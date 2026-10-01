@@ -3802,6 +3802,98 @@ static void gc_ctor_roots_take_back(Buf *b) {
   }
 }
 
+/* The start of the function `at` is in: the last line before it that begins
+   in the first column and is not a directive. */
+static const char *gc_fn_header(const Buf *b, const char *at) {
+  while (at > b->p && !(at[-1] == '\n' && at[0] != ' ' && at[0] != '#' && at[0] != '\n')) at--;
+  return at;
+}
+
+/* Is the mention of an initialize at `use` (its name `n` long) a constructor
+   handing it the object it has just allocated, with nothing in between that
+   could collect? The last part is what the constructor's missing root says:
+   gc_ctor_roots_take_back erased it on exactly that proof. */
+static int gc_use_on_fresh_self(const Buf *b, const char *use, size_t n) {
+  const char *hdr = gc_fn_header(b, use), *end = strstr(use, "\n}\n");
+  const char *paren = memchr(hdr, '(', (size_t)(use - hdr));
+  if (!end || !paren || paren - hdr < 5 || strncmp(hdr, "static sp_", 10) || strncmp(paren - 4, "_new", 4)) return 0;
+  const char *alloc = strstr(hdr, " *self = SP_POOL_NEW("), *root = strstr(hdr, "SP_GC_ROOT(self)");
+  if (!alloc || alloc > use || (root && root < end)) return 0;
+  const char *a = use + n;
+  if (*a++ != '(') return 0;
+  if (*a == '(') { while (*a && *a != ')') a++; if (*a) a++; }   /* `(sp_Parent *)self` */
+  return !strncmp(a, "self", 4) && (a[4] == ',' || a[4] == ')');
+}
+
+/* An object is young until it has been through a collection, and a store into
+   a young object needs no barrier: sp_gc_wb looks at the holder and returns.
+   So when an initialize cannot collect, and every mention of it in the program
+   is a constructor running it on the object it just allocated, `self` is young
+   at each of its stores and their barriers test a fact already known.
+   `initialize(left, right)` storing its two arguments is the commonest
+   constructor there is, and paid two (binary_trees: 20 of 230 instructions per
+   Node).
+
+   One mention anywhere else -- `super` from a subclass, an explicit
+   `initialize(...)` on an object that may have aged -- and the barriers stay. */
+static void gc_ctor_barriers_take_back(Buf *b) {
+  size_t from = 0;
+  for (;;) {
+    const char *d = b->p ? strstr(b->p + from, "\nstatic ") : NULL;
+    if (!d) return;
+    from = (size_t)(d - b->p) + 1;
+    const char *eol = strchr(d + 1, '\n');
+    if (!eol || eol - d < 4 || strncmp(eol - 3, ") {", 3)) continue;
+    const char *paren = memchr(d + 1, '(', (size_t)(eol - d - 1));
+    if (!paren || paren - d < 12 || strncmp(paren - 11, "_initialize", 11)) continue;
+    const char *name = paren;
+    while (name > d + 1 && (isalnum((unsigned char)name[-1]) || name[-1] == '_')) name--;
+    size_t n = (size_t)(paren - name);
+    const char *body_end = strstr(eol, "\n}\n");
+    if (!body_end || n >= 250 || !gc_ctor_span_inert(eol, body_end, NULL, NULL)) continue;
+    char nm[256]; memcpy(nm, name, n); nm[n] = '\0';
+    int ok = 1, uses = 0;
+    for (const char *q = strstr(b->p, nm); q && ok; q = strstr(q + 1, nm)) {
+      if (isalnum((unsigned char)q[n]) || q[n] == '_') continue;         /* a longer name */
+      if (q > b->p && (isalnum((unsigned char)q[-1]) || q[-1] == '_')) { ok = 0; break; }
+      const char *ls = q;
+      while (ls > b->p && ls[-1] != '\n') ls--;
+      if (*ls != ' ') continue;                                          /* its prototype, its definition */
+      uses++;
+      ok = gc_use_on_fresh_self(b, q, n);
+    }
+    if (!ok || !uses) continue;
+    /* the statement form: { __typeof__(self) _wbN = self; _wbN->f = v; sp_gc_wb((void *)_wbN); } */
+    size_t body = (size_t)(eol - b->p);
+    for (;;) {
+      static const char head[] = "{ __typeof__(self) _wb";
+      const char *lim = strstr(b->p + body, "\n}\n"), *at = strstr(b->p + body, head);
+      if (!at || !lim || at > lim) break;
+      const char *id = at + sizeof head - 4;   /* at "_wb" */
+      size_t idn = 3;
+      while (isdigit((unsigned char)id[idn])) idn++;
+      char open[96], close[96];
+      int on = snprintf(open, sizeof open, "{ __typeof__(self) %.*s = self; %.*s->", (int)idn, id, (int)idn, id);
+      int cn = snprintf(close, sizeof close, "; sp_gc_wb((void *)%.*s); }", (int)idn, id);
+      const char *tail = strncmp(at, open, (size_t)on) ? NULL : strstr(at + on, close);
+      if (!tail || tail > lim) { body = (size_t)(at - b->p) + 1; continue; }
+      size_t t = (size_t)(tail - b->p), a = (size_t)(at - b->p);
+      buf_erase(b, t + 1, (size_t)cn - 1);
+      memcpy(b->p + a + on - 6, "self->", 6);
+      buf_erase(b, a, (size_t)on - 6);
+    }
+    /* and the expression form */
+    for (;;) {
+      static const char wbo[] = "SP_WBO(self)->";
+      const char *lim = strstr(b->p + body, "\n}\n"), *at = strstr(b->p + body, wbo);
+      if (!at || !lim || at > lim) break;
+      size_t a = (size_t)(at - b->p);
+      memcpy(b->p + a + sizeof wbo - 1 - 6, "self->", 6);
+      buf_erase(b, a, sizeof wbo - 1 - 6);
+    }
+  }
+}
+
 /* ---- root frames ----
 
    Every root the emitters write costs the C compiler three things: taking
@@ -15658,6 +15750,7 @@ char *codegen_program(const NodeTable *nt) {
      at a time left a quarter of the stores bare. */
   gc_wb_insert(c, &b, 0);
   if (!g_no_root_elision) gc_ctor_roots_take_back(&b);
+  if (!g_no_root_elision && !g_no_write_barrier) gc_ctor_barriers_take_back(&b);
   if (g_line_map) line_map_reanchor(&b);
   free(g_procs.p); free(g_proc_protos.p);
   free(g_pd_protos.p); free(g_pd_defs.p);

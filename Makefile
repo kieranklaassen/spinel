@@ -1660,7 +1660,8 @@ GC_MINOR_TESTS := test/gc_minor_thread_local_slot.rb \
                   test/gc_minor_ctor_stores.rb \
                   test/gc_minor_alloc_shapes.rb \
                   test/gc_minor_ctor_root.rb \
-                  test/gc_minor_method_roots.rb
+                  test/gc_minor_method_roots.rb \
+                  test/gc_minor_ctor_fresh.rb
 
 # Each program runs with the minor mark off and on and must answer the same;
 # then once more under the generational verifier with stress on (every
@@ -1718,6 +1719,13 @@ gc-minor-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
 	  echo "gc-minor-test: FAIL (a method that only stores registered a root)"; ok=0; fi; \
 	if ! grep -q 'SP_GC_ROOT' "$$tmp/mr.relink"; then \
 	  echo "gc-minor-test: FAIL (a method that allocates lost its roots)"; ok=0; fi; \
+	$(SPINEL) test/gc_minor_ctor_fresh.rb --no-line-map -c -o "$$tmp/cf.c" >/dev/null 2>&1; \
+	sed -n '/^[^ ].* sp_Pair_initialize(.*) {$$/,/^}$$/p' "$$tmp/cf.c" > "$$tmp/cf.pair"; \
+	sed -n '/^[^ ].* sp_Slot_initialize(.*) {$$/,/^}$$/p' "$$tmp/cf.c" > "$$tmp/cf.slot"; \
+	if [ ! -s "$$tmp/cf.pair" ] || grep -q sp_gc_wb "$$tmp/cf.pair"; then \
+	  echo "gc-minor-test: FAIL (an initialize only new runs took a barrier on the object new just made)"; ok=0; fi; \
+	if [ "$$(grep -c sp_gc_wb "$$tmp/cf.slot")" != 2 ]; then \
+	  echo "gc-minor-test: FAIL (an initialize that is also called on an existing object lost its barriers)"; ok=0; fi; \
 	rm -rf "$$tmp"; \
 	if [ $$ok -eq 1 ]; then echo "gc-minor-test: pass"; else exit 1; fi
 
