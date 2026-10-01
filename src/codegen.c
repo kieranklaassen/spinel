@@ -4498,6 +4498,39 @@ static void gc_wb_cells(Compiler *c, Buf *b) {
   (void)c;
 }
 
+/* Is the value stored at `q` (the `=` of a store) one that can never be a
+   young object: nil, or a frozen string literal? nil is no object, and the
+   literal is static storage under the 0xf1 marker, which sp_mark_string steps
+   over and nothing sweeps. The barrier exists to record an old holder that now
+   points at a young object, so such a store needs none, whoever the holder is
+   and however old. A constructor is mostly these -- `@left = nil`,
+   `@tag = "n"` -- and gcbench ran three per Node.
+
+   Decided on the emitted text, like everything else in this pass, and only
+   when the value is the whole right-hand side: `NULL`, `sp_box_nil()`, or
+   exactly what emit_frozen_literal_open_a and _close write. Anything else,
+   `sp_str_dup(<literal>)` included, keeps its barrier. */
+static int wb_value_never_young(const Buf *b, size_t q) {
+  static const char lit[] = "({ static struct { sp_str_hdr h; unsigned char m; char d[";
+  const char *p = b->p + q + 1, *end = b->p + b->len;
+  while (p < end && *p == ' ') p++;
+  if (!strncmp(p, "NULL", 4)) p += 4;
+  else if (!strncmp(p, "sp_box_nil()", 12)) p += 12;
+  else if (!strncmp(p, lit, sizeof lit - 1)) {
+    const char *s = p + sizeof lit - 1;
+    while (s < end && *s != '"' && *s != '(' && *s != ')') s++;   /* the header initializer has neither */
+    if (s >= end || *s != '"' || s - p < 8 || strncmp(s - 8, ", 0xf1, ", 8)) return 0;
+    for (s++; s < end && *s != '"'; s++) if (*s == '\\') s++;
+    if (s >= end || strncmp(s, "\" }; _fzl_", 10)) return 0;
+    s += 10;
+    while (s < end && isdigit((unsigned char)*s)) s++;
+    if (strncmp(s, ".d; })", 6)) return 0;
+    p = s + 6;
+  }
+  else return 0;
+  while (p < end && *p == ' ') p++;
+  return p < end && (*p == ';' || *p == ')' || *p == ',');
+}
 static void gc_wb_insert_seg(Compiler *c, Buf *b, size_t fn_off);
 /* Each insertion shifts the rest of the buffer, so over the whole program the
    splices cost (barriers x output size): 9,462 barriers into 43 MB on lobsters
@@ -4568,6 +4601,7 @@ static void gc_wb_insert_seg(Compiler *c, Buf *b, size_t fn_off) {
     /* already wrapped (a nested store re-scanned) */
     if (st >= 7 && !strncmp(b->p + st - 7, "SP_WBO(", 7)) continue;
     if (st >= 14 && !strncmp(b->p + st - 14, "sp_gc_wb((void ", 15 - 1)) continue;
+    if (wb_value_never_young(b, q)) continue;
     /* A bare identifier can be named twice, so the barrier goes in front as its
        own statement -- which the C compiler optimizes far better than the
        statement expression the general form needs (8% vs noise on optcarrot).

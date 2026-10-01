@@ -1656,7 +1656,9 @@ GC_MINOR_TESTS := test/gc_minor_thread_local_slot.rb \
                   test/iter_block_string_share.rb \
                   test/string_handle_ivar_in_container.rb \
                   test/string_handle_yield_paths.rb \
-                  test/string_handle_keyword_dyn_sites.rb
+                  test/string_handle_keyword_dyn_sites.rb \
+                  test/gc_minor_ctor_stores.rb \
+                  test/gc_minor_alloc_shapes.rb
 
 # Each program runs with the minor mark off and on and must answer the same;
 # then once more under the generational verifier with stress on (every
@@ -1693,6 +1695,13 @@ gc-minor-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
 	sed -n '/^[^ ].* sp_emit(const char \* \*_cell_io) {$$/,/^}$$/p' "$$tmp/bp.c" > "$$tmp/bp.emit"; \
 	if [ ! -s "$$tmp/bp.emit" ] || grep -q sp_gc_wb "$$tmp/bp.emit"; then \
 	  echo "gc-minor-test: FAIL (a by-reference parameter's store took a cell barrier: it reads a header off the caller's stack)"; ok=0; fi; \
+	$(SPINEL) test/gc_minor_ctor_stores.rb --no-line-map -c -o "$$tmp/cs.c" >/dev/null 2>&1; \
+	sed -n '/^[^ ].* sp_Node_initialize(.*) {$$/,/^}$$/p' "$$tmp/cs.c" > "$$tmp/cs.init"; \
+	sed -n '/^[^ ].* sp_grow(.*) {$$/,/^}$$/p' "$$tmp/cs.c" > "$$tmp/cs.grow"; \
+	if [ ! -s "$$tmp/cs.init" ] || grep -q sp_gc_wb "$$tmp/cs.init"; then \
+	  echo "gc-minor-test: FAIL (a store of nil or of a string literal took a barrier: neither is ever a young object)"; ok=0; fi; \
+	if [ "$$(grep -c sp_gc_wb "$$tmp/cs.grow")" != 3 ]; then \
+	  echo "gc-minor-test: FAIL (a store of a fresh object or string lost its barrier)"; ok=0; fi; \
 	rm -rf "$$tmp"; \
 	if [ $$ok -eq 1 ]; then echo "gc-minor-test: pass"; else exit 1; fi
 
