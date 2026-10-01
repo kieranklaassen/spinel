@@ -7,9 +7,12 @@
 # others makes a value that only its own frame names, collects, and then
 # allocates another of the same size, which is handed the slot of a value that
 # was not rooted -- and the numbers and strings printed come out wrong.
+#
+# `spelled` and `label` hold strings that spell a root. Taking a method's
+# roots back must not take part of a string with them.
 
 class Thing
-  attr_accessor :v, :peer, :other
+  attr_accessor :v, :peer, :other, :tag
   def initialize(v)
     @v = v
     @peer = nil
@@ -23,6 +26,15 @@ class Thing
   def link_both(a, b)
     @peer = a
     @other = b
+  end
+
+  def spelled
+    "SP_GC_ROOT(self); is how a root is spelled"
+  end
+
+  def label(a)
+    @peer = a
+    @tag = "SP_GC_ROOT"
   end
 
   def relink(a)
@@ -69,3 +81,8 @@ holders = []
   holders << h
 end
 puts holders.map { |h| h.peer.v * 1000 + h.other.v }.join(" ")
+
+named = Thing.new(1)
+named.label(root)
+puts named.spelled
+puts named.tag + " " + named.peer.v.to_s

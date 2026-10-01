@@ -1702,7 +1702,7 @@ gc-minor-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
 	$(SPINEL) test/gc_minor_ctor_stores.rb --no-line-map -c -o "$$tmp/cs.c" >/dev/null 2>&1; \
 	sed -n '/^[^ ].* sp_Node_initialize(.*) {$$/,/^}$$/p' "$$tmp/cs.c" > "$$tmp/cs.init"; \
 	sed -n '/^[^ ].* sp_grow(.*) {$$/,/^}$$/p' "$$tmp/cs.c" > "$$tmp/cs.grow"; \
-	if [ ! -s "$$tmp/cs.init" ] || grep -q sp_gc_wb "$$tmp/cs.init"; then \
+	if [ ! -s "$$tmp/cs.init" ] || grep -q 'sp_gc_wb\|SP_WBO' "$$tmp/cs.init"; then \
 	  echo "gc-minor-test: FAIL (a store of nil or of a string literal took a barrier: neither is ever a young object)"; ok=0; fi; \
 	if [ "$$(grep -c sp_gc_wb "$$tmp/cs.grow")" != 3 ]; then \
 	  echo "gc-minor-test: FAIL (a store of a fresh object or string lost its barrier)"; ok=0; fi; \
@@ -1723,7 +1723,7 @@ gc-minor-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
 	$(SPINEL) test/gc_minor_ctor_fresh.rb --no-line-map -c -o "$$tmp/cf.c" >/dev/null 2>&1; \
 	sed -n '/^[^ ].* sp_Pair_initialize(.*) {$$/,/^}$$/p' "$$tmp/cf.c" > "$$tmp/cf.pair"; \
 	sed -n '/^[^ ].* sp_Slot_initialize(.*) {$$/,/^}$$/p' "$$tmp/cf.c" > "$$tmp/cf.slot"; \
-	if [ ! -s "$$tmp/cf.pair" ] || grep -q sp_gc_wb "$$tmp/cf.pair"; then \
+	if [ ! -s "$$tmp/cf.pair" ] || grep -q 'sp_gc_wb\|SP_WBO' "$$tmp/cf.pair"; then \
 	  echo "gc-minor-test: FAIL (an initialize only new runs took a barrier on the object new just made)"; ok=0; fi; \
 	if [ "$$(grep -c sp_gc_wb "$$tmp/cf.slot")" != 2 ]; then \
 	  echo "gc-minor-test: FAIL (an initialize that is also called on an existing object lost its barriers)"; ok=0; fi; \

@@ -9,6 +9,9 @@
 # when they are dropped anyway -- it is old by the time it is refilled with
 # two new leaves, and the collector's verifier reports the holder nobody
 # recorded.
+#
+# Note stores a string that spells both shapes a barrier is written in. It is
+# a string: its initialize stores bare and the text comes back whole.
 
 class Leaf
   attr_reader :v
@@ -63,6 +66,14 @@ class Derived < Base
   end
 end
 
+class Note
+  attr_reader :leaf, :text
+  def initialize(leaf)
+    @leaf = leaf
+    @text = "SP_WBO(self)->iv_leaf = leaf; { __typeof__(self) _wb1 = self; _wb1->iv_leaf = leaf; sp_gc_wb((void *)_wb1); }"
+  end
+end
+
 def churn(n)
   junk = []
   n.times { |i| junk << Leaf.new(i) }
@@ -89,3 +100,8 @@ kin = []
 50.times { |i| kin << Derived.new(Leaf.new(i), Leaf.new(i * 3)) }
 churn(200)
 puts kin.map { |d| d.item.v + d.extra.v }.sum
+
+notes = []
+3.times { |i| notes << Note.new(Leaf.new(i)) }
+puts notes.map { |n| n.leaf.v }.sum
+puts notes[0].text

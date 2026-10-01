@@ -3740,17 +3740,79 @@ static int gc_ctor_span_inert(const char *from, const char *to, const char **ini
   return 1;
 }
 
+/* `needle` wholly between `from` and `to`, or NULL. */
+static const char *gc_find_in(const char *from, const char *to, const char *needle) {
+  size_t n = strlen(needle);
+  if (to < from || (size_t)(to - from) < n) return NULL;
+  for (const char *last = to - n, *p = from; p <= last; p++) {
+    p = memchr(p, needle[0], (size_t)(last - p) + 1);
+    if (!p) return NULL;
+    if (!memcmp(p, needle, n)) return p;
+  }
+  return NULL;
+}
+
+/* Past what starts at `p` when that is not code -- a string or a character
+   literal, a comment -- and `p` itself when it is. A Ruby string can spell
+   anything the passes below look for, a root or a barrier or a brace, and
+   nothing in one is a statement. */
+static const char *gc_past_noncode(const char *p, const char *to) {
+  if (*p == '"' || *p == '\'') {
+    char q = *p++;
+    while (p < to && *p != q && *p != '\n') p += (*p == '\\' && p + 1 < to) ? 2 : 1;
+    return p < to ? p + 1 : to;
+  }
+  if (*p == '/' && p + 1 < to && p[1] == '*') {
+    const char *e = gc_find_in(p + 2, to, "*/");
+    return e ? e + 2 : to;
+  }
+  if (*p == '/' && p + 1 < to && p[1] == '/') {
+    const char *e = memchr(p, '\n', (size_t)(to - p));
+    return e ? e : to;
+  }
+  return p;
+}
+
+/* The next place `needle` starts in code between `from`, itself code, and
+   `to`; or NULL. */
+static const char *gc_code_find(const char *from, const char *to, const char *needle) {
+  size_t n = strlen(needle);
+  for (const char *p = from; p < to && (size_t)(to - p) >= n; ) {
+    char c = *p;
+    if (c == '"' || c == '\'' || c == '/') {
+      const char *q = gc_past_noncode(p, to);
+      if (q != p) { p = q; continue; }
+    }
+    if (c == needle[0] && !memcmp(p, needle, n)) return p;
+    p++;
+  }
+  return NULL;
+}
+
 /* A function that calls nothing that could collect is never on the stack
    while the collector looks for roots, so the ones it registers -- its
    reference parameters, its temporaries -- are read by nobody. An
    `initialize(left, right)` that stores its two arguments built a two-entry
    frame for them, and its constructor then had to root self across it; with
-   the frame gone both go (binary_trees: 38 of 275 instructions per Node). */
+   the frame gone both go (binary_trees: 38 of 275 instructions per Node).
+
+   Every place the function spells a root has to be a root statement first.
+   A Ruby string can spell one too -- "SP_GC_ROOT(x);" -- and a function
+   holding such a string keeps its roots rather than lose part of it. */
 static void gc_fn_roots_take_back(Buf *b, size_t fn_off) {
   if (fn_off >= b->len) return;
-  const char *fn = b->p + fn_off;
+  const char *fn = b->p + fn_off, *end = b->p + b->len;
   if (!strstr(fn, "SP_GC_ROOT") || strstr(fn, "setjmp") || strstr(fn, "sp_gc_nroots")) return;
-  if (!gc_ctor_span_inert(fn, b->p + b->len, NULL, NULL)) return;
+  if (!gc_ctor_span_inert(fn, end, NULL, NULL)) return;
+  size_t stmts = 0, spelled = 0;
+  for (const char *p = fn; (p = gc_code_find(p, end, "SP_GC_ROOT")) != NULL; p += 10) {
+    const char *q = p;
+    while (q > fn && q[-1] == ' ') q--;
+    if (q > fn && !strchr("\n;{}", q[-1])) return;
+    stmts++;
+  }
+  for (const char *p = fn; (p = strstr(p, "SP_GC_ROOT")) != NULL; p += 10) spelled++;
+  if (stmts != spelled) return;
   size_t from = fn_off;
   for (char *at; (at = strstr(b->p + from, "SP_GC_ROOT")) != NULL; ) {
     const char *semi = strchr(at, ';');
@@ -3781,18 +3843,6 @@ static void gc_fn_roots_take_back(Buf *b, size_t fn_off) {
 static const char *gc_fn_header(const Buf *b, const char *at) {
   while (at > b->p && !(at[-1] == '\n' && at[0] != ' ' && at[0] != '#' && at[0] != '\n')) at--;
   return at;
-}
-
-/* `needle` wholly between `from` and `to`, or NULL. */
-static const char *gc_find_in(const char *from, const char *to, const char *needle) {
-  size_t n = strlen(needle);
-  if (to < from || (size_t)(to - from) < n) return NULL;
-  for (const char *last = to - n, *p = from; p <= last; p++) {
-    p = memchr(p, needle[0], (size_t)(last - p) + 1);
-    if (!p) return NULL;
-    if (!memcmp(p, needle, n)) return p;
-  }
-  return NULL;
 }
 
 /* Spans to take out of the text, in any order, none overlapping. */
@@ -3983,14 +4033,14 @@ static void gc_ctor_barriers_take_back(Buf *b) {
   for (size_t i = 0; i < ix.n; i++) {
     GcInit *in = &ix.v[i];
     if (!in->ok || !in->uses || !gc_init_inert(in)) continue;
-    for (const char *from = in->body, *at; (at = gc_find_in(from, in->end, head)) != NULL; ) {
+    for (const char *from = in->body, *at; (at = gc_code_find(from, in->end, head)) != NULL; ) {
       const char *id = at + sizeof head - 4;   /* at "_wb" */
       size_t idn = 3;
       while (isdigit((unsigned char)id[idn])) idn++;
       char lead[96], trail[96];
       int ln = snprintf(lead, sizeof lead, "{ __typeof__(self) %.*s = self; %.*s->", (int)idn, id, (int)idn, id);
       int tn = snprintf(trail, sizeof trail, "; sp_gc_wb((void *)%.*s); }", (int)idn, id);
-      const char *tail = strncmp(at, lead, (size_t)ln) ? NULL : gc_find_in(at + ln, in->end, trail);
+      const char *tail = strncmp(at, lead, (size_t)ln) ? NULL : gc_code_find(at + ln, in->end, trail);
       if (!tail) { from = at + 1; continue; }
       /* `self->f = v;` is what stays: the lead's last bytes become the arrow, the trail keeps its `;` */
       memcpy(b->p + (at - b->p) + ln - al, arrow, al);
@@ -3998,7 +4048,7 @@ static void gc_ctor_barriers_take_back(Buf *b) {
       gc_cut(&cuts, (size_t)(tail - b->p) + 1, (size_t)tn - 1);
       from = at + ln;
     }
-    for (const char *from = in->body, *at; (at = gc_find_in(from, in->end, wbo)) != NULL; from = at + sizeof wbo - 1) {
+    for (const char *from = in->body, *at; (at = gc_code_find(from, in->end, wbo)) != NULL; from = at + sizeof wbo - 1) {
       memcpy(b->p + (at - b->p) + sizeof wbo - 1 - al, arrow, al);
       gc_cut(&cuts, (size_t)(at - b->p), sizeof wbo - 1 - al);
     }
@@ -4820,8 +4870,12 @@ static void gc_wb_cells(Compiler *c, Buf *b) {
    Decided on the emitted text, like everything else in this pass, and only
    when the value is the whole right-hand side: `NULL`, `sp_box_nil()`, or
    exactly what emit_frozen_literal_open_a and _close write. Anything else,
-   `sp_str_dup(<literal>)` included, keeps its barrier. */
-static int wb_value_never_young(const Buf *b, size_t q) {
+   `sp_str_dup(<literal>)` included, keeps its barrier.
+
+   Answers where the value ends, 0 for no. The scan goes on from there: a
+   store it wraps is stepped over whole, and the text of a literal it leaves
+   bare must be too, since a Ruby string can spell a store. */
+static size_t wb_value_never_young(const Buf *b, size_t q) {
   static const char open[] = "({ static struct { sp_str_hdr h; unsigned char m; char d[";
   static const char mark[] = ", 0xf1, ", shut[] = "\" }; _fzl_", data[] = ".d; })";
   size_t on = sizeof open - 1, mn = sizeof mark - 1, sn = sizeof shut - 1, dn = sizeof data - 1;
@@ -4842,7 +4896,7 @@ static int wb_value_never_young(const Buf *b, size_t q) {
   }
   else return 0;
   while (p < end && *p == ' ') p++;
-  return p < end && (*p == ';' || *p == ')' || *p == ',');
+  return p < end && (*p == ';' || *p == ')' || *p == ',') ? (size_t)(p - b->p) : 0;
 }
 
 static void gc_wb_insert_seg(Compiler *c, Buf *b, size_t fn_off);
@@ -4915,7 +4969,8 @@ static void gc_wb_insert_seg(Compiler *c, Buf *b, size_t fn_off) {
     /* already wrapped (a nested store re-scanned) */
     if (st >= 7 && !strncmp(b->p + st - 7, "SP_WBO(", 7)) continue;
     if (st >= 14 && !strncmp(b->p + st - 14, "sp_gc_wb((void ", 15 - 1)) continue;
-    if (wb_value_never_young(b, q)) continue;
+    size_t bare_end = wb_value_never_young(b, q);
+    if (bare_end) { i = bare_end - 1; continue; }
     /* A bare identifier can be named twice, so the barrier goes in front as its
        own statement -- which the C compiler optimizes far better than the
        statement expression the general form needs (8% vs noise on optcarrot).
