@@ -439,6 +439,8 @@ extern int sp_slab_on;
    because the size of its object is a constant. Everything else about the
    slab, and every other use of this struct, is lib/sp_slab.c's. */
 #define SP_SLAB_NCLS    27
+#define SP_GC_LEAN_MAX  256   /* the largest block, header included, a lean front hands out */
+typedef struct { uint64_t a, b; } sp_slab_u16;   /* what a block is zeroed by */
 #ifdef SP_THREADS
 #define SP_SLAB_NWK SP_MAX_WORKERS
 #define SP_SLAB_WID() (sp_worker_id)

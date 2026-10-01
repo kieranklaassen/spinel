@@ -817,10 +817,9 @@ static inline sp_gc_hdr *sp_pool_try_pop(sp_gc_hdr **head) {
    NULL when the front cannot run -- the run is used up, a collection is due,
    the slab is off, or something wants to see each allocation
    (sp_gc_alloc_fast_ok) -- and the caller takes the path it always took. */
-typedef struct { uint64_t a, b; } sp_gc_zero_pair;
 static inline void *sp_gc_alloc_front(size_t sz, void (*scn)(void *)) {
   size_t need = sizeof(sp_gc_hdr) + sz;
-  if (need > 256 || !SP_EXPECT(sp_gc_alloc_fast_ok, 1)) return NULL;
+  if (need > SP_GC_LEAN_MAX || !SP_EXPECT(sp_gc_alloc_fast_ok, 1)) return NULL;
   if (SP_EXPECT(SP_GC_CTR_GET(sp_gc_bytes) > SP_GC_CTR_GET(sp_gc_threshold), 0)) return NULL;
   size_t cls = need <= 32 ? 0 : ((need + 15) >> 4) - 2, csize = 32 + 16 * cls;
   sp_slab_worker *wk = &sp_slab_wk[SP_SLAB_WID()];
@@ -829,7 +828,7 @@ static inline void *sp_gc_alloc_front(size_t sz, void (*scn)(void *)) {
   wk->rnext[0][cls] = p + csize;
   /* 16-byte stores, not memset: at these sizes the compiler expands that to a
      string instruction, whose start-up costs more than the stores */
-  { sp_gc_zero_pair *q = (sp_gc_zero_pair *)p; const sp_gc_zero_pair z = { 0, 0 };
+  { sp_slab_u16 *q = (sp_slab_u16 *)p; const sp_slab_u16 z = { 0, 0 };
     for (size_t i = 0; i < csize / 16; i++) q[i] = z; }
   sp_gc_hdr *h = (sp_gc_hdr *)p;
   h->scan = scn; h->size = need;
@@ -839,8 +838,8 @@ static inline void *sp_gc_alloc_front(size_t sz, void (*scn)(void *)) {
 
 #define SP_POOL_NEW(CLS, SCAN) (__extension__ ({ \
   sp_##CLS *_p = (sp_##CLS *)sp_gc_alloc_front(sizeof(sp_##CLS), SCAN); \
-  sp_gc_hdr *_h = _p || sp_slab_on > 0 ? NULL : sp_pool_try_pop(&sp_##CLS##_pool_head); \
-  if (_p) { } \
+  sp_gc_hdr *_h = (_p || sp_slab_on > 0) ? NULL : sp_pool_try_pop(&sp_##CLS##_pool_head); \
+  if (_p) { /* the inline front took it */ } \
   else if (_h) { \
     SP_POOL_CTR_DEC(sp_##CLS##_pool_count); \
     SP_POOL_CTR_INC(sp_##CLS##_pool_pops); \

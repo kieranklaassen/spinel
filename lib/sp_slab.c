@@ -299,8 +299,8 @@ static void sp_slab_init(void) {
     sp_slab_cls_of[i] = (uint8_t)c;
   }
   /* sp_gc_alloc_front (spinel_rt.h) computes the class and the slot size of a
-     block of 256 bytes or less instead of reading them here */
-  for (unsigned i = 0; i <= 16; i++) {
+     block of SP_GC_LEAN_MAX bytes or less instead of reading them here */
+  for (unsigned i = 0; i <= SP_GC_LEAN_MAX / 16; i++) {
     unsigned k = i <= 2 ? 0 : i - 2;
     if (sp_slab_cls_of[i] != k || sp_slab_csize[k] != 32 + 16 * k) { fputs("spinel: slab size classes moved; update sp_gc_alloc_front\n", stderr); abort(); }
   }
@@ -510,7 +510,6 @@ static SP_NOINLINE void *sp_slab_refill(sp_slab_worker *wk, int cls, unsigned cs
 /* Zero a block of a class's size: 16 bytes a store, the count from the
    size, entered at the store that leaves exactly the block. Sizes above
    256 go to memset, which earns its call there. */
-typedef struct { uint64_t a, b; } sp_slab_u16;
 static SP_INLINE void sp_slab_zero(void *p, unsigned csize) {
   sp_slab_u16 *q = (sp_slab_u16 *)p;
   const sp_slab_u16 z = { 0, 0 };
@@ -638,12 +637,14 @@ void *sp_slab_alloc_obj(size_t need, void (*fin)(void *), void (*scn)(void *)) {
    case tail-calls the full form below). It runs when the slab is on and
    nothing wants a look at each allocation (the verifier, the report, the
    stress switch not yet read): sp_gc_alloc_fast_ok, recomputed by the full
-   form and dropped by whoever turns one of those on. */
+   form and dropped by whoever turns one of those on. A constructor runs
+   the same front inline with its size a constant (sp_gc_alloc_front,
+   spinel_rt.h): a condition added here belongs there too. */
 int sp_gc_alloc_fast_ok = 0;
 static void *sp_gc_alloc_full(size_t sz, void (*fin)(void *), void (*scn)(void *));
 void *sp_gc_alloc(size_t sz, void (*fin)(void *), void (*scn)(void *)) {
   size_t need = sizeof(sp_gc_hdr) + sz;
-  if (SP_EXPECT(!sp_gc_alloc_fast_ok || need > 256, 0)) return sp_gc_alloc_full(sz, fin, scn);
+  if (SP_EXPECT(!sp_gc_alloc_fast_ok || need > SP_GC_LEAN_MAX, 0)) return sp_gc_alloc_full(sz, fin, scn);
   if (SP_EXPECT(SP_GC_CTR_GET(sp_gc_bytes) > SP_GC_CTR_GET(sp_gc_threshold), 0)) return sp_gc_alloc_full(sz, fin, scn);
   int cls = sp_slab_cls_of[(need + 15) >> 4];
   sp_slab_worker *wk = &sp_slab_wk[SP_SLAB_WID()];
