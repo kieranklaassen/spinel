@@ -108,7 +108,8 @@ io_wordcount     235,816,569    14.0     3.2    16.5    27.2     3.2     7.3    
   (`--tolerance PCT`). The baseline names the C compiler, valgrind and
   architecture it was measured with; on any other the comparison still
   prints, as indicative, and nothing fails. `make bench-ledger-update`
-  (`--update`) rewrites it.
+  (`--update`) rewrites it, leaving as it was any row that moved by less
+  than 50 parts in a million, so the diff shows the benchmarks that changed.
 - `ruby tools/speed_ledger.rb --against REV` builds `REV` in a temporary
   worktree, measures both compilers on the benchmarks of this tree, and prints
   before, after and the change per benchmark, then the geometric mean. That is

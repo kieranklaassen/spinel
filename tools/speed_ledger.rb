@@ -232,6 +232,10 @@ else
     puts sl_table(rows)
     failures = not_measured.length
     if failures.zero?
+      if File.exist?(opts[:baseline])
+        was = sl_baseline_parse(File.read(opts[:baseline]))
+        rows = sl_settle(was.rows, rows, 50) if sl_same_toolchain(was, toolchain[:cc], toolchain[:valgrind], toolchain[:arch])
+      end
       File.write(opts[:baseline], sl_baseline_format(toolchain[:cc], toolchain[:valgrind], toolchain[:arch], revision, rows))
       puts "wrote #{opts[:baseline]}"
     else

@@ -124,6 +124,13 @@ puts "other compiler: " + sl_same_toolchain(b, "gcc 14.2.0", "valgrind-3.22.0", 
 # On another toolchain the same numbers are reported and nothing fails.
 show_report("other toolchain", sl_check(b, now, 50, false))
 
+# An update keeps the baseline's row for a benchmark that moved by less than
+# 50 parts in a million and allocated the same; one that moved further, one
+# that allocated differently and a new one are written as measured.
+kept = sl_settle([row("steady", 1000000), row("moved", 1000000), row("reallocated", 1000000)],
+                 [row("steady", 1000049), row("moved", 999950), SlRow.new("reallocated", "ok", 1000001, [0, 0, 0, 0, 0, 0, 0, 1000001], 7, 0), row("fresh", 5)], 50)
+kept.each { |r| puts r.name + " " + r.ir.to_s }
+
 # Before/after. The mean of ratios 0.9 and 1.1 is geometric: 0.995, not 1.0.
 # A benchmark that failed on either side is left out of the mean and named.
 before = [row("a", 1000), row("b", 1000), row("c", 1000), row("d", 1000)]

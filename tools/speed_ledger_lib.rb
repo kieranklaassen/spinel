@@ -301,6 +301,24 @@ def sl_find_row(rows, name)
   nil
 end
 
+# The rows an update writes. The same build repeats to a few parts in a
+# million, so a row that allocated what the baseline's did and moved by less
+# than `ppm` parts in a million is the same measurement: the baseline's row
+# stays, and a rewrite changes only the benchmarks that moved.
+def sl_settle(base_rows, rows, ppm)
+  out = []
+  rows.each do |r|
+    b = sl_find_row(base_rows, r.name)
+    if b && r.status == "ok" && r.allocs == b.allocs
+      d = r.ir - b.ir
+      d = -d if d < 0
+      r = b if d * 1000000 < b.ir * ppm
+    end
+    out.push(r)
+  end
+  out
+end
+
 # Lines to print and how many of them should fail the run.
 class SlReport
   attr_reader :lines, :failures

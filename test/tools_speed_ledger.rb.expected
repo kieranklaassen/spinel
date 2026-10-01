@@ -45,6 +45,10 @@ broke              1,000,000                            FAILED
 fresh                                      5            new
 speed ledger: 3 compared, 1 regressed, 2 missing (tolerance 0.50%)
 the toolchain differs from the baseline's: indicative only, nothing fails
+steady 1000000
+moved 999950
+reallocated 1000001
+fresh 5
 -- before/after (failures 2)
 benchmark             before           after    change
 a                      1,000             900   -10.00%
