@@ -1658,7 +1658,8 @@ GC_MINOR_TESTS := test/gc_minor_thread_local_slot.rb \
                   test/string_handle_yield_paths.rb \
                   test/string_handle_keyword_dyn_sites.rb \
                   test/gc_minor_ctor_stores.rb \
-                  test/gc_minor_alloc_shapes.rb
+                  test/gc_minor_alloc_shapes.rb \
+                  test/gc_minor_ctor_root.rb
 
 # Each program runs with the minor mark off and on and must answer the same;
 # then once more under the generational verifier with stress on (every
@@ -1702,6 +1703,13 @@ gc-minor-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
 	  echo "gc-minor-test: FAIL (a store of nil or of a string literal took a barrier: neither is ever a young object)"; ok=0; fi; \
 	if [ "$$(grep -c sp_gc_wb "$$tmp/cs.grow")" != 3 ]; then \
 	  echo "gc-minor-test: FAIL (a store of a fresh object or string lost its barrier)"; ok=0; fi; \
+	$(SPINEL) test/gc_minor_ctor_root.rb --no-line-map -c -o "$$tmp/cr.c" >/dev/null 2>&1; \
+	sed -n '/^static sp_Leaf \*sp_Leaf_new(.*) {$$/,/^}$$/p' "$$tmp/cr.c" > "$$tmp/cr.leaf"; \
+	sed -n '/^static sp_Cell \*sp_Cell_new(.*) {$$/,/^}$$/p' "$$tmp/cr.c" > "$$tmp/cr.cell"; \
+	if [ ! -s "$$tmp/cr.leaf" ] || grep -q 'SP_GC_ROOT(self)' "$$tmp/cr.leaf"; then \
+	  echo "gc-minor-test: FAIL (a constructor rooted self across an initialize that only stores)"; ok=0; fi; \
+	if ! grep -q 'SP_GC_ROOT(self)' "$$tmp/cr.cell"; then \
+	  echo "gc-minor-test: FAIL (a constructor lost its root on self across an initialize that allocates)"; ok=0; fi; \
 	rm -rf "$$tmp"; \
 	if [ $$ok -eq 1 ]; then echo "gc-minor-test: pass"; else exit 1; fi
 

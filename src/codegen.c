@@ -3696,6 +3696,86 @@ static void gc_roots_take_back(Compiler *c, Scope *s, Buf *b, size_t fn_off) {
   }
 }
 
+/* A constructor roots `self` for one reason: the initialize it is about to run
+   may allocate, and until the constructor returns nothing else names the new
+   object. Most initializes only store -- `@left = nil`, `@n = n` -- and then
+   the root protects nothing, while pushing and popping it is a tenth of what
+   allocating the object costs (gcbench: 19 of 191 instructions per Node) and
+   its `&self` keeps the constructor from being frameless.
+
+   A veto like the one above, read off the finished text because a constructor
+   is emitted before the initialize it calls: everything after the root must
+   call nothing that could collect, and the one call let through is an
+   initialize whose own body passes that test. A call through a pointer is a
+   call.
+
+   The calls that pass are fewer than gc_elide_call_ok's. That list serves a
+   local whose value a container also holds, so it can afford a helper that
+   reaches Ruby (sp_poly_length on an object with #to_a); here the root is the
+   only thing naming the object, and only what leaves the heap exactly as it
+   found it gets through: C's keywords, the boxing constructors, which build a
+   struct by value, and the write barrier. */
+static int gc_call_cannot_collect(const char *id, size_t n) {
+  static const char *const OK[] = {
+    "if", "while", "for", "switch", "return", "sizeof", "do", "else", "__typeof__",
+    "sp_box_int", "sp_box_bool", "sp_box_nil", "sp_box_sym", "sp_box_float",
+    "sp_box_str", "sp_box_obj", "sp_box_nullable_obj", "sp_box_poly_array",
+    "sp_box_int_or_nil", "sp_box_float_or_nil", "sp_gc_wb", "SP_WBO", NULL };
+  for (int i = 0; OK[i]; i++) if (strlen(OK[i]) == n && !strncmp(id, OK[i], n)) return 1;
+  return 0;
+}
+
+static int gc_ctor_span_inert(const char *from, const char *to, const char **init, size_t *init_n) {
+  for (const char *p = from; p < to; p++) {
+    if (*p != '(' || p == from) continue;
+    if (p[-1] == ')' || p[-1] == ']') return 0;
+    const char *e = p;
+    while (e > from && (isalnum((unsigned char)e[-1]) || e[-1] == '_')) e--;
+    size_t n = (size_t)(p - e);
+    if (!n || gc_call_cannot_collect(e, n)) continue;
+    if (init && !*init && n > 14 && !strncmp(e, "sp_", 3) && !strncmp(p - 11, "_initialize", 11)) {
+      *init = e; *init_n = n;
+      continue;
+    }
+    return 0;
+  }
+  return 1;
+}
+
+static void gc_ctor_roots_take_back(Buf *b) {
+  static const char root[] = "  SP_GC_ROOT(self);\n";
+  size_t rl = sizeof root - 1, from = 0;
+  for (;;) {
+    char *at = b->p ? strstr(b->p + from, root) : NULL;
+    if (!at) return;
+    from = (size_t)(at - b->p) + rl;
+    /* the function this root is in, and whether it is a constructor */
+    const char *hdr = at;
+    while (hdr > b->p && !(hdr[-1] == '\n' && hdr[0] != ' ' && hdr[0] != '#' && hdr[0] != '\n')) hdr--;
+    const char *open = strstr(hdr, ") {\n"), *end = strstr(at, "\n}\n");
+    const char *paren = memchr(hdr, '(', (size_t)(at - hdr));
+    if (!open || open > at || !end || !paren || strncmp(hdr, "static sp_", 10)) continue;
+    if (!((paren - hdr > 4 && !strncmp(paren - 4, "_new", 4)) ||
+          (paren - hdr > 11 && !strncmp(paren - 11, "_new_noinit", 11)))) continue;
+    const char *init = NULL; size_t init_n = 0;
+    if (!gc_ctor_span_inert(at + rl, end, &init, &init_n)) continue;
+    if (init) {
+      /* its definition: `static ... void sp_X_initialize(sp_X *self, ...) {` */
+      const char *body = NULL, *body_end = NULL;
+      for (const char *d = strstr(b->p, "\nstatic "); d && !body; d = strstr(d + 1, "\nstatic ")) {
+        const char *eol = strchr(d + 1, '\n');
+        if (!eol || eol - d < 4 || strncmp(eol - 3, ") {", 3)) continue;
+        const char *nm = memchr(d + 1, '(', (size_t)(eol - d - 1));
+        if (!nm || (size_t)(nm - d - 1) < init_n || strncmp(nm - init_n, init, init_n) || nm[-(long)init_n - 1] != ' ') continue;
+        body = eol; body_end = strstr(eol, "\n}\n");
+      }
+      if (!body || !body_end || !gc_ctor_span_inert(body, body_end, NULL, NULL)) continue;
+    }
+    from = (size_t)(at - b->p);
+    buf_erase(b, from, rl);
+  }
+}
+
 /* ---- root frames ----
 
    Every root the emitters write costs the C compiler three things: taking
@@ -15550,6 +15630,7 @@ char *codegen_program(const NodeTable *nt) {
      constructors and main are emitted by different paths, and hooking them one
      at a time left a quarter of the stores bare. */
   gc_wb_insert(c, &b, 0);
+  if (!g_no_root_elision) gc_ctor_roots_take_back(&b);
   if (g_line_map) line_map_reanchor(&b);
   free(g_procs.p); free(g_proc_protos.p);
   free(g_pd_protos.p); free(g_pd_defs.p);
