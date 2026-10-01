@@ -11,9 +11,9 @@ execution: code
 
 ## Goal Capsule
 
-- **Objective:** Anyone changing Spinel can state what the change costs or saves on the README's narrow benchmarks with one reproducible command, and the allocation-bound benchmarks run measurably fewer instructions than upstream master does today.
+- **Objective:** Anyone changing Spinel can state what the change costs or saves on the README's narrow benchmarks with one reproducible command, and the allocation-bound benchmarks (the allocation set of KTD7) run measurably fewer instructions than upstream master does today.
 - **Means:** an instruction-count ledger under `tools/` (KTD1, KTD2), used as the scoring harness of a ce-optimize keep/revert loop on allocation cost (KTD6, KTD7).
-- **Authority:** the user's three settled decisions (KTD9, KTD10, Key Decisions) outrank this plan; the Product Contract outranks the Planning Contract; units override neither.
+- **Authority:** the user's four settled decisions (the two Key Decisions, KTD9 and KTD10) outrank this plan; the Product Contract outranks the Planning Contract; units override neither.
 - **Execution profile:** U1 to U4 are ordinary tool work. U5 is a long measured loop with its own stopping rules.
 - **Stop conditions:** stop and report if upstream lands a benchmark ledger or allocator speed work while this runs, if a kept change cannot pass the correctness gates in the Verification Contract, or if instruction counts stop repeating run to run.
 - **Who finishes:** work ends pushed to `claude/alloc-speed-loop-h0j89v` on the fork. The user decides what becomes an upstream pull request.
@@ -59,11 +59,11 @@ That warning is the reason to settle the measurement before touching the code.
 - R4. A committed baseline file holds one row per benchmark and the toolchain it was measured with.
 - R5. A check mode compares a fresh run with the baseline and exits non-zero when any benchmark rose beyond a tolerance; on a different toolchain it reports the comparison as indicative and does not fail.
 - R6. An A/B mode builds another git ref in a temporary worktree, measures both on this machine, and prints one before/after row per benchmark with the geometric mean.
-- R7. A machine-readable output carries the same rows plus peak resident memory and allocation count per benchmark, for the loop to score and gate on.
+- R7. A machine-readable output carries the same rows plus peak resident memory and allocation count per benchmark: the loop gates on the first and picks its scored benchmarks from the second.
 
 **Loop**
 
-- R8. The loop is scored on the geometric mean of instructions over the allocation-bound benchmarks and keeps a change only when that mean falls beyond noise.
+- R8. The loop is scored on the geometric mean of instructions over the allocation set and keeps a change only when that mean falls beyond noise.
 - R9. The loop leaves `io_wordcount` and `csv_process` line-reading and hash work to its upstream owner; they are guarded against regression, not optimized.
 - R10. No kept change may alter any benchmark's output, fail the collector tests, or raise peak resident memory on the allocation benchmarks by more than 5%.
 - R11. Work ends as commits pushed to `claude/alloc-speed-loop-h0j89v` on the fork, with no pull request.
@@ -72,8 +72,8 @@ That warning is the reason to settle the measurement before touching the code.
 ### Success Criteria
 
 - A second run of the ledger on an unchanged build reproduces every total within one part in a million.
-- The geometric mean of instructions over the allocation-bound benchmarks is lower at the end of the loop than at upstream `0f6feeb9`, with every gate in R10 green.
-- Each kept change also shows no slowdown in native CPU time over interleaved runs.
+- The geometric mean of instructions over the allocation set is lower at the end of the loop than at upstream `0f6feeb9`, with every gate in R10 green.
+- Each kept change also shows no slowdown in native CPU time beyond the noise floor this machine measures between two copies of one build.
 
 ### Scope Boundaries
 
@@ -96,12 +96,12 @@ That warning is the reason to settle the measurement before touching the code.
 
 - KTD1. **Instructions under callgrind, on the default build.** Counts repeat here to one part in two million and need no `perf`. The default build keeps its symbols, so callgrind names functions without `--profile`, which would add `-fno-omit-frame-pointer` and measure a different binary.
 - KTD2. **A CRuby script in `tools/` with pure logic in a separate file.** `tools/compile_scale.rb` is the precedent for a measuring script driven from `make`. The parsing, bucketing and comparison live in `tools/speed_ledger_lib.rb`, written in the Spinel subset so a `test/tools_*.rb` test covers them the way `test/tools_diff_classify.rb` covers `tools/diff_classify.rb`.
-- KTD3. **Baseline is a tab-separated text file at `benchmark/speed-ledger.tsv`.** One row per benchmark diffs cleanly in review. Header comment lines carry the fingerprint: compiler version, valgrind version, architecture and the spinel revision.
+- KTD3. **Baseline is a tab-separated text file at `benchmark/speed-ledger.tsv`.** One row per benchmark diffs cleanly in review. Header comment lines carry the toolchain fingerprint that check mode compares: compiler version, valgrind version and architecture. The spinel revision sits on its own header line as provenance and is never compared, since a baseline cannot name the commit that adds it.
 - KTD4. **Layers come from function names and the object file callgrind reports.** One ordered rule table maps a function to a layer; a function in a shared library is libc; whatever matches no rule is generated code. Runtime helpers that the C compiler inlines into generated functions count as generated code, which the docs state.
 - KTD5. **Two benchmark sets.** `narrow` is the eight rows below the README's geometric mean: `gcbench`, `binary_trees`, `json_parse`, `csv_process`, `io_wordcount`, `str_concat`, `splay`, `rbtree`. `all` is every `benchmark/bm_*.rb` whose emitted C does not use threads, since callgrind serializes them.
 - KTD6. **The loop may change emitted code as well as the runtime.** The profile puts 27% of `gcbench` in barrier and root code the compiler emits, against 20% in `sp_gc_alloc`, which matz tuned last month. Mutable scope is `lib/sp_slab.c`, `lib/sp_alloc.c`, `lib/sp_gc.c`, `lib/sp_gc.h`, the allocation macros in `lib/spinel_rt.h`, and the constructor, barrier and root emission in `src/codegen*.c`.
-- KTD7. **Primary metric is the geometric mean of instructions over the allocation set; everything else is a gate.** The allocation set is fixed before the first experiment as every benchmark in `all` whose allocation plus collection share is at least 25%. Gates: outputs unchanged, no benchmark in `narrow` up more than 0.5%, peak resident memory per R10.
-- KTD8. **Native CPU time confirms a keep; it does not rank.** Before a change is kept, both builds run interleaved at least 20 times each and the medians of user plus system time are compared. A candidate that is slower by more than 2% is reverted whatever its instruction count says.
+- KTD7. **Primary metric is the geometric mean of instructions over the allocation set; everything else is a gate.** The allocation set is fixed before the first experiment as every benchmark in `all` that allocates at least one object per 1,000 instructions. Layer shares cannot define it, because KTD4 counts inlined barrier, root and constructor code as generated code. Gates on every experiment: outputs unchanged, no benchmark in `narrow` up more than 0.5%, peak resident memory per R10. Gate before a keep lands: no benchmark in `all` up more than 0.5% against the base.
+- KTD8. **Native CPU time confirms a keep; it does not rank.** Before the first experiment the loop measures a noise floor per benchmark: the base build interleaved against itself, 20 runs an arm, five times, comparing medians of user plus system time. Only allocation-set benchmarks that run at least 100 ms natively take part. A candidate is reverted when its median is slower than base by more than twice the largest same-build gap seen. When that floor exceeds 5% the native result is recorded as inconclusive in the keep's commit message and does not revert. Two copies of one `gcbench` binary differed by up to 4.9% here while other jobs shared the machine, so a fixed threshold would decide by chance.
 - KTD9. **The loop runs under ce-optimize.** (session-settled: user-directed — chosen over hand-tuned one-off changes: the user said "use ce-optimize to test them")
 - KTD10. **Keeps land on the designated branch, not on `optimize/<spec>`.** (session-settled: user-directed — chosen over ce-optimize's own branch and its closing pull request: the user said "no prs yet" and the session may push only to `claude/alloc-speed-loop-h0j89v`) Experiments still run in separate worktrees.
 
@@ -148,14 +148,14 @@ These are unconfirmed bets made without the user present.
 
 - The user's instruction to run the loop with ce-optimize covers its approval step, because every experiment is reversible, local, and capped by the limits in U5.
 - Planning artifacts (`docs/plans/`, the exported loop log) may sit on the fork branch. They are kept in their own commits so an upstream pull request can leave them out.
-- A 0.5% tolerance for check mode and a 0.2% keep threshold for the loop are loose enough for a quiet machine and tight enough to catch a real change. Both are options, not constants.
+- A 0.5% tolerance for check mode and a 0.2% keep threshold for the loop are far above the run-to-run spread of instruction counts and tight enough to catch a real change. Both are options, not constants.
 - The system `ruby` (3.3.6) is acceptable for running the tool itself, as it is for `tools/compile_scale.rb`. The benchmark oracle stays the committed `.expected` files.
 
 ### Risks & Dependencies
 
 - **Instruction counts miss cache and branch effects.** KTD8 is the mitigation; a keep still needs wall-clock confirmation against Ruby 4.0 with YJIT before the README can cite it.
-- **Barrier and root changes are correctness-critical.** A missed barrier is a use-after-free that only a minor collection exposes. Every candidate that touches them runs the collector tests and the allocation benchmarks under `SPINEL_GC_VERIFY_GEN=1 SPINEL_GC_STRESS=1`.
-- **Upstream moves fast in `src/codegen*.c`.** Kept changes stay small and local so they rebase. The overlap scan is repeated before any pull request is cut.
+- **Barrier and root changes are correctness-critical.** A missed barrier is a use-after-free that only a minor collection exposes, and the corpus in its default mode shows one only by luck. The Verification Contract's verifier rows are the mitigation: reduced-size copies of the benchmark shapes in `GC_MINOR_TESTS`, and a differential run of the whole corpus under the generational verifier before such a keep lands.
+- **Upstream moves fast in `src/codegen*.c`.** Kept changes stay small and local so they rebase. U5 repeats the overlap scan before the first experiment and before each keep. Upstream added argument-temporary roots as correctness fixes on 2026-10-01 (#6549), so removing temporaries' roots is the hypothesis most likely to collide and is tried last.
 - **matz may prefer to keep the collector to himself.** The ledger stands on its own if he does.
 - **Depends on** valgrind 3.22 and gcc 13.3 as installed; the baseline's fingerprint records both.
 
@@ -164,7 +164,7 @@ These are unconfirmed bets made without the user present.
 - `tools/compile_scale.rb`, `tools/README.md` (the `compile_scale` section): the shape of a measuring script and its documentation.
 - `tools/cdiff.sh`: builds a reference revision in a temporary worktree; the A/B mode follows it.
 - `test/tools_diff_classify.rb`: how tool logic is tested inside the corpus.
-- `Makefile` `bench` and `bench-compile` targets: naming and recipe style. A single corpus test runs as `make build/test-results/<name>.ok`.
+- `Makefile` `bench` and `bench-compile` targets: naming and recipe style. A single corpus test runs through `make build/test-results/<name>.ok`; the recipe always exits zero and writes PASS, FAIL or ERR into that file, and it does not rerun when only a `tools/` file changed, so delete the file first and read it afterwards.
 - `lib/sp_slab.c` (`sp_gc_alloc`, `sp_slab_run`), `lib/sp_gc.h` (`sp_gc_wb`, `_sp_gc_root_push`), `lib/spinel_rt.h` (`SP_POOL_NEW`): the allocation path the loop works on.
 - `docs/internals/gc.md`: the collector's design, its environment switches, the nursery history and the measurement warning.
 - `docs/profiling.md`: `SPINEL_ALLOC_REPORT`, the source of the allocation count in R7.
@@ -184,7 +184,7 @@ These are unconfirmed bets made without the user present.
   2. It runs the binary under callgrind and hands the per-function counts to the library.
   3. The library applies the layer rules (KTD4), sums per layer, and formats rows.
   4. A native run with `SPINEL_ALLOC_REPORT=1` supplies peak resident memory and the allocation count.
-  5. Benchmarks run in parallel up to the core count; counts do not depend on load.
+  5. Different benchmarks run in parallel up to the core count; counts do not depend on load. All runs of one benchmark, including both sides of an A/B, run one after another, because `benchmark/bm_io_wordcount.rb` writes and deletes the fixed path `/tmp/spinel_io_wf.txt`.
 - **Execution note:** Write the library test first, from a recorded callgrind function listing of `gcbench`.
 - **Patterns to follow:** `tools/compile_scale.rb` for the driver; `tools/diff_classify.rb` with `test/tools_diff_classify.rb` for the tested library.
 - **Test scenarios:**
@@ -195,7 +195,7 @@ These are unconfirmed bets made without the user present.
   - Row formatting pads and orders columns identically for a seven-digit and a ten-digit total.
   - Integration: running the driver on `gcbench` twice gives the same total within one part in a million.
   - Integration: a benchmark given a wrong `.expected` is reported as failed with no count.
-- **Verification:** `make build/test-results/tools_speed_ledger.ok` passes, and the `gcbench` row matches a hand-run callgrind total.
+- **Verification:** the Ledger logic check in the Verification Contract reports PASS, and the `gcbench` row matches a hand-run callgrind total.
 
 ### U2. Baseline file, check mode and make targets
 
@@ -210,9 +210,10 @@ These are unconfirmed bets made without the user present.
   - A row that fell is reported as an improvement and does not fail.
   - A benchmark present in the run and absent from the baseline is reported as new and does not fail.
   - A benchmark in the baseline and absent from the run is reported as missing and fails.
-  - A fingerprint mismatch turns every failure into an indicative notice and the exit status into zero.
+  - A toolchain fingerprint mismatch (KTD3) turns every failure into an indicative notice and the exit status into zero.
+  - A baseline whose recorded spinel revision differs from the current one, on the same toolchain, still fails on a 0.6% rise.
   - A baseline file round-trips: parse then format reproduces it byte for byte.
-- **Verification:** `make bench-ledger` exits zero on the unchanged tree and non-zero after a deliberate extra loop is added to one benchmark locally.
+- **Verification:** `make bench-ledger` exits zero on the unchanged tree and non-zero after a deliberate extra loop is added to one benchmark, both checked at a commit later than the one that wrote the baseline.
 
 ### U3. A/B mode against a git ref
 
@@ -244,20 +245,25 @@ These are unconfirmed bets made without the user present.
 - **Goal:** Lower the allocation set's instruction geometric mean with changes that pass every gate.
 - **Requirements:** R8, R9, R10, R12
 - **Dependencies:** U1, U2, U3
-- **Files:** `lib/sp_slab.c`, `lib/sp_alloc.c`, `lib/sp_gc.c`, `lib/sp_gc.h`, `lib/spinel_rt.h`, `src/codegen*.c`, `benchmark/speed-ledger.tsv`, new `test/*.rb` with `.expected` for any emission change, `docs/optimize/alloc-speed-loop/` (exported loop log, new)
+- **Files:** `lib/sp_slab.c`, `lib/sp_alloc.c`, `lib/sp_gc.c`, `lib/sp_gc.h`, `lib/spinel_rt.h`, `src/codegen*.c`, `benchmark/speed-ledger.tsv`, new `test/gc_minor_*.rb` with `.expected` for any emission change, `Makefile` (the `GC_MINOR_TESTS` list), `docs/optimize/alloc-speed-loop/` (exported loop log, new)
 - **Approach:**
-  1. Fix the allocation set and the baseline per KTD7 before the first experiment.
-  2. Run ce-optimize (KTD9) with the ledger's JSON as the measurement, serial, capped at 12 experiments and 6 hours.
-  3. Start from the profile: barriers on stores that cannot create an old-to-young reference, the root for `self` in a constructor whose `initialize` cannot collect, roots for temporaries that alias a rooted object's field, and constant folding of the size class at allocation sites.
-  4. Apply the gates and the confirmation in KTD7 and KTD8 to every candidate.
-  5. Land each keep on the branch as its own commit (KTD10, R12), refresh the baseline in that commit, and export the loop's log to the tracked directory at wrap-up.
-- **Execution note:** An emission change gets a characterization test of the emitted shape and a behavior test under collector stress before it is measured.
+  1. Fetch upstream and repeat the overlap scan: new commits and open pull requests touching the allocator and collector files, barrier or root emission, or a benchmark ledger. Repeat it before each keep lands. A hit stops the loop per the Goal Capsule.
+  2. Fix the allocation set, the baseline and the native noise floors per KTD7 and KTD8 before the first experiment.
+  3. Run ce-optimize (KTD9) with the ledger's JSON as the measurement, serial, capped at 12 experiments and 6 hours.
+  4. Start from the profile, in this order: barriers on stores whose value is emitted as nil or as an immortal static, the root for `self` in a constructor whose `initialize` provably reaches nothing that can collect, constant folding of the size class at allocation sites, and last the roots for temporaries that alias a rooted object's field.
+  5. Hold each elision to its condition. A string literal is not always static: one containing a NUL byte is a fresh heap string. "Cannot collect" is stricter than "does not allocate": a loop emits a safepoint and a finalizer poll, so an `initialize` with a call or a loop keeps its root.
+  6. Apply the gates and the confirmation in KTD7 and KTD8 to every candidate.
+  7. Land each keep on the branch as its own commit (KTD10, R12), refresh the baseline in that commit, and export the loop's log to the tracked directory at wrap-up.
+- **Execution note:** An emission change gets a characterization test of the emitted shape and a reduced-size behavior test in `GC_MINOR_TESTS` before it is measured.
 - **Patterns to follow:** the `gc-minor-test` target and its `GC_MINOR_TESTS` list in `Makefile` for barrier coverage; `test/gc_minor_barrier_holders.rb` for the shape of a barrier test.
 - **Test scenarios:**
   - An object built with nil and literal instance variables, then promoted and given a young child after a collection, keeps that child alive under `SPINEL_GC_MINOR=1 SPINEL_GC_VERIFY_GEN=1 SPINEL_GC_STRESS=1`.
   - A constructor whose `initialize` allocates still keeps `self` alive across that allocation under collector stress.
   - A constructor whose `initialize` stores a freshly allocated object into an instance variable keeps both alive.
   - A method that passes a field of a rooted object to a call that allocates, then reassigns that field inside the call, still holds the original value.
+  - A constructor that stores a NUL-containing string literal into an instance variable keeps its barrier and is clean under the generational verifier with stress.
+  - A constructor whose `initialize` runs a call-free loop keeps the root for `self`, and a threaded program that allocates on a second thread during that loop keeps the object alive under `SPINEL_GC_STRESS=1`.
+  - Reduced-size copies of the allocation benchmarks' shapes (tree build, populate, churn at depth 10 or less) pass all three legs of `gc-minor-test` within its 60-second limit.
   - Every benchmark in `all` prints its expected output with the candidate build.
 - **Verification:** The loop reached a stopping criterion, its log is on disk and exported, every kept commit carries its row, and no reverted experiment's code remains in the diff.
 
@@ -268,14 +274,17 @@ These are unconfirmed bets made without the user present.
 | Check | Command | Applies to |
 |---|---|---|
 | Build | `make -j4` | all units |
-| Ledger logic | `make build/test-results/tools_speed_ledger.ok` | U1, U2, U3 |
+| Ledger logic | `rm -f build/test-results/tools_speed_ledger.ok && make build/test-results/tools_speed_ledger.ok && grep -qx PASS build/test-results/tools_speed_ledger.ok` | U1, U2, U3 |
 | Ledger round trip | `make bench-ledger` | U2 |
 | Emitted C unchanged by tool work | `tools/cdiff.sh <base-rev>` | U1 to U4 |
 | Benchmark outputs | `make bench` | U5, each keep |
 | Collector tests | `make gc-minor-test gc-phases-test gc-threshold-test gc-obj-budget-test gc-str-major-test gc-locality-test` | U5, each keep |
-| Stress run | allocation set under `SPINEL_GC_VERIFY_GEN=1 SPINEL_GC_STRESS=1` and under `SPINEL_GC_MINOR=1` | U5, each keep |
-| Corpus | `make test` | U5, once before the final push, and after any emission change |
-| Speed | `ruby tools/speed_ledger.rb --against <base-rev>` | U5, each keep |
+| Verifier on benchmark shapes | `make gc-minor-test`, whose list includes the reduced-size programs U5 adds | U5, every experiment that changes a barrier or a root |
+| Other collector mode | allocation set at full size with `SPINEL_GC_MINOR=0`, outputs compared with `.expected` | U5, each keep |
+| Corpus under the verifier | `make test-corpus` with `SPINEL_GC_MINOR=1 SPINEL_GC_VERIFY_GEN=1 SPINEL_GC_STRESS=1` exported, on the base build and on the candidate; any test that passes on base and fails on the candidate rejects it | U5, before a keep that removes or narrows a barrier or a root lands |
+| Corpus | `make test` | U5, before a keep that changes emitted code lands, and once before the final push |
+| Speed, per experiment | `ruby tools/speed_ledger.rb --against <base-rev>` on the allocation set and `narrow` | U5 |
+| Speed, per keep | the same on `all` | U5, before each keep lands |
 
 Exit criterion for U5: the allocation set's geometric mean is below baseline by more than the keep threshold with every row above green, or the loop stopped on its caps or a plateau and says so.
 
