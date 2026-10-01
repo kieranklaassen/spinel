@@ -3733,6 +3733,8 @@ static int gc_ctor_span_inert(const char *from, const char *to, const char **ini
     while (e > from && (isalnum((unsigned char)e[-1]) || e[-1] == '_')) e--;
     size_t n = (size_t)(p - e);
     if (!n || gc_call_cannot_collect(e, n)) continue;
+    /* registering a root, or saving the depth, is not a collection */
+    if (!init && n >= 10 && (!strncmp(e, "SP_GC_ROOT", 10) || !strncmp(e, "SP_GC_SAVE", 10))) continue;
     if (init && !*init && n > 14 && !strncmp(e, "sp_", 3) && !strncmp(p - 11, "_initialize", 11)) {
       *init = e; *init_n = n;
       continue;
@@ -3740,6 +3742,30 @@ static int gc_ctor_span_inert(const char *from, const char *to, const char **ini
     return 0;
   }
   return 1;
+}
+
+/* The method-wide form of the same fact. A function that calls nothing that
+   could collect is never on the stack while the collector looks for roots, so
+   the ones it registers -- its reference parameters, its temporaries -- are
+   read by nobody. An `initialize(left, right)` that stores its two arguments
+   built a two-entry frame for them, and its constructor then had to root self
+   across it; with the frame gone both go (binary_trees: 38 of 275
+   instructions per Node). */
+static void gc_fn_roots_take_back(Buf *b, size_t fn_off) {
+  if (fn_off >= b->len) return;
+  const char *fn = b->p + fn_off;
+  if (!strstr(fn, "SP_GC_ROOT") || strstr(fn, "setjmp") || strstr(fn, "sp_gc_nroots")) return;
+  if (!gc_ctor_span_inert(fn, b->p + b->len, NULL, NULL)) return;
+  for (char *at; (at = strstr(b->p + fn_off, "SP_GC_ROOT")) != NULL; ) {
+    const char *semi = strchr(at, ';');
+    if (!semi) return;
+    size_t start = (size_t)(at - b->p), len = (size_t)(semi + 1 - at);
+    /* a root on a line of its own takes the line with it */
+    size_t ls = start;
+    while (ls > fn_off && b->p[ls - 1] == ' ') ls--;
+    if (ls > 0 && b->p[ls - 1] == '\n' && semi[1] == '\n') { len += start - ls + 1; start = ls; }
+    buf_erase(b, start, len);
+  }
 }
 
 static void gc_ctor_roots_take_back(Buf *b) {
@@ -5015,6 +5041,7 @@ void emit_method(Compiler *c, Scope *s, Buf *b) {
   g_brk_ser_var = saved_bser; g_brk_skip_id = saved_bskip;
   g_yield_proc_ref = sv_ypr9; g_yield_slot_ty = sv_yst9;
   buf_puts(b, "}\n");
+  if (!g_no_root_elision) gc_fn_roots_take_back(b, gc_save_off + gc_save_len);
   if (!g_no_root_elision) gc_roots_take_back(c, s, b, gc_save_off);
   if (!g_no_root_frame) gc_frame_build(b, gc_save_off + gc_save_len);
   gc_save_take_back(b, gc_save_off, gc_save_len);

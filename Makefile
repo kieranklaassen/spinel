@@ -1659,7 +1659,8 @@ GC_MINOR_TESTS := test/gc_minor_thread_local_slot.rb \
                   test/string_handle_keyword_dyn_sites.rb \
                   test/gc_minor_ctor_stores.rb \
                   test/gc_minor_alloc_shapes.rb \
-                  test/gc_minor_ctor_root.rb
+                  test/gc_minor_ctor_root.rb \
+                  test/gc_minor_method_roots.rb
 
 # Each program runs with the minor mark off and on and must answer the same;
 # then once more under the generational verifier with stress on (every
@@ -1710,6 +1711,13 @@ gc-minor-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
 	  echo "gc-minor-test: FAIL (a constructor rooted self across an initialize that only stores)"; ok=0; fi; \
 	if ! grep -q 'SP_GC_ROOT(self)' "$$tmp/cr.cell"; then \
 	  echo "gc-minor-test: FAIL (a constructor lost its root on self across an initialize that allocates)"; ok=0; fi; \
+	$(SPINEL) test/gc_minor_method_roots.rb --no-line-map -c -o "$$tmp/mr.c" >/dev/null 2>&1; \
+	sed -n '/^[^ ].* sp_Thing_link_both(.*) {$$/,/^}$$/p' "$$tmp/mr.c" > "$$tmp/mr.link"; \
+	sed -n '/^[^ ].* sp_Thing_relink(.*) {$$/,/^}$$/p' "$$tmp/mr.c" > "$$tmp/mr.relink"; \
+	if [ ! -s "$$tmp/mr.link" ] || grep -q 'SP_GC_' "$$tmp/mr.link"; then \
+	  echo "gc-minor-test: FAIL (a method that only stores registered a root)"; ok=0; fi; \
+	if ! grep -q 'SP_GC_ROOT' "$$tmp/mr.relink"; then \
+	  echo "gc-minor-test: FAIL (a method that allocates lost its roots)"; ok=0; fi; \
 	rm -rf "$$tmp"; \
 	if [ $$ok -eq 1 ]; then echo "gc-minor-test: pass"; else exit 1; fi
 
