@@ -87,7 +87,6 @@
 #define SP_SLAB_ARENA   ((size_t)4 << 20)
 #define SP_SLAB_CHUNK   ((size_t)16 << 10)
 #define SP_SLAB_NCHUNK  (SP_SLAB_ARENA / SP_SLAB_CHUNK)   /* 256 */
-#define SP_SLAB_NCLS    27
 #define SP_SLAB_MAX     2048
 /* chunk 0 is the header table (256 x 64 B); chunks 1..SP_SLAB_META hold the
    bitmaps (256 x 448 B = 112 KB = 7 chunks); the rest are carved */
@@ -99,12 +98,8 @@
 #define SP_SLAB_NW      8
 
 #ifdef SP_THREADS
-#define SP_SLAB_NWK SP_MAX_WORKERS
-#define SP_SLAB_WID() (sp_worker_id)
 static inline int sp_worker_id_shadow(void) { return sp_worker_id; }
 #else
-#define SP_SLAB_NWK 1
-#define SP_SLAB_WID() 0
 static inline int sp_worker_id_shadow(void) { return 0; }
 #endif
 void sp_slab_note(const void *p, int what);
@@ -123,7 +118,7 @@ static uint8_t sp_slab_cls_of[SP_SLAB_MAX / 16 + 1];   /* (need+15)/16 -> class 
 static uint32_t sp_slab_recip[SP_SLAB_NCLS];
 static uint16_t sp_slab_nslots_of[SP_SLAB_NCLS];
 
-typedef struct sp_slab_chunk {
+struct sp_slab_chunk {
   struct sp_slab_chunk *next_avail;   /* the owner's available list, per class */
   struct sp_slab_chunk *own_next, *own_prev;   /* the owner's owned list, every chunk it carved */
   uint32_t nslots;
@@ -133,7 +128,7 @@ typedef struct sp_slab_chunk {
   uint8_t in_use;                     /* holds a class; 0 = empty, on the global pool */
   uint8_t touched;                    /* has resident pages since the last release */
   uint8_t _pad[64 - sizeof(void *) * 3 - 4 - 2 * 3 - 3];   /* a 64-byte header on any pointer width */
-} sp_slab_chunk;
+};
 typedef char sp_slab_chunk_is_one_line[sizeof(sp_slab_chunk) == 64 ? 1 : -1];
 
 /* one slot's worth of state per chunk: seven bitmaps of SP_SLAB_NW words */
@@ -152,41 +147,7 @@ typedef struct sp_slab_arena {
   sp_slab_chunk ch[SP_SLAB_NCHUNK];   /* ch[0] is this table itself, never carved */
 } sp_slab_arena;
 
-typedef struct {
-  sp_slab_chunk *cur[SP_SLAB_NCLS];
-  sp_slab_chunk *avail[SP_SLAB_NCLS];
-  /* The allocation cache, per class: a word of the current chunk with its
-     free bits (wmask, not claimed yet), and per KIND (0: objects and
-     strings, claimed in the epoch's young word; 1: payloads, claimed in
-     pin) a RUN of consecutive slots cut from that word, claimed in the
-     bitmap all at once and handed out by a bump of rnext up to rend. The
-     two kinds keep their runs through each other's refills: dropping a
-     run on a kind switch orphaned its claimed rest until the next
-     collection, and a server alternating hash tables with objects of the
-     same class orphaned gigabytes that way. A slot claimed and not yet
-     handed out is in the bitmap and garbage in memory; nothing reads it,
-     and the collector unclaims every worker's remainders under the barrier
-     (sp_slab_runs_release) before it walks or sweeps anything. */
-  uint64_t wmask[SP_SLAB_NCLS];     /* free bits of the cached word not claimed yet */
-  uint64_t *wyoung[SP_SLAB_NCLS];   /* the cached word in this epoch's young bitmap */
-  uint64_t *wpin[SP_SLAB_NCLS];     /* the same word of the pin bitmap */
-  uint64_t *wfin[SP_SLAB_NCLS];     /* the same word of the fin bitmap */
-  uint64_t *wstr[SP_SLAB_NCLS];     /* the same word of the str bitmap */
-  char *wbase[SP_SLAB_NCLS];        /* slot 0 of that word */
-  char *rnext[2][SP_SLAB_NCLS];     /* the run's next slot, per kind */
-  char *rend[2][SP_SLAB_NCLS];      /* one past the run's last slot */
-  char *rbase[2][SP_SLAB_NCLS];     /* slot 0 of the run's word (the fin bit is computed from it) */
-  uint64_t *rclaim[2][SP_SLAB_NCLS];   /* the word the run was claimed in (unclaimed from there at a release) */
-  uint64_t *rfin[2][SP_SLAB_NCLS];     /* the run's word in the fin bitmap */
-  uint64_t *rstr[2][SP_SLAB_NCLS];     /* the run's word in the str bitmap */
-  sp_slab_chunk *owned;              /* every chunk this worker carved, doubly linked */
-  long taken;        /* chunks this worker started allocating into since the last release */
-  int taken_cls[SP_SLAB_NCLS];   /* the same, per class: what each class will need again next cycle */
-  int sweeping;      /* a sweep of this worker's chunks is running (the release waits it out) */
-  char _pad[64 - ((19 * SP_SLAB_NCLS * sizeof(void *) + SP_SLAB_NCLS * (sizeof(uint64_t) + sizeof(int)) + sizeof(void *) + sizeof(long) + sizeof(int)) % 64)];
-} sp_slab_worker;
-
-static sp_slab_worker sp_slab_wk[SP_SLAB_NWK];
+sp_slab_worker sp_slab_wk[SP_SLAB_NWK];   /* declared in sp_gc.h, for sp_gc_alloc_front */
 uintptr_t sp_slab_base = 0;   /* the reservation (read inline by sp_slab_owns) */
 static uintptr_t sp_slab_brk = 0;   /* how much of it is in use */
 size_t sp_slab_cap = 0;
@@ -336,6 +297,12 @@ static void sp_slab_init(void) {
   for (unsigned i = 0; i <= SP_SLAB_MAX / 16; i++) {
     while (c < SP_SLAB_NCLS - 1 && sp_slab_csize[c] < i * 16) c++;
     sp_slab_cls_of[i] = (uint8_t)c;
+  }
+  /* sp_gc_alloc_front (spinel_rt.h) computes the class and the slot size of a
+     block of 256 bytes or less instead of reading them here */
+  for (unsigned i = 0; i <= 16; i++) {
+    unsigned k = i <= 2 ? 0 : i - 2;
+    if (sp_slab_cls_of[i] != k || sp_slab_csize[k] != 32 + 16 * k) { fputs("spinel: slab size classes moved; update sp_gc_alloc_front\n", stderr); abort(); }
   }
   for (int k = 0; k < SP_SLAB_NCLS; k++) {
     unsigned cs = sp_slab_csize[k];

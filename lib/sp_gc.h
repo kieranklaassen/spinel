@@ -434,6 +434,54 @@ void  sp_slab_release_worker(int wid);   /* one worker's lists, by their owner, 
 void  sp_slab_release_from(int first);   /* the slots from `first` on, under the barrier */
 extern int sp_slab_on;
 
+/* The slab's allocation cache, declared here and not in lib/sp_slab.c for one
+   reader: sp_gc_alloc_front (spinel_rt.h), the bump a constructor does inline
+   because the size of its object is a constant. Everything else about the
+   slab, and every other use of this struct, is lib/sp_slab.c's. */
+#define SP_SLAB_NCLS    27
+#ifdef SP_THREADS
+#define SP_SLAB_NWK SP_MAX_WORKERS
+#define SP_SLAB_WID() (sp_worker_id)
+#else
+#define SP_SLAB_NWK 1
+#define SP_SLAB_WID() 0
+#endif
+typedef struct sp_slab_chunk sp_slab_chunk;
+typedef struct {
+  sp_slab_chunk *cur[SP_SLAB_NCLS];
+  sp_slab_chunk *avail[SP_SLAB_NCLS];
+  /* The allocation cache, per class: a word of the current chunk with its
+     free bits (wmask, not claimed yet), and per KIND (0: objects and
+     strings, claimed in the epoch's young word; 1: payloads, claimed in
+     pin) a RUN of consecutive slots cut from that word, claimed in the
+     bitmap all at once and handed out by a bump of rnext up to rend. The
+     two kinds keep their runs through each other's refills: dropping a
+     run on a kind switch orphaned its claimed rest until the next
+     collection, and a server alternating hash tables with objects of the
+     same class orphaned gigabytes that way. A slot claimed and not yet
+     handed out is in the bitmap and garbage in memory; nothing reads it,
+     and the collector unclaims every worker's remainders under the barrier
+     (sp_slab_runs_release) before it walks or sweeps anything. */
+  uint64_t wmask[SP_SLAB_NCLS];     /* free bits of the cached word not claimed yet */
+  uint64_t *wyoung[SP_SLAB_NCLS];   /* the cached word in this epoch's young bitmap */
+  uint64_t *wpin[SP_SLAB_NCLS];     /* the same word of the pin bitmap */
+  uint64_t *wfin[SP_SLAB_NCLS];     /* the same word of the fin bitmap */
+  uint64_t *wstr[SP_SLAB_NCLS];     /* the same word of the str bitmap */
+  char *wbase[SP_SLAB_NCLS];        /* slot 0 of that word */
+  char *rnext[2][SP_SLAB_NCLS];     /* the run's next slot, per kind */
+  char *rend[2][SP_SLAB_NCLS];      /* one past the run's last slot */
+  char *rbase[2][SP_SLAB_NCLS];     /* slot 0 of the run's word (the fin bit is computed from it) */
+  uint64_t *rclaim[2][SP_SLAB_NCLS];   /* the word the run was claimed in (unclaimed from there at a release) */
+  uint64_t *rfin[2][SP_SLAB_NCLS];     /* the run's word in the fin bitmap */
+  uint64_t *rstr[2][SP_SLAB_NCLS];     /* the run's word in the str bitmap */
+  sp_slab_chunk *owned;              /* every chunk this worker carved, doubly linked */
+  long taken;        /* chunks this worker started allocating into since the last release */
+  int taken_cls[SP_SLAB_NCLS];   /* the same, per class: what each class will need again next cycle */
+  int sweeping;      /* a sweep of this worker's chunks is running (the release waits it out) */
+  char _pad[64 - ((19 * SP_SLAB_NCLS * sizeof(void *) + SP_SLAB_NCLS * (sizeof(uint64_t) + sizeof(int)) + sizeof(void *) + sizeof(long) + sizeof(int)) % 64)];
+} sp_slab_worker;
+extern sp_slab_worker sp_slab_wk[SP_SLAB_NWK];
+
 /* ---- Collector entry points (defined in lib/sp_gc.c) ---- */
 int  sp_gc_verify_on(void);   /* SPINEL_GC_VERIFY is set (diagnostics only) */
 extern const char *sp_gc_dbg_phase;   /* which root group the mark walk is in */

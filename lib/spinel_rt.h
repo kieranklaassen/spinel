@@ -805,10 +805,43 @@ static inline sp_gc_hdr *sp_pool_try_pop(sp_gc_hdr **head) {
   static long sp_##CLS##_pool_pops; \
   static void sp_##CLS##_pool_recycle(sp_gc_hdr *h);
 
+/* sp_gc_alloc's lean front (lib/sp_slab.c) for a caller that knows the size at
+   compile time, which a constructor does: sizeof its class. Out of line that
+   front looks the size class up in a table, loads the slot size from another,
+   tests for a finalizer and enters the zeroing through a jump table, 46
+   instructions for a five-field object; with the size a constant the class and
+   the slot size fold, the finalizer test goes, and the zeroing is as many
+   stores as the slot has 16-byte pairs. The classes are 16 bytes apart from 32
+   to 256 (sp_slab_csize; sp_slab_init checks this formula against its table).
+
+   NULL when the front cannot run -- the run is used up, a collection is due,
+   the slab is off, or something wants to see each allocation
+   (sp_gc_alloc_fast_ok) -- and the caller takes the path it always took. */
+typedef struct { uint64_t a, b; } sp_gc_zero_pair;
+static inline void *sp_gc_alloc_front(size_t sz, void (*scn)(void *)) {
+  size_t need = sizeof(sp_gc_hdr) + sz;
+  if (need > 256 || !SP_EXPECT(sp_gc_alloc_fast_ok, 1)) return NULL;
+  if (SP_EXPECT(SP_GC_CTR_GET(sp_gc_bytes) > SP_GC_CTR_GET(sp_gc_threshold), 0)) return NULL;
+  size_t cls = need <= 32 ? 0 : ((need + 15) >> 4) - 2, csize = 32 + 16 * cls;
+  sp_slab_worker *wk = &sp_slab_wk[SP_SLAB_WID()];
+  char *p = wk->rnext[0][cls];
+  if (SP_EXPECT(p == wk->rend[0][cls], 0)) return NULL;
+  wk->rnext[0][cls] = p + csize;
+  /* 16-byte stores, not memset: at these sizes the compiler expands that to a
+     string instruction, whose start-up costs more than the stores */
+  { sp_gc_zero_pair *q = (sp_gc_zero_pair *)p; const sp_gc_zero_pair z = { 0, 0 };
+    for (size_t i = 0; i < csize / 16; i++) q[i] = z; }
+  sp_gc_hdr *h = (sp_gc_hdr *)p;
+  h->scan = scn; h->size = need;
+  sp_gc_bytes_add(need);
+  return p + sizeof(sp_gc_hdr);
+}
+
 #define SP_POOL_NEW(CLS, SCAN) (__extension__ ({ \
-  sp_##CLS *_p; \
-  sp_gc_hdr *_h = sp_slab_on > 0 ? NULL : sp_pool_try_pop(&sp_##CLS##_pool_head); \
-  if (_h) { \
+  sp_##CLS *_p = (sp_##CLS *)sp_gc_alloc_front(sizeof(sp_##CLS), SCAN); \
+  sp_gc_hdr *_h = _p || sp_slab_on > 0 ? NULL : sp_pool_try_pop(&sp_##CLS##_pool_head); \
+  if (_p) { } \
+  else if (_h) { \
     SP_POOL_CTR_DEC(sp_##CLS##_pool_count); \
     SP_POOL_CTR_INC(sp_##CLS##_pool_pops); \
     sp_gc_pool_relink(_h); \

@@ -1661,7 +1661,8 @@ GC_MINOR_TESTS := test/gc_minor_thread_local_slot.rb \
                   test/gc_minor_alloc_shapes.rb \
                   test/gc_minor_ctor_root.rb \
                   test/gc_minor_method_roots.rb \
-                  test/gc_minor_ctor_fresh.rb
+                  test/gc_minor_ctor_fresh.rb \
+                  test/gc_alloc_front_sizes.rb
 
 # Each program runs with the minor mark off and on and must answer the same;
 # then once more under the generational verifier with stress on (every
