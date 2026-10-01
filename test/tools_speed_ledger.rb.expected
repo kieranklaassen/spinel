@@ -1,0 +1,56 @@
+gcbench ok ir=6720 alloc=2320 collect=1612 hash=810 string=600 array=90 io=30 libc=758 generated=500
+layers sum to total: true
+totals line: 6720
+generated
+libc
+generated
+collect
+hash
+empty ok ir=0 alloc=0 collect=0 hash=0 string=0 array=0 io=0 libc=0 generated=0
+alloc count: 15333874
+benchmark                 Ir   alloc collect    hash  string   array      io    libc     gen       allocs  rss MB
+str_concat         1,709,257    17.9     0.1     0.0     5.4     0.0     0.0    34.6    42.0            3     2.0
+gcbench        3,529,278,094    21.5    15.3     0.0     0.0     0.0     0.0     0.3    62.9   15,333,862   109.0
+splay         FAILED
+empty ok ir=0 alloc=0 collect=0 hash=0 string=0 array=0 io=0 libc=0 generated=0
+# Spinel speed ledger: instructions (Ir) under valgrind --tool=callgrind.
+# Rewritten by `make bench-ledger-update`, compared by `make bench-ledger`.
+# cc: gcc 13.3.0
+# valgrind: valgrind-3.22.0
+# arch: x86_64
+# spinel: 0f6feeb9
+benchmark	ir	alloc	collect	hash	string	array	io	libc	generated	allocs
+str_concat	1709257	306438	1389	0	92172	0	0	591539	717719	3
+gcbench	3529278094	760000000	540000000	0	0	0	0	9278094	2220000000	15333862
+round trip: true
+2 rows, gcbench 3529278094
+-- same toolchain (failures 3)
+benchmark           baseline         current    change
+up_a_little        1,000,000       1,004,000    +0.40%
+up_too_much        1,000,000       1,006,000    +0.60%  REGRESSED
+down               1,000,000         900,000   -10.00%  improved
+gone               1,000,000                            missing
+broke              1,000,000                            FAILED
+fresh                                      5            new
+speed ledger: 3 compared, 1 regressed, 2 missing (tolerance 0.50%)
+same toolchain, other revision: true
+other compiler: false
+-- other toolchain (failures 0)
+benchmark           baseline         current    change
+up_a_little        1,000,000       1,004,000    +0.40%
+up_too_much        1,000,000       1,006,000    +0.60%  REGRESSED
+down               1,000,000         900,000   -10.00%  improved
+gone               1,000,000                            missing
+broke              1,000,000                            FAILED
+fresh                                      5            new
+speed ledger: 3 compared, 1 regressed, 2 missing (tolerance 0.50%)
+the toolchain differs from the baseline's: indicative only, nothing fails
+-- before/after (failures 2)
+benchmark             before           after    change
+a                      1,000             900   -10.00%
+b                      1,000           1,100   +10.00%
+geometric mean: 0.9950 (-0.50%) over 2 benchmarks
+not measured on both sides: c, d
+0.995
+1.000
++0.60% -0.66% +0.00% n/a

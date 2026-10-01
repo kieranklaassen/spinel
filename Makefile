@@ -2259,6 +2259,19 @@ BENCH_COMPILE_K ?= 100 200
 bench-compile: $(SPINEL)
 	@ruby tools/compile_scale.rb $(BENCH_COMPILE_K)
 
+# Speed ledger: the instructions each of the README's narrow benchmarks retires
+# under callgrind, split by runtime layer, against the committed
+# benchmark/speed-ledger.tsv. Fails when one rose by more than 0.5%; on another
+# C compiler or valgrind the same lines print as indicative and nothing fails.
+# `make bench-ledger-update` rewrites the baseline, and
+# `ruby tools/speed_ledger.rb --against REV` prints the before/after rows a
+# speed change should carry. See tools/README.md.
+.PHONY: bench-ledger bench-ledger-update
+bench-ledger: $(SPINEL) $(SP_RT_LIB)
+	@ruby tools/speed_ledger.rb --check
+bench-ledger-update: $(SPINEL) $(SP_RT_LIB)
+	@ruby tools/speed_ledger.rb --update
+
 bench: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
 	@if [ -z "$(TIMEOUT_BIN)" ]; then echo "Note: no 'timeout' command found; running without time limits."; fi
 	@rm -rf build/bench-results; mkdir -p build/bench-results

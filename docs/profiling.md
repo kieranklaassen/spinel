@@ -172,3 +172,10 @@ Reach for `SPINEL_ALLOC_REPORT` when the profile points at the collector
 (`sp_gc_collect`, `sp_gc_mark_all`) or at `malloc` -- then the question is not
 which code is slow but which code allocates, and the counters answer that
 exactly rather than statistically.
+
+To ask whether a change to the compiler or the runtime made the benchmarks
+faster or slower, neither is the tool: a sampler's answer moves by a few
+percent from run to run. `ruby tools/speed_ledger.rb --against REV` counts
+instructions under callgrind instead and prints a before/after row per
+benchmark; a plain run splits each count by runtime layer. See `speed_ledger`
+in [tools/README.md](../tools/README.md).

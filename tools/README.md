@@ -79,6 +79,62 @@ growth between consecutive sizes. The program is linear in K, so a linear
 phase shows x2 per doubling. `--cc` also builds the binary; `--check` compares
 its output with CRuby's.
 
+## speed_ledger
+
+`make bench-ledger` (or `ruby tools/speed_ledger.rb`) says what a change costs
+or saves at run time. It compiles each benchmark with the default `spinel`
+build, checks the output against its `.expected` file, and counts the
+instructions the program retires under `valgrind --tool=callgrind`, split by
+the layer of the runtime they were spent in:
+
+```
+benchmark                 Ir   alloc collect    hash  string   array      io    libc     gen       allocs  rss MB
+gcbench        3,427,621,896    24.1    17.3     0.0     0.0     0.0     0.0     0.3    58.3   15,333,862   105.5
+csv_process    2,179,608,614    17.4     4.2    16.2    40.1     6.6     0.0    13.0     2.6    5,068,420     3.8
+io_wordcount     235,816,569    14.0     3.2    16.5    27.2     3.2     7.3    25.8     2.8      540,236     2.9
+```
+
+`Ir` is the instruction count, the layer columns are percentages of it,
+`allocs` is the number of objects allocated (`SPINEL_ALLOC_REPORT`) and
+`rss MB` the peak resident memory of a native run. It is a CRuby script, like
+`compile_scale`, and needs valgrind.
+
+- `ruby tools/speed_ledger.rb [--set narrow|all|NAME,NAME...]` prints the
+  table. `narrow`, the default, is the eight benchmarks at the bottom of the
+  README's table; `all` is every benchmark that does not start threads.
+  `--json FILE` writes the same rows for a script to read.
+- `make bench-ledger` (`--check`) measures the benchmarks in
+  `benchmark/speed-ledger.tsv` and fails when one rose by more than 0.5%
+  (`--tolerance PCT`). The baseline names the C compiler, valgrind and
+  architecture it was measured with; on any other the comparison still
+  prints, as indicative, and nothing fails. `make bench-ledger-update`
+  (`--update`) rewrites it.
+- `ruby tools/speed_ledger.rb --against REV` builds `REV` in a temporary
+  worktree, measures both compilers on the benchmarks of this tree, and prints
+  before, after and the change per benchmark, then the geometric mean. That is
+  the row a speed change should carry. `--against-tree DIR` compares against a
+  tree that is already built.
+
+Why instructions and not seconds: the same build repeats to a few parts in a
+million on a busy machine (`io_wordcount` moved by 1,126 of 235,815,431
+between two runs), so a 0.3% change is a result where wall time would lose it
+in the noise. The measured program is started with a fixed environment for
+the same reason: the loader and `getenv` walk every variable. What the count
+does not price is a cache miss or a mispredicted branch, so confirm a win on
+the clock, with the two builds interleaved, before quoting it.
+
+How the layers are decided (`speed_ledger_lib.rb`, tested by
+`test/tools_speed_ledger.rb`): a function in a shared object is `libc`; the
+others go by name, `sp_gc_alloc` and the slab's allocation side to `alloc`,
+the rest of the collector to `collect`, and so on; a function no rule names is
+`gen`. The C compiler inlines much of the runtime into the program -- the
+write barrier, the root push, typed array reads -- and inlined instructions
+carry the name of the function they landed in, so `gen` is the compiled
+program plus whatever was inlined into it. A function-level split cannot do
+better without `-g`, and `spinel -g` does not emit the same code. The whole
+`narrow` set takes about half a minute on four cores and `all` under three
+minutes; callgrind runs a program some fifty times slower than native.
+
 ## call_binding_probe
 
 `ruby tools/call_binding_probe.rb [--strength T | --random N] [--seed S]
