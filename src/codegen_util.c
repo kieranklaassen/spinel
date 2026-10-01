@@ -2603,7 +2603,10 @@ int emit_frozen_literal_open(Buf *b, size_t raw_len) {
    runtime index this literal by byte -- sp_str_fixed_width wants the bit AND
    a known length, and a literal has always carried the length. Without it a
    frozen literal was walked to find every character index, and the byte-load
-   fold for `s[i] == "c"` had no way to prove itself safe (#4239). */
+   fold for `s[i] == "c"` had no way to prove itself safe (#4239).
+
+   wb_value_never_young (codegen.c) reads this text and the close's back to
+   know a stored value is a literal: the two change together. */
 int emit_frozen_literal_open_a(Buf *b, size_t raw_len, int ascii7) {
   static int g_fzl_ctr = 0;
   int id = g_fzl_ctr++;

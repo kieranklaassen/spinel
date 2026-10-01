@@ -3696,25 +3696,13 @@ static void gc_roots_take_back(Compiler *c, Scope *s, Buf *b, size_t fn_off) {
   }
 }
 
-/* A constructor roots `self` for one reason: the initialize it is about to run
-   may allocate, and until the constructor returns nothing else names the new
-   object. Most initializes only store -- `@left = nil`, `@n = n` -- and then
-   the root protects nothing, while pushing and popping it is a tenth of what
-   allocating the object costs (gcbench: 19 of 191 instructions per Node) and
-   its `&self` keeps the constructor from being frameless.
+/* The calls that leave the heap exactly as they found it: C's keywords, the
+   boxing constructors, which build a struct by value, and the write barrier.
 
-   A veto like the one above, read off the finished text because a constructor
-   is emitted before the initialize it calls: everything after the root must
-   call nothing that could collect, and the one call let through is an
-   initialize whose own body passes that test. A call through a pointer is a
-   call.
-
-   The calls that pass are fewer than gc_elide_call_ok's. That list serves a
-   local whose value a container also holds, so it can afford a helper that
-   reaches Ruby (sp_poly_length on an object with #to_a); here the root is the
-   only thing naming the object, and only what leaves the heap exactly as it
-   found it gets through: C's keywords, the boxing constructors, which build a
-   struct by value, and the write barrier. */
+   Fewer than gc_elide_call_ok's. That list serves a local whose value a
+   container also holds, so it can afford a helper that reaches Ruby
+   (sp_poly_length on an object with #to_a); the passes below take back a root
+   that is the only thing naming its object. */
 static int gc_call_cannot_collect(const char *id, size_t n) {
   static const char *const OK[] = {
     "if", "while", "for", "switch", "return", "sizeof", "do", "else", "__typeof__",
@@ -3725,6 +3713,15 @@ static int gc_call_cannot_collect(const char *id, size_t n) {
   return 0;
 }
 
+/* Does the text from `from` to `to` call nothing that could collect? A call
+   through a pointer is a call. Read two ways, by `init`:
+
+   NULL, a function's own body. Registering a root or saving the depth is not
+   a collection; any other call off the list is a no.
+
+   Non-NULL, the tail of a constructor. The roots are what is being asked
+   about, so they are not excused, and one `sp_X_initialize` call is let
+   through and handed back in *init for the caller to judge by its body. */
 static int gc_ctor_span_inert(const char *from, const char *to, const char **init, size_t *init_n) {
   for (const char *p = from; p < to; p++) {
     if (*p != '(' || p == from) continue;
@@ -3733,7 +3730,6 @@ static int gc_ctor_span_inert(const char *from, const char *to, const char **ini
     while (e > from && (isalnum((unsigned char)e[-1]) || e[-1] == '_')) e--;
     size_t n = (size_t)(p - e);
     if (!n || gc_call_cannot_collect(e, n)) continue;
-    /* registering a root, or saving the depth, is not a collection */
     if (!init && n >= 10 && (!strncmp(e, "SP_GC_ROOT", 10) || !strncmp(e, "SP_GC_SAVE", 10))) continue;
     if (init && !*init && n > 14 && !strncmp(e, "sp_", 3) && !strncmp(p - 11, "_initialize", 11)) {
       *init = e; *init_n = n;
@@ -3744,19 +3740,19 @@ static int gc_ctor_span_inert(const char *from, const char *to, const char **ini
   return 1;
 }
 
-/* The method-wide form of the same fact. A function that calls nothing that
-   could collect is never on the stack while the collector looks for roots, so
-   the ones it registers -- its reference parameters, its temporaries -- are
-   read by nobody. An `initialize(left, right)` that stores its two arguments
-   built a two-entry frame for them, and its constructor then had to root self
-   across it; with the frame gone both go (binary_trees: 38 of 275
-   instructions per Node). */
+/* A function that calls nothing that could collect is never on the stack
+   while the collector looks for roots, so the ones it registers -- its
+   reference parameters, its temporaries -- are read by nobody. An
+   `initialize(left, right)` that stores its two arguments built a two-entry
+   frame for them, and its constructor then had to root self across it; with
+   the frame gone both go (binary_trees: 38 of 275 instructions per Node). */
 static void gc_fn_roots_take_back(Buf *b, size_t fn_off) {
   if (fn_off >= b->len) return;
   const char *fn = b->p + fn_off;
   if (!strstr(fn, "SP_GC_ROOT") || strstr(fn, "setjmp") || strstr(fn, "sp_gc_nroots")) return;
   if (!gc_ctor_span_inert(fn, b->p + b->len, NULL, NULL)) return;
-  for (char *at; (at = strstr(b->p + fn_off, "SP_GC_ROOT")) != NULL; ) {
+  size_t from = fn_off;
+  for (char *at; (at = strstr(b->p + from, "SP_GC_ROOT")) != NULL; ) {
     const char *semi = strchr(at, ';');
     if (!semi) return;
     size_t start = (size_t)(at - b->p), len = (size_t)(semi + 1 - at);
@@ -3765,42 +3761,20 @@ static void gc_fn_roots_take_back(Buf *b, size_t fn_off) {
     while (ls > fn_off && b->p[ls - 1] == ' ') ls--;
     if (ls > 0 && b->p[ls - 1] == '\n' && semi[1] == '\n') { len += start - ls + 1; start = ls; }
     buf_erase(b, start, len);
+    from = start;
   }
 }
 
-static void gc_ctor_roots_take_back(Buf *b) {
-  static const char root[] = "  SP_GC_ROOT(self);\n";
-  size_t rl = sizeof root - 1, from = 0;
-  for (;;) {
-    char *at = b->p ? strstr(b->p + from, root) : NULL;
-    if (!at) return;
-    from = (size_t)(at - b->p) + rl;
-    /* the function this root is in, and whether it is a constructor */
-    const char *hdr = at;
-    while (hdr > b->p && !(hdr[-1] == '\n' && hdr[0] != ' ' && hdr[0] != '#' && hdr[0] != '\n')) hdr--;
-    const char *open = strstr(hdr, ") {\n"), *end = strstr(at, "\n}\n");
-    const char *paren = memchr(hdr, '(', (size_t)(at - hdr));
-    if (!open || open > at || !end || !paren || strncmp(hdr, "static sp_", 10)) continue;
-    if (!((paren - hdr > 4 && !strncmp(paren - 4, "_new", 4)) ||
-          (paren - hdr > 11 && !strncmp(paren - 11, "_new_noinit", 11)))) continue;
-    const char *init = NULL; size_t init_n = 0;
-    if (!gc_ctor_span_inert(at + rl, end, &init, &init_n)) continue;
-    if (init) {
-      /* its definition: `static ... void sp_X_initialize(sp_X *self, ...) {` */
-      const char *body = NULL, *body_end = NULL;
-      for (const char *d = strstr(b->p, "\nstatic "); d && !body; d = strstr(d + 1, "\nstatic ")) {
-        const char *eol = strchr(d + 1, '\n');
-        if (!eol || eol - d < 4 || strncmp(eol - 3, ") {", 3)) continue;
-        const char *nm = memchr(d + 1, '(', (size_t)(eol - d - 1));
-        if (!nm || (size_t)(nm - d - 1) < init_n || strncmp(nm - init_n, init, init_n) || nm[-(long)init_n - 1] != ' ') continue;
-        body = eol; body_end = strstr(eol, "\n}\n");
-      }
-      if (!body || !body_end || !gc_ctor_span_inert(body, body_end, NULL, NULL)) continue;
-    }
-    from = (size_t)(at - b->p);
-    buf_erase(b, from, rl);
-  }
-}
+/* ---- the two passes over the finished program ----
+
+   A constructor is emitted before the initialize it calls, and whether an
+   initialize is reached from anywhere but its constructor is a fact about
+   every function there is, so what follows reads the finished text. Both
+   passes read it once: the initializes are indexed by name up front, each
+   question about a function stops at that function's end, and what a pass
+   takes out is gathered and removed in one sweep. An erase apiece moves the
+   rest of the program every time, edits x output size, which is what the
+   barrier insertion below was split by segment to stop doing (#4966). */
 
 /* The start of the function `at` is in: the last line before it that begins
    in the first column and is not a directive. */
@@ -3809,16 +3783,154 @@ static const char *gc_fn_header(const Buf *b, const char *at) {
   return at;
 }
 
+/* `needle` wholly between `from` and `to`, or NULL. */
+static const char *gc_find_in(const char *from, const char *to, const char *needle) {
+  size_t n = strlen(needle);
+  if (to < from || (size_t)(to - from) < n) return NULL;
+  for (const char *last = to - n, *p = from; p <= last; p++) {
+    p = memchr(p, needle[0], (size_t)(last - p) + 1);
+    if (!p) return NULL;
+    if (!memcmp(p, needle, n)) return p;
+  }
+  return NULL;
+}
+
+/* Spans to take out of the text, in any order, none overlapping. */
+typedef struct { size_t off, len; } GcCut;
+typedef struct { GcCut *v; size_t n, cap; } GcCuts;
+static void gc_cut(GcCuts *c, size_t off, size_t len) {
+  if (c->n == c->cap) { c->cap = c->cap ? c->cap * 2 : 64; c->v = realloc(c->v, sizeof *c->v * c->cap); }
+  c->v[c->n].off = off; c->v[c->n].len = len; c->n++;
+}
+static int gc_cut_cmp(const void *a, const void *b) {
+  size_t x = ((const GcCut *)a)->off, y = ((const GcCut *)b)->off;
+  return (x > y) - (x < y);
+}
+static void gc_cuts_apply(Buf *b, GcCuts *c) {
+  if (c->n) {
+    qsort(c->v, c->n, sizeof *c->v, gc_cut_cmp);
+    size_t w = c->v[0].off, r = w;
+    for (size_t i = 0; i < c->n; i++) {
+      memmove(b->p + w, b->p + r, c->v[i].off - r);
+      w += c->v[i].off - r;
+      r = c->v[i].off + c->v[i].len;
+    }
+    memmove(b->p + w, b->p + r, b->len - r);
+    b->len = w + (b->len - r);
+    b->p[b->len] = '\0';
+  }
+  free(c->v);
+}
+
+/* A `static ... name_initialize(...) {` definition. */
+typedef struct {
+  const char *name; size_t n;
+  const char *body, *end;   /* from the end of its header line to the line of its closing brace (NULL: there is none) */
+  int spaced;               /* the name follows a space, as in `static void sp_X_initialize(` */
+  int inert;                /* the body cannot collect; -1 until asked */
+  int ok, uses;             /* the barriers pass: no mention disqualifies it yet, and how many constructors call it */
+} GcInit;
+typedef struct { GcInit *v, **byname; size_t n; } GcInits;
+
+static int gc_init_named(const GcInit *e, const char *name, size_t n) {
+  int c = memcmp(e->name, name, e->n < n ? e->n : n);
+  return c ? c : (e->n > n) - (e->n < n);
+}
+static int gc_init_cmp(const void *a, const void *b) {
+  const GcInit *x = *(const GcInit *const *)a, *y = *(const GcInit *const *)b;
+  int c = gc_init_named(x, y->name, y->n);
+  return c ? c : (x->name > y->name) - (x->name < y->name);
+}
+static GcInits gc_inits_index(const Buf *b) {
+  GcInits ix = { NULL, NULL, 0 };
+  size_t cap = 0;
+  for (const char *d = strstr(b->p, "\nstatic "); d; d = strstr(d + 1, "\nstatic ")) {
+    const char *eol = strchr(d + 1, '\n');
+    if (!eol) break;
+    if (eol - d < 4 || strncmp(eol - 3, ") {", 3)) continue;
+    const char *paren = memchr(d + 1, '(', (size_t)(eol - d - 1));
+    if (!paren || paren - d < 12 || strncmp(paren - 11, "_initialize", 11)) continue;
+    const char *name = paren;
+    while (name > d + 1 && (isalnum((unsigned char)name[-1]) || name[-1] == '_')) name--;
+    if (ix.n == cap) { cap = cap ? cap * 2 : 64; ix.v = realloc(ix.v, sizeof *ix.v * cap); }
+    GcInit *e = &ix.v[ix.n++];
+    e->name = name; e->n = (size_t)(paren - name);
+    e->body = eol; e->end = strstr(eol, "\n}\n");
+    e->spaced = name[-1] == ' ';
+    e->inert = -1; e->ok = 1; e->uses = 0;
+  }
+  if (ix.n) {
+    ix.byname = malloc(sizeof *ix.byname * ix.n);
+    for (size_t i = 0; i < ix.n; i++) ix.byname[i] = &ix.v[i];
+    qsort(ix.byname, ix.n, sizeof *ix.byname, gc_init_cmp);
+  }
+  return ix;
+}
+static void gc_inits_free(GcInits *ix) { free(ix->v); free(ix->byname); }
+/* The definitions of that name, first in the text first: a position in
+   byname to walk while gc_init_named answers 0, or NULL. */
+static GcInit **gc_inits_find(const GcInits *ix, const char *name, size_t n) {
+  size_t lo = 0, hi = ix->n;
+  while (lo < hi) {
+    size_t mid = lo + (hi - lo) / 2;
+    if (gc_init_named(ix->byname[mid], name, n) < 0) lo = mid + 1; else hi = mid;
+  }
+  return lo < ix->n && !gc_init_named(ix->byname[lo], name, n) ? ix->byname + lo : NULL;
+}
+static int gc_init_inert(GcInit *e) {
+  if (e->inert < 0) e->inert = e->end && gc_ctor_span_inert(e->body, e->end, NULL, NULL);
+  return e->inert;
+}
+
+/* A constructor roots `self` for one reason: the initialize it is about to run
+   may allocate, and until the constructor returns nothing else names the new
+   object. Most initializes only store -- `@left = nil`, `@n = n` -- and then
+   the root protects nothing, while pushing and popping it is a tenth of what
+   allocating the object costs (gcbench: 19 of 191 instructions per Node) and
+   its `&self` keeps the constructor from being frameless.
+
+   So the root goes when everything after it calls nothing that could
+   collect, the one call let through being an initialize whose own body
+   passes that test. */
+static void gc_ctor_roots_take_back(Buf *b) {
+  static const char root[] = "  SP_GC_ROOT(self);\n";
+  size_t rl = sizeof root - 1;
+  if (!b->p) return;
+  GcInits ix = gc_inits_index(b);
+  GcCuts cuts = { NULL, 0, 0 };
+  for (const char *at = strstr(b->p, root); at; at = strstr(at + rl, root)) {
+    /* the function this root is in, and whether it is a constructor */
+    const char *hdr = gc_fn_header(b, at);
+    const char *paren = memchr(hdr, '(', (size_t)(at - hdr));
+    if (!paren || strncmp(hdr, "static sp_", 10)) continue;
+    if (!((paren - hdr > 4 && !strncmp(paren - 4, "_new", 4)) ||
+          (paren - hdr > 11 && !strncmp(paren - 11, "_new_noinit", 11)))) continue;
+    const char *end = strstr(at, "\n}\n");
+    if (!end || !gc_find_in(hdr, at, ") {\n")) continue;
+    const char *init = NULL; size_t init_n = 0;
+    if (!gc_ctor_span_inert(at + rl, end, &init, &init_n)) continue;
+    if (init) {
+      /* its definition: `static ... void sp_X_initialize(sp_X *self, ...) {` */
+      GcInit **e = gc_inits_find(&ix, init, init_n), **stop = ix.byname + ix.n;
+      while (e && e < stop && !gc_init_named(*e, init, init_n) && !(*e)->spaced) e++;
+      if (!e || e == stop || gc_init_named(*e, init, init_n) || !gc_init_inert(*e)) continue;
+    }
+    gc_cut(&cuts, (size_t)(at - b->p), rl);
+  }
+  gc_cuts_apply(b, &cuts);
+  gc_inits_free(&ix);
+}
+
 /* Is the mention of an initialize at `use` (its name `n` long) a constructor
    handing it the object it has just allocated, with nothing in between that
    could collect? The last part is what the constructor's missing root says:
-   gc_ctor_roots_take_back erased it on exactly that proof. */
+   gc_ctor_roots_take_back took it on exactly that proof. */
 static int gc_use_on_fresh_self(const Buf *b, const char *use, size_t n) {
-  const char *hdr = gc_fn_header(b, use), *end = strstr(use, "\n}\n");
+  const char *hdr = gc_fn_header(b, use);
   const char *paren = memchr(hdr, '(', (size_t)(use - hdr));
-  if (!end || !paren || paren - hdr < 5 || strncmp(hdr, "static sp_", 10) || strncmp(paren - 4, "_new", 4)) return 0;
-  const char *alloc = strstr(hdr, " *self = SP_POOL_NEW("), *root = strstr(hdr, "SP_GC_ROOT(self)");
-  if (!alloc || alloc > use || (root && root < end)) return 0;
+  if (!paren || paren - hdr < 5 || strncmp(hdr, "static sp_", 10) || strncmp(paren - 4, "_new", 4)) return 0;
+  const char *end = strstr(use, "\n}\n");
+  if (!end || !gc_find_in(hdr, use, " *self = SP_POOL_NEW(") || gc_find_in(hdr, end, "SP_GC_ROOT(self)")) return 0;
   const char *a = use + n;
   if (*a++ != '(') return 0;
   if (*a == '(') { while (*a && *a != ')') a++; if (*a) a++; }   /* `(sp_Parent *)self` */
@@ -3835,63 +3947,64 @@ static int gc_use_on_fresh_self(const Buf *b, const char *use, size_t n) {
    Node).
 
    One mention anywhere else -- `super` from a subclass, an explicit
-   `initialize(...)` on an object that may have aged -- and the barriers stay. */
+   `initialize(...)` on an object that may have aged -- and the barriers stay.
+   So does a name that merely ends in an initialize's: it is told apart from
+   nothing and counts against it.
+
+   The stores are the two shapes gc_wb_insert_seg writes, read back here:
+   `{ __typeof__(self) _wbN = self; _wbN->f = v; sp_gc_wb((void *)_wbN); }`
+   for a statement and `SP_WBO(self)->f` inside an expression. */
 static void gc_ctor_barriers_take_back(Buf *b) {
-  size_t from = 0;
-  for (;;) {
-    const char *d = b->p ? strstr(b->p + from, "\nstatic ") : NULL;
-    if (!d) return;
-    from = (size_t)(d - b->p) + 1;
-    const char *eol = strchr(d + 1, '\n');
-    if (!eol || eol - d < 4 || strncmp(eol - 3, ") {", 3)) continue;
-    const char *paren = memchr(d + 1, '(', (size_t)(eol - d - 1));
-    if (!paren || paren - d < 12 || strncmp(paren - 11, "_initialize", 11)) continue;
-    const char *name = paren;
-    while (name > d + 1 && (isalnum((unsigned char)name[-1]) || name[-1] == '_')) name--;
-    size_t n = (size_t)(paren - name);
-    const char *body_end = strstr(eol, "\n}\n");
-    if (!body_end || n >= 250 || !gc_ctor_span_inert(eol, body_end, NULL, NULL)) continue;
-    char nm[256]; memcpy(nm, name, n); nm[n] = '\0';
-    int ok = 1, uses = 0;
-    for (const char *q = strstr(b->p, nm); q && ok; q = strstr(q + 1, nm)) {
-      if (isalnum((unsigned char)q[n]) || q[n] == '_') continue;         /* a longer name */
-      if (q > b->p && (isalnum((unsigned char)q[-1]) || q[-1] == '_')) { ok = 0; break; }
-      const char *ls = q;
-      while (ls > b->p && ls[-1] != '\n') ls--;
-      if (*ls != ' ') continue;                                          /* its prototype, its definition */
-      uses++;
-      ok = gc_use_on_fresh_self(b, q, n);
+  static const char suffix[] = "_initialize", arrow[] = "self->";
+  static const char head[] = "{ __typeof__(self) _wb", wbo[] = "SP_WBO(self)->";
+  size_t al = sizeof arrow - 1;
+  if (!b->p) return;
+  GcInits ix = gc_inits_index(b);
+  GcCuts cuts = { NULL, 0, 0 };
+  /* every mention of every initialize, in one walk */
+  for (const char *q = ix.n ? strstr(b->p, suffix) : NULL; q; q = strstr(q + 1, suffix)) {
+    const char *e = q + sizeof suffix - 1, *s = q;
+    if (isalnum((unsigned char)*e) || *e == '_') continue;   /* a longer name */
+    while (s > b->p && (isalnum((unsigned char)s[-1]) || s[-1] == '_')) s--;
+    const char *ls = s;
+    while (ls > b->p && ls[-1] != '\n') ls--;
+    int called = *ls == ' ', fresh = -1;   /* in the first column it is the prototype or the definition */
+    for (const char *k = s; k <= q; k++) {
+      GcInit **hit = gc_inits_find(&ix, k, (size_t)(e - k));
+      for (; hit && hit < ix.byname + ix.n && !gc_init_named(*hit, k, (size_t)(e - k)); hit++) {
+        if (k > s) { (*hit)->ok = 0; continue; }
+        if (!called) continue;
+        if (fresh < 0) fresh = gc_use_on_fresh_self(b, s, (size_t)(e - s));
+        (*hit)->uses++;
+        if (!fresh) (*hit)->ok = 0;
+      }
     }
-    if (!ok || !uses) continue;
-    /* the statement form: { __typeof__(self) _wbN = self; _wbN->f = v; sp_gc_wb((void *)_wbN); } */
-    size_t body = (size_t)(eol - b->p);
-    for (;;) {
-      static const char head[] = "{ __typeof__(self) _wb";
-      const char *lim = strstr(b->p + body, "\n}\n"), *at = strstr(b->p + body, head);
-      if (!at || !lim || at > lim) break;
+  }
+  for (size_t i = 0; i < ix.n; i++) {
+    GcInit *in = &ix.v[i];
+    if (!in->ok || !in->uses || !gc_init_inert(in)) continue;
+    for (const char *from = in->body, *at; (at = gc_find_in(from, in->end, head)) != NULL; ) {
       const char *id = at + sizeof head - 4;   /* at "_wb" */
       size_t idn = 3;
       while (isdigit((unsigned char)id[idn])) idn++;
-      char open[96], close[96];
-      int on = snprintf(open, sizeof open, "{ __typeof__(self) %.*s = self; %.*s->", (int)idn, id, (int)idn, id);
-      int cn = snprintf(close, sizeof close, "; sp_gc_wb((void *)%.*s); }", (int)idn, id);
-      const char *tail = strncmp(at, open, (size_t)on) ? NULL : strstr(at + on, close);
-      if (!tail || tail > lim) { body = (size_t)(at - b->p) + 1; continue; }
-      size_t t = (size_t)(tail - b->p), a = (size_t)(at - b->p);
-      buf_erase(b, t + 1, (size_t)cn - 1);
-      memcpy(b->p + a + on - 6, "self->", 6);
-      buf_erase(b, a, (size_t)on - 6);
+      char lead[96], trail[96];
+      int ln = snprintf(lead, sizeof lead, "{ __typeof__(self) %.*s = self; %.*s->", (int)idn, id, (int)idn, id);
+      int tn = snprintf(trail, sizeof trail, "; sp_gc_wb((void *)%.*s); }", (int)idn, id);
+      const char *tail = strncmp(at, lead, (size_t)ln) ? NULL : gc_find_in(at + ln, in->end, trail);
+      if (!tail) { from = at + 1; continue; }
+      /* `self->f = v;` is what stays: the lead's last bytes become the arrow, the trail keeps its `;` */
+      memcpy(b->p + (at - b->p) + ln - al, arrow, al);
+      gc_cut(&cuts, (size_t)(at - b->p), (size_t)ln - al);
+      gc_cut(&cuts, (size_t)(tail - b->p) + 1, (size_t)tn - 1);
+      from = at + ln;
     }
-    /* and the expression form */
-    for (;;) {
-      static const char wbo[] = "SP_WBO(self)->";
-      const char *lim = strstr(b->p + body, "\n}\n"), *at = strstr(b->p + body, wbo);
-      if (!at || !lim || at > lim) break;
-      size_t a = (size_t)(at - b->p);
-      memcpy(b->p + a + sizeof wbo - 1 - 6, "self->", 6);
-      buf_erase(b, a, sizeof wbo - 1 - 6);
+    for (const char *from = in->body, *at; (at = gc_find_in(from, in->end, wbo)) != NULL; from = at + sizeof wbo - 1) {
+      memcpy(b->p + (at - b->p) + sizeof wbo - 1 - al, arrow, al);
+      gc_cut(&cuts, (size_t)(at - b->p), sizeof wbo - 1 - al);
     }
   }
+  gc_cuts_apply(b, &cuts);
+  gc_inits_free(&ix);
 }
 
 /* ---- root frames ----
@@ -4709,26 +4822,29 @@ static void gc_wb_cells(Compiler *c, Buf *b) {
    exactly what emit_frozen_literal_open_a and _close write. Anything else,
    `sp_str_dup(<literal>)` included, keeps its barrier. */
 static int wb_value_never_young(const Buf *b, size_t q) {
-  static const char lit[] = "({ static struct { sp_str_hdr h; unsigned char m; char d[";
+  static const char open[] = "({ static struct { sp_str_hdr h; unsigned char m; char d[";
+  static const char mark[] = ", 0xf1, ", shut[] = "\" }; _fzl_", data[] = ".d; })";
+  size_t on = sizeof open - 1, mn = sizeof mark - 1, sn = sizeof shut - 1, dn = sizeof data - 1;
   const char *p = b->p + q + 1, *end = b->p + b->len;
   while (p < end && *p == ' ') p++;
   if (!strncmp(p, "NULL", 4)) p += 4;
   else if (!strncmp(p, "sp_box_nil()", 12)) p += 12;
-  else if (!strncmp(p, lit, sizeof lit - 1)) {
-    const char *s = p + sizeof lit - 1;
+  else if (!strncmp(p, open, on)) {
+    const char *s = p + on;
     while (s < end && *s != '"' && *s != '(' && *s != ')') s++;   /* the header initializer has neither */
-    if (s >= end || *s != '"' || s - p < 8 || strncmp(s - 8, ", 0xf1, ", 8)) return 0;
+    if (s >= end || *s != '"' || (size_t)(s - p) < mn || strncmp(s - mn, mark, mn)) return 0;
     for (s++; s < end && *s != '"'; s++) if (*s == '\\') s++;
-    if (s >= end || strncmp(s, "\" }; _fzl_", 10)) return 0;
-    s += 10;
+    if (s >= end || strncmp(s, shut, sn)) return 0;
+    s += sn;
     while (s < end && isdigit((unsigned char)*s)) s++;
-    if (strncmp(s, ".d; })", 6)) return 0;
-    p = s + 6;
+    if (strncmp(s, data, dn)) return 0;
+    p = s + dn;
   }
   else return 0;
   while (p < end && *p == ' ') p++;
   return p < end && (*p == ';' || *p == ')' || *p == ',');
 }
+
 static void gc_wb_insert_seg(Compiler *c, Buf *b, size_t fn_off);
 /* Each insertion shifts the rest of the buffer, so over the whole program the
    splices cost (barriers x output size): 9,462 barriers into 43 MB on lobsters
@@ -4850,7 +4966,8 @@ static void gc_wb_insert_seg(Compiler *c, Buf *b, size_t fn_off) {
     size_t stmt_end = at_stmt ? wb_stmt_end(b, q) : 0;
     Buf ins; memset(&ins, 0, sizeof ins);
     if (at_stmt && stmt_end) {
-      /* rewrite the whole statement: { typeof(obj) _wb = obj; _wb->f = rhs; wb(_wb); } */
+      /* rewrite the whole statement: { typeof(obj) _wb = obj; _wb->f = rhs; wb(_wb); }
+         (gc_ctor_barriers_take_back reads this shape and SP_WBO's back) */
       int wid = ++g_tmp;
       buf_printf(&ins, "{ __typeof__(");
       buf_putn(&ins, b->p + st, i - st);
@@ -15749,8 +15866,12 @@ char *codegen_program(const NodeTable *nt) {
      constructors and main are emitted by different paths, and hooking them one
      at a time left a quarter of the stores bare. */
   gc_wb_insert(c, &b, 0);
-  if (!g_no_root_elision) gc_ctor_roots_take_back(&b);
-  if (!g_no_root_elision && !g_no_write_barrier) gc_ctor_barriers_take_back(&b);
+  /* In this order: the barriers pass reads a constructor's missing root as
+     proof that nothing collects between its allocation and its initialize. */
+  if (!g_no_root_elision) {
+    gc_ctor_roots_take_back(&b);
+    if (!g_no_write_barrier) gc_ctor_barriers_take_back(&b);
+  }
   if (g_line_map) line_map_reanchor(&b);
   free(g_procs.p); free(g_proc_protos.p);
   free(g_pd_protos.p); free(g_pd_defs.p);
