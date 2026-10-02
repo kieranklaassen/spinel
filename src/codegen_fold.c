@@ -708,6 +708,17 @@ int emit_transform_hash_expr(Compiler *c, int id, Buf *b) {
   if (!shn) return 0;
   TyKind dt = comp_ntype(c, id);
   const char *dhn = ty_hash_cname(dt);
+  /* a call typed boxed (a dispatch's builtin arm asks this way): build the
+     Hash of any keys and values, and box it */
+  if (!dhn && dt == TY_POLY) {
+    Buf hb; memset(&hb, 0, sizeof hb);
+    int v = view_push(c, id, TY_POLY_POLY_HASH);
+    int ok = emit_transform_hash_expr(c, id, &hb);
+    view_pop(c, v);
+    if (ok) emit_boxed_text(c, TY_POLY_POLY_HASH, hb.p ? hb.p : "NULL", b);
+    free(hb.p);
+    return ok;
+  }
   if (!dhn) return 0;
   const char *p0_orig = block_param_name(c, block, 0);
   const char *p0 = p0_orig ? rename_local(p0_orig) : NULL;
@@ -4135,9 +4146,9 @@ int emit_minmax_cmp_expr(Compiler *c, int id, Buf *b) {
     g_argov_node[g_n_argov] = recv;
     snprintf(g_argov_text[g_n_argov], sizeof g_argov_text[0], "_t%d", ta);
     g_n_argov++;
-    TyKind sv = c->ntype[recv]; c->ntype[recv] = TY_POLY_ARRAY;
+    int v = view_push(c, recv, TY_POLY_ARRAY);
     int handled = emit_minmax_cmp_expr(c, id, b);
-    c->ntype[recv] = sv;
+    view_pop(c, v);
     g_n_argov--;
     return handled;
   }
@@ -4153,9 +4164,9 @@ int emit_minmax_cmp_expr(Compiler *c, int id, Buf *b) {
     g_argov_node[g_n_argov] = recv;
     snprintf(g_argov_text[g_n_argov], sizeof g_argov_text[0], "_t%d", ta);
     g_n_argov++;
-    TyKind sv = c->ntype[recv]; c->ntype[recv] = TY_INT_ARRAY;
+    int v = view_push(c, recv, TY_INT_ARRAY);
     int handled = emit_minmax_cmp_expr(c, id, b);
-    c->ntype[recv] = sv;
+    view_pop(c, v);
     g_n_argov--;
     return handled;
   }
@@ -4355,9 +4366,9 @@ int emit_collect_expr(Compiler *c, int id, Buf *b) {
       g_argov_node[g_n_argov] = es_recv;
       snprintf(g_argov_text[g_n_argov], sizeof g_argov_text[0], "_t%d", ta);
       g_n_argov++;
-      TyKind sv = c->ntype[es_recv]; c->ntype[es_recv] = TY_INT_ARRAY;
+      int v = view_push(c, es_recv, TY_INT_ARRAY);
       int done = emit_collect_expr(c, id, b);
-      c->ntype[es_recv] = sv;
+      view_pop(c, v);
       g_n_argov--;
       return done;
     }

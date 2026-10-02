@@ -1336,6 +1336,9 @@ void emit_boxed(Compiler *c, int node, Buf *b) {
       if (pbn == 1) { emit_boxed(c, pbd[0], b); return; }
     }
   }
+  if (nt_kind(c->nt, node) == NK_LocalVariableReadNode && comp_ntype(c, node) == TY_STRING &&
+      c->poly_strbuf_lift[node])
+    unsupported_feature(c, node, "a String is not yet shared by reference through a narrowed boxed iterator element into an appending parameter");
   {
     const char *bty0 = nt_type(c->nt, node);
     /* `*x` in a boxed value position (break *x / next *x): Ruby's
@@ -11013,9 +11016,14 @@ void emit_super(Compiler *c, int id, Buf *b) {
                uname, scn, raise_tail_value_c(c, comp_ntype(c, id)));
     return;
   }
-  if (sp_streq(c->classes[defcls].name, "Object")) {
-    /* Object's methods take self boxed: any value can be the receiver */
-    buf_printf(b, "sp_Object_%s(", mc(uname));
+  if (sp_streq(c->classes[defcls].name, "Object") || sp_streq(c->classes[defcls].name, "Array") ||
+      sp_streq(c->classes[defcls].name, "Hash") || sp_streq(c->classes[defcls].name, "Numeric")) {
+    /* Object's methods take self boxed: any value can be the receiver. So
+       do an Array, Hash or Numeric reopening's (emit_method_signature),
+       which a program class deriving from it reaches by super --
+       activesupport's HashWithIndifferentAccess#reverse_merge -- and which
+       have no struct to cast self to. */
+    buf_printf(b, "sp_%s_%s(", c->classes[defcls].c_name, mc(uname));
     emit_boxed_text(c, ty_object(s->class_id), g_self, b);
   }
   /* a user exception subclass's super reaching its builtin parent's
@@ -13129,10 +13137,12 @@ typedef struct EmitUnitState {
   int loop_exc_base, loop_ensure_base, redo_depth;
   TyKind ie_next_ty;
   int move_depth;   /* instance_exec scope moves (comp_scope_move_unwind) */
+  int view_depth;   /* codegen views (view_unwind) */
 } EmitUnitState;
 
 void emit_unit_state_save(EmitUnitState *s) {
   s->move_depth = comp_scope_move_depth();
+  s->view_depth = view_depth();
   s->ret_type = g_ret_type; s->fn_ret_type = g_fn_ret_type; s->result_ty = g_result_ty;
   s->c_ret_void = g_c_ret_void; s->in_proc_body = g_in_proc_body; s->result_poly = g_result_poly;
   s->proc_body_kind = g_proc_body_kind; s->proc_toplevel_return = g_proc_toplevel_return;
@@ -13183,6 +13193,7 @@ void emit_unit_state_save(EmitUnitState *s) {
 
 void emit_unit_state_restore(const EmitUnitState *s) {
   comp_scope_move_unwind(s->move_depth);
+  view_unwind(s->view_depth);
   g_ret_type = s->ret_type; g_fn_ret_type = s->fn_ret_type; g_result_ty = s->result_ty;
   g_c_ret_void = s->c_ret_void; g_in_proc_body = s->in_proc_body; g_result_poly = s->result_poly;
   g_proc_body_kind = s->proc_body_kind; g_proc_toplevel_return = s->proc_toplevel_return;
