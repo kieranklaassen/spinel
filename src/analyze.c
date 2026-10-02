@@ -10815,9 +10815,9 @@ static int value_is_new_exception(Compiler *c, int v) {
 
 /* Whether a local that a `rescue => name` arm binds is also written by an
    ordinary assignment in the same scope; a target is ordinary unless it is a
-   rescue arm's own reference. */
+   rescue arm's own reference, which `rescue_ref` marks by node id. */
 static int rescue_name_written_elsewhere(Compiler *c, Scope *vsc, const char *nm,
-                                         const int *rescues, int nrescues) {
+                                         const unsigned char *rescue_ref) {
   const NodeTable *nt = c->nt;
   static const NodeKind kinds[] = {
     NK_LocalVariableWriteNode, NK_LocalVariableOperatorWriteNode,
@@ -10828,11 +10828,7 @@ static int rescue_name_written_elsewhere(Compiler *c, Scope *vsc, const char *nm
     NT_FOREACH_KIND(nt, kinds[k], id) {
       const char *wn = nt_str(nt, id, "name");
       if (!wn || !sp_streq(wn, nm) || comp_scope_of(c, id) != vsc) continue;
-      if (kinds[k] == NK_LocalVariableTargetNode) {
-        int own = 0;
-        for (int r = 0; r < nrescues && !own; r++) own = nt_ref(nt, rescues[r], "reference") == id;
-        if (own) continue;
-      }
+      if (kinds[k] == NK_LocalVariableTargetNode && rescue_ref[id]) continue;
       /* an exception built in place (`e = MyErr.new(...)`) is what the
          exception slot holds anyway */
       if (kinds[k] == NK_LocalVariableWriteNode && value_is_new_exception(c, nt_ref(nt, id, "value")))
@@ -10841,6 +10837,63 @@ static int rescue_name_written_elsewhere(Compiler *c, Scope *vsc, const char *nm
     }
   }
   return 0;
+}
+
+/* rescue variables (`rescue => e`) are typed as exception objects. When the
+   arm names exactly one user exception subclass that carries ivars, type the
+   binding as that object instead so `e.<ivar>` reads resolve and the carried
+   object's fields are reachable (#1415); otherwise plain TY_EXCEPTION.
+   A name reused across rescue arms (`rescue A => e` ... `rescue B => e`)
+   interns to one LocalVar, so it may only specialize when every arm binding
+   it agrees on the same class -- otherwise the slot would collapse onto one
+   of the types and mis-read the others.
+   The arms that bind a local are collected once; the unanimity check then
+   compares arms against this small list instead of rescanning the whole
+   node table per arm (was O(rescues * nodes)). Whether the name is written
+   elsewhere is asked once per name and scope, not once per arm: a scope's
+   arms mostly share one name, and each ask walked that name's targets and,
+   per target, every arm (the cube of the scope's rescues). */
+static void type_rescue_bindings(Compiler *c) {
+  int cap = 0, rn = 0;
+  struct { int id; const char *nm; Scope *vsc; int spec; int written; } *arms = NULL;
+  unsigned char *rescue_ref = calloc((size_t)(c->nt->count ? c->nt->count : 1), 1);
+  for (int id = 0; id < c->nt->count; id++) {
+    const char *ty = nt_type(c->nt, id);
+    if (!ty || !sp_streq(ty, "RescueNode")) continue;
+    int ref = nt_ref(c->nt, id, "reference");
+    if (ref < 0 || !nt_type(c->nt, ref) || !sp_streq(nt_type(c->nt, ref), "LocalVariableTargetNode")) continue;
+    const char *nm = nt_str(c->nt, ref, "name");
+    if (!nm) continue;
+    Scope *vsc = comp_scope_of(c, ref);
+    scope_local_intern(vsc, nm);   /* ensure the LocalVar exists for every arm first */
+    if (rn >= cap) { cap = cap ? cap * 2 : 16; arms = realloc(arms, sizeof(*arms) * (size_t)cap); }
+    arms[rn].id = id; arms[rn].nm = nm; arms[rn].vsc = vsc;
+    arms[rn].spec = rescue_arm_spec_cid(c, id);
+    if (arms[rn].spec < 0) arms[rn].spec = bare_rescue_spec_cid(c, id);
+    arms[rn].written = -1;
+    if (rescue_ref) rescue_ref[ref] = 1;
+    rn++;
+  }
+  for (int i = 0; i < rn && rescue_ref; i++) {
+    /* unanimity across every same-name rescue arm in the same scope */
+    int unanimous = arms[i].spec, first = i;
+    for (int j = 0; j < rn; j++) {
+      if (j == i || arms[j].vsc != arms[i].vsc || !sp_streq(arms[j].nm, arms[i].nm)) continue;
+      if (j < first) first = j;
+      if (arms[j].spec != arms[i].spec) unanimous = -1;
+    }
+    LocalVar *lv = scope_local_intern(arms[i].vsc, arms[i].nm);
+    lv->type = unanimous >= 0 ? ty_object(unanimous) : TY_EXCEPTION;
+    /* the name also holds what an ordinary write put there (`e = Foo.new`
+       before `rescue => e`): the pin would retype those reads as the
+       exception, so the slot holds either, boxed (#4923) */
+    if (arms[first].written < 0)
+      arms[first].written = rescue_name_written_elsewhere(c, arms[i].vsc, arms[i].nm, rescue_ref);
+    if (arms[first].written) lv->type = TY_POLY;
+    lv->is_block_param = 1;  /* set externally; don't reset in the fixpoint */
+  }
+  free(rescue_ref);
+  free(arms);
 }
 
 /* ---- `return <expr> if p.nil?` guard narrowing (#1661) --------------------
@@ -27725,55 +27778,7 @@ void analyze_program(Compiler *c) {
   reject_env_value_uses(c);
   register_ffi_decls(c);
 
-  /* rescue variables (`rescue => e`) are typed as exception objects. When the
-     arm names exactly one user exception subclass that carries ivars, type the
-     binding as that object instead so `e.<ivar>` reads resolve and the carried
-     object's fields are reachable (#1415); otherwise plain TY_EXCEPTION.
-     A name reused across rescue arms (`rescue A => e` ... `rescue B => e`)
-     interns to one LocalVar, so it may only specialize when every arm binding
-     it agrees on the same class -- otherwise the slot would collapse onto one
-     of the types and mis-read the others. */
-  /* Collect the rescue arms that bind a local (`rescue X => e`) once; the
-     unanimity check then compares arms against this small list instead of
-     rescanning the whole node table per arm (was O(rescues * nodes)). */
-  {
-    int cap = 0, rn = 0;
-    struct { int id; const char *nm; Scope *vsc; int spec; } *arms = NULL;
-    for (int id = 0; id < c->nt->count; id++) {
-      const char *ty = nt_type(c->nt, id);
-      if (!ty || !sp_streq(ty, "RescueNode")) continue;
-      int ref = nt_ref(c->nt, id, "reference");
-      if (ref < 0 || !nt_type(c->nt, ref) || !sp_streq(nt_type(c->nt, ref), "LocalVariableTargetNode")) continue;
-      const char *nm = nt_str(c->nt, ref, "name");
-      if (!nm) continue;
-      Scope *vsc = comp_scope_of(c, ref);
-      scope_local_intern(vsc, nm);   /* ensure the LocalVar exists for every arm first */
-      if (rn >= cap) { cap = cap ? cap * 2 : 16; arms = realloc(arms, sizeof(*arms) * (size_t)cap); }
-      arms[rn].id = id; arms[rn].nm = nm; arms[rn].vsc = vsc;
-      arms[rn].spec = rescue_arm_spec_cid(c, id);
-      if (arms[rn].spec < 0) arms[rn].spec = bare_rescue_spec_cid(c, id);
-      rn++;
-    }
-    int *rescue_ids = malloc(sizeof(int) * (size_t)(rn ? rn : 1));
-    for (int i = 0; i < rn; i++) rescue_ids[i] = arms[i].id;
-    for (int i = 0; i < rn; i++) {
-      /* unanimity across every same-name rescue arm in the same scope */
-      int unanimous = arms[i].spec;
-      for (int j = 0; j < rn && unanimous >= 0; j++) {
-        if (j == i || arms[j].vsc != arms[i].vsc || !sp_streq(arms[j].nm, arms[i].nm)) continue;
-        if (arms[j].spec != arms[i].spec) unanimous = -1;
-      }
-      LocalVar *lv = scope_local_intern(arms[i].vsc, arms[i].nm);
-      lv->type = unanimous >= 0 ? ty_object(unanimous) : TY_EXCEPTION;
-      /* the name also holds what an ordinary write put there (`e = Foo.new`
-         before `rescue => e`): the pin would retype those reads as the
-         exception, so the slot holds either, boxed (#4923) */
-      if (rescue_name_written_elsewhere(c, arms[i].vsc, arms[i].nm, rescue_ids, rn)) lv->type = TY_POLY;
-      lv->is_block_param = 1;  /* set externally; don't reset in the fixpoint */
-    }
-    free(rescue_ids);
-    free(arms);
-  }
+  type_rescue_bindings(c);
 
   resolve_parents(c);
   desugar_data_positional_new(c);
