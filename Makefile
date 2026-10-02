@@ -1723,10 +1723,16 @@ gc-minor-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
 	$(SPINEL) test/gc_minor_ctor_fresh.rb --no-line-map -c -o "$$tmp/cf.c" >/dev/null 2>&1; \
 	sed -n '/^[^ ].* sp_Pair_initialize(.*) {$$/,/^}$$/p' "$$tmp/cf.c" > "$$tmp/cf.pair"; \
 	sed -n '/^[^ ].* sp_Slot_initialize(.*) {$$/,/^}$$/p' "$$tmp/cf.c" > "$$tmp/cf.slot"; \
+	sed -n '/^[^ ].* sp_Base_initialize(.*) {$$/,/^}$$/p' "$$tmp/cf.c" > "$$tmp/cf.base"; \
+	sed -n '/^[^ ].* sp_Point_initialize(.*) {$$/,/^}$$/p' "$$tmp/cf.c" > "$$tmp/cf.point"; \
 	if [ ! -s "$$tmp/cf.pair" ] || grep -q 'sp_gc_wb\|SP_WBO' "$$tmp/cf.pair"; then \
 	  echo "gc-minor-test: FAIL (an initialize only new runs took a barrier on the object new just made)"; ok=0; fi; \
 	if [ "$$(grep -c sp_gc_wb "$$tmp/cf.slot")" != 2 ]; then \
 	  echo "gc-minor-test: FAIL (an initialize that is also called on an existing object lost its barriers)"; ok=0; fi; \
+	if [ "$$(grep -c sp_gc_wb "$$tmp/cf.base")" != 1 ]; then \
+	  echo "gc-minor-test: FAIL (an initialize reached through super lost its barrier)"; ok=0; fi; \
+	if [ "$$(grep -c sp_gc_wb "$$tmp/cf.point")" != 2 ]; then \
+	  echo "gc-minor-test: FAIL (an initialize called after its arguments were evaluated at the call site lost its barriers)"; ok=0; fi; \
 	rm -rf "$$tmp"; \
 	if [ $$ok -eq 1 ]; then echo "gc-minor-test: pass"; else exit 1; fi
 

@@ -3832,17 +3832,75 @@ static void gc_fn_roots_take_back(Buf *b, size_t fn_off) {
    A constructor is emitted before the initialize it calls, and whether an
    initialize is reached from anywhere but its constructor is a fact about
    every function there is, so what follows reads the finished text. Both
-   passes read it once: the initializes are indexed by name up front, each
-   question about a function stops at that function's end, and what a pass
-   takes out is gathered and removed in one sweep. An erase apiece moves the
-   rest of the program every time, edits x output size, which is what the
-   barrier insertion below was split by segment to stop doing (#4966). */
+   passes read it once: the functions are found and the initializes indexed
+   by name up front, each question about a function stops at that function's
+   end, and what a pass takes out is gathered and removed in one sweep. An
+   erase apiece moves the rest of the program every time, edits x output
+   size, which is what the barrier insertion below was split by segment to
+   stop doing (#4966). */
 
-/* The start of the function `at` is in: the last line before it that begins
-   in the first column and is not a directive. */
-static const char *gc_fn_header(const Buf *b, const char *at) {
-  while (at > b->p && !(at[-1] == '\n' && at[0] != ' ' && at[0] != '#' && at[0] != '\n')) at--;
-  return at;
+/* A function in the finished text: its header line, its body from the
+   opening brace on, its closing brace. */
+typedef struct { const char *hdr, *body, *end; } GcFn;
+typedef struct { GcFn *v; size_t n; } GcFns;
+
+/* Every function there is, in the order of the text. Indentation does not
+   say where one ends: a statement hoisted out of an argument list is written
+   in the first column, in the middle of a body. So braces are counted, in
+   code only, and a function is an opening brace outside every other that
+   follows a `)`. Text whose braces do not pair up answers no functions, and
+   the passes then take nothing back. */
+static GcFns gc_fns_index(const Buf *b) {
+  GcFns f = { NULL, 0 };
+  size_t cap = 0, depth = 0;
+  int open = 0;
+  const char *to = b->p + b->len;
+  for (const char *p = b->p; p < to; ) {
+    p += strcspn(p, "\"'/{}#");
+    if (p >= to) break;
+    char c = *p;
+    if (c == '#') {
+      /* a directive is not C: its braces need not pair */
+      const char *q = p;
+      while (q > b->p && (q[-1] == ' ' || q[-1] == '\t')) q--;
+      if (q == b->p || q[-1] == '\n') {
+        for (p = strchr(p, '\n'); p && p[-1] == '\\'; p = strchr(p + 1, '\n')) ;
+        if (!p) break;
+      } else p++;
+    } else if (c == '{') {
+      if (depth++ == 0) {
+        const char *q = p;
+        while (q > b->p && (q[-1] == ' ' || q[-1] == '\n')) q--;
+        open = q > b->p && q[-1] == ')';
+        if (open) {
+          const char *hdr = p;
+          while (hdr > b->p && hdr[-1] != '\n') hdr--;
+          if (f.n == cap) { cap = cap ? cap * 2 : 256; f.v = realloc(f.v, sizeof *f.v * cap); }
+          f.v[f.n].hdr = hdr; f.v[f.n].body = p + 1; f.v[f.n].end = to; f.n++;
+        }
+      }
+      p++;
+    } else if (c == '}') {
+      if (!depth) { depth = 1; break; }
+      if (--depth == 0 && open) { f.v[f.n - 1].end = p; open = 0; }
+      p++;
+    } else {
+      const char *q = gc_past_noncode(p, to);
+      p = q != p ? q : p + 1;
+    }
+  }
+  if (depth) { free(f.v); f.v = NULL; f.n = 0; }
+  return f;
+}
+/* The function whose body holds `at`; NULL between functions, where the
+   prototypes, the headers and the tables are. */
+static const GcFn *gc_fn_at(const GcFns *f, const char *at) {
+  size_t lo = 0, hi = f->n;
+  while (lo < hi) {
+    size_t mid = lo + (hi - lo) / 2;
+    if (f->v[mid].body <= at) lo = mid + 1; else hi = mid;
+  }
+  return lo && at < f->v[lo - 1].end ? &f->v[lo - 1] : NULL;
 }
 
 /* Spans to take out of the text, in any order, none overlapping. */
@@ -3875,7 +3933,7 @@ static void gc_cuts_apply(Buf *b, GcCuts *c) {
 /* A `static ... name_initialize(...) {` definition. */
 typedef struct {
   const char *name; size_t n;
-  const char *body, *end;   /* from the end of its header line to the line of its closing brace (NULL: there is none) */
+  const char *body, *end;   /* from its opening brace to its closing one */
   int spaced;               /* the name follows a space, as in `static void sp_X_initialize(` */
   int inert;                /* the body cannot collect; -1 until asked */
   int ok, uses;             /* the barriers pass: no mention disqualifies it yet, and how many constructors call it */
@@ -3891,21 +3949,20 @@ static int gc_init_cmp(const void *a, const void *b) {
   int c = gc_init_named(x, y->name, y->n);
   return c ? c : (x->name > y->name) - (x->name < y->name);
 }
-static GcInits gc_inits_index(const Buf *b) {
+static GcInits gc_inits_index(const GcFns *f) {
   GcInits ix = { NULL, NULL, 0 };
   size_t cap = 0;
-  for (const char *d = strstr(b->p, "\nstatic "); d; d = strstr(d + 1, "\nstatic ")) {
-    const char *eol = strchr(d + 1, '\n');
-    if (!eol) break;
-    if (eol - d < 4 || strncmp(eol - 3, ") {", 3)) continue;
-    const char *paren = memchr(d + 1, '(', (size_t)(eol - d - 1));
-    if (!paren || paren - d < 12 || strncmp(paren - 11, "_initialize", 11)) continue;
+  for (size_t i = 0; i < f->n; i++) {
+    const char *hdr = f->v[i].hdr;
+    if (strncmp(hdr, "static ", 7)) continue;
+    const char *paren = memchr(hdr, '(', (size_t)(f->v[i].body - hdr));
+    if (!paren || paren - hdr < 12 || strncmp(paren - 11, "_initialize", 11)) continue;
     const char *name = paren;
-    while (name > d + 1 && (isalnum((unsigned char)name[-1]) || name[-1] == '_')) name--;
+    while (name > hdr && (isalnum((unsigned char)name[-1]) || name[-1] == '_')) name--;
     if (ix.n == cap) { cap = cap ? cap * 2 : 64; ix.v = realloc(ix.v, sizeof *ix.v * cap); }
     GcInit *e = &ix.v[ix.n++];
     e->name = name; e->n = (size_t)(paren - name);
-    e->body = eol; e->end = strstr(eol, "\n}\n");
+    e->body = f->v[i].body; e->end = f->v[i].end;
     e->spaced = name[-1] == ' ';
     e->inert = -1; e->ok = 1; e->uses = 0;
   }
@@ -3928,7 +3985,7 @@ static GcInit **gc_inits_find(const GcInits *ix, const char *name, size_t n) {
   return lo < ix->n && !gc_init_named(ix->byname[lo], name, n) ? ix->byname + lo : NULL;
 }
 static int gc_init_inert(GcInit *e) {
-  if (e->inert < 0) e->inert = e->end && gc_ctor_span_inert(e->body, e->end, NULL, NULL);
+  if (e->inert < 0) e->inert = gc_ctor_span_inert(e->body, e->end, NULL, NULL);
   return e->inert;
 }
 
@@ -3946,19 +4003,19 @@ static void gc_ctor_roots_take_back(Buf *b) {
   static const char root[] = "  SP_GC_ROOT(self);\n";
   size_t rl = sizeof root - 1;
   if (!b->p) return;
-  GcInits ix = gc_inits_index(b);
+  GcFns fns = gc_fns_index(b);
+  GcInits ix = gc_inits_index(&fns);
   GcCuts cuts = { NULL, 0, 0 };
   for (const char *at = strstr(b->p, root); at; at = strstr(at + rl, root)) {
     /* the function this root is in, and whether it is a constructor */
-    const char *hdr = gc_fn_header(b, at);
-    const char *paren = memchr(hdr, '(', (size_t)(at - hdr));
+    const GcFn *fn = gc_fn_at(&fns, at);
+    if (!fn) continue;
+    const char *hdr = fn->hdr, *paren = memchr(hdr, '(', (size_t)(fn->body - hdr));
     if (!paren || strncmp(hdr, "static sp_", 10)) continue;
     if (!((paren - hdr > 4 && !strncmp(paren - 4, "_new", 4)) ||
           (paren - hdr > 11 && !strncmp(paren - 11, "_new_noinit", 11)))) continue;
-    const char *end = strstr(at, "\n}\n");
-    if (!end || !gc_find_in(hdr, at, ") {\n")) continue;
     const char *init = NULL; size_t init_n = 0;
-    if (!gc_ctor_span_inert(at + rl, end, &init, &init_n)) continue;
+    if (!gc_ctor_span_inert(at + rl, fn->end, &init, &init_n)) continue;
     if (init) {
       /* its definition: `static ... void sp_X_initialize(sp_X *self, ...) {` */
       GcInit **e = gc_inits_find(&ix, init, init_n), **stop = ix.byname + ix.n;
@@ -3969,18 +4026,19 @@ static void gc_ctor_roots_take_back(Buf *b) {
   }
   gc_cuts_apply(b, &cuts);
   gc_inits_free(&ix);
+  free(fns.v);
 }
 
 /* Is the mention of an initialize at `use` (its name `n` long) a constructor
    handing it the object it has just allocated, with nothing in between that
    could collect? The last part is what the constructor's missing root says:
    gc_ctor_roots_take_back took it on exactly that proof. */
-static int gc_use_on_fresh_self(const Buf *b, const char *use, size_t n) {
-  const char *hdr = gc_fn_header(b, use);
-  const char *paren = memchr(hdr, '(', (size_t)(use - hdr));
+static int gc_use_on_fresh_self(const GcFns *fns, const char *use, size_t n) {
+  const GcFn *fn = gc_fn_at(fns, use);
+  if (!fn) return 0;
+  const char *hdr = fn->hdr, *paren = memchr(hdr, '(', (size_t)(fn->body - hdr));
   if (!paren || paren - hdr < 5 || strncmp(hdr, "static sp_", 10) || strncmp(paren - 4, "_new", 4)) return 0;
-  const char *end = strstr(use, "\n}\n");
-  if (!end || !gc_find_in(hdr, use, " *self = SP_POOL_NEW(") || gc_find_in(hdr, end, "SP_GC_ROOT(self)")) return 0;
+  if (!gc_find_in(fn->body, use, " *self = SP_POOL_NEW(") || gc_find_in(fn->body, fn->end, "SP_GC_ROOT(self)")) return 0;
   const char *a = use + n;
   if (*a++ != '(') return 0;
   if (*a == '(') { while (*a && *a != ')') a++; if (*a) a++; }   /* `(sp_Parent *)self` */
@@ -3996,10 +4054,14 @@ static int gc_use_on_fresh_self(const Buf *b, const char *use, size_t n) {
    constructor there is, and paid two (binary_trees: 20 of 230 instructions per
    Node).
 
-   One mention anywhere else -- `super` from a subclass, an explicit
-   `initialize(...)` on an object that may have aged -- and the barriers stay.
-   So does a name that merely ends in an initialize's: it is told apart from
-   nothing and counts against it.
+   One mention anywhere else and the barriers stay: `super` from a subclass,
+   an explicit `initialize(...)` on an object that may have aged, a `new`
+   written out at its call site because a default argument reads the object
+   (`def initialize(a, b = spare)`: the arguments are evaluated, and may
+   collect, between the allocation and the initialize), an address in a
+   table. Only the name a `static` line outside every body declares, the
+   prototype's and the definition's, is not a mention. A name that merely
+   ends in an initialize's is told apart from nothing and counts against it.
 
    The stores are the two shapes gc_wb_insert_seg writes, read back here:
    `{ __typeof__(self) _wbN = self; _wbN->f = v; sp_gc_wb((void *)_wbN); }`
@@ -4009,7 +4071,8 @@ static void gc_ctor_barriers_take_back(Buf *b) {
   static const char head[] = "{ __typeof__(self) _wb", wbo[] = "SP_WBO(self)->";
   size_t al = sizeof arrow - 1;
   if (!b->p) return;
-  GcInits ix = gc_inits_index(b);
+  GcFns fns = gc_fns_index(b);
+  GcInits ix = gc_inits_index(&fns);
   GcCuts cuts = { NULL, 0, 0 };
   /* every mention of every initialize, in one walk */
   for (const char *q = ix.n ? strstr(b->p, suffix) : NULL; q; q = strstr(q + 1, suffix)) {
@@ -4018,13 +4081,14 @@ static void gc_ctor_barriers_take_back(Buf *b) {
     while (s > b->p && (isalnum((unsigned char)s[-1]) || s[-1] == '_')) s--;
     const char *ls = s;
     while (ls > b->p && ls[-1] != '\n') ls--;
-    int called = *ls == ' ', fresh = -1;   /* in the first column it is the prototype or the definition */
+    int declared = !gc_fn_at(&fns, s) && !strncmp(ls, "static ", 7) && memchr(ls, '(', (size_t)(e - ls) + 1) == e;
+    int called = !declared, fresh = -1;
     for (const char *k = s; k <= q; k++) {
       GcInit **hit = gc_inits_find(&ix, k, (size_t)(e - k));
       for (; hit && hit < ix.byname + ix.n && !gc_init_named(*hit, k, (size_t)(e - k)); hit++) {
         if (k > s) { (*hit)->ok = 0; continue; }
         if (!called) continue;
-        if (fresh < 0) fresh = gc_use_on_fresh_self(b, s, (size_t)(e - s));
+        if (fresh < 0) fresh = gc_use_on_fresh_self(&fns, s, (size_t)(e - s));
         (*hit)->uses++;
         if (!fresh) (*hit)->ok = 0;
       }
@@ -4055,6 +4119,7 @@ static void gc_ctor_barriers_take_back(Buf *b) {
   }
   gc_cuts_apply(b, &cuts);
   gc_inits_free(&ix);
+  free(fns.v);
 }
 
 /* ---- root frames ----

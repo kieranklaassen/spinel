@@ -2,5 +2,7 @@
 1 201 401 601 801 1001 1201 1401 1601 1801
 1850
 4900
+2500
+290
 3
 SP_WBO(self)->iv_leaf = leaf; { __typeof__(self) _wb1 = self; _wb1->iv_leaf = leaf; sp_gc_wb((void *)_wb1); }

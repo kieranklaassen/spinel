@@ -5,10 +5,16 @@
 # `new` has just allocated, therefore stores bare: Pair, and Trunk with the
 # Branch that inherits its initialize. One other way in and the barriers stay,
 # because the object may have aged by then: Slot runs its initialize again on
-# itself, and Base's is reached through `super`. Slot is the case that fails
-# when they are dropped anyway -- it is old by the time it is refilled with
-# two new leaves, and the collector's verifier reports the holder nobody
-# recorded.
+# itself, Base's is reached through `super`, and Point's default argument
+# reads the new object, so its `new` is written out where it is called and
+# evaluates the arguments between the allocation and the initialize.
+#
+# Slot, Late and Point are the cases that fail when the barriers are dropped
+# anyway. Slot is old by the time it is refilled with two new leaves; Late
+# allocates before it calls `super`, and Point's `spare` allocates before its
+# initialize runs, so under the stress switch each has been through a
+# collection when the store lands. The collector's verifier reports the
+# holder nobody recorded.
 #
 # Note stores a string that spells both shapes a barrier is written in. It is
 # a string: its initialize stores bare and the text comes back whole.
@@ -66,6 +72,26 @@ class Derived < Base
   end
 end
 
+class Late < Base
+  attr_reader :extra
+  def initialize(n)
+    @extra = Leaf.new(n)
+    super(Leaf.new(n + 1))
+  end
+end
+
+class Point
+  attr_reader :a, :b
+  def initialize(a, b = spare)
+    @a = a
+    @b = b
+  end
+
+  def spare
+    Leaf.new(5)
+  end
+end
+
 class Note
   attr_reader :leaf, :text
   def initialize(leaf)
@@ -100,6 +126,16 @@ kin = []
 50.times { |i| kin << Derived.new(Leaf.new(i), Leaf.new(i * 3)) }
 churn(200)
 puts kin.map { |d| d.item.v + d.extra.v }.sum
+
+late = []
+50.times { |i| late << Late.new(i) }
+churn(200)
+puts late.map { |l| l.item.v + l.extra.v }.sum
+
+points = []
+20.times { |i| points << Point.new(Leaf.new(i)) }
+churn(300)
+puts points.map { |q| q.a.v + q.b.v }.sum
 
 notes = []
 3.times { |i| notes << Note.new(Leaf.new(i)) }
