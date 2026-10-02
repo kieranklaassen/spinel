@@ -3435,8 +3435,8 @@ int emit_poly_recv_block_dispatch(Compiler *c, int id, Buf *b, int indent) {
       view_pop(c, v);
     }
     g_n_argov--;
-    int str_arm = ab.p && !strstr(ab.p, "sp_raise_nomethod(");
-    int io_arm = fb.p && !strstr(fb.p, "sp_raise_nomethod(");
+    int str_arm = ab.p && !c_code_find(ab.p, "sp_raise_nomethod(");
+    int io_arm = fb.p && !c_code_find(fb.p, "sp_raise_nomethod(");
     if (str_arm || io_arm) {
       emit_indent(&sw, indent); buf_puts(&sw, "default: {\n");
       if (str_arm) {

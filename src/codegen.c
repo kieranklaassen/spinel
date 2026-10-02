@@ -3562,8 +3562,8 @@ static void inherit_transplant_locals(Compiler *c, Scope *s) {
 static void gc_save_take_back(Buf *b, size_t off, size_t save_len) {
   if (off + save_len > b->len) return;
   const char *body = b->p + off + save_len;
-  if (strstr(body, "SP_GC_ROOT") || strstr(body, "setjmp") ||
-      strstr(body, "sp_gc_nroots")) return;
+  if (c_code_find(body, "SP_GC_ROOT") || c_code_find(body, "setjmp") ||
+      c_code_find(body, "sp_gc_nroots")) return;
   buf_erase(b, off, save_len);
 }
 
@@ -3698,8 +3698,8 @@ static void gc_roots_take_back(Compiler *c, Scope *s, Buf *b, size_t fn_off) {
      the execution order, so "the last mention" says nothing about liveness. */
   {
     const char *fn = b->p + fn_off;
-    if (strstr(fn, "setjmp") || strstr(fn, "while (") || strstr(fn, "for (") ||
-        strstr(fn, "do {") || strstr(fn, "goto ")) return;
+    if (c_code_find(fn, "setjmp") || c_code_find(fn, "while (") || c_code_find(fn, "for (") ||
+        c_code_find(fn, "do {") || c_code_find(fn, "goto ")) return;
   }
   for (int i = 0; i < s->nlocals; i++) {
     LocalVar *lv = &s->locals[i];
@@ -3806,9 +3806,11 @@ static FrameTemp *frame_temp(FrameTemps *ts, const char *nm, size_t n, int creat
   return t;
 }
 /* The end of the string/char literal, comment or preprocessor line starting
-   at i, or i when nothing does: the scans below must not read braces or
-   names out of a `#line` file name or a string constant. */
-static size_t frame_skip_noncode(const char *p, size_t i, size_t end) {
+   at i, or i when nothing does: a scan of emitted C must not read braces,
+   names or stores out of a `#line` file name or a string constant. A Ruby
+   string literal is in the C verbatim, so it can spell anything a pass looks
+   for. */
+size_t c_skip_noncode(const char *p, size_t i, size_t end) {
   char c = p[i];
   if (c == '"' || c == '\'') {
     size_t j = i + 1;
@@ -3832,6 +3834,39 @@ static size_t frame_skip_noncode(const char *p, size_t i, size_t end) {
   }
   return i;
 }
+/* The same step for a scan that walks back: p[i] is the quote that closes a
+   literal, the answer is the quote that opens it. A quote inside a literal
+   has an odd number of backslashes in front of it. */
+size_t c_literal_open(const char *p, size_t i) {
+  char q = p[i];
+  while (i > 0) {
+    i--;
+    if (p[i] != q) continue;
+    size_t k = i;
+    while (k > 0 && p[k-1] == '\\') k--;
+    if ((i - k) % 2 == 0) return i;
+  }
+  return 0;
+}
+/* Is p[at] code? Read from the start of its line, no further back than `lo`:
+   the emitters write no literal and no comment across a line end, so a line
+   starts in code. A pass that searches the whole program asks this of each
+   match it finds, and pays nothing for the text in between. */
+int c_code_at(const char *p, size_t lo, size_t at) {
+  size_t i = at;
+  while (i > lo && p[i-1] != '\n') i--;
+  while (i < at) {
+    size_t j = c_skip_noncode(p, i, at + 1);
+    i = j != i ? j : i + 1;
+  }
+  return i == at;
+}
+/* strstr for emitted C: the first `needle` that starts in code. */
+const char *c_code_find(const char *text, const char *needle) {
+  const char *hit = strstr(text, needle);
+  while (hit && !c_code_at(text, 0, (size_t)(hit - text))) hit = strstr(hit + 1, needle);
+  return hit;
+}
 /* Does the text before i end with `word` as a whole word (spaces between
    allowed)? Returns the offset where that word starts, or 0 for no. */
 static size_t frame_preceded_by(const char *p, size_t i, size_t lo, const char *word) {
@@ -3847,7 +3882,7 @@ static size_t frame_preceded_by(const char *p, size_t i, size_t lo, const char *
 static void frame_collect(const char *p, size_t beg, size_t end, FrameTemps *ts) {
   size_t i = beg;
   while (i < end) {
-    size_t j = frame_skip_noncode(p, i, end);
+    size_t j = c_skip_noncode(p, i, end);
     if (j != i) { i = j; continue; }
     if (!frame_idch(p[i]) || isdigit((unsigned char)p[i])) { i++; continue; }
     size_t k = i;
@@ -3949,7 +3984,7 @@ static int gc_frame_build(Buf *b, size_t ins) {
   int saved[FRAME_DEPTH_MAX];
   size_t i = ins;
   while (i < end) {
-    size_t j = frame_skip_noncode(p, i, end);
+    size_t j = c_skip_noncode(p, i, end);
     if (j != i) { buf_putn(&nb, p + i, j - i); i = j; continue; }
     char c = p[i];
     if (c == '{') {
@@ -4053,7 +4088,7 @@ static int gc_frame_build(Buf *b, size_t ins) {
 static int main_text_has_word(const char *p, size_t beg, size_t end, const char *w) {
   size_t wl = strlen(w);
   for (size_t i = beg; i < end; ) {
-    size_t j = frame_skip_noncode(p, i, end);
+    size_t j = c_skip_noncode(p, i, end);
     if (j != i) { i = j; continue; }
     if (!frame_idch(p[i])) { i++; continue; }
     size_t k = i;
@@ -4161,7 +4196,7 @@ static int main_body_split(Compiler *c, Buf *body, size_t open, size_t *frame_in
     size_t rb = q == np ? dend : q ? cuts[pend[q - 1]] : sbeg;
     size_t re = q == np ? sbeg : cuts[pend[q]];
     for (size_t i = rb; i < re; ) {
-      size_t j = frame_skip_noncode(p, i, re);
+      size_t j = c_skip_noncode(p, i, re);
       if (j != i) { i = j; continue; }
       if (!frame_idch(p[i])) { i++; continue; }
       size_t k = i;
@@ -4308,7 +4343,8 @@ static size_t wb_lvalue_start(const char *p, size_t end) {
       int depth = 0;
       while (i > 0) {
         i--;
-        if (p[i] == close) depth++;
+        if (p[i] == '"' || p[i] == '\'') i = c_literal_open(p, i);
+        else if (p[i] == close) depth++;
         else if (p[i] == open) { depth--; if (!depth) break; }
       }
       if (i == 0) return i;
@@ -4376,7 +4412,7 @@ static void wb_cells_collect(WbCells *cs, const char *p, size_t len) {
     int ref = 0;
     for (; q + 13 < stop; q++)
       if (!strncmp(p + q, "sp_cell_scan_", 13)) { ref = 1; break; }
-    if (!ref || wb_cells_has(cs, p + s, e - s)) continue;
+    if (!ref || wb_cells_has(cs, p + s, e - s) || !c_code_at(p, 0, s)) continue;
     if (cs->n == cs->cap) { cs->cap = cs->cap ? cs->cap * 2 : 16;
                             cs->v = (char **)realloc(cs->v, sizeof(char *) * cs->cap); }
     cs->v[cs->n] = (char *)malloc(e - s + 1);
@@ -4492,7 +4528,7 @@ static void gc_wb_cells(Compiler *c, Buf *b) {
        store made through `_cap` matched the declaration and the proc body's
        every `(*cap->c_x) = v` went unrecorded */
     else if (nn > 2 && !strncmp(nm, "c_", 2) && ns >= 2 && b->p[ns-1] == '>' && b->p[ns-2] == '-') { nm += 2; nn -= 2; }
-    if (!wb_cells_has(&cs, nm, nn)) continue;
+    if (!wb_cells_has(&cs, nm, nn) || !c_code_at(b->p, 0, i)) continue;
     if (!strncmp(b->p + is, "SP_WBO(", 7)) continue;
     if (local_cell) {
       size_t h = wb_fn_header(b, i, &hdr_at, &hdr_h);
@@ -4612,6 +4648,7 @@ static void gc_wb_insert_seg(Compiler *c, Buf *b, size_t fn_off) {
       if (!wb_field_is_ref_in(c, hc, b->p + f, e - f)) continue;
     }
     else if (!wb_field_is_ref(c, b->p + f, e - f)) continue;
+    if (!c_code_at(b->p, fn_off, i)) continue;     /* a string that spells a store */
     /* already wrapped (a nested store re-scanned) */
     if (st >= 7 && !strncmp(b->p + st - 7, "SP_WBO(", 7)) continue;
     if (st >= 14 && !strncmp(b->p + st - 14, "sp_gc_wb((void ", 15 - 1)) continue;

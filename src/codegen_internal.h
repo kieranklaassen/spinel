@@ -31,6 +31,13 @@ typedef struct { char *p; size_t len, cap; } Buf;
 void buf_putn(Buf *b, const char *s, size_t n);
 void buf_puts(Buf *b, const char *s);
 void buf_erase(Buf *b, size_t off, size_t n);
+/* Emitted C read as text (codegen.c): the step over a literal, a comment or
+   a `#line`, forward and back, whether a position is code, and the strstr
+   that answers only in code. */
+size_t c_skip_noncode(const char *p, size_t i, size_t end);
+size_t c_literal_open(const char *p, size_t i);
+int c_code_at(const char *p, size_t lo, size_t at);
+const char *c_code_find(const char *text, const char *needle);
 extern int g_no_root_elision;
 extern int g_no_root_frame;
 extern int g_inline_hot;
