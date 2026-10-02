@@ -10832,6 +10832,8 @@ int narrow_empty_array_args_by_yield(Compiler *c) {
       if (a < 0 || a >= c->node_cap || nt_kind(nt, a) != NK_ArrayNode) continue;
       int en = 0; nt_arr(nt, a, "elements", &en);
       if (en == 0 && c->arr_want[a] == TY_UNKNOWN) any_empty = 1;
+      /* a non-empty literal the block may push another kind into */
+      if (en > 0 && blk >= 0 && c->arr_want[a] != TY_POLY_ARRAY) any_empty = 1;
     }
     if (!any_empty) continue;
     /* with a block: an inlinable yielding method; without: a receiverless
@@ -10847,7 +10849,8 @@ int narrow_empty_array_args_by_yield(Compiler *c) {
       int a = call_param_arg(c, m, av, an, j);
       if (a < 0 || a >= c->node_cap || nt_kind(nt, a) != NK_ArrayNode) continue;
       int en = 0; nt_arr(nt, a, "elements", &en);
-      if (en != 0 || c->arr_want[a] != TY_UNKNOWN) continue;
+      int seeded = en > 0 && blk >= 0 && c->arr_want[a] != TY_POLY_ARRAY;
+      if (!seeded && (en != 0 || c->arr_want[a] != TY_UNKNOWN)) continue;
       const char *pn = m->pnames[j];
       if (!pn) continue;
       TyKind acc = TY_UNKNOWN; int open = 0;
@@ -10866,6 +10869,18 @@ int narrow_empty_array_args_by_yield(Compiler *c) {
           const char *bp = block_param_name(c, blk, q);
           if (bp) yarg_scan_pushes(c, bbody, bp, &acc, &open);
         }
+      }
+      if (seeded) {
+        /* A literal with elements of its own, `each_with_object([1]) { |e, acc|
+           acc << e }`, keeps its kind while every push fits it; a push of
+           another kind widens it to the general Array, as a local's literal
+           widens (#7100). It ran as an sp_IntArray and raised "cannot store
+           ... into an Array[Integer]" at the push, or was refused. */
+        TyKind lt = infer_type(c, a);
+        if (!open && acc != TY_UNKNOWN && ty_is_array(lt) && lt != TY_POLY_ARRAY &&
+            acc != ty_array_elem(lt))
+          changed |= widen_arg_array(c, a);
+        continue;
       }
       if (!open && (acc == TY_INT || acc == TY_FLOAT || acc == TY_STRING)) {
         c->arr_want[a] = ty_array_of(acc);
@@ -12418,11 +12433,7 @@ int infer_block_params(Compiler *c) {
       int tmi = bx >= 0 && nt_kind(nt, bx) == NK_CallNode ? method_obj_target_mi(c, bx) : -1;
       int ymi = -1;
       if (tmi >= 0 && !method_call_param_shift(c, bx, tmi)) {
-        if (recv < 0) {
-          Scope *self = comp_scope_of(c, id);
-          if (self && self->class_id >= 0) ymi = comp_method_in_chain(c, self->class_id, name, NULL);
-          if (ymi < 0) ymi = comp_method_index(c, name);
-        }
+        if (recv < 0) ymi = comp_self_call_mi(c, id, name);
         else if (sp_streq(name, "new") && (nt_kind(nt, recv) == NK_ConstantReadNode ||
                                            nt_kind(nt, recv) == NK_ConstantPathNode)) {
           int cid = nt_str(nt, recv, "name") ? comp_class_index(c, nt_str(nt, recv, "name")) : -1;
@@ -12547,18 +12558,12 @@ int infer_block_params(Compiler *c) {
     {
       int mi = -1;
       if (recv < 0) {
+        /* the class body's own class methods, then self's: the class
+           methods first in a class method, the instance chain, and a
+           top-level def last (comp_self_call_mi), as the splice resolves
+           the call */
         mi = comp_cbody_call_mi(c, id, name);
-        if (mi < 0) mi = comp_method_index(c, name);
-        if (mi < 0) {
-          Scope *self = comp_scope_of(c, id);
-          if (self->class_id >= 0) {
-            mi = comp_method_in_chain(c, self->class_id, name, NULL);
-            /* inside a class method, a bare call also reaches sibling class
-               methods (self is the class there) */
-            if (mi < 0 && self->is_cmethod)
-              mi = comp_cmethod_in_chain(c, self->class_id, name, NULL);
-          }
-        }
+        if (mi < 0) mi = comp_self_call_mi(c, id, name);
       }
       else {
         TyKind rt0 = infer_type(c, recv);
@@ -12636,7 +12641,12 @@ int infer_block_params(Compiler *c) {
              them, and the builtin rules below must not type the block from
              the NAME -- a poly `each_line` read as an IO's walk bound the
              Integer a user each_line yielded into a String slot. */
-          if (ndef > 0 && (poly_enum_op_for(name) || (mi < 0 && rt0 == TY_POLY))) {
+          /* the same for a boxed receiver's names whose dispatch default
+             hands the block to the builtin (fetch, delete, merge!, update) */
+          int bdflt = rt0 == TY_POLY &&
+                      (sp_streq(name, "fetch") || sp_streq(name, "delete") ||
+                       sp_streq(name, "merge!") || sp_streq(name, "update"));
+          if (ndef > 0 && (poly_enum_op_for(name) || bdflt || (mi < 0 && rt0 == TY_POLY))) {
             Scope *bs2 = comp_scope_of(c, block);
             for (int k = 0; ; k++) {
               const char *bp2 = block_param_name(c, block, k);
@@ -13665,15 +13675,9 @@ int backprop_call_target(Compiler *c, int call_id) {
   if (!name || sp_streq(name, "new")) return -1;  /* constructors bind elsewhere */
   int recv = nt_ref(nt, call_id, "receiver");
   if (recv < 0) {
-    int mi = comp_method_index(c, name);
-    if (mi < 0) {
-      Scope *self = comp_scope_of(c, call_id);
-      if (self && self->class_id >= 0) {
-        mi = comp_method_in_chain(c, self->class_id, name, NULL);
-        if (mi < 0 && self->is_cmethod)
-          mi = comp_cmethod_in_chain(c, self->class_id, name, NULL);
-      }
-    }
+    /* self's class methods first in a class method, then its instance
+       chain, then a top-level def, as inference resolves the call */
+    int mi = comp_self_call_mi(c, call_id, name);
     if (mi < 0) mi = comp_included_method_index(c, name, call_id);
     return mi;
   }

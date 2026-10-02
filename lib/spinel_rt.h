@@ -148,6 +148,7 @@ static inline void sp_builtin_cls_ids_distinct(int id) {
     case SP_BUILTIN_COMPLEX: case SP_BUILTIN_RATIONAL:
     case SP_BUILTIN_BIG_RATIONAL: case SP_BUILTIN_FLOAT_RANGE:
     case SP_BUILTIN_STR_RANGE: case SP_BUILTIN_OPENSTRUCT:
+    case SP_BUILTIN_RANDOM: case SP_BUILTIN_ARGF:
     case SP_BUILTIN_PROCESS_STATUS:   /* agentwm/dvtm: Process.waitpid2's boxed
                                           return value, dispatches signaled?/exited?/
                                           termsig/... via runtime type tag. */
@@ -476,6 +477,7 @@ sp_int sp_process_spawn(sp_RbVal cmd, sp_RbVal args, sp_RbVal opts);
 int sp_process_open_redirect(const char *path, int slot, int *owned);
 SP_NORETURN void sp_process_spawn_fail(int *owned, const char *cls, const char *msg);
 sp_PolyArray *sp_process_waitpid2(sp_int pid);
+sp_int sp_process_waitpid(sp_int pid);   /* Process.wait / waitpid: the pid reaped */
 
 
 /* `recycle`: optional sweep hook. If non-NULL, sp_gc_collect calls
@@ -2182,6 +2184,8 @@ static const char *sp_poly_class_name(sp_RbVal v) {
         case SP_BUILTIN_SOCKOPT: return SPL("Socket::Option");
         case SP_BUILTIN_PROCESS_STATUS: return SPL("Process::Status");
         case SP_BUILTIN_YIELDER: return SPL("Enumerator::Yielder");
+        case SP_BUILTIN_RANDOM: return SPL("Random");
+        case SP_BUILTIN_ARGF: return SPL("ARGF.class");
         case SP_BUILTIN_EXCEPTION: return sp_exc_class_name((volatile struct sp_Exception_s *)v.v.p);
         default: { sp_Class c = {v.cls_id}; return sp_class_to_s(c); }
       }
@@ -3383,6 +3387,23 @@ static sp_float sp_poly_to_f_opt(sp_RbVal v) { return v.tag == SP_TAG_NIL ? sp_f
 /* sp_str_to_c: moved to lib/sp_cold.c */
 sp_Complex sp_str_to_c(const char *s);
 sp_Complex sp_str_to_c_strict(const char *s);
+/* Boolean rejection is local to Kernel#Complex, not generic Float coercion.
+   In a two-component call Strings are parsed before real-number validation. */
+static SP_NORETURN void sp_complex_reject_bool(sp_RbVal re, sp_RbVal im, int argc) {
+  SP_GC_ROOT_RBVAL(re); SP_GC_ROOT_RBVAL(im);
+  if (re.tag == SP_TAG_NIL || (argc == 2 && im.tag == SP_TAG_NIL))
+    sp_raise_cls("TypeError", "can't convert nil into Complex");
+  if (argc == 2) {
+    if (sp_poly_is_strbuf(re)) re = sp_poly_strbuf_deref(re);
+    if (sp_poly_is_strbuf(im)) im = sp_poly_strbuf_deref(im);
+    if (re.tag == SP_TAG_STR) (void)sp_str_to_c_strict(re.v.s);
+    if (im.tag == SP_TAG_STR) (void)sp_str_to_c_strict(im.v.s);
+    sp_raise_cls("TypeError", "not a real");
+  }
+  sp_raise_cls("TypeError", re.v.b ? "can't convert true into Complex" :
+                                  "can't convert false into Complex");
+}
+
 /* lib/sp_cold.c: while sp_convert_soft is set, an unparseable Complex/Rational
    string sets sp_convert_failed instead of raising (Kernel's exception: false). */
 extern sp_bool sp_convert_soft;
@@ -3909,8 +3930,8 @@ static sp_bool sp_poly_nan_p(sp_RbVal v) { if (v.tag == SP_TAG_FLT) return isnan
    raised for them, whose `args` is the empty list */
 static sp_float sp_poly_next_float(sp_RbVal v) { if (v.tag == SP_TAG_FLT) return nextafter(v.v.f, INFINITY); sp_raise_cls("NoMethodError", sp_nomethod_msg_args("next_float", v, 0, NULL)); return 0.0; }
 static sp_float sp_poly_prev_float(sp_RbVal v) { if (v.tag == SP_TAG_FLT) return nextafter(v.v.f, -INFINITY); sp_raise_cls("NoMethodError", sp_nomethod_msg_args("prev_float", v, 0, NULL)); return 0.0; }
-static sp_bool sp_poly_finite_p(sp_RbVal v) { if (v.tag == SP_TAG_FLT) return isfinite(v.v.f) != 0; if (v.tag == SP_TAG_INT || v.tag == SP_TAG_BIGINT) return TRUE; sp_raise_poly_nomethod("finite?", v); }
-static sp_RbVal sp_poly_infinite(sp_RbVal v) { if (v.tag == SP_TAG_FLT) return isinf(v.v.f) ? sp_box_int(v.v.f > 0 ? 1 : -1) : sp_box_nil(); if (v.tag == SP_TAG_INT || v.tag == SP_TAG_BIGINT) return sp_box_nil(); sp_raise_poly_nomethod("infinite?", v); }
+static sp_bool sp_poly_finite_p(sp_RbVal v) { if (v.tag == SP_TAG_FLT) return isfinite(v.v.f) != 0; if (v.tag == SP_TAG_INT || v.tag == SP_TAG_BIGINT || ((sp_poly_is_rational(v) || sp_poly_is_brat(v)) && v.v.p)) return TRUE; sp_raise_poly_nomethod("finite?", v); }
+static sp_RbVal sp_poly_infinite(sp_RbVal v) { if (v.tag == SP_TAG_FLT) return isinf(v.v.f) ? sp_box_int(v.v.f > 0 ? 1 : -1) : sp_box_nil(); if (v.tag == SP_TAG_INT || v.tag == SP_TAG_BIGINT || ((sp_poly_is_rational(v) || sp_poly_is_brat(v)) && v.v.p)) return sp_box_nil(); sp_raise_poly_nomethod("infinite?", v); }
 /* Complex-projection queries on a poly value read out of a container (#2882):
    a Complex yields its stored component (int- or float-classed per its flags),
    and any real number is its own real part with a zero imaginary part. */
@@ -4271,6 +4292,16 @@ static SP_NOINLINE sp_bool sp_poly_eq_slow(sp_RbVal a, sp_RbVal b) {
      other operators now do; the field-wise hook below stays the default for
      a class that does not define one (#3501) */
   { sp_RbVal _u; if (sp_poly_user_cmp("==", a, b, &_u)) return sp_poly_truthy(_u); }
+  /* Ruby 3.2's Process::Status#== compares the status word (to_i) with the
+     other side, and Integer#== hands a non-number back to it, so `$? == 0`
+     and `0 == $?` both read the word; two statuses compare their words */
+  { int _pa = a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_PROCESS_STATUS && a.v.p;
+    int _pb = b.tag == SP_TAG_OBJ && b.cls_id == SP_BUILTIN_PROCESS_STATUS && b.v.p;
+    if (_pa || _pb) {
+      sp_RbVal _x = _pa ? sp_box_int(((sp_ProcessStatus *)a.v.p)->status) : a;
+      sp_RbVal _y = _pb ? sp_box_int(((sp_ProcessStatus *)b.v.p)->status) : b;
+      return sp_poly_eq(_x, _y);
+    } }
   { sp_RbVal _u; if (a.tag == SP_TAG_OBJ && sp_poly_is_array_kind(a.cls_id) && sp_poly_is_user_obj(b) && sp_obj_to_ary_fn &&
                      sp_obj_to_ary_fn((sp_RbVal){ .tag = SP_TAG_OBJ, .cls_id = b.cls_id }).tag == SP_TAG_BOOL &&
                      sp_poly_user_cmp("==", b, a, &_u)) return sp_poly_truthy(_u); }
@@ -5130,8 +5161,8 @@ sp_PolyArray *sp_math_lgamma(double x);
 static sp_RbVal sp_PolyArray_shift(sp_PolyArray *a) { if (!a || a->len <= 0) return sp_box_nil(); if (a->frozen) { sp_raise_frozen_array_at(a, SP_BUILTIN_POLY_ARRAY); return sp_box_nil(); } sp_RbVal v = a->data[0]; memmove(a->data, a->data+1, (size_t)(--a->len)*sizeof(sp_RbVal)); return v; }
 static sp_RbVal sp_PolyArray_delete_at(sp_PolyArray *a, sp_int i) {sp_gc_wb((void*)a);  if (!a) return sp_box_nil(); if (i < 0) i += a->len; if (i < 0 || i >= a->len) return sp_box_nil(); sp_RbVal v = a->data[i]; for (sp_int j = i; j < a->len - 1; j++) a->data[j] = a->data[j+1]; a->len--; return v; }
 static void sp_PolyArray_insert(sp_PolyArray *a, sp_int i, sp_RbVal v) {sp_gc_wb((void*)a);  if (!a) return; if (a->frozen) { sp_raise_frozen_array_at(a, SP_BUILTIN_POLY_ARRAY); return; } sp_int orig = i; if (i < 0) i += a->len + 1; if (i < 0) sp_raise_cls("IndexError", sp_sprintf("index %lld too small for array; minimum: %lld", (long long)orig, (long long)(-(a->len + 1)))); while (i > a->len) sp_PolyArray_push(a, sp_box_nil()); /* CRuby pads with nils past the end */ sp_PolyArray_push(a, sp_box_nil()); for (sp_int j = a->len - 1; j > i; j--) a->data[j] = a->data[j-1]; a->data[i] = v; }
-/* Array#delete(v): removes every element sp_poly_eq to v, returns v (or
-   nil if not found). Was missing for TY_POLY_ARRAY -- only TY_INT_ARRAY/
+/* Array#delete(v): removes every element sp_poly_eq to v, returns the
+   last one (nil if none). Was missing for TY_POLY_ARRAY -- only TY_INT_ARRAY/
    TY_STR_ARRAY had it -- which blocked the array-backed Set package's
    #delete (doom's `@secret_sectors.delete(sector_idx)`). Lives here (not
    sp_array.c, home of sp_IntArray_delete et al) because it needs
@@ -5144,13 +5175,13 @@ static sp_RbVal sp_PolyArray_delete(sp_PolyArray *a, sp_RbVal v) {sp_gc_wb((void
      mid-loop; a and v may be reachable only through the call expression. */
   SP_GC_ROOT(a); SP_GC_ROOT_RBVAL(v);
   sp_int w = 0;
-  sp_bool found = FALSE;
+  sp_RbVal removed = sp_box_nil(); SP_GC_ROOT_RBVAL(removed);
   for (sp_int i = 0; i < a->len; i++) {
     if (!sp_poly_eq(a->data[i], v)) { a->data[w] = a->data[i]; w++; }
-    else found = TRUE;
+    else removed = a->data[i];
   }
   a->len = w;
-  return found ? v : sp_box_nil();
+  return removed;
 }
 
 /* MatchData -- holds the source string and the per-group byte offsets
@@ -7519,6 +7550,7 @@ static inline const char *sp_poly_inspect(sp_RbVal v) {
         }
         case SP_BUILTIN_FIBER:  return sp_Fiber_inspect((sp_Fiber *)v.v.p);
         case SP_BUILTIN_THREAD: return sp_Thread_inspect((sp_thread *)v.v.p);
+        case SP_BUILTIN_ARGF:   return SPL("ARGF");
         default:
           /* a user object: the generated per-class ivar walk renders
              #<Name:0x... @a=..., ...> like CRuby's default inspect */
@@ -15751,7 +15783,17 @@ enum {
      these names as a yielding method makes the call a dispatch, and a Hash
      (or Array) reaching it is served here */
   SP_PENUM_EACH_PAIR, SP_PENUM_EACH_KEY, SP_PENUM_EACH_VALUE,
-  SP_PENUM_REVERSE_EACH, SP_PENUM_UNIQ
+  SP_PENUM_REVERSE_EACH, SP_PENUM_UNIQ,
+  /* to_h with a block: the block's pairs, as a Hash */
+  SP_PENUM_TO_H,
+  /* a Hash's keys or values through the block, into a new Hash or (bang)
+     back into the receiver */
+  SP_PENUM_TRANSFORM_KEYS, SP_PENUM_TRANSFORM_VALUES,
+  SP_PENUM_TRANSFORM_KEYS_BANG, SP_PENUM_TRANSFORM_VALUES_BANG,
+  /* the in-place filters of a Hash or an Array: select!/filter! and reject!
+     answer nil when nothing went, keep_if and delete_if the receiver */
+  SP_PENUM_SELECT_BANG, SP_PENUM_REJECT_BANG, SP_PENUM_KEEP_IF, SP_PENUM_DELETE_IF,
+  SP_PENUM_FILTER_BANG   /* select! by its other name, for the error */
 };
 /* Call `blk` with one element. Both channels are filled, as every other
    proc-driving site does: a poly parameter reads the boxed side-channel, a
@@ -15783,6 +15825,85 @@ static sp_RbVal sp_penum_call2(sp_Proc *blk, sp_RbVal v, sp_RbVal w) {
   _sp_proc_poly_ret = sp_box_nil();
   sp_proc_call(blk, 2, a);
   return _sp_proc_poly_ret;
+}
+static sp_RbVal sp_penum_call1(sp_Proc *blk, sp_RbVal v);
+/* delete(key) { |k| } on a boxed Hash or Array: the block answers a key
+   that was not there */
+static sp_RbVal sp_poly_delete_key_blk(sp_RbVal recv, sp_RbVal key, sp_Proc *blk) {
+  SP_GC_ROOT_RBVAL(recv); SP_GC_ROOT_RBVAL(key); SP_GC_ROOT(blk);
+  sp_int before = sp_poly_length(recv);
+  sp_RbVal r = sp_poly_delete_key(recv, key);
+  if (sp_poly_length(recv) < before || !blk) return r;
+  return sp_penum_call1(blk, key);
+}
+static sp_RbVal sp_poly_enum_proc(sp_RbVal recv, int op, sp_Proc *blk);
+/* fetch(key) { |k| } on a boxed Hash or Array: the block answers a key (or
+   an index) that is not there; anything else raises as fetch does */
+static sp_RbVal sp_poly_fetch(sp_RbVal recv, sp_RbVal key, int has_dflt, sp_RbVal dflt);
+static sp_RbVal sp_poly_fetch_blk(sp_RbVal recv, sp_RbVal key, sp_Proc *blk) {
+  SP_GC_ROOT_RBVAL(recv); SP_GC_ROOT_RBVAL(key); SP_GC_ROOT(blk);
+  if (!blk) return sp_poly_fetch(recv, key, 0, sp_box_nil());   /* `&b` with b nil */
+  if (recv.tag == SP_TAG_OBJ && sp_poly_is_hash_kind(recv.cls_id)) {
+    if (sp_poly_has_key(recv, key)) return sp_poly_index_poly(recv, key);
+    return sp_penum_call1(blk, key);
+  }
+  if (recv.tag == SP_TAG_OBJ && sp_poly_is_array_kind(recv.cls_id)) {
+    /* any Integer-convertible index, as the blockless fetch takes it; the
+       block gets the index as given */
+    sp_int n = sp_poly_length(recv), i = sp_poly_arg_int_chk(key);
+    if (i < 0) i += n;
+    if (i >= 0 && i < n) return sp_poly_arr_get(recv, i);
+    return sp_penum_call1(blk, key);
+  }
+  return sp_poly_fetch(recv, key, 0, sp_box_nil());
+}
+/* merge!/update(other) { |k, old, new| } on a boxed Hash */
+static sp_RbVal sp_poly_set_poly(sp_RbVal v, sp_RbVal key, sp_RbVal val);
+static sp_RbVal sp_poly_hash_merge_blk(sp_RbVal recv, sp_RbVal other, sp_Proc *blk, const char *name) {
+  SP_GC_ROOT_RBVAL(recv); SP_GC_ROOT_RBVAL(other); SP_GC_ROOT(blk);
+  if (recv.tag != SP_TAG_OBJ || !sp_poly_is_hash_kind(recv.cls_id)) {
+    sp_raise_nomethod(sp_nomethod_msg(name, recv));
+    return sp_box_nil();
+  }
+  if (other.tag != SP_TAG_OBJ || !sp_poly_is_hash_kind(other.cls_id))
+    sp_raise_cls("TypeError", sp_sprintf("no implicit conversion of %s into Hash", sp_convert_src_name(other)));
+  if (sp_gc_is_frozen(recv.v.p)) sp_raise_frozen_hash_at(recv.v.p, recv.cls_id);
+  sp_int n = sp_poly_length(other);
+  for (sp_int i = 0; i < n; i++) {
+    sp_RbVal k, v;
+    sp_poly_hash_pair(other, i, &k, &v);
+    SP_GC_ROOT_RBVAL(k); SP_GC_ROOT_RBVAL(v);
+    if (blk && sp_poly_has_key(recv, k)) {   /* no block (`&b` with b nil): the new value */
+      sp_RbVal old = sp_poly_index_poly(recv, k);
+      SP_GC_ROOT_RBVAL(old);
+      sp_int a[16] = {0};
+      a[0] = (k.tag == SP_TAG_OBJ || k.tag == SP_TAG_STR) ? (sp_int)(uintptr_t)k.v.p : sp_poly_to_i(k);
+      a[1] = (old.tag == SP_TAG_OBJ || old.tag == SP_TAG_STR) ? (sp_int)(uintptr_t)old.v.p : sp_poly_to_i(old);
+      a[2] = (v.tag == SP_TAG_OBJ || v.tag == SP_TAG_STR) ? (sp_int)(uintptr_t)v.v.p : sp_poly_to_i(v);
+      _sp_proc_poly_args[0] = k; _sp_proc_poly_args[1] = old; _sp_proc_poly_args[2] = v;
+      _sp_proc_poly_ret = sp_box_nil();
+      sp_proc_call(blk, 3, a);
+      v = _sp_proc_poly_ret;
+    }
+    sp_poly_set_poly(recv, k, v);
+  }
+  return recv;
+}
+/* sum(init) { } on a boxed Array, Hash or Range: init plus each answer */
+static sp_RbVal sp_poly_sum_init_proc(sp_RbVal recv, sp_RbVal init, sp_Proc *blk) {
+  SP_GC_ROOT(blk); SP_GC_ROOT_RBVAL(init);
+  if (!(recv.tag == SP_TAG_OBJ && (sp_poly_is_array_kind(recv.cls_id) || sp_poly_is_hash_kind(recv.cls_id) ||
+        recv.cls_id == SP_BUILTIN_RANGE || recv.cls_id == SP_BUILTIN_ENUMERATOR))) {
+    sp_raise_nomethod(sp_nomethod_msg("sum", recv));
+    return sp_box_nil();
+  }
+  sp_RbVal vals = sp_poly_enum_proc(recv, SP_PENUM_MAP, blk);
+  SP_GC_ROOT_RBVAL(vals);
+  sp_RbVal acc = init;
+  SP_GC_ROOT_RBVAL(acc);
+  sp_int n = sp_poly_length(vals);
+  for (sp_int i = 0; i < n; i++) acc = sp_poly_add(acc, sp_poly_arr_get(vals, i));
+  return acc;
 }
 /* `new` on a Class value that turns out at run time to be String, Array,
    Hash or Object (`kind` 'S', 'A', 'H', 'O'), with the call's arguments
@@ -15849,7 +15970,87 @@ static sp_RbVal sp_class_value_new_fallback(sp_RbVal cls, const char *cn, sp_int
 }
 static void sp_proc_call_spread(sp_Proc *p, sp_RbVal arr, int kwpos);
 static void sp_proc_call_spread_blk(sp_Proc *p, sp_Proc *blk, sp_RbVal arr, int kwpos);
+static sp_RbVal sp_poly_to_h_val(sp_RbVal v);
+static sp_RbVal sp_poly_hash_replace(sp_RbVal recv, sp_RbVal src, int keep_default);
+static sp_RbVal sp_poly_delete_key(sp_RbVal recv, sp_RbVal key);
+static sp_RbVal sp_poly_delete_at(sp_RbVal v, sp_int i);
 static sp_RbVal sp_poly_enum_proc(sp_RbVal recv, int op, sp_Proc *blk) {
+  if (op >= SP_PENUM_SELECT_BANG && op <= SP_PENUM_FILTER_BANG) {
+    const char *opname = op == SP_PENUM_SELECT_BANG ? "select!" : op == SP_PENUM_FILTER_BANG ? "filter!" :
+                         op == SP_PENUM_REJECT_BANG ? "reject!" : op == SP_PENUM_KEEP_IF ? "keep_if" : "delete_if";
+    if (op == SP_PENUM_FILTER_BANG) op = SP_PENUM_SELECT_BANG;
+    int keep = op == SP_PENUM_SELECT_BANG || op == SP_PENUM_KEEP_IF;   /* the block says keep */
+    int nil_if_same = op == SP_PENUM_SELECT_BANG || op == SP_PENUM_REJECT_BANG;
+    SP_GC_ROOT_RBVAL(recv); SP_GC_ROOT(blk);
+    int is_hash = recv.tag == SP_TAG_OBJ && sp_poly_is_hash_kind(recv.cls_id);
+    if (!is_hash && !(recv.tag == SP_TAG_OBJ && sp_poly_is_array_kind(recv.cls_id))) {
+      sp_raise_nomethod(sp_nomethod_msg(opname, recv));
+      return sp_box_nil();
+    }
+    /* frozen is refused before the block runs */
+    if (is_hash && sp_gc_is_frozen(recv.v.p)) sp_raise_frozen_hash_at(recv.v.p, recv.cls_id);
+    if (!is_hash && sp_poly_array_frozen(recv)) sp_raise_frozen_array_at(recv.v.p, recv.cls_id);
+    /* walk a copy of the entries and remove as the block decides, so a
+       break keeps what went before it and the block may change the
+       receiver without the walk reading past its end */
+    sp_PolyArray *snap = sp_PolyArray_new(); SP_GC_ROOT(snap);
+    sp_int n = sp_poly_length(recv);
+    for (sp_int i = 0; i < n; i++) {
+      if (is_hash) {
+        sp_RbVal k, v;
+        sp_poly_hash_pair(recv, i, &k, &v);
+        sp_PolyArray_push(snap, k);
+        sp_PolyArray_push(snap, v);
+      }
+      else sp_PolyArray_push(snap, sp_poly_arr_get(recv, i));
+    }
+    sp_int removed = 0;
+    if (is_hash) {
+      for (sp_int i = 0; i + 1 < snap->len; i += 2) {
+        sp_RbVal ans = sp_penum_call2(blk, snap->data[i], snap->data[i + 1]);
+        if (sp_poly_truthy(ans) != keep && sp_poly_has_key(recv, snap->data[i])) {
+          sp_poly_delete_key(recv, snap->data[i]);
+          removed++;
+        }
+      }
+    }
+    else {
+      for (sp_int i = 0; i < snap->len; i++) {
+        sp_RbVal ans = sp_penum_call1(blk, snap->data[i]);
+        if (sp_poly_truthy(ans) != keep && i - removed < sp_poly_length(recv)) {
+          sp_poly_delete_at(recv, i - removed);
+          removed++;
+        }
+      }
+    }
+    return (nil_if_same && removed == 0) ? sp_box_nil() : recv;
+  }
+  if (op >= SP_PENUM_TRANSFORM_KEYS && op <= SP_PENUM_TRANSFORM_VALUES_BANG) {
+    int keys = op == SP_PENUM_TRANSFORM_KEYS || op == SP_PENUM_TRANSFORM_KEYS_BANG;
+    int bang = op == SP_PENUM_TRANSFORM_KEYS_BANG || op == SP_PENUM_TRANSFORM_VALUES_BANG;
+    if (recv.tag != SP_TAG_OBJ || !sp_poly_is_hash_kind(recv.cls_id)) {
+      sp_raise_nomethod(sp_nomethod_msg(keys ? (bang ? "transform_keys!" : "transform_keys")
+                                             : (bang ? "transform_values!" : "transform_values"), recv));
+      return sp_box_nil();
+    }
+    SP_GC_ROOT_RBVAL(recv); SP_GC_ROOT(blk);
+    if (bang && sp_gc_is_frozen(recv.v.p)) sp_raise_frozen_hash_at(recv.v.p, recv.cls_id);
+    sp_PolyPolyHash *out = sp_PolyPolyHash_new(); SP_GC_ROOT(out);
+    for (sp_int i = 0; i < sp_poly_length(recv); i++) {   /* the block may change it */
+      sp_RbVal k, v;
+      sp_poly_hash_pair(recv, i, &k, &v);
+      SP_GC_ROOT_RBVAL(k); SP_GC_ROOT_RBVAL(v);
+      if (keys) sp_PolyPolyHash_set(out, sp_penum_call1(blk, k), v);
+      else sp_PolyPolyHash_set(out, k, sp_penum_call1(blk, v));
+    }
+    sp_RbVal r = sp_box_obj(out, SP_BUILTIN_POLY_POLY_HASH);
+    return bang ? sp_poly_hash_replace(recv, r, 1) : r;
+  }
+  if (op == SP_PENUM_TO_H) {
+    sp_RbVal pairs = sp_poly_enum_proc(recv, SP_PENUM_MAP, blk);
+    SP_GC_ROOT_RBVAL(pairs);
+    return sp_poly_to_h_val(pairs);
+  }
   SP_GC_ROOT_RBVAL(recv);
   /* The block is this loop's only handle on its own captures: the caller's
      temp holding it can be dead by now, and everything the block
