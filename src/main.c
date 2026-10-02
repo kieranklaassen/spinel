@@ -34,6 +34,12 @@
 #endif
 #include <sys/wait.h>
 #include <sys/stat.h>
+#include <sys/mman.h>
+#include <signal.h>
+#include <pthread.h>
+#ifdef __GLIBC__
+  #include <malloc.h>
+#endif
 
 extern int g_no_root_elision;
 extern int g_no_root_frame;
@@ -387,7 +393,137 @@ static void usage(void) {
 static void work_report(void) { fprintf(stderr, "spinel-work: %llu\n", g_nt_work); }
 #endif
 
+/* ---- the stack the compile runs on -------------------------------------
+   The parser bridge, the analyzer and the code generator all walk the
+   program by recursion, a few kilobytes of C stack per level of nesting, so
+   the stack the loader gave the process decided how deep a program could
+   nest: 8 MB ran out near a thousand levels (near a hundred in a compiler
+   built without optimisation), and the compiler died of SIGSEGV with nothing
+   said. The compile runs on a stack mapped here instead, as the compiled
+   program's body does (sp_main_stack_run in lib/sp_fiber.c), sized and
+   fallen back from the same way, so its depth is this compiler's choice
+   rather than the loader's. When that stack runs out as well, the fault
+   lands in the guard below it and is answered by name.
+
+   A thread rather than a context switch: the compiler links none of the
+   runtime's context primitives, and a thread is what lets a caller name the
+   stack (pthread_attr_setstack). Nothing else runs beside it. */
+#ifndef MAP_NORESERVE
+#define MAP_NORESERVE 0   /* macOS, the BSDs: no overcommit accounting to opt out of */
+#endif
+#ifndef MAP_STACK
+#define MAP_STACK 0
+#endif
+/* The guard is wider than any frame in the compiler, so a frame that is
+   entered past the end of the stack faults inside it rather than beyond. */
+#define CSTACK_GUARD ((size_t)1 << 20)
+static char *g_cstack_base;            /* the mapping: guard, then stack */
+static const char *g_cstack_source;    /* the program being compiled, once known */
+static char g_cstack_msg[160];
+static const int g_cstack_sigs[2] = { SIGSEGV, SIGBUS };
+static struct sigaction g_cstack_was[2];
+typedef struct { int argc; char **argv; int rc; } CStackRun;
+
+static size_t cstack_bytes(void) {
+  const char *e = getenv("SPINEL_COMPILE_STACK");
+  char *end = NULL;
+  unsigned long long v = e && *e ? strtoull(e, &end, 10) : 0;
+  if (v && (*end == 'k' || *end == 'K')) v <<= 10;
+  else if (v && (*end == 'm' || *end == 'M')) v <<= 20;
+  if (!v) {
+#ifdef __OPTIMIZE__
+    v = (size_t)64 << 20;
+#else
+    /* an unoptimised build's frames are several times an -O2 one's */
+    v = (size_t)1024 << 20;
+#endif
+  }
+  long p = sysconf(_SC_PAGESIZE); size_t page = p > 0 ? (size_t)p : 4096;
+  size_t sz = ((size_t)v + page - 1) / page * page;
+  /* the startup frames have to fit, whatever the environment asked for */
+  if (sz < (size_t)1 << 20) sz = (size_t)1 << 20;
+  return sz;
+}
+
+static void cstack_write(const char *s) {
+  size_t n = strlen(s);
+  while (n) { ssize_t w = write(2, s, n); if (w <= 0) break; s += w; n -= (size_t)w; }
+}
+
+/* Runs on the alternate signal stack: the one that faulted has no room. A
+   fault in the guard is the stack having run out, which is a refusal; any
+   other fault is the crash it always was, so the signal gets back the
+   disposition it had and the instruction faults again under it. */
+static void cstack_fault(int sig, siginfo_t *si, void *uctx) {
+  (void)uctx;
+  char *a = si ? (char *)si->si_addr : NULL;
+  if (a && a >= g_cstack_base && a < g_cstack_base + CSTACK_GUARD) {
+    cstack_write("spinel: ");
+    if (g_cstack_source) { cstack_write(g_cstack_source); cstack_write(": "); }
+    cstack_write(g_cstack_msg);
+    _exit(1);
+  }
+  for (int i = 0; i < 2; i++)
+    if (g_cstack_sigs[i] == sig) sigaction(sig, &g_cstack_was[i], NULL);
+  /* one that was sent rather than raised by an instruction has nothing to
+     fault again: pass it on */
+  if (!si || si->si_code <= 0 || si->si_code == SI_USER) raise(sig);
+}
+
+static int spinel_main(int argc, char **argv);
+
+static void *cstack_entry(void *arg) {
+  static char alt[64 * 1024];
+  stack_t ss; ss.ss_sp = alt; ss.ss_size = sizeof alt; ss.ss_flags = 0;
+  if (sigaltstack(&ss, NULL) == 0) {
+    struct sigaction sa; memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = cstack_fault;
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    sigemptyset(&sa.sa_mask);
+    for (int i = 0; i < 2; i++) sigaction(g_cstack_sigs[i], &sa, &g_cstack_was[i]);
+  }
+  CStackRun *r = (CStackRun *)arg;
+  r->rc = spinel_main(r->argc, r->argv);
+  return NULL;
+}
+
+/* If no stack can be had -- any size, down to the floor -- or no thread to
+   run on it, compile where we are: the compiler must not fail to start
+   because it could not reserve a big stack. */
 int main(int argc, char **argv) {
+  size_t want = cstack_bytes();
+  char *base = MAP_FAILED;
+  for (;;) {
+    base = (char *)mmap(NULL, CSTACK_GUARD + want, PROT_READ | PROT_WRITE,
+                        MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK | MAP_NORESERVE, -1, 0);
+    if (base != MAP_FAILED) break;
+    if (want <= (size_t)1 << 20) break;       /* the floor: give up on mapping */
+    want /= 2;                                 /* halve and ask again */
+  }
+  if (base == MAP_FAILED) return spinel_main(argc, argv);
+  mprotect(base, CSTACK_GUARD, PROT_NONE);
+  g_cstack_base = base;
+  snprintf(g_cstack_msg, sizeof g_cstack_msg,
+           "nesting too deep for the compiler's stack (%zu MB; "
+           "SPINEL_COMPILE_STACK=<bytes> sets it)\n", want >> 20);
+  CStackRun run = { argc, argv, 1 };
+#ifdef M_ARENA_MAX
+  /* glibc gives a second thread a heap of its own, grown by a mprotect per
+     step; the compile keeps the heap the process started with */
+  mallopt(M_ARENA_MAX, 1);
+#endif
+  pthread_attr_t at;
+  pthread_t th;
+  if (pthread_attr_init(&at) != 0) return spinel_main(argc, argv);
+  int started = pthread_attr_setstack(&at, base + CSTACK_GUARD, want) == 0 &&
+                pthread_create(&th, &at, cstack_entry, &run) == 0;
+  pthread_attr_destroy(&at);
+  if (!started) return spinel_main(argc, argv);
+  pthread_join(th, NULL);
+  return run.rc;
+}
+
+static int spinel_main(int argc, char **argv) {
 #ifdef SP_WORK_COUNT
   atexit(work_report);
 #endif
@@ -633,6 +769,7 @@ int main(int argc, char **argv) {
      the -O2 assumption. */
   g_opt_level = (opt_level[0] == '0' || opt_level[0] == '1') ? opt_level[0] - '0' : 2;
   if (!file_exists(source)) { fprintf(stderr, "spinel: %s: No such file\n", source); return 1; }
+  g_cstack_source = eval_used ? "-e" : source;
 
   /* Mode-conflict checks mirror the old driver. */
   if (run_mode && (output || c_only || stdout_mode)) {

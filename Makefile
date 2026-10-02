@@ -366,7 +366,7 @@ RE_OBJ = $(patsubst lib/regexp/%.c,build/regexp/%.o,$(RE_SRC))
 
 $(SPINEL): $(SPINEL_OBJ) build/csrc/sp_parse_lib.o build/csrc/re_lit_check.o $(RE_OBJ) $(PRISM_LIB)
 	@mkdir -p bin
-	$(CC) $(CFLAGS) $(SPINEL_OBJ) build/csrc/sp_parse_lib.o build/csrc/re_lit_check.o $(RE_OBJ) $(PRISM_LIB) -lm $(LDFLAGS) -o $@
+	$(CC) $(CFLAGS) $(SPINEL_OBJ) build/csrc/sp_parse_lib.o build/csrc/re_lit_check.o $(RE_OBJ) $(PRISM_LIB) -lm -pthread $(LDFLAGS) -o $@
 	@# Dev convenience: a repo-root `./spinel` pointing at the built binary
 	@# (the installed command is `spinel` too). Best-effort; gitignored.
 	@ln -sf $@ spinel 2>/dev/null || cp $@ spinel 2>/dev/null || true
@@ -385,7 +385,7 @@ build/csrc-work/%.o: src/%.c $(SPINEL_HDRS) | build/csrc
 build/csrc-work/main.o: build/csrc/spinel_rev.h
 build/csrc-work/codegen_util.o: build/csrc/sp_rt_names.h
 $(SPINEL_WORK): $(SPINEL_WORK_OBJ) build/csrc/sp_parse_lib.o build/csrc/re_lit_check.o $(RE_OBJ) $(PRISM_LIB)
-	$(CC) $(CFLAGS) $(SPINEL_WORK_OBJ) build/csrc/sp_parse_lib.o build/csrc/re_lit_check.o $(RE_OBJ) $(PRISM_LIB) -lm $(LDFLAGS) -o $@
+	$(CC) $(CFLAGS) $(SPINEL_WORK_OBJ) build/csrc/sp_parse_lib.o build/csrc/re_lit_check.o $(RE_OBJ) $(PRISM_LIB) -lm -pthread $(LDFLAGS) -o $@
 
 # Wrapper around the system `timeout` that always returns GNU coreutils'
 # exit code (124 on timeout), regardless of which `timeout` is on PATH.
@@ -1496,6 +1496,9 @@ reject-test: $(SPINEL)
 	  else grep -qF "$$why" "$$tmp/sb.out" || \
 	    { echo "reject-test: FAIL ($$t refused without saying why)"; sed -n 1,5p "$$tmp/sb.out"; ok=0; }; fi; \
 	done; \
+	SPINEL_COMPILE_STACK=1m $(SPINEL) test/begin_nested_deep.rb -c --no-line-map -o "$$tmp/dn.c" >"$$tmp/dn.out" 2>&1; rc=$$?; \
+	if [ $$rc -ne 1 ] || ! grep -q "nesting too deep for the compiler's stack (1 MB" "$$tmp/dn.out"; then \
+	  echo "reject-test: FAIL (a compile that runs out of stack ended with status $$rc: it is refused by name)"; sed -n 1,5p "$$tmp/dn.out"; ok=0; fi; \
 	rm -rf "$$tmp"; \
 	if [ $$ok -eq 1 ]; then echo "reject-test: pass"; else exit 1; fi
 
