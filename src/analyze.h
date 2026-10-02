@@ -19,6 +19,12 @@
    the default gates and optcarrot (which pins wrap) see no behavior change. */
 extern int g_promote_mode;
 
+/* Set by main.c from --plan-check (#7100): inference records, per call node,
+   the builtin-op row it answered the call with (c->bop_inf), and codegen
+   reports on stderr every call it emitted through a row inference did not
+   choose. Off in every normal build. */
+extern int g_plan_check;
+
 /* One post-convergence bind pass fills UNKNOWN params from empty
    array-literal args (fst([]) with def fst(a) = a.first). */
 extern int g_final_bind_pass;
@@ -180,9 +186,15 @@ TyKind infer_uncached(Compiler *c, int id);
 /* Pin/read the receiver node the inference should answer as `kind` while
    codegen re-enters a typed emitter for a boxed receiver (the face table in
    types.h). Node -1 clears the pin. */
-void an_set_face_node(int node, TyKind kind);
-int  an_face_node(void);
-TyKind an_face_kind(void);
+/* The face kind node is pinned to (the face table, types.h): the innermost
+   pin, codegen's on the view stack (view_push_face) or inference's own
+   (an_face_push / an_face_pop), answers for its node; TY_UNKNOWN for any
+   other node, or when none is pinned. face_active() says whether one is. */
+TyKind face_of(int node);
+int face_active(void);
+void an_face_push(int node, TyKind kind);
+void an_face_pop(void);
+int view_face_top(int *node, TyKind *kind);   /* codegen_view.c */
 /* Name of a block's idx-th required parameter, or NULL. */
 const char *block_param_name(Compiler *c, int block, int idx);
 /* The name of a numbered block parameter (`_1`..`_9`) on this parameters node.
@@ -370,4 +382,6 @@ int gather_reaches(Compiler *c, Scope *m, const int *argv, int pos_argc, int gat
    parameter, no `**kwrest`, no `**nil`) and `s` declares one: CRuby
    passes them as keywords, which such a method takes positionally. */
 int zsuper_kw_positional(Compiler *c, Scope *s, Scope *pm);
+int an_thread_arg_block(Compiler *c, int n);
+int cap_wrap_mutates_param(Compiler *c, int blk, const char *bp);
 #endif
