@@ -132,6 +132,18 @@ Tracing uses an explicit mark stack of 65536 entries. When it is full,
 `sp_gc_mark` calls `scan` directly instead -- correct, but recursive, so a very
 deep object graph falls back to the C stack.
 
+`sp_gc_mark` is a front. The plain case is a block of the slab, reached while
+one thread drains the mark stack or walks a minor's remembered and pinned
+sets, with no verifier or probe on and the root phase over (`sp_gc_mk_lean`
+is set around those loops and nowhere else). There it stamps and promotes in
+the header, counts, pushes, and ends in `sp_slab_mark_obj`, the chunk bitmaps'
+half of the mark, building no frame. Every other case -- a marker byte of
+`0xf0` or above, a block `malloc` gave, the root phase, `SPINEL_GC_VERIFY`,
+the generational verifier's probes, several markers at once -- is
+`sp_gc_mark_full`, which is where the modes are told apart. A mode added to
+the mark belongs there, and the front stays off for it unless
+`sp_gc_mk_lean_ok` is taught otherwise.
+
 ## Sweeping
 
 **Object heap.** Each worker owns a young list. Every collection sweeps young:

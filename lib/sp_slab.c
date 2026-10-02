@@ -370,8 +370,12 @@ static inline sp_slab_bm *sp_slab_bm_of(sp_slab_chunk *ch) {
 typedef struct { sp_slab_chunk *ch; sp_slab_bm *bm; unsigned w; uint64_t bit; unsigned idx; } sp_slab_loc;
 static inline void sp_slab_locate(const void *p, sp_slab_loc *l) {
   uintptr_t a = (uintptr_t)p;
-  l->ch = sp_slab_chunk_of(p);
-  l->bm = sp_slab_bm_of(l->ch);
+  /* the chunk's index in its arena, once, for both tables: going by way of
+     the chunk pointer (sp_slab_bm_of) took it apart again to find it */
+  sp_slab_arena *ar = (sp_slab_arena *)(a & ~(SP_SLAB_ARENA - 1));
+  size_t ci = (a & (SP_SLAB_ARENA - 1)) / SP_SLAB_CHUNK;
+  l->ch = &ar->ch[ci];
+  l->bm = (sp_slab_bm *)((char *)ar + SP_SLAB_CHUNK) + ci;
   unsigned off = (unsigned)(a & (SP_SLAB_CHUNK - 1));
   unsigned cls = l->ch->cls;
   unsigned idx = sp_slab_recip[cls] ? (unsigned)(((uint64_t)off * sp_slab_recip[cls]) >> 32) : off / sp_slab_csize[cls];
@@ -982,6 +986,14 @@ int sp_slab_mark(const void *p, int aging, int *was_young) {
   *was_young = 1;
   if (!aging) bm_or(&l.bm->old[l.w], l.bit);
   return 1;
+}
+/* The same for an object whose header answers both questions already, with
+   nothing to return: sp_gc_mark's lean front ends in this call. */
+void sp_slab_mark_obj(const void *p) {
+  sp_slab_loc l; sp_slab_locate(p, &l);
+  uint64_t o = bm_or(&l.bm->mark[l.w], l.bit);
+  if (o & l.bit) return;
+  if (!(bm_load(&l.bm->old[l.w]) & l.bit)) bm_or(&l.bm->old[l.w], l.bit);
 }
 /* is the slot marked this cycle? (the string side's "already marked" test) */
 int sp_slab_is_marked(const void *p) {

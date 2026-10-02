@@ -417,6 +417,7 @@ void  sp_slab_unmark(const void *p);
 /* the mark: sets the slot's mark bit, promotes a young slot (unless `aging`
    keeps it young); 0 when the slot was already marked this cycle */
 int   sp_slab_mark(const void *p, int aging, int *was_young);
+void  sp_slab_mark_obj(const void *p);   /* the same for an object, answering nothing */
 extern unsigned sp_slab_epoch;
 extern SP_TLS unsigned long sp_slab_frees;   /* this thread's explicit frees, counted */
 void  sp_slab_epoch_flip(void);          /* under the barrier: new allocations go to the other parity */

@@ -135,6 +135,11 @@ static SP_TLS int sp_gc_mark_cap = 0;
    drain ends (a shared counter per marked object would bounce a line
    between the markers on every object). */
 static SP_TLS size_t sp_gc_mkl_marked = 0, sp_gc_mkl_bytes = 0, sp_gc_mkl_young = 0;
+/* sp_gc_mark may take its lean front: set for a serial drain and for a
+   minor's walk of the remembered and pinned sets, when no verifier or probe
+   is on and the root phase is over, and at no other time. */
+static int sp_gc_mk_lean = 0;
+static int sp_gc_mk_lean_ok(void);
 static int sp_gc_par_mark = 0;   /* the drain is running on several threads */
 static SP_TLS int sp_gc_mk_is_collector=0;
 unsigned long long sp_gc_ph_mk_by_helpers=0, sp_gc_ph_mk_spills=0, sp_gc_ph_mk_takes=0;
@@ -398,6 +403,7 @@ void sp_gc_hdr_flags_check(void) {
   }
 }
 #endif
+static int sp_gc_mk_lean_ok(void) { return !sp_gc_verify && !sp_gc_verify_probe_on && !sp_gc_young_probe_on && !sp_gc_root_phase; }
 /* The drain: on the collector alone, or on the collector and the helpers the
    scheduler lends it. The verifiers and probes read state the helpers do not
    keep, so they drain serially. */
@@ -411,7 +417,9 @@ static void sp_gc_mark_drain_all(void) {
     return;
   }
 #endif
+  sp_gc_mk_lean = sp_gc_mk_lean_ok();
   sp_gc_mark_drain();
+  sp_gc_mk_lean = 0;
 }
 /* What this thread's marking counted on the string side: bytes reached, and
    of those the young ones the mark promoted (the bitmap strings; a string
@@ -448,7 +456,11 @@ void sp_gc_mark_str(const char *s) {
   ((unsigned char *)s)[-1] = mk;
 #endif
 }
-void sp_gc_mark(void*obj){if(!obj)return;unsigned char pm=((unsigned char*)obj)[-1];if((pm|0x04)==0xfe){sp_gc_mark_str((const char*)obj);return;}
+/* The whole of the object mark: every mode the collector has (the verifiers
+   and their probes, the root phase, several markers at once, a block off the
+   slab). sp_gc_mark below is its front, and comes here for all but the
+   plain case. */
+static SP_NOINLINE void sp_gc_mark_full(void*obj){if(!obj)return;unsigned char pm=((unsigned char*)obj)[-1];if((pm|0x04)==0xfe){sp_gc_mark_str((const char*)obj);return;}
   if(pm==0xfc||pm==0xff||pm==0xfd||pm==0xf1||pm==0xfb||pm==0xf8)return;sp_gc_hdr*h=(sp_gc_hdr*)((char*)obj-sizeof(sp_gc_hdr));if(sp_gc_verify&&!sp_gc_obj_registered(h))sp_gc_verify_fail(obj,h);if(sp_gc_verify_probe_on){if(!h->old&&h->marked==sp_gc_verify_probe)sp_gc_verify_probe_hit=1;return;}if(sp_gc_young_probe_on){if(!h->old)sp_gc_young_probe_hit=1;return;}if(sp_gc_root_phase&&!h->old)h->aged=1;
   int was_young=0;
 #ifdef SP_THREADS
@@ -499,6 +511,41 @@ void sp_gc_mark(void*obj){if(!obj)return;unsigned char pm=((unsigned char*)obj)[
     if(sp_gc_mark_cap<(1<<28)){int nc=sp_gc_mark_cap*2;void**ns=(void**)realloc(sp_gc_mark_stack,sizeof(void*)*(size_t)nc);if(ns){sp_gc_mark_stack=ns;sp_gc_mark_cap=nc;}}}
 if(sp_gc_mark_stack&&sp_gc_mark_top<sp_gc_mark_cap){sp_gc_mark_stack[sp_gc_mark_top++]=obj;}
 else{h->scan(obj);}}}
+/* The front's push onto a full stack: grown, or the object scanned in place
+   when there is no growing it, as sp_gc_mark_full does. */
+static SP_NOINLINE void sp_gc_mark_push_grow(void*obj,sp_gc_hdr*h){
+  sp_slab_mark_obj(h);
+  if(sp_gc_mark_stack&&sp_gc_mark_cap<(1<<28)){int nc=sp_gc_mark_cap*2;void**ns=(void**)realloc(sp_gc_mark_stack,sizeof(void*)*(size_t)nc);if(ns){sp_gc_mark_stack=ns;sp_gc_mark_cap=nc;}}
+  if(sp_gc_mark_stack&&sp_gc_mark_top<sp_gc_mark_cap){sp_gc_mark_stack[sp_gc_mark_top++]=obj;}
+  else{h->scan(obj);}
+}
+/* The plain case, which is nearly every mark of a drain: a slab object,
+   reached by the one thread marking, with no verifier or probe watching
+   (sp_gc_mk_lean). It is sp_gc_mark_full's serial arm for such an object and
+   writes what that writes -- the stamp, the counts, the promotion in the
+   header and in the chunk's bitmaps, the push -- with no call on its path
+   but the last, so it builds no frame. sp_gc_mark_full reads four mode
+   words and saves five registers and a stack guard around calls a plain
+   mark does not make: 152 instructions an object with sp_slab_mark, against
+   89 here. */
+void sp_gc_mark(void*obj){
+  if(!obj)return;
+  sp_gc_hdr*h=(sp_gc_hdr*)((char*)obj-sizeof(sp_gc_hdr));
+  /* every tag byte that is not an object's is 0xf0 or above (the list is at
+     the head of sp_gc_mark_full, which sorts them out) */
+  if(((unsigned char*)obj)[-1]>=0xf0||!sp_gc_mk_lean||!sp_slab_owns(h)){sp_gc_mark_full(obj);return;}
+  if(h->marked==sp_gc_mark_gen)return;
+  if(sp_gc_minor&&h->old)return;
+  size_t sz=h->size;
+  sp_gc_mkl_marked++;sp_gc_mkl_bytes+=sz;
+  if(!h->old){sp_gc_mkl_young+=sz;sp_gc_mkl_promo+=sz;}
+  h->marked=sp_gc_mark_gen;h->old=1;   /* marked, and promoted if it was young */
+  if(h->scan){
+    if(sp_gc_mark_top>=sp_gc_mark_cap){sp_gc_mark_push_grow(obj,h);return;}
+    sp_gc_mark_stack[sp_gc_mark_top++]=obj;
+  }
+  sp_slab_mark_obj(h);
+}
 /* The thread's counts, folded in. The collector folds its own at the end of
    the mark; a helper folds when its drain ends. */
 static void sp_gc_mkl_fold(void){
@@ -524,7 +571,7 @@ void sp_gc_mark_drain(void){
        reference found here is a field of THIS object, and the group label on
        its own says nothing about which. */
     if(sp_gc_verify){sp_gc_dbg_phase="scan";sp_gc_dbg_ctx=obj;}
-    if(h->scan)h->scan(obj);}
+    h->scan(obj);}   /* only an object with a scan is pushed */
 }
 /* sp_gc_stat_now is defined with the rest of the phase clock, below: the split
    here is the same measurement, taken one level down. */
@@ -1276,6 +1323,7 @@ void sp_gc_collect(void){
        only re-marks what the cycle cannot free. Clearing the flag first made
        the drain do exactly that: 27% (gcbench) to 48% (threaded render) of a
        minor's marked objects were old, and its time followed the count. */
+    sp_gc_mk_lean = sp_gc_mk_lean_ok();
     for(int ri=0;ri<sp_gc_nremembered;ri++){
       sp_gc_hdr *rh=(sp_gc_hdr*)sp_gc_remembered[ri]-1;
       if(sp_gc_verify){sp_gc_dbg_phase="remembered";sp_gc_dbg_ctx=sp_gc_remembered[ri];}
@@ -1288,6 +1336,7 @@ void sp_gc_collect(void){
       if(sp_gc_verify){sp_gc_dbg_phase="pinned";sp_gc_dbg_ctx=sp_gc_pinned[pi];}
       if(ph->scan) ph->scan(sp_gc_pinned[pi]);
     }
+    sp_gc_mk_lean = 0;
     if(sp_gc_verify){sp_gc_dbg_phase="minor-drain";sp_gc_dbg_ctx=NULL;}
     sp_gc_mark_drain_all();
     sp_gc_mkl_fold();
