@@ -214,6 +214,11 @@ if mode == :against
       FileUtils.rm_rf(ref_tmp)
     end
   end
+  if opts[:set] == "all"
+    # as below: `all` is every benchmark that does not start threads
+    threaded = sides.values.map { |rows| rows.select { |r| r.status == "uses threads" }.map(&:name) }.inject(:&)
+    sides = sides.transform_values { |rows| rows.reject { |r| threaded.include?(r.name) } }
+  end
   report = sl_compare(sides["before"], sides["after"])
   puts report.lines
   failures = report.failures
