@@ -614,7 +614,11 @@ const char*sp_str_repeat(const char*s,sp_int n){SP_GC_ROOT_STR(s);
   size_t total=(size_t)n*l;
   if(total>(size_t)(1u<<30)) sp_raise_cls("ArgumentError","string size too big");
   char*r=sp_str_alloc_raw(total+1);
-  for(sp_int i=0;i<n;i++)memcpy(r+(l*i),s,l);
+  /* one copy of s, then what is filled is copied onto what is not, so the
+     copies double: a call per repetition made `"x" * 450_000` eighteen
+     times CRuby's cost */
+  memcpy(r,s,l);
+  for(size_t done=l;done<total;){size_t k=done<total-done?done:total-done;memcpy(r+done,r,k);done+=k;}
   r[total]=0;
   sp_str_set_len(r,total);
   return sp_str_bin_from(r,s);
