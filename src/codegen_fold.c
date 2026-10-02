@@ -1,4 +1,5 @@
 #include "codegen_internal.h"
+#include "call_plan.h"
 
 /* Defined lower in this file; declared here so the collecting emitters above
    its definition (the hash block-walk binder, flat_map) can route a block's
@@ -96,7 +97,25 @@ static int emit_blk_proc_tmp(Compiler *c, int blk_node) {
 void emit_method_call(Compiler *c, int id, Buf *b) {
   const NodeTable *nt = c->nt;
   const char *name = nt_str(nt, id, "name");
-  int mi = comp_method_index(c, name);
+  /* the target is the call's plan (call_plan.c): a top-level def, reached
+     bare or through a retargeted send. A plan of another kind does not
+     serve this site, which then takes the top-level def by name as it
+     always did; --plan-check reports both that fallback and any plan that
+     names another method than the by-name lookup. */
+  const CallPlan *pl = cplan_user(c, id);
+  int mi;
+  if (pl->mi >= 0 && (pl->via == UC_TOP || pl->via == UC_SEND_BLIND)) {
+    mi = pl->mi;
+    if (g_plan_check) cplan_served("emit_method_call");
+    if (g_plan_check && mi != comp_method_index(c, name))
+      fprintf(stderr, "plan-check: cplan-conflict: emit_method_call node %d %s: plan %d, by name %d\n",
+              id, name ? name : "?", mi, comp_method_index(c, name));
+  }
+  else {
+    mi = comp_method_index(c, name);
+    if (g_plan_check)
+      fprintf(stderr, "plan-check: cplan-fallback: emit_method_call node %d %s\n", id, name ? name : "?");
+  }
   Scope *m = mi >= 0 ? &c->scopes[mi] : NULL;
   /* a top-level alias reaches the target's one function: hand it the spelled
      name for __callee__ (#3729) */
@@ -708,6 +727,17 @@ int emit_transform_hash_expr(Compiler *c, int id, Buf *b) {
   if (!shn) return 0;
   TyKind dt = comp_ntype(c, id);
   const char *dhn = ty_hash_cname(dt);
+  /* a call typed boxed (a dispatch's builtin arm asks this way): build the
+     Hash of any keys and values, and box it */
+  if (!dhn && dt == TY_POLY) {
+    Buf hb; memset(&hb, 0, sizeof hb);
+    int v = view_push(c, id, TY_POLY_POLY_HASH);
+    int ok = emit_transform_hash_expr(c, id, &hb);
+    view_pop(c, v);
+    if (ok) emit_boxed_text(c, TY_POLY_POLY_HASH, hb.p ? hb.p : "NULL", b);
+    free(hb.p);
+    return ok;
+  }
   if (!dhn) return 0;
   const char *p0_orig = block_param_name(c, block, 0);
   const char *p0 = p0_orig ? rename_local(p0_orig) : NULL;
@@ -4135,9 +4165,9 @@ int emit_minmax_cmp_expr(Compiler *c, int id, Buf *b) {
     g_argov_node[g_n_argov] = recv;
     snprintf(g_argov_text[g_n_argov], sizeof g_argov_text[0], "_t%d", ta);
     g_n_argov++;
-    TyKind sv = c->ntype[recv]; c->ntype[recv] = TY_POLY_ARRAY;
+    int v = view_push(c, recv, TY_POLY_ARRAY);
     int handled = emit_minmax_cmp_expr(c, id, b);
-    c->ntype[recv] = sv;
+    view_pop(c, v);
     g_n_argov--;
     return handled;
   }
@@ -4153,9 +4183,9 @@ int emit_minmax_cmp_expr(Compiler *c, int id, Buf *b) {
     g_argov_node[g_n_argov] = recv;
     snprintf(g_argov_text[g_n_argov], sizeof g_argov_text[0], "_t%d", ta);
     g_n_argov++;
-    TyKind sv = c->ntype[recv]; c->ntype[recv] = TY_INT_ARRAY;
+    int v = view_push(c, recv, TY_INT_ARRAY);
     int handled = emit_minmax_cmp_expr(c, id, b);
-    c->ntype[recv] = sv;
+    view_pop(c, v);
     g_n_argov--;
     return handled;
   }
@@ -4355,9 +4385,9 @@ int emit_collect_expr(Compiler *c, int id, Buf *b) {
       g_argov_node[g_n_argov] = es_recv;
       snprintf(g_argov_text[g_n_argov], sizeof g_argov_text[0], "_t%d", ta);
       g_n_argov++;
-      TyKind sv = c->ntype[es_recv]; c->ntype[es_recv] = TY_INT_ARRAY;
+      int v = view_push(c, es_recv, TY_INT_ARRAY);
       int done = emit_collect_expr(c, id, b);
-      c->ntype[es_recv] = sv;
+      view_pop(c, v);
       g_n_argov--;
       return done;
     }
@@ -10185,7 +10215,7 @@ static int arm_string_abi(const LocalVar *p) {
    list: an override with another count, a rest, a keyword or a block slot got
    a C call with the wrong number of arguments, and one with a default got the
    base method's default instead of its own (#4866). */
-static int dispatch_arms_disagree(Compiler *c, int cid, const char *name) {
+int dispatch_arms_disagree(Compiler *c, int cid, const char *name) {
   Scope *first = NULL;
   for (int k = 0; k < c->nclasses; k++) {
     if (!is_descendant(c, k, cid)) continue;
@@ -10421,7 +10451,58 @@ void emit_dispatch(Compiler *c, int cid, const char *name,
                           const char *selfptr, int argsNode, int blk_node, Buf *b) {
   const NodeTable *nt = c->nt;
   int defcls = cid;
-  int mi = comp_method_in_chain(c, cid, name, &defcls);
+  /* the target is the plan of the call being emitted (g_nd_call_id) when
+     this dispatch is that call's own name: the node's own plan when it is
+     cid's lookup, otherwise the plan read with cid for its self or
+     receiver (an instance_exec self, a body emitted for an inheriting
+     class, a poly arm). A dispatch under another name (an operator answered
+     through another method, a to_ary probe), and under --plan-check as the
+     assertion, looks the name up itself */
+  CallPlan dpc;
+  const CallPlan *dpl = NULL;
+  int mi = -1, served = 0;
+  if (g_nd_call_id >= 0) {
+    const char *cnm = nt_str(nt, g_nd_call_id, "name");
+    if (cnm && sp_streq(cnm, name)) {
+      dpc = *cplan_user(c, g_nd_call_id);
+      if (!(dpc.chain && dpc.via == UC_INST && dpc.owner_ci == cid))
+        dpc = *cplan_user_in(c, g_nd_call_id, cid,
+                             g_ie_class_id == cid ? CPX_IE : g_emitting_class_id == cid ? CPX_EMIT : CPX_ARM);
+      served = 1;
+      if (dpc.chain && dpc.via == UC_INST && dpc.owner_ci == cid) {
+        mi = dpc.mi;
+        if (mi >= 0) defcls = c->scopes[mi].class_id;
+        dpl = &dpc;
+      }
+      if (g_plan_check) cplan_served("dispatch");
+    }
+    else if (cnm) {
+      /* an operator the plan answers through another of the class's methods
+         (`!=` through `==`, the comparisons through `<=>`): the dispatch of
+         that method is the plan's */
+      dpc = *cplan_user(c, g_nd_call_id);
+      if (!dpc.chain && dpc.via == UC_INST && dpc.owner_ci == cid && dpc.mi >= 0 &&
+          c->scopes[dpc.mi].name && sp_streq(c->scopes[dpc.mi].name, name)) {
+        served = 1;
+        mi = dpc.mi;
+        defcls = c->scopes[mi].class_id;
+        dpl = &dpc;
+        if (g_plan_check) cplan_served("dispatch");
+      }
+    }
+  }
+  if (g_plan_check || !served) {
+    int odef = cid;
+    int omi = comp_method_in_chain(c, cid, name, &odef);
+    if (!served) {
+      if (g_plan_check && omi >= 0)
+        fprintf(stderr, "plan-check: cplan-fallback: dispatch node %d %s\n", g_nd_call_id, name);
+      mi = omi; defcls = odef;
+    }
+    else if (omi != mi || odef != defcls)
+      fprintf(stderr, "plan-check: cplan-conflict: dispatch node %d %s: plan %d/%d, lookup %d/%d\n",
+              g_nd_call_id, name, mi, defcls, omi, odef);
+  }
   Scope *m = mi >= 0 ? &c->scopes[mi] : NULL;
   /* An alias shares the definition's function, so `__callee__` in the body can
      only learn the spelled name from here (#3729). */
@@ -10434,13 +10515,14 @@ void emit_dispatch(Compiler *c, int cid, const char *name,
   TyKind ret = m ? m->ret : TY_UNKNOWN;
   /* Unify return type across all descendant implementations so that even
      when the base method has TY_VOID/TY_UNKNOWN, a subclass override
-     with a real return type makes the dispatch virtual and typed. */
-  for (int k = 0; k < c->nclasses; k++) {
-    if (!is_descendant(c, k, cid)) continue;
-    int kd = -1;
-    int kmi = comp_method_in_chain(c, k, name, &kd);
-    if (kmi >= 0 && (TyKind)c->scopes[kmi].ret != TY_UNKNOWN)
-      ret = ty_unify(ret, (TyKind)c->scopes[kmi].ret);
+     with a real return type makes the dispatch virtual and typed. A
+     yielding override answers what this call's block makes it answer, as
+     inference typed the call (dispatch_ret_over), when the dispatch is the
+     call's own. */
+  {
+    const char *cnm = g_nd_call_id >= 0 ? nt_str(nt, g_nd_call_id, "name") : NULL;
+    ret = dispatch_ret_over(c, cid, name, 0, mi, ret,
+                            cnm && sp_streq(cnm, name) ? g_nd_call_id : -1);
   }
   /* A yielding method answers what this call's block makes it answer, which
      its scope's return type (the last splice's) does not say: the arms are its
@@ -10457,7 +10539,20 @@ void emit_dispatch(Compiler *c, int cid, const char *name,
   /* Force a runtime switch when there is no base implementation (m == NULL):
      a template method defined only in subclasses cannot be called directly as
      sp_<base>_<name>, so even a single descendant impl must dispatch virtually. */
-  int impl_n = dispatch_impl_count(c, cid, name);
+  /* the form -- one method, a switch, a switch whose arms lay the arguments
+     out each for itself -- is the plan's (cplan_dispatch_form); without
+     one (a dispatch under another name the plan has no word for), and
+     under --plan-check as the assertion, it is counted here */
+  int form = dpl ? dpl->dispatch : -1;
+  if (!dpl || g_plan_check) {
+    int impl_n = dispatch_impl_count(c, cid, name);
+    int sw = impl_n > 1 || (!m && impl_n >= 1);
+    int oform = !sw ? (m ? CP_DIRECT : CP_NONE) : dispatch_arms_disagree(c, cid, name) ? CP_PER_ARM : CP_SWITCH;
+    if (!dpl) form = oform;
+    else if (form != oform)
+      fprintf(stderr, "plan-check: cplan-conflict: dispatch-form node %d %s: plan %d, counted %d (%d implementations)\n",
+              g_nd_call_id, name, form, oform, impl_n);
+  }
   /* A void/nil-returning method that subclasses override must still dispatch on
      the runtime class -- an implicit-self call to it from a base method (e.g.
      `def run; validate; end` where each subclass overrides `validate`) would
@@ -10466,10 +10561,11 @@ void emit_dispatch(Compiler *c, int cid, const char *name,
      void dispatch uses a dummy int temp (its value is discarded). */
   int ret_is_void = (ret == TY_VOID || ret == TY_NIL);
   TyKind disp_ret = ret_is_void ? TY_INT : ret;
-  int virtual = (is_scalar_ret(ret) || ret_is_void) && (impl_n > 1 || (!m && impl_n >= 1));
+  /* the switch, for a return it can carry */
+  int virtual = (is_scalar_ret(ret) || ret_is_void) && form >= CP_SWITCH;
   nd_stamp(g_nd_call_id, virtual ? ND_SWITCH : ND_DIRECT);
   if (!virtual && m) nd_callee(c, g_nd_call_id, mi, defcls, 0);
-  if (virtual && dispatch_arms_disagree(c, cid, name)) {
+  if (virtual && form == CP_PER_ARM) {
     emit_dispatch_per_arm(c, cid, name, selfptr, argsNode, blk_node, mi, defcls, ret, disp_ret, b);
     return;
   }
