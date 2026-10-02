@@ -111,10 +111,13 @@ def measure_one(spinel, name, dir, tools)
   allocs = sl_alloc_count(File.read(File.join(dir, "#{name}.alloc")))
   rss_kb = File.read(File.join(dir, "#{name}.rss")).to_i
 
-  ok = run_ok?(RUN_ENV, tools[:valgrind], *CALLGRIND, "--callgrind-out-file=#{name}.cg", "./#{name}", chdir: dir, out: File::NULL)
-  cg = ok ? File.read(File.join(dir, "#{name}.cg")) : ""
+  # The run above reports each allocation, which turns the fast allocation
+  # paths off; this is the run that takes them, so its output is checked too.
+  ok = run_ok?(RUN_ENV, tools[:valgrind], *CALLGRIND, "--callgrind-out-file=#{name}.cg", "./#{name}", chdir: dir, out: out)
+  return failed(name, "FAILED: output differs from .expected under callgrind") unless ok && File.binread(out).gsub("\r\n", "\n") == want
+  cg = File.read(File.join(dir, "#{name}.cg"))
   row = sl_row_from_callgrind(name, cg)
-  return failed(name, "FAILED: callgrind run") unless ok && row.ir > 0 && row.ir == sl_callgrind_total(cg)
+  return failed(name, "FAILED: callgrind run") unless row.ir > 0 && row.ir == sl_callgrind_total(cg)
   SlRow.new(name, "ok", row.ir, row.layers, allocs, rss_kb)
 end
 
