@@ -102,6 +102,13 @@
 # define SP_UNUSED
 #endif
 
+/* On a type whose lvalues may read or write an object of any other type */
+#if SP_HAS_ATTRIBUTE(may_alias) || (!defined(SP_PORTABLE) && SP_GNUC_PREREQ(3, 3))
+# define SP_MAY_ALIAS __attribute__((may_alias))
+#else
+# define SP_MAY_ALIAS
+#endif
+
 #if SP_HAS_ATTRIBUTE(format) || (!defined(SP_PORTABLE) && SP_GNUC_PREREQ(3, 0))
 # define SP_PRINTF_FORMAT(fmt, first) __attribute__((format(printf, fmt, first)))
 #else
