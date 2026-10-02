@@ -47,3 +47,18 @@ Fixed in 4305ef91. A build with every decision denied must now exit 0 as well as
 - No model identifier in the five messages or the diff; one `Co-Authored-By: Claude Code` trailer each.
 
 The full gate is running; the old and new strings for the PR description follow when it finishes.
+
+## Finding 5 (raised on 52dc3bfc at 20:59 UTC): declined, no new commit
+
+src/main.c:259, Minor: "Keep validation and writing on the same file descriptor."
+
+The claim is true as far as it goes: the path is looked up for the check, then again when decide.c empties the log and again when it writes it, so a directory entry replaced in between would be written without having been looked at. Declined because the check is a guard against the user's own slip, not a boundary. `refuse_overwrite` for `-o`, a few lines above it and not part of this PR, has the same shape (open, read the banner, close; `write_text_file` opens the path again), and whoever can replace the entry in that window can already write the file. The no-follow open the finding asks for would also refuse a symlink to an earlier log, which works today.
+
+**Reply for the thread (final):**
+
+Not changing this one. The check guards against naming the wrong file by mistake (`--decisions-log=app.rb`); it is not a boundary against a file being swapped under the compiler while it runs. `refuse_overwrite` for `-o`, just above it, works the same way: it reads the banner, closes, and `write_text_file` opens the path again. Whoever can replace the directory entry in that window can already write the file. Opening with no-follow would also refuse a symlink to an earlier log, which works today.
+
+## Two small points from the second reading of 52dc3bfc: no action
+
+- The C test accepts a doubled hyphen (`a--b@`) where the Makefile's regex for `DECISION_KINDS` does not. No kind has one, and the difference only makes the C test take one more unlikely file for a log. Not worth a commit by itself; it can ride with the next change to that function if there is one.
+- The README sentence does not say that an empty file is replaced or that a pipe is not looked into. The comment on `refuse_log_overwrite` does; the README says what a user needs, that an earlier log is replaced and another file is refused.
