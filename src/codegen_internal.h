@@ -1368,10 +1368,47 @@ int recv_is_const(const NodeTable *nt, int recv, const char *name);
 int sp_is_fiber_storage_recv(const NodeTable *nt, int recv);
 int emit_ctor_yield_inline(Compiler *c, int id, int ci, Buf *b);
 void emit_call(Compiler *c, int id, Buf *b);
-/* Receiver table emitters return 1 when handled, 0 to keep falling through. */
-int emit_call_by_recv_type(Compiler *c, int id, int recv, TyKind rt,
-                          const char *name, Buf *b);
-int emit_tms_call(Compiler *c, int id, int recv, const char *name, Buf *b);
+/* A builtin call the builtin-op table covers (codegen_ops.c): 1 when it
+   emitted the call, 0 to keep falling through the chain. */
+struct BuiltinOp;
+typedef struct {
+  int id, recv, argc;
+  TyKind rt;
+  const char *name;
+  const struct BuiltinOp *op;
+  const char *rtext;   /* the receiver's C when the caller already rendered it */
+} BopCtx;
+int emit_builtin_op(Compiler *c, int id, int recv, TyKind rt, const char *name, Buf *b);
+/* the same, the receiver already rendered as rtext by a family that renders
+   it once before its own arms */
+int emit_builtin_op_text(Compiler *c, int id, int recv, TyKind rt, const char *name,
+                         const char *rtext, Buf *b);
+
+/* codegen_view.c: a node's cached type overridden for one nested emission.
+   view_push answers a token for the matching view_pop; a recovery point
+   saves view_depth() and view_unwind()s back to it after a refusal. */
+int view_push(Compiler *c, int id, TyKind t);
+void view_pop(Compiler *c, int tok);
+int view_depth(void);
+void view_unwind(int depth);
+/* The concurrency handles' row emitters (codegen_call_concurrency.c) */
+int emit_op_thread_set_report(Compiler *c, const BopCtx *x, Buf *b);
+int emit_op_thread_raise(Compiler *c, const BopCtx *x, Buf *b);
+int emit_op_thread_tls(Compiler *c, const BopCtx *x, Buf *b);
+int emit_op_mutex_sleep(Compiler *c, const BopCtx *x, Buf *b);
+int emit_op_condvar_wait(Compiler *c, const BopCtx *x, Buf *b);
+int emit_op_queue_push(Compiler *c, const BopCtx *x, Buf *b);
+int emit_op_queue_pop(Compiler *c, const BopCtx *x, Buf *b);
+int emit_op_fiber_resume(Compiler *c, const BopCtx *x, Buf *b);
+int emit_op_fiber_transfer(Compiler *c, const BopCtx *x, Buf *b);
+int emit_op_fiber_raise(Compiler *c, const BopCtx *x, Buf *b);
+/* fn(recv, value, count) for Fiber#resume / #transfer, fn(value) for
+   Fiber.yield (recv NULL) (codegen_call.c) */
+void emit_fiber_pass_call(Compiler *c, const char *fn, const char *recv,
+                          int argc, const int *argv, Buf *b);
+/* Thread#raise / Fiber#raise on the receiver text rtext (codegen_call.c) */
+void emit_concurrency_raise(Compiler *c, const char *rtext, int argc, const int *argv,
+                            const char *ctype, char pfx, const char *fn, Buf *b);
 /* Decode a CallNode's positional arguments: sets *argc and returns the argv
    array (NULL when the node has no arguments). Shared by the call emitters. */
 const int *call_args(const NodeTable *nt, int id, int *argc);
@@ -1628,4 +1665,5 @@ void emit_index_opw_unhoist(void);
 extern const char *g_iow_recv_ref;
 extern const char *g_iow_key_ref;
 
+void refuse_yield_capwrap(Compiler *c, int blk, int yc, const int *yv);
 #endif
