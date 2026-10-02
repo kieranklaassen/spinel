@@ -3519,19 +3519,26 @@ static int sp_src_in_comment(const char *source, const char *at) {
   return 0;
 }
 
-/* Does the source mention `name` as a method: `.name` or a bare `name`
-   followed by `(`, ` {`, ` do` or an argument, outside a comment? A textual
-   test, as the Set splice's is: a false positive costs the parse of a small
-   file, and the names never reach the generated C uncalled. */
+/* Does the source mention `name` as a method, outside a comment: the word
+   by itself, whatever ends it (`.name`, `recv::name`, a bare `name` before
+   `(`, a space, `;`, `{`, `,`, `]`, `.`, `==`), or the `&:name` the sugar
+   pass makes a block of? Not a variable of another kind (`@name`, `$name`),
+   a label (`name: 1`) or any other Symbol. A textual test, as the Set
+   splice's is: a false positive costs the parse of a small file, and the
+   names never reach the generated C uncalled. */
 static int sp_source_mentions_method(const char *src, const char *name) {
   size_t nl = strlen(name);
   const char *p = src;
   while ((p = strstr(p, name)) != NULL) {
     const char *after = p + nl;
     unsigned char ac = (unsigned char)*after;
-    int word_end = !((ac >= 'a' && ac <= 'z') || (ac >= 'A' && ac <= 'Z') || (ac >= '0' && ac <= '9') || ac == '_' || ac == '?' || ac == '!' || ac == '=');
+    int word_end = !((ac >= 'a' && ac <= 'z') || (ac >= 'A' && ac <= 'Z') || (ac >= '0' && ac <= '9') || ac == '_' || ac == '?' || ac == '!');
     unsigned char bc = p > src ? (unsigned char)p[-1] : ' ';
-    int word_start = !((bc >= 'a' && bc <= 'z') || (bc >= 'A' && bc <= 'Z') || (bc >= '0' && bc <= '9') || bc == '_' || bc == '@' || bc == '$' || bc == ':');
+    int word_start = !((bc >= 'a' && bc <= 'z') || (bc >= 'A' && bc <= 'Z') || (bc >= '0' && bc <= '9') || bc == '_' || bc == '@' || bc == '$');
+    /* after a `:` the name is a call as `&:name` and as `recv::name`, and
+       any other Symbol is not; before a single `:` it is a label */
+    if (bc == ':' && !(p - src >= 2 && (p[-2] == '&' || p[-2] == ':'))) word_start = 0;
+    if (ac == ':' && after[1] != ':') word_end = 0;
     p = after;
     if (!word_end || !word_start) continue;
     /* not in a comment: a `#` between the line start and the name is asked
@@ -3542,8 +3549,7 @@ static int sp_source_mentions_method(const char *src, const char *name) {
     int in_comment = 0;
     for (const char *k = ls; k < p - nl; k++) if (*k == '#') { in_comment = sp_src_in_comment(src, p - nl); break; }
     if (in_comment) continue;
-    if (bc == '.') return 1;
-    if (ac == '(' || ac == ' ' || ac == '\n') return 1;
+    return 1;
   }
   return 0;
 }
