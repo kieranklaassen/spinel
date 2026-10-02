@@ -595,6 +595,13 @@ void emit_p_one(Compiler *c, int arg, Buf *b, int indent) {
                   " printf(\"#<Dir:%%s>\\n\", _dp ? _dp : \"\"); }"
                   " else fputs(\"nil\\n\", stdout); }\n", dv, dv);
   }
+  else if (t == TY_PROCESS_STATUS) {
+    /* `$?` is nil (NULL) until a child has been waited for */
+    int sv = ++g_tmp;
+    buf_printf(b, "{ sp_ProcessStatus *_t%d = (", sv); emit_expr(c, arg, b);
+    buf_printf(b, "); sp_puts_line(_t%d ? sp_process_status_to_s(_t%d->pid, _t%d->status, 1) : \"nil\"); }\n",
+               sv, sv, sv);
+  }
   else if (t == TY_OPENSTRUCT) {
     buf_puts(b, "{ sp_OpenStruct *_po = ("); emit_expr(c, arg, b);
     buf_puts(b, "); sp_puts_line(_po ? sp_OpenStruct_inspect(_po) : \"nil\"); }\n");
@@ -614,7 +621,10 @@ void emit_p_one(Compiler *c, int arg, Buf *b, int indent) {
     const char *hn = t == TY_MUTEX ? "Thread::Mutex"
                    : t == TY_QUEUE ? "Thread::Queue" : "Thread::ConditionVariable";
     buf_puts(b, "{ void *_po = (void *)("); emit_expr(c, arg, b);
-    buf_printf(b, "); sp_puts_line(_po ? sp_sprintf(\"#<%s:0x%%016llx>\", (unsigned long long)(uintptr_t)_po) : \"nil\"); }\n", hn);
+    if (t == TY_QUEUE)
+      buf_puts(b, "); sp_puts_line(_po ? sp_sprintf(\"#<%s:0x%016llx>\", sp_Queue_class_name((sp_queue *)_po), (unsigned long long)(uintptr_t)_po) : \"nil\"); }\n");
+    else
+      buf_printf(b, "); sp_puts_line(_po ? sp_sprintf(\"#<%s:0x%%016llx>\", (unsigned long long)(uintptr_t)_po) : \"nil\"); }\n", hn);
   }
   else if (ty_is_object(t)) {
     /* p obj: a user #inspect wins; otherwise the generated per-class ivar
@@ -1177,10 +1187,9 @@ static int emit_ptr_array_build(Compiler *c, int v, TyKind want, Buf *b) {
     return 1;
   }
   if (is_array_new_block(c, v)) {
-    TyKind sv = c->ntype[v];
-    c->ntype[v] = want;
+    int vw = view_push(c, v, want);
     emit_expr(c, v, b);
-    c->ntype[v] = sv;
+    view_pop(c, vw);
     return 1;
   }
   return 0;
@@ -1391,12 +1400,11 @@ static void emit_strbuf_value(Compiler *c, LocalVar *lv, int v, Buf *b) {
     emit_expr(c, v, b);
   }
   else if (comp_ntype(c, v) == TY_STRBUF) {
-    unsigned char sv = c->strbuf_box[v];
-    c->strbuf_box[v] = 0;
+    int sv = view_push_repr(c, v, VR_STRBUF_BOX, 0);
     buf_puts(b, "sp_String_new_shared(");
     emit_str_expr(c, v, b);
     buf_puts(b, ")");
-    c->strbuf_box[v] = sv;
+    view_pop(c, sv);
   }
   else if (comp_ntype(c, v) == TY_POLY || strbuf_boxed_elem_read(c, v)) {
     /* a container element read hands out the element's BOXED handle: take the
@@ -8871,7 +8879,9 @@ static int masgn_store(Compiler *c, int id, int tgt, const char *val, TyKind vt,
       emit_indent(b, indent);
       buf_puts(b, "if (sp_gc_is_frozen("); emit_node_or_tmp(c, recv, recv_tmp, b);
       buf_puts(b, ")) sp_raise_frozen_hash_at("); emit_node_or_tmp(c, recv, recv_tmp, b);
-      buf_printf(b, ", %s);\n", hash_box_cls(rt));
+      /* every hash kind ty_hash_cname names has a box id */
+      const char *hbc = hash_box_cls(rt);
+      buf_printf(b, ", %s);\n", hbc ? hbc : "0");
       emit_indent(b, indent);
       buf_printf(b, "sp_%sHash_set(", ty_hash_cname(rt));
       emit_node_or_tmp(c, recv, recv_tmp, b); buf_puts(b, ", ");
@@ -9875,10 +9885,9 @@ else {
         sp_streq(nt_type(nt, nt_ref(nt, v, "receiver")), "ConstantReadNode") &&
         nt_str(nt, nt_ref(nt, v, "receiver"), "name") &&
         sp_streq(nt_str(nt, nt_ref(nt, v, "receiver"), "name"), "Array")) {
-      TyKind sv = c->ntype[v];
-      c->ntype[v] = ivt;
+      int vw = view_push(c, v, ivt);
       emit_expr(c, v, b);
-      c->ntype[v] = sv;
+      view_pop(c, vw);
     }
     else if (ty_is_ptr_array(ivt) && v_empty_array) buf_puts(b, "sp_PtrArray_new()");
     /* `@t = [[..], [..]]` into a narrowed pointer-array ivar: build the
@@ -13179,22 +13188,20 @@ void emit_stmts_tail(Compiler *c, int id, Buf *b, int indent) {
 /* ---- declarations ---- */
 
 /* Heap-managed types need a GC root for their local slot. */
-int needs_root(TyKind t) { return t == TY_STRING || t == TY_STRBUF || t == TY_BIGINT || ty_is_array(t) || ty_is_obj_array(t) || ty_is_hash(t) || ty_is_object(t) || t == TY_EXCEPTION || t == TY_POLY || t == TY_PROC || t == TY_CURRY || t == TY_METHOD || t == TY_IO || t == TY_FIBER || t == TY_THREAD || t == TY_QUEUE || t == TY_MUTEX || t == TY_CONDVAR || t == TY_ENUMERATOR || t == TY_RANDOM || t == TY_DIR || t == TY_ADDRINFO || t == TY_SOCKOPT || t == TY_OPENSTRUCT || t == TY_MATCHDATA; }
+int needs_root(TyKind t) {
+  /* a builtin kind's slot is a GC root when its ty_traits row says so
+     (types.c); a user object and an object array always are */
+  const TyTraits *tr = ty_traits_of(t);
+  return tr ? tr->needs_root : (ty_is_object(t) || ty_is_obj_array(t));
+}
 
 /* Emit `node` boxed into an sp_RbVal. Idempotent: an already-poly value is
    passed through unboxed (double-boxing is a classic silent-corruption bug). */
 /* Box a C-text expression `expr` of static type `t` into an sp_RbVal. */
 const char *hash_box_cls(TyKind t) {
-  switch (t) {
-    case TY_STR_INT_HASH:   return "SP_BUILTIN_STR_INT_HASH";
-    case TY_STR_STR_HASH:   return "SP_BUILTIN_STR_STR_HASH";
-    case TY_INT_STR_HASH:   return "SP_BUILTIN_INT_STR_HASH";
-    case TY_INT_INT_HASH:   return "SP_BUILTIN_INT_INT_HASH";
-    case TY_STR_POLY_HASH:  return "SP_BUILTIN_STR_POLY_HASH";
-    case TY_SYM_POLY_HASH:  return "SP_BUILTIN_SYM_POLY_HASH";
-    case TY_POLY_POLY_HASH: return "SP_BUILTIN_POLY_POLY_HASH";
-    default:                return NULL;
-  }
+  /* a Hash variant's boxed class id is its ty_traits row's (types.c) */
+  const TyTraits *tr = ty_traits_of(t);
+  return tr ? tr->hash_id : NULL;
 }
 
 /* The key and the value at position `_t<ti>` of the iteration order of the
@@ -13308,21 +13315,18 @@ static int emit_array_mutate_stmt_body(Compiler *c, int id, Buf *b, int indent) 
       Scope *rsN = rnN ? comp_scope_of(c, recv) : NULL;
       LocalVar *rlN = rsN ? scope_local(rsN, rnN) : NULL;
       if (rlN && rlN->type == TY_POLY) {
-        TyKind svN = c->ntype[recv];
-        TyKind svNN = c->nilnarrow[recv];
-        TyKind svC = c->ntype[id];
-        c->ntype[recv] = TY_POLY;
-        c->nilnarrow[recv] = TY_UNKNOWN;
+        int vr = view_push(c, recv, TY_POLY);
+        int vn = view_push_repr(c, recv, VR_NILNARROW, TY_UNKNOWN);
         /* the call's value is the poly arm's too (a String-typed call made
            an arm hold its boxed answer in a String temp) */
-        c->ntype[id] = TY_POLY;
+        int vi = view_push(c, id, TY_POLY);
         emit_indent(b, indent);
         buf_puts(b, "(void)(");
         emit_call(c, id, b);
         buf_puts(b, ");\n");
-        c->ntype[id] = svC;
-        c->ntype[recv] = svN;
-        c->nilnarrow[recv] = svNN;
+        view_pop(c, vi);
+        view_pop(c, vn);
+        view_pop(c, vr);
         return 1;
       }
     }
