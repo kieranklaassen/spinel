@@ -13434,9 +13434,186 @@ static int push_stmt_takes_value_form(Compiler *c, int id) {
   return run > 1 && !pure;
 }
 
+/* Does this subtree store nothing and run no code of the program's? Reads
+   and literals do neither, nor, over numbers, do the calls a loop keeps
+   its array headers across (hc_call_ok: arithmetic, a typed Array's
+   element, a field, a length, `x.abs`, `Math.sqrt(q)`), a clock read, and
+   the least or greatest of an Array literal of numbers. Nothing such an
+   operand does changes what another reads. A whitelist: a builtin of an
+   Array a variable holds may be a mutator (`q.shift`), a call handed an
+   object may run that object's code (`n == obj`), and neither is on it. */
+static int subtree_stores_nothing(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  if (id < 0) return 1;
+  switch (nt_kind(nt, id)) {
+    case NK_LocalVariableReadNode: case NK_InstanceVariableReadNode: case NK_SelfNode:
+    case NK_IntegerNode: case NK_FloatNode: case NK_NilNode: case NK_TrueNode: case NK_FalseNode:
+    case NK_SymbolNode: case NK_ConstantReadNode: case NK_ConstantPathNode:
+      return 1;
+    case NK_ParenthesesNode: case NK_StatementsNode:
+      break;
+    case NK_ArrayNode: {
+      TyKind t = comp_ntype(c, id);
+      if (t != TY_INT_ARRAY && t != TY_FLOAT_ARRAY) return 0;
+      break;
+    }
+    case NK_CallNode: {
+      const char *nm = nt_str(nt, id, "name");
+      int recv = nt_ref(nt, id, "receiver"), ac = 0;
+      const int *av = call_args(nt, id, &ac);
+      if (recv >= 0 && nt_kind(nt, recv) == NK_ArrayNode) {
+        if (!nm || (!sp_streq(nm, "min") && !sp_streq(nm, "max")) || ac || nt_ref(nt, id, "block") >= 0)
+          return 0;
+      }
+      else if (!hc_call_ok(c, id, 0) && !call_is_math_or_clock(nt, id)) return 0;
+      for (int i = 0; i < ac; i++) {
+        TyKind t = comp_ntype(c, av[i]);
+        if (t != TY_INT && t != TY_FLOAT && t != TY_BOOL) return 0;
+      }
+      break;
+    }
+    default: {
+      /* a call's argument list has no kind of its own */
+      const char *ty = nt_type(nt, id);
+      if (!ty || !sp_streq(ty, "ArgumentsNode")) return 0;
+      break;
+    }
+  }
+  for (int i = 0; i < nt_num_refs(nt, id); i++)
+    if (!subtree_stores_nothing(c, nt_ref_at(nt, id, i))) return 0;
+  for (int i = 0; i < nt_num_arrs(nt, id); i++) {
+    int n = 0;
+    const int *ids = nt_arr_at(nt, id, i, &n);
+    for (int j = 0; j < n; j++) if (!subtree_stores_nothing(c, ids[j])) return 0;
+  }
+  return 1;
+}
+
+/* Is the global or the class variable of this name (`$g`, `@@c`) assigned
+   under `id`, where the assignment is written? */
+static int state_var_direct_writes(const NodeTable *nt, int id, const char *name) {
+  if (id < 0) return 0;
+  const char *ty = nt_type(nt, id);
+  if (ty && (strstr(ty, "WriteNode") || strstr(ty, "TargetNode")) &&
+      (strncmp(ty, "GlobalVariable", 14) == 0 || strncmp(ty, "ClassVariable", 13) == 0)) {
+    const char *nm = nt_str(nt, id, "name");
+    if (nm && sp_streq(nm, name)) return 1;
+  }
+  for (int i = 0; i < nt_num_refs(nt, id); i++)
+    if (state_var_direct_writes(nt, nt_ref_at(nt, id, i), name)) return 1;
+  for (int i = 0; i < nt_num_arrs(nt, id); i++) {
+    int n = 0;
+    const int *ids = nt_arr_at(nt, id, i, &n);
+    for (int j = 0; j < n; j++) if (state_var_direct_writes(nt, ids[j], name)) return 1;
+  }
+  return 0;
+}
+
+/* read_rebound_by, less what it takes for a rebinding of an ivar, a global
+   or a class variable and is none. To it a call on anything but self runs
+   any code; but a builtin over plain values runs none of the program's
+   (subtree_may_run_proc), and so assigns no variable: `@n` beside
+   `line.length`, `@@h` beside `k.to_s * 2`. And nothing gives another
+   object to an ivar only a constructor assigns (ivar_set_only_by_ctor),
+   whatever runs. A value built of reads is asked read by read. */
+static int read_moved_by(Compiler *c, int x, int after) {
+  const NodeTable *nt = c->nt;
+  if (x < 0 || !read_rebound_by(c, x, after)) return 0;
+  switch (nt_kind(nt, x)) {
+    case NK_InstanceVariableReadNode: {
+      const char *iv = nt_str(nt, x, "name");
+      if (!iv || ivar_direct_writes(nt, after, iv, 0)) return 1;
+      if (!subtree_may_run_proc(c, after) || subtree_stores_nothing(c, after)) return 0;
+      return !ivar_set_only_by_ctor(c, iv);
+    }
+    case NK_GlobalVariableReadNode: case NK_ClassVariableReadNode: {
+      const char *nm = nt_str(nt, x, "name");
+      if (!nm || state_var_direct_writes(nt, after, nm)) return 1;
+      return subtree_may_run_proc(c, after) && !subtree_stores_nothing(c, after);
+    }
+    case NK_LocalVariableReadNode:
+      return 1;
+    default:
+      break;
+  }
+  for (int i = 0; i < nt_num_refs(nt, x); i++)
+    if (read_moved_by(c, nt_ref_at(nt, x, i), after)) return 1;
+  for (int i = 0; i < nt_num_arrs(nt, x); i++) {
+    int n = 0;
+    const int *ids = nt_arr_at(nt, x, i, &n);
+    for (int j = 0; j < n; j++) if (read_moved_by(c, ids[j], after)) return 1;
+  }
+  return 0;
+}
+/* `recv[key] = value`: can the key or the value give what the receiver
+   reads another object, or the value what the key reads? */
+static int index_set_read_moved(Compiler *c, int recv, int args, const int *argv) {
+  return read_moved_by(c, recv, args) || read_moved_by(c, argv[0], argv[1]);
+}
+
+/* An element store whose value goes nowhere -- `recv[key] = value` as a
+   statement on an Array -- is written below as one C call, the receiver,
+   the key and the value its sibling arguments, and C orders those as it
+   likes. Under gcc `a[t(1)] = t(2)` ran t(2) first, `b[i] = (i += 1; 50)`
+   stored at the index the value left in i, and `@cells[0] = fresh`, fresh
+   assigning @cells, stored into the new Array. Can that order show here?
+   It can when an operand can give what an earlier one reads another object
+   (index_set_read_moved), or when two of the three run something and are
+   not all of the kind that stores nothing (subtree_stores_nothing):
+   `tb[i][j] = [x, y, z].min` and `@ram[addr] = @bus.read(a)`, @ram set by
+   its constructor alone, keep their single call. */
+static int index_set_stmt_order_shows(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  const char *nm = nt_str(nt, id, "name");
+  int recv = nt_ref(nt, id, "receiver");
+  if (!nm || recv < 0 || !sp_streq(nm, "[]=")) return 0;
+  /* the kinds whose store the statement arm writes as that one call */
+  TyKind rt = comp_ntype(c, recv);
+  if (rt != TY_POLY_ARRAY && !array_kind(rt)) return 0;
+  int args = nt_ref(nt, id, "arguments"), argc = 0;
+  const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &argc) : NULL;
+  if (argc != 2) return 0;
+  if (index_set_read_moved(c, recv, args, argv)) return 1;
+  int run = 0, quiet = 1;
+  const int operand[3] = { recv, argv[0], argv[1] };
+  for (int i = 0; i < 3; i++) {
+    if (!subtree_has_side_effect(c, operand[i])) continue;
+    run++;
+    quiet = quiet && subtree_stores_nothing(c, operand[i]);
+  }
+  return run > 1 && !quiet;
+}
+
 static int emit_array_mutate_stmt_body(Compiler *c, int id, Buf *b, int indent);
+/* Such a store, in Ruby's order: the receiver, then the key, each that
+   runs something or reads what a later operand can move, runs ahead of the
+   statement into a temp (emit_args_before, rooted where its kind is), and
+   the arm writes its call over those. What the arm declines is taken back,
+   and the statement is the value form. */
+static int emit_index_set_stmt_in_order(Compiler *c, int id, Buf *b, int indent) {
+  const NodeTable *nt = c->nt;
+  int argc = 0;
+  const int *argv = call_args(nt, id, &argc);
+  const int first[2] = { nt_ref(nt, id, "receiver"), argv[0] };
+  if (!g_pre) return 0;
+  size_t pre_mark = g_pre->len, out_mark = b->len;
+  int argov_mark = g_n_argov;
+  for (int i = 0; i < 2; i++) {
+    int after = i == 0 ? nt_ref(nt, id, "arguments") : argv[1];
+    if (subtree_has_side_effect(c, first[i])) emit_args_before(c, &first[i], 1, NULL, 0, g_pre);
+    else if (read_moved_by(c, first[i], after)) emit_args_before(c, &first[i], 1, argv + i, 2 - i, g_pre);
+  }
+  int took = emit_ivar_nil_guarded(c, id, b, indent, emit_array_mutate_stmt_body);
+  g_n_argov = argov_mark;
+  if (took) return 1;
+  if (g_pre->len > pre_mark) { g_pre->len = pre_mark; g_pre->p[pre_mark] = '\0'; }
+  if (b->len > out_mark) { b->len = out_mark; b->p[out_mark] = '\0'; }
+  return 0;
+}
+
 int emit_array_mutate_stmt(Compiler *c, int id, Buf *b, int indent) {
   if (push_stmt_takes_value_form(c, id)) return 0;
+  if (index_set_stmt_order_shows(c, id)) return emit_index_set_stmt_in_order(c, id, b, indent);
   return emit_ivar_nil_guarded(c, id, b, indent, emit_array_mutate_stmt_body);
 }
 static int emit_array_mutate_stmt_body(Compiler *c, int id, Buf *b, int indent) {
@@ -14128,7 +14305,7 @@ static int emit_array_mutate_stmt_body(Compiler *c, int id, Buf *b, int indent) 
          receiver and key are both reads or plain literals keeps the bare
          call: the key is held by its slot. */
       emit_indent(b, indent);
-      if (subtree_may_allocate(nt, recv) || subtree_may_allocate(nt, argv[0])) {
+      if (subtree_may_allocate(nt, recv) || subtree_may_allocate(nt, argv[0]) || index_set_read_moved(c, recv, args, argv)) {
         TyKind kt = ty_hash_key(rt);
         int tr = ++g_tmp, tk = ++g_tmp, tv = ++g_tmp;
         buf_printf(b, "{ %s _t%d = ", c_type_name(rt), tr); emit_expr(c, recv, b); buf_puts(b, "; ");

@@ -1,0 +1,97 @@
+-- Integer Array
+t1
+t2
+ia
+t0
+t3
+[3, 2, 0]
+-- String Array
+t1
+s2
+["x", "s2"]
+-- Float Array
+t0
+f3
+[3.5, 1.5]
+-- Array of anything
+t2
+s4
+t0
+t5
+[5, "x", "s4"]
+-- a closure that advances
+[1, 9, 3, 9]
+-- a key the value reassigns
+[50, 0, 70]
+0
+["a", "z"]
+-- a receiver the value reassigns
+[5, 5]
+[6, 2]
+["q", "q"]
+["a", "z"]
+-- a key that reads what the value shifts
+[0, 0, 2]
+[1]
+-- a row whose index the value moves
+[9, 8, 1, 2, 2, 2]
+-- instance variables
+t1
+t2
+t0
+s1
+t2
+s3
+[0, 2, 0]
+["s1", "b", "c"]
+[0, "x", "s3"]
+[10, 2, 20]
+2
+[8, 8, 8]
+[1, 2, 20]
+["n", "n", "n"]
+["s1", "b", "r"]
+-- another object writes the receiver's variable back
+[3, 3, 3]
+[0, 4, 0]
+-- a receiver read through its reader
+[3, 3, 3]
+[0, 4, 0]
+[3, 3, 3]
+[4, 3, 3]
+-- a method the program gives Array, called on a literal
+[3, 3, 3]
+[3, 3, 4]
+-- a comparison that runs the object's own ==
+[9, "y", nil]
+[true, "x", nil]
+-- a variable only its constructor assigns, assigned in an operand
+[5, 5]
+[6, 0]
+-- Hash: a key the value reassigns
+[[0, 5], [2, 6]]
+2
+[["a", 1]]
+-- Hash: a receiver the value reassigns
+[[9, 9]]
+[[1, 1], [2, 3]]
+-- Hash in instance variables
+[[9, 9], [0, 10], [2, 20]]
+[[7, 7]]
+[[9, 9], [0, 10], [2, 20], [5, 1]]
+-- a global and a class variable the value reassigns
+[5, 5]
+[6, 2]
+[7, 7]
+[5, 8]
+[[9, 9]]
+[[1, 1], [2, 3]]
+[4, 4]
+[3, 0]
+[6, 6]
+[4, 2]
+[[8, 8]]
+[[1, 1], [5, 2]]
+-- nothing to order: the same answers
+[4, 2, 4, 2]
+[0, 5]
