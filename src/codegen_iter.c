@@ -1672,7 +1672,16 @@ static int block_tail_needs_value_form(Compiler *c, int id) {
       LocalVar *rl = rs ? scope_local(rs, rn) : NULL;
       if (rl && rl->type == TY_STRBUF) return 1;
     } }
-  if (nt_ref(nt, id, "block") < 0) return 0;
+  if (nt_ref(nt, id, "block") < 0) {
+    /* A method that yields only under `block_given?` is spliced inline at a
+       call without a block too, and the statement form of that splice is
+       the same plain compound with no value: Enumerable#minmax is such a
+       method on a boxed receiver, and `rows.flat_map { |r| r.minmax }` did
+       not build. A call typed nil has no value to carry and keeps the
+       statement form; the yield reads it as nil. */
+    TyKind ct = comp_ntype(c, id);
+    return ct != TY_NIL && ct != TY_VOID && ct != TY_UNKNOWN && call_targets_yielding_method(c, id);
+  }
   if (sp_streq(nm, "tap") || sp_streq(nm, "then") || sp_streq(nm, "yield_self"))
     return nt_ref(nt, id, "receiver") >= 0;
   /* a block-driving call to a user method that yields is spliced inline;
