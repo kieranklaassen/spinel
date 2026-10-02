@@ -13165,6 +13165,26 @@ static void sp_mark_proc_homes(void) {
    globals. Only in the threaded build (the single-threaded one never parks). */
 static void sp_publish_worker_roots(void) {
   for (int i = 0; i < sp_exc_top; i++) if (sp_exc_obj[i]) _sp_gc_root_push((void **)&sp_exc_obj[i]);
+  /* The rest of what sp_mark_in_flight_exceptions does when this worker is the
+     one collecting. It marks each frame's message, and the slot one past the
+     top, which a rescue arm has popped and still reads: sp_raise_cls stores a
+     heap copy of every message, so after any rescue that slot names a heap
+     string until the next handler or the next raise replaces it. And it
+     clears every slot above that window, so that a later push cannot bring a
+     pointer the collection freed back inside it (#3404). A worker that is
+     parked while another one collects needs both. Without the first, the
+     other worker's collection freed the message of the exception this one had
+     just rescued; without the second, it freed what a slot above the window
+     still named, and the next `begin` here put that slot back in the window.
+     Either way this worker's own next collection marked a freed string. */
+  for (int i = 0; i <= sp_exc_top && i < SP_EXC_STACK_MAX; i++)
+    if (sp_exc_msg[i]) _sp_gc_root_push((void **)((uintptr_t)&sp_exc_msg[i] | (uintptr_t)2));   /* a string root */
+  if (sp_exc_top < SP_EXC_STACK_MAX && sp_exc_obj[sp_exc_top]) _sp_gc_root_push((void **)&sp_exc_obj[sp_exc_top]);
+  for (int i = sp_exc_top + 1; i < SP_EXC_STACK_MAX; i++) {
+    sp_exc_obj[i] = NULL;
+    sp_exc_msg[i] = NULL;
+  }
+  if (sp_inflight_cause) _sp_gc_root_push((void **)&sp_inflight_cause);
   if (sp_pending_exc_obj) _sp_gc_root_push((void **)&sp_pending_exc_obj);
   if (sp_pending_cause) _sp_gc_root_push((void **)&sp_pending_cause);
   for (int i = 0; i < sp_rescue_sp; i++)
