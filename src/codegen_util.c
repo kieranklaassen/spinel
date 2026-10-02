@@ -1,4 +1,6 @@
 #include "codegen_internal.h"
+#include "call_plan.h"
+#include "repr.h"
 
 Buf expr_buf(Compiler *c, int node) {
   Buf b; memset(&b, 0, sizeof b);
@@ -62,7 +64,231 @@ void nd_stamp(int id, int kind) {
    wrong whenever two classes define it (#4557). Same gate as nd_stamp. */
 char **g_ndtarget = NULL;
 int g_ndtarget_cap = 0;
+
+/* --plan-check for user-method calls (#7100): the method codegen bound a
+   call to, compared with the one inference bound it to (c->ucall_inf), per
+   node. A node's observations accumulate (a switch stamps one per arm, a
+   body emitted more than once stamps again) and are classified once, at
+   the end (ucall_report):
+     conflict       codegen bound another method where nothing re-reads the
+                    node: view depth 0, no instance_exec scope move or
+                    class, no inline splice, the emitting class the node's
+                    own scope's class, not a lowered or proc-form body
+     respecialized  another method, but only where the node is re-read
+                    (any of the above)
+     virtual        a dispatch switch, one of whose arms is inference's
+     unrecorded     codegen bound a method inference bound none for
+     unobserved     inference bound a method, codegen emitted the call and
+                    stamped nothing
+     unemitted      inference bound a method, codegen never emitted the call
+                    (dead code, or a call folded to its value)
+     refused        inference bound a method, codegen emitted the
+                    NoMethodError its visibility gives the call instead
+     dynamic        inference typed a boxed receiver's call over its
+                    candidates, codegen emitted it through the run-time
+                    dispatch, which binds nothing statically
+   The resolver's plan (call_plan.c) is the third reading, compared with
+   both: a per-program ucall-resolver line counts agreement with codegen's
+   binding (agree, differ, respecialized as above, none: the resolver found
+   no method) and with inference's record (agree, differ, none), and each
+   disagreement outside a re-read context is listed. */
+typedef struct { int mi; short owner; unsigned char seen, flags; int rmi; unsigned char rflags; } UcallObs;
+enum { UO_MATCH = 1, UO_ARM = 2, UO_MISS_PLAIN = 4, UO_MISS_RESPEC = 8 };
+/* the resolver's plan (cplan_user) against codegen's binding */
+enum { UR_AGREE = 1, UR_DIFF_PLAIN = 2, UR_DIFF_RESPEC = 4, UR_NONE = 8,
+       UR_ARM_HIT = 16, UR_ARM_MISS = 32 };   /* a switch: some arm is the plan's, some is not */
+static UcallObs *g_ucobs = NULL;
+static int g_ucobs_cap = 0;
+/* the call nodes codegen emitted at all (emit_call, emit_super, a splice):
+   an inference binding at a node never emitted -- a method no code reaches,
+   a call folded away -- has nothing to compare with */
+static unsigned char *g_ucemit = NULL;
+static int g_ucemit_cap = 0;
+
+void ucall_emitted(int id) {
+  if (id < 0) return;
+  if (id >= g_ucemit_cap) {
+    int ncap = g_ucemit_cap ? g_ucemit_cap : 1024;
+    while (ncap <= id) ncap *= 2;
+    g_ucemit = realloc(g_ucemit, (size_t)ncap);
+    memset(g_ucemit + g_ucemit_cap, 0, (size_t)(ncap - g_ucemit_cap));
+    g_ucemit_cap = ncap;
+  }
+  if (!g_ucemit[id]) g_ucemit[id] = 1;
+}
+void ucall_refused(int id) {
+  ucall_emitted(id);
+  g_ucemit[id] = 2;
+}
+
+static int ucall_respec_ctx(Compiler *c, int id) {
+  if (view_depth() > 0 || comp_scope_move_depth() > 0 || g_ie_class_id >= 0 ||
+      inline_splice_depth() > 0 || g_current_scope_is_lowered)
+    return 1;
+  Scope *s = comp_scope_of(c, id);
+  int scls = s ? s->class_id : -1;
+  if (g_emitting_class_id >= 0 && g_emitting_class_id != scls) return 1;
+  if (s && scope_proc_form_of(c, (int)(s - c->scopes)) >= 0) return 1;
+  return 0;
+}
+
+void ucall_observe(Compiler *c, int id, int mi, int owner_ci, int add) {
+  if (id < 0 || id >= c->node_cap || mi < 0 || mi >= c->nscopes) return;
+  if (id >= g_ucobs_cap) {
+    int ncap = g_ucobs_cap ? g_ucobs_cap : 1024;
+    while (ncap <= id) ncap *= 2;
+    g_ucobs = realloc(g_ucobs, (size_t)ncap * sizeof *g_ucobs);
+    memset(g_ucobs + g_ucobs_cap, 0, (size_t)(ncap - g_ucobs_cap) * sizeof *g_ucobs);
+    g_ucobs_cap = ncap;
+  }
+  UcallObs *o = &g_ucobs[id];
+  if (!o->seen) { o->seen = 1; o->mi = mi; o->owner = (short)owner_ci; }
+  if (add) o->flags |= UO_ARM;
+  /* the resolver: its method, an arm of the switch it plans, or the
+     proc-form clone of its method agrees */
+  { const CallPlan *pl = cplan_user(c, id);
+    int member = pl->mi >= 0 &&
+                 (cplan_virtual_member(c, id, pl, mi) || (add && pl->dispatch >= CP_SWITCH) ||
+                  (c->scopes[mi].is_proc_form && scope_proc_form_of(c, pl->mi) == mi));
+    if (pl->mi < 0) o->rflags |= UR_NONE;
+    /* a switch's arms: agreement is the plan's method among them, decided
+       once every arm is in (the report) */
+    else if (add) {
+      o->rflags |= member ? UR_ARM_HIT : UR_ARM_MISS;
+      if (!member && !o->rmi) o->rmi = mi + 1;
+    }
+    else if (member) o->rflags |= UR_AGREE;
+    else {
+      o->rflags |= ucall_respec_ctx(c, id) ? UR_DIFF_RESPEC : UR_DIFF_PLAIN;
+      if (!o->rmi || !(o->rflags & UR_DIFF_PLAIN)) o->rmi = mi + 1;
+    } }
+  const UCallInf *inf = &c->ucall_inf[id];
+  if (inf->via == UC_NONE) return;
+  /* a boxed receiver's union: any of its candidates is one of its arms */
+  if (inf->via == UC_POLY) {
+    const char *pnm = nt_str(c->nt, id, "name");
+    int npc = 0, ncc = 0;
+    const PolyCand *pcs = pnm ? comp_poly_candidates(c, pnm, &npc) : NULL;
+    for (int k = 0; k < npc; k++)
+      if (pcs[k].mi == mi ||
+          (pcs[k].mi < 0 && comp_method_in_chain(c, pcs[k].cls, pnm, NULL) == mi)) {
+        o->flags |= UO_MATCH | UO_ARM; return;
+      }
+    const PolyCand *ccs = pnm ? comp_cmethod_candidates(c, pnm, &ncc) : NULL;
+    for (int k = 0; k < ncc; k++)
+      if (ccs[k].mi == mi) { o->flags |= UO_MATCH | UO_ARM; return; }
+  }
+  /* a yielding method's proc-form clone is that method, taken as a function
+     with its block as a proc */
+  if (inf->mi == mi || (c->scopes[mi].is_proc_form && scope_proc_form_of(c, inf->mi) == mi)) {
+    o->flags |= UO_MATCH; return;
+  }
+  int miss = ucall_respec_ctx(c, id) ? UO_MISS_RESPEC : UO_MISS_PLAIN;
+  if (!(o->flags & (UO_MISS_PLAIN | UO_MISS_RESPEC)) || miss == UO_MISS_PLAIN) {
+    o->mi = mi; o->owner = (short)owner_ci;
+  }
+  o->flags |= miss;
+}
+
+static void ucall_scope_name(Compiler *c, int mi, char *out, size_t n) {
+  if (mi < 0 || mi >= c->nscopes) { snprintf(out, n, "?"); return; }
+  Scope *m = &c->scopes[mi];
+  int ci = m->class_id;
+  if (ci >= 0 && ci < c->nclasses)
+    snprintf(out, n, "%s%s%s", c->classes[ci].name, m->is_cmethod ? "." : "#", m->name ? m->name : "?");
+  else snprintf(out, n, "%s", m->name ? m->name : "?");
+}
+
+static void ucall_resolver_report(Compiler *c) {
+  int ac = 0, dc = 0, rc = 0, nc = 0, ai = 0, di = 0, ni = 0;
+  for (int id = 0; id < c->node_cap; id++) {
+    const UCallInf *inf = &c->ucall_inf[id];
+    const UcallObs *o = id < g_ucobs_cap ? &g_ucobs[id] : NULL;
+    int seen = o && o->seen;
+    if (inf->via == UC_NONE && !seen) continue;
+    const CallPlan *pl = cplan_user(c, id);
+    const char *nm = nt_str(c->nt, id, "name");
+    char rs[256], xs[256];
+    ucall_scope_name(c, pl->mi, rs, sizeof rs);
+    if (seen) {
+      /* a switch with the plan's method among its arms agrees; one without
+         it differs like a plain binding would */
+      int arm_diff = (o->rflags & UR_ARM_MISS) && !(o->rflags & UR_ARM_HIT);
+      if ((o->rflags & UR_DIFF_PLAIN) || arm_diff) {
+        dc++;
+        ucall_scope_name(c, o->rmi - 1, xs, sizeof xs);
+        fprintf(stderr, "plan-check: ucall-resolver-differ: node %d %s: resolver %s, codegen %s\n",
+                id, nm ? nm : "?", rs, xs);
+      }
+      else if (o->rflags & UR_DIFF_RESPEC) rc++;
+      else if (o->rflags & (UR_AGREE | UR_ARM_HIT)) ac++;
+      else {
+        nc++;
+        ucall_scope_name(c, o->mi, xs, sizeof xs);
+        fprintf(stderr, "plan-check: ucall-resolver-none: node %d %s: codegen %s\n", id, nm ? nm : "?", xs);
+      }
+    }
+    if (inf->via != UC_NONE) {
+      if (pl->mi < 0) {
+        ni++;
+        ucall_scope_name(c, inf->mi, xs, sizeof xs);
+        fprintf(stderr, "plan-check: ucall-resolver-none-inference: node %d %s: inference %s (%s)\n", id,
+                nm ? nm : "?", xs, inf->via < 10 ? (const char *[]){ "none", "top", "inst", "cmeth", "super",
+                "send_blind", "ie", "included", "reopen", "poly" }[inf->via] : "?");
+      }
+      else if (cplan_virtual_member(c, id, pl, inf->mi) ||
+               (inf->via == UC_POLY && pl->via == UC_POLY)) ai++;
+      else {
+        di++;
+        ucall_scope_name(c, inf->mi, xs, sizeof xs);
+        fprintf(stderr, "plan-check: ucall-resolver-differ-inference: node %d %s: resolver %s, inference %s\n",
+                id, nm ? nm : "?", rs, xs);
+      }
+    }
+  }
+  fprintf(stderr, "plan-check: ucall-resolver: codegen %d agree %d differ %d respecialized %d none;"
+                  " inference %d agree %d differ %d none\n", ac, dc, rc, nc, ai, di, ni);
+}
+
+void ucall_report(Compiler *c) {
+  ucall_resolver_report(c);
+  cplan_served_report();
+  pa_report();
+  static const char *const via_name[] = { "none", "top", "inst", "cmeth", "super",
+                                          "send_blind", "ie", "included", "reopen", "poly" };
+  for (int id = 0; id < c->node_cap; id++) {
+    const UCallInf *inf = &c->ucall_inf[id];
+    const UcallObs *o = id < g_ucobs_cap ? &g_ucobs[id] : NULL;
+    int seen = o && o->seen;
+    if (inf->via == UC_NONE && !seen) continue;
+    const char *nm = nt_str(c->nt, id, "name");
+    char cg[256], in[256];
+    ucall_scope_name(c, seen ? o->mi : -1, cg, sizeof cg);
+    ucall_scope_name(c, inf->via != UC_NONE ? inf->mi : -1, in, sizeof in);
+    const char *vn = inf->via < sizeof via_name / sizeof via_name[0] ? via_name[inf->via] : "?";
+    if (inf->via == UC_NONE)
+      fprintf(stderr, "plan-check: ucall-unrecorded: node %d %s: codegen %s%s\n", id, nm ? nm : "?", cg,
+              (o->flags & UO_ARM) ? " (switch)" : "");
+    else if (!seen && inf->via == UC_POLY && id < g_ucemit_cap && g_ucemit[id] == 1)
+      fprintf(stderr, "plan-check: ucall-dynamic: node %d %s: inference %s (%s)\n", id, nm ? nm : "?", in, vn);
+    else if (!seen && id < g_ucemit_cap && g_ucemit[id] == 2)
+      fprintf(stderr, "plan-check: ucall-refused: node %d %s: inference %s (%s)\n", id, nm ? nm : "?", in, vn);
+    else if (!seen && !(id < g_ucemit_cap && g_ucemit[id]))
+      fprintf(stderr, "plan-check: ucall-unemitted: node %d %s: inference %s (%s)\n", id, nm ? nm : "?", in, vn);
+    else if (!seen)
+      fprintf(stderr, "plan-check: ucall-unobserved: node %d %s: inference %s (%s)\n", id, nm ? nm : "?", in, vn);
+    else if (!(o->flags & (UO_MISS_PLAIN | UO_MISS_RESPEC))) continue;
+    else if ((o->flags & UO_ARM) && (o->flags & UO_MATCH))
+      fprintf(stderr, "plan-check: ucall-virtual: node %d %s: codegen switch, inference %s (%s)\n", id, nm ? nm : "?", in, vn);
+    else if (o->flags & UO_MISS_PLAIN)
+      fprintf(stderr, "plan-check: ucall-conflict: node %d %s: codegen %s, inference %s (%s)\n", id, nm ? nm : "?", cg, in, vn);
+    else
+      fprintf(stderr, "plan-check: ucall-respecialized: node %d %s: codegen %s, inference %s (%s)\n", id, nm ? nm : "?", cg, in, vn);
+  }
+}
+
 void nd_callee(Compiler *c, int id, int mi, int owner_ci, int add) {
+  if (g_plan_check) ucall_observe(c, id, mi, owner_ci, add);
   static int on = -1;
   if (on < 0) { const char *et = getenv("SPINEL_EMIT_TYPES"); on = (et && *et) ? 1 : 0; }
   if (!on || id < 0 || mi < 0 || mi >= c->nscopes) return;
@@ -562,11 +788,10 @@ static int yield_builtin_method_site_type(const Compiler *c, int id, TyKind *out
   const int *av = an >= 0 ? nt_arr(nt, an, "arguments", &ac) : NULL;
   TyKind rt;
   if (!sp_yield_site_type(c, recv, &rt)) return 0;
-  /* a site whose class reopens the name: the reopen's return type for a
-     scalar, nothing for an Array or Hash (yield_recv_chain_kind says why) */
+  /* a site whose class reopens the name: the reopen's return type, for an
+     Array or Hash as for a scalar (yield_recv_chain_kind says why) */
   { int rmi = nt_int(nt, id, "builtin_only", 0) ? -1 : comp_builtin_kind_reopen_mi((Compiler *)c, rt, op);
     if (rmi >= 0) {
-      if (ty_is_array(rt) || ty_is_obj_array(rt) || ty_is_hash(rt)) return 0;
       TyKind rr = c->scopes[rmi].ret;
       if (rr == TY_UNKNOWN || rr == TY_VOID) return 0;
       *out = rr;
@@ -1273,13 +1498,10 @@ void emit_tail_lead(Buf *b) {
    types carry an in-band nil sentinel (NULL string, SP_INT_NIL, NaN float,
    (sp_sym)-1). Types with no sentinel fall back to the zero value. */
 const char *nil_value(TyKind t) {
-  switch (t) {
-    case TY_STRING: return "NULL";
-    case TY_INT:    return "SP_INT_NIL";
-    case TY_FLOAT:  return "sp_float_nil()";
-    case TY_POLY:   return "sp_box_nil()";
-    default:        return NULL;
-  }
+  /* a builtin kind's nil is its ty_traits row's (types.c): a String, an
+     Integer, a Float and a boxed value have one; any other kind, none */
+  const TyTraits *tr = ty_traits_of(t);
+  return tr ? tr->nil : NULL;
 }
 
 /* Does the program ask whether class variable `nm` ("@@x") is set yet --
@@ -1964,6 +2186,19 @@ int emit_empty_container_for_slot(Compiler *c, int v, TyKind slot, Buf *b) {
   return 0;
 }
 
+/* emit_poly_rhs_coerced's conversion of a boxed value into a scalar or a
+   String slot (a String slot takes sp_poly_arg_str instead where the
+   program defines a #to_str); NULL for any other slot */
+const char *poly_rhs_unbox_fn(TyKind slot) {
+  const TyTraits *tr = ty_traits_of(slot);   /* the unbox_rhs column (types.c) */
+  return tr ? tr->unbox_rhs : NULL;
+}
+/* emit_typed_sink_text's conversion of a boxed value into a typed element */
+const char *poly_sink_unbox_fn(TyKind slot) {
+  const TyTraits *tr = ty_traits_of(slot);   /* the unbox_sink column (types.c) */
+  return tr ? tr->unbox_sink : NULL;
+}
+
 int emit_poly_rhs_coerced(Compiler *c, TyKind slot, int v, Buf *b) {
   /* yield_site_type, not comp_ntype: a `yield` carries the union over every
      call site, and the block spliced HERE may already hand back the scalar
@@ -1994,12 +2229,8 @@ int emit_poly_rhs_coerced(Compiler *c, TyKind slot, int v, Buf *b) {
     free(e.p);
     return 1;
   }
-  const char *fn = slot == TY_INT   ? "sp_poly_to_i_or_nil"
-                 : slot == TY_BOOL  ? "sp_poly_to_i"
-                 : slot == TY_FLOAT ? "sp_poly_to_f_or_nil"
-                 : slot == TY_SYMBOL ? "sp_poly_to_sym_or_nil"
-                 : slot == TY_STRING
-                     ? (prog_has_conv_method(c, "to_str", TY_STRING) ? "sp_poly_arg_str" : "sp_poly_to_s") : NULL;
+  const char *fn = slot == TY_STRING && prog_has_conv_method(c, "to_str", TY_STRING)
+                   ? "sp_poly_arg_str" : poly_rhs_unbox_fn(slot);
   if (!fn) return 0;
   buf_printf(b, "%s(", fn); emit_expr(c, v, b); buf_puts(b, ")");
   return 1;
@@ -2007,10 +2238,9 @@ int emit_poly_rhs_coerced(Compiler *c, TyKind slot, int v, Buf *b) {
 
 static int strbuf_box_ref_as(Compiler *c, int recv, const char *fmt, Buf *b) {
   char sref[1024];
-  int svm = c->strbuf_box[recv];
-  c->strbuf_box[recv] = 1;
+  int svm = view_push_repr(c, recv, VR_STRBUF_BOX, 1);
   int is_sb = strbuf_slot_ref(c, recv, sref, sizeof sref);
-  c->strbuf_box[recv] = (unsigned char)svm;
+  view_pop(c, svm);
   if (!is_sb) return 0;
   buf_printf(b, fmt, sref);
   return 1;
@@ -2088,19 +2318,23 @@ int sb_reader_shim_open(Compiler *c, int recv, char *sref, size_t cap, SbReaderS
   if (g_n_argov >= MAX_ARG_OVERRIDE) return 0;
   if (!strbuf_slot_ref(c, recv, sref, cap)) return 0;
   int tH = ++g_tmp;
+  /* the marks lifted and the handle type dropped for the shim's lifetime:
+     views, so a refusal inside it puts them back (view_unwind) */
   sv->box = c->strbuf_box[recv]; sv->demand = c->strbuf_handle_demand[recv];
   sv->ty = c->ntype[recv];
-  c->strbuf_box[recv] = 0; c->strbuf_handle_demand[recv] = 0;
-  if (sv->ty == TY_STRBUF) c->ntype[recv] = TY_STRING;
+  sv->tok = view_push_repr(c, recv, VR_STRBUF_BOX, 0);
+  view_push_repr(c, recv, VR_HANDLE_DEMAND, 0);
+  sv->ntok = 2;
+  if (sv->ty == TY_STRBUF) { view_push(c, recv, TY_STRING); sv->ntok = 3; }
   g_argov_node[g_n_argov] = recv;
   snprintf(g_argov_text[g_n_argov], sizeof g_argov_text[0], "lv__sb%d", tH);
   g_n_argov++;
   return tH;
 }
 void sb_reader_shim_close(Compiler *c, int recv, const SbReaderSave *sv) {
+  (void)recv;
   g_n_argov--;
-  c->strbuf_box[recv] = sv->box; c->strbuf_handle_demand[recv] = sv->demand;
-  c->ntype[recv] = sv->ty;
+  for (int k = sv->ntok - 1; k >= 0; k--) view_pop(c, sv->tok + k);
 }
 const char *g_sb_iv_name = NULL;
 int         g_sb_iv_cid  = -1;
@@ -2296,67 +2530,17 @@ __attribute__((noreturn)) void unsupported(Compiler *c, int id, const char *what
 }
 
 const char *c_type_name(TyKind t) {
+  /* a builtin kind's C type is its ty_traits row's (types.c); an object
+     array is the pointer array, a user object has none here */
   if (ty_is_obj_array(t)) return "sp_PtrArray *";
-  switch (t) {
-    case TY_INT:         return "sp_int";
-    case TY_BIGINT:      return "sp_Bigint *";
-    case TY_FLOAT:       return "sp_float";
-    case TY_BOOL:        return "sp_bool";
-    case TY_STRING:      return "const char *";
-    case TY_SYMBOL:      return "sp_sym";
-    case TY_RANGE:       return "sp_Range";
-    case TY_FLOAT_RANGE: return "sp_FloatRange";
-    case TY_STR_RANGE:   return "sp_StrRange";
-    case TY_TIME:        return "sp_Time";
-    case TY_COMPLEX:     return "sp_Complex";
-    case TY_RATIONAL:    return "sp_Rational";
-    case TY_MATCHDATA:   return "sp_MatchData *";
-    case TY_REGEX:       return "mrb_regexp_pattern *";
-    case TY_EXCEPTION:   return "sp_Exception *";
-    case TY_STRBUF:      return "sp_String *";
-    case TY_INT_ARRAY:   return "sp_IntArray *";
-    case TY_FLOAT_ARRAY: return "sp_FloatArray *";
-    case TY_STR_ARRAY:   return "sp_StrArray *";
-    case TY_STR_INT_HASH: return "sp_StrIntHash *";
-    case TY_STR_STR_HASH: return "sp_StrStrHash *";
-    case TY_INT_INT_HASH: return "sp_IntIntHash *";
-    case TY_INT_STR_HASH: return "sp_IntStrHash *";
-    case TY_SYM_POLY_HASH:  return "sp_SymPolyHash *";
-    case TY_STR_POLY_HASH:  return "sp_StrPolyHash *";
-    case TY_POLY_POLY_HASH: return "sp_PolyPolyHash *";
-    case TY_POLY:         return "sp_RbVal";
-    case TY_POLY_ARRAY:   return "sp_PolyArray *";
-    case TY_INT_ARRAY_ARRAY: return "sp_PtrArray *";
-    case TY_FLOAT_ARRAY_ARRAY: return "sp_PtrArray *";
-    case TY_PROC:         return "sp_Proc *";
-    case TY_CURRY:        return "sp_Curry *";
-    case TY_FIBER:        return "sp_Fiber *";
-    case TY_THREAD:       return "sp_thread *";
-    case TY_QUEUE:        return "sp_queue *";
-    case TY_MUTEX:        return "sp_mutex *";
-    case TY_CONDVAR:      return "sp_condvar *";
-    case TY_RANDOM:       return "sp_Random *";
-    case TY_DIR:          return "sp_Dir *";
-    case TY_ADDRINFO:     return "sp_Addrinfo *";
-    case TY_SOCKOPT:      return "sp_SockOpt *";
-    case TY_TMS:          return "sp_Tms";
-    case TY_OPENSTRUCT:   return "sp_OpenStruct *";
-    case TY_METHOD:       return "sp_BoundMethod *";
-    case TY_IO:           return "sp_File *";
-    case TY_ARGF:         return "sp_Argf *";
-    case TY_ENUMERATOR:   return "sp_Enumerator *";
-    case TY_CLASS:        return "sp_Class";
-    default:             return NULL;
-  }
+  const TyTraits *tr = ty_traits_of(t);
+  return tr ? tr->ctype : NULL;
 }
 int is_scalar_ret(TyKind t) {
-  return t == TY_INT || t == TY_BIGINT || t == TY_FLOAT || t == TY_BOOL || t == TY_STRING ||
-         t == TY_SYMBOL || t == TY_RANGE || t == TY_FLOAT_RANGE || t == TY_STR_RANGE || t == TY_TIME || t == TY_TMS || t == TY_COMPLEX || t == TY_RATIONAL || t == TY_MATCHDATA || t == TY_REGEX || t == TY_EXCEPTION ||
-         t == TY_INT_ARRAY || t == TY_FLOAT_ARRAY || t == TY_STR_ARRAY || t == TY_INT_ARRAY_ARRAY ||
-         t == TY_FLOAT_ARRAY_ARRAY ||
-         t == TY_STRBUF ||
-         t == TY_POLY || t == TY_POLY_ARRAY || t == TY_PROC || t == TY_CURRY || t == TY_FIBER || t == TY_THREAD || t == TY_QUEUE || t == TY_MUTEX || t == TY_CONDVAR || t == TY_RANDOM || t == TY_DIR || t == TY_ADDRINFO || t == TY_SOCKOPT || t == TY_METHOD || t == TY_IO || t == TY_ARGF || t == TY_ENUMERATOR || t == TY_CLASS || t == TY_OPENSTRUCT ||
-         ty_is_hash(t) || ty_is_object(t) || ty_is_obj_array(t);
+  /* a builtin kind's ty_traits row says (types.c); a user object and an
+     object array are pointers a method can return */
+  const TyTraits *tr = ty_traits_of(t);
+  return tr ? tr->scalar_ret : (ty_is_object(t) || ty_is_obj_array(t));
 }
 /* native binding (Path B): map a spinel type spec to the C type at the ABI
    boundary. any -> the boxed value; string -> the runtime string; scalars
@@ -2366,13 +2550,10 @@ int is_scalar_ret(TyKind t) {
    parameter and an argument that disagree here can never be the same call --
    unlike the numeric scalars, where int-into-float is an ordinary conversion. */
 int ty_is_struct_valued(TyKind t) {
-  switch (t) {
-    case TY_RANGE: case TY_FLOAT_RANGE: case TY_STR_RANGE:
-    case TY_TIME: case TY_COMPLEX: case TY_RATIONAL:
-    case TY_TMS: case TY_CLASS:
-      return 1;
-    default: return 0;
-  }
+  /* a builtin kind's ty_traits row says (types.c); a user object's
+     by-value class is asked of the class (comp_ty_value_obj) */
+  const TyTraits *tr = ty_traits_of(t);
+  return tr ? tr->struct_valued : 0;
 }
 
 const char *native_c_type(const char *spec) {
@@ -2479,8 +2660,7 @@ void emit_expr_slot(Compiler *c, int node, TyKind slot, Buf *b) {
    emitted as it is. `text` is the already-rendered expression. */
 void emit_typed_sink_text(Compiler *c, int node, TyKind slot, const char *text, Buf *b) {
   TyKind vt = node >= 0 ? comp_ntype(c, node) : TY_UNKNOWN;
-  if (vt == TY_POLY && slot == TY_INT) buf_printf(b, "sp_poly_to_i(%s)", text);
-  else if (vt == TY_POLY && slot == TY_FLOAT) buf_printf(b, "sp_poly_to_f(%s)", text);
+  if (vt == TY_POLY && poly_sink_unbox_fn(slot)) buf_printf(b, "%s(%s)", poly_sink_unbox_fn(slot), text);
   else if (vt == TY_BIGINT && slot == TY_INT) buf_printf(b, "sp_bigint_to_int(%s)", text);
   /* A block's value into a typed element (`fill { ... }`, a collect
      accumulator) is written as it is: where its class differs from the
@@ -2529,56 +2709,10 @@ TyKind store_value_kind(Compiler *c, int node) {
   return t;
 }
 
-/* The C value class of a kind: what C allows between two of them. */
-enum { SC_NONE, SC_ARITH, SC_PTR, SC_STRUCT, SC_BOXED };
-static int store_class(Compiler *c, TyKind t) {
-  switch (t) {
-    case TY_INT: case TY_FLOAT: case TY_BOOL: case TY_SYMBOL: return SC_ARITH;
-    case TY_POLY: return SC_BOXED;
-    case TY_UNKNOWN: case TY_VOID: case TY_NIL: return SC_NONE;
-    default: break;
-  }
-  if (ty_is_object(t)) return comp_ty_value_obj(c, t) ? SC_STRUCT : SC_PTR;
-  if (ty_is_struct_valued(t)) return SC_STRUCT;
-  return c_type_name(t) ? SC_PTR : SC_NONE;
-}
-
-/* Does a value of kind `from`, written as it is, keep its value in a slot of
-   kind `to`? The same C type does; so does an exact arithmetic widening
-   (an Integer into a Float slot, a boolean into an Integer one), a nil
-   literal's 0 in a pointer slot, which is NULL, and a subclass instance in
-   its ancestor's pointer slot. A nil fits as it is only where it is a
-   literal (store_nil_fits). An untyped value's C type is whatever its
-   emitter chose (a boxed result, the gate's token, a super call's String),
-   which the kind does not say, so it is not checked. A void one fits
-   nothing. */
-/* A nil literal renders as 0, which is a pointer slot's NULL and a boolean's
-   false: it is written as it is there, and into an operand a builtin
-   converts itself (CO_CONVERT), whose nilable forms read the 0 as they
-   always have. Any other nil value -- a call that answers nil, kept for its
-   effect -- and a nil into a variable whose nil is a sentinel (an Integer,
-   a Float, a Symbol) takes the slot's nil. */
-static int store_nil_fits(Compiler *c, int node, TyKind slot, int how) {
-  return node >= 0 && nt_kind(c->nt, node) == NK_NilNode &&
-         (store_class(c, slot) == SC_PTR || slot == TY_BOOL ||
-          (how == CO_CONVERT && store_class(c, slot) == SC_ARITH));
-}
-
-int store_fits(Compiler *c, TyKind from, TyKind to) {
-  if (from == to || to == TY_UNKNOWN || to == TY_VOID || from == TY_UNKNOWN) return 1;
-  int fc = store_class(c, from), tc = store_class(c, to);
-  if (from == TY_NIL) return 0;   /* see store_nil_fits */
-  if (fc == SC_NONE) return 0;
-  if (fc == SC_ARITH && tc == SC_ARITH) return from != TY_FLOAT || to == TY_FLOAT;
-  if (ty_is_object(from) && ty_is_object(to) && fc == SC_PTR && tc == SC_PTR)
-    return is_descendant(c, ty_object_class(from), ty_object_class(to));
-  Buf fb, tb;
-  memset(&fb, 0, sizeof fb); memset(&tb, 0, sizeof tb);
-  emit_ctype(c, from, &fb); emit_ctype(c, to, &tb);
-  int same = fb.p && tb.p && sp_streq(fb.p, tb.p);
-  free(fb.p); free(tb.p);
-  return same;
-}
+/* The C value class of a kind, whether a store fits as it is: repr.c
+   (repr_store_class, repr_store_fits) */
+#define store_class(c, t) repr_store_class((c), (t))
+int store_fits(Compiler *c, TyKind from, TyKind to) { return repr_store_fits(c, from, to); }
 
 /* Report the raw store of `node` (rendered as a `from` value) into a slot of
    kind `slot`, when it does not fit: once per node and site, on stderr at the
@@ -2642,29 +2776,57 @@ void store_check(Compiler *c, int node, TyKind slot, const char *what, Buf *b) {
    construct (`what`), the class it was given and the slot's C type. That is
    the rule of #6179: what Spinel compiles works, or it is refused; it never
    emits C that does not build, or a store that reads the wrong value. */
+/* --repr-check (R6): each store emit_coerce makes records its form
+   (CoerceForm), compared with repr_coerce_form's prediction. A store
+   emit_coerce_text makes for emit_coerce's last arm hands its form up; one
+   it makes on its own is compared with repr_coerce_text_form's. */
+static int rcc_depth;
+static int rcc_text_form = -1;
+static void rcc_note(Compiler *c, int node, TyKind from, TyKind slot, int how, int form, int text) {
+  if (!g_repr_check || form < 0) return;
+  int want = text ? repr_coerce_text_form(c, node, from, slot, how) : repr_coerce_form(c, node, slot, how);
+  if (want == form) return;
+  const char *nty = node >= 0 ? nt_type(c->nt, node) : NULL;
+  fprintf(stderr, "repr-check: %s: node %d %s %s->%s: emitted %s, predicted %s\n",
+          view_depth() > 0 ? "coerce-view" : "coerce-conflict", node, nty ? nty : "?",
+          ty_name(text ? from : store_value_kind(c, node)), ty_name(slot),
+          repr_coerce_form_name(form), repr_coerce_form_name(want));
+}
+#define RCC(form) rcc_note(c, node, TY_UNKNOWN, slot, how, (form), 0)
+#define RCCT(form) do { if (g_repr_check) { rcc_text_form = (form); \
+    if (rcc_depth == 0) rcc_note(c, node, from, slot, how, (form), 1); } } while (0)
+
 void emit_coerce_text(Compiler *c, int node, TyKind from, TyKind slot, int how,
                       const char *text, const char *what, Buf *b) {
-  if (store_fits(c, from, slot) || (from == TY_NIL && store_nil_fits(c, node, slot, how))) {
+  /* the form is repr_coerce_text_form's (repr.c) */
+  switch (repr_coerce_text_form(c, node, from, slot, how)) {
+  case CF_FIT:
     buf_puts(b, text);
+    RCCT(CF_FIT);
     return;
-  }
-  if (slot == TY_POLY) { emit_boxed_text(c, from, text, b); return; }
-  /* A value with no C type of its own -- a call that answers nothing, a
-     raise -- is evaluated for its effect, and the slot takes its nil */
-  if (from == TY_VOID || from == TY_NIL) {
+  case CF_BOX:
+    emit_boxed_text(c, from, text, b); RCCT(CF_BOX); return;
+  case CF_NIL_SENT:
+    /* A value with no C type of its own -- a call that answers nothing, a
+       raise -- is evaluated for its effect, and the slot takes its nil */
     buf_printf(b, "((void)(%s), %s)", text, raise_tail_value_c(c, slot));
+    RCCT(CF_NIL_SENT);
     return;
-  }
-  if (slot == TY_BIGINT && from == TY_INT) {
+  case CF_INT2BIG: {
     int t = ++g_tmp;
     buf_printf(b, "({ sp_int _t%d = (%s); _t%d == SP_INT_NIL ? NULL : sp_bigint_new_int(_t%d); })",
                t, text, t, t);
+    RCCT(CF_INT2BIG);
     return;
   }
-  const char *fn = NULL;
-  if (how == CO_CONVERT && slot == TY_FLOAT)
-    fn = from == TY_BIGINT ? "sp_bigint_to_double" : from == TY_RATIONAL ? "sp_rational_to_f" : NULL;
-  if (fn) { buf_printf(b, "%s(%s)", fn, text); return; }
+  case CF_CONVERT:
+    /* a Bignum or a Rational operand a Float slot converts, as Ruby does */
+    buf_printf(b, "%s(%s)", from == TY_BIGINT ? "sp_bigint_to_double" : "sp_rational_to_f", text);
+    RCCT(CF_CONVERT);
+    return;
+  default:
+    break;
+  }
   char msg[512];
   Buf tb; memset(&tb, 0, sizeof tb);
   emit_ctype(c, slot, &tb);
@@ -2681,54 +2843,75 @@ void emit_coerce_text(Compiler *c, int node, TyKind from, TyKind slot, int how,
 }
 
 void emit_coerce(Compiler *c, int node, TyKind slot, int how, const char *what, Buf *b) {
-  /* A boolean a builtin takes as a flag (`report_on_exception = v`) is the
-     value's truthiness, whatever its class: nil and false are false, 0 and
-     "" are true (emit_cond) */
-  if (how == CO_CONVERT && slot == TY_BOOL) { emit_cond(c, node, b); return; }
-  TyKind from = store_value_kind(c, node);
-  /* An untyped empty container (a bare Array.new / Hash.new) is built at
-     the slot's kind ahead of the fit, which an untyped value always passes:
-     the bare `Array.new` went into a Float array slot as the general Array
-     it renders as */
-  if (from == TY_UNKNOWN && (ty_is_array(slot) || ty_is_hash(slot)) &&
-      emit_empty_literal_as(c, node, slot, b)) return;
-  if (store_fits(c, from, slot) || (from == TY_NIL && store_nil_fits(c, node, slot, how))) {
+  /* repr_coerce_plan decides the form (repr.c), in this order: a boolean
+     flag's truthiness, an untyped empty container built at the slot's kind,
+     a value that fits written as it is (store_fits first, as cheap as it
+     was: the hot path), a boxed slot, an empty literal of another kind, a
+     nil literal's sentinel, an Integer widened into a Bignum, a boxed value
+     unboxed, and the conversions emit_coerce_text makes or refuses. */
+  TyKind from = TY_UNKNOWN;
+  int plan = repr_coerce_plan(c, node, slot, how, &from);
+  switch (plan) {
+  case CF_FIT:
     emit_expr(c, node, b);
+    RCC(CF_FIT);
+    return;
+  case CF_CONVERT:
+    /* A boolean a builtin takes as a flag (`report_on_exception = v`) is the
+       value's truthiness, whatever its class: nil and false are false, 0 and
+       "" are true (emit_cond) */
+    if (how == CO_CONVERT && slot == TY_BOOL) { emit_cond(c, node, b); RCC(CF_CONVERT); return; }
+    break;
+  case CF_EMPTY_LIT:
+    /* An untyped empty container (a bare Array.new / Hash.new) is built at
+       the slot's kind ahead of the fit, which an untyped value always
+       passes: the bare `Array.new` went into a Float array slot as the
+       general Array it renders as; an empty `[]` or `{}` of another kind
+       than the slot's is built at the slot's */
+    if (emit_empty_literal_as(c, node, slot, b)) { RCC(CF_EMPTY_LIT); return; }
+    break;
+  case CF_BOX:
+    /* A boxed slot takes any value boxed, as it is */
+    if (slot == TY_POLY) { emit_boxed(c, node, b); RCC(CF_BOX); return; }
+    break;
+  case CF_NIL_SENT:
+    /* nil literal into a sentinel slot: the slot's nil itself */
+    if (from == TY_NIL && nt_kind(c->nt, node) == NK_NilNode) { buf_puts(b, raise_tail_value_c(c, slot)); RCC(CF_NIL_SENT); return; }
+    break;
+  case CF_INT2BIG:
+    /* An Integer into a Bignum slot is the same Ruby value in the wide
+       representation, its nil sentinel kept as nil (emit_bigint_operand) */
+    emit_bigint_operand_ext(c, node, b); RCC(CF_INT2BIG); return;
+  case CF_POLY_RHS:
+    /* A boxed value into a typed slot is unboxed, as the plain writes unbox
+       it: a scalar or a String through its conversion (emit_poly_rhs_coerced,
+       nil kept as the slot's nil) */
+    if (emit_poly_rhs_coerced(c, slot, node, b)) { RCC(CF_POLY_RHS); return; }
+    break;
+  case CF_CHECKED_UNBOX: {
+    /* a container, an object or a Bignum through the checked unbox, which
+       converts or raises for a value of another class rather than reading
+       its memory, and a Class from its boxed form. A struct-valued or other
+       handle slot has no checked unbox, and is refused below. */
+    Buf vb; memset(&vb, 0, sizeof vb);
+    emit_expr(c, node, &vb);
+    emit_unbox_nilable_text(c, slot, vb.p ? vb.p : "sp_box_nil()", b);
+    free(vb.p);
+    RCC(CF_CHECKED_UNBOX);
     return;
   }
-  /* A boxed slot takes any value boxed, as it is */
-  if (slot == TY_POLY) { emit_boxed(c, node, b); return; }
-  /* An empty `[]` or `{}` of another kind than the slot's is built at the
-     slot's */
-  if ((ty_is_array(slot) || ty_is_hash(slot)) && emit_empty_literal_as(c, node, slot, b)) return;
-  /* nil literal into a sentinel slot: the slot's nil itself */
-  if (from == TY_NIL && nt_kind(c->nt, node) == NK_NilNode) { buf_puts(b, raise_tail_value_c(c, slot)); return; }
-  /* An Integer into a Bignum slot is the same Ruby value in the wide
-     representation, its nil sentinel kept as nil (emit_bigint_operand) */
-  if (slot == TY_BIGINT && from == TY_INT) { emit_bigint_operand_ext(c, node, b); return; }
-  /* A boxed value into a typed slot is unboxed, as the plain writes unbox
-     it: a scalar or a String through its conversion (emit_poly_rhs_coerced,
-     nil kept as the slot's nil), a container, an object or a Bignum through
-     the checked unbox, which converts or raises for a value of another class
-     rather than reading its memory, and a Class from its boxed form. A
-     struct-valued or other handle slot has no checked unbox, and is refused
-     below. */
-  if (from == TY_POLY && how == CO_HOLD) {
-    if (emit_poly_rhs_coerced(c, slot, node, b)) return;
-    if (ty_is_array(slot) || ty_is_ptr_array(slot) || ty_is_hash(slot) || slot == TY_BIGINT ||
-        slot == TY_STRBUF || slot == TY_CLASS || (ty_is_object(slot) && !comp_ty_value_obj(c, slot))) {
-      Buf vb; memset(&vb, 0, sizeof vb);
-      emit_expr(c, node, &vb);
-      emit_unbox_nilable_text(c, slot, vb.p ? vb.p : "sp_box_nil()", b);
-      free(vb.p);
-      return;
-    }
+  default:
+    break;
   }
   Buf vb; memset(&vb, 0, sizeof vb);
   emit_expr(c, node, &vb);
+  rcc_depth++;
   emit_coerce_text(c, node, from, slot, how, vb.p ? vb.p : "", what, b);
+  rcc_depth--;
   free(vb.p);
+  RCC(rcc_text_form);
 }
+
 int local_nil_test(Compiler *c, LocalVar *lv, const char *ref, Buf *out) {
   if (!lv) return 0;
   TyKind t = lv->type;
@@ -2739,36 +2922,46 @@ int local_nil_test(Compiler *c, LocalVar *lv, const char *ref, Buf *out) {
   /* ...or when some write leaves the sentinel in it (`a = nil; a ||= 10`):
      the nil join keeps such a slot an sp_int, and its nil is the sentinel */
   if (lv->nullable_int) nil_init = 1;
-  switch (t) {
-    case TY_STRING: case TY_BIGINT: case TY_OPENSTRUCT:
-      buf_printf(out, "!%s", ref); return 1;
-    case TY_CLASS:
-      buf_printf(out, "sp_class_nil_p(%s)", ref); return 1;
-    case TY_INT:
-      if (!nil_init) return 0;
-      buf_printf(out, "%s == SP_INT_NIL", ref); return 1;
-    case TY_FLOAT:
-      if (!nil_init) return 0;
-      buf_printf(out, "sp_float_is_nil(%s)", ref); return 1;
-    /* value kinds with no in-band nil (and POLY/BOOL/SYMBOL, whose callers
-       test their own sentinel before reaching here) */
-    case TY_BOOL: case TY_SYMBOL: case TY_POLY:
-    case TY_RANGE: case TY_FLOAT_RANGE: case TY_STR_RANGE: case TY_TIME:
-    case TY_COMPLEX: case TY_RATIONAL: case TY_TMS:
-      return 0;
-    default:
-      if (comp_ty_value_obj(c, t)) return 0;
-      if (t != TY_UNKNOWN && is_scalar_ret(t)) { buf_printf(out, "!%s", ref); return 1; }
-      return 0;
+  if (t == TY_INT || t == TY_FLOAT) {
+    if (!nil_init) return 0;
+    buf_printf(out, t == TY_INT ? "%s == SP_INT_NIL" : "sp_float_is_nil(%s)", ref);
+    return 1;
   }
+  /* any other builtin kind: its ty_traits row's nil_test_local (types.c),
+     NULL for a value kind with no in-band nil (and for POLY, BOOL and
+     SYMBOL, whose callers test their own sentinel before reaching here) */
+  const TyTraits *tr = ty_traits_of(t);
+  if (tr) {
+    if (!tr->nil_test_local) return 0;
+    ty_traits_render(tr->nil_test_local, ref, out);
+    return 1;
+  }
+  /* a user object is a pointer whose nil is NULL, unless its class is a
+     value type; an object array is a pointer too */
+  if (comp_ty_value_obj(c, t)) return 0;
+  if (is_scalar_ret(t)) { buf_printf(out, "!%s", ref); return 1; }
+  return 0;
 }
 /* The dead value closing a `({ ...; sp_raise_cls(...); V; })` arm. The raise
    never returns, so V only has to type-check in the slot: an UNKNOWN result
    flows as poly (default_value's "0" would not assign to sp_RbVal), and a
    Range wants its brace form. */
 const char *raise_tail_value(TyKind t) {
-  if (t == TY_UNKNOWN || t == TY_VOID) return "sp_box_nil()";
-  return default_value(t);
+  /* a builtin kind's ty_traits row's zero_tail (types.c): its zero, and a
+     boxed nil for an untyped value; a user object's zero otherwise */
+  const TyTraits *tr = ty_traits_of(t);
+  return tr ? tr->zero_tail : default_value(t);
+}
+
+/* Write a ty_traits rendering (types.h) with `expr` for $e and, for $t, the
+   one fresh temp the form takes, numbered on its first use. */
+void ty_traits_render(const char *cell, const char *expr, Buf *b) {
+  int tb = 0;
+  for (const char *p = cell; *p; p++) {
+    if (p[0] == '$' && p[1] == 'e') { buf_puts(b, expr); p++; continue; }
+    if (p[0] == '$' && p[1] == 't') { if (!tb) tb = ++g_tmp; buf_printf(b, "%d", tb); p++; continue; }
+    buf_printf(b, "%c", *p);
+  }
 }
 
 /* Compiler-aware form: a by-value object class's C representation is a bare
@@ -2823,50 +3016,11 @@ const char *default_value_from_compiler(Compiler *c, TyKind t) {
 }
 
 const char *default_value(TyKind t) {
-  switch (t) {
-    case TY_INT:    return "SP_INT_NIL";
-    case TY_FLOAT:  return "sp_float_nil()";
-    case TY_BOOL:   return "0";
-    case TY_STRING: return "NULL";
-    case TY_SYMBOL: return "((sp_sym)-1)";
-    case TY_RANGE:  return "(sp_Range){0}";
-    case TY_FLOAT_RANGE: return "(sp_FloatRange){0}";
-    case TY_STR_RANGE:   return "(sp_StrRange){0}";
-    case TY_TIME:   return "(sp_Time){0}";
-    case TY_COMPLEX: return "(sp_Complex){0}";
-    case TY_RATIONAL: return "(sp_Rational){0}";
-    case TY_MATCHDATA:  return "NULL";
-    case TY_BIGINT:     return "NULL";
-    case TY_REGEX:      return "NULL";
-    case TY_EXCEPTION: return "NULL";
-    case TY_STRBUF:    return "NULL";
-    case TY_INT_ARRAY:
-    case TY_FLOAT_ARRAY:
-    case TY_STR_ARRAY:
-    case TY_POLY_ARRAY:
-    case TY_INT_ARRAY_ARRAY: return "NULL";
-    case TY_FLOAT_ARRAY_ARRAY: return "NULL";
-    case TY_PROC:    return "NULL";
-    case TY_CURRY:   return "NULL";
-    case TY_FIBER:   return "NULL";
-    case TY_THREAD:  return "NULL";
-    case TY_QUEUE:   return "NULL";
-    case TY_MUTEX:   return "NULL";
-    case TY_CONDVAR: return "NULL";
-    case TY_RANDOM:  return "NULL";
-    case TY_DIR:     return "NULL";
-    case TY_ADDRINFO: return "NULL";
-    case TY_SOCKOPT: return "NULL";
-    case TY_TMS:     return "((sp_Tms){0})";
-    case TY_OPENSTRUCT: return "NULL";
-    case TY_METHOD:  return "NULL";
-    case TY_IO:      return "NULL";
-    case TY_ARGF:    return "NULL";
-    case TY_ENUMERATOR: return "NULL";
-    case TY_POLY:    return "sp_box_nil()";
-    case TY_CLASS:   return "(SP_CLASS_NIL)";   /* a struct value: callers test for the leading paren */
-    default:        return (ty_is_hash(t) || ty_is_object(t) || ty_is_obj_array(t)) ? "NULL" : "0";
-  }
+  /* a builtin kind's zero is its ty_traits row's (types.c); a Hash, a user
+     object and an object array are pointers, NULL */
+  const TyTraits *tr = ty_traits_of(t);
+  if (tr) return tr->zero;
+  return (ty_is_hash(t) || ty_is_object(t) || ty_is_obj_array(t)) ? "NULL" : "0";
 }
 /* Ruby truthiness of a slot `ref` of type `t`, as a C condition: the scalar
    kinds hold nil as a sentinel (default_value), which C reads as true. */
@@ -2984,57 +3138,6 @@ const char *ptr_array_stamp(Compiler *c, TyKind t) {
   snprintf(buf, sizeof buf, "SP_PTR_ELEM_OBJ, %d", ty_obj_array_class(t));
   return buf;
 }
-void emit_box_open(Compiler *c, TyKind t, Buf *b) {
-  switch (t) {
-  case TY_INT:      buf_puts(b, "sp_box_int("); return;
-  case TY_STRING:   buf_puts(b, "sp_box_str("); return;
-  case TY_FLOAT:    buf_puts(b, "sp_box_float("); return;
-  case TY_BOOL:     buf_puts(b, "sp_box_bool("); return;
-  case TY_NIL:      buf_puts(b, "sp_box_nil(); (void)("); return;
-  case TY_SYMBOL:   buf_puts(b, "sp_box_sym("); return;
-  /* Array slots are nilable C pointers (a nil-defaulting param, `[x] if cond`
-     in value position): box NULL as a proper nil, not a truthy OBJ wrapping
-     NULL that passes truthy checks and then segfaults on the first access
-     (#3275). Matches emit_boxed_text's array cases. */
-  case TY_INT_ARRAY: case TY_FLOAT_ARRAY: case TY_STR_ARRAY: case TY_POLY_ARRAY:
-    buf_puts(b, "sp_box_nullable_obj((void *)("); return;
-  /* A shared-mutable string boxes as the handle, the SP_BUILTIN_STRBUF object
-     the poly operators deref (sp_poly_is_strbuf). Without an arm of its own it
-     fell to TY_STRING's sp_box_str, which takes a `const char *` and was
-     handed an `sp_String *`: the C build stopped. emit_boxed_text has had the
-     handle arm; this is its open/close twin. */
-  case TY_STRBUF:   buf_puts(b, "sp_box_obj("); return;
-  case TY_CLASS:    buf_puts(b, "sp_box_class("); return;
-  case TY_COMPLEX:  buf_puts(b, "sp_box_complex("); return;
-  case TY_RATIONAL: buf_puts(b, "sp_box_rational("); return;
-  default: break;
-  }
-  if (ty_is_ptr_array(t))  buf_puts(b, "sp_box_ptr_array_k((void *)(");   /* by reference, stamped (#4486) */
-  /* Reference-backed builtins are nilable C pointers: box NULL as nil. */
-  else if (ty_nullable_builtin_id(t)) buf_puts(b, "sp_box_nullable_obj((void *)(");
-  else if (ty_is_object(t)) {
-    int cid = ty_object_class(t);
-    /* the struct typedef is sp_<c_name>; a bare `(<Name> *)` would never
-       have compiled, so this arm was effectively unreachable as written */
-    buf_printf(b, "sp_box_obj((%s *)( ", class_ctype(c, cid));
-  }
-  /* TY_POLY: already sp_RbVal, no prefix */
-}
-void emit_box_close(Compiler *c, TyKind t, Buf *b) {
-  (void)c;
-  if (t == TY_POLY || t == TY_UNKNOWN) return; /* no-op: already sp_RbVal */
-  { const char *nbid = ty_nullable_builtin_id(t);
-    if (nbid) { buf_printf(b, "), %s)", nbid); return; } }
-  if (t == TY_STRBUF)         { buf_puts(b, ", SP_BUILTIN_STRBUF)"); return; }
-  if (ty_is_object(t))        { buf_printf(b, "), %d)", ty_object_class(t)); return; }
-  /* array open used sp_box_nullable_obj((void *)( ... -- close with the kind. */
-  if (t == TY_INT_ARRAY)   { buf_puts(b, "), SP_BUILTIN_INT_ARRAY)"); return; }
-  if (t == TY_FLOAT_ARRAY) { buf_puts(b, "), SP_BUILTIN_FLT_ARRAY)"); return; }
-  if (t == TY_STR_ARRAY)   { buf_puts(b, "), SP_BUILTIN_STR_ARRAY)"); return; }
-  if (t == TY_POLY_ARRAY)  { buf_puts(b, "), SP_BUILTIN_POLY_ARRAY)"); return; }
-  if (ty_is_ptr_array(t))  { buf_printf(b, "), %s)", ptr_array_stamp(c, t)); return; }
-  buf_puts(b, ")");
-}
 /* comp_ntype through fold_seed_kind, which owns the rule (see types.c). */
 TyKind fold_seed_ntype(Compiler *c, int node) {
   return fold_seed_kind(comp_ntype(c, node), nt_type(c->nt, node));
@@ -3062,10 +3165,14 @@ void emit_poly_sum_seed(Compiler *c, int recv, int seed, Buf *b) {
    the analyzer settled as void. */
 int call_never_returns(Compiler *c, int id) {
   const NodeTable *nt = c->nt;
-  if (id < 0 || nt_kind(nt, id) != NK_CallNode || comp_ntype(c, id) != TY_VOID) return 0;
+  if (id < 0 || nt_kind(nt, id) != NK_CallNode) return 0;
+  int recv = nt_ref(nt, id, "receiver");
+  /* a call on such a receiver never runs, whatever its own type
+     (`m.version - 1 > 2`: the `-` raises before `>` is reached) */
+  if (recv >= 0 && call_never_returns(c, recv)) return 1;
+  if (comp_ntype(c, id) != TY_VOID) return 0;
   const char *nm = nt_str(nt, id, "name");
   if (!nm) return 0;
-  int recv = nt_ref(nt, id, "receiver");
   if (recv < 0 && (sp_streq(nm, "raise") || sp_streq(nm, "fail"))) return 1;
   int mi = -1;
   if (recv < 0 || nt_kind(nt, recv) == NK_SelfNode) mi = comp_self_call_mi(c, id, nm);
