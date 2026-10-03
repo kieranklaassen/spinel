@@ -650,6 +650,9 @@ int collect_dm_each_unroll(Compiler *c, int id, int class_id) {
     int ms_idx = c->nscopes - 1;
     if (dbody >= 0) walk_scope(c, dbody, ms_idx, class_id);
   }
+  /* every element named a method, so the shared body is a method's: its
+     `next` is a `return`. Not before, where a later element may still bail. */
+  method_body_next_to_return((NodeTable *)nt, dbody);
   return 1;
 }
 
@@ -839,8 +842,7 @@ int class_eval_reopen_class(Compiler *c, int id, int enclosing_class) {
   const char *ty = nt_type(nt, id);
   if (!ty || !sp_streq(ty, "CallNode")) return -1;
   const char *nm = nt_str(nt, id, "name");
-  if (!nm || (!sp_streq(nm, "class_eval") && !sp_streq(nm, "module_eval") &&
-              !sp_streq(nm, "class_exec") && !sp_streq(nm, "module_exec"))) return -1;
+  if (!nm || !is_class_eval_family(nm)) return -1;
   int blk = nt_ref(nt, id, "block");
   if (blk < 0) return -1;
   int recv = nt_ref(nt, id, "receiver");
@@ -897,8 +899,7 @@ int class_reopen_cmethod(Compiler *c, int recv, const char *name) {
 }
 
 static int is_class_eval_name(const char *nm) {
-  return nm && (sp_streq(nm, "class_eval") || sp_streq(nm, "module_eval") ||
-                sp_streq(nm, "class_exec") || sp_streq(nm, "module_exec"));
+  return nm && is_class_eval_family(nm);
 }
 
 void desugar_class_reopen(Compiler *c) {
@@ -984,7 +985,7 @@ static void sclass_walk_stmt(Compiler *c, int s, int scope_idx, int target_class
     const char *vn = nt_str(nt, s, "name");
     int va = nt_ref(nt, s, "arguments");
     int vc = 0; const int *vv = va >= 0 ? nt_arr(nt, va, "arguments", &vc) : NULL;
-    if (vn && (sp_streq(vn, "private") || sp_streq(vn, "protected") || sp_streq(vn, "public")) &&
+    if (vn && is_visibility_name(vn) &&
         vc == 1 && nt_kind(nt, vv[0]) == NK_DefNode && nt_ref(nt, vv[0], "receiver") < 0) {
       c->nscope[s] = scope_idx;
       c->node_cbody[s] = g_cbody_class_id;
@@ -1219,6 +1220,8 @@ void walk_scope(Compiler *c, int id, int scope_idx, int class_id) {
           Scope *dm_s = comp_scope_new(c, dm_mname, id);
           int dm_new_idx = c->nscopes - 1;
           dm_s->body = nt_ref(c->nt, dm_blk, "body");
+          /* the block is a method's body from here on: its `next` is a `return` */
+          method_body_next_to_return((NodeTable *)c->nt, dm_s->body);
           dm_s->class_id = dm_cls;
           dm_s->is_cmethod = dm_cmethod;
           /* the block's params are the defined method's params (e.g. the
@@ -2496,7 +2499,7 @@ void fix_struct_block_scopes(Compiler *c) {
         const char *vn = nt_str(nt, dn, "name");
         int va = nt_ref(nt, dn, "arguments");
         int vc = 0; const int *vv = va >= 0 ? nt_arr(nt, va, "arguments", &vc) : NULL;
-        if (vn && (sp_streq(vn, "private") || sp_streq(vn, "protected") || sp_streq(vn, "public")) &&
+        if (vn && is_visibility_name(vn) &&
             vc == 1 && nt_kind(nt, vv[0]) == NK_DefNode && nt_ref(nt, vv[0], "receiver") < 0)
           dn = vv[0];
       }
@@ -2597,7 +2600,7 @@ void register_attrs_body(Compiler *c, ClassInfo *cls, int body) {
          call's argument is the attr call (#4922) */
       const char *vn = nt_str(nt, s, "name");
       if (vn && nt_ref(nt, s, "receiver") < 0 &&
-          (sp_streq(vn, "private") || sp_streq(vn, "protected") || sp_streq(vn, "public"))) {
+          is_visibility_name(vn)) {
         int va = nt_ref(nt, s, "arguments");
         int vc = 0; const int *vv = va >= 0 ? nt_arr(nt, va, "arguments", &vc) : NULL;
         for (int q = 0; q < vc; q++)
@@ -2844,7 +2847,7 @@ void register_aliases_body(Compiler *c, ClassInfo *cls, int body) {
       const char *nm = nt_str(nt, s, "name");
       /* `private alias_method :a, :b` defines the alias it wraps */
       if (nm && nt_ref(nt, s, "receiver") < 0 &&
-          (sp_streq(nm, "private") || sp_streq(nm, "protected") || sp_streq(nm, "public"))) {
+          is_visibility_name(nm)) {
         int pa = nt_ref(nt, s, "arguments");
         int pn = 0;
         const int *pv = pa >= 0 ? nt_arr(nt, pa, "arguments", &pn) : NULL;
@@ -4210,7 +4213,7 @@ int infer_global_const_types(Compiler *c) {
          the receiver is a direct ConstantReadNode. */
       const char *cnm = nt_str(nt, id, "name");
       if (!cnm) continue;
-      int is_push = (sp_streq(cnm, "<<") || sp_streq(cnm, "push") || sp_streq(cnm, "append"));
+      int is_push = is_push_alias(cnm);
       /* `CONST[i] = v` is the other way a constant bound to an empty literal
          gets filled -- the table-building shape (`DISPATCH[opcode] = args`).
          Without it the constant stayed UNKNOWN, which reads as "defined
@@ -4535,10 +4538,115 @@ static void check_unrewritten_delegators(Compiler *c) {
   }
 }
 
+/* The builtin class a superclass expression names, when instances of that
+   builtin carry a representation of their own that a program class cannot
+   take on, else NULL. A subclass of one is built as a plain object: none of
+   the parent's methods reach it, its constructor takes none of the parent's
+   arguments, and p / to_s / == / respond_to? answer as for an Object (#7075).
+   `::Hash` and `Thread::Queue` name the builtin too; any other path is a
+   namespace of the program's own. A bare name that some class of the
+   program's own nests under a namespace (`M::Queue`) is left alone: the
+   lexical lookup may well find that class instead. Object, BasicObject, the
+   exceptions, Struct / Data, Numeric, and package classes written in Ruby
+   (Set, Date, ...) are absent: a subclass of those works. OpenStruct is a
+   type of the runtime's own here, so it is listed with the builtins. */
+static const char *refused_builtin_superclass(Compiler *c, int sc) {
+  static const char *const refused[] = {
+    "Array", "Hash", "String", "Range", "Proc", "Method", "UnboundMethod",
+    "Integer", "Float", "Symbol", "Rational", "Complex",
+    "NilClass", "TrueClass", "FalseClass", "Regexp", "MatchData", "Time",
+    "Random", "Enumerator", "IO", "File", "Dir", "Thread", "Fiber", "Mutex",
+    "Queue", "SizedQueue", "ConditionVariable", "OpenStruct", NULL };
+  const NodeTable *nt = c->nt;
+  if (sc < 0) return NULL;
+  NodeKind k = nt_kind(nt, sc);
+  if (k != NK_ConstantReadNode && k != NK_ConstantPathNode) return NULL;
+  const char *nm = nt_str(nt, sc, "name");
+  if (!nm || !str_in(nm, refused)) return NULL;
+  if (k == NK_ConstantPathNode) {
+    int par = nt_ref(nt, sc, "parent");
+    if (par >= 0) {
+      const char *pn = nt_kind(nt, par) == NK_ConstantReadNode ? nt_str(nt, par, "name") : NULL;
+      if (!pn || !sp_streq(pn, "Thread") ||
+          !(sp_streq(nm, "Queue") || sp_streq(nm, "SizedQueue") ||
+            sp_streq(nm, "Mutex") || sp_streq(nm, "ConditionVariable")))
+        return NULL;
+    }
+    return nm;
+  }
+  for (int i = 0; i < c->nclasses; i++) {
+    if (!c->classes[i].name || !sp_streq(c->classes[i].name, nm)) continue;
+    const char *rn = class_ruby_name(c, i);
+    if (rn && !sp_streq(rn, nm)) return NULL;
+  }
+  return nm;
+}
+
+/* A program class whose superclass is a builtin of that kind, or a class a
+   package binds to C (StringIO), is refused where it is declared: it would
+   build and then answer differently from CRuby (#7075). The fix is a real
+   subclass -- an instance that IS an Array with the subclass's methods
+   dispatched on it -- which spinel does not have yet; rewriting the class
+   into one that delegates to a wrapped value answers differently too
+   (`is_a?`, `==`, `p`), so wrapping is left to the program. `Class.new(Hash)`
+   without a block is the same class spelled as a call (the block form
+   arrives here already rewritten into a ClassNode). */
+static void refuse_builtin_subclass(Compiler *c, int at, const char *what, const char *par) {
+  char msg[512];
+  snprintf(msg, sizeof msg,
+           "%s: subclassing %s is not supported yet (a subclass would answer "
+           "differently from CRuby); wrap a%s %s in an instance variable instead",
+           what, par,
+           strchr("AEIOU", par[0]) ? "n" : "",
+           par);
+  unsupported_feature(c, at, msg);
+}
+
+static void check_builtin_subclasses(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  NT_FOREACH_KIND(nt, NK_ClassNode, id) {
+    int sc = nt_ref(nt, id, "superclass");
+    if (sc < 0) continue;
+    int cp = nt_ref(nt, id, "constant_path");
+    const char *cn = cp >= 0 ? nt_str(nt, cp, "name") : NULL;
+    const char *par = refused_builtin_superclass(c, sc);
+    if (!par) {
+      NodeKind sk = nt_kind(nt, sc);
+      if (sk != NK_ConstantReadNode && sk != NK_ConstantPathNode) continue;
+      int p = comp_class_index(c, nt_str(nt, sc, "name"));
+      if (p < 0 || !c->classes[p].is_native_class) continue;
+      par = c->classes[p].name;
+    }
+    char what[300];
+    snprintf(what, sizeof what, "class %s < %s", cn ? cn : "?", par);
+    /* the superclass node: a ClassNode rewritten from `Foo = Class.new(Hash)
+       do ... end` carries no position of its own */
+    refuse_builtin_subclass(c, sc, what, par);
+  }
+  NT_FOREACH_KIND(nt, NK_CallNode, id) {
+    const char *nm = nt_str(nt, id, "name");
+    if (!nm || !sp_streq(nm, "new") || nt_ref(nt, id, "block") >= 0) continue;
+    int recv = nt_ref(nt, id, "receiver");
+    if (recv < 0 || nt_kind(nt, recv) != NK_ConstantReadNode) continue;
+    const char *rn = nt_str(nt, recv, "name");
+    if (!rn || !sp_streq(rn, "Class")) continue;
+    int args = nt_ref(nt, id, "arguments"), ac = 0;
+    const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &ac) : NULL;
+    if (!av || ac != 1) continue;
+    const char *par = refused_builtin_superclass(c, av[0]);
+    if (par) {
+      char what[64];
+      snprintf(what, sizeof what, "Class.new(%s)", par);
+      refuse_builtin_subclass(c, id, what, par);
+    }
+  }
+}
+
 void resolve_parents(Compiler *c) {
   check_class_redeclarations(c);
   check_blk_param_writes(c);
   check_unrewritten_delegators(c);
+  check_builtin_subclasses(c);
   const NodeTable *nt = c->nt;
   for (int i = 0; i < c->nclasses; i++) {
     int sc = nt_ref(nt, c->classes[i].def_node, "superclass");
@@ -6805,7 +6913,7 @@ int infer_ivar_types(Compiler *c) {
       if (sp_streq(ty, "InstanceVariableOperatorWriteNode") && ci->ivar_types[iv] == TY_UNKNOWN &&
           !class_ivar_pinned(ci, nm)) {
         const char *bo = nt_str(nt, id, "binary_operator");
-        if (bo && (sp_streq(bo, "|") || sp_streq(bo, "&") || sp_streq(bo, "^"))) vt = TY_POLY;
+        if (bo && is_bit_op(bo)) vt = TY_POLY;
       }
       /* For operator-write (@b += rhs), vt is the RHS type, not the result type.
          When the slot holds a user object, the result is the method's return type. */
@@ -7660,7 +7768,7 @@ static void bc_walk(Bc *b, int id, const char *self, int mode) {
     if (target && target[0] == '?') target_known = 0;
     const char *m2 = nm;
     int a0 = 0;
-    if (nm && (sp_streq(nm, "send") || sp_streq(nm, "__send__") || sp_streq(nm, "public_send")) && ac >= 1) {
+    if (nm && is_send_family(nm) && ac >= 1) {
       m2 = bc_sym_arg(nt, av[0]);
       a0 = 1;
     }

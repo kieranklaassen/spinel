@@ -904,8 +904,7 @@ int desugar_body_module_eval(Compiler *c) {
       int st = bb[i];
       int blk = nt_kind(nt, st) == NK_CallNode ? nt_ref(nt, st, "block") : -1;
       const char *nm = blk >= 0 ? nt_str(nt, st, "name") : NULL;
-      int is_eval = nm && (sp_streq(nm, "class_eval") || sp_streq(nm, "module_eval") ||
-                           sp_streq(nm, "class_exec") || sp_streq(nm, "module_exec")) &&
+      int is_eval = nm && is_class_eval_family(nm) &&
                     nt_kind(nt, blk) == NK_BlockNode && nt_ref(nt, blk, "parameters") < 0 &&
                     nt_ref(nt, st, "arguments") < 0;
       int recv = is_eval ? nt_ref(nt, st, "receiver") : -1;
@@ -2045,8 +2044,7 @@ int desugar_int_enum_with_index(Compiler *c) {
     if (recv < 0 || nt_kind(nt, recv) != NK_CallNode) continue;
     if (nt_ref(nt, recv, "block") >= 0) continue;
     const char *rnm = nt_str(nt, recv, "name");
-    if (!rnm || (!sp_streq(rnm, "times") && !sp_streq(rnm, "upto") &&
-                 !sp_streq(rnm, "downto"))) continue;
+    if (!rnm || !is_int_step(rnm)) continue;
     if (infer_type(c, recv) != TY_RANGE) continue;
     int base = nt->count;
     int blk = nt_ref(nt, id, "block");
@@ -2487,8 +2485,7 @@ int desugar_implicit_send(Compiler *c) {
     if (!nt_type(nt, id) || !sp_streq(nt_type(nt, id), "CallNode")) continue;
     if (nt_ref(nt, id, "receiver") >= 0) continue;        /* implicit self only */
     const char *nm = nt_str(nt, id, "name");
-    if (!nm || (!sp_streq(nm, "send") && !sp_streq(nm, "__send__") &&
-                !sp_streq(nm, "public_send"))) continue;
+    if (!nm || !is_send_family(nm)) continue;
     int args = nt_ref(nt, id, "arguments");
     if (args < 0) continue;
     int argc = 0; const int *argv = nt_arr(nt, args, "arguments", &argc);
@@ -2498,8 +2495,7 @@ int desugar_implicit_send(Compiler *c) {
     if (a0ty && sp_streq(a0ty, "SymbolNode")) mname = nt_str(nt, argv[0], "value");
     else if (a0ty && sp_streq(a0ty, "StringNode")) mname = nt_str(nt, argv[0], "content");
     if (!mname || !*mname) continue;                      /* non-literal name: leave it */
-    if (sp_streq(mname, "send") || sp_streq(mname, "__send__") ||
-        sp_streq(mname, "public_send")) continue;          /* don't re-trigger next pass */
+    if (is_send_family(mname)) continue;          /* don't re-trigger next pass */
     int nrest = argc - 1;
     if (nrest > 64) continue;                             /* absurd arity: leave it */
     int rest[64];
@@ -2566,8 +2562,7 @@ int desugar_public_send_recv(Compiler *c) {
     if (a0ty && sp_streq(a0ty, "SymbolNode")) mname = nt_str(nt, argv[0], "value");
     else if (a0ty && sp_streq(a0ty, "StringNode")) mname = nt_str(nt, argv[0], "content");
     if (!mname || !*mname) continue;                       /* runtime name: dyn_send_arms */
-    int m_is_send = sp_streq(mname, "send") || sp_streq(mname, "__send__") ||
-                    sp_streq(mname, "public_send");
+    int m_is_send = is_send_family(mname);
     (void)m_is_send;
     /* send/__send__ that spinel_parse.c already lowered never reach here;
        the ones it leaves are the send-of-send residue (`d.send(:greet)` after
@@ -2932,7 +2927,7 @@ static int engine_inner_body(NodeTable *nt, int id) {
 /* Is `name` Object, Kernel or BasicObject, whose constants Object's lookup
    reaches, or a name the program also assigns as a value (`K = Kernel`)? */
 static int engine_maybe_object_chain(NodeTable *nt, const char *name) {
-  if (!name || sp_streq(name, "Object") || sp_streq(name, "Kernel") || sp_streq(name, "BasicObject")) return 1;
+  if (!name || is_object_root(name)) return 1;
   for (int w = 0; w < nt->count; w++) {
     NodeKind wk = nt_kind(nt, w);
     if (wk == NK_ClassNode || wk == NK_ModuleNode) continue;
@@ -2979,7 +2974,7 @@ static int engine_object_mixes_in_scan(NodeTable *nt) {
     const char *nm = nt_str(nt, id, "name");
     if (!nm) continue;
     int mix = sp_streq(nm, "include") || sp_streq(nm, "prepend");
-    if (!mix && (sp_streq(nm, "send") || sp_streq(nm, "__send__") || sp_streq(nm, "public_send"))) {
+    if (!mix && is_send_family(nm)) {
       int ac = 0; const int *av = nt_arr(nt, nt_ref(nt, id, "arguments"), "arguments", &ac);
       const char *s = ac < 1 ? NULL : nt_kind(nt, av[0]) == NK_SymbolNode ? nt_str(nt, av[0], "value") :
                       nt_kind(nt, av[0]) == NK_StringNode ? nt_str(nt, av[0], "content") : NULL;
@@ -3264,7 +3259,7 @@ static int dsend_method_name_shaped(const char *v) {
 
 static void dsend_add_name(char ***names, int *n, int *cap, ANameHash *seen, const char *v) {
   if (!v || !*v || anh_has(seen, v)) return;
-  if (sp_streq(v, "send") || sp_streq(v, "__send__") || sp_streq(v, "public_send")) return;
+  if (is_send_family(v)) return;
   if (*n == *cap) { *cap = *cap ? *cap * 2 : 32; *names = (char **)realloc(*names, sizeof(char *) * (size_t)*cap); }
   (*names)[(*n)++] = strdup(v);
   anh_add(seen, (*names)[*n - 1]);
@@ -3337,7 +3332,6 @@ static ANameHash g_dsend_lits;
 char **dsend_candidates(Compiler *c, int *out_n) {
   NodeTable *nt = (NodeTable *)c->nt;
   int n0 = nt->count;
-  static const char *const sends[] = { "send", "__send__", "public_send", NULL };
   /* collect distinct symbol/string-literal names = candidate method names (send
      accepts either; a string name interns to the same symbol at the call).
      Only names shaped like a method name: a log message or a label with a
@@ -3355,8 +3349,7 @@ char **dsend_candidates(Compiler *c, int *out_n) {
     if (ty && sp_streq(ty, "SymbolNode")) v = nt_str(nt, id, "value");
     else if (ty && sp_streq(ty, "StringNode")) v = nt_str(nt, id, "content");
     if (!v || !*v || !dsend_method_name_shaped(v)) continue;
-    int skip = 0;
-    for (int k = 0; sends[k]; k++) if (sp_streq(v, sends[k])) { skip = 1; break; }  /* avoid send-of-send recursion */
+    int skip = is_send_family(v);  /* avoid send-of-send recursion */
     if (!skip && anh_has(&cand_set, v)) skip = 1;
     if (skip) continue;
     if (ncand == candcap) { candcap = candcap ? candcap * 2 : 16; cand = (char **)realloc(cand, sizeof(char *) * candcap); }
@@ -3376,8 +3369,7 @@ char **dsend_candidates(Compiler *c, int *out_n) {
       const char *sn = c->scopes[s].name;
       if (!sn || !*sn || strncmp(sn, "__", 2) == 0 || strchr(sn, '#') || !dsend_method_name_shaped(sn)) continue;
       if (sp_streq(sn, "initialize")) continue;
-      int skip = 0;
-      for (int k = 0; sends[k]; k++) if (sp_streq(sn, sends[k])) { skip = 1; break; }
+      int skip = is_send_family(sn);
       if (skip || anh_has(&cand_set, sn)) continue;
       if (ncand == candcap) { candcap = candcap ? candcap * 2 : 16; cand = (char **)realloc(cand, sizeof(char *) * candcap); }
       cand[ncand++] = strdup(sn);
@@ -3458,18 +3450,16 @@ int desugar_dynamic_send(Compiler *c) {
   NodeTable *nt = (NodeTable *)c->nt;
   int n0 = nt->count;
   int changed = 0;
-  static const char *const sends[] = { "send", "__send__", "public_send", NULL };
   /* a user-defined method named send/etc. resolves normally; don't intercept */
   for (int s = 0; s < c->nscopes; s++) { const char *sn = c->scopes[s].name;
-    if (sn) for (int k = 0; sends[k]; k++) if (sp_streq(sn, sends[k])) return 0; }
+    if (sn && is_send_family(sn)) return 0; }
   /* quick out: nothing to do unless some not-yet-lowered explicit-receiver send
      with a runtime name exists (the common case has none, so skip the scans). */
   { int any = 0;
     for (int id = 0; id < n0 && !any; id++) {
       if (!nt_type(nt, id) || !sp_streq(nt_type(nt, id), "CallNode")) continue;
       const char *nm = nt_str(nt, id, "name"); if (!nm) continue;
-      int is = 0; for (int k = 0; sends[k]; k++) if (sp_streq(nm, sends[k])) { is = 1; break; }
-      if (!is) continue;
+      if (!is_send_family(nm)) continue;
       int dn = 0; nt_arr(nt, id, "dyn_send_arms", &dn); if (dn > 0) continue;
       int a = nt_ref(nt, id, "arguments"); if (a < 0) continue;
       int ac = 0; const int *av = nt_arr(nt, a, "arguments", &ac);
@@ -3488,8 +3478,7 @@ int desugar_dynamic_send(Compiler *c) {
     if (!nt_type(nt, id) || !sp_streq(nt_type(nt, id), "CallNode")) continue;
     const char *nm = nt_str(nt, id, "name");
     if (!nm) continue;
-    int is_send = 0; for (int k = 0; sends[k]; k++) if (sp_streq(nm, sends[k])) { is_send = 1; break; }
-    if (!is_send) continue;
+    if (!is_send_family(nm)) continue;
     int recv = nt_ref(nt, id, "receiver");
     if (recv < 0) {
       /* A receiverless `send(name, ...)` in a method is `self.send(name, ...)`:
@@ -5203,11 +5192,6 @@ static int fwd_new_call(NodeTable *nt, int recv, const char *name, int arg) {
   nt_node_set_ref(nt, call, "block", -1);
   return call;
 }
-static int fwd_new_int(NodeTable *nt, int v) {
-  int n = nt_new_node(nt, "IntegerNode");
-  nt_node_set_int(nt, n, "value", v);
-  return n;
-}
 
 /* The call a Hash iterator's forward makes to a callable whose parameters it
    cannot see, `pair` handing it the [k, v] pair: map spreads the pair for more
@@ -5216,9 +5200,9 @@ static int fwd_new_int(NodeTable *nt, int v) {
    `q.is_a?(Proc) && (q.arity >= 2 || q.arity < -1) ? ...`. The Proc test is
    left out where the callable is known to be one. */
 static int fwd_arity_pick(Compiler *c, NodeTable *nt, int ex, int id, int pair, int find, int proc_test) {
-  int ge = fwd_new_call(nt, fwd_new_call(nt, nt_clone_subtree(nt, ex), "arity", -1), ">=", fwd_new_int(nt, 2));
+  int ge = fwd_new_call(nt, fwd_new_call(nt, nt_clone_subtree(nt, ex), "arity", -1), ">=", nt_new_int(nt, 2));
   int lt = fwd_new_call(nt, fwd_new_call(nt, nt_clone_subtree(nt, ex), "arity", -1), "<",
-                        fwd_new_int(nt, find ? -1 : -2));
+                        nt_new_int(nt, find ? -1 : -2));
   int cond = nt_new_node(nt, "OrNode");
   nt_node_set_ref(nt, cond, "left", ge);
   nt_node_set_ref(nt, cond, "right", lt);
@@ -6666,7 +6650,7 @@ static int dm_stmt_call(NodeTable *nt, int s) {
   int args = nt_ref(nt, s, "arguments");
   int an = 0; const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
   if (nm && nt_ref(nt, s, "receiver") < 0 && an == 1 && nt_kind(nt, av[0]) == NK_CallNode &&
-      (sp_streq(nm, "private") || sp_streq(nm, "protected") || sp_streq(nm, "public")))
+      is_visibility_name(nm))
     return av[0];
   return s;
 }
@@ -6715,6 +6699,87 @@ static int dmp_instance_method_alias(NodeTable *nt, int call, const char *cn, in
   nt_node_set_str(nt, call, "name", "alias_method");
   nt_node_reset(nt, src, "NilNode");
   return 1;
+}
+
+
+/* The `next`s the block whose body is `id` owns: not the ones a loop or an
+   inner block, lambda or def takes. With `retype` each becomes a `return`. */
+static int owned_next_walk(NodeTable *nt, int id, int depth, int retype) {
+  if (id < 0 || id >= nt->count || depth > 200) return 0;
+  NodeKind k = nt_kind(nt, id);
+  if (k == NK_WhileNode || k == NK_UntilNode || k == NK_ForNode || k == NK_BlockNode ||
+      k == NK_LambdaNode || k == NK_DefNode || k == NK_ClassNode || k == NK_ModuleNode) return 0;
+  int found = 0;
+  if (k == NK_NextNode) { if (retype) nt_node_set_type(nt, id, "ReturnNode"); found = 1; }
+  const SpNode *nd = &nt->nodes[id];
+  for (int i = 0; i < nd->nr; i++) found |= owned_next_walk(nt, nd->r[i].ref, depth + 1, retype);
+  for (int i = 0; i < nd->na; i++)
+    for (int j = 0; j < nd->a[i].n; j++) found |= owned_next_walk(nt, nd->a[i].ids[j], depth + 1, retype);
+  return found;
+}
+
+/* Whether the pieces of an interpolated String or Symbol can spell `name`:
+   the literal ones in order, a `#{}` standing for any text. `open` says a
+   `#{}` came just before, so the next literal piece may start anywhere. */
+static int interp_pieces_spell(const NodeTable *nt, const int *parts, int pn, int k, int open, const char *name) {
+  for (; k < pn; k++) {
+    const char *s = sym_or_str_literal(nt, parts[k]);
+    if (!s) { open = 1; continue; }
+    size_t n = strlen(s);
+    if (!n) continue;
+    if (!open) { if (strncmp(name, s, n)) return 0; name += n; continue; }
+    for (const char *h = strstr(name, s); h; h = strstr(h + 1, s))
+      if (interp_pieces_spell(nt, parts, pn, k + 1, 0, h + n)) return 1;
+    return 0;
+  }
+  return open || !*name;
+}
+
+/* A `define_method` call whose name is an interpolated String or Symbol that
+   can spell define_method or define_singleton_method. The methods an `each`
+   over literals names (collect_dm_each_unroll) get theirs put together at
+   compile time, with no literal in the program spelling it whole:
+
+     [:method].each { |v| define_method("define_#{v}") { |n, &b| b.call } } */
+static int dm_interp_name_may_be_dm(const NodeTable *nt, int call) {
+  const char *cn = nt_str(nt, call, "name");
+  if (!cn || !sp_streq(cn, "define_method")) return 0;
+  int args = nt_ref(nt, call, "arguments"), an = 0, pn = 0;
+  const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+  if (an < 1) return 0;
+  NodeKind k = nt_kind(nt, av[0]);
+  if (k != NK_InterpolatedStringNode && k != NK_InterpolatedSymbolNode) return 0;
+  const int *parts = nt_arr(nt, av[0], "parts", &pn);
+  return interp_pieces_spell(nt, parts, pn, 0, 0, "define_method") ||
+         interp_pieces_spell(nt, parts, pn, 0, 0, "define_singleton_method");
+}
+
+/* A define_method or define_singleton_method block that is registered as a
+   method is that method's body, compiled as a C function with no loop for a
+   `continue` to name, and a `next` it owns ends the call with its value,
+   which is what a `return` there does:
+
+     define_method(:m) { next v if c; w }  ->  define_method(:m) { return v if c; w }
+
+   `id` is such a body. Called only where the block becomes a method
+   (walk_scope, collect_dm_each_unroll, desugar_define_method_keywords): a
+   call whose name is not known at compile time registers nothing, and a
+   `return` left in its block would be read as the enclosing method's. A
+   program with a method of its own by either name is left alone: that one
+   may run the block as a block. A `def` makes one, and so does an `alias`
+   or an `alias_method`, which names it by a Symbol or a String, so a Symbol
+   or String literal spelling either name anywhere in the program counts as
+   one, and so does a `define_method` whose interpolated name can spell it.
+   The program is searched only when the body owns a `next`. */
+int method_body_next_to_return(NodeTable *nt, int id) {
+  if (!owned_next_walk(nt, id, 0, 0)) return 0;
+  for (int d = 0; d < nt->count; d++) {
+    NodeKind k = nt_kind(nt, d);
+    const char *dn = k == NK_DefNode ? nt_str(nt, d, "name") : sym_or_str_literal(nt, d);
+    if (dn && (sp_streq(dn, "define_method") || sp_streq(dn, "define_singleton_method"))) return 0;
+    if (k == NK_CallNode && dm_interp_name_may_be_dm(nt, d)) return 0;
+  }
+  return owned_next_walk(nt, id, 0, 1);
 }
 
 /* `define_method(:m, <proc>)` / `define_method(:m, &<proc>)` in a class,
@@ -6896,6 +6961,7 @@ int desugar_define_method_keywords(Compiler *c) {
       nt_node_set_ref(nt, def, "parameters", pn);
       nt_node_set_ref(nt, def, "body", nt_ref(nt, blk, "body"));
       nt_node_set_ref(nt, def, "receiver", dself);
+      method_body_next_to_return(nt, nt_ref(nt, def, "body"));
       if (id != bv[i]) {
         /* `private define_method(...)` -> `private def ...` */
         nt_node_set_arr(nt, nt_ref(nt, bv[i], "arguments"), "arguments", &def, 1);
@@ -7160,7 +7226,7 @@ typedef struct { int def, st, top, tst, cond, cm, cls; const char *path, *vis; }
 static int cdef_vis_def(const NodeTable *nt, int id) {
   const char *nm = nt_kind(nt, id) == NK_CallNode && nt_ref(nt, id, "receiver") < 0 ? nt_str(nt, id, "name") : NULL;
   int an = 0;
-  const int *av = nm && (sp_streq(nm, "private") || sp_streq(nm, "protected") || sp_streq(nm, "public"))
+  const int *av = nm && is_visibility_name(nm)
                   ? nt_arr(nt, nt_ref(nt, id, "arguments"), "arguments", &an) : NULL;
   return an == 1 && nt_kind(nt, av[0]) == NK_DefNode ? av[0] : -1;
 }
@@ -7308,7 +7374,7 @@ int desugar_conditional_defs(Compiler *c) {
       nt_set_str(nt, g[k].def, "name", nm);
       int wk = fwd_new_node_like(nt, g[k].def, "GlobalVariableWriteNode");
       nt_node_set_str(nt, wk, "name", sel);
-      nt_node_set_ref(nt, wk, "value", fwd_new_int(nt, k + 1));
+      nt_node_set_ref(nt, wk, "value", nt_new_int(nt, k + 1));
       cdef_insert_after(nt, g[k].st, g[k].def, wk);
       int na = ar < 0 ? 2 : ar, av[na > 0 ? na : 1];
       for (int a = 0; a < ar; a++) { snprintf(pn, sizeof pn, "__cond%d", a); av[a] = cdef_local(nt, "LocalVariableReadNode", pn); }
@@ -7333,7 +7399,7 @@ int desugar_conditional_defs(Compiler *c) {
       }
       int ifn = nt_new_node(nt, "IfNode");
       nt_node_set_ref(nt, ifn, "predicate", fwd_new_call(nt, cdef_local(nt, "GlobalVariableReadNode", sel), "==",
-                                                         fwd_new_int(nt, k + 1)));
+                                                         nt_new_int(nt, k + 1)));
       nt_node_set_ref(nt, ifn, "statements", cdef_stmts(nt, call));
       nt_node_set_ref(nt, ifn, "subsequent", chain);
       chain = ifn;
@@ -7866,7 +7932,7 @@ int nested_row_iter_call(Compiler *c, int id) {
   if (args >= 0) nt_arr(nt, args, "arguments", &argc);
   int np = 0;
   while (block_param_name(c, block, np)) np++;
-  if ((sp_streq(nm, "each") || sp_streq(nm, "reverse_each") || sp_streq(nm, "each_entry")) &&
+  if (is_each_walk(nm) &&
       argc == 0 && np <= 1) return 1;
   if (sp_streq(nm, "each_with_index") && argc == 0 && np <= 2) return 1;
   if ((sp_streq(nm, "map") || sp_streq(nm, "collect")) && argc == 0 && np <= 1) return 1;
@@ -8068,8 +8134,7 @@ int desugar_builtin_enum_calls(Compiler *c) {
        truthiness (or, with one argument, a `===` pattern), never the
        block's; both stay on the existing emitter, the way a blockless,
        argumentless count does. */
-    if ((sp_streq(name, "any?") || sp_streq(name, "all?") ||
-         sp_streq(name, "none?") || sp_streq(name, "one?")) &&
+    if (is_quantifier(name) &&
         nt_ref(nt, id, "block") < 0) continue;
     /* find_index without a block is either the value-argument form
        (`find_index(v)`, its own arity/emitter arm) or the blockless
@@ -9070,7 +9135,7 @@ static int bs_yield_count(TyKind rt, const char *nm, int argc, TyKind *elem, int
   *hash_pair = 0;
   *elem = TY_UNKNOWN;
   /* tap, then and yield_self yield the receiver, whatever it is */
-  if ((sp_streq(nm, "tap") || sp_streq(nm, "then") || sp_streq(nm, "yield_self")) && argc == 0) {
+  if (is_tap_alias(nm) && argc == 0) {
     *elem = rt;
     return rt == TY_UNKNOWN ? 0 : 1;
   }
@@ -9179,7 +9244,7 @@ static int bs_binds_rest(TyKind rt, const char *nm, int argc) {
   if (!arr && rt != TY_RANGE) return 0;
   if (sp_streq(nm, "map") || sp_streq(nm, "collect") || sp_streq(nm, "select") ||
       sp_streq(nm, "filter") || sp_streq(nm, "reject")) return 1;
-  return arr && (sp_streq(nm, "each") || sp_streq(nm, "each_entry") || sp_streq(nm, "reverse_each"));
+  return arr && is_each_walk(nm);
 }
 
 /* Does the emitter of builtin iterator `nm` spread the one Array a step
@@ -9612,7 +9677,7 @@ int desugar_builtin_iter_block_shapes(Compiler *c) {
     TyKind rt = infer_type(c, recv);
     /* a program's own tap or then, on any receiver, yields what it likes,
        and so does its own method of the name on a boxed receiver */
-    if ((rt == TY_POLY || sp_streq(nm, "tap") || sp_streq(nm, "then") || sp_streq(nm, "yield_self")) &&
+    if ((rt == TY_POLY || is_tap_alias(nm)) &&
         def_exists_by_name(nt, nm)) continue;
     if (bs_hash_guess(c, recv, rt, nm)) continue;
     TyKind elem; int hash_pair;
@@ -9798,7 +9863,7 @@ static int block_values_in(const NodeTable *nt, int node, const char *bpn, int n
     int r = nt_ref(nt, node, "receiver");
     const char *cn = nt_str(nt, node, "name");
     if (r >= 0 && nt_kind(nt, r) == NK_LocalVariableReadNode && sp_streq(nt_str(nt, r, "name"), bpn) &&
-        cn && (sp_streq(cn, "call") || sp_streq(cn, "yield") || sp_streq(cn, "()") || sp_streq(cn, "[]"))) {
+        cn && is_call_or_yield(cn)) {
       (*calls)++;
       args = nt_ref(nt, node, "arguments");
     }
@@ -11873,6 +11938,39 @@ static void rbself_walk(NodeTable *nt, int node, char **defs, int nd, int *chang
   }
 }
 
+/* The instance methods a class body defines, wherever in the body they
+   stand: at its top, or under a guard (`def blank? = strip.empty? unless
+   method_defined?(:blank?)`). A nested class, module or singleton class is
+   another body. */
+static void rbself_defs(NodeTable *nt, int node, char **defs, int nd, int *changed, int is_array) {
+  if (node < 0) return;
+  NodeKind k = nt_kind(nt, node);
+  if (k == NK_ClassNode || k == NK_ModuleNode || k == NK_SingletonClassNode) return;
+  if (k == NK_DefNode) {
+    if (nt_ref(nt, node, "receiver") < 0)
+      rbself_walk(nt, nt_ref(nt, node, "body"), defs, nd, changed, is_array);
+    return;
+  }
+  /* define_method(:name) { ... }: its block is an instance method's body */
+  if (k == NK_CallNode && nt_ref(nt, node, "receiver") < 0 &&
+      sp_streq(nt_str(nt, node, "name") ? nt_str(nt, node, "name") : "", "define_method")) {
+    int blk = nt_ref(nt, node, "block");
+    if (blk >= 0 && nt_kind(nt, blk) == NK_BlockNode)
+      rbself_walk(nt, nt_ref(nt, blk, "body"), defs, nd, changed, is_array);
+    return;
+  }
+  int nr = nt_num_refs(nt, node);
+  for (int i = 0; i < nr; i++) rbself_defs(nt, nt_ref_at(nt, node, i), defs, nd, changed, is_array);
+  int na = nt_num_arrs(nt, node);
+  for (int i = 0; i < na; i++) {
+    int cnt = 0; const int *ids = nt_arr_at(nt, node, i, &cnt);
+    int *cp = cnt > 0 ? malloc(sizeof(int) * (size_t)cnt) : NULL;
+    if (cnt > 0) memcpy(cp, ids, sizeof(int) * (size_t)cnt);
+    for (int j = 0; j < cnt; j++) rbself_defs(nt, cp[j], defs, nd, changed, is_array);
+    free(cp);
+  }
+}
+
 int desugar_builtin_reopen_self_calls(Compiler *c) {
   NodeTable *nt = (NodeTable *)c->nt;
   int n0 = nt->count, changed = 0;
@@ -11894,12 +11992,7 @@ int desugar_builtin_reopen_self_calls(Compiler *c) {
         if (nt_kind(nt, bs2[k]) == NK_DefNode && nt_str(nt, bs2[k], "name"))
           defs[nd++] = (char *)nt_str(nt, bs2[k], "name");
     }
-    int body = nt_ref(nt, m, "body");
-    int bn = 0; const int *bs = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
-    for (int k = 0; k < bn; k++) {
-      if (nt_kind(nt, bs[k]) != NK_DefNode || nt_ref(nt, bs[k], "receiver") >= 0) continue;
-      rbself_walk(nt, nt_ref(nt, bs[k], "body"), defs, nd, &changed, sp_streq(cn, "Array"));
-    }
+    rbself_defs(nt, nt_ref(nt, m, "body"), defs, nd, &changed, sp_streq(cn, "Array"));
   }
   if (changed) comp_grow_node_arrays(c);
   return changed;

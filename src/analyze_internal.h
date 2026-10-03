@@ -299,6 +299,16 @@ int infer_poly_call(Compiler *c, int id, TyKind rt, TyKind *out);
 int infer_object_call(Compiler *c, int id, TyKind rt, TyKind *out);
 int infer_array_call(Compiler *c, int id, TyKind rt, TyKind *out);
 int infer_hash_call(Compiler *c, int id, TyKind rt, TyKind *out);
+/* bop_find for the call `id`, recording the row under --plan-check */
+struct BuiltinOp;
+const struct BuiltinOp *an_bop_find(Compiler *c, int id, TyKind rt, const char *name,
+                                    int argc, int has_block);
+/* method_call_ret(c, mi, id) for a call an arm of infer_call bound to the
+   user method mi, recording the binding (via UC_*, the class owner_ci whose
+   chain was searched) under --plan-check */
+TyKind an_user_call(Compiler *c, int id, int mi, int via, int owner_ci);
+/* the record alone, for an arm that answers the bound call another way */
+void an_user_call_record(Compiler *c, int id, int mi, int via, int owner_ci);
 int infer_numeric_call(Compiler *c, int id, TyKind rt, TyKind *out);
 /* The array a map-shaped call answers from its block's tail (analyze_infer_recv.c). */
 TyKind infer_map_block_ty(Compiler *c, int id, int block);
@@ -375,6 +385,7 @@ int desugar_forwarding_to_rest_callee(Compiler *c);
 int desugar_anon_block_param(Compiler *c);
 int desugar_singleton_class_define_method(Compiler *c);
 int desugar_define_method_proc_arg(Compiler *c);
+int method_body_next_to_return(NodeTable *nt, int id);
 int desugar_define_method_captures(Compiler *c);
 int desugar_define_method_keywords(Compiler *c);
 void desugar_extended_module_attrs(Compiler *c);
