@@ -614,7 +614,10 @@ void emit_p_one(Compiler *c, int arg, Buf *b, int indent) {
     const char *hn = t == TY_MUTEX ? "Thread::Mutex"
                    : t == TY_QUEUE ? "Thread::Queue" : "Thread::ConditionVariable";
     buf_puts(b, "{ void *_po = (void *)("); emit_expr(c, arg, b);
-    buf_printf(b, "); sp_puts_line(_po ? sp_sprintf(\"#<%s:0x%%016llx>\", (unsigned long long)(uintptr_t)_po) : \"nil\"); }\n", hn);
+    if (t == TY_QUEUE)
+      buf_puts(b, "); sp_puts_line(_po ? sp_sprintf(\"#<%s:0x%016llx>\", sp_Queue_class_name((sp_queue *)_po), (unsigned long long)(uintptr_t)_po) : \"nil\"); }\n");
+    else
+      buf_printf(b, "); sp_puts_line(_po ? sp_sprintf(\"#<%s:0x%%016llx>\", (unsigned long long)(uintptr_t)_po) : \"nil\"); }\n", hn);
   }
   else if (ty_is_object(t)) {
     /* p obj: a user #inspect wins; otherwise the generated per-class ivar
@@ -1177,10 +1180,9 @@ static int emit_ptr_array_build(Compiler *c, int v, TyKind want, Buf *b) {
     return 1;
   }
   if (is_array_new_block(c, v)) {
-    TyKind sv = c->ntype[v];
-    c->ntype[v] = want;
+    int vw = view_push(c, v, want);
     emit_expr(c, v, b);
-    c->ntype[v] = sv;
+    view_pop(c, vw);
     return 1;
   }
   return 0;
@@ -1391,12 +1393,11 @@ static void emit_strbuf_value(Compiler *c, LocalVar *lv, int v, Buf *b) {
     emit_expr(c, v, b);
   }
   else if (comp_ntype(c, v) == TY_STRBUF) {
-    unsigned char sv = c->strbuf_box[v];
-    c->strbuf_box[v] = 0;
+    int sv = view_push_repr(c, v, VR_STRBUF_BOX, 0);
     buf_puts(b, "sp_String_new_shared(");
     emit_str_expr(c, v, b);
     buf_puts(b, ")");
-    c->strbuf_box[v] = sv;
+    view_pop(c, sv);
   }
   else if (comp_ntype(c, v) == TY_POLY || strbuf_boxed_elem_read(c, v)) {
     /* a container element read hands out the element's BOXED handle: take the
@@ -8871,7 +8872,9 @@ static int masgn_store(Compiler *c, int id, int tgt, const char *val, TyKind vt,
       emit_indent(b, indent);
       buf_puts(b, "if (sp_gc_is_frozen("); emit_node_or_tmp(c, recv, recv_tmp, b);
       buf_puts(b, ")) sp_raise_frozen_hash_at("); emit_node_or_tmp(c, recv, recv_tmp, b);
-      buf_printf(b, ", %s);\n", hash_box_cls(rt));
+      /* every hash kind ty_hash_cname names has a box id */
+      const char *hbc = hash_box_cls(rt);
+      buf_printf(b, ", %s);\n", hbc ? hbc : "0");
       emit_indent(b, indent);
       buf_printf(b, "sp_%sHash_set(", ty_hash_cname(rt));
       emit_node_or_tmp(c, recv, recv_tmp, b); buf_puts(b, ", ");
@@ -9019,6 +9022,68 @@ static void emit_break_value(Compiler *c, int id, Buf *b) {
     }
     buf_printf(b, "sp_box_poly_array(_t%d); })", t);
   }
+}
+
+/* A `next` that leaves the C function its block was compiled into, where
+   there is no C loop for a `continue` to answer. Answers 0 for every other
+   `next`, which the statement emitter then lowers itself.
+
+   A Fiber.new, Thread.new or Enumerator.new block is `static void
+   _fiber_body_N(sp_Fiber *)` and its value is what the body leaves in
+   _fb->yielded_value, so a `next` the block owns stores its value there and
+   returns. Ownership is by the source (subtree_owns_next), not by the C loop
+   depth: a `next` in a `while` or in an iterator's block inside the body is
+   that loop's. An `ensure` between the `next` and the body runs first,
+   through the deferred-return chain, whose tail in a void function is a bare
+   `return`.
+
+   A `next` at C-loop depth 0 inside a _proc_N function is the proc's own
+   return (Ruby block semantics: next leaves the block with its value). Route
+   it through the proc's return ABI: the poly slot when one is active, else
+   the direct sp_int carrier. */
+static int emit_next_leaving_body(Compiler *c, int id, Buf *b, int indent) {
+  const NodeTable *nt = c->nt;
+  if (g_fiber_body >= 0 && subtree_owns_next(nt, g_fiber_body, id)) {
+    emit_indent(b, indent); buf_puts(b, "{ _fb->yielded_value = ");
+    emit_break_value(c, id, b);
+    buf_puts(b, "; ");
+    if (g_ensure_depth > 0) {
+      EnsureCtx *ctx = &g_ensure_stack[g_ensure_depth - 1];
+      int pops = g_exc_frame_depth - ctx->exc_base;
+      if (pops < 0) pops = 0;   /* see emit_return */
+      emit_cur_exc_restore(b, ctx->exc_base);
+      buf_printf(b, "_retf%d = 1; sp_exc_top -= %d; goto _ensure%d; }\n", ctx->lid, pops, ctx->lid);
+      return 1;
+    }
+    emit_frame_unwind(b, 0, NULL);
+    buf_puts(b, "return; }\n");
+    return 1;
+  }
+  if (!g_in_proc_body || g_c_loop_depth != 0) return 0;
+  int nargs = nt_ref(nt, id, "arguments");
+  int nvc = 0; const int *nv = nargs >= 0 ? nt_arr(nt, nargs, "arguments", &nvc) : NULL;
+  if (g_result_var && g_result_poly) {
+    emit_indent(b, indent); buf_printf(b, "%s = ", g_result_var);
+    if (nvc > 0) emit_boxed(c, nv[0], b); else buf_puts(b, "sp_box_nil()");
+    buf_puts(b, ";\n");
+    emit_indent(b, indent); buf_puts(b, "return 0;\n");
+  }
+  else if (nvc > 0 && (g_ret_type == TY_INT || g_ret_type == TY_BOOL || g_ret_type == TY_SYMBOL)) {
+    emit_indent(b, indent); buf_puts(b, "return ");
+    emit_expr(c, nv[0], b); buf_puts(b, ";\n");
+  }
+  else if (nvc > 0 && proc_slot_is_ptr(g_ret_type)) {
+    emit_indent(b, indent); buf_puts(b, "return (sp_int)(uintptr_t)(");
+    emit_expr(c, nv[0], b); buf_puts(b, ");\n");
+  }
+  else if (nvc > 0) {
+    /* untypable slot: evaluate for effects, return nil */
+    emit_indent(b, indent); buf_puts(b, "(void)(");
+    emit_expr(c, nv[0], b); buf_puts(b, ");\n");
+    emit_indent(b, indent); buf_puts(b, "return 0;\n");
+  }
+  else { emit_indent(b, indent); buf_puts(b, "return 0;\n"); }
+  return 1;
 }
 
 /* Run a class body's side-effecting statements at the definition site
@@ -9875,10 +9940,9 @@ else {
         sp_streq(nt_type(nt, nt_ref(nt, v, "receiver")), "ConstantReadNode") &&
         nt_str(nt, nt_ref(nt, v, "receiver"), "name") &&
         sp_streq(nt_str(nt, nt_ref(nt, v, "receiver"), "name"), "Array")) {
-      TyKind sv = c->ntype[v];
-      c->ntype[v] = ivt;
+      int vw = view_push(c, v, ivt);
       emit_expr(c, v, b);
-      c->ntype[v] = sv;
+      view_pop(c, vw);
     }
     else if (ty_is_ptr_array(ivt) && v_empty_array) buf_puts(b, "sp_PtrArray_new()");
     /* `@t = [[..], [..]]` into a narrowed pointer-array ivar: build the
@@ -12186,37 +12250,7 @@ else {
     buf_puts(b, "break;\n"); return;
   }
   if (sp_streq(ty, "NextNode")) {
-    /* `next` at C-loop depth 0 inside a _proc_N function is the proc's own
-       return (Ruby block semantics: next leaves the block with its value),
-       not a loop continue -- there is no enclosing C loop, and emitting
-       `continue` there is invalid C. Route it through the proc's return ABI:
-       the poly slot when one is active, else the direct sp_int carrier. */
-    if (g_in_proc_body && g_c_loop_depth == 0) {
-      int nargs = nt_ref(nt, id, "arguments");
-      int nvc = 0; const int *nv = nargs >= 0 ? nt_arr(nt, nargs, "arguments", &nvc) : NULL;
-      if (g_result_var && g_result_poly) {
-        emit_indent(b, indent); buf_printf(b, "%s = ", g_result_var);
-        if (nvc > 0) emit_boxed(c, nv[0], b); else buf_puts(b, "sp_box_nil()");
-        buf_puts(b, ";\n");
-        emit_indent(b, indent); buf_puts(b, "return 0;\n");
-      }
-      else if (nvc > 0 && (g_ret_type == TY_INT || g_ret_type == TY_BOOL || g_ret_type == TY_SYMBOL)) {
-        emit_indent(b, indent); buf_puts(b, "return ");
-        emit_expr(c, nv[0], b); buf_puts(b, ";\n");
-      }
-      else if (nvc > 0 && proc_slot_is_ptr(g_ret_type)) {
-        emit_indent(b, indent); buf_puts(b, "return (sp_int)(uintptr_t)(");
-        emit_expr(c, nv[0], b); buf_puts(b, ");\n");
-      }
-      else if (nvc > 0) {
-        /* untypable slot: evaluate for effects, return nil */
-        emit_indent(b, indent); buf_puts(b, "(void)(");
-        emit_expr(c, nv[0], b); buf_puts(b, ");\n");
-        emit_indent(b, indent); buf_puts(b, "return 0;\n");
-      }
-      else { emit_indent(b, indent); buf_puts(b, "return 0;\n"); }
-      return;
-    }
+    if (emit_next_leaving_body(c, id, b, indent)) return;
     if (g_ie_next_var) {
       int nargs = nt_ref(nt, id, "arguments");
       int nvc = 0; const int *nv = nargs >= 0 ? nt_arr(nt, nargs, "arguments", &nvc) : NULL;
@@ -13179,22 +13213,20 @@ void emit_stmts_tail(Compiler *c, int id, Buf *b, int indent) {
 /* ---- declarations ---- */
 
 /* Heap-managed types need a GC root for their local slot. */
-int needs_root(TyKind t) { return t == TY_STRING || t == TY_STRBUF || t == TY_BIGINT || ty_is_array(t) || ty_is_obj_array(t) || ty_is_hash(t) || ty_is_object(t) || t == TY_EXCEPTION || t == TY_POLY || t == TY_PROC || t == TY_CURRY || t == TY_METHOD || t == TY_IO || t == TY_FIBER || t == TY_THREAD || t == TY_QUEUE || t == TY_MUTEX || t == TY_CONDVAR || t == TY_ENUMERATOR || t == TY_RANDOM || t == TY_DIR || t == TY_ADDRINFO || t == TY_SOCKOPT || t == TY_OPENSTRUCT || t == TY_MATCHDATA; }
+int needs_root(TyKind t) {
+  /* a builtin kind's slot is a GC root when its ty_traits row says so
+     (types.c); a user object and an object array always are */
+  const TyTraits *tr = ty_traits_of(t);
+  return tr ? tr->needs_root : (ty_is_object(t) || ty_is_obj_array(t));
+}
 
 /* Emit `node` boxed into an sp_RbVal. Idempotent: an already-poly value is
    passed through unboxed (double-boxing is a classic silent-corruption bug). */
 /* Box a C-text expression `expr` of static type `t` into an sp_RbVal. */
 const char *hash_box_cls(TyKind t) {
-  switch (t) {
-    case TY_STR_INT_HASH:   return "SP_BUILTIN_STR_INT_HASH";
-    case TY_STR_STR_HASH:   return "SP_BUILTIN_STR_STR_HASH";
-    case TY_INT_STR_HASH:   return "SP_BUILTIN_INT_STR_HASH";
-    case TY_INT_INT_HASH:   return "SP_BUILTIN_INT_INT_HASH";
-    case TY_STR_POLY_HASH:  return "SP_BUILTIN_STR_POLY_HASH";
-    case TY_SYM_POLY_HASH:  return "SP_BUILTIN_SYM_POLY_HASH";
-    case TY_POLY_POLY_HASH: return "SP_BUILTIN_POLY_POLY_HASH";
-    default:                return NULL;
-  }
+  /* a Hash variant's boxed class id is its ty_traits row's (types.c) */
+  const TyTraits *tr = ty_traits_of(t);
+  return tr ? tr->hash_id : NULL;
 }
 
 /* The key and the value at position `_t<ti>` of the iteration order of the
@@ -13308,21 +13340,18 @@ static int emit_array_mutate_stmt_body(Compiler *c, int id, Buf *b, int indent) 
       Scope *rsN = rnN ? comp_scope_of(c, recv) : NULL;
       LocalVar *rlN = rsN ? scope_local(rsN, rnN) : NULL;
       if (rlN && rlN->type == TY_POLY) {
-        TyKind svN = c->ntype[recv];
-        TyKind svNN = c->nilnarrow[recv];
-        TyKind svC = c->ntype[id];
-        c->ntype[recv] = TY_POLY;
-        c->nilnarrow[recv] = TY_UNKNOWN;
+        int vr = view_push(c, recv, TY_POLY);
+        int vn = view_push_repr(c, recv, VR_NILNARROW, TY_UNKNOWN);
         /* the call's value is the poly arm's too (a String-typed call made
            an arm hold its boxed answer in a String temp) */
-        c->ntype[id] = TY_POLY;
+        int vi = view_push(c, id, TY_POLY);
         emit_indent(b, indent);
         buf_puts(b, "(void)(");
         emit_call(c, id, b);
         buf_puts(b, ");\n");
-        c->ntype[id] = svC;
-        c->ntype[recv] = svN;
-        c->nilnarrow[recv] = svNN;
+        view_pop(c, vi);
+        view_pop(c, vn);
+        view_pop(c, vr);
         return 1;
       }
     }

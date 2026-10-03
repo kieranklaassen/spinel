@@ -1,4 +1,5 @@
 #include "analyze_internal.h"
+#include "builtin_ops.h"
 #include <stdint.h>
 #include <limits.h>
 
@@ -1670,15 +1671,8 @@ static TyKind infer_call_inner(Compiler *c, int id);
    the method's return unified with every descendant's direct override,
    since codegen's dispatch switches over them all. */
 static TyKind an_self_call_ret(Compiler *c, Scope *self, const char *name, int mi, int id) {
-  TyKind r = method_call_ret(c, mi, id);
-  int nd = 0; const int *ds = comp_descendants(c, self->class_id, &nd);
-  for (int di = 0; di < nd; di++) {
-    int k = ds[di];
-    int dmi = self->is_cmethod ? comp_cmethod_in_class(c, k, name) :
-                                 comp_method_in_class(c, k, name);
-    if (dmi >= 0) r = ty_unify(r, (TyKind)c->scopes[dmi].ret);
-  }
-  return r;
+  TyKind r = an_user_call(c, id, mi, c->scopes[mi].is_cmethod ? UC_CMETH : UC_INST, self->class_id);
+  return dispatch_ret_over(c, self->class_id, name, self->is_cmethod, mi, r, id);
 }
 /* `k[]` or `k[1, 2, 3]` on a boxed receiver: no builtin `[]` takes that
    many arguments, so the call was left untyped; a Struct or Data class
@@ -1727,18 +1721,17 @@ static int yield_recv_chain_kind(Compiler *c, int node, TyKind bt, TyKind *out) 
   const int *av = an >= 0 ? nt_arr(nt, an, "arguments", &ac) : NULL;
   TyKind a0 = ac == 1 && av ? comp_ntype(c, av[0]) : TY_UNKNOWN;
   /* The table names the builtin's answer, and a program that reopened the
-     kind's class with its own method of the name runs that one instead. A
-     scalar's reopen is what codegen calls for such a site, so the site
-     answers its return type. An Array's or Hash's is not reached for a name
-     a builtin arm takes, so no answer would describe the site: decline it.
-     Typing it from the table read `class Array; def first = 9; end`'s
-     yield.first back as the element, a wrong value where the program had
-     failed to build. */
+     kind's class with its own method of the name runs that one instead.
+     That reopen is what codegen calls for such a site, so the site answers
+     its return type. An Array's or Hash's reopen of a builtin name is
+     dispatched too since #7078; declining it here, as before that, left the
+     yield typed as one site, and `yield.first` over a Hash reopen and an
+     Array block wrote the Array's element into the reopen's Symbol slot (a
+     C compile error). */
   { const char *rn = nt_str(nt, node, "name");
     /* a call an alias captured the builtin for (builtin_only) runs the builtin */
     int rmi = nt_int(nt, node, "builtin_only", 0) ? -1 : comp_builtin_kind_reopen_mi(c, rk, rn);
     if (rmi >= 0) {
-      if (ty_is_array(rk) || ty_is_obj_array(rk) || ty_is_hash(rk)) return 0;
       /* still settling in an early round is not a reason to decline: the
          site is answered by the reopen either way, and codegen reads the
          settled return */
@@ -1895,7 +1888,7 @@ int object_reopen_answers(Compiler *c, const char *cls, int call_id, TyKind *out
   /* a yielding one given a block answers what its proc form does, a boxed
      value (#5779), as the general Object fallback says */
   *out = c->scopes[omi].yields && nt_ref(c->nt, call_id, "block") >= 0
-         ? TY_POLY : method_call_ret(c, omi, call_id);
+         ? TY_POLY : an_user_call(c, call_id, omi, UC_REOPEN, oci);
   return 1;
 }
 
@@ -1906,7 +1899,36 @@ static int an_user_poly_arm(Compiler *c, const char *name, int argc) {
   return 0;
 }
 
+void an_user_call_record(Compiler *c, int id, int mi, int via, int owner_ci) {
+  if (!g_plan_check || an_builtin_only || id < 0 || id >= c->node_cap) return;
+  c->ucall_inf[id].mi = mi;
+  c->ucall_inf[id].owner_ci = (short)owner_ci;
+  c->ucall_inf[id].via = (unsigned char)via;
+}
+
+TyKind an_user_call(Compiler *c, int id, int mi, int via, int owner_ci) {
+  an_user_call_record(c, id, mi, via, owner_ci);
+  return method_call_ret(c, mi, id);
+}
+
+const BuiltinOp *an_bop_find(Compiler *c, int id, TyKind rt, const char *name,
+                             int argc, int has_block) {
+  const BuiltinOp *op = bop_find(rt, name, argc, has_block);
+  if (g_plan_check && !an_builtin_only && op && op->result != TY_UNKNOWN &&
+      id >= 0 && id < c->node_cap)
+    c->bop_inf[id] = op;
+  return op;
+}
+
 static TyKind infer_call_inner(Compiler *c, int id) {
+  /* the call is inferred afresh: only the row this pass answers with counts */
+  /* the builtin-only re-derivation (an_builtin_answer) asks what the call
+     would be with no user method: not the call's answer, so it neither
+     clears nor makes the call's records */
+  if (g_plan_check && !an_builtin_only && id >= 0 && id < c->node_cap) {
+    c->bop_inf[id] = NULL;
+    c->ucall_inf[id].via = UC_NONE;
+  }
 
   /* a yielder push (`y << v` inside an Enumerator.new generator) lowers to a
      Fiber.yield, whose value is boxed -- never the array append it looks like */
@@ -2015,7 +2037,7 @@ static TyKind infer_call_inner(Compiler *c, int id) {
     int fold_ci = comp_sg_reader_const(c, recv);
     if (fold_ci >= 0) {
       int mi = comp_cmethod_in_chain(c, fold_ci, name, NULL);
-      if (mi >= 0) return method_call_ret(c, mi, id);
+      if (mi >= 0) return an_user_call(c, id, mi, UC_CMETH, fold_ci);
     }
     /* Stage-2: accessor holds one of several constants; unify their cmethod returns. */
     int cand[32];
@@ -2065,11 +2087,8 @@ static TyKind infer_call_inner(Compiler *c, int id) {
   if (nt_str(nt, id, "send_blind") && recv >= 0 && nt_ref(nt, id, "block") < 0) {
     int smi = comp_method_index(c, name);
     if (smi >= 0 && !(smi < c->nscopes && c->scopes[smi].yields)) {
-      TyKind srt = infer_type(c, recv);
-      int owns = ty_is_object(srt) &&
-                 (comp_method_in_chain(c, ty_object_class(srt), name, NULL) >= 0 ||
-                  comp_reader_in_chain(c, ty_object_class(srt), name, NULL));
-      if (!owns) return method_call_ret(c, smi, id);
+      if (!send_blind_recv_owns(c, recv, infer_type(c, recv), name))
+        return an_user_call(c, id, smi, UC_SEND_BLIND, -1);
     }
   }
 
@@ -2083,8 +2102,8 @@ static TyKind infer_call_inner(Compiler *c, int id) {
      any builtin arm, keeps the two halves of the compiler on the same method. */
   if (recv < 0 && nt_ref(nt, id, "block") < 0 &&
       !nt_str(nt, id, "vis_enforce")) {
-    int bmi = comp_method_index(c, name);
-    if (bmi < 0) bmi = comp_included_method_index(c, name, id);
+    int bmi = comp_method_index(c, name), bvia = UC_TOP;
+    if (bmi < 0) { bmi = comp_included_method_index(c, name, id); bvia = UC_INCLUDED; }
     if (bmi >= 0) {
       Scope *bsc = comp_scope_of(c, id);
       int bcls = bsc ? bsc->class_id : -1;
@@ -2097,7 +2116,7 @@ static TyKind infer_call_inner(Compiler *c, int id) {
          which the arm below is what establishes: answering here left the call
          site and the definition disagreeing about the signature. */
       if (!shadowed && !(bmi < c->nscopes && c->scopes[bmi].yields))
-        return method_call_ret(c, bmi, id);
+        return an_user_call(c, id, bmi, bvia, bvia == UC_TOP ? -1 : c->scopes[bmi].class_id);
     }
     /* ...and the first part of that sentence, which only the per-arm
        `!an_bare_call_class_owned` guards said, one name at a time: the
@@ -2184,6 +2203,19 @@ static TyKind infer_call_inner(Compiler *c, int id) {
   if (!g_infer_ignore_brk && call_breaks(c, id)) return TY_POLY;
 
   TyKind rt = recv >= 0 ? infer_type(c, recv) : TY_UNKNOWN;
+  /* --plan-check: a boxed receiver's call is dispatched over every user
+     class's method of the name; the first candidate stands for that union
+     (an arm below that binds one method records it instead) */
+  if (g_plan_check && recv >= 0 && rt == TY_POLY && name && !an_builtin_only) {
+    int npc = 0;
+    const PolyCand *pcs = comp_poly_candidates(c, name, &npc);
+    for (int pi = 0; pi < npc; pi++) {
+      if (c->classes[pcs[pi].cls].is_native_class) continue;
+      /* a reader candidate written as a method (`def x = @x`) is that method */
+      int pmi = pcs[pi].mi >= 0 ? pcs[pi].mi : comp_method_in_chain(c, pcs[pi].cls, name, NULL);
+      if (pmi >= 0) { an_user_call_record(c, id, pmi, UC_POLY, pcs[pi].cls); break; }
+    }
+  }
   /* respond_to? on a boxed receiver is the compile-time fold
      (emit_call_body) unless a class that can be the value overrides it
      (respond_to_user_defined: an instantiated class with respond_to? in its
@@ -2240,7 +2272,7 @@ static TyKind infer_call_inner(Compiler *c, int id) {
     /* a kind no reopening serves gets the builtin's answer: boxed when the
        two answer different types */
     if (emi >= 0 && rt == TY_IO && io_reopen_leaves_builtin(c, name)) {
-      TyKind ur = method_call_ret(c, emi, id);
+      TyKind ur = an_user_call(c, id, emi, UC_REOPEN, eci);
       int sv_skip = g_io_skip_reopen, sv_skip_node = g_io_skip_node;
       g_io_skip_reopen = 1; g_io_skip_node = id;
       TyKind bt = an_builtin_answer(c, id);
@@ -2248,7 +2280,7 @@ static TyKind infer_call_inner(Compiler *c, int id) {
       if (bt != TY_UNKNOWN && ur != TY_UNKNOWN && bt != ur) return TY_POLY;
       return ur;
     }
-    if (emi >= 0) return method_call_ret(c, emi, id);
+    if (emi >= 0) return an_user_call(c, id, emi, UC_REOPEN, eci);
   }
   /* An Array or Hash reopen that defines a builtin's name owns it, as the
      scalar reopens do: `class Array; def first = "arr"; end` makes
@@ -2263,7 +2295,7 @@ static TyKind infer_call_inner(Compiler *c, int id) {
     /* the reopen's own method under this very name: an alias taken before the
        reopen (`alias orig_first first`) still names the builtin */
     if (ami >= 0 && adc == aci && c->scopes[ami].name && sp_streq(c->scopes[ami].name, name))
-      return method_call_ret(c, ami, id);
+      return an_user_call(c, id, ami, UC_REOPEN, aci);
   }
   /* A boxed-value hash whose values are all one class: its value reads are
      that class (nil included, as a NULL pointer), and `values` an array of it
@@ -3063,7 +3095,10 @@ static TyKind infer_call_inner(Compiler *c, int id) {
        there. */
     return TY_POLY;
   }
-  if (recv >= 0 && rt == TY_METHOD && argc == 0 && sp_streq(name, "to_proc")) return TY_PROC;
+  if (recv >= 0 && rt == TY_METHOD) {
+    const BuiltinOp *op = an_bop_find(c, id, rt, name, argc, nt_ref(nt, id, "block") >= 0);
+    if (op && op->result != TY_UNKNOWN) return op->result;
+  }
   /* A Method read out of a container answers these from its sp_BoundMethod;
      the value is boxed, so the call is poly (#3692). */
   if (recv >= 0 && argc == 0 && infer_type(c, recv) == TY_POLY &&
@@ -3086,37 +3121,18 @@ static TyKind infer_call_inner(Compiler *c, int id) {
         !an_user_defines_or_reads(c, "call"))
       return TY_PROC;
   }
-  /* Proc#to_proc is self (#3687) */
-  if (recv >= 0 && rt == TY_PROC && argc == 0 && sp_streq(name, "to_proc")) return TY_PROC;
-  /* Method/UnboundMethod reflection (#3247) */
-  if (recv >= 0 && rt == TY_METHOD && argc == 0) {
-    if (sp_streq(name, "original_name")) return TY_SYMBOL;
-    if (sp_streq(name, "parameters") || sp_streq(name, "source_location")) return TY_POLY_ARRAY;
-    if (sp_streq(name, "dup") || sp_streq(name, "clone")) return TY_METHOD;
-    if (sp_streq(name, "unbind")) return TY_METHOD;
-    if (sp_streq(name, "super_method")) return TY_METHOD;
-    if (sp_streq(name, "inspect") || sp_streq(name, "to_s")) return TY_STRING;
-    if (sp_streq(name, "box")) return TY_NIL;  /* namespace-less: never boxed */
+  if (recv >= 0 && rt == TY_PROC) {
+    const BuiltinOp *op = an_bop_find(c, id, rt, name, argc, nt_ref(nt, id, "block") >= 0);
+    if (op && op->result != TY_UNKNOWN) return op->result;
   }
-  if (recv >= 0 && rt == TY_METHOD && argc == 1 &&
-      (sp_streq(name, "==") || sp_streq(name, "eql?") || sp_streq(name, "equal?")))
-    return TY_BOOL;
   /* Klass.instance_method(:m) -> an (unbound) method object; #bind re-binds (#2676) */
   if (recv >= 0 && sp_streq(name, "instance_method") && method_sym_arg(c, id) != NULL &&
       method_obj_target_mi(c, id) >= 0) return TY_METHOD;
-  if (recv >= 0 && rt == TY_METHOD && argc == 1 && sp_streq(name, "bind")) return TY_METHOD;
-  /* Method#owner is a class value; #receiver is the bound receiver (#2701) */
-  if (recv >= 0 && rt == TY_METHOD && argc == 0 && sp_streq(name, "owner")) return TY_CLASS;
+  /* Method#receiver is the bound receiver (#2701) */
   if (recv >= 0 && rt == TY_METHOD && argc == 0 && sp_streq(name, "receiver")) {
     int mn = method_recv_node(c, recv);
     int mrecv = mn >= 0 ? nt_ref(nt, mn, "receiver") : -1;
     if (mrecv >= 0) return infer_type(c, mrecv);
-  }
-  /* <method>.name -> the method name as a Symbol; .arity -> int */
-  if (recv >= 0 && rt == TY_METHOD && argc == 0) {
-    if (sp_streq(name, "name")) return TY_SYMBOL;
-    if (sp_streq(name, "arity")) return TY_INT;
-    if (sp_streq(name, "to_proc")) return TY_PROC;
   }
   /* <poly>.call(args): a boxed Proc publishes its result through the boxed
      return slot, so the value is genuinely dynamic -- type it poly and let
@@ -3159,7 +3175,6 @@ static TyKind infer_call_inner(Compiler *c, int id) {
   /* Proc#=== answers the proc's return VALUE (#3818). Typing it from the
      proc's body pins it to one shape, and a proc that arrives through a slot
      has no body to read, so the answer is boxed. */
-  if (recv >= 0 && rt == TY_PROC && sp_streq(name, "===") && argc == 1) return TY_POLY;
   if (recv >= 0 && rt == TY_PROC &&
       (sp_streq(name, "call") || sp_streq(name, "()") || sp_streq(name, "[]"))) {
     /* In a proc form, a call on the block parameter is the yield: the block is
@@ -3175,20 +3190,6 @@ static TyKind infer_call_inner(Compiler *c, int id) {
       infer_type(c, argv[0]) == TY_PROC)
     return TY_PROC;
 
-  /* Proc introspection */
-  /* parameters(lambda: <bool/nil>) forces the view; same shape as parameters() */
-  if (recv >= 0 && rt == TY_PROC && argc == 1 && sp_streq(name, "parameters"))
-    return TY_POLY_ARRAY;
-  if (recv >= 0 && rt == TY_PROC && argc == 0) {
-    if (sp_streq(name, "arity")) return TY_INT;
-    if (sp_streq(name, "lambda?")) return TY_BOOL;
-    if (sp_streq(name, "parameters")) return TY_POLY_ARRAY;
-    if (sp_streq(name, "source_location")) return TY_POLY_ARRAY;  /* [file, line] */
-    if (sp_streq(name, "inspect") || sp_streq(name, "to_s")) return TY_STRING;
-    if (sp_streq(name, "frozen?")) return TY_BOOL;
-    if (sp_streq(name, "freeze") || sp_streq(name, "dup") || sp_streq(name, "clone") ||
-        sp_streq(name, "itself")) return TY_PROC;
-  }
   /* Proc identity: equal?/eql?/== against another Proc -> bool */
   if (recv >= 0 && rt == TY_PROC && argc == 1 &&
       (sp_streq(name, "equal?") || sp_streq(name, "eql?") || sp_streq(name, "==")) &&
@@ -3778,40 +3779,22 @@ static TyKind infer_call_inner(Compiler *c, int id) {
 
   /* Regexp instance methods */
   if (recv >= 0 && rt == TY_REGEX) {
-    if (sp_streq(name, "match?") || sp_streq(name, "===")) return TY_BOOL;
-    /* the block form evaluates to the block's value (nil on a miss) (#3642) */
-    if (sp_streq(name, "match")) return nt_ref(nt, id, "block") >= 0 ? TY_POLY : TY_MATCHDATA;
-    if (sp_streq(name, "=~")) return TY_POLY;
-    if (sp_streq(name, "~") && argc == 0) return TY_POLY;   /* ~ /re/ == /re/ =~ $_ */
-    if (sp_streq(name, "source") || sp_streq(name, "inspect") || sp_streq(name, "to_s")) return TY_STRING;
-    if (sp_streq(name, "names")) return TY_STR_ARRAY;
-    if (sp_streq(name, "named_captures")) return TY_STR_POLY_HASH;  /* {name => [group indices]} */
-    if (sp_streq(name, "freeze") || sp_streq(name, "dup") || sp_streq(name, "clone") ||
-        sp_streq(name, "itself")) return TY_REGEX;
-    if (sp_streq(name, "frozen?")) return TY_BOOL;
-    if ((sp_streq(name, "==") || sp_streq(name, "!=") ||
-         sp_streq(name, "equal?") || sp_streq(name, "eql?")) && argc == 1) return TY_BOOL;
-    if (sp_streq(name, "encoding")) return TY_POLY;  /* a boxed Encoding value */
-    if (sp_streq(name, "fixed_encoding?")) return TY_BOOL;
-    if (sp_streq(name, "options")) return TY_INT;
-    if (sp_streq(name, "casefold?")) return TY_BOOL;
-    if (sp_streq(name, "timeout")) return TY_POLY;   /* nil: no per-instance timeout */
+    const BuiltinOp *op = an_bop_find(c, id, rt, name, argc, nt_ref(nt, id, "block") >= 0);
+    if (op && op->result != TY_UNKNOWN) return op->result;
   }
 
   /* MatchData instance methods */
   if (recv >= 0 && rt == TY_MATCHDATA) {
+    {
+      const BuiltinOp *op = an_bop_find(c, id, rt, name, argc, nt_ref(nt, id, "block") >= 0);
+      if (op && op->result != TY_UNKNOWN) return op->result;
+    }
     if (sp_streq(name, "[]") && argc == 1 &&
         (comp_ntype(c, argv[0]) == TY_RANGE ||
          (nt_type(nt, argv[0]) && sp_streq(nt_type(nt, argv[0]), "RangeNode"))))
       return TY_POLY_ARRAY;   /* md[range] (#2532) */
     if (sp_streq(name, "[]") && argc == 1) return TY_STRING;
     if (sp_streq(name, "[]") && argc == 2) return TY_POLY_ARRAY;   /* md[start, length] (#2507) */
-    if ((sp_streq(name, "==") || sp_streq(name, "eql?")) && argc == 1) return TY_BOOL;   /* (#2529) */
-    if (sp_streq(name, "inspect") && argc == 0) return TY_STRING;   /* (#2500) */
-    if (sp_streq(name, "match") && argc == 1) return TY_STRING;   /* group substring (#2501) */
-    if (sp_streq(name, "match_length") && argc == 1) return TY_POLY;   /* int or nil (#2501) */
-    if (sp_streq(name, "deconstruct") && argc == 0) return TY_POLY_ARRAY;   /* (#2503) */
-    if (sp_streq(name, "deconstruct_keys") && argc == 1) return TY_SYM_POLY_HASH;   /* (#2503) */
     if (sp_streq(name, "named_captures") && argc == 1) {
       /* symbolize_names: false asks for the string keys (#3640) */
       int kv = kwh_lookup(nt, argv[0], "symbolize_names");
@@ -3819,17 +3802,6 @@ static TyKind infer_call_inner(Compiler *c, int id) {
       if (kvt && sp_streq(kvt, "FalseNode")) return TY_STR_POLY_HASH;
       return TY_SYM_POLY_HASH;   /* symbolize (#2530) */
     }
-    if (sp_streq(name, "regexp") && argc == 0) return TY_REGEX;   /* (#2499) */
-    if (sp_streq(name, "pre_match") || sp_streq(name, "post_match") || sp_streq(name, "to_s")) return TY_STRING;
-    if (sp_streq(name, "begin") || sp_streq(name, "end") || sp_streq(name, "length") || sp_streq(name, "size")) return TY_INT;
-    if (sp_streq(name, "bytebegin") || sp_streq(name, "byteend")) return TY_INT;
-    if (sp_streq(name, "offset") || sp_streq(name, "byteoffset")) return TY_INT_ARRAY;
-    if (sp_streq(name, "values_at")) return TY_POLY_ARRAY;
-    if (sp_streq(name, "captures") || sp_streq(name, "to_a")) return TY_POLY_ARRAY;
-    if (sp_streq(name, "named_captures")) return TY_STR_POLY_HASH;  /* {String => String|nil} */
-    if (sp_streq(name, "names")) return TY_STR_ARRAY;
-    if (sp_streq(name, "string")) return TY_STRING;  /* the match subject */
-    if (sp_streq(name, "nil?")) return TY_BOOL;
   }
 
   /* StringIO: a native-bound class (packages/stringio); no arms here. .new
@@ -4056,16 +4028,10 @@ static TyKind infer_call_inner(Compiler *c, int id) {
     }
   }
 
-  /* TY_FIBER instance methods */
+  /* Fiber: builtin-op rows (builtin_ops.c) */
   if (recv >= 0 && rt == TY_FIBER) {
-    if (sp_streq(name, "resume") || sp_streq(name, "transfer") || sp_streq(name, "raise")) return TY_POLY;
-    if (sp_streq(name, "__storage_get") || sp_streq(name, "__storage_set")) return TY_POLY;
-    if (sp_streq(name, "alive?")) return TY_BOOL;
-    if (sp_streq(name, "value")) return TY_POLY;
-    if (sp_streq(name, "kill")) return TY_FIBER;   /* returns the receiver */
-    if (sp_streq(name, "storage") && argc == 0) return TY_POLY;   /* a Hash copy, or nil */
-    if (sp_streq(name, "storage=") && argc == 1) return TY_POLY;
-    if (sp_streq(name, "blocking?") && argc == 0) return TY_BOOL;
+    const BuiltinOp *op = an_bop_find(c, id, rt, name, argc, nt_ref(nt, id, "block") >= 0);
+    if (op && op->result != TY_UNKNOWN) return op->result;
   }
 
   /* Object's identity protocol on the native kinds: typed from the same
@@ -4081,27 +4047,14 @@ static TyKind infer_call_inner(Compiler *c, int id) {
     return TY_BOOL;
   }
 
-  /* universal query methods on the concurrency handles (#3124) */
+  /* Thread, Queue, Mutex and ConditionVariable: builtin-op rows
+     (builtin_ops.c), the universal queries (#3124) among them. Queue's,
+     Mutex's and ConditionVariable's rules sat below the TY_POLY rules
+     that follow, which no handle reaches. */
   if (recv >= 0 && (rt == TY_THREAD || rt == TY_QUEUE || rt == TY_MUTEX ||
-                    rt == TY_CONDVAR) && argc == 0) {
-    if (sp_streq(name, "class")) return TY_CLASS;
-    if (sp_streq(name, "frozen?") || sp_streq(name, "nil?")) return TY_BOOL;
-    if (sp_streq(name, "itself")) return rt;
-  }
-  /* TY_THREAD instance methods */
-  if (recv >= 0 && rt == TY_THREAD) {
-    if ((sp_streq(name, "inspect") || sp_streq(name, "to_s")) && argc == 0) return TY_STRING;
-    if (sp_streq(name, "value")) return TY_POLY;
-    if (sp_streq(name, "join") || sp_streq(name, "kill") || sp_streq(name, "exit") ||
-        sp_streq(name, "terminate") || sp_streq(name, "raise")) return TY_THREAD;   /* return self */
-    if (sp_streq(name, "alive?") || sp_streq(name, "stop?")) return TY_BOOL;
-    if (sp_streq(name, "wakeup") || sp_streq(name, "run")) return TY_THREAD;   /* return self */
-    if (sp_streq(name, "report_on_exception") || sp_streq(name, "report_on_exception=")) return TY_BOOL;
-    if (sp_streq(name, "status") || sp_streq(name, "[]") || sp_streq(name, "[]=") ||
-        sp_streq(name, "thread_variable_get") || sp_streq(name, "thread_variable_set") ||
-        sp_streq(name, "name") || sp_streq(name, "name=")) return TY_POLY;
-    if (sp_streq(name, "key?") || sp_streq(name, "thread_variable?") || sp_streq(name, "equal?")) return TY_BOOL;
-    if (sp_streq(name, "keys") && argc == 0) return TY_POLY_ARRAY;
+                    rt == TY_CONDVAR)) {
+    const BuiltinOp *op = an_bop_find(c, id, rt, name, argc, nt_ref(nt, id, "block") >= 0);
+    if (op && op->result != TY_UNKNOWN) return op->result;
   }
 
   /* Array#push / #append / #unshift / #prepend answer the RECEIVER, and on a
@@ -4160,52 +4113,16 @@ static TyKind infer_call_inner(Compiler *c, int id) {
     return TY_INT;
   }
 
-  /* TY_QUEUE instance methods */
-  if (recv >= 0 && rt == TY_QUEUE) {
-    if (sp_streq(name, "pop") || sp_streq(name, "shift") || sp_streq(name, "deq")) return TY_POLY;
-    if (sp_streq(name, "push") || sp_streq(name, "<<") || sp_streq(name, "enq") ||
-        sp_streq(name, "close") || sp_streq(name, "clear")) return TY_QUEUE;   /* return self */
-    if (sp_streq(name, "size") || sp_streq(name, "length") || sp_streq(name, "max") ||
-        sp_streq(name, "num_waiting")) return TY_INT;
-    if (sp_streq(name, "empty?") || sp_streq(name, "closed?")) return TY_BOOL;
+  /* Process::Tms: builtin-op rows (builtin_ops.c), looked up where its
+     rule sat, so the rules above still claim first */
+  if (recv >= 0 && rt == TY_TMS) {
+    const BuiltinOp *op = an_bop_find(c, id, rt, name, argc, nt_ref(nt, id, "block") >= 0);
+    if (op && op->result != TY_UNKNOWN) return op->result;
   }
-
-  /* TY_MUTEX instance methods */
-  if (recv >= 0 && rt == TY_MUTEX) {
-    if (sp_streq(name, "lock") || sp_streq(name, "unlock")) return TY_MUTEX;   /* return self */
-    if (sp_streq(name, "try_lock") || sp_streq(name, "locked?") || sp_streq(name, "owned?")) return TY_BOOL;
-    if (sp_streq(name, "synchronize")) return TY_POLY;   /* the block's result */
-    if (sp_streq(name, "sleep")) return TY_POLY;   /* nil on a timeout, else the seconds */
-  }
-
-  /* TY_CONDVAR instance methods */
-  if (recv >= 0 && rt == TY_CONDVAR) {
-    /* #wait answers nil (timed out) or the Integer seconds slept, as CRuby */
-    if (sp_streq(name, "wait")) return TY_POLY;
-    if (sp_streq(name, "signal") || sp_streq(name, "broadcast")) return TY_CONDVAR;
-  }
-
-  /* Process::Tms accessors: four cumulative CPU times, all Float (#3044) */
-  if (recv >= 0 && rt == TY_TMS && argc == 0 &&
-      (sp_streq(name, "utime") || sp_streq(name, "stime") ||
-       sp_streq(name, "cutime") || sp_streq(name, "cstime"))) return TY_FLOAT;
-  /* Process::Status accessors. The runtime returns sp_int (with -1 for
-     the nil-or-false slot on exitstatus/termsig); the analyze pass keeps
-     Integer here and the codegen wraps -1 in sp_box_nil for those two.
-     Boolean predicates are TY_BOOL; the accessors that can be nil are
-     TY_INT (so `result[1].termsig.nil?` is well-typed). */
-  if (recv >= 0 && rt == TY_PROCESS_STATUS && argc == 0) {
-    if (sp_streq(name, "signaled?") || sp_streq(name, "exited?") ||
-        sp_streq(name, "coredump?"))
-      return TY_BOOL;
-    /* success? is nil, not false, when the process did not exit normally */
-    if (sp_streq(name, "success?")) return TY_POLY;
-    if (sp_streq(name, "exitstatus") || sp_streq(name, "termsig") ||
-        sp_streq(name, "pid"))
-      return TY_INT;
-    if (sp_streq(name, "to_s") || sp_streq(name, "inspect") ||
-        sp_streq(name, "class")) return TY_STRING;
-    if (sp_streq(name, "==")) return TY_BOOL;
+  /* Process::Status readers: builtin-op rows (builtin_ops.c) */
+  if (recv >= 0 && rt == TY_PROCESS_STATUS) {
+    const BuiltinOp *op = an_bop_find(c, id, rt, name, argc, nt_ref(nt, id, "block") >= 0);
+    if (op && op->result != TY_UNKNOWN) return op->result;
   }
   /* The same names on a BOXED status -- which is how one normally arrives,
      since waitpid2 answers an Array and its second element is read out of a
@@ -4216,17 +4133,11 @@ static TyKind infer_call_inner(Compiler *c, int id) {
      asked sp_poly_to_s for a poly the emitter had produced as an sp_int. */
   if (recv >= 0 && rt == TY_POLY && argc == 0 &&
       !an_user_defines_or_reads(c, name)) {
-    if (sp_streq(name, "signaled?") || sp_streq(name, "exited?") ||
-        sp_streq(name, "coredump?"))
-      return TY_BOOL;
-    if (sp_streq(name, "success?")) return TY_POLY;
-    if (sp_streq(name, "exitstatus") || sp_streq(name, "termsig") ||
-        sp_streq(name, "pid"))
-      return TY_INT;
+    int blk = nt_ref(nt, id, "block") >= 0;
+    const BuiltinOp *op = bop_find_boxed(TY_PROCESS_STATUS, name, argc, blk);
     /* and a boxed Process::Tms's four CPU times, as on a typed one */
-    if (sp_streq(name, "utime") || sp_streq(name, "stime") ||
-        sp_streq(name, "cutime") || sp_streq(name, "cstime"))
-      return TY_FLOAT;
+    if (!op) op = bop_find_boxed(TY_TMS, name, argc, blk);
+    if (op) return op->result;
   }
   /* OpenStruct: dynamic members. A member read (any name, arg-less, no
      writer) or `[sym]` returns a boxed value; a writer / `[]=` returns the
@@ -4249,31 +4160,9 @@ static TyKind infer_call_inner(Compiler *c, int id) {
   }
   /* TY_ENUMERATOR instance methods */
   if (recv >= 0 && rt == TY_ENUMERATOR) {
-    if (sp_streq(name, "next") || sp_streq(name, "peek")) return TY_POLY;
-    /* find/detect with a block: driven lazily via #next (works on infinite
-       generator enums like blockless Kernel#loop); nil on no match (#3236) */
-    if ((sp_streq(name, "find") || sp_streq(name, "detect")) &&
-        nt_ref(nt, id, "block") >= 0) return TY_POLY;
-    /* take_while rides the same lazy driver and collects the prefix (#3590) */
-    if (sp_streq(name, "take_while") && nt_ref(nt, id, "block") >= 0) return TY_POLY_ARRAY;
-    /* include?/member? scan through the driver and stop at the first hit */
-    if ((sp_streq(name, "include?") || sp_streq(name, "member?")) && argc == 1 &&
-        nt_ref(nt, id, "block") < 0) return TY_BOOL;
-    /* so does find_index(v), an int or nil */
-    if (sp_streq(name, "find_index") && argc == 1 && nt_ref(nt, id, "block") < 0) return TY_INT;
-    if (sp_streq(name, "next_values") || sp_streq(name, "peek_values")) return TY_POLY_ARRAY;   /* #2482 */
+    const BuiltinOp *op = an_bop_find(c, id, rt, name, argc, nt_ref(nt, id, "block") >= 0);
+    if (op && op->result != TY_UNKNOWN) return op->result;
     if (sp_streq(name, "+") && argc == 1 && infer_type(c, argv[0]) == TY_ENUMERATOR) return TY_ENUMERATOR;  /* #2481 */
-    if (sp_streq(name, "rewind")) return TY_ENUMERATOR;
-    if (sp_streq(name, "frozen?")) return TY_BOOL;
-    if ((sp_streq(name, "equal?") || sp_streq(name, "eql?") || sp_streq(name, "==")) && argc == 1) return TY_BOOL;
-    if (sp_streq(name, "freeze") || sp_streq(name, "itself")) return TY_ENUMERATOR;
-    if (sp_streq(name, "feed") && argc == 1) return TY_NIL;   /* #feed returns nil */
-    /* blockless enum.with_index(off) is another materialized Enumerator (over
-       [element, index] pairs); the block/terminal-chain forms are typed below */
-    if (sp_streq(name, "with_index") && argc <= 1 && nt_ref(nt, id, "block") < 0) return TY_ENUMERATOR;
-    /* blockless enum.each_with_index / each_index -> a chained Enumerator (#2487) */
-    if ((sp_streq(name, "each_with_index") || sp_streq(name, "each_index")) &&
-        argc == 0 && nt_ref(nt, id, "block") < 0) return TY_ENUMERATOR;
     /* Stored-enumerator block form returns the underlying each return (the
        boxed source). Immediate chains (arr.each.with_index { } and the
        map/select shapes) keep their own typed arms below -- skip a blockless
@@ -4291,22 +4180,6 @@ static TyKind infer_call_inner(Compiler *c, int id) {
       }
       if (!wchain) return TY_POLY;
     }
-    /* #size is nil for a generator with no size, an Integer for a materialized
-       snapshot, or whatever a stored size value/callable yields -- hence poly. */
-    if (sp_streq(name, "size")) return TY_POLY;
-    if ((sp_streq(name, "take") || sp_streq(name, "first")) && argc == 1) return TY_POLY_ARRAY;
-    if (sp_streq(name, "drop") && argc == 1 && nt_ref(nt, id, "block") < 0) return TY_POLY_ARRAY;
-    /* reject/select/filter/map with a block over the materialized pairs: a
-       generic Array (each_with_index.reject { |v, i| ... }, each_index.map { }). */
-    if ((sp_streq(name, "reject") || sp_streq(name, "select") || sp_streq(name, "filter") ||
-         sp_streq(name, "map") || sp_streq(name, "collect")) &&
-        argc == 0 && nt_ref(nt, id, "block") >= 0) return TY_POLY_ARRAY;
-    /* block forms over the materialized pairs: sort_by is a reordered Array;
-       sum { } folds to a poly. */
-    if (sp_streq(name, "sort_by") && argc == 0 && nt_ref(nt, id, "block") >= 0) return TY_POLY_ARRAY;
-    if (sp_streq(name, "sum") && argc == 0 && nt_ref(nt, id, "block") >= 0) return TY_POLY;
-    if ((sp_streq(name, "to_a") || sp_streq(name, "entries")) && argc == 0) return TY_POLY_ARRAY;
-    if ((sp_streq(name, "inspect") || sp_streq(name, "to_s")) && argc == 0) return TY_STRING;
   }
 
   /* Kernel#p returns its argument (one arg; several return the array), so it
@@ -4416,93 +4289,18 @@ static TyKind infer_call_inner(Compiler *c, int id) {
     }
   }
 
-  /* TY_IO (File/IO handle) instance methods */
-  if (recv >= 0 && rt == TY_SOCKOPT && argc == 0) {
-    if (sp_streq(name, "int") || sp_streq(name, "level") ||
-        sp_streq(name, "optname") || sp_streq(name, "family")) return TY_INT;
-    if (sp_streq(name, "bool")) return TY_BOOL;
-    if (sp_streq(name, "inspect") || sp_streq(name, "to_s")) return TY_STRING;
-    if (sp_streq(name, "class")) return TY_CLASS;
-  }
-  if (recv >= 0 && rt == TY_ADDRINFO && argc == 0) {
-    if (sp_streq(name, "ip_address") || sp_streq(name, "unix_path") ||
-        sp_streq(name, "afamily_name") || sp_streq(name, "to_sockaddr") ||
-        sp_streq(name, "inspect") || sp_streq(name, "to_s")) return TY_STRING;
-    if (sp_streq(name, "ip_port") || sp_streq(name, "socktype") ||
-        sp_streq(name, "protocol") ||
-        sp_streq(name, "afamily") || sp_streq(name, "pfamily")) return TY_INT;
-    if (sp_streq(name, "class")) return TY_CLASS;
-    if (sp_streq(name, "ipv4?") || sp_streq(name, "ipv6?") ||
-        sp_streq(name, "unix?") || sp_streq(name, "ip?")) return TY_BOOL;
+  /* Socket::Option and Addrinfo readers: builtin-op rows */
+  if (recv >= 0 && (rt == TY_SOCKOPT || rt == TY_ADDRINFO)) {
+    const BuiltinOp *op = an_bop_find(c, id, rt, name, argc, nt_ref(nt, id, "block") >= 0);
+    if (op && op->result != TY_UNKNOWN) return op->result;
   }
   if (recv >= 0 && rt == TY_IO) {
-    /* answered true or false, whatever the name (the catch-all below is poly) */
-    if (sp_streq(name, "respond_to?")) return TY_BOOL;
-    if (sp_streq(name, "read") || sp_streq(name, "gets") || sp_streq(name, "readline") ||
-        sp_streq(name, "path") || sp_streq(name, "to_path")) return TY_STRING;
-    if (sp_streq(name, "read") && nt_ref(nt, id, "arguments") >= 0) return TY_STRING;
-    if (sp_streq(name, "readlines")) return TY_STR_ARRAY;
-    if (sp_streq(name, "write") || sp_streq(name, "syswrite") || sp_streq(name, "pos") ||
-        sp_streq(name, "tell") || sp_streq(name, "seek") || sp_streq(name, "rewind"))
-      return TY_INT;
-    if (sp_streq(name, "close")) return TY_POLY;      /* nil (#2801) */
-    if (sp_streq(name, "print") || sp_streq(name, "puts")) return TY_NIL;
-    if (sp_streq(name, "flush") || sp_streq(name, "binmode")) return TY_IO;  /* self (#2799) */
+    {
+      const BuiltinOp *op = an_bop_find(c, id, rt, name, argc, nt_ref(nt, id, "block") >= 0);
+      if (op && op->result != TY_UNKNOWN) return op->result;
+    }
     /* sync= answers its argument, whatever it is; only its truth sets the mode */
     if (sp_streq(name, "sync=") && argc >= 1) return infer_type(c, argv[0]);
-    if (sp_streq(name, "closed?") || sp_streq(name, "eof?") || sp_streq(name, "eof") ||
-        sp_streq(name, "tty?") || sp_streq(name, "isatty") ||
-        sp_streq(name, "sync") ||
-        sp_streq(name, "autoclose?") ||
-        /* the File::Stat predicates: a stat is carried as the handle itself */
-        sp_streq(name, "file?") || sp_streq(name, "directory?") ||
-        sp_streq(name, "symlink?") || sp_streq(name, "owned?") ||
-        sp_streq(name, "grpowned?") || sp_streq(name, "setuid?") ||
-        sp_streq(name, "setgid?") || sp_streq(name, "sticky?") ||
-        sp_streq(name, "socket?") ||
-        sp_streq(name, "==") || sp_streq(name, "equal?") || sp_streq(name, "eql?"))
-      return TY_BOOL;
-    if (sp_streq(name, "flock")) return TY_POLY;   /* 0, or false for a held LOCK_NB */
-    if (sp_streq(name, "fileno") || sp_streq(name, "to_i") || sp_streq(name, "lineno") ||
-        sp_streq(name, "lineno=") || sp_streq(name, "pos=") ||
-        sp_streq(name, "truncate") ||
-        sp_streq(name, "fsync") || sp_streq(name, "fdatasync") || sp_streq(name, "getbyte") ||
-        (sp_streq(name, "chown") && argc == 2) ||   /* (#3104) */
-        sp_streq(name, "sysseek") || sp_streq(name, "size") || sp_streq(name, "chmod") ||
-        sp_streq(name, "mode"))
-      return TY_INT;
-    /* File::Stat's numeric fields and its mode predicates (#3765). size? is an
-       int-or-nil (the sentinel), so it stays TY_INT like the other counts. */
-    if (argc == 0 &&
-        (sp_streq(name, "uid") || sp_streq(name, "gid") || sp_streq(name, "nlink") ||
-         sp_streq(name, "dev") || sp_streq(name, "ino") || sp_streq(name, "blksize") ||
-         sp_streq(name, "blocks") || sp_streq(name, "rdev") || sp_streq(name, "size?")))
-      return TY_INT;
-    if (argc == 0 &&
-        (sp_streq(name, "pipe?") || sp_streq(name, "zero?") || sp_streq(name, "readable?") ||
-         sp_streq(name, "writable?") || sp_streq(name, "executable?") ||
-         sp_streq(name, "blockdev?") || sp_streq(name, "chardev?")))
-      return TY_BOOL;
-    if (sp_streq(name, "getc") || sp_streq(name, "readchar") || sp_streq(name, "readpartial") ||
-        sp_streq(name, "sysread") || sp_streq(name, "ftype")) return TY_STRING;
-    if (sp_streq(name, "inspect") && argc == 0) return TY_STRING;
-    if (sp_streq(name, "nil?") && argc == 0) return TY_BOOL;
-    if (argc == 1 && (sp_streq(name, "is_a?") || sp_streq(name, "kind_of?") ||
-                      sp_streq(name, "instance_of?"))) return TY_BOOL;
-    /* Object's hash and object_id on the handle: the generic arms already
-       emit them (the pointer hash, the pointer), but the catch-all at the end
-       of this block typed the slot poly, so the C they produced refused to
-       compile. respond_to? stays untyped on purpose: the compile-time fold
-       reads the analyze-time probe, which that same catch-all answers for
-       every name, so a typed slot would turn today's refusal into a wrong
-       `true` for `f.respond_to?(:nope)`. */
-    if (argc == 0 && (sp_streq(name, "hash") || sp_streq(name, "object_id") ||
-                      sp_streq(name, "__id__"))) return TY_INT;
-    /* the readiness family answers the handle itself or nil -- a nullable
-       sp_File*, which TY_IO already models (NULL is nil) */
-    if (sp_streq(name, "wait_readable") || sp_streq(name, "wait_writable") ||
-        sp_streq(name, "wait_priority") || sp_streq(name, "wait"))
-      return TY_IO;
     /* socket methods on the IO handle (#2922) */
     if (sp_feature_required("socket")) {
       if (sp_streq(name, "accept") && argc == 0) return TY_IO;
@@ -4532,21 +4330,9 @@ static TyKind infer_call_inner(Compiler *c, int id) {
     if ((sp_streq(name, "read_nonblock") || sp_streq(name, "write_nonblock")) &&
         an_nonblock_no_exception(c, id))
       return TY_POLY;
-    if (sp_streq(name, "readbyte") || sp_streq(name, "fcntl") ||
-        sp_streq(name, "pwrite") || sp_streq(name, "write_nonblock")) return TY_INT;
-    if (sp_streq(name, "pread") || sp_streq(name, "read_nonblock")) return TY_STRING;
-    if (sp_streq(name, "binmode?") || sp_streq(name, "close_on_exec?") ||
-        sp_streq(name, "close_on_exec=") || sp_streq(name, "autoclose=")) return TY_BOOL;
-    if (sp_streq(name, "to_io") || sp_streq(name, "reopen")) return TY_IO;
-    if (sp_streq(name, "ungetbyte") || sp_streq(name, "advise") ||
-        sp_streq(name, "close_read") || sp_streq(name, "close_write")) return TY_POLY;
-    if (sp_streq(name, "mtime") || sp_streq(name, "atime") || sp_streq(name, "ctime") ||
-        sp_streq(name, "birthtime")) return TY_TIME;
-    if (sp_streq(name, "stat") || sp_streq(name, "lstat")) return TY_IO;
-    if (sp_streq(name, "putc") || sp_streq(name, "printf") || sp_streq(name, "ungetc") ||
-        sp_streq(name, "pid")) return TY_POLY;
+    if (sp_streq(name, "write_nonblock")) return TY_INT;
+    if (sp_streq(name, "read_nonblock")) return TY_STRING;
     if (sp_streq(name, "winsize") && sp_feature_enabled("io/console")) return TY_INT_ARRAY;
-    if (sp_streq(name, "<<")) return TY_IO;   /* writes, returns self (chainable) */
     if (sp_streq(name, "each_line") || sp_streq(name, "each") ||
         sp_streq(name, "each_char") || sp_streq(name, "each_byte") ||
         sp_streq(name, "each_codepoint")) {
@@ -4579,35 +4365,19 @@ static TyKind infer_call_inner(Compiler *c, int id) {
          that later holds the boxed answer */
       if (at == TY_UNKNOWN) return TY_UNKNOWN;
     }
-    if (sp_streq(name, "utc") || sp_streq(name, "gmtime") || sp_streq(name, "getutc") ||
-        sp_streq(name, "getgm") ||
-        sp_streq(name, "localtime") || sp_streq(name, "getlocal") || sp_streq(name, "+") ||
-        sp_streq(name, "-")) return TY_TIME;
-    if (sp_streq(name, "clamp") && argc == 2) return TY_TIME;  /* self or a bound */
-    if (sp_streq(name, "to_a") && argc == 0) return TY_POLY_ARRAY;
-    if (sp_streq(name, "to_r") && argc == 0) return TY_RATIONAL;
-    if ((sp_streq(name, "floor") || sp_streq(name, "ceil") || sp_streq(name, "round")) && (argc == 0 || argc == 1)) return TY_TIME;
-    if (sp_streq(name, "xmlschema")) return TY_STRING;   /* with or without a fraction-digits arg (#3094) */
-    if (sp_streq(name, "deconstruct_keys") && argc == 1) return TY_POLY;  /* boxed Sym=>Int hash */
+    /* builtin-op rows (builtin_ops.c). Every row names a known Time (or
+       Object) method, which the Object reopen check below never answers. */
+    {
+      const BuiltinOp *op = an_bop_find(c, id, rt, name, argc, nt_ref(nt, id, "block") >= 0);
+      if (op && op->result != TY_UNKNOWN) return op->result;
+    }
     if (sp_streq(name, "iso8601") && sp_feature_enabled("time")) return TY_STRING;
     if ((sp_streq(name, "httpdate") || sp_streq(name, "rfc2822") || sp_streq(name, "rfc822")) &&
         argc == 0 && sp_feature_enabled("time")) return TY_STRING;
-    if (sp_streq(name, "to_s") || sp_streq(name, "inspect") || sp_streq(name, "strftime") ||
-        sp_streq(name, "zone") || sp_streq(name, "asctime") ||
-        sp_streq(name, "ctime")) return TY_STRING;
-    if (sp_streq(name, "to_f")) return TY_FLOAT;
-    /* Integer 0 for a whole second, else a Rational -- boxed at the arm */
-    if (sp_streq(name, "subsec")) return TY_POLY;
-    if (sp_streq(name, "utc?") || sp_streq(name, "gmt?") || sp_streq(name, "dst?") ||
-        sp_streq(name, "isdst") ||
-        sp_streq(name, "sunday?") || sp_streq(name, "monday?") ||
-        sp_streq(name, "<") || sp_streq(name, ">") || sp_streq(name, "<=") ||
-        sp_streq(name, ">=") || sp_streq(name, "==") || sp_streq(name, "!=")) return TY_BOOL;
     /* Time <=> Time is an Integer; against a non-Time operand it is nil, so
        the result is poly (#2677). */
     if (sp_streq(name, "<=>") && argc == 1)
       return infer_type(c, argv[0]) == TY_TIME ? TY_INT : TY_POLY;
-    if (sp_streq(name, "class")) return TY_STRING;
     /* predicates (is_a?/kind_of?/instance_of?/between?/...) before the int
        catch-all below swallows them */
     { size_t tnl = strlen(name); if (tnl > 0 && name[tnl - 1] == '?') return TY_BOOL; }
@@ -4628,10 +4398,10 @@ static TyKind infer_call_inner(Compiler *c, int id) {
       int ci = sci >= 0 ? sci : comp_class_index(c, nt_str(nt, recv, "name"));
       if (ci >= 0) {
         int mi = comp_cmethod_in_chain(c, ci, name, NULL);
-        if (mi >= 0) return method_call_ret(c, mi, id);
+        if (mi >= 0) return an_user_call(c, id, mi, UC_CMETH, ci);
       }
       int rmi = class_reopen_cmethod(c, recv, name);
-      if (rmi >= 0) return method_call_ret(c, rmi, id);
+      if (rmi >= 0) return an_user_call(c, id, rmi, UC_CMETH, c->scopes[rmi].class_id);
     }
     /* obj.class.cmeth(...) -> unify class method return types across hierarchy */
     if (rty && sp_streq(rty, "CallNode") &&
@@ -4772,7 +4542,24 @@ static TyKind infer_call_inner(Compiler *c, int id) {
       if (oc_ci >= 0) {
         int oc_mi = comp_method_in_chain(c, oc_ci, name, NULL);
         if (oc_mi >= 0 && rt == TY_IO && io_reopen_ret_mixed(c, name)) return TY_POLY;
-        if (oc_mi >= 0) return method_call_ret(c, oc_mi, id);
+        if (oc_mi >= 0) return an_user_call(c, id, oc_mi, UC_REOPEN, oc_ci);
+      }
+    }
+    /* ...and a nil receiver's NilClass reopen, an Integer or Float
+       receiver's Numeric reopen, ahead of Object's: the emitter's reopened-
+       builtin dispatch calls them for a name the receiver's own class does
+       not define, as CRuby's ancestry does. Answered by Object's method, the
+       call was typed from a method it never ran (`3.kind_tag` a String slot
+       around Numeric's Float). A name the builtin surface knows stays the
+       builtin's, where the emitter's earlier arms keep it. */
+    if (rt == TY_NIL || rt == TY_INT || rt == TY_FLOAT || rt == TY_BIGINT) {
+      const char *own = rt == TY_NIL ? "NilClass" : rt == TY_FLOAT ? "Float" : "Integer";
+      const char *anc = rt == TY_NIL ? "NilClass" : "Numeric";
+      if (!builtin_method_known(own, name) && !builtin_object_method_known(name)) {
+        int aci = comp_class_index(c, anc);
+        int ami = aci >= 0 ? comp_method_in_chain(c, aci, name, NULL) : -1;
+        if (ami >= 0 && c->scopes[ami].class_id == aci)
+          return an_user_call(c, id, ami, UC_REOPEN, aci);
       }
     }
   }
@@ -4840,6 +4627,14 @@ static TyKind infer_call_inner(Compiler *c, int id) {
   if (recv < 0) {
     Scope *self = comp_scope_of(c, id);
     if (self->class_id >= 0 && ie_class_of(c, id) < 0) {
+      /* inside a class method self is the class, so its class methods come
+         first, as comp_self_call_mi and the inline splice resolve the call:
+         an instance method or reader of the same name stood in for
+         `def self.go` and typed the call by the wrong body */
+      if (self->is_cmethod && !sp_streq(name, "new")) {
+        int cmi = comp_cmethod_in_chain(c, self->class_id, name, NULL);
+        if (cmi >= 0) return an_self_call_ret(c, self, name, cmi, id);
+      }
       { int rdcls2 = -1;
         if (comp_reader_in_chain(c, self->class_id, name, &rdcls2)) {
           const char *rname2 = comp_resolve_alias(c, self->class_id, name);
@@ -4994,7 +4789,7 @@ static TyKind infer_call_inner(Compiler *c, int id) {
     if (cbody < 0) cbody = g_cbody_class_id;
     if (cbody >= 0) {
       int smi = comp_cmethod_in_chain(c, cbody, name, NULL);
-      if (smi >= 0) return method_call_ret(c, smi, id);
+      if (smi >= 0) return an_user_call(c, id, smi, UC_CMETH, cbody);
     }
   }
   /* bare call inside an instance_eval/exec block: dispatch on receiver class */
@@ -5002,7 +4797,7 @@ static TyKind infer_call_inner(Compiler *c, int id) {
     int iec = ie_class_of(c, id);
     if (iec >= 0) {
       int imi = comp_method_in_chain(c, iec, name, NULL);
-      if (imi >= 0) return method_call_ret(c, imi, id);
+      if (imi >= 0) return an_user_call(c, id, imi, UC_IE, iec);
       TyKind at;
       if (argc == 0 && attr_reader_ty(c, iec, name, &at)) return at;
     }
@@ -5072,9 +4867,9 @@ static TyKind infer_call_inner(Compiler *c, int id) {
 
   /* user-defined free-function call (no receiver) */
   if (recv < 0) {
-    int mi = comp_method_index(c, name);
-    if (mi < 0) mi = comp_included_method_index(c, name, id);
-    if (mi >= 0) return method_call_ret(c, mi, id);
+    int mi = comp_method_index(c, name), fvia = UC_TOP;
+    if (mi < 0) { mi = comp_included_method_index(c, name, id); fvia = UC_INCLUDED; }
+    if (mi >= 0) return an_user_call(c, id, mi, fvia, fvia == UC_TOP ? -1 : c->scopes[mi].class_id);
     /* Kernel conversions */
     if (sp_streq(name, "Integer") && (kw_argc == 1 || kw_argc == 2)) {
       if (g_promote_mode && infer_type(c, argv[0]) == TY_FLOAT) return TY_POLY;   /* see above (#4688) */
@@ -5444,7 +5239,7 @@ static TyKind infer_call_inner(Compiler *c, int id) {
     int xr[8];
     int xn = exc_reopen_definers(c, name, xr, 8);
     if (xn > 0) {
-      TyKind xt = method_call_ret(c, comp_method_in_chain(c, xr[0], name, NULL), id);
+      TyKind xt = an_user_call(c, id, comp_method_in_chain(c, xr[0], name, NULL), UC_REOPEN, xr[0]);
       for (int q = 1; q < xn; q++)
         if (method_call_ret(c, comp_method_in_chain(c, xr[q], name, NULL), id) != xt) return TY_POLY;
       return xt;
@@ -5662,6 +5457,10 @@ static TyKind infer_call_inner(Compiler *c, int id) {
           return an_poly_concrete(c, name, TY_COMPLEX);
         }
       }
+      /* to_h with a block (a proc argument too): the pairs it answers, boxed */
+      if (argc == 0 && sp_streq(name, "to_h") && nt_ref(nt, id, "block") >= 0 &&
+          !an_user_poly_arm(c, name, argc))
+        return an_poly_concrete(c, name, TY_POLY);
       if (argc == 1 && sp_streq(name, "===")) {
         int has_user = an_user_poly_arm(c, name, argc);
         /* A boxed receiver can be a Proc, whose #=== answers the proc's
@@ -5877,7 +5676,10 @@ static TyKind infer_call_inner(Compiler *c, int id) {
            candidate skipped the builtin answer for the name applies, and once
            the method's return does settle it unifies in on a later round. */
         if (mi >= 0 && c->scopes[mi].ret == TY_UNKNOWN) continue;
-        if (mi >= 0) { r = found ? ty_unify(r, c->scopes[mi].ret) : c->scopes[mi].ret; found = 1; continue; }
+        if (mi >= 0) {
+          if (!found) an_user_call_record(c, id, mi, UC_POLY, k);
+          r = found ? ty_unify(r, c->scopes[mi].ret) : c->scopes[mi].ret; found = 1; continue;
+        }
         int rdcls = pcs[pi].rdcls;
         if (rdcls >= 0) {
           /* resolve alias so `alias_method :required?, :required` reads the
@@ -6282,18 +6084,10 @@ static TyKind infer_call_inner(Compiler *c, int id) {
 
   /* symbol receiver methods */
   if (recv >= 0 && rt == TY_SYMBOL) {
-    if (sp_streq(name, "to_s") || sp_streq(name, "id2name") || sp_streq(name, "name")) return TY_STRING;
-    if (sp_streq(name, "inspect")) return TY_STRING;
-    if (sp_streq(name, "upcase") || sp_streq(name, "downcase") ||
-        sp_streq(name, "capitalize") || sp_streq(name, "swapcase") ||
-        sp_streq(name, "to_sym") || sp_streq(name, "intern") ||
-        sp_streq(name, "itself")) return TY_SYMBOL;
-    if (sp_streq(name, "length") || sp_streq(name, "size")) return TY_INT;
-    if (sp_streq(name, "empty?") || sp_streq(name, "==") || sp_streq(name, "!=")) return TY_BOOL;
-    if (sp_streq(name, "succ") || sp_streq(name, "next")) return TY_SYMBOL;
-    if ((sp_streq(name, "[]") || sp_streq(name, "slice")) && (argc == 1 || argc == 2)) return TY_STRING;
-    if ((sp_streq(name, "start_with?") || sp_streq(name, "end_with?") || sp_streq(name, "match?")) && argc == 1)
-      return TY_BOOL;
+    {
+      const BuiltinOp *op = an_bop_find(c, id, rt, name, argc, nt_ref(nt, id, "block") >= 0);
+      if (op && op->result != TY_UNKNOWN) return op->result;
+    }
     /* Symbol#<=> is defined only between Symbols; String included, any other
        operand is not comparable and the result is nil (#3081) */
     if (sp_streq(name, "<=>") && argc == 1) {
@@ -6637,35 +6431,14 @@ static TyKind infer_call_inner(Compiler *c, int id) {
 
   /* string receiver methods */
   if (recv >= 0 && rt == TY_STRING) {
-    if (sp_streq(name, "clear") && argc == 0) return TY_STRING;  /* empties + returns self (#2332) */
-    /* s[i] = v / s[i, n] = v / s[range] = v / s["sub"] = v as a VALUE: the
-       assigned string (#2370) */
-    if (sp_streq(name, "[]=") && (argc == 2 || argc == 3)) return TY_STRING;
-    if (sp_streq(name, "concat") && argc == 0) return TY_STRING;  /* self (#2309) */
-    if (sp_streq(name, "clone") && argc == 1) return TY_STRING;  /* clone(freeze: ...) */
-    if (sp_streq(name, "encoding") && argc == 0) return TY_POLY;  /* an Encoding value */
-    if (sp_streq(name, "upcase") || sp_streq(name, "downcase") ||
-        sp_streq(name, "capitalize") || sp_streq(name, "swapcase") ||
-        sp_streq(name, "reverse") ||
-        ((sp_streq(name, "delete_prefix") || sp_streq(name, "delete_suffix")) && argc == 1) ||
-        sp_streq(name, "strip") || sp_streq(name, "lstrip") ||
-        sp_streq(name, "rstrip") || sp_streq(name, "chomp") ||
-        sp_streq(name, "chop") || sp_streq(name, "chr") || sp_streq(name, "clamp") ||
-        sp_streq(name, "squeeze") || sp_streq(name, "tr") || sp_streq(name, "tr_s") ||
-        sp_streq(name, "succ") || sp_streq(name, "next") ||
-        sp_streq(name, "delete")) return TY_STRING;
-    if (sp_streq(name, "slice!")) return TY_STRING;  /* removed part, or nil */
-    if (sp_streq(name, "[]") || sp_streq(name, "slice") || sp_streq(name, "byteslice") ||
-        sp_streq(name, "bytesplice") || sp_streq(name, "append_as_bytes") ||
-        sp_streq(name, "force_encoding") || sp_streq(name, "b") || sp_streq(name, "encode") ||
-        sp_streq(name, "encode!")) return TY_STRING;
-    if ((sp_streq(name, "dump") || sp_streq(name, "undump")) && argc == 0) return TY_STRING;
-    if (sp_streq(name, "index") && argc == 1) {
-      const char *aty = nt_type(nt, argv[0]);
-      /* nullable int (SP_INT_NIL on no match), matching the string-needle
-         form -- the emitter carries the same sentinel for a regexp needle */
-      if (aty && sp_streq(aty, "RegularExpressionNode")) return TY_INT;
-      if (infer_type(c, argv[0]) == TY_REGEX) return TY_INT;
+    /* promote mode: a String#to_i past sp_int is a Bignum (sp_str_to_i_promote).
+       It reads the mode, so it sits ahead of the to_i row. */
+    if (g_promote_mode && sp_streq(name, "to_i") && argc <= 1) return TY_POLY;
+    /* builtin-op rows (builtin_ops.c): the calls typed by name, arity and
+       block form */
+    {
+      const BuiltinOp *op = an_bop_find(c, id, rt, name, argc, nt_ref(nt, id, "block") >= 0);
+      if (op && op->result != TY_UNKNOWN) return op->result;
     }
     /* casecmp/casecmp? with a statically non-string argument: CRuby answers
        nil rather than raising, so the call types nil (the emitter drops the
@@ -6683,41 +6456,16 @@ static TyKind infer_call_inner(Compiler *c, int id) {
       if (at0 != TY_STRING && at0 != TY_UNKNOWN) return TY_NIL;
       return sp_streq(name, "casecmp") ? TY_INT : TY_BOOL;
     }
-    /* promote mode: a String#to_i past sp_int is a Bignum (sp_str_to_i_promote) */
-    if (g_promote_mode && sp_streq(name, "to_i") && argc <= 1) return TY_POLY;
-    if (sp_streq(name, "index") || sp_streq(name, "to_i") || sp_streq(name, "count") ||
-        sp_streq(name, "oct") || sp_streq(name, "hex") || sp_streq(name, "ord") ||
-        sp_streq(name, "bytesize") || sp_streq(name, "setbyte") || sp_streq(name, "getbyte")) return TY_INT;
-    if (sp_streq(name, "scrub") || sp_streq(name, "scrub!") || sp_streq(name, "crypt")) return TY_STRING;
-    if (sp_streq(name, "sum") && argc <= 1) return TY_INT;
     if (sp_streq(name, "unpack1") && (argc == 1 || argc == 2)) return an_unpack1_lit_type(nt, argv[0]);
-    if (sp_streq(name, "rindex")) return TY_INT;
     /* byteindex/byterindex over a String or Regexp needle -> byte offset or
        nil (SP_INT_NIL). */
     if ((sp_streq(name, "byteindex") || sp_streq(name, "byterindex")) &&
         (argc == 1 || argc == 2) &&
         (comp_ntype(c, argv[0]) == TY_STRING || comp_ntype(c, argv[0]) == TY_REGEX))
       return TY_INT;
-    if (sp_streq(name, "partition") || sp_streq(name, "rpartition")) return TY_STR_ARRAY;
-    /* value-form mutators: the post-mutation string; the no-change bang
-       contract carries nil as NULL through the nullable string. */
-    if (sp_streq(name, "gsub!") || sp_streq(name, "sub!") || sp_streq(name, "upcase!") ||
-        sp_streq(name, "downcase!") || sp_streq(name, "capitalize!") || sp_streq(name, "swapcase!") ||
-        sp_streq(name, "strip!") || sp_streq(name, "lstrip!") || sp_streq(name, "rstrip!") ||
-        sp_streq(name, "chomp!") || sp_streq(name, "chop!") || sp_streq(name, "squeeze!") ||
-        sp_streq(name, "tr!") || sp_streq(name, "delete!") || sp_streq(name, "reverse!") ||
-        sp_streq(name, "tr_s!") || sp_streq(name, "delete_prefix!") ||
-        sp_streq(name, "delete_suffix!") || sp_streq(name, "dedup") ||
-        sp_streq(name, "succ!") || sp_streq(name, "next!") ||
-        sp_streq(name, "concat") || sp_streq(name, "<<") || sp_streq(name, "prepend") ||
-        sp_streq(name, "insert") || sp_streq(name, "replace"))
-      return TY_STRING;
-    if (sp_streq(name, "ascii_only?") || sp_streq(name, "valid_encoding?")) return TY_BOOL;
-    if (sp_streq(name, "to_f"))  return TY_FLOAT;
-    if (sp_streq(name, "to_r") && argc == 0) return TY_RATIONAL;
-    if ((sp_streq(name, "each_char") || sp_streq(name, "each_line") ||
-         sp_streq(name, "each_byte") || sp_streq(name, "each_codepoint")) && argc == 0 &&
-        nt_ref(nt, id, "block") < 0) return TY_ENUMERATOR;
+    /* each_line and lines read their separator argument */
+    if (sp_streq(name, "each_line") && argc == 0 && nt_ref(nt, id, "block") < 0)
+      return TY_ENUMERATOR;
     if (sp_streq(name, "each_line") && argc == 1 && nt_ref(nt, id, "block") < 0 &&
         nt_type(nt, argv[0]) && sp_streq(nt_type(nt, argv[0]), "KeywordHashNode"))
       return TY_ENUMERATOR;  /* each_line(chomp: ...) blockless */
@@ -6729,13 +6477,8 @@ static TyKind infer_call_inner(Compiler *c, int id) {
     if (sp_streq(name, "lines") && argc == 2 && infer_type(c, argv[0]) == TY_STRING &&
         nt_type(nt, argv[1]) && sp_streq(nt_type(nt, argv[1]), "KeywordHashNode"))
       return TY_STR_ARRAY;   /* lines(sep, chomp: true) (#3546) */
-    if (sp_streq(name, "each_char") || sp_streq(name, "each_line") || sp_streq(name, "each_byte")) return TY_STRING;
-    { int blk = nt_ref(nt, id, "block");
-      if (blk >= 0 && (sp_streq(name, "chars") || sp_streq(name, "lines"))) return TY_STRING;
-      if (blk >= 0 && (sp_streq(name, "bytes") || sp_streq(name, "codepoints"))) return TY_STRING;
-      /* the block form of split iterates and answers the receiver too */
-      if (blk >= 0 && sp_streq(name, "split")) return TY_STRING; }
-    if (sp_streq(name, "split") || sp_streq(name, "lines")) return TY_STR_ARRAY;
+    if (sp_streq(name, "each_line")) return TY_STRING;
+    if (sp_streq(name, "lines")) return nt_ref(nt, id, "block") >= 0 ? TY_STRING : TY_STR_ARRAY;
     if (sp_streq(name, "scan") && argc == 1) {
       /* the block form iterates and returns self (the receiver string) */
       if (nt_ref(nt, id, "block") >= 0) return TY_STRING;
@@ -6761,22 +6504,10 @@ static TyKind infer_call_inner(Compiler *c, int id) {
       if (infer_type(c, argv[0]) == TY_POLY) return TY_POLY_ARRAY;
       return TY_STR_ARRAY;
     }
-    if (sp_streq(name, "upto") && argc == 1) return TY_STR_ARRAY;  /* blockless: materialized sequence */
-    if (sp_streq(name, "bytes") || sp_streq(name, "codepoints")) return TY_INT_ARRAY;
-    if (sp_streq(name, "unpack") && (argc == 1 || argc == 2)) return TY_POLY_ARRAY;
-    if (sp_streq(name, "chars")) return TY_STR_ARRAY;
-    if (sp_streq(name, "intern") && argc == 0) return TY_SYMBOL;
-    if (sp_streq(name, "to_c") && argc == 0) return TY_COMPLEX;
     if (sp_streq(name, "gsub") && argc == 1 && nt_ref(nt, id, "block") < 0 &&
         nt_type(nt, argv[0]) && sp_streq(nt_type(nt, argv[0]), "RegularExpressionNode"))
       return TY_ENUMERATOR;  /* blockless gsub(/re/): an Enumerator of matches */
-    if (sp_streq(name, "gsub") || sp_streq(name, "sub") || sp_streq(name, "tr") ||
-        sp_streq(name, "center") || sp_streq(name, "ljust") || sp_streq(name, "rjust"))
-      return TY_STRING;
-    if (sp_streq(name, "*")) return TY_STRING;
-    /* in-place append / concat reassign the receiver and evaluate to it */
-    if ((sp_streq(name, "<<") || sp_streq(name, "concat") || sp_streq(name, "prepend")) && argc == 1)
-      return TY_STRING;
+    if (sp_streq(name, "gsub")) return TY_STRING;
   }
   /* <int_array>.product(<int_array>)[.to_a].inspect -> a string */
   if (sp_streq(name, "inspect") && argc == 0 && recv >= 0) {
@@ -6815,51 +6546,16 @@ static TyKind infer_call_inner(Compiler *c, int id) {
       return TY_BIGINT;
     if (sp_streq(name, "lcm") && argc == 1 && infer_type(c, argv[0]) == TY_BIGINT)
       return TY_BIGINT;
-    if (sp_streq(name, "ceil") || sp_streq(name, "floor") ||
-        sp_streq(name, "round") || sp_streq(name, "truncate")) return TY_INT;  /* no precision arg -> self */
-    if (sp_streq(name, "divmod") && argc == 1) return TY_INT_ARRAY;  /* [quotient, remainder] */
-    if ((sp_streq(name, "allbits?") || sp_streq(name, "anybits?") || sp_streq(name, "nobits?")) && argc == 1) return TY_BOOL;
-    if (sp_streq(name, "even?") || sp_streq(name, "odd?") || sp_streq(name, "zero?") ||
-        sp_streq(name, "positive?") || sp_streq(name, "negative?") ||
-        sp_streq(name, "integer?") || sp_streq(name, "finite?") ||
-        sp_streq(name, "real?")) return TY_BOOL;
-    if (sp_streq(name, "infinite?") && argc == 0) return TY_INT;  /* always nil (nullable int) */
-    /* Numeric / Complex-projection on a real Integer (#2328) */
-    if ((sp_streq(name, "abs2") || sp_streq(name, "real") || sp_streq(name, "imaginary") ||
-         sp_streq(name, "imag") || sp_streq(name, "conj") || sp_streq(name, "conjugate")) && argc == 0)
-      return TY_INT;
-    if (sp_streq(name, "i") && argc == 0) return TY_COMPLEX;
-    if ((sp_streq(name, "arg") || sp_streq(name, "angle") || sp_streq(name, "phase")) && argc == 0)
-      return TY_POLY;  /* Integer 0 or Float PI */
-    if ((sp_streq(name, "rect") || sp_streq(name, "rectangular")) && argc == 0) return TY_INT_ARRAY;
-    if (sp_streq(name, "polar") && argc == 0) return TY_POLY_ARRAY;
-    if ((sp_streq(name, "ord") || sp_streq(name, "to_int")) && argc == 0) return TY_INT;
+    {
+      const BuiltinOp *op = an_bop_find(c, id, rt, name, argc, nt_ref(nt, id, "block") >= 0);
+      if (op && op->result != TY_UNKNOWN) return op->result;
+    }
     /* pow with a literal negative exponent yields the exact Rational */
     if (sp_streq(name, "pow") && argc == 1 && nt_type(nt, argv[0]) &&
         sp_streq(nt_type(nt, argv[0]), "IntegerNode") &&
         nt_int(nt, argv[0], "value", 0) < 0) return TY_RATIONAL;
     if (sp_streq(name, "pow") && argc == 1 && infer_type(c, argv[0]) == TY_FLOAT) return TY_FLOAT;
-    if ((sp_streq(name, "ceildiv") || sp_streq(name, "pow")) && argc >= 1) return TY_INT;
-    if ((sp_streq(name, "pred") || sp_streq(name, "succ") || sp_streq(name, "next")) && argc == 0) return TY_INT;
-    if (sp_streq(name, "nonzero?") && argc == 0) return TY_INT;  /* self or nil (nullable int) */
-    /* Integer as a Rational: numerator is self, denominator is 1. */
-    if ((sp_streq(name, "numerator") || sp_streq(name, "denominator")) && argc == 0) return TY_INT;
-    if ((sp_streq(name, "to_r") && argc == 0) ||
-        (sp_streq(name, "rationalize") && (argc == 0 || argc == 1))) return TY_RATIONAL;
-    if (sp_streq(name, "to_c") && argc == 0) return TY_COMPLEX;
-    /* times/upto/downto/step with a block return the receiver (self) */
-    if ((sp_streq(name, "times") || sp_streq(name, "upto") || sp_streq(name, "downto") ||
-         sp_streq(name, "step")) && nt_ref(nt, id, "block") >= 0) return TY_INT;
-    /* times/upto/downto without a block return a range-like enumerator */
-    if ((sp_streq(name, "times") || sp_streq(name, "upto") || sp_streq(name, "downto")) &&
-        nt_ref(nt, id, "block") < 0) return TY_RANGE;
-    if (sp_streq(name, "chr")) return TY_STRING;
-    if (sp_streq(name, "[]") && argc == 1) return TY_INT;  /* bit access */
-    if (sp_streq(name, "bit_length") && argc == 0) return TY_INT;
-    if (sp_streq(name, "fdiv") && argc == 1) return TY_FLOAT;
-    if (sp_streq(name, "[]") && (argc == 1 || argc == 2)) return TY_INT;  /* bit access / bit-range field */
-    if (sp_streq(name, "div") && argc == 1) return TY_INT;  /* floor division */
-    if (sp_streq(name, "gcd") || sp_streq(name, "lcm")) return TY_INT;
+    if (sp_streq(name, "pow") && argc >= 1) return TY_INT;
     /* clamp keeps the applied operand's class: a Float bound can be returned, so
        the mixed int-receiver/float-bound form is poly; pure-int stays Integer. */
     if (sp_streq(name, "clamp")) {
@@ -6869,11 +6565,6 @@ static TyKind infer_call_inner(Compiler *c, int id) {
       }
       return TY_INT;
     }
-    if (sp_streq(name, "magnitude") && argc == 0) return TY_INT;  /* alias for abs */
-    if ((sp_streq(name, "modulo") || sp_streq(name, "remainder")) && argc == 1) return TY_INT;
-    if (sp_streq(name, "gcdlcm") && argc == 1) return TY_INT_ARRAY;  /* [gcd, lcm] */
-    if (sp_streq(name, "digits")) return TY_INT_ARRAY;   /* face-table fallback only, see codegen_call_recv.c */
-    if (sp_streq(name, "to_s") && argc == 1) return TY_STRING;
     if (sp_streq(name, "coerce") && argc == 1) {
       TyKind a0 = infer_type(c, argv[0]);
       if (a0 == TY_BIGINT) return TY_POLY_ARRAY;   /* [big, big] boxed pair (#2419) */
@@ -6926,41 +6617,15 @@ static TyKind infer_call_inner(Compiler *c, int id) {
         }
       }
     }
-    if ((sp_streq(name, "arg") || sp_streq(name, "angle") || sp_streq(name, "phase")) && argc == 0)
-      return TY_POLY;  /* Integer 0 or Float PI (#2316) */
-    if (sp_streq(name, "to_c") && argc == 0) return TY_COMPLEX;
-    if (sp_streq(name, "coerce") && argc == 1) return TY_FLOAT_ARRAY;  /* [Float(other), self] */
-    if (sp_streq(name, "divmod") && argc == 1) return TY_POLY_ARRAY;  /* [Integer, Float] */
-    if (sp_streq(name, "infinite?")) return TY_INT;   /* nil / 1 / -1 (nullable int) */
-    if (sp_streq(name, "nan?") || sp_streq(name, "finite?") ||
-        sp_streq(name, "positive?") || sp_streq(name, "negative?") ||
-        sp_streq(name, "zero?") || sp_streq(name, "integer?") ||
-        sp_streq(name, "real?")) return TY_BOOL;
-    if (sp_streq(name, "nonzero?")) return TY_POLY;   /* self (Float) or nil */
-    if (sp_streq(name, "div") && argc == 1) return TY_INT;  /* integer floor-division */
-    /* Complex-view methods on a real Float */
-    if (sp_streq(name, "abs2") || sp_streq(name, "real") ||
-        sp_streq(name, "conj") || sp_streq(name, "conjugate")) return TY_FLOAT;
-    if (sp_streq(name, "imag") || sp_streq(name, "imaginary")) return TY_INT;
-    if (sp_streq(name, "rect") || sp_streq(name, "rectangular") ||
-        sp_streq(name, "polar")) return TY_POLY_ARRAY;
-    if (sp_streq(name, "i")) return TY_COMPLEX;
     /* Float <=> Rational: compare via the rational's float value (#2596) */
     if (sp_streq(name, "<=>") && argc == 1 && comp_ntype(c, argv[0]) == TY_RATIONAL) return TY_INT;
     /* Float#fdiv(Complex) is self / c, a Complex */
     if (sp_streq(name, "fdiv") && argc == 1 && comp_ntype(c, argv[0]) == TY_COMPLEX) return TY_COMPLEX;
-    if (sp_streq(name, "next_float") || sp_streq(name, "prev_float") ||
-        sp_streq(name, "abs") || sp_streq(name, "magnitude") ||
-        sp_streq(name, "modulo") || sp_streq(name, "remainder") || sp_streq(name, "to_f") ||
-        (sp_streq(name, "fdiv") && argc == 1)) return TY_FLOAT;
-    /* Float#numerator is an Integer when finite and the (non-finite) Float
-       itself otherwise, so it is boxed; #denominator is always an Integer
-       (1 for a non-finite value). (#3011) */
-    if (sp_streq(name, "numerator") && argc == 0) return TY_POLY;
-    if (sp_streq(name, "denominator") && argc == 0) return TY_INT;
-    if ((sp_streq(name, "to_r") && argc == 0) ||
-        (sp_streq(name, "rationalize") && (argc == 0 || argc == 1))) return TY_RATIONAL;
-    if (sp_streq(name, "eql?") && argc == 1) return TY_BOOL;
+    if (sp_streq(name, "fdiv") && argc == 1) return TY_FLOAT;
+    {
+      const BuiltinOp *op = an_bop_find(c, id, rt, name, argc, nt_ref(nt, id, "block") >= 0);
+      if (op && op->result != TY_UNKNOWN) return op->result;
+    }
     /* clamp with float bounds returns a float (matches codegen in codegen_call.c);
        a mixed/int bound can return the Integer bound, so leave that poly. */
     if (sp_streq(name, "clamp") && argc == 2 &&
@@ -8882,6 +8547,7 @@ TyKind infer_uncached(Compiler *c, int id) {
     return yield_value_type(c, ymi);
   }
   if (nk == NK_SuperNode || nk == NK_ForwardingSuperNode) {
+    if (g_plan_check && id >= 0 && id < c->node_cap) c->ucall_inf[id].via = UC_NONE;
     Scope *s = comp_scope_of(c, id);
     if (s->class_id < 0 || !s->name) return TY_UNKNOWN;
     const char *shadow = comp_super_shadow(c, s);
@@ -8890,6 +8556,7 @@ TyKind infer_uncached(Compiler *c, int id) {
                          : comp_method_in_class(c, s->class_id, shadow);
       if (mi < 0) return TY_UNKNOWN;
       /* a yielding shadow is spliced as a parent is */
+      an_user_call_record(c, id, mi, UC_SUPER, s->class_id);
       return super_target_ret(c, s, mi, id);
     }
     /* Class#new: an instance of the receiving class, which is this one or,
@@ -8910,6 +8577,7 @@ TyKind infer_uncached(Compiler *c, int id) {
     int mi = s->is_cmethod ? comp_cmethod_in_chain(c, p, uname, NULL)
                            : comp_method_in_chain(c, p, uname, NULL);
     if (mi < 0) return rto_super ? TY_BOOL : TY_UNKNOWN;
+    an_user_call_record(c, id, mi, UC_SUPER, p);
     return super_target_ret(c, s, mi, id);
   }
   if (nk == NK_AndNode || nk == NK_OrNode) {
