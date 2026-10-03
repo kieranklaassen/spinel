@@ -19,6 +19,12 @@
    the default gates and optcarrot (which pins wrap) see no behavior change. */
 extern int g_promote_mode;
 
+/* Set by main.c from --plan-check (#7100): inference records, per call node,
+   the builtin-op row it answered the call with (c->bop_inf), and codegen
+   reports on stderr every call it emitted through a row inference did not
+   choose. Off in every normal build. */
+extern int g_plan_check;
+
 /* One post-convergence bind pass fills UNKNOWN params from empty
    array-literal args (fst([]) with def fst(a) = a.first). */
 extern int g_final_bind_pass;
@@ -370,4 +376,6 @@ int gather_reaches(Compiler *c, Scope *m, const int *argv, int pos_argc, int gat
    parameter, no `**kwrest`, no `**nil`) and `s` declares one: CRuby
    passes them as keywords, which such a method takes positionally. */
 int zsuper_kw_positional(Compiler *c, Scope *s, Scope *pm);
+int an_thread_arg_block(Compiler *c, int n);
+int cap_wrap_mutates_param(Compiler *c, int blk, const char *bp);
 #endif
