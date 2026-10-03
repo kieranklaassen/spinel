@@ -92,6 +92,8 @@ Compiler *comp_new(const NodeTable *nt) {
   c->hash_want = calloc((size_t)n, sizeof(TyKind));
   c->arr_want = calloc((size_t)n, sizeof(TyKind));
   c->poly_builtin_ty = calloc((size_t)n, sizeof(TyKind));
+  c->bop_inf = calloc((size_t)n, sizeof *c->bop_inf);
+  c->ucall_inf = calloc((size_t)n, sizeof *c->ucall_inf);
   c->node_cap = n;
   comp_node_ord(c, 0, NULL);   /* number the parsed nodes before any rewrite */
   c->node_ord_parsed = nt->count;
@@ -226,6 +228,10 @@ void comp_grow_node_arrays(Compiler *c) {
   c->hash_want = realloc(c->hash_want, sizeof(TyKind) * (size_t)n);
   c->arr_want = realloc(c->arr_want, sizeof(TyKind) * (size_t)n);
   c->poly_builtin_ty = realloc(c->poly_builtin_ty, sizeof(TyKind) * (size_t)n);
+  c->bop_inf = realloc(c->bop_inf, sizeof *c->bop_inf * (size_t)n);
+  for (int i = c->node_cap; i < n; i++) c->bop_inf[i] = NULL;
+  c->ucall_inf = realloc(c->ucall_inf, sizeof *c->ucall_inf * (size_t)n);
+  memset(c->ucall_inf + c->node_cap, 0, sizeof *c->ucall_inf * (size_t)(n - c->node_cap));
   for (int i = c->node_cap; i < n; i++) { c->ntype[i] = TY_UNKNOWN; c->norigin[i] = -1; c->nilnarrow[i] = TY_UNKNOWN; c->nscope[i] = 0; c->node_cbody[i] = -1; c->empty_arr_recv[i] = 0; c->empty_hash_recv[i] = 0; c->empty_hash_arg[i] = 0; c->store_misfit_arg[i] = 0; c->ivar_widen_src[i] = 0; c->hash_want[i] = TY_UNKNOWN; c->arr_want[i] = TY_UNKNOWN; c->poly_builtin_ty[i] = TY_UNKNOWN; c->strbuf_box[i] = 0; c->strbuf_handle_demand[i] = 0; c->strbuf_read_raw[i] = 0; c->poly_strbuf_lift[i] = 0; }
   c->node_cap = n;
 }
@@ -297,6 +303,8 @@ void comp_free(Compiler *c) {
   free(c->hash_want);
   free(c->arr_want);
   free(c->poly_builtin_ty);
+  free(c->bop_inf);
+  free(c->ucall_inf);
   free(c);
 }
 
@@ -1234,12 +1242,13 @@ int comp_is_nested_int_array_literal(Compiler *c, int node) {
   return 1;
 }
 
-static int name_in(char **list, int n, const char *name) {
+int name_list_has(char **list, int n, const char *name) {
+  if (!name) return 0;
   for (int i = 0; i < n; i++) if (sp_streq(list[i], name)) return 1;
   return 0;
 }
 static void name_add(char ***list, int *n, int *cap, const char *name) {
-  if (name_in(*list, *n, name)) return;
+  if (name_list_has(*list, *n, name)) return;
   if (*n >= *cap) {
     *cap = *cap ? *cap * 2 : 4;
     *list = realloc(*list, sizeof(char *) * (size_t)*cap);
@@ -1254,8 +1263,8 @@ void comp_add_reader(ClassInfo *ci, const char *name) {
 void comp_add_writer(ClassInfo *ci, const char *name) {
   name_add(&ci->writers, &ci->nwriters, &ci->cwriters, name);
 }
-int comp_is_reader(ClassInfo *ci, const char *name) { return name_in(ci->readers, ci->nreaders, name); }
-int comp_is_writer(ClassInfo *ci, const char *name) { return name_in(ci->writers, ci->nwriters, name); }
+int comp_is_reader(ClassInfo *ci, const char *name) { return name_list_has(ci->readers, ci->nreaders, name); }
+int comp_is_writer(ClassInfo *ci, const char *name) { return name_list_has(ci->writers, ci->nwriters, name); }
 
 /* A plain setter name: `x=`, but not the operators that also end in `=`
    (`==`, `!=`, `<=`, `>=`, `===`) and not `[]=`, whose value form is its own. */
@@ -1308,7 +1317,7 @@ void comp_add_undef(ClassInfo *ci, const char *name) {
 }
 int comp_is_undeffed_in_chain(Compiler *c, int class_id, const char *name) {
   for (int cid = class_id; cid >= 0; cid = c->classes[cid].parent) {
-    if (name_in(c->classes[cid].undefs, c->classes[cid].nundefs, name)) return 1;
+    if (name_list_has(c->classes[cid].undefs, c->classes[cid].nundefs, name)) return 1;
     if (comp_method_in_class(c, cid, name) >= 0) return 0;
   }
   return 0;
@@ -1322,18 +1331,18 @@ void comp_add_sg_writer(ClassInfo *ci, const char *name) {
 void comp_add_sg_civ(ClassInfo *ci, const char *name) {
   if (name) name_add(&ci->sg_civ, &ci->nsg_civ, &ci->csg_civ, name);
 }
-int comp_is_sg_civ(ClassInfo *ci, const char *name) { return name_in(ci->sg_civ, ci->nsg_civ, name); }
-int comp_is_sg_inh(ClassInfo *ci, const char *name) { return name_in(ci->sg_inh, ci->nsg_inh, name); }
+int comp_is_sg_civ(ClassInfo *ci, const char *name) { return name_list_has(ci->sg_civ, ci->nsg_civ, name); }
+int comp_is_sg_inh(ClassInfo *ci, const char *name) { return name_list_has(ci->sg_inh, ci->nsg_inh, name); }
 void comp_add_sg_inh(ClassInfo *ci, const char *name) {
-  if (name_in(ci->sg_inh, ci->nsg_inh, name)) return;
+  if (name_list_has(ci->sg_inh, ci->nsg_inh, name)) return;
   if (ci->nsg_inh >= ci->csg_inh) {
     ci->csg_inh = ci->csg_inh ? ci->csg_inh * 2 : 4;
     ci->sg_inh = realloc(ci->sg_inh, sizeof(char *) * (size_t)ci->csg_inh);
   }
   ci->sg_inh[ci->nsg_inh++] = strdup(name);
 }
-int comp_is_sg_reader(ClassInfo *ci, const char *name) { return name_in(ci->sg_readers, ci->nsg_readers, name); }
-int comp_is_sg_writer(ClassInfo *ci, const char *name) { return name_in(ci->sg_writers, ci->nsg_writers, name); }
+int comp_is_sg_reader(ClassInfo *ci, const char *name) { return name_list_has(ci->sg_readers, ci->nsg_readers, name); }
+int comp_is_sg_writer(ClassInfo *ci, const char *name) { return name_list_has(ci->sg_writers, ci->nsg_writers, name); }
 
 void comp_add_alias_from(ClassInfo *ci, const char *new_name, const char *old_name, int alias_node) {
   comp_table_gen++;
@@ -2281,7 +2290,13 @@ const char *poly_enum_op_for(const char *name) {
        never runs the method. */
     {"each_entry","SP_PENUM_EACH"}, {"each_pair","SP_PENUM_EACH_PAIR"},
     {"each_key","SP_PENUM_EACH_KEY"}, {"each_value","SP_PENUM_EACH_VALUE"},
-    {"reverse_each","SP_PENUM_REVERSE_EACH"}, {"uniq","SP_PENUM_UNIQ"}, {NULL,NULL}
+    {"reverse_each","SP_PENUM_REVERSE_EACH"}, {"uniq","SP_PENUM_UNIQ"},
+    {"to_h","SP_PENUM_TO_H"},
+    {"transform_keys","SP_PENUM_TRANSFORM_KEYS"}, {"transform_values","SP_PENUM_TRANSFORM_VALUES"},
+    {"transform_keys!","SP_PENUM_TRANSFORM_KEYS_BANG"}, {"transform_values!","SP_PENUM_TRANSFORM_VALUES_BANG"},
+    {"select!","SP_PENUM_SELECT_BANG"}, {"filter!","SP_PENUM_FILTER_BANG"},
+    {"reject!","SP_PENUM_REJECT_BANG"}, {"keep_if","SP_PENUM_KEEP_IF"}, {"delete_if","SP_PENUM_DELETE_IF"},
+    {NULL,NULL}
   };
   if (!name) return NULL;
   for (int i = 0; PEN[i].nm; i++) if (sp_streq(name, PEN[i].nm)) return PEN[i].op;
