@@ -1,0 +1,1 @@
+Fixed in b3faa98e. The job count now comes from the chain the Makefile's NPROC uses (nproc, then sysctl -n hw.ncpu, then 4), and a non-zero status from xargs ends the script with status 2 instead of a summary, so a run that compiled nothing can no longer read as clean. Checked with nproc off PATH (normal run) and with a job count xargs refuses (status 2).
