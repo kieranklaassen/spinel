@@ -14444,43 +14444,57 @@ static int an_strbuf_alias_source(Compiler *c, int v) {
    the write wraps. Each such read is a second name for the target on the
    path that takes it, so it joins the target's alias set
    (promote_local_alias_pairs), and the write emits the handle per arm
-   (emit_strbuf_cond_value). Answers the count written to `out` (at most
-   `cap`). */
-static int an_strbuf_alias_leaves(Compiler *c, int v, int *out, int cap, int depth) {
+   (emit_strbuf_cond_value). A conditional has as many as it has arms, so
+   the list grows: an arm left off it was handed over as a copy. */
+typedef struct { int *v; int n, cap; } AStrLeaves;
+static void an_strbuf_alias_leaf_add(AStrLeaves *out, int id) {
+  if (out->n == out->cap) {
+    out->cap = out->cap ? out->cap * 2 : 16;
+    int *nv = (int *)realloc(out->v, sizeof(int) * (size_t)out->cap);
+    if (!nv) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+    out->v = nv;
+  }
+  out->v[out->n++] = id;
+}
+static void an_strbuf_alias_leaves(Compiler *c, int v, AStrLeaves *out, int depth) {
   const NodeTable *nt = c->nt;
-  if (v < 0 || cap <= 0 || depth > 8) return 0;
+  if (v < 0 || depth > 8) return;
   int one = an_strbuf_alias_source(c, v);
-  if (one >= 0) { out[0] = one; return 1; }
+  if (one >= 0) { an_strbuf_alias_leaf_add(out, one); return; }
   switch (nt_kind(nt, v)) {
     case NK_ParenthesesNode:
-      return an_strbuf_alias_leaves(c, nt_ref(nt, v, "body"), out, cap, depth + 1);
+      an_strbuf_alias_leaves(c, nt_ref(nt, v, "body"), out, depth + 1);
+      return;
     case NK_StatementsNode: {
       int n = 0; const int *b = nt_arr(nt, v, "body", &n);
-      return n > 0 ? an_strbuf_alias_leaves(c, b[n - 1], out, cap, depth + 1) : 0;
+      if (n > 0) an_strbuf_alias_leaves(c, b[n - 1], out, depth + 1);
+      return;
     }
     case NK_ElseNode:
-      return an_strbuf_alias_leaves(c, nt_ref(nt, v, "statements"), out, cap, depth + 1);
-    case NK_IfNode: case NK_UnlessNode: {
+      an_strbuf_alias_leaves(c, nt_ref(nt, v, "statements"), out, depth + 1);
+      return;
+    case NK_IfNode: case NK_UnlessNode:
       /* a missing arm is nil */
-      int sub = nt_ref(nt, v, nt_kind(nt, v) == NK_IfNode ? "subsequent" : "else_clause");
-      int n = an_strbuf_alias_leaves(c, nt_ref(nt, v, "statements"), out, cap, depth + 1);
-      return n + an_strbuf_alias_leaves(c, sub, out + n, cap - n, depth + 1);
-    }
-    case NK_OrNode: {
-      int n = an_strbuf_alias_leaves(c, nt_ref(nt, v, "left"), out, cap, depth + 1);
-      return n + an_strbuf_alias_leaves(c, nt_ref(nt, v, "right"), out + n, cap - n, depth + 1);
-    }
+      an_strbuf_alias_leaves(c, nt_ref(nt, v, "statements"), out, depth + 1);
+      an_strbuf_alias_leaves(c, nt_ref(nt, v, nt_kind(nt, v) == NK_IfNode ? "subsequent" : "else_clause"), out, depth + 1);
+      return;
+    case NK_OrNode:
+      an_strbuf_alias_leaves(c, nt_ref(nt, v, "left"), out, depth + 1);
+      an_strbuf_alias_leaves(c, nt_ref(nt, v, "right"), out, depth + 1);
+      return;
     /* `a && g` answers a only when a is nil or false, never a String */
     case NK_AndNode:
-      return an_strbuf_alias_leaves(c, nt_ref(nt, v, "right"), out, cap, depth + 1);
+      an_strbuf_alias_leaves(c, nt_ref(nt, v, "right"), out, depth + 1);
+      return;
     case NK_CaseNode: {
-      int nw = 0, n = 0; const int *whens = nt_arr(nt, v, "conditions", &nw);
+      int nw = 0; const int *whens = nt_arr(nt, v, "conditions", &nw);
       for (int w = 0; w < nw; w++)
-        n += an_strbuf_alias_leaves(c, nt_ref(nt, whens[w], "statements"), out + n, cap - n, depth + 1);
-      return n + an_strbuf_alias_leaves(c, nt_ref(nt, v, "else_clause"), out + n, cap - n, depth + 1);
+        an_strbuf_alias_leaves(c, nt_ref(nt, whens[w], "statements"), out, depth + 1);
+      an_strbuf_alias_leaves(c, nt_ref(nt, v, "else_clause"), out, depth + 1);
+      return;
     }
     default:
-      return 0;
+      return;
   }
 }
 /* The local read a multiple assignment's value hands target `t` (a
@@ -14545,15 +14559,16 @@ static void an_local_aliases_build(Compiler *c, ALocalAliases *t) {
   if (!t->head) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
   for (int i = 0; i < c->nscopes; i++) t->head[i] = -1;
   int cap = 0;
+  AStrLeaves lv = {0};
   for (int w = comp_kind_first(c, NK_LocalVariableWriteNode); w >= 0; w = comp_kind_next(c, w)) {
     if (nt_kind(nt, w) != NK_LocalVariableWriteNode) continue;
     Scope *ws = comp_scope_of(c, w);
     int si = ws ? (int)(ws - c->scopes) : -1;
     if (si < 0 || si >= c->nscopes) continue;
     const char *wn = nt_str(nt, w, "name");
-    int lv[16];
-    int nl = an_strbuf_alias_leaves(c, nt_ref(nt, w, "value"), lv, 16, 0);
-    for (int l = 0; l < nl; l++) an_local_aliases_add(t, &cap, si, wn, nt_str(nt, lv[l], "name"));
+    lv.n = 0;
+    an_strbuf_alias_leaves(c, nt_ref(nt, w, "value"), &lv, 0);
+    for (int l = 0; l < lv.n; l++) an_local_aliases_add(t, &cap, si, wn, nt_str(nt, lv.v[l], "name"));
   }
   /* `h ||= g`, `h &&= g` */
   for (int k = 0; k < 2; k++)
@@ -14563,10 +14578,11 @@ static void an_local_aliases_build(Compiler *c, ALocalAliases *t) {
       Scope *ws = comp_scope_of(c, w);
       int si = ws ? (int)(ws - c->scopes) : -1;
       if (si < 0 || si >= c->nscopes) continue;
-      int lv[16];
-      int nl = an_strbuf_alias_leaves(c, nt_ref(nt, w, "value"), lv, 16, 0);
-      for (int l = 0; l < nl; l++) an_local_aliases_add(t, &cap, si, nt_str(nt, w, "name"), nt_str(nt, lv[l], "name"));
+      lv.n = 0;
+      an_strbuf_alias_leaves(c, nt_ref(nt, w, "value"), &lv, 0);
+      for (int l = 0; l < lv.n; l++) an_local_aliases_add(t, &cap, si, nt_str(nt, w, "name"), nt_str(nt, lv.v[l], "name"));
     }
+  free(lv.v);
   /* `t, u = s, 1`: each target an element names */
   for (int mw = comp_kind_first(c, NK_MultiWriteNode); mw >= 0; mw = comp_kind_next(c, mw)) {
     if (nt_kind(nt, mw) != NK_MultiWriteNode) continue;
@@ -16162,6 +16178,7 @@ static int promote_local_alias_pair(Compiler *c, Scope *ws, const char *srcn, co
 static int promote_local_alias_pairs(Compiler *c) {
   const NodeTable *nt = c->nt;
   int changed = 0;
+  AStrLeaves lv = {0};
   /* Pure-alias pairs (`s2 = s1`): when either endpoint of the alias is
      in-place mutated, both share the one handle -- CRuby's mutable String
      objects -- regardless of which mutator (a bang-only alias set shares
@@ -16178,21 +16195,22 @@ static int promote_local_alias_pairs(Compiler *c) {
     /* the aliasing shapes: `s2 = s1`, the value-position append chain
        `s2 = (s1 << x)`, whose value IS the base object, and each arm of a
        conditional (an_strbuf_alias_leaves) */
-    int lv[16];
-    int nl = an_strbuf_alias_leaves(c, nt_ref(nt, w, "value"), lv, 16, 0);
-    for (int l = 0; l < nl; l++)
-      changed |= promote_local_alias_pair(c, comp_scope_of(c, w), nt_str(nt, lv[l], "name"), nt_str(nt, w, "name"));
+    lv.n = 0;
+    an_strbuf_alias_leaves(c, nt_ref(nt, w, "value"), &lv, 0);
+    for (int l = 0; l < lv.n; l++)
+      changed |= promote_local_alias_pair(c, comp_scope_of(c, w), nt_str(nt, lv.v[l], "name"), nt_str(nt, w, "name"));
   }
   /* `h ||= g` and `h &&= g` are `h = g` on the path that writes */
   for (int k = 0; k < 2; k++)
     for (int w = comp_kind_first(c, k ? NK_LocalVariableAndWriteNode : NK_LocalVariableOrWriteNode); w >= 0;
          w = comp_kind_next(c, w)) {
       if (nt_kind(nt, w) != (k ? NK_LocalVariableAndWriteNode : NK_LocalVariableOrWriteNode)) continue;
-      int lv[16];
-      int nl = an_strbuf_alias_leaves(c, nt_ref(nt, w, "value"), lv, 16, 0);
-      for (int l = 0; l < nl; l++)
-        changed |= promote_local_alias_pair(c, comp_scope_of(c, w), nt_str(nt, lv[l], "name"), nt_str(nt, w, "name"));
+      lv.n = 0;
+      an_strbuf_alias_leaves(c, nt_ref(nt, w, "value"), &lv, 0);
+      for (int l = 0; l < lv.n; l++)
+        changed |= promote_local_alias_pair(c, comp_scope_of(c, w), nt_str(nt, lv.v[l], "name"), nt_str(nt, w, "name"));
     }
+  free(lv.v);
   /* A nested target binds out of a boxed Array and would append to a copy. */
   for (int t = comp_kind_first(c, NK_LocalVariableTargetNode); t >= 0; t = comp_kind_next(c, t)) {
     const char *tn = nt_str(nt, t, "name");
