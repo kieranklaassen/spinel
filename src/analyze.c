@@ -6862,6 +6862,18 @@ static int desugar_class_literal_ctors(Compiler *c) {
       changed = 1;
       continue;
     }
+    /* And as the seed of a fold, which takes the accumulator's kind from the
+       receiver while the untyped seed was built boxed:
+       `[1, 2].inject(Array.new) { |m, v| m << v }` did not build. */
+    const char *fn = nt_str(nt, id, "name");
+    int fa = nt_ref(nt, id, "arguments"), fc = 0;
+    const int *fv = fa >= 0 ? nt_arr(nt, fa, "arguments", &fc) : NULL;
+    if (fn && fc >= 1 && (sp_streq(fn, "inject") || sp_streq(fn, "reduce") || sp_streq(fn, "sum")) &&
+        bare_array_new(c, fv[0])) {
+      nt_node_reset(nt, fv[0], "ArrayNode");
+      nt_node_set_arr(nt, fv[0], "elements", NULL, 0);
+      changed = 1;
+    }
     if (recv < 0 || nt_kind(nt, recv) != NK_ConstantReadNode) continue;
     if (nt_ref(nt, id, "block") >= 0) continue;
     const char *rn = nt_str(nt, recv, "name");
