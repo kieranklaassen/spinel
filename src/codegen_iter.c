@@ -2946,6 +2946,10 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
       if (g_ie_res_poly) buf_printf(b, "sp_RbVal _t%d = sp_box_nil(); ", nx_tmp);
       else if (nx_bt == TY_INT || nx_bt == TY_BOOL || nx_bt == TY_SYMBOL)
         buf_printf(b, "sp_int _t%d = SP_INT_NIL; ", nx_tmp);
+      /* a Float rides its own slot: in the sp_int one below `next 0.5` and
+         a tail of `x * 1.5` were stored as 0 and as the whole number */
+      else if (nx_bt == TY_FLOAT)
+        buf_printf(b, "sp_float _t%d = %s; ", nx_tmp, nil_value(TY_FLOAT));
       else if (proc_slot_is_ptr(nx_bt)) {
         emit_ctype(c, nx_bt, b); buf_printf(b, " _t%d = NULL; ", nx_tmp);
       }
