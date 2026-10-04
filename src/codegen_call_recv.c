@@ -3411,8 +3411,8 @@ static int emit_str_mutator_call(Compiler *c, int id, Buf *b, const NodeTable *n
        append. Unroll the chain onto the base, one write-back per link, and
        yield the base (each `<<` returns its receiver). */
     if (sp_streq(name, "<<") && argc == 1) {
-      int chain[64]; int cur;
-      int nchain = str_append_chain(c, recv, chain, &cur);
+      int *chain; int cur;
+      int nchain = str_append_chain(c, recv, &chain, &cur);
       const char *bty = nt_type(nt, cur);
       LocalVar *blv = (bty && sp_streq(bty, "LocalVariableReadNode"))
                       ? scope_local(comp_scope_of(c, cur), nt_str(nt, cur, "name")) : NULL;
@@ -3435,6 +3435,7 @@ static int emit_str_mutator_call(Compiler *c, int id, Buf *b, const NodeTable *n
           buf_puts(b, ");");
         }
         buf_printf(b, " sp_String_cstr(_t%d); })", tb9);
+        free(chain);
         { *out = 1; return 1; }
       }
       if (nchain > 0 && !(blv && blv->type == TY_STRBUF) && str_mut_var_recv(c, cur)) {
@@ -3450,8 +3451,10 @@ static int emit_str_mutator_call(Compiler *c, int id, Buf *b, const NodeTable *n
         }
         emit_expr(c, cur, b);
         buf_puts(b, "; })");
+        free(chain);
         { *out = 1; return 1; }
       }
+      free(chain);
     }
     if ((sp_streq(name, "concat") || sp_streq(name, "<<") ||
          sp_streq(name, "prepend")) && argc >= 1) {

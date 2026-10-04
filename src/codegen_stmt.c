@@ -14017,20 +14017,8 @@ static int str_mutate_append_bang_arms(Compiler *c, int id, Buf *b, int indent, 
      buffer. recv is emitted raw (the sp_String*), not via emit_expr (which
      would hand out a copy). */
   if ((is_append_concat(name)) && argc == 1) {
-    int chain[64]; int nchain = 0; int cur = id;
-    while (nchain < 64) {
-      cur = unwrap_parens(c, cur);
-      const char *cty = nt_type(nt, cur);
-      if (!cty || !sp_streq(cty, "CallNode")) break;
-      const char *cnm = nt_str(nt, cur, "name");
-      int crecv = nt_ref(nt, cur, "receiver");
-      if (!cnm || (!sp_streq(cnm, "<<") && !sp_streq(cnm, "concat")) || crecv < 0) break;
-      int cargs = nt_ref(nt, cur, "arguments");
-      int cac = 0; const int *cav = cargs >= 0 ? nt_arr(nt, cargs, "arguments", &cac) : NULL;
-      if (cac != 1) break;
-      chain[nchain++] = cav[0];
-      cur = crecv;
-    }
+    int *chain; int cur;
+    int nchain = strbuf_append_chain(c, id, &chain, &cur);
     char srefC[1024];
     if (nchain > 0 && strbuf_slot_ref(c, cur, srefC, sizeof srefC)) {
       for (int j = nchain - 1; j >= 0; j--) {
@@ -14060,8 +14048,10 @@ static int str_mutate_append_bang_arms(Compiler *c, int id, Buf *b, int indent, 
           emit_str_append_arg(c, arg, rt, b); }
         buf_puts(b, ");\n");
       }
+      free(chain);
       return 1;
     }
+    free(chain);
   }
 
   /* string append: s << x  ->  s = sp_str_concat(s, x) (value semantics).
@@ -14070,8 +14060,8 @@ static int str_mutate_append_bang_arms(Compiler *c, int id, Buf *b, int indent, 
      one reassignment per argument in left-to-right order. */
   if (rt == TY_STRING && sp_streq(name, "<<") && argc == 1) {
     /* walk down the receiver chain, collecting each `<<` argument */
-    int chain[64]; int cur;
-    int nchain = str_append_chain(c, id, chain, &cur);
+    int *chain; int cur;
+    int nchain = str_append_chain(c, id, &chain, &cur);
     const char *rty = nt_type(nt, cur);
     /* a chain from a guard-narrowed POLY local appends through the box, as
        the value form does (emit_call) */
@@ -14084,6 +14074,7 @@ static int str_mutate_append_bang_arms(Compiler *c, int id, Buf *b, int indent, 
         buf_puts(b, "(void)(");
         emit_call(c, id, b);
         buf_puts(b, ");\n");
+        free(chain);
         return 1;
       }
     }
@@ -14135,8 +14126,10 @@ static int str_mutate_append_bang_arms(Compiler *c, int id, Buf *b, int indent, 
         else emit_str_expr(c, arg, b);
         buf_puts(b, ");\n");
       }
+      free(chain);
       return 1;
     }
+    free(chain);
     /* `<<` onto a frozen string literal raises FrozenError */
     if (rty && sp_streq(rty, "StringNode")) {
       emit_indent(b, indent);

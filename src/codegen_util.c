@@ -3726,27 +3726,51 @@ int unwrap_parens(Compiler *c, int id) {
   return id;
 }
 
-/* Walk a String `<<` chain (`(s << a) << b`) down to its base, peeling
-   parens. Fills chain[] outermost-first with each link's argument (at most
-   64) and stores the base node in *base. Returns the link count. */
-int str_append_chain(Compiler *c, int recv, int *chain, int *base) {
+/* Walk a String append chain down to its base, peeling parens, collecting
+   each link's argument. A link is a one-argument `<<` on a String-typed
+   receiver; with any_recv it is a one-argument `<<` or `concat` on any
+   receiver (the caller tests the base). The chain has no length limit: a
+   walk that stopped at a fixed count handed back a base that is itself a
+   link, and the links above it appended to a temporary nothing reads. */
+static int append_chain_walk(Compiler *c, int recv, int any_recv, int **chain, int *base) {
   const NodeTable *nt = c->nt;
-  int nchain = 0; int cur = recv;
-  while (nchain < 64) {
+  int nchain = 0, cap = 0; int *links = NULL; int cur = recv;
+  for (;;) {
     cur = unwrap_parens(c, cur);
     const char *cty = nt_type(nt, cur);
     if (!cty || !sp_streq(cty, "CallNode")) break;
     const char *cnm = nt_str(nt, cur, "name");
     int crecv = nt_ref(nt, cur, "receiver");
-    if (!cnm || !sp_streq(cnm, "<<") || crecv < 0 || comp_ntype(c, crecv) != TY_STRING) break;
+    if (!cnm || crecv < 0) break;
+    if (!sp_streq(cnm, "<<") && !(any_recv && sp_streq(cnm, "concat"))) break;
+    if (!any_recv && comp_ntype(c, crecv) != TY_STRING) break;
     int cargs = nt_ref(nt, cur, "arguments");
     int cac = 0; const int *cav = cargs >= 0 ? nt_arr(nt, cargs, "arguments", &cac) : NULL;
     if (cac != 1) break;
-    chain[nchain++] = cav[0];
+    if (nchain == cap) {
+      cap = cap ? cap * 2 : 16;
+      links = realloc(links, (size_t)cap * sizeof *links);
+    }
+    links[nchain++] = cav[0];
     cur = crecv;
   }
+  *chain = links;
   *base = cur;
   return nchain;
+}
+
+/* Walk a String `<<` chain (`(s << a) << b`) down to its base, peeling
+   parens. Stores in *chain each link's argument, outermost first (an array
+   the caller frees, NULL for no link), and the base node in *base. Returns
+   the link count. */
+int str_append_chain(Compiler *c, int recv, int **chain, int *base) {
+  return append_chain_walk(c, recv, 0, chain, base);
+}
+
+/* The same walk for an in-place append onto a shared-mutable String: `<<`
+   and `concat` links, whatever each receiver is typed. */
+int strbuf_append_chain(Compiler *c, int recv, int **chain, int *base) {
+  return append_chain_walk(c, recv, 1, chain, base);
 }
 
 /* 1 when the receiver is a range whose begin endpoint is statically a Float

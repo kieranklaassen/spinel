@@ -14181,7 +14181,10 @@ static const char *an_reader_ivar_of(Compiler *c, int node, int *defc,
 static int an_strbuf_alias_source(Compiler *c, int v) {
   const NodeTable *nt = c->nt;
   int via_self = 0;
-  for (int depth = 0; v >= 0 && depth < 64; depth++) {
+  /* no depth limit: every step goes down to a child, and a chain is as
+     long as the program writes it (at 64 links `t = s << a << ...` stopped
+     naming s, and t became a copy) */
+  while (v >= 0) {
     const char *vt = nt_type(nt, v);
     if (!vt) return -1;
     if (sp_streq(vt, "ParenthesesNode")) {
