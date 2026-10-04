@@ -7381,16 +7381,26 @@ else {
    line is flushed at the statement boundary, capturing the value ABOVE that
    in-sequence assignment (`a = {...}; foo(a)` as an operand passed a stale `a`).
    That matches the g_argov skip in emit_args_filled. A param default like `{}`
-   (provided < 0) is a fresh allocation and does want the root -- #1445. */
+   (provided < 0) is a fresh allocation and does want the root -- #1445.
+
+   A bare read into a parameter that is the shared handle is the exception.
+   Unless it reads a handle, the binder wraps the String in a handle of its
+   own (emit_arg_or_default_fill): the argument is then an allocation as
+   fresh as a call's result, held by nothing where it is read. It is hoisted
+   as a call in its place would be. nil binds the NULL handle. */
 int arg_wants_root(Compiler *c, TyKind pt, int provided) {
   if (pt != TY_POLY && !needs_root(pt)) return 0;
   if (provided < 0) return 1;
   const char *aty = nt_type(c->nt, provided);
-  return !(aty && (sp_streq(aty, "LocalVariableReadNode") ||
-                   sp_streq(aty, "InstanceVariableReadNode") ||
-                   sp_streq(aty, "ConstantReadNode") ||
-                   sp_streq(aty, "SelfNode") || sp_streq(aty, "NilNode") ||
-                   sp_streq(aty, "StringNode")));
+  if (!(aty && (sp_streq(aty, "LocalVariableReadNode") ||
+                sp_streq(aty, "InstanceVariableReadNode") ||
+                sp_streq(aty, "ConstantReadNode") ||
+                sp_streq(aty, "SelfNode") || sp_streq(aty, "NilNode") ||
+                sp_streq(aty, "StringNode"))))
+    return 1;
+  if (pt != TY_STRBUF || sp_streq(aty, "NilNode") || comp_ntype(c, provided) == TY_NIL) return 0;
+  char sref[192];
+  return !strbuf_slot_ref(c, provided, sref, sizeof sref);
 }
 
 /* Evaluate the already-rendered argument text `expr` into a g_pre temp of type
