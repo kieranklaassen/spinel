@@ -8004,13 +8004,73 @@ static int value_rebound(Compiler *c, const int *vals, int nv, int i, const int 
   return 0;
 }
 
+/* Whether the subtree at `id` assigns a local at all, whatever its name
+   (subtree_writes_local asks one name). */
+static int subtree_writes_a_local(const NodeTable *nt, int id) {
+  if (id < 0) return 0;
+  const char *ty = nt_type(nt, id);
+  if (!ty) return 0;
+  if (!strncmp(ty, "LocalVariable", 13) && (strstr(ty, "Write") || strstr(ty, "Target"))) return 1;
+  for (int i = 0; i < nt_num_refs(nt, id); i++)
+    if (subtree_writes_a_local(nt, nt_ref_at(nt, id, i))) return 1;
+  for (int i = 0; i < nt_num_arrs(nt, id); i++) {
+    int n = 0; const int *ids = nt_arr_at(nt, id, i, &n);
+    for (int j = 0; j < n; j++) if (subtree_writes_a_local(nt, ids[j])) return 1;
+  }
+  return 0;
+}
+
+/* later_read_rebound_by's walk of one later value `x`. `writes`: `by`
+   assigns some local; `runs`: it may call a proc, which rebinds a cell a
+   proc assigns (read_rebound_by's rule). */
+static int later_read_walk(Compiler *c, int x, int by, int writes, int runs) {
+  const NodeTable *nt = c->nt;
+  if (x < 0) return 0;
+  if (nt_kind(nt, x) == NK_LocalVariableReadNode) {
+    const char *nm = nt_str(nt, x, "name");
+    if (!nm || arg_ran_first(x, 0)) return 0;
+    if (writes && subtree_writes_local(c, by, nm)) return 1;
+    if (!runs) return 0;
+    LocalVar *lv = scope_local(comp_scope_of(c, x), nm);
+    return lv && lv->is_cell && lv->proc_rebinds;
+  }
+  for (int i = 0; i < nt_num_refs(nt, x); i++)
+    if (later_read_walk(c, nt_ref_at(nt, x, i), by, writes, runs)) return 1;
+  for (int i = 0; i < nt_num_arrs(nt, x); i++) {
+    int n = 0; const int *ids = nt_arr_at(nt, x, i, &n);
+    for (int j = 0; j < n; j++) if (later_read_walk(c, ids[j], by, writes, runs)) return 1;
+  }
+  return 0;
+}
+
+/* See codegen_internal.h. */
+int later_read_rebound_by(Compiler *c, const int *later, int n, int by, int procs) {
+  if (n < 1) return 0;
+  /* most values assign no local and call no proc, and then no later value
+     is walked for them */
+  int writes = subtree_writes_a_local(c->nt, by);
+  int runs = procs && subtree_may_run_proc(c, by);
+  if (!writes && !runs) return 0;
+  for (int j = 0; j < n; j++) if (later_read_walk(c, later[j], by, writes, runs)) return 1;
+  return 0;
+}
+
+/* Can the i-th of `vals` rebind a local a value after it, or a node of
+   `after`, reads? The values a binding leaves in place are siblings of one
+   C argument list, whose order C leaves open, and gcc read the later one
+   first: `f((n = 5; 1), n)` bound the 3. */
+static int value_rebinds_later(Compiler *c, const int *vals, int nv, int i, const int *after, int nafter) {
+  return later_read_rebound_by(c, vals + i + 1, nv - i - 1, vals[i], 1) ||
+         later_read_rebound_by(c, after, nafter, vals[i], 1);
+}
+
 /* See codegen_internal.h. */
 int args_order_matters(Compiler *c, const int *argv, int argc, const int *after, int nafter) {
   int nv = 0, eff = 0, matters = 0; char *ds = NULL;
   int *vals = source_values(c->nt, argv, argc, &nv, &ds);
   for (int i = 0; i < nv && !matters; i++) {
     eff += subtree_has_side_effect(c, vals[i]);
-    matters = eff > 1 || value_rebound(c, vals, nv, i, after, nafter);
+    matters = eff > 1 || value_rebound(c, vals, nv, i, after, nafter) || value_rebinds_later(c, vals, nv, i, NULL, 0);
   }
   free(vals); free(ds);
   return matters;
@@ -8065,7 +8125,7 @@ int emit_args_before_binding(Compiler *c, Scope *m, const int *argv, int argc, B
   int *vals = source_values(nt, argv, argc, &nv, &ds);
   for (int i = 0; i < nv; i++) {
     ev += subtree_has_side_effect(c, vals[i]);
-    if (value_rebound(c, vals, nv, i, dfl, nd)) run = 1;
+    if (value_rebound(c, vals, nv, i, dfl, nd) || value_rebinds_later(c, vals, nv, i, NULL, 0)) run = 1;
     for (int j = 0; j < nd && !run; j++) run = default_rebound_by(c, dfl[j], vals[i]);
   }
   for (int i = 0; i < nd; i++) ed += subtree_has_side_effect(c, dfl[i]);
@@ -8080,8 +8140,11 @@ void emit_args_before(Compiler *c, const int *argv, int argc, const int *after, 
   int nv = 0; char *ds = NULL;
   int *vals = source_values(c->nt, argv, argc, &nv, &ds);
   Buf *sv_pre = g_pre; g_pre = b;
+  /* a value that rebinds a later read runs here whatever it is: a `for`
+     that assigns its index has no effect emit_arg_first counts */
   for (int i = 0; i < nv; i++)
-    emit_arg_first(c, vals[i], value_rebound(c, vals, nv, i, after, nafter), b);
+    emit_arg_first(c, vals[i], value_rebound(c, vals, nv, i, after, nafter) ||
+                               value_rebinds_later(c, vals, nv, i, after, nafter), b);
   g_pre = sv_pre;
   free(vals); free(ds);
 }
@@ -8835,7 +8898,7 @@ void emit_args_run(Compiler *c, const int *argv, int argc) {
   int *vals = source_values(c->nt, argv, argc, &nv, &ds);
   for (int i = 0; i < nv; i++) {
     int v = vals[i];
-    emit_arg_first(c, v, value_rebound(c, vals, nv, i, NULL, 0), g_pre);
+    emit_arg_first(c, v, value_rebound(c, vals, nv, i, NULL, 0) || value_rebinds_later(c, vals, nv, i, NULL, 0), g_pre);
     if (!ds[i]) continue;
     TyKind t = comp_ntype(c, v);
     if (t == TY_POLY) {
