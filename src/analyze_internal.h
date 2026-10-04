@@ -33,9 +33,10 @@ int ffi_find_writer(Compiler *c, const char *mod, const char *name);
 
 
 /* Re-entrancy guard for yield_value_type: prevents infinite recursion when a
-   recursive method forwards its block to itself (e.g. countdown { blk.call }). */
-#define MAX_YVT_DEPTH 32
-extern int g_yvt_mi[MAX_YVT_DEPTH];
+   recursive method forwards its block to itself (e.g. countdown { blk.call }).
+   The methods being answered, outermost first; it grows, as a block forwarded
+   through N methods is answered N deep. */
+extern int *g_yvt_mi;
 extern int g_yvt_depth;
 
 /* Temporary class override for instance_eval block body inference.
