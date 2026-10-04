@@ -666,6 +666,14 @@ spinel: 1 refusal, nothing written
 == test/reject/string_fiber_method_param_arg.rb [promote] rc=1
 spinel: a String is passed to a block's parameter `t` through `Fiber#resume`, which the proc appends to: this call hands the proc a copy, so the append would not reach the caller's String (a String is not yet shared by reference through `Fiber#resume`). Return the String from the proc and assign it, or append to it in the caller.
 spinel: 1 refusal, nothing written
+== test/reject/string_for_variable_alias_dropped_append.rb [default] rc=1
+spinel: a String is not yet shared by reference through the variable of a `for` over an Array into an in-place `<<`
+== test/reject/string_for_variable_alias_dropped_append.rb [promote] rc=1
+spinel: a String is not yet shared by reference through the variable of a `for` over an Array into an in-place `<<`
+== test/reject/string_for_variable_dropped_append.rb [default] rc=1
+spinel: a String is not yet shared by reference through the variable of a `for` over an Array into an in-place `<<`
+== test/reject/string_for_variable_dropped_append.rb [promote] rc=1
+spinel: a String is not yet shared by reference through the variable of a `for` over an Array into an in-place `<<`
 == test/reject/string_forward_poly_chain.rb [default] rc=1
 spinel: a String is passed to `m`'s parameter `p` through a parameter it hands on, which the method appends to: this call hands the method a copy, so the append would not reach the caller's String (a String is not yet shared by reference from a global variable). Return the String from the method and assign it, or append to it in the caller.
 spinel: 1 refusal, nothing written
@@ -836,6 +844,14 @@ spinel: 1 refusal, nothing written
 == test/reject/string_lent_ivar_rebound.rb [promote] rc=1
 spinel: `@x` is passed to gri's parameter `v`, which appends to it, and `@x` is assigned at line 0, where the assignment can run during the call: the append would then reach the newly assigned String instead of the one passed (a String held by a global, a class variable, or a top-level or class-level instance variable is not yet shared by reference). Pass a local and assign it back after the call.
 spinel: 1 refusal, nothing written
+== test/reject/string_local_from_array_read_dropped_append.rb [default] rc=1
+spinel: a String is not yet shared by reference through a local written from an Array's `max_by` into an in-place `<<`
+== test/reject/string_local_from_array_read_dropped_append.rb [promote] rc=1
+spinel: a String is not yet shared by reference through a local written from an Array's `max_by` into an in-place `<<`
+== test/reject/string_masgn_target_dropped_bang.rb [default] rc=1
+spinel: a String is not yet shared by reference through a multiple assignment from an Array into an in-place `upcase!`
+== test/reject/string_masgn_target_dropped_bang.rb [promote] rc=1
+spinel: a String is not yet shared by reference through a multiple assignment from an Array into an in-place `upcase!`
 == test/reject/string_mutator_jump_arm.rb [default] rc=1
 spinel: unsupported expression: node N (ReturnNode)
 spinel: 1 refusal, nothing written

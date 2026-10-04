@@ -28869,11 +28869,14 @@ static int an_program_defines_method(Compiler *c, const char *name) {
 /* Is the value of statement `top` thrown away? an_value_dropped reads only
    the name of a block's call, and a method of that name the program defines
    (a user `each`, `step`, `loop`) can answer the block's value, as
-   cow_user_block_value knows. */
+   cow_user_block_value knows. The last statement of a `for` body is dropped
+   too: the loop answers its collection. */
 static int an_statement_value_dropped(Compiler *c, const int *parent, int top) {
   const NodeTable *nt = c->nt;
-  if (!an_value_dropped(nt, parent, top)) return 0;
   int st = parent[top], sn = 0;
+  if (!an_value_dropped(nt, parent, top))
+    return st >= 0 && nt_kind(nt, st) == NK_StatementsNode && parent[st] >= 0 &&
+           nt_kind(nt, parent[st]) == NK_ForNode && nt_ref(nt, parent[st], "statements") == st;
   const int *sb = nt_arr(nt, st, "body", &sn);
   int blk = sn > 0 && sb[sn - 1] == top ? parent[st] : -1;
   if (blk < 0 || nt_kind(nt, blk) != NK_BlockNode) return 1;
@@ -28881,33 +28884,131 @@ static int an_statement_value_dropped(Compiler *c, const int *parent, int top) {
   return !(bn && an_program_defines_method(c, bn));
 }
 
-/* A String mutator whose receiver is a String a call took out of an Array or
-   a Hash, in a statement whose value is dropped (`a.min_by { } << x`,
-   `WORDS[0].upcase!`): the mutator lowerings act in place only on a
-   receiver they can name or on a shared handle, so the change went to a
-   copy that nothing read and the container printed as it was, with nothing
-   said. The change is all such a statement is for, so it is refused. Where
-   the call's value is used (`t = a.find { } << x`) the value is right and
-   only the container's element is not; that is left as it was, and so is a
-   mutator with a block, which runs for what the block does as well. setbyte
-   writes the byte where the String is, so it reaches the container through
-   the copy. Runs once sharing analysis settles: an element it shares is a
-   handle here, not a String. */
+/* The reads of every local, chained by scope and name as its writes are
+   (comp_lvw_first_sc), and built at the first local the refusal below asks
+   about: asking the node table again for each would make the pass quadratic
+   in the program. */
+typedef struct { int *head, *next, nb; } AnLocalReads;
+static unsigned an_local_reads_bucket(const AnLocalReads *ix, int si, const char *nm) {
+  return (sp_strhash(nm) ^ ((unsigned)si * 2654435761u)) & (unsigned)(ix->nb - 1);
+}
+static int an_local_reads_build(Compiler *c, AnLocalReads *ix) {
+  const NodeTable *nt = c->nt;
+  int n = nt->count, nb = 16;
+  if (ix->head) return 1;
+  while (nb < n && nb < (1 << 22)) nb <<= 1;
+  ix->head = malloc((size_t)nb * sizeof(int));
+  ix->next = malloc((size_t)(n > 0 ? n : 1) * sizeof(int));
+  if (!ix->head || !ix->next) { free(ix->head); free(ix->next); ix->head = ix->next = NULL; return 0; }
+  ix->nb = nb;
+  for (int b = 0; b < nb; b++) ix->head[b] = -1;
+  NT_FOREACH_KIND(nt, NK_LocalVariableReadNode, q) {
+    const char *qn = nt_str(nt, q, "name");
+    if (!qn) continue;
+    unsigned b = an_local_reads_bucket(ix, (int)(comp_scope_of(c, q) - c->scopes), qn);
+    ix->next[q] = ix->head[b];
+    ix->head[b] = q;
+  }
+  return 1;
+}
+
+/* The read `rd` of a plain String local: is the local bound once, to a
+   String out of an Array or a Hash -- written from a container read (or from
+   a local that is), a target of a multiple assignment from an Array, or the
+   variable of a `for` over one -- and is `rd` its only read? `how` then says
+   which binding. A parameter, a local read anywhere else, or one written
+   twice answers 0: its String may be read after the change, or be another
+   one. */
+static int an_local_string_from_container(Compiler *c, int rd, const int *parent, AnLocalReads *ix,
+                                          int depth, char *how, size_t cap) {
+  const NodeTable *nt = c->nt;
+  const char *x = nt_str(nt, rd, "name");
+  Scope *sc = comp_scope_of(c, rd);
+  int si = (int)(sc - c->scopes);
+  LocalVar *lv = x ? scope_local(sc, x) : NULL;
+  /* a buffer of the local's own (TY_STRBUF, not shared) is as much a copy */
+  if (!lv || lv->is_param || (lv->type != TY_STRING && lv->type != TY_STRBUF) || lv->str_shared || depth > 4) return 0;
+  int w = -1;
+  for (int k = comp_lvw_first_sc(c, si, x); k >= 0; k = comp_lvw_next_sc(c, k)) {
+    if (comp_scope_of(c, k) != sc || !sp_streq(nt_str(nt, k, "name"), x)) continue;
+    if (w >= 0) return 0;
+    w = k;
+  }
+  if (w < 0) return 0;
+  if (nt_kind(nt, w) == NK_LocalVariableWriteNode) {
+    int v = an_unparen(nt, nt_ref(nt, w, "value"));
+    if (v < 0) return 0;
+    if (nt_kind(nt, v) == NK_LocalVariableReadNode) {
+      if (!an_local_string_from_container(c, v, parent, ix, depth + 1, how, cap)) return 0;
+    }
+    else {
+      if (nt_kind(nt, v) != NK_CallNode || comp_ntype(c, v) != TY_STRING ||
+          c->strbuf_box[v] || c->strbuf_handle_demand[v]) return 0;
+      char nb[64];
+      int r = -1;
+      const char *nm = an_container_string_read(c, v, &r, nb, sizeof nb);
+      if (!nm) return 0;
+      snprintf(how, cap, "a local written from %s `%s`", ty_is_hash(comp_ntype(c, r)) ? "a Hash's" : "an Array's", nm);
+    }
+  }
+  else if (nt_kind(nt, w) == NK_LocalVariableTargetNode) {
+    int p = parent[w];
+    if (p >= 0 && nt_kind(nt, p) == NK_ForNode && nt_ref(nt, p, "index") == w) {
+      TyKind ct = comp_ntype(c, nt_ref(nt, p, "collection"));
+      if (!ty_is_array(ct) && ct != TY_POLY_ARRAY) return 0;
+      snprintf(how, cap, "the variable of a `for` over an Array");
+    }
+    else if (p >= 0 && nt_kind(nt, p) == NK_MultiWriteNode) {
+      TyKind vt = comp_ntype(c, nt_ref(nt, p, "value"));
+      int vk = nt_kind(nt, an_unparen(nt, nt_ref(nt, p, "value")));
+      if ((!ty_is_array(vt) && vt != TY_POLY_ARRAY) || vk == NK_ArrayNode) return 0;
+      snprintf(how, cap, "a multiple assignment from an Array");
+    }
+    else return 0;
+  }
+  else return 0;
+  /* last, since it is the one question that walks a chain: no other read */
+  if (!an_local_reads_build(c, ix)) return 0;
+  for (int q = ix->head[an_local_reads_bucket(ix, si, x)]; q >= 0; q = ix->next[q])
+    if (q != rd && comp_scope_of(c, q) == sc && sp_streq(nt_str(nt, q, "name"), x)) return 0;
+  return 1;
+}
+
+/* A String mutator whose receiver is a String out of an Array or a Hash that
+   the sharing analysis did not make a handle, in a statement whose value is
+   dropped: `a.min_by { } << x`, `WORDS[0].upcase!`, and through a local
+   nothing else reads, `t = a.min; t << x`, `x, y = a; x << y`,
+   `for s in a; s << x; end`. The mutator lowerings act in place only on a
+   shared handle; on a plain String they reassign the receiver, so the change
+   went to a copy that nothing read and the container printed as it was, with
+   nothing said. The change is all such a statement is for, so it is refused.
+   Where the changed String is read (`t = a.find { } << x`) its value is
+   right and only the container's element is not; that is left as it was,
+   and so is a mutator with a block, which runs for what the block does as
+   well. setbyte writes the byte where the String is, so it reaches the
+   container through the copy. Runs once sharing analysis settles: an
+   element it shares is a handle here, not a String. */
 static void refuse_dropped_container_string_change(Compiler *c) {
   const NodeTable *nt = c->nt;
   int *parent = NULL;
+  AnLocalReads ix = { NULL, NULL, 0 };
   NT_FOREACH_KIND(nt, NK_CallNode, u) {
     const char *un = nt_str(nt, u, "name");
     int b = nt_ref(nt, u, "receiver");
     if (!un || b < 0 || !sp_str_mutator(un, SP_MUT_LOCAL) || sp_streq(un, "setbyte")) continue;
     if (nt_ref(nt, u, "block") >= 0) continue;
-    if (nt_kind(nt, b) != NK_CallNode || comp_ntype(c, b) != TY_STRING) continue;
+    NodeKind bk = nt_kind(nt, b);
+    if ((bk != NK_CallNode && bk != NK_LocalVariableReadNode) || comp_ntype(c, b) != TY_STRING) continue;
     if (c->strbuf_box[b] || c->strbuf_handle_demand[b]) continue;
-    char nb[64];
-    int r = -1;
-    const char *how = an_container_string_read(c, b, &r, nb, sizeof nb);
-    if (!how) continue;
-    if (!parent && !(parent = an_parent_map(nt))) return;
+    char how[128];
+    if (bk == NK_CallNode) {
+      char nb[64];
+      int r = -1;
+      const char *nm = an_container_string_read(c, b, &r, nb, sizeof nb);
+      if (!nm) continue;
+      snprintf(how, sizeof how, "%s `%s`", ty_is_hash(comp_ntype(c, r)) ? "a Hash's" : "an Array's", nm);
+    }
+    if (!parent && !(parent = an_parent_map(nt))) break;
     /* `x.m << a << b`: the chain's value is its last call's, and a
        parenthesized call's is the parentheses' */
     int top = u;
@@ -28925,13 +29026,13 @@ static void refuse_dropped_container_string_change(Compiler *c) {
       break;
     }
     if (!an_statement_value_dropped(c, parent, top)) continue;
+    if (bk == NK_LocalVariableReadNode && !an_local_string_from_container(c, b, parent, &ix, 0, how, sizeof how)) continue;
     char msg[256];
-    snprintf(msg, sizeof msg, "a String is not yet shared by reference through %s `%s` into an in-place `%s`",
-             ty_is_hash(comp_ntype(c, r)) ? "a Hash's" : "an Array's", how, un);
-    free(parent);
+    snprintf(msg, sizeof msg, "a String is not yet shared by reference through %s into an in-place `%s`", how, un);
+    free(parent); free(ix.head); free(ix.next);
     unsupported_feature(c, u, msg);
   }
-  free(parent);
+  free(parent); free(ix.head); free(ix.next);
 }
 
 static void poly_ivar_set_reference(Compiler *c, int id, int recv) {
