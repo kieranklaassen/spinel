@@ -2423,6 +2423,38 @@ void sb_reader_shim_close(Compiler *c, int recv, const SbReaderSave *sv) {
   view_unbind(g_n_argov - 1);
   for (int k = sv->ntok - 1; k >= 0; k--) view_pop(c, sv->tok + k);
 }
+/* Open the shim over a shared-mutable String LOCAL `recv`: the handle's text
+   goes to sref, and until sb_local_shim_close the local reads and is assigned
+   as the plain String shadow `lv__sbT`. A local a proc captures lives in a
+   cell, and a cell is reached ahead of the rename map, so the cell and the
+   capture are lifted along with the handle type: the shadow is a C local of
+   the function the shim is emitted in, on either side of the proc. Answers T,
+   or 0 when `recv` is no such local. */
+int sb_local_shim_open(Compiler *c, int recv, char *sref, size_t cap, SbLocalSave *sv) {
+  const char *sbn = strbuf_local_name(c, recv);
+  if (!sbn || g_nren >= MAX_RENAME) return 0;
+  if (!strbuf_slot_ref(c, recv, sref, cap)) return 0;
+  int tH = ++g_tmp;
+  sv->lv = scope_local(comp_scope_of(c, recv), sbn);
+  sv->ty = sv->lv->type; sv->cell = sv->lv->is_cell;
+  sv->lv->type = TY_STRING; sv->lv->is_cell = 0;
+  sv->caps = g_cap_struct ? g_cap_names : NULL; sv->cap_at = -1;
+  for (int i = 0; sv->caps && i < sv->caps->n; i++) {
+    if (!sp_streq(sv->caps->v[i], sbn)) continue;
+    sv->cap_at = i; sv->cap_nm = sv->caps->v[i];
+    sv->caps->v[i] = "";
+    break;
+  }
+  snprintf(g_ren_from[g_nren], sizeof g_ren_from[0], "%s", sbn);
+  snprintf(g_ren_to[g_nren], sizeof g_ren_to[0], "_sb%d", tH);
+  g_nren++;
+  return tH;
+}
+void sb_local_shim_close(const SbLocalSave *sv) {
+  g_nren--;
+  if (sv->cap_at >= 0) sv->caps->v[sv->cap_at] = sv->cap_nm;
+  sv->lv->type = sv->ty; sv->lv->is_cell = sv->cell;
+}
 const char *g_sb_iv_name = NULL;
 int         g_sb_iv_cid  = -1;
 char        g_sb_iv_repl[64];

@@ -475,6 +475,11 @@ extern int g_re_count, g_re_cap;
 
 /* A set of local names (borrowed pointers into the node table). */
 typedef struct { const char **v; int n, cap; } NameSet;
+/* what sb_local_shim_open lifted: the local's type and cell as they were, and
+   its place in the capture list of the proc body being emitted, if any */
+typedef struct { LocalVar *lv; TyKind ty; int cell; NameSet *caps; int cap_at; const char *cap_nm; } SbLocalSave;
+int sb_local_shim_open(Compiler *c, int recv, char *sref, size_t cap, SbLocalSave *sv);
+void sb_local_shim_close(const SbLocalSave *sv);
 /* While emitting a capturing proc's body: the cap struct's C type name and the
    set of captured names, so a read/write of a captured var routes to the cell
    held in `_cap` instead of a (non-existent) local. NULL outside such a body. */
