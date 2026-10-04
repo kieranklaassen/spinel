@@ -6,24 +6,23 @@
 #include "call_plan.h"
 #include "repr.h"
 
+static int emit_blk_value_via_next(Compiler *c, int blk, TyKind vt, Buf *b);
+
 /* The value of the block a `fetch` or `delete` runs when it finds nothing, as
    `({ bind; leading statements; setup; value; })`. `bind` sets the block's
    parameter to what the call was given, and has to run before the block's own
    expression: an array or hash literal in it builds its elements in `setup`,
    which lands in g_pre, ahead of the whole call, unless it is captured here
    -- there the parameter was still unset, so `{ |k| [k] }` held nil.
-   `lead_always` 0 (`delete`) leaves the leading statements out of a block
-   that has a `next`: spliced here, that `next` would be a C `continue`, which
-   is not a loop's. */
+   A block `blk` with a `next` of its own answers through a slot instead
+   (emit_blk_value_via_next): spliced here, that `next` would be a C
+   `continue`, which is not a loop's, or is the loop's the call stands in. */
 static void emit_fallback_block_value(Compiler *c, const int *bb, int bn, const char *bind,
-                                      int boxed, const char *empty, int lead_always, Buf *b) {
+                                      int boxed, const char *empty, int blk, Buf *b) {
   buf_puts(b, "({ ");
   if (bind) buf_puts(b, bind);
-  int lead = 1;
-  if (!lead_always)
-    for (int k = 0; k < bn; k++) if (subtree_has_own_next(c->nt, bb[k])) lead = 0;
-  if (lead)
-    for (int k = 0; k < bn - 1; k++) emit_stmt(c, bb[k], b, 0);
+  if (boxed && emit_blk_value_via_next(c, blk, TY_POLY, b)) { buf_puts(b, "; })"); return; }
+  for (int k = 0; k < bn - 1; k++) emit_stmt(c, bb[k], b, 0);
   Buf pre, val;
   memset(&pre, 0, sizeof pre); memset(&val, 0, sizeof val);
   if (bn > 0) emit_split_pre(c, bb[bn - 1], boxed ? emit_boxed : emit_expr, &pre, &val);
@@ -666,7 +665,6 @@ static void emit_fetch_blk_param(Compiler *c, int id, int blk, TyKind kt, int tk
   else buf_printf(b, "lv_%s = _t%d; ", rename_local(fp0), tk);
 }
 
-static int emit_blk_value_via_next(Compiler *c, int blk, TyKind vt, Buf *b);
 static void emit_blk_value_as(Compiler *c, int blk, TyKind vt, Buf *b);
 
 /* An operand whose evaluation cannot allocate: a local's read or a scalar
@@ -2042,7 +2040,7 @@ else {
         Buf nbind; memset(&nbind, 0, sizeof nbind);
         if (dp0 && block_param_is_boxed(c, dblk, id, dp0)) { buf_printf(&nbind, "lv_%s = ", rename_local(dp0)); emit_boxed(c, argv[0], &nbind); buf_puts(&nbind, "; "); }
         else { buf_puts(b, "(void)("); emit_expr(c, argv[0], b); buf_puts(b, "); "); }
-        emit_fallback_block_value(c, dbb, dbn, nbind.p, 1, "sp_box_nil()", 0, b);
+        emit_fallback_block_value(c, dbb, dbn, nbind.p, 1, "sp_box_nil()", dblk, b);
         free(nbind.p);
         buf_puts(b, "; })");
         { *out = 1; return 1; }
@@ -2098,7 +2096,7 @@ else {
           emit_expr(c, argv[0], b);
           buf_printf(b, "); _t%d ? sp_box_str(_t%d) : ", tdr, tdr);
         }
-        emit_fallback_block_value(c, dbb, dbn, dpbind.p, 1, "sp_box_nil()", 0, b);
+        emit_fallback_block_value(c, dbb, dbn, dpbind.p, 1, "sp_box_nil()", dblk, b);
         free(dpbind.p);
         buf_puts(b, "; })");
         if (held[0]) buf_puts(b, "; })");
@@ -2621,7 +2619,7 @@ static int emit_typed_array_call(Compiler *c, int id, Buf *b, const NodeTable *n
         buf_printf(b, "sp_PolyArray_push(_t%d, ", to);
         /* Build the fallback value after binding the missing index; its
            literal setup must stay inside this out-of-range branch. */
-        emit_fallback_block_value(c, fbb, fbn, bind.p, 1, "sp_box_nil()", 1, b);
+        emit_fallback_block_value(c, fbb, fbn, bind.p, 1, "sp_box_nil()", fblk, b);
         free(bind.p);
         buf_puts(b, "); }\nelse { ");
         { char getx[96]; snprintf(getx, sizeof getx, "sp_%sArray_get(_t%d, _ix)", an, tr);
@@ -2987,7 +2985,7 @@ static int emit_typed_array_call(Compiler *c, int id, Buf *b, const NodeTable *n
         const char *pp0 = block_param_name(c, dblk, 0);
         if (pp0 && block_param_is_boxed(c, dblk, id, pp0)) buf_printf(&pbind, "lv_%s = _t%d; ", rename_local(pp0), tdn);
         buf_printf(b, " _t%d.tag != SP_TAG_NIL ? _t%d : ", tdr, tdr);
-        emit_fallback_block_value(c, dbb, dbn, pbind.p, 1, "sp_box_nil()", 0, b);
+        emit_fallback_block_value(c, dbb, dbn, pbind.p, 1, "sp_box_nil()", dblk, b);
         free(pbind.p);
         buf_puts(b, "; })");
         if (ch) buf_puts(b, "; })");
@@ -5072,7 +5070,7 @@ else {
           }
           emit_fallback_block_value(c, bb, bn, fbind.p,
                                     (vt == TY_POLY || mismatch) && bvt != TY_POLY,
-                                    (vt == TY_POLY || mismatch) ? "sp_box_nil()" : default_value_from_compiler(c, vt), 1, b);
+                                    (vt == TY_POLY || mismatch) ? "sp_box_nil()" : default_value_from_compiler(c, vt), blk, b);
           free(fbind.p);
           buf_puts(b, "; })");
           return 1;
@@ -5713,7 +5711,7 @@ else {
           buf_puts(&dbind, "; ");
         }
         buf_printf(b, " _t%d = ", tvv);
-        emit_fallback_block_value(c, hdv, hdn, dbind.p, 1, "sp_box_nil()", 0, b);
+        emit_fallback_block_value(c, hdv, hdn, dbind.p, 1, "sp_box_nil()", hd_blk, b);
         free(dbind.p);
         buf_puts(b, "; }");
         buf_printf(b, " _t%d; })", tvv);
