@@ -440,10 +440,11 @@ module ProbeCommon
 
   # A refusal or C error in words that do not change as a case shrinks, or
   # as it shares a program with others: a name the compiler numbers (`p1`,
-  # and `p1__bp72` for the same parameter in a larger program) is `#`.
+  # and `p1__bp72` for the same parameter in a larger program) is `#`, and so
+  # is a class a generator numbers, in a C name (`sp_S12_new`).
   def error_kind(detail)
     detail.sub(/\Aspinel: /, "").sub(LOCATION, "").gsub(/node \d+/, "node N").gsub(/\b[a-z_]\w*\d\b/, "#")
-          .sub(/ \(\w+Node.*\z/, "").sub(/ recv=.*\z/, "")[0, 100]
+          .gsub(/(?<=_)[A-Z]+\d+(?=_)/, "#").sub(/ \(\w+Node.*\z/, "").sub(/ recv=.*\z/, "")[0, 100]
   end
 
   class Probe
@@ -453,6 +454,9 @@ module ProbeCommon
     # on purpose, each
     #   { doc: "limitations.md, \"<section>\": <what it says>",
     #     when: ->(r) { <the case's realized levels> }, answer: /<spinel's line>/ }
+    # or, for a difference that leaves no line of spinel's own to match (a
+    # line it prints that CRuby printed too, elsewhere), `kind: "<the
+    # finding's kind>"` in place of `answer:`.
     # `undefined`: CRuby's line for a name the generator's programs read and
     # do not define, which makes the program wrong, not spinel. `keep`: the
     # work dir is kept, binaries included.
@@ -654,7 +658,9 @@ module ProbeCommon
     def documented(f)
       return nil unless f.label == "output-diff"
       line = f.got.to_a.find { |l| !f.want.to_a.include?(l) } || ""
-      @documented.find { |d| d[:when].call(f.c.realized) && line.match?(d[:answer]) }
+      @documented.find do |d|
+        d[:when].call(f.c.realized) && (d[:kind] ? d[:kind] == f.kind : line.match?(d[:answer]))
+      end
     end
 
     # Runs `cases` (whose CRuby lines are `want`), splitting a failure that
