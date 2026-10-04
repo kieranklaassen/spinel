@@ -14622,10 +14622,23 @@ static int strbuf_map_block_tail(Compiler *c, int val) {
   return bn > 0 ? bb[bn - 1] : -1;
 }
 
+/* `c[k] ||= v` and `c[k] &&= v` store v into c as `c[k] = v` does. Answers
+   the stored value with *recv the container, -1 for any other node. Left out
+   of the walks below, the value went in as a plain String while every other
+   store into the container went in as the shared handle, and an append
+   through the element landed in a copy. */
+static int an_index_logic_write_value(const NodeTable *nt, int w, int *recv) {
+  NodeKind k = nt_kind(nt, w);
+  if (k != NK_IndexOrWriteNode && k != NK_IndexAndWriteNode) return -1;
+  *recv = nt_ref(nt, w, "receiver");
+  return nt_ref(nt, w, "value");
+}
+
 /* The values node `w` stores into container local (contn, conts): the
    elements of an array/hash literal written to it (with `map_tail`, also a
    collecting iterator's block tail), or the arguments of a push/<</[]= on
-   it. Fills `stores` (64 slots) and answers the count; 0 when not a store. */
+   it, or the value of a `||=` / `&&=` on an element of it. Fills `stores`
+   (64 slots) and answers the count; 0 when not a store. */
 static int strbuf_container_store_values(Compiler *c, int w, const char *contn, Scope *conts,
                                          int map_tail, int *stores) {
   const NodeTable *nt = c->nt;
@@ -14664,6 +14677,14 @@ static int strbuf_container_store_values(Compiler *c, int w, const char *contn, 
     else if (sp_streq(wcn, "[]=") && an >= 2) stores[nst++] = av[an - 1];
     else if (sp_streq(wcn, "fill") && an >= 1 && an <= 3 &&
              nt_ref(nt, w, "block") < 0) stores[nst++] = av[0];
+  }
+  else {
+    /* `c[k] ||= v` stores v as `c[k] = v` does */
+    int wr = -1, val = an_index_logic_write_value(nt, w, &wr);
+    if (val < 0 || wr < 0 || nt_kind(nt, wr) != NK_LocalVariableReadNode) return 0;
+    const char *wrn = nt_str(nt, wr, "name");
+    if (!wrn || !sp_streq(wrn, contn) || comp_scope_of(c, wr) != conts) return 0;
+    stores[nst++] = val;
   }
   return nst;
 }
@@ -14782,7 +14803,8 @@ static int strbuf_elem_first_iterator(const char *n) {
    per round -- the largest single term of lobsters' analysis. Built once per
    promote_shared_stored_strings run (a round's desugars rename and re-point
    nodes in between) and again if the table grows; each list is ascending, so
-   the stores are met in the order the walk met them. */
+   the stores are met in the order the walk met them. A `||=` / `&&=` index
+   write on the local is listed as a call on it is. */
 typedef struct SbStoreEnt { const char *name; Scope *sc; int *ids; int n, cap; struct SbStoreEnt *next; } SbStoreEnt;
 #define SB_STORE_BUCKETS 4096
 static SbStoreEnt *sb_store_tab[SB_STORE_BUCKETS];
@@ -14820,7 +14842,7 @@ static const int *sb_store_nodes(Compiler *c, const char *nm, Scope *sc, int *n)
         const char *wn = nt_str(nt, id, "name");
         if (wn) sb_store_add(wn, comp_scope_of(c, id), id);
       }
-      else if (k == NK_CallNode) {
+      else if (k == NK_CallNode || k == NK_IndexOrWriteNode || k == NK_IndexAndWriteNode) {
         int r = nt_ref(nt, id, "receiver");
         if (r < 0 || nt_kind(nt, r) != NK_LocalVariableReadNode) continue;
         const char *rn = nt_str(nt, r, "name");
@@ -14896,6 +14918,9 @@ static int strbuf_store_leaf(Compiler *c, int sn, int depth, int mode) {
   if (mode == SB_HAS_STRING) return st == TY_STRING || st == TY_STRBUF;
   return st != TY_UNKNOWN && st != TY_POLY && st != TY_STRING && st != TY_STRBUF;
 }
+/* The walks in progress that a `||=` / `&&=` store is part of: through its
+   value, or begun at a mutator of that value. */
+static int sb_logic_write_walks;
 static int strbuf_demand_container_stores_here(Compiler *c, const char *contn, Scope *conts,
                                                int depth, int mode) {
   const NodeTable *nt = c->nt;
@@ -14908,8 +14933,11 @@ static int strbuf_demand_container_stores_here(Compiler *c, const char *contn, S
     for (int si = 0; si < nsn; si++) {
       int stores[64];
       int nst = strbuf_container_store_values(c, sns0[si], contn, conts, 1, stores);
+      int lw = nt_kind(nt, sns0[si]) == NK_IndexOrWriteNode || nt_kind(nt, sns0[si]) == NK_IndexAndWriteNode;
+      sb_logic_write_walks += lw;
       for (int e3 = 0; e3 < nst; e3++)
         changed |= strbuf_store_leaf(c, stores[e3], depth, mode);
+      sb_logic_write_walks -= lw;
       /* bound from a method result, an ivar or another local: the container
          is whatever that expression built (`x = mk; x[0] << "q"`) */
       if (nst == 0 && nt_kind(nt, sns0[si]) == NK_LocalVariableWriteNode) {
@@ -15041,7 +15069,7 @@ static int strbuf_demand_container_stores(Compiler *c, const char *contn, Scope 
 }
 
 /* The values stored into container ivar (cid, ivn): what is written to it,
-   and what is pushed or []='d into it. */
+   and what is pushed, []='d or `||=` / `&&=`'d into it. */
 static int strbuf_ivar_source_walk(Compiler *c, int cid, const char *ivn, int depth, int mode) {
   const NodeTable *nt = c->nt;
   int changed = 0;
@@ -15066,6 +15094,18 @@ static int strbuf_ivar_source_walk(Compiler *c, int cid, const char *ivn, int de
     }
     else if (sp_streq(wcn, "[]=") && an >= 2)
       changed |= strbuf_store_leaf(c, av[an - 1], depth, mode);
+  }
+  static const NodeKind lkinds[] = { NK_IndexOrWriteNode, NK_IndexAndWriteNode };
+  for (size_t lk = 0; lk < sizeof(lkinds) / sizeof(lkinds[0]); lk++) {
+    for (int w = comp_kind_first(c, lkinds[lk]); w >= 0; w = comp_kind_next(c, w)) {
+      int r = -1, val = an_index_logic_write_value(nt, w, &r);
+      if (val < 0 || r < 0 || nt_kind(nt, r) != NK_InstanceVariableReadNode) continue;
+      const char *rn = nt_str(nt, r, "name");
+      if (!rn || !sp_streq(rn, ivn) || an_ivar_owner(c, r) != cid) continue;
+      sb_logic_write_walks++;
+      changed |= strbuf_store_leaf(c, val, depth, mode);
+      sb_logic_write_walks--;
+    }
   }
   return changed;
 }
@@ -16200,8 +16240,12 @@ static int strbuf_demand_elem_arg(Compiler *c, int an) {
   for (int k = 0; bn && k < sb_elem_nbusy; k++) {
     if (sb_elem_busy[k].owner != bo || !sp_streq(sb_elem_busy[k].name, bn)) continue;
     /* `c[k] = c.fetch(k, v)` stores v where k is missing, and v is no store
-       the walk reaches: it would go in as a copy beside c's handles. */
-    if (an_fetch_default_plain_string(c, an)) {
+       the walk reaches: it would go in as a copy beside c's handles. Only on
+       a walk made of `[]=` and push stores: one a `||=` store is part of
+       comes here for `c[k] ||= c.fetch(j, v)`, which stores an element c
+       holds already where j is there and compiles; it goes on compiling,
+       v a copy as it is with any other receiver. */
+    if (!sb_logic_write_walks && an_fetch_default_plain_string(c, an)) {
       sb_elem_nbusy = 0;
       unsupported_feature(c, an,
           "a String that is the default of `fetch` is stored back into the Hash "
@@ -16229,15 +16273,16 @@ static int promote_shared_stored_strings(Compiler *c) {
   /* per-kind chains: these walks run every fixpoint round, and the full-table
      form spent a quarter of a large machine-generated program's analyze just
      skipping unrelated nodes */
-  /* the four chains are merged in node-id order (each chain is ascending),
+  /* the six chains are merged in node-id order (each chain is ascending),
      preserving the full walk's exact processing order -- grouping by kind
      deferred some promotions to a later round and the extra rounds cost more
      than the walk saved */
-  int pss_cur[4] = { comp_kind_first(c, NK_ArrayNode), comp_kind_first(c, NK_HashNode),
-                     comp_kind_first(c, NK_KeywordHashNode), comp_kind_first(c, NK_CallNode) };
+  int pss_cur[6] = { comp_kind_first(c, NK_ArrayNode), comp_kind_first(c, NK_HashNode),
+                     comp_kind_first(c, NK_KeywordHashNode), comp_kind_first(c, NK_CallNode),
+                     comp_kind_first(c, NK_IndexOrWriteNode), comp_kind_first(c, NK_IndexAndWriteNode) };
   for (;;) {
     int pk = -1;
-    for (int q = 0; q < 4; q++)
+    for (int q = 0; q < 6; q++)
       if (pss_cur[q] >= 0 && (pk < 0 || pss_cur[q] < pss_cur[pk])) pk = q;
     if (pk < 0) break;
     int w = pss_cur[pk];
@@ -16302,6 +16347,12 @@ static int promote_shared_stored_strings(Compiler *c) {
           }
         }
       }
+    }
+    else {
+      /* `c[k] ||= s` stores s as the element assignment above does */
+      int recv3 = -1, val3 = an_index_logic_write_value(nt, w, &recv3);
+      TyKind rt3 = val3 >= 0 && recv3 >= 0 ? c->ntype[recv3] : TY_UNKNOWN;
+      if (ty_is_array(rt3) || ty_is_hash(rt3)) cand3[nc3++] = val3;
     }
     for (int e3 = 0; e3 < nc3; e3++) {
       int vnode = cand3[e3];
