@@ -9765,6 +9765,101 @@ void emit_super_class_new(Compiler *c, int id, Buf *b) {
   buf_printf(b, " default: break; } _t%d; })", rt);
 }
 
+/* ---- A String into a Struct's or Data's handle member (#6179) -----------
+
+   A member the program changes in place through its reader (`c.x << "z"`,
+   `c.x.upcase!`) is the shared handle, as a class's ivar is, and the
+   synthesized constructor takes an sp_String * for it. A class's
+   `initialize` has a parameter its binder converts into
+   (emit_arg_or_default_fill); a Struct's constructor has none, and the
+   argument went over as the const char * it renders as, C that did not
+   build. It converts here. An argument that is the handle already goes
+   over as it is, so the member and the caller hold the one String, and a
+   String nobody else holds is wrapped in a handle of its own. Any other
+   String may be one the caller still holds: wrapped, the member would hold
+   a copy and its changes would not reach the caller's, so the construction
+   is refused rather than compiled with them lost. */
+
+/* Can nothing but the member hold the String `v` answers? A literal; what
+   a call with no block makes of such a String, which is that String or a
+   new one; `dup`, `clone`, `+`, `*` and `%` on any String and
+   `String.new`, which answer a new one; and the String a number or a
+   Symbol answers. A method the program defines under the name may answer
+   any String, as may a `send`. */
+static int struct_arg_own_string(Compiler *c, int v, int depth) {
+  const NodeTable *nt = c->nt;
+  if (v < 0 || depth > 64) return 0;
+  NodeKind k = nt_kind(nt, v);
+  if (k == NK_StringNode || k == NK_InterpolatedStringNode) return 1;
+  if (k == NK_ParenthesesNode) {
+    int in = unwrap_parens(c, v);
+    return in != v && struct_arg_own_string(c, in, depth + 1);
+  }
+  if (k != NK_CallNode) return 0;
+  const char *nm = nt_str(nt, v, "name");
+  int r = nt_ref(nt, v, "receiver");
+  if (!nm || r < 0 || nt_ref(nt, v, "block") >= 0 || an_user_defines_method(c, nm)) return 0;
+  if (sp_streq(nm, "send") || sp_streq(nm, "__send__") || sp_streq(nm, "public_send")) return 0;
+  if (nt_kind(nt, r) == NK_ConstantReadNode && nt_str(nt, r, "name") &&
+      sp_streq(nt_str(nt, r, "name"), "String")) return sp_streq(nm, "new");
+  TyKind rt = comp_ntype(c, r);
+  if (rt == TY_INT || rt == TY_FLOAT || rt == TY_BIGINT || rt == TY_SYMBOL) return 1;
+  if (rt != TY_STRING && rt != TY_STRBUF) return 0;
+  if (sp_streq(nm, "dup") || sp_streq(nm, "clone") || sp_streq(nm, "+") || sp_streq(nm, "*") ||
+      sp_streq(nm, "%")) return 1;
+  return struct_arg_own_string(c, r, depth + 1);
+}
+
+static const char *strvar_arg(Compiler *c, int a, int *shared);
+static int ctor_arg_shared(Compiler *c, int a, int boxed);
+/* See codegen_internal.h. */
+__attribute__((noreturn)) void refuse_struct_member_copy(Compiler *c, ClassInfo *cls, int a, int node, const char *kind) {
+  const char *what = cls->is_data ? "Data" : "Struct";
+  char msg[768];
+  snprintf(msg, sizeof msg,
+           "a String is stored in member `%s` of a %s from %s, and the program changes that member's "
+           "String in place: the member would hold a copy, so the change would not reach the String "
+           "the caller holds (a String is not yet shared by reference into a %s member). Store a "
+           "String of the member's own (`.dup`), or change the String before it is stored.",
+           cls->ivars[a] + 1, what, kind, what);
+  unsupported_feature(c, node, msg);
+}
+/* See codegen_internal.h. */
+void emit_struct_handle_member(Compiler *c, ClassInfo *cls, int a, int vnode, int root, Buf *mv) {
+  const NodeTable *nt = c->nt;
+  NodeKind vk = nt_kind(nt, vnode);
+  int var = vk == NK_LocalVariableReadNode || vk == NK_InstanceVariableReadNode;
+  char sref[192];
+  /* a variable an earlier argument can rebind ran first: the handle it
+     read then is the String handed over (ran_first_handle) */
+  if (var && ctor_arg_shared(c, vnode, 0) && arg_ran_first(vnode, 0)) {
+    int th = ran_first_handle(vnode);
+    if (th >= 0) { buf_printf(mv, "_t%d", th); return; }
+  }
+  else if ((var ? ctor_arg_shared(c, vnode, 0) : vk == NK_CallNode) &&
+           strbuf_slot_ref(c, vnode, sref, sizeof sref)) {
+    buf_puts(mv, sref);
+    return;
+  }
+  if (struct_arg_own_string(c, vnode, 0)) {
+    Buf hv; memset(&hv, 0, sizeof hv);
+    buf_puts(&hv, "sp_String_new_shared(");
+    emit_str_expr(c, vnode, &hv);
+    buf_puts(&hv, ")");
+    /* the handle is new and the member beside it allocates. A `new` roots
+       each member's value itself, but not an argument that ran first, which
+       it takes as rooted in the temp it ran into: that temp holds the
+       String, not this handle of it */
+    if (root || arg_ran_first(vnode, 0)) emit_rooted_operand(c, TY_STRBUF, -1, hv.p, mv);
+    else buf_puts(mv, hv.p);
+    free(hv.p);
+    return;
+  }
+  int shared;
+  const char *kind = strvar_arg(c, vnode, &shared);
+  refuse_struct_member_copy(c, cls, a, vnode, kind ? kind : "a value another holder may keep");
+}
+
 /* The C text of `vnode` as the value of member `a` of a Struct/Data, in the
    member's own slot type: what sp_<S>_new takes for it, before any rooting. */
 static void emit_struct_member_value(Compiler *c, ClassInfo *cls, int a, int vnode, Buf *mv) {
@@ -9804,6 +9899,9 @@ static void emit_struct_member_value(Compiler *c, ClassInfo *cls, int a, int vno
   else if ((cls->ivar_types[a] == TY_INT || cls->ivar_types[a] == TY_FLOAT) &&
            (nt_kind(nt, vnode) == NK_NilNode || comp_ntype(c, vnode) == TY_NIL))
     emit_expr_slot(c, vnode, cls->ivar_types[a], mv);
+  else if (cls->ivar_types[a] == TY_STRBUF &&
+           (comp_ntype(c, vnode) == TY_STRING || comp_ntype(c, vnode) == TY_STRBUF))
+    emit_struct_handle_member(c, cls, a, vnode, 0, mv);
   else emit_unresolved_coerced(c, vnode, cls->ivar_types[a], mv);
 }
 

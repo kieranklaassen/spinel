@@ -11124,6 +11124,9 @@ void emit_super(Compiler *c, int id, Buf *b) {
              growing append moves them */
           else if (ivt == TY_STRING && at == TY_STRBUF)
             buf_printf(b, "(%s ? sp_str_concat(sp_String_cstr(%s), (&(\"\\xff\")[1])) : NULL)", src.p, src.p);
+          /* and a plain String parameter into a handle member would be a
+             copy of the caller's (emit_struct_handle_member) */
+          else if (ivt == TY_STRBUF && at == TY_STRING) refuse_struct_member_copy(c, cls, a, id, "a parameter");
           else if (ivt == TY_POLY && at != TY_POLY) { Buf ex; memset(&ex, 0, sizeof ex); emit_boxed_text(c, at, src.p, &ex); buf_puts(b, ex.p ? ex.p : ""); free(ex.p); }
           else if (ivt != TY_POLY && at == TY_POLY) emit_unbox_nilable_text(c, ivt, src.p, b);
           else buf_puts(b, src.p);
@@ -11146,6 +11149,7 @@ void emit_super(Compiler *c, int id, Buf *b) {
           else {
             TyKind at = comp_ntype(c, vnode);
             if (ivt == TY_STRBUF && struct_super_handle_arg(c, vnode, b)) {}
+            else if (ivt == TY_STRBUF && (at == TY_STRING || at == TY_STRBUF)) emit_struct_handle_member(c, cls, a, vnode, 1, b);
             else if (ivt == TY_POLY && at != TY_POLY) emit_boxed(c, vnode, b);
             else if (ivt != TY_POLY && at == TY_POLY) {
               Buf ex; memset(&ex, 0, sizeof ex); emit_expr(c, vnode, &ex);
@@ -11157,6 +11161,7 @@ void emit_super(Compiler *c, int id, Buf *b) {
         else {
           TyKind at = comp_ntype(c, sargv[a]);
           if (ivt == TY_STRBUF && struct_super_handle_arg(c, sargv[a], b)) {}
+          else if (ivt == TY_STRBUF && (at == TY_STRING || at == TY_STRBUF)) emit_struct_handle_member(c, cls, a, sargv[a], 1, b);
           else if (ivt == TY_POLY && at != TY_POLY) emit_boxed(c, sargv[a], b);
           else if (ivt != TY_POLY && at == TY_POLY) {
             /* poly arg (e.g. an initialize param that stayed poly) into a scalar

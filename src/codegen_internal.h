@@ -639,6 +639,14 @@ int kw_plan_error(const KwPlan *P, char *msg, size_t n);
 void positional_arity(Compiler *c, Scope *m, int *required, int *total);
 void emit_unreached_splat_count(Compiler *c, Scope *m, const int *argv, int argc, int pos_argc,
                                 const KwPlan *P);
+/* String `vnode` as member `a` of a Struct or Data whose slot is the shared
+   handle (codegen_call.c): the handle it reads, a handle of its own for a
+   String nobody else holds, or a refusal of what a wrap would copy
+   (refuse_struct_member_copy, naming what held the String as `kind`).
+   `root` hoists a handle made here into a rooted temp, for a caller that
+   roots no member value itself. */
+void emit_struct_handle_member(Compiler *c, ClassInfo *cls, int a, int vnode, int root, Buf *mv);
+__attribute__((noreturn)) void refuse_struct_member_copy(Compiler *c, ClassInfo *cls, int a, int node, const char *kind);
 /* Every argument of a call run ahead of it, in source order, each `**`
    operand converted where it stands (codegen_fold.c): a call planned so
    (KwPlan.args_first) or whose keywords run ahead (kwh_runs_ahead). Only

@@ -8407,6 +8407,8 @@ static int emit_struct_recv_call(Compiler *c, int id, Buf *b, const NodeTable *n
           }
           else emit_expr(c, val, b);
         }
+        /* a String into a member that is the shared handle */
+        else if (mt == TY_STRBUF && (vt == TY_STRING || vt == TY_STRBUF)) emit_struct_handle_member(c, sc, i, val, 1, b);
         else {
           emit_expr(c, val, b);
         }

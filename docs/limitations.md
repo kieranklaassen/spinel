@@ -720,7 +720,12 @@ Not yet shared:
   curried proc, a method `define_method` defines, `new` or `raise`, a
   String held by a block parameter, by a variable a block or proc captures,
   or by a global or class variable, and through a proc, a `Method` or a
-  class value's `new`, one held by an instance variable.
+  class value's `new`, one held by an instance variable;
+- into a member of a `Struct` or `Data` whose String the program changes
+  in place through its reader (`c.x << "z"`, `c.x.upcase!`), a String a
+  variable, another object or a container still holds, unless the variable
+  is the shared handle already; a String of the member's own (a literal,
+  `.dup`, `+`, an interpolation) is stored and changes as in CRuby.
 
 A String is shared as well through a rest a method forwards (`def w(*a) =
 m(*a)`, `def w(*) = m(*)`, `def w(...) = m(...)`, `def m(*) = super`) and
