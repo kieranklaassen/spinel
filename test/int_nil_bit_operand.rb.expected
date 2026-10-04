@@ -1,0 +1,34 @@
+-- a parameter one call passes nil
+&: 2
+& nil: TypeError: nil can't be coerced into Integer
+~: -7
+~ nil: NoMethodError
+^=: 3
+^= nil: TypeError: nil can't be coerced into Integer
+-- a local with a nil arm
+&: TypeError: nil can't be coerced into Integer
+|: TypeError: nil can't be coerced into Integer
+^: TypeError: nil can't be coerced into Integer
+~: NoMethodError
+no else: TypeError: nil can't be coerced into Integer
+-- a method that answers nil
+^: 7
+^ nil: TypeError: nil can't be coerced into Integer
+~: -7
+~ nil: NoMethodError
+-- an ivar and its reader
+ivar &: 0
+ivar & nil: TypeError: nil can't be coerced into Integer
+ivar ~: -7
+ivar ~ nil: NoMethodError
+reader |: 14
+reader | nil: TypeError: nil can't be coerced into Integer
+-- a Struct member and a global
+member: 7
+member nil: TypeError: nil can't be coerced into Integer
+member left out: TypeError: nil can't be coerced into Integer
+global: TypeError: nil can't be coerced into Integer
+global set: 7
+-- narrowed, the operators are Integer's
+guard: 7
+or: 5

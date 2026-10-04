@@ -1,0 +1,75 @@
+-- a nil operand
++ slice: TypeError
++ computed start: TypeError
++ range: TypeError
++ slice call: TypeError
+-: TypeError
+&: TypeError
+|: TypeError
+union: TypeError
+difference: TypeError
+intersection: TypeError
+chain: TypeError
+-- a nil receiver
++: NoMethodError
+-: NoMethodError
+union: NoMethodError
+both nil: NoMethodError
+-- through a local
+operand: TypeError
+receiver: NoMethodError
+-- each kind
+Float +: TypeError
+Float -: TypeError
+Float receiver: NoMethodError
+String +: TypeError
+String |: TypeError
+String receiver: NoMethodError
+general +: TypeError
+general -: TypeError
+general &: TypeError
+general receiver: NoMethodError
+Integer + general nil: TypeError
+general + Integer nil: TypeError
+general + Float nil: TypeError
+general - String nil: TypeError
+Float | String nil: TypeError
+Integer receiver nil, + String: NoMethodError
+-- an op-assign
++= nil: TypeError
+-= nil: TypeError
+|= nil: TypeError
+&= nil: TypeError
+nil +=: NoMethodError
+nil -=: NoMethodError
+general += nil: TypeError
+general += Integer nil: TypeError
+nil += literal: NoMethodError
+-- an empty literal receiver
++: TypeError
+|: TypeError
+-: TypeError
+-- both sides are evaluated first
+receiver nil: NoMethodError
+operand nil: TypeError
+[1, 2, 3, 4]
+-- an Array on both sides answers as before
++: [1, 2]
++ at the end: [1, 2]
+-: [1]
+&: [1]
+|: [2, 1]
+local: [1, 1, 2]
+literal: [1, 2, 3]
+general: [1, "a", "a"]
+two kinds: [1, "b"]
+union of two kinds: [1.5, 1, "a"]
++=: [1, 2, 2]
+|=: [1, 2, 3]
++= empty: [1, 2]
+empty literal: [[1, 2], [1], [1, 2], [1, 2]]
+-- nil made an Array first
+to_a: [1, 2]
+Array(): [1, 2]
+or: [1, 2]
++= to_a: [1, 2]
