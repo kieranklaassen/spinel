@@ -2059,6 +2059,145 @@ int desugar_mutator_receiver_value(Compiler *c) {
   return changed;
 }
 
+/* A chain of in-place String methods on a local changes the local with
+   every link in CRuby: `s.prepend("b").prepend("a")`,
+   `s.concat("a").concat("b")`, `s.clear << x`. A mutator is lowered to a
+   write of its receiver, and only a receiver that is a name has a place to
+   write: the second link changed the first one's value, a temporary, and s
+   kept the first change alone. (A chain of `<<` alone has its own lowering
+   and is left to it.) The links become calls on the local, in order:
+
+     s.m(x).n(y).o(z)   ->  ((s.m(x); s.n(y); s.o(z)))
+     (e; s.m(x)).n(y)   ->  ((e; s.m(x); s.n(y)))
+
+   where m and n always answer their receiver, so each next call is sent to
+   s itself: `<<`, concat, and str_self_call's prepend, insert, replace,
+   clear, reverse!, freeze, force_encoding and encode! (to_s, to_str and
+   itself are taken off by desugar_mutator_receiver_value). A link becomes
+   a statement of the sequence, and two of them are not as statements what
+   they are as values: an insert past either end raises IndexError only
+   where its value is taken, so it is a link at the index 0 or -1 alone,
+   and `s.concat(x, y)` on a String two names share does not build, so a
+   concat is a link with one argument. The last call is any String mutator. The second form is a chain met from the inside:
+   a call moved into a conditional's arm stands outside the links it is
+   sent to in the table's order. After a link that may answer nil
+   (`s.upcase!.concat(x)` is a NoMethodError in CRuby when nothing changed)
+   the next call is not sent to s: it stays on that link's value, as it
+   was. A chain that ends in such a call and is sent another call is left
+   whole: a mutator sent to a paren sequence is not what one sent to a call
+   is. So is a chain with a block, a `&.`, or an argument that writes a
+   variable, and one on a local a closure writes, which an argument's call
+   could leave naming another String than the chain started on. */
+static int mcl_unparen(const NodeTable *nt, int v) {
+  while (v >= 0 && nt_kind(nt, v) == NK_ParenthesesNode) {
+    int b = nt_ref(nt, v, "body"), bn = 0;
+    const int *bb = b >= 0 && nt_kind(nt, b) == NK_StatementsNode ? nt_arr(nt, b, "body", &bn) : NULL;
+    if (bn != 1) break;
+    v = bb[0];
+  }
+  return v;
+}
+static int mcl_plain_call(const NodeTable *nt, int v) {
+  const char *op = nt_str(nt, v, "call_operator");
+  return nt_ref(nt, v, "block") < 0 && !(op && sp_streq(op, "&.")) &&
+         !mrv_writes(nt, nt_ref(nt, v, "arguments"), NULL, 0);
+}
+static int mcl_self_link(const NodeTable *nt, int v) {
+  if (nt_kind(nt, v) != NK_CallNode || nt_ref(nt, v, "receiver") < 0 || !mcl_plain_call(nt, v)) return 0;
+  const char *nm = nt_str(nt, v, "name");
+  if (!nm) return 0;
+  int a = nt_ref(nt, v, "arguments"), an = 0;
+  const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
+  if (is_append_concat(nm)) return an == 1 && nt_kind(nt, av[0]) != NK_SplatNode;
+  if (!str_self_call(nt, v) || sp_streq(nm, "to_s") || sp_streq(nm, "to_str") || sp_streq(nm, "itself")) return 0;
+  if (!sp_streq(nm, "insert")) return 1;
+  long long at = nt_kind(nt, av[0]) == NK_IntegerNode ? nt_int(nt, av[0], "value", 0) : 1;
+  return at == 0 || at == -1;
+}
+int desugar_mutator_chain_on_local(Compiler *c) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  int n0 = nt->count, changed = 0;
+  /* the writes closures make to locals outside themselves and the calls
+     another call is sent to, collected at the first chain met: the rewrite
+     adds none */
+  int *outer = NULL, nouter = -1;
+  char *is_recv = NULL;
+  for (int id = 0; id < n0; id++) {
+    if (nt_kind(nt, id) != NK_CallNode) continue;
+    const char *nm = nt_str(nt, id, "name");
+    if (!nm || nt_ref(nt, id, "receiver") < 0 || !sp_str_mutator(nm, SP_MUT_LOCAL) || !mcl_plain_call(nt, id)) continue;
+    int n = 0, only_shl = sp_streq(nm, "<<");
+    int x = mcl_unparen(nt, nt_ref(nt, id, "receiver"));
+    for (; mcl_self_link(nt, x); x = mcl_unparen(nt, nt_ref(nt, x, "receiver")), n++)
+      only_shl = only_shl && sp_streq(nt_str(nt, x, "name"), "<<");
+    /* a paren sequence that ends with such a call on a local: its
+       statements come first */
+    int pre = -1, pn = 0;
+    const int *pb = NULL;
+    if (nt_kind(nt, x) == NK_ParenthesesNode && nt_kind(nt, nt_ref(nt, x, "body")) == NK_StatementsNode)
+      pb = nt_arr(nt, nt_ref(nt, x, "body"), "body", &pn);
+    if (pn > 1 && mcl_self_link(nt, pb[pn - 1])) { pre = x; x = nt_ref(nt, pb[pn - 1], "receiver"); }
+    if (pre < 0 && (n == 0 || only_shl)) continue;
+    if (nt_kind(nt, x) != NK_LocalVariableReadNode || !mrv_is_string(infer_type(c, x))) continue;
+    if (nouter < 0) {
+      nouter = 0;
+      outer = malloc(sizeof(int) * (size_t)(n0 > 0 ? n0 : 1));
+      is_recv = calloc((size_t)(n0 > 0 ? n0 : 1), 1);
+      if (!outer || !is_recv) break;
+      for (int w = 0; w < n0; w++) {
+        if (comp_is_local_write(nt_kind(nt, w)) && nt_int(nt, w, "depth", 0) > 0) outer[nouter++] = w;
+        int r = nt_kind(nt, w) == NK_CallNode ? mcl_unparen(nt, nt_ref(nt, w, "receiver")) : -1;
+        if (r >= 0 && r < n0) is_recv[r] = 1;
+      }
+    }
+    /* the sequence's value is its last call's: one that may not answer s
+       stays the call the next one is sent to, with its chain */
+    if (is_recv[id] && !mcl_self_link(nt, id)) continue;
+    int rebound = 0;
+    for (int i = 0; i < nouter && !rebound; i++) rebound = sp_streq(nt_str(nt, outer[i], "name"), nt_str(nt, x, "name"));
+    int *seq = rebound ? NULL : malloc(sizeof(int) * (size_t)(pn + n + 1));
+    if (!seq) continue;
+    int base = nt->count;
+    long long line = nt_int(nt, id, "node_line", 0), file = nt_int(nt, id, "node_file", 0);
+    if (pre < 0) pn = 0;
+    else memcpy(seq, pb, sizeof(int) * (size_t)pn);
+    /* each call sent to a link, or to the sequence, takes a read of the
+       local instead; a paren that stood between them goes */
+    for (int cur = id, k = n; k >= 0; k--) {
+      int r = nt_ref(nt, cur, "receiver"), link = mcl_unparen(nt, r);
+      if (k == 0 && pre < 0) break;
+      while (r != link) {
+        int b = nt_ref(nt, r, "body"), bn = 0, inner = nt_arr(nt, b, "body", &bn)[0];
+        nt_node_reset(nt, b, "NilNode");
+        nt_node_reset(nt, r, "NilNode");
+        r = inner;
+      }
+      nt_node_set_ref(nt, cur, "receiver", nt_clone_subtree(nt, x));
+      if (k > 0) seq[pn + k - 1] = cur = link;
+    }
+    if (pre >= 0) {
+      nt_node_reset(nt, nt_ref(nt, pre, "body"), "NilNode");
+      nt_node_reset(nt, pre, "NilNode");
+    }
+    /* the call moves into a new node; the call's own becomes the paren */
+    int st = nt_new_node(nt, "StatementsNode"), pr = nt_new_node(nt, "ParenthesesNode");
+    nt_swap_nodes(nt, id, pr);
+    nt_node_reset(nt, id, "ParenthesesNode");
+    seq[pn + n] = pr;
+    nt_node_set_arr(nt, st, "body", seq, pn + n + 1);
+    nt_node_set_ref(nt, id, "body", st);
+    if (line > 0) { nt_node_set_int(nt, id, "node_line", line); nt_node_set_int(nt, id, "node_file", file); }
+    free(seq);
+    comp_grow_node_arrays(c);
+    int encl = c->nscope[id];
+    for (int j = base; j < nt->count; j++) c->nscope[j] = encl;
+    changed = 1;
+  }
+  free(outer);
+  free(is_recv);
+  return changed;
+}
+
 /* proc.curry(obj) -> proc.curry(obj.to_int): CRuby converts a non-Integer
    count through to_int (a to_int-less count is its TypeError). The rewrite
    fires once per argument -- an arg already spelled to_int, an Integer, or

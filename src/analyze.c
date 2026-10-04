@@ -29714,6 +29714,7 @@ static void an_phase_infer_fixpoint(Compiler *c) {
     ch |= desugar_builtin_class_var_recv(c);   /* k = Array; k.new(..) -> Array.new(..) */
     ch |= desugar_compose_method_operand(c);   /* proc >> meth -> proc >> meth.to_proc */
     ch |= desugar_mutator_receiver_value(c);   /* (c ? s : t) << x -> (c ? s << x : t << x) */
+    ch |= desugar_mutator_chain_on_local(c);   /* s.prepend(x).concat(y) -> (s.prepend(x); s.concat(y)) */
     ch |= desugar_method_curry(c);             /* meth.curry -> meth.to_proc.curry */
     ch |= desugar_curry_arity_to_int(c);       /* proc.curry(obj) -> proc.curry(obj.to_int) */
     ch |= desugar_int_enum_with_index(c);      /* n.times.with_index -> n.times.each.with_index */
