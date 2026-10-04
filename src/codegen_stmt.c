@@ -1219,7 +1219,7 @@ static int strbuf_uplus_operand(Compiler *c, int v) {
          sp_streq(nt_str(c->nt, v, "name"), "+@") && nt_ref(c->nt, v, "arguments") < 0 ?
          nt_ref(c->nt, v, "receiver") : -1;
 }
-static void emit_strbuf_cond_value(Compiler *c, LocalVar *lv, int v, const char *dst, Buf *b, int depth);
+static void emit_strbuf_cond_value(Compiler *c, LocalVar *lv, int v, const char *dst, Buf *b);
 /* The `case` emitted as a conditional value into a shared String slot
    (emit_strbuf_cond_value), and that slot: its result is the handle. */
 static int g_strbuf_case_node = -1;
@@ -1228,7 +1228,7 @@ static LocalVar *g_strbuf_case_lv;
    `v` can hand over (an_strbuf_alias_leaves' arms)? */
 static int strbuf_cond_has_handle_leaf(Compiler *c, int v, int depth) {
   const NodeTable *nt = c->nt;
-  if (v < 0 || depth > 8) return 0;
+  if (v < 0) return 0;
   switch (nt_kind(nt, v)) {
     case NK_ParenthesesNode:
       return strbuf_cond_has_handle_leaf(c, nt_ref(nt, v, "body"), depth + 1);
@@ -1271,11 +1271,11 @@ static int strbuf_cond_has_handle_leaf(Compiler *c, int v, int depth) {
 /* Assign conditional `v`'s value to the handle temp `dst` as statements,
    arm by arm (strbuf_cond_has_handle_leaf): the condition is tested where
    the value form tests it, and each arm's own setup runs only on its path. */
-static void emit_strbuf_cond_arm(Compiler *c, LocalVar *lv, int v, const char *dst, Buf *b, int depth) {
+static void emit_strbuf_cond_arm(Compiler *c, LocalVar *lv, int v, const char *dst, Buf *b) {
   Buf pre; memset(&pre, 0, sizeof pre);
   Buf *sv = g_pre; g_pre = &pre;
   Buf body; memset(&body, 0, sizeof body);
-  emit_strbuf_cond_value(c, lv, v, dst, &body, depth);
+  emit_strbuf_cond_value(c, lv, v, dst, &body);
   g_pre = sv;
   buf_puts(b, "{ ");
   buf_puts(b, pre.p ? pre.p : "");
@@ -1283,23 +1283,22 @@ static void emit_strbuf_cond_arm(Compiler *c, LocalVar *lv, int v, const char *d
   buf_puts(b, " }");
   free(pre.p); free(body.p);
 }
-static void emit_strbuf_cond_value(Compiler *c, LocalVar *lv, int v, const char *dst, Buf *b, int depth) {
+static void emit_strbuf_cond_value(Compiler *c, LocalVar *lv, int v, const char *dst, Buf *b) {
   const NodeTable *nt = c->nt;
   NodeKind k = v >= 0 ? nt_kind(nt, v) : NK_NilNode;
-  if (depth > 8) k = NK_NilNode;
   switch (k) {
     case NK_ParenthesesNode:
-      emit_strbuf_cond_value(c, lv, nt_ref(nt, v, "body"), dst, b, depth + 1);
+      emit_strbuf_cond_value(c, lv, nt_ref(nt, v, "body"), dst, b);
       return;
     case NK_StatementsNode: {
       int n = 0; const int *bb = nt_arr(nt, v, "body", &n);
       for (int i = 0; i < n - 1; i++) emit_stmt(c, bb[i], b, 0);
-      if (n > 0) emit_strbuf_cond_value(c, lv, bb[n - 1], dst, b, depth + 1);
+      if (n > 0) emit_strbuf_cond_value(c, lv, bb[n - 1], dst, b);
       else buf_printf(b, "%s = NULL;\n", dst);
       return;
     }
     case NK_ElseNode:
-      emit_strbuf_cond_value(c, lv, nt_ref(nt, v, "statements"), dst, b, depth + 1);
+      emit_strbuf_cond_value(c, lv, nt_ref(nt, v, "statements"), dst, b);
       return;
     case NK_IfNode: case NK_UnlessNode: {
       int is_unless = k == NK_UnlessNode;
@@ -1308,9 +1307,9 @@ static void emit_strbuf_cond_value(Compiler *c, LocalVar *lv, int v, const char 
       emit_cond(c, nt_ref(nt, v, "predicate"), &cnd);
       buf_printf(b, "if (%s%s%s) ", is_unless ? "!(" : "", cnd.p ? cnd.p : "0", is_unless ? ")" : "");
       free(cnd.p);
-      emit_strbuf_cond_arm(c, lv, nt_ref(nt, v, "statements"), dst, b, depth + 1);
+      emit_strbuf_cond_arm(c, lv, nt_ref(nt, v, "statements"), dst, b);
       buf_puts(b, "\nelse ");
-      emit_strbuf_cond_arm(c, lv, sub, dst, b, depth + 1);
+      emit_strbuf_cond_arm(c, lv, sub, dst, b);
       buf_puts(b, "\n");
       return;
     }
@@ -1325,13 +1324,13 @@ static void emit_strbuf_cond_value(Compiler *c, LocalVar *lv, int v, const char 
         emit_cond(c, l, &cnd);
         buf_printf(b, "if (%s) ", cnd.p ? cnd.p : "0");
         free(cnd.p);
-        emit_strbuf_cond_arm(c, lv, nt_ref(nt, v, "right"), dst, b, depth + 1);
+        emit_strbuf_cond_arm(c, lv, nt_ref(nt, v, "right"), dst, b);
         buf_printf(b, "\nelse %s = NULL;\n", dst);
         return;
       }
-      emit_strbuf_cond_value(c, lv, l, dst, b, depth + 1);
+      emit_strbuf_cond_value(c, lv, l, dst, b);
       buf_printf(b, " if (%s%s) ", k == NK_OrNode ? "!" : "", dst);
-      emit_strbuf_cond_arm(c, lv, nt_ref(nt, v, "right"), dst, b, depth + 1);
+      emit_strbuf_cond_arm(c, lv, nt_ref(nt, v, "right"), dst, b);
       buf_puts(b, "\n");
       return;
     }
@@ -1393,7 +1392,7 @@ static void emit_strbuf_value(Compiler *c, LocalVar *lv, int v, Buf *b) {
     char dst[32];
     snprintf(dst, sizeof dst, "_t%d", ++g_tmp);
     buf_printf(b, "({ sp_String *%s = NULL; ", dst);
-    emit_strbuf_cond_value(c, lv, v, dst, b, 0);
+    emit_strbuf_cond_value(c, lv, v, dst, b);
     buf_printf(b, " %s; })", dst);
   }
   /* a demand-marked read (a reader call, a container element) already
@@ -6010,7 +6009,7 @@ void emit_case_branch_value(Compiler *c, int stmts, TyKind rt, int cr, Buf *b) {
   if (rt == TY_STRBUF && g_strbuf_case_node >= 0) {
     char dst[32];
     snprintf(dst, sizeof dst, "_cr%d", cr);
-    emit_strbuf_cond_arm(c, g_strbuf_case_lv, stmts, dst, b, 1);
+    emit_strbuf_cond_arm(c, g_strbuf_case_lv, stmts, dst, b);
     buf_puts(b, " ");
     return;
   }

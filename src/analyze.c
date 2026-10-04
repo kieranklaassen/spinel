@@ -14309,41 +14309,41 @@ static void an_strbuf_alias_leaf_add(AStrLeaves *out, int id) {
   }
   out->v[out->n++] = id;
 }
-static void an_strbuf_alias_leaves(Compiler *c, int v, AStrLeaves *out, int depth) {
+static void an_strbuf_alias_leaves(Compiler *c, int v, AStrLeaves *out) {
   const NodeTable *nt = c->nt;
-  if (v < 0 || depth > 8) return;
+  if (v < 0) return;
   int one = an_strbuf_alias_source(c, v);
   if (one >= 0) { an_strbuf_alias_leaf_add(out, one); return; }
   switch (nt_kind(nt, v)) {
     case NK_ParenthesesNode:
-      an_strbuf_alias_leaves(c, nt_ref(nt, v, "body"), out, depth + 1);
+      an_strbuf_alias_leaves(c, nt_ref(nt, v, "body"), out);
       return;
     case NK_StatementsNode: {
       int n = 0; const int *b = nt_arr(nt, v, "body", &n);
-      if (n > 0) an_strbuf_alias_leaves(c, b[n - 1], out, depth + 1);
+      if (n > 0) an_strbuf_alias_leaves(c, b[n - 1], out);
       return;
     }
     case NK_ElseNode:
-      an_strbuf_alias_leaves(c, nt_ref(nt, v, "statements"), out, depth + 1);
+      an_strbuf_alias_leaves(c, nt_ref(nt, v, "statements"), out);
       return;
     case NK_IfNode: case NK_UnlessNode:
       /* a missing arm is nil */
-      an_strbuf_alias_leaves(c, nt_ref(nt, v, "statements"), out, depth + 1);
-      an_strbuf_alias_leaves(c, nt_ref(nt, v, nt_kind(nt, v) == NK_IfNode ? "subsequent" : "else_clause"), out, depth + 1);
+      an_strbuf_alias_leaves(c, nt_ref(nt, v, "statements"), out);
+      an_strbuf_alias_leaves(c, nt_ref(nt, v, nt_kind(nt, v) == NK_IfNode ? "subsequent" : "else_clause"), out);
       return;
     case NK_OrNode:
-      an_strbuf_alias_leaves(c, nt_ref(nt, v, "left"), out, depth + 1);
-      an_strbuf_alias_leaves(c, nt_ref(nt, v, "right"), out, depth + 1);
+      an_strbuf_alias_leaves(c, nt_ref(nt, v, "left"), out);
+      an_strbuf_alias_leaves(c, nt_ref(nt, v, "right"), out);
       return;
     /* `a && g` answers a only when a is nil or false, never a String */
     case NK_AndNode:
-      an_strbuf_alias_leaves(c, nt_ref(nt, v, "right"), out, depth + 1);
+      an_strbuf_alias_leaves(c, nt_ref(nt, v, "right"), out);
       return;
     case NK_CaseNode: {
       int nw = 0; const int *whens = nt_arr(nt, v, "conditions", &nw);
       for (int w = 0; w < nw; w++)
-        an_strbuf_alias_leaves(c, nt_ref(nt, whens[w], "statements"), out, depth + 1);
-      an_strbuf_alias_leaves(c, nt_ref(nt, v, "else_clause"), out, depth + 1);
+        an_strbuf_alias_leaves(c, nt_ref(nt, whens[w], "statements"), out);
+      an_strbuf_alias_leaves(c, nt_ref(nt, v, "else_clause"), out);
       return;
     }
     default:
@@ -14420,7 +14420,7 @@ static void an_local_aliases_build(Compiler *c, ALocalAliases *t) {
     if (si < 0 || si >= c->nscopes) continue;
     const char *wn = nt_str(nt, w, "name");
     lv.n = 0;
-    an_strbuf_alias_leaves(c, nt_ref(nt, w, "value"), &lv, 0);
+    an_strbuf_alias_leaves(c, nt_ref(nt, w, "value"), &lv);
     for (int l = 0; l < lv.n; l++) an_local_aliases_add(t, &cap, si, wn, nt_str(nt, lv.v[l], "name"));
   }
   /* `h ||= g`, `h &&= g` */
@@ -14432,7 +14432,7 @@ static void an_local_aliases_build(Compiler *c, ALocalAliases *t) {
       int si = ws ? (int)(ws - c->scopes) : -1;
       if (si < 0 || si >= c->nscopes) continue;
       lv.n = 0;
-      an_strbuf_alias_leaves(c, nt_ref(nt, w, "value"), &lv, 0);
+      an_strbuf_alias_leaves(c, nt_ref(nt, w, "value"), &lv);
       for (int l = 0; l < lv.n; l++) an_local_aliases_add(t, &cap, si, nt_str(nt, w, "name"), nt_str(nt, lv.v[l], "name"));
     }
   free(lv.v);
@@ -15838,7 +15838,7 @@ static int promote_local_alias_pairs(Compiler *c) {
        `s2 = (s1 << x)`, whose value IS the base object, and each arm of a
        conditional (an_strbuf_alias_leaves) */
     lv.n = 0;
-    an_strbuf_alias_leaves(c, nt_ref(nt, w, "value"), &lv, 0);
+    an_strbuf_alias_leaves(c, nt_ref(nt, w, "value"), &lv);
     for (int l = 0; l < lv.n; l++)
       changed |= promote_local_alias_pair(c, comp_scope_of(c, w), nt_str(nt, lv.v[l], "name"), nt_str(nt, w, "name"));
   }
@@ -15848,7 +15848,7 @@ static int promote_local_alias_pairs(Compiler *c) {
          w = comp_kind_next(c, w)) {
       if (nt_kind(nt, w) != (k ? NK_LocalVariableAndWriteNode : NK_LocalVariableOrWriteNode)) continue;
       lv.n = 0;
-      an_strbuf_alias_leaves(c, nt_ref(nt, w, "value"), &lv, 0);
+      an_strbuf_alias_leaves(c, nt_ref(nt, w, "value"), &lv);
       for (int l = 0; l < lv.n; l++)
         changed |= promote_local_alias_pair(c, comp_scope_of(c, w), nt_str(nt, lv.v[l], "name"), nt_str(nt, w, "name"));
     }
