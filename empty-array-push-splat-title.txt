@@ -1,0 +1,1 @@
+A splat pushed onto an empty array literal spreads its elements
