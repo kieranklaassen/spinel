@@ -3542,7 +3542,9 @@ static int emit_str_mutator_call(Compiler *c, int id, Buf *b, const NodeTable *n
       int tn2 = ++g_tmp;
       buf_printf(b, "({ sp_str_check_mutable(");   /* frozen -> FrozenError (#3003) */
       emit_expr(c, recv, b);
-      buf_printf(b, "); const char *_t%d = ", tn2); emit_str_expr(c, argv[0], b); buf_puts(b, "; ");
+      /* a copy of the source bytes, as the statement arm takes: the source
+         itself would leave the receiver holding a frozen String */
+      buf_printf(b, "); const char *_t%d = sp_str_dup(", tn2); emit_str_expr(c, argv[0], b); buf_puts(b, "); ");
       if (lvw) { emit_expr(c, recv, b); buf_printf(b, " = _t%d; ", tn2); }
       buf_printf(b, "_t%d; })", tn2);
       { *out = 1; return 1; }
