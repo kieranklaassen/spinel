@@ -28822,6 +28822,118 @@ static int super_forwards_caller_block(Compiler *c, int id) {
   return block < 0 || nt_kind(c->nt, block) != NK_BlockNode;
 }
 
+/* A call that takes one String out of an Array or a Hash and leaves it
+   there, by name: the element reads the sharing analysis follows from a
+   local (container_elem_read_p) and the ones no rule follows. *recv is the
+   container -- the builtin's own copy of an Enumerable call carries it as
+   its first argument (desugar_builtin_enum_calls) -- and the answer the
+   read's name, which may point into nb. */
+static const char *an_container_string_read(Compiler *c, int b, int *recv, char *nb, size_t cap) {
+  static const char *const reads[] = {
+    "[]", "at", "first", "last", "fetch", "dig", "slice", "min", "max", "sample",
+    "find", "detect", "min_by", "max_by", "bsearch", NULL };
+  const NodeTable *nt = c->nt;
+  const char *nm = nt_str(nt, b, "name");
+  int r = nt_ref(nt, b, "receiver");
+  if (!nm) return NULL;
+  if (r < 0 && strncmp(nm, "__enum_", 7) == 0) {
+    const char *bn = nm + 7, *sep = strstr(bn, "__");
+    int a = nt_ref(nt, b, "arguments"), an = 0;
+    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
+    if (!sep || (size_t)(sep - bn) >= cap || an < 1) return NULL;
+    memcpy(nb, bn, (size_t)(sep - bn)); nb[sep - bn] = 0;
+    nm = nb; r = av[0];
+  }
+  if (r < 0) return NULL;
+  TyKind rt = comp_ntype(c, r);
+  if (!ty_is_array(rt) && rt != TY_POLY_ARRAY && !ty_is_hash(rt)) return NULL;
+  for (int i = 0; reads[i]; i++)
+    if (sp_streq(nm, reads[i])) { *recv = r; return nm; }
+  return NULL;
+}
+
+/* Does the program define a method called `name`, under that name or as an
+   alias of another? */
+static int an_program_defines_method(Compiler *c, const char *name) {
+  if (an_any_scope_by_name(c, name) >= 0) return 1;
+  for (int k = 0; k < c->nclasses; k++) {
+    const ClassInfo *ci = &c->classes[k];
+    if (comp_method_in_chain(c, k, name, NULL) >= 0) return 1;
+    /* the top level's aliases name methods no class holds */
+    for (int i = 0; i < ci->naliases; i++)
+      if (sp_streq(ci->alias_new[i], name)) return 1;
+  }
+  return 0;
+}
+
+/* Is the value of statement `top` thrown away? an_value_dropped reads only
+   the name of a block's call, and a method of that name the program defines
+   (a user `each`, `step`, `loop`) can answer the block's value, as
+   cow_user_block_value knows. */
+static int an_statement_value_dropped(Compiler *c, const int *parent, int top) {
+  const NodeTable *nt = c->nt;
+  if (!an_value_dropped(nt, parent, top)) return 0;
+  int st = parent[top], sn = 0;
+  const int *sb = nt_arr(nt, st, "body", &sn);
+  int blk = sn > 0 && sb[sn - 1] == top ? parent[st] : -1;
+  if (blk < 0 || nt_kind(nt, blk) != NK_BlockNode) return 1;
+  const char *bn = parent[blk] >= 0 ? nt_str(nt, parent[blk], "name") : NULL;
+  return !(bn && an_program_defines_method(c, bn));
+}
+
+/* A String mutator whose receiver is a String a call took out of an Array or
+   a Hash, in a statement whose value is dropped (`a.min_by { } << x`,
+   `WORDS[0].upcase!`): the mutator lowerings act in place only on a
+   receiver they can name or on a shared handle, so the change went to a
+   copy that nothing read and the container printed as it was, with nothing
+   said. The change is all such a statement is for, so it is refused. Where
+   the call's value is used (`t = a.find { } << x`) the value is right and
+   only the container's element is not; that is left as it was, and so is a
+   mutator with a block, which runs for what the block does as well. setbyte
+   writes the byte where the String is, so it reaches the container through
+   the copy. Runs once sharing analysis settles: an element it shares is a
+   handle here, not a String. */
+static void refuse_dropped_container_string_change(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  int *parent = NULL;
+  NT_FOREACH_KIND(nt, NK_CallNode, u) {
+    const char *un = nt_str(nt, u, "name");
+    int b = nt_ref(nt, u, "receiver");
+    if (!un || b < 0 || !sp_str_mutator(un, SP_MUT_LOCAL) || sp_streq(un, "setbyte")) continue;
+    if (nt_ref(nt, u, "block") >= 0) continue;
+    if (nt_kind(nt, b) != NK_CallNode || comp_ntype(c, b) != TY_STRING) continue;
+    if (c->strbuf_box[b] || c->strbuf_handle_demand[b]) continue;
+    char nb[64];
+    int r = -1;
+    const char *how = an_container_string_read(c, b, &r, nb, sizeof nb);
+    if (!how) continue;
+    if (!parent && !(parent = an_parent_map(nt))) return;
+    /* `x.m << a << b`: the chain's value is its last call's, and a
+       parenthesized call's is the parentheses' */
+    int top = u;
+    for (;;) {
+      int p = parent[top];
+      if (p < 0) break;
+      if (nt_kind(nt, p) == NK_CallNode && nt_ref(nt, p, "receiver") == top && nt_str(nt, p, "name") &&
+          sp_str_mutator(nt_str(nt, p, "name"), SP_MUT_LOCAL)) { top = p; continue; }
+      int sn = 0;
+      const int *sb = nt_kind(nt, p) == NK_StatementsNode ? nt_arr(nt, p, "body", &sn) : NULL;
+      if (sn > 0 && sb[sn - 1] == top && parent[p] >= 0 && nt_kind(nt, parent[p]) == NK_ParenthesesNode) {
+        top = parent[p];
+        continue;
+      }
+      break;
+    }
+    if (!an_statement_value_dropped(c, parent, top)) continue;
+    char msg[256];
+    snprintf(msg, sizeof msg, "a String is not yet shared by reference through %s `%s` into an in-place `%s`",
+             ty_is_hash(comp_ntype(c, r)) ? "a Hash's" : "an Array's", how, un);
+    free(parent);
+    unsupported_feature(c, u, msg);
+  }
+  free(parent);
+}
+
 static void poly_ivar_set_reference(Compiler *c, int id, int recv) {
   TyKind rt = comp_ntype(c, recv);
   if (ty_is_object(rt)) {
@@ -33097,6 +33209,8 @@ static void an_phase_reconcile_check(Compiler *c) {
      analysis settles (#6998). */
   refuse_lent_ivar_copies(c);
   refuse_hash_pair_string_mutations(c);
+  /* ...and a change that could only go to a copy of a container's String */
+  refuse_dropped_container_string_change(c);
 
   /* Last: the capture pass again, on the settled types. a_block_is_lifted asks
      whether the receiver is poly, and a receiver that widened after the

@@ -614,6 +614,18 @@ spinel: 1 refusal, nothing written
 == test/reject/string_append_through_proc_keyword.rb [promote] rc=1
 spinel: a String is passed to a proc's parameter `k` through `f.call`, which the proc appends to: this call hands the proc a copy, so the append would not reach the caller's String (a String is not yet shared by reference from a block's parameter). Return the String from the proc and assign it, or append to it in the caller.
 spinel: 1 refusal, nothing written
+== test/reject/string_array_find_dropped_append.rb [default] rc=1
+spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`
+== test/reject/string_array_find_dropped_append.rb [promote] rc=1
+spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`
+== test/reject/string_array_find_dropped_paren_call.rb [default] rc=1
+spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`
+== test/reject/string_array_find_dropped_paren_call.rb [promote] rc=1
+spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`
+== test/reject/string_array_min_by_dropped_chain.rb [default] rc=1
+spinel: a String is not yet shared by reference through an Array's `min_by` into an in-place `<<`
+== test/reject/string_array_min_by_dropped_chain.rb [promote] rc=1
+spinel: a String is not yet shared by reference through an Array's `min_by` into an in-place `<<`
 == test/reject/string_array_rebound_iterator_alias.rb [default] rc=1
 spinel: a String appended to through a rebound iterator alias is not yet shared by reference with its Array
 == test/reject/string_array_rebound_iterator_alias.rb [promote] rc=1
@@ -622,6 +634,14 @@ spinel: a String appended to through a rebound iterator alias is not yet shared 
 spinel: a String is not yet shared by reference through an Array's chained index into an appending block
 == test/reject/string_chained_index_append.rb [promote] rc=1
 spinel: a String is not yet shared by reference through an Array's chained index into an appending block
+== test/reject/string_const_array_index_dropped_bang.rb [default] rc=1
+spinel: a String is not yet shared by reference through an Array's `[]` into an in-place `upcase!`
+== test/reject/string_const_array_index_dropped_bang.rb [promote] rc=1
+spinel: a String is not yet shared by reference through an Array's `[]` into an in-place `upcase!`
+== test/reject/string_const_hash_index_dropped_append.rb [default] rc=1
+spinel: a String is not yet shared by reference through a Hash's `[]` into an in-place `<<`
+== test/reject/string_const_hash_index_dropped_append.rb [promote] rc=1
+spinel: a String is not yet shared by reference through a Hash's `[]` into an in-place `<<`
 == test/reject/string_cvar_boxed_param.rb [default] rc=1
 spinel: a String is passed to `poly`'s parameter `io` through the call, which the method appends to: this call hands the method a copy, so the append would not reach the caller's String (a String is not yet shared by reference from a class variable into a parameter that boxes it). Return the String from the method and assign it, or append to it in the caller.
 spinel: 1 refusal, nothing written
