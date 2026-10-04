@@ -1973,15 +1973,16 @@ static int is_heavy_brk_call(Compiler *c, int id) {
   return call_breaks(c, id) && !brk_wrapper_surely_light(c, id);
 }
 
-/* Does scope index `si` contain a begin/rescue, a `loop {}`, or a heavy
-   (real-setjmp) break-carrying call (so its locals need volatile across the
-   setjmp it emits)? */
+/* Does scope index `si` contain a begin/rescue, a rescue modifier, a
+   `loop {}`, or a heavy (real-setjmp) break-carrying call (so its locals
+   need volatile across the setjmp it emits)? */
 int scope_has_begin(Compiler *c, int si) {
   int nids = 0; const int *ids = cg_scope_nodes(c, si, &nids);
   for (int k = 0; k < nids; k++) {
     int id = ids[k];
     const char *ty = nt_type(c->nt, id);
-    if (ty && (sp_streq(ty, "BeginNode") || sp_streq(ty, "RescueNode")))
+    if (ty && (sp_streq(ty, "BeginNode") || sp_streq(ty, "RescueNode") ||
+               sp_streq(ty, "RescueModifierNode")))
       return 1;
     if (is_stopiter_loop(c, id) || is_heavy_brk_call(c, id)) return 1;
   }
@@ -2030,6 +2031,9 @@ static void begin_volatile_names(Compiler *c, int si, char ***out, int *nout, in
   for (int k = 0; k < nids; k++) {
     int id = ids[k];
     if ((nt_kind(nt, id) == NK_BeginNode) || is_stopiter_loop(c, id) || is_heavy_brk_call(c, id)) mark_subtree(nt, id, inb);
+    /* a rescue modifier's setjmp is around its expression; the fallback
+       runs after the longjmp */
+    if (nt_kind(nt, id) == NK_RescueModifierNode) mark_subtree(nt, nt_ref(nt, id, "expression"), inb);
   }
   for (int k = 0; k < nids; k++)
     if (nt_kind(nt, ids[k]) == NK_RescueNode && !inb[ids[k]]) { *all = 1; break; }
