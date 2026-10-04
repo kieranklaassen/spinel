@@ -3589,32 +3589,33 @@ sp_bool sp_srange_cover(sp_StrRange r, const char *x) {
 }
 /* #min / #max with no block, as CRuby's range_min / range_max: an open
    side raises, an empty range (the begin past the end, or at it with the
-   end excluded) is nil, and an excluded end walks the members for the
-   least or greatest, since a String end cannot be stepped back from. NULL
-   is nil. */
-static const char *sp_srange_walk_extreme(sp_StrRange r, int greatest) {
+   end excluded) is nil. The minimum is the begin, whose two ends alone
+   decide it -- ("9"..."11") has none, "9" > "11", though it holds "9" and
+   "10" -- and so is the maximum the end, but for an excluded end, which
+   walks the members for the greatest, since a String end cannot be stepped
+   back from. NULL is nil. */
+static const char *sp_srange_walk_greatest(sp_StrRange r) {
   sp_StrArray *a = sp_srange_to_a(r); SP_GC_ROOT(a);
   const char *best = NULL; SP_GC_ROOT_STR(best);
   for (sp_int i = 0; i < sp_StrArray_length(a); i++) {
     const char *s = sp_StrArray_get(a, i);
-    if (!best || (greatest ? strcmp(s, best) > 0 : strcmp(s, best) < 0)) best = s;
+    if (!best || strcmp(s, best) > 0) best = s;
   }
   return best;
 }
 const char *sp_srange_min_v(sp_StrRange r) {
   if (!r.first) sp_raise_cls("RangeError", "cannot get the minimum of beginless range");
-  if (r.excl) {
-    if (!r.last) sp_raise_cls("RangeError", "cannot get the minimum of endless range with custom comparison method");
-    return sp_srange_walk_extreme(r, 0);
+  if (r.last) {
+    int c = strcmp(r.first, r.last);
+    if (c > 0 || (c == 0 && r.excl)) return NULL;
   }
-  if (r.last && strcmp(r.first, r.last) > 0) return NULL;
   return r.first;
 }
 const char *sp_srange_max_v(sp_StrRange r) {
   if (!r.last) sp_raise_cls("RangeError", "cannot get the maximum of endless range");
   if (r.excl) {
     if (!r.first) sp_raise_cls("RangeError", "cannot get the maximum of beginless range with custom comparison method");
-    return sp_srange_walk_extreme(r, 1);
+    return sp_srange_walk_greatest(r);
   }
   if (r.first && strcmp(r.first, r.last) > 0) return NULL;
   return r.last;
