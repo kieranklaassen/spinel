@@ -657,35 +657,13 @@ const char *sp_StrArray_sample(sp_StrArray*a){SP_GC_ROOT(a);if(a->len<=0)return 
 sp_StrArray *sp_StrArray_from_string_range(const char *s, const char *e, sp_int excl) {SP_GC_ROOT_STR(s);SP_GC_ROOT_STR(e);
   sp_StrArray *a = sp_StrArray_new();
   SP_GC_ROOT(a);
-  if (!s || !e) return a;
-  /* `cur` walks the range via String#succ, allocating a fresh heap string each
-     step; the next sp_str_alloc can trigger a GC that would sweep both the
-     array under construction and the current (unrooted) succ string, so the
-     strcpy read freed memory (#3152). Root the slot -- it tracks each succ
-     reassignment. */
-  const char *cur = s;
-  SP_GC_ROOT_STR(cur);
-  int iters = 0;
-  /* Two all-digit endpoints walk numerically, so ("9".."11") holds "9", "10",
-     "11" -- a plain byte compare stops at once because "9" > "1" (#3549).
-     Anything else keeps the byte order, where ("y".."ab") is empty. */
-  size_t elen = strlen(e);
-  int numeric = *s && *e;
-  for (const char *q = s; numeric && *q; q++) if (*q < '0' || *q > '9') numeric = 0;
-  for (const char *q = e; numeric && *q; q++) if (*q < '0' || *q > '9') numeric = 0;
-  while (iters < 4096) {
-    size_t clen = strlen(cur);
-    int cmp = (numeric && clen != elen) ? (clen < elen ? -1 : 1)
-                                        : sp_str_cmp_bytes(cur, e);
-    if (cmp > 0) break;
-    if (cmp == 0 && excl) break;
-    char *copy = sp_str_alloc(strlen(cur));
-    strcpy(copy, cur);
-    sp_StrArray_push(a, copy);
-    if (cmp == 0) break;
-    cur = sp_str_succ(cur);
-    iters++;
-  }
+  /* The members are String#upto's walk (sp_str_walk_first, lib/sp_str.c). Each
+     step allocates a fresh String, and that allocation can collect: the walk's
+     own Strings are rooted here, as the array under construction is (#3152). */
+  sp_StrWalk w = {0};
+  SP_GC_ROOT_STR(w.cur); SP_GC_ROOT_STR(w.end); SP_GC_ROOT_STR(w.stop);
+  for (const char *m = sp_str_walk_first(&w, s, e, excl); m; m = sp_str_walk_next(&w))
+    sp_StrArray_push(a, m);
   return a;
 }
 const char*sp_IntArray_inspect(sp_IntArray*a){SP_GC_ROOT(a);return a?sp_inspect_container(sp_box_obj(a,SP_BUILTIN_INT_ARRAY)):"nil";}

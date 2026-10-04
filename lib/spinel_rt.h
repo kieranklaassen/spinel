@@ -880,6 +880,8 @@ static inline sp_int sp_int_bit(sp_int n, sp_int i) {
 /* String range to_a -- single-char and multi-char ASCII ranges via
    sp_str_succ. The 4096-iteration cap stops a pathological prepend-
    style infinite loop before it eats memory. */
+/* (No cap now: the walk is String#upto's, sp_str_walk_first in lib/sp_str.c,
+   and it ends by itself.) */
 /* Case-insensitive string compare. Portable across glibc / MinGW
    (avoids strcasecmp which lives in strings.h on POSIX and is named
    stricmp on Windows). Returns -1 / 0 / 1 like CRuby's String#casecmp. */

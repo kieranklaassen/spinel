@@ -156,6 +156,15 @@ const char*sp_str_undump(const char*s);
 const char*sp_str_succ_impl(const char*s);
 const char*sp_str_succ(const char*s);
 const char*sp_str_succ_n(const char*s,sp_int n);
+/* String#upto's walk, one member a call (lib/sp_str.c). The caller owns the
+   state and roots its three Strings before the first call:
+     sp_StrWalk w = {0};
+     SP_GC_ROOT_STR(w.cur); SP_GC_ROOT_STR(w.end); SP_GC_ROOT_STR(w.stop);
+     for (const char *m = sp_str_walk_first(&w, lo, hi, excl); m; m = sp_str_walk_next(&w)) ...
+   Both answer NULL once the walk is over. */
+typedef struct{const char*cur;const char*end;const char*stop;sp_int excl;int kind;}sp_StrWalk;
+const char*sp_str_walk_first(sp_StrWalk*w,const char*s,const char*e,sp_int excl);
+const char*sp_str_walk_next(sp_StrWalk*w);
 sp_StrArray*sp_str_split(const char*s,const char*sep);
 sp_StrArray*sp_str_split_drop_trailing(const char*s,const char*sep);
 sp_StrArray*sp_str_split_limit(const char*s,const char*sep,sp_int n);

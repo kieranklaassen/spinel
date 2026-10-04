@@ -989,6 +989,71 @@ const char*sp_str_succ(const char*s){SP_GC_ROOT_STR(s);return sp_str_succ_impl(s
 /* succ applied n times (n < 1: the string itself): the next member of an
    endless String range walked by step(n) */
 const char*sp_str_succ_n(const char*s,sp_int n){SP_GC_ROOT_STR(s);for(sp_int i=0;i<n;i++)s=sp_str_succ_impl(s);return s;}
+/* String#upto's walk, which a String Range's members are, as CRuby's
+   rb_str_upto_each has it. The ends are compared ONCE, before the walk: a
+   begin past the end is an empty range. The walk then goes by String#succ
+   until it meets the end, grows longer than the end or is empty -- so
+   ("a".."ac") holds "a" to "z", "aa", "ab", "ac", where comparing every
+   member with the end stopped at "b" > "ac". Two pairs of ends walk their own
+   way: two single ASCII characters walk the bytes between them (("9".."A")
+   holds "9", ":", ";" ... "A", not "10"), and two all-digit ends walk as the
+   numbers they spell, at the begin's width (("9".."11"), #3549; ("08".."11")).
+   Each of the three ends by itself, so nothing caps a walk's length. */
+enum{SP_STR_WALK_OVER=0,SP_STR_WALK_CHAR,SP_STR_WALK_DIGITS,SP_STR_WALK_SUCC};
+static int sp_str_walk_all_digits(const char*s,size_t n){
+  for(size_t i=0;i<n;i++)if(s[i]<'0'||s[i]>'9')return 0;
+  return n>0;
+}
+/* two all-digit Strings as numbers: leading zeros aside, the longer is greater */
+static int sp_str_walk_digits_cmp(const char*a,const char*b){
+  size_t la=sp_str_byte_len(a),lb=sp_str_byte_len(b);
+  while(la>1&&*a=='0'){a++;la--;}
+  while(lb>1&&*b=='0'){b++;lb--;}
+  if(la!=lb)return la<lb?-1:1;
+  int r=memcmp(a,b,la);
+  return r<0?-1:r>0;
+}
+static const char*sp_str_walk_over(sp_StrWalk*w){w->kind=SP_STR_WALK_OVER;w->cur=NULL;return NULL;}
+const char*sp_str_walk_first(sp_StrWalk*w,const char*s,const char*e,sp_int excl){
+  SP_GC_ROOT_STR(s);SP_GC_ROOT_STR(e);
+  w->end=e;w->stop=NULL;w->excl=excl;
+  if(!s||!e)return sp_str_walk_over(w);
+  size_t sl=sp_str_byte_len(s),el=sp_str_byte_len(e);
+  int kind,cmp;
+  if(sl==1&&el==1&&(unsigned char)*s<0x80&&(unsigned char)*e<0x80){kind=SP_STR_WALK_CHAR;cmp=(*s>*e)-(*s<*e);}
+  else if(sp_str_walk_all_digits(s,sl)&&sp_str_walk_all_digits(e,el)){kind=SP_STR_WALK_DIGITS;cmp=sp_str_walk_digits_cmp(s,e);}
+  else{kind=SP_STR_WALK_SUCC;cmp=sp_str_cmp_bytes(s,e);}
+  if(cmp>0||(cmp==0&&excl))return sp_str_walk_over(w);
+  if(kind==SP_STR_WALK_SUCC){
+    /* a begin that is already the end's successor ("aaa".."zz") is no member */
+    w->stop=sp_str_succ(e);
+    if(sp_str_eq(s,w->stop))return sp_str_walk_over(w);
+  }
+  w->kind=kind;
+  return w->cur=sp_str_dup(s);
+}
+const char*sp_str_walk_next(sp_StrWalk*w){
+  const char*n;
+  switch(w->kind){
+  case SP_STR_WALK_CHAR:{
+    char c=*w->cur;
+    if(c==*w->end||(w->excl&&c+1==*w->end))return sp_str_walk_over(w);
+    char*r=sp_str_alloc(1);r[0]=(char)(c+1);
+    return w->cur=r;}
+  case SP_STR_WALK_DIGITS:{
+    n=sp_str_succ(w->cur);
+    int cmp=sp_str_walk_digits_cmp(n,w->end);
+    if(cmp>0||(cmp==0&&w->excl))return sp_str_walk_over(w);
+    return w->cur=n;}
+  case SP_STR_WALK_SUCC:{
+    if(!w->excl&&sp_str_eq(w->cur,w->end))return sp_str_walk_over(w);
+    n=sp_str_succ(w->cur);
+    size_t nl=sp_str_byte_len(n);
+    if((w->excl&&sp_str_eq(n,w->end))||nl>sp_str_byte_len(w->end)||nl==0||sp_str_eq(n,w->stop))return sp_str_walk_over(w);
+    return w->cur=n;}
+  }
+  return NULL;
+}
 sp_StrArray*sp_str_split(const char*s,const char*sep){if(!s)sp_nil_recv("split");
   SP_GC_ROOT_STR(s);
   SP_GC_ROOT_STR(sep);
