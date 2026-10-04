@@ -7002,6 +7002,52 @@ int desugar_kernel_recv(Compiler *c) {
   return changed;
 }
 
+/* `Array.new` with no argument and no block, where the program has not given
+   Array a `new` or an `initialize` of its own. */
+static int bare_array_new(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  if (id < 0 || nt_kind(nt, id) != NK_CallNode || nt_ref(nt, id, "block") >= 0) return 0;
+  int k = nt_ref(nt, id, "receiver");
+  const char *mn = nt_str(nt, id, "name");
+  if (k < 0 || nt_kind(nt, k) != NK_ConstantReadNode || !mn || !sp_streq(mn, "new")) return 0;
+  const char *kn = nt_str(nt, k, "name");
+  int ca = nt_ref(nt, id, "arguments"), argc = 0;
+  if (ca >= 0) nt_arr(nt, ca, "arguments", &argc);
+  if (!kn || !sp_streq(kn, "Array") || argc != 0) return 0;
+  int ci = comp_class_index(c, kn);
+  return ci < 0 || (comp_cmethod_in_chain(c, ci, "new", NULL) < 0 &&
+                    comp_method_in_chain(c, ci, "initialize", NULL) < 0);
+}
+
+/* A call on an empty Array that stores into it, or that can answer one of
+   its own operands: the default of fetch, the seed of a fold, what find
+   calls when nothing matches, the value of a block the receiver is handed
+   to, anything sent by name. A literal Integer, Float, Symbol, nil, true or
+   false is the same value as its copy, so a fetch or a fold given one of
+   those answers nothing to tell apart. */
+static int array_call_stores_or_answers_operand(const NodeTable *nt, int id, const char *on) {
+  if (is_push_alias(on) || is_prepend_alias(on) || is_send_family(on)) return 1;
+  static const char *const whole[] = {"insert", "concat", "fill", "replace", "[]=", "tap", "then",
+                                      "yield_self", NULL};
+  for (int i = 0; whole[i]; i++)
+    if (sp_streq(on, whole[i])) return 1;
+  int ca = nt_ref(nt, id, "arguments"), argc = 0;
+  const int *av = ca >= 0 ? nt_arr(nt, ca, "arguments", &argc) : NULL;
+  if (sp_streq(on, "find") || sp_streq(on, "detect")) return argc > 0;
+  int is_fetch = sp_streq(on, "fetch");
+  if (!is_fetch && !sp_streq(on, "inject") && !sp_streq(on, "reduce") && !sp_streq(on, "sum") &&
+      !sp_streq(on, "each_with_object"))
+    return 0;
+  for (int k = 0; k < argc; k++)
+    if (nt_kind(nt, av[k]) == NK_SplatNode) return 1;
+  if (is_fetch && nt_ref(nt, id, "block") >= 0) return 1;
+  int at = is_fetch ? 1 : 0;
+  if (argc <= at) return 0;
+  NodeKind k = nt_kind(nt, av[at]);
+  return !(k == NK_IntegerNode || k == NK_FloatNode || k == NK_SymbolNode || k == NK_NilNode ||
+           k == NK_TrueNode || k == NK_FalseNode);
+}
+
 /* `Array[a, b, c]` and `Range.new(lo, hi)` are the constructor spellings of the
    `[a, b, c]` and `(lo..hi)` literals, and both raised NoMethodError -- the
    literal worked and the documented constructor for the same value did not
@@ -7020,6 +7066,22 @@ static int desugar_class_literal_ctors(Compiler *c) {
   for (int id = 0; id < n0; id++) {
     if (nt_kind(nt, id) != NK_CallNode) continue;
     int recv = nt_ref(nt, id, "receiver");
+    /* A bare `Array.new` that a call is made on is the empty literal too. As
+       a receiver it has no later use to take an element type from, and stayed
+       untyped: `Array.new + [1]` answered nil and `Array.new.map { }` raised
+       NoMethodError "for unknown". Elsewhere it keeps its own paths, and so
+       does the receiver of a call that stores into it or can answer one of
+       its operands: the literal's arms copy a String there (`[] << s`,
+       `[].fetch(0, s)`) and nest a splat beside a block, and `Array.new << s`
+       goes on raising rather than answer as they do. */
+    if (bare_array_new(c, recv)) {
+      const char *on = nt_str(nt, id, "name");
+      if (on && array_call_stores_or_answers_operand(nt, id, on)) continue;
+      nt_node_reset(nt, recv, "ArrayNode");
+      nt_node_set_arr(nt, recv, "elements", NULL, 0);
+      changed = 1;
+      continue;
+    }
     if (recv < 0 || nt_kind(nt, recv) != NK_ConstantReadNode) continue;
     if (nt_ref(nt, id, "block") >= 0) continue;
     const char *rn = nt_str(nt, recv, "name");
