@@ -1328,6 +1328,12 @@ int emit_args_before_binding(Compiler *c, Scope *m, const int *argv, int argc, B
    instance, global or class variable by any effect. A value built of reads
    (`[x, 2]`) asks it of each; a block reads when it runs. */
 int read_rebound_by(Compiler *c, int x, int after);
+/* Does one of the `n` values of `later`, which run after `by`, read a local
+   `by` rebinds: one it assigns or, with `procs`, one a proc it may call
+   assigns (read_rebound_by)? A read in a block counts, as the block runs
+   with its value or later, after `by` either way; one that already ran into
+   a temp reads that. */
+int later_read_rebound_by(Compiler *c, const int *later, int n, int by, int procs);
 int emit_ds_hash_materialize(Compiler *c, Scope *m, int kwh, TyKind *out_type);
 /* The TypeError CRuby raises for a `**` operand that is neither a Hash, nil
    nor convertible with #to_hash, emitted into g_pre ahead of any keyword

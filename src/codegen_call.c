@@ -17750,6 +17750,14 @@ static int operand_local_rebound_by(Compiler *c, int x, int after) {
   return 0;
 }
 
+/* Does the `i`th of a call's operands assign a local an operand after it
+   reads (later_read_rebound_by)? Only an assignment is asked, not a proc
+   that may rebind the local: a call beside another call is bound in order
+   already. */
+static int operand_assigns_later_read(Compiler *c, const int *operand, int nop, int i) {
+  return later_read_rebound_by(c, operand + i + 1, nop - i - 1, operand[i], 0);
+}
+
 /* An operand emit_operands_in_order cannot bind, the `u`th, renders where
    its arm puts it. An Array or Hash literal builds into g_pre, ahead of the
    whole call, so a local read anywhere in an operand to its left read what
@@ -17760,22 +17768,29 @@ static int operand_local_rebound_by(Compiler *c, int x, int after) {
    the write under gcc. The receiver is not asked there: the arms that take
    it into a temp do so ahead of their arguments (push_recv_in_slot), and
    the ones that render it beside them take their snapshot first
-   (emit_recv_snapshot). The operands up to the last such read run first,
-   in order, into rooted temps in g_pre (emit_args_before), and the call
-   reads those. `first_arg` is the index of the first argument among the
-   operands. 1 when it emitted the call; 0, emitting nothing, when no such
-   read is there. */
+   (emit_recv_snapshot). The other way round is C's order whatever takes
+   the call: an operand from the unbound one on that assigns a local a later
+   operand reads (operand_assigns_later_read) sat beside that read in one C
+   call, and gcc read first, so `"x".rjust((t = "b"; 5), t)` padded with
+   the old t and `Integer((n = 16; "ff"), n + 0)` took the old base. The
+   operands up to the last such read or assignment run first, in order,
+   into rooted temps in g_pre (emit_args_before), and the call reads those.
+   `first_arg` is the index of the first argument among the operands. 1
+   when it emitted the call; 0, emitting nothing, when no such read or
+   assignment is there. */
 static int emit_operands_before_unbound(Compiler *c, int id, const int *operand, int nop,
                                         int first_arg, int u, Buf *b) {
   const NodeTable *nt = c->nt;
   NodeKind uk = nt_kind(nt, operand[u]);
   int literal = uk == NK_ArrayNode || uk == NK_HashNode;
+  int last = -1;
+  for (int i = u; i < nop; i++)
+    if (operand_assigns_later_read(c, operand, nop, i)) last = i;
   /* a user method or a boxed receiver's dispatch binds its arguments in
      order already (emit_args_before_binding); only a builtin's arm of plain
      values passes them to C as they stand */
-  if (!literal && (first_arg == 0 || !ty_runs_no_code(comp_ntype(c, operand[0])))) return 0;
-  int last = -1;
-  for (int i = literal ? 0 : first_arg; i < u; i++) {
+  int bound = !literal && (first_arg == 0 || !ty_runs_no_code(comp_ntype(c, operand[0])));
+  for (int i = literal ? 0 : first_arg; i < u && !bound; i++) {
     if (!literal && nt_kind(nt, operand[i]) != NK_LocalVariableReadNode) continue;
     for (int j = u; j < nop && last < i; j++)
       if (operand_local_rebound_by(c, operand[i], operand[j])) last = i;
@@ -17874,7 +17889,7 @@ static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
   int effects = 0;
   for (int i = 0; i < nop; i++)
     if (subtree_may_reassign_state(c, operand[i])) effects++;
-  int observable = 0, converts = 0;
+  int observable = 0, converts = 0, assigns = 0;
   for (int i = 0; i < nop; i++) {
     /* an operand that may convert -- a user object, a boxed value -- is
        converted by the arm, in a hold that runs before the call: the
@@ -17899,7 +17914,12 @@ static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
     char sref[192];
     if ((state_read || local_read) && strbuf_slot_ref(c, operand[i], sref, sizeof sref))
       state_read = local_read = 0;
-    if (!local_read && (state_read ? effects < 1 : !subtree_has_side_effect(c, operand[i]))) continue;
+    /* an operand that assigns a local a later operand reads is ordered
+       against that read, which the arm leaves beside it in one C call: bound,
+       it runs ahead of the call, alone among the operands or not */
+    int assigns_i = operand_assigns_later_read(c, operand, nop, i);
+    assigns |= assigns_i;
+    if (!local_read && !assigns_i && (state_read ? effects < 1 : !subtree_has_side_effect(c, operand[i]))) continue;
     observable++;
     int bindable = (k == NK_CallNode || k == NK_SuperNode ||
                     k == NK_ForwardingSuperNode || k == NK_YieldNode || state_read || local_read);
@@ -17924,8 +17944,10 @@ static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
     if (pure) return 0;
   }
   /* One observable operand has no sibling to be ordered against or collected by:
-     it is the only thing running, and the call consumes it immediately. */
-  if ((observable < 2 && !(converts && observable >= 1)) || nb < 1 ||
+     it is the only thing running, and the call consumes it immediately. Not
+     one that assigns what a later operand reads. */
+  int lone = observable < 2 && !assigns;
+  if ((lone && !(converts && observable >= 1)) || nb < 1 ||
       g_n_argov + nb > MAX_ARG_OVERRIDE) return 0;
 
   size_t pre_mark = g_pre->len;
@@ -17937,7 +17959,7 @@ static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
      rewrite has not rendered it. Rendered first, a decline re-rendered it with
      the whole call, once per nesting level: 2^depth copies of a receiver
      chain (#4925). */
-  int operands_last = observable < 2;
+  int operands_last = lone;
   for (; !operands_last && rendered < nb && ok; rendered++) {
     render_operand(c, node[rendered], &opb[rendered], &opp[rendered]);
     if (text_is_raise_token(opb[rendered].p)) ok = 0;
@@ -17961,7 +17983,7 @@ static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
        and costs a rooted temp on what may be a hot path (`@fetch[addr][addr]`
        is poly, and converts nothing). Counted as emitted, not as held: a
        #to_int renders inline and IO#write holds per operand. */
-    if (observable < 2 && g_conv_emitted == conv_mark) ok = 0;
+    if (lone && g_conv_emitted == conv_mark) ok = 0;
     /* An arm that stores back into its receiver -- a poly `[]=` splice
        answering a new String, `@bytes = sp_poly_splice(@bytes, ...)` -- treats
        the operand as its slot; bound, the store lands in the temp and the
