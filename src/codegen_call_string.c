@@ -1038,8 +1038,12 @@ int emit_str_append_chain_handle(Compiler *c, int id, Buf *b) {
   int first = unwrap_parens(c, recv);
   Repr rp = repr_of(c, first);
   if (rp.handle && rp.kind == RK_STRBUF) return 0;
-  int links[64], nlinks = 0, cur = recv, calls = 0;
-  while (cur >= 0 && nlinks < 64) {
+  int *links = NULL, nlinks = 0, cap = 0, cur = recv, calls = 0;
+  while (cur >= 0) {
+    if (nlinks == cap) {
+      cap = cap ? cap * 2 : 16;
+      links = realloc(links, (size_t)cap * sizeof *links);
+    }
     if (nt_kind(nt, cur) == NK_ParenthesesNode) {
       int body = nt_ref(nt, cur, "body"), n = 0;
       const int *bb = body >= 0 ? nt_arr(nt, body, "body", &n) : NULL;
@@ -1059,8 +1063,8 @@ int emit_str_append_chain_handle(Compiler *c, int id, Buf *b) {
   if (!calls || cur < 0 ||
       (nt_kind(nt, cur) != NK_LocalVariableReadNode &&
        nt_kind(nt, cur) != NK_InstanceVariableReadNode) ||
-      !strbuf_slot_ref(c, cur, ref, sizeof ref)) return 0;
-  int sv[64], st[64];
+      !strbuf_slot_ref(c, cur, ref, sizeof ref)) { free(links); return 0; }
+  int *sv = malloc((size_t)nlinks * 2 * sizeof *sv), *st = sv + nlinks;
   for (int i = 0; i < nlinks; i++) {
     sv[i] = view_push_repr(c, links[i], VR_STRBUF_BOX, 1);
     st[i] = view_push(c, links[i], TY_STRBUF);
@@ -1070,6 +1074,7 @@ int emit_str_append_chain_handle(Compiler *c, int id, Buf *b) {
     view_pop(c, st[i]);
     view_pop(c, sv[i]);
   }
+  free(sv); free(links);
   return 1;
 }
 
