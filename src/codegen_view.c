@@ -37,12 +37,11 @@
 #include "codegen_internal.h"
 #include <stdarg.h>
 
-#define VIEW_MAX 256
-
 /* what an entry overrides: the node's type, one representation flag, or
    the arm context */
 enum { VK_TYPE = -1, VK_ARM = -2, VK_FACE = -3 };
-static struct { Compiler *c; int id; int kind; int saved; ArmCtx arm_saved; } view_stack[VIEW_MAX];
+static struct { Compiler *c; int id; int kind; int saved; ArmCtx arm_saved; } *view_stack;
+static int view_cap;
 static int view_face = -1;   /* the innermost face entry, or -1 */
 static int view_sp;
 static int view_nodes;   /* the entries that view a node (all but VK_ARM) */
@@ -107,12 +106,19 @@ static void view_write(Compiler *c, int kind, int id, int v) {
   }
 }
 
-static int view_open(Compiler *c, int id, int kind, int v) {
-  if (view_sp >= VIEW_MAX) {
-    fprintf(stderr, "spinel: internal error: codegen views nested too deep\n");
-    exit(1);
+/* The next free entry. The stack grows: an append chain over a handle
+   holds two views for each of its links at once. */
+static int view_slot(void) {
+  if (view_sp == view_cap) {
+    view_cap = view_cap ? view_cap * 2 : 256;
+    view_stack = realloc(view_stack, (size_t)view_cap * sizeof *view_stack);
+    if (!view_stack) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
   }
-  int tok = view_sp++;
+  return view_sp++;
+}
+
+static int view_open(Compiler *c, int id, int kind, int v) {
+  int tok = view_slot();
   view_stack[tok].c = c;
   view_stack[tok].id = id;
   view_stack[tok].kind = kind;
@@ -124,11 +130,7 @@ static int view_open(Compiler *c, int id, int kind, int v) {
 }
 
 int view_push_arm(int pd_skip, int prbd_skip, int builtin_arm) {
-  if (view_sp >= VIEW_MAX) {
-    fprintf(stderr, "spinel: internal error: codegen views nested too deep\n");
-    exit(1);
-  }
-  int tok = view_sp++;
+  int tok = view_slot();
   view_stack[tok].c = NULL;
   view_stack[tok].id = -1;
   view_stack[tok].kind = VK_ARM;
@@ -140,11 +142,7 @@ int view_push_arm(int pd_skip, int prbd_skip, int builtin_arm) {
 }
 
 int view_push_face(int node, TyKind kind) {
-  if (view_sp >= VIEW_MAX) {
-    fprintf(stderr, "spinel: internal error: codegen views nested too deep\n");
-    exit(1);
-  }
-  int tok = view_sp++;
+  int tok = view_slot();
   view_stack[tok].c = NULL;
   view_stack[tok].id = node;
   view_stack[tok].kind = VK_FACE;
