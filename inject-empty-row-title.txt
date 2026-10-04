@@ -1,0 +1,1 @@
+A fold over a literal table reads an empty row as empty
