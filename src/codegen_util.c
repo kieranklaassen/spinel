@@ -1,3 +1,4 @@
+#include <ctype.h>
 #include "codegen_internal.h"
 #include "call_plan.h"
 #include "repr.h"
@@ -2468,8 +2469,16 @@ char *sb_local_shim_close(SbLocalSave *sv, int handled) {
   if (!sv->pre.p || !sv->pre.len) { free(sv->pre.p); return NULL; }
   char nm[32];
   int nl = snprintf(nm, sizeof nm, "lv__sb%d", sv->t);
-  for (const char *q = handled ? strstr(sv->pre.p, nm) : NULL; q; q = strstr(q + nl, nm))
-    if (!isdigit((unsigned char)q[nl])) return sv->pre.p;
+  /* a read of the shadow as C reads it: a Ruby string literal that spells the
+     name is in the text verbatim, inside a C literal, and is no read */
+  for (const char *q = handled ? sv->pre.p : ""; *q; q++) {
+    if (*q == '"' || *q == '\'') {
+      char e = *q++;
+      while (*q && *q != e) { if (*q == '\\' && q[1]) q++; q++; }
+      if (!*q) break;
+    }
+    else if (!strncmp(q, nm, (size_t)nl) && !isdigit((unsigned char)q[nl])) return sv->pre.p;
+  }
   buf_puts(g_pre, sv->pre.p);
   free(sv->pre.p);
   return NULL;

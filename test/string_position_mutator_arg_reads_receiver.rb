@@ -27,7 +27,7 @@ p q, u, u.equal?(v)
 # inside a lambda, and on a parameter
 a = "qrst".dup
 b = a
-l = -> { b.insert(1, [1, 2].map { |x| (b.size * x).to_s }.join); b.size }
+l = -> { b.insert(1, %w[x yy zzz].select { |w| w.size < b.size }.join); b.size }
 p l.call, a, a.equal?(b)
 
 def pad(d)
