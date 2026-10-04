@@ -176,6 +176,10 @@ spinel: 1 refusal, nothing written
 == test/reject/dynamic_send_then_refusal.rb [promote] rc=1
 spinel: String#unicode_normalize is not supported: Unicode normalization requires shipping the Unicode decomposition/composition tables, which spinel deliberately does not carry -- the same limit as String#grapheme_clusters (see docs/limitations.md)
 spinel: 1 refusal, nothing written
+== test/reject/fetch_default_string_stored_back.rb [default] rc=1
+spinel: a String that is the default of `fetch` is stored back into the Hash or Array it was fetched from: a String is not yet shared by reference through the default of `fetch`. Store it with h[k] = v unless h.key?(k).
+== test/reject/fetch_default_string_stored_back.rb [promote] rc=1
+spinel: a String that is the default of `fetch` is stored back into the Hash or Array it was fetched from: a String is not yet shared by reference through the default of `fetch`. Store it with h[k] = v unless h.key?(k).
 == test/reject/ffi_ptr_ruby_object.rb [default] rc=1
 spinel: unsupported ffi pointer argument (a Ruby object has no C address; pass an IO::Buffer, a String or a :ptr value): node 23 (CallNode `new`) recv=ConstantReadNode/ty49 argc=0
 spinel: 1 refusal, nothing written
