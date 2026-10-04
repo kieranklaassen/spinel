@@ -38,11 +38,12 @@
 # What counts as a finding follows the compiler's own contract. Ruby that
 # does not parse is no case. An exception CRuby raises is part of the
 # expected answer: spinel has to raise the same one. Spinel may refuse a
-# program at compile time, naming the construct ("unsupported ...") rather
-# than compile it wrong -- docs/limitations.md counts that a gap -- so a
-# refusal (label compile-error) is reported in the `refused` tier. A
-# difference docs/limitations.md describes as the answer on purpose (a
-# probe's DOCUMENTED list) is reported in the `documented` tier, citing it.
+# program at compile time, naming the construct at its Ruby line
+# ("unsupported ...", or a feature in its own words) rather than compile it
+# wrong -- docs/limitations.md counts that a gap -- so a refusal (label
+# compile-error) is reported in the `refused` tier. A difference
+# docs/limitations.md describes as the answer on purpose (a probe's
+# DOCUMENTED list) is reported in the `documented` tier, citing it.
 # Everything else that differs is `wrong`: another answer, exception, order of
 # evaluation or exit status (output-diff), C that does not build (link-error:
 # the compiler should have refused), a compiler that fails without naming a
@@ -553,19 +554,19 @@ module ProbeCommon
       unless !timed_out && status.success?
         # C that does not build first: its diagnostics can quote generated C
         # that says "unsupported". A refusal is the compiler's own line naming
-        # the construct at a Ruby line, or its tally of them.
-        refusal = /^spinel: (?:\S+\.rb:\d+: )?unsupported /
+        # the construct at a Ruby line ("unsupported ...", or a feature in its
+        # own words: "a String is not yet shared by reference through ..."),
+        # which a warning or a note is not, or its tally of them.
+        refusal = /^spinel: (?:\S+\.rb:\d+: (?!warning: |note: )|unsupported )/
         tally = /\d+ refusals?, nothing written/
         label = if !timed_out && status.signaled? then "compiler-failure"
                 elsif build.include?("C compilation failed") then "link-error"
                 elsif build.match?(refusal) || build.match?(tally) then "compile-error"
                 else "compiler-failure"
                 end
-        # Under a tally every line of the compiler's at a Ruby line is a
-        # refusal, whether or not it says "unsupported", and the first one is
-        # the failure: the tally counts the program's refusals, so it changes
-        # as the program is split and would not name what its parts show.
-        refusal = /^spinel: (?:\S+\.rb:\d+: |unsupported )/ if build.match?(tally)
+        # The first refusal is the failure, not the tally: it counts the
+        # program's refusals, so it changes as the program is split and would
+        # not name what its parts show.
         first = build.lines.find { |l| l.include?("error:") || l.match?(refusal) }
         first ||= if timed_out then "spinel ran past 600s"
                   elsif status.signaled? then "spinel died of SIG#{Signal.signame(status.termsig)}"
