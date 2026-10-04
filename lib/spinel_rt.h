@@ -237,6 +237,12 @@ SP_NORETURN SP_COLD void sp_raise_nil_cmp(int left_nil, const char *op, const ch
   if (SP_UNLIKELY((a) == SP_INT_NIL || (b) == SP_INT_NIL)) sp_raise_nil_cmp((a) == SP_INT_NIL, op, "Integer")
 #define SP_FLOAT_NIL_CMP_CK(a, b, op) \
   if (SP_UNLIKELY(sp_float_is_nil(a) || sp_float_is_nil(b))) sp_raise_nil_cmp(sp_float_is_nil(a), op, "Float")
+/* Array#to_a and Kernel#Array on an Array slot, whose nil is NULL: the
+   Array itself, and [] for nil, which nil.to_a and Array(nil) are. */
+static inline sp_IntArray *sp_IntArray_to_a(sp_IntArray *a) { return a ? a : sp_IntArray_new(); }
+static inline sp_FloatArray *sp_FloatArray_to_a(sp_FloatArray *a) { return a ? a : sp_FloatArray_new(); }
+static inline sp_StrArray *sp_StrArray_to_a(sp_StrArray *a) { return a ? a : sp_StrArray_new(); }
+static inline sp_PolyArray *sp_PolyArray_to_a(sp_PolyArray *a) { return a ? a : sp_PolyArray_new(); }
 /* The Float twin of SP_INT_NIL_CK: a nullable Float slot's nil is a NaN
    payload the hardware carries through every arithmetic operator, so
    `nil + 1.0` computed a NaN that read back as nil instead of raising.

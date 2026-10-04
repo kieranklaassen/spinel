@@ -114,6 +114,7 @@ typedef enum {
   BOPE_ARRAY_SUM0,        /* Array#sum without a seed or a block */
   BOPE_ARRAY_COMPACT_BANG, /* Array#compact! / #flatten! with no depth */
   BOPE_ARRAY_FLATTEN,     /* Array#flatten / #flatten(depth) / #flatten!(depth) */
+  BOPE_ARRAY_TO_A,        /* Array#to_a */
   BOPE_ARRAY_PUSH,        /* Array#push / << / append of one value (poly) */
   BOPE_ARRAY_INSERT_N,    /* Array#insert(i, v...) (poly) */
   BOPE_ARRAY_TRANSPOSE,   /* Array#transpose (poly) */

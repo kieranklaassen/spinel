@@ -837,6 +837,28 @@ int emit_op_array_compact_bang(Compiler *c, const BopCtx *x, Buf *b) {
 }
 
 /* Array#flatten / #flatten(depth) / #flatten!(depth) */
+/* 0 where `v` is certainly an Array: a literal, or a call that builds a new
+   one. A nil in an Array slot is NULL, and anything else (a variable, a
+   slice, a method's return) can be one. */
+int array_expr_may_be_nil(Compiler *c, int v) {
+  v = unwrap_parens(c, v);
+  if (v < 0 || nt_kind(c->nt, v) == NK_ArrayNode) return 0;
+  return !is_fresh_array(c, v);
+}
+
+/* `v` as Array#to_a and Kernel#Array answer it: the Array itself, and []
+   for nil. An Array of objects or of rows is handed on as it is. */
+void emit_array_to_a(Compiler *c, int v, Buf *b) {
+  TyKind t = comp_ntype(c, v);
+  const char *k = t == TY_POLY_ARRAY ? "Poly" : array_kind(t);
+  if (!k || !array_expr_may_be_nil(c, v)) { emit_expr(c, v, b); return; }
+  buf_printf(b, "sp_%sArray_to_a(", k); emit_expr(c, v, b); buf_puts(b, ")");
+}
+int emit_op_array_to_a(Compiler *c, const BopCtx *x, Buf *b) {
+  emit_array_to_a(c, x->recv, b);
+  return 1;
+}
+
 int emit_op_array_flatten(Compiler *c, const BopCtx *x, Buf *b) {
   const NodeTable *nt = c->nt;
   const char *name = x->name;

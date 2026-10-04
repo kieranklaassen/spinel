@@ -240,6 +240,7 @@ static int (*const bop_emitters[BOPE__COUNT])(Compiler *, const BopCtx *, Buf *)
   [BOPE_ARRAY_SUM0] = emit_op_array_sum0,
   [BOPE_ARRAY_COMPACT_BANG] = emit_op_array_compact_bang,
   [BOPE_ARRAY_FLATTEN] = emit_op_array_flatten,
+  [BOPE_ARRAY_TO_A] = emit_op_array_to_a,
   [BOPE_ARRAY_PUSH] = emit_op_array_push,
   [BOPE_ARRAY_INSERT_N] = emit_op_array_insert_n,
   [BOPE_ARRAY_TRANSPOSE] = emit_op_array_transpose,
