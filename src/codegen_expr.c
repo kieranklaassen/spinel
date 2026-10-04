@@ -3928,7 +3928,8 @@ static void emit_expr_node(Compiler *c, int id, Buf *b) {
        supplies a value. When it can, declare a poly result temp defaulting to
        nil, point the break-value target at it while emitting the loop, and yield
        the temp. */
-    if (loop_has_valued_break(c, nt_ref(nt, id, "statements"))) {
+    if (loop_has_valued_break(c, nt_ref(nt, id, "statements")) ||
+        loop_has_valued_break(c, nt_ref(nt, id, "predicate"))) {
       int tr = ++g_tmp;
       const char *saved_bv = g_loop_break_var;
       int saved_rp = g_ie_res_poly;

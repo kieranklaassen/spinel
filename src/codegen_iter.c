@@ -3785,37 +3785,39 @@ int subtree_owns_redo(const NodeTable *nt, int body, int redo) {
    ownership rule as subtree_has_own_redo. With `next` >= 0 the answer is for
    that one node. A nested iteration owns its body, not what is evaluated in
    this block before it runs: the receiver, the arguments and a `&blk` of a
-   call with a block, and the collection of a `for`, are looked through. */
-static int subtree_has_own_next_ex(const NodeTable *nt, int id, int next) {
+   call with a block, and the collection of a `for`, are looked through.
+   `jty` is the node asked for: a `break` has the same owner. */
+static int subtree_has_own_jump_ex(const NodeTable *nt, int id, const char *jty, int next) {
   if (id < 0) return 0;
   const char *ty = nt_type(nt, id);
   if (!ty) return 0;
-  if (sp_streq(ty, "NextNode")) return next < 0 || id == next;
+  if (sp_streq(ty, jty)) return next < 0 || id == next;
   if (sp_streq(ty, "DefNode") || sp_streq(ty, "ClassNode") || sp_streq(ty, "ModuleNode") ||
       sp_streq(ty, "WhileNode") || sp_streq(ty, "UntilNode") || sp_streq(ty, "LambdaNode"))
     return 0;
   if (sp_streq(ty, "ForNode"))
-    return subtree_has_own_next_ex(nt, nt_ref(nt, id, "collection"), next);
+    return subtree_has_own_jump_ex(nt, nt_ref(nt, id, "collection"), jty, next);
   int blk = sp_streq(ty, "CallNode") ? nt_ref(nt, id, "block") : -1;
   if (blk >= 0) {
     const char *bty = nt_type(nt, blk);
-    return subtree_has_own_next_ex(nt, nt_ref(nt, id, "receiver"), next) ||
-           subtree_has_own_next_ex(nt, nt_ref(nt, id, "arguments"), next) ||
-           (bty && sp_streq(bty, "BlockArgumentNode") && subtree_has_own_next_ex(nt, blk, next));
+    return subtree_has_own_jump_ex(nt, nt_ref(nt, id, "receiver"), jty, next) ||
+           subtree_has_own_jump_ex(nt, nt_ref(nt, id, "arguments"), jty, next) ||
+           (bty && sp_streq(bty, "BlockArgumentNode") && subtree_has_own_jump_ex(nt, blk, jty, next));
   }
   int nr = nt_num_refs(nt, id);
-  for (int i = 0; i < nr; i++) if (subtree_has_own_next_ex(nt, nt_ref_at(nt, id, i), next)) return 1;
+  for (int i = 0; i < nr; i++) if (subtree_has_own_jump_ex(nt, nt_ref_at(nt, id, i), jty, next)) return 1;
   int na = nt_num_arrs(nt, id);
   for (int i = 0; i < na; i++) {
     int n = 0; const int *ids = nt_arr_at(nt, id, i, &n);
-    for (int k = 0; k < n; k++) if (subtree_has_own_next_ex(nt, ids[k], next)) return 1;
+    for (int k = 0; k < n; k++) if (subtree_has_own_jump_ex(nt, ids[k], jty, next)) return 1;
   }
   return 0;
 }
-int subtree_has_own_next(const NodeTable *nt, int id) { return subtree_has_own_next_ex(nt, id, -1); }
+int subtree_has_own_next(const NodeTable *nt, int id) { return subtree_has_own_jump_ex(nt, id, "NextNode", -1); }
 int subtree_owns_next(const NodeTable *nt, int body, int next) {
-  return next >= 0 && subtree_has_own_next_ex(nt, body, next);
+  return next >= 0 && subtree_has_own_jump_ex(nt, body, "NextNode", next);
 }
+int subtree_has_own_break(const NodeTable *nt, int id) { return subtree_has_own_jump_ex(nt, id, "BreakNode", -1); }
 
 /* Mark every `next` written where the value of `id` is: `id` itself, the
    last statement of a sequence, an arm of an `if`, `unless`, `case` or

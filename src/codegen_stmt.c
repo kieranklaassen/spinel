@@ -6686,6 +6686,24 @@ static void hc_close(HcRegion *r, const char *loop, Buf *b, int indent) {
   }
 }
 
+/* A loop's condition into `out`. A `next` or a `break` written in it is the
+   loop's own (`own_jump`): CRuby tests the condition again, or leaves the
+   loop. It is emitted as the body is (emit_loop_body), a C `continue` or
+   `break`, and the caller writes the condition inside the C loop. Outside it
+   the jump did not build, or was the enclosing loop's. */
+static void emit_loop_cond(Compiler *c, int pred, int own_jump, Buf *out) {
+  if (!own_jump) { emit_cond(c, pred, out); return; }
+  int sv_lexc = g_loop_exc_base, sv_lens = g_loop_ensure_base;
+  const char *sv_nxv = g_ie_next_var; TyKind sv_nxt = g_ie_next_ty;
+  g_loop_exc_base = g_exc_frame_depth; g_loop_ensure_base = g_ensure_depth;
+  g_ie_next_var = NULL; g_ie_next_ty = TY_UNKNOWN;
+  g_c_loop_depth++;
+  emit_cond(c, pred, out);
+  g_c_loop_depth--;
+  g_ie_next_var = sv_nxv; g_ie_next_ty = sv_nxt;
+  g_loop_exc_base = sv_lexc; g_loop_ensure_base = sv_lens;
+}
+
 void emit_while(Compiler *c, int id, Buf *b, int indent, int is_until) {
   const NodeTable *nt = c->nt;
   int prev_stmt = g_stmt_cur == id ? g_stmt_prev : -1;
@@ -6694,6 +6712,7 @@ void emit_while(Compiler *c, int id, Buf *b, int indent, int is_until) {
   /* PM_LOOP_FLAGS_BEGIN_MODIFIER (bit 2 == 4): `begin..end while cond` is a
      post-test loop -- the body runs at least once before the guard is tested. */
   int post_test = (int)(nt_int(nt, id, "flags", 0) & 4) ? 1 : 0;
+  int cond_jump = subtree_has_own_next(nt, pred) || subtree_has_own_break(nt, pred);
   if (post_test) {
     emit_indent(b, indent);
     buf_puts(b, "do {\n");
@@ -6705,16 +6724,24 @@ void emit_while(Compiler *c, int id, Buf *b, int indent, int is_until) {
     Buf ccond; memset(&ccond, 0, sizeof ccond);
     Buf *sv_pre = g_pre; int sv_ind = g_indent;
     g_pre = &cpre; g_indent = indent + 1;
-    emit_cond(c, pred, &ccond);
+    emit_loop_cond(c, pred, cond_jump, &ccond);
     g_pre = sv_pre; g_indent = sv_ind;
     int has_pre = cpre.p && cpre.p[0];
     emit_indent(b, indent);
     buf_puts(b, "} while (");
-    if (has_pre) { buf_puts(b, "({\n"); buf_puts(b, cpre.p); emit_indent(b, indent + 1); }
+    /* a jump in the guard gets a C loop of its own around it: a `next`
+       tests the guard again, and a `break` leaves with the answer that
+       ends the loop */
+    int tj = cond_jump ? ++g_tmp : 0;
+    if (cond_jump) buf_printf(b, "({ int _t%d; for (;;) { _t%d = 0;\n", tj, tj);
+    else if (has_pre) buf_puts(b, "({\n");
+    if (has_pre) { buf_puts(b, cpre.p); emit_indent(b, indent + 1); }
+    if (cond_jump) buf_printf(b, "_t%d = ", tj);
     if (is_until) buf_puts(b, "!(");
     buf_puts(b, ccond.p ? ccond.p : "0");
     if (is_until) buf_puts(b, ")");
-    if (has_pre) buf_puts(b, "; })");
+    if (cond_jump) buf_printf(b, "; break; } _t%d; })", tj);
+    else if (has_pre) buf_puts(b, "; })");
     buf_puts(b, ");\n");
     free(cpre.p); free(ccond.p);
     return;
@@ -6766,20 +6793,23 @@ void emit_while(Compiler *c, int id, Buf *b, int indent, int is_until) {
   Buf ccond; memset(&ccond, 0, sizeof ccond);
   Buf *sv_pre = g_pre; int sv_ind = g_indent;
   g_pre = &cpre; g_indent = indent + 1;
-  emit_cond(c, pred, &ccond);
+  emit_loop_cond(c, pred, cond_jump, &ccond);
   g_pre = sv_pre; g_indent = sv_ind;
+  /* a condition with a jump of the loop's own is tested inside the C loop,
+     as one with a prelude is */
+  int cond_in_loop = (cpre.p && cpre.p[0]) || cond_jump;
   /* a proved loop polls ahead of its test (hc_bounded_index); a condition with
      a prelude has no single test to put them ahead of, so it keeps its checks */
-  int polls_in_cond = use_hc && hcr.bi[0] && !(cpre.p && cpre.p[0]) && (g_uses_threads || g_uses_finalizers);
-  if (use_hc && hcr.bi[0] && cpre.p && cpre.p[0]) hcr.bi[0] = 0;
+  int polls_in_cond = use_hc && hcr.bi[0] && !cond_in_loop && (g_uses_threads || g_uses_finalizers);
+  if (use_hc && hcr.bi[0] && cond_in_loop) hcr.bi[0] = 0;
   if (use_hc && hcr.bi[0]) {
     Buf hcc; memset(&hcc, 0, sizeof hcc);
     if (hc_bounded_cond(c, pred, &hcc)) { free(ccond.p); ccond = hcc; }
     else free(hcc.p);
   }
-  if (cpre.p && cpre.p[0]) {
+  if (cond_in_loop) {
     emit_indent(b, indent); buf_puts(b, "while (1) {\n");
-    buf_puts(b, cpre.p);
+    buf_puts(b, cpre.p ? cpre.p : "");
     emit_indent(b, indent + 1);
     buf_puts(b, "if (");
     if (!is_until) buf_puts(b, "!(");
@@ -13041,7 +13071,8 @@ void emit_stmt_tail_inner(Compiler *c, int id, Buf *b, int indent) {
   if ((sp_streq(ty, "InstanceVariableWriteNode") && !_iv_tail_val) ||
       sp_streq(ty, "ConstantWriteNode") ||
       ((sp_streq(ty, "WhileNode") || sp_streq(ty, "UntilNode")) &&
-       !loop_has_valued_break(c, nt_ref(nt, id, "statements"))) ||
+       !loop_has_valued_break(c, nt_ref(nt, id, "statements")) &&
+       !loop_has_valued_break(c, nt_ref(nt, id, "predicate"))) ||
       (sp_streq(ty, "CallNode") && nt_ref(nt, id, "receiver") < 0 &&
        /* the statement form drops the call's value: only the outputs whose
           value is nil take it; `system` answers the command's success and
