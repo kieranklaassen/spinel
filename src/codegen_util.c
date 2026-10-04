@@ -2448,12 +2448,44 @@ int sb_local_shim_open(Compiler *c, int recv, char *sref, size_t cap, SbLocalSav
   snprintf(g_ren_from[g_nren], sizeof g_ren_from[0], "%s", sbn);
   snprintf(g_ren_to[g_nren], sizeof g_ren_to[0], "_sb%d", tH);
   g_nren++;
+  /* what the re-run hoists is kept apart until the close knows where it goes */
+  sv->t = tH; sv->pre_at = g_pre;
+  memset(&sv->pre, 0, sizeof sv->pre);
+  if (g_pre) g_pre = &sv->pre;
   return tH;
 }
-void sb_local_shim_close(const SbLocalSave *sv) {
+/* Close it. What the re-run hoisted goes ahead of the statement, where it
+   would be without the shim. An argument that reads the local from a hoisted
+   statement (a block's inlined loop, an interpolation's parts) reads the
+   shadow there, and the shadow is declared inside the shim: those statements
+   are answered instead, for the caller to put after that declaration and to
+   free. */
+char *sb_local_shim_close(SbLocalSave *sv, int handled) {
   g_nren--;
   if (sv->cap_at >= 0) sv->caps->v[sv->cap_at] = sv->cap_nm;
   sv->lv->type = sv->ty; sv->lv->is_cell = sv->cell;
+  g_pre = sv->pre_at;
+  if (!sv->pre.p || !sv->pre.len) { free(sv->pre.p); return NULL; }
+  char nm[32];
+  int nl = snprintf(nm, sizeof nm, "lv__sb%d", sv->t);
+  for (const char *q = handled ? strstr(sv->pre.p, nm) : NULL; q; q = strstr(q + nl, nm))
+    if (!isdigit((unsigned char)q[nl])) return sv->pre.p;
+  buf_puts(g_pre, sv->pre.p);
+  free(sv->pre.p);
+  return NULL;
+}
+/* The head of the shim in value position: the handle, its frozen check and
+   the shadow. `pre` is what the close answered, freed here: it runs after the
+   shadow's declaration and, an argument of the call, before the check. */
+void sb_local_shim_head(Buf *b, int tH, const char *sref, char *pre) {
+  buf_printf(b, "({ sp_String *_t%d = %s;", tH, sref);
+  if (!pre) buf_printf(b, " if (sp_String_is_frozen(_t%d)) sp_raise_frozen_str(_t%d->data);", tH, tH);
+  buf_printf(b, " const char *lv__sb%d = sp_str_concat(sp_String_cstr(_t%d), (&(\"\\xff\")[1]));"
+                " SP_GC_ROOT(lv__sb%d); ", tH, tH, tH);
+  if (!pre) return;
+  buf_puts(b, pre);
+  free(pre);
+  buf_printf(b, "if (sp_String_is_frozen(_t%d)) sp_raise_frozen_str(_t%d->data); ", tH, tH);
 }
 const char *g_sb_iv_name = NULL;
 int         g_sb_iv_cid  = -1;

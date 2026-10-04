@@ -13568,13 +13568,24 @@ static int str_mut_recv_assignable(Compiler *c, int recv) {
   return nt_kind(c->nt, recv) == NK_SelfNode || str_mut_var_recv(c, recv);
 }
 
-static void emit_sb_shim_swap(Buf *b, int indent, int tH, char *arm) {
-  emit_indent(b, indent + 1);
-  buf_printf(b, "if (sp_String_is_frozen(_t%d)) sp_raise_frozen_str(_t%d->data);\n", tH, tH);
+/* `pre`, when given, is what the arm's re-run hoisted that reads the shadow:
+   it runs after the shadow's declaration and, an argument of the call, before
+   the frozen check. */
+static void emit_sb_shim_swap(Buf *b, int indent, int tH, char *pre, char *arm) {
+  if (!pre) {
+    emit_indent(b, indent + 1);
+    buf_printf(b, "if (sp_String_is_frozen(_t%d)) sp_raise_frozen_str(_t%d->data);\n", tH, tH);
+  }
   emit_indent(b, indent + 1);
   buf_printf(b, "const char *lv__sb%d = sp_str_concat(sp_String_cstr(_t%d), (&(\"\\xff\")[1]));\n", tH, tH);
   emit_indent(b, indent + 1);
   buf_printf(b, "SP_GC_ROOT(lv__sb%d);\n", tH);
+  if (pre) {
+    buf_puts(b, pre);
+    free(pre);
+    emit_indent(b, indent + 1);
+    buf_printf(b, "if (sp_String_is_frozen(_t%d)) sp_raise_frozen_str(_t%d->data);\n", tH, tH);
+  }
   buf_puts(b, arm ? arm : "");
   free(arm);
   emit_indent(b, indent + 1);
@@ -14351,7 +14362,7 @@ static int str_mutate_shared_arms(Compiler *c, int id, Buf *b, int indent, const
       else {
         emit_indent(b, indent);
         buf_printf(b, "{ sp_String *_t%d = %s;\n", tH, srefR);
-        emit_sb_shim_swap(b, indent, tH, armb.p);
+        emit_sb_shim_swap(b, indent, tH, NULL, armb.p);
         return 1;
       }
     }
@@ -14386,7 +14397,7 @@ static int str_mutate_shared_arms(Compiler *c, int id, Buf *b, int indent, const
         else {
           emit_indent(b, indent);
           buf_printf(b, "{ sp_String *_t%d = %s;\n", tH, srefI);
-          emit_sb_shim_swap(b, indent, tH, armb.p);
+          emit_sb_shim_swap(b, indent, tH, NULL, armb.p);
           return 1;
         }
       }
@@ -14397,12 +14408,12 @@ static int str_mutate_shared_arms(Compiler *c, int id, Buf *b, int indent, const
     if (tH) {
       Buf armb; memset(&armb, 0, sizeof armb);
       int handled = emit_array_mutate_stmt(c, id, &armb, indent + 1);
-      sb_local_shim_close(&svL);
+      char *preL = sb_local_shim_close(&svL, handled);
       if (!handled) { free(armb.p); }
       else {
         emit_indent(b, indent);
         buf_printf(b, "{ sp_String *_t%d = %s;\n", tH, srefL);
-        emit_sb_shim_swap(b, indent, tH, armb.p);
+        emit_sb_shim_swap(b, indent, tH, preL, armb.p);
         return 1;
       }
     }

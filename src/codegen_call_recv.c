@@ -3900,15 +3900,11 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
       if (tH) {
         Buf armb; memset(&armb, 0, sizeof armb);
         int handled = emit_array_call(c, id, &armb);
-        sb_local_shim_close(&svL);
+        char *preL = sb_local_shim_close(&svL, handled);
         if (!handled) { free(armb.p); }
         else {
           TyKind resty = comp_ntype(c, id);
-          buf_printf(b, "({ sp_String *_t%d = %s;"
-                        " if (sp_String_is_frozen(_t%d)) sp_raise_frozen_str(_t%d->data);"
-                        " const char *lv__sb%d = sp_str_concat(sp_String_cstr(_t%d), (&(\"\\xff\")[1]));"
-                        " SP_GC_ROOT(lv__sb%d); ",
-                     tH, srefL, tH, tH, tH, tH, tH);
+          sb_local_shim_head(b, tH, srefL, preL);
           emit_ctype(c, resty == TY_UNKNOWN || resty == TY_VOID ? TY_STRING : resty, b);
           buf_printf(b, " _res%d = %s;", tH, armb.p ? armb.p : "0");
           free(armb.p);
@@ -7878,16 +7874,12 @@ static int emit_scalar_call_arms(Compiler *c, int id, Buf *b) {
       if (tH) {
         Buf armb; memset(&armb, 0, sizeof armb);
         int handled = emit_scalar_call(c, id, &armb);
-        sb_local_shim_close(&svL);
+        char *preL = sb_local_shim_close(&svL, handled);
         if (!handled) { free(armb.p); }
         else {
-          buf_printf(b, "({ sp_String *_t%d = %s;"
-                        " if (sp_String_is_frozen(_t%d)) sp_raise_frozen_str(_t%d->data);"
-                        " const char *lv__sb%d = sp_str_concat(sp_String_cstr(_t%d), (&(\"\\xff\")[1]));"
-                        " SP_GC_ROOT(lv__sb%d);"
-                        " sp_int _res%d = %s;"
+          sb_local_shim_head(b, tH, srefL, preL);
+          buf_printf(b, "sp_int _res%d = %s;"
                         " sp_String_set_bin(_t%d, lv__sb%d); _res%d; })",
-                     tH, srefL, tH, tH, tH, tH, tH,
                      tH, armb.p ? armb.p : "0", tH, tH, tH);
           free(armb.p);
           return 1;
