@@ -26024,7 +26024,7 @@ static int du_first_write(const NodeTable *nt, int stmts, const char *nm) {
    referrer comes last, then walked a read up into that dead copy and found
    no write ahead of it. A node the program does not reach keeps
    an_parent_map's answer. */
-static int *du_parent_map(const NodeTable *nt) {
+int *du_parent_map(const NodeTable *nt) {
   int *par = an_parent_map(nt);
   if (!par) return NULL;
   char *seen = calloc((size_t)nt->count + 1, 1);

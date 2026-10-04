@@ -1724,11 +1724,17 @@ int desugar_compose_method_operand(Compiler *c) {
      (@v ||= e).m(x)    ->  ((@v ||= e; @v.m(x)))
      (a || b).m(x)      ->  ((a ? a.m(x) : b.m(x)))     a variable's read
      s.to_s.m(x)        ->  s.m(x)                      s a String
+     (c ? a : b).m(x).n(y)  ->  ((c ? a.m(x).n(y) : b.m(x).n(y)))
 
    The receiver still runs first and the arguments after it, once on each
    path. Only a String-typed receiver is rewritten, so other programs keep
    their tree; a conditional missing an arm (whose value is nil), a call
-   with a block and an argument holding one are left alone. */
+   with a block and an argument holding one are left alone.
+
+   A chain of such calls on a conditional moves into its arms as one.
+   Moved a call a round, each left a paren the next link had to cross, at
+   twice the rounds of the link before: the eighth was still outside when
+   the fixpoint's rounds ran out, and its change was lost. */
 static int mrv_no_scope(const NodeTable *nt, int root, int depth) {
   if (root < 0 || root >= nt->count) return 1;
   if (depth > 200) return 0;
@@ -1887,9 +1893,23 @@ static int mrv_then_self(Compiler *c, int r) {
     if (c->nscope[w] == si && sp_streq(nt_str(nt, w, "name"), zn)) return 0;
   return 1;
 }
+/* The call `x` is sent to, when it is one that can move along with `x`:
+   a String mutator with no block, no argument writing a variable or
+   holding a scope -- the rules a call moves by on its own. -1 for none.
+   `par` may be older than the tree, so its answer is asked of the node. */
+static int mrv_link_over(Compiler *c, const int *par, int pn, int x) {
+  const NodeTable *nt = c->nt;
+  int p = x < pn ? par[x] : -1;
+  if (p < 0 || nt_kind(nt, p) != NK_CallNode || nt_ref(nt, p, "receiver") != x || nt_ref(nt, p, "block") >= 0) return -1;
+  const char *nm = nt_str(nt, p, "name");
+  int args = nt_ref(nt, p, "arguments");
+  if (!nm || !sp_str_mutator(nm, SP_MUT_LOCAL) || mrv_writes(nt, args, NULL, 0) || !mrv_no_scope(nt, args, 0)) return -1;
+  return mrv_is_string(infer_type(c, x)) ? p : -1;
+}
 int desugar_mutator_receiver_value(Compiler *c) {
   NodeTable *nt = (NodeTable *)c->nt;
   int n0 = nt->count, changed = 0;
+  int *par = NULL, pn = 0;
   for (int id = 0; id < n0; id++) {
     if (nt_kind(nt, id) != NK_CallNode) continue;
     const char *nm = nt_str(nt, id, "name");
@@ -1988,16 +2008,30 @@ int desugar_mutator_receiver_value(Compiler *c) {
         if (!mrv_paren_value(nt, bb[bn - 1])) continue;
       }
     }
+    /* the links of a chain over this call go with it, up to the first
+       that cannot: `head` is the outermost that does */
+    if (!par) { par = du_parent_map(nt); pn = nt->count; }
+    int head = id;
+    for (int p; par && (p = mrv_link_over(c, par, pn, head)) >= 0; ) head = p;
     int base = nt->count;
-    long long line = nt_int(nt, id, "node_line", 0), file = nt_int(nt, id, "node_file", 0);
-    /* the call without its receiver and arguments, copied once per path */
+    long long line = nt_int(nt, head, "node_line", 0), file = nt_int(nt, head, "node_file", 0);
+    /* the outermost call without its receiver and arguments, copied once
+       per path, and the links under it down to this one */
+    int rest = head == id ? -1 : nt_ref(nt, head, "receiver");
+    args = nt_ref(nt, head, "arguments");
     nt_node_set_ref(nt, id, "receiver", -1);
-    nt_node_set_ref(nt, id, "arguments", -1);
-    int paths = rk == NK_OrNode ? 2 : na, shells[64];
+    nt_node_set_ref(nt, head, "receiver", -1);
+    nt_node_set_ref(nt, head, "arguments", -1);
+    int paths = rk == NK_OrNode ? 2 : na, shells[64], ends[64];
     for (int k = 0; k < paths; k++) {
-      shells[k] = nt_clone_subtree(nt, id);
+      shells[k] = nt_clone_subtree(nt, head);
       int ak = k == 0 ? args : (args >= 0 ? nt_clone_subtree(nt, args) : -1);
       nt_node_set_ref(nt, shells[k], "arguments", ak);
+      /* the innermost link of each copy takes the path's receiver */
+      ends[k] = shells[k];
+      if (rest < 0) continue;
+      nt_node_set_ref(nt, shells[k], "receiver", k == 0 ? rest : nt_clone_subtree(nt, rest));
+      while (nt_ref(nt, ends[k], "receiver") >= 0) ends[k] = nt_ref(nt, ends[k], "receiver");
     }
     int top = r;
     if (rk == NK_OrNode) {
@@ -2018,10 +2052,10 @@ int desugar_mutator_receiver_value(Compiler *c) {
         scope_local_intern(comp_scope_of(c, id), tname);
       }
       nt_node_set_ref(nt, iff, "predicate", pred);
-      nt_node_set_ref(nt, shells[0], "receiver", re);
+      nt_node_set_ref(nt, ends[0], "receiver", re);
       nt_node_set_arr(nt, s1, "body", &shells[0], 1);
       nt_node_set_ref(nt, iff, "statements", s1);
-      nt_node_set_ref(nt, shells[1], "receiver", nt_ref(nt, r, "right"));
+      nt_node_set_ref(nt, ends[1], "receiver", nt_ref(nt, r, "right"));
       nt_node_set_arr(nt, s2, "body", &shells[1], 1);
       nt_node_set_ref(nt, el, "statements", s2);
       nt_node_set_ref(nt, iff, "subsequent", el);
@@ -2036,11 +2070,11 @@ int desugar_mutator_receiver_value(Compiler *c) {
         memcpy(body, bb, sizeof(int) * (size_t)bn);
         int last = body[bn - 1], tr = mrv_target_read(nt, last);
         if (tr >= 0) {
-          nt_node_set_ref(nt, shells[k], "receiver", tr);
+          nt_node_set_ref(nt, ends[k], "receiver", tr);
           body[bn++] = shells[k];
         }
         else {
-          nt_node_set_ref(nt, shells[k], "receiver", last);
+          nt_node_set_ref(nt, ends[k], "receiver", last);
           body[bn - 1] = shells[k];
         }
         nt_node_set_arr(nt, arms[k], "body", body, bn);
@@ -2048,14 +2082,15 @@ int desugar_mutator_receiver_value(Compiler *c) {
     /* the call's node is the value now: a paren around it */
     int st = nt_new_node(nt, "StatementsNode");
     nt_node_set_arr(nt, st, "body", &top, 1);
-    nt_node_reset(nt, id, "ParenthesesNode");
-    nt_node_set_ref(nt, id, "body", st);
-    if (line > 0) { nt_node_set_int(nt, id, "node_line", line); nt_node_set_int(nt, id, "node_file", file); }
+    nt_node_reset(nt, head, "ParenthesesNode");
+    nt_node_set_ref(nt, head, "body", st);
+    if (line > 0) { nt_node_set_int(nt, head, "node_line", line); nt_node_set_int(nt, head, "node_file", file); }
     comp_grow_node_arrays(c);
-    int encl = c->nscope[id];
+    int encl = c->nscope[head];
     for (int j = base; j < nt->count; j++) c->nscope[j] = encl;
     changed = 1;
   }
+  free(par);
   return changed;
 }
 
