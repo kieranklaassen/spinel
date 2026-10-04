@@ -125,6 +125,8 @@ int poly_blockless_enum_name(const char *name);
    cannot say -- an `Integer?` and an `Integer` are both TY_INT -- so codegen
    asks this before choosing between sp_box_int and sp_box_int_or_nil at a poly
    boundary. Valid only after analyze_program has settled the marking. */
+/* The kinds of nil nullable_int_value answers and the marks hold (0: none) */
+enum { NIL_MISSED = 1, NIL_WRITTEN = 2 };
 int nullable_int_value(Compiler *c, int id);
 /* The same, asked of the variable rather than of the read: what it can hold
    anywhere, the nil narrowing's facts left out. */

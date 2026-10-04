@@ -72,6 +72,7 @@ typedef struct { char msg[256]; int *cis; int ncis; } CtorArityArm;
 typedef struct { CtorArityArm *arms; int narms; } CtorArityArms;
 void emit_bigint_operand(Compiler *c, int node, Buf *b);
 int cmp_operand_may_be_nil(Compiler *c, int id);
+int operand_nil_written(Compiler *c, int id);
 int emit_poly_isa_test(Compiler *c, const char *cn, const char *v, int exact, Buf *b);
 void emit_pre_root(Compiler *c, TyKind t, int tmp);
 int emit_scalar_class_test(Compiler *c, int node, TyKind t, const char *cn, int exact, Buf *b);

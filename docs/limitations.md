@@ -479,6 +479,15 @@ index, a count, a width -- is `no implicit conversion from nil to integer`
 carry the sentinel, so a loop counting from a literal keeps its bare
 compare and its bare index.
 
+The bit operators test less. A shift tests its receiver. `&`, `|`, `^` and
+`~` test only for a `nil` the program wrote -- a `nil` literal, an arm with
+no value, a slot one was written to -- and raise as CRuby's do on it. A
+`nil` a read missed (`a[9] & 1`, `h[k] | 1`) still computes on the
+sentinel: that test would cost the bit-twiddling loops a branch per element
+read. A `nil` receiver of `&`, `|` or `^` answers `true` or `false` in
+CRuby (`NilClass#&`), which the Integer slot of the result cannot hold, so
+it raises `NotImplementedError`.
+
 What is left is the sentinel reaching a slot through a shape the analysis
 does not mark: a `Range` VALUE built from one (`r = (h[k]..); s[r]`) still
 slices from the raw sentinel rather than reading as the beginless Range a

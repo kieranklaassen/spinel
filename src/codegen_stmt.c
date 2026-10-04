@@ -2098,12 +2098,12 @@ static int emit_nilfree_operand(Compiler *c, int v, const char *op, Buf *b) {
 
    A Float slot's nil is a NaN payload every C operator carries through, so
    `x += 1` on a nil Float answered nil where the binary `x + 1` raises
-   (SP_FLOAT_NIL_CK). `lhs_nil` says the slot can hold nil (its nullable
-   mark), and a rhs the marks call nilable is tested too: the same raise as
-   the binary form. Two Floats under + - * / test the result for NaN and
-   look at the operands only then (SP_FLOAT_NIL_CK_NAN); otherwise each side
-   that can be nil is tested. The caller has emitted the indent. Answers 1
-   when it emitted the write. */
+   (SP_FLOAT_NIL_CK). `lhs_nil` is the slot's nullable mark, 0 where it
+   cannot hold nil, and a rhs the marks call nilable is tested too: the same
+   raise as the binary form. Two Floats under + - * / test the result for
+   NaN and look at the operands only then (SP_FLOAT_NIL_CK_NAN); otherwise
+   each side that can be nil is tested. The caller has emitted the indent.
+   Answers 1 when it emitted the write. */
 int emit_scalar_op_assign(Compiler *c, const char *lval, TyKind t, const char *op,
                           int v, int capture, int lhs_nil, Buf *b) {
   const NodeTable *nt = c->nt;
@@ -2211,6 +2211,18 @@ int emit_scalar_op_assign(Compiler *c, const char *lval, TyKind t, const char *o
       buf_printf(b, "%s = sp_int_%s_ck(%s, (%s));", lval, sp_streq(op, "<<") ? "shl" : "shr", sb.p, rhs);
     else buf_printf(b, "%s = (%s %s (%s));", lval, sb.p, op, rhs);
     free(sb.p);
+  }
+  /* &=, |= or ^= on a slot, or with a right side, that can be a nil the
+     program wrote: tested as the binary form tests them (the slot first),
+     where the sentinel was read as a number and `x ^= 1` of a nil x
+     answered -9223372036854775807 */
+  else if (bitop && (lhs_nil == NIL_WRITTEN || (vt == TY_INT && nullable_int_value(c, v) == NIL_WRITTEN))) {
+    int k = ++g_tmp;
+    char l9[32] = "0", r9[32] = "0";
+    if (lhs_nil == NIL_WRITTEN) snprintf(l9, sizeof l9, "_t%d", k);
+    if (vt == TY_INT && nullable_int_value(c, v) == NIL_WRITTEN) snprintf(r9, sizeof r9, "_t%d_r", k);
+    buf_printf(b, "{ sp_int _t%d = %s, _t%d_r = %s; SP_INT_NIL_BIT_CK(%s, %s, \"%s\"); %s = _t%d %s _t%d_r; }",
+               k, src, k, rhs, l9, r9, op, lval, k, op, k);
   }
   else if (bitop) buf_printf(b, "%s = (%s %s (%s));", lval, src, op, rhs);
   else if (ffn) buf_printf(b, "%s = %s(%s, %s);", lval, ffn, src, rhs);
@@ -2344,7 +2356,7 @@ static void emit_op_assign_lv(Compiler *c, int id, Buf *b, int indent,
     buf_printf(b, "%s = %s %s ", lval, lval, op); emit_expr(c, v, b); buf_puts(b, ";\n");
     return;
   }
-  if (emit_scalar_op_assign(c, lval, t, op, v, cap, lv && lv->nullable_int, b)) return;
+  if (emit_scalar_op_assign(c, lval, t, op, v, cap, lv ? lv->nullable_int : 0, b)) return;
   if (t == TY_COMPLEX && (is_add_or_mul(op))) {
     /* coerce the rhs like the binary path does: an Integer, a Float or a boxed
        value all have to reach sp_complex_* as an sp_Complex */
@@ -11176,7 +11188,7 @@ static int emit_ivar_cvar_write_stmt(Compiler *c, int id, Buf *b, int indent, co
     else if (emit_array_op_assign(c, ref, ct, op, v, b)) { }
     else if (ct == TY_POLY && emit_poly_op_assign(c, ref, op, v, 1, b)) { }
     else if (emit_scalar_op_assign(c, ref, ct, op, v, 1,
-                                   idx >= 0 && c->classes[sc].cvar_nullable_int[idx], b)) { }
+                                   idx >= 0 ? c->classes[sc].cvar_nullable_int[idx] : 0, b)) { }
     else {
       buf_printf(b, "%s %s= ", ref, op ? op : "+");
       emit_coerce(c, v, ct, CO_HOLD, "the operand of an `op=`", b); buf_puts(b, ";\n");

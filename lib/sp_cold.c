@@ -4618,6 +4618,18 @@ SP_NORETURN void sp_raise_nil_cmp(int left_nil, const char *op, const char *cls)
   sp_raise_cls("ArgumentError", sp_sprintf("comparison of %s with nil failed", cls));
 }
 
+/* Integer's &, | or ^ reached a nil the program wrote into an Integer slot.
+   On the right it fails to coerce, as CRuby's does. On the left the
+   operator is nil's own, which answers true or false: the result slot is an
+   Integer's and cannot hold either, so it is refused rather than computed
+   on the sentinel (`x ^= 1` of a nil x answered -9223372036854775807). */
+SP_NORETURN void sp_raise_nil_bit_op(int left_nil, const char *op) {SP_GC_ROOT_STR(op);
+  if (!left_nil)
+    sp_raise_cls("TypeError", "nil can't be coerced into Integer");
+  sp_raise_cls("NotImplementedError",
+               sp_sprintf("nil %s Integer answers true or false, which an Integer slot cannot hold", op));
+}
+
 /* A nil side of Array#+, -, & or | read out of a typed array slot
    (sp_ary_nil_ck). nil has & and |, whose true or false the call's Array
    slot cannot hold. */

@@ -1572,6 +1572,13 @@ int name_is_enumerable_module_method(const char *m) {
 int cmp_operand_may_be_nil(Compiler *c, int id) {
   return id >= 0 && nullable_int_value(c, id);
 }
+/* Can it be a nil the program wrote -- `nil`, an arm with no value, a slot
+   one was written to -- rather than only the nil of a read that missed?
+   Integer's &, | and ^ test for that one alone: a typed array element read
+   is their operand in the bit-twiddling loops, and stays bare. */
+int operand_nil_written(Compiler *c, int id) {
+  return id >= 0 && nullable_int_value(c, id) == NIL_WRITTEN;
+}
 /* A float-result operand as the arithmetic arm reads it (emit_scalar_operand). */
 static void emit_float_operand_expr(Compiler *c, int node, Buf *b) {
   emit_scalar_operand(c, node, "0.0", b);

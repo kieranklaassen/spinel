@@ -12,9 +12,10 @@
 /* The receiver of an Integer bit operator. For a shift, an Integer slot
    that can hold its nil sentinel (cmp_operand_may_be_nil) is tested first:
    nil has no << or >>, and the sentinel shifted read as a number (`>> 1` of
-   a nil attribute answered -4611686018427387904). & | ^ are left as they
-   were: the marking counts every typed array element read, and the test
-   cost the bit-twiddling loops (nqueens) a branch per operand. */
+   a nil attribute answered -4611686018427387904). & | ^ test only for a nil
+   the program wrote (emit_int_bit_nil_written): the marking counts every
+   typed array element read, and testing those cost the bit-twiddling loops
+   (nqueens) a branch per operand. */
 static void emit_int_bit_recv(Compiler *c, int recv, TyKind rt, const char *conv,
                               const char *name, Buf *b) {
   if (rt != TY_INT || !is_shift_op(name) || !cmp_operand_may_be_nil(c, recv)) {
@@ -25,6 +26,30 @@ static void emit_int_bit_recv(Compiler *c, int recv, TyKind rt, const char *conv
   buf_printf(b, "({ sp_int _t%d = ", tn);
   emit_expr(c, recv, b);
   buf_printf(b, "; if (SP_UNLIKELY(_t%d == SP_INT_NIL)) sp_nil_recv(\"%s\"); _t%d; })", tn, name, tn);
+}
+
+/* Integer's &, | or ^ with a side that can be a nil the program wrote
+   (operand_nil_written): both sides are read, then tested, the receiver
+   first (SP_INT_NIL_BIT_CK). A nil operand is Integer's own TypeError. nil
+   has its own &, | and ^, whose true or false the call's Integer slot
+   cannot hold, so a nil receiver is refused. A side that cannot be one is
+   not tested. Answers 0, emitting nothing, where neither can. */
+static int emit_int_bit_nil_written(Compiler *c, const char *name, int recv, int arg, TyKind at, Buf *b) {
+  int wl = operand_nil_written(c, recv);
+  int wr = at == TY_INT && operand_nil_written(c, arg);
+  if (!wl && !wr) return 0;
+  int tg = ++g_tmp;
+  char l9[32] = "0", r9[32] = "0";
+  if (wl) snprintf(l9, sizeof l9, "_t%d", tg);
+  if (wr) snprintf(r9, sizeof r9, "_t%d_r", tg);
+  buf_printf(b, "({ sp_int _t%d = ", tg);
+  emit_expr(c, recv, b);
+  buf_printf(b, ", _t%d_r = ", tg);
+  if (at == TY_POLY) { buf_puts(b, "sp_poly_bit_operand("); emit_expr(c, arg, b); buf_puts(b, ", 0)"); }
+  else if (at == TY_BIGINT) { buf_puts(b, "sp_bigint_to_int("); emit_expr(c, arg, b); buf_puts(b, ")"); }
+  else emit_expr(c, arg, b);
+  buf_printf(b, "; SP_INT_NIL_BIT_CK(%s, %s, \"%s\"); _t%d %s _t%d_r; })", l9, r9, name, tg, name, tg);
+  return 1;
 }
 
 /* Integer shifts, <=>, the comparison and equality operators, and is_a? on a poly receiver */
@@ -169,6 +194,7 @@ int emit_call_compare_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
        cost (a bare reinterpret). `>>` stays a signed (arithmetic) shift, which
        matches Ruby and is only implementation-defined, not UB. */
     int shl_neg_safe = sp_streq(name, "<<");
+    if (!is_shift && rt == TY_INT && emit_int_bit_nil_written(c, name, recv, argv[0], at0, b)) return 1;
     buf_puts(b, "(");
     if (shl_neg_safe) buf_puts(b, "(sp_int)((uint64_t)(");
     emit_int_bit_recv(c, recv, rt, rcv_conv, name, b);
@@ -1138,6 +1164,13 @@ int emit_call_operator_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
   /* unary bitwise complement: ~int -> (~x); ~poly -> coerce to int first */
   if (sp_streq(name, "~") && recv >= 0 && argc == 0 && (rt == TY_INT || rt == TY_POLY)) {
     if (rt == TY_POLY) { buf_puts(b, "(~sp_poly_recv_i(\"~\", "); emit_expr(c, recv, b); buf_puts(b, "))"); }
+    /* nil has no ~, and a nil the program wrote read as the sentinel's
+       number: `~x` of a nil x answered 9223372036854775807 */
+    else if (operand_nil_written(c, recv)) {
+      int tn = ++g_tmp;
+      buf_printf(b, "({ sp_int _t%d = ", tn); emit_expr(c, recv, b);
+      buf_printf(b, "; if (SP_UNLIKELY(_t%d == SP_INT_NIL)) sp_nil_recv(\"~\"); ~_t%d; })", tn, tn);
+    }
     else { buf_puts(b, "(~"); emit_expr(c, recv, b); buf_puts(b, ")"); }
     return 1;
   }

@@ -2046,7 +2046,7 @@ static int emit_ivar_cvar_gvar_expr(Compiler *c, int id, Buf *b, const NodeTable
     else if (emit_array_op_assign_value(c, ref, ct, op, v, b)) { }
     else if (emit_poly_op_assign_value(c, ref, ct, op, v, b)) { }
     else if (emit_scalar_op_assign_value(c, ref, ct, op, v,
-                                         idx >= 0 && c->classes[cid].cvar_nullable_int[idx], b)) { }
+                                         idx >= 0 ? c->classes[cid].cvar_nullable_int[idx] : 0, b)) { }
     else {
       buf_printf(b, "(%s %s= ", ref, op ? op : "+");
       emit_coerce(c, v, ct, CO_HOLD, "the operand of an `op=`", b); buf_puts(b, ")");

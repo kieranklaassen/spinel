@@ -237,6 +237,14 @@ SP_NORETURN SP_COLD void sp_raise_nil_cmp(int left_nil, const char *op, const ch
   if (SP_UNLIKELY((a) == SP_INT_NIL || (b) == SP_INT_NIL)) sp_raise_nil_cmp((a) == SP_INT_NIL, op, "Integer")
 #define SP_FLOAT_NIL_CMP_CK(a, b, op) \
   if (SP_UNLIKELY(sp_float_is_nil(a) || sp_float_is_nil(b))) sp_raise_nil_cmp(sp_float_is_nil(a), op, "Float")
+/* The same test ahead of Integer's &, | and ^, emitted only for a side that
+   can be a nil the program wrote. A nil operand is Integer's own TypeError.
+   A nil receiver takes nil's & | ^, which answer true or false: no Integer,
+   so the call's slot cannot hold it and the operation is refused
+   (NotImplementedError) where it computed on INTPTR_MIN. */
+SP_NORETURN SP_COLD void sp_raise_nil_bit_op(int left_nil, const char *op);
+#define SP_INT_NIL_BIT_CK(a, b, op) \
+  if (SP_UNLIKELY((a) == SP_INT_NIL || (b) == SP_INT_NIL)) sp_raise_nil_bit_op((a) == SP_INT_NIL, op)
 /* Array#to_a and Kernel#Array on an Array slot, whose nil is NULL: the
    Array itself, and [] for nil, which nil.to_a and Array(nil) are. */
 static inline sp_IntArray *sp_IntArray_to_a(sp_IntArray *a) { return a ? a : sp_IntArray_new(); }

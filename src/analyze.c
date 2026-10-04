@@ -25245,10 +25245,17 @@ void nn_inference_round(Compiler *c) {
   nn_epoch++;
 }
 
+/* The nil an Integer or Float value can be, as its kind: 0 for none,
+   NIL_MISSED for one only a read can find (a search that missed, an element
+   past the end), NIL_WRITTEN for one the program wrote (`nil`, an arm with no
+   value) or read out of a slot one was written to. The marks hold the same
+   kinds. Every reader asks only whether the answer is 0, except the test
+   ahead of Integer's &, | and ^, which a missed read does not pay for. */
+static int nil_kind_max(int a, int b) { return a > b ? a : b; }
 int nullable_int_value(Compiler *c, int v) {
   const NodeTable *nt = c->nt;
   if (v < 0) return 0;
-  if (nt_kind(nt, v) == NK_NilNode) return 1;
+  if (nt_kind(nt, v) == NK_NilNode) return NIL_WRITTEN;
   /* `return e` / `(e)` carry their inner value unchanged; a block tail can be
      either, and so can a method's own tail statement. */
   if (nt_kind(nt, v) == NK_ReturnNode) {
@@ -25262,40 +25269,42 @@ int nullable_int_value(Compiler *c, int v) {
      that is absent yields nil, which is the sentinel in an int slot. */
   if (nt_kind(nt, v) == NK_StatementsNode) {
     int n = 0; const int *st = nt_arr(nt, v, "body", &n);
-    return st && n > 0 ? nullable_int_value(c, st[n - 1]) : 1;   /* an empty body is nil */
+    return st && n > 0 ? nullable_int_value(c, st[n - 1]) : NIL_WRITTEN;   /* an empty body is nil */
   }
   if (nt_kind(nt, v) == NK_ElseNode) {
     int es = nt_ref(nt, v, "statements");
-    return es < 0 || nullable_int_value(c, es);
+    return es < 0 ? NIL_WRITTEN : nullable_int_value(c, es);
   }
   if (nt_kind(nt, v) == NK_IfNode || nt_kind(nt, v) == NK_UnlessNode) {
     int ts = nt_ref(nt, v, "statements");
-    if (ts < 0 || nullable_int_value(c, ts)) return 1;   /* an empty arm is nil */
     int els = nt_ref(nt, v, nt_kind(nt, v) == NK_IfNode ? "subsequent" : "else_clause");
-    return els >= 0 ? nullable_int_value(c, els) : 1;
+    if (ts < 0 || els < 0) return NIL_WRITTEN;   /* an empty arm is nil */
+    return nil_kind_max(nullable_int_value(c, ts), nullable_int_value(c, els));
   }
   if (nt_kind(nt, v) == NK_CaseNode || nt_kind(nt, v) == NK_CaseMatchNode) {
     int nw = 0; const int *whens = nt_arr(nt, v, "conditions", &nw);
-    for (int w = 0; w < nw; w++) {
-      int ws = nt_ref(nt, whens[w], "statements");
-      if (ws < 0 || nullable_int_value(c, ws)) return 1;   /* an empty arm is nil */
-    }
     int els = nt_ref(nt, v, "else_clause");
-    return els >= 0 ? nullable_int_value(c, els) : 1;
+    if (els < 0) return NIL_WRITTEN;
+    int k = nullable_int_value(c, els);
+    for (int w = 0; w < nw && k < NIL_WRITTEN; w++) {
+      int ws = nt_ref(nt, whens[w], "statements");
+      k = ws < 0 ? NIL_WRITTEN : nil_kind_max(k, nullable_int_value(c, ws));   /* an empty arm is nil */
+    }
+    return k;
   }
   if (nt_kind(nt, v) == NK_BeginNode) {
-    if (nullable_int_value(c, nt_ref(nt, v, "statements"))) return 1;
+    int k = nullable_int_value(c, nt_ref(nt, v, "statements"));
     for (int rs = nt_ref(nt, v, "rescue_clause"); rs >= 0; rs = nt_ref(nt, rs, "subsequent"))
-      if (nullable_int_value(c, nt_ref(nt, rs, "statements"))) return 1;
+      k = nil_kind_max(k, nullable_int_value(c, nt_ref(nt, rs, "statements")));
     int els = nt_ref(nt, v, "else_clause");
-    return els >= 0 && nullable_int_value(c, nt_ref(nt, els, "statements"));
+    return els >= 0 ? nil_kind_max(k, nullable_int_value(c, nt_ref(nt, els, "statements"))) : k;
   }
   if (nt_kind(nt, v) == NK_RescueModifierNode)
-    return nullable_int_value(c, nt_ref(nt, v, "expression")) ||
-           nullable_int_value(c, nt_ref(nt, v, "rescue_expression"));
+    return nil_kind_max(nullable_int_value(c, nt_ref(nt, v, "expression")),
+                        nullable_int_value(c, nt_ref(nt, v, "rescue_expression")));
   if (nt_kind(nt, v) == NK_OrNode || nt_kind(nt, v) == NK_AndNode)
-    return nullable_int_value(c, nt_ref(nt, v, "left")) ||
-           nullable_int_value(c, nt_ref(nt, v, "right"));
+    return nil_kind_max(nullable_int_value(c, nt_ref(nt, v, "left")),
+                        nullable_int_value(c, nt_ref(nt, v, "right")));
   /* Reading a slot some write left the sentinel in: the reader method a caller
      resolves to is this read, so its callers box through it too. */
   if (nt_kind(nt, v) == NK_InstanceVariableReadNode) {
@@ -25305,14 +25314,14 @@ int nullable_int_value(Compiler *c, int v) {
     if (cid < 0 || cid >= c->nclasses) return 0;
     ClassInfo *ci = &c->classes[cid];
     int iv = comp_ivar_index(ci, nt_str(nt, v, "name"));
-    return iv >= 0 && ci->ivar_nullable_int[iv];
+    return iv >= 0 ? ci->ivar_nullable_int[iv] : 0;
   }
   /* A class variable some write left the sentinel in, as an ivar: `def
      self.b = (@@x = nil)` beside `@@x = 1` read back 0 */
   if (nt_kind(nt, v) == NK_ClassVariableReadNode) {
     ClassInfo *ci = NULL;
     int cv = cvar_slot(c, v, &ci);
-    return cv >= 0 && ci->cvar_nullable_int[cv];
+    return cv >= 0 ? ci->cvar_nullable_int[cv] : 0;
   }
   /* A Float global is declared holding the sentinel, which it keeps until its
      first assignment; and any scalar global some write left the sentinel in
@@ -25321,7 +25330,7 @@ int nullable_int_value(Compiler *c, int v) {
     const char *gn = nt_str(nt, v, "name");
     const char *rn = gn ? comp_resolve_gvar(c, gn + 1) : NULL;
     LocalVar *g = rn ? comp_gvar(c, rn) : NULL;
-    if (g && g->nullable_int) return 1;
+    if (g && g->nullable_int) return g->nullable_int;
     return g && g->type == TY_FLOAT && !gvar_seeded_before_read(c, rn);
   }
   /* `(e)` is e, and a parenthesized sequence `(y = a[i]; y)` is its last
@@ -25330,7 +25339,7 @@ int nullable_int_value(Compiler *c, int v) {
      assigned to unmarked. `()` is nil. */
   if (nt_kind(nt, v) == NK_ParenthesesNode) {
     int pb = nt_ref(nt, v, "body");
-    return pb < 0 || nullable_int_value(c, pb);
+    return pb < 0 ? NIL_WRITTEN : nullable_int_value(c, pb);
   }
   /* The value of `yield x` is the BLOCK's, decided per call site. The yield's
      own type says only TY_INT, which an `Integer?` and an `Integer` share, so
@@ -25343,8 +25352,9 @@ int nullable_int_value(Compiler *c, int v) {
     int n = yield_block_tails(c, ymi, tails, (int)(sizeof tails / sizeof tails[0]));
     /* no literal block in sight (an escaping &blk called through the proc ABI):
        its value arrives boxed, so nothing unboxed carries a sentinel */
-    for (int i = 0; i < n; i++) if (nullable_int_value(c, tails[i])) return 1;
-    return 0;
+    int k = 0;
+    for (int i = 0; i < n; i++) k = nil_kind_max(k, nullable_int_value(c, tails[i]));
+    return k;
   }
   if (nt_kind(nt, v) == NK_CallNode) {
     if (nn_index_inbounds(v)) return 0;
@@ -25372,7 +25382,8 @@ int nullable_int_value(Compiler *c, int v) {
     /* a fold's value is its block's, and `find`/`detect` hand back an element */
     if (cn && (is_reduce_alias(cn))) {
       int ft = call_block_tail(c, v);
-      if (ft >= 0 && nullable_int_value(c, ft)) return 1;
+      int fk = ft >= 0 ? nullable_int_value(c, ft) : 0;
+      if (fk) return fk;
     }
     if (rcv0 >= 0 && cn && (is_find_alias(cn)) &&
         nullable_int_elem_expr(c, rcv0, 0)) return 1;
@@ -25395,14 +25406,15 @@ int nullable_int_value(Compiler *c, int v) {
           snprintf(ivb, sizeof ivb, "@%s", comp_resolve_alias(c, ty_object_class(rt), cn));
           int iv = comp_ivar_index(&c->classes[k], ivb);
           TyKind ivt = iv >= 0 ? c->classes[k].ivar_types[iv] : TY_UNKNOWN;
-          if ((ivt == TY_FLOAT || ivt == TY_INT) && c->classes[k].ivar_nullable_int[iv]) return 1;
+          if ((ivt == TY_FLOAT || ivt == TY_INT) && c->classes[k].ivar_nullable_int[iv])
+            return c->classes[k].ivar_nullable_int[iv];
           if (ivt == TY_FLOAT && !ivar_assigned_in_initialize(c, k, ivb)) return 1;
         }
         /* ... and so does a Struct member's, which is no attr_reader */
         else if (ty_is_object(rt) && comp_method_in_chain(c, ty_object_class(rt), cn, NULL) < 0) {
           ClassInfo *sci = NULL;
           int sm = struct_member_slot(c, ty_object_class(rt), cn, &sci);
-          if (sm >= 0 && sci->ivar_nullable_int[sm]) return 1;
+          if (sm >= 0 && sci->ivar_nullable_int[sm]) return sci->ivar_nullable_int[sm];
         }
         if (ty_is_object(rt)) mi = comp_method_in_chain(c, ty_object_class(rt), cn, NULL);
         else if (nt_kind(nt, rcv) == NK_ConstantReadNode) {
@@ -25414,13 +25426,13 @@ int nullable_int_value(Compiler *c, int v) {
         else if (rt == TY_POLY) return poly_dispatch_nullable(c, cn);
       }
     }
-    return mi >= 0 && c->scopes[mi].ret_nullable_int;
+    return mi >= 0 ? c->scopes[mi].ret_nullable_int : 0;
   }
   if (nt_kind(nt, v) == NK_LocalVariableReadNode) {
     const char *rn = nt_str(nt, v, "name");
     Scope *rs = rn ? comp_scope_of(c, v) : NULL;
     LocalVar *rv = rs ? scope_local(rs, rn) : NULL;
-    return rv && rv->nullable_int && !nn_read_nonnil(v);
+    return rv && !nn_read_nonnil(v) ? rv->nullable_int : 0;
   }
   /* `x &&= v` answers x's nil when x is nil, and `x ||= v` answers v when
      x is nil, so the value can be nil as the local or v can */
@@ -25428,7 +25440,7 @@ int nullable_int_value(Compiler *c, int v) {
     const char *rn = nt_str(nt, v, "name");
     Scope *rs = rn ? comp_scope_of(c, v) : NULL;
     LocalVar *rv = rs ? scope_local(rs, rn) : NULL;
-    return rv && (rv->type == TY_INT || rv->type == TY_FLOAT) && rv->nullable_int;
+    return rv && (rv->type == TY_INT || rv->type == TY_FLOAT) ? rv->nullable_int : 0;
   }
   if (nt_kind(nt, v) == NK_LocalVariableOrWriteNode)
     return nullable_int_value(c, nt_ref(nt, v, "value"));
@@ -25689,6 +25701,19 @@ static int site_args_may_be_nil(Compiler *c, const int *av, int an) {
   return 0;
 }
 
+/* Raises a slot's mark to the kind of nil a value written there can be.
+   Answers 1 when the mark rose. */
+static int nil_mark(int *mark, int kind) {
+  if (kind <= *mark) return 0;
+  *mark = kind;
+  return 1;
+}
+static int nil_mark_slot(unsigned char *mark, int kind) {
+  if (kind <= *mark) return 0;
+  *mark = (unsigned char)kind;
+  return 1;
+}
+
 /* The marks a call's arguments hand the parameters of method `mi` it binds:
    an object parameter handed nil, an array one handed an array holding the
    sentinel, an Integer or Float one handed a value that can be it -- a
@@ -25719,8 +25744,9 @@ static int mark_nullable_params_of_call(Compiler *c, int id, int mi) {
     }
     if ((p->type == TY_INT_ARRAY || p->type == TY_FLOAT_ARRAY) && !p->nullable_int_elem &&
         nullable_int_elem_expr(c, a, 0)) { p->nullable_int_elem = 1; changed = 1; }
-    if ((p->type != TY_INT && p->type != TY_FLOAT) || p->nullable_int) continue;
-    if (nullable_int_value(c, a)) { p->nullable_int = 1; changed = 1; continue; }
+    if ((p->type != TY_INT && p->type != TY_FLOAT) || p->nullable_int == NIL_WRITTEN) continue;
+    if (nil_mark(&p->nullable_int, nullable_int_value(c, a))) changed = 1;
+    if (p->nullable_int) continue;
     /* an ivar that can be read before anything assigned it, or a parameter
        already carrying one: boxing the parameter has to answer nil (#5085) */
     if (!p->box_nullable && box_nullable_arg(c, a)) { p->box_nullable = 1; changed = 1; }
@@ -25730,9 +25756,9 @@ static int mark_nullable_params_of_call(Compiler *c, int id, int mi) {
   for (int k = 0; kwh >= 0 && k < m->nparams; k++) {
     const char *pk = m->pnames[k];
     LocalVar *p = pk ? scope_local(m, pk) : NULL;
-    if (!p || (p->type != TY_INT && p->type != TY_FLOAT) || p->nullable_int ||
+    if (!p || (p->type != TY_INT && p->type != TY_FLOAT) || p->nullable_int == NIL_WRITTEN ||
         !callee_param_is_declared_kwarg(c, m, pk)) continue;
-    if (nullable_int_value(c, ie_kwhash_value(c, kwh, pk))) { p->nullable_int = 1; changed = 1; }
+    if (nil_mark(&p->nullable_int, nullable_int_value(c, ie_kwhash_value(c, kwh, pk)))) changed = 1;
   }
   arg_layout_free(&L);
   return changed;
@@ -26142,6 +26168,7 @@ static void mark_nullable_int_locals(Compiler *c) {
      only thing the check is here to catch. */
   long rounds_max = c->nscopes + 2 + c->ngvars;
   for (int s = 0; s < c->nscopes; s++) rounds_max += c->scopes[s].nlocals;
+  rounds_max *= 2;   /* a mark rises at most twice: to a missed nil, then to a written one */
   int converged = 0;
   NilOnlyLocals nilonly = {0};
   nil_only_locals(c, &nilonly);
@@ -26157,9 +26184,9 @@ static void mark_nullable_int_locals(Compiler *c) {
        plain int at the caller (#3505). */
     for (int mi = 1; mi < c->nscopes; mi++) {
       Scope *s = &c->scopes[mi];
-      if (s->ret_nullable_int || (s->ret != TY_INT && s->ret != TY_FLOAT)) continue;
+      if (s->ret_nullable_int == NIL_WRITTEN || (s->ret != TY_INT && s->ret != TY_FLOAT)) continue;
       int tail = scope_body_last(c, mi);
-      if (tail >= 0 && nullable_int_value(c, tail)) { s->ret_nullable_int = 1; changed = 1; }
+      if (tail >= 0 && nil_mark(&s->ret_nullable_int, nullable_int_value(c, tail))) changed = 1;
     }
     /* an explicit `return e` exits the method just as its tail does. Blocks
        share the enclosing method's scope, so a `return` inside one attributes
@@ -26169,8 +26196,8 @@ static void mark_nullable_int_locals(Compiler *c) {
       int rmi = rs ? (int)(rs - c->scopes) : -1;
       if (rmi < 1 || rmi >= c->nscopes) continue;
       Scope *s = &c->scopes[rmi];
-      if (s->ret_nullable_int || (s->ret != TY_INT && s->ret != TY_FLOAT)) continue;
-      if (nullable_int_value(c, id)) { s->ret_nullable_int = 1; changed = 1; }
+      if (s->ret_nullable_int == NIL_WRITTEN || (s->ret != TY_INT && s->ret != TY_FLOAT)) continue;
+      if (nil_mark(&s->ret_nullable_int, nullable_int_value(c, id))) changed = 1;
     }
     for (int id = 0; id < nt->count; id++) {
       NodeKind wk = nt_kind(nt, id);
@@ -26181,13 +26208,12 @@ static void mark_nullable_int_locals(Compiler *c) {
       if (v < 0 || !ln) continue;
       Scope *sc = comp_scope_of(c, id);
       LocalVar *lv = sc ? scope_local(sc, ln) : NULL;
-      if (!lv || (lv->type != TY_INT && lv->type != TY_FLOAT) || lv->nullable_int) continue;
+      if (!lv || (lv->type != TY_INT && lv->type != TY_FLOAT) || lv->nullable_int == NIL_WRITTEN) continue;
       /* An outright `i = nil` on a slot the other writes make an int leaves
          the sentinel in it just as a search miss does, and so does a local
          only nil is written to, here or through `&&=` / `||=` */
-      if (nullable_int_value(c, v) || nil_only_read(c, &nilonly, v)) {
-        lv->nullable_int = 1; changed = 1;
-      }
+      if (nil_mark(&lv->nullable_int, nil_only_read(c, &nilonly, v) ? NIL_WRITTEN : nullable_int_value(c, v)))
+        changed = 1;
     }
     /* A global written from such a value carries it to every reader, just as
        a local does: `$g = a[i]` boxed the sentinel as a number (a Float's
@@ -26197,8 +26223,8 @@ static void mark_nullable_int_locals(Compiler *c) {
       const char *gn = nt_str(nt, id, "name");
       const char *rn = gn ? comp_resolve_gvar(c, gn + 1) : NULL;
       LocalVar *g = rn ? comp_gvar(c, rn) : NULL;
-      if (v < 0 || !g || (g->type != TY_INT && g->type != TY_FLOAT) || g->nullable_int) continue;
-      if (nullable_int_value(c, v)) { g->nullable_int = 1; changed = 1; }
+      if (v < 0 || !g || (g->type != TY_INT && g->type != TY_FLOAT) || g->nullable_int == NIL_WRITTEN) continue;
+      if (nil_mark(&g->nullable_int, nullable_int_value(c, v))) changed = 1;
     }
     /* A PARAMETER whose DEFAULT is the nil literal carries the sentinel on
        every defaulted call even when each explicit call site passes a real
@@ -26214,8 +26240,8 @@ static void mark_nullable_int_locals(Compiler *c) {
         int dv2 = sc2->pdefault[pk2];
         if (dv2 < 0 || nt_kind(nt, dv2) != NK_NilNode) continue;
         LocalVar *p2 = sc2->pnames[pk2] ? scope_local(sc2, sc2->pnames[pk2]) : NULL;
-        if (!p2 || (p2->type != TY_INT && p2->type != TY_FLOAT) || p2->nullable_int) continue;
-        p2->nullable_int = 1; changed = 1;
+        if (!p2 || (p2->type != TY_INT && p2->type != TY_FLOAT)) continue;
+        if (nil_mark(&p2->nullable_int, NIL_WRITTEN)) changed = 1;
       }
     }
     /* An int/float ARRAY local holding such a value hands it to every element
@@ -26367,9 +26393,9 @@ static void mark_nullable_int_locals(Compiler *c) {
       if (cid < 0 || cid >= c->nclasses) continue;
       ClassInfo *ci = &c->classes[cid];
       int iv = comp_ivar_index(ci, nt_str(nt, id, "name"));
-      if (iv < 0 || ci->ivar_nullable_int[iv]) continue;
+      if (iv < 0 || ci->ivar_nullable_int[iv] == NIL_WRITTEN) continue;
       if (ci->ivar_types[iv] != TY_INT && ci->ivar_types[iv] != TY_FLOAT) continue;
-      if (nullable_int_value(c, v)) { ci->ivar_nullable_int[iv] = 1; changed = 1; }
+      if (nil_mark_slot(&ci->ivar_nullable_int[iv], nullable_int_value(c, v))) changed = 1;
     }
     /* ... and through a setter that is no ivar write in the program: an
        attr_writer's or a Struct member's `o.x = v` */
@@ -26392,9 +26418,9 @@ static void mark_nullable_int_locals(Compiler *c) {
         iv = comp_ivar_index(ci, ivb);
       }
       else if (comp_method_in_chain(c, cid, wn, NULL) < 0) iv = struct_member_slot(c, cid, base, &ci);
-      if (iv < 0 || ci->ivar_nullable_int[iv]) continue;
+      if (iv < 0 || ci->ivar_nullable_int[iv] == NIL_WRITTEN) continue;
       if (ci->ivar_types[iv] != TY_INT && ci->ivar_types[iv] != TY_FLOAT) continue;
-      if (nullable_int_value(c, av[0])) { ci->ivar_nullable_int[iv] = 1; changed = 1; }
+      if (nil_mark_slot(&ci->ivar_nullable_int[iv], nullable_int_value(c, av[0]))) changed = 1;
     }
     /* A Struct's generated constructor sets its members: from a nil
        argument, or to nil when the construction does not supply one
@@ -26420,16 +26446,15 @@ static void mark_nullable_int_locals(Compiler *c) {
       for (int e = 0; e < kn && plain; e++) plain = nt_kind(nt, ke[e]) == NK_AssocNode;
       if (!plain) continue;
       for (int m = 0; m < ci->nivars; m++) {
-        if (ci->ivar_nullable_int[m] || (ci->ivar_types[m] != TY_INT && ci->ivar_types[m] != TY_FLOAT)) continue;
+        if (ci->ivar_nullable_int[m] == NIL_WRITTEN || (ci->ivar_types[m] != TY_INT && ci->ivar_types[m] != TY_FLOAT)) continue;
         int vnode = kwh < 0 && m < an ? av[m] : -1;
         for (int e = 0; e < kn; e++) {
           int key = nt_ref(nt, ke[e], "key");
           const char *kv = nt_kind(nt, key) == NK_SymbolNode ? nt_str(nt, key, "value") : NULL;
           if (kv && sp_streq(kv, ci->ivars[m] + 1)) vnode = nt_ref(nt, ke[e], "value");
         }
-        if (vnode < 0 ? !ci->is_data : nullable_int_value(c, vnode)) {
-          ci->ivar_nullable_int[m] = 1; changed = 1;
-        }
+        if (nil_mark_slot(&ci->ivar_nullable_int[m], vnode < 0 ? (ci->is_data ? 0 : NIL_WRITTEN) : nullable_int_value(c, vnode)))
+          changed = 1;
       }
     }
     /* ... and through a class variable */
@@ -26437,9 +26462,9 @@ static void mark_nullable_int_locals(Compiler *c) {
       int v = nt_ref(nt, id, "value");
       ClassInfo *ci = NULL;
       int cv = v >= 0 ? cvar_slot(c, id, &ci) : -1;
-      if (cv < 0 || ci->cvar_nullable_int[cv]) continue;
+      if (cv < 0 || ci->cvar_nullable_int[cv] == NIL_WRITTEN) continue;
       if (ci->cvar_types[cv] != TY_INT && ci->cvar_types[cv] != TY_FLOAT) continue;
-      if (nullable_int_value(c, v)) { ci->cvar_nullable_int[cv] = 1; changed = 1; }
+      if (nil_mark_slot(&ci->cvar_nullable_int[cv], nullable_int_value(c, v))) changed = 1;
     }
     /* A PARAMETER bound from such a value carries the sentinel into the callee,
        where boxing it (`other.inspect`, `x == other`) has the same problem the
