@@ -6817,6 +6817,23 @@ int desugar_kernel_recv(Compiler *c) {
   return changed;
 }
 
+/* `Array.new` with no argument and no block, where the program has not given
+   Array a `new` or an `initialize` of its own. */
+static int bare_array_new(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  if (id < 0 || nt_kind(nt, id) != NK_CallNode || nt_ref(nt, id, "block") >= 0) return 0;
+  int k = nt_ref(nt, id, "receiver");
+  const char *mn = nt_str(nt, id, "name");
+  if (k < 0 || nt_kind(nt, k) != NK_ConstantReadNode || !mn || !sp_streq(mn, "new")) return 0;
+  const char *kn = nt_str(nt, k, "name");
+  int ca = nt_ref(nt, id, "arguments"), argc = 0;
+  if (ca >= 0) nt_arr(nt, ca, "arguments", &argc);
+  if (!kn || !sp_streq(kn, "Array") || argc != 0) return 0;
+  int ci = comp_class_index(c, kn);
+  return ci < 0 || (comp_cmethod_in_chain(c, ci, "new", NULL) < 0 &&
+                    comp_method_in_chain(c, ci, "initialize", NULL) < 0);
+}
+
 /* `Array[a, b, c]` and `Range.new(lo, hi)` are the constructor spellings of the
    `[a, b, c]` and `(lo..hi)` literals, and both raised NoMethodError -- the
    literal worked and the documented constructor for the same value did not
@@ -6835,6 +6852,16 @@ static int desugar_class_literal_ctors(Compiler *c) {
   for (int id = 0; id < n0; id++) {
     if (nt_kind(nt, id) != NK_CallNode) continue;
     int recv = nt_ref(nt, id, "receiver");
+    /* A bare `Array.new` that a call is made on is the empty literal too. As
+       a receiver it has no later use to take an element type from, and stayed
+       untyped: `Array.new << 1` raised NoMethodError "for unknown" and
+       `Array.new + [1]` answered nil. Elsewhere it keeps its own paths. */
+    if (bare_array_new(c, recv)) {
+      nt_node_reset(nt, recv, "ArrayNode");
+      nt_node_set_arr(nt, recv, "elements", NULL, 0);
+      changed = 1;
+      continue;
+    }
     if (recv < 0 || nt_kind(nt, recv) != NK_ConstantReadNode) continue;
     if (nt_ref(nt, id, "block") >= 0) continue;
     const char *rn = nt_str(nt, recv, "name");
