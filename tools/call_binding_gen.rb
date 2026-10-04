@@ -35,7 +35,11 @@
 # order it runs in, or the first read from a local a later argument assigns
 # (`m(b: x, a: (x = 2))`), or from an instance variable a later argument's
 # call writes (`yield(@v, **change)`). Both were found by hand, in the review
-# of #5537 and #5744, past a probe whose values could only log.
+# of #5537 and #5744, past a probe whose values could only log. The other
+# way round is the level `assigned`: the first value assigns a local the
+# last one reads (`m((x = 2; 1), x + 0)`), and a binding that leaves the two
+# side by side in one C argument list reads the local in C's order, ahead
+# of the assignment under gcc.
 #
 # The rows come from a covering array of strength T (default 3): every
 # combination of levels of any T factors is asked for by some row. A level a
@@ -88,7 +92,12 @@ module CallBindingGen
     [:dsplat, %w[none empty nil_lit nil_var known unknown string_key non_hash boxed]],
     [:dsplat_at, %w[after before]],
     [:type, %w[int string nil float symbol array hash object boxed]],
-    [:source, %w[literal logged local ivar default]],
+    # assigned: the last value reads a local the first one assigns, inside
+    # a sum (`m((u = 2; 1), u + 0)`): gcc ran the read ahead of the
+    # assignment where the two stood in one C argument list, and the call
+    # bound the local's old value. Found by hand, past the level `local`,
+    # which asks the read first and the assignment after it.
+    [:source, %w[literal logged local ivar default assigned]],
     # rebound: one Method local called, then set to another method and
     # called again (`m = A.new.method(:x); m.call(..); m = method(:x)`), so
     # the local's target changes under it. rebound9: an all-Integer call
@@ -471,13 +480,19 @@ module CallBindingGen
     # The values' sources, in the order the call runs them. A local or an
     # instance variable is read by the first value and changed by a later
     # argument: a local by assigning it, an instance variable by a call --
-    # the last value's, or the `**` operand's when that comes last.
+    # the last value's, or the `**` operand's when that comes last. With
+    # `assigned` the first value assigns the local and the last reads it.
     marks = args.scan(/\u0000(\d+)\u0000/).flatten.map(&:to_i)
     ds_last = ds&.start_with?("**h") && kws.last&.last == ds
     # like the typed value, the read binds only when no later key replaces
     # it; a read that binds nowhere asks nothing
     read_at = marks.empty? ? nil : kws.index { |_, src| src.include?("\u0000#{marks.first}\u0000") }
     replaced = read_at && kws[(read_at + 1)..].any? { |k, _| k == kws[read_at][0] }
+    # the same of the last value, which is the read of `assigned`. The read
+    # is a sum of Integers, so the level is not taken where the last value
+    # is the typed one, which keywords written in reverse can put there
+    last_at = marks.empty? ? nil : kws.index { |_, src| src.include?("\u0000#{marks.last}\u0000") }
+    last_replaced = last_at && kws[(last_at + 1)..].any? { |k, _| k == kws[last_at][0] }
     # the variable a default reads, which the last value run in place assigns
     dvar = STRUCT_PATHS.include?(row[:path]) ? nil : ps.filter_map { |p| p[2] if p[2]&.match?(/\A[@$]d\d+\z/) }.first
     source = case row[:source]
@@ -485,6 +500,8 @@ module CallBindingGen
              when "default" then dvar && !marks.empty? ? "default" : "literal"
              when "local" then marks.size >= 2 && !replaced ? "local" : "literal"
              when "ivar" then !marks.empty? && (ds_last || marks.size >= 2) && !replaced ? "ivar" : "literal"
+             when "assigned"
+               marks.size >= 2 && !last_replaced && !slots[marks.last][2] ? "assigned" : "literal"
              else "literal"
              end
     real[:source] = source
@@ -496,6 +513,13 @@ module CallBindingGen
       if source == "logged" then "($l << #{n}; #{v})"
       elsif source == "default" then j == marks.last ? "(#{dvar} = #{v}; #{v})" : v
       elsif source == "literal" || !(j == marks.first || j == marks.last) then v
+      elsif source == "assigned"
+        # the local starts at 0, which no value is, and the first value
+        # assigns it the last one's own: read in order, the call binds what
+        # its literals would
+        next "(u#{tag} + 0)" unless j == marks.first
+        prelude << "u#{tag} = 0"
+        "(u#{tag} = #{value(*slots[marks.last][0, 2])}; #{v})"
       elsif j == marks.first
         prelude << "#{source == "ivar" ? "@" : ""}u#{tag} = #{v}"
         "#{source == "ivar" ? "@" : ""}u#{tag}"

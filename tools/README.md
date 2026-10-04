@@ -96,8 +96,9 @@ or a global), the arguments (their count against the parameters' window,
 splats, literal keywords in the parameters' order or not, `**` operands and
 where they sit), the class of one argument's value, where the values come
 from (literals, values that log the order they run in, a read of a local or
-an instance variable a later argument changes, or an assignment to the
-variable a default reads), how many calls reach the parameters (a `Method`
+an instance variable a later argument changes, a read of a local an earlier
+argument assigned, or an assignment to the variable a
+default reads), how many calls reach the parameters (a `Method`
 local may be set to another target between two, or to nine targets), a class
 of its own defining a method of the same name, the child's own parameters
 when a bare `super` forwards them, whether the callee grows a String
@@ -114,8 +115,8 @@ are a covering array: every combination of levels of any T factors (default
 (a rebound `Method` local on a path with no `Method`, or an argument
 assigning the instance variable a default reads, on a path whose method has
 another self), so each case records the levels it did take, and the summary
-says how many of the combinations the cases took -- at strength 2, 6716 of
-7060, at strength 3, 217453 of 248186. `--only name_clash=sibling,seed=poly`
+says how many of the combinations the cases took -- at strength 2, 6833 of
+7179, at strength 3, 223516 of 254651. `--only name_clash=sibling,seed=poly`
 pins factors to a level each, leaving out the cases that cannot take them,
 to ask one level's combinations without a whole run. Ruby that does not parse is no case; an exception CRuby
 raises is part of the expected answer.
@@ -141,9 +142,9 @@ crash; a timeout; two cases that only fail together), `refused` (an
 limitations.md gives as the answer, cited). Findings come in families by the
 difference they make and shapes by the factors they need, with the reduced
 case of each shape as a program of its own. It is a probe to run by hand,
-not a gate: a pairwise run (`--strength 2`, about 510 cases) takes ten
+not a gate: a pairwise run (`--strength 2`, about 530 cases) takes ten
 minutes to an hour, most of it reducing findings, and a 3-way run (about
-6000 cases) several times that. The answers are compared as they print,
+6300 cases) several times that. The answers are compared as they print,
 exception messages included, so the reference is the `ruby` whose wording
 Spinel follows (4.0); `SPINEL` names the compiler to probe (default
 `./spinel`). Exit status 0 is no wrong answer, 1 a wrong answer, 4 the
