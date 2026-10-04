@@ -1,8 +1,8 @@
 # insert, []= and slice! on a shared String whose argument reads the same
 # String from a statement the argument hoists: a block's inlined loop, the
-# parts of an interpolation. The mutator runs against a shadow copy, and the
-# hoisted statements read that shadow, so they run after it is declared and,
-# arguments of the call, before its frozen check.
+# parts of an interpolation. The mutator runs against a shadow copy declared
+# inside its own block, so such an argument is evaluated first, ahead of the
+# statement and on the String itself, as CRuby runs it before the call.
 
 # a statement
 s = "qrst".dup
@@ -46,6 +46,36 @@ g = f
 k = 3
 g.insert(0, [1, 2].map { |x| (k + x).to_s }.join)
 p f, f.equal?(g)
+
+# an arm that is not taken does not run its argument
+r = k > 5 ? g.insert(0, [1].map { |x| puts "not run"; g.size.to_s }.join) : "no"
+p r, f
+
+# the block changes the String: by its own name, by its other name, in a
+# method it calls; the read after the change sees it, and the change stays
+def bump(w)
+  w << "y"
+end
+m = "qrst".dup
+n = m
+n.insert(0, [1].map { |x| n << "a"; n.size.to_s }.join)
+p m
+n.insert(0, [1].map { |x| m << "b"; n.size.to_s }.join)
+p m
+n.insert(0, [1].map { |x| bump(m); n.size.to_s }.join)
+p m, m.equal?(n)
+
+# an earlier argument is read before a later one's block runs
+n[n.size - 1, 1] = [1].map { |x| n << "c"; "z" }.join
+p m
+n[k, 1] = [1].map { |x| k += 1; n.size.to_s }.join
+p m, k
+
+# two Strings, one changed in the other's argument
+o = "wxyz".dup
+w = o
+n.insert(0, [1, 2].map { |x| w.insert(0, [x].map { |y| (w.size + n.size + y).to_s }.join); w.size.to_s }.join)
+p m, o, m.equal?(n), o.equal?(w)
 
 # a frozen receiver: the argument runs, then the call raises
 h = "qrst".dup

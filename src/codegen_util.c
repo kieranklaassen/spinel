@@ -2424,6 +2424,20 @@ void sb_reader_shim_close(Compiler *c, int recv, const SbReaderSave *sv) {
   view_unbind(g_n_argov - 1);
   for (int k = sv->ntok - 1; k >= 0; k--) view_pop(c, sv->tok + k);
 }
+/* Lift (on) what stands between the arm's re-run and the shadow, or put it
+   back: the handle type, the cell, the capture, the rename; and set aside the
+   prelude, so that what the re-run hoists can be read before it is placed. */
+static void sb_local_lift(SbLocalSave *sv, int on) {
+  sv->lv->type = on ? TY_STRING : sv->ty;
+  sv->lv->is_cell = on ? 0 : sv->cell;
+  if (sv->cap_at >= 0) sv->caps->v[sv->cap_at] = on ? "" : sv->cap_nm;
+  if (on) {
+    snprintf(g_ren_from[g_nren], sizeof g_ren_from[0], "%s", sv->nm);
+    snprintf(g_ren_to[g_nren], sizeof g_ren_to[0], "_sb%d", sv->t);
+  }
+  g_nren += on ? 1 : -1;
+  g_pre = on && sv->pre_at ? &sv->pre : sv->pre_at;
+}
 /* Open the shim over a shared-mutable String LOCAL `recv`: the handle's text
    goes to sref, and until sb_local_shim_close the local reads and is assigned
    as the plain String shadow `lv__sbT`. A local a proc captures lives in a
@@ -2438,63 +2452,72 @@ int sb_local_shim_open(Compiler *c, int recv, char *sref, size_t cap, SbLocalSav
   int tH = ++g_tmp;
   sv->lv = scope_local(comp_scope_of(c, recv), sbn);
   sv->ty = sv->lv->type; sv->cell = sv->lv->is_cell;
-  sv->lv->type = TY_STRING; sv->lv->is_cell = 0;
   sv->caps = g_cap_struct ? g_cap_names : NULL; sv->cap_at = -1;
-  for (int i = 0; sv->caps && i < sv->caps->n; i++) {
-    if (!sp_streq(sv->caps->v[i], sbn)) continue;
-    sv->cap_at = i; sv->cap_nm = sv->caps->v[i];
-    sv->caps->v[i] = "";
-    break;
-  }
-  snprintf(g_ren_from[g_nren], sizeof g_ren_from[0], "%s", sbn);
-  snprintf(g_ren_to[g_nren], sizeof g_ren_to[0], "_sb%d", tH);
-  g_nren++;
-  /* what the re-run hoists is kept apart until the close knows where it goes */
-  sv->t = tH; sv->pre_at = g_pre;
+  for (int i = 0; sv->caps && i < sv->caps->n && sv->cap_at < 0; i++)
+    if (sp_streq(sv->caps->v[i], sbn)) { sv->cap_at = i; sv->cap_nm = sv->caps->v[i]; }
+  sv->nm = sbn; sv->t = tH; sv->pre_at = g_pre; sv->argov = -1;
   memset(&sv->pre, 0, sizeof sv->pre);
-  if (g_pre) g_pre = &sv->pre;
+  sb_local_lift(sv, 1);
   return tH;
 }
-/* Close it. What the re-run hoisted goes ahead of the statement, where it
-   would be without the shim. An argument that reads the local from a hoisted
-   statement (a block's inlined loop, an interpolation's parts) reads the
-   shadow there, and the shadow is declared inside the shim: those statements
-   are answered instead, for the caller to put after that declaration and to
-   free. */
-char *sb_local_shim_close(SbLocalSave *sv, int handled) {
-  g_nren--;
-  if (sv->cap_at >= 0) sv->caps->v[sv->cap_at] = sv->cap_nm;
-  sv->lv->type = sv->ty; sv->lv->is_cell = sv->cell;
-  g_pre = sv->pre_at;
-  if (!sv->pre.p || !sv->pre.len) { free(sv->pre.p); return NULL; }
+/* After the arm's re-run for call `id`: did a statement it hoisted read the
+   shadow? An argument's block, inlined as a loop, or the parts of an
+   interpolation run ahead of the statement, and the shadow is declared inside
+   the shim. Then the arguments are evaluated here instead, ahead of the
+   statement and on the String itself, as CRuby runs them before the call;
+   each is bound to its temp, the arm's text is dropped, and the answer is 1:
+   run the arm again. */
+int sb_local_shim_again(Compiler *c, int id, SbLocalSave *sv, int handled, Buf *arm) {
+  if (!handled || sv->argov >= 0 || !sv->pre.len) return 0;
   char nm[32];
-  int nl = snprintf(nm, sizeof nm, "lv__sb%d", sv->t);
+  int nl = snprintf(nm, sizeof nm, "lv__sb%d", sv->t), reads = 0;
   /* a read of the shadow as C reads it: a Ruby string literal that spells the
      name is in the text verbatim, inside a C literal, and is no read */
-  for (const char *q = handled ? sv->pre.p : ""; *q; q++) {
+  for (const char *q = sv->pre.p; *q && !reads; q++) {
     if (*q == '"' || *q == '\'') {
       char e = *q++;
       while (*q && *q != e) { if (*q == '\\' && q[1]) q++; q++; }
       if (!*q) break;
     }
-    else if (!strncmp(q, nm, (size_t)nl) && !isdigit((unsigned char)q[nl])) return sv->pre.p;
+    else reads = !strncmp(q, nm, (size_t)nl) && !isdigit((unsigned char)q[nl]);
   }
-  buf_puts(g_pre, sv->pre.p);
-  free(sv->pre.p);
-  return NULL;
+  if (!reads) return 0;
+  sb_local_lift(sv, 0);
+  sv->pre.len = 0; sv->pre.p[0] = '\0';
+  arm->len = 0; if (arm->p) arm->p[0] = '\0';
+  sv->argov = g_n_argov;
+  int an = nt_ref(c->nt, id, "arguments"), ac = 0;
+  const int *av = an >= 0 ? nt_arr(c->nt, an, "arguments", &ac) : NULL;
+  int last = -1;
+  for (int a = 0; a < ac; a++) if (subtree_has_side_effect(c, av[a])) last = a;
+  for (int a = 0; a < ac; a++) {
+    TyKind vt = comp_ntype(c, av[a]);
+    /* an argument that is the String itself stays where it is, and the arm
+       reads it as the shadow; so does one that does not read the String and
+       has nothing run after it */
+    if (vt == TY_STRBUF || !c_type_name(vt)) continue;
+    if (a > last && !subtree_reads_local(c->nt, av[a], sv->nm)) continue;
+    argov_reserve();
+    int ht = ++g_tmp;
+    Buf vb = expr_buf(c, av[a]);
+    emit_indent(g_pre, g_indent);
+    emit_ctype(c, vt, g_pre);
+    buf_printf(g_pre, " _t%d = %s;", ht, vb.p ? vb.p : default_value_from_compiler(c, vt));
+    if (needs_root(vt)) buf_printf(g_pre, " SP_GC_ROOT(_t%d);", ht);
+    buf_puts(g_pre, "\n");
+    free(vb.p);
+    view_bind(av[a], "_t%d", ht);
+  }
+  sb_local_lift(sv, 1);
+  return 1;
 }
-/* The head of the shim in value position: the handle, its frozen check and
-   the shadow. `pre` is what the close answered, freed here: it runs after the
-   shadow's declaration and, an argument of the call, before the check. */
-void sb_local_shim_head(Buf *b, int tH, const char *sref, char *pre) {
-  buf_printf(b, "({ sp_String *_t%d = %s;", tH, sref);
-  if (!pre) buf_printf(b, " if (sp_String_is_frozen(_t%d)) sp_raise_frozen_str(_t%d->data);", tH, tH);
-  buf_printf(b, " const char *lv__sb%d = sp_str_concat(sp_String_cstr(_t%d), (&(\"\\xff\")[1]));"
-                " SP_GC_ROOT(lv__sb%d); ", tH, tH, tH);
-  if (!pre) return;
-  buf_puts(b, pre);
-  free(pre);
-  buf_printf(b, "if (sp_String_is_frozen(_t%d)) sp_raise_frozen_str(_t%d->data); ", tH, tH);
+/* Close it: what the re-run hoisted goes ahead of the statement, where it
+   would be without the shim. */
+void sb_local_shim_close(SbLocalSave *sv) {
+  sb_local_lift(sv, 0);
+  if (sv->argov >= 0) view_unbind(sv->argov);
+  if (sv->pre.len) buf_puts(g_pre, sv->pre.p);
+  free(sv->pre.p);
 }
 const char *g_sb_iv_name = NULL;
 int         g_sb_iv_cid  = -1;
