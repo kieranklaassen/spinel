@@ -3779,12 +3779,9 @@ int subtree_owns_redo(const NodeTable *nt, int body, int redo) {
 /* Does the subtree contain a `next` that belongs to THIS block, i.e. one not
    nested inside a deeper loop/block/def (which would own it instead)? Same
    ownership rule as subtree_has_own_redo. With `next` >= 0 the answer is for
-   that one node, and it is also looked for where a nested iteration is
-   evaluated in this block: the receiver, the arguments and a `&blk` of a
-   call with a block, and the collection of a `for`. The any-`next` form
-   does not look there: its callers pick by the answer how a block spliced
-   in place is written, and emit_fallback_block_value leaves the leading
-   statements out of a block that has one. */
+   that one node. A nested iteration owns its body, not what is evaluated in
+   this block before it runs: the receiver, the arguments and a `&blk` of a
+   call with a block, and the collection of a `for`, are looked through. */
 static int subtree_has_own_next_ex(const NodeTable *nt, int id, int next) {
   if (id < 0) return 0;
   const char *ty = nt_type(nt, id);
@@ -3794,10 +3791,9 @@ static int subtree_has_own_next_ex(const NodeTable *nt, int id, int next) {
       sp_streq(ty, "WhileNode") || sp_streq(ty, "UntilNode") || sp_streq(ty, "LambdaNode"))
     return 0;
   if (sp_streq(ty, "ForNode"))
-    return next >= 0 && subtree_has_own_next_ex(nt, nt_ref(nt, id, "collection"), next);
+    return subtree_has_own_next_ex(nt, nt_ref(nt, id, "collection"), next);
   int blk = sp_streq(ty, "CallNode") ? nt_ref(nt, id, "block") : -1;
   if (blk >= 0) {
-    if (next < 0) return 0;
     const char *bty = nt_type(nt, blk);
     return subtree_has_own_next_ex(nt, nt_ref(nt, id, "receiver"), next) ||
            subtree_has_own_next_ex(nt, nt_ref(nt, id, "arguments"), next) ||

@@ -775,7 +775,8 @@ TyKind block_next_value_ntype(const Compiler *c, int node) {
     if (aty && sp_streq(aty, "SplatNode")) return TY_POLY_ARRAY;
     return c->ntype[av[0]];
   }
-  if (k == NK_WhileNode || k == NK_UntilNode || k == NK_ForNode || k == NK_BlockNode ||
+  if (k == NK_ForNode) return block_next_value_ntype(c, nt_ref(nt, node, "collection"));
+  if (k == NK_WhileNode || k == NK_UntilNode || k == NK_BlockNode ||
       k == NK_LambdaNode || k == NK_DefNode || k == NK_ClassNode || k == NK_ModuleNode)
     return TY_UNKNOWN;
   TyKind r = TY_UNKNOWN;

@@ -1426,7 +1426,10 @@ TyKind block_next_value_ty(Compiler *c, int node) {
     if (aty && sp_streq(aty, "SplatNode")) return TY_POLY_ARRAY;
     return infer_type(c, av[0]);
   }
-  if (k == NK_WhileNode || k == NK_UntilNode || k == NK_ForNode || k == NK_BlockNode ||
+  /* a `for` binds the `next` of its body, not one in its collection, which
+     is evaluated in the block */
+  if (k == NK_ForNode) return block_next_value_ty(c, nt_ref(nt, node, "collection"));
+  if (k == NK_WhileNode || k == NK_UntilNode || k == NK_BlockNode ||
       k == NK_LambdaNode || k == NK_DefNode || k == NK_ClassNode || k == NK_ModuleNode)
     return TY_UNKNOWN;
   TyKind r = TY_UNKNOWN;
