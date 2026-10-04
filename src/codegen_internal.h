@@ -1539,6 +1539,7 @@ int emit_op_array_compact_bang(Compiler *c, const BopCtx *x, Buf *b);
 int emit_op_array_flatten(Compiler *c, const BopCtx *x, Buf *b);
 int emit_op_array_to_a(Compiler *c, const BopCtx *x, Buf *b);
 int array_expr_may_be_nil(Compiler *c, int v);
+int array_side_may_be_nil(Compiler *c, int v);
 void emit_array_to_a(Compiler *c, int v, Buf *b);
 int emit_op_array_push(Compiler *c, const BopCtx *x, Buf *b);
 int emit_op_array_insert_n(Compiler *c, const BopCtx *x, Buf *b);

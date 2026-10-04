@@ -236,8 +236,75 @@ static int emit_array_operand_type_error(Compiler *c, const BopCtx *x, Buf *b) {
   return 1;
 }
 
+/* The two sides of Array#+, -, & or | as the arms read them. A typed array
+   slot's nil is NULL -- a slice that starts past the end (`a[3, 5]` of two
+   elements), a general Array local one branch leaves nil -- and the runtime
+   reads NULL as the empty array an empty literal hands it, so `a[0, 1] +
+   a[3, 5]` answered [1] where CRuby raises TypeError, and a nil receiver
+   answered the operand. Where a side can be nil both are bound to rooted
+   temps and tested (sp_ary_nil_ck) ahead of the arm, which then reads the
+   temps; where neither can -- a literal, a builtin answering a new array --
+   the arm emits them as it did. */
+typedef struct { int on; char l[24], r[24]; } ArySides;
+
+int array_side_may_be_nil(Compiler *c, int v) {
+  const NodeTable *nt = c->nt;
+  v = unwrap_parens(c, v);
+  if (v >= 0 && nt_kind(nt, v) == NK_CallNode) {
+    /* an Array's to_a and Kernel#Array of one answer [] for nil */
+    const char *nm = nt_str(nt, v, "name");
+    int r = nt_ref(nt, v, "receiver"), ac;
+    const int *av = call_args(nt, v, &ac);
+    if (nm && sp_streq(nm, "to_a") && r >= 0 && ac == 0 && ty_is_array(comp_ntype(c, r))) return 0;
+    if (nm && sp_streq(nm, "Array") && r < 0 && ac == 1 && ty_is_array(comp_ntype(c, av[0]))) return 0;
+  }
+  return array_expr_may_be_nil(c, v);
+}
+static const char *array_side_kind(TyKind t) {
+  return t == TY_POLY_ARRAY ? "Poly" : array_kind(t);
+}
+static void array_sides_open(Compiler *c, const BopCtx *x, ArySides *s, Buf *b) {
+  int argc;
+  const int *argv = call_args(c->nt, x->id, &argc);
+  s->on = 0;
+  if (argc != 1) return;
+  TyKind a0 = comp_ntype(c, argv[0]);
+  const char *kl = array_side_kind(x->rt), *kr = array_side_kind(a0);
+  if (!kl || !kr) return;
+  /* a typed Array `+` one of another kind hoists its sides into temps of
+     its own, and tests there */
+  if (sp_streq(x->name, "+") && x->rt != TY_POLY_ARRAY && a0 != x->rt) return;
+  if (!array_side_may_be_nil(c, x->recv) && !array_side_may_be_nil(c, argv[0])) return;
+  int tl = ++g_tmp, tr = ++g_tmp;
+  snprintf(s->l, sizeof s->l, "_t%d", tl);
+  snprintf(s->r, sizeof s->r, "_t%d", tr);
+  buf_printf(b, "({ sp_%sArray *_t%d = ", kl, tl); emit_expr(c, x->recv, b);
+  buf_printf(b, "; SP_GC_ROOT(_t%d); sp_%sArray *_t%d = ", tl, kr, tr); emit_expr(c, argv[0], b);
+  buf_printf(b, "; SP_GC_ROOT(_t%d); sp_ary_nil_ck(_t%d, _t%d, \"%s\"); ", tr, tl, tr, x->name);
+  s->on = 1;
+}
+static void array_side_l(Compiler *c, const BopCtx *x, const ArySides *s, Buf *b) {
+  if (s->on) buf_puts(b, s->l);
+  else emit_expr(c, x->recv, b);
+}
+static void array_side_r(Compiler *c, int arg, const ArySides *s, Buf *b) {
+  if (s->on) buf_puts(b, s->r);
+  else emit_expr(c, arg, b);
+}
+
+static int array_plus_arms(Compiler *c, const BopCtx *x, const ArySides *s, Buf *b);
 /* Array#+: the same kind concatenates; another kind boxes both sides into a poly array */
 int emit_op_array_plus(Compiler *c, const BopCtx *x, Buf *b) {
+  if (emit_array_operand_type_error(c, x, b)) return 1;
+  ArySides s;
+  size_t mark = b->len;
+  array_sides_open(c, x, &s, b);
+  int r = array_plus_arms(c, x, &s, b);
+  if (s.on && r) buf_puts(b, "; })");
+  else if (s.on) buf_erase(b, mark, b->len - mark);   /* no arm took it */
+  return r;
+}
+static int array_plus_arms(Compiler *c, const BopCtx *x, const ArySides *s, Buf *b) {
   const NodeTable *nt = c->nt;
   const char *name = x->name;
   int id = x->id, recv = x->recv, argc;
@@ -247,15 +314,14 @@ int emit_op_array_plus(Compiler *c, const BopCtx *x, Buf *b) {
   const char *k = array_kind(rt);
   int block = nt_ref(nt, id, "block");
   (void)name; (void)a0; (void)k; (void)block; (void)argv;
-  if (emit_array_operand_type_error(c, x, b)) return 1;
   if (rt == TY_POLY_ARRAY) {
     if (sp_streq(name, "+") && argc == 1 && a0 == TY_POLY_ARRAY) {
       /* Spill the receiver: evaluating the operand can allocate, and until
          the concat runs the receiver is in nothing but this temp. */
       int t = ++g_tmp;
-      buf_printf(b, "({ sp_PolyArray *_t%d = ", t); emit_expr(c, recv, b);
+      buf_printf(b, "({ sp_PolyArray *_t%d = ", t); array_side_l(c, x, s, b);
       buf_printf(b, "; SP_GC_ROOT(_t%d); sp_PolyArray_concat(_t%d, ", t, t);
-      emit_expr(c, argv[0], b); buf_puts(b, "); })");
+      array_side_r(c, argv[0], s, b); buf_puts(b, "); })");
       return 1;
     }
     /* poly_array + typed array: box the typed operand to poly, then concat. */
@@ -265,9 +331,9 @@ int emit_op_array_plus(Compiler *c, const BopCtx *x, Buf *b) {
                          a0 == TY_STR_ARRAY ? "sp_StrArray_to_poly_fmt" : NULL;
       if (conv) {
         int t = ++g_tmp;
-        buf_printf(b, "({ sp_PolyArray *_t%d = ", t); emit_expr(c, recv, b);
+        buf_printf(b, "({ sp_PolyArray *_t%d = ", t); array_side_l(c, x, s, b);
         buf_printf(b, "; SP_GC_ROOT(_t%d); sp_PolyArray_concat(_t%d, %s(", t, t, conv);
-        emit_expr(c, argv[0], b); buf_puts(b, ")); })");
+        array_side_r(c, argv[0], s, b); buf_puts(b, ")); })");
         return 1;
       }
     }
@@ -276,8 +342,8 @@ int emit_op_array_plus(Compiler *c, const BopCtx *x, Buf *b) {
   if (sp_streq(name, "+") && argc == 1 && a0 == rt) {
     /* array + array of the same kind -> a fresh concatenation */
     buf_printf(b, "sp_%sArray_concat(", k);
-    emit_expr(c, recv, b); buf_puts(b, ", ");
-    emit_expr(c, argv[0], b);
+    array_side_l(c, x, s, b); buf_puts(b, ", ");
+    array_side_r(c, argv[0], s, b);
     buf_puts(b, ")");
     return 1;
   }
@@ -302,6 +368,10 @@ int emit_op_array_plus(Compiler *c, const BopCtx *x, Buf *b) {
       buf_printf(g_pre, "sp_%sArray *_t%d = %s; SP_GC_ROOT(_t%d);\n", k, tL, lbuf.p ? lbuf.p : "", tL); free(lbuf.p);
       emit_indent(g_pre, g_indent);
       buf_printf(g_pre, "sp_%sArray *_t%d = %s; SP_GC_ROOT(_t%d);\n", k2, tR, rbuf.p ? rbuf.p : "", tR); free(rbuf.p);
+      if (array_side_may_be_nil(c, recv) || array_side_may_be_nil(c, argv[0])) {
+        emit_indent(g_pre, g_indent);
+        buf_printf(g_pre, "sp_ary_nil_ck(_t%d, _t%d, \"+\");\n", tL, tR);
+      }
       if (rt == TY_INT_ARRAY || rt == TY_FLOAT_ARRAY) {
         int tn = ++g_tmp; snprintf(nf_l, sizeof nf_l, "_t%d, ", tn);
         char an[24]; snprintf(an, sizeof an, "_t%d", tL);
@@ -338,7 +408,18 @@ int emit_op_array_plus(Compiler *c, const BopCtx *x, Buf *b) {
 
 /* Array#& / #| / #- and intersection / union / difference with operands: the
    same kind runs the typed set op; another kind, or a boxed operand, the poly one */
+static int array_setop_arms(Compiler *c, const BopCtx *x, const ArySides *s, Buf *b);
 int emit_op_array_setop(Compiler *c, const BopCtx *x, Buf *b) {
+  if (emit_array_operand_type_error(c, x, b)) return 1;
+  ArySides s;
+  size_t mark = b->len;
+  array_sides_open(c, x, &s, b);
+  int r = array_setop_arms(c, x, &s, b);
+  if (s.on && r) buf_puts(b, "; })");
+  else if (s.on) buf_erase(b, mark, b->len - mark);   /* no arm took it */
+  return r;
+}
+static int array_setop_arms(Compiler *c, const BopCtx *x, const ArySides *s, Buf *b) {
   const NodeTable *nt = c->nt;
   const char *name = x->name;
   int id = x->id, recv = x->recv, argc;
@@ -348,13 +429,12 @@ int emit_op_array_setop(Compiler *c, const BopCtx *x, Buf *b) {
   const char *k = array_kind(rt);
   int block = nt_ref(nt, id, "block");
   (void)name; (void)a0; (void)k; (void)block; (void)argv;
-  if (emit_array_operand_type_error(c, x, b)) return 1;
   if (rt == TY_POLY_ARRAY) {
     if (is_set_op(name) && argc == 1 && (a0 == TY_POLY_ARRAY || a0 == TY_UNKNOWN)) {
       const char *fn = (is_intersection_alias(name)) ? "intersect" : (is_union_alias(name) ? "union" : "difference");
       buf_printf(b, "sp_PolyArray_%s(", fn);
-      emit_expr(c, recv, b); buf_puts(b, ", ");
-      if (a0 == TY_UNKNOWN) buf_puts(b, "NULL"); else emit_expr(c, argv[0], b);
+      array_side_l(c, x, s, b); buf_puts(b, ", ");
+      if (a0 == TY_UNKNOWN) buf_puts(b, "NULL"); else array_side_r(c, argv[0], s, b);
       buf_puts(b, ")"); return 1;
     }
     /* poly-array set-op with a typed-array argument (different element type):
@@ -365,7 +445,7 @@ int emit_op_array_setop(Compiler *c, const BopCtx *x, Buf *b) {
       const char *conv = a0 == TY_INT_ARRAY ? "sp_IntArray_to_poly" :
                          a0 == TY_STR_ARRAY ? "sp_StrArray_to_poly_fmt" : "sp_FloatArray_to_poly";
       buf_printf(b, "sp_PolyArray_%s(", fn);
-      emit_expr(c, recv, b); buf_printf(b, ", %s(", conv); emit_expr(c, argv[0], b);
+      array_side_l(c, x, s, b); buf_printf(b, ", %s(", conv); array_side_r(c, argv[0], s, b);
       buf_puts(b, "))"); return 1;
     }
     /* poly-array receiver, POLY argument: same run-time coercion (#3475) */
@@ -373,8 +453,8 @@ int emit_op_array_setop(Compiler *c, const BopCtx *x, Buf *b) {
         a0 == TY_POLY) {
       const char *fn = (is_intersection_alias(name)) ? "intersect" : (is_union_alias(name) ? "union" : "difference");
       buf_printf(b, "sp_PolyArray_%s(", fn);
-      emit_expr(c, recv, b); buf_puts(b, ", sp_poly_set_operand(");
-      emit_expr(c, argv[0], b); buf_puts(b, "))"); return 1;
+      array_side_l(c, x, s, b); buf_puts(b, ", sp_poly_set_operand(");
+      array_side_r(c, argv[0], s, b); buf_puts(b, "))"); return 1;
     }
     /* variadic named set ops on a poly array: fold over each argument */
     if ((is_named_set_operator(name)) && argc >= 2) {
@@ -387,7 +467,7 @@ int emit_op_array_setop(Compiler *c, const BopCtx *x, Buf *b) {
         const char *fn = sp_streq(name, "intersection") ? "intersect" :
                          sp_streq(name, "union") ? "union" : "difference";
         int t = ++g_tmp;
-        buf_printf(b, "({ sp_PolyArray *_t%d = ", t); emit_expr(c, recv, b);
+        buf_printf(b, "({ sp_PolyArray *_t%d = ", t); array_side_l(c, x, s, b);
         buf_printf(b, "; SP_GC_ROOT(_t%d);", t);
         for (int j = 0; j < argc; j++) {
           buf_printf(b, " _t%d = sp_PolyArray_%s(_t%d, ", t, fn, t);
@@ -404,8 +484,8 @@ int emit_op_array_setop(Compiler *c, const BopCtx *x, Buf *b) {
   if (is_set_op(name) && argc == 1 && (a0 == rt || a0 == TY_UNKNOWN)) {
     const char *fn = (is_intersection_alias(name)) ? "intersect" : ((is_union_alias(name)) ? "union" : "difference");
     /* empty literal [] arg: use a null pointer (safe for all sp_*Array_* set ops) */
-    if (a0 == TY_UNKNOWN) { buf_printf(b, "sp_%sArray_%s(", k, fn); emit_expr(c, recv, b); buf_puts(b, ", NULL)"); }
-    else { buf_printf(b, "sp_%sArray_%s(", k, fn); emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
+    if (a0 == TY_UNKNOWN) { buf_printf(b, "sp_%sArray_%s(", k, fn); array_side_l(c, x, s, b); buf_puts(b, ", NULL)"); }
+    else { buf_printf(b, "sp_%sArray_%s(", k, fn); array_side_l(c, x, s, b); buf_puts(b, ", "); array_side_r(c, argv[0], s, b); buf_puts(b, ")"); }
     return 1;
   }
   /* typed-array receiver, different-kind typed-array or poly-array argument:
@@ -422,9 +502,9 @@ int emit_op_array_setop(Compiler *c, const BopCtx *x, Buf *b) {
        conversions allocate, and a nested-call operand is nobody's root
        between its evaluation and the call */
     int tl = ++g_tmp;
-    buf_printf(b, "({ sp_PolyArray *_t%d = %s(", tl, conv_l); emit_expr(c, recv, b); buf_printf(b, "); SP_GC_ROOT(_t%d); sp_PolyArray_%s(_t%d, ", tl, fn, tl);
-    if (conv_r) { buf_printf(b, "%s(", conv_r); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
-    else emit_expr(c, argv[0], b);  /* already poly */
+    buf_printf(b, "({ sp_PolyArray *_t%d = %s(", tl, conv_l); array_side_l(c, x, s, b); buf_printf(b, "); SP_GC_ROOT(_t%d); sp_PolyArray_%s(_t%d, ", tl, fn, tl);
+    if (conv_r) { buf_printf(b, "%s(", conv_r); array_side_r(c, argv[0], s, b); buf_puts(b, ")"); }
+    else array_side_r(c, argv[0], s, b);  /* already poly */
     buf_puts(b, "); })"); return 1;
   }
   /* typed-array receiver, POLY argument (a value whose static type widened,
@@ -438,8 +518,8 @@ int emit_op_array_setop(Compiler *c, const BopCtx *x, Buf *b) {
     const char *conv_l = rt == TY_INT_ARRAY ? "sp_IntArray_to_poly" :
                          rt == TY_STR_ARRAY ? "sp_StrArray_to_poly_fmt" : "sp_FloatArray_to_poly";
     int tl = ++g_tmp;
-    buf_printf(b, "({ sp_PolyArray *_t%d = %s(", tl, conv_l); emit_expr(c, recv, b);
-    buf_printf(b, "); SP_GC_ROOT(_t%d); sp_PolyArray_%s(_t%d, sp_poly_set_operand(", tl, fn, tl); emit_expr(c, argv[0], b);
+    buf_printf(b, "({ sp_PolyArray *_t%d = %s(", tl, conv_l); array_side_l(c, x, s, b);
+    buf_printf(b, "); SP_GC_ROOT(_t%d); sp_PolyArray_%s(_t%d, sp_poly_set_operand(", tl, fn, tl); array_side_r(c, argv[0], s, b);
     buf_puts(b, ")); })"); return 1;
   }
   /* variadic named set ops: union/intersection/difference(*others) fold the
@@ -454,7 +534,7 @@ int emit_op_array_setop(Compiler *c, const BopCtx *x, Buf *b) {
       const char *fn = sp_streq(name, "intersection") ? "intersect" :
                        sp_streq(name, "union") ? "union" : "difference";
       int t = ++g_tmp;
-      buf_printf(b, "({ sp_%sArray *_t%d = ", k, t); emit_expr(c, recv, b);
+      buf_printf(b, "({ sp_%sArray *_t%d = ", k, t); array_side_l(c, x, s, b);
       buf_printf(b, "; SP_GC_ROOT(_t%d);", t);
       for (int j = 0; j < argc; j++) {
         buf_printf(b, " _t%d = sp_%sArray_%s(_t%d, ", t, k, fn, t);
@@ -1908,7 +1988,17 @@ int emit_call_array_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const
                          : (is_union_alias(name)) ? "union"
                          : (sp_streq(name, "+")) ? "concat"
                          : "difference";
-          buf_printf(b, "sp_%sArray_%s(NULL, ", ek, fn); emit_expr(c, argv[0], b); buf_puts(b, ")");
+          if (ty_is_array(akt) && array_side_kind(akt) && !sp_streq(name, "zip") &&
+              array_side_may_be_nil(c, argv[0])) {
+            /* the operand's nil is NULL too, and the receiver is no nil */
+            int tn = ++g_tmp;
+            buf_printf(b, "({ sp_%sArray *_t%d = ", ek, tn); emit_expr(c, argv[0], b);
+            buf_printf(b, "; sp_ary_nil_ck(\"\", _t%d, \"%s\"); sp_%sArray_%s(NULL, _t%d); })",
+                       tn, name, ek, fn, tn);
+          }
+          else {
+            buf_printf(b, "sp_%sArray_%s(NULL, ", ek, fn); emit_expr(c, argv[0], b); buf_puts(b, ")");
+          }
         }
         else {
           buf_printf(b, "sp_%sArray_new()", ek);

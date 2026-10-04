@@ -243,6 +243,16 @@ static inline sp_IntArray *sp_IntArray_to_a(sp_IntArray *a) { return a ? a : sp_
 static inline sp_FloatArray *sp_FloatArray_to_a(sp_FloatArray *a) { return a ? a : sp_FloatArray_new(); }
 static inline sp_StrArray *sp_StrArray_to_a(sp_StrArray *a) { return a ? a : sp_StrArray_new(); }
 static inline sp_PolyArray *sp_PolyArray_to_a(sp_PolyArray *a) { return a ? a : sp_PolyArray_new(); }
+/* The sides of Array#+, -, & or | held in typed array slots, whose nil is
+   NULL: the helpers read NULL as an empty array (an empty literal reaches
+   them so), which answered `a + nil` as a. A nil receiver has no + or -
+   (NoMethodError); nil's own & and | answer a boolean no Array slot holds
+   (NotImplementedError); a nil operand is CRuby's TypeError. Emitted only
+   where a side can be nil. */
+SP_NORETURN SP_COLD void sp_raise_nil_ary_op(int recv_nil, const char *op);
+static inline void sp_ary_nil_ck(const void *a, const void *b, const char *op) {
+  if (SP_UNLIKELY(!a || !b)) sp_raise_nil_ary_op(!a, op);
+}
 /* The Float twin of SP_INT_NIL_CK: a nullable Float slot's nil is a NaN
    payload the hardware carries through every arithmetic operator, so
    `nil + 1.0` computed a NaN that read back as nil instead of raising.

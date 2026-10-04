@@ -1904,6 +1904,34 @@ static const char *poly_array_rhs_conv(TyKind vt) {
   return NULL;
 }
 
+/* The array kind of an op-assign's rhs `v` where it is held in an array slot
+   of its own and can be that slot's nil, or NULL. */
+static const char *array_op_assign_nil_kind(Compiler *c, int v, TyKind vt) {
+  const char *vk = vt == TY_POLY_ARRAY ? "Poly" : array_kind(vt);
+  return vk && array_side_may_be_nil(c, v) ? vk : NULL;
+}
+
+/* The write `lval = sp_<k>Array_<fn>(src, rhs)` of an Array op-assign. The
+   slot's nil is NULL, which the helper reads as an empty array, and so is
+   the nil of an rhs held in an array slot (`vk` its kind): `x += a` with x
+   nil answered a, where nil has no `+`. Both are tested first, the rhs once
+   it is evaluated (sp_ary_nil_ck). */
+static void emit_array_op_assign_write(const char *lval, const char *k, const char *fn,
+                                       const char *op, const char *src, const char *vk,
+                                       const char *conv, const char *rhs, Buf *b) {
+  if (!vk) {
+    buf_printf(b, "{ sp_ary_nil_ck(%s, \"\", \"%s\"); %s = sp_%sArray_%s(%s, %s); }",
+               src, op, lval, k, fn, src, rhs);
+    return;
+  }
+  int t = ++g_tmp;
+  buf_printf(b, "{ sp_%sArray *_t%d = %s; sp_ary_nil_ck(%s, _t%d, \"%s\"); %s = sp_%sArray_%s(%s, ",
+             vk, t, rhs, src, t, op, lval, k, fn, src);
+  if (conv) buf_printf(b, "%s(_t%d)", conv, t);
+  else buf_printf(b, "_t%d", t);
+  buf_puts(b, "); }");
+}
+
 /* Array op-assign on any slot -- a local, an ivar, a global, a class
    variable -- as `x = x OP v`, `lval` naming the slot and `t` its array type:
    `|=` `&=` `-=` through the same typed set-op helpers the binary `a | b`
@@ -1925,15 +1953,14 @@ int emit_array_op_assign(Compiler *c, const char *lval, TyKind t,
     if (vt != t && vt != TY_UNKNOWN && !conv) return 0;
     const char *fn = sp_streq(op, "&") ? "intersect" : (sp_streq(op, "|") ? "union" : "difference");
     size_t pre_mark = g_pre ? g_pre->len : 0;
+    const char *vk = vt != TY_UNKNOWN ? array_op_assign_nil_kind(c, v, vt) : NULL;
     Buf rb; memset(&rb, 0, sizeof rb);
     if (vt == TY_UNKNOWN) buf_puts(&rb, "NULL");
-    else if (conv) { buf_printf(&rb, "%s(", conv); emit_expr(c, v, &rb); buf_puts(&rb, ")"); }
+    else if (conv && !vk) { buf_printf(&rb, "%s(", conv); emit_expr(c, v, &rb); buf_puts(&rb, ")"); }
     else emit_expr(c, v, &rb);
     char tn[32];
     const char *src = array_op_assign_src(c, lval, k, v, pre_mark, tn, sizeof tn, b);
-    buf_printf(b, "%s = sp_%sArray_%s(%s, ", lval, k, fn, src);
-    buf_puts(b, rb.p ? rb.p : "");
-    buf_puts(b, ");");
+    emit_array_op_assign_write(lval, k, fn, op, src, vk, conv, rb.p ? rb.p : "", b);
     op_assign_slot_end(src, lval, b);
     free(rb.p);
     return 1;
@@ -1949,15 +1976,14 @@ int emit_array_op_assign(Compiler *c, const char *lval, TyKind t,
     const char *conv = (t == TY_POLY_ARRAY && vt != t && !rhs_empty) ? poly_array_rhs_conv(vt) : NULL;
     if (vt != t && !rhs_empty && !conv) return 0;
     size_t pre_mark = g_pre ? g_pre->len : 0;
+    const char *vk = !rhs_empty ? array_op_assign_nil_kind(c, v, vt) : NULL;
     Buf rb; memset(&rb, 0, sizeof rb);
     if (rhs_empty) buf_puts(&rb, "NULL");
-    else if (conv) { buf_printf(&rb, "%s(", conv); emit_expr(c, v, &rb); buf_puts(&rb, ")"); }
+    else if (conv && !vk) { buf_printf(&rb, "%s(", conv); emit_expr(c, v, &rb); buf_puts(&rb, ")"); }
     else emit_expr(c, v, &rb);
     char tn[32];
     const char *src = array_op_assign_src(c, lval, k, v, pre_mark, tn, sizeof tn, b);
-    buf_printf(b, "%s = sp_%sArray_concat(%s, ", lval, k, src);
-    buf_puts(b, rb.p ? rb.p : "");
-    buf_puts(b, ");");
+    emit_array_op_assign_write(lval, k, "concat", op, src, vk, conv, rb.p ? rb.p : "", b);
     op_assign_slot_end(src, lval, b);
     free(rb.p);
     return 1;

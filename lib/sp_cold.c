@@ -4618,6 +4618,17 @@ SP_NORETURN void sp_raise_nil_cmp(int left_nil, const char *op, const char *cls)
   sp_raise_cls("ArgumentError", sp_sprintf("comparison of %s with nil failed", cls));
 }
 
+/* A nil side of Array#+, -, & or | read out of a typed array slot
+   (sp_ary_nil_ck). nil has & and |, whose true or false the call's Array
+   slot cannot hold. */
+SP_NORETURN void sp_raise_nil_ary_op(int recv_nil, const char *op) {SP_GC_ROOT_STR(op);
+  if (!recv_nil)
+    sp_raise_cls("TypeError", "no implicit conversion of nil into Array");
+  if (op[0] == '&' || op[0] == '|')
+    sp_raise_cls("NotImplementedError", sp_sprintf("nil %s Array answers true or false, which an Array slot cannot hold", op));
+  sp_raise_cls("NoMethodError", sp_sprintf("undefined method '%s' for nil", op));
+}
+
 /* A nil that reached a strict Integer argument slot through an `Integer?`
    variable. The literal `s[nil]` already raised this from the emitter; the
    slot's nil is the same nil, so it gets the same message (#4896). */
