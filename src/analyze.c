@@ -16265,6 +16265,41 @@ static int strbuf_demand_elem_arg(Compiler *c, int an) {
   if (listed) sb_elem_nbusy--;
   return d;
 }
+/* The container a mutator's receiver reads its String out of, -1 when the
+   receiver is no element of one. Every element read, not just `[]`: a
+   mutation through `b.first` has to reach the container the same way
+   (#4013). And the value of `c[k] ||= v` / `c[k] &&= v`, which is the
+   element the write leaves in the slot: `(h[k] ||= +"") << x` appends to
+   the String h holds. */
+static int strbuf_mutated_elem_container(const NodeTable *nt, int mrecv) {
+  if (mrecv < 0) return -1;
+  if (nt_kind(nt, mrecv) == NK_CallNode)
+    return container_elem_read_p(nt, mrecv) ? nt_ref(nt, mrecv, "receiver") : -1;
+  int cont = -1;
+  return an_index_logic_write_value(nt, an_unparen(nt, mrecv), &cont) >= 0 ? cont : -1;
+}
+/* The stores into `cont`, a container one of whose elements is changed in
+   place, demanded as shared handles. */
+static int strbuf_demand_mutated_container(Compiler *c, int cont) {
+  const NodeTable *nt = c->nt;
+  /* an element of a method result, an ivar, a reader: `mk[1] << x` */
+  if (nt_kind(nt, cont) != NK_LocalVariableReadNode) {
+    TyKind ct = infer_type(c, cont);
+    /* or an element of another container (`r[0][0] << "!"`), boxed */
+    if (ty_is_array(ct) || ty_is_hash(ct) || container_elem_read_p(nt, cont))
+      return strbuf_container_source_walk(c, cont, 0, SB_DEMAND);
+    return 0;
+  }
+  const char *contn = nt_str(nt, cont, "name");
+  Scope *conts = contn ? comp_scope_of(c, cont) : NULL;
+  LocalVar *contv = (contn && conts) ? scope_local(conts, contn) : NULL;
+  /* a block parameter bound to boxed elements is POLY, whatever it holds,
+     and so is a local bound from one (`x = a[0]; x[0] << "!"`): its
+     stores are walked to the container they name */
+  if (!contv || (!ty_is_array(contv->type) && !ty_is_hash(contv->type) &&
+                 contv->type != TY_UNKNOWN && contv->type != TY_POLY)) return 0;
+  return strbuf_demand_container_stores(c, contn, conts);
+}
 static int promote_shared_stored_strings(Compiler *c) {
   int changed = 0;
   sb_store_valid = 0;   /* this run's store index is built on first use */
@@ -16407,29 +16442,12 @@ static int promote_shared_stored_strings(Compiler *c) {
       if (!sp_str_mutator(mun, SP_MUT_CONTAINER)) continue;
     }
     int mrecv = nt_ref(nt, mu, "receiver");
-    if (mrecv < 0 || nt_kind(nt, mrecv) != NK_CallNode) continue;
-    /* every element read, not just `[]`: a mutation through `b.first` has to
-       reach the container the same way (#4013) */
-    if (!container_elem_read_p(nt, mrecv)) continue;
-    int cont = nt_ref(nt, mrecv, "receiver");
+    int cont = strbuf_mutated_elem_container(nt, mrecv);
     if (cont < 0) continue;
-    /* an element of a method result, an ivar, a reader: `mk[1] << x` */
-    if (nt_kind(nt, cont) != NK_LocalVariableReadNode) {
-      TyKind ct = infer_type(c, cont);
-      /* or an element of another container (`r[0][0] << "!"`), boxed */
-      if (ty_is_array(ct) || ty_is_hash(ct) || container_elem_read_p(nt, cont))
-        changed |= strbuf_container_source_walk(c, cont, 0, SB_DEMAND);
-      continue;
-    }
-    const char *contn = nt_str(nt, cont, "name");
-    Scope *conts = contn ? comp_scope_of(c, cont) : NULL;
-    LocalVar *contv = (contn && conts) ? scope_local(conts, contn) : NULL;
-    /* a block parameter bound to boxed elements is POLY, whatever it holds,
-       and so is a local bound from one (`x = a[0]; x[0] << "!"`): its
-       stores are walked to the container they name */
-    if (!contv || (!ty_is_array(contv->type) && !ty_is_hash(contv->type) &&
-                   contv->type != TY_UNKNOWN && contv->type != TY_POLY)) continue;
-    changed |= strbuf_demand_container_stores(c, contn, conts);
+    int lw = nt_kind(nt, mrecv) != NK_CallNode;
+    sb_logic_write_walks += lw;
+    changed |= strbuf_demand_mutated_container(c, cont);
+    sb_logic_write_walks -= lw;
   }
 
   /* External reader mutation (`expr.reader << x`): the mutator reaches the
