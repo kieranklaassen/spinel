@@ -76,6 +76,15 @@ static const char *sp_errf_path(int err, const char *path) {
   return sp_err_buf;
 }
 
+/* CRuby's TypeError for a [program, argv0] element that is no String */
+static const char *sp_errf_conv(sp_RbVal v) {
+  const char *k = v.tag == SP_TAG_INT ? "Integer" : v.tag == SP_TAG_FLT ? "Float"
+                : v.tag == SP_TAG_NIL ? "nil" : v.tag == SP_TAG_SYM ? "Symbol"
+                : v.tag == SP_TAG_BOOL ? (v.v.i ? "true" : "false") : "Object";
+  snprintf(sp_err_buf, sizeof sp_err_buf, "no implicit conversion of %s into String", k);
+  return sp_err_buf;
+}
+
 /* Apply the redirect in the child: dup2 src_fd onto target_fd, close src.
    src_fd < 0 means the caller did not pass that slot in the opts hash
    (the codegen initialises every slot to -1 and overwrites only the ones
@@ -246,12 +255,14 @@ sp_int sp_process_spawn(sp_RbVal cmd, sp_RbVal args_box,
   }
   else if (cmd.tag == SP_TAG_OBJ &&
              cmd.cls_id == SP_BUILTIN_POLY_ARRAY) {
+    /* [program, argv0]: run program with argv0 as its argv[0], exactly two
+       Strings, as CRuby takes them */
     cmd_arr = (sp_PolyArray *)cmd.v.p;
-    if (cmd_arr->len < 1) sp_process_spawn_fail(owned, "ArgumentError", "empty command array");
-    if (cmd_arr->data[0].tag != SP_TAG_STR)
-      sp_process_spawn_fail(owned, "ArgumentError", "command[0] must be a String");
+    if (cmd_arr->len != 2) sp_process_spawn_fail(owned, "ArgumentError", "wrong first argument");
+    for (int i = 0; i < 2; i++)
+      if (cmd_arr->data[i].tag != SP_TAG_STR)
+        sp_process_spawn_fail(owned, "TypeError", sp_errf_conv(cmd_arr->data[i]));
     prog = cmd_arr->data[0].v.s;
-    extra_from_cmd = cmd_arr->len - 1;
     if (args_box.tag == SP_TAG_OBJ &&
         args_box.cls_id == SP_BUILTIN_POLY_ARRAY) {
       args_arr = (sp_PolyArray *)args_box.v.p;
@@ -268,15 +279,8 @@ sp_int sp_process_spawn(sp_RbVal cmd, sp_RbVal args_box,
   if (!argv) sp_process_spawn_fail(owned, "NoMemoryError", "out of memory");
   int ai = 0;
   if (via_shell) { argv[ai++] = (char *)"/bin/sh"; argv[ai++] = (char *)"-c"; }
-  argv[ai++] = (char *)prog;
+  argv[ai++] = cmd_arr ? (char *)cmd_arr->data[1].v.s : (char *)prog;
   if (via_shell) prog = "/bin/sh";
-  if (cmd_arr) {
-    for (int i = 1; i < cmd_arr->len; i++) {
-      if (cmd_arr->data[i].tag != SP_TAG_STR)
-        sp_process_spawn_fail(owned, "ArgumentError", "command array element must be a String");
-      argv[ai++] = (char *)cmd_arr->data[i].v.s;
-    }
-  }
   if (args_arr) {
     for (int i = 0; i < args_arr->len; i++) {
       if (args_arr->data[i].tag != SP_TAG_STR)
@@ -370,7 +374,7 @@ sp_int sp_process_spawn(sp_RbVal cmd, sp_RbVal args_box,
       do { r = waitpid(pid, &st, 0); } while (r < 0 && errno == EINTR);
       /* the reaped child is the last one waited for, so $? reads its
          exit 127, as it does under CRuby */
-      if (r == pid) sp_last_status = st; }
+      if (r == pid) { sp_last_status = st; sp_last_pid = (int)pid; } }
     errno = fail[0];
     sp_raise_cls(errno == ENOENT ? "Errno::ENOENT" :
                  errno == EACCES ? "Errno::EACCES" :
@@ -384,6 +388,23 @@ sp_int sp_process_spawn(sp_RbVal cmd, sp_RbVal args_box,
    waitpid answers for the OS worker, and a started green thread is pinned to
    its worker, so blocking here stalls the thread that may have to drain this
    child's output before it can exit (#4381). */
+/* Process.wait / waitpid: the same wait as waitpid2, answering only the
+   pid; the status goes to $? */
+sp_int sp_process_waitpid(sp_int pid) {
+  extern int sp_sched_wait_child(int pid, int *status);
+  int status = 0;
+  pid_t r = (pid_t)sp_sched_wait_child((int)pid, &status);
+  if (r < 0) {
+    if (errno == ECHILD) {
+      sp_raise_cls("Errno::ECHILD", "No child processes");
+    }
+    sp_raise_cls("SystemCallError", sp_errf_errno("waitpid failed", errno));
+  }
+  sp_last_status = status;
+  sp_last_pid = (int)r;
+  return (sp_int)r;
+}
+
 sp_PolyArray *sp_process_waitpid2(sp_int pid) {
   extern int sp_sched_wait_child(int pid, int *status);   /* see the note at the top on this TU's includes */
   int status = 0;
@@ -398,6 +419,7 @@ sp_PolyArray *sp_process_waitpid2(sp_int pid) {
      and a backtick; before this a waitpid2 left $? at whatever the last
      system call or backtick stored. */
   sp_last_status = status;
+  sp_last_pid = (int)r;
   sp_PolyArray *pa = sp_PolyArray_new(); SP_GC_ROOT(pa);   /* the status object below is an allocation */
   sp_PolyArray_push(pa, sp_box_int((sp_int)r));
   /* Second element is a Process::Status instance wrapping (pid, status),
