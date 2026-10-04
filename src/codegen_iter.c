@@ -3669,7 +3669,10 @@ static int call_targets_yielding_method(Compiler *c, int id) {
 int emit_inline_expr(Compiler *c, int id, Buf *b) {
   /* only when a value is actually produced (scalar return) */
   TyKind rt = comp_ntype(c, id);
-  if (!is_scalar_ret(rt)) {
+  if (is_scalar_ret(rt)) {
+    if (emit_inline_call_x(c, id, b, g_indent + 1, 1)) return 1;
+  }
+  else {
     /* A block that always raises leaves the call with no value type at all,
        but the call itself still inlines: hold the (dead) result boxed so the
        yielding method needs no standalone function (#3716). A call with no
@@ -3683,17 +3686,17 @@ int emit_inline_expr(Compiler *c, int id, Buf *b) {
       view_pop(c, v);
       if (ok) return 1;
     }
-    /* a block-driving call to a yielding method that can't be inlined here (a
-       non-scalar result) has no standalone function to fall back to: the plain
-       call would emit an undefined symbol (invalid C). Fail loud (#2948). */
-    if (nt_ref(c->nt, id, "block") >= 0 && call_targets_yielding_method(c, id) &&
-        !block_call_takes_class_dispatch(c, id))
-      unsupported_feature(c, id,
-        "a block-driving call to a method that yields could not be inlined "
-        "(a yielding method has no standalone function to call)");
-    return 0;
   }
-  return emit_inline_call_x(c, id, b, g_indent + 1, 1);
+  /* a block-driving call to a yielding method that can't be inlined here (a
+     non-scalar result, or a scalar one the inliner declined) has no
+     standalone function to fall back to: the plain call would emit an
+     undefined symbol (invalid C). Fail loud (#2948). */
+  if (nt_ref(c->nt, id, "block") >= 0 && call_targets_yielding_method(c, id) &&
+      !block_call_takes_class_dispatch(c, id))
+    unsupported_feature(c, id,
+      "a block-driving call to a method that yields could not be inlined "
+      "(a yielding method has no standalone function to call)");
+  return 0;
 }
 
 /* Block iteration lowered to an inline C for-loop. Handles n.times,
