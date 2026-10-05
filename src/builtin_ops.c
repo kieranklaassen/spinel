@@ -1603,7 +1603,7 @@ static const BuiltinOp bop_rows[] = {
   { TY_STRING, "force_encoding",  0, 127, BF_ANY,      TY_STRING,     BOPE_NONE },
   { TY_STRING, "b",               0,   0, BF_ANY,      TY_STRING,     BOPE_TEMPLATE, "sp_str_b($r)", 0 },
   { TY_STRING, "b",               0, 127, BF_ANY,      TY_STRING,     BOPE_NONE },
-  { TY_STRING, "encode",          0,   0, BF_ANY,      TY_STRING,     BOPE_TEMPLATE, "($r)", 0 },
+  { TY_STRING, "encode",          0,   0, BF_ANY,      TY_STRING,     BOPE_TEMPLATE, "sp_str_dup($r)", 0 },
   { TY_STRING, "encode",          0, 127, BF_ANY,      TY_STRING,     BOPE_NONE },
   { TY_STRING, "encode!",         0, 127, BF_ANY,      TY_STRING,     BOPE_NONE },
   { TY_STRING, "dump",            0,   0, BF_ANY,      TY_STRING,     BOPE_TEMPLATE, "sp_str_dump($r)", 0 },

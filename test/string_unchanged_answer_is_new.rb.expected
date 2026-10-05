@@ -1,0 +1,43 @@
+sub string: same=false frozen=false receiver 103 -> 103 answer 104
+sub regexp: same=false frozen=false receiver 103 -> 103 answer 104
+sub string hash: same=false frozen=false receiver 103 -> 103 answer 104
+sub regexp hash: same=false frozen=false receiver 103 -> 103 answer 104
+gsub string hash: same=false frozen=false receiver 103 -> 103 answer 104
+center: same=false frozen=false receiver 103 -> 103 answer 104
+center pad: same=false frozen=false receiver 103 -> 103 answer 104
+ljust: same=false frozen=false receiver 103 -> 103 answer 104
+ljust pad: same=false frozen=false receiver 103 -> 103 answer 104
+rjust: same=false frozen=false receiver 103 -> 103 answer 104
+rjust pad: same=false frozen=false receiver 103 -> 103 answer 104
+encode: same=false frozen=false receiver 103 -> 103 answer 104
+encode UTF-8: same=false frozen=false receiver 103 -> 103 answer 104
+partition: same=false frozen=false receiver 103 -> 103 answer 104
+rpartition: same=false frozen=false receiver 103 -> 103 answer 104
+rpartition regexp: same=false frozen=false receiver 103 -> 103 answer 104
+frozen sub string: same=false frozen=false receiver 3 -> 3 answer 4
+frozen sub regexp: same=false frozen=false receiver 3 -> 3 answer 4
+frozen sub string hash: same=false frozen=false receiver 3 -> 3 answer 4
+frozen sub regexp hash: same=false frozen=false receiver 3 -> 3 answer 4
+frozen gsub string hash: same=false frozen=false receiver 3 -> 3 answer 4
+frozen center: same=false frozen=false receiver 3 -> 3 answer 4
+frozen center pad: same=false frozen=false receiver 3 -> 3 answer 4
+frozen ljust: same=false frozen=false receiver 3 -> 3 answer 4
+frozen ljust pad: same=false frozen=false receiver 3 -> 3 answer 4
+frozen rjust: same=false frozen=false receiver 3 -> 3 answer 4
+frozen rjust pad: same=false frozen=false receiver 3 -> 3 answer 4
+frozen encode: same=false frozen=false receiver 3 -> 3 answer 4
+frozen encode UTF-8: same=false frozen=false receiver 3 -> 3 answer 4
+frozen partition: same=false frozen=false receiver 3 -> 3 answer 4
+frozen rpartition: same=false frozen=false receiver 3 -> 3 answer 4
+frozen rpartition regexp: same=false frozen=false receiver 3 -> 3 answer 4
+"name!"
+"line\n"
+101
+"  ab  "
+"ab**"
+"**ab"
+["a", "-", "b"]
+["a", "-", "b"]
+true
+104
+true

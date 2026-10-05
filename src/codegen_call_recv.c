@@ -3421,7 +3421,13 @@ static int emit_str_mutator_call(Compiler *c, int id, Buf *b, const NodeTable *n
       nt_node_set_str((NodeTable *)nt, id, "name", sb_bang);
       buf_printf(b, "const char *_t%d = %s; ", tn2, nb.p ? nb.p : "");
       free(nb.p);
-      if (lvw) { emit_expr(c, recv, b); buf_printf(b, " = _t%d; ", tn2); }
+      if (lvw) {
+        /* sub! and gsub! keep their receiver, and answer it, when the plain
+           form answers the same bytes in a new String */
+        if (sb_sub && str_bang_plain_renews(c, id, sb_plain))
+          buf_printf(b, "if (sp_str_eq(_t%d, _t%d)) _t%d = _t%d; else ", to, tn2, tn2, to);
+        emit_expr(c, recv, b); buf_printf(b, " = _t%d; ", tn2);
+      }
       if (sb_nil_nc)
         buf_printf(b, "(sp_str_eq(_t%d, _t%d)%s) ? NULL : _t%d; })", to, tn2, subm2 ? " && !sp_re_sub_matched" : "", tn2);
       else
@@ -11795,11 +11801,11 @@ static int emit_poly_call0_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
   if (sp_streq(name, "valid_encoding?") && argc == 0) {
     buf_puts(b, "sp_box_bool(sp_str_valid_encoding(sp_poly_recv_s("); emit_expr(c, recv, b); buf_puts(b, ", \"valid_encoding?\")))"); { *out = 1; return 1; }
   }
-  /* encode is a no-op on the concrete arm -- every string here is UTF-8 --
-     so the poly one only has to unbox and re-box, and raise for a
-     non-String the way the others do. */
+  /* encode converts nothing on the concrete arm -- every string here is
+     UTF-8 -- so the poly one only has to unbox, copy as CRuby does and
+     re-box, and raise for a non-String the way the others do. */
   if (sp_streq(name, "encode") && argc == 0) {
-    buf_puts(b, "sp_box_str(sp_poly_recv_s("); emit_expr(c, recv, b); buf_puts(b, ", \"encode\"))"); { *out = 1; return 1; }
+    buf_puts(b, "sp_box_str(sp_str_dup(sp_poly_recv_s("); emit_expr(c, recv, b); buf_puts(b, ", \"encode\")))"); { *out = 1; return 1; }
   }
   if (sp_streq(name, "b") && argc == 0) {   /* a binary copy, as the String arm answers (#4441) */
     buf_puts(b, "sp_box_str(sp_str_b(sp_poly_recv_s("); emit_expr(c, recv, b); buf_puts(b, ", \"b\")))"); { *out = 1; return 1; }

@@ -3976,7 +3976,7 @@ sp_bool sp_str_re_match_p_at(mrb_regexp_pattern *pat, const char *str, sp_int cp
 const char *sp_str_sub_str_str_hash(const char *str, const char *pat, sp_StrStrHash *h) {SP_GC_ROOT_STR(pat);SP_GC_ROOT(h);SP_GC_ROOT_STR(str);
   if (!str || !pat) return str;
   const char *found = strstr(str, pat);
-  if (!found) { if (sp_re_track_last) sp_re_clear_last_match(); return str; }
+  if (!found) { if (sp_re_track_last) sp_re_clear_last_match(); return sp_str_dup(str); }
   size_t before = (size_t)(found - str);
   size_t plen = strlen(pat);
   if (sp_re_track_last) sp_re_set_lit_match(str, (sp_int)before, (sp_int)(before + plen));
@@ -4005,7 +4005,7 @@ const char *sp_str_gsub_str_str_hash(const char *str, const char *pat, sp_StrStr
   int bin = sp_str_is_binary(str);
   if (plen == 0) { for (size_t i = 0; i < slen; i++) if (bin || ((unsigned char)str[i] & 0xC0) != 0x80) n++; n++; }
   else for (const char *q = strstr(str, pat); q; q = strstr(q + plen, pat)) n++;
-  if (n == 0) { if (sp_re_track_last) sp_re_clear_last_match(); return str; }
+  if (n == 0) { if (sp_re_track_last) sp_re_clear_last_match(); return sp_str_dup(str); }
   size_t total = slen + n * rlen - (plen ? n * plen : 0);
   char *out = sp_str_alloc_raw(total + 1);
   size_t o = 0, last = 0;
@@ -4686,7 +4686,7 @@ const char *sp_re_sub_str_str_hash(mrb_regexp_pattern *pat, const char *str, sp_
   int64_t slen = (int64_t)strlen(str);
   int caps[64];
   int n = re_exec(pat, str, slen, 0, caps, 64, 0);
-  if (n <= 0 || caps[0] < 0) { if (sp_re_track_last) sp_re_clear_last_match(); return str; }
+  if (n <= 0 || caps[0] < 0) { if (sp_re_track_last) sp_re_clear_last_match(); return sp_str_dup(str); }
   int mlen = caps[1] - caps[0];
   /* 0xff marker before the transient key: keeps sp_str_hash's s[-1] read
      in-bounds and on the non-caching path (no sp_str_hdr behind this buffer). */
@@ -4881,12 +4881,12 @@ const char *sp_str_encode(const char *s, sp_RbVal dst, sp_RbVal src,
   if (!s) sp_nil_recv("encode");
   int from = sp_enc_kind(src, sp_str_is_binary(s) ? 2 : 1);
   int to = sp_enc_kind(dst, 1);
-  if (!from || !to) return s;
+  if (!from || !to) return sp_str_dup(s);
   const char *repl = (replace.tag == SP_TAG_STR && replace.v.s) ? replace.v.s : NULL;
   SP_GC_ROOT_STR(repl);
   if (from == to) {
     if (from == 1 && sp_enc_kw_replace(invalid)) return sp_str_scrub(s, repl);
-    return s;
+    return sp_str_dup(s);
   }
   /* binary <-> UTF-8: the ASCII bytes carry over, nothing else does */
   size_t bl = sp_str_byte_len(s);

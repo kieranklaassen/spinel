@@ -13661,6 +13661,27 @@ static int str_mut_recv_assignable(Compiler *c, int recv) {
   return nt_kind(c->nt, recv) == NK_SelfNode || str_mut_var_recv(c, recv);
 }
 
+/* The plain form of a bang method answers a new String even when it
+   replaces nothing: sub, and gsub from a String pattern through a Hash.
+   The bang form then keeps its receiver, which another name may hold. A
+   block form builds its answer in the emitted loop and is not one. */
+int str_bang_plain_renews(Compiler *c, int id, const char *plain) {
+  int argc;
+  const int *argv = call_args(c->nt, id, &argc);
+  if (nt_ref(c->nt, id, "block") >= 0) return 0;
+  if (sp_streq(plain, "sub")) return 1;
+  return sp_streq(plain, "gsub") && argc == 2 && comp_ntype(c, argv[0]) == TY_STRING &&
+         ty_is_hash(comp_ntype(c, argv[1]));
+}
+
+/* `recv = <call>` unless <call> answers the receiver's own bytes. */
+static void emit_str_bang_keep(Compiler *c, int recv, const char *call, Buf *b) {
+  int t = ++g_tmp;
+  buf_printf(b, "{ const char *_t%d = %s; if (!sp_str_eq(_t%d, ", t, call, t);
+  emit_expr(c, recv, b); buf_puts(b, ")) "); emit_expr(c, recv, b);
+  buf_printf(b, " = _t%d; }\n", t);
+}
+
 static void emit_sb_shim_swap(Buf *b, int indent, int tH, char *arm) {
   emit_indent(b, indent + 1);
   buf_printf(b, "if (sp_String_is_frozen(_t%d)) sp_raise_frozen_str(_t%d->data);\n", tH, tH);
@@ -14357,9 +14378,17 @@ static int str_mutate_append_bang_arms(Compiler *c, int id, Buf *b, int indent, 
       emit_indent(b, indent); buf_puts(b, "sp_str_check_mutable("); emit_expr(c, recv, b); buf_puts(b, ");\n");
       nt_node_set_str((NodeTable *)nt, id, "name", abase);
       emit_indent(b, indent);
-      emit_expr(c, recv, b); buf_puts(b, " = ");
-      emit_expr(c, id, b);
-      buf_puts(b, ";\n");
+      if (str_bang_plain_renews(c, id, abase)) {
+        Buf nb; memset(&nb, 0, sizeof nb);
+        emit_expr(c, id, &nb);
+        emit_str_bang_keep(c, recv, nb.p ? nb.p : "", b);
+        free(nb.p);
+      }
+      else {
+        emit_expr(c, recv, b); buf_puts(b, " = ");
+        emit_expr(c, id, b);
+        buf_puts(b, ";\n");
+      }
       nt_node_set_str((NodeTable *)nt, id, "name", abang);
       return 1;
     }
@@ -14370,11 +14399,22 @@ static int str_mutate_append_bang_arms(Compiler *c, int id, Buf *b, int indent, 
         emit_indent(b, indent);
         /* sub would set `$~`, which slice! leaves alone; a program that
            never reads it has sub record nothing */
-        emit_expr(c, recv, b);
-        buf_puts(b, g_reads_match_regs ? " = sp_str_remove_first(" : " = sp_str_sub(");
-        emit_expr(c, recv, b); buf_puts(b, ", ");
-        emit_expr(c, argv[0], b);
-        buf_puts(b, g_reads_match_regs ? ");\n" : ", (&(\"\\xff\")[1]));\n");
+        if (g_reads_match_regs) {
+          emit_expr(c, recv, b);
+          buf_puts(b, " = sp_str_remove_first(");
+          emit_expr(c, recv, b); buf_puts(b, ", ");
+          emit_expr(c, argv[0], b);
+          buf_puts(b, ");\n");
+        }
+        else {
+          Buf nb; memset(&nb, 0, sizeof nb);
+          buf_puts(&nb, "sp_str_sub(");
+          emit_expr(c, recv, &nb); buf_puts(&nb, ", ");
+          emit_expr(c, argv[0], &nb);
+          buf_puts(&nb, ", (&(\"\\xff\")[1]))");
+          emit_str_bang_keep(c, recv, nb.p, b);
+          free(nb.p);
+        }
         return 1;
       }
       if (argc == 1 && (comp_ntype(c, argv[0]) == TY_INT || comp_ntype(c, argv[0]) == TY_RANGE)) {
