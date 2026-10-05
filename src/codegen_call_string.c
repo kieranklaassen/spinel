@@ -1131,7 +1131,14 @@ int emit_string_handle_append(Compiler *c, int id, Buf *b, const char *name, int
           int ordered = 0;
           for (int j = 0; j < argc && argc > 1; j++)
             if (!arg_ran_first(argv[j], 0) && !subtree_is_pure_read(c, argv[j])) ordered = 1;
-          if (ordered) emit_string_prepend_ordered(c, tb2, argc, argv, b);
+          if (argc > 1 && !str_args_nested(c, id, argv, argc)) {
+            int tp3 = ++g_tmp;
+            buf_puts(b, " ");
+            emit_str_args_joined(c, id, argv, argc, tp3, NULL, b);
+            buf_printf(b, " _t%d = sp_str_concat(_t%d, sp_String_cstr(_t%d)); sp_String_set_bin(_t%d, _t%d);",
+                       tp3, tp3, tb2, tb2, tp3);
+          }
+          else if (ordered) emit_string_prepend_ordered(c, tb2, argc, argv, b);
           else {
             int tp3 = ++g_tmp;
             buf_printf(b, " const char *_t%d = ", tp3);

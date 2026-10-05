@@ -181,6 +181,358 @@ void emit_str_append_arg(Compiler *c, int arg, const char *rtext, Buf *b) {
   emit_str_expr(c, arg, b);
 }
 
+/* Are the arguments of the concat or prepend `id` all String literals and
+   plain reads of a String? Those make nothing and run nothing, so nested in
+   one C expression they lose nothing and need no order. */
+static int str_args_plain(Compiler *c, int id, const int *argv, int argc) {
+  for (int j = 0; j < argc; j++) {
+    const char *ty = nt_type(c->nt, argv[j]);
+    if (ty && sp_streq(ty, "StringNode")) continue;
+    /* one the operand-order rewrite ran into a rooted temp of its own is a
+       read of that temp */
+    if (comp_ntype(c, argv[j]) == TY_STRING && operand_bound_in_order(id, argv[j])) continue;
+    if (comp_ntype(c, argv[j]) != TY_STRING || !subtree_is_pure_read(c, argv[j])) return 0;
+    /* a String two names hold reads out as a copy: that read makes something */
+    char sref[192];
+    if (strbuf_slot_ref(c, argv[j], sref, sizeof sref)) return 0;
+  }
+  return 1;
+}
+
+/* A String, an Integer, a Float, a Symbol, nil or a boolean. */
+static int ty_plain_value(TyKind t) {
+  return t == TY_STRING || t == TY_INT || t == TY_FLOAT || t == TY_SYMBOL || t == TY_NIL || t == TY_BOOL;
+}
+
+static int str_call_builds(Compiler *c, int n);
+
+/* Is evaluating `n` known to run no code of the program's? A list, so that
+   whatever it does not name counts as running some: a literal; a read of a
+   local, an instance variable, a global or a constant; statements that are
+   all such; an interpolation of such parts, each a String, nil, a boolean,
+   or an Integer, a Float or a Symbol whose class the program gives no to_s
+   (the test the interpolation makes before it calls one); and a builtin
+   that builds a String (str_call_builds) on such a receiver with such
+   arguments. An object, an Array or a boxed value turned to text, a
+   conditional, a `case`, a `for` are not on it: `"#{w}"` runs W#to_s and
+   `case 1 when w` runs W#===, with no call written. */
+static int str_val_runs_nothing(Compiler *c, int n) {
+  const NodeTable *nt = c->nt;
+  if (n < 0) return 1;
+  switch (nt_kind(nt, n)) {
+    case NK_StringNode: case NK_IntegerNode: case NK_FloatNode: case NK_SymbolNode:
+    case NK_NilNode: case NK_TrueNode: case NK_FalseNode:
+    case NK_LocalVariableReadNode: case NK_InstanceVariableReadNode:
+    case NK_GlobalVariableReadNode: case NK_ConstantReadNode:
+      return 1;
+    case NK_ParenthesesNode:
+      return str_val_runs_nothing(c, nt_ref(nt, n, "body"));
+    case NK_StatementsNode: {
+      int bn = 0; const int *body = nt_arr(nt, n, "body", &bn);
+      for (int i = 0; i < bn; i++) if (!str_val_runs_nothing(c, body[i])) return 0;
+      return 1;
+    }
+    case NK_InterpolatedStringNode: {
+      int pn = 0; const int *parts = nt_arr(nt, n, "parts", &pn);
+      for (int i = 0; i < pn; i++) {
+        NodeKind pk = nt_kind(nt, parts[i]);
+        if (pk == NK_StringNode) continue;
+        if (pk != NK_EmbeddedStatementsNode) return 0;
+        int st = nt_ref(nt, parts[i], "statements");
+        int bn = 0; const int *body = st >= 0 ? nt_arr(nt, st, "body", &bn) : NULL;
+        if (!bn) continue;
+        if (!str_val_runs_nothing(c, st)) return 0;
+        TyKind t = comp_ntype(c, body[bn - 1]);
+        if (!ty_plain_value(t)) return 0;
+        const char *cn = t == TY_INT ? "Integer" : t == TY_FLOAT ? "Float" : t == TY_SYMBOL ? "Symbol" : NULL;
+        int ci = cn ? comp_class_index(c, cn) : -1;
+        if (ci >= 0 && comp_method_in_chain(c, ci, "to_s", NULL) >= 0) return 0;
+      }
+      return 1;
+    }
+    case NK_CallNode: {
+      int recv = nt_ref(nt, n, "receiver");
+      if (!str_call_builds(c, n) || !ty_plain_value(comp_ntype(c, recv)) || !str_val_runs_nothing(c, recv))
+        return 0;
+      int a = nt_ref(nt, n, "arguments"); int ac = 0;
+      const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+      for (int i = 0; i < ac; i++)
+        if (!ty_plain_value(comp_ntype(c, av[i])) || !str_val_runs_nothing(c, av[i])) return 0;
+      return 1;
+    }
+    default:
+      return 0;
+  }
+}
+
+/* The same of an argument of concat or prepend, which is appended as it
+   stands only when it is a String or an Integer; any other is turned to
+   text first, an object's by its own method. */
+static int str_arg_runs_nothing(Compiler *c, int n) {
+  TyKind t = comp_ntype(c, n);
+  return (t == TY_STRING || t == TY_INT) && str_val_runs_nothing(c, n);
+}
+
+/* How is argument j of a concat or prepend read when an argument after it
+   can change what it reads? Ruby hands over the String itself and reads its
+   text when the call runs, after every argument is evaluated:
+   `s.concat(t, (t << "z"; "a"))` appends "tz".
+   2: a read of a String two names hold, a local or an instance variable,
+      while an argument after it may run code of the program's
+      (str_arg_runs_nothing). The handle is taken where the argument stands
+      and its text is read in the join: right whether that code appends to
+      the String or assigns the variable.
+   1: a plain read of a String local that no argument after it assigns
+      (read_rebound_by), while one names it or may run code of the
+      program's. It is read in the join, from the local: an append through
+      its name rebinds the local, and one through another holder of the
+      same String (`$g = t`, `u = String(t)`, which share the text with no
+      handle between them) changes it in place.
+   0: read where it stands. */
+static int str_arg_read_late(Compiler *c, const int *argv, int argc, int j) {
+  const NodeTable *nt = c->nt;
+  NodeKind k = nt_kind(nt, argv[j]);
+  char sref[192];
+  if ((k == NK_LocalVariableReadNode || k == NK_InstanceVariableReadNode) &&
+      strbuf_slot_ref(c, argv[j], sref, sizeof sref)) {
+    for (int a = j + 1; a < argc; a++)
+      if (!str_arg_runs_nothing(c, argv[a])) return 2;
+    return 0;
+  }
+  if (k != NK_LocalVariableReadNode || comp_ntype(c, argv[j]) != TY_STRING) return 0;
+  const char *nm = nt_str(nt, argv[j], "name");
+  if (!nm) return 0;
+  int late = 0;
+  for (int a = j + 1; a < argc; a++) {
+    if (read_rebound_by(c, argv[j], argv[a])) return 0;
+    if (subtree_reads_local(nt, argv[a], nm) || !str_arg_runs_nothing(c, argv[a])) late = 1;
+  }
+  return late;
+}
+
+/* Does the call `n` answer a String it builds, one no other name holds? A
+   builtin of String, Integer, Float or Array that the program defines for no
+   class of its own. */
+static int str_call_builds(Compiler *c, int n) {
+  static const char *const of_str[] = { "+", "*", "%", "upcase", "downcase", "capitalize", "swapcase",
+                                        "reverse", "dup", NULL };
+  const NodeTable *nt = c->nt;
+  const char *nm = nt_str(nt, n, "name");
+  int recv = nt_ref(nt, n, "receiver");
+  if (!nm || recv < 0 || nt_ref(nt, n, "block") >= 0 || recv_user_defines(c, nm)) return 0;
+  TyKind rt = comp_ntype(c, recv);
+  if (rt == TY_INT || rt == TY_FLOAT) return sp_streq(nm, "to_s");
+  if (ty_is_array(rt)) return sp_streq(nm, "join");
+  if (rt != TY_STRING) return 0;
+  for (int i = 0; of_str[i]; i++)
+    if (sp_streq(nm, of_str[i])) return 1;
+  return 0;
+}
+
+/* Does the interpolation `n` join two parts or more, not counting empty
+   text? Then its value is a String of its own. With one part CRuby may
+   answer that part itself: `"#{t}#{""}"` is `t` in 3.3. */
+static int str_interp_joins(const NodeTable *nt, int n) {
+  int pn = 0, live = 0; const int *parts = nt_arr(nt, n, "parts", &pn);
+  for (int i = 0; i < pn; i++) {
+    int e = parts[i];
+    if (nt_kind(nt, e) == NK_EmbeddedStatementsNode) {
+      int st = nt_ref(nt, e, "statements");
+      int bn = 0; const int *body = st >= 0 ? nt_arr(nt, st, "body", &bn) : NULL;
+      if (!bn) continue;
+      e = bn == 1 ? body[0] : -1;
+    }
+    if (e >= 0 && nt_kind(nt, e) == NK_StringNode && !nt_str_len(nt, e, "content")) continue;
+    live++;
+  }
+  return live >= 2;
+}
+
+/* The value of argument `n` is made where it stands: a String literal, an
+   interpolation of two parts or more (str_interp_joins) or a call that
+   builds its String (str_call_builds), alone or as the last statement in
+   parentheses; or it is an Integer. */
+static int str_arg_made_here(Compiler *c, int n) {
+  const NodeTable *nt = c->nt;
+  for (;;) {
+    NodeKind k = nt_kind(nt, n);
+    if (k == NK_ParenthesesNode) n = nt_ref(nt, n, "body");
+    else if (k == NK_StatementsNode) {
+      int bn = 0; const int *body = nt_arr(nt, n, "body", &bn);
+      if (bn < 1) return 0;
+      n = body[bn - 1];
+    }
+    else if (k == NK_StringNode || comp_ntype(c, n) == TY_INT) return 1;
+    else if (k == NK_InterpolatedStringNode) return str_interp_joins(nt, n);
+    else return k == NK_CallNode && str_call_builds(c, n);
+    if (n < 0) return 0;
+  }
+}
+
+/* The name of the String local `n` reads, when only code written in this
+   call can assign that local: no block or proc captures it and it is no
+   parameter passed by reference; and it holds its String with no handle.
+   Another holder may still share that String's text. NULL for any other
+   node. */
+static const char *str_plain_local(Compiler *c, int n) {
+  const NodeTable *nt = c->nt;
+  char sref[192];
+  if (nt_kind(nt, n) != NK_LocalVariableReadNode || comp_ntype(c, n) != TY_STRING) return NULL;
+  const char *nm = nt_str(nt, n, "name");
+  LocalVar *lv = nm ? scope_local(comp_scope_of(c, n), nm) : NULL;
+  if (!lv || lv->is_cell || strbuf_slot_ref(c, n, sref, sizeof sref)) return NULL;
+  return nm;
+}
+
+/* The receiver `n` is a String made where it stands, which no argument can
+   reach: what str_arg_made_here says of an argument, and `+"literal"`. */
+static int str_recv_made_here(Compiler *c, int n) {
+  const NodeTable *nt = c->nt;
+  for (;;) {
+    NodeKind k = n >= 0 ? nt_kind(nt, n) : NK_NilNode;
+    if (k == NK_ParenthesesNode) n = nt_ref(nt, n, "body");
+    else if (k == NK_StatementsNode) {
+      int bn = 0; const int *body = nt_arr(nt, n, "body", &bn);
+      if (bn < 1) return 0;
+      n = body[bn - 1];
+    }
+    else break;
+  }
+  if (n < 0 || comp_ntype(c, n) != TY_STRING) return 0;
+  if (nt_kind(nt, n) == NK_CallNode) {
+    const char *nm = nt_str(nt, n, "name");
+    int r = nt_ref(nt, n, "receiver");
+    NodeKind rk = r >= 0 ? nt_kind(nt, r) : NK_NilNode;
+    if (nm && sp_streq(nm, "+@") && rk == NK_StringNode && !recv_user_defines(c, nm)) return 1;
+  }
+  return str_arg_made_here(c, n);
+}
+
+/* How is the receiver of the concat `id` read when its arguments are
+   joined? Ruby takes the String itself first and reads its text when the
+   call runs, after every argument: `s.concat("x", (s << "z"; "b"))` appends
+   to "sz". The join takes the receiver into a temp first and starts from
+   it, so it reads the text ahead of the arguments.
+   0: from that temp. Nothing after it can change the text: every argument
+      is known to run no code of the program's (str_arg_runs_nothing), or
+      the receiver is made where it stands. prepend reads its receiver last
+      in both forms, through the same temp.
+   1: in the join, from the local: a String local that only this call can
+      assign (str_plain_local) and that no argument assigns. An append
+      through its name rebinds the local; one through another holder of
+      the same String changes it in place.
+   -1: neither is known to be right, and the call keeps the nest: an
+      element, an attribute, an instance variable, a global, a method's
+      result, a captured local, a parameter passed by reference, and a
+      local an argument assigns. */
+static int str_joined_recv(Compiler *c, int id, const int *argv, int argc) {
+  const NodeTable *nt = c->nt;
+  const char *name = nt_str(nt, id, "name");
+  int recv = nt_ref(nt, id, "receiver");
+  if (!name || !sp_streq(name, "concat") || recv < 0) return 0;
+  int quiet = 1;
+  for (int a = 0; a < argc && quiet; a++) quiet = str_arg_runs_nothing(c, argv[a]);
+  if (quiet || str_recv_made_here(c, recv)) return 0;
+  const char *nm = str_plain_local(c, recv);
+  if (!nm) return -1;
+  for (int a = 0; a < argc; a++)
+    if (subtree_writes_local(c, argv[a], nm)) return -1;
+  return 1;
+}
+
+/* Do the arguments of the concat or prepend `id` stay nested in one C
+   expression, as they always were? Plain ones do (str_args_plain), and
+   more than 32. So do the arguments of a call where the join could read a
+   String's text too early. Ruby reads the text when the call runs, so the
+   join may read an argument where it stands only when nothing after it can
+   change it: it is made where it stands (str_arg_made_here), or every
+   argument after it is known to run no code of the program's
+   (str_arg_runs_nothing). Two more are joined and read late
+   (str_arg_read_late): a String two names hold, through its handle; and a
+   String local that only this call can assign (str_plain_local) and no
+   later argument assigns, from the local. Any other argument followed by
+   one not known to run nothing keeps the nest: a global, a constant, an
+   attribute, an element, a conditional, a boxed value, a captured local, a
+   parameter passed by reference, a method's result, a local a later
+   argument assigns, and one the operand-order rewrite ran into a temp,
+   which holds the String and not its text. The receiver of concat is such
+   a read too, ahead of every argument (str_joined_recv). */
+int str_args_nested(Compiler *c, int id, const int *argv, int argc) {
+  if (argc > 32 || str_args_plain(c, id, argv, argc)) return 1;
+  for (int j = 0; j + 1 < argc; j++) {
+    if (str_arg_made_here(c, argv[j])) continue;
+    int quiet = 1;
+    for (int a = j + 1; a < argc && quiet; a++) quiet = str_arg_runs_nothing(c, argv[a]);
+    if (quiet || str_arg_read_late(c, argv, argc, j) == 2) continue;
+    const char *nm = str_plain_local(c, argv[j]);
+    if (!nm) return 1;
+    for (int a = j + 1; a < argc; a++)
+      if (subtree_writes_local(c, argv[a], nm)) return 1;
+  }
+  return str_joined_recv(c, id, argv, argc) < 0;
+}
+
+/* One argument's C into `out`, the code it hoists written into `b`, where
+   the argument stands, and not ahead of the statement: what an earlier
+   argument ran stays ahead of it (`s.concat((i += 1; i.to_s), [i += 1].first.to_s)`).
+   `b` is inside the call's statement expression at every caller. */
+static void emit_str_arg_in_place(Compiler *c, int arg, const char *seed, Buf *b, Buf *out) {
+  Buf *pre = g_pre;
+  g_pre = b;
+  if (seed) emit_str_append_arg(c, arg, seed, out);
+  else emit_str_expr(c, arg, out);
+  g_pre = pre;
+}
+
+/* Any other arguments are joined one statement at a time into the rooted
+   temp `acc`. Nested in one C expression, the text one argument made was
+   held by nothing while the next was built, and C does not say which of the
+   two is built first. `seed` is what the first argument is appended to (the
+   receiver's C string, for concat, where an Integer is a codepoint) or
+   NULL. When an argument is read late (str_arg_read_late), the others run
+   first, each into a rooted temp of its own, and the join reads those. So
+   they do when the receiver of the concat `id` is read late
+   (str_joined_recv): the join then starts from the local and not from the
+   temp that took it first. At most 32 arguments come here
+   (str_args_nested). */
+void emit_str_args_joined(Compiler *c, int id, const int *argv, int argc, int acc, const char *seed, Buf *b) {
+  int held[32], late[32], nlate = 0;
+  Buf rb; memset(&rb, 0, sizeof rb);
+  for (int j = 0; j < argc; j++) nlate += (late[j] = str_arg_read_late(c, argv, argc, j)) != 0;
+  if (seed && str_joined_recv(c, id, argv, argc) == 1) {
+    emit_expr(c, nt_ref(c->nt, id, "receiver"), &rb);
+    seed = rb.p; nlate++;
+  }
+  for (int j = 0; nlate && j < argc; j++) {
+    const char *ty = nt_type(c->nt, argv[j]);
+    held[j] = 0;
+    if ((ty && sp_streq(ty, "StringNode")) || late[j] == 1) continue;
+    held[j] = ++g_tmp;
+    if (late[j] == 2) {
+      char sref[192];
+      strbuf_slot_ref(c, argv[j], sref, sizeof sref);
+      buf_printf(b, "sp_String *_t%d = %s; SP_GC_ROOT(_t%d); ", held[j], sref, held[j]);
+      continue;
+    }
+    Buf ab; memset(&ab, 0, sizeof ab);
+    emit_str_arg_in_place(c, argv[j], seed, b, &ab);
+    buf_printf(b, "const char *_t%d = %s; SP_GC_ROOT_STR(_t%d); ", held[j], ab.p ? ab.p : "NULL", held[j]);
+    free(ab.p);
+  }
+  for (int j = 0; j < argc; j++) {
+    Buf ab; memset(&ab, 0, sizeof ab);
+    if (nlate && held[j] && late[j] == 2) buf_printf(&ab, "(_t%d ? sp_str_concat(sp_String_cstr(_t%d), \"\") : NULL)", held[j], held[j]);
+    else if (nlate && held[j]) buf_printf(&ab, "_t%d", held[j]);
+    else emit_str_arg_in_place(c, argv[j], seed, b, &ab);
+    if (j) buf_printf(b, " _t%d = sp_str_concat(_t%d, %s);", acc, acc, ab.p ? ab.p : "NULL");
+    else if (seed) buf_printf(b, "const char *_t%d = sp_str_concat(%s, %s);", acc, seed, ab.p ? ab.p : "NULL");
+    else buf_printf(b, "const char *_t%d = %s;", acc, ab.p ? ab.p : "NULL");
+    if (!j) buf_printf(b, " SP_GC_ROOT_STR(_t%d);", acc);
+    free(ab.p);
+  }
+  free(rb.p);
+}
+
 /* A Float index is cut to the Integer it converts to, as CRuby's does (an
    error then names that offset); NaN and a Float outside the C int range,
    where CRuby raises RangeError, stay as they are. `tk` is the key temp, `tk0`
@@ -3490,21 +3842,28 @@ static int emit_str_mutator_call(Compiler *c, int id, Buf *b, const NodeTable *n
          side effect that must not run twice. */
       /* rooted across the arguments, which may allocate */
       buf_printf(b, "({ const char *_t%d = ", trc); emit_recv_rooted(c, recv, trc, "SP_GC_ROOT_STR", b);
-      buf_printf(b, "const char *_t%d = ", tn2);
-      if (sp_streq(name, "prepend")) {
-        /* args first (in order), then the receiver */
-        for (int j = 0; j < argc; j++) buf_puts(b, "sp_str_concat(");
-        emit_str_expr(c, argv[0], b);
-        for (int j = 1; j < argc; j++) { buf_puts(b, ", "); emit_str_expr(c, argv[j], b); buf_puts(b, ")"); }
-        buf_printf(b, ", _t%d)", trc);
+      char rt[24]; snprintf(rt, sizeof rt, "_t%d", trc);
+      int pre = sp_streq(name, "prepend");
+      if (argc > 1 && !str_args_nested(c, id, argv, argc)) {
+        emit_str_args_joined(c, id, argv, argc, tn2, pre ? NULL : rt, b);
+        if (pre) buf_printf(b, " _t%d = sp_str_concat(_t%d, _t%d);", tn2, tn2, trc);
+        buf_puts(b, " ");
       }
       else {
+        buf_printf(b, "const char *_t%d = ", tn2);
         for (int j = 0; j < argc; j++) buf_puts(b, "sp_str_concat(");
-        buf_printf(b, "_t%d", trc);
-        { char rt[24]; snprintf(rt, sizeof rt, "_t%d", trc);
-          for (int j = 0; j < argc; j++) { buf_puts(b, ", "); emit_str_append_arg(c, argv[j], rt, b); buf_puts(b, ")"); } }
+        if (pre) {
+          /* args first (in order), then the receiver */
+          emit_str_expr(c, argv[0], b);
+          for (int j = 1; j < argc; j++) { buf_puts(b, ", "); emit_str_expr(c, argv[j], b); buf_puts(b, ")"); }
+          buf_printf(b, ", _t%d)", trc);
+        }
+        else {
+          buf_printf(b, "_t%d", trc);
+          for (int j = 0; j < argc; j++) { buf_puts(b, ", "); emit_str_append_arg(c, argv[j], rt, b); buf_puts(b, ")"); }
+        }
+        buf_puts(b, "; ");
       }
-      buf_puts(b, "; ");
       /* Ruby evaluates the argument(s) before invoking the mutator, so the
          frozen check must fire AFTER the concatenation builds (which is what
          evaluates the args). sp_str_concat allocates a fresh string and never
