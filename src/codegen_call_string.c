@@ -1141,6 +1141,23 @@ int emit_op_poly_case_options(Compiler *c, const BopCtx *x, Buf *b) {
   return 0;
 }
 
+/* slice!'s receiver rebuilt from what is left of `src`, the String sliced
+   (the receiver's own text when NULL): its first _t<ti> characters, then
+   what follows the _t<tl> removed, of _t<tn>. The head is held in a rooted
+   temp while the tail is made. As one nested expression, whichever piece C
+   evaluated first was held by nothing while the other was allocated:
+   sp_str_concat roots its parameters only once entered (sp_str_splice_at). */
+void emit_slice_bang_rejoin(Compiler *c, int recv, const char *src, int ti, int tl, int tn, Buf *b) {
+  int th = ++g_tmp;
+  Buf rb; memset(&rb, 0, sizeof rb);
+  if (!src) { emit_expr(c, recv, &rb); src = rb.p ? rb.p : ""; }
+  buf_printf(b, " const char *_t%d = sp_str_sub_range(%s, 0, _t%d); SP_GC_ROOT_STR(_t%d); ", th, src, ti, th);
+  emit_expr(c, recv, b);
+  buf_printf(b, " = sp_str_concat(_t%d, sp_str_sub_range(%s, _t%d + _t%d, _t%d - _t%d - _t%d));",
+             th, src, ti, tl, tn, ti, tl);
+  free(rb.p);
+}
+
 /* Boxed slice! arguments select the same overloads as typed arguments.
    Keep the argument rooted and evaluate it once before re-entering the arms. */
 static int emit_string_slice_poly(Compiler *c, int id, int arg, Buf *b) {
@@ -1269,10 +1286,8 @@ int emit_op_string_slice(Compiler *c, const BopCtx *x, Buf *b) {
                tl2, tn2, tb2, tl2, tn2, tb2,
                tr2, to, tb2, tl2, tr2);
     if (sb_asgn) {
-      buf_puts(b, " ");
-      emit_expr(c, recv, b);
-      buf_printf(b, " = sp_str_concat(sp_str_sub_range(_t%d, 0, _t%d), sp_str_sub_range(_t%d, _t%d + _t%d, _t%d - _t%d - _t%d));",
-                 to, tb2, to, tb2, tl2, tn2, tb2, tl2);
+      char tos[32]; snprintf(tos, sizeof tos, "_t%d", to);
+      emit_slice_bang_rejoin(c, recv, tos, tb2, tl2, tn2, b);
     }
     buf_printf(b, " } _t%d; })", tr2);
     return 1;
@@ -1323,14 +1338,9 @@ int emit_op_string_slice(Compiler *c, const BopCtx *x, Buf *b) {
     emit_expr(c, recv, b);
     buf_printf(b, ", _t%d, _t%d); ", ti2, tl2);
     /* the removed part must outlive the three allocations that rebuild the receiver */
-    buf_printf(b, "SP_GC_ROOT_STR(_t%d); ", tr2);
-    emit_expr(c, recv, b);
-    buf_puts(b, " = sp_str_concat(sp_str_sub_range(");
-    emit_expr(c, recv, b);
-    buf_printf(b, ", 0, _t%d), sp_str_sub_range(", ti2);
-    emit_expr(c, recv, b);
-    buf_printf(b, ", _t%d + _t%d, _t%d - _t%d - _t%d)); } _t%d; })",
-               ti2, tl2, tn2, ti2, tl2, tr2);
+    buf_printf(b, "SP_GC_ROOT_STR(_t%d);", tr2);
+    emit_slice_bang_rejoin(c, recv, NULL, ti2, tl2, tn2, b);
+    buf_printf(b, " } _t%d; })", tr2);
     return 1;
   }
   return 0;
