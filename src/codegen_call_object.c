@@ -1289,26 +1289,39 @@ static int sn_typed_nil_recv(Compiler *c, TyKind rrt) {
   return needs_root(rrt) && rrt != TY_POLY && !ty_is_object(rrt);
 }
 
+/* Is a value of type `t` changed by assigning what holds it? A String is:
+   `s << "x"` is `lv_s = sp_str_..(lv_s, ..)`, and what read `lv_s` before
+   that holds the String as it was, whichever name the append went through.
+   A boxed value may be a String, and an object kept by value is copied by
+   each read. */
+static int sn_type_assigned_in_place(Compiler *c, TyKind t) {
+  return t == TY_STRING || t == TY_STRBUF || t == TY_POLY || t == TY_UNKNOWN ||
+         (ty_is_object(t) && comp_ty_value_obj(c, t));
+}
+
 /* Does operand `n`, beside the `&.` call `id`, hold nothing a collection
-   could free and read nothing `id` could change? A literal and self do. So
-   does a variable `id` cannot give another value (read_rebound_by): the
-   variable keeps what it names. A constant that names no object, and
-   arithmetic over these (call_is_scalar_op). An index read or a field read
-   does not: only its container keeps what it answers. */
+   could free and read nothing `id` could change? A literal does. So do self
+   and a variable `id` cannot give another value (read_rebound_by), unless
+   the value is of a type assigned in place (sn_type_assigned_in_place):
+   `two(s, o&.m((s << "x"; 1)))` reads `s` after the append only while the
+   arguments run ahead of the statement. A constant that names no object,
+   and arithmetic over these (call_is_scalar_op). An index read or a field
+   read does not: only its container keeps what it answers. */
 static int sn_operand_is_read(Compiler *c, int n, int id) {
   const NodeTable *nt = c->nt;
   if (n < 0) return 1;
   switch (nt_kind(nt, n)) {
-    case NK_SelfNode: case NK_NilNode: case NK_TrueNode: case NK_FalseNode:
+    case NK_NilNode: case NK_TrueNode: case NK_FalseNode:
     case NK_IntegerNode: case NK_FloatNode: case NK_SymbolNode:
       return 1;
     case NK_StringNode:
       return !subtree_allocates(nt, n);
-    case NK_LocalVariableReadNode: case NK_InstanceVariableReadNode:
-    case NK_ClassVariableReadNode:
-      return !read_rebound_by(c, n, id);
+    case NK_SelfNode: case NK_LocalVariableReadNode:
+    case NK_InstanceVariableReadNode: case NK_ClassVariableReadNode:
+      return !sn_type_assigned_in_place(c, comp_ntype(c, n)) && !read_rebound_by(c, n, id);
     case NK_GlobalVariableReadNode:
-      return !subtree_allocates(nt, n) && !read_rebound_by(c, n, id);
+      return !subtree_allocates(nt, n) && !sn_type_assigned_in_place(c, comp_ntype(c, n)) &&
+             !read_rebound_by(c, n, id);
     case NK_ConstantReadNode: case NK_ConstantPathNode:
       return !subtree_allocates(nt, n) && !ty_gc_holds_refs(c, comp_ntype(c, n));
     case NK_CallNode:
