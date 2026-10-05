@@ -1027,6 +1027,83 @@ sp_int sp_int_round_half(sp_int v, sp_int nd, int mode) {
   return q * f;
 }
 
+sp_RbVal sp_poly_replace(sp_RbVal recv, sp_RbVal src);
+
+static const char *sp_typed_elem_class(sp_RbVal v) {
+  switch (v.tag) {
+    case SP_TAG_INT: case SP_TAG_BIGINT: return "Integer";
+    case SP_TAG_FLT: return "Float";
+    case SP_TAG_STR: return "String";
+    case SP_TAG_SYM: return "Symbol";
+    case SP_TAG_BOOL: return v.v.i ? "true" : "false";
+    default: return "Object";
+  }
+}
+
+SP_NORETURN static void sp_typed_replace_elem_error(sp_RbVal v, const char *kind) {
+  char msg[160];
+  snprintf(msg, sizeof msg, "cannot store %s into an Array[%s]: a typed array holds one kind of element",
+           sp_typed_elem_class(v), kind);
+  sp_raise_cls("TypeError", msg);
+  abort();
+}
+
+/* A typed array replaced from an array of another kind takes each element as
+   the boxed []= stores one: its own kind, nil as its nil, an Integer into a
+   Float array; any other element raises before the receiver changes. */
+static void sp_typed_array_replace_boxed(sp_RbVal recv, sp_RbVal src) {
+  SP_GC_ROOT_RBVAL(recv); SP_GC_ROOT_RBVAL(src);
+  sp_PolyArray *els = sp_PolyArray_new(); SP_GC_ROOT(els);
+  sp_poly_replace(sp_box_poly_array(els), src);
+  switch (recv.cls_id) {
+    case SP_BUILTIN_INT_ARRAY: {
+      sp_IntArray *st = sp_IntArray_new(); SP_GC_ROOT(st);
+      for (sp_int i = 0; i < els->len; i++) {
+        sp_RbVal e = els->data[i];
+        if (e.tag == SP_TAG_INT) sp_IntArray_push(st, e.v.i);
+        else if (e.tag == SP_TAG_NIL) sp_IntArray_push(st, SP_INT_NIL);
+        else sp_typed_replace_elem_error(e, "Integer");
+      }
+      sp_IntArray_replace((sp_IntArray *)recv.v.p, st);
+      break;
+    }
+    case SP_BUILTIN_FLT_ARRAY: {
+      sp_FloatArray *st = sp_FloatArray_new(); SP_GC_ROOT(st);
+      for (sp_int i = 0; i < els->len; i++) {
+        sp_RbVal e = els->data[i];
+        if (e.tag == SP_TAG_FLT) sp_FloatArray_push(st, e.v.f);
+        else if (e.tag == SP_TAG_INT) sp_FloatArray_push(st, (sp_float)e.v.i);
+        else if (e.tag == SP_TAG_NIL) sp_FloatArray_push(st, sp_float_nil());
+        else sp_typed_replace_elem_error(e, "Float");
+      }
+      sp_FloatArray_replace((sp_FloatArray *)recv.v.p, st);
+      break;
+    }
+    case SP_BUILTIN_STR_ARRAY: {
+      sp_StrArray *st = sp_StrArray_new(); SP_GC_ROOT(st);
+      for (sp_int i = 0; i < els->len; i++) {
+        sp_RbVal e = els->data[i];
+        if (e.tag == SP_TAG_STR) sp_StrArray_push(st, e.v.s);
+        else if (e.tag == SP_TAG_OBJ && e.cls_id == SP_BUILTIN_STRBUF)
+          sp_StrArray_push(st, sp_str_dup_external(sp_String_cstr((sp_String *)e.v.p)));
+        else if (e.tag == SP_TAG_NIL) sp_StrArray_push(st, NULL);
+        else sp_typed_replace_elem_error(e, "String");
+      }
+      sp_StrArray_replace((sp_StrArray *)recv.v.p, st);
+      break;
+    }
+    case SP_BUILTIN_PTR_ARRAY: {
+      sp_PtrArray *d = (sp_PtrArray *)recv.v.p;
+      if (d->frozen) { sp_raise_frozen_array_at(d, SP_BUILTIN_PTR_ARRAY); return; }
+      for (sp_int i = 0; i < els->len; i++) (void)sp_PtrArray_elem_unbox(d, els->data[i]);
+      sp_gc_wb((void *)d);
+      d->len = 0;
+      for (sp_int i = 0; i < els->len; i++) sp_PtrArray_push(d, sp_PtrArray_elem_unbox(d, els->data[i]));
+      break;
+    }
+  }
+}
+
 sp_RbVal sp_poly_replace(sp_RbVal recv, sp_RbVal src) {SP_GC_ROOT_RBVAL(recv);SP_GC_ROOT_RBVAL(src);
   if (recv.tag != SP_TAG_OBJ) return recv;
   /* String#replace on a shared-mutable handle: swap the buffer contents in
@@ -1057,6 +1134,12 @@ sp_RbVal sp_poly_replace(sp_RbVal recv, sp_RbVal src) {SP_GC_ROOT_RBVAL(recv);SP
     d->len = 0;
     for (sp_int i = 0; i < sa->len; i++) sp_PtrArray_push(d, sa->data[i]);
   }
+  else if ((recv.cls_id == SP_BUILTIN_INT_ARRAY || recv.cls_id == SP_BUILTIN_FLT_ARRAY ||
+            recv.cls_id == SP_BUILTIN_STR_ARRAY || recv.cls_id == SP_BUILTIN_PTR_ARRAY) &&
+           (src.cls_id == SP_BUILTIN_INT_ARRAY || src.cls_id == SP_BUILTIN_FLT_ARRAY ||
+            src.cls_id == SP_BUILTIN_STR_ARRAY || src.cls_id == SP_BUILTIN_PTR_ARRAY ||
+            src.cls_id == SP_BUILTIN_POLY_ARRAY))
+    sp_typed_array_replace_boxed(recv, src);
   else if (recv.cls_id == SP_BUILTIN_POLY_ARRAY) {
     sp_PolyArray *d = (sp_PolyArray *)recv.v.p;
     d->len = 0;
@@ -1800,7 +1883,12 @@ const char *sp_File_getc(sp_File *f) {SP_GC_ROOT(f);
   sp_io_wait_readable(f);
   int ch = fgetc(f->fp);
   if (ch == EOF) return NULL;
-  int extra = ((ch & 0xE0) == 0xC0) ? 1 : ((ch & 0xF0) == 0xE0) ? 2 : ((ch & 0xF8) == 0xF0) ? 3 : 0;
+  /* A binary handle (a socket, a File opened "rb", one put in binmode) has
+     one-byte characters: reading on after a byte that looks like a UTF-8
+     lead took the next bytes with it, and on a socket waited for bytes the
+     peer had not sent (#7312). */
+  int bin = sp_File_binmode_p(f);
+  int extra = bin ? 0 : ((ch & 0xE0) == 0xC0) ? 1 : ((ch & 0xF0) == 0xE0) ? 2 : ((ch & 0xF8) == 0xF0) ? 3 : 0;
   char *r = sp_str_alloc((size_t)(1 + extra));
   size_t n = 0;
   r[n++] = (char)ch;
@@ -1811,6 +1899,7 @@ const char *sp_File_getc(sp_File *f) {SP_GC_ROOT(f);
   }
   r[n] = 0;
   sp_str_set_len(r, n);
+  if (bin) sp_str_mark_binary(r);
   return r;
 }
 const char *sp_File_readchar(sp_File *f) {SP_GC_ROOT(f);
@@ -3257,6 +3346,43 @@ const char *sp_str_setbyte_cow(const char *s, sp_int i, sp_int v) {SP_GC_ROOT_ST
    (resolved at final link against the generated TU). ---- */
 #include "sp_range.h"
 
+/* The caller has checked the boxed Range kind and its non-NULL payload. */
+sp_RbVal sp_range_dup(sp_RbVal v, int keep_frozen) {
+  switch (v.cls_id) {
+    case SP_BUILTIN_RANGE: {
+      sp_Range r = *(sp_Range *)v.v.p;
+      if (!keep_frozen) r.unfrozen = 1;
+      return sp_box_range(r);
+    }
+    case SP_BUILTIN_FLOAT_RANGE: {
+      sp_FloatRange r = *(sp_FloatRange *)v.v.p;
+      if (!keep_frozen) r.unfrozen = 1;
+      return sp_box_frange(r);
+    }
+    case SP_BUILTIN_STR_RANGE: {
+      sp_StrRange r = *(sp_StrRange *)v.v.p;
+      if (!keep_frozen) r.unfrozen = 1;
+      return sp_box_srange(r);
+    }
+  }
+  return v;
+}
+void sp_range_freeze(sp_RbVal v) {
+  switch (v.cls_id) {
+    case SP_BUILTIN_RANGE: ((sp_Range *)v.v.p)->unfrozen = 0; break;
+    case SP_BUILTIN_FLOAT_RANGE: ((sp_FloatRange *)v.v.p)->unfrozen = 0; break;
+    case SP_BUILTIN_STR_RANGE: ((sp_StrRange *)v.v.p)->unfrozen = 0; break;
+  }
+}
+sp_bool sp_range_frozen(sp_RbVal v) {
+  switch (v.cls_id) {
+    case SP_BUILTIN_RANGE: return !((sp_Range *)v.v.p)->unfrozen;
+    case SP_BUILTIN_FLOAT_RANGE: return !((sp_FloatRange *)v.v.p)->unfrozen;
+    case SP_BUILTIN_STR_RANGE: return !((sp_StrRange *)v.v.p)->unfrozen;
+  }
+  return TRUE;
+}
+
 /* `Range#include?`/`#cover?` on the boxed (SP_TAG_OBJ cls_id
    SP_BUILTIN_RANGE) Range value. The direct sp_Range typed path
    inlines this same check via compile_range_method_expr; poly-recv
@@ -3513,11 +3639,11 @@ sp_bool sp_argf_eof(void) { return !sp_argf_ensure(); }
 /* Float range (1.0..3.0). Endpoints stay sp_float, so cover?/include?/begin/end
    are exact. -HUGE_VAL / +HUGE_VAL are the beginless / endless sentinels. */
 sp_FloatRange sp_frange_new(sp_float f, sp_float l, sp_int e) {
-  sp_FloatRange r; r.first = f; r.last = l; r.excl = e; r.omitted = 0; return r;
+  sp_FloatRange r; r.first = f; r.last = l; r.excl = e; r.omitted = 0; r.unfrozen = 0; return r;
 }
 /* Same, recording which bound was written as absent rather than infinite. */
 sp_FloatRange sp_frange_new_o(sp_float f, sp_float l, sp_int e, sp_int om) {
-  sp_FloatRange r; r.first = f; r.last = l; r.excl = e; r.omitted = om; return r;
+  sp_FloatRange r; r.first = f; r.last = l; r.excl = e; r.omitted = om; r.unfrozen = 0; return r;
 }
 sp_bool sp_frange_cover(sp_FloatRange r, sp_float x) {
   if (r.first != -HUGE_VAL && x < r.first) return 0;
@@ -3552,7 +3678,7 @@ sp_float sp_frange_max(sp_FloatRange r) {
    it became a value of its own (#3064). A NULL endpoint is a nil bound: the
    range is beginless or endless. */
 sp_StrRange sp_srange_new(const char *f, const char *l, sp_int e) {
-  sp_StrRange r; r.first = f; r.last = l; r.excl = e; return r;
+  sp_StrRange r; r.first = f; r.last = l; r.excl = e; r.unfrozen = 0; return r;
 }
 sp_StrArray *sp_srange_to_a(sp_StrRange r) {
   if (!r.first) sp_raise_cls("TypeError", "can't iterate from NilClass");
@@ -3847,6 +3973,45 @@ const char *sp_str_sub_str_str_hash(const char *str, const char *pat, sp_StrStrH
   memcpy(out + before, rep, rlen);
   memcpy(out + before + rlen, found + plen, rest);
   out[total] = 0;
+  return out;
+}
+/* gsub(string, hash): every occurrence of the literal pattern replaced by
+   the hash's value for it ("" when absent or nil), $~ the last occurrence.
+   An empty pattern matches at every character boundary -- every byte of a
+   binary String -- as CRuby's does. */
+const char *sp_str_gsub_str_str_hash(const char *str, const char *pat, sp_StrStrHash *h) {SP_GC_ROOT_STR(pat);SP_GC_ROOT(h);SP_GC_ROOT_STR(str);
+  if (!str || !pat) return str;
+  size_t slen = strlen(str), plen = strlen(pat);
+  const char *rep = (h && sp_StrStrHash_has_key(h, pat)) ? sp_StrStrHash_get(h, pat) : "";
+  if (!rep) rep = "";
+  SP_GC_ROOT_STR(rep);
+  size_t rlen = strlen(rep), n = 0;
+  int bin = sp_str_is_binary(str);
+  if (plen == 0) { for (size_t i = 0; i < slen; i++) if (bin || ((unsigned char)str[i] & 0xC0) != 0x80) n++; n++; }
+  else for (const char *q = strstr(str, pat); q; q = strstr(q + plen, pat)) n++;
+  if (n == 0) { if (sp_re_track_last) sp_re_clear_last_match(); return str; }
+  size_t total = slen + n * rlen - (plen ? n * plen : 0);
+  char *out = sp_str_alloc_raw(total + 1);
+  size_t o = 0, last = 0;
+  if (plen == 0) {
+    for (size_t i = 0; i < slen; i++) {
+      if (bin || ((unsigned char)str[i] & 0xC0) != 0x80) { memcpy(out + o, rep, rlen); o += rlen; last = i; }
+      out[o++] = str[i];
+    }
+    memcpy(out + o, rep, rlen); o += rlen; last = slen;
+  }
+  else {
+    const char *p = str;
+    for (const char *q = strstr(p, pat); q; q = strstr(p, pat)) {
+      memcpy(out + o, p, (size_t)(q - p)); o += (size_t)(q - p);
+      memcpy(out + o, rep, rlen); o += rlen;
+      last = (size_t)(q - str);
+      p = q + plen;
+    }
+    memcpy(out + o, p, slen - (size_t)(p - str)); o += slen - (size_t)(p - str);
+  }
+  out[o] = 0;
+  if (sp_re_track_last) sp_re_set_lit_match(str, (sp_int)last, (sp_int)(last + plen));
   return out;
 }
 /* Array#sum with a String initial value: concatenation fold ("abc" from

@@ -1951,6 +1951,76 @@ int comp_scall_next(const Compiler *c, int u) {
   return (u >= 0 && u < c->scall_count) ? c->scall_next[u] : -1;
 }
 
+/* Every ivar read handed to a call as an argument, chained by the ivar's
+   name: one entry per (CallNode, argument) pair. Asking whether an ivar is
+   lent to a callee walked every CallNode of the program once per question,
+   and a machine-generated program asks it for nearly every method. Chains
+   carry hash collisions: callers keep their name/owner filters. An argument
+   array rewritten in place (nt_node_set_arr) leaves the table's version
+   alone, so a caller that may run after such a rewrite drops the index with
+   comp_ivarg_invalidate first. */
+static void ivarg_build(Compiler *c) {
+  free(c->ivarg_head); free(c->ivarg_next); free(c->ivarg_call); free(c->ivarg_arg);
+  c->ivarg_call = c->ivarg_arg = NULL;
+  const NodeTable *nt = c->nt;
+  int n = nt->count, np = 0;
+  for (int u = 0; u < n; u++) {
+    if (nt_kind(nt, u) != NK_CallNode) continue;
+    int a = nt_ref(nt, u, "arguments"), ac = 0;
+    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+    for (int k = 0; k < ac; k++)
+      if (nt_kind(nt, av[k]) == NK_InstanceVariableReadNode && nt_str(nt, av[k], "name")) np++;
+  }
+  int nb = 16;
+  while (nb < np && nb < (1 << 22)) nb <<= 1;
+  if (!comp_chain_alloc(&c->ivarg_head, &c->ivarg_next, nb, np, &c->ivarg_built)) return;
+  c->ivarg_call = malloc((size_t)(np > 0 ? np : 1) * sizeof(int));
+  c->ivarg_arg = malloc((size_t)(np > 0 ? np : 1) * sizeof(int));
+  if (!c->ivarg_call || !c->ivarg_arg) {
+    free(c->ivarg_head); free(c->ivarg_next); free(c->ivarg_call); free(c->ivarg_arg);
+    c->ivarg_head = c->ivarg_next = c->ivarg_call = c->ivarg_arg = NULL;
+    c->ivarg_built = 0;
+    return;
+  }
+  c->ivarg_nbuckets = nb;
+  c->ivarg_count = np;
+  for (int b = 0; b < nb; b++) c->ivarg_head[b] = -1;
+  int e = np;
+  for (int u = n - 1; u >= 0; u--) {   /* reverse: chains run in node order */
+    if (nt_kind(nt, u) != NK_CallNode) continue;
+    int a = nt_ref(nt, u, "arguments"), ac = 0;
+    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+    for (int k = ac - 1; k >= 0; k--) {
+      if (nt_kind(nt, av[k]) != NK_InstanceVariableReadNode) continue;
+      const char *an = nt_str(nt, av[k], "name");
+      if (!an) continue;
+      unsigned b = sp_strhash(an) & (unsigned)(nb - 1);
+      e--;
+      c->ivarg_call[e] = u;
+      c->ivarg_arg[e] = av[k];
+      c->ivarg_next[e] = c->ivarg_head[b];
+      c->ivarg_head[b] = e;
+    }
+  }
+  c->ivarg_version = nt->version;
+  c->ivarg_built = 1;
+}
+int comp_ivarg_first(Compiler *c, const char *name) {
+  if (!c->ivarg_built || c->ivarg_version != c->nt->version) ivarg_build(c);
+  if (!c->ivarg_built || !name) return -1;
+  return c->ivarg_head[sp_strhash(name) & (unsigned)(c->ivarg_nbuckets - 1)];
+}
+void comp_ivarg_invalidate(Compiler *c) { c->ivarg_built = 0; }
+int comp_ivarg_next(const Compiler *c, int e) {
+  return (e >= 0 && e < c->ivarg_count) ? c->ivarg_next[e] : -1;
+}
+int comp_ivarg_call(const Compiler *c, int e) {
+  return (e >= 0 && e < c->ivarg_count) ? c->ivarg_call[e] : -1;
+}
+int comp_ivarg_arg(const Compiler *c, int e) {
+  return (e >= 0 && e < c->ivarg_count) ? c->ivarg_arg[e] : -1;
+}
+
 /* Every node of one kind, chained in node order. The string-promotion passes
    walked the whole table per fixpoint round with a kind filter as the first
    test; these chains hand them just the matching nodes. */
@@ -1978,6 +2048,40 @@ int comp_kind_first(Compiler *c, int kind) {
 }
 int comp_kind_next(const Compiler *c, int id) {
   return (id >= 0 && id < c->kind_count) ? c->kind_next[id] : -1;
+}
+
+/* Every ReturnNode in a scope, chained in node order. A method's values are
+   its body's and its returns', and finding the returns walked every
+   ReturnNode of the program per question; the walks that follow a call into
+   its callee ask once per call they follow. The same shape as the CallNode
+   chain above, which a scope's own returns could share one day. */
+static void sret_build(Compiler *c) {
+  free(c->sret_head); free(c->sret_next);
+  int n = c->nt->count;
+  int ns = c->nscopes > 0 ? c->nscopes : 1;
+  if (!comp_chain_alloc(&c->sret_head, &c->sret_next, ns, n, &c->sret_built)) return;
+  c->sret_nscopes = ns;
+  c->sret_count = n;
+  for (int s = 0; s < ns; s++) c->sret_head[s] = -1;
+  for (int r = n - 1; r >= 0; r--) {   /* reverse: chains run in node order */
+    c->sret_next[r] = -1;
+    if (nt_kind(c->nt, r) != NK_ReturnNode) continue;
+    int si = c->nscope ? c->nscope[r] : 0;
+    if (si < 0 || si >= ns) si = 0;
+    c->sret_next[r] = c->sret_head[si];
+    c->sret_head[si] = r;
+  }
+  c->sret_version = c->nt->version;
+  c->sret_built = 1;
+}
+int comp_sret_first(Compiler *c, int scope_idx) {
+  if (!c->sret_built || c->sret_version != c->nt->version ||
+      c->sret_nscopes < c->nscopes) sret_build(c);
+  if (!c->sret_built || scope_idx < 0 || scope_idx >= c->sret_nscopes) return -1;
+  return c->sret_head[scope_idx];
+}
+int comp_sret_next(const Compiler *c, int r) {
+  return (r >= 0 && r < c->sret_count) ? c->sret_next[r] : -1;
 }
 
 /* Whether a bare `gets` may answer ARGF's next line, as `ARGF.gets` does.

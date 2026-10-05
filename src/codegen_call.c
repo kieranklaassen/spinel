@@ -12235,6 +12235,14 @@ static int emit_case_eq_call(Compiler *c, int id, Buf *b) {
           return 1;
         }
       }
+      /* typed boxed, the call answers the program's == value itself */
+      if (comp_ntype(c, id) == TY_POLY) {
+        int ta = ++g_tmp, tb = ++g_tmp;
+        buf_printf(b, "({ sp_RbVal _t%d = ", ta); emit_boxed(c, recv, b);
+        buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); sp_RbVal _t%d = ", ta, tb); emit_boxed(c, argv[0], b);
+        buf_printf(b, "; sp_poly_eq_value(_t%d, _t%d, %d); })", ta, tb, eq ? 0 : 1);
+        return 1;
+      }
       emit_poly_eq_ordered(c, recv, argv[0], eq, b);
       return 1;
     }
@@ -17941,7 +17949,9 @@ static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
       state_read = local_read = 0;
     if (!local_read && (state_read ? effects < 1 : !subtree_has_side_effect(c, operand[i]))) continue;
     observable++;
-    int bindable = (k == NK_CallNode || k == NK_SuperNode ||
+    /* a conditional's value is bound as a call's is: `f(a: r.int, b: c ? r.int : 0)`
+       declined whole and left every keyword to C's order */
+    int bindable = (k == NK_CallNode || k == NK_SuperNode || k == NK_IfNode || k == NK_UnlessNode ||
                     k == NK_ForwardingSuperNode || k == NK_YieldNode || state_read || local_read);
     if (!bindable) return emit_operands_before_unbound(c, id, operand, nop, recv >= 0, i, b);
     TyKind t = comp_ntype(c, operand[i]);

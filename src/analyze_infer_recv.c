@@ -1069,6 +1069,13 @@ int infer_array_call(Compiler *c, int id, TyKind rt, TyKind *out) {
       { *out = rt == TY_POLY_ARRAY ? TY_POLY : infer_type(c, argv[2]); return 1; }
     if ((sp_streq(name, "assoc") || sp_streq(name, "rassoc")) && rt == TY_POLY_ARRAY)
       { *out = TY_POLY_ARRAY; return 1; }  /* the matching sub-array, or nil (NULL ptr) */
+    /* an array of numbers, Strings, Symbols or booleans holds no Array to
+       match: the boxed nil emit_op_array_assoc answers */
+    if ((sp_streq(name, "assoc") || sp_streq(name, "rassoc")) && argc == 1) {
+      TyKind et = ty_array_elem(rt);
+      if (et == TY_INT || et == TY_FLOAT || et == TY_STRING || et == TY_SYMBOL || et == TY_BOOL)
+        { *out = TY_POLY; return 1; }
+    }
     if (sp_streq(name, "to_h") && argc == 0 && block < 0) {
       /* Infer hash type from the first pair element of an array literal */
       if (recv >= 0 && nt_type(nt, recv) && sp_streq(nt_type(nt, recv), "ArrayNode")) {
@@ -1326,6 +1333,8 @@ int poly_lines_args(Compiler *c, int argc, const int *argv) {
 }
 
 int infer_poly_call(Compiler *c, int id, TyKind rt, TyKind *out) {
+  { const char *nm0 = nt_str(c->nt, id, "name");
+    if (nm0 && sp_streq(nm0, "__to_h_subject")) { *out = TY_POLY; return 1; } }
   const NodeTable *nt = c->nt;
   const char *name = nt_str(nt, id, "name");
   int recv = nt_ref(nt, id, "receiver");
@@ -1621,6 +1630,11 @@ int infer_poly_call(Compiler *c, int id, TyKind rt, TyKind *out) {
   if (recv >= 0 && rt == TY_POLY && sp_streq(name, "lines") && nt_ref(nt, id, "block") < 0 &&
       poly_lines_args(c, argc, argv))
     { *out = an_user_defines_or_reads(c, name) ? TY_POLY : TY_STR_ARRAY; return 1; }
+  /* ...and each_line with those arguments and no block: the same Array,
+     as the argumentless poly.each_line materializes */
+  if (recv >= 0 && rt == TY_POLY && sp_streq(name, "each_line") && nt_ref(nt, id, "block") < 0 &&
+      poly_lines_args(c, argc, argv))
+    { *out = (an_user_defines_or_reads(c, name) || an_user_defines_or_reads(c, "lines")) ? TY_POLY : TY_STR_ARRAY; return 1; }
   /* A blockless grouping enumerator on a boxed Array -- an Array read out of a
      container -- materializes to the groups themselves, an Array of Arrays. */
   if (recv >= 0 && rt == TY_POLY && argc == 1 && nt_ref(nt, id, "block") < 0 &&
@@ -1654,7 +1668,8 @@ int infer_poly_call(Compiler *c, int id, TyKind rt, TyKind *out) {
   /* poly.each_char { |c| } / each_line { |l| }: the block param is a String
      (one char, one line) and the call answers the receiver's string, as
      String#each_char answers self (#3402). */
-  if (recv >= 0 && rt == TY_POLY && argc == 0 &&
+  if (recv >= 0 && rt == TY_POLY &&
+      (argc == 0 || (sp_streq(name, "each_line") && poly_lines_args(c, argc, argv))) &&
       (sp_streq(name, "each_char") || sp_streq(name, "each_line")) &&
       nt_ref(nt, id, "block") >= 0 && !an_user_defines_or_reads(c, name) &&
       !an_user_defines_or_reads(c, sp_streq(name, "each_char") ? "chars" : "lines")) {
