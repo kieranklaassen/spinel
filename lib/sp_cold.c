@@ -3562,12 +3562,27 @@ sp_StrArray *sp_srange_to_a(sp_StrRange r) {
 sp_bool sp_srange_eq(sp_StrRange a, sp_StrRange b) {
   return a.excl == b.excl && sp_str_eq(a.first, b.first) && sp_str_eq(a.last, b.last);
 }
-/* #include? / #member?: #cover? for a bounded range, which CRuby refuses to
-   answer for a beginless or endless one. */
+/* #include? / #member? ask the members, as CRuby's rb_str_include_range_p
+   does, where #cover? and #=== compare with the two ends: ("a".."ab") holds
+   "z", which lies past "ab", and ("a".."z") holds no "bb", which lies
+   between. Two single-character ends hold the single ASCII characters
+   between them and need no walk; any other pair walks, and stops at the
+   member that is the String. CRuby refuses a beginless or endless range. */
 sp_bool sp_srange_include(sp_StrRange r, const char *x) {
   if (!r.first || !r.last)
     sp_raise_cls("TypeError", "cannot determine inclusion in beginless/endless ranges");
-  return sp_srange_cover(r, x);
+  if (!x) return 0;
+  if (sp_str_byte_len(r.first) == 1 && sp_str_byte_len(r.last) == 1) {
+    unsigned char b = (unsigned char)*r.first, e = (unsigned char)*r.last, v = (unsigned char)*x;
+    if (sp_str_byte_len(x) != 1) return 0;
+    if (b < 0x80 && e < 0x80 && v < 0x80) return (b <= v && v < e) || (!r.excl && v == e);
+  }
+  SP_GC_ROOT_STR(x);
+  sp_StrWalk w = {0};
+  SP_GC_ROOT_STR(w.cur); SP_GC_ROOT_STR(w.end); SP_GC_ROOT_STR(w.stop);
+  for (const char *m = sp_str_walk_first(&w, r.first, r.last, r.excl); m; m = sp_str_walk_next(&w))
+    if (sp_str_eq(m, x)) return 1;
+  return 0;
 }
 /* #cover? / #=== compare lexicographically, no materialization. */
 sp_bool sp_srange_cover(sp_StrRange r, const char *x) {
