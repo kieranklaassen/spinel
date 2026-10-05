@@ -1,0 +1,1 @@
+A splat spreads a boxed Range's members and an Enumerator's items
