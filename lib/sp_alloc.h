@@ -422,9 +422,14 @@ static inline const char *sp_str_as_binary(const char *s) {
   sp_str_mark_binary((char *)s);
   return s;
 }
-/* The inverse, for force_encoding back to the text side. */
+/* The inverse, for force_encoding back to the text side. A length remembered
+   before the bytes were binary may be of other bytes by now (setbyte forgets
+   nothing on a binary String, lib/sp_cold.c), so it goes with the tag. */
 static inline const char *sp_str_as_text(const char *s) {
-  if (s && sp_str_has_hdr(s)) (((sp_str_hdr *)(s - 1)) - 1)->size &= ~SP_STR_SIZE_BINARY;
+  if (s && sp_str_is_binary(s)) {
+    (((sp_str_hdr *)(s - 1)) - 1)->size &= ~SP_STR_SIZE_BINARY;
+    sp_str_lcache_drop(s);
+  }
   return s;
 }
 static inline int sp_str_is_ascii7(const char *s) {
