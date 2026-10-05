@@ -18329,6 +18329,55 @@ static int mark_reader_identity_operands(Compiler *c) {
   return changed;
 }
 
+/* `obj.reader.freeze` and `obj.reader.frozen?` where the reader's slot holds
+   a shared handle: the frozen flag is the handle's, and the read hands out a
+   copy of the contents, so the freeze froze a String nobody else could see
+   and the question was asked of a fresh one. The receiver is marked to hand
+   out the handle. Like the rules above it promotes nothing.
+
+   Only a read that IS the slot is marked: an attr reader, or a memoizing
+   `def m = (@iv ||= v)`, of an object's class or of self's, with no other
+   def of the name in that class's chain or in a class below it. A plain
+   `def m; @iv; end` and a boxed receiver are left as they are: their reads
+   do not hand out the handle. */
+static int an_reader_is_slot(Compiler *c, int cid, const char *mn) {
+  int mi = comp_method_in_chain(c, cid, mn, NULL);
+  if (mi < 0 ? !comp_reader_in_chain(c, cid, mn, NULL)
+             : comp_reader_in_chain(c, cid, mn, NULL) || !an_memo_reader_ivar(c, mi)) return 0;
+  for (int k = 0; k < c->nclasses; k++)
+    if (k != cid && is_descendant(c, k, cid) && comp_method_in_chain(c, k, mn, NULL) != mi) return 0;
+  return 1;
+}
+static int mark_reader_frozen_receivers(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  int changed = 0;
+  for (int w = 0; w < nt->count; w++) {
+    if (nt_kind(nt, w) != NK_CallNode) continue;
+    const char *nm = nt_str(nt, w, "name");
+    if (!nm || !(sp_streq(nm, "freeze") || sp_streq(nm, "frozen?"))) continue;
+    int recv = nt_ref(nt, w, "receiver");
+    int a = nt_ref(nt, w, "arguments");
+    int ac = 0; if (a >= 0) nt_arr(nt, a, "arguments", &ac);
+    if (recv < 0 || ac != 0 || nt_ref(nt, w, "block") >= 0) continue;
+    if (nt_kind(nt, recv) != NK_CallNode) continue;
+    if (c->strbuf_box[recv] || c->strbuf_handle_demand[recv]) continue;
+    int obj = nt_ref(nt, recv, "receiver");
+    TyKind ot = obj >= 0 ? infer_type(c, obj) : TY_UNKNOWN;
+    int cid = obj < 0 ? ie_receiverless_self_class(c, recv) : ty_is_object(ot) ? ty_object_class(ot) : -1;
+    const char *mn = nt_str(nt, recv, "name");
+    if (cid < 0 || !mn || !an_reader_is_slot(c, cid, mn)) continue;
+    char ivb[300]; int defc = cid;
+    const char *ivn = an_reader_ivar_of(c, recv, &defc, ivb, sizeof ivb);
+    if (!ivn || defc < 0) continue;
+    /* the type, as the read's emitter asks: a subclass's slot carries it */
+    int iv = comp_ivar_index(&c->classes[defc], ivn);
+    if (iv < 0 || c->classes[defc].ivar_types[iv] != TY_STRBUF) continue;
+    c->strbuf_handle_demand[recv] = 1;
+    changed = 1;
+  }
+  return changed;
+}
+
 /* Can POLY variable `vn` of scope `vs` hold a String? Only then can lifting
    its read into the handle (poly_strbuf_lift) change anything, so a variable
    that only ever holds Arrays, Hashes or numbers -- an accumulator handed to
@@ -32546,6 +32595,7 @@ static void an_phase_storage(Compiler *c) {
     c->ntype[r] = TY_POLY;
   }
   mark_reader_identity_operands(c);
+  mark_reader_frozen_receivers(c);
   mark_reader_read_only_operands(c);
 
   /* Promote `<<`-appended string locals to mutable strings (TY_STRBUF) so the

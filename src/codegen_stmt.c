@@ -10908,6 +10908,18 @@ else {
   {
     const char *fnm = nt_str(nt, id, "name");
     int frcv = nt_ref(nt, id, "receiver");
+    /* a reader that hands out the handle (mark_reader_frozen_receivers) */
+    if (frcv >= 0 && fnm && sp_streq(fnm, "freeze") && nt_kind(nt, frcv) == NK_CallNode &&
+        c->strbuf_handle_demand[frcv] && comp_recv_type(c, frcv) == TY_STRING) {
+      int fargs = nt_ref(nt, id, "arguments");
+      int fac = 0; if (fargs >= 0) nt_arr(nt, fargs, "arguments", &fac);
+      char frref[1024];
+      if (fac == 0 && strbuf_slot_ref(c, frcv, frref, sizeof frref)) {
+        emit_indent(b, indent);
+        buf_printf(b, "sp_String_freeze(%s);\n", frref);
+        return 1;
+      }
+    }
     if (frcv >= 0 && fnm && sp_streq(fnm, "freeze") && comp_ntype(c, frcv) == TY_STRING) {
       const char *rty2 = nt_type(nt, frcv);
       if (rty2 && (sp_streq(rty2, "LocalVariableReadNode") || sp_streq(rty2, "InstanceVariableReadNode"))) {
