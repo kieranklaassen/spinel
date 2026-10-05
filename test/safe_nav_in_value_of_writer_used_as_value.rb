@@ -1,7 +1,7 @@
 # A writer used as a value, on a receiver no name holds, with a `&.` writer
-# as its own value: the Array the `&.` call stores was made under the nil
-# test, where its root ended with the test, and a collection freed it while
-# only the stored-into object still held it.
+# as its own value: the Array the `&.` call stores is made ahead of the
+# statement, not under the nil test, where its root would end with the test
+# while only the stored-into object still held it.
 class K
   attr_accessor :w
   def initialize(v) = (@v = v; @w = nil)

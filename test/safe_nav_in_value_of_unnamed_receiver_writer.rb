@@ -1,7 +1,7 @@
 # A writer whose receiver no name holds (`a.pop.w = v`, `K.new(x).w = v`)
-# takes that receiver before its value is made. A `&.` call in the value made
-# its arguments after it, under the nil test, and a collection there freed
-# the receiver: the store landed on an object the arguments had just made.
+# takes that receiver before its value is made. A `&.` call in the value
+# makes its arguments ahead of the statement, not under its nil test: there
+# a collection would free the receiver the writer has already taken.
 class K
   attr_accessor :w
   def initialize(v) = (@v = v; @w = nil)
