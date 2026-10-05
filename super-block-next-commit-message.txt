@@ -1,0 +1,64 @@
+A next in the block given to super leaves that block, not the Fiber's
+
+    class A
+      def go
+        r = []
+        r << (yield 1)
+        r << (yield 2)
+        r
+      end
+    end
+    class B < A
+      def go
+        f = Fiber.new do
+          a = super() { |x| next 0 if x == 2; x * 10 }
+          a
+        end
+        f.resume
+      end
+    end
+    p B.new.go
+
+printed 0 where CRuby prints [10, 0]: the `next` ended the Fiber's block
+with its value. The block of Thread.new and of Enumerator.new ended the
+same way, with `super()`, `super(n)` and a bare `super`.
+
+A `next` that such a body owns stores its value in the fiber and returns
+(emit_next_leaving_body), and subtree_owns_next says whether a `next` is
+the body's. The walk stops at the block of a call, which owns its
+`next`, but it went through the block of a SuperNode and of a
+ForwardingSuperNode, so that block's `next` was taken for the body's.
+Before f505ed77 the program did not build; since a method whose super
+passes a block is an ordinary method, it builds, and the wrong `next`
+showed. For that one `next` the walk now treats the block of a super as
+the block of a call, where the splice of that block into the method the
+super lands on is right today:
+
+- the method carries every yield whole: as a statement, as its last
+  statement, as the value written to a local, as an element of an
+  Array literal or as the argument of `<<`;
+- the block has no parameter or block-local with the name of a variable
+  around it;
+- the block does not answer a Float;
+- the block's last statement is not a `begin` or a `while` or `until`
+  loop.
+
+Elsewhere the super compiles as it did. A parent that computes with the
+yield's value (`n > 0 ? yield(n) : 5`, `(yield n).itself`,
+`return yield(n)`) loses the block's value at the splice; a super's
+block that shadows a name writes the outer variable, where a call's has
+the name renamed; a Float is kept in an Integer slot; beside a `next`
+a `begin` or a loop as the block's last statement answers nil. All
+four are wrong in a plain method too. A body whose `next` is its last
+act answers right today, which taking the block as the owner would
+lose, and where the body ends early a second `e.next` or `resume`
+raises, which is better than the splice's wrong answer.
+
+The other form of the walk, which asks about any `next`, is read by the
+blocks that are run in place (a tap block, the block of a yielding
+method, Array.new's and delete's). It answers as before, so a program
+with no super in such a body compiles to the C it had.
+test/block_next_beside_super_block.rb holds those blocks around a super
+with a block.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
