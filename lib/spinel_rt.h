@@ -14828,6 +14828,35 @@ static sp_PolyArray *sp_enum_items_from(sp_RbVal v) {
   }
   return sp_PolyArray_new();
 }
+/* The arguments a splat stands for in a list built for a proc, a Method or
+   a yield: sp_enum_items_from's items, and for a value with no #to_a (an
+   Integer, a Float, a Symbol, true or false, a class, an object whose class
+   defines none) the value itself. sp_enum_items_from has no items for such
+   a value, so the argument was dropped. A String is left as it was: boxed
+   here it would arrive as a copy, and a block that appends to its parameter
+   would write to the copy. */
+/* ... the one value: an object is asked for its #to_a once, here, and an
+   Array answered is spread as sp_enum_items_from spreads it */
+static SP_NOINLINE sp_PolyArray *sp_splat_arg_one(sp_RbVal v) {
+  SP_GC_ROOT_RBVAL(v);   /* may be a call's fresh answer, and the array allocates */
+  if (v.tag == SP_TAG_OBJ) {
+    sp_RbVal a = sp_obj_to_a_fn ? sp_obj_to_a_fn(v) : sp_box_nil();
+    if (a.tag == SP_TAG_OBJ && sp_poly_is_array_kind(a.cls_id))
+      return a.cls_id == SP_BUILTIN_POLY_ARRAY ? sp_enum_items_from(a) : sp_poly_to_poly_array(a);
+    if (a.tag != SP_TAG_NIL) return sp_PolyArray_new();
+  }
+  sp_PolyArray *r = sp_PolyArray_new(); SP_GC_ROOT(r);
+  sp_PolyArray_push(r, v);
+  return r;
+}
+static SP_NOINLINE sp_PolyArray *sp_splat_arg_items(sp_RbVal v) {
+  /* an Array, a Hash, a Range and every other builtin's object, nil and a String, as before */
+  if (SP_LIKELY(v.tag == SP_TAG_OBJ))
+    return v.cls_id >= 0 && v.v.p != NULL ? sp_splat_arg_one(v) : sp_enum_items_from(v);
+  int one = v.tag == SP_TAG_INT || v.tag == SP_TAG_BIGINT || v.tag == SP_TAG_FLT ||
+            v.tag == SP_TAG_SYM || v.tag == SP_TAG_BOOL || v.tag == SP_TAG_CLASS;
+  return one ? sp_splat_arg_one(v) : sp_enum_items_from(v);
+}
 /* The items each_with_index walks on a boxed receiver: an Array's elements,
    and a Hash's [key, value] pairs, a Range's members or an Enumerator's
    values (sp_enum_items_from); anything else, as before, none. */

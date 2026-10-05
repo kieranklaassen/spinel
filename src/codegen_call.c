@@ -22036,11 +22036,19 @@ int emit_spread_args_into(Compiler *c, const int *argv, int argc, const char *kw
       int sx = nt_ref(nt, argv[k], "expression");
       if (sx >= 0) emit_boxed(c, sx, &ab);
       int ts = ++g_tmp, ti = ++g_tmp;
+      /* A value with no #to_a is the argument itself (sp_splat_arg_items),
+         decided at run time where the kind says it may be one. Every other
+         kind is spread as before; so is a String, which would arrive here
+         as a copy. */
+      TyKind st = sx >= 0 ? comp_ntype(c, sx) : TY_UNKNOWN;
+      int one = st == TY_INT || st == TY_BIGINT || st == TY_FLOAT || st == TY_SYMBOL ||
+                st == TY_BOOL || st == TY_CLASS || st == TY_POLY || ty_is_object(st);
       emit_indent(g_pre, g_indent);
-      buf_printf(g_pre, "{ sp_PolyArray *_t%d = sp_enum_items_from(%s); SP_GC_ROOT(_t%d);"
+      buf_printf(g_pre, "{ sp_PolyArray *_t%d = %s(%s); SP_GC_ROOT(_t%d);"
                         " for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++)"
                         " sp_PolyArray_push(_t%d, _t%d->data[_t%d]); }\n",
-                 ts, ab.p ? ab.p : "sp_box_nil()", ts, ti, ti, ts, ti, ta, ts, ti);
+                 ts, one ? "sp_splat_arg_items" : "sp_enum_items_from",
+                 ab.p ? ab.p : "sp_box_nil()", ts, ti, ti, ts, ti, ta, ts, ti);
     }
     else {
       emit_boxed(c, argv[k], &ab);
