@@ -1,0 +1,48 @@
+A String an object's method builds can be appended to where it is stored
+
+`z = [c.plus]; z[0] << "z"` with `def plus = @x + "a"` did not build
+with clang and ended in SIGSEGV with gcc, and so did `z << c.to_s`,
+`h[:k] = c.show` and `@list = [c.plus]` wherever the container's
+Strings are changed in place. A String stored there is marked to go in
+as a shared handle, and for a call on an object
+strbuf_marked_yields_handle answered that the call renders the handle
+itself. A method that builds its String answers a plain one, and that
+went into the box under the handle's tag as it was.
+
+Such a call is now wrapped as a fresh handle where it is stored, as a
+call on a String and a receiverless call already are. It is taken for
+one when the method's body is seen to build the String
+(method_builds_string): it ends, with no `return` in it, in an
+interpolated String, in `to_s`, `inspect` or `chr` of an Integer or a
+Float, or in a String method that always answers a new String
+(str_call_makes_string: `@x + "a"`, `@x.dup`, `@x.upcase`, 34 names,
+each String's own). A nil such a method answers (`@x&.upcase`) is
+boxed as nil. The element is the new String and the object is left
+alone.
+
+Every other call on an object is read as before, so its store still
+does not build with clang and still ends in SIGSEGV with gcc: a
+reader, a method that may answer a String the object holds
+(`def m = @f ? @a : @b`, `@x.clamp(lo, hi)`, `@x.itself`, and
+`@x.clone`, which a program may define), one not seen to be new
+(`@parts.join`, `@x[0, 2]`), a name one class gives both a def and an
+attr reader, and a method a subclass overrides with one that is not
+seen to build its String, on an object of the parent class too.
+
+Not cured here: where a second String goes into the same container as
+a copy, the append to that one is still lost. A program that stopped
+at the first store now runs on and prints what it prints today with a
+plain String in the call's place (`z << "qa".dup << s; z[1] << "?"`).
+The copy is a String handed to `concat`, `insert`, `prepend`,
+`merge!`, `update`, `+=` or `||=`, a splat, or a later link of a push
+chain, in the same statement or another, through an alias of the
+container, a method or a block.
+
+A no-op `sub`, `center`, `ljust`, `rjust` or `encode` answers its
+receiver itself in the runtime, so over a frozen literal
+(`def m = @x.center(1)`) the append now raises FrozenError where it
+crashed and CRuby appends.
+
+No String is shared that was not, and nothing is refused that was not.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
