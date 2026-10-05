@@ -1,0 +1,27 @@
+nil
+"11"
+nil
+"a"
+nil
+"a"
+[nil, "9"]
+["a", "b"]
+[nil, nil]
+"aaa"
+["aaa", nil]
+"a"
+"a\u0000b"
+nil
+nil
+nil
+"9"
+"11"
+"11"
+nil
+"9"
+3
+nil
+"11"
+"a"
+cannot get the minimum of beginless range
+cannot get the maximum of endless range
