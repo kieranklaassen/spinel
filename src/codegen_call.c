@@ -2016,7 +2016,7 @@ unsigned g_yield_live_mask = 0;
    kind whose box is no allocation of its own; emit_proc_arg_boxed writes
    the box, through the holder when there is one. */
 int proc_arg_box_hold(Compiler *c, TyKind at, Buf *decl, int indent) {
-  if (!proc_slot_via_poly(c, at)) return -1;
+  if (!proc_slot_via_poly(c, at) || at == TY_CLASS) return -1;   /* a Class boxes without allocating */
   int t = ++g_tmp;
   emit_indent(decl, indent);
   buf_printf(decl, "sp_RbVal _t%d = sp_box_nil(); SP_GC_ROOT_RBVAL(_t%d);\n", t, t);

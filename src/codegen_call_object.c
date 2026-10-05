@@ -1572,8 +1572,10 @@ int emit_call_object_override_arms(Compiler *c, int id, Buf *b, const NodeTable 
       { Buf rb3; memset(&rb3, 0, sizeof rb3); emit_boxed(c, pr, &rb3);
         buf_puts(&pb3, rb3.p ? rb3.p : "sp_box_nil()"); free(rb3.p); }
       /* a by-value struct's box is held for the Proc it is handed to */
-      if (proc_slot_via_poly(c, comp_ntype(c, pv[0]))) buf_puts(&pb3, "; ");
-      int th3 = proc_arg_box_hold(c, comp_ntype(c, pv[0]), &pb3, 0);
+      Buf hb3; memset(&hb3, 0, sizeof hb3);
+      int th3 = proc_arg_box_hold(c, comp_ntype(c, pv[0]), &hb3, 0);
+      if (th3 >= 0) { buf_puts(&pb3, "; "); buf_puts(&pb3, hb3.p); }
+      free(hb3.p);
       buf_printf(&pb3, "; _t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_PROC"
                        " ? sp_penum_call1((sp_Proc *)_t%d.v.p, ", tp3, tp3, tp3);
       { Buf ab3; memset(&ab3, 0, sizeof ab3);
