@@ -24440,11 +24440,12 @@ int nullable_scalar_nil_only_call(Compiler *c, int id) {
   return recv >= 0 && scalar_nil_only_call(c, id, c->ntype[recv]) && nullable_int_value(c, recv);
 }
 
-/* The same names on a slot whose nil is a NULL pointer: a String, an Array,
-   a Hash, an object of the program's own. It is asked of a call nothing of
-   the receiver's class answered (`to_a` on a String, `&` on a Hash), so it
-   does not tell the classes apart; Array's own & and | are typed Array and
-   never reach it. */
+/* The same names on a slot whose nil is a NULL pointer -- a String, an
+   Array, a Hash, an object of the program's own -- and to_i and to_f on all
+   of those but a String. It is asked
+   of a call nothing of the receiver's class answered (`to_a` on a String,
+   `to_i` on an Array, `&` on a Hash), so it does not tell the classes
+   apart; Array's own & and | are typed Array and never reach it. */
 int null_slot_nil_only_call(Compiler *c, int id, TyKind rt) {
   const NodeTable *nt = c->nt;
   if (id < 0 || nt_kind(nt, id) != NK_CallNode) return 0;
@@ -24459,7 +24460,13 @@ int null_slot_nil_only_call(Compiler *c, int id, TyKind rt) {
   for (int k = 0; k < argc; k++)
     if (nt_kind(nt, argv[k]) == NK_SplatNode || nt_kind(nt, argv[k]) == NK_KeywordHashNode ||
         nt_kind(nt, argv[k]) == NK_BlockArgumentNode) return 0;
-  return argc == 0 ? (op && (sp_streq(nm, "to_a") || sp_streq(nm, "to_h"))) : argc == 1 && is_bit_op(nm);
+  if (argc == 0) {
+    if (!op) return 0;
+    if (sp_streq(nm, "to_a") || sp_streq(nm, "to_h")) return 1;
+    /* String answers these two itself */
+    return rt != TY_STRING && (sp_streq(nm, "to_i") || sp_streq(nm, "to_f"));
+  }
+  return argc == 1 && is_bit_op(nm);
 }
 
 /* Can this expression leave the sentinel in an int slot? */
