@@ -1734,7 +1734,11 @@ int desugar_compose_method_operand(Compiler *c) {
    A chain of such calls on a conditional moves into its arms as one.
    Moved a call a round, each left a paren the next link had to cross, at
    twice the rounds of the link before: the eighth was still outside when
-   the fixpoint's rounds ran out, and its change was lost. */
+   the fixpoint's rounds ran out, and its change was lost. It moves as one
+   only where every link's change is then kept and nothing reads its
+   value: a chain as a statement, of `<<` alone or of the links
+   desugar_mutator_chain_on_local rewrites, on a receiver every path of
+   which ends in a local. Any other chain moves a call a round. */
 static int mrv_no_scope(const NodeTable *nt, int root, int depth) {
   if (root < 0 || root >= nt->count) return 1;
   if (depth > 200) return 0;
@@ -1937,6 +1941,32 @@ static int mrv_dropped(Compiler *c, const int *par, int pn, int v) {
   }
   return 0;
 }
+static int mcl_closure_writes(const NodeTable *nt, const char *name);
+static int mcl_chain_kept(Compiler *c, int first, int last);
+/* Is the value `v` a String local no closure writes on every path: its
+   read, or a write of it, at the end of each arm of a conditional or a
+   paren? With `ivars` any local is one, and an instance variable's read. */
+static int mrv_leaves_named(Compiler *c, int v, int ivars, int depth) {
+  const NodeTable *nt = c->nt;
+  NodeKind k = nt_kind(nt, v);
+  const char *ty = nt_type(nt, v);
+  size_t tl = ty ? strlen(ty) : 0;
+  if (depth > 60 || v < 0) return 0;
+  if (k == NK_LocalVariableReadNode || (ivars && k == NK_InstanceVariableReadNode) ||
+      (tl >= 22 && strncmp(ty, "LocalVariable", 13) == 0 && strcmp(ty + tl - 9, "WriteNode") == 0))
+    return mrv_is_string(infer_type(c, v)) && (ivars || !mcl_closure_writes(nt, nt_str(nt, v, "name")));
+  if (k == NK_OrNode) {
+    int l = nt_ref(nt, v, "left");
+    return (nt_kind(nt, l) == NK_LocalVariableReadNode || (ivars && nt_kind(nt, l) == NK_InstanceVariableReadNode)) &&
+           mrv_leaves_named(c, nt_ref(nt, v, "right"), ivars, depth + 1);
+  }
+  int arms[64], na = mrv_arms(nt, v, arms, 64);
+  for (int i = 0; i < na; i++) {
+    int bn = 0; const int *bb = nt_arr(nt, arms[i], "body", &bn);
+    if (!mrv_leaves_named(c, bb[bn - 1], ivars, depth + 1)) return 0;
+  }
+  return na > 0;
+}
 /* The call `x` is sent to, when it is one that can move along with `x`:
    a String mutator with no block, no argument writing a variable or
    holding a scope -- the rules a call moves by on its own. -1 for none.
@@ -2057,6 +2087,13 @@ int desugar_mutator_receiver_value(Compiler *c) {
     if (!par) { par = du_parent_map(nt); pn = nt->count; }
     int head = id;
     for (int p; par && (p = mrv_link_over(c, par, pn, head)) >= 0; ) head = p;
+    /* as one only where every link's change is then kept and nothing reads
+       the chain's value, which as a conditional's is a copy where a write
+       takes it; any other chain moves this call alone, as it did */
+    if (head != id) {
+      int kept = mcl_chain_kept(c, id, head);
+      if (!kept || !mrv_dropped(c, par, pn, head) || !mrv_leaves_named(c, r, kept > 1, 0)) head = id;
+    }
     int base = nt->count;
     long long line = nt_int(nt, head, "node_line", 0), file = nt_int(nt, head, "node_file", 0);
     /* the outermost call without its receiver and arguments, copied once
@@ -2214,6 +2251,25 @@ static int mcl_last_call(const NodeTable *nt, int v) {
   const char *nm = nt_str(nt, v, "name");
   if (!nm || !sp_str_mutator(nm, SP_MUT_LOCAL) || !mcl_plain_call(nt, v) || sp_streq(nm, "replace")) return 0;
   return !sp_streq(nm, "insert") || mcl_insert_at(nt, v, 1);
+}
+/* Does a closure write the local `name` of a scope outside itself? */
+static int mcl_closure_writes(const NodeTable *nt, const char *name) {
+  for (int w = 0; w < nt->count; w++)
+    if (comp_is_local_write(nt_kind(nt, w)) && nt_int(nt, w, "depth", 0) > 0 && sp_streq(nt_str(nt, w, "name"), name)) return 1;
+  return 0;
+}
+/* Would the calls from `first` up to `last`, once `first` is sent to a
+   local, keep every change: 2 for a chain of `<<` alone, 1 for one the
+   pass below rewrites, 0 for any other? */
+static int mcl_chain_kept(Compiler *c, int first, int last) {
+  const NodeTable *nt = c->nt;
+  int only_shl = sp_streq(nt_str(nt, last, "name"), "<<");
+  if (!mcl_last_call(nt, last)) return 0;
+  for (int v = nt_ref(nt, last, "receiver"); ; v = nt_ref(nt, v, "receiver")) {
+    if (!mcl_self_link(nt, v)) return 0;
+    only_shl = only_shl && sp_streq(nt_str(nt, v, "name"), "<<");
+    if (v == first) return only_shl ? 2 : 1;
+  }
 }
 int desugar_mutator_chain_on_local(Compiler *c) {
   NodeTable *nt = (NodeTable *)c->nt;

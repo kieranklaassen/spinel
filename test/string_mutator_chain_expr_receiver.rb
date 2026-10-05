@@ -1,6 +1,6 @@
-# A chain of String mutators whose first receiver is an expression
-# answering an existing String changes that String through every link,
-# as in CRuby. The rewrite that sends such a call to the String moved a
+# A chain of String mutators, as a statement, whose first receiver is an
+# expression answering an existing String changes that String through
+# every link, as in CRuby. The rewrite that sends such a call to the String moved a
 # chain one link a round, each link at twice the rounds of the one before:
 # from the eighth link on the fixpoint's rounds ran out, the links left
 # over appended to a copy under a warning, and at 34 links the compiler
@@ -20,10 +20,11 @@ a = +"a"; b = +"b"
 (c ? a : b) << "1" << "2" << "3" << "4" << "5" << "6" << "7" << "8"
 p a, b
 
-# the chain's value
+# a chain whose value is read is moved a link a round, as before: its
+# value is the String
 a = +"a"; b = +"b"
-t = (d ? a : b) << "1" << "2" << "3" << "4" << "5" << "6" << "7" << "8" << "9"
-p t, a, b
+t = (d ? a : b) << "1" << "2" << "3"
+p t, a, b, t.equal?(a)
 
 # forty links
 a = +""; b = +""
@@ -66,10 +67,19 @@ p a, b, $log
 # in a method, on its parameters
 def both(c, x, y)
   (c ? x : y) << "1" << "2" << "3" << "4" << "5" << "6" << "7" << "8" << "9"
+  nil
 end
 x = +"x"; y = +"y"
-r = both(c, x, y)
-p x, y, r.equal?(y)
+both(c, x, y)
+p x, y
+
+# other mutators than `<<`
+a = +"a"; b = +"b"
+(c ? a : b).concat("1").prepend("2").concat("3").prepend("4").concat("5").prepend("6").concat("7").prepend("8").concat("9")
+p a, b
+a = +"a"; b = +"b"; z = nil
+(z || b).prepend("1").prepend("2").prepend("3").prepend("4").prepend("5").prepend("6").prepend("7").prepend("8").clear.concat("9")
+p a, b
 
 # in a loop, each pass through the chain
 a = +"a"; b = +"b"
