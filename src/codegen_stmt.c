@@ -13568,6 +13568,17 @@ static int str_mut_recv_assignable(Compiler *c, int recv) {
   return nt_kind(c->nt, recv) == NK_SelfNode || str_mut_var_recv(c, recv);
 }
 
+/* insert as a statement through the arm that answers its value: that one
+   checks the index against the String's end, and holds the receiver while
+   the text is made. */
+static int emit_insert_stmt_checked(Compiler *c, int id, Buf *b, int indent) {
+  Buf v; memset(&v, 0, sizeof v);
+  int ok = emit_array_call(c, id, &v);
+  if (ok) { emit_indent(b, indent); buf_printf(b, "(void)%s;\n", v.p ? v.p : "0"); }
+  free(v.p);
+  return ok;
+}
+
 static void emit_sb_shim_swap(Buf *b, int indent, int tH, char *arm) {
   emit_indent(b, indent + 1);
   buf_printf(b, "if (sp_String_is_frozen(_t%d)) sp_raise_frozen_str(_t%d->data);\n", tH, tH);
@@ -14397,12 +14408,15 @@ static int str_mutate_shared_arms(Compiler *c, int id, Buf *b, int indent, const
     if (tH) {
       Buf armb; memset(&armb, 0, sizeof armb);
       int handled = emit_array_mutate_stmt(c, id, &armb, indent + 1);
-      if (sb_local_shim_again(c, id, &svL, handled, &armb)) handled = emit_array_mutate_stmt(c, id, &armb, indent + 1);
+      if (sb_local_shim_again(c, id, &svL, handled, &armb, 1))
+        handled = sp_streq(name, "insert") ? emit_insert_stmt_checked(c, id, &armb, indent + 1)
+                                           : emit_array_mutate_stmt(c, id, &armb, indent + 1);
       sb_local_shim_close(&svL);
-      if (!handled) { free(armb.p); }
+      if (!handled) { free(armb.p); free(svL.args.p); }
       else {
         emit_indent(b, indent);
-        buf_printf(b, "{ sp_String *_t%d = %s;\n", tH, srefL);
+        buf_printf(b, "{ sp_String *_t%d = %s;%s", tH, srefL, svL.args.p ? svL.args.p : "\n");
+        free(svL.args.p);
         emit_sb_shim_swap(b, indent, tH, armb.p);
         return 1;
       }

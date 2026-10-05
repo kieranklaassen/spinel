@@ -2,11 +2,14 @@
 "abbccc6qrst"
 "<111213>ccc6qrst"
 "<11213>ccc6qrst"
+"L11213>ccc6qrst"
 true
-"56qrst"
-"56qrst"
-"6"
-"5qrst"
+"r"
+"qst"
+[3, "q", 2]
+"st"
+83
+"St"
 true
 10
 "qxyyzzzrst"
@@ -21,13 +24,19 @@ true
 "75qrstab"
 "975qrstaby"
 true
-"975qrstabzc"
-"97511rstabzc"
-4
-"6897511rstabzc"
-"2017wxyz"
+"975qrstabyzc"
+"97512rstabyzc"
+[0]
+IndexError
+"qx"
+"97512rstabyzc"
+"6897512rstabyzc"
+"2118wxyz"
 true
 true
+block 1
+IndexError
+"6897512rstabyzc"
 block 1
 block 2
 FrozenError

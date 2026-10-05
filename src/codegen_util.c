@@ -2102,17 +2102,22 @@ int cvar_global_slot(Compiler *c, int node, char *out, size_t cap) {
 /* The innermost block or lambda `node` is written in, within its method;
    -1 at the method's own level. */
 int *an_parent_map(const NodeTable *nt);
+int an_value_dropped(const NodeTable *nt, const int *parent, int node);
 static int *g_lent_parent;
 static int g_lent_parent_n = -1;
 static unsigned g_lent_parent_ver;
-static int lent_enclosing_closure(Compiler *c, int node) {
-  const NodeTable *nt = c->nt;
+static const int *lent_parent_map(const NodeTable *nt) {
   if (!g_lent_parent || g_lent_parent_n != nt->count || g_lent_parent_ver != nt->version) {
     free(g_lent_parent);
     g_lent_parent = an_parent_map(nt);
     if (!g_lent_parent) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
     g_lent_parent_n = nt->count; g_lent_parent_ver = nt->version;
   }
+  return g_lent_parent;
+}
+static int lent_enclosing_closure(Compiler *c, int node) {
+  const NodeTable *nt = c->nt;
+  lent_parent_map(nt);
   for (int p = node >= 0 && node < nt->count ? g_lent_parent[node] : -1; p >= 0; p = g_lent_parent[p]) {
     NodeKind k = nt_kind(nt, p);
     if (k == NK_BlockNode || k == NK_LambdaNode) return p;
@@ -2457,17 +2462,148 @@ int sb_local_shim_open(Compiler *c, int recv, char *sref, size_t cap, SbLocalSav
     if (sp_streq(sv->caps->v[i], sbn)) { sv->cap_at = i; sv->cap_nm = sv->caps->v[i]; }
   sv->nm = sbn; sv->t = tH; sv->pre_at = g_pre; sv->argov = -1;
   memset(&sv->pre, 0, sizeof sv->pre);
+  memset(&sv->args, 0, sizeof sv->args);
   sb_local_lift(sv, 1);
   return tH;
+}
+/* Is the value of call `id` (`name`, its arguments moved by
+   sb_local_shim_again) one the shim answers as CRuby does? A dropped value
+   is. So is what slice! or setbyte answers, unless a call is made on it:
+   that can run the receiver expression twice (a `!` method does). insert
+   answers its receiver, and the shim a copy of it, which is the same to a
+   shared String local assigned it (the String's other name), to an
+   interpolation and to p, puts or print as a statement; anywhere else the
+   copy can be told. The value of `[]=` is its last argument. */
+static int sb_shim_value_ok(Compiler *c, int id, const char *name) {
+  const NodeTable *nt = c->nt;
+  const int *par = lent_parent_map(nt);
+  if (id >= g_lent_parent_n) return 0;
+  if (an_value_dropped(nt, par, id)) return 1;
+  int at = id, p = par[id];
+  while (p >= 0 && (nt_kind(nt, p) == NK_ParenthesesNode || nt_kind(nt, p) == NK_StatementsNode)) {
+    at = p; p = par[p];
+  }
+  if (sp_streq(name, "slice!") || sp_streq(name, "setbyte"))
+    return !(p >= 0 && nt_kind(nt, p) == NK_CallNode && nt_ref(nt, p, "receiver") == at);
+  if (!sp_streq(name, "insert") || p < 0) return 0;
+  if (nt_kind(nt, p) == NK_EmbeddedStatementsNode) return 1;
+  if (nt_kind(nt, p) == NK_LocalVariableWriteNode) {
+    LocalVar *wl = scope_local(comp_scope_of(c, p), nt_str(nt, p, "name"));
+    return wl && wl->type == TY_STRBUF;
+  }
+  int pc = sp_streq(nt_type(nt, p), "ArgumentsNode") ? par[p] : -1;
+  const char *pn = pc >= 0 && nt_kind(nt, pc) == NK_CallNode && nt_ref(nt, pc, "receiver") < 0
+                     ? nt_str(nt, pc, "name") : NULL;
+  return pn && (sp_streq(pn, "p") || sp_streq(pn, "puts") || sp_streq(pn, "print")) &&
+         an_value_dropped(nt, par, pc);
+}
+/* Is the value of `id` one that cannot be a shared String, nor hold one?
+   A value typed Integer, Float, true or false, nil or Symbol is; so are a
+   String literal, an interpolation and what String#slice! answers. So is
+   a call on such a receiver whose block answers such a value, with such
+   arguments where the receiver could keep one; and an Array, a Hash, an
+   assignment or a conditional made of such values. Nothing else: not a
+   local that is not a scalar, not an instance variable, not a call with no
+   receiver. */
+static int sb_fresh(Compiler *c, const int *par, int id, int depth);
+static int sb_scalar(TyKind t) {
+  return t == TY_INT || t == TY_FLOAT || t == TY_BOOL || t == TY_NIL || t == TY_SYMBOL;
+}
+static int sb_fresh_last(Compiler *c, const int *par, int body, int depth) {
+  const NodeTable *nt = c->nt;
+  if (body < 0) return 1;
+  if (nt_kind(nt, body) != NK_StatementsNode) return sb_fresh(c, par, body, depth);
+  int n = 0;
+  const int *st = nt_arr(nt, body, "body", &n);
+  return n == 0 || an_value_dropped(nt, par, st[n - 1]) || sb_fresh(c, par, st[n - 1], depth);
+}
+static int sb_fresh(Compiler *c, const int *par, int id, int depth) {
+  const NodeTable *nt = c->nt;
+  if (id < 0) return 1;
+  if (depth > 200) return 0;
+  NodeKind k = nt_kind(nt, id);
+  if (sb_scalar(comp_ntype(c, id)) || k == NK_StringNode || k == NK_InterpolatedStringNode ||
+      k == NK_WhileNode || k == NK_UntilNode) return 1;
+  if (k == NK_StatementsNode) return sb_fresh_last(c, par, id, depth + 1);
+  if (k == NK_CallNode) {
+    int r = nt_ref(nt, id, "receiver"), bl = nt_ref(nt, id, "block");
+    if (r < 0) return 0;
+    if (sp_streq(nt_str(nt, id, "name"), "slice!") && comp_ntype(c, r) == TY_STRING) return 1;
+    if (!sb_fresh(c, par, r, depth + 1)) return 0;
+    if (bl >= 0 && !sb_fresh_last(c, par, nt_ref(nt, bl, "body"), depth + 1)) return 0;
+    if (sb_scalar(comp_ntype(c, r)) || comp_ntype(c, r) == TY_STRING) return 1;
+    return sb_fresh(c, par, nt_ref(nt, id, "arguments"), depth + 1);
+  }
+  if (k != NK_ArrayNode && k != NK_HashNode && k != NK_AssocNode && k != NK_ParenthesesNode &&
+      k != NK_LocalVariableWriteNode && k != NK_IfNode && k != NK_UnlessNode && k != NK_ElseNode &&
+      k != NK_AndNode && k != NK_OrNode && !sp_streq(nt_type(nt, id), "ArgumentsNode")) return 0;
+  int nr = nt_num_refs(nt, id);
+  for (int i = 0; i < nr; i++)
+    if (!sb_fresh(c, par, nt_ref_at(nt, id, i), depth + 1)) return 0;
+  int na = nt_num_arrs(nt, id);
+  for (int i = 0; i < na; i++) {
+    int n = 0;
+    const int *ids = nt_arr_at(nt, id, i, &n);
+    for (int j = 0; j < n; j++)
+      if (!sb_fresh(c, par, ids[j], depth + 1)) return 0;
+  }
+  return 1;
+}
+/* Does a return, next or break under `id` hand out any other value? */
+static int sb_exits_with(Compiler *c, const int *par, int id, int depth) {
+  const NodeTable *nt = c->nt;
+  if (id < 0 || depth > 200) return 0;
+  NodeKind k = nt_kind(nt, id);
+  if ((k == NK_ReturnNode || k == NK_NextNode || k == NK_BreakNode) &&
+      !sb_fresh(c, par, nt_ref(nt, id, "arguments"), 0)) return 1;
+  int nr = nt_num_refs(nt, id);
+  for (int i = 0; i < nr; i++)
+    if (sb_exits_with(c, par, nt_ref_at(nt, id, i), depth + 1)) return 1;
+  int na = nt_num_arrs(nt, id);
+  for (int i = 0; i < na; i++) {
+    int n = 0;
+    const int *ids = nt_arr_at(nt, id, i, &n);
+    for (int j = 0; j < n; j++)
+      if (sb_exits_with(c, par, ids[j], depth + 1)) return 1;
+  }
+  return 0;
+}
+/* Can a def, lambda or block around call `id` answer a shared String, or
+   something that holds one: by the value of its last statement, where that
+   value is used, or by a return, next or break? The caller gets a copy of
+   such an answer (as it does from a method that only appends), and can
+   tell. */
+static int sb_local_answered(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  const int *par = lent_parent_map(nt);
+  for (int p = id < g_lent_parent_n ? par[id] : -1; p >= 0; p = par[p]) {
+    NodeKind k = nt_kind(nt, p);
+    if (k != NK_DefNode && k != NK_LambdaNode && k != NK_BlockNode) continue;
+    int body = nt_ref(nt, p, "body");
+    if (!sb_fresh_last(c, par, body, 0) || sb_exits_with(c, par, body, 0)) return 1;
+    if (k == NK_DefNode) break;
+  }
+  return 0;
 }
 /* After the arm's re-run for call `id`: did a statement it hoisted read the
    shadow? An argument's block, inlined as a loop, or the parts of an
    interpolation run ahead of the statement, and the shadow is declared inside
-   the shim. Then the arguments are evaluated here instead, ahead of the
-   statement and on the String itself, as CRuby runs them before the call;
-   each is bound to its temp, the arm's text is dropped, and the answer is 1:
-   run the arm again. */
-int sb_local_shim_again(Compiler *c, int id, SbLocalSave *sv, int handled, Buf *arm) {
+   the shim. Then the arguments are evaluated on the String itself and at the
+   call's own place, as CRuby runs them: after the handle is read and before
+   the frozen check and the copy. Their statements and one rooted temp each
+   go to sv->args, which the caller writes inside the shim; each argument is
+   bound to its temp, the arm's text is dropped, and the answer is 1: run the
+   arm again. `stmt` says the call is a statement.
+
+   The answer is 0, and the call does not build as before, where the new
+   path would reach an answer that is wrong without it too: an insert whose
+   index is not a literal from -1 up (a negative index past the start is not
+   refused), `t[i] = x` (wrong under SPINEL_GC_STRESS=1 in a long loop), an
+   argument that is neither an Integer nor a String (a boxed index is not
+   checked for a Bignum), a String that a later argument can change, a
+   value the shim answers as a copy, a method, lambda or block around the
+   call whose answer may be a shared String. */
+int sb_local_shim_again(Compiler *c, int id, SbLocalSave *sv, int handled, Buf *arm, int stmt) {
   if (!handled || sv->argov >= 0 || !sv->pre.len) return 0;
   char nm[32];
   int nl = snprintf(nm, sizeof nm, "lv__sb%d", sv->t), reads = 0;
@@ -2482,25 +2618,54 @@ int sb_local_shim_again(Compiler *c, int id, SbLocalSave *sv, int handled, Buf *
     else reads = !strncmp(q, nm, (size_t)nl) && !isdigit((unsigned char)q[nl]);
   }
   if (!reads) return 0;
+  const NodeTable *nt = c->nt;
+  const char *name = nt_str(nt, id, "name");
+  int an = nt_ref(nt, id, "arguments"), ac = 0;
+  const int *av = an >= 0 ? nt_arr(nt, an, "arguments", &ac) : NULL;
+  /* a Ruby local can spell the shadow's C name too: the tree says whether
+     an argument reads the String */
+  int inarg = 0;
+  for (int a = 0; a < ac; a++) inarg |= subtree_reads_local(nt, av[a], sv->nm);
+  char keep[4];
+  if (!inarg || !name || ac > (int)sizeof keep) return 0;
+  for (int a = 0; a < ac; a++) {
+    NodeKind k = nt_kind(nt, av[a]);
+    TyKind vt = comp_ntype(c, av[a]);
+    /* a literal stays in the arm, and so does a read of the String or of
+       another shared one, whose bytes the call sees as the arguments left
+       them */
+    const char *ln = k == NK_LocalVariableReadNode ? nt_str(nt, av[a], "name") : NULL;
+    const char *sn = strbuf_local_name(c, av[a]);
+    keep[a] = k == NK_IntegerNode || k == NK_StringNode || (ln && sp_streq(ln, sv->nm));
+    if (keep[a]) continue;
+    if (sn) {
+      for (int x = 0; x < ac; x++) if (subtree_writes_local(c, av[x], sn)) return 0;
+      keep[a] = 1;
+    }
+    else if (vt == TY_STRING) {
+      for (int x = a + 1; x < ac; x++) if (subtree_has_side_effect(c, av[x])) return 0;
+    }
+    else if (vt != TY_INT) return 0;
+  }
+  if (sp_streq(name, "insert") &&
+      !(ac == 2 && nt_kind(nt, av[0]) == NK_IntegerNode && nt_int(nt, av[0], "value", 0) >= -1)) return 0;
+  if (sp_streq(name, "[]=") && ac == 2 && comp_ntype(c, av[0]) == TY_INT) return 0;
+  if (!stmt && !sb_shim_value_ok(c, id, name)) return 0;
+  if (sb_local_answered(c, id)) return 0;
   sb_local_lift(sv, 0);
   sv->pre.len = 0; sv->pre.p[0] = '\0';
   arm->len = 0; if (arm->p) arm->p[0] = '\0';
   sv->argov = g_n_argov;
-  int an = nt_ref(c->nt, id, "arguments"), ac = 0;
-  const int *av = an >= 0 ? nt_arr(c->nt, an, "arguments", &ac) : NULL;
-  int last = -1;
-  for (int a = 0; a < ac; a++) if (subtree_has_side_effect(c, av[a])) last = a;
+  g_pre = &sv->args;
+  /* an argument can rebind the local, which then no longer holds the handle */
+  buf_printf(g_pre, " SP_GC_ROOT(_t%d);\n", sv->t);
   for (int a = 0; a < ac; a++) {
+    if (keep[a]) continue;
     TyKind vt = comp_ntype(c, av[a]);
-    /* an argument that is the String itself stays where it is, and the arm
-       reads it as the shadow; so does one that does not read the String and
-       has nothing run after it */
-    if (vt == TY_STRBUF || !c_type_name(vt)) continue;
-    if (a > last && !subtree_reads_local(c->nt, av[a], sv->nm)) continue;
     argov_reserve();
     int ht = ++g_tmp;
     Buf vb = expr_buf(c, av[a]);
-    emit_indent(g_pre, g_indent);
+    emit_indent(g_pre, g_indent + 1);
     emit_ctype(c, vt, g_pre);
     buf_printf(g_pre, " _t%d = %s;", ht, vb.p ? vb.p : default_value_from_compiler(c, vt));
     if (needs_root(vt)) buf_printf(g_pre, " SP_GC_ROOT(_t%d);", ht);

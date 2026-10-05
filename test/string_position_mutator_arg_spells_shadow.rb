@@ -1,12 +1,12 @@
 # slice!, setbyte, insert, []= and clear on a shared String run against a
-# shadow copy, the C locals lv__sb1 and lv__sb9 here. An argument's hoisted
-# statements that read the shadow run after it is declared; a String
-# literal that only spells its name is no read, and they stay ahead of the
-# statement.
+# shadow copy, the C locals lv__sb1 and lv__sb9 here. Statements an argument
+# hoists that read the shadow send the arguments to be evaluated first; a
+# String literal that only spells the shadow's name is no read, and the call
+# is emitted as it was.
 
 s = "qrst".dup
 t = s
-t.insert(0, [1].map { |x| s << "y"; "lv__sb1" }.join)
+t[0, 0] = [1].map { |x| s << "y"; "lv__sb1" }.join
 p s, t, s.equal?(t)
 
 u = "qrst".dup

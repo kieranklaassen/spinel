@@ -478,14 +478,15 @@ typedef struct { const char **v; int n, cap; } NameSet;
 /* what sb_local_shim_open lifted: the local's type and cell as they were, and
    its place in the capture list of the proc body being emitted, if any; its
    name and the shadow's number; the prelude it set aside, with what the
-   re-run hoisted; and where the bindings of the arguments start, once
-   sb_local_shim_again evaluated them */
+   re-run hoisted; and, once sb_local_shim_again evaluated the arguments,
+   where their bindings start and the text that evaluates them, which the
+   caller writes after the handle's declaration and frees */
 typedef struct {
   LocalVar *lv; TyKind ty; int cell; NameSet *caps; int cap_at; const char *cap_nm;
-  const char *nm; int t; Buf *pre_at; Buf pre; int argov;
+  const char *nm; int t; Buf *pre_at; Buf pre; int argov; Buf args;
 } SbLocalSave;
 int sb_local_shim_open(Compiler *c, int recv, char *sref, size_t cap, SbLocalSave *sv);
-int sb_local_shim_again(Compiler *c, int id, SbLocalSave *sv, int handled, Buf *arm);
+int sb_local_shim_again(Compiler *c, int id, SbLocalSave *sv, int handled, Buf *arm, int stmt);
 void sb_local_shim_close(SbLocalSave *sv);
 /* While emitting a capturing proc's body: the cap struct's C type name and the
    set of captured names, so a read/write of a captured var routes to the cell
