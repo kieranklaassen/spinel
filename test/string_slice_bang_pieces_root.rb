@@ -52,3 +52,15 @@ s.slice!(-3..)
 p s
 s.slice!(1)
 p s
+# With longer pieces a plain run loses them as well. The removed parts are
+# kept, so the heap grows from round to round.
+big = 0
+keep = []
+a = "ab" * 2_000
+1_000.times do |i|
+  s = a + "<#{i}>" + a
+  keep << s.slice!(4_000, i.to_s.size + 2)
+  big += 1 unless s == a + a
+end
+keep.each_with_index { |q, i| big += 1 unless q == "<#{i}>" }
+p big, keep.size
