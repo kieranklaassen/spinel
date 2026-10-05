@@ -3904,8 +3904,10 @@ static Compiler *g_owns_next_c;
 /* Is the block of the `super` at id taken as the owner of its `next`? Only
    where the splice of that block has the right answer today: the method the
    super lands on carries every yield whole (a yield that is computed with
-   loses the block's value at the splice), the block shadows no name, and
-   it does not answer a Float (the splice keeps one in an Integer slot).
+   loses the block's value at the splice), the block shadows no name, it
+   does not answer a Float (the splice keeps one in an Integer slot), and
+   its last statement is not a `begin` or a loop (beside a `next` the
+   splice answers nil for one).
    Elsewhere a body whose `next` left it as its last act keeps its answer,
    and a body that stopped early keeps its raise. */
 static int super_block_owns_next(Compiler *c, int id) {
@@ -3918,6 +3920,8 @@ static int super_block_owns_next(Compiler *c, int id) {
   const int *bd = bb >= 0 ? nt_arr(nt, bb, "body", &bn) : NULL;
   if ((bn > 0 && comp_ntype(c, bd[bn - 1]) == TY_FLOAT) || block_next_value_ntype(c, bb) == TY_FLOAT)
     return 0;
+  NodeKind tk = bn > 0 ? nt_kind(nt, bd[bn - 1]) : NK_NONE;
+  if (tk == NK_BeginNode || tk == NK_WhileNode || tk == NK_UntilNode) return 0;
   return yields_carried_whole(nt, nt_ref(nt, c->scopes[mi].def_node, "body"), YC_WHOLE) &&
          !super_block_shadows(c, id);
 }
