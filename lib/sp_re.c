@@ -389,13 +389,15 @@ sp_bool sp_re_match_p(mrb_regexp_pattern *pat, const char *str) {
   int caps[2];
   return re_exec(pat, str, slen, 0, caps, 2, sp_str_is_binary(str)) > 0;
 }
+/* Regexp#match?(str, pos) -- pos counts characters, as String#match?'s does. */
 sp_bool sp_re_match_p_at(mrb_regexp_pattern *pat, const char *str, sp_int pos) {
   if (!str) return FALSE;
+  sp_int cl = sp_str_length(str);
+  if (pos < 0) pos += cl;
+  if (pos < 0 || pos > cl) return FALSE;
   int64_t slen = (int64_t)sp_str_byte_len(str);
-  if (pos < 0) pos += slen;
-  if (pos < 0 || pos > slen) return FALSE;
   int caps[2];
-  return re_exec(pat, str, slen, (sp_int)pos, caps, 2, sp_str_is_binary(str)) > 0;
+  return re_exec(pat, str, slen, (sp_int)sp_utf8_byte_offset(str, pos), caps, 2, sp_str_is_binary(str)) > 0;
 }
 /* Regexp#=== on a boxed operand (a case/when arm, an explicit ===). Only a
    String (plain or shared-mutable handle) or a Symbol can match; a match
@@ -829,10 +831,13 @@ sp_RbVal sp_re_match_poly(mrb_regexp_pattern *pat, const char *str) {SP_GC_ROOT_
    sp_re_match / sp_re_match_poly). NULL (nil) when the last match failed, the
    name is unknown, or the group did not participate. Used by `/(?<n>..)/ =~ s`
    named-capture local binding (MatchWriteNode). */
+/* A name the pattern has no group for is CRuby's IndexError; the callers
+   ask only once the pattern matched, so a failed match stays nil. */
 const char *sp_re_named_capture(const mrb_regexp_pattern *pat, const char *name) {
   if (!pat || !name || !sp_re_last_str) return NULL;
   int g = re_named_group(pat, name);
-  if (g < 0 || (g * 2) + 1 >= 64) return NULL;
+  if (g < 0) sp_raise_cls("IndexError", sp_sprintf("undefined group name reference: %s", name));
+  if ((g * 2) + 1 >= 64) return NULL;
   int b = sp_re_caps[g * 2], e = sp_re_caps[(g * 2) + 1];
   /* e < b also covers e < 0 once b >= 0; guards against a malformed register
      state yielding a negative len that would cast to a huge size_t. */
