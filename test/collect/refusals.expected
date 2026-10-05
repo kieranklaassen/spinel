@@ -280,6 +280,22 @@ spinel: 1 refusal, nothing written
 == test/reject/io_reopen_yielding_call.rb [promote] rc=1
 spinel: unsupported call: node N (CallNode `twice`) recv=GlobalVariableReadNode/ty46 argc=0
 spinel: 1 refusal, nothing written
+== test/reject/kept_string_attr_read_after.rb [default] rc=1
+spinel: String `s` is mutated in place after `s=` kept it, and `b.s` is read afterwards: a String is not yet shared by reference with what keeps it, so the read would miss the mutation. Mutate the String before handing it over, or mutate it through what holds it.
+== test/reject/kept_string_attr_read_after.rb [promote] rc=1
+spinel: String `s` is mutated in place after `s=` kept it, and `b.s` is read afterwards: a String is not yet shared by reference with what keeps it, so the read would miss the mutation. Mutate the String before handing it over, or mutate it through what holds it.
+== test/reject/kept_string_initialize_read_after.rb [default] rc=1
+spinel: String `buf` is mutated in place after `new` kept it, and `line.text` is read afterwards: a String is not yet shared by reference with what keeps it, so the read would miss the mutation. Mutate the String before handing it over, or mutate it through what holds it.
+== test/reject/kept_string_initialize_read_after.rb [promote] rc=1
+spinel: String `buf` is mutated in place after `new` kept it, and `line.text` is read afterwards: a String is not yet shared by reference with what keeps it, so the read would miss the mutation. Mutate the String before handing it over, or mutate it through what holds it.
+== test/reject/kept_string_mutated_in_block.rb [default] rc=1
+spinel: String `buf` is mutated in place after `s=` kept it, and `b.s` is read afterwards: a String is not yet shared by reference with what keeps it, so the read would miss the mutation. Mutate the String before handing it over, or mutate it through what holds it.
+== test/reject/kept_string_mutated_in_block.rb [promote] rc=1
+spinel: String `buf` is mutated in place after `s=` kept it, and `b.s` is read afterwards: a String is not yet shared by reference with what keeps it, so the read would miss the mutation. Mutate the String before handing it over, or mutate it through what holds it.
+== test/reject/kept_string_struct_read_after.rb [default] rc=1
+spinel: String `s` is mutated in place after `new` kept it, and `pr.x` is read afterwards: a String is not yet shared by reference with what keeps it, so the read would miss the mutation. Mutate the String before handing it over, or mutate it through what holds it.
+== test/reject/kept_string_struct_read_after.rb [promote] rc=1
+spinel: String `s` is mutated in place after `new` kept it, and `pr.x` is read afterwards: a String is not yet shared by reference with what keeps it, so the read would miss the mutation. Mutate the String before handing it over, or mutate it through what holds it.
 == test/reject/macro_alias_in_aliased_namespace.rb [default] rc=1
 spinel: unsupported send with a runtime method name (AOT needs a compile-time-known name): node N (CallNode `public_send`) recv=SelfNode/ty49 argc=1 arg0ty6
 == test/reject/macro_alias_in_aliased_namespace.rb [promote] rc=1

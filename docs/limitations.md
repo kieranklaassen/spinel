@@ -698,6 +698,8 @@ Not yet shared:
 
 - a bare instance-variable argument written from a local, handed to an appending parameter through a call or `super`, unless the instance variable is already a shared handle;
 
+- into an attribute writer or a constructor (a Struct's or a Data's `new`, or an `initialize` that stores its parameter in an instance variable), a local String variable that is mutated in place afterwards and then read back through the object's attribute reader (`b.s = s; s << x; puts b.s`). This is refused only where the hand-over, the mutation and the read are in one method or block body in that order and the object is a new one the body names nowhere else. Every other String a method keeps while its caller goes on mutating it is still a silent copy: kept in a container, a class variable or a global, kept by a method that is not an attribute writer, kept through `super`, a proc, a lambda or `yield`, read back through a method of the object, or held by an object that was passed in;
+
 - a repeated keyword whose later value is a String variable bound to an appending parameter, unless the value is already passed as a shared handle;
 
 - through `Thread.new` or `Fiber#resume`, a String variable handed to a block parameter that appends to it, unless its read already hands over the shared handle or the local is read only as that argument;
