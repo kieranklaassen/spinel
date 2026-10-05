@@ -293,8 +293,7 @@ int an_re_has_captures(const char *src) {
    agree on which patterns are statically visible. Unlike re_lit_index this
    only looks, never registers a pattern slot, so it is safe to call during
    inference. A local answers only where it can hold nothing but the literal
-   (comp_regex_local_lit); whether a read can run before its write is settled
-   after inference, and such a local is still typed by its one literal. */
+   (comp_regex_local_lit), which answers here as it does for codegen. */
 const char *an_regex_lit_src(Compiler *c, int nid) {
   const NodeTable *nt = c->nt;
   if (nid < 0) return NULL;

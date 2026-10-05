@@ -1922,7 +1922,7 @@ int comp_lvw_next_sc(const Compiler *c, int w) {
 /* The Regexp literal behind the read of a local at `nid`, or -1. With `sure`
    it is the literal the read IS: every write of the local in the read's own
    scope is `re = /lit/` with one source and one set of flags, the local is no
-   parameter, and no read of it can run before a write. A second pattern, a
+   parameter, and this read cannot run before a write. A second pattern, a
    write that is no literal (`re ||= x`, `a, re = ...`, a `rescue => re`), a
    parameter or an unset read leaves it holding a value only the run knows.
    Without `sure` it is the first literal written to the local in that scope,
@@ -1934,7 +1934,7 @@ int comp_regex_local_lit(Compiler *c, int nid, int sure) {
   if (!nm) return -1;
   int si = (int)(comp_scope_of(c, nid) - c->scopes);
   LocalVar *lv = scope_local(&c->scopes[si], nm);
-  if (sure && lv && (lv->is_param || lv->is_block_param || lv->maybe_unset)) return -1;
+  if (sure && lv && (lv->is_param || lv->is_block_param)) return -1;
   int first = -1, lit = -1;
   for (int w = comp_lvw_first_sc(c, si, nm); w >= 0; w = comp_lvw_next_sc(c, w)) {
     const char *wn = nt_str(nt, w, "name");
@@ -1949,6 +1949,7 @@ int comp_regex_local_lit(Compiler *c, int nid, int sure) {
       return -1;
     if (first < 0 || w < first) { first = w; lit = v; }
   }
+  if (sure && lit >= 0 && an_local_read_maybe_unset(c, nid)) return -1;
   return lit;
 }
 

@@ -112,3 +112,26 @@ def same(s)
   s.sub(re, "X")
 end
 p same("xab")
+
+# written in a loop and read after it: the loop may not run, so the read is
+# asked at run time, and what is chained on the scan is typed for that
+def after_loop(s)
+  i = 0
+  while i < 1
+    re = /b/
+    i += 1
+  end
+  s.scan(re).each { |x| p x }
+  p s.scan(re).first, s.scan(re).map { |x| x.inspect }
+  re.match?(s, 5)
+end
+p after_loop("xaybzab")
+def first_pass(s)
+  i = 0
+  while i < 2
+    re = /(b)(z)?/ if i == 0
+    p s.scan(re).first if i == 1
+    i += 1
+  end
+end
+first_pass("xaybzab")

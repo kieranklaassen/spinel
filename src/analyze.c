@@ -26526,6 +26526,45 @@ static int du_read_maybe_unset(const NodeTable *nt, const int *par, DUPos *dp, i
   return 1;
 }
 
+/* Can the read of a local at `rd` run before any write of it? The walk of
+   mark_nullable_int_locals below, for one read: comp_regex_local_lit asks it
+   while types are inferred and again from codegen, and the two must hear one
+   answer, so the first is kept. A read past the table the first ask saw is
+   taken for such a read. The walk's memo is this function's own, so the pass
+   below starts from none as it always did. */
+int an_local_read_maybe_unset(Compiler *c, int rd) {
+  static signed char *known; static int known_n;
+  static int *par; static DUPos dp; static int built_n = -1;
+  static DUMemo *memo; static int memo_cap, memo_n;
+  const NodeTable *nt = c->nt;
+  const char *nm = rd >= 0 ? nt_str(nt, rd, "name") : NULL;
+  if (!nm) return 1;
+  if (!known) {
+    known = (signed char *)calloc((size_t)nt->count + 1, 1);
+    if (!known) return 1;
+    known_n = nt->count;
+  }
+  if (rd >= known_n) return 1;
+  if (known[rd]) return known[rd] > 1;
+  if (built_n != nt->count) {
+    free(par); free(dp.pos); free(dp.done); free(memo);
+    memo = NULL; memo_cap = memo_n = 0;
+    par = du_parent_map(nt);
+    dp.pos = (int *)malloc(sizeof(int) * ((size_t)nt->count + 1));
+    dp.done = (char *)calloc((size_t)nt->count + 1, 1);
+    if (!par || !dp.pos || !dp.done) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+    for (int k = 0; k < nt->count; k++) dp.pos[k] = -1;
+    built_n = nt->count;
+  }
+  DUMemo *pm = du_memo; int pc = du_memo_cap, pn = du_memo_n;
+  du_memo = memo; du_memo_cap = memo_cap; du_memo_n = memo_n;
+  int r = du_read_maybe_unset(nt, par, &dp, rd, nm);
+  memo = du_memo; memo_cap = du_memo_cap; memo_n = du_memo_n;
+  du_memo = pm; du_memo_cap = pc; du_memo_n = pn;
+  known[rd] = r ? 2 : 1;
+  return r;
+}
+
 /* The instance methods of a program, by name: a boxed receiver's call binds
    every one of its name (mark_nullable_int_locals), looked up once per call
    in every round, so they are sorted once rather than scanned per call. */
@@ -26565,10 +26604,7 @@ static int named_method_first(const NamedMethod *v, int n, const char *name) {
 static void mark_nullable_int_locals(Compiler *c) {
   const NodeTable *nt = c->nt;
   /* A scalar local a read can reach before any write starts as its nil and
-     carries it (du_read_maybe_unset); the rounds below spread the mark. A
-     Regexp local is marked too: its slot starts NULL already, and the mark
-     keeps such a read from being taken for the literal a later write holds
-     (comp_regex_local_lit). */
+     carries it (du_read_maybe_unset); the rounds below spread the mark */
   {
     int *par = NULL;
     DUPos dp = { NULL, NULL };
@@ -26584,7 +26620,7 @@ static void mark_nullable_int_locals(Compiler *c) {
       Scope *rs = nm ? comp_scope_of(c, r) : NULL;
       LocalVar *lv = rs ? scope_local(rs, nm) : NULL;
       if (!lv || lv->is_param || lv->is_block_param || lv->maybe_unset ||
-          (lv->type != TY_INT && lv->type != TY_FLOAT && lv->type != TY_REGEX)) continue;
+          (lv->type != TY_INT && lv->type != TY_FLOAT)) continue;
       if (!par) {
         par = du_parent_map(nt);
         if (!par) break;
@@ -26593,7 +26629,7 @@ static void mark_nullable_int_locals(Compiler *c) {
         if (!dp.pos || !dp.done) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
         for (int k = 0; k < nt->count; k++) dp.pos[k] = -1;
       }
-      if (du_read_maybe_unset(nt, par, &dp, r, nm)) { lv->maybe_unset = 1; lv->nullable_int = lv->type != TY_REGEX; }
+      if (du_read_maybe_unset(nt, par, &dp, r, nm)) { lv->maybe_unset = 1; lv->nullable_int = 1; }
     }
     free(par); free(dp.pos); free(dp.done);
     free(du_memo); du_memo = NULL; du_memo_cap = du_memo_n = 0;
