@@ -2435,6 +2435,61 @@ void sb_reader_shim_close(Compiler *c, int recv, const SbReaderSave *sv) {
 const char *g_sb_iv_name = NULL;
 int         g_sb_iv_cid  = -1;
 char        g_sb_iv_repl[64];
+/* The String methods that answer a String the call makes: never their
+   receiver, an argument or nil. */
+static int str_call_makes_string(const char *n) {
+  static const char *const made[] = {
+    "+", "*", "%", "dup", "clone", "upcase", "downcase", "capitalize", "swapcase",
+    "reverse", "strip", "lstrip", "rstrip", "chomp", "chop", "chr", "squeeze", "tr",
+    "tr_s", "delete", "delete_prefix", "delete_suffix", "sub", "gsub", "center",
+    "ljust", "rjust", "succ", "next", "inspect", "dump", "undump", "b", "scrub",
+    "encode", "unicode_normalize" };
+  for (size_t i = 0; i < sizeof made / sizeof made[0]; i++)
+    if (sp_streq(n, made[i])) return 1;
+  return 0;
+}
+/* Whether method `mi` answers a String it builds: its body ends, with no
+   `return` in it, in an interpolated String, in `to_s`, `inspect` or `chr` of
+   an Integer or a Float, or in a String method that always answers a new
+   String (str_call_makes_string). The names are the builtin class's own, so
+   no method the program gives Object or Kernel answers in their place; one
+   it gives the builtin class by reopening it is asked the same question. */
+static int method_builds_string(Compiler *c, int mi, int depth) {
+  const NodeTable *nt = c->nt;
+  int last = scope_body_last(c, mi);
+  if (last < 0 || depth > 4 || scope_has_return(c, mi)) return 0;
+  if (nt_kind(nt, last) == NK_InterpolatedStringNode) return 1;
+  if (nt_kind(nt, last) != NK_CallNode || nt_ref(nt, last, "block") >= 0) return 0;
+  int r = nt_ref(nt, last, "receiver");
+  TyKind rt = r >= 0 ? comp_ntype(c, r) : TY_UNKNOWN;
+  const char *nm = nt_str(nt, last, "name");
+  int isstr = rt == TY_STRING || rt == TY_STRBUF;
+  if (!nm || (!isstr && rt != TY_INT && rt != TY_FLOAT)) return 0;
+  int bc = comp_class_index(c, isstr ? "String" : rt == TY_INT ? "Integer" : "Float");
+  int bm = bc >= 0 ? comp_method_in_chain(c, bc, nm, NULL) : -1;
+  if (bm >= 0) return method_builds_string(c, bm, depth + 1);
+  if (isstr) return str_call_makes_string(nm);
+  return sp_streq(nm, "to_s") || sp_streq(nm, "inspect") || (rt == TY_INT && sp_streq(nm, "chr"));
+}
+/* How call `v` on an object of type `rt` comes by its String: 1 when the
+   method it names is seen to build it (method_builds_string), 0 when not.
+   -1 when the name is a def and an attr reader both: the one written last
+   answers, which is not followed here, unless the def is a subclass's over
+   its parent's reader. */
+static int obj_call_builds_string(Compiler *c, int v, TyKind rt) {
+  const char *nm = nt_str(c->nt, v, "name");
+  int cid = ty_object_class(rt);
+  int mi = nm && cid >= 0 && cid < c->nclasses ? comp_method_in_chain(c, cid, nm, NULL) : -1;
+  if (mi < 0) return 0;
+  int rdc = -1, below = 0;
+  if (comp_reader_in_chain(c, cid, nm, &rdc))
+    for (int k = c->scopes[mi].class_id; k >= 0 && !below; ) {
+      k = c->classes[k].parent;
+      below = k == rdc;
+    }
+  if (rdc >= 0 && !below) return -1;
+  return method_builds_string(c, mi, 0);
+}
 /* Does demand-marked call `v` render as a handle itself? A reader call, a
    container's element read and a call that answers its receiver (`h << x
    << y`, `h.freeze`) do. A call on a String that makes a new one -- `+"lit"`,
@@ -2445,6 +2500,9 @@ int strbuf_marked_yields_handle(Compiler *c, int v) {
   if (nt_kind(nt, v) != NK_CallNode) return 0;
   int r = nt_ref(nt, v, "receiver");
   TyKind rt = r >= 0 ? comp_ntype(c, r) : TY_UNKNOWN;
+  /* a method of an object that builds its String answers a plain one:
+     marked, it is wrapped as a fresh handle where it is stored */
+  if (ty_is_object(rt) && obj_call_builds_string(c, v, rt) > 0) return 0;
   if (rt != TY_STRING && rt != TY_STRBUF) return 1;
   const char *nm = nt_str(nt, v, "name");
   return nm && (is_append_concat(nm) || str_self_call(nt, v));
