@@ -1,0 +1,1 @@
+A proc's parameter after a rest or an optional keeps a value the body assigns it

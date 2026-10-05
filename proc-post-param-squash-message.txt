@@ -1,0 +1,16 @@
+A proc's parameter after a rest or an optional keeps a value the body assigns it
+
+`pr = proc { |*rest, z| z = a + z; junk = (1..40).map { ... }; z }`
+answered a wrong String in a plain run: 174 of 1,000 calls with
+4,000-character Strings, with gcc and clang alike, and the stress lane
+stopped it with small ones. The boxed slot of a parameter that follows a
+rest or an optional was declared in the proc's prologue without a root,
+so a value the body assigned to it was held by nothing and the next
+allocations freed it.
+
+A parameter the body writes is rooted now (emit_boxed_post_param_use,
+which asks subtree_writes_local), as an optional's slot beside it is.
+One the body only reads keeps what the caller passed, which the caller
+holds: it is declared as it was and costs nothing.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

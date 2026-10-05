@@ -1,0 +1,32 @@
+Proc#parameters names a reassigned parameter by its own name
+
+A block parameter the body assigns becomes an ordinary local fed from
+a slot the compiler names (desugar_reassigned_block_params: `|k|`
+becomes `|k__bpin|` with `k = k__bpin` first). The slot's name was
+what a program printed:
+
+    lambda { |k| k = k + 1; k }.parameters    # [[:req, :k__bpin]]
+
+and Method#inspect of a define_method block showed `m(k__bpin)`.
+
+The pass now records each slot name with the length of the name it
+stands for. param_public_name and Method#inspect's renderer print the
+name written, and the symbol table takes that name in place of the
+slot's. A slot under the shadow rename's suffix (`k__bpin__bp17`,
+where an outer local has the same name) is read the same way.
+
+A slot name also steps past a name the program itself uses, so no
+written name is taken for a slot:
+
+    k__bpin = 5
+    lambda { |k| k = k + 1; k + k__bpin }.call(1)    # 7; was 3
+
+param_public_name no longer cuts a name at 127 bytes: its buffer grows
+to the name. A cut name was never interned and printed as the empty
+Symbol.
+
+The generated C of eight tests changes, each in its symbol table and
+the Symbol ids the table gives out; every benchmark's, every package
+test's and optcarrot's is unchanged.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
