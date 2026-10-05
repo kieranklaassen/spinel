@@ -1,0 +1,18 @@
+The minimum of a String Range with an excluded end is decided by its ends
+
+sp_srange_min_v walked a range whose end is excluded and took its least
+member, so ("9"..."11"), which holds "9" and "10" though "9" > "11",
+answered "10" where CRuby answers nil, ("11"..."9") answered nil for
+"11", ("aaa"..."zz") nil for "aaa", and an endless ("a"...) raised.
+CRuby's range_min never walks with no block and no argument: the
+minimum is the begin, or nil when the begin is past the end, or at it
+with the end excluded.
+
+An excluded end is compared as the walk compared it (sp_str_cmp_bytes)
+and answers a copy of the begin, as the walk's first member was. An
+included end is compared as strcmp compared it, and by its bytes alone
+past a NUL when strcmp finds no difference, so ("a\0b".."a\0a") has no
+minimum. The maximum of an excluded end still walks, as CRuby's does;
+that walk and the two slow paths are kept out of line.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

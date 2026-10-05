@@ -1,0 +1,1 @@
+String#delete_prefix and #delete_prefix! are byte-exact over a NUL
