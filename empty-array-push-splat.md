@@ -24,10 +24,17 @@ One test, `test/empty_array_literal_splat_push.rb`. On master 6ddcb81fa 23 of it
 ## `make gate` (on this branch merged with current master)
 
 ```
-GATE_LINES
+scale-test: instance_eval forwarding work at 2x the wrappers is 1.74x (limit 2.50)
+scale-test: work at 4x the program is 4.74x (linear 4.00, limit 5.20)
+scale-test: work at 4x the program, compiled to C, is 6.10x (limit 6.90)
+scale-test: call-shape work at 4x the units, compiled to C, is 4.22x (linear 4.00, limit 4.50)
+Tests:     5848 pass,        0 fail,        0 error
+gate: ALL GREEN
 ```
 
-- [ ] New tests have `.expected` files that match CRuby 4.0 run with `--enable-frozen-string-literal` (written with CRuby 3.3.6 where this was built; the test prints only integers, floats, strings, symbols, nil, booleans and arrays of them)
-- [ ] Values past 2^31 are marked `# spinel: int64` (none in the test)
-- [ ] If optcarrot's generated C changed: callgrind numbers, checksum 59662 (not compared where this was built)
+Run on macOS (arm64) with CRuby 4.0.7, on master 6ddcb81fa merged with this branch's commit (590a6db4a).
+
+- [x] New tests have `.expected` files that match CRuby 4.0 run with `--enable-frozen-string-literal` (CRuby 4.0.7 with that flag prints exactly the test's `.expected`)
+- [x] Values past 2^31 are marked `# spinel: int64` (none)
+- [ ] If optcarrot's generated C changed: callgrind numbers, checksum 59662 (it did not change: byte-identical to master's at 6ddcb81fa)
 - [ ] Depends on: # (nothing)
