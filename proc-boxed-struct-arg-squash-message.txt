@@ -1,0 +1,36 @@
+The box of a Range handed to a Proc is held while the Proc runs
+
+A Range, a Time, a Rational, a Complex or a value-type object is a C
+struct. For a Proc with a boxed parameter it is boxed for the call
+alone and published to the side channel; the Proc's prologue reads the
+box into its parameter and clears the channel, and nothing roots a
+parameter. The caller held the struct, not its box:
+
+    pat = [->(x) { [x].to_s.size > 3 }, 1][0]
+    pat.call(i..i + 2)
+
+Under SPINEL_GC_STRESS=2 the mark reached a freed slot, or the Proc
+read another value and the program printed a wrong line with exit 0.
+
+The call site now holds the box. proc_arg_box_hold declares a rooted
+holder where the argument's own temp is declared and
+emit_proc_arg_boxed writes the box through it, at the three places
+that publish an argument (a typed Proc's call, a boxed callable's
+call, the call arm of a dispatch on a class that defines call) and in
+`pat === value`. The holder starts as nil and is assigned where the
+box was made, so nothing is evaluated earlier.
+
+Proc#[] on a boxed receiver is a runtime call, sp_poly_index_poly. A
+new sp_poly_call_aref_held roots the argument and calls
+sp_poly_call_aref, and sp_poly_index_poly calls it in its place; the
+Symbol and String keys keep sp_poly_call_aref and its cost.
+
+A Class is passed the same way, but its box allocates nothing: it gets
+no holder and compiles as it did.
+
+Rooting the parameter inside the Proc fixes every form in one line and
+costs 25 instructions on every call of a small Proc. Held at the call
+site, a call with any other argument costs what it did; a Range costs
+3 to 5 instructions a call, and 13 through Proc#[].
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
