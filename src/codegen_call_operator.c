@@ -787,8 +787,10 @@ int emit_call_compare_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
                                sp_streq(name, "instance_of?"), b)) return 1;
     /* A nullable String slot answers at run time too: nil is a NilClass and
        is not a String, whatever the slot's kind says. Object and its
-       ancestors hold for nil too. */
-    if (yes >= 0 && eff_rt == TY_STRING) {
+       ancestors hold for nil too. An Array or a Hash slot holds nil as the
+       same NULL; a literal is never nil and keeps the constant. */
+    if (yes >= 0 && (eff_rt == TY_STRING || ((ty_is_array(eff_rt) || ty_is_ptr_array(eff_rt) || ty_is_hash(eff_rt)) &&
+                                             node_may_be_null_nil(c, recv)))) {
       const char *kn = nt_str(nt, argv[0], "name");
       int nilcls = kn && sp_streq(kn, "NilClass");
       int univ = kn && is_object_root(kn);
