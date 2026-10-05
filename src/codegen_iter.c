@@ -2767,8 +2767,64 @@ void emit_block_binds(Compiler *c, int blk, const int *yargs, int yc,
   emit_block_binds_close(c, blk, ykw, bsc, rest_tmp, rest_lv, b, indent, as_expr, bi, al);
 }
 
+/* Can `id` answer nil? Not a Float or Integer literal, not arithmetic on
+   numbers (nil has none of these operators), not `to_f` of an Integer, not
+   a conditional whose arms are all such. Anything else can: a local, an
+   element, a call, an `if` with no `else`. */
+static int expr_may_be_nil(const Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  if (id < 0) return 1;
+  NodeKind k = nt_kind(nt, id);
+  if (k == NK_FloatNode || k == NK_IntegerNode) return 0;
+  if (k == NK_ParenthesesNode || k == NK_ElseNode)
+    return expr_may_be_nil(c, nt_ref(nt, id, k == NK_ElseNode ? "statements" : "body"));
+  if (k == NK_StatementsNode) {
+    int n = 0; const int *st = nt_arr(nt, id, "body", &n);
+    return n <= 0 || expr_may_be_nil(c, st[n - 1]);
+  }
+  if (k == NK_IfNode)
+    return expr_may_be_nil(c, nt_ref(nt, id, "statements")) || expr_may_be_nil(c, nt_ref(nt, id, "subsequent"));
+  if (k == NK_CallNode && nt_ref(nt, id, "block") < 0) {
+    const char *nm = nt_str(nt, id, "name");
+    int recv = nt_ref(nt, id, "receiver");
+    TyKind rt = recv >= 0 ? comp_ntype(c, recv) : TY_UNKNOWN, t = comp_ntype(c, id);
+    if (!nm || (t != TY_FLOAT && t != TY_INT)) return 1;
+    if (sp_streq(nm, "to_f")) return rt != TY_INT;
+    if (rt != TY_FLOAT && rt != TY_INT) return 1;
+    return !(sp_streq(nm, "+") || sp_streq(nm, "-") || sp_streq(nm, "*") || sp_streq(nm, "/") ||
+             sp_streq(nm, "%") || sp_streq(nm, "**") || sp_streq(nm, "-@"));
+  }
+  return 1;
+}
+
+/* Can a `next` of the block whose body is `node` leave it with nil? A bare
+   `next` does. A nested loop, block, lambda or def binds its own. */
+static int block_next_may_be_nil(const Compiler *c, int node) {
+  const NodeTable *nt = c->nt;
+  if (node < 0) return 0;
+  NodeKind k = nt_kind(nt, node);
+  if (k == NK_NextNode) {
+    int a = nt_ref(nt, node, "arguments"); int an = 0;
+    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
+    return an != 1 || expr_may_be_nil(c, av[0]);
+  }
+  if (k == NK_WhileNode || k == NK_UntilNode || k == NK_ForNode || k == NK_BlockNode ||
+      k == NK_LambdaNode || k == NK_DefNode || k == NK_ClassNode || k == NK_ModuleNode)
+    return 0;
+  int nr = nt_num_refs(nt, node);
+  for (int i = 0; i < nr; i++) if (block_next_may_be_nil(c, nt_ref_at(nt, node, i))) return 1;
+  int na = nt_num_arrs(nt, node);
+  for (int i = 0; i < na; i++) {
+    int n = 0; const int *ids = nt_arr_at(nt, node, i, &n);
+    for (int j = 0; j < n; j++) if (block_next_may_be_nil(c, ids[j])) return 1;
+  }
+  return 0;
+}
+
 void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_expr,
                        TyKind want_ty) {
+  int boxed_site = g_yield_boxed;
+  g_yield_boxed = 0;
   /* want_ty: the consumer's slot type for the block's value (the YieldNode's
      unified type). A poly slot must receive sp_RbVal even when THIS block's
      tail is concrete (a yield-result union of an rbs-seeded Hash and a class
@@ -2956,6 +3012,15 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
       if (g_ie_res_poly) buf_printf(b, "sp_RbVal _t%d = sp_box_nil(); ", nx_tmp);
       else if (nx_bt == TY_INT || nx_bt == TY_BOOL || nx_bt == TY_SYMBOL)
         buf_printf(b, "sp_int _t%d = SP_INT_NIL; ", nx_tmp);
+      /* A Float slot holds nil as the Float sentinel, and a consumer that
+         computes with an unboxed Float does not look for it: `to_f` and
+         `to_i` answered nil and a FloatDomainError for the 0.0 and the 0
+         of nil. So the slot is a Float one only where no nil can reach an
+         unboxed Float: the site boxes the value, or neither the block's
+         last expression nor a `next` of its own can be nil. */
+      else if (nx_bt == TY_FLOAT &&
+               (boxed_site || !(expr_may_be_nil(c, bbody) || block_next_may_be_nil(c, bbody))))
+        buf_printf(b, "sp_float _t%d = sp_float_nil(); ", nx_tmp);
       else if (proc_slot_is_ptr(nx_bt)) {
         emit_ctype(c, nx_bt, b); buf_printf(b, " _t%d = NULL; ", nx_tmp);
       }

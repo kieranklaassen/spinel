@@ -253,6 +253,9 @@ extern const char *g_ie_next_var;
    at its own default, which the destination then reads as the wrong struct
    (#3978). TY_UNKNOWN when unknown or not a container. */
 extern TyKind g_ie_next_ty;
+/* Set by emit_boxed for the one yield it is about to splice and box as a
+   Float that may be nil; emit_block_invoke takes it on entry. */
+extern int g_yield_boxed;
 typedef struct EmitUnitState EmitUnitState;
 EmitUnitState *emit_state_snapshot(void);
 void emit_state_release(EmitUnitState *s, int rollback);

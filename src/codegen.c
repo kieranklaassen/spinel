@@ -1572,6 +1572,19 @@ static void emit_boxed_impl(Compiler *c, int node, Buf *b) {
         if (nx != TY_UNKNOWN) bt = (bt == TY_UNKNOWN) ? nx : ty_unify(bt, nx); }
       break;
     }
+    /* A Float block that holds a `next` hands its value on in a slot that
+       starts as the nil sentinel, and a bare `next` leaves it there: boxed
+       plainly, that nil was a NaN. Boxed here, the nil is a real one, so
+       the splice of this block may keep a Float slot whatever it carries. */
+    if (bt == TY_FLOAT && tblk >= 0 && subtree_has_own_next(c->nt, nt_ref(c->nt, tblk, "body"))) {
+      buf_printf(b, "%s(", ty_box_nil_fn(TY_FLOAT));
+      g_yield_boxed = tblk == g_block_id && !g_yield_proc_ref;
+      emit_expr(c, node, b);
+      g_yield_boxed = 0;
+      buf_puts(b, ")");
+      RC(RF_FLT_NIL, RW_YIELD);
+      return;
+    }
     if (bt != t && bt != TY_UNKNOWN) {
       if (bt == TY_POLY) { emit_expr(c, node, b); RC(RF_PASS, RW_YIELD); return; }
       Buf yb; memset(&yb, 0, sizeof yb);

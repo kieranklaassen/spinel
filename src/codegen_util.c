@@ -1499,6 +1499,7 @@ int g_has_user_cmp = 0;
 int g_has_user_binop = 0;
 int g_has_user_aset = 0;
 TyKind g_ie_next_ty = TY_UNKNOWN;
+int g_yield_boxed = 0;
 int g_has_user_coerce = 0;
 int g_has_user_to_io = 0;
 int g_gen_obj_hashkey = 0;
