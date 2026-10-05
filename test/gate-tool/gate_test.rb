@@ -128,22 +128,27 @@ Dir.mktmpdir("gate-tool-test") do |dir|
   v, _, err = capture { Gate.check }
   ok(v == 1 && err.include?("new function big"), "check refuses a new function past FUNCTION_LIMIT lines")
 
-  # A C locale (US-ASCII as the default external encoding) changes no answer:
-  # check reads git's and CRuby's output as bytes.
+  # A C locale changes no answer: check reads git's output, CRuby's and a
+  # test's .args as bytes, and its CRuby judges with UTF-8 as the external
+  # encoding (under C, p would print the accent as an escape).
   File.write("src/big.c", "/* caf\u00e9 */\n#{File.read("src/big.c")}")
-  external = Encoding.default_external
-  [Encoding::UTF_8, Encoding::US_ASCII].each do |enc|
+  File.write("test/accent.rb.args", "caf\u00e9\n")
+  src = "puts ARGV[0]\np \"caf\u00e9\"\n"
+  external, locale = Encoding.default_external, ENV["LC_ALL"]
+  [[Encoding::UTF_8, locale], [Encoding::US_ASCII, "C"]].each do |enc, lc_all|
     Encoding.default_external = enc
+    ENV["LC_ALL"] = lc_all
     sh("git", "add", "src/big.c")
     v, _, err = capture { Gate.check }
     ok(v == 1 && err.include?("new function big"), "check reads a C file with non-ASCII text under #{enc}")
     sh("git", "rm", "-q", "--cached", "src/big.c")
-    v, _, err = check.("accent", "puts \"caf\u00e9\"\n", "caf\u00e9\n")
+    v, _, err = check.("accent", src, "caf\u00e9\n\"caf\u00e9\"\n")
     ok(v == 0 && err.empty?, "check passes a test with non-ASCII text under #{enc}")
-    v, _, err = check.("accent", "puts \"caf\u00e9\"\n", "cafe\n")
+    v, _, err = check.("accent", src, "cafe\n\"cafe\"\n")
     ok(v == 1 && err.include?(".expected differs"), "check refuses its wrong .expected under #{enc}")
   end
   Encoding.default_external = external
+  ENV["LC_ALL"] = locale
 end
 
 if $fails > 0
