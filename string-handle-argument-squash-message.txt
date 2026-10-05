@@ -1,0 +1,39 @@
+A String handed to new for a String changed in place is kept alive
+
+A member some code changes in place (`d.x << "z"`) holds its String
+through a handle, and a String that is not one already is wrapped in a
+handle of its own where it is bound (emit_arg_or_default_fill). For a
+bare read (a literal, a constant, a local, an instance variable, self)
+that wrap sat inline in the C argument list, since arg_wants_root takes
+a bare read as held where it is read. The new handle is held by nothing:
+the wrap of the argument beside it, or the allocation of the object
+itself, could collect it. 20,000 of `Pair.new("q", "r")` in a plain run
+left five objects holding another String, and with SPINEL_GC_STRESS=1
+twenty of twenty-four.
+
+arg_wants_root now answers 2 for a bare read bound to such a parameter,
+unless it reads a handle already (strbuf_slot_ref) or is nil. A bare
+read must not be hoisted: a variable the statement writes before the
+argument would be read too early. So emit_held_operand moves only the
+temp's declaration and its root ahead of the statement, as
+emit_rest_pack_kwh does for its array, and the handle is made and
+assigned where the argument stands. The Struct constructor's member
+values take the same form, and so does a String element of a splat
+bound to such a parameter (emit_elem_param), with the default a short
+splat leaves to fill.
+
+A parenthesized sequence moves its leading statements ahead as soon as
+its tail writes a prelude line, and a literal argument in the tail used
+to write none. A prelude of nothing but those declarations runs no code
+of the tail, so the sequence passes it on and stays in place. It knows
+by reading the prelude (prelude_is_held_decls): every line is
+`T _tN = NULL;` or `SP_GC_ROOT(_tN);`. The lines are read and not
+counted where they are written, because an operator with two call
+operands passes each operand's prelude on as bytes
+(emit_operands_in_order).
+
+A temp exists only where the binder allocates a handle: a call that
+allocates none compiles to the C it did. The generated C of three
+tests gains the temps; every benchmark's and optcarrot's is unchanged.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

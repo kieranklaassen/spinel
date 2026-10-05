@@ -1,0 +1,1 @@
+A String handed to new for a String changed in place is kept alive
