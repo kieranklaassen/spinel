@@ -732,7 +732,12 @@ Not yet shared:
   elsewhere), a String given to `new`, `S[...]`, `super` or `Data#with`,
   unless it is a keyword argument that is the shared handle already (give
   the member a new String instead, `c.x += "z"`, `d = d.with(x: d.x + "z")`,
-  or store a copy of the String changed elsewhere, `s.dup`).
+  or store a copy of the String changed elsewhere, `s.dup`);
+- in an instance variable or a member that is a boxed slot (it holds
+  another kind of value as well, nil until a setter fills it or a String
+  or an Integer, or the String it is given is itself boxed), a String
+  changed in place through the reader (`c.x = +"q"; c.x << "z"`; change
+  the String before it is stored).
 
 A String is shared as well through a rest a method forwards (`def w(*a) =
 m(*a)`, `def w(*) = m(*)`, `def w(...) = m(...)`, `def m(*) = super`) and

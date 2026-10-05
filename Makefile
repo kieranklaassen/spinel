@@ -1335,6 +1335,13 @@ reject-test: $(SPINEL)
 	  echo "reject-test: FAIL (scrub_bang_block compiled)"; ok=0; \
 	else grep -q "scrub! with a block" "$$tmp/r.out" || \
 	  { echo "reject-test: FAIL (scrub_bang_block rejected without saying why)"; head -5 "$$tmp/r.out"; ok=0; }; fi; \
+	for t in test/reject/reader_string_in_boxed_slot.rb test/reject/struct_member_string_after_nil.rb \
+	         test/reject/struct_member_string_or_integer.rb; do \
+	  if $(SPINEL) "$$t" -c --no-line-map -o "$$tmp/sk.c" >"$$tmp/sk.out" 2>&1; then \
+	    echo "reject-test: FAIL ($$t compiled)"; ok=0; \
+	  else grep -q "is not yet shared by reference" "$$tmp/sk.out" || \
+	    { echo "reject-test: FAIL ($$t refused without saying why)"; sed -n 1,5p "$$tmp/sk.out"; ok=0; }; fi; \
+	done; \
 	t=test/reject/string_ivar_array_append.rb; \
 	if $(SPINEL) "$$t" -c --no-line-map -o "$$tmp/r.c" >"$$tmp/r.out" 2>&1; then \
 	  echo "reject-test: FAIL (string_ivar_array_append compiled)"; ok=0; \

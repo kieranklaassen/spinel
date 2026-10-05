@@ -608,6 +608,12 @@ spinel: 1 refusal, nothing written
 == test/reject/rational_pow_bignum.rb [promote] rc=1
 spinel: the receiver of a Float `**` given a Rational, which no conversion keeps in its sp_float slot
 spinel: 1 refusal, nothing written
+== test/reject/reader_string_in_boxed_slot.rb [default] rc=1
+spinel: the String read from `@text` is changed in place, and `@text` is a boxed slot (it holds nil or a value of another class as well, or the String it is given is itself boxed): the String sits in that slot by value, so the change would reach a copy of it (a String is not yet shared by reference in a boxed slot). Change the String before it is stored.
+spinel: 1 refusal, nothing written
+== test/reject/reader_string_in_boxed_slot.rb [promote] rc=1
+spinel: the String read from `@text` is changed in place, and `@text` is a boxed slot (it holds nil or a value of another class as well, or the String it is given is itself boxed): the String sits in that slot by value, so the change would reach a copy of it (a String is not yet shared by reference in a boxed slot). Change the String before it is stored.
+spinel: 1 refusal, nothing written
 == test/reject/recursive_default_reads_block.rb [default] rc=1
 spinel: unsupported default of `m`'s parameter `y` that calls `m` again with that argument omitted (one reading the caller's block or `super` cannot be moved into a method of its own): node N (ParenthesesNode)
 spinel: 1 refusal, nothing written
@@ -956,11 +962,23 @@ spinel: 1 refusal, nothing written
 == test/reject/string_yield_splat_captured.rb [promote] rc=1
 spinel: a String is passed to a block's parameter `q` through a splat into a yield, which the proc appends to: this call hands the proc a copy, so the append would not reach the caller's String (a String is not yet shared by reference through a splat into a yield). Return the String from the proc and assign it, or append to it in the caller.
 spinel: 1 refusal, nothing written
+== test/reject/struct_member_string_after_nil.rb [default] rc=1
+spinel: the String read from member `x` is changed in place, and member `x` is a boxed slot (it holds nil or a value of another class as well, or the String it is given is itself boxed): the String sits in that slot by value, so the change would reach a copy of it (a String is not yet shared by reference in a boxed slot). Change the String before it is stored.
+spinel: 1 refusal, nothing written
+== test/reject/struct_member_string_after_nil.rb [promote] rc=1
+spinel: the String read from member `x` is changed in place, and member `x` is a boxed slot (it holds nil or a value of another class as well, or the String it is given is itself boxed): the String sits in that slot by value, so the change would reach a copy of it (a String is not yet shared by reference in a boxed slot). Change the String before it is stored.
+spinel: 1 refusal, nothing written
 == test/reject/struct_member_string_class_method_new.rb [default] rc=1
 spinel: a String is stored in member `x` of a Struct, and that member holds a shared String (the program changes its String in place, or stores in it a String it changes elsewhere): the member would hold a copy of this one (a String is not yet shared by reference into a Struct member). Give the member a new String instead of changing it in place (`obj.x += "z"`), or store a copy of the String changed elsewhere (`s.dup`).
 spinel: 1 refusal, nothing written
 == test/reject/struct_member_string_class_method_new.rb [promote] rc=1
 spinel: a String is stored in member `x` of a Struct, and that member holds a shared String (the program changes its String in place, or stores in it a String it changes elsewhere): the member would hold a copy of this one (a String is not yet shared by reference into a Struct member). Give the member a new String instead of changing it in place (`obj.x += "z"`), or store a copy of the String changed elsewhere (`s.dup`).
+spinel: 1 refusal, nothing written
+== test/reject/struct_member_string_or_integer.rb [default] rc=1
+spinel: the String read from member `x` is changed in place, and member `x` is a boxed slot (it holds nil or a value of another class as well, or the String it is given is itself boxed): the String sits in that slot by value, so the change would reach a copy of it (a String is not yet shared by reference in a boxed slot). Change the String before it is stored.
+spinel: 1 refusal, nothing written
+== test/reject/struct_member_string_or_integer.rb [promote] rc=1
+spinel: the String read from member `x` is changed in place, and member `x` is a boxed slot (it holds nil or a value of another class as well, or the String it is given is itself boxed): the String sits in that slot by value, so the change would reach a copy of it (a String is not yet shared by reference in a boxed slot). Change the String before it is stored.
 spinel: 1 refusal, nothing written
 == test/reject/struct_member_string_stored.rb [default] rc=1
 spinel: a String is stored in member `x` of a Struct, and that member holds a shared String (the program changes its String in place, or stores in it a String it changes elsewhere): the member would hold a copy of this one (a String is not yet shared by reference into a Struct member). Give the member a new String instead of changing it in place (`obj.x += "z"`), or store a copy of the String changed elsewhere (`s.dup`).
