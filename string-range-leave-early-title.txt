@@ -1,0 +1,1 @@
+A String Range left early reads only the members it is asked for

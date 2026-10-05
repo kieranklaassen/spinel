@@ -1,0 +1,1 @@
+cover?, === and max of a String Range compare the whole String
