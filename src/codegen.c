@@ -6504,9 +6504,12 @@ static TyKind lambda_nonlocal_return_ty(Compiler *c, int id) {
 static const char *param_public_name(const char *n) {
   if (!n) return n;
   if (!strncmp(n, "__blk_kwrest", 12)) return "**";   /* name_anon_block_kwrest */
-  if (!block_param_is_renamed(n)) return n;
-  { size_t len = block_param_written_len(n);
-    static char buf[128];
+  /* the slot of a parameter the body assigns (desugar_reassigned_block_params)
+     stands for the name written, with or without the shadow rename's suffix */
+  size_t len = reassigned_param_written_len(n);
+  if (!n[len]) len = block_param_written_len(n);
+  if (!n[len]) return n;
+  { static char buf[128];
     if (len >= sizeof buf) len = sizeof buf - 1;
     memcpy(buf, n, len); buf[len] = 0;
     return buf; }
