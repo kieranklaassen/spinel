@@ -17836,6 +17836,10 @@ static int operand_hoists_effect(Compiler *c, int node) {
 static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
   const NodeTable *nt = c->nt;
   if (id == g_operand_order_node) return 0;
+  /* a `&.` call's operands are ordered on its guard's re-entry, under the
+     nil test: ordered here they ran although the receiver was nil
+     (`s&.rjust(lg(5), lg("b"))` logged both) */
+  if (sn_guard_ahead(c, id)) return 0;
   int recv = nt_ref(nt, id, "receiver");
   int args = nt_ref(nt, id, "arguments");
   int argc = 0;

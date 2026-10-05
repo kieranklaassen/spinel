@@ -1270,6 +1270,36 @@ int emit_call_freeze_dup_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, 
   return 0;
 }
 
+/* Whether a `&.` receiver of type `rrt` is a C value one of the guards below
+   tests for nil: a pointer, or a scalar with its own nil. */
+static int sn_typed_nil_recv(Compiler *c, TyKind rrt) {
+  /* A concretely-typed OBJECT receiver is still a nullable C pointer
+     (a nil-able ivar like doom's `@combat&.sprites` after death):
+     dropping the `&.` deref'd NULL. The same holds for a concrete
+     STRING receiver (NULL is the string nil, e.g. the nil arm of a
+     chained `obj&.field&.length`). */
+  if (rrt == TY_STRING || (ty_is_object(rrt) && !comp_ty_value_obj(c, rrt))) return 1;
+  /* A specialized container answers a miss with the ELEMENT type's own C
+     nil -- a NULL string, SP_INT_NIL -- so `h["zz"]&.empty?` reaches the
+     guard with a concrete receiver, not a poly one. Guard those too, or
+     the miss takes the result type's zero and `&.` answers false (#4070). */
+  if (rrt == TY_INT || rrt == TY_FLOAT) return 1;
+  /* a typed array or hash is a pointer too, and a slice past the end
+     (`a[4..]&.size`) or a container miss hands it NULL (#4524) */
+  return needs_root(rrt) && rrt != TY_POLY && !ty_is_object(rrt);
+}
+
+/* See codegen_internal.h. */
+int sn_guard_ahead(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  if (g_sn_skip == id) return 0;
+  const char *op = nt_str(nt, id, "call_operator");
+  int recv = nt_ref(nt, id, "receiver");
+  if (recv < 0 || !op || !sp_streq(op, "&.")) return 0;
+  TyKind rrt = comp_ntype(c, recv);
+  return rrt == TY_NIL || rrt == TY_POLY || sn_typed_nil_recv(c, rrt);
+}
+
 /* safe navigation (&.): a nil receiver answers nil, any other the call, guarded by a nil test */
 int emit_call_safe_nav_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv) {
   /* Safe navigation &. : nil receiver -> return nil/0; non-nil -> emit conditional */
@@ -1450,24 +1480,14 @@ int emit_call_safe_nav_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
         free(nb.p); free(vb2.p); free(preb.p);
         return 1;
       }
-      /* A concretely-typed OBJECT receiver is still a nullable C pointer
-         (a nil-able ivar like doom's `@combat&.sprites` after death):
-         dropping the `&.` deref'd NULL. The same holds for a concrete
-         STRING receiver (NULL is the string nil, e.g. the nil arm of a
-         chained `obj&.field&.length`). Emit a guard, then re-enter the
+      /* A concretely-typed receiver that is a C pointer, or a scalar with a
+         nil of its own (sn_typed_nil_recv). Emit a guard, then re-enter the
          normal call emission with the receiver substituted by the guarded
          temp (via the arg-override table); g_sn_skip suppresses this block
          on re-entry. */
       int sn_obj = ty_is_object(rrt) && !comp_ty_value_obj(c, rrt);
-      /* A specialized container answers a miss with the ELEMENT type's own C
-         nil -- a NULL string, SP_INT_NIL -- so `h["zz"]&.empty?` reaches the
-         guard with a concrete receiver, not a poly one. Guard those too, or
-         the miss takes the result type's zero and `&.` answers false (#4070). */
-      int sn_scalar = (rrt == TY_INT || rrt == TY_FLOAT);
-      /* a typed array or hash is a pointer too, and a slice past the end
-         (`a[4..]&.size`) or a container miss hands it NULL (#4524) */
       int sn_cont = needs_root(rrt) && rrt != TY_POLY && rrt != TY_STRING && !ty_is_object(rrt);
-      if ((sn_obj || rrt == TY_STRING || sn_scalar || sn_cont) && g_sn_skip != id) {
+      if (sn_typed_nil_recv(c, rrt) && g_sn_skip != id) {
         int tsn2 = ++g_tmp;
         TyKind ret2 = comp_ntype(c, id);
         /* The temp lives in g_pre (statement scope), not an inline ({ }):
@@ -1512,13 +1532,23 @@ int emit_call_safe_nav_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
                         nat2 != TY_UNKNOWN && nat2 != TY_VOID);
           int vw = sn_box ? view_push(c, id, nat2) : -1;
           Buf vb; memset(&vb, 0, sizeof vb);
+          /* What the call hoists runs under the guard, with the call: in
+             the statement's prelude it ran ahead of the test, so an
+             argument ran although the receiver was nil (`o&.m(n += 1)`
+             counted, `o&.m(lg(1))` logged). */
+          Buf vpre; memset(&vpre, 0, sizeof vpre);
+          Buf *sv_pre = g_pre; g_pre = &vpre;
           emit_expr(c, id, &vb);
+          g_pre = sv_pre;
           if (vw >= 0) view_pop(c, vw);
           g_sn_skip = sv_skip;
           view_unbind(g_n_argov - 1);
+          int hoisted = vpre.p && vpre.p[0];
+          if (hoisted) { buf_puts(b, "({\n"); buf_puts(b, vpre.p); emit_indent(b, g_indent + 1); }
           if (sn_box) emit_boxed_text(c, nat2, vb.p ? vb.p : "", b);
           else buf_puts(b, vb.p ? vb.p : "");
-          free(vb.p);
+          if (hoisted) buf_puts(b, "; })");
+          free(vb.p); free(vpre.p);
         }
         else emit_expr(c, recv, b);  /* override table full: degrade to unguarded */
         buf_puts(b, "))");
