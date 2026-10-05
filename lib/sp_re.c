@@ -107,6 +107,10 @@ sp_MatchData *sp_re_last_matchdata(void) {
    returns. The registers here are per-worker globals, so a method that matches
    saves them on entry and puts them back on the way out; the emitter gives
    such a method one of these frames (#3629). */
+/* Root one saved string, tagged as the registers' own are marked. */
+static int sp_re_frame_root(const char **slot) {
+  return *slot ? _sp_gc_root_push((void **)((uintptr_t)slot | (uintptr_t)2)) : 0;
+}
 void sp_re_frame_push(sp_re_frame *f) {
   if (!f) return;
   for (int i = 0; i < 10; i++) f->captures[i] = sp_re_captures[i];
@@ -119,9 +123,19 @@ void sp_re_frame_push(sp_re_frame *f) {
   f->last_pat = sp_re_last_pat;
   f->last_lit = sp_re_last_lit;
   f->pp_span[0] = sp_re_pp_span[0]; f->pp_span[1] = sp_re_pp_span[1];
+  /* The saved strings are the caller's. While this method runs its own match
+     is in the registers, so nothing else names them, and they go back into
+     the registers on the way out: they are roots until then. */
+  f->nroot = 0;
+  for (int i = 0; i < 10; i++) f->nroot += sp_re_frame_root(&f->captures[i]);
+  f->nroot += sp_re_frame_root(&f->last_str);
+  f->nroot += sp_re_frame_root(&f->match_str);
+  f->nroot += sp_re_frame_root(&f->match_pre);
+  f->nroot += sp_re_frame_root(&f->match_post);
 }
 void sp_re_frame_pop(sp_re_frame *f) {
   if (!f) return;
+  sp_gc_nroots -= f->nroot;
   for (int i = 0; i < 10; i++) sp_re_captures[i] = f->captures[i];
   for (int i = 0; i < 64; i++) sp_re_caps[i] = f->caps[i];
   sp_re_last_str = f->last_str;
@@ -829,10 +843,13 @@ sp_RbVal sp_re_match_poly(mrb_regexp_pattern *pat, const char *str) {SP_GC_ROOT_
    sp_re_match / sp_re_match_poly). NULL (nil) when the last match failed, the
    name is unknown, or the group did not participate. Used by `/(?<n>..)/ =~ s`
    named-capture local binding (MatchWriteNode). */
+/* A name the pattern has no group for is CRuby's IndexError; the callers
+   ask only once the pattern matched, so a failed match stays nil. */
 const char *sp_re_named_capture(const mrb_regexp_pattern *pat, const char *name) {
   if (!pat || !name || !sp_re_last_str) return NULL;
   int g = re_named_group(pat, name);
-  if (g < 0 || (g * 2) + 1 >= 64) return NULL;
+  if (g < 0) sp_raise_cls("IndexError", sp_sprintf("undefined group name reference: %s", name));
+  if ((g * 2) + 1 >= 64) return NULL;
   int b = sp_re_caps[g * 2], e = sp_re_caps[(g * 2) + 1];
   /* e < b also covers e < 0 once b >= 0; guards against a malformed register
      state yielding a negative len that would cast to a huge size_t. */
