@@ -30,9 +30,13 @@ p tl
 
 # the other mutators land in the constant too
 H = +"hello"
-def chg(v) = (v.replace("jello" * 30); v.insert(0, ">"); v.gsub!("j", "J"); v.upcase!)
+def chg(v) = (v.gsub!("l", "L"); v.upcase!; v.insert(0, ">>"))
 chg(H)
-p H.size, H[0, 6]
+p H
+I = +"i"
+def rep(v) = v.replace("a longer String than the one it replaces, by far")
+rep(I)
+p I
 
 class K
   BUF = +"k"
@@ -51,12 +55,7 @@ end
 p M.go
 gr(M::S); p M::S.size
 
-# a constant a block assigns each time round is lent inside that block
-3.times do |i|
-  T = +"t#{i}"
-  gr(T)
-  p T.size
-end if ARGV.size > 5
+# a constant a block assigns is lent inside that block
 [7].each { |i| U = +"u#{i}"; gr(U); p U.size }
 
 # a frozen String still raises, a read is unchanged, and the slot survives
