@@ -1,0 +1,51 @@
+String#insert raises IndexError for an index past either end
+
+`s = +"ab"; s.insert(9, "x"); p s` printed "abx" and `s.insert(-4, "x")`
+printed "xb", a character lost, where CRuby raises IndexError: the
+statement arm cut the String with two sp_str_sub_range calls and checked
+no bound. A String two names hold runs the same arm and answered the
+same. With its value taken a negative index below the start came back
+around: `r = s.insert(-4, "x")` answered "axb", because the arm folded
+the index and sp_str_splice_at folded it again. A boxed receiver's
+insert did the same.
+
+The statement and the value arm now go through one sp_str_insert in
+the runtime. It raises for an index past either end, with the index
+CRuby reports (one more than a negative one), ahead of a frozen
+receiver's FrozenError as CRuby does, and builds the result in one
+sp_str_concat3 with the head rooted while the tail is cut. A boxed
+receiver's sp_poly_insert keeps its two lines and gains the bound
+above them, so lib/spinel_rt.h only gains lines.
+
+The statement arm nested both fresh pieces in sp_str_concat, so under
+SPINEL_GC_STRESS=2 a statement insert stopped with "the mark reached a
+freed heap string" (`s = +"x"; s << "a"; s.insert(0, "b")`). It runs
+now, and the test joins GC_STRESS_TESTS. The statement arm also reads
+its text as the value arm does, so a text whose kind is known at run
+time (`s.insert(1, x)`, x out of a mixed Array) builds.
+
+The statement reads its index, then its text, then the receiver, so a
+text that changes the receiver, `s.insert(1, (s << "ef"; "x"))`, is
+seen whichever order the C compiler reads a call's arguments in. The
+nested calls it replaces lost the append built with gcc and kept it
+built with clang. With its value taken an insert reads the
+receiver first, as it did: `r = s.insert(1, (s << "ef"; "x"))` still
+loses the append, with gcc and with clang.
+
+A nil receiver raised FrozenError as a statement ("can't modify frozen
+String: nil"); it raises NoMethodError, as CRuby does. With its value
+taken an insert on a nil receiver still crashes, as on master. A nil
+text, `s.insert(1, pick)` with pick answering nil, inserted nothing;
+it raises TypeError, as CRuby does.
+
+An insert is not slower: 1,172 instructions a statement insert into an
+eight-character String before, 1,090 after; 1,304 and 1,100 with the
+value taken (callgrind, 200,000 calls).
+
+Left as they are: a frozen String two names hold raises FrozenError
+ahead of the IndexError when the index is also past the end, and on a
+String two names hold a text that appends through the other name
+(`s.insert(1, (t << "ef"; "x"))`) loses the append, since that arm
+copies the contents out before the arguments run.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

@@ -1,0 +1,1 @@
+String#[]= with an Integer index keeps its pieces rooted

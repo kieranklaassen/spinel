@@ -1,0 +1,15 @@
+sp_str_splice_at joins its three pieces in one allocation
+
+A splice cut the head and the tail, joined the head and the value, and
+joined that with the tail: four allocations, each piece rooted while the
+next was made. The head, the value and the tail now go to one
+sp_str_concat3, which roots all three once entered; the head stays
+rooted while the tail is cut, and nothing allocates between the tail
+and the call. The result's bytes and its binary marking are those the
+two joins gave.
+
+`s[2, 3] = "xy"` on an eight-character String took 1,327 instructions
+and takes 1,145; `s[2..4] = "xy"` 1,362 and 1,180 (callgrind, 200,000
+statements).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
