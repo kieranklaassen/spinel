@@ -61,3 +61,20 @@ p put([1, 2, 3], 0, 9)
 p put("abcdef".freeze, 9, "X")
 p put("abcdef".freeze, 2, "X")
 p put(+"abcdef", 2, "X")
+
+# a value that is no String is CRuby's TypeError before the index is looked
+# at. It is not raised here yet: the store keeps the error it had, which a
+# rescue naming both classes takes
+bv = [5, "q"][0]
+bn = [nil, "q"][0]
+def held
+  yield
+  "stored"
+rescue TypeError, FrozenError
+  "rescued"
+end
+p held { fz[9] = bv }
+p held { fz[9] = bn }
+p held { fz[9, 1] = bv }
+p held { fz[-9] = bv }
+p fz
