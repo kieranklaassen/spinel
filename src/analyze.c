@@ -28866,6 +28866,188 @@ static void refuse_hash_pair_string_mutations(Compiler *c) {
   }
   free(binds); free(pmw);
 }
+/* The String mutator a write's value is, when that call answers its receiver
+   (or nil, having changed nothing) and no alias walk takes it for its
+   receiver: `r = s.upcase!`. `<<`, concat with one argument and the
+   str_self_call names are followed (an_strbuf_alias_source); these are not.
+   The call is looked for where an_strbuf_alias_leaves looks for a local: in
+   parentheses and in each arm of a conditional (`r = s.strip! || s`). Any
+   class may define the names: only a call that answers a String on a String,
+   or on a box that holds one, counts. A call that answers the box itself
+   (`a[0].concat(x, y)` on an Array that boxes its Strings) hands on the
+   shared String. -1 for anything else. */
+static int an_kept_bang_value(Compiler *c, int v, int depth) {
+  const NodeTable *nt = c->nt;
+  if (v < 0 || depth > 8) return -1;
+  int k;
+  switch (nt_kind(nt, v)) {
+    case NK_ParenthesesNode:
+      return an_kept_bang_value(c, nt_ref(nt, v, "body"), depth + 1);
+    case NK_StatementsNode: {
+      int n = 0; const int *b = nt_arr(nt, v, "body", &n);
+      return n > 0 ? an_kept_bang_value(c, b[n - 1], depth + 1) : -1;
+    }
+    case NK_ElseNode:
+      return an_kept_bang_value(c, nt_ref(nt, v, "statements"), depth + 1);
+    case NK_IfNode: case NK_UnlessNode:
+      k = an_kept_bang_value(c, nt_ref(nt, v, "statements"), depth + 1);
+      if (k >= 0) return k;
+      return an_kept_bang_value(c, nt_ref(nt, v, nt_kind(nt, v) == NK_IfNode ? "subsequent" : "else_clause"),
+                                depth + 1);
+    case NK_OrNode:
+      k = an_kept_bang_value(c, nt_ref(nt, v, "left"), depth + 1);
+      return k >= 0 ? k : an_kept_bang_value(c, nt_ref(nt, v, "right"), depth + 1);
+    case NK_AndNode:
+      return an_kept_bang_value(c, nt_ref(nt, v, "right"), depth + 1);
+    case NK_CaseNode: {
+      int nw = 0; const int *whens = nt_arr(nt, v, "conditions", &nw);
+      for (int w = 0; w < nw; w++)
+        if ((k = an_kept_bang_value(c, nt_ref(nt, whens[w], "statements"), depth + 1)) >= 0) return k;
+      return an_kept_bang_value(c, nt_ref(nt, v, "else_clause"), depth + 1);
+    }
+    case NK_CallNode: break;
+    default: return -1;
+  }
+  static const char *const M[] = {
+    "upcase!", "downcase!", "capitalize!", "swapcase!", "strip!", "lstrip!", "rstrip!", "chomp!",
+    "chop!", "squeeze!", "tr!", "tr_s!", "delete!", "delete_prefix!", "delete_suffix!", "gsub!",
+    "sub!", "succ!", "next!", "scrub!", "bytesplice", "append_as_bytes", NULL };
+  const char *nm = nt_str(nt, v, "name");
+  int recv = nt_ref(nt, v, "receiver"), hit = 0;
+  if (!nm || recv < 0) return -1;
+  for (int i = 0; M[i] && !hit; i++) hit = sp_streq(nm, M[i]);
+  if (!hit && (sp_streq(nm, "concat") || sp_streq(nm, "prepend"))) {
+    int a = nt_ref(nt, v, "arguments"), ac = 0;
+    if (a >= 0) nt_arr(nt, a, "arguments", &ac);
+    hit = ac != 1;
+  }
+  if (!hit) return -1;
+  TyKind rt = comp_ntype(c, recv), vt = comp_ntype(c, v);
+  return (rt == TY_STRING || rt == TY_STRBUF || rt == TY_POLY) && (vt == TY_STRING || vt == TY_STRBUF) ? v : -1;
+}
+/* Is local `vn` of scope `vs` changed in place? It is the receiver of a
+   String mutator other than setbyte (which writes its byte where the bytes
+   are, so every name sees it), or it is lent to a parameter that appends,
+   or it is the shared handle: another name for it, or a container it is
+   stored in, changes it. `named` says one of its own writes makes it
+   another name for a local (`r = s.strip! || s`): it is then the handle
+   because the mutator changes `s`, which says nothing of `r`. */
+static int an_kept_bang_local_changed(Compiler *c, const char *vn, Scope *vs, const LocalVar *lv, int named) {
+  const NodeTable *nt = c->nt;
+  if ((lv->type == TY_STRBUF && !named) || an_local_lent(c, vn, vs)) return 1;
+  if (strbuf_mut_kind(c, vn, vs) != 1) return 0;
+  for (int u = comp_scall_first(c, (int)(vs - c->scopes)); u >= 0; u = comp_scall_next(c, u)) {
+    if (nt_kind(nt, u) != NK_CallNode || comp_scope_of(c, u) != vs) continue;
+    int ur = nt_ref(nt, u, "receiver");
+    const char *un = nt_str(nt, u, "name");
+    if (ur < 0 || !un || nt_kind(nt, ur) != NK_LocalVariableReadNode || !sp_streq(nt_str(nt, ur, "name"), vn)) continue;
+    if (sp_str_mutator(un, SP_MUT_LOCAL) && !sp_streq(un, "setbyte")) return 1;
+  }
+  return 0;
+}
+/* Can the String the mutator `call` changed be read again after the write
+   that kept its value? It can through a variable that outlives the
+   statement: an instance, global or class variable, a constant, an element
+   of a container, a reader's instance variable, or a local the alias walk
+   reads the receiver as, when that local is a parameter, is another name
+   for a String (one of its writes names a local), or is read again in its
+   scope. A String the receiver has just made (`x.dup.upcase!`), and a local
+   nothing reads again, show no one the copy. `reads` counts each local's
+   reads, up to two, the first time it is asked: a program may keep such a
+   value in every method, and each would walk the whole program's reads. */
+static int an_kept_bang_receiver_read_again(Compiler *c, int call, SbMutTab *reads) {
+  const NodeTable *nt = c->nt;
+  int recv = an_unparen(nt, nt_ref(nt, call, "receiver"));
+  switch (nt_kind(nt, recv)) {
+    case NK_InstanceVariableReadNode: case NK_GlobalVariableReadNode: case NK_ClassVariableReadNode:
+    case NK_ConstantReadNode: case NK_ConstantPathNode:
+      return 1;
+    default: break;
+  }
+  if (container_elem_read_p(nt, recv)) {
+    /* a String's `[]` answers a new String */
+    TyKind ht = comp_ntype(c, nt_ref(nt, recv, "receiver"));
+    return ht != TY_STRING && ht != TY_STRBUF;
+  }
+  char ivn[256]; int defc = -1;
+  if (an_reader_ivar_of(c, recv, &defc, ivn, sizeof ivn)) return 1;
+  int src = an_strbuf_alias_source(c, recv);
+  const char *sn = src >= 0 ? nt_str(nt, src, "name") : NULL;
+  Scope *ss = src >= 0 ? comp_scope_of(c, src) : NULL;
+  if (!sn || !ss) return 0;
+  LocalVar *sv = scope_local(ss, sn);
+  if (!sv || sv->is_param || sv->is_block_param) return 1;
+  for (int w = comp_lvw_first_sc(c, (int)(ss - c->scopes), sn); w >= 0; w = comp_lvw_next_sc(c, w)) {
+    /* the chain carries the writes of other names too */
+    const char *wn = nt_str(nt, w, "name");
+    if (!wn || !sp_streq(wn, sn) || comp_scope_of(c, w) != ss) continue;
+    NodeKind wk = nt_kind(nt, w);
+    int lv[1];
+    if ((wk != NK_LocalVariableWriteNode && wk != NK_LocalVariableOrWriteNode && wk != NK_LocalVariableAndWriteNode) ||
+        an_strbuf_alias_leaves(c, nt_ref(nt, w, "value"), lv, 1, 0) > 0)
+      return 1;
+  }
+  if (!reads->head) {
+    int n = 0;
+    nt_nodes_of_kind(nt, NK_LocalVariableReadNode, &n);
+    sb_mut_tab_init(reads, n);
+    NT_FOREACH_KIND(nt, NK_LocalVariableReadNode, rd) {
+      Scope *rs = comp_scope_of(c, rd);
+      const char *rn = nt_str(nt, rd, "name");
+      signed char *cell = rs && rn ? sb_mut_tab_slot(reads, rn, (int)(rs - c->scopes), 1) : NULL;
+      if (cell && *cell < 2) (*cell)++;
+    }
+  }
+  /* the receiver's own read is one of them; a chained write (`(t = s).upcase!`) is none */
+  signed char *cell = sb_mut_tab_slot(reads, sn, (int)(ss - c->scopes), 0);
+  return cell && *cell >= (nt_kind(nt, src) == NK_LocalVariableReadNode ? 2 : 1);
+}
+/* `r = s.upcase!` keeps the String `s` in CRuby, so a later `r << x` shows
+   through `s`. Here the write keeps the value as a String of the local's
+   own, and the change stays in `r`: a copy with nothing said. Refused, as
+   the scrub! result is where its write is read
+   (promote_local_alias_pairs), when the local is changed in place, holds
+   nothing but such values (or nil), and the receiver's String can be read
+   again. A local that is only read holds the same bytes either way and is
+   left alone. Asked once the types have settled: what an_kept_bang_value
+   reads of a box is not known before. */
+static void refuse_kept_bang_values(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  static const NodeKind WK[] = { NK_LocalVariableWriteNode, NK_LocalVariableOrWriteNode,
+                                 NK_LocalVariableAndWriteNode };
+  SbMutTab reads; memset(&reads, 0, sizeof reads);
+  for (int i = 0; i < 3; i++) {
+    NT_FOREACH_KIND(nt, WK[i], w) {
+      int call = an_kept_bang_value(c, nt_ref(nt, w, "value"), 0);
+      if (call < 0) continue;
+      const char *wn = nt_str(nt, w, "name");
+      Scope *ws = comp_scope_of(c, w);
+      LocalVar *lv = ws && wn ? scope_local(ws, wn) : NULL;
+      if (!lv || lv->is_param || lv->is_block_param || (lv->type != TY_STRING && lv->type != TY_STRBUF)) continue;
+      /* every write of the local is such a value, or nil: a change through
+         it lands on no other String */
+      int other = 0, named = 0;
+      for (int o = comp_lvw_first_sc(c, (int)(ws - c->scopes), wn); o >= 0 && !other; o = comp_lvw_next_sc(c, o)) {
+        const char *on = nt_str(nt, o, "name");
+        if (!on || !sp_streq(on, wn) || comp_scope_of(c, o) != ws) continue;
+        NodeKind ok = nt_kind(nt, o);
+        int ov = ok == NK_LocalVariableWriteNode || ok == NK_LocalVariableOrWriteNode ||
+                 ok == NK_LocalVariableAndWriteNode ? nt_ref(nt, o, "value") : -1;
+        int al[1];
+        other = ov < 0 || (nt_kind(nt, ov) != NK_NilNode && an_kept_bang_value(c, ov, 0) < 0);
+        named |= ov >= 0 && an_strbuf_alias_leaves(c, ov, al, 1, 0) > 0;
+      }
+      if (other || !an_kept_bang_local_changed(c, wn, ws, lv, named) ||
+          !an_kept_bang_receiver_read_again(c, call, &reads))
+        continue;
+      char msg[160];
+      snprintf(msg, sizeof msg, "a String is not yet shared by reference through a retained %s result "
+               "that is appended to", nt_str(nt, call, "name"));
+      unsupported_feature(c, w, msg);
+    }
+  }
+  if (reads.head) sb_mut_tab_free(&reads);
+}
 
 /* A bare `@ivar` argument whose ivar is written from a local, handed to a
    parameter the callee appends to: the callee would append to a copy, so
@@ -33218,6 +33400,7 @@ static void an_phase_reconcile_check(Compiler *c) {
   /* Refuse lent ivar copies through calls and super only after sharing
      analysis settles (#6998). */
   refuse_lent_ivar_copies(c);
+  refuse_kept_bang_values(c);
   refuse_hash_pair_string_mutations(c);
 
   /* Last: the capture pass again, on the settled types. a_block_is_lifted asks

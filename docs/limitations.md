@@ -707,6 +707,7 @@ Not yet shared:
 - through an Array's chained index into an appending block;
 
 - through a retained `scrub!` result that is appended to; `scrub!` with a block is also refused because the block would be ignored;
+- through the retained result of another String method that changes its receiver and answers it, or nil when nothing changed (`r = s.upcase!`, `gsub!`, `strip!`, `squeeze!`, `succ!`, `bytesplice`, `append_as_bytes`, `concat` or `prepend` with other than one argument, also as an arm of `r = s.strip! || s`), when `r` is then changed in place and the receiver's String can still be read. A result that is only read is accepted;
 
 - through an ivar's or a call's Array, a fresh Array literal, a narrowed boxed String element, or a fresh String's `tap`, into an appending block or parameter;
 

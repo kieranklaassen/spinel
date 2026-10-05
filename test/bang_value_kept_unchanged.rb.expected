@@ -1,0 +1,17 @@
+"ABCD"
+false
+true
+4
+v=ABCD
+unchanged
+nil
+ab
+ab
+"ABCD and a tail long enough to move the buffer"
+"abcd"
+axcax
+"other and a tail long enough to move the buffer"
+"axcax"
+"ZBCD"
+["abcd and a tail long enough to move the buffer"]
+"abcd and a tail long enough to move the buffer"
