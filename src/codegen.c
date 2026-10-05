@@ -7759,7 +7759,7 @@ else if (orecv >= 0 && onm) {
       if (lt == TY_POLY || lt == TY_UNKNOWN) {
         buf_printf(pb, "    sp_RbVal lv_%s = ({ sp_int __i = _sp_ps + %d;\n", pp, j);
         buf_puts(pb, "      (__i < argc && __i < 16) ? _sp_proc_poly_args[__i] : sp_box_nil(); });\n");
-        buf_printf(pb, "    (void)lv_%s;\n", pp);
+        buf_printf(pb, "    SP_GC_ROOT_RBVAL(lv_%s); (void)lv_%s;\n", pp, pp);
         continue;
       }
       buf_printf(pb, "    sp_RbVal _pv_%s = (_sp_ps + %d < argc && _sp_ps + %d < 16) ? _sp_proc_poly_args[_sp_ps + %d]"
