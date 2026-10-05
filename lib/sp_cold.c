@@ -3598,11 +3598,26 @@ static SP_NOINLINE int sp_srange_cmp_past_nul(const char *a, const char *b) {
   if (c) return c;
   return la < lb ? -1 : la > lb;
 }
-/* #cover? / #=== compare lexicographically, no materialization. */
+static inline int sp_srange_cmp(const char *a, const char *b) {
+  int c = strcmp(a, b);
+  return c ? c : sp_srange_cmp_past_nul(a, b);
+}
+/* #cover? / #=== compare lexicographically, no materialization. The
+   compare is by the bytes alone: strcmp stops at a NUL, and every String
+   that shares an end's bytes up to one was covered. */
+/* Not static: with cover?'s own arguments it is reached by a jump, and the
+   common path of cover? keeps nothing more across strcmp than it did. */
+SP_NOINLINE sp_bool sp_srange_cover_past_nul(sp_StrRange r, const char *x) {
+  if (r.first && sp_srange_cmp(x, r.first) < 0) return 0;
+  if (r.last) { int d = sp_srange_cmp(x, r.last); if (r.excl ? d >= 0 : d > 0) return 0; }
+  return 1;
+}
 sp_bool sp_srange_cover(sp_StrRange r, const char *x) {
   if (!x) return 0;
-  if (r.first && strcmp(x, r.first) < 0) return 0;
-  if (r.last) { int d = strcmp(x, r.last); if (r.excl ? d >= 0 : d > 0) return 0; }
+  /* a difference strcmp finds decides as it did; an end strcmp takes x to
+     equal is compared again past a NUL */
+  if (r.first) { int c = strcmp(x, r.first); if (c <= 0) return c ? 0 : sp_srange_cover_past_nul(r, x); }
+  if (r.last) { int d = strcmp(x, r.last); if (d >= 0) return d ? 0 : sp_srange_cover_past_nul(r, x); }
   return 1;
 }
 /* #min / #max with no block, as CRuby's range_min / range_max: an open
@@ -3617,7 +3632,7 @@ static SP_NOINLINE const char *sp_srange_walk_greatest(sp_StrRange r) {
   const char *best = NULL; SP_GC_ROOT_STR(best);
   for (sp_int i = 0; i < sp_StrArray_length(a); i++) {
     const char *s = sp_StrArray_get(a, i);
-    if (!best || strcmp(s, best) > 0) best = s;
+    if (!best || sp_srange_cmp(s, best) > 0) best = s;
   }
   return best;
 }
@@ -3644,13 +3659,20 @@ const char *sp_srange_min_v(sp_StrRange r) {
   }
   return r.first;
 }
+/* Not static, as sp_srange_cover_past_nul is not. */
+SP_NOINLINE const char *sp_srange_max_past_nul(sp_StrRange r) {
+  return sp_srange_cmp_past_nul(r.first, r.last) > 0 ? NULL : r.last;
+}
 const char *sp_srange_max_v(sp_StrRange r) {
   if (!r.last) sp_raise_cls("RangeError", "cannot get the maximum of endless range");
   if (r.excl) {
     if (!r.first) sp_raise_cls("RangeError", "cannot get the maximum of beginless range with custom comparison method");
     return sp_srange_walk_greatest(r);
   }
-  if (r.first && strcmp(r.first, r.last) > 0) return NULL;
+  if (r.first) {
+    int c = strcmp(r.first, r.last);
+    if (c >= 0) return c ? NULL : sp_srange_max_past_nul(r);
+  }
   return r.last;
 }
 const char *sp_srange_to_s(sp_StrRange r) {
