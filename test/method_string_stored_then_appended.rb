@@ -87,6 +87,16 @@ hd = Holder.new(c)
 hd.bump
 p hd.list, c.x
 
+# beside a splat, and read on in the same chain
+pre = ["s".dup]
+z = [*pre, c.plus]
+z[1] << "z"
+p z, pre, c.x
+z = []
+t = z.push(c.plus).join("-")
+z[0] << "z"
+p t, z, c.x
+
 # a method a Struct defines
 s = P.new("q".dup)
 z = [s.plus]

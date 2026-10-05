@@ -2107,12 +2107,13 @@ int cvar_global_slot(Compiler *c, int node, char *out, size_t cap) {
   snprintf(out, cap, "cvar_%s_%s", c->classes[cid].name, nm + 2);
   return 1;
 }
-/* The node `node` is written in, or -1. */
+/* The innermost block or lambda `node` is written in, within its method;
+   -1 at the method's own level. */
 int *an_parent_map(const NodeTable *nt);
 static int *g_lent_parent;
 static int g_lent_parent_n = -1;
 static unsigned g_lent_parent_ver;
-static int node_parent(Compiler *c, int node) {
+static int lent_enclosing_closure(Compiler *c, int node) {
   const NodeTable *nt = c->nt;
   if (!g_lent_parent || g_lent_parent_n != nt->count || g_lent_parent_ver != nt->version) {
     free(g_lent_parent);
@@ -2120,13 +2121,7 @@ static int node_parent(Compiler *c, int node) {
     if (!g_lent_parent) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
     g_lent_parent_n = nt->count; g_lent_parent_ver = nt->version;
   }
-  return node >= 0 && node < nt->count ? g_lent_parent[node] : -1;
-}
-/* The innermost block or lambda `node` is written in, within its method;
-   -1 at the method's own level. */
-static int lent_enclosing_closure(Compiler *c, int node) {
-  const NodeTable *nt = c->nt;
-  for (int p = node_parent(c, node); p >= 0; p = g_lent_parent[p]) {
+  for (int p = node >= 0 && node < nt->count ? g_lent_parent[node] : -1; p >= 0; p = g_lent_parent[p]) {
     NodeKind k = nt_kind(nt, p);
     if (k == NK_BlockNode || k == NK_LambdaNode) return p;
     if (k == NK_DefNode) return -1;
@@ -2508,58 +2503,6 @@ static int obj_call_builds_string(Compiler *c, int v, TyKind rt) {
   }
   return method_builds_string(c, mi, 0);
 }
-/* Is `n` a String a store hands over as a copy (no store marked it, and it
-   is not a literal, which is frozen), or an array, a hash or a splat written
-   there that holds one? */
-static int holds_copied_string(Compiler *c, int n, int depth) {
-  const NodeTable *nt = c->nt;
-  n = unwrap_parens(c, n);
-  if (n < 0 || depth > 8) return 0;
-  NodeKind k = nt_kind(nt, n);
-  if (k == NK_ArrayNode || k == NK_HashNode || k == NK_KeywordHashNode) {
-    int en = 0;
-    const int *ev = nt_arr(nt, n, "elements", &en);
-    for (int i = 0; i < en; i++)
-      if (holds_copied_string(c, ev[i], depth + 1)) return 1;
-    return 0;
-  }
-  if (k == NK_AssocNode || k == NK_AssocSplatNode) return holds_copied_string(c, nt_ref(nt, n, "value"), depth + 1);
-  if (k == NK_SplatNode) return holds_copied_string(c, nt_ref(nt, n, "expression"), depth + 1);
-  return k != NK_StringNode && comp_ntype(c, n) == TY_STRING && !c->strbuf_box[n];
-}
-/* Is String `v` stored beside another the same expression hands over as a
-   copy: a splat in the array or hash literal `v` is written in, or an
-   argument of a later link of the chain `v` is an argument of (`z << v <<
-   s`: only the first link's argument goes in as itself)? An append to that
-   other element is lost. */
-static int stored_beside_copied_string(Compiler *c, int v) {
-  const NodeTable *nt = c->nt;
-  int p = node_parent(c, v);
-  if (p >= 0 && nt_kind(nt, p) == NK_AssocNode) p = node_parent(c, p);
-  if (p < 0) return 0;
-  if (nt_kind(nt, p) == NK_ArrayNode || nt_kind(nt, p) == NK_HashNode) {
-    int en = 0;
-    const int *ev = nt_arr(nt, p, "elements", &en);
-    for (int i = 0; i < en; i++)
-      if (nt_kind(nt, ev[i]) == NK_SplatNode || nt_kind(nt, ev[i]) == NK_AssocSplatNode) return 1;
-    return 0;
-  }
-  /* the call `v` is an argument of, then each call made on its value,
-     parenthesised or not: found by its receiver */
-  int q = node_parent(c, p);
-  if (q < 0 || nt_kind(nt, q) != NK_CallNode || nt_ref(nt, q, "arguments") != p) return 0;
-  for (int d = 0; d < 64; d++) {
-    p = q;
-    q = nt->count - 1;
-    while (q >= 0 && !(nt_kind(nt, q) == NK_CallNode && unwrap_parens(c, nt_ref(nt, q, "receiver")) == p)) q--;
-    if (q < 0) return 0;
-    int n = 0;
-    const int *av = call_args(nt, q, &n);
-    for (int i = 0; i < n; i++)
-      if (holds_copied_string(c, av[i], 0)) return 1;
-  }
-  return 0;
-}
 /* Does demand-marked call `v` render as a handle itself? A reader call, a
    container's element read and a call that answers its receiver (`h << x
    << y`, `h.freeze`) do. A call on a String that makes a new one -- `+"lit"`,
@@ -2571,11 +2514,8 @@ int strbuf_marked_yields_handle(Compiler *c, int v) {
   int r = nt_ref(nt, v, "receiver");
   TyKind rt = r >= 0 ? comp_ntype(c, r) : TY_UNKNOWN;
   /* a method of an object that builds its String answers a plain one:
-     marked, it is wrapped as a fresh handle where it is stored. One stored
-     beside a String the same expression copies is left as it was: the
-     program stops there, where wrapped it would run on and lose the appends
-     to that other element. */
-  if (ty_is_object(rt) && obj_call_builds_string(c, v, rt) > 0 && !stored_beside_copied_string(c, v)) return 0;
+     marked, it is wrapped as a fresh handle where it is stored */
+  if (ty_is_object(rt) && obj_call_builds_string(c, v, rt) > 0) return 0;
   if (rt != TY_STRING && rt != TY_STRBUF) return 1;
   const char *nm = nt_str(nt, v, "name");
   return nm && (is_append_concat(nm) || str_self_call(nt, v));
