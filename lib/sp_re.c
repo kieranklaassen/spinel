@@ -389,13 +389,15 @@ sp_bool sp_re_match_p(mrb_regexp_pattern *pat, const char *str) {
   int caps[2];
   return re_exec(pat, str, slen, 0, caps, 2, sp_str_is_binary(str)) > 0;
 }
+/* Regexp#match?(str, pos) -- pos counts characters, as String#match?'s does. */
 sp_bool sp_re_match_p_at(mrb_regexp_pattern *pat, const char *str, sp_int pos) {
   if (!str) return FALSE;
+  sp_int cl = sp_str_length(str);
+  if (pos < 0) pos += cl;
+  if (pos < 0 || pos > cl) return FALSE;
   int64_t slen = (int64_t)sp_str_byte_len(str);
-  if (pos < 0) pos += slen;
-  if (pos < 0 || pos > slen) return FALSE;
   int caps[2];
-  return re_exec(pat, str, slen, (sp_int)pos, caps, 2, sp_str_is_binary(str)) > 0;
+  return re_exec(pat, str, slen, (sp_int)sp_utf8_byte_offset(str, pos), caps, 2, sp_str_is_binary(str)) > 0;
 }
 /* Regexp#=== on a boxed operand (a case/when arm, an explicit ===). Only a
    String (plain or shared-mutable handle) or a Symbol can match; a match
