@@ -1,0 +1,20 @@
+q->iv_ary = 1;
+x = y->iv_ary = z; /* "q->iv_ary=1;" */
+1; q->iv_ary = 1; x
+void f(sp_Slot *q) {
+  q->iv_ary = 1;
+}
+:"q->iv_ary = 1;"
+[:"q->iv_ary=1;", :b]
+true
+1
+"q->iv_ary = 1;"
+(*_cell_n) = 1;
+:"(*_cell_n) = 1;"
+[1]
+[1]
+behind a Regexp's source: 0
+behind a Hash key with quotes in it: 0
+behind a piece that ends in a backslash: 0
+a captured local, behind a piece: 0
+a captured local, behind a Regexp's source: 0

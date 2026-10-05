@@ -4500,6 +4500,40 @@ static int wb_header_has_param(const Buf *b, size_t h, const char *nm, size_t nn
   }
   return 0;
 }
+/* Is the store read at `at` only the text of a string literal? The written
+   pieces of an interpolation, the Symbol names and a Regexp's source are in
+   the C verbatim, so `puts "q->iv_w = #{n};"` reads as a store, and wrapping
+   it rewrote the text the program prints. The line is read from its start,
+   which is always code: the emitters write a literal's line ends as `\n`.
+   Answers the literal's closing quote, 0 for code. Only a string that opens
+   and closes around `at` counts: a store behind a quote this cannot pair
+   keeps its barrier. `code` is the last place found outside every literal
+   and `len` the buffer's length then, so a line of many such strings (the
+   Symbol name table) is read once; a rewrite grows the buffer, and the line
+   is read from its start again. */
+static size_t wb_literal_end(const Buf *b, size_t at, size_t *code, size_t *len) {
+  const char *p = b->p;
+  size_t i = at, lo = *len == b->len && *code <= at ? *code : 0;
+  *len = 0;
+  while (i > lo && p[i-1] != '\n') i--;
+  if (memchr(p + i, '"', at - i)) {
+    while (i < at) {
+      char x = p[i++];
+      if (x != '"' && x != '\'') continue;
+      size_t j = i;
+      while (j < b->len && p[j] != x && p[j] != '\n') j += p[j] == '\\' ? 2 : 1;
+      if (j >= b->len || p[j] != x) return 0;
+      if (j > at) {
+        if (x != '"') return 0;
+        *code = j + 1; *len = b->len;
+        return j;
+      }
+      i = j + 1;
+    }
+  }
+  *code = at; *len = b->len;
+  return 0;
+}
 static size_t wb_stmt_end(const Buf *b, size_t q) {
   size_t k = q + 1, d = 0, send = 0;
   int str = 0, ch = 0;
@@ -4537,6 +4571,7 @@ static void gc_wb_cells(Compiler *c, Buf *b) {
   WbCells cs; memset(&cs, 0, sizeof cs);
   wb_cells_collect(&cs, b->p, b->len);
   if (!cs.n) { free(cs.v); return; }
+  size_t lit_code = 0, lit_len = 0;
   size_t hdr_at = 0, hdr_h = (size_t)-1;
   for (size_t i = 0; i + 3 < b->len; i++) {
     if (b->p[i] != '(' || b->p[i+1] != '*') continue;
@@ -4567,6 +4602,8 @@ static void gc_wb_cells(Compiler *c, Buf *b) {
        every `(*cap->c_x) = v` went unrecorded */
     else if (nn > 2 && !strncmp(nm, "c_", 2) && ns >= 2 && b->p[ns-1] == '>' && b->p[ns-2] == '-') { nm += 2; nn -= 2; }
     if (!wb_cells_has(&cs, nm, nn)) continue;
+    size_t lit = wb_literal_end(b, i, &lit_code, &lit_len);
+    if (lit) { i = lit; continue; }
     if (!strncmp(b->p + is, "SP_WBO(", 7)) continue;
     if (local_cell) {
       size_t h = wb_fn_header(b, i, &hdr_at, &hdr_h);
@@ -4680,6 +4717,7 @@ static void gc_wb_insert(Compiler *c, Buf *b, size_t fn_off) {
   *b = out;
 }
 static void gc_wb_insert_seg(Compiler *c, Buf *b, size_t fn_off) {
+  size_t lit_code = 0, lit_len = 0;
   int cur_self_cls = -1;
   for (size_t i = fn_off; i + 4 < b->len; i++) {
     /* track the enclosing function's receiver type */
@@ -4719,6 +4757,8 @@ static void gc_wb_insert_seg(Compiler *c, Buf *b, size_t fn_off) {
       if (!wb_field_is_ref_in(c, hc, b->p + f, e - f)) continue;
     }
     else if (!wb_field_is_ref(c, b->p + f, e - f)) continue;
+    size_t lit = wb_literal_end(b, i, &lit_code, &lit_len);
+    if (lit) { i = lit; continue; }
     /* already wrapped (a nested store re-scanned) */
     if (st >= 7 && !strncmp(b->p + st - 7, "SP_WBO(", 7)) continue;
     if (st >= 14 && !strncmp(b->p + st - 14, "sp_gc_wb((void ", 15 - 1)) continue;
