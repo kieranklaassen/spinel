@@ -1,0 +1,1 @@
+A constant or ivar table with an empty row reads it as empty

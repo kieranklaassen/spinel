@@ -1,0 +1,1 @@
+each with two parameters over a literal table binds nil for an empty row
