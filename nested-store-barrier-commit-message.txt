@@ -1,0 +1,25 @@
+A store in another store's value takes its write barrier
+
+The barrier pass rewrites an instance variable store that stands at
+statement position and went on from the end of the statement, so a
+store inside the value was never looked at. `k.w = @last.w = [a, b]` is
+one C statement; so is `@seen = @items.each { |it| it.w = v }` with its
+whole block, and `@box = Box.new(a) { .. }` with the body of an
+initialize that takes a block. The store in the value got no barrier:
+the young Array was held only by an old `@last` no minor mark walks,
+was freed in the slot, and read back as whatever the slot was handed
+to next, with nothing said. A ternary, `||`, `||=` and a method that
+yields put a store there the same way, and the pass for captured
+locals had the same hole (`x = y = v` in a lambda).
+
+Both scans now go on into the value. A literal in there is stepped
+over, as it was when the statement was skipped whole, so a String that
+spells a store still comes back as written.
+
+Four programs of the corpus change their C, each by the barrier of
+such a store: bundle_class_21, issue236_chain_empty_literal,
+set_from_required_file (Set's initialize, in the value of
+`@seen = Set.new`) and optcarrot (`@apu = @cpu.apu = APU.new(..)` and
+`@ppu = @cpu.ppu = PPU.new(..)`, once each at start).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
