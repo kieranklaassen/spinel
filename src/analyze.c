@@ -17220,15 +17220,20 @@ static int promote_shared_stored_strings(Compiler *c) {
       /* mutator name check (same handle-capable set) */
       if (!sp_str_mutator(mun, SP_MUT_CONTAINER)) continue;
     }
-    int mrecv = nt_ref(nt, mu, "receiver");
-    if (mrecv < 0 || nt_kind(nt, mrecv) != NK_CallNode) continue;
-    /* an element a program method hands out (`h[0] << x` with `def [](i) =
-       @values[i]`): its container is the method's */
-    if (strbuf_demand_user_elem_call(c, mrecv, 0)) { changed = 1; continue; }
-    /* every element read, not just `[]`: a mutation through `b.first` has to
-       reach the container the same way (#4013) */
-    if (!container_elem_read_p(nt, mrecv)) continue;
-    int cont = nt_ref(nt, mrecv, "receiver");
+    int mrecv = nt_ref(nt, mu, "receiver"), cont = -1;
+    if (mrecv < 0) continue;
+    /* the value of `c[k] ||= v` / `c[k] &&= v` is the element the write
+       leaves in the slot (`(h[k] ||= +"") << x`): its container is c */
+    if (an_index_logic_write_value(nt, an_unparen(nt, mrecv), &cont) < 0) {
+      if (nt_kind(nt, mrecv) != NK_CallNode) continue;
+      /* an element a program method hands out (`h[0] << x` with `def [](i) =
+         @values[i]`): its container is the method's */
+      if (strbuf_demand_user_elem_call(c, mrecv, 0)) { changed = 1; continue; }
+      /* every element read, not just `[]`: a mutation through `b.first` has to
+         reach the container the same way (#4013) */
+      if (!container_elem_read_p(nt, mrecv)) continue;
+      cont = nt_ref(nt, mrecv, "receiver");
+    }
     if (cont < 0) continue;
     /* an element of a method result, an ivar, a reader: `mk[1] << x` */
     if (nt_kind(nt, cont) != NK_LocalVariableReadNode) {
