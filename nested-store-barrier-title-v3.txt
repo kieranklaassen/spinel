@@ -1,0 +1,1 @@
+A store in another store's value takes its write barrier
