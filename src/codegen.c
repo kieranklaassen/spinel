@@ -5981,9 +5981,16 @@ void emit_fiber_new(Compiler *c, int id, Buf *b, int as_gen, int size_node) {
   const char *cap_self_class = NULL;
   int self_is_value = 0;   /* value-type self is captured by value (sp_X), not sp_X* */
   int self_is_ptr = 1;     /* but a value-type `initialize` still receives self as sp_X* */
+  /* a reopened Array, Hash, Object or Numeric takes self boxed (an
+     sp_RbVal, as emit_method_signature writes it), and is captured so */
+  int self_boxed = 0;
   if (encl && encl->class_id >= 0 && !encl->is_cmethod && body >= 0 && fiber_body_uses_self(c, body)) {
     cap_self = 1;
     cap_self_class = c->classes[encl->class_id].c_name;
+    { const char *rcn = c->classes[encl->class_id].name;
+      self_boxed = rcn && is_builtin_reopen(rcn) &&
+                   (sp_streq(rcn, "Array") || sp_streq(rcn, "Hash") || sp_streq(rcn, "Object") ||
+                    sp_streq(rcn, "Numeric")); }
     self_is_value = c->classes[encl->class_id].is_value_type;
     self_is_ptr = !self_is_value || (encl->name && sp_streq(encl->name, "initialize"));
   }
@@ -5991,7 +5998,8 @@ void emit_fiber_new(Compiler *c, int id, Buf *b, int as_gen, int size_node) {
   /* Emit capture struct + GC scan function when there are captured vars or self */
   if (ncap > 0 || cap_self) {
     buf_printf(&g_proc_protos, "typedef struct {");
-    if (cap_self) buf_printf(&g_proc_protos, self_is_value ? " sp_%s self_val;" : " sp_%s *self_ptr;", cap_self_class);
+    if (cap_self && self_boxed) buf_puts(&g_proc_protos, " sp_RbVal self_val;");
+    else if (cap_self) buf_printf(&g_proc_protos, self_is_value ? " sp_%s self_val;" : " sp_%s *self_ptr;", cap_self_class);
     for (int i = 0; i < ncap; i++) {
       LocalVar *lv = encl ? scope_local(encl, caps.v[i]) : NULL;
       if (lv && lv->is_cell) {
@@ -6012,7 +6020,9 @@ void emit_fiber_new(Compiler *c, int id, Buf *b, int as_gen, int size_node) {
     buf_printf(&g_proc_protos, "static void _fib_cap_scan_%d(void *p) {\n", fid);
     buf_printf(&g_proc_protos, "  sp_gc_mark(p);\n");
     buf_printf(&g_proc_protos, "  _fib_cap_%d *_c = (_fib_cap_%d *)p;\n", fid, fid);
-    if (cap_self && !self_is_value)
+    if (cap_self && self_boxed)
+      buf_puts(&g_proc_protos, "  sp_mark_rbval(_c->self_val);\n");
+    else if (cap_self && !self_is_value)
       buf_printf(&g_proc_protos, "  if (_c->self_ptr) sp_gc_mark((void *)_c->self_ptr);\n");
     else if (cap_self && class_needs_scan(&c->classes[encl->class_id]))
       buf_printf(&g_proc_protos, "  sp_%s__gc_scan(&_c->self_val);\n", cap_self_class);
@@ -6112,7 +6122,12 @@ void emit_fiber_new(Compiler *c, int id, Buf *b, int as_gen, int size_node) {
   /* Unpack capture struct */
   if (ncap > 0 || cap_self) {
     buf_printf(pb, "    _fib_cap_%d *_fc = (_fib_cap_%d *)_fb->user_data;\n", fid, fid);
-    if (cap_self && self_is_value) {
+    if (cap_self && self_boxed) {
+      const char *svar = sv_self ? sv_self : "self";
+      buf_printf(pb, "    sp_RbVal %s = _fc->self_val;\n", svar);
+      buf_printf(pb, "    SP_GC_ROOT_RBVAL(%s);\n", svar);
+    }
+    else if (cap_self && self_is_value) {
       /* value-type self: a by-value copy; its heap fields stay reachable through
          the rooted capture struct (scanned above), so no separate root. */
       const char *svar = sv_self ? sv_self : "self";
@@ -6355,7 +6370,8 @@ void emit_fiber_new(Compiler *c, int id, Buf *b, int as_gen, int size_node) {
     buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", tc);
     if (cap_self) {
       emit_indent(g_pre, g_indent);
-      buf_printf(g_pre, self_is_value ? (self_is_ptr ? "_t%d->self_val = *%s;\n"
+      if (self_boxed) buf_printf(g_pre, "_t%d->self_val = %s;\n", tc, sv_self ? sv_self : "self");
+      else buf_printf(g_pre, self_is_value ? (self_is_ptr ? "_t%d->self_val = *%s;\n"
                                                       : "_t%d->self_val = %s;\n")
                                       : "_t%d->self_ptr = %s;\n",
                  tc, sv_self ? sv_self : "self");
@@ -11380,10 +11396,20 @@ static void emit_obj_cmp_dispatch(Compiler *c, Buf *b) {
   buf_puts(b, "static sp_int sp_obj_cmp_dispatch(sp_RbVal a, sp_RbVal b, sp_bool *comparable) {\n");
   buf_puts(b, "  switch (a.cls_id) {\n");
   for (int k = 0; k < c->nclasses; k++) {
-    if (!c->classes[k].instantiated) continue;
+    /* a reopened Time or Range is keyed by its builtin id, and its method
+       takes self by value (see emit_user_binop_dispatch); the reopenings of
+       other builtins are not boxed as one object id this switch reaches */
+    const char *bcase = NULL, *bself = NULL;
+    if (is_builtin_reopen(c->classes[k].name)) {
+      if (sp_streq(c->classes[k].name, "Time")) { bcase = "SP_BUILTIN_TIME"; bself = "*(sp_Time *)a.v.p"; }
+      else if (sp_streq(c->classes[k].name, "Range")) { bcase = "SP_BUILTIN_RANGE"; bself = "*(sp_Range *)a.v.p"; }
+      else continue;
+    }
+    else if (!c->classes[k].instantiated) continue;
     int defcls = -1;
     int mi = comp_method_in_chain(c, k, "<=>", &defcls);
     if (mi < 0) continue;
+    if (bcase && defcls != k) continue;
     Scope *m = &c->scopes[mi];
     if (m->nparams < 1 || m->rest_idx >= 0) continue;     /* need exactly the one operand */
     if (m->ret != TY_INT && m->ret != TY_POLY && m->ret != TY_FLOAT) continue;  /* unusable return -> not-comparable */
@@ -11437,7 +11463,19 @@ static void emit_obj_cmp_dispatch(Compiler *c, Buf *b) {
     else {
       continue;
     }
-    buf_printf(b, "    case %d: {\n", cid);
+    /* the callee and its self, as the class's own methods take them */
+    char callee[200], selfarg[200];
+    if (bcase) {
+      Buf nb; memset(&nb, 0, sizeof nb); emit_method_cname(c, m, &nb);
+      snprintf(callee, sizeof callee, "%s", nb.p ? nb.p : ""); free(nb.p);
+      snprintf(selfarg, sizeof selfarg, "%s", bself);
+      buf_printf(b, "    case %s: {\n", bcase);
+    }
+    else {
+      snprintf(callee, sizeof callee, "sp_%s_%s", dcn, mc("<=>"));
+      snprintf(selfarg, sizeof selfarg, "%s(sp_%s *)a.v.p", self_vt ? "*" : "", dcn);
+      buf_printf(b, "    case %d: {\n", cid);
+    }
     if (obj_operand) {
       /* The operand param was inferred to a single class (`pcid`), but the
          `<=>` body (defined up the chain, e.g. a Comparable mixin) works for
@@ -11461,23 +11499,20 @@ static void emit_obj_cmp_dispatch(Compiler *c, Buf *b) {
     if (m->ret == TY_INT) {
       /* a `<=>` that also answers nil is a nullable Integer (the nil join):
          its sentinel is the not-comparable answer */
-      buf_printf(b, "      sp_int _ri = (sp_int)sp_%s_%s(%s(sp_%s *)a.v.p, %s);\n",
-                 dcn, mc("<=>"), self_vt ? "*" : "", dcn, argbuf);
+      buf_printf(b, "      sp_int _ri = (sp_int)%s(%s, %s);\n", callee, selfarg, argbuf);
       if (m->ret_nullable_int) buf_puts(b, "      if (_ri == SP_INT_NIL) { *comparable = FALSE; return 0; }\n");
       buf_puts(b, "      *comparable = TRUE; return _ri;\n");
     }
     else if (m->ret == TY_FLOAT) {
       /* a Float `<=>` result is a valid comparison (CRuby): use its sign */
-      buf_printf(b, "      sp_float _rf = sp_%s_%s(%s(sp_%s *)a.v.p, %s);\n",
-                 dcn, mc("<=>"), self_vt ? "*" : "", dcn, argbuf);
+      buf_printf(b, "      sp_float _rf = %s(%s, %s);\n", callee, selfarg, argbuf);
       if (m->ret_nullable_int) buf_puts(b, "      if (sp_float_is_nil(_rf)) { *comparable = FALSE; return 0; }\n");
       buf_puts(b, "      *comparable = TRUE; return (_rf > 0) - (_rf < 0);\n");
     }
     else {
       /* poly `<=>`: an Integer or Float result is comparable (use its sign);
          nil or any other type (String, ...) is incomparable -> ArgumentError */
-      buf_printf(b, "      sp_RbVal _r = sp_%s_%s(%s(sp_%s *)a.v.p, %s);\n",
-                 dcn, mc("<=>"), self_vt ? "*" : "", dcn, argbuf);
+      buf_printf(b, "      sp_RbVal _r = %s(%s, %s);\n", callee, selfarg, argbuf);
       buf_puts(b, "      if (_r.tag == SP_TAG_INT) { *comparable = TRUE; return _r.v.i; }\n");
       buf_puts(b, "      if (_r.tag == SP_TAG_FLT) { *comparable = TRUE; return (_r.v.f > 0) - (_r.v.f < 0); }\n");
       buf_puts(b, "      *comparable = FALSE; return 0;\n");
@@ -13374,8 +13409,11 @@ static void scan_prologue_features(Compiler *c) {
     const char *nty = nt_type(c->nt, nid);
     if (!nty || !sp_streq(nty, "CallNode")) continue;
     int nrv = nt_ref(c->nt, nid, "receiver");
-    if (nrv < 0 || (comp_ntype(c, nrv) != TY_POLY && comp_ntype(c, nrv) != TY_UNKNOWN)) continue;
     const char *nnm = nt_str(c->nt, nid, "name");
+    /* and #subclasses on a Class value no constant names */
+    if (nrv >= 0 && comp_ntype(c, nrv) == TY_CLASS && nnm && sp_streq(nnm, "subclasses") &&
+        nt_kind(c->nt, nrv) != NK_ConstantReadNode) { g_gen_cls_answers = 1; break; }
+    if (nrv < 0 || (comp_ntype(c, nrv) != TY_POLY && comp_ntype(c, nrv) != TY_UNKNOWN)) continue;
     if (nnm && (sp_streq(nnm, "subclasses") || sp_streq(nnm, "allocate") ||
                 sp_streq(nnm, "members") || sp_streq(nnm, "keyword_init?")))
       g_gen_cls_answers = 1;
@@ -15727,7 +15765,10 @@ char *codegen_program(const NodeTable *nt) {
      is itself never instantiated. */
   g_has_user_cmp = 0;
   for (int k = 0; k < c->nclasses; k++) {
-    if (!c->classes[k].instantiated) continue;
+    /* a reopened Time or Range is instantiated by the runtime itself */
+    const char *kn = c->classes[k].name;
+    int breopen = kn && is_builtin_reopen(kn) && (sp_streq(kn, "Time") || sp_streq(kn, "Range"));
+    if (!c->classes[k].instantiated && !breopen) continue;
     if (comp_method_in_chain(c, k, "<=>", NULL) >= 0) { g_has_user_cmp = 1; break; }
   }
   g_has_user_binop = 0;

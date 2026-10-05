@@ -573,6 +573,7 @@ void emit_coerce_text(Compiler *c, int node, TyKind from, TyKind slot, int how,
 
 /* ---- forward decls ---- */
 
+int emit_bm_flat_args(Compiler *c, const int *argv, int argc, Buf *b);
 int is_builtin_reopen(const char *name);
 int is_exc_name(const char *n);
 int class_is_exc_subclass(Compiler *c, int ci);
@@ -1532,6 +1533,9 @@ int emit_op_hash_take(Compiler *c, const BopCtx *x, Buf *b);
 int emit_op_hash_drop(Compiler *c, const BopCtx *x, Buf *b);
 int emit_op_hash_assoc(Compiler *c, const BopCtx *x, Buf *b);
 int emit_op_hash_compact(Compiler *c, const BopCtx *x, Buf *b);
+/* Range row emitters (codegen_call_numeric.c) */
+int emit_op_range_clone(Compiler *c, const BopCtx *x, Buf *b);
+int emit_op_range_freeze(Compiler *c, const BopCtx *x, Buf *b);
 /* Array row emitters (codegen_call_array.c) */
 int emit_op_array_shift_n(Compiler *c, const BopCtx *x, Buf *b);
 int emit_op_array_cycle_n(Compiler *c, const BopCtx *x, Buf *b);
