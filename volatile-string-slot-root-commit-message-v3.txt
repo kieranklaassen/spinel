@@ -1,0 +1,59 @@
+A String local a rescue can write stays rooted as a String
+
+```ruby
+def each_built(n)
+  s = "start"
+  v = "none"
+  i = 0
+  while i < n
+    begin
+      v = fresh(i)[0].to_s    # a mutable String nothing else holds
+      s = v if i == 0
+      yield i
+    rescue
+    end
+    i += 1
+  end
+  s
+end
+```
+
+called with a block that allocates (test/gc_root_volatile_string_slot_plain.rb
+has the whole program) ends in a segmentation fault in a plain run, exit
+139 and nothing printed. That was seen on Linux (x86-64, glibc) with gcc
+13.3 at -O0 to -O3 and with clang 18.1: the crash comes once a collection
+falls after the String's last other holder is gone, so where it shows
+depends on the allocator and on how much the block allocates. On macOS
+(arm64, Apple clang 21) the same run does not crash: it prints another
+String's contents, payload-2 where CRuby prints payload-0.
+Under SPINEL_GC_STRESS=1 and 2 a smaller program
+(test/gc_root_volatile_string_slot.rb) shows it at once:
+
+    *** SPINEL_GC_VERIFY: fault on the GC mark path (signal 11)
+      phase = root
+
+_SP_GC_SLOT_TAG picks a slot's root form from its C type, and knew
+`const char **` only. A local written under a begin is declared
+`const char * volatile`; its address is a `const char *volatile *`, so
+SP_GC_ROOT and SP_GC_ENTRY_PTR gave it the object form, which skips a
+mutable String's payload and never reaches the handle in front of it.
+The buffer was freed while the local still named it.
+
+The macro now knows that type too. It is the one other spelling of a
+String slot the compiler emits: a volatile pointer is always written
+`T * volatile`, and every other volatile slot that reaches the macro is
+an object pointer and keeps the object form.
+
+In the generated C of the corpus 75 String slots in 25 programs take the
+String form now, each a local of a yielding method spliced into its
+caller and rooted with SP_GC_ROOT. No benchmark holds one and optcarrot
+holds none. Those 25 answer as before, plain and under
+SPINEL_GC_STRESS=1 and 2. The generated C does not change (`make cident`:
+0 differ): the macro is in lib/sp_gc.h.
+
+The plain test fails in the ordinary test lane without the change, by
+the crash on Linux and by the wrong line on macOS, and runs in 0.02 s
+with it. The smaller one joins
+GC_STRESS_TESTS, where it fails without the change.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
