@@ -90,3 +90,19 @@ def fp_maybe_first(*a)
   a
 end
 p fp_perform(7), fp_maybe_first(7), fp_maybe_first
+
+# A Hash under two names beside a method that stores into its parameter and
+# is handed a Hash of another kind as well: the two names keep their kinds.
+# Widened to one, they made the parameter boxed, the store narrowed it again,
+# and the two took turns every round
+def fp_put(x)
+  x["a"] = "q"
+end
+fp_h = {"a" => "x"}
+fp_g = fp_h
+fp_m = {1 => "s"}
+fp_g.merge!(fp_m) if ARGV.size > 5
+fp_k = {"c" => "w"}
+fp_put(fp_h)
+fp_put(fp_k)
+p fp_h.to_a, fp_k.to_a
