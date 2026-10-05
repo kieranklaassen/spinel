@@ -4948,6 +4948,12 @@ static int emit_poly_builtin_method(Compiler *c, int id, Buf *b) {
     buf_printf(b, " (_t%d.tag == SP_TAG_STR || _t%d.tag == SP_TAG_SYM) ? (", tv, tv);
     for (int j = 0; j < argc; j++) {
       if (j) buf_puts(b, " || ");
+      /* start_with?(/re/): the pattern matches at index 0, as the typed
+         String path answers it */
+      if (sp_streq(name, "start_with?") && re_lit_index(c, argv[j]) >= 0) {
+        buf_printf(b, "(sp_re_match(sp_re_pat_%d, _s%d) == 0)", re_lit_index(c, argv[j]), tv);
+        continue;
+      }
       buf_printf(b, "%s(_s%d, ", fn, tv);
       emit_str_expr(c, argv[j], b);
       buf_puts(b, ")");
@@ -7972,8 +7978,9 @@ else if (argc == 7) {
     /* a Rational subsecond (usec) has no int64 slot; route it through the
        float helper via sp_rational_to_f (#3091) */
     TyKind ut = comp_ntype(c, argv[6]);
+    /* a boxed one is any real number, read through the same float helper */
     buf_printf(b, "%s(sp_time_new%s(",
-               (ut == TY_FLOAT || ut == TY_RATIONAL) ? "sp_time_with_usec_f" : "sp_time_with_usec",
+               (ut == TY_FLOAT || ut == TY_RATIONAL || ut == TY_POLY) ? "sp_time_with_usec_f" : "sp_time_with_usec",
                is_utc ? "_utc" : "");
   }
 else buf_printf(b, "sp_time_new%s(", is_utc ? "_utc" : "");
@@ -7994,7 +8001,10 @@ else buf_printf(b, "sp_time_new%s(", is_utc ? "_utc" : "");
   }
   if (argc == 7) {
     buf_puts(b, is_new ? ", " : "), ");
-    if (comp_ntype(c, argv[6]) == TY_RATIONAL) {
+    if (comp_ntype(c, argv[6]) == TY_POLY) {
+      buf_puts(b, "sp_poly_to_f_with_rational("); emit_expr(c, argv[6], b); buf_puts(b, ")");
+    }
+    else if (comp_ntype(c, argv[6]) == TY_RATIONAL) {
       buf_puts(b, "sp_rational_to_f("); emit_expr(c, argv[6], b); buf_puts(b, ")");
     }
     else emit_expr(c, argv[6], b);
@@ -10561,6 +10571,40 @@ int emit_try_convert_boxed(Compiler *c, const char *cname, int arg, Buf *b) {
   return 1;
 }
 
+/* A user exception subclass with no initialize: the generated constructor,
+   its first argument the message. Klass.new(...) and a bare new(...) in a
+   class method both build with it. */
+void emit_exc_new_no_init(Compiler *c, int id, int ci, int argc, const int *argv, Buf *b) {
+  /* An ivar-bearing subclass needs its dedicated struct size --
+     sp_exc_new_sub would only allocate the base (#2772). */
+  const char *cn2 = class_ruby_name(c, ci); if (!cn2) cn2 = c->classes[ci].name;
+  const char *par = exc_builtin_parent(c, ci);
+  if (c->classes[ci].nivars > 0)
+    buf_printf(b, "((sp_%s *)sp_exc_new_sub_sized(sizeof(sp_%s), \"%s\", ",
+               c->classes[ci].c_name, c->classes[ci].c_name, cn2);
+  else
+    buf_printf(b, "sp_exc_new_sub(\"%s\", \"%s\", ", cn2, par);
+  if (class_is_syserr(c, ci)) {
+    /* SystemCallError#initialize: the errno text, " - msg" */
+    char lead[192]; snprintf(lead, sizeof lead, "\"%s\", ", cn2);
+    emit_syserr_call(c, id, "sp_syserr_msg_a", lead, argc, argv, b);
+  }
+  else if (argc >= 1) {
+    /* an explicitly given message stays, even empty (#3713) */
+    if (comp_ntype(c, argv[0]) == TY_STRING) {
+      buf_puts(b, "sp_exc_msg_given("); emit_expr(c, argv[0], b); buf_puts(b, ")");
+    }
+    else {
+      int mt2 = ++g_tmp;
+      buf_printf(b, "({ sp_RbVal _t%d = ", mt2); emit_boxed(c, argv[0], b);
+      buf_printf(b, "; _t%d.tag == SP_TAG_NIL ? (&(\"\\xff\")[1])"
+                    " : sp_exc_msg_given(sp_poly_to_s(_t%d)); })", mt2, mt2);
+    }
+  }
+  else buf_puts(b, "(&(\"\\xff\")[1])");
+  buf_puts(b, c->classes[ci].nivars > 0 ? "))" : ")");
+}
+
 /* A .new call (and the default-hash form): user classes, Struct and Data, the builtin constructors (emit_class_new_call's arms, in their order) */
 static int emit_new_call_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, int *out) {
   if (!(recv >= 0 && (is_hash_constructor(name)))) return 0;
@@ -10624,37 +10668,7 @@ static int emit_new_call_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, 
           emit_ctor_block_slot(c, id, initm, c->scopes[initm].nparams > 0 ? ", " : "", b);
           buf_puts(b, ")");
         }
-        else {
-          /* no user initialize: create directly with first arg as message.
-             An ivar-bearing subclass needs its dedicated struct size --
-             sp_exc_new_sub would only allocate the base (#2772). */
-          const char *cn2 = class_ruby_name(c, ci); if (!cn2) cn2 = c->classes[ci].name;
-          const char *par = exc_builtin_parent(c, ci);
-          if (c->classes[ci].nivars > 0)
-            buf_printf(b, "((sp_%s *)sp_exc_new_sub_sized(sizeof(sp_%s), \"%s\", ",
-                       c->classes[ci].c_name, c->classes[ci].c_name, cn2);
-          else
-            buf_printf(b, "sp_exc_new_sub(\"%s\", \"%s\", ", cn2, par);
-          if (class_is_syserr(c, ci)) {
-            /* SystemCallError#initialize: the errno text, " - msg" */
-            char lead[192]; snprintf(lead, sizeof lead, "\"%s\", ", cn2);
-            emit_syserr_call(c, id, "sp_syserr_msg_a", lead, argc, argv, b);
-          }
-          else if (argc >= 1) {
-            /* an explicitly given message stays, even empty (#3713) */
-            if (comp_ntype(c, argv[0]) == TY_STRING) {
-              buf_puts(b, "sp_exc_msg_given("); emit_expr(c, argv[0], b); buf_puts(b, ")");
-            }
-            else {
-              int mt2 = ++g_tmp;
-              buf_printf(b, "({ sp_RbVal _t%d = ", mt2); emit_boxed(c, argv[0], b);
-              buf_printf(b, "; _t%d.tag == SP_TAG_NIL ? (&(\"\\xff\")[1])"
-                            " : sp_exc_msg_given(sp_poly_to_s(_t%d)); })", mt2, mt2);
-            }
-          }
-          else buf_puts(b, "(&(\"\\xff\")[1])");
-          buf_puts(b, c->classes[ci].nivars > 0 ? "))" : ")");
-        }
+        else emit_exc_new_no_init(c, id, ci, argc, argv, b);
         { *out = 1; return 1; }
       }
       /* yielding initialize: inline its body at the call site (the block
@@ -12196,17 +12210,28 @@ static int emit_case_eq_call(Compiler *c, int id, Buf *b) {
           LocalVar *up = um->nparams >= 1 ? scope_local(um, um->pnames[0]) : NULL;
           TyKind upt = (up && up->type != TY_UNKNOWN) ? up->type : TY_POLY;
           int uretb = (um->ret == TY_BOOL);
+          /* a fresh receiver (`C.new != x`) is held by nothing else across
+             the operand's evaluation and the user #==: root it first */
+          int ueh = expr_is_held_ref(c, recv), uet = 0;
+          if (!ueh) {
+            uet = ++g_tmp;
+            buf_printf(b, "({ sp_%s *_t%d = (sp_%s *)(", c->classes[ueq_def].c_name, uet,
+                       c->classes[ueq_def].c_name);
+            emit_expr(c, recv, b);
+            buf_printf(b, "); SP_GC_ROOT(_t%d); ", uet);
+          }
           buf_puts(b, "(!");
           if (!uretb) buf_puts(b, "sp_poly_truthy(");
           buf_printf(b, "sp_%s_%s((sp_%s *)(", c->classes[ueq_def].c_name,
                      mc(um->name), c->classes[ueq_def].c_name);
-          emit_expr(c, recv, b);
+          if (ueh) emit_expr(c, recv, b); else buf_printf(b, "_t%d", uet);
           buf_puts(b, "), ");
           if (upt == TY_POLY) emit_boxed(c, argv[0], b);
           else emit_expr(c, argv[0], b);
           buf_puts(b, ")");
           if (!uretb) buf_puts(b, ")");
           buf_puts(b, ")");
+          if (!ueh) buf_puts(b, "; })");
           return 1;
         }
       }
@@ -14218,7 +14243,7 @@ void emit_math_arg(Compiler *c, int node, Buf *out) {
 
 /* Does class `cid` (or any ancestor) have a literal `include <mod_name>` in a
    class/module body? Compile-time mirror of the ancestors-table include scan,
-   for folding is_a?(Comparable) / is_a?(Enumerable) on a statically-typed
+   for answering is_a?(Comparable) / is_a?(Enumerable) on a statically-typed
    user instance (#2363). static_isa_cond (the folded `is_a?` of an `if`,
    `unless` or ternary) and emit_obj_class_when (the typed class arm of a
    `when` or `in`) read it too, so a module the class includes matches
@@ -23166,15 +23191,7 @@ void emit_call_body(Compiler *c, int id, Buf *b) {
   /* A retargeted `x.send(:m)`: send ignores visibility, and a top-level `def`
      is Object's private instance method -- reachable this way and no other.
      The receiver's own class answers first when it defines the name. */
-  if (nt_str(c->nt, id, "send_blind") && nt_ref(c->nt, id, "receiver") >= 0 &&
-      nt_ref(c->nt, id, "block") < 0) {
-    const char *sn = nt_str(c->nt, id, "name");
-    int smi = sn ? comp_method_index(c, sn) : -1;
-    if (smi >= 0 && !(smi < c->nscopes && c->scopes[smi].yields)) {
-      int srecv = nt_ref(c->nt, id, "receiver");
-      if (!send_blind_recv_owns(c, srecv, comp_ntype(c, srecv), sn)) { emit_method_call(c, id, b); return; }
-    }
-  }
+  if (emit_send_blind(c, id, b)) return;
 
   /* A bare call resolves the way CRuby's ancestry does: the enclosing class's
      own chain, then Object -- where a top-level `def` lands -- and only then a

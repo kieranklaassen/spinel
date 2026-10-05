@@ -181,4 +181,11 @@ int is_string_append(const char *n); /* << concat: appends answering the receive
 
 int is_string_rebind_mutator(const char *n); /* mutators needing argument-rebind snapshots */
 
+int builtin_module_owns(const char *cls, const char *name); /* included ahead of Object */
+
+int is_gated_exception_accessor(const char *n); /* accessors owned by specific exception classes */
+int is_symbol_exception_accessor(const char *n); /* exception accessors that can return a Symbol */
+
+int is_builtin_reopen_name(const char *name);
+
 #endif
