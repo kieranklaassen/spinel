@@ -7019,52 +7019,50 @@ static int bare_array_new(Compiler *c, int id) {
                     comp_method_in_chain(c, ci, "initialize", NULL) < 0);
 }
 
-/* A call on an empty Array that answers a plain value: a count, a test, the
-   element that is not there, a String built from nothing, a fold's literal
-   seed. Not the Array, not an Array, Hash or Enumerator made from it, and
-   none of the call's own operands: the default of fetch, the seed of a fold
-   or what find calls when nothing matches, unless that is a literal Integer,
-   Float, Symbol, nil, true or false, the same value as its copy. */
-static int array_call_answers_plain_value(const NodeTable *nt, int id, const char *on) {
-  static const char *const any_args[] = {"size", "length", "count", "empty?", "any?", "all?",
-                                         "none?", "one?", "include?", "member?", "nil?", "frozen?",
-                                         "==", "!=", "join", "inspect", "to_s", "pack", "at", "dig",
-                                         NULL};
-  static const char *const no_args[] = {"first", "last", "min", "max", NULL};
-  static const char *const finds[] = {"index", "find_index", "rindex", NULL};
-  static const char *const seeded[] = {"sum", "inject", "reduce", "each_with_object", "fetch",
-                                       NULL};
-  int ca = nt_ref(nt, id, "arguments"), argc = 0;
-  const int *av = ca >= 0 ? nt_arr(nt, ca, "arguments", &argc) : NULL;
-  for (int k = 0; k < argc; k++)
-    if (nt_kind(nt, av[k]) == NK_SplatNode) return 0;
-  int blk = nt_ref(nt, id, "block") >= 0;
-  if (str_in(on, any_args)) return 1;
-  if (str_in(on, no_args)) return argc == 0;
-  if (str_in(on, finds)) return argc > 0 || blk;
-  if (sp_streq(on, "find") || sp_streq(on, "detect")) return argc == 0 && blk;
-  if (sp_streq(on, "[]")) return argc == 1 && nt_kind(nt, av[0]) == NK_IntegerNode;
-  if (!str_in(on, seeded)) return 0;
-  int is_fetch = sp_streq(on, "fetch");
-  if (is_fetch ? blk : sp_streq(on, "each_with_object") && !blk) return 0;
-  int at = is_fetch ? 1 : 0;
-  if (argc <= at) return 1;
-  NodeKind k = nt_kind(nt, av[at]);
-  return k == NK_IntegerNode || k == NK_FloatNode || k == NK_SymbolNode || k == NK_NilNode ||
-         k == NK_TrueNode || k == NK_FalseNode;
+/* A literal of one of the kinds asked for: an Integer within int64, a Float,
+   a String, a Symbol, or nil, true and false. */
+enum { LIT_INT = 1, LIT_FLOAT = 2, LIT_STR = 4, LIT_SYM = 8, LIT_NIL_BOOL = 16, LIT_ANY = 31 };
+static int array_arg_literal(const NodeTable *nt, int a, int kinds) {
+  switch (nt_kind(nt, a)) {
+    case NK_IntegerNode: return (kinds & LIT_INT) && !nt_str(nt, a, "bigval");
+    case NK_FloatNode: return kinds & LIT_FLOAT;
+    case NK_StringNode: return kinds & LIT_STR;
+    case NK_SymbolNode: return kinds & LIT_SYM;
+    case NK_NilNode: case NK_TrueNode: case NK_FalseNode: return kinds & LIT_NIL_BOOL;
+    default: return 0;
+  }
 }
 
-/* `Array[a, b, c]` and `Range.new(lo, hi)` are the constructor spellings of the
-   `[a, b, c]` and `(lo..hi)` literals, and both raised NoMethodError -- the
-   literal worked and the documented constructor for the same value did not
-   (#3485, #3486). Build the literal and carry it as the receiver of a marker
-   call that inference and emission both see through, the way `Hash[k: v]`
-   already reaches the hash literal. Everything downstream then types and emits
-   these exactly as the literal form, with no second implementation to keep in
-   step.
+/* A call on an empty Array that answers a plain value and reads nothing but
+   literals: a count, a test, the element that is not there, a String built
+   from nothing, a literal seed or default. Each form kept here answers on
+   `[]` as CRuby does, whatever the literals. So no block, no operand that
+   has to be run, no String as a seed or default (the answer would be that
+   very String), and nothing that answers the Array or a container. */
+static int array_call_answers_plain_value(const NodeTable *nt, int id, const char *on) {
+  static const char *const bare[] = {"size", "length", "empty?", "nil?", "frozen?", "inspect",
+                                     "to_s", "first", "last", "min", "max", NULL};
+  static const char *const tests[] = {"count", "any?", "all?", "none?", "one?", NULL};
+  static const char *const finds[] = {"include?", "member?", "==", "!=", "index", "find_index",
+                                      "rindex", NULL};
+  static const char *const reads[] = {"at", "[]", "dig", NULL};
+  int ca = nt_ref(nt, id, "arguments"), argc = 0;
+  const int *av = ca >= 0 ? nt_arr(nt, ca, "arguments", &argc) : NULL;
+  if (nt_ref(nt, id, "block") >= 0) return 0;
+  if (str_in(on, bare)) return argc == 0;
+  int join = sp_streq(on, "join"), sum = sp_streq(on, "sum");
+  if (argc == 0) return str_in(on, tests) || join || sum;
+  if (sp_streq(on, "fetch"))
+    return array_arg_literal(nt, av[0], LIT_INT) &&
+           (argc == 1 || (argc == 2 && array_arg_literal(nt, av[1], LIT_ANY & ~LIT_STR)));
+  int kinds = str_in(on, tests) || str_in(on, finds) ? LIT_ANY
+            : join ? LIT_STR : sum ? LIT_INT | LIT_FLOAT : str_in(on, reads) ? LIT_INT : 0;
+  if (!kinds || (argc > 1 && !sp_streq(on, "dig"))) return 0;
+  for (int k = 0; k < argc; k++)
+    if (!array_arg_literal(nt, av[k], kinds)) return 0;
+  return 1;
+}
 
-   Left alone when the program owns the constructor: reopening Array is fine,
-   defining `Array.[]` means whatever it says. */
 static int desugar_class_literal_ctors(Compiler *c) {
   NodeTable *nt = (NodeTable *)c->nt;
   int changed = 0;
@@ -7072,14 +7070,15 @@ static int desugar_class_literal_ctors(Compiler *c) {
   for (int id = 0; id < n0; id++) {
     if (nt_kind(nt, id) != NK_CallNode) continue;
     int recv = nt_ref(nt, id, "receiver");
-    /* A bare `Array.new` that a call answering a plain value is made on is
-       the empty literal too. As a receiver it has no later use to take an
-       element type from, and stayed untyped: `Array.new.join` answered nil
-       and `Array.new.include?(1)` raised NoMethodError "for unknown".
-       Elsewhere it keeps its own paths, and so does the receiver of a call
-       that stores into it or answers an Array: what is done with that Array
-       later would meet the literal's arms, which copy a String or an Array
-       seed in places (`[] << s`, `[].dup.sum(d)`). */
+    /* A bare `Array.new` is the empty literal too where a call that answers a
+       plain value and reads nothing but literals is made on it. As a receiver
+       it has no later use to take an element type from, and stayed untyped:
+       `Array.new.join` answered nil and `Array.new.include?(1)` raised
+       NoMethodError "for unknown". Every other call on it keeps its own
+       paths: one that stores into it or answers an Array (what is done with
+       that Array later would meet the literal's arms, which copy a String or
+       an Array seed in places: `[] << s`, `[].dup.sum(d)`), one with a block,
+       one with an operand that has to be run. */
     if (bare_array_new(c, recv)) {
       const char *on = nt_str(nt, id, "name");
       if (!on || !array_call_answers_plain_value(nt, id, on)) continue;
