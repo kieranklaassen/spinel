@@ -1,0 +1,1 @@
+The reopened-builtin self.class walk skips an empty node array before copying it
