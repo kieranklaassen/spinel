@@ -8,6 +8,7 @@
    emitted nothing) to leave it to the chain after the lookup. */
 
 #include "codegen_internal.h"
+#include "repr.h"
 #include "builtin_ops.h"
 #include "codegen_call_arms.h"
 
@@ -1270,12 +1271,9 @@ int emit_op_array_dig_n(Compiler *c, const BopCtx *x, Buf *b) {
        TypeError on a step that cannot be dug. Chaining index reads
        instead read the scalar the first step answered as if it were an
        array, so `[1].dig(0, 0)` answered 1 where Ruby raises (#3825). */
-    buf_puts(b, "sp_poly_dig_n(sp_box_obj(");
-    emit_expr(c, recv, b);
-    buf_printf(b, ", SP_BUILTIN_%s_ARRAY), %d, (sp_RbVal[]){",
-               rt == TY_INT_ARRAY ? "INT" : rt == TY_FLOAT_ARRAY ? "FLT" : "STR", argc);
-    for (int di = 0; di < argc; di++) { if (di) buf_puts(b, ", "); emit_boxed(c, argv[di], b); }
-    buf_puts(b, "})");
+    Buf rb = {0}; emit_boxed(c, recv, &rb);
+    emit_rooted_key_call(c, "sp_poly_dig_n", rb.p, argv, argc, b);
+    free(rb.p);
     return 1;
   }
   return 0;
@@ -1790,7 +1788,7 @@ int emit_call_store_value_arms(Compiler *c, Buf *b, const NodeTable *nt, const c
         /* a String stored as the shared handle (`hh[k] = +"d"` in a Hash's
            default block, whose value is what the read answers): boxed once,
            so the store and the expression's value are the one handle */
-        if (is_poly_hash && c->strbuf_box[argv[1]]) decl_type = TY_POLY;
+        if (is_poly_hash && repr_of(c, argv[1]).handle) decl_type = TY_POLY;
         emit_ctype(c, decl_type, b);
         buf_printf(b, " _t%d = ", tv);
         /* When the slot is poly but the rhs has no type yet (e.g. `{}`),

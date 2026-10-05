@@ -52,17 +52,23 @@ int repr_dyn_cls(const Compiler *c, TyKind t) {
    a local's slot and a builtin's name), an Integer ivar read (every one is
    nil-initialized), a parameter bound from such an ivar (box_nullable_arg),
    a node in a Ruby-defined builtin (enum_builtin_node), and every Integer
-   under --int-overflow=promote. */
+   under --int-overflow=promote.
+   nullable_int_value re-derives a receiver's type (infer_type), so the
+   questions are asked as a pure read (an_pure_read_begin): nothing derived
+   is recorded, and asking changes nothing codegen reads next. */
 int repr_nil_scalar(const Compiler *c, int node, TyKind t) {
   Compiler *mc = (Compiler *)c;
+  int r = 0;
+  an_pure_read_begin();
   if (t == TY_INT)
-    return g_promote_mode || call_returns_nullable_int(mc, node) ||
-           nt_kind(c->nt, node) == NK_InstanceVariableReadNode ||
-           box_nullable_arg(mc, node) || enum_builtin_node(mc, node);
-  if (t == TY_FLOAT)
-    return call_returns_nullable_int(mc, node) || box_nullable_arg(mc, node) ||
-           enum_builtin_node(mc, node);
-  return 0;
+    r = g_promote_mode || call_returns_nullable_int(mc, node) ||
+        nt_kind(c->nt, node) == NK_InstanceVariableReadNode ||
+        box_nullable_arg(mc, node) || enum_builtin_node(mc, node);
+  else if (t == TY_FLOAT)
+    r = call_returns_nullable_int(mc, node) || box_nullable_arg(mc, node) ||
+        enum_builtin_node(mc, node);
+  an_pure_read_end();
+  return r;
 }
 
 /* Where the boxed form of a shared-mutable String comes from, as emit_boxed
@@ -196,6 +202,10 @@ Repr repr_of(const Compiler *c, int node) {
   r.strbuf_src = (unsigned char)repr_strbuf_src(c, node, kt);
   if (r.strbuf_src == RS_SLOT_POLY) r.kind = RK_BOXED;
   else if (r.strbuf_src != RS_NONE) r.kind = RK_STRBUF;
+  /* a user object the nil fact says may be nil (analyze_nil.c, #7444); a
+     by-value one too, whose layout has no nil to hold it in */
+  if ((r.kind == RK_PTR || r.kind == RK_VOBJ) && ty_is_object(kt) && nil_fact_node(c, node))
+    r.may_nil = 1;
   return r;
 }
 
@@ -368,6 +378,15 @@ const char *repr_coerce_form_name(int form) {
 
 int g_repr_check = 0;
 
+/* repr_of is a pure read: asked anywhere, it changes nothing. Under
+   --repr-check codegen asks it of every node it is about to emit, which an
+   ordinary compile does not, and repr_check.sh fails when the C then
+   differs from the C without the flag: a type recorded while a view was
+   open re-materialized a Range from its own temp. */
+void repr_check_ask(const Compiler *c, int node) {
+  if (node >= 0 && node < c->nt->count) (void)repr_of(c, node);
+}
+
 Repr repr_of_slot(const Compiler *c, const LocalVar *lv) {
   Repr r;
   memset(&r, 0, sizeof r);
@@ -384,15 +403,33 @@ Repr repr_of_slot(const Compiler *c, const LocalVar *lv) {
   }
   /* a `||=` can read the slot before any write: nil until then */
   if (lv->or_written) r.may_nil = 1;
-  /* a shared-mutable String is held as its handle */
-  if (lv->str_shared) { k = RK_STRBUF; r.handle = 1; }
+  /* an object slot the nil fact says may hold nil */
+  if (ty_is_object(lv->type) && lv->obj_may_nil) r.may_nil = 1;
+  /* str_shared refines TY_STRBUF; it can outlive that storage type */
+  if (lv->type == TY_STRBUF && lv->str_shared) r.handle = 1;
   r.kind = (unsigned char)k;
   r.dyn_cls = repr_dyn_cls(c, lv->type);
   return r;
 }
 
+/* Method and constructor signatures pass a kept &block as sp_Proc *.
+   Check the slot as well as expression boxing: a read can infer Proc even
+   when a copied parameter's local was left untyped and widened to POLY. */
+static void repr_check_block_params(Compiler *c) {
+  for (int si = 1; si < c->nscopes; si++) {
+    Scope *sc = &c->scopes[si];
+    if (!sc->blk_param || !sc->blk_param[0] || sc->yields) continue;
+    LocalVar *lv = scope_local(sc, sc->blk_param);
+    Repr r = repr_of_slot(c, lv);
+    if (!lv || !lv->is_param || r.ty != TY_PROC || r.kind != RK_PTR)
+      fprintf(stderr, "repr-check: conflict: method %s block parameter %s: "
+              "slot %s, signature sp_Proc *\n", sc->name ? sc->name : "?",
+              sc->blk_param, ty_name(r.ty));
+  }
+}
+
 void repr_seal(Compiler *c) {
-  (void)c;
+  if (g_repr_check) repr_check_block_params(c);
   repr_sealed_flag = 1;
 }
 

@@ -119,7 +119,7 @@ int cvar_global_slot(Compiler *c, int node, char *out, size_t cap);
 int lent_global_slot_rebound(Compiler *c, int arg, const char *slot);
 void refuse_lent_global_rebound(Compiler *c, int arg, const char *slot, const char *target, const char *pname);
 int strbuf_ivar_owner(Compiler *c, int node);
-/* Is an object's ivar set: 0 always, 1 when not nil, 2 cannot tell (codegen_util.c) */
+/* Is an object's ivar set: 0 always, 1 when not nil, 2 cannot tell, 3 explicit flag (codegen_util.c) */
 int ivar_set_kind(Compiler *c, int cid, const char *ivn);
 const char *ivar_set_test(Compiler *c, int cid, const char *ivn, const char *expr, char *buf, size_t cap);
 /* The shared-mutable shim (codegen_stmt.c) re-runs a value-semantics mutator
@@ -564,6 +564,7 @@ const char *rename_local(const char *nm);
 
 
 void emit_expr(Compiler *c, int id, Buf *b);
+void emit_constant_slot(Compiler *c, int id, Buf *b);
 void emit_expr_slot(Compiler *c, int node, TyKind slot, Buf *b);
 void emit_typed_sink_text(Compiler *c, int node, TyKind slot, const char *text, Buf *b);
 /* The store check (--check-stores): see codegen_util.c. */
@@ -579,6 +580,7 @@ void emit_coerce_text(Compiler *c, int node, TyKind from, TyKind slot, int how,
 
 /* ---- forward decls ---- */
 
+int emit_bm_flat_args(Compiler *c, const int *argv, int argc, Buf *b);
 int is_builtin_reopen(const char *name);
 int is_exc_name(const char *n);
 int class_is_exc_subclass(Compiler *c, int ci);
@@ -924,6 +926,11 @@ void nd_callee(Compiler *c, int id, int mi, int owner_ci, int add);
    them with inference's (codegen_util.c) */
 void ucall_observe(Compiler *c, int id, int mi, int owner_ci, int add);
 void ucall_report(Compiler *c);
+/* --nil-check (#7444): the calls nil_recv_guard decided, and the
+   end-of-compile report holding the analysis's nil fact against the codegen
+   helpers' answers there (codegen_call.c) */
+void nil_check_seen(int id);
+void nil_check_report(Compiler *c);
 /* --plan-check: codegen emitted the call node id (whatever it bound) */
 void ucall_emitted(int id);
 /* --plan-check: codegen emitted the visibility refusal for node id */
@@ -1077,10 +1084,10 @@ int emit_poly_rhs_coerced(Compiler *c, TyKind slot, int v, Buf *b);
 /* An empty `[]` / `{}` into a typed slot builds at the slot's representation
    rather than the literal's default (#4054). Returns 1 when it emitted. */
 int emit_empty_container_for_slot(Compiler *c, int v, TyKind slot, Buf *b);
-int emit_frozen_literal_open(Buf *b, size_t raw_len);
-int emit_frozen_literal_open_a(Buf *b, size_t raw_len, int ascii7);
-int bytes_are_ascii7(const char *s, size_t n);
-void emit_frozen_literal_close(Buf *b, int id);
+/* A frozen literal from its C-escaped bytes: a reference to the one file-scope
+   object for that content, whose definition fzl_emit_defs writes. */
+void emit_frozen_literal(Buf *b, const char *esc, size_t esc_len, size_t raw_len);
+void fzl_emit_defs(const char *t, Buf *out);
 /* Emit a Ruby string literal. len is the true byte count (may exceed strlen
    when the string contains embedded NUL bytes). */
 /* What a `round`-family call's trailing keyword hash says, as far as it can
@@ -1237,6 +1244,8 @@ void emit_arg_or_default(Compiler *c, Scope *m, int idx, int provided, Buf *out)
 int declare_default_locals(Compiler *c, Scope *m, int dnode);
 int arg_wants_root(Compiler *c, TyKind pt, int provided);
 void emit_rooted_operand(Compiler *c, TyKind pt, int provided, const char *expr, Buf *out);
+int arg_read_converts(Compiler *c, TyKind pt, int provided);
+void emit_rooted_conversion(Compiler *c, TyKind pt, const char *expr, Buf *out);
 int arg_slot_for_param(Compiler *c, Scope *m, int idx, int argc);
 /* 1 when a parameter default reads an earlier parameter: it must be evaluated
    with that parameter bound (see emit_args_filled). */
@@ -1536,6 +1545,9 @@ int emit_op_hash_take(Compiler *c, const BopCtx *x, Buf *b);
 int emit_op_hash_drop(Compiler *c, const BopCtx *x, Buf *b);
 int emit_op_hash_assoc(Compiler *c, const BopCtx *x, Buf *b);
 int emit_op_hash_compact(Compiler *c, const BopCtx *x, Buf *b);
+/* Range row emitters (codegen_call_numeric.c) */
+int emit_op_range_clone(Compiler *c, const BopCtx *x, Buf *b);
+int emit_op_range_freeze(Compiler *c, const BopCtx *x, Buf *b);
 /* Array row emitters (codegen_call_array.c) */
 int emit_op_array_shift_n(Compiler *c, const BopCtx *x, Buf *b);
 int emit_op_array_cycle_n(Compiler *c, const BopCtx *x, Buf *b);
@@ -1628,6 +1640,7 @@ int diagnose_eval_call(Compiler *c, int id);
 int diagnose_unsupported_call(Compiler *c, int id);
 int diag_user_defines(Compiler *c, const char *name);
 int recv_user_defines(Compiler *c, const char *name);
+int emit_object_ivar_list(Compiler *c, int recv, int cid, Buf *b);
 int emit_object_ivar_call(Compiler *c, int id, const char *name, int recv, TyKind rt,
                           int cid, int argc, const int *argv, Buf *b);
 const char *case_map_suffix(Compiler *c, int argc, const int *argv);
@@ -1805,6 +1818,11 @@ void emit_scalar_operand(Compiler *c, int node, const char *zero, Buf *b);
    before the argument's value: left in g_pre, the setup (an array literal's
    pushes) runs ahead of the whole expression, and so ahead of the receiver
    Ruby evaluates first. */
+void emit_rooted_key_call(Compiler *c, const char *fn, const char *recv,
+                          const int *argv, int argc, Buf *b);
+int emit_rooted_arg_list(Compiler *c, const int *argv, int argc,
+                         const char *ctype, const char *root,
+                         void (*emit)(Compiler *, int, Buf *), Buf *b);
 void emit_split_pre(Compiler *c, int node, void (*emit)(Compiler *, int, Buf *), Buf *pre, Buf *val);
 void declare_local(Compiler *c, Buf *b, LocalVar *lv, int vol);
 void declare_local_named(Compiler *c, Buf *b, LocalVar *lv, const char *name, int vol);

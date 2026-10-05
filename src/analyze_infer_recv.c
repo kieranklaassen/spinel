@@ -83,6 +83,8 @@ int infer_range_call(Compiler *c, int id, TyKind rt, TyKind *out) {
     { *out = TY_UNKNOWN; return 1; }
   }
   if (rt == TY_FLOAT_RANGE) {
+    /* overlap? answers through sp_range_overlap_v, as an Integer Range's does */
+    if (sp_streq(name, "overlap?") && argc == 1) { *out = TY_BOOL; return 1; }
     /* #size counts the integers the range enumerates: a Float answer, since an
        unbounded end makes it Infinity (#3670). Only an Integer begin has an
        enumeration at all; the emitter checks that and leaves the rest to the
@@ -1333,6 +1335,8 @@ int poly_lines_args(Compiler *c, int argc, const int *argv) {
 }
 
 int infer_poly_call(Compiler *c, int id, TyKind rt, TyKind *out) {
+  { const char *nm0 = nt_str(c->nt, id, "name");
+    if (nm0 && sp_streq(nm0, "__to_h_subject")) { *out = TY_POLY; return 1; } }
   const NodeTable *nt = c->nt;
   const char *name = nt_str(nt, id, "name");
   int recv = nt_ref(nt, id, "receiver");
@@ -1356,6 +1360,10 @@ int infer_poly_call(Compiler *c, int id, TyKind rt, TyKind *out) {
      since Set#hash is exactly that loop (#4728). */
   if (recv >= 0 && rt == TY_POLY && argc == 0 && sp_streq(name, "hash"))
     { *out = TY_INT; return 1; }
+  /* Symbol#id2name on a boxed receiver: the name as a String (sp_poly_sym_id2name) */
+  if (recv >= 0 && rt == TY_POLY && argc == 0 && sp_streq(name, "id2name") &&
+      !an_user_defines_or_reads(c, name))
+    { *out = TY_STRING; return 1; }
   /* blockless cycle(n) on a boxed receiver: the Enumerator sp_poly_cycle_n
      builds, and a countless cycle the endless one sp_poly_cycle builds,
      unless a class of the program's own has a method or a class
@@ -1404,21 +1412,21 @@ int infer_poly_call(Compiler *c, int id, TyKind rt, TyKind *out) {
       !an_user_recv_defines_method(c, name))
     { *out = TY_POLY; return 1; }
   /* Numeric#arg / #angle / #phase (0, pi or a Complex's angle) and #rect /
-     #rectangular (a pair) on a poly value, where the dispatch answers them
+     #rectangular and #polar (a pair) on a poly value, where the dispatch answers them
      (sp_poly_arg, sp_poly_rect): unless a class of the program's own has a
      method, a reader or a class method of the name, the test emit_poly_call
      makes. The builtin-only derivation, which shapes the dispatch's default
      arm, answers them either way, as that arm does. */
   if (recv >= 0 && rt == TY_POLY && argc == 0 &&
       (sp_streq(name, "arg") || sp_streq(name, "angle") || sp_streq(name, "phase") ||
-       sp_streq(name, "rect") || sp_streq(name, "rectangular"))) {
+       sp_streq(name, "rect") || sp_streq(name, "rectangular") || sp_streq(name, "polar"))) {
     int own = 0;
     for (int k = 0; k < c->nclasses && !own && !an_builtin_only_p(); k++)
       if (comp_poly_arm_defines_n(c, k, name, argc) ||
           (!c->classes[k].is_native_class && comp_reader_in_chain(c, k, name, NULL)) ||
           comp_cmethod_in_chain(c, k, name, NULL) >= 0) own = 1;
     if (!own) {
-      *out = (is_rectangular_alias(name)) ? TY_POLY_ARRAY : TY_POLY;
+      *out = (is_rectangular_alias(name) || sp_streq(name, "polar")) ? TY_POLY_ARRAY : TY_POLY;
       return 1;
     }
   }
@@ -1470,6 +1478,8 @@ int infer_poly_call(Compiler *c, int id, TyKind rt, TyKind *out) {
        reported it against generated code (#4004). Mirrors the typed-receiver
        rule in analyze_infer.c. */
     if (argc == 1 && (is_casecmp_family(name))) {
+      /* a boxed Symbol compares too, so the answer is boxed (sp_poly_casecmp) */
+      if (rt == TY_POLY && !an_user_defines_or_reads(c, name)) { *out = TY_POLY; return 1; }
       TyKind at0 = argv ? infer_type(c, argv[0]) : TY_UNKNOWN;
       if (at0 == TY_POLY) { *out = TY_POLY; return 1; }
       /* an operand that answers #to_str converts and compares, and answers
@@ -1589,8 +1599,9 @@ int infer_poly_call(Compiler *c, int id, TyKind rt, TyKind *out) {
     { *out = TY_STRING; return 1; }
   /* poly.compact / poly.flatten: an Array read out of a container answers a
      generic Array either way (#3423). */
-  if (recv >= 0 && rt == TY_POLY && argc == 0 && nt_ref(nt, id, "block") < 0 &&
+  if (recv >= 0 && rt == TY_POLY && nt_ref(nt, id, "block") < 0 &&
       sp_streq(name, "flatten") &&
+      (argc == 0 || (argc == 1 && infer_type(c, argv[0]) == TY_INT)) &&
       !an_user_defines_or_reads(c, name))
     { *out = TY_POLY_ARRAY; return 1; }
   /* #compact answers the receiver's own kind -- Hash#compact is a Hash -- and
@@ -1628,6 +1639,11 @@ int infer_poly_call(Compiler *c, int id, TyKind rt, TyKind *out) {
   if (recv >= 0 && rt == TY_POLY && sp_streq(name, "lines") && nt_ref(nt, id, "block") < 0 &&
       poly_lines_args(c, argc, argv))
     { *out = an_user_defines_or_reads(c, name) ? TY_POLY : TY_STR_ARRAY; return 1; }
+  /* ...and each_line with those arguments and no block: the same Array,
+     as the argumentless poly.each_line materializes */
+  if (recv >= 0 && rt == TY_POLY && sp_streq(name, "each_line") && nt_ref(nt, id, "block") < 0 &&
+      poly_lines_args(c, argc, argv))
+    { *out = (an_user_defines_or_reads(c, name) || an_user_defines_or_reads(c, "lines")) ? TY_POLY : TY_STR_ARRAY; return 1; }
   /* A blockless grouping enumerator on a boxed Array -- an Array read out of a
      container -- materializes to the groups themselves, an Array of Arrays. */
   if (recv >= 0 && rt == TY_POLY && argc == 1 && nt_ref(nt, id, "block") < 0 &&
@@ -1661,7 +1677,8 @@ int infer_poly_call(Compiler *c, int id, TyKind rt, TyKind *out) {
   /* poly.each_char { |c| } / each_line { |l| }: the block param is a String
      (one char, one line) and the call answers the receiver's string, as
      String#each_char answers self (#3402). */
-  if (recv >= 0 && rt == TY_POLY && argc == 0 &&
+  if (recv >= 0 && rt == TY_POLY &&
+      (argc == 0 || (sp_streq(name, "each_line") && poly_lines_args(c, argc, argv))) &&
       (sp_streq(name, "each_char") || sp_streq(name, "each_line")) &&
       nt_ref(nt, id, "block") >= 0 && !an_user_defines_or_reads(c, name) &&
       !an_user_defines_or_reads(c, sp_streq(name, "each_char") ? "chars" : "lines")) {

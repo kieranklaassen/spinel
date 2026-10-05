@@ -64,6 +64,15 @@ int proc_to_proc_method_nodes(Compiler *c, int recv, int **out);
 int local_sole_range_node(Compiler *c, int recv);
 int const_array_elems_all_int_array(Compiler *c, const char *cname);
 int *an_parent_map(const NodeTable *nt);
+/* The definite-assignment walk (analyze.c), shared with the nil facts
+   (analyze_nil.c): the program's parent map, each statement's place in its
+   list (filled one list at a time, -1 for a node not in its parent's list),
+   whether a read of local `nm` can run before any write of it, and the
+   per-list memo the walk keeps, freed once a pass is done with it. */
+typedef struct { int *pos; char *done; } DUPos;
+int *du_parent_map(const NodeTable *nt);
+int du_read_maybe_unset(const NodeTable *nt, const int *par, DUPos *dp, int rd, const char *nm);
+void du_memo_free(void);
 int an_value_dropped(const NodeTable *nt, const int *parent, int node);
 int local_all_writes_empty_hash(Compiler *c, Scope *sc, const char *name);
 int local_all_writes_empty_hash_or_new(Compiler *c, Scope *sc, const char *name);
@@ -92,6 +101,7 @@ int builtin_class_id(const char *name);
 int builtin_class_parent_id(int id);
 int desugar_builtin_reopen_named_superclass(Compiler *c);
 int desugar_builtin_reopen_self_class(Compiler *c);
+int desugar_time_singleton_bare_ctor(Compiler *c);
 const char *class_ruby_name(Compiler *c, int ci); /* codegen.c */
 int builtin_object_method_known(const char *m);
 int core_method_name(const char *n);   /* analyze_desugar.c: a core class's public method */
@@ -140,6 +150,8 @@ int struct_member_idx(Compiler *c, ClassInfo *sc, int keynode);
 int struct_member_idx_float(Compiler *c, ClassInfo *sc, int keynode);
 /* Last statement of a scope's body, or -1. */
 int scope_body_last(Compiler *c, int mi);
+int block_given_tail_then_last(Compiler *c, int last);
+int super_forwards_caller_block(Compiler *c, int id);
 /* 1 if `node` is `<&block-param>.call(...)` / .() / [] for method mi -- the
    explicit-call equivalent of `yield`, inlined the same way. */
 int is_blk_param_call(Compiler *c, int node, int mi);
@@ -428,6 +440,7 @@ int desugar_handle_attr_accessor(Compiler *c);
 int desugar_handle_reopen_self_recv(Compiler *c);
 int desugar_call_or_write_reopen(Compiler *c);
 int desugar_static_class_eval(Compiler *c);
+void desugar_nil_block_arg(Compiler *c);
 int desugar_compose_method_operand(Compiler *c);
 int desugar_mutator_receiver_value(Compiler *c);
 int desugar_method_curry(Compiler *c);

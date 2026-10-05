@@ -1869,17 +1869,19 @@ TyKind yield_aware_elem_ty(Compiler *c, int node) {
 }
 
 /* The statement a call with a block answers from, when the body ends in
-   `if block_given? ... else ... end`: the block arm's last statement. */
-static int block_given_tail_then_last(Compiler *c, int last) {
+   `if/unless block_given? ... else ... end`: the block arm's last statement. */
+int block_given_tail_then_last(Compiler *c, int last) {
   const NodeTable *nt = c->nt;
-  if (last < 0 || nt_kind(nt, last) != NK_IfNode) return -1;
+  if (last < 0) return -1;
+  NodeKind k = nt_kind(nt, last);
+  if (k != NK_IfNode && k != NK_UnlessNode) return -1;
   int pred = nt_ref(nt, last, "predicate");
   if (pred < 0 || nt_kind(nt, pred) != NK_CallNode || nt_ref(nt, pred, "receiver") >= 0) return -1;
   const char *pn = nt_str(nt, pred, "name");
   if (!pn || !sp_streq(pn, "block_given?")) return -1;
-  int sub = nt_ref(nt, last, "subsequent");
+  int sub = nt_ref(nt, last, k == NK_UnlessNode ? "else_clause" : "subsequent");
   if (sub < 0 || nt_kind(nt, sub) != NK_ElseNode) return -1;
-  int ts = nt_ref(nt, last, "statements");
+  int ts = nt_ref(nt, k == NK_UnlessNode ? sub : last, "statements");
   int tn = 0; const int *tb = ts >= 0 ? nt_arr(nt, ts, "body", &tn) : NULL;
   return tn > 0 ? tb[tn - 1] : -1;
 }
@@ -2715,9 +2717,8 @@ int method_call_param_shift(Compiler *c, int mn, int mi) {
   return (m->class_id < 0 && !m->is_cmethod) ? 1 : 0;
 }
 
-/* True when scope `scope_idx` contains an explicit `return` (such a method
-   cannot be inlined at its call sites). Shared by the inliner and the
-   valued-break detector. */
+/* True when scope `scope_idx` contains an explicit `return`, which needs
+   a return funnel when the method is inlined at its call sites. */
 int scope_has_return(Compiler *c, int scope_idx) {
   NT_FOREACH_KIND(c->nt, NK_ReturnNode, id)
     if (c->nscope[id] == scope_idx) return 1;
@@ -2727,7 +2728,7 @@ int scope_has_return(Compiler *c, int scope_idx) {
 /* Resolve a block-bearing CallNode to an INLINE-ABLE yielding user method:
    mirrors emit_inline_call_x's resolution (free function -> implicit-self
    chain -> Cls class method -> object-receiver chain) and its
-   yields/!return guard. -1 for anything else -- builtin iterators, `loop`,
+   yields guard. -1 for anything else -- builtin iterators, `loop`,
    `catch`, proc/lambda literals, and methods the inliner would refuse. */
 int call_user_yield_mi(Compiler *c, int id) {
   const NodeTable *nt = c->nt;
@@ -2750,7 +2751,7 @@ int call_user_yield_mi(Compiler *c, int id) {
   }
   if (mi < 0) return -1;
   Scope *m = &c->scopes[mi];
-  if (!m->yields || scope_has_return(c, mi)) return -1;
+  if (!m->yields) return -1;
   return mi;
 }
 
