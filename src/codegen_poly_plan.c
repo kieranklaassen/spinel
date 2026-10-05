@@ -75,7 +75,7 @@ static void pa_arm_text(Compiler *c, const PolyArm *a, char *out, size_t n) {
                                      "io-flush", "io-close", "enum-to_a",
                                      "cover?", "try_convert", "gcdlcm", "unpack1", "include?", "str-delete",
                                      "str-partition", "str-setop", "store", "str-encode", "str-split",
-                                     "int-bitref", "index-cases", "io-read_nonblock", "io-write",
+                                     "int-bitref", "index-cases", "io-read_nonblock", "io-readpartial", "io-write",
                                      "io-syswrite", "io-print", "io-putc", "io-seek/read", "unshift", "push",
                                      "pack", "join(sep)", "include?-cases", "array-index", "intersect?",
                                      "strftime", "aref-str", "aref-sym", "aref-poly", "predicate(arg)",
@@ -1228,7 +1228,10 @@ void poly_specials0(Compiler *c, int id, const char *name, PolySpecials0 *s) {
   /* `rewind` on a poly stream (a param unioning StringIO and IO, #3257):
      both are builtins/native classes with no user arm, so without this
      pre-arm the call was silently dropped. */
-  int is_io_rewind = sp_streq(name, "rewind") && !recv_user_defines(c, name);
+  /* ...and an Enumerator's, beside a class of the program's own that
+     defines rewind too: the builtin arms test their runtime kind first, so
+     a user arm still takes its objects */
+  int is_io_rewind = sp_streq(name, "rewind") && argc == 0;
   /* to_a on a poly value that is really a builtin hash/array (a yield-result
      union of an rbs-seeded Hash and a class instance, #3278): the user-class
      switch has no builtin arm, so the hash fell through to the nil seed. */
@@ -1552,13 +1555,27 @@ void emit_poly_prearms0(Compiler *c, int id, const char *name, const PolySpecial
      (rewind's return is rarely consumed through a poly union) */
   if (is_io_rewind) {
     if (g_plan_check) pa_observe(PA_BUILTIN, PA_KEY_BUILTIN + PB_IO_REWIND, -1, TY_UNKNOWN, PC_SAME);
+    /* a stream answers its 0 where the result is boxed */
     buf_printf(b, "if (_t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_IO)"
-                  " { sp_File_rewind((sp_File *)_t%d.v.p); }\nelse ", tv, tv, tv);
+                  " { sp_int _rw = sp_File_rewind((sp_File *)_t%d.v.p);", tv, tv, tv);
+    if (ret == TY_POLY) buf_printf(b, " _t%d = sp_box_int(_rw);", tr);
+    else if (ret == TY_INT) buf_printf(b, " _t%d = _rw;", tr);
+    buf_puts(b, " (void)_rw; }\nelse ");
+    /* an Enumerator rewinds, and answers itself where the result is boxed */
+    buf_printf(b, "if (_t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_ENUMERATOR)"
+                  " { sp_Enumerator_rewind((sp_Enumerator *)_t%d.v.p);", tv, tv, tv);
+    if (ret == TY_POLY) buf_printf(b, " _t%d = _t%d;", tr, tv);
+    buf_puts(b, " }\nelse ");
     int sio_cid3 = comp_class_index(c, "StringIO");
     if (sio_cid3 >= 0)
+    {
       buf_printf(b, "if (_t%d.tag == SP_TAG_OBJ && _t%d.cls_id == %d)"
-                    " { sp_StringIO_rewind((sp_StringIO *)_t%d.v.p); }\nelse ",
+                    " { sp_int _rw = sp_StringIO_rewind((sp_StringIO *)_t%d.v.p);",
                  tv, tv, sio_cid3, tv);
+      if (ret == TY_POLY) buf_printf(b, " _t%d = sp_box_int(_rw);", tr);
+      else if (ret == TY_INT) buf_printf(b, " _t%d = _rw;", tr);
+      buf_puts(b, " (void)_rw; }\nelse ");
+    }
   }
   /* A zero-arg IO method whose name a user class ALSO owns. The cls_id
      switch below carries an arm per user class only, so an `@io` that
@@ -2929,6 +2946,20 @@ void emit_poly_cases_n(Compiler *c, int id, const char *name, const PolySpecials
       else buf_printf(b, "sp_box_str(_t%d)", trd7);
     }
     else buf_printf(b, "_t%d", trd7);
+    buf_puts(b, "; break; }");
+  }
+  /* readpartial / sysread(len) on the builtin IO tag, the same shape: a
+     TCPSocket beside an SSLSocket (an openssl package class) reached the
+     class-id switch, which had an arm only for the SSLSocket (#7315) */
+  if ((sp_streq(name, "readpartial") || sp_streq(name, "sysread")) && argc == 1 && kwh < 0 && splat_a < 0) {
+    if (g_plan_check) pa_observe(PA_BUILTIN, PA_KEY_BUILTIN + PB_IO_READPARTIAL, -1, TY_UNKNOWN, PC_SAME);
+    int trp = ++g_tmp;
+    buf_printf(b, " case SP_BUILTIN_IO: { const char *_t%d = sp_File_readpartial((sp_File *)_t%d.v.p, ", trp, tv);
+    if (atmp_ty[0] == TY_POLY) buf_printf(b, "sp_poly_arg_i(_t%d)", atmp[0]);
+    else buf_printf(b, "(sp_int)_t%d", atmp[0]);
+    buf_printf(b, "); _t%d = ", tr);
+    if (ret == TY_POLY) buf_printf(b, "sp_box_str(_t%d)", trp);
+    else buf_printf(b, "_t%d", trp);
     buf_puts(b, "; break; }");
   }
   if (sp_streq(name, "write") && argc == 1 && kwh < 0 && splat_a < 0) {

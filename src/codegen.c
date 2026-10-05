@@ -752,6 +752,7 @@ static void emit_int_expr_ex(Compiler *c, int node, int strict, Buf *b) {
 }
 
 void emit_int_expr(Compiler *c, int node, Buf *b) {
+  if (b == g_pre) { emit_into_pre_line(c, emit_int_expr, node); return; }
   emit_int_expr_ex(c, node, 1, b);
 }
 
@@ -830,6 +831,7 @@ static int class_is_user_numeric(Compiler *c, int cid) {
 }
 
 void emit_float_expr(Compiler *c, int node, Buf *b) {
+  if (b == g_pre) { emit_into_pre_line(c, emit_float_expr, node); return; }
   if (yield_site_type(c, node) == TY_POLY) {
     buf_puts(b, "sp_poly_to_f("); emit_expr(c, node, b); buf_puts(b, ")");
     return;
@@ -979,6 +981,7 @@ static void emit_str_expr_ex(Compiler *c, int node, int strict, Buf *b) {
 }
 
 void emit_str_expr(Compiler *c, int node, Buf *b) {
+  if (b == g_pre) { emit_into_pre_line(c, emit_str_expr, node); return; }
   emit_str_expr_ex(c, node, 1, b);
 }
 
@@ -1831,6 +1834,7 @@ static void emit_boxed_impl(Compiler *c, int node, Buf *b) {
 /* emit_boxed: the boxing of node `node`'s value (emit_boxed_impl); under
    --repr-check it keeps the nesting the recorder reads */
 void emit_boxed(Compiler *c, int node, Buf *b) {
+  if (b == g_pre) { emit_into_pre_line(c, emit_boxed, node); return; }
   rc_depth++;
   emit_boxed_impl(c, node, b);
   rc_depth--;
@@ -3338,6 +3342,23 @@ static void fi_build(Compiler *c) {
   fi_memo_reset(0);
 }
 
+/* How a decision about a whole method is named in its key (src/decide.c):
+   Class#meth, Class.meth for a class method, #meth for a top-level def, and
+   `main` for the top-level body. Never the emitted C name, which a reopened
+   class or a renamed top-level method spells differently. Class is the name
+   the compiler knows the class by: its last constant, or the whole path
+   joined by `__` (A__Foo) when two classes share that. */
+static const char *decide_method_site(Compiler *c, Scope *s) {
+  static char *site = NULL; static size_t cap = 0;
+  if (!g_decide_on) return "";
+  if (!s->name) return "main";
+  const char *cls = s->class_id >= 0 ? c->classes[s->class_id].name : "";
+  size_t need = strlen(cls) + strlen(s->name) + 2;
+  if (need > cap) { cap = need * 2; site = realloc(site, cap); }
+  snprintf(site, cap, "%s%s%s", cls, s->class_id >= 0 && s->is_cmethod ? "." : "#", s->name);
+  return site;
+}
+
 static int method_inline_force(Compiler *c, Scope *s) {
   static int env_rd; static const char *env_force;
   if (!env_rd) { env_force = getenv("SPINEL_INLINE_FORCE"); env_rd = 1; }
@@ -3351,7 +3372,8 @@ static int method_inline_force(Compiler *c, Scope *s) {
   if (!g_fi_state) return 0;
   int si = (int)(s - c->scopes);
   if (si < 0 || si >= g_fi_nscopes) return 0;
-  return g_fi_state[si] == 1;
+  if (g_fi_state[si] != 1) return 0;
+  return decide_fn("inline-force", decide_method_site(c, s), NULL);
 }
 
 /* The cls_id a fresh instance is stamped with. A synthesized singleton subclass
@@ -3594,11 +3616,12 @@ static void inherit_transplant_locals(Compiler *c, Scope *s) {
    directly (`sp_gc_nroots`): an unwind skips the cleanup attributes of every
    frame it passes, so the landing frame is the one that has to put the depth
    back, whether or not it pushed anything itself. */
-static void gc_save_take_back(Buf *b, size_t off, size_t save_len) {
+static void gc_save_take_back(Buf *b, size_t off, size_t save_len, const char *site) {
   if (off + save_len > b->len) return;
   const char *body = b->p + off + save_len;
   if (strstr(body, "SP_GC_ROOT") || strstr(body, "setjmp") ||
       strstr(body, "sp_gc_nroots")) return;
+  if (!decide_fn("gc-save", site, NULL)) return;
   buf_erase(b, off, save_len);
 }
 
@@ -3694,9 +3717,9 @@ static int gc_region_inert(const char *from, const char *to, const char *lvname)
    temp initialized straight from an element of a container ivar whose elements
    analyze proved array-or-nil is the same value under a different name. This
    is the destructuring shape -- `@io_addr, @lut = @attr_lut[i]` puts the pair
-   in a temp and reads it twice. */
-static int gc_temp_is_arr_or_nil(Compiler *c, Scope *s, const char *fn,
-                                 const char *rootline, const char *tname) {
+   in a temp and reads it twice. Answers that ivar, or NULL. */
+static const char *gc_temp_arr_or_nil_ivar(Compiler *c, Scope *s, const char *fn,
+                                           const char *rootline, const char *tname) {
   if (s->class_id < 0 || s->class_id >= c->nclasses) return 0;
   /* the declaration sits just before the root: `sp_RbVal _tN = <init>;` */
   size_t off = (size_t)(rootline - fn);
@@ -3722,7 +3745,7 @@ static int gc_temp_is_arr_or_nil(Compiler *c, Scope *s, const char *fn,
   for (int i = 0; i < ci->nivars; i++) {
     const char *m = iv_c(ci->ivars[i] + 1);
     if (strlen(m) == fn_len && !strncmp(m, fname, fn_len))
-      return ci->ivar_arr_elem_arr_or_nil[i];
+      return ci->ivar_arr_elem_arr_or_nil[i] ? ci->ivars[i] : NULL;
   }
   return 0;
 }
@@ -3749,6 +3772,11 @@ static void gc_roots_take_back(Compiler *c, Scope *s, Buf *b, size_t fn_off) {
     const char *last = NULL;
     for (const char *q = strstr(body, lvname); q; q = strstr(q + 1, lvname)) last = q;
     if (last && !gc_region_inert(body, last, lvname)) continue;
+    if (g_decide_on) {
+      char written[300];
+      snprintf(written, sizeof written, "%.*s", (int)block_param_written_len(lv->name), lv->name);
+      if (!decide_fn("root-elide", decide_method_site(c, s), written)) continue;
+    }
     buf_erase(b, (size_t)(at - b->p), rl);
   }
   /* temps, by the same rule */
@@ -3763,11 +3791,15 @@ static void gc_roots_take_back(Compiler *c, Scope *s, Buf *b, size_t fn_off) {
       tname[n] = '\0';
       if (nm[n] != ')') continue;
       snprintf(rootline, sizeof rootline, "SP_GC_ROOT_RBVAL(%s);", tname);
-      if (!gc_temp_is_arr_or_nil(c, s, fn, q, tname)) continue;
+      const char *ivar = gc_temp_arr_or_nil_ivar(c, s, fn, q, tname);
+      if (!ivar) continue;
       const char *body = q + strlen(rootline);
       const char *lastq = NULL;
       for (const char *r = strstr(body, tname); r; r = strstr(r + 1, tname)) lastq = r;
       if (lastq && !gc_region_inert(body, lastq, tname)) continue;
+      /* a temp has no name of its own to key: the temps read out of one
+         container ivar in one method share a decision */
+      if (!decide_fn("root-elide", decide_method_site(c, s), ivar)) continue;
       at = q; break;
     }
     if (!at) break;
@@ -3969,7 +4001,7 @@ static void line_map_reanchor(Buf *b) {
   *b = o;
 }
 
-static int gc_frame_build(Buf *b, size_t ins) {
+static int gc_frame_build(Buf *b, size_t ins, const char *site) {
   if (ins >= b->len) return 0;
   const char *p = b->p;
   size_t end = b->len;
@@ -4048,6 +4080,7 @@ static int gc_frame_build(Buf *b, size_t ins) {
   }
   free(ts.v);
   if (peak == 0 && np == 0) { free(nb.p); return 0; }
+  if (!decide_fn("root-frame", site, NULL)) { free(nb.p); return 0; }
   Buf out; memset(&out, 0, sizeof out);
   buf_putn(&out, p, ins);
   buf_puts(&out, "    struct { sp_gc_frame_hdr h;");
@@ -4239,7 +4272,7 @@ static int main_body_split(Compiler *c, Buf *body, size_t open, size_t *frame_in
       buf_putn(&part, p + from, to - from);
       if (part.len && part.p[part.len - 1] != '\n') buf_puts(&part, "\n");
       buf_puts(&part, "}\n");
-      if (!g_no_root_frame) gc_frame_build(&part, ins);
+      if (!g_no_root_frame) gc_frame_build(&part, ins, "main");
       buf_putn(&out, part.p, part.len);
       free(part.p);
       from = to;
@@ -5026,8 +5059,9 @@ void emit_method(Compiler *c, Scope *s, Buf *b) {
   g_yield_proc_ref = sv_ypr9; g_yield_slot_ty = sv_yst9;
   buf_puts(b, "}\n");
   if (!g_no_root_elision) gc_roots_take_back(c, s, b, gc_save_off);
-  if (!g_no_root_frame) gc_frame_build(b, gc_save_off + gc_save_len);
-  gc_save_take_back(b, gc_save_off, gc_save_len);
+  const char *site = decide_method_site(c, s);
+  if (!g_no_root_frame) gc_frame_build(b, gc_save_off + gc_save_len, site);
+  gc_save_take_back(b, gc_save_off, gc_save_len, site);
 }
 
 /* ---- first-class Proc ---- */
@@ -6263,7 +6297,7 @@ void emit_fiber_new(Compiler *c, int id, Buf *b, int as_gen, int size_node) {
   }
 
   buf_puts(pb, "}\n");
-  if (!g_no_root_frame) gc_frame_build(pb, fib_frame_ins);
+  if (!g_no_root_frame) gc_frame_build(pb, fib_frame_ins, decide_node_site(c->nt, id));
   g_c_loop_depth = sv_fib_loopd;
   g_ensure_depth = sv_fib_ensd; g_loop_ensure_base = sv_fib_lensb;
   memcpy(g_ensure_stack, sv_fib_estk, sizeof sv_fib_estk);
@@ -7957,7 +7991,7 @@ else if (orecv >= 0 && onm) {
     buf_puts(pb, "  return 0;\n");
   }
   buf_puts(pb, "}\n");
-  if (!g_no_root_frame) gc_frame_build(pb, proc_frame_ins);
+  if (!g_no_root_frame) gc_frame_build(pb, proc_frame_ins, decide_node_site(c->nt, create));
   buf_puts(&g_procs, proc_body_buf.p ? proc_body_buf.p : "");
   free(proc_body_buf.p);
   g_c_loop_depth = sv_loopd; g_in_proc_body = sv_inproc; g_c_ret_void = sv_cv;
@@ -10524,7 +10558,11 @@ int emit_super_inline(Compiler *c, int id, Buf *b, int indent, int as_expr) {
   }
   if (mi < 0) return 0;
   Scope *m = &c->scopes[mi];
-  if (!m->yields || scope_has_return(c, mi)) return 0;
+  if (!m->yields) return 0;
+  /* a `return` in the parent leaves the inlined body through an exit label of
+     its own, as the yield inliner's does; bailing fell to a call of a
+     function a yielding method never has, which did not link */
+  int m_has_ret = scope_has_return(c, mi);
   if (g_nren + m->nlocals >= MAX_RENAME) return 0;
   for (int i = 0; i < m->nlocals; i++) {
     LocalVar *lv = &m->locals[i];
@@ -10649,6 +10687,10 @@ int emit_super_inline(Compiler *c, int id, Buf *b, int indent, int as_expr) {
   if (is_forwarding) zsuper_end(&z);
   inl_dflt_leave(sv_dflt);
 
+  const char *sv_prl = g_method_pr_label, *sv_prv = g_method_pr_var;
+  TyKind sv_prt = g_ret_type;
+  int sv_prexc = g_method_pr_exc_depth, sv_prens = g_method_pr_ensure_depth;
+  char inl_lbl[32]; snprintf(inl_lbl, sizeof inl_lbl, "_sret%d", tag);
   if (as_expr) {
     TyKind rt = comp_ntype(c, id);
     int rtag = ++g_tmp;
@@ -10658,11 +10700,37 @@ int emit_super_inline(Compiler *c, int id, Buf *b, int indent, int as_expr) {
     const char *sv_rv = g_result_var; g_result_var = rvbuf;
     int sp = g_result_poly; g_result_poly = (rt == TY_POLY);
     TyKind srt = g_result_ty; g_result_ty = rt;
-    emit_stmts_tail(c, m->body, b, din);
+    if (m_has_ret) {
+      g_method_pr_label = inl_lbl; g_method_pr_var = rvbuf; g_ret_type = rt;
+      g_method_pr_exc_depth = g_exc_frame_depth;
+      g_method_pr_ensure_depth = g_ensure_depth;
+      emit_indent(b, din); buf_puts(b, "{\n");
+    }
+    emit_stmts_tail(c, m->body, b, m_has_ret ? din + 1 : din);
+    if (m_has_ret) {
+      g_method_pr_label = sv_prl; g_method_pr_var = sv_prv; g_ret_type = sv_prt;
+      g_method_pr_exc_depth = sv_prexc; g_method_pr_ensure_depth = sv_prens;
+      emit_indent(b, din); buf_puts(b, "}\n");
+      emit_indent(b, din); buf_printf(b, "%s: ;\n", inl_lbl);
+    }
     g_result_var = sv_rv; g_result_poly = sp; g_result_ty = srt;
     emit_indent(b, din); buf_printf(b, "_t%d;\n", rtag);
   }
-  else emit_stmts(c, m->body, b, din);
+  else {
+    if (m_has_ret) {
+      g_method_pr_label = inl_lbl; g_method_pr_var = NULL;
+      g_method_pr_exc_depth = g_exc_frame_depth;
+      g_method_pr_ensure_depth = g_ensure_depth;
+      emit_indent(b, din); buf_puts(b, "{\n");
+    }
+    emit_stmts(c, m->body, b, m_has_ret ? din + 1 : din);
+    if (m_has_ret) {
+      g_method_pr_label = sv_prl; g_method_pr_var = sv_prv;
+      g_method_pr_exc_depth = sv_prexc; g_method_pr_ensure_depth = sv_prens;
+      emit_indent(b, din); buf_puts(b, "}\n");
+      emit_indent(b, din); buf_printf(b, "%s: ;\n", inl_lbl);
+    }
+  }
 
   if (as_expr) { emit_indent(b, indent); buf_puts(b, "})"); }
   else { emit_indent(b, indent); buf_puts(b, "}\n"); }
@@ -15805,7 +15873,7 @@ char *codegen_program(const NodeTable *nt) {
         size_t end_frame_ins = body->len;
         EMIT_COLLECT_UNIT(emit_stmts(c, stmts, body, 1));
         buf_puts(body, "}\n");
-        if (!g_no_root_frame) gc_frame_build(body, end_frame_ins);
+        if (!g_no_root_frame) gc_frame_build(body, end_frame_ins, decide_node_site(c->nt, tbody[k]));
       }
     }
   }
@@ -15974,7 +16042,7 @@ char *codegen_program(const NodeTable *nt) {
     buf_puts(body, "  sp_main_stack_run(_sp_main_body);\n"
                    "  return _sp_main_rc;\n}\n");
   }
-  if (!g_no_root_frame) gc_frame_build(body, main_frame_ins);
+  if (!g_no_root_frame) gc_frame_build(body, main_frame_ins, "main");
 
   emit_regex_section(c, &b);
   { const char *pdt[3] = { g_procs.p, body->p, b.p };

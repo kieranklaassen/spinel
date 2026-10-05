@@ -2,6 +2,7 @@
 #include <limits.h>
 #include "analyze_internal.h"
 #include "repr.h"
+#include "decide.h"
 
 
 static int narrow_int_table_ivars(Compiler *c, int in_round);  /* declared early: the fixpoint calls it */
@@ -1731,6 +1732,43 @@ static void reject_env_value_uses(Compiler *c) {
     exit(1);
   }
   free(ok);
+}
+
+/* `include x` / `extend x` / `prepend x` in a class or module body (or at
+   the top level) whose argument is not a constant -- `include w(Registry)` --
+   names a module only the run time knows. The mixin is resolved at compile
+   time by its constant, so such an argument was skipped and the module's
+   methods were silently missing; refuse it instead. */
+static void reject_dynamic_mixin_args(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  for (int id = 0; id < nt->count; id++) {
+    NodeKind k = nt_kind(nt, id);
+    int body = -1;
+    if (k == NK_ClassNode || k == NK_ModuleNode || k == NK_SingletonClassNode) body = nt_ref(nt, id, "body");
+    else if (id == nt->root_id) body = nt_ref(nt, id, "statements");
+    if (body < 0 || nt_kind(nt, body) != NK_StatementsNode) continue;
+    int bn = 0; const int *bb = nt_arr(nt, body, "body", &bn);
+    for (int i = 0; i < bn; i++) {
+      int st = bb[i];
+      if (nt_kind(nt, st) != NK_CallNode || nt_ref(nt, st, "receiver") >= 0) continue;
+      const char *nm = nt_str(nt, st, "name");
+      if (!nm || !(sp_streq(nm, "include") || sp_streq(nm, "extend") || sp_streq(nm, "prepend"))) continue;
+      int args = nt_ref(nt, st, "arguments"), ac = 0;
+      const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &ac) : NULL;
+      for (int a = 0; a < ac; a++) {
+        NodeKind ak = nt_kind(nt, av[a]);
+        if (ak == NK_ConstantReadNode || ak == NK_ConstantPathNode || ak == NK_SelfNode) continue;
+        int ln = (int)nt_int(nt, st, "node_line", 0);
+        int fid = (int)nt_int(nt, st, "node_file", 0);
+        const char *file = nt_file_path(nt, fid);
+        if (!file || !*file) file = nt->source_file;
+        fprintf(stderr, "spinel: %s:%d: `%s` of a module named by an expression, not a "
+                        "constant, is not supported (the mixin is resolved at compile time)\n",
+                file ? file : "source.rb", ln, nm);
+        exit(1);
+      }
+    }
+  }
 }
 
 /* `A = SomeClass` (a constant aliasing a class) then `A.foo`: rewrite the
@@ -23977,11 +24015,20 @@ static int nn_fresh(void) {
   if (nn_inferring && nn_done_epoch != nn_epoch && nn_c) nn_compute_now(nn_c, 0);
   return nn_ready;
 }
-static int nn_read_nonnil(int id) {
-  return id >= 0 && nn_fresh() && id < nn_cap && nn_nonnil[id];
+/* The two questions the rest of the compiler asks of the facts. Each fact
+   used is a decision (src/decide.c), keyed by the read's position and, for a
+   local, the name it was written with: a refused one leaves the read as
+   possibly nil, which is what it was before the fact was proven. */
+static int nn_read_nonnil(Compiler *c, int id, const char *name) {
+  if (!(id >= 0 && nn_fresh() && id < nn_cap && nn_nonnil[id])) return 0;
+  if (!g_decide_on) return 1;
+  char written[300];
+  snprintf(written, sizeof written, "%.*s", (int)block_param_written_len(name), name);
+  return decide_node(c->nt, id, "nn-read", written);
 }
-static int nn_index_inbounds(int id) {
-  return id >= 0 && nn_fresh() && id < nn_cap && nn_inb[id];
+static int nn_index_inbounds(Compiler *c, int id) {
+  return id >= 0 && nn_fresh() && id < nn_cap && nn_inb[id] &&
+         decide_node(c->nt, id, "nn-inb", NULL);
 }
 /* nullable_int_value as the slot's own marks answer it, without the facts:
    what the variable can hold anywhere, rather than at this read. */
@@ -25418,7 +25465,7 @@ int nullable_int_value(Compiler *c, int v) {
     return 0;
   }
   if (nt_kind(nt, v) == NK_CallNode) {
-    if (nn_index_inbounds(v)) return 0;
+    if (nn_index_inbounds(c, v)) return 0;
     if (nullable_int_call_name(nt_str(nt, v, "name"))) return 1;
     if (nn_call_unboxes_nil(c, v)) return 1;
     /* A setter assignment answers its RHS, not the writer's return. Its
@@ -25491,7 +25538,7 @@ int nullable_int_value(Compiler *c, int v) {
     const char *rn = nt_str(nt, v, "name");
     Scope *rs = rn ? comp_scope_of(c, v) : NULL;
     LocalVar *rv = rs ? scope_local(rs, rn) : NULL;
-    return rv && rv->nullable_int && !nn_read_nonnil(v);
+    return rv && rv->nullable_int && !nn_read_nonnil(c, v, rn);
   }
   /* `x &&= v` answers x's nil when x is nil, and `x ||= v` answers v when
      x is nil, so the value can be nil as the local or v can */
@@ -27730,6 +27777,121 @@ static void desugar_block_arg_order(Compiler *c) {
   }
 }
 
+/* Does the subtree under `n` write the variable a read of type-name prefix
+   `pfx` ("LocalVariable", "InstanceVariable", ...) and name `name` reads? A
+   def's body runs when called, under its own locals. */
+static int rr_writes_var(const NodeTable *nt, int n, const char *pfx, const char *name) {
+  if (n < 0) return 0;
+  const char *ty = nt_type(nt, n);
+  if (!ty || sp_streq(ty, "DefNode")) return 0;
+  if (!strncmp(ty, pfx, strlen(pfx)) && (strstr(ty, "Write") || strstr(ty, "Target")) &&
+      nt_str(nt, n, "name") && sp_streq(nt_str(nt, n, "name"), name))
+    return 1;
+  int nr = nt_num_refs(nt, n);
+  for (int i = 0; i < nr; i++)
+    if (rr_writes_var(nt, nt_ref_at(nt, n, i), pfx, name)) return 1;
+  int na = nt_num_arrs(nt, n);
+  for (int i = 0; i < na; i++) {
+    int m = 0; const int *ids = nt_arr_at(nt, n, i, &m);
+    for (int j = 0; j < m; j++) if (rr_writes_var(nt, ids[j], pfx, name)) return 1;
+  }
+  return 0;
+}
+/* `v << (v = +"b")`: Ruby evaluates the receiver before the arguments, so the
+   String the call mutates and answers is the one v held then, and the
+   argument's write stands -- `r = v << (v = +"b")` gives r "ab" and v "b".
+   The String mutators read their receiver's variable again after the
+   arguments, to write the result back or to hand its handle on, so they
+   mutated or answered the String the argument bound, and a value-semantics
+   write-back undid the argument's write. When an argument or the block of
+   such a call, or of an append it chains onto (`v << x << (v = y)`), writes
+   the variable its receiver chain starts from, the call becomes
+     (__rr_N = v; __rr_N << (v = +"b"))
+   so the mutation and the value follow the String the receiver read, and the
+   write stands. The node itself becomes the parentheses, keeping its id,
+   line and scope. This runs after the type fixpoint converges; a rewrite
+   resumes inference so the new temporary takes its receiver's type. */
+static int desugar_mutator_recv_rebind(Compiler *c) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  int n0 = nt->count, changed = 0;
+  for (int id = 0; id < n0; id++) {
+    if (nt_kind(nt, id) != NK_CallNode) continue;
+    const char *nm = nt_str(nt, id, "name");
+    if (!nm || !is_string_rebind_mutator(nm)) continue;
+    /* the variable the receiver chain starts from, through the appends
+       that answer their receiver */
+    int base = nt_ref(nt, id, "receiver");
+    while (base >= 0 && nt_kind(nt, base) == NK_CallNode && nt_ref(nt, base, "receiver") >= 0 &&
+           nt_str(nt, base, "name") &&
+           is_string_append(nt_str(nt, base, "name")))
+      base = nt_ref(nt, base, "receiver");
+    const char *pfx = NULL;
+    switch (nt_kind(nt, base)) {
+      case NK_LocalVariableReadNode: pfx = "LocalVariable"; break;
+      case NK_InstanceVariableReadNode: pfx = "InstanceVariable"; break;
+      case NK_GlobalVariableReadNode: pfx = "GlobalVariable"; break;
+      case NK_ClassVariableReadNode: pfx = "ClassVariable"; break;
+      default: continue;
+    }
+    const char *vn = nt_str(nt, base, "name");
+    if (!vn) continue;
+    int hit = 0;
+    for (int cur = id; cur >= 0 && cur != base && !hit; cur = nt_ref(nt, cur, "receiver"))
+      hit = rr_writes_var(nt, nt_ref(nt, cur, "arguments"), pfx, vn) ||
+            rr_writes_var(nt, nt_ref(nt, cur, "block"), pfx, vn);
+    if (!hit) continue;
+    /* These names also belong to Arrays, Hashes and user objects. Only a
+       String receiver needs the String emitters' receiver snapshot. */
+    TyKind rt = infer_type(c, base);
+    if (rt != TY_STRING && rt != TY_STRBUF) continue;
+    Scope *sc = comp_scope_of(c, id);
+    if (!sc) continue;
+    int first = nt->count;
+    char tn[64];
+    snprintf(tn, sizeof tn, "__rr_%s", comp_node_tag(c, id));
+    /* `__rr_N = v`, its value a fresh read of v; the chain's base becomes
+       the read of __rr_N */
+    char vty[48], vnm[256];
+    snprintf(vty, sizeof vty, "%sReadNode", pfx);
+    snprintf(vnm, sizeof vnm, "%s", vn);
+    int w = nt_new_node(nt, "LocalVariableWriteNode");
+    int vr = nt_new_node(nt, vty);
+    if (w < 0 || vr < 0) continue;
+    nt_node_set_str(nt, vr, "name", vnm);
+    if (pfx[0] == 'L') nt_node_set_int(nt, vr, "depth", nt_int(nt, base, "depth", 0));
+    nt_node_set_str(nt, w, "name", tn);
+    nt_node_set_ref(nt, w, "value", vr);
+    long long bl = nt_int(nt, base, "node_line", 0), bf = nt_int(nt, base, "node_file", 0),
+              bc = nt_int(nt, base, "node_col", 0);
+    nt_node_reset(nt, base, "LocalVariableReadNode");
+    nt_node_set_str(nt, base, "name", tn);
+    nt_node_set_int(nt, base, "node_line", bl);
+    nt_node_set_int(nt, base, "node_file", bf);
+    nt_node_set_int(nt, base, "node_col", bc);
+    nt_node_set_int(nt, vr, "node_line", bl);
+    nt_node_set_int(nt, vr, "node_file", bf);
+    nt_node_set_int(nt, vr, "node_col", bc);
+    scope_local_intern(sc, tn);
+    int nc = bo_shallow_copy(nt, id);
+    if (nc < 0) continue;
+    int stm[2] = { w, nc };
+    int stmts = nt_new_node(nt, "StatementsNode");
+    nt_node_set_arr(nt, stmts, "body", stm, 2);
+    long long line = nt_int(nt, id, "node_line", 0), file = nt_int(nt, id, "node_file", 0),
+              col = nt_int(nt, id, "node_col", 0);
+    nt_node_reset(nt, id, "ParenthesesNode");
+    nt_node_set_int(nt, id, "node_line", line);
+    nt_node_set_int(nt, id, "node_file", file);
+    nt_node_set_int(nt, id, "node_col", col);
+    nt_node_set_ref(nt, id, "body", stmts);
+    comp_grow_node_arrays(c);
+    int encl = c->nscope[id];
+    for (int j = first; j < nt->count; j++) c->nscope[j] = encl;
+    changed = 1;
+  }
+  return changed;
+}
+
 /* `m(&v)` where v is a boxed value that can be a Symbol: `&:name` is lowered
    to the block `{ |_spx| _spx.name }` before parsing, but a Symbol that a poly
    value holds is known only at run time, and sp_poly_to_block refused it with
@@ -28652,6 +28814,14 @@ static void refuse_lent_ivar_copies(Compiler *c) {
 }
 }
 
+/* A literal block belongs to this super, not to its caller's block. */
+static int super_forwards_caller_block(Compiler *c, int id) {
+  NodeKind kind = nt_kind(c->nt, id);
+  if (kind != NK_SuperNode && kind != NK_ForwardingSuperNode) return 0;
+  int block = nt_ref(c->nt, id, "block");
+  return block < 0 || nt_kind(c->nt, block) != NK_BlockNode;
+}
+
 static void poly_ivar_set_reference(Compiler *c, int id, int recv) {
   TyKind rt = comp_ntype(c, recv);
   if (ty_is_object(rt)) {
@@ -28724,6 +28894,43 @@ static void an_phase_desugar_register(Compiler *c) {
       }
     }
   }
+  /* `Struct.send(:new, :a)`, `Data.public_send(:define, :x)`: a class
+     maker reached through a literal-name send. The send is retargeted onto
+     the direct call only inside the fixpoint, after the passes that register
+     the class it makes have run, so `P = Data.send(:define, :x)` left P
+     undefined and its first use raised NameError. Retarget these here, as
+     the later pass would. */
+  {
+    NodeTable *ntm = (NodeTable *)c->nt;
+    int n0 = ntm->count;
+    for (int id = 0; id < n0; id++) {
+      if (nt_kind(ntm, id) != NK_CallNode) continue;
+      const char *nm = nt_str(ntm, id, "name");
+      if (!nm || !(sp_streq(nm, "send") || sp_streq(nm, "public_send") || sp_streq(nm, "__send__"))) continue;
+      int rv = nt_ref(ntm, id, "receiver");
+      if (rv < 0 || nt_kind(ntm, rv) != NK_ConstantReadNode) continue;
+      const char *rn = nt_str(ntm, rv, "name");
+      int sa = nt_ref(ntm, id, "arguments"), sac = 0;
+      const int *sav = sa >= 0 ? nt_arr(ntm, sa, "arguments", &sac) : NULL;
+      if (sac < 1 || nt_kind(ntm, sav[0]) != NK_SymbolNode) continue;
+      const char *mn = nt_str(ntm, sav[0], "value");
+      if (!rn || !mn) continue;
+      int maker = (sp_streq(mn, "new") && (sp_streq(rn, "Struct") || sp_streq(rn, "Class"))) ||
+                  (sp_streq(mn, "define") && sp_streq(rn, "Data"));
+      if (!maker) continue;
+      int rest[64], nrest = sac - 1;
+      if (nrest > 64) continue;
+      for (int k = 0; k < nrest; k++) rest[k] = sav[k + 1];
+      int na = nt_new_node(ntm, "ArgumentsNode");
+      if (na < 0) continue;
+      comp_grow_node_arrays(c);
+      c->nscope[na] = c->nscope[id];
+      nt_node_set_arr(ntm, na, "arguments", rest, nrest);
+      char mbuf[16]; snprintf(mbuf, sizeof mbuf, "%s", mn);
+      nt_node_set_str(ntm, id, "name", mbuf);
+      nt_node_set_ref(ntm, id, "arguments", nrest > 0 ? na : -1);
+    }
+  }
   /* A superclass is a constant or a call (`Struct.new(:a)`); the parser peels
      parentheses around one expression. Anything else -- `(A rescue B)`,
      `(x; Base)`, a local variable -- was read as no superclass and the class
@@ -28750,10 +28957,13 @@ static void an_phase_desugar_register(Compiler *c) {
         if (rv >= 0 && nt_kind(ntc, rv) == NK_ConstantReadNode &&
             sp_streq(nt_str(ntc, rv, "name"), "Class") && mn && sp_streq(mn, "new") &&
             nt_ref(ntc, sc, "block") < 0) {
-          if (ac == 0) { nt_node_set_ref(ntc, id, "superclass", -1); continue; }
+          /* the anonymous class in between is remembered: reflection
+             that would name it is refused (resolve_parents) */
+          if (ac == 0) { nt_node_set_ref(ntc, id, "superclass", -1); nt_node_set_int(ntc, id, "anon_super", 1); continue; }
           if (ac == 1 && (nt_kind(ntc, av[0]) == NK_ConstantReadNode ||
                           nt_kind(ntc, av[0]) == NK_ConstantPathNode)) {
             nt_node_set_ref(ntc, id, "superclass", av[0]);
+            nt_node_set_int(ntc, id, "anon_super", 1);
             continue;
           }
         }
@@ -28791,6 +29001,7 @@ static void an_phase_desugar_register(Compiler *c) {
   desugar_builtin_reopen_named_superclass(c); /* class Rational < Numeric -> class Rational */
   desugar_builtin_reopen_self_class(c);  /* self.class in a reopened Hash -> Hash */
   desugar_engine_branches(c);
+  desugar_paren_def_body(c);            /* def m = (a; b) -> def m; a; b; end */
   desugar_def_unless_method_defined(c); /* def m .. end unless method_defined?(:m), answered in program order --
                                            ahead of the runtime-condition defs, which it answers statically */
   desugar_class_body_self_calls(c);     /* self.v = x / v in a class body -> Cls.v = x / Cls.v */
@@ -28942,6 +29153,7 @@ static void an_phase_class_structure(Compiler *c) {
   expand_struct_forwarding_super(c);
   refuse_super_init_value(c);
   inherit_members(c);
+  reject_dynamic_mixin_args(c);
   register_includes(c);
   register_include_attrs(c);
   register_extends(c);
@@ -29029,8 +29241,7 @@ static void an_phase_class_structure(Compiler *c) {
     char *has_super = (char *)calloc(ns > 0 ? (size_t)ns : 1, 1);
     if (has_super) {
       for (int id = 0; id < c->nt->count; id++) {
-        const char *ty = nt_type(c->nt, id);
-        if (!ty || (!sp_streq(ty, "SuperNode") && !sp_streq(ty, "ForwardingSuperNode"))) continue;
+        if (!super_forwards_caller_block(c, id)) continue;
         Scope *sc = comp_scope_of(c, id);
         if (!sc) continue;
         int idx = (int)(sc - c->scopes);
@@ -29816,7 +30027,7 @@ static void an_phase_infer_fixpoint(Compiler *c) {
         ch = infer_param_types(c);
         g_final_bind_pass = 0;
       }
-      if (!ch) break;
+      if (!ch && !desugar_mutator_recv_rebind(c)) break;
     }
   }
   g_infer_optimistic = 0;

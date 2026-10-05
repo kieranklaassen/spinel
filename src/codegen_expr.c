@@ -1,4 +1,5 @@
 #include "codegen_internal.h"
+#include "repr.h"
 
 /* defined? support: does this subtree reference a constant the compiler
    cannot resolve? Any such reference makes the whole defined? answer nil
@@ -460,7 +461,28 @@ void emit_interp(Compiler *c, int id, Buf *b) {
   buf_puts(b, "; ");
   buf_printf(b, "char *_t%d = sp_str_alloc_raw(_cap%d + 1); ", rid, rid);
   buf_printf(b, "char *_t%d = _t%d; ", wpid, rid);
+  /* The result's encoding, part by part as CRuby picks it: the first part's,
+     taken over by a later part's high bytes (sp_str_enc_step). Only a String
+     part can be binary; without one the result is UTF-8. */
+  int eid = -1;
+  for (int k = 0; k < nwp && eid < 0; k++) if (wp[k].kind == WK_DYN) eid = ++g_tmp;
+  /* a leading literal makes it UTF-8 from the start */
+  int lead = -1;
+  for (int k = 0; k < nwp && lead < 0; k++)
+    if (wp[k].kind == WK_DYN || wp[k].kind == WK_LIT) {
+      if (wp[k].kind == WK_LIT && wp[k].lit_len == 0) continue;
+      lead = k;
+    }
+  int lead_lit = lead >= 0 && wp[lead].kind == WK_LIT;
+  if (eid >= 0) buf_printf(b, "int _e%d = %d; ", eid, lead_lit ? 0 : -1);
   for (int k = 0; k < nwp; k++) {
+    if (eid >= 0 && wp[k].kind == WK_LIT && wp[k].lit_len > 0 && !(lead_lit && k == lead))
+      buf_printf(b, "_e%d = sp_str_enc_step_i(_e%d, _t%d, (size_t)(_t%d - _t%d), \"%.*s\", %ld, 0); ",
+                 eid, eid, rid, wpid, rid, wp[k].lit_esc_len, (lits.p ? lits.p : "") + wp[k].lit_off,
+                 wp[k].lit_len);
+    else if (eid >= 0 && wp[k].kind == WK_DYN)
+      buf_printf(b, "_e%d = sp_str_enc_step_i(_e%d, _t%d, (size_t)(_t%d - _t%d), _t%d, _l%d, sp_str_is_binary(_t%d)); ",
+                 eid, eid, rid, wpid, rid, wp[k].tmp, wp[k].tmp, wp[k].tmp);
     switch (wp[k].kind) {
       case WK_LIT:
         if (wp[k].lit_len > 0)
@@ -482,8 +504,9 @@ void emit_interp(Compiler *c, int id, Buf *b) {
         break;
     }
   }
-  buf_printf(b, "*_t%d = 0; sp_str_set_len(_t%d, (size_t)(_t%d - _t%d)); (const char *)_t%d; })",
-             wpid, rid, wpid, rid, rid);
+  buf_printf(b, "*_t%d = 0; sp_str_set_len(_t%d, (size_t)(_t%d - _t%d)); ", wpid, rid, wpid, rid);
+  if (eid >= 0) buf_printf(b, "if (_e%d == 1) sp_str_mark_binary(_t%d); ", eid, rid);
+  buf_printf(b, "(const char *)_t%d; })", rid);
   free(lits.p); free(decls.p); free(wp); free(flat);
 }
 
@@ -807,7 +830,8 @@ static void emit_index_get(Compiler *c, int recv, int key, Buf *b) {
      hot enough in optcarrot's per-pixel path to be worth spending it on. */
   const char *fn = kt == TY_SYMBOL ? "sp_poly_get_sym" :
                    kt == TY_STRING ? "sp_poly_get_str" :
-                   kt == TY_INT    ? (expr_is_arr_or_nil(c, recv) ? "sp_poly_arr_get_aon"
+                   kt == TY_INT    ? (expr_is_arr_or_nil(c, recv) && decide_node(c->nt, recv, "aon-get", NULL)
+                                                                  ? "sp_poly_arr_get_aon"
                                                                   : "sp_poly_arr_get_hash")
                                    : "sp_poly_index_poly";
   buf_printf(b, "%s(", fn);
@@ -1337,6 +1361,7 @@ static int emit_next_expr(Compiler *c, int id, Buf *b) {
 int g_expr_depth = 0;
 
 void emit_expr(Compiler *c, int id, Buf *b) {
+  if (b == g_pre && g_pre) { emit_into_pre_line(c, emit_expr, id); return; }
   /* an argument of a call re-emitted as its builtin sees the reopenings */
   if (g_io_skip_reopen && id != g_io_skip_node) {
     g_io_skip_reopen = 0;
@@ -1407,6 +1432,30 @@ static void emit_engine_const_str(const char *var, const char *lit, Buf *b) {
                "{ { NULL, sizeof(%s) | SP_STR_SIZE_ASCII7, sizeof(%s) - 1, 0 }, 0xf1, %s };\n",
                lit, var, lit, lit, lit);
   buf_printf(b, "((const char *)%s.d)", var);
+}
+
+/* A write's nil result uses the expression's representation, not its
+   receiver's field representation. In a rebound block these can differ:
+   a caller's String slot types the result while the receiver stores an
+   Integer sentinel. The store above still uses the receiver's own kind. */
+static void emit_ivar_write_result(Compiler *c, int id, int value, TyKind slot,
+                                   const char *ref, Buf *b) {
+  Repr result = repr_of(c, id);
+  TyKind wt = result.as_ty;
+  if (nt_kind(c->nt, value) == NK_NilNode && ie_class_of(c, id) >= 0 && nil_value(wt)) {
+    buf_printf(b, "; %s; })", nil_value(wt));
+    return;
+  }
+  /* A boxed slot can feed a concrete expression, as in a retyped
+     instance_exec body whose assignment answers a Symbol. */
+  if (slot == TY_POLY && wt != TY_POLY && wt != TY_UNKNOWN && wt != TY_VOID && wt != TY_NIL &&
+      is_scalar_ret(wt)) {
+    buf_puts(b, "; ");
+    emit_unbox_text(c, wt, ref, b);
+    buf_puts(b, "; })");
+    return;
+  }
+  buf_printf(b, "; %s; })", ref);
 }
 
 /* Local-variable reads and writes and instance-variable writes in value position (emit_expr_node's arms, in their order) */
@@ -1630,7 +1679,7 @@ static int emit_local_ivar_write_expr(Compiler *c, int id, Buf *b, const NodeTab
     if (!nm || v < 0) { buf_puts(b, "0"); return 1; }
     /* inside an instance_eval/exec splice the block scope has no class_id, so
        the ivar belongs to the rebound receiver class (g_ie_class_id). */
-    int ivcls2 = cid2 >= 0 ? cid2 : g_ie_class_id;
+    int ivcls2 = ie_class_of(c, id) >= 0 ? ie_class_of(c, id) : cid2 >= 0 ? cid2 : g_ie_class_id;
     /* a top-level ivar's slot is the Toplevel pseudo-class's, the one the
        store below writes (civ_Toplevel_x): without its kind the value went
        in as it was, and `y = (@a = [])` put an Integer array into a slot
@@ -1747,18 +1796,7 @@ static int emit_local_ivar_write_expr(Compiler *c, int id, Buf *b, const NodeTab
       emit_obj_upcast_prefix(c, ivt2, comp_ntype(c, v), b);
       emit_coerce(c, v, ivt2, CO_HOLD, "an instance variable write", b);
     }
-    /* The expression's value is the slot read back, at the node's own type:
-       a write retyped for an instance_exec receiver (ie_body_retype) is typed
-       by its value, `:sym`, while a poly slot reads back boxed. */
-    { TyKind wt = comp_ntype(c, id);
-      if (ivt2 == TY_POLY && wt != TY_POLY && wt != TY_UNKNOWN && wt != TY_VOID && wt != TY_NIL &&
-          is_scalar_ret(wt)) {
-        buf_puts(b, "; ");
-        emit_unbox_text(c, wt, ref2e, b);
-        buf_puts(b, "; })");
-        return 1;
-      } }
-    buf_printf(b, "; %s; })", ref2e);
+    emit_ivar_write_result(c, id, v, ivt2, ref2e, b);
     return 1;
   }
   if (sp_streq(ty, "InstanceVariableOrWriteNode") || sp_streq(ty, "InstanceVariableAndWriteNode")) {
