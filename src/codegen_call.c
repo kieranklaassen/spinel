@@ -17866,6 +17866,49 @@ static int operand_hoists_effect(Compiler *c, int node) {
   return 0;
 }
 
+/* The call `id` emitted into `ob` with emit_operands_in_order's `nb`
+   operands bound to fresh temps, their numbers left in `tmp`. 0 when the
+   call cannot take them so: it raises, it stores into one, or it reads one
+   from what it put in the prelude past `pre_mark` and not from where the
+   binding stands. */
+static int emit_call_operands_bound(Compiler *c, int id, const int *node, int nb,
+                                    int *tmp, size_t pre_mark, Buf *ob) {
+  for (int i = 0; i < nb; i++) {
+    tmp[i] = ++g_tmp;
+    view_bind(node[i], "_t%d", tmp[i]);
+  }
+  int saved_node = g_operand_order_node;
+  g_operand_order_node = id;
+  emit_call(c, id, ob);
+  g_operand_order_node = saved_node;
+  view_unbind(g_n_argov - (nb));
+  if (text_is_raise_token(ob->p)) return 0;
+  /* An arm that stores back into its receiver -- a poly `[]=` splice
+     answering a new String, `@bytes = sp_poly_splice(@bytes, ...)` -- treats
+     the operand as its slot; bound, the store lands in the temp and the
+     ivar keeps the old value. */
+  for (int i = 0; i < nb; i++) {
+    if (!text_uses_tmp(ob->p, tmp[i]) || text_assigns_tmp(ob->p, tmp[i])) return 0;
+    if (g_pre->p && g_pre->len > pre_mark &&
+        text_uses_tmp(g_pre->p + pre_mark, tmp[i])) return 0;
+  }
+  return 1;
+}
+
+/* The calls emit_operands_in_order declined after it had rendered two or
+   more operands, by node. */
+static unsigned char *g_bind_declined;
+static int g_bind_declined_cap;
+static void bind_declined_note(int id) {
+  if (id >= g_bind_declined_cap) {
+    int cap = id + 1024;
+    g_bind_declined = realloc(g_bind_declined, (size_t)cap);
+    memset(g_bind_declined + g_bind_declined_cap, 0, (size_t)(cap - g_bind_declined_cap));
+    g_bind_declined_cap = cap;
+  }
+  g_bind_declined[id] = 1;
+}
+
 static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
   if (emit_or_take_back(c, id, b, emit_str_append_chain_handle)) return 1;
   const NodeTable *nt = c->nt;
@@ -17988,39 +18031,39 @@ static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
      the whole call, once per nesting level: 2^depth copies of a receiver
      chain (#4925). */
   int operands_last = observable < 2;
+  Buf ob; memset(&ob, 0, sizeof ob);
+  int tmp[8];
+  /* Two or more render first, so their temps number ahead of the bindings.
+     A call that takes its operands into temps of its own -- a user
+     method's, binding its arguments in order already -- declines, and the
+     caller renders the operands again with the call. As the receiver of
+     another such call it is emitted twice, to be bound and in that call's
+     arm, and every link of `q.where(col(1)).where(col(2))...` doubled the
+     work below it. A call that has declined once is asked first: emitted
+     with its operands named and not yet rendered, and they are rendered
+     only when it takes them. */
+  if (!operands_last && id < g_bind_declined_cap && g_bind_declined[id]) {
+    ok = emit_call_operands_bound(c, id, node, nb, tmp, pre_mark, &ob);
+    free(ob.p);
+    memset(&ob, 0, sizeof ob);
+    g_pre->len = pre_mark;
+    if (g_pre->p) g_pre->p[pre_mark] = '\0';
+    g_tmp = saved_tmp;
+    if (!ok) return 0;
+  }
   for (; !operands_last && rendered < nb && ok; rendered++) {
     render_operand(c, node[rendered], &opb[rendered], &opp[rendered]);
     if (text_is_raise_token(opb[rendered].p)) ok = 0;
   }
-  Buf ob; memset(&ob, 0, sizeof ob);
-  int tmp[8];
   if (ok) {
-    for (int i = 0; i < nb; i++) {
-      tmp[i] = ++g_tmp;
-      view_bind(node[i], "_t%d", tmp[i]);
-    }
-    int saved_node = g_operand_order_node;
-    g_operand_order_node = id;
     unsigned conv_mark = g_conv_emitted;
-    emit_call(c, id, &ob);
-    g_operand_order_node = saved_node;
-    view_unbind(g_n_argov - (nb));
-    if (text_is_raise_token(ob.p)) ok = 0;
+    ok = emit_call_operands_bound(c, id, node, nb, tmp, pre_mark, &ob);
     /* a single observable operand was bound only so a conversion would run
        after it; when this call converted nothing, the binding buys no order
        and costs a rooted temp on what may be a hot path (`@fetch[addr][addr]`
        is poly, and converts nothing). Counted as emitted, not as held: a
        #to_int renders inline and IO#write holds per operand. */
     if (observable < 2 && g_conv_emitted == conv_mark) ok = 0;
-    /* An arm that stores back into its receiver -- a poly `[]=` splice
-       answering a new String, `@bytes = sp_poly_splice(@bytes, ...)` -- treats
-       the operand as its slot; bound, the store lands in the temp and the
-       ivar keeps the old value. */
-    for (int i = 0; i < nb && ok; i++) {
-      if (!text_uses_tmp(ob.p, tmp[i]) || text_assigns_tmp(ob.p, tmp[i])) ok = 0;
-      else if (g_pre->p && g_pre->len > pre_mark &&
-               text_uses_tmp(g_pre->p + pre_mark, tmp[i])) ok = 0;
-    }
     for (; operands_last && rendered < nb && ok; rendered++) {
       render_operand(c, node[rendered], &opb[rendered], &opp[rendered]);
       if (text_is_raise_token(opb[rendered].p)) ok = 0;
@@ -18032,6 +18075,7 @@ static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
     g_pre->len = pre_mark;
     if (g_pre->p) g_pre->p[pre_mark] = '\0';
     g_tmp = saved_tmp;
+    if (!operands_last) bind_declined_note(id);
     return 0;
   }
   /* an operand's hoisted statements stay ahead of the call unless they run
