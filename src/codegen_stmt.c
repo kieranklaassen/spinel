@@ -36,10 +36,14 @@ static int emit_splat_io(Compiler *c, int arg, const char *fn, Buf *b, int inden
   if (nt_type(c->nt, arg) && sp_streq(nt_type(c->nt, arg), "SplatNode")) {
     int sx = nt_ref(c->nt, arg, "expression");
     if (sx >= 0) {
+      /* sp_splat_to_array: a value that is no Array is the one argument, a
+         Range or an Enumerator its members, nil none. The array may be
+         fresh, and printing allocates. */
+      int t = ++g_tmp;
       emit_indent(b, indent);
-      buf_puts(b, fn);
+      buf_printf(b, "{ sp_RbVal _t%d = sp_splat_to_array(", t);
       emit_boxed(c, sx, b);
-      buf_puts(b, ");\n");
+      buf_printf(b, "); SP_GC_ROOT_RBVAL(_t%d); %s_t%d); }\n", t, fn, t);
       return 1;
     }
   }
@@ -690,9 +694,9 @@ int emit_output_spilled(Compiler *c, const char *name, int argc, const int *argv
     g_pre = &apre; g_indent = indent + 2;
     if (nt_type(c->nt, a) && sp_streq(nt_type(c->nt, a), "SplatNode")) {
       int sx = nt_ref(c->nt, a, "expression");
-      buf_printf(&abody, "sp_PolyArray_concat_into(_t%d, ", t);
+      buf_printf(&abody, "sp_PolyArray_concat_into(_t%d, sp_splat_to_array(", t);
       if (sx >= 0) emit_boxed(c, sx, &abody); else buf_puts(&abody, "sp_box_nil()");
-      buf_puts(&abody, ");\n");
+      buf_puts(&abody, "));\n");
     }
     else {
       buf_printf(&abody, "sp_PolyArray_push(_t%d, ", t); emit_boxed(c, a, &abody); buf_puts(&abody, ");\n");
@@ -3579,8 +3583,9 @@ int emit_pm_cond(Compiler *c, int pat, int t, TyKind pt, Buf *b) {
       char ref[24]; snprintf(ref, sizeof ref, "_t%d", t);
       buf_puts(b, "!"); emit_slot_truthy(pt, ref, b);
     }
-    /* a no-match MatchData is a NULL pointer; `in nil` matches it */
-    else if (pt == TY_MATCHDATA) buf_printf(b, "(_t%d == NULL)", t);
+    /* a no-match MatchData is a NULL pointer, and a String slot holds nil
+       as NULL; `in nil` matches it */
+    else if (pt == TY_MATCHDATA || pt == TY_STRING) buf_printf(b, "(_t%d == NULL)", t);
     else if (ty_is_object(pt)) emit_obj_nil(c, pt, t, b);
     else buf_puts(b, (pt == TY_NIL) ? "1" : "0");
     return 1;
@@ -3655,8 +3660,9 @@ int emit_pm_cond(Compiler *c, int pat, int t, TyKind pt, Buf *b) {
     int yes = ty_matches_class(pt, cn2, 0);
     /* a scalar subject holding its nil sentinel is a NilClass, and is not
        the Integer or Float its slot is; Object and its ancestors hold for
-       nil too, as in the is_a? fold */
-    if (t == g_pm_sentinel_t && !is_object_root(cn2) && (yes > 0 || sp_streq(cn2, "NilClass"))) {
+       nil too, as in the is_a? fold. A String slot holds nil as NULL. */
+    if ((t == g_pm_sentinel_t || pt == TY_STRING) && !is_object_root(cn2) &&
+        (yes > 0 || sp_streq(cn2, "NilClass"))) {
       char ref[24]; snprintf(ref, sizeof ref, "_t%d", t);
       if (!sp_streq(cn2, "NilClass")) emit_slot_truthy(pt, ref, b);
       else { buf_puts(b, "!"); emit_slot_truthy(pt, ref, b); }
@@ -3810,7 +3816,8 @@ int emit_pm_cond(Compiler *c, int pat, int t, TyKind pt, Buf *b) {
     }
     if (has_nested) { buf_puts(b, "0"); return 1; }
     /* a `Class` / `Class => v` element check is fully static against a typed
-       array's element type: a mismatching class can never match. */
+       array's element type: a mismatching class can never match. A String
+       element holds nil as NULL, so NilClass can match it. */
     {
       TyKind et2 = ty_array_elem(pt);
       int class_mismatch = 0;
@@ -3826,7 +3833,8 @@ int emit_pm_cond(Compiler *c, int pat, int t, TyKind pt, Buf *b) {
         }
         if (classpat >= 0) {
           const char *cn2 = nt_str(nt, classpat, "name");
-          if (cn2 && ty_matches_class(et2, cn2, 0) <= 0) class_mismatch = 1;
+          if (cn2 && ty_matches_class(et2, cn2, 0) <= 0 &&
+              !(et2 == TY_STRING && sp_streq(cn2, "NilClass"))) class_mismatch = 1;
         }
       }
       if (class_mismatch) { buf_puts(b, "0"); return 1; }
@@ -5514,28 +5522,32 @@ static void emit_when_splat_test(Compiler *c, int cond, int t, TyKind pt, Buf *b
   buf_puts(b, ")");
 }
 
-/* `when Integer` / `when NilClass` on an Integer or Float scrutinee: the
-   slot holds nil as its sentinel, which the static type cannot say, so the
-   arm reads it as is_a? does (#7049). The universal classes hold for nil as
-   well and keep the constant (answers 0, nothing emitted). */
+/* `when Integer` / `when NilClass` on an Integer, Float or String
+   scrutinee: the slot holds nil as its sentinel (NULL for a String), which
+   the static type cannot say, so the arm reads it as is_a? does (#7049). The
+   universal classes hold for nil as well and keep the constant (answers 0,
+   nothing emitted). */
 static int emit_when_scalar_class(TyKind pt, const char *cn, int t, Buf *b) {
-  if (pt != TY_INT && pt != TY_FLOAT) return 0;
+  if (pt != TY_INT && pt != TY_FLOAT && pt != TY_STRING) return 0;
   int yes = ty_matches_class(pt, cn, 0);
   int nilcls = sp_streq(cn, "NilClass");
   int univ = is_object_root(cn);
   if (yes < 0 || (!nilcls && (!yes || univ))) return 0;
   if (pt == TY_INT) buf_printf(b, "(_t%d %s SP_INT_NIL)", t, nilcls ? "==" : "!=");
-  else buf_printf(b, "(%ssp_float_is_nil(_t%d))", nilcls ? "" : "!", t);
+  else if (pt == TY_FLOAT) buf_printf(b, "(%ssp_float_is_nil(_t%d))", nilcls ? "" : "!", t);
+  else buf_printf(b, "(_t%d %s NULL)", t, nilcls ? "==" : "!=");
   return 1;
 }
 
 static int emit_when_typed_test(Compiler *c, int cond, int t, TyKind pt, Buf *b) {
   int reidx = re_lit_index(c, cond);
   /* `when nil` on an Integer or Float scrutinee matches its nil sentinel:
-     compared as a number, nil read as 0 and matched a 0 */
-  if (nt_kind(c->nt, cond) == NK_NilNode && (pt == TY_INT || pt == TY_FLOAT)) {
+     compared as a number, nil read as 0 and matched a 0. A String
+     scrutinee holds nil as NULL. */
+  if (nt_kind(c->nt, cond) == NK_NilNode && (pt == TY_INT || pt == TY_FLOAT || pt == TY_STRING)) {
     if (pt == TY_INT) buf_printf(b, "(_t%d == SP_INT_NIL)", t);
-    else buf_printf(b, "sp_float_is_nil(_t%d)", t);
+    else if (pt == TY_FLOAT) buf_printf(b, "sp_float_is_nil(_t%d)", t);
+    else buf_printf(b, "(_t%d == NULL)", t);
   }
   else if (reidx >= 0 && pt == TY_STRING) {
     buf_printf(b, "(sp_re_match(sp_re_pat_%d, _t%d) >= 0)", reidx, t);
@@ -7567,6 +7579,14 @@ static void emit_return_deferred(Compiler *c, const int *a, int n, Buf *b, int i
       buf_puts(b, "; ");
     }
   }
+  else {
+    /* A discarded return still evaluates its arguments before the ensure,
+       including in a statement-position inline with no return slot. */
+    for (int k = 0; k < n; k++) {
+      if (node_is_pure_literal(c->nt, a[k])) continue;
+      buf_puts(b, "(void)("); emit_expr(c, a[k], b); buf_puts(b, "); ");
+    }
+  }
   /* inside a rescue/else clause the region's frame is already popped, so
      0 is a valid count; popping one anyway takes a caller's handler */
   int pops = g_exc_frame_depth - ctx->exc_base;
@@ -8182,6 +8202,64 @@ void emit_rescue(Compiler *c, int id, Buf *b, int indent, int fr, const char *re
   }
 }
 
+/* A deferred return runs only ensures belonging to its method, then pops
+   frames down to that method's exit. An inline exit is inside the caller's
+   protected regions, which must remain live after the call. */
+static void emit_ensure_return(Compiler *c, int eid, int has_retval, Buf *b, int indent) {
+  int base = g_method_pr_label ? g_method_pr_ensure_depth : 0;
+  if (g_ensure_depth > base) {
+    EnsureCtx *outer = &g_ensure_stack[g_ensure_depth - 1];
+    buf_printf(b, "if (_retf%d) { ", eid);
+    if (has_retval && outer->has_retval)
+      buf_printf(b, "_retv%d = _retv%d; ", outer->lid, eid);
+    buf_printf(b, "_retf%d = 1; ", outer->lid);
+    /* A rescue between the ensures also leaves scope. Keep the ordinary
+       one-frame spelling when there are no other handlers to unwind. */
+    if (g_exc_frame_depth == outer->exc_base + 1 && rescues_crossed(outer->exc_base) == 0)
+      buf_puts(b, "sp_exc_top--; ");
+    else emit_frame_unwind(b, outer->exc_base, NULL);
+    buf_printf(b, "goto _ensure%d; }\n", outer->lid);
+    return;
+  }
+  /* An inline return leaves only the method's frames. The caller's
+     handlers stay live until control leaves their own protected body. */
+  {
+    char g[24]; snprintf(g, sizeof g, "_retf%d", eid);
+    int base = g_method_pr_label ? g_method_pr_exc_depth : 0;
+    if (emit_frame_unwind(b, base, g)) { buf_puts(b, "\n"); emit_indent(b, indent); }
+  }
+  /* Inside an INLINED method the enclosing C function belongs to the
+     CALLER, so a raw `return` here returns from that one -- `return
+     _retv5;` of an sp_RbVal out of `main`, which C rejects and which is
+     not what the Ruby meant either. Funnel through the inline exit, the
+     single one every return at ensure-depth 0 already takes. The shape
+     that finds it pairs an early return with an ensure tail, which is the
+     resource idiom: `def self.open(..); r = new(..); return r unless
+     block_given?; begin; yield r; ensure; r.close; end; end`. */
+  if (g_method_pr_label) {
+    if (has_retval && g_method_pr_var)
+      buf_printf(b, "if (_retf%d) { %s = _retv%d; goto %s; }\n",
+                 eid, g_method_pr_var, eid, g_method_pr_label);
+    else
+      buf_printf(b, "if (_retf%d) goto %s;\n", eid, g_method_pr_label);
+  }
+  /* inside a first-class proc body routing returns through the boxed slot
+     (the universal proc return ABI) the deferred value returns through the
+     slot, not a raw C return of an sp_RbVal from an sp_int function */
+  else if (has_retval && g_ret_type == TY_POLY && proc_ret_slot())
+    buf_printf(b, "if (_retf%d) { %s = _retv%d; return 0; }\n", eid, proc_ret_slot(), eid);
+  /* a proc body with a typed result publishes through the same boxed
+     slot: `lambda do ... :l ensure ... end` returned its sp_RbVal from
+     the sp_int proc function and did not compile (found under #4547) */
+  else if (has_retval && g_in_proc_body && !g_c_ret_void) {
+    char rv[32]; snprintf(rv, sizeof rv, "_retv%d", eid);
+    buf_printf(b, "if (_retf%d) { _sp_proc_poly_ret = ", eid);
+    emit_boxed_text(c, g_ret_type, rv, b);
+    buf_puts(b, "; return 0; }\n");
+  }
+  else emit_retf_return(eid, has_retval, b);
+}
+
 /* begin/body/rescue (ensure/else deferred) via the setjmp exception model.
    When resultvar != NULL, the body's and rescue handlers' values are
    assigned to it (begin/rescue as an expression). */
@@ -8400,16 +8478,9 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
       buf_printf(b, "sp_rescue_sp -= _brkf%d - 1; break; }\n", eid);
     }
     emit_indent(b, indent);
+    emit_ensure_return(c, eid, has_retval, b, indent);
     if (g_ensure_depth > 0) {
       EnsureCtx *outer = &g_ensure_stack[g_ensure_depth - 1];
-      if (has_retval && outer->has_retval) {
-        buf_printf(b, "if (_retf%d) { _retv%d = _retv%d; _retf%d = 1; sp_exc_top--; goto _ensure%d; }\n",
-                   eid, outer->lid, eid, outer->lid, outer->lid);
-      }
-      else {
-        buf_printf(b, "if (_retf%d) { _retf%d = 1; sp_exc_top--; goto _ensure%d; }\n",
-                   eid, outer->lid, outer->lid);
-      }
       /* Unhandled exception. It belongs to the nearest enclosing HANDLER,
          which is not always the enclosing ensure: a `begin ... rescue`
          between the two catches it in Ruby. Handing it straight to the outer
@@ -8431,42 +8502,6 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
       }
     }
     else {
-      /* the deferred return leaves through every enclosing live begin frame:
-         pop them or their jmp_bufs dangle into this soon-dead C frame */
-      {
-        char g[24]; snprintf(g, sizeof g, "_retf%d", eid);
-        if (emit_frame_unwind(b, 0, g)) { buf_puts(b, "\n"); emit_indent(b, indent); }
-      }
-      /* Inside an INLINED method the enclosing C function belongs to the
-         CALLER, so a raw `return` here returns from that one -- `return
-         _retv5;` of an sp_RbVal out of `main`, which C rejects and which is
-         not what the Ruby meant either. Funnel through the inline exit, the
-         single one every return at ensure-depth 0 already takes. The shape
-         that finds it pairs an early return with an ensure tail, which is the
-         resource idiom: `def self.open(..); r = new(..); return r unless
-         block_given?; begin; yield r; ensure; r.close; end; end`. */
-      if (g_method_pr_label) {
-        if (has_retval && g_method_pr_var)
-          buf_printf(b, "if (_retf%d) { %s = _retv%d; goto %s; }\n",
-                     eid, g_method_pr_var, eid, g_method_pr_label);
-        else
-          buf_printf(b, "if (_retf%d) goto %s;\n", eid, g_method_pr_label);
-      }
-      /* inside a first-class proc body routing returns through the boxed slot
-         (the universal proc return ABI) the deferred value returns through the
-         slot, not a raw C return of an sp_RbVal from an sp_int function */
-      else if (has_retval && g_ret_type == TY_POLY && proc_ret_slot())
-        buf_printf(b, "if (_retf%d) { %s = _retv%d; return 0; }\n", eid, proc_ret_slot(), eid);
-      /* a proc body with a typed result publishes through the same boxed
-         slot: `lambda do ... :l ensure ... end` returned its sp_RbVal from
-         the sp_int proc function and did not compile (found under #4547) */
-      else if (has_retval && g_in_proc_body && !g_c_ret_void) {
-        char rv[32]; snprintf(rv, sizeof rv, "_retv%d", eid);
-        buf_printf(b, "if (_retf%d) { _sp_proc_poly_ret = ", eid);
-        emit_boxed_text(c, g_ret_type, rv, b);
-        buf_puts(b, "; return 0; }\n");
-      }
-      else emit_retf_return(eid, has_retval, b);
       /* Unhandled exception: re-raise using the saved class/message. */
       emit_indent(b, indent);
       buf_printf(b, "if (_excf%d) { sp_pending_exc_obj = _excobj%d; sp_raise_cls(_exccls%d, _excmsg%d); }\n", eid, eid, eid, eid);
@@ -13854,9 +13889,13 @@ static int emit_array_mutate_stmt_dispatch(Compiler *c, int id, Buf *b, int inde
   if (recv >= 0 && op && op->emit == BOPE_STRING_SLICE && argc == 1 &&
       (comp_ntype(c, recv) == TY_STRING || comp_ntype(c, recv) == TY_STRBUF) &&
       repr_of(c, argv[0]).kind == RK_BOXED) {
-    emit_indent(b, indent); buf_puts(b, "(void)(");
-    emit_array_call(c, id, b); buf_puts(b, ");\n");
-    return 1;
+    Buf vb; memset(&vb, 0, sizeof vb);
+    if (emit_or_take_back(c, id, &vb, emit_array_call)) {
+      emit_indent(b, indent); buf_printf(b, "(void)(%s);\n", vb.p ? vb.p : "0");
+      free(vb.p);
+      return 1;
+    }
+    free(vb.p);
   }
   return emit_array_mutate_stmt_body(c, id, b, indent);
 }
@@ -14143,6 +14182,32 @@ static int str_mutate_reassign_arms(Compiler *c, Buf *b, int indent, const NodeT
 /* emit_array_mutate_stmt_body's String appends (<< and concat) and its bang
    methods, with and without arguments (answers 1 emitted, 0 declined, -1 to
    go on) */
+/* concat(a, b, ...) onto the handle `sref`: the frozen check first, then
+   every argument taken before anything is appended, as CRuby does (a handle
+   argument reads as a copy, so `s.concat(s, s)` appends the String as it
+   was), then the frozen check, then the appends in order */
+static void emit_str_concat_handle(Compiler *c, const char *sref, int argc, const int *argv, Buf *b, int indent) {
+  int base = g_tmp + 1; g_tmp += argc;
+  emit_indent(b, indent);
+  buf_puts(b, "{");
+  char rt[1100]; snprintf(rt, sizeof rt, "sp_String_cstr(%s)", sref);
+  /* Every argument runs before the frozen check, as in CRuby. A boxed
+     argument may be this very String, whose sp_poly_to_s is the live buffer
+     the first append grows: it is staged as a copy. */
+  for (int a = 0; a < argc; a++) {
+    int boxed = repr_of(c, argv[a]).kind == RK_BOXED;
+    buf_printf(b, " const char *_t%d = %s", base + a, boxed ? "sp_str_concat(" : "");
+    emit_str_append_arg(c, argv[a], rt, b);
+    buf_printf(b, "%s; SP_GC_ROOT_STR(_t%d);", boxed ? ", \"\")" : "", base + a);
+  }
+  buf_printf(b, " if (sp_String_is_frozen(%s)) sp_raise_frozen_str((%s)->data);\n", sref, sref);
+  for (int a = 0; a < argc; a++) {
+    emit_indent(b, indent + 1);
+    buf_printf(b, "sp_String_append_bin(%s, _t%d);\n", sref, base + a);
+  }
+  emit_indent(b, indent); buf_puts(b, "}\n");
+}
+
 static int str_mutate_append_bang_arms(Compiler *c, int id, Buf *b, int indent, const NodeTable *nt, const char *name, int recv, TyKind rt, int argc, const int *argv) {
   /* mutable-string append: a STRBUF-typed local appends in place (amortized
      O(1)) via sp_String_append. Chains (`s << a << b`) all target the same
@@ -14192,6 +14257,17 @@ static int str_mutate_append_bang_arms(Compiler *c, int id, Buf *b, int indent, 
           emit_str_append_arg(c, arg, rt, b); }
         buf_puts(b, ");\n");
       }
+      return 1;
+    }
+  }
+  /* concat(a, b, ...) on a shared-mutable String appends to its handle, as
+     the one-argument form above does: the value arm's reassignment of the
+     receiver had no lvalue to assign (the read is a copy of the handle's
+     bytes) and the C did not compile */
+  if (sp_streq(name, "concat") && argc >= 2) {
+    char srefM[1024];
+    if (strbuf_slot_ref(c, recv, srefM, sizeof srefM)) {
+      emit_str_concat_handle(c, srefM, argc, argv, b, indent);
       return 1;
     }
   }

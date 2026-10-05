@@ -5312,6 +5312,34 @@ int desugar_to_hash_splat(Compiler *c) {
   return changed;
 }
 
+/* Is SplatNode `sp` an argument handed to one of the program's own methods:
+   of a call whose name the program defines, or of `super`? */
+static int splat_feeds_user_method(Compiler *c, int sp) {
+  const NodeTable *nt = c->nt;
+  for (int id = 0; id < nt->count; id++) {
+    NodeKind k = nt_kind(nt, id);
+    if (k != NK_CallNode && k != NK_SuperNode) continue;
+    int args = nt_ref(nt, id, "arguments"), argc = 0, mine = 0;
+    const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &argc) : NULL;
+    for (int a = 0; a < argc; a++) mine |= av[a] == sp;
+    if (!mine) continue;
+    const char *nm = nt_str(nt, id, "name");
+    if (k == NK_SuperNode) return 1;
+    if (nm && sp_streq(nm, "new")) {
+      /* a constructor, whatever else the program names `new`, unless the
+         class has a class method `new` of its own */
+      int r = nt_ref(nt, id, "receiver");
+      const char *rn = r >= 0 && nt_kind(nt, r) == NK_ConstantReadNode ? nt_str(nt, r, "name") : NULL;
+      int ci = rn ? comp_class_index(c, rn) : -1;
+      return ci >= 0 && comp_cmethod_in_chain(c, ci, "new", NULL) >= 0;
+    }
+    for (int si = 0; nm && si < c->nscopes; si++)
+      if (c->scopes[si].name && sp_streq(c->scopes[si].name, nm)) return 1;
+    return 0;
+  }
+  return 0;
+}
+
 /* `[*h]`, `x = *h`, `f(*h)` with a Hash, a Struct, or an object defining #to_a:
    a splat converts its operand through #to_a, so a Hash spreads its [k, v]
    pairs rather than landing as one element. Rewrite the operand to
@@ -5329,7 +5357,13 @@ int desugar_splat_to_a(Compiler *c) {
     if (sp_streq(vty, "CallNode") && nt_str(nt, val, "name") &&
         sp_streq(nt_str(nt, val, "name"), "to_a")) continue;
     TyKind t = infer_type(c, val);
-    if (!ty_is_hash(t) && !sp_streq(vty, "HashNode")) {
+    /* A Range or an Enumerator handed to a method of the program: its
+       parameters were bound to the one value, `f(*(3..4))` to [3..4]. Left
+       to the settled rounds, where the operand's kind is no longer a guess.
+       The builtins and the array literal spread these in their own arms. */
+    if ((t == TY_RANGE || t == TY_STR_RANGE || t == TY_ENUMERATOR) && !g_infer_optimistic &&
+        splat_feeds_user_method(c, id)) ;
+    else if (!ty_is_hash(t) && !sp_streq(vty, "HashNode")) {
       if (!ty_is_object(t)) continue;
       int cid = ty_object_class(t);
       if (cid < 0) continue;
@@ -5614,6 +5648,76 @@ static int fwd_arity_pick(Compiler *c, NodeTable *nt, int ex, int id, int pair, 
   return pick;
 }
 
+/* Is method `ms` called somewhere without a block of its own -- no block,
+   or a `&expr` that may be nil? Its own block forwarded to a builtin is then
+   absent at that site, where the builtin answers its blockless form. A call
+   counts when it may reach ms: receiverless, or on a receiver of ms's class
+   (or a subclass), or one not typed yet. */
+static int fwd_method_called_blockless(Compiler *c, Scope *ms) {
+  const NodeTable *nt = c->nt;
+  if (!ms || !ms->name) return 0;
+  NT_FOREACH_KIND(nt, NK_CallNode, u) {
+    const char *un = nt_str(nt, u, "name");
+    if (!un || !sp_streq(un, ms->name)) continue;
+    int ub = nt_ref(nt, u, "block");
+    if (ub >= 0 && nt_kind(nt, ub) == NK_BlockNode) continue;
+    int ur = nt_ref(nt, u, "receiver");
+    if (ur < 0 || ms->is_cmethod) return 1;
+    TyKind ut = infer_type(c, ur);
+    if (ut == TY_UNKNOWN || ut == TY_POLY) return 1;
+    if (ty_is_object(ut) && ms->class_id >= 0 &&
+        (ty_object_class(ut) == ms->class_id || is_descendant(c, ty_object_class(ut), ms->class_id)))
+      return 1;
+  }
+  return 0;
+}
+
+/* `recv.m(args) { |x| yield x }` -- a builtin given the enclosing method's
+   own block -- becomes `block_given? ? <that call> : recv.m(args)`: the
+   method is spliced into each of its sites, where block_given? is known, and
+   a site that passed no block takes the builtin's blockless form instead of
+   a yield to nothing. The call keeps its number (its parents refer to it);
+   the conditional takes it over and the call moves to a new node. */
+static void fwd_branch_on_block_given(Compiler *c, int id) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  int base = nt->count;
+  int noblk = nt_clone_subtree(nt, id);
+  if (noblk < 0) return;
+  nt_node_set_ref(nt, noblk, "block", -1);
+  int ifn = nt_new_node(nt, "IfNode");
+  int pred = nt_new_node(nt, "CallNode");
+  int then = nt_new_node(nt, "StatementsNode");
+  int other = nt_new_node(nt, "StatementsNode");
+  int els = nt_new_node(nt, "ElseNode");
+  if (ifn < 0 || pred < 0 || then < 0 || other < 0 || els < 0) return;
+  long long line = nt_int(nt, id, "node_line", 0), file = nt_int(nt, id, "node_file", 0);
+  nt_node_set_str(nt, pred, "name", "block_given?");
+  nt_node_set_ref(nt, pred, "receiver", -1);
+  nt_node_set_ref(nt, pred, "arguments", -1);
+  nt_node_set_ref(nt, pred, "block", -1);
+  /* the call moves to `ifn`'s number, the conditional takes `id`'s */
+  nt_swap_nodes(nt, id, ifn);
+  int call = ifn;
+  nt_node_reset(nt, id, "IfNode");
+  nt_node_set_arr(nt, then, "body", &call, 1);
+  nt_node_set_arr(nt, other, "body", &noblk, 1);
+  nt_node_set_ref(nt, els, "statements", other);
+  nt_node_set_ref(nt, id, "predicate", pred);
+  nt_node_set_ref(nt, id, "statements", then);
+  nt_node_set_ref(nt, id, "subsequent", els);
+  if (line > 0) {
+    int ln[3] = { id, pred, noblk };
+    for (int k = 0; k < 3; k++) { nt_node_set_int(nt, ln[k], "node_line", line); nt_node_set_int(nt, ln[k], "node_file", file); }
+  }
+  comp_grow_node_arrays(c);
+  int encl = c->nscope[id];
+  for (int j = base; j < nt->count; j++) c->nscope[j] = encl;
+  /* the blockless call is new: a splat it forwards (`split(*args)`) is
+     spread to the builtin's arguments as the original's would have been,
+     had it carried no block */
+  expand_static_splat_args(c, base, nt->count);
+}
+
 int desugar_value_callable_forwards(Compiler *c) {
   NodeTable *nt = (NodeTable *)c->nt;
   int changed = 0;
@@ -5869,6 +5973,14 @@ int desugar_value_callable_forwards(Compiler *c) {
       lv->type = pty[k];
     }
     if (anon) fwd_drop_spent_anon_block_param(c, id, n0);
+    /* the method's own block may be absent where it is called: a String
+       builtin then answers its blockless form (split's Array, an
+       Enumerator), not a yield to no block */
+    if (anon && rt == TY_STRING && fwd_method_called_blockless(c, comp_scope_of(c, id)))
+      fwd_branch_on_block_given(c, id);
+    /* a splat beside the forward was kept whole while the block was an
+       `&` (a block goes on one arm only); the literal now spreads it */
+    else if (anon) expand_static_splat_args(c, id, id + 1);
     changed = 1;
   }
   return changed;
@@ -14445,10 +14557,36 @@ static int sce_name_reflective(const char *nm) {
   if (*nm == ':') nm++;
   return str_in(nm, NAMES);
 }
+/* An instance method of Kernel, Object or BasicObject: what a plain object
+   reaches. A class or module finds Module's own class_eval (and hooks)
+   first, so such a def overrides nothing a class body's graft runs --
+   activesupport's Kernel#class_eval is this. */
+static int sce_def_below_module(const NodeTable *nt, int def) {
+  if (nt_ref(nt, def, "receiver") >= 0) return 0;
+  static const NodeKind HOLDERS[] = { NK_ModuleNode, NK_ClassNode };
+  for (int h = 0; h < 2; h++) {
+    NtKindIter it = nt_kind_iter_begin(nt, HOLDERS[h]);
+    int found = 0;
+    while (!found && nt_kind_iter_next(&it)) {
+      int cp = nt_ref(nt, it.id, "constant_path");
+      if (cp < 0 || nt_kind(nt, cp) != NK_ConstantReadNode) continue;
+      const char *cn = nt_str(nt, cp, "name");
+      if (!cn || !(h == 0 ? sp_streq(cn, "Kernel")
+                          : (sp_streq(cn, "Object") || sp_streq(cn, "BasicObject")))) continue;
+      int body = nt_ref(nt, it.id, "body"), bn = 0;
+      const int *bb = body >= 0 && nt_kind(nt, body) == NK_StatementsNode ? nt_arr(nt, body, "body", &bn) : NULL;
+      for (int i = 0; i < bn && !found; i++) found = bb[i] == def;
+    }
+    nt_kind_iter_close(&it);
+    if (found) return 1;
+  }
+  return 0;
+}
 static int sce_program_reflects(const NodeTable *nt) {
   int hit = 0;
   NtKindIter it = nt_kind_iter_begin(nt, NK_DefNode);
-  while (!hit && nt_kind_iter_next(&it)) hit = sce_name_reflective(nt_str(nt, it.id, "name"));
+  while (!hit && nt_kind_iter_next(&it))
+    hit = sce_name_reflective(nt_str(nt, it.id, "name")) && !sce_def_below_module(nt, it.id);
   nt_kind_iter_close(&it);
   it = nt_kind_iter_begin(nt, NK_AliasMethodNode);
   while (!hit && nt_kind_iter_next(&it)) {

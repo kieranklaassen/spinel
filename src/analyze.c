@@ -27660,7 +27660,11 @@ static int splat_dispatch_on_length(Compiler *c, int id, const int *argv, int ar
      dynamic send's arms share their one block node. Any other name keeps
      its splat. */
   int subst = sp_streq(cnm, "sub") || sp_streq(cnm, "sub!") || sp_streq(cnm, "gsub") || sp_streq(cnm, "gsub!");
-  if (blk >= 0 && !subst && !splat_binary_operator(cnm) && !odyn) return 0;
+  /* ...except the block a method's own forwarded block became
+     (`{ |x| yield x }`, desugar_value_callable_forwards): its parameters
+     live in the method's scope, so every arm takes a copy of it */
+  int fwd_blk = blk >= 0 && !subst && nt_kind(nt, blk) == NK_BlockNode && nt_int(nt, blk, "fwd_yield", 0);
+  if (blk >= 0 && !subst && !splat_binary_operator(cnm) && !odyn && !fwd_blk) return 0;
   if (blk >= 0 && subst) lo = 1;
   /* insert(i, *objs) spreads at run time (emit_array_splat_mutator) */
   if (sp_streq(cnm, "insert") && sp_at > 0) return 0;
@@ -27879,7 +27883,8 @@ static int splat_dispatch_on_length(Compiler *c, int id, const int *argv, int ar
     if (nt_str(nt, id, "vis_enforce")) nt_node_set_str(nt, cl, "vis_enforce", "1");
     nt_node_set_int(nt, cl, "dyn_arm", nt_int(nt, id, "dyn_arm", 0));
     nt_node_set_ref(nt, cl, "receiver", nt_clone_subtree(nt, recv));
-    nt_node_set_ref(nt, cl, "block", blk >= 0 && (m == 1 || odyn) ? blk : -1);
+    nt_node_set_ref(nt, cl, "block", fwd_blk ? nt_clone_subtree(nt, blk) :
+                                     blk >= 0 && (m == 1 || odyn) ? blk : -1);
     int an = -1;
     if (m > 0) {
       an = nt_new_node(nt, "ArgumentsNode");
@@ -28013,7 +28018,12 @@ void expand_static_splat_args(Compiler *c, int from, int count) {
       if (sp_streq(cnm, "insert") && sp_at > 0) continue;
       /* A block moves the required count (`sub(pat) { .. }` takes one
          argument, not two), so leave those alone. */
-      n = nt_ref(nt, id, "block") >= 0 && !splat_binary_operator(cnm) ? -1 : splat_builtin_arity(cnm);
+      /* A method's own forwarded block (`{ |x| yield x }`) only takes what
+         the call yields: outside the substitutions it moves nothing. */
+      int sblk = nt_ref(nt, id, "block");
+      int fwd_sblk = sblk >= 0 && nt_kind(nt, sblk) == NK_BlockNode && nt_int(nt, sblk, "fwd_yield", 0) &&
+                     !sp_streq(cnm, "sub") && !sp_streq(cnm, "sub!") && !sp_streq(cnm, "gsub") && !sp_streq(cnm, "gsub!");
+      n = sblk >= 0 && !splat_binary_operator(cnm) && !fwd_sblk ? -1 : splat_builtin_arity(cnm);
       /* slice has no arity to expand to on purpose (see the table). Leave the
          splat as it stands rather than refusing the program: Hash#slice's
          emitter iterates it, which is what the call means. */
@@ -28445,6 +28455,8 @@ static int desugar_mutator_recv_rebind(Compiler *c) {
     if (pfx[0] == 'L') nt_node_set_int(nt, vr, "depth", nt_int(nt, base, "depth", 0));
     nt_node_set_str(nt, w, "name", tn);
     nt_node_set_ref(nt, w, "value", vr);
+    int nc = bo_shallow_copy(nt, id);
+    if (nc < 0) continue;
     long long bl = nt_int(nt, base, "node_line", 0), bf = nt_int(nt, base, "node_file", 0),
               bc = nt_int(nt, base, "node_col", 0);
     nt_node_reset(nt, base, "LocalVariableReadNode");
@@ -28456,8 +28468,6 @@ static int desugar_mutator_recv_rebind(Compiler *c) {
     nt_node_set_int(nt, vr, "node_file", bf);
     nt_node_set_int(nt, vr, "node_col", bc);
     scope_local_intern(sc, tn);
-    int nc = bo_shallow_copy(nt, id);
-    if (nc < 0) continue;
     int stm[2] = { w, nc };
     int stmts = nt_new_node(nt, "StatementsNode");
     nt_node_set_arr(nt, stmts, "body", stm, 2);
@@ -29447,12 +29457,19 @@ static void refuse_lent_ivar_copies(Compiler *c) {
 }
 }
 
-/* A literal block belongs to this super, not to its caller's block. */
-static int super_forwards_caller_block(Compiler *c, int id) {
+/* Only an implicit block or the method's own block parameter forwards its
+   caller's block. A literal block or an unrelated proc belongs to super. */
+int super_forwards_caller_block(Compiler *c, int id) {
   NodeKind kind = nt_kind(c->nt, id);
   if (kind != NK_SuperNode && kind != NK_ForwardingSuperNode) return 0;
   int block = nt_ref(c->nt, id, "block");
-  return block < 0 || nt_kind(c->nt, block) != NK_BlockNode;
+  if (block < 0) return 1;
+  if (nt_kind(c->nt, block) != NK_BlockArgumentNode) return 0;
+  Scope *scope = comp_scope_of(c, id);
+  int expr = nt_ref(c->nt, block, "expression");
+  return scope && scope->blk_param && scope->blk_param[0] && expr >= 0 &&
+         nt_kind(c->nt, expr) == NK_LocalVariableReadNode &&
+         sp_streq(nt_str(c->nt, expr, "name"), scope->blk_param);
 }
 
 static void poly_ivar_set_reference(Compiler *c, int id, int recv) {
@@ -29653,6 +29670,11 @@ static void an_phase_desugar_register(Compiler *c) {
   desugar_class_reopen(c);               /* class Class / Class.class_eval -> a module */
   desugar_class_new_blocks(c);           /* X = Class.new(B) do..end -> class X < B; ..; end */
   desugar_included_hooks(c);             /* include M / extend M -> M.included/extended(base)'s body */
+  /* a hook body spliced into its includer can carry a class_eval "<text>"
+     of its own (`base.class_eval do class_eval "..." end`): graft it as the
+     first pass did the includer's own */
+  desugar_static_class_eval(c);
+  desugar_nil_block_arg(c);
   desugar_self_const_get(c);             /* const_get(:X) / self::X in a class method -> per subclass */
   desugar_dynamic_const_get(c);          /* M.const_get(expr) -> a table of M's constants */
   desugar_builtin_reopen_self_calls(c);  /* class Hash; def m = each {..} -> self.each */

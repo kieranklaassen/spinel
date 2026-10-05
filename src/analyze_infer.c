@@ -7247,10 +7247,11 @@ static TyKind infer_call_inner(Compiler *c, int id) {
   /* Kernel#p returns its argument (one arg; several return the array), so it
      composes as an expression: x = p(y), f(p(y)). Statement-position p keeps
      its own emitter; this types the value form. */
-  if (recv < 0 && !an_bare_call_class_owned(c, id) && (is_inspect_print(name)) && nt_ref(nt, id, "block") < 0 && argc >= 2)
-    return TY_POLY_ARRAY;   /* p(a, b, ...) returns the array of its arguments */
-  if (recv < 0 && !an_bare_call_class_owned(c, id) && (is_inspect_print(name)) && nt_ref(nt, id, "block") < 0 && argc == 1)
-    return infer_type(c, argv[0]);
+  if (recv < 0 && !an_bare_call_class_owned(c, id) && (is_inspect_print(name)) && nt_ref(nt, id, "block") < 0 && argc >= 1) {
+    /* a splat among them leaves their count to run time: nil, the one, or the array */
+    for (int a = 0; a < argc; a++) if (nt_kind(nt, argv[a]) == NK_SplatNode) return TY_POLY;
+    return argc >= 2 ? TY_POLY_ARRAY : infer_type(c, argv[0]);   /* p(a, b, ...) returns the array of its arguments */
+  }
   /* Object#instance_variables: a static symbol list for a typed object */
   if (recv >= 0 && ty_is_object(rt) && argc == 0 &&
       sp_streq(name, "instance_variables"))
@@ -7794,9 +7795,27 @@ static TyKind super_target_ret(Compiler *c, Scope *s, int mi, int id) {
   /* `super(x) { }`: the literal block is spliced into the yielding parent
      like a call's, so the super answers what that call would */
   int sblk = nt_ref(c->nt, id, "block");
-  if (c->scopes[mi].yields && sblk >= 0 && nt_kind(c->nt, sblk) == NK_BlockNode)
-    return method_call_ret(c, mi, id);
+  if (c->scopes[mi].yields && sblk >= 0 && nt_kind(c->nt, sblk) == NK_BlockNode) {
+    TyKind ret = method_call_ret(c, mi, id);
+    TyKind own = (TyKind)c->scopes[mi].ret;
+    if (own != TY_UNKNOWN && own != TY_VOID && ret != TY_UNKNOWN && ret != TY_VOID &&
+        scope_has_return(c, mi)) return ty_unify(own, ret);
+    return ret;
+  }
   TyKind sret = (TyKind)c->scopes[mi].ret;
+  if (c->scopes[mi].yields && sblk >= 0 &&
+      nt_kind(c->nt, sblk) == NK_BlockArgumentNode && !super_forwards_caller_block(c, id)) {
+    /* An unrelated proc replaces the caller's block. Its result, not a
+       block supplied to this method, is what a yield-tailed parent answers. */
+    int last = scope_body_last(c, mi);
+    if (last >= 0 && (nt_kind(c->nt, last) == NK_YieldNode || is_blk_param_call(c, last, mi))) {
+      TyKind ret = proc_call_ret(c, nt_ref(c->nt, sblk, "expression"));
+      if (sret != TY_UNKNOWN && sret != TY_VOID && ret != TY_UNKNOWN && ret != TY_VOID &&
+          scope_has_return(c, mi)) return ty_unify(sret, ret);
+      return ret;
+    }
+    return sret;
+  }
   /* A yielding parent's return is whatever its yield produces, decided per
      call site, so its own `ret` stays unknown. The block reaching it is the
      one this method is called with, so take that value's type. */
