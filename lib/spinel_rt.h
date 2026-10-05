@@ -2628,6 +2628,14 @@ static inline sp_RbVal sp_poly_strbuf_lift(sp_RbVal v) {
   if (v.tag == SP_TAG_STR && v.v.s) return sp_box_obj(sp_poly_as_strbuf(v), SP_BUILTIN_STRBUF);
   return v;
 }
+/* The same lift for a value on its way into a container's slot. A frozen
+   String is passed as the box it is: it can take no change in place, and a
+   frozen literal is one object the program may compare by identity, which a
+   fresh handle around a copy of it would not be. */
+static inline sp_RbVal sp_poly_strbuf_lift_unfrozen(sp_RbVal v) {
+  if (v.tag == SP_TAG_STR && v.v.s && !sp_str_is_frozen_val(v.v.s)) return sp_box_obj(sp_poly_as_strbuf(v), SP_BUILTIN_STRBUF);
+  return v;
+}
 /* A boxed value unboxed into a String slot. A mutable String's box carries
    its sp_String handle in the union, so reading `.v.s` there hands the slot
    the handle, not the bytes; the bytes are the handle's data, the same live
