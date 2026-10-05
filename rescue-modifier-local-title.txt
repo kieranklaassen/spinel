@@ -1,0 +1,1 @@
+A rescue modifier, and a begin in a lambda, keep a local written before the raise

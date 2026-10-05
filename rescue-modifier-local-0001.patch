@@ -1,0 +1,268 @@
+From acac05fb25f08cf723744530e00f8814313af6e4 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 5 Oct 2026 09:05:16 +0000
+Subject: [PATCH 1/2] A rescue modifier keeps a local written before the raise
+
+`tries = 0; x = (tries += 1; raise "no") rescue :gave_up; p x, tries`
+printed `:gave_up` and 0 where CRuby prints 1, and in a method
+`v = (n = s.size; Integer(s)) rescue -1` left n at its old value for a
+String that is no number. Silent, at -O1 and above and with clang; -O0
+was right. The statement form (`begin ... rescue ... end`) was right.
+
+The modifier runs its expression under a setjmp of its own, as a begin
+does, and the analysis that says which locals must be volatile across a
+setjmp knew only the begin: scope_has_begin and begin_volatile_names
+looked for a BeginNode or a RescueNode, never a RescueModifierNode. A
+local written in the expression and read after the longjmp was a plain C
+local, and what it held was whatever the register held at the setjmp.
+An Integer, a Float, a Symbol, a true or false and a Range were lost, in
+a local and in a parameter; a String, an Array and an object were kept,
+and only because a rooted local has its address taken.
+
+Both now count the modifier, and the locals written in its expression
+are volatile. The fallback runs after the longjmp, so a local written
+only there stays plain. A block spliced into a yielding method under
+the modifier, `(twice { |x| n += x; raise "stop" if x == 2 }) rescue nil`,
+keeps its writes the same way.
+
+A String local of a yielding method spliced into its caller becomes a
+volatile slot here when the modifier's expression writes it, so this
+stands on the commit that roots such a slot as a String;
+test/gc_root_volatile_string_slot_modifier.rb is that case under
+GC_STRESS_TESTS.
+
+Inside a lambda, a proc, a Fiber or a Thread body the write is still
+lost, for the modifier as for a begin there: such a body declares its
+own locals and does not ask the analysis.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ Makefile                                      |  3 +-
+ src/codegen.c                                 | 12 ++-
+ test/gc_root_volatile_string_slot_modifier.rb | 32 +++++++
+ ..._volatile_string_slot_modifier.rb.expected |  1 +
+ test/rescue_modifier_local_write.rb           | 92 +++++++++++++++++++
+ test/rescue_modifier_local_write.rb.expected  | 16 ++++
+ 6 files changed, 151 insertions(+), 5 deletions(-)
+ create mode 100644 test/gc_root_volatile_string_slot_modifier.rb
+ create mode 100644 test/gc_root_volatile_string_slot_modifier.rb.expected
+ create mode 100644 test/rescue_modifier_local_write.rb
+ create mode 100644 test/rescue_modifier_local_write.rb.expected
+
+diff --git a/Makefile b/Makefile
+index aba4855c8..ba4328b92 100644
+--- a/Makefile
++++ b/Makefile
+@@ -1746,7 +1746,8 @@ GC_STRESS_TESTS := test/gc_root_frame_slots.rb \
+                    test/proc_cell_capture_marked.rb \
+                    test/poly_array_intersect.rb \
+                    test/thread_new_args_rooted_across_fiber_alloc.rb \
+-                   test/gc_root_volatile_string_slot.rb
++                   test/gc_root_volatile_string_slot.rb \
++                   test/gc_root_volatile_string_slot_modifier.rb
+ gc-stress-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
+ 	@tmp=$$(mktemp -d /tmp/spinel-gcstress.XXXXXX); ok=1; \
+ 	if $(CC) -O1 -w -Ilib test/gc-stress/lost.c $(SP_RT_LIB) $(LDFLAGS) -lm -o "$$tmp/lost" 2>"$$tmp/cc.err"; then \
+diff --git a/src/codegen.c b/src/codegen.c
+index 7a6dc0733..49ea4492f 100644
+--- a/src/codegen.c
++++ b/src/codegen.c
+@@ -1973,15 +1973,16 @@ static int is_heavy_brk_call(Compiler *c, int id) {
+   return call_breaks(c, id) && !brk_wrapper_surely_light(c, id);
+ }
+ 
+-/* Does scope index `si` contain a begin/rescue, a `loop {}`, or a heavy
+-   (real-setjmp) break-carrying call (so its locals need volatile across the
+-   setjmp it emits)? */
++/* Does scope index `si` contain a begin/rescue, a rescue modifier, a
++   `loop {}`, or a heavy (real-setjmp) break-carrying call (so its locals
++   need volatile across the setjmp it emits)? */
+ int scope_has_begin(Compiler *c, int si) {
+   int nids = 0; const int *ids = cg_scope_nodes(c, si, &nids);
+   for (int k = 0; k < nids; k++) {
+     int id = ids[k];
+     const char *ty = nt_type(c->nt, id);
+-    if (ty && (sp_streq(ty, "BeginNode") || sp_streq(ty, "RescueNode")))
++    if (ty && (sp_streq(ty, "BeginNode") || sp_streq(ty, "RescueNode") ||
++               sp_streq(ty, "RescueModifierNode")))
+       return 1;
+     if (is_stopiter_loop(c, id) || is_heavy_brk_call(c, id)) return 1;
+   }
+@@ -2030,6 +2031,9 @@ static void begin_volatile_names(Compiler *c, int si, char ***out, int *nout, in
+   for (int k = 0; k < nids; k++) {
+     int id = ids[k];
+     if ((nt_kind(nt, id) == NK_BeginNode) || is_stopiter_loop(c, id) || is_heavy_brk_call(c, id)) mark_subtree(nt, id, inb);
++    /* a rescue modifier's setjmp is around its expression; the fallback
++       runs after the longjmp */
++    if (nt_kind(nt, id) == NK_RescueModifierNode) mark_subtree(nt, nt_ref(nt, id, "expression"), inb);
+   }
+   for (int k = 0; k < nids; k++)
+     if (nt_kind(nt, ids[k]) == NK_RescueNode && !inb[ids[k]]) { *all = 1; break; }
+diff --git a/test/gc_root_volatile_string_slot_modifier.rb b/test/gc_root_volatile_string_slot_modifier.rb
+new file mode 100644
+index 000000000..1cfa76e72
+--- /dev/null
++++ b/test/gc_root_volatile_string_slot_modifier.rb
+@@ -0,0 +1,32 @@
++# A String local written in the expression of a rescue modifier is a
++# volatile slot, and is rooted as a String all the same: the buffer it names
++# stays alive when nothing else holds it. Run under SPINEL_GC_STRESS=2 by
++# gc-stress-test.
++APPEND = ->(x) { x << "-appended-0123456789-abcdefghij" }
++
++def fresh(i)
++  b = String.new("payload-#{i}")
++  APPEND.call(b)
++  [b, i]
++end
++
++# a yielding method, spliced into its caller: its local is rooted where the
++# caller's are
++def each_built(n)
++  s = "start"
++  i = 0
++  while i < n
++    (s = fresh(i)[0].to_s; APPEND.call(String.new("other")); yield i; Integer("5")) rescue nil
++    i += 1
++  end
++  APPEND.call(String.new("last"))
++  junk = (1..50).map { |k| "junk-#{k}-" * 8 }
++  s + junk.size.to_s
++end
++
++def run
++  seen = 0
++  r = each_built(3) { |x| seen += x }
++  [r, seen]
++end
++p run
+diff --git a/test/gc_root_volatile_string_slot_modifier.rb.expected b/test/gc_root_volatile_string_slot_modifier.rb.expected
+new file mode 100644
+index 000000000..4821c9d57
+--- /dev/null
++++ b/test/gc_root_volatile_string_slot_modifier.rb.expected
+@@ -0,0 +1 @@
++["payload-2-appended-0123456789-abcdefghij50", 3]
+diff --git a/test/rescue_modifier_local_write.rb b/test/rescue_modifier_local_write.rb
+new file mode 100644
+index 000000000..a85ef3092
+--- /dev/null
++++ b/test/rescue_modifier_local_write.rb
+@@ -0,0 +1,92 @@
++# A local written in the expression of a rescue modifier keeps the write
++# when the rescue is taken
++tries = 0
++x = (tries += 1; raise "no") rescue :gave_up
++p x, tries
++
++def size_then_parse(s)
++  n = 0
++  v = (n = s.size; Integer(s)) rescue -1
++  [v, n]
++end
++p size_then_parse("12"), size_then_parse("zz")
++
++# a parameter
++def scaled(k, s)
++  v = (k *= 2; Integer(s) * k) rescue 0
++  [v, k]
++end
++p scaled(3, "7"), scaled(3, "x")
++
++# a Float, a Symbol, a true, a String and an Array, the modifier as a statement
++def kinds
++  f = 1.5
++  y = :old
++  t = false
++  s = "old"
++  a = [1]
++  (f = 2.5; y = :new; t = true; s = "new"; a = [1, 2]; raise ArgumentError) rescue nil
++  [f, y, t, s, a]
++end
++p kinds
++
++# first written inside, and a local that takes two types
++def fresh
++  r = ((m = 4; u = 1; u = "one"; Integer("z")) rescue :err)
++  [r, m, u]
++end
++p fresh
++
++# nested modifiers
++def nested
++  a = 0
++  b = 0
++  r = ((a = 1; ((b = 2; Integer("in")) rescue raise("out"))) rescue :outer)
++  [r, a, b]
++end
++p nested
++
++# a write in the fallback, and one the rescue does not reach
++def untaken
++  c = 0
++  d = 0
++  r = ((c = 1; Integer("5")) rescue (d = 1; 0))
++  q = (Integer("z") rescue (d += 2; -1))
++  [r, q, c, d]
++end
++p untaken
++
++# in a block, with next and break
++def scan(words)
++  seen = 0
++  good = 0
++  words.each do |w|
++    v = (seen += 1; Integer(w)) rescue nil
++    next if v.nil?
++    good += 1
++    break if v == 0
++  end
++  [seen, good]
++end
++p scan(["1", "x", "2"]), scan(["0", "1"]), scan(["y"])
++
++i = 0
++bad = 0
++while i < 4
++  i += 1
++  (bad += 1 if i.odd?; raise "odd" if i.odd?) rescue next
++end
++p i, bad
++
++# a block spliced into a yielding method, the whole call under the modifier
++def twice
++  yield 1
++  yield 2
++end
++def spliced
++  n = 0
++  f = 0.0
++  (twice { |x| n += x; f += 0.5; raise "stop" if x == 2 }) rescue nil
++  [n, f]
++end
++p spliced
+diff --git a/test/rescue_modifier_local_write.rb.expected b/test/rescue_modifier_local_write.rb.expected
+new file mode 100644
+index 000000000..60dd46f7e
+--- /dev/null
++++ b/test/rescue_modifier_local_write.rb.expected
+@@ -0,0 +1,16 @@
++:gave_up
++1
++[12, 2]
++[-1, 2]
++[42, 6]
++[0, 6]
++[2.5, :new, true, "new", [1, 2]]
++[:err, 4, "one"]
++[:outer, 1, 2]
++[5, -1, 1, 2]
++[3, 2]
++[1, 1]
++[1, 0]
++4
++2
++[3, 1.0]
+-- 
+2.43.0
+

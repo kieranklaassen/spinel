@@ -1,0 +1,50 @@
+A lambda's local written inside a begin keeps the write after the rescue
+
+```ruby
+tries = lambda do
+  n = 0
+  begin
+    n += 1
+    raise "again" if n < 3
+  rescue
+    retry
+  end
+  n
+end
+p tries.call
+```
+
+never returned at -O1 and above and with clang: n read 0 after every
+retry. `l = lambda { n = 3; begin; n = 5; Integer("z"); rescue; end; n }`
+answered 3 where CRuby answers 5, and a write an ensure reads was lost
+the same way. Silent; -O0 was right, and so was the same body as a
+method or as a block spliced into its caller.
+
+A lambda, a proc, a Fiber body and a Thread body are C functions of
+their own, and the three places that declare their locals
+(emit_fiber_new, and twice in emit_proc_literal_here) passed 0 for
+declare_local's volatile argument whatever the body held. They now ask
+proc_local_needs_volatile, which looks under the body's own block for a
+write of that local inside a begin, a rescue modifier's expression, a
+`loop` that ends on StopIteration or a break that crosses a frame. A
+setjmp around the `lambda` call is in the enclosing function, so a body
+with none of its own is declared as before.
+
+One walk of the block gathers every name written under a setjmp, and
+the answer is kept for the body's next local, so a body with no rescue
+costs what it cost: a lambda of 4,000 locals, each written in a block,
+compiles in 31.11 s against master's 31.34 s, and one of 3,000 locals
+each under a begin of its own in 3.61 s against 3.69 s.
+
+The body's own parameter is the same local when the body assigns it. A
+block's required parameter was already copied into a local of the body;
+a stabby lambda's (`->(k) { ... }`), a parameter after a splat and a
+`**rest` are declared by the argument prologue, which now spells their
+type through emit_local_ctype, the volatile spelling split out of
+emit_inlined_local_decl. Each change in emit_proc_literal_here replaces
+text on a line it already had: the function stays at 1,293 lines.
+
+An Integer, a Float, a Symbol and a true or false were lost; a rooted
+local, a String or an Array, was kept.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

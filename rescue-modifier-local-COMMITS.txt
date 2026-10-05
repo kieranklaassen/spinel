@@ -1,0 +1,44 @@
+The pair as it should stand when its history is rebuilt at opening
+===================================================================
+
+Base: master with the slot rooting pull request merged. Built and checked here on
+0d1a02501 (master 92510d6c1 plus the slot piece's two commits 623fbaad7 and 0d1a02501).
+Two commits, one cause each, in this order:
+
+1. "A rescue modifier keeps a local written before the raise"
+   = 9db869370 + 51bfdb383 (its tests: the spliced block case added to
+     test/rescue_modifier_local_write.rb, and test/gc_root_volatile_string_slot_modifier.rb
+     with its line in GC_STRESS_TESTS)
+   message: commit-1-message.txt
+   tree after it: 745970ff2fb8a4f5aec149fd9d93bfec8a6e0118   (local id acac05fb2)
+   patch: 0001-A-rescue-modifier-keeps-a-local-written-before-the-r.patch
+
+2. "A lambda's local written inside a begin keeps the write after the rescue"
+   = 3eef3174e + 4272bb8f3 (one walk a body) + 2dd27bef3 (the table's version in the kept answer's key)
+   message: commit-2-message.txt
+   tree after it: 8c8298d2d19326f61111408a89618ddb35875d47   (local id 67262b3c6)
+   patch: 0002-A-lambda-s-local-written-inside-a-begin-keeps-the-wr.patch
+
+The tree after commit 2 is the tree of the pushed head 2dd27bef3 of
+claude/rescue-modifier-local-6f9l90, hash for hash (`git diff 2dd27bef3 67262b3c6` is empty).
+
+To rebuild on a later master M that holds the slot rooting fix:
+  git checkout -b <new branch> M
+  git am 0001-*.patch 0002-*.patch        (or cherry-pick -n the commits named above, in the two groups)
+The trees above hold only while M's tree is 0d1a02501's; on any other master the tree is new and
+the gate decides.
+
+Commit 2 stands alone on master (the second reading checked it: cherry-pick clean, 46 of 46
+programs right). Commit 1 does NOT: alone on a master without the slot rooting fix it carries
+that crash to the modifier (the reading's finding 1).
+
+Checked here (10-05, 09:30 UTC): commit 1 alone (acac05fb2, built) passes
+test/rescue_modifier_local_write.rb, test/gc_root_volatile_string_slot_modifier.rb and
+test/gc_root_volatile_string_slot.rb at -O0 to -O3, with clang and under SPINEL_GC_STRESS=1 and 2,
+and `ruby tools/gate.rb check` passes on it. Commit 2's tree is the pushed head's, measured as
+the head was.
+
+New tests whose .expected a CRuby 4.0 compares (made with CRuby 3.3.6; none prints a Hash):
+  test/rescue_modifier_local_write.rb             (commit 1, 16 lines)
+  test/gc_root_volatile_string_slot_modifier.rb   (commit 1, 1 line)
+  test/proc_body_local_across_rescue.rb           (commit 2, 18 lines)

@@ -1,0 +1,35 @@
+A rescue modifier keeps a local written before the raise
+
+`tries = 0; x = (tries += 1; raise "no") rescue :gave_up; p x, tries`
+printed `:gave_up` and 0 where CRuby prints 1, and in a method
+`v = (n = s.size; Integer(s)) rescue -1` left n at its old value for a
+String that is no number. Silent, at -O1 and above and with clang; -O0
+was right. The statement form (`begin ... rescue ... end`) was right.
+
+The modifier runs its expression under a setjmp of its own, as a begin
+does, and the analysis that says which locals must be volatile across a
+setjmp knew only the begin: scope_has_begin and begin_volatile_names
+looked for a BeginNode or a RescueNode, never a RescueModifierNode. A
+local written in the expression and read after the longjmp was a plain C
+local, and what it held was whatever the register held at the setjmp.
+An Integer, a Float, a Symbol, a true or false and a Range were lost, in
+a local and in a parameter; a String, an Array and an object were kept,
+and only because a rooted local has its address taken.
+
+Both now count the modifier, and the locals written in its expression
+are volatile. The fallback runs after the longjmp, so a local written
+only there stays plain. A block spliced into a yielding method under
+the modifier, `(twice { |x| n += x; raise "stop" if x == 2 }) rescue nil`,
+keeps its writes the same way.
+
+A String local of a yielding method spliced into its caller becomes a
+volatile slot here when the modifier's expression writes it, so this
+stands on the commit that roots such a slot as a String;
+test/gc_root_volatile_string_slot_modifier.rb is that case under
+GC_STRESS_TESTS.
+
+Inside a lambda, a proc, a Fiber or a Thread body the write is still
+lost, for the modifier as for a begin there: such a body declares its
+own locals and does not ask the analysis.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
