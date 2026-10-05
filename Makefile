@@ -1510,6 +1510,11 @@ reject-test: $(SPINEL)
 	  echo "reject-test: FAIL (a call to a yielding method with more locals than the inliner renames compiled)"; ok=0; \
 	else grep -q "a block-driving call to a method that yields could not be inlined" "$$tmp/yl.out" || \
 	  { echo "reject-test: FAIL (a yielding method past the inliner rename room rejected without saying why)"; sed -n 1,5p "$$tmp/yl.out"; ok=0; }; fi; \
+	t=test/reject/yielding_method_blockless_past_inline_room.rb; \
+	if $(SPINEL) "$$t" -c --no-line-map -o "$$tmp/yb.c" >"$$tmp/yb.out" 2>&1; then \
+	  echo "reject-test: FAIL (a call with no block to a yielding method with more locals than the inliner renames compiled)"; ok=0; \
+	else grep -q "a call with no block to a method that yields could not be inlined" "$$tmp/yb.out" || \
+	  { echo "reject-test: FAIL (a blockless call past the inliner rename room rejected without saying why)"; sed -n 1,5p "$$tmp/yb.out"; ok=0; }; fi; \
 	t=test/reject/forwarding_builtin_uneven_calls.rb; \
 	if $(SPINEL) "$$t" -c --no-line-map -o "$$tmp/fb.c" >"$$tmp/fb.out" 2>&1; then \
 	  echo "reject-test: FAIL (... into a builtin from calls of different arities compiled)"; ok=0; \
