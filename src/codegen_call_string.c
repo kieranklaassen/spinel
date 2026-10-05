@@ -1201,21 +1201,24 @@ int emit_op_string_slice(Compiler *c, const BopCtx *x, Buf *b) {
     buf_printf(b, " _hit%d ? _t%d : (const char *)0; })", tp2, tp2);
     return 1;
   }
-  if (argc == 1 && re_lit_index(c, argv[0]) >= 0) {
+  if (argc == 1 && re_arg_p(c, argv[0])) {
     /* slice!(/re/): remove the first match, evaluate to it (or nil).
        sp_re_match fills sp_re_match_str with the matched run; the splice
-       helper replaces it with the empty string. */
+       helper replaces it with the empty string. The Regexp is a literal or
+       one held in a variable, which had no arm. */
     int tm3 = ++g_tmp, ts3 = ++g_tmp;
+    char pat[32];
     buf_printf(b, "({ const char *_t%d = ", ts3); emit_expr(c, recv, b);
     buf_printf(b, "; if (_t%d) sp_str_check_mutable(_t%d);", ts3, ts3);
-    buf_printf(b, " sp_int _t%d = sp_re_match(sp_re_pat_%d, _t%d);"
+    if (re_lit_index(c, argv[0]) < 0) buf_printf(b, " SP_GC_ROOT_STR(_t%d);", ts3);
+    emit_re_arg_pat(c, argv[0], "no implicit conversion from nil to integer", b, pat);
+    buf_printf(b, " sp_int _t%d = sp_re_match(%s, _t%d);"
                   " const char *_hit%d = _t%d >= 0 ? sp_re_match_str : NULL;",
-               tm3, re_lit_index(c, argv[0]), ts3, tm3, tm3);
+               tm3, pat, ts3, tm3, tm3);
     if (sb_asgn) {
       buf_printf(b, " if (_hit%d) ", tm3);
       emit_expr(c, recv, b);
-      buf_printf(b, " = sp_str_splice_re(sp_re_pat_%d, _t%d, (&(\"\\xff\")[1]));",
-                 re_lit_index(c, argv[0]), ts3);
+      buf_printf(b, " = sp_str_splice_re(%s, _t%d, (&(\"\\xff\")[1]));", pat, ts3);
     }
     buf_printf(b, " _hit%d; })", tm3);
     return 1;
@@ -1277,19 +1280,23 @@ int emit_op_string_slice(Compiler *c, const BopCtx *x, Buf *b) {
     buf_printf(b, " } _t%d; })", tr2);
     return 1;
   }
-  if (argc == 2 && re_lit_index(c, argv[0]) >= 0) {
+  if (argc == 2 && re_arg_p(c, argv[0])) {
     /* slice!(/re/, n): remove the nth capture group of the first match and
        evaluate to it. sp_re_caps holds each group's byte span, so the removal
        is the group's own occurrence rather than the first textual one, which
-       is a different character when the group repeats (#3543). */
+       is a different character when the group repeats (#3543). The Regexp is
+       a literal or one held in a variable, which had no arm. */
     int ts = ++g_tmp, tn = ++g_tmp, th = ++g_tmp;
+    char pat[32];
     buf_printf(b, "({ const char *_t%d = ", ts); emit_expr(c, recv, b);
     buf_printf(b, "; if (_t%d) sp_str_check_mutable(_t%d);", ts, ts);
+    if (re_lit_index(c, argv[0]) < 0) buf_printf(b, " SP_GC_ROOT_STR(_t%d);", ts);
+    emit_re_arg_pat(c, argv[0], "no implicit conversion from nil to integer", b, pat);
     buf_printf(b, " sp_int _t%d = ", tn); emit_int_expr(c, argv[1], b);
-    buf_printf(b, "; const char *_t%d = sp_re_match(sp_re_pat_%d, _t%d) >= 0"
+    buf_printf(b, "; const char *_t%d = sp_re_match(%s, _t%d) >= 0"
                   " ? (_t%d == 0 ? sp_re_match_str"
                   "    : (_t%d >= 1 && _t%d <= 9 ? sp_re_captures[_t%d] : NULL)) : NULL;",
-               th, re_lit_index(c, argv[0]), ts, tn, tn, tn, tn);
+               th, pat, ts, tn, tn, tn, tn);
     if (sb_asgn) {
       buf_printf(b, " if (_t%d && _t%d >= 0 && _t%d <= 9) {"
                     " sp_int _b = sp_re_caps[2 * _t%d], _e = sp_re_caps[2 * _t%d + 1]; ",

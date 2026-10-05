@@ -1,0 +1,17 @@
+["a", "xybzab"]
+[nil, "xaybzab"]
+["bz", "xayab"]
+["y", "xabzab"]
+["ay", "xbzab"]
+[nil, "xaybzab"]
+[nil, "xaybzab"]
+"y"
+"xabzab"
+"bz"
+"a"
+"xyab"
+"ay"
+"xbzab"
+FrozenError: can't modify frozen String: "xaybzab"
+TypeError: no implicit conversion from nil to integer
+"xbzab"
