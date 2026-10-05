@@ -1367,6 +1367,8 @@ void emit_expr(Compiler *c, int id, Buf *b) {
     g_io_skip_reopen = 1;
     return;
   }
+  /* the receiver of an append a boxed Hash's value block makes */
+  if (g_append_guard_n && append_guard_recv(c, id, b)) return;
   g_expr_depth++;
   emit_expr_node(c, id, b);
   g_expr_depth--;

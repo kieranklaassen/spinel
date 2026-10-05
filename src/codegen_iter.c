@@ -4760,15 +4760,83 @@ static void emit_zip_block_param(Compiler *c, TyKind slot, TyKind src_ty,
   else buf_puts(b, src);
 }
 
+/* The appends a boxed Hash's value block makes to its value parameter. A
+   push in the block (`x << y`) is the usage pass's reason to type x an Array,
+   and a String answers `<<` as well: out of the Hash it binds as a null
+   Array, and the push crashed. The append could only reach a copy, so it
+   raises instead, where it is reached: `recv` is the receiver node of one
+   `x << y` in the block's own body and `key` names the temp that says the
+   bound value is such a String. emit_expr writes that receiver through
+   append_guard_recv. A stack, so a walk inside a guarded body keeps its own. */
+typedef struct { int recv, key, body; TyKind ty; } AppendGuard;
+static AppendGuard g_append_guard[16];
+int g_append_guard_n;
+
+static void append_guard_collect(Compiler *c, int id, const char *nm, AppendGuard g) {
+  const NodeTable *nt = c->nt;
+  if (id < 0) return;
+  NodeKind k = nt_kind(nt, id);
+  /* the temp is out of scope in a nested block's or lambda's function */
+  if (k == NK_BlockNode || k == NK_LambdaNode || k == NK_DefNode) return;
+  const char *cn = k == NK_CallNode ? nt_str(nt, id, "name") : NULL;
+  if (cn && is_push_alias(cn) && g_append_guard_n < 16) {
+    g.recv = nt_ref(nt, id, "receiver");
+    const char *rn = g.recv >= 0 && nt_kind(nt, g.recv) == NK_LocalVariableReadNode ? nt_str(nt, g.recv, "name") : NULL;
+    if (rn && sp_streq(rn, nm)) g_append_guard[g_append_guard_n++] = g;
+  }
+  int nr = nt_num_refs(nt, id);
+  for (int i = 0; i < nr; i++) append_guard_collect(c, nt_ref_at(nt, id, i), nm, g);
+  int na = nt_num_arrs(nt, id);
+  for (int i = 0; i < na; i++) {
+    int n = 0;
+    const int *ids = nt_arr_at(nt, id, i, &n);
+    for (int j = 0; j < n; j++) append_guard_collect(c, ids[j], nm, g);
+  }
+}
+
+/* Open the guard for parameter `pj` of `block`, whose bound value `words`
+   answers for (0, or which refusal's words): declares `_as<key>` in the
+   loop's scope when the block appends to an Array-typed parameter it never
+   assigns. append_guard_end closes it once the body is emitted. */
+static void append_guard_begin(Compiler *c, int block, int pj, int key, const char *words, Buf *b, int indent) {
+  Scope *bs = comp_scope_of(c, block);
+  const char *pn = block_param_name(c, block, pj);
+  LocalVar *lv = bs && pn ? scope_local(bs, pn) : NULL;
+  int body = nt_ref(c->nt, block, "body"), n0 = g_append_guard_n;
+  if (!lv || !ty_is_array(lv->type) || !dyn_block_appends(c, block, pj) || subtree_writes_local(c, body, pn)) return;
+  append_guard_collect(c, body, pn, (AppendGuard){ -1, key, body, lv->type });
+  if (g_append_guard_n == n0) return;
+  emit_indent(b, indent);
+  buf_printf(b, "sp_int _as%d = %s;\n", key, words);
+}
+
+static void append_guard_end(int body) {
+  while (g_append_guard_n > 0 && g_append_guard[g_append_guard_n - 1].body == body) g_append_guard_n--;
+}
+
+int append_guard_recv(Compiler *c, int id, Buf *b) {
+  for (int i = g_append_guard_n - 1; i >= 0; i--) {
+    if (g_append_guard[i].recv != id) continue;
+    int n = g_append_guard_n;
+    g_append_guard_n = 0;   /* the read below is the receiver itself */
+    buf_printf(b, "((%s)sp_poly_appended_string(_as%d, ", c_type_name(g_append_guard[i].ty), g_append_guard[i].key);
+    emit_expr(c, id, b);
+    buf_puts(b, "))");
+    g_append_guard_n = n;
+    return 1;
+  }
+  return 0;
+}
+
 /* `thash` is the temp of a boxed receiver whose pairs `each` / `each_pair`
-   walk, or 0. Its value parameter typed an Array is the usage pass's reading
-   of a push in the block (`x << y`), which a String answers as well: the
-   String was unboxed to a null Array and the push crashed. An append there
-   could only reach a copy, so the bind raises for one
-   (sp_poly_appended_hash_value). */
+   walk, or 0: its value parameter's appends are guarded (append_guard_recv). */
 static void emit_poly_auto_splat(Compiler *c, int block, int telem, int thash, Buf *b, int indent) {
   Scope *bs = comp_scope_of(c, block);
   int npp = 0; while (block_param_name(c, block, npp)) npp++;
+  if (thash) {
+    char words[96]; snprintf(words, sizeof words, "sp_poly_hash_pair_string(_t%d, _t%d)", thash, telem);
+    append_guard_begin(c, block, 1, telem, words, b, indent + 1);
+  }
   emit_indent(b, indent + 1);
   buf_printf(b, "if (_t%d.tag == SP_TAG_OBJ && SP_IS_BUILTIN_ARRAY(_t%d.cls_id)) {\n", telem, telem);
   for (int pj = 0; pj < npp; pj++) {
@@ -4776,10 +4844,7 @@ static void emit_poly_auto_splat(Compiler *c, int block, int telem, int thash, B
     if (!pnj) break;
     LocalVar *plv = bs ? scope_local(bs, pnj) : NULL;
     TyKind pt = plv ? plv->type : TY_POLY;
-    char src[112];
-    if (thash && pj == 1 && ty_is_array(pt) && dyn_block_appends(c, block, pj))
-      snprintf(src, sizeof src, "sp_poly_appended_hash_value(_t%d, sp_poly_arr_get(_t%d, %d))", thash, telem, pj);
-    else snprintf(src, sizeof src, "sp_poly_arr_get(_t%d, %d)", telem, pj);
+    char src[64]; snprintf(src, sizeof src, "sp_poly_arr_get(_t%d, %d)", telem, pj);
     emit_indent(b, indent + 2);
     emit_block_param_from_boxed(c, rename_local(pnj), pt, src, b);
   }
@@ -5520,15 +5585,16 @@ static int iter_enum_poly_walk_arms(Compiler *c, int id, Buf *b, int indent, con
         Scope *bs0 = comp_scope_of(c, block);
         LocalVar *b0 = p0_orig ? scope_local(bs0, p0_orig) : NULL;
         TyKind p0t = (b0 && b0->type != TY_UNKNOWN) ? b0->type : TY_POLY;
-        char vb0[96];
-        /* a boxed Hash's each_value: the String of an appending block whose
-           pushes typed the parameter an Array, as each's (emit_poly_auto_splat) */
+        char vb0[48];
+        snprintf(vb0, sizeof vb0, "sp_PolyArray_get(_t%d, _t%d)", ta, ti);
+        /* a boxed Hash's each_value: its value parameter's appends are
+           guarded as each's are (append_guard_recv) */
         const char *en = nt_kind(nt, recv) == NK_CallNode ? nt_str(nt, recv, "name") : NULL;
         int er = en ? nt_ref(nt, recv, "receiver") : -1;
-        if (ty_is_array(p0t) && en && sp_streq(en, "each_value") && er >= 0 &&
-            comp_ntype(c, er) == TY_POLY && dyn_block_appends(c, block, 0))
-          snprintf(vb0, sizeof vb0, "sp_poly_appended_chain_value(sp_PolyArray_get(_t%d, _t%d))", ta, ti);
-        else snprintf(vb0, sizeof vb0, "sp_PolyArray_get(_t%d, _t%d)", ta, ti);
+        if (en && sp_streq(en, "each_value") && er >= 0 && comp_ntype(c, er) == TY_POLY) {
+          char words[96]; snprintf(words, sizeof words, "sp_poly_unfrozen_string(%s) ? 2 : 0", vb0);
+          append_guard_begin(c, block, 0, ti, words, b, indent + 1);
+        }
         emit_indent(b, indent + 1);
         buf_printf(b, "lv_%s = ", p0);
         if (p0t == TY_POLY) buf_puts(b, vb0);
@@ -5549,6 +5615,7 @@ static int iter_enum_poly_walk_arms(Compiler *c, int id, Buf *b, int indent, con
           buf_printf(b, "lv_%s = _t%d + _t%d;\n", p1, ti, toff);
       }
       emit_loop_body(c, body, b, indent + 1);
+      append_guard_end(body);
       emit_indent(b, indent); buf_puts(b, "}\n");
       return 1;
     }
@@ -6193,6 +6260,7 @@ static int iter_ewi_zip_poly_arms(Compiler *c, int id, Buf *b, int indent, const
     /* a paramless block (`each { ... }`) binds nothing; the loop still runs the
        body once per element for its side effect. */
     emit_loop_body(c, body, b, indent + 1);
+    append_guard_end(body);
     emit_indent(b, indent); buf_puts(b, "}\n");
     return 1;
   }

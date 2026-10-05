@@ -20,8 +20,8 @@ p s.rows.to_a
 
 # A String out of such a Hash answers `<<` as well, and it was unboxed to a
 # null Array: the push crashed. The append could only reach a copy, since a
-# String is not yet shared by reference through a Hash's values, so spinel
-# raises NotImplementedError for it, in the words a Hash local is refused
+# String is not yet shared by reference through a Hash's values, so the
+# append raises NotImplementedError, in the words a Hash local is refused
 # with when it is built. The rescue answers what CRuby answers, so the two
 # runs agree only when spinel raised.
 g = {a: +"q"}
@@ -52,3 +52,12 @@ rescue NotImplementedError
   [[:a, "qzz"]]
 end
 p r
+
+# The raise is the append's: a block that never reaches it for the String
+# runs to its end.
+m = {a: +"q", b: ["s"]}
+[m].each do |f|
+  f.each { |k, x| x << "z" if k == :b }
+  f.each_value.with_index { |x, i| x << "y" if i == 1 }
+end
+p m.to_a

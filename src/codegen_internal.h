@@ -229,6 +229,8 @@ int call_is_scalar_op(Compiler *c, int id);   /* a builtin operator over scalars
 /* Whether the subtree at `id` assigns the local `nm`: a write, an op-write
    or a multiple-assignment target by that name. */
 int subtree_writes_local(Compiler *c, int id, const char *nm);
+extern int g_append_guard_n;
+int append_guard_recv(Compiler *c, int id, Buf *b);
 int iter_recv_bind_once(Compiler *c, int node);
 /* When a yielding method is inlined, g_yield_block_fallback holds the block
    that was active in the CALLER's context so nested `yield`s inside the
