@@ -31878,8 +31878,16 @@ static void an_phase_late_widen(Compiler *c) {
      the backstop above, after the last return pass). Lift ONLY returns that
      are still UNKNOWN: widening an established return here is what
      g_ret_no_new_poly deliberately prevents. Iterated so a caller whose tail
-     is such a call picks the type up too. */
-  for (int iter = 0; iter < 8; iter++) {
+     is such a call picks the type up too.
+
+     Iterated until nothing lifts, not 8 times. A pass lifts one hop of a
+     chain of callers defined before their callee, and this is the last place
+     a return gets its type: past the count the head of the chain stayed
+     UNKNOWN, was emitted `void`, and its call answered nil with nothing said
+     (40 methods handing an empty `[]` down to the one that appends to it).
+     It ends: a lift moves a return from UNKNOWN to a type or from NIL to
+     POLY and none moves back, so a scope lifts twice at most. */
+  for (int iter = 0, cap = 2 * c->nscopes + 1; iter < cap; iter++) {
     int lifted = 0;
     /* A NIL return was read off a local the loop above just made poly:
        `h = nil; h ||= {}; h` is nil through the fixpoint, because the
