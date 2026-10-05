@@ -1,0 +1,1 @@
+The value of a String index assignment on a global is its right-hand side

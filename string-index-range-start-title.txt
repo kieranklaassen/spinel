@@ -1,0 +1,1 @@
+String#[]= with a Range starting outside the String raises RangeError

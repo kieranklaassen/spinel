@@ -1,0 +1,36 @@
+String#[]= with a Range starting outside the String raises RangeError
+
+`s = +"abc"; s[-5..1] = "x"; p s` printed "ax" where CRuby raises
+RangeError, "-5..1 out of range": the Range arm counted a negative
+start from the end once, and sp_str_splice_at counted the start, still
+negative, from the end again. The assignment with its value taken and
+a String two names hold run the same arm. A boxed receiver's
+sp_poly_splice_range answered the same. A start past the end did
+raise, but named the start alone, "4 out of range", and a boxed
+receiver raised IndexError, "index 4 out of string", where CRuby names
+the Range.
+
+The arm now checks its start against the String before the splice and
+raises with the Range's own text, ahead of the frozen check as CRuby
+has it: on a frozen String `s[-5..1] = "x"` is the RangeError.
+sp_poly_splice_range's String arm has the same check.
+
+The statement reads its value into a C temp after the Range and ahead
+of the check, as CRuby reads its arguments before it looks at the
+String: `s[4..5] = lg("x")` has run lg when the RangeError is raised.
+Read there, a value that changes the receiver is seen whichever order
+the C compiler reads a call's arguments in: `s[1..2] = (s << "ef";
+"x")` on "abcd" answered "axdef" built with gcc and "axd" built with
+clang, and answers "axdef" with both.
+
+An assignment inside the String pays the two compares: 1,296
+instructions a `s[2..4] = "xyz"` before, 1,305 after (callgrind,
+200,000 statements).
+
+Left as they are: `s[0..] = "x"` answers "xabc". The arm tests an
+endless end against SP_INT_NIL where the Range carries INTPTR_MAX,
+another cause. And a Float end is printed as its Integer part:
+`s[20..20.5] = "x"` says "20..20 out of range" where CRuby says
+"20..20.5 out of range"; it said "20 out of range".
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
