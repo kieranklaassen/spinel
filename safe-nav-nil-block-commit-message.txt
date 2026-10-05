@@ -1,0 +1,36 @@
+A `&.` call with a block on a nil receiver runs nothing
+
+    o = find_node(key)                  # nil
+    o&.each_n(lg(2)) { |i| lg(i + 10) }
+    p $log                              # [] in CRuby, [2, 10, 11] here
+
+A method that yields is spliced at its call, and the splice bound self
+to the receiver without looking at the operator. On a nil receiver the
+arguments ran, the body ran and the block ran, and the call answered
+what the body answered, 2 above, where CRuby answers nil. A body that
+reads an instance variable read it through NULL: `o&.sum { |i| i }`
+with `def sum; t = @v; ...` was a SIGSEGV.
+
+emit_inline_call_x now splices such a call under a nil test when the
+receiver is an object pointer: the receiver goes into a temp, the
+splice runs on that temp only when it is not NULL, and a nil receiver
+answers the nil of the call's type. What the splice hoists stays under
+the test with it. A call that is not spliced gives its temp's number
+back, so every other call numbers its temps as before.
+
+The root the splice gives self is taken at the nil test instead, ahead
+of what was hoisted (emit_sn_tmp_root), so a receiver nothing else
+holds is kept while an argument allocates:
+`K.new(v)&.tag([K.new(a), ...]) { }`. One root for each call, as
+before, and none for a nil receiver: a million `o&.add(i) { }` run
+the instructions they ran without the nil test.
+
+This stands on the commit before it (a `&.` call on a nil receiver
+runs none of its arguments): without that one, two arguments with
+effects are still ordered ahead of the splice and run.
+
+Not here: a yielding method added to Integer, called `i&.m { }` on a
+nil Integer, still runs its body, and `o&.priv { }` on a nil receiver
+still raises for a private method.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
