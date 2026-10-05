@@ -1,0 +1,57 @@
+A block's Float value beside a `next` keeps its fraction at the yield
+
+    def twice
+      r = []
+      r << (yield 1)
+      r << (yield 2)
+      r
+    end
+    p twice { |x| next 1.5 if x == 2; 2.5 }
+
+printed [2.0, 1.0] where CRuby prints [2.5, 1.5].
+
+When a block holds a `next`, emit_block_invoke declares a slot for the
+block's value and the yield reads the slot. The declaration had an arm
+for an Integer, for a pointer and for a boxed value. A Float fell to
+the last arm, the sp_int one kept for a block whose value has no type
+yet. The `next` and the block's last expression both stored their
+Float in that sp_int, and C dropped the fraction.
+
+g_ie_next_ty already tells the `next` that the slot is a Float one, so
+`next nil` stores the Float sentinel. Only the declaration lacked its
+arm. It has one now, an sp_float that starts as sp_float_nil(), in two
+cases.
+
+The block cannot leave with nil: its last expression and the value of
+every `next` of its own are each a Float or Integer literal,
+arithmetic on numbers, `to_f` of an Integer, or a conditional with an
+`else` whose arms are such.
+
+Or the site keeps the yield's value boxed, as a method does that
+blocks of two kinds reach or that is reached through a `super`.
+emit_boxed says so, through g_yield_boxed, for the one yield it is
+about to splice, and boxes it with sp_box_float_or_nil: sp_box_float
+would make a NaN of the sentinel. There a bare `next` and a `next nil`
+answer nil, where they answered -9.223372036854776e+18.
+
+Any other block that answers a Float keeps the slot and the C it had:
+one with a bare `next` or a `next nil`, or whose value is a local, an
+instance variable, an element or a call, where the yield's value is
+read as an unboxed Float. The Float slot would hold its nil as the
+sentinel, and `to_f` and `to_i` on an unboxed Float do not look for
+it, in the method or after the value has left it:
+
+    def m
+      v = yield 2
+      v.to_f + 1
+    end
+    p(m { |x| next nil if x == 2; 2.5 })
+
+prints 1.0 today, as CRuby does, through the sp_int slot: the
+sentinel stored there is a conversion C leaves undefined, which gcc
+makes 0. Such a block's fraction is cut as it was.
+
+A block with no `next` has no slot, and a block whose value is not a
+Float takes another arm: their C is unchanged.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

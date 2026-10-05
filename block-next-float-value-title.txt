@@ -1,0 +1,1 @@
+A block's Float value beside a `next` keeps its fraction at the yield
