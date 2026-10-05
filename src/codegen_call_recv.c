@@ -11953,6 +11953,18 @@ static int emit_poly_call0_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
   return 0;
 }
 
+/* The head of a boxed `recv[key] = v` through sp_poly_aset_str or
+   sp_poly_aset_key: a local or an ivar takes a String's new contents back, as
+   the Integer key's arm stores its widened Array; any other receiver has
+   nowhere to, and only a String two names hold keeps them. */
+static void emit_poly_aset_head(Compiler *c, Buf *b, const NodeTable *nt, int recv, const char *helper) {
+  NodeKind k = nt_kind(nt, recv);
+  if (k == NK_LocalVariableReadNode || k == NK_InstanceVariableReadNode) {
+    emit_expr(c, recv, b); buf_puts(b, " = ");
+  }
+  buf_printf(b, "%s(", helper); emit_expr(c, recv, b);
+}
+
 /* Element access on a boxed receiver: an index read, []= and [] with one or two arguments (emit_poly_call's arms, in their order) */
 static int emit_poly_index_call(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, TyKind rt, int *out) {
   /* poly receiver: arr[start, len] = src -- 3-arg splice assign
@@ -12090,7 +12102,17 @@ static int emit_poly_index_call(Compiler *c, int id, Buf *b, const NodeTable *nt
     if (at != TY_INT || subtree_has_side_effect(c, argv[0])) buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); ", tv);
     else buf_puts(b, "; ");
     if (at == TY_STRING) {
-      buf_printf(b, "sp_poly_set_str("); emit_expr(c, recv, b);
+      /* A boxed String takes a String key too, and splices into a fresh
+         buffer: stored back into a local or an ivar, or into the outer's slot
+         for a computed `outer[idx]` receiver, as the Integer key is. Only an
+         outer known to be an Array or a Hash: the slot helpers read no other,
+         and an object's own `[]` has to be called. */
+      int outer, oidx;
+      if (splice_recv_index_slot(c, recv, &outer, &oidx) &&
+          (ty_is_array(comp_ntype(c, outer)) || ty_is_hash(comp_ntype(c, outer)))) {
+        buf_puts(b, "sp_poly_slot_set_str("); emit_boxed(c, outer, b); buf_puts(b, ", "); emit_int_expr(c, oidx, b);
+      }
+      else emit_poly_aset_head(c, b, nt, recv, "sp_poly_aset_str");
       buf_puts(b, ", "); emit_expr(c, argv[0], b);
     }
     else if (at == TY_SYMBOL) {
@@ -12132,7 +12154,8 @@ static int emit_poly_index_call(Compiler *c, int id, Buf *b, const NodeTable *nt
         buf_puts(b, ", "); emit_boxed(c, argv[0], b);
       }
       else {
-        buf_printf(b, "sp_poly_set_poly("); emit_expr(c, recv, b);
+        /* a boxed String receiver takes the key it holds at run time */
+        emit_poly_aset_head(c, b, nt, recv, "sp_poly_aset_key");
         buf_puts(b, ", "); emit_boxed(c, argv[0], b);
       }
     }

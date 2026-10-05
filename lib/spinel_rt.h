@@ -11418,6 +11418,46 @@ static sp_RbVal sp_poly_slot_splice_range(sp_RbVal outer, sp_int oidx, sp_Range 
   sp_poly_set_poly(outer, sp_box_int(oidx), res);
   return res;
 }
+/* The String arm of a boxed `recv[key] = val`. A String key replaces its
+   first occurrence, and none is the IndexError, ahead of a frozen receiver's
+   FrozenError as in CRuby; an Integer key replaces one character. A shared
+   handle absorbs the new contents; a plain box is answered for the caller to
+   store back. */
+static sp_RbVal sp_poly_str_aset(sp_RbVal recv, sp_RbVal key, sp_RbVal val) {
+  if (sp_poly_is_strbuf(key)) key = sp_poly_strbuf_deref(key);
+  if (key.tag == SP_TAG_STR) {
+    const char *cur = (recv.tag == SP_TAG_STR) ? (recv.v.s ? recv.v.s : sp_str_empty)
+                                               : sp_String_cstr((sp_String *)recv.v.p);
+    const char *k = key.v.s ? key.v.s : sp_str_empty;
+    sp_int at = sp_str_index_opt(cur, k);
+    if (at == SP_INT_NIL) sp_raise_cls("IndexError", SPL("string not matched"));
+    return sp_poly_splice(recv, at, (sp_int)sp_str_length(k), val);
+  }
+  if (key.tag == SP_TAG_FLT) key = sp_box_int((sp_int)key.v.f);
+  else if (key.tag != SP_TAG_INT)
+    sp_raise_cls("TypeError", key.tag == SP_TAG_NIL
+                 ? SPL("no implicit conversion from nil to integer")
+                 : sp_sprintf("no implicit conversion of %s into Integer",
+                              sp_poly_class_name(key)));
+  return sp_poly_splice(recv, key.v.i, 1, val);
+}
+/* `recv[key] = val` on a boxed receiver that may be a String, the key a
+   String: sp_poly_set_str has no String arm, and the assignment was dropped.
+   Answers the receiver for the caller to store back, as
+   sp_poly_arr_widen_and_set does. */
+static inline sp_RbVal sp_poly_aset_str(sp_RbVal recv, const char *key, sp_RbVal val) {
+  if (recv.tag == SP_TAG_STR || sp_poly_is_strbuf(recv))
+    return sp_poly_str_aset(recv, sp_box_str(key), val);
+  sp_poly_set_str(recv, key, val);
+  return recv;
+}
+/* The same with the key boxed: a String or an Integer known at run time. */
+static inline sp_RbVal sp_poly_aset_key(sp_RbVal recv, sp_RbVal key, sp_RbVal val) {
+  if (recv.tag == SP_TAG_STR || sp_poly_is_strbuf(recv))
+    return sp_poly_str_aset(recv, key, val);
+  sp_poly_set_poly(recv, key, val);
+  return recv;
+}
 /* `outer[oidx][ikey] = val` single-index assign through an index-expression
    receiver: read inner, widen-and-set (promoting on element-kind mismatch), and
    store the possibly promoted result back into outer's slot. No GC root spans
@@ -11446,6 +11486,13 @@ static sp_RbVal sp_poly_slot_set(sp_RbVal outer, sp_int oidx, sp_int ikey, sp_Rb
    going through the same helper keeps one rule rather than two. */
 static sp_RbVal sp_poly_slot_set_key(sp_RbVal outer, sp_int oidx, sp_RbVal key, sp_RbVal val) {
   sp_RbVal inner = sp_poly_slot_inner(outer, oidx);
+  /* a String key replaces its first occurrence */
+  if ((inner.tag == SP_TAG_STR || sp_poly_is_strbuf(inner)) &&
+      (key.tag == SP_TAG_STR || sp_poly_is_strbuf(key))) {
+    sp_RbVal sres = sp_poly_str_aset(inner, key, val);
+    sp_poly_set_poly(outer, sp_box_int(oidx), sres);
+    return val;
+  }
   if (inner.tag == SP_TAG_STR || sp_poly_is_strbuf(inner)) {
     /* the index of a character assignment is an Integer, and anything else is
        the TypeError the typed path raises rather than a write to drop */
@@ -11460,6 +11507,17 @@ static sp_RbVal sp_poly_slot_set_key(sp_RbVal outer, sp_int oidx, sp_RbVal key, 
     return val;
   }
   return sp_poly_set_poly(inner, key, val);
+}
+/* `outer[oidx]["key"] = val`: a String inner is stored back as above; any
+   other inner takes sp_poly_set_str as before. */
+static sp_RbVal sp_poly_slot_set_str(sp_RbVal outer, sp_int oidx, const char *key, sp_RbVal val) {
+  sp_RbVal inner = sp_poly_slot_inner(outer, oidx);
+  if (inner.tag == SP_TAG_STR || sp_poly_is_strbuf(inner)) {
+    sp_RbVal sres = sp_poly_str_aset(inner, sp_box_str(key), val);
+    sp_poly_set_poly(outer, sp_box_int(oidx), sres);
+    return val;
+  }
+  return sp_poly_set_str(inner, key, val);
 }
 /* Hash#compare_by_identity? for a poly-carried receiver: spinel hashes are
    always value-keyed (the mutating variant is a compile error), so any hash
