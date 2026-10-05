@@ -71,8 +71,19 @@ module Net
       nil
     end
 
+    # The media type alone, as CRuby answers it: `text/html; charset=utf-8`
+    # reads `text/html`. The whole header made a type check written against
+    # CRuby (`res.content_type == "text/html"`) fail for nearly every real
+    # server, which sends the charset. Case is kept, as CRuby keeps it, and
+    # so is CRuby's main_type/sub_type split: a third `/` part is dropped and
+    # an empty subtype leaves the main type alone (`text/` reads `text`).
     def content_type
-      @headers["content-type"]
+      v = @headers["content-type"]
+      return nil if v.nil?
+      parts = v.split(";", 2)[0].to_s.split("/")
+      main = parts[0].to_s.strip
+      return main if parts.length < 2
+      main + "/" + parts[1].to_s.strip
     end
   end
 
@@ -190,6 +201,13 @@ module Net
 
     def key?(name)
       @headers.key?(name.to_s.downcase)
+    end
+
+    # Whether this kind of request carries a body, CRuby's REQUEST_HAS_BODY.
+    # Decided by the method rather than per class, since `Net::HTTP#post` and
+    # `Net::HTTP.post_form` build a plain HTTPRequest with the method name.
+    def request_body_permitted?
+      @method == "POST" || @method == "PUT"
     end
 
     # Yields the spelling the caller wrote, not the downcased key: for a
@@ -546,7 +564,9 @@ module Net
         out << "#{k}: #{v}\r\n"
       end
       body = req.body.to_s
-      out << "Content-Length: #{body.bytesize}\r\n" if !have_len && !body.empty?
+      # A request that carries a body states its length even when it is
+      # zero, as CRuby's does; some servers answer 411 without it.
+      out << "Content-Length: #{body.bytesize}\r\n" if !have_len && (req.request_body_permitted? || !body.empty?)
       out << "Connection: close\r\n"
       out << "\r\n"
       out << body
