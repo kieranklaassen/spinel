@@ -125,3 +125,44 @@ t = "a"; p((t = "b"; "c") + t)
 t = "a"; p((t = "b"; "b") == t)
 t = "a"; p((t = "b"; "x").rjust(3, t))
 t = "a"; p "abc".tr((t = "b"; "a"), t).sub((t = "c"; "b"), t)
+
+# The assignment runs at its call, not ahead of the statement: a read to the
+# left of the call is the old value
+n = 3; p "#{n} #{f((n = 5; 1), n)}"
+n = 3; p [n, f((n = 5; 1), n), n]
+n = 3; x, y = n, f((n = 5; 1), n); p x, y
+n = 3; p n * 100 + f((n = 5; 1), n).sum
+n = 3; p n, f((n = 5; 1), n), n
+t = "a"; p "#{t} #{"x".rjust((t = "b"; 5), t)}"
+def ss(a, b) = a + b
+t = "a"; p t + ss((t = "b"; "c"), t) + t
+p(in_yield { |a, b| "#{a} #{b}" } + in_method.inspect)
+def left_of_yield
+  n = 3
+  "#{n} #{yield((n = 5; 1), n)} #{n}"
+end
+p(left_of_yield { |a, b| [a, b] })
+class L2 < K
+  def m(a, b)
+    n = 3
+    "#{n} #{super((n = 5; a), n)} #{n}"
+  end
+end
+p L2.new(0, 0).m(1, 2)
+# ... and a call that a test in front of it skips assigns nothing
+n = 3; p(case 7 when 7 then 0 when f((n = 5; 1), n).first then 1 end); p n
+n = 3; p(case 1 when 7 then 0 when f((n = 5; 1), n).first then 1 end); p n
+$g = 1; n = 3; $g ||= f((n = 5; 1), n); p $g, n
+$h = nil; n = 3; $h ||= f((n = 5; 1), n); p $h, n
+t = "a"; s = [nil, "x"].first; p s&.rjust((t = "b"; 5), t); p t
+t = "a"; s = [nil, "x"].last; p s&.rjust((t = "b"; 5), t); p t
+# a builtin's one operand that assigns, with a later operand built ahead of
+# the call: that one is built after the assignment
+n = 3; p [(n = 5)].dup.concat([n])
+n = 3; p [(n = 5)].dup.concat([n], [n + 1])
+h = {}; h.update((k = :a) => 1).update(k => 2); p h.to_a
+t = "a"; p [(t = "b")].dup.push("#{t}!")
+# one to its left that reads the local keeps the old value, and a chain of
+# appends appends once
+n = 3; p [n].concat([(n = 5)].dup, [n])
+buf = +"z"; x = buf << (c = "q") << c; p buf, x.equal?(buf)

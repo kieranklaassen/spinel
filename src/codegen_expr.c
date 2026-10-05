@@ -1370,7 +1370,15 @@ void emit_expr(Compiler *c, int id, Buf *b) {
     return;
   }
   g_expr_depth++;
-  emit_expr_node(c, id, b);
+  NodeKind k = nt_kind(c->nt, id);
+  if (k == NK_YieldNode || k == NK_SuperNode || k == NK_ForwardingSuperNode) {
+    /* a value a yield or a super ran first for the local it assigns stays
+       at it, as a call's does (emit_call) */
+    ArgsInPlace in_place = args_in_place_begin(b);
+    emit_expr_node(c, id, b);
+    args_in_place_end(in_place, b);
+  }
+  else emit_expr_node(c, id, b);
   g_expr_depth--;
 }
 

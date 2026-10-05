@@ -8065,6 +8065,37 @@ static int value_rebinds_later(Compiler *c, const int *vals, int nv, int i, cons
 }
 
 /* See codegen_internal.h. */
+Buf *g_args_kept_in = NULL;
+
+/* See codegen_internal.h. */
+ArgsInPlace args_in_place_begin(Buf *b) {
+  ArgsInPlace a = { g_pre, g_pre ? g_pre->len : 0, b->len, g_args_kept_in };
+  g_args_kept_in = NULL;
+  return a;
+}
+
+/* See codegen_internal.h. */
+void args_in_place_end(ArgsInPlace a, Buf *b) {
+  Buf *made = g_args_kept_in;
+  g_args_kept_in = a.outer;
+  /* no such value ran into this prelude, or it was taken back with its call */
+  if (!made || made != a.pre || g_pre != a.pre || b == a.pre || b->len < a.len ||
+      a.pre->len <= a.pre_len) return;
+  Buf w; memset(&w, 0, sizeof w);
+  buf_puts(&w, "({\n");
+  buf_puts(&w, a.pre->p + a.pre_len);
+  if (w.p[w.len - 1] != '\n') buf_puts(&w, "\n");
+  emit_indent(&w, g_indent + 1);
+  buf_puts(&w, b->len > a.len ? b->p + a.len : "(void)0");
+  buf_puts(&w, "; })");
+  a.pre->len = a.pre_len; a.pre->p[a.pre_len] = '\0';
+  b->len = a.len;
+  if (b->p) b->p[a.len] = '\0';
+  buf_puts(b, w.p);
+  free(w.p);
+}
+
+/* See codegen_internal.h. */
 int args_order_matters(Compiler *c, const int *argv, int argc, const int *after, int nafter) {
   int nv = 0, eff = 0, matters = 0; char *ds = NULL;
   int *vals = source_values(c->nt, argv, argc, &nv, &ds);
@@ -8141,10 +8172,13 @@ void emit_args_before(Compiler *c, const int *argv, int argc, const int *after, 
   int *vals = source_values(c->nt, argv, argc, &nv, &ds);
   Buf *sv_pre = g_pre; g_pre = b;
   /* a value that rebinds a later read runs here whatever it is: a `for`
-     that assigns its index has no effect emit_arg_first counts */
-  for (int i = 0; i < nv; i++)
-    emit_arg_first(c, vals[i], value_rebound(c, vals, nv, i, after, nafter) ||
-                               value_rebinds_later(c, vals, nv, i, after, nafter), b);
+     that assigns its index has no effect emit_arg_first counts. Run into
+     the statement's prelude, it is kept at the call (g_args_kept_in). */
+  for (int i = 0; i < nv; i++) {
+    int rebinds = value_rebinds_later(c, vals, nv, i, after, nafter);
+    if (rebinds && b == sv_pre) g_args_kept_in = b;
+    emit_arg_first(c, vals[i], rebinds || value_rebound(c, vals, nv, i, after, nafter), b);
+  }
   g_pre = sv_pre;
   free(vals); free(ds);
 }
@@ -8898,7 +8932,9 @@ void emit_args_run(Compiler *c, const int *argv, int argc) {
   int *vals = source_values(c->nt, argv, argc, &nv, &ds);
   for (int i = 0; i < nv; i++) {
     int v = vals[i];
-    emit_arg_first(c, v, value_rebound(c, vals, nv, i, NULL, 0) || value_rebinds_later(c, vals, nv, i, NULL, 0), g_pre);
+    int rebinds = value_rebinds_later(c, vals, nv, i, NULL, 0);
+    if (rebinds) g_args_kept_in = g_pre;
+    emit_arg_first(c, v, rebinds || value_rebound(c, vals, nv, i, NULL, 0), g_pre);
     if (!ds[i]) continue;
     TyKind t = comp_ntype(c, v);
     if (t == TY_POLY) {

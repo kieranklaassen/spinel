@@ -17907,7 +17907,7 @@ static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
   int effects = 0;
   for (int i = 0; i < nop; i++)
     if (subtree_may_reassign_state(c, operand[i])) effects++;
-  int observable = 0, converts = 0, assigns = 0;
+  int observable = 0, converts = 0, assigns = 0, assigner = -1;
   for (int i = 0; i < nop; i++) {
     /* an operand that may convert -- a user object, a boxed value -- is
        converted by the arm, in a hold that runs before the call: the
@@ -17937,6 +17937,7 @@ static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
        it runs ahead of the call, alone among the operands or not */
     int assigns_i = operand_assigns_later_read(c, operand, nop, i);
     assigns |= assigns_i;
+    if (assigns_i && assigner < 0) assigner = i;
     if (!local_read && !assigns_i && (state_read ? effects < 1 : !subtree_has_side_effect(c, operand[i]))) continue;
     observable++;
     int bindable = (k == NK_CallNode || k == NK_SuperNode ||
@@ -17963,8 +17964,14 @@ static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
   }
   /* One observable operand has no sibling to be ordered against or collected by:
      it is the only thing running, and the call consumes it immediately. Not
-     one that assigns what a later operand reads. */
+     one that assigns what a later operand reads (`alone`): bound, it runs
+     ahead of that read. It then runs ahead of every operand's read, so one
+     to its left that reads what it rebinds (`[n].concat([(n = 5)].dup,
+     [n])`) leaves the call as the arm orders it. */
+  int alone = observable < 2 && assigns;
   int lone = observable < 2 && !assigns;
+  for (int i = 0; alone && i < assigner; i++)
+    if (read_rebound_by(c, operand[i], operand[assigner])) return 0;
   if ((lone && !(converts && observable >= 1)) || nb < 1 ||
       g_n_argov + nb > MAX_ARG_OVERRIDE) return 0;
 
@@ -18024,6 +18031,17 @@ static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
     g_tmp = saved_tmp;
     return 0;
   }
+  /* What the arm built ahead of the call for the other operands (an Array or
+     Hash literal, an interpolation) stood in the prelude in front of the
+     binding. One of them may read what the operand bound `alone` assigns:
+     `[(n = 5)].dup.concat([n])` appended a 3, and `h.update((k = :a) =>
+     1).update(k => 2)` stored under a key not yet assigned. They are built
+     behind the binding. */
+  char *late = NULL;
+  if (alone && g_pre->p && g_pre->len > pre_mark) {
+    late = strdup(g_pre->p + pre_mark);
+    g_pre->len = pre_mark; g_pre->p[pre_mark] = '\0';
+  }
   /* an operand's hoisted statements stay ahead of the call unless they run
      code an operand to their left must precede */
   for (int i = 0; i < nb; i++) {
@@ -18045,6 +18063,7 @@ static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
     else if (needs_root(ty[i])) buf_printf(b, "SP_GC_ROOT(_t%d); ", tmp[i]);
     free(opb[i].p);
   }
+  if (late) { buf_puts(b, "\n"); buf_puts(b, late); free(late); }
   buf_puts(b, ob.p ? ob.p : "");
   buf_puts(b, "; })");
   free(ob.p);
@@ -18135,7 +18154,9 @@ int emit_or_take_back(Compiler *c, int id, Buf *b, int (*fn)(Compiler *, int, Bu
   Buf *pre = g_pre;
   size_t pre_mark = pre ? pre->len : 0, out_mark = b->len;
   int argov_mark = g_n_argov;
+  Buf *kept = g_args_kept_in;
   if (fn(c, id, b)) return 1;
+  g_args_kept_in = kept;
   if (pre && g_pre == pre && pre->len > pre_mark) { pre->len = pre_mark; pre->p[pre_mark] = '\0'; }
   if (b->len > out_mark) { b->len = out_mark; b->p[out_mark] = '\0'; }
   if (g_n_argov > argov_mark) view_unbind(argov_mark);
@@ -20051,6 +20072,8 @@ void emit_call(Compiler *c, int id, Buf *b) {
   int nd_saved = g_nd_call_id; g_nd_call_id = id;
   if (nt_int(c->nt, id, "node_line", 0) > 0) g_refuse_outer = id;
   refuse_string_copies(c, id);
+  /* an argument run first for the local it assigns stays at the call */
+  ArgsInPlace in_place = args_in_place_begin(b);
   int grecv = -1;
   int guard = nil_recv_guard(c, id, &grecv);
   if (guard && nt_kind(c->nt, unwrap_parens(c, grecv)) == NK_CallNode) {
@@ -20107,6 +20130,7 @@ void emit_call(Compiler *c, int id, Buf *b) {
     free(cb.p);
   }
   else emit_call_held(c, id, b);
+  args_in_place_end(in_place, b);
   g_nd_call_id = nd_saved;
   /* an emitter that made a switch or reached for the boxed value said so;
      anything else bound the call statically, unless the receiver is a boxed

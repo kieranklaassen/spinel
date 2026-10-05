@@ -1345,6 +1345,22 @@ int read_rebound_by(Compiler *c, int x, int after);
    with its value or later, after `by` either way; one that already ran into
    a temp reads that. */
 int later_read_rebound_by(Compiler *c, const int *later, int n, int by, int procs);
+/* A value run ahead of its call because it rebinds what a later value
+   reads (emit_args_before, emit_args_run) is kept at the call: left in the
+   statement's prelude it ran ahead of everything the statement runs before
+   the call, and whether or not the call is reached. `"#{n} #{g((n = 5; 1),
+   n)}"` read the 5 on the left, and a later `when f((n = 5; 1), n)` or
+   `$g ||= f((n = 5; 1), n)` assigned n although the test in front of it
+   never let the call run. The emitter of a call, a yield or a super opens a
+   frame around its emission (args_in_place_begin) and closes it after
+   (args_in_place_end): when such a value went into the prelude the frame
+   began with, what the emission added there is cut back out and written in
+   front of the call's own text, `({ <the temps> <the call>; })`.
+   g_args_kept_in is that prelude, NULL when no such value ran. */
+typedef struct { Buf *pre; size_t pre_len, len; Buf *outer; } ArgsInPlace;
+extern Buf *g_args_kept_in;
+ArgsInPlace args_in_place_begin(Buf *b);
+void args_in_place_end(ArgsInPlace a, Buf *b);
 int emit_ds_hash_materialize(Compiler *c, Scope *m, int kwh, TyKind *out_type);
 /* The TypeError CRuby raises for a `**` operand that is neither a Hash, nil
    nor convertible with #to_hash, emitted into g_pre ahead of any keyword
