@@ -73,3 +73,16 @@ rescue FrozenError
   puts "frozen"
 end
 p FZ
+# ...and stays one where a call on it answers something of its own that a
+# name keeps, or is printed
+names = ["ann", "bo"]
+sizes = names.map { |s| s.size }
+sorted = names.sort
+pieces = names.each_slice(1).to_a
+p names.to_a
+begin
+  names.find { |s| s == "bo" } << "!"
+rescue FrozenError
+  puts "frozen"
+end
+p sizes, sorted, pieces.size

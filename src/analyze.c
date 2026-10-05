@@ -29129,6 +29129,63 @@ static int an_store_name(const char *pn) {
          sp_streq(pn, "fill") || sp_streq(pn, "concat") || sp_streq(pn, "replace") || sp_streq(pn, "update");
 }
 
+/* Can a call `p` made on a container, or a call chained on it, store into
+   the container out of this pass's sight, or hand it on? `a.to_a`,
+   `a.itself`, `a.each { }` and `a << "r"` answer their receiver; kept under
+   a name, in a literal, handed to a method or answered by a block, that is a
+   second holder, which can store a String that is not frozen. A read of an
+   element, or a call known to answer something else, ends the question, and
+   an answer that is dropped or printed holds nothing. Any call not listed
+   here -- `send`, `instance_eval`, a method the program gives Array -- is
+   taken to store. */
+static int an_container_answer_kept(Compiler *c, const int *parent, int p, const char *pn) {
+  static const char *const other[] = {
+    "count", "join", "inspect", "to_s", "include?", "member?", "index", "find_index", "rindex", "sum",
+    "any?", "all?", "none?", "one?", "map", "collect", "flat_map", "collect_concat", "select", "filter",
+    "find_all", "reject", "sort", "sort_by", "reverse", "dup", "clone", "keys", "values", "key?", "has_key?",
+    "value?", "has_value?", "key", "hash", "==", "!=", "eql?", "equal?", "frozen?", "nil?", "is_a?",
+    "kind_of?", "instance_of?", "class", "zip", "take", "drop", "uniq", "compact", "flatten", "rotate",
+    "shuffle", "inject", "reduce", "partition", "group_by", "tally", "minmax", "values_at", "+", "-", "*",
+    "&", "|", "<=>", "size", "length", "empty?", "filter_map", "each_with_object", "to_set", "take_while",
+    "drop_while", "grep", "grep_v", "pack", "entries", "first", "last", "pop", "shift", "freeze", "[]", "at",
+    "fetch", "dig", "slice", "min", "max", "sample", "find", "detect", "min_by", "max_by", "bsearch",
+    "invert", "merge", "transform_values", "transform_keys", "except", "fetch_values", "assoc", "rassoc",
+    "transpose", "product", "combination", "permutation", "chunk_while", "slice_when", "minmax_by", "chunk",
+    "slice_before", "slice_after", "tally_by", "intersect?", "intersection", "union", "difference",
+    "respond_to?", "object_id", "===", "!", NULL };
+  /* these answer their receiver and store nothing; the walks, without a
+     block, an Enumerator, whose to_a is an Array of its own */
+  static const char *const walks[] = {
+    "each", "each_with_index", "each_slice", "each_cons", "each_entry", "reverse_each", "each_index",
+    "each_value", "each_key", "each_pair", "cycle", "lazy", "with_index", NULL };
+  static const char *const same[] = {
+    "to_a", "to_ary", "to_h", "itself", "delete", "delete_at", "delete_if", "clear", NULL };
+  const NodeTable *nt = c->nt;
+  char nb[64];
+  int r = -1, walk = 0;
+  for (int n = p;;) {
+    const char *nm = n == p ? pn : nt_str(nt, n, "name");
+    int blk = nt_ref(nt, n, "block"), is_walk = 0, is_same = 0;
+    if (!nm) return 1;
+    if (an_container_string_read(c, n, &r, nb, sizeof nb)) return 0;
+    for (int i = 0; other[i]; i++) if (sp_streq(nm, other[i])) return 0;
+    if (sp_streq(nm, "to_h") && blk >= 0) return 0;
+    if (walk && (sp_streq(nm, "to_a") || sp_streq(nm, "force") || sp_streq(nm, "next") || sp_streq(nm, "peek"))) return 0;
+    for (int i = 0; walks[i]; i++) if (sp_streq(nm, walks[i])) is_walk = 1;
+    for (int i = 0; same[i]; i++) if (sp_streq(nm, same[i])) is_same = 1;
+    /* the stores are judged by what they store (an_named_container_seen) */
+    if (!is_walk && !is_same && !an_store_name(nm)) return 1;
+    walk = is_walk && blk < 0;
+    int up = parent[n], g = up >= 0 ? parent[up] : -1;
+    if (up >= 0 && nt_kind(nt, up) == NK_CallNode && nt_ref(nt, up, "receiver") == n) { n = up; continue; }
+    /* printed: a read, as the name alone is */
+    const char *gn = g >= 0 && nt_kind(nt, g) == NK_CallNode && nt_ref(nt, g, "arguments") == up &&
+                     nt_ref(nt, g, "receiver") < 0 ? nt_str(nt, g, "name") : NULL;
+    if (gn && (sp_streq(gn, "p") || sp_streq(gn, "puts") || sp_streq(gn, "print"))) return 0;
+    return !an_value_dropped(nt, parent, n);
+  }
+}
+
 /* What the program shows of the container a local or a constant names, for
    the read `r` of it: AN_FROZEN when every store it can see -- the literals
    the name is written with, and each push, `<<`, unshift, insert, `[]=` or
@@ -29185,6 +29242,7 @@ static int an_named_container_seen(Compiler *c, int r, const int *parent, AnLoca
         frozen = 0;
       continue;
     }
+    if (an_container_answer_kept(c, parent, p, pn)) frozen = 0;
     /* an Enumerable call's copy stores nothing */
     if (nt_ref(nt, p, "receiver") != q) an = 0, pn = "";
     if (is_push_unshift(pn) || sp_streq(pn, "prepend")) { if (!an_stores_frozen(nt, av, an, &lit)) frozen = 0; }
@@ -29260,7 +29318,7 @@ static int an_container_change_unseen(Compiler *c, int cont, int bind, const cha
     NodeKind rk = rc >= 0 ? nt_kind(nt, rc) : NK_NilNode;
     int blk = rn ? nt_ref(nt, rc, "block") : -1;
     if ((!rn && rk != NK_ForNode && rk != NK_MultiWriteNode) || sp_streq(mut, "[]=") || sp_streq(mut, "insert") ||
-        (blk >= 0 && !an_block_measures(c, rn, blk))) return 0;
+        sp_streq(mut, "bytesplice") || (blk >= 0 && !an_block_measures(c, rn, blk))) return 0;
   }
   else if (seen != cont + 1 && !an_fresh_string_container(c, cont)) return 0;
   if (bind < 0 || an_statement_value_dropped(c, parent, bind, ix->defs)) return 1;
