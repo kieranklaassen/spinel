@@ -1044,3 +1044,9 @@ spinel: 1 refusal, nothing written
 == test/reject/yield_splat_elem_append.rb [promote] rc=1
 spinel: a String is passed through a splat into a yield to a block parameter the block appends to, from a value that is not a String variable: the block would append to a copy. Return the String from the block and assign it, or append to it in the caller
 spinel: 1 refusal, nothing written
+== test/reject/yielding_method_locals_past_inline_room.rb [default] rc=1
+spinel: a block-driving call to a method that yields could not be inlined (a yielding method has no standalone function to call)
+spinel: 1 refusal, nothing written
+== test/reject/yielding_method_locals_past_inline_room.rb [promote] rc=1
+spinel: a block-driving call to a method that yields could not be inlined (a yielding method has no standalone function to call)
+spinel: 1 refusal, nothing written
