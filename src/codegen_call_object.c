@@ -660,10 +660,14 @@ int emit_call_instance_eval_arms(Compiler *c, int id, Buf *b, const NodeTable *n
       /* A value-type receiver is a stack struct, not a pointer: bind the
          rebound self by value and dereference its ivars with `.` in the
          splice. Value types are immutable, so the copy is transparent. */
-      buf_printf(g_pre, "sp_%s %s_t%d = %s;\n", c->classes[cls_id].c_name,
+      buf_printf(g_pre, "sp_%s %s_t%d = %s;", c->classes[cls_id].c_name,
                  self_is_val ? "" : "*", tr,
                  rb.p ? rb.p : (self_is_val ? "{0}" : "NULL"));
       free(rb.p);
+      /* a receiver made in place is held by this temp alone while the
+         block runs */
+      if (!self_is_val && ie_self_cls < 0 && !expr_is_held_ref(c, recv)) buf_printf(g_pre, " SP_GC_ROOT(_t%d);", tr);
+      buf_puts(g_pre, "\n");
       if (scalar_res) {
         emit_indent(g_pre, g_indent); emit_ctype(c, body_ty, g_pre);
         buf_printf(g_pre, " _t%d;\n", tres);
