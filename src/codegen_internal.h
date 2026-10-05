@@ -199,6 +199,12 @@ int loop_has_valued_break(Compiler *c, int root);
    write to one, or anything that runs Ruby code it does not show; not scalar
    arithmetic, a typed-array read or a plain field read (codegen_call.c). */
 int subtree_may_reassign_state(Compiler *c, int id);
+/* Does the subtree read out an object something else keeps: variables,
+   constants and self, and field reads and index reads off them that run no
+   code (subtree_may_reassign_state says which), or a typed Hash's value
+   under a builtin key? A call's result, an object made in place and
+   anything that runs code are not (codegen_call.c). */
+int subtree_reads_held(Compiler *c, int id);
 /* Can evaluating the subtree run a proc or block of the program's? A
    yield, a super, a block, a call of a method the program defines (or of a
    name it defines on any class), and a builtin handed anything but numbers,

@@ -17761,6 +17761,29 @@ static int ty_runs_no_code(TyKind t) {
 }
 
 /* See codegen_internal.h. */
+int subtree_reads_held(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  id = unwrap_parens(c, id);
+  if (id < 0) return 0;
+  if (nt_kind(nt, id) == NK_CallNode) {
+    const char *nm = nt_str(nt, id, "name");
+    int recv = nt_ref(nt, id, "receiver");
+    int a = nt_ref(nt, id, "arguments"); int ac = 0;
+    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+    /* an element of an Array, and a typed Hash's value: a lookup by a key
+       whose #hash and #eql? are builtin runs no code in a program with no
+       Hash default block */
+    if (nm && sp_streq(nm, "[]") && recv >= 0 && ac == 1 && nt_ref(nt, id, "block") < 0) {
+      TyKind rt = comp_ntype(c, recv), kt = comp_ntype(c, av[0]);
+      if (((ty_is_array(rt) || ty_is_obj_array(rt)) && kt == TY_INT) ||
+          (ty_is_hash(rt) && ty_runs_no_code(kt) && !prog_has_hash_default_block(c)))
+        return subtree_reads_held(c, recv) && !subtree_may_reassign_state(c, av[0]);
+    }
+  }
+  return !subtree_may_reassign_state(c, id);
+}
+
+/* See codegen_internal.h. */
 int subtree_may_run_proc(Compiler *c, int id) {
   const NodeTable *nt = c->nt;
   if (id < 0) return 0;

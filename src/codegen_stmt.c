@@ -8743,21 +8743,34 @@ static int slot_takes_subclass(Compiler *c, TyKind slot, TyKind val) {
    after it. A receiver that nothing else holds (`K.new(v).w = [i]`,
    `pool.pop.w = mk(i)`) was collected while the value allocated, and the
    store went into the object that took its place: the temp is rooted then.
-   A value that makes nothing leaves the temp bare, and so does a receiver
-   that is a plain read: self, a constant, a local or an instance variable
-   the value cannot rebind (read_rebound_by), a field read off one
-   (subtree_is_pure_read); and one a statement around this one already ran
-   into a temp of its own (arg_ran_first). */
+   The temp stays bare:
+   - where the value makes nothing, scalar arithmetic over plain reads
+     among them (`K.new(i).w = i + 1` is a call and allocates nothing);
+   - on self and on a constant;
+   - on a local or an instance variable the value cannot rebind
+     (read_rebound_by);
+   - on any other receiver something keeps (subtree_reads_held: a global, a
+     class variable, an element, a Hash's value, a field read off one),
+     unless the value can take it out of its holder: it rebinds a variable
+     the receiver reads, or it may store into state at all, as any call
+     that is not a plain read may (`a[0].w = (a.clear; mk)`,
+     `$g.w = ($g = nil; mk)`, `h.o.w = (h.o = nil; mk)`). `$g.w = [i]` and
+     `a[i].w = [i]` make an Array and run nothing: no root;
+   - on a receiver a statement around this one already ran into a temp of
+     its own (arg_ran_first). */
 int writer_recv_wants_root(Compiler *c, int recv, int value) {
   if (recv < 0 || value < 0 || !operand_may_allocate(c, value)) return 0;
+  TyKind vt = comp_ntype(c, value);
+  if ((vt == TY_INT || vt == TY_FLOAT || vt == TY_BOOL) && subtree_is_pure_read(c, value)) return 0;
   if (arg_ran_first(recv, 0)) return 0;
   recv = unwrap_parens(c, recv);
   NodeKind k = nt_kind(c->nt, recv);
-  if (k == NK_ConstantReadNode || k == NK_ConstantPathNode) return 0;
-  if (!subtree_is_pure_read(c, recv)) return 1;
+  if (k == NK_SelfNode || k == NK_ConstantReadNode || k == NK_ConstantPathNode) return 0;
   if (k == NK_LocalVariableReadNode || k == NK_InstanceVariableReadNode)
     return read_rebound_by(c, recv, value);
-  return 0;
+  if (!subtree_reads_held(c, recv)) return 1;
+  return read_rebound_by(c, recv, value) ||
+         (subtree_may_reassign_state(c, value) && subtree_has_side_effect(c, value));
 }
 
 void emit_boxed_writer_arms(Compiler *c, const char *base, const char *nm,
