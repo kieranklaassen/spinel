@@ -49,3 +49,17 @@ p D10[2], D10[1]
 D11 = [[1, 2], [3, 4]]
 D11.clear.push(["x"], [5])
 p D11[0], D11[1], D11.size
+
+# a chain onto a table whose literal has no Integer row leaves it a general
+# table: its other rows are nil, or not there
+E1 = [nil, nil]
+E1.push([5]).push([7, 8])
+p E1[0].to_a, E1[3]
+
+E2 = []
+E2.sort!.push([7, 8])
+p E2[0], E2[1].to_a
+
+E3 = [nil, nil]
+E3.push(nil)[0] = [7, 8]
+p E3[1].to_a, E3[0], E3[2].nil?
