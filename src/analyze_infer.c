@@ -1072,6 +1072,28 @@ static int an_stored_rows_int(Compiler *c, int id, int *saw) {
   return 1;
 }
 
+/* A call that writes the rows of a table anew. `map!` and `collect!` leave
+   a general table. `fill` and `replace` leave a table of Integer Arrays
+   where the call hands over nothing else: `t.fill(r)` with a row of that
+   type, `t.replace([r, s])` with every row written out. */
+static int an_rewritten_rows_int(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  int args = nt_ref(nt, id, "arguments");
+  int an = 0;
+  const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+  if (an < 1 || nt_ref(nt, id, "block") >= 0) return 0;
+  for (int a = 0; a < an; a++)
+    if (nt_kind(nt, av[a]) == NK_SplatNode) return 0;
+  const char *nm = nt_str(nt, id, "name");
+  if (sp_streq(nm, "fill")) return comp_ntype(c, av[0]) == TY_INT_ARRAY;
+  if (!sp_streq(nm, "replace") || an != 1 || nt_kind(nt, av[0]) != NK_ArrayNode) return 0;
+  int en = 0;
+  const int *els = nt_arr(nt, av[0], "elements", &en);
+  for (int e = 0; e < en; e++)
+    if (nt_kind(nt, els[e]) == NK_SplatNode || comp_ntype(c, els[e]) != TY_INT_ARRAY) return 0;
+  return en > 0;
+}
+
 /* Whether every element stored into poly-array ivar `@<ivname>` is an int
    array (a nested array of int arrays, e.g. @chr_banks / @nmt_mem). Element
    reads then yield an int array rather than a boxed poly. */
@@ -1214,7 +1236,6 @@ static int const_array_elems_all_int_array_impl(Compiler *c, const char *cname) 
       return 0;
     }
     if (sp_streq(ty, "CallNode")) {
-      /* a call that writes the rows anew leaves a general table */
       static const char *const rewrites[] = { "map!", "collect!", "fill", "replace", NULL };
       const char *nm = nt_str(nt, id, "name");
       int rewrite = nm && str_in(nm, rewrites);
@@ -1223,7 +1244,12 @@ static int const_array_elems_all_int_array_impl(Compiler *c, const char *cname) 
       if (recv < 0 || !sp_streq(nt_type(nt, recv) ? nt_type(nt, recv) : "", "ConstantReadNode")) continue;
       const char *rn = nt_str(nt, recv, "name");
       if (!rn || !sp_streq(rn, cname)) continue;
-      if (rewrite || !an_stored_rows_int(c, id, &saw)) return 0;
+      if (rewrite) {
+        if (!an_rewritten_rows_int(c, id)) return 0;
+        saw = 1;
+        continue;
+      }
+      if (!an_stored_rows_int(c, id, &saw)) return 0;
       continue;
     }
     if (!sp_streq(ty, "ConstantWriteNode")) continue;
