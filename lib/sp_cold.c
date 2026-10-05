@@ -998,6 +998,28 @@ const char *sp_str_splice_at(const char *s, sp_int from, sp_int n, const char *v
   return sp_str_concat(pre, tail);
 }
 
+/* String#insert(i, val): val goes in ahead of character i. A negative i
+   counts from the end and names the place after that character, so -1
+   appends. An index past either end is IndexError, with one more than a
+   negative i as CRuby reports it, raised ahead of a frozen receiver's
+   FrozenError as CRuby raises it. A nil receiver is NoMethodError and a nil
+   text TypeError, whatever the index. The head is rooted while the tail is cut:
+   nested in one call, whichever piece C builds first is in flight while the
+   other allocates (see sp_str_splice_at). */
+const char *sp_str_insert(const char *s, sp_int i, const char *val) {SP_GC_ROOT_STR(s);SP_GC_ROOT_STR(val);
+  if (!s) sp_nil_recv("insert");
+  if (!val) sp_raise_cls("TypeError", "no implicit conversion of nil into String");
+  sp_int len = (sp_int)sp_str_length(s), at = i < 0 ? i + len + 1 : i;
+  if (at < 0 || at > len) {
+    sp_raise_cls("IndexError", sp_sprintf("index %lld out of string", (long long)(i < 0 ? i + 1 : i)));
+    return s;
+  }
+  sp_str_check_mutable(s);
+  const char *head = sp_str_sub_range(s, 0, at);
+  SP_GC_ROOT_STR(head);
+  return sp_str_concat3(head, val, sp_str_sub_range(s, at, len - at));
+}
+
 sp_int sp_poly_cmp_int_arrays(sp_RbVal a, sp_RbVal b, sp_bool *comparable) {
   if (a.tag != SP_TAG_OBJ || b.tag != SP_TAG_OBJ ||
       a.cls_id != SP_BUILTIN_INT_ARRAY || b.cls_id != SP_BUILTIN_INT_ARRAY) { *comparable = FALSE; return 0; }

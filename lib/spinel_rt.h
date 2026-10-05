@@ -1174,6 +1174,8 @@ static inline const char *sp_str_clone_val(const char *s) {
    raises IndexError. Over-long spans clamp to the tail. */
 /* sp_str_splice_at: moved to lib/sp_cold.c */
 const char *sp_str_splice_at(const char *s, sp_int from, sp_int n, const char *val, int range_form);
+/* String#insert: IndexError past either end, then the frozen check (lib/sp_cold.c) */
+const char *sp_str_insert(const char *s, sp_int i, const char *val);
 
 /* sp_String (mutable-String builder) moved to sp_string.h / lib/sp_string.c:
    the hot construction/append core is inline in the header, the cold in-place
@@ -9464,6 +9466,9 @@ static sp_RbVal sp_poly_insert(sp_RbVal v, sp_int i, sp_RbVal x) {
   if (v.tag == SP_TAG_STR || sp_poly_is_strbuf(v)) {
     const char *s = sp_poly_strbuf_deref(v).v.s;
     if (!s) s = (&("\xff")[1]);
+    /* below the start is the IndexError, with the index CRuby reports */
+    if (i < 0 && i + (sp_int)sp_str_length(s) + 1 < 0)
+      sp_raise_cls("IndexError", sp_sprintf("index %lld out of string", (long long)(i + 1)));
     if (i < 0) i += (sp_int)sp_str_length(s) + 1;
     return sp_poly_str_become(v, sp_str_splice_at(s, i, 0, sp_poly_to_s(x), 0));
   }
