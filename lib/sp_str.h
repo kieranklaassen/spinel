@@ -113,6 +113,12 @@ const char*sp_str_byteslice1(const char*s,sp_int i);
 const char*sp_str_byteslice_range(const char*s,sp_int lo,sp_int hi,int excl,int lo_none,int hi_none);
 const char*sp_str_bytesplice(const char*s,sp_int start,sp_int len,const char*val);
 int sp_str_ascii_only(const char*s);
+int sp_str_enc_step(int state, const char *acc, size_t acc_len, const char *part, size_t part_len, int part_bin);
+/* the common step inline: a part in the encoding so far keeps it */
+static inline int sp_str_enc_step_i(int state, const char *acc, size_t acc_len, const char *part, size_t part_len, int part_bin) {
+  if (state == part_bin) return state;
+  return sp_str_enc_step(state, acc, acc_len, part, part_len, part_bin);
+}
 const char*sp_str_format_strarr(const char*fmt,sp_StrArray*a);
 const char*sp_str_sub(const char*s,const char*pat,const char*rep);
 const char*sp_str_remove_first(const char*s,const char*pat);
@@ -149,6 +155,16 @@ void sp_str_split_into(sp_StrArray*a,const char*s,const char*sep);
 const char*sp_str_undump(const char*s);
 const char*sp_str_succ_impl(const char*s);
 const char*sp_str_succ(const char*s);
+const char*sp_str_succ_n(const char*s,sp_int n);
+/* String#upto's walk, one member a call (lib/sp_str.c). The caller owns the
+   state and roots its three Strings before the first call:
+     sp_StrWalk w = {0};
+     SP_GC_ROOT_STR(w.cur); SP_GC_ROOT_STR(w.end); SP_GC_ROOT_STR(w.stop);
+     for (const char *m = sp_str_walk_first(&w, lo, hi, excl); m; m = sp_str_walk_next(&w)) ...
+   Both answer NULL once the walk is over. */
+typedef struct{const char*cur;const char*end;const char*stop;sp_int excl;int kind;}sp_StrWalk;
+const char*sp_str_walk_first(sp_StrWalk*w,const char*s,const char*e,sp_int excl);
+const char*sp_str_walk_next(sp_StrWalk*w);
 sp_StrArray*sp_str_split(const char*s,const char*sep);
 sp_StrArray*sp_str_split_drop_trailing(const char*s,const char*sep);
 sp_StrArray*sp_str_split_limit(const char*s,const char*sep,sp_int n);
