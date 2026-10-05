@@ -1729,9 +1729,10 @@ static void emit_boxed_impl(Compiler *c, int node, Buf *b) {
        it is. A plain String in that box is still the String the mark asks
        the handle of (`h[k] = h.fetch(k, +""); h[k] << x`): it is lifted
        into one, as emit_boxed_strbuf's element arm made it while the read
-       was typed the handle, and any other value passes unchanged. */
+       was typed the handle, and any other value passes unchanged. A frozen
+       String passes unchanged too: it is the object it was. */
     if (rp.handle && strbuf_boxed_elem_read(c, node)) {
-      buf_puts(b, "sp_poly_strbuf_lift(");
+      buf_puts(b, "sp_poly_strbuf_lift_unfrozen(");
       emit_expr(c, node, b);
       buf_puts(b, ")");
       RC(RF_PASS, RW_NONE);
