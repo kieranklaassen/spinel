@@ -1,0 +1,62 @@
+An argument that assigns a local runs before a later argument reads it
+
+CRuby evaluates a call's arguments left to right, so after `n = 3` the
+call `f((n = 5; 1), n)` binds [1, 5]. With a boxed second parameter it
+bound [1, 3] under gcc, with nothing said. The binders left both values
+in place as siblings of one C argument list, whose order C leaves open,
+and gcc ran the later one first: `sp_box_int(lv_n)`, `n + 0`, a String
+local into a boxed slot. A method, a class method, `K.new`, a Struct's
+and a Data's `new`, keywords, an optional, a rest, yield and super all
+bound the old value. So did a builtin's arm over plain values:
+`"x".rjust((t = "b"; 5), t)` padded with the old t, and
+`Integer((n = 16; "ff"), n + 0)` raised on the old base. clang ran
+these left to right, and still bound the old value where the later
+argument is built ahead of the whole call (`[n]`, an interpolation).
+
+A read that a later value can rebind is taken into a temp already
+(read_rebound_by, value_rebound). This is the other way round: an
+earlier value rebinds what a later one reads. later_read_rebound_by
+asks the values after one for a read of a local it assigns or, for a
+call of the program's own, of a cell that a proc it may call assigns. A
+value that assigns no local and can call no proc, which is most of
+them, has no later value walked for it. args_order_matters and
+emit_args_before_binding count such a pair (value_rebinds_later), so
+the values run first, in order, into temps the call reads, and
+emit_args_before and emit_args_run hand it to emit_arg_first as they
+hand it a rebound read: a `for` that assigns its index has no effect
+that one counts.
+
+Those temps stay at the call. In the statement's prelude, where the
+calls with two effectful arguments put theirs, the assignment would run
+ahead of everything the statement runs before the call, and ahead of a
+test the call stands behind:
+
+    n = 3
+    p "#{n} #{g((n = 5; 1), n)}"       # "3 6"
+    $g ||= f((n = 5; 1), n)            # $g set: n stays 3
+
+emit_args_before and emit_args_run note the prelude they ran such a
+value into (g_args_kept_in); the emitter of the call, the yield or the
+super opens a frame around its emission (args_in_place_begin,
+args_in_place_end), and the frame cuts what the emission added to that
+prelude back out and writes it in front of the call's own text, in one
+statement expression, as emit_constructor keeps its own.
+
+For a builtin, emit_operands_in_order binds an operand that assigns a
+local a later operand reads even when it is the only observable one,
+and places what the arm built ahead of the call for a later operand
+behind that binding, so `[(n = 5)].dup.concat([n])` is [5, 5]. An
+operand to the left of the assigning one that reads what it rebinds
+(`[n].concat([(n = 5)].dup, [n])`) leaves the call as the arm orders
+it. emit_operands_before_unbound runs the operands up to the last such
+assignment first where the rewrite cannot bind one. There only an
+assignment is asked, not a proc: a call beside another call is bound in
+order already.
+
+A call none of whose arguments assigns a local that a later one reads
+is emitted as before. An instance or a global variable written by an
+earlier argument and read by a later one is not taken here; nor is a
+constructor or an Array literal that is itself a call's receiver, which
+runs ahead of its statement as before.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
