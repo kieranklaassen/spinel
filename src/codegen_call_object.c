@@ -951,6 +951,21 @@ int emit_call_freeze_dup_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, 
     }
   }
 
+  /* freeze on a reader that hands out the handle
+     (mark_reader_frozen_receivers): the handle is frozen, which every later
+     mutation through it checks, and its contents are answered frozen. The
+     receiver runs once. */
+  if (recv >= 0 && argc == 0 && sp_streq(name, "freeze") && nt_kind(nt, recv) == NK_CallNode &&
+      c->strbuf_handle_demand[recv] && comp_recv_type(c, recv) == TY_STRING) {
+    char frref[1024];
+    if (strbuf_slot_ref(c, recv, frref, sizeof frref)) {
+      int tf = ++g_tmp;
+      buf_printf(b, "({ sp_String *_t%d = %s; sp_String_freeze(_t%d); ", tf, frref, tf);
+      buf_printf(b, "sp_str_freeze_val(_t%d ? sp_str_concat(sp_String_cstr(_t%d), (&(\"\\xff\")[1])) : NULL); })", tf, tf);
+      return 1;
+    }
+  }
+
   /* TY_STRING freeze: update the variable to the frozen copy and return it */
   if (recv >= 0 && argc == 0 && sp_streq(name, "freeze") && comp_ntype(c, recv) == TY_STRING) {
     const char *rtyf = nt_type(nt, recv);
