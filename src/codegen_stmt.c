@@ -5510,12 +5510,28 @@ static void emit_when_boxed_test(Compiler *c, int cond, int t, TyKind pt, Buf *b
 static void emit_when_splat_test(Compiler *c, int cond, int t, TyKind pt, Buf *b) {
   int sp_in = nt_ref(c->nt, cond, "expression");
   char stmp[32]; snprintf(stmp, sizeof stmp, "_t%d", t);
+  /* `when *f` with f a lambda of known type stays no match, as it was: its
+     parameter is typed by its direct calls, not by this subject */
+  if (sp_in >= 0 && comp_ntype(c, sp_in) == TY_PROC) {
+    buf_puts(b, "((void)("); emit_expr(c, sp_in, b); buf_puts(b, "), 0)");
+    return;
+  }
+  /* as in emit_when_boxed_test: the operand is held and rooted while a
+     by-value subject is boxed */
+  int held = sp_in >= 0 && ty_boxes_by_copy(c, pt);
+  int ta = held ? ++g_tmp : -1;
+  if (held) {
+    buf_printf(b, "({ sp_RbVal _t%d = ", ta); emit_boxed(c, sp_in, b);
+    buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); ", ta);
+  }
   buf_puts(b, "sp_case_splat_match(");
   if (pt == TY_POLY) buf_puts(b, stmp);
   else emit_boxed_text(c, pt, stmp, b);
   buf_puts(b, ", ");
-  if (sp_in >= 0) emit_boxed(c, sp_in, b); else buf_puts(b, "sp_box_nil()");
-  buf_puts(b, ")");
+  if (held) buf_printf(b, "_t%d", ta);
+  else if (sp_in >= 0) emit_boxed(c, sp_in, b);
+  else buf_puts(b, "sp_box_nil()");
+  buf_puts(b, held ? "); })" : ")");
 }
 
 /* `when Integer` / `when NilClass` on an Integer or Float scrutinee: the
@@ -5809,34 +5825,22 @@ void emit_case(Compiler *c, int id, Buf *b, int indent) {
     for (int j = 0; j < wc; j++) {
       if (j) buf_puts(b, " || ");
       if (pred >= 0) {
-        /* `when *arr` -- array membership test */
+        /* `when *arr` -- array membership test. A typed array of the
+           subject's own kind is searched as it stands; any other operand
+           goes through the helper the value form uses, which asks `===` of
+           each element. */
         if (nt_type(nt, conds[j]) && sp_streq(nt_type(nt, conds[j]), "SplatNode")) {
           int inner = nt_ref(nt, conds[j], "expression");
           TyKind at = inner >= 0 ? comp_ntype(c, inner) : TY_UNKNOWN;
-          int ta = ++g_tmp;
-          switch (at) {
-          case TY_INT_ARRAY:
-            buf_printf(b, "({ sp_IntArray *_t%d = ", ta); emit_expr(c, inner, b);
-            buf_printf(b, "; _t%d && sp_IntArray_include(_t%d, _t%d); })", ta, ta, t);
-            break;
-          case TY_STR_ARRAY:
-            buf_printf(b, "({ sp_StrArray *_t%d = ", ta); emit_expr(c, inner, b);
-            buf_printf(b, "; _t%d && sp_StrArray_include(_t%d, _t%d); })", ta, ta, t);
-            break;
-          case TY_FLOAT_ARRAY:
-            buf_printf(b, "({ sp_FloatArray *_t%d = ", ta); emit_expr(c, inner, b);
-            buf_printf(b, "; _t%d && sp_FloatArray_include(_t%d, _t%d); })", ta, ta, t);
-            break;
-          case TY_POLY_ARRAY:
-            buf_printf(b, "({ sp_PolyArray *_t%d = ", ta); emit_expr(c, inner, b);
-            buf_printf(b, "; _t%d && sp_PolyArray_include(_t%d, ", ta, ta);
-            emit_boxed(c, pred, b);
-            buf_puts(b, "); })");
-            break;
-          default:
-            buf_puts(b, "0 /* unsupported splat type */");
-            break;
+          const char *ak = (at == TY_INT_ARRAY && pt == TY_INT) ? "Int" :
+                           (at == TY_STR_ARRAY && pt == TY_STRING) ? "Str" :
+                           (at == TY_FLOAT_ARRAY && pt == TY_FLOAT) ? "Float" : NULL;
+          if (ak) {
+            int ta = ++g_tmp;
+            buf_printf(b, "({ sp_%sArray *_t%d = ", ak, ta); emit_expr(c, inner, b);
+            buf_printf(b, "; _t%d && sp_%sArray_include(_t%d, _t%d); })", ta, ak, ta, t);
           }
+          else emit_when_splat_test(c, conds[j], t, pt, b);
         }
         else {
           const char *cnty = nt_type(nt, conds[j]);

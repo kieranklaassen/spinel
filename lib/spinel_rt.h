@@ -5995,18 +5995,38 @@ static sp_PolyArray *sp_poly_product(sp_RbVal *arrs, sp_int n) {
   if (idx != idx_stack) free(idx);
   return res;
 }
-static sp_bool sp_poly_case_eq(sp_RbVal pat, sp_RbVal e);   /* defined below */
-/* `when *arr` in a case value: does any element of arr match the
-   scrutinee? The scrutinee equal to the element, as before, or the element
-   matching it through sp_poly_case_eq: a Class its instances, a Regexp a
-   String, a Range its members. */
+static sp_bool sp_poly_when_eq_slow(sp_RbVal pat, sp_RbVal e);   /* defined below */
+static sp_RbVal sp_splat_to_array(sp_RbVal v);
+static sp_PolyArray *sp_enum_items_from(sp_RbVal v);
+/* `when *v`: does any element of the splatted operand match the scrutinee?
+   The operand spreads as a splat spreads it -- nil to nothing, a Hash to its
+   pairs, a Range to its members (a Float one raises, having none to walk), a
+   plain value, a Regexp or a Proc to itself. Any other object may spread by
+   a to_a of its own (a Struct, an Enumerator, a Set), which the runtime
+   cannot say: it stays no match, as it was. Each element is asked `===` as a
+   `when` holding it is (sp_poly_when_eq). A plain value also matches a
+   scrutinee that equals it, as before; a Class, a Regexp and a Range match
+   by `===` alone, so `when *[1..3]` is no match for the Range 1..3. */
 static sp_bool sp_case_splat_match(sp_RbVal scrut, sp_RbVal arr) {
   SP_GC_ROOT_RBVAL(scrut);
   SP_GC_ROOT_RBVAL(arr);
+  if (arr.tag == SP_TAG_OBJ && arr.cls_id == SP_BUILTIN_FLOAT_RANGE) sp_frange_iter_raise(*(sp_FloatRange *)arr.v.p, 1);
+  if (arr.tag == SP_TAG_OBJ && (arr.cls_id == SP_BUILTIN_RANGE || arr.cls_id == SP_BUILTIN_STR_RANGE))
+    arr = sp_box_poly_array(sp_enum_items_from(arr));
+  else if (arr.tag == SP_TAG_OBJ && !sp_poly_is_array_kind(arr.cls_id) && !sp_poly_is_hash_kind(arr.cls_id) &&
+           arr.cls_id != SP_BUILTIN_REGEX && arr.cls_id != SP_BUILTIN_PROC)
+    return FALSE;
+  else arr = sp_splat_to_array(arr);
   sp_int n = sp_poly_length(arr);
-  for (sp_int i = 0; i < n; i++)
-    if (sp_poly_eq(scrut, sp_poly_arr_get(arr, i)) || sp_poly_case_eq(sp_poly_arr_get(arr, i), scrut))
+  for (sp_int i = 0; i < n; i++) {
+    sp_RbVal e = sp_poly_arr_get(arr, i);
+    if (sp_poly_when_eq_slow(e, scrut)) return TRUE;
+    if (e.tag != SP_TAG_CLASS &&
+        !(e.tag == SP_TAG_OBJ && (e.cls_id == SP_BUILTIN_REGEX || e.cls_id == SP_BUILTIN_RANGE ||
+                                  e.cls_id == SP_BUILTIN_FLOAT_RANGE || e.cls_id == SP_BUILTIN_STR_RANGE)) &&
+        sp_poly_eq(scrut, e))
       return TRUE;
+  }
   return FALSE;
 }
 /* `break *x` / `next *x`: Ruby's splat-to-array -- nil becomes [], an array
