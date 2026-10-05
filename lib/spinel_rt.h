@@ -8956,10 +8956,16 @@ static int sp_poly_is_call_aref(sp_RbVal v) {
          (v.cls_id == SP_BUILTIN_PROC || v.cls_id == SP_BUILTIN_METHOD);
 }
 static sp_RbVal sp_poly_call_aref(sp_RbVal v, sp_RbVal arg) {
-  SP_GC_ROOT_RBVAL(arg);   /* a by-value struct's box, made for this call alone */
   _sp_proc_poly_args[0] = arg;
   sp_int slot = sp_poly_slot_i(arg);
   return sp_poly_callable_call(v, 1, &slot);
+}
+/* sp_poly_call_aref for an argument its caller may have boxed for this call
+   alone (a Range, a Time: a by-value struct): the box is held while the
+   Proc runs */
+static sp_RbVal sp_poly_call_aref_held(sp_RbVal v, sp_RbVal arg) {
+  SP_GC_ROOT_RBVAL(arg);
+  return sp_poly_call_aref(v, arg);
 }
 /* A key of a kind the Hash's storage cannot hold (a String or an Integer on a
    Symbol-keyed Hash, a Symbol or an Integer on a String-keyed one, a Float or
@@ -10088,7 +10094,7 @@ static sp_RbVal sp_poly_index_poly(sp_RbVal recv, sp_RbVal idx) {
   /* a Proc's or a Method's [] is a call, and its argument of any kind (a
      shared String handle, nil, an Integer) is the one argument: the
      key-typed arms below would take it for an index (#6179) */
-  if (sp_poly_is_call_aref(recv)) return sp_poly_call_aref(recv, idx);
+  if (sp_poly_is_call_aref(recv)) return sp_poly_call_aref_held(recv, idx);
   /* Reading through a shared-string handle is non-mutating, so it answers as
      its live value: the String arms below all test SP_TAG_STR, and a handle
      fell past every one of them to the trailing nil (#4279). */
