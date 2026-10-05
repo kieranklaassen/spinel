@@ -33,7 +33,7 @@ Generated C against master (`make cident REF=origin/master`): CIDENT_LINE. Besid
 
 Cost under callgrind: an Integer or Float first bound in a temp costs nothing (a million `(lg(i)..lg(i + 3)).size` take the same instructions before and after, to within 30 of 17 million); a String first bound costs its root, four instructions a Range.
 
-Not kept: a first bound that is a second name for a String the last bound then changes in place (`(idn(s)..(s << "x"; "zz".dup))`, `(b.str..b.add("x"))`). On master such a Range is right with gcc, only because the last bound runs first, and wrong with clang. Now both compilers give clang's answer: the Range begins at the String as it was before the change, which is also what master prints, with either compiler, when the same two expressions are the two arguments of one call. Making the first bound share the String, so that it shows the change as it does in CRuby, is not in this change.
+Not kept: a first bound that is a second name for a String the last bound then changes in place (`(idn(s)..(s << "x"; "zz".dup))`, `(b.str..b.add("x"))`). On master such a Range is right with gcc, only because the last bound runs first, and wrong with clang. Now both compilers give clang's answer: the Range begins at the String as it was before the change, which is also what master prints, with either compiler, when the same two expressions are the two arguments of one call. Making the first bound share the String, so that it shows the change as it does in CRuby, is not in this change. Nor is it in the String Range piece this one depends on, which keeps a Range's two ends alive and does not make them share: with both applied these programs print the same lines.
 
 Left alone, wrong on master and unchanged:
 
