@@ -14492,6 +14492,37 @@ static int str_mutate_shared_arms(Compiler *c, int id, Buf *b, int indent, const
   return -1;
 }
 
+/* A push statement's receiver and its value are siblings in one C call:
+   whichever C evaluates first is held by nothing while the other runs, and
+   a value that reads what an earlier link pushed may run ahead of it. A
+   receiver that can allocate -- an earlier link of `q << a << b`, whose own
+   push grows the array -- is evaluated first, as Ruby does, into a temp of
+   C type `ct` that the pushes then go through. The temp is rooted unless
+   every value is a number, a boolean, nil or a Symbol read from where it
+   is kept: nothing can run between such a receiver and its push. A
+   receiver that is itself a pure read (a variable, a reader's field, a
+   typed element) runs nothing and stays where it was. `always` asks for
+   the temp whatever the receiver (a splat's loop pushes through it).
+   Answers the temp, with a block left open, or -1 when the receiver is
+   emitted in place. */
+static int emit_push_recv_temp(Compiler *c, int recv, const int *argv, int argc, const char *ct, const char *root, int always, Buf *b, int indent) {
+  int may = !subtree_is_pure_read(c, recv) && subtree_may_allocate(c->nt, recv);
+  if (!always && !may) return -1;
+  int hold = 0;
+  for (int a = 0; may && a < argc; a++) {
+    TyKind t = comp_ntype(c, argv[a]);
+    if (!(t == TY_INT || t == TY_FLOAT || t == TY_BOOL || t == TY_NIL || t == TY_SYMBOL) ||
+        !subtree_is_pure_read(c, argv[a]))
+      hold = 1;
+  }
+  int tr = ++g_tmp;
+  emit_indent(b, indent);
+  buf_printf(b, "{ %s_t%d = ", ct, tr); emit_expr(c, recv, b); buf_puts(b, ";");
+  if (hold) buf_printf(b, " %s(_t%d);", root, tr);
+  buf_puts(b, "\n");
+  return tr;
+}
+
 static int emit_array_mutate_stmt_body(Compiler *c, int id, Buf *b, int indent) {
   const NodeTable *nt = c->nt;
   const char *name = nt_str(nt, id, "name");
@@ -14584,11 +14615,14 @@ static int emit_array_mutate_stmt_body(Compiler *c, int id, Buf *b, int indent) 
       return 1;
     }
     if (is_push_alias(name) && argc >= 1) {
+      int tr = emit_push_recv_temp(c, recv, argv, argc, "sp_PolyArray *", "SP_GC_ROOT", 0, b, indent);
       for (int a = 0; a < argc; a++) {
-        emit_indent(b, indent);
-        buf_puts(b, "sp_PolyArray_push("); emit_expr(c, recv, b); buf_puts(b, ", ");
-        emit_boxed(c, argv[a], b); buf_puts(b, ");\n");
+        emit_indent(b, indent + (tr >= 0));
+        buf_puts(b, "sp_PolyArray_push(");
+        if (tr >= 0) buf_printf(b, "_t%d", tr); else emit_expr(c, recv, b);
+        buf_puts(b, ", "); emit_boxed(c, argv[a], b); buf_puts(b, ");\n");
       }
+      if (tr >= 0) { emit_indent(b, indent); buf_puts(b, "}\n"); }
       return 1;
     }
     if (sp_streq(name, "clear") && argc == 0) {
@@ -14649,10 +14683,14 @@ static int emit_array_mutate_stmt_body(Compiler *c, int id, Buf *b, int indent) 
       return 1;
     }
     if (!has_user) {
+      int tr = emit_push_recv_temp(c, recv, argv, argc, "sp_RbVal ", "SP_GC_ROOT_RBVAL", 0, b, indent);
       for (int a = 0; a < argc; a++) {
-        emit_indent(b, indent);
-        buf_puts(b, "sp_poly_shl("); emit_expr(c, recv, b); buf_puts(b, ", "); emit_boxed(c, argv[a], b); buf_puts(b, ");\n");
+        emit_indent(b, indent + (tr >= 0));
+        buf_puts(b, "sp_poly_shl(");
+        if (tr >= 0) buf_printf(b, "_t%d", tr); else emit_expr(c, recv, b);
+        buf_puts(b, ", "); emit_boxed(c, argv[a], b); buf_puts(b, ");\n");
       }
+      if (tr >= 0) { emit_indent(b, indent); buf_puts(b, "}\n"); }
       return 1;
     }
   }
@@ -14742,12 +14780,8 @@ static int emit_array_mutate_stmt_body(Compiler *c, int id, Buf *b, int indent) 
       const char *aty = nt_type(nt, argv[a]);
       if (aty && sp_streq(aty, "SplatNode")) { has_splat = 1; break; }
     }
-    int tr = -1;
-    if (has_splat) {
-      tr = ++g_tmp;
-      emit_indent(b, indent);
-      buf_printf(b, "{ sp_%sArray *_t%d = ", k, tr); emit_expr(c, recv, b); buf_puts(b, ";\n");
-    }
+    char rct[64]; snprintf(rct, sizeof rct, "sp_%sArray *", k);
+    int tr = emit_push_recv_temp(c, recv, argv, argc, rct, "SP_GC_ROOT", has_splat, b, indent);
     for (int a = 0; a < argc; a++) {
       const char *aty = nt_type(nt, argv[a]);
       if (aty && sp_streq(aty, "SplatNode")) {
@@ -14790,9 +14824,9 @@ static int emit_array_mutate_stmt_body(Compiler *c, int id, Buf *b, int indent) 
         }
         continue;
       }
-      emit_indent(b, indent + (has_splat ? 1 : 0));
+      emit_indent(b, indent + (tr >= 0));
       buf_printf(b, "sp_%sArray_push%s(", k, nil_store_sfx(c, k, argv[a]));
-      if (has_splat) buf_printf(b, "_t%d", tr); else emit_expr(c, recv, b);
+      if (tr >= 0) buf_printf(b, "_t%d", tr); else emit_expr(c, recv, b);
       buf_puts(b, ", ");
       /* coerce a poly value (holds the element type at runtime) to the typed
          array's element representation */
@@ -14828,7 +14862,7 @@ static int emit_array_mutate_stmt_body(Compiler *c, int id, Buf *b, int indent) 
       else emit_coerce(c, argv[a], et, CO_HOLD, "an Array push", b);
       buf_puts(b, ");\n");
     }
-    if (has_splat) { emit_indent(b, indent); buf_puts(b, "}\n"); }
+    if (tr >= 0) { emit_indent(b, indent); buf_puts(b, "}\n"); }
     return 1;
   }
   if (sp_streq(name, "concat") && argc >= 1) {
