@@ -1,0 +1,1 @@
++= on a String local that is also appended to is compiled

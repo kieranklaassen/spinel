@@ -1,0 +1,122 @@
+=== commit 5f8c17b507c9f3f0b5f942e76635eb088b3f9b01
++= on a String local that is also appended to is compiled
+
+  out = +""
+  out << "a"
+  out += "b"
+  out << "c"
+
+was refused ("unsupported operator assignment"), where `out = out + "b"`
+compiled and was right. A local that is appended to holds its String by a
+handle, and emit_op_assign_lv had an arm for `+=` on a plain String only.
+
+The new arm does what the spelled-out write does: String#+ answers a new
+String, so the local gets a handle of its own and the String its other
+names hold is not touched (`t = s << "a"; t += "x"` leaves s as it was).
+The operand is run first and the receiver read after it, as CRuby reads
+it, so an operand that appends to the receiver shows in the sum. The
+operand converts as String#+ converts it: to_str, else TypeError. A nil
+receiver raises NoMethodError.
+
+The VALUE of the write (`v = (t += "x")`, or the write as a method's last
+statement) stays refused, now where the expression form starts: v would
+have to be the same String as t, and nothing pairs the two there.
+test/reject/string_appended_local_plus_assign_value.rb holds it.
+
+The other operator writes were run over the same shapes and are not
+changed: `*=`, `%=` and `<<=` are refused on a String local whether it is
+appended to or not, `||=` and `&&=` compile.
+
+Against master c1d108ab, with CRuby 3.3.6 as the reference, over 234
+programs: of the 103 master refuses for this write 94 are right. Six are
+refused or fail in C as before (the value form, an operand that is a call
+to no method, `freeze` on a local a proc captures). Three print a wrong
+answer, the one master prints for the same program with the refused line
+spelled out: a local that is also assigned nil is no handle on master, and
+appending a binary String leaves the receiver's encoding. The 131 master
+does not refuse print what they printed.
+
+make cident REF=c1d108ab: 6032 identical, 0 differ, 1 refusal changes
+(the new test).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+
+=== commit 6db9107b215769c33579f707caf9956ef48a5552
++= on an appended String local stays refused unless its other writes are proven
+
+  $g = +"b"
+  t = $g << "a"
+  t += "x"
+  t << "y"
+  p $g, t
+
+prints "ba" and "baxy" in CRuby. Master refuses it (unsupported operator
+assignment). With the commit below this one alone it did not build:
+`assignment to 'sp_String *' from incompatible pointer type 'const char
+*'`, at the first write. The `+=` arm made t's slot one the C reads as a
+handle, and that write hands over a plain String: an append to a global
+answers the global's own String, which has no handle to give. The second
+reading found 81 such programs of 192: the first write an append to a
+global, a constant, a method's result or a Struct member, to a reader's
+String from 17 links, to a parameter from 64, to an instance variable
+from 66.
+
+The arm now applies only where every other write of the local is on a
+list (strbuf_value_proven_handle) of writes proven to leave in the slot
+the handle of the String CRuby names there:
+
+  nil
+  a local or an instance variable that holds a handle, and `+` of one
+  `u = v` where u is such a local
+  an append chain on such a local or instance variable
+  a String no other name holds: a literal, an interpolation, `+` of
+  either, `x.dup`, `a + b`, `a * n`
+
+In every other case the write is refused in master's words and nothing
+else changes. Not on the list, so refused as on master: a parameter; a
+target of a multiple assignment, a pattern, a rescue or a named capture;
+a conditional value; `&&=`; a method's result; a reader's String; an
+element; a boxed value; and a String that has another name already (a
+global, a constant), which a new handle would part from that name.
+
+"An append chain on such a slot" is the chain emitter's own question:
+emit_str_append_chain_handle is split so the proof asks what it asks
+(str_append_chain_links).
+
+Measured on master 5c2dea51 with CRuby 3.3.6 as the reference.
+
+The reader's 192 programs (12 kinds of first write at 16 lengths): 86
+are refused on master and all 86 are refused here in the same words, the
+81 among them; 50 are refused on master and right here; 56 are not
+refused on master and print the same.
+
+634 programs in all (those 192, the 368 of the commit below, and 74
+written against the list):
+
+  refused on master, right here                             159
+  refused on master, refused here in the same words         174
+  refused on master, refused here for its operand             1
+  refused on master, the C does not build here                2
+  refused on master, a wrong line here                        2
+  not refused on master, the same output here               296
+
+The 1 has an operand that is a call to no method, which is refused
+first. The 2 that do not build freeze a local a proc captures
+(`t.freeze`, a read); with the sum spelled out master does not build
+them either. The 2 with a wrong line are wrong in lines master does not
+refuse, and master prints the same with the refused lines spelled out:
+one appends a binary String to a handle, which leaves its encoding
+UTF-8; in the other a local that is assigned nil in one place and a
+String under a condition in another is not held by a handle, so
+`t = s << "a" << "b"` gives it a copy.
+
+Three reject tests hold a first write that is not on the list, an
+append to a global, to a constant and to a method's result
+(test/reject/string_appended_local_plus_assign_{global,constant,call}.rb),
+with their six records in test/collect/refusals.expected.
+
+make cident REF=5c2dea51: 6079 identical, 0 differ, 1 refusal changes
+(the test of the commit below).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+
