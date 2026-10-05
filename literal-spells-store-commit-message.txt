@@ -1,0 +1,26 @@
+An interpolated String, a Symbol or a Regexp that spells a store keeps its text
+
+The write-barrier pass reads the emitted C as text and wraps what
+reads as a store into a reference instance variable or a captured
+local. A Ruby string that spells one is in that text too. Since
+2fddce4b a frozen literal is a file-scope object written after the
+pass, which put `puts "q->iv_w = 1;"` right; the written pieces of an
+interpolation, the Symbol name table and a Regexp's source are still
+scanned. `puts "q->iv_w = #{n};"` printed `SP_WBO(q)-3;`, the wrapped
+text cut to the piece's length. `:"q->iv_w = 1;"` kept the longer
+name and no longer equalled the same name built by to_sym.
+`/q->iv_w = 1;/` matched the longer text only, so `=~` answered nil.
+`"(*_cell_x) = #{n};"` beside a captured `x` went the same way in the
+pass for captured locals.
+
+Both scans now ask, of a store they are about to wrap, whether it
+stands inside a string literal on its C line, and leave it if so. The
+line is read from its start, which is always code, since the emitters
+write a literal's line ends as `\n`. Only a string that opens and
+closes around the store counts, so a store behind a quote the reading
+cannot pair keeps its barrier, and a store written behind such a
+string on the same line is wrapped as before.
+
+Besides the new test, no program of the corpus changes its C.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

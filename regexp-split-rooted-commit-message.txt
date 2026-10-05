@@ -1,0 +1,32 @@
+split and rpartition with a Regexp keep their pieces across a collection
+
+    s = ("abcdefghij" * 40 + " ") * 2000
+    n = 0
+    8.times { a = s.split(/ /); n += a.size }
+    p n
+
+exits 139 in a plain run where CRuby prints 16000, and the same loop
+over s.rpartition(/ /) does too. On a 6 KB String, 20,000 rounds of
+rpartition(/b/) answer a freed head or match 113 times.
+
+sp_re_split_limit kept the Array it fills in a C local with no root, so
+the collection that a later piece's allocation starts freed the Array.
+sp_re_rpartition rooted its Array but made the head, the match and the
+tail before it pushed any of them, so the head and the match had no
+holder while the next piece was allocated.
+
+split now roots its Array where it is made, as scan does, and
+rpartition pushes each piece as it is made, as partition with a String
+does. The root costs split 20 to 24 instructions a call (callgrind,
+200,000 calls: "ab cd ef".split(/ /) goes from 1,333 to 1,353 a call, a
+subject with no match from 594 to 618); rpartition's count does not
+rise.
+
+partition with a Regexp builds its Array in the emitted C and is not
+changed here: it still aborts under SPINEL_GC_STRESS=2, as before.
+
+Test: test/regexp_split_rpartition_rooted.rb, in GC_STRESS_TESTS.
+Without the change it exits 139 in a plain run and aborts at level 2.
+The generated C does not change.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

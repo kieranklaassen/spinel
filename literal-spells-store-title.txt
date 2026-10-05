@@ -1,0 +1,1 @@
+An interpolated String, a Symbol or a Regexp that spells a store keeps its text

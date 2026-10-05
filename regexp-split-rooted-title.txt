@@ -1,0 +1,1 @@
+split and rpartition with a Regexp keep their pieces across a collection
