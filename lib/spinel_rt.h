@@ -16738,12 +16738,20 @@ static sp_RbVal sp_penum_call1(sp_Proc *blk, sp_RbVal v);
 /* `when pat` with the pattern boxed is `pat === e` by the pattern's class at
    run time: a Proc is called, a Regexp matches as a literal
    `when /re/` does (a String, a shared one or a Symbol, and it sets the
-   match registers), and any other pattern is sp_poly_case_eq's -- a Class
-   its instances, a Range its cover, else equality. */
+   match registers), a user object answers its class's own ===, and any
+   other pattern is sp_poly_case_eq's -- a Class its instances, a Range its
+   cover, else equality. */
 static sp_bool sp_poly_when_eq_slow(sp_RbVal pat, sp_RbVal e) {
   if (pat.tag == SP_TAG_OBJ) {
     if (pat.cls_id == SP_BUILTIN_PROC) return sp_poly_truthy(sp_penum_call1((sp_Proc *)pat.v.p, e));
     if (pat.cls_id == SP_BUILTIN_REGEX) return sp_re_case_eq((mrb_regexp_pattern *)pat.v.p, e);
+    /* an object of a class with its own === is asked it, through the
+       operator table the program carries */
+    if (sp_poly_is_user_obj(pat) && sp_user_binop_hook) {
+      sp_bool h = FALSE;
+      sp_RbVal r = sp_user_binop_hook("===", pat, e, &h);
+      if (h) return sp_poly_truthy(r);
+    }
   }
   return sp_poly_case_eq(pat, e);
 }
