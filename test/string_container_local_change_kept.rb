@@ -33,3 +33,25 @@ for r in "a".."c"
   r << "!"
 end
 p c.size
+# a change nothing can see: an Array of its own literal's Strings that
+# nothing reads again but for its size, and an Array built where it is read
+only = [+"q", +"rr"]
+longest = only.max_by { |s| s.size }
+longest << "*"
+p only.size
+key, val = "k = v".split("=")
+key.strip!
+p val
+for l in "a\nb\n".lines
+  l.chomp!
+end
+# a frozen literal raises, as it does by every route
+fz = ["q", "rr"]
+begin
+  for f in fz
+    f << "!"
+  end
+rescue FrozenError
+  puts "frozen"
+end
+p fz

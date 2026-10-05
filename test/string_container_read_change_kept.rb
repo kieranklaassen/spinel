@@ -69,3 +69,28 @@ end
 alias each once
 r = each { |i| pets.min_by { |s| s.size } << "#{i}" }
 p r
+# a change nothing can see: the Array's own literal made its Strings and
+# nothing reads the Array again but for its size
+fresh = [+"q", +"rr"]
+fresh.max_by { |s| s.size } << "*"
+p fresh.size
+# ...or the Array is built where it is read
+line = "k = v"
+line.split("=").first.strip!
+line.chars.first << "x"
+p line
+# a frozen literal raises, as it does by every route
+lits = ["q", "rr"]
+begin
+  lits.find { |s| s.size == 2 } << "!"
+rescue FrozenError
+  puts "frozen"
+end
+p lits
+NAMES = ["ann", "bo"]
+begin
+  NAMES[0].upcase!
+rescue FrozenError
+  puts "frozen"
+end
+p NAMES
