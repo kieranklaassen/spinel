@@ -5542,9 +5542,10 @@ static int emit_when_scalar_class(TyKind pt, const char *cn, int t, Buf *b) {
 static int emit_when_typed_test(Compiler *c, int cond, int t, TyKind pt, Buf *b) {
   int reidx = re_lit_index(c, cond);
   /* `when nil` on an Integer or Float scrutinee matches its nil sentinel:
-     compared as a number, nil read as 0 and matched a 0. A String
-     scrutinee holds nil as NULL. */
-  if (nt_kind(c->nt, cond) == NK_NilNode && (pt == TY_INT || pt == TY_FLOAT || pt == TY_STRING)) {
+     compared as a number, nil read as 0 and matched a 0. A String, an
+     Array or a Hash scrutinee holds nil as NULL. */
+  if (nt_kind(c->nt, cond) == NK_NilNode &&
+      (pt == TY_INT || pt == TY_FLOAT || pt == TY_STRING || ty_is_array(pt) || ty_is_hash(pt))) {
     if (pt == TY_INT) buf_printf(b, "(_t%d == SP_INT_NIL)", t);
     else if (pt == TY_FLOAT) buf_printf(b, "sp_float_is_nil(_t%d)", t);
     else buf_printf(b, "(_t%d == NULL)", t);
