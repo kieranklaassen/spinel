@@ -1,0 +1,16 @@
+a:hello:0
+a:bye:1
+[["hello", 0], [:bye, 1]]
+["a:hey:1", "a:again:2"]
+a:nav:4
+tcp:hello:5
+ivar:hello:3
+reader:hello:6
+made:hello:7
+kept:hello:8
+posted to kieran
+class hello 9
+f<hello>
+a:through:10
+6
+42

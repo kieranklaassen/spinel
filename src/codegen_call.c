@@ -19381,11 +19381,15 @@ static void splat_appended_param(Compiler *c, int id, const char *name, int recv
   }
   else {
     const char *tn = name;
-    /* `send(:m, *s)` names its method with the literal */
-    if (is_send_family(name) && ac > 0 &&
-        nt_kind(nt, av[0]) == NK_SymbolNode) { tn = nt_str(nt, av[0], "value"); p--; }
     int mi = -1;
-    if (tn) {
+    /* `send(:m, *s)` names its method with the literal, unless the receiver
+       has a send of its own, whose parameters the arguments are then */
+    for (int lit = 0; lit < 2 && mi < 0; lit++) {
+      if (lit) {
+        if (!is_send_family(name) || ac <= 0 || nt_kind(nt, av[0]) != NK_SymbolNode) break;
+        tn = nt_str(nt, av[0], "value"); p--;
+      }
+      if (!tn) continue;
       if (recv < 0 || nt_kind(nt, recv) == NK_SelfNode) {
         Scope *encl = comp_scope_of(c, id);
         mi = encl && encl->class_id >= 0 && !encl->is_cmethod ? comp_method_in_chain(c, encl->class_id, tn, NULL) : -1;

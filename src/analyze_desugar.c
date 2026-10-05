@@ -2763,6 +2763,25 @@ int desugar_enumerable_chain(Compiler *c) {
   return changed;
 }
 
+/* A program's own method named send, __send__ or public_send is the method
+   a call of that name reaches on its receiver, as CRuby's ancestry has it:
+   `def send(msg, flags)` on a connection is not Object#send, and its first
+   argument names no method. `cls` owns the name when its chain defines it
+   (its own def, an inherited one, an included module's), for an instance
+   or, with `cmeth`, for the class itself. */
+static int send_name_owned(Compiler *c, int cls, int cmeth, const char *nm) {
+  if (cls < 0 || cls >= c->nclasses) return 0;
+  return (cmeth ? comp_cmethod_in_chain(c, cls, nm, NULL) : comp_method_in_chain(c, cls, nm, NULL)) >= 0;
+}
+
+/* Whether the program defines `nm` anywhere: the question that keeps a
+   program with no send of its own on the path it always took. */
+static int send_name_defined(Compiler *c, const char *nm) {
+  for (int s = 0; s < c->nscopes; s++)
+    if (c->scopes[s].name && sp_streq(c->scopes[s].name, nm)) return 1;
+  return 0;
+}
+
 int desugar_implicit_send(Compiler *c) {
   NodeTable *nt = (NodeTable *)c->nt;
   int changed = 0;
@@ -2772,6 +2791,11 @@ int desugar_implicit_send(Compiler *c) {
     if (nt_ref(nt, id, "receiver") >= 0) continue;        /* implicit self only */
     const char *nm = nt_str(nt, id, "name");
     if (!nm || !is_send_family(nm)) continue;
+    /* The enclosing class's own method of the name, or a top-level def of
+       it, is what the bare call reaches (send_name_owned). */
+    { Scope *ss = comp_scope_of(c, id);
+      if (ss && send_name_owned(c, ss->class_id, ss->is_cmethod, nm)) continue;
+      if (comp_method_index(c, nm) >= 0) continue; }
     int args = nt_ref(nt, id, "arguments");
     if (args < 0) continue;
     int argc = 0; const int *argv = nt_arr(nt, args, "arguments", &argc);
@@ -2816,6 +2840,7 @@ int desugar_public_send_recv(Compiler *c) {
   NodeTable *nt = (NodeTable *)c->nt;
   int changed = 0;
   int n0 = nt->count;
+  int defd[3] = { -1, -1, -1 };   /* send, __send__, public_send: asked once a pass */
   for (int id = 0; id < n0; id++) {
     if (!nt_type(nt, id) || !sp_streq(nt_type(nt, id), "CallNode")) continue;
     if (nt_ref(nt, id, "receiver") < 0) continue;          /* explicit receiver only */
@@ -2838,6 +2863,22 @@ int desugar_public_send_recv(Compiler *c) {
          by the receiver's class, and `u.send("ping", 0, host, port)` would
          otherwise retarget to a method named "ping" (#2922). */
       if (sp_streq(nm, "send") && bsrt == TY_IO && sp_feature_required("socket")) continue;
+    }
+    /* A program class's own method of the name is the call's the same way
+       (send_name_owned): `c.send("hello", 0)` with `def send(msg, flags)`
+       looked for a method named hello and raised NoMethodError. The class
+       has to be in hand, so while the receiver's type is still unresolved,
+       wait rather than guess: g_infer_optimistic says the fixpoint has more
+       to say. A receiver that is boxed, or whose class only a subclass
+       gives the name, is retargeted as before. */
+    int di = is_pub ? 2 : sp_streq(nm, "send") ? 0 : 1;
+    if (defd[di] < 0) defd[di] = send_name_defined(c, nm);
+    if (defd[di]) {
+      int orecv = nt_ref(nt, id, "receiver");
+      TyKind ort = infer_type(c, orecv);
+      if (ort == TY_UNKNOWN && g_infer_optimistic) continue;
+      if (ty_is_object(ort) && send_name_owned(c, ty_object_class(ort), 0, nm)) continue;
+      if (ort == TY_CLASS && send_name_owned(c, class_recv_static_ci(c, orecv), 1, nm)) continue;
     }
     int args = nt_ref(nt, id, "arguments");
     if (args < 0) continue;
