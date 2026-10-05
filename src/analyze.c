@@ -29355,12 +29355,74 @@ static int an_block_measures(Compiler *c, const char *cn, int blk) {
 }
 
 /* Does the read `rd` answer a String of its container? Its name says so only
-   while the program has no method of that name. */
+   while the program has no method of that name; and `fetch` with a default
+   or a block, and `find` with an `ifnone`, can answer a String from
+   elsewhere, which another name holds. */
 static int an_read_answers_element(Compiler *c, AnLocalReads *ix, int rd) {
+  const NodeTable *nt = c->nt;
   char nb[64];
-  int r = -1;
+  int r = -1, a = nt_ref(nt, rd, "arguments"), an = 0;
   const char *nm = an_container_string_read(c, rd, &r, nb, sizeof nb);
-  return nm && !an_name_is_own(c, ix, nm);
+  if (!nm || an_name_is_own(c, ix, nm)) return 0;
+  if (a >= 0) nt_arr(nt, a, "arguments", &an);
+  /* the builtin's own copy of an Enumerable call carries the container first */
+  if (nt_ref(nt, rd, "receiver") < 0) an--;
+  if (sp_streq(nm, "fetch")) return an == 1 && nt_ref(nt, rd, "block") < 0;
+  if (sp_streq(nm, "find") || sp_streq(nm, "detect")) return an == 0;
+  return 1;
+}
+
+/* Does the subtree `id` of a read's block only compare and measure what it
+   is handed? It may name anything, and call what answers something else
+   than its receiver or its argument -- a comparison, a size, a test -- under
+   a name that is not a method of the program's. A write of any kind, a call
+   off the list (a store, a print, a method) or a block of its own can keep
+   the String under another name, where the change made on the copy is
+   missed. */
+static int an_only_compares(Compiler *c, AnLocalReads *ix, int id, int depth) {
+  static const char *const kinds[] = {
+    "StatementsNode", "ParenthesesNode", "BlockParametersNode", "ParametersNode", "RequiredParameterNode",
+    "NumberedParametersNode", "ItParametersNode", "LocalVariableReadNode", "ItLocalVariableReadNode",
+    "InstanceVariableReadNode", "GlobalVariableReadNode", "ConstantReadNode", "IntegerNode", "FloatNode",
+    "StringNode", "SymbolNode", "TrueNode", "FalseNode", "NilNode", "AndNode", "OrNode", "IfNode",
+    "UnlessNode", "ElseNode", "ArgumentsNode", "CallNode", NULL };
+  static const char *const calls[] = {
+    "==", "!=", "<", ">", "<=", ">=", "<=>", "===", "=~", "!", "eql?", "equal?", "size", "length",
+    "bytesize", "empty?", "start_with?", "end_with?", "include?", "match?", "nil?", "hash", "ord", "to_i",
+    "to_f", "to_sym", "count", "index", "+", "-", "*", "/", "%", NULL };
+  const NodeTable *nt = c->nt;
+  if (id < 0) return 1;
+  const char *t = nt_type(nt, id);
+  int ok = 0;
+  if (!t || depth > 200) return 0;
+  for (int i = 0; kinds[i] && !ok; i++) ok = sp_streq(t, kinds[i]);
+  if (!ok) return 0;
+  if (nt_kind(nt, id) == NK_CallNode) {
+    const char *nm = nt_str(nt, id, "name");
+    if (!nm || nt_ref(nt, id, "receiver") < 0 || nt_ref(nt, id, "block") >= 0) return 0;
+    for (ok = 0; calls[ok] && !sp_streq(nm, calls[ok]); ok++) ;
+    if (!calls[ok] || an_name_is_own(c, ix, nm)) return 0;
+  }
+  for (int i = 0, nr = nt_num_refs(nt, id); i < nr; i++)
+    if (!an_only_compares(c, ix, nt_ref_at(nt, id, i), depth + 1)) return 0;
+  for (int i = 0, na = nt_num_arrs(nt, id); i < na; i++) {
+    int n = 0;
+    const int *ids = nt_arr_at(nt, id, i, &n);
+    for (int j = 0; j < n; j++)
+      if (!an_only_compares(c, ix, ids[j], depth + 1)) return 0;
+  }
+  return 1;
+}
+
+/* Can the block of the read `rd` keep the String it is handed? Not a block
+   written out that only compares and measures. A block passed as an
+   argument (`&pr`, `&method(:keep)`) is not looked into. */
+static int an_read_block_keeps(Compiler *c, AnLocalReads *ix, int rd) {
+  const NodeTable *nt = c->nt;
+  int blk = nt_ref(nt, rd, "block");
+  if (blk < 0) return 0;
+  return nt_kind(nt, blk) != NK_BlockNode || !an_only_compares(c, ix, nt_ref(nt, blk, "parameters"), 0) ||
+         !an_only_compares(c, ix, nt_ref(nt, blk, "body"), 0);
 }
 
 /* Is a dropped change to a String out of container `cont` one no run can
@@ -29370,7 +29432,9 @@ static int an_read_answers_element(Compiler *c, AnLocalReads *ix, int rd) {
    that bound the String to a local, if one did (a write, a multiple
    assignment, a `for`): its value names the String or the container once
    more, so it has to be dropped as well, or be the program's last. A `for`
-   calls `each`, and a frozen literal may be written `"q".freeze`. */
+   calls `each`, and a frozen literal may be written `"q".freeze`. A String
+   of a container built new can still change in sight where the read's block
+   kept it under another name; a frozen literal raises there as well. */
 static int an_container_change_unseen(Compiler *c, int cont, int read, int bind, const char *mut, const int *parent, AnLocalReads *ix) {
   const NodeTable *nt = c->nt;
   int lit = 0;
@@ -29383,6 +29447,7 @@ static int an_container_change_unseen(Compiler *c, int cont, int read, int bind,
   NodeKind ck = nt_kind(nt, cont);
   int seen = ck == NK_LocalVariableReadNode || ck == NK_ConstantReadNode ? an_named_container_seen(c, cont, parent, ix) : AN_SEEN;
   if (seen == AN_FROZEN) return 1;
+  if (read >= 0 && an_read_block_keeps(c, ix, read)) return 0;
   if (seen == AN_AGAIN - cont) {
     /* the read runs again: it must not be able to tell what its last run
        changed. No block of its own, or a min_by or max_by that measures each
