@@ -12936,6 +12936,38 @@ static int infer_zip_block_params(Compiler *c, int id, int block, const char *p0
   return changed;
 }
 
+/* A fetch key of type `kt` whose block's parameter may be boxed: the type
+   is known and can hold neither a String nor a Symbol. A nil counts only
+   as the literal; a local that is nil so far may yet be typed a String. */
+static int fetch_key_boxes(const NodeTable *nt, int key, TyKind kt) {
+  return kt != TY_UNKNOWN && kt != TY_POLY && kt != TY_STRING && kt != TY_SYMBOL &&
+         (kt != TY_NIL || nt_kind(nt, key) == NK_NilNode);
+}
+
+/* May the fetch blocks' parameters that kept a stale type be boxed? Not
+   while another fetch block of the program would be left behind: one whose
+   key is or may be a String or a Symbol, and whose parameter is neither
+   boxed nor of the key's own type. Boxed, a String is a copy
+   under a change in place, and nothing shows the block's calls are right
+   on a boxed Symbol; so that parameter stays as it is, and its fetch keeps
+   a failure that a program which now builds would reach. */
+static int fetch_params_may_box(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  for (int id = an_calls_named_first(c, "fetch"); id >= 0; id = an_calls_named_next(id)) {
+    int blk = nt_ref(nt, id, "block");
+    const char *p0 = nt_kind(nt, blk) == NK_BlockNode ? block_param_name(c, blk, 0) : NULL;
+    int fa = nt_ref(nt, id, "arguments");
+    int fac = 0; const int *fav = fa >= 0 ? nt_arr(nt, fa, "arguments", &fac) : NULL;
+    if (!p0 || fac < 1) continue;
+    TyKind kt = infer_type(c, fav[0]);
+    LocalVar *lv = scope_local(comp_scope_of(c, blk), p0);
+    TyKind st = lv ? lv->type : TY_UNKNOWN;
+    if (!fetch_key_boxes(nt, fav[0], kt) && st != TY_POLY &&
+        !(st == kt && (kt == TY_STRING || kt == TY_SYMBOL))) return 0;
+  }
+  return 1;
+}
+
 /* infer_block_params's per-call arms for a container receiver's block:
    match, zip, merge, product, fetch, transform_keys / transform_values,
    each_value / each_key, a Hash's each / each_pair, and an Array element
@@ -12996,6 +13028,21 @@ static int infer_block_params_container_arms(Compiler *c, const NodeTable *nt, i
     Scope *fs = comp_scope_of(c, block);
     if (bp_widen(fs, p0, ty_hash_key(rt))) changed = 1;
     return changed | 2;
+  }
+  /* A boxed receiver's fetch(key) { |k| } binds that key too. A read such
+     as `x[:s]` types a still untyped local as a Hash of Symbol keys for a
+     round, and the arm above then gave k that key type, which k kept when
+     the local was boxed: `x.fetch(9) { |k| k * 2 }` multiplied a "Symbol"
+     and lost its Hash arm, or did not build. Where the key is of another
+     type than k has, and is no String and no Symbol, k is boxed, as it is
+     where nothing typed it. */
+  if (sp_streq(name, "fetch") && rt == TY_POLY && p0) {
+    LocalVar *fp = scope_local(comp_scope_of(c, block), p0);
+    int fa = nt_ref(nt, id, "arguments");
+    int fac = 0; const int *fav = fa >= 0 ? nt_arr(nt, fa, "arguments", &fac) : NULL;
+    TyKind fkt = fac > 0 ? infer_type(c, fav[0]) : TY_UNKNOWN;
+    if (fp && fp->type != TY_UNKNOWN && fp->type != TY_POLY && fac > 0 && fetch_key_boxes(nt, fav[0], fkt) &&
+        fkt != fp->type && fetch_params_may_box(c) && lv_widen(fp, TY_POLY)) changed = 1;
   }
 
   /* hash.transform_keys { |k| } binds key; transform_values { |v| } value */
