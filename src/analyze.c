@@ -7413,6 +7413,8 @@ static int desugar_enum_named_call(Compiler *c, int id, NodeTable *nt, const cha
     int eac2 = 0;
     if (ea2 >= 0) nt_arr(nt, ea2, "arguments", &eac2);
     if (erecv2 >= 0 && eac2 == 0 && ty_is_array(infer_type(c, erecv2))) {
+      /* the spelling the program wrote: nil answers to_a and has no entries */
+      nt_node_set_str(nt, id, "written_name", "entries");
       nt_node_set_str(nt, id, "name", "to_a");
       *changed = 1;
       return 1;
@@ -7822,6 +7824,7 @@ static int desugar_enum_named_call(Compiler *c, int id, NodeTable *nt, const cha
       return 1;
     }
     if (sp_streq(nm, "entries") && man == 0 && (ty_is_array(mrt) || mrt_open)) {
+      nt_node_set_str(nt, id, "written_name", "entries");
       nt_node_set_str(nt, id, "name", "to_a");
       *changed = 1;
       return 1;
