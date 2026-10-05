@@ -2847,6 +2847,14 @@ int emit_call_class_method_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
           if (emit_native_ctor(c, id, new_cls, nargc, nargv, b)) return 1;
         }
         int initm = comp_method_in_chain(c, new_cls, "initialize", NULL);
+        /* an exception class with no `initialize` takes the first argument as
+           its message, exactly as the receiver `Klass.new(msg)` path does;
+           the plain constructor below dropped it */
+        if (initm < 0 && class_is_exc_subclass(c, new_cls)) {
+          int eargc; const int *eargv = call_args(nt, id, &eargc);
+          emit_exc_new_no_init(c, id, new_cls, eargc, eargv, b);
+          return 1;
+        }
         /* A Data/Struct class has no user `initialize`; its generated constructor
            takes one arg per member. Fill member-wise -- positionally, or by
            keyword when a trailing kwarg hash names each member -- exactly as the
@@ -3318,6 +3326,20 @@ int emit_call_reopen_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
   /* dispatch user-defined methods on reopened built-in types -- not for an
      alias that captured the builtin (builtin_only) */
   if (recv >= 0 && !nt_int(nt, id, "builtin_only", 0)) {
+    if (rt == TY_RANDOM) {
+      const CallPlan *pl = cplan_user(c, id);
+      if (pl->mi >= 0 && pl->via == UC_REOPEN && pl->dispatch == CP_DIRECT &&
+          pl->owner_ci == comp_class_index(c, "Random")) {
+        int mi = pl->mi, ci = pl->owner_ci;
+        if (g_plan_check) ucall_observe(c, id, mi, ci, 0);
+        emit_method_cname(c, &c->scopes[mi], b);
+        buf_puts(b, "(");
+        emit_expr(c, recv, b);
+        emit_args_filled(c, mi, nt_ref(nt, id, "arguments"), ", ", b);
+        buf_puts(b, ")");
+        return 1;
+      }
+    }
     const char *oc_cn = NULL;
     switch (rt) {
     case TY_STRING: oc_cn = "String"; break;

@@ -70,6 +70,51 @@ const BuiltinZeroOp *bop_zero_find(TyKind recv, const char *name) {
    lookups go through the sorted index below. */
 static const BuiltinOp bop_rows[] = {
 #include "builtin_zero_ops.inc"
+  { TY_POLY, "upcase", 0, 0, BF_ANY, TY_POLY, BOPE_TEMPLATE,
+    "sp_poly_case_conv($r, sp_str_upcase, \"upcase\")", 0, 0, 0, 1 },
+  { TY_POLY, "downcase", 0, 0, BF_ANY, TY_POLY, BOPE_TEMPLATE,
+    "sp_poly_case_conv($r, sp_str_downcase, \"downcase\")", 0, 0, 0, 1 },
+  { TY_POLY, "capitalize", 0, 0, BF_ANY, TY_POLY, BOPE_TEMPLATE,
+    "sp_poly_case_conv($r, sp_str_capitalize, \"capitalize\")", 0, 0, 0, 1 },
+  { TY_POLY, "swapcase", 0, 0, BF_ANY, TY_POLY, BOPE_TEMPLATE,
+    "sp_poly_case_conv($r, sp_str_swapcase, \"swapcase\")", 0, 0, 0, 1 },
+  /* Boxed String transforms; stage 1 retains the zero-argument dispatch position. */
+  { TY_POLY, "dump", 0, 0, BF_ANY, TY_POLY, BOPE_TEMPLATE,
+    "sp_box_str(sp_str_dump(sp_poly_recv_s($r, \"dump\")))", 0, 0, 0, 1 },
+  { TY_POLY, "undump", 0, 0, BF_ANY, TY_POLY, BOPE_TEMPLATE,
+    "sp_box_str(sp_str_undump(sp_poly_recv_s($r, \"undump\")))", 0, 0, 0, 1 },
+  { TY_POLY, "upcase", 1, 2, BF_NONE, TY_POLY, BOPE_POLY_CASE_OPTIONS, "0" },
+  { TY_POLY, "downcase", 1, 2, BF_NONE, TY_POLY, BOPE_POLY_CASE_OPTIONS, "1" },
+  { TY_POLY, "capitalize", 1, 2, BF_NONE, TY_POLY, BOPE_POLY_CASE_OPTIONS, "0" },
+  { TY_POLY, "swapcase", 1, 2, BF_NONE, TY_POLY, BOPE_POLY_CASE_OPTIONS, "0" },
+
+  /* Random's scalar readers and byte string, also used by its poly face. */
+  { TY_RANDOM, "rand", 0, 0, BF_ANY, TY_FLOAT, BOPE_TEMPLATE, "sp_Random_rand_float($r)", 0, 0, 0 },
+  { TY_RANDOM, "seed", 0, 0, BF_ANY, TY_INT, BOPE_TEMPLATE, "sp_Random_seed($r)", 0, 0, 0 },
+  { TY_RANDOM, "bytes", 1, 1, BF_ANY, TY_STRING, BOPE_TEMPLATE, "sp_Random_bytes($r, $i0)", BOP_K(TY_INT), 0, 0 },
+  { TY_RANDOM, "bytes", 1, 1, BF_ANY, TY_STRING, BOPE_TEMPLATE, "sp_Random_bytes($h, sp_random_bytes_count($b0))", 0, 0, 0 },
+  /* Preserve the result of the legacy inference for invalid counts too;
+     emission's arity guard raises before an operation is selected. */
+  { TY_RANDOM, "seed", 0, BOP_ARGC_ANY, BF_ANY, TY_INT, BOPE_NONE, NULL, 0, 0, 0 },
+  { TY_RANDOM, "bytes", 0, BOP_ARGC_ANY, BF_ANY, TY_STRING, BOPE_NONE, NULL, 0, 0, 0 },
+
+  /* Class-gated exception accessors, used behind the Object fallback. */
+  { TY_EXCEPTION, "key", 0, 0, BF_NONE, TY_POLY, BOPE_TEMPLATE, "sp_exc_key_acc($r)", 0, 0, 0 },
+  { TY_EXCEPTION, "receiver", 0, 0, BF_NONE, TY_POLY, BOPE_TEMPLATE, "sp_exc_receiver_acc($r)", 0, 0, 0 },
+  { TY_EXCEPTION, "args", 0, 0, BF_NONE, TY_POLY, BOPE_TEMPLATE, "sp_exc_args_acc($r)", 0, 0, 0 },
+  { TY_EXCEPTION, "private_call?", 0, 0, BF_NONE, TY_BOOL, BOPE_TEMPLATE, "sp_exc_private_call_acc($r)", 0, 0, 0 },
+  { TY_EXCEPTION, "reason", 0, 0, BF_NONE, TY_POLY, BOPE_TEMPLATE, "sp_exc_reason_acc($r)", 0, 0, 0 },
+  { TY_EXCEPTION, "exit_value", 0, 0, BF_NONE, TY_POLY, BOPE_TEMPLATE, "sp_exc_exit_value_acc($r)", 0, 0, 0 },
+  { TY_EXCEPTION, "tag", 0, 0, BF_NONE, TY_POLY, BOPE_TEMPLATE, "sp_exc_tag_acc($r)", 0, 0, 0 },
+  { TY_EXCEPTION, "value", 0, 0, BF_NONE, TY_POLY, BOPE_TEMPLATE, "sp_exc_throw_value_acc($r)", 0, 0, 0 },
+  { TY_EXCEPTION, "status", 0, 0, BF_NONE, TY_INT, BOPE_TEMPLATE, "sp_exc_status_acc($r)", 0, 0, 0 },
+  { TY_EXCEPTION, "success?", 0, 0, BF_NONE, TY_BOOL, BOPE_TEMPLATE, "sp_exc_success_acc($r)", 0, 0, 0 },
+  { TY_EXCEPTION, "signo", 0, 0, BF_NONE, TY_INT, BOPE_TEMPLATE, "sp_exc_signo_acc($r)", 0, 0, 0 },
+  { TY_EXCEPTION, "signm", 0, 0, BF_NONE, TY_STRING, BOPE_TEMPLATE, "sp_exc_signm_acc($r)", 0, 0, 0 },
+  { TY_EXCEPTION, "name", 0, 0, BF_NONE, TY_POLY, BOPE_TEMPLATE, "sp_exc_name_acc($r)", 0, 0, 0 },
+  { TY_EXCEPTION, "errno", 0, 0, BF_NONE, TY_POLY, BOPE_TEMPLATE, "sp_exc_errno_acc($r)", 0, 0, 0 },
+  { TY_EXCEPTION, "result", 0, 0, BF_NONE, TY_POLY, BOPE_TEMPLATE, "sp_exc_result($r)", 0, 0, 0 },
+
   /* Process::Tms: four cumulative CPU times, all Float (#3044), fields of
      the by-value struct */
   { TY_TMS, "utime",  0, 0, BF_ANY, TY_FLOAT, BOPE_TEMPLATE, "($r).utime", 0, 0, BOPF_BOXED },
@@ -1534,6 +1579,7 @@ static const BuiltinOp bop_rows[] = {
   { TY_STRING, "delete",          0, 127, BF_ANY,      TY_STRING,     BOPE_NONE },
   /* Pattern analysis determines the result's element shape. */
   { TY_STRING, "scan", 1, 1, BF_NONE, TY_UNKNOWN, BOPE_STRING_SCAN_CHECKED },
+  { TY_STRING, "slice!", 1, 2, BF_ANY, TY_STRING, BOPE_STRING_SLICE, 0, 0, 0, 0, 6 },
   { TY_STRING, "slice!",          0, 127, BF_ANY,      TY_STRING,     BOPE_NONE },  /* removed part, or nil */
   { TY_STRING, "[]",              0, 127, BF_ANY,      TY_STRING,     BOPE_NONE },
   { TY_STRING, "slice",           0, 127, BF_ANY,      TY_STRING,     BOPE_NONE },
