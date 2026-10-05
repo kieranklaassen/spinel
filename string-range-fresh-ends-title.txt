@@ -1,1 +1,1 @@
-The two ends of a String Range made on the spot are both kept, and made in order
+A String Range made on the spot keeps its ends, made in order, until it is read
