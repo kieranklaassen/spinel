@@ -7004,15 +7004,10 @@ void emit_for(Compiler *c, int id, Buf *b, int indent) {
     return;
   }
   /* `for s in "a".."e"`: a String range has no int representation, so walk
-     its succ-sequence materialized as a StrArray. */
+     its members one at a time, as its each does. */
   if (ct == TY_STR_RANGE && (vn || multi)) {
-    int ta = ++g_tmp, ti = ++g_tmp;
-    emit_indent(b, indent);
-    buf_printf(b, "{ sp_StrArray *_t%d = sp_srange_to_a(", ta); emit_expr(c, coll, b); buf_puts(b, ");\n");
-    emit_indent(b, indent + 1); buf_printf(b, "SP_GC_ROOT(_t%d);\n", ta);
-    emit_indent(b, indent + 1);
-    buf_printf(b, "for (sp_int _t%d = 0; _t%d < sp_StrArray_length(_t%d); _t%d++) {\n", ti, ti, ta, ti);
-    char el[64]; snprintf(el, sizeof el, "sp_StrArray_get(_t%d, _t%d)", ta, ti);
+    char el[32];
+    emit_str_range_walk_open(c, coll, b, indent, el, sizeof el);
     if (multi) emit_for_multi_scalar(c, idx, TY_STRING, el, b, indent + 2);
     else {
       LocalVar *slv = scope_local(comp_scope_of(c, idx), rename_local(vn));
