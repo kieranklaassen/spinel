@@ -198,10 +198,14 @@ A parameter default that WRITES a local the method body READS -- the
 `def m(a, c = (z = a + 1; z)); z; end` -- is run by the callee rather than at
 the call site, where the write could not reach the body: the parameter's
 default becomes the private symbol `:__sp_absent`, the locals are declared
-nil ahead of the body, and a guard binds the parameter from the original
+nil ahead of the body (a parameter the default assigns is bound already and
+keeps its argument), and a guard binds the parameter from the original
 default when it sees the symbol. The parameter's inferred type therefore
 includes Symbol (a scalar parameter widens to a boxed one), and a caller
-passing that very symbol is taken as omitting the argument.
+passing that very symbol is taken as omitting the argument. A later default
+is still filled in at the call site, ahead of this one: one that reads a
+parameter this default assigns (`def m(a, b = (a = 9; 3), c = a)`) reads the
+argument.
 
 A module method's optional parameter default is typed in the MODULE's own
 scope, which cannot see the including class's instance-variable types. A

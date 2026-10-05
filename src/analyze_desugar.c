@@ -13105,6 +13105,14 @@ static int pdl_body_reads(const NodeTable *nt, int id, const char **names, int n
     for (int k2 = 0; k2 < nd->a[j].n; k2++) if (pdl_body_reads(nt, nd->a[j].ids[k2], names, n)) return 1;
   return 0;
 }
+/* Is `nm` one of the parameters `ps`? */
+static int pdl_is_param(const NodeTable *nt, const int *ps, int np, const char *nm) {
+  for (int j = 0; j < np; j++) {
+    const char *qn = nt_str(nt, ps[j], "name");
+    if (qn && sp_streq(qn, nm)) return 1;
+  }
+  return 0;
+}
 int desugar_param_default_assigns_local(Compiler *c) {
   NodeTable *nt = (NodeTable *)c->nt;
   int changed = 0;
@@ -13125,6 +13133,9 @@ int desugar_param_default_assigns_local(Compiler *c) {
       BsB b = { nt, 1 };
       long long line = nt_int(nt, ps[i], "node_line", 0);
       for (int k = 0; k < nn && npro < 60; k++) {
+        /* a parameter is bound on entry: declared nil here, it lost its
+           argument */
+        if (pdl_is_param(nt, ps, np, names[k])) continue;
         int w = bs_write(&b, names[k], bs_new(&b, "NilNode"));
         if (w >= 0) nt_node_set_int(nt, w, "node_line", line);
         pro[npro++] = w;
