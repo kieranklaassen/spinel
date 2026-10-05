@@ -7227,6 +7227,75 @@ int emit_poly_default_blk_arm(Compiler *c, int id, const char *name, int argc, c
   return 1;
 }
 
+/* the `outer[i]` receiver emit_poly_aset_string reads from the dispatch's temp */
+int g_aset_temp_recv = -1;
+
+/* `x[k] = v` where a user class owns `[]=` and x holds a String at run time.
+   The dispatch's default arm stores through sp_poly_set_poly, which reaches a
+   container or a user object and leaves a String as it was: the assignment
+   was dropped. Ahead of the dispatch, a String takes the builtin emission of
+   the same call, as it does in a program with no such class; the default arm
+   then stores nothing into it. A String's index assignment builds a new
+   String, and the builtin emission stores it back where the receiver came
+   from -- a variable, a slot of an Array or a Hash -- so the receiver is
+   read from there again, not from the dispatch's temp tv. A receiver that
+   cannot be read twice (a call, or a slot whose outer may be an object with
+   its own `[]`) stays the temp: a shared String changes in place through it.
+   Only a store the builtin emission keeps is worth the test: an Integer or a
+   Range key, a boxed key on a slot (sp_poly_slot_set_key), and a value that
+   can be a String. */
+static void emit_poly_aset_string(Compiler *c, int id, int recv, const char *name, int argc,
+                                  const int *argv, const int *atmp, const TyKind *atmp_ty,
+                                  int tv, Buf *b) {
+  const NodeTable *nt = c->nt;
+  if (argc != 2 || !name || !sp_streq(name, "[]=") || recv < 0 || !argv || g_pd_skip == id ||
+      g_n_argov + argc + 1 > MAX_ARG_OVERRIDE) return;
+  TyKind kt = comp_ntype(c, argv[0]), vt = comp_ntype(c, argv[1]);
+  if (vt != TY_STRING && vt != TY_STRBUF && vt != TY_POLY) return;
+  for (int a = 0; a < argc; a++)
+    if (nt_kind(nt, argv[a]) == NK_SplatNode ||
+        (subtree_has_side_effect(c, argv[a]) && comp_ntype(c, argv[a]) != atmp_ty[a]))
+      return;
+  int mark = g_n_argov, outer, oidx;
+  int bind = subtree_has_side_effect(c, recv), slot = 0;
+  if (splice_recv_index_slot(c, recv, &outer, &oidx)) {
+    TyKind ot = comp_ntype(c, outer);
+    bind = !(ty_is_array(ot) || ty_is_hash(ot)) ||
+           (subtree_has_side_effect(c, outer) && !subtree_is_pure_read(c, outer)) ||
+           (subtree_has_side_effect(c, oidx) && !subtree_is_pure_read(c, oidx));
+    slot = !bind;
+  }
+  if (kt != TY_INT && kt != TY_RANGE && !(slot && kt == TY_POLY)) return;
+  int sv_temp_recv = g_aset_temp_recv;
+  if (bind) { view_bind(recv, "_t%d", tv); g_aset_temp_recv = recv; }
+  for (int a = 0; a < argc; a++)
+    if (subtree_has_side_effect(c, argv[a])) view_bind(argv[a], "_t%d", atmp[a]);
+  int va = view_push_arm(id, g_prbd_skip, 1);
+  /* under the silent probe: an emission that refuses drops the test, not the
+     build. On the heap: the probe may longjmp back after a write to them */
+  Buf *pb = calloc(1, sizeof *pb), *nb = calloc(1, sizeof *nb);
+  Buf *sv_gpre = g_pre;
+  int sv_probe = g_unsup_probe, sv_open_defaults = g_open_defaults;
+  ConvHold *sv_hold = g_conv_hold;
+  jmp_buf sv_jb; memcpy(sv_jb, g_unsup_recover, sizeof(jmp_buf));
+  volatile int ok = 1;
+  EmitUnitState *sv_state = emit_state_snapshot();
+  g_pre = pb; g_unsup_probe = 1;
+  if (setjmp(g_unsup_recover) == 0) emit_expr(c, id, nb);
+  else ok = 0;
+  emit_state_release(sv_state, !ok);
+  memcpy(g_unsup_recover, sv_jb, sizeof(jmp_buf));
+  g_conv_hold = sv_hold; g_open_defaults = sv_open_defaults;
+  g_unsup_probe = sv_probe; g_pre = sv_gpre;
+  view_pop(c, va);
+  view_unbind(mark);
+  g_aset_temp_recv = sv_temp_recv;
+  if (ok && nb->p && strncmp(nb->p, "sp_raise", 8) != 0)
+    buf_printf(b, "if (_t%d.tag == SP_TAG_STR || sp_poly_is_strbuf(_t%d)) { %s (void)(%s); } ",
+               tv, tv, pb->p && pb->len ? pb->p : "", nb->p);
+  free(nb->p); free(nb); free(pb->p); free(pb);
+}
+
 static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
   /* Re-entered from this very dispatch's builtin-container arm: decline, so
      the call falls through to the builtin emitters the arm is there to
@@ -7607,6 +7676,9 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
           buf_puts(b, ", SP_BUILTIN_SYM_POLY_HASH)); ");
         }
       }
+      /* `x[k] = v` on a String, stored ahead of the dispatch and outside the
+         region below: it names the receiver's variable */
+      emit_poly_aset_string(c, id, recv, name, argc, argv, atmp, atmp_ty, tv, b);
       /* Seed the result temp (a setter dispatch yields the argument's temp
          instead and declares none). For `fetch(key, default)` the seed IS the
          supplied default, so a receiver whose runtime variant matches no switch

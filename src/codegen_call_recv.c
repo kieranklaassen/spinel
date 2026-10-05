@@ -10765,11 +10765,13 @@ int emit_range_call(Compiler *c, int id, Buf *b) {
 /* If `recv` is an index expression `outer[oidx]` (a `[]` CallNode with a single
    int argument), set *outer/*oidx and return 1. Lets a `[]=`/splice on such a
    receiver write a promoted array back into outer's slot instead of dropping the
-   write-back (which would lose a typed->poly promotion for a computed receiver). */
-static int splice_recv_index_slot(Compiler *c, int recv, int *outer, int *oidx) {
+   write-back (which would lose a typed->poly promotion for a computed receiver).
+   A receiver the String arm of a `[]=` dispatch reads from the dispatch's temp
+   (g_aset_temp_recv) is not one: outer and oidx are not read again. */
+int splice_recv_index_slot(Compiler *c, int recv, int *outer, int *oidx) {
   const NodeTable *nt = c->nt;
   const char *rty = nt_type(nt, recv);
-  if (!rty || !sp_streq(rty, "CallNode")) return 0;
+  if (!rty || !sp_streq(rty, "CallNode") || recv == g_aset_temp_recv) return 0;
   const char *rn = nt_str(nt, recv, "name");
   if (!rn || !sp_streq(rn, "[]")) return 0;
   int ro = nt_ref(nt, recv, "receiver");
