@@ -77,3 +77,16 @@ while i < 4
   (bad += 1 if i.odd?; raise "odd" if i.odd?) rescue next
 end
 p i, bad
+
+# a block spliced into a yielding method, the whole call under the modifier
+def twice
+  yield 1
+  yield 2
+end
+def spliced
+  n = 0
+  f = 0.0
+  (twice { |x| n += x; f += 0.5; raise "stop" if x == 2 }) rescue nil
+  [n, f]
+end
+p spliced
