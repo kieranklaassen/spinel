@@ -6521,6 +6521,18 @@ static void emit_arg_or_default_fill(Compiler *c, Scope *m, int idx, int provide
        slot, read when the callee runs, holds the new String, and CRuby
        binds the one read first. It binds the value the call read, in a temp
        like any other value, as a shared handle binds a fresh one. */
+    /* Where nothing can assign the variable before the callee returns
+       (lent_slot_never_rebound) the temp was taken for nothing, and lent
+       it, `emit(@out, s.strip)` and `emit($out, i.to_s)` appended to a
+       String the variable never saw. Its own slot is lent, as it is when no
+       value ran first: asked for with the temps set aside. */
+    if (provided >= 0 && arg_ran_first(provided, 0) && lent_slot_never_rebound(c, provided)) {
+      int sv_argov = g_n_argov;
+      view_unbind(0);
+      emit_arg_or_default_fill(c, m, idx, provided, out);
+      view_unbind(sv_argov);
+      return;
+    }
     /* a class body's ivar, read through its synthesized getter
        (`C.__spinel_civget_x`, desugar_body_ivars): the class's civ_ C
        global, lent as a class method's ivar is, also when the getter ran

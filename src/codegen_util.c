@@ -2193,6 +2193,168 @@ void refuse_lent_global_rebound(Compiler *c, int arg, const char *slot, const ch
            (int)nt_int(c->nt, w, "node_line", 0));
   unsupported_feature(c, arg, msg);
 }
+/* The write kinds of an instance (0), a class (1) and a global (2) variable. */
+static const NodeKind lent_wk[3][5] = {
+  { NK_InstanceVariableWriteNode, NK_InstanceVariableOrWriteNode, NK_InstanceVariableAndWriteNode,
+    NK_InstanceVariableOperatorWriteNode, NK_InstanceVariableTargetNode },
+  { NK_ClassVariableWriteNode, NK_ClassVariableOrWriteNode, NK_ClassVariableAndWriteNode,
+    NK_ClassVariableOperatorWriteNode, NK_ClassVariableTargetNode },
+  { NK_GlobalVariableWriteNode, NK_GlobalVariableOrWriteNode, NK_GlobalVariableAndWriteNode,
+    NK_GlobalVariableOperatorWriteNode, NK_GlobalVariableTargetNode } };
+static int lent_write_family(NodeKind k) {
+  for (int f = 0; f < 3; f++) for (int i = 0; i < 5; i++) if (lent_wk[f][i] == k) return f;
+  return -1;
+}
+/* Is `w` a write of family `fam` to the variable `vn`: the same name, in
+   any class; a global under either of its names (`alias $b $a`)? */
+static int lent_writes_var(Compiler *c, int w, int fam, const char *vn) {
+  if (lent_write_family(nt_kind(c->nt, w)) != fam) return 0;
+  const char *wn = nt_str(c->nt, w, "name");
+  if (!wn || sp_streq(wn, vn)) return 1;
+  if (fam != 2 || wn[0] != '$' || vn[0] != '$') return 0;
+  const char *wr = comp_resolve_gvar(c, wn + 1), *vr = comp_resolve_gvar(c, vn + 1);
+  return !wr || !vr || sp_streq(wr, vr);
+}
+/* One walk of the program from its root, kept until the tree changes.
+   g_lent_wst marks each variable write it reaches: 1, or 2 when reached
+   inside a block or a lambda. Read down from the root, not up from the
+   write: a parenthesized write the analysis hands to its user directly
+   still names the parentheses as its parent. g_lent_ordered: the program
+   has nothing that could run a setup write while a call is in flight (see
+   lent_slot_never_rebound). */
+static unsigned char *g_lent_wst;
+static int g_lent_ordered, g_lent_scan_n = -1;
+static unsigned g_lent_scan_ver;
+static void lent_scan_walk(Compiler *c, int id, int closure, int def) {
+  static const char *const late[] = { "require", "require_relative", "load", "autoload", NULL };
+  const NodeTable *nt = c->nt;
+  if (id < 0 || id >= nt->count) return;
+  NodeKind k = nt_kind(nt, id);
+  if (k == NK_BlockNode || k == NK_LambdaNode) closure = 1;
+  else if (k == NK_DefNode) {
+    const char *dn = nt_str(nt, id, "name");
+    closure = 0;
+    def = dn && sp_streq(dn, "initialize") && nt_ref(nt, id, "receiver") < 0 ? 1 : 2;
+  }
+  else if (lent_write_family(k) >= 0) { if (g_lent_wst[id] < 2) g_lent_wst[id] = closure ? 2 : 1; }
+  /* a `super` a block or a lambda of an `initialize` holds runs the
+     parent's again whenever the block is called */
+  else if ((k == NK_SuperNode || k == NK_ForwardingSuperNode) && closure && def == 1) g_lent_ordered = 0;
+  /* a file pulled in from a method: its top level is not the program's */
+  else if (k == NK_CallNode && (closure || def)) {
+    const char *nm = nt_str(nt, id, "name");
+    for (int i = 0; nm && late[i]; i++) if (sp_streq(nm, late[i])) g_lent_ordered = 0;
+  }
+  for (int i = 0; i < nt_num_refs(nt, id); i++) lent_scan_walk(c, nt_ref_at(nt, id, i), closure, def);
+  for (int i = 0; i < nt_num_arrs(nt, id); i++) {
+    int n = 0; const int *ids = nt_arr_at(nt, id, i, &n);
+    for (int j = 0; j < n; j++) lent_scan_walk(c, ids[j], closure, def);
+  }
+}
+static void lent_scan(Compiler *c) {
+  static const char *const consts[] = { "Thread", "Fiber", "Enumerator", "Ractor", NULL };
+  static const char *const calls[] = {
+    "send", "__send__", "public_send", "method", "public_method", "instance_method",
+    "instance_variable_set", "class_variable_set", "initialize", "to_enum", "enum_for", "next", "peek",
+    "instance_eval", "instance_exec", "class_eval", "module_eval", "class_exec", "module_exec", NULL };
+  static const NodeKind ck[] = { NK_ConstantReadNode, NK_ConstantPathNode };
+  const NodeTable *nt = c->nt;
+  if (g_lent_scan_n == nt->count && g_lent_scan_ver == nt->version) return;
+  free(g_lent_wst);
+  g_lent_wst = calloc((size_t)nt->count + 1, 1);
+  if (!g_lent_wst) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+  g_lent_scan_n = nt->count; g_lent_scan_ver = nt->version; g_lent_ordered = 1;
+  lent_scan_walk(c, nt->root_id, 0, 0);
+  for (int k = 0; k < 2; k++)
+    for (int n = comp_kind_first(c, ck[k]); n >= 0; n = comp_kind_next(c, n)) {
+      const char *nm = nt_kind(nt, n) == ck[k] ? nt_str(nt, n, "name") : NULL;
+      for (int i = 0; nm && consts[i]; i++) if (sp_streq(nm, consts[i])) g_lent_ordered = 0;
+    }
+  for (int n = comp_kind_first(c, NK_CallNode); n >= 0; n = comp_kind_next(c, n)) {
+    const char *nm = nt_kind(nt, n) == NK_CallNode ? nt_str(nt, n, "name") : NULL;
+    for (int i = 0; nm && calls[i]; i++) if (sp_streq(nm, calls[i])) g_lent_ordered = 0;
+  }
+  for (int k = 0; k < c->nclasses; k++)
+    for (int i = 0; i < c->classes[k].naliases; i++)
+      if (sp_streq(c->classes[k].alias_old[i], "initialize") || sp_streq(c->classes[k].alias_new[i], "initialize"))
+        g_lent_ordered = 0;
+}
+/* Is every write of the variable `vn` of family `fam` a setup write: at the
+   top level outside a block, which runs once and is never reentered
+   (lent_global_slot_rebound), or, for an object's own instance variable, in
+   an `initialize` outside a block, which no call that object is making runs
+   again? A write the walk from the root did not reach is not one. Kept per
+   variable: a program asks this at every such call. */
+static int lent_writes_are_setup(Compiler *c, int fam, const char *vn) {
+  static struct lent_memo { int fam, ans; const char *vn; } *memo;
+  static int memo_n, memo_cap, memo_cnt = -1;
+  static unsigned memo_ver;
+  const NodeTable *nt = c->nt;
+  if (memo_cnt != nt->count || memo_ver != nt->version) { memo_n = 0; memo_cnt = nt->count; memo_ver = nt->version; }
+  for (int i = 0; i < memo_n; i++) if (memo[i].fam == fam && sp_streq(memo[i].vn, vn)) return memo[i].ans;
+  int ans = 1;
+  for (int k = 0; k < 5 && ans; k++)
+    for (int w = comp_kind_first(c, lent_wk[fam][k]); w >= 0 && ans; w = comp_kind_next(c, w)) {
+      if (!lent_writes_var(c, w, fam, vn)) continue;
+      Scope *ws = comp_scope_of(c, w);
+      int top = ws && !ws->name && ws->def_node < 0;
+      int init = fam == 0 && ws && ws->name && sp_streq(ws->name, "initialize") && ws->class_id >= 0 && !ws->is_cmethod;
+      if (g_lent_wst[w] != 1 || (!top && !init)) ans = 0;
+    }
+  if (memo_n >= memo_cap) {
+    memo_cap = memo_cap ? memo_cap * 2 : 16;
+    memo = realloc(memo, (size_t)memo_cap * sizeof *memo);
+    if (!memo) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+  }
+  memo[memo_n].fam = fam; memo[memo_n].vn = vn; memo[memo_n++].ans = ans;
+  return ans;
+}
+/* Does the subtree hold a write of the variable? */
+static int lent_subtree_writes(Compiler *c, int id, int fam, const char *vn) {
+  const NodeTable *nt = c->nt;
+  if (id < 0 || id >= nt->count) return 0;
+  if (lent_writes_var(c, id, fam, vn)) return 1;
+  for (int i = 0; i < nt_num_refs(nt, id); i++) if (lent_subtree_writes(c, nt_ref_at(nt, id, i), fam, vn)) return 1;
+  for (int i = 0; i < nt_num_arrs(nt, id); i++) {
+    int n = 0; const int *ids = nt_arr_at(nt, id, i, &n);
+    for (int j = 0; j < n; j++) if (lent_subtree_writes(c, ids[j], fam, vn)) return 1;
+  }
+  return 0;
+}
+/* Is the variable read `arg`, a positional argument of a call, one nothing
+   can assign from the moment the call reads it until the callee returns?
+   It is a global, a class variable or the instance variable of the object
+   the method runs on, and every write of it in the program is a setup write
+   (lent_writes_are_setup), none inside the call itself. The call is not
+   written in an `initialize`, where a `super` among its arguments would run
+   another, and an instance variable has no attr writer. And the program has
+   nothing that could run a setup write while a call is in flight
+   (lent_scan): no thread, fiber or enumerator pulled from outside, no call
+   that picks its method, its variable or its receiver's scope at run time,
+   no `initialize` called or aliased, no `super` in a block of one, no file
+   required from a method. */
+int lent_slot_never_rebound(Compiler *c, int arg) {
+  const NodeTable *nt = c->nt;
+  NodeKind ak = nt_kind(nt, arg);
+  int fam = ak == NK_InstanceVariableReadNode ? 0 : ak == NK_ClassVariableReadNode ? 1 :
+            ak == NK_GlobalVariableReadNode ? 2 : -1;
+  const char *vn = nt_str(nt, arg, "name");
+  Scope *as = comp_scope_of(c, arg);
+  if (fam < 0 || !vn || !as || (as->name && sp_streq(as->name, "initialize"))) return 0;
+  if (fam == 0 && (as->class_id < 0 || as->is_cmethod)) return 0;
+  /* the call `arg` is an argument of (lent_enclosing_closure fills the map) */
+  lent_enclosing_closure(c, arg);
+  int args = g_lent_parent[arg], call = args >= 0 ? g_lent_parent[args] : -1, ac = 0, at = -1;
+  if (call < 0 || nt_kind(nt, call) != NK_CallNode || nt_ref(nt, call, "arguments") != args) return 0;
+  const int *av = nt_arr(nt, args, "arguments", &ac);
+  for (int i = 0; i < ac; i++) if (av[i] == arg) at = i;
+  if (at < 0 || lent_subtree_writes(c, call, fam, vn)) return 0;
+  if (fam == 0)
+    for (int k = 0; k < c->nclasses; k++)
+      if (comp_writer_in_chain(c, k, vn + 1, NULL)) return 0;
+  lent_scan(c);
+  return g_lent_ordered && lent_writes_are_setup(c, fam, vn);
+}
 /* Emit-side lvalue for a shared-mutable string receiver: lv_<x> for a
    strbuf local, <self>-><iv_x> (or civ_Toplevel_x) for a strbuf ivar.
    Returns 1 and fills `out`, or 0 when the receiver is neither (#3227). */
