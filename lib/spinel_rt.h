@@ -6881,6 +6881,8 @@ static sp_RbVal sp_poly_splice_range(sp_RbVal recv, sp_Range r, sp_RbVal src) {
     sp_int sfirst = r.first;
     if (sfirst == INTPTR_MIN) sfirst = 0;
     else if (sfirst < 0) sfirst += slen;
+    /* a start outside the String is the RangeError, naming the Range */
+    if (sfirst < 0 || sfirst > slen) sp_raise_cls("RangeError", sp_sprintf("%s out of range", sp_range_str(r)));
     sp_int slen2;
     if (r.last == INTPTR_MAX) { slen2 = slen - sfirst; if (slen2 < 0) slen2 = 0; }
     else {
