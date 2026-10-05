@@ -14231,6 +14231,23 @@ static int str_mutate_append_bang_arms(Compiler *c, int id, Buf *b, int indent, 
     }
     char srefC[1024];
     if (nchain > 0 && strbuf_slot_ref(c, cur, srefC, sizeof srefC)) {
+      /* A receiver that is a call (a reader, an element read) runs once,
+         ahead of the chain. Written out at each link it ran once a link:
+         `a.shift.s << "x" << "y"` shifted twice. It is rooted: nothing else
+         may hold it while the arguments allocate. A local or an instance
+         variable is its own slot, and one link whose argument writes the
+         receiver once (not an interpolation, an Integer or a boxed value)
+         stays as it was. */
+      TyKind at0 = comp_ntype(c, chain[0]);
+      int held = nt_kind(nt, cur) == NK_CallNode &&
+                 (nchain > 1 || nt_kind(nt, chain[0]) == NK_InterpolatedStringNode ||
+                  at0 == TY_INT || at0 == TY_POLY);
+      if (held) {
+        int th = ++g_tmp;
+        emit_indent(b, indent);
+        buf_printf(b, "{ sp_String *_t%d = %s; SP_GC_ROOT(_t%d);\n", th, srefC, th);
+        snprintf(srefC, sizeof srefC, "_t%d", th);
+      }
       for (int j = nchain - 1; j >= 0; j--) {
         int arg = chain[j];
         TyKind at = comp_ntype(c, arg);
@@ -14258,6 +14275,7 @@ static int str_mutate_append_bang_arms(Compiler *c, int id, Buf *b, int indent, 
           emit_str_append_arg(c, arg, rt, b); }
         buf_puts(b, ");\n");
       }
+      if (held) { emit_indent(b, indent); buf_puts(b, "}\n"); }
       return 1;
     }
   }
