@@ -2615,6 +2615,10 @@ static int sp_require_find(char *buf, char *from, const char *word, SpReqHit *ou
    the call sits in (sp_toplevel_stmt_start) and the call itself replaced by
    `value`, so the statement around the require -- a
    condition, an assignment, a method body -- survives intact. */
+/* Set once a required file does not run where its require stands: inlined
+   that way, its top level runs ahead of the statement, not when the call is
+   reached as in CRuby; one that was not resolved does not run at all. */
+int g_require_displaced = 0;
 /* The start of the top-level statement a position sits inside: the nearest
    line at or above it that begins, at the margin, something other than the
    continuation of a statement already open (end / else / rescue / a closing
@@ -2703,6 +2707,7 @@ static void sp_req_hoist_splice(char **result, unsigned char **fsl, size_t *fsl_
                                 const char *value) {
   size_t kw_off = (size_t)(h->kw - *result), end_off = (size_t)(h->expr_end - *result);
   size_t rlen = strlen(*result), clen = strlen(content), vlen = strlen(value);
+  if (strcmp(value, "true") == 0) g_require_displaced = 1;   /* this require read the file */
   size_t ins = sp_toplevel_stmt_start(*result, kw_off);
   size_t ins_line = 0;
   for (size_t i = 0; i < ins; i++) if ((*result)[i] == '\n') ins_line++;
@@ -4057,6 +4062,7 @@ else {
                   "warning: '%s' is not available in Spinel; the require is ignored and code using it will fail\n",
                   lib_name);
           content = strdup("# require not resolved");
+          g_require_displaced = 1;
         }
       }
 else {

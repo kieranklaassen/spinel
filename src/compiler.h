@@ -20,6 +20,10 @@
    require-gated stdlib (stringio, io/console, ...) so they match CRuby's
    uninitialized-constant / NoMethodError when the require is absent. */
 extern int g_require_gate;
+/* A required file does not run where its require stands: it was inlined
+   ahead of the statement the require sits in (sp_req_hoist_splice in
+   spinel_parse.c), or it was not resolved and does not run at all. */
+extern int g_require_displaced;
 void sp_feature_mark(const char *name);
 int sp_feature_enabled(const char *name);
 int        sp_feature_required(const char *name); /* require was actually written (gate-independent) */

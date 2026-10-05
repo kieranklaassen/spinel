@@ -2263,7 +2263,11 @@ static void lent_scan(Compiler *c) {
   free(g_lent_wst);
   g_lent_wst = calloc((size_t)nt->count + 1, 1);
   if (!g_lent_wst) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
-  g_lent_scan_n = nt->count; g_lent_scan_ver = nt->version; g_lent_ordered = 1;
+  /* a file required inside a statement was inlined ahead of it, at the top
+     level, and one that was not resolved is not here at all: what it
+     assigns, CRuby assigns when the require is reached, which may be inside
+     a call */
+  g_lent_scan_n = nt->count; g_lent_scan_ver = nt->version; g_lent_ordered = !g_require_displaced;
   lent_scan_walk(c, nt->root_id, 0, 0);
   for (int k = 0; k < 2; k++)
     for (int n = comp_kind_first(c, ck[k]); n >= 0; n = comp_kind_next(c, n)) {
