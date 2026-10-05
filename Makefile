@@ -1747,6 +1747,7 @@ GC_STRESS_TESTS := test/gc_root_frame_slots.rb \
                    test/string_insert_index_out_of_range.rb \
                    test/proc_cell_capture_marked.rb \
                    test/poly_array_intersect.rb \
+                   test/string_index_assign_rooted.rb \
                    test/thread_new_args_rooted_across_fiber_alloc.rb
 gc-stress-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
 	@tmp=$$(mktemp -d /tmp/spinel-gcstress.XXXXXX); ok=1; \
