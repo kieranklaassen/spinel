@@ -1,0 +1,26 @@
+A String made in place is kept alive while replace copies it
+
+The statement form of replace copies its source into a new String
+(str_mutate_reassign_arms): the source goes into a C temp and
+sp_str_from_bytes allocates the copy. A source only that temp holds,
+such as `s.replace("a" + i.to_s)`, a join or a method's result, was
+held by nothing while the copy was allocated. So was a String two
+names hold: reading such a local or instance variable as the source
+makes a copy (`sp_str_concat(sp_String_cstr(lv_t), "")`), as in
+`t = +"sh"; u = t; u << i.to_s; s.replace(t)` and `@s.replace(@t)`.
+Under SPINEL_GC_STRESS=2 the copy was made from a freed String and the
+receiver came out as poison bytes, for a local, a global and an
+instance variable alike. A plain run and level 1 were right in every
+program tried.
+
+The temp is now rooted unless the source is a literal, a constant,
+self, or a local or an instance variable that is read where it stands
+(strbuf_slot_ref says which of those are read as a copy). The copy
+itself is as it was: the source is not sent through sp_str_dup, which
+would turn the "" that a nil String-or-nil source reads as into nil.
+
+The generated C of two tests gains the root; every benchmark's, every
+package test's and optcarrot's is unchanged. The root costs 14
+instructions a replace.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
