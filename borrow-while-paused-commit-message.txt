@@ -1,0 +1,48 @@
+A read-only parameter keeps its copy when the callee hands control away
+
+A read-only parameter takes a shared String's live buffer where nothing
+can see the difference (#7531). A callee that yields its Fiber is not such
+a place: the resumer runs before the callee's next read, an append there
+moves the buffer, and the callee reads the freed one.
+
+    def peek(s)
+      Fiber.yield 1
+      s.getbyte(0) + s.bytesize
+    end
+    s = +"hello"
+    t = s
+    t << " world"
+    f = Fiber.new { peek(s) }
+    f.resume
+    s << ("x" * 1_000_000)
+    p f.resume
+
+This printed 115 before #7531 (the parameter was a copy) and prints a
+different number on each run since. valgrind: "Invalid read of size 1 at
+_fiber_body_1", 24 bytes inside a block freed by realloc in
+sp_String_append_bin.
+
+param_borrow_loud now answers yes for a builtin with no receiver or on a
+class that is named yield, sleep, pass or stop: Fiber.yield, sleep,
+Thread.pass, Thread.stop. It goes by the name, since `F = Fiber; F.yield`
+is the same call. Such a callee keeps the copy, and its call compiles to
+the C it had before #7531. A signal handler and a finalizer run at a safe
+point of whatever method is running, so a program that calls trap or
+define_finalizer marks no read at all.
+
+The answer is the copy's, 115, as before #7531, not CRuby's 1000115. That
+one needs the parameter to be the handle, which is a sharing rule (#6765).
+
+The cost: where the buffer does not move while the callee is paused, the
+borrow was right and the copy is not. With `s << "!"` in place of the long
+append the program above prints 116, CRuby's, since #7531, and 115 again
+with this.
+
+Left alone: two threads that share a String with no Mutex, where the
+reader does not sleep, pass or stop but runs a long loop, a blocking read
+or `system` while the other appends. That still reads the freed buffer;
+docs/limitations.md leaves such a race to the program ("Thread data races
+are observable"). A callee that waits on a Fiber, a Thread, a Queue, a
+Mutex or a ConditionVariable it was handed was loud already.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

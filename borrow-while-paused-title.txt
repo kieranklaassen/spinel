@@ -1,0 +1,1 @@
+A read-only parameter keeps its copy when the callee hands control away

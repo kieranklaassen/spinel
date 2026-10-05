@@ -1,0 +1,16 @@
+A method ending in an instance variable write of a shared String answers the String
+
+`def text; return @text if @text; b = +""; b << "x" << "y"; @text = b; end`
+answered nil the first time it was asked: a tail instance variable write
+hands back the slot when the slot's type is the return's, and a String
+that is appended to in place under a second name lives in a shared-handle
+slot, which a String return cannot take as it stands, so the write went
+out as a statement and the method fell to its default. Such a write now
+goes out in its value form, the write and then the slot's ordinary read,
+as `(@text = b)` and `return @text = b` already do. That read is a copy
+of the String, so it is made only where the method's value can be seen
+to be wanted: a call that is no plain statement, the name as a Symbol or
+a String, a call that ends a method whose own value is wanted. A setter
+whose every call drops its value keeps the statement form and its cost.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
