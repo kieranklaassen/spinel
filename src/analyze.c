@@ -16117,13 +16117,12 @@ static int promote_local_alias_pair(Compiler *c, Scope *ws, const char *srcn, co
   return changed;
 }
 
-/* Does the block of `itn` over `recv` bind the VALUE of a Hash local or a
-   Hash literal? It does for
+/* Has the block of `itn` over `recv` the shape that binds a Hash's VALUE?
+   It has for
    `h.each_value { |v| }`, `h.each { |k, v| }` / `each_pair`, and an element
    iterator over `h.values`. Answers the Hash's read in *hrecv and the
    value's parameter position in *vi. */
-static int an_hash_value_block(Compiler *c, const char *itn, int recv, int *hrecv, int *vi) {
-  const NodeTable *nt = c->nt;
+static int an_value_block_shape(const NodeTable *nt, const char *itn, int recv, int *hrecv, int *vi) {
   if (recv < 0) return 0;
   /* `h.values.each { |v| }`: the Array `values` answers holds those Strings,
      as do `values_at` and `fetch_values` */
@@ -16138,12 +16137,30 @@ static int an_hash_value_block(Compiler *c, const char *itn, int recv, int *hrec
   else if (sp_streq(itn, "each_value")) *vi = 0;
   else if (is_each_or_pair(itn)) *vi = 1;
   else return 0;
-  if (recv < 0 || (nt_kind(nt, recv) != NK_LocalVariableReadNode && nt_kind(nt, recv) != NK_HashNode) ||
-      !ty_is_hash(infer_type(c, recv)))
-    return 0;
   *hrecv = recv;
-  return 1;
+  return recv >= 0;
 }
+/* Does it bind the value of a Hash local or a Hash literal, whose stores the
+   block's own scope lists? */
+static int an_hash_value_block(Compiler *c, const char *itn, int recv, int *hrecv, int *vi) {
+  const NodeTable *nt = c->nt;
+  if (!an_value_block_shape(nt, itn, recv, hrecv, vi)) return 0;
+  recv = *hrecv;
+  return (nt_kind(nt, recv) == NK_LocalVariableReadNode || nt_kind(nt, recv) == NK_HashNode) &&
+         ty_is_hash(infer_type(c, recv));
+}
+/* Does the block append to its parameter `vi`, in place or through a method
+   it hands it to? */
+static int an_value_block_appends(Compiler *c, int blk, int vi) {
+  const char *vp = block_param_name(c, blk, vi);
+  Scope *vs = vp ? comp_scope_of(c, blk) : NULL;
+  return vp && (strbuf_mut_kind(c, vp, vs) == 1 || cap_wrap_mutates_param(c, blk, vp) ||
+                an_subtree_hands_to_appender(c, nt_ref(c->nt, blk, "body"), vp, 0));
+}
+static const char an_hash_value_block_refusal[] =
+    "a String stored in a Hash is passed to an appending value block: "
+    "a String is not yet shared by reference through a Hash's values. "
+    "Append to the String before storing it in the Hash.";
 
 /* A chained value iterator over a fresh Hash literal is harmless when its
    only Hash read is the iterator receiver itself: no code can observe the
@@ -16962,10 +16979,7 @@ static int promote_shared_stored_strings(Compiler *c) {
     else {
       int hr, vi;
       if (an_hash_value_block(c, itn, recv4, &hr, &vi)) {
-        const char *vp = block_param_name(c, blk4, vi);
-        Scope *vs = vp ? comp_scope_of(c, blk4) : NULL;
-        if (!vp || (strbuf_mut_kind(c, vp, vs) != 1 && !cap_wrap_mutates_param(c, blk4, vp) &&
-            !an_subtree_hands_to_appender(c, nt_ref(nt, blk4, "body"), vp, 0))) continue;
+        if (!an_value_block_appends(c, blk4, vi)) continue;
         int lit = nt_kind(nt, hr) == NK_HashNode;
         const char *hn = lit ? NULL : nt_str(nt, hr, "name");
         Scope *hs = lit ? NULL : comp_scope_of(c, hr);
@@ -16992,10 +17006,7 @@ static int promote_shared_stored_strings(Compiler *c) {
             TyKind st = infer_type(c, stores[e]);
             /* A frozen literal already raises FrozenError on this route. */
             if ((st == TY_STRING || st == TY_STRBUF) && nt_kind(nt, stores[e]) != NK_StringNode)
-              unsupported_feature(c, w ? w : hr,
-                  "a String stored in a Hash is passed to an appending value block: "
-                  "a String is not yet shared by reference through a Hash's values. "
-                  "Append to the String before storing it in the Hash.");
+              unsupported_feature(c, w ? w : hr, an_hash_value_block_refusal);
           }
         }
         continue;
@@ -29090,6 +29101,339 @@ static void refuse_hash_pair_string_mutations(Compiler *c) {
   free(binds); free(pmw);
 }
 
+/* The stores an appending Hash value block cannot see from its own scope.
+   The refusal of #7004 and #7034 (promote_shared_stored_strings) lists what
+   the block's scope stores into a Hash local. A Hash a method it was handed
+   to fills, a parameter, a method's answer, an instance variable's or a
+   global's, a default block's or `to_h`'s has its stores somewhere else, and
+   the block appended to a copy with nothing said. The walk below follows the
+   Hash to those stores, and the same refusal covers them. */
+
+/* The call a method's scope was entered by: a parameter read there is that
+   call's argument, so `fill(h, :a, "lit")` stores a literal. */
+typedef struct HvFrame { Scope *m; int call; const struct HvFrame *up; } HvFrame;
+/* What one walk has listed the stores of, by holder and the call it came in
+   by: a Hash handed round a cycle of methods is listed once. */
+static struct HvSeen { const void *owner; const char *name; int call; } *hv_seen;
+static int hv_nseen, hv_seen_cap;
+static int hv_enter(const void *owner, const char *name, int call) {
+  for (int k = 0; k < hv_nseen; k++)
+    if (hv_seen[k].owner == owner && hv_seen[k].call == call && sp_streq(hv_seen[k].name, name)) return 0;
+  if (hv_nseen == hv_seen_cap) {
+    int ncap = hv_seen_cap ? hv_seen_cap * 2 : 16;
+    struct HvSeen *nv = (struct HvSeen *)realloc(hv_seen, sizeof *nv * (size_t)ncap);
+    if (!nv) return 0;
+    hv_seen = nv; hv_seen_cap = ncap;
+  }
+  hv_seen[hv_nseen].owner = owner; hv_seen[hv_nseen].name = name; hv_seen[hv_nseen++].call = call;
+  return 1;
+}
+/* The value `h[k] = v` or `h.store(k, v)` stores, or -1. */
+static int hv_call_stored(const NodeTable *nt, int call) {
+  const char *nm = nt_str(nt, call, "name");
+  int a = nt_ref(nt, call, "arguments"), an = 0;
+  const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
+  if (nm && sp_streq(nm, "[]=") && an >= 2) return av[an - 1];
+  return nm && sp_streq(nm, "store") && an == 2 ? av[1] : -1;
+}
+/* What the walk asks for by holder, listed once and sorted: the writes and
+   stores of an instance variable (owner its class) or a global (owner -1),
+   the calls a scope hands a local to, a scope's returns. Asking every call
+   for each value block would grow with the square of the program. */
+enum { HV_VAR, HV_HANDED, HV_RETURN };
+typedef struct { int grp, owner; const char *name; int node; } HvSite;
+static HvSite *hv_sites;
+static int hv_nsites, hv_sites_cap;
+static HandleArgTab hv_callers;   /* a method's call sites */
+static void hv_site_add(int grp, int owner, const char *name, int node) {
+  if (!name) return;
+  if (hv_nsites == hv_sites_cap) {
+    int ncap = hv_sites_cap ? hv_sites_cap * 2 : 64;
+    HvSite *nv = (HvSite *)realloc(hv_sites, sizeof *nv * (size_t)ncap);
+    if (!nv) return;
+    hv_sites = nv; hv_sites_cap = ncap;
+  }
+  hv_sites[hv_nsites++] = (HvSite){ grp, owner, name, node };
+}
+static int hv_site_cmp(const void *a, const void *b) {
+  const HvSite *x = (const HvSite *)a, *y = (const HvSite *)b;
+  if (x->grp != y->grp) return x->grp - y->grp;
+  if (x->owner != y->owner) return x->owner < y->owner ? -1 : 1;
+  int d = strcmp(x->name, y->name);
+  return d ? d : x->node - y->node;
+}
+/* The first site of (grp, owner, name) and whether site `i` is one of them. */
+static int hv_site_first(int grp, int owner, const char *name) {
+  HvSite key = { grp, owner, name, -1 };
+  int lo = 0, hi = hv_nsites;
+  while (lo < hi) {
+    int mid = lo + (hi - lo) / 2;
+    if (hv_site_cmp(&hv_sites[mid], &key) < 0) lo = mid + 1; else hi = mid;
+  }
+  return lo;
+}
+static int hv_site_is(int i, int grp, int owner, const char *name) {
+  return i < hv_nsites && hv_sites[i].grp == grp && hv_sites[i].owner == owner &&
+         strcmp(hv_sites[i].name, name) == 0;
+}
+/* Variable read or write `at` as a site of `node`. */
+static void hv_site_var(Compiler *c, int at, int node) {
+  NodeKind k = nt_kind(c->nt, at);
+  const char *vn = nt_str(c->nt, at, "name");
+  if (!vn) return;
+  if (k == NK_GlobalVariableReadNode || k == NK_GlobalVariableWriteNode)
+    hv_site_add(HV_VAR, -1, comp_resolve_gvar(c, vn + 1), node);
+  else if (an_ivar_owner(c, at) >= 0)
+    hv_site_add(HV_VAR, an_ivar_owner(c, at), vn, node);
+}
+static void hv_list_sites(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  for (int u = 0; u < nt->count; u++) {
+    NodeKind k = nt_kind(nt, u);
+    Scope *us;
+    if (k == NK_InstanceVariableWriteNode || k == NK_GlobalVariableWriteNode) hv_site_var(c, u, u);
+    else if (k == NK_ReturnNode && (us = comp_scope_of(c, u)) != NULL)
+      hv_site_add(HV_RETURN, (int)(us - c->scopes), "", u);
+    if (k != NK_CallNode) continue;
+    int r = nt_ref(nt, u, "receiver"), a = nt_ref(nt, u, "arguments"), an = 0;
+    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
+    if (r >= 0 && hv_call_stored(nt, u) >= 0 &&
+        (nt_kind(nt, r) == NK_InstanceVariableReadNode || nt_kind(nt, r) == NK_GlobalVariableReadNode))
+      hv_site_var(c, r, u);
+    for (int j = 0; j < an; j++)
+      if (nt_kind(nt, av[j]) == NK_LocalVariableReadNode && (us = comp_scope_of(c, av[j])) != NULL)
+        hv_site_add(HV_HANDED, (int)(us - c->scopes), nt_str(nt, av[j], "name"), u);
+  }
+  if (hv_nsites > 1) qsort(hv_sites, (size_t)hv_nsites, sizeof *hv_sites, hv_site_cmp);
+  /* a call that hands one local twice is one site */
+  int n = 0;
+  for (int i = 0; i < hv_nsites; i++)
+    if (n == 0 || hv_site_cmp(&hv_sites[n - 1], &hv_sites[i]) != 0) hv_sites[n++] = hv_sites[i];
+  hv_nsites = n;
+  handle_arg_tab_init(c, &hv_callers);
+}
+static int hv_caller_first(Compiler *c, Scope *m) {
+  return hv_callers.ok ? hv_callers.head[m - c->scopes] : -1;
+}
+/* The position of local `vn` among its method's parameters when nothing in
+   the method writes it again, else -1. */
+static int hv_param_as_passed(Compiler *c, Scope *vs, const char *vn) {
+  LocalVar *lv = scope_local(vs, vn);
+  if (!lv || !lv->is_param || lv->is_block_param) return -1;
+  for (int w = comp_lvw_first_sc(c, (int)(vs - c->scopes), vn); w >= 0; w = comp_lvw_next_sc(c, w)) {
+    const char *wn = nt_str(c->nt, w, "name");
+    if (wn && sp_streq(wn, vn) && comp_scope_of(c, w) == vs) return -1;
+  }
+  return an_param_idx(vs, vn);
+}
+/* Is every write of local `vn` a String literal? It then holds a frozen
+   one, as the literal itself does. */
+static int hv_local_holds_literal(Compiler *c, Scope *vs, const char *vn) {
+  const NodeTable *nt = c->nt;
+  LocalVar *lv = scope_local(vs, vn);
+  int n = 0;
+  if (!lv || lv->is_param || lv->is_block_param) return 0;
+  for (int w = comp_lvw_first_sc(c, (int)(vs - c->scopes), vn); w >= 0; w = comp_lvw_next_sc(c, w)) {
+    const char *wn = nt_str(nt, w, "name");
+    if (!wn || !sp_streq(wn, vn) || comp_scope_of(c, w) != vs) continue;
+    int wv = nt_kind(nt, w) == NK_LocalVariableWriteNode ? an_unparen(nt, nt_ref(nt, w, "value")) : -1;
+    if (wv < 0 || nt_kind(nt, wv) != NK_StringNode) return 0;
+    n++;
+  }
+  return n > 0;
+}
+/* Would an append through a copy of stored value `v` be lost? As in view: a
+   String that is no literal (a frozen literal raises FrozenError on this
+   route). A parameter stands for what is passed: the argument of the call
+   the walk came in by, or of every call when it came in by none. */
+static int hv_lost_string(Compiler *c, int v, const HvFrame *f, int depth) {
+  const NodeTable *nt = c->nt;
+  if (v < 0 || depth > 8) return 0;
+  if (nt_kind(nt, v) == NK_LocalVariableReadNode) {
+    const char *vn = nt_str(nt, v, "name");
+    Scope *vs = vn ? comp_scope_of(c, v) : NULL;
+    if (vs && hv_local_holds_literal(c, vs, vn)) return 0;
+    int j = vs ? hv_param_as_passed(c, vs, vn) : -1;
+    if (j >= 0 && f && f->m == vs)
+      return hv_lost_string(c, arg_layout_param_node(c, vs, f->call, j, NULL), f->up, depth + 1);
+    if (j >= 0) {
+      if (!hv_enter(vs, vn, -2)) return 0;
+      for (int e = hv_caller_first(c, vs); e >= 0; e = hv_callers.enext[e])
+        if (hv_lost_string(c, arg_layout_param_node(c, vs, hv_callers.enode[e], j, NULL), NULL, depth + 1))
+          return 1;
+      return 0;
+    }
+  }
+  TyKind t = infer_type(c, v);
+  return (t == TY_STRING || t == TY_STRBUF) && nt_kind(nt, v) != NK_StringNode;
+}
+/* Can call `u` reach a method of the program: a bare call, or one on self,
+   on a class or on an object? Any other receiver answers a builtin of the
+   name, whatever method the program defines under it. */
+static int hv_user_call(Compiler *c, int u) {
+  int r = nt_ref(c->nt, u, "receiver");
+  NodeKind rk = r >= 0 ? nt_kind(c->nt, r) : NK_SelfNode;
+  return rk == NK_SelfNode || rk == NK_ConstantReadNode || rk == NK_ConstantPathNode ||
+         ty_is_object(infer_type(c, r));
+}
+static int hv_far_store(Compiler *c, int node, const HvFrame *f, int depth);
+/* The first store of such a String into Hash local (hn, hs), or -1: what its
+   scope stores and writes it from, what the callers hand a parameter, and
+   what a method it is handed to stores into its own parameter. */
+static int hv_local_far_store(Compiler *c, const char *hn, Scope *hs, const HvFrame *f, int depth) {
+  const NodeTable *nt = c->nt;
+  LocalVar *lv = hn && hs ? scope_local(hs, hn) : NULL;
+  if (!lv || depth > 8 || !hv_enter(hs, hn, f ? f->call : -1)) return -1;
+  int n = 0, r;
+  const int *ids = sb_store_nodes(c, hn, hs, &n);
+  for (int i = 0; i < n; i++) {
+    int w = ids[i], stores[64];
+    int ns = strbuf_container_store_values(c, w, hn, hs, 0, stores);
+    /* A store with a block is not rewritten to []=. */
+    if (ns == 0 && nt_kind(nt, w) == NK_CallNode && hv_call_stored(nt, w) >= 0)
+      stores[ns++] = hv_call_stored(nt, w);
+    for (int e = 0; e < ns; e++)
+      if (hv_lost_string(c, stores[e], f, 0)) return w;
+    if (ns == 0 && nt_kind(nt, w) == NK_LocalVariableWriteNode &&
+        (r = hv_far_store(c, nt_ref(nt, w, "value"), f, depth + 1)) >= 0) return r;
+  }
+  int mi = (int)(hs - c->scopes);
+  int pj = lv->is_param && !lv->is_block_param ? an_param_idx(hs, hn) : -1;
+  if (pj >= 0 && f && f->m == hs) {
+    if ((r = hv_far_store(c, arg_layout_param_node(c, hs, f->call, pj, NULL), f->up, depth + 1)) >= 0) return r;
+  }
+  else if (pj >= 0)
+    for (int e = hv_caller_first(c, hs); e >= 0; e = hv_callers.enext[e])
+      if ((r = hv_far_store(c, arg_layout_param_node(c, hs, hv_callers.enode[e], pj, NULL), NULL, depth + 1)) >= 0)
+        return r;
+  for (int i = hv_site_first(HV_HANDED, mi, hn); hv_site_is(i, HV_HANDED, mi, hn); i++) {
+    int u = hv_sites[i].node;
+    if (!hv_user_call(c, u)) continue;
+    ACallTargets tg = { NULL, 0, 0, -1, 0 };
+    an_call_targets_of(c, u, &tg);
+    r = -1;
+    for (int t = 0; t < tg.n && r < 0; t++) {
+      Scope *m = &c->scopes[tg.v[t]];
+      for (int j = 0; m->body >= 0 && j < m->nparams && r < 0; j++) {
+        int p = arg_layout_param_node(c, m, u, j, NULL);
+        if (p < 0 || nt_kind(nt, p) != NK_LocalVariableReadNode || !m->pnames[j] ||
+            !sp_streq(nt_str(nt, p, "name"), hn) || comp_scope_of(c, p) != hs) continue;
+        HvFrame g = { m, u, f };
+        r = hv_local_far_store(c, m->pnames[j], m, &g, depth + 1);
+      }
+    }
+    free(tg.v);
+    if (r >= 0) return r;
+  }
+  return -1;
+}
+/* The same for the Hash an instance variable of class `cid` holds, or a
+   global (`cid` -1, `vn` its resolved name): what is written to the
+   variable, and what its own []= stores. */
+static int hv_var_far_store(Compiler *c, int cid, const char *vn, int depth) {
+  const NodeTable *nt = c->nt;
+  if (!hv_enter(cid >= 0 ? (const void *)&c->classes[cid] : (const void *)c, vn, -1)) return -1;
+  for (int i = hv_site_first(HV_VAR, cid, vn); hv_site_is(i, HV_VAR, cid, vn); i++) {
+    int w = hv_sites[i].node, r;
+    if (nt_kind(nt, w) == NK_CallNode) {
+      if (hv_lost_string(c, hv_call_stored(nt, w), NULL, 0)) return w;
+    }
+    else if ((r = hv_far_store(c, nt_ref(nt, w, "value"), NULL, depth + 1)) >= 0) return r;
+  }
+  return -1;
+}
+/* The first store of such a String into the Hash `node` evaluates to, or -1. */
+static int hv_far_store(Compiler *c, int node, const HvFrame *f, int depth) {
+  const NodeTable *nt = c->nt;
+  node = an_unparen(nt, node);
+  if (node < 0 || depth > 8) return -1;
+  switch (nt_kind(nt, node)) {
+    case NK_HashNode: case NK_KeywordHashNode: {
+      int en = 0; const int *el = nt_arr(nt, node, "elements", &en);
+      for (int e = 0; e < en; e++)
+        if (nt_kind(nt, el[e]) == NK_AssocNode && hv_lost_string(c, nt_ref(nt, el[e], "value"), f, 0)) return node;
+      return -1;
+    }
+    case NK_LocalVariableReadNode:
+      return hv_local_far_store(c, nt_str(nt, node, "name"), comp_scope_of(c, node), f, depth + 1);
+    case NK_InstanceVariableReadNode: {
+      const char *ivn = nt_str(nt, node, "name");
+      int cid = ivn ? an_ivar_owner(c, node) : -1;
+      return cid < 0 ? -1 : hv_var_far_store(c, cid, ivn, depth);
+    }
+    case NK_GlobalVariableReadNode: {
+      const char *gn = nt_str(nt, node, "name");
+      const char *grn = gn ? comp_resolve_gvar(c, gn + 1) : NULL;
+      return grn ? hv_var_far_store(c, -1, grn, depth) : -1;
+    }
+    case NK_CallNode: {
+      const char *mn = nt_str(nt, node, "name");
+      int recv = nt_ref(nt, node, "receiver"), blk = nt_ref(nt, node, "block"), r = -1;
+      if (!mn) return -1;
+      if (blk >= 0 && nt_kind(nt, blk) != NK_BlockNode) blk = -1;
+      /* `Hash.new { |hh, k| hh[k] = v }`: the block's first parameter is the Hash */
+      if (blk >= 0 && sp_streq(mn, "new") && recv >= 0 && nt_kind(nt, recv) == NK_ConstantReadNode &&
+          nt_str(nt, recv, "name") && sp_streq(nt_str(nt, recv, "name"), "Hash"))
+        return hv_local_far_store(c, block_param_name(c, blk, 0), comp_scope_of(c, blk), f, depth + 1);
+      /* `to_h { |x| [k, v] }` is `map { |x| [k, v] }.to_h` by now: the value
+         of the pair the block answers */
+      if (sp_streq(mn, "to_h") && recv >= 0) {
+        int pair = an_unparen(nt, strbuf_map_block_tail(c, recv)), pn = 0;
+        const int *pe = pair >= 0 && nt_kind(nt, pair) == NK_ArrayNode ? nt_arr(nt, pair, "elements", &pn) : NULL;
+        if (pn == 2) return hv_lost_string(c, pe[1], f, 0) ? node : -1;
+      }
+      /* a reader's instance variable */
+      { char ivb[300]; int defc = -1;
+        const char *riv = an_reader_ivar_of(c, node, &defc, ivb, sizeof ivb);
+        if (riv && defc >= 0) {
+          int iv = comp_ivar_index(&c->classes[defc], riv);
+          return iv < 0 ? -1 : hv_var_far_store(c, defc, c->classes[defc].ivars[iv], depth); } }
+      /* a method's answer: its last expression and what it returns */
+      if (!hv_user_call(c, node)) return -1;
+      ACallTargets tg = { NULL, 0, 0, -1, 0 };
+      an_call_targets_of(c, node, &tg);
+      for (int t = 0; t < tg.n && r < 0; t++) {
+        Scope *m = &c->scopes[tg.v[t]];
+        if (m->body < 0 || (m->name && sp_streq(m->name, "initialize"))) continue;
+        HvFrame g = { m, node, f };
+        r = hv_far_store(c, scope_body_last(c, tg.v[t]), &g, depth + 1);
+        for (int i = hv_site_first(HV_RETURN, tg.v[t], ""); r < 0 && hv_site_is(i, HV_RETURN, tg.v[t], ""); i++) {
+          int u = hv_sites[i].node;
+          int ra = nt_ref(nt, u, "arguments"), rn = 0;
+          const int *rv = ra >= 0 ? nt_arr(nt, ra, "arguments", &rn) : NULL;
+          if (rn == 1) r = hv_far_store(c, rv[0], &g, depth + 1);
+        }
+      }
+      free(tg.v);
+      return r;
+    }
+    default:
+      return -1;
+  }
+}
+static void refuse_far_hash_value_stores(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  int listed = 0;
+  NT_FOREACH_KIND(nt, NK_CallNode, it) {
+    char nb[64]; int recv, an;
+    const char *itn = hp_call(nt, it, &recv, &an, nb, sizeof nb);
+    int blk = nt_ref(nt, it, "block"), hr, vi;
+    /* the shape and the parameter first: they ask the node table alone */
+    if (!itn || blk < 0 || !an_value_block_shape(nt, itn, recv, &hr, &vi) ||
+        !block_param_name(c, blk, vi) || !ty_is_hash(infer_type(c, hr)) ||
+        !an_value_block_appends(c, blk, vi)) continue;
+    /* the store index is the fixpoint's: list again on the settled tree */
+    if (!listed) { sb_store_valid = 0; hv_list_sites(c); listed = 1; }
+    hv_nseen = 0;
+    int st = hv_far_store(c, hr, NULL, 0);
+    if (st >= 0) unsupported_feature(c, st, an_hash_value_block_refusal);
+  }
+  if (listed) {
+    handle_arg_tab_free(&hv_callers);
+    free(hv_sites); hv_sites = NULL; hv_nsites = hv_sites_cap = 0;
+  }
+}
+
 /* A bare `@ivar` argument whose ivar is written from a local, handed to a
    parameter the callee appends to: the callee would append to a copy, so
    the program is refused (#6998). Runs once sharing analysis settles. */
@@ -33443,6 +33787,7 @@ static void an_phase_reconcile_check(Compiler *c) {
      analysis settles (#6998). */
   refuse_lent_ivar_copies(c);
   refuse_hash_pair_string_mutations(c);
+  refuse_far_hash_value_stores(c);
 
   /* Last: the capture pass again, on the settled types. a_block_is_lifted asks
      whether the receiver is poly, and a receiver that widened after the

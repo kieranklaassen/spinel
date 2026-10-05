@@ -780,6 +780,38 @@ spinel: a String stored in a Hash is passed to an appending value block: a Strin
 spinel: a String stored in a Hash is passed to an appending value block: a String is not yet shared by reference through a Hash's values. Append to the String before storing it in the Hash.
 == test/reject/string_hash_store_value_block.rb [promote] rc=1
 spinel: a String stored in a Hash is passed to an appending value block: a String is not yet shared by reference through a Hash's values. Append to the String before storing it in the Hash.
+== test/reject/string_hash_value_default_block.rb [default] rc=1
+spinel: a String stored in a Hash is passed to an appending value block: a String is not yet shared by reference through a Hash's values. Append to the String before storing it in the Hash.
+== test/reject/string_hash_value_default_block.rb [promote] rc=1
+spinel: a String stored in a Hash is passed to an appending value block: a String is not yet shared by reference through a Hash's values. Append to the String before storing it in the Hash.
+== test/reject/string_hash_value_global.rb [default] rc=1
+spinel: a String stored in a Hash is passed to an appending value block: a String is not yet shared by reference through a Hash's values. Append to the String before storing it in the Hash.
+== test/reject/string_hash_value_global.rb [promote] rc=1
+spinel: a String stored in a Hash is passed to an appending value block: a String is not yet shared by reference through a Hash's values. Append to the String before storing it in the Hash.
+== test/reject/string_hash_value_ivar.rb [default] rc=1
+spinel: a String stored in a Hash is passed to an appending value block: a String is not yet shared by reference through a Hash's values. Append to the String before storing it in the Hash.
+== test/reject/string_hash_value_ivar.rb [promote] rc=1
+spinel: a String stored in a Hash is passed to an appending value block: a String is not yet shared by reference through a Hash's values. Append to the String before storing it in the Hash.
+== test/reject/string_hash_value_method_answer.rb [default] rc=1
+spinel: a String stored in a Hash is passed to an appending value block: a String is not yet shared by reference through a Hash's values. Append to the String before storing it in the Hash.
+== test/reject/string_hash_value_method_answer.rb [promote] rc=1
+spinel: a String stored in a Hash is passed to an appending value block: a String is not yet shared by reference through a Hash's values. Append to the String before storing it in the Hash.
+== test/reject/string_hash_value_method_store.rb [default] rc=1
+spinel: a String stored in a Hash is passed to an appending value block: a String is not yet shared by reference through a Hash's values. Append to the String before storing it in the Hash.
+== test/reject/string_hash_value_method_store.rb [promote] rc=1
+spinel: a String stored in a Hash is passed to an appending value block: a String is not yet shared by reference through a Hash's values. Append to the String before storing it in the Hash.
+== test/reject/string_hash_value_method_store_call.rb [default] rc=1
+spinel: a String stored in a Hash is passed to an appending value block: a String is not yet shared by reference through a Hash's values. Append to the String before storing it in the Hash.
+== test/reject/string_hash_value_method_store_call.rb [promote] rc=1
+spinel: a String stored in a Hash is passed to an appending value block: a String is not yet shared by reference through a Hash's values. Append to the String before storing it in the Hash.
+== test/reject/string_hash_value_param.rb [default] rc=1
+spinel: a String stored in a Hash is passed to an appending value block: a String is not yet shared by reference through a Hash's values. Append to the String before storing it in the Hash.
+== test/reject/string_hash_value_param.rb [promote] rc=1
+spinel: a String stored in a Hash is passed to an appending value block: a String is not yet shared by reference through a Hash's values. Append to the String before storing it in the Hash.
+== test/reject/string_hash_value_to_h.rb [default] rc=1
+spinel: a String stored in a Hash is passed to an appending value block: a String is not yet shared by reference through a Hash's values. Append to the String before storing it in the Hash.
+== test/reject/string_hash_value_to_h.rb [promote] rc=1
+spinel: a String stored in a Hash is passed to an appending value block: a String is not yet shared by reference through a Hash's values. Append to the String before storing it in the Hash.
 == test/reject/string_hash_value_variable.rb [default] rc=1
 spinel: a String stored in a Hash is passed to an appending value block: a String is not yet shared by reference through a Hash's values. Append to the String before storing it in the Hash.
 == test/reject/string_hash_value_variable.rb [promote] rc=1
