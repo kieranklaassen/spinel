@@ -1,0 +1,1 @@
+A Struct made in place is kept alive while its values are gathered

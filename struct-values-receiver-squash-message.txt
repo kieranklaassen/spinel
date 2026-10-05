@@ -1,0 +1,20 @@
+A Struct made in place is kept alive while its values are gathered
+
+`[*Pt.new(1, 2)]` in test/hash_splat_to_a.rb prints two garbage
+Integers under SPINEL_GC_STRESS=2, and with String members
+`Pt.new("a" + "1", "b" + "2").to_a` ends in SIGSEGV. to_a, values,
+deconstruct, values_at and deconstruct_keys on a Struct or Data are
+emitted inline: the receiver goes into a C temporary, the Array or Hash
+is allocated, and the members are read off the temporary. Nothing held
+a receiver made in place (a `new`, a method's result) while that
+container was allocated.
+
+Each of the four emitters now roots the temporary of such a receiver,
+as to_h beside them already does. A receiver read from a local, an
+instance variable, self or a constant is held where it is, and three
+of the emitters run no Ruby code before the last member read, so they
+leave it as it was. values_at with keys known only at run time roots
+every receiver: a key can drop the variable the receiver was read
+from. The two tests join GC_STRESS_TESTS.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
