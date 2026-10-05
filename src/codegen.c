@@ -14870,13 +14870,20 @@ static void emit_sym_class_name_rt(Compiler *c, Buf *b) {
        asking sp_str_byte_len for one reads past the object. A caller that HAS
        a spinel string -- String#to_sym -- calls the _n form with the real
        length. The first-byte test keeps strcmp's early exit: without it every
-       candidate paid a full length walk before the compare could fail. */
+       candidate paid a full length walk before the compare could fail.
+
+       A miss copies the name, and the copy's allocation can collect the
+       String being copied when nothing else holds it (`(a + b).to_sym`).
+       The root for that is in a cold function kept out of line: placed in
+       sp_sym_intern_n, its cleanup cost every hit as well. */
+    buf_printf(b, "static SP_NOINLINE SP_COLD sp_sym sp_sym_intern_new(const char *s, size_t n){SP_GC_ROOT_STR(s);"
+                   "sp_dyn_syms[sp_ndyn]=sp_str_from_bytes(s,n);return (sp_sym)(%d+sp_ndyn++);}\n", ns);
     buf_printf(b, "%s", g_ext_init_name ? "" : "static ");
     buf_printf(b, "sp_sym sp_sym_intern_n(const char *s, size_t n){"
                    "for(int i=0;i<%d;i++){const char*_c=%s;if(_c[0]==s[0]&&sp_str_byte_len(_c)==n&&memcmp(_c,s,n)==0)return (sp_sym)i;}"
                    "for(int i=0;i<sp_ndyn;i++){const char*_c=sp_dyn_syms[i];if(_c[0]==s[0]&&sp_str_byte_len(_c)==n&&memcmp(_c,s,n)==0)return (sp_sym)(%d+i);}"
-                   "if(sp_ndyn<SP_DYN_SYMS_MAX){sp_dyn_syms[sp_ndyn]=sp_str_from_bytes(s,n);return (sp_sym)(%d+sp_ndyn++);}"
-                   "return (sp_sym)0;}\n", ns, ns > 0 ? "sp_sym_names[i]" : "sp_str_empty", ns, ns);
+                   "if(sp_ndyn<SP_DYN_SYMS_MAX)return sp_sym_intern_new(s,n);"
+                   "return (sp_sym)0;}\n", ns, ns > 0 ? "sp_sym_names[i]" : "sp_str_empty", ns);
     buf_printf(b, "%ssp_sym sp_sym_intern(const char *s){return sp_sym_intern_n(s,s?strlen(s):0);}\n\n",
                g_ext_init_name ? "" : "static ");
   }
