@@ -6173,6 +6173,17 @@ static int str_range_each_block_plain(Compiler *c, int blk) {
   return nt_ref(nt, pn, "rest") < 0 && nt_ref(nt, pn, "keyword_rest") < 0 && nt_ref(nt, pn, "block") < 0;
 }
 
+/* Called without a block, these read every member of the range and answer
+   only then: nothing can leave them early, so no prefix can stand for the
+   range. */
+static int str_range_reads_whole(const char *nm) {
+  static const char *const whole[] = {
+    "count", "sum", "sort", "minmax", "tally", "uniq", "to_set", "inject",
+    "reduce", "last", "max", "drop", "zip", NULL };
+  for (int i = 0; whole[i]; i++) if (sp_streq(nm, whole[i])) return 1;
+  return 0;
+}
+
 /* A string range serves only its endpoint/membership face natively; every
    other method rides the materialized element array. Type-driven, so it also
    catches a range held in a variable -- which is why it lives in the
@@ -6261,6 +6272,15 @@ static int desugar_str_range_methods(Compiler *c) {
     if (toa < 0) continue;
     nt_node_set_str(nt, toa, "name", "to_a");
     nt_node_set_ref(nt, toa, "receiver", recv);
+    /* A traversal that can leave early -- a block may break, and any?, lazy
+       and the blockless Enumerator forms answer from a prefix -- rides the
+       range's held members (sp_srange_held), as every traversal did: the
+       whole of ("a".."zzzzzzzz") is more than memory holds, and a search
+       that leaves it at its third member has its answer from the prefix.
+       A consumer that reads every member and has no block to leave by
+       rides the whole range. */
+    if (nt_ref(nt, id, "block") >= 0 || !str_range_reads_whole(nm))
+      nt_node_set_int(nt, toa, "held", 1);
     nt_node_set_ref(nt, id, "receiver", toa);
     comp_grow_node_arrays(c);
     c->nscope[toa] = c->nscope[id];

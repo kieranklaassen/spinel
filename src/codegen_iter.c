@@ -6539,7 +6539,7 @@ static int emit_iteration_stmt_body(Compiler *c, int id, Buf *b, int indent) {
   }
 
   /* ("a".."e").step(k) { |s| ... } walks every k-th member, as CRuby 4.0
-     does: a bounded range's members materialize once, an endless one's
+     does: a bounded range's held members materialize once, an endless one's
      follow by succ without end, and a step of zero or less yields the begin
      alone (CRuby yields it once and stops). It answers the range. */
   if (sp_streq(name, "step") && rt == TY_STR_RANGE) {
@@ -6556,7 +6556,7 @@ static int emit_iteration_stmt_body(Compiler *c, int id, Buf *b, int indent) {
     emit_indent(b, indent);
     buf_printf(b, "if (!_t%d.first) sp_raise_cls(\"TypeError\", \"can't iterate from NilClass\");\n", tr);
     emit_indent(b, indent);
-    buf_printf(b, "sp_StrArray *_t%d = _t%d.last ? sp_srange_to_a(_t%d) : NULL; SP_GC_ROOT(_t%d);\n", ta, tr, tr, ta);
+    buf_printf(b, "sp_StrArray *_t%d = _t%d.last ? sp_srange_held(_t%d) : NULL; SP_GC_ROOT(_t%d);\n", ta, tr, tr, ta);
     emit_indent(b, indent);
     buf_printf(b, "const char *_t%d = _t%d.first; SP_GC_ROOT(_t%d);\n", tx, tr, tx);
     emit_indent(b, indent);

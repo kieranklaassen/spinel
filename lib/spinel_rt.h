@@ -14473,8 +14473,9 @@ static sp_PolyArray *sp_enum_items_from(sp_RbVal v) {
       /* an int range iterates its members; keeps the range itself printable
          as the enumerator's #inspect source */
       case SP_BUILTIN_RANGE: { sp_Range *rg = (sp_Range *)p; sp_IntArray *ia = sp_range_to_ia(*rg); SP_GC_ROOT(ia); return sp_IntArray_to_poly(ia); }
-      /* a string range iterates its members too (#3619) */
-      case SP_BUILTIN_STR_RANGE: { sp_StrRange *sr = (sp_StrRange *)p; sp_StrArray *sa = sp_srange_to_a(*sr); SP_GC_ROOT(sa); return sp_StrArray_to_poly_fmt(sa); }
+      /* a string range iterates its members too (#3619): the held ones, an
+         Enumerator being a traversal that can leave early */
+      case SP_BUILTIN_STR_RANGE: { sp_StrRange *sr = (sp_StrRange *)p; sp_StrArray *sa = sp_srange_held(*sr); SP_GC_ROOT(sa); return sp_StrArray_to_poly_fmt(sa); }
       /* A hash iterates as its [key, value] pairs, in insertion order --
          sp_poly_each_elem builds the i-th pair for any of the variants. Each
          freshly built pair is rooted across the push, whose array-grow may

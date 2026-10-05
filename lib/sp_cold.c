@@ -3575,6 +3575,13 @@ sp_StrArray *sp_srange_first_n(sp_StrRange r, sp_int n) {
   }
   return a;
 }
+/* The array a traversal that can leave early rides: a block may break, and
+   any?, lazy and the Enumerator forms answer from a prefix, so they hold the
+   first SP_SRANGE_HELD_MAX members -- the length every walk was cut at --
+   where the range whole, ("a".."zzzzzzzz") say, is more than memory holds. */
+sp_StrArray *sp_srange_held(sp_StrRange r) {
+  return sp_srange_first_n(r, SP_SRANGE_HELD_MAX);
+}
 sp_bool sp_srange_eq(sp_StrRange a, sp_StrRange b) {
   return a.excl == b.excl && sp_str_eq(a.first, b.first) && sp_str_eq(a.last, b.last);
 }

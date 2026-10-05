@@ -10200,7 +10200,8 @@ int emit_range_call(Compiler *c, int id, Buf *b) {
       buf_printf(b, "({ sp_StrRange _t%d = ", tr); emit_expr(c, recv, b);
       if (nt_int(nt, id, "to_set", 0))
         buf_printf(b, "; if (!_t%d.last) sp_raise_cls(\"RangeError\", \"cannot convert endless range to a set\")", tr);
-      buf_printf(b, "; sp_srange_to_a(_t%d); })", tr); return 1;
+      /* the receiver of a traversal that can leave early: the held members */
+      buf_printf(b, "; %s(_t%d); })", nt_int(nt, id, "held", 0) ? "sp_srange_held" : "sp_srange_to_a", tr); return 1;
     }
     /* builtin-op rows (builtin_ops.c), after the arms that read the operand */
     if (emit_builtin_op_tmp(c, id, recv, rt, name, tr, b)) return 1;
