@@ -992,10 +992,9 @@ const char *sp_str_splice_at(const char *s, sp_int from, sp_int n, const char *v
   const char *head = sp_str_sub_range(s, 0, from);
   SP_GC_ROOT_STR(head);
   const char *tail = sp_str_sub_range(s, from + n, len - from - n);
-  SP_GC_ROOT_STR(tail);
-  const char *pre = sp_str_concat(head, val);
-  SP_GC_ROOT_STR(pre);
-  return sp_str_concat(pre, tail);
+  /* the three pieces in one allocation: nothing allocates between the tail
+     and the call, and sp_str_concat3 roots all three once entered */
+  return sp_str_concat3(head, val, tail);
 }
 
 /* String#insert(i, val): val goes in ahead of character i. A negative i
