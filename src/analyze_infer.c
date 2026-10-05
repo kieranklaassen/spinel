@@ -7654,6 +7654,15 @@ static int value_arm_is(const NodeTable *nt, int v, int node) {
   case NK_AndNode: case NK_OrNode:
     return value_arm_is(nt, nt_ref(nt, v, "left"), node) ||
            value_arm_is(nt, nt_ref(nt, v, "right"), node);
+  case NK_RescueModifierNode:
+    return value_arm_is(nt, nt_ref(nt, v, "expression"), node) ||
+           value_arm_is(nt, nt_ref(nt, v, "rescue_expression"), node);
+  case NK_CaseNode: {
+    int nw = 0; const int *wh = nt_arr(nt, v, "conditions", &nw);
+    for (int i = 0; i < nw; i++)
+      if (value_arm_is(nt, nt_ref(nt, wh[i], "statements"), node)) return 1;
+    return value_arm_is(nt, nt_ref(nt, v, "else_clause"), node);
+  }
   default: return 0;
   }
 }
@@ -7670,7 +7679,7 @@ static int value_arm_is(const NodeTable *nt, int v, int node) {
    rebuilt per fixpoint iteration and when the table grows, like the
    receiver set above, and each node on it is checked as the walk did, so
    one that no longer holds the yield answers no. */
-enum { YU_WRITE, YU_ELEMENT, YU_ARGUMENT, YU_RECEIVER, YU_FRAME, YU_BLOCK };
+enum { YU_WRITE, YU_ELEMENT, YU_ARGUMENT, YU_RECEIVER, YU_FRAME, YU_BLOCK, YU_TAIL };
 static const NodeKind yu_write_kinds[] = {
   NK_LocalVariableWriteNode, NK_LocalVariableOperatorWriteNode,
   NK_LocalVariableOrWriteNode, NK_LocalVariableAndWriteNode,
@@ -7721,6 +7730,16 @@ static void yu_collect(const NodeTable *nt, int v, int w, int kind) {
     yu_collect(nt, nt_ref(nt, v, "left"), w, kind);
     yu_collect(nt, nt_ref(nt, v, "right"), w, kind);
     return;
+  case NK_RescueModifierNode:
+    yu_collect(nt, nt_ref(nt, v, "expression"), w, kind);
+    yu_collect(nt, nt_ref(nt, v, "rescue_expression"), w, kind);
+    return;
+  case NK_CaseNode: {
+    int nw = 0; const int *wh = nt_arr(nt, v, "conditions", &nw);
+    for (int i = 0; i < nw; i++) yu_collect(nt, nt_ref(nt, wh[i], "statements"), w, kind);
+    yu_collect(nt, nt_ref(nt, v, "else_clause"), w, kind);
+    return;
+  }
   default: return;
   }
 }
@@ -7756,6 +7775,10 @@ static int yield_uses(Compiler *c, int y) {
       int bn = 0; const int *bs = nt_arr(nt, st, "body", &bn);
       if (bs && bn > 0 && bs[bn - 1] >= 0 && bs[bn - 1] < nt->count &&
           nt_kind(nt, bs[bn - 1]) == NK_YieldNode) yu_add(bs[bn - 1], w, YU_FRAME);
+    }
+    for (int s = 1; s < c->nscopes; s++) {
+      int tl = scope_joined_tail(c, s);
+      if (tl >= 0) yu_collect(nt, tl, tl, YU_TAIL);
     }
     g_yu_gen = g_narrow_gen; g_yu_nt = nt; g_yu_cnt = nt->count;
   }
@@ -8258,6 +8281,14 @@ static int infer_yield_node(Compiler *c, int id, const NodeTable *nt, NodeKind n
         if (bs && bn > 0 && bs[bn - 1] == id) { *out = TY_POLY; return 1; }
         break;
       }
+      case YU_TAIL:
+        /* One arm of the method's own value likewise (`yield rescue :none`,
+           `c ? yield : :none`, `yield || :none`, a `case` arm): the other
+           arm and the first site's block settle the method's return, and
+           the per-site coercion reaches a bare `yield` tail only. A Symbol
+           block and then an Integer one answered `:""` for the Integer. */
+        if (scope_joined_tail(c, ymi) == w && value_arm_is(nt, w, id)) { *out = TY_POLY; return 1; }
+        break;
       }
     }
   }

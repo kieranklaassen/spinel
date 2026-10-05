@@ -2031,6 +2031,19 @@ static int method_block_presence(Compiler *c, int mi) {
   return with ? 1 : 0;
 }
 
+/* The last statement of method `mi` where it joins values and so types the
+   method by itself: -1 where method_call_ret types the call from each site's
+   block (a `yield` tail, a call of the block parameter, the block arm of an
+   `if block_given?`). */
+int scope_joined_tail(Compiler *c, int mi) {
+  const NodeTable *nt = c->nt;
+  int last = scope_body_last(c, mi);
+  if (last < 0 || block_given_tail_then_last(c, last) >= 0) return -1;
+  int u = an_unparen(nt, last);
+  if (u < 0 || nt_kind(nt, u) == NK_YieldNode || is_blk_param_call(c, u, mi)) return -1;
+  return last;
+}
+
 TyKind dispatch_ret_over(Compiler *c, int cid, const char *name, int cmeth, int base_mi, TyKind r,
                          int call_id) {
   int nd = 0;
