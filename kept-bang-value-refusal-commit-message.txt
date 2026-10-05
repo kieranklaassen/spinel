@@ -1,0 +1,30 @@
+Refuse a String changed in place through the kept value of a bang method
+
+`r = s.upcase!; r << x; p s` printed `s` without x once x outgrew the
+receiver's buffer, and `r.equal?(s)` was then false: the write keeps the
+call's value as a String of the local's own, where CRuby keeps `s`
+itself (or nil when nothing changed). A change that still fits showed
+through `s` after upcase!, downcase!, capitalize!, swapcase!, squeeze!
+and succ!. After strip!, lstrip!, rstrip!, chomp!, chop!, tr!, tr_s!,
+delete!, delete_prefix!, delete_suffix!, gsub!, sub!, next!, bytesplice,
+append_as_bytes, and concat or prepend with other than one argument, no
+change through `r` reached `s`.
+
+Refused as scrub! already is, whatever the size of the change: a plain
+write of the call whose local is the receiver of a String mutator. The
+sentence names the local and, where that builds for every call of the
+list, what to change instead ("Change s itself instead of r"). That
+rewrite answers as CRuby does where the receiver's own name is what is
+read afterwards. It does not make every program right: a String read
+through another holder that is not shared with the receiver (a constant
+or a global given a local's String, a `for` variable, a parameter given
+a constant or an Array's element) loses the change with or without this
+refusal, and a parameter given a Struct member does not build.
+
+Narrower than the scrub! refusal in four ways: the receiver is typed
+String, every write of the local is such a value or nil, the mutator is
+not setbyte, and the receiver's String is held where it can be read
+again. A value that is only read, a String the receiver has just made,
+and a receiver in a box compile as before. scrub! keeps its own refusal.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

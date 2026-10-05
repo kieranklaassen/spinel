@@ -1,0 +1,1 @@
+Refuse a String changed in place through the kept value of a bang method
