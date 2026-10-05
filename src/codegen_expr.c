@@ -73,7 +73,141 @@ typedef struct {
 static void interp_plan_free(InterpPlan *pl) {
   free(pl->lits.p); free(pl->decls.p); free(pl->wp); free(pl->flat);
 }
-static void interp_plan(Compiler *c, int id, InterpPlan *pl) {
+/* ---- where a later part's operands run ----
+   A part's value is evaluated in its place in `decls`, but what its call
+   hoists (the operands emit_operands_in_order binds, a receiver's temp)
+   goes to the statement's prelude, ahead of every part:
+   `"#{a.f(x1)} #{b.g(x2)}"` ran x1, x2, f, g. The three questions below say
+   when those operands are kept in the part's place instead. */
+
+/* Can the operands of part `expr` see what an earlier part did? One that
+   holds a call or an assignment can, and so can a read of a variable an
+   earlier part gives another value (read_rebound_by). */
+static int interp_part_observes(Compiler *c, int expr, const int *parts, int k) {
+  const NodeTable *nt = c->nt;
+  if (expr < 0) return 0;
+  for (int pass = 0; pass < 2; pass++) {
+    int n = pass ? nt_num_arrs(nt, expr) : nt_num_refs(nt, expr);
+    for (int i = 0; i < n; i++) {
+      int one = pass ? -1 : nt_ref_at(nt, expr, i), cnt = 1;
+      const int *ids = pass ? nt_arr_at(nt, expr, i, &cnt) : &one;
+      for (int j = 0; j < cnt; j++) {
+        if (subtree_has_side_effect(c, ids[j])) return 1;
+        for (int e = 0; e < k; e++)
+          if (nt_kind(nt, parts[e]) == NK_EmbeddedStatementsNode && read_rebound_by(c, ids[j], parts[e])) return 1;
+      }
+    }
+  }
+  return 0;
+}
+
+/* Is a value of type `t` changed by assigning what holds it? A String is
+   (`s << "x"` is `lv_s = sp_str_..(lv_s, ..)`), a boxed value may be one,
+   and an object kept by value is copied by each read. */
+static int interp_type_assigned_in_place(Compiler *c, TyKind t) {
+  return t == TY_STRING || t == TY_STRBUF || t == TY_POLY || t == TY_UNKNOWN ||
+         (ty_is_object(t) && comp_ty_value_obj(c, t));
+}
+
+/* Does `n`, evaluated beside the interpolation `id` in the order the C
+   compiler picks, see nothing `id` can change? A literal, self, a constant
+   or a variable `id` cannot give another value, whose value is not assigned
+   in place, arithmetic over those; a block reads when it runs. */
+static int interp_operand_sees_nothing(Compiler *c, int n, int id) {
+  const NodeTable *nt = c->nt;
+  if (n < 0) return 1;
+  switch (nt_kind(nt, n)) {
+    case NK_NilNode: case NK_TrueNode: case NK_FalseNode: case NK_IntegerNode:
+    case NK_FloatNode: case NK_SymbolNode: case NK_StringNode: case NK_SelfNode:
+    case NK_BlockNode: case NK_LambdaNode:
+      return 1;
+    case NK_LocalVariableReadNode: case NK_InstanceVariableReadNode:
+    case NK_ClassVariableReadNode: case NK_GlobalVariableReadNode:
+      return !interp_type_assigned_in_place(c, comp_ntype(c, n)) && !read_rebound_by(c, n, id);
+    case NK_ConstantReadNode: case NK_ConstantPathNode:
+      return !interp_type_assigned_in_place(c, comp_ntype(c, n));
+    case NK_CallNode:
+      if (!call_is_scalar_op(c, n)) return 0;
+      break;
+    case NK_ParenthesesNode: case NK_StatementsNode:
+      break;
+    default: {
+      const char *ty = nt_type(nt, n);
+      if (!ty || !sp_streq(ty, "ArgumentsNode")) return 0;
+    }
+  }
+  for (int i = 0; i < nt_num_refs(nt, n); i++)
+    if (!interp_operand_sees_nothing(c, nt_ref_at(nt, n, i), id)) return 0;
+  for (int i = 0; i < nt_num_arrs(nt, n); i++) {
+    int cnt = 0; const int *ids = nt_arr_at(nt, n, i, &cnt);
+    for (int j = 0; j < cnt; j++) if (!interp_operand_sees_nothing(c, ids[j], id)) return 0;
+  }
+  return 1;
+}
+
+/* Is the interpolation `id` evaluated where Ruby evaluates it, against
+   everything else its statement evaluates? Up from `id` to the body it is
+   written in, each node either is sequenced by C as by Ruby (a statement
+   list, a conditional, `&&`, a plain assignment, another interpolation) or
+   holds operands of one C expression, whose order the C compiler picks: then
+   the others must see nothing (interp_operand_sees_nothing). Any other
+   place answers no, and there a part's operands stay ahead of the
+   statement, where a read beside the interpolation finds them done:
+   `"#{a.f(1)}#{b.g(lg(2), (n += 1))}".center(n)`. */
+int *du_parent_map(const NodeTable *nt);
+static int *g_interp_parent;
+static int g_interp_parent_n = -1;
+static unsigned g_interp_parent_ver;
+static int interp_sequenced(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  if (!g_interp_parent || g_interp_parent_n != nt->count || g_interp_parent_ver != nt->version) {
+    free(g_interp_parent);
+    g_interp_parent = du_parent_map(nt);
+    if (!g_interp_parent) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+    g_interp_parent_n = nt->count; g_interp_parent_ver = nt->version;
+  }
+  for (int n = id; n >= 0 && n < nt->count; ) {
+    int p = g_interp_parent[n];
+    const char *pty = p >= 0 ? nt_type(nt, p) : NULL;
+    if (!pty) return 0;
+    if (sp_streq(pty, "ProgramNode")) return 1;
+    int operands = sp_streq(pty, "ArgumentsNode");
+    if (!operands && !sp_streq(pty, "WhenNode") && !sp_streq(pty, "EnsureNode"))
+      switch (nt_kind(nt, p)) {
+        case NK_DefNode: case NK_BlockNode: case NK_LambdaNode:
+        case NK_ClassNode: case NK_ModuleNode: case NK_SingletonClassNode:
+          return 1;
+        case NK_StatementsNode: case NK_ParenthesesNode: case NK_EmbeddedStatementsNode:
+        case NK_InterpolatedStringNode: case NK_IfNode: case NK_UnlessNode: case NK_ElseNode:
+        case NK_AndNode: case NK_OrNode: case NK_WhileNode: case NK_UntilNode:
+        case NK_BeginNode: case NK_RescueNode: case NK_CaseNode:
+        case NK_LocalVariableWriteNode: case NK_InstanceVariableWriteNode:
+        case NK_GlobalVariableWriteNode: case NK_ClassVariableWriteNode: case NK_ConstantWriteNode:
+          break;
+        case NK_CallNode: case NK_ArrayNode: case NK_HashNode: case NK_AssocNode:
+        case NK_KeywordHashNode: case NK_ReturnNode: case NK_YieldNode: case NK_SuperNode:
+          operands = 1;
+          break;
+        default:
+          return 0;
+      }
+    if (operands) {
+      for (int i = 0; i < nt_num_refs(nt, p); i++) {
+        int ch = nt_ref_at(nt, p, i);
+        if (ch != n && !interp_operand_sees_nothing(c, ch, id)) return 0;
+      }
+      for (int i = 0; i < nt_num_arrs(nt, p); i++) {
+        int cnt = 0; const int *ids = nt_arr_at(nt, p, i, &cnt);
+        for (int j = 0; j < cnt; j++)
+          if (ids[j] != n && !interp_operand_sees_nothing(c, ids[j], id)) return 0;
+      }
+    }
+    n = p;
+  }
+  return 0;
+}
+
+static void interp_plan(Compiler *c, int id, InterpPlan *pl, int own_stmt) {
   const NodeTable *nt = c->nt;
   int n = 0;
   int *flat = NULL, fcap = 0;
@@ -82,6 +216,8 @@ static void interp_plan(Compiler *c, int id, InterpPlan *pl) {
   WPart *wp = malloc(sizeof(WPart) * (size_t)(n > 0 ? n : 1));
   if (!wp) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
   int nwp = 0, ndyn_or_scalar = 0;
+  int effect_before = 0;                /* an earlier part has an effect */
+  int sequenced = own_stmt ? 1 : -1;    /* interp_sequenced(c, id), asked once */
   Buf lits; memset(&lits, 0, sizeof lits);
   Buf decls; memset(&decls, 0, sizeof decls);
   long fixed_cap = 0;
@@ -187,6 +323,11 @@ static void interp_plan(Compiler *c, int id, InterpPlan *pl) {
         buf_printf(&decls, " _t%d = ", tv); emit_local_ref(c, expr, vn, &decls); buf_puts(&decls, "; ");
         snprintf(vexpr, sizeof vexpr, "_t%d", tv);
       }
+      /* What this part's value hoists is caught here, to go in the part's
+         place when an earlier part's effect is one its operands can see. */
+      Buf ppre; memset(&ppre, 0, sizeof ppre);
+      Buf *sv_pre = g_pre;
+      if (effect_before && interp_part_observes(c, expr, parts, k)) g_pre = &ppre;
       /* Build this part's conversion expression. Bounded scalars keep their
          native C type (written digit-by-digit later); everything else
          converts to a marker-carrying string whose byte length is summed. */
@@ -370,11 +511,19 @@ static void interp_plan(Compiler *c, int id, InterpPlan *pl) {
         EMIT_IV(); buf_puts(&conv, ")");
       }
       else {
+        g_pre = sv_pre; free(ppre.p);
         free(conv.p); free(lits.p); free(decls.p); free(wp); free(flat);
         unsupported(c, pid, "interpolation value");
       }
       iv_done:
       free(iv_pre);
+      g_pre = sv_pre;
+      if (ppre.len) {
+        if (sequenced < 0) sequenced = interp_sequenced(c, id);
+        buf_puts(sequenced ? &decls : g_pre, ppre.p);
+      }
+      free(ppre.p);
+      if (subtree_has_side_effect(c, pid)) effect_before = 1;
       #undef EMIT_IV
       /* Pre-evaluate into an ordered temp. A dynamic part's string is rooted
          (its bytes are copied after later parts may allocate, and the final
@@ -426,7 +575,7 @@ static void interp_plan(Compiler *c, int id, InterpPlan *pl) {
 
 void emit_interp(Compiler *c, int id, Buf *b) {
   InterpPlan pl; memset(&pl, 0, sizeof pl);
-  interp_plan(c, id, &pl);
+  interp_plan(c, id, &pl, 0);
   WPart *wp = pl.wp; int nwp = pl.nwp, ndyn_or_scalar = pl.ndyn_or_scalar;
   Buf lits = pl.lits, decls = pl.decls; long fixed_cap = pl.fixed_cap; int *flat = pl.flat;
 
@@ -528,7 +677,7 @@ void emit_interp(Compiler *c, int id, Buf *b) {
    dynamic part (a literal fold, left to the plain path). */
 int emit_interp_append(Compiler *c, int id, const char *open, const char *open_n, Buf *b, int indent) {
   InterpPlan pl; memset(&pl, 0, sizeof pl);
-  interp_plan(c, id, &pl);
+  interp_plan(c, id, &pl, 1);
   if (pl.ndyn_or_scalar == 0) { interp_plan_free(&pl); return 0; }
   emit_indent(b, indent);
   buf_printf(b, "{ %s\n", pl.decls.p ? pl.decls.p : "");
