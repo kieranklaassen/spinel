@@ -1,0 +1,24 @@
+"abc"
+"a,b,c"
+["ab!", "abx?"]
+["abcx?", "abc!"]
+["ab!", "ab!", "abx"]
+["ab", "abx?"]
+"ab"
+["ab", "abxy"]
+["aby", "aby"]
+["ab", "ab0120,1,2,"]
+["ab?", "ab!!"]
+["ab!", "abababab"]
+["abz", "abzq"]
+["ab", "abx"]
+["abc", "abcabc/abc--x"]
+[true, false, "abxy"]
+"NoMethodError"
+["abc", "abcx"]
+"TypeError"
+["abc", "abcx"]
+"TypeError"
+["abc", "abcw"]
+"TypeError"
+"TypeError"
