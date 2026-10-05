@@ -27,7 +27,7 @@ Measured with both compilers built on d38099fb5, over the 6,012 programs in `tes
 
 `test/instance_exec_fresh_receiver_root.rb` reads a receiver made in place through nine forms of the call and counts the wrong answers of 20,000 more, and joins `GC_STRESS_TESTS`. On master (d38099fb5) it ends in SIGSEGV at level 2 and prints 3 for the count at level 1; with this change it prints Ruby's output at every level with gcc and clang. Of the 260 tests in `test/*.rb` that failed level 2 on de1e627cc, the two named above passed with this change and none of the others changed its result, and the 85 other tests that call `instance_exec` or `instance_eval` passed as before, plain and at level 2; on d38099fb5 the two still fail on master and pass with this change.
 
-Not covered, and the same on master: a receiver read from a local or an instance variable that the block itself empties. The temporary is then the object's only holder and is not rooted, so `l.instance_exec { l = nil; [@e, make] }` still fails level 2.
+Not covered, and the same on master: a receiver read from a local or an instance variable that the block itself empties. The temporary is then the object's only holder and is not rooted, so `y.instance_exec { y = nil; a = ["h" + "4", "i" + "5"]; [@e, a, @e] }` still ends in SIGSEGV at level 2.
 
 ## `make gate` (on this branch merged with current master)
 
