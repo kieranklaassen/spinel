@@ -21,58 +21,57 @@ o = mk(false)
 n = 0
 o&.m(n += 1)
 p n
-p o&.m(lg(1)), $log
-p o&.m2(lg(1), lg(2)), $log
-p o&.kw(lg(1), k: lg(2)), $log
-p o&.m((n = 7)), n
+r1 = o&.m(lg(1)); p r1, $log
+r2 = o&.m2(lg(1), lg(2)); p r2, $log
+r3 = o&.kw(lg(1), k: lg(2)); p r3, $log
+r4 = o&.m((n = 7)); p r4, n
 x = o&.m(lg(3)); p x, $log
-p [lg(0), o&.m(lg(1)), lg(2)], $log; $log.clear
-p "#{o&.m(lg(1))}", $log
-p o&.m(lg(1))&.m(lg(2)), $log
+r5 = "#{o&.m(lg(1))}"; p r5, $log
+r6 = o&.m(lg(1))&.m(lg(2)); p r6, $log
 
 # the same receiver, not nil: every argument once, in order
 o = mk(true)
-p o&.m(lg(1)), $log; $log.clear
-p o&.m2(lg(1), lg(2)), $log; $log.clear
-p o&.kw(lg(1), k: lg(2)), $log; $log.clear
-p o&.m(lg(1))&.succ, $log; $log.clear
+r7 = o&.m(lg(1)); p r7, $log; $log.clear
+r8 = o&.m2(lg(1), lg(2)); p r8, $log; $log.clear
+r9 = o&.kw(lg(1), k: lg(2)); p r9, $log; $log.clear
+r10 = o&.m(lg(1))&.succ; p r10, $log; $log.clear
 n = 0; o&.m(n += 1); p n
 
 # builtins, receiver nil
 s = str(false)
-p s&.rjust(lg(5)), $log
-p s&.rjust(lg(5), lg("b")), $log
-p s&.center(lg(5), lg("b")), $log
-p s&.sub(lg("a"), lg("b")), $log
-p s&.tr(lg("a"), lg("b")), $log
-p s&.+(lg("b")), $log
-p s&.[](lg(0), lg(1)), $log
+r11 = s&.rjust(lg(5)); p r11, $log
+r12 = s&.rjust(lg(5), lg("b")); p r12, $log
+r13 = s&.center(lg(5), lg("b")); p r13, $log
+r14 = s&.sub(lg("a"), lg("b")); p r14, $log
+r15 = s&.tr(lg("a"), lg("b")); p r15, $log
+r16 = s&.+(lg("b")); p r16, $log
+r17 = s&.[](lg(0), lg(1)); p r17, $log
 a = ary(false)
-p a&.fetch(lg(0), lg(9)), $log
-p a&.push(lg(0), lg(1)), $log
-p a&.first(lg(1)), $log
-p a&.map { |e| lg(e) }, $log
+r18 = a&.fetch(lg(0), lg(9)); p r18, $log
+r19 = a&.push(lg(0), lg(1)); p r19, $log
+r20 = a&.first(lg(1)); p r20, $log
+r21 = a&.map { |e| lg(e) }; p r21, $log
 h = hsh(false)
-p h&.fetch(lg(:a), lg(0)), $log
-p h&.store(lg(:b), lg(2)), $log
+r22 = h&.fetch(lg(:a), lg(0)); p r22, $log
+r23 = h&.store(lg(:b), lg(2)); p r23, $log
 i = int(false)
-p i&.+(lg(1)), $log
+r24 = i&.+(lg(1)); p r24, $log
 f = flt(false)
-p f&.round(lg(1)), $log
+r25 = f&.round(lg(1)); p r25, $log
 
 # builtins, receiver not nil
 s = str(true)
-p s&.rjust(lg(5), lg("b")), $log; $log.clear
-p s&.sub(lg("a"), lg("b")), $log; $log.clear
+r26 = s&.rjust(lg(5), lg("b")); p r26, $log; $log.clear
+r27 = s&.sub(lg("a"), lg("b")); p r27, $log; $log.clear
 a = ary(true)
-p a&.fetch(lg(0), lg(9)), $log; $log.clear
-p a&.push(lg(0), lg(1)), $log; $log.clear
+r28 = a&.fetch(lg(0), lg(9)); p r28, $log; $log.clear
+r29 = a&.push(lg(0), lg(1)); p r29, $log; $log.clear
 h = hsh(true)
-p h&.fetch(lg(:a), lg(0)), $log; $log.clear
+r30 = h&.fetch(lg(:a), lg(0)); p r30, $log; $log.clear
 i = int(true)
 f = flt(true)
-p f&.clamp(lg(1.0), lg(2.0)), $log; $log.clear
+r31 = f&.clamp(lg(1.0), lg(2.0)); p r31, $log; $log.clear
 
 # a value of several classes
 v = [nil, "ab", 3][ARGV.size]
-p v&.to_s&.rjust(lg(5), lg("b")), $log
+r32 = v&.to_s&.rjust(lg(5), lg("b")); p r32, $log

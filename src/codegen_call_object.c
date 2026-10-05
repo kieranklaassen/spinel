@@ -1289,6 +1289,107 @@ static int sn_typed_nil_recv(Compiler *c, TyKind rrt) {
   return needs_root(rrt) && rrt != TY_POLY && !ty_is_object(rrt);
 }
 
+/* Does operand `n`, beside the `&.` call `id`, hold nothing a collection
+   could free and read nothing `id` could change? A literal and self do. So
+   does a variable `id` cannot give another value (read_rebound_by): the
+   variable keeps what it names. A constant that names no object, and
+   arithmetic over these (call_is_scalar_op). An index read or a field read
+   does not: only its container keeps what it answers. */
+static int sn_operand_is_read(Compiler *c, int n, int id) {
+  const NodeTable *nt = c->nt;
+  if (n < 0) return 1;
+  switch (nt_kind(nt, n)) {
+    case NK_SelfNode: case NK_NilNode: case NK_TrueNode: case NK_FalseNode:
+    case NK_IntegerNode: case NK_FloatNode: case NK_SymbolNode:
+      return 1;
+    case NK_StringNode:
+      return !subtree_allocates(nt, n);
+    case NK_LocalVariableReadNode: case NK_InstanceVariableReadNode:
+    case NK_ClassVariableReadNode:
+      return !read_rebound_by(c, n, id);
+    case NK_GlobalVariableReadNode:
+      return !subtree_allocates(nt, n) && !read_rebound_by(c, n, id);
+    case NK_ConstantReadNode: case NK_ConstantPathNode:
+      return !subtree_allocates(nt, n) && !ty_gc_holds_refs(c, comp_ntype(c, n));
+    case NK_CallNode:
+      if (!call_is_scalar_op(c, n)) return 0;
+      break;
+    default: {
+      const char *ty = nt_type(nt, n);
+      if (!ty || !sp_streq(ty, "ArgumentsNode")) return 0;
+    }
+  }
+  int nr = nt_num_refs(nt, n);
+  for (int i = 0; i < nr; i++)
+    if (!sn_operand_is_read(c, nt_ref_at(nt, n, i), id)) return 0;
+  int na = nt_num_arrs(nt, n);
+  for (int i = 0; i < na; i++) {
+    int cnt = 0;
+    const int *ids = nt_arr_at(nt, n, i, &cnt);
+    for (int j = 0; j < cnt; j++) if (!sn_operand_is_read(c, ids[j], id)) return 0;
+  }
+  return 1;
+}
+
+/* A `&.` receiver rendered for its guard temp, which is a statement of its
+   own in the prelude: g_prelude_stmt is the receiver meanwhile. */
+static Buf sn_recv_buf(Compiler *c, int recv) {
+  int sv = g_prelude_stmt;
+  g_prelude_stmt = recv;
+  Buf rb = expr_buf(c, recv);
+  g_prelude_stmt = sv;
+  return rb;
+}
+
+/* Whether the statement can hold nothing it made itself when it reaches the
+   `&.` call `id`: on the way down from `n` every other operand of every call
+   and interpolation around `id` is a read (sn_operand_is_read). Any other
+   place answers no: a kind not named here, or an operand that is a call,
+   makes an object, or reads what `id` can change. There a value may sit in
+   a temp nothing roots (`a.pop.w = o&.m([K.new])`,
+   `f(r).fill(o&.m([K.new]))`, `x.w = o&.m((x = K.new; [K.new]))`), covered
+   only by the call's arguments being made ahead of the statement. */
+static int sn_nothing_held(Compiler *c, int n, int id) {
+  const NodeTable *nt = c->nt;
+  if (n < 0) return 0;
+  if (n == id) return 1;
+  int operands = 1;
+  switch (nt_kind(nt, n)) {
+    case NK_ParenthesesNode: case NK_StatementsNode:
+    case NK_IfNode: case NK_UnlessNode: case NK_ElseNode:
+    case NK_AndNode: case NK_OrNode: case NK_ReturnNode:
+    case NK_LocalVariableWriteNode: case NK_InstanceVariableWriteNode:
+    case NK_ClassVariableWriteNode: case NK_GlobalVariableWriteNode:
+    case NK_ConstantWriteNode:
+      operands = 0;
+      break;
+    case NK_CallNode: case NK_InterpolatedStringNode: case NK_EmbeddedStatementsNode:
+      break;
+    default: {
+      const char *ty = nt_type(nt, n);
+      if (!ty || !sp_streq(ty, "ArgumentsNode")) return 0;
+    }
+  }
+  int down = -1;
+  int nr = nt_num_refs(nt, n);
+  for (int i = 0; i < nr; i++) {
+    int k = nt_ref_at(nt, n, i);
+    if (k < 0) continue;
+    if (subtree_holds(nt, k, id)) down = k;
+    else if (operands && !sn_operand_is_read(c, k, id)) return 0;
+  }
+  int na = nt_num_arrs(nt, n);
+  for (int i = 0; i < na; i++) {
+    int cnt = 0;
+    const int *ids = nt_arr_at(nt, n, i, &cnt);
+    for (int j = 0; j < cnt; j++) {
+      if (subtree_holds(nt, ids[j], id)) down = ids[j];
+      else if (operands && !sn_operand_is_read(c, ids[j], id)) return 0;
+    }
+  }
+  return down >= 0 && sn_nothing_held(c, down, id);
+}
+
 /* See codegen_internal.h. */
 int sn_guard_ahead(Compiler *c, int id) {
   const NodeTable *nt = c->nt;
@@ -1296,6 +1397,7 @@ int sn_guard_ahead(Compiler *c, int id) {
   const char *op = nt_str(nt, id, "call_operator");
   int recv = nt_ref(nt, id, "receiver");
   if (recv < 0 || !op || !sp_streq(op, "&.")) return 0;
+  if (!sn_nothing_held(c, g_prelude_stmt, id)) return 0;
   TyKind rrt = comp_ntype(c, recv);
   return rrt == TY_NIL || rrt == TY_POLY || sn_typed_nil_recv(c, rrt);
 }
@@ -1374,7 +1476,7 @@ int emit_call_safe_nav_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
            result, emit the natural form and default the nil arm to match. */
         int tsn = ++g_tmp;
         TyKind ret2 = comp_ntype(c, id);
-        Buf rsn = expr_buf(c, recv);
+        Buf rsn = sn_recv_buf(c, recv);
         emit_indent(g_pre, g_indent);
         buf_printf(g_pre, "sp_RbVal _sn%d = %s; SP_GC_ROOT_RBVAL(_sn%d);\n",
                    tsn, rsn.p ? rsn.p : "sp_box_nil()", tsn);
@@ -1494,7 +1596,7 @@ int emit_call_safe_nav_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
            the re-entered dispatch hoists its (substituted) receiver into
            g_pre too, which lands before the statement and must still see
            the temp. Rooted: the guarded call's args may allocate. */
-        Buf rsn = expr_buf(c, recv);
+        Buf rsn = sn_recv_buf(c, recv);
         emit_indent(g_pre, g_indent);
         if (sn_obj)
           buf_printf(g_pre, "sp_%s *_sn%d = %s; SP_GC_ROOT(_sn%d);\n",
@@ -1537,7 +1639,8 @@ int emit_call_safe_nav_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
              argument ran although the receiver was nil (`o&.m(n += 1)`
              counted, `o&.m(lg(1))` logged). */
           Buf vpre; memset(&vpre, 0, sizeof vpre);
-          Buf *sv_pre = g_pre; g_pre = &vpre;
+          Buf *sv_pre = g_pre;
+          if (sn_nothing_held(c, g_prelude_stmt, id)) g_pre = &vpre;
           emit_expr(c, id, &vb);
           g_pre = sv_pre;
           if (vw >= 0) view_pop(c, vw);

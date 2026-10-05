@@ -19580,7 +19580,7 @@ static void refuse_nonlocal_param_args(Compiler *c, int id, const char *name) {
 }
 
 /* Does `root`'s subtree hold node `target`? A def is its own scope. */
-static int subtree_holds(const NodeTable *nt, int root, int target) {
+int subtree_holds(const NodeTable *nt, int root, int target) {
   if (root < 0) return 0;
   if (root == target) return 1;
   if (nt_kind(nt, root) == NK_DefNode) return 0;

@@ -8546,13 +8546,16 @@ void emit_with_prelude(Compiler *c, int id, Buf *b, int indent,
                               void (*inner)(Compiler *, int, Buf *, int)) {
   Buf *savePre = g_pre;
   int saveIndent = g_indent;
+  int saveStmt = g_prelude_stmt;
   Buf pre;  memset(&pre, 0, sizeof pre);
   Buf line; memset(&line, 0, sizeof line);
   g_pre = &pre;
   g_indent = indent;
+  g_prelude_stmt = id;
   inner(c, id, &line, indent);
   g_pre = savePre;
   g_indent = saveIndent;
+  g_prelude_stmt = saveStmt;
   if (pre.p)  buf_puts(b, pre.p);
   if (line.p) buf_puts(b, line.p);
   free(pre.p);
