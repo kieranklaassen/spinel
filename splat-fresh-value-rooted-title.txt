@@ -1,0 +1,1 @@
+A splatted value is rooted while its one-element array is allocated

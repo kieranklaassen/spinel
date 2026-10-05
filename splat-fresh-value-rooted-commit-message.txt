@@ -1,0 +1,32 @@
+A splatted value is rooted while its one-element array is allocated
+
+sp_splat_to_array wraps a value that is no Array, Hash, Range or
+Enumerator in a one-element array. It allocated the array first and
+pushed the value after, with only the array rooted. A value nothing
+else holds yet, the fresh answer of a call, could be collected by that
+allocation, and the array kept a freed slot:
+
+    def str(n) = "s" + n.to_s
+    a = [0, "s"]
+    a.push(*str(2))
+    p a
+
+Under SPINEL_GC_STRESS=2 this aborted with "the mark reached a freed
+slot". So did append, unshift, prepend and insert with such a splat,
+`break *str(e)` and `next *str(e)`, for a String and an object alike.
+p, puts and print with one reach the same line: `puts(*Foo.new(2))`
+printed the freed object's bytes there. A plain run printed the right
+answer in each case.
+
+The value is now rooted in that arm before the array is allocated, as
+sp_enum_items_from roots its own. The arms for nil, an Array, a Hash, a
+Range and an Enumerator return before it and cost nothing more: 200,000
+splats of an Array ran 75,584,559 instructions before and 75,583,684
+after (callgrind); of a String 85,663,870 before and 87,871,455 after,
+11 more a splat. No generated C changes.
+
+Test: test/splat_fresh_value_rooted.rb, added to GC_STRESS_TESTS. It
+prints its .expected in a plain run with and without the root; without
+it `make gc-stress-test` fails on the test.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
