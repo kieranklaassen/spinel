@@ -1,0 +1,16 @@
+[["x", "a", "ybzab"], ["xaybz", "a", "b"]]
+[["xaybzab", "", ""], ["", "", "xaybzab"]]
+[["xay", "bz", "ab"], ["xay", "bz", "ab"]]
+[["", "", ""], ["", "", ""]]
+["xa", "y", "bzab"]
+["no", "", ""]
+["xay", "bz", "ab"]
+["xay", "bz", "ab"]
+["x", "a", "ybzab"]
+["xaybz", "a", "b"]
+["", "xa", "ybzab"]
+["x", "ay", "bzab"]
+"bz"
+"xay"
+TypeError: wrong argument type nil (expected Regexp)
+TypeError: wrong argument type nil (expected Regexp)

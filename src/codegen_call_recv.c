@@ -6498,6 +6498,24 @@ static int str_arms_case_search(Compiler *c, Buf *b, const NodeTable *nt, const 
     buf_printf(b, "sp_str_byterindex_from(%s, ", r); emit_str_expr(c, argv[0], b);
     buf_puts(b, ", "); emit_int_expr(c, argv[1], b); buf_puts(b, ")");
   }
+  /* [before, match, after] around a Regexp held in a variable, which was
+     converted to a String */
+  else if ((is_partition_family(name)) && argc == 1 && re_lit_index(c, argv[0]) < 0 &&
+           comp_ntype(c, argv[0]) == TY_REGEX) {
+    int ts = ++g_tmp, tr = ++g_tmp;
+    char pat[32];
+    buf_printf(b, "({ const char *_t%d = %s; SP_GC_ROOT_STR(_t%d);", ts, r, ts);
+    emit_re_arg_pat(c, argv[0], "wrong argument type nil (expected Regexp)", b, pat);
+    if (name[0] == 'r') buf_printf(b, " sp_re_rpartition(%s, _t%d); })", pat, ts);
+    else
+      buf_printf(b, " sp_StrArray *_t%d = sp_StrArray_new();"
+                    " if (sp_re_match(%s, _t%d) >= 0) {"
+                    " sp_StrArray_push(_t%d, sp_re_pre_match()); sp_StrArray_push(_t%d, sp_re_match_str);"
+                    " sp_StrArray_push(_t%d, sp_re_post_match()); }\nelse {"
+                    " sp_StrArray_push(_t%d, _t%d); sp_StrArray_push(_t%d, SPL(\"\")); sp_StrArray_push(_t%d, SPL(\"\")); }"
+                    " _t%d; })",
+                 tr, pat, ts, tr, tr, tr, tr, ts, tr, tr, tr);
+  }
   else if ((is_partition_family(name)) && argc == 1 &&
            re_lit_index(c, argv[0]) < 0) {
     buf_printf(b, "sp_str_%s(%s, ", name, r); emit_str_expr(c, argv[0], b); buf_puts(b, ")");
