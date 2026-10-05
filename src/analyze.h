@@ -12,12 +12,22 @@
 
 #define SP_RUBY_VERSION "4.0.7"
 
+/* Whether a boxed ivar setter's receiver can hold class k; an unproved
+   receiver conservatively reaches every class. Shared by layout/emission. */
+int poly_ivar_set_reaches(Compiler *c, int call, int k);
+
 /* Set by main.c from --int-overflow=promote. In promote mode the analyzer is
    free to widen accumulating int locals to bigint more aggressively (e.g. block
    iteration loops, not just `while`), since the overflow-raising int macros are
    exactly what promote mode is asking us to avoid. Off (0) for raise/wrap, so
    the default gates and optcarrot (which pins wrap) see no behavior change. */
 extern int g_promote_mode;
+
+/* Set by main.c from --plan-check (#7100): inference records, per call node,
+   the builtin-op row it answered the call with (c->bop_inf), and codegen
+   reports on stderr every call it emitted through a row inference did not
+   choose. Off in every normal build. */
+extern int g_plan_check;
 
 /* One post-convergence bind pass fills UNKNOWN params from empty
    array-literal args (fst([]) with def fst(a) = a.first). */
@@ -37,6 +47,8 @@ void analyze_program(Compiler *c);
    nested arrays for capturing patterns, which the str_array path can't model. */
 int an_re_has_captures(const char *src);
 int an_send_name_is_computed(Compiler *c, int arg);
+/* Is scope si an iterator synth_struct_each generated, not a def? */
+int scope_is_struct_synth(Compiler *c, int si);
 int an_str_mutator_name(const char *nm);
 /* A String handed to a proc, a lambda or a Method (#6179): what the targets
    a `.call` / `.()` / `[]` / `.yield` / `===` on a Proc or Method value can
@@ -99,6 +111,11 @@ int strbuf_ivar_alias_value(const NodeTable *nt, int v);
 /* Infer (and cache) the type of node `id`. Used during analysis; codegen
    reads the cached results via comp_ntype. */
 TyKind infer_type(Compiler *c, int id);
+
+/* String#lines' argument shapes besides none: (sep), (chomp: ...) and
+   (sep, chomp: ...), sep a String -- what a boxed receiver takes the
+   typed String path for. */
+int poly_lines_args(Compiler *c, int argc, const int *argv);
 
 /* `recv` is a blockless call making an Enumerator that yields two values per
    element: each_with_index, with_index, each_with_object, with_object. */
@@ -180,9 +197,15 @@ TyKind infer_uncached(Compiler *c, int id);
 /* Pin/read the receiver node the inference should answer as `kind` while
    codegen re-enters a typed emitter for a boxed receiver (the face table in
    types.h). Node -1 clears the pin. */
-void an_set_face_node(int node, TyKind kind);
-int  an_face_node(void);
-TyKind an_face_kind(void);
+/* The face kind node is pinned to (the face table, types.h): the innermost
+   pin, codegen's on the view stack (view_push_face) or inference's own
+   (an_face_push / an_face_pop), answers for its node; TY_UNKNOWN for any
+   other node, or when none is pinned. face_active() says whether one is. */
+TyKind face_of(int node);
+int face_active(void);
+void an_face_push(int node, TyKind kind);
+void an_face_pop(void);
+int view_face_top(int *node, TyKind *kind);   /* codegen_view.c */
 /* Name of a block's idx-th required parameter, or NULL. */
 const char *block_param_name(Compiler *c, int block, int idx);
 /* The name of a numbered block parameter (`_1`..`_9`) on this parameters node.
@@ -233,6 +256,7 @@ int an_user_recv_defines_method(Compiler *c, const char *name);
 /* obj.methods / public_methods / singleton_methods on an instance of `cid`
    fold to a static symbol list */
 int an_object_methods_listable(Compiler *c, int cid, const char *name);
+int an_object_methods_all_arg(Compiler *c, int cid, int argc, const int *argv);
 int an_class_singleton_methods_listable(Compiler *c, int cid);
 int ewo_memo_passed_to_callable_at(Compiler *c, int callid, int pidx);
 
@@ -247,6 +271,7 @@ void ie_body_restore(Compiler *c, int *snap);
    -1), and the value node bound to a keyword name within it (or -1). */
 int ie_call_kwhash(Compiler *c, int id);
 size_t block_param_written_len(const char *name);
+size_t reassigned_param_written_len(const char *name);
 int block_param_is_renamed(const char *name);
 void block_param_invent_name(Compiler *c, char *buf, size_t n,
                              const char *written, int blk);
@@ -370,4 +395,6 @@ int gather_reaches(Compiler *c, Scope *m, const int *argv, int pos_argc, int gat
    parameter, no `**kwrest`, no `**nil`) and `s` declares one: CRuby
    passes them as keywords, which such a method takes positionally. */
 int zsuper_kw_positional(Compiler *c, Scope *s, Scope *pm);
+int an_thread_arg_block(Compiler *c, int n);
+int cap_wrap_mutates_param(Compiler *c, int blk, const char *bp);
 #endif
