@@ -156,8 +156,10 @@ static inline const char *sp_str_or_empty(const char *s) { return s ? s : sp_str
 #define SP_STR_LCACHE_SIZE ((1u << SP_STR_LCACHE_BITS) * SP_STR_LCACHE_WAYS)
 struct sp_str_lcache_entry {
   const char *s;
-  size_t byte_len;
-  sp_int char_len;
+  size_t byte_len;   /* the bytes that were counted */
+  sp_int char_len;   /* the characters in them; ~count, so below zero, once
+                        appends have added bytes nobody has counted yet */
+  size_t now_len;    /* byte_len plus those bytes: the string's length now */
 };
 /* Per-worker (SP_TLS) in the threaded build: this string-length cache is keyed
    by string pointer and written without the heap lock (sp_str_byte_len is on the
@@ -206,6 +208,40 @@ static inline void sp_str_lcache_drop(const char *s) {
   unsigned h = sp_str_lcache_slot(s);
   for (unsigned w = 0; w < SP_STR_LCACHE_WAYS; w++)
     if (sp_str_lcache[h + w].s == s) sp_str_lcache[h + w].s = NULL;
+}
+/* `s`, a string with a header, has just grown in place: `lb` bytes now follow
+   the `la` it held, and those `la` are as they were. An append is how a buffer
+   is built, and forgetting its length here made the next #size count every
+   byte again: `buf << x; buf.size` in a loop was quadratic. So what is known
+   stays, where the append can show it still holds:
+   - the 7-bit hint, while every new byte is below 0x80;
+   - a counted entry, whose now_len follows the string and whose count is
+     marked as short of it. Nothing is counted here: the next reader counts
+     the bytes past byte_len (sp_str_length_grown, lib/sp_str.c).
+   An entry whose now_len is not the length this append started from was
+   taken before some other change of length, and goes as every entry used to. */
+static inline void sp_str_lcache_grown(const char *s, size_t la, size_t lb) {
+  sp_str_hdr *hd = ((sp_str_hdr *)(s - 1)) - 1;
+  if (hd->size & SP_STR_SIZE_ASCII7) {
+    const unsigned char *p = (const unsigned char *)s + la, *end = p + lb;
+    unsigned char any = 0;
+    while (p + 8 <= end) {
+      uint64_t w;
+      memcpy(&w, p, sizeof(w));
+      if (w & 0x8080808080808080ULL) { any = 0x80; break; }
+      p += 8;
+    }
+    if (!any) while (p < end) any |= *p++;
+    if (any & 0x80) hd->size &= ~SP_STR_SIZE_ASCII7;
+  }
+  unsigned h = sp_str_lcache_slot(s);
+  for (unsigned w = 0; w < SP_STR_LCACHE_WAYS; w++) {
+    struct sp_str_lcache_entry *e = &sp_str_lcache[h + w];
+    if (e->s != s) continue;
+    if (e->now_len != la) { e->s = NULL; continue; }
+    e->now_len = la + lb;
+    if (e->char_len >= 0) e->char_len = ~e->char_len;
+  }
 }
 /* Deep-return side channel (#3227): a method whose every return path yields
    a shared-mutable string publishes the sp_String* handle here as the copy
