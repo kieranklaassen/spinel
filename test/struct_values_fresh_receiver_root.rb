@@ -36,3 +36,12 @@ p Pt.new("a" + "1", "b" + "2").deconstruct_keys(nil).to_a
 p Dt.new(a: "a" + "1", b: "b" + "2").deconstruct
 p Dt.new(a: "a" + "1", b: "b" + "2").deconstruct_keys([:a]).to_a
 p Dt.new(a: "a" + "1", b: "b" + "2").with(a: "c" + "3").deconstruct
+
+# a run-time key may drop the variable the receiver was read from, and a
+# later key allocates: the temporary is then the Struct's only holder
+def spare(n) = ["s#{n}", "t#{n}"].size - 2 + n
+def dropped
+  l = make(4)
+  l.values_at((l = nil; spare(0)), spare(1), spare(0))
+end
+p dropped

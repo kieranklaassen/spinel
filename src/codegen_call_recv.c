@@ -8101,6 +8101,13 @@ static void emit_identity_equal(Compiler *c, int recv, int arg, TyKind rt, TyKin
   }
   else { buf_puts(b, "(("); emit_expr(c, arg, b); buf_puts(b, "), 0)"); }
 }
+/* The root of a Struct receiver's temp `_tN`, for an arm that runs no Ruby
+   code between the receiver and its last member read. A receiver made in
+   place is held by nothing but the temp; a read of a local, an ivar, self
+   or a constant is held where it is and cannot be dropped meanwhile. */
+static void emit_struct_recv_root(Compiler *c, int recv, int t, Buf *b) {
+  if (!expr_is_held_ref(c, recv)) buf_printf(b, " SP_GC_ROOT(_t%d);", t);
+}
 /* A Struct instance receiver (emit_object_call's arms, in their order) */
 static int emit_struct_recv_call(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, TyKind rt, TyKind res, int *out) {
   /* Struct instance methods (to_h / to_a / values / members / dig). */
@@ -8127,8 +8134,9 @@ static int emit_struct_recv_call(Compiler *c, int id, Buf *b, const NodeTable *n
   if (is_to_a && argc == 0) {
     int t = ++g_tmp; int rt2 = ++g_tmp;
     Buf rb = expr_buf(c, recv);
-    buf_printf(b, "({ sp_%s *_t%d = %s; SP_GC_ROOT(_t%d); sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);",
-               sc->name, t, rb.p ? rb.p : "", t, rt2, rt2);
+    buf_printf(b, "({ sp_%s *_t%d = %s;", sc->name, t, rb.p ? rb.p : "");
+    emit_struct_recv_root(c, recv, t, b);
+    buf_printf(b, " sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);", rt2, rt2);
     for (int i = 0; i < sc->nmembers; i++) {
       buf_printf(b, " sp_PolyArray_push(_t%d, ", rt2);
       Buf fb; memset(&fb, 0, sizeof fb); buf_printf(&fb, "_t%d->iv_%s", t, iv_c(sc->ivars[i] + 1));
@@ -8218,8 +8226,9 @@ static int emit_struct_recv_call(Compiler *c, int id, Buf *b, const NodeTable *n
        leave the abandoned prefix in it */
     Buf lit4; memset(&lit4, 0, sizeof lit4);
     Buf *b4 = &lit4;
-    buf_printf(b4, "({ sp_%s *_t%d = %s; SP_GC_ROOT(_t%d); sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);",
-               sc->c_name, tv4, rb4.p ? rb4.p : "", tv4, to4, to4);
+    buf_printf(b4, "({ sp_%s *_t%d = %s;", sc->c_name, tv4, rb4.p ? rb4.p : "");
+    emit_struct_recv_root(c, recv, tv4, b4);
+    buf_printf(b4, " sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);", to4, to4);
     int ok4 = 1;
     for (int a4 = 0; a4 < argc && ok4; a4++) {
       const char *aty4 = nt_type(nt, argv[a4]);
@@ -8332,8 +8341,9 @@ static int emit_struct_recv_call(Compiler *c, int id, Buf *b, const NodeTable *n
     if (ok) {
       int t = ++g_tmp, rh = ++g_tmp;
       Buf rb = expr_buf(c, recv);
-      buf_printf(b, "({ sp_%s *_t%d = %s; SP_GC_ROOT(_t%d); sp_SymPolyHash *_t%d = sp_SymPolyHash_new(); SP_GC_ROOT(_t%d);",
-                 sc->c_name, t, rb.p ? rb.p : "", t, rh, rh);
+      buf_printf(b, "({ sp_%s *_t%d = %s;", sc->c_name, t, rb.p ? rb.p : "");
+      emit_struct_recv_root(c, recv, t, b);
+      buf_printf(b, " sp_SymPolyHash *_t%d = sp_SymPolyHash_new(); SP_GC_ROOT(_t%d);", rh, rh);
       free(rb.p);
       for (int e = 0; e < nkey; e++) {
         int i = keyed[e];
