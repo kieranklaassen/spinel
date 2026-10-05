@@ -2243,6 +2243,7 @@ GC_MINOR_TESTS := test/reopened_builtin_kwrest_keys.rb \
                   test/string_handle_yield_paths.rb \
                   test/string_handle_keyword_dyn_sites.rb \
                   test/gc_minor_never_young_store.rb \
+                  test/gc_minor_nested_store.rb \
                   test/builtin_value_ivar_reflection.rb \
                   test/builtin_ivar_gc.rb \
                   test/builtin_ivar_frozen_copy.rb \
