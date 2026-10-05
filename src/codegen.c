@@ -10617,6 +10617,29 @@ int emit_super_inline(Compiler *c, int id, Buf *b, int indent, int as_expr) {
     g_yield_proc_ref = fwd_yield_proc;
     g_yield_slot_ty = as_expr ? comp_ntype(c, id) : TY_UNKNOWN;
   }
+  /* A block written at the super is the parent's block. The proc this
+     method was called with (`go(&pr)`, spliced into its caller) is the
+     method's own: it moves one level out with the name of the method's
+     `&b`, where the written block's body finds both, as at an inlined
+     call (a parent that hands the block on keeps it there, see
+     fwd_parked). Left in place, the parent's yields called the proc and
+     the written block never ran. Two blocks stay as they were. One that
+     holds a `return`: it leaves the caller of a spliced method, as it
+     does under a literal block. One that yields or reads `b` where a
+     Method object is behind the `&`: the Method is typed from the calls
+     inference sees, and a call in the written block is not among them. */
+  const char *saved_yprf = g_yield_proc_ref_fallback;
+  TyKind saved_yslotf = g_yield_slot_ty_fallback;
+  const char *saved_bown = g_block_owner_param_name;
+  int ypr_method = g_yield_proc_expr >= 0 && g_yield_proc_expr_ref == saved_ypr &&
+                   comp_ntype(c, g_yield_proc_expr) == TY_METHOD;
+  if (block >= 0 && block != saved_block && saved_ypr && !proc_body_has_return(c, block) &&
+      !(ypr_method && (proc_body_has_yield(c, block) || subtree_reads_local(c->nt, block, saved_bpn)))) {
+    g_yield_proc_ref_fallback = saved_ypr;
+    g_yield_slot_ty_fallback = saved_yslot;
+    g_block_owner_param_name = saved_bpn;
+    g_yield_proc_ref = NULL;
+  }
 
   if (as_expr) buf_puts(b, "({\n");
   else { emit_indent(b, indent); buf_puts(b, "{\n"); }
@@ -10730,6 +10753,8 @@ int emit_super_inline(Compiler *c, int id, Buf *b, int indent, int as_expr) {
   g_block_brk_exc_base = saved_bbexc; g_brk_exc_base = saved_bexc;
   g_brk_ser_var = saved_ser; g_brk_ensure_base = saved_ebase;
   g_yield_proc_ref = saved_ypr; g_yield_slot_ty = saved_yslot;
+  g_yield_proc_ref_fallback = saved_yprf; g_yield_slot_ty_fallback = saved_yslotf;
+  g_block_owner_param_name = saved_bown;
   g_current_scope_is_lowered = saved_low;
   free(fwd_pb.p);
   return 1;

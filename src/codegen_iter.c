@@ -1132,7 +1132,13 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
   TyKind saved_yslot_fb = g_yield_slot_ty_fallback;
   const char *saved_ypr_fb2 = g_yield_proc_ref_fallback2;
   TyKind saved_yslot_fb2 = g_yield_slot_ty_fallback2;
-  if (!fwd_kept) {
+  /* A block written at a super has no yield-target entry, so fwd_kept misses
+     it when the parent hands it on (`pair(&b)`). In a method called with a
+     proc and no block, that proc is parked for the block's body already and
+     this scope has none to park over it: it stays. */
+  int fwd_parked = block >= 0 && block == saved_block && saved_yfb < 0 && !g_yield_proc_ref &&
+                   g_yield_proc_ref_fallback;
+  if (!fwd_kept && !fwd_parked) {
     g_yield_proc_ref_fallback = g_yield_proc_ref;
     g_yield_slot_ty_fallback = g_yield_slot_ty;
   }
