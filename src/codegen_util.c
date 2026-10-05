@@ -2437,14 +2437,16 @@ int         g_sb_iv_cid  = -1;
 char        g_sb_iv_repl[64];
 /* The String methods that answer a String the call makes: never their
    receiver or an argument, and nil only where the receiver is nil (`@x.dup`
-   of a nil ivar, `@x&.upcase`), which the store boxes as nil. */
+   of a nil ivar, `@x&.upcase`), which the store boxes as nil. `clone` is not
+   one: a clone the program gives Kernel, Object or Comparable answers in its
+   place. */
 static int str_call_makes_string(const char *n) {
   static const char *const made[] = {
-    "+", "*", "%", "dup", "clone", "upcase", "downcase", "capitalize", "swapcase",
+    "+", "*", "%", "dup", "upcase", "downcase", "capitalize", "swapcase",
     "reverse", "strip", "lstrip", "rstrip", "chomp", "chop", "chr", "squeeze", "tr",
     "tr_s", "delete", "delete_prefix", "delete_suffix", "sub", "gsub", "center",
     "ljust", "rjust", "succ", "next", "inspect", "dump", "undump", "b", "scrub",
-    "encode", "unicode_normalize" };
+    "encode" };
   for (size_t i = 0; i < sizeof made / sizeof made[0]; i++)
     if (sp_streq(n, made[i])) return 1;
   return 0;
@@ -2473,7 +2475,8 @@ static int method_builds_string(Compiler *c, int mi, int depth) {
   return sp_streq(nm, "to_s") || sp_streq(nm, "inspect") || (rt == TY_INT && sp_streq(nm, "chr"));
 }
 /* How call `v` on an object of type `rt` comes by its String: 1 when the
-   method it names is seen to build it (method_builds_string), 0 when not.
+   method it names is seen to build it (method_builds_string), and each
+   subclass's method of the name with it, 0 when not.
    -1 when the name is a def and an attr reader both: the one written last
    answers, which is not followed here, unless the def is a subclass's over
    its parent's reader. */
@@ -2489,6 +2492,15 @@ static int obj_call_builds_string(Compiler *c, int v, TyKind rt) {
       below = k == rdc;
     }
   if (rdc >= 0 && !below) return -1;
+  /* the object may be a subclass's (`def me = self` answers a K that is an
+     L): a subclass's def or reader of the name answers in its place */
+  for (int k = 0; k < c->nclasses; k++) {
+    if (k == cid || !is_descendant(c, k, cid)) continue;
+    int rk = -1;
+    if (comp_reader_in_chain(c, k, nm, &rk) && rk != rdc) return 0;
+    int mk = comp_method_in_chain(c, k, nm, NULL);
+    if (mk != mi && (mk < 0 || !method_builds_string(c, mk, 0))) return 0;
+  }
   return method_builds_string(c, mi, 0);
 }
 /* Does demand-marked call `v` render as a handle itself? A reader call, a

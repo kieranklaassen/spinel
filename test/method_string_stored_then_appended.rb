@@ -122,3 +122,13 @@ p z
 h = { a: o.up, b: q.up }
 h[:b] << "z"
 p h.to_a
+
+# a subclass whose own method builds its String too
+class L < K
+  def plus = @x + "b"
+end
+def both = [K.new("p".dup), L.new("q".dup)]
+b = both
+z = [b[0].plus, b[1].plus]
+z.each { |e| e << "!" }
+p z, b[0].x, b[1].x
