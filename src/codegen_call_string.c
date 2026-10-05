@@ -471,6 +471,11 @@ no_gsub_enum:
             else { buf_printf(b, "sp_re_match_p(%s, ", rp.p); emit_str_expr_nilable(c, argv[0], b); buf_puts(b, ")"); }  /* nil subject: no match */
             free(rp.p); return 1;
           }
+          if (sp_streq(name, "match?") && argc == 2) {
+            buf_printf(b, "sp_re_match_p_at(%s, ", rp.p); emit_expr(c, argv[0], b);
+            buf_puts(b, ", "); emit_int_expr(c, argv[1], b); buf_puts(b, ")");
+            free(rp.p); return 1;
+          }
           if (sp_streq(name, "=~") && argc == 1) {
             if (a0 == TY_STRING) {
               buf_printf(b, "sp_re_match_poly(%s, ", rp.p); emit_expr(c, argv[0], b); buf_puts(b, ")");
