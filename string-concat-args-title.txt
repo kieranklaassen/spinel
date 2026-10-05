@@ -1,0 +1,1 @@
+String#concat and #prepend read several arguments in order and hold each

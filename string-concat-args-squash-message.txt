@@ -1,0 +1,47 @@
+String#concat and #prepend read several arguments in order and hold each
+
+`s.concat((n = 1; "x"), n.to_s)` answered "sx0" with gcc where Ruby
+answers "sx1", and `x = s.concat("a#{i}", "b#{i}")` stopped under
+SPINEL_GC_STRESS=2 with "the mark reached a freed heap string", with
+gcc and clang alike. With two arguments or more, the value arm of
+concat and prepend and the shared handle's prepend nested the
+arguments in one C expression,
+sp_str_concat(sp_str_concat(recv, A), B): C leaves it open whether A
+or B is built first, and whichever is built first is held by nothing
+while the other allocates.
+
+Such arguments are now joined one statement each into one rooted temp,
+in their order (emit_str_args_joined).
+
+Ruby hands concat the String itself and reads its text when the call
+runs, after every argument, so `s.concat(t, (t << "z"; "a"))` appends
+"tz". A plain read of a local that a later argument names, and none
+assigns, is read in the join, where an ordinary call leaves it; the
+other arguments run first, each into a rooted temp of its own. For a
+String two names hold, a local or an instance variable, the handle is
+taken where the argument stands and its text is read in the join:
+right whether the later argument appends to the String or assigns the
+variable (str_arg_read_late).
+
+Three kinds of call keep the nested C they had (str_args_nested).
+
+Arguments that make nothing and run nothing (str_args_plain), and a
+single argument: String literals, plain reads of a String, and
+arguments the operand-order rewrite already ran into rooted temps
+ahead of the call (operand_bound_in_order), which it does when two or
+more of them are calls. A read of a String two names hold builds a
+copy and is not plain: `s.concat(@a, @b)` lost one copy while the
+other was built.
+
+A call where an argument may be a String made before the call and
+read some other way (a global, a constant, an attribute, an element,
+the result of a method of the program's own), with an argument after
+it that runs code. The join would read its text before that argument
+can append to it; gcc's nested C reads it after, as Ruby does, and the
+join would turn that right answer wrong. An argument made where it
+stands is not such a String: a literal, an interpolation, an Integer,
+a builtin that builds its String (str_call_builds).
+
+And a call of more than 32 arguments.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
