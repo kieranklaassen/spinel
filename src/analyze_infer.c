@@ -7218,7 +7218,7 @@ static TyKind infer_call_inner(Compiler *c, int id) {
       !(rt == TY_POLY && an_user_defines_method(c, name)))
     return TY_NIL;
   if (recv >= 0 && sp_streq(name, "instance_variable_defined?") && argc == 1 &&
-      ty_is_object(rt)) return TY_BOOL;
+      ty_is_object(rt) && comp_method_in_chain(c, ty_object_class(rt), name, NULL) < 0) return TY_BOOL;
   if (recv >= 0 && rt == TY_SYMBOL && argc == 0 && sp_streq(name, "encoding"))
     return TY_POLY;  /* a boxed Encoding value */
   if (recv >= 0 && (rt == TY_BOOL || rt == TY_SYMBOL || rt == TY_FLOAT) && argc == 1 &&
@@ -7378,7 +7378,7 @@ static TyKind infer_call_inner(Compiler *c, int id) {
   }
   /* Object#instance_variables: a static symbol list for a typed object */
   if (recv >= 0 && ty_is_object(rt) && argc == 0 &&
-      sp_streq(name, "instance_variables"))
+      sp_streq(name, "instance_variables") && comp_method_in_chain(c, ty_object_class(rt), name, NULL) < 0)
     return TY_POLY_ARRAY;
   if (recv >= 0 && ty_is_object(rt) &&
       (sp_streq(name, "methods") || sp_streq(name, "public_methods") ||

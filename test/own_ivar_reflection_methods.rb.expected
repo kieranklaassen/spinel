@@ -1,0 +1,26 @@
+"get @n of 3"
+"get @n of 3"
+:stored
+2
+[:only, 3]
+"get @n of 3"
+:stored
+2
+[[:@n, 5], [:@n, 9]]
+"get @zz of 3"
+"remove @n of 3"
+"remove @n of 3"
+"get @n of 4"
+[:only, 4]
+"remove @log of 4"
+:masked
+[]
+[:slot, :@a, 1]
+[:slot_set, :@b, 2]
+7
+8
+8
+true
+false
+[:@n]
+8
