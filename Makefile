@@ -2159,6 +2159,7 @@ GC_MINOR_TESTS := test/reopened_builtin_kwrest_keys.rb \
                   test/data_ivar_set_value_gc.rb \
                   test/method_call_block_captures_outer.rb \
                   test/range_dup_unfrozen.rb \
+                  test/str_range_slot_barrier.rb \
                   test/zip_block_many_operands.rb \
                   test/block_arg_paren_sequence_proc.rb \
                   test/gc_fresh_receiver_eq_exc_rooted.rb \
