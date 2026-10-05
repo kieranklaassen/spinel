@@ -16955,13 +16955,14 @@ static int promote_shared_stored_strings(Compiler *c) {
       if (!an || !((aac == 1 && (sp_streq(an, "<<") || sp_streq(an, "concat") ||
                                  sp_streq(an, "prepend") || sp_streq(an, "replace"))) ||
                    (aac == 0 && sp_streq(an, "clear")))) break;
-      if (sp_streq(an, "prepend") || sp_streq(an, "replace")) slow = 1;
+      if (!sp_streq(an, "<<") && !sp_streq(an, "concat")) slow = 1;
       nl++;
       cur = nt_ref(nt, cur, "receiver");
     }
-    /* A chain holding a prepend or a replace keeps the walk of 16: a marked
-       link of either kind emits its receiver more than once, so each link
-       doubled the compile and a chain of 23 did not finish. */
+    /* Only a chain of `<<` and concat links is marked at any length. One
+       holding a prepend, a replace or a clear keeps the walk of 16: a marked
+       prepend or replace emits its receiver more than once, so each such
+       link doubled the compile and a chain of 23 did not finish. */
     if (slow && nl > 16) {
       nl = 16; cur = top;
       for (int k = 0; k < 16; k++) cur = nt_ref(nt, cur, "receiver");
