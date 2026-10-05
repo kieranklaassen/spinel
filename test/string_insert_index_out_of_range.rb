@@ -133,3 +133,30 @@ p f
 o = +"abcd"
 o.insert(1, (o << "ef"; "x"))
 p o
+
+# a nil receiver and a nil text raise, whatever the index
+def none(k) k == 1 ? +"one" : nil end
+n = none(2)
+begin
+  n.insert(-1, "!")
+rescue NoMethodError => e
+  puts e.class
+end
+begin
+  n.insert(9, "!")
+rescue NoMethodError => e
+  puts e.class
+end
+p n
+m = +"abc"
+begin
+  m.insert(1, none(2))
+rescue TypeError => e
+  puts "TypeError: #{e.message}"
+end
+begin
+  m.insert(9, none(2))
+rescue TypeError => e
+  puts "TypeError: #{e.message}"
+end
+p m

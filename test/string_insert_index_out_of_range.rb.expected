@@ -43,3 +43,9 @@ IndexError: index 7 out of string
 IndexError: index -6 out of string
 "ab"
 "axbcdef"
+NoMethodError
+NoMethodError
+nil
+TypeError: no implicit conversion of nil into String
+TypeError: no implicit conversion of nil into String
+"abc"
