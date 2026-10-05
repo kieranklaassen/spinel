@@ -24,11 +24,13 @@ the other was built: (("a" * k)..("a" * (k - 1) + "c")).each stopped
 in the collector's check under SPINEL_GC_STRESS=2 with gcc and
 counted nothing with clang. It is right at every level now.
 
-Not kept: a first bound that returns the very String the last bound
-then changes in place, `(idn(s)..(s << "x"; "zz".dup))`, was right
-with gcc only because the last bound ran first. It now begins at the
-String as it was before the change, as with clang, and as the same two
-expressions do as the arguments of one call.
+Not kept: a first bound that is a second name for a String the last
+bound then changes in place, `(idn(s)..(s << "x"; "zz".dup))`. Such a
+Range was right with gcc, only because the last bound ran first, and
+wrong with clang. Both now give clang's answer, the String as it was
+before the change, which is what the same two expressions give as the
+two arguments of one call. Sharing the first bound is not in this
+change.
 
 Not here, as before: `a[lg(1)..lg(3)]`, `s[lg(1)..lg(3)]` and
 `a.slice(lg(1)..lg(3))` hand the bounds straight to the slice and
