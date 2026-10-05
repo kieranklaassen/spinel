@@ -68,7 +68,7 @@ Not in this change, each another cause:
 GATE_LINES
 ```
 
-- [ ] New tests have `.expected` files that match CRuby 4.0 run with `--enable-frozen-string-literal` (the file was written from ruby 3.3.6 with that flag; it is nine lines of `0`, one Array of four Strings, two Strings, three Arrays of two Strings and one String)
+- [x] New tests have `.expected` files that match CRuby 4.0 run with `--enable-frozen-string-literal` (4.0.7)
 - [ ] Values past 2^31 are marked `# spinel: int64` (none)
 - [ ] If optcarrot's generated C changed: callgrind numbers, checksum 59662 (it did not change: byte-identical before and after on ab9b925aa)
 - [ ] Depends on: # (nothing)
