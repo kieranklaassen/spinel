@@ -17896,7 +17896,9 @@ static int emit_call_operands_bound(Compiler *c, int id, const int *node, int nb
 }
 
 /* The calls emit_operands_in_order declined after it had rendered two or
-   more operands, by node. */
+   more operands, by node. A mark only chooses what is tried first, so one
+   that no longer holds -- the call emitted again where it takes its
+   operands -- costs an emission and changes nothing. */
 static unsigned char *g_bind_declined;
 static int g_bind_declined_cap;
 static void bind_declined_note(int id) {
