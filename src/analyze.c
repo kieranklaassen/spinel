@@ -8850,8 +8850,10 @@ static int desugar_multi_yield_map_param(Compiler *c) {
    literal, an assignment -- as the last expression or through a `return`?
    The `each`-like idiom answers self, nil or an iterator call, whose value
    nobody keeps; index_by answers the Hash it built. Walked through the tail
-   of if / unless / parentheses and a return's argument. */
-static int te_tail_is_value(const NodeTable *nt, int n, int depth) {
+   of if / unless / parentheses and a return's argument. `last` is set while
+   `n` is the body's last expression: the other literals count only there,
+   since a method that returns one early beside a `self` tail builds pinned. */
+static int te_tail_is_value(const NodeTable *nt, int n, int depth, int last) {
   if (n < 0 || depth > 12) return 0;
   switch (nt_kind(nt, n)) {
     case NK_LocalVariableReadNode: case NK_InstanceVariableReadNode:
@@ -8859,6 +8861,10 @@ static int te_tail_is_value(const NodeTable *nt, int n, int depth) {
     case NK_HashNode: case NK_StringNode: case NK_IntegerNode: case NK_FloatNode:
     case NK_SymbolNode: case NK_TrueNode: case NK_FalseNode:
       return 1;
+    case NK_ArrayNode: case NK_RangeNode: case NK_InterpolatedStringNode:
+    case NK_RegularExpressionNode: case NK_InterpolatedRegularExpressionNode:
+    case NK_RationalNode: case NK_ImaginaryNode: case NK_LambdaNode:
+      return last;
     case NK_StatementsNode: {
       int bn = 0; const int *bb = nt_arr(nt, n, "body", &bn);
       if (bn <= 0) return 0;
@@ -8866,21 +8872,21 @@ static int te_tail_is_value(const NodeTable *nt, int n, int depth) {
       for (int i = 0; i < bn - 1; i++)
         if (nt_kind(nt, bb[i]) == NK_ReturnNode || nt_kind(nt, bb[i]) == NK_IfNode ||
             nt_kind(nt, bb[i]) == NK_UnlessNode)
-          if (te_tail_is_value(nt, bb[i], depth + 1)) return 1;
-      return te_tail_is_value(nt, bb[bn - 1], depth + 1);
+          if (te_tail_is_value(nt, bb[i], depth + 1, 0)) return 1;
+      return te_tail_is_value(nt, bb[bn - 1], depth + 1, last);
     }
     case NK_IfNode:
-      return te_tail_is_value(nt, nt_ref(nt, n, "statements"), depth + 1) ||
-             te_tail_is_value(nt, nt_ref(nt, n, "subsequent"), depth + 1);
+      return te_tail_is_value(nt, nt_ref(nt, n, "statements"), depth + 1, last) ||
+             te_tail_is_value(nt, nt_ref(nt, n, "subsequent"), depth + 1, last);
     case NK_UnlessNode:
-      return te_tail_is_value(nt, nt_ref(nt, n, "statements"), depth + 1) ||
-             te_tail_is_value(nt, nt_ref(nt, n, "else_clause"), depth + 1);
-    case NK_ElseNode: return te_tail_is_value(nt, nt_ref(nt, n, "statements"), depth + 1);
-    case NK_ParenthesesNode: return te_tail_is_value(nt, nt_ref(nt, n, "body"), depth + 1);
+      return te_tail_is_value(nt, nt_ref(nt, n, "statements"), depth + 1, last) ||
+             te_tail_is_value(nt, nt_ref(nt, n, "else_clause"), depth + 1, last);
+    case NK_ElseNode: return te_tail_is_value(nt, nt_ref(nt, n, "statements"), depth + 1, last);
+    case NK_ParenthesesNode: return te_tail_is_value(nt, nt_ref(nt, n, "body"), depth + 1, last);
     case NK_ReturnNode: {
       int a = nt_ref(nt, n, "arguments");
       int ac = 0; const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
-      return ac > 0 && te_tail_is_value(nt, av[0], depth + 1);
+      return ac > 0 && te_tail_is_value(nt, av[0], depth + 1, 0);
     }
     /* a call answers its value -- `@a.select { |x| yield x }` an Array --
        unless it is an each-like iteration, whose value (the receiver)
@@ -8973,7 +8979,7 @@ static int desugar_to_enum(Compiler *c) {
          through an Enumerator-typed C signature, a type error; widened, a
          blockless call site reads a boxed Enumerator its consumers dispatch
          on. */
-      int value_form = es && es->body >= 0 && te_tail_is_value(nt, es->body, 0);
+      int value_form = es && es->body >= 0 && te_tail_is_value(nt, es->body, 0, 1);
       /* not in a reopened builtin, whose self tail is the boxed receiver:
          the blockless call already reads the Enumerator (ret_noblock) */
       if (self_recv && es && es->name && sp_streq(es->name, m) && !value_form && reopen_ci < 0 &&
