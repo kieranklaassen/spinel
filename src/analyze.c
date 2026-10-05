@@ -16144,6 +16144,31 @@ static int an_param_appended_deep(Compiler *c, int mi, int j) {
    shared String is put IN; here the evidence is what is done to what comes
    OUT. Answers -1 when `an` is no element read of a container, else whether
    it changed anything. */
+/* The containers strbuf_demand_elem_arg is in the middle of demanding the
+   stores of, by the variable that holds each: a local's name and scope, an
+   instance variable's name and class. */
+#define SB_ELEM_BUSY_MAX 16
+static struct { const char *name; const void *owner; } sb_elem_busy[SB_ELEM_BUSY_MAX];
+static int sb_elem_nbusy;
+/* `c.fetch(k, v)` or `c.fetch(k) { v }` whose v can be a String that is no
+   shared handle: a String expression, or a boxed value. A literal is left
+   out, an append to it raises FrozenError. */
+static int an_fetch_default_plain_string(Compiler *c, int call) {
+  const NodeTable *nt = c->nt;
+  const char *fn = nt_str(nt, call, "name");
+  if (!fn || !sp_streq(fn, "fetch")) return 0;
+  int a = nt_ref(nt, call, "arguments"), an = 0;
+  const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
+  int blk = nt_ref(nt, call, "block");
+  int v = an == 2 ? av[1] : -1;
+  if (an == 1 && blk >= 0 && nt_kind(nt, blk) == NK_BlockNode) {
+    int bn = 0; const int *body = nt_arr(nt, nt_ref(nt, blk, "body"), "body", &bn);
+    if (bn > 0) v = body[bn - 1];
+  }
+  if (v < 0 || nt_kind(nt, v) == NK_StringNode) return 0;
+  TyKind vt = infer_type(c, v);
+  return vt == TY_STRING || vt == TY_POLY;
+}
 static int strbuf_demand_elem_arg(Compiler *c, int an) {
   const NodeTable *nt = c->nt;
   if (an < 0 || nt_kind(nt, an) != NK_CallNode || !container_elem_read_p(nt, an)) return -1;
@@ -16158,17 +16183,44 @@ static int strbuf_demand_elem_arg(Compiler *c, int an) {
     if (base < 0 || (nt_kind(nt, base) != NK_LocalVariableReadNode &&
                      nt_kind(nt, base) != NK_InstanceVariableReadNode)) return -1; }
   TyKind rt = infer_type(c, rr);
-  if (ty_is_array(rt) || ty_is_hash(rt)) {
-    if (nt_kind(nt, rr) == NK_LocalVariableReadNode) {
-      const char *cn = nt_str(nt, rr, "name");
-      Scope *cs = cn ? comp_scope_of(c, rr) : NULL;
-      return cn && cs ? strbuf_demand_container_stores(c, cn, cs) : 0;
-    }
+  if (!ty_is_array(rt) && !ty_is_hash(rt) && !container_elem_read_p(nt, rr)) return -1;
+  /* A container that stores one of its own elements (`h[:k] = h[:j]`, `a <<
+     a[0]`) meets that element among its stores, and two containers that
+     store each other's meet each other: the walk came back here for a
+     container it was still in, and did not end. The stores of that one are
+     being demanded already. */
+  const char *bn = NULL; const void *bo = NULL;
+  if (nt_kind(nt, rr) == NK_LocalVariableReadNode) {
+    bn = nt_str(nt, rr, "name"); bo = bn ? comp_scope_of(c, rr) : NULL;
   }
-  else if (!container_elem_read_p(nt, rr)) return -1;
+  else if (nt_kind(nt, rr) == NK_InstanceVariableReadNode) {
+    int cid = an_ivar_owner(c, rr);
+    bn = nt_str(nt, rr, "name"); bo = cid >= 0 ? &c->classes[cid] : NULL;
+  }
+  if (!bo) bn = NULL;
+  for (int k = 0; bn && k < sb_elem_nbusy; k++) {
+    if (sb_elem_busy[k].owner != bo || !sp_streq(sb_elem_busy[k].name, bn)) continue;
+    /* `c[k] = c.fetch(k, v)` stores v where k is missing, and v is no store
+       the walk reaches: it would go in as a copy beside c's handles. */
+    if (an_fetch_default_plain_string(c, an)) {
+      sb_elem_nbusy = 0;
+      unsupported_feature(c, an,
+          "a String that is the default of `fetch` is stored back into the Hash "
+          "or Array it was fetched from: a String is not yet shared by reference "
+          "through the default of `fetch`. Store it with h[k] = v unless h.key?(k).");
+    }
+    return 0;
+  }
+  int listed = bn && sb_elem_nbusy < SB_ELEM_BUSY_MAX;
+  if (listed) { sb_elem_busy[sb_elem_nbusy].name = bn; sb_elem_busy[sb_elem_nbusy++].owner = bo; }
+  int d;
+  if (nt_kind(nt, rr) == NK_LocalVariableReadNode)
+    d = bn ? strbuf_demand_container_stores(c, bn, (Scope *)bo) : 0;
   /* an element of an ivar's container, of another element, of a method's
      result: the stores that reach it, as for a mutator through one */
-  return strbuf_container_source_walk(c, rr, 0, SB_DEMAND);
+  else d = strbuf_container_source_walk(c, rr, 0, SB_DEMAND);
+  if (listed) sb_elem_nbusy--;
+  return d;
 }
 static int promote_shared_stored_strings(Compiler *c) {
   int changed = 0;
