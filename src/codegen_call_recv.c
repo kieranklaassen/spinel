@@ -3517,12 +3517,12 @@ static int emit_str_mutator_call(Compiler *c, int id, Buf *b, const NodeTable *n
       int to = ++g_tmp, ti2 = ++g_tmp, tn2 = ++g_tmp;
       /* rooted across the index and the text, which may allocate */
       buf_printf(b, "({ const char *_t%d = ", to); emit_recv_rooted(c, recv, to, "SP_GC_ROOT_STR", b);
-      buf_printf(b, "sp_str_check_mutable(_t%d);", to);   /* frozen -> FrozenError (#3003) */
-      buf_printf(b, " sp_int _t%d = ", ti2); emit_int_expr(c, argv[0], b);
-      buf_printf(b, "; if (_t%d < 0) _t%d += (sp_int)sp_str_length(_t%d) + 1;", ti2, ti2, to);
-      buf_printf(b, " const char *_t%d = sp_str_splice_at(_t%d, _t%d, 0, ", tn2, to, ti2);
+      /* sp_str_insert raises for an index past either end, then for a
+         frozen receiver (#3003) */
+      buf_printf(b, "sp_int _t%d = ", ti2); emit_int_expr(c, argv[0], b);
+      buf_printf(b, "; const char *_t%d = sp_str_insert(_t%d, _t%d, ", tn2, to, ti2);
       emit_str_insert_text(c, argv[1], b);
-      buf_puts(b, ", 0); ");
+      buf_puts(b, "); ");
       if (lvw) { emit_expr(c, recv, b); buf_printf(b, " = _t%d; ", tn2); }
       buf_printf(b, "_t%d; })", tn2);
       { *out = 1; return 1; }

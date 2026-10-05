@@ -14003,19 +14003,18 @@ static int str_mutate_reassign_arms(Compiler *c, Buf *b, int indent, const NodeT
       return 1;
     }
     if (assignable && sp_streq(name, "insert") && argc == 2) {
-      /* insert(i, x): s[0,i] + x + s[i..]. A negative i counts from the end
-         and inserts after that character (i += len + 1). */
-      int ti = ++g_tmp;
-      emit_indent(b, indent); buf_puts(b, "sp_str_check_mutable("); emit_expr(c, recv, b); buf_puts(b, ");\n");
+      /* insert(i, x) through sp_str_insert, as the value form: it raises for
+         an index past either end and for a frozen receiver. The index is
+         read ahead of the text, and the text ahead of the receiver: a text
+         that changes the receiver (`s.insert(1, (s << "ef"; "x"))`) is
+         seen, where two arguments of one call are read in the order the C
+         compiler picks. */
+      int ti = ++g_tmp, tx = ++g_tmp;
       emit_indent(b, indent);
       buf_printf(b, "{ sp_int _t%d = ", ti); emit_int_expr(c, argv[0], b);
-      buf_printf(b, "; if (_t%d < 0) _t%d += (sp_int)sp_str_length(", ti, ti); emit_expr(c, recv, b); buf_printf(b, ") + 1; ");
-      emit_expr(c, recv, b); buf_puts(b, " = sp_str_concat(sp_str_concat(sp_str_sub_range(");
-      emit_expr(c, recv, b); buf_printf(b, ", 0, _t%d), ", ti);
-      if (nt_kind(nt, argv[1]) == NK_SplatNode) emit_str_insert_text(c, argv[1], b);
-      else emit_expr(c, argv[1], b);
-      buf_puts(b, "), sp_str_sub_range("); emit_expr(c, recv, b);
-      buf_printf(b, ", _t%d, (sp_int)sp_str_length(", ti); emit_expr(c, recv, b); buf_printf(b, "))); }\n");
+      buf_printf(b, "; const char *_t%d = ", tx); emit_str_insert_text(c, argv[1], b); buf_puts(b, "; ");
+      emit_expr(c, recv, b); buf_puts(b, " = sp_str_insert("); emit_expr(c, recv, b);
+      buf_printf(b, ", _t%d, _t%d); }\n", ti, tx);
       return 1;
     }
     if ((sp_streq(name, "delete_prefix!") || sp_streq(name, "delete_suffix!")) && argc == 1) {
