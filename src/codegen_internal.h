@@ -1660,6 +1660,7 @@ int emit_boxed_step_binds(Compiler *c, int blk, const char *vals, Buf *b, int in
 void emit_yield_proc_call(Compiler *c, int args_node, TyKind result_ty, Buf *b, int indent, int as_expr);
 int emit_inline_expr(Compiler *c, int id, Buf *b);
 void emit_iter_param_assign(Compiler *c, int block, const char *p0_orig, const char *p0_ren, TyKind src_type, const char *src_expr, Buf *b, int indent);
+void emit_str_range_walk_open(Compiler *c, int recv, Buf *b, int indent, char *elem, size_t elem_sz);
 int subtree_has_own_redo(const NodeTable *nt, int id);
 void emit_loop_body(Compiler *c, int body, Buf *b, int indent);
 int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent);

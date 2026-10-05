@@ -6152,6 +6152,27 @@ static int expand_literal_splat_args(Compiler *c) {
    source never terminates either), so drop the `.lazy` and let the eager
    array path serve it. An endless range keeps its lazy chain and its
    (still unsupported) reject. (#2993) */
+/* A literal block of no parameter or of one plain required parameter: the
+   block the String-range each arm binds. */
+static int str_range_each_block_plain(Compiler *c, int blk) {
+  const NodeTable *nt = c->nt;
+  if (blk < 0 || nt_kind(nt, blk) != NK_BlockNode) return 0;
+  int bp = nt_ref(nt, blk, "parameters");
+  if (bp < 0) return 1;
+  const char *bpty = nt_type(nt, bp);
+  if (bpty && sp_streq(bpty, "NumberedParametersNode")) return nt_int(nt, bp, "maximum", 0) <= 1;
+  if (!bpty || !sp_streq(bpty, "BlockParametersNode")) return 0;
+  int pn = nt_ref(nt, bp, "parameters");
+  if (pn < 0) return 1;
+  int n = 0, m = 0;
+  const int *reqs = nt_arr(nt, pn, "requireds", &n);
+  if (n > 1 || (n == 1 && nt_kind(nt, reqs[0]) != NK_RequiredParameterNode)) return 0;
+  nt_arr(nt, pn, "optionals", &m); if (m) return 0;
+  nt_arr(nt, pn, "posts", &m); if (m) return 0;
+  nt_arr(nt, pn, "keywords", &m); if (m) return 0;
+  return nt_ref(nt, pn, "rest") < 0 && nt_ref(nt, pn, "keyword_rest") < 0 && nt_ref(nt, pn, "block") < 0;
+}
+
 /* A string range serves only its endpoint/membership face natively; every
    other method rides the materialized element array. Type-driven, so it also
    catches a range held in a variable -- which is why it lives in the
@@ -6224,6 +6245,12 @@ static int desugar_str_range_methods(Compiler *c) {
     }
     /* first/last are the endpoints bare, a prefix/suffix ARRAY with a count */
     if (!native && an == 0 && (is_endpoint_query(nm))) native = 1;
+    /* each with a block of at most one plain parameter walks the members
+       one at a time, in its own arm (the statement iteration's String-range
+       each) */
+    if (!native && an == 0 && sp_streq(nm, "each")) {
+      if (str_range_each_block_plain(c, nt_ref(nt, id, "block"))) native = 1;
+    }
     /* first(n) and take(n) leave the walk at the nth member: their own arm,
        where the element array would hold the whole range first */
     if (!native && an == 1 && nt_ref(nt, id, "block") < 0 &&
