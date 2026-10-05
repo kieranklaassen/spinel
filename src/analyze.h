@@ -201,6 +201,7 @@ void infer_subtree(Compiler *c, int id);
    collecting emitter widen its element type past the tail expression so a
    `next <other-type>` is boxed rather than assigned to a mismatched temp. */
 TyKind ie_block_break_next_ty(Compiler *c, int node);
+int ie_block_bare_jump(Compiler *c, int node);
 TyKind then_block_value_ty(Compiler *c, int body, TyKind tail);
 TyKind hash_merge_block_value_ty(Compiler *c, int id);
 /* The value type of every `next` that leaves the block whose body is `node`.

@@ -677,7 +677,7 @@ TyKind ie_splice_value_ty(Compiler *c, int node) {
     int a = nt_ref(nt, node, "arguments"); int an = 0;
     const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
     if (an > 0) return comp_ntype(c, av[0]);
-    return sp_streq(ty, "NextNode") ? TY_NIL : TY_UNKNOWN;   /* keep in step with ie_block_break_next_ty */
+    return TY_NIL;   /* either one with no value leaves the splice answering nil */
   }
   if (sp_streq(ty, "WhileNode") || sp_streq(ty, "UntilNode") || sp_streq(ty, "ForNode") ||
       sp_streq(ty, "BlockNode") || sp_streq(ty, "LambdaNode") || sp_streq(ty, "DefNode") ||

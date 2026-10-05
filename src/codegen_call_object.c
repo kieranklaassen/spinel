@@ -666,7 +666,11 @@ int emit_call_instance_eval_arms(Compiler *c, int id, Buf *b, const NodeTable *n
       free(rb.p);
       if (scalar_res) {
         emit_indent(g_pre, g_indent); emit_ctype(c, body_ty, g_pre);
-        buf_printf(g_pre, " _t%d;\n", tres);
+        /* a `next` or a `break` with no value stores nothing: the slot starts
+           as nil (a Float's is left as it was: nothing boxes its sentinel as nil here) */
+        if (body_ty != TY_FLOAT && ie_block_bare_jump(c, blk_body))
+          buf_printf(g_pre, " _t%d = %s;\n", tres, nil_value(body_ty) ? nil_value(body_ty) : default_value_from_compiler(c, body_ty));
+        else buf_printf(g_pre, " _t%d;\n", tres);
       }
       /* The arguments are the caller's, so a value that reads self runs
          here, before self switches, into a temp the binds below read:

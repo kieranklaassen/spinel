@@ -675,6 +675,26 @@ TyKind ie_block_break_next_ty(Compiler *c, int node) {
   return r;
 }
 
+/* Does a `next` or a `break` with no value bind to the splice of `node`, the
+   body of the block instance_eval or instance_exec runs? The call answers nil
+   when one is taken, in its own slot. */
+int ie_block_bare_jump(Compiler *c, int node) {
+  const NodeTable *nt = c->nt;
+  if (node < 0) return 0;
+  NodeKind k = nt_kind(nt, node);
+  if (k == NK_BreakNode || k == NK_NextNode) return nt_ref(nt, node, "arguments") < 0;
+  if (k == NK_WhileNode || k == NK_UntilNode || k == NK_ForNode || k == NK_BlockNode ||
+      k == NK_LambdaNode || k == NK_DefNode || k == NK_ClassNode || k == NK_ModuleNode) return 0;
+  int nr = nt_num_refs(nt, node);
+  for (int i = 0; i < nr; i++) if (ie_block_bare_jump(c, nt_ref_at(nt, node, i))) return 1;
+  int na = nt_num_arrs(nt, node);
+  for (int i = 0; i < na; i++) {
+    int n = 0; const int *ids = nt_arr_at(nt, node, i, &n);
+    for (int j = 0; j < n; j++) if (ie_block_bare_jump(c, ids[j])) return 1;
+  }
+  return 0;
+}
+
 /* The array kind a `next <v>` arm hands a `then` block's value slot, joined
    over every arm that binds to this block (one inside a nested loop, block or
    def binds there). Two kinds widen to the poly array, the one both convert
@@ -6037,6 +6057,8 @@ static int infer_block_kernel_call(Compiler *c, int id, const NodeTable *nt, con
         /* A value-carrying break/next can widen the result past the last
            expression (e.g. `next val + 1` poly vs trailing `999` int). */
         TyKind bnt = ie_block_break_next_ty(c, body);
+        /* a `break` with no value leaves the call answering nil, as a bare `next` does */
+        if (ie_block_bare_jump(c, body)) bnt = bnt == TY_UNKNOWN ? TY_NIL : ty_unify(bnt, TY_NIL);
         if (bnt != TY_UNKNOWN)
           bt = (bt == TY_NIL || bt == TY_UNKNOWN) ? bnt : ty_unify(bt, bnt);
         { *out = bt; return 1; }

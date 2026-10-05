@@ -1,0 +1,67 @@
+nil
+4
+nil
+"s"
+nil
+:a
+nil
+true
+nil
+[1, 2]
+nil
+#<Other>
+nil
+7
+nil
+4
+nil
+"s"
+nil
+:a
+nil
+true
+nil
+#<Other>
+[nil, nil, 1]
+[nil, nil, 1]
+true
+true
+9
+"alt"
+"<>"
+nil
+[4, "s", 1]
+[4, :a, 1]
+false
+false
+4
+"s"
+"<4>"
+7
+[nil, nil]
+[9, "x"]
+[nil, nil]
+[7, 10]
+[nil, nil]
+[7, 8]
+nil
+3
+nil
+7
+nil
+nil
+[7, nil, 21]
+nil
+:n
+"s"
+7
+ens
+nil
+ens
+7
+in
+after
+in
+tail
+after
+7
