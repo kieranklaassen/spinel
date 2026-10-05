@@ -5524,7 +5524,7 @@ static void emit_when_splat_test(Compiler *c, int cond, int t, TyKind pt, Buf *b
     buf_printf(b, "({ sp_RbVal _t%d = ", ta); emit_boxed(c, sp_in, b);
     buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); ", ta);
   }
-  buf_puts(b, "sp_case_splat_match(");
+  buf_puts(b, "sp_when_splat_match(");
   if (pt == TY_POLY) buf_puts(b, stmp);
   else emit_boxed_text(c, pt, stmp, b);
   buf_puts(b, ", ");
