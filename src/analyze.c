@@ -29482,8 +29482,10 @@ static void refuse_dropped_container_string_change(Compiler *c) {
     if (bk == NK_LocalVariableReadNode &&
         !an_local_string_from_container(c, b, parent, &ix, 0, how, sizeof how, &cont, &bind)) continue;
     if (an_container_change_unseen(c, cont, bind, un, parent, &ix)) continue;
-    char msg[256];
-    snprintf(msg, sizeof msg, "a String is not yet shared by reference through %s into an in-place `%s`", how, un);
+    char msg[320];
+    snprintf(msg, sizeof msg, "a String is not yet shared by reference through %s into an in-place `%s`. "
+             "Store the new String back instead (%s)", how, un,
+             cont >= 0 && ty_is_hash(comp_ntype(c, cont)) ? "h[k] = h[k] + x" : "a[i] = a[i] + x");
     free(parent); free(ix.head); free(ix.next); free(ix.seen);
     unsupported_feature(c, u, msg);
   }

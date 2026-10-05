@@ -647,17 +647,17 @@ spinel: 1 refusal, nothing written
 spinel: a String is passed to a proc's parameter `k` through `f.call`, which the proc appends to: this call hands the proc a copy, so the append would not reach the caller's String (a String is not yet shared by reference from a block's parameter). Return the String from the proc and assign it, or append to it in the caller.
 spinel: 1 refusal, nothing written
 == test/reject/string_array_find_dropped_append.rb [default] rc=1
-spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`
+spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_array_find_dropped_append.rb [promote] rc=1
-spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`
+spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_array_find_dropped_paren_call.rb [default] rc=1
-spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`
+spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_array_find_dropped_paren_call.rb [promote] rc=1
-spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`
+spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_array_min_by_dropped_chain.rb [default] rc=1
-spinel: a String is not yet shared by reference through an Array's `min_by` into an in-place `<<`
+spinel: a String is not yet shared by reference through an Array's `min_by` into an in-place `<<`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_array_min_by_dropped_chain.rb [promote] rc=1
-spinel: a String is not yet shared by reference through an Array's `min_by` into an in-place `<<`
+spinel: a String is not yet shared by reference through an Array's `min_by` into an in-place `<<`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_array_rebound_iterator_alias.rb [default] rc=1
 spinel: a String appended to through a rebound iterator alias is not yet shared by reference with its Array
 == test/reject/string_array_rebound_iterator_alias.rb [promote] rc=1
@@ -667,37 +667,37 @@ spinel: a String is not yet shared by reference through an Array's chained index
 == test/reject/string_chained_index_append.rb [promote] rc=1
 spinel: a String is not yet shared by reference through an Array's chained index into an appending block
 == test/reject/string_const_array_index_dropped_bang.rb [default] rc=1
-spinel: a String is not yet shared by reference through an Array's `[]` into an in-place `upcase!`
+spinel: a String is not yet shared by reference through an Array's `[]` into an in-place `upcase!`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_const_array_index_dropped_bang.rb [promote] rc=1
-spinel: a String is not yet shared by reference through an Array's `[]` into an in-place `upcase!`
+spinel: a String is not yet shared by reference through an Array's `[]` into an in-place `upcase!`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_const_hash_index_dropped_append.rb [default] rc=1
-spinel: a String is not yet shared by reference through a Hash's `[]` into an in-place `<<`
+spinel: a String is not yet shared by reference through a Hash's `[]` into an in-place `<<`. Store the new String back instead (h[k] = h[k] + x)
 == test/reject/string_const_hash_index_dropped_append.rb [promote] rc=1
-spinel: a String is not yet shared by reference through a Hash's `[]` into an in-place `<<`
+spinel: a String is not yet shared by reference through a Hash's `[]` into an in-place `<<`. Store the new String back instead (h[k] = h[k] + x)
 == test/reject/string_container_chained_write_dropped_append.rb [default] rc=1
-spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`
+spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_container_chained_write_dropped_append.rb [promote] rc=1
-spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`
+spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_container_read_in_loop_dropped_append.rb [default] rc=1
-spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`
+spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_container_read_in_loop_dropped_append.rb [promote] rc=1
-spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`
+spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_container_read_in_loop_dropped_bytesplice.rb [default] rc=1
-spinel: a String is not yet shared by reference through an Array's `slice` into an in-place `bytesplice`
+spinel: a String is not yet shared by reference through an Array's `slice` into an in-place `bytesplice`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_container_read_in_loop_dropped_bytesplice.rb [promote] rc=1
-spinel: a String is not yet shared by reference through an Array's `slice` into an in-place `bytesplice`
+spinel: a String is not yet shared by reference through an Array's `slice` into an in-place `bytesplice`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_container_read_in_while_dropped_append.rb [default] rc=1
-spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`
+spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_container_read_in_while_dropped_append.rb [promote] rc=1
-spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`
+spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_container_write_argument_dropped_append.rb [default] rc=1
-spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`
+spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_container_write_argument_dropped_append.rb [promote] rc=1
-spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`
+spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_container_write_in_array_dropped_append.rb [default] rc=1
-spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`
+spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_container_write_in_array_dropped_append.rb [promote] rc=1
-spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`
+spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_cvar_boxed_param.rb [default] rc=1
 spinel: a String is passed to `poly`'s parameter `io` through the call, which the method appends to: this call hands the method a copy, so the append would not reach the caller's String (a String is not yet shared by reference from a class variable into a parameter that boxes it). Return the String from the method and assign it, or append to it in the caller.
 spinel: 1 refusal, nothing written
@@ -723,17 +723,17 @@ spinel: 1 refusal, nothing written
 spinel: a String is passed to a block's parameter `t` through `Fiber#resume`, which the proc appends to: this call hands the proc a copy, so the append would not reach the caller's String (a String is not yet shared by reference through `Fiber#resume`). Return the String from the proc and assign it, or append to it in the caller.
 spinel: 1 refusal, nothing written
 == test/reject/string_for_over_chained_write_dropped_append.rb [default] rc=1
-spinel: a String is not yet shared by reference through the variable of a `for` over an Array into an in-place `<<`
+spinel: a String is not yet shared by reference through the variable of a `for` over an Array into an in-place `<<`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_for_over_chained_write_dropped_append.rb [promote] rc=1
-spinel: a String is not yet shared by reference through the variable of a `for` over an Array into an in-place `<<`
+spinel: a String is not yet shared by reference through the variable of a `for` over an Array into an in-place `<<`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_for_variable_alias_dropped_append.rb [default] rc=1
-spinel: a String is not yet shared by reference through the variable of a `for` over an Array into an in-place `<<`
+spinel: a String is not yet shared by reference through the variable of a `for` over an Array into an in-place `<<`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_for_variable_alias_dropped_append.rb [promote] rc=1
-spinel: a String is not yet shared by reference through the variable of a `for` over an Array into an in-place `<<`
+spinel: a String is not yet shared by reference through the variable of a `for` over an Array into an in-place `<<`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_for_variable_dropped_append.rb [default] rc=1
-spinel: a String is not yet shared by reference through the variable of a `for` over an Array into an in-place `<<`
+spinel: a String is not yet shared by reference through the variable of a `for` over an Array into an in-place `<<`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_for_variable_dropped_append.rb [promote] rc=1
-spinel: a String is not yet shared by reference through the variable of a `for` over an Array into an in-place `<<`
+spinel: a String is not yet shared by reference through the variable of a `for` over an Array into an in-place `<<`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_forward_poly_chain.rb [default] rc=1
 spinel: a String is passed to `m`'s parameter `p` through a parameter it hands on, which the method appends to: this call hands the method a copy, so the append would not reach the caller's String (a String is not yet shared by reference from a global variable). Return the String from the method and assign it, or append to it in the caller.
 spinel: 1 refusal, nothing written
@@ -753,29 +753,29 @@ spinel: 1 refusal, nothing written
 spinel: a String is not yet shared by reference through a fresh Array literal into an appending iterator block
 spinel: 1 refusal, nothing written
 == test/reject/string_frozen_literal_array_answer_kept_dropped_append.rb [default] rc=1
-spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`
+spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_frozen_literal_array_answer_kept_dropped_append.rb [promote] rc=1
-spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`
+spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_frozen_literal_array_chained_store_dropped_append.rb [default] rc=1
-spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`
+spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_frozen_literal_array_chained_store_dropped_append.rb [promote] rc=1
-spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`
+spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_frozen_literal_array_printed_answer_kept_dropped_append.rb [default] rc=1
-spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`
+spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_frozen_literal_array_printed_answer_kept_dropped_append.rb [promote] rc=1
-spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`
+spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_frozen_literal_array_second_name_dropped_append.rb [default] rc=1
-spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`
+spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_frozen_literal_array_second_name_dropped_append.rb [promote] rc=1
-spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`
+spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_frozen_literal_array_send_store_dropped_append.rb [default] rc=1
-spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`
+spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_frozen_literal_array_send_store_dropped_append.rb [promote] rc=1
-spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`
+spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_frozen_literal_const_answer_handed_on_dropped_append.rb [default] rc=1
-spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`
+spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_frozen_literal_const_answer_handed_on_dropped_append.rb [promote] rc=1
-spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`
+spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_gather_short_splat_lead.rb [default] rc=1
 spinel: a String is passed to `g`'s parameter `a` through a call that gathers its arguments, which the method appends to: this call hands the method a copy, so the append would not reach the caller's String (a String is not yet shared by reference from a local variable ahead of a splat whose length decides which parameter takes it). Return the String from the method and assign it, or append to it in the caller.
 spinel: 1 refusal, nothing written
@@ -929,21 +929,21 @@ spinel: 1 refusal, nothing written
 spinel: `@x` is passed to gri's parameter `v`, which appends to it, and `@x` is assigned at line 0, where the assignment can run during the call: the append would then reach the newly assigned String instead of the one passed (a String held by a global, a class variable, or a top-level or class-level instance variable is not yet shared by reference). Pass a local and assign it back after the call.
 spinel: 1 refusal, nothing written
 == test/reject/string_local_from_array_read_dropped_append.rb [default] rc=1
-spinel: a String is not yet shared by reference through a local written from an Array's `max_by` into an in-place `<<`
+spinel: a String is not yet shared by reference through a local written from an Array's `max_by` into an in-place `<<`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_local_from_array_read_dropped_append.rb [promote] rc=1
-spinel: a String is not yet shared by reference through a local written from an Array's `max_by` into an in-place `<<`
+spinel: a String is not yet shared by reference through a local written from an Array's `max_by` into an in-place `<<`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_local_from_read_in_loop_dropped_append.rb [default] rc=1
-spinel: a String is not yet shared by reference through a local written from an Array's `find` into an in-place `<<`
+spinel: a String is not yet shared by reference through a local written from an Array's `find` into an in-place `<<`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_local_from_read_in_loop_dropped_append.rb [promote] rc=1
-spinel: a String is not yet shared by reference through a local written from an Array's `find` into an in-place `<<`
+spinel: a String is not yet shared by reference through a local written from an Array's `find` into an in-place `<<`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_masgn_over_chained_write_dropped_bang.rb [default] rc=1
-spinel: a String is not yet shared by reference through a multiple assignment from an Array into an in-place `upcase!`
+spinel: a String is not yet shared by reference through a multiple assignment from an Array into an in-place `upcase!`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_masgn_over_chained_write_dropped_bang.rb [promote] rc=1
-spinel: a String is not yet shared by reference through a multiple assignment from an Array into an in-place `upcase!`
+spinel: a String is not yet shared by reference through a multiple assignment from an Array into an in-place `upcase!`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_masgn_target_dropped_bang.rb [default] rc=1
-spinel: a String is not yet shared by reference through a multiple assignment from an Array into an in-place `upcase!`
+spinel: a String is not yet shared by reference through a multiple assignment from an Array into an in-place `upcase!`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_masgn_target_dropped_bang.rb [promote] rc=1
-spinel: a String is not yet shared by reference through a multiple assignment from an Array into an in-place `upcase!`
+spinel: a String is not yet shared by reference through a multiple assignment from an Array into an in-place `upcase!`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_mutator_jump_arm.rb [default] rc=1
 spinel: unsupported expression: node N (ReturnNode)
 spinel: 1 refusal, nothing written
