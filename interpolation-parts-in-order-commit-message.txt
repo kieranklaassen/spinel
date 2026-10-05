@@ -1,0 +1,32 @@
+The parts of an interpolation run in order, each to its end
+
+    r = R.new(%w[( a ) b])
+    puts "#{r.item(r.nxt)} #{r.item(r.nxt)}"
+
+printed "[)] a" for "[a] b" (R#item reads on from the queue after a
+"("): in `"#{a.f(x1)} #{b.g(x2)}"` x1 and x2 ran first, then f, then
+g, where CRuby runs x1, f, x2, g. interp_plan evaluates each part's
+value in its place, inside the statement expression that builds the
+String, but what a part's call hoists (the operands
+emit_operands_in_order binds, a receiver's temp) went to the
+statement's prelude, ahead of every part.
+
+Once an earlier part has an effect, the hoists of a later part whose
+operands hold a call or an assignment, or read a variable an earlier
+part assigns, are kept in the part's place. They move only where the
+interpolation is sequenced against the rest of its statement
+(interp_sequenced): from the interpolation up to the body, each node
+evaluates its children in order, or its other operands see nothing the
+interpolation can change. Beside a call, an element read, a String or
+a variable a part assigns, the C is as before: a read standing in the
+same C expression could run before the moved operands, as in
+`"#{k.name}#{k.two((n += 1), lg(1))}".center(n + 12, "*")`.
+`buf << "..."` as a statement appends part by part and is sequenced.
+
+Test: test/interpolation_parts_run_in_order.rb. Generated C changes in
+34 corpus programs: one line of packages/ffi/ffi.rb (in 13 ffi tests,
+8 fiddle tests and test/ffi_gem_compat), net_http_header_crlf and 11
+tests under test/; each prints what it printed. optcarrot's C is
+identical.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
