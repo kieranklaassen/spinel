@@ -3950,9 +3950,17 @@ static void emit_expr_node(Compiler *c, int id, Buf *b) {
     for (int ti = 0; ti < tcount; ti++) {
       const char *tnm = nt_str(nt, tv[ti], "name");
       if (!tnm) continue;
-      buf_printf(b, "lv_%s = sp_re_named_capture(sp_re_pat_%d, ", rename_local(tnm), reidx);
+      /* a target that holds a String handle (a local that is appended to)
+         takes the capture in a handle of its own, as the plain write wraps
+         a String for it; a group that took no part stays nil. Bare, the
+         const char * went into the sp_String * slot and the C did not
+         build. */
+      LocalVar *tlv = scope_local(comp_scope_of(c, id), tnm);
+      int hnd = tlv && tlv->type == TY_STRBUF;
+      buf_printf(b, "lv_%s = %ssp_re_named_capture(sp_re_pat_%d, ", rename_local(tnm),
+                 hnd ? "sp_String_new_shared(" : "", reidx);
       emit_str_literal(b, tnm);
-      buf_puts(b, "); ");
+      buf_puts(b, hnd ? ")); " : "); ");
     }
     buf_printf(b, "_t%d; })", t);
     return;
