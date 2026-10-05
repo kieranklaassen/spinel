@@ -398,7 +398,13 @@ int emit_call_kernel_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
     }
     if (sp_streq(name, "String") && ac == 1) {
       TyKind at = comp_ntype(c, av[0]);
-      if (at == TY_STRING) { emit_expr(c, av[0], b); }
+      /* a String slot holding nil is NULL, and String(nil) is "", as the
+         slot's #to_s answers */
+      if (at == TY_STRING) {
+        int tn = ++g_tmp;
+        buf_printf(b, "({ const char *_t%d = ", tn); emit_expr(c, av[0], b);
+        buf_printf(b, "; _t%d ? _t%d : sp_str_frozen_empty; })", tn, tn);
+      }
       /* a nullable Integer or Float holding its sentinel is nil, whose
          String is "": box it, as nil where it is one */
       else if ((at == TY_INT || at == TY_FLOAT) && call_returns_nullable_int(c, av[0])) {
