@@ -1,0 +1,1 @@
+A `when nil` beside an Array or a Hash asks whether it is nil

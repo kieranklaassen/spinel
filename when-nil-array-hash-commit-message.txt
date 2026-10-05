@@ -1,0 +1,19 @@
+A `when nil` beside an Array or a Hash asks whether it is nil
+
+`when nil` beside an Array or a Hash subject never matched, so one that
+was nil took the else:
+
+    rows = [[1, 2], [3]]
+    p(case rows[9] when nil then :none else :row end)   # :row
+
+The same for an instance variable never written. An Array and a Hash
+hold nil as NULL, as a String does, and the arm now asks for it in the
+same line.
+
+`when NilClass` beside an Array or a Hash still misses a nil one. Where
+a `when nil` arm follows it, that arm now answers where the else did;
+CRuby takes the `when NilClass` arm.
+
+Test: case_when_nil_array_hash.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

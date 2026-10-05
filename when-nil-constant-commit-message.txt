@@ -1,0 +1,17 @@
+A constant holding nil is a `when nil` arm
+
+    NOTHING = nil
+    p(case 0 when NOTHING then :hit else :miss end)     # :hit
+
+Only the literal `nil` took the arm that asks the subject for its own
+nil. A constant that holds nil was read as a value: beside an Integer
+or a Float it was compared as a number, nil read as 0, and matched 0
+and 0.0; beside a String, an Array or a Hash it never matched one that
+was nil.
+
+The constant, bare or under a module, now takes the same arm as the
+literal.
+
+Test: case_when_nil_constant.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

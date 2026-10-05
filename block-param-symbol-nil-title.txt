@@ -1,0 +1,1 @@
+A nil yielded into a Symbol block parameter is a Symbol's nil

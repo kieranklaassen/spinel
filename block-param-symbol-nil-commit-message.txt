@@ -1,0 +1,32 @@
+A nil yielded into a Symbol block parameter is a Symbol's nil
+
+A literal nil bound to a block parameter that holds a Symbol was written
+as 0, the id of the program's first Symbol:
+
+    def marks
+      yield nil
+      yield :a
+    end
+    marks { |m| p m }
+
+printed ":marks" and ":a"; CRuby prints "nil" and ":a". `m.nil?` was
+false, `m` was truthy, `m || :none` was `:marks` and "#{m}" was "marks".
+An Integer and a Float parameter take their own nil there; a Symbol had
+no line. With it the parameter is nil to each of those, to `to_s`,
+`inspect`, `compact`, `include?` and a Hash lookup, and when it is kept
+in an Array or handed on to a method.
+
+`when nil` beside a Symbol subject made the same mistake from the other
+side. It compared with 0, so it took that parameter for nil, and the
+first Symbol with it, and it missed a Symbol that was nil another way
+(an element past the end, an instance variable never written). The two
+are cured together, since either alone turns `case m when nil` for the
+yielded nil from right to wrong: the parameter takes the Symbol's nil,
+and the arm, a constant holding nil the same, asks for it.
+
+What a Symbol slot holding nil gets wrong wherever its nil came from
+stays as on master. Among others: `m == nil` is false, `!m` is false,
+`m.class` is Symbol, `m&.to_s` is "" and `in nil` misses; the class
+tests and the other methods nil has take it for a Symbol too.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
