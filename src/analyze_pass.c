@@ -13132,6 +13132,46 @@ static int infer_block_params_container_arms(Compiler *c, const NodeTable *nt, i
   return changed;
 }
 
+/* Whether `node`, a value in a fold's block, is the memo itself: a read of
+   it, a push onto it (`m << a`, `m.push(a)`, `m.unshift(a)` answer their
+   receiver, so a chain of them does too), or a conditional whose every arm
+   is. */
+static int fold_value_is_memo(Compiler *c, int node, const char *memo, int depth) {
+  const NodeTable *nt = c->nt;
+  node = unwrap_parens(c, node);
+  if (node < 0 || depth > 64) return 0;
+  NodeKind k = nt_kind(nt, node);
+  if (k == NK_LocalVariableReadNode)
+    return nt_str(nt, node, "name") && sp_streq(nt_str(nt, node, "name"), memo);
+  if (k == NK_CallNode) {
+    const char *nm = nt_str(nt, node, "name");
+    if (!nm || !(is_push_alias(nm) || is_prepend_alias(nm)) || nt_ref(nt, node, "block") >= 0) return 0;
+    return fold_value_is_memo(c, nt_ref(nt, node, "receiver"), memo, depth + 1);
+  }
+  if (k == NK_IfNode || k == NK_UnlessNode) {
+    int sub = nt_ref(nt, node, "subsequent");
+    if (sub < 0) sub = nt_ref(nt, node, "else_clause");
+    if (sub < 0) return 0;
+    if (nt_kind(nt, sub) == NK_ElseNode) sub = stmts_tail(nt, nt_ref(nt, sub, "statements"));
+    return fold_value_is_memo(c, stmts_tail(nt, nt_ref(nt, node, "statements")), memo, depth + 1) &&
+           fold_value_is_memo(c, sub, memo, depth + 1);
+  }
+  return 0;
+}
+
+/* Whether a fold's block answers its memo at every step, so that the memo
+   is the seed all the way through: the block's value is the memo, and the
+   block neither assigns it nor leaves a step early with another value. */
+static int fold_block_answers_memo(Compiler *c, int block, const char *memo) {
+  static const NodeKind early[] = { NK_NextNode, NK_BreakNode };
+  const NodeTable *nt = c->nt;
+  if (!memo || nt_kind(nt, block) != NK_BlockNode) return 0;
+  int body = nt_ref(nt, block, "body");
+  if (body < 0 || subtree_has_any_kind(nt, body, early, 2, 0) ||
+      exec_subtree_writes_local(nt, body, memo, 0)) return 0;
+  return fold_value_is_memo(c, stmts_tail(nt, body), memo, 0);
+}
+
 /* infer_block_params's per-call arms for the Enumerable family's blocks:
    each_cons / each_slice and their map / with_index / inject chains,
    with_index, combination / permutation, sort and the comparator blocks,
@@ -13377,13 +13417,16 @@ static int infer_block_params_enum_arms(Compiler *c, const NodeTable *nt, int id
     TyKind acc_t = (rargc > 0 && rargv) ? infer_type(c, rargv[0]) : et2;
     /* An empty `[]` / `{}` seed the block only hands to a callable has no
        fill to type it from; the element type of the RECEIVER is not what it
-       holds, so answer the general boxed container (#3657). */
+       holds, so answer the general boxed container (#3657). So does an
+       empty `[]` the block answers at every step: the memo is that Array
+       throughout, and typed as the receiver's element `m << v << s` read
+       as a String append whose operand `s` is copied. */
     if (rargc > 0 && rargv && acc_t == TY_UNKNOWN) {
       const char *s0 = nt_type(nt, rargv[0]);
       int sn0 = 0;
       if (s0 && sp_streq(s0, "ArrayNode") &&
           (nt_arr(nt, rargv[0], "elements", &sn0), sn0 == 0) &&
-          ewo_memo_passed_to_callable_at(c, id, 0))
+          (ewo_memo_passed_to_callable_at(c, id, 0) || fold_block_answers_memo(c, block, p0)))
         acc_t = TY_POLY_ARRAY;
       else if (s0 && sp_streq(s0, "HashNode") &&
                (nt_arr(nt, rargv[0], "elements", &sn0), sn0 == 0))
