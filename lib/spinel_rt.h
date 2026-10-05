@@ -6111,6 +6111,8 @@ static sp_RbVal sp_splat_to_array(sp_RbVal v) {
         cn, cn, sp_poly_class_name(a)));
     }
   }
+  /* nothing else may hold v yet (a call's fresh answer), and the array allocates */
+  SP_GC_ROOT_RBVAL(v);
   { sp_PolyArray *r = sp_PolyArray_new(); SP_GC_ROOT(r); sp_PolyArray_push(r, v); return sp_box_poly_array(r); }
 }
 static sp_RbVal sp_poly_arr_get(sp_RbVal a, sp_int i) {
