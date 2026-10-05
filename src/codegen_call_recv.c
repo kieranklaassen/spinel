@@ -1438,7 +1438,11 @@ static int emit_kind_array_iter_call(Compiler *c, int id, Buf *b, const NodeTabl
     else                              buf_printf(b, " _t%d == 1; })", tc);
     { *out = 1; return 1; }
   }
-  /* array.none?(/re/) / any?/all?/one? with a Regexp pattern over strings. */
+  /* array.none?(/re/) / any?/all?/one? with a Regexp pattern over strings.
+     Each asks the pattern's === of an element at a time and stops where the
+     answer is known -- any? and none? at the first match, all? at the first
+     miss, one? at the second match -- so $~ is the last one asked, as in
+     CRuby. Counting them all left the last element's. */
   if (is_quantifier(name) &&
       argc == 1 && nt_ref(nt, id, "block") < 0 &&
       rt == TY_STR_ARRAY && re_lit_index(c, argv[0]) >= 0) {
@@ -1448,7 +1452,12 @@ static int emit_kind_array_iter_call(Compiler *c, int id, Buf *b, const NodeTabl
     buf_printf(b, "({ sp_StrArray *_t%d = %s;", ta, ra.p ? ra.p : "NULL"); free(ra.p);
     buf_printf(b, " sp_int _t%d = 0;", tc);
     buf_printf(b, " for (sp_int _t%d = 0; _t%d < sp_StrArray_length(_t%d); _t%d++)", ti, ti, ta, ti);
-    buf_printf(b, " if (sp_re_match(sp_re_pat_%d, sp_StrArray_get(_t%d, _t%d)) >= 0) _t%d++;", rei, ta, ti, tc);
+    if (sp_streq(name, "all?"))
+      buf_printf(b, " { if (sp_re_match(sp_re_pat_%d, sp_StrArray_get(_t%d, _t%d)) < 0) break; _t%d++; }", rei, ta, ti, tc);
+    else if (sp_streq(name, "one?"))
+      buf_printf(b, " if (sp_re_match(sp_re_pat_%d, sp_StrArray_get(_t%d, _t%d)) >= 0 && ++_t%d > 1) break;", rei, ta, ti, tc);
+    else
+      buf_printf(b, " if (sp_re_match(sp_re_pat_%d, sp_StrArray_get(_t%d, _t%d)) >= 0) { _t%d++; break; }", rei, ta, ti, tc);
     if (sp_streq(name, "all?"))       buf_printf(b, " _t%d == sp_StrArray_length(_t%d); })", tc, ta);
     else if (sp_streq(name, "any?"))  buf_printf(b, " _t%d > 0; })", tc);
     else if (sp_streq(name, "none?")) buf_printf(b, " _t%d == 0; })", tc);
