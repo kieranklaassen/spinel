@@ -19,6 +19,26 @@ p kind("a\0a")
 p kind("a\0b")
 p kind("a\0d")
 
+# a Range held in a value, read by when
+def held(r, s)
+  case s
+  when r then "in"
+  else "out"
+  end
+end
+r2 = ("a\0b".."a\0c")
+p held(r2, "a\0a")
+p held(r2, "a\0b")
+p held(r2, "a\0d")
+
+# the compare is by the bytes alone: a String that lost its binary mark
+# still equals the end it was cut from
+rb = ("\x80".b.."\xbf".b)
+p "\xC3\xA9\xBF".b.chars.map { |ch| rb === ch }
+ch = "\xbf".b.chars[0]
+p rb.cover?(ch)
+p (ch.."\xbf".b).max.nil?
+
 # the maximum is the end unless the begin is past it
 p ("a\0b".."a\0a").max
 p ("a\0a".."a\0b").max

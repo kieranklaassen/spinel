@@ -8,6 +8,12 @@ false
 "out"
 "in"
 "out"
+"out"
+"in"
+"out"
+[false, true, true]
+true
+false
 nil
 "a\u0000b"
 nil
