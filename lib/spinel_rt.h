@@ -3091,6 +3091,13 @@ static SP_INLINE const char *sp_poly_sep_str(sp_RbVal v) {
   if (v.tag == SP_TAG_NIL) return NULL;
   return sp_poly_arg_str(v);
 }
+/* A boxed value assigned into a String SLOT, in a program that defines a
+   #to_str: nil is the slot's nil (NULL), as sp_poly_to_s_or_nil keeps it in a
+   program that defines none. */
+static SP_INLINE const char *sp_poly_arg_str_or_nil(sp_RbVal v) {
+  if (v.tag == SP_TAG_NIL) return NULL;
+  return sp_poly_arg_str(v);
+}
 /* The object half of the check below, split out and kept off the inlined path
    for the reason sp_poly_arg_str_obj is: the object case is the rare one.
 

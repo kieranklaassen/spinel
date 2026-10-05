@@ -2324,7 +2324,7 @@ int emit_empty_container_for_slot(Compiler *c, int v, TyKind slot, Buf *b) {
 }
 
 /* emit_poly_rhs_coerced's conversion of a boxed value into a scalar or a
-   String slot (a String slot takes sp_poly_arg_str instead where the
+   String slot (a String slot takes sp_poly_arg_str_or_nil instead where the
    program defines a #to_str); NULL for any other slot */
 const char *poly_rhs_unbox_fn(TyKind slot) {
   const TyTraits *tr = ty_traits_of(slot);   /* the unbox_rhs column (types.c) */
@@ -2354,7 +2354,8 @@ int emit_poly_rhs_coerced(Compiler *c, TyKind slot, int v, Buf *b) {
      bool keeps the plain form: an object in a bool slot is truthy. */
   /* A nil narrowed into an int or float slot is that slot's nil sentinel, not
      the 0 under the tag (#4288). TY_BOOL keeps the plain form: nil in a bool
-     slot is false, and the int sentinel would read truthy. */
+     slot is false, and the int sentinel would read truthy. A String slot's nil
+     is NULL, not the "" nil.to_s answers: both String forms keep it. */
   /* A class-typed slot (a parameter an RBS declaration pinned to its class)
      reassigned from a boxed value (`comment = subtree.shift` over a poly
      array) took the raw sp_RbVal and the C did not compile (#4640). The
@@ -2367,7 +2368,7 @@ int emit_poly_rhs_coerced(Compiler *c, TyKind slot, int v, Buf *b) {
     return 1;
   }
   const char *fn = slot == TY_STRING && prog_has_conv_method(c, "to_str", TY_STRING)
-                   ? "sp_poly_arg_str" : poly_rhs_unbox_fn(slot);
+                   ? "sp_poly_arg_str_or_nil" : poly_rhs_unbox_fn(slot);
   if (!fn) return 0;
   buf_printf(b, "%s(", fn); emit_expr(c, v, b); buf_puts(b, ")");
   return 1;
