@@ -2225,6 +2225,7 @@ LocalVar *scope_local_intern(Scope *s, const char *name) {
   lv->str_shared = 0;
   lv->str_append = 0;
   lv->poly_hash_pin = 0;
+  lv->hash_alias_seen = TY_UNKNOWN;
   lv->poly_array_pin = 0;
   lv->nullable_int = 0;
   lv->nil_passed = 0;

@@ -20,6 +20,18 @@ h11 = {1 => 2}; g11 = h11; m11 = {"k" => "s"}; m11.each { |k, v| g11[k] = v }; p
 
 h12 = {a: 1}; g12 = h12; m12 = {1 => :a}; g12.merge!(m12); p h12.equal?(g12), g12.size
 
+# a copy of the Hash kept in a local takes the Hash's variant with it
+h13 = {1 => 1, 2 => 2}; g13 = h13; [[9, "s"]].each { |k, v| g13[k] = v }; c13 = h13.dup; p c13.to_a, c13.equal?(h13)
+h14 = {"a" => 1}; g14 = h14; m14 = {2 => 2}; g14.merge!(m14); c14 = h14.merge({}); d14 = h14.select { |_k, v| v == 1 }; p c14.to_a, d14.to_a
+h15 = {"a" => "x"}; g15 = h15; [[1, "s"]].each { |k, v| g15[k] = v }; c15 = h15.clone; d15 = h15.to_h; p c15.to_a, d15.to_a
+
+# three names, and a foreign key of another kind through two of them
+h16 = {"a" => 1}; g16 = h16; f16 = g16; m16 = {"b" => "s"}; g16.merge!(m16); n16 = {c: 2}; f16.merge!(n16); p h16.to_a
+
+# a chain of names is followed to its end
+a17 = {a: 1}; b17 = a17; c17 = b17; d17 = c17; e17 = d17; f17 = e17; g17 = f17; h17 = g17; i17 = h17; j17 = i17
+j17[1] = "s"; p a17.to_a
+
 def fill(pairs)
   h = {"a" => 1}
   g = h

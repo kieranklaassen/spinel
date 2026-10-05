@@ -220,6 +220,11 @@ typedef struct {
                        Durable, like oa_pin: the slot's own element writes
                        re-derive a narrower kind every round, and the binding
                        widened it back -- to the cap. */
+  TyKind hash_alias_seen; /* the kind this Hash local had the last time
+                       infer_hash_aliases looked at it beside another name of
+                       its Hash. Two names are joined on kinds that have each
+                       lasted a round: one a round behind the other is on its
+                       way to the same kind already. */
   int poly_array_pin; /* a local whose writes are all array literals, handed
                        to a parameter an element write widened to the general
                        Array: the reverse binding types it that Array, and the
