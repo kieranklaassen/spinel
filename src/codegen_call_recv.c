@@ -6471,6 +6471,19 @@ static int str_arms_case_search(Compiler *c, Buf *b, const NodeTable *nt, const 
     else buf_printf(b, "(sp_int)sp_str_byte_len(_t%d)", tsr);
     buf_puts(b, "); })");
   }
+  /* the same two with the Regexp held in a variable, which had no arm */
+  else if ((sp_streq(name, "byteindex") || sp_streq(name, "byterindex")) && (argc == 1 || argc == 2) &&
+           comp_ntype(c, argv[0]) == TY_REGEX) {
+    int tsr = ++g_tmp, back = name[4] == 'r';
+    char pat[32];
+    buf_printf(b, "({ const char *_t%d = %s; SP_GC_ROOT_STR(_t%d);", tsr, r, tsr);
+    emit_re_arg_pat(c, argv[0], "no implicit conversion of nil into String", b, pat);
+    buf_printf(b, " sp_re_byte%sindex_opt(%s, _t%d, ", back ? "r" : "", pat, tsr);
+    if (argc == 2) emit_int_expr(c, argv[1], b);
+    else if (back) buf_printf(b, "(sp_int)sp_str_byte_len(_t%d)", tsr);
+    else buf_puts(b, "0");
+    buf_puts(b, "); })");
+  }
   else if (sp_streq(name, "byteindex") && argc == 1 && str_needle_p(c, argv[0])) {
     buf_printf(b, "sp_str_byteindex(%s, ", r); emit_str_expr(c, argv[0], b); buf_puts(b, ")");
   }
