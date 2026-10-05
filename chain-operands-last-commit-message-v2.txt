@@ -1,0 +1,34 @@
+A call that declined its operands once renders them last
+
+emit_operands_in_order renders two or more observable operands, emits
+the call with them bound, and declines when the call did not take them
+so; the caller then renders the whole call again, operands included. A
+method written in Ruby binds its arguments in order already and
+declines every time. As the receiver of another such call it is
+emitted twice, once to be bound and once in that call's arm, so every
+link of a chain doubled the work below it:
+
+    def where(x) = (@w << x; self)
+    q = Q.new.where(col(1)).where(col(2))...
+
+compiled in 0.11 s at 12 links, 1.7 s at 16 and 25 s at 20, with `.`
+and with `&.`, whatever call the argument is. #4925 was the same with a
+lone operand, cured by rendering it after the call (operands_last). A
+call that has declined two or more is now remembered by node and takes
+that path from then on: it is emitted with its operands named, and they
+are rendered only if it takes them. 20 links compile in 0.02 s, 200 in
+1.6 s and 512 in 10 s. Past 100 links the time grows four to six times
+for each doubling; a chain with literal arguments grows about four
+times, on master and here.
+
+The first emission of every call is as before. `make cident` against
+fa08b100d: 6109 identical, 1 differ. In test/typed_array_assoc_nil a
+call that had declined is emitted again where it takes its operands,
+and their temps are numbered after the bindings instead of before.
+optcarrot's C is identical.
+
+`make scale-test` compiles test/scale/call_chain_operands.rb, forty
+links in seven shapes, under its CPU-time limit; without the change it
+is killed there.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
