@@ -2144,6 +2144,7 @@ GC_MINOR_TESTS := test/builtin_argument_array_roots.rb \
                   test/string_handle_yield_paths.rb \
                   test/string_handle_keyword_dyn_sites.rb \
                   test/gc_minor_never_young_store.rb \
+                  test/gc_minor_nested_store.rb \
                   test/builtin_value_ivar_reflection.rb
 
 # Each program runs with the minor mark off and on and must answer the same;

@@ -4520,6 +4520,18 @@ static size_t wb_stmt_end(const Buf *b, size_t q) {
   }
   return send;
 }
+/* A store rewritten at statement position is scanned on into its value, since
+   a store can sit in there: `k.w = @last.w = v` is one C statement, and so is
+   `@seen = @items.each { |it| it.w = v }` with its block, or `@box = Box.new
+   { .. }` with the body of an initialize that takes a block. What a value
+   holds besides code is its literals, and a Ruby string can spell a store, so
+   inside a value (up to `val_end`) a literal is stepped over, the way
+   wb_stmt_end stepped over it to find the statement's end. Answers the last
+   byte of the literal that opens at `i`, or `i` when none does. */
+static size_t wb_value_literal_last(const Buf *b, size_t i, size_t val_end) {
+  if (b->p[i] != '"' && b->p[i] != '\'') return i;
+  return frame_skip_noncode(b->p, i, val_end) - 1;
+}
 /* `(*X) = v` where X names a reference cell: wrap X so the barrier lands on the
    cell, which is the object the collector reaches the stored value through.
 
@@ -4538,8 +4550,12 @@ static void gc_wb_cells(Compiler *c, Buf *b) {
   wb_cells_collect(&cs, b->p, b->len);
   if (!cs.n) { free(cs.v); return; }
   size_t hdr_at = 0, hdr_h = (size_t)-1;
+  size_t val_end = 0;                  /* see wb_value_literal_last */
   for (size_t i = 0; i + 3 < b->len; i++) {
-    if (b->p[i] != '(' || b->p[i+1] != '*') continue;
+    if (b->p[i] != '(' || b->p[i+1] != '*') {
+      if (i < val_end) i = wb_value_literal_last(b, i, val_end);
+      continue;
+    }
     size_t j = i, d = 0;
     while (j < b->len) {
       if (b->p[j] == '(') d++;
@@ -4590,6 +4606,7 @@ static void gc_wb_cells(Compiler *c, Buf *b) {
       buf_printf(&ins, ") _wc%d = ", wid);
       buf_putn(&ins, b->p + is, ie - is);
       buf_printf(&ins, "; (*_wc%d)", wid);
+      size_t lv_end = ins.len;
       buf_putn(&ins, b->p + j + 1, send - j);
       buf_printf(&ins, " sp_gc_wb((void *)_wc%d); }", wid);
       size_t grew2 = ins.len - (send + 1 - i);
@@ -4598,7 +4615,10 @@ static void gc_wb_cells(Compiler *c, Buf *b) {
       memmove(b->p + i + ins.len, b->p + i + (send + 1 - i), tail2);
       memcpy(b->p + i, ins.p, ins.len);
       b->p[b->len] = '\0';
-      i = i + ins.len;
+      if (i < val_end) val_end += grew2;
+      else val_end = i + ins.len;
+      /* on into the value: `x = y = v` stores into y's cell in there */
+      i = i + lv_end;
       free(ins.p);
       continue;
     }
@@ -4611,6 +4631,7 @@ static void gc_wb_cells(Compiler *c, Buf *b) {
     memmove(b->p + is + ins.len, b->p + is + (ie - is), tail);
     memcpy(b->p + is, ins.p, ins.len);
     b->p[b->len] = '\0';
+    if (is < val_end) val_end += grew;
     i = is + ins.len;
     free(ins.p);
   }
@@ -4632,8 +4653,7 @@ static void gc_wb_cells(Compiler *c, Buf *b) {
    exactly what emit_frozen_literal writes. Anything else,
    `sp_str_dup(<literal>)` included, keeps its barrier.
 
-   Answers where the value ends, 0 for no. The scan goes on from there: a
-   store it wraps is stepped over whole. */
+   Answers where the value ends, 0 for no. The scan goes on from there. */
 static size_t wb_value_never_young(const Buf *b, size_t q) {
   static const char fzl[] = "((char *)_fzl_", data[] = ".d)";
   size_t fn = sizeof fzl - 1, dn = sizeof data - 1;
@@ -4681,6 +4701,7 @@ static void gc_wb_insert(Compiler *c, Buf *b, size_t fn_off) {
 }
 static void gc_wb_insert_seg(Compiler *c, Buf *b, size_t fn_off) {
   int cur_self_cls = -1;
+  size_t val_end = 0;                  /* see wb_value_literal_last */
   for (size_t i = fn_off; i + 4 < b->len; i++) {
     /* track the enclosing function's receiver type */
     if (b->p[i] == '\n' && !strncmp(b->p + i + 1, "static ", 7)) {
@@ -4701,7 +4722,10 @@ static void gc_wb_insert_seg(Compiler *c, Buf *b, size_t fn_off) {
           cur_self_cls = wb_class_by_cname(c, t + 3, (size_t)(e - t) - 3);
       }
     }
-    if (b->p[i] != '-' || b->p[i+1] != '>' || strncmp(b->p + i + 2, "iv_", 3)) continue;
+    if (b->p[i] != '-' || b->p[i+1] != '>' || strncmp(b->p + i + 2, "iv_", 3)) {
+      if (i < val_end) i = wb_value_literal_last(b, i, val_end);
+      continue;
+    }
     size_t f = i + 2, e = f;
     while (e < b->len && (isalnum((unsigned char)b->p[e]) || b->p[e] == '_')) e++;
     size_t q = e;
@@ -4781,6 +4805,7 @@ static void gc_wb_insert_seg(Compiler *c, Buf *b, size_t fn_off) {
       buf_printf(&ins, ") _wb%d = ", wid);
       buf_putn(&ins, b->p + st, i - st);
       buf_printf(&ins, "; _wb%d", wid);
+      size_t lv_end = ins.len;
       buf_putn(&ins, b->p + i, stmt_end - i + 1);
       /* A statement expression's last statement is its value, and this store
          can be one (`({ ...; o->f = v; })`). Keep the assigned value as the
@@ -4792,7 +4817,13 @@ static void gc_wb_insert_seg(Compiler *c, Buf *b, size_t fn_off) {
       memmove(b->p + st + ins.len, b->p + st + (stmt_end + 1 - st), tail2);
       memcpy(b->p + st, ins.p, ins.len);
       b->p[b->len] = '\0';
-      i = st + ins.len;
+      if (st < val_end) val_end += grew2;
+      else val_end = st + ins.len;
+      /* On into the value, not past the statement. Stepping over it whole
+         left a store in the value with no barrier at all: the young Array of
+         `k.w = @last.w = [a, b]` was held only by an old `@last` no minor
+         mark walks, and was freed in the slot. */
+      i = st + lv_end;
       free(ins.p);
       continue;
     }
@@ -4814,6 +4845,7 @@ static void gc_wb_insert_seg(Compiler *c, Buf *b, size_t fn_off) {
     memmove(b->p + st + ins.len, b->p + st + (i - st), tail);
     memcpy(b->p + st, ins.p, ins.len);
     b->p[b->len] = '\0';
+    if (st < val_end) val_end += grew;
     i = st + ins.len + 1;                    /* continue past what was inserted */
     free(ins.p);
   }
