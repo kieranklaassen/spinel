@@ -28897,14 +28897,76 @@ static int an_kept_bang_value(Compiler *c, int v) {
   TyKind rt = comp_ntype(c, recv), vt = comp_ntype(c, v);
   return (rt == TY_STRING || rt == TY_STRBUF) && (vt == TY_STRING || vt == TY_STRBUF) ? v : -1;
 }
-/* The String mutator local `vn` of scope `vs` is the receiver of, or NULL:
-   what the scrub! refusal asks (strbuf_mut_kind), less setbyte, which
-   writes its byte where the bytes are, so every name sees it. A change made
-   through another name for the value (`t = r; t << x`) or by a method the
-   value is handed to is not looked for: the scrub! refusal sees neither. */
+/* What the pass asks of a local, answered from tables so that a program
+   with a kept value in every method, or thousands in one, walks its calls
+   and reads once and the writes of each local once. `chg` and `reads` are
+   filled by an_kept_bang_tabs_build the first time a kept value passes
+   strbuf_mut_kind; `wr` is filled a local at a time (an_kept_bang_writes). */
+typedef struct {
+  SbMutTab chg;    /* 1: the receiver of a String mutator other than setbyte */
+  SbMutTab reads;  /* the local's reads, up to two */
+  SbMutTab wr;     /* KEPT_BANG_* of the local's writes */
+  int built;
+} KeptBangTabs;
+enum { KEPT_BANG_ASKED = 1, KEPT_BANG_OWN = 2, KEPT_BANG_NAMED = 4 };
+static void an_kept_bang_tabs_build(Compiler *c, KeptBangTabs *t) {
+  const NodeTable *nt = c->nt;
+  int n = 0;
+  nt_nodes_of_kind(nt, NK_CallNode, &n);
+  sb_mut_tab_init(&t->chg, n);
+  NT_FOREACH_KIND(nt, NK_CallNode, u) {
+    int ur = nt_ref(nt, u, "receiver");
+    const char *un = nt_str(nt, u, "name");
+    if (ur < 0 || !un || nt_kind(nt, ur) != NK_LocalVariableReadNode) continue;
+    Scope *us = comp_scope_of(c, ur);
+    const char *rn = nt_str(nt, ur, "name");
+    if (us && rn && sp_str_mutator(un, SP_MUT_LOCAL) && !sp_streq(un, "setbyte"))
+      sb_mut_tab_note(&t->chg, rn, (int)(us - c->scopes), 1);
+  }
+  nt_nodes_of_kind(nt, NK_LocalVariableReadNode, &n);
+  sb_mut_tab_init(&t->reads, n);
+  NT_FOREACH_KIND(nt, NK_LocalVariableReadNode, rd) {
+    Scope *rs = comp_scope_of(c, rd);
+    const char *rn = nt_str(nt, rd, "name");
+    signed char *cell = rs && rn ? sb_mut_tab_slot(&t->reads, rn, (int)(rs - c->scopes), 1) : NULL;
+    if (cell && *cell < 2) (*cell)++;
+  }
+  nt_nodes_of_kind(nt, NK_LocalVariableWriteNode, &n);
+  sb_mut_tab_init(&t->wr, 2 * n);   /* a kept value's local and its receiver's */
+  t->built = 1;
+}
+/* The writes of local `ln` of scope `ls`. KEPT_BANG_OWN: each is a kept
+   bang value or nil, so a change through the local lands on no other
+   String. KEPT_BANG_NAMED: one of them names a local (or is not a plain
+   write), so the local may be another name for a String. */
+static int an_kept_bang_writes(Compiler *c, KeptBangTabs *t, const char *ln, Scope *ls) {
+  const NodeTable *nt = c->nt;
+  int lsi = (int)(ls - c->scopes);
+  signed char *cell = sb_mut_tab_slot(&t->wr, ln, lsi, 1);
+  if (cell && *cell) return *cell;
+  int f = KEPT_BANG_ASKED | KEPT_BANG_OWN;
+  for (int w = comp_lvw_first_sc(c, lsi, ln); w >= 0; w = comp_lvw_next_sc(c, w)) {
+    /* the chain carries the writes of other names too */
+    const char *wn = nt_str(nt, w, "name");
+    if (!wn || !sp_streq(wn, ln) || comp_scope_of(c, w) != ls) continue;
+    NodeKind wk = nt_kind(nt, w);
+    int wv = wk == NK_LocalVariableWriteNode || wk == NK_LocalVariableOrWriteNode ||
+             wk == NK_LocalVariableAndWriteNode ? nt_ref(nt, w, "value") : -1;
+    int lv[1];
+    if (wv < 0 || (nt_kind(nt, wv) != NK_NilNode && an_kept_bang_value(c, wv) < 0)) f &= ~KEPT_BANG_OWN;
+    if (wv < 0 || an_strbuf_alias_leaves(c, wv, lv, 1, 0) > 0) f |= KEPT_BANG_NAMED;
+  }
+  if (cell) *cell = (signed char)f;
+  return f;
+}
+/* The String mutator local `vn` of scope `vs` is the receiver of: what the
+   scrub! refusal asks (strbuf_mut_kind), less setbyte, which writes its
+   byte where the bytes are, so every name sees it. A change made through
+   another name for the value (`t = r; t << x`) or by a method the value is
+   handed to is not looked for: the scrub! refusal sees neither. Walked
+   only for the sentence, once `chg` has said there is one. */
 static const char *an_kept_bang_local_change(Compiler *c, const char *vn, Scope *vs) {
   const NodeTable *nt = c->nt;
-  if (strbuf_mut_kind(c, vn, vs) != 1) return NULL;
   for (int u = comp_scall_first(c, (int)(vs - c->scopes)); u >= 0; u = comp_scall_next(c, u)) {
     if (nt_kind(nt, u) != NK_CallNode) continue;
     int ur = nt_ref(nt, u, "receiver");
@@ -28913,7 +28975,7 @@ static const char *an_kept_bang_local_change(Compiler *c, const char *vn, Scope 
     if (sp_str_mutator(un, SP_MUT_LOCAL) && !sp_streq(un, "setbyte") && sp_streq(nt_str(nt, ur, "name"), vn))
       return un;
   }
-  return NULL;
+  return "a String mutator";
 }
 /* Is the String at `n` held by a variable that outlives the statement: an
    instance, global or class variable, a constant, a reader's instance
@@ -28946,10 +29008,8 @@ static int an_kept_bang_held(Compiler *c, int n, int depth) {
    walk reads it as and that local is a parameter, is another name for a
    String (one of its writes names a local), or is read again in its scope.
    A String the receiver has just made (`x.dup.upcase!`), and a local
-   nothing reads again, show no one the copy. `reads` counts each local's
-   reads, up to two, the first time it is asked: a program may keep such a
-   value in every method, and each would walk the whole program's reads. */
-static int an_kept_bang_receiver_read_again(Compiler *c, int call, SbMutTab *reads) {
+   nothing reads again, show no one the copy. */
+static int an_kept_bang_receiver_read_again(Compiler *c, int call, KeptBangTabs *t) {
   const NodeTable *nt = c->nt;
   int recv = an_unparen(nt, nt_ref(nt, call, "receiver"));
   if (an_kept_bang_held(c, recv, 0)) return 1;
@@ -28957,73 +29017,44 @@ static int an_kept_bang_receiver_read_again(Compiler *c, int call, SbMutTab *rea
   const char *sn = src >= 0 ? nt_str(nt, src, "name") : NULL;
   Scope *ss = src >= 0 ? comp_scope_of(c, src) : NULL;
   if (!sn || !ss) return 0;
-  LocalVar *sv = scope_local(ss, sn);
-  if (!sv || sv->is_param || sv->is_block_param) return 1;
-  for (int w = comp_lvw_first_sc(c, (int)(ss - c->scopes), sn); w >= 0; w = comp_lvw_next_sc(c, w)) {
-    /* the chain carries the writes of other names too */
-    const char *wn = nt_str(nt, w, "name");
-    if (!wn || !sp_streq(wn, sn) || comp_scope_of(c, w) != ss) continue;
-    NodeKind wk = nt_kind(nt, w);
-    int lv[1];
-    if ((wk != NK_LocalVariableWriteNode && wk != NK_LocalVariableOrWriteNode && wk != NK_LocalVariableAndWriteNode) ||
-        an_strbuf_alias_leaves(c, nt_ref(nt, w, "value"), lv, 1, 0) > 0)
-      return 1;
-  }
-  if (!reads->head) {
-    int n = 0;
-    nt_nodes_of_kind(nt, NK_LocalVariableReadNode, &n);
-    sb_mut_tab_init(reads, n);
-    NT_FOREACH_KIND(nt, NK_LocalVariableReadNode, rd) {
-      Scope *rs = comp_scope_of(c, rd);
-      const char *rn = nt_str(nt, rd, "name");
-      signed char *cell = rs && rn ? sb_mut_tab_slot(reads, rn, (int)(rs - c->scopes), 1) : NULL;
-      if (cell && *cell < 2) (*cell)++;
-    }
-  }
+  if (an_kept_bang_writes(c, t, sn, ss) & KEPT_BANG_NAMED) return 1;
   /* the receiver's own read is one of them; a chained write (`(t = s).upcase!`) is none */
-  signed char *cell = sb_mut_tab_slot(reads, sn, (int)(ss - c->scopes), 0);
-  return cell && *cell >= (nt_kind(nt, src) == NK_LocalVariableReadNode ? 2 : 1);
+  signed char *cell = sb_mut_tab_slot(&t->reads, sn, (int)(ss - c->scopes), 0);
+  if (cell && *cell >= (nt_kind(nt, src) == NK_LocalVariableReadNode ? 2 : 1)) return 1;
+  LocalVar *sv = scope_local(ss, sn);   /* asked last: it walks the scope's locals */
+  return !sv || sv->is_param || sv->is_block_param;
 }
 /* `r = s.upcase!` keeps the String `s` in CRuby, so a later `r << x` shows
    through `s`. Here the write keeps the value as a String of the local's
    own, and the change stays in `r`: a copy with nothing said. Refused when
-   the local is the receiver of a String mutator (an_kept_bang_local_change),
-   holds nothing but such values (or nil), and the receiver's String can be
-   read again.
+   the local is the receiver of a String mutator, holds nothing but such
+   values (or nil), and the receiver's String can be read again.
    A local that is only read holds the same bytes either way and is left
    alone. Asked once the types have settled: a receiver's type is not known
    before. */
 static void refuse_kept_bang_values(Compiler *c) {
   const NodeTable *nt = c->nt;
-  SbMutTab reads; memset(&reads, 0, sizeof reads);
+  KeptBangTabs t; memset(&t, 0, sizeof t);
   NT_FOREACH_KIND(nt, NK_LocalVariableWriteNode, w) {
     int call = an_kept_bang_value(c, nt_ref(nt, w, "value"));
     if (call < 0) continue;
     const char *wn = nt_str(nt, w, "name");
     Scope *ws = comp_scope_of(c, w);
-    LocalVar *lv = ws && wn ? scope_local(ws, wn) : NULL;
+    if (!wn || !ws || strbuf_mut_kind(c, wn, ws) != 1) continue;
+    if (!t.built) an_kept_bang_tabs_build(c, &t);
+    if (!sb_mut_tab_slot(&t.chg, wn, (int)(ws - c->scopes), 0)) continue;
+    if (!(an_kept_bang_writes(c, &t, wn, ws) & KEPT_BANG_OWN)) continue;
+    LocalVar *lv = scope_local(ws, wn);   /* asked late: it walks the scope's locals */
     if (!lv || lv->is_param || lv->is_block_param || (lv->type != TY_STRING && lv->type != TY_STRBUF)) continue;
-    /* every write of the local is such a value, or nil: a change through
-       it lands on no other String */
-    int other = 0;
-    for (int o = comp_lvw_first_sc(c, (int)(ws - c->scopes), wn); o >= 0 && !other; o = comp_lvw_next_sc(c, o)) {
-      const char *on = nt_str(nt, o, "name");
-      if (!on || !sp_streq(on, wn) || comp_scope_of(c, o) != ws) continue;
-      NodeKind ok = nt_kind(nt, o);
-      int ov = ok == NK_LocalVariableWriteNode || ok == NK_LocalVariableOrWriteNode ||
-               ok == NK_LocalVariableAndWriteNode ? nt_ref(nt, o, "value") : -1;
-      other = ov < 0 || (nt_kind(nt, ov) != NK_NilNode && an_kept_bang_value(c, ov) < 0);
-    }
-    const char *by = other ? NULL : an_kept_bang_local_change(c, wn, ws);
-    if (!by || !an_kept_bang_receiver_read_again(c, call, &reads)) continue;
+    if (!an_kept_bang_receiver_read_again(c, call, &t)) continue;
     const char *nm = nt_str(nt, call, "name");
     char msg[320];
     snprintf(msg, sizeof msg, "the value of %s is kept and then changed in place (%s): a String is not yet "
              "shared by reference through that value. Change the receiver instead (s.%s%s; r = s)",
-             nm, by, nm, nm[strlen(nm) - 1] == '!' ? "" : "(...)");
+             nm, an_kept_bang_local_change(c, wn, ws), nm, nm[strlen(nm) - 1] == '!' ? "" : "(...)");
     unsupported_feature(c, w, msg);
   }
-  if (reads.head) sb_mut_tab_free(&reads);
+  if (t.built) { sb_mut_tab_free(&t.chg); sb_mut_tab_free(&t.reads); sb_mut_tab_free(&t.wr); }
 }
 
 /* A bare `@ivar` argument whose ivar is written from a local, handed to a
