@@ -1060,11 +1060,12 @@ int emit_op_string_scan_checked(Compiler *c, const BopCtx *x, Buf *b) {
   return 1;
 }
 
-/* An append chain over an existing handle must hand that handle to the
-   next link. Mark its receiver links before operand ordering can bind a
-   String read into a const char * temp, and restore their emission types
-   afterwards. No slot becomes shared here. */
-int emit_str_append_chain_handle(Compiler *c, int id, Buf *b) {
+/* The receiver links of append `id` over a local or an instance variable
+   that holds a String handle, into links[64], and their count: appends and
+   one-statement parentheses, an append among them. 0 when `id` is no such
+   chain, when it is longer, or when its receiver answers the handle
+   already. */
+int str_append_chain_links(Compiler *c, int id, int *links) {
   const NodeTable *nt = c->nt;
   const char *name = nt_str(nt, id, "name");
   if (!name || !is_string_append_or_prepend(name)) return 0;
@@ -1076,7 +1077,7 @@ int emit_str_append_chain_handle(Compiler *c, int id, Buf *b) {
   int first = unwrap_parens(c, recv);
   Repr rp = repr_of(c, first);
   if (rp.handle && rp.kind == RK_STRBUF) return 0;
-  int links[64], nlinks = 0, cur = recv, calls = 0;
+  int nlinks = 0, cur = recv, calls = 0;
   while (cur >= 0 && nlinks < 64) {
     if (nt_kind(nt, cur) == NK_ParenthesesNode) {
       int body = nt_ref(nt, cur, "body"), n = 0;
@@ -1098,7 +1099,16 @@ int emit_str_append_chain_handle(Compiler *c, int id, Buf *b) {
       (nt_kind(nt, cur) != NK_LocalVariableReadNode &&
        nt_kind(nt, cur) != NK_InstanceVariableReadNode) ||
       !strbuf_slot_ref(c, cur, ref, sizeof ref)) return 0;
-  int sv[64], st[64];
+  return nlinks;
+}
+/* An append chain over an existing handle must hand that handle to the
+   next link. Mark its receiver links before operand ordering can bind a
+   String read into a const char * temp, and restore their emission types
+   afterwards. No slot becomes shared here. */
+int emit_str_append_chain_handle(Compiler *c, int id, Buf *b) {
+  int links[64], sv[64], st[64];
+  int nlinks = str_append_chain_links(c, id, links);
+  if (!nlinks) return 0;
   for (int i = 0; i < nlinks; i++) {
     sv[i] = view_push_repr(c, links[i], VR_STRBUF_BOX, 1);
     st[i] = view_push(c, links[i], TY_STRBUF);
