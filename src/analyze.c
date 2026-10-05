@@ -28645,6 +28645,522 @@ static void refuse_hash_pair_string_mutations(Compiler *c) {
   free(binds); free(pmw);
 }
 
+/* A String variable handed to a method that keeps it, then mutated in place
+   through the variable: `b.s = s; s << "x"; b.s`. What the method kept is
+   the String's buffer as it was handed over, so it follows the variable
+   only until the mutation that moves the buffer -- short data reads right
+   and longer data wrong. Nothing makes the variable a handle for what a
+   callee keeps, so the program is refused. Left alone: a String mutated
+   before it is handed over, a variable rebound between the two, a path
+   that does not run both, and a String the analysis already shares. */
+
+/* Is `n` a read of local `vn` of scope `si`? */
+static int ks_local_read(Compiler *c, int n, int si, const char *vn) {
+  const NodeTable *nt = c->nt;
+  n = an_unparen(nt, n);
+  return n >= 0 && nt_kind(nt, n) == NK_LocalVariableReadNode && c->nscope[n] == si &&
+         nt_str(nt, n, "name") && sp_streq(nt_str(nt, n, "name"), vn);
+}
+/* Is `n` an Array or Hash literal with local `vn` as an element or value? */
+static int ks_literal_holds(Compiler *c, int n, int si, const char *vn) {
+  const NodeTable *nt = c->nt;
+  n = an_unparen(nt, n);
+  if (n < 0 || (nt_kind(nt, n) != NK_ArrayNode && nt_kind(nt, n) != NK_HashNode)) return 0;
+  int en = 0; const int *el = nt_arr(nt, n, "elements", &en);
+  for (int e = 0; e < en; e++) {
+    int v = nt_kind(nt, el[e]) == NK_AssocNode ? nt_ref(nt, el[e], "value") : el[e];
+    if (ks_local_read(c, v, si, vn)) return 1;
+  }
+  return 0;
+}
+/* What method `mi` answers: its last expression and each return's value,
+   by a walk of its own body. */
+static void ks_return_values(Compiler *c, int node, int *out, int *n, int cap, int depth) {
+  const NodeTable *nt = c->nt;
+  if (node < 0 || depth > 400 || *n >= cap) return;
+  NodeKind k = nt_kind(nt, node);
+  if (k == NK_DefNode || k == NK_ClassNode || k == NK_ModuleNode) return;
+  if (k == NK_ReturnNode) {
+    int ra = nt_ref(nt, node, "arguments"), rn = 0;
+    const int *rv = ra >= 0 ? nt_arr(nt, ra, "arguments", &rn) : NULL;
+    if (rn == 1) out[(*n)++] = an_unparen(nt, rv[0]);
+    return;
+  }
+  int nr = nt_num_refs(nt, node);
+  for (int i = 0; i < nr; i++) ks_return_values(c, nt_ref_at(nt, node, i), out, n, cap, depth + 1);
+  int na = nt_num_arrs(nt, node);
+  for (int i = 0; i < na; i++) {
+    int cnt = 0; const int *a = nt_arr_at(nt, node, i, &cnt);
+    for (int q = 0; q < cnt; q++) ks_return_values(c, a[q], out, n, cap, depth + 1);
+  }
+}
+enum { KS_ANSWERS = 16 };
+static int ks_answers(Compiler *c, int mi, int *out) {
+  int n = 0, last = an_unparen(c->nt, scope_body_last(c, mi));
+  if (last >= 0) out[n++] = last;
+  ks_return_values(c, c->scopes[mi].body, out, &n, KS_ANSWERS, 0);
+  return n;
+}
+/* Is local `vn` among those answers, or held by a literal that is? */
+static int ks_local_answered(Compiler *c, int mi, const int *ans, int nans, const char *vn, int in_literal) {
+  for (int i = 0; i < nans; i++)
+    if (ks_local_read(c, ans[i], mi, vn) || (in_literal && ks_literal_holds(c, ans[i], mi, vn))) return 1;
+  return 0;
+}
+/* Does the code under `node` write local `vn` of method `mi`, or a literal
+   holding it, to an instance variable, a class variable, a global or a
+   constant? */
+static int ks_written_out(Compiler *c, int node, int mi, const char *vn, int depth) {
+  const NodeTable *nt = c->nt;
+  if (node < 0 || depth > 400) return 0;
+  NodeKind k = nt_kind(nt, node);
+  if (k == NK_DefNode || k == NK_ClassNode || k == NK_ModuleNode) return 0;
+  if (k == NK_InstanceVariableWriteNode || k == NK_InstanceVariableOrWriteNode || k == NK_ClassVariableWriteNode ||
+      k == NK_GlobalVariableWriteNode || k == NK_ConstantWriteNode) {
+    int v = nt_ref(nt, node, "value");
+    if (ks_local_read(c, v, mi, vn) || ks_literal_holds(c, v, mi, vn)) return 1;
+  }
+  int nr = nt_num_refs(nt, node);
+  for (int i = 0; i < nr; i++)
+    if (ks_written_out(c, nt_ref_at(nt, node, i), mi, vn, depth + 1)) return 1;
+  int na = nt_num_arrs(nt, node);
+  for (int i = 0; i < na; i++) {
+    int n = 0; const int *a = nt_arr_at(nt, node, i, &n);
+    for (int q = 0; q < n; q++)
+      if (ks_written_out(c, a[q], mi, vn, depth + 1)) return 1;
+  }
+  return 0;
+}
+/* The method call `call` names: what an_call_target_mi finds, or a class
+   method named on its constant. */
+static int ks_call_target(Compiler *c, int call) {
+  const NodeTable *nt = c->nt;
+  int mi = an_call_target_mi(c, call);
+  if (mi >= 1) return mi;
+  int r = nt_ref(nt, call, "receiver");
+  if (r < 0 || nt_kind(nt, r) != NK_ConstantReadNode || !nt_str(nt, call, "name")) return -1;
+  int cid = comp_class_index(c, nt_str(nt, r, "name"));
+  return cid >= 0 ? comp_cmethod_in_chain(c, cid, nt_str(nt, call, "name"), NULL) : -1;
+}
+/* Does call `u` store argument `arg` in its receiver, an Array or a Hash? */
+static int ks_container_store(Compiler *c, int u, int arg) {
+  const NodeTable *nt = c->nt;
+  const char *un = nt_str(nt, u, "name");
+  int ur = nt_ref(nt, u, "receiver");
+  int a = nt_ref(nt, u, "arguments"), ac = 0;
+  const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+  if (!un || ur < 0 || !ac) return 0;
+  TyKind rt = comp_ntype(c, ur);
+  if (!ty_is_array(rt) && !ty_is_hash(rt)) return 0;
+  arg = an_unparen(nt, arg);
+  if (is_push_unshift(un)) {
+    for (int e = 0; e < ac; e++) if (an_unparen(nt, av[e]) == arg) return 1;
+    return 0;
+  }
+  if ((sp_streq(un, "[]=") || sp_streq(un, "store")) && ac >= 2) return an_unparen(nt, av[ac - 1]) == arg;
+  return sp_streq(un, "fill") && an_unparen(nt, av[0]) == arg;
+}
+/* How method `mi` keeps its parameter `j` past the call: 1 it stores it (in
+   an instance variable, a class variable, a global or a constant, in a
+   container one of those or another parameter names, or by handing it to a
+   method that does), 2 it answers it (itself, in a literal, or in a
+   container it built), 0 neither. */
+static int ks_param_kept(Compiler *c, int mi, int j, int depth) {
+  const NodeTable *nt = c->nt;
+  if (mi < 1 || mi >= c->nscopes || depth > 4) return 0;
+  Scope *m = &c->scopes[mi];
+  if (j < 0 || j >= m->nparams || !m->pnames[j] || m->body < 0) return 0;
+  const char *pn = m->pnames[j];
+  LocalVar *p = scope_local(m, pn);
+  if (!p || !p->is_param || p->is_block_param) return 0;
+  /* a parameter the body rebinds is another String from there on */
+  for (int w = comp_lvw_first_sc(c, mi, pn); w >= 0; w = comp_lvw_next_sc(c, w))
+    if (c->nscope[w] == mi && nt_str(nt, w, "name") && sp_streq(nt_str(nt, w, "name"), pn)) return 0;
+  if (ks_written_out(c, m->body, mi, pn, 0)) return 1;
+  int ans[KS_ANSWERS], nans = ks_answers(c, mi, ans);
+  int answered = ks_local_answered(c, mi, ans, nans, pn, 1);
+  for (int u = comp_scall_first(c, mi); u >= 0; u = comp_scall_next(c, u)) {
+    if (nt_kind(nt, u) != NK_CallNode || c->nscope[u] != mi) continue;
+    int a = nt_ref(nt, u, "arguments"), ac = 0;
+    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+    int stored = 0;
+    for (int e = 0; e < ac && !stored; e++)
+      stored = ks_local_read(c, av[e], mi, pn) && ks_container_store(c, u, av[e]);
+    if (stored) {
+      int r = an_unparen(nt, nt_ref(nt, u, "receiver"));
+      NodeKind rk = nt_kind(nt, r);
+      if (rk == NK_InstanceVariableReadNode || rk == NK_ClassVariableReadNode || rk == NK_GlobalVariableReadNode ||
+          rk == NK_ConstantReadNode) return 1;
+      if (rk != NK_LocalVariableReadNode || c->nscope[r] != mi || !nt_str(nt, r, "name")) continue;
+      LocalVar *rl = scope_local(m, nt_str(nt, r, "name"));
+      if (rl && rl->is_param && !rl->is_block_param) return 1;
+      if (rl && ks_local_answered(c, mi, ans, nans, nt_str(nt, r, "name"), 0)) answered = 1;
+      continue;
+    }
+    int mi2 = ks_call_target(c, u);
+    if (mi2 < 1 || mi2 == mi) continue;
+    Scope *m2 = &c->scopes[mi2];
+    for (int k = 0; k < m2->nparams; k++) {
+      int an = arg_layout_param_node(c, m2, u, k, NULL);
+      if (an < 0 || !ks_local_read(c, an, mi, pn)) continue;
+      int how = ks_param_kept(c, mi2, k, depth + 1);
+      if (how == 1) return 1;
+      for (int i = 0; how == 2 && i < nans; i++) if (ans[i] == u) answered = 1;
+    }
+  }
+  return answered ? 2 : 0;
+}
+/* ks_param_kept for every (method, parameter) asked, once: a method is
+   asked about at each of its call sites. */
+static struct { int nscopes, *off; signed char *kept; } ks_tab;
+static int ks_param_kept_once(Compiler *c, int mi, int j) {
+  if (!ks_tab.off || mi < 1 || mi >= ks_tab.nscopes || j < 0 || j >= c->scopes[mi].nparams)
+    return ks_param_kept(c, mi, j, 0);
+  signed char *slot = &ks_tab.kept[ks_tab.off[mi] + j];
+  if (*slot < 0) *slot = (signed char)ks_param_kept(c, mi, j, 0);
+  return *slot;
+}
+/* Is call `u` an attribute writer on an object, `recv.name = value`? */
+static int ks_attr_write(Compiler *c, int u) {
+  const NodeTable *nt = c->nt;
+  const char *un = nt_str(nt, u, "name");
+  int ur = nt_ref(nt, u, "receiver");
+  size_t ul = un ? strlen(un) : 0;
+  if (ur < 0 || ul < 2 || un[ul - 1] != '=' || sp_streq(un, "[]=") || !ty_is_object(comp_ntype(c, ur))) return 0;
+  if (un[ul - 2] == '=' || un[ul - 2] == '!' || un[ul - 2] == '<' || un[ul - 2] == '>') return 0;
+  char base[128];
+  snprintf(base, sizeof base, "%.*s", (int)(ul - 1 < 127 ? ul - 1 : 127), un);
+  return comp_writer_in_chain(c, ty_object_class(comp_ntype(c, ur)), base, NULL);
+}
+/* How call `u` keeps its argument `arg`, as ks_param_kept counts: an
+   attribute writer and a Struct's or Data's own `new` store it, a method
+   says by its body. */
+static int ks_call_keeps(Compiler *c, int u, int arg) {
+  const NodeTable *nt = c->nt;
+  const char *un = nt_str(nt, u, "name");
+  int ur = nt_ref(nt, u, "receiver");
+  if (!un) return 0;
+  if (ks_attr_write(c, u)) return 1;
+  if (sp_streq(un, "new") && ur >= 0 && (nt_kind(nt, ur) == NK_ConstantReadNode || nt_kind(nt, ur) == NK_ConstantPathNode) &&
+      ty_is_object(comp_ntype(c, u))) {
+    int cid = ty_object_class(comp_ntype(c, u));
+    if (cid >= 0 && cid < c->nclasses && c->classes[cid].is_struct &&
+        comp_method_in_chain(c, cid, "initialize", NULL) < 0) return 1;
+  }
+  int mi = ks_call_target(c, u);
+  if (mi < 1) return 0;
+  Scope *m = &c->scopes[mi];
+  for (int j = 0; j < m->nparams; j++)
+    if (arg_layout_param_node(c, m, u, j, NULL) == arg) return ks_param_kept_once(c, mi, j);
+  return 0;
+}
+
+/* One question to the walk: on a path that has run hand-over `u`, with no
+   rebinding of `vn` between, does scope `si` mutate `vn` in place? `on`,
+   threaded through the walk, says the String handed over may be what `vn`
+   names here; `kept` says the value of the node being walked is stored. */
+typedef struct {
+  int u, si;
+  const char *vn;
+  int by_value;     /* the callee only answers the String: kept if the call's value is */
+  int passed;       /* hand-overs run so far */
+  int hit;          /* the mutating call, once found */
+  int cont, brk;    /* what `next` and `break` carry to the loop's edge */
+} KsWalk;
+static int ks_walk(Compiler *c, KsWalk *w, int node, int on, int kept, int depth);
+
+static int ks_names(Compiler *c, const KsWalk *w, int node) {
+  const char *nm = nt_str(c->nt, node, "name");
+  return c->nscope[node] == w->si && nm && sp_streq(nm, w->vn);
+}
+/* A String mutator on the variable, or the variable lent to a parameter its
+   method mutates in place. */
+static int ks_call_mutates(Compiler *c, const KsWalk *w, int call) {
+  const NodeTable *nt = c->nt;
+  int r = nt_ref(nt, call, "receiver");
+  if (r >= 0 && ks_local_read(c, r, w->si, w->vn) && an_str_mutator_name(nt_str(nt, call, "name")) &&
+      (comp_ntype(c, r) == TY_STRING || comp_ntype(c, r) == TY_STRBUF)) return 1;
+  int mi = ks_call_target(c, call);
+  if (mi < 1) return 0;
+  Scope *m = &c->scopes[mi];
+  for (int j = 0; j < m->nparams; j++) {
+    if (!comp_byref_param(c, m, j) && !an_param_mutated_in_place(c, mi, j)) continue;
+    int a = arg_layout_param_node(c, m, call, j, NULL);
+    if (a >= 0 && ks_local_read(c, a, w->si, w->vn)) return 1;
+  }
+  return 0;
+}
+/* A loop, or a block its call may run any number of times: two rounds, the
+   second from what the first one's body left. `head` runs before each
+   round (a while's condition, a for's index); a while leaves from its head,
+   a for or a block after any round. `rebinds`: each round binds `vn` anew
+   (a block parameter of that name). */
+static int ks_walk_loop(Compiler *c, KsWalk *w, int head, int body, int is_while, int rebinds,
+                        int rounds, int on, int kept, int depth) {
+  int sc = w->cont, sb = w->brk, out = on;
+  w->brk = 0;
+  for (int round = 0; round < rounds && !w->hit; round++) {
+    w->cont = 0;
+    int at = ks_walk(c, w, head, rebinds ? 0 : on, 0, depth + 1);
+    int end = ks_walk(c, w, body, at, kept, depth + 1) | w->cont;
+    out = is_while ? at : (out | end);
+    on |= end;
+  }
+  out |= w->brk;
+  w->cont = sc; w->brk = sb;
+  return out;
+}
+/* The block of call `call`: a loop, unless the method is one that runs its
+   block once. Its last value is stored only where the call collects the
+   values and the call's own value is. */
+static int ks_walk_block(Compiler *c, KsWalk *w, int call, int blk, int on, int kept, int depth) {
+  static const char *const once[] = { "tap", "then", "yield_self", "open", "synchronize", "catch", NULL };
+  static const char *const collects[] = { "map", "collect", "flat_map", "filter_map", NULL };
+  const char *cn = nt_str(c->nt, call, "name");
+  int rounds = 2, rebinds = 0, gathers = 0;
+  for (int i = 0; cn && once[i]; i++) if (sp_streq(cn, once[i])) rounds = 1;
+  for (int i = 0; cn && collects[i]; i++) if (sp_streq(cn, collects[i])) gathers = 1;
+  const char *bp;
+  for (int i = 0; (bp = block_param_name(c, blk, i)); i++) if (sp_streq(bp, w->vn)) rebinds = 1;
+  return ks_walk_loop(c, w, -1, nt_ref(c->nt, blk, "body"), 0, rebinds, rounds, on, kept && gathers, depth);
+}
+/* Is argument `arg` of call `call` stored by it: an attribute writer, a
+   container store, or a method that keeps the parameter it lands on? */
+static int ks_arg_stored(Compiler *c, int call, int arg, int kept) {
+  if (nt_kind(c->nt, call) != NK_CallNode) return 0;
+  if (ks_container_store(c, call, arg)) return 1;
+  int how = ks_call_keeps(c, call, arg);
+  return how == 1 || (how == 2 && kept);
+}
+static int ks_walk(Compiler *c, KsWalk *w, int node, int on, int kept, int depth) {
+  const NodeTable *nt = c->nt;
+  if (node < 0 || w->hit || depth > 400) return on;
+  NodeKind k = nt_kind(nt, node);
+  switch (k) {
+    case NK_DefNode: case NK_ClassNode: case NK_ModuleNode: case NK_SingletonClassNode:
+      return on;
+    case NK_StatementsNode: {
+      int n = 0; const int *b = nt_arr(nt, node, "body", &n);
+      for (int i = 0; i < n; i++) on = ks_walk(c, w, b[i], on, i == n - 1 ? kept : 0, depth + 1);
+      return on;
+    }
+    case NK_ParenthesesNode:
+      return ks_walk(c, w, nt_ref(nt, node, "body"), on, kept, depth + 1);
+    case NK_ElseNode:
+      return ks_walk(c, w, nt_ref(nt, node, "statements"), on, kept, depth + 1);
+    case NK_IfNode: case NK_UnlessNode: {
+      /* each arm from the state at its head: one arm's hand-over does not
+         meet the other arm's mutation */
+      int at = ks_walk(c, w, nt_ref(nt, node, "predicate"), on, 0, depth + 1);
+      int a = ks_walk(c, w, nt_ref(nt, node, "statements"), at, kept, depth + 1);
+      return a | ks_walk(c, w, nt_ref(nt, node, k == NK_IfNode ? "subsequent" : "else_clause"), at, kept, depth + 1);
+    }
+    case NK_CaseNode: case NK_CaseMatchNode: {
+      int at = ks_walk(c, w, nt_ref(nt, node, "predicate"), on, 0, depth + 1), out = 0;
+      int nw = 0; const int *arms = nt_arr(nt, node, "conditions", &nw);
+      for (int i = 0; i < nw; i++) {
+        int in = at;
+        if (nt_kind(nt, arms[i]) == NK_InNode) in = ks_walk(c, w, nt_ref(nt, arms[i], "pattern"), at, 0, depth + 1);
+        else {
+          int nc = 0; const int *cs = nt_arr(nt, arms[i], "conditions", &nc);
+          for (int q = 0; q < nc; q++) at = ks_walk(c, w, cs[q], at, 0, depth + 1);
+          in = at;
+        }
+        out |= ks_walk(c, w, nt_ref(nt, arms[i], "statements"), in, kept, depth + 1);
+      }
+      return out | ks_walk(c, w, nt_ref(nt, node, "else_clause"), at, kept, depth + 1);
+    }
+    case NK_AndNode: case NK_OrNode: {
+      int l = ks_walk(c, w, nt_ref(nt, node, "left"), on, kept, depth + 1);
+      return l | ks_walk(c, w, nt_ref(nt, node, "right"), l, kept, depth + 1);
+    }
+    case NK_WhileNode: case NK_UntilNode:
+      return ks_walk_loop(c, w, nt_ref(nt, node, "predicate"), nt_ref(nt, node, "statements"), 1, 0, 2, on, 0, depth);
+    case NK_ForNode:
+      on = ks_walk(c, w, nt_ref(nt, node, "collection"), on, 0, depth + 1);
+      return ks_walk_loop(c, w, nt_ref(nt, node, "index"), nt_ref(nt, node, "statements"), 0, 0, 2, on, 0, depth);
+    case NK_LambdaNode:
+      return ks_walk_loop(c, w, -1, nt_ref(nt, node, "body"), 0, 0, 2, on, 0, depth);
+    case NK_BeginNode: {
+      /* a rescue starts from any state its body passed through */
+      int before = w->passed, els = nt_ref(nt, node, "else_clause");
+      int body = ks_walk(c, w, nt_ref(nt, node, "statements"), on, els < 0 ? kept : 0, depth + 1);
+      int raised = on | body | (w->passed != before);
+      int out = ks_walk(c, w, els, body, kept, depth + 1);
+      for (int r = nt_ref(nt, node, "rescue_clause"); r >= 0; r = nt_ref(nt, r, "subsequent")) {
+        int at = ks_walk(c, w, nt_ref(nt, r, "reference"), raised, 0, depth + 1);
+        out |= ks_walk(c, w, nt_ref(nt, r, "statements"), at, kept, depth + 1);
+      }
+      int ens = nt_ref(nt, node, "ensure_clause");
+      return ens >= 0 ? ks_walk(c, w, ens, out | raised, 0, depth + 1) : out;
+    }
+    case NK_RescueModifierNode: {
+      int before = w->passed;
+      int a = ks_walk(c, w, nt_ref(nt, node, "expression"), on, kept, depth + 1);
+      return a | ks_walk(c, w, nt_ref(nt, node, "rescue_expression"), on | a | (w->passed != before), kept, depth + 1);
+    }
+    /* the path ends here: nothing after it runs on this one */
+    case NK_ReturnNode: case NK_RetryNode: case NK_RedoNode:
+      ks_walk(c, w, nt_ref(nt, node, "arguments"), on, 0, depth + 1);
+      return 0;
+    case NK_NextNode:
+      w->cont |= ks_walk(c, w, nt_ref(nt, node, "arguments"), on, 0, depth + 1);
+      return 0;
+    case NK_BreakNode:
+      w->brk |= ks_walk(c, w, nt_ref(nt, node, "arguments"), on, 0, depth + 1);
+      return 0;
+    case NK_LocalVariableWriteNode: case NK_LocalVariableOperatorWriteNode:
+      on = ks_walk(c, w, nt_ref(nt, node, "value"), on, k == NK_LocalVariableWriteNode, depth + 1);
+      return ks_names(c, w, node) ? 0 : on;
+    case NK_LocalVariableTargetNode:
+      return ks_names(c, w, node) ? 0 : on;
+    case NK_InstanceVariableWriteNode: case NK_ClassVariableWriteNode: case NK_GlobalVariableWriteNode:
+    case NK_ConstantWriteNode:
+      return ks_walk(c, w, nt_ref(nt, node, "value"), on, 1, depth + 1);
+    case NK_ArrayNode: case NK_HashNode: {
+      int n = 0; const int *el = nt_arr(nt, node, "elements", &n);
+      for (int i = 0; i < n; i++) on = ks_walk(c, w, el[i], on, kept, depth + 1);
+      return on;
+    }
+    case NK_AssocNode:
+      on = ks_walk(c, w, nt_ref(nt, node, "key"), on, 0, depth + 1);
+      return ks_walk(c, w, nt_ref(nt, node, "value"), on, kept, depth + 1);
+    case NK_CallNode: {
+      on = ks_walk(c, w, nt_ref(nt, node, "receiver"), on, 0, depth + 1);
+      int a = nt_ref(nt, node, "arguments"), ac = 0;
+      const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+      for (int i = 0; i < ac; i++) on = ks_walk(c, w, av[i], on, ks_arg_stored(c, node, av[i], kept), depth + 1);
+      int blk = nt_ref(nt, node, "block");
+      if (blk >= 0 && nt_kind(nt, blk) != NK_BlockNode) on = ks_walk(c, w, blk, on, 0, depth + 1);
+      if (node == w->u) {
+        if (!w->by_value || kept) { on = 1; w->passed++; }
+      }
+      else if (on && ks_call_mutates(c, w, node)) { w->hit = node; return on; }
+      if (blk >= 0 && nt_kind(nt, blk) == NK_BlockNode) on = ks_walk_block(c, w, node, blk, on, kept, depth);
+      return on;
+    }
+    default: break;
+  }
+  int in = on;
+  int nr = nt_num_refs(nt, node);
+  for (int i = 0; i < nr; i++) on = ks_walk(c, w, nt_ref_at(nt, node, i), on, 0, depth + 1);
+  int na = nt_num_arrs(nt, node);
+  for (int i = 0; i < na; i++) {
+    int n = 0; const int *ids = nt_arr_at(nt, node, i, &n);
+    for (int q = 0; q < n; q++) on = ks_walk(c, w, ids[q], on, 0, depth + 1);
+  }
+  /* `x ||= v`, `x &&= v`: the value may not have run, and the name keeps
+     what it held */
+  const char *ty = nt_type(nt, node);
+  size_t tl = ty ? strlen(ty) : 0;
+  if ((tl > 11 && sp_streq(ty + tl - 11, "OrWriteNode")) || (tl > 12 && sp_streq(ty + tl - 12, "AndWriteNode"))) on |= in;
+  return on;
+}
+/* an_local_lent's question -- is local `vn` of scope `si` handed to a
+   parameter its method mutates in place -- with the scope's calls read once. */
+static struct { int nscopes, n, cap, *scope; char *done; const char **name; } ks_lent;
+static int ks_local_lent(Compiler *c, int si, const char *vn) {
+  const NodeTable *nt = c->nt;
+  if (!ks_lent.done || si < 0 || si >= ks_lent.nscopes) return an_local_lent(c, vn, &c->scopes[si]);
+  if (!ks_lent.done[si]) {
+    ks_lent.done[si] = 1;
+    for (int u = comp_scall_first(c, si); u >= 0; u = comp_scall_next(c, u)) {
+      if (nt_kind(nt, u) != NK_CallNode || c->nscope[u] != si) continue;
+      int mi = an_call_target_mi(c, u);
+      if (mi < 0) mi = an_any_scope_by_name(c, nt_str(nt, u, "name"));
+      if (mi < 0) continue;
+      for (int j = 0; j < c->scopes[mi].nparams; j++) {
+        if (!comp_byref_param(c, &c->scopes[mi], j) && !an_param_mutated_in_place(c, mi, j)) continue;
+        int a = arg_layout_param_node(c, &c->scopes[mi], u, j, NULL);
+        if (a < 0 || nt_kind(nt, a) != NK_LocalVariableReadNode || !nt_str(nt, a, "name")) continue;
+        if (ks_lent.n == ks_lent.cap) {
+          int cap = ks_lent.cap ? ks_lent.cap * 2 : 16;
+          int *sc = (int *)realloc(ks_lent.scope, sizeof(int) * (size_t)cap);
+          if (sc) ks_lent.scope = sc;
+          const char **nm = sc ? (const char **)realloc(ks_lent.name, sizeof(char *) * (size_t)cap) : NULL;
+          if (!nm) return an_local_lent(c, vn, &c->scopes[si]);
+          ks_lent.name = nm; ks_lent.cap = cap;
+        }
+        ks_lent.scope[ks_lent.n] = si; ks_lent.name[ks_lent.n++] = nt_str(nt, a, "name");
+      }
+    }
+  }
+  for (int i = 0; i < ks_lent.n; i++)
+    if (ks_lent.scope[i] == si && sp_streq(ks_lent.name[i], vn)) return 1;
+  return 0;
+}
+/* Is every write of local `vn` in scope `si` a String literal? Such a
+   String is frozen, and its mutation raises as CRuby's does. */
+static int ks_only_frozen_literals(Compiler *c, int si, const char *vn) {
+  const NodeTable *nt = c->nt;
+  int seen = 0;
+  for (int w = comp_lvw_first_sc(c, si, vn); w >= 0; w = comp_lvw_next_sc(c, w)) {
+    if (c->nscope[w] != si || !nt_str(nt, w, "name") || !sp_streq(nt_str(nt, w, "name"), vn)) continue;
+    if (nt_kind(nt, w) != NK_LocalVariableWriteNode) return 0;
+    int v = an_unparen(nt, nt_ref(nt, w, "value"));
+    if (v < 0 || nt_kind(nt, v) != NK_StringNode) return 0;
+    seen = 1;
+  }
+  return seen;
+}
+/* Argument `arg` of call `u`: a String variable the analysis has not made a
+   handle, kept by the callee and mutated in place afterwards. */
+static void ks_check_arg(Compiler *c, int u, int arg) {
+  const NodeTable *nt = c->nt;
+  int rd = an_unparen(nt, arg);
+  if (rd < 0 || nt_kind(nt, rd) != NK_LocalVariableReadNode) return;
+  const char *vn = nt_str(nt, rd, "name");
+  Scope *vs = comp_scope_of(c, rd);
+  LocalVar *lv = vn && vs ? scope_local(vs, vn) : NULL;
+  if (!lv || lv->str_shared || (lv->type != TY_STRING && lv->type != TY_STRBUF)) return;
+  /* a cell a proc captures is not judged; a parameter the method mutates
+     through its caller's slot is */
+  if ((lv->is_cell && !lv->byref_out) || vs->body < 0) return;
+  int si = (int)(vs - c->scopes), mutated = strbuf_mut_kind(c, vn, vs) != 0;
+  if (!lv->is_param && ks_only_frozen_literals(c, si, vn)) return;
+  int how = ks_call_keeps(c, u, arg);
+  if (!how || (!mutated && !ks_local_lent(c, si, vn))) return;
+  KsWalk w = { u, si, vn, how == 2, 0, 0, 0, 0 };
+  ks_walk(c, &w, vs->body, 0, si != 0, 0);
+  if (!w.hit) return;
+  /* the hand-over's line, where the program was read with one */
+  char at[32] = "", msg[512];
+  int ln = (int)nt_int(nt, u, "node_line", 0);
+  if (ln > 0) snprintf(at, sizeof at, " (line %d)", ln);
+  snprintf(msg, sizeof msg,
+           "String `%s` is mutated in place after `%s`%s kept it: a String is not yet shared by "
+           "reference with a method that keeps it, and what was kept would miss the mutation. Mutate the "
+           "String before handing it over, or mutate it through what holds it.",
+           vn, nt_str(nt, u, "name"), at);
+  unsupported_feature(c, w.hit, msg);
+}
+static void refuse_kept_string_mutations(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  int total = 0;
+  ks_tab.nscopes = c->nscopes;
+  ks_tab.off = (int *)malloc(sizeof(int) * (size_t)(c->nscopes + 1));
+  for (int i = 0; ks_tab.off && i < c->nscopes; i++) { ks_tab.off[i] = total; total += c->scopes[i].nparams; }
+  ks_tab.kept = ks_tab.off ? (signed char *)malloc((size_t)total + 1) : NULL;
+  if (ks_tab.kept) memset(ks_tab.kept, -1, (size_t)total + 1);
+  else { free(ks_tab.off); ks_tab.off = NULL; }
+  ks_lent.nscopes = c->nscopes;
+  ks_lent.done = (char *)calloc((size_t)c->nscopes + 1, 1);
+  NT_FOREACH_KIND(nt, NK_CallNode, u) {
+    int a = nt_ref(nt, u, "arguments"), ac = 0;
+    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+    for (int k = 0; k < ac; k++) {
+      if (nt_kind(nt, av[k]) != NK_KeywordHashNode) { ks_check_arg(c, u, av[k]); continue; }
+      int en = 0; const int *el = nt_arr(nt, av[k], "elements", &en);
+      for (int e = 0; e < en; e++)
+        if (nt_kind(nt, el[e]) == NK_AssocNode) ks_check_arg(c, u, nt_ref(nt, el[e], "value"));
+    }
+  }
+  free(ks_tab.off); free(ks_tab.kept);
+  ks_tab.off = NULL; ks_tab.kept = NULL;
+  free(ks_lent.done); free(ks_lent.scope); free(ks_lent.name);
+  memset(&ks_lent, 0, sizeof ks_lent);
+}
+
 /* A bare `@ivar` argument whose ivar is written from a local, handed to a
    parameter the callee appends to: the callee would append to a copy, so
    the program is refused (#6998). Runs once sharing analysis settles. */
@@ -32959,6 +33475,10 @@ static void an_phase_reconcile_check(Compiler *c) {
     if (src >= 0 && sac == 2 && ty_is_hash(comp_ntype(c, src)))
       nt_node_set_str((NodeTable *)c->nt, sid, "name", "[]=");
   }
+
+  /* A String variable mutated in place after a method kept it: asked, as
+     the lent ivar below is, of the settled sharing analysis. */
+  refuse_kept_string_mutations(c);
 
   /* Refuse lent ivar copies through calls and super only after sharing
      analysis settles (#6998). */

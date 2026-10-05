@@ -698,6 +698,8 @@ Not yet shared:
 
 - a bare instance-variable argument written from a local, handed to an appending parameter through a call or `super`, unless the instance variable is already a shared handle;
 
+- into a method that keeps it, a String variable that is mutated in place afterwards through the variable (`b.s = s; s << x`): one an attribute writer, a Struct's or a Data's `new`, or a method stores in an instance variable, a class variable, a global, a constant or a container, or one a method answers and the caller keeps. A String mutated before it is handed over, one handed over by keyword, and one mutated through what holds it (`k.s << x` after `K.new(s)`, `b.q[0] << x`) compile;
+
 - a repeated keyword whose later value is a String variable bound to an appending parameter, unless the value is already passed as a shared handle;
 
 - through `Thread.new` or `Fiber#resume`, a String variable handed to a block parameter that appends to it, unless its read already hands over the shared handle or the local is read only as that argument;
@@ -1028,8 +1030,11 @@ values (stored or read back, including mutation THROUGH a container read
 like `arr[0].upcase!`), instance variables (with attr and hand-written
 readers), method parameters (a callee's mutation stays visible through the
 caller's aliases), returned values (including a string the callee also
-retained), closure captures, and iteration variables. Frozen strings keep
-raising FrozenError through every path; a hash string KEY is
+retained), closure captures, and iteration variables. The other direction
+of a method parameter is not covered yet: a String variable its caller
+mutates in place after a method kept it is refused at compile time (see
+"Not yet shared" above), unless it was handed over by keyword. Frozen
+strings keep raising FrozenError through every path; a hash string KEY is
 snapshot-frozen on store, exactly CRuby's dup-and-freeze. Strings never
 mutated in place, or mutated but never aliased, keep the plain value
 representation (no cost).
