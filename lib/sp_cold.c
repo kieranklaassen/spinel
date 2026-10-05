@@ -3612,9 +3612,9 @@ const char *sp_srange_to_s(sp_StrRange r) {
   return sp_sprintf("%s%s%s", r.first ? r.first : sp_str_empty,
                     r.excl ? "..." : "..", r.last ? r.last : sp_str_empty);
 }
-const char *sp_srange_inspect(sp_StrRange r) {
-  const char *lo = r.first ? sp_str_inspect(r.first) : sp_str_empty;
-  const char *hi = r.last ? sp_str_inspect(r.last) : sp_str_empty;
+const char *sp_srange_inspect(sp_StrRange r) {SP_GC_ROOT_STR(r.last);
+  const char *lo = r.first ? sp_str_inspect(r.first) : sp_str_empty; SP_GC_ROOT_STR(lo);
+  const char *hi = r.last ? sp_str_inspect(r.last) : sp_str_empty; SP_GC_ROOT_STR(hi);
   return sp_sprintf("%s%s%s", lo, r.excl ? "..." : "..", hi);
 }
 /* A boxed String range holds its two endpoint strings: the box marks them,
