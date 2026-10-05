@@ -28931,14 +28931,15 @@ static int an_kept_bang_value(Compiler *c, int v, int depth) {
 /* What changes local `vn` of scope `vs` in place, or NULL: the String
    mutator it is the receiver of (other than setbyte, which writes its byte
    where the bytes are, so every name sees it), itself or through a local
-   that is only ever another name for it, or the method it is handed to,
+   that is only ever another name for it (`shared`: the alias pair made
+   both the handle, so no other local is asked), or the method it is handed to,
    whose parameter is changed in place. That method is the one the call's
    own receiver reaches (self, an object's class, a class named by a
    constant). One that only has the call's name is not asked
    (an_local_lent asks it for sharing, where a name too many costs
    nothing): `p r` beside some class's `def p(x) = x << "\n"` changes
    nothing. */
-static const char *an_kept_bang_local_change(Compiler *c, const char *vn, Scope *vs) {
+static const char *an_kept_bang_local_change(Compiler *c, const char *vn, Scope *vs, int shared) {
   const NodeTable *nt = c->nt;
   int vsi = (int)(vs - c->scopes);
   for (int u = comp_scall_first(c, vsi); u >= 0; u = comp_scall_next(c, u)) {
@@ -28949,7 +28950,8 @@ static const char *an_kept_bang_local_change(Compiler *c, const char *vn, Scope 
     if (ur >= 0 && nt_kind(nt, ur) == NK_LocalVariableReadNode && sp_str_mutator(un, SP_MUT_LOCAL) &&
         !sp_streq(un, "setbyte")) {
       const char *rn = nt_str(nt, ur, "name");
-      if (strbuf_mut_kind(c, rn, vs) == 1 && (sp_streq(rn, vn) || an_local_pure_alias_of(c, vsi, rn, vn, 0)))
+      if (sp_streq(rn, vn) ? strbuf_mut_kind(c, vn, vs) == 1
+                           : shared && strbuf_mut_kind(c, rn, vs) == 1 && an_local_pure_alias_of(c, vsi, rn, vn, 0))
         return un;
     }
     int a = nt_ref(nt, u, "arguments"), an = 0, handed = 0;
@@ -29070,7 +29072,7 @@ static void refuse_kept_bang_values(Compiler *c) {
                  ok == NK_LocalVariableAndWriteNode ? nt_ref(nt, o, "value") : -1;
         other = ov < 0 || (nt_kind(nt, ov) != NK_NilNode && an_kept_bang_value(c, ov, 0) < 0);
       }
-      const char *by = other ? NULL : an_kept_bang_local_change(c, wn, ws);
+      const char *by = other ? NULL : an_kept_bang_local_change(c, wn, ws, lv->type == TY_STRBUF);
       if (!by || !an_kept_bang_receiver_read_again(c, call, &reads)) continue;
       const char *nm = nt_str(nt, call, "name");
       char msg[320];
