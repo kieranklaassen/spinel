@@ -1,0 +1,12 @@
+[:hit, :miss, :hit, :hit, :hit, :miss, :hit, :miss]
+[:miss, :miss, :miss]
+[:miss, :hit]
+[:hit, :hit, :miss]
+:boxed_list
+:after_a_value
+[:range, :typed_range, :scalar, :pair]
+[:float_in_ints, :str_in_strs, :int_in_floats, :boxed_in_ints]
+[:once, 1]
+[TypeError, "can't iterate from Float"]
+[RangeError, "cannot convert endless range to an array"]
+[TypeError, "can't iterate from NilClass"]
