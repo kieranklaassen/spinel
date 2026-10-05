@@ -3806,8 +3806,11 @@ static int subtree_has_own_next_ex(const NodeTable *nt, int id, int next) {
   if (sp_streq(ty, "ForNode"))
     return next >= 0 && subtree_has_own_next_ex(nt, nt_ref(nt, id, "collection"), next);
   int blk = sp_streq(ty, "CallNode") ? nt_ref(nt, id, "block") : -1;
-  /* a `super` hands its block on as a call does: that block owns its `next` */
-  if (sp_streq(ty, "SuperNode") || sp_streq(ty, "ForwardingSuperNode")) blk = nt_ref(nt, id, "block");
+  /* For the one node, a `super` hands its block on as a call does: that
+     block owns its `next`. The any-`next` form reads through a super's block
+     as before: the blocks its callers write stand on that answer. */
+  if (next >= 0 && (sp_streq(ty, "SuperNode") || sp_streq(ty, "ForwardingSuperNode")))
+    blk = nt_ref(nt, id, "block");
   if (blk >= 0) {
     if (next < 0) return 0;
     const char *bty = nt_type(nt, blk);

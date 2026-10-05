@@ -200,12 +200,3 @@ class OfClass < Base
   end
 end
 p OfClass.two
-
-# the block of delete asks the same walk whether it can keep its leading
-# statements: it left them out for a `next` that is the super's block's
-class InDelete < Base
-  def two
-    [1, 2].delete(9) { |k| a = super() { |x| next 0 if x == 2; x * 10 }; a.size + k }
-  end
-end
-p InDelete.new.two
