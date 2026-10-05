@@ -2042,6 +2042,58 @@ static int method_block_presence(Compiler *c, int mi) {
   return with ? 1 : 0;
 }
 
+/* Whether a value arm of `v` is a parenthesized sequence: parentheses that
+   hold more than one statement. */
+int value_arm_has_sequence(const NodeTable *nt, int v) {
+  if (v < 0) return 0;
+  switch (nt_kind(nt, v)) {
+  case NK_StatementsNode: {
+    int n = 0; const int *s = nt_arr(nt, v, "body", &n);
+    return n > 0 && value_arm_has_sequence(nt, s[n - 1]);
+  }
+  case NK_ParenthesesNode: {
+    int b = nt_ref(nt, v, "body"), n = 0;
+    if (b >= 0 && nt_kind(nt, b) == NK_StatementsNode) nt_arr(nt, b, "body", &n);
+    return n > 1 || value_arm_has_sequence(nt, b);
+  }
+  case NK_ElseNode: return value_arm_has_sequence(nt, nt_ref(nt, v, "statements"));
+  case NK_IfNode:
+    return value_arm_has_sequence(nt, nt_ref(nt, v, "statements")) ||
+           value_arm_has_sequence(nt, nt_ref(nt, v, "subsequent"));
+  case NK_UnlessNode:
+    return value_arm_has_sequence(nt, nt_ref(nt, v, "statements")) ||
+           value_arm_has_sequence(nt, nt_ref(nt, v, "else_clause"));
+  case NK_AndNode: case NK_OrNode:
+    return value_arm_has_sequence(nt, nt_ref(nt, v, "left")) ||
+           value_arm_has_sequence(nt, nt_ref(nt, v, "right"));
+  case NK_RescueModifierNode:
+    return value_arm_has_sequence(nt, nt_ref(nt, v, "expression")) ||
+           value_arm_has_sequence(nt, nt_ref(nt, v, "rescue_expression"));
+  case NK_CaseNode: {
+    int nw = 0; const int *wh = nt_arr(nt, v, "conditions", &nw);
+    for (int i = 0; i < nw; i++)
+      if (value_arm_has_sequence(nt, nt_ref(nt, wh[i], "statements"))) return 1;
+    return value_arm_has_sequence(nt, nt_ref(nt, v, "else_clause"));
+  }
+  default: return 0;
+  }
+}
+
+/* The last statement of method `mi` where it joins values and so types the
+   method by itself: -1 where method_call_ret types the call from each site's
+   block (a `yield` tail, a call of the block parameter, the block arm of an
+   `if block_given?`), and where one of its value arms is a parenthesized
+   sequence, whose last statement's value is not boxed for a nil block. */
+int scope_joined_tail(Compiler *c, int mi) {
+  const NodeTable *nt = c->nt;
+  int last = scope_body_last(c, mi);
+  if (last < 0 || block_given_tail_then_last(c, last) >= 0) return -1;
+  int u = an_unparen(nt, last);
+  if (u < 0 || nt_kind(nt, u) == NK_YieldNode || is_blk_param_call(c, u, mi)) return -1;
+  if (value_arm_has_sequence(nt, last)) return -1;
+  return last;
+}
+
 TyKind dispatch_ret_over(Compiler *c, int cid, const char *name, int cmeth, int base_mi, TyKind r,
                          int call_id) {
   int nd = 0;
