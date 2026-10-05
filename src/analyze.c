@@ -18609,12 +18609,24 @@ static int param_borrow_targets(Compiler *c, int n, int *out, int cap) {
   return k;
 }
 
+/* Does a builtin with no receiver, or one on a class, hand control to other
+   code of the program before it returns? `Fiber.yield` runs the Fiber's
+   resumer, and a thread that sleeps, passes or stops is waiting for another
+   thread to run. By name, since the class may be reached through another
+   constant (`F = Fiber`). */
+static int param_borrow_hands_off(const char *name) {
+  return sp_streq(name, "yield") || sp_streq(name, "sleep") || sp_streq(name, "pass") ||
+         sp_streq(name, "stop");
+}
+
 /* Could node n, run inside a callee, change a String, drop the last name of
    one, or run code this cannot see? A user call, a yield, a super, a proc, a
    reflective call, a builtin on or handed a value that can reach user code
    (an object's to_s, ==, hash), an in-place String change, a write of a
-   variable that can hold a String. Deliberately coarse: a callee that does
-   any of it keeps the copy. */
+   variable that can hold a String, a call that hands control away (what
+   runs meanwhile can grow the String, and the buffer the callee holds is
+   then freed under it). Deliberately coarse: a callee that does any of it
+   keeps the copy. */
 static int param_borrow_loud(Compiler *c, int n) {
   const NodeTable *nt = c->nt;
   switch (nt_kind(nt, n)) {
@@ -18653,6 +18665,7 @@ static int param_borrow_loud(Compiler *c, int n) {
     int recv = nt_ref(nt, n, "receiver");
     TyKind rt = recv >= 0 ? c->ntype[recv] : TY_VOID;
     if (recv >= 0 && !param_borrow_plain_ty(rt) && rt != TY_CLASS) return 1;
+    if ((recv < 0 || rt == TY_CLASS) && param_borrow_hands_off(name)) return 1;
     if ((rt == TY_STRING || rt == TY_STRBUF) && sp_str_mutator(name, 0)) return 1;
     int blk = nt_ref(nt, n, "block");
     if (blk >= 0 && nt_kind(nt, blk) == NK_BlockArgumentNode) return 1;
@@ -18727,8 +18740,16 @@ static int mark_param_read_only_operands(Compiler *c) {
   for (int s = 0; s < ns; s++)
     if (c->scopes[s].def_node >= 0) other[s] = calloc((size_t)(c->scopes[s].nlocals + 1), sizeof(int));
   /* one pass: which methods are loud, and how many uses of each local are
-     anything but an accessor's receiver (a block shares its method's scope) */
+     anything but an accessor's receiver (a block shares its method's scope).
+     A signal handler and a finalizer run at a safe point of whatever method
+     is running (a loop's back edge, a method's entry), so a program that
+     installs either has no quiet callee. */
+  int async = 0;
   for (int n = 0; n < nt->count; n++) {
+    if (nt_kind(nt, n) == NK_CallNode) {
+      const char *nm = nt_str(nt, n, "name");
+      if (nm && (sp_streq(nm, "trap") || sp_streq(nm, "define_finalizer"))) async = 1;
+    }
     int si = c->nscope[n];
     if (si < 0 || si >= ns || !other[si]) continue;
     if (!loud[si] && param_borrow_loud(c, n)) loud[si] = 1;
@@ -18749,6 +18770,7 @@ static int mark_param_read_only_operands(Compiler *c) {
     if (lv) other[si][lv - c->scopes[si].locals] += weight;
   }
   NT_FOREACH_KIND(nt, NK_CallNode, n) {
+    if (async) continue;
     if (nt_ref(nt, n, "block") >= 0) continue;
     int args = nt_ref(nt, n, "arguments");
     int argc = 0; const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &argc) : NULL;
