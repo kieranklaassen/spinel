@@ -646,6 +646,12 @@ spinel: 1 refusal, nothing written
 == test/reject/string_append_through_proc_keyword.rb [promote] rc=1
 spinel: a String is passed to a proc's parameter `k` through `f.call`, which the proc appends to: this call hands the proc a copy, so the append would not reach the caller's String (a String is not yet shared by reference from a block's parameter). Return the String from the proc and assign it, or append to it in the caller.
 spinel: 1 refusal, nothing written
+== test/reject/string_appended_local_plus_assign_value.rb [default] rc=1
+spinel: unsupported operator assignment: node N (LocalVariableOperatorWriteNode)
+spinel: 1 refusal, nothing written
+== test/reject/string_appended_local_plus_assign_value.rb [promote] rc=1
+spinel: unsupported operator assignment: node N (LocalVariableOperatorWriteNode)
+spinel: 1 refusal, nothing written
 == test/reject/string_array_rebound_iterator_alias.rb [default] rc=1
 spinel: a String appended to through a rebound iterator alias is not yet shared by reference with its Array
 == test/reject/string_array_rebound_iterator_alias.rb [promote] rc=1
