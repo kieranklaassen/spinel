@@ -1,0 +1,36 @@
+concat and prepend on a boxed String read it after their arguments have run
+
+    g = { a: +"q", b: +"q", c: +"q", d: +"q", e: +"q" }
+    pad = (1..40).map { |i| "pad" + i.to_s }
+    m = g[:a]
+    m.concat((m << ("z" * 300); "w"))
+    p g[:a].size
+
+segfaulted, with gcc and with clang; CRuby prints 302. A String read
+out of a Hash or a mixed Array sits behind a shared handle, and the
+boxed dispatch's String arm (emit_face_arm) reads the handle's bytes
+into a rooted temp before the call's arguments are rendered. concat and
+prepend join that text with their arguments afterwards, so an argument
+that grows the receiver moves the bytes and the temp names the old
+ones. Smaller programs answered right in a plain run and stopped on
+the GC mark path under SPINEL_GC_STRESS, and `u.concat("n", big(u,
+500))` built with clang printed size 3 for 503.
+
+Where an argument of concat or prepend can change a String (it may run
+code of the program, or calls a String mutator by name), the arguments
+now run first, each into a rooted temp, and the text is read after
+them, where CRuby reads it. With no such argument (a literal, a
+variable, `j.to_s`) the call's C is as before.
+
+The order in which several arguments run where none can change a
+String is not covered, and neither is a String receiver that is not
+boxed.
+
+Test: test/boxed_string_concat_reads_after_arguments.rb. Generated C
+changes in two corpus programs, optparse_parse_default_argv and
+optparse_parse_forms under packages/optparse/test
+(`rest.concat(argv[(i + 1)..])` on a boxed `rest`: the argument has a
+temp of its own); both print what they printed. optcarrot's C is
+identical.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
