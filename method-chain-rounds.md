@@ -44,7 +44,7 @@ Of the chains master had right at the cap, with the warning, seven get typed C h
 paste the Tests:, scale-test and gate: lines here
 ```
 
-- [ ] New tests have `.expected` files that match CRuby 4.0 run with `--enable-frozen-string-literal` (written with CRuby 3.3.6 and that flag; they print Integers and Strings)
+- [x] New tests have `.expected` files that match CRuby 4.0 run with `--enable-frozen-string-literal` (4.0.7)
 - [x] Values past 2^31 are marked `# spinel: int64` (none)
 - [x] If optcarrot's generated C changed: callgrind numbers, checksum 59662 (it did not change)
 - [ ] Depends on: #
