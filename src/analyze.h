@@ -99,6 +99,7 @@ typedef struct {
   const char *pname;     /* a parameter it binds, for a diagnostic */
   const char *mname;     /* the method it binds, when the target is one */
   int argc1;             /* the call's count of plain positional arguments, plus one; 0 if not known */
+  int lost;              /* a target appends to it through a local assigned again: 1 its parameter is the handle, 2 a plain value */
 } DynReach;
 /* The keyword arm (`f.call(k1: s)`): what the targets do with keyword `key`. */
 void dyn_call_kw_reach(Compiler *c, int n, const char *key, DynReach *r);
@@ -113,6 +114,8 @@ int dyn_yield_site(Compiler *c, int y);
 void dyn_yield_reach(Compiler *c, int y, int k, DynReach *r);
 void dyn_blk_reach(Compiler *c, int mi, int k, DynReach *r);
 int dyn_yield_param_appends(Compiler *c, int mi, int j);
+int dyn_block_loses(Compiler *c, int blk, int k);
+int dyn_yield_block_loses(Compiler *c, int mi, int j, int blk, int *argc);
 int dyn_yield_live(Compiler *c, int mi, int k);
 int dyn_open_site(Compiler *c, int n, int *shift);
 void dyn_open_reach(Compiler *c, int n, int k, DynReach *r);

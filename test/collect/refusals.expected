@@ -868,6 +868,18 @@ spinel: a nested multiple-assignment target appends to a String variable from an
 spinel: a nested multiple-assignment target appends to a String variable from an Array literal (a String is not yet shared by reference through a nested multiple-assignment target). Append to the source String instead.
 == test/reject/string_nested_masgn_target.rb [promote] rc=1
 spinel: a nested multiple-assignment target appends to a String variable from an Array literal (a String is not yet shared by reference through a nested multiple-assignment target). Append to the source String instead.
+== test/reject/string_proc_alias_assigned.rb [default] rc=1
+spinel: a String is passed to a proc's parameter `k` through `f.call`, which the proc appends to: this call hands the proc a copy, so the append would not reach the caller's String (a String is not yet shared by reference through a parameter or a local that is assigned again). Return the String from the proc and assign it, or append to it in the caller.
+spinel: 1 refusal, nothing written
+== test/reject/string_proc_alias_assigned.rb [promote] rc=1
+spinel: a String is passed to a proc's parameter `k` through `f.call`, which the proc appends to: this call hands the proc a copy, so the append would not reach the caller's String (a String is not yet shared by reference through a parameter or a local that is assigned again). Return the String from the proc and assign it, or append to it in the caller.
+spinel: 1 refusal, nothing written
+== test/reject/string_proc_param_assigned.rb [default] rc=1
+spinel: a String is passed to a proc's parameter `k` through `f.call`, which the proc appends to: this call hands the proc a copy, so the append would not reach the caller's String (a String is not yet shared by reference through a parameter or a local that is assigned again). Return the String from the proc and assign it, or append to it in the caller.
+spinel: 1 refusal, nothing written
+== test/reject/string_proc_param_assigned.rb [promote] rc=1
+spinel: a String is passed to a proc's parameter `k` through `f.call`, which the proc appends to: this call hands the proc a copy, so the append would not reach the caller's String (a String is not yet shared by reference through a parameter or a local that is assigned again). Return the String from the proc and assign it, or append to it in the caller.
+spinel: 1 refusal, nothing written
 == test/reject/string_rest_splat_yield.rb [default] rc=1
 spinel: a String is passed to a block's parameter `b` through a splat into a yield, which the proc appends to: this call hands the proc a copy, so the append would not reach the caller's String (a String is not yet shared by reference through a splat into a yield). Return the String from the proc and assign it, or append to it in the caller.
 spinel: 1 refusal, nothing written
@@ -932,6 +944,12 @@ spinel: 1 refusal, nothing written
 == test/reject/string_thread_method_param_arg.rb [promote] rc=1
 spinel: a String is passed to a block's parameter `t` through `Thread.new`, which the proc appends to: this call hands the proc a copy, so the append would not reach the caller's String (a String is not yet shared by reference through `Thread.new`). Return the String from the proc and assign it, or append to it in the caller.
 spinel: 1 refusal, nothing written
+== test/reject/string_yield_block_param_assigned.rb [default] rc=1
+spinel: a String is passed to `run`'s parameter `s` through a yield into a block, which the method appends to: this call hands the method a copy, so the append would not reach the caller's String (a String is not yet shared by reference through a parameter or a local that is assigned again). Return the String from the method and assign it, or append to it in the caller.
+spinel: 1 refusal, nothing written
+== test/reject/string_yield_block_param_assigned.rb [promote] rc=1
+spinel: a String is passed to `run`'s parameter `s` through a yield into a block, which the method appends to: this call hands the method a copy, so the append would not reach the caller's String (a String is not yet shared by reference through a parameter or a local that is assigned again). Return the String from the method and assign it, or append to it in the caller.
+spinel: 1 refusal, nothing written
 == test/reject/string_yield_captured_param.rb [default] rc=1
 spinel: a String is passed to a block's parameter `q` through `yield` into a capture-wrapper block, which the proc appends to: this call hands the proc a copy, so the append would not reach the caller's String (a String is not yet shared by reference through `yield` into a capture-wrapper block). Return the String from the proc and assign it, or append to it in the caller.
 spinel: 1 refusal, nothing written
@@ -943,6 +961,12 @@ spinel: a String is passed to `w`'s parameter `x` through a yield into a block a
 spinel: 1 refusal, nothing written
 == test/reject/string_yield_poly_param_global.rb [promote] rc=1
 spinel: a String is passed to `w`'s parameter `x` through a yield into a block argument, which the method appends to: this call hands the method a copy, so the append would not reach the caller's String (a String is not yet shared by reference from a global variable). Return the String from the method and assign it, or append to it in the caller.
+spinel: 1 refusal, nothing written
+== test/reject/string_yield_splat_array_literal.rb [default] rc=1
+spinel: a String is passed to a block's parameter `k` through a splat into a yield, which the proc appends to: this call hands the proc a copy, so the append would not reach the caller's String (a String is not yet shared by reference through a splat into a yield). Return the String from the proc and assign it, or append to it in the caller.
+spinel: 1 refusal, nothing written
+== test/reject/string_yield_splat_array_literal.rb [promote] rc=1
+spinel: a String is passed to a block's parameter `k` through a splat into a yield, which the proc appends to: this call hands the proc a copy, so the append would not reach the caller's String (a String is not yet shared by reference through a splat into a yield). Return the String from the proc and assign it, or append to it in the caller.
 spinel: 1 refusal, nothing written
 == test/reject/string_yield_splat_captured.rb [default] rc=1
 spinel: a String is passed to a block's parameter `q` through a splat into a yield, which the proc appends to: this call hands the proc a copy, so the append would not reach the caller's String (a String is not yet shared by reference through a splat into a yield). Return the String from the proc and assign it, or append to it in the caller.

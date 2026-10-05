@@ -18809,6 +18809,22 @@ static __attribute__((noreturn)) void refuse_string_copy(Compiler *c, int arg, c
   unsupported_feature(c, arg, msg);
 }
 
+/* The same for a block or a proc that appends through a local it assigns
+   again (DynReach.lost): no call pulls a variable into the handle for it,
+   so one that is not the handle already goes over as a copy. A parameter
+   the block itself assigns is named as written (`k__bpin` is `k`,
+   desugar_reassigned_block_params). */
+static __attribute__((noreturn)) void refuse_lost_append(Compiler *c, int arg, const char *target,
+                                                         const char *pname, const char *through) {
+  char pn[96];
+  snprintf(pn, sizeof pn, "%s", pname ? pname : "");
+  size_t n = strlen(pn);
+  if (n > 6 && sp_streq(pn + n - 6, "__bpin")) pn[n - 6] = 0;
+  pn[block_param_written_len(pn)] = 0;
+  refuse_string_copy(c, arg, target, pname ? pn : NULL, through,
+                     "through a parameter or a local that is assigned again");
+}
+
 /* Does a method's parameter take a String by value, so that a String
    variable bound to it arrives as a copy? A handle parameter is shared
    through the static binders already (#3227, #5957), and a boxed one
@@ -19099,11 +19115,13 @@ void refuse_yield_string_copies(Compiler *c, int yargc, const int *yargv) {
        follow it bind by name all the same, so the scan goes on to them */
     if (nt_kind(c->nt, yargv[k]) == NK_SplatNode) spread = 1;
     if (spread) continue;
-    if (!strvar_arg(c, yargv[k], &shared) || shared || local_is_handle(c, yargv[k])) continue;
+    if (!strvar_arg(c, yargv[k], &shared)) continue;
     DynReach r;
     if (g_yield_proc_expr < 0 && g_yield_proc_method >= 0) dyn_blk_reach(c, g_yield_proc_method, k, &r);
     else dyn_value_reach(c, g_yield_proc_expr, k, &r);
-    if (!r.app) continue;
+    int handle = shared || local_is_handle(c, yargv[k]);
+    if (!r.app && r.lost > handle) refuse_lost_append(c, yargv[k], NULL, r.pname, "a yield into a block argument");
+    if (handle || !r.app) continue;
     if (r.mname) {
       char mt[96]; snprintf(mt, sizeof mt, "`%s`", r.mname);
       refuse_string_copy(c, yargv[k], mt, r.pname, "a yield into a block argument",
@@ -19254,6 +19272,7 @@ static int ie_arg_aliases(Compiler *c, int a) {
    be: a block's parameter, a global or class variable, an ivar that is no
    handle. A spliced call is emitted by the inliner, which asks this too. */
 static void refuse_rest_yield_copies(Compiler *c, int id, int t);
+static void refuse_array_yield_copies(Compiler *c, int id, int t);
 void refuse_yield_handle_args(Compiler *c, int id) {
   const NodeTable *nt = c->nt;
   const char *name = nt_str(nt, id, "name");
@@ -19264,8 +19283,23 @@ void refuse_yield_handle_args(Compiler *c, int id) {
       !refuse_call_binds(c, refuse_scope_params(c, ym), id, 0, 0)) return;
   if (nt_int(nt, id, "node_line", 0) > 0) g_refuse_call = id;
   refuse_rest_yield_copies(c, id, ymi);
+  refuse_array_yield_copies(c, id, ymi);
   for (int j = 0; j < ym->nparams && j < 16; j++) {
     LocalVar *q = ym->pnames[j] ? scope_local(ym, ym->pnames[j]) : NULL;
+    /* the call's block assigns the parameter this one is yielded to and
+       appends to it: the yield neither lends it the variable nor hands it
+       the handle */
+    int blk = nt_ref(nt, id, "block"), yn = 0;
+    int bk = dyn_yield_block_loses(c, ymi, j, blk, &yn);
+    if (bk >= 0 && !block_param_wants_alias(c, blk, bk, yn)) {
+      int a = arg_layout_param_node(c, ym, id, j, NULL);
+      int shared;
+      const char *kind = a >= 0 ? strvar_arg(c, a, &shared) : NULL;
+      int handle = kind && (ctor_arg_shared(c, a, 0) || (local_is_handle(c, a) && !sp_streq(kind, "a block's parameter")));
+      char mt[96]; snprintf(mt, sizeof mt, "`%s`", name);
+      if (kind && !(handle && block_param_is_handle(c, blk, bk, yn)))
+        refuse_lost_append(c, a, mt, ym->pnames[j], "a yield into a block");
+    }
     /* a boxed parameter the block appends to through a yield: a local is
        pulled in and boxed as the handle, any other variable is a copy */
     if (q && q->type == TY_POLY) {
@@ -19635,6 +19669,41 @@ static void refuse_rest_yield_copies(Compiler *c, int id, int t) {
   }
 }
 
+/* The same for an Array literal bound to a parameter the method yields with
+   a splat (`def y(a) = yield(*a)`; `y([s]) { |k| k << x }`): an element that
+   is not the handle is a copy where it lands. */
+static void refuse_array_yield_copies(Compiler *c, int id, int t) {
+  const NodeTable *nt = c->nt;
+  int blk = nt_ref(nt, id, "block");
+  if (t < 0 || blk < 0 || nt_kind(nt, blk) != NK_BlockNode) return;
+  Scope *m = &c->scopes[t];
+  int ca = nt_ref(nt, id, "arguments"), cn = 0, lit = 0;
+  const int *cv = ca >= 0 ? nt_arr(nt, ca, "arguments", &cn) : NULL;
+  for (int k = 0; k < cn && !lit; k++) lit = nt_kind(nt, cv[k]) == NK_ArrayNode;
+  if (!lit || !m->yields) return;
+  for (int y = comp_kind_first(c, NK_YieldNode); y >= 0; y = comp_kind_next(c, y)) {
+    if (nt_kind(nt, y) != NK_YieldNode || comp_scope_of(c, y) != m) continue;
+    int ya = nt_ref(nt, y, "arguments"), yc = 0;
+    const int *yv = ya >= 0 ? nt_arr(nt, ya, "arguments", &yc) : NULL;
+    int ys = 0;
+    while (ys < yc && nt_kind(nt, yv[ys]) != NK_SplatNode) ys++;
+    int j = ys < yc ? unassigned_param_read(c, m, nt_ref(nt, yv[ys], "expression")) : -1;
+    int a = j >= 0 ? arg_layout_param_node(c, m, id, j, NULL) : -1;
+    int en = 0;
+    const int *el = a >= 0 && nt_kind(nt, a) == NK_ArrayNode ? nt_arr(nt, a, "elements", &en) : NULL;
+    for (int e = 0; e < en && ys + e < 16; e++) {
+      if (nt_kind(nt, el[e]) == NK_SplatNode) break;
+      int shared;
+      if (!strvar_arg(c, el[e], &shared) || shared || local_is_handle(c, el[e]) || c->strbuf_box[el[e]]) continue;
+      if (dyn_block_loses(c, blk, ys + e))
+        refuse_lost_append(c, el[e], "a block", proc_param_name(c, blk, ys + e), "a splat into a yield");
+      if (dyn_block_appends(c, blk, ys + e))
+        refuse_string_copy(c, el[e], "a block", proc_param_name(c, blk, ys + e), "a splat into a yield",
+                           "through a splat into a yield");
+    }
+  }
+}
+
 /* A method that forwards its rest (`def w(*a) = m(*a)`, `*`, `...`) to a
    parameter that appends, or hands a POLY parameter on to one (`def m(p,
    k:) = super`, called with `**h`): the call's String variable is pulled
@@ -19921,6 +19990,7 @@ static void refuse_string_copies(Compiler *c, int id) {
       if (!kind) continue;
       DynReach r;
       dyn_call_reach(c, id, k, &r);
+      if (!r.app && r.lost > shared) refuse_lost_append(c, av[k], NULL, r.pname, call);
       if (shared || !r.app) continue;
       char why[96]; snprintf(why, sizeof why, "from %s", kind);
       char mt[96]; if (r.mname) snprintf(mt, sizeof mt, "`%s`", r.mname);
