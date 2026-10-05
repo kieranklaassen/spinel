@@ -1268,19 +1268,43 @@ static int strbuf_cond_has_handle_leaf(Compiler *c, int v, int depth) {
       return 0;
   }
 }
+/* Each arm below stands in a pair of braces, and clang stops at 256 nested
+   brackets. So from this many arms deep, an `else` whose value is itself an
+   `if` with no setup of its own is written `else if`, and an `elsif` chain
+   of any length nests no deeper. Below it the C is what it was. */
+#define STRBUF_COND_FLAT_FROM 64
+static int g_strbuf_cond_depth, g_strbuf_cond_else;
+static int strbuf_cond_is_if(Compiler *c, int v) {
+  const NodeTable *nt = c->nt;
+  for (int n = 1; v >= 0 && n == 1; ) {
+    switch (nt_kind(nt, v)) {
+      case NK_IfNode: case NK_UnlessNode: return 1;
+      case NK_ElseNode: v = nt_ref(nt, v, "statements"); break;
+      case NK_ParenthesesNode: v = nt_ref(nt, v, "body"); break;
+      case NK_StatementsNode: { const int *bb = nt_arr(nt, v, "body", &n); v = n == 1 ? bb[0] : -1; break; }
+      default: return 0;
+    }
+  }
+  return 0;
+}
 /* Assign conditional `v`'s value to the handle temp `dst` as statements,
    arm by arm (strbuf_cond_has_handle_leaf): the condition is tested where
    the value form tests it, and each arm's own setup runs only on its path. */
 static void emit_strbuf_cond_arm(Compiler *c, LocalVar *lv, int v, const char *dst, Buf *b) {
+  int flat = g_strbuf_cond_else && g_strbuf_cond_depth >= STRBUF_COND_FLAT_FROM && strbuf_cond_is_if(c, v);
+  g_strbuf_cond_else = 0;
   Buf pre; memset(&pre, 0, sizeof pre);
   Buf *sv = g_pre; g_pre = &pre;
   Buf body; memset(&body, 0, sizeof body);
+  g_strbuf_cond_depth++;
   emit_strbuf_cond_value(c, lv, v, dst, &body);
+  g_strbuf_cond_depth--;
   g_pre = sv;
-  buf_puts(b, "{ ");
+  if (pre.p && pre.p[0]) flat = 0;
+  buf_puts(b, flat ? "" : "{ ");
   buf_puts(b, pre.p ? pre.p : "");
   buf_puts(b, body.p ? body.p : "");
-  buf_puts(b, " }");
+  buf_puts(b, flat ? "" : " }");
   free(pre.p); free(body.p);
 }
 static void emit_strbuf_cond_value(Compiler *c, LocalVar *lv, int v, const char *dst, Buf *b) {
@@ -1309,6 +1333,7 @@ static void emit_strbuf_cond_value(Compiler *c, LocalVar *lv, int v, const char 
       free(cnd.p);
       emit_strbuf_cond_arm(c, lv, nt_ref(nt, v, "statements"), dst, b);
       buf_puts(b, "\nelse ");
+      g_strbuf_cond_else = 1;
       emit_strbuf_cond_arm(c, lv, sub, dst, b);
       buf_puts(b, "\n");
       return;
