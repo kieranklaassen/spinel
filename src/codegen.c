@@ -10887,6 +10887,15 @@ int emit_super_inline(Compiler *c, int id, Buf *b, int indent, int as_expr) {
             : p < 0 ? -1
             : s->is_cmethod ? comp_cmethod_in_chain(c, p, s->name, &odef)
                             : comp_method_in_chain(c, p, s->name, &odef);
+    /* A copy's name the parent's chain holds is the parent's own copy of
+       that number, not what the super reaches: a class's own body under a
+       prepend is `__prep_0_m` in the parent as it is here, and the splice
+       took the parent's own body, past the copy the parent's prepend put in
+       front of it. The super reaches the parent's `m`. */
+    const char *uname = comp_prep_user_name(s->name);
+    if (!shadow && omi >= 0 && uname != s->name)
+      omi = s->is_cmethod ? comp_cmethod_in_chain(c, p, uname, &odef)
+                          : comp_method_in_chain(c, p, uname, &odef);
     if (mi < 0) {
       if (g_plan_check && omi >= 0)
         fprintf(stderr, "plan-check: cplan-fallback: super-inline node %d %s\n", id, s->name);
