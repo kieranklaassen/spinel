@@ -4,6 +4,12 @@
 
 /* ---- The boxed-receiver face table (see types.h) ---- */
 static const PolyFace ty_poly_face_tbl[] = {
+  /* Random stored in a mixed container keeps its instance surface. The
+     typed call also checks invalid counts; bytes without arguments belongs
+     to String and keeps its existing dispatch. */
+  {"rand", PF_RANDOM, 0, -1, -1},
+  {"bytes", PF_RANDOM, 1, -1, -1},
+  {"seed", PF_RANDOM, 0, -1, -1},
   /* String value-form mutators: the non-bang transform runs against the
      unboxed contents and the result is written back through the box. */
   {"gsub!", PF_STRING | PF_STR_BANG, 0, -1, -1}, {"sub!", PF_STRING | PF_STR_BANG, 0, -1, -1},
@@ -34,9 +40,21 @@ static const PolyFace ty_poly_face_tbl[] = {
   {"times", PF_INT, 0, 0, 1}, {"upto", PF_INT, 1, 1, 1}, {"downto", PF_INT, 1, 1, 1},
   {"step", PF_INT | PF_FLOAT, 0, 2, 1},   /* no limit: the endless Integer walk (the Float arm declines it) */
   /* the blockless form materializes the sequence the way the typed
-     emitters do (an Integer or a Float array), boxed since the two arms
-     disagree, so `.to_a` / `.map` read it as the Enumerator's answer (#4779) */
-  {"step", PF_INT | PF_FLOAT, 1, 2, 0},
+     emitters do (an Integer or a Float array), boxed since the arms
+     disagree, so `.to_a` / `.map` read it as the Enumerator's answer (#4779);
+     an Integer or Float Range's step(n) materializes the same way */
+  {"step", PF_INT | PF_FLOAT | PF_RANGE | PF_FRANGE, 1, 2, 0},
+  /* A Range of each kind owns step and bsearch with a block: unboxed to its
+     own by-value struct, the typed emitter walks it. A blockless step(n)
+     takes the row above; blockless bsearch answers an Enumerator no typed
+     emitter builds.
+     An Array owns bsearch too: a row for the name decides every receiver
+     kind, so leaving it out made a boxed Array's bsearch a NoMethodError. */
+  {"step", PF_RANGE | PF_FRANGE | PF_SRANGE, 0, 1, 1},
+  {"bsearch", PF_ARRAY | PF_RANGE | PF_FRANGE, 0, 0, 1},
+  /* minmax is Range's own, read off the endpoints (a Float Range cannot be
+     walked), beside the Enumerable row below that walks a collection */
+  {"minmax", PF_RANGE | PF_FRANGE | PF_SRANGE, 0, 0, -1},
   /* The Enumerable names a boxed receiver shares with Array: its elements
      (a hash's [key, value] pairs) materialize into a poly array once. */
   {"minmax", PF_ENUM, 0, -1, -1}, {"tally", PF_ENUM, 0, -1, -1}, {"product", PF_ENUM, 0, -1, -1},
@@ -142,6 +160,29 @@ unsigned ty_poly_face_owner_flags(const char *name, int argc, int has_blk, int p
     fl |= r->flags;
   }
   return fl;
+}
+unsigned ty_str_bang_flags(const char *name) {
+  if (!name) return 0;
+  for (const PolyFace *r = ty_poly_face_tbl; r->name; r++)
+    if ((r->flags & PF_STR_BANG) && sp_streq(name, r->name))
+      return r->flags & (PF_STR_BANG | PF_STR_SELF);
+  return 0;
+}
+unsigned ty_str_typed_bang_flags(const char *name) {
+  unsigned fl = ty_str_bang_flags(name);
+  /* reverse! is a String bang too, answering self, but its face rows are
+     the mutator kind's (PF_MUT | PF_VAL_SELF): Array has it as well, so a
+     boxed receiver's reverse! is either, and answers poly */
+  if (!fl && name && sp_streq(name, "reverse!")) fl = PF_STR_BANG | PF_STR_SELF;
+  return fl;
+}
+void str_bang_plain(const char *bang, char *out, int n) {
+  size_t len = bang ? strlen(bang) : 0;
+  if (len && bang[len - 1] == '!') len--;
+  if (n <= 0) return;
+  if (len >= (size_t)n) len = (size_t)n - 1;
+  if (len) memcpy(out, bang, len);
+  out[len] = 0;
 }
 int ty_poly_hash_face_name(const char *nm) {
   if (!nm) return 0;
@@ -263,6 +304,9 @@ int ty_is_array(TyKind t) {
   return t == TY_INT_ARRAY || t == TY_FLOAT_ARRAY ||
          t == TY_STR_ARRAY || t == TY_POLY_ARRAY || t == TY_INT_ARRAY_ARRAY ||
          t == TY_FLOAT_ARRAY_ARRAY;
+}
+int array_new_copies(TyKind t) {
+  return t == TY_INT_ARRAY || t == TY_FLOAT_ARRAY || t == TY_STR_ARRAY || t == TY_POLY_ARRAY;
 }
 TyKind ty_array_of(TyKind elem) {
   switch (elem) {
@@ -464,8 +508,8 @@ static int ty_is_array_elem_iter(const char *n) {
 
 TyIterShape ty_iter_shape(const char *name) {
   if (!name) return TY_ITER_NONE;
-  if (sp_streq(name, "map") || sp_streq(name, "collect")) return TY_ITER_MAP;
-  if (sp_streq(name, "select") || sp_streq(name, "filter")) return TY_ITER_SELECT;
+  if (is_map_alias(name)) return TY_ITER_MAP;
+  if (is_select_alias(name)) return TY_ITER_SELECT;
   if (sp_streq(name, "reject")) return TY_ITER_REJECT;
   return TY_ITER_NONE;
 }
@@ -476,7 +520,7 @@ int ty_block_yield(TyKind recv, const char *name, TyKind *out, int max) {
   /* each_slice(n) and each_cons(n) hand their block one Array per step, which
      the block's parameter is typed from as a literal block's is */
   if ((ty_is_array(recv) || ty_is_hash(recv) || recv == TY_RANGE) &&
-      (sp_streq(name, "each_slice") || sp_streq(name, "each_cons"))) {
+      (is_each_window(name))) {
     BY_PUT(0, TY_UNKNOWN); return 1;
   }
   if (ty_is_array(recv)) {
@@ -486,7 +530,7 @@ int ty_block_yield(TyKind recv, const char *name, TyKind *out, int max) {
     return 0;
   }
   if (ty_is_hash(recv)) {
-    if (sp_streq(name, "each") || sp_streq(name, "each_pair")) {
+    if (is_each_or_pair(name)) {
       BY_PUT(0, ty_hash_key(recv)); BY_PUT(1, ty_hash_val(recv)); return 2;
     }
     if (sp_streq(name, "each_key")) { BY_PUT(0, ty_hash_key(recv)); return 1; }
@@ -514,7 +558,7 @@ int ty_block_yield(TyKind recv, const char *name, TyKind *out, int max) {
     return 0;
   }
   if (recv == TY_INT) {
-    if (sp_streq(name, "times") || sp_streq(name, "upto") || sp_streq(name, "downto")) {
+    if (is_int_step(name)) {
       BY_PUT(0, TY_INT); return 1;
     }
     return 0;
@@ -578,7 +622,7 @@ int ty_object_protocol_answers(TyKind rt, TyKind at, const char *name, int argc)
   int kind = ty_object_protocol_kind(rt);
   if (argc == 0) {
     if (kind == 1)
-      return sp_streq(name, "frozen?") || sp_streq(name, "freeze") ||
+      return is_freeze_family(name) ||
              (ty_object_protocol_io(rt) && sp_streq(name, "to_s"));
     /* a Range is always frozen; Time and Tms carry no frozen bit, so neither
        question is answered for them */
@@ -590,7 +634,7 @@ int ty_object_protocol_answers(TyKind rt, TyKind at, const char *name, int argc)
   int is_equal = sp_streq(name, "equal?");
   int is_eql = sp_streq(name, "eql?");
   int is_case = sp_streq(name, "===");
-  int is_eq = is_case || sp_streq(name, "==") || sp_streq(name, "!=");
+  int is_eq = is_case || is_eq_or_ne(name);
   if (!is_eq && !is_eql && !is_equal) return 0;
   if (kind == 0) {
     /* the cross-family tier */
@@ -606,4 +650,17 @@ int ty_object_protocol_answers(TyKind rt, TyKind at, const char *name, int argc)
   /* a by-value struct has no identity to compare */
   if (kind == 2 && is_equal) return 0;
   return 1;
+}
+
+/* ty_traits (types.h): generated from the functions each column names by
+   spinel --dump-traits, and checked against them by --check-traits. */
+const TyTraits ty_traits[TY_TRAITS_N] = {
+#include "ty_traits.inc"
+};
+
+/* A builtin value's type, which lays out no instance variables: a String,
+   a number, true, false, nil, a Symbol, a Range, an Array or a Hash. */
+int ty_builtin_ivar_less(TyKind t) {
+  return t == TY_STRING || t == TY_STRBUF || t == TY_INT || t == TY_FLOAT || t == TY_BOOL || t == TY_NIL ||
+         t == TY_SYMBOL || t == TY_BIGINT || t == TY_RANGE || ty_is_array(t) || ty_is_hash(t);
 }
