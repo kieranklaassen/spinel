@@ -1,6 +1,7 @@
 # A String local that is appended to twice in a row, or in a loop, is held
-# as a handle. Once a write sets it to nil the handle is NULL, and reading
-# the local answers nil.
+# as a handle. While it is nil the handle is NULL, and reading the local
+# answers nil: after a write of nil, after a call hands it nil, and before
+# its first write.
 
 def joined(parts)
   t = +""
@@ -15,6 +16,23 @@ def label(clear)
   t << "b"
   t = nil if clear
   return "none" unless t
+  t
+end
+
+def found(words, want)
+  t = +""
+  t << "a"
+  t << "b"
+  t = words.find { |w| w == want }
+  t
+end
+
+def unset(fill)
+  if fill
+    t = +""
+    t << "a"
+    t << "b"
+  end
   t
 end
 
@@ -33,13 +51,15 @@ p t.to_s
 p t.class
 p t&.size
 p(t || "d")
-p t.to_i
-p t.to_f
 
 p joined([])
 p joined(["x", "y"])
 puts label(true)
 puts label(false)
+p found(["x", "y"], "q")
+p found(["x", "y"], "y")
+p unset(false)
+p unset(true)
 
 u = +""
 3.times { |i| u << i.to_s }

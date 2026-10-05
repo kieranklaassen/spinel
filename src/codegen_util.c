@@ -1857,20 +1857,6 @@ const char *strbuf_local_name(Compiler *c, int recv) {
   LocalVar *rl = rs ? scope_local(rs, rn) : NULL;
   return repr_of_slot(c, rl).kind == RK_STRBUF ? rn : NULL;
 }
-/* Does a write in scope `sc` set its local `name` to nil (`t = nil`)? A String
-   local held as a handle is then a NULL handle until another write fills it. */
-int strbuf_local_nil_written(Compiler *c, Scope *sc, const char *name) {
-  const NodeTable *nt = c->nt;
-  if (!sc || !name) return 0;
-  for (int w = comp_lvw_first_sc(c, (int)(sc - c->scopes), name); w >= 0; w = comp_lvw_next_sc(c, w)) {
-    if (nt_kind(nt, w) != NK_LocalVariableWriteNode || comp_scope_of(c, w) != sc) continue;
-    const char *wn = nt_str(nt, w, "name");
-    if (!wn || !sp_streq(wn, name)) continue;
-    int v = unwrap_parens(c, nt_ref(nt, w, "value"));
-    if (v >= 0 && nt_kind(nt, v) == NK_NilNode) return 1;
-  }
-  return 0;
-}
 /* The owning class slot of an ivar READ node, mirroring the read emitter's
    storage resolution: instance method -> its class; top-level method ->
    the Toplevel pseudo-class; a class method -> its class, whose civ_ slot

@@ -1535,22 +1535,15 @@ static int emit_local_ivar_write_expr(Compiler *c, int id, Buf *b, const NodeTab
          right after the call (#3227 P6) */
       buf_puts(b, "(_sp_ret_strbuf = (void *)");
       emit_local_ref(c, id, lrn, b);
-      /* A parameter that is the handle can be nil, `def initialize(s, o: nil)`
-         or `def run(cmd, text: nil)` whose block appends to it: nil is a NULL
-         handle, and reads as nil. So is a local's (`q = nil; q = +"x" if c`
-         with `q.tap { |w| w << "!" if w }` making q the handle). */
-      if (slv->dyn_handle || slv->is_param || slv->str_shared ||
-          strbuf_local_nil_written(c, comp_scope_of(c, id), lrn)) {
-        buf_puts(b, ", ");
-        emit_local_ref(c, id, lrn, b);
-        buf_puts(b, " ? sp_str_concat(sp_String_cstr(");
-        emit_local_ref(c, id, lrn, b);
-        buf_puts(b, "), (&(\"\\xff\")[1])) : NULL)");
-        return 1;
-      }
-      buf_puts(b, ", sp_str_concat(sp_String_cstr(");
+      /* The handle can be nil: a parameter (`def initialize(s, o: nil)`, or
+         `def run(cmd, text: nil)` whose block appends to it), or a local
+         that is assigned nil, handed nil by a call, or read before its
+         first write. nil is a NULL handle, and reads as nil. */
+      buf_puts(b, ", ");
       emit_local_ref(c, id, lrn, b);
-      buf_puts(b, "), (&(\"\\xff\")[1])))");
+      buf_puts(b, " ? sp_str_concat(sp_String_cstr(");
+      emit_local_ref(c, id, lrn, b);
+      buf_puts(b, "), (&(\"\\xff\")[1])) : NULL)");
       return 1;
     }
     /* A POLY variable handed to a parameter the callee appends to in place:
