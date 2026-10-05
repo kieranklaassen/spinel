@@ -1741,7 +1741,8 @@ gc-phases-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
 # threshold floor asked for beside it too: the level is over the floors. Then the
 # other half of the contract: programs that root what they use answer the same
 # at level 2, alone and beside the full verifier, on both runtimes.
-GC_STRESS_TESTS := test/gc_root_frame_slots.rb \
+GC_STRESS_TESTS := test/case_string_range_subject_root.rb \
+                   test/gc_root_frame_slots.rb \
                    test/gc_minor_byref_lent_slot.rb \
                    test/proc_cell_capture_marked.rb \
                    test/poly_array_intersect.rb \

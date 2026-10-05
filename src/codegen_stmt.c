@@ -5346,10 +5346,12 @@ static int emit_when_lambda_inline(Compiler *c, int cond, int t, TyKind pt, Buf 
    or a regexp operand cannot collect anything, so `case x when Klass` and
    the integer switch fast path generate what they did. The subject is
    rooted even when it was read from a local: a `when` operand can reassign
-   that local, and the temporary is then the only reference left. */
+   that local, and the temporary is then the only reference left. A subject
+   kept by value is rooted through the Strings it carries (a String Range's
+   two ends): the temporary is the only holder of an end made in place. */
 static int case_subject_needs_root(Compiler *c, TyKind pt, const int *whens, int nw) {
   const NodeTable *nt = c->nt;
-  if (!needs_root(pt) || comp_ty_value_obj(c, pt)) return 0;
+  if (!ty_gc_holds_refs(c, pt)) return 0;
   for (int w = 0; w < nw; w++) {
     int wc = 0; const int *conds = nt_arr(nt, whens[w], "conditions", &wc);
     for (int k = 0; k < wc; k++) if (subtree_allocates(nt, conds[k])) return 1;
@@ -5700,7 +5702,7 @@ void emit_case(Compiler *c, int id, Buf *b, int indent) {
     }
     if (case_subject_needs_root(c, pt, whens, nw)) {
       emit_indent(b, indent);
-      emit_gc_root_tmp(c, pt, t, b);
+      emit_gc_root_tmp_refs(c, pt, t, b);
       buf_puts(b, "\n");
     }
   }
@@ -6141,7 +6143,7 @@ void emit_case_expr(Compiler *c, int id, Buf *b) {
       pt = TY_POLY;
     }
     else { emit_ctype(c, pt, b); buf_printf(b, " _t%d = ", t); emit_expr(c, pred, b); buf_puts(b, "; "); }
-    if (case_subject_needs_root(c, pt, whens, nw)) { emit_gc_root_tmp(c, pt, t, b); buf_puts(b, " "); }
+    if (case_subject_needs_root(c, pt, whens, nw)) { emit_gc_root_tmp_refs(c, pt, t, b); buf_puts(b, " "); }
   }
 
   /* Fast path: `case <int> when <integer literals>` captures the branch value
