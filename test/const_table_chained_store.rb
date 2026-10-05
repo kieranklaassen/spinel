@@ -1,0 +1,35 @@
+# A row stored through a chain of stores into a constant table of Integer rows
+# is read back by index as the row it is.
+
+D1 = [[1, 2], [3, 4]]
+D1.push([5]).push(["a"])
+p D1[3], D1[3].size, D1[2], D1[0][1]
+
+D2 = [[1, 2], [3, 4]]
+(D2 << [5]) << []
+p D2[3], D2[3].size
+
+D3 = [[1, 2], [3, 4]]
+D3 << [5] << [1.5] << {}
+p D3[3], D3[4], D3[2].sum
+
+D4 = [[1, 2], [3, 4]]
+D4.concat([[5]]).unshift(["a", "b"]).insert(1, [])
+p D4[0], D4[1], D4[2][1] + 1, D4[4]
+
+D5 = [[1, 2], [3, 4]]
+D5.fill([7, 8]).push(["x"])
+p D5[2], D5[2].size, D5[0]
+
+D6 = [[1, 2], [3, 4]]
+D6.each { |r| r }.push([:s])
+p D6[2], D6.at(2)
+
+D7 = [[1, 2], [3, 4]]
+D7.push([5]).replace([["a"], [1.5]])
+p D7[0], D7[1]
+
+# a chain of Integer rows leaves a table of Integer rows
+D8 = [[1, 2], [3, 4]]
+D8.push([5, 6]).push([7]).unshift([8, 9])
+p D8[3], D8[4][0] + D8[3][1], D8[0].sum
