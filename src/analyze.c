@@ -8969,12 +8969,80 @@ static int desugar_multi_yield_map_param(Compiler *c) {
   return changed;
 }
 
+/* What a condition says of the caller's block: 1 when it holds with a
+   block (`block_given?`, the `&b` parameter read), -1 when it holds without
+   one (`!` of either, `nil?` of the parameter), 0 when it says nothing.
+   `block_given?.nil?` never holds, so `nil?` counts on the parameter alone. */
+static int te_block_test(const NodeTable *nt, int n, const char *bp) {
+  if (n < 0) return 0;
+  if (nt_kind(nt, n) == NK_LocalVariableReadNode) {
+    const char *vn = nt_str(nt, n, "name");
+    return bp && bp[0] && vn && sp_streq(vn, bp);
+  }
+  if (nt_kind(nt, n) != NK_CallNode) return 0;
+  const char *cn = nt_str(nt, n, "name");
+  int r = nt_ref(nt, n, "receiver");
+  if (!cn) return 0;
+  if (r < 0) return sp_streq(cn, "block_given?");
+  if (sp_streq(cn, "!")) return -te_block_test(nt, r, bp);
+  if (sp_streq(cn, "nil?") && nt_kind(nt, r) == NK_LocalVariableReadNode) return -te_block_test(nt, r, bp);
+  return 0;
+}
+
+/* Is statement `n` the guard, a return taken when no block was given
+   (`return to_enum(:m) unless block_given?`, `block_given? or return ...`)?
+   What follows it in the list runs with a block. */
+static int te_blockless_return(const NodeTable *nt, int n, const char *bp) {
+  int arm = -1;
+  switch (nt_kind(nt, n)) {
+    case NK_IfNode:
+      if (te_block_test(nt, nt_ref(nt, n, "predicate"), bp) < 0) arm = nt_ref(nt, n, "statements");
+      break;
+    case NK_UnlessNode:
+      if (te_block_test(nt, nt_ref(nt, n, "predicate"), bp) > 0) arm = nt_ref(nt, n, "statements");
+      break;
+    case NK_OrNode:
+      if (te_block_test(nt, nt_ref(nt, n, "left"), bp) > 0) arm = nt_ref(nt, n, "right");
+      break;
+    default: break;
+  }
+  if (arm >= 0 && nt_kind(nt, arm) == NK_StatementsNode) {
+    int bn = 0; const int *bb = nt_arr(nt, arm, "body", &bn);
+    arm = bn > 0 ? bb[bn - 1] : -1;
+  }
+  return arm >= 0 && nt_kind(nt, arm) == NK_ReturnNode;
+}
+
+/* Does the subtree hold a `return`, or test the block again with
+   `block_given?`? What follows such a statement may never run with a block
+   (`if block_given? ... return self end`), whatever the guard said. */
+static int te_may_leave(const NodeTable *nt, int n, int depth) {
+  if (n < 0 || n >= nt->count || depth > 200) return 0;
+  if (nt_kind(nt, n) == NK_ReturnNode) return 1;
+  if (nt_kind(nt, n) == NK_CallNode && nt_ref(nt, n, "receiver") < 0) {
+    const char *cn = nt_str(nt, n, "name");
+    if (cn && sp_streq(cn, "block_given?")) return 1;
+  }
+  const SpNode *nd = &nt->nodes[n];
+  for (int i = 0; i < nd->nr; i++)
+    if (te_may_leave(nt, nd->r[i].ref, depth + 1)) return 1;
+  for (int i = 0; i < nd->na; i++)
+    for (int j = 0; j < nd->a[i].n; j++)
+      if (te_may_leave(nt, nd->a[i].ids[j], depth + 1)) return 1;
+  return 0;
+}
+
 /* Does a def's body answer a VALUE on some path -- a local or ivar read, a
    literal, an assignment -- as the last expression or through a `return`?
    The `each`-like idiom answers self, nil or an iterator call, whose value
    nobody keeps; index_by answers the Hash it built. Walked through the tail
-   of if / unless / parentheses and a return's argument. */
-static int te_tail_is_value(const NodeTable *nt, int n, int depth) {
+   of if / unless / parentheses and a return's argument.
+   `last` follows the body's last expression: 1 on it, 2 once it is known to
+   run with a block (past the guard, or in the block arm of a test of the
+   block; `bp` names a `&b` parameter), 0 elsewhere. The other literals
+   count only at 2: one returned early beside a `self` tail, or ending the
+   arm that runs without a block, sits in a method that builds pinned. */
+static int te_tail_is_value(const NodeTable *nt, int n, int depth, int last, const char *bp) {
   if (n < 0 || depth > 12) return 0;
   switch (nt_kind(nt, n)) {
     case NK_LocalVariableReadNode: case NK_InstanceVariableReadNode:
@@ -8982,28 +9050,40 @@ static int te_tail_is_value(const NodeTable *nt, int n, int depth) {
     case NK_HashNode: case NK_StringNode: case NK_IntegerNode: case NK_FloatNode:
     case NK_SymbolNode: case NK_TrueNode: case NK_FalseNode:
       return 1;
+    case NK_ArrayNode: case NK_RangeNode: case NK_InterpolatedStringNode:
+    case NK_RegularExpressionNode: case NK_InterpolatedRegularExpressionNode:
+    case NK_RationalNode: case NK_ImaginaryNode: case NK_LambdaNode:
+      return last == 2;
     case NK_StatementsNode: {
       int bn = 0; const int *bb = nt_arr(nt, n, "body", &bn);
       if (bn <= 0) return 0;
-      /* a `return v` anywhere in the list counts, the last statement is the tail */
-      for (int i = 0; i < bn - 1; i++)
+      /* a `return v` anywhere in the list counts, the last statement is the tail;
+         past the guard it runs with a block, unless a statement before it,
+         the guard aside, can leave first */
+      int dead = 0;
+      for (int i = 0; i < bn - 1; i++) {
         if (nt_kind(nt, bb[i]) == NK_ReturnNode || nt_kind(nt, bb[i]) == NK_IfNode ||
             nt_kind(nt, bb[i]) == NK_UnlessNode)
-          if (te_tail_is_value(nt, bb[i], depth + 1)) return 1;
-      return te_tail_is_value(nt, bb[bn - 1], depth + 1);
+          if (te_tail_is_value(nt, bb[i], depth + 1, 0, bp)) return 1;
+        if (te_blockless_return(nt, bb[i], bp)) { if (last == 1) last = 2; }
+        else if (te_may_leave(nt, bb[i], 0)) dead = 1;
+      }
+      return te_tail_is_value(nt, bb[bn - 1], depth + 1, dead ? 0 : last, bp);
     }
-    case NK_IfNode:
-      return te_tail_is_value(nt, nt_ref(nt, n, "statements"), depth + 1) ||
-             te_tail_is_value(nt, nt_ref(nt, n, "subsequent"), depth + 1);
-    case NK_UnlessNode:
-      return te_tail_is_value(nt, nt_ref(nt, n, "statements"), depth + 1) ||
-             te_tail_is_value(nt, nt_ref(nt, n, "else_clause"), depth + 1);
-    case NK_ElseNode: return te_tail_is_value(nt, nt_ref(nt, n, "statements"), depth + 1);
-    case NK_ParenthesesNode: return te_tail_is_value(nt, nt_ref(nt, n, "body"), depth + 1);
+    case NK_IfNode: case NK_UnlessNode: {
+      /* an arm that runs without a block is not the block form */
+      int t = last ? te_block_test(nt, nt_ref(nt, n, "predicate"), bp) : 0;
+      if (nt_kind(nt, n) == NK_UnlessNode) t = -t;
+      int other = nt_ref(nt, n, nt_kind(nt, n) == NK_IfNode ? "subsequent" : "else_clause");
+      return te_tail_is_value(nt, nt_ref(nt, n, "statements"), depth + 1, t > 0 ? 2 : t < 0 ? 0 : last, bp) ||
+             te_tail_is_value(nt, other, depth + 1, t < 0 ? 2 : t > 0 ? 0 : last, bp);
+    }
+    case NK_ElseNode: return te_tail_is_value(nt, nt_ref(nt, n, "statements"), depth + 1, last, bp);
+    case NK_ParenthesesNode: return te_tail_is_value(nt, nt_ref(nt, n, "body"), depth + 1, last, bp);
     case NK_ReturnNode: {
       int a = nt_ref(nt, n, "arguments");
       int ac = 0; const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
-      return ac > 0 && te_tail_is_value(nt, av[0], depth + 1);
+      return ac > 0 && te_tail_is_value(nt, av[0], depth + 1, 0, bp);
     }
     /* a call answers its value -- `@a.select { |x| yield x }` an Array --
        unless it is an each-like iteration, whose value (the receiver)
@@ -9096,7 +9176,7 @@ static int desugar_to_enum(Compiler *c) {
          through an Enumerator-typed C signature, a type error; widened, a
          blockless call site reads a boxed Enumerator its consumers dispatch
          on. */
-      int value_form = es && es->body >= 0 && te_tail_is_value(nt, es->body, 0);
+      int value_form = es && es->body >= 0 && te_tail_is_value(nt, es->body, 0, 1, es->blk_param);
       /* not in a reopened builtin, whose self tail is the boxed receiver:
          the blockless call already reads the Enumerator (ret_noblock) */
       if (self_recv && es && es->name && sp_streq(es->name, m) && !value_form && reopen_ci < 0 &&
