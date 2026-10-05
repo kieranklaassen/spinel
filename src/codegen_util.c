@@ -551,6 +551,7 @@ void buf_printf(Buf *b, const char *fmt, ...) {
 }
 int  g_indent = 0;
 int  g_setter_stmt_id = -1;
+int  g_prelude_stmt = -1;
 /* Node id whose safe-nav (&.) guard is already emitted; the re-entrant
    emit_call skips the guard block for exactly this node. */
 int  g_sn_skip = -1;
