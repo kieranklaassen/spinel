@@ -10936,8 +10936,12 @@ else {
             Scope *lsc = comp_scope_of(c, frcv);
             LocalVar *llv = (lnm && lsc) ? scope_local(lsc, lnm) : NULL;
             if (llv && llv->type == TY_STRBUF) {
+              /* through emit_local_ref: a local a proc captures is in its
+                 cell, on either side of the proc */
               emit_indent(b, indent);
-              buf_printf(b, "sp_gc_freeze((void *)lv_%s);\n", rename_local(lnm));
+              buf_puts(b, "sp_gc_freeze((void *)");
+              emit_local_ref(c, frcv, lnm, b);
+              buf_puts(b, ");\n");
               return 1;
             }
           }
