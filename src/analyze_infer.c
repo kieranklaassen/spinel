@@ -1037,6 +1037,41 @@ static int an_elems_int_rows(Compiler *c, int arr, int *saw) {
   return 1;
 }
 
+/* A call that stores rows into the table it is called on: `t[i] = r` and
+   `t.store(i, r)`, `t.insert(i, r)`, `t.concat([r])` and the push family. */
+static int an_call_stores_rows(const char *nm) {
+  return nm && (is_store_alias(nm) || sp_streq(nm, "insert") || sp_streq(nm, "concat") ||
+                is_array_push_family(nm));
+}
+
+/* The rows such a call stores, for a table of Integer Arrays: 0 when one of
+   them is a row of another kind, *saw set when one is an Integer Array. */
+static int an_stored_rows_int(Compiler *c, int id, int *saw) {
+  const NodeTable *nt = c->nt;
+  const char *nm = nt_str(nt, id, "name");
+  int is_store = is_store_alias(nm);
+  int is_insert = sp_streq(nm, "insert");
+  int is_concat = sp_streq(nm, "concat");
+  int args = nt_ref(nt, id, "arguments");
+  int an = 0;
+  const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+  if (is_store && an < 2) return 1;
+  for (int a = is_store || is_insert ? 1 : 0; a < an; a++) {
+    const char *aty = nt_type(nt, av[a]);
+    if (aty && sp_streq(aty, "SplatNode")) return 0;
+    if (is_concat) {
+      if (!aty || !sp_streq(aty, "ArrayNode") || !an_elems_int_rows(c, av[a], saw)) return 0;
+      continue;
+    }
+    TyKind vt = comp_ntype(c, av[a]);
+    if (vt == TY_INT_ARRAY) { *saw = 1; continue; }
+    if (an_row_open_empty(c, av[a])) return 0;
+    if (vt == TY_NIL || vt == TY_UNKNOWN) continue;
+    return 0;
+  }
+  return 1;
+}
+
 /* Whether every element stored into poly-array ivar `@<ivname>` is an int
    array (a nested array of int arrays, e.g. @chr_banks / @nmt_mem). Element
    reads then yield an int array rather than a boxed poly. */
@@ -1051,35 +1086,14 @@ static int ivar_array_elems_all_int_array_impl(Compiler *c, int cid, const char 
     if (!ty) continue;
     if (sp_streq(ty, "CallNode")) {
       const char *nm = nt_str(nt, id, "name");
-      if (!nm) continue;
-      int is_store = is_store_alias(nm);
-      int is_insert = sp_streq(nm, "insert");
-      int is_concat = sp_streq(nm, "concat");
-      int is_append = is_array_push_family(nm);
-      if (!is_store && !is_insert && !is_concat && !is_append) continue;
+      if (!an_call_stores_rows(nm)) continue;
       int recv = nt_ref(nt, id, "receiver");
       if (recv < 0 || !sp_streq(nt_type(nt, recv) ? nt_type(nt, recv) : "", "InstanceVariableReadNode")) continue;
       const char *rn = nt_str(nt, recv, "name");
       if (!rn || !sp_streq(rn, ivname)) continue;
       Scope *s = comp_scope_of(c, id);
       if (!s || s->class_id != cid) continue;
-      int args = nt_ref(nt, id, "arguments");
-      int an = 0;
-      const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
-      if (is_store && an < 2) continue;
-      for (int a = is_store || is_insert ? 1 : 0; a < an; a++) {
-        const char *aty = nt_type(nt, av[a]);
-        if (aty && sp_streq(aty, "SplatNode")) return 0;
-        if (is_concat) {
-          if (!aty || !sp_streq(aty, "ArrayNode") || !an_elems_int_rows(c, av[a], &saw)) return 0;
-          continue;
-        }
-        TyKind vt = comp_ntype(c, av[a]);
-        if (vt == TY_INT_ARRAY) { saw = 1; continue; }
-        if (an_row_open_empty(c, av[a])) return 0;
-        if (vt == TY_NIL || vt == TY_UNKNOWN) continue;
-        return 0;
-      }
+      if (!an_stored_rows_int(c, id, &saw)) return 0;
       continue;
     }
     if (sp_streq(ty, "InstanceVariableWriteNode")) {
@@ -1200,21 +1214,17 @@ static int const_array_elems_all_int_array_impl(Compiler *c, const char *cname) 
       return 0;
     }
     if (sp_streq(ty, "CallNode")) {
+      /* a call that writes the rows anew leaves a general table */
+      static const char *const rewrites[] = { "map!", "collect!", "fill", "replace", NULL };
       const char *nm = nt_str(nt, id, "name");
-      if (!nm || (!sp_streq(nm, "[]=") && !sp_streq(nm, "store"))) continue;
+      int rewrite = nm && str_in(nm, rewrites);
+      if (!rewrite && !an_call_stores_rows(nm)) continue;
       int recv = nt_ref(nt, id, "receiver");
       if (recv < 0 || !sp_streq(nt_type(nt, recv) ? nt_type(nt, recv) : "", "ConstantReadNode")) continue;
       const char *rn = nt_str(nt, recv, "name");
       if (!rn || !sp_streq(rn, cname)) continue;
-      int args = nt_ref(nt, id, "arguments");
-      int an = 0;
-      const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
-      if (an < 2) continue;
-      TyKind vt = comp_ntype(c, av[1]);
-      if (vt == TY_INT_ARRAY) { saw = 1; continue; }
-      if (an_row_open_empty(c, av[1])) return 0;
-      if (vt == TY_NIL || vt == TY_UNKNOWN) continue;
-      return 0;
+      if (rewrite || !an_stored_rows_int(c, id, &saw)) return 0;
+      continue;
     }
     if (!sp_streq(ty, "ConstantWriteNode")) continue;
     const char *nm = nt_str(nt, id, "name");
