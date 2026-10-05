@@ -6615,7 +6615,8 @@ static void process_prepend_body(Compiler *c, int ci, int body, int **done, int 
       int anode = nt_ref(nt, s, "arguments");
       int an = 0;
       const int *args = anode >= 0 ? nt_arr(nt, anode, "arguments", &an) : NULL;
-      for (int j = 0; j < an; j++) {
+      /* `prepend A, B` prepends B first, so A ends up in front (as include) */
+      for (int j = an - 1; j >= 0; j--) {
         const char *aty = nt_type(nt, args[j]);
         const char *mname = (aty && (sp_streq(aty, "ConstantReadNode") || sp_streq(aty, "ConstantPathNode"))) ? nt_str(nt, args[j], "name") : NULL;
         int mod_id = mname ? comp_class_index(c, mname) : -1;
