@@ -1081,7 +1081,7 @@ int emit_string_handle_append(Compiler *c, int id, Buf *b, const char *name, int
         buf_puts(b, ";");
         if (!is_append_concat(name)) {
           int tp3 = ++g_tmp;
-          if (argc > 1 && !str_args_plain(c, argv, argc)) {
+          if (argc > 1 && !str_args_plain(c, id, argv, argc)) {
             buf_puts(b, " ");
             emit_str_args_joined(c, argv, argc, tp3, NULL, b);
             buf_printf(b, " _t%d = sp_str_concat(_t%d, sp_String_cstr(_t%d));", tp3, tp3, tb2);

@@ -179,13 +179,16 @@ void emit_str_append_arg(Compiler *c, int arg, const char *rtext, Buf *b) {
   emit_str_expr(c, arg, b);
 }
 
-/* Are the arguments of a concat or prepend all String literals and plain
-   reads of a String? Those make nothing and run nothing, so nested in one C
-   expression they lose nothing and need no order. */
-int str_args_plain(Compiler *c, const int *argv, int argc) {
+/* Are the arguments of the concat or prepend `id` all String literals and
+   plain reads of a String? Those make nothing and run nothing, so nested in
+   one C expression they lose nothing and need no order. */
+int str_args_plain(Compiler *c, int id, const int *argv, int argc) {
   for (int j = 0; j < argc; j++) {
     const char *ty = nt_type(c->nt, argv[j]);
     if (ty && sp_streq(ty, "StringNode")) continue;
+    /* one the operand-order rewrite ran into a rooted temp of its own is a
+       read of that temp */
+    if (comp_ntype(c, argv[j]) == TY_STRING && operand_bound_in_order(id, argv[j])) continue;
     if (comp_ntype(c, argv[j]) != TY_STRING || !subtree_is_pure_read(c, argv[j])) return 0;
     /* a String two names hold reads out as a copy: that read makes something */
     char sref[192];
@@ -3570,7 +3573,7 @@ static int emit_str_mutator_call(Compiler *c, int id, Buf *b, const NodeTable *n
       buf_printf(b, "({ const char *_t%d = ", trc); emit_recv_rooted(c, recv, trc, "SP_GC_ROOT_STR", b);
       char rt[24]; snprintf(rt, sizeof rt, "_t%d", trc);
       int pre = sp_streq(name, "prepend");
-      if (argc > 1 && !str_args_plain(c, argv, argc)) {
+      if (argc > 1 && !str_args_plain(c, id, argv, argc)) {
         emit_str_args_joined(c, argv, argc, tn2, pre ? NULL : rt, b);
         if (pre) buf_printf(b, " _t%d = sp_str_concat(_t%d, _t%d);", tn2, tn2, trc);
         buf_puts(b, " ");

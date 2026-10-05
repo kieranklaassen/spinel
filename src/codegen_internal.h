@@ -656,6 +656,9 @@ void emit_args_run(Compiler *c, const int *argv, int argc);
 /* Has the argument `node` run already, into the temp an override from
    the `from`th on names? */
 int arg_ran_first(int node, int from);
+/* Did the operand-order rewrite of the call `id`, the one being emitted,
+   run `node` into a rooted temp of its own? */
+int operand_bound_in_order(int id, int node);
 /* The handle temp a shared String slot's argument took when it ran first
    (emit_arg_temp), -1 when there is none. */
 int ran_first_handle(int node);
@@ -725,7 +728,7 @@ int emit_unknown_kwarg_raise(Compiler *c, Scope *m, const int *argv, int argc);
    because the rule was written twice and the second copy only had the typed half
    (#4425). */
 void emit_str_append_arg(Compiler *c, int arg, const char *rtext, Buf *b);
-int str_args_plain(Compiler *c, const int *argv, int argc);
+int str_args_plain(Compiler *c, int id, const int *argv, int argc);
 void emit_str_args_joined(Compiler *c, const int *argv, int argc, int acc, const char *seed, Buf *b);
 void emit_str_force_encoding(Compiler *c, const char *name, const char *r, const int *argv, int argc, Buf *b);
 int rest_shortfall_required(Compiler *c, Scope *m);

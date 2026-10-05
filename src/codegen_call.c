@@ -17866,6 +17866,12 @@ static int operand_hoists_effect(Compiler *c, int node) {
   return 0;
 }
 
+/* See codegen_internal.h. Both binders of the rewrite root their temps
+   (emit_operands_in_order below, emit_args_before). */
+int operand_bound_in_order(int id, int node) {
+  return id == g_operand_order_node && arg_ran_first(node, 0);
+}
+
 static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
   if (emit_or_take_back(c, id, b, emit_str_append_chain_handle)) return 1;
   const NodeTable *nt = c->nt;
