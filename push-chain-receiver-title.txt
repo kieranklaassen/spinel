@@ -1,0 +1,1 @@
+A chained push runs its receiver before the value it appends
