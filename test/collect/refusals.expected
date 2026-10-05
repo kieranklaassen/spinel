@@ -18,18 +18,10 @@ spinel: 1 refusal, nothing written
 == test/reject/array_push_other_class_temporary.rb [promote] rc=1
 spinel: an Array push given a String, which no conversion keeps in its sp_int slot
 spinel: 1 refusal, nothing written
-== test/reject/bang_value_alias_retained_append.rb [default] rc=1
-spinel: the value of upcase! is kept and then changed in place (<<): a String is not yet shared by reference through that value. Change the receiver instead (s.upcase!; r = s)
-== test/reject/bang_value_alias_retained_append.rb [promote] rc=1
-spinel: the value of upcase! is kept and then changed in place (<<): a String is not yet shared by reference through that value. Change the receiver instead (s.upcase!; r = s)
 == test/reject/bang_value_retained_append.rb [default] rc=1
 spinel: the value of upcase! is kept and then changed in place (<<): a String is not yet shared by reference through that value. Change the receiver instead (s.upcase!; r = s)
 == test/reject/bang_value_retained_append.rb [promote] rc=1
 spinel: the value of upcase! is kept and then changed in place (<<): a String is not yet shared by reference through that value. Change the receiver instead (s.upcase!; r = s)
-== test/reject/bang_value_retained_lent.rb [default] rc=1
-spinel: the value of succ! is kept and then changed in place (add): a String is not yet shared by reference through that value. Change the receiver instead (s.succ!; r = s)
-== test/reject/bang_value_retained_lent.rb [promote] rc=1
-spinel: the value of succ! is kept and then changed in place (add): a String is not yet shared by reference through that value. Change the receiver instead (s.succ!; r = s)
 == test/reject/bare_const_compact_class_path.rb [default] rc=1
 spinel: uninitialized constant A::B::LIMIT (NameError): the program defines it only as A::LIMIT, which CRuby's lookup from A::B (its lexical scope, then its ancestors) does not reach
 == test/reject/bare_const_compact_class_path.rb [promote] rc=1
