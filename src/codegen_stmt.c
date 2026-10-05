@@ -1,4 +1,6 @@
 #include "codegen_internal.h"
+#include "repr.h"
+#include "builtin_ops.h"
 
 /* an object arg's #to_s as a C string expression (the puts/print arms) */
 static void emit_obj_to_s(Compiler *c, int arg, TyKind t, Buf *b) {
@@ -2613,7 +2615,12 @@ int static_isa_cond(Compiler *c, int pred) {
     return ty_matches_class(rt, target_name, sp_streq(nm, "instance_of?"));
   }
   int target = comp_class_index(c, target_name);
-  if (target < 0) return -1;
+  /* Comparable, Enumerable and Math name no class of the table: the includes
+     of the class answer for them, as for a user module. */
+  int builtin_mod = target < 0 && (sp_streq(target_name, "Comparable") ||
+                                   sp_streq(target_name, "Enumerable") ||
+                                   sp_streq(target_name, "Math"));
+  if (target < 0 && !builtin_mod) return -1;
   /* A number/symbol/bool is never an instance of a user class, so the arm that
      reads it as one is dead -- and it is the only place a call like
      `value.value` on an Integer comes from (`Int64.new(0)` reaching
@@ -2645,16 +2652,16 @@ int static_isa_cond(Compiler *c, int pred) {
   int has_sub = class_has_subclass(c, rcls);
   int exact = sp_streq(nm, "instance_of?");
   if (rcls == target) return (nilable || (exact && has_sub)) ? -1 : 1;
-  if (has_sub && is_descendant(c, target, rcls)) return -1;
+  if (has_sub && !builtin_mod && is_descendant(c, target, rcls)) return -1;
   if (exact) return 0;
-  if (is_descendant(c, rcls, target)) return nilable ? -1 : 1;
+  if (!builtin_mod && is_descendant(c, rcls, target)) return nilable ? -1 : 1;
+  int is_mod = builtin_mod || comp_class_is_module(c, &c->classes[target]);
   /* a module the class (or a superclass) includes */
-  if (comp_class_is_module(c, &c->classes[target]) &&
-      class_includes_module_named(c, rcls, target_name)) return nilable ? -1 : 1;
+  if (is_mod && class_includes_module_named(c, rcls, target_name)) return nilable ? -1 : 1;
   /* a subclass can add any other module (with include, prepend, a module
      that includes it, or an `extend` on one object), so is_a? of a module
      is answered at run time when the class has a subclass */
-  if (has_sub && comp_class_is_module(c, &c->classes[target])) return -1;
+  if (has_sub && is_mod) return -1;
   return 0;
 }
 
@@ -9175,6 +9182,26 @@ static int masgn_store(Compiler *c, int id, int tgt, const char *val, TyKind vt,
     size_t snl = nm ? strlen(nm) : 0;
     if (!nm || snl < 2 || nm[snl - 1] != '=' || crecv < 0) { unsupported(c, id, "multiple assignment call target"); return 1; }
     TyKind crt = comp_ntype(c, crecv);
+    /* a boxed receiver dispatches on its class, as the single setter does */
+    if (crt == TY_POLY) {
+      char base[256]; snprintf(base, sizeof base, "%.*s", (int)(snl - 1), nm);
+      TyKind at = val && vt != TY_NIL && vt != TY_VOID && vt != TY_UNKNOWN ? vt : TY_POLY;
+      int tv = ++g_tmp, tval = ++g_tmp;
+      emit_indent(b, indent);
+      buf_printf(b, "{ sp_RbVal _t%d = ", tv);
+      if (recv_tmp >= 0) buf_printf(b, "_t%d", recv_tmp); else emit_boxed(c, crecv, b);
+      buf_puts(b, "; ");
+      emit_ctype(c, at, b); buf_printf(b, " _t%d = ", tval);
+      if (at == TY_POLY && !(val && vt == TY_POLY)) buf_puts(b, val && vt == TY_UNKNOWN ? val : "sp_box_nil()");
+      else buf_puts(b, val);
+      buf_printf(b, "; switch (_t%d.tag == SP_TAG_OBJ ? _t%d.cls_id : 0x7fffffff) {", tv, tv);
+      char src[32]; snprintf(src, sizeof src, "_t%d", tval);
+      char objp[32]; snprintf(objp, sizeof objp, "_t%d.v.p", tv);
+      emit_boxed_writer_arms(c, base, nm, objp, src, at, b);
+      buf_printf(b, " default: sp_raise_nomethod(sp_nomethod_msg(\"%s\", _t%d)); break;", nm, tv);
+      buf_puts(b, " } }\n");
+      return 1;
+    }
     if (!ty_is_object(crt)) { unsupported(c, id, "multiple assignment call target non-object"); return 1; }
     int crc = ty_object_class(crt);
     int cdef = -1;
@@ -10308,6 +10335,11 @@ static int emit_multi_write_stmt(Compiler *c, int id, Buf *b, int indent, const 
       if (!setnm || snlen < 2 || setnm[snlen - 1] != '=' || recv_id2 < 0)
         { unsupported(c, id, "multiple assignment call target"); continue; }
       TyKind rt2 = comp_ntype(c, recv_id2);
+      if (rt2 == TY_POLY) {
+        char rv[32]; snprintf(rv, sizeof rv, "_t%d", tmps[i]);
+        masgn_store(c, id, lefts[i], masgn_nil_el(c, els[i]) ? NULL : rv, tmpts[i], ttr[i], ttk[i], indent, b);
+        continue;
+      }
       if (!ty_is_object(rt2))
         { unsupported(c, id, "multiple assignment call target non-object"); continue; }
       char base2[256]; memcpy(base2, setnm, snlen - 1); base2[snlen - 1] = '\0';
@@ -10661,17 +10693,24 @@ static int emit_call_stmt(Compiler *c, int id, Buf *b, int indent, const NodeTab
       int tg = ++g_tmp;
       Buf rb; memset(&rb, 0, sizeof rb);
       emit_expr(c, grecv, &rb);
-      emit_indent(b, indent); buf_puts(b, "{ ");
-      emit_ctype(c, comp_ntype(c, grecv), b);
-      buf_printf(b, " _t%d = %s; SP_GC_ROOT(_t%d); if (_t%d == NULL) sp_raise_nomethod(sp_nomethod_msg(\"%s\", sp_box_nil()));\n",
+      /* declared at the statement's own level, not inside a block of its
+         own: the statement may root a temp of its own from this one, and a
+         method's root frame declares such temps at the top of the body,
+         where a block-scoped name is not visible (#7343) */
+      /* ... and ahead of what the statement hoists: its prelude is flushed
+         before the statement's own text, so the temp goes into the prelude
+         when there is one */
+      Buf *db = g_pre ? g_pre : b;
+      emit_indent(db, g_pre ? g_indent : indent);
+      emit_ctype(c, comp_ntype(c, grecv), db);
+      buf_printf(db, " _t%d = %s; SP_GC_ROOT(_t%d); if (_t%d == NULL) sp_raise_nomethod(sp_nomethod_msg(\"%s\", sp_box_nil()));\n",
                  tg, rb.p ? rb.p : "NULL", tg, tg, nt_str(nt, id, "name"));
       free(rb.p);
       int slot = view_bind(grecv, "_t%d", tg);
       int sv = g_ivar_nil_guarded_id; g_ivar_nil_guarded_id = id;
-      emit_stmt_inner(c, id, b, indent + 1);
+      emit_stmt_inner(c, id, b, indent);
       g_ivar_nil_guarded_id = sv;
       view_unbind(slot);
-      emit_indent(b, indent); buf_puts(b, "}\n");
       return 1;
     }
     if (grecv >= 0) {
@@ -13798,9 +13837,25 @@ static int push_stmt_takes_value_form(Compiler *c, int id) {
 }
 
 static int emit_array_mutate_stmt_body(Compiler *c, int id, Buf *b, int indent);
+static int emit_array_mutate_stmt_dispatch(Compiler *c, int id, Buf *b, int indent) {
+  int recv = nt_ref(c->nt, id, "receiver");
+  const char *name = nt_str(c->nt, id, "name");
+  int args = nt_ref(c->nt, id, "arguments"), argc = 0;
+  const int *argv = args >= 0 ? nt_arr(c->nt, args, "arguments", &argc) : NULL;
+  const BuiltinOp *op = bop_find_stage(TY_STRING, name, argc,
+                                      nt_ref(c->nt, id, "block") >= 0, NULL, NULL, 6);
+  if (recv >= 0 && op && op->emit == BOPE_STRING_SLICE && argc == 1 &&
+      (comp_ntype(c, recv) == TY_STRING || comp_ntype(c, recv) == TY_STRBUF) &&
+      repr_of(c, argv[0]).kind == RK_BOXED) {
+    emit_indent(b, indent); buf_puts(b, "(void)(");
+    emit_array_call(c, id, b); buf_puts(b, ");\n");
+    return 1;
+  }
+  return emit_array_mutate_stmt_body(c, id, b, indent);
+}
 int emit_array_mutate_stmt(Compiler *c, int id, Buf *b, int indent) {
   if (push_stmt_takes_value_form(c, id)) return 0;
-  return emit_ivar_nil_guarded(c, id, b, indent, emit_array_mutate_stmt_body);
+  return emit_ivar_nil_guarded(c, id, b, indent, emit_array_mutate_stmt_dispatch);
 }
 /* The FrozenError an in-place String mutator raises before it reads its
    arguments, hit or miss; a nil receiver is left to the mutator's own
@@ -13818,11 +13873,15 @@ static int str_mutate_reassign_arms(Compiler *c, Buf *b, int indent, const NodeT
     const char *rty = nt_type(nt, recv);
     int assignable = str_mut_recv_assignable(c, recv);
     if (sb_shadowed_reader(recv)) assignable = 1;   /* the reader shim's shadow */
-    /* an in-place mutator on a frozen string literal raises FrozenError */
+    /* an in-place mutator on a frozen string literal raises FrozenError,
+       once its arguments are evaluated */
     if (rty && sp_streq(rty, "StringNode") &&
         (sp_streq(name, "insert") || sp_streq(name, "prepend") || sp_streq(name, "<<") ||
          sp_streq(name, "concat") || sp_streq(name, "replace") || sp_streq(name, "clear") ||
-         sp_streq(name, "delete_prefix!") || sp_streq(name, "delete_suffix!"))) {
+         sp_streq(name, "delete_prefix!") || sp_streq(name, "delete_suffix!") ||
+         sp_streq(name, "[]="))) {
+      for (int a = 0; a < argc; a++)
+        if (nt_kind(nt, argv[a]) != NK_SplatNode) emit_stmt(c, argv[a], b, indent);
       emit_indent(b, indent);
       buf_puts(b, "sp_raise_frozen_str("); emit_expr(c, recv, b); buf_puts(b, ");\n");
       return 1;
@@ -14203,8 +14262,10 @@ static int str_mutate_append_bang_arms(Compiler *c, int id, Buf *b, int indent, 
       }
       return 1;
     }
-    /* `<<` onto a frozen string literal raises FrozenError */
+    /* `<<` onto a frozen string literal raises FrozenError, once the first
+       link's argument is evaluated (the later links never run) */
     if (rty && sp_streq(rty, "StringNode")) {
+      emit_stmt(c, chain[nchain - 1], b, indent);
       emit_indent(b, indent);
       buf_puts(b, "sp_raise_frozen_str("); emit_expr(c, cur, b); buf_puts(b, ");\n");
       return 1;

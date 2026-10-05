@@ -13108,20 +13108,16 @@ static int an_local_lent(Compiler *c, const char *vn, Scope *vs) {
 }
 
 /* The same for ivar `ivn` of class `cid`, handed by a call in one of its
-   methods. */
+   methods. The calls that hand an ivar on come from the by-name index, not
+   a walk of every call in the program: this is asked once per local/ivar
+   alias, and a machine-generated program has one in nearly every method. */
 static int an_ivar_owner(Compiler *c, int node);
 static int an_ivar_lent(Compiler *c, int cid, const char *ivn) {
   const NodeTable *nt = c->nt;
   if (!ivn || cid < 0) return 0;
-  for (int u = comp_kind_first(c, NK_CallNode); u >= 0; u = comp_kind_next(c, u)) {
-    if (nt_kind(nt, u) != NK_CallNode) continue;
-    int a = nt_ref(nt, u, "arguments"), ac = 0;
-    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
-    int hit = 0;
-    for (int k = 0; k < ac && !hit; k++)
-      hit = nt_kind(nt, av[k]) == NK_InstanceVariableReadNode && sp_streq(nt_str(nt, av[k], "name"), ivn) &&
-            an_ivar_owner(c, av[k]) == cid;
-    if (!hit) continue;
+  for (int e = comp_ivarg_first(c, ivn); e >= 0; e = comp_ivarg_next(c, e)) {
+    int u = comp_ivarg_call(c, e), av = comp_ivarg_arg(c, e);
+    if (!sp_streq(nt_str(nt, av, "name"), ivn) || an_ivar_owner(c, av) != cid) continue;
     int mi = an_call_target_mi(c, u);
     if (mi < 0) mi = an_any_scope_by_name(c, nt_str(nt, u, "name"));
     if (mi < 0) continue;
@@ -15626,34 +15622,104 @@ static int an_param_mutated_in_place(Compiler *c, int mi, int pi) {
   return 0;
 }
 
+/* The demand below is a depth-bounded walk with no visited set: a poly
+   variable's read goes to every write of it, and those values read other
+   variables in turn, so a variable with W writes was walked W^hops times
+   (a machine-generated method appends to every boxed local it has). The
+   memo remembers a variable whose writes were walked from some depth and
+   changed nothing -- marked no node, promoted no local -- and skips its walk
+   from that depth or deeper. Nothing having changed since, the skipped walk
+   would see what the remembered one saw with less budget left, and so also
+   change nothing. Every change moves the generation on, which forgets every
+   entry; so does each run of the demand block, as other passes run between
+   them. Off (sbd_memo_on) outside that block. */
+typedef struct { int kind, owner; const char *name; unsigned gen; int depth; } SbdMemo;
+static SbdMemo *sbd_memo;
+static int sbd_memo_cap, sbd_memo_n, sbd_memo_on;
+static unsigned sbd_gen = 1;
+static SbdMemo *sbd_memo_slot(int kind, int owner, const char *name, int add) {
+  if (add && (sbd_memo_n + 1) * 2 > sbd_memo_cap) {
+    int ncap = sbd_memo_cap ? sbd_memo_cap * 2 : 256;
+    SbdMemo *nm = calloc((size_t)ncap, sizeof(SbdMemo));
+    if (!nm) return NULL;
+    for (int i = 0; i < sbd_memo_cap; i++) {
+      if (!sbd_memo[i].name) continue;
+      unsigned h = (sp_strhash(sbd_memo[i].name) ^ ((unsigned)sbd_memo[i].owner * 2654435761u) ^
+                    (unsigned)sbd_memo[i].kind) & (unsigned)(ncap - 1);
+      while (nm[h].name) h = (h + 1) & (unsigned)(ncap - 1);
+      nm[h] = sbd_memo[i];
+    }
+    free(sbd_memo);
+    sbd_memo = nm; sbd_memo_cap = ncap;
+  }
+  if (!sbd_memo_cap) return NULL;
+  unsigned h = (sp_strhash(name) ^ ((unsigned)owner * 2654435761u) ^ (unsigned)kind) &
+               (unsigned)(sbd_memo_cap - 1);
+  for (; sbd_memo[h].name; h = (h + 1) & (unsigned)(sbd_memo_cap - 1))
+    if (sbd_memo[h].kind == kind && sbd_memo[h].owner == owner && sp_streq(sbd_memo[h].name, name))
+      return &sbd_memo[h];
+  if (!add) return NULL;
+  sbd_memo[h].kind = kind; sbd_memo[h].owner = owner; sbd_memo[h].name = name;
+  sbd_memo[h].gen = 0; sbd_memo_n++;
+  return &sbd_memo[h];
+}
+static void sbd_memo_begin(void) {
+  if (sbd_memo_cap) memset(sbd_memo, 0, (size_t)sbd_memo_cap * sizeof(SbdMemo));
+  sbd_memo_n = 0;
+  sbd_gen++;
+  sbd_memo_on = 1;
+}
+/* Is this variable's walk from `depth` known to change nothing? */
+static int sbd_memo_covers(int kind, int owner, const char *name, int depth) {
+  if (!sbd_memo_on || !name) return 0;
+  SbdMemo *e = sbd_memo_slot(kind, owner, name, 0);
+  return e && e->gen == sbd_gen && e->depth <= depth;
+}
+/* Its walk from `depth`, begun at generation `gen0`, is done: remembered
+   when nothing changed on the way. */
+static void sbd_memo_done(int kind, int owner, const char *name, int depth, unsigned gen0) {
+  if (!sbd_memo_on || !name || sbd_gen != gen0) return;
+  SbdMemo *e = sbd_memo_slot(kind, owner, name, 1);
+  if (e) { e->gen = gen0; e->depth = depth; }
+}
+
 /* The writes of a poly local, ivar or global, each demanded in turn: the
    variable is another name for whatever was written to it. */
 static int strbuf_demand_local_writes(Compiler *c, const char *vn, Scope *vs, int depth) {
   const NodeTable *nt = c->nt;
   int changed = 0;
   if (!vn || !vs) return 0;
-  for (int w = comp_lvw_first_sc(c, (int)(vs - c->scopes), vn); w >= 0; w = comp_lvw_next_sc(c, w)) {
+  int vsi = (int)(vs - c->scopes);
+  if (sbd_memo_covers(0, vsi, vn, depth)) return 0;
+  unsigned gen0 = sbd_gen;
+  for (int w = comp_lvw_first_sc(c, vsi, vn); w >= 0; w = comp_lvw_next_sc(c, w)) {
     if (nt_kind(nt, w) != NK_LocalVariableWriteNode || comp_scope_of(c, w) != vs) continue;
     const char *wn = nt_str(nt, w, "name");
     if (!wn || !sp_streq(wn, vn)) continue;
     changed |= strbuf_demand_value_leaves(c, nt_ref(nt, w, "value"), depth);
   }
+  sbd_memo_done(0, vsi, vn, depth, gen0);
   return changed;
 }
 static int strbuf_demand_ivar_writes(Compiler *c, int cid, const char *ivn, int depth) {
   const NodeTable *nt = c->nt;
   int changed = 0;
+  if (sbd_memo_covers(1, cid, ivn, depth)) return 0;
+  unsigned gen0 = sbd_gen;
   for (int w = comp_kind_first(c, NK_InstanceVariableWriteNode); w >= 0; w = comp_kind_next(c, w)) {
     if (nt_kind(nt, w) != NK_InstanceVariableWriteNode) continue;
     const char *wn = nt_str(nt, w, "name");
     if (!wn || !sp_streq(wn, ivn) || an_ivar_owner(c, w) != cid) continue;
     changed |= strbuf_demand_value_leaves(c, nt_ref(nt, w, "value"), depth);
   }
+  sbd_memo_done(1, cid, ivn, depth, gen0);
   return changed;
 }
 static int strbuf_demand_gvar_writes(Compiler *c, const char *grn, int depth) {
   const NodeTable *nt = c->nt;
   int changed = 0;
+  if (sbd_memo_covers(2, 0, grn, depth)) return 0;
+  unsigned gen0 = sbd_gen;
   for (int w = comp_kind_first(c, NK_GlobalVariableWriteNode); w >= 0; w = comp_kind_next(c, w)) {
     if (nt_kind(nt, w) != NK_GlobalVariableWriteNode) continue;
     const char *wn = nt_str(nt, w, "name");
@@ -15661,6 +15727,7 @@ static int strbuf_demand_gvar_writes(Compiler *c, const char *grn, int depth) {
     if (!wrn || !sp_streq(wrn, grn)) continue;
     changed |= strbuf_demand_value_leaves(c, nt_ref(nt, w, "value"), depth);
   }
+  sbd_memo_done(2, 0, grn, depth, gen0);
   return changed;
 }
 static int strbuf_poly_ivar_read(Compiler *c, int node, int *cid) {
@@ -15731,6 +15798,7 @@ static int strbuf_demand_value_leaves(Compiler *c, int node, int depth) {
       if (strbuf_mut_kind(c, vn, vs) < 0) return 0;
       vlv->type = TY_STRBUF; vlv->str_shared = 1;
       c->strbuf_box[node] = 1;
+      sbd_gen++;
       return 1;
     }
     default: {
@@ -15739,10 +15807,12 @@ static int strbuf_demand_value_leaves(Compiler *c, int node, int depth) {
          container holds, so the container's Strings become handles */
       if (infer_type(c, node) == TY_POLY) {
         int d = strbuf_demand_elem_arg(c, node);
+        if (d >= 0) sbd_gen++;   /* it may have marked stores, changed or not */
         return d > 0 ? d : 0;
       }
       if (infer_type(c, node) != TY_STRING) return 0;
       c->strbuf_box[node] = 1;
+      sbd_gen++;
       return 1;
     }
   }
@@ -16208,32 +16278,14 @@ static int an_param_appended_deep(Compiler *c, int mi, int j) {
    the stored String. The same demand the container-store rules make when a
    shared String is put IN; here the evidence is what is done to what comes
    OUT. Answers -1 when `an` is no element read of a container, else whether
-   it changed anything. */
-/* The containers strbuf_demand_elem_arg is in the middle of demanding the
-   stores of, by the variable that holds each: a local's name and scope, an
-   instance variable's name and class. */
-#define SB_ELEM_BUSY_MAX 16
-static struct { const char *name; const void *owner; } sb_elem_busy[SB_ELEM_BUSY_MAX];
-static int sb_elem_nbusy;
-/* `c.fetch(k, v)` or `c.fetch(k) { v }` whose v can be a String that is no
-   shared handle: a String expression, or a boxed value. A literal is left
-   out, an append to it raises FrozenError. */
-static int an_fetch_default_plain_string(Compiler *c, int call) {
-  const NodeTable *nt = c->nt;
-  const char *fn = nt_str(nt, call, "name");
-  if (!fn || !sp_streq(fn, "fetch")) return 0;
-  int a = nt_ref(nt, call, "arguments"), an = 0;
-  const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
-  int blk = nt_ref(nt, call, "block");
-  int v = an == 2 ? av[1] : -1;
-  if (an == 1 && blk >= 0 && nt_kind(nt, blk) == NK_BlockNode) {
-    int bn = 0; const int *body = nt_arr(nt, nt_ref(nt, blk, "body"), "body", &bn);
-    if (bn > 0) v = body[bn - 1];
-  }
-  if (v < 0 || nt_kind(nt, v) == NK_StringNode) return 0;
-  TyKind vt = infer_type(c, v);
-  return vt == TY_STRING || vt == TY_POLY;
-}
+   it changed anything.
+
+   The walk can come back to the same read: a container that stores an
+   element of itself (`@m[to] = @m[from]`) has that read among its stores,
+   and demanding a poly store starts a fresh demand of it, depth and all.
+   That recursed until the stack ran out. A read whose walk is already under
+   way answers 0 -- the walk on the stack covers it. */
+static int *sb_elem_active, sb_elem_nactive, sb_elem_cap;
 static int strbuf_demand_elem_arg(Compiler *c, int an) {
   const NodeTable *nt = c->nt;
   if (an < 0 || nt_kind(nt, an) != NK_CallNode || !container_elem_read_p(nt, an)) return -1;
@@ -16248,48 +16300,37 @@ static int strbuf_demand_elem_arg(Compiler *c, int an) {
     if (base < 0 || (nt_kind(nt, base) != NK_LocalVariableReadNode &&
                      nt_kind(nt, base) != NK_InstanceVariableReadNode)) return -1; }
   TyKind rt = infer_type(c, rr);
-  if (!ty_is_array(rt) && !ty_is_hash(rt) && !container_elem_read_p(nt, rr)) return -1;
-  /* A container that stores one of its own elements (`h[:k] = h[:j]`, `a <<
-     a[0]`) meets that element among its stores, and two containers that
-     store each other's meet each other: the walk came back here for a
-     container it was still in, and did not end. The stores of that one are
-     being demanded already. */
-  const char *bn = NULL; const void *bo = NULL;
-  if (nt_kind(nt, rr) == NK_LocalVariableReadNode) {
-    bn = nt_str(nt, rr, "name"); bo = bn ? comp_scope_of(c, rr) : NULL;
-  }
-  else if (nt_kind(nt, rr) == NK_InstanceVariableReadNode) {
-    int cid = an_ivar_owner(c, rr);
-    bn = nt_str(nt, rr, "name"); bo = cid >= 0 ? &c->classes[cid] : NULL;
-  }
-  if (!bo) bn = NULL;
-  for (int k = 0; bn && k < sb_elem_nbusy; k++) {
-    if (sb_elem_busy[k].owner != bo || !sp_streq(sb_elem_busy[k].name, bn)) continue;
-    /* `c[k] = c.fetch(k, v)` stores v where k is missing, and v is no store
-       the walk reaches: it would go in as a copy beside c's handles. */
-    if (an_fetch_default_plain_string(c, an)) {
-      sb_elem_nbusy = 0;
-      unsupported_feature(c, an,
-          "a String that is the default of `fetch` is stored back into the Hash "
-          "or Array it was fetched from: a String is not yet shared by reference "
-          "through the default of `fetch`. Store it with h[k] = v unless h.key?(k).");
+  const char *cn = NULL;
+  Scope *cs = NULL;
+  if (ty_is_array(rt) || ty_is_hash(rt)) {
+    if (nt_kind(nt, rr) == NK_LocalVariableReadNode) {
+      cn = nt_str(nt, rr, "name");
+      cs = cn ? comp_scope_of(c, rr) : NULL;
+      if (!cn || !cs) return 0;
     }
-    return 0;
   }
-  int listed = bn && sb_elem_nbusy < SB_ELEM_BUSY_MAX;
-  if (listed) { sb_elem_busy[sb_elem_nbusy].name = bn; sb_elem_busy[sb_elem_nbusy++].owner = bo; }
-  int d;
-  if (nt_kind(nt, rr) == NK_LocalVariableReadNode)
-    d = bn ? strbuf_demand_container_stores(c, bn, (Scope *)bo) : 0;
+  else if (!container_elem_read_p(nt, rr)) return -1;
+  for (int k = 0; k < sb_elem_nactive; k++)
+    if (sb_elem_active[k] == an) return 0;
+  if (sb_elem_nactive == sb_elem_cap) {
+    int ncap = sb_elem_cap ? sb_elem_cap * 2 : 16;
+    int *na = realloc(sb_elem_active, (size_t)ncap * sizeof(int));
+    if (!na) return 0;
+    sb_elem_active = na; sb_elem_cap = ncap;
+  }
+  sb_elem_active[sb_elem_nactive++] = an;
+  int r;
+  if (cn) r = strbuf_demand_container_stores(c, cn, cs);
   /* an element of an ivar's container, of another element, of a method's
      result: the stores that reach it, as for a mutator through one */
-  else d = strbuf_container_source_walk(c, rr, 0, SB_DEMAND);
-  if (listed) sb_elem_nbusy--;
-  return d;
+  else r = strbuf_container_source_walk(c, rr, 0, SB_DEMAND);
+  sb_elem_nactive--;
+  return r;
 }
 static int promote_shared_stored_strings(Compiler *c) {
   int changed = 0;
   sb_store_valid = 0;   /* this run's store index is built on first use */
+  comp_ivarg_invalidate(c);   /* an_ivar_lent's, likewise */
   const NodeTable *nt = c->nt;
   /* mutated string locals: receivers of an in-place mutator */
   /* per-kind chains: these walks run every fixpoint round, and the full-table
@@ -17165,6 +17206,7 @@ static int promote_shared_stored_strings(Compiler *c) {
      variable alone and every alias kept the old string. Demand the String
      values written to it into handles. */
   if (!g_infer_optimistic) {
+    sbd_memo_begin();
     for (int w = comp_kind_first(c, NK_LocalVariableWriteNode); w >= 0; w = comp_kind_next(c, w)) {
       if (nt_kind(nt, w) != NK_LocalVariableWriteNode) continue;
       const char *pn = nt_str(nt, w, "name");
@@ -17211,6 +17253,7 @@ static int promote_shared_stored_strings(Compiler *c) {
         changed |= strbuf_demand_value_leaves(c, aj, 0);
       }
     }
+    sbd_memo_on = 0;
   }
   return changed;
 }
@@ -25493,10 +25536,12 @@ int nullable_int_value(Compiler *c, int v) {
   if (v < 0) return 0;
   if (nt_kind(nt, v) == NK_NilNode) return 1;
   /* `return e` / `(e)` carry their inner value unchanged; a block tail can be
-     either, and so can a method's own tail statement. */
+     either, and so can a method's own tail statement. A bare `return` answers
+     nil, which an Integer or Float return carries as the sentinel. */
   if (nt_kind(nt, v) == NK_ReturnNode) {
     int rv = nt_ref(nt, v, "arguments");
     int rn = 0; const int *ra = rv >= 0 ? nt_arr(nt, rv, "arguments", &rn) : NULL;
+    if (rn == 0) return 1;
     return ra && rn == 1 ? nullable_int_value(c, ra[0]) : 0;
   }
   /* A conditional's value is one of its arms, so it carries the sentinel if any
@@ -30286,6 +30331,18 @@ static void an_phase_infer_fixpoint(Compiler *c) {
       TyKind *prevd = (TyKind *)malloc(sizeof(TyKind) * (nrec > 0 ? nrec : 1));
       TyKind *lprevd = (TyKind *)malloc(sizeof(TyKind) * (nlrec > 0 ? nlrec : 1));
       int have_prevd = 0;
+      /* Every class's ivar slots, flagged where this loop re-clears them, and
+         a snapshot of their types: infer_inherited_ivars below re-fills an
+         inherited slot the re-clear zeroed (a child's copy of a reset parent
+         ivar) every round, the way the re-derive pair does, and only a
+         change to a slot NOT re-cleared counts toward the fixed-cycle exit. */
+      int ivncls = c->nclasses;
+      int *ivoff = (int *)malloc(sizeof(int) * (size_t)(ivncls + 1));
+      ivoff[0] = 0;
+      for (int ci = 0; ci < ivncls; ci++) ivoff[ci + 1] = ivoff[ci] + c->classes[ci].nivars;
+      char *ivrec = (char *)calloc((size_t)ivoff[ivncls] + 1, 1);
+      TyKind *ivsnap = (TyKind *)malloc(sizeof(TyKind) * (size_t)(ivoff[ivncls] + 1));
+      for (int k = 0; k < nrec; k++) ivrec[ivoff[recCi[k]] + recIv[k]] = 1;
       for (int iter = 0; iter < 128; iter++) {
         /* Parameters bind from the SETTLED state of the previous iteration,
            before this one's re-clear. Bound after it, a parameter sampled
@@ -30337,7 +30394,20 @@ static void an_phase_infer_fixpoint(Compiler *c) {
         { int _w = promote_append_accumulators(c); ch |= _w; ch_other |= _w; }
         { int _w = widen_shared_cmp_params(c); ch |= _w; ch_other |= _w; }
         { int _w = infer_cvar_types(c); ch |= _w; ch_other |= _w; }
-        { int _w = infer_inherited_ivars(c); ch |= _w; ch_other |= _w; }
+        int ivsame = c->nclasses == ivncls;
+        for (int ci = 0; ivsame && ci < ivncls; ci++)
+          if (c->classes[ci].nivars != ivoff[ci + 1] - ivoff[ci]) ivsame = 0;
+        for (int ci = 0; ivsame && ci < ivncls; ci++)
+          for (int iv = 0; iv < c->classes[ci].nivars; iv++)
+            ivsnap[ivoff[ci] + iv] = c->classes[ci].ivar_types[iv];
+        if (infer_inherited_ivars(c)) {
+          ch = 1;
+          if (!ivsame) ch_other = 1;   /* the layout moved: count it, as before */
+          for (int ci = 0; ci < ivncls && !ch_other; ci++) {
+            for (int iv = 0; iv < c->classes[ci].nivars; iv++)
+              if (!ivrec[ivoff[ci] + iv] && c->classes[ci].ivar_types[iv] != ivsnap[ivoff[ci] + iv]) { ch_other = 1; break; }
+          }
+        }
         { int _w = infer_return_types(c); ch |= _w; ch_other |= _w; }
         /* With reset ivars, the re-clear makes infer_ivar_types report change
            every iteration, so converge on ivar value-stability instead. With
@@ -30381,7 +30451,7 @@ static void an_phase_infer_fixpoint(Compiler *c) {
       }
       /* the bind lags one iteration; take the settled state once more */
       infer_param_types(c);
-      free(prev); free(lprev); free(prevd); free(lprevd);
+      free(prev); free(lprev); free(prevd); free(lprevd); free(ivoff); free(ivrec); free(ivsnap);
     }
     free(recCi); free(recIv); free(recLs); free(recLi); free(recRs); free(nsoff); free(nsbad);
   }

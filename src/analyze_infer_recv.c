@@ -1069,6 +1069,13 @@ int infer_array_call(Compiler *c, int id, TyKind rt, TyKind *out) {
       { *out = rt == TY_POLY_ARRAY ? TY_POLY : infer_type(c, argv[2]); return 1; }
     if ((sp_streq(name, "assoc") || sp_streq(name, "rassoc")) && rt == TY_POLY_ARRAY)
       { *out = TY_POLY_ARRAY; return 1; }  /* the matching sub-array, or nil (NULL ptr) */
+    /* an array of numbers, Strings, Symbols or booleans holds no Array to
+       match: the boxed nil emit_op_array_assoc answers */
+    if ((sp_streq(name, "assoc") || sp_streq(name, "rassoc")) && argc == 1) {
+      TyKind et = ty_array_elem(rt);
+      if (et == TY_INT || et == TY_FLOAT || et == TY_STRING || et == TY_SYMBOL || et == TY_BOOL)
+        { *out = TY_POLY; return 1; }
+    }
     if (sp_streq(name, "to_h") && argc == 0 && block < 0) {
       /* Infer hash type from the first pair element of an array literal */
       if (recv >= 0 && nt_type(nt, recv) && sp_streq(nt_type(nt, recv), "ArrayNode")) {
@@ -1316,6 +1323,15 @@ static int call_is_safe_nav(const NodeTable *nt, int id) {
 }
 
 /* Boxed (poly) receivers: the run of poly-face arms of infer_call */
+int poly_lines_args(Compiler *c, int argc, const int *argv) {
+  const NodeTable *nt = c->nt;
+  int kw = argc >= 1 && nt_type(nt, argv[argc - 1]) &&
+           sp_streq(nt_type(nt, argv[argc - 1]), "KeywordHashNode");
+  if (argc == 1) return kw || infer_type(c, argv[0]) == TY_STRING;
+  if (argc == 2) return kw && infer_type(c, argv[0]) == TY_STRING;
+  return 0;
+}
+
 int infer_poly_call(Compiler *c, int id, TyKind rt, TyKind *out) {
   const NodeTable *nt = c->nt;
   const char *name = nt_str(nt, id, "name");
@@ -1596,11 +1612,21 @@ int infer_poly_call(Compiler *c, int id, TyKind rt, TyKind *out) {
       is_index_query(name) &&
       !an_user_defines_or_reads(c, name))
     { *out = TY_POLY; return 1; }
+  /* difference / union / intersection on a poly value: the boxed result of
+     the - | & fold codegen emits for an Array receiver */
+  if (recv >= 0 && rt == TY_POLY && argc >= 1 && is_named_set_operator(name) &&
+      !an_user_defines_or_reads(c, name))
+    { *out = TY_POLY; return 1; }
   /* String#chars on a poly value (a String read out of a container / pair):
      an array of single-char strings (#2909). */
   if (recv >= 0 && rt == TY_POLY && argc == 0 &&
       (sp_streq(name, "chars") || sp_streq(name, "lines")) &&
       nt_ref(nt, id, "block") < 0)
+    { *out = an_user_defines_or_reads(c, name) ? TY_POLY : TY_STR_ARRAY; return 1; }
+  /* lines(sep), lines(chomp: ...) and lines(sep, chomp: ...) on a poly
+     value: the same Array of Strings the typed String answers */
+  if (recv >= 0 && rt == TY_POLY && sp_streq(name, "lines") && nt_ref(nt, id, "block") < 0 &&
+      poly_lines_args(c, argc, argv))
     { *out = an_user_defines_or_reads(c, name) ? TY_POLY : TY_STR_ARRAY; return 1; }
   /* A blockless grouping enumerator on a boxed Array -- an Array read out of a
      container -- materializes to the groups themselves, an Array of Arrays. */
@@ -1632,11 +1658,13 @@ int infer_poly_call(Compiler *c, int id, TyKind rt, TyKind *out) {
     if (is_byte_codepoint_each(name)) { *out = TY_INT_ARRAY; return 1; }
     { *out = TY_STR_ARRAY; return 1; }
   }
-  /* poly.each_char { |c| }: the block param is a one-char String and the call
-     answers the receiver's string, as String#each_char answers self (#3402). */
-  if (recv >= 0 && rt == TY_POLY && argc == 0 && sp_streq(name, "each_char") &&
-      nt_ref(nt, id, "block") >= 0 && !an_user_defines_or_reads(c, "each_char") &&
-      !an_user_defines_or_reads(c, "chars")) {
+  /* poly.each_char { |c| } / each_line { |l| }: the block param is a String
+     (one char, one line) and the call answers the receiver's string, as
+     String#each_char answers self (#3402). */
+  if (recv >= 0 && rt == TY_POLY && argc == 0 &&
+      (sp_streq(name, "each_char") || sp_streq(name, "each_line")) &&
+      nt_ref(nt, id, "block") >= 0 && !an_user_defines_or_reads(c, name) &&
+      !an_user_defines_or_reads(c, sp_streq(name, "each_char") ? "chars" : "lines")) {
     int eb = nt_ref(nt, id, "block");
     const char *ebp = block_param_name(c, eb, 0);
     Scope *ebs = ebp ? comp_scope_of(c, eb) : NULL;

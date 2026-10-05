@@ -1460,8 +1460,9 @@ int view_mark(void);
    pushed and popped like a view (view_push_arm / view_pop) and put back by
    view_unwind: the node whose dispatch declines its own re-entry (the
    method dispatch's g_pd_skip, the block dispatch's g_prbd_skip), and
-   g_poly_builtin_arm, under which no user class owns a name. */
-typedef struct { int pd_skip, prbd_skip, builtin_arm; } ArmCtx;
+   g_poly_builtin_arm, under which no user class owns a name. send_split
+   prevents a boxed send's class arm from splitting the same call again. */
+typedef struct { int pd_skip, prbd_skip, builtin_arm, send_split; } ArmCtx;
 extern ArmCtx g_arm;
 #define g_pd_skip (g_arm.pd_skip)
 #define g_prbd_skip (g_arm.prbd_skip)
@@ -1553,6 +1554,7 @@ int emit_scalar_array_transpose(Compiler *c, int id, int recv, TyKind rt,
                                 const char *name, int argc, Buf *b);
 int emit_op_float_rationalize(Compiler *c, const BopCtx *x, Buf *b);
 int emit_op_string_scan_checked(Compiler *c, const BopCtx *x, Buf *b);
+int emit_op_string_slice(Compiler *c, const BopCtx *x, Buf *b);
 int emit_op_array_transpose(Compiler *c, const BopCtx *x, Buf *b);
 int emit_op_array_assoc(Compiler *c, const BopCtx *x, Buf *b);
 int emit_op_array_combination(Compiler *c, const BopCtx *x, Buf *b);
@@ -1622,6 +1624,8 @@ int diag_user_defines(Compiler *c, const char *name);
 int recv_user_defines(Compiler *c, const char *name);
 int emit_object_ivar_call(Compiler *c, int id, const char *name, int recv, TyKind rt,
                           int cid, int argc, const int *argv, Buf *b);
+const char *case_map_suffix(Compiler *c, int argc, const int *argv);
+int emit_op_poly_case_options(Compiler *c, const BopCtx *x, Buf *b);
 int user_defines_or_reads(Compiler *c, const char *name);
 int native_class_defines(Compiler *c, const char *name);
 const char *array_index_bad_class(Compiler *c, int id);

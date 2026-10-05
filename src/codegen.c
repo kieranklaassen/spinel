@@ -3468,6 +3468,9 @@ void emit_method_signature(Compiler *c, Scope *s, Buf *b) {
     else if (sp_streq(cn, "Time"))    { buf_puts(b, "sp_Time self"); }
     else if (sp_streq(cn, "Thread"))  { buf_puts(b, "sp_thread *self"); }
     else if (sp_streq(cn, "Fiber"))   { buf_puts(b, "sp_Fiber *self"); }
+    /* the runtime's generator: a reopening's self is its handle (the class's
+       C name is u_Random, clear of the runtime's own sp_Random) */
+    else if (sp_streq(c->classes[s->class_id].name, "Random")) { emit_ctype(c, TY_RANDOM, b); buf_puts(b, "self"); }
     else if (is_exc_name(c->classes[s->class_id].name)) { buf_puts(b, "sp_Exception *self"); }
     else if (io_family_class(c, s->class_id)) { buf_puts(b, "sp_File *self"); }
     else if (sp_streq(cn, "Class"))   { buf_puts(b, "sp_Class self"); }
@@ -8078,26 +8081,7 @@ else if (orecv >= 0 && onm) {
 /* Emit the struct + the constructor (sp_<Class>_new) for one class. */
 /* Returns 1 if the class name shadows a built-in runtime type (no struct/new to emit). */
 int is_builtin_reopen(const char *name) {
-  return sp_streq(name, "Toplevel") ||
-         sp_streq(name, "String")    || sp_streq(name, "Integer") ||
-         sp_streq(name, "Float")     || sp_streq(name, "Symbol")  ||
-         sp_streq(name, "TrueClass") || sp_streq(name, "FalseClass") ||
-         sp_streq(name, "NilClass")  || sp_streq(name, "Array")   ||
-         sp_streq(name, "Object")    || sp_streq(name, "Numeric") ||
-         sp_streq(name, "Dir")       ||
-         /* runtime value types with a typedef of their own (sp_Range, sp_Time,
-            sp_File, sp_Class): a user struct under that name was a C-level
-            typedef collision before any call was reached (activesupport's
-            blank.rb reopens Range and Time) */
-         sp_streq(name, "Range")     || sp_streq(name, "Time") ||
-         sp_streq(name, "File")      || sp_streq(name, "Class") ||
-         sp_streq(name, "Hash")      || io_family_name(name) ||
-         /* a thread and a fiber are runtime handles too (activesupport's
-            IsolatedExecutionState gives both an accessor) */
-         sp_streq(name, "Thread")    || sp_streq(name, "Fiber") ||
-         /* a builtin exception's reopening (`class LoadError; def is_missing?`)
-            adds methods to the runtime's class: the value stays the runtime's
-            sp_Exception, raised, rescued and constructed by name as before */
+  return is_builtin_reopen_name(name) || io_family_name(name) ||
          is_builtin_exception_name(name);
 }
 
@@ -11311,6 +11295,38 @@ void emit_super(Compiler *c, int id, Buf *b) {
     /* `super` in a respond_to? override no ancestor defines is Object's:
        the object's method-table answer for a runtime name */
     if (uname && sp_streq(uname, "respond_to?") && emit_super_respond_to(c, id, s, b)) return;
+    /* `super` in an is_a? / kind_of? / instance_of? override no ancestor
+       defines is Object's answer for this object: its runtime class against
+       the argument (activesupport's TimeWithZone#is_a? says Time, then asks
+       super). Not a class or module is CRuby's TypeError. */
+    if (uname && !s->is_cmethod && s->class_id >= 0 &&
+        (sp_streq(uname, "is_a?") || sp_streq(uname, "kind_of?") || sp_streq(uname, "instance_of?"))) {
+      const char *sty = nt_type(c->nt, id);
+      int fwd = sty && sp_streq(sty, "ForwardingSuperNode");
+      int sargs = fwd ? -1 : nt_ref(c->nt, id, "arguments");
+      int sargc = 0; const int *sargv = sargs >= 0 ? nt_arr(c->nt, sargs, "arguments", &sargc) : NULL;
+      if ((fwd && s->nparams == 1) || (!fwd && sargc == 1)) {
+        int tk = ++g_tmp;
+        Buf kb; memset(&kb, 0, sizeof kb);
+        if (fwd) {
+          LocalVar *lv = scope_local(s, s->pnames[0]);
+          char pn[160]; snprintf(pn, sizeof pn, "lv_%s", rename_local(s->pnames[0]));
+          emit_boxed_text(c, lv && lv->type != TY_UNKNOWN ? lv->type : TY_POLY, pn, &kb);
+        }
+        else emit_boxed(c, sargv[0], &kb);
+        Buf rb; memset(&rb, 0, sizeof rb);
+        buf_printf(&rb, "({ sp_RbVal _t%d = %s; if (_t%d.tag != SP_TAG_CLASS) sp_raise_cls(\"TypeError\", \"class or module required\"); ",
+                   tk, kb.p ? kb.p : "sp_box_nil()", tk);
+        if (sp_streq(uname, "instance_of?"))
+          buf_printf(&rb, "(sp_bool)(sp_unbox_class(_t%d).cls_id == %s->cls_id); })", tk, g_self);
+        else
+          buf_printf(&rb, "(sp_bool)sp_class_le((sp_Class){%s->cls_id}, sp_unbox_class(_t%d)); })", g_self, tk);
+        if (comp_ntype(c, id) == TY_POLY) emit_boxed_text(c, TY_BOOL, rb.p, b);
+        else buf_puts(b, rb.p);
+        free(kb.p); free(rb.p);
+        return;
+      }
+    }
     /* No superclass method anywhere (parent chain, included-module shadow, and
        the exception-initialize special case all missed). CRuby raises
        NoMethodError at runtime, so emit that rather than rejecting at compile
@@ -11578,17 +11594,29 @@ static void emit_user_binop_dispatch(Compiler *c, Buf *b) {
   buf_puts(b, "static sp_RbVal sp_user_binop_dispatch(const char *op, sp_RbVal a, sp_RbVal b, sp_bool *handled) {\n");
   buf_puts(b, "  *handled = FALSE;\n  switch (a.cls_id) {\n");
   for (int k = 0; k < c->nclasses; k++) {
-    if (!c->classes[k].instantiated) continue;
+    /* A reopened builtin's boxed values carry the builtin's own id, and its
+       methods take self as the reopening's signature does: activesupport's
+       Time#- is minus_with_coercion, on a Time by value. Only the kinds
+       boxed as one object id are reached by this switch. */
+    const char *bcase = NULL, *bself = NULL;
+    if (is_builtin_reopen(c->classes[k].name)) {
+      if (sp_streq(c->classes[k].name, "Time")) { bcase = "SP_BUILTIN_TIME"; bself = "*(sp_Time *)a.v.p"; }
+      else if (sp_streq(c->classes[k].name, "Range")) { bcase = "SP_BUILTIN_RANGE"; bself = "*(sp_Range *)a.v.p"; }
+      else continue;
+    }
+    else if (!c->classes[k].instantiated) continue;
     int any = 0;
     for (int u = 0; uops[u] && !any; u++)
       if (comp_method_in_chain(c, k, uops[u], NULL) >= 0) any = 1;
     if (!any) continue;
     int cid = comp_class_index(c, c->classes[k].name);
-    buf_printf(b, "    case %d: {\n", cid);
+    if (bcase) buf_printf(b, "    case %s: {\n", bcase);
+    else buf_printf(b, "    case %d: {\n", cid);
     for (int u = 0; uops[u]; u++) {
       int defcls = -1;
       int mi = comp_method_in_chain(c, k, uops[u], &defcls);
       if (mi < 0) continue;
+      if (bcase && defcls != k) continue;   /* the reopening's own */
       Scope *m = &c->scopes[mi];
       /* only methods this TU actually emits: an unreachable / yielding /
          shadowed scope has no C function to call */
@@ -11606,6 +11634,13 @@ static void emit_user_binop_dispatch(Compiler *c, Buf *b) {
       char callbuf[256];
       /* an alias (`alias + |`) resolves to its target's scope: name the C
          function after the RESOLVED method, not the queried operator */
+      if (bcase) {
+        Buf nb; memset(&nb, 0, sizeof nb);
+        emit_method_cname(c, m, &nb);
+        snprintf(callbuf, sizeof callbuf, "%s(%s, %s)", nb.p ? nb.p : "", bself, argbuf);
+        free(nb.p);
+      }
+      else
       snprintf(callbuf, sizeof callbuf, "sp_%s_%s(%s(sp_%s *)a.v.p, %s)",
                dcn, mc(m->name ? m->name : uops[u]), self_vt ? "*" : "", dcn, argbuf);
       buf_puts(b, "        *handled = TRUE; return ");
@@ -11616,7 +11651,7 @@ static void emit_user_binop_dispatch(Compiler *c, Buf *b) {
        compare but not the equality still answers `a == b` as `(a <=> b) == 0`.
        Without an arm the boxed path fell through to identity and said false
        for two equal values (#3501). */
-    if (comp_method_in_chain(c, k, "==", NULL) < 0) {
+    if (!bcase && comp_method_in_chain(c, k, "==", NULL) < 0) {
       int cmp_defcls = -1;
       int cmp_mi = comp_method_in_chain(c, k, "<=>", &cmp_defcls);
       if (cmp_mi >= 0) {
@@ -15706,7 +15741,11 @@ char *codegen_program(const NodeTable *nt) {
        would only gain a dispatch table it has no use for. */
     static const char *const cops[] = { "<", ">", "<=", ">=", "<=>", NULL };
     for (int k = 0; k < c->nclasses && !g_has_user_binop; k++) {
-      if (!c->classes[k].instantiated) continue;
+      /* a reopened Time or Range is instantiated by the runtime itself, and
+         its operators reach boxed values through the table too */
+      const char *kn = c->classes[k].name;
+      int breopen = kn && is_builtin_reopen(kn) && (sp_streq(kn, "Time") || sp_streq(kn, "Range"));
+      if (!c->classes[k].instantiated && !breopen) continue;
       for (int u = 0; uops[u]; u++)
         if (comp_method_in_chain(c, k, uops[u], NULL) >= 0) { g_has_user_binop = 1; break; }
       /* a `<=>` with no `==` is Comparable's equality, which the table
