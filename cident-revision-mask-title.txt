@@ -1,0 +1,1 @@
+cident ignores the compiler's revision in each form the Makefile writes
