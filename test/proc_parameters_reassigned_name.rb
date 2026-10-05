@@ -24,3 +24,7 @@ class Box
   define_method(:bump) { |k, j = 2| k = k + j; k }
 end
 p Box.new.method(:bump).inspect.sub(/ \S+:\d+>/, ">"), Box.new.bump(1)
+
+# a long name is printed whole (129 bytes here; a fixed buffer cut it at 127)
+long = lambda { |the_count_this_block_is_handed_under_a_name_longer_than_the_one_hundred_and_twenty_seven_bytes_a_fixed_buffer_once_cut_it_down_to| the_count_this_block_is_handed_under_a_name_longer_than_the_one_hundred_and_twenty_seven_bytes_a_fixed_buffer_once_cut_it_down_to = the_count_this_block_is_handed_under_a_name_longer_than_the_one_hundred_and_twenty_seven_bytes_a_fixed_buffer_once_cut_it_down_to + 1; the_count_this_block_is_handed_under_a_name_longer_than_the_one_hundred_and_twenty_seven_bytes_a_fixed_buffer_once_cut_it_down_to }
+p long.call(1), long.parameters[0][1].to_s.size, long.parameters[0][1].to_s[-14, 14]

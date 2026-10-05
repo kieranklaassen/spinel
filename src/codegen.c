@@ -6509,8 +6509,8 @@ static const char *param_public_name(const char *n) {
   size_t len = reassigned_param_written_len(n);
   if (!n[len]) len = block_param_written_len(n);
   if (!n[len]) return n;
-  { static char buf[128];
-    if (len >= sizeof buf) len = sizeof buf - 1;
+  { static char *buf; static size_t cap;   /* a name of any length: nothing is cut */
+    if (len + 1 > cap) { cap = len + 1; buf = (char *)realloc(buf, cap); }
     memcpy(buf, n, len); buf[len] = 0;
     return buf; }
 }
