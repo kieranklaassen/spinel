@@ -13427,6 +13427,19 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
     emit_expr(c, argv[1], b); buf_puts(b, ")");
     return 1;
   }
+  /* and with the Regexp held in a variable, which had no arm */
+  if (recv >= 0 && rt == TY_POLY && (is_substitution(name)) &&
+      argc == 2 && comp_ntype(c, argv[0]) == TY_REGEX) {
+    const char *suf = comp_ntype(c, argv[1]) == TY_STR_STR_HASH ? "_str_str_hash" : "";
+    int ts = ++g_tmp;
+    char pat[32];
+    buf_printf(b, "({ const char *_t%d = sp_poly_to_s(", ts); emit_expr(c, recv, b);
+    buf_printf(b, "); SP_GC_ROOT_STR(_t%d);", ts);
+    emit_re_arg_pat(c, argv[0], "wrong argument type nil (expected Regexp)", b, pat);
+    buf_printf(b, " sp_re_%s%s(%s, _t%d, ", name, suf, pat, ts);
+    emit_expr(c, argv[1], b); buf_puts(b, "); })");
+    return 1;
+  }
   return 0;
 }
 
