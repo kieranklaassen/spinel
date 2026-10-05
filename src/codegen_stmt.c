@@ -14099,15 +14099,18 @@ static int str_mutate_reassign_arms(Compiler *c, Buf *b, int indent, const NodeT
       return 1;
     }
     /* s[/re/, n] = v: replace the nth capture group's span (#3548) */
-    if (assignable && sp_streq(name, "[]=") && argc == 3 && re_lit_index(c, argv[0]) >= 0) {
+    if (assignable && sp_streq(name, "[]=") && argc == 3 && re_arg_p(c, argv[0])) {
       int ts = ++g_tmp, tn = ++g_tmp;
+      char pat[32];
       emit_indent(b, indent);
       buf_printf(b, "{ const char *_t%d = ", ts); emit_expr(c, recv, b);
       buf_printf(b, "; sp_str_check_mutable(_t%d);", ts);
+      if (re_lit_index(c, argv[0]) < 0) buf_printf(b, " SP_GC_ROOT_STR(_t%d);", ts);
+      emit_re_arg_pat(c, argv[0], "no implicit conversion from nil to integer", b, pat);
       buf_printf(b, " sp_int _t%d = ", tn); emit_int_expr(c, argv[1], b);
-      buf_printf(b, "; if (sp_re_match(sp_re_pat_%d, _t%d) < 0)"
+      buf_printf(b, "; if (sp_re_match(%s, _t%d) < 0)"
                     " sp_raise_cls(\"IndexError\", \"regexp not matched\");",
-                 re_lit_index(c, argv[0]), ts);
+                 pat, ts);
       buf_printf(b, " if (_t%d < 0 || _t%d > 9)"
                     " sp_raise_cls(\"IndexError\", sp_sprintf(\"index %%lld out of regexp\","
                     " (long long)_t%d));", tn, tn, tn);
@@ -14127,6 +14130,19 @@ static int str_mutate_reassign_arms(Compiler *c, Buf *b, int indent, const NodeT
       buf_printf(b, " = sp_str_splice_re(sp_re_pat_%d, ", re_lit_index(c, argv[0]));
       emit_expr(c, recv, b); buf_puts(b, ", "); emit_str_expr(c, argv[1], b);
       buf_puts(b, ");\n");
+      return 1;
+    }
+    /* and with the Regexp held in a variable, which had no arm */
+    if (assignable && sp_streq(name, "[]=") && argc == 2 && comp_ntype(c, argv[0]) == TY_REGEX) {
+      int ts = ++g_tmp;
+      char pat[32];
+      emit_indent(b, indent);
+      buf_printf(b, "{ const char *_t%d = ", ts); emit_expr(c, recv, b);
+      buf_printf(b, "; sp_str_check_mutable(_t%d); SP_GC_ROOT_STR(_t%d);", ts, ts);
+      emit_re_arg_pat(c, argv[0], "no implicit conversion from nil to integer", b, pat);
+      buf_puts(b, " "); emit_expr(c, recv, b);
+      buf_printf(b, " = sp_str_splice_re(%s, _t%d, ", pat, ts); emit_str_expr(c, argv[1], b);
+      buf_puts(b, "); }\n");
       return 1;
     }
   }
