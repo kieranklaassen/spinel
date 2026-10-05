@@ -1,0 +1,1 @@
+An attribute writer's receiver is held while its value is built

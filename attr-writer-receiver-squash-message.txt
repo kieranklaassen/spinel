@@ -1,0 +1,28 @@
+An attribute writer's receiver is held while its value is built
+
+    K.new("v").v = (made = Array.new(8) { |i| K.new("k#{i}") }; r)
+
+An attribute writer takes its receiver into a C temp and builds the
+value after it. Nothing held a receiver that only the statement
+reaches: the value's allocations collected it, the next object took
+its place, and the store went into that object. 20,000 rounds of the
+line above leave one of the eight objects holding r for its v in a
+plain run, and 5,467 at SPINEL_GC_STRESS=1. Level 2 does not show it:
+a freed slot is not handed out again there.
+
+The temp is now rooted where the value can allocate
+(operand_may_allocate) and nothing else holds the receiver for the
+statement (writer_recv_wants_root): an object made in place, a call's
+result, or a local or an instance variable the value itself rebinds
+(`o.v = (o = nil; ...)`, read_rebound_by). The four places that take
+the receiver first do it: the typed statement, the statement on a
+class with subclasses, the statement on a boxed receiver, and the
+writer read for its value.
+
+A receiver that is a plain read keeps the C it had: self, a constant,
+a local or an instance variable the value does not rebind, a field
+read off one (subtree_is_pure_read). So does a receiver a statement
+around this one already ran into a temp of its own (arg_ran_first),
+and any receiver when the value makes nothing.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
