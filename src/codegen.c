@@ -2054,41 +2054,54 @@ static void begin_volatile_names(Compiler *c, int si, char ***out, int *nout, in
   free(inb);
 }
 
-/* The same question for one local of a lambda, a proc, a Fiber or a Thread
-   body, asked of that body alone. Such a body is a C function of its own:
-   the setjmp of a begin around the `lambda` call is in the enclosing
-   function, and only one under the body's own block can lose its local.
-   `in` says a setjmp construct above already holds node `id`. */
-static int setjmp_writes_local_under(Compiler *c, int id, const char *name, int in) {
+/* The same question for a lambda, a proc, a Fiber or a Thread body, asked
+   of that body alone. Such a body is a C function of its own: the setjmp
+   of a begin around the `lambda` call is in the enclosing function, and
+   only one under the body's own block can lose its local. One walk of the
+   block gathers every name written under a setjmp; `*all` is a rescue no
+   begin holds, which guards the whole block. `in` says a setjmp construct
+   above already holds node `id`. */
+static void setjmp_written_names_under(Compiler *c, int id, int in, char ***names, int *n, int *cap, int *all) {
   const NodeTable *nt = c->nt;
-  if (id < 0 || id >= nt->count) return 0;
+  if (*all || id < 0 || id >= nt->count) return;
   NodeKind k = nt_kind(nt, id);
-  if (k == NK_RescueNode && !in) return 1;
+  if (k == NK_RescueNode && !in) { *all = 1; return; }
   if (in && lv_is_write_or_target(k)) {
     const char *nm = nt_str(nt, id, "name");
-    if (nm && sp_streq(nm, name)) return 1;
+    if (nm && !name_list_has(*names, *n, nm)) {
+      if (*n == *cap) { *cap = *cap ? *cap * 2 : 8; *names = (char **)realloc(*names, sizeof(char *) * (size_t)*cap); }
+      (*names)[(*n)++] = (char *)nm;
+    }
   }
   if (k == NK_BeginNode || is_stopiter_loop(c, id) || is_heavy_brk_call(c, id)) in = 1;
   int expr = k == NK_RescueModifierNode ? nt_ref(nt, id, "expression") : -1;
   int nr = nt_num_refs(nt, id);
   for (int i = 0; i < nr; i++) {
     int ch = nt_ref_at(nt, id, i);
-    if (setjmp_writes_local_under(c, ch, name, in || ch == expr)) return 1;
+    setjmp_written_names_under(c, ch, in || ch == expr, names, n, cap, all);
   }
   int na = nt_num_arrs(nt, id);
   for (int i = 0; i < na; i++) {
-    int n = 0; const int *a = nt_arr_at(nt, id, i, &n);
-    for (int j = 0; j < n; j++) if (setjmp_writes_local_under(c, a[j], name, in)) return 1;
+    int m = 0; const int *a = nt_arr_at(nt, id, i, &m);
+    for (int j = 0; j < m; j++) setjmp_written_names_under(c, a[j], in, names, n, cap, all);
   }
-  return 0;
 }
 
-/* `create` makes the body, or is its block. */
+/* `create` makes the body, or is its block. A body's locals are asked one
+   after another, so the walk is made once a body and its answer kept. */
 int proc_local_needs_volatile(Compiler *c, int create, LocalVar *lv) {
+  static const NodeTable *for_nt = NULL;
+  static int for_blk = -1, n = 0, cap = 0, all = 0;
+  static char **names = NULL;
   NodeKind k = nt_kind(c->nt, create);
   int blk = (k == NK_LambdaNode || k == NK_BlockNode) ? create : nt_ref(c->nt, create, "block");
   if (!lv || !lv->name) return 0;
-  return blk < 0 ? inlined_local_needs_volatile(c, lv) : setjmp_writes_local_under(c, blk, lv->name, 0);
+  if (blk < 0) return inlined_local_needs_volatile(c, lv);
+  if (for_nt != c->nt || for_blk != blk) {
+    for_nt = c->nt; for_blk = blk; n = 0; all = 0;
+    setjmp_written_names_under(c, blk, 0, &names, &n, &cap, &all);
+  }
+  return all || name_list_has(names, n, lv->name);
 }
 
 
