@@ -1,0 +1,13 @@
+"axabc"
+["xy", "axyc"]
+"xabc"
+"string not matched"
+"can't modify frozen String: \"abc\""
+"string not matched"
+"yybx"
+"string not matched"
+["axyy", 1]
+["aabcc", 1]
+"axc"
+"aéüé"
+[1, 5, 6]
