@@ -1,0 +1,28 @@
+A `when` beside a Rational or a Complex compares by value
+
+A Rational literal arm read its subject as an Integer, so it missed a
+Rational or a Float that equals it and said nothing:
+
+    case Rational(1, 2)
+    when 0.5r then puts "hit"
+    else puts "miss"           # Spinel: miss, CRuby: hit
+    end
+
+`case 0.5` with `when 0.5r` and `case Complex(0, 2)` with `when 2i`
+missed the same way. An arm that is not a literal compared the two
+with C's `==`, which a struct does not have, so `when Rational(1, 2)`
+beside a Rational did not build.
+
+A Rational beside an Integer, a Float, a Bignum or a Rational, on
+either side, and two Complex are now compared as a pinned value is
+(emit_pm_eq: boxed, by sp_poly_eq). The literal arms keep their own
+test beside an Integer subject, where it was right.
+
+A Complex beside a real number is left as it was and still does not
+build (`case Complex(2, 0)` with `when 2`): boxed, the two do not
+compare equal, and in CRuby they do.
+
+Test: case_when_rational
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+

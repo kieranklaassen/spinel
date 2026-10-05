@@ -1,0 +1,25 @@
+A pinned Rational or Complex is compared by value
+
+`in ^y` beside a Rational or a Complex compared the two with C's `==`,
+which a struct does not have, so the program did not build:
+
+    x = Rational(1, 2)
+    y = Rational(1, 2)
+    case x
+    in ^y then puts "hit"      # error: invalid operands to binary ==
+    else puts "miss"
+    end
+
+emit_pm_eq already compares an Array, a Hash and a Bignum subject
+boxed, by sp_poly_eq, with the value rooted. A Rational beside an
+Integer, a Float, a Bignum or a Rational, on either side, and two
+Complex now go the same way.
+
+A Complex beside a real number is left as it was and still does not
+build (`case Complex(2, 0)` with `in ^n`, n = 2): boxed, the two do
+not compare equal, and in CRuby they do.
+
+Test: case_in_pinned_rational
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+
