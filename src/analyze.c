@@ -15187,6 +15187,22 @@ static int strbuf_container_source_walk(Compiler *c, int node, int depth, int mo
       }
       return changed;
     }
+    /* a constant's container likewise: what its writes store. The one
+       write nearly every constant has is recorded (LocalVar.const_write) */
+    case NK_ConstantReadNode: case NK_ConstantPathNode: {
+      const char *cn = nt_str(nt, node, "name");
+      LocalVar *cv = cn ? comp_const(c, cn) : NULL;
+      if (!cv || !cv->const_write) return 0;
+      int ow = comp_const_only_write(c, cn);
+      if (ow >= 0) return strbuf_container_source_walk(c, nt_ref(nt, ow, "value"), depth + 1, mode);
+      for (int w = comp_kind_first(c, NK_ConstantWriteNode); w >= 0; w = comp_kind_next(c, w)) {
+        if (nt_kind(nt, w) != NK_ConstantWriteNode) continue;
+        const char *wn = nt_str(nt, w, "name");
+        if (!wn || !sp_streq(wn, cn)) continue;
+        changed |= strbuf_container_source_walk(c, nt_ref(nt, w, "value"), depth + 1, mode);
+      }
+      return changed;
+    }
     case NK_CallNode: {
       int tail = strbuf_map_block_tail(c, node);
       if (tail >= 0) return SB_KIND(mode) == SB_HAS_NONSTRING ? 0 : strbuf_store_leaf(c, tail, depth, mode);
