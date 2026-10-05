@@ -1,0 +1,36 @@
+A call that declined its operands once renders them last
+
+emit_operands_in_order renders two or more observable operands, emits
+the call with them bound, and declines when the call did not take them
+so; the caller then renders the whole call again, operands included. A
+method written in Ruby binds its arguments in order already and
+declines every time. As the receiver of another such call it is
+emitted twice, once to be bound and once in that call's arm, so every
+link of a chain doubled the work below it:
+
+    def where(x) = (@w << x; self)
+    q = Q.new.where(col(1)).where(col(2))...
+
+compiled in 0.15 s at 12 links, 1.5 s at 16 and 26 s at 20, with `.`
+and with `&.`, whatever call the argument is. #4925 was the same with a
+lone operand, cured by rendering it after the call (operands_last). A
+call that has declined two or more is now remembered by node and takes
+that path from then on: it is emitted with its operands named, and they
+are rendered only if it takes them. 20 links compile in 0.02 s and 200
+in 1.5 s. Past that the time grows with the square of the length, as a
+chain with literal arguments does on master.
+
+The first emission of every call is as before. `make cident` against
+5c2dea515: 6075 identical, 3 differ. benchmark/bm_tree_walker_frames
+and test/poly_getbyte_beside_native_getbyte differ in the numbers of
+their string literals, since the renderings thrown away had taken
+numbers. In test/typed_array_assoc_nil a call that had declined is
+emitted again where it takes its operands, and their temps are numbered
+after the bindings instead of before. The stripped binaries of all
+three are byte-identical to master's. optcarrot's C is identical.
+
+`make scale-test` compiles test/scale/call_chain_operands.rb, forty
+links in seven shapes, under its CPU-time limit; without the change it
+is killed there.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
