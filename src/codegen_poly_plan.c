@@ -3395,6 +3395,11 @@ void emit_poly_cases_n(Compiler *c, int id, const char *name, const PolySpecials
       buf_printf(b, " case SP_BUILTIN_FLOAT_RANGE: _t%d = %ssp_frange_cover_i(*(sp_FloatRange *)_t%d.v.p, _t%d)%s; break;", tr, ibo, tv, atmp[0], ibc);
       break;
     case TY_FLOAT:
+      /* key? and has_key? are not an Array's: they keep the default arm. So
+         does a NaN: the search finds one by its bits (#3650), which would
+         answer for a NaN computed elsewhere too */
+      if (is_membership_alias(name))
+        buf_printf(b, " case SP_BUILTIN_FLT_ARRAY: _t%d = %s_t%d == _t%d && sp_FloatArray_include((sp_FloatArray *)_t%d.v.p, _t%d)%s; break;", tr, ibo, atmp[0], atmp[0], tv, atmp[0], ibc);
       buf_printf(b, " case SP_BUILTIN_RANGE: _t%d = %ssp_range_cover_f((sp_Range *)_t%d.v.p, _t%d)%s; break;", tr, ibo, tv, atmp[0], ibc);
       buf_printf(b, " case SP_BUILTIN_FLOAT_RANGE: _t%d = %ssp_frange_cover(*(sp_FloatRange *)_t%d.v.p, _t%d)%s; break;", tr, ibo, tv, atmp[0], ibc);
       break;
