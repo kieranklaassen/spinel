@@ -1,0 +1,36 @@
+A String key assigned on a boxed String replaces its first occurrence
+
+`b = [+"abc", 1][0]; b["b"] = "x"; p b` printed "abc", and a key that
+is not there raised nothing: a boxed receiver's `recv["key"] = v` goes
+to sp_poly_set_str, which stores into a Hash or an OpenStruct and
+answers for anything else. The same with the key boxed (`b[k] = "x"`, k
+out of a mixed Array, a String or an Integer), which goes to
+sp_poly_set_poly. Through an element, `a[0][k] = "x"` with a String in
+k raised TypeError, "no implicit conversion of String into Integer".
+The compiler's own String arm, for a receiver it knows, was right.
+
+Both calls now pass a String receiver to one sp_poly_str_aset: the
+first occurrence of a String key is replaced, a key that is not there
+is IndexError "string not matched" ahead of a frozen receiver's
+FrozenError as in CRuby, and an Integer key replaces one character as
+sp_poly_slot_set_key already did. The new contents are stored back
+where the Integer key's arm stores them: into a local or an ivar, or
+into the slot of an `outer[i]` receiver whose outer is an Array or a
+Hash. A String two names hold takes them in place. Every other
+receiver goes on to sp_poly_set_str and sp_poly_set_poly unchanged.
+
+A boxed Hash pays for the look at its receiver: 182 instructions a
+`h["k"] = i` before, 194 after; 140 and 150 with the key boxed
+(callgrind, 200,000 stores).
+
+Left as it is: a boxed String that is neither a local, an ivar nor
+such a slot (a global, a method's answer, the element of a boxed
+outer) still keeps its old contents, with an Integer key as with a
+String one.
+
+A value that is no String is not refused: `x["b"] = 5` prints
+"a5cabc" where CRuby raises TypeError, as `x[1] = 5` does on master.
+With a String key master left the String as it was.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+

@@ -1,0 +1,21 @@
+String#slice! with a String key answers a String of its own
+
+`s = +"abcd"; r = s.slice!("bc"); r << "x"` raised FrozenError: the
+value arm answered the key itself, here a frozen literal. With a key
+that can change the answer was that key, so `r.setbyte(0, 90)` changed
+the key too and `r.equal?(k)` was true. CRuby answers a new String.
+
+The arm answers a copy of the key where it matched. That is one
+allocation more where the value is taken: 398 instructions a
+`r = s.slice!("cd")` on an eight-character String before, 673 after
+(callgrind, 200,000 calls). The statement, whose value nobody reads,
+is another arm and its C is the same.
+
+The same arm rendered a receiver that is no variable at each of its
+uses: `r = mk.slice!("b")` ran mk four times, hit or miss, with its
+value taken or not, and said nothing. Such a receiver is now read once
+into a rooted temp, and nothing is stored back, as before: 469
+instructions a `r = mk.slice!("cd")` before, 257 after.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+

@@ -1,0 +1,1 @@
+String#slice! with a String key answers a String of its own
