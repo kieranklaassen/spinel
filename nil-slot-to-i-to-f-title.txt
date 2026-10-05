@@ -1,0 +1,1 @@
+A nil in an Array, a Hash or an object slot answers to_i and to_f

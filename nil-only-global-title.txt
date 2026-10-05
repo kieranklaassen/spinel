@@ -1,0 +1,1 @@
+A call on a global that only ever holds nil keeps its value

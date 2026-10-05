@@ -1,0 +1,26 @@
+A nil in an Array, a Hash or an object slot answers to_i and to_f
+
+    class Card
+      def list = (@list ||= [1])
+      def count = @list.to_i
+    end
+    p Card.new.count
+
+prints 0 in CRuby and raised NoMethodError, undefined method 'to_i'
+for an instance of Array. nil answers to_i and to_f; Array, Hash and a
+class of the program's own have neither, so the call fell to the
+gate's raise whatever the slot held. The two are typed Integer and
+Float for any receiver, so the raise was the scalar form and the boxed
+test of the other nil-only names did not see it.
+
+null_slot_nil_only_call takes the two names, and
+emit_null_slot_nil_only answers 0 or 0.0 for a NULL in the call's own
+type and raises as before for any other value. A String answers both
+itself and a class with a to_i or a to_f of its own keeps it; neither
+is probed.
+
+Test: test/nil_slot_to_i_to_f.rb. No other program's generated C
+changes but test/nil_slot_nil_only_names.rb and
+test/nil_slot_nil_only_nested.rb, whose raise arms gain a parenthesis.
+
+Co-Authored-By: Claude Code

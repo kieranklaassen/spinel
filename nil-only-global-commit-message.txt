@@ -1,0 +1,31 @@
+A call on a global that only ever holds nil keeps its value
+
+    $log = nil
+    p $log.to_a
+
+prints [] in CRuby and printed nil. A global that only ever holds nil,
+or is never assigned, had no type through the fixpoint;
+an_phase_reconcile_check boxed it afterwards and stamped its reads. A
+call on such a read had been typed with a receiver of no type and had
+none itself, so it was emitted for its effect and its value dropped:
+`(sp_poly_to_a_call(gv_log), sp_box_nil())`. to_h, &, | and ^ answered
+nil the same way, `$log.to_a.size` raised NoMethodError and
+`"#{$log.to_a}"` did not build.
+
+Whether a global has a write that is not nil is a question about the
+program's text, so register_globals_consts answers it before the types
+are inferred (box_nil_only_globals) and boxes the global there. The
+read, the call on it, the `+` on that and the conditional around it
+are then typed together: `$log.to_a + [1]` is [1], `def f = $log.to_a`
+answers [], and `$hook ? $hook.call(1) : 0` builds as it did. A global
+with any other write, an op-assign or a multiple-assignment target is
+left to the fixpoint as before.
+
+Not covered: `$log.to_h.merge({})` answers {} and aborts under
+SPINEL_GC_STRESS=2, as the same call on a boxed local does on master.
+
+Test: test/nil_only_global_call_value.rb. No other program's generated
+C changes.
+
+Co-Authored-By: Claude Code
+
