@@ -28901,8 +28901,14 @@ static int an_statement_value_dropped(Compiler *c, const int *parent, int top, s
    under scope -1, with every other node that names it (`M::W`, `W ||= x`).
    `seen` keeps what an_named_container_seen answered for a name, at the first
    node of its chain; `defs` what an_statement_value_dropped learned of each
-   block loop's name. */
-typedef struct { int *head, *next, nb, *seen; signed char defs[7]; } AnLocalReads;
+   block loop's name; `own` and `owned` what an_name_is_own learned of the
+   names it was asked. */
+enum { AN_OWN_MAX = 48, AN_OWN_LEN = 24 };
+typedef struct {
+  int *head, *next, nb, *seen;
+  signed char defs[7];
+  char own[AN_OWN_MAX][AN_OWN_LEN]; signed char owned[AN_OWN_MAX]; int nown;
+} AnLocalReads;
 static unsigned an_local_reads_bucket(const AnLocalReads *ix, int si, const char *nm) {
   return (sp_strhash(nm) ^ ((unsigned)si * 2654435761u)) & (unsigned)(ix->nb - 1);
 }
@@ -28999,6 +29005,21 @@ static int an_literal_stores_frozen(const NodeTable *nt, int v, int *lit) {
   return 1;
 }
 
+/* Does the program give a method of its own the name `nm`? A call by that
+   name may be that method, which can keep what it is handed: `def puts(x) =
+   $out << x`, an Array `count` that stores `self`. Any class's method
+   counts; the name is asked once. */
+static int an_name_is_own(Compiler *c, AnLocalReads *ix, const char *nm) {
+  for (int i = 0; i < ix->nown; i++)
+    if (sp_streq(ix->own[i], nm)) return ix->owned[i];
+  int own = an_program_defines_method(c, nm);
+  if (ix->nown < AN_OWN_MAX && strlen(nm) < AN_OWN_LEN) {
+    strcpy(ix->own[ix->nown], nm);
+    ix->owned[ix->nown++] = (signed char)own;
+  }
+  return own;
+}
+
 /* Does a node under `id` leave its block early (next, break), with a value
    of its own? */
 static int an_leaves_early(const NodeTable *nt, int id, int depth) {
@@ -29019,8 +29040,9 @@ static int an_leaves_early(const NodeTable *nt, int id, int depth) {
 /* Does `v` build its container and every String in it new, so that no name
    holds either: a literal of `+"q"` or `"q".dup`, the pieces a String
    answers, the names a directory or the lines a file gives, or a map or an
-   Array.new whose block answers a String it builds? */
-static int an_fresh_string_container(Compiler *c, int v) {
+   Array.new whose block answers a String it builds? Each by its name, which
+   says so only while the program has no method of that name. */
+static int an_fresh_string_container(Compiler *c, AnLocalReads *ix, int v) {
   static const char *const pieces[] = {
     "split", "chars", "lines", "scan", "partition", "rpartition", "grapheme_clusters", NULL };
   static const char *const listings[] = { "glob", "children", "entries", "readlines", NULL };
@@ -29035,14 +29057,15 @@ static int an_fresh_string_container(Compiler *c, int v) {
       e = an_unparen(nt, e);
       const char *en = e >= 0 && nt_kind(nt, e) == NK_CallNode ? nt_str(nt, e, "name") : NULL;
       int er = en ? an_unparen(nt, nt_ref(nt, e, "receiver")) : -1;
-      if (er < 0 || nt_kind(nt, er) != NK_StringNode || (!sp_streq(en, "+@") && !sp_streq(en, "dup"))) return 0;
+      if (er < 0 || nt_kind(nt, er) != NK_StringNode || (!sp_streq(en, "+@") && !sp_streq(en, "dup")) ||
+          an_name_is_own(c, ix, en)) return 0;
     }
     return n > 0;
   }
   if (k != NK_CallNode) return 0;
   const char *nm = nt_str(nt, v, "name");
   int r = nt_ref(nt, v, "receiver"), blk = nt_ref(nt, v, "block");
-  if (!nm || r < 0) return 0;
+  if (!nm || r < 0 || an_name_is_own(c, ix, nm)) return 0;
   const char *rn = nt_kind(nt, r) == NK_ConstantReadNode ? nt_str(nt, r, "name") : NULL;
   int tail = strbuf_map_block_tail(c, v);
   if (tail < 0 && rn && sp_streq(rn, "Array") && sp_streq(nm, "new") && blk >= 0 && nt_kind(nt, blk) == NK_BlockNode) {
@@ -29058,7 +29081,7 @@ static int an_fresh_string_container(Compiler *c, int v) {
     if (nt_kind(nt, tail) == NK_InterpolatedStringNode) return an_stored_literal(nt, tail) < 0;
     const char *tn = nt_kind(nt, tail) == NK_CallNode ? nt_str(nt, tail, "name") : NULL;
     int tr = tn ? nt_ref(nt, tail, "receiver") : -1;
-    if (!tn) return 0;
+    if (!tn || an_name_is_own(c, ix, tn)) return 0;
     if (sp_streq(tn, "dup")) return 1;
     return tr >= 0 && comp_ntype(c, tr) == TY_STRING && (sp_streq(tn, "+") || sp_streq(tn, "*"));
   }
@@ -29156,15 +29179,17 @@ static int an_last_value_dropped(const NodeTable *nt, const int *parent, int nod
 /* Is a value whose parent is `args` only printed? An interpolation makes a
    String of its own. `puts` and `print` answer nil. `p` answers its
    argument, or its arguments as an Array, so `x = p(a)` is a second name for
-   `a`: it is a print only where its own value is thrown away. */
-static int an_only_printed(const NodeTable *nt, const int *parent, int args) {
+   `a`: it is a print only where its own value is thrown away. Each is the
+   builtin only while the program has no method of that name. */
+static int an_only_printed(Compiler *c, AnLocalReads *ix, const int *parent, int args) {
+  const NodeTable *nt = c->nt;
   int g = args >= 0 ? parent[args] : -1;
   if (g >= 0 && nt_kind(nt, args) == NK_StatementsNode && nt_kind(nt, g) == NK_EmbeddedStatementsNode) return 1;
   const char *gn = g >= 0 && nt_kind(nt, g) == NK_CallNode && nt_ref(nt, g, "arguments") == args &&
                    nt_ref(nt, g, "receiver") < 0 ? nt_str(nt, g, "name") : NULL;
-  if (!gn) return 0;
-  if (sp_streq(gn, "puts") || sp_streq(gn, "print")) return 1;
-  return sp_streq(gn, "p") && an_last_value_dropped(nt, parent, g);
+  if (!gn || (!sp_streq(gn, "puts") && !sp_streq(gn, "print") && !sp_streq(gn, "p"))) return 0;
+  if (an_name_is_own(c, ix, gn)) return 0;
+  return !sp_streq(gn, "p") || an_last_value_dropped(nt, parent, g);
 }
 
 /* Can a call `p` made on a container, or a call chained on it, store into
@@ -29175,8 +29200,9 @@ static int an_only_printed(const NodeTable *nt, const int *parent, int args) {
    element, or a call known to answer something else, ends the question, and
    an answer that is dropped or printed holds nothing. Any call not listed
    here -- `send`, `instance_eval`, a method the program gives Array -- is
-   taken to store. */
-static int an_container_answer_kept(Compiler *c, const int *parent, int p, const char *pn) {
+   taken to store, and so is a listed name the program gives a method of its
+   own. */
+static int an_container_answer_kept(Compiler *c, AnLocalReads *ix, const int *parent, int p, const char *pn) {
   static const char *const other[] = {
     "count", "join", "inspect", "to_s", "include?", "member?", "index", "find_index", "rindex", "sum",
     "any?", "all?", "none?", "one?", "map", "collect", "flat_map", "collect_concat", "select", "filter",
@@ -29204,7 +29230,7 @@ static int an_container_answer_kept(Compiler *c, const int *parent, int p, const
   for (int n = p;;) {
     const char *nm = n == p ? pn : nt_str(nt, n, "name");
     int blk = nt_ref(nt, n, "block"), is_walk = 0, is_same = 0;
-    if (!nm) return 1;
+    if (!nm || an_name_is_own(c, ix, nm)) return 1;
     if (an_container_string_read(c, n, &r, nb, sizeof nb)) return 0;
     for (int i = 0; other[i]; i++) if (sp_streq(nm, other[i])) return 0;
     if (sp_streq(nm, "to_h") && blk >= 0) return 0;
@@ -29217,7 +29243,7 @@ static int an_container_answer_kept(Compiler *c, const int *parent, int p, const
     int up = parent[n];
     if (up >= 0 && nt_kind(nt, up) == NK_CallNode && nt_ref(nt, up, "receiver") == n) { n = up; continue; }
     /* printed: a read, as the name alone is */
-    if (an_only_printed(nt, parent, up)) return 0;
+    if (an_only_printed(c, ix, parent, up)) return 0;
     return !an_value_dropped(nt, parent, n);
   }
 }
@@ -29264,18 +29290,20 @@ static int an_named_container_seen(Compiler *c, int r, const int *parent, AnLoca
     const char *pn = an_call_on_read(nt, parent, q, &p, nb, sizeof nb);
     int a = pn ? nt_ref(nt, p, "arguments") : -1, an = 0, blk = pn ? nt_ref(nt, p, "block") : -1;
     const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
-    if (pn && an == 0 && blk < 0 && (is_len_alias(pn) || sp_streq(pn, "empty?"))) continue;
+    if (pn && an == 0 && blk < 0 && (is_len_alias(pn) || sp_streq(pn, "empty?")) && !an_name_is_own(c, ix, pn)) continue;
     nseen++; seen = q;
     if (!pn) {
-      /* printed, walked by a `for` or spread by a multiple assignment: a
-         read. Any other use may store through another name. */
+      /* printed, walked by a `for` (which calls `each`) or spread by a
+         multiple assignment: a read. Any other use may store through
+         another name. */
       NodeKind pk = p >= 0 ? nt_kind(nt, p) : NK_NilNode;
-      if (!an_only_printed(nt, parent, p) &&
-          !(pk == NK_ForNode && nt_ref(nt, p, "collection") == q) && !(pk == NK_MultiWriteNode && nt_ref(nt, p, "value") == q))
+      if (!an_only_printed(c, ix, parent, p) &&
+          !(pk == NK_ForNode && nt_ref(nt, p, "collection") == q && !an_name_is_own(c, ix, "each")) &&
+          !(pk == NK_MultiWriteNode && nt_ref(nt, p, "value") == q))
         frozen = 0;
       continue;
     }
-    if (an_container_answer_kept(c, parent, p, pn)) frozen = 0;
+    if (an_container_answer_kept(c, ix, parent, p, pn)) frozen = 0;
     /* an Enumerable call's copy stores nothing */
     if (nt_ref(nt, p, "receiver") != q) an = 0, pn = "";
     if (is_push_unshift(pn) || sp_streq(pn, "prepend")) { if (!an_stores_frozen(nt, av, an, &lit)) frozen = 0; }
@@ -29303,7 +29331,7 @@ static int an_named_container_seen(Compiler *c, int r, const int *parent, AnLoca
       int v = nt_kind(nt, k) == NK_LocalVariableWriteNode ? an_unparen(nt, nt_ref(nt, k, "value")) : -1;
       nw++;
       if (!an_literal_stores_frozen(nt, v, &lit)) frozen = 0;
-      fresh = nw == 1 && an_fresh_string_container(c, v);
+      fresh = nw == 1 && an_fresh_string_container(c, ix, v);
       wk = k;
     }
   }
@@ -29326,17 +29354,31 @@ static int an_block_measures(Compiler *c, const char *cn, int blk) {
          nt_ref(nt, e, "arguments") < 0 && nt_ref(nt, e, "block") < 0 && !an_program_defines_method(c, en);
 }
 
+/* Does the read `rd` answer a String of its container? Its name says so only
+   while the program has no method of that name. */
+static int an_read_answers_element(Compiler *c, AnLocalReads *ix, int rd) {
+  char nb[64];
+  int r = -1;
+  const char *nm = an_container_string_read(c, rd, &r, nb, sizeof nb);
+  return nm && !an_name_is_own(c, ix, nm);
+}
+
 /* Is a dropped change to a String out of container `cont` one no run can
    miss: its Strings frozen literals, which raise; or the container built new
-   where it is read, or named and looked at by that read alone? `bind` is the
-   statement that bound the String to a local, if one did (a write, a
-   multiple assignment, a `for`): its value names the String or the container
-   once more, so it has to be dropped as well, or be the program's last. */
-static int an_container_change_unseen(Compiler *c, int cont, int bind, const char *mut, const int *parent, AnLocalReads *ix) {
+   where it is read, or named and looked at by that read alone? `read` is the
+   call that took the String out, if a call did, and `bind` the statement
+   that bound the String to a local, if one did (a write, a multiple
+   assignment, a `for`): its value names the String or the container once
+   more, so it has to be dropped as well, or be the program's last. A `for`
+   calls `each`, and a frozen literal may be written `"q".freeze`. */
+static int an_container_change_unseen(Compiler *c, int cont, int read, int bind, const char *mut, const int *parent, AnLocalReads *ix) {
   const NodeTable *nt = c->nt;
   int lit = 0;
   cont = an_unparen(nt, cont);
   if (cont < 0) return 0;
+  if (read >= 0 ? !an_read_answers_element(c, ix, read)
+                : bind >= 0 && nt_kind(nt, bind) == NK_ForNode && an_name_is_own(c, ix, "each")) return 0;
+  if (an_name_is_own(c, ix, "freeze")) return 0;
   if (an_literal_stores_frozen(nt, cont, &lit) && lit > 0) return 1;
   NodeKind ck = nt_kind(nt, cont);
   int seen = ck == NK_LocalVariableReadNode || ck == NK_ConstantReadNode ? an_named_container_seen(c, cont, parent, ix) : AN_SEEN;
@@ -29353,7 +29395,7 @@ static int an_container_change_unseen(Compiler *c, int cont, int bind, const cha
     if ((!rn && rk != NK_ForNode && rk != NK_MultiWriteNode) || sp_streq(mut, "[]=") || sp_streq(mut, "insert") ||
         sp_streq(mut, "bytesplice") || (blk >= 0 && !an_block_measures(c, rn, blk))) return 0;
   }
-  else if (seen != cont + 1 && !an_fresh_string_container(c, cont)) return 0;
+  else if (seen != cont + 1 && !an_fresh_string_container(c, ix, cont)) return 0;
   if (bind < 0 || an_statement_value_dropped(c, parent, bind, ix->defs)) return 1;
   int st = parent[bind];
   return st >= 0 && nt_kind(nt, st) == NK_StatementsNode && st == nt_ref(nt, nt->root_id, "statements");
@@ -29367,7 +29409,7 @@ static int an_container_change_unseen(Compiler *c, int cont, int bind, const cha
    twice answers 0: its String may be read after the change, or be another
    one. */
 static int an_local_string_from_container(Compiler *c, int rd, const int *parent, AnLocalReads *ix,
-                                          int depth, char *how, size_t cap, int *cont, int *bind) {
+                                          int depth, char *how, size_t cap, int *cont, int *read, int *bind) {
   const NodeTable *nt = c->nt;
   const char *x = nt_str(nt, rd, "name");
   Scope *sc = comp_scope_of(c, rd);
@@ -29386,7 +29428,7 @@ static int an_local_string_from_container(Compiler *c, int rd, const int *parent
     int v = an_unparen(nt, nt_ref(nt, w, "value"));
     if (v < 0) return 0;
     if (nt_kind(nt, v) == NK_LocalVariableReadNode) {
-      if (!an_local_string_from_container(c, v, parent, ix, depth + 1, how, cap, cont, bind)) return 0;
+      if (!an_local_string_from_container(c, v, parent, ix, depth + 1, how, cap, cont, read, bind)) return 0;
     }
     else {
       if (nt_kind(nt, v) != NK_CallNode || comp_ntype(c, v) != TY_STRING ||
@@ -29396,7 +29438,7 @@ static int an_local_string_from_container(Compiler *c, int rd, const int *parent
       const char *nm = an_container_string_read(c, v, &r, nb, sizeof nb);
       if (!nm) return 0;
       snprintf(how, cap, "a local written from %s `%s`", ty_is_hash(comp_ntype(c, r)) ? "a Hash's" : "an Array's", nm);
-      *cont = r; *bind = w;
+      *cont = r; *read = v; *bind = w;
     }
   }
   else if (nt_kind(nt, w) == NK_LocalVariableTargetNode) {
@@ -29443,10 +29485,10 @@ static int an_local_string_from_container(Compiler *c, int rd, const int *parent
 static void refuse_dropped_container_string_change(Compiler *c) {
   const NodeTable *nt = c->nt;
   int *parent = NULL;
-  AnLocalReads ix = { NULL, NULL, 0, NULL, { 0 } };
+  AnLocalReads ix = { NULL, NULL, 0, NULL, { 0 }, { { 0 } }, { 0 }, 0 };
   NT_FOREACH_KIND(nt, NK_CallNode, u) {
     const char *un = nt_str(nt, u, "name");
-    int b = nt_ref(nt, u, "receiver"), cont = -1, bind = -1;
+    int b = nt_ref(nt, u, "receiver"), cont = -1, read = -1, bind = -1;
     if (!un || b < 0 || !sp_str_mutator(un, SP_MUT_LOCAL) || sp_streq(un, "setbyte")) continue;
     if (nt_ref(nt, u, "block") >= 0) continue;
     NodeKind bk = nt_kind(nt, b);
@@ -29459,7 +29501,7 @@ static void refuse_dropped_container_string_change(Compiler *c) {
       const char *nm = an_container_string_read(c, b, &r, nb, sizeof nb);
       if (!nm) continue;
       snprintf(how, sizeof how, "%s `%s`", ty_is_hash(comp_ntype(c, r)) ? "a Hash's" : "an Array's", nm);
-      cont = r;
+      cont = r; read = b;
     }
     if (!parent && !(parent = an_parent_map(nt))) break;
     /* `x.m << a << b`: the chain's value is its last call's, and a
@@ -29480,8 +29522,8 @@ static void refuse_dropped_container_string_change(Compiler *c) {
     }
     if (!an_statement_value_dropped(c, parent, top, ix.defs)) continue;
     if (bk == NK_LocalVariableReadNode &&
-        !an_local_string_from_container(c, b, parent, &ix, 0, how, sizeof how, &cont, &bind)) continue;
-    if (an_container_change_unseen(c, cont, bind, un, parent, &ix)) continue;
+        !an_local_string_from_container(c, b, parent, &ix, 0, how, sizeof how, &cont, &read, &bind)) continue;
+    if (an_container_change_unseen(c, cont, read, bind, un, parent, &ix)) continue;
     char msg[320];
     snprintf(msg, sizeof msg, "a String is not yet shared by reference through %s into an in-place `%s`. "
              "Store the new String back instead (%s)", how, un,
