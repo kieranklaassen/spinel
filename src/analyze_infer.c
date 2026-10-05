@@ -9193,7 +9193,18 @@ TyKind infer_uncached(Compiler *c, int id) {
        (#3130). Answer the boxed union until the try resolves; if it never
        does (the NoMethodError gate's raise-all token), poly still holds the
        rescue arm's value correctly. */
-    if (et == TY_VOID || et == TY_NIL) return rt;
+    if (et == TY_VOID) return rt;
+    if (et == TY_NIL) {
+      /* A bare call typed nil is taken to raise, and the value arm emits it
+         for effect alone (#3021). Any other always-nil expression -- the
+         call in parentheses, two statements, an `if` with no else -- is a
+         value: nil where nothing is raised. An Integer or a Float slot holds
+         that as its sentinel; no other typed slot is asked to, so the two
+         arms join boxed. */
+      if (nt_kind(nt, e) == NK_CallNode || rt == TY_INT || rt == TY_FLOAT ||
+          rt == TY_NIL || rt == TY_VOID || rt == TY_UNKNOWN) return rt;
+      return TY_POLY;
+    }
     if (et == TY_UNKNOWN) {
       /* an empty container carries a value; the union of the two arms is poly */
       if (node_is_empty_container(nt, e)) return TY_POLY;
