@@ -1821,7 +1821,12 @@ const char *sp_File_getc(sp_File *f) {SP_GC_ROOT(f);
   sp_io_wait_readable(f);
   int ch = fgetc(f->fp);
   if (ch == EOF) return NULL;
-  int extra = ((ch & 0xE0) == 0xC0) ? 1 : ((ch & 0xF0) == 0xE0) ? 2 : ((ch & 0xF8) == 0xF0) ? 3 : 0;
+  /* A binary handle (a socket, a File opened "rb", one put in binmode) has
+     one-byte characters: reading on after a byte that looks like a UTF-8
+     lead took the next bytes with it, and on a socket waited for bytes the
+     peer had not sent (#7312). */
+  int bin = sp_File_binmode_p(f);
+  int extra = bin ? 0 : ((ch & 0xE0) == 0xC0) ? 1 : ((ch & 0xF0) == 0xE0) ? 2 : ((ch & 0xF8) == 0xF0) ? 3 : 0;
   char *r = sp_str_alloc((size_t)(1 + extra));
   size_t n = 0;
   r[n++] = (char)ch;
@@ -1832,6 +1837,7 @@ const char *sp_File_getc(sp_File *f) {SP_GC_ROOT(f);
   }
   r[n] = 0;
   sp_str_set_len(r, n);
+  if (bin) sp_str_mark_binary(r);
   return r;
 }
 const char *sp_File_readchar(sp_File *f) {SP_GC_ROOT(f);
@@ -3583,12 +3589,23 @@ sp_StrArray *sp_srange_to_a(sp_StrRange r) {
 sp_bool sp_srange_eq(sp_StrRange a, sp_StrRange b) {
   return a.excl == b.excl && sp_str_eq(a.first, b.first) && sp_str_eq(a.last, b.last);
 }
-/* #include? / #member?: #cover? for a bounded range, which CRuby refuses to
-   answer for a beginless or endless one. */
+/* #include? / #member?: whether the walk String#upto takes meets x, as
+   CRuby's rb_str_include_range_p, stopping at the first equal member;
+   CRuby refuses to answer for a beginless or endless range. */
+static int sp_srange_include_i(const char *m, void *arg) {
+  const char **v = (const char **)arg;
+  if (!sp_str_eq(m, *v)) return 0;
+  *v = NULL;
+  return 1;
+}
 sp_bool sp_srange_include(sp_StrRange r, const char *x) {
   if (!r.first || !r.last)
     sp_raise_cls("TypeError", "cannot determine inclusion in beginless/endless ranges");
-  return sp_srange_cover(r, x);
+  if (!x) return 0;
+  const char *v = x;
+  SP_GC_ROOT_STR(v);
+  sp_str_upto_each(r.first, r.last, r.excl, sp_srange_include_i, &v);
+  return v == NULL;
 }
 /* #cover? / #=== compare lexicographically, no materialization. */
 sp_bool sp_srange_cover(sp_StrRange r, const char *x) {
@@ -3857,6 +3874,42 @@ const char *sp_str_sub_str_str_hash(const char *str, const char *pat, sp_StrStrH
   memcpy(out + before, rep, rlen);
   memcpy(out + before + rlen, found + plen, rest);
   out[total] = 0;
+  return out;
+}
+/* gsub(string, hash): every occurrence of the literal pattern replaced by
+   the hash's value for it ("" when absent), $~ the last occurrence. An
+   empty pattern matches at every character boundary, as CRuby's does. */
+const char *sp_str_gsub_str_str_hash(const char *str, const char *pat, sp_StrStrHash *h) {SP_GC_ROOT_STR(pat);SP_GC_ROOT(h);SP_GC_ROOT_STR(str);
+  if (!str || !pat) return str;
+  size_t slen = strlen(str), plen = strlen(pat);
+  const char *rep = (h && sp_StrStrHash_has_key(h, pat)) ? sp_StrStrHash_get(h, pat) : "";
+  SP_GC_ROOT_STR(rep);
+  size_t rlen = strlen(rep), n = 0;
+  if (plen == 0) { for (size_t i = 0; i < slen; i++) if (((unsigned char)str[i] & 0xC0) != 0x80) n++; n++; }
+  else for (const char *q = strstr(str, pat); q; q = strstr(q + plen, pat)) n++;
+  if (n == 0) { if (sp_re_track_last) sp_re_clear_last_match(); return str; }
+  size_t total = slen + n * rlen - (plen ? n * plen : 0);
+  char *out = sp_str_alloc_raw(total + 1);
+  size_t o = 0, last = 0;
+  if (plen == 0) {
+    for (size_t i = 0; i < slen; i++) {
+      if (((unsigned char)str[i] & 0xC0) != 0x80) { memcpy(out + o, rep, rlen); o += rlen; last = i; }
+      out[o++] = str[i];
+    }
+    memcpy(out + o, rep, rlen); o += rlen; last = slen;
+  }
+  else {
+    const char *p = str;
+    for (const char *q = strstr(p, pat); q; q = strstr(p, pat)) {
+      memcpy(out + o, p, (size_t)(q - p)); o += (size_t)(q - p);
+      memcpy(out + o, rep, rlen); o += rlen;
+      last = (size_t)(q - str);
+      p = q + plen;
+    }
+    memcpy(out + o, p, slen - (size_t)(p - str)); o += slen - (size_t)(p - str);
+  }
+  out[o] = 0;
+  if (sp_re_track_last) sp_re_set_lit_match(str, (sp_int)last, (sp_int)(last + plen));
   return out;
 }
 /* Array#sum with a String initial value: concatenation fold ("abc" from

@@ -2,6 +2,7 @@
 #include <limits.h>
 #include "analyze_internal.h"
 #include "repr.h"
+#include "decide.h"
 
 
 static int narrow_int_table_ivars(Compiler *c, int in_round);  /* declared early: the fixpoint calls it */
@@ -13107,20 +13108,16 @@ static int an_local_lent(Compiler *c, const char *vn, Scope *vs) {
 }
 
 /* The same for ivar `ivn` of class `cid`, handed by a call in one of its
-   methods. */
+   methods. The calls that hand an ivar on come from the by-name index, not
+   a walk of every call in the program: this is asked once per local/ivar
+   alias, and a machine-generated program has one in nearly every method. */
 static int an_ivar_owner(Compiler *c, int node);
 static int an_ivar_lent(Compiler *c, int cid, const char *ivn) {
   const NodeTable *nt = c->nt;
   if (!ivn || cid < 0) return 0;
-  for (int u = comp_kind_first(c, NK_CallNode); u >= 0; u = comp_kind_next(c, u)) {
-    if (nt_kind(nt, u) != NK_CallNode) continue;
-    int a = nt_ref(nt, u, "arguments"), ac = 0;
-    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
-    int hit = 0;
-    for (int k = 0; k < ac && !hit; k++)
-      hit = nt_kind(nt, av[k]) == NK_InstanceVariableReadNode && sp_streq(nt_str(nt, av[k], "name"), ivn) &&
-            an_ivar_owner(c, av[k]) == cid;
-    if (!hit) continue;
+  for (int e = comp_ivarg_first(c, ivn); e >= 0; e = comp_ivarg_next(c, e)) {
+    int u = comp_ivarg_call(c, e), av = comp_ivarg_arg(c, e);
+    if (!sp_streq(nt_str(nt, av, "name"), ivn) || an_ivar_owner(c, av) != cid) continue;
     int mi = an_call_target_mi(c, u);
     if (mi < 0) mi = an_any_scope_by_name(c, nt_str(nt, u, "name"));
     if (mi < 0) continue;
@@ -15560,34 +15557,104 @@ static int an_param_mutated_in_place(Compiler *c, int mi, int pi) {
   return 0;
 }
 
+/* The demand below is a depth-bounded walk with no visited set: a poly
+   variable's read goes to every write of it, and those values read other
+   variables in turn, so a variable with W writes was walked W^hops times
+   (a machine-generated method appends to every boxed local it has). The
+   memo remembers a variable whose writes were walked from some depth and
+   changed nothing -- marked no node, promoted no local -- and skips its walk
+   from that depth or deeper. Nothing having changed since, the skipped walk
+   would see what the remembered one saw with less budget left, and so also
+   change nothing. Every change moves the generation on, which forgets every
+   entry; so does each run of the demand block, as other passes run between
+   them. Off (sbd_memo_on) outside that block. */
+typedef struct { int kind, owner; const char *name; unsigned gen; int depth; } SbdMemo;
+static SbdMemo *sbd_memo;
+static int sbd_memo_cap, sbd_memo_n, sbd_memo_on;
+static unsigned sbd_gen = 1;
+static SbdMemo *sbd_memo_slot(int kind, int owner, const char *name, int add) {
+  if (add && (sbd_memo_n + 1) * 2 > sbd_memo_cap) {
+    int ncap = sbd_memo_cap ? sbd_memo_cap * 2 : 256;
+    SbdMemo *nm = calloc((size_t)ncap, sizeof(SbdMemo));
+    if (!nm) return NULL;
+    for (int i = 0; i < sbd_memo_cap; i++) {
+      if (!sbd_memo[i].name) continue;
+      unsigned h = (sp_strhash(sbd_memo[i].name) ^ ((unsigned)sbd_memo[i].owner * 2654435761u) ^
+                    (unsigned)sbd_memo[i].kind) & (unsigned)(ncap - 1);
+      while (nm[h].name) h = (h + 1) & (unsigned)(ncap - 1);
+      nm[h] = sbd_memo[i];
+    }
+    free(sbd_memo);
+    sbd_memo = nm; sbd_memo_cap = ncap;
+  }
+  if (!sbd_memo_cap) return NULL;
+  unsigned h = (sp_strhash(name) ^ ((unsigned)owner * 2654435761u) ^ (unsigned)kind) &
+               (unsigned)(sbd_memo_cap - 1);
+  for (; sbd_memo[h].name; h = (h + 1) & (unsigned)(sbd_memo_cap - 1))
+    if (sbd_memo[h].kind == kind && sbd_memo[h].owner == owner && sp_streq(sbd_memo[h].name, name))
+      return &sbd_memo[h];
+  if (!add) return NULL;
+  sbd_memo[h].kind = kind; sbd_memo[h].owner = owner; sbd_memo[h].name = name;
+  sbd_memo[h].gen = 0; sbd_memo_n++;
+  return &sbd_memo[h];
+}
+static void sbd_memo_begin(void) {
+  if (sbd_memo_cap) memset(sbd_memo, 0, (size_t)sbd_memo_cap * sizeof(SbdMemo));
+  sbd_memo_n = 0;
+  sbd_gen++;
+  sbd_memo_on = 1;
+}
+/* Is this variable's walk from `depth` known to change nothing? */
+static int sbd_memo_covers(int kind, int owner, const char *name, int depth) {
+  if (!sbd_memo_on || !name) return 0;
+  SbdMemo *e = sbd_memo_slot(kind, owner, name, 0);
+  return e && e->gen == sbd_gen && e->depth <= depth;
+}
+/* Its walk from `depth`, begun at generation `gen0`, is done: remembered
+   when nothing changed on the way. */
+static void sbd_memo_done(int kind, int owner, const char *name, int depth, unsigned gen0) {
+  if (!sbd_memo_on || !name || sbd_gen != gen0) return;
+  SbdMemo *e = sbd_memo_slot(kind, owner, name, 1);
+  if (e) { e->gen = gen0; e->depth = depth; }
+}
+
 /* The writes of a poly local, ivar or global, each demanded in turn: the
    variable is another name for whatever was written to it. */
 static int strbuf_demand_local_writes(Compiler *c, const char *vn, Scope *vs, int depth) {
   const NodeTable *nt = c->nt;
   int changed = 0;
   if (!vn || !vs) return 0;
-  for (int w = comp_lvw_first_sc(c, (int)(vs - c->scopes), vn); w >= 0; w = comp_lvw_next_sc(c, w)) {
+  int vsi = (int)(vs - c->scopes);
+  if (sbd_memo_covers(0, vsi, vn, depth)) return 0;
+  unsigned gen0 = sbd_gen;
+  for (int w = comp_lvw_first_sc(c, vsi, vn); w >= 0; w = comp_lvw_next_sc(c, w)) {
     if (nt_kind(nt, w) != NK_LocalVariableWriteNode || comp_scope_of(c, w) != vs) continue;
     const char *wn = nt_str(nt, w, "name");
     if (!wn || !sp_streq(wn, vn)) continue;
     changed |= strbuf_demand_value_leaves(c, nt_ref(nt, w, "value"), depth);
   }
+  sbd_memo_done(0, vsi, vn, depth, gen0);
   return changed;
 }
 static int strbuf_demand_ivar_writes(Compiler *c, int cid, const char *ivn, int depth) {
   const NodeTable *nt = c->nt;
   int changed = 0;
+  if (sbd_memo_covers(1, cid, ivn, depth)) return 0;
+  unsigned gen0 = sbd_gen;
   for (int w = comp_kind_first(c, NK_InstanceVariableWriteNode); w >= 0; w = comp_kind_next(c, w)) {
     if (nt_kind(nt, w) != NK_InstanceVariableWriteNode) continue;
     const char *wn = nt_str(nt, w, "name");
     if (!wn || !sp_streq(wn, ivn) || an_ivar_owner(c, w) != cid) continue;
     changed |= strbuf_demand_value_leaves(c, nt_ref(nt, w, "value"), depth);
   }
+  sbd_memo_done(1, cid, ivn, depth, gen0);
   return changed;
 }
 static int strbuf_demand_gvar_writes(Compiler *c, const char *grn, int depth) {
   const NodeTable *nt = c->nt;
   int changed = 0;
+  if (sbd_memo_covers(2, 0, grn, depth)) return 0;
+  unsigned gen0 = sbd_gen;
   for (int w = comp_kind_first(c, NK_GlobalVariableWriteNode); w >= 0; w = comp_kind_next(c, w)) {
     if (nt_kind(nt, w) != NK_GlobalVariableWriteNode) continue;
     const char *wn = nt_str(nt, w, "name");
@@ -15595,6 +15662,7 @@ static int strbuf_demand_gvar_writes(Compiler *c, const char *grn, int depth) {
     if (!wrn || !sp_streq(wrn, grn)) continue;
     changed |= strbuf_demand_value_leaves(c, nt_ref(nt, w, "value"), depth);
   }
+  sbd_memo_done(2, 0, grn, depth, gen0);
   return changed;
 }
 static int strbuf_poly_ivar_read(Compiler *c, int node, int *cid) {
@@ -15665,6 +15733,7 @@ static int strbuf_demand_value_leaves(Compiler *c, int node, int depth) {
       if (strbuf_mut_kind(c, vn, vs) < 0) return 0;
       vlv->type = TY_STRBUF; vlv->str_shared = 1;
       c->strbuf_box[node] = 1;
+      sbd_gen++;
       return 1;
     }
     default: {
@@ -15673,10 +15742,12 @@ static int strbuf_demand_value_leaves(Compiler *c, int node, int depth) {
          container holds, so the container's Strings become handles */
       if (infer_type(c, node) == TY_POLY) {
         int d = strbuf_demand_elem_arg(c, node);
+        if (d >= 0) sbd_gen++;   /* it may have marked stores, changed or not */
         return d > 0 ? d : 0;
       }
       if (infer_type(c, node) != TY_STRING) return 0;
       c->strbuf_box[node] = 1;
+      sbd_gen++;
       return 1;
     }
   }
@@ -16142,7 +16213,14 @@ static int an_param_appended_deep(Compiler *c, int mi, int j) {
    the stored String. The same demand the container-store rules make when a
    shared String is put IN; here the evidence is what is done to what comes
    OUT. Answers -1 when `an` is no element read of a container, else whether
-   it changed anything. */
+   it changed anything.
+
+   The walk can come back to the same read: a container that stores an
+   element of itself (`@m[to] = @m[from]`) has that read among its stores,
+   and demanding a poly store starts a fresh demand of it, depth and all.
+   That recursed until the stack ran out. A read whose walk is already under
+   way answers 0 -- the walk on the stack covers it. */
+static int *sb_elem_active, sb_elem_nactive, sb_elem_cap;
 static int strbuf_demand_elem_arg(Compiler *c, int an) {
   const NodeTable *nt = c->nt;
   if (an < 0 || nt_kind(nt, an) != NK_CallNode || !container_elem_read_p(nt, an)) return -1;
@@ -16157,21 +16235,37 @@ static int strbuf_demand_elem_arg(Compiler *c, int an) {
     if (base < 0 || (nt_kind(nt, base) != NK_LocalVariableReadNode &&
                      nt_kind(nt, base) != NK_InstanceVariableReadNode)) return -1; }
   TyKind rt = infer_type(c, rr);
+  const char *cn = NULL;
+  Scope *cs = NULL;
   if (ty_is_array(rt) || ty_is_hash(rt)) {
     if (nt_kind(nt, rr) == NK_LocalVariableReadNode) {
-      const char *cn = nt_str(nt, rr, "name");
-      Scope *cs = cn ? comp_scope_of(c, rr) : NULL;
-      return cn && cs ? strbuf_demand_container_stores(c, cn, cs) : 0;
+      cn = nt_str(nt, rr, "name");
+      cs = cn ? comp_scope_of(c, rr) : NULL;
+      if (!cn || !cs) return 0;
     }
   }
   else if (!container_elem_read_p(nt, rr)) return -1;
+  for (int k = 0; k < sb_elem_nactive; k++)
+    if (sb_elem_active[k] == an) return 0;
+  if (sb_elem_nactive == sb_elem_cap) {
+    int ncap = sb_elem_cap ? sb_elem_cap * 2 : 16;
+    int *na = realloc(sb_elem_active, (size_t)ncap * sizeof(int));
+    if (!na) return 0;
+    sb_elem_active = na; sb_elem_cap = ncap;
+  }
+  sb_elem_active[sb_elem_nactive++] = an;
+  int r;
+  if (cn) r = strbuf_demand_container_stores(c, cn, cs);
   /* an element of an ivar's container, of another element, of a method's
      result: the stores that reach it, as for a mutator through one */
-  return strbuf_container_source_walk(c, rr, 0, SB_DEMAND);
+  else r = strbuf_container_source_walk(c, rr, 0, SB_DEMAND);
+  sb_elem_nactive--;
+  return r;
 }
 static int promote_shared_stored_strings(Compiler *c) {
   int changed = 0;
   sb_store_valid = 0;   /* this run's store index is built on first use */
+  comp_ivarg_invalidate(c);   /* an_ivar_lent's, likewise */
   const NodeTable *nt = c->nt;
   /* mutated string locals: receivers of an in-place mutator */
   /* per-kind chains: these walks run every fixpoint round, and the full-table
@@ -17047,6 +17141,7 @@ static int promote_shared_stored_strings(Compiler *c) {
      variable alone and every alias kept the old string. Demand the String
      values written to it into handles. */
   if (!g_infer_optimistic) {
+    sbd_memo_begin();
     for (int w = comp_kind_first(c, NK_LocalVariableWriteNode); w >= 0; w = comp_kind_next(c, w)) {
       if (nt_kind(nt, w) != NK_LocalVariableWriteNode) continue;
       const char *pn = nt_str(nt, w, "name");
@@ -17093,6 +17188,7 @@ static int promote_shared_stored_strings(Compiler *c) {
         changed |= strbuf_demand_value_leaves(c, aj, 0);
       }
     }
+    sbd_memo_on = 0;
   }
   return changed;
 }
@@ -24014,11 +24110,20 @@ static int nn_fresh(void) {
   if (nn_inferring && nn_done_epoch != nn_epoch && nn_c) nn_compute_now(nn_c, 0);
   return nn_ready;
 }
-static int nn_read_nonnil(int id) {
-  return id >= 0 && nn_fresh() && id < nn_cap && nn_nonnil[id];
+/* The two questions the rest of the compiler asks of the facts. Each fact
+   used is a decision (src/decide.c), keyed by the read's position and, for a
+   local, the name it was written with: a refused one leaves the read as
+   possibly nil, which is what it was before the fact was proven. */
+static int nn_read_nonnil(Compiler *c, int id, const char *name) {
+  if (!(id >= 0 && nn_fresh() && id < nn_cap && nn_nonnil[id])) return 0;
+  if (!g_decide_on) return 1;
+  char written[300];
+  snprintf(written, sizeof written, "%.*s", (int)block_param_written_len(name), name);
+  return decide_node(c->nt, id, "nn-read", written);
 }
-static int nn_index_inbounds(int id) {
-  return id >= 0 && nn_fresh() && id < nn_cap && nn_inb[id];
+static int nn_index_inbounds(Compiler *c, int id) {
+  return id >= 0 && nn_fresh() && id < nn_cap && nn_inb[id] &&
+         decide_node(c->nt, id, "nn-inb", NULL);
 }
 /* nullable_int_value as the slot's own marks answer it, without the facts:
    what the variable can hold anywhere, rather than at this read. */
@@ -25358,10 +25463,12 @@ int nullable_int_value(Compiler *c, int v) {
   if (v < 0) return 0;
   if (nt_kind(nt, v) == NK_NilNode) return 1;
   /* `return e` / `(e)` carry their inner value unchanged; a block tail can be
-     either, and so can a method's own tail statement. */
+     either, and so can a method's own tail statement. A bare `return` answers
+     nil, which an Integer or Float return carries as the sentinel. */
   if (nt_kind(nt, v) == NK_ReturnNode) {
     int rv = nt_ref(nt, v, "arguments");
     int rn = 0; const int *ra = rv >= 0 ? nt_arr(nt, rv, "arguments", &rn) : NULL;
+    if (rn == 0) return 1;
     return ra && rn == 1 ? nullable_int_value(c, ra[0]) : 0;
   }
   /* A conditional's value is one of its arms, so it carries the sentinel if any
@@ -25455,7 +25562,7 @@ int nullable_int_value(Compiler *c, int v) {
     return 0;
   }
   if (nt_kind(nt, v) == NK_CallNode) {
-    if (nn_index_inbounds(v)) return 0;
+    if (nn_index_inbounds(c, v)) return 0;
     if (nullable_int_call_name(nt_str(nt, v, "name"))) return 1;
     if (nn_call_unboxes_nil(c, v)) return 1;
     /* A setter assignment answers its RHS, not the writer's return. Its
@@ -25528,7 +25635,7 @@ int nullable_int_value(Compiler *c, int v) {
     const char *rn = nt_str(nt, v, "name");
     Scope *rs = rn ? comp_scope_of(c, v) : NULL;
     LocalVar *rv = rs ? scope_local(rs, rn) : NULL;
-    return rv && rv->nullable_int && !nn_read_nonnil(v);
+    return rv && rv->nullable_int && !nn_read_nonnil(c, v, rn);
   }
   /* `x &&= v` answers x's nil when x is nil, and `x ||= v` answers v when
      x is nil, so the value can be nil as the local or v can */
@@ -27767,6 +27874,121 @@ static void desugar_block_arg_order(Compiler *c) {
   }
 }
 
+/* Does the subtree under `n` write the variable a read of type-name prefix
+   `pfx` ("LocalVariable", "InstanceVariable", ...) and name `name` reads? A
+   def's body runs when called, under its own locals. */
+static int rr_writes_var(const NodeTable *nt, int n, const char *pfx, const char *name) {
+  if (n < 0) return 0;
+  const char *ty = nt_type(nt, n);
+  if (!ty || sp_streq(ty, "DefNode")) return 0;
+  if (!strncmp(ty, pfx, strlen(pfx)) && (strstr(ty, "Write") || strstr(ty, "Target")) &&
+      nt_str(nt, n, "name") && sp_streq(nt_str(nt, n, "name"), name))
+    return 1;
+  int nr = nt_num_refs(nt, n);
+  for (int i = 0; i < nr; i++)
+    if (rr_writes_var(nt, nt_ref_at(nt, n, i), pfx, name)) return 1;
+  int na = nt_num_arrs(nt, n);
+  for (int i = 0; i < na; i++) {
+    int m = 0; const int *ids = nt_arr_at(nt, n, i, &m);
+    for (int j = 0; j < m; j++) if (rr_writes_var(nt, ids[j], pfx, name)) return 1;
+  }
+  return 0;
+}
+/* `v << (v = +"b")`: Ruby evaluates the receiver before the arguments, so the
+   String the call mutates and answers is the one v held then, and the
+   argument's write stands -- `r = v << (v = +"b")` gives r "ab" and v "b".
+   The String mutators read their receiver's variable again after the
+   arguments, to write the result back or to hand its handle on, so they
+   mutated or answered the String the argument bound, and a value-semantics
+   write-back undid the argument's write. When an argument or the block of
+   such a call, or of an append it chains onto (`v << x << (v = y)`), writes
+   the variable its receiver chain starts from, the call becomes
+     (__rr_N = v; __rr_N << (v = +"b"))
+   so the mutation and the value follow the String the receiver read, and the
+   write stands. The node itself becomes the parentheses, keeping its id,
+   line and scope. This runs after the type fixpoint converges; a rewrite
+   resumes inference so the new temporary takes its receiver's type. */
+static int desugar_mutator_recv_rebind(Compiler *c) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  int n0 = nt->count, changed = 0;
+  for (int id = 0; id < n0; id++) {
+    if (nt_kind(nt, id) != NK_CallNode) continue;
+    const char *nm = nt_str(nt, id, "name");
+    if (!nm || !is_string_rebind_mutator(nm)) continue;
+    /* the variable the receiver chain starts from, through the appends
+       that answer their receiver */
+    int base = nt_ref(nt, id, "receiver");
+    while (base >= 0 && nt_kind(nt, base) == NK_CallNode && nt_ref(nt, base, "receiver") >= 0 &&
+           nt_str(nt, base, "name") &&
+           is_string_append(nt_str(nt, base, "name")))
+      base = nt_ref(nt, base, "receiver");
+    const char *pfx = NULL;
+    switch (nt_kind(nt, base)) {
+      case NK_LocalVariableReadNode: pfx = "LocalVariable"; break;
+      case NK_InstanceVariableReadNode: pfx = "InstanceVariable"; break;
+      case NK_GlobalVariableReadNode: pfx = "GlobalVariable"; break;
+      case NK_ClassVariableReadNode: pfx = "ClassVariable"; break;
+      default: continue;
+    }
+    const char *vn = nt_str(nt, base, "name");
+    if (!vn) continue;
+    int hit = 0;
+    for (int cur = id; cur >= 0 && cur != base && !hit; cur = nt_ref(nt, cur, "receiver"))
+      hit = rr_writes_var(nt, nt_ref(nt, cur, "arguments"), pfx, vn) ||
+            rr_writes_var(nt, nt_ref(nt, cur, "block"), pfx, vn);
+    if (!hit) continue;
+    /* These names also belong to Arrays, Hashes and user objects. Only a
+       String receiver needs the String emitters' receiver snapshot. */
+    TyKind rt = infer_type(c, base);
+    if (rt != TY_STRING && rt != TY_STRBUF) continue;
+    Scope *sc = comp_scope_of(c, id);
+    if (!sc) continue;
+    int first = nt->count;
+    char tn[64];
+    snprintf(tn, sizeof tn, "__rr_%s", comp_node_tag(c, id));
+    /* `__rr_N = v`, its value a fresh read of v; the chain's base becomes
+       the read of __rr_N */
+    char vty[48], vnm[256];
+    snprintf(vty, sizeof vty, "%sReadNode", pfx);
+    snprintf(vnm, sizeof vnm, "%s", vn);
+    int w = nt_new_node(nt, "LocalVariableWriteNode");
+    int vr = nt_new_node(nt, vty);
+    if (w < 0 || vr < 0) continue;
+    nt_node_set_str(nt, vr, "name", vnm);
+    if (pfx[0] == 'L') nt_node_set_int(nt, vr, "depth", nt_int(nt, base, "depth", 0));
+    nt_node_set_str(nt, w, "name", tn);
+    nt_node_set_ref(nt, w, "value", vr);
+    long long bl = nt_int(nt, base, "node_line", 0), bf = nt_int(nt, base, "node_file", 0),
+              bc = nt_int(nt, base, "node_col", 0);
+    nt_node_reset(nt, base, "LocalVariableReadNode");
+    nt_node_set_str(nt, base, "name", tn);
+    nt_node_set_int(nt, base, "node_line", bl);
+    nt_node_set_int(nt, base, "node_file", bf);
+    nt_node_set_int(nt, base, "node_col", bc);
+    nt_node_set_int(nt, vr, "node_line", bl);
+    nt_node_set_int(nt, vr, "node_file", bf);
+    nt_node_set_int(nt, vr, "node_col", bc);
+    scope_local_intern(sc, tn);
+    int nc = bo_shallow_copy(nt, id);
+    if (nc < 0) continue;
+    int stm[2] = { w, nc };
+    int stmts = nt_new_node(nt, "StatementsNode");
+    nt_node_set_arr(nt, stmts, "body", stm, 2);
+    long long line = nt_int(nt, id, "node_line", 0), file = nt_int(nt, id, "node_file", 0),
+              col = nt_int(nt, id, "node_col", 0);
+    nt_node_reset(nt, id, "ParenthesesNode");
+    nt_node_set_int(nt, id, "node_line", line);
+    nt_node_set_int(nt, id, "node_file", file);
+    nt_node_set_int(nt, id, "node_col", col);
+    nt_node_set_ref(nt, id, "body", stmts);
+    comp_grow_node_arrays(c);
+    int encl = c->nscope[id];
+    for (int j = first; j < nt->count; j++) c->nscope[j] = encl;
+    changed = 1;
+  }
+  return changed;
+}
+
 /* `m(&v)` where v is a boxed value that can be a Symbol: `&:name` is lowered
    to the block `{ |_spx| _spx.name }` before parsing, but a Symbol that a poly
    value holds is known only at run time, and sp_poly_to_block refused it with
@@ -28689,6 +28911,14 @@ static void refuse_lent_ivar_copies(Compiler *c) {
 }
 }
 
+/* A literal block belongs to this super, not to its caller's block. */
+static int super_forwards_caller_block(Compiler *c, int id) {
+  NodeKind kind = nt_kind(c->nt, id);
+  if (kind != NK_SuperNode && kind != NK_ForwardingSuperNode) return 0;
+  int block = nt_ref(c->nt, id, "block");
+  return block < 0 || nt_kind(c->nt, block) != NK_BlockNode;
+}
+
 static void poly_ivar_set_reference(Compiler *c, int id, int recv) {
   TyKind rt = comp_ntype(c, recv);
   if (ty_is_object(rt)) {
@@ -28761,6 +28991,43 @@ static void an_phase_desugar_register(Compiler *c) {
       }
     }
   }
+  /* `Struct.send(:new, :a)`, `Data.public_send(:define, :x)`: a class
+     maker reached through a literal-name send. The send is retargeted onto
+     the direct call only inside the fixpoint, after the passes that register
+     the class it makes have run, so `P = Data.send(:define, :x)` left P
+     undefined and its first use raised NameError. Retarget these here, as
+     the later pass would. */
+  {
+    NodeTable *ntm = (NodeTable *)c->nt;
+    int n0 = ntm->count;
+    for (int id = 0; id < n0; id++) {
+      if (nt_kind(ntm, id) != NK_CallNode) continue;
+      const char *nm = nt_str(ntm, id, "name");
+      if (!nm || !(sp_streq(nm, "send") || sp_streq(nm, "public_send") || sp_streq(nm, "__send__"))) continue;
+      int rv = nt_ref(ntm, id, "receiver");
+      if (rv < 0 || nt_kind(ntm, rv) != NK_ConstantReadNode) continue;
+      const char *rn = nt_str(ntm, rv, "name");
+      int sa = nt_ref(ntm, id, "arguments"), sac = 0;
+      const int *sav = sa >= 0 ? nt_arr(ntm, sa, "arguments", &sac) : NULL;
+      if (sac < 1 || nt_kind(ntm, sav[0]) != NK_SymbolNode) continue;
+      const char *mn = nt_str(ntm, sav[0], "value");
+      if (!rn || !mn) continue;
+      int maker = (sp_streq(mn, "new") && (sp_streq(rn, "Struct") || sp_streq(rn, "Class"))) ||
+                  (sp_streq(mn, "define") && sp_streq(rn, "Data"));
+      if (!maker) continue;
+      int rest[64], nrest = sac - 1;
+      if (nrest > 64) continue;
+      for (int k = 0; k < nrest; k++) rest[k] = sav[k + 1];
+      int na = nt_new_node(ntm, "ArgumentsNode");
+      if (na < 0) continue;
+      comp_grow_node_arrays(c);
+      c->nscope[na] = c->nscope[id];
+      nt_node_set_arr(ntm, na, "arguments", rest, nrest);
+      char mbuf[16]; snprintf(mbuf, sizeof mbuf, "%s", mn);
+      nt_node_set_str(ntm, id, "name", mbuf);
+      nt_node_set_ref(ntm, id, "arguments", nrest > 0 ? na : -1);
+    }
+  }
   /* A superclass is a constant or a call (`Struct.new(:a)`); the parser peels
      parentheses around one expression. Anything else -- `(A rescue B)`,
      `(x; Base)`, a local variable -- was read as no superclass and the class
@@ -28787,10 +29054,13 @@ static void an_phase_desugar_register(Compiler *c) {
         if (rv >= 0 && nt_kind(ntc, rv) == NK_ConstantReadNode &&
             sp_streq(nt_str(ntc, rv, "name"), "Class") && mn && sp_streq(mn, "new") &&
             nt_ref(ntc, sc, "block") < 0) {
-          if (ac == 0) { nt_node_set_ref(ntc, id, "superclass", -1); continue; }
+          /* the anonymous class in between is remembered: reflection
+             that would name it is refused (resolve_parents) */
+          if (ac == 0) { nt_node_set_ref(ntc, id, "superclass", -1); nt_node_set_int(ntc, id, "anon_super", 1); continue; }
           if (ac == 1 && (nt_kind(ntc, av[0]) == NK_ConstantReadNode ||
                           nt_kind(ntc, av[0]) == NK_ConstantPathNode)) {
             nt_node_set_ref(ntc, id, "superclass", av[0]);
+            nt_node_set_int(ntc, id, "anon_super", 1);
             continue;
           }
         }
@@ -28828,6 +29098,7 @@ static void an_phase_desugar_register(Compiler *c) {
   desugar_builtin_reopen_named_superclass(c); /* class Rational < Numeric -> class Rational */
   desugar_builtin_reopen_self_class(c);  /* self.class in a reopened Hash -> Hash */
   desugar_engine_branches(c);
+  desugar_paren_def_body(c);            /* def m = (a; b) -> def m; a; b; end */
   desugar_def_unless_method_defined(c); /* def m .. end unless method_defined?(:m), answered in program order --
                                            ahead of the runtime-condition defs, which it answers statically */
   desugar_class_body_self_calls(c);     /* self.v = x / v in a class body -> Cls.v = x / Cls.v */
@@ -29067,8 +29338,7 @@ static void an_phase_class_structure(Compiler *c) {
     char *has_super = (char *)calloc(ns > 0 ? (size_t)ns : 1, 1);
     if (has_super) {
       for (int id = 0; id < c->nt->count; id++) {
-        const char *ty = nt_type(c->nt, id);
-        if (!ty || (!sp_streq(ty, "SuperNode") && !sp_streq(ty, "ForwardingSuperNode"))) continue;
+        if (!super_forwards_caller_block(c, id)) continue;
         Scope *sc = comp_scope_of(c, id);
         if (!sc) continue;
         int idx = (int)(sc - c->scopes);
@@ -29853,7 +30123,7 @@ static void an_phase_infer_fixpoint(Compiler *c) {
         ch = infer_param_types(c);
         g_final_bind_pass = 0;
       }
-      if (!ch) break;
+      if (!ch && !desugar_mutator_recv_rebind(c)) break;
     }
   }
   g_infer_optimistic = 0;
@@ -29988,6 +30258,18 @@ static void an_phase_infer_fixpoint(Compiler *c) {
       TyKind *prevd = (TyKind *)malloc(sizeof(TyKind) * (nrec > 0 ? nrec : 1));
       TyKind *lprevd = (TyKind *)malloc(sizeof(TyKind) * (nlrec > 0 ? nlrec : 1));
       int have_prevd = 0;
+      /* Every class's ivar slots, flagged where this loop re-clears them, and
+         a snapshot of their types: infer_inherited_ivars below re-fills an
+         inherited slot the re-clear zeroed (a child's copy of a reset parent
+         ivar) every round, the way the re-derive pair does, and only a
+         change to a slot NOT re-cleared counts toward the fixed-cycle exit. */
+      int ivncls = c->nclasses;
+      int *ivoff = (int *)malloc(sizeof(int) * (size_t)(ivncls + 1));
+      ivoff[0] = 0;
+      for (int ci = 0; ci < ivncls; ci++) ivoff[ci + 1] = ivoff[ci] + c->classes[ci].nivars;
+      char *ivrec = (char *)calloc((size_t)ivoff[ivncls] + 1, 1);
+      TyKind *ivsnap = (TyKind *)malloc(sizeof(TyKind) * (size_t)(ivoff[ivncls] + 1));
+      for (int k = 0; k < nrec; k++) ivrec[ivoff[recCi[k]] + recIv[k]] = 1;
       for (int iter = 0; iter < 128; iter++) {
         /* Parameters bind from the SETTLED state of the previous iteration,
            before this one's re-clear. Bound after it, a parameter sampled
@@ -30039,7 +30321,20 @@ static void an_phase_infer_fixpoint(Compiler *c) {
         { int _w = promote_append_accumulators(c); ch |= _w; ch_other |= _w; }
         { int _w = widen_shared_cmp_params(c); ch |= _w; ch_other |= _w; }
         { int _w = infer_cvar_types(c); ch |= _w; ch_other |= _w; }
-        { int _w = infer_inherited_ivars(c); ch |= _w; ch_other |= _w; }
+        int ivsame = c->nclasses == ivncls;
+        for (int ci = 0; ivsame && ci < ivncls; ci++)
+          if (c->classes[ci].nivars != ivoff[ci + 1] - ivoff[ci]) ivsame = 0;
+        for (int ci = 0; ivsame && ci < ivncls; ci++)
+          for (int iv = 0; iv < c->classes[ci].nivars; iv++)
+            ivsnap[ivoff[ci] + iv] = c->classes[ci].ivar_types[iv];
+        if (infer_inherited_ivars(c)) {
+          ch = 1;
+          if (!ivsame) ch_other = 1;   /* the layout moved: count it, as before */
+          for (int ci = 0; ci < ivncls && !ch_other; ci++) {
+            for (int iv = 0; iv < c->classes[ci].nivars; iv++)
+              if (!ivrec[ivoff[ci] + iv] && c->classes[ci].ivar_types[iv] != ivsnap[ivoff[ci] + iv]) { ch_other = 1; break; }
+          }
+        }
         { int _w = infer_return_types(c); ch |= _w; ch_other |= _w; }
         /* With reset ivars, the re-clear makes infer_ivar_types report change
            every iteration, so converge on ivar value-stability instead. With
@@ -30083,7 +30378,7 @@ static void an_phase_infer_fixpoint(Compiler *c) {
       }
       /* the bind lags one iteration; take the settled state once more */
       infer_param_types(c);
-      free(prev); free(lprev); free(prevd); free(lprevd);
+      free(prev); free(lprev); free(prevd); free(lprevd); free(ivoff); free(ivrec); free(ivsnap);
     }
     free(recCi); free(recIv); free(recLs); free(recLi); free(recRs); free(nsoff); free(nsbad);
   }
