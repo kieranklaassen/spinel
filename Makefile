@@ -1312,6 +1312,14 @@ reject-test: $(SPINEL)
 	  else grep -q "is not yet shared by reference" "$$tmp/sk.out" || \
 	    { echo "reject-test: FAIL ($$t refused without saying why)"; sed -n 1,5p "$$tmp/sk.out"; ok=0; }; fi; \
 	done; \
+	for t in test/reject/struct_member_string_stored.rb test/reject/struct_member_string_variable.rb \
+	         test/reject/struct_member_string_super.rb test/reject/struct_member_string_class_method_new.rb \
+	         test/reject/data_member_string_with.rb; do \
+	  if $(SPINEL) "$$t" -c --no-line-map -o "$$tmp/sk.c" >"$$tmp/sk.out" 2>&1; then \
+	    echo "reject-test: FAIL ($$t compiled)"; ok=0; \
+	  else grep -q "is not yet shared by reference" "$$tmp/sk.out" || \
+	    { echo "reject-test: FAIL ($$t refused without saying why)"; sed -n 1,5p "$$tmp/sk.out"; ok=0; }; fi; \
+	done; \
 	t=test/reject/string_chained_index_append.rb; \
 	if $(SPINEL) "$$t" -c --no-line-map -o "$$tmp/r.c" >"$$tmp/r.out" 2>&1; then \
 	  echo "reject-test: FAIL (string_chained_index_append compiled)"; ok=0; \

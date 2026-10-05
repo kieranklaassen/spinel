@@ -9797,10 +9797,39 @@ void emit_super_class_new(Compiler *c, int id, Buf *b) {
   buf_printf(b, " default: break; } _t%d; })", rt);
 }
 
+/* A String stored into member `a` of a Struct or Data that is the shared
+   handle (#6179): the program changes the member's String in place through
+   its reader, or stores in the member a String that is a handle already.
+   The slot is an sp_String * and the String comes as the const char * it
+   renders as: the synthesized constructor has no binder to convert it, as
+   the parameter of a class's `initialize` has, so the C did not build
+   (`--check-stores` names the store). A handle made here would be a copy,
+   which a read of the member hands out again as a copy, so the store is
+   refused by name while Strings are not shared by default. `from` is the
+   kind the value renders as, `node` what the refusal names. A silent
+   emittability probe emits as it did: a refusal there would only drop the
+   arm it probes. */
+void refuse_struct_string_store(Compiler *c, ClassInfo *cls, int a, TyKind from, int node) {
+  if (g_unsup_probe || cls->ivar_types[a] != TY_STRBUF || from != TY_STRING) return;
+  const char *kind = cls->is_data ? "Data" : "Struct", *m = cls->ivars[a] + 1;
+  char fix[256], msg[1024];
+  if (cls->is_data) snprintf(fix, sizeof fix, "`obj = obj.with(%s: obj.%s + \"z\")`", m, m);
+  else snprintf(fix, sizeof fix, "`obj.%s += \"z\"`", m);
+  snprintf(msg, sizeof msg,
+           "a String is stored in member `%s` of a %s, and that member holds a shared String (the "
+           "program changes its String in place, or stores in it a String it changes elsewhere): the "
+           "member would hold a copy of this one (a String is not yet shared by reference into a %s "
+           "member). Give the member a new String instead of changing it in place (%s), or store a "
+           "copy of the String changed elsewhere (`s.dup`).",
+           m, kind, kind, fix);
+  unsupported_feature(c, node, msg);
+}
+
 /* The C text of `vnode` as the value of member `a` of a Struct/Data, in the
    member's own slot type: what sp_<S>_new takes for it, before any rooting. */
 static void emit_struct_member_value(Compiler *c, ClassInfo *cls, int a, int vnode, Buf *mv) {
   const NodeTable *nt = c->nt;
+  refuse_struct_string_store(c, cls, a, store_value_kind(c, vnode), vnode);
   /* an empty `[]` member value has no element type of its own and
      would fall back to an IntArray, mismatching the member type that
      another construction fixed (#3359) */
