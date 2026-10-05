@@ -383,6 +383,12 @@ sp_StrArray *sp_re_rpartition(mrb_regexp_pattern *pat, const char *str) {
   sp_StrArray_push(r, after);
   return r;
 }
+/* A Regexp argument read out of a variable: one that holds nil is CRuby's
+   TypeError for the method, where the engine would be handed no pattern. */
+mrb_regexp_pattern *sp_re_arg(mrb_regexp_pattern *pat, const char *msg) {
+  if (!pat) sp_raise_cls("TypeError", msg);
+  return pat;
+}
 sp_bool sp_re_match_p(mrb_regexp_pattern *pat, const char *str) {
   if (!str) return FALSE;
   int64_t slen = (int64_t)sp_str_byte_len(str);
@@ -829,10 +835,13 @@ sp_RbVal sp_re_match_poly(mrb_regexp_pattern *pat, const char *str) {SP_GC_ROOT_
    sp_re_match / sp_re_match_poly). NULL (nil) when the last match failed, the
    name is unknown, or the group did not participate. Used by `/(?<n>..)/ =~ s`
    named-capture local binding (MatchWriteNode). */
+/* A name the pattern has no group for is CRuby's IndexError; the callers
+   ask only once the pattern matched, so a failed match stays nil. */
 const char *sp_re_named_capture(const mrb_regexp_pattern *pat, const char *name) {
   if (!pat || !name || !sp_re_last_str) return NULL;
   int g = re_named_group(pat, name);
-  if (g < 0 || (g * 2) + 1 >= 64) return NULL;
+  if (g < 0) sp_raise_cls("IndexError", sp_sprintf("undefined group name reference: %s", name));
+  if ((g * 2) + 1 >= 64) return NULL;
   int b = sp_re_caps[g * 2], e = sp_re_caps[(g * 2) + 1];
   /* e < b also covers e < 0 once b >= 0; guards against a malformed register
      state yielding a negative len that would cast to a huge size_t. */
@@ -922,6 +931,19 @@ mrb_regexp_pattern *sp_re_union_array(sp_PolyArray *a) {
     joined = (i == 0) ? part : sp_re_alt_join(joined, part);
   }
   return re_compile(joined, (int64_t)sp_str_byte_len(joined), 0);
+}
+/* One turn of `scan { |m| }` over a Regexp held in a variable: the whole
+   match, or the row of groups. A block of one parameter is typed for one of
+   the two, and the pattern may turn out to yield the other. */
+const char *sp_re_scan_whole(sp_RbVal m) {
+  if (m.tag != SP_TAG_STR)
+    sp_raise_cls("NotImplementedError", "String#scan: a Regexp held in a variable yields the rows of its groups only to a block of two or more parameters");
+  return m.v.s;
+}
+sp_PolyArray *sp_re_scan_row(sp_RbVal m) {
+  if (m.tag == SP_TAG_STR)
+    sp_raise_cls("NotImplementedError", "String#scan: a Regexp held in a variable yields its whole matches only to a block typed for them");
+  return (sp_PolyArray *)m.v.p;
 }
 sp_PolyArray *sp_re_scan_poly(mrb_regexp_pattern *pat, const char *str) {
   SP_GC_ROOT_STR(str);

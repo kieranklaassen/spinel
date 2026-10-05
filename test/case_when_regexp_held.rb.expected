@@ -1,0 +1,21 @@
+:hit
+:miss
+:hit
+:miss
+[:hit, "ab", "b"]
+1
+nil
+2
+:hit
+:miss
+hit a
+miss
+:hit
+:miss
+hhh------
+:miss
+:miss
+:miss
+:miss
+:miss
+:miss

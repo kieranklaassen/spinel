@@ -1,0 +1,13 @@
+[["ay", nil], ["ab", nil]]
+[["a", "y"], ["a", nil]]
+[["b", nil], ["b", nil]]
+[]
+[["a", "y", "b"], ["a", nil, "b"]]
+[["b", nil, nil], ["b", nil, nil]]
+[["a", nil, nil], ["a", nil, nil]]
+["b", "z"]
+["b", nil]
+["AY", "AB"]
+2
+4
+TypeError: wrong argument type nil (expected Regexp)

@@ -1,0 +1,9 @@
+hit ay at 1
+2
+nil
+"bxay"
+nil
+"z"
+"y"
+"ab"
+TypeError: wrong argument type nil (expected Regexp)
