@@ -787,6 +787,21 @@ int emit_call_compare_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
        String slot holds nil as NULL and answers the same way. */
     if (emit_scalar_class_test(c, recv, eff_rt, nt_str(nt, argv[0], "name"),
                                sp_streq(name, "instance_of?"), b)) return 1;
+    /* An Array or a Hash slot holds nil as NULL too: nil is a NilClass and
+       is neither, whatever the slot's kind says. Object and its ancestors
+       hold for nil too; a literal is never nil and keeps the constant. */
+    if (yes >= 0 && (ty_is_array(eff_rt) || ty_is_ptr_array(eff_rt) || ty_is_hash(eff_rt)) &&
+        node_may_be_null_nil(c, recv)) {
+      const char *kn = nt_str(nt, argv[0], "name");
+      int nilcls = kn && sp_streq(kn, "NilClass");
+      int univ = kn && is_object_root(kn);
+      if (nilcls || (yes && !univ)) {
+        int tn = ++g_tmp;
+        buf_puts(b, "({ "); emit_ctype(c, eff_rt, b); buf_printf(b, " _t%d = ", tn); emit_expr(c, recv, b);
+        buf_printf(b, "; %s(_t%d == NULL); })", nilcls ? "" : "!", tn);
+        return 1;
+      }
+    }
     if (yes >= 0) { buf_puts(b, "((void)("); emit_expr(c, recv, b); buf_printf(b, "), %d)", yes); return 1; }
   }
 
