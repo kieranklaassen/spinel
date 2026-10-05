@@ -23,7 +23,7 @@ The statement arms wrote the push as one C call, `sp_PolyArray_push(RECEIVER, VA
 - The temp is not rooted when every value is a number, a boolean, nil or a Symbol read from where it is kept: nothing can run between the receiver and its push.
 - A receiver that is a pure read (`a << x`, `@a << x`, `obj.items << x`, `rows[i] << x`) stays where it was and compiles as before.
 
-`test/array_push_chain_value_root.rb` builds 80,000 chains of Strings made in place and counts the wrong ones, then prints four lines of chains whose values read what the earlier links did. On master (ab9b925aa, Linux x86-64, gcc 13) a plain run prints `4` wrong chains and three of the four order lines wrong; level 1 is wrong too (1,862 chains) and level 2 aborts. With this change it prints Ruby's output with gcc and with clang, in a plain run and at levels 1 and 2. With clang, which evaluates left to right, master is already right, so the test fails on master only where the C compiler is gcc. It is not added to `GC_STRESS_TESTS`: the plain run fails without the fix.
+`test/array_push_chain_value_root.rb` builds 80,000 chains of Strings made in place and counts the wrong ones, then prints four lines of chains whose values read what the earlier links did. On master (ab9b925aa, Linux x86-64, gcc 13) a plain run prints `4` wrong chains and three of the four order lines wrong; level 1 is wrong too (1,862 chains) and level 2 aborts. With this change it prints Ruby's output with gcc and with clang, in a plain run and at levels 1 and 2. With clang, which evaluates left to right, master is already right, so the test fails on master only where the C compiler is gcc. It is not added to `GC_STRESS_TESTS`: the plain run fails without the fix. The `.expected` file was written with CRuby 3.3.6 run with `--enable-frozen-string-literal`; CRuby 4.0.7 with the same flag prints it byte for byte.
 
 Measured with both compilers built on ab9b925aa:
 
@@ -44,7 +44,7 @@ Not in this change:
 GATE_LINES
 ```
 
-- [ ] New tests have `.expected` files that match CRuby 4.0 run with `--enable-frozen-string-literal` (the file was written from ruby 3.3.6 with that flag; it is `0` and four Arrays)
+- [x] New tests have `.expected` files that match CRuby 4.0 run with `--enable-frozen-string-literal` (4.0.7)
 - [ ] Values past 2^31 are marked `# spinel: int64` (none)
 - [ ] If optcarrot's generated C changed: callgrind numbers, checksum 59662 (two start-up lines change: 2,376,393,817 before, 2,376,561,024 after, checksum 59662 both times, on ab9b925aa)
 - [ ] Depends on: # (nothing)

@@ -30,7 +30,7 @@ The temp is now rooted, `SP_GC_ROOT(_t1);`, unless the source is a literal, a co
 
 The source is not sent through `sp_str_dup` instead, which roots its argument: that would turn the `""` a nil String-or-nil source reads as into nil. Two programs with a nil source answer the same before and after.
 
-`test/string_replace_fresh_source_root.rb` replaces 300 times through each of seven forms (a concatenation, a join over a block, a method's result, a global receiver, a local two names hold, an instance variable two names hold, an instance variable receiver) and counts the Strings that came out wrong. On master (ab9b925aa, Linux x86-64, gcc and clang) all 2,100 are wrong at level 2; a plain run (200,000 rounds tried) and level 1 are right. With this change it prints 0 at plain, level 1, level 1 with `SPINEL_GC_VERIFY=1` and level 2 with both compilers. The test is added to `GC_STRESS_TESTS`, the only leg that fails without the fix.
+`test/string_replace_fresh_source_root.rb` replaces 300 times through each of seven forms (a concatenation, a join over a block, a method's result, a global receiver, a local two names hold, an instance variable two names hold, an instance variable receiver) and counts the Strings that came out wrong. On master (ab9b925aa, Linux x86-64, gcc and clang) all 2,100 are wrong at level 2; a plain run (200,000 rounds tried) and level 1 are right. With this change it prints 0 at plain, level 1, level 1 with `SPINEL_GC_VERIFY=1` and level 2 with both compilers. The test is added to `GC_STRESS_TESTS`, the only leg that fails without the fix. The `.expected` file was written with CRuby 3.3.6 run with `--enable-frozen-string-literal`; CRuby 4.0.7 with the same flag prints it byte for byte.
 
 Measured with both compilers built on ab9b925aa (the branch merged with it):
 
@@ -45,7 +45,7 @@ Not in this change: `replace` with its value taken (`x = s.replace(...)`) alread
 GATE_LINES
 ```
 
-- [ ] New tests have `.expected` files that match CRuby 4.0 run with `--enable-frozen-string-literal` (the file was written from ruby 3.3.6 with that flag; it is `0` and two Strings)
+- [x] New tests have `.expected` files that match CRuby 4.0 run with `--enable-frozen-string-literal` (4.0.7)
 - [ ] Values past 2^31 are marked `# spinel: int64` (none)
 - [ ] If optcarrot's generated C changed: callgrind numbers, checksum 59662 (it did not change: byte-identical before and after on ab9b925aa)
 - [ ] Depends on: # (nothing)
