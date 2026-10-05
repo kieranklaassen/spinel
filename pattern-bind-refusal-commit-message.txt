@@ -1,0 +1,36 @@
+A pattern's binding onto a String local that is appended to is refused by name
+
+  line = +"zz"
+  t = +""
+  t << "a"
+  case line
+  in String => t
+    t << "!"
+  end
+  p line, t
+
+prints "zz!" twice in CRuby and did not build: "assignment to
+'sp_String *' from incompatible pointer type 'const char *'", a
+const char * written into the local's sp_String * slot.
+
+The binding names the subject itself, the same String and not a copy. A
+plain String subject has no handle to give, and a new handle over its
+text would part the two: the append through t would not show in line.
+So emit_pattern_bind refuses it:
+
+  a String bound by a pattern to a local that is appended to is not yet
+  shared by reference with the pattern's subject
+
+docs/limitations.md has the line, and
+test/reject/pattern_bind_appended_string_local.rb is the program above,
+with its two records in test/collect/refusals.expected.
+
+Against master c6bbdfbc over 60 programs (`in String => t`, a bare `in
+t`, `=> t`, with a guard, an alternative, an else arm, in a method): the
+37 that did not build through this write are refused by name, and the 19
+that were right print the same. Not touched: two that bind an element of
+an Array pattern (`in [*, t]`) still do not build, and two that bind
+inside an Array or a Hash pattern hold a copy, on master as here.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+

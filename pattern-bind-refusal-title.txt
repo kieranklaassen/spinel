@@ -1,0 +1,1 @@
+A pattern's binding onto a String local that is appended to is refused by name
