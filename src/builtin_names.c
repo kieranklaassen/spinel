@@ -2,10 +2,9 @@
    Each family is spelled once here; the order is the order its compares run
    in, the one most of the replaced chains used. */
 #include <stddef.h>
+#include <string.h>
 #include "types.h"
-#include <stddef.h>
 #include "builtin_names.h"
-#include <stddef.h>
 
 int is_zip_name(const char *n) {
   return sp_streq(n, "zip");
@@ -45,6 +44,17 @@ int is_object_root(const char *n) {
 
 int is_send_family(const char *n) {
   return sp_streq(n, "send") || sp_streq(n, "__send__") || sp_streq(n, "public_send");
+}
+
+/* A call that can run code the analysis does not see, or capture a String:
+   send and its siblings, call, new, lambda/proc, freeze, eval, and the
+   instance_* / class_* / module_* / *method* reflection families. */
+int is_opaque_reaching_call(const char *n) {
+  return is_send_family(n) || sp_streq(n, "call") || sp_streq(n, "new") ||
+         sp_streq(n, "lambda") || sp_streq(n, "proc") || sp_streq(n, "freeze") ||
+         sp_streq(n, "eval") || strncmp(n, "instance_", 9) == 0 ||
+         strncmp(n, "class_", 6) == 0 || strncmp(n, "module_", 7) == 0 ||
+         strstr(n, "method") != NULL;
 }
 
 int is_name_reader(const char *n) {

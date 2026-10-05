@@ -507,7 +507,7 @@ int emit_float_bigint_cmp(Compiler *c, int recv, int arg, const char *op, Buf *b
    the plain C comparison, which is exact then: an Integer literal converts
    without rounding, and against a Float literal below 2^53 a rounded
    Integer is already past it. */
-static int int_flt_lit_exact(Compiler *c, int id) {
+int int_flt_lit_exact(Compiler *c, int id) {
   if (nt_kind(c->nt, id) == NK_IntegerNode)
     return !nt_str(c->nt, id, "bigval") && llabs(nt_int(c->nt, id, "value", 0)) <= (1LL << 53);
   if (nt_kind(c->nt, id) == NK_FloatNode) {
@@ -11968,6 +11968,8 @@ static int emit_case_eq_call(Compiler *c, int id, Buf *b) {
     if (fr && fr != 5 && fr != 6 && fr != 7 && fa && fa != 5 && fa != 6 && fa != 7) {
       if (fr == fa) {
         if (fr == 2) emit_str_eq_ordered(c, recv, argv[0], 1, b);
+        /* an Integer against a Float is equal exactly, as == is (#7505) */
+        else if (emit_int_float_cmp(c, recv, argv[0], "==", b)) {}
         else { buf_puts(b, "("); emit_expr(c, recv, b); buf_puts(b, " == "); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
       }
       else { buf_puts(b, "(("); emit_expr(c, recv, b); buf_puts(b, "), ("); emit_expr(c, argv[0], b); buf_puts(b, "), 0)"); }
@@ -15382,7 +15384,10 @@ static int emit_poly_arity_guard(Compiler *c, int id, Buf *b) {
    refuses it (NotImplementedError) on text where that answer differs from
    CRuby's (non-ASCII, or an i or I under :turkic). A receiver that is not a
    plain read is evaluated into a temp first, as CRuby evaluates it before
-   the method checks its options. */
+   the method checks its options. A block that breaks is wrapped first
+   (emit_brk_wrapped_call) and the check runs inside the wrapper: the
+   wrapper hoists the call it re-enters into g_pre, ahead of the temp this
+   check would declare around it. */
 static int case_opts_valid_lits(Compiler *c, const int *av, int argc, int down) {
   const char *a[2] = { NULL, NULL };
   if (argc > 2) return 0;
@@ -15398,7 +15403,7 @@ static int case_opts_valid_lits(Compiler *c, const int *av, int argc, int down) 
 static int g_case_opts_node = -1;
 static int emit_case_opts_guard(Compiler *c, int id, Buf *b) {
   const NodeTable *nt = c->nt;
-  if (g_case_opts_node == id) return 0;
+  if (g_case_opts_node == id || (id != g_brk_skip_id && call_breaks(c, id))) return 0;
   const char *name = nt_str(nt, id, "name");
   int recv = nt_ref(nt, id, "receiver");
   if (!name || recv < 0) return 0;
