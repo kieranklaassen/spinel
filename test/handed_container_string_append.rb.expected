@@ -1,0 +1,40 @@
+["a", "syyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"]
+["a", "sy"]
+["a", "sy"]
+["sy", "a"]
+["sy"]
+["a", "sy", "tz"]
+[[:a, "a"], [:k, "syyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"]]
+[["a", "a"], ["k", "sy"]]
+[[:a, "a"], [:k, "sy"]]
+["a", "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr"]
+["a", "iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiis"]
+["a", "S"]
+["a", "syyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"]
+true
+["a!", "s!"]
+["a", "syyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyz"]
+"syyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyz"
+true
+["a", "szzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzy"]
+true
+["x", "y"]
+["w", "k!y"]
+["w", "xmore"]
+["a", "syyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"]
+38
+"n6y"
+["a", "syyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"]
+["a", "sy"]
+["a", "syyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"]
+["a", "sy"]
+["a", "syyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"]
+["ay", "n0y", "n1y", "n2y"]
+["a", 1, "sy"]
+FrozenError
+["a", "lit"]
+[[:j, "ayyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"], [:x, "ayyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"]]
+["a", 1, "syyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"]
+["a", 1, "syyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy", "t!"]
+["a", 1, "syyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"]
+["a", 1, "syyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy!"]
