@@ -725,7 +725,14 @@ Not yet shared:
   curried proc, a method `define_method` defines, `new` or `raise`, a
   String held by a block parameter, by a variable a block or proc captures,
   or by a global or class variable, and through a proc, a `Method` or a
-  class value's `new`, one held by an instance variable.
+  class value's `new`, one held by an instance variable;
+- into a member of a `Struct` or `Data` that holds a shared String (the
+  program changes the member's String in place through its reader,
+  `c.x << "z"`, `c.x.upcase!`, or stores in the member a String it changes
+  elsewhere), a String given to `new`, `S[...]`, `super` or `Data#with`,
+  unless it is a keyword argument that is the shared handle already (give
+  the member a new String instead, `c.x += "z"`, `d = d.with(x: d.x + "z")`,
+  or store a copy of the String changed elsewhere, `s.dup`).
 
 A String is shared as well through a rest a method forwards (`def w(*a) =
 m(*a)`, `def w(*) = m(*)`, `def w(...) = m(...)`, `def m(*) = super`) and

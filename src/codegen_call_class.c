@@ -2910,6 +2910,7 @@ int emit_call_class_method_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
             }
             else if (kw_ht >= 0) emit_struct_kw_member(c, ncls, a, kw_ht, b);
             else if (vnode >= 0) {
+              refuse_struct_string_store(c, ncls, a, comp_ntype(c, vnode), vnode);
               if (ncls->ivar_types[a] == TY_POLY && repr_of(c, vnode).kind != RK_BOXED) emit_boxed(c, vnode, b);
               /* and the reverse: a poly value into a concrete member slot
                  (#4348), the same coercion the receiver path does */

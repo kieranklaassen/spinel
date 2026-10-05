@@ -8393,6 +8393,7 @@ static int emit_struct_recv_call(Compiler *c, int id, Buf *b, const NodeTable *n
       if (val >= 0) {
         TyKind mt = sc->ivar_types[i];
         TyKind vt = comp_ntype(c, val);
+        refuse_struct_string_store(c, sc, i, vt, val);
         if (mt == TY_POLY && vt != TY_POLY) {
           emit_boxed(c, val, b);  /* box a concrete value into a poly member */
         }
