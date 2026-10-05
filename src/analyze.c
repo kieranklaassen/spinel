@@ -16469,8 +16469,27 @@ static int an_param_appended_deep(Compiler *c, int mi, int j) {
    element of itself (`@m[to] = @m[from]`) has that read among its stores,
    and demanding a poly store starts a fresh demand of it, depth and all.
    That recursed until the stack ran out. A read whose walk is already under
-   way answers 0 -- the walk on the stack covers it. */
+   way answers 0 -- the walk on the stack covers it.
+
+   So does any other read of the container that walk is of. The walk is of
+   the stores into the container a local or an instance variable holds,
+   whichever element is read, so `h[:b] = h[:a]; h[:c] = h[:b]` met a second
+   read of h inside the walk the first began and walked h's stores once
+   more for it, and again for each read after that: n such stores cost n!
+   walks, and nine of them were more than a minute of compiling. */
 static int *sb_elem_active, sb_elem_nactive, sb_elem_cap;
+static int sb_elem_same_walk(Compiler *c, int a, int b) {
+  const NodeTable *nt = c->nt;
+  if (a == b) return 1;
+  int ra = nt_ref(nt, a, "receiver"), rb = nt_ref(nt, b, "receiver");
+  if (ra < 0 || rb < 0 || nt_kind(nt, ra) != nt_kind(nt, rb)) return 0;
+  NodeKind k = nt_kind(nt, ra);
+  if (k != NK_LocalVariableReadNode && k != NK_InstanceVariableReadNode) return 0;
+  const char *na = nt_str(nt, ra, "name"), *nb = nt_str(nt, rb, "name");
+  if (!na || !nb || !sp_streq(na, nb)) return 0;
+  return k == NK_LocalVariableReadNode ? comp_scope_of(c, ra) == comp_scope_of(c, rb)
+                                       : an_ivar_owner(c, ra) == an_ivar_owner(c, rb);
+}
 static int strbuf_demand_elem_arg(Compiler *c, int an) {
   const NodeTable *nt = c->nt;
   if (an < 0 || nt_kind(nt, an) != NK_CallNode || !container_elem_read_p(nt, an)) return -1;
@@ -16496,7 +16515,7 @@ static int strbuf_demand_elem_arg(Compiler *c, int an) {
   }
   else if (!container_elem_read_p(nt, rr)) return -1;
   for (int k = 0; k < sb_elem_nactive; k++)
-    if (sb_elem_active[k] == an) return 0;
+    if (sb_elem_same_walk(c, sb_elem_active[k], an)) return 0;
   if (sb_elem_nactive == sb_elem_cap) {
     int ncap = sb_elem_cap ? sb_elem_cap * 2 : 16;
     int *na = realloc(sb_elem_active, (size_t)ncap * sizeof(int));
