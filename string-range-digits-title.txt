@@ -1,0 +1,1 @@
+Two all-digit ends of a String Range walk as numbers at any width
