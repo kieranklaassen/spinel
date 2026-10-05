@@ -24,12 +24,26 @@ class Pair
   def self.late(s)
     return s, (s = "bb"; new("x", "t").x)
   end
+  # Two objects made in the tail of a sequence leave it where it stands too.
+  def self.late_two(s)
+    return s, (s = "bb"; new("x", "2").x + new("y", "3").y)
+  end
+  def self.late_text(s) = "#{s}|#{(s = "bb"; new("x", "2").x + new("y", "3").y)}"
 end
 
 class Named
   attr_reader :x
   def initialize(x:) = @x = x
   def is?(odd) = @x == (odd ? "s" : "q")
+end
+
+class Tail
+  attr_reader :x, :y
+  def initialize(x, y = "r")
+    @x = x
+    @y = y
+  end
+  def is?(odd) = @x == (odd ? "s" : "q") && @y == "r"
 end
 
 class Maker
@@ -56,6 +70,9 @@ d.x << "z"
 d.y << "z"
 e = Named.new(x: +"w")
 e.x << "z"
+g = Tail.new(+"w", +"v")
+g.x << "z"
+g.y << "z"
 
 # Each object is looked at one construction later, when a String it lost
 # has been handed out again.
@@ -72,6 +89,10 @@ end
 
 qr = Maker.new("q", "r")
 st = Maker.new("s", "t")
+ra = ["r"]
+ta = ["t"]
+qa = ["q"]
+sa = ["s"]
 
 p wrong(N) { |odd| odd ? Pair.new("s", "t") : Pair.new("q", "r") }   # literals
 p wrong(N) { |odd| odd ? Named.new(x: "s") : Named.new(x: "q") }     # a literal by keyword
@@ -80,5 +101,8 @@ p wrong(N) { |odd| odd ? Pair.of("s", "t") : Pair.of("q", "r") }     # parameter
 p wrong(N) { |odd| odd ? pair_of("s", "t") : pair_of("q", "r") }     # parameters of a method
 p wrong(N) { |odd| odd ? st.pair : qr.pair }                         # instance variables
 p wrong(N) { |odd| odd ? "s".with("t") : "q".with("r") }             # self
-p [d.x, d.y, e.x]
+p wrong(N) { |odd| odd ? Pair.new("s", *ta) : Pair.new("q", *ra) }   # an Array's element, splatted
+p wrong(N) { |odd| odd ? Tail.new(*sa) : Tail.new(*qa) }             # a splat that leaves a default to fill
+p [d.x, d.y, e.x, g.y]
 p Pair.sum("a"), Pair.text("a"), Pair.two("a"), Pair.late("a")
+p Pair.late_two("a"), Pair.late_text("a")

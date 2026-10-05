@@ -7429,19 +7429,55 @@ void emit_rooted_operand(Compiler *c, TyKind pt, int provided, const char *expr,
    (arg_wants_root answering 2). Only the temp's declaration and its root go
    into g_pre, as emit_rest_pack_kwh's array does; `expr` is assigned to it
    in place, so a read in it sees every assignment the statement makes ahead
-   of the argument. The bytes written are counted for the parenthesized
-   sequence that is capturing g_pre (g_held_pre): a prelude of nothing but
-   these lines runs none of its tail's code. */
+   of the argument. A prelude of nothing but these lines runs none of its
+   operand's code (prelude_is_held_decls). */
 void emit_held_operand(Compiler *c, TyKind pt, const char *expr, Buf *out) {
   int t = ++g_tmp;
-  size_t at = g_pre->len;
   emit_indent(g_pre, g_indent);
   emit_ctype(c, pt, g_pre);
   buf_printf(g_pre, " _t%d = NULL;\n", t);
   emit_indent(g_pre, g_indent);
   buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", t);
-  if (g_pre == g_held_pre) g_held_len += g_pre->len - at;
   buf_printf(out, "({ _t%d = %s; _t%d; })", t, expr, t);
+}
+
+/* `_t<digits>` then `tail`, and nothing more. */
+static int held_line_tmp(const char *q, size_t n, const char *tail) {
+  size_t k = 2, tl = strlen(tail);
+  if (n < 3 || q[0] != '_' || q[1] != 't' || !isdigit((unsigned char)q[2])) return 0;
+  while (k < n && isdigit((unsigned char)q[k])) k++;
+  return n - k == tl && !strncmp(q + k, tail, tl);
+}
+
+/* Is the prelude `p` nothing but temps declared NULL and their roots, the
+   lines emit_held_operand writes? Read off the text, since an emitter that
+   catches an operand's prelude in a buffer of its own passes the lines on
+   as bytes (emit_operands_in_order). Such a prelude assigns no variable and
+   calls nothing, so it may run ahead of anything. */
+int prelude_is_held_decls(const char *p) {
+  int lines = 0;
+  while (p && *p) {
+    const char *nl = strchr(p, '\n');
+    size_t n = nl ? (size_t)(nl - p) : strlen(p);
+    const char *q = p;
+    p = nl ? nl + 1 : p + n;
+    while (n && *q == ' ') { q++; n--; }
+    if (!n) continue;
+    if (n > 11 && !strncmp(q, "SP_GC_ROOT(", 11)) {
+      if (!held_line_tmp(q + 11, n - 11, ");")) return 0;
+    }
+    else {
+      /* `<type> _tN = NULL;`: the type is names, spaces and stars */
+      if (n < 10 || strncmp(q + n - 8, " = NULL;", 8)) return 0;
+      size_t e = n - 8, k = e;
+      while (k && q[k - 1] != ' ') k--;
+      if (k < 2 || !held_line_tmp(q + k, e - k, "")) return 0;
+      for (size_t i = 0; i < k; i++)
+        if (!(isalnum((unsigned char)q[i]) || q[i] == '_' || q[i] == ' ' || q[i] == '*')) return 0;
+    }
+    lines++;
+  }
+  return lines > 0;
 }
 
 /* Like emit_arg_or_default, but hoists a pointer-backed / poly argument into a
@@ -9901,6 +9937,10 @@ static void emit_elem_param(Compiler *c, Scope *m, int i, int off, int tmp, TyKi
     return;
   }
   TyKind set = ty_array_elem(at);
+  /* a String element into a shared-handle parameter: a handle of its own, as
+     any value that is not a caller's variable gets, and held as a bare read's
+     is (arg_wants_root answering 2), with the default it may fall back to */
+  int handle = sp && sp->type == TY_STRBUF && sp->str_shared && set == TY_STRING;
   Buf eb; memset(&eb, 0, sizeof eb);
   if (sp && sp->type == TY_POLY && set != TY_POLY && set != TY_UNKNOWN) {
     /* a scalar splat element into a poly-widened param: box it */
@@ -9908,9 +9948,7 @@ static void emit_elem_param(Compiler *c, Scope *m, int i, int off, int tmp, TyKi
     emit_array_elem_at(at, tmp, off, &raw);
     emit_boxed_text(c, set, raw.p ? raw.p : "0", &eb); free(raw.p);
   }
-  else if (sp && sp->type == TY_STRBUF && sp->str_shared && set == TY_STRING) {
-    /* a String element into a shared-handle parameter: a handle of its own,
-       as any value that is not a caller's variable gets */
+  else if (handle) {
     Buf raw; memset(&raw, 0, sizeof raw);
     emit_array_elem_at(at, tmp, off, &raw);
     buf_printf(&eb, "sp_String_new_shared(%s)", raw.p ? raw.p : "NULL"); free(raw.p);
@@ -9939,10 +9977,12 @@ static void emit_elem_param(Compiler *c, Scope *m, int i, int off, int tmp, TyKi
     Buf db; memset(&db, 0, sizeof db);
     emit_arg_or_default(c, m, i, -1, &db);
     TyKind pt = sp ? sp->type : TY_INT;
-    buf_printf(out, "(%d < (_t%d ? _t%d->len : 0) ? %s : %s)", off, tmp, tmp,
+    Buf cb; memset(&cb, 0, sizeof cb);
+    buf_printf(&cb, "(%d < (_t%d ? _t%d->len : 0) ? %s : %s)", off, tmp, tmp,
                eb.p ? eb.p : "", db.p ? db.p : default_value_from_compiler(c, pt));
-    free(db.p);
+    free(db.p); free(eb.p); eb = cb;
   }
+  if (handle && eb.p) emit_held_operand(c, TY_STRBUF, eb.p, out);
   else buf_puts(out, eb.p ? eb.p : "");
   free(eb.p);
 }

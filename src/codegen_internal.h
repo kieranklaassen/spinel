@@ -98,10 +98,6 @@ static inline const char *isa_const_qualname(const NodeTable *nt, int arg, char 
    setup lines at g_indent; the statement wrapper flushes g_pre before the
    line. g_tmp hands out unique temp ids. */
 extern Buf *g_pre;
-/* The prelude a parenthesized sequence is capturing for its tail, and how
-   many of its bytes only declare and root a held temp (emit_held_operand). */
-extern Buf *g_held_pre;
-extern size_t g_held_len;
 extern int  g_indent;
 extern int  g_tmp;
 
@@ -1227,6 +1223,7 @@ int declare_default_locals(Compiler *c, Scope *m, int dnode);
 int arg_wants_root(Compiler *c, TyKind pt, int provided);
 void emit_rooted_operand(Compiler *c, TyKind pt, int provided, const char *expr, Buf *out);
 void emit_held_operand(Compiler *c, TyKind pt, const char *expr, Buf *out);
+int prelude_is_held_decls(const char *p);
 int arg_slot_for_param(Compiler *c, Scope *m, int idx, int argc);
 /* 1 when a parameter default reads an earlier parameter: it must be evaluated
    with that parameter bound (see emit_args_filled). */
