@@ -896,7 +896,7 @@ static int inline_target_same(const InlineTarget *a, const InlineTarget *b) {
          a->cm_self_id == b->cm_self_id && a->implicit_self == b->implicit_self;
 }
 
-int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
+static int inline_call_spliced(Compiler *c, int id, Buf *b, int indent, int as_expr, int self_rooted) {
   if (g_plan_check) ucall_emitted(id);
   const NodeTable *nt = c->nt;
   const char *name = nt_str(nt, id, "name");
@@ -1239,8 +1239,10 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
        A value-type receiver is a struct copy that lives in the temp itself
        rather than behind it, so it must not be rooted; emit_gc_root_tmp
        declines it on its own account, and the test here is only so that the
-       separating space is not emitted when it does. */
-    if (!self_is_val) { buf_puts(b, " "); emit_gc_root_tmp(c, ty_object(recv_class), st, b); }
+       separating space is not emitted when it does.
+       A `&.` receiver arrives in a temp its nil test has rooted already
+       (self_rooted, see emit_inline_call_x): one root holds it for both. */
+    if (!self_is_val && !self_rooted) { buf_puts(b, " "); emit_gc_root_tmp(c, ty_object(recv_class), st, b); }
     buf_puts(b, "\n");
     snprintf(selfbuf, sizeof selfbuf, "_t%d", st);
     recv_self_deref = self_is_val ? "." : "->";
@@ -1417,6 +1419,73 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
   g_lowered_blk_name = saved_lbn;
   if (g_inline_depth > 0) g_inline_depth--;
   return 1;
+}
+
+/* Root the temp a `&.` nil test holds its receiver in. */
+void emit_sn_tmp_root(Compiler *c, TyKind t, int tsn, Buf *b) {
+  char sn[24]; snprintf(sn, sizeof sn, "_sn%d", tsn);
+  emit_gc_root_var(c, t, sn, b);
+}
+
+/* The splice of a yielding method at its call. A `&.` call whose receiver is
+   an object pointer splices under a nil test: the splice binds self to the
+   receiver and never looks at the operator, so `o&.each_n(lg(2)) { }` on a
+   nil o ran the arguments, the body and the block, and a body that reads an
+   instance variable read it through NULL. A nil receiver answers nil and
+   runs none of them. What the splice hoists stays under the test with it. */
+int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
+  const NodeTable *nt = c->nt;
+  const char *op = nt_str(nt, id, "call_operator");
+  int recv = nt_ref(nt, id, "receiver");
+  TyKind rrt = recv >= 0 && op && sp_streq(op, "&.") ? comp_ntype(c, recv) : TY_UNKNOWN;
+  if (!ty_is_object(rrt) || comp_ty_value_obj(c, rrt) || g_inline_recv_expr)
+    return inline_call_spliced(c, id, b, indent, as_expr, 0);
+  int tsn = ++g_tmp;
+  int slot = view_bind(recv, "_sn%d", tsn);
+  Buf sb; memset(&sb, 0, sizeof sb);
+  Buf spre; memset(&spre, 0, sizeof spre);
+  Buf *sv_pre = g_pre; g_pre = &spre;
+  int ok = inline_call_spliced(c, id, &sb, indent + 2, as_expr, 1);
+  g_pre = sv_pre;
+  view_unbind(slot);
+  if (ok) {
+    Buf rb = expr_buf(c, recv);
+    if (as_expr) buf_puts(b, "({\n");
+    else { emit_indent(b, indent); buf_puts(b, "{\n"); }
+    emit_indent(b, indent + 1);
+    buf_printf(b, "sp_%s *_sn%d = %s;\n", c->classes[ty_object_class(rrt)].c_name, tsn,
+               rb.p ? rb.p : "NULL");
+    if (as_expr) {
+      TyKind rt = comp_ntype(c, id);
+      const char *nv = nil_value(rt);
+      emit_indent(b, indent + 1); emit_ctype(c, rt, b);
+      buf_printf(b, " _snr%d = %s;\n", tsn, nv ? nv : default_value_from_compiler(c, rt));
+    }
+    emit_indent(b, indent + 1); buf_printf(b, "if (_sn%d != NULL) {\n", tsn);
+    /* The root the splice gives self, taken here instead: what the arguments
+       hoisted runs ahead of the splice, and a receiver nothing else holds
+       (`K.new(v)&.tag([K.new(a), ...]) { }`) was collected while it ran --
+       the method then ran on the object that took its place. */
+    emit_indent(b, indent + 2); emit_sn_tmp_root(c, rrt, tsn, b); buf_puts(b, "\n");
+    if (spre.p) buf_puts(b, spre.p);
+    if (as_expr) {
+      emit_indent(b, indent + 2);
+      buf_printf(b, "_snr%d = %s;\n", tsn, sb.p ? sb.p : "0");
+    }
+    else if (sb.p) buf_puts(b, sb.p);
+    emit_indent(b, indent + 1); buf_puts(b, "}\n");
+    if (as_expr) {
+      emit_indent(b, indent + 1); buf_printf(b, "_snr%d;\n", tsn);
+      emit_indent(b, indent); buf_puts(b, "})");
+    }
+    else { emit_indent(b, indent); buf_puts(b, "}\n"); }
+    free(rb.p);
+  }
+  /* not spliced, nothing written: the temp's number goes back, so such a
+     call numbers its own temps as it did */
+  else g_tmp--;
+  free(sb.p); free(spre.p);
+  return ok;
 }
 
 int emit_inline_call(Compiler *c, int id, Buf *b, int indent) {
