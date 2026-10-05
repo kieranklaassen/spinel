@@ -1,0 +1,33 @@
+:miss
+:miss
+nil
+true
+unset
+:none
+[]
+nil
+nil
+a or nil
+:a
+false
+set
+:a
+[a]
+a
+other
+a or nil
+nil
+:b
+1 nil
+2 :c
+[nil, :a]
+[true, false]
+nil
+sym
+none
+first
+first
+sym
+none
+:hit
+:miss

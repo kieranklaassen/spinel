@@ -1604,11 +1604,12 @@ static void emit_block_arg_coerced(Compiler *c, int node, TyKind ot, Buf *b) {
     empty_lit = empty_lit == 0;
   }
   if (ot == TY_POLY && ((at != TY_POLY && at != TY_UNKNOWN) || empty_lit)) emit_boxed(c, node, b);
-  /* a literal nil into an Integer or a Float parameter (one
+  /* a literal nil into an Integer, a Float or a Symbol parameter (one
      block_settle_types kept nullable, bs_join_val) is the slot's own nil,
-     not the 0 it emits as */
+     not the 0 it emits as (for a Symbol, the program's first Symbol) */
   else if (nk == NK_NilNode && ot == TY_INT) buf_puts(b, "SP_INT_NIL");
   else if (nk == NK_NilNode && ot == TY_FLOAT) buf_puts(b, "sp_float_nil()");
+  else if (nk == NK_NilNode && ot == TY_SYMBOL) buf_puts(b, "((sp_sym)-1)");
   /* and so is a boxed nil: under --int-overflow=promote an Integer slot
      that can hold nil (an ivar, a local, a method's parameter) is widened
      to the box, while a block parameter it feeds keeps its Integer type,

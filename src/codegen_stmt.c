@@ -5549,6 +5549,14 @@ static int emit_when_typed_test(Compiler *c, int cond, int t, TyKind pt, Buf *b)
     else if (pt == TY_FLOAT) buf_printf(b, "sp_float_is_nil(_t%d)", t);
     else buf_printf(b, "(_t%d == NULL)", t);
   }
+  /* a Symbol's nil is its own sentinel and no Symbol's id: compared by id,
+     nil read as 0 and matched the first Symbol interned. A constant that
+     holds nil is the same arm. */
+  else if (pt == TY_SYMBOL &&
+           (nt_kind(c->nt, cond) == NK_NilNode ||
+            (comp_ntype(c, cond) == TY_NIL &&
+             (nt_kind(c->nt, cond) == NK_ConstantReadNode || nt_kind(c->nt, cond) == NK_ConstantPathNode))))
+    buf_printf(b, "(_t%d == (sp_sym)-1)", t);
   else if (reidx >= 0 && pt == TY_STRING) {
     buf_printf(b, "(sp_re_match(sp_re_pat_%d, _t%d) >= 0)", reidx, t);
   }
