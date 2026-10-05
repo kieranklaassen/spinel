@@ -71,3 +71,60 @@ p q
 s = +"ab"
 p s.concat(s, s)
 p s
+
+# a String among the arguments is read when the call runs, after every
+# argument: what a later argument appends to it is there
+class Keep
+  attr_reader :buf
+
+  def initialize(i)
+    @buf = +"k#{i}"
+    @two = +"w#{i}"
+  end
+
+  def two = @two
+  def grow = (@buf << "zzz"; "a")
+  def swap = (@buf = +"new"; "a")
+  def go(s) = s.concat(@buf, grow)
+  def went(s) = s.concat(@buf, swap)
+  def both(s) = s.concat(@buf, @two)
+  def front(s) = s.prepend(@two, @buf)
+end
+
+def late(s, t) = s.concat(t, (t << "z"; "a"))
+
+t = +"t"
+p (+"s").concat(t, (t << "z"; "a"))
+p late(+"s", +"t")
+p (+"s").concat(t, "m#{1}", (t << "y"; "b"))
+p (+"s").prepend(t, (t << "x"; "c"))
+p (+"s").concat(t, (t.upcase!; "d#{1}"))
+p (+"s").concat(t, (t.replace("vv"); "e#{2}"))
+p (+"s").prepend(t, (t.concat("x", "y#{3}"); "f"))
+u = +"u"
+v = u
+p (+"s").concat(u, (v << "z" * 300; "a")).size
+p (+"s").prepend(u, (v << "y"; "a")).size
+r = +"r"
+r2 = r
+p r.prepend(u, (v << "x"; "a")).size, r2.size
+k = Keep.new(0)
+k.buf << "!"
+k.two << "?"
+p k.go(+"s"), k.buf
+# and one a later argument assigns is the String read where it stood
+p (+"s").concat(t, (t = +"n"; "g")), t
+p k.went(+"s"), k.buf
+
+# two reads of Strings two names hold: each read makes a copy
+bad = 0
+300.times do |i|
+  k = Keep.new(i)
+  k.buf << "!"
+  k.two << "?"
+  x = k.both(+"s#{i}")
+  bad += 1 unless x == "s#{i}k#{i}!w#{i}?"
+  y = k.front(+"t#{i}")
+  bad += 1 unless y == "w#{i}?k#{i}!t#{i}"
+end
+p bad

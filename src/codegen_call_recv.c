@@ -187,8 +187,46 @@ int str_args_plain(Compiler *c, const int *argv, int argc) {
     const char *ty = nt_type(c->nt, argv[j]);
     if (ty && sp_streq(ty, "StringNode")) continue;
     if (comp_ntype(c, argv[j]) != TY_STRING || !subtree_is_pure_read(c, argv[j])) return 0;
+    /* a String two names hold reads out as a copy: that read makes something */
+    char sref[192];
+    if (strbuf_slot_ref(c, argv[j], sref, sizeof sref)) return 0;
   }
   return 1;
+}
+
+/* How is argument j of a concat or prepend read when an argument after it
+   can change what it reads? Ruby hands over the String itself and reads its
+   text when the call runs, after every argument is evaluated:
+   `s.concat(t, (t << "z"; "a"))` appends "tz".
+   2: a read of a String two names hold, a local or an instance variable,
+      while an argument after it runs code. The handle is taken where the
+      argument stands and its text is read in the join: right whether the
+      later argument appends to the String or assigns the variable.
+   1: a plain read of a String local that an argument after it names, or may
+      reach through a proc, and none assigns (read_rebound_by). It is read in
+      the join, where an ordinary call leaves it; an append rebinds the local.
+   0: read where it stands. */
+static int str_arg_read_late(Compiler *c, const int *argv, int argc, int j) {
+  const NodeTable *nt = c->nt;
+  NodeKind k = nt_kind(nt, argv[j]);
+  char sref[192];
+  if ((k == NK_LocalVariableReadNode || k == NK_InstanceVariableReadNode) &&
+      strbuf_slot_ref(c, argv[j], sref, sizeof sref)) {
+    for (int a = j + 1; a < argc; a++)
+      if (subtree_has_side_effect(c, argv[a])) return 2;
+    return 0;
+  }
+  if (k != NK_LocalVariableReadNode || comp_ntype(c, argv[j]) != TY_STRING) return 0;
+  const char *nm = nt_str(nt, argv[j], "name");
+  if (!nm) return 0;
+  LocalVar *lv = scope_local(comp_scope_of(c, argv[j]), nm);
+  int late = 0;
+  for (int a = j + 1; a < argc; a++) {
+    if (read_rebound_by(c, argv[j], argv[a])) return 0;
+    if (subtree_reads_local(nt, argv[a], nm) || (lv && lv->is_cell && subtree_may_run_proc(c, argv[a])))
+      late = 1;
+  }
+  return late;
 }
 
 /* Any other arguments are joined one statement at a time into the rooted
@@ -196,13 +234,34 @@ int str_args_plain(Compiler *c, const int *argv, int argc) {
    held by nothing while the next was built, and C does not say which of the
    two is built first. `seed` is what the first argument is appended to (the
    receiver's C string, for concat, where an Integer is a codepoint) or
-   NULL. */
+   NULL. When an argument is read late (str_arg_read_late), the others run
+   first, each into a rooted temp of its own, and the join reads those. */
 void emit_str_args_joined(Compiler *c, const int *argv, int argc, int acc, const char *seed, Buf *b) {
+  int held[32], late[32], nlate = 0;
+  for (int j = 0; j < argc && argc <= 32; j++) nlate += (late[j] = str_arg_read_late(c, argv, argc, j)) != 0;
+  for (int j = 0; nlate && j < argc; j++) {
+    const char *ty = nt_type(c->nt, argv[j]);
+    held[j] = 0;
+    if ((ty && sp_streq(ty, "StringNode")) || late[j] == 1) continue;
+    held[j] = ++g_tmp;
+    if (late[j] == 2) {
+      char sref[192];
+      strbuf_slot_ref(c, argv[j], sref, sizeof sref);
+      buf_printf(b, "sp_String *_t%d = %s; SP_GC_ROOT(_t%d); ", held[j], sref, held[j]);
+      continue;
+    }
+    buf_printf(b, "const char *_t%d = ", held[j]);
+    if (seed) emit_str_append_arg(c, argv[j], seed, b);
+    else emit_str_expr(c, argv[j], b);
+    buf_printf(b, "; SP_GC_ROOT_STR(_t%d); ", held[j]);
+  }
   buf_printf(b, "const char *_t%d = ", acc);
   for (int j = 0; j < argc; j++) {
     if (j) buf_printf(b, " _t%d = sp_str_concat(_t%d, ", acc, acc);
     else if (seed) buf_printf(b, "sp_str_concat(%s, ", seed);
-    if (seed) emit_str_append_arg(c, argv[j], seed, b);
+    if (nlate && held[j] && late[j] == 2) buf_printf(b, "(_t%d ? sp_str_concat(sp_String_cstr(_t%d), \"\") : NULL)", held[j], held[j]);
+    else if (nlate && held[j]) buf_printf(b, "_t%d", held[j]);
+    else if (seed) emit_str_append_arg(c, argv[j], seed, b);
     else emit_str_expr(c, argv[j], b);
     buf_puts(b, (j || seed) ? ");" : ";");
     if (!j) buf_printf(b, " SP_GC_ROOT_STR(_t%d);", acc);
