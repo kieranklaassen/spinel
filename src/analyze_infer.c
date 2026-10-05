@@ -1186,6 +1186,19 @@ static int const_array_elems_all_int_array_impl(Compiler *c, const char *cname) 
   for (int id = 0; id < nt->count; id++) {
     const char *ty = nt_type(nt, id);
     if (!ty) continue;
+    /* `CNAME[i] ||= v` and `CNAME[i] &&= v` store v as `CNAME[i] = v` does */
+    if (sp_streq(ty, "IndexOrWriteNode") || sp_streq(ty, "IndexAndWriteNode")) {
+      int recv = nt_ref(nt, id, "receiver");
+      if (recv < 0 || nt_kind(nt, recv) != NK_ConstantReadNode) continue;
+      const char *rn = nt_str(nt, recv, "name");
+      if (!rn || !sp_streq(rn, cname)) continue;
+      int val = nt_ref(nt, id, "value");
+      TyKind vt = val >= 0 ? comp_ntype(c, val) : TY_UNKNOWN;
+      if (vt == TY_INT_ARRAY) { saw = 1; continue; }
+      if (val >= 0 && an_row_open_empty(c, val)) return 0;
+      if (vt == TY_NIL || vt == TY_UNKNOWN) continue;
+      return 0;
+    }
     if (sp_streq(ty, "CallNode")) {
       const char *nm = nt_str(nt, id, "name");
       if (!nm || (!sp_streq(nm, "[]=") && !sp_streq(nm, "store"))) continue;
