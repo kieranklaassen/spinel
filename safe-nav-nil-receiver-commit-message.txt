@@ -1,0 +1,56 @@
+A `&.` call on a nil receiver runs none of its arguments
+
+    o = mk(false)                 # nil
+    n = 0
+    o&.m(n += 1)
+    p n                           # 0 in CRuby, 1 here
+
+A `&.` call whose receiver is a typed pointer or a number is a nil test
+around the call re-entered on the guarded temp. What that re-entry
+hoisted went into the statement's prelude, ahead of the test: an
+argument of a method of the program's ran although the receiver was nil,
+one argument being enough. A builtin's operands were ordered before the
+guard was reached at all, so `s&.rjust(lg(5), lg("b"))` logged both and
+`a&.fetch(lg(0), lg(9))` one of its two.
+
+The value arm now keeps what it hoists, in a statement expression under
+the test, as the boxed receiver's arm does with an `if`, and
+emit_operands_in_order leaves a `&.` call alone until its guard has
+re-entered it (sn_guard_ahead), so the operands are ordered under the
+test. A receiver that is not nil runs each argument once, in order, as
+before.
+
+Ahead of the statement nothing of the statement's own is live. Under
+the test, whatever the statement has already taken is, and an argument
+that allocates can collect a value no root holds:
+`pool.pop.w = o&.keep([K.new])` would lose the popped object. Which
+temps a statement holds unrooted cannot be listed emitter by emitter;
+the places where it holds none can. So the arguments move only where,
+from the statement that owns the prelude (g_prelude_stmt, set by
+emit_with_prelude) down to the call, every other operand of every call
+and interpolation on the way is a read (sn_nothing_held): a literal,
+self, a variable the call cannot give another value (read_rebound_by),
+a constant that names no object, arithmetic over those. Parentheses, a
+conditional, `&&`, `||`, `return` and a variable's assignment hold
+nothing and are passed through. Anywhere else the call is emitted as
+before, byte for byte.
+
+A variable whose value is a String, a boxed value or an object kept by
+value is not such a read (sn_type_assigned_in_place). `s << "x"`
+assigns the C variable, so in `two(s, o&.name((s << "x"; 1)))` the
+read of `s` and the assignment would stand in one C expression, in the
+order the C compiler picks.
+
+A `&.` receiver is bound to its guard temp by a statement of its own in
+the prelude, so a `&.` call inside it is asked from the receiver down
+(sn_recv_buf).
+
+Not here: beside an operand that is a call, makes an object, reads an
+element or a field, is a String or boxed variable, or is a variable
+the arguments can reassign, a `&.` call on a nil receiver still runs
+its arguments: `p o&.m(lg(1)), $log`, `[lg(0), o&.m(lg(1))]`. A block
+to a yielding method of a nil receiver, `o&.each_n(2) { }`, still runs
+the method, and `i&.clamp(a, b)` on a nil Integer or Float still
+raises NoMethodError.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
