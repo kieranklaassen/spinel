@@ -830,7 +830,8 @@ static void emit_index_get(Compiler *c, int recv, int key, Buf *b) {
      hot enough in optcarrot's per-pixel path to be worth spending it on. */
   const char *fn = kt == TY_SYMBOL ? "sp_poly_get_sym" :
                    kt == TY_STRING ? "sp_poly_get_str" :
-                   kt == TY_INT    ? (expr_is_arr_or_nil(c, recv) ? "sp_poly_arr_get_aon"
+                   kt == TY_INT    ? (expr_is_arr_or_nil(c, recv) && decide_node(c->nt, recv, "aon-get", NULL)
+                                                                  ? "sp_poly_arr_get_aon"
                                                                   : "sp_poly_arr_get_hash")
                                    : "sp_poly_index_poly";
   buf_printf(b, "%s(", fn);
@@ -1268,9 +1269,7 @@ int emit_call_or_write_via_methods(Compiler *c, int id, int is_or, Buf *b) {
       LocalVar *pv = (ws->nparams > 0 && ws->pnames[0]) ? scope_local(ws, ws->pnames[0]) : NULL;
       TyKind pt = pv ? pv->type : vt;
       char sw[32]; snprintf(sw, sizeof sw, "_t%d", tw);
-      if (pt == vt || pt == TY_UNKNOWN) buf_puts(b, sw);
-      else if (pt == TY_POLY) emit_boxed_text(c, vt, sw, b);
-      else emit_unbox_text(c, pt, sw, b);
+      emit_coerce_text(c, v, vt, pt, CO_HOLD, sw, "a conditional attribute writer's argument", b);
     }
     buf_puts(b, ")");
   }

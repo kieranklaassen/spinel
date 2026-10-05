@@ -7507,6 +7507,24 @@ static int bind_zsuper_params(Compiler *c, int id, Scope *s, Scope *pm) {
   return changed;
 }
 
+/* A conditional attribute write is not a CallNode, but its RHS still
+   reaches a defined writer's parameter, beside the ordinary assignments. */
+static int infer_conditional_writer_param(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  int recv = nt_ref(nt, id, "receiver"), val = nt_ref(nt, id, "value");
+  const char *name = nt_str(nt, id, "name");
+  if (recv < 0 || val < 0 || !name) return 0;
+  TyKind rt = infer_type(c, recv);
+  if (!ty_is_object(rt)) return 0;
+  int mi = -1;
+  if (comp_resolve_member(c, ty_object_class(rt), name, 1, NULL, &mi) != SP_MEMBER_METHOD || mi < 0)
+    return 0;
+  Scope *ws = &c->scopes[mi];
+  LocalVar *pv = ws->nparams > 0 && ws->pnames[0] ? scope_local(ws, ws->pnames[0]) : NULL;
+  if (!pv || pv->rbs_seeded) return 0;
+  return slot_take(c, pv, infer_type(c, val), val);
+}
+
 int infer_param_types(Compiler *c) {
   const NodeTable *nt = c->nt;
   int changed = 0;
@@ -7596,6 +7614,10 @@ int infer_param_types(Compiler *c) {
       if (!pp || pp->rbs_seeded) continue;
       TyKind at2 = infer_type(c, val);
       changed |= slot_take(c, pp, at2, val);
+      continue;
+    }
+    if (nt_kind(nt, id) == NK_CallOrWriteNode || nt_kind(nt, id) == NK_CallAndWriteNode) {
+      changed |= infer_conditional_writer_param(c, id);
       continue;
     }
     if (!sp_streq(ty, "CallNode")) continue;
@@ -12355,6 +12377,34 @@ static int proc_params_poly(const NodeTable *nt, Scope *bs, int pn, const char *
   return changed;
 }
 
+static int infer_zip_block_params(Compiler *c, int id, int block, const char *p0, TyKind rt) {
+  const NodeTable *nt = c->nt;
+  int changed = 0;
+  int za = nt_ref(nt, id, "arguments"), zn = 0;
+  const int *zv = za >= 0 ? nt_arr(nt, za, "arguments", &zn) : NULL;
+  if (zn != 1 || (zv && nt_kind(nt, zv[0]) == NK_SplatNode)) {
+    Scope *zs = comp_scope_of(c, block);
+    for (int j = 0; block_param_name(c, block, j); j++)
+      if (bp_widen(zs, block_param_name(c, block, j), TY_POLY)) changed = 1;
+    return changed;
+  }
+  Scope *zs = comp_scope_of(c, block);
+  const char *zp1s = block_param_name(c, block, 1);
+  LocalVar *ep0 = scope_local_intern(zs, p0); ep0->is_block_param = 1;
+  /* a SOLO param receives the boxed TUPLE ([e1, e2]); two params
+     auto-splat it */
+  if (lv_widen(ep0, zp1s ? ty_array_elem(rt) : TY_POLY)) changed = 1;
+  const char *zp1 = zp1s;
+  if (zp1) {
+    int zargs = nt_ref(nt, id, "arguments");
+    int zargc = 0; const int *zargv = zargs >= 0 ? nt_arr(nt, zargs, "arguments", &zargc) : NULL;
+    TyKind et2 = (zargc > 0 && zargv && ty_is_array(infer_type(c, zargv[0])))
+                 ? ty_array_elem(infer_type(c, zargv[0])) : ty_array_elem(rt);
+    if (bp_widen(zs, zp1, et2)) changed = 1;
+  }
+  return changed;
+}
+
 /* infer_block_params's per-call arms for a container receiver's block:
    match, zip, merge, product, fetch, transform_keys / transform_values,
    each_value / each_key, a Hash's each / each_pair, and an Array element
@@ -12378,21 +12428,8 @@ static int infer_block_params_container_arms(Compiler *c, const NodeTable *nt, i
       return changed | 2;
     }
   }
-  if (sp_streq(name, "zip") && ty_is_array(rt)) {
-    Scope *zs = comp_scope_of(c, block);
-    const char *zp1s = block_param_name(c, block, 1);
-    LocalVar *ep0 = scope_local_intern(zs, p0); ep0->is_block_param = 1;
-    /* a SOLO param receives the boxed TUPLE ([e1, e2]); two params
-       auto-splat it */
-    if (lv_widen(ep0, zp1s ? ty_array_elem(rt) : TY_POLY)) changed = 1;
-    const char *zp1 = zp1s;
-    if (zp1) {
-      int zargs = nt_ref(nt, id, "arguments");
-      int zargc = 0; const int *zargv = zargs >= 0 ? nt_arr(nt, zargs, "arguments", &zargc) : NULL;
-      TyKind et2 = (zargc > 0 && zargv && ty_is_array(infer_type(c, zargv[0])))
-                   ? ty_array_elem(infer_type(c, zargv[0])) : ty_array_elem(rt);
-      if (bp_widen(zs, zp1, et2)) changed = 1;
-    }
+  if (is_zip_name(name) && ty_is_array(rt)) {
+    changed |= infer_zip_block_params(c, id, block, p0, rt);
     return changed | 2;
   }
 

@@ -299,13 +299,28 @@ int elem_nil_marked(Compiler *c, int recv, TyKind rt) {
 }
 
 /* An array literal of plain elements (no splat): what CRuby's VM answers
-   min and max of without building the array (opt_newarray_send). */
+   min and max of without building the array (opt_newarray_send). A literal
+   whose elements are all static -- numbers, nil, true, false, a Symbol, a
+   Regexp or a plain String (frozen here) -- is a prebuilt array in CRuby
+   instead, whose min and max are Array#min and #max. */
+static int static_literal_elem(const NodeTable *nt, int n) {
+  switch (nt_kind(nt, n)) {
+    case NK_IntegerNode: case NK_FloatNode: case NK_RationalNode: case NK_ImaginaryNode:
+    case NK_NilNode: case NK_TrueNode: case NK_FalseNode: case NK_SymbolNode:
+    case NK_RegularExpressionNode: case NK_StringNode: return 1;
+    default: return 0;
+  }
+}
 static int array_literal_plain(Compiler *c, int recv) {
   const NodeTable *nt = c->nt;
   if (recv < 0 || nt_kind(nt, recv) != NK_ArrayNode) return 0;
   int en = 0; const int *el = nt_arr(nt, recv, "elements", &en);
-  for (int e = 0; el && e < en; e++) if (nt_kind(nt, el[e]) == NK_SplatNode) return 0;
-  return en > 0;
+  int all_static = 1;
+  for (int e = 0; el && e < en; e++) {
+    if (nt_kind(nt, el[e]) == NK_SplatNode) return 0;
+    if (!static_literal_elem(nt, el[e])) all_static = 0;
+  }
+  return en > 0 && !all_static;
 }
 
 /* value_kind_misses for a needle searched for in the array `recv`: nil is no
@@ -681,6 +696,7 @@ static void emit_merge_blk_param(Compiler *c, int blk, const char *pn, TyKind vt
 }
 
 static int emit_blk_value_via_next(Compiler *c, int blk, TyKind vt, Buf *b);
+static int str_arms_convert(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, TyKind a0, const char *r);
 static void emit_blk_value_as(Compiler *c, int blk, TyKind vt, Buf *b);
 
 /* An operand whose evaluation cannot allocate: a local's read or a scalar
@@ -689,7 +705,7 @@ static int fetch_operand_is_inert(Compiler *c, int n) {
   switch (nt_kind(c->nt, n)) {
     case NK_LocalVariableReadNode: case NK_IntegerNode: case NK_FloatNode:
     case NK_SymbolNode: case NK_NilNode: case NK_TrueNode: case NK_FalseNode:
-      return 1;
+      return decide_node(c->nt, n, "fetch-inert", NULL);
     default:
       return 0;
   }
@@ -888,8 +904,9 @@ static Buf block_cond_buf(Compiler *c, int block, const int *bb, int bn) {
    the call raises CRuby's TypeError, or answers {} when the Array is empty.
    A program with a def, alias or define_method of to_h in a class or module
    keeps the path it had. */
-static int emit_scalar_array_to_h(Compiler *c, int id, int recv, TyKind rt,
+static int emit_scalar_array_conversion(Compiler *c, int id, int recv, TyKind rt,
                                   const char *name, int argc, Buf *b) {
+  if (emit_scalar_array_transpose(c, id, recv, rt, name, argc, b)) return 1;
   if (!(rt == TY_INT_ARRAY || rt == TY_FLOAT_ARRAY || rt == TY_STR_ARRAY) ||
       !sp_streq(name, "to_h") || argc != 0 || nt_ref(c->nt, id, "block") >= 0 ||
       an_user_recv_defines_method(c, "to_h"))
@@ -1583,16 +1600,13 @@ static int emit_kind_array_iter_call(Compiler *c, int id, Buf *b, const NodeTabl
       emit_poly_sum_seed(c, recv, argv[0], b);
       { *out = 1; return 1; }
     }
-    /* A FLOAT seed over Floats does not compensate: CRuby reaches the
-       compensated loop only out of the exact phase, and a seed that is
-       already a Float never has one. An INTEGER seed does have one, so it
-       keeps the compensated call -- `[0.1, 0.2, 0.3].sum(0)` is 0.6 and
-       `.sum(0.0)` is 0.6000000000000001. The boxed fold draws the same
-       line; the two paths must not disagree. */
+    /* A FLOAT seed over Floats compensates from the first element, as Ruby
+       4.0.7 does: `[0.1, 0.2, 0.3].sum(0.0)` is 0.6, like `.sum(0)`. The
+       boxed fold draws the same line; the two paths must not disagree. */
     if (rt == TY_FLOAT_ARRAY && init_t == TY_FLOAT) {
       Buf rb; int ch = hold_recv_open(c, recv, 0, "sp_FloatArray *", "SP_GC_ROOT", b, &rb);
       Buf ckb; memset(&ckb, 0, sizeof ckb);
-      buf_printf(b, "sp_FloatArray_sum_plain(%s, ", nil_sum_ck_text(c, recv, rt, 1, rb.p, &ckb)); free(rb.p); free(ckb.p);
+      buf_printf(b, "sp_FloatArray_sum(%s, ", nil_sum_ck_text(c, recv, rt, 1, rb.p, &ckb)); free(rb.p); free(ckb.p);
       emit_expr(c, argv[0], b); buf_puts(b, ")");
       if (ch) buf_puts(b, "; })");
       { *out = 1; return 1; }
@@ -1736,11 +1750,15 @@ else {
       Buf ra = expr_buf(c, recv);
       buf_printf(b, "({ sp_%sArray *_t%d = %s; SP_GC_ROOT(_t%d);", k, ta, ra.p ? ra.p : "NULL", ta);
       free(ra.p);
+      int vbase = g_tmp + 1; g_tmp += 2 * argc;   /* each value, then its length */
       for (int j = 0; j < argc; j++) {
-        int tv = ++g_tmp, tn = ++g_tmp, ti = ++g_tmp;
+        int tv = vbase + 2 * j, tn = tv + 1;
         buf_printf(b, " sp_RbVal _t%d = ", tv); emit_boxed(c, argv[j], b);
         buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d);", tv);
         buf_printf(b, " sp_int _t%d = sp_poly_length(_t%d);", tn, tv);
+      }
+      for (int j = 0; j < argc; j++) {
+        int tv = vbase + 2 * j, tn = tv + 1, ti = ++g_tmp;
         buf_printf(b, " for (sp_int _t%d = 0; _t%d < _t%d; _t%d++)", ti, ti, tn, ti);
         buf_printf(b, " sp_%sArray_push%s(_t%d, ", k, nil_store_sfx(c, k, NIL_STORE_BOXED), ta);
         { char el[64]; snprintf(el, sizeof el, "sp_poly_each_elem(_t%d, _t%d)", tv, ti);
@@ -1758,18 +1776,22 @@ else {
       Buf ra = expr_buf(c, recv);
       buf_printf(b, "({ sp_%sArray *_t%d = %s; SP_GC_ROOT(_t%d);", k, ta, ra.p ? ra.p : "NULL", ta);
       free(ra.p);
+      /* every argument and its length first: one aliasing the receiver is
+         appended as it was, not as an earlier append grew it (CRuby) */
       int base = g_tmp + 1; g_tmp += argc;
+      int lbase = g_tmp + 1; g_tmp += argc;
       for (int j = 0; j < argc; j++) {
         buf_printf(b, " sp_%sArray *_t%d = ", k, base + j);
         emit_expr(c, argv[j], b);
         buf_printf(b, "; SP_GC_ROOT(_t%d);", base + j);
       }
+      for (int j = 0; j < argc; j++)
+        buf_printf(b, " sp_int _t%d = sp_%sArray_length(_t%d);", lbase + j, k, base + j);
       for (int j = 0; j < argc; j++) {
-        int ii = ++g_tmp, sn = ++g_tmp;
-        buf_printf(b, " { sp_int _t%d = sp_%sArray_length(_t%d);"
-                      " for (sp_int _t%d = 0; _t%d < _t%d; _t%d++)"
+        int ii = ++g_tmp, sn = lbase + j;
+        buf_printf(b, " { for (sp_int _t%d = 0; _t%d < _t%d; _t%d++)"
                       " sp_%sArray_push(_t%d, sp_%sArray_get(_t%d, _t%d)); }",
-                   sn, k, base + j, ii, ii, sn, ii, k, ta, k, base + j, ii);
+                   ii, ii, sn, ii, k, ta, k, base + j, ii);
         /* the appended elements carry their array's nils */
         if (rt == TY_INT_ARRAY || rt == TY_FLOAT_ARRAY)
           buf_printf(b, " sp_%sArray_nil_from(_t%d, _t%d);", k, ta, base + j);
@@ -2409,7 +2431,7 @@ else {
 /* A typed Array receiver (emit_array_call's arms, in their order) */
 static int emit_typed_array_call(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, TyKind rt, TyKind a0, TyKind res, int *out) {
   if (!(recv >= 0 && ty_is_array(rt))) return 0;
-  if (emit_scalar_array_to_h(c, id, recv, rt, name, argc, b)) { *out = 1; return 1; }
+  if (emit_scalar_array_conversion(c, id, recv, rt, name, argc, b)) { *out = 1; return 1; }
   /* a nil / true / false OPERAND to the Array-expecting family is CRuby's
      TypeError ("no implicit conversion of nil into Array") -- concat fell
      to NoMethodError, product answered [] -- with every argument still
@@ -2867,8 +2889,14 @@ static int emit_typed_array_call(Compiler *c, int id, Buf *b, const NodeTable *n
       }
       else if (argc >= 2) {
         /* nil start / length are legal: "from the start" / "to the end" */
-        buf_printf(b, " sp_int _t%d = ", ts); emit_int_expr_nilable(c, argv[1], b);
-        buf_printf(b, "; if (_t%d < 0) _t%d += _t%d; if (_t%d < 0) _t%d = 0;", ts, ts, tn, ts, ts);
+        buf_printf(b, " sp_int _t%d = ", ts);
+        /* a boxed start may be a Range or no number at all */
+        if (comp_ntype(c, argv[1]) == TY_POLY) {
+          buf_puts(b, "sp_fill_offset_arg("); emit_expr(c, argv[1], b); buf_printf(b, ", %d)", argc == 2);
+        }
+        else emit_int_expr_nilable(c, argv[1], b);
+        buf_printf(b, "; if (_t%d == SP_INT_NIL) _t%d = 0;", ts, ts);
+        buf_printf(b, " if (_t%d < 0) _t%d += _t%d; if (_t%d < 0) _t%d = 0;", ts, ts, tn, ts, ts);
         if (argc == 3 && comp_ntype(c, argv[2]) == TY_NIL) {
           /* a nil LENGTH is "to the end": keep the array-length bound */
           buf_puts(b, " (void)("); emit_expr(c, argv[2], b); buf_puts(b, ");");
@@ -2879,7 +2907,7 @@ static int emit_typed_array_call(Compiler *c, int id, Buf *b, const NodeTable *n
              sentinel -- is "to the end" as the literal one is; read as a
              number it was 0 or negative, and nothing was filled */
           buf_printf(b, " sp_int _t%d = ", tl);
-          if (comp_ntype(c, argv[2]) == TY_POLY) { buf_puts(b, "sp_poly_to_i_or_nil("); emit_expr(c, argv[2], b); buf_puts(b, ")"); }
+          if (comp_ntype(c, argv[2]) == TY_POLY) { buf_puts(b, "sp_fill_offset_arg("); emit_expr(c, argv[2], b); buf_puts(b, ", 0)"); }
           else emit_int_expr_nilable(c, argv[2], b);
           /* end = start+len; negative len = no-op (empty range) */
           buf_printf(b, "; if (_t%d != SP_INT_NIL) { if (_t%d < 0) _t%d = 0; _t%d = _t%d + _t%d; }",
@@ -3393,40 +3421,7 @@ static int emit_str_mutator_call(Compiler *c, int id, Buf *b, const NodeTable *n
         buf_printf(b, "_t%d; })", tn2);
       { *out = 1; return 1; }
     }
-    if ((sp_streq(name, "concat") || sp_streq(name, "<<") ||
-         sp_streq(name, "prepend")) && argc >= 1) {
-      /* a STRBUF-promoted local (repeated `<<`) appends in place: the read
-         form sp_String_cstr(lv) is not an lvalue, so the generic write-back
-         below would emit an invalid assignment (#2020). prepend replaces the
-         buffer with args-then-contents, keeping the handle stable (#3227). */
-      { char sref0[1024];
-        if (strbuf_slot_ref(c, recv, sref0, sizeof sref0)) {
-          int tb2 = ++g_tmp;
-          buf_printf(b, "({ sp_String *_t%d = %s;", tb2, sref0);
-          if (sp_streq(name, "prepend")) {
-            int tp3 = ++g_tmp;
-            buf_printf(b, " const char *_t%d = ", tp3);
-            for (int j = 0; j < argc; j++) buf_puts(b, "sp_str_concat(");
-            emit_str_expr(c, argv[0], b);
-            for (int j = 1; j < argc; j++) { buf_puts(b, ", "); emit_str_expr(c, argv[j], b); buf_puts(b, ")"); }
-            buf_printf(b, ", sp_String_cstr(_t%d)); sp_String_set_bin(_t%d, _t%d);", tb2, tb2, tp3);
-          }
-          else {
-            for (int j = 0; j < argc; j++) {
-              buf_printf(b, " sp_String_append(_t%d, ", tb2);
-              { char rt[48]; snprintf(rt, sizeof rt, "sp_String_cstr(_t%d)", tb2);
-                emit_str_append_arg(c, argv[j], rt, b); }
-              buf_puts(b, ");");
-            }
-          }
-          /* an append marked to hand out the handle (`r = obj.buf << x`)
-             answers the receiver itself; otherwise its String read */
-          if (c->strbuf_box[id]) buf_printf(b, " _t%d; })", tb2);
-          else buf_printf(b, " sp_String_cstr(_t%d); })", tb2);
-          { *out = 1; return 1; }
-        }
-      }
-    }
+    if (emit_string_handle_append(c, id, b, name, recv, argc, argv)) { *out = 1; return 1; }
     /* chained append in value position (`t = s << a << b`): the generic form
        below writes back only when the receiver is a direct lvalue read, so a
        chain's outer links never reach the base -- `s` kept just the first
@@ -3548,165 +3543,7 @@ static int emit_str_mutator_call(Compiler *c, int id, Buf *b, const NodeTable *n
       { *out = 1; return 1; }
     }
   }
-  /* String#slice! in VALUE position: returns the removed part (or nil) and
-     reassigns the receiver; statement position has its own arm. The
-     receiver must be an lvalue (re-read and re-assigned). */
-  if (rt == TY_STRING && sp_streq(name, "slice!") && (argc == 1 || argc == 2)) {
-    int sb_asgn = str_mut_var_recv(c, recv) || sb_shadowed_reader(recv);
-    if (argc == 1 && comp_ntype(c, argv[0]) == TY_STRING) {
-      int tp2 = ++g_tmp;
-      buf_printf(b, "({ const char *_t%d = ", tp2); emit_expr(c, argv[0], b);
-      buf_printf(b, "; const char *_hit%d = (_t%d && ", tp2, tp2);
-      emit_expr(c, recv, b);
-      buf_puts(b, ") ? strstr("); emit_expr(c, recv, b);
-      buf_printf(b, ", _t%d) : NULL;", tp2);
-      if (sb_asgn) {
-        buf_printf(b, " if (_hit%d) ", tp2);
-        emit_expr(c, recv, b);
-        /* sub would set `$~`, which slice! leaves alone; a program that
-           never reads it has sub record nothing */
-        if (g_reads_match_regs) {
-          buf_printf(b, " = sp_str_remove_first("); emit_expr(c, recv, b);
-          buf_printf(b, ", _t%d);", tp2);
-        }
-        else {
-          buf_printf(b, " = sp_str_sub("); emit_expr(c, recv, b);
-          buf_printf(b, ", _t%d, (&(\"\\xff\")[1]));", tp2);
-        }
-      }
-      buf_printf(b, " _hit%d ? _t%d : (const char *)0; })", tp2, tp2);
-      { *out = 1; return 1; }
-    }
-    if (argc == 1 && re_lit_index(c, argv[0]) >= 0) {
-      /* slice!(/re/): remove the first match, evaluate to it (or nil).
-         sp_re_match fills sp_re_match_str with the matched run; the splice
-         helper replaces it with the empty string. */
-      int tm3 = ++g_tmp, ts3 = ++g_tmp;
-      buf_printf(b, "({ const char *_t%d = ", ts3); emit_expr(c, recv, b);
-      buf_printf(b, "; sp_int _t%d = sp_re_match(sp_re_pat_%d, _t%d);"
-                    " const char *_hit%d = _t%d >= 0 ? sp_re_match_str : NULL;",
-                 tm3, re_lit_index(c, argv[0]), ts3, tm3, tm3);
-      if (sb_asgn) {
-        buf_printf(b, " if (_hit%d) ", tm3);
-        emit_expr(c, recv, b);
-        buf_printf(b, " = sp_str_splice_re(sp_re_pat_%d, _t%d, (&(\"\\xff\")[1]));",
-                   re_lit_index(c, argv[0]), ts3);
-      }
-      buf_printf(b, " _hit%d; })", tm3);
-      { *out = 1; return 1; }
-    }
-    if (argc == 1 && re_lit_index(c, argv[0]) >= 0) {
-      /* slice!(regexp): the removed first match (or nil), reassigning an
-         lvalue receiver with the remainder; sets the match registers. */
-      int to = ++g_tmp, ts2 = ++g_tmp, tr2 = ++g_tmp;
-      buf_printf(b, "({ const char *_t%d = ", to); emit_expr(c, recv, b);
-      buf_printf(b, "; const char *_t%d = _t%d;"
-                    " const char *_t%d = sp_str_slice_re(sp_re_pat_%d, _t%d, &_t%d);",
-                 ts2, to, tr2, re_lit_index(c, argv[0]), to, ts2);
-      if (sb_asgn) { buf_puts(b, " "); emit_expr(c, recv, b); buf_printf(b, " = _t%d;", ts2); }
-      buf_printf(b, " _t%d; })", tr2);
-      { *out = 1; return 1; }
-    }
-    if (argc == 1 && (comp_ntype(c, argv[0]) == TY_INT || comp_ntype(c, argv[0]) == TY_RANGE)) {
-      /* slice!(i) / slice!(range): the removed part (or nil), reassigning an
-         lvalue receiver; a literal receiver just yields the removed part. */
-      int to = ++g_tmp, tb2 = ++g_tmp, tl2 = ++g_tmp, tn2 = ++g_tmp, tr2 = ++g_tmp;
-      /* rooted across the index or range, which may allocate */
-      buf_printf(b, "({ const char *_t%d = ", to); emit_recv_rooted(c, recv, to, "SP_GC_ROOT_STR", b);
-      buf_printf(b, "sp_str_check_mutable(_t%d);", to);   /* frozen -> FrozenError (#3003) */
-      buf_printf(b, " sp_int _t%d = (sp_int)sp_str_length(_t%d); sp_int _t%d, _t%d;",
-                 tn2, to, tb2, tl2);
-      if (comp_ntype(c, argv[0]) == TY_RANGE) {
-        int trg = ++g_tmp;
-        buf_printf(b, " sp_Range _t%d = sp_range_ix(", trg); emit_expr(c, argv[0], b); buf_puts(b, ")");
-        /* a beginless Range (first is INTPTR_MIN) starts at the beginning */
-        buf_printf(b, "; _t%d = _t%d.first == INTPTR_MIN ? 0 : _t%d.first < 0 ? _t%d.first + _t%d : _t%d.first;",
-                   tb2, trg, trg, trg, tn2, trg);
-        /* an endless Range (last is INTPTR_MAX) runs to the end of the String */
-        buf_printf(b, " _t%d = _t%d.last == INTPTR_MAX ? _t%d - _t%d :"
-                      " (_t%d.last < 0 ? _t%d.last + _t%d : _t%d.last) - _t%d + (_t%d.excl ? 0 : 1);",
-                   tl2, trg, tn2, tb2, trg, trg, tn2, trg, tb2, trg);
-        buf_printf(b, " if (_t%d < 0) _t%d = 0;", tl2, tl2);
-      }
-      else {
-        buf_printf(b, " _t%d = ", tb2); emit_int_expr(c, argv[0], b);
-        buf_printf(b, "; _t%d = 1; if (_t%d < 0) _t%d += _t%d;", tl2, tb2, tb2, tn2);
-      }
-      /* a Range may be empty at any position up to the end (`s.slice!(3..)`
-         is ""); one index removes a character, so it must be inside */
-      buf_printf(b, " const char *_t%d = NULL;"
-                    " if (_t%d >= 0 && _t%d %s _t%d && _t%d >= 0) {"
-                    " if (_t%d > _t%d - _t%d) _t%d = _t%d - _t%d;"
-                    " _t%d = sp_str_sub_range(_t%d, _t%d, _t%d);"
-                    " SP_GC_ROOT_STR(_t%d);",
-                 tr2,
-                 tb2, tb2, comp_ntype(c, argv[0]) == TY_RANGE ? "<=" : "<", tn2, tl2,
-                 tl2, tn2, tb2, tl2, tn2, tb2,
-                 tr2, to, tb2, tl2, tr2);
-      if (sb_asgn) {
-        buf_puts(b, " ");
-        emit_expr(c, recv, b);
-        buf_printf(b, " = sp_str_concat(sp_str_sub_range(_t%d, 0, _t%d), sp_str_sub_range(_t%d, _t%d + _t%d, _t%d - _t%d - _t%d));",
-                   to, tb2, to, tb2, tl2, tn2, tb2, tl2);
-      }
-      buf_printf(b, " } _t%d; })", tr2);
-      { *out = 1; return 1; }
-    }
-    if (argc == 2 && re_lit_index(c, argv[0]) >= 0) {
-      /* slice!(/re/, n): remove the nth capture group of the first match and
-         evaluate to it. sp_re_caps holds each group's byte span, so the removal
-         is the group's own occurrence rather than the first textual one, which
-         is a different character when the group repeats (#3543). */
-      int ts = ++g_tmp, tn = ++g_tmp, th = ++g_tmp;
-      buf_printf(b, "({ const char *_t%d = ", ts); emit_expr(c, recv, b);
-      buf_printf(b, "; sp_int _t%d = ", tn); emit_int_expr(c, argv[1], b);
-      buf_printf(b, "; const char *_t%d = sp_re_match(sp_re_pat_%d, _t%d) >= 0"
-                    " ? (_t%d == 0 ? sp_re_match_str"
-                    "    : (_t%d >= 1 && _t%d <= 9 ? sp_re_captures[_t%d] : NULL)) : NULL;",
-                 th, re_lit_index(c, argv[0]), ts, tn, tn, tn, tn);
-      if (sb_asgn) {
-        buf_printf(b, " if (_t%d && _t%d >= 0 && _t%d <= 9) { sp_str_check_mutable(_t%d);"
-                      " sp_int _b = sp_re_caps[2 * _t%d], _e = sp_re_caps[2 * _t%d + 1]; ",
-                   th, tn, tn, ts, tn, tn);
-        emit_expr(c, recv, b);
-        buf_printf(b, " = sp_str_concat(sp_str_byteslice(_t%d, 0, _b),"
-                      " sp_str_byteslice(_t%d, _e, (sp_int)sp_str_byte_len(_t%d) - _e)); }",
-                   ts, ts, ts);
-      }
-      buf_printf(b, " _t%d; })", th);
-      { *out = 1; return 1; }
-    }
-    if (sb_asgn && argc == 2) {
-      /* character-indexed splice, not byte-indexed, for a multibyte receiver (#3084) */
-      int ti2 = ++g_tmp, tl2 = ++g_tmp, tn2 = ++g_tmp, tr2 = ++g_tmp;
-      buf_printf(b, "({ sp_int _t%d = ", ti2); emit_int_expr(c, argv[0], b);
-      buf_printf(b, "; sp_int _t%d = ", tl2); emit_int_expr(c, argv[1], b);
-      buf_printf(b, "; sp_int _t%d = (sp_int)sp_str_length(", tn2);
-      emit_expr(c, recv, b);
-      buf_printf(b, "); const char *_t%d = NULL;"
-                    " if (_t%d < 0) _t%d += _t%d;"
-                    " if (_t%d >= 0 && _t%d <= _t%d && _t%d >= 0) {"
-                    " if (_t%d > _t%d - _t%d) _t%d = _t%d - _t%d;"
-                    " _t%d = sp_str_sub_range(",
-                 tr2,
-                 ti2, ti2, tn2,
-                 ti2, ti2, tn2, tl2,
-                 tl2, tn2, ti2, tl2, tn2, ti2,
-                 tr2);
-      emit_expr(c, recv, b);
-      buf_printf(b, ", _t%d, _t%d); ", ti2, tl2);
-      /* the removed part must outlive the three allocations that rebuild the receiver */
-      buf_printf(b, "SP_GC_ROOT_STR(_t%d); ", tr2);
-      emit_expr(c, recv, b);
-      buf_puts(b, " = sp_str_concat(sp_str_sub_range(");
-      emit_expr(c, recv, b);
-      buf_printf(b, ", 0, _t%d), sp_str_sub_range(", ti2);
-      emit_expr(c, recv, b);
-      buf_printf(b, ", _t%d + _t%d, _t%d - _t%d - _t%d)); } _t%d; })",
-                 ti2, tl2, tn2, ti2, tl2, tr2);
-      { *out = 1; return 1; }
-    }
-  }
+  if (rt == TY_STRING && emit_builtin_op_stage(c, id, recv, rt, name, 6, b)) { *out = 1; return 1; }
   /* String#bytesplice(start, len, str): byte-range replace returning self
      (value-semantics strings: the helper builds the new value and an lvalue
      receiver is rebound to it). */
@@ -4416,6 +4253,12 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
         emit_str_pattern_expr(c, argv[0], b); buf_puts(b, ")");
       }
     }
+    else if (comp_ntype(c, argv[0]) == TY_REGEX) {
+      /* a regex separator with a limit: sp_re_split_limit, as the typed
+         String path; the string-separator slot below refused the pattern */
+      buf_puts(b, "sp_re_split_limit("); emit_expr(c, argv[0], b);
+      buf_printf(b, ", _t%d.v.s, ", tv); emit_int_expr(c, argv[1], b); buf_puts(b, ")");
+    }
     else {
       /* The separator of String#split can be nil ("split on whitespace" in
          CRuby); sp_str_split_limit treats a NULL separator as that mode.
@@ -4429,6 +4272,22 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
       buf_puts(b, ", "); emit_int_expr(c, argv[1], b); buf_puts(b, ")");
     }
     buf_printf(b, " : (sp_StrArray *)(sp_raise_nomethod(sp_nomethod_msg(\"split\", _t%d)), (void *)0); })", tv);
+    return 1;
+  }
+  /* poly.lines(sep) / lines(chomp: ...) / lines(sep, chomp: ...): the typed
+     String path's lines over the receiver read as a String, which raises
+     NoMethodError for anything else, as the argumentless poly.lines does */
+  if (recv >= 0 && rt == TY_POLY && sp_streq(name, "lines") && nt_ref(nt, id, "block") < 0 &&
+      poly_lines_args(c, argc, argv) && !user_defines_or_reads(c, "lines")) {
+    int tl = ++g_tmp;
+    char rl[32]; snprintf(rl, sizeof rl, "_t%d", tl);
+    buf_printf(b, "({ const char *_t%d = sp_poly_recv_s(", tl); emit_expr(c, recv, b);
+    buf_printf(b, ", \"lines\"); SP_GC_ROOT(_t%d); ", tl);
+    if (argc == 1 && comp_ntype(c, argv[0]) == TY_STRING) {
+      buf_printf(b, "sp_str_lines_sep(%s, ", rl); emit_expr(c, argv[0], b); buf_puts(b, ")");
+    }
+    else str_arms_convert(c, id, b, nt, name, recv, argc, argv, TY_UNKNOWN, rl);
+    buf_puts(b, "; })");
     return 1;
   }
   /* `poly.map! { |x| ... }` / `collect!` where poly is an array read out of a
@@ -5792,7 +5651,7 @@ else {
 /* String#upcase and friends take an optional casemap symbol. `:ascii`
    restricts folding to A-Z/a-z; return the "_ascii" runtime suffix for it so
    non-ASCII bytes pass through. Full-Unicode folding (no arg) returns "". */
-static const char *case_map_suffix(Compiler *c, int argc, const int *argv) {
+const char *case_map_suffix(Compiler *c, int argc, const int *argv) {
   if (argc >= 1 && nt_type(c->nt, argv[0]) &&
       sp_streq(nt_type(c->nt, argv[0]), "SymbolNode") &&
       nt_str(c->nt, argv[0], "value") &&
@@ -6869,14 +6728,6 @@ static int str_arms_pattern(Compiler *c, int id, Buf *b, const NodeTable *nt, co
     buf_printf(b, "%s(", comp_ntype(c, id) == TY_POLY_ARRAY ? "sp_re_scan_poly" : "sp_re_scan");
     emit_expr(c, argv[0], b); buf_printf(b, ", %s)", r);
   }
-  /* the same, for a pattern that arrives BOXED (read out of a table): a
-     Regexp or a String, told apart at run time (sp_scan_boxed) */
-  else if (sp_streq(name, "scan") && argc == 1 && comp_ntype(c, argv[0]) == TY_POLY &&
-           nt_ref(nt, id, "block") < 0) {
-    buf_printf(b, "%s(%s, ", comp_ntype(c, id) == TY_POLY_ARRAY ? "sp_scan_boxed_poly" : "sp_scan_boxed", r);
-    emit_boxed(c, argv[0], b);
-    buf_puts(b, ")");
-  }
   else return 0;
   return 1;
 }
@@ -7254,6 +7105,12 @@ static int int_arms_round_divide(Compiler *c, int id, Buf *b, const NodeTable *n
     buf_printf(b, "sp_bigint_to_int(sp_bigint_div(sp_bigint_new_int(%s), ", r);
     emit_expr(c, argv[0], b); buf_puts(b, "))");
   }
+  /* a boxed divisor answers by its run-time kind: a Float floors the real
+     quotient as the typed arm above does. It was converted to an Integer
+     first, and 17.div(2.5) answered 8 where CRuby answers 6. */
+  else if (sp_streq(name, "div") && argc == 1 && comp_ntype(c, argv[0]) == TY_POLY) {
+    buf_printf(b, "sp_int_div_boxed(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")");
+  }
   else if (sp_streq(name, "div") && argc == 1) { buf_printf(b, "sp_idiv(%s, ", r); emit_int_divisor(c, argv[0], b); buf_puts(b, ")"); }
   else if ((sp_streq(name, "gcd") || sp_streq(name, "lcm")) && argc == 1 &&
            (comp_ntype(c, argv[0]) == TY_FLOAT ||
@@ -7294,6 +7151,12 @@ static int int_arms_round_divide(Compiler *c, int id, Buf *b, const NodeTable *n
     /* Integer % Rational lifts the receiver to n/1 (floor modulo) */
     buf_printf(b, "sp_rational_mod(sp_rational_new((sp_int)(%s), 1), ", r);
     emit_expr(c, argv[0], b); buf_puts(b, ")");
+  }
+  /* a boxed Float divisor answers a Float CRuby's way (17.modulo(2.5) is
+     2.0), which the Integer-typed call cannot hold: raise rather than answer
+     the modulo of a divisor cut to an Integer (it answered 1) */
+  else if (sp_streq(name, "modulo") && argc == 1 && comp_ntype(c, argv[0]) == TY_POLY) {
+    buf_printf(b, "sp_int_modulo_boxed(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")");
   }
   else if (sp_streq(name, "modulo") && argc == 1) { buf_printf(b, "sp_imod(%s, ", r); emit_int_divisor(c, argv[0], b); buf_puts(b, ")"); }
   else if (sp_streq(name, "remainder") && argc == 1 && comp_ntype(c, argv[0]) == TY_FLOAT) {
@@ -7720,15 +7583,6 @@ static int emit_scalar_recv_arms(Compiler *c, int id, Buf *b, const NodeTable *n
                  tq, tx, tn,
                  o, tq,
                  o, tx, tq, tn, o);
-    }
-    else if (sp_streq(name, "rationalize") && argc == 1) {
-      /* The epsilon must reach sp_float_rationalize as a float. emit_float_expr
-         casts a Rational arg with (sp_float)(<struct>), which the C compiler
-         rejects; convert it through sp_rational_to_f instead (#3224). */
-      buf_printf(b, "sp_float_rationalize(%s, ", r);
-      if (comp_ntype(c, argv[0]) == TY_RATIONAL) { buf_puts(b, "sp_rational_to_f("); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
-      else emit_float_expr(c, argv[0], b);
-      buf_puts(b, ")");
     }
     else if (sp_streq(name, "to_int")) buf_printf(b, comp_ntype(c, id) == TY_POLY ? "sp_box_f_to_int(%s)" : "sp_float_to_i_checked(%s)", r);  /* alias of to_i (#2317); raises on Inf/NaN */
     /* a nil bound is an open side: clamp one-sided (or return the receiver),
@@ -9047,12 +8901,28 @@ int emit_object_call(Compiler *c, int id, Buf *b) {
       }
     }
     /* Dynamic klass argument typed as TY_CLASS: runtime sp_class_le check */
-    if (comp_ntype(c, argv[0]) == TY_CLASS) {
+    if (comp_ntype(c, argv[0]) == TY_CLASS ||
+        (comp_ntype(c, argv[0]) == TY_POLY && nt_kind(nt, argv[0]) != NK_ConstantReadNode)) {
       int cid = ty_object_class(rt);
       int k = ++g_tmp;
-      buf_printf(b, "({ sp_Class _t%d = ", k); emit_expr(c, argv[0], b); buf_printf(b, "; ");
+      buf_printf(b, "({ sp_Class _t%d = ", k);
+      /* a class read out of a boxed slot is checked: CRuby's TypeError */
+      if (comp_ntype(c, argv[0]) == TY_POLY) { buf_puts(b, "sp_isa_class_arg("); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
+      else emit_expr(c, argv[0], b);
+      buf_printf(b, "; ");
       if (sp_streq(name, "instance_of?")) {
-        buf_printf(b, "((sp_Class){%d}).cls_id == _t%d.cls_id; })", singleton_visible_ci(c, cid), k);
+        if (cid >= 0 && cid < c->nclasses && !c->classes[cid].is_value_type && class_has_descendants(c, cid)) {
+          /* the object's own class, which a subclass instance running an
+             inherited method (`instance_of?(w(Animal))` in a Dog) does not
+             share with the method's: read off the object, a synthesized
+             singleton class answering as its parent (#4142) */
+          int o9 = ++g_tmp;
+          buf_printf(b, "sp_int _t%d = (", o9); emit_expr(c, recv, b); buf_puts(b, ")->cls_id; (");
+          for (int kk = 0; kk < c->nclasses; kk++)
+            if (singleton_visible_ci(c, kk) != kk) buf_printf(b, "_t%d == %d ? %d : ", o9, kk, singleton_visible_ci(c, kk));
+          buf_printf(b, "_t%d) == _t%d.cls_id; })", o9, k);
+        }
+        else buf_printf(b, "((sp_Class){%d}).cls_id == _t%d.cls_id; })", singleton_visible_ci(c, cid), k);
       }
       else {
         buf_puts(b, "sp_class_le(");
@@ -9496,7 +9366,7 @@ int emit_object_call(Compiler *c, int id, Buf *b) {
              this read is typically in a loop: `ctx.buf.getbyte(i)` over a
              200 KB buffer copied the whole string once per row. Same type,
              same const char * -- the live buffer rather than a snapshot. */
-          else if (c->strbuf_read_raw[id])
+          else if (c->strbuf_read_raw[id] && decide_node(c->nt, id, "strbuf-raw", NULL))
             buf_printf(b, "_t%d ? sp_String_cstr(_t%d) : NULL; })", tvR, tvR);
           else
             buf_printf(b, "_t%d ? sp_str_concat(sp_String_cstr(_t%d), (&(\"\\xff\")[1])) : NULL; })",
@@ -10988,6 +10858,9 @@ static TyKind emit_face_arm(Compiler *c, int id, unsigned kind, unsigned flags, 
       if (has_blk) buf_printf(g_pre, "sp_int _t%d = sp_poly_int_recv(%s, \"%s\");\n", t, rs, name);
       else buf_printf(g_pre, "sp_int _t%d = sp_poly_recv_i(\"%s\", %s);\n", t, name, rs);
       break;
+    case PF_RANDOM:
+      buf_printf(g_pre, "sp_Random *_t%d = sp_poly_random_recv(%s, \"%s\"); SP_GC_ROOT(_t%d);\n", t, rs, name, t);
+      break;
     case PF_FLOAT:
       buf_printf(g_pre, "sp_float _t%d = sp_poly_float_recv(%s, \"%s\");\n", t, rs, name);
       break;
@@ -11225,6 +11098,7 @@ static void emit_face_kind_test(unsigned kind, int t, Buf *b) {
   switch (kind) {
     case PF_STRING: buf_printf(b, "(_t%d.tag == SP_TAG_STR || sp_poly_is_strbuf(_t%d))", t, t); break;
     case PF_INT:    buf_printf(b, "(_t%d.tag == SP_TAG_INT)", t); break;
+    case PF_RANDOM: buf_printf(b, "(_t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_RANDOM)", t, t); break;
     case PF_FLOAT:  buf_printf(b, "(_t%d.tag == SP_TAG_FLT)", t); break;
     case PF_RANGE:  buf_printf(b, "(_t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_RANGE)", t, t); break;
     case PF_FRANGE: buf_printf(b, "(_t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_FLOAT_RANGE)", t, t); break;
@@ -11489,16 +11363,28 @@ int emit_boxed_class_aref(Compiler *c, int id, Buf *b) {
     }
     buf_printf(b, "(_t%d.tag == SP_TAG_CLASS && (%s)) ? ", tsv, ids.p);
     view_bind(recv, "_t%d", tsv);
+    /* what either re-entry hoists (the arity guard of a builtin `[]`) reads
+       the temps bound above, which live only inside this expression: it runs
+       in its own arm, not ahead of the statement */
+    Buf *sv_pre = g_pre;
+    Buf npre; memset(&npre, 0, sizeof npre);
+    g_pre = &npre;
     nt_node_set_str((NodeTable *)nt, id, "name", "new");
     Buf nb; memset(&nb, 0, sizeof nb); emit_call(c, id, &nb);
     nt_node_set_str((NodeTable *)nt, id, "name", "[]");
     int sv_skip = g_aref_cls_skip;
     g_aref_cls_skip = id;
+    Buf apre; memset(&apre, 0, sizeof apre);
+    g_pre = &apre;
     Buf ab; memset(&ab, 0, sizeof ab); emit_call(c, id, &ab);
+    g_pre = sv_pre;
     g_aref_cls_skip = sv_skip;
     view_unbind(nov0);
-    buf_printf(b, "(%s) : (%s); })", nb.p ? nb.p : "sp_box_nil()", ab.p ? ab.p : "sp_box_nil()");
-    free(nb.p); free(ab.p); free(ids.p);
+    if (npre.p) buf_printf(b, "({\n%s(%s); })", npre.p, nb.p ? nb.p : "sp_box_nil()");
+    else buf_printf(b, "(%s)", nb.p ? nb.p : "sp_box_nil()");
+    if (apre.p) buf_printf(b, " : ({\n%s(%s); }); })", apre.p, ab.p ? ab.p : "sp_box_nil()");
+    else buf_printf(b, " : (%s); })", ab.p ? ab.p : "sp_box_nil()");
+    free(npre.p); free(apre.p); free(nb.p); free(ab.p); free(ids.p);
     return 1;
   }
   return 0;
@@ -11834,10 +11720,7 @@ static int emit_poly_call0_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
                   "sp_Enumerator_peek((sp_Enumerator *)_t%d.v.p); })", tv, tv, tv, tv, tv);
     { *out = 1; return 1; }
   }
-  if (sp_streq(name, "upcase"))     { buf_puts(b, "sp_poly_case_conv("); emit_expr(c, recv, b); buf_puts(b, ", sp_str_upcase, \"upcase\")"); { *out = 1; return 1; } }
-  if (sp_streq(name, "downcase"))     { buf_puts(b, "sp_poly_case_conv("); emit_expr(c, recv, b); buf_puts(b, ", sp_str_downcase, \"downcase\")"); { *out = 1; return 1; } }
-  if (sp_streq(name, "capitalize"))     { buf_puts(b, "sp_poly_case_conv("); emit_expr(c, recv, b); buf_puts(b, ", sp_str_capitalize, \"capitalize\")"); { *out = 1; return 1; } }
-  if (sp_streq(name, "swapcase"))     { buf_puts(b, "sp_poly_case_conv("); emit_expr(c, recv, b); buf_puts(b, ", sp_str_swapcase, \"swapcase\")"); { *out = 1; return 1; } }
+  if (emit_builtin_op_stage(c, id, recv, rt, name, 1, b)) { *out = 1; return 1; }
   if (sp_streq(name, "strip"))      { buf_puts(b, "sp_box_str(sp_str_strip(sp_poly_recv_s("); emit_expr(c, recv, b); buf_printf(b, ", \"strip\")))"); { *out = 1; return 1; } }
   /* `strip` had an arm and its one-sided siblings did not, which is the
      shape of most of what follows: a String reaching the dispatch through a
@@ -11873,6 +11756,9 @@ static int emit_poly_call0_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
   }
   if (sp_streq(name, "scrub") && argc == 0) {
     buf_puts(b, "sp_box_str(sp_str_scrub(sp_poly_recv_s("); emit_expr(c, recv, b); buf_puts(b, ", \"scrub\"), 0))"); { *out = 1; return 1; }
+  }
+  if (sp_streq(name, "dump") && argc == 0) {   /* the quoted form, as the String arm answers */
+    buf_puts(b, "sp_box_str(sp_str_dump(sp_poly_recv_s("); emit_expr(c, recv, b); buf_puts(b, ", \"dump\")))"); { *out = 1; return 1; }
   }
   if (sp_streq(name, "reverse"))    { buf_puts(b, "sp_poly_reverse("); emit_expr(c, recv, b); buf_puts(b, ")"); { *out = 1; return 1; } }
   /* `encoding` on a boxed String: the concrete arm has answered it since
@@ -11936,9 +11822,11 @@ static int emit_poly_call0_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
      receiver has its own emitter that does not materialize one; a poly
      receiver only learns it is a String at run time, so it pays the array
      and yields out of it. Answers the receiver's string, as String#each_char
-     answers self (#3402). */
-  if (sp_streq(name, "each_char") && argc == 0 && nt_ref(nt, id, "block") >= 0 &&
-      !user_defines_or_reads(c, "each_char") && !user_defines_or_reads(c, "chars")) {
+     answers self (#3402). each_line { } walks the array #lines answers the
+     same way. */
+  if ((sp_streq(name, "each_char") || sp_streq(name, "each_line")) && argc == 0 &&
+      nt_ref(nt, id, "block") >= 0 && !user_defines_or_reads(c, name) &&
+      !user_defines_or_reads(c, sp_streq(name, "each_char") ? "chars" : "lines")) {
     int eblk = nt_ref(nt, id, "block");
     const char *ebp = block_param_name(c, eblk, 0);
     const char *ebpn = ebp ? rename_local(ebp) : NULL;
@@ -11947,7 +11835,8 @@ static int emit_poly_call0_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
     int ts = ++g_tmp, ta = ++g_tmp, ti = ++g_tmp;
     buf_printf(b, "({ const char *_t%d = sp_poly_recv_s(", ts); emit_expr(c, recv, b);
     buf_printf(b, ", \"%s\"); SP_GC_ROOT(_t%d);", name, ts);
-    buf_printf(b, " sp_StrArray *_t%d = sp_str_chars(_t%d); SP_GC_ROOT(_t%d);", ta, ts, ta);
+    buf_printf(b, " sp_StrArray *_t%d = %s(_t%d); SP_GC_ROOT(_t%d);",
+               ta, sp_streq(name, "each_char") ? "sp_str_chars" : "sp_str_lines", ts, ta);
     buf_printf(b, " for (sp_int _t%d = 0; _t%d < sp_StrArray_length(_t%d); _t%d++) {", ti, ti, ta, ti);
     if (ebpn) buf_printf(b, " const char *lv_%s = sp_StrArray_get(_t%d, _t%d);", ebpn, ta, ti);
     for (int k2 = 0; k2 < ebn; k2++) emit_stmt(c, ebb[k2], b, 0);
@@ -12260,7 +12149,7 @@ static int emit_poly_index_call(Compiler *c, int id, Buf *b, const NodeTable *nt
            call behind it are dead code on this read. analyze established the
            proof for the GC root elision; this is the same fact paying twice. */
         buf_puts(b, at != TY_INT ? "sp_poly_index_poly("
-                    : expr_is_arr_or_nil(c, recv) ? "sp_poly_arr_get_aon("
+                    : expr_is_arr_or_nil(c, recv) && decide_node(c->nt, recv, "aon-get", NULL) ? "sp_poly_arr_get_aon("
                                                   : "sp_poly_arr_get_hash(");
         emit_expr(c, recv, b);
         buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, ")");
@@ -13152,6 +13041,7 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
     buf_printf(b, " } _t%d; })", ts);
     return 1;
   }
+  if (rt == TY_POLY && emit_builtin_op(c, id, recv, rt, name, b)) return 1;
   { int r; if (emit_poly_call0_arms(c, id, b, nt, name, recv, argc, argv, rt, &r)) return r; }
   /* blockless cycle(n) on a poly value: the Enumerator over its items
      repeated n times that the typed arms build (sp_poly_cycle_n), the
@@ -13348,6 +13238,22 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
     buf_puts(b, "sp_PolyArray_get(sp_str_unpack(sp_poly_to_s(");
     emit_expr(c, recv, b); buf_puts(b, "), ");
     emit_expr(c, argv[0], b); buf_puts(b, "), 0)");
+    if (u1t == TY_INT || u1t == TY_FLOAT) buf_puts(b, ")");
+    return 1;
+  }
+  /* ...and unpack1(fmt, offset: n), as the typed receiver's arm takes it: with
+     the keyword the boxed String had no arm and raised NoMethodError (#7317) */
+  if (recv >= 0 && rt == TY_POLY && sp_streq(name, "unpack1") && argc == 2 &&
+      nt_kind(nt, argv[1]) == NK_KeywordHashNode && struct_kwarg_value(c, argv[1], "offset") >= 0 &&
+      !user_defines_or_reads(c, name)) {
+    int offv = struct_kwarg_value(c, argv[1], "offset");
+    TyKind u1t = comp_ntype(c, id);
+    if (u1t == TY_INT)        buf_puts(b, "sp_poly_to_i_or_nil(");
+    else if (u1t == TY_FLOAT) buf_puts(b, "sp_poly_to_f_opt(");
+    buf_puts(b, "sp_PolyArray_get(sp_str_unpack_off(sp_poly_recv_s(");
+    emit_expr(c, recv, b); buf_puts(b, ", \"unpack1\"), ");
+    emit_str_expr(c, argv[0], b); buf_puts(b, ", ");
+    emit_int_expr(c, offv, b); buf_puts(b, "), 0)");
     if (u1t == TY_INT || u1t == TY_FLOAT) buf_puts(b, ")");
     return 1;
   }

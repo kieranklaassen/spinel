@@ -1247,60 +1247,6 @@ int desugar_kernel_reopen(Compiler *c) {
   return 1;
 }
 
-/* ---- `xs.zip(a, b) { |t| ... }` with other than one operand -------------
-   The block form of zip is written for one operand. With two or more (or a
-   splat, or none) the call fell to the runtime dispatch, which has no zip
-   arm, and raised NoMethodError. The blockless form takes any count, so the
-   call becomes `(xs.zip(a, b).each { |t| ... }; nil)`: the same tuples in
-   the same order, and the nil zip's block form answers. A program defining
-   its own zip keeps its call. */
-int desugar_zip_block_operands(Compiler *c) {
-  NodeTable *nt = (NodeTable *)c->nt;
-  int n0 = nt->count, changed = 0;
-  for (int id = 0; id < n0; id++)
-    if (nt_kind(nt, id) == NK_DefNode && nt_str(nt, id, "name") && sp_streq(nt_str(nt, id, "name"), "zip"))
-      return 0;
-  for (int id = 0; id < n0; id++) {
-    if (nt_kind(nt, id) != NK_CallNode) continue;
-    const char *nm = nt_str(nt, id, "name");
-    if (!nm || !sp_streq(nm, "zip")) continue;
-    int recv = nt_ref(nt, id, "receiver"), blk = nt_ref(nt, id, "block");
-    if (recv < 0 || blk < 0 || nt_kind(nt, blk) != NK_BlockNode) continue;
-    int args = nt_ref(nt, id, "arguments"), argc = 0;
-    const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &argc) : NULL;
-    int splat = 0;
-    for (int i = 0; i < argc; i++) if (nt_kind(nt, argv[i]) == NK_SplatNode) splat = 1;
-    if (argc == 1 && !splat) continue;
-    int line = nt_int(nt, id, "node_line", 0), file = nt_int(nt, id, "node_file", 0);
-    int col = nt_int(nt, id, "node_col", 0);
-    int zc = nt_new_node(nt, "CallNode"), ec = nt_new_node(nt, "CallNode");
-    int st = nt_new_node(nt, "StatementsNode"), nl = nt_new_node(nt, "NilNode");
-    if (zc < 0 || ec < 0 || st < 0 || nl < 0) continue;
-    int fresh[4] = { zc, ec, st, nl };
-    for (int k = 0; k < 4; k++) {
-      nt_node_set_int(nt, fresh[k], "node_line", line);
-      nt_node_set_int(nt, fresh[k], "node_file", file);
-      nt_node_set_int(nt, fresh[k], "node_col", col);
-    }
-    nt_node_set_str(nt, zc, "name", "zip");
-    nt_node_set_ref(nt, zc, "receiver", recv);
-    if (args >= 0) nt_node_set_ref(nt, zc, "arguments", args);
-    nt_node_set_str(nt, ec, "name", "each");
-    nt_node_set_ref(nt, ec, "receiver", zc);
-    nt_node_set_ref(nt, ec, "block", blk);
-    int body[2] = { ec, nl };
-    nt_node_set_arr(nt, st, "body", body, 2);
-    nt_node_reset(nt, id, "ParenthesesNode");
-    nt_node_set_int(nt, id, "node_line", line);
-    nt_node_set_int(nt, id, "node_file", file);
-    nt_node_set_int(nt, id, "node_col", col);
-    nt_node_set_ref(nt, id, "body", st);
-    changed = 1;
-  }
-  if (changed) comp_grow_node_arrays(c);
-  return changed;
-}
-
 /* ---- `singleton_class.prepend(Mod)` in a class or module body ------------
    The statement adds Mod's methods to the class object -- what `extend Mod`
    does, the precedence between Mod and the class's own singleton methods
@@ -3490,6 +3436,31 @@ static int engine_splice_list(NodeTable *nt, int body) {
       changed = again = 1;
       break;
     }
+  }
+  return changed;
+}
+
+/* `def m = (a; b)`: a def whose whole body is one parenthesized sequence
+   is that sequence's statements, as CRuby runs it. Left wrapped, the
+   method's value was the parentheses' rather than its last statement's, so
+   a yield there was typed once for every call site, and a call whose block
+   answers another kind stored the value in the first site's carrier. */
+int desugar_paren_def_body(Compiler *c) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  int changed = 0;
+  NT_FOREACH_KIND(nt, NK_DefNode, d) {
+    int body = nt_ref(nt, d, "body"), bn = 0;
+    const int *bb = body >= 0 && nt_kind(nt, body) == NK_StatementsNode ? nt_arr(nt, body, "body", &bn) : NULL;
+    if (bn != 1 || nt_kind(nt, bb[0]) != NK_ParenthesesNode) continue;
+    int pb = nt_ref(nt, bb[0], "body"), pn = 0;
+    const int *pd = pb >= 0 && nt_kind(nt, pb) == NK_StatementsNode ? nt_arr(nt, pb, "body", &pn) : NULL;
+    if (pn < 2) continue;
+    int *cp = malloc(sizeof(int) * (size_t)pn);
+    if (!cp) continue;
+    memcpy(cp, pd, sizeof(int) * (size_t)pn);
+    nt_node_set_arr(nt, body, "body", cp, pn);
+    free(cp);
+    changed = 1;
   }
   return changed;
 }
@@ -6639,13 +6610,33 @@ static int fwd_class_value_new_shape(const NodeTable *nt) {
 /* The number of arguments every call of `name` passes: -1 when they differ
    or one passes a splat, keywords or a `...` of its own, -2 when there is no
    call. */
+/* Does CallNode `id` call `name`: directly (*skip = 0), or through send,
+   __send__ or public_send with the name as a literal first argument
+   (*skip = 1, that argument is no argument of the callee's)? A forwarder's
+   callers were counted only when they spelled it directly, so
+   `o.send(:m, :x) { }` lost its block in the forwarder (#7213 sweep). */
+static int fwd_call_names(const NodeTable *nt, int id, const char *name, int *skip) {
+  const char *nm = nt_str(nt, id, "name");
+  *skip = 0;
+  if (!nm) return 0;
+  if (sp_streq(nm, name)) return 1;
+  if (!sp_streq(nm, "send") && !sp_streq(nm, "__send__") && !sp_streq(nm, "public_send")) return 0;
+  int ac = 0; const int *av = nt_arr(nt, nt_ref(nt, id, "arguments"), "arguments", &ac);
+  if (ac < 1 || !av) return 0;
+  const char *lit = fwd_node_is(nt, av[0], "SymbolNode") ? nt_str(nt, av[0], "value")
+                  : fwd_node_is(nt, av[0], "StringNode") ? nt_str(nt, av[0], "content") : NULL;
+  if (!lit || !sp_streq(lit, name)) return 0;
+  *skip = 1;
+  return 1;
+}
 static int fwd_fixed_call_arity(const NodeTable *nt, const char *name) {
   int n = -2;
   for (int id = 0; id < nt->count; id++) {
     if (!fwd_node_is(nt, id, "CallNode")) continue;
-    const char *nm = nt_str(nt, id, "name");
-    if (!nm || !sp_streq(nm, name)) continue;
+    int skip;
+    if (!fwd_call_names(nt, id, name, &skip)) continue;
     int ac = 0; const int *av = nt_arr(nt, nt_ref(nt, id, "arguments"), "arguments", &ac);
+    av += skip; ac -= skip;
     for (int k = 0; k < ac; k++)
       if (fwd_node_is(nt, av[k], "SplatNode") || fwd_node_is(nt, av[k], "KeywordHashNode") ||
           fwd_node_is(nt, av[k], "ForwardingArgumentsNode")) return -1;
@@ -6771,8 +6762,8 @@ static int def_exists_by_name(const NodeTable *nt, const char *name) {
 static int any_call_passes_block(const NodeTable *nt, const char *name) {
   for (int id = 0; id < nt->count; id++) {
     if (!fwd_node_is(nt, id, "CallNode")) continue;
-    const char *nm = nt_str(nt, id, "name");
-    if (nm && sp_streq(nm, name) && nt_ref(nt, id, "block") >= 0) return 1;
+    int skip;
+    if (fwd_call_names(nt, id, name, &skip) && nt_ref(nt, id, "block") >= 0) return 1;
   }
   return 0;
 }
@@ -7074,11 +7065,18 @@ static int dmp_instance_method_alias(NodeTable *nt, int call, const char *cn, in
   if (!sp_streq(cn, "define_method") || blk >= 0 || nt_kind(nt, src) != NK_CallNode) return 0;
   const char *nm = nt_str(nt, src, "name");
   int recv = nt_ref(nt, src, "receiver");
-  if (!nm || !sp_streq(nm, "instance_method") || nt_ref(nt, src, "block") >= 0 ||
-      (recv >= 0 && nt_kind(nt, recv) != NK_SelfNode)) return 0;
+  if (!nm || nt_ref(nt, src, "block") >= 0 || (recv >= 0 && nt_kind(nt, recv) != NK_SelfNode)) return 0;
   int sargs = nt_ref(nt, src, "arguments");
   int sn = 0; const int *sv = sargs >= 0 ? nt_arr(nt, sargs, "arguments", &sn) : NULL;
-  if (sn != 1 || nt_kind(nt, sv[0]) != NK_SymbolNode) return 0;
+  /* `send(:instance_method, :x)` (or __send__ / public_send) is the same
+     UnboundMethod; it was left as a call, and the method never defined */
+  if ((sp_streq(nm, "send") || sp_streq(nm, "__send__") || sp_streq(nm, "public_send")) &&
+      sn == 2 && nt_kind(nt, sv[0]) == NK_SymbolNode &&
+      sp_streq(nt_str(nt, sv[0], "value"), "instance_method")) {
+    nm = "instance_method";
+    sv++; sn--;
+  }
+  if (!sp_streq(nm, "instance_method") || sn != 1 || nt_kind(nt, sv[0]) != NK_SymbolNode) return 0;
   int args = nt_ref(nt, call, "arguments");
   int an = 0; const int *av = nt_arr(nt, args, "arguments", &an);
   if (nt_kind(nt, av[0]) == NK_StringNode) {
@@ -7412,11 +7410,11 @@ int desugar_anon_block_param(Compiler *c) {
 static int any_call_passes_keywords(const NodeTable *nt, const char *name) {
   for (int id = 0; id < nt->count; id++) {
     if (!fwd_node_is(nt, id, "CallNode")) continue;
-    const char *nm = nt_str(nt, id, "name");
-    if (!nm || !sp_streq(nm, name)) continue;
+    int skip;
+    if (!fwd_call_names(nt, id, name, &skip)) continue;
     int args = nt_ref(nt, id, "arguments");
     int ac = 0; const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &ac) : NULL;
-    if (ac >= 1 && av && fwd_node_is(nt, av[ac - 1], "KeywordHashNode")) return 1;
+    if (ac >= 1 + skip && av && fwd_node_is(nt, av[ac - 1], "KeywordHashNode")) return 1;
   }
   return 0;
 }
