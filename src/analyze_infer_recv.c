@@ -1234,7 +1234,10 @@ int infer_object_call(Compiler *c, int id, TyKind rt, TyKind *out) {
        yields the field type too (C `lvalue = v` evaluates to the lvalue). The
        codegen lowers both to a direct iv_ field access on the known layout. */
     if ((sp_streq(name, "instance_variable_get") || sp_streq(name, "instance_variable_set") ||
-         sp_streq(name, "remove_instance_variable")) && argc >= 1) {
+         sp_streq(name, "remove_instance_variable")) && argc >= 1 &&
+        /* the class's own method of the name is the call's (#4190's rule
+           for a reader, here for a def) */
+        comp_method_in_chain(c, cid, name, NULL) < 0) {
       const char *a0ty = nt_type(nt, argv[0]);
       if (a0ty && (sp_streq(a0ty, "SymbolNode") || sp_streq(a0ty, "StringNode"))) {
         const char *sym = sp_streq(a0ty, "SymbolNode")

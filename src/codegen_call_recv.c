@@ -9320,7 +9320,7 @@ int emit_object_call(Compiler *c, int id, Buf *b) {
     /* instance_variables lists the assigned slots from the class layout. */
     if (sp_streq(name, "instance_variables") && argc == 0 && ty_is_object(rt)) {
       int ivcid = ty_object_class(rt);
-      if (ivcid >= 0 && ivcid < c->nclasses) {
+      if (ivcid >= 0 && ivcid < c->nclasses && comp_method_in_chain(c, ivcid, name, NULL) < 0) {
         return emit_object_ivar_list(c, recv, ivcid, b);
       }
     }
@@ -9337,6 +9337,7 @@ int emit_object_call(Compiler *c, int id, Buf *b) {
        layout can't truly undefine a slot, so a later read still sees the field;
        an undefined name raises NameError, matching CRuby (#3020). */
     if (sp_streq(name, "remove_instance_variable") && argc == 1 && nt_type(nt, argv[0]) &&
+        comp_method_in_chain(c, cid, name, NULL) < 0 &&
         (sp_streq(nt_type(nt, argv[0]), "SymbolNode") || sp_streq(nt_type(nt, argv[0]), "StringNode"))) {
       const char *a0ty = nt_type(nt, argv[0]);
       const char *sym = sp_streq(a0ty, "SymbolNode")

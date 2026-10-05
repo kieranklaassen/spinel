@@ -2037,7 +2037,8 @@ int emit_call_display_ivar_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
   /* instance_variable_defined?(:@x / '@x') on a statically-typed object:
      the layout answers at compile time */
   if (recv >= 0 && sp_streq(name, "instance_variable_defined?") && argc == 1 &&
-      ty_is_object(rt) && nt_type(nt, argv[0]) &&
+      ty_is_object(rt) && comp_method_in_chain(c, ty_object_class(rt), name, NULL) < 0 &&
+      nt_type(nt, argv[0]) &&
       (sp_streq(nt_type(nt, argv[0]), "SymbolNode") || sp_streq(nt_type(nt, argv[0]), "StringNode"))) {
     const char *ivn = sp_streq(nt_type(nt, argv[0]), "SymbolNode")
                         ? nt_str(nt, argv[0], "value") : nt_str(nt, argv[0], "content");
@@ -2133,7 +2134,7 @@ static void emit_reflect_ivar_set(Compiler *c, int id, int recv, int value, int 
 int emit_object_ivar_call(Compiler *c, int id, const char *name, int recv, TyKind rt,
                           int cid, int argc, const int *argv, Buf *b) {
   const NodeTable *nt = c->nt;
-  if (is_ivar_access(name) &&
+  if (is_ivar_access(name) && comp_method_in_chain(c, cid, name, NULL) < 0 &&
       argc >= 1 && nt_type(nt, argv[0]) &&
       (sp_streq(nt_type(nt, argv[0]), "SymbolNode") || sp_streq(nt_type(nt, argv[0]), "StringNode"))) {
     const char *a0ty = nt_type(nt, argv[0]);
