@@ -123,6 +123,8 @@ const char *sp_re_named_capture(const mrb_regexp_pattern *pat, const char *name)
 const char *sp_re_escape(const char *src);
 mrb_regexp_pattern *sp_re_union_array(sp_PolyArray *a);
 sp_PolyArray *sp_re_scan_poly(mrb_regexp_pattern *pat, const char *str);
+const char *sp_re_scan_whole(sp_RbVal m);
+sp_PolyArray *sp_re_scan_row(sp_RbVal m);
 sp_PolyArray *sp_re_match_data(mrb_regexp_pattern *pat, const char *str);
 void sp_MatchData_scan(void *p);
 sp_MatchData *sp_re_matchdata(mrb_regexp_pattern *pat, const char *str);

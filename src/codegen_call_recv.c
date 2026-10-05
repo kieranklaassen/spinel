@@ -6651,7 +6651,7 @@ static int str_arms_pattern(Compiler *c, int id, Buf *b, const NodeTable *nt, co
     int np = 0; while (block_param_name(c, blk, np)) np++;
     int body = nt_ref(nt, blk, "body");
     int bn = 0; const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
-    int tr = ++g_tmp, tm = ++g_tmp, ti = ++g_tmp, tpat = -1;
+    int tr = ++g_tmp, tm = ++g_tmp, ti = ++g_tmp, tpat = -1, held = 0;
     emit_indent(g_pre, g_indent);
     buf_printf(g_pre, "const char *_t%d = %s;\n", tr, r);
     emit_indent(g_pre, g_indent);
@@ -6662,17 +6662,17 @@ static int str_arms_pattern(Compiler *c, int id, Buf *b, const NodeTable *nt, co
       buf_printf(g_pre, "sp_StrArray *_t%d = sp_re_scan(sp_re_pat_%d, _t%d); SP_GC_ROOT(_t%d);\n",
                  tm, re_idx, tr, tm);
     /* pattern only known at run time (an inline `Regexp.new(s)`, a local
-       holding one): the value already IS the mrb_regexp_pattern*. has_cap
-       is 0 for such a pattern, so the block param stays a whole-match
-       String -- the same shape a local bound to a capturing literal
-       already yields here (#3389). */
+       holding one): the value already IS the mrb_regexp_pattern*, and
+       whether it has groups is asked of each turn's row (sp_re_scan_poly
+       answers the whole match or the row of groups) (#3389). */
     else if (comp_ntype(c, argv[0]) == TY_REGEX) {
       /* render the pattern to a scratch buffer: `Regexp.new(s)` roots its
          own argument, and those decls go to g_pre, which must receive them
          as whole statements rather than spliced into this initializer */
       Buf eb; memset(&eb, 0, sizeof eb);
       emit_expr(c, argv[0], &eb);
-      buf_printf(g_pre, "sp_StrArray *_t%d = sp_re_scan(%s, _t%d); SP_GC_ROOT(_t%d);\n",
+      held = 1;
+      buf_printf(g_pre, "sp_PolyArray *_t%d = sp_re_scan_poly(sp_re_arg(%s, \"wrong argument type nil (expected Regexp)\"), _t%d); SP_GC_ROOT(_t%d);\n",
                  tm, eb.p ? eb.p : "NULL", tr, tm);
       free(eb.p);
     }
@@ -6724,7 +6724,38 @@ static int str_arms_pattern(Compiler *c, int id, Buf *b, const NodeTable *nt, co
                         " _t%d = sp_re_caps[1] > sp_re_caps[0] ? sp_re_caps[1] : sp_re_caps[1] + 1;\n",
                  re_idx, tr, sc_pos, sc_pos);
     }
-    if (has_cap && np >= 2) {
+    /* a Regexp held in a variable, asked each turn: several params take a
+       row's groups, or the whole match and nils where it has no group (they
+       took the whole match and nothing else, groups or not). One param is
+       typed for the whole match or for the row, so the other raises by name
+       where the body reads it. */
+    if (held && np >= 2) {
+      int trow = ++g_tmp;
+      emit_indent(g_pre, g_indent + 1);
+      buf_printf(g_pre, "sp_PolyArray *_t%d = _t%d->data[_t%d].tag == SP_TAG_STR ? NULL : (sp_PolyArray *)_t%d->data[_t%d].v.p;\n",
+                 trow, tm, ti, tm, ti);
+      for (int pj = 0; pj < np; pj++) {
+        const char *pn = rename_local(block_param_name(c, blk, pj));
+        LocalVar *plv = scope_local(comp_scope_of(c, blk), block_param_name(c, blk, pj));
+        /* a param typed before the pattern's type settled holds the group
+           boxed; one typed for neither is a nil the pattern cannot fill */
+        if (!plv || (plv->type != TY_STRING && plv->type != TY_POLY)) continue;
+        emit_indent(g_pre, g_indent + 1);
+        buf_printf(g_pre, "lv_%s = %s(", pn, plv->type == TY_POLY ? "sp_box_nullable_str" : "");
+        if (pj == 0) buf_printf(g_pre, "!_t%d ? _t%d->data[_t%d].v.s : ", trow, tm, ti);
+        buf_printf(g_pre, "(_t%d && _t%d->len > %d && _t%d->data[%d].tag == SP_TAG_STR) ? _t%d->data[%d].v.s : NULL);\n",
+                   trow, trow, pj, trow, pj, trow, pj);
+      }
+    }
+    else if (held && block_param_name(c, blk, 0)) {
+      LocalVar *plv = scope_local(comp_scope_of(c, blk), block_param_name(c, blk, 0));
+      if (body >= 0 && subtree_reads_local(nt, body, block_param_name(c, blk, 0))) {
+        emit_indent(g_pre, g_indent + 1);
+        buf_printf(g_pre, "lv_%s = %s(_t%d->data[_t%d]);\n", rename_local(block_param_name(c, blk, 0)),
+                   plv && plv->type == TY_POLY_ARRAY ? "sp_re_scan_row" : "sp_re_scan_whole", tm, ti);
+      }
+    }
+    else if (has_cap && np >= 2) {
       int trow = ++g_tmp;
       emit_indent(g_pre, g_indent + 1);
       buf_printf(g_pre, "sp_PolyArray *_t%d = (sp_PolyArray *)_t%d->data[_t%d].v.p;\n", trow, tm, ti);

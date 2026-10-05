@@ -985,6 +985,17 @@ any type converts at the call, and a key the declared type cannot hold raises
 are Symbols agrees with it and one whose keys are not diverges: the seed is a
 claim about the program, and this is where the claim is checked.
 
+**`scan` with a block asks a Regexp held in a variable for its groups at
+run time.** Whether a pattern has groups decides what the block is handed --
+each whole match, or each row of groups -- and a block parameter is typed when
+the program is compiled. A literal, and a constant or a local that names one,
+is read then. A Regexp only known at run time (a parameter, an instance
+variable, `Regexp.new`) is asked each turn: a block of two or more parameters
+takes the groups, or the whole match and nils, as CRuby does. A block of one
+parameter is typed for the whole match, so where it reads the parameter and
+the pattern turns out to have groups the call raises `NotImplementedError`
+rather than hand it the whole match.
+
 **Regexp literals share one compiled object.** Each pattern is compiled once
 at startup and every textually-equal literal names that one object, so
 `/ab/.equal?(/ab/)` is `true` (CRuby allocates per literal: `false`). Same

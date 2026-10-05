@@ -13670,17 +13670,20 @@ int infer_block_params(Compiler *c) {
       int scan_args_id = nt_ref(nt, id, "arguments");
       int scan_argc = 0;
       const int *scan_argv = scan_args_id >= 0 ? nt_arr(nt, scan_args_id, "arguments", &scan_argc) : NULL;
-      int has_cap = 0;
+      int has_cap = 0, held = 0;
       if (scan_argc == 1 && scan_argv) {
         /* through a name too: `PAT = /(\d)(\w)/; s.scan(PAT) { |a, b| }` must
            destructure the capture row exactly as the inline literal does
            (#3391) */
         const char *src = an_regex_lit_src(c, scan_argv[0]);
         if (src && an_re_has_captures(src)) has_cap = 1;
+        /* a Regexp held in a variable has its groups asked at run time */
+        if (!src && infer_type(c, scan_argv[0]) == TY_REGEX) held = 1;
       }
       /* a capturing scan yields each captures ROW (a boxed-element array);
-         multiple params destructure it into strings */
-      if (has_cap && block_param_name(c, block, 1)) {
+         multiple params destructure it into strings. So do those of a held
+         Regexp, which bind the whole match and nils where it has no group. */
+      if ((has_cap || held) && block_param_name(c, block, 1)) {
         Scope *scs = comp_scope_of(c, block);
         for (int pk = 0; ; pk++) {
           const char *pn2 = block_param_name(c, block, pk);

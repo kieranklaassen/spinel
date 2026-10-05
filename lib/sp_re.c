@@ -929,6 +929,19 @@ mrb_regexp_pattern *sp_re_union_array(sp_PolyArray *a) {
   }
   return re_compile(joined, (int64_t)sp_str_byte_len(joined), 0);
 }
+/* One turn of `scan { |m| }` over a Regexp held in a variable: the whole
+   match, or the row of groups. A block of one parameter is typed for one of
+   the two, and the pattern may turn out to yield the other. */
+const char *sp_re_scan_whole(sp_RbVal m) {
+  if (m.tag != SP_TAG_STR)
+    sp_raise_cls("NotImplementedError", "String#scan: a Regexp held in a variable yields the rows of its groups only to a block of two or more parameters");
+  return m.v.s;
+}
+sp_PolyArray *sp_re_scan_row(sp_RbVal m) {
+  if (m.tag == SP_TAG_STR)
+    sp_raise_cls("NotImplementedError", "String#scan: a Regexp held in a variable yields its whole matches only to a block typed for them");
+  return (sp_PolyArray *)m.v.p;
+}
 sp_PolyArray *sp_re_scan_poly(mrb_regexp_pattern *pat, const char *str) {
   SP_GC_ROOT_STR(str);
   if (!str) sp_nil_recv("scan");
