@@ -17,6 +17,21 @@ class Tree
     [0]
   end
 end
+# The Array that ends Shrub#each never runs with a block: the test of the
+# block before it returns first.
+class Shrub
+  def initialize
+    @kids = [4, 5]
+  end
+  def each
+    return to_enum(:each) unless block_given?
+    if block_given?
+      @kids.each { |x| yield x }
+      return self
+    end
+    [0]
+  end
+end
 class Bush
   def initialize
     @kids = [3]
@@ -28,5 +43,5 @@ class Bush
   end
 end
 $skip = false
-[Tree.new, Bush.new].each { |t| p t.each.with_index.to_a }
-[Tree.new, Bush.new].each { |t| p t.each.to_a }
+[Tree.new, Shrub.new, Bush.new].each { |t| p t.each.with_index.to_a }
+[Tree.new, Shrub.new, Bush.new].each { |t| p t.each.to_a }

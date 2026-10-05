@@ -8890,6 +8890,25 @@ static int te_blockless_return(const NodeTable *nt, int n, const char *bp) {
   return arm >= 0 && nt_kind(nt, arm) == NK_ReturnNode;
 }
 
+/* Does the subtree hold a `return`, or test the block again with
+   `block_given?`? What follows such a statement may never run with a block
+   (`if block_given? ... return self end`), whatever the guard said. */
+static int te_may_leave(const NodeTable *nt, int n, int depth) {
+  if (n < 0 || n >= nt->count || depth > 200) return 0;
+  if (nt_kind(nt, n) == NK_ReturnNode) return 1;
+  if (nt_kind(nt, n) == NK_CallNode && nt_ref(nt, n, "receiver") < 0) {
+    const char *cn = nt_str(nt, n, "name");
+    if (cn && sp_streq(cn, "block_given?")) return 1;
+  }
+  const SpNode *nd = &nt->nodes[n];
+  for (int i = 0; i < nd->nr; i++)
+    if (te_may_leave(nt, nd->r[i].ref, depth + 1)) return 1;
+  for (int i = 0; i < nd->na; i++)
+    for (int j = 0; j < nd->a[i].n; j++)
+      if (te_may_leave(nt, nd->a[i].ids[j], depth + 1)) return 1;
+  return 0;
+}
+
 /* Does a def's body answer a VALUE on some path -- a local or ivar read, a
    literal, an assignment -- as the last expression or through a `return`?
    The `each`-like idiom answers self, nil or an iterator call, whose value
@@ -8915,14 +8934,18 @@ static int te_tail_is_value(const NodeTable *nt, int n, int depth, int last, con
     case NK_StatementsNode: {
       int bn = 0; const int *bb = nt_arr(nt, n, "body", &bn);
       if (bn <= 0) return 0;
-      /* a `return v` anywhere in the list counts, the last statement is the tail */
+      /* a `return v` anywhere in the list counts, the last statement is the tail;
+         past the guard it runs with a block, unless a statement before it,
+         the guard aside, can leave first */
+      int dead = 0;
       for (int i = 0; i < bn - 1; i++) {
         if (nt_kind(nt, bb[i]) == NK_ReturnNode || nt_kind(nt, bb[i]) == NK_IfNode ||
             nt_kind(nt, bb[i]) == NK_UnlessNode)
           if (te_tail_is_value(nt, bb[i], depth + 1, 0, bp)) return 1;
-        if (last == 1 && te_blockless_return(nt, bb[i], bp)) last = 2;
+        if (te_blockless_return(nt, bb[i], bp)) { if (last == 1) last = 2; }
+        else if (te_may_leave(nt, bb[i], 0)) dead = 1;
       }
-      return te_tail_is_value(nt, bb[bn - 1], depth + 1, last, bp);
+      return te_tail_is_value(nt, bb[bn - 1], depth + 1, dead ? 0 : last, bp);
     }
     case NK_IfNode: case NK_UnlessNode: {
       /* an arm that runs without a block is not the block form */
