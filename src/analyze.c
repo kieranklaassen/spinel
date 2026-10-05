@@ -29589,10 +29589,19 @@ static void refuse_dropped_container_string_change(Compiler *c) {
     if (bk == NK_LocalVariableReadNode &&
         !an_local_string_from_container(c, b, parent, &ix, 0, how, sizeof how, &cont, &read, &bind)) continue;
     if (an_container_change_unseen(c, cont, read, bind, un, parent, &ix)) continue;
-    char msg[320];
+    /* the cure in the mutator's terms: `upcase!` is `upcase` stored back, and
+       any other change is made on a copy that is */
+    const char *el = cont >= 0 && ty_is_hash(comp_ntype(c, cont)) ? "h[k]" : "a[i]";
+    size_t ul = strlen(un);
+    char cure[128], msg[400];
+    if (ul > 1 && un[ul - 1] == '!')
+      snprintf(cure, sizeof cure, "%s = %s.%.*s%s", el, el, (int)ul - 1, un, nt_ref(nt, u, "arguments") >= 0 ? "(...)" : "");
+    else if (sp_streq(un, "<<") || sp_streq(un, "concat")) snprintf(cure, sizeof cure, "%s = %s + x", el, el);
+    else if (sp_streq(un, "prepend")) snprintf(cure, sizeof cure, "%s = x + %s", el, el);
+    else if (sp_streq(un, "[]=")) snprintf(cure, sizeof cure, "s = %s.dup; s[j] = x; %s = s", el, el);
+    else snprintf(cure, sizeof cure, "s = %s.dup; s.%s%s; %s = s", el, un, nt_ref(nt, u, "arguments") >= 0 ? "(...)" : "", el);
     snprintf(msg, sizeof msg, "a String is not yet shared by reference through %s into an in-place `%s`. "
-             "Store the new String back instead (%s)", how, un,
-             cont >= 0 && ty_is_hash(comp_ntype(c, cont)) ? "h[k] = h[k] + x" : "a[i] = a[i] + x");
+             "Store the new String back instead (%s)", how, un, cure);
     free(parent); free(ix.head); free(ix.next); free(ix.seen);
     unsupported_feature(c, u, msg);
   }

@@ -667,9 +667,9 @@ spinel: a String is not yet shared by reference through an Array's chained index
 == test/reject/string_chained_index_append.rb [promote] rc=1
 spinel: a String is not yet shared by reference through an Array's chained index into an appending block
 == test/reject/string_const_array_index_dropped_bang.rb [default] rc=1
-spinel: a String is not yet shared by reference through an Array's `[]` into an in-place `upcase!`. Store the new String back instead (a[i] = a[i] + x)
+spinel: a String is not yet shared by reference through an Array's `[]` into an in-place `upcase!`. Store the new String back instead (a[i] = a[i].upcase)
 == test/reject/string_const_array_index_dropped_bang.rb [promote] rc=1
-spinel: a String is not yet shared by reference through an Array's `[]` into an in-place `upcase!`. Store the new String back instead (a[i] = a[i] + x)
+spinel: a String is not yet shared by reference through an Array's `[]` into an in-place `upcase!`. Store the new String back instead (a[i] = a[i].upcase)
 == test/reject/string_const_fetch_default_dropped_append.rb [default] rc=1
 spinel: a String is not yet shared by reference through an Array's `fetch` into an in-place `<<`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_const_fetch_default_dropped_append.rb [promote] rc=1
@@ -683,9 +683,9 @@ spinel: a String is not yet shared by reference through an Array's `find` into a
 == test/reject/string_container_chained_write_dropped_append.rb [promote] rc=1
 spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_container_own_split_dropped_bang.rb [default] rc=1
-spinel: a String is not yet shared by reference through an Array's `[]` into an in-place `strip!`. Store the new String back instead (a[i] = a[i] + x)
+spinel: a String is not yet shared by reference through an Array's `[]` into an in-place `strip!`. Store the new String back instead (a[i] = a[i].strip)
 == test/reject/string_container_own_split_dropped_bang.rb [promote] rc=1
-spinel: a String is not yet shared by reference through an Array's `[]` into an in-place `strip!`. Store the new String back instead (a[i] = a[i] + x)
+spinel: a String is not yet shared by reference through an Array's `[]` into an in-place `strip!`. Store the new String back instead (a[i] = a[i].strip)
 == test/reject/string_container_read_block_keeps_dropped_append.rb [default] rc=1
 spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_container_read_block_keeps_dropped_append.rb [promote] rc=1
@@ -695,9 +695,9 @@ spinel: a String is not yet shared by reference through an Array's `find` into a
 == test/reject/string_container_read_in_loop_dropped_append.rb [promote] rc=1
 spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_container_read_in_loop_dropped_bytesplice.rb [default] rc=1
-spinel: a String is not yet shared by reference through an Array's `slice` into an in-place `bytesplice`. Store the new String back instead (a[i] = a[i] + x)
+spinel: a String is not yet shared by reference through an Array's `slice` into an in-place `bytesplice`. Store the new String back instead (s = a[i].dup; s.bytesplice(...); a[i] = s)
 == test/reject/string_container_read_in_loop_dropped_bytesplice.rb [promote] rc=1
-spinel: a String is not yet shared by reference through an Array's `slice` into an in-place `bytesplice`. Store the new String back instead (a[i] = a[i] + x)
+spinel: a String is not yet shared by reference through an Array's `slice` into an in-place `bytesplice`. Store the new String back instead (s = a[i].dup; s.bytesplice(...); a[i] = s)
 == test/reject/string_container_read_in_while_dropped_append.rb [default] rc=1
 spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_container_read_in_while_dropped_append.rb [promote] rc=1
@@ -973,13 +973,13 @@ spinel: a String is not yet shared by reference through a local written from an 
 == test/reject/string_local_from_read_in_loop_dropped_append.rb [promote] rc=1
 spinel: a String is not yet shared by reference through a local written from an Array's `find` into an in-place `<<`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_masgn_over_chained_write_dropped_bang.rb [default] rc=1
-spinel: a String is not yet shared by reference through a multiple assignment from an Array into an in-place `upcase!`. Store the new String back instead (a[i] = a[i] + x)
+spinel: a String is not yet shared by reference through a multiple assignment from an Array into an in-place `upcase!`. Store the new String back instead (a[i] = a[i].upcase)
 == test/reject/string_masgn_over_chained_write_dropped_bang.rb [promote] rc=1
-spinel: a String is not yet shared by reference through a multiple assignment from an Array into an in-place `upcase!`. Store the new String back instead (a[i] = a[i] + x)
+spinel: a String is not yet shared by reference through a multiple assignment from an Array into an in-place `upcase!`. Store the new String back instead (a[i] = a[i].upcase)
 == test/reject/string_masgn_target_dropped_bang.rb [default] rc=1
-spinel: a String is not yet shared by reference through a multiple assignment from an Array into an in-place `upcase!`. Store the new String back instead (a[i] = a[i] + x)
+spinel: a String is not yet shared by reference through a multiple assignment from an Array into an in-place `upcase!`. Store the new String back instead (a[i] = a[i].upcase)
 == test/reject/string_masgn_target_dropped_bang.rb [promote] rc=1
-spinel: a String is not yet shared by reference through a multiple assignment from an Array into an in-place `upcase!`. Store the new String back instead (a[i] = a[i] + x)
+spinel: a String is not yet shared by reference through a multiple assignment from an Array into an in-place `upcase!`. Store the new String back instead (a[i] = a[i].upcase)
 == test/reject/string_mutator_jump_arm.rb [default] rc=1
 spinel: unsupported expression: node N (ReturnNode)
 spinel: 1 refusal, nothing written
