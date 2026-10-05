@@ -15,4 +15,4 @@ The first and the third are the cases CodeRabbit's comments describe, seen here 
 
 The second has not been raised. `sp_srange_min_v` walks a range whose end is excluded and takes the least member; with the walk corrected `("aaa"..."zz")` has no member, so the answer is nil. CRuby's `range_min` (range.c) does not walk: with no block and no count it compares the ends.
 
-A follow-up on top of #7328 is ready if it is wanted: a traversal that can leave early no longer builds the whole range, `min` is decided by the ends, and all-digit ends walk as numbers at any width.
+A follow-up on top of #7328 can follow if it is wanted: a traversal that can leave early no longer builds the whole range, `min` is decided by the ends, and all-digit ends walk as numbers at any width.
