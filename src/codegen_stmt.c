@@ -13377,6 +13377,167 @@ static int yield_block_value_boxed(Compiler *c) {
   return bn > 0 && repr_of(c, bd[bn - 1]).kind == RK_BOXED && block_next_value_ty(c, bb) == TY_UNKNOWN;
 }
 
+/* Can the value of a method be seen to be wanted? A setter that ends in an
+   instance variable write is mostly called as a statement, and the value
+   form of a shared String write is a copy that statement would throw away.
+   One walk of the program lists every place a method's name is used, with
+   what becomes of the value there: taken, dropped, or handed on as the
+   value of the method the call ends. Taken is every use that is no plain
+   statement, and every way to a method with no call to look at: the name
+   as a Symbol or a String, an op-assign through it, `super` in a method of
+   that name. */
+enum { TAILW_TAKEN, TAILW_DROPPED, TAILW_HANDED_ON };
+typedef struct { const char *name; int how, def, call; } TailUse;
+static TailUse *g_tailw_use;
+static int g_tailw_nuse, g_tailw_cap;
+static int g_tailw_any;              /* a name built at run time: every method is wanted */
+static int *g_tailw_parent;
+static signed char *g_tailw_memo;    /* per method: 0 not asked, 1 wanted, -1 not */
+static int g_tailw_n = -1;
+static unsigned g_tailw_ver;
+int *an_parent_map(const NodeTable *nt);
+
+/* What becomes of the value of the call `u`. Dropped: a statement that is
+   not the last of its sequence, or is the last of a loop's body, of the
+   program, or of an `if` that is itself such a statement. */
+static int tail_use_of_call(const NodeTable *nt, const int *par, int u, int *def) {
+  for (;;) {
+    int p = par[u];
+    if (p < 0 || nt_kind(nt, p) != NK_StatementsNode) return TAILW_TAKEN;
+    int n = 0; const int *st = nt_arr(nt, p, "body", &n);
+    if (n > 0 && st[n - 1] != u) return TAILW_DROPPED;
+    int o = par[p];
+    const char *ot = o >= 0 ? nt_type(nt, o) : NULL;
+    if (!ot) return TAILW_TAKEN;
+    if (sp_streq(ot, "WhileNode") || sp_streq(ot, "UntilNode") || sp_streq(ot, "ProgramNode")) return TAILW_DROPPED;
+    if (sp_streq(ot, "DefNode")) { *def = o; return TAILW_HANDED_ON; }
+    if (sp_streq(ot, "ElseNode")) { o = par[o]; ot = o >= 0 ? nt_type(nt, o) : NULL; if (!ot) return TAILW_TAKEN; }
+    if (!sp_streq(ot, "IfNode") && !sp_streq(ot, "UnlessNode")) return TAILW_TAKEN;
+    u = o;
+  }
+}
+static int tail_use_cmp(const void *a, const void *b) {
+  const TailUse *x = a, *y = b;
+  int c = strcmp(x->name, y->name);
+  return c ? c : x->how - y->how;
+}
+static void tail_uses_collect(const NodeTable *nt, const int *par) {
+  g_tailw_nuse = 0; g_tailw_any = 0;
+  for (int u = 0; u < nt->count; u++) {
+    const char *un = NULL;
+    int how = TAILW_TAKEN, def = -1, call = -1;
+    switch (nt_kind(nt, u)) {
+      case NK_CallNode:
+        un = nt_str(nt, u, "name");
+        if (!un) continue;
+        call = u;
+        if (sp_streq(un, "to_sym") || sp_streq(un, "intern")) g_tailw_any = 1;
+        else if (sp_streq(un, "send") || sp_streq(un, "public_send") || sp_streq(un, "__send__") ||
+                 sp_streq(un, "method") || sp_streq(un, "public_method") || sp_streq(un, "instance_method")) {
+          int an = 0, ca = nt_ref(nt, u, "arguments");
+          const int *av = ca >= 0 ? nt_arr(nt, ca, "arguments", &an) : NULL;
+          if (an > 0 && nt_kind(nt, av[0]) != NK_SymbolNode && nt_kind(nt, av[0]) != NK_StringNode) g_tailw_any = 1;
+        }
+        /* `o.name = v` is worth v wherever it stands, never the method's value */
+        if (un[0] && !strchr("=!<>", un[0]) && un[strlen(un) - 1] == '=') how = TAILW_DROPPED;
+        else how = tail_use_of_call(nt, par, u, &def);
+        break;
+      case NK_SymbolNode: un = nt_str(nt, u, "value"); break;
+      case NK_StringNode: un = nt_str(nt, u, "content"); break;
+      case NK_InterpolatedSymbolNode: g_tailw_any = 1; continue;
+      case NK_CallOrWriteNode: case NK_CallAndWriteNode: un = nt_str(nt, u, "name"); break;
+      case NK_SuperNode: case NK_ForwardingSuperNode: {
+        int s = par[u];
+        while (s >= 0 && nt_kind(nt, s) != NK_DefNode) s = par[s];
+        un = s >= 0 ? nt_str(nt, s, "name") : NULL;
+        if (!un) g_tailw_any = 1;
+        break;
+      }
+      case NK_NONE: {
+        const char *ut = nt_type(nt, u);
+        if (ut && sp_streq(ut, "CallOperatorWriteNode")) un = nt_str(nt, u, "name");
+        break;
+      }
+      default: continue;
+    }
+    if (!un) continue;
+    if (g_tailw_nuse == g_tailw_cap) {
+      g_tailw_cap = g_tailw_cap ? g_tailw_cap * 2 : 256;
+      g_tailw_use = realloc(g_tailw_use, (size_t)g_tailw_cap * sizeof *g_tailw_use);
+      if (!g_tailw_use) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+    }
+    g_tailw_use[g_tailw_nuse++] = (TailUse){ un, how, def, call };
+  }
+  if (g_tailw_nuse) qsort(g_tailw_use, (size_t)g_tailw_nuse, sizeof *g_tailw_use, tail_use_cmp);
+}
+/* Wanted: a name the runtime calls by itself, any use that takes the value,
+   a call that ends a method whose own value is wanted. What cannot be told
+   is wanted too: a method no call names, a chain of such methods four long.
+   Never wanted: a method one of whose calls the caller takes as the handle
+   itself (a container whose elements are changed in place stores the
+   answer unwrapped). The value form's String would be read there as a
+   handle; the statement form's nil is stored as nil. */
+static int tail_name_value_wanted(Compiler *c, const char *mn, int depth) {
+  const NodeTable *nt = c->nt;
+  int lo = 0, hi = g_tailw_nuse;
+  while (lo < hi) {
+    int mid = lo + (hi - lo) / 2;
+    if (strcmp(g_tailw_use[mid].name, mn) < 0) lo = mid + 1; else hi = mid;
+  }
+  int first = lo, end = lo;
+  for (; end < g_tailw_nuse && sp_streq(g_tailw_use[end].name, mn); end++)
+    if (g_tailw_use[end].call >= 0 && repr_of(c, g_tailw_use[end].call).kind == RK_STRBUF) return 0;
+  int word = (mn[0] >= 'a' && mn[0] <= 'z') || (mn[0] >= 'A' && mn[0] <= 'Z') || mn[0] == '_';
+  if (!word || !strncmp(mn, "to_", 3) || sp_streq(mn, "inspect") || sp_streq(mn, "message") ||
+      sp_streq(mn, "full_message") || sp_streq(mn, "detailed_message") || sp_streq(mn, "method_missing")) return 1;
+  if (g_tailw_any || depth >= 4) return 1;
+  for (lo = first; lo < end; lo++) {
+    const TailUse *e = &g_tailw_use[lo];
+    if (e->how == TAILW_TAKEN) return 1;
+    if (e->how == TAILW_HANDED_ON) {
+      const char *on = nt_str(nt, e->def, "name");
+      if (!on || tail_name_value_wanted(c, on, depth + 1)) return 1;
+    }
+  }
+  return end == first;
+}
+/* The same for the method that ends in the write `w`. A write that is not
+   plainly the method's own last value (the tail of a block, of a `case`
+   arm, of a `begin` that is itself a value) cannot be told, and is wanted. */
+static int tail_write_value_wanted(Compiler *c, int w) {
+  const NodeTable *nt = c->nt;
+  if (!g_tailw_parent || g_tailw_n != nt->count || g_tailw_ver != nt->version) {
+    free(g_tailw_parent); free(g_tailw_memo);
+    g_tailw_parent = an_parent_map(nt);
+    g_tailw_memo = calloc((size_t)nt->count + 1, 1);
+    if (!g_tailw_parent || !g_tailw_memo) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+    g_tailw_n = nt->count; g_tailw_ver = nt->version;
+    tail_uses_collect(nt, g_tailw_parent);
+  }
+  const int *par = g_tailw_parent;
+  int d = w;
+  for (;;) {
+    int p = par[d];
+    const char *pt = p >= 0 ? nt_type(nt, p) : NULL;
+    if (!pt) return 1;
+    if (sp_streq(pt, "DefNode")) { d = p; break; }
+    if (sp_streq(pt, "StatementsNode")) {
+      int n = 0; const int *st = nt_arr(nt, p, "body", &n);
+      if (n == 0 || st[n - 1] != d) return 1;
+    }
+    else if (sp_streq(pt, "IfNode") || sp_streq(pt, "UnlessNode")) {
+      if (nt_ref(nt, p, "predicate") == d) return 1;
+    }
+    else if (!sp_streq(pt, "BeginNode") && !sp_streq(pt, "RescueNode") && !sp_streq(pt, "ElseNode")) return 1;
+    d = p;
+  }
+  /* asked once a method: its body is emitted again wherever it is inlined */
+  if (!g_tailw_memo[d]) {
+    const char *mn = nt_str(nt, d, "name");
+    g_tailw_memo[d] = !mn || tail_name_value_wanted(c, mn, 0) ? 1 : -1;
+  }
+  return g_tailw_memo[d] > 0;
+}
 
 void emit_stmt_tail_inner(Compiler *c, int id, Buf *b, int indent) {
   const NodeTable *nt = c->nt;
@@ -13553,6 +13714,16 @@ void emit_stmt_tail_inner(Compiler *c, int id, Buf *b, int indent) {
         else buf_printf(b, "%s;\n", islot9);
         return;
       }
+      /* A shared-handle String slot under a String return: the slot's text
+         is the handle, which that return cannot take, and the statement form
+         answered nil. The write's value form answers the slot's ordinary
+         read face, as `(@x = v)` does. That read is a copy, so it is made
+         only where the method's value can be seen to be wanted: a setter
+         called as a statement keeps the statement form. */
+      if (iidx9 >= 0 && it9 == TY_STRBUF && !want_poly8 &&
+          (g_result_var ? g_result_ty : g_ret_type) == TY_STRING &&
+          tail_write_value_wanted(c, id))
+        _iv_tail_val = 1;
     }
   }
   /* A tail LOCAL write is the method's value in Ruby (`def m; x = v; end`
