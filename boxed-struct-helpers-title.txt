@@ -1,0 +1,1 @@
+A boxed Struct is kept alive while its members are gathered
