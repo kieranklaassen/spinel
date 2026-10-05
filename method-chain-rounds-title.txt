@@ -1,0 +1,1 @@
+A chain of methods longer than the inference's round cap is typed to its end

@@ -1,0 +1,80 @@
+A chain of methods longer than the inference's round cap is typed to its end
+
+  def f1(x) = f2(x)
+  def f2(x) = f3(x)
+  ...                       # 200 methods, each answers the next one's
+  def f200(x) = x + 1
+  p f1(1)
+
+prints 2 in CRuby and printed nil, under the warning that type
+inference did not converge in 128 rounds. A type crosses one call in a
+round: a return goes up to its caller where the caller is defined
+first, a parameter down to its callee where the callee is. So the chain
+takes a round a method, and stopped at 128 the methods at the far end
+had no type: f1 to f72 returned nothing. Of 18 chain shapes at 200
+methods (instance and class methods, an explicit return, a String, an
+Array or an object answered, arithmetic on the way up, a second type
+following the first up the chain, two argument types, the callee
+defined first) 3 were right on master, 12 printed a wrong answer and 3
+did not compile, one of them refused for an append it does not make.
+
+The cap is there for an oscillation, where the round the loop stops on
+decides what is emitted. The two are told apart by where a round ends:
+an oscillation comes back to a state of types it has been in, a chain
+ends each round in a new one. From round 64 on each round's state (a
+digest of every node's, return's, local's, instance variable's,
+global's and constant's type) is kept, and the last round the cap
+allows earns one more when its state is new and the round added no
+node. A program that has stopped growing has finitely many states, so
+this ends; a rewrite undone and redone each round grows the program
+and is cut at 128 as before. No loop is given more than four rounds
+for each slot a type waits a round to cross (a return, a local, an
+instance variable, a global, a constant). The fixpoint's first stage
+settling on the cap's last round no longer costs the second stage its
+round.
+
+The re-narrowing after the fixpoint has a loop of 128 rounds of its
+own and no warning. It resets the boxed parameters, a return whose
+parameter was reset loses its type for a round, and then so does each
+caller's in turn: 160 methods called with an Integer and a String
+printed nil twice with the first loop fixed alone. It takes the same
+rule.
+
+17 of the 18 shapes are right now at 200 and at 300 methods. The
+eighteenth, a block handed down the chain, does not compile at 100
+methods either, which is another limit. A chain runs along instance
+variables the same way: 200 of them in one method, each assigned from
+the next, ran to the cap on master and settle on round 203.
+
+Measured with master b2a283d4 merged in. Nothing is computed before
+round 64, and of the 5,880 programs under test/ and benchmark/ none
+goes past round 32 but ptr_array_set_poly_value, which oscillates to
+the cap on master and still does, on the same round, to the same C;
+every other round count is the one master has.
+
+The cost is on the chains, and it has no bound in time. The bound is
+in rounds, 128 and four for each slot, and a chain never meets it: n
+methods run n + 3 rounds where master stopped at 128. A round is a
+pass over the whole program and costs what it costs on master; there
+are more of them, and a pass grows faster than the program does.
+Measured, the time grows as the chain to the power 2.4 to 2.5. To C,
+in CPU seconds, 200 methods take 0.30 where the wrong answer took
+0.21, 500 take 2.38 (0.68), 1,000 take 12.91 (1.85) and 2,000 take
+74.13 (5.18). A chain master already had right at the cap, with the
+warning (one along locals or instance variables), runs its rounds to
+the end too, for typed C where master's was boxed and no warning: 200
+such methods 0.42 for 0.28, 1,000 18.11 for 2.56. One shape pays and
+gets nothing but the warning gone: a parameter given two types down a
+chain whose callee is defined first is boxed whether the rounds end or
+are cut, so the C is byte for byte master's, and 1,000 such methods
+take 1,002 rounds for 128, 14.13 s for 1.87 s. At 127 and 128 methods
+a chain runs two or three rounds more than on master; under 127
+nothing changes. 1,000 methods with no chain settle on round 3 as
+before, in the same time.
+
+test/method_chain_long.rb is 200 methods caller first and 200 callee
+first with a String, which master refuses;
+test/method_chain_two_types_long.rb is 200 methods called with two
+types, and prints nil twice on master.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
