@@ -41,7 +41,7 @@ Not here, wrong on master and not made right:
 GATE_LINES
 ```
 
-- [ ] New tests have `.expected` files that match CRuby 4.0 run with `--enable-frozen-string-literal`
+- [x] New tests have `.expected` files that match CRuby 4.0 run with `--enable-frozen-string-literal` (4.0.7)
 - [ ] Values past 2^31 are marked `# spinel: int64` (none)
 - [ ] If optcarrot's generated C changed: callgrind numbers, checksum 59662 (it did not change: byte-identical)
 - [ ] Depends on: # (nothing)
