@@ -970,9 +970,12 @@ static int str_aset_plain_index(const NodeTable *nt, int n, int locals) {
   }
 }
 
-/* A right-hand side that is a String and cannot be nil: a literal, an
-   interpolation, or `+`, `*`, `to_s` or `dup` on a String or a number, which
-   answer one or raise. */
+/* A right-hand side that is a String and cannot be nil, by what it is:
+   - a literal or an interpolation;
+   - `to_s` on a String or a number, which answers "" for nil;
+   - `dup`, `+` and `*` by an Integer literal, where every String operand is
+     on this list itself: a String local can hold nil, `dup` answers nil for
+     it, and so does any `&.` call. */
 static int str_aset_value_never_nil(Compiler *c, int v) {
   const NodeTable *nt = c->nt;
   if (comp_ntype(c, v) != TY_STRING) return 0;
@@ -981,11 +984,24 @@ static int str_aset_value_never_nil(Compiler *c, int v) {
     return 1;
   case NK_CallNode: {
     const char *nm = nt_str(nt, v, "name");
+    const char *cop = nt_str(nt, v, "call_operator");
     int r = nt_ref(nt, v, "receiver");
     if (!nm || r < 0 || nt_ref(nt, v, "block") >= 0) return 0;
-    TyKind rt = comp_ntype(c, r);
-    if (rt != TY_STRING && rt != TY_INT && rt != TY_FLOAT) return 0;
-    return sp_streq(nm, "+") || sp_streq(nm, "*") || sp_streq(nm, "to_s") || sp_streq(nm, "dup");
+    if (cop && sp_streq(cop, "&.")) return 0;
+    /* the builtin's answer is what is proven: the program's own method of
+       that name, on a reopened String or number, can answer nil */
+    if (an_user_defines_method(c, nm)) return 0;
+    int an = nt_ref(nt, v, "arguments"), ac = 0;
+    const int *av = an >= 0 ? nt_arr(nt, an, "arguments", &ac) : NULL;
+    if (sp_streq(nm, "to_s")) {
+      TyKind rt = comp_ntype(c, r);
+      return ac == 0 && (rt == TY_STRING || rt == TY_INT || rt == TY_FLOAT);
+    }
+    if (!str_aset_value_never_nil(c, r)) return 0;
+    if (sp_streq(nm, "dup")) return ac == 0;
+    if (sp_streq(nm, "+")) return ac == 1 && str_aset_value_never_nil(c, av[0]);
+    if (sp_streq(nm, "*")) return ac == 1 && nt_kind(nt, av[0]) == NK_IntegerNode;
+    return 0;
   }
   default:
     return 0;
