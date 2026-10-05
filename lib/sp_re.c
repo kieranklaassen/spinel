@@ -368,19 +368,21 @@ sp_StrArray *sp_re_rpartition(mrb_regexp_pattern *pat, const char *str) {
     sp_StrArray_push(r, sp_str_dup(str));
     return r;
   }
+  /* Each piece goes into the rooted result as it is made: a piece held
+     only in a C local is freed by the allocation of the next one. */
   char *before = sp_str_alloc_raw(ms + 1);
   memcpy(before, str, ms); before[ms] = 0;
   sp_str_set_len(before, (size_t)ms);
+  sp_StrArray_push(r, before);
   int mlen = (int)(me - ms);
   char *mid = sp_str_alloc_raw(mlen + 1);
   memcpy(mid, str + ms, mlen); mid[mlen] = 0;
   sp_str_set_len(mid, (size_t)mlen);
+  sp_StrArray_push(r, mid);
   int alen = (int)(slen - me);
   char *after = sp_str_alloc_raw(alen + 1);
   memcpy(after, str + me, alen); after[alen] = 0;
   sp_str_set_len(after, (size_t)alen);
-  sp_StrArray_push(r, before);
-  sp_StrArray_push(r, mid);
   sp_StrArray_push(r, after);
   return r;
 }
@@ -706,6 +708,7 @@ static void split_push_slice(sp_StrArray *arr, const char *str, int64_t from, in
 
 sp_StrArray *sp_re_split_limit(mrb_regexp_pattern *pat, const char *str, sp_int limit) {SP_GC_ROOT_STR(str);if(!str)sp_nil_recv("split");
   sp_StrArray *arr = sp_StrArray_new();
+  SP_GC_ROOT(arr);
   int64_t slen = (int64_t)sp_str_byte_len(str);
 
   /* limit == 1: the whole string is the single field; "" splits to []. */
