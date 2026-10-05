@@ -1,0 +1,38 @@
+to_a and to_h on a nil in an Array or a Hash slot answer [] and {}
+
+    class C
+      def opts = (@opts ||= {a: 1})
+      def pairs = @opts.to_a
+    end
+    p C.new.pairs
+
+prints [] in CRuby and was a SIGSEGV. A nil in an Array or a Hash slot
+is a NULL pointer, and the typed emissions of the two conversions do
+not look: Hash#to_a reads the NULL's `len`; Array#to_a and Hash#to_h
+are the receiver itself, so the answer was nil for [] and {};
+Array#to_h boxed the NULL and raised NoMethodError for nil; Kernel#Array
+hands a typed Array on as it is. The nil gets there through an instance
+variable not assigned yet, an attr_reader of one, a parameter whose
+default is nil, a miss on a table of Arrays: `b.items.to_a` and
+`Array(b.items)` printed nil, `def run(opts = nil) = opts.to_a` crashed.
+
+emit_null_slot_nil_answer reads the receiver once into a temp the call
+reads. A NULL answers nil's value in the call's own type; anything
+else goes through the emission it had, so `a.to_a.equal?(a)` stays
+true. Kernel#Array takes emit_null_guarded_call. A literal receiver is
+never nil and is emitted as before.
+
+Only a call the program wrote as `x.to_a` or `x.to_h` is tested. The
+analysis renames `entries` to to_a and puts a to_a under each_slice,
+cycle, lazy and others; nil has none of those, and tested they would
+answer [] where they crash or raise now. The `entries` rename records
+the spelling (written_name), as the yield one does. 66 such calls on a
+nil slot do what they did.
+
+Test: test/nil_array_hash_slot_to_a_to_h.rb. The generated C of 139
+other programs gains the test, two to eight instructions a call: seven
+where master's loop had folded the conversion away (`t += a.to_a.size`
+over four million turns, 52,657,680 instructions for 24,657,660).
+optcarrot's is unchanged.
+
+Co-Authored-By: Claude Code

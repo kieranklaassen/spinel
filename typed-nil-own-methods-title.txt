@@ -1,0 +1,1 @@
+A nil held in a typed slot answers nil's own to_a, to_h, &, |, ^ and is_a?
