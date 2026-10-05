@@ -1689,6 +1689,19 @@ static void emit_boxed_impl(Compiler *c, int node, Buf *b) {
       RC(RF_PASS, RW_NONE);
       return;
     }
+    /* An element a boxed container hands out, read under a handle mark: its
+       own value is boxed, so it is no handle (#7462) and passes as the box
+       it is. A plain String in that box is still the String the mark asks
+       the handle of (`h[k] = h.fetch(k, +""); h[k] << x`): it is lifted
+       into one, as emit_boxed_strbuf's element arm made it while the read
+       was typed the handle, and any other value passes unchanged. */
+    if (rp.handle && strbuf_boxed_elem_read(c, node)) {
+      buf_puts(b, "sp_poly_strbuf_lift(");
+      emit_expr(c, node, b);
+      buf_puts(b, ")");
+      RC(RF_PASS, RW_NONE);
+      return;
+    }
     emit_expr(c, node, b);
     RC(RF_PASS, RW_NONE);
     return;
