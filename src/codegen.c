@@ -14413,8 +14413,9 @@ static void emit_class_machinery(const NodeTable *nt, Compiler *c, Buf *b, char 
           int an2 = 0;
           const int *aargs = anode2 >= 0 ? nt_arr(c->nt, anode2, "arguments", &an2) : NULL;
           for (int jj = 0; jj < an2; jj++) {
-            /* `include A, B` includes B first, so A is listed in front */
-            int j2 = is_prep2 ? jj : an2 - 1 - jj;
+            /* `include A, B` includes B first, so A is listed in front,
+               and `prepend A, B` prepends B first, to the same end */
+            int j2 = an2 - 1 - jj;
             const char *aty2 = nt_type(c->nt, aargs[j2]);
             const char *mname2 = (aty2 && sp_streq(aty2, "ConstantReadNode")) ? nt_str(c->nt, aargs[j2], "name") : NULL;
             if (!mname2 && aty2 && sp_streq(aty2, "ConstantPathNode")) mname2 = nt_str(c->nt, aargs[j2], "name");
