@@ -77,6 +77,26 @@ class Late
     self
   end
 end
+# Nor is a literal that ends the arm run without a block: the block form
+# answers self here too.
+class Bare
+  def visit
+    if block_given?
+      yield 10
+      self
+    else
+      return to_enum(:visit) unless $skip
+      [0]
+    end
+  end
+end
+class Twin
+  def visit
+    return to_enum(:visit) unless block_given?
+    yield 11
+    self
+  end
+end
 $skip = false
 pair = Pair.new
 r = pair.each { |x| p x }
@@ -100,3 +120,4 @@ p rest.imag.to_a
 p rest.fn { |x| x }.call
 p rest.fn.to_a
 [Early.new, Late.new].each { |t| p t.scan.with_index.to_a }
+[Bare.new, Twin.new].each { |t| p t.visit.with_index.to_a }
