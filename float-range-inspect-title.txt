@@ -1,0 +1,1 @@
+A Float Range's inspect holds the text of its first end

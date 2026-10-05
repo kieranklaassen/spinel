@@ -1,0 +1,18 @@
+A Float Range's inspect holds the text of its first end
+
+`((i + 0.25)..(i + 1.25)).inspect` began with freed bytes: once in
+200,000 calls in a plain run, and at every call under
+SPINEL_GC_STRESS=2 ("\xDB\xDB\xDB\xDB..1.25", exit 0).
+
+sp_frange_inspect makes the text of the first end, then the text of
+the last end, then joins the two with sp_sprintf. Nothing held the
+first text while the second was made. It is rooted now. An omitted
+first end is sp_str_empty there in place of "", so that the rooted
+slot always holds a String with a header. The last text needs no
+root: sp_sprintf formats into its own buffer before it allocates.
+
+to_s, an interpolation, p, puts and print of a Float Range go through
+this function, and so does the inspect of an Array or a Struct that
+holds one.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
