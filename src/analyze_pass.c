@@ -13654,6 +13654,8 @@ int infer_block_params(Compiler *c) {
       }
       pt = has_cap ? TY_POLY_ARRAY : TY_STRING;
     }
+    /* a String Range's own each binds each member, a String */
+    else if (sp_streq(name, "each") && rt == TY_STR_RANGE) pt = TY_STRING;
     else if ((sp_streq(name, "each") || ty_iter_shape(name) == TY_ITER_MAP ||
               sp_streq(name, "select") || sp_streq(name, "reject") || sp_streq(name, "filter") ||
               sp_streq(name, "find") || sp_streq(name, "detect") || sp_streq(name, "each_with_index") ||

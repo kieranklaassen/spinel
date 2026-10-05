@@ -3696,6 +3696,30 @@ int emit_inline_expr(Compiler *c, int id, Buf *b) {
   return emit_inline_call_x(c, id, b, g_indent + 1, 1);
 }
 
+/* Open a walk over the String Range `recv`, member by member: a block
+   holding the range, the walk and a loop whose body the caller emits at
+   indent + 2 with the member named `elem`, then closes with "}" at
+   indent + 1 and at indent. Each member is a copy of its own
+   (sp_str_walk_first), so a body that appends to it leaves the walk alone. */
+void emit_str_range_walk_open(Compiler *c, int recv, Buf *b, int indent, char *elem, size_t elem_sz) {
+  int tr = ++g_tmp, tw = ++g_tmp, tm = ++g_tmp;
+  emit_indent(b, indent);
+  buf_printf(b, "{ sp_StrRange _t%d = ", tr); emit_expr(c, recv, b); buf_puts(b, ";\n");
+  emit_indent(b, indent + 1);
+  buf_printf(b, "if (!_t%d.first) sp_raise_cls(\"TypeError\", \"can't iterate from NilClass\");\n", tr);
+  emit_indent(b, indent + 1);
+  buf_printf(b, "if (!_t%d.last) sp_raise_cls(\"RangeError\", \"cannot convert endless range to an array\");\n", tr);
+  emit_indent(b, indent + 1);
+  buf_printf(b, "sp_StrWalk _t%d = {0}; const char *_t%d = NULL;\n", tw, tm);
+  emit_indent(b, indent + 1);
+  buf_printf(b, "SP_GC_ROOT_STR(_t%d.cur); SP_GC_ROOT_STR(_t%d.end); SP_GC_ROOT_STR(_t%d.stop); SP_GC_ROOT_STR(_t%d);\n",
+             tw, tw, tw, tm);
+  emit_indent(b, indent + 1);
+  buf_printf(b, "for (_t%d = sp_str_walk_first(&_t%d, _t%d.first, _t%d.last, _t%d.excl); _t%d;"
+                " _t%d = sp_str_walk_next(&_t%d)) {\n", tm, tw, tr, tr, tr, tm, tm, tw);
+  snprintf(elem, elem_sz, "_t%d", tm);
+}
+
 /* Block iteration lowered to an inline C for-loop. Handles n.times,
    array.each, range.each, n.upto/downto. Returns 1 if handled. */
 /* Emit `lv_<p0> = <expr_src>` boxing if p0 is poly and src is concrete. */
@@ -5117,6 +5141,18 @@ static int iter_range_upto_arms(Compiler *c, int id, Buf *b, int indent, const N
     buf_printf(b, "for (sp_int _t%d = _t%d.first; _t%d > 0 ? _t%d <= _t%d : _t%d >= _t%d; _t%d += _t%d) {\n",
                ti0, t0, ts0, ti0, te0, ti0, te0, ti0, ts0);
     emit_loop_body(c, body, b, indent + 1);
+    emit_indent(b, indent); buf_puts(b, "}\n");
+    return 1;
+  }
+  /* ("a".."e").each { |s| ... } walks the members one at a time, as CRuby's
+     each does, so a walk left early or too long to hold builds no array.
+     String#upto with a block arrives here too, as its range's each. */
+  if (sp_streq(name, "each") && rt == TY_STR_RANGE) {
+    char elem[32];
+    emit_str_range_walk_open(c, recv, b, indent, elem, sizeof elem);
+    if (p0) emit_iter_param_assign(c, block, p0_orig, p0, TY_STRING, elem, b, indent + 2);
+    emit_loop_body(c, body, b, indent + 2);
+    emit_indent(b, indent + 1); buf_puts(b, "}\n");
     emit_indent(b, indent); buf_puts(b, "}\n");
     return 1;
   }
