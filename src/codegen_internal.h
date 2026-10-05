@@ -728,7 +728,7 @@ int emit_unknown_kwarg_raise(Compiler *c, Scope *m, const int *argv, int argc);
    because the rule was written twice and the second copy only had the typed half
    (#4425). */
 void emit_str_append_arg(Compiler *c, int arg, const char *rtext, Buf *b);
-int str_args_plain(Compiler *c, int id, const int *argv, int argc);
+int str_args_nested(Compiler *c, int id, const int *argv, int argc);
 void emit_str_args_joined(Compiler *c, const int *argv, int argc, int acc, const char *seed, Buf *b);
 void emit_str_force_encoding(Compiler *c, const char *name, const char *r, const int *argv, int argc, Buf *b);
 int rest_shortfall_required(Compiler *c, Scope *m);

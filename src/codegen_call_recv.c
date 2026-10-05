@@ -182,7 +182,7 @@ void emit_str_append_arg(Compiler *c, int arg, const char *rtext, Buf *b) {
 /* Are the arguments of the concat or prepend `id` all String literals and
    plain reads of a String? Those make nothing and run nothing, so nested in
    one C expression they lose nothing and need no order. */
-int str_args_plain(Compiler *c, int id, const int *argv, int argc) {
+static int str_args_plain(Compiler *c, int id, const int *argv, int argc) {
   for (int j = 0; j < argc; j++) {
     const char *ty = nt_type(c->nt, argv[j]);
     if (ty && sp_streq(ty, "StringNode")) continue;
@@ -232,16 +232,78 @@ static int str_arg_read_late(Compiler *c, const int *argv, int argc, int j) {
   return late;
 }
 
+/* Does the call `n` answer a String it builds, one no other name holds? A
+   builtin of String, Integer, Float or Array that the program defines for no
+   class of its own. */
+static int str_call_builds(Compiler *c, int n) {
+  static const char *const of_str[] = { "+", "*", "%", "upcase", "downcase", "capitalize", "swapcase",
+                                        "reverse", "dup", NULL };
+  const NodeTable *nt = c->nt;
+  const char *nm = nt_str(nt, n, "name");
+  int recv = nt_ref(nt, n, "receiver");
+  if (!nm || recv < 0 || nt_ref(nt, n, "block") >= 0 || recv_user_defines(c, nm)) return 0;
+  TyKind rt = comp_ntype(c, recv);
+  if (rt == TY_INT || rt == TY_FLOAT) return sp_streq(nm, "to_s");
+  if (ty_is_array(rt)) return sp_streq(nm, "join");
+  if (rt != TY_STRING) return 0;
+  for (int i = 0; of_str[i]; i++)
+    if (sp_streq(nm, of_str[i])) return 1;
+  return 0;
+}
+
+/* The value of argument `n` is made where it stands: a String literal, an
+   interpolation or a call that builds its String (str_call_builds), alone
+   or as the last statement in parentheses; or it is an Integer. */
+static int str_arg_made_here(Compiler *c, int n) {
+  const NodeTable *nt = c->nt;
+  for (;;) {
+    NodeKind k = nt_kind(nt, n);
+    if (k == NK_ParenthesesNode) n = nt_ref(nt, n, "body");
+    else if (k == NK_StatementsNode) {
+      int bn = 0; const int *body = nt_arr(nt, n, "body", &bn);
+      if (bn < 1) return 0;
+      n = body[bn - 1];
+    }
+    else if (k == NK_StringNode || k == NK_InterpolatedStringNode || comp_ntype(c, n) == TY_INT) return 1;
+    else return k == NK_CallNode && str_call_builds(c, n);
+    if (n < 0) return 0;
+  }
+}
+
+/* Do the arguments of the concat or prepend `id` stay nested in one C
+   expression, as they always were? Plain ones do (str_args_plain). So do
+   the arguments of a call where the join would read a String's text too
+   early: an argument that may be a String made before the call (a global, a
+   constant, an attribute, an element, the result of a method the program
+   defines) is followed by one that runs code, which may append to that
+   String, and Ruby reads the text when the call runs. The join reads late only a local and a String two
+   names hold (str_arg_read_late), up to 32 arguments. */
+int str_args_nested(Compiler *c, int id, const int *argv, int argc) {
+  if (argc > 32 || str_args_plain(c, id, argv, argc)) return 1;
+  for (int j = 0; j + 1 < argc; j++) {
+    if (str_arg_made_here(c, argv[j]) || operand_bound_in_order(id, argv[j])) continue;
+    if (str_arg_read_late(c, argv, argc, j)) continue;
+    char sref[192];
+    if (nt_kind(c->nt, argv[j]) == NK_LocalVariableReadNode && comp_ntype(c, argv[j]) == TY_STRING &&
+        !strbuf_slot_ref(c, argv[j], sref, sizeof sref))
+      continue;
+    for (int a = j + 1; a < argc; a++)
+      if (subtree_has_side_effect(c, argv[a])) return 1;
+  }
+  return 0;
+}
+
 /* Any other arguments are joined one statement at a time into the rooted
    temp `acc`. Nested in one C expression, the text one argument made was
    held by nothing while the next was built, and C does not say which of the
    two is built first. `seed` is what the first argument is appended to (the
    receiver's C string, for concat, where an Integer is a codepoint) or
    NULL. When an argument is read late (str_arg_read_late), the others run
-   first, each into a rooted temp of its own, and the join reads those. */
+   first, each into a rooted temp of its own, and the join reads those. At
+   most 32 arguments come here (str_args_nested). */
 void emit_str_args_joined(Compiler *c, const int *argv, int argc, int acc, const char *seed, Buf *b) {
   int held[32], late[32], nlate = 0;
-  for (int j = 0; j < argc && argc <= 32; j++) nlate += (late[j] = str_arg_read_late(c, argv, argc, j)) != 0;
+  for (int j = 0; j < argc; j++) nlate += (late[j] = str_arg_read_late(c, argv, argc, j)) != 0;
   for (int j = 0; nlate && j < argc; j++) {
     const char *ty = nt_type(c->nt, argv[j]);
     held[j] = 0;
@@ -3573,7 +3635,7 @@ static int emit_str_mutator_call(Compiler *c, int id, Buf *b, const NodeTable *n
       buf_printf(b, "({ const char *_t%d = ", trc); emit_recv_rooted(c, recv, trc, "SP_GC_ROOT_STR", b);
       char rt[24]; snprintf(rt, sizeof rt, "_t%d", trc);
       int pre = sp_streq(name, "prepend");
-      if (argc > 1 && !str_args_plain(c, id, argv, argc)) {
+      if (argc > 1 && !str_args_nested(c, id, argv, argc)) {
         emit_str_args_joined(c, argv, argc, tn2, pre ? NULL : rt, b);
         if (pre) buf_printf(b, " _t%d = sp_str_concat(_t%d, _t%d);", tn2, tn2, trc);
         buf_puts(b, " ");
