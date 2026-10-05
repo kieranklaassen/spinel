@@ -70,7 +70,9 @@ are cut, so the C is byte for byte master's, and 1,000 such methods
 take 1,002 rounds for 128, 14.13 s for 1.87 s. At 127 and 128 methods
 a chain runs two or three rounds more than on master; under 127
 nothing changes. 1,000 methods with no chain settle on round 3 as
-before, in the same time.
+before, in the same time. A fixed ceiling on rounds would bound the
+time and bring back master's warning past it; it is not in this
+change.
 
 test/method_chain_long.rb is 200 methods caller first and 200 callee
 first with a String, which master refuses;

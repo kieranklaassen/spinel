@@ -32,7 +32,7 @@ The cost is on the chains, and it has no bound in time. The bound is in rounds, 
 | 1,000, the same | 2.56 | 18.11 |
 | 1,000 methods with no chain | 0.18 | 0.17 |
 
-So a chain of 2,000 methods compiles for over a minute, and a longer one for longer; nothing stops it but its own end.
+So a chain of 2,000 methods compiles for over a minute, and a longer one for longer; nothing stops it but its own end. A fixed ceiling on rounds would bound the time and bring back master's warning past it; it is not in this change.
 
 Of the chains master had right at the cap, with the warning, seven get typed C here where master's was boxed (`sp_int sp_f200(sp_int)` for `sp_RbVal sp_f200(sp_RbVal)`). One shape pays and gets nothing but the warning gone: a parameter given two types down a chain whose callee is defined first. The parameter is boxed whether the rounds end or are cut, so the C is byte for byte master's, and 1,000 such methods take 1,002 rounds for master's 128, 14.13 s for 1.87 s. At 127 and 128 methods a chain runs two or three rounds more than on master; under 127 nothing changes.
 
