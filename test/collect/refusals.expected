@@ -654,6 +654,10 @@ spinel: a String is not yet shared by reference through an Array's `find` into a
 spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`. Store the new String back instead (s = a[i].dup; s << x; a[i] = s)
 == test/reject/string_array_find_dropped_append_codepoint.rb [promote] rc=1
 spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`. Store the new String back instead (s = a[i].dup; s << x; a[i] = s)
+== test/reject/string_array_find_dropped_aset_string_index.rb [default] rc=1
+spinel: a String is not yet shared by reference through an Array's `find` into an in-place `[]=`
+== test/reject/string_array_find_dropped_aset_string_index.rb [promote] rc=1
+spinel: a String is not yet shared by reference through an Array's `find` into an in-place `[]=`
 == test/reject/string_array_find_dropped_paren_call.rb [default] rc=1
 spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`. Store the new String back instead (a[i] = a[i] + x)
 == test/reject/string_array_find_dropped_paren_call.rb [promote] rc=1

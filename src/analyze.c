@@ -30248,7 +30248,9 @@ static void refuse_dropped_container_string_change(Compiler *c) {
        other change is made on a copy that is stored back: `slice!` answers
        the piece it cut, and `<<` takes an Integer where `+` does not. Master
        refuses that copy stored into a Hash a constant or a global holds, so
-       for a Hash it is printed only where a local or an ivar holds it. */
+       for a Hash it is printed only where a local or an ivar holds it; and
+       `s["q"] = x` or `s[/q/] = x` does nothing to a copy that is then
+       stored, so for `[]=` it is printed only for an Integer or Range index. */
     int hash = cont >= 0 && ty_is_hash(comp_ntype(c, cont));
     const char *el = hash ? "h[k]" : "a[i]";
     const char *args = blk >= 0 && nt_kind(nt, blk) == NK_BlockNode ? (ac > 0 ? "(...) { ... }" : " { ... }")
@@ -30263,6 +30265,7 @@ static void refuse_dropped_container_string_change(Compiler *c) {
     else if (hash && nt_kind(nt, an_unparen(nt, cont)) != NK_LocalVariableReadNode &&
              nt_kind(nt, an_unparen(nt, cont)) != NK_InstanceVariableReadNode) cure[0] = 0;
     else if (sp_streq(un, "<<")) snprintf(cure, sizeof cure, "s = %s.dup; s << x; %s = s", el, el);
+    else if (sp_streq(un, "[]=") && (ac < 1 || (comp_ntype(c, av[0]) != TY_INT && comp_ntype(c, av[0]) != TY_RANGE))) cure[0] = 0;
     else if (sp_streq(un, "[]=")) snprintf(cure, sizeof cure, "s = %s.dup; s[j] = x; %s = s", el, el);
     else snprintf(cure, sizeof cure, "s = %s.dup; s.%s%s; %s = s", el, un, args, el);
     snprintf(msg, sizeof msg, "a String is not yet shared by reference through %s into an in-place `%s`%s%s%s",
