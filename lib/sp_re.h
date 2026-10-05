@@ -79,6 +79,7 @@ sp_int sp_re_match(mrb_regexp_pattern *pat, const char *str);
 sp_int sp_re_match_at(mrb_regexp_pattern *pat, const char *str, sp_int pos);
 sp_int sp_re_match_next(mrb_regexp_pattern *pat, const char *str, sp_int pos);
 sp_int sp_re_rindex(mrb_regexp_pattern *pat, const char *str);
+sp_StrArray *sp_re_partition(mrb_regexp_pattern *pat, const char *str);
 sp_StrArray *sp_re_rpartition(mrb_regexp_pattern *pat, const char *str);
 sp_bool sp_re_match_p(mrb_regexp_pattern *pat, const char *str);
 sp_bool sp_re_match_p_at(mrb_regexp_pattern *pat, const char *str, sp_int pos);

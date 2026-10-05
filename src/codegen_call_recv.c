@@ -6534,14 +6534,7 @@ static int str_arms_case_search(Compiler *c, Buf *b, const NodeTable *nt, const 
   }
   else if (sp_streq(name, "partition") && argc == 1 && re_lit_index(c, argv[0]) >= 0) {
     /* [before, match, after] from the first regex match, else [s, "", ""] */
-    int tr = ++g_tmp;
-    buf_printf(b, "({ sp_StrArray *_t%d = sp_StrArray_new();"
-                  " if (sp_re_match(sp_re_pat_%d, %s) >= 0) {"
-                  " sp_StrArray_push(_t%d, sp_re_pre_match()); sp_StrArray_push(_t%d, sp_re_match_str);"
-                  " sp_StrArray_push(_t%d, sp_re_post_match()); }\nelse {"
-                  " sp_StrArray_push(_t%d, %s); sp_StrArray_push(_t%d, SPL(\"\")); sp_StrArray_push(_t%d, SPL(\"\")); }"
-                  " _t%d; })",
-               tr, re_lit_index(c, argv[0]), r, tr, tr, tr, tr, r, tr, tr, tr);
+    buf_printf(b, "sp_re_partition(sp_re_pat_%d, %s)", re_lit_index(c, argv[0]), r);
   }
   else if (sp_streq(name, "rpartition") && argc == 1 && re_lit_index(c, argv[0]) >= 0) {
     buf_printf(b, "sp_re_rpartition(sp_re_pat_%d, %s)", re_lit_index(c, argv[0]), r);

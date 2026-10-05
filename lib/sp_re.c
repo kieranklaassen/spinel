@@ -345,6 +345,25 @@ sp_int sp_re_rindex(mrb_regexp_pattern *pat, const char *str) {SP_GC_ROOT_STR(st
   /* the result is a character index; caps[] holds byte offsets */
   return last < 0 ? -1 : sp_str_count_chars(str, (size_t)last);
 }
+/* [before, match, after] from the first match, else [str, "", ""]. The
+   match is set as =~ sets it, so $~ and its pieces read it afterwards. The
+   receiver arrives once and the Array is rooted while its pieces are made. */
+sp_StrArray *sp_re_partition(mrb_regexp_pattern *pat, const char *str) {
+  SP_GC_ROOT_STR(str);
+  sp_StrArray *r = sp_StrArray_new();
+  SP_GC_ROOT(r);
+  if (sp_re_match(pat, str) >= 0) {
+    sp_StrArray_push(r, sp_re_pre_match());
+    sp_StrArray_push(r, sp_re_match_str);
+    sp_StrArray_push(r, sp_re_post_match());
+  }
+  else {
+    sp_StrArray_push(r, str);
+    sp_StrArray_push(r, SPL(""));
+    sp_StrArray_push(r, SPL(""));
+  }
+  return r;
+}
 sp_StrArray *sp_re_rpartition(mrb_regexp_pattern *pat, const char *str) {
   SP_GC_ROOT_STR(str);
   int64_t slen = (int64_t)sp_str_byte_len(str);
