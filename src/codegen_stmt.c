@@ -4124,7 +4124,8 @@ static void emit_pm_typed_assign(Compiler *c, Scope *sc, const char *lnm,
                                  const char *boxed, Buf *b, int indent) {
   LocalVar *lv = sc ? scope_local(sc, lnm) : NULL;
   TyKind ty = lv ? lv->type : TY_POLY;
-  emit_indent(b, indent); buf_printf(b, "lv_%s = ", rename_local(lnm));
+  /* through emit_scope_local_ref: a local a proc captures is in its cell */
+  emit_indent(b, indent); emit_scope_local_ref(c, sc, lnm, b); buf_puts(b, " = ");
   switch (ty) {
   case TY_INT:                   buf_printf(b, "sp_poly_to_i_or_nil(%s)", boxed); break;   /* nil is the slot's sentinel */
   case TY_BOOL:                  buf_printf(b, "sp_poly_to_i(%s)", boxed); break;
@@ -4405,7 +4406,9 @@ static const char *pm_target_name(const NodeTable *nt, int pat) {
 static void emit_pattern_bind(Compiler *c, int id, const char *lnm, TyKind pt, int t, int indent, Buf *b) {
   if (!lnm) return;
   emit_indent(b, indent);
-  buf_printf(b, "lv_%s = ", rename_local(lnm));
+  /* through emit_local_ref, here and in emit_case_match: a local a proc
+     captures is in its cell */
+  emit_local_ref(c, id, lnm, b); buf_puts(b, " = ");
   LocalVar *plv = scope_local(comp_scope_of(c, id), lnm);
   if (plv && plv->type == TY_POLY && pt != TY_POLY && pt != TY_UNKNOWN) emit_boxed_tmp(c, pt, t, b);
   else buf_printf(b, "_t%d", t);
@@ -4999,7 +5002,7 @@ void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail, int valu
           }
           else {
             emit_indent(b, body_indent);
-            buf_printf(b, "lv_%s = sp_%sHash_get(_t%d, ", rename_local(lnm), hn, arm_t);
+            emit_local_ref(c, id, lnm, b); buf_printf(b, " = sp_%sHash_get(_t%d, ", hn, arm_t);
             emit_hash_key(c, key, ty_hash_key(arm_pt), b); buf_puts(b, ");\n");
           }
         }
@@ -5058,10 +5061,10 @@ void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail, int valu
                 char rv[24]; snprintf(rv, sizeof rv, "_t%d", tr);
                 Buf bx; memset(&bx, 0, sizeof bx);
                 emit_boxed_text(c, arm_pt, rv, &bx);
-                buf_printf(b, "lv_%s = %s;\n", rename_local(rnm), bx.p ? bx.p : rv);
+                emit_local_ref(c, id, rnm, b); buf_printf(b, " = %s;\n", bx.p ? bx.p : rv);
                 free(bx.p);
               }
-              else buf_printf(b, "lv_%s = _t%d;\n", rename_local(rnm), tr);
+              else { emit_local_ref(c, id, rnm, b); buf_printf(b, " = _t%d;\n", tr); }
             }
             emit_indent(b, body_indent); buf_puts(b, "}\n");
           }
@@ -5103,7 +5106,7 @@ void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail, int valu
         const char *lnm = pm_target_name(nt, reqs[i]);
         if (!lnm) continue;
         emit_indent(b, body_indent);
-        buf_printf(b, "lv_%s = ", rename_local(lnm));
+        emit_local_ref(c, id, lnm, b); buf_puts(b, " = ");
         LocalVar *plv = scope_local(comp_scope_of(c, id), lnm);
         char gx[64]; snprintf(gx, sizeof gx, "sp_%sArray_get(_t%d, %dLL)", k, arm_t, i);
         if (plv && plv->type == TY_POLY && !sp_streq(k, "Poly")) emit_boxed_src(c, ty_array_elem(arr_t), gx, b);
@@ -5123,7 +5126,7 @@ void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail, int valu
             snprintf(sx, sizeof sx, "sp_%sArray_slice(_t%d, %dLL, _t%d->len - %dLL)",
                      k, arm_t, apn, arm_t, apn + npost);
             emit_indent(b, body_indent);
-            buf_printf(b, "lv_%s = ", rename_local(rnm));
+            emit_local_ref(c, id, rnm, b); buf_puts(b, " = ");
             /* a local shared with another arm of a different array kind holds
                the slice boxed, as the required bindings above already do */
             if (rlv && rlv->type == TY_POLY && !sp_streq(k, "Poly")) emit_boxed_src(c, arr_t, sx, b);
@@ -5137,7 +5140,7 @@ void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail, int valu
         const char *lnm = pm_target_name(nt, posts[j]);
         if (!lnm) continue;
         emit_indent(b, body_indent);
-        buf_printf(b, "lv_%s = ", rename_local(lnm));
+        emit_local_ref(c, id, lnm, b); buf_puts(b, " = ");
         LocalVar *plv = scope_local(comp_scope_of(c, id), lnm);
         char gx[80]; snprintf(gx, sizeof gx, "sp_%sArray_get(_t%d, _t%d->len - %lldLL)", k, arm_t, arm_t, (long long)(npost - j));
         if (plv && plv->type == TY_POLY && !sp_streq(k, "Poly")) emit_boxed_src(c, ty_array_elem(arr_t), gx, b);
@@ -5160,8 +5163,8 @@ void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail, int valu
           const char *lnm = nt_str(nt, inner, "name");
           if (lnm) {
             emit_indent(b, body_indent);
-            buf_printf(b, "lv_%s = sp_%sArray_slice(_t%d, 0LL, _t%d);\n",
-                       rename_local(lnm), find_k, find_arr, find_pos);
+            emit_local_ref(c, id, lnm, b);
+            buf_printf(b, " = sp_%sArray_slice(_t%d, 0LL, _t%d);\n", find_k, find_arr, find_pos);
           }
         }
       }
@@ -5174,7 +5177,7 @@ void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail, int valu
         const char *lnm = pm_target_name(nt, reqs[j]);
         if (lnm) {
           emit_indent(b, body_indent);
-          buf_printf(b, "lv_%s = ", rename_local(lnm));
+          emit_local_ref(c, id, lnm, b); buf_puts(b, " = ");
           LocalVar *plv = scope_local(comp_scope_of(c, id), lnm);
           if (plv && plv->type == TY_POLY && !sp_streq(find_k, "Poly")) emit_boxed_src(c, ty_array_elem(pt), gx, b);
           else buf_puts(b, gx);
@@ -5200,8 +5203,8 @@ void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail, int valu
           const char *rnm = nt_str(nt, inner, "name");
           if (rnm) {
             emit_indent(b, body_indent);
-            buf_printf(b, "lv_%s = sp_%sArray_slice(_t%d, _t%d + %dLL, _t%d->len - (_t%d + %dLL));\n",
-                       rename_local(rnm), find_k, find_arr, find_pos, rn, find_arr, find_pos, rn);
+            emit_local_ref(c, id, rnm, b); buf_printf(b, " = sp_%sArray_slice(_t%d, _t%d + %dLL, _t%d->len - (_t%d + %dLL));\n",
+                       find_k, find_arr, find_pos, rn, find_arr, find_pos, rn);
           }
         }
       }

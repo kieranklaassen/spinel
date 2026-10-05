@@ -3832,6 +3832,20 @@ static TyKind emit_paren_tail(Compiler *c, int paren, int tail, Buf *b) {
   emit_expr(c, tail, b);
   return tt;
 }
+/* A named capture's target, written where the local lives: a local a proc
+   captures is in its cell, not in `lv_<name>`. A cell's store is a block of
+   its own, so that the cell's write barrier (gc_wb_cells) finds each one at
+   statement position and runs after the value is in the cell, not before
+   sp_re_named_capture allocates it. */
+static void emit_named_capture_store(Compiler *c, int target, const char *tnm, int reidx, Buf *b) {
+  Buf ref; memset(&ref, 0, sizeof ref);
+  emit_local_ref(c, target, tnm, &ref);
+  int cell = strncmp(ref.p, "lv_", 3) != 0;
+  buf_printf(b, "%s%s = sp_re_named_capture(sp_re_pat_%d, ", cell ? "{ " : "", ref.p, reidx);
+  emit_str_literal(b, tnm);
+  buf_puts(b, cell ? "); } " : "); ");
+  free(ref.p);
+}
 static void emit_expr_node(Compiler *c, int id, Buf *b) {
   const NodeTable *nt = c->nt;
   const char *ty = nt_type(nt, id);
@@ -3959,9 +3973,7 @@ static void emit_expr_node(Compiler *c, int id, Buf *b) {
     for (int ti = 0; ti < tcount; ti++) {
       const char *tnm = nt_str(nt, tv[ti], "name");
       if (!tnm) continue;
-      buf_printf(b, "lv_%s = sp_re_named_capture(sp_re_pat_%d, ", rename_local(tnm), reidx);
-      emit_str_literal(b, tnm);
-      buf_puts(b, "); ");
+      emit_named_capture_store(c, tv[ti], tnm, reidx, b);
     }
     buf_printf(b, "_t%d; })", t);
     return;
