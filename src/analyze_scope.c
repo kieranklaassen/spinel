@@ -6632,11 +6632,16 @@ static void process_prepend_body(Compiler *c, int ci, int body) {
 /* For each class, find `prepend M` in ALL class bodies, the reopenings
    included, the same two passes register_includes makes (#4200). */
 void register_prepends(Compiler *c) {
+  int snap = c->nscopes;
   int *bci, *bnode;
   int nb = class_body_list(c, &bci, &bnode);
   for (int b = 0; b < nb; b++) process_prepend_body(c, bci[b], bnode[b]);
   free(bci);
   free(bnode);
+  /* The cloned bodies introduced new local nodes; intern them, as the
+     include and extend clones are. Left out, a local written in a prepended
+     method had no declaration and the C did not build. */
+  if (c->nscopes > snap) register_locals(c);
 }
 
 /* Merge inherited ivar/reader/writer NAMES into subclasses so the struct
