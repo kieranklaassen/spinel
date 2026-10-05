@@ -136,6 +136,7 @@ int nullable_int_value(Compiler *c, int id);
 int nullable_int_value_raw(Compiler *c, int id);
 int scalar_nil_only_call(Compiler *c, int id, TyKind rt);
 int nullable_scalar_nil_only_call(Compiler *c, int id);
+int null_slot_nil_only_call(Compiler *c, int id, TyKind rt);
 int nullable_int_elem_read(Compiler *c, int call);
 int nullable_int_elem_array(Compiler *c, int node);
 TyKind tuple_elem_read_type(Compiler *c, int node);

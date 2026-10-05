@@ -6117,6 +6117,10 @@ static int infer_last_resort_call(Compiler *c, int id, const NodeTable *nt, cons
       if (r != TY_UNKNOWN) { *out = r; return 1; }
     }
   }
+  /* nil's to_a, to_h, &, | and ^ on a slot whose nil is NULL, of a class
+     that has none of them: typed as nil's answer, boxed, as the same names
+     are on an Integer or a Float (scalar_nil_only_call) */
+  if (null_slot_nil_only_call(c, id, rt)) { *out = TY_POLY; return 1; }
   return 0;
 }
 

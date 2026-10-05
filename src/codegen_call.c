@@ -18157,6 +18157,64 @@ static void emit_call_held(Compiler *c, int id, Buf *b);
    through a copy of the node, so a depth rather than the node id */
 int g_setter_value_inner = 0;
 
+/* null_slot_nil_only_call's names on a call nothing answers: the receiver's
+   class has no such method, so the call's own emission is the gate's
+   NoMethodError, raised for a nil in the slot too. A NULL is nil, which
+   answers: [] and {}, false for `&`, the argument's truth for `|` and `^`.
+   Any other value raises as it did. The call is emitted once to see that
+   the gate is what answers it, and that emission is taken back. */
+static int g_null_only_id = -1, g_null_only_raises = 0;
+static int probe_null_slot_call(Compiler *c, int id, Buf *b) {
+  int sv = g_null_only_id; g_null_only_id = id;
+  emit_call_held(c, id, b);
+  g_null_only_id = sv;
+  g_null_only_raises = b->p && strncmp(b->p, "sp_raise_nomethod(", 18) == 0;
+  return 0;
+}
+static int emit_null_slot_nil_only(Compiler *c, int id, Buf *b) {
+  const NodeTable *nt = c->nt;
+  int recv = nt_ref(nt, id, "receiver");
+  if (id == g_null_only_id || recv < 0 || comp_ntype(c, id) != TY_POLY) return 0;
+  TyKind rt = comp_ntype(c, recv);
+  if (!null_slot_nil_only_call(c, id, rt) || !node_may_be_null_nil(c, recv)) return 0;
+  const char *nm = nt_str(nt, id, "name");
+  /* a method the program adds to NilClass answers for the nil slot */
+  int ncid = comp_class_index(c, "NilClass");
+  if (ncid >= 0 && comp_method_in_chain(c, ncid, nm, NULL) >= 0) return 0;
+  Buf pb; memset(&pb, 0, sizeof pb);
+  int saved_tmp = g_tmp;
+  (void)emit_or_take_back(c, id, &pb, probe_null_slot_call);
+  g_tmp = saved_tmp;
+  free(pb.p);
+  if (!g_null_only_raises) return 0;
+  int argc = 0; const int *argv = call_args(nt, id, &argc);
+  int tr = ++g_tmp, ta = -1;
+  buf_puts(b, "({ "); emit_ctype(c, rt, b);
+  buf_printf(b, " _t%d = ", tr); emit_expr(c, recv, b); buf_puts(b, "; ");
+  if (argc == 1) {
+    /* the argument after the receiver, setup and all (emit_split_pre), the
+       receiver held across it */
+    Buf ap; memset(&ap, 0, sizeof ap);
+    Buf av; memset(&av, 0, sizeof av);
+    emit_split_pre(c, argv[0], emit_boxed, &ap, &av);
+    ta = ++g_tmp;
+    buf_printf(b, "SP_GC_ROOT(_t%d); %ssp_RbVal _t%d = %s; ", tr, ap.p ? ap.p : "", ta, av.p ? av.p : "sp_box_nil()");
+    free(ap.p); free(av.p);
+  }
+  buf_printf(b, "_t%d == NULL ? ", tr);
+  if (sp_streq(nm, "to_a")) buf_puts(b, "sp_box_poly_array(sp_PolyArray_new())");
+  else if (sp_streq(nm, "to_h")) buf_puts(b, "sp_box_obj(sp_PolyPolyHash_new(), SP_BUILTIN_POLY_POLY_HASH)");
+  else if (sp_streq(nm, "&")) buf_puts(b, "sp_box_bool(0)");
+  else buf_printf(b, "sp_box_bool(sp_poly_truthy(_t%d))", ta);
+  buf_printf(b, " : sp_raise_nomethod(sp_nomethod_msg_args(\"%s\", ", nm);
+  int slot = view_bind(recv, "_t%d", tr);
+  emit_boxed(c, recv, b);
+  view_unbind(slot);
+  if (argc == 1) buf_printf(b, ", 1, (sp_RbVal[]){_t%d})); })", ta);
+  else buf_puts(b, ", 0, (sp_RbVal[]){sp_box_nil()})); })");
+  return 1;
+}
+
 /* Every String a call's operands convert to is declared in a rooted temp in
    front of the call, inside one statement expression, so a #to_path that
    builds its answer survives the next operand's conversion and the callee's
@@ -20323,6 +20381,7 @@ static void emit_call_held(Compiler *c, int id, Buf *b) {
     view_unbind(g_n_argov - 1);
     return;
   }
+  if (emit_or_take_back(c, id, b, emit_null_slot_nil_only)) return;
   ConvHold hold; memset(&hold, 0, sizeof hold);
   ConvHold *saved = g_conv_hold;
   size_t pre_mark = g_pre ? g_pre->len : 0;

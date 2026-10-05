@@ -1,0 +1,47 @@
+arg true
+arg 1
+arg nil
+arg false
+arg :x
+[]
+{}
+false
+true
+false
+false
+true
+arg true
+arg 1
+arg nil
+[]
+{}
+false
+true
+false
+arg true
+arg 1
+arg nil
+arg 1
+false
+true
+false
+true
+0
+true
+"[]{}"
+arg true
+arg 1
+arg nil
+arg 1
+[[], false, {}, true, false, true]
+arg true
+arg 1
+arg nil
+arg 1
+[[:to_a, [], String], [:&, [true], String], [:to_h, [], Peer], [:|, [1], Peer], [:^, [nil], Hash], [:^, [1], Array]]
+[[], {}, false, true, true]
+:raised
+[]
+{}
+false
+true
