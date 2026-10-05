@@ -205,9 +205,9 @@ spinel: 1 refusal, nothing written
 spinel: a Complex component given an Integer past 64 bits, which no conversion keeps in its sp_float slot
 spinel: 1 refusal, nothing written
 == test/reject/concat_args_value_retained_append.rb [default] rc=1
-spinel: the value of concat is kept in r and then changed in place (<<): a String is not yet shared by reference through that value
+spinel: the value of concat is kept in r and then changed in place (<<): a String is not yet shared by reference through that value. Change s itself instead of r
 == test/reject/concat_args_value_retained_append.rb [promote] rc=1
-spinel: the value of concat is kept in r and then changed in place (<<): a String is not yet shared by reference through that value
+spinel: the value of concat is kept in r and then changed in place (<<): a String is not yet shared by reference through that value. Change s itself instead of r
 == test/reject/const_get_runtime_name.rb [default] rc=1
 spinel: unsupported const_get with a name known only at run time and no class or module receiver (an instance has no const_get; constants are resolved at compile time): node N (CallNode `const_get`) recv=-/ty-1 argc=1 arg0ty6
 == test/reject/const_get_runtime_name.rb [promote] rc=1

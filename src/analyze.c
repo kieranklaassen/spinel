@@ -29035,20 +29035,16 @@ static int an_kept_bang_receiver_read_again(Compiler *c, int call, KeptBangTabs 
    variable, a parameter given a constant or an Array's element), and a
    parameter given a Struct member does not build. NULL where the rewrite
    itself does not hold, and the sentence stops before it: a change made
-   on an Array's element is lost as the kept value's is, not every call
-   builds on the value of a call (a reader), and `s.concat(a, b)` as a
-   statement does not build on a String two names hold. A second name for
-   the receiver (`s.upcase!; r = s`) is no cure either: it is a copy when
-   the receiver is a global, a class variable, a constant or a block
+   on an Array's element is lost as the kept value's is, and not every
+   call builds on the value of a call (a reader). A second name for the
+   receiver (`s.upcase!; r = s`) is no cure either: it is a copy when the
+   receiver is a global, a class variable, a constant or a block
    parameter. Nothing is said when the program defines a method of the
    name: its value may be a String of its own, and the program right as it
    stands. */
 static const char *an_kept_bang_cure(Compiler *c, int call) {
   const NodeTable *nt = c->nt;
-  const char *nm = nt_str(nt, call, "name");
-  int a = nt_ref(nt, call, "arguments"), ac = 0;
-  if (a >= 0) nt_arr(nt, a, "arguments", &ac);
-  if ((ac >= 2 && sp_streq(nm, "concat")) || an_any_scope_by_name(c, nm) >= 0) return NULL;
+  if (an_any_scope_by_name(c, nt_str(nt, call, "name")) >= 0) return NULL;
   int recv = an_unparen(nt, nt_ref(nt, call, "receiver"));
   switch (nt_kind(nt, recv)) {
     case NK_LocalVariableReadNode: case NK_InstanceVariableReadNode: case NK_GlobalVariableReadNode:
