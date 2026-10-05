@@ -16944,7 +16944,7 @@ static int promote_shared_stored_strings(Compiler *c) {
     /* The links are counted, then walked again to be marked: a chain has no
        longest length. Kept in an array of 16, a chain of 17 was left unmarked
        whole, r took a copy, and obj.buf kept its first link only. */
-    int nl = 0;
+    int nl = 0, slow = 0;
     int top = nt_ref(nt, w, "value");
     int cur = top;
     while (cur >= 0 && nt_kind(nt, cur) == NK_CallNode &&
@@ -16955,8 +16955,16 @@ static int promote_shared_stored_strings(Compiler *c) {
       if (!an || !((aac == 1 && (sp_streq(an, "<<") || sp_streq(an, "concat") ||
                                  sp_streq(an, "prepend") || sp_streq(an, "replace"))) ||
                    (aac == 0 && sp_streq(an, "clear")))) break;
+      if (sp_streq(an, "prepend") || sp_streq(an, "replace")) slow = 1;
       nl++;
       cur = nt_ref(nt, cur, "receiver");
+    }
+    /* A chain holding a prepend or a replace keeps the walk of 16: a marked
+       link of either kind emits its receiver more than once, so each link
+       doubled the compile and a chain of 23 did not finish. */
+    if (slow && nl > 16) {
+      nl = 16; cur = top;
+      for (int k = 0; k < 16; k++) cur = nt_ref(nt, cur, "receiver");
     }
     if (nl == 0 || cur < 0 || nt_kind(nt, cur) != NK_CallNode || !c->strbuf_box[cur]) continue;
     const char *lname3 = nt_str(nt, w, "name");
