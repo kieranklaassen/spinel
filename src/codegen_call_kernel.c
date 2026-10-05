@@ -444,11 +444,15 @@ int emit_call_kernel_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
     }
     if (sp_streq(name, "Array") && ac == 1) {
       /* an argument already typed as an array is returned as-is (identity and
-         element type preserved); a statically scalar argument wraps into a typed
+         element type preserved), a nil in its slot as the empty array
+         Array(nil) is; a statically scalar argument wraps into a typed
          one-element array (matching the precise inference); everything else
          routes through the runtime coercion, which yields a poly array. */
       TyKind at = comp_ntype(c, av[0]);
-      if (ty_is_array(at)) emit_expr(c, av[0], b);
+      if (ty_is_array(at)) {
+        char e[40]; snprintf(e, sizeof e, "sp_%sArray_new()", array_iter_kind(at));
+        emit_null_guarded_call(c, av[0], at, "", e, b);
+      }
       else if (at == TY_RANGE) {
         /* Array(range) enumerates it */
         int tr6 = ++g_tmp;

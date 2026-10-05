@@ -20238,8 +20238,63 @@ static int emit_at_without_array(Compiler *c, int id, Buf *b) {
   return 1;
 }
 
+/* `x.to_a` and `x.to_h` on an Array or a Hash slot, whose nil is NULL: nil
+   answers both, with [] and {}, where the typed emission read the NULL
+   pointer (Hash#to_a crashed on `->len`), answered it (Array#to_a and
+   Hash#to_h are the receiver, so the answer was nil) or boxed it and raised
+   (Array#to_h). The receiver is read once into a temp the call reads; a
+   NULL answers nil's value in the call's own type, and anything else goes
+   through the emission it had. */
+static int g_null_conv_id = -1;
+static int emit_null_slot_nil_answer(Compiler *c, int id, Buf *b) {
+  const NodeTable *nt = c->nt;
+  if (id == g_null_conv_id || g_n_argov >= MAX_ARG_OVERRIDE) return 0;
+  const char *nm = nt_str(nt, id, "name");
+  int recv = nt_ref(nt, id, "receiver");
+  if (!nm || recv < 0 || nt_ref(nt, id, "block") >= 0) return 0;
+  int to_a = sp_streq(nm, "to_a");
+  if (!to_a && !sp_streq(nm, "to_h")) return 0;
+  /* only a call the program wrote with these names: nil has no `entries`,
+     and a to_a the analysis put under each_slice or cycle stands for a
+     method nil lacks */
+  const char *op = nt_str(nt, id, "call_operator");
+  if (!op || !sp_streq(op, ".") || nt_str(nt, id, "written_name")) return 0;
+  int argc = 0; (void)call_args(nt, id, &argc);
+  if (argc != 0) return 0;
+  TyKind rt = comp_ntype(c, recv), ct = comp_ntype(c, id);
+  if (!ty_is_array(rt) && !ty_is_ptr_array(rt) && !ty_is_hash(rt)) return 0;
+  if (!node_may_be_null_nil(c, recv)) return 0;
+  /* a method the program adds to NilClass answers for the nil slot */
+  int ncid = comp_class_index(c, "NilClass");
+  if (ncid >= 0 && comp_method_in_chain(c, ncid, nm, NULL) >= 0) return 0;
+  char ans[96];
+  if (ct == TY_POLY)
+    snprintf(ans, sizeof ans, "%s", to_a ? "sp_box_poly_array(sp_PolyArray_new())"
+                                         : "sp_box_obj(sp_PolyPolyHash_new(), SP_BUILTIN_POLY_POLY_HASH)");
+  else if (to_a && array_iter_kind(ct)) snprintf(ans, sizeof ans, "sp_%sArray_new()", array_iter_kind(ct));
+  else if (!to_a && ty_is_hash(ct)) snprintf(ans, sizeof ans, "sp_%sHash_new()", ty_hash_cname(ct));
+  else return 0;
+  int t = ++g_tmp;
+  Buf rb = expr_buf(c, recv);
+  buf_puts(b, "({ "); emit_ctype(c, rt, b);
+  buf_printf(b, " _t%d = %s; _t%d ? ", t, rb.p ? rb.p : "NULL", t);
+  free(rb.p);
+  /* work the call hoists ahead of its statement would read the temp there,
+     in front of this test: such a call is left as it was */
+  size_t pre0 = g_pre ? g_pre->len : 0;
+  int slot = view_bind(recv, "_t%d", t);
+  int sv = g_null_conv_id; g_null_conv_id = id;
+  emit_call_held(c, id, b);
+  g_null_conv_id = sv;
+  view_unbind(slot);
+  if (g_pre && g_pre->len > pre0) { g_tmp = t - 1; return 0; }
+  buf_printf(b, " : %s; })", ans);
+  return 1;
+}
+
 static void emit_call_held(Compiler *c, int id, Buf *b) {
   if (emit_or_take_back(c, id, b, emit_at_without_array)) return;
+  if (emit_or_take_back(c, id, b, emit_null_slot_nil_answer)) return;
   if (emit_or_take_back(c, id, b, emit_boxed_class_aref)) return;
   /* a tuple element read typed as the element itself: the read answers the
      boxed element, unboxed here */
