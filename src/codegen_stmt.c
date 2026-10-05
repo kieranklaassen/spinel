@@ -14036,18 +14036,17 @@ static int str_mutate_reassign_arms(Compiler *c, Buf *b, int indent, const NodeT
        being read as a number. */
     if (assignable && sp_streq(name, "[]=") && argc == 2 &&
         (comp_ntype(c, argv[0]) == TY_INT || comp_ntype(c, argv[0]) == TY_POLY)) {
-      int ti = ++g_tmp;
+      int ti = ++g_tmp, tv = ++g_tmp;
       emit_indent(b, indent); buf_puts(b, "sp_str_check_mutable("); emit_expr(c, recv, b); buf_puts(b, ");\n");
       emit_indent(b, indent);
+      /* through sp_str_splice_at, which keeps each piece rooted while the
+         next is built; the index is read ahead of the value, and the value
+         ahead of the receiver, so a value that changes the receiver is seen
+         whichever order the C compiler reads a call's arguments in */
       buf_printf(b, "{ sp_int _t%d = ", ti); emit_int_expr(c, argv[0], b);
-      buf_printf(b, "; sp_int _len%d = (sp_int)sp_str_length(", ti); emit_expr(c, recv, b); buf_puts(b, ");");
-      buf_printf(b, " sp_int _a%d = _t%d < 0 ? _t%d + _len%d : _t%d;", ti, ti, ti, ti, ti);
-      buf_printf(b, " if (_a%d < 0 || _a%d > _len%d) sp_raise_cls(\"IndexError\", sp_sprintf(\"index %%lld out of string\", (long long)_t%d));",
-                 ti, ti, ti, ti);
-      buf_puts(b, " "); emit_expr(c, recv, b); buf_puts(b, " = sp_str_concat(sp_str_concat(sp_str_sub_range(");
-      emit_expr(c, recv, b); buf_printf(b, ", 0, _a%d), ", ti); emit_str_expr(c, argv[1], b);
-      buf_printf(b, "), sp_str_sub_range("); emit_expr(c, recv, b);
-      buf_printf(b, ", _a%d + 1 < _len%d ? _a%d + 1 : _len%d, _len%d)); }\n", ti, ti, ti, ti, ti);
+      buf_printf(b, "; const char *_t%d = ", tv); emit_str_expr(c, argv[1], b); buf_puts(b, "; ");
+      emit_expr(c, recv, b); buf_puts(b, " = sp_str_splice_at("); emit_expr(c, recv, b);
+      buf_printf(b, ", _t%d, 1, _t%d, 0); }\n", ti, tv);
       return 1;
     }
     /* s[range] = v: splice over the range's char span (negative n inserts) */
