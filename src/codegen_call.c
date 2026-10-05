@@ -18160,31 +18160,40 @@ int g_setter_value_inner = 0;
 /* null_slot_nil_only_call's names on a call nothing answers: the receiver's
    class has no such method, so the call's own emission is the gate's
    NoMethodError, raised for a nil in the slot too. A NULL is nil, which
-   answers: [] and {}, false for `&`, the argument's truth for `|` and `^`.
-   Any other value raises as it did. The call is emitted once to see that
-   the gate is what answers it, and that emission is taken back. What it saw
-   is kept by node and receiver type: a call in another's operand is emitted
-   again with each emission of the call around it, and probing it each time
-   doubled the work at every level of `s | (s | (s | t))`. */
+   answers: [] and {}, 0 and 0.0, false for `&`, the argument's truth for
+   `|` and `^`. Any other value raises as it did. The call is emitted once
+   to see that the gate is what answers it, and that emission is taken
+   back. What it saw is kept by node and receiver type: a call in another's
+   operand is emitted again with each emission of the call around it, and
+   probing it each time doubled the work at every level of
+   `s | (s | (s | t))`. to_i and to_f are typed Integer and Float for any
+   receiver, where the gate's raise is the other of its two spellings. */
 static int g_null_only_id = -1, g_null_only_raises = 0;
 static int *g_null_only_seen = NULL, g_null_only_cap = 0;
 static int probe_null_slot_call(Compiler *c, int id, Buf *b) {
   int sv = g_null_only_id; g_null_only_id = id;
   emit_call_held(c, id, b);
   g_null_only_id = sv;
-  g_null_only_raises = b->p && strncmp(b->p, "sp_raise_nomethod(", 18) == 0;
+  g_null_only_raises = b->p && (strncmp(b->p, "sp_raise_nomethod(", 18) == 0 ||
+                                strncmp(b->p, "(sp_raise_cls(\"NoMethodError\", ", 31) == 0);
   return 0;
 }
 static int emit_null_slot_nil_only(Compiler *c, int id, Buf *b) {
   const NodeTable *nt = c->nt;
   int recv = nt_ref(nt, id, "receiver");
-  if (id == g_null_only_id || recv < 0 || comp_ntype(c, id) != TY_POLY) return 0;
-  TyKind rt = comp_ntype(c, recv);
+  if (id == g_null_only_id || recv < 0) return 0;
+  TyKind rt = comp_ntype(c, recv), ct = comp_ntype(c, id);
   if (!null_slot_nil_only_call(c, id, rt) || !node_may_be_null_nil(c, recv)) return 0;
   const char *nm = nt_str(nt, id, "name");
+  /* the value of the call's own type the raise arm never hands on */
+  const char *typed = ct == TY_INT && sp_streq(nm, "to_i") ? "(sp_int)0"
+                    : ct == TY_FLOAT && sp_streq(nm, "to_f") ? "0.0" : NULL;
+  if (ct != TY_POLY && !typed) return 0;
   /* a method the program adds to NilClass answers for the nil slot */
   int ncid = comp_class_index(c, "NilClass");
   if (ncid >= 0 && comp_method_in_chain(c, ncid, nm, NULL) >= 0) return 0;
+  /* a class with the method answers; it needs no probe */
+  if (ty_is_object(rt) && comp_method_in_chain(c, ty_object_class(rt), nm, NULL) >= 0) return 0;
   if (g_null_only_cap != nt->count) {
     free(g_null_only_seen);
     g_null_only_seen = calloc((size_t)nt->count + 1, sizeof *g_null_only_seen);
@@ -18216,16 +18225,21 @@ static int emit_null_slot_nil_only(Compiler *c, int id, Buf *b) {
     free(ap.p); free(av.p);
   }
   buf_printf(b, "_t%d == NULL ? ", tr);
-  if (sp_streq(nm, "to_a")) buf_puts(b, "sp_box_poly_array(sp_PolyArray_new())");
+  if (typed) buf_puts(b, typed);
+  else if (sp_streq(nm, "to_a")) buf_puts(b, "sp_box_poly_array(sp_PolyArray_new())");
   else if (sp_streq(nm, "to_h")) buf_puts(b, "sp_box_obj(sp_PolyPolyHash_new(), SP_BUILTIN_POLY_POLY_HASH)");
+  else if (sp_streq(nm, "to_i")) buf_puts(b, "sp_box_int(0)");
+  else if (sp_streq(nm, "to_f")) buf_puts(b, "sp_box_float(0.0)");
   else if (sp_streq(nm, "&")) buf_puts(b, "sp_box_bool(0)");
   else buf_printf(b, "sp_box_bool(sp_poly_truthy(_t%d))", ta);
-  buf_printf(b, " : sp_raise_nomethod(sp_nomethod_msg_args(\"%s\", ", nm);
+  buf_printf(b, " : (sp_raise_nomethod(sp_nomethod_msg_args(\"%s\", ", nm);
   int slot = view_bind(recv, "_t%d", tr);
   emit_boxed(c, recv, b);
   view_unbind(slot);
-  if (argc == 1) buf_printf(b, ", 1, (sp_RbVal[]){_t%d})); })", ta);
-  else buf_puts(b, ", 0, (sp_RbVal[]){sp_box_nil()})); })");
+  if (argc == 1) buf_printf(b, ", 1, (sp_RbVal[]){_t%d}))", ta);
+  else buf_puts(b, ", 0, (sp_RbVal[]){sp_box_nil()}))");
+  if (typed) buf_printf(b, ", %s); })", typed);
+  else buf_puts(b, "); })");
   return 1;
 }
 
