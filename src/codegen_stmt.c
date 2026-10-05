@@ -13855,13 +13855,16 @@ static int str_mutate_reassign_arms(Compiler *c, Buf *b, int indent, const NodeT
     if (assignable && sp_streq(name, "insert") && argc == 2) {
       /* insert(i, x) through sp_str_insert, as the value form: it raises for
          an index past either end and for a frozen receiver. The index is
-         read ahead of the text. */
-      int ti = ++g_tmp;
+         read ahead of the text, and the text ahead of the receiver: a text
+         that changes the receiver (`s.insert(1, (s << "ef"; "x"))`) is
+         seen, where two arguments of one call are read in the order the C
+         compiler picks. */
+      int ti = ++g_tmp, tx = ++g_tmp;
       emit_indent(b, indent);
-      buf_printf(b, "{ sp_int _t%d = ", ti); emit_int_expr(c, argv[0], b); buf_puts(b, "; ");
+      buf_printf(b, "{ sp_int _t%d = ", ti); emit_int_expr(c, argv[0], b);
+      buf_printf(b, "; const char *_t%d = ", tx); emit_str_insert_text(c, argv[1], b); buf_puts(b, "; ");
       emit_expr(c, recv, b); buf_puts(b, " = sp_str_insert("); emit_expr(c, recv, b);
-      buf_printf(b, ", _t%d, ", ti); emit_str_insert_text(c, argv[1], b);
-      buf_puts(b, "); }\n");
+      buf_printf(b, ", _t%d, _t%d); }\n", ti, tx);
       return 1;
     }
     if ((sp_streq(name, "delete_prefix!") || sp_streq(name, "delete_suffix!")) && argc == 1) {
@@ -13914,15 +13917,17 @@ static int str_mutate_reassign_arms(Compiler *c, Buf *b, int indent, const NodeT
        being read as a number. */
     if (assignable && sp_streq(name, "[]=") && argc == 2 &&
         (comp_ntype(c, argv[0]) == TY_INT || comp_ntype(c, argv[0]) == TY_POLY)) {
-      int ti = ++g_tmp;
+      int ti = ++g_tmp, tv = ++g_tmp;
       emit_indent(b, indent); buf_puts(b, "sp_str_check_mutable("); emit_expr(c, recv, b); buf_puts(b, ");\n");
       emit_indent(b, indent);
       /* through sp_str_splice_at, which keeps each piece rooted while the
-         next is built; the index is read ahead of the value */
-      buf_printf(b, "{ sp_int _t%d = ", ti); emit_int_expr(c, argv[0], b); buf_puts(b, "; ");
+         next is built; the index is read ahead of the value, and the value
+         ahead of the receiver, so a value that changes the receiver is seen
+         whichever order the C compiler reads a call's arguments in */
+      buf_printf(b, "{ sp_int _t%d = ", ti); emit_int_expr(c, argv[0], b);
+      buf_printf(b, "; const char *_t%d = ", tv); emit_str_expr(c, argv[1], b); buf_puts(b, "; ");
       emit_expr(c, recv, b); buf_puts(b, " = sp_str_splice_at("); emit_expr(c, recv, b);
-      buf_printf(b, ", _t%d, 1, ", ti); emit_str_expr(c, argv[1], b);
-      buf_puts(b, ", 0); }\n");
+      buf_printf(b, ", _t%d, 1, _t%d, 0); }\n", ti, tv);
       return 1;
     }
     /* s[range] = v: splice over the range's char span (negative n inserts) */

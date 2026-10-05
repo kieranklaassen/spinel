@@ -19,3 +19,4 @@ IndexError: index -4 out of string
 true
 FrozenError: can't modify frozen String: "ab"
 "ab"
+"axcdef"

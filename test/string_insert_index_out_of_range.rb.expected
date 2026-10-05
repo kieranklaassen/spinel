@@ -42,3 +42,4 @@ FrozenError: can't modify frozen String: "ab"
 IndexError: index 7 out of string
 IndexError: index -6 out of string
 "ab"
+"axbcdef"

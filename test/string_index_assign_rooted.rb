@@ -46,3 +46,8 @@ rescue FrozenError => e
   puts "FrozenError: #{e.message}"
 end
 p f
+
+# a value that changes the receiver is read before the receiver is
+o = +"abcd"
+o[1] = (o << "ef"; "x")
+p o
