@@ -1,0 +1,51 @@
+A String Range in a global, a constant or a class variable keeps its ends
+
+    $span = ("a".."z")
+    def fill(i)
+      a = "a#{i}"
+      z = "z#{i}"
+      $span = (a..z)
+    end
+    warm = (1..5000).map { |k| "warm-#{k}" }
+    i = 0
+    while i < 200
+      fill(i)
+      junk = (1..3000).map { |k| "j#{k}" }
+      r = $span
+      puts "#{i}: #{r.first}..#{r.last}" unless r.first == "a#{i}" && r.last == "z#{i}" && junk.size == 3000
+      i += 1
+    end
+    puts "done"
+
+printed `0: j44..j45` and `161: j284..j285` before `done`; CRuby prints
+`done` alone. With SPINEL_GC_STRESS=1 every one of the 200 turns read
+another String's bytes, and level 2 stopped at "the mark reached a freed
+heap string".
+
+A String Range sits in its file-scope slot by value and carries two GC
+strings. The lines codegen_program writes into sp_mark_user_globals mark
+a slot that is a String, a boxed value or a reference, and ask needs_root
+for the last, which says no for a slot that is not itself a reference.
+Nothing marked the two ends, and the next collection freed them while the
+slot still named them.
+
+The four loops that write those lines (globals, constants, class-level
+instance variables, class variables) now share one function,
+emit_static_slot_mark, which marks each end of a String Range as
+emit_class_scan does for an instance variable (#4353). A class or a
+Struct with a String Range instance variable or member has a class-level
+slot of that name, so its program gains the two mark lines for it as
+well. Every other program gets the C it had.
+
+Not here: an instance variable or a Struct member holding a String Range
+takes no write barrier (its own commit); a constant whose two ends are
+both made in the assignment loses the first before the slot is written;
+and inspect of a String Range does not hold the text of its first end
+while it makes the second.
+
+Test: test/str_range_static_slot.rb (expected from CRuby 3.3.6), in
+GC_STRESS_TESTS, where without the change the run aborts. The C of two
+corpus programs changes (range_dup_unfrozen, str_range_endpoints_root),
+by the mark lines of their String Range slots; optcarrot has none.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
