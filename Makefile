@@ -1729,6 +1729,7 @@ gc-phases-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
 # at level 2, alone and beside the full verifier, on both runtimes.
 GC_STRESS_TESTS := test/gc_root_frame_slots.rb \
                    test/gc_minor_byref_lent_slot.rb \
+                   test/string_replace_fresh_source_root.rb \
                    test/proc_cell_capture_marked.rb \
                    test/poly_array_intersect.rb \
                    test/thread_new_args_rooted_across_fiber_alloc.rb
