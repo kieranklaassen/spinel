@@ -4030,6 +4030,9 @@ int emit_tap_then_expr(Compiler *c, int id, Buf *b) {
   if (block < 0 || !nt_type(nt, block) || !sp_streq(nt_type(nt, block), "BlockNode")) return 0;
   int recv = nt_ref(nt, id, "receiver");
   if (recv < 0) return 0;
+  /* `o&.tap { }`: the nil guard comes first and re-enters this on the guarded
+     temp, so a nil receiver runs no block; inlined here it ran */
+  if (sn_guard_ahead(c, id)) return 0;
   TyKind et = comp_ntype(c, recv);
   /* An empty array literal receiver (`[].tap { |a| a << x }.join`) has no
      element type of its own, so comp_ntype leaves it unknown. Adopt the block
@@ -4891,7 +4894,8 @@ static void emit_row_param_bind(Compiler *c, int block, int pj, const char *k, T
    with a block (answers 1 emitted, 0 declined, -1 to go on) */
 static int iter_tap_slice_string_arms(Compiler *c, int id, Buf *b, int indent, const NodeTable *nt, int block, const char *name, int recv, int body, const char *p0_orig, const char *p0, TyKind rt) {
   /* recv.tap { |p| body } -- run block for side effects, preserve outer var */
-  if (sp_streq(name, "tap") && recv >= 0) {
+  /* (a `&.` call waits for its nil guard, as in emit_tap_then_expr) */
+  if (sp_streq(name, "tap") && recv >= 0 && !sn_guard_ahead(c, id)) {
     TyKind et = infer_type(c, recv);
     /* a receiver of no type -- a call proven to raise NoMethodError -- is
        the raise's sp_RbVal; `void _t` did not compile (#6213) */
