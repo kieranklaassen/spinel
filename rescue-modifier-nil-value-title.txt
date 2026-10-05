@@ -1,0 +1,1 @@
+A nil expression under a rescue modifier is a value unless it is a bare call
