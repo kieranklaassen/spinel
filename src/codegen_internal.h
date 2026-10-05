@@ -648,6 +648,9 @@ int kw_plan_error(const KwPlan *P, char *msg, size_t n);
 void positional_arity(Compiler *c, Scope *m, int *required, int *total);
 void emit_unreached_splat_count(Compiler *c, Scope *m, const int *argv, int argc, int pos_argc,
                                 const KwPlan *P);
+/* Refuses a String (`from` TY_STRING) stored into member `a` of a Struct or
+   Data when that member is the shared handle (codegen_call.c). */
+void refuse_struct_string_store(Compiler *c, ClassInfo *cls, int a, TyKind from, int node);
 /* Every argument of a call run ahead of it, in source order, each `**`
    operand converted where it stands (codegen_fold.c): a call planned so
    (KwPlan.args_first) or whose keywords run ahead (kwh_runs_ahead). Only

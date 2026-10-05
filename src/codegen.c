@@ -11210,6 +11210,9 @@ void emit_super(Compiler *c, int id, Buf *b) {
              growing append moves them */
           else if (ivt == TY_STRING && at == TY_STRBUF)
             buf_printf(b, "(%s ? sp_str_concat(sp_String_cstr(%s), (&(\"\\xff\")[1])) : NULL)", src.p, src.p);
+          /* the reverse, a plain String parameter into a member that is the
+             handle, has no conversion (refuse_struct_string_store) */
+          else if (ivt == TY_STRBUF && at == TY_STRING) refuse_struct_string_store(c, cls, a, at, id);
           else if (ivt == TY_POLY && at != TY_POLY) { Buf ex; memset(&ex, 0, sizeof ex); emit_boxed_text(c, at, src.p, &ex); buf_puts(b, ex.p ? ex.p : ""); free(ex.p); }
           else if (ivt != TY_POLY && at == TY_POLY) emit_unbox_nilable_text(c, ivt, src.p, b);
           else buf_puts(b, src.p);
@@ -11237,7 +11240,7 @@ void emit_super(Compiler *c, int id, Buf *b) {
               Buf ex; memset(&ex, 0, sizeof ex); emit_expr(c, vnode, &ex);
               emit_unbox_nilable_text(c, ivt, ex.p ? ex.p : "", b); free(ex.p);
             }
-            else emit_expr(c, vnode, b);
+            else { refuse_struct_string_store(c, cls, a, at, vnode); emit_expr(c, vnode, b); }
           }
         }
         else {
@@ -11250,7 +11253,7 @@ void emit_super(Compiler *c, int id, Buf *b) {
             Buf ex; memset(&ex, 0, sizeof ex); emit_expr(c, sargv[a], &ex);
             emit_unbox_nilable_text(c, ivt, ex.p ? ex.p : "", b); free(ex.p);
           }
-          else emit_expr(c, sargv[a], b);
+          else { refuse_struct_string_store(c, cls, a, at, sargv[a]); emit_expr(c, sargv[a], b); }
         }
         buf_puts(b, ", ");
       }
