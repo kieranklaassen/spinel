@@ -9313,6 +9313,7 @@ static void emit_member_boxed(Compiler *c, TyKind mt, const char *ivf, Buf *b) {
 static void emit_obj_to_h_dispatch(Compiler *c, Buf *b) {
   if (!g_gen_obj_to_h) return;
   buf_puts(b, "static sp_RbVal sp_obj_to_h(sp_RbVal v) {\n");
+  buf_puts(b, "  SP_GC_ROOT_RBVAL(v);\n");
   buf_puts(b, "  switch (v.cls_id) {\n");
   for (int i = 0; i < c->nclasses; i++) {
     ClassInfo *ci = &c->classes[i];
@@ -9371,6 +9372,7 @@ static void emit_obj_to_h_dispatch(Compiler *c, Buf *b) {
 static void emit_obj_struct_values_dispatch(Compiler *c, Buf *b) {
   if (!g_gen_obj_struct_values) return;
   buf_puts(b, "static sp_RbVal sp_obj_struct_values(sp_RbVal v) {\n");
+  buf_puts(b, "  SP_GC_ROOT_RBVAL(v);\n");
   buf_puts(b, "  switch (v.cls_id) {\n");
   for (int i = 0; i < c->nclasses; i++) {
     ClassInfo *ci = &c->classes[i];
