@@ -200,3 +200,25 @@ class OfClass < Base
   end
 end
 p OfClass.two
+
+# where the parent computes with the yield's value, as a receiver, an
+# operand, an arm of a conditional or the value of a `return`, the block of
+# the super is left as it was: these answered right and still do
+class Calc
+  def recv(n = 2) = (yield n).itself
+  def either(n = 2) = yield(n) || 5
+  def arm(n = 2) = n > 0 ? yield(n) : 5
+
+  def back(n = 2)
+    return yield(n)
+  end
+end
+
+class CalcChild < Calc
+  def recv(n = 2) = Fiber.new { super() { |x| next 7 if x == 2; x * 10 } }.resume
+  def either(n = 2) = Fiber.new { super() { |x| next true if x == 2; false } }.resume
+  def arm(n = 2) = Fiber.new { super() { |x| next :n if x == 2; :s } }.resume
+  def back(n = 2) = Thread.new { super() { |x| next 7 if x == 2; x * 10 } }.value
+end
+c = CalcChild.new
+p [c.recv, c.either, c.arm, c.back]
