@@ -8695,6 +8695,29 @@ static int emit_struct_recv_call(Compiler *c, int id, Buf *b, const NodeTable *n
   return 0;
 }
 
+/* A reader's read marked to hand out its ivar's handle (the program changes
+   the String it answers in place), where the slot settled as a boxed value:
+   it holds nil or another class's value beside the String, or the String it
+   is given is itself boxed (a parameter its method changes in place). The
+   read is an sp_RbVal there and every consumer of the mark takes an
+   sp_String *, C that did not build (`c = S.new; c.x = +"q"; c.x << "z"`).
+   The String sits in that slot by value, so the change could only reach a
+   copy of it: refused by name. */
+static void refuse_boxed_handle_reader(Compiler *c, int id, const ClassInfo *ci, int iv) {
+  if (iv < 0 || ci->ivar_types[iv] != TY_POLY) return;
+  if (!c->strbuf_box[id] || comp_ntype(c, id) != TY_STRBUF) return;
+  char slot[300], msg[1280];
+  if (ci->is_struct) snprintf(slot, sizeof slot, "member `%s`", ci->ivars[iv] + 1);
+  else snprintf(slot, sizeof slot, "`%s`", ci->ivars[iv]);
+  snprintf(msg, sizeof msg,
+           "the String read from %s is changed in place, and %s is a boxed slot (it holds nil or a "
+           "value of another class as well, or the String it is given is itself boxed): the String "
+           "sits in that slot by value, so the change would reach a copy of it (a String is not yet "
+           "shared by reference in a boxed slot). Change the String before it is stored.",
+           slot, slot);
+  unsupported_feature(c, id, msg);
+}
+
 int emit_object_call(Compiler *c, int id, Buf *b) {
   const NodeTable *nt = c->nt;
   const char *name = nt_str(nt, id, "name");
@@ -9407,6 +9430,7 @@ int emit_object_call(Compiler *c, int id, Buf *b) {
                        tvR, tvR);
           return 1;
         }
+        if (rdiv >= 0) refuse_boxed_handle_reader(c, id, &c->classes[rdc >= 0 ? rdc : cid], rdiv);
         buf_puts(b, "("); emit_expr(c, recv, b);
         buf_printf(b, ")%siv_%s", comp_ty_value_obj(c, rt) ? "." : "->", iv_c(rn2));
         return 1;
@@ -9437,6 +9461,7 @@ int emit_object_call(Compiler *c, int id, Buf *b) {
         const char *ivnH = nt_str(nt, lastH, "name");
         int defcH = c->scopes[mi].class_id;
         int ivH = (ivnH && defcH >= 0) ? comp_ivar_index(&c->classes[defcH], ivnH) : -1;
+        if (ivH >= 0) refuse_boxed_handle_reader(c, id, &c->classes[defcH], ivH);
         if (ivH >= 0 && c->classes[defcH].ivar_types[ivH] == TY_STRBUF) {
           /* a body with statements before the read (`@reads += 1; @s`)
              runs them first, then the slot is the handle it answered */
