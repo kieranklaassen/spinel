@@ -2615,6 +2615,25 @@ void emit_poly_prearms_n(Compiler *c, const char *name, const PolySpecialsN *ps,
                  tv, tv, tr, ret == TY_POLY ? "sp_box_bool(" : "",
                  atmp[0], atmp[0], atmp[0], tv, atmp[0], tv, atmp[0],
                  ret == TY_POLY ? ")" : "");
+    /* a String argument: a String Range covers it between its ends. An
+       Integer or a Float Range covers no String unless both its ends were
+       left out, and otherwise falls to the default arm's false; what is no
+       Range has no cover? -- the Integer test took the String as a number,
+       which did not compile */
+    else if (atmp_ty[0] == TY_STRING)
+      buf_printf(b, "if (!(_t%d.tag == SP_TAG_OBJ && (_t%d.cls_id == SP_BUILTIN_RANGE ||"
+                    " _t%d.cls_id == SP_BUILTIN_FLOAT_RANGE || _t%d.cls_id == SP_BUILTIN_STR_RANGE)))"
+                    " { sp_raise_poly_nomethod(\"cover?\", _t%d); }\n"
+                    "else if (_t%d.cls_id == SP_BUILTIN_STR_RANGE && _t%d.v.p)"
+                    " { _t%d = %ssp_srange_cover(*(sp_StrRange *)_t%d.v.p, _t%d)%s; }\n"
+                    "else if (_t%d.v.p && (_t%d.cls_id == SP_BUILTIN_RANGE"
+                    " ? ((sp_Range *)_t%d.v.p)->first == INTPTR_MIN && ((sp_Range *)_t%d.v.p)->last == INTPTR_MAX"
+                    " : _t%d.cls_id == SP_BUILTIN_FLOAT_RANGE && (((sp_FloatRange *)_t%d.v.p)->omitted &"
+                    " (SP_FRANGE_NO_BEGIN | SP_FRANGE_NO_END)) == (SP_FRANGE_NO_BEGIN | SP_FRANGE_NO_END)))"
+                    " { _t%d = %s; }\nelse ",
+                 tv, tv, tv, tv, tv, tv, tv, tr, ret == TY_POLY ? "sp_box_bool(" : "", tv, atmp[0],
+                 ret == TY_POLY ? ")" : "",
+                 tv, tv, tv, tv, tv, tv, tr, ret == TY_POLY ? "sp_box_bool(TRUE)" : "TRUE");
     else
     buf_printf(b, "if (_t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_RANGE)"
                   " { _t%d = %ssp_range_%s((sp_Range *)_t%d.v.p, _t%d)%s; }\nelse ",
@@ -2639,6 +2658,14 @@ void emit_poly_prearms_n(Compiler *c, const char *name, const PolySpecialsN *ps,
       else buf_printf(b, "sp_frange_cover(*(sp_FloatRange *)_t%d.v.p, (sp_float)_t%d)", tv, atmp[0]);
       buf_printf(b, "%s; }\nelse ", ret == TY_POLY ? ")" : "");
     }
+    /* a boxed String, which a String Range read as no member; after the
+       numeric Ranges' tests, so that they run what they ran */
+    if (atmp_ty[0] == TY_POLY)
+      buf_printf(b, "if (_t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_STR_RANGE && _t%d.v.p)"
+                    " { _t%d = %s((_t%d.tag == SP_TAG_STR || sp_poly_is_strbuf(_t%d)) &&"
+                    " sp_srange_cover(*(sp_StrRange *)_t%d.v.p, sp_poly_unbox_s(_t%d)))%s; }\nelse ",
+                 tv, tv, tv, tr, ret == TY_POLY ? "sp_box_bool(" : "", atmp[0], atmp[0], tv, atmp[0],
+                 ret == TY_POLY ? ")" : "");
   }
   /* Klass.try_convert(x) on a class-tagged receiver, checked ahead of
      the cls_id switch: no user class defines the name, so no arm below
