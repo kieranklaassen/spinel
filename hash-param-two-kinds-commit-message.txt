@@ -1,0 +1,33 @@
+A Hash parameter given two kinds of value is not typed from its body
+
+    def use(x)
+      x["a"] = "q" if x
+    end
+    h = {"a" => "x"}
+    use(h)
+    use(nil)
+
+ran the inference to its 128-round cap, with the warning. The binding
+boxed `x` for the two kinds of argument, infer_param_hash_value typed
+it String-keyed again from the store in its body, and the next round's
+binding boxed it again: param_gets_boxed_arg held the narrowing back
+only for an argument that is itself boxed. The same with an Integer, a
+Hash of another kind or a literal of one in the second call, with a
+keyword parameter, and with one call whose Hash a block widens a round
+after the call first bound it:
+
+    def use(x) = x["a"] = "q"
+    h = {"a" => "x"}
+    [1].each { |k| h[k] = "s" }
+    use(h)
+
+A boxed parameter now stays boxed where a call hands it a typed value
+of another kind than its store gives. The rounds settle, in 4 to 6
+where they ran to the cap. Where the calls agree in the end, as in the
+last program, the parameter takes their variant (sp_PolyPolyHash *),
+as it already did with the store written without the block.
+
+test/infer/fixpoint_converges.rb gains the four shapes; each reaches
+the cap alone on master.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

@@ -1,0 +1,1 @@
+A Hash parameter given two kinds of value is not typed from its body
