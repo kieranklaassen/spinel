@@ -92,33 +92,41 @@ value, a parent's class method through a subclass's `Method`, an inlined
 yield, `initialize`, `raise C, msg`, `super` into a class and into an
 included or prepended module, `...` and anonymous forwarding,
 `instance_exec`, a block given to `yield`, a proc, a lambda, Struct and Data
-construction), the parameter list (a default may read an instance variable
-or a global), the arguments (their count against the parameters' window,
-splats, literal keywords in the parameters' order or not, `**` operands and
-where they sit), the class of one argument's value, where the values come
-from (literals, values that log the order they run in, a read of a local or
-an instance variable a later argument changes, or an assignment to the
-variable a default reads), how many calls reach the parameters (a `Method`
-local may be set to another target between two, or to nine targets), a class
-of its own defining a method of the same name, the child's own parameters
-when a bare `super` forwards them, whether the callee grows a String
-argument in place and the caller prints it after (itself or through a method
-it hands it to, which another call may give an Array), the block passed (or
-handed on by an anonymous `&` forwarder), whether a method that yields to
-the block also keeps it and runs it later with values of another type, and
-whether the program is compiled with `--int-overflow=promote` (the cases of
-one program share it). The argument levels follow the decisions CRuby's
-binding makes (`vm_args.c`); the others each ask for a kind of bug that was
-found by hand past the probe, named in the comments at `FACTORS`. The rows
-are a covering array: every combination of levels of any T factors (default
-3) is asked for by some row. A row asks for levels a case cannot always take
-(a rebound `Method` local on a path with no `Method`, or an argument
-assigning the instance variable a default reads, on a path whose method has
-another self), so each case records the levels it did take, and the summary
-says how many of the combinations the cases took -- at strength 2, 6716 of
-7060, at strength 3, 217453 of 248186. `--only name_clash=sibling,seed=poly`
-pins factors to a level each, leaving out the cases that cannot take them,
-to ask one level's combinations without a whole run. Ruby that does not parse is no case; an exception CRuby
+construction, a method added to a reopened Random or Array), the parameter
+list (a default may read an instance variable or a global, or be an object
+of a class no argument has), the arguments (their count against the
+parameters' window, splats, literal keywords in the parameters' order or
+not, `**` operands and where they sit), the class of one argument's value,
+where the values come from (literals, values that log the order they run in,
+a read of a local or an instance variable a later argument changes, or an
+assignment to the variable a default reads), how many calls reach the
+parameters (a `Method` local may be set to another target between two, or to
+nine targets, and a first call may leave the optionals to their defaults), a
+class of its own defining a method of the same name, the child's own
+parameters when a bare `super` forwards them, whether the callee grows a
+String argument in place and the caller prints it after (itself or through a
+method it hands it to, which another call may give an Array), the block
+passed (or handed on by an anonymous `&` forwarder, or a proc of its own
+passed from inside one, or a bare `super`'s own literal block), what the
+method the call reaches does with it (yields it into its answer, answers it
+on the call after one that returned early, or yields and then returns
+through an `ensure`, the call made as a statement) or with an object default
+(writes an instance variable of it and reads it back), whether a method that
+yields to the block also keeps it and runs it later with values of another
+type, and whether the program is compiled with `--int-overflow=promote` (the
+cases of one program share it). The argument levels follow the decisions
+CRuby's binding makes (`vm_args.c`); the others each ask for a kind of bug
+that was found by hand past the probe, named in the comments at `FACTORS`.
+The rows are a covering array: every combination of levels of any T factors
+(default 3) is asked for by some row. A row asks for levels a case cannot
+always take (a rebound `Method` local on a path with no `Method`, or an
+argument assigning the instance variable a default reads, on a path whose
+method has another self), so each case records the levels it did take, and
+the summary says how many of the combinations the cases took -- at strength
+2, 7920 of 8393, at strength 3, 277458 of 323053.
+`--only name_clash=sibling,seed=poly` pins factors to a level each, leaving out the
+cases that cannot take them, to ask one level's combinations without a whole
+run. Ruby that does not parse is no case; an exception CRuby
 raises is part of the expected answer.
 
 A difference is a finding. A program that spinel refuses, whose C does not
@@ -142,9 +150,9 @@ crash; a timeout; two cases that only fail together), `refused` (an
 limitations.md gives as the answer, cited). Findings come in families by the
 difference they make and shapes by the factors they need, with the reduced
 case of each shape as a program of its own. It is a probe to run by hand,
-not a gate: a pairwise run (`--strength 2`, about 510 cases) takes ten
+not a gate: a pairwise run (`--strength 2`, about 640 cases) takes ten
 minutes to an hour, most of it reducing findings, and a 3-way run (about
-6000 cases) several times that. The answers are compared as they print,
+7500 cases) several times that. The answers are compared as they print,
 exception messages included, so the reference is the `ruby` whose wording
 Spinel follows (4.0); `SPINEL` names the compiler to probe (default
 `./spinel`). Exit status 0 is no wrong answer, 1 a wrong answer, 4 the
@@ -169,22 +177,32 @@ or class variable, a block, proc, lambda, method or `Method#call` parameter,
 a method's return, an attr_reader and an aliased one, a Struct member, a
 Hash value, an Array element pushed, written in a literal, stored with
 `[]=`, left in a gap past the end or appended through a reader, an element
-read through a poly handle, a local a lambda captures, and the block
-parameters of `each_with_index`, `map` and `each_slice`), the read (47: `p`,
-interpolation, `nil?`, `===`, `case`/`when`, a Hash key, searches, `join`,
-`sum`, `max`, `sort`, `<=>`, `pack`, conversions, arithmetic, `||=`, splats,
-`zip`, `then` and more), the slot's type (Integer or Float), the top level
-or a method, and `--int-overflow=promote`. Every carrier takes a present
-value first, which types the slot, and each case prints the read of that
-value, of the source's, of a nil the carrier makes of its own (a gap, a
-short row), and, for an Array read of an Array carrier, of its whole Array,
-so a finding's kind names the first line that differs (`source: value` is a
-nil read as something else, `array: ...` a typed Array that holds one). The
-call-binding probe prints what it binds with `inspect`, which already reads
-the sentinel as nil, so it does not see this family. A pairwise run (the
-default: 1175 cases, taking all 2165 pairs of levels) takes about ten
-minutes at `--jobs 2`, and half an hour more to reduce what it finds; like
-`call_binding_probe` it is a probe to run by hand, not a gate.
+read through a poly handle, a local a lambda captures, the block parameters
+of `each_with_index`, `map` and `each_slice`, a Data member, an ivar only
+`instance_variable_set` wrote, read back by `instance_variable_get` or an
+attr_reader, `instance_variable_get` of a Struct beside an object with that
+ivar, an ivar of an object a splice or a fetch block brought into an Array
+or a Hash of other classes, and a write through a handle that may be another
+class by a setter, `send(:x=)`, `Struct#[]=` or `instance_variable_set`),
+the read (47: `p`, interpolation, `nil?`, `===`, `case`/`when`, a Hash key,
+searches, `join`, `sum`, `max`, `sort`, `<=>`, `pack`, conversions,
+arithmetic, `||=`, splats, `zip`, `then` and more), the slot's type
+(Integer, Float, Bool, whose present value is false, String or Symbol),
+whether the object a writing carrier writes into is frozen first (the write
+then raises FrozenError), the top level or a method, and
+`--int-overflow=promote`. Every carrier takes a present value first, which
+types the slot, and each case prints the read of that value, of the
+source's, of a nil the carrier makes of its own (a gap, a short row), and,
+for an Array read of an Array carrier, of its whole Array, so a finding's
+kind names the first line that differs (`source: value` is a nil read as
+something else, `array: ...` a typed Array that holds one). The call-binding
+probe prints what it binds with `inspect`, which already reads the sentinel
+as nil, so it does not see this family. A pairwise run (the default: 1741
+cases, taking 3338 of the 3370 pairs of levels; the others pair `frozen`
+with a carrier that writes nothing) takes a few minutes at `--jobs 4` when
+nothing differs, longer while it splits the programs that fail, and more to
+reduce what it finds; like `call_binding_probe` it is a probe to run by
+hand, not a gate.
 
 ## nil_narrowing_probe
 
@@ -226,6 +244,45 @@ a guard, is never taken) takes about ten minutes at `--jobs 2` with
 `--no-reduce`. On master most of its several hundred findings are older
 bugs, so reduce only a run whose findings are few. Like the other probes it
 is a probe to run by hand, not a gate.
+
+## builtin_row_probe
+
+`ruby tools/builtin_row_probe.rb [--strength T | --random N] [--seed S]
+[--ops RE] [--shard I/N]` calls each builtin method the rows of
+`src/builtin_ops.c` (and `src/builtin_zero_ops.inc`) serve, with its
+receiver and arguments varied, under CRuby and spinel, with the options,
+tiers and output of `call_binding_probe` (whose runner, `probe_common.rb`,
+it shares; its default `--out` is `build/builtin-row-probe/`, where it also
+writes `rows.txt`: the rows a case takes, and why the others have none).
+The flow probes carry values to a few calls; this one takes the calls
+themselves. An op, generated by `builtin_row_gen.rb`, is a receiver family
+(the Ruby class of a row's kind), a name and a count of arguments with a
+baseline call CRuby answers, found as `gen_nil_arg_probe.rb` finds one (the
+counts the method accepts, then the first combination of small sample
+values and of the name's hints it answers) by a CRuby child the first time
+and kept under `build/builtin-row-probe-baselines/`. Each op's cases cover
+every pair of levels of its factors: the receiver's form (typed, read out
+of a mixed Array, a wrong class or a nil read out of one, a nil-or-value
+local, a value or a nil through an identity method whose RBS signature
+takes `T?`), the family's sample receiver, each argument's form (typed,
+read out of a mixed Array, nil, a wrong class, a wrong class read out of a
+mixed Array), the wrong class (paired with the argument forms only), the
+count (the baseline's, one more, one less), the block (the baseline's, or
+the other), whether the receiver and each argument run through a write to
+a log, and `--int-overflow=promote`. A case prints its answer, or the
+class and message of what it raised, then the log, so a finding's kind is
+`raise-class(ArgumentError->NoMethodError)`, `no-raise(...)`, `value`, or
+`log` (an operand evaluated out of order, skipped or run again). `--ops`
+keeps the ops matching RE (`Array#zip/1`), `--shard I/N` the I-th of N
+slices of them; the reduction never steps a case to another op (the
+generator's `FIXED`). A pairwise run of every op (1,158 ops, about 34,000
+cases, taking 96% of the pairs of levels they ask for) differs from CRuby in
+about four cases of ten on master, and confirming each alone would take most
+of its time: run it as `--shard I/9 --no-reduce --no-confirm` (each shard
+about 15 minutes at `--jobs 2` on a loaded machine; `--no-confirm` takes a
+difference in a program that ran to its end as its case's own), then reduce
+one op at a time (`--ops`, which also confirms). Like the other probes it is a
+probe to run by hand, not a gate.
 
 ## order_probe
 

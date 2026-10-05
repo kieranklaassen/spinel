@@ -6,6 +6,7 @@
 #include "codegen_internal.h"
 #include "codegen_poly.h"
 #include "builtin_ops.h"
+#include "repr.h"
 #include "call_plan.h"
 #include "codegen_call_arms.h"
 
@@ -230,10 +231,9 @@ int emit_call_compare_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
   if (recv >= 0 && ty_is_array(rt) && emit_builtin_op_stage(c, id, recv, rt, name, 5, b)) return 1;
 
   if (recv >= 0 && argc == 1 && sp_streq(name, "<=>")) {
-    /* Re-infer when stale cache has TY_POLY (e.g. block params temporarily pinned to element type). */
-    TyKind lrt = (rt == TY_POLY || rt == TY_UNKNOWN) ? infer_type(c, recv) : rt;
-    TyKind at = comp_ntype(c, argv[0]);
-    TyKind lat = (at == TY_POLY || at == TY_UNKNOWN) ? infer_type(c, argv[0]) : at;
+    /* the receiver's own settled type where the dispatch type is poly */
+    TyKind lrt = (rt == TY_POLY || rt == TY_UNKNOWN) ? comp_ntype(c, recv) : rt;
+    TyKind lat = comp_ntype(c, argv[0]);
     /* nil <=> nil is 0; nil <=> anything-else is nil (#2383) */
     if (lrt == TY_NIL) {
       buf_puts(b, "((void)("); emit_expr(c, recv, b);
@@ -282,8 +282,14 @@ int emit_call_compare_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
       int ta = ++g_tmp, tb = ++g_tmp;
       buf_puts(b, "({ "); emit_ctype(c, lrt, b); buf_printf(b, " _t%d = ", ta); emit_expr(c, recv, b);
       buf_puts(b, "; "); emit_ctype(c, lat, b); buf_printf(b, " _t%d = ", tb); emit_expr(c, argv[0], b);
+      /* an Integer against a Float compares exactly (#7505); a NaN answers 2 */
+      if ((lrt == TY_INT && lat == TY_FLOAT) || (lrt == TY_FLOAT && lat == TY_INT)) {
+        int tc = ++g_tmp;
+        buf_printf(b, "; int _t%d = sp_int_flt_cmp(_t%d, _t%d); _t%d == 2 ? SP_INT_NIL : (sp_int)%s_t%d; })",
+                   tc, lrt == TY_INT ? ta : tb, lrt == TY_INT ? tb : ta, tc, lrt == TY_INT ? "" : "-", tc);
+      }
       /* a NaN operand makes <=> nil, not 0 (#2315); only floats can be NaN */
-      if (lrt == TY_FLOAT || lat == TY_FLOAT)
+      else if (lrt == TY_FLOAT || lat == TY_FLOAT)
         buf_printf(b, "; (isnan((double)_t%d) || isnan((double)_t%d)) ? SP_INT_NIL"
                       " : (sp_int)((_t%d > _t%d) - (_t%d < _t%d)); })", ta, tb, ta, tb, ta, tb);
       /* an Integer slot's nil sentinel on either side: nil <=> n and n <=> nil
@@ -299,8 +305,8 @@ int emit_call_compare_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
     /* Symbol#<=> is defined only between Symbols; a String (or any other
        non-Symbol) operand is not comparable and answers nil (#3081). A Symbol
        receiver can reach here typed as a string (it prints as its name), so
-       ask the inferred receiver type rather than trusting lrt alone. */
-    if ((lrt == TY_SYMBOL || infer_type(c, recv) == TY_SYMBOL) &&
+       ask the receiver's own type rather than trusting lrt alone. */
+    if ((lrt == TY_SYMBOL || comp_ntype(c, recv) == TY_SYMBOL) &&
         lat != TY_SYMBOL && lat != TY_POLY && lat != TY_UNKNOWN) {
       buf_puts(b, "((void)("); emit_expr(c, recv, b);
       buf_puts(b, "), (void)("); emit_expr(c, argv[0], b);
@@ -356,14 +362,14 @@ int emit_call_compare_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
        node kind nor the inferred type says Symbol on its own. All three
        spellings are asked. */
     { const char *rvt_s = nt_type(nt, recv);
-      int recv_is_sym = (infer_type(c, recv) == TY_SYMBOL) ||
+      int recv_is_sym = (comp_ntype(c, recv) == TY_SYMBOL) ||
                         (rvt_s && sp_streq(rvt_s, "SymbolNode"));
       if (!recv_is_sym && rvt_s && sp_streq(rvt_s, "CallNode")) {
         const char *rcn = nt_str(nt, recv, "name");
         int rr = nt_ref(nt, recv, "receiver");
         const char *rrt = rr >= 0 ? nt_type(nt, rr) : NULL;
         if (rcn && sp_streq(rcn, "to_s") &&
-            ((rrt && sp_streq(rrt, "SymbolNode")) || (rr >= 0 && infer_type(c, rr) == TY_SYMBOL)))
+            ((rrt && sp_streq(rrt, "SymbolNode")) || (rr >= 0 && comp_ntype(c, rr) == TY_SYMBOL)))
           recv_is_sym = 1;
       }
     if (lrt == TY_STRING && !recv_is_sym &&
@@ -576,8 +582,10 @@ int emit_call_compare_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
         emit_expr(c, recv, b);
         buf_printf(b, "; %s%s %s = %s", ap.p ? ap.p : "", cat == TY_FLOAT ? "sp_float" : "sp_int", rv, av.p ? av.p : "0");
         free(ap.p); free(av.p);
-        buf_printf(b, "; if (SP_UNLIKELY(%s || %s)) sp_raise_nil_cmp(%s, \"%s\", \"%s\"); %s %s %s; })",
-                   ln, rn, ln, name, rt == TY_FLOAT ? "Float" : "Integer", lv, name, rv);
+        buf_printf(b, "; if (SP_UNLIKELY(%s || %s)) sp_raise_nil_cmp(%s, \"%s\", \"%s\"); ",
+                   ln, rn, ln, name, rt == TY_FLOAT ? "Float" : "Integer");
+        emit_int_flt_rel(b, rt == TY_INT ? lv : rv, rt == TY_INT ? rv : lv, rt == TY_INT, name);
+        buf_puts(b, "; })");
         return 1;
       }
       if (guard9) {
@@ -597,6 +605,7 @@ int emit_call_compare_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
                    rt == TY_FLOAT ? "SP_FLOAT_NIL_CMP_CK" : "SP_INT_NIL_CMP_CK", l9, r9, name, tg, name, tg);
         return 1;
       }
+      if (mixed9 && emit_int_float_cmp(c, recv, argv[0], name, b)) return 1;
       buf_puts(b, "(");
       emit_expr(c, recv, b);
       buf_printf(b, " %s ", name);
@@ -782,23 +791,10 @@ int emit_call_compare_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
     /* an Integer or a Float reads its nil sentinel at run time, as nil?
        does: the nullable-value analysis does not see every way nil reaches
        one (a method's parameter only nil is passed to, a splat of a boxed
-       Array), and folded, a nil answered true to is_a?(Integer) */
+       Array), and folded, a nil answered true to is_a?(Integer). A nullable
+       String slot holds nil as NULL and answers the same way. */
     if (emit_scalar_class_test(c, recv, eff_rt, nt_str(nt, argv[0], "name"),
                                sp_streq(name, "instance_of?"), b)) return 1;
-    /* A nullable String slot answers at run time too: nil is a NilClass and
-       is not a String, whatever the slot's kind says. Object and its
-       ancestors hold for nil too. */
-    if (yes >= 0 && eff_rt == TY_STRING) {
-      const char *kn = nt_str(nt, argv[0], "name");
-      int nilcls = kn && sp_streq(kn, "NilClass");
-      int univ = kn && is_object_root(kn);
-      if (nilcls || (yes && !univ)) {
-        int tn = ++g_tmp;
-        buf_puts(b, "({ "); emit_ctype(c, eff_rt, b); buf_printf(b, " _t%d = ", tn); emit_expr(c, recv, b);
-        buf_printf(b, "; %s(_t%d == NULL); })", nilcls ? "" : "!", tn);
-        return 1;
-      }
-    }
     if (yes >= 0) { buf_puts(b, "((void)("); emit_expr(c, recv, b); buf_printf(b, "), %d)", yes); return 1; }
   }
 
@@ -998,7 +994,7 @@ int emit_call_operator_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
            receiver itself, as for the appends */
         buf_printf(b, "({ sp_String *_t%d = %s; sp_String_set_bin(_t%d, (&(\"\\xff\")[1]));",
                    tC2, srefC, tC2);
-        if (c->strbuf_box[id]) buf_printf(b, " _t%d; })", tC2);
+        if (repr_of(c, id).handle) buf_printf(b, " _t%d; })", tC2);
         else buf_printf(b, " sp_String_cstr(_t%d); })", tC2);
         return 1;
       } }
@@ -1097,10 +1093,10 @@ int emit_call_operator_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
   /* A reader call handing out the shared handle takes the same statement,
      through its shim (#3227). */
   if (recv >= 0 && sp_streq(name, "[]=") && (argc == 2 || argc == 3) &&
-      ((comp_ntype(c, recv) == TY_STRING &&
+      ((repr_of(c, recv).as_ty == TY_STRING &&
         nt_type(nt, recv) && (sp_streq(nt_type(nt, recv), "LocalVariableReadNode") ||
                               sp_streq(nt_type(nt, recv), "InstanceVariableReadNode"))) ||
-       (comp_ntype(c, recv) == TY_STRBUF && nt_kind(nt, recv) == NK_CallNode))) {
+       (repr_of(c, recv).as_ty == TY_STRBUF && nt_kind(nt, recv) == NK_CallNode))) {
     /* the value is evaluated once, into a temp the store reads and the
        expression answers: evaluated again after the store, a call with
        effects ran twice, and a value the store read through a boxed

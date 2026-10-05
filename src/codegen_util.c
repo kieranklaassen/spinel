@@ -619,7 +619,7 @@ int subtree_may_allocate(const NodeTable *nt, int id) {
 int operand_may_allocate(Compiler *c, int id) {
   if (subtree_may_allocate(c->nt, id)) return 1;
   id = unwrap_parens(c, id);
-  if (id < 0 || c->strbuf_box[id]) return 0;
+  if (id < 0 || repr_of(c, id).handle) return 0;
   if (strbuf_local_name(c, id)) return 1;
   if (nt_kind(c->nt, id) != NK_InstanceVariableReadNode) return 0;
   const char *nm = nt_str(c->nt, id, "name");
@@ -1513,8 +1513,9 @@ int g_re_init_needed = 0;
    and `[]=` store it, rather than the strict slot's TypeError: analyze marks
    the array it lands in (unshift, insert, fill) as able to hold one. */
 void emit_typed_elem_value(Compiler *c, int node, TyKind et, Buf *b) {
-  TyKind vt = comp_ntype(c, node);
-  if (vt == TY_POLY && (et == TY_INT || et == TY_FLOAT || et == TY_STRING)) {
+  Repr vr = repr_of(c, node);
+  TyKind vt = vr.as_ty;
+  if (vr.kind == RK_BOXED && (et == TY_INT || et == TY_FLOAT || et == TY_STRING)) {
     buf_printf(b, "sp_poly_elem_%s(", et == TY_INT ? "i" : et == TY_FLOAT ? "f" : "s");
     emit_expr(c, node, b);
     buf_puts(b, ")");
@@ -1855,7 +1856,7 @@ const char *strbuf_local_name(Compiler *c, int recv) {
   const char *rn = nt_str(c->nt, recv, "name");
   Scope *rs = rn ? comp_scope_of(c, recv) : NULL;
   LocalVar *rl = rs ? scope_local(rs, rn) : NULL;
-  return (rl && rl->type == TY_STRBUF) ? rn : NULL;
+  return repr_of_slot(c, rl).kind == RK_STRBUF ? rn : NULL;
 }
 /* The owning class slot of an ivar READ node, mirroring the read emitter's
    storage resolution: instance method -> its class; top-level method ->
@@ -1880,7 +1881,8 @@ int strbuf_ivar_owner(Compiler *c, int node) {
           level, unconditionally (a `super` there runs the parent's);
      1 -- set exactly when it is not nil: every write the program makes to
           it stores a value that is never nil, so a nil slot is unset;
-     2 -- neither can be told; reflection lists it as before. */
+     2 -- neither can be told; reflection lists it as before;
+     3 -- a reflection-only slot has an explicit presence flag. */
 static int ivs_writes_toplevel(Compiler *c, int body, const char *ivn, int cid, int depth);
 static int ivs_init_sets(Compiler *c, int cid, const char *ivn, int depth) {
   if (cid < 0 || depth > 16) return 0;
@@ -1975,6 +1977,37 @@ static int ivs_subtree_writes(const NodeTable *nt, int n, const char *ivn, int d
 static int ivs_related(Compiler *c, int k, int cid) {
   return k == cid || is_descendant(c, k, cid) || is_descendant(c, cid, k);
 }
+/* A slot introduced only by reflection has no ordinary assignment emitter.
+   Its setter can keep presence separately even when the assigned value is nil.
+   Use the name across classes so inherited layouts agree on the extra field. */
+static int ivs_reflect_only(Compiler *c, const char *ivn) {
+  const NodeTable *nt = c->nt;
+  int found = 0;
+  for (int k = 0; k < c->nclasses; k++) {
+    ClassInfo *ci = &c->classes[k];
+    for (int j = 0; j < ci->nwriters; j++)
+      if (sp_streq(ci->writers[j], ivn + 1)) return 0;
+    if (ci->is_struct) {
+      int iv = comp_ivar_index(ci, ivn);
+      if (iv >= 0 && iv < ci->nmembers) return 0;
+    }
+  }
+  for (int n = 0; n < nt->count; n++) {
+    const char *t = nt_type(nt, n);
+    if (t && strncmp(t, "InstanceVariable", 16) == 0 && !strstr(t, "Read") &&
+        sp_streq(nt_str(nt, n, "name"), ivn)) return 0;
+  }
+  NT_FOREACH_KIND(nt, NK_CallNode, u) {
+    if (!sp_streq(nt_str(nt, u, "name"), "instance_variable_set")) continue;
+    int a = nt_ref(nt, u, "arguments"), ac = 0;
+    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+    if (ac != 2) continue;
+    const char *sn = nt_kind(nt, av[0]) == NK_SymbolNode ? nt_str(nt, av[0], "value") :
+                     nt_kind(nt, av[0]) == NK_StringNode ? nt_str(nt, av[0], "content") : NULL;
+    if (sn && sp_streq(sn, ivn)) found = 1;
+  }
+  return found;
+}
 int ivar_set_kind(Compiler *c, int cid, const char *ivn) {
   const NodeTable *nt = c->nt;
   if (cid < 0 || cid >= c->nclasses || !ivn) return 2;
@@ -2046,13 +2079,20 @@ int ivar_set_kind(Compiler *c, int cid, const char *ivn) {
       if ((rn && (sp_streq(rn, ivn + 1) || sp_streq(rn, wr))) || (wn && sp_streq(wn, wr))) kind = 2;
     }
   }
+  if (kind == 2 && ivs_reflect_only(c, ivn)) kind = 3;
   if (slot >= 0) memo[slot] = kind;
   return kind;
 }
 /* The C test that ivar `ivn` (of class `cid`, read as `expr`) is set, for
-   an ivar of kind 1; NULL when it is always reported as set. */
+   an ivar of kind 1 or 3; NULL when it is always reported as set. */
 const char *ivar_set_test(Compiler *c, int cid, const char *ivn, const char *expr, char *buf, size_t cap) {
-  if (ivar_set_kind(c, cid, ivn) != 1) return NULL;
+  int kind = ivar_set_kind(c, cid, ivn);
+  if (kind == 3) {
+    size_t n = strlen(expr) - strlen(iv_c(ivn + 1)) - 3;
+    snprintf(buf, cap, "(%.*s_sp_set_%s)", (int)n, expr, iv_c(ivn + 1));
+    return buf;
+  }
+  if (kind != 1) return NULL;
   TyKind t = c->classes[cid].ivar_types[comp_ivar_index(&c->classes[cid], ivn)];
   if (t == TY_INT) snprintf(buf, cap, "(%s != SP_INT_NIL)", expr);
   else if (t == TY_FLOAT) snprintf(buf, cap, "(!sp_float_is_nil(%s))", expr);
@@ -2412,14 +2452,14 @@ int sb_shadowed_reader(int node) {
    when `recv` is no such call. */
 int sb_reader_shim_open(Compiler *c, int recv, char *sref, size_t cap, SbReaderSave *sv) {
   if (recv < 0 || nt_kind(c->nt, recv) != NK_CallNode) return 0;
-  if (!c->strbuf_box[recv] && !c->strbuf_handle_demand[recv]) return 0;
+  Repr rp = repr_of(c, recv);
+  if (!rp.handle && !rp.demand) return 0;
   if (g_n_argov >= MAX_ARG_OVERRIDE) return 0;
   if (!strbuf_slot_ref(c, recv, sref, cap)) return 0;
   int tH = ++g_tmp;
   /* the marks lifted and the handle type dropped for the shim's lifetime:
      views, so a refusal inside it puts them back (view_unwind) */
-  sv->box = c->strbuf_box[recv]; sv->demand = c->strbuf_handle_demand[recv];
-  sv->ty = c->ntype[recv];
+  sv->box = rp.handle; sv->demand = rp.demand; sv->ty = rp.ty;
   sv->tok = view_push_repr(c, recv, VR_STRBUF_BOX, 0);
   view_push_repr(c, recv, VR_HANDLE_DEMAND, 0);
   sv->ntok = 2;
@@ -2467,8 +2507,8 @@ int strbuf_slot_ref(Compiler *c, int recv, char *out, size_t cap) {
      made after the node-type cache is finalized cannot move the type without
      moving the call off the surface that dispatches it (see compiler.h). */
   if (recv >= 0 && nt_kind(c->nt, recv) == NK_CallNode &&
-      ((c->strbuf_box[recv] && comp_ntype(c, recv) == TY_STRBUF && strbuf_marked_yields_handle(c, recv)) ||
-       c->strbuf_handle_demand[recv])) {
+      ((repr_of(c, recv).handle && repr_of(c, recv).as_ty == TY_STRBUF && strbuf_marked_yields_handle(c, recv)) ||
+       repr_of(c, recv).demand)) {
     Buf rb2; memset(&rb2, 0, sizeof rb2);
     emit_expr(c, recv, &rb2);
     /* A container ELEMENT read comes back BOXED (a poly array element, a hash
@@ -2759,7 +2799,7 @@ void emit_expr_slot(Compiler *c, int node, TyKind slot, Buf *b) {
   if (node >= 0 && (slot == TY_INT || slot == TY_FLOAT)) {
     const char *sent = slot == TY_INT ? "SP_INT_NIL" : "sp_float_nil()";
     if (nt_kind(c->nt, node) == NK_NilNode) { buf_puts(b, sent); return; }
-    TyKind vt = comp_ntype(c, node);
+    TyKind vt = repr_of(c, node).as_ty;
     if (vt == TY_NIL || vt == TY_VOID) {
       buf_puts(b, "({ (void)("); emit_expr(c, node, b); buf_printf(b, "); %s; })", sent);
       return;
@@ -2776,8 +2816,9 @@ void emit_expr_slot(Compiler *c, int node, TyKind slot, Buf *b) {
    sink; a Bignum that does not fit raises there. Any other expression is
    emitted as it is. `text` is the already-rendered expression. */
 void emit_typed_sink_text(Compiler *c, int node, TyKind slot, const char *text, Buf *b) {
-  TyKind vt = node >= 0 ? comp_ntype(c, node) : TY_UNKNOWN;
-  if (vt == TY_POLY && poly_sink_unbox_fn(slot)) buf_printf(b, "%s(%s)", poly_sink_unbox_fn(slot), text);
+  Repr vr = repr_of(c, node);
+  TyKind vt = vr.as_ty;
+  if (vr.kind == RK_BOXED && poly_sink_unbox_fn(slot)) buf_printf(b, "%s(%s)", poly_sink_unbox_fn(slot), text);
   else if (vt == TY_BIGINT && slot == TY_INT) buf_printf(b, "sp_bigint_to_int(%s)", text);
   /* A block's value into a typed element (`fill { ... }`, a collect
      accumulator) is written as it is: where its class differs from the
@@ -3175,8 +3216,9 @@ const char *nil_store_sfx(Compiler *c, const char *k, int node) {
   if (!k || (!sp_streq(k, "Int") && !sp_streq(k, "Float"))) return "";
   if (node == NIL_STORE_BOXED) return "_nilable";   /* a boxed element, converted */
   if (node < 0) return "";
-  TyKind t = comp_ntype(c, node);
-  if (t == TY_NIL || t == TY_POLY || t == TY_UNKNOWN) return "_nilable";
+  Repr r = repr_of(c, node);
+  TyKind t = r.as_ty;
+  if (t == TY_NIL || r.kind == RK_BOXED || t == TY_UNKNOWN) return "_nilable";
   if (t != TY_INT && t != TY_FLOAT) return "";
   return enum_builtin_node(c, node) ? "_nilable" : "";
 }
@@ -3318,9 +3360,10 @@ int call_never_returns(Compiler *c, int id) {
   int mi = -1;
   if (recv < 0 || nt_kind(nt, recv) == NK_SelfNode) mi = comp_self_call_mi(c, id, nm);
   else {
-    TyKind rt = comp_ntype(c, recv);
+    Repr rr = repr_of(c, recv);
+    TyKind rt = rr.as_ty;
     if (ty_is_object(rt)) mi = comp_method_in_chain(c, ty_object_class(rt), nm, NULL);
-    else if (rt == TY_POLY) {
+    else if (rr.kind == RK_BOXED) {
       /* a boxed receiver dispatches to whichever class defines the name;
          every one of them must raise (a builtin answering it would have
          given the call that builtin's type, not void) */
@@ -3387,35 +3430,99 @@ void emit_c_escaped(Buf *b, const char *s) {
    `frozen?` is true and mutation raises FrozenError. Synthesized strings
    (symbol names, ivar names, ...) go through emit_str_literal, which is never
    frozen: the pragma only affects literals written in the source. */
-/* Open/close a static frozen-literal object around caller-streamed escaped
-   bytes. The 0xf1 marker promises a REAL sp_str_hdr immediately in front of
-   the data (hash cache, mutation guards), so every frozen literal -- single
-   or an adjacent-literal fold -- must carry this header (#1749). */
-int emit_frozen_literal_open(Buf *b, size_t raw_len) {
-  return emit_frozen_literal_open_a(b, raw_len, 0);
+/* A frozen literal is one static object per distinct content, defined at
+   file scope, so every occurrence of the same bytes is the same object: CRuby
+   with frozen string literals gives `"x".equal?("x")` true, and a
+   compare_by_identity Hash keyed by "x" in two methods has one entry.
+
+   The 0xf1 marker promises a REAL sp_str_hdr immediately in front of the data
+   (hash cache, mutation guards), so every frozen literal -- single or an
+   adjacent-literal fold -- carries this header (#1749). `ascii7` says every
+   byte is below 0x80, which is what lets the runtime index the literal by
+   byte (sp_str_fixed_width wants the bit AND a known length, #4239); it is
+   read off the escaped text, where a byte from 0x80 up is a `\2xx` or `\3xx`
+   escape, so two spellings of the same bytes can never disagree on it.
+
+   A site emits a reference; the definitions are kept here, keyed by the
+   escaped text (emit_c_escaped_n and the interpolation fold escape the same
+   way), and fzl_emit_defs writes the ones the finished unit still names. */
+typedef struct { char *esc; size_t esc_len, raw_len; unsigned hash; } FzlLit;
+static FzlLit *g_fzl;
+static int g_fzl_n, g_fzl_cap;
+static int *g_fzl_slot;            /* open addressing over g_fzl, -1 empty */
+static int g_fzl_slots;
+
+static unsigned fzl_hash(const char *s, size_t n) {
+  unsigned h = 2166136261u;
+  for (size_t i = 0; i < n; i++) { h ^= (unsigned char)s[i]; h *= 16777619u; }
+  return h;
 }
-/* `ascii7` says every byte is below 0x80, which the caller knows from the
-   bytes it is about to stream. Recording it in the header is what lets the
-   runtime index this literal by byte -- sp_str_fixed_width wants the bit AND
-   a known length, and a literal has always carried the length. Without it a
-   frozen literal was walked to find every character index, and the byte-load
-   fold for `s[i] == "c"` had no way to prove itself safe (#4239). */
-int emit_frozen_literal_open_a(Buf *b, size_t raw_len, int ascii7) {
-  static int g_fzl_ctr = 0;
-  int id = g_fzl_ctr++;
-  size_t dl = raw_len + 1;
-  buf_printf(b, "({ static struct { sp_str_hdr h; unsigned char m; char d[%zu]; } _fzl_%d = "
-                "{ { NULL, %zu%s, %zu, 0 }, 0xf1, \"", dl, id, dl,
-             ascii7 ? " | SP_STR_SIZE_ASCII7" : "", raw_len);
-  return id;
+static void fzl_rehash(void) {
+  int ns = g_fzl_slots ? g_fzl_slots * 2 : 1024;
+  free(g_fzl_slot);
+  g_fzl_slot = malloc(sizeof(int) * (size_t)ns);
+  for (int i = 0; i < ns; i++) g_fzl_slot[i] = -1;
+  g_fzl_slots = ns;
+  for (int k = 0; k < g_fzl_n; k++) {
+    int i = (int)(g_fzl[k].hash & (unsigned)(ns - 1));
+    while (g_fzl_slot[i] >= 0) i = (i + 1) & (ns - 1);
+    g_fzl_slot[i] = k;
+  }
 }
-/* Every byte below 0x80 -- the compile-time half of the ASCII7 bit above. */
-int bytes_are_ascii7(const char *s, size_t n) {
-  for (size_t i = 0; i < n; i++) if ((unsigned char)s[i] >= 0x80) return 0;
+static int fzl_esc_ascii7(const char *e, size_t n) {
+  for (size_t i = 0; i < n; i++)
+    if (e[i] == '\\') { i++; if (i < n && (e[i] == '2' || e[i] == '3')) return 0; }
   return 1;
 }
-void emit_frozen_literal_close(Buf *b, int id) {
-  buf_printf(b, "\" }; _fzl_%d.d; })", id);
+void emit_frozen_literal(Buf *b, const char *esc, size_t esc_len, size_t raw_len) {
+  if (!esc) esc = "";
+  unsigned h = fzl_hash(esc, esc_len);
+  if ((g_fzl_n + 1) * 2 > g_fzl_slots) fzl_rehash();
+  int i = (int)(h & (unsigned)(g_fzl_slots - 1));
+  for (; g_fzl_slot[i] >= 0; i = (i + 1) & (g_fzl_slots - 1)) {
+    FzlLit *f = &g_fzl[g_fzl_slot[i]];
+    if (f->hash == h && f->esc_len == esc_len && !memcmp(f->esc, esc, esc_len)) break;
+  }
+  int id = g_fzl_slot[i];
+  if (id < 0) {
+    if (g_fzl_n == g_fzl_cap) {
+      g_fzl_cap = g_fzl_cap ? g_fzl_cap * 2 : 256;
+      g_fzl = realloc(g_fzl, sizeof *g_fzl * (size_t)g_fzl_cap);
+    }
+    id = g_fzl_n++;
+    g_fzl[id].esc = malloc(esc_len + 1);
+    memcpy(g_fzl[id].esc, esc, esc_len);
+    g_fzl[id].esc[esc_len] = 0;
+    g_fzl[id].esc_len = esc_len; g_fzl[id].raw_len = raw_len; g_fzl[id].hash = h;
+    g_fzl_slot[i] = id;
+  }
+  buf_printf(b, "((char *)_fzl_%d.d)", id);
+}
+/* The definitions of the literals the unit `t` names, in the order they were
+   first met. A literal only a discarded emission named (a speculative arm, an
+   abandoned unit) is left out. Resets the table for the next unit. */
+void fzl_emit_defs(const char *t, Buf *out) {
+  char *used = calloc((size_t)g_fzl_n + 1, 1);
+  for (const char *p = t; p && (p = strstr(p, "_fzl_")); ) {
+    p += 5;
+    if (!isdigit((unsigned char)*p)) continue;
+    long k = 0;
+    while (isdigit((unsigned char)*p)) k = k * 10 + (*p++ - '0');
+    if (k < g_fzl_n) used[k] = 1;
+  }
+  for (int k = 0; k < g_fzl_n; k++) {
+    FzlLit *f = &g_fzl[k];
+    if (used[k])
+      buf_printf(out, "static struct { sp_str_hdr h; unsigned char m; char d[%zu]; } _fzl_%d = "
+                      "{ { NULL, %zu%s, %zu, 0 }, 0xf1, \"%s\" };\n",
+                 f->raw_len + 1, k, f->raw_len + 1,
+                 fzl_esc_ascii7(f->esc, f->esc_len) ? " | SP_STR_SIZE_ASCII7" : "",
+                 f->raw_len, f->esc);
+    free(f->esc);
+  }
+  free(used);
+  free(g_fzl); g_fzl = NULL; g_fzl_n = g_fzl_cap = 0;
+  free(g_fzl_slot); g_fzl_slot = NULL; g_fzl_slots = 0;
 }
 static int round_kw_elem(Compiler *c, const RoundKw *o, int e, int *is_splat, int *opaque) {
   const NodeTable *nt = c->nt;
@@ -3527,10 +3634,10 @@ void emit_str_literal_n(Buf *b, const char *content, size_t len, int frozen) {
      string exactly (hdr | marker | bytes), the hash cache write hits our
      own static storage, and next=NULL keeps it off the sweep list. */
   if (frozen) {
-    int id = emit_frozen_literal_open_a(b, content ? len : 0,
-                                       content && len ? bytes_are_ascii7(content, len) : 1);
-    if (content && len) emit_c_escaped_n(b, content, len);
-    emit_frozen_literal_close(b, id);
+    Buf e; memset(&e, 0, sizeof e);
+    if (content && len) emit_c_escaped_n(&e, content, len);
+    emit_frozen_literal(b, e.p, e.len, content ? len : 0);
+    free(e.p);
     return;
   }
   if (!content || len == 0) { buf_printf(b, "(&(\"%s\")[1])", mk); return; }
@@ -3573,8 +3680,8 @@ void emit_str_literal(Buf *b, const char *content) {
    equal literals into one address, making `"abc".equal?("abc")` true. A
    re-evaluated occurrence (a literal in a loop) still yields one address --
    the frozen-string-literal semantics spinel's immutable strings already have.
-   Frozen and NUL-containing literals keep their existing per-site forms
-   (_fzl_N / sp_str_from_bytes), which are already identity-correct. */
+   A frozen literal is one object per content (_fzl_N), and a NUL-containing
+   one is built by sp_str_from_bytes. */
 void emit_str_literal_src(Buf *b, const char *content, size_t len, int frozen) {
   static int g_slit_ctr = 0;
   if (frozen || (content && len > strlen(content))) {
@@ -3592,7 +3699,8 @@ int emit_catch_tag(Compiler *c, int id, Buf *b) {
   const char *ty = nt_type(c->nt, id);
   if (ty && sp_streq(ty, "SymbolNode")) { emit_str_literal(b, nt_str(c->nt, id, "value")); return 0; }
   if (ty && sp_streq(ty, "StringNode")) { emit_str_literal(b, nt_str(c->nt, id, "unescaped")); return 0; }
-  TyKind t = comp_ntype(c, id);
+  Repr tr = repr_of(c, id);
+  TyKind t = tr.as_ty;
   if (t == TY_SYMBOL) {
     buf_puts(b, "sp_sym_to_s("); emit_expr(c, id, b); buf_puts(b, ")");
     return 0;
@@ -3606,7 +3714,7 @@ int emit_catch_tag(Compiler *c, int id, Buf *b) {
     buf_printf(b, "); _t%d ? _t%d : (const char *)&sp_catch_nil_tag; })", tp, tp);
     return 1;
   }
-  if (t == TY_POLY) {
+  if (tr.kind == RK_BOXED) {
     /* A boxed tag is whatever the value is: a Symbol or a String matches by
        name, an object by identity. The kind is the value's at run time, so
        the caller gets the sp_RbVal and -1, and asks sp_catch_tag_of for the
@@ -3674,7 +3782,7 @@ int hash_nil_key_stored(Compiler *c, int key, TyKind kt) {
 }
 
 void emit_hash_key(Compiler *c, int key, TyKind kt, Buf *b) {
-  TyKind actual = comp_ntype(c, key);
+  int kboxed = repr_of(c, key).kind == RK_BOXED;
   if (hash_key_misses(c, key, kt)) {
     /* evaluate the key for its effects, then answer the value no key equals */
     buf_puts(b, "({ (void)(");
@@ -3688,7 +3796,7 @@ void emit_hash_key(Compiler *c, int key, TyKind kt, Buf *b) {
      leftover of an older Hash.new{} model (its hash is PolyPoly now): it
      made `h[:a]` find "a"'s entry and `h.delete(:a)` remove it (#4531).
      :a != "a", so it is a miss like any other kind mismatch above. */
-  if (actual == TY_POLY && kt != TY_POLY) {
+  if (kboxed && kt != TY_POLY) {
     /* The union member is only valid when the tag agrees. A call site reached
        with a key of another kind -- the same method called with a String and
        with a Float -- read a Float's bits as a `const char *` and dereferenced
@@ -3704,7 +3812,7 @@ void emit_hash_key(Compiler *c, int key, TyKind kt, Buf *b) {
     else                      buf_puts(b, "; _hk.tag == SP_TAG_INT ? _hk.v.i : SP_INT_NIL; })");
     return;
   }
-  if (kt == TY_POLY && actual != TY_POLY) {
+  if (kt == TY_POLY && !kboxed) {
     /* PolyPolyHash key: box the typed value into sp_RbVal */
     emit_boxed(c, key, b);
     return;
@@ -4397,6 +4505,36 @@ void emit_recv_rooted(Compiler *c, int recv, int t, const char *rootm, Buf *b) {
     if (g_argov_node[i] == recv) bound = 1;
   if (bound) buf_puts(b, "; ");
   else buf_printf(b, "; %s(_t%d); ", rootm, t);
+}
+
+/* A compound literal is not a GC root. Evaluate and root each operand
+   before the next one's setup or value can allocate; only the held values
+   go into the array passed to the builtin. The caller owns the scope. */
+int emit_rooted_arg_list(Compiler *c, const int *argv, int argc,
+                         const char *ctype, const char *root,
+                         void (*emit)(Compiler *, int, Buf *), Buf *b) {
+  int first = g_tmp + 1;
+  g_tmp += argc;
+  for (int i = 0; i < argc; i++) {
+    Buf pre = {0}, val = {0};
+    emit_split_pre(c, argv[i], emit, &pre, &val);
+    if (pre.len) buf_puts(b, pre.p);
+    buf_printf(b, "%s _t%d = %s; %s(_t%d); ", ctype, first + i, val.p, root, first + i);
+    free(pre.p); free(val.p);
+  }
+  return first;
+}
+
+/* Boxed key-list builtins also hold the receiver before their keys. */
+void emit_rooted_key_call(Compiler *c, const char *fn, const char *recv,
+                          const int *argv, int argc, Buf *b) {
+  int tr = ++g_tmp;
+  buf_printf(b, "({ sp_RbVal _t%d = %s; SP_GC_ROOT_RBVAL(_t%d); ", tr, recv, tr);
+  int first = emit_rooted_arg_list(c, argv, argc, "sp_RbVal", "SP_GC_ROOT_RBVAL", emit_boxed, b);
+  buf_printf(b, "%s(_t%d, %d, (sp_RbVal[]){", fn, tr, argc);
+  for (int i = 0; i < argc; i++) buf_printf(b, "%s_t%d", i ? ", " : "", first + i);
+  if (!argc) buf_puts(b, "sp_box_nil()");
+  buf_puts(b, "}); })");
 }
 
 void emit_main_exit(Buf *b) {

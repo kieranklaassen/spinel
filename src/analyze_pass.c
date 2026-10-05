@@ -2633,6 +2633,22 @@ static int table_row_alias(Compiler *c, const LWIndex *lw, const char *nm, Scope
 /* infer_write_types's pass that folds container usage into a local's type:
    an empty [] or {} takes its element, key and value types from how it is
    filled (answers whether it changed a type) */
+/* `a[i] op= v` stores `a[i] op v`, not v: a Float element combined with an
+   Integer operand by an arithmetic operator is a Float, so a Float Array (or
+   a Float-valued Hash) written `acc[i] /= 4` keeps its kind. Taking the
+   operand's own type as the stored value's widened the container to a boxed
+   PolyArray, and every read and write of it after that was boxed. */
+static TyKind index_op_write_value_type(Compiler *c, int id, int recv, TyKind vt) {
+  if (vt != TY_INT) return vt;
+  const char *op = nt_str(c->nt, id, "binary_operator");
+  if (!op || !(sp_streq(op, "+") || sp_streq(op, "-") || sp_streq(op, "*") ||
+               sp_streq(op, "/") || sp_streq(op, "%") || sp_streq(op, "**")))
+    return vt;
+  TyKind rt = infer_type(c, recv);
+  TyKind et = ty_is_array(rt) ? ty_array_elem(rt) : ty_is_hash(rt) ? ty_hash_val(rt) : TY_UNKNOWN;
+  return et == TY_FLOAT ? TY_FLOAT : vt;
+}
+
 static int infer_write_container_usage(Compiler *c, const NodeTable *nt, int nfb, int *fb, LWIndex lw_ix, LWIndex ivw_ix) {
   int changed = 0;
   /* Fold container usage into the local type so an empty `[]` / `{}` gets
@@ -2921,6 +2937,7 @@ static int infer_write_container_usage(Compiler *c, const NodeTable *nt, int nfb
       kt = infer_type(c, argv[0]); vt = infer_type(c, nt_ref(nt, id, "value"));
       knode = argv[0];
       if (!sp_streq(ty, "IndexOperatorWriteNode")) vnode = nt_ref(nt, id, "value");
+      else vt = index_op_write_value_type(c, id, recv, (TyKind)vt);
     }
     else {
       continue;
@@ -12812,8 +12829,15 @@ static int infer_block_params_container_arms(Compiler *c, const NodeTable *nt, i
           int re_n2 = 0;
           const int *re_els2 = nt_arr(nt, recv, "elements", &re_n2);
           TyKind common_at = TY_UNKNOWN;
-          for (int ri = 0; ri < re_n2; ri++)
-            common_at = ty_unify(common_at, infer_type(c, re_els2[ri]));
+          for (int ri = 0; ri < re_n2; ri++) {
+            TyKind row_at = infer_type(c, re_els2[ri]);
+            /* An empty `[]` row has no kind of its own and is built boxed, as
+               a poly array. Left open it unified away, the parameters took
+               the other rows' element type, and the loop read that row as a
+               typed array: `[[1, 2], []].each { |a, b| }` bound 0 and 0. */
+            if (row_at == TY_UNKNOWN && node_is_empty_container(nt, re_els2[ri])) row_at = TY_POLY;
+            common_at = ty_unify(common_at, row_at);
+          }
           if (ty_is_array(common_at)) inner_elem = ty_array_elem(common_at);
           else inner_elem = TY_POLY;
         }
@@ -14051,6 +14075,11 @@ int infer_block_params(Compiler *c) {
                  to a const char * */
               sp_streq(name, "transform_keys") || sp_streq(name, "transform_values") ||
               sp_streq(name, "each_key") || sp_streq(name, "each_value") ||
+              /* each_pair is each's alias: left off, its key param kept the
+                 Symbol a round typed it with while one site's Symbol-keyed
+                 Hash was all the receiver held, and once another site widened
+                 the receiver to a boxed value a String key read as a Symbol */
+              sp_streq(name, "each_pair") ||
               sp_streq(name, "delete_if") || sp_streq(name, "keep_if") ||
               sp_streq(name, "select!") || sp_streq(name, "filter!") ||
               sp_streq(name, "reject!")))

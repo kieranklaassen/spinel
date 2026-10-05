@@ -69,3 +69,16 @@ u[:k] ||= +"abc"
 u[:k].upcase!
 u[:k].concat("d", "e")
 p u.to_a
+
+# a key the write did not store is still nil, bound to a local too
+w = {}
+w[:k] &&= +""
+w[:j] ||= +""
+z = w[:k]
+p z
+begin
+  z << "3"
+rescue NoMethodError
+  puts "nil takes no append"
+end
+p w.to_a

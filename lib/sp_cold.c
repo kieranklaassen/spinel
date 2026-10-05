@@ -18,6 +18,7 @@
 #include <strings.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdarg.h>   /* sp_sprintf */
 #include <unistd.h>
 #include "sp_alloc.h"   /* sp_str_alloc / sp_str_set_len / sp_raise_cls */
 #include "sp_array.h"   /* sp_StrArray for Dir.glob */
@@ -54,6 +55,11 @@ extern int sp_gc_rem_peak;   /* lib/sp_gc.c: high-water mark of the remembered s
 #elif defined(__GLIBC__) || defined(__APPLE__) || defined(__FreeBSD__)
 #  define HAVE_EXECINFO_H 1
 #endif
+
+/* printf into a fresh heap string: the error-message and interpolation
+   formatter every runtime TU and the generated program call. */
+const char*sp_sprintf(const char*fmt,...){char _sp_tmp[4096];va_list ap;va_start(ap,fmt);int _sp_n=vsnprintf(_sp_tmp,sizeof(_sp_tmp),fmt,ap);va_end(ap);if(_sp_n<0)_sp_n=0;char*b=sp_str_alloc((size_t)_sp_n);if(_sp_n<(int)sizeof(_sp_tmp)){memcpy(b,_sp_tmp,(size_t)_sp_n);}
+else{/* result didn't fit the stack temp; re-render at full width (sp_str_alloc gives _sp_n bytes + NUL) so long string interpolations aren't truncated. re-arm the va_list rather than va_copy so the common fast path pays nothing */va_start(ap,fmt);vsnprintf(b,(size_t)_sp_n+1,fmt,ap);va_end(ap);}return b;}
 
 /* Integer#% / Kernel#format "%b"/"%B"/"%o"/"%x"/"%X": non-decimal formatting
    with Ruby's flag, width, precision, and two's-complement-for-negative rules.
@@ -1049,13 +1055,14 @@ SP_NORETURN static void sp_typed_replace_elem_error(sp_RbVal v, const char *kind
 }
 
 /* the contents of a shared String buffer as a String of their own, embedded
-   NULs included */
+   NULs and a binary encoding included */
 static const char *sp_strbuf_copy(sp_String *b) {
   size_t n = (size_t)b->len;
   char *c = sp_str_alloc(n);
   memcpy(c, b->data, n);
   c[n] = '\0';
   sp_str_set_len(c, n);
+  if (b->binary) sp_str_mark_binary(c);
   return c;
 }
 
@@ -3426,7 +3433,7 @@ sp_Range sp_range_new_fend(sp_int f, sp_float e, sp_int x) {
   sp_Range r = sp_range_new(f, 0, 0);
   r.fend = e; r.fe = x ? 2 : 1;
   sp_float fl = floor(e);
-  if (e != e) { r.last = f - 1; return r; }             /* NaN: nothing compares */
+  if (e != e) sp_raise_cls("ArgumentError", "bad value for range");   /* NaN compares with nothing */
   if (fl >= 9.2e18) { r.last = INTPTR_MAX; return r; }  /* past sp_int: no end to walk to */
   if (fl <= -9.2e18) { r.last = f - 1; return r; }
   r.last = (sp_int)fl;
@@ -3653,11 +3660,19 @@ sp_bool sp_argf_eof(void) { return !sp_argf_ensure(); }
 
 /* Float range (1.0..3.0). Endpoints stay sp_float, so cover?/include?/begin/end
    are exact. -HUGE_VAL / +HUGE_VAL are the beginless / endless sentinels. */
+/* A NaN bound compares with nothing, so CRuby refuses a range that has one
+   and another bound to compare it with; a beginless or endless one is kept. */
+static void sp_frange_check(sp_float f, sp_float l, sp_int om) {
+  if (!(om & SP_FRANGE_NO_BEGIN) && !(om & SP_FRANGE_NO_END) && (f != f || l != l))
+    sp_raise_cls("ArgumentError", "bad value for range");
+}
 sp_FloatRange sp_frange_new(sp_float f, sp_float l, sp_int e) {
+  sp_frange_check(f, l, 0);
   sp_FloatRange r; r.first = f; r.last = l; r.excl = e; r.omitted = 0; r.unfrozen = 0; return r;
 }
 /* Same, recording which bound was written as absent rather than infinite. */
 sp_FloatRange sp_frange_new_o(sp_float f, sp_float l, sp_int e, sp_int om) {
+  sp_frange_check(f, l, om);
   sp_FloatRange r; r.first = f; r.last = l; r.excl = e; r.omitted = om; r.unfrozen = 0; return r;
 }
 sp_bool sp_frange_cover(sp_FloatRange r, sp_float x) {

@@ -222,10 +222,6 @@ spinel: 1 refusal, nothing written
 == test/reject/dynamic_send_then_refusal.rb [promote] rc=1
 spinel: String#unicode_normalize is not supported: Unicode normalization requires shipping the Unicode decomposition/composition tables, which spinel deliberately does not carry -- the same limit as String#grapheme_clusters (see docs/limitations.md)
 spinel: 1 refusal, nothing written
-== test/reject/fetch_default_string_stored_back.rb [default] rc=1
-spinel: a String that is the default of `fetch` is stored back under the key it was fetched with (h[k] = h.fetch(k, v)) and then changed in place through h[k]: a String is not yet shared by reference through the default of `fetch`. Write h[k] = v unless h.key?(k)
-== test/reject/fetch_default_string_stored_back.rb [promote] rc=1
-spinel: a String that is the default of `fetch` is stored back under the key it was fetched with (h[k] = h.fetch(k, v)) and then changed in place through h[k]: a String is not yet shared by reference through the default of `fetch`. Write h[k] = v unless h.key?(k)
 == test/reject/ffi_ptr_ruby_object.rb [default] rc=1
 spinel: unsupported ffi pointer argument (a Ruby object has no C address; pass an IO::Buffer, a String or a :ptr value): node 23 (CallNode `new`) recv=ConstantReadNode/ty49 argc=0
 spinel: 1 refusal, nothing written
@@ -792,6 +788,12 @@ spinel: a String stored in a Hash is passed to an appending value block: a Strin
 spinel: a String stored in a Hash is passed to an appending value block: a String is not yet shared by reference through a Hash's values. Append to the String before storing it in the Hash.
 == test/reject/string_hash_values_variable.rb [promote] rc=1
 spinel: a String stored in a Hash is passed to an appending value block: a String is not yet shared by reference through a Hash's values. Append to the String before storing it in the Hash.
+== test/reject/string_iter_block_argument.rb [default] rc=1
+spinel: unsupported a String iterator given its block as a block argument (&blk): write the block out, or use each_char / each_byte / each_line: node 12 (CallNode `bytes`) recv=StringNode/ty6 argc=0
+spinel: 1 refusal, nothing written
+== test/reject/string_iter_block_argument.rb [promote] rc=1
+spinel: unsupported a String iterator given its block as a block argument (&blk): write the block out, or use each_char / each_byte / each_line: node 12 (CallNode `bytes`) recv=StringNode/ty6 argc=0
+spinel: 1 refusal, nothing written
 == test/reject/string_ivar_alias_lent_call.rb [default] rc=1
 spinel: a String instance variable written from a local is passed to an appending parameter (a String is not yet shared by reference through a lent instance variable written from a local). Return the String from the method and assign it, or append to it in the caller.
 == test/reject/string_ivar_alias_lent_call.rb [promote] rc=1

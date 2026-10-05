@@ -9,3 +9,6 @@ true
 [[:k, "t?"]]
 true
 [[:k, "ABCde"]]
+nil
+nil takes no append
+[[:j, ""]]

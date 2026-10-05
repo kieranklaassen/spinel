@@ -241,6 +241,7 @@ void comp_free(Compiler *c) {
   free(c->hash_default_arg_memo);
   c->hash_default_arg_memo = NULL;
   free(c->blk_body_map);
+  free(c->nil_fact);
   free(c->node_ord); free(c->node_base);
   for (int k = 0; k < c->bi_base_cap; k++) free(c->bi_base_key[k]);
   free(c->bi_base_key); free(c->bi_base_cnt);
@@ -262,6 +263,7 @@ void comp_free(Compiler *c) {
     for (int j = 0; j < c->classes[i].nivars; j++) free(c->classes[i].ivars[j]);
     free(c->classes[i].ivars);
     free(c->classes[i].ivar_types);
+    free(c->classes[i].ivar_obj_may_nil);
     for (int j = 0; j < c->classes[i].n_rbs_pin_ivars; j++) free(c->classes[i].rbs_pin_ivars[j]);
     free(c->classes[i].rbs_pin_ivars);
     for (int j = 0; j < c->classes[i].nreaders; j++) free(c->classes[i].readers[j]);
@@ -1252,15 +1254,22 @@ int comp_defined_guard_true(Compiler *c, int pred) {
   return 0;
 }
 
-/* A literal ArrayNode whose elements are all integer literals (or empty). */
+/* A literal ArrayNode that is built as an sp_IntArray: one element at least,
+   each an integer literal that fits an sp_int. The folds over a nested
+   literal read every row through that pointer type without a test, so a row
+   built as anything else is not one: an empty `[]` (a poly array, having no
+   element to take a kind from) or a row holding a literal past int64 (a
+   Bignum, boxed). Each read as an sp_IntArray answered a length of 8 and
+   the poly array's storage as its elements. */
 static int is_int_array_literal(Compiler *c, int node) {
   const NodeTable *nt = c->nt;
   const char *ty = nt_type(nt, node);
   if (!ty || !sp_streq(ty, "ArrayNode")) return 0;
   int en = 0; const int *els = nt_arr(nt, node, "elements", &en);
+  if (en == 0) return 0;
   for (int i = 0; i < en; i++) {
     const char *et = nt_type(nt, els[i]);
-    if (!et || !sp_streq(et, "IntegerNode")) return 0;
+    if (!et || !sp_streq(et, "IntegerNode") || nt_str(nt, els[i], "bigval")) return 0;
   }
   return 1;
 }

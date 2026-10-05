@@ -1,4 +1,5 @@
 #include "codegen_internal.h"
+#include "repr.h"
 #include "call_plan.h"
 
 /* Defined lower in this file; declared here so the collecting emitters above
@@ -168,9 +169,6 @@ void emit_method_call(Compiler *c, int id, Buf *b) {
   }
   buf_puts(b, ")");
 }
-
-int patch_lv_reads(Compiler *c, int id, const char *nm, TyKind ty,
-                           int *ids_out, TyKind *ty_out, int cap);
 
 /* Emit, into g_pre after the caller's `<lhs> = `, the rest of the statement
    binding a hash block's first parameter to entry `ti` of `_t<trecv>`: the
@@ -672,62 +670,6 @@ int emit_hash_reduce_scalar_expr(Compiler *c, int id, Buf *b) {
   return 1;
 }
 
-/* Recursively patch c->ntype[id]=ty for every LocalVariableReadNode named nm
-   within the subtree at id. Saved old values in ids_out/ty_out (max cap).
-   Returns count of patched nodes. */
-int patch_lv_reads(Compiler *c, int id, const char *nm, TyKind ty,
-                           int *ids_out, TyKind *ty_out, int cap) {
-  if (id < 0 || id >= c->nt->count || cap <= 0) return 0;
-  int n = 0;
-  const char *node_ty = nt_type(c->nt, id);
-  if (node_ty && sp_streq(node_ty, "LocalVariableReadNode")) {
-    const char *vname = nt_str(c->nt, id, "name");
-    if (vname && sp_streq(vname, nm)) {
-      ids_out[0] = id; ty_out[0] = c->ntype[id]; c->ntype[id] = ty;
-      return 1;
-    }
-  }
-  int nr = nt_num_refs(c->nt, id);
-  for (int i = 0; i < nr && n < cap; i++) {
-    int r = nt_ref_at(c->nt, id, i);
-    n += patch_lv_reads(c, r, nm, ty, ids_out + n, ty_out + n, cap - n);
-  }
-  int na = nt_num_arrs(c->nt, id);
-  for (int i = 0; i < na && n < cap; i++) {
-    int cn = 0; const int *ids = nt_arr_at(c->nt, id, i, &cn);
-    for (int j = 0; j < cn && n < cap; j++)
-      n += patch_lv_reads(c, ids[j], nm, ty, ids_out + n, ty_out + n, cap - n);
-  }
-  return n;
-}
-
-/* Scan nodes with IDs in [min_id, max_id) for LocalVariableReadNode with the
-   given name in the given scope, and patch c->ntype[id] to `new_ty`.
-   Prism assigns IDs in pre-order, so all descendants of `block` have id > block.
-   Passing min_id=block+1 restricts patching to the block's own subtree.
-   Stores original types in saved[] (caller must free). Returns the count. */
-int patch_lv_read_ntype(Compiler *c, int scope_idx, const char *name,
-                                TyKind new_ty, int min_id,
-                                int **saved_ids, TyKind **saved_tys) {
-  int n = 0, cap = 8;
-  *saved_ids = malloc(sizeof(int) * (size_t)cap);
-  *saved_tys = malloc(sizeof(TyKind) * (size_t)cap);
-  for (int i = min_id; i < c->nt->count; i++) {
-    const char *ty = nt_type(c->nt, i);
-    if (!ty || !sp_streq(ty, "LocalVariableReadNode")) continue;
-    if (c->nscope[i] != scope_idx) continue;
-    const char *nm = nt_str(c->nt, i, "name");
-    if (!nm || !sp_streq(nm, name)) continue;
-    if (c->ntype[i] == new_ty) continue;
-    if (n >= cap) { cap *= 2; *saved_ids = realloc(*saved_ids, sizeof(int) * (size_t)cap); *saved_tys = realloc(*saved_tys, sizeof(TyKind) * (size_t)cap); }
-    (*saved_ids)[n] = i;
-    (*saved_tys)[n] = c->ntype[i];
-    c->ntype[i] = new_ty;
-    n++;
-  }
-  return n;
-}
-
 /* hash.transform_keys { |k| nk } / transform_values { |v| nv }: rebuild the
    hash applying the block to every key (or value), keeping the other half.
    Returns 1 if handled. */
@@ -933,8 +875,8 @@ int emit_bsearch_expr(Compiler *c, int id, Buf *b) {
        re-assigned variable, a call's answer) bisects its run-time bounds */
     int fvar = rn9 < 0 && comp_ntype(c, recv) == TY_FLOAT_RANGE;
     if (rn9 < 0 && !fvar) return 0;
-    TyKind blt9 = rleft >= 0 ? infer_type(c, rleft) : TY_NIL;
-    TyKind brt9 = rright >= 0 ? infer_type(c, rright) : TY_NIL;
+    TyKind blt9 = rleft >= 0 ? comp_ntype(c, rleft) : TY_NIL;
+    TyKind brt9 = rright >= 0 ? comp_ntype(c, rright) : TY_NIL;
     /* A half-open Float range (..2.5), (1.5..): CRuby bisects the doubles
        themselves, in the order of their bit patterns (sp_f2key), so an
        infinite bound is a bound like any other. Its answer is the least
@@ -5705,7 +5647,7 @@ int emit_find_index_poly_expr(Compiler *c, int id, Buf *b) {
   int block = resolve_forwarded_block(c, nt_ref(nt, id, "block"));
   int recv = nt_ref(nt, id, "receiver");
   if (block < 0 || recv < 0) return 0;
-  if (comp_ntype(c, recv) != TY_POLY || infer_type(c, recv) != TY_POLY) return 0;
+  if (comp_ntype(c, recv) != TY_POLY) return 0;
   int body = nt_ref(nt, block, "body");
   int bn = 0; const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
   if (bn < 1) return 0;
@@ -6125,7 +6067,7 @@ static int emit_strbuf_local_write_handle(Compiler *c, int node, Buf *out) {
   if (node < 0 || nt_kind(c->nt, node) != NK_LocalVariableWriteNode) return 0;
   const char *nm = nt_str(c->nt, node, "name");
   LocalVar *lv = nm ? scope_local(comp_scope_of(c, node), nm) : NULL;
-  if (!lv || lv->type != TY_STRBUF) return 0;
+  if (repr_of_slot(c, lv).kind != RK_STRBUF) return 0;
   for (int i = g_n_argov - 1; i >= 0; i--)
     if (g_argov_node[i] == node) { buf_puts(out, g_argov_text[i]); return 1; }
   buf_puts(out, "({ ");
@@ -6191,7 +6133,7 @@ static int dyn_handle_lit_arg(Compiler *c, Scope *m, int idx, int arg) {
   const NodeTable *nt = c->nt;
   if (!m || idx < 0 || idx >= m->nparams || !m->pnames[idx] || arg < 0) return 0;
   LocalVar *p = scope_local(m, m->pnames[idx]);
-  if (!p || !p->dyn_handle || p->type != TY_STRBUF || nt_kind(nt, arg) != NK_CallNode) return 0;
+  if (!p || !p->dyn_handle || repr_of_slot(c, p).kind != RK_STRBUF || nt_kind(nt, arg) != NK_CallNode) return 0;
   const char *nm = nt_str(nt, arg, "name");
   int r = nt_ref(nt, arg, "receiver");
   return nm && sp_streq(nm, "+@") && nt_ref(nt, arg, "arguments") < 0 && r >= 0 &&
@@ -6390,12 +6332,12 @@ static void emit_arg_or_default_fill(Compiler *c, Scope *m, int idx, int provide
      appending initialize made the handle is read by other constructors too,
      and the copy per construction was most of their cost. */
   if (provided >= 0 && pt == TY_STRING && p && !p->byref_out && m->name && sp_streq(m->name, "initialize") &&
-      nt_kind(c->nt, provided) == NK_LocalVariableReadNode && !c->strbuf_box[provided] &&
+      nt_kind(c->nt, provided) == NK_LocalVariableReadNode && !repr_of(c, provided).handle &&
       !arg_ran_first(provided, 0)) {
     const char *vn = nt_str(c->nt, provided, "name");
     Scope *vs = vn ? comp_scope_of(c, provided) : NULL;
     LocalVar *lv = vs ? scope_local(vs, vn) : NULL;
-    if (lv && !lv->is_cell && lv->type == TY_STRBUF && lv->str_shared &&
+    if (lv && !lv->is_cell && repr_of_slot(c, lv).handle &&
         ctor_param_reads_only(c, (int)(m - c->scopes), idx)) {
       Buf lr; memset(&lr, 0, sizeof lr);
       emit_local_ref(c, provided, vn, &lr);
@@ -6447,8 +6389,8 @@ static void emit_arg_or_default_fill(Compiler *c, Scope *m, int idx, int provide
      handle -- the parameter and the local are one object. The analyzer
      types the parameter from the write, which is the local's sp_String *,
      while the write's value form is the const char * copy. */
-  if (p && pt == TY_STRBUF && emit_strbuf_local_write_handle(c, provided, out)) return;
-  if (p && pt == TY_STRBUF && p->str_shared) {
+  if (repr_of_slot(c, p).kind == RK_STRBUF && emit_strbuf_local_write_handle(c, provided, out)) return;
+  if (repr_of_slot(c, p).handle) {
     if (provided >= 0) {
       char srefP[192];
       /* A variable the call ran first is read where it ran, not at its
@@ -7442,6 +7384,33 @@ void emit_rooted_operand(Compiler *c, TyKind pt, int provided, const char *expr,
   buf_printf(out, "_t%d", t);
 }
 
+/* True when a bare read `provided` (one arg_wants_root leaves unrooted) does
+   NOT reach the container parameter of type `pt` as itself: a read of another
+   kind -- a boxed value, a PolyArray into an Array[Float] parameter -- goes
+   through a converting entry (sp_poly_as_float_array, sp_poly_as_ptr_array,
+   ...) that builds a NEW container, rooted only inside the converter. The
+   read's own root does not reach the copy, and a callee that allocates before
+   it roots the parameter (sp_<C>_new) can collect it: the object then holds
+   freed memory. */
+int arg_read_converts(Compiler *c, TyKind pt, int provided) {
+  if (provided < 0 || pt == TY_POLY) return 0;
+  if (!(ty_is_array(pt) || ty_is_obj_array(pt) || ty_is_hash(pt))) return 0;
+  TyKind st = comp_ntype(c, provided);
+  return st != pt && st != TY_NIL && st != TY_UNKNOWN && st != TY_VOID;
+}
+
+/* Root a converted bare read across the call without moving its evaluation:
+   the temp is declared NULL and rooted in g_pre, and assigned where the
+   argument stands, so the read sees the value at its own position (the stale
+   capture arg_wants_root avoids for a hoisted read cannot happen). */
+void emit_rooted_conversion(Compiler *c, TyKind pt, const char *expr, Buf *out) {
+  int t = ++g_tmp;
+  emit_indent(g_pre, g_indent);
+  emit_ctype(c, pt, g_pre);
+  buf_printf(g_pre, " _t%d = NULL; SP_GC_ROOT(_t%d);\n", t, t);
+  buf_printf(out, "(_t%d = %s)", t, expr);
+}
+
 /* Like emit_arg_or_default, but hoists a pointer-backed / poly argument into a
    g_pre temp and roots it before the call. A fresh allocation passed straight
    into a callee that allocates before it roots the parameter -- the canonical
@@ -7459,7 +7428,14 @@ static void emit_arg_rooted(Compiler *c, Scope *m, int idx, int provided, Buf *o
   /* a byref out-param arg is a slot address, not a heap value: it hoists its
      own rooted temp when one is needed (see emit_arg_or_default) */
   if (p && p->byref_out) { emit_arg_or_default(c, m, idx, provided, out); return; }
-  if (!arg_wants_root(c, pt, provided)) { emit_arg_or_default(c, m, idx, provided, out); return; }
+  if (!arg_wants_root(c, pt, provided)) {
+    if (!arg_read_converts(c, pt, provided)) { emit_arg_or_default(c, m, idx, provided, out); return; }
+    Buf cb; memset(&cb, 0, sizeof cb);
+    emit_arg_or_default(c, m, idx, provided, &cb);
+    emit_rooted_conversion(c, pt, cb.p ? cb.p : "NULL", out);
+    free(cb.p);
+    return;
+  }
   Buf ab; memset(&ab, 0, sizeof ab);
   emit_arg_or_default(c, m, idx, provided, &ab);
   emit_rooted_operand(c, pt, provided, ab.p ? ab.p : default_value_from_compiler(c, pt), out);
@@ -9904,7 +9880,7 @@ static void emit_elem_param(Compiler *c, Scope *m, int i, int off, int tmp, TyKi
     emit_array_elem_at(at, tmp, off, &raw);
     emit_boxed_text(c, set, raw.p ? raw.p : "0", &eb); free(raw.p);
   }
-  else if (sp && sp->type == TY_STRBUF && sp->str_shared && set == TY_STRING) {
+  else if (repr_of_slot(c, sp).handle && set == TY_STRING) {
     /* a String element into a shared-handle parameter: a handle of its own,
        as any value that is not a caller's variable gets */
     Buf raw; memset(&raw, 0, sizeof raw);
@@ -10223,7 +10199,7 @@ void emit_args_filled_argv(Compiler *c, int callee_idx, const int *argv, int arg
       /* a write to a shared-string local handed to a mutable-string parameter
          is sequenced as the local's handle, which is what the slot takes */
       LocalVar *hp = m->pnames[k] ? scope_local(m, m->pnames[k]) : NULL;
-      if (hp && hp->type == TY_STRBUF &&
+      if (repr_of_slot(c, hp).kind == RK_STRBUF &&
           emit_strbuf_local_write_handle(c, argv[k], &hb)) {
         emit_indent(g_pre, g_indent);
         buf_printf(g_pre, "sp_String *_t%d = %s; SP_GC_ROOT(_t%d);\n", ht, hb.p, ht);
@@ -10393,10 +10369,10 @@ static int arm_takes_blk(Scope *s) {
 
 /* How an arm's parameter takes a String: 1 the lent slot (byref), 2 the
    shared handle, 0 anything else. */
-static int arm_string_abi(const LocalVar *p) {
+static int arm_string_abi(const Compiler *c, const LocalVar *p) {
   if (!p) return 0;
   if (p->byref_out) return 1;
-  return p->type == TY_STRBUF && p->str_shared ? 2 : 0;
+  return repr_of_slot(c, p).handle ? 2 : 0;
 }
 
 /* Do the switch's arms bind the call's arguments differently? The shared path
@@ -10435,8 +10411,8 @@ int dispatch_arms_disagree(Compiler *c, int cid, const char *name) {
          shared handle, the value -- is one no single temp can be: a Sub
          whose parameter became the handle took the base method's copy, or
          its `const char **`, and the C build stopped (#6065) */
-      if (arm_string_abi(scope_local(s, s->pnames[i])) !=
-          arm_string_abi(scope_local(first, first->pnames[i]))) return 1;
+      if (arm_string_abi(c, scope_local(s, s->pnames[i])) !=
+          arm_string_abi(c, scope_local(first, first->pnames[i]))) return 1;
     }
   }
   return 0;

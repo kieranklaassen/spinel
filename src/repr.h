@@ -34,7 +34,9 @@ typedef struct {
   TyKind narrowed;        /* a read narrowed past a nil guard: its non-nil
                              type, or TY_UNKNOWN */
   unsigned char kind;     /* ReprKind */
-  unsigned may_nil:1;     /* the value can be nil in this representation */
+  unsigned may_nil:1;     /* the value can be nil in this representation;
+                             for a user object, the nil fact (analyze_nil.c,
+                             #7444): nothing reads it for one yet */
   unsigned handle:1;      /* a read that yields the shared String handle */
   unsigned demand:1;      /* stored as the handle without moving the type */
   unsigned read_raw:1;    /* a handle read whose consumer only reads bytes */
@@ -114,6 +116,9 @@ ReprForm repr_box_form(const Compiler *c, Repr r);
 const char *repr_form_name(int form);
 /* --repr-check is on */
 extern int g_repr_check;
+/* --repr-check: ask repr_of of a node codegen is about to emit, whose
+   answer is dropped; the C must not change (repr_of changes nothing) */
+void repr_check_ask(const Compiler *c, int node);
 
 /* ---- Stores (R6) ----
    The C value class of a kind, what C allows between two of them: a store

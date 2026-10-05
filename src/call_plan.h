@@ -69,6 +69,11 @@ typedef struct {
 } CallPlan;
 
 const CallPlan *cplan_user(Compiler *c, int id);
+/* The same plan resolved afresh and never kept, for a reader that runs in
+   the analysis, before the memo is codegen's to fill (the nil facts,
+   analyze_nil.c): it answers from the types as they stand. The answer
+   lasts until the next call. */
+const CallPlan *cplan_user_fresh(Compiler *c, int id);
 /* Object fallback behind a class-gated exception accessor, or -1. */
 int cplan_exc_object_method(Compiler *c, const char *name);
 
@@ -128,6 +133,7 @@ typedef enum {
   PA_NATIVE,      /* a native class's C binding */
   PA_ARITY,       /* the call's count is refused: ArgumentError */
   PA_SYNTH_ENUM,  /* a Struct's synthesized each/each_pair: an Enumerator */
+  PA_STRUCT_SET,  /* a Struct's builtin member write */
   PA_BUILTIN,     /* a builtin value's arm (key PA_KEY_BUILTIN + its PolyFamily) */
   PA_TRIAL        /* an arm only an emission can decide: the call re-entered as the
                      builtin it is, kept unless it raises (key PA_KEY_TRIAL + its
@@ -258,6 +264,7 @@ const PolyPlan *cplan_poly(Compiler *c, int id);
    receiver form). Cheaper: the builtin families and trials, which only the
    --plan-check shadow compares, are left out. */
 const PolyPlan *cplan_poly_arms(Compiler *c, int id);
+int cplan_struct_aset(Compiler *c, int cid, const char *name, int argc);
 /* A plan the caller keeps across emissions that may resolve others (a
    resolve outside the memo reuses one buffer); cplan_poly_free drops it. */
 PolyPlan *cplan_poly_copy(const PolyPlan *p);
