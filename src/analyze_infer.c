@@ -1223,10 +1223,13 @@ static int const_array_elems_all_int_array_impl(Compiler *c, const char *cname) 
       if (!rn || !sp_streq(rn, cname)) continue;
       if (rewrite) {
         if (!an_rewritten_rows_int(c, id)) return 0;
-        saw = 1;
         continue;
       }
-      if (!an_stored_rows_int(c, id, &saw)) return 0;
+      /* A row handed to the table by another call keeps a table of Integer
+         Arrays one, and does not make one: `T = []; T << [7, 8]` reads
+         `T[1]` as nil, from a general table. */
+      int kept = 0;
+      if (!an_stored_rows_int(c, id, is_store_alias(nm) ? &saw : &kept)) return 0;
       continue;
     }
     if (!sp_streq(ty, "ConstantWriteNode")) continue;
