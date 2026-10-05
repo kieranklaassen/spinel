@@ -21,7 +21,9 @@
 #include "spinel_rev.h"
 #include "codegen.h"
 #include "analyze.h"
+#include "repr.h"
 #include "csplit.h"
+#include "decide.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -237,11 +239,31 @@ static int refuse_overwrite(const char *path) {
   return 1;
 }
 
-static int write_text_file(const char *path, const char *text) {
-  FILE *f = fopen(path, "wb");
-  if (!f) { fprintf(stderr, "spinel: cannot write '%s'\n", path); return 0; }
-  fputs(text, f);
-  fclose(f);
+/* The decisions log is emptied before the source is read, so the same care
+   comes first there: `spinel --decisions-log=app.rb app.rb` would leave
+   nothing to compile. A log is lines of `kind@site` (src/decide.c), a kind
+   being lowercase words joined by hyphens (nn-read, root-frame); a file
+   that opens with anything else is not replaced.
+
+   Only a regular file is looked into. A pipe, a FIFO or /dev/stdout has
+   nothing to lose, and opening one to read it would wait for a writer that
+   is this process. */
+static int refuse_log_overwrite(const char *path) {
+  if (g_force_overwrite || !path || !*path) return 0;
+  struct stat st;
+  if (stat(path, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size == 0) return 0;
+  /* one that cannot be read cannot be shown to be a log */
+  char head[64];
+  size_t n = 0;
+  FILE *f = fopen(path, "rb");
+  if (f) { n = fread(head, 1, sizeof head - 1, f); fclose(f); }
+  head[n] = 0;
+  size_t k = strspn(head, "abcdefghijklmnopqrstuvwxyz-");
+  if (k > 2 && head[k] == '@' && head[0] != '-' && head[k - 1] != '-' && memchr(head, '-', k)) return 0;
+  fprintf(stderr,
+          "spinel: refusing to overwrite '%s': it is not a decisions log.\n"
+          "spinel:   Choose another --decisions-log path, or pass --force if\n"
+          "spinel:   you mean to replace it.\n", path);
   return 1;
 }
 
@@ -343,7 +365,8 @@ static void usage(void) {
     "  --link ARG  Extra link input (object/archive/-lLIB); repeatable\n"
     "  -v, --version  Print the compiler version and build revision\n"
     "  -c          C source only (don't compile)\n"
-    "  --force     with -c, overwrite an -o path spinel did not write\n"
+    "  --force     overwrite an -o path (with -c) or a --decisions-log path\n"
+    "              that spinel did not write\n"
     "  -I DIR      Add a feature search root for `require \"name\"` (like ruby -I)\n"
     "  --require-gate  Refuse an unresolvable require instead of warning\n"
     "  --emit-rbs  Dump inferred type signatures as RBS (-> app.rbs), no binary\n"
@@ -370,6 +393,10 @@ static void usage(void) {
     "  --no-inline-hot  Do not force small leaf methods inline (default: do).\n"
     "                 Forcing is worth a sixth of optcarrot's frame rate and\n"
     "                 costs up to twice the C compile time\n"
+    "  --decisions-log=FILE  Write the key of each optimization decision that\n"
+    "              would be a miscompile if its check were wrong, one per line\n"
+    "  --decisions=FILE  Take only the decisions FILE lists (an empty file:\n"
+    "              none); `spinel bisect` searches the list for a wrong answer\n"
     "  --cc=CMD    C compiler (default: cc)\n"
     "  --jobs=N    compile the generated C as N units in parallel\n"
     "              (default: split only a unit of 4 MB or more; --jobs=1 never)\n"
@@ -390,14 +417,15 @@ int main(int argc, char **argv) {
 #ifdef SP_WORK_COUNT
   atexit(work_report);
 #endif
-  /* `spinel diff FILE.rb ...`: the companion tool beside the compiler runs
-     it (tools/diff.rb, built to bin/spinel-diff); the arguments pass through
+  /* `spinel diff FILE.rb ...`, `spinel bisect FILE.rb ...`: the companion
+     tool beside the compiler runs it (tools/diff.rb, built to
+     bin/spinel-diff; tools/bisect.rb likewise); the arguments pass through
      untouched, its exit status is the answer. */
-  if (argc >= 2 && sp_streq(argv[1], "diff")) {
+  if (argc >= 2 && (sp_streq(argv[1], "diff") || sp_streq(argv[1], "bisect"))) {
     char dir[4096];
     exe_dir(argv[0], dir, sizeof dir);
     char tool[4200];
-    snprintf(tool, sizeof tool, "%s/spinel-diff", dir);
+    snprintf(tool, sizeof tool, "%s/spinel-%s", dir, argv[1]);
     char self[4200];
     snprintf(self, sizeof self, "%s/spinel", dir);
     setenv("SPINEL", self, 0);
@@ -489,6 +517,19 @@ int main(int argc, char **argv) {
        and a faster C compile, at the cost of a call per hot-loop method. */
     else if (sp_streq(a, "--no-inline-hot")) { g_inline_hot = 0; i++; }
     else if (sp_streq(a, "--no-write-barrier")) { g_no_write_barrier = 1; i++; }
+    /* The same bisecting hatch, one decision at a time (src/decide.c): take
+       only the listed decisions, or write down the ones taken. They travel
+       in the environment so that a compile some other tool starts, `spinel
+       diff` or an oracle script, is restricted the same way. */
+    else if (!strncmp(a, "--decisions=", 12) || !strncmp(a, "--decisions-log=", 16)) {
+      int log = a[11] == '-';
+      const char *path = a + (log ? 16 : 12);
+      /* no name is not no restriction: it would compile unrestricted and
+         be read as the answer under the list */
+      if (!*path) { fprintf(stderr, "spinel: %s needs a file\n", log ? "--decisions-log=" : "--decisions="); return 1; }
+      set_env(log ? "SPINEL_DECISIONS_LOG" : "SPINEL_DECISIONS", path);
+      i++;
+    }
     /* Library emission for host extensions (docs/internals/ext-design.md):
        --ext-init names the host-callable init function (emitted in place of
        main), --ext-entry designates the exported methods. */
@@ -509,6 +550,11 @@ int main(int argc, char **argv) {
     else if (sp_streq(a, "-E"))            { run_mode = 1; i++; }
     else if (sp_streq(a, "--emit-rbs"))    { emit_rbs = 1; i++; }
     else if (sp_streq(a, "--emit-types"))  { emit_types = 1; i++; }
+    else if (sp_streq(a, "--plan-check"))  { g_plan_check = 1; i++; }
+    else if (sp_streq(a, "--repr-check"))  { g_repr_check = 1; i++; }
+    else if (sp_streq(a, "--check-traits")) { g_check_traits = 1; i++; }
+    else if (sp_streq(a, "--check-bop-arity")) return builtin_ops_arity_check() ? 1 : 0;
+    else if (sp_streq(a, "--dump-traits"))  { g_dump_traits = 1; i++; }
     else if (sp_streq(a, "--emit-symbol-map")) { emit_symbol_map = 1; i++; }
     else if (sp_streq(a, "--dump-ast"))    { dump_ast = 1; i++; }
     else if (sp_streq(a, "-h") || sp_streq(a, "--help")) { usage(); return 0; }
@@ -703,6 +749,9 @@ int main(int argc, char **argv) {
   if (warn_widen) { set_env("SPINEL_LINE_MAP", "1"); set_env("SPINEL_WARN_WIDEN", "1"); }
   /* --check-stores reports each store at its Ruby line, so it needs them too */
   if (check_stores) { set_env("SPINEL_LINE_MAP", "1"); set_env("SPINEL_CHECK_STORES", "1"); }
+  /* A decision key names its site by position: forced the same way. */
+  if (refuse_log_overwrite(getenv("SPINEL_DECISIONS_LOG"))) return 1;
+  if (decide_setup()) set_env("SPINEL_LINE_MAP", "1");
 
   /* Analyze-only emit modes write their artifact from inside codegen_program
      and produce an empty translation unit; route the output path via env. */
@@ -817,6 +866,7 @@ int main(int argc, char **argv) {
   }
   char *csrc = codegen_program(nt);
   nt_free(nt);
+  decide_write_log();
   if (seed_path[0]) remove(seed_path);
   if (!csrc) { fprintf(stderr, "spinel: codegen failed\n"); return 1; }
 
@@ -1190,6 +1240,21 @@ int main(int argc, char **argv) {
      exists in the build cache. A --link basename lib<name>.(a|so) counts as
      providing -l<name>, so one package source serves both worlds -- the
      Makefile's -L via ffi_cflags and spin's absolute --link paths. */
+  /* The OpenSSL library directory the build probed on a host whose
+     OpenSSL is keg-only (Homebrew): the package's -lssl/-lcrypto resolve
+     there, and an ELF binary finds it again at run time (#7191). */
+  if (ffi_links.p && SPINEL_OPENSSL_LIBDIR[0] &&
+      (strstr(ffi_links.p, "-lssl") || strstr(ffi_links.p, "-lcrypto"))) {
+    char ld[1100];
+    snprintf(ld, sizeof ld, "-L%s", SPINEL_OPENSSL_LIBDIR);
+    s_add_arg(&cmd, ld); s_add(&cmd, " "); bi_put(&bi, "lib", ld);
+#if !defined(__APPLE__)
+    if (!target_wasi) {
+      snprintf(ld, sizeof ld, "-Wl,-rpath,%s", SPINEL_OPENSSL_LIBDIR);
+      s_add_arg(&cmd, ld); s_add(&cmd, " "); bi_put(&bi, "lib", ld);
+    }
+#endif
+  }
   if (ffi_links.p) {
     char *ltoks = strdup(ffi_links.p);
     for (char *t = strtok(ltoks, " "); t; t = strtok(NULL, " ")) {
