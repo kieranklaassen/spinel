@@ -1,0 +1,59 @@
+A String Range made on the spot keeps its ends until it is read
+
+    n = 0
+    3000000.times do |i|
+      n += 1 if (i.to_s..(i + 3).to_s) == (i.to_s..(i + 3).to_s)
+    end
+    p n               # 3000000 in CRuby, 2999672 here
+
+    def lo; puts "lo"; "b"; end
+    def hi; puts "hi"; "d"; end
+    p (lo..hi).to_a   # lo then hi in CRuby, hi then lo here with gcc
+
+A String Range is two Strings by value, and two things lost them.
+
+The two ends are sibling arguments of one sp_srange_new call. Nothing
+held the end made first while the other was made, so a collection in
+between freed it, and gcc makes the last argument first. When both
+ends are made on the spot the begin now goes into a rooted temp ahead
+of the end (emit_range_expr).
+
+A local's two ends are rooted and an instance variable's are marked,
+but a temp's were not: a Range that was a method's value, an argument
+on its way to a callee, the receiver of cover? or one side of == lost
+its ends to the next allocation. The ends of a String Range temp are
+now rooted where the temp is bound, with emit_gc_root_tmp_refs as the
+poly dispatch does: the operand temps, an argument's temp, the local
+of an inlined method, the receiver of include?, member?, cover?, ===
+and eql? when the argument may allocate, and each side of == and !=
+beside a side that may allocate.
+
+Rooting a Range takes it whole. A read beside an end that runs
+something, `(s..(s = t; j.to_s))`, or two ends each read from a String
+that was appended to, could already carry a freed end, so such an end
+goes into a rooted slot where the C compiler makes it, in the C
+compiler's order. A local that the other end does not name and cannot
+reach through a Proc still holds its String and takes no slot. A Range
+whose ends are literals or plain reads compiles to the C it did.
+
+Not kept: a begin that is a second name for a String the end then
+changes in place, `(idn(s)..(s << "x"; "zz".dup))`. Such a Range was
+right with gcc, only because the end ran first, and wrong with clang.
+Both now give clang's answer, the String as it was before the change.
+Sharing the begin's String is not in this change.
+
+Cost by callgrind, 200,000 turns of
+`(i.to_s..(i + 3).to_s).cover?((i + 1).to_s)`: 111.86M to 120.25M
+instructions (+7.5%); with a local as the begin 80.58M to 86.49M
+(+7.3%); `==` of two such Ranges 182.78M to 202.08M (+10.6%). A Range
+of literals or plain reads, and one stored in a local, cost what they
+did.
+
+Not here, as before: a String Range passed to a Proc, taken apart by a
+multiple assignment, read by inspect, read out of a Struct member or
+back through an attribute reader, or that is the value of `||`, still
+loses an end under SPINEL_GC_STRESS=2.
+
+Test: test/string_range_fresh_ends.rb, added to GC_STRESS_TESTS.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
