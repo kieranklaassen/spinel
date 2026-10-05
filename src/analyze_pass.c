@@ -3882,6 +3882,42 @@ static int infer_write_multi_assign(Compiler *c, const NodeTable *nt) {
   return changed;
 }
 
+static int is_fresh_hash(Compiler *c, int v);
+static int local_has_target_write(Compiler *c, Scope *sc, const char *name);
+
+/* 1 when the Hash local `nm` of `sc` is written once, with a Hash built
+   there (a literal, `Hash.new`) or with another such local. A variant given
+   to the local then reaches the Hash where it is built; any other write (a
+   call's value, an instance variable, an element) may hand over a Hash
+   something else holds, which a wider slot could only take as a converted
+   copy. Once, because a second write of another kind boxes the local the
+   round after its source widened, and the two answers trade places. */
+static int local_hash_built_in_sight(Compiler *c, const LWIndex *lw, Scope *sc, const char *nm, int depth) {
+  const NodeTable *nt = c->nt;
+  LocalVar *lv = scope_local(sc, nm);
+  if (depth > 8 || !lv || lv->is_param || lv->is_block_param || lv->rbs_seeded) return 0;
+  int w = -1;
+  for (int r = lw_index_first(lw, nm, (int)(sc - c->scopes)); r >= 0; r = lw->next[r]) {
+    const char *wn = nt_str(nt, lw->node[r], "name");
+    if (!wn || !sp_streq(wn, nm) || comp_scope_of(c, lw->node[r]) != sc) continue;
+    if (w >= 0) return 0;
+    w = lw->node[r];
+  }
+  if (w < 0 || nt_kind(nt, w) != NK_LocalVariableWriteNode || local_has_target_write(c, sc, nm)) return 0;
+  int v = nt_ref(nt, w, "value");
+  if (v < 0 || nt_kind(nt, v) != NK_LocalVariableReadNode) return is_fresh_hash(c, v);
+  const char *sn = nt_str(nt, v, "name");
+  return sn && comp_scope_of(c, v) == sc && local_hash_built_in_sight(c, lw, sc, sn, depth + 1);
+}
+
+/* The variant one Hash under two names takes when the names' kinds differ:
+   the String-keyed one with boxed values where both are String-keyed, else
+   the general one, the only variants that hold what either was given. */
+static TyKind hash_alias_join(TyKind a, TyKind b) {
+  return ty_hash_key(a) == TY_STRING && ty_hash_key(b) == TY_STRING ? TY_STR_POLY_HASH
+                                                                   : TY_POLY_POLY_HASH;
+}
+
 int infer_write_types(Compiler *c) {
   const NodeTable *nt = c->nt;
   int changed = 0;
@@ -4141,6 +4177,19 @@ int infer_write_types(Compiler *c) {
         LocalVar *src = sn ? scope_local(comp_scope_of(c, v), sn) : NULL;
         if (!dst || !src || dst == src) continue;
         if (dst->is_param || dst->is_block_param || src->is_param || src->is_block_param) continue;
+        /* A Hash under two names is one Hash the same way: a key or a value
+           one name is given that the other's variant cannot hold (`g = h;
+           g.merge!(m)`) left the write a conversion, which builds another
+           Hash, and what went in through one name never reached the other.
+           Both take the variant that holds either's, where the Hash is
+           built in sight (local_hash_built_in_sight). */
+        if (ty_is_hash(dst->type) && ty_is_hash(src->type) && dst->type != src->type) {
+          TyKind j = hash_alias_join(dst->type, src->type);
+          Scope *sc = comp_scope_of(c, id);
+          if (!local_hash_built_in_sight(c, &lw_ix, sc, dn, 0)) continue;
+          dst->type = src->type = j; prop = 1;
+          continue;
+        }
         if (!ty_is_array(dst->type) || !ty_is_array(src->type)) continue;
         if (dst->type == src->type) continue;
         /* Both are reset locals, so the sweep reports; `prop` still drives
