@@ -9212,16 +9212,63 @@ int desugar_builtin_scalar_calls(Compiler *c) {
       if (an + 1 < crn || an + 1 > crn + con) continue; }
     int encl = c->nscope[id];
     int base = nt->count;
+    /* `v&.m(args)`: the receiver is bound once and a nil answers nil, the
+       shape desugar_builtin_enum_calls gives a `&.` call:
+         (__r = recv; __r.nil? ? nil : <prefix>m__N(__r, args))
+       Rewritten in place, the call lost its receiver and the operator's
+       nil test with it: the copy took the nil as its __self, so
+       `i&.clamp(1, 2)` on a nil Integer raised NoMethodError where CRuby
+       answers nil and runs no argument. */
+    const char *cop = nt_str(nt, id, "call_operator");
+    int generic = id, recv_read = recv;
+    if (cop && sp_streq(cop, "&.")) {
+      char rn[64]; snprintf(rn, sizeof rn, "__sclrecv_%s", comp_node_tag(c, id));
+      int w = nt_new_node(nt, "LocalVariableWriteNode");
+      int nr = nt_new_node(nt, "LocalVariableReadNode");
+      int nq = nt_new_node(nt, "CallNode");
+      int genr = nt_new_node(nt, "LocalVariableReadNode");
+      int gen = nt_new_node(nt, "CallNode");
+      int nil_n = nt_new_node(nt, "NilNode");
+      int ifn = nt_new_node(nt, "IfNode");
+      int ts = nt_new_node(nt, "StatementsNode");
+      int es = nt_new_node(nt, "StatementsNode");
+      int eln = nt_new_node(nt, "ElseNode");
+      int body = nt_new_node(nt, "StatementsNode");
+      if (w < 0 || nr < 0 || nq < 0 || genr < 0 || gen < 0 || nil_n < 0 || ifn < 0 || ts < 0 ||
+          es < 0 || eln < 0 || body < 0) return changed;
+      nt_node_set_str(nt, w, "name", rn); nt_node_set_int(nt, w, "depth", 0);
+      nt_node_set_ref(nt, w, "value", recv);
+      nt_node_set_str(nt, nr, "name", rn); nt_node_set_int(nt, nr, "depth", 0);
+      nt_node_set_str(nt, genr, "name", rn); nt_node_set_int(nt, genr, "depth", 0);
+      nt_node_set_str(nt, nq, "name", "nil?");
+      nt_node_set_ref(nt, nq, "receiver", nr);
+      nt_node_set_arr(nt, ts, "body", &nil_n, 1);
+      nt_node_set_arr(nt, es, "body", &gen, 1);
+      nt_node_set_ref(nt, eln, "statements", es);
+      nt_node_set_ref(nt, ifn, "predicate", nq);
+      nt_node_set_ref(nt, ifn, "statements", ts);
+      nt_node_set_ref(nt, ifn, "subsequent", eln);
+      int stmts[2] = { w, ifn };
+      nt_node_set_arr(nt, body, "body", stmts, 2);
+      nt_node_set_type(nt, id, "ParenthesesNode");
+      nt_node_set_ref(nt, id, "body", body);
+      nt_node_set_str(nt, id, "call_operator", ".");
+      nt_node_set_ref(nt, id, "receiver", -1);
+      nt_node_set_ref(nt, id, "arguments", -1);
+      Scope *es2 = comp_scope_of(c, id);
+      if (es2) scope_local_intern(es2, rn);
+      generic = gen; recv_read = genr;
+    }
     int *na = (int *)malloc(sizeof(int) * (size_t)(an + 1));
     if (!na) continue;
-    na[0] = recv; for (int j = 0; j < an; j++) na[j + 1] = av[j];
+    na[0] = recv_read; for (int j = 0; j < an; j++) na[j + 1] = av[j];
     int nargs = nt_new_node(nt, "ArgumentsNode");
     if (nargs < 0) { free(na); continue; }
     nt_node_set_arr(nt, nargs, "arguments", na, an + 1);
     free(na);
-    nt_node_set_ref(nt, id, "arguments", nargs);
-    nt_node_set_ref(nt, id, "receiver", -1);
-    nt_node_set_str(nt, id, "name", gn);
+    nt_node_set_ref(nt, generic, "arguments", nargs);
+    nt_node_set_ref(nt, generic, "receiver", -1);
+    { char gnb[256]; snprintf(gnb, sizeof gnb, "%s", gn); nt_node_set_str(nt, generic, "name", gnb); }
     comp_grow_node_arrays(c);
     for (int j = base; j < nt->count; j++) c->nscope[j] = encl;
     changed = 1;
