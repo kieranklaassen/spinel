@@ -5665,6 +5665,9 @@ static int emit_when_typed_test(Compiler *c, int cond, int t, TyKind pt, Buf *b)
   else if (pt == TY_BIGINT && comp_ntype(c, cond) == TY_BIGINT) {
     buf_printf(b, "(sp_bigint_cmp(_t%d, ", t); emit_expr(c, cond, b); buf_puts(b, ") == 0)");
   }
+  /* a Rational or a Complex beside a number: `_t == arm` on the struct did
+     not build. Compared as a pinned value is. */
+  else if (num_struct_pair(pt, comp_ntype(c, cond))) emit_pm_eq(c, t, pt, cond, b);
   else return 0;
   return 1;
 }
@@ -5905,9 +5908,12 @@ void emit_case(Compiler *c, int id, Buf *b, int indent) {
              matching the scrutinee selects this branch (value equality;
              a Class/Regexp element inside a splat is not #===-dispatched). */
           else if (cnty && sp_streq(cnty, "SplatNode")) emit_when_splat_test(c, conds[j], t, pt, b);
-          /* RationalNode: `when 0r` -- matches integer iff denominator==1 */
+          /* RationalNode: `when 0r` -- matches integer iff denominator==1.
+             Beside a Float, a Bignum or a Rational it is compared as a
+             value (emit_when_typed_test): read as an Integer it missed a
+             Rational that equals it. */
           else
-          if (cnty && sp_streq(cnty, "RationalNode")) {
+          if (cnty && sp_streq(cnty, "RationalNode") && (pt == TY_INT || !num_struct_pair(pt, TY_RATIONAL))) {
             const char *rnum = nt_str(nt, conds[j], "rat_num");
             const char *rden = nt_str(nt, conds[j], "rat_den");
             long long den = rden ? atoll(rden) : 1;
@@ -5915,8 +5921,9 @@ void emit_case(Compiler *c, int id, Buf *b, int indent) {
             if (den == 1) buf_printf(b, "(_t%d == %lldLL)", t, num);
             else buf_puts(b, "0");
           }
-          /* ImaginaryNode: `when 0i` -- Complex(0,imag); integer matches only if imag==0 */
-          else if (cnty && sp_streq(cnty, "ImaginaryNode")) {
+          /* ImaginaryNode: `when 0i` -- Complex(0,imag); integer matches only if imag==0.
+             Beside a Complex it is compared as a value. */
+          else if (cnty && sp_streq(cnty, "ImaginaryNode") && pt != TY_COMPLEX) {
             int numnode = nt_ref(nt, conds[j], "numeric");
             long long imval = numnode >= 0 ? (long long)nt_int(nt, numnode, "value", 0) : -1;
             if (imval == 0) buf_printf(b, "(_t%d == 0LL)", t);
