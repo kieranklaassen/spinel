@@ -11660,9 +11660,12 @@ static void mark_empty_array_operands(Compiler *c) {
         /* ... and a row stored into a table of Integer rows is a row of
            that kind: what reads the table takes each row as a bare
            sp_IntArray *. A table held in a local has its rows stamped by
-           narrow_object_arrays; one narrow_int_table_ivars pinned has not. */
+           narrow_object_arrays; one narrow_int_table_ivars pinned has not.
+           `t[i] = []` stores a row where i is an Integer; under a Range the
+           `[]` is a list of rows. */
         if (rt == TY_INT_ARRAY_ARRAY &&
-            (is_push_alias(nm) || (sp_streq(nm, "[]=") && an == 2)))
+            (is_push_alias(nm) ||
+             (sp_streq(nm, "[]=") && an == 2 && infer_type(c, av[0]) == TY_INT)))
           want = TY_INT_ARRAY;
         for (int k = 0; k < an; k++)
           if (is_empty_array_literal(nt, av[k], c->node_cap) && c->arr_want[av[k]] == TY_UNKNOWN)
