@@ -23,6 +23,18 @@ p ("a\0b"..."a\0c").min
 p ("a\0c"..."a\0b").min
 p ("a\0b".."a\0a").min
 
+# the answer is a String of its own, as a member of the walk was
+m = ("a".sub("x", "y")..."zz").min
+p m.frozen?
+m << "x"
+p m
+
+# the ends are compared by their bytes alone
+ch = "\xbf".b.chars[0]
+lit = "\xbf".b
+p (ch..lit).min.nil?
+p (lit..."\xff".b).min == ch
+
 # a range held in a local, and one built from two locals
 r = ("9"..."11")
 p r.min

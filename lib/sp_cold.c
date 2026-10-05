@@ -3586,6 +3586,18 @@ sp_bool sp_srange_include(sp_StrRange r, const char *x) {
   sp_str_upto_each(r.first, r.last, r.excl, sp_srange_include_i, &v);
   return v == NULL;
 }
+/* Two Strings strcmp found no difference in, by their bytes alone: the
+   bytes after a NUL are compared, the shorter String first. A difference
+   strcmp does find stands as it is, NUL being the least byte.
+   sp_str_cmp_bytes goes on to order equal bytes by encoding, and a String
+   can have lost its binary mark. */
+static SP_NOINLINE int sp_srange_cmp_past_nul(const char *a, const char *b) {
+  size_t la = sp_str_byte_len(a), lb = sp_str_byte_len(b);
+  size_t n = la < lb ? la : lb;
+  int c = n ? memcmp(a, b, n) : 0;
+  if (c) return c;
+  return la < lb ? -1 : la > lb;
+}
 /* #cover? / #=== compare lexicographically, no materialization. */
 sp_bool sp_srange_cover(sp_StrRange r, const char *x) {
   if (!x) return 0;
@@ -3600,7 +3612,7 @@ sp_bool sp_srange_cover(sp_StrRange r, const char *x) {
    "10" -- and so is the maximum the end, but for an excluded end, which
    walks the members for the greatest, since a String end cannot be stepped
    back from. NULL is nil. */
-static const char *sp_srange_walk_greatest(sp_StrRange r) {
+static SP_NOINLINE const char *sp_srange_walk_greatest(sp_StrRange r) {
   sp_StrArray *a = sp_srange_to_a(r); SP_GC_ROOT(a);
   const char *best = NULL; SP_GC_ROOT_STR(best);
   for (sp_int i = 0; i < sp_StrArray_length(a); i++) {
@@ -3609,13 +3621,26 @@ static const char *sp_srange_walk_greatest(sp_StrRange r) {
   }
   return best;
 }
+/* An excluded end, as the walk decided it: none when the begin is at the
+   end or past it by sp_str_cmp_bytes, the compare the walk made (strcmp
+   stops at a NUL, and ("a"..."a\0") would have no minimum), else the
+   walk's first member, a copy of the begin. */
+static SP_NOINLINE const char *sp_srange_min_excl(const char *b, const char *e) {
+  SP_GC_ROOT_STR(b);
+  if (e && sp_str_cmp_bytes(b, e) >= 0) return NULL;
+  return sp_str_from_bytes(b, sp_str_byte_len(b));
+}
+static SP_NOINLINE const char *sp_srange_min_tie(sp_StrRange r) {
+  return sp_srange_cmp_past_nul(r.first, r.last) > 0 ? NULL : r.first;
+}
 const char *sp_srange_min_v(sp_StrRange r) {
   if (!r.first) sp_raise_cls("RangeError", "cannot get the minimum of beginless range");
+  if (r.excl) return sp_srange_min_excl(r.first, r.last);
+  /* an included end as strcmp compared it, but past a NUL */
   if (r.last) {
-    /* byte-exact, as the walk was: strcmp stops at a NUL, and ("a"..."a\0")
-       would have no minimum */
-    int c = sp_str_cmp_bytes(r.first, r.last);
-    if (c > 0 || (c == 0 && r.excl)) return NULL;
+    int c = strcmp(r.first, r.last);
+    if (!c) return sp_srange_min_tie(r);
+    if (c > 0) return NULL;
   }
   return r.first;
 }
