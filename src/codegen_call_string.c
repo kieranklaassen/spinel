@@ -235,17 +235,28 @@ no_gsub_enum:
       buf_puts(b, ", "); emit_expr(c, argv[1], b); buf_puts(b, ")");
       return 1;
     }
-    if (are >= 0 && sp_streq(name, "match") && nt_ref(nt, id, "block") >= 0) {
+    if ((are >= 0 || (argc == 1 && comp_ntype(c, argv[0]) == TY_REGEX)) &&
+        sp_streq(name, "match") && nt_ref(nt, id, "block") >= 0) {
       /* match(re) { |m| body }: yield the MatchData on a hit, evaluate to the
-         block's value; nil (block not run) on a miss */
+         block's value; nil (block not run) on a miss. The Regexp is a literal
+         or one held in a variable, whose call answered the MatchData where
+         the block's value was expected, so the C did not compile. */
       int mblk = nt_ref(nt, id, "block");
       const char *mp0 = block_param_name(c, mblk, 0);
       const char *mp0r = mp0 ? rename_local(mp0) : NULL;
       int mbody = nt_ref(nt, mblk, "body");
       int mbn = 0; const int *mbb = mbody >= 0 ? nt_arr(nt, mbody, "body", &mbn) : NULL;
-      int tm = ++g_tmp, tr2 = ++g_tmp;
-      buf_printf(b, "({ sp_MatchData *_t%d = sp_re_matchdata(sp_re_pat_%d, ", tm, are);
-      emit_str_expr(c, recv, b);
+      int tm = ++g_tmp, tr2 = ++g_tmp, ts = are < 0 ? ++g_tmp : 0;
+      char pat[32];
+      buf_puts(b, "({");
+      if (are < 0) {
+        buf_printf(b, " const char *_t%d = ", ts); emit_str_expr(c, recv, b);
+        buf_printf(b, "; SP_GC_ROOT_STR(_t%d);", ts);
+      }
+      emit_re_arg_pat(c, argv[0], "wrong argument type nil (expected Regexp)", b, pat);
+      buf_printf(b, " sp_MatchData *_t%d = sp_re_matchdata(%s, ", tm, pat);
+      if (are < 0) buf_printf(b, "_t%d", ts);
+      else emit_str_expr(c, recv, b);
       buf_printf(b, "); sp_RbVal _t%d = sp_box_nil(); SP_GC_ROOT_RBVAL(_t%d); if (_t%d) { ",
                  tr2, tr2, tm);
       if (mp0r) buf_printf(b, "lv_%s = _t%d; ", mp0r, tm);
