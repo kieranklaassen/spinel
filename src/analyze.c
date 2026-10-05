@@ -15617,7 +15617,12 @@ static LocalVar *strbuf_poly_gvar(Compiler *c, int node, const char **grn) {
    it reads: a string-valued expression marks for a fresh-handle wrap, an
    eligible string local promotes. */
 static int strbuf_demand_elem_arg(Compiler *c, int an);
+static int strbuf_demand_value_in(Compiler *c, int node, int depth, int cond);
 static int strbuf_demand_value_leaves(Compiler *c, int node, int depth) {
+  return strbuf_demand_value_in(c, node, depth, -1);
+}
+/* `cond` is the conditional `node` is an arm of, if it is one. */
+static int strbuf_demand_value_in(Compiler *c, int node, int depth, int cond) {
   const NodeTable *nt = c->nt;
   if (node < 0 || depth > 16) return 0;
   switch (nt_kind(nt, node)) {
@@ -15625,8 +15630,8 @@ static int strbuf_demand_value_leaves(Compiler *c, int node, int depth) {
       int changed = 0;
       int nw = 0; const int *whens = nt_arr(nt, node, "conditions", &nw);
       for (int w = 0; w < nw; w++)
-        changed |= strbuf_demand_value_leaves(c, nt_ref(nt, whens[w], "statements"), depth + 1);
-      return changed | strbuf_demand_value_leaves(c, nt_ref(nt, node, "else_clause"), depth + 1);
+        changed |= strbuf_demand_value_in(c, nt_ref(nt, whens[w], "statements"), depth + 1, node);
+      return changed | strbuf_demand_value_in(c, nt_ref(nt, node, "else_clause"), depth + 1, node);
     }
     case NK_InstanceVariableReadNode: {
       int cid;
@@ -15640,21 +15645,21 @@ static int strbuf_demand_value_leaves(Compiler *c, int node, int depth) {
     }
     case NK_StatementsNode: {
       int n = 0; const int *b = nt_arr(nt, node, "body", &n);
-      return n > 0 ? strbuf_demand_value_leaves(c, b[n - 1], depth + 1) : 0;
+      return n > 0 ? strbuf_demand_value_in(c, b[n - 1], depth + 1, cond) : 0;
     }
     case NK_ParenthesesNode:
-      return strbuf_demand_value_leaves(c, nt_ref(nt, node, "body"), depth + 1);
+      return strbuf_demand_value_in(c, nt_ref(nt, node, "body"), depth + 1, cond);
     case NK_ElseNode:
-      return strbuf_demand_value_leaves(c, nt_ref(nt, node, "statements"), depth + 1);
+      return strbuf_demand_value_in(c, nt_ref(nt, node, "statements"), depth + 1, cond);
     case NK_IfNode:
-      return strbuf_demand_value_leaves(c, nt_ref(nt, node, "statements"), depth + 1) |
-             strbuf_demand_value_leaves(c, nt_ref(nt, node, "subsequent"), depth + 1);
+      return strbuf_demand_value_in(c, nt_ref(nt, node, "statements"), depth + 1, node) |
+             strbuf_demand_value_in(c, nt_ref(nt, node, "subsequent"), depth + 1, node);
     case NK_UnlessNode:
-      return strbuf_demand_value_leaves(c, nt_ref(nt, node, "statements"), depth + 1) |
-             strbuf_demand_value_leaves(c, nt_ref(nt, node, "else_clause"), depth + 1);
+      return strbuf_demand_value_in(c, nt_ref(nt, node, "statements"), depth + 1, node) |
+             strbuf_demand_value_in(c, nt_ref(nt, node, "else_clause"), depth + 1, node);
     case NK_OrNode: case NK_AndNode:
-      return strbuf_demand_value_leaves(c, nt_ref(nt, node, "left"), depth + 1) |
-             strbuf_demand_value_leaves(c, nt_ref(nt, node, "right"), depth + 1);
+      return strbuf_demand_value_in(c, nt_ref(nt, node, "left"), depth + 1, node) |
+             strbuf_demand_value_in(c, nt_ref(nt, node, "right"), depth + 1, node);
     case NK_LocalVariableReadNode: {
       if (c->strbuf_box[node]) return 0;
       const char *vn = nt_str(nt, node, "name");
@@ -15662,8 +15667,25 @@ static int strbuf_demand_value_leaves(Compiler *c, int node, int depth) {
       LocalVar *vlv = vs ? scope_local(vs, vn) : NULL;
       if (vlv && vlv->type == TY_POLY && !vlv->is_param)
         return strbuf_demand_local_writes(c, vn, vs, depth + 4);
-      if (!vlv || !strbuf_slot_eligible(c, vn, vs, vlv)) return 0;
+      /* The method's own parameter as an arm of a boxed conditional is its
+         caller's String (`t = k && s`). strbuf_slot_eligible turns
+         parameters away, so the box held a copy and a change through `t`
+         never reached the caller. The parameter takes the handle as the
+         source of a plain alias does (promote_local_alias_pair), and
+         convert_byref_handle_params pulls each caller's argument in. One
+         written whole (`@v = s`) is other rules', and so is an arm of a
+         conditional that is itself a String (`k && (c ? s : r)`): marked
+         here, neither builds. */
+      int param = cond >= 0 && vlv && vlv->is_param && !vlv->is_block_param &&
+                  !vlv->rbs_seeded && an_param_idx(vs, vn) >= 0 &&
+                  (vlv->type == TY_STRING || vlv->type == TY_STRBUF);
+      if (param) {
+        TyKind ct = infer_type(c, cond);
+        if (ct == TY_STRING || ct == TY_STRBUF) param = 0;
+      }
+      if (!vlv || (!param && !strbuf_slot_eligible(c, vn, vs, vlv))) return 0;
       if (strbuf_mut_kind(c, vn, vs) < 0) return 0;
+      if (param && vlv->byref_out) { vlv->byref_out = 0; vlv->is_cell = 0; }
       vlv->type = TY_STRBUF; vlv->str_shared = 1;
       c->strbuf_box[node] = 1;
       return 1;
