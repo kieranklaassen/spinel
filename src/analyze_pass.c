@@ -344,8 +344,11 @@ static TyKind aset_value_type(Compiler *c, int recv) {
 /* Whether some call of the method `sc` by name passes a boxed value (not
    an empty `{}`), or one not typed yet, to positional parameter p, as the
    call's layout funds it (a splat's element is boxed). Matched by name, so
-   a same-named method elsewhere only makes this more careful. */
-static int param_gets_boxed_arg(Compiler *c, Scope *sc, int p) {
+   a same-named method elsewhere only makes this more careful. With `seed`
+   a Hash kind, a call that passes a typed value of any other kind counts
+   as well, to a keyword parameter too: the binding boxes the parameter
+   for it. */
+static int param_gets_boxed_arg(Compiler *c, Scope *sc, int p, TyKind seed) {
   const NodeTable *nt = c->nt;
   if (!sc->name) return 0;
   /* the calls of this name only: asked per parameter of every scope, a walk
@@ -362,10 +365,13 @@ static int param_gets_boxed_arg(Compiler *c, Scope *sc, int p) {
     int a = layout_plain_arg(c, sc, av, &L, p);
     arg_layout_free(&L);
     if (from == ARG_ELEM || from == ARG_GATHERED) return 1;
+    if (a < 0 && seed != TY_UNKNOWN && from == ARG_BY_NAME)
+      a = ie_kwhash_value(c, ie_call_kwhash(c, id), sc->pnames[p]);
     if (a < 0) continue;
     NodeKind ak = nt_kind(nt, a);
-    if (ak == NK_HashNode) continue;
     TyKind at = infer_type(c, a);
+    if (seed != TY_UNKNOWN && at != TY_UNKNOWN && at != seed) return 1;
+    if (ak == NK_HashNode) continue;
     if (at == TY_POLY) return 1;
     /* not typed yet: wait for it rather than decide the parameter now,
        unless it is a local only ever given an empty `{}` (the container
@@ -445,10 +451,12 @@ int infer_param_hash_value(Compiler *c) {
       /* A boxed parameter some caller hands a boxed value is that caller's
          object, whatever kind it holds at run time: narrowing it cast a
          `Hash.new(0)` (a poly-keyed hash) to the string-keyed struct and the
-         counting loop ran off its table (tally(hash) in builtins/). */
-      if (seedable && param_gets_boxed_arg(c, sc, p)) continue;
+         counting loop ran off its table (tally(hash) in builtins/). One the
+         calls hand values of two kinds is boxed for good: narrowed here, the
+         next round's binding boxed it again, and so on to the cap. */
       TyKind hv = ty_hash_of(kt, vt);
       if (hv == TY_UNKNOWN) continue;
+      if (seedable && param_gets_boxed_arg(c, sc, p, cur == TY_POLY ? hv : TY_UNKNOWN)) continue;
       if (empty_hash_default && !seedable) {
         /* only the key mismatch, and keep whatever value type is already
            settled unless the writes are more specific */
@@ -7124,7 +7132,7 @@ int infer_hash_params(Compiler *c) {
     { int pi = -1;
       for (int q = 0; q < s->nparams; q++)
         if (s->pnames && s->pnames[q] && sp_streq(s->pnames[q], nt_str(nt, recv, "name"))) { pi = q; break; }
-      if (pi >= 0 && param_gets_boxed_arg(c, s, pi)) continue; }
+      if (pi >= 0 && param_gets_boxed_arg(c, s, pi, TY_UNKNOWN)) continue; }
     /* Literal-key [] / fetch: infer specific variant */
     if (sp_streq(name, "[]") || sp_streq(name, "fetch")) {
       int args = nt_ref(nt, id, "arguments");
