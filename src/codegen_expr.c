@@ -874,7 +874,7 @@ static const char *slot_zero(Compiler *c, TyKind t) {
 }
 
 /* Is `id` somewhere inside the subtree at `root`? */
-static int node_in_subtree(const NodeTable *nt, int root, int id) {
+int node_in_subtree(const NodeTable *nt, int root, int id) {
   if (root < 0) return 0;
   if (root == id) return 1;
   int nr = nt_num_refs(nt, root);

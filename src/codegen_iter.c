@@ -3795,6 +3795,136 @@ int subtree_owns_redo(const NodeTable *nt, int body, int redo) {
    does not look there: its callers pick by the answer how a block spliced
    in place is written, and emit_fallback_block_value leaves the leading
    statements out of a block that has one. */
+/* How a node's value is taken, for yields_carried_whole. */
+enum { YC_UNUSED, YC_WHOLE, YC_VALUE };
+/* Is every yield under `id` carried whole: a statement, the method's own
+   last statement, the value of a local's write, an element of an Array
+   literal or the argument of `<<`? `how` says how id's own value is taken.
+   A yield that is computed with answers no: a receiver or an operand, an
+   arm of a conditional whose value is used, the value of a `return`, the
+   last statement of a block; so does a `super`, which hands the block on. */
+static int yields_carried_whole(const NodeTable *nt, int id, int how) {
+  if (id < 0) return 1;
+  NodeKind k = nt_kind(nt, id);
+  if (k == NK_DefNode || k == NK_ClassNode || k == NK_ModuleNode || k == NK_LambdaNode) return 1;
+  if (k == NK_SuperNode || k == NK_ForwardingSuperNode) return 0;
+  if (k == NK_YieldNode && how == YC_VALUE) return 0;
+  if (k == NK_ParenthesesNode || k == NK_ElseNode)
+    return yields_carried_whole(nt, nt_ref(nt, id, k == NK_ElseNode ? "statements" : "body"), how);
+  if (k == NK_StatementsNode) {
+    int n = 0; const int *st = nt_arr(nt, id, "body", &n);
+    for (int i = 0; i < n; i++)
+      if (!yields_carried_whole(nt, st[i], i < n - 1 ? YC_UNUSED : how)) return 0;
+    return 1;
+  }
+  if (k == NK_IfNode || k == NK_UnlessNode) {
+    int arm = how == YC_UNUSED ? YC_UNUSED : YC_VALUE;
+    return yields_carried_whole(nt, nt_ref(nt, id, "predicate"), YC_VALUE) &&
+           yields_carried_whole(nt, nt_ref(nt, id, "statements"), arm) &&
+           yields_carried_whole(nt, nt_ref(nt, id, k == NK_IfNode ? "subsequent" : "else_clause"), arm);
+  }
+  if (k == NK_WhileNode || k == NK_UntilNode)
+    return yields_carried_whole(nt, nt_ref(nt, id, "predicate"), YC_VALUE) &&
+           yields_carried_whole(nt, nt_ref(nt, id, "statements"), YC_UNUSED);
+  if (k == NK_CallNode && nt_ref(nt, id, "block") < 0) {
+    const char *nm = nt_str(nt, id, "name");
+    int an = nt_ref(nt, id, "arguments"), ac = 0;
+    const int *av = an >= 0 ? nt_arr(nt, an, "arguments", &ac) : NULL;
+    if (nm && sp_streq(nm, "<<") && ac == 1 && av)
+      return yields_carried_whole(nt, nt_ref(nt, id, "receiver"), YC_VALUE) &&
+             yields_carried_whole(nt, av[0], YC_WHOLE);
+  }
+  int sub = k == NK_LocalVariableWriteNode || k == NK_ArrayNode ? YC_WHOLE : YC_VALUE;
+  int nr = nt_num_refs(nt, id);
+  for (int i = 0; i < nr; i++) if (!yields_carried_whole(nt, nt_ref_at(nt, id, i), sub)) return 0;
+  int na = nt_num_arrs(nt, id);
+  for (int i = 0; i < na; i++) {
+    int n = 0; const int *ids = nt_arr_at(nt, id, i, &n);
+    for (int j = 0; j < n; j++) if (!yields_carried_whole(nt, ids[j], sub)) return 0;
+  }
+  return 1;
+}
+/* Do the comma-joined lists `a` and `b` share a name? */
+static int locals_share(const char *a, const char *b) {
+  char nm[256];
+  for (const char *p = a; p && *p && b; ) {
+    const char *e = strchr(p, ',');
+    size_t len = e ? (size_t)(e - p) : strlen(p);
+    if (len < sizeof nm) {
+      memcpy(nm, p, len); nm[len] = 0;
+      if (blk_locals_have(b, nm)) return 1;
+    }
+    if (!e) break;
+    p = e + 1;
+  }
+  return 0;
+}
+/* Is one of the names in `locs` a variable of the code around the `super`
+   at id, looked for from `node` down? A parameter or a write of the method
+   itself is one, and so is a name of a block that holds the super; a block
+   beside it keeps its names to itself. */
+static int name_bound_around(const NodeTable *nt, int node, int id, const char *locs, int in_blk) {
+  if (node < 0) return 0;
+  NodeKind k = nt_kind(nt, node);
+  const char *ty = nt_type(nt, node), *nm = nt_str(nt, node, "name");
+  if (k == NK_DefNode || k == NK_ClassNode || k == NK_ModuleNode) return 0;
+  if (k == NK_BlockNode || k == NK_LambdaNode) {
+    if (!node_in_subtree(nt, nt_ref(nt, node, "body"), id)) return 0;
+    if (locals_share(locs, nt_str(nt, node, "locals"))) return 1;
+    in_blk = 1;
+  }
+  else if (!in_blk && ty && nm && (a_is_write_node(ty) || strstr(ty, "ParameterNode")) &&
+           blk_locals_have(locs, nm))
+    return 1;
+  int nr = nt_num_refs(nt, node);
+  for (int i = 0; i < nr; i++) if (name_bound_around(nt, nt_ref_at(nt, node, i), id, locs, in_blk)) return 1;
+  int na = nt_num_arrs(nt, node);
+  for (int i = 0; i < na; i++) {
+    int n = 0; const int *ids = nt_arr_at(nt, node, i, &n);
+    for (int j = 0; j < n; j++) if (name_bound_around(nt, ids[j], id, locs, in_blk)) return 1;
+  }
+  return 0;
+}
+/* Does the block of the `super` at id declare a name, as a parameter or a
+   block-local, that the code around it has a variable of? A call's block has
+   such a name renamed (rename_shadowing_block_params); a super's has not,
+   and its splice writes the outer variable. */
+static int super_block_shadows(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  Scope *s = comp_scope_of(c, id);
+  int blk = nt_ref(nt, id, "block");
+  const char *locs = blk >= 0 ? nt_str(nt, blk, "locals") : NULL;
+  if (!locs || !*locs) return 0;
+  return !s || s->def_node < 0 ||
+         name_bound_around(nt, nt_ref(nt, s->def_node, "parameters"), id, locs, 0) ||
+         name_bound_around(nt, nt_ref(nt, s->def_node, "body"), id, locs, 0);
+}
+/* The compiler subtree_owns_next walks for, NULL in the any-`next` form. */
+static Compiler *g_owns_next_c;
+/* Is the block of the `super` at id taken as the owner of its `next`? Only
+   where the splice of that block has the right answer today: the method the
+   super lands on carries every yield whole (a yield that is computed with
+   loses the block's value at the splice), the block shadows no name, it
+   does not answer a Float (the splice keeps one in an Integer slot), and
+   its last statement is not a `begin` or a loop (beside a `next` the
+   splice answers nil for one).
+   Elsewhere a body whose `next` left it as its last act keeps its answer,
+   and a body that stopped early keeps its raise. */
+static int super_block_owns_next(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  Scope *s = comp_scope_of(c, id);
+  int mi = s && s->class_id >= 0 && s->name ? a_super_target(c, s) : -1;
+  if (mi < 0 || c->scopes[mi].def_node < 0) return 0;
+  if (c->scopes[mi].blk_param && c->scopes[mi].blk_param[0]) return 0;
+  int blk = nt_ref(nt, id, "block"), bb = blk >= 0 ? nt_ref(nt, blk, "body") : -1, bn = 0;
+  const int *bd = bb >= 0 ? nt_arr(nt, bb, "body", &bn) : NULL;
+  if ((bn > 0 && comp_ntype(c, bd[bn - 1]) == TY_FLOAT) || block_next_value_ntype(c, bb) == TY_FLOAT)
+    return 0;
+  NodeKind tk = bn > 0 ? nt_kind(nt, bd[bn - 1]) : NK_NONE;
+  if (tk == NK_BeginNode || tk == NK_WhileNode || tk == NK_UntilNode) return 0;
+  return yields_carried_whole(nt, nt_ref(nt, c->scopes[mi].def_node, "body"), YC_WHOLE) &&
+         !super_block_shadows(c, id);
+}
 static int subtree_has_own_next_ex(const NodeTable *nt, int id, int next) {
   if (id < 0) return 0;
   const char *ty = nt_type(nt, id);
@@ -3806,6 +3936,12 @@ static int subtree_has_own_next_ex(const NodeTable *nt, int id, int next) {
   if (sp_streq(ty, "ForNode"))
     return next >= 0 && subtree_has_own_next_ex(nt, nt_ref(nt, id, "collection"), next);
   int blk = sp_streq(ty, "CallNode") ? nt_ref(nt, id, "block") : -1;
+  /* For the one node, a `super` hands its block on as a call does: that
+     block owns its `next`. The any-`next` form reads through a super's block
+     as before: the blocks its callers write stand on that answer. */
+  if (next >= 0 && (sp_streq(ty, "SuperNode") || sp_streq(ty, "ForwardingSuperNode")) &&
+      super_block_owns_next(g_owns_next_c, id))
+    blk = nt_ref(nt, id, "block");
   if (blk >= 0) {
     if (next < 0) return 0;
     const char *bty = nt_type(nt, blk);
@@ -3823,8 +3959,12 @@ static int subtree_has_own_next_ex(const NodeTable *nt, int id, int next) {
   return 0;
 }
 int subtree_has_own_next(const NodeTable *nt, int id) { return subtree_has_own_next_ex(nt, id, -1); }
-int subtree_owns_next(const NodeTable *nt, int body, int next) {
-  return next >= 0 && subtree_has_own_next_ex(nt, body, next);
+int subtree_owns_next(Compiler *c, int body, int next) {
+  if (next < 0) return 0;
+  g_owns_next_c = c;
+  int owns = subtree_has_own_next_ex(c->nt, body, next);
+  g_owns_next_c = NULL;
+  return owns;
 }
 
 /* Mark every `next` written where the value of `id` is: `id` itself, the

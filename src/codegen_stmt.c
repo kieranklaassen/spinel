@@ -9338,7 +9338,7 @@ static void emit_break_value(Compiler *c, int id, Buf *b) {
    value computed while the frame is still live. */
 static int emit_next_leaving_body(Compiler *c, int id, Buf *b, int indent) {
   const NodeTable *nt = c->nt;
-  if (g_fiber_body >= 0 && subtree_owns_next(nt, g_fiber_body, id)) {
+  if (g_fiber_body >= 0 && subtree_owns_next(c, g_fiber_body, id)) {
     emit_indent(b, indent); buf_puts(b, "{ _fb->yielded_value = ");
     emit_break_value(c, id, b);
     buf_puts(b, "; ");
