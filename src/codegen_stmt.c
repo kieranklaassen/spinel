@@ -8739,6 +8739,27 @@ static int slot_takes_subclass(Compiler *c, TyKind slot, TyKind val) {
   return is_descendant(c, vc, sc);
 }
 
+/* An attribute writer takes its receiver into a C temp and builds the value
+   after it. A receiver that nothing else holds (`K.new(v).w = [i]`,
+   `pool.pop.w = mk(i)`) was collected while the value allocated, and the
+   store went into the object that took its place: the temp is rooted then.
+   A value that makes nothing leaves the temp bare, and so does a receiver
+   that is a plain read: self, a constant, a local or an instance variable
+   the value cannot rebind (read_rebound_by), a field read off one
+   (subtree_is_pure_read); and one a statement around this one already ran
+   into a temp of its own (arg_ran_first). */
+int writer_recv_wants_root(Compiler *c, int recv, int value) {
+  if (recv < 0 || value < 0 || !operand_may_allocate(c, value)) return 0;
+  if (arg_ran_first(recv, 0)) return 0;
+  recv = unwrap_parens(c, recv);
+  NodeKind k = nt_kind(c->nt, recv);
+  if (k == NK_ConstantReadNode || k == NK_ConstantPathNode) return 0;
+  if (!subtree_is_pure_read(c, recv)) return 1;
+  if (k == NK_LocalVariableReadNode || k == NK_InstanceVariableReadNode)
+    return read_rebound_by(c, recv, value);
+  return 0;
+}
+
 void emit_boxed_writer_arms(Compiler *c, const char *base, const char *nm,
                             const char *objp, const char *src, TyKind at, Buf *b) {
   for (int k = 0; k < c->nclasses; k++) {
@@ -10796,12 +10817,16 @@ static int emit_call_stmt(Compiler *c, int id, Buf *b, int indent, const NodeTab
               emit_indent(b, indent);
               int fo = rc >= 0 && rc < c->nclasses &&
                        c->classes[rc].freeze_observed && !c->classes[rc].is_value_type;
-              int tw = fo ? ++g_tmp : -1;
-              if (fo) {
+              /* a receiver only this statement holds, kept while the value is built */
+              int hold = rc >= 0 && rc < c->nclasses && !c->classes[rc].is_value_type &&
+                         writer_recv_wants_root(c, recv, argv[0]);
+              int tw = (fo || hold) ? ++g_tmp : -1;
+              if (fo || hold) {
                 char twn[32]; snprintf(twn, sizeof twn, "_t%d", tw);
                 buf_printf(b, "{ sp_%s *_t%d = ", c->classes[rc].c_name, tw);
                 emit_expr(c, recv, b); buf_puts(b, "; ");
-                emit_frozen_obj_guard(c, rc, twn, b);
+                if (hold) buf_printf(b, "SP_GC_ROOT(_t%d); ", tw);
+                if (fo) emit_frozen_obj_guard(c, rc, twn, b);
                 buf_printf(b, "_t%d->iv_%s = ", tw, iv_c(base));
               }
               else {
@@ -10830,7 +10855,7 @@ static int emit_call_stmt(Compiler *c, int id, Buf *b, int indent, const NodeTab
               else if (ivt != TY_POLY && ivt != TY_UNKNOWN)
                 emit_coerce(c, argv[0], ivt, CO_HOLD, "an attribute writer", b);
               else emit_expr(c, argv[0], b);
-              buf_puts(b, fo ? "; }\n" : ";\n");
+              buf_puts(b, (fo || hold) ? "; }\n" : ";\n");
               return 1;
             }
           }
@@ -10845,6 +10870,7 @@ static int emit_call_stmt(Compiler *c, int id, Buf *b, int indent, const NodeTab
               emit_indent(b, indent);
               buf_printf(b, "{ sp_%s *_t%d = ", c->classes[ty_object_class(rt)].c_name, tp);
               emit_expr(c, recv, b); buf_puts(b, "; ");
+              if (writer_recv_wants_root(c, recv, argv[0])) buf_printf(b, "SP_GC_ROOT(_t%d); ", tp);
               emit_ctype(c, at, b); buf_printf(b, " _t%d = ", tval);
               emit_expr(c, argv[0], b); buf_puts(b, ";");
               buf_printf(b, " switch (_t%d->cls_id) {", tp);
@@ -10882,6 +10908,7 @@ static int emit_call_stmt(Compiler *c, int id, Buf *b, int indent, const NodeTab
             int tv = ++g_tmp, tval = ++g_tmp;
             emit_indent(b, indent);
             buf_printf(b, "{ sp_RbVal _t%d = ", tv); emit_expr(c, recv, b); buf_puts(b, "; ");
+            if (writer_recv_wants_root(c, recv, argv[0])) buf_printf(b, "SP_GC_ROOT_RBVAL(_t%d); ", tv);
             if (nil_rhs) {
               buf_printf(b, "sp_RbVal _t%d = sp_box_nil();", tval);
             }

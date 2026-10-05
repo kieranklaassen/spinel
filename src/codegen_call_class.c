@@ -1101,6 +1101,9 @@ int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
           int _atmp = ++g_tmp;
           char _aself[32]; snprintf(_aself, sizeof _aself, "_t%d", _atmp);
           buf_printf(b, "({ sp_%s *_t%d = ", c->classes[_arc].c_name, _atmp); emit_expr(c, recv, b); buf_puts(b, "; ");
+          /* a receiver only this expression holds, kept while the value is built */
+          if (argc >= 1 && !c->classes[_arc].is_value_type && writer_recv_wants_root(c, recv, argv[0]))
+            buf_printf(b, "SP_GC_ROOT(_t%d); ", _atmp);
           emit_frozen_obj_guard(c, _arc, _aself, b);
           /* a typed slot (an --rbs seed pins one) given a boxed value: the
              slot takes it unboxed, and the assignment's value is still the

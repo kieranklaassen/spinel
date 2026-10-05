@@ -622,6 +622,7 @@ int  emit_vis_refusal(Compiler *c, int id, Buf *b);
 void emit_poly_vis_precheck(Compiler *c, int id, int tv, Buf *b);
 /* The per-class `case` arms that store `src` into each candidate class's
    `base` writer slot through the object pointer text `objp` (codegen_stmt.c). */
+int writer_recv_wants_root(Compiler *c, int recv, int value);
 void emit_boxed_writer_arms(Compiler *c, const char *base, const char *nm,
                             const char *objp, const char *src, TyKind at, Buf *b);
 int  method_is_void(Scope *s);
