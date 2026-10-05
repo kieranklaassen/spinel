@@ -658,11 +658,27 @@ static int sp_str_upto_digits_cmp(const char *a, const char *b) {
   int r = memcmp(a, b, la);
   return r < 0 ? -1 : r > 0;
 }
-/* The members String#upto yields, in CRuby's rb_str_upto_each order of
-   cases, each a fresh copy (the frozen begin is not handed out) passed to
-   fn until it answers nonzero. */
-void sp_str_upto_each(const char *s, const char *e, sp_int excl, int (*fn)(const char *, void *), void *arg) {SP_GC_ROOT_STR(s);SP_GC_ROOT_STR(e);
-  if (!s || !e) return;
+/* The walk String#upto takes, a member at a time, in CRuby's
+   rb_str_upto_each order of cases: sp_str_walk_first answers the first
+   member or NULL, sp_str_walk_next the one after. Each member is a fresh
+   copy (the frozen begin is not handed out), so a caller may change it.
+   The caller roots w->cur, w->end and w->stop before the first call. */
+enum { SP_STR_WALK_OVER, SP_STR_WALK_BYTES, SP_STR_WALK_DIGITS, SP_STR_WALK_WIDE, SP_STR_WALK_SUCC };
+static const char *sp_str_walk_member(sp_StrWalk *w) {
+  if (w->kind == SP_STR_WALK_BYTES) {
+    char one = (char)w->at;
+    return sp_str_from_bytes(&one, 1);
+  }
+  if (w->kind == SP_STR_WALK_DIGITS) {
+    char buf[32];
+    int n = snprintf(buf, sizeof buf, "%.*lld", w->width, w->at);
+    return sp_str_from_bytes(buf, (size_t)n);
+  }
+  return sp_str_from_bytes(w->cur, sp_str_byte_len(w->cur));
+}
+const char *sp_str_walk_first(sp_StrWalk *w, const char *s, const char *e, sp_int excl) {SP_GC_ROOT_STR(s);SP_GC_ROOT_STR(e);
+  w->kind = SP_STR_WALK_OVER;
+  if (!s || !e) return NULL;
   size_t sl = sp_str_byte_len(s), el = sp_str_byte_len(e);
   int ascii = 1;
   for (size_t i = 0; i < sl; i++) if ((unsigned char)s[i] >= 0x80) ascii = 0;
@@ -670,12 +686,11 @@ void sp_str_upto_each(const char *s, const char *e, sp_int excl, int (*fn)(const
   /* one ASCII character at each end: every byte between, so ("A".."c")
      holds the punctuation between "Z" and "a" */
   if (ascii && sl == 1 && el == 1) {
-    int lim = (unsigned char)e[0] + (excl ? 0 : 1);
-    for (int ch = (unsigned char)s[0]; ch < lim; ch++) {
-      char one = (char)ch;
-      if (fn(sp_str_from_bytes(&one, 1), arg)) return;
-    }
-    return;
+    w->at = (unsigned char)s[0];
+    w->lim = (unsigned char)e[0] + (excl ? 0 : 1);
+    if (w->at >= w->lim) return NULL;
+    w->kind = SP_STR_WALK_BYTES;
+    return sp_str_walk_member(w);
   }
   /* two all-digit ends: the numbers between, zero-padded to the begin's
      width, so ("9".."11") holds "9", "10", "11" (#3549) and ("1".."010")
@@ -684,51 +699,66 @@ void sp_str_upto_each(const char *s, const char *e, sp_int excl, int (*fn)(const
   for (size_t i = 0; digits && i < sl; i++) if (s[i] < '0' || s[i] > '9') digits = 0;
   for (size_t i = 0; digits && i < el; i++) if (e[i] < '0' || e[i] > '9') digits = 0;
   if (digits && sl <= 18 && el <= 18) {
-    long long bi = strtoll(s, NULL, 10), ei = strtoll(e, NULL, 10);
-    for (; excl ? bi < ei : bi <= ei; bi++) {
-      char buf[32];
-      int n = snprintf(buf, sizeof buf, "%.*lld", (int)sl, bi);
-      if (fn(sp_str_from_bytes(buf, (size_t)n), arg)) return;
-    }
-    return;
+    w->at = strtoll(s, NULL, 10);
+    w->lim = strtoll(e, NULL, 10) + (excl ? 0 : 1);
+    w->width = (int)sl;
+    if (w->at >= w->lim) return NULL;
+    w->kind = SP_STR_WALK_DIGITS;
+    return sp_str_walk_member(w);
   }
   /* past 18 digits a long long does not hold them: the same numbers by
      String#succ, which carries through the digits and keeps the begin's
      zeros, each compared with the end as a number */
   if (digits) {
-    const char *num = s;
-    SP_GC_ROOT_STR(num);
-    for (;;) {
-      int c = sp_str_upto_digits_cmp(num, e);
-      if (c > 0 || (excl && c == 0)) return;
-      if (fn(sp_str_from_bytes(num, sp_str_byte_len(num)), arg)) return;
-      if (c == 0) return;
-      num = sp_str_succ(num);
-    }
+    int c = sp_str_upto_digits_cmp(s, e);
+    if (c > 0 || (excl && c == 0)) return NULL;
+    w->cur = s; w->end = e; w->excl = excl;
+    w->kind = SP_STR_WALK_WIDE;
+    return sp_str_walk_member(w);
   }
   /* otherwise String#succ from the begin up to the end, never past the
      end's length, so ("a".."bb") runs through "z" and on to "bb", and
      ("aa".."z") -- whose begin is the end's successor -- is empty */
   int cmp = sp_str_cmp_bytes(s, e);
-  if (cmp > 0 || (excl && cmp == 0)) return;
-  const char *after = sp_str_succ(e);
-  SP_GC_ROOT_STR(after);
+  if (cmp > 0 || (excl && cmp == 0)) return NULL;
   /* `cur` walks the range via String#succ, allocating a fresh heap string each
-     step; the next sp_str_alloc can trigger a GC that would sweep both the
-     array under construction and the current (unrooted) succ string, so the
-     strcpy read freed memory (#3152). Root the slot -- it tracks each succ
-     reassignment. */
-  const char *cur = s;
-  SP_GC_ROOT_STR(cur);
-  while (!sp_str_eq(cur, after)) {
-    int last = !excl && sp_str_eq(cur, e);
-    if (fn(sp_str_from_bytes(cur, sp_str_byte_len(cur)), arg)) return;
-    if (last) return;
-    cur = sp_str_succ(cur);
-    if (excl && sp_str_eq(cur, e)) return;
-    size_t cl = sp_str_byte_len(cur);
-    if (cl > el || cl == 0) return;
+     step; the next sp_str_alloc can trigger a GC that would sweep the current
+     succ string, so the copy read freed memory (#3152). The caller's root on
+     the slot tracks each succ reassignment. */
+  w->cur = s; w->end = e; w->excl = excl;
+  w->stop = sp_str_succ(e);
+  if (sp_str_eq(w->cur, w->stop)) return NULL;
+  w->kind = SP_STR_WALK_SUCC;
+  return sp_str_walk_member(w);
+}
+const char *sp_str_walk_next(sp_StrWalk *w) {
+  if (w->kind == SP_STR_WALK_BYTES || w->kind == SP_STR_WALK_DIGITS) {
+    if (++w->at >= w->lim) { w->kind = SP_STR_WALK_OVER; return NULL; }
+    return sp_str_walk_member(w);
   }
+  if (w->kind == SP_STR_WALK_WIDE) {
+    w->cur = sp_str_succ(w->cur);
+    int c = sp_str_upto_digits_cmp(w->cur, w->end);
+    if (c > 0 || (w->excl && c == 0)) { w->kind = SP_STR_WALK_OVER; return NULL; }
+    return sp_str_walk_member(w);
+  }
+  if (w->kind != SP_STR_WALK_SUCC) return NULL;
+  w->kind = SP_STR_WALK_OVER;
+  if (!w->excl && sp_str_eq(w->cur, w->end)) return NULL;
+  w->cur = sp_str_succ(w->cur);
+  if (w->excl && sp_str_eq(w->cur, w->end)) return NULL;
+  size_t cl = sp_str_byte_len(w->cur);
+  if (cl > sp_str_byte_len(w->end) || cl == 0) return NULL;
+  if (sp_str_eq(w->cur, w->stop)) return NULL;
+  w->kind = SP_STR_WALK_SUCC;
+  return sp_str_walk_member(w);
+}
+/* The same members, each passed to fn until it answers nonzero. */
+void sp_str_upto_each(const char *s, const char *e, sp_int excl, int (*fn)(const char *, void *), void *arg) {SP_GC_ROOT_STR(s);SP_GC_ROOT_STR(e);
+  sp_StrWalk w = {0};
+  SP_GC_ROOT_STR(w.cur); SP_GC_ROOT_STR(w.end); SP_GC_ROOT_STR(w.stop);
+  for (const char *m = sp_str_walk_first(&w, s, e, excl); m; m = sp_str_walk_next(&w))
+    if (fn(m, arg)) return;
 }
 static int sp_str_upto_push(const char *m, void *arg) {
   sp_StrArray_push((sp_StrArray *)arg, m);
