@@ -27,19 +27,24 @@ No program that answered as CRuby on master answers differently. The 16 are a Bi
 
 Also fixed and not among the generated programs: `[[1], [], [2]].reduce(:concat)`, `inject(:concat)` and `inject([5], :concat)`, which printed the eight zeros on master.
 
-**Generated C.** `tools/cident.sh upstream/master`: `5924 identical, 2 differ, 0 refusal changes, 0 refused by both`. The two are the new tests. optcarrot's C does not change.
+**Generated C.** `tools/cident.sh` against 701529f0: `5924 identical, 2 differ, 0 refusal changes, 0 refused by both`. The two are the new tests. optcarrot's C does not change.
 
 **Tests.** `test/fold_literal_table_empty_row.rb` (21 lines printed; 14 differ on master) and `test/fold_literal_table_bignum_row.rb` (4 lines; 3 differ on master). Both print the same under `SPINEL_GC_STRESS=1` and `2`.
 
-The `.expected` files are from CRuby 3.3.6 run with `--enable-frozen-string-literal`; 4.0 is not installed where this was written.
+The `.expected` files are what CRuby 4.0.7 prints with `--enable-frozen-string-literal`.
 
 ## `make gate` (on this branch merged with current master)
 
 ```
-GATE_LINES
+scale-test: instance_eval forwarding work at 2x the wrappers is 1.74x (limit 2.50)
+scale-test: work at 4x the program is 4.74x (linear 4.00, limit 5.20)
+scale-test: work at 4x the program, compiled to C, is 6.10x (limit 6.90)
+scale-test: call-shape work at 4x the units, compiled to C, is 4.22x (linear 4.00, limit 4.50)
+Tests:     5849 pass,        0 fail,        0 error
+gate: ALL GREEN
 ```
 
-- [ ] New tests have `.expected` files that match CRuby 4.0 run with `--enable-frozen-string-literal` (written with CRuby 3.3.6 and that flag; they print Integers, Arrays, a String and booleans)
+- [x] New tests have `.expected` files that match CRuby 4.0 run with `--enable-frozen-string-literal` (4.0.7)
 - [x] Values past 2^31 are marked `# spinel: int64` (test/fold_literal_table_bignum_row.rb)
-- [x] If optcarrot's generated C changed: callgrind numbers, checksum 59662 (it did not change; checksum 59662)
+- [x] If optcarrot's generated C changed: callgrind numbers, checksum 59662 (it did not change, byte for byte; Optcarrot: OK, checksum: 59662)
 - [ ] Depends on: # (nothing)
