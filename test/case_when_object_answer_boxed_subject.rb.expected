@@ -1,0 +1,22 @@
+count hit
+count miss
+count miss
+count hit
+count hit
+count hit
+[:miss, :miss, :miss, :hit, :miss, :miss]
+[:miss, :miss, :miss, :hit, :miss, :miss]
+[:miss, :miss, :miss, :hit, :miss, :miss]
+[:miss, :miss, :miss, :hit, :miss, :miss]
+[:miss, :miss, :miss, :hit, :miss, :miss]
+[:miss, :miss, :miss, :hit, :miss, :miss]
+child miss
+child miss
+child miss
+child hit
+string
+child miss
+[:miss, :miss, :hit, :miss, :miss, :miss]
+[:miss, :miss, :miss, :hit, :miss, :miss]
+[:miss, :miss, :miss, :miss, :miss, :miss]
+6

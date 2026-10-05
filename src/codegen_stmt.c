@@ -5638,10 +5638,10 @@ static int emit_case_container_eq(Compiler *c, int cond, int t, TyKind pt, Buf *
 }
 
 /* `when <obj>`: call an object's own === (or ==) with the boxed case subject
-   when it takes one plain boxed parameter and returns a boolean or boxed
-   value. The arm and subject stay rooted across the call. A nil arm matches
-   only a nil subject; return 0 for other patterns so the caller can use its
-   existing typed comparisons. */
+   when it takes one plain boxed parameter. What it answers is read for its
+   Ruby truth. The arm and subject stay rooted across the call. A nil arm
+   matches only a nil subject; return 0 for other patterns so the caller can
+   use its existing typed comparisons. */
 static int emit_when_user_eq(Compiler *c, int cond, int t, TyKind pt, Buf *b) {
   TyKind wpt = comp_ntype(c, cond);
   int wcid = ty_is_object(wpt) ? ty_object_class(wpt) : -1;
@@ -5654,8 +5654,15 @@ static int emit_when_user_eq(Compiler *c, int cond, int t, TyKind pt, Buf *b) {
   if (weq < 0) return 0;
   Scope *ws = &c->scopes[weq];
   LocalVar *wp = ws->nparams == 1 ? scope_local(ws, ws->pnames[0]) : NULL;
+  /* an Integer, a Float or a Symbol answer is nil at its sentinel, a String,
+     an Array, a Hash or an object at the null pointer, and anything else
+     they hold is true; a method that answers nil on every path is a void
+     function, called and no match */
+  TyKind wr = ws->ret;
+  int ptr_ret = wr == TY_STRING || ty_is_array(wr) || ty_is_hash(wr) || (ty_is_object(wr) && !comp_ty_value_obj(c, wr));
   if (!wp || wp->type != TY_POLY || ws->rest_idx >= 0 || ws->kwrest_idx >= 0 || ws->blk_param ||
-      (ws->ret != TY_BOOL && ws->ret != TY_POLY)) return 0;
+      (wr != TY_BOOL && wr != TY_POLY && wr != TY_INT && wr != TY_FLOAT && wr != TY_SYMBOL && wr != TY_NIL &&
+       wr != TY_VOID && !ptr_ret)) return 0;
   const char *dcn = c->classes[wdef].c_name;
   int ta = ++g_tmp;
   buf_printf(b, "({ sp_%s *_t%d = (sp_%s *)(", dcn, ta, dcn);
@@ -5666,6 +5673,17 @@ static int emit_when_user_eq(Compiler *c, int cond, int t, TyKind pt, Buf *b) {
     emit_boxed_text(c, pt, sref, b); }
   buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); _t%d ? ", ts, ta);
   if (via_eq) buf_printf(b, "(_t%d.tag == SP_TAG_OBJ && _t%d.v.p == (void *)_t%d) || ", ts, ts, ta);
+  if (wr != TY_BOOL && wr != TY_POLY) {
+    Buf call; memset(&call, 0, sizeof call);
+    emit_method_cname(c, ws, &call);
+    buf_printf(&call, "(_t%d, _t%d)", ta, ts);
+    if (ptr_ret) buf_printf(b, "(%s != NULL)", call.p);
+    else if (wr == TY_NIL || wr == TY_VOID) buf_printf(b, "(%s, 0)", call.p);
+    else emit_slot_truthy(wr, call.p, b);
+    free(call.p);
+    buf_printf(b, " : _t%d.tag == SP_TAG_NIL; })", ts);
+    return 1;
+  }
   buf_puts(b, ws->ret == TY_POLY ? "sp_poly_truthy(" : "(");
   emit_method_cname(c, ws, b);
   buf_printf(b, "(_t%d, _t%d)) : _t%d.tag == SP_TAG_NIL; })", ta, ts, ts);

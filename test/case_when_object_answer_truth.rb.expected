@@ -1,0 +1,7 @@
+[:no_int, :zero, :no_float, :no_sym, :no_str, :no_mixed, :no_flag, :eq]
+[:no_int, :zero, :no_float, :no_sym, :no_str, :mixed, :no_flag, :eq]
+[:int, :zero, :float, :sym, :str, :mixed, :flag, :eq]
+:hit
+:miss
+:hit
+:miss
