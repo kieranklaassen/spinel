@@ -8848,7 +8848,8 @@ static int desugar_multi_yield_map_param(Compiler *c) {
 
 /* What a condition says of the caller's block: 1 when it holds with a
    block (`block_given?`, the `&b` parameter read), -1 when it holds without
-   one (`!` or `nil?` of either), 0 when it says nothing. */
+   one (`!` of either, `nil?` of the parameter), 0 when it says nothing.
+   `block_given?.nil?` never holds, so `nil?` counts on the parameter alone. */
 static int te_block_test(const NodeTable *nt, int n, const char *bp) {
   if (n < 0) return 0;
   if (nt_kind(nt, n) == NK_LocalVariableReadNode) {
@@ -8860,7 +8861,8 @@ static int te_block_test(const NodeTable *nt, int n, const char *bp) {
   int r = nt_ref(nt, n, "receiver");
   if (!cn) return 0;
   if (r < 0) return sp_streq(cn, "block_given?");
-  if (sp_streq(cn, "!") || sp_streq(cn, "nil?")) return -te_block_test(nt, r, bp);
+  if (sp_streq(cn, "!")) return -te_block_test(nt, r, bp);
+  if (sp_streq(cn, "nil?") && nt_kind(nt, r) == NK_LocalVariableReadNode) return -te_block_test(nt, r, bp);
   return 0;
 }
 
