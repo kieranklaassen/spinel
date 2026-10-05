@@ -1032,7 +1032,18 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
     /* a proc value drives the yields; the site's own block is not this one */
     block = (fwd_yield_proc && !fwd_encl) ? -1 : g_block_id;
   }
-  if (g_nren + m->nlocals >= MAX_RENAME) return 0;
+  if (g_nren + m->nlocals >= MAX_RENAME) {
+    /* A call with no block has nothing else to become: the plain call it
+       falls back to names a function a yielding method never has, and the C
+       did not link. An arm of the poly-receiver switch is left to decline
+       (the call then goes to the proc-form clones), and so is a probe. */
+    if (nt_ref(nt, id, "block") < 0 && !g_inline_recv_expr && !g_unsup_probe)
+      unsupported_feature(c, id,
+        "a call with no block to a method that yields could not be inlined: its locals do "
+        "not fit the inliner's table of 128 names (a yielding method has no standalone "
+        "function to call)");
+    return 0;
+  }
   /* Pre-check: every body local must have an emittable type. Bail BEFORE
      writing anything (a mid-emit bail would leave an unbalanced `{`). */
   for (int i = 0; i < m->nlocals; i++) {
