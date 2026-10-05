@@ -21,7 +21,7 @@ s = +"abc"; s.force_encoding("UTF-8") << "d"; p s
 s = +""; s.concat("a").concat("b"); p s
 s = +""; s.concat("a") << "b"; p s
 s = +""; (s << "a").concat("b"); p s
-s = +"x"; s.prepend("a").insert(0, "b").concat("c") << "d"; p s
+s = +"x"; s.insert(0, "b").prepend("a").concat("c") << "d"; p s
 
 # a longer one
 s = +"0"
@@ -74,7 +74,7 @@ s = +"a"; r = s << "b" << "c"; p s, r.equal?(s)
 
 # each argument runs once, in order, and reads the local as it then is
 s = +"m"
-s.prepend(tick("1")).concat(tick("2")).insert(0, tick("3")).insert(1, tick("4"))
+s.prepend(tick("1")).concat(tick("2")).insert(-1, tick("3")).insert(1, tick("4"))
 p s, $log
 s = +"ab"; s.concat(s).prepend(s.size.to_s); p s
 

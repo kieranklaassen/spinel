@@ -2260,15 +2260,18 @@ static int mcl_closure_writes(const NodeTable *nt, const char *name) {
 }
 /* Would the calls from `first` up to `last`, once `first` is sent to a
    local, keep every change: 2 for a chain of `<<` alone, 1 for one the
-   pass below rewrites, 0 for any other? */
+   pass below rewrites, 0 for any other? A chain of `<<` alone is written
+   by emit_str_append_chain_handle, which carries 65 calls and drops the
+   rest: a longer one is not kept. */
 static int mcl_chain_kept(Compiler *c, int first, int last) {
   const NodeTable *nt = c->nt;
-  int only_shl = sp_streq(nt_str(nt, last, "name"), "<<");
+  int only_shl = sp_streq(nt_str(nt, last, "name"), "<<"), calls = 1;
   if (!mcl_last_call(nt, last)) return 0;
   for (int v = nt_ref(nt, last, "receiver"); ; v = nt_ref(nt, v, "receiver")) {
     if (!mcl_self_link(nt, v)) return 0;
     only_shl = only_shl && sp_streq(nt_str(nt, v, "name"), "<<");
-    if (v == first) return only_shl ? 2 : 1;
+    calls++;
+    if (v == first) return !only_shl ? 1 : calls <= 65 ? 2 : 0;
   }
 }
 int desugar_mutator_chain_on_local(Compiler *c) {
