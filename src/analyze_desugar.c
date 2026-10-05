@@ -3846,9 +3846,15 @@ int desugar_dynamic_send(Compiler *c) {
   NodeTable *nt = (NodeTable *)c->nt;
   int n0 = nt->count;
   int changed = 0;
-  /* a user-defined method named send/etc. resolves normally; don't intercept */
-  for (int s = 0; s < c->nscopes; s++) { const char *sn = c->scopes[s].name;
-    if (sn && is_send_family(sn)) return 0; }
+  /* A user-defined method named send/etc. resolves normally; don't intercept.
+     That is a matter of the receiver, though, not of the program: only a
+     call that can reach such a method stays as written (an_send_may_be_own).
+     Standing every send down once one class defined the name left
+     `[1].__send__(m)` beside a Mailer#send an ordinary call nothing
+     answers, a NoMethodError where CRuby calls the method m names. */
+  int own_any = 0;
+  for (int s = 0; s < c->nscopes && !own_any; s++) { const char *sn = c->scopes[s].name;
+    if (sn && is_send_family(sn)) own_any = 1; }
   /* quick out: nothing to do unless some not-yet-lowered explicit-receiver send
      with a runtime name exists (the common case has none, so skip the scans). */
   { int any = 0;
@@ -3856,6 +3862,7 @@ int desugar_dynamic_send(Compiler *c) {
       if (!nt_type(nt, id) || !sp_streq(nt_type(nt, id), "CallNode")) continue;
       const char *nm = nt_str(nt, id, "name"); if (!nm) continue;
       if (!is_send_family(nm)) continue;
+      if (own_any && an_send_may_be_own(c, id)) continue;
       int dn = 0; nt_arr(nt, id, "dyn_send_arms", &dn); if (dn > 0) continue;
       int a = nt_ref(nt, id, "arguments"); if (a < 0) continue;
       int ac = 0; const int *av = nt_arr(nt, a, "arguments", &ac);
@@ -3875,6 +3882,7 @@ int desugar_dynamic_send(Compiler *c) {
     const char *nm = nt_str(nt, id, "name");
     if (!nm) continue;
     if (!is_send_family(nm)) continue;
+    if (own_any && an_send_may_be_own(c, id)) continue;
     int recv = nt_ref(nt, id, "receiver");
     if (recv < 0) {
       /* A receiverless `send(name, ...)` in a method is `self.send(name, ...)`:

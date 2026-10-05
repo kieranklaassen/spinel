@@ -6529,7 +6529,7 @@ static TyKind infer_call_inner(Compiler *c, int id) {
   }
   /* a dynamic send lowered to a name-dispatch (desugar_dynamic_send) yields one
      of several boxed method results -> poly. */
-  { int dn = 0; nt_arr(nt, id, "dyn_send_arms", &dn); if (dn > 0) return TY_POLY; }
+  { int dn = 0; nt_arr(nt, id, "dyn_send_arms", &dn); if (dn > 0 && !an_send_may_be_own(c, id)) return TY_POLY; }
   /* and a runtime-name respond_to? (desugar_dynamic_respond_to): true or false */
   { int dn = 0; nt_arr(nt, id, "dyn_rto_arms", &dn); if (dn > 0) return TY_BOOL; }
   /* likewise a runtime-name const_get (desugar_dynamic_const_get): a class

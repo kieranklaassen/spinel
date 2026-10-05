@@ -3118,6 +3118,10 @@ static int emit_dynamic_send(Compiler *c, int id, Buf *b) {
   const NodeTable *nt = c->nt;
   int narm = 0; const int *arms = nt_arr(nt, id, "dyn_send_arms", &narm);
   if (narm <= 0) return 0;
+  /* the arms were made while the receiver was proved another class's; a
+     receiver that has since widened to one the program's own send can take
+     is that method's call again */
+  if (an_send_may_be_own(c, id)) return 0;
   int args = nt_ref(nt, id, "arguments");
   int argc = 0; const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &argc) : NULL;
   if (argc < 1 || !argv) return 0;
