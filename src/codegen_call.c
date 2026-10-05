@@ -17918,6 +17918,20 @@ static int operand_hoists_effect(Compiler *c, int node) {
   return 0;
 }
 
+/* The calls emit_operands_in_order declined after it had rendered two or
+   more operands, by node. */
+static unsigned char *g_bind_declined;
+static int g_bind_declined_cap;
+static void bind_declined_note(int id) {
+  if (id >= g_bind_declined_cap) {
+    int cap = id + 1024;
+    g_bind_declined = realloc(g_bind_declined, (size_t)cap);
+    memset(g_bind_declined + g_bind_declined_cap, 0, (size_t)(cap - g_bind_declined_cap));
+    g_bind_declined_cap = cap;
+  }
+  g_bind_declined[id] = 1;
+}
+
 static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
   if (emit_or_take_back(c, id, b, emit_str_append_chain_handle)) return 1;
   const NodeTable *nt = c->nt;
@@ -18038,8 +18052,13 @@ static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
      call's own emission tells; render the operand after that, so a declined
      rewrite has not rendered it. Rendered first, a decline re-rendered it with
      the whole call, once per nesting level: 2^depth copies of a receiver
-     chain (#4925). */
-  int operands_last = observable < 2;
+     chain (#4925). Two or more are rendered first, until the call has
+     declined them once. A call that binds its own arguments, a user
+     method's, declines every time; its caller then renders the operands
+     again with the call, and as the receiver of another such call it is
+     emitted twice: every link of `q.where(col(1)).where(col(2))...` doubled
+     the work below it. */
+  int operands_last = observable < 2 || (id < g_bind_declined_cap && g_bind_declined[id]);
   for (; !operands_last && rendered < nb && ok; rendered++) {
     render_operand(c, node[rendered], &opb[rendered], &opp[rendered]);
     if (text_is_raise_token(opb[rendered].p)) ok = 0;
@@ -18084,6 +18103,7 @@ static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
     g_pre->len = pre_mark;
     if (g_pre->p) g_pre->p[pre_mark] = '\0';
     g_tmp = saved_tmp;
+    if (!operands_last) bind_declined_note(id);
     return 0;
   }
   /* an operand's hoisted statements stay ahead of the call unless they run
