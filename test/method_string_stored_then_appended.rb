@@ -1,7 +1,8 @@
 # A String a method of an object builds, stored in an Array or a Hash and
 # appended to through it: the element is that new String, and the object is
 # left as it was. The element was boxed as a shared String around the plain
-# one the method answered, and the append ended in SIGSEGV.
+# one the method answered: the C did not build with clang, and with gcc the
+# append ended in SIGSEGV.
 
 class K
   attr_reader :x
@@ -100,3 +101,24 @@ p z
 w = [n.padded]
 w[0] << "z"
 p w
+
+# a method that answers nil where the String it builds from is nil: the
+# element is nil
+class O
+  def initialize(x) = @x = x
+  def up = @x&.upcase
+  def copy = @x.dup
+end
+o = O.new(nil)
+q = O.new("q".dup)
+z = [o.up, q.up]
+z[1] << "z"
+p z
+z = []
+z << o.copy
+z.push(q.copy)
+z.each { |e| e << "!" if e }
+p z
+h = { a: o.up, b: q.up }
+h[:b] << "z"
+p h.to_a

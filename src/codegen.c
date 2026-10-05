@@ -1454,8 +1454,12 @@ static void emit_boxed_strbuf(Compiler *c, int node, TyKind t, const Repr *rp, B
     }
   }
   /* a demanded literal / expression store: wrap a FRESH handle so the
-     container element is mutable in place (#3227 P3) */
-  buf_puts(b, "sp_box_obj(sp_String_new_shared(");
+     container element is mutable in place (#3227 P3). A method of an object
+     that builds its String may answer nil (`def m = @x&.upcase`, `@x.dup` of
+     a nil ivar), and sp_String_new_shared hands a nil back: box it as nil. */
+  int orcv = k == NK_CallNode ? nt_ref(c->nt, node, "receiver") : -1;
+  buf_puts(b, orcv >= 0 && ty_is_object(comp_ntype(c, orcv)) ? "sp_box_nullable_obj(sp_String_new_shared("
+                                                              : "sp_box_obj(sp_String_new_shared(");
   { Buf eb0; memset(&eb0, 0, sizeof eb0);
     int sv_mark = view_push_repr(c, node, VR_STRBUF_BOX, 0);   /* emit the plain string value */
     emit_str_expr(c, node, &eb0);

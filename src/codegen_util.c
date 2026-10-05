@@ -2436,7 +2436,8 @@ const char *g_sb_iv_name = NULL;
 int         g_sb_iv_cid  = -1;
 char        g_sb_iv_repl[64];
 /* The String methods that answer a String the call makes: never their
-   receiver, an argument or nil. */
+   receiver or an argument, and nil only where the receiver is nil (`@x.dup`
+   of a nil ivar, `@x&.upcase`), which the store boxes as nil. */
 static int str_call_makes_string(const char *n) {
   static const char *const made[] = {
     "+", "*", "%", "dup", "clone", "upcase", "downcase", "capitalize", "swapcase",
