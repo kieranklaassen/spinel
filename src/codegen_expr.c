@@ -3649,6 +3649,28 @@ static int emit_range_expr(Compiler *c, int id, Buf *b, const NodeTable *nt, con
   int left = nt_ref(nt, id, "left");
   int right = nt_ref(nt, id, "right");
   int excl = (int)(nt_int(nt, id, "flags", 0) & 4) ? 1 : 0;
+  /* CRuby runs the first bound, then the last. Each form below writes the
+     two as arguments of one C call, whose order C leaves open, and gcc ran
+     the last one first: `(lg(1)..lg(2))` logged 2 then 1, and
+     `(n..(n = 5))` began at 5. Where the order shows (args_order_matters:
+     two bounds with an effect, or a first bound reading what the last can
+     change) the first bound runs into a temp here, ahead of the last, and
+     the form reads the temp. */
+  if (left >= 0 && right >= 0 && !arg_ran_first(left, 0)) {
+    int bounds[2] = { left, right };
+    TyKind lt = comp_ntype(c, left);
+    if (lt != TY_NIL && lt != TY_VOID && lt != TY_UNKNOWN && args_order_matters(c, bounds, 2, NULL, 0)) {
+      int t = ++g_tmp;
+      buf_puts(b, "({ "); emit_ctype(c, lt, b);
+      buf_printf(b, " _t%d = ", t); emit_expr(c, left, b); buf_puts(b, "; ");
+      if (ty_gc_rootable(c, lt)) { emit_gc_root_tmp(c, lt, t, b); buf_puts(b, " "); }
+      int slot = view_bind(left, "_t%d", t);
+      emit_range_expr(c, id, b, nt, ty);
+      view_unbind(slot);
+      buf_puts(b, "; })");
+      return 1;
+    }
+  }
   /* (:a..:e): a poly array of boxed symbols, walked by name succession
      (interning through the generated TU's own table) */
   if (left >= 0 && right >= 0 &&
