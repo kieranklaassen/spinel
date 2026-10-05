@@ -4454,12 +4454,17 @@ static sp_int sp_poly_range_begin(sp_RbVal v) { if (v.tag == SP_TAG_OBJ && v.cls
 static sp_int sp_poly_range_end(sp_RbVal v) { if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_RANGE) return sp_range_end_i(*(sp_Range *)v.v.p); sp_raise_poly_nomethod("end", v); }
 static SP_UNUSED sp_RbVal sp_poly_range_begin_v(sp_RbVal v) {
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_FLOAT_RANGE && v.v.p) { sp_FloatRange r = (*(sp_FloatRange *)v.v.p); if (r.omitted & SP_FRANGE_NO_BEGIN) return sp_box_nil(); return sp_frange_box_bound(r, r.first, SP_FRANGE_INT_BEGIN | SP_FRANGE_RT_INT_BEGIN); }
+  /* a String Range's ends are the Strings it was written with; one left
+     out is NULL, which sp_box_str boxes as nil.  Asked only of what is no
+     Integer Range, on the way to the raise */
+  if (!(v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_RANGE)) { if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_STR_RANGE && v.v.p) return sp_box_str(((sp_StrRange *)v.v.p)->first); }
   sp_int b = sp_poly_range_begin(v); return b == SP_INT_NIL ? sp_box_nil() : sp_box_int(b);
 }
 static SP_UNUSED sp_RbVal sp_poly_range_end_v(sp_RbVal v) {
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_FLOAT_RANGE && v.v.p) { sp_FloatRange r = (*(sp_FloatRange *)v.v.p); if (r.omitted & SP_FRANGE_NO_END) return sp_box_nil(); return sp_frange_box_bound(r, r.last, SP_FRANGE_INT_END | SP_FRANGE_RT_INT_END); }
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_RANGE && v.v.p && ((sp_Range *)v.v.p)->fe)
     return sp_box_float(((sp_Range *)v.v.p)->fend);   /* (1..2.5): the end as written */
+  if (!(v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_RANGE)) { if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_STR_RANGE && v.v.p) return sp_box_str(((sp_StrRange *)v.v.p)->last); }
   sp_int e = sp_poly_range_end(v); return (e == SP_INT_NIL || e == INTPTR_MAX) ? sp_box_nil() : sp_box_int(e);
 }
 /* every Range kind carries its own exclude-end flag; a Range read out of a
