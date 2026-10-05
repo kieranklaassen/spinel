@@ -10616,8 +10616,19 @@ static int emit_sn_writer_stmt(Compiler *c, int id, Buf *b, int indent, const No
   if (ok) {
     Buf rb = expr_buf(c, recv);
     emit_indent(b, indent);
-    buf_printf(b, "{ sp_%s *_sn%d = %s; if (_sn%d != NULL) {\n", c->classes[cid].c_name, tsn,
+    buf_printf(b, "{ sp_%s *_sn%d = %s; if (_sn%d != NULL) {", c->classes[cid].c_name, tsn,
                rb.p ? rb.p : "NULL", tsn);
+    /* A value that allocates runs between the temp and the store: a
+       receiver nothing else holds (`K.new(v)&.v = [i]`) was collected there
+       and the store went into the object that took its place. Rooted for
+       such a value, bare for one that is only read. */
+    int args = nt_ref(nt, id, "arguments");
+    int argc = 0;
+    const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &argc) : NULL;
+    if (spre.len || (argc > 0 && operand_may_allocate(c, argv[0]))) {
+      buf_puts(b, " "); emit_sn_tmp_root(c, rt, tsn, b);
+    }
+    buf_puts(b, "\n");
     if (spre.p) buf_puts(b, spre.p);
     if (sb.p) buf_puts(b, sb.p);
     emit_indent(b, indent); buf_puts(b, "} }\n");
