@@ -4066,6 +4066,507 @@ static int node_is_empty_hash_producer(Compiler *c, int node) {
   return 0;
 }
 
+/* A global assigned nothing but an empty `{}` / `Hash.new` (or nil) and
+   filled through another name -- a method's parameter -- or by `merge!`, or
+   made by `||=`, has no `[]=` that says what it holds. It kept no type
+   through the fixpoint and took the boxed slot only after it, when every
+   call on it had been typed as answering nothing: `$g[k]`, `$g.keys`,
+   `$g.values` and `$g.to_a` computed their answer and read nil.
+
+   box_empty_hash_globals gives such a global the boxed slot once the main
+   loop has converged, and the loop runs on, so the calls are typed against
+   it. It does so only where nothing but a number, a Symbol, true, false or
+   nil can be stored in the Hash. A String read back out of a boxed Hash and
+   changed in place is a copy (docs/limitations.md), and so is one inside an
+   Array or an object kept there; a program that does that reads nil, raises
+   or does not build today, and must not start to print the unchanged String
+   instead. It is typed exactly as before.
+
+   So the Hash has to be in plain sight: each mention of the global is the
+   receiver of a call, or is handed to a parameter of a method or of its
+   block, and so is each mention of that parameter, in turn. Then the calls
+   on those are every store there is, and the settled types say what each one
+   puts in. */
+#define EHG_MAX 16
+#define EHG_DROPPED 1   /* a statement whose value nothing takes */
+#define EHG_PLACED  2   /* a mention of the Hash that is accounted for */
+typedef struct {
+  const char *gname;            /* the global, as comp_resolve_gvar names it */
+  LocalVar *param[EHG_MAX];     /* the parameters it is handed to */
+  const char *reader[EHG_MAX];  /* `def table = $table ||= {}`: the methods answering it */
+  const char *handed[EHG_MAX];  /* the methods found to take it, by name, */
+  int handed_at[EHG_MAX];       /* argument index */
+  int handed_in[EHG_MAX];       /* and class (`new`), or -1 */
+  int nparam, nreader, nhanded;
+  char *mark;                   /* per node: EHG_DROPPED, EHG_PLACED */
+  int *value_of;                /* per node: 1 + the method whose value it is */
+} EhgSet;
+
+static int ehg_scalar(TyKind t) {
+  return t == TY_INT || t == TY_FLOAT || t == TY_SYMBOL || t == TY_BOOL || t == TY_NIL;
+}
+
+static int ehg_in(const char *nm, const char *const *list) {
+  for (int i = 0; nm && list[i]; i++) if (sp_streq(nm, list[i])) return 1;
+  return 0;
+}
+
+static int ehg_global(Compiler *c, const EhgSet *e, int node) {
+  const char *nm = node >= 0 ? nt_str(c->nt, node, "name") : NULL;
+  return nm && sp_streq(comp_resolve_gvar(c, nm + 1), e->gname);
+}
+
+static LocalVar *ehg_local(Compiler *c, int node) {
+  Scope *s = comp_scope_of(c, node);
+  const char *nm = nt_str(c->nt, node, "name");
+  return s && nm ? scope_local(s, nm) : NULL;
+}
+
+static int ehg_param(const EhgSet *e, const LocalVar *lv) {
+  for (int i = 0; lv && i < e->nparam; i++) if (e->param[i] == lv) return 1;
+  return 0;
+}
+
+/* `node` names the Hash: a read of the global or of a parameter it reaches,
+   or a call of a method answering it */
+static int ehg_names(Compiler *c, const EhgSet *e, int node) {
+  const NodeTable *nt = c->nt;
+  if (node < 0) return 0;
+  NodeKind k = nt_kind(nt, node);
+  if (k == NK_GlobalVariableReadNode) return ehg_global(c, e, node);
+  if (k == NK_LocalVariableReadNode) return ehg_param(e, ehg_local(c, node));
+  if (k != NK_CallNode) return 0;
+  for (int i = 0; i < e->nreader; i++) if (sp_streq(nt_str(nt, node, "name"), e->reader[i])) return 1;
+  return 0;
+}
+
+static int ehg_last_stmt(const NodeTable *nt, int body) {
+  if (body < 0 || nt_kind(nt, body) != NK_StatementsNode) return -1;
+  int n = 0; const int *b = nt_arr(nt, body, "body", &n);
+  return n > 0 ? b[n - 1] : -1;
+}
+
+/* a Symbol spells the name: it may be called where no call node shows */
+static int ehg_symbol_spells(const NodeTable *nt, const char *name) {
+  NT_FOREACH_KIND(nt, NK_SymbolNode, sy) {
+    const char *sv = nt_str(nt, sy, "value");
+    if (sv && sp_streq(sv, name)) return 1;
+  }
+  return 0;
+}
+
+/* the program has a method of that name */
+static int ehg_defined(Compiler *c, const char *nm) {
+  for (int si = 0; nm && si < c->nscopes; si++)
+    if (c->scopes[si].def_node >= 0 && c->scopes[si].name && sp_streq(c->scopes[si].name, nm)) return 1;
+  return 0;
+}
+
+static int ehg_has_kind(const NodeTable *nt, int id, NodeKind k) {
+  if (id < 0 || id >= nt->count) return 0;
+  if (nt_kind(nt, id) == k) return 1;
+  for (int j = 0; j < nt_num_refs(nt, id); j++) if (ehg_has_kind(nt, nt_ref_at(nt, id, j), k)) return 1;
+  for (int j = 0; j < nt_num_arrs(nt, id); j++) {
+    int n = 0; const int *el = nt_arr_at(nt, id, j, &n);
+    for (int i = 0; i < n; i++) if (ehg_has_kind(nt, el[i], k)) return 1;
+  }
+  return 0;
+}
+
+/* The value of `id` goes nowhere (`owner` 0) or is its method's, and so is
+   that of the last statement of each arm of an `if` or of a `begin` there. */
+static void ehg_value_goes(const NodeTable *nt, EhgSet *e, int id, int owner) {
+  while (id >= 0) {
+    NodeKind k = nt_kind(nt, id);
+    if (owner) e->value_of[id] = owner;
+    else e->mark[id] |= EHG_DROPPED;
+    if (k != NK_IfNode && k != NK_UnlessNode && k != NK_ElseNode && k != NK_BeginNode) return;
+    ehg_value_goes(nt, e, ehg_last_stmt(nt, nt_ref(nt, id, "statements")), owner);
+    id = k == NK_IfNode ? nt_ref(nt, id, "subsequent") : k == NK_UnlessNode ? nt_ref(nt, id, "else_clause") : -1;
+  }
+}
+
+/* Marks the statements whose value nothing takes: all but the last of a
+   body; the last one of the program, of a class or module body and of a
+   loop; of the block of an iterator that answers its receiver. The last one
+   of a method is noted as that method's value. */
+static void ehg_mark_dropped(Compiler *c, EhgSet *e) {
+  static const char *const iter[] = { "each", "each_with_index", "each_pair", "each_key",
+    "each_value", "times", "upto", "downto", "loop", NULL };
+  const NodeTable *nt = c->nt;
+  for (int id = 0; id < nt->count; id++) {
+    NodeKind k = nt_kind(nt, id);
+    int body = -1;
+    if (k == NK_StatementsNode) {
+      int n = 0; const int *b = nt_arr(nt, id, "body", &n);
+      for (int i = 0; i + 1 < n; i++) ehg_value_goes(nt, e, b[i], 0);
+    }
+    else if (id == nt->root_id) body = nt_ref(nt, id, "statements");
+    else if (k == NK_ClassNode || k == NK_ModuleNode || k == NK_SingletonClassNode) body = nt_ref(nt, id, "body");
+    else if (k == NK_WhileNode || k == NK_UntilNode || k == NK_ForNode) body = nt_ref(nt, id, "statements");
+    else if (k == NK_CallNode && ehg_in(nt_str(nt, id, "name"), iter) && !ehg_defined(c, nt_str(nt, id, "name"))) {
+      int blk = nt_ref(nt, id, "block");
+      if (blk >= 0 && nt_kind(nt, blk) == NK_BlockNode) body = nt_ref(nt, blk, "body");
+    }
+    ehg_value_goes(nt, e, ehg_last_stmt(nt, body), 0);
+  }
+  for (int si = 0; si < c->nscopes; si++)
+    if (c->scopes[si].def_node >= 0 && c->scopes[si].name)
+      ehg_value_goes(nt, e, ehg_last_stmt(nt, c->scopes[si].body), si + 1);
+}
+
+/* Nothing takes the value of `node`: it is such a statement, or the value of
+   a method no call of which has its value taken. A method the runtime calls
+   by its name has no call to show, and neither has one a Symbol spells. */
+static int ehg_dropped(Compiler *c, EhgSet *e, int node) {
+  static const char *const unseen[] = { "to_s", "inspect", "to_str", "to_a", "to_ary", "to_h",
+    "to_hash", "to_proc", "to_i", "to_f", "to_sym", "call", "each", "<=>", "==", "===", "eql?",
+    "equal?", "hash", "coerce", "succ", "method_missing", "respond_to_missing?", "initialize_copy",
+    NULL };
+  const NodeTable *nt = c->nt;
+  if (e->mark[node] & EHG_DROPPED) return 1;
+  int si = e->value_of[node] - 1;
+  /* asked again while its own calls are read, a method takes its own value */
+  e->value_of[node] = 0;
+  if (si < 0) return 0;
+  const char *nm = c->scopes[si].name;
+  if (ehg_in(nm, unseen) || ehg_symbol_spells(nt, nm)) return 0;
+  NT_FOREACH_KIND(nt, NK_CallNode, cu) {
+    const char *cn = nt_str(nt, cu, "name");
+    if (cn && sp_streq(cn, nm) && !ehg_dropped(c, e, cu)) return 0;
+  }
+  e->mark[node] |= EHG_DROPPED;
+  return 1;
+}
+
+/* `lv` takes the Hash. A method's parameter another caller gave a type holds
+   that caller's value too, and the type would change under it: 0. (A block's
+   parameter is typed by its own use until a value arrives.) */
+static int ehg_take(EhgSet *e, LocalVar *lv, int block, int *grew) {
+  if (!lv || (!block && lv->type != TY_POLY && lv->type != TY_UNKNOWN)) return 0;
+  if (ehg_param(e, lv)) return 1;
+  if (e->nparam == EHG_MAX) return 0;
+  e->param[e->nparam++] = lv;
+  *grew = 1;
+  return 1;
+}
+
+/* The call hands its argument `idx` to a parameter of every method of its
+   name; 0 where it may reach anything else. */
+static int ehg_hand_on(Compiler *c, EhgSet *e, int call, int idx, int *grew) {
+  const NodeTable *nt = c->nt;
+  const char *nm = nt_str(nt, call, "name");
+  int r = nt_ref(nt, call, "receiver"), cid = -1;
+  if (!nm) return 0;
+  if (r < 0 && (sp_streq(nm, "p") || sp_streq(nm, "puts") || sp_streq(nm, "print") || sp_streq(nm, "pp")))
+    return !ehg_defined(c, nm);
+  int an = 0; const int *av = nt_arr(nt, nt_ref(nt, call, "arguments"), "arguments", &an);
+  for (int i = 0; i <= idx && i < an; i++)
+    if (nt_kind(nt, av[i]) == NK_SplatNode || nt_kind(nt, av[i]) == NK_KeywordHashNode) return 0;
+  if (sp_streq(nm, "new")) {
+    /* `Holder.new($g)` binds `initialize`'s */
+    if (r < 0 || nt_kind(nt, r) != NK_ConstantReadNode) return 0;
+    cid = comp_class_index(c, nt_str(nt, r, "name"));
+    if (cid < 0) return 0;
+    nm = "initialize";
+  }
+  else if (r >= 0 && nt_kind(nt, r) != NK_SelfNode && nt_kind(nt, r) != NK_ConstantReadNode &&
+           !ty_is_object(infer_type(c, r))) return 0;
+  for (int i = 0; i < e->nhanded; i++)
+    if (e->handed_at[i] == idx && e->handed_in[i] == cid && sp_streq(e->handed[i], nm)) return 1;
+  int found = 0;
+  for (int si = 0; si < c->nscopes; si++) {
+    Scope *s = &c->scopes[si];
+    if (s->def_node < 0 || !s->name || !sp_streq(s->name, nm) || (cid >= 0 && s->class_id != cid)) continue;
+    if (idx >= s->nparams || (s->rest_idx >= 0 && idx >= s->rest_idx) || s->pdefault[idx] >= 0) return 0;
+    if (!ehg_take(e, scope_local(s, s->pnames[idx]), 0, grew)) return 0;
+    found = 1;
+  }
+  if (found && e->nhanded < EHG_MAX) {
+    e->handed[e->nhanded] = nm; e->handed_at[e->nhanded] = idx; e->handed_in[e->nhanded++] = cid;
+  }
+  return found;
+}
+
+/* What `node` puts in the Hash is a scalar (or, for a key, a String, which
+   the Hash keeps as its own frozen copy). A parameter that callers hand
+   scalars of more than one kind is boxed, so it is read at its callers. */
+static int ehg_stores_scalar(Compiler *c, int node, int key) {
+  const NodeTable *nt = c->nt;
+  TyKind t = infer_type(c, node);
+  if (ehg_scalar(t) || (key && t == TY_STRING)) return 1;
+  Scope *s = comp_scope_of(c, node);
+  const char *nm = nt_str(nt, node, "name");
+  if (t != TY_POLY || nt_kind(nt, node) != NK_LocalVariableReadNode || !s || s->def_node < 0 || !s->name ||
+      !nm || sp_streq(s->name, "initialize") || ehg_symbol_spells(nt, s->name)) return 0;
+  /* `super(h, k, v)` is a caller no call node shows */
+  NT_FOREACH_KIND(nt, NK_SuperNode, su) { (void)su; return 0; }
+  int idx = -1;
+  for (int i = 0; i < s->nparams; i++) if (sp_streq(s->pnames[i], nm)) idx = i;
+  if (idx < 0 || (s->rest_idx >= 0 && idx >= s->rest_idx) || s->pdefault[idx] >= 0) return 0;
+  for (int id = 0; id < nt->count; id++) {
+    NodeKind k = nt_kind(nt, id);
+    if (comp_is_local_write(k) && comp_scope_of(c, id) == s && sp_streq(nt_str(nt, id, "name"), nm)) return 0;
+    if (k != NK_CallNode || !sp_streq(nt_str(nt, id, "name"), s->name)) continue;
+    int an = 0; const int *av = nt_arr(nt, nt_ref(nt, id, "arguments"), "arguments", &an);
+    if (idx >= an) return 0;
+    for (int i = 0; i <= idx; i++)
+      if (nt_kind(nt, av[i]) == NK_SplatNode || nt_kind(nt, av[i]) == NK_KeywordHashNode) return 0;
+    TyKind at = infer_type(c, av[idx]);
+    if (!ehg_scalar(at) && !(key && at == TY_STRING)) return 0;
+  }
+  return 1;
+}
+
+/* `yield h` hands it to the block of each call of the method. */
+static int ehg_yield_on(Compiler *c, EhgSet *e, int yield, int idx, int *grew) {
+  const NodeTable *nt = c->nt;
+  Scope *ys = comp_scope_of(c, yield);
+  if (!ys || ys->def_node < 0 || !ys->name || ehg_symbol_spells(nt, ys->name)) return 0;
+  NT_FOREACH_KIND(nt, NK_CallNode, cu) {
+    const char *cn = nt_str(nt, cu, "name");
+    int blk = nt_ref(nt, cu, "block");
+    if (!cn || !sp_streq(cn, ys->name) || blk < 0) continue;
+    if (nt_kind(nt, blk) != NK_BlockNode) return 0;
+    if (nt_ref(nt, blk, "parameters") < 0) continue;
+    const char *pn = block_param_name(c, blk, idx);
+    int body = nt_ref(nt, blk, "body");
+    Scope *bs = comp_scope_of(c, body >= 0 ? body : blk);
+    if (!pn || !bs || !ehg_take(e, scope_local(bs, pn), 1, grew)) return 0;
+  }
+  return 1;
+}
+
+/* What the block answers is a scalar; for `map`, a String (the result is an
+   Array of Strings, not a boxed one) or a pair of scalars and of the block's
+   own parameters too. */
+static int ehg_block_scalar(Compiler *c, int blk, int map) {
+  const NodeTable *nt = c->nt;
+  int body = nt_ref(nt, blk, "body");
+  int last = ehg_last_stmt(nt, body);
+  if (last < 0) return body < 0;
+  TyKind t = infer_type(c, last);
+  if (ehg_scalar(t) || (map && t == TY_STRING)) return 1;
+  if (!map || nt_kind(nt, last) != NK_ArrayNode) return 0;
+  int n = 0; const int *el = nt_arr(nt, last, "elements", &n);
+  for (int i = 0; i < n; i++) {
+    const char *nm = nt_kind(nt, el[i]) == NK_LocalVariableReadNode ? nt_str(nt, el[i], "name") : NULL;
+    const char *pn;
+    int own = ehg_scalar(infer_type(c, el[i]));
+    for (int j = 0; !own && nm && j < 4 && (pn = block_param_name(c, blk, j)); j++) own = sp_streq(pn, nm);
+    if (!own) return 0;
+  }
+  return 1;
+}
+
+/* A call on the Hash, or an index assignment through it: 0 where it may
+   store something other than a scalar, or hand the Hash on out of sight. */
+static int ehg_call_ok(Compiler *c, EhgSet *e, int node) {
+  /* answer a new object or one of the Hash's own members */
+  static const char *const reads[] = { "[]", "fetch", "dig", "key?", "has_key?", "include?", "member?",
+    "value?", "has_value?", "key", "keys", "values", "values_at", "fetch_values", "to_a", "size",
+    "length", "count", "empty?", "any?", "all?", "none?", "sum", "inject", "reduce", "min_by",
+    "max_by", "sort_by", "min", "max", "sort", "map", "collect", "flat_map", "filter_map", "select",
+    "filter", "reject", "find", "detect", "find_all", "partition", "group_by", "first", "invert",
+    "merge", "slice", "except", "transform_values", "transform_keys", "compact", "dup", "inspect",
+    "to_s", "hash", "==", "!=", "eql?", "equal?", "nil?", "is_a?", "kind_of?", "instance_of?",
+    "respond_to?", "frozen?", "class", "object_id", "delete", "shift", "default", "assoc",
+    "rassoc", "take", "drop", "entries", "!", NULL };
+  /* look a key up: a String there is compared, not kept */
+  static const char *const keyed[] = { "[]", "fetch", "dig", "key?", "has_key?", "include?",
+    "member?", "delete", "assoc", NULL };
+  /* the block's answer is tested or thrown away, not kept */
+  static const char *const tested[] = { "each", "each_pair", "each_key", "each_value",
+    "each_with_index", "select", "filter", "reject", "find", "detect", "find_all", "partition",
+    "any?", "all?", "none?", "count", "min_by", "max_by", "sort_by", "delete_if", "keep_if",
+    "select!", "filter!", "reject!", NULL };
+  /* store what a block answers or a name read at run time, or yield the Hash */
+  static const char *const late[] = { "default_proc=", "transform_values!", "transform_keys!",
+    "send", "public_send", "__send__", "instance_eval", "instance_exec", "instance_variable_set",
+    "define_singleton_method", "singleton_class", "extend", "method", "tap", "then", "yield_self",
+    NULL };
+  const NodeTable *nt = c->nt;
+  int owr = nt_kind(nt, node) != NK_CallNode;
+  int an = 0; const int *av = nt_arr(nt, nt_ref(nt, node, "arguments"), "arguments", &an);
+  const char *nm = owr ? "[]=" : nt_str(nt, node, "name");
+  if (!nm || ehg_in(nm, late)) return 0;
+  /* a method of the program by that name is not the Hash's */
+  if (ehg_defined(c, nm)) return 0;
+  if (sp_streq(nm, "[]=") || sp_streq(nm, "store")) {
+    for (int i = 0; i < an - (owr ? 0 : 1); i++)
+      if (!ehg_stores_scalar(c, av[i], 1)) return 0;
+    int v = owr ? nt_ref(nt, node, "value") : an > 0 ? av[an - 1] : -1;
+    return v >= 0 && ehg_stores_scalar(c, v, 0);
+  }
+  if (sp_streq(nm, "default=")) return an == 1 && ehg_stores_scalar(c, av[0], 0);
+  if (sp_streq(nm, "merge!") || sp_streq(nm, "update") || sp_streq(nm, "replace")) {
+    if (nt_ref(nt, node, "block") >= 0) return 0;
+    for (int i = 0; i < an; i++) {
+      TyKind ht = infer_type(c, av[i]);
+      int en = 0; const int *el = nt_arr(nt, av[i], "elements", &en);
+      if (nt_kind(nt, av[i]) == NK_HashNode || nt_kind(nt, av[i]) == NK_KeywordHashNode) {
+        /* a literal's pairs say more than its type: Symbol keys box the values */
+        for (int j = 0; j < en; j++)
+          if (nt_kind(nt, el[j]) != NK_AssocNode || !ehg_stores_scalar(c, nt_ref(nt, el[j], "key"), 1) ||
+              !ehg_stores_scalar(c, nt_ref(nt, el[j], "value"), 0)) return 0;
+      }
+      else if (!ty_is_hash(ht) || !ehg_scalar(ty_hash_val(ht)) ||
+               (!ehg_scalar(ty_hash_key(ht)) && ty_hash_key(ht) != TY_STRING)) return 0;
+    }
+    return ehg_dropped(c, e, node);
+  }
+  /* What goes in by an argument (a default, a seed) or as a block's answer
+     comes back out boxed: a String among those would be changed as a copy. */
+  for (int i = 0; i < an; i++)
+    if (!ehg_stores_scalar(c, av[i], i == 0 && ehg_in(nm, keyed))) return 0;
+  int blk = owr ? -1 : nt_ref(nt, node, "block");
+  if (blk >= 0) {
+    int body = nt_kind(nt, blk) == NK_BlockNode ? nt_ref(nt, blk, "body") : -1;
+    if (nt_kind(nt, blk) != NK_BlockNode) return 0;
+    if (!ehg_in(nm, tested) &&
+        (!ehg_block_scalar(c, blk, sp_streq(nm, "map") || sp_streq(nm, "collect")) ||
+         ehg_has_kind(nt, body, NK_NextNode))) return 0;
+    if (ehg_has_kind(nt, body, NK_BreakNode) && !ehg_dropped(c, e, node)) return 0;
+  }
+  /* any other call may answer the Hash itself: only as a statement */
+  return ehg_in(nm, reads) || ehg_dropped(c, e, node);
+}
+
+/* the method's last statement is the global, or an assignment of it */
+static int ehg_ends_in(Compiler *c, const EhgSet *e, const Scope *s) {
+  int last = ehg_last_stmt(c->nt, s->body);
+  NodeKind k = last >= 0 ? nt_kind(c->nt, last) : NK_NilNode;
+  return (k == NK_GlobalVariableReadNode || k == NK_GlobalVariableWriteNode ||
+          k == NK_GlobalVariableOrWriteNode) && ehg_global(c, e, last);
+}
+
+/* 1 when the Hash global `gname` holds stays in plain sight and takes
+   nothing but scalars. */
+static int ehg_plain_sight(Compiler *c, const char *gname) {
+  const NodeTable *nt = c->nt;
+  EhgSet e = { .gname = gname };
+  e.mark = (char *)calloc((size_t)nt->count + 1, 1);
+  e.value_of = (int *)calloc((size_t)nt->count + 1, sizeof(int));
+  if (!e.mark || !e.value_of) { free(e.mark); free(e.value_of); return 0; }
+  ehg_mark_dropped(c, &e);
+  int ok = 1;
+  /* A method whose value is the global answers the Hash: a call of it
+     stands for the global where every method of the name does and no Symbol
+     spells it. */
+  for (int si = 0; si < c->nscopes; si++) {
+    Scope *s = &c->scopes[si];
+    if (s->def_node < 0 || !s->name || !ehg_ends_in(c, &e, s) || ehg_in(s->name, e.reader)) continue;
+    int all = e.nreader < EHG_MAX - 1 && !ehg_symbol_spells(nt, s->name);
+    for (int sj = 0; sj < c->nscopes && all; sj++) {
+      Scope *o = &c->scopes[sj];
+      if (o->def_node >= 0 && o->name && sp_streq(o->name, s->name) && !ehg_ends_in(c, &e, o)) all = 0;
+    }
+    if (!all) continue;
+    e.reader[e.nreader++] = s->name;
+    for (int sj = 0; sj < c->nscopes; sj++) {
+      Scope *o = &c->scopes[sj];
+      if (o->def_node >= 0 && o->name && sp_streq(o->name, s->name)) e.mark[ehg_last_stmt(nt, o->body)] |= EHG_PLACED;
+    }
+  }
+  /* an assignment of the global is a statement, not a value */
+  static const NodeKind wk[] = { NK_GlobalVariableWriteNode, NK_GlobalVariableOrWriteNode };
+  for (int k = 0; k < 2 && ok; k++) {
+    NT_FOREACH_KIND(nt, wk[k], w) {
+      if (ehg_global(c, &e, w) && !(e.mark[w] & EHG_PLACED) && !ehg_dropped(c, &e, w)) ok = 0;
+    }
+  }
+  /* the parameters it is handed to, and those they are handed on to */
+  for (int grew = 1; grew && ok; ) {
+    grew = 0;
+    NT_FOREACH_KIND(nt, NK_CallNode, cu) {
+      int an = 0; const int *av = nt_arr(nt, nt_ref(nt, cu, "arguments"), "arguments", &an);
+      for (int i = 0; i < an && ok; i++) {
+        if (!ehg_names(c, &e, av[i])) continue;
+        if (ehg_hand_on(c, &e, cu, i, &grew)) e.mark[av[i]] |= EHG_PLACED;
+        else ok = 0;
+      }
+    }
+    NT_FOREACH_KIND(nt, NK_YieldNode, yn) {
+      int an = 0; const int *av = nt_arr(nt, nt_ref(nt, yn, "arguments"), "arguments", &an);
+      for (int i = 0; i < an && ok; i++) {
+        if (!ehg_names(c, &e, av[i])) continue;
+        if (ehg_yield_on(c, &e, yn, i, &grew)) e.mark[av[i]] |= EHG_PLACED;
+        else ok = 0;
+      }
+    }
+  }
+  for (int id = 0; id < nt->count && ok; id++) {
+    NodeKind k = nt_kind(nt, id);
+    if (comp_is_local_write(k)) {
+      /* the parameter keeps the Hash it was given */
+      if (ehg_param(&e, ehg_local(c, id))) ok = 0;
+      continue;
+    }
+    if (k == NK_IfNode || k == NK_UnlessNode || k == NK_WhileNode || k == NK_UntilNode) {
+      /* tested, not kept */
+      int pr = nt_ref(nt, id, "predicate");
+      if (ehg_names(c, &e, pr)) e.mark[pr] |= EHG_PLACED;
+      continue;
+    }
+    if (k != NK_CallNode && k != NK_IndexOperatorWriteNode && k != NK_IndexOrWriteNode &&
+        k != NK_IndexAndWriteNode) continue;
+    int r = nt_ref(nt, id, "receiver");
+    if (!ehg_names(c, &e, r)) continue;
+    if (ehg_call_ok(c, &e, id)) e.mark[r] |= EHG_PLACED;
+    else ok = 0;
+  }
+  for (int id = 0; id < nt->count && ok; id++)
+    if (ehg_names(c, &e, id) && !(e.mark[id] & EHG_PLACED) && !ehg_dropped(c, &e, id)) ok = 0;
+  free(e.mark);
+  free(e.value_of);
+  return ok;
+}
+
+int box_empty_hash_globals(Compiler *c) {
+  static const NodeKind wk[] = {
+    NK_GlobalVariableWriteNode, NK_GlobalVariableOrWriteNode, NK_GlobalVariableAndWriteNode,
+    NK_GlobalVariableOperatorWriteNode, NK_GlobalVariableTargetNode };
+  const NodeTable *nt = c->nt;
+  int slot[EHG_MAX], ns = 0;
+  for (int g = 0; g < c->ngvars && ns < EHG_MAX; g++) {
+    if (c->gvars[g].type != TY_UNKNOWN) continue;
+    int made = 0, other = 0;
+    for (size_t k = 0; k < sizeof(wk) / sizeof(wk[0]) && !other; k++) {
+      NT_FOREACH_KIND(nt, wk[k], w) {
+        const char *nm = nt_str(nt, w, "name");
+        if (!nm || !sp_streq(comp_resolve_gvar(c, nm + 1), c->gvars[g].name)) continue;
+        int v = nt_ref(nt, w, "value");
+        if (k > 1) other = 1;
+        else if (v >= 0 && nt_kind(nt, v) == NK_NilNode) continue;
+        else if (node_is_empty_hash_producer(c, v)) {
+          /* `Hash.new(d)`: the default is a value the Hash answers */
+          int d = hash_new_default_arg(c, v);
+          if (d >= 0 && !ehg_scalar(infer_type(c, d))) other = 1;
+          made++;
+        }
+        else other = 1;
+      }
+    }
+    if (!other && made) slot[ns++] = g;
+  }
+  if (!ns) return 0;
+  /* a method added to every Hash could store under any name, and `super`
+     with no argument list hands a parameter on unseen */
+  static const NodeKind ck[] = { NK_ClassNode, NK_ModuleNode };
+  static const char *const reopened[] = { "Hash", "Object", "Kernel", "Enumerable", "Comparable", "BasicObject", NULL };
+  for (int k = 0; k < 2; k++) {
+    NT_FOREACH_KIND(nt, ck[k], cn) {
+      int cp = nt_ref(nt, cn, "constant_path");
+      if (cp >= 0 && nt_kind(nt, cp) == NK_ConstantReadNode && ehg_in(nt_str(nt, cp, "name"), reopened)) return 0;
+    }
+  }
+  NT_FOREACH_KIND(nt, NK_ForwardingSuperNode, fs) { (void)fs; return 0; }
+  int changed = 0;
+  for (int i = 0; i < ns; i++) if (!ehg_plain_sight(c, c->gvars[slot[i]].name)) slot[i] = -1;
+  for (int i = 0; i < ns; i++) if (slot[i] >= 0) { c->gvars[slot[i]].type = TY_POLY; changed = 1; }
+  return changed;
+}
+
 /* The type a write of `vt` from `vnode` brings to a slot now typed `slot`. An
    empty `[]` / `{}` has no type of its own yet, and unified it took the
    slot's: `@x = 1; @x = {}` stored the hash pointer in an Integer slot.

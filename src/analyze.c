@@ -30347,7 +30347,7 @@ static void an_phase_infer_fixpoint(Compiler *c) {
         ch = infer_param_types(c);
         g_final_bind_pass = 0;
       }
-      if (!ch && !desugar_mutator_recv_rebind(c)) break;
+      if (!ch && !desugar_mutator_recv_rebind(c) && !box_empty_hash_globals(c)) break;
     }
   }
   g_infer_optimistic = 0;

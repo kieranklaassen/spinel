@@ -243,6 +243,7 @@ int ffi_find_buf(Compiler *c, const char *mod, const char *name);
 int ffi_find_reader(Compiler *c, const char *mod, const char *name);
 int ffi_find_writer(Compiler *c, const char *mod, const char *name);
 int infer_global_const_types(Compiler *c);
+int box_empty_hash_globals(Compiler *c);
 int infer_multiwrite_const_types(Compiler *c);
 int masgn_tuple_rhs(const NodeTable *nt, int value);
 int multi_return_elem_types(Compiler *c, int value, TyKind *out, int max);
