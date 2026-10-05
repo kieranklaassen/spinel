@@ -15303,6 +15303,22 @@ static void emit_user_exc_dispatch(Compiler *c, Buf *b) {
   }
 }
 
+/* The mark line of one file-scope slot `<pfx><a><sep><b>` of type `t`. A
+   String range is a by-value struct carrying two GC strings, so needs_root
+   does not report it and each endpoint is marked instead, as emit_class_scan
+   does for an ivar (#4353). */
+static void emit_static_slot_mark(Buf *mk, TyKind t, const char *pfx, const char *a,
+                                  const char *sep, const char *b) {
+  Buf slot; memset(&slot, 0, sizeof slot);
+  buf_printf(&slot, "%s%s%s%s", pfx, a, sep, b);
+  if (t == TY_STRING) buf_printf(mk, "  sp_mark_string(%s);\n", slot.p);
+  else if (t == TY_POLY) buf_printf(mk, "  sp_mark_rbval(%s);\n", slot.p);
+  else if (t == TY_STR_RANGE)
+    buf_printf(mk, "  sp_mark_string(%s.first);\n  sp_mark_string(%s.last);\n", slot.p, slot.p);
+  else if (needs_root(t)) buf_printf(mk, "  if (%s) sp_gc_mark((void *)%s);\n", slot.p, slot.p);
+  free(slot.p);
+}
+
 char *codegen_program(const NodeTable *nt) {
   char *isa_ext = NULL;  /* sp_poly_is_a's class-value arms, and where they go */
   size_t isa_ext_at = 0;
@@ -15731,25 +15747,19 @@ char *codegen_program(const NodeTable *nt) {
     for (int i = 0; i < c->ngvars; i++) {
       LocalVar *lv = &c->gvars[i];
       if (!is_scalar_ret(lv->type)) continue;
-      if (lv->type == TY_STRING) buf_printf(&mk, "  sp_mark_string(gv_%s);\n", lv->name);
-      else if (lv->type == TY_POLY) buf_printf(&mk, "  sp_mark_rbval(gv_%s);\n", lv->name);
-      else if (needs_root(lv->type)) buf_printf(&mk, "  if (gv_%s) sp_gc_mark((void *)gv_%s);\n", lv->name, lv->name);
+      emit_static_slot_mark(&mk, lv->type, "gv_", lv->name, "", "");
     }
     for (int i = 0; i < c->nconsts; i++) {
       LocalVar *lv = &c->consts[i];
       if (!is_scalar_ret(lv->type)) continue;
-      if (lv->type == TY_STRING) buf_printf(&mk, "  sp_mark_string(cst_%s);\n", lv->name);
-      else if (lv->type == TY_POLY) buf_printf(&mk, "  sp_mark_rbval(cst_%s);\n", lv->name);
-      else if (needs_root(lv->type)) buf_printf(&mk, "  if (cst_%s) sp_gc_mark((void *)cst_%s);\n", lv->name, lv->name);
+      emit_static_slot_mark(&mk, lv->type, "cst_", lv->name, "", "");
     }
     for (int i = 0; i < c->nclasses; i++) {
       ClassInfo *ci = &c->classes[i];
       for (int j = 0; j < ci->nivars; j++) {
         TyKind t = ci->ivar_types[j] == TY_UNKNOWN ? TY_INT : ci->ivar_types[j];
         const char *iv = iv_c(ci->ivars[j] + 1);
-        if (t == TY_STRING) buf_printf(&mk, "  sp_mark_string(civ_%s_%s);\n", ci->name, iv);
-        else if (t == TY_POLY) buf_printf(&mk, "  sp_mark_rbval(civ_%s_%s);\n", ci->name, iv);
-        else if (needs_root(t)) buf_printf(&mk, "  if (civ_%s_%s) sp_gc_mark((void *)civ_%s_%s);\n", ci->name, iv, ci->name, iv);
+        emit_static_slot_mark(&mk, t, "civ_", ci->name, "_", iv);
       }
       for (int j = 0; j < ci->nsg_readers; j++)
         buf_printf(&mk, "  sp_mark_rbval(sg_%s_%s);\n", ci->name, ci->sg_readers[j]);
@@ -15761,9 +15771,7 @@ char *codegen_program(const NodeTable *nt) {
       for (int j = 0; j < ci->ncvars; j++) {
         TyKind t = ci->cvar_types[j] == TY_UNKNOWN ? TY_INT : ci->cvar_types[j];
         const char *cv = ci->cvars[j] + 2;
-        if (t == TY_STRING) buf_printf(&mk, "  sp_mark_string(cvar_%s_%s);\n", ci->name, cv);
-        else if (t == TY_POLY) buf_printf(&mk, "  sp_mark_rbval(cvar_%s_%s);\n", ci->name, cv);
-        else if (needs_root(t)) buf_printf(&mk, "  if (cvar_%s_%s) sp_gc_mark((void *)cvar_%s_%s);\n", ci->name, cv, ci->name, cv);
+        emit_static_slot_mark(&mk, t, "cvar_", ci->name, "_", cv);
       }
     }
     /* $0 and the proc calling convention's side channel are marked by the
