@@ -11657,13 +11657,13 @@ static void mark_empty_array_operands(Compiler *c) {
       if ((ty_is_array(rt) && !seed) || ty_is_hash(rt)) {
         TyKind want = (ty_is_array(rt) && rt != TY_POLY_ARRAY && empty_arr_same_kind_method(nm))
                       ? rt : TY_POLY_ARRAY;
-        /* ... and a row stored into a table of Integer or Float rows is a
-           row of that kind: what reads the table takes each row as a bare
+        /* ... and a row stored into a table of Integer rows is a row of
+           that kind: what reads the table takes each row as a bare
            sp_IntArray *. A table held in a local has its rows stamped by
            narrow_object_arrays; one narrow_int_table_ivars pinned has not. */
-        if ((rt == TY_INT_ARRAY_ARRAY || rt == TY_FLOAT_ARRAY_ARRAY) &&
+        if (rt == TY_INT_ARRAY_ARRAY &&
             (is_push_alias(nm) || (sp_streq(nm, "[]=") && an == 2)))
-          want = rt == TY_INT_ARRAY_ARRAY ? TY_INT_ARRAY : TY_FLOAT_ARRAY;
+          want = TY_INT_ARRAY;
         for (int k = 0; k < an; k++)
           if (is_empty_array_literal(nt, av[k], c->node_cap) && c->arr_want[av[k]] == TY_UNKNOWN)
             c->arr_want[av[k]] = want;
