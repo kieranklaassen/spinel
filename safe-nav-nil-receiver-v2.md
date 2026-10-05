@@ -35,7 +35,7 @@ Generated C against master (`make cident`): eight tests differ, the new one and 
 
 Not here, wrong on master and not made right:
 
-- A `&.` call beside an operand that is a call, makes an object, reads an element or a field, or is a variable its own arguments can reassign still runs its arguments on a nil receiver: `p o&.m(lg(1)), $log`, `[lg(0), o&.m(lg(1))]`, `a.pop.w = o&.m(lg(1))`. So does one in a keyword argument, a `case`, or a block's value.
+- A `&.` call beside an operand that is a call, makes an object, reads an element or a field, or is a variable its own arguments can reassign still runs its arguments on a nil receiver: `p o&.m(lg(1)), $log`, `[lg(0), o&.m(lg(1))]`, `a.pop.w = o&.m(lg(1))`. So does one in an Array or Hash literal, a keyword argument, the subject of a `case`, a loop's condition, or the value of a block.
 - A block given to a yielding method of a nil receiver, `o&.each_n(2) { }`, still runs the method.
 - `i&.clamp(a, b)` on a nil Integer or Float still raises NoMethodError.
 - A local of an unboxed kind first assigned inside a skipped argument reads its zero, not nil: after `o&.m((fresh = 5))`, `p fresh` prints nil in Ruby, 5 on master and 0 here (0.0 for a Float, false for true, 0..0 for a Range).
