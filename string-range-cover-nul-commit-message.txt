@@ -1,0 +1,17 @@
+cover?, === and max of a String Range compare the whole String
+
+sp_srange_cover compared with strcmp, which stops at a NUL byte, so
+every String that shares an end's bytes up to one compared equal to
+that end: ("a\0b".."a\0c") covered "a\0a" and "a\0d". === and a when
+over a Range held in a value ride it. sp_srange_max_v had the same
+compare, and so had its walk for the greatest member of an excluded
+end: ("a\0b".."a\0a").max answered the end where CRuby answers nil.
+
+The three compare as strcmp did, and by the bytes alone past a NUL
+where strcmp finds no difference. A difference strcmp does find stands
+as it is, NUL being the least byte, so the common path is strcmp and a
+branch, and nothing more is kept across the call than before: the
+compare past a NUL is reached by a jump to a function with the same
+arguments, which is why two helpers are not static.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
