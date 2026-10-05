@@ -1,0 +1,12 @@
+String#delete_prefix and #delete_prefix! are byte-exact over a NUL
+
+Both measured the receiver and the prefix with strlen, where
+delete_suffix reads the byte length. A receiver carrying a NUL lost its
+tail whether the prefix matched or not ("xa\0b".delete_prefix("x") was
+"a", and so was "a\0b".delete_prefix("q")), and a prefix carrying one
+matched by its bytes before the NUL ("abc".delete_prefix("a\0zzz") was
+"bc"). On such a receiver delete_prefix! with a prefix that was not
+there answered the receiver where it is nil. Both read the byte length
+now, as the limitations section already says they do.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
