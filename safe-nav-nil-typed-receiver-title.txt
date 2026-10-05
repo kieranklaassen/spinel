@@ -1,0 +1,1 @@
+A `&.` call on a receiver that can only be nil still runs the receiver
