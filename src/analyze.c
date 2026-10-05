@@ -26296,7 +26296,10 @@ static int named_method_first(const NamedMethod *v, int n, const char *name) {
 static void mark_nullable_int_locals(Compiler *c) {
   const NodeTable *nt = c->nt;
   /* A scalar local a read can reach before any write starts as its nil and
-     carries it (du_read_maybe_unset); the rounds below spread the mark */
+     carries it (du_read_maybe_unset); the rounds below spread the mark. A
+     Regexp local is marked too: its slot starts NULL already, and the mark
+     keeps such a read from being taken for the literal a later write holds
+     (comp_regex_local_lit). */
   {
     int *par = NULL;
     /* `x &&= v` and `x += v` read x before they write it: an unassigned x
@@ -26311,10 +26314,10 @@ static void mark_nullable_int_locals(Compiler *c) {
       Scope *rs = nm ? comp_scope_of(c, r) : NULL;
       LocalVar *lv = rs ? scope_local(rs, nm) : NULL;
       if (!lv || lv->is_param || lv->is_block_param || lv->maybe_unset ||
-          (lv->type != TY_INT && lv->type != TY_FLOAT)) continue;
+          (lv->type != TY_INT && lv->type != TY_FLOAT && lv->type != TY_REGEX)) continue;
       if (!par) par = du_parent_map(nt);
       if (!par) break;
-      if (du_read_maybe_unset(nt, par, r, nm)) { lv->maybe_unset = 1; lv->nullable_int = 1; }
+      if (du_read_maybe_unset(nt, par, r, nm)) { lv->maybe_unset = 1; lv->nullable_int = lv->type != TY_REGEX; }
     }
     free(par);
     free(du_memo); du_memo = NULL; du_memo_cap = du_memo_n = 0;

@@ -1357,30 +1357,27 @@ int re_lit_node(Compiler *c, int nid) {
   if (!want_const && !want_local) return -1;
   const char *nm = nt_str(nt, nid, "name");
   if (!nm) return -1;
-  /* the answer is fixed by (name, kind): one scan per name, not per use */
+  /* the answer is fixed by (name, kind), and a local's by its scope too: one
+     scan per name, not per use. Kept by name alone, the first `re` asked
+     answered for the `re` of every other method. */
   static CgMemo memo = { .touches = re_lit_write_node };
-  int got;
-  if (cg_memo_get(c, &memo, nm, want_const, &got)) return got;
-  int found = -1;
-  for (int k = 0; k < nt->count && found < 0; k++) {
+  int got, tag = want_const ? 1 : 2 + (int)(comp_scope_of(c, nid) - c->scopes);
+  if (cg_memo_get(c, &memo, nm, tag, &got)) return got;
+  /* a local is the literal only where it can hold nothing else */
+  int found = want_local ? comp_regex_local_lit(c, nid, 1) : -1;
+  for (int k = 0; want_const && k < nt->count && found < 0; k++) {
     const char *kt = nt_type(nt, k);
     if (!kt) continue;
-    if (want_const ? (!sp_streq(kt, "ConstantWriteNode") && !sp_streq(kt, "ConstantPathWriteNode"))
-                   : !sp_streq(kt, "LocalVariableWriteNode"))
-      continue;
+    if (!sp_streq(kt, "ConstantWriteNode") && !sp_streq(kt, "ConstantPathWriteNode")) continue;
     const char *kn = nt_str(nt, k, "name");
     if (!kn || !sp_streq(kn, nm)) continue;
-    /* a local is its own scope's: a top-level `re = /x/` is not the `re`
-       parameter of a method, which resolved to that literal by name alone and
-       scanned with the wrong pattern (a parameter has no write at all) */
-    if (want_local && comp_scope_of(c, k) != comp_scope_of(c, nid)) continue;
     int v = nt_ref(nt, k, "value");
-    if (want_const && v >= 0 && nt_type(nt, v) && sp_streq(nt_type(nt, v), "CallNode") &&
+    if (v >= 0 && nt_type(nt, v) && sp_streq(nt_type(nt, v), "CallNode") &&
         nt_str(nt, v, "name") && sp_streq(nt_str(nt, v, "name"), "freeze"))
       v = nt_ref(nt, v, "receiver");
     if (v >= 0 && nt_type(nt, v) && sp_streq(nt_type(nt, v), "RegularExpressionNode")) found = v;
   }
-  cg_memo_put(&memo, nm, want_const, found);
+  cg_memo_put(&memo, nm, tag, found);
   return found;
 }
 int re_lit_index(Compiler *c, int nid) {

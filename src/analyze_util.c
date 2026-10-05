@@ -292,28 +292,30 @@ int an_re_has_captures(const char *src) {
    regex-typed local bound to one -- so a type rule here and the emit arm there
    agree on which patterns are statically visible. Unlike re_lit_index this
    only looks, never registers a pattern slot, so it is safe to call during
-   inference. */
+   inference. A local answers only where it can hold nothing but the literal
+   (comp_regex_local_lit); whether a read can run before its write is settled
+   after inference, and such a local is still typed by its one literal. */
 const char *an_regex_lit_src(Compiler *c, int nid) {
   const NodeTable *nt = c->nt;
   if (nid < 0) return NULL;
   const char *ty = nt_type(nt, nid);
   if (!ty) return NULL;
   if (sp_streq(ty, "RegularExpressionNode")) return nt_str(nt, nid, "unescaped");
-  int want_const = sp_streq(ty, "ConstantReadNode") || sp_streq(ty, "ConstantPathNode");
-  int want_local = sp_streq(ty, "LocalVariableReadNode") && infer_type(c, nid) == TY_REGEX;
-  if (!want_const && !want_local) return NULL;
+  if (sp_streq(ty, "LocalVariableReadNode")) {
+    int lit = infer_type(c, nid) == TY_REGEX ? comp_regex_local_lit(c, nid, 1) : -1;
+    return lit >= 0 ? nt_str(nt, lit, "unescaped") : NULL;
+  }
+  if (!sp_streq(ty, "ConstantReadNode") && !sp_streq(ty, "ConstantPathNode")) return NULL;
   const char *nm = nt_str(nt, nid, "name");
   if (!nm) return NULL;
   for (int k = 0; k < nt->count; k++) {
     const char *kt = nt_type(nt, k);
     if (!kt) continue;
-    if (want_const ? (!sp_streq(kt, "ConstantWriteNode") && !sp_streq(kt, "ConstantPathWriteNode"))
-                   : !sp_streq(kt, "LocalVariableWriteNode"))
-      continue;
+    if (!sp_streq(kt, "ConstantWriteNode") && !sp_streq(kt, "ConstantPathWriteNode")) continue;
     const char *kn = nt_str(nt, k, "name");
     if (!kn || !sp_streq(kn, nm)) continue;
     int v = nt_ref(nt, k, "value");
-    if (want_const && v >= 0 && nt_type(nt, v) && sp_streq(nt_type(nt, v), "CallNode") &&
+    if (v >= 0 && nt_type(nt, v) && sp_streq(nt_type(nt, v), "CallNode") &&
         nt_str(nt, v, "name") && sp_streq(nt_str(nt, v, "name"), "freeze"))
       v = nt_ref(nt, v, "receiver");
     if (v >= 0 && nt_type(nt, v) && sp_streq(nt_type(nt, v), "RegularExpressionNode"))

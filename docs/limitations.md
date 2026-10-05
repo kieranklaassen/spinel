@@ -994,7 +994,9 @@ variable, `Regexp.new`) is asked each turn: a block of two or more parameters
 takes the groups, or the whole match and nils, as CRuby does. A block of one
 parameter is typed for the whole match, so where it reads the parameter and
 the pattern turns out to have groups the call raises `NotImplementedError`
-rather than hand it the whole match.
+rather than hand it the whole match. A local written with more than one
+pattern types such a block by the first of them, and raises the same way when
+the pattern that ran yields the other shape.
 
 **Regexp literals share one compiled object.** Each pattern is compiled once
 at startup and every textually-equal literal names that one object, so

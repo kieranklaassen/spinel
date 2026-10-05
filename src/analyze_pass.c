@@ -13677,8 +13677,15 @@ int infer_block_params(Compiler *c) {
            (#3391) */
         const char *src = an_regex_lit_src(c, scan_argv[0]);
         if (src && an_re_has_captures(src)) has_cap = 1;
-        /* a Regexp held in a variable has its groups asked at run time */
-        if (!src && infer_type(c, scan_argv[0]) == TY_REGEX) held = 1;
+        /* a Regexp held in a variable has its groups asked at run time. A
+           block of one parameter is typed all the same: by the first literal
+           written to a local that holds more than one pattern. */
+        if (!src && infer_type(c, scan_argv[0]) == TY_REGEX) {
+          held = 1;
+          int hint = nt_kind(nt, scan_argv[0]) == NK_LocalVariableReadNode
+                       ? comp_regex_local_lit(c, scan_argv[0], 0) : -1;
+          if (hint >= 0 && an_re_has_captures(nt_str(nt, hint, "unescaped"))) has_cap = 1;
+        }
       }
       /* a capturing scan yields each captures ROW (a boxed-element array);
          multiple params destructure it into strings. So do those of a held
