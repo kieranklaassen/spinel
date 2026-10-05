@@ -1,0 +1,26 @@
+early: undefined method 'v' for nil
+case: undefined method 'v' for nil
+one arm: undefined method 'v' for nil
+loop: undefined method 'hello' for nil
+case local: undefined method 'v' for nil
+class method: undefined method 'v' for nil
+instance method: undefined method 'v' for nil
+through: undefined method 'hello' for nil
+setter: undefined method 'v=' for nil
+local: undefined method 'hello' for nil
+local stmt: undefined method 'v=' for nil
+unset: undefined method 'hello' for nil
+true
+"nil"
+true
+true
+nil
+1
+3
+4
+1
+5
+8
+9
+"hello"
+2
