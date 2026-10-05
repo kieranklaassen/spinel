@@ -14971,6 +14971,70 @@ static int strbuf_demand_param_container_stores(Compiler *c, const char *pn, Sco
   }
   return changed;
 }
+/* The same walk in the other direction: a container HANDED to a method takes
+   the stores the method makes into its parameter. `def put(q, v) = q << v`
+   stores v into the caller's Array, and `put(q, +"s"); q[1] << "y"` changes
+   that String through q, so v is among q's stores as much as a String the
+   caller pushed itself. The stored parameter becomes the handle
+   (strbuf_demand_store_leaf) and each caller's argument follows it. Without
+   this the caller's own elements were handles and the method's a plain box
+   beside them, whose append was made on a copy and dropped. A method that
+   hands its parameter on carries it one call further.
+   A method that hands the container to itself at k call sites was walked k^8
+   times, so each (method, parameter) is entered once in a walk, and again
+   only from nearer the top, where the depth left reaches further. */
+static int an_call_target_scopes(Compiler *c, int u, int **v, int *cap);
+static struct { Scope *m; int j, mode, depth; } *sb_handed_seen;
+static int sb_handed_nseen, sb_handed_cap, sb_handed_nest;
+static int sb_handed_enter(Scope *m, int j, int mode, int depth) {
+  for (int k = 0; k < sb_handed_nseen; k++) {
+    if (sb_handed_seen[k].m != m || sb_handed_seen[k].j != j || sb_handed_seen[k].mode != mode) continue;
+    if (sb_handed_seen[k].depth <= depth) return 0;
+    sb_handed_seen[k].depth = depth;
+    return 1;
+  }
+  if (sb_handed_nseen == sb_handed_cap) {
+    int ncap = sb_handed_cap ? sb_handed_cap * 2 : 16;
+    void *ns = realloc(sb_handed_seen, sizeof *sb_handed_seen * (size_t)ncap);
+    if (!ns) return 0;
+    sb_handed_seen = ns; sb_handed_cap = ncap;
+  }
+  sb_handed_seen[sb_handed_nseen].m = m; sb_handed_seen[sb_handed_nseen].j = j;
+  sb_handed_seen[sb_handed_nseen].mode = mode; sb_handed_seen[sb_handed_nseen++].depth = depth;
+  return 1;
+}
+static int strbuf_demand_handed_container_stores(Compiler *c, const char *vn, Scope *vs,
+                                                 int depth, int mode) {
+  const NodeTable *nt = c->nt;
+  int changed = 0;
+  if (depth > 8 || !vs || !vn) return 0;
+  int *tv = NULL, tcap = 0;
+  sb_handed_nest++;
+  for (int u = comp_scall_first(c, (int)(vs - c->scopes)); u >= 0; u = comp_scall_next(c, u)) {
+    if (nt_kind(nt, u) != NK_CallNode || comp_scope_of(c, u) != vs) continue;
+    int ntv = an_call_target_scopes(c, u, &tv, &tcap);
+    for (int t = 0; t < ntv; t++) {
+      int mi = tv[t];
+      if (mi <= 0 || mi >= c->nscopes) continue;
+      Scope *m = &c->scopes[mi];
+      if (m->body < 0) continue;
+      for (int j = 0; j < m->nparams; j++) {
+        int an = arg_layout_param_node(c, m, u, j, NULL);
+        if (an < 0 || nt_kind(nt, an) != NK_LocalVariableReadNode) continue;
+        const char *avn = nt_str(nt, an, "name");
+        if (!avn || !sp_streq(avn, vn) || comp_scope_of(c, an) != vs) continue;
+        LocalVar *plv = m->pnames[j] ? scope_local(m, m->pnames[j]) : NULL;
+        if (!plv || !plv->is_param || plv->is_block_param) continue;
+        if (!sb_handed_enter(m, j, mode, depth)) continue;
+        changed |= strbuf_demand_container_stores_here(c, m->pnames[j], m, depth + 1, mode);
+        changed |= strbuf_demand_handed_container_stores(c, m->pnames[j], m, depth + 1, mode);
+      }
+    }
+  }
+  if (--sb_handed_nest == 0) sb_handed_nseen = 0;
+  free(tv);
+  return changed;
+}
 /* A block parameter names what the iterator hands the block: the receiver
    itself for `tap`/`then`, an element of it for `each`/`map`/..., and the
    memo for each_with_object's second parameter. With `leaf` the parameter
@@ -15033,6 +15097,7 @@ static int strbuf_demand_local_container(Compiler *c, const char *vn, Scope *vs,
   LocalVar *lv = scope_local(vs, vn);
   if (!lv || depth > 8) return 0;
   int changed = strbuf_demand_container_stores_here(c, vn, vs, depth, mode);
+  changed |= strbuf_demand_handed_container_stores(c, vn, vs, depth, mode);
   if (lv->is_block_param) changed |= strbuf_block_param_source_walk(c, vn, vs, depth, mode, 0);
   else if (lv->is_param) changed |= strbuf_demand_param_container_stores(c, vn, vs, depth, mode);
   return changed;
@@ -17405,6 +17470,14 @@ static void an_call_targets_of(Compiler *c, int u, ACallTargets *t) {
   Scope *m2 = &c->scopes[mi];
   if (!m2->name || m2->class_id < 0 || m2->is_cmethod) return;
   act_add(t, mi);
+}
+/* an_call_targets_of for a walk above it: the list is the caller's, kept
+   across calls and freed by it */
+static int an_call_target_scopes(Compiler *c, int u, int **v, int *cap) {
+  ACallTargets tg = { *v, 0, *cap, -1, 0 };
+  an_call_targets_of(c, u, &tg);
+  *v = tg.v; *cap = tg.cap;
+  return tg.n;
 }
 
 /* (scope, parameter) -> "some call site hands that parameter a shared handle".
