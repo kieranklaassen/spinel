@@ -7411,16 +7411,28 @@ else {
    line is flushed at the statement boundary, capturing the value ABOVE that
    in-sequence assignment (`a = {...}; foo(a)` as an operand passed a stale `a`).
    That matches the g_argov skip in emit_args_filled. A param default like `{}`
-   (provided < 0) is a fresh allocation and does want the root -- #1445. */
+   (provided < 0) is a fresh allocation and does want the root -- #1445.
+
+   A bare read into a parameter that is the shared handle is the exception.
+   Unless it reads a handle, the binder wraps the String in a handle of its
+   own (emit_arg_or_default_fill): the argument is then an allocation as
+   fresh as a call's result, held by nothing where it is read. It wants the
+   root and, by the paragraph above, must not be hoisted: the answer is 2,
+   and emit_rooted_conversion roots it where it stands. nil binds the NULL
+   handle. */
 int arg_wants_root(Compiler *c, TyKind pt, int provided) {
   if (pt != TY_POLY && !needs_root(pt)) return 0;
   if (provided < 0) return 1;
   const char *aty = nt_type(c->nt, provided);
-  return !(aty && (sp_streq(aty, "LocalVariableReadNode") ||
-                   sp_streq(aty, "InstanceVariableReadNode") ||
-                   sp_streq(aty, "ConstantReadNode") ||
-                   sp_streq(aty, "SelfNode") || sp_streq(aty, "NilNode") ||
-                   sp_streq(aty, "StringNode")));
+  if (!(aty && (sp_streq(aty, "LocalVariableReadNode") ||
+                sp_streq(aty, "InstanceVariableReadNode") ||
+                sp_streq(aty, "ConstantReadNode") ||
+                sp_streq(aty, "SelfNode") || sp_streq(aty, "NilNode") ||
+                sp_streq(aty, "StringNode"))))
+    return 1;
+  if (pt != TY_STRBUF || sp_streq(aty, "NilNode") || comp_ntype(c, provided) == TY_NIL) return 0;
+  char sref[192];
+  return strbuf_slot_ref(c, provided, sref, sizeof sref) ? 0 : 2;
 }
 
 /* Evaluate the already-rendered argument text `expr` into a g_pre temp of type
@@ -7461,13 +7473,57 @@ int arg_read_converts(Compiler *c, TyKind pt, int provided) {
 /* Root a converted bare read across the call without moving its evaluation:
    the temp is declared NULL and rooted in g_pre, and assigned where the
    argument stands, so the read sees the value at its own position (the stale
-   capture arg_wants_root avoids for a hoisted read cannot happen). */
+   capture arg_wants_root avoids for a hoisted read cannot happen). An
+   argument arg_wants_root answers 2 for is rooted the same way. A prelude
+   of nothing but these lines runs none of its operand's code
+   (prelude_is_held_decls). */
 void emit_rooted_conversion(Compiler *c, TyKind pt, const char *expr, Buf *out) {
   int t = ++g_tmp;
   emit_indent(g_pre, g_indent);
   emit_ctype(c, pt, g_pre);
   buf_printf(g_pre, " _t%d = NULL; SP_GC_ROOT(_t%d);\n", t, t);
   buf_printf(out, "(_t%d = %s)", t, expr);
+}
+
+/* `_t<digits>` then `tail`, and nothing more. */
+static int held_line_tmp(const char *q, size_t n, const char *tail) {
+  size_t k = 2, tl = strlen(tail);
+  if (n < 3 || q[0] != '_' || q[1] != 't' || !isdigit((unsigned char)q[2])) return 0;
+  while (k < n && isdigit((unsigned char)q[k])) k++;
+  return n - k == tl && !strncmp(q + k, tail, tl);
+}
+
+/* Is the prelude `p` nothing but temps declared NULL and rooted, the line
+   emit_rooted_conversion writes (`<type> _tN = NULL; SP_GC_ROOT(_tN);`)?
+   Read off the text, since an emitter that catches an operand's prelude in
+   a buffer of its own passes the lines on as bytes
+   (emit_operands_in_order). Such a prelude assigns no variable and calls
+   nothing, so it may run ahead of anything. */
+int prelude_is_held_decls(const char *p) {
+  static const char mid[] = " = NULL; SP_GC_ROOT(";
+  int lines = 0;
+  while (p && *p) {
+    const char *nl = strchr(p, '\n');
+    size_t n = nl ? (size_t)(nl - p) : strlen(p);
+    const char *q = p;
+    p = nl ? nl + 1 : p + n;
+    while (n && *q == ' ') { q++; n--; }
+    if (!n) continue;
+    const char *eq = strstr(q, mid);
+    if (!eq || eq >= q + n) return 0;
+    /* `<type> _tN`: the type is names, spaces and stars */
+    size_t e = (size_t)(eq - q), k = e;
+    while (k && q[k - 1] != ' ') k--;
+    if (k < 2 || !held_line_tmp(q + k, e - k, "")) return 0;
+    for (size_t i = 0; i < k; i++)
+      if (!(isalnum((unsigned char)q[i]) || q[i] == '_' || q[i] == ' ' || q[i] == '*')) return 0;
+    /* `_tN);`, the same temp */
+    const char *r = eq + sizeof mid - 1;
+    size_t rn = n - (size_t)(r - q);
+    if (rn != e - k + 2 || strncmp(r, q + k, e - k) || strncmp(r + rn - 2, ");", 2)) return 0;
+    lines++;
+  }
+  return lines > 0;
 }
 
 /* Like emit_arg_or_default, but hoists a pointer-backed / poly argument into a
@@ -7487,8 +7543,9 @@ static void emit_arg_rooted(Compiler *c, Scope *m, int idx, int provided, Buf *o
   /* a byref out-param arg is a slot address, not a heap value: it hoists its
      own rooted temp when one is needed (see emit_arg_or_default) */
   if (p && p->byref_out) { emit_arg_or_default(c, m, idx, provided, out); return; }
-  if (!arg_wants_root(c, pt, provided)) {
-    if (!arg_read_converts(c, pt, provided)) { emit_arg_or_default(c, m, idx, provided, out); return; }
+  int wr = arg_wants_root(c, pt, provided);
+  if (wr != 1) {
+    if (!wr && !arg_read_converts(c, pt, provided)) { emit_arg_or_default(c, m, idx, provided, out); return; }
     Buf cb; memset(&cb, 0, sizeof cb);
     emit_arg_or_default(c, m, idx, provided, &cb);
     emit_rooted_conversion(c, pt, cb.p ? cb.p : "NULL", out);
@@ -9932,6 +9989,10 @@ static void emit_elem_param(Compiler *c, Scope *m, int i, int off, int tmp, TyKi
     return;
   }
   TyKind set = ty_array_elem(at);
+  /* a String element into a shared-handle parameter: a handle of its own, as
+     any value that is not a caller's variable gets, and held as a bare read's
+     is (arg_wants_root answering 2), with the default it may fall back to */
+  int handle = repr_of_slot(c, sp).handle && set == TY_STRING;
   Buf eb; memset(&eb, 0, sizeof eb);
   if (sp && sp->type == TY_POLY && set != TY_POLY && set != TY_UNKNOWN) {
     /* a scalar splat element into a poly-widened param: box it */
@@ -9939,9 +10000,7 @@ static void emit_elem_param(Compiler *c, Scope *m, int i, int off, int tmp, TyKi
     emit_array_elem_at(at, tmp, off, &raw);
     emit_boxed_text(c, set, raw.p ? raw.p : "0", &eb); free(raw.p);
   }
-  else if (repr_of_slot(c, sp).handle && set == TY_STRING) {
-    /* a String element into a shared-handle parameter: a handle of its own,
-       as any value that is not a caller's variable gets */
+  else if (handle) {
     Buf raw; memset(&raw, 0, sizeof raw);
     emit_array_elem_at(at, tmp, off, &raw);
     buf_printf(&eb, "sp_String_new_shared(%s)", raw.p ? raw.p : "NULL"); free(raw.p);
@@ -9970,10 +10029,12 @@ static void emit_elem_param(Compiler *c, Scope *m, int i, int off, int tmp, TyKi
     Buf db; memset(&db, 0, sizeof db);
     emit_arg_or_default(c, m, i, -1, &db);
     TyKind pt = sp ? sp->type : TY_INT;
-    buf_printf(out, "(%d < (_t%d ? _t%d->len : 0) ? %s : %s)", off, tmp, tmp,
+    Buf cb; memset(&cb, 0, sizeof cb);
+    buf_printf(&cb, "(%d < (_t%d ? _t%d->len : 0) ? %s : %s)", off, tmp, tmp,
                eb.p ? eb.p : "", db.p ? db.p : default_value_from_compiler(c, pt));
-    free(db.p);
+    free(db.p); free(eb.p); eb = cb;
   }
+  if (handle && eb.p) emit_rooted_conversion(c, TY_STRBUF, eb.p, out);
   else buf_puts(out, eb.p ? eb.p : "");
   free(eb.p);
 }
