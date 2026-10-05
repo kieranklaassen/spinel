@@ -179,6 +179,36 @@ void emit_str_append_arg(Compiler *c, int arg, const char *rtext, Buf *b) {
   emit_str_expr(c, arg, b);
 }
 
+/* Are the arguments of a concat or prepend all String literals and plain
+   reads of a String? Those make nothing and run nothing, so nested in one C
+   expression they lose nothing and need no order. */
+int str_args_plain(Compiler *c, const int *argv, int argc) {
+  for (int j = 0; j < argc; j++) {
+    const char *ty = nt_type(c->nt, argv[j]);
+    if (ty && sp_streq(ty, "StringNode")) continue;
+    if (comp_ntype(c, argv[j]) != TY_STRING || !subtree_is_pure_read(c, argv[j])) return 0;
+  }
+  return 1;
+}
+
+/* Any other arguments are joined one statement at a time into the rooted
+   temp `acc`. Nested in one C expression, the text one argument made was
+   held by nothing while the next was built, and C does not say which of the
+   two is built first. `seed` is what the first argument is appended to (the
+   receiver's C string, for concat, where an Integer is a codepoint) or
+   NULL. */
+void emit_str_args_joined(Compiler *c, const int *argv, int argc, int acc, const char *seed, Buf *b) {
+  buf_printf(b, "const char *_t%d = ", acc);
+  for (int j = 0; j < argc; j++) {
+    if (j) buf_printf(b, " _t%d = sp_str_concat(_t%d, ", acc, acc);
+    else if (seed) buf_printf(b, "sp_str_concat(%s, ", seed);
+    if (seed) emit_str_append_arg(c, argv[j], seed, b);
+    else emit_str_expr(c, argv[j], b);
+    buf_puts(b, (j || seed) ? ");" : ";");
+    if (!j) buf_printf(b, " SP_GC_ROOT_STR(_t%d);", acc);
+  }
+}
+
 /* A Float index is cut to the Integer it converts to, as CRuby's does (an
    error then names that offset); NaN and a Float outside the C int range,
    where CRuby raises RangeError, stay as they are. `tk` is the key temp, `tk0`
@@ -3479,21 +3509,28 @@ static int emit_str_mutator_call(Compiler *c, int id, Buf *b, const NodeTable *n
          side effect that must not run twice. */
       /* rooted across the arguments, which may allocate */
       buf_printf(b, "({ const char *_t%d = ", trc); emit_recv_rooted(c, recv, trc, "SP_GC_ROOT_STR", b);
-      buf_printf(b, "const char *_t%d = ", tn2);
-      if (sp_streq(name, "prepend")) {
-        /* args first (in order), then the receiver */
-        for (int j = 0; j < argc; j++) buf_puts(b, "sp_str_concat(");
-        emit_str_expr(c, argv[0], b);
-        for (int j = 1; j < argc; j++) { buf_puts(b, ", "); emit_str_expr(c, argv[j], b); buf_puts(b, ")"); }
-        buf_printf(b, ", _t%d)", trc);
+      char rt[24]; snprintf(rt, sizeof rt, "_t%d", trc);
+      int pre = sp_streq(name, "prepend");
+      if (argc > 1 && !str_args_plain(c, argv, argc)) {
+        emit_str_args_joined(c, argv, argc, tn2, pre ? NULL : rt, b);
+        if (pre) buf_printf(b, " _t%d = sp_str_concat(_t%d, _t%d);", tn2, tn2, trc);
+        buf_puts(b, " ");
       }
       else {
+        buf_printf(b, "const char *_t%d = ", tn2);
         for (int j = 0; j < argc; j++) buf_puts(b, "sp_str_concat(");
-        buf_printf(b, "_t%d", trc);
-        { char rt[24]; snprintf(rt, sizeof rt, "_t%d", trc);
-          for (int j = 0; j < argc; j++) { buf_puts(b, ", "); emit_str_append_arg(c, argv[j], rt, b); buf_puts(b, ")"); } }
+        if (pre) {
+          /* args first (in order), then the receiver */
+          emit_str_expr(c, argv[0], b);
+          for (int j = 1; j < argc; j++) { buf_puts(b, ", "); emit_str_expr(c, argv[j], b); buf_puts(b, ")"); }
+          buf_printf(b, ", _t%d)", trc);
+        }
+        else {
+          buf_printf(b, "_t%d", trc);
+          for (int j = 0; j < argc; j++) { buf_puts(b, ", "); emit_str_append_arg(c, argv[j], rt, b); buf_puts(b, ")"); }
+        }
+        buf_puts(b, "; ");
       }
-      buf_puts(b, "; ");
       /* Ruby evaluates the argument(s) before invoking the mutator, so the
          frozen check must fire AFTER the concatenation builds (which is what
          evaluates the args). sp_str_concat allocates a fresh string and never

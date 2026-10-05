@@ -1081,11 +1081,19 @@ int emit_string_handle_append(Compiler *c, int id, Buf *b, const char *name, int
         buf_puts(b, ";");
         if (!is_append_concat(name)) {
           int tp3 = ++g_tmp;
-          buf_printf(b, " const char *_t%d = ", tp3);
-          for (int j = 0; j < argc; j++) buf_puts(b, "sp_str_concat(");
-          emit_str_expr(c, argv[0], b);
-          for (int j = 1; j < argc; j++) { buf_puts(b, ", "); emit_str_expr(c, argv[j], b); buf_puts(b, ")"); }
-          buf_printf(b, ", sp_String_cstr(_t%d)); sp_String_set_bin(_t%d, _t%d);", tb2, tb2, tp3);
+          if (argc > 1 && !str_args_plain(c, argv, argc)) {
+            buf_puts(b, " ");
+            emit_str_args_joined(c, argv, argc, tp3, NULL, b);
+            buf_printf(b, " _t%d = sp_str_concat(_t%d, sp_String_cstr(_t%d));", tp3, tp3, tb2);
+          }
+          else {
+            buf_printf(b, " const char *_t%d = ", tp3);
+            for (int j = 0; j < argc; j++) buf_puts(b, "sp_str_concat(");
+            emit_str_expr(c, argv[0], b);
+            for (int j = 1; j < argc; j++) { buf_puts(b, ", "); emit_str_expr(c, argv[j], b); buf_puts(b, ")"); }
+            buf_printf(b, ", sp_String_cstr(_t%d));", tb2);
+          }
+          buf_printf(b, " sp_String_set_bin(_t%d, _t%d);", tb2, tp3);
         }
         else {
           for (int j = 0; j < argc; j++) {
