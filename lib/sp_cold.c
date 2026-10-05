@@ -3559,6 +3559,22 @@ sp_StrArray *sp_srange_to_a(sp_StrRange r) {
   if (!r.last) sp_raise_cls("RangeError", "cannot convert endless range to an array");
   return sp_StrArray_from_string_range(r.first, r.last, r.excl);
 }
+/* #first(n), #take(n) and #min(n): the first n members, with the walk left
+   there as CRuby leaves its each, so the first three of ("a".."zzzzzzzz") are
+   three Strings and not the range built whole. */
+sp_StrArray *sp_srange_first_n(sp_StrRange r, sp_int n) {
+  if (!r.first) sp_raise_cls("TypeError", "can't iterate from NilClass");
+  if (!r.last) sp_raise_cls("RangeError", "cannot convert endless range to an array");
+  SP_GC_ROOT_STR(r.first); SP_GC_ROOT_STR(r.last);
+  sp_StrArray *a = sp_StrArray_new(); SP_GC_ROOT(a);
+  sp_StrWalk w = {0};
+  SP_GC_ROOT_STR(w.cur); SP_GC_ROOT_STR(w.end); SP_GC_ROOT_STR(w.stop);
+  for (const char *m = n > 0 ? sp_str_walk_first(&w, r.first, r.last, r.excl) : NULL; m; m = sp_str_walk_next(&w)) {
+    sp_StrArray_push(a, m);
+    if (sp_StrArray_length(a) >= n) break;
+  }
+  return a;
+}
 sp_bool sp_srange_eq(sp_StrRange a, sp_StrRange b) {
   return a.excl == b.excl && sp_str_eq(a.first, b.first) && sp_str_eq(a.last, b.last);
 }

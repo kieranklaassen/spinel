@@ -6224,6 +6224,11 @@ static int desugar_str_range_methods(Compiler *c) {
     }
     /* first/last are the endpoints bare, a prefix/suffix ARRAY with a count */
     if (!native && an == 0 && (is_endpoint_query(nm))) native = 1;
+    /* first(n) and take(n) leave the walk at the nth member: their own arm,
+       where the element array would hold the whole range first */
+    if (!native && an == 1 && nt_ref(nt, id, "block") < 0 &&
+        is_first_or_take(nm) &&
+        infer_type(c, nt_arr(nt, argn, "arguments", &an)[0]) == TY_INT) native = 1;
     if (native) continue;
     int toa = nt_new_node(nt, "CallNode");
     if (toa < 0) continue;
