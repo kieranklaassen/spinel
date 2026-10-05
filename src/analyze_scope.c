@@ -17,6 +17,8 @@ void sp_ivwatch(const char *name, const char *where, TyKind old, TyKind nw) {
           (int)nw, ty_name(nw < 1000 ? nw : TY_POLY));
 }
 
+static int bc_builtin_module(const char *n);
+
 /* `...` forwards the caller's args verbatim, so rather than a rest array we
    synthesize concrete positional params whose count is the widest positional
    arg count across this method's call sites (the compiler already knows the
@@ -1101,10 +1103,37 @@ void walk_scope(Compiler *c, int id, int scope_idx, int class_id) {
                         "collides with the builtin class of that name\n", file, ln, cname);
       exit(1);
     }
+    /* The reverse: `class Comparable` reopens a builtin MODULE as a class,
+       which CRuby refuses with a TypeError. A nested or path-qualified name
+       is a fresh constant in CRuby, but the generated C name is the bare
+       tail and collides, so refuse that as unsupported. */
+    int cls_toplevel = class_id < 0 && cp >= 0 && nt_type(c->nt, cp) &&
+                       sp_streq(nt_type(c->nt, cp), "ConstantReadNode");
+    /* An earlier pass mangles a nested name to `Outer__Inner`: test the leaf. */
+    const char *cls_leaf = cname;
+    if (cname && !cls_toplevel) {
+      for (const char *q = strstr(cname, "__"); q; q = strstr(q + 1, "__")) cls_leaf = q + 2;
+    }
+    if (sp_streq(ty, "ClassNode") && cname && bc_builtin_module(cls_leaf)) {
+      int ln = (int)nt_int(c->nt, id, "node_line", 0);
+      const char *file = c->nt->source_file ? c->nt->source_file : "source.rb";
+      if (cls_toplevel)
+        fprintf(stderr, "spinel: %s:%d: %s is not a class (TypeError)\n", file, ln, cname);
+      else
+        fprintf(stderr, "spinel: %s:%d: unsupported class name '%s': "
+                        "collides with the builtin module of that name\n", file, ln, cls_leaf);
+      exit(1);
+    }
     /* `class CONST` where CONST aliases an existing class reopens that class.
        Rewrite the AST name so every later pass (registration, includes) agrees. */
     if (cname && cp >= 0 && comp_class_index(c, cname) < 0) {
       const char *real = resolve_class_alias(c, cname);
+      if (real && sp_streq(ty, "ClassNode") && cls_toplevel && bc_builtin_module(real)) {
+        int ln = (int)nt_int(c->nt, id, "node_line", 0);
+        const char *file = c->nt->source_file ? c->nt->source_file : "source.rb";
+        fprintf(stderr, "spinel: %s:%d: %s is not a class (TypeError)\n", file, ln, cname);
+        exit(1);
+      }
       if (real) {
         char buf[256]; snprintf(buf, sizeof buf, "%s", real);  /* copy: set frees cname */
         nt_set_str((NodeTable *)c->nt, cp, "name", buf);
@@ -4721,6 +4750,68 @@ static void check_builtin_subclasses(Compiler *c) {
   }
 }
 
+
+/* A class whose superclass is an anonymous class (`class A < Class.new(B)`,
+   `class S < Struct.new(:a)`, `< Data.define(:a)`), or a descendant of one:
+   no class object stands for the anonymous class, so `superclass` and
+   `ancestors` would name the wrong class (Base, Struct, Object) where CRuby
+   answers the anonymous one. */
+static int anon_super_class(Compiler *c, int k) {
+  for (int x = k, g = 0; x >= 0 && x < c->nclasses && g < 256; x = c->classes[x].parent, g++) {
+    int dn = c->classes[x].def_node;
+    if (dn < 0 || dn >= c->nt->count || nt_kind(c->nt, dn) != NK_ClassNode) continue;
+    if (nt_int(c->nt, dn, "anon_super", 0)) return 1;
+    int sc = nt_ref(c->nt, dn, "superclass");
+    if (sc >= 0 && nt_kind(c->nt, sc) == NK_CallNode) return 1;
+  }
+  return 0;
+}
+static int is_anon_reflect_name(const char *n) {
+  return n && (sp_streq(n, "superclass") || sp_streq(n, "ancestors"));
+}
+/* Refuse `superclass` / `ancestors` that can reach such a class: on a
+   constant naming one, on self inside one, and on any receiver the program
+   does not name statically while one exists. */
+static void refuse_anon_superclass_reflection(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  int any = 0;
+  for (int k = 0; k < c->nclasses && !any; k++) any = anon_super_class(c, k);
+  if (!any) return;
+  NT_FOREACH_KIND(nt, NK_CallNode, id) {
+    const char *nm = nt_str(nt, id, "name");
+    int recv = nt_ref(nt, id, "receiver");
+    const char *what = NULL;
+    if (is_anon_reflect_name(nm)) what = nm;
+    else if (nm && (sp_streq(nm, "send") || sp_streq(nm, "public_send") || sp_streq(nm, "__send__") ||
+                    sp_streq(nm, "method"))) {
+      int a = nt_ref(nt, id, "arguments"), ac = 0;
+      const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+      if (ac >= 1 && nt_kind(nt, av[0]) == NK_SymbolNode && is_anon_reflect_name(nt_str(nt, av[0], "value")))
+        what = nt_str(nt, av[0], "value");
+    }
+    if (!what) continue;
+    int k = -1, known = 0;
+    if (recv >= 0 && (nt_kind(nt, recv) == NK_ConstantReadNode || nt_kind(nt, recv) == NK_ConstantPathNode)) {
+      k = comp_class_index(c, nt_str(nt, recv, "name"));
+      known = 1;   /* a module or a builtin class: not one of these */
+    }
+    else if (recv < 0 || nt_kind(nt, recv) == NK_SelfNode) {
+      Scope *s = comp_scope_of(c, id);
+      if (s && s->class_id >= 0 && s->is_cmethod) { k = s->class_id; known = 1; }
+      else if (c->node_cbody[id] >= 0 && (!s || !s->name)) { k = c->node_cbody[id]; known = 1; }
+    }
+    if (known && (k < 0 || !anon_super_class(c, k))) continue;
+    int ln = (int)nt_int(nt, id, "node_line", 0);
+    const char *file = nt_file_path(nt, (int)nt_int(nt, id, "node_file", 0));
+    if (!file || !*file) file = nt->source_file;
+    if (!file || !*file) file = "source.rb";
+    fprintf(stderr, "spinel: %s:%d: unsupported `%s` that can reach a class whose superclass is an "
+                    "anonymous class (Class.new, Struct.new or Data.define as the superclass): "
+                    "spinel has no class object for the anonymous class\n", file, ln, what);
+    exit(1);
+  }
+}
+
 void resolve_parents(Compiler *c) {
   check_class_redeclarations(c);
   check_blk_param_writes(c);
@@ -4772,6 +4863,7 @@ void resolve_parents(Compiler *c) {
     }
   }
   resolve_inherited_aliases(c);
+  refuse_anon_superclass_reflection(c);
 }
 
 /* An alias of a method this class only INHERITS names the ancestor's body: a

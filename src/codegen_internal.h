@@ -13,6 +13,7 @@
 #include "codegen.h"
 #include "compiler.h"
 #include "analyze.h"
+#include "decide.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -143,6 +144,7 @@ int sb_reader_shim_open(Compiler *c, int recv, char *sref, size_t cap, SbReaderS
 void sb_reader_shim_close(Compiler *c, int recv, const SbReaderSave *sv);
 int sb_shadowed_reader(int node);
 int str_mut_var_recv(Compiler *c, int recv);
+void emit_str_frozen_check(Compiler *c, int recv, Buf *b);
 int strbuf_boxed_elem_read(Compiler *c, int v);
 int emit_strbuf_read_ref(Compiler *c, int recv, Buf *b);
 int strbuf_object_ref(Compiler *c, int recv, Buf *b);
@@ -186,7 +188,11 @@ void argov_reserve(void);
 extern int  g_setter_stmt_id;
 extern int  g_sn_skip;   /* safe-nav re-entry marker (see codegen_util.c) */
 extern int  g_cls_tag_skip;   /* poly-dispatch builtin-arm re-entry marker */
+/* Ask subtree_may_allocate before leaving something unrooted across `id`:
+   its "no" is a keyed decision (src/decide.c). subtree_allocates is the
+   bare fact, for a caller whose answer licenses no such omission. */
 int subtree_may_allocate(const NodeTable *nt, int id);
+int subtree_allocates(const NodeTable *nt, int id);
 int subtree_has_side_effect(Compiler *c, int id);
 int loop_has_valued_break(Compiler *c, int root);
 /* Can evaluating the subtree store into an ivar, class variable or global? A
@@ -261,6 +267,7 @@ extern int g_ie_res_poly;
 extern const char *g_self;
 extern const char *g_self_deref;
 extern const char *g_inline_recv_expr;
+void emit_into_pre_line(Compiler *c, void (*fn)(Compiler *, int, Buf *), int node);
 extern int g_inline_recv_class;
 /* When emitting class/module body statements, the class index (-1 outside). */
 extern int g_class_body_id;
@@ -1107,6 +1114,8 @@ int unwrap_parens(Compiler *c, int id);
 /* Collect a String `<<` chain's args outermost-first (max 64); *base gets
    the node the chain bottoms out at. Returns the link count. */
 int str_append_chain(Compiler *c, int recv, int *chain, int *base);
+int emit_string_handle_append(Compiler *c, int id, Buf *b, const char *name, int recv, int argc, const int *argv);
+int emit_str_append_chain_handle(Compiler *c, int id, Buf *b);
 int kwh_only_spreads(const NodeTable *nt, int kwh);
 const char *int_arith_fn(const char *op);
 const char *bigint_arith_fn(const char *op);
@@ -1451,8 +1460,9 @@ int view_mark(void);
    pushed and popped like a view (view_push_arm / view_pop) and put back by
    view_unwind: the node whose dispatch declines its own re-entry (the
    method dispatch's g_pd_skip, the block dispatch's g_prbd_skip), and
-   g_poly_builtin_arm, under which no user class owns a name. */
-typedef struct { int pd_skip, prbd_skip, builtin_arm; } ArmCtx;
+   g_poly_builtin_arm, under which no user class owns a name. send_split
+   prevents a boxed send's class arm from splitting the same call again. */
+typedef struct { int pd_skip, prbd_skip, builtin_arm, send_split; } ArmCtx;
 extern ArmCtx g_arm;
 #define g_pd_skip (g_arm.pd_skip)
 #define g_prbd_skip (g_arm.prbd_skip)
@@ -1475,6 +1485,7 @@ int view_push_repr(Compiler *c, int id, int flag, int v);
    that reads the flags or the type keys on it */
 unsigned view_epoch(void);
 void view_unwind(int mark);   /* back to a view_mark(): views, arm contexts and bindings */
+int emit_op_ivar_reflection(Compiler *c, const BopCtx *x, Buf *b);
 /* The concurrency handles' row emitters (codegen_call_concurrency.c) */
 int emit_op_thread_set_report(Compiler *c, const BopCtx *x, Buf *b);
 int emit_op_thread_raise(Compiler *c, const BopCtx *x, Buf *b);
@@ -1539,6 +1550,11 @@ int emit_op_array_compact_bang(Compiler *c, const BopCtx *x, Buf *b);
 int emit_op_array_flatten(Compiler *c, const BopCtx *x, Buf *b);
 int emit_op_array_push(Compiler *c, const BopCtx *x, Buf *b);
 int emit_op_array_insert_n(Compiler *c, const BopCtx *x, Buf *b);
+int emit_scalar_array_transpose(Compiler *c, int id, int recv, TyKind rt,
+                                const char *name, int argc, Buf *b);
+int emit_op_float_rationalize(Compiler *c, const BopCtx *x, Buf *b);
+int emit_op_string_scan_checked(Compiler *c, const BopCtx *x, Buf *b);
+int emit_op_string_slice(Compiler *c, const BopCtx *x, Buf *b);
 int emit_op_array_transpose(Compiler *c, const BopCtx *x, Buf *b);
 int emit_op_array_assoc(Compiler *c, const BopCtx *x, Buf *b);
 int emit_op_array_combination(Compiler *c, const BopCtx *x, Buf *b);
@@ -1608,6 +1624,8 @@ int diag_user_defines(Compiler *c, const char *name);
 int recv_user_defines(Compiler *c, const char *name);
 int emit_object_ivar_call(Compiler *c, int id, const char *name, int recv, TyKind rt,
                           int cid, int argc, const int *argv, Buf *b);
+const char *case_map_suffix(Compiler *c, int argc, const int *argv);
+int emit_op_poly_case_options(Compiler *c, const BopCtx *x, Buf *b);
 int user_defines_or_reads(Compiler *c, const char *name);
 int native_class_defines(Compiler *c, const char *name);
 const char *array_index_bad_class(Compiler *c, int id);

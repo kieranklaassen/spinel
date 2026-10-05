@@ -562,7 +562,7 @@ int  g_cls_tag_skip = -1;
    interpolation, or a read of the last match qualifies -- `$~` builds its
    MatchData, $` and $' their String; $& and $+ are reads, counted with
    them. */
-int subtree_may_allocate(const NodeTable *nt, int id) {
+int subtree_allocates(const NodeTable *nt, int id) {
   if (id < 0) return 0;
   const char *ty = nt_type(nt, id);
   if (!ty) return 0;
@@ -591,15 +591,24 @@ int subtree_may_allocate(const NodeTable *nt, int id) {
   }
   int nr = nt_num_refs(nt, id);
   for (int i = 0; i < nr; i++)
-    if (subtree_may_allocate(nt, nt_ref_at(nt, id, i))) return 1;
+    if (subtree_allocates(nt, nt_ref_at(nt, id, i))) return 1;
   int na = nt_num_arrs(nt, id);
   for (int i = 0; i < na; i++) {
     int n = 0;
     const int *ids = nt_arr_at(nt, id, i, &n);
     for (int j = 0; j < n; j++)
-      if (subtree_may_allocate(nt, ids[j])) return 1;
+      if (subtree_allocates(nt, ids[j])) return 1;
   }
   return 0;
+}
+/* The same question as the callers ask it. "Cannot allocate" is what lets a
+   caller leave a sibling temp unrooted, so that answer is a decision
+   (src/decide.c), keyed at the operand: a refused one is treated as
+   allocating, which every caller answers with the root or the ordered temp
+   it gives an operand that does allocate. */
+int subtree_may_allocate(const NodeTable *nt, int id) {
+  if (subtree_allocates(nt, id)) return 1;
+  return id >= 0 && !decide_node(nt, id, "no-alloc", NULL);
 }
 /* subtree_may_allocate, plus the one allocation the node table cannot show:
    an ordinary read of a shared-mutable String slot (a TY_STRBUF local or
@@ -4574,4 +4583,34 @@ void kw_key_inspect(const char *kn, int is_sym, char *out, size_t n) {
   }
   if (o < n) snprintf(out + o, n - o, "%s", quote ? "\"" : "");
   else out[n - 1] = 0;
+}
+
+/* An emitter asked to write into g_pre itself, after a partial line
+   (`buf_printf(g_pre, "sp_int _t3 = "); emit_int_expr(c, v, g_pre)`): what
+   the expression hoists would land in the middle of that line -- an
+   argument through a method with a default (`with_index(w(1))`), a value
+   stored through a setter -- and the C did not build. The value is emitted
+   into a side buffer, the hoisted statements are spliced in where the
+   line starts, and the value is appended to the line. */
+void emit_into_pre_line(Compiler *c, void (*fn)(Compiler *, int, Buf *), int node) {
+  Buf *pre = g_pre;
+  size_t ls = pre->len;
+  while (ls > 0 && pre->p[ls - 1] != '\n') ls--;
+  Buf val; memset(&val, 0, sizeof val);
+  Buf hoist; memset(&hoist, 0, sizeof hoist);
+  g_pre = &hoist;
+  fn(c, node, &val);
+  g_pre = pre;
+  if (hoist.len > 0) {
+    size_t tail = pre->len - ls;
+    char *saved = malloc(tail + 1);
+    memcpy(saved, pre->p + ls, tail); saved[tail] = 0;
+    pre->len = ls; pre->p[ls] = 0;
+    buf_puts(pre, hoist.p);
+    if (pre->len > 0 && pre->p[pre->len - 1] != '\n') buf_puts(pre, "\n");
+    buf_putn(pre, saved, tail);
+    free(saved);
+  }
+  if (val.p) buf_puts(pre, val.p);
+  free(val.p); free(hoist.p);
 }
