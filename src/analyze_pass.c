@@ -12936,6 +12936,40 @@ static int infer_zip_block_params(Compiler *c, int id, int block, const char *p0
   return changed;
 }
 
+/* Is node `n` a read of the local `nm` of scope `s`? */
+static int local_read_of(Compiler *c, Scope *s, const char *nm, int n) {
+  const char *rn = nt_kind(c->nt, n) == NK_LocalVariableReadNode ? nt_str(c->nt, n, "name") : NULL;
+  return rn && sp_streq(rn, nm) && comp_scope_of(c, n) == s;
+}
+
+/* Is the parameter `nm` of the block `blk` used up wherever it is read: as
+   the receiver of a call without a block, in an interpolation, or as the
+   node `value`? It is not where something assigns it, a proc captures it,
+   or the block numbers its parameters. The slot is the scope's, so every
+   read in the scope counts. */
+int block_param_used_up(Compiler *c, int blk, const char *nm, int value) {
+  const NodeTable *nt = c->nt;
+  Scope *s = comp_scope_of(c, blk);
+  if (nt_kind(nt, nt_ref(nt, blk, "parameters")) != NK_BlockParametersNode ||
+      subtree_proc_captures_name(c, blk, nm, 0, 0)) return 0;
+  int reads = 0, used = value >= 0 && local_read_of(c, s, nm, value);
+  for (int n = 0; n < nt->count; n++) {
+    NodeKind k = nt_kind(nt, n);
+    if (local_read_of(c, s, nm, n)) reads++;
+    else if (k == NK_CallNode)
+      used += nt_ref(nt, n, "block") < 0 && local_read_of(c, s, nm, nt_ref(nt, n, "receiver"));
+    else if (k == NK_EmbeddedStatementsNode) {
+      int en = 0; const int *eb = nt_arr(nt, nt_ref(nt, n, "statements"), "body", &en);
+      used += en == 1 && local_read_of(c, s, nm, eb[0]);
+    }
+    else if (comp_is_local_write(k) && comp_scope_of(c, n) == s) {
+      const char *wn = nt_str(nt, n, "name");
+      if (wn && sp_streq(wn, nm)) return 0;
+    }
+  }
+  return reads == used;
+}
+
 /* A fetch key of type `kt` whose block's parameter may be boxed: the type
    is known and can hold neither a String nor a Symbol. A nil counts only
    as the literal; a local that is nil so far may yet be typed a String. */

@@ -698,18 +698,61 @@ static int emit_dig_splat(Compiler *c, int recv, int arg, Buf *b) {
   return 1;
 }
 
+/* Is the slot `flv` of `|k|`, the one parameter of the block `blk` given to
+   the fetch `id`, typed as the key itself, so that a table holding its keys
+   boxed can unbox the key into it? Only where this list shows it: the key
+   is a Symbol or a String literal (frozen, so the unboxed value is no second
+   name for a String someone changes in place) and the slot has that type
+   once inference has settled, and is no shared handle (--share-strings);
+   nothing assigns k; every read of k is a call's receiver, an interpolation
+   or the block's value; the block answers a plain value, so that nothing
+   built from the typed k is hidden behind fetch's boxed answer; and no
+   fetch block of the program is left with a slot of another type than its
+   key, whose failure a program that now builds would reach. */
+static int fetch_blk_param_is_key(Compiler *c, int id, int blk, LocalVar *flv, const char *fp0) {
+  const NodeTable *nt = c->nt;
+  int ac = 0; const int *av = call_args(nt, id, &ac);
+  if (ac < 1 || flv->type != comp_ntype(c, av[0]) || repr_of_slot(c, flv).kind == RK_STRBUF ||
+      !(flv->type == TY_SYMBOL || (flv->type == TY_STRING && nt_kind(nt, av[0]) == NK_StringNode))) return 0;
+  int pn = nt_ref(nt, nt_ref(nt, blk, "parameters"), "parameters");
+  int rn = 0, on = 0, sn = 0, kn = 0;
+  nt_arr(nt, pn, "requireds", &rn); nt_arr(nt, pn, "optionals", &on);
+  nt_arr(nt, pn, "posts", &sn); nt_arr(nt, pn, "keywords", &kn);
+  if (rn != 1 || on || sn || kn || nt_ref(nt, pn, "rest") >= 0 || nt_ref(nt, pn, "keyword_rest") >= 0 ||
+      nt_ref(nt, pn, "block") >= 0) return 0;
+  int body = nt_ref(nt, blk, "body");
+  int bn = 0; const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
+  int last = bn > 0 ? bb[bn - 1] : -1;
+  TyKind vt = last >= 0 ? comp_ntype(c, last) : TY_NIL;
+  if (!(vt == TY_INT || vt == TY_FLOAT || vt == TY_BOOL || vt == TY_NIL || vt == TY_SYMBOL || vt == TY_STRING) ||
+      block_next_value_ty(c, body) != TY_UNKNOWN || !block_param_used_up(c, blk, fp0, last)) return 0;
+  NT_FOREACH_KIND(nt, NK_CallNode, f) {
+    const char *fn = nt_str(nt, f, "name");
+    int fb = nt_ref(nt, f, "block"), fac = 0;
+    const int *fav = call_args(nt, f, &fac);
+    const char *op = fn && sp_streq(fn, "fetch") && nt_kind(nt, fb) == NK_BlockNode ? block_param_name(c, fb, 0) : NULL;
+    LocalVar *ov = op && fac > 0 && comp_ntype(c, nt_ref(nt, f, "receiver")) == TY_POLY ? scope_local(comp_scope_of(c, fb), op) : NULL;
+    if (ov && ov->type != TY_POLY && ov->type != comp_ntype(c, fav[0])) return 0;
+  }
+  return 1;
+}
+
 /* fetch's block is spliced inline, so its parameter's slot is the enclosing
    scope's local: bind the missed key (or index), of type `kt` in temp `tk`,
    to it -- boxed on the way in when the slot is poly, as it is when the body
-   reassigns it or another receiver kind yields a key of another class. */
+   reassigns it or another receiver kind yields a key of another class, and
+   unboxed where a table of boxed keys meets a slot typed as the key
+   (fetch_blk_param_is_key): `x.fetch(:k) { |k| k }` on a receiver that may
+   be a Hash or an Array put the boxed key in a Symbol's slot and the C did
+   not build. */
 static void emit_fetch_blk_param(Compiler *c, int id, int blk, TyKind kt, int tk, Buf *b) {
   const char *fp0 = block_param_name(c, blk, 0);
   if (!fp0) return;
   Scope *fbs = comp_scope_of(c, blk);
-  LocalVar *flv = fbs ? scope_local(fbs, fp0) : NULL;
+  LocalVar *flv = fbs ? scope_local(fbs, fp0) : NULL, *own = flv;
   if (!flv) { Scope *fes = comp_scope_of(c, id); flv = fes ? scope_local(fes, fp0) : NULL; }
+  char ktn[32]; snprintf(ktn, sizeof ktn, "_t%d", tk);
   if (flv && flv->type == TY_POLY && kt != TY_POLY) {
-    char ktn[32]; snprintf(ktn, sizeof ktn, "_t%d", tk);
     buf_printf(b, "lv_%s = ", rename_local(fp0)); emit_boxed_text(c, kt, ktn, b); buf_puts(b, "; ");
   }
   /* a parameter that is the shared handle (--share-strings) takes the key
@@ -721,6 +764,9 @@ static void emit_fetch_blk_param(Compiler *c, int id, int blk, TyKind kt, int tk
     if (fac >= 1 && strbuf_slot_ref(c, fav[0], kref, sizeof kref))
       buf_printf(b, "lv_%s = %s; ", rename_local(fp0), kref);
     else buf_printf(b, "lv_%s = sp_String_new_shared(_t%d); ", rename_local(fp0), tk);
+  }
+  else if (own && kt == TY_POLY && fetch_blk_param_is_key(c, id, blk, own, fp0)) {
+    buf_printf(b, "lv_%s = ", rename_local(fp0)); emit_unbox_text(c, own->type, ktn, b); buf_puts(b, "; ");
   }
   else buf_printf(b, "lv_%s = _t%d; ", rename_local(fp0), tk);
 }
