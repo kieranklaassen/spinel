@@ -1,0 +1,26 @@
+hello world
+101
+201
+201
+101
+101
+101
+201
+201
+">>HELLO"
+"a longer String than the one it replaces, by far"
+201
+302
+302
+101
+201
+102
+FrozenError
+"fz"
+201
+50101
+FrozenError
+"lit"
+FrozenError
+FrozenError
+"built"
