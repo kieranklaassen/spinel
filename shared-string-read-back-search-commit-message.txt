@@ -1,0 +1,33 @@
+A shared String handle read back from a container is searched for as its String
+
+A String grown with << is held through a shared handle, and read back
+out of a Hash or an Array it arrives boxed as that handle:
+
+    s = +"cd"
+    s << "e"
+    h = { k: s }
+    p ["cd", "cde"].include?(h[:k])
+
+printed false, where CRuby prints true. A search that takes a boxed
+argument tests its tag for a String and answers "not there" for
+anything else, so the handle was never compared. include?, member?,
+index, find_index, rindex and delete on an Array of Strings answered
+false or nil and deleted nothing; include?, member? and cover? on a
+Range of Strings answered false, and include? on an endless one did
+not raise; casecmp and casecmp? answered nil.
+
+These arms now read the handle's String first, as the boxed
+conversions (e42a1119b) and the boxed operators already do. Nothing of
+the handle is kept: the answers are a boolean, an index, or the
+Array's own element. A boxed value that is not a String is still not
+there.
+
+Not covered: with the receiver boxed too (`mixed[0].include?(v)`,
+`mixed[0].delete(v)`, a Hash's `[]`, `key?` and `fetch`) the call goes
+through the runtime's helpers and still misses the handle; `raise v`,
+`match[v]` and `/re/ =~ v` still take it as no String.
+
+Test: test/shared_string_read_back_search.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+

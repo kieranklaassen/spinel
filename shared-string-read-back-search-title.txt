@@ -1,0 +1,1 @@
+A shared String handle read back from a container is searched for as its String
