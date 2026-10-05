@@ -1,0 +1,23 @@
+rbs-seed-test runs its checks again
+
+#7524 left one line in the Makefile where the two lists stood:
+
+    RBS_SEED_CHECKS :=  \
+
+The backslash joins the next two lines to it, so the definition of
+RBS_SEED_RESULTS became the value of RBS_SEED_CHECKS. RBS_SEED_RESULTS
+was never defined and RBS_SEED_RUN_CHECKS was defined nowhere.
+rbs-seed-test had no prerequisites, its recipe looped over no result
+file, and it printed "rbs-seed-test: pass".
+
+Both lists are back as they stood before #7524: 54 names in
+RBS_SEED_CHECKS and 26 in RBS_SEED_RUN_CHECKS. array_transpose_nil
+joins RBS_SEED_RUN_CHECKS. #7524 added its .rb, its .expected and its
+sig file, which is all the .run rule reads, and no arm in the .res
+rule's case, which every RBS_SEED_CHECKS name needs.
+
+Before, make rbs-seed-test printed pass with no file under
+build/rbs-seed-results. Now it builds 81 (54 .res, 27 .run), each
+holds 1, and it prints pass (linux-x86_64, gcc 13.3.0).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
