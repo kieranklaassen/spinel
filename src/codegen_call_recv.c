@@ -2135,14 +2135,14 @@ else {
         }
         else if (a0 == TY_POLY || held[0]) {
           /* a boxed needle: a String compares, anything else is not
-             there, as include? and index read it (#4458) */
+             there, as include? and index read it (#4458). The block's
+             parameter keeps the held value; the search reads its String. */
           int tv = ++g_tmp;
-          char tvn[32]; snprintf(tvn, sizeof tvn, "_t%d", tv);
-          const char *nd = held[0] ? held : tvn;
-          buf_puts(b, "({ ");
-          if (!held[0]) { buf_printf(b, "sp_RbVal %s = ", tvn); emit_boxed(c, argv[0], b); buf_puts(b, "; "); }
-          buf_printf(b, "const char *_t%d = %s.tag == SP_TAG_STR ? sp_StrArray_delete(%s, %s.v.s)"
-                        " : (const char *)0; _t%d ? sp_box_str(_t%d) : ", tdr, nd, rdb.p, nd, tdr, tdr);
+          buf_printf(b, "({ sp_RbVal _t%d = sp_poly_strbuf_deref(", tv);
+          if (held[0]) buf_puts(b, held);
+          else emit_boxed(c, argv[0], b);
+          buf_printf(b, "); const char *_t%d = _t%d.tag == SP_TAG_STR ? sp_StrArray_delete(%s, _t%d.v.s)"
+                        " : (const char *)0; _t%d ? sp_box_str(_t%d) : ", tdr, tv, rdb.p, tv, tdr, tdr);
         }
         else {
           buf_printf(b, "({ const char *_t%d = sp_StrArray_delete(%s, ", tdr, rdb.p);
@@ -2175,8 +2175,8 @@ else {
     else if (rt == TY_STR_ARRAY && a0 == TY_POLY) {
       /* a boxed needle, read as the block form above reads it */
       int tv = ++g_tmp;
-      buf_printf(b, "({ sp_RbVal _t%d = ", tv); emit_boxed(c, argv[0], b);
-      buf_printf(b, "; _t%d.tag == SP_TAG_STR ? sp_StrArray_delete(%s, _t%d.v.s) : (const char *)0; })",
+      buf_printf(b, "({ sp_RbVal _t%d = sp_poly_strbuf_deref(", tv); emit_boxed(c, argv[0], b);
+      buf_printf(b, "); _t%d.tag == SP_TAG_STR ? sp_StrArray_delete(%s, _t%d.v.s) : (const char *)0; })",
                  tv, rdl.p, tv);
     }
     else {
@@ -2302,8 +2302,8 @@ else {
          compile (#4458). */
       int ta = ++g_tmp, tv = ++g_tmp;
       buf_printf(b, "({ sp_StrArray *_t%d = ", ta); emit_recv_rooted(c, recv, ta, "SP_GC_ROOT", b);
-      buf_printf(b, "sp_RbVal _t%d = ", tv); emit_boxed(c, argv[0], b);
-      buf_printf(b, "; _t%d.tag == SP_TAG_STR ? sp_StrArray_%s(_t%d, _t%d.v.s) : sp_box_nil(); })", tv, fn, ta, tv);
+      buf_printf(b, "sp_RbVal _t%d = sp_poly_strbuf_deref(", tv); emit_boxed(c, argv[0], b);
+      buf_printf(b, "); _t%d.tag == SP_TAG_STR ? sp_StrArray_%s(_t%d, _t%d.v.s) : sp_box_nil(); })", tv, fn, ta, tv);
       { *out = 1; return 1; }
     }
     if (nil_needle) {
@@ -2381,8 +2381,8 @@ else {
     if (rt == TY_STR_ARRAY && (sat == TY_POLY || sat == TY_NIL)) {
       int ta = ++g_tmp, tv = ++g_tmp;
       buf_printf(b, "({ sp_StrArray *_t%d = ", ta); emit_recv_rooted(c, recv, ta, "SP_GC_ROOT", b);
-      buf_printf(b, "sp_RbVal _t%d = ", tv); emit_boxed(c, argv[0], b);
-      buf_printf(b, "; _t%d.tag == SP_TAG_STR ? sp_StrArray_%s(_t%d, _t%d.v.s) : FALSE; })",
+      buf_printf(b, "sp_RbVal _t%d = sp_poly_strbuf_deref(", tv); emit_boxed(c, argv[0], b);
+      buf_printf(b, "); _t%d.tag == SP_TAG_STR ? sp_StrArray_%s(_t%d, _t%d.v.s) : FALSE; })",
                  tv, fn, ta, tv);
       { *out = 1; return 1; }
     }
@@ -10092,8 +10092,8 @@ int emit_range_call(Compiler *c, int id, Buf *b) {
       }
       if (a0 == TY_POLY) {
         buf_printf(b, "({ sp_StrRange _t%d = ", tr); emit_expr(c, recv, b);
-        buf_printf(b, "; sp_RbVal _a%d = ", tr); emit_boxed(c, argv[0], b);
-        buf_printf(b, "; (sp_bool)(_a%d.tag == SP_TAG_STR &&"
+        buf_printf(b, "; sp_RbVal _a%d = sp_poly_strbuf_deref(", tr); emit_boxed(c, argv[0], b);
+        buf_printf(b, "); (sp_bool)(_a%d.tag == SP_TAG_STR &&"
                       " %s(_t%d, _a%d.v.s)); })", tr, fn, tr, tr);
         return 1;
       }
