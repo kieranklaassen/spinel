@@ -24440,6 +24440,28 @@ int nullable_scalar_nil_only_call(Compiler *c, int id) {
   return recv >= 0 && scalar_nil_only_call(c, id, c->ntype[recv]) && nullable_int_value(c, recv);
 }
 
+/* The same names on a slot whose nil is a NULL pointer: a String, an Array,
+   a Hash, an object of the program's own. It is asked of a call nothing of
+   the receiver's class answered (`to_a` on a String, `&` on a Hash), so it
+   does not tell the classes apart; Array's own & and | are typed Array and
+   never reach it. */
+int null_slot_nil_only_call(Compiler *c, int id, TyKind rt) {
+  const NodeTable *nt = c->nt;
+  if (id < 0 || nt_kind(nt, id) != NK_CallNode) return 0;
+  const char *nm = nt_str(nt, id, "name");
+  if (!nm || nt_ref(nt, id, "receiver") < 0 || nt_ref(nt, id, "block") >= 0) return 0;
+  const char *op = nt_str(nt, id, "call_operator");
+  if (op && sp_streq(op, "&.")) return 0;
+  if (rt != TY_STRING && !ty_is_array(rt) && !ty_is_ptr_array(rt) && !ty_is_hash(rt) &&
+      !(ty_is_object(rt) && !comp_ty_value_obj(c, rt))) return 0;
+  int args = nt_ref(nt, id, "arguments");
+  int argc = 0; const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &argc) : NULL;
+  for (int k = 0; k < argc; k++)
+    if (nt_kind(nt, argv[k]) == NK_SplatNode || nt_kind(nt, argv[k]) == NK_KeywordHashNode ||
+        nt_kind(nt, argv[k]) == NK_BlockArgumentNode) return 0;
+  return argc == 0 ? (op && (sp_streq(nm, "to_a") || sp_streq(nm, "to_h"))) : argc == 1 && is_bit_op(nm);
+}
+
 /* Can this expression leave the sentinel in an int slot? */
 /* Whether an unconditional write of ivar `ivn` is among the top-level
    statements of class k's initialize, or of the initialize it inherits. */
