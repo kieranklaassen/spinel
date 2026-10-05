@@ -7284,7 +7284,12 @@ static int emit_scalar_recv_arms(Compiler *c, int id, Buf *b, const NodeTable *n
      the bytes and answers a scalar or a freshly built string keeps nothing,
      so it can read the live buffer instead -- `text[i]` in a scan loop was
      copying the whole subject on every character. */
-  if (rt == TY_STRING && name && str_recv_reads_only(name))
+  /* nil answers to_i and to_f, so a handle that a write sets to nil is read
+     as a value for them: the value read tests the handle, this one does not. */
+  const char *nh = rt == TY_STRING && name && argc == 0 && (sp_streq(name, "to_i") || sp_streq(name, "to_f"))
+                     ? strbuf_local_name(c, recv) : NULL;
+  if (nh && !strbuf_local_nil_written(c, comp_scope_of(c, recv), nh)) nh = NULL;
+  if (rt == TY_STRING && name && str_recv_reads_only(name) && !nh)
     emit_strbuf_read_ref(c, recv, &rs);
   if (!rs.p) emit_expr(c, recv, &rs);
   const char *r = rs.p ? rs.p : "";

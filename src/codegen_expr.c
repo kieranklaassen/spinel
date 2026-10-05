@@ -1539,7 +1539,8 @@ static int emit_local_ivar_write_expr(Compiler *c, int id, Buf *b, const NodeTab
          or `def run(cmd, text: nil)` whose block appends to it: nil is a NULL
          handle, and reads as nil. So is a local's (`q = nil; q = +"x" if c`
          with `q.tap { |w| w << "!" if w }` making q the handle). */
-      if (slv->dyn_handle || slv->is_param || slv->str_shared) {
+      if (slv->dyn_handle || slv->is_param || slv->str_shared ||
+          strbuf_local_nil_written(c, comp_scope_of(c, id), lrn)) {
         buf_puts(b, ", ");
         emit_local_ref(c, id, lrn, b);
         buf_puts(b, " ? sp_str_concat(sp_String_cstr(");

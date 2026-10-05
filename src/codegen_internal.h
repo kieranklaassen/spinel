@@ -113,6 +113,7 @@ typedef struct { int sv, from, n; char (*f)[96]; char (*t)[112]; } RenPark;
 RenPark ren_park(int from);
 void ren_unpark(RenPark *p);
 const char *strbuf_local_name(Compiler *c, int recv);
+int strbuf_local_nil_written(Compiler *c, Scope *sc, const char *name);
 int ivar_global_slot(Compiler *c, int node, char *out, size_t cap);
 int gvar_global_slot(Compiler *c, int node, char *out, size_t cap);
 int cvar_global_slot(Compiler *c, int node, char *out, size_t cap);
