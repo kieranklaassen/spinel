@@ -1,0 +1,35 @@
+A Range's first bound runs before its last
+
+    n = 3
+    p (n..(n = 5))                # 3..5 in CRuby, 5..5 here
+    p (lg(1)..lg(2)), $log        # logs 1, 2 in CRuby; 2, 1 here
+
+emit_range_expr writes the two bounds as arguments of one C call
+(sp_range_new, sp_frange_new, sp_srange_new), whose order C leaves
+open, and gcc runs the last one first. Two bounds with an effect ran
+in reverse, and a first bound read what the last had already changed:
+a local the last bound assigns, an instance or a global variable a
+call in it writes, a local a proc it calls assigns. Integer and Float
+Ranges, and a String Range whose first bound is a read, whatever read
+the Range: to_a, size, each, map, step, include?, a `when`, clamp.
+clang ran them left to right.
+
+Where the order shows (args_order_matters: two bounds with an effect,
+or a first bound reading what the last can change) the first bound now
+runs into a temp at the Range, ahead of the last, and the form reads
+the temp. The temp is rooted when the collector follows its type. Any
+other Range is emitted as before.
+
+A String Range with both ends made on the spot already has its first
+end in a rooted temp; that arm leaves alone a first bound that ran
+into a temp here (arg_ran_first).
+
+Not here, as before: `a[lg(1)..lg(3)]`, `s[lg(1)..lg(3)]` and
+`a.slice(lg(1)..lg(3))` hand the bounds straight to the slice and
+still run the last first, and so does `for i in lg(1)..lg(3)`. A
+first bound that assigns what a last bound without a call reads,
+`((n = 1)..n + 2)`. A bound whose only effect is a raise that is not
+a call, `((10 / z)..lg(2))`, and a first bound that is a method that
+only raises.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
