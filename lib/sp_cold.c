@@ -3671,9 +3671,10 @@ sp_bool sp_frange_eq(sp_FloatRange a, sp_FloatRange b) {
 }
 const char *sp_frange_inspect(sp_FloatRange r) {
   /* an OMITTED bound prints as nothing; an explicit infinity prints itself */
-  const char *lo = (r.omitted & SP_FRANGE_NO_BEGIN) ? ""
+  const char *lo = (r.omitted & SP_FRANGE_NO_BEGIN) ? sp_str_empty
                  : (r.omitted & SP_FRANGE_INT_BEGIN) ? sp_sprintf("%lld", (long long)r.first)
                  : sp_float_to_s(r.first);
+  SP_GC_ROOT_STR(lo);   /* held while the text of the last end is made */
   const char *hi = (r.omitted & SP_FRANGE_NO_END) ? ""
                  : (r.omitted & SP_FRANGE_INT_END) ? sp_sprintf("%lld", (long long)r.last)
                  : sp_float_to_s(r.last);
