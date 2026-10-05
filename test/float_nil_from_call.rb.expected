@@ -1,0 +1,24 @@
+"s"
+[1.5, 1]
+[nil, 1]
+[1.5, "x"]
+[nil, "x"]
+false
+true
+[1.5, 1]
+[nil, 1]
+[1.5, 1]
+[nil, 1]
+[1.5, 1]
+side
+[nil, 1]
+2.5
+NoMethodError
+1.5
+nil
+[nil, 1]
+[1.5, 1]
+[nil, 1]
+[1.5, 1]
+false
+true

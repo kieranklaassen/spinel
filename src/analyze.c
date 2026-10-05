@@ -25925,6 +25925,8 @@ int nullable_int_value(Compiler *c, int v) {
   const NodeTable *nt = c->nt;
   if (v < 0) return 0;
   if (nt_kind(nt, v) == NK_NilNode) return 1;
+  /* a call that can answer only nil is nil as the literal is */
+  if (nt_kind(nt, v) == NK_CallNode && infer_type(c, v) == TY_NIL) return 1;
   /* `return e` / `(e)` carry their inner value unchanged; a block tail can be
      either, and so can a method's own tail statement. A bare `return` answers
      nil, which an Integer or Float return carries as the sentinel. */
