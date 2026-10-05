@@ -1,0 +1,33 @@
+String#[]= with an Integer index keeps its pieces rooted
+
+`s[1] = x` as a statement built its answer in one nested call,
+sp_str_concat(sp_str_concat(sp_str_sub_range(..), x), sp_str_sub_range(..)):
+whichever piece C made first was in flight, unrooted, while the next
+allocated. sp_str_splice_at's comment describes the window; this arm
+still had it. In a plain run a collection in that window loses the
+String and raises nothing: of 20,000 rounds of
+`s = "x" * 2100; s[0] = "y" * n` with n from 1 to 40, 34 leave s the
+value alone, built with gcc (the count moves with what else
+allocates). Under SPINEL_GC_STRESS=2 the assignment stopped with "the
+mark reached a freed heap string", with a literal value as with one
+that allocates, on a local and on a String two names hold.
+
+The arm now calls sp_str_splice_at with a length of one, as the
+(start, length) arm below it does. The bounds and the IndexError text
+are the helper's and were the same: one past the end appends, further
+raises. gc-stress-test runs the new test at level 2: on master it
+fails there built with gcc and with clang; plain, it fails by one line
+built with gcc and passes built with clang.
+
+The statement reads its index, then its value, then the receiver, so a
+value that changes the receiver, `s[1] = (s << "ef"; "x")`, is seen
+whichever order the C compiler reads a call's arguments in. The nested
+calls it replaces lost the append built with gcc and kept it built
+with clang. `s[a, n] = v` and `s[range] = v` pass the receiver and the
+value to one call as they did, and are not changed here.
+
+An assignment is not slower: 1,155 instructions a statement on an
+eight-character String before, 1,087 after (callgrind, 200,000
+statements).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
