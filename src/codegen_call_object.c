@@ -211,7 +211,7 @@ int emit_call_identity_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
          CRuby (which warns and defines it): fall through to the member read,
          which the inference already typed (#4190) */
       !(ty_is_object(rt) &&
-        comp_resolve_member(c, ty_object_class(rt), name, 0, NULL, NULL) == SP_MEMBER_ATTR)) {
+        comp_resolve_member(c, ty_object_class(rt), name, 0, NULL, NULL) != SP_MEMBER_NONE)) {
     /* a nullable Integer or Float holding its sentinel is nil, whose id
        is nil's */
     if ((rt == TY_INT || rt == TY_FLOAT) && call_returns_nullable_int(c, recv)) {
@@ -2014,7 +2014,7 @@ int emit_call_display_ivar_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
   if (recv >= 0 && sp_streq(name, "display") && argc == 0 &&
       /* a generated READER of the name owns it, as in CRuby (#4190) */
       !(ty_is_object(comp_ntype(c, recv)) &&
-        comp_resolve_member(c, ty_object_class(comp_ntype(c, recv)), name, 0, NULL, NULL) == SP_MEMBER_ATTR)) {
+        comp_resolve_member(c, ty_object_class(comp_ntype(c, recv)), name, 0, NULL, NULL) != SP_MEMBER_NONE)) {
     /* Struct#to_s IS inspect in CRuby ("#<struct Point x=1, y=2>"); the
        boxed sp_poly_to_s default would print the bare-object form */
     TyKind drt2 = comp_ntype(c, recv);
