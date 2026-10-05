@@ -160,3 +160,14 @@ rescue TypeError => e
   puts "TypeError: #{e.message}"
 end
 p m
+
+# an earlier change, then an insert at the start: the statement stopped under
+# SPINEL_GC_STRESS=2, which the stress leg now runs this file at
+g = +"x"
+g << "a"
+g.insert(0, "b")
+p g
+h = +"xy"
+h.upcase!
+h.insert(-3, "b")
+p h
