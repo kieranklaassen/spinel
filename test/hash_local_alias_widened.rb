@@ -27,3 +27,20 @@ def fill(pairs)
   h.to_a
 end
 p fill([[:b, "s"], [2, nil]])
+
+# a second name written twice, or given its Hash by a condition
+h13 = {a: 1}; g13 = {zz: 9}; g13 = h13; m13 = {1 => :a}; g13.merge!(m13); p h13.to_a
+h14 = {"a" => 1}; g14 = h14; g14 = {"zz" => 9} if h14.size > 5; g14[:b] = "s"; p h14.to_a
+h15 = {a: 1}; g15 = h15.size > 5 ? {b: 2} : h15; m15 = {1 => :a}; g15.merge!(m15); p h15.to_a, g15.to_a
+h16 = {a: 1}; g16 = h16.size > 5 ? h16 : {b: 2}; g16["k"] = 3; p h16.to_a, g16.to_a
+h17 = {a: 1}; g17 = if h17.size == 1 then h17 else {c: 4} end; m17 = {1 => "v"}; g17.merge!(m17); p h17.to_a
+h18 = {a: 1}; k18 = {b: 2}; g18 = h18; g18 = k18; g18[1] = 2.5; p h18.to_a, k18.to_a
+h19 = {a: 1}; g19 = h19; h19 = {b: 2}; g19["k"] = 1; h19[2] = :c; p g19.to_a, h19.to_a
+
+def choose(c)
+  h = {"a" => 1}
+  g = c ? h : {"b" => 2}
+  g["z"] = :y
+  [h.to_a, g.to_a]
+end
+p choose(true), choose(false)
