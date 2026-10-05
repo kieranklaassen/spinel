@@ -26208,7 +26208,7 @@ static int site_args_may_be_nil(Compiler *c, const int *av, int an) {
 static int obj_nil_value(Compiler *c, int a) {
   const NodeTable *nt = c->nt;
   if (a < 0) return 0;
-  if (nil_value_node(c, a) || c->ntype[a] == TY_NIL) return 1;
+  if (nil_value_node(c, a) || case_nil_value(c, a) || c->ntype[a] == TY_NIL) return 1;
   if (nt_kind(nt, a) != NK_LocalVariableReadNode) return 0;
   Scope *as = comp_scope_of(c, a);
   const char *an = nt_str(nt, a, "name");
@@ -26642,8 +26642,11 @@ static void mark_nullable_int_locals(Compiler *c) {
       const char *nm = nt_str(nt, r, "name");
       Scope *rs = nm ? comp_scope_of(c, r) : NULL;
       LocalVar *lv = rs ? scope_local(rs, nm) : NULL;
-      if (!lv || lv->is_param || lv->is_block_param || lv->maybe_unset ||
-          (lv->type != TY_INT && lv->type != TY_FLOAT)) continue;
+      /* ... and so does an object local, whose nil is held (obj_nil_held):
+         `d = Box.new if c; d.hello`, a local only a loop's body fills */
+      int obj = lv && ty_is_object(lv->type);
+      if (!lv || lv->is_param || lv->is_block_param || lv->maybe_unset || (obj && lv->obj_nil_held) ||
+          (lv->type != TY_INT && lv->type != TY_FLOAT && !obj)) continue;
       if (!par) {
         par = du_parent_map(nt);
         if (!par) break;
@@ -26652,7 +26655,9 @@ static void mark_nullable_int_locals(Compiler *c) {
         if (!dp.pos || !dp.done) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
         for (int k = 0; k < nt->count; k++) dp.pos[k] = -1;
       }
-      if (du_read_maybe_unset(nt, par, &dp, r, nm)) { lv->maybe_unset = 1; lv->nullable_int = 1; }
+      if (!du_read_maybe_unset(nt, par, &dp, r, nm)) continue;
+      if (obj) lv->obj_nil_held = 1;
+      else { lv->maybe_unset = 1; lv->nullable_int = 1; }
     }
     free(par); free(dp.pos); free(dp.done);
     free(du_memo); du_memo = NULL; du_memo_cap = du_memo_n = 0;

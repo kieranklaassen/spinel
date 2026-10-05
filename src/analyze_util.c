@@ -407,6 +407,21 @@ int nil_value_node(Compiler *c, int v) {
   }
   return 0;
 }
+/* A `case` that answers nil: it has no `else`, or an arm ends in nil */
+int case_nil_value(Compiler *c, int v) {
+  const NodeTable *nt = c->nt;
+  v = an_unparen(nt, v);
+  if (v < 0 || nt_kind(nt, v) != NK_CaseNode) return 0;
+  int el = nt_ref(nt, v, "else_clause"), nw = 0;
+  const int *wh = nt_arr(nt, v, "conditions", &nw);
+  if (el < 0) return 1;
+  for (int i = 0; i <= nw; i++) {
+    int st = nt_ref(nt, i < nw ? wh[i] : el, "statements"), n = 0;
+    const int *bd = st >= 0 ? nt_arr(nt, st, "body", &n) : NULL;
+    if (n == 0 || nil_value_node(c, bd[n - 1]) || case_nil_value(c, bd[n - 1])) return 1;
+  }
+  return 0;
+}
 /* Can nil answer `nm` in this program: a method defined at the top level,
    in Object, Kernel or BasicObject (a module's copies with them), or any
    method at all once the program reopens NilClass? A call on a typed slot

@@ -108,8 +108,13 @@ typedef struct {
   int obj_nil_held; /* an object-typed parameter or local that holds nil
                        though no caller and no write of it names nil: its own
                        default, a keyword, a block or proc site that hands it
-                       nil or nothing, such a value handed on. Guarded as
-                       obj_nilable is (nil_recv_guard) */
+                       nil or nothing, such a value handed on, a read no
+                       write has to come before. Guarded as obj_nilable is
+                       (nil_recv_guard) */
+  int obj_nil_from; /* codegen's memo for an object-typed local: 1 when a
+                       write in its scope stores a `case` with no `else` or
+                       what a method that answers nil returns, 2 when none
+                       does, 0 not yet asked */
   int obj_nil_written; /* codegen's memo for an object-typed local: 1 when a
                        write in its scope stores nil, 2 when none does, 0 not
                        yet asked (#7262) */

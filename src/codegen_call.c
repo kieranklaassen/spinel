@@ -18331,6 +18331,30 @@ static int local_obj_nil_written(Compiler *c, Scope *sc, const char *ln, LocalVa
   }
   return lv->obj_nil_written == 1;
 }
+/* ... or one that holds a nil nothing writes there: its own default or no
+   write at all (obj_nil_held), a write that stores a `case` with no `else`
+   or what a method of the program that answers nil returned
+   (`x = pick(c)`) */
+static int method_ret_nilable(Compiler *c, int mi, int depth, int held);
+static int local_obj_holds_nil(Compiler *c, Scope *sc, const char *ln, LocalVar *lv) {
+  if (lv->obj_nil_held || local_obj_nil_written(c, sc, ln, lv)) return 1;
+  if (lv->obj_nil_from) return lv->obj_nil_from == 1;
+  const NodeTable *nt = c->nt;
+  int si = (int)(sc - c->scopes);
+  lv->obj_nil_from = 2;
+  NT_FOREACH_KIND(nt, NK_LocalVariableWriteNode, w) {
+    if (c->nscope[w] != si) continue;
+    const char *wn = nt_str(nt, w, "name");
+    if (!wn || !sp_streq(wn, ln)) continue;
+    int v = unwrap_parens(c, nt_ref(nt, w, "value"));
+    const CallPlan *p = v >= 0 && nt_kind(nt, v) == NK_CallNode ? cplan_user(c, v) : NULL;
+    if (case_nil_value(c, v) || (p && p->mi >= 0 && method_ret_nilable(c, p->mi, 0, 1))) {
+      lv->obj_nil_from = 1;
+      break;
+    }
+  }
+  return lv->obj_nil_from == 1;
+}
 
 /* Can a user method answer nil (a NULL object pointer) where its type says
    a user object: a nil it writes (`cond ? Box.new : nil`, a bare `return`),
@@ -18338,7 +18362,7 @@ static int local_obj_nil_written(Compiler *c, Scope *sc, const char *ln, LocalVa
    call, another such method, or an ivar of its class that nothing ever
    writes (`def self.box = @box`). A call on its result then raises
    NoMethodError where it ran with a NULL self (#7262). */
-static int ret_nilable_value(Compiler *c, int mi, int v, int depth);
+static int ret_nilable_value(Compiler *c, int mi, int v, int depth, int held);
 static int ivar_never_written(Compiler *c, int cid, const char *ivn) {
   const NodeTable *nt = c->nt;
   static const NodeKind wk[] = { NK_InstanceVariableWriteNode, NK_InstanceVariableOrWriteNode,
@@ -18357,7 +18381,7 @@ static int ivar_never_written(Compiler *c, int cid, const char *ivn) {
   }
   return 1;
 }
-static int ret_nilable_returns(Compiler *c, int mi, int node, int depth) {
+static int ret_nilable_returns(Compiler *c, int mi, int node, int depth, int held) {
   const NodeTable *nt = c->nt;
   if (node < 0) return 0;
   NodeKind k = nt_kind(nt, node);
@@ -18365,38 +18389,40 @@ static int ret_nilable_returns(Compiler *c, int mi, int node, int depth) {
   if (k == NK_ReturnNode) {
     int a = nt_ref(nt, node, "arguments"), an = 0;
     const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
-    if (an == 0 || (an == 1 && ret_nilable_value(c, mi, av[0], depth))) return 1;
+    if (an == 0 || (an == 1 && ret_nilable_value(c, mi, av[0], depth, held))) return 1;
   }
   int nr = nt_num_refs(nt, node);
-  for (int i = 0; i < nr; i++) if (ret_nilable_returns(c, mi, nt_ref_at(nt, node, i), depth)) return 1;
+  for (int i = 0; i < nr; i++) if (ret_nilable_returns(c, mi, nt_ref_at(nt, node, i), depth, held)) return 1;
   int na = nt_num_arrs(nt, node);
   for (int i = 0; i < na; i++) {
     int n = 0; const int *ids = nt_arr_at(nt, node, i, &n);
-    for (int j = 0; j < n; j++) if (ret_nilable_returns(c, mi, ids[j], depth)) return 1;
+    for (int j = 0; j < n; j++) if (ret_nilable_returns(c, mi, ids[j], depth, held)) return 1;
   }
   return 0;
 }
-static int method_ret_nilable(Compiler *c, int mi, int depth) {
-  static signed char *memo = NULL; static int memo_n = 0; static const NodeTable *memo_nt = NULL;
+static int method_ret_nilable(Compiler *c, int mi, int depth, int held) {
+  static signed char *memos[2] = { NULL, NULL }; static int memo_n = 0; static const NodeTable *memo_nt = NULL;
   if (mi < 0 || mi >= c->nscopes || depth > 4) return 0;
   if (memo_nt != c->nt || memo_n < c->nscopes) {
-    free(memo); memo_n = c->nscopes; memo = calloc((size_t)memo_n, 1); memo_nt = c->nt;
-    if (!memo) { memo_n = 0; return 0; }
+    free(memos[0]); free(memos[1]); memo_n = c->nscopes; memo_nt = c->nt;
+    memos[0] = calloc((size_t)memo_n, 1); memos[1] = calloc((size_t)memo_n, 1);
+    if (!memos[0] || !memos[1]) { memo_n = 0; return 0; }
   }
+  signed char *memo = memos[held != 0];
   if (memo[mi]) return memo[mi] == 1;
   memo[mi] = 2;   /* a recursion answers no */
   Scope *m = &c->scopes[mi];
   const NodeTable *nt = c->nt;
   int r = 0;
   if (m->def_node >= 0 && m->body >= 0) {
-    r = ret_nilable_value(c, mi, m->body, depth);
+    r = ret_nilable_value(c, mi, m->body, depth, held);
     /* every `return` the body holds, outside a nested lambda or def */
-    if (!r) r = ret_nilable_returns(c, mi, m->body, depth);
+    if (!r) r = ret_nilable_returns(c, mi, m->body, depth, held);
   }
   memo[mi] = r ? 1 : 2;
   return r;
 }
-static int ret_nilable_value(Compiler *c, int mi, int v, int depth) {
+static int ret_nilable_value(Compiler *c, int mi, int v, int depth, int held) {
   const NodeTable *nt = c->nt;
   v = unwrap_parens(c, v);
   if (v < 0) return 1;
@@ -18406,9 +18432,18 @@ static int ret_nilable_value(Compiler *c, int mi, int v, int depth) {
     int st = k == NK_BeginNode ? nt_ref(nt, v, "statements") : v;
     if (st < 0) return 1;
     int n = 0; const int *bd = nt_arr(nt, st, "body", &n);
-    return n == 0 ? 1 : ret_nilable_value(c, mi, bd[n - 1], depth);
+    return n == 0 ? 1 : ret_nilable_value(c, mi, bd[n - 1], depth, held);
   }
   if (k == NK_ReturnNode) return 0;   /* counted with the returns */
+  /* ... and, for `held`, the nils nothing writes: a `case` with no `else`,
+     a local of the method that holds nil */
+  if (held && case_nil_value(c, v)) return 1;
+  if (held && k == NK_LocalVariableReadNode) {
+    Scope *m = &c->scopes[mi];
+    const char *ln = nt_str(nt, v, "name");
+    LocalVar *lv = ln && comp_scope_of(c, v) == m ? scope_local(m, ln) : NULL;
+    return lv && ty_is_object(lv->type) && (lv->obj_nilable || local_obj_holds_nil(c, m, ln, lv));
+  }
   if (k == NK_InstanceVariableReadNode) {
     const char *ivn = nt_str(nt, v, "name");
     return ivn && ivar_never_written(c, c->scopes[mi].class_id, ivn);
@@ -18429,7 +18464,7 @@ static int ret_nilable_value(Compiler *c, int mi, int v, int depth) {
       return 0;
     }
     const CallPlan *p = cplan_user(c, v);
-    return p && p->mi >= 0 && method_ret_nilable(c, p->mi, depth + 1);
+    return p && p->mi >= 0 && method_ret_nilable(c, p->mi, depth + 1, held);
   }
   return 0;
 }
@@ -18471,7 +18506,11 @@ int nil_recv_guard(Compiler *c, int id, int *recv_out) {
         !nil_guard_writer(c, rcid, nm))
       return 0;
     const CallPlan *rp = cplan_user(c, unwrap_parens(c, recv));
-    if (!rp || rp->mi < 0 || !method_ret_nilable(c, rp->mi, 0)) return 0;
+    if (!rp || rp->mi < 0) return 0;
+    /* ... or a nil nothing writes (it falls off a `case`, hands back a local
+       that holds nil), unless nil can answer the call */
+    if (!method_ret_nilable(c, rp->mi, 0, 0) && (!method_ret_nilable(c, rp->mi, 0, 1) || nil_may_answer(c, nm)))
+      return 0;
     *recv_out = recv;
     return 1;
   }
@@ -18482,9 +18521,10 @@ int nil_recv_guard(Compiler *c, int id, int *recv_out) {
   if (!lv || !ty_is_object(rt) || comp_ty_value_obj(c, rt)) return 0;
   if (lv->is_param ? !lv->obj_nilable : !local_obj_nil_written(c, sc, ln, lv)) {
     /* ... or one that holds nil another way: its own default, a keyword, a
-       block or proc site that hands it none, a nil its body writes. A call
-       nil can answer in this program is left as it was. */
-    if ((!lv->obj_nil_held && !local_obj_nil_written(c, sc, ln, lv)) || nil_may_answer(c, nm)) return 0;
+       block or proc site that hands it none, a nil its body writes, no
+       write at all, what a method that answers nil returned. A call nil
+       can answer in this program is left as it was. */
+    if (!local_obj_holds_nil(c, sc, ln, lv) || nil_may_answer(c, nm)) return 0;
   }
   int cid = ty_object_class(rt);
   if (comp_method_in_chain(c, cid, nm, NULL) < 0 && !comp_reader_in_chain(c, cid, nm, NULL) &&

@@ -107,6 +107,8 @@ void an_node_dir(const NodeTable *nt, int id, char *dir, size_t cap);
 const char *an_memo_reader_ivar(Compiler *c, int mi);
 /* A value the program writes as nil: `nil`, a conditional with a nil arm */
 int nil_value_node(Compiler *c, int v);
+/* A `case` that answers nil: no `else`, or an arm that ends in nil */
+int case_nil_value(Compiler *c, int v);
 /* Can nil answer `nm`, or any method of class `cid`, in this program */
 int nil_may_answer(Compiler *c, const char *nm);
 int nil_may_answer_class(Compiler *c, int cid);
