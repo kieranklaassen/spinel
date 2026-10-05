@@ -30,7 +30,7 @@ One test, `test/splat_range_into_method_arguments.rb`. On master c1d108abe with 
 GATE_LINES
 ```
 
-- [ ] New tests have `.expected` files that match CRuby 4.0 run with `--enable-frozen-string-literal`
+- [x] New tests have `.expected` files that match CRuby 4.0 run with `--enable-frozen-string-literal` (CRuby 4.0.7 with that flag prints exactly the test's `.expected`)
 - [ ] Values past 2^31 are marked `# spinel: int64` (none)
 - [ ] If optcarrot's generated C changed: callgrind numbers, checksum 59662 (it did not change: byte-identical, compared at 08bf767fb where this commit was written)
 - [ ] Depends on: #FIRST_SPLAT_PR, #SECOND_SPLAT_PR ("A splat pushed onto an empty array literal spreads its elements" and "A splat spreads a boxed Range's members and an Enumerator's items"; this commit sits on those two)
