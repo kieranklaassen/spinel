@@ -1,0 +1,12 @@
+/a.b/i
+"a.b"
+/(?-mix:a|b)|x\.y|(?i-mx:q)/
+"(?-mix:a|b)|x\\.y|(?i-mx:q)"
+/(?m-ix:a)|(?x-mi:b)/
+/(?-mix:b(z))|(?-mix:a(y))|c/
+/a(y)/
+3
+1
+nil
+TypeError: no implicit conversion of nil into String
+TypeError: no implicit conversion of nil into String
