@@ -1,9 +1,10 @@
 # A String in a constant's Array or Hash that is changed in place through
-# the constant (`A[0] << "x"`, `H[:k].upcase!`, an `each` whose block
-# appends) changed a copy: the walk from a container back to the Strings
-# its writes store followed a local, an ivar and a global, and stopped at a
-# constant, so the constant's Strings were never made shared. Each append
-# is 100 bytes, so it cannot land in spare capacity by chance.
+# the constant (`A[0] << "x"`, `H[:k].upcase!`) changed a copy: the walk
+# from a container back to the Strings its writes store followed a local,
+# an ivar and a global, and stopped at a constant, so the constant's
+# Strings were never made shared. Once they are, an `each` whose block
+# appends and a local read from the Array reach them too. Each append is
+# 100 bytes, so it cannot land in spare capacity by chance.
 A = [+"a", +"b"]
 A[0] << "x" * 100
 p A[0].size, A[1]
