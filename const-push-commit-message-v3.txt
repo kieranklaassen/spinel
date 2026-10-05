@@ -1,0 +1,25 @@
+T << row stores a row into a constant table as T[i] = row does
+
+`D = [[1, 2], [3, 4]]; D << ["a"]; p D[2]` printed [0, 0, 0, 0],
+and after `D << []` it printed [0, 0, 0, 0, 0, 0, 0, 0]; CRuby
+prints ["a"] and []. The same with push, append, unshift, prepend,
+insert and concat.
+
+The test for a constant table of Integer Arrays read the rows
+stored after the constant is written from `T[i] = v` alone. Its
+twin for an instance variable reads the push family, insert and
+concat too. The loop that reads them is one function now, asked by
+both: a row of another kind pushed onto the constant makes it a
+general table, and an Integer Array pushed leaves it a table of
+Integer Arrays.
+
+`map!` and `collect!` called on the constant write its rows anew,
+and the table is a general one after them. `fill` and `replace` do
+too, unless the call hands over Integer Arrays and nothing else
+(`D.fill([7, 8])`, `D.replace([[2, 1], [4, 3]])` with every row
+written out): the table stays a table of Integer Arrays then.
+
+A table appended to through another name (`t = D; t << r`, or D
+handed to a method that appends) is not followed, as before.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
