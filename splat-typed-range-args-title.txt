@@ -1,0 +1,1 @@
+A Range splatted into a method's arguments spreads over its parameters

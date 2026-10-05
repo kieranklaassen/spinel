@@ -1,0 +1,1 @@
+p with a splat among its arguments answers by their count

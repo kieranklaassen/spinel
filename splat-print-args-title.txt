@@ -1,0 +1,1 @@
+p, puts and print spread a splatted value that is no Array

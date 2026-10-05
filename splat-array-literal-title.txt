@@ -1,0 +1,1 @@
+A splat in an array literal spreads a boxed Range and an Enumerator
