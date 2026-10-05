@@ -56,7 +56,7 @@ Not in this change, and wrong on master and here alike: `insert` and `s[i] = v` 
 GATE_LINES
 ```
 
-- [ ] New tests have `.expected` files that match CRuby 4.0 run with `--enable-frozen-string-literal` (the file was written from ruby 3.3.6 with that flag; it is `0`, four Strings, `0` and `1000`)
+- [x] New tests have `.expected` files that match CRuby 4.0 run with `--enable-frozen-string-literal` (4.0.7)
 - [ ] Values past 2^31 are marked `# spinel: int64` (none)
 - [ ] If optcarrot's generated C changed: callgrind numbers, checksum 59662 (it did not change: byte-identical before and after on 1ed8b0fbd)
 - [ ] Depends on: # (nothing)
