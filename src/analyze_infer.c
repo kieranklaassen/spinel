@@ -999,6 +999,7 @@ int an_value_dropped(const NodeTable *nt, const int *parent, int node) {
    settled yet stays open. */
 static int an_local_only_open_empty(Compiler *c, int rd);
 static int an_row_open_empty(Compiler *c, int row) {
+  row = unwrap_parens(c, row);
   if (comp_ntype(c, row) != TY_UNKNOWN) return 0;
   if (node_is_empty_container(c->nt, row)) return 1;
   return nt_kind(c->nt, row) == NK_LocalVariableReadNode && an_local_only_open_empty(c, row);
