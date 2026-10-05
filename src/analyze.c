@@ -6252,6 +6252,18 @@ static int desugar_str_range_methods(Compiler *c) {
     if (!native && an == 0 && sp_streq(nm, "each")) {
       if (str_range_each_block_plain(c, nt_ref(nt, id, "block"))) native = 1;
     }
+    /* A name builtins/enumerable.rb defines, called with a block: the
+       definition walks its receiver with `each`, and a String Range's each
+       takes a member at a time, so `("a".."zzzzzzzz").find { |s| s == "c" }`
+       leaves the range at its third member where the element array would
+       hold all of it first. The call waits one round for
+       desugar_builtin_enum_calls; one it does not take rides the array. */
+    if (!native && nt_ref(nt, id, "block") >= 0 && builtin_enum_name_index(nm) >= 0 &&
+        !nt_int(nt, id, "str_range_enum_seen", 0)) {
+      nt_node_set_int(nt, id, "str_range_enum_seen", 1);
+      changed = 1;
+      continue;
+    }
     if (native) continue;
     int toa = nt_new_node(nt, "CallNode");
     if (toa < 0) continue;
