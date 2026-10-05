@@ -33,6 +33,7 @@
    directly onto the one shared heap, so no sp_ext_str_* shim is needed. */
 #include "sp_alloc.h"   /* string + object allocation, sp_box_*, sp_PolyArray */
 #include "sp_str.h"     /* sp_nil_recv for the nil-receiver unpack raise */
+#include "sp_string.h"  /* sp_String, the shared handle a box can hold */
 
 /* ---------- Helpers ---------- */
 
@@ -340,9 +341,14 @@ static double pk_poly_to_flt(sp_RbVal v) {
    sp_str_byte_len, as the m/M directives read theirs, so a String carrying a
    NUL (packed bytes, a binary key) keeps every byte; strlen stopped at the
    first one. Only a String has the header sp_str_byte_len reads, so anything
-   else answers the empty literal with length 0. */
+   else answers the empty literal with length 0. A shared String handle in the
+   box is a String too: its live bytes and its own length. */
 static const char *pk_poly_to_str(sp_RbVal v, size_t *n) {
   if (v.tag == SP_TAG_STR && v.v.s) { *n = sp_str_byte_len(v.v.s); return v.v.s; }
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_STRBUF && v.v.p) {
+    sp_String *h = (sp_String *)v.v.p;
+    if (h->data) { *n = (size_t)h->len; return h->data; }
+  }
   *n = 0;
   return "";
 }
@@ -673,11 +679,8 @@ const char *sp_PolyArray_pack(sp_PolyArray *arr, const char *fmt) {SP_GC_ROOT(ar
       continue;
     }
     if (spec == 'm' || spec == 'M') {
-      const char *s = ""; size_t sl = 0;
-      if (idx < arr->len) {
-        sp_RbVal e = arr->data[idx];
-        if (e.tag == SP_TAG_STR && e.v.s) { s = e.v.s; sl = sp_str_byte_len(s); }
-      }
+      size_t sl = 0;
+      const char *s = (idx < arr->len) ? pk_poly_to_str(arr->data[idx], &sl) : "";
       idx++;
       pk_str_directive(spec, count, s, sl, &buf, &len, &cap);
       continue;
