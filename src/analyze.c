@@ -29200,6 +29200,188 @@ static void refuse_hash_pair_string_mutations(Compiler *c) {
 /* A bare `@ivar` argument whose ivar is written from a local, handed to a
    parameter the callee appends to: the callee would append to a copy, so
    the program is refused (#6998). Runs once sharing analysis settles. */
+/* Two reads of one container: the same local in the same scope, or the
+   same instance variable of the same class. */
+static int fd_same_container(Compiler *c, int a, int b) {
+  const NodeTable *nt = c->nt;
+  if (a < 0 || b < 0 || nt_kind(nt, a) != nt_kind(nt, b)) return 0;
+  NodeKind k = nt_kind(nt, a);
+  if (k != NK_LocalVariableReadNode && k != NK_InstanceVariableReadNode) return 0;
+  const char *na = nt_str(nt, a, "name"), *nb = nt_str(nt, b, "name");
+  if (!na || !nb || !sp_streq(na, nb)) return 0;
+  return k == NK_LocalVariableReadNode ? comp_scope_of(c, a) == comp_scope_of(c, b)
+                                       : an_ivar_owner(c, a) == an_ivar_owner(c, b);
+}
+/* Two keys that are one key written twice: a Symbol, an Integer or a String
+   literal, or a read of the same local. */
+static int fd_same_key(Compiler *c, int a, int b) {
+  const NodeTable *nt = c->nt;
+  if (a < 0 || b < 0 || nt_kind(nt, a) != nt_kind(nt, b)) return 0;
+  const char *f = NULL;
+  switch (nt_kind(nt, a)) {
+    case NK_SymbolNode: f = "value"; break;
+    case NK_StringNode: f = "content"; break;
+    case NK_IntegerNode: return nt_int(nt, a, "value", 0) == nt_int(nt, b, "value", 0);
+    case NK_LocalVariableReadNode:
+      if (comp_scope_of(c, a) != comp_scope_of(c, b)) return 0;
+      f = "name"; break;
+    default: return 0;
+  }
+  const char *va = nt_str(nt, a, f), *vb = nt_str(nt, b, f);
+  return va && vb && sp_streq(va, vb);
+}
+/* The default of `c.fetch(k, v)` or `c.fetch(k) { v }`, -1 for any other
+   node. */
+static int fd_default(const NodeTable *nt, int call) {
+  if (call < 0 || nt_kind(nt, call) != NK_CallNode) return -1;
+  const char *cn = nt_str(nt, call, "name");
+  if (!cn || !sp_streq(cn, "fetch")) return -1;
+  int an = 0, ca = nt_ref(nt, call, "arguments");
+  const int *av = ca >= 0 ? nt_arr(nt, ca, "arguments", &an) : NULL;
+  if (an == 2) return av[1];
+  int blk = nt_ref(nt, call, "block");
+  if (an != 1 || blk < 0 || nt_kind(nt, blk) != NK_BlockNode) return -1;
+  int body = nt_ref(nt, blk, "body"), bn = 0;
+  const int *bb = body >= 0 && nt_kind(nt, body) == NK_StatementsNode ? nt_arr(nt, body, "body", &bn) : NULL;
+  return bn > 0 ? bb[bn - 1] : -1;
+}
+/* Can `v` be a String built where it stands (`+""`, `x.to_s`, an
+   interpolation), which no rule makes a shared handle? A literal is left
+   out, an append to it raises FrozenError; so are a variable and an element
+   read, which may hold a handle already. */
+static int fd_fresh_string(Compiler *c, int v, int depth) {
+  const NodeTable *nt = c->nt;
+  v = an_unparen(nt, v);
+  if (v < 0 || depth > 4) return 0;
+  switch (nt_kind(nt, v)) {
+    case NK_IfNode: {
+      int th = nt_ref(nt, v, "statements"), el = nt_ref(nt, v, "subsequent"), n = 0;
+      const int *b = th >= 0 ? nt_arr(nt, th, "body", &n) : NULL;
+      if (n > 0 && fd_fresh_string(c, b[n - 1], depth + 1)) return 1;
+      el = el >= 0 && nt_kind(nt, el) == NK_ElseNode ? nt_ref(nt, el, "statements") : -1;
+      b = el >= 0 ? nt_arr(nt, el, "body", &n) : NULL;
+      return el >= 0 && n > 0 && fd_fresh_string(c, b[n - 1], depth + 1);
+    }
+    case NK_StringNode: case NK_LocalVariableReadNode: case NK_InstanceVariableReadNode:
+    case NK_GlobalVariableReadNode: case NK_ConstantReadNode: case NK_ClassVariableReadNode:
+      return 0;
+    case NK_CallNode: {
+      int d = fd_default(nt, v);
+      if (d >= 0) return fd_fresh_string(c, d, depth + 1);
+      if (container_elem_read_p(nt, v)) return 0;
+      break;
+    }
+    default: break;
+  }
+  return infer_type(c, v) == TY_STRING;
+}
+/* Is `a` a literal key that cannot be the key `b`? */
+static int fd_other_key(const NodeTable *nt, int a, int b) {
+  NodeKind ka = a < 0 ? NK_NilNode : nt_kind(nt, a), kb = b < 0 ? NK_NilNode : nt_kind(nt, b);
+  int la = ka == NK_SymbolNode || ka == NK_StringNode || ka == NK_IntegerNode;
+  int lb = kb == NK_SymbolNode || kb == NK_StringNode || kb == NK_IntegerNode;
+  if (!la || !lb) return 0;
+  if (ka != kb) return 1;
+  if (ka == NK_IntegerNode) return nt_int(nt, a, "value", 0) != nt_int(nt, b, "value", 0);
+  const char *f = ka == NK_SymbolNode ? "value" : "content";
+  const char *va = nt_str(nt, a, f), *vb = nt_str(nt, b, f);
+  return va && vb && !sp_streq(va, vb);
+}
+/* Does the store `w` find nothing under `key` the first time it runs? Then
+   its `fetch` takes the default, whatever the program is given. It is so
+   when the variable `cont` reads is only ever bound to a Hash literal with
+   other literal keys, or an empty one, every other store through it is
+   `[]=` under another literal key, and every other use of it is a read.
+   Anything else that carries the variable's name (a parameter, a target,
+   another kind of write, the Symbol `attr_reader` takes) says no, and so
+   does a use that is no call's receiver: a Hash handed on may be filled
+   somewhere else. A name is matched in every scope and class, which only
+   counts more stores. */
+static int fd_first_run_misses(Compiler *c, int w, int cont, int key) {
+  static const char *const reads_only[] = {
+    "[]", "fetch", "dig", "key?", "size", "length", "empty?", "keys", "values",
+    "each", "each_pair", "to_a", "inspect", NULL };
+  const NodeTable *nt = c->nt;
+  NodeKind rk = nt_kind(nt, cont);
+  int ivar = rk == NK_InstanceVariableReadNode, bare = 0;
+  const char *cn = nt_str(nt, cont, "name");
+  if (!cn) return 0;
+  for (int u = 0; u < nt->count; u++) {
+    NodeKind k = nt_kind(nt, u);
+    if (k == NK_CallNode) {
+      int r = nt_ref(nt, u, "receiver");
+      const char *rn = r >= 0 && nt_kind(nt, r) == rk ? nt_str(nt, r, "name") : NULL;
+      if (rn && sp_streq(rn, cn)) {
+        const char *un = nt_str(nt, u, "name");
+        bare--;
+        if (u == w) continue;
+        if (un && sp_streq(un, "[]=")) {
+          int an = 0, ua = nt_ref(nt, u, "arguments");
+          const int *av = ua >= 0 ? nt_arr(nt, ua, "arguments", &an) : NULL;
+          if (an != 2 || !fd_other_key(nt, av[0], key)) return 0;
+        }
+        else if (!un || !hp_name_in(un, reads_only)) return 0;
+        continue;
+      }
+    }
+    if (ivar && (k == NK_SymbolNode || k == NK_StringNode)) {
+      const char *sv = nt_str(nt, u, k == NK_SymbolNode ? "value" : "content");
+      if (sv && (sp_streq(sv, cn) || sp_streq(sv, cn + 1))) return 0;
+    }
+    const char *un = nt_str(nt, u, "name");
+    if (!un || !sp_streq(un, cn)) continue;
+    if (k == rk) { bare++; continue; }
+    if (k != (ivar ? NK_InstanceVariableWriteNode : NK_LocalVariableWriteNode) &&
+        k != (ivar ? NK_InstanceVariableOrWriteNode : NK_LocalVariableOrWriteNode)) return 0;
+    int v = an_unparen(nt, nt_ref(nt, u, "value")), en = 0;
+    if (v < 0 || nt_kind(nt, v) != NK_HashNode) return 0;
+    const int *ev = nt_arr(nt, v, "elements", &en);
+    for (int e = 0; e < en; e++)
+      if (nt_kind(nt, ev[e]) != NK_AssocNode || !fd_other_key(nt, nt_ref(nt, ev[e], "key"), key)) return 0;
+  }
+  return bare == 0;
+}
+/* `c[k] = c.fetch(k, v)` stores v where k is missing, and v is no store a
+   sharing rule reaches. Where a String is changed in place through `c[k]`
+   the Hash's other Strings are shared handles, v went in as a plain String,
+   and the change landed in a copy. Until #7369 the walk of c's stores did
+   not end for this shape and the compiler crashed; since then it compiled
+   and the change was lost with nothing said.
+
+   Refused by name, after the sharing analysis has settled, and only where
+   the loss is certain: one variable's Hash and one key in the store, the
+   fetch and the change, a fetch the analysis left unmarked, and a first run
+   that has to miss. Where the key may be there, the statement stores back
+   the element it read, which is right, and it compiles as before. */
+static void refuse_fetch_default_stored_back(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  for (int w = an_calls_named_first(c, "[]="); w >= 0; w = an_calls_named_next(w)) {
+    int wc = 0, wa = nt_ref(nt, w, "arguments"), cont = nt_ref(nt, w, "receiver");
+    const int *wv = wa >= 0 ? nt_arr(nt, wa, "arguments", &wc) : NULL;
+    if (nt_kind(nt, w) != NK_CallNode || wc != 2 || cont < 0) continue;
+    int f = an_unparen(nt, wv[1]), d = fd_default(nt, f), fc = 0, changed = 0;
+    if (d < 0 || c->strbuf_box[f] || c->strbuf_box[wv[1]]) continue;
+    const int *fv = nt_arr(nt, nt_ref(nt, f, "arguments"), "arguments", &fc);
+    if (!fd_same_container(c, nt_ref(nt, f, "receiver"), cont) || !fd_same_key(c, fv[0], wv[0])) continue;
+    if (!fd_fresh_string(c, d, 0)) continue;
+    NT_FOREACH_KIND(nt, NK_CallNode, mu) {
+      const char *mun = nt_str(nt, mu, "name");
+      if (changed || !mun || !sp_str_mutator(mun, SP_MUT_CONTAINER)) continue;
+      int er = nt_ref(nt, mu, "receiver"), ec = 0;
+      const char *en = er >= 0 && nt_kind(nt, er) == NK_CallNode ? nt_str(nt, er, "name") : NULL;
+      if (!en || !sp_streq(en, "[]") || !fd_same_container(c, nt_ref(nt, er, "receiver"), cont)) continue;
+      int ea = nt_ref(nt, er, "arguments");
+      const int *ev = ea >= 0 ? nt_arr(nt, ea, "arguments", &ec) : NULL;
+      changed = ec == 1 && fd_same_key(c, ev[0], wv[0]);
+    }
+    if (changed && fd_first_run_misses(c, w, cont, wv[0]))
+      unsupported_feature(c, f,
+          "a String that is the default of `fetch` is stored back under the key it "
+          "was fetched with (h[k] = h.fetch(k, v)) and then changed in place through "
+          "h[k]: a String is not yet shared by reference through the default of "
+          "`fetch`. Write h[k] = v unless h.key?(k)");
+  }
+}
 static void refuse_lent_ivar_copies(Compiler *c) {
   for (int pass = 0; pass < 2; pass++)
   for (int cu = comp_kind_first(c, pass ? NK_SuperNode : NK_CallNode); cu >= 0; cu = comp_kind_next(c, cu)) {
@@ -33653,6 +33835,7 @@ static void an_phase_reconcile_check(Compiler *c) {
      analysis settles (#6998). */
   refuse_lent_ivar_copies(c);
   refuse_hash_pair_string_mutations(c);
+  refuse_fetch_default_stored_back(c);
 
   /* Last: the capture pass again, on the settled types. a_block_is_lifted asks
      whether the receiver is poly, and a receiver that widened after the

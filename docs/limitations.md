@@ -703,6 +703,7 @@ Not yet shared:
 - through `Thread.new` or `Fiber#resume`, a String variable handed to a block parameter that appends to it, unless its read already hands over the shared handle or the local is read only as that argument;
 - through a Hash's value block (`each_value`, `each`, `each_pair`, or an element iterator over `values`, `values_at` or `fetch_values`), a stored String variable when the value parameter appends to it;
 - through a Hash's `[key, value]` pairs (`h.to_a`, `h.first`, `h.min_by { }`, `k, v = h.first`, an iterator over them), a String value that is then mutated;
+- through the default of `fetch` stored back under the key it was fetched with (`h[k] = h.fetch(k, v)`), a String that is then changed in place through `h[k]`, where the Hash holds nothing under that key before the store (where it may, the store puts back the element it read, and compiles);
 - through `yield` into a capture-wrapper block, a String variable whose captured parameter appends to it without already being the shared handle, including a splatted yield;
 - through an Array's chained index into an appending block;
 
