@@ -1444,6 +1444,30 @@ int emit_regex_pat_to_buf(Compiler *c, int nid, Buf *b) {
   }
   return 0;
 }
+/* The pattern a Regexp argument stands for, as C text in `pat` (32 bytes):
+   the slot of a literal the compiler can name, else a temp that `b` -- which
+   is inside the caller's statement expression -- reads the value into once.
+   With `nilmsg`, a variable holding nil raises that TypeError, as CRuby does
+   for the method; without, the caller answers for a NULL pattern itself.
+   Answers 0, writing nothing, when `nid` is neither. */
+int emit_re_arg_pat(Compiler *c, int nid, const char *nilmsg, Buf *b, char *pat) {
+  int ri = re_lit_index(c, nid);
+  if (ri >= 0) { snprintf(pat, 32, "sp_re_pat_%d", ri); return 1; }
+  if (comp_ntype(c, nid) != TY_REGEX) return 0;
+  int tp = ++g_tmp;
+  buf_printf(b, " mrb_regexp_pattern *_t%d = ", tp);
+  if (nilmsg) buf_puts(b, "sp_re_arg(");
+  emit_expr(c, nid, b);
+  if (nilmsg) { buf_puts(b, ", "); emit_str_literal(b, nilmsg); buf_puts(b, ")"); }
+  buf_puts(b, ";");
+  snprintf(pat, 32, "_t%d", tp);
+  return 1;
+}
+/* Whether emit_re_arg_pat has a pattern for `nid`: a literal the compiler can
+   name, or a value typed Regexp. */
+int re_arg_p(Compiler *c, int nid) {
+  return re_lit_index(c, nid) >= 0 || comp_ntype(c, nid) == TY_REGEX;
+}
 int nameset_has(NameSet *s, const char *nm) {
   if (!nm) return 0;
   for (int i = 0; i < s->n; i++) if (sp_streq(s->v[i], nm)) return 1;

@@ -1429,17 +1429,24 @@ static int emit_kind_array_iter_call(Compiler *c, int id, Buf *b, const NodeTabl
     else                              buf_printf(b, " _t%d == 1; })", tc);
     { *out = 1; return 1; }
   }
-  /* array.none?(/re/) / any?/all?/one? with a Regexp pattern over strings. */
+  /* array.none?(/re/) / any?/all?/one? with a Regexp pattern over strings:
+     a literal, or one held in a variable, which matches nothing when nil. It
+     was tested with ==, so no element matched. */
   if (is_quantifier(name) &&
       argc == 1 && nt_ref(nt, id, "block") < 0 &&
-      rt == TY_STR_ARRAY && re_lit_index(c, argv[0]) >= 0) {
-    int rei = re_lit_index(c, argv[0]);
+      rt == TY_STR_ARRAY && re_arg_p(c, argv[0])) {
+    int held = re_lit_index(c, argv[0]) < 0;
     int ta = ++g_tmp, tc = ++g_tmp, ti = ++g_tmp;
+    char pat[32];
     Buf ra = expr_buf(c, recv);
     buf_printf(b, "({ sp_StrArray *_t%d = %s;", ta, ra.p ? ra.p : "NULL"); free(ra.p);
+    if (held) buf_printf(b, " SP_GC_ROOT(_t%d);", ta);
+    emit_re_arg_pat(c, argv[0], NULL, b, pat);
     buf_printf(b, " sp_int _t%d = 0;", tc);
     buf_printf(b, " for (sp_int _t%d = 0; _t%d < sp_StrArray_length(_t%d); _t%d++)", ti, ti, ta, ti);
-    buf_printf(b, " if (sp_re_match(sp_re_pat_%d, sp_StrArray_get(_t%d, _t%d)) >= 0) _t%d++;", rei, ta, ti, tc);
+    buf_puts(b, " if (");
+    if (held) buf_printf(b, "%s && ", pat);
+    buf_printf(b, "sp_re_match(%s, sp_StrArray_get(_t%d, _t%d)) >= 0) _t%d++;", pat, ta, ti, tc);
     if (sp_streq(name, "all?"))       buf_printf(b, " _t%d == sp_StrArray_length(_t%d); })", tc, ta);
     else if (sp_streq(name, "any?"))  buf_printf(b, " _t%d > 0; })", tc);
     else if (sp_streq(name, "none?")) buf_printf(b, " _t%d == 0; })", tc);

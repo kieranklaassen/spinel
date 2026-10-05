@@ -81,6 +81,7 @@ sp_int sp_re_match_next(mrb_regexp_pattern *pat, const char *str, sp_int pos);
 sp_int sp_re_rindex(mrb_regexp_pattern *pat, const char *str);
 sp_StrArray *sp_re_rpartition(mrb_regexp_pattern *pat, const char *str);
 sp_bool sp_re_match_p(mrb_regexp_pattern *pat, const char *str);
+mrb_regexp_pattern *sp_re_arg(mrb_regexp_pattern *pat, const char *msg);
 sp_bool sp_re_match_p_at(mrb_regexp_pattern *pat, const char *str, sp_int pos);
 sp_bool sp_re_case_eq(mrb_regexp_pattern *pat, sp_RbVal v);
 /* poly-operand match forms: either side may carry the pattern (#3961) */

@@ -383,6 +383,12 @@ sp_StrArray *sp_re_rpartition(mrb_regexp_pattern *pat, const char *str) {
   sp_StrArray_push(r, after);
   return r;
 }
+/* A Regexp argument read out of a variable: one that holds nil is CRuby's
+   TypeError for the method, where the engine would be handed no pattern. */
+mrb_regexp_pattern *sp_re_arg(mrb_regexp_pattern *pat, const char *msg) {
+  if (!pat) sp_raise_cls("TypeError", msg);
+  return pat;
+}
 sp_bool sp_re_match_p(mrb_regexp_pattern *pat, const char *str) {
   if (!str) return FALSE;
   int64_t slen = (int64_t)sp_str_byte_len(str);
