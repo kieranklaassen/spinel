@@ -1133,8 +1133,21 @@ int is_blk_param_call(Compiler *c, int node, int mi) {
   const char *bp = c->scopes[mi].blk_param;
   return rn && bp && bp[0] && sp_streq(rn, bp);
 }
-int g_yvt_mi[MAX_YVT_DEPTH];
+int *g_yvt_mi = NULL;
 int g_yvt_depth = 0;
+static int g_yvt_cap = 0;
+/* Put method `mi` on the stack of methods being answered; 0 when it is on it
+   already (a method that forwards its block to itself). */
+static int yvt_enter(int mi) {
+  for (int i = 0; i < g_yvt_depth; i++)
+    if (g_yvt_mi[i] == mi) return 0;
+  if (g_yvt_depth == g_yvt_cap) {
+    g_yvt_cap = g_yvt_cap ? g_yvt_cap * 2 : 32;
+    g_yvt_mi = realloc(g_yvt_mi, (size_t)g_yvt_cap * sizeof *g_yvt_mi);
+  }
+  g_yvt_mi[g_yvt_depth++] = mi;
+  return 1;
+}
 /* set by yield_value_diverges to make yield_value_type unify all call sites
    (rather than take the first concrete one) for divergence detection */
 int g_yvt_unify_all = 0;
@@ -1464,10 +1477,7 @@ static TyKind yvt_forwarded_value(Compiler *c, int emi) {
 }
 
 TyKind yield_value_type(Compiler *c, int mi) {
-  for (int i = 0; i < g_yvt_depth; i++)
-    if (g_yvt_mi[i] == mi) return TY_UNKNOWN;
-  if (g_yvt_depth >= MAX_YVT_DEPTH) return TY_UNKNOWN;
-  g_yvt_mi[g_yvt_depth++] = mi;
+  if (!yvt_enter(mi)) return TY_UNKNOWN;
 
   const NodeTable *nt = c->nt;
   TyKind result = TY_UNKNOWN;
@@ -1591,10 +1601,7 @@ TyKind yield_value_type(Compiler *c, int mi) {
    returns how many. */
 int yield_block_tails(Compiler *c, int mi, int *out, int max) {
   if (max <= 0) return 0;
-  for (int i = 0; i < g_yvt_depth; i++)
-    if (g_yvt_mi[i] == mi) return 0;
-  if (g_yvt_depth >= MAX_YVT_DEPTH) return 0;
-  g_yvt_mi[g_yvt_depth++] = mi;
+  if (!yvt_enter(mi)) return 0;
 
   const NodeTable *nt = c->nt;
   int n = 0;
@@ -1628,10 +1635,7 @@ int yield_block_tails(Compiler *c, int mi, int *out, int max) {
    yield_value_type so that a method with real call sites keeps its per-site
    specialization instead of being pinned to a sibling's block type. */
 TyKind yield_value_type_via_super(Compiler *c, int mi) {
-  for (int i = 0; i < g_yvt_depth; i++)
-    if (g_yvt_mi[i] == mi) return TY_UNKNOWN;
-  if (g_yvt_depth >= MAX_YVT_DEPTH) return TY_UNKNOWN;
-  g_yvt_mi[g_yvt_depth++] = mi;
+  if (!yvt_enter(mi)) return TY_UNKNOWN;
   const NodeTable *nt = c->nt;
   if (yvt_nt != nt || yvt_ntc != nt->count) yvt_build(c);
   TyKind result = TY_UNKNOWN;
@@ -1889,10 +1893,7 @@ static int block_given_tail_then_last(Compiler *c, int last) {
    present here; a forward from a method whose own answer is mixed is mixed
    too, one level up (recursion bounded like yield_value_type's). */
 static int method_block_presence(Compiler *c, int mi) {
-  for (int i = 0; i < g_yvt_depth; i++)
-    if (g_yvt_mi[i] == mi) return -1;
-  if (g_yvt_depth >= MAX_YVT_DEPTH) return -1;
-  g_yvt_mi[g_yvt_depth++] = mi;
+  if (!yvt_enter(mi)) return -1;
   const NodeTable *nt = c->nt;
   const char *mn = c->scopes[mi].name;
   int with = 0, without = 0, mixed = 0;
