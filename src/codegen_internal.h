@@ -191,6 +191,7 @@ extern int  g_sn_skip;   /* safe-nav re-entry marker (see codegen_util.c) */
    writes for its receiver. What runs ahead of that guard runs although the
    receiver is nil. */
 int sn_guard_ahead(Compiler *c, int id);
+void emit_sn_tmp_root(Compiler *c, TyKind t, int tsn, Buf *b);
 extern int  g_cls_tag_skip;   /* poly-dispatch builtin-arm re-entry marker */
 /* Ask subtree_may_allocate before leaving something unrooted across `id`:
    its "no" is a keyed decision (src/decide.c). subtree_allocates is the
