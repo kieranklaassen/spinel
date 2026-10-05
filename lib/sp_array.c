@@ -648,6 +648,16 @@ sp_StrArray*sp_StrArray_shuffle(sp_StrArray*a){SP_GC_ROOT(a);sp_StrArray*r=sp_St
 const char *sp_StrArray_sample(sp_StrArray*a){SP_GC_ROOT(a);if(a->len<=0)return sp_str_empty;return a->data[sp_krand_below(a->len)];}
 
 /* ============ poly/inspect-dependent array ops (display, concat, to_poly) ============ */
+/* Two all-digit Strings as numbers: leading zeros aside, the longer is the
+   greater. */
+static int sp_str_upto_digits_cmp(const char *a, const char *b) {
+  size_t la = sp_str_byte_len(a), lb = sp_str_byte_len(b);
+  while (la > 1 && *a == '0') { a++; la--; }
+  while (lb > 1 && *b == '0') { b++; lb--; }
+  if (la != lb) return la < lb ? -1 : 1;
+  int r = memcmp(a, b, la);
+  return r < 0 ? -1 : r > 0;
+}
 /* The members String#upto yields, in CRuby's rb_str_upto_each order of
    cases, each a fresh copy (the frozen begin is not handed out) passed to
    fn until it answers nonzero. */
@@ -669,11 +679,11 @@ void sp_str_upto_each(const char *s, const char *e, sp_int excl, int (*fn)(const
   }
   /* two all-digit ends: the numbers between, zero-padded to the begin's
      width, so ("9".."11") holds "9", "10", "11" (#3549) and ("1".."010")
-     stops at "10". Past 18 digits the succ walk below serves. */
-  int digits = ascii && sl > 0 && el > 0 && sl <= 18 && el <= 18;
+     stops at "10". */
+  int digits = ascii && sl > 0 && el > 0;
   for (size_t i = 0; digits && i < sl; i++) if (s[i] < '0' || s[i] > '9') digits = 0;
   for (size_t i = 0; digits && i < el; i++) if (e[i] < '0' || e[i] > '9') digits = 0;
-  if (digits) {
+  if (digits && sl <= 18 && el <= 18) {
     long long bi = strtoll(s, NULL, 10), ei = strtoll(e, NULL, 10);
     for (; excl ? bi < ei : bi <= ei; bi++) {
       char buf[32];
@@ -681,6 +691,20 @@ void sp_str_upto_each(const char *s, const char *e, sp_int excl, int (*fn)(const
       if (fn(sp_str_from_bytes(buf, (size_t)n), arg)) return;
     }
     return;
+  }
+  /* past 18 digits a long long does not hold them: the same numbers by
+     String#succ, which carries through the digits and keeps the begin's
+     zeros, each compared with the end as a number */
+  if (digits) {
+    const char *num = s;
+    SP_GC_ROOT_STR(num);
+    for (;;) {
+      int c = sp_str_upto_digits_cmp(num, e);
+      if (c > 0 || (excl && c == 0)) return;
+      if (fn(sp_str_from_bytes(num, sp_str_byte_len(num)), arg)) return;
+      if (c == 0) return;
+      num = sp_str_succ(num);
+    }
   }
   /* otherwise String#succ from the begin up to the end, never past the
      end's length, so ("a".."bb") runs through "z" and on to "bb", and
