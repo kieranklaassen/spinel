@@ -1,0 +1,11 @@
+["x", "xbcdef"]
+["yy", "xyydef"]
+["z", "xyydz"]
+["ww", "xyywwz"]
+"q"
+"qyywwz"
+[["m", 1], "qyywwm"]
+"index 40 out of string"
+"can't modify frozen String: \"abc\""
+["xy", "axyc"]
+["z", "abz"]
