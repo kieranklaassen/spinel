@@ -12547,6 +12547,10 @@ static SP_TLS int sp_poly_recur_mark[SP_EXC_STACK_MAX];
    jumped over, so give the path back the depth that frame recorded. */
 static inline void sp_poly_recur_unwind(void) {
   if (sp_exc_top > 0) sp_poly_recur_pop(sp_poly_recur_mark[sp_exc_top - 1]);
+  /* and the methods jumped over that match give their callers' `$~` back
+     (lib/sp_re.c); a frame notes the depth it was entered at, as the entries
+     sp_handler_stacks_unwind drops do, so no arm pays for it */
+  if (SP_UNLIKELY(sp_re_frame_top != NULL)) sp_re_frames_leave(SP_RE_FRAME_EXC, sp_exc_top);
 }
 #define sp_cur_handled() (sp_rescue_sp > 0 ? sp_exc_handling[sp_rescue_sp-1] : NULL)
 /* Push a handled exception. sp_rescue_sp grows with recursion *through* rescue
@@ -13527,6 +13531,7 @@ static void sp_throw(const char *tag, int kind, sp_RbVal val) {
         longjmp(sp_exc_stack[sp_exc_top - 1], 1);
       }
       sp_poly_recur_pop(sp_catch_recur_mark[i]);
+      sp_re_frames_leave(SP_RE_FRAME_CATCH, i + 1);
       longjmp(sp_catch_stack[i], 1);
     }
     i--;
@@ -13615,6 +13620,7 @@ static SP_NORETURN void sp_brk_throw(sp_int serial, sp_RbVal v) {
       longjmp(sp_exc_stack[sp_exc_top - 1], 1);
     }
     sp_poly_recur_pop(sp_brk_recur_mark[i]);
+    sp_re_frames_leave(SP_RE_FRAME_BRK, i + 1);
     longjmp(sp_brk_stack[i], 1);
   }
   /* no live scope carries the serial: an escaped/foreign proc's break. An
@@ -13678,16 +13684,44 @@ static sp_int sp_proc_home_next(void) {
   return sp_proc_home_seq++;
 #endif
 }
+/* Open a matching method's match frame (sp_re_frame, lib/sp_re.h) on the
+   chain a jump walks: note where each handler stack stands, so that a jump out
+   of the method can tell it is being left. The stacks are this file's own, so
+   the note is taken here and not in sp_re_frame_push. */
+static inline void sp_re_frame_enter(sp_re_frame *f) {
+  f->depth[SP_RE_FRAME_EXC] = sp_exc_top;
+  f->depth[SP_RE_FRAME_CATCH] = sp_catch_top;
+  f->depth[SP_RE_FRAME_BRK] = sp_brk_top;
+  f->home = sp_proc_ret_head;
+  sp_re_frame_push(f);
+  sp_re_clear_last_match();
+  f->prev = sp_re_frame_top;
+  sp_re_frame_top = f;
+}
+/* The innermost match frame a return to home `h` keeps. A home has no depth
+   to note, but both chains run newest first, so one pass pairs them: a frame
+   whose home is still on the chain down to `h` was entered inside `h`'s
+   method and is left with it. */
+static sp_re_frame *sp_re_frame_outside(sp_proc_home *h) {
+  sp_re_frame *f = sp_re_frame_top;
+  for (sp_proc_home *x = sp_proc_ret_head; f; f = f->prev) {
+    while (x != h && (void *)x != f->home) x = x->prev;
+    if ((void *)x != f->home) break;
+  }
+  return f;
+}
 static void sp_proc_return(sp_int id, sp_RbVal v) {
   for (sp_proc_home *h = sp_proc_ret_head; h; h = h->prev) {
     if (h->id == id) {
       h->val = v;
+      h->re_keep = sp_re_frame_outside(h);   /* found now: the ensures on the way move the chain */
       if (sp_exc_top > h->exc_top) {   /* run intervening ensures first */
         sp_unwind_kind = SP_UNWIND_PROCRET; sp_unwind_home = h; sp_unwind_exc_top = h->exc_top;
         sp_poly_recur_unwind();
         longjmp(sp_exc_stack[sp_exc_top - 1], 1);
       }
       sp_poly_recur_pop(h->recur_mark);
+      sp_re_frames_leave_to((sp_re_frame *)h->re_keep);
       longjmp(h->jb, 1);
     }
   }
@@ -13783,13 +13817,16 @@ static void sp_unwind_resume(void) {
      the way here) */
   if (kind == SP_UNWIND_PROCRET) {
     sp_poly_recur_pop(sp_unwind_home->recur_mark);
+    sp_re_frames_leave_to((sp_re_frame *)sp_unwind_home->re_keep);
     longjmp(sp_unwind_home->jb, 1);
   }
   if (kind == SP_UNWIND_BREAK) {
     sp_poly_recur_pop(sp_brk_recur_mark[sp_unwind_target]);
+    sp_re_frames_leave(SP_RE_FRAME_BRK, sp_unwind_target + 1);
     longjmp(sp_brk_stack[sp_unwind_target], 1);
   }
   sp_poly_recur_pop(sp_catch_recur_mark[sp_unwind_target]);
+  sp_re_frames_leave(SP_RE_FRAME_CATCH, sp_unwind_target + 1);
   longjmp(sp_catch_stack[sp_unwind_target], 1);
 }
 
@@ -13855,6 +13892,7 @@ void sp_exc_ctx_save(void *p) {            /* current globals -> ctx */
     x->rrbm[i] = sp_brk_recur_mark[i]; }
   x->bn = bn;
   x->prhead = sp_proc_ret_head;
+  x->rftop = sp_re_frame_top;
   x->uk = sp_unwind_kind; x->ut = sp_unwind_target; x->ue = sp_unwind_exc_top; x->uh = sp_unwind_home;
   int rn = sp_rescue_sp;
   if (rn > x->rcap) { x->rcap = rn;
@@ -13898,6 +13936,7 @@ void sp_exc_ctx_load(void *p) {            /* ctx -> current globals */
     sp_brk_recur_mark[i] = x->rrbm[i]; }
   sp_brk_top = x->bn;
   sp_proc_ret_head = x->prhead;
+  sp_re_frame_top = (sp_re_frame *)x->rftop;
   sp_unwind_kind = x->uk; sp_unwind_target = x->ut; sp_unwind_exc_top = x->ue; sp_unwind_home = x->uh;
   for (int i = 0; i < x->rn; i++) sp_exc_handling[i] = x->shand[i];
   sp_rescue_sp = x->rn; sp_pending_cause = x->pcause;

@@ -21,6 +21,7 @@ typedef struct sp_proc_home {
   int exc_top;                /* sp_exc_top at the method's entry */
   int catch_top;              /* sp_catch_top at the method's entry */
   int recur_mark;             /* walk-path depth at the method's entry (see sp_poly_recur_mark) */
+  void *re_keep;              /* the match frame a return to here keeps (sp_re_frame_outside); set by the return */
   sp_int id;                 /* fresh id captured by the home's returning procs */
   struct sp_proc_home *prev;  /* enclosing home, forming the per-fiber chain */
 } sp_proc_home;
@@ -32,6 +33,7 @@ typedef struct {
   jmp_buf *cs; const char **ct; unsigned char *ctk; sp_RbVal *cv; int *cet;  int cn, ccap;
   jmp_buf *bs; sp_RbVal *bv; sp_int *bser; int *bet;     int bn, bcap;  /* break scopes */
   sp_proc_home *prhead;  /* this fiber's proc-return chain head (nodes on its C stack) */
+  void *rftop;           /* this fiber's chain of match frames (sp_re_frame_top; frames on its C stack) */
   int uk, ut, ue; sp_proc_home *uh;  /* transient unwind state (in flight only while running ensures) */
   void **shand; int rn, rcap;        /* sp_exc_handling prefix [0..sp_rescue_sp) */
   void *pcause;                      /* sp_pending_cause */

@@ -2142,12 +2142,14 @@ int scope_reads_callee(Compiler *c, int si) {
   return 0;
 }
 
+static const char *const match_call_names[] = {
+  "=~", "!~", "match", "match?", "scan", "gsub", "gsub!", "sub", "sub!",
+  "split", "slice", "index", "rindex", "partition", "rpartition",
+  "start_with?", "end_with?", "grep", "grep_v", "[]", "===", NULL };
+
 static int scope_performs_match(Compiler *c, int si) {
   const NodeTable *nt = c->nt;
-  static const char *const mnames[] = {
-    "=~", "!~", "match", "match?", "scan", "gsub", "gsub!", "sub", "sub!",
-    "split", "slice", "index", "rindex", "partition", "rpartition",
-    "start_with?", "end_with?", "grep", "grep_v", "[]", "===", NULL };
+  const char *const *mnames = match_call_names;
   int nids = 0; const int *ids = cg_scope_nodes(c, si, &nids);
   for (int k = 0; k < nids; k++) {
     int id = ids[k];
@@ -2279,9 +2281,16 @@ void emit_scope_decls_ends(Compiler *c, Scope *s, Buf *b, size_t *ends) {
   /* $~ and the $1.. globals derived from it are frame-local in Ruby: a match
      inside this method must not outlive it. The cleanup attribute puts the
      caller's registers back on every ordinary exit, early returns included. */
-  if (s->name && s->def_node >= 0 && scope_performs_match(c, si))
-    buf_puts(b, "    sp_re_frame _sp_rf SP_CLEANUP(sp_re_frame_pop);"
-                " sp_re_frame_push(&_sp_rf);\n");
+  if (s->name && s->def_node >= 0 && scope_performs_match(c, si)) {
+    /* where the frame is provably the method's own it is also put back when a
+       jump leaves the method (sp_re_frame_enter) */
+    if (g_match_frame_closed)
+      buf_puts(b, "    sp_re_frame _sp_rf SP_CLEANUP(sp_re_frame_leave);"
+                  " sp_re_frame_enter(&_sp_rf);\n");
+    else
+      buf_puts(b, "    sp_re_frame _sp_rf SP_CLEANUP(sp_re_frame_pop);"
+                  " sp_re_frame_push(&_sp_rf);\n");
+  }
   /* Take the name this call spelled, and clear the channel so a call that did
      not write it (or a later nested one) cannot be mistaken for ours (#3729). */
   if (s->name && s->def_node >= 0 && scope_reads_callee(c, si))
@@ -13450,6 +13459,114 @@ static int program_needs_class_machinery(Compiler *c) {
   return need;
 }
 
+/* Does this node read the match registers, or may it set them? Whatever
+   cannot be told counts: a Regexp in sight however it is used, a matching call
+   with an operand that is boxed or not typed, a pattern that may be a String,
+   a name only the run knows. */
+static int node_touches_match(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  const char *ty = nt_type(nt, id);
+  if (!ty) return 0;
+  if (comp_ntype(c, id) == TY_REGEX) return 1;
+  if (sp_streq(ty, "BackReferenceReadNode") || sp_streq(ty, "NumberedReferenceReadNode") ||
+      sp_streq(ty, "RegularExpressionNode") || sp_streq(ty, "InterpolatedRegularExpressionNode") ||
+      sp_streq(ty, "MatchLastLineNode") || sp_streq(ty, "InterpolatedMatchLastLineNode") ||
+      sp_streq(ty, "MatchWriteNode")) return 1;
+  if (sp_streq(ty, "WhenNode")) {
+    int wc = 0; const int *conds = nt_arr(nt, id, "conditions", &wc);
+    for (int j = 0; j < wc && conds; j++) {
+      TyKind t = comp_ntype(c, conds[j]);
+      if (t == TY_POLY || t == TY_UNKNOWN) return 1;
+    }
+    return 0;
+  }
+  if (sp_streq(ty, "SymbolNode")) {       /* send(:match, ..), method(:=~), &:match */
+    const char *v = nt_str(nt, id, "value");
+    if (!v) return 0;
+    for (int k = 0; match_call_names[k]; k++) if (sp_streq(v, match_call_names[k])) return 1;
+    return is_quantifier(v);
+  }
+  const char *nm = nt_str(nt, id, "name");
+  if (!nm) return 0;
+  if (strncmp(ty, "GlobalVariable", 14) == 0)
+    return sp_streq(nm, "$~") || sp_streq(nm, "$&") || sp_streq(nm, "$`") ||
+           sp_streq(nm, "$'") || sp_streq(nm, "$+");
+  if (nt_kind(nt, id) != NK_CallNode) return 0;
+  int a = nt_ref(nt, id, "arguments");
+  int an = 0; const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
+  if (sp_streq(nm, "last_match")) return 1;
+  if (sp_streq(nm, "send") || sp_streq(nm, "__send__") || sp_streq(nm, "public_send") ||
+      sp_streq(nm, "method") || sp_streq(nm, "public_method") || sp_streq(nm, "instance_method"))
+    return an < 1 || !av || nt_kind(nt, av[0]) != NK_SymbolNode;
+  /* these set them for a String pattern too */
+  if (sp_streq(nm, "match") || sp_streq(nm, "scan") || sp_streq(nm, "gsub") ||
+      sp_streq(nm, "gsub!") || sp_streq(nm, "sub") || sp_streq(nm, "sub!")) return 1;
+  int hit = is_quantifier(nm);
+  for (int k = 0; match_call_names[k] && !hit; k++) if (sp_streq(nm, match_call_names[k])) hit = 1;
+  if (!hit) return 0;
+  int r = nt_ref(nt, id, "receiver");
+  TyKind t = r >= 0 ? comp_ntype(c, r) : TY_NIL;
+  if (t == TY_POLY || t == TY_UNKNOWN) return 1;
+  for (int k = 0; k < an && av; k++) {
+    t = comp_ntype(c, av[k]);
+    if (t == TY_POLY || t == TY_UNKNOWN) return 1;
+  }
+  return 0;
+}
+
+/* A block given to a built-in value's own method runs where it is written:
+   the loop is emitted around it, and so are `loop` and `catch`. Any other
+   block may be handed on as a Proc, and counts as one. */
+static int block_runs_in_place(Compiler *c, int call) {
+  const NodeTable *nt = c->nt;
+  const char *nm = nt_str(nt, call, "name");
+  if (!nm || nt_kind(nt, call) != NK_CallNode) return 0;
+  int r = nt_ref(nt, call, "receiver");
+  if (r < 0) return (sp_streq(nm, "loop") || sp_streq(nm, "catch")) && !diag_user_defines(c, nm);
+  if (recv_user_defines(c, nm)) return 0;
+  TyKind t = comp_ntype(c, r);
+  return ty_is_array(t) || ty_is_hash(t) || t == TY_INT || t == TY_BIGINT || t == TY_FLOAT ||
+         t == TY_STRING || t == TY_STRBUF || t == TY_SYMBOL || t == TY_RANGE ||
+         t == TY_FLOAT_RANGE || t == TY_STR_RANGE || t == TY_MATCHDATA || t == TY_REGEX ||
+         t == TY_IO || t == TY_ARGF || t == TY_DIR;
+}
+
+/* Are the match registers a method sees while it runs its own frame's? Code
+   of another frame must not touch them inside it. Such code is: a block that
+   may run as a function of its own (it belongs to the frame it was written
+   in, and runs inside whichever method calls it); a method that takes a
+   block, whose body is spliced into its caller; a method that saves no frame
+   (scope_performs_match), which leaves what it sets to its caller; a class or
+   module body, which runs in the top level's frame here. */
+static int match_frame_closed(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  int n = nt->count, hit = 0;
+  char *other = (char *)calloc((size_t)(n > 0 ? n : 1), 1);
+  char *framed = (char *)calloc((size_t)(c->nscopes > 0 ? c->nscopes : 1), 1);
+  if (!other || !framed) { free(other); free(framed); return 0; }
+  for (int id = 0; id < n; id++) {
+    int body = -1;
+    const char *ty = nt_type(nt, id);
+    if (ty && sp_streq(ty, "LambdaNode")) body = nt_ref(nt, id, "body");
+    else {
+      int blk = nt_ref(nt, id, "block");
+      if (blk >= 0 && nt_kind(nt, blk) == NK_BlockNode && !block_runs_in_place(c, id))
+        body = nt_ref(nt, blk, "body");
+    }
+    if (body >= 0 && !other[body]) a_mark_subtree(c, body, other);
+    int si = c->nscope[id];
+    if (si < 0 || si >= c->nscopes) continue;
+    Scope *s = &c->scopes[si];
+    if (!s->name) { if (id < c->node_cap && c->node_cbody[id] >= 0) other[id] = 1; continue; }
+    if (!framed[si]) framed[si] = (s->def_node >= 0 && scope_performs_match(c, si)) ? 1 : 2;
+    if (s->yields || s->blk_param || framed[si] == 2) other[id] = 1;
+  }
+  for (int id = 0; id < n && !hit; id++)
+    if (other[id]) hit = node_touches_match(c, id);
+  free(other); free(framed);
+  return !hit;
+}
+
 /* Whole-program scan for the prologue features (see codegen_internal.h). Each
    flag over-approximates (a user method named `rand` keeps srand; that is
    harmless), so a feature that is genuinely used is never missed: a symbol /
@@ -13461,9 +13578,12 @@ static void scan_prologue_features(Compiler *c) {
   g_uses_regex = 0; g_uses_argv = 0; g_uses_threads = 0; g_uses_finalizers = 0;
   g_uses_program_name = 0;
   g_reads_match_regs = 0;
+  int fibers = 0;      /* user code can run on a fiber: a Fiber, a generator Enumerator */
   for (int i = 0; i < nt->count; i++) {
     const char *ty = nt_type(nt, i);
     if (!ty) continue;
+    { TyKind t = comp_ntype(c, i);       /* a blockless each_slice, a Thread held in a local */
+      if (t == TY_ENUMERATOR || t == TY_FIBER || t == TY_THREAD) fibers = 1; }
     if (sp_streq(ty, "BackReferenceReadNode") || sp_streq(ty, "NumberedReferenceReadNode"))
       g_reads_match_regs = 1;
     if (sp_streq(ty, "RegularExpressionNode") || sp_streq(ty, "InterpolatedRegularExpressionNode"))
@@ -13517,6 +13637,7 @@ static void scan_prologue_features(Compiler *c) {
           break;
         }
       }
+      if (sp_streq(nm, "Fiber") || sp_streq(nm, "Enumerator")) fibers = 1;
       if (sp_streq(nm, "Regexp")) g_uses_regex = 1;
       else if (sp_streq(nm, "Thread") || sp_streq(nm, "Queue") || sp_streq(nm, "SizedQueue") ||
                sp_streq(nm, "Mutex") || sp_streq(nm, "Monitor") ||
@@ -13554,6 +13675,7 @@ static void scan_prologue_features(Compiler *c) {
           "Refinements are not supported by AOT compilation: scope-keyed dispatch is "
           "incompatible with direct C calls. Reopen the class instead (see docs/limitations.md)");
       if (sp_streq(nm, "last_match")) g_reads_match_regs = 1;
+      if (sp_streq(nm, "to_enum") || sp_streq(nm, "enum_for")) fibers = 1;
       if (sp_streq(nm, "to_sym") || sp_streq(nm, "intern") ||
           sp_streq(nm, "constants") || sp_streq(nm, "members") ||
           sp_streq(nm, "instance_methods") || sp_streq(nm, "public_instance_methods") ||
@@ -13571,6 +13693,8 @@ static void scan_prologue_features(Compiler *c) {
       }
     }
   }
+  /* and no fiber, under which a method's frame would sit suspended */
+  g_match_frame_closed = g_reads_match_regs && !fibers && !g_uses_threads && match_frame_closed(c);
   /* Generic object reflection: when a native package declared it consumes
      object->hash reflection (native_obj_reflect, e.g. json) and the program
      defines any Struct, emit + install sp_obj_to_hash. No feature is named
