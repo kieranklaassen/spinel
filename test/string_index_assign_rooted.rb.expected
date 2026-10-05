@@ -1,0 +1,22 @@
+"qabbcccst"
+"qabbcccszzzz"
+"qabbcccszzzz!"
+"qabbcccst"
+"qabbcccszzzzz"
+"qabbcccszzzzz!"
+"qabbcccst"
+"qabbcccszzzzzz"
+"qabbcccszzzzzz!"
+"56"
+"56rst"
+true
+"abc"
+IndexError: index 4 out of string
+IndexError: index -4 out of string
+"abc"
+5
+6
+true
+FrozenError: can't modify frozen String: "ab"
+"ab"
+"axcdef"
