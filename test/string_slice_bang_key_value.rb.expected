@@ -1,0 +1,6 @@
+["bcx", "ad"]
+["Zc and forty more bytes, so that the buffer has to move", "bc", "ad", false]
+[nil, "abcd"]
+[["é!", "é"], "ab"]
+["cd!", "abe", "abe"]
+["bx", nil, 3]

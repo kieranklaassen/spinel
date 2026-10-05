@@ -1194,6 +1194,17 @@ int emit_op_string_slice(Compiler *c, const BopCtx *x, Buf *b) {
   const int *argv = call_args(c->nt, id, &argc);
   if (argc == 1 && emit_string_slice_poly(c, id, argv[0], b)) return 1;
   int sb_asgn = str_mut_var_recv(c, recv) || sb_shadowed_reader(recv);
+  if (argc == 1 && comp_ntype(c, argv[0]) == TY_STRING && !sb_asgn) {
+    /* a receiver that is no variable is read once and nothing is stored
+       back: rendered at each use below, a call ran four times */
+    int to = ++g_tmp, tk = ++g_tmp;
+    buf_printf(b, "({ const char *_t%d = ", to); emit_recv_rooted(c, recv, to, "SP_GC_ROOT_STR", b);
+    buf_printf(b, "if (_t%d) sp_str_check_mutable(_t%d); const char *_t%d = ", to, to, tk);
+    emit_expr(c, argv[0], b);
+    buf_printf(b, "; (_t%d && _t%d && strstr(_t%d, _t%d)) ? sp_str_dup(_t%d) : (const char *)0; })",
+               tk, to, to, tk, tk);
+    return 1;
+  }
   if (argc == 1 && comp_ntype(c, argv[0]) == TY_STRING) {
     int tp2 = ++g_tmp;
     buf_puts(b, "({ "); emit_str_frozen_check(c, recv, b);
@@ -1216,7 +1227,10 @@ int emit_op_string_slice(Compiler *c, const BopCtx *x, Buf *b) {
         buf_printf(b, ", _t%d, (&(\"\\xff\")[1]));", tp2);
       }
     }
-    buf_printf(b, " _hit%d ? _t%d : (const char *)0; })", tp2, tp2);
+    /* the removed part is a String of its own: answered as the key itself
+       it was frozen where the key is a literal, and a change through it
+       changed a key that can change */
+    buf_printf(b, " _hit%d ? sp_str_dup(_t%d) : (const char *)0; })", tp2, tp2);
     return 1;
   }
   if (argc == 1 && re_lit_index(c, argv[0]) >= 0) {
