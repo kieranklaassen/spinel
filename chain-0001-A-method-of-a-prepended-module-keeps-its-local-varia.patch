@@ -1,0 +1,197 @@
+From 00204682ad0b6b4bfaf632b6cd85105d1265c7a4 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 5 Oct 2026 18:19:25 +0000
+Subject: [PATCH 1/6] A method of a prepended module keeps its local variables
+
+    module Doubled
+      def total(a)
+        twice = a * 2
+        twice + super(a)
+      end
+    end
+    class Plain
+      prepend Doubled
+      def total(a)
+        a + 100
+      end
+    end
+    p Plain.new.total(3)
+
+did not build: the C read and wrote `lv_twice` without declaring it.
+CRuby prints 109. A local written in a method of a prepended module had
+no slot, with a super in the method or without one. Where its type was
+needed first, the program was refused instead: "unsupported comparison"
+for a loop counter, "unsupported operator assignment" for `t += q`.
+
+process_prepend_body copies the module's method in front of the class
+after register_locals has run. It carries the parameters across by
+hand, but the locals the cloned body writes were never interned. The
+include and extend clones call register_locals again for this, and
+register_prepends now does too when it made a copy.
+
+Such a program built before only where a later pass interned them by
+the way: a method cloned in its proc form, or a class method
+specialised for a subclass, registers the locals of every scope.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/analyze_scope.c                   |   5 ++
+ test/prepend_method_local.rb          | 107 ++++++++++++++++++++++++++
+ test/prepend_method_local.rb.expected |  10 +++
+ 3 files changed, 122 insertions(+)
+ create mode 100644 test/prepend_method_local.rb
+ create mode 100644 test/prepend_method_local.rb.expected
+
+diff --git a/src/analyze_scope.c b/src/analyze_scope.c
+index b3e4b89f..2db28692 100644
+--- a/src/analyze_scope.c
++++ b/src/analyze_scope.c
+@@ -6364,11 +6364,16 @@ static void process_prepend_body(Compiler *c, int ci, int body) {
+ /* For each class, find `prepend M` in ALL class bodies, the reopenings
+    included, the same two passes register_includes makes (#4200). */
+ void register_prepends(Compiler *c) {
++  int snap = c->nscopes;
+   int *bci, *bnode;
+   int nb = class_body_list(c, &bci, &bnode);
+   for (int b = 0; b < nb; b++) process_prepend_body(c, bci[b], bnode[b]);
+   free(bci);
+   free(bnode);
++  /* The cloned bodies introduced new local nodes; intern them, as the
++     include and extend clones are. Left out, a local written in a prepended
++     method had no declaration and the C did not build. */
++  if (c->nscopes > snap) register_locals(c);
+ }
+ 
+ /* Merge inherited ivar/reader/writer NAMES into subclasses so the struct
+diff --git a/test/prepend_method_local.rb b/test/prepend_method_local.rb
+new file mode 100644
+index 00000000..acec8b0e
+--- /dev/null
++++ b/test/prepend_method_local.rb
+@@ -0,0 +1,107 @@
++# A local written in a method of a prepended module. The method is copied
++# in front of the class after the pass that gives every method's locals
++# their slots, and the copy's own locals were given none: the C read and
++# wrote a variable it never declared, and did not build.
++module Doubled
++  def total(a)
++    twice = a * 2
++    twice + super(a)
++  end
++end
++
++# the class's own method beneath the module's
++class Plain
++  prepend Doubled
++  def total(a)
++    a + 100
++  end
++end
++p Plain.new.total(3)
++
++# the superclass's method beneath it
++class Base
++  def total(a)
++    a + 200
++  end
++end
++class Below < Base
++  prepend Doubled
++end
++p Below.new.total(3)
++
++# the module in front of a class and of its subclass
++class Under < Plain
++  prepend Doubled
++end
++p Under.new.total(3)
++
++# a local that takes super's value
++module Wrapped
++  def pair
++    v = super
++    [v, :w]
++  end
++
++  def sized(a)
++    v = super(a)
++    v.length
++  end
++end
++
++class Pair
++  prepend Wrapped
++  def pair
++    [3, 6]
++  end
++
++  def sized(a)
++    "x" * a
++  end
++end
++p Pair.new.pair
++p Pair.new.sized(4)
++
++# a method with nothing beneath it: a counter, a compound write, two
++# targets at once, a rescue's binding, a block that writes a local
++module Counted
++  def count(n)
++    i = 0
++    sum = 0
++    while i < n
++      sum += i
++      i += 1
++    end
++    sum
++  end
++
++  def both(a)
++    x, y = a, a + 1
++    x * y
++  end
++
++  def safe(n)
++    begin
++      raise ArgumentError, "negative" if n < 0
++      r = n.to_s
++    rescue => e
++      r = e.message
++    end
++    r
++  end
++
++  def gather(a)
++    t = 0
++    [a, 2].each { |q| t += q }
++    t
++  end
++end
++
++class Counter
++  prepend Counted
++end
++c = Counter.new
++p c.count(5)
++p c.both(3)
++p c.safe(7)
++p c.safe(-1)
++p c.gather(5)
+diff --git a/test/prepend_method_local.rb.expected b/test/prepend_method_local.rb.expected
+new file mode 100644
+index 00000000..237056a7
+--- /dev/null
++++ b/test/prepend_method_local.rb.expected
+@@ -0,0 +1,10 @@
++109
++209
++115
++[[3, 6], :w]
++4
++10
++12
++"7"
++"negative"
++7
+-- 
+2.43.0
+

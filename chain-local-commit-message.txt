@@ -1,0 +1,34 @@
+A method of a prepended module keeps its local variables
+
+    module Doubled
+      def total(a)
+        twice = a * 2
+        twice + super(a)
+      end
+    end
+    class Plain
+      prepend Doubled
+      def total(a)
+        a + 100
+      end
+    end
+    p Plain.new.total(3)
+
+did not build: the C read and wrote `lv_twice` without declaring it.
+CRuby prints 109. A local written in a method of a prepended module had
+no slot, with a super in the method or without one. Where its type was
+needed first, the program was refused instead: "unsupported comparison"
+for a loop counter, "unsupported operator assignment" for `t += q`.
+
+process_prepend_body copies the module's method in front of the class
+after register_locals has run. It carries the parameters across by
+hand, but the locals the cloned body writes were never interned. The
+include and extend clones call register_locals again for this, and
+register_prepends now does too when it made a copy.
+
+Such a program built before only where a later pass interned them by
+the way: a method cloned in its proc form, or a class method
+specialised for a subclass, registers the locals of every scope.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+

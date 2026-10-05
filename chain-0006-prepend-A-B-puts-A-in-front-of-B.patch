@@ -1,0 +1,143 @@
+From c301a20f92cd2376fbba3fd106e553af38085aa6 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 5 Oct 2026 17:57:04 +0000
+Subject: [PATCH 6/6] `prepend A, B` puts A in front of B
+
+Ruby prepends the arguments last to first, as it includes them, so the
+first one listed is found first: `prepend A, B` is `prepend B;
+prepend A`, ancestors [A, B, C]. The prepend pass took them first to
+last, leaving B in front -- B's method ran before A's -- and the
+ancestors table did the same. Both now go last to first, as the
+include pass does since #7447.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/analyze_scope.c                           |  3 +-
+ src/codegen.c                                 |  5 +-
+ test/prepend_several_modules_order.rb         | 64 +++++++++++++++++++
+ .../prepend_several_modules_order.rb.expected | 12 ++++
+ 4 files changed, 81 insertions(+), 3 deletions(-)
+ create mode 100644 test/prepend_several_modules_order.rb
+ create mode 100644 test/prepend_several_modules_order.rb.expected
+
+diff --git a/src/analyze_scope.c b/src/analyze_scope.c
+index 1929796d..40e69210 100644
+--- a/src/analyze_scope.c
++++ b/src/analyze_scope.c
+@@ -6336,7 +6336,8 @@ static void process_prepend_body(Compiler *c, int ci, int body, int **done, int
+       int anode = nt_ref(nt, s, "arguments");
+       int an = 0;
+       const int *args = anode >= 0 ? nt_arr(nt, anode, "arguments", &an) : NULL;
+-      for (int j = 0; j < an; j++) {
++      /* `prepend A, B` prepends B first, so A ends up in front (as include) */
++      for (int j = an - 1; j >= 0; j--) {
+         const char *aty = nt_type(nt, args[j]);
+         const char *mname = (aty && (sp_streq(aty, "ConstantReadNode") || sp_streq(aty, "ConstantPathNode"))) ? nt_str(nt, args[j], "name") : NULL;
+         int mod_id = mname ? comp_class_index(c, mname) : -1;
+diff --git a/src/codegen.c b/src/codegen.c
+index 63297edf..0d3600b6 100644
+--- a/src/codegen.c
++++ b/src/codegen.c
+@@ -14413,8 +14413,9 @@ static void emit_class_machinery(const NodeTable *nt, Compiler *c, Buf *b, char
+           int an2 = 0;
+           const int *aargs = anode2 >= 0 ? nt_arr(c->nt, anode2, "arguments", &an2) : NULL;
+           for (int jj = 0; jj < an2; jj++) {
+-            /* `include A, B` includes B first, so A is listed in front */
+-            int j2 = is_prep2 ? jj : an2 - 1 - jj;
++            /* `include A, B` includes B first, so A is listed in front,
++               and `prepend A, B` prepends B first, to the same end */
++            int j2 = an2 - 1 - jj;
+             const char *aty2 = nt_type(c->nt, aargs[j2]);
+             const char *mname2 = (aty2 && sp_streq(aty2, "ConstantReadNode")) ? nt_str(c->nt, aargs[j2], "name") : NULL;
+             if (!mname2 && aty2 && sp_streq(aty2, "ConstantPathNode")) mname2 = nt_str(c->nt, aargs[j2], "name");
+diff --git a/test/prepend_several_modules_order.rb b/test/prepend_several_modules_order.rb
+new file mode 100644
+index 00000000..622e9cb5
+--- /dev/null
++++ b/test/prepend_several_modules_order.rb
+@@ -0,0 +1,64 @@
++# `prepend A, B` puts A in front of B, as `include A, B` does: A's method
++# is found first and its super reaches B's, then the class's own.
++module Plain
++  def hi = "plain " + super
++end
++
++module Fancy
++  def hi = "fancy " + super
++end
++
++module Loud
++  def hi = "loud " + super
++end
++
++class Both
++  prepend Fancy, Plain
++  def hi = "both"
++end
++
++class Each
++  prepend Plain
++  prepend Fancy
++  def hi = "each"
++end
++
++class Three
++  prepend Loud, Fancy, Plain
++  def hi = "three"
++end
++
++class Then
++  prepend Fancy, Plain
++  prepend Loud
++  def hi = "then"
++end
++
++class Under < Both
++  def hi = "under " + super
++end
++
++# A module named again is prepended once, where its last naming puts it.
++class Again
++  prepend Fancy, Plain, Fancy
++  def hi = "again"
++end
++
++class Swapped
++  prepend Plain, Fancy
++  prepend Fancy, Plain
++  def hi = "swapped"
++end
++
++p Both.new.hi
++p Both.ancestors.take(3)
++p Each.new.hi
++p Each.ancestors.take(3)
++p Three.new.hi
++p Three.ancestors.take(4)
++p Then.new.hi
++p Under.new.hi
++p Again.new.hi
++p Again.ancestors.take(3)
++p Swapped.new.hi
++p Swapped.ancestors.take(3)
+diff --git a/test/prepend_several_modules_order.rb.expected b/test/prepend_several_modules_order.rb.expected
+new file mode 100644
+index 00000000..6e2551b0
+--- /dev/null
++++ b/test/prepend_several_modules_order.rb.expected
+@@ -0,0 +1,12 @@
++"fancy plain both"
++[Fancy, Plain, Both]
++"fancy plain each"
++[Fancy, Plain, Each]
++"loud fancy plain three"
++[Loud, Fancy, Plain, Three]
++"loud fancy plain then"
++"under fancy plain both"
++"plain fancy again"
++[Plain, Fancy, Again]
++"plain fancy swapped"
++[Plain, Fancy, Swapped]
+-- 
+2.43.0
+

@@ -1,0 +1,285 @@
+From b06c30930f396b897eafcce9e76c1d15c594e311 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 5 Oct 2026 17:55:30 +0000
+Subject: [PATCH 4/6] A module the class or a superclass has prepended is not
+ included again
+
+    module Mark
+      def trail
+        super + [:m]
+      end
+    end
+    class Root
+      def trail
+        [:root]
+      end
+    end
+    class Mixed < Root
+      prepend Mark
+      include Mark
+      def trail
+        super + [:own]
+      end
+    end
+    p Mixed.new.trail
+
+printed [:root, :m, :own, :m] where CRuby prints [:root, :own, :m].
+`include` adds nothing for a module that is in the class's chain
+already, and a prepended module is: in front of the class that
+prepended it. So the include adds nothing in that class, and nothing
+in a subclass of it.
+
+process_include_body knew of the modules a superclass includes. It
+could not know of a prepend, because the prepends are registered after
+every include, and it copied the module's methods behind the class, so
+a method of the module that calls super ran once more.
+
+register_includes now lists the `prepend` statements of the class
+bodies before it starts, and process_include_body leaves a module
+alone that the class or a superclass prepends in an earlier statement.
+The order counts as it does in CRuby: `include Mark; prepend Mark` has
+the module in the chain twice, and so does a subclass whose superclass
+is reopened to prepend the module after the subclass's include. The
+class still records the module, so is_a?, include? and `rescue Mark`
+answer as before, and `ancestors` still lists the module a second
+time at the include, as it did.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/analyze_scope.c                    |  48 ++++++++++
+ test/include_after_prepend.rb          | 124 +++++++++++++++++++++++++
+ test/include_after_prepend.rb.expected |  11 +++
+ 3 files changed, 183 insertions(+)
+ create mode 100644 test/include_after_prepend.rb
+ create mode 100644 test/include_after_prepend.rb.expected
+
+diff --git a/src/analyze_scope.c b/src/analyze_scope.c
+index cd6e3509..1929796d 100644
+--- a/src/analyze_scope.c
++++ b/src/analyze_scope.c
+@@ -2216,6 +2216,49 @@ static int superclass_includes_mod(Compiler *c, int ci, int mod_ci) {
+   return 0;
+ }
+ 
++/* The `prepend M` statements of the class bodies, as (class, module,
++   statement) triples: register_includes lists them, since the prepends
++   themselves are registered after every include. */
++static int *g_prep_stmts;
++static int g_nprep_stmts;
++
++static void list_prepend_stmts(Compiler *c, const int *bci, const int *bnode, int nb) {
++  const NodeTable *nt = c->nt;
++  for (int b = 0; b < nb; b++) {
++    int n = 0;
++    const int *stmts = bnode[b] >= 0 ? nt_arr(nt, bnode[b], "body", &n) : NULL;
++    for (int k = 0; k < n; k++) {
++      int s = stmts[k];
++      if (nt_kind(nt, s) != NK_CallNode || nt_ref(nt, s, "receiver") >= 0) continue;
++      const char *nm = nt_str(nt, s, "name");
++      if (!nm || !sp_streq(nm, "prepend")) continue;
++      int anode = nt_ref(nt, s, "arguments");
++      int an = 0;
++      const int *args = anode >= 0 ? nt_arr(nt, anode, "arguments", &an) : NULL;
++      for (int j = 0; j < an; j++) {
++        NodeKind ak = nt_kind(nt, args[j]);
++        const char *mname = (ak == NK_ConstantReadNode || ak == NK_ConstantPathNode) ? nt_str(nt, args[j], "name") : NULL;
++        int mod_id = mname ? comp_class_index(c, mname) : -1;
++        if (mod_id < 0) continue;
++        int *np = realloc(g_prep_stmts, sizeof(int) * 3 * (size_t)(g_nprep_stmts + 1));
++        if (!np) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
++        g_prep_stmts = np;
++        np[3 * g_nprep_stmts] = bci[b]; np[3 * g_nprep_stmts + 1] = mod_id; np[3 * g_nprep_stmts + 2] = s;
++        g_nprep_stmts++;
++      }
++    }
++  }
++}
++
++/* Has ci, or a superclass of it, prepended the module in a statement that
++   comes before `stmt`? */
++static int prepended_before(Compiler *c, int ci, int mod_ci, int stmt) {
++  for (int k = ci, n = 0; k >= 0 && n <= c->nclasses; k = c->classes[k].parent, n++)
++    for (int q = 0; q < g_nprep_stmts; q++)
++      if (g_prep_stmts[3 * q] == k && g_prep_stmts[3 * q + 1] == mod_ci && g_prep_stmts[3 * q + 2] < stmt) return 1;
++  return 0;
++}
++
+ /* Copy module `mod_ci`'s instance methods onto subclass `newci` (obj.extend). */
+ static void sg_transplant_module(Compiler *c, int mod_ci, int newci) {
+   const NodeTable *nt = c->nt;
+@@ -5154,6 +5197,9 @@ void process_include_body(Compiler *c, int ci, int body_node) {
+          already, behind that superclass, and `include` adds nothing. Copied
+          here a second time, a method of it that calls super ran twice. */
+       if (superclass_includes_mod(c, ci, mod_id)) continue;
++      /* So is a module the class has prepended by now, or a superclass
++         has: it stands in front of that class. */
++      if (prepended_before(c, ci, mod_id, s)) continue;
+       /* snapshot count before adding new scopes to avoid re-scanning them */
+       int snap = c->nscopes;
+       for (int ms = 0; ms < snap; ms++) {
+@@ -5334,6 +5380,7 @@ void register_includes(Compiler *c) {
+      falls back to source order. */
+   int *bci, *bnode;
+   int nb = class_body_list(c, &bci, &bnode);
++  list_prepend_stmts(c, bci, bnode, nb);
+   int *remaining = calloc((size_t)c->nclasses, sizeof(int));
+   char *done = calloc((size_t)nb, 1);
+   for (int b = 0; b < nb; b++) remaining[bci[b]]++;
+@@ -5364,6 +5411,7 @@ void register_includes(Compiler *c) {
+     }
+   }
+   free(bci); free(bnode); free(remaining); free(done);
++  free(g_prep_stmts); g_prep_stmts = NULL; g_nprep_stmts = 0;
+   if (g_inc_did_clone) register_locals(c);
+ }
+ 
+diff --git a/test/include_after_prepend.rb b/test/include_after_prepend.rb
+new file mode 100644
+index 00000000..91e1fe13
+--- /dev/null
++++ b/test/include_after_prepend.rb
+@@ -0,0 +1,124 @@
++# `include M` in a class that has M prepended already adds nothing, and
++# neither does it in a subclass of a class that prepends M: M is in the
++# chain, in front of the class that prepended it. The include copied the
++# module's methods behind the class all the same, so a method of M that
++# calls super ran once more: `Mixed.new.trail` below answered
++# [:root, :m, :own, :m] for [:root, :own, :m].
++module Mark
++  def trail
++    super + [:m]
++  end
++end
++
++class Root
++  def trail
++    [:root]
++  end
++end
++
++class Mixed < Root
++  prepend Mark
++  include Mark
++  def trail
++    super + [:own]
++  end
++end
++p Mixed.new.trail
++
++# the include in a reopening of the class
++class Reopened < Root
++  prepend Mark
++  def trail
++    super + [:own]
++  end
++end
++class Reopened
++  include Mark
++end
++p Reopened.new.trail
++
++# the prepend in the superclass, the include in a subclass and in its subclass
++class Parent < Root
++  prepend Mark
++  def trail
++    super + [:parent]
++  end
++end
++
++class Child < Parent
++  include Mark
++  def trail
++    super + [:child]
++  end
++end
++
++class Grandchild < Child
++  include Mark
++end
++p Child.new.trail
++p Grandchild.new.trail
++p Child.new.is_a?(Mark), Child.include?(Mark)
++
++# `include M, N` where only M is prepended above: N is included
++module Note
++  def trail
++    super + [:n]
++  end
++end
++
++class Noted < Parent
++  include Mark, Note
++  def trail
++    super + [:noted]
++  end
++end
++p Noted.new.trail
++
++# included first and prepended after, the module is in the chain twice
++class Both < Root
++  include Mark
++  prepend Mark
++  def trail
++    super + [:own]
++  end
++end
++p Both.new.trail
++
++# so it is where the superclass prepends it only after the subclass's include
++class Early < Root
++  def trail
++    super + [:early]
++  end
++end
++class Late < Early
++  include Mark
++  def trail
++    super + [:late]
++  end
++end
++class Early
++  prepend Mark
++end
++p Late.new.trail
++
++# a module that keeps a count
++module Counted
++  def bump
++    @bumps = (@bumps || 0) + 1
++    super + @bumps
++  end
++end
++
++class Counter
++  def bump
++    10
++  end
++end
++
++class CountedTwice < Counter
++  prepend Counted
++  include Counted
++end
++c = CountedTwice.new
++p c.bump
++p c.bump
+diff --git a/test/include_after_prepend.rb.expected b/test/include_after_prepend.rb.expected
+new file mode 100644
+index 00000000..e4b715b8
+--- /dev/null
++++ b/test/include_after_prepend.rb.expected
+@@ -0,0 +1,11 @@
++[:root, :own, :m]
++[:root, :own, :m]
++[:root, :parent, :m, :child]
++[:root, :parent, :m, :child]
++true
++true
++[:root, :parent, :m, :n, :noted]
++[:root, :m, :own, :m]
++[:root, :early, :m, :m, :late]
++11
++12
+-- 
+2.43.0
+

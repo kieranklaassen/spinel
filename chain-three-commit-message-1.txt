@@ -1,0 +1,40 @@
+A module prepended twice to a class runs once
+
+    module Mark
+      def trail
+        super + [:m]
+      end
+    end
+    class Root
+      def trail
+        [:root]
+      end
+    end
+    class Twice < Root
+      prepend Mark
+      prepend Mark
+      def trail
+        super + [:own]
+      end
+    end
+    p Twice.new.trail
+
+printed [:root, :own, :m, :m] where CRuby prints [:root, :own, :m]. A
+class has a prepended module in front of it once, and a second
+`prepend` of it adds nothing: in the same body, in one call
+(`prepend Mark, Mark`), or where the class is reopened.
+
+process_prepend_body transplanted the module's methods in front of the
+class for each `prepend` statement it met, so a method of the module
+that calls super ran once per statement, and a block it gives to super
+ran in each copy. `ancestors` listed the module once already.
+
+register_prepends now keeps the (class, module) pairs done so far, and
+process_prepend_body leaves a pair alone the second time. `prepend
+Mark; prepend Note; prepend Mark` leaves Mark where the first one put
+it, as CRuby does. A subclass that prepends a module its superclass
+prepends has it in its chain twice, in CRuby and here, and so has a
+class that includes a module and then prepends it.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+

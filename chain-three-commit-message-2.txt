@@ -1,0 +1,44 @@
+A module the class or a superclass has prepended is not included again
+
+    module Mark
+      def trail
+        super + [:m]
+      end
+    end
+    class Root
+      def trail
+        [:root]
+      end
+    end
+    class Mixed < Root
+      prepend Mark
+      include Mark
+      def trail
+        super + [:own]
+      end
+    end
+    p Mixed.new.trail
+
+printed [:root, :m, :own, :m] where CRuby prints [:root, :own, :m].
+`include` adds nothing for a module that is in the class's chain
+already, and a prepended module is: in front of the class that
+prepended it. So the include adds nothing in that class, and nothing
+in a subclass of it.
+
+process_include_body knew of the modules a superclass includes. It
+could not know of a prepend, because the prepends are registered after
+every include, and it copied the module's methods behind the class, so
+a method of the module that calls super ran once more.
+
+register_includes now lists the `prepend` statements of the class
+bodies before it starts, and process_include_body leaves a module
+alone that the class or a superclass prepends in an earlier statement.
+The order counts as it does in CRuby: `include Mark; prepend Mark` has
+the module in the chain twice, and so does a subclass whose superclass
+is reopened to prepend the module after the subclass's include. The
+class still records the module, so is_a?, include? and `rescue Mark`
+answer as before, and `ancestors` still lists the module a second
+time at the include, as it did.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+

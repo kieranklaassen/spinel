@@ -1,0 +1,269 @@
+From 1061c45e9ba35e43d8512e1a5222739bb00490d7 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 5 Oct 2026 17:55:47 +0000
+Subject: [PATCH 5/6] A super past a prepend reaches the parent's prepended
+ method
+
+    module Tens
+      def go
+        super() { |x| x * 10 }
+      end
+    end
+    class Parent
+      prepend Tens
+      def go
+        r = []
+        r << (yield 1)
+        r << (yield 2)
+        r
+      end
+    end
+    class Child < Parent
+      prepend Tens
+      def go
+        super() { |x| x + 1 }
+      end
+    end
+    p Child.new.go
+
+printed [2, 3] where CRuby prints [10, 20]: the super in Child#go ran
+Parent's own body with Child's block and went past the copy of Tens#go
+that Parent's prepend puts in front of it. The same with another module
+on the child than on the parent, with two modules on the parent, with a
+class that has no prepend between the two, and three classes down.
+
+A class's own method under a prepend is kept as `__prep_0_go`, and the
+module's copy takes the name `go`. Past the class, the super of the own
+method reaches the parent's `go`. Inference, the call plan and
+emit_super ask the parent's chain for that name. The splice of a
+yielding parent (emit_super_inline) asked it for the copy's name, and a
+parent with a prepend of its own holds a method of that name: its own
+body. So the splice took the body the parent's prepend stands in front
+of, and --plan-check reported the program as a call codegen and
+inference disagree on. Where the parent's chain holds the copy's name,
+the splice now asks for the method's name, as the others do.
+
+A copy's name the parent's chain does not hold is left to emit_super
+as before.
+
+A module that both classes prepend and the lower one names a second
+time (a second `prepend`, or an `include`) ran twice in the lower
+class while the parent's copy was passed by, which came to the right
+count. With the two commits beneath it runs once for each class, and
+the test holds those forms.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/codegen.c                              |   9 ++
+ test/prepend_super_parent_copy.rb          | 158 +++++++++++++++++++++
+ test/prepend_super_parent_copy.rb.expected |  13 ++
+ 3 files changed, 180 insertions(+)
+ create mode 100644 test/prepend_super_parent_copy.rb
+ create mode 100644 test/prepend_super_parent_copy.rb.expected
+
+diff --git a/src/codegen.c b/src/codegen.c
+index 5bea0016..63297edf 100644
+--- a/src/codegen.c
++++ b/src/codegen.c
+@@ -10565,6 +10565,15 @@ int emit_super_inline(Compiler *c, int id, Buf *b, int indent, int as_expr) {
+             : p < 0 ? -1
+             : s->is_cmethod ? comp_cmethod_in_chain(c, p, s->name, &odef)
+                             : comp_method_in_chain(c, p, s->name, &odef);
++    /* A copy's name the parent's chain holds is the parent's own copy of
++       that number, not what the super reaches: a class's own body under a
++       prepend is `__prep_0_m` in the parent as it is here, and the splice
++       took the parent's own body, past the copy the parent's prepend put in
++       front of it. The super reaches the parent's `m`. */
++    const char *uname = comp_prep_user_name(s->name);
++    if (!shadow && omi >= 0 && uname != s->name)
++      omi = s->is_cmethod ? comp_cmethod_in_chain(c, p, uname, &odef)
++                          : comp_method_in_chain(c, p, uname, &odef);
+     if (mi < 0) {
+       if (g_plan_check && omi >= 0)
+         fprintf(stderr, "plan-check: cplan-fallback: super-inline node %d %s\n", id, s->name);
+diff --git a/test/prepend_super_parent_copy.rb b/test/prepend_super_parent_copy.rb
+new file mode 100644
+index 00000000..f2322a4e
+--- /dev/null
++++ b/test/prepend_super_parent_copy.rb
+@@ -0,0 +1,158 @@
++# A `super` with a block, in the own method of a class that has a prepend,
++# reaches the parent's method. Where the parent has a prepend too, that is
++# the copy the parent's prepend put in front of the parent's own body. The
++# own body is kept under one name in each class, and the splice of a
++# yielding parent asked the parent's chain for that name: it took the
++# parent's own body and went past the prepended copy. Below, `Child#go`
++# answered [2, 3] for [10, 20].
++module Tens
++  def go
++    super() { |x| x * 10 }
++  end
++end
++
++class Parent
++  prepend Tens
++  def go
++    r = []
++    r << (yield 1)
++    r << (yield 2)
++    r
++  end
++end
++
++class Child < Parent
++  prepend Tens
++  def go
++    super() { |x| x + 1 }
++  end
++end
++p Parent.new.go
++p Child.new.go
++
++# a third class down, and a class with no prepend between
++class Grandchild < Child
++  prepend Tens
++  def go
++    super() { |x| x + 2 }
++  end
++end
++p Grandchild.new.go
++
++class Between < Parent
++end
++
++class Below < Between
++  prepend Tens
++  def go
++    super() { |x| x + 3 }
++  end
++end
++p Between.new.go
++p Below.new.go
++
++# the child prepends another module than the parent, and the parent two
++module Marks
++  def go
++    super() { |x| x + 5 } << :marks
++  end
++end
++
++class Other < Parent
++  prepend Marks
++  def go
++    super() { |x| x + 1 }
++  end
++end
++p Other.new.go
++
++class Twice
++  prepend Tens
++  prepend Marks
++  def go
++    r = []
++    r << (yield 1)
++    r << (yield 2)
++    r
++  end
++end
++
++class UnderTwice < Twice
++  prepend Tens
++  def go
++    super() { |x| x + 1 }
++  end
++end
++p Twice.new.go
++p UnderTwice.new.go
++
++# with arguments, and the parent's value changed on the way back
++module Scaled
++  def from(n)
++    super(n * 10) { |x| x + 1000 }
++  end
++end
++
++class Counter
++  prepend Scaled
++  def from(n)
++    r = []
++    r << (yield n)
++    r << (yield n + 1)
++    r
++  end
++end
++
++class Reversed < Counter
++  prepend Scaled
++  def from(n)
++    super(n + 1) { |x| x + 7 }.reverse
++  end
++end
++p Counter.new.from(1)
++p Reversed.new.from(1)
++
++# a module that both classes prepend, named again in the lower class: it
++# runs once for each class
++module Marked
++  def go
++    v = super() { |x| x * 3 }
++    [v, :m]
++  end
++end
++
++class Upper
++  prepend Marked
++  def go
++    r = []
++    r << (yield 1)
++    r << (yield 2)
++    r
++  end
++end
++
++class Lower < Upper
++  prepend Marked
++end
++class Lower
++  prepend Marked
++  def go
++    super
++  end
++end
++p Lower.new.go
++
++class LowerTwice < Upper
++  prepend Marked
++  prepend Marked
++end
++p LowerTwice.new.go
++
++class LowerMixed < Upper
++  prepend Marked
++  include Marked
++  def go
++    super
++  end
++end
++p LowerMixed.new.go
+diff --git a/test/prepend_super_parent_copy.rb.expected b/test/prepend_super_parent_copy.rb.expected
+new file mode 100644
+index 00000000..360987e9
+--- /dev/null
++++ b/test/prepend_super_parent_copy.rb.expected
+@@ -0,0 +1,13 @@
++[10, 20]
++[10, 20]
++[10, 20]
++[10, 20]
++[10, 20]
++[10, 20, :marks]
++[10, 20, :marks]
++[10, 20, :marks]
++[1010, 1011]
++[1111, 1110]
++[[[3, 6], :m], :m]
++[[[3, 6], :m], :m]
++[[[3, 6], :m], :m]
+-- 
+2.43.0
+

@@ -1,0 +1,1 @@
+A super past a prepend reaches the parent's prepended method

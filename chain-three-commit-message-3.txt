@@ -1,0 +1,52 @@
+A super past a prepend reaches the parent's prepended method
+
+    module Tens
+      def go
+        super() { |x| x * 10 }
+      end
+    end
+    class Parent
+      prepend Tens
+      def go
+        r = []
+        r << (yield 1)
+        r << (yield 2)
+        r
+      end
+    end
+    class Child < Parent
+      prepend Tens
+      def go
+        super() { |x| x + 1 }
+      end
+    end
+    p Child.new.go
+
+printed [2, 3] where CRuby prints [10, 20]: the super in Child#go ran
+Parent's own body with Child's block and went past the copy of Tens#go
+that Parent's prepend puts in front of it. The same with another module
+on the child than on the parent, with two modules on the parent, with a
+class that has no prepend between the two, and three classes down.
+
+A class's own method under a prepend is kept as `__prep_0_go`, and the
+module's copy takes the name `go`. Past the class, the super of the own
+method reaches the parent's `go`. Inference, the call plan and
+emit_super ask the parent's chain for that name. The splice of a
+yielding parent (emit_super_inline) asked it for the copy's name, and a
+parent with a prepend of its own holds a method of that name: its own
+body. So the splice took the body the parent's prepend stands in front
+of, and --plan-check reported the program as a call codegen and
+inference disagree on. Where the parent's chain holds the copy's name,
+the splice now asks for the method's name, as the others do.
+
+A copy's name the parent's chain does not hold is left to emit_super
+as before.
+
+A module that both classes prepend and the lower one names a second
+time (a second `prepend`, or an `include`) ran twice in the lower
+class while the parent's copy was passed by, which came to the right
+count. With the two commits beneath it runs once for each class, and
+the test holds those forms.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+

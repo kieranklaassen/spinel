@@ -1,0 +1,285 @@
+From d9777d48137bc9ed0aae3d0e330f191c4a25e20d Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 5 Oct 2026 17:54:46 +0000
+Subject: [PATCH 3/6] A module prepended twice to a class runs once
+
+    module Mark
+      def trail
+        super + [:m]
+      end
+    end
+    class Root
+      def trail
+        [:root]
+      end
+    end
+    class Twice < Root
+      prepend Mark
+      prepend Mark
+      def trail
+        super + [:own]
+      end
+    end
+    p Twice.new.trail
+
+printed [:root, :own, :m, :m] where CRuby prints [:root, :own, :m]. A
+class has a prepended module in front of it once, and a second
+`prepend` of it adds nothing: in the same body, in one call
+(`prepend Mark, Mark`), or where the class is reopened.
+
+process_prepend_body transplanted the module's methods in front of the
+class for each `prepend` statement it met, so a method of the module
+that calls super ran once per statement, and a block it gives to super
+ran in each copy. `ancestors` listed the module once already.
+
+register_prepends now keeps the (class, module) pairs done so far, and
+process_prepend_body leaves a pair alone the second time. `prepend
+Mark; prepend Note; prepend Mark` leaves Mark where the first one put
+it, as CRuby does. A subclass that prepends a module its superclass
+prepends has it in its chain twice, in CRuby and here, and so has a
+class that includes a module and then prepends it.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/analyze_scope.c                      |  21 ++-
+ test/prepend_twice_runs_once.rb          | 160 +++++++++++++++++++++++
+ test/prepend_twice_runs_once.rb.expected |  14 ++
+ 3 files changed, 193 insertions(+), 2 deletions(-)
+ create mode 100644 test/prepend_twice_runs_once.rb
+ create mode 100644 test/prepend_twice_runs_once.rb.expected
+
+diff --git a/src/analyze_scope.c b/src/analyze_scope.c
+index aee193ca..cd6e3509 100644
+--- a/src/analyze_scope.c
++++ b/src/analyze_scope.c
+@@ -6273,7 +6273,7 @@ void specialize_inherited_cls_new(Compiler *c) {
+    was, and a `prepend` in `class B ... end; class B; prepend Guard; end`
+    compiled and did nothing -- while being the very form the explicit-receiver
+    diagnostic recommends (#4200). */
+-static void process_prepend_body(Compiler *c, int ci, int body) {
++static void process_prepend_body(Compiler *c, int ci, int body, int **done, int *ndone) {
+   const NodeTable *nt = c->nt;
+   {
+     int n = 0;
+@@ -6293,6 +6293,21 @@ static void process_prepend_body(Compiler *c, int ci, int body) {
+         const char *mname = (aty && (sp_streq(aty, "ConstantReadNode") || sp_streq(aty, "ConstantPathNode"))) ? nt_str(nt, args[j], "name") : NULL;
+         int mod_id = mname ? comp_class_index(c, mname) : -1;
+         if (mod_id < 0) continue;
++        /* A module the class has prepended already is in front of it, and
++           `prepend` adds nothing: twice in one body, or again where the
++           class is reopened. Transplanted a second time, a method of it
++           that calls super ran twice. `done` holds the (class, module)
++           pairs so far. */
++        {
++          int again = 0;
++          for (int q = 0; q < *ndone && !again; q++)
++            again = (*done)[2 * q] == ci && (*done)[2 * q + 1] == mod_id;
++          if (again) continue;
++          int *nd = realloc(*done, sizeof(int) * 2 * (size_t)(*ndone + 1));
++          if (!nd) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
++          *done = nd;
++          nd[2 * *ndone] = ci; nd[2 * *ndone + 1] = mod_id; (*ndone)++;
++        }
+         /* Transplant each instance method of the module into class ci. */
+         for (int ms = 0; ms < c->nscopes; ms++) {
+           Scope *sc = &c->scopes[ms];
+@@ -6389,7 +6404,9 @@ void register_prepends(Compiler *c) {
+   int snap = c->nscopes;
+   int *bci, *bnode;
+   int nb = class_body_list(c, &bci, &bnode);
+-  for (int b = 0; b < nb; b++) process_prepend_body(c, bci[b], bnode[b]);
++  int *done = NULL, ndone = 0;
++  for (int b = 0; b < nb; b++) process_prepend_body(c, bci[b], bnode[b], &done, &ndone);
++  free(done);
+   free(bci);
+   free(bnode);
+   /* The cloned bodies introduced new local nodes; intern them, as the
+diff --git a/test/prepend_twice_runs_once.rb b/test/prepend_twice_runs_once.rb
+new file mode 100644
+index 00000000..8aa95213
+--- /dev/null
++++ b/test/prepend_twice_runs_once.rb
+@@ -0,0 +1,160 @@
++# `prepend M` in a class that has M prepended already adds nothing: M stays
++# in front of the class once. Each `prepend` statement copied the module's
++# methods in front of the class again, so a method of M that calls super
++# ran once for each: `Twice.new.trail` below answered [:root, :own, :m, :m]
++# for [:root, :own, :m].
++module Mark
++  def trail
++    super + [:m]
++  end
++end
++
++module Note
++  def trail
++    super + [:n]
++  end
++end
++
++class Root
++  def trail
++    [:root]
++  end
++end
++
++class Twice < Root
++  prepend Mark
++  prepend Mark
++  def trail
++    super + [:own]
++  end
++end
++p Twice.new.trail
++p Twice.ancestors.first(3)
++
++# the same module three times, and twice in one call
++class Thrice < Root
++  prepend Mark
++  prepend Mark
++  prepend Mark
++end
++p Thrice.new.trail
++
++class OneCall < Root
++  prepend Mark, Mark
++  def trail
++    super + [:own]
++  end
++end
++p OneCall.new.trail
++
++# a class reopened with the prepend again, its method in either body
++class Reopened < Root
++  prepend Mark
++  def trail
++    super + [:own]
++  end
++end
++class Reopened
++  prepend Mark
++end
++p Reopened.new.trail
++
++class Later < Root
++  prepend Mark
++end
++class Later
++  prepend Mark
++  def trail
++    super + [:own]
++  end
++end
++p Later.new.trail
++
++# another module between: the second `prepend Mark` does not move it
++class Between < Root
++  prepend Mark
++  prepend Note
++  prepend Mark
++  def trail
++    super + [:own]
++  end
++end
++p Between.new.trail
++p Between.ancestors.first(4)
++
++# a method of the module that keeps a count, and one that gives super a block
++module Counted
++  def bump
++    @bumps = (@bumps || 0) + 1
++    super + @bumps
++  end
++end
++
++class Counter
++  def bump
++    10
++  end
++end
++
++class TwiceCounted < Counter
++  prepend Counted
++  prepend Counted
++end
++c = TwiceCounted.new
++p c.bump
++p c.bump
++
++module Triple
++  def each_pair
++    super() { |x| x * 3 }
++  end
++end
++
++class Pairs
++  def each_pair
++    r = []
++    r << (yield 1)
++    r << (yield 2)
++    r
++  end
++end
++
++class TwicePairs < Pairs
++  prepend Triple
++  prepend Triple
++end
++p TwicePairs.new.each_pair
++
++# a module that does not call super, and a second class with one prepend
++module Shout
++  def trail
++    [:shout]
++  end
++end
++
++class Loud < Root
++  prepend Shout
++  prepend Shout
++  def trail
++    super + [:own]
++  end
++end
++p Loud.new.trail
++
++class Once < Root
++  prepend Mark
++  def trail
++    super + [:own]
++  end
++end
++p Once.new.trail
++
++# a module included and then prepended is in the chain twice
++class Both < Root
++  include Mark
++  prepend Mark
++  def trail
++    super + [:own]
++  end
++end
++p Both.new.trail
+diff --git a/test/prepend_twice_runs_once.rb.expected b/test/prepend_twice_runs_once.rb.expected
+new file mode 100644
+index 00000000..e02e48f5
+--- /dev/null
++++ b/test/prepend_twice_runs_once.rb.expected
+@@ -0,0 +1,14 @@
++[:root, :own, :m]
++[Mark, Twice, Root]
++[:root, :m]
++[:root, :own, :m]
++[:root, :own, :m]
++[:root, :own, :m]
++[:root, :own, :m, :n]
++[Note, Mark, Between, Root]
++11
++12
++[3, 6]
++[:shout]
++[:root, :own, :m]
++[:root, :m, :own, :m]
+-- 
+2.43.0
+

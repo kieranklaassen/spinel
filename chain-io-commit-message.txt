@@ -1,0 +1,36 @@
+A module the superclass includes is not included again
+
+    module Plus
+      def count
+        super + 1
+      end
+    end
+    class Root
+      def count
+        1
+      end
+    end
+    class Parent < Root
+      include Plus
+    end
+    class Child < Parent
+      include Plus
+    end
+    p Child.new.count
+
+printed 3 where CRuby prints 2. Parent has Plus in its chain, so Child
+has it too, once, behind Parent, and the `include` in Child adds
+nothing. The module's methods were copied into Child all the same, in
+front of the copies Parent holds, and Plus#count ran once for each
+copy. A third class down it ran three times; a block the module's
+method gives to super ran in each copy.
+
+process_include_body leaves a module alone that a superclass includes
+by the time the class's own include is reached, directly or through a
+module that includes it. The class still records the module, so
+is_a?, include? and `rescue Plus` answer as before. Where the class
+includes the module first and its superclass is reopened to include it
+later, CRuby has the module in the chain twice, and so does this.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+

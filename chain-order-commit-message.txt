@@ -1,0 +1,11 @@
+`prepend A, B` puts A in front of B
+
+Ruby prepends the arguments last to first, as it includes them, so the
+first one listed is found first: `prepend A, B` is `prepend B;
+prepend A`, ancestors [A, B, C]. The prepend pass took them first to
+last, leaving B in front -- B's method ran before A's -- and the
+ancestors table did the same. Both now go last to first, as the
+include pass does since #7447.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+

@@ -1,0 +1,23 @@
+A Regexp pattern over boxed elements matches a Symbol and a grown String
+
+`pattern === element` on boxed values (sp_poly_case_eq) asked a Regexp
+only of a plain String. A Symbol, which Regexp#=== matches by its name,
+and a String that has grown (a shared handle) answered false:
+
+    p [:a1, :b].any?(/\d/)
+    s = +"a"
+    s << "1"
+    p [s, 3].any?(/\d/)
+
+printed false and false; CRuby prints true and true. The same test
+serves all?, none?, one?, slice_before, slice_after and a Regexp read
+out of an Array and asked with ===.
+
+The Regexp arm now asks a Symbol by its name and a grown String by its
+contents. It sets no match, as it set none for a plain String. The arm
+for a Symbol further down came after the Regexp arm's return and never
+ran; it is removed.
+
+Test: test/regexp_pattern_boxed_symbol.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
