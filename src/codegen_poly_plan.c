@@ -3371,6 +3371,7 @@ void emit_poly_cases_n(Compiler *c, int id, const char *name, const PolySpecials
        accumulator is an sp_RbVal and these have to box. */
     const char *ibo = (ret == TY_POLY) ? "sp_box_bool(" : "";
     const char *ibc = (ret == TY_POLY) ? ")" : "";
+    int srange_q = sp_streq(name, "include?") || sp_streq(name, "member?");
     /* a user Enumerable read out of a container answers from its elements;
        -1 means "not one", and the arms below still decide (#3761) */
     { Buf ab5; memset(&ab5, 0, sizeof ab5);
@@ -3414,6 +3415,10 @@ void emit_poly_cases_n(Compiler *c, int id, const char *name, const PolySpecials
       buf_printf(b, " case SP_BUILTIN_STR_INT_HASH: _t%d = %ssp_StrIntHash_has_key((sp_StrIntHash *)_t%d.v.p, _t%d)%s; break;", tr, ibo, tv, atmp[0], ibc);
       buf_printf(b, " case SP_BUILTIN_STR_STR_HASH: _t%d = %ssp_StrStrHash_has_key((sp_StrStrHash *)_t%d.v.p, _t%d)%s; break;", tr, ibo, tv, atmp[0], ibc);
       buf_printf(b, " case SP_BUILTIN_STR_POLY_HASH: _t%d = %ssp_StrPolyHash_has_key((sp_StrPolyHash *)_t%d.v.p, _t%d)%s; break;", tr, ibo, tv, atmp[0], ibc);
+      /* a String Range walks its members, as the typed call does: it fell
+         to the default arm and answered false. Range has no key?. */
+      if (srange_q)
+        buf_printf(b, " case SP_BUILTIN_STR_RANGE: _t%d = %ssp_srange_include(*(sp_StrRange *)_t%d.v.p, _t%d)%s; break;", tr, ibo, tv, atmp[0], ibc);
       break;
     case TY_SYMBOL:
       /* sym array is stored as IntArray (sp_sym == sp_int) */
@@ -3438,6 +3443,10 @@ void emit_poly_cases_n(Compiler *c, int id, const char *name, const PolySpecials
                     " sp_FloatArray_include((sp_FloatArray *)_t%d.v.p, _t%d.tag == SP_TAG_NIL ? sp_float_nil() : _t%d.v.f)%s; break;",
                  tr, ibo, atmp[0], atmp[0], tv, atmp[0], atmp[0], ibc);
       buf_printf(b, " case SP_BUILTIN_STR_ARRAY: _t%d = %s_t%d.tag == SP_TAG_STR && sp_StrArray_include((sp_StrArray *)_t%d.v.p, _t%d.v.s)%s; break;", tr, ibo, atmp[0], tv, atmp[0], ibc);
+      if (srange_q)
+        buf_printf(b, " case SP_BUILTIN_STR_RANGE: _t%d = %s(_t%d.tag == SP_TAG_STR || sp_poly_is_strbuf(_t%d)) &&"
+                      " sp_srange_include(*(sp_StrRange *)_t%d.v.p, sp_poly_unbox_s(_t%d))%s; break;",
+                   tr, ibo, atmp[0], atmp[0], tv, atmp[0], ibc);
       break;
     case TY_NIL:
       /* an Integer or Float array holds nil as its sentinel */
