@@ -1,0 +1,29 @@
+The head and the tail of a String are held while slice! joins them
+
+slice! with an Integer, a start and a length, or a Range rebuilds the
+receiver from what is left of it. All four arms, as a statement and
+with the removed part taken, wrote that as one C expression,
+sp_str_concat(sp_str_sub_range(..), sp_str_sub_range(..)): whichever
+piece C evaluated first was held by nothing while the other was
+allocated, since sp_str_concat roots its parameters only once
+entered. When both pieces are longer than one character, so that both
+are allocated, SPINEL_GC_STRESS=2 stopped with "the mark reached a
+freed heap string". With long pieces a plain run is wrong too: two
+4,000-character pieces with the removed parts kept leave 11 of 1,000
+rounds holding another text, and 121 at level 1, with gcc and clang
+alike.
+
+emit_slice_bang_rejoin now writes the join for the four arms: the
+head goes into a rooted temp, then the tail is made inside the call,
+as sp_str_splice_at does for its own pieces. An index held boxed
+re-enters the same arms and is covered. Calling sp_str_splice_at was
+measured and not taken: it makes one more allocation, 392
+instructions a call against about 10 for the temp.
+
+The test runs the long round as well, so it fails on master in the
+ordinary test leg and under the stress lane. The generated C of 24
+tests changes, and three of them (issue_3084,
+string_slice_bang_value_rooted, string_slice_bang_empty) now pass at
+level 2. Every benchmark's and optcarrot's is unchanged.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
