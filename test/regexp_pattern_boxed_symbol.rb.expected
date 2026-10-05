@@ -1,0 +1,56 @@
+true
+false
+false
+false
+false
+true
+true
+true
+true
+false
+false
+false
+true
+false
+false
+false
+true
+true
+true
+true
+false
+true
+true
+[true, true]
+true
+true
+true
+false
+true
+true
+true
+true
+true
+false
+true
+false
+true
+true
+false
+true
+[[:a1, :b], [:c2, :d]]
+[[:a1], [:b, :c2], [:d]]
+[["a1", :b], ["c2", :d]]
+true
+false
+true
+false
+false
+true
+true
+false
+"9"
+true
+"9"
+false
+"9"
