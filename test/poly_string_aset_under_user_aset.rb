@@ -118,3 +118,77 @@ begin
 rescue TypeError
 end
 p w
+
+# a key, a value or a receiver that runs the program's code with no call
+# written (an interpolated object's to_s or inspect, a `when` object's ===,
+# an `in` object's deconstruct) runs it once
+class Tally
+  def initialize; @n = 0; end
+  def n = @n
+  def to_s; @n += 1; "a"; end
+  def inspect; @n += 1; "i"; end
+  def ===(x); @n += 1; true; end
+  def deconstruct; @n += 1; [1, 2]; end
+end
+tl = Tally.new
+hs = [+"abcdef", 1][0]
+hs[0] = "#{tl}"
+p hs, tl.n
+hs[1] = "<#{[tl]}>"
+p hs, tl.n
+tb = [tl, 1][0]
+hs[2] = "#{tb}"
+p hs, tl.n
+hs[3] = (case 1 when tl then "w" else "b" end)
+p hs, tl.n
+hs[4] = (case tl; in [1, 2] then "d"; else "b"; end)
+p hs, tl.n
+hs[(case 1 when tl then 5 else 0 end)] = "k"
+p hs, tl.n
+hs[0..1] = "#{tl}#{1}"
+p hs, tl.n
+ha = [+"abcdef", 1]
+ha[(case 1 when tl then 0 else 1 end)][0] = "Q"
+p tl.n
+ht = [+"uvwxyz", 1][0]
+(case 1 when tl then hs else ht end)[0] = "R"
+p tl.n
+hl = [[+"abc", 1][0], [+"def", 1][0]]
+hl.each_with_index { |r, x| hl[x][0] = "#{tl}" }
+p tl.n
+
+# and what such code rebinds or replaces is not stored into: an instance
+# variable, an element, a local a lambda assigns
+class Swap
+  def initialize
+    @s = [+"abcdef", 1][0]
+    @t = [+"uvwxyz", 1][0]
+    @a = [+"abcdef", 1]
+  end
+  def to_s = (@s = @t; @a[0] = @t; "X")
+  def go
+    @s[0] = "#{self}"
+    p @s, @t
+  end
+  def go_slot
+    @a[0][0] = "#{self}"
+    p @a, @t
+  end
+end
+Swap.new.go
+Swap.new.go_slot
+ls = [+"abcdef", 1][0]
+lt = [+"uvwxyz", 1][0]
+$rebind = -> { ls = lt }
+class Rebinder
+  def to_s = ($rebind.call; "X")
+end
+ls[0] = "#{Rebinder.new}"
+p ls, lt
+
+# an interpolation of Strings and numbers runs none
+qn = 5
+qs = "q"
+hq = { title: +"draft", n: 1 }
+hq[:title][0] = "#{qs}#{qn}"
+p hq[:title]

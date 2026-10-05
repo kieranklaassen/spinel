@@ -31,3 +31,27 @@ frozen
 "xyz"
 1
 "abc"
+"abcdef"
+1
+"a<[i]>cdef"
+2
+"a<ai]>cdef"
+3
+"a<aw]>cdef"
+4
+"a<awd>cdef"
+5
+"a<awdkcdef"
+6
+"a1awdkcdef"
+7
+8
+9
+11
+"uvwxyz"
+"uvwxyz"
+["uvwxyz", 1]
+"uvwxyz"
+"uvwxyz"
+"uvwxyz"
+"q5raft"
