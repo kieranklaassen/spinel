@@ -22,7 +22,7 @@ module Gate
   module_function
 
   def run(*cmd, env: {})
-    out, st = Open3.capture2(env, *cmd, err: File::NULL)
+    out, st = Open3.capture2(env, *cmd, err: File::NULL, binmode: true)
     out if st.success?
   rescue SystemCallError
     nil
@@ -141,7 +141,7 @@ module Gate
 
   def cruby(ruby, t, args)
     stdin = File.exist?("#{t}.stdin") ? "#{t}.stdin" : File::NULL
-    IO.popen([ruby, "--enable-frozen-string-literal", t, *args], in: stdin, err: File::NULL) do |io|
+    IO.popen([ruby, "--enable-frozen-string-literal", t, *args], in: stdin, err: File::NULL, binmode: true) do |io|
       reader = Thread.new { io.read }
       next reader.value if reader.join(20)
 

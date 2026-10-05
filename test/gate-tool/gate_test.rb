@@ -127,6 +127,23 @@ Dir.mktmpdir("gate-tool-test") do |dir|
   sh("git", "add", "src/big.c")
   v, _, err = capture { Gate.check }
   ok(v == 1 && err.include?("new function big"), "check refuses a new function past FUNCTION_LIMIT lines")
+
+  # A C locale (US-ASCII as the default external encoding) changes no answer:
+  # check reads git's and CRuby's output as bytes.
+  File.write("src/big.c", "/* caf\u00e9 */\n#{File.read("src/big.c")}")
+  external = Encoding.default_external
+  [Encoding::UTF_8, Encoding::US_ASCII].each do |enc|
+    Encoding.default_external = enc
+    sh("git", "add", "src/big.c")
+    v, _, err = capture { Gate.check }
+    ok(v == 1 && err.include?("new function big"), "check reads a C file with non-ASCII text under #{enc}")
+    sh("git", "rm", "-q", "--cached", "src/big.c")
+    v, _, err = check.("accent", "puts \"caf\u00e9\"\n", "caf\u00e9\n")
+    ok(v == 0 && err.empty?, "check passes a test with non-ASCII text under #{enc}")
+    v, _, err = check.("accent", "puts \"caf\u00e9\"\n", "cafe\n")
+    ok(v == 1 && err.include?(".expected differs"), "check refuses its wrong .expected under #{enc}")
+  end
+  Encoding.default_external = external
 end
 
 if $fails > 0
