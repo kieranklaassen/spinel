@@ -6273,7 +6273,7 @@ void specialize_inherited_cls_new(Compiler *c) {
    was, and a `prepend` in `class B ... end; class B; prepend Guard; end`
    compiled and did nothing -- while being the very form the explicit-receiver
    diagnostic recommends (#4200). */
-static void process_prepend_body(Compiler *c, int ci, int body) {
+static void process_prepend_body(Compiler *c, int ci, int body, int **done, int *ndone) {
   const NodeTable *nt = c->nt;
   {
     int n = 0;
@@ -6293,6 +6293,21 @@ static void process_prepend_body(Compiler *c, int ci, int body) {
         const char *mname = (aty && (sp_streq(aty, "ConstantReadNode") || sp_streq(aty, "ConstantPathNode"))) ? nt_str(nt, args[j], "name") : NULL;
         int mod_id = mname ? comp_class_index(c, mname) : -1;
         if (mod_id < 0) continue;
+        /* A module the class has prepended already is in front of it, and
+           `prepend` adds nothing: twice in one body, or again where the
+           class is reopened. Transplanted a second time, a method of it
+           that calls super ran twice. `done` holds the (class, module)
+           pairs so far. */
+        {
+          int again = 0;
+          for (int q = 0; q < *ndone && !again; q++)
+            again = (*done)[2 * q] == ci && (*done)[2 * q + 1] == mod_id;
+          if (again) continue;
+          int *nd = realloc(*done, sizeof(int) * 2 * (size_t)(*ndone + 1));
+          if (!nd) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+          *done = nd;
+          nd[2 * *ndone] = ci; nd[2 * *ndone + 1] = mod_id; (*ndone)++;
+        }
         /* Transplant each instance method of the module into class ci. */
         for (int ms = 0; ms < c->nscopes; ms++) {
           Scope *sc = &c->scopes[ms];
@@ -6389,7 +6404,9 @@ void register_prepends(Compiler *c) {
   int snap = c->nscopes;
   int *bci, *bnode;
   int nb = class_body_list(c, &bci, &bnode);
-  for (int b = 0; b < nb; b++) process_prepend_body(c, bci[b], bnode[b]);
+  int *done = NULL, ndone = 0;
+  for (int b = 0; b < nb; b++) process_prepend_body(c, bci[b], bnode[b], &done, &ndone);
+  free(done);
   free(bci);
   free(bnode);
   /* The cloned bodies introduced new local nodes; intern them, as the
