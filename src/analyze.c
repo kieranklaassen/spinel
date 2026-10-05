@@ -28866,12 +28866,105 @@ typedef struct {
   int passed;       /* hand-overs run so far */
   int hit;          /* the mutating call, once found */
   int cont, brk;    /* what `next` and `break` carry to the loop's edge */
+  int numbering;    /* no question asked: the walk numbers the scope's calls (ks_ord) */
+  int from, to;     /* the statements of the scope's body to walk, or -1 for all */
 } KsWalk;
 static int ks_walk(Compiler *c, KsWalk *w, int node, int on, int kept, int depth);
 
+/* The order in which ks_walk runs a scope's calls, and the last call that
+   mutates each of its locals, taken once a scope: a mutation can follow a
+   hand-over only if it runs later, or in a loop that holds both.
+   ks_check_arg asks this before it walks, so a scope of many Strings built
+   and then handed over is not walked once for each of them. */
+typedef struct { const char *name; int seq, stmt; } KsMut;
+static struct {
+  int count, n;           /* nodes covered; calls numbered so far */
+  int *seq, *loop;        /* a call's number; the number its outermost loop starts at, or -1 */
+  int *stmt, at;          /* the statement of the scope's body a call is in, or -1; the one being walked */
+  int depth, start;       /* loops open in the walk; where the outermost one began */
+  int nscopes;
+  char *done;             /* a scope is numbered */
+  int *first, *last;      /* a scope's mutations in mut[], sorted by name and number */
+  KsMut *mut;
+  int nmut, cap;
+} ks_ord;
+static void ks_ord_mutation(const char *name) {
+  if (ks_ord.nmut == ks_ord.cap) {
+    int cap = ks_ord.cap ? ks_ord.cap * 2 : 64;
+    KsMut *m = (KsMut *)realloc(ks_ord.mut, sizeof(KsMut) * (size_t)cap);
+    if (!m) return;
+    ks_ord.mut = m; ks_ord.cap = cap;
+  }
+  ks_ord.mut[ks_ord.nmut].name = name;
+  ks_ord.mut[ks_ord.nmut].stmt = ks_ord.at;
+  ks_ord.mut[ks_ord.nmut++].seq = ks_ord.n;
+}
+/* Number call `call` of scope `si`, and note each local it mutates: the
+   receiver of a String mutator, an argument lent to a parameter its method
+   mutates in place (ks_call_mutates's two questions, for any local). */
+static void ks_ord_call(Compiler *c, int si, int call) {
+  const NodeTable *nt = c->nt;
+  if (call >= ks_ord.count) return;
+  ks_ord.seq[call] = ks_ord.n;
+  ks_ord.stmt[call] = ks_ord.at;
+  ks_ord.loop[call] = ks_ord.depth ? ks_ord.start : -1;
+  int r = an_unparen(nt, nt_ref(nt, call, "receiver"));
+  if (r >= 0 && nt_kind(nt, r) == NK_LocalVariableReadNode && c->nscope[r] == si && nt_str(nt, r, "name") &&
+      an_str_mutator_name(nt_str(nt, call, "name")) &&
+      (comp_ntype(c, r) == TY_STRING || comp_ntype(c, r) == TY_STRBUF)) ks_ord_mutation(nt_str(nt, r, "name"));
+  int mi = ks_call_target(c, call);
+  for (int j = 0; mi >= 1 && j < c->scopes[mi].nparams; j++) {
+    if (!comp_byref_param(c, &c->scopes[mi], j) && !an_param_mutated_in_place(c, mi, j)) continue;
+    int a = an_unparen(nt, arg_layout_param_node(c, &c->scopes[mi], call, j, NULL));
+    if (a >= 0 && nt_kind(nt, a) == NK_LocalVariableReadNode && c->nscope[a] == si && nt_str(nt, a, "name"))
+      ks_ord_mutation(nt_str(nt, a, "name"));
+  }
+  ks_ord.n++;
+}
+static int ks_mut_cmp(const void *a, const void *b) {
+  const KsMut *x = (const KsMut *)a, *y = (const KsMut *)b;
+  int d = strcmp(x->name, y->name);
+  return d ? d : x->seq - y->seq;
+}
+static void ks_ord_scope(Compiler *c, int si) {
+  KsWalk w = { -1, si, NULL, 0, 0, 0, 0, 0, 1, -1, -1 };
+  ks_ord.done[si] = 1;
+  ks_ord.first[si] = ks_ord.nmut;
+  ks_ord.depth = 0;
+  ks_ord.at = -1;
+  ks_walk(c, &w, c->scopes[si].body, 0, 0, 0);
+  ks_ord.last[si] = ks_ord.nmut;
+  int nm = ks_ord.last[si] - ks_ord.first[si];
+  if (nm > 1) qsort(ks_ord.mut + ks_ord.first[si], (size_t)nm, sizeof(KsMut), ks_mut_cmp);
+}
+/* Can a mutation of local `vn` follow hand-over `u` in scope `si`? If so,
+   `from` and `to` are the statements of the scope's body that hold the
+   hand-over and the last such mutation: nothing outside them decides it. */
+static int ks_may_follow(Compiler *c, int si, int u, const char *vn, int *from, int *to) {
+  *from = *to = -1;
+  if (!ks_ord.seq || u >= ks_ord.count || si >= ks_ord.nscopes) return 1;
+  if (!ks_ord.done[si]) ks_ord_scope(c, si);
+  if (ks_ord.seq[u] < 0) return 1;
+  /* the last mutation of `vn`: the end of its run in the sorted list */
+  int lo = ks_ord.first[si], hi = ks_ord.last[si];
+  while (lo < hi) {
+    int mid = lo + (hi - lo) / 2;
+    if (strcmp(ks_ord.mut[mid].name, vn) <= 0) lo = mid + 1;
+    else hi = mid;
+  }
+  if (lo == ks_ord.first[si] || strcmp(ks_ord.mut[lo - 1].name, vn)) return 0;
+  int last = ks_ord.mut[lo - 1].seq;
+  if (last <= ks_ord.seq[u] && (ks_ord.loop[u] < 0 || last < ks_ord.loop[u])) return 0;
+  if (ks_ord.stmt[u] >= 0 && ks_ord.mut[lo - 1].stmt >= 0) {
+    *from = ks_ord.stmt[u];
+    *to = ks_ord.mut[lo - 1].stmt > *from ? ks_ord.mut[lo - 1].stmt : *from;
+  }
+  return 1;
+}
+
 static int ks_names(Compiler *c, const KsWalk *w, int node) {
   const char *nm = nt_str(c->nt, node, "name");
-  return c->nscope[node] == w->si && nm && sp_streq(nm, w->vn);
+  return w->vn && c->nscope[node] == w->si && nm && sp_streq(nm, w->vn);
 }
 /* A String mutator on the variable, or the variable lent to a parameter its
    method mutates in place. */
@@ -28899,6 +28992,10 @@ static int ks_walk_loop(Compiler *c, KsWalk *w, int head, int body, int is_while
                         int rounds, int on, int kept, int depth) {
   int sc = w->cont, sb = w->brk, out = on;
   w->brk = 0;
+  if (w->numbering) {
+    rounds = 1;
+    if (!ks_ord.depth++) ks_ord.start = ks_ord.n;
+  }
   for (int round = 0; round < rounds && !w->hit; round++) {
     w->cont = 0;
     int at = ks_walk(c, w, head, rebinds ? 0 : on, 0, depth + 1);
@@ -28908,6 +29005,7 @@ static int ks_walk_loop(Compiler *c, KsWalk *w, int head, int body, int is_while
   }
   out |= w->brk;
   w->cont = sc; w->brk = sb;
+  if (w->numbering) ks_ord.depth--;
   return out;
 }
 /* The block of call `call`: a loop, unless the method is one that runs its
@@ -28921,7 +29019,7 @@ static int ks_walk_block(Compiler *c, KsWalk *w, int call, int blk, int on, int 
   for (int i = 0; cn && once[i]; i++) if (sp_streq(cn, once[i])) rounds = 1;
   for (int i = 0; cn && collects[i]; i++) if (sp_streq(cn, collects[i])) gathers = 1;
   const char *bp;
-  for (int i = 0; (bp = block_param_name(c, blk, i)); i++) if (sp_streq(bp, w->vn)) rebinds = 1;
+  for (int i = 0; w->vn && (bp = block_param_name(c, blk, i)); i++) if (sp_streq(bp, w->vn)) rebinds = 1;
   return ks_walk_loop(c, w, -1, nt_ref(c->nt, blk, "body"), 0, rebinds, rounds, on, kept && gathers, depth);
 }
 /* Is argument `arg` of call `call` stored by it: an attribute writer, a
@@ -28941,7 +29039,13 @@ static int ks_walk(Compiler *c, KsWalk *w, int node, int on, int kept, int depth
       return on;
     case NK_StatementsNode: {
       int n = 0; const int *b = nt_arr(nt, node, "body", &n);
-      for (int i = 0; i < n; i++) on = ks_walk(c, w, b[i], on, i == n - 1 ? kept : 0, depth + 1);
+      int lo = 0, hi = n - 1;
+      if (!depth && w->from >= 0) { lo = w->from; hi = w->to < hi ? w->to : hi; }
+      for (int i = lo; i <= hi; i++) {
+        if (!depth && w->numbering) ks_ord.at = i;
+        on = ks_walk(c, w, b[i], on, i == n - 1 ? kept : 0, depth + 1);
+      }
+      if (!depth && w->numbering) ks_ord.at = -1;
       return on;
     }
     case NK_ParenthesesNode:
@@ -29029,10 +29133,13 @@ static int ks_walk(Compiler *c, KsWalk *w, int node, int on, int kept, int depth
       on = ks_walk(c, w, nt_ref(nt, node, "receiver"), on, 0, depth + 1);
       int a = nt_ref(nt, node, "arguments"), ac = 0;
       const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
-      for (int i = 0; i < ac; i++) on = ks_walk(c, w, av[i], on, ks_arg_stored(c, node, av[i], kept), depth + 1);
+      /* whether an argument is stored matters only to a hand-over kept by value */
+      for (int i = 0; i < ac; i++)
+        on = ks_walk(c, w, av[i], on, w->by_value && ks_arg_stored(c, node, av[i], kept), depth + 1);
       int blk = nt_ref(nt, node, "block");
       if (blk >= 0 && nt_kind(nt, blk) != NK_BlockNode) on = ks_walk(c, w, blk, on, 0, depth + 1);
-      if (node == w->u) {
+      if (w->numbering) ks_ord_call(c, w->si, node);
+      else if (node == w->u) {
         if (!w->by_value || kept) { on = 1; w->passed++; }
       }
       else if (on && ks_call_mutates(c, w, node)) { w->hit = node; return on; }
@@ -29055,39 +29162,6 @@ static int ks_walk(Compiler *c, KsWalk *w, int node, int on, int kept, int depth
   size_t tl = ty ? strlen(ty) : 0;
   if ((tl > 11 && sp_streq(ty + tl - 11, "OrWriteNode")) || (tl > 12 && sp_streq(ty + tl - 12, "AndWriteNode"))) on |= in;
   return on;
-}
-/* an_local_lent's question -- is local `vn` of scope `si` handed to a
-   parameter its method mutates in place -- with the scope's calls read once. */
-static struct { int nscopes, n, cap, *scope; char *done; const char **name; } ks_lent;
-static int ks_local_lent(Compiler *c, int si, const char *vn) {
-  const NodeTable *nt = c->nt;
-  if (!ks_lent.done || si < 0 || si >= ks_lent.nscopes) return an_local_lent(c, vn, &c->scopes[si]);
-  if (!ks_lent.done[si]) {
-    ks_lent.done[si] = 1;
-    for (int u = comp_scall_first(c, si); u >= 0; u = comp_scall_next(c, u)) {
-      if (nt_kind(nt, u) != NK_CallNode || c->nscope[u] != si) continue;
-      int mi = an_call_target_mi(c, u);
-      if (mi < 0) mi = an_any_scope_by_name(c, nt_str(nt, u, "name"));
-      if (mi < 0) continue;
-      for (int j = 0; j < c->scopes[mi].nparams; j++) {
-        if (!comp_byref_param(c, &c->scopes[mi], j) && !an_param_mutated_in_place(c, mi, j)) continue;
-        int a = arg_layout_param_node(c, &c->scopes[mi], u, j, NULL);
-        if (a < 0 || nt_kind(nt, a) != NK_LocalVariableReadNode || !nt_str(nt, a, "name")) continue;
-        if (ks_lent.n == ks_lent.cap) {
-          int cap = ks_lent.cap ? ks_lent.cap * 2 : 16;
-          int *sc = (int *)realloc(ks_lent.scope, sizeof(int) * (size_t)cap);
-          if (sc) ks_lent.scope = sc;
-          const char **nm = sc ? (const char **)realloc(ks_lent.name, sizeof(char *) * (size_t)cap) : NULL;
-          if (!nm) return an_local_lent(c, vn, &c->scopes[si]);
-          ks_lent.name = nm; ks_lent.cap = cap;
-        }
-        ks_lent.scope[ks_lent.n] = si; ks_lent.name[ks_lent.n++] = nt_str(nt, a, "name");
-      }
-    }
-  }
-  for (int i = 0; i < ks_lent.n; i++)
-    if (ks_lent.scope[i] == si && sp_streq(ks_lent.name[i], vn)) return 1;
-  return 0;
 }
 /* Is every write of local `vn` in scope `si` a String literal? Such a
    String is frozen, and its mutation raises as CRuby's does. */
@@ -29116,11 +29190,12 @@ static void ks_check_arg(Compiler *c, int u, int arg) {
   /* a cell a proc captures is not judged; a parameter the method mutates
      through its caller's slot is */
   if ((lv->is_cell && !lv->byref_out) || vs->body < 0) return;
-  int si = (int)(vs - c->scopes), mutated = strbuf_mut_kind(c, vn, vs) != 0;
+  int si = (int)(vs - c->scopes);
   if (!lv->is_param && ks_only_frozen_literals(c, si, vn)) return;
   int how = ks_call_keeps(c, u, arg);
-  if (!how || (!mutated && !ks_local_lent(c, si, vn))) return;
-  KsWalk w = { u, si, vn, how == 2, 0, 0, 0, 0 };
+  int from, to;
+  if (!how || !ks_may_follow(c, si, u, vn, &from, &to)) return;
+  KsWalk w = { u, si, vn, how == 2, 0, 0, 0, 0, 0, from, to };
   ks_walk(c, &w, vs->body, 0, si != 0, 0);
   if (!w.hit) return;
   /* the hand-over's line, where the program was read with one */
@@ -29128,10 +29203,10 @@ static void ks_check_arg(Compiler *c, int u, int arg) {
   int ln = (int)nt_int(nt, u, "node_line", 0);
   if (ln > 0) snprintf(at, sizeof at, " (line %d)", ln);
   snprintf(msg, sizeof msg,
-           "String `%s` is mutated in place after `%s`%s kept it: a String is not yet shared by "
+           "String `%.*s` is mutated in place after `%s`%s kept it: a String is not yet shared by "
            "reference with a method that keeps it, and what was kept would miss the mutation. Mutate the "
            "String before handing it over, or mutate it through what holds it.",
-           vn, nt_str(nt, u, "name"), at);
+           (int)block_param_written_len(vn), vn, nt_str(nt, u, "name"), at);
   unsupported_feature(c, w.hit, msg);
 }
 static void refuse_kept_string_mutations(Compiler *c) {
@@ -29143,8 +29218,18 @@ static void refuse_kept_string_mutations(Compiler *c) {
   ks_tab.kept = ks_tab.off ? (signed char *)malloc((size_t)total + 1) : NULL;
   if (ks_tab.kept) memset(ks_tab.kept, -1, (size_t)total + 1);
   else { free(ks_tab.off); ks_tab.off = NULL; }
-  ks_lent.nscopes = c->nscopes;
-  ks_lent.done = (char *)calloc((size_t)c->nscopes + 1, 1);
+  memset(&ks_ord, 0, sizeof ks_ord);
+  ks_ord.seq = (int *)malloc(sizeof(int) * (size_t)(nt->count + 1));
+  ks_ord.loop = (int *)malloc(sizeof(int) * (size_t)(nt->count + 1));
+  ks_ord.stmt = (int *)malloc(sizeof(int) * (size_t)(nt->count + 1));
+  ks_ord.done = (char *)calloc((size_t)c->nscopes + 1, 1);
+  ks_ord.first = (int *)calloc((size_t)c->nscopes + 1, sizeof(int));
+  ks_ord.last = (int *)calloc((size_t)c->nscopes + 1, sizeof(int));
+  if (ks_ord.seq && ks_ord.loop && ks_ord.stmt && ks_ord.done && ks_ord.first && ks_ord.last) {
+    memset(ks_ord.seq, -1, sizeof(int) * (size_t)(nt->count + 1));
+    ks_ord.count = nt->count; ks_ord.nscopes = c->nscopes;
+  }
+  else { free(ks_ord.seq); ks_ord.seq = NULL; }
   NT_FOREACH_KIND(nt, NK_CallNode, u) {
     int a = nt_ref(nt, u, "arguments"), ac = 0;
     const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
@@ -29157,8 +29242,9 @@ static void refuse_kept_string_mutations(Compiler *c) {
   }
   free(ks_tab.off); free(ks_tab.kept);
   ks_tab.off = NULL; ks_tab.kept = NULL;
-  free(ks_lent.done); free(ks_lent.scope); free(ks_lent.name);
-  memset(&ks_lent, 0, sizeof ks_lent);
+  free(ks_ord.seq); free(ks_ord.loop); free(ks_ord.stmt); free(ks_ord.done); free(ks_ord.first);
+  free(ks_ord.last); free(ks_ord.mut);
+  memset(&ks_ord, 0, sizeof ks_ord);
 }
 
 /* A bare `@ivar` argument whose ivar is written from a local, handed to a

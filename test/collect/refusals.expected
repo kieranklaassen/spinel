@@ -246,6 +246,10 @@ spinel: 1 refusal, nothing written
 spinel: String `s` is mutated in place after `s=` kept it: a String is not yet shared by reference with a method that keeps it, and what was kept would miss the mutation. Mutate the String before handing it over, or mutate it through what holds it.
 == test/reject/kept_string_attr_writer.rb [promote] rc=1
 spinel: String `s` is mutated in place after `s=` kept it: a String is not yet shared by reference with a method that keeps it, and what was kept would miss the mutation. Mutate the String before handing it over, or mutate it through what holds it.
+== test/reject/kept_string_block_local.rb [default] rc=1
+spinel: String `s` is mutated in place after `new` kept it: a String is not yet shared by reference with a method that keeps it, and what was kept would miss the mutation. Mutate the String before handing it over, or mutate it through what holds it.
+== test/reject/kept_string_block_local.rb [promote] rc=1
+spinel: String `s` is mutated in place after `new` kept it: a String is not yet shared by reference with a method that keeps it, and what was kept would miss the mutation. Mutate the String before handing it over, or mutate it through what holds it.
 == test/reject/kept_string_ivar_array_loop.rb [default] rc=1
 spinel: String `s` is mutated in place after `add` kept it: a String is not yet shared by reference with a method that keeps it, and what was kept would miss the mutation. Mutate the String before handing it over, or mutate it through what holds it.
 == test/reject/kept_string_ivar_array_loop.rb [promote] rc=1
