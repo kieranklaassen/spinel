@@ -77,7 +77,7 @@ k = Q.new(+"k")
 v = 7
 k.b << 100 << 101
 k.b << "a#{v}" << "b#{v + 1}"
-k.b << 3.to_s << [1, 2].size.to_s
+k.me.s << 3.to_s << [1, 2].size.to_s
 p k.s, $n
 
 # one link whose argument has the receiver written again
@@ -86,6 +86,32 @@ k = Q.new(+"k")
 k.b << 65
 k.b << "a#{v}b#{v}"
 p k.s, $n
+
+# an argument that puts the receiver's own String back in its slot under a
+# new handle: the slot is read again at each link
+class W
+  attr_reader :s
+  def initialize = @s = +"s"
+  def touch
+    x = @s
+    @s = x
+    "w"
+  end
+end
+o = W.new
+o.s << "a#{o.touch}" << "b"
+a = [o]
+a.shift.s << "c#{o.touch}" << "d"
+p o.s, a.size
+
+# an argument that changes what the owner names: the first owner's String
+# takes every link
+a = [W.new, W.new]
+b = a.dup
+i = 0
+a[i].s << "x" << (i = 1; "y")
+a[0].s << "p" << (a.clear; "q")
+p b.map(&:s), i, a.size
 
 # under a condition, in a block and in a loop
 $n = 0

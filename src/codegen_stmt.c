@@ -14209,6 +14209,89 @@ static void emit_str_concat_handle(Compiler *c, const char *sref, int argc, cons
   emit_indent(b, indent); buf_puts(b, "}\n");
 }
 
+/* 1 when running `id` calls no method of the program: a String or an
+   Integer literal, a local that holds a String or an Integer, `+`, `-` or
+   `*` of two such Integers, an interpolation of these. A list: what it does
+   not name may run anything, an interpolated object's to_s included. */
+static int append_arg_runs_nothing(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  id = unwrap_parens(c, id);
+  TyKind t = comp_ntype(c, id);
+  switch (nt_kind(nt, id)) {
+    case NK_StringNode: case NK_IntegerNode: return 1;
+    case NK_LocalVariableReadNode: return t == TY_STRING || t == TY_STRBUF || t == TY_INT;
+    case NK_CallNode: {
+      const char *nm = nt_str(nt, id, "name");
+      int r = nt_ref(nt, id, "receiver"), an = nt_ref(nt, id, "arguments"), ac = 0;
+      const int *av = an >= 0 ? nt_arr(nt, an, "arguments", &ac) : NULL;
+      return nm && (sp_streq(nm, "+") || sp_streq(nm, "-") || sp_streq(nm, "*")) && r >= 0 && ac == 1 &&
+             nt_ref(nt, id, "block") < 0 && comp_ntype(c, r) == TY_INT && comp_ntype(c, av[0]) == TY_INT &&
+             append_arg_runs_nothing(c, r) && append_arg_runs_nothing(c, av[0]);
+    }
+    case NK_InterpolatedStringNode: {
+      int pn = 0; const int *parts = nt_arr(nt, id, "parts", &pn);
+      for (int k = 0; k < pn; k++) {
+        if (nt_kind(nt, parts[k]) == NK_StringNode) continue;
+        if (nt_kind(nt, parts[k]) != NK_EmbeddedStatementsNode) return 0;
+        int st = nt_ref(nt, parts[k], "statements"), bn = 0;
+        const int *body = st >= 0 ? nt_arr(nt, st, "body", &bn) : NULL;
+        if (bn != 1 || !append_arg_runs_nothing(c, body[0])) return 0;
+      }
+      return 1;
+    }
+    default: return 0;
+  }
+}
+
+/* 1 when `cur`, a call with no argument, reads an attribute whatever object
+   its receiver holds: a field read on a typed receiver, and on a boxed one
+   a name that no class answers with a method and one at least answers with
+   an attribute. Such a call runs no method of the program. */
+static int append_recv_reads_slot(Compiler *c, int cur) {
+  const NodeTable *nt = c->nt;
+  int allocates = 0, found = 0;
+  if (call_is_field_read(c, cur, &allocates)) return 1;
+  const char *nm = nt_str(nt, cur, "name");
+  int r = nt_ref(nt, cur, "receiver");
+  if (!nm || r < 0 || comp_ntype(c, r) != TY_POLY || nt_ref(nt, cur, "arguments") >= 0 ||
+      nt_ref(nt, cur, "block") >= 0)
+    return 0;
+  for (int cid = 0; cid < c->nclasses; cid++) {
+    int dc = -1;
+    int k = comp_resolve_member(c, cid, nm, 0, &dc, NULL);
+    if (k == SP_MEMBER_METHOD) return 0;
+    if (k == SP_MEMBER_ATTR) found = 1;
+  }
+  return found;
+}
+
+/* How a statement's append chain holds a receiver that is a call: 0 not at
+   all, 1 its handle, 2 its owner. Only a receiver written out more than
+   once is held: a chain of two links or more, or one link whose argument
+   is an interpolation, an Integer or a boxed value. A reader's slot is read
+   again at each link, so a link that puts the same String back in the slot
+   under a new handle (`x = @s; @s = x`) is followed; it is read through
+   the owner, which is held where running it does something or where an
+   argument may change what it names (`a[0].s << "x" << (a.clear; "y")`).
+   A value object is copied by a temp, so it is never held. Any other call
+   is held by its handle only where no argument can write a slot. */
+static int append_chain_hold(Compiler *c, int cur, const int *chain, int nchain) {
+  const NodeTable *nt = c->nt;
+  if (nt_kind(nt, cur) != NK_CallNode) return 0;
+  TyKind at0 = comp_ntype(c, chain[0]);
+  if (nchain == 1 && nt_kind(nt, chain[0]) != NK_InterpolatedStringNode && at0 != TY_INT && at0 != TY_POLY)
+    return 0;
+  int quiet = 1;
+  for (int j = 0; j < nchain; j++)
+    if (!append_arg_runs_nothing(c, chain[j])) quiet = 0;
+  if (append_recv_reads_slot(c, cur)) {
+    int owner = nt_ref(nt, cur, "receiver");
+    if (owner < 0 || nt_kind(nt, owner) == NK_SelfNode || comp_ty_value_obj(c, comp_ntype(c, owner))) return 0;
+    return subtree_is_pure_read(c, owner) && quiet ? 0 : 2;
+  }
+  return quiet;
+}
+
 static int str_mutate_append_bang_arms(Compiler *c, int id, Buf *b, int indent, const NodeTable *nt, const char *name, int recv, TyKind rt, int argc, const int *argv) {
   /* mutable-string append: a STRBUF-typed local appends in place (amortized
      O(1)) via sp_String_append. Chains (`s << a << b`) all target the same
@@ -14230,20 +14313,37 @@ static int str_mutate_append_bang_arms(Compiler *c, int id, Buf *b, int indent, 
       cur = crecv;
     }
     char srefC[1024];
-    if (nchain > 0 && strbuf_slot_ref(c, cur, srefC, sizeof srefC)) {
-      /* A receiver that is a call (a reader, an element read) runs once,
-         ahead of the chain. Written out at each link it ran once a link:
-         `a.shift.s << "x" << "y"` shifted twice. It is rooted: nothing else
-         may hold it while the arguments allocate. A local or an instance
-         variable is its own slot, and one link whose argument writes the
-         receiver once (not an interpolation, an Integer or a boxed value)
-         stays as it was. */
-      TyKind at0 = comp_ntype(c, chain[0]);
-      int held = nt_kind(nt, cur) == NK_CallNode &&
-                 (nchain > 1 || nt_kind(nt, chain[0]) == NK_InterpolatedStringNode ||
-                  at0 == TY_INT || at0 == TY_POLY);
-      if (held) {
-        int th = ++g_tmp;
+    /* A receiver that is a call and is written out at more than one link
+       ran once a link: `a.shift.s << "x" << "y"` shifted twice. Where it is
+       a reader, its owner runs once, ahead of the chain, and the links read
+       the slot through it; where it is any other call, its handle is read
+       once, under a list that proves no argument runs anything. */
+    int hold = nchain > 0 ? append_chain_hold(c, cur, chain, nchain) : 0;
+    int owner = hold == 2 ? nt_ref(nt, cur, "receiver") : -1;
+    /* the owner's temp is numbered only once the slot is known to be one:
+       the slot is rendered around a mark first, and the mark renamed */
+    static const char mark[] = "_o_w_n_e_r_o_f_";   /* no shorter than a temp's name */
+    int bind = hold == 2 ? view_bind(owner, "%s", mark) : -1;
+    int slot = nchain > 0 && strbuf_slot_ref(c, cur, srefC, sizeof srefC);
+    if (bind >= 0) view_unbind(bind);
+    if (slot) {
+      if (hold == 2 && !strstr(srefC, mark)) hold = 0;
+      int th = hold ? ++g_tmp : 0;
+      if (hold == 2) {
+        char named[1024], *out = named;
+        for (const char *in = srefC, *at; *in; in = at ? at + sizeof mark - 1 : in + strlen(in)) {
+          at = strstr(in, mark);
+          out += sprintf(out, "%.*s", at ? (int)(at - in) : (int)strlen(in), in);
+          if (at) out += sprintf(out, "_t%d", th);
+        }
+        snprintf(srefC, sizeof srefC, "%s", named);
+        TyKind ot = comp_ntype(c, owner);
+        emit_indent(b, indent);
+        buf_puts(b, "{ "); emit_ctype(c, ot, b);
+        buf_printf(b, " _t%d = ", th); emit_expr(c, owner, b); buf_puts(b, "; ");
+        emit_gc_root_tmp(c, ot, th, b); buf_puts(b, "\n");
+      }
+      else if (hold) {
         emit_indent(b, indent);
         buf_printf(b, "{ sp_String *_t%d = %s; SP_GC_ROOT(_t%d);\n", th, srefC, th);
         snprintf(srefC, sizeof srefC, "_t%d", th);
@@ -14275,7 +14375,7 @@ static int str_mutate_append_bang_arms(Compiler *c, int id, Buf *b, int indent, 
           emit_str_append_arg(c, arg, rt, b); }
         buf_puts(b, ");\n");
       }
-      if (held) { emit_indent(b, indent); buf_puts(b, "}\n"); }
+      if (hold) { emit_indent(b, indent); buf_puts(b, "}\n"); }
       return 1;
     }
   }
