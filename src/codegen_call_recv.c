@@ -10882,6 +10882,24 @@ static int face_str_var_recv(const NodeTable *nt, int recv) {
   const char *rvt = nt_type(nt, recv);
   return rvt && (sp_streq(rvt, "LocalVariableReadNode") || sp_streq(rvt, "InstanceVariableReadNode"));
 }
+/* Does this subtree call a String mutator, by its name? A builtin over plain
+   values runs no code of the program's (subtree_may_run_proc) and still
+   changes a String in place. */
+static int subtree_calls_str_mutator(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  if (id < 0) return 0;
+  if (nt_kind(nt, id) == NK_CallNode && !call_is_scalar_op(c, id)) {
+    const char *nm = nt_str(nt, id, "name");
+    if (nm && an_str_mutator_name(nm)) return 1;
+  }
+  for (int i = 0; i < nt_num_refs(nt, id); i++)
+    if (subtree_calls_str_mutator(c, nt_ref_at(nt, id, i))) return 1;
+  for (int i = 0; i < nt_num_arrs(nt, id); i++) {
+    int n = 0; const int *ids = nt_arr_at(nt, id, i, &n);
+    for (int j = 0; j < n; j++) if (subtree_calls_str_mutator(c, ids[j])) return 1;
+  }
+  return 0;
+}
 /* One owner's arm: unbox `box` (a temp holding the boxed receiver, or 0 to
    unbox the receiver expression itself) to `kind`'s representation in the
    statement prelude, override the receiver node with the temp, retype and
@@ -10919,6 +10937,20 @@ static TyKind emit_face_arm(Compiler *c, int id, unsigned kind, unsigned flags, 
     else emit_expr(c, recv, &rb);
   }
   const char *rs = box ? bx : rb.p ? rb.p : "sp_box_nil()";
+  /* The text read below is a shared handle's own bytes, and concat and
+     prepend join it with their arguments after it is read. An argument
+     that grows the receiver, as in `u.concat((u << big; "w"))`, moves the
+     bytes, and the temp named freed ones. So where an argument can change
+     a String, the arguments run first, each into a rooted temp, and the
+     text is read after them, where CRuby reads it. */
+  if (kind == PF_STRING && (sp_streq(name, "concat") || sp_streq(name, "prepend")) &&
+      nt_call_args_plain(nt, id)) {
+    int argc = 0, changes = 0;
+    const int *argv = call_args(nt, id, &argc);
+    for (int i = 0; i < argc && !changes; i++)
+      changes = subtree_may_run_proc(c, argv[i]) || subtree_calls_str_mutator(c, argv[i]);
+    if (changes) emit_args_in_source_order(c, argv, argc, g_pre);
+  }
   emit_indent(g_pre, g_indent);
   switch (kind) {
     /* A String mutator's receiver checks a shared handle's frozen flag
