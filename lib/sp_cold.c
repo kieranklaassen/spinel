@@ -3559,6 +3559,23 @@ sp_StrArray *sp_srange_to_a(sp_StrRange r) {
   if (!r.last) sp_raise_cls("RangeError", "cannot convert endless range to an array");
   return sp_StrArray_from_string_range(r.first, r.last, r.excl);
 }
+/* #first(n), #take(n) and #min(n): the first n members, with the walk left
+   there as CRuby leaves its each, so the first three of ("a".."zzzzzzzz") are
+   three Strings and not the range built whole. */
+typedef struct { sp_StrArray *a; sp_int n; } sp_srange_first_t;
+static int sp_srange_first_i(const char *m, void *arg) {
+  sp_srange_first_t *t = (sp_srange_first_t *)arg;
+  sp_StrArray_push(t->a, m);
+  return sp_StrArray_length(t->a) >= t->n;
+}
+sp_StrArray *sp_srange_first_n(sp_StrRange r, sp_int n) {
+  if (!r.first) sp_raise_cls("TypeError", "can't iterate from NilClass");
+  if (!r.last) sp_raise_cls("RangeError", "cannot convert endless range to an array");
+  sp_StrArray *a = sp_StrArray_new(); SP_GC_ROOT(a);
+  sp_srange_first_t t = { a, n };
+  if (n > 0) sp_str_upto_each(r.first, r.last, r.excl, sp_srange_first_i, &t);
+  return a;
+}
 sp_bool sp_srange_eq(sp_StrRange a, sp_StrRange b) {
   return a.excl == b.excl && sp_str_eq(a.first, b.first) && sp_str_eq(a.last, b.last);
 }

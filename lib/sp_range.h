@@ -109,6 +109,7 @@ sp_RbVal sp_box_frange(sp_FloatRange v);
 sp_float sp_frange_max(sp_FloatRange r);
 sp_StrRange sp_srange_new(const char *f, const char *l, sp_int e);
 sp_StrArray *sp_srange_to_a(sp_StrRange r);
+sp_StrArray *sp_srange_first_n(sp_StrRange r, sp_int n);
 sp_bool sp_srange_eq(sp_StrRange a, sp_StrRange b);
 sp_bool sp_srange_cover(sp_StrRange r, const char *x);
 sp_bool sp_srange_include(sp_StrRange r, const char *x);
