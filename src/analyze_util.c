@@ -382,6 +382,63 @@ int an_unparen(const NodeTable *nt, int n) {
   }
   return n;
 }
+/* A value the program writes as nil: `nil`, or a conditional with a nil arm
+   (`c ? Box.new : nil`, `Box.new if c`) */
+int nil_value_node(Compiler *c, int v) {
+  const NodeTable *nt = c->nt;
+  v = an_unparen(nt, v);
+  if (v < 0) return 0;
+  NodeKind k = nt_kind(nt, v);
+  if (k == NK_NilNode) return 1;
+  if (k == NK_IfNode || k == NK_UnlessNode) {
+    int st = nt_ref(nt, v, "statements"), el = nt_ref(nt, v, "subsequent");
+    if (el < 0) el = nt_ref(nt, v, "else_clause");
+    if (st < 0) return 1;   /* `x if c` with no body answers nil */
+    int n = 0; const int *bd = nt_arr(nt, st, "body", &n);
+    if (n > 0 && nil_value_node(c, bd[n - 1])) return 1;
+    if (el < 0) return 1;   /* no else: nil when the condition fails */
+    if (nt_kind(nt, el) == NK_ElseNode) {
+      int es = nt_ref(nt, el, "statements");
+      if (es < 0) return 1;
+      int m = 0; const int *eb = nt_arr(nt, es, "body", &m);
+      return m > 0 && nil_value_node(c, eb[m - 1]);
+    }
+    return nil_value_node(c, el);
+  }
+  return 0;
+}
+/* Can nil answer `nm` in this program: a method defined at the top level,
+   in Object, Kernel or BasicObject (a module's copies with them), or any
+   method at all once the program reopens NilClass? A call on a typed slot
+   that holds nil is then not a NoMethodError, and nil's own method is not
+   reached from such a slot, so the guards of a held nil (obj_nil_held)
+   leave it as it was. */
+int nil_may_answer(Compiler *c, const char *nm) {
+  static const char *const up[] = { "Object", "Kernel", "BasicObject", NULL };
+  if (comp_class_index(c, "NilClass") >= 0) return 1;
+  for (int i = 0; up[i]; i++) {
+    int cid = comp_class_index(c, up[i]);
+    if (cid >= 0 && (comp_method_in_chain(c, cid, nm, NULL) >= 0 ||
+                     comp_method_in_chain(c, cid, "method_missing", NULL) >= 0)) return 1;
+  }
+  for (int k = 0; k < c->ntoplevel_includes; k++)
+    if (comp_method_in_chain(c, c->toplevel_includes[k], nm, NULL) >= 0) return 1;
+  for (int mi = 1; mi < c->nscopes; mi++) {
+    Scope *s = &c->scopes[mi];
+    if (s->class_id < 0 && s->name && (sp_streq(s->name, nm) || sp_streq(s->name, "method_missing"))) return 1;
+  }
+  return 0;
+}
+/* ... any of the methods of class `cid` */
+int nil_may_answer_class(Compiler *c, int cid) {
+  const ClassInfo *ci = &c->classes[cid];
+  for (int i = 0; i < ci->nreaders; i++) if (nil_may_answer(c, ci->readers[i])) return 1;
+  for (int mi = 1; mi < c->nscopes; mi++) {
+    Scope *s = &c->scopes[mi];
+    if (s->class_id == cid && s->name && !s->is_cmethod && nil_may_answer(c, s->name)) return 1;
+  }
+  return 0;
+}
 /* A construct whose VALUE is an empty container. Its type reads UNKNOWN
    because it carries no element type, which is not the same as producing no
    value -- and the two were conflated wherever an expression's type decides

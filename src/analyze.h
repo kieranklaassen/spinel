@@ -105,6 +105,11 @@ int ctor_arg_in_splat(Compiler *c, int u, int a);
 int an_indexed_each_source(const NodeTable *nt, int recv);
 void an_node_dir(const NodeTable *nt, int id, char *dir, size_t cap);
 const char *an_memo_reader_ivar(Compiler *c, int mi);
+/* A value the program writes as nil: `nil`, a conditional with a nil arm */
+int nil_value_node(Compiler *c, int v);
+/* Can nil answer `nm`, or any method of class `cid`, in this program */
+int nil_may_answer(Compiler *c, const char *nm);
+int nil_may_answer_class(Compiler *c, int cid);
 /* The ivar read/write node a local write's value aliases, or -1 */
 int strbuf_ivar_alias_value(const NodeTable *nt, int v);
 

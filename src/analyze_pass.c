@@ -11988,6 +11988,9 @@ static int cs_type_params(Compiler *c, int create, const int *argv, int argc) {
     if ((merged == TY_INT || merged == TY_FLOAT) && (nil_int || (absent[k] & BS_ABSENT)) &&
         !lv->nullable_int) { lv->nullable_int = 1; changed = 1; }
     if (lit && !lv->nil_passed) { lv->nil_passed = 1; changed = 1; }
+    /* an object one this call hands nil, or nothing: a method called on it
+       raises NoMethodError, as on a method's parameter (#5088) */
+    if (absent[k]) lv->obj_nil_held = 1;
     if (merged != lv->type) { lv->type = merged; changed = 1; }
     /* Reverse binding, as a method's (bind_call_params): an empty-`{}`-only
        local handed to a parameter the body types as a Hash is that Hash,
@@ -12362,6 +12365,8 @@ int block_settle_types(Compiler *c, int blk, const BlockSig *s,
         at != TY_POLY && pure_block_param(c, bs, bp))
       m = at;
     if (nil_int && m == at && !lv->nullable_int) { lv->nullable_int = 1; changed = 1; }
+    /* an object one a site hands nil (`yield nil`, a `= nil` default) */
+    if (fl) lv->obj_nil_held = 1;
     if (m == TY_POLY && !lv->site_boxed) lv->site_boxed = at == TY_POLY && was != TY_POLY ? 1 : 2;
     if (m != lv->type) { lv->type = m; changed = 1; }
   }
@@ -13441,6 +13446,7 @@ static int infer_block_params_call_arms(Compiler *c, const NodeTable *nt, int id
           TyKind merged = ty_unify(lv->type, absent[k] ? ty_unify(at, TY_NIL) : at);
           if ((absent[k] & BS_NIL) && (merged == TY_INT || merged == TY_FLOAT) && g_promote_mode) merged = TY_POLY;
           if ((merged == TY_INT || merged == TY_FLOAT) && absent[k] && !lv->nullable_int) { lv->nullable_int = 1; changed = 1; }
+          if (absent[k]) lv->obj_nil_held = 1;
           if (merged != lv->type) { lv->type = merged; changed = 1; }
         }
       }

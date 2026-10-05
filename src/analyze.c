@@ -26202,6 +26202,20 @@ static int site_args_may_be_nil(Compiler *c, const int *av, int an) {
   return 0;
 }
 
+/* A value that leaves an object parameter holding nil (obj_nil_held): a nil
+   the program writes (`nil`, `c ? Box.new : nil`), a value typed nil, or a
+   parameter that holds one already */
+static int obj_nil_value(Compiler *c, int a) {
+  const NodeTable *nt = c->nt;
+  if (a < 0) return 0;
+  if (nil_value_node(c, a) || c->ntype[a] == TY_NIL) return 1;
+  if (nt_kind(nt, a) != NK_LocalVariableReadNode) return 0;
+  Scope *as = comp_scope_of(c, a);
+  const char *an = nt_str(nt, a, "name");
+  LocalVar *al = as && an ? scope_local(as, an) : NULL;
+  return al && (al->obj_nilable || al->obj_nil_held);
+}
+
 /* The marks a call's arguments hand the parameters of method `mi` it binds:
    an object parameter handed nil, an array one handed an array holding the
    sentinel, an Integer or Float one handed a value that can be it -- a
@@ -26230,6 +26244,7 @@ static int mark_nullable_params_of_call(Compiler *c, int id, int mi) {
       }
       if (nilarg) { p->obj_nilable = 1; changed = 1; }
     }
+    if (ty_is_object(p->type) && !p->obj_nil_held && obj_nil_value(c, a)) { p->obj_nil_held = 1; changed = 1; }
     if ((p->type == TY_INT_ARRAY || p->type == TY_FLOAT_ARRAY) && !p->nullable_int_elem &&
         nullable_int_elem_expr(c, a, 0)) { p->nullable_int_elem = 1; changed = 1; }
     if ((p->type != TY_INT && p->type != TY_FLOAT) || p->nullable_int) continue;
@@ -26243,8 +26258,11 @@ static int mark_nullable_params_of_call(Compiler *c, int id, int mi) {
   for (int k = 0; kwh >= 0 && k < m->nparams; k++) {
     const char *pk = m->pnames[k];
     LocalVar *p = pk ? scope_local(m, pk) : NULL;
-    if (!p || (p->type != TY_INT && p->type != TY_FLOAT) || p->nullable_int ||
-        !callee_param_is_declared_kwarg(c, m, pk)) continue;
+    if (!p || !callee_param_is_declared_kwarg(c, m, pk)) continue;
+    if (ty_is_object(p->type) && !p->obj_nil_held && obj_nil_value(c, ie_kwhash_value(c, kwh, pk))) {
+      p->obj_nil_held = 1; changed = 1;
+    }
+    if ((p->type != TY_INT && p->type != TY_FLOAT) || p->nullable_int) continue;
     if (nullable_int_value(c, ie_kwhash_value(c, kwh, pk))) { p->nullable_int = 1; changed = 1; }
   }
   arg_layout_free(&L);
@@ -26976,6 +26994,18 @@ static void mark_nullable_int_locals(Compiler *c) {
       if (ci->cvar_types[cv] != TY_INT && ci->cvar_types[cv] != TY_FLOAT) continue;
       if (nullable_int_value(c, v)) { ci->cvar_nullable_int[cv] = 1; changed = 1; }
     }
+    /* An object parameter's own default hands it nil when the call leaves
+       it out: `def run(o = nil)`, `o: nil`, `{ |o = nil| }`, a default that
+       is a nil parameter before it */
+    static const NodeKind dk[] = { NK_OptionalParameterNode, NK_OptionalKeywordParameterNode };
+    for (int q = 0; q < 2; q++)
+      NT_FOREACH_KIND(nt, dk[q], id) {
+        const char *pn = nt_str(nt, id, "name");
+        Scope *ps = pn ? comp_scope_of(c, id) : NULL;
+        LocalVar *p = ps ? scope_local(ps, pn) : NULL;
+        if (!p || !ty_is_object(p->type) || p->obj_nil_held || !obj_nil_value(c, nt_ref(nt, id, "value"))) continue;
+        p->obj_nil_held = 1; changed = 1;
+      }
     /* A PARAMETER bound from such a value carries the sentinel into the callee,
        where boxing it (`other.inspect`, `x == other`) has the same problem the
        local marking exists to prevent. */
@@ -33100,6 +33130,27 @@ static void an_phase_value_types(Compiler *c) {
         if (lv2 && ty_is_object(lv2->type)) {
           int q = ty_object_class(lv2->type);
           if (q >= 0 && q < c->nclasses) c->classes[q].is_value_type = 0;
+        }
+      }
+    }
+    /* ... and so is a nil a call hands a keyword (`run(o: nil)`), for the
+       keyword parameters of that name, unless nil can answer a method of
+       the class: its calls then stay as they were (nil_may_answer) */
+    if (sp_streq(ty, "KeywordHashNode")) {
+      int kn2 = 0; const int *ke2 = nt_arr(c->nt, id, "elements", &kn2);
+      for (int e = 0; e < kn2; e++) {
+        int key = nt_kind(c->nt, ke2[e]) == NK_AssocNode ? nt_ref(c->nt, ke2[e], "key") : -1;
+        int v2 = key >= 0 ? nt_ref(c->nt, ke2[e], "value") : -1;
+        const char *kw = v2 >= 0 && nt_kind(c->nt, key) == NK_SymbolNode && nt_kind(c->nt, v2) == NK_NilNode ?
+                         nt_str(c->nt, key, "value") : NULL;
+        for (int mi = 1; kw && mi < c->nscopes; mi++) {
+          Scope *m = &c->scopes[mi];
+          LocalVar *lv2 = callee_param_is_declared_kwarg(c, m, kw) ? scope_local(m, kw) : NULL;
+          if (lv2 && ty_is_object(lv2->type)) {
+            int q = ty_object_class(lv2->type);
+            if (q >= 0 && q < c->nclasses && c->classes[q].is_value_type && !nil_may_answer_class(c, q))
+              c->classes[q].is_value_type = 0;
+          }
         }
       }
     }

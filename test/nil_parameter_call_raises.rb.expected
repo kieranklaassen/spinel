@@ -1,0 +1,33 @@
+default: undefined method 'hello' for nil
+hello
+second: undefined method 'v' for nil
+3
+keyword default: undefined method 'v' for nil
+3
+keyword nil: undefined method 'hello' for nil
+hello
+keyword nil, attribute: undefined method 'n' for nil
+5
+default from a method: undefined method 'hello' for nil
+hello
+handed on: undefined method 'hello' for nil
+hello
+statement: undefined method 'touch' for nil
+touched
+setter: undefined method 'v=' for nil
+3
+written in the body: undefined method 'hello' for nil
+instance method: undefined method 'v' for nil
+6
+class method: undefined method 'hello' for nil
+hello
+lambda: undefined method 'hello' for nil
+hello
+lambda default: undefined method 'v' for nil
+10
+block default: undefined method 'v' for nil
+8
+yielded nil: undefined method 'v' for nil
+[true, "nil", "", true]
+nil
+11

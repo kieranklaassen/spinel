@@ -105,6 +105,11 @@ typedef struct {
   int obj_nilable;  /* an object-typed parameter some call site passes nil:
                        a user method called on it has to raise NoMethodError
                        for nil rather than run with a NULL self (#5088) */
+  int obj_nil_held; /* an object-typed parameter or local that holds nil
+                       though no caller and no write of it names nil: its own
+                       default, a keyword, a block or proc site that hands it
+                       nil or nothing, such a value handed on. Guarded as
+                       obj_nilable is (nil_recv_guard) */
   int obj_nil_written; /* codegen's memo for an object-typed local: 1 when a
                        write in its scope stores nil, 2 when none does, 0 not
                        yet asked (#7262) */
