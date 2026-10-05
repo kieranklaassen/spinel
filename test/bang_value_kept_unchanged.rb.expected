@@ -15,3 +15,13 @@ axcax
 "ZBCD"
 ["abcd and a tail long enough to move the buffer"]
 "abcd and a tail long enough to move the buffer"
+"ABCD"
+"ABCD"
+"other and a tail long enough to move the buffer"
+doc!
+ABCD
+"ABCD"
+"b and a tail long enough to move the buffer"
+" a , b "
+[1, "abcd"]
+"A!"

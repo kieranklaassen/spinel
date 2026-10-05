@@ -52,3 +52,50 @@ o = +"ab"
 m = o.concat("c", "d")
 m << " and a tail long enough to move the buffer"
 p m
+
+# another name for the kept value changes it only after it is given a
+# String of its own
+aa = +"abcd"
+ab = aa.upcase!
+ac = ab
+ac = +"other"
+ac << " and a tail long enough to move the buffer"
+p aa, ab, ac
+
+# another class's method of the name answers a String of its own
+class Doc
+  def strip!
+    "doc".dup
+  end
+end
+[Doc.new].each do |d|
+  ad = d.strip!
+  ad << "!"
+  puts ad
+end
+
+# a method that changes its parameter has the name of a call that only
+# reads the kept value
+class Log
+  def write(x)
+    x << "\n"
+  end
+end
+Log.new.write(+"q")
+ae = +"abcd"
+af = ae.upcase!
+$stdout.write(af)
+puts
+p ae
+
+# an element of an Array a call has just answered is held by nothing else
+line = " a , b "
+ag = line.split(",")[1].strip!
+ag << " and a tail long enough to move the buffer" if ag
+p ag, line
+
+# `[]` on a String out of a mixed Array answers a new String
+mixed = [1, +"abcd"]
+ah = mixed[1][0].upcase!
+ah << "!"
+p mixed, ah
