@@ -1,0 +1,1 @@
+A String made in place is kept alive while it becomes a new Symbol
