@@ -92,7 +92,7 @@ fi
 NEWDIR=$(mktemp -d "${TMPDIR:-/tmp}/spinel-cident-new.XXXXXX")
 emit "$NEW" "$ROOT" "$NEWDIR"
 
-NORM='s/[0-9]{4}\.[0-9]{2}\.[0-9]{2}\+[0-9]+ revision [0-9a-f]+/REV/g'
+NORM='s/([0-9]{4}\.[0-9]{2}\.[0-9]{2}(\.[0-9]+)?(\+[0-9]+)?|unreleased) revision [0-9a-f]+/REV/g'
 same=0; diffn=0; refch=0; refused=0; fresh=0
 for f in $(list); do
   key=$(printf "%s" "$f" | tr "/" "_")
