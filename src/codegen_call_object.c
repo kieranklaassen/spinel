@@ -1226,7 +1226,7 @@ int emit_call_freeze_dup_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, 
       return 1;
     }
     if (blk >= 0) {
-      TyKind rtype = infer_type(c, recv);
+      TyKind rtype = comp_ntype(c, recv);
       const char *bp0 = block_param_name(c, blk, 0); if (bp0) bp0 = rename_local(bp0);
       int blk_body = nt_ref(nt, blk, "body");
       int then_bn = 0; const int *then_bb = blk_body >= 0 ? nt_arr(nt, blk_body, "body", &then_bn) : NULL;
@@ -1990,7 +1990,16 @@ int emit_op_ivar_reflection(Compiler *c, const BopCtx *x, Buf *b) {
   int tv = ++g_tmp;
   buf_printf(b, "({ sp_RbVal _t%d = ", tv); emit_boxed(c, recv, b);
   buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); ", tv);
-  for (int k = 0; k < argc; k++) { buf_puts(b, "(void)("); emit_expr(c, argv[k], b); buf_puts(b, "); "); }
+  int tn = -1;
+  for (int k = 0; k < argc; k++) {
+    if (k == 0 && !sym) {
+      tn = ++g_tmp;
+      buf_printf(b, "sp_RbVal _t%d = ", tn); emit_boxed(c, argv[k], b);
+      buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); ", tn);
+    }
+    else { buf_puts(b, "(void)("); emit_expr(c, argv[k], b); buf_puts(b, "); "); }
+  }
+  if (tn >= 0) buf_printf(b, "sp_ivar_name_check(_t%d); ", tn);
   /* a literal name with no `@` is NameError before anything else */
   if (argc >= 1 && sym && sym[0] != '@')
     buf_printf(b, "sp_raise_cls(\"NameError\", \"'%s' is not allowed as an instance variable name\"); ", sym);
