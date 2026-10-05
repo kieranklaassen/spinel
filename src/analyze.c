@@ -28871,46 +28871,15 @@ static void refuse_hash_pair_string_mutations(Compiler *c) {
    receiver: `r = s.upcase!`. `<<`, concat with one argument and the
    str_self_call names are followed (an_strbuf_alias_source); these are not.
    scrub! has its own refusal (promote_local_alias_pairs) and is left to it.
-   The call is looked for where an_strbuf_alias_leaves looks for a local: in
-   parentheses, in a chained write and in each arm of a conditional
-   (`r = s.strip! || s`). Any class may define the names, so only a call
-   on a receiver typed String counts: a box may hold another class's
-   object, whose `strip!` answers a String of its own. -1 for anything
-   else. */
-static int an_kept_bang_value(Compiler *c, int v, int depth) {
+   Only the call itself is read, as that refusal reads scrub!: an arm of a
+   conditional (`r = s.strip! || s`) and a chained write are not. Any class
+   may define the names, so only a call on a receiver typed String counts: a
+   box may hold another class's object, whose `strip!` answers a String of
+   its own. -1 for anything else. */
+static int an_kept_bang_value(Compiler *c, int v) {
   const NodeTable *nt = c->nt;
-  if (v < 0 || depth > 8) return -1;
-  int k;
-  switch (nt_kind(nt, v)) {
-    case NK_ParenthesesNode:
-      return an_kept_bang_value(c, nt_ref(nt, v, "body"), depth + 1);
-    case NK_LocalVariableWriteNode:   /* `r = t = s.upcase!` */
-      return an_kept_bang_value(c, nt_ref(nt, v, "value"), depth + 1);
-    case NK_StatementsNode: {
-      int n = 0; const int *b = nt_arr(nt, v, "body", &n);
-      return n > 0 ? an_kept_bang_value(c, b[n - 1], depth + 1) : -1;
-    }
-    case NK_ElseNode:
-      return an_kept_bang_value(c, nt_ref(nt, v, "statements"), depth + 1);
-    case NK_IfNode: case NK_UnlessNode:
-      k = an_kept_bang_value(c, nt_ref(nt, v, "statements"), depth + 1);
-      if (k >= 0) return k;
-      return an_kept_bang_value(c, nt_ref(nt, v, nt_kind(nt, v) == NK_IfNode ? "subsequent" : "else_clause"),
-                                depth + 1);
-    case NK_OrNode:
-      k = an_kept_bang_value(c, nt_ref(nt, v, "left"), depth + 1);
-      return k >= 0 ? k : an_kept_bang_value(c, nt_ref(nt, v, "right"), depth + 1);
-    case NK_AndNode:
-      return an_kept_bang_value(c, nt_ref(nt, v, "right"), depth + 1);
-    case NK_CaseNode: {
-      int nw = 0; const int *whens = nt_arr(nt, v, "conditions", &nw);
-      for (int w = 0; w < nw; w++)
-        if ((k = an_kept_bang_value(c, nt_ref(nt, whens[w], "statements"), depth + 1)) >= 0) return k;
-      return an_kept_bang_value(c, nt_ref(nt, v, "else_clause"), depth + 1);
-    }
-    case NK_CallNode: break;
-    default: return -1;
-  }
+  v = an_unparen(nt, v);
+  if (v < 0 || nt_kind(nt, v) != NK_CallNode) return -1;
   static const char *const M[] = {
     "upcase!", "downcase!", "capitalize!", "swapcase!", "strip!", "lstrip!", "rstrip!", "chomp!",
     "chop!", "squeeze!", "tr!", "tr_s!", "delete!", "delete_prefix!", "delete_suffix!", "gsub!",
@@ -29050,37 +29019,33 @@ static int an_kept_bang_receiver_read_again(Compiler *c, int call, SbMutTab *rea
    before. */
 static void refuse_kept_bang_values(Compiler *c) {
   const NodeTable *nt = c->nt;
-  static const NodeKind WK[] = { NK_LocalVariableWriteNode, NK_LocalVariableOrWriteNode,
-                                 NK_LocalVariableAndWriteNode };
   SbMutTab reads; memset(&reads, 0, sizeof reads);
-  for (int i = 0; i < 3; i++) {
-    NT_FOREACH_KIND(nt, WK[i], w) {
-      int call = an_kept_bang_value(c, nt_ref(nt, w, "value"), 0);
-      if (call < 0) continue;
-      const char *wn = nt_str(nt, w, "name");
-      Scope *ws = comp_scope_of(c, w);
-      LocalVar *lv = ws && wn ? scope_local(ws, wn) : NULL;
-      if (!lv || lv->is_param || lv->is_block_param || (lv->type != TY_STRING && lv->type != TY_STRBUF)) continue;
-      /* every write of the local is such a value, or nil: a change through
-         it lands on no other String */
-      int other = 0;
-      for (int o = comp_lvw_first_sc(c, (int)(ws - c->scopes), wn); o >= 0 && !other; o = comp_lvw_next_sc(c, o)) {
-        const char *on = nt_str(nt, o, "name");
-        if (!on || !sp_streq(on, wn) || comp_scope_of(c, o) != ws) continue;
-        NodeKind ok = nt_kind(nt, o);
-        int ov = ok == NK_LocalVariableWriteNode || ok == NK_LocalVariableOrWriteNode ||
-                 ok == NK_LocalVariableAndWriteNode ? nt_ref(nt, o, "value") : -1;
-        other = ov < 0 || (nt_kind(nt, ov) != NK_NilNode && an_kept_bang_value(c, ov, 0) < 0);
-      }
-      const char *by = other ? NULL : an_kept_bang_local_change(c, wn, ws, lv->type == TY_STRBUF);
-      if (!by || !an_kept_bang_receiver_read_again(c, call, &reads)) continue;
-      const char *nm = nt_str(nt, call, "name");
-      char msg[320];
-      snprintf(msg, sizeof msg, "the value of %s is kept and then changed in place (%s): a String is not yet "
-               "shared by reference through that value. Change the receiver instead (s.%s%s; r = s)",
-               nm, by, nm, nm[strlen(nm) - 1] == '!' ? "" : "(...)");
-      unsupported_feature(c, w, msg);
+  NT_FOREACH_KIND(nt, NK_LocalVariableWriteNode, w) {
+    int call = an_kept_bang_value(c, nt_ref(nt, w, "value"));
+    if (call < 0) continue;
+    const char *wn = nt_str(nt, w, "name");
+    Scope *ws = comp_scope_of(c, w);
+    LocalVar *lv = ws && wn ? scope_local(ws, wn) : NULL;
+    if (!lv || lv->is_param || lv->is_block_param || (lv->type != TY_STRING && lv->type != TY_STRBUF)) continue;
+    /* every write of the local is such a value, or nil: a change through
+       it lands on no other String */
+    int other = 0;
+    for (int o = comp_lvw_first_sc(c, (int)(ws - c->scopes), wn); o >= 0 && !other; o = comp_lvw_next_sc(c, o)) {
+      const char *on = nt_str(nt, o, "name");
+      if (!on || !sp_streq(on, wn) || comp_scope_of(c, o) != ws) continue;
+      NodeKind ok = nt_kind(nt, o);
+      int ov = ok == NK_LocalVariableWriteNode || ok == NK_LocalVariableOrWriteNode ||
+               ok == NK_LocalVariableAndWriteNode ? nt_ref(nt, o, "value") : -1;
+      other = ov < 0 || (nt_kind(nt, ov) != NK_NilNode && an_kept_bang_value(c, ov) < 0);
     }
+    const char *by = other ? NULL : an_kept_bang_local_change(c, wn, ws, lv->type == TY_STRBUF);
+    if (!by || !an_kept_bang_receiver_read_again(c, call, &reads)) continue;
+    const char *nm = nt_str(nt, call, "name");
+    char msg[320];
+    snprintf(msg, sizeof msg, "the value of %s is kept and then changed in place (%s): a String is not yet "
+             "shared by reference through that value. Change the receiver instead (s.%s%s; r = s)",
+             nm, by, nm, nm[strlen(nm) - 1] == '!' ? "" : "(...)");
+    unsupported_feature(c, w, msg);
   }
   if (reads.head) sb_mut_tab_free(&reads);
 }

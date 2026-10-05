@@ -22,14 +22,6 @@ spinel: 1 refusal, nothing written
 spinel: the value of upcase! is kept and then changed in place (<<): a String is not yet shared by reference through that value. Change the receiver instead (s.upcase!; r = s)
 == test/reject/bang_value_alias_retained_append.rb [promote] rc=1
 spinel: the value of upcase! is kept and then changed in place (<<): a String is not yet shared by reference through that value. Change the receiver instead (s.upcase!; r = s)
-== test/reject/bang_value_chained_retained_append.rb [default] rc=1
-spinel: the value of upcase! is kept and then changed in place (<<): a String is not yet shared by reference through that value. Change the receiver instead (s.upcase!; r = s)
-== test/reject/bang_value_chained_retained_append.rb [promote] rc=1
-spinel: the value of upcase! is kept and then changed in place (<<): a String is not yet shared by reference through that value. Change the receiver instead (s.upcase!; r = s)
-== test/reject/bang_value_conditional_retained_append.rb [default] rc=1
-spinel: the value of strip! is kept and then changed in place (<<): a String is not yet shared by reference through that value. Change the receiver instead (s.strip!; r = s)
-== test/reject/bang_value_conditional_retained_append.rb [promote] rc=1
-spinel: the value of strip! is kept and then changed in place (<<): a String is not yet shared by reference through that value. Change the receiver instead (s.strip!; r = s)
 == test/reject/bang_value_retained_append.rb [default] rc=1
 spinel: the value of upcase! is kept and then changed in place (<<): a String is not yet shared by reference through that value. Change the receiver instead (s.upcase!; r = s)
 == test/reject/bang_value_retained_append.rb [promote] rc=1
