@@ -2489,6 +2489,24 @@ static void emit_op_assign_lv(Compiler *c, int id, Buf *b, int indent,
     buf_puts(b, ");\n");
     return;
   }
+  /* `t += v` on a local that holds a String handle (TY_STRBUF: one that is
+     appended to, or shares its String with a name that is) is `t = t + v`:
+     String#+ answers a new String, so t gets a handle of its own, as the
+     plain write gives it one, and the String its other names hold is not
+     touched. The operand is run first and the receiver read after it, as
+     CRuby reads it: an operand that appends to the shared String shows in
+     the sum, and one that grows it cannot leave the read pointing at freed
+     bytes. The operand converts as String#+ converts it (to_str, else
+     TypeError); sp_str_plus raises for a nil receiver. */
+  if (t == TY_STRBUF && sp_streq(op, "+")) {
+    const char *rd = lv_op_assign_src(c, lval, t, cap, rtn, sizeof rtn);
+    int k = ++g_tmp;
+    buf_printf(b, "{ const char *_t%d = ", k);
+    emit_str_expr(c, v, b);
+    buf_printf(b, "; %s = sp_String_new_shared(sp_str_plus((%s) ? sp_String_cstr(%s) : NULL, _t%d)); }\n",
+               lval, rd, rd, k);
+    return;
+  }
   /* a loop-bounded counter's `+= k` is a plain C add (see above) */
   if (t == TY_INT && int_arith_fn(op) && (is_add_sub(op)) &&
       local_is_bounded_counter(c, id, nm, lv)) {
