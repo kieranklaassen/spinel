@@ -2220,12 +2220,15 @@ int const_global_slot(Compiler *c, int node, char *out, size_t cap) {
 /* Does the constant read `node` hold a plain String its one write made
    there, one the program can change in place: `+"lit"`, `String.new`, a
    `dup`, a String's `+`, `*` or `%`, an interpolation? A literal is
-   frozen, and so can be what any other value hands over; an append through
-   such a constant raises, in a copy as in the String itself. */
+   frozen, and so can be what any other value hands over, or a constant the
+   program calls `freeze` on; an append through such a constant raises, in
+   a copy as in the String itself. */
 int const_string_fresh(Compiler *c, int node) {
   const NodeTable *nt = c->nt;
   NodeKind k = nt_kind(nt, node);
   if ((k != NK_ConstantReadNode && k != NK_ConstantPathNode) || comp_ntype(c, node) != TY_STRING) return 0;
+  LocalVar *cv = comp_const(c, nt_str(nt, node, "name"));
+  if (!cv || cv->const_frozen) return 0;
   int w = comp_const_only_write(c, nt_str(nt, node, "name"));
   int v = w >= 0 ? nt_ref(nt, w, "value") : -1;
   if (v >= 0) v = unwrap_parens(c, v);

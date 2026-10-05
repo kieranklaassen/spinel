@@ -177,6 +177,8 @@ typedef struct {
                        when that is its only write; -1 when it has several, or
                        one of another form (`||=`, an operator write, a
                        multiple assignment, `Mod::X = v`); 0 with none */
+  int const_frozen; /* (consts) `CONST.freeze` is called on it somewhere: its
+                       String can be frozen though its write makes one */
   int or_written; /* some write to this local is a `||=`, which can run before
                      any definite assignment (`v ||= 5; v += 2`, a definite
                      write in one branch only, a block local reset each

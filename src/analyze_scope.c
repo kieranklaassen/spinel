@@ -3125,6 +3125,17 @@ void register_globals_consts(Compiler *c) {
       }
     }
   }
+  /* `CONST.freeze` in a call of its own: the String can be frozen though the
+     constant's write makes one. Marked here, once every constant is known,
+     for the copy refusal to read (const_string_fresh). */
+  NT_FOREACH_KIND(nt, NK_CallNode, id) {
+    const char *mn = nt_str(nt, id, "name");
+    int r = mn && sp_streq(mn, "freeze") ? nt_ref(nt, id, "receiver") : -1;
+    if (r < 0 || (nt_kind(nt, r) != NK_ConstantReadNode && nt_kind(nt, r) != NK_ConstantPathNode)) continue;
+    const char *rn = nt_str(nt, r, "name");
+    LocalVar *cv = rn ? comp_const(c, rn) : NULL;
+    if (cv) cv->const_frozen = 1;
+  }
 }
 
 /* Extract a symbol or string literal text from a node, or NULL. */

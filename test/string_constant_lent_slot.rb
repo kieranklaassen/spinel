@@ -73,3 +73,10 @@ LIT = "lit"
 ap = ->(t) { t << "!" }
 begin; ap.call(LIT); rescue FrozenError => e; p e.class; end
 p LIT
+# nor is one the program builds and then freezes
+BUILT = +"b"
+BUILT << "uilt"
+BUILT.freeze
+begin; ap.call(BUILT); rescue FrozenError => e; p e.class; end
+begin; gr(BUILT); rescue FrozenError => e; p e.class; end
+p BUILT

@@ -742,7 +742,8 @@ A constant's String is lent to a parameter that appends to it as a global's
 is (`write(OUT, s)` into `def write(buf, s) = buf << s`). Where a global is
 refused above and the refusal names the parameter that appends, so is a
 constant whose one assignment makes its String (`BUF = String.new`,
-`+"lit"`, a `dup`, an interpolation).
+`+"lit"`, a `dup`, an interpolation) and that the program does not
+`freeze`.
 
 Each is lifted in turn, and this list shrinks with it. Until then, return
 the String from the method and assign it, or append to it in the caller. A
