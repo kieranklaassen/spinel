@@ -1,0 +1,18 @@
+"abc!?"
+"abcdef!"
+nil
+"zz!?"
+"none?"
+["ab!", "zz1"]
+["zz1", "ab!"]
+["ab", "zz12", "zz12"]
+"zzb"
+["ab", "zz1"]
+["ab", "zz!"]
+"zz!"
+"qa"
+[1, "zz", "ab"]
+nil
+nil
+true
+"ab"
