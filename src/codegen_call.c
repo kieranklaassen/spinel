@@ -18227,8 +18227,12 @@ int g_setter_value_inner = 0;
    NoMethodError, raised for a nil in the slot too. A NULL is nil, which
    answers: [] and {}, false for `&`, the argument's truth for `|` and `^`.
    Any other value raises as it did. The call is emitted once to see that
-   the gate is what answers it, and that emission is taken back. */
+   the gate is what answers it, and that emission is taken back. What it saw
+   is kept by node and receiver type: a call in another's operand is emitted
+   again with each emission of the call around it, and probing it each time
+   doubled the work at every level of `s | (s | (s | t))`. */
 static int g_null_only_id = -1, g_null_only_raises = 0;
+static int *g_null_only_seen = NULL, g_null_only_cap = 0;
 static int probe_null_slot_call(Compiler *c, int id, Buf *b) {
   int sv = g_null_only_id; g_null_only_id = id;
   emit_call_held(c, id, b);
@@ -18246,11 +18250,21 @@ static int emit_null_slot_nil_only(Compiler *c, int id, Buf *b) {
   /* a method the program adds to NilClass answers for the nil slot */
   int ncid = comp_class_index(c, "NilClass");
   if (ncid >= 0 && comp_method_in_chain(c, ncid, nm, NULL) >= 0) return 0;
-  Buf pb; memset(&pb, 0, sizeof pb);
-  int saved_tmp = g_tmp;
-  (void)emit_or_take_back(c, id, &pb, probe_null_slot_call);
-  g_tmp = saved_tmp;
-  free(pb.p);
+  if (g_null_only_cap != nt->count) {
+    free(g_null_only_seen);
+    g_null_only_seen = calloc((size_t)nt->count + 1, sizeof *g_null_only_seen);
+    g_null_only_cap = g_null_only_seen ? nt->count : 0;
+  }
+  int key = ((int)rt + 1) * 2;
+  if (id >= g_null_only_cap || (g_null_only_seen[id] & ~1) != key) {
+    Buf pb; memset(&pb, 0, sizeof pb);
+    int saved_tmp = g_tmp;
+    (void)emit_or_take_back(c, id, &pb, probe_null_slot_call);
+    g_tmp = saved_tmp;
+    free(pb.p);
+    if (id < g_null_only_cap) g_null_only_seen[id] = key | g_null_only_raises;
+  }
+  else g_null_only_raises = g_null_only_seen[id] & 1;
   if (!g_null_only_raises) return 0;
   int argc = 0; const int *argv = call_args(nt, id, &argc);
   int tr = ++g_tmp, ta = -1;
