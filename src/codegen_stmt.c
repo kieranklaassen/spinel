@@ -10581,6 +10581,65 @@ static int emit_multi_write_stmt(Compiler *c, int id, Buf *b, int indent, const 
   return 0;
 }
 
+static int emit_call_stmt(Compiler *c, int id, Buf *b, int indent, const NodeTable *nt, const char *ty);
+
+/* `o&.v = x` as a statement, where v= is a writer the compiler stores a field
+   for: the store went through the receiver with no look at the operator, so a
+   nil o was a write through NULL. The statement now runs under a nil test, on
+   a temp holding the receiver; what its value hoists stays under the test, so
+   a nil receiver runs no part of the value. */
+static int g_sn_writer_stmt_id = -1;
+static int emit_sn_writer_stmt(Compiler *c, int id, Buf *b, int indent, const NodeTable *nt, const char *ty) {
+  const char *nm = nt_str(nt, id, "name");
+  const char *op = nt_str(nt, id, "call_operator");
+  int recv = nt_ref(nt, id, "receiver");
+  size_t ln = nm ? strlen(nm) : 0;
+  if (id == g_sn_writer_stmt_id || recv < 0 || !op || !sp_streq(op, "&.")) return 0;
+  if (ln < 2 || nm[ln - 1] != '=' || ln - 1 >= 256) return 0;
+  TyKind rt = comp_ntype(c, recv);
+  if (!ty_is_object(rt) || comp_ty_value_obj(c, rt)) return 0;
+  char base[256]; memcpy(base, nm, ln - 1); base[ln - 1] = '\0';
+  int cid = ty_object_class(rt);
+  if (comp_resolve_member(c, cid, base, 1, NULL, NULL) != SP_MEMBER_ATTR &&
+      comp_method_in_chain(c, cid, nm, NULL) >= 0)
+    return 0;
+  int tsn = ++g_tmp;
+  int slot = view_bind(recv, "_sn%d", tsn);
+  Buf sb; memset(&sb, 0, sizeof sb);
+  Buf spre; memset(&spre, 0, sizeof spre);
+  Buf *sv_pre = g_pre; g_pre = &spre;
+  int sv = g_sn_writer_stmt_id; g_sn_writer_stmt_id = id;
+  int ok = emit_call_stmt(c, id, &sb, indent + 1, nt, ty);
+  g_sn_writer_stmt_id = sv;
+  g_pre = sv_pre;
+  view_unbind(slot);
+  if (ok) {
+    Buf rb = expr_buf(c, recv);
+    emit_indent(b, indent);
+    buf_printf(b, "{ sp_%s *_sn%d = %s; if (_sn%d != NULL) {", c->classes[cid].c_name, tsn,
+               rb.p ? rb.p : "NULL", tsn);
+    /* A value that allocates runs between the temp and the store: a
+       receiver nothing else holds (`K.new(v)&.v = [i]`) was collected there
+       and the store went into the object that took its place. Rooted for
+       such a value, bare for one that is only read. */
+    int args = nt_ref(nt, id, "arguments");
+    int argc = 0;
+    const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &argc) : NULL;
+    if (spre.len || (argc > 0 && operand_may_allocate(c, argv[0]))) {
+      buf_puts(b, " "); emit_sn_tmp_root(c, rt, tsn, b);
+    }
+    buf_puts(b, "\n");
+    if (spre.p) buf_puts(b, spre.p);
+    if (sb.p) buf_puts(b, sb.p);
+    emit_indent(b, indent); buf_puts(b, "} }\n");
+    free(rb.p);
+  }
+  /* not taken as a statement here: the temp's number goes back */
+  else g_tmp--;
+  free(sb.p); free(spre.p);
+  return ok;
+}
+
 /* A CallNode statement: the statement-level fast paths ahead of emit_expr (emit_stmt_inner's arms, in their order) */
 static int emit_call_stmt(Compiler *c, int id, Buf *b, int indent, const NodeTable *nt, const char *ty) {
   if (!(sp_streq(ty, "CallNode"))) return 0;
@@ -10716,6 +10775,7 @@ static int emit_call_stmt(Compiler *c, int id, Buf *b, int indent, const NodeTab
     }
   }
   if (emit_iteration_stmt(c, id, b, indent)) return 1;
+  if (emit_sn_writer_stmt(c, id, b, indent, nt, ty)) return 1;
   /* attr writer: obj.x = v */
   {
     const char *nm = nt_str(nt, id, "name");

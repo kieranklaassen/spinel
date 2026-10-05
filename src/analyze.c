@@ -5352,6 +5352,9 @@ static void desugar_enum_chain_shapes(Compiler *c) {
     if ((sp_streq(nm, "merge") || sp_streq(nm, "merge!")) && recv >= 0) {
       /* h.merge(a, b, ...) folds left into h.merge(a).merge(b)...; merge!
          chains the same way because it returns self. */
+      /* h&.merge(a, b) folds into h&.merge(a)&.merge(b): a step without the
+         operator merged into the nil and answered the merge of the arguments */
+      const char *mop = nt_str(nt, id, "call_operator");
       int argsn = nt_ref(nt, id, "arguments");
       int an = 0;
       const int *av0 = argsn >= 0 ? nt_arr(nt, argsn, "arguments", &an) : NULL;
@@ -5369,6 +5372,7 @@ static void desugar_enum_chain_shapes(Compiler *c) {
           nt_node_set_str(nt, call, "name", mname);
           nt_node_set_ref(nt, call, "receiver", cur);
           nt_node_set_ref(nt, call, "arguments", one);
+          if (mop && sp_streq(mop, "&.")) nt_node_set_str(nt, call, "call_operator", "&.");
           /* a conflict block applies at every merge step */
           if (mblk >= 0) nt_node_set_ref(nt, call, "block", mblk);
           cur = call;
