@@ -45,7 +45,7 @@ Each reads the row back as an Integer Array it is not (eight zeros for the empty
 
 **Test.** `test/const_table_empty_row.rb` (50 lines printed; 26 differ on master). It prints the same under `SPINEL_GC_STRESS=1` and `2`.
 
-The `.expected` file is from CRuby 3.3.6 run with `--enable-frozen-string-literal`; 4.0 is not installed where this was written.
+The `.expected` file was written with CRuby 3.3.6 run with `--enable-frozen-string-literal`; CRuby 4.0.7 with the same flag prints it byte for byte.
 
 ## `make gate` (on this branch merged with current master)
 
@@ -53,7 +53,7 @@ The `.expected` file is from CRuby 3.3.6 run with `--enable-frozen-string-litera
 GATE_LINES
 ```
 
-- [ ] New tests have `.expected` files that match CRuby 4.0 run with `--enable-frozen-string-literal` (written with CRuby 3.3.6 and that flag; the test prints Integers, Arrays, a String, nil and booleans)
+- [x] New tests have `.expected` files that match CRuby 4.0 run with `--enable-frozen-string-literal` (4.0.7)
 - [ ] Values past 2^31 are marked `# spinel: int64` (none in the test)
 - [x] If optcarrot's generated C changed: callgrind numbers, checksum 59662 (it did not change)
 - [ ] Depends on: # (nothing)
