@@ -2067,7 +2067,7 @@ static int emit_nilfree_operand(Compiler *c, int v, const char *op, Buf *b) {
   char hd[48], hn[48];
   if (!vn || (!sp_streq(vn, "[]") && !sp_streq(vn, "at")) || vr < 0 || vc != 1 ||
       nt_ref(nt, v, "block") >= 0 || comp_ntype(c, vr) != TY_FLOAT_ARRAY ||
-      infer_type(c, vav[0]) != TY_INT || nullable_int_elem_array(c, vr) ||
+      comp_ntype(c, vav[0]) != TY_INT || nullable_int_elem_array(c, vr) ||
       !hc_array_nilfree(c, vr, hd, hn, sizeof hd))
     return 0;
   int tk = ++g_tmp;
@@ -3082,6 +3082,23 @@ void emit_pm_eq(Compiler *c, int t, TyKind pt, int valnode, Buf *b) {
     buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); sp_poly_eq(", tp);
     emit_boxed_text(c, pt, sn, b);
     buf_printf(b, ", _t%d); })", tp);
+  }
+  /* an Integer scrutinee against a Float value, or the reverse, is equal
+     exactly, as == is (#7505); a literal within 2^53 keeps the plain C
+     comparison, which is exact then */
+  else if (repr_of(c, valnode).kind != RK_BOXED &&
+           ((pt == TY_INT && comp_ntype(c, valnode) == TY_FLOAT) ||
+            (pt == TY_FLOAT && comp_ntype(c, valnode) == TY_INT)) &&
+           !int_flt_lit_exact(c, valnode)) {
+    int tc = ++g_tmp;
+    char sv[32], cv[32];
+    snprintf(sv, sizeof sv, "_t%d", t);
+    snprintf(cv, sizeof cv, "_t%d", tc);
+    buf_printf(b, "({ %s _t%d = ", pt == TY_INT ? "sp_float" : "sp_int", tc);
+    emit_expr(c, valnode, b);
+    buf_puts(b, "; ");
+    emit_int_flt_rel(b, pt == TY_INT ? sv : cv, pt == TY_INT ? cv : sv, 1, "==");
+    buf_puts(b, "; })");
   }
   else {
     buf_printf(b, "(_t%d == ", t);
@@ -5492,6 +5509,21 @@ static void emit_case_obj_eq(Compiler *c, int cond, int t, TyKind pt, Buf *b) {
         emit_boxed_text(c, pt, sref2, b);
         buf_puts(b, ")");
       }
+      /* an Integer subject against a Float pattern, or the reverse, is
+         equal exactly, as == is (#7505); a literal within 2^53 keeps the
+         plain C comparison, which is exact then */
+      else if (((pt == TY_INT && ct == TY_FLOAT) || (pt == TY_FLOAT && ct == TY_INT)) &&
+               !int_flt_lit_exact(c, cond)) {
+        int tc = ++g_tmp;
+        char sv[32], cv[32];
+        snprintf(sv, sizeof sv, "_t%d", t);
+        snprintf(cv, sizeof cv, "_t%d", tc);
+        buf_printf(b, "({ %s _t%d = ", ct == TY_INT ? "sp_int" : "sp_float", tc);
+        emit_expr(c, cond, b);
+        buf_puts(b, "; ");
+        emit_int_flt_rel(b, pt == TY_INT ? sv : cv, pt == TY_INT ? cv : sv, 1, "==");
+        buf_puts(b, "; })");
+      }
       else {
         buf_printf(b, "(_t%d == ", t); emit_expr(c, cond, b); buf_puts(b, ")");
       }
@@ -5593,6 +5625,8 @@ static int emit_when_typed_test(Compiler *c, int cond, int t, TyKind pt, Buf *b)
       char sref[32]; snprintf(sref, sizeof sref, "_t%d", t);
       buf_printf(b, "; sp_frange_cover_poly(_t%d, ", tr); emit_boxed_text(c, pt, sref, b); buf_puts(b, "); })");
     }
+    /* an Integer against the Float bounds exactly (#7505) */
+    else if (pt == TY_INT) buf_printf(b, "; sp_frange_cover_i(_t%d, _t%d); })", tr, t);
     else buf_printf(b, "; sp_frange_cover(_t%d, (sp_float)_t%d); })", tr, t);
   }
   else if (comp_ntype(c, cond) == TY_CLASS) {
@@ -12669,7 +12703,9 @@ void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
       if (nvc > 0) {
         /* An empty `[]` / `{}` carries no kind of its own, and the destination
            is the block's own value slot: build the literal at THAT kind, or the
-           default one lands in it as the wrong struct (#3978). */
+           default one lands in it as the wrong struct (#3978). A view, for
+           this emission of the literal alone. */
+        int vt9[2], nv9 = 0;
         if (g_ie_next_ty != TY_UNKNOWN) {
           int vn9 = nv[0];
           /* `next {}` needs the parens to parse as a hash at all, so the
@@ -12687,8 +12723,8 @@ void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
           if (ven9 == 0 &&
               ((vk9 == NK_ArrayNode && ty_is_array(g_ie_next_ty)) ||
                ((vk9 == NK_HashNode || vk9 == NK_KeywordHashNode) && ty_is_hash(g_ie_next_ty)))) {
-            c->ntype[vn9] = g_ie_next_ty;
-            if (vn9 != nv[0]) c->ntype[nv[0]] = g_ie_next_ty;
+            vt9[nv9++] = view_push(c, vn9, g_ie_next_ty);
+            if (vn9 != nv[0]) vt9[nv9++] = view_push(c, nv[0], g_ie_next_ty);
           }
         }
         emit_indent(b, indent); buf_printf(b, "%s = ", g_ie_next_var);
@@ -12702,6 +12738,7 @@ void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
         else if (apf9) { buf_printf(b, "%s(", apf9); emit_expr(c, nv[0], b); buf_puts(b, ")"); }
         else emit_expr(c, nv[0], b);
         buf_puts(b, ";\n");
+        while (nv9 > 0) view_pop(c, vt9[--nv9]);
       }
     }
     /* No slot for the value -- the iterator discards what the block answers

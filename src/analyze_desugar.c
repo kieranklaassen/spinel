@@ -11389,6 +11389,51 @@ static int rbp_captured(const NodeTable *nt, int node, const char *name, int lev
   return 0;
 }
 
+/* The slot names this pass invents, each with the length of the name it
+   stands for: what a program prints (`Proc#parameters`, `Method#inspect`) is
+   the name it wrote. A slot name steps past one the program itself uses, so
+   no name the program wrote is taken for a slot. The shadow rename runs
+   later, so a slot may carry its suffix too; any other name is its whole
+   self. */
+static struct { char **name; size_t *len; int n; } rbp_slots;
+
+size_t reassigned_param_written_len(const char *name) {
+  if (!name) return 0;
+  size_t n = block_param_written_len(name);
+  for (int i = 0; i < rbp_slots.n; i++)
+    if (strlen(rbp_slots.name[i]) == n && !memcmp(rbp_slots.name[i], name, n)) return rbp_slots.len[i];
+  return strlen(name);
+}
+
+/* True when the program itself uses `name`. Only a name with `__bpin` in it
+   can clash with a slot's, so those are collected once. */
+static int rbp_program_uses(const NodeTable *nt, int n0, const char *name) {
+  static const NodeTable *seen;
+  static char **used;
+  static int nused;
+  if (seen != nt) {
+    seen = nt;
+    for (int id = 0; id < n0; id++) {
+      const char *nm = nt_str(nt, id, "name");
+      if (!nm || !strstr(nm, "__bpin") || reassigned_param_written_len(nm) != strlen(nm)) continue;
+      used = realloc(used, sizeof(char *) * (size_t)(nused + 1));
+      used[nused++] = strdup(nm);
+    }
+  }
+  for (int i = 0; i < nused; i++) if (sp_streq(used[i], name)) return 1;
+  return 0;
+}
+
+static void rbp_slot_name(const NodeTable *nt, int n0, const char *orig, char *buf, size_t n) {
+  snprintf(buf, n, "%s__bpin", orig);
+  for (int k = 1; rbp_program_uses(nt, n0, buf); k++) snprintf(buf, n, "%s__bpin_%d", orig, k);
+  if (reassigned_param_written_len(buf) != strlen(buf)) return;
+  rbp_slots.name = realloc(rbp_slots.name, sizeof(char *) * (size_t)(rbp_slots.n + 1));
+  rbp_slots.len = realloc(rbp_slots.len, sizeof(size_t) * (size_t)(rbp_slots.n + 1));
+  rbp_slots.name[rbp_slots.n] = strdup(buf);
+  rbp_slots.len[rbp_slots.n++] = strlen(orig);
+}
+
 int desugar_reassigned_block_params(Compiler *c) {
   NodeTable *nt = (NodeTable *)c->nt;
   int n0 = nt->count, changed = 0;
@@ -11409,9 +11454,9 @@ int desugar_reassigned_block_params(Compiler *c) {
       /* a parameter a nested block or lambda captures keeps its one cell per
          iteration, which only a block parameter has */
       if (rbp_captured(nt, body, pn, 0)) continue;
-      char orig[160], renamed[176];
+      char orig[160], renamed[192];
       snprintf(orig, sizeof orig, "%s", pn);
-      snprintf(renamed, sizeof renamed, "%s__bpin", orig);
+      rbp_slot_name(nt, n0, orig, renamed, sizeof renamed);
       nt_set_str(nt, rq[i], "name", renamed);
       int w = fwd_new_node_like(nt, rq[i], "LocalVariableWriteNode");
       nt_node_set_str(nt, w, "name", orig);
@@ -14582,6 +14627,46 @@ static int sce_def_below_module(const NodeTable *nt, int def) {
   }
   return 0;
 }
+/* Could a call naming its method by a value (`undef_method m`) reach the
+   class_eval a class body calls? That one is Module's, so only a call whose
+   self is Module, Class or a singleton class can: one in a `class << x`
+   body or in `class Module` / `class Class`'s own body, or one with an
+   explicit receiver. A bare call anywhere else -- a blank-slate class
+   undefining its instance methods, a Module method changing the module it
+   is called on -- changes some module's instance methods. `ctx`: 1 inside
+   a singleton class or Module/Class body, 0 elsewhere; a def resets it. */
+static int sce_computed_reaches_module(const NodeTable *nt, int n, int ctx, int depth) {
+  if (n < 0 || depth > 4000) return 0;
+  NodeKind k = nt_kind(nt, n);
+  if (k == NK_DefNode) ctx = 0;
+  else if (k == NK_SingletonClassNode) ctx = 1;
+  else if (k == NK_ClassNode || k == NK_ModuleNode) {
+    int cp = nt_ref(nt, n, "constant_path");
+    const char *cn = cp >= 0 && nt_kind(nt, cp) == NK_ConstantReadNode ? nt_str(nt, cp, "name") : NULL;
+    ctx = k == NK_ClassNode && cn && (sp_streq(cn, "Module") || sp_streq(cn, "Class"));
+  }
+  else if (k == NK_CallNode) {
+    const char *m = nt_str(nt, n, "name");
+    if (m && (sp_streq(m, "alias_method") || sp_streq(m, "define_singleton_method") ||
+              sp_streq(m, "remove_method") || sp_streq(m, "undef_method"))) {
+      int args = nt_ref(nt, n, "arguments"), an = 0;
+      const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+      NodeKind ak = an >= 1 && av ? nt_kind(nt, av[0]) : NK_NONE;
+      if (an >= 1 && ak != NK_SymbolNode && ak != NK_StringNode) {
+        int r = nt_ref(nt, n, "receiver");
+        if (ctx || (r >= 0 && nt_kind(nt, r) != NK_SelfNode)) return 1;
+      }
+    }
+  }
+  int nr = nt_num_refs(nt, n);
+  for (int i = 0; i < nr; i++) if (sce_computed_reaches_module(nt, nt_ref_at(nt, n, i), ctx, depth + 1)) return 1;
+  int na = nt_num_arrs(nt, n);
+  for (int i = 0; i < na; i++) {
+    int m = 0; const int *ids = nt_arr_at(nt, n, i, &m);
+    for (int j = 0; j < m; j++) if (sce_computed_reaches_module(nt, ids[j], ctx, depth + 1)) return 1;
+  }
+  return 0;
+}
 static int sce_program_reflects(const NodeTable *nt) {
   int hit = 0;
   NtKindIter it = nt_kind_iter_begin(nt, NK_DefNode);
@@ -14613,9 +14698,10 @@ static int sce_program_reflects(const NodeTable *nt) {
     NodeKind k = nt_kind(nt, av[0]);
     if (k == NK_SymbolNode) hit = sce_name_reflective(nt_str(nt, av[0], "value"));
     else if (k == NK_StringNode) hit = sce_name_reflective(nt_str(nt, av[0], "content"));
-    else hit = !dm;   /* a computed name could be any of them (as sp_macro.c reads it) */
   }
   nt_kind_iter_close(&it);
+  /* a computed name could be any of them, where it can reach Module's */
+  if (!hit) hit = sce_computed_reaches_module(nt, nt->root_id, 0, 0);
   return hit;
 }
 /* a bare `private` / `protected` / `public` / `module_function`: a def
