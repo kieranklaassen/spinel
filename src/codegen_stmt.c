@@ -4422,9 +4422,17 @@ static const char *pm_target_name(const NodeTable *nt, int pat) {
 
 static void emit_pattern_bind(Compiler *c, int id, const char *lnm, TyKind pt, int t, int indent, Buf *b) {
   if (!lnm) return;
+  LocalVar *plv = scope_local(comp_scope_of(c, id), lnm);
+  /* A local that holds a String handle (one that is appended to) would have
+     to take the SUBJECT ITSELF, the same String and not a copy. A plain
+     String subject has no handle to give, and a new one would part the two:
+     an append through the local would not show in the subject. Refused;
+     bare, the const char * went into the sp_String * slot and the C did not
+     build. */
+  if (plv && plv->type == TY_STRBUF && pt == TY_STRING)
+    unsupported_feature(c, id, "a String bound by a pattern to a local that is appended to is not yet shared by reference with the pattern's subject");
   emit_indent(b, indent);
   buf_printf(b, "lv_%s = ", rename_local(lnm));
-  LocalVar *plv = scope_local(comp_scope_of(c, id), lnm);
   if (plv && plv->type == TY_POLY && pt != TY_POLY && pt != TY_UNKNOWN) emit_boxed_tmp(c, pt, t, b);
   else buf_printf(b, "_t%d", t);
   buf_puts(b, ";\n");
