@@ -985,6 +985,70 @@ int emit_call_compare_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
   return 0;
 }
 
+/* An index argument of `recv[...] = v` that evaluates nothing: an Integer or
+   a String literal, a local variable where `locals` allows one, or a Range
+   of those. */
+static int str_aset_plain_index(const NodeTable *nt, int n, int locals) {
+  if (n < 0) return 1;
+  switch (nt_kind(nt, n)) {
+  case NK_IntegerNode: case NK_StringNode: return 1;
+  case NK_LocalVariableReadNode: return locals;
+  case NK_RangeNode:
+    return str_aset_plain_index(nt, nt_ref(nt, n, "left"), locals) &&
+           str_aset_plain_index(nt, nt_ref(nt, n, "right"), locals);
+  default: return 0;
+  }
+}
+
+/* A right-hand side that is a String and cannot be nil: a literal, an
+   interpolation, or `+`, `*`, `to_s` or `dup` on a String or a number, which
+   answer one or raise. */
+static int str_aset_value_never_nil(Compiler *c, int v) {
+  const NodeTable *nt = c->nt;
+  if (comp_ntype(c, v) != TY_STRING) return 0;
+  switch (nt_kind(nt, v)) {
+  case NK_StringNode: case NK_InterpolatedStringNode:
+    return 1;
+  case NK_CallNode: {
+    const char *nm = nt_str(nt, v, "name");
+    int r = nt_ref(nt, v, "receiver");
+    if (!nm || r < 0 || nt_ref(nt, v, "block") >= 0) return 0;
+    TyKind rt = comp_ntype(c, r);
+    if (rt != TY_STRING && rt != TY_INT && rt != TY_FLOAT) return 0;
+    return sp_streq(nm, "+") || sp_streq(nm, "*") || sp_streq(nm, "to_s") || sp_streq(nm, "dup");
+  }
+  default:
+    return 0;
+  }
+}
+
+/* `r = ($g[0] = v)`: a global, a class variable and a constant holding a
+   String are receivers the statement stores into (str_mut_var_recv). The
+   value arm takes one where this list proves its answer, and leaves every
+   other shape to the NoMethodError gate as before:
+   - the right-hand side is a String that cannot be nil: the statement takes
+     a nil value for an empty String;
+   - every index argument is a literal, or a local variable beside a value
+     that runs no code. The arm reads the value ahead of the index, and a
+     receiver found nil raises with the index not read at all, so an index
+     that could run code, or a local the value could write, is not taken. */
+static int str_aset_value_slot_recv(Compiler *c, int recv, int argc, const int *argv) {
+  const NodeTable *nt = c->nt;
+  switch (nt_kind(nt, recv)) {
+  case NK_GlobalVariableReadNode: case NK_ClassVariableReadNode:
+  case NK_ConstantReadNode: case NK_ConstantPathNode:
+    break;
+  default:
+    return 0;
+  }
+  if (repr_of(c, recv).as_ty != TY_STRING || !str_mut_var_recv(c, recv)) return 0;
+  if (!str_aset_value_never_nil(c, argv[argc - 1])) return 0;
+  int locals = !subtree_has_side_effect(c, argv[argc - 1]);
+  for (int i = 0; i < argc - 1; i++)
+    if (!str_aset_plain_index(nt, argv[i], locals)) return 0;
+  return 1;
+}
+
 /* String concatenation, unary -@ +@ ~ !, element stores and the arithmetic on a poly operand */
 int emit_call_operator_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, TyKind rt, TyKind a0) {
   /* String#concat with no arguments returns the receiver unchanged (#2309):
@@ -1141,11 +1205,17 @@ int emit_call_operator_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
      value is the assigned string (#2370). */
   /* A reader call handing out the shared handle takes the same statement,
      through its shim (#3227). */
+  /* A global, a class variable and a constant take it too, where
+     str_aset_value_slot_recv proves the answer: they fell through to the
+     NoMethodError gate, where the statement stored. */
+  int slot_recv = recv >= 0 && sp_streq(name, "[]=") && (argc == 2 || argc == 3) &&
+                  str_aset_value_slot_recv(c, recv, argc, argv);
   if (recv >= 0 && sp_streq(name, "[]=") && (argc == 2 || argc == 3) &&
       ((repr_of(c, recv).as_ty == TY_STRING &&
         nt_type(nt, recv) && (sp_streq(nt_type(nt, recv), "LocalVariableReadNode") ||
                               sp_streq(nt_type(nt, recv), "InstanceVariableReadNode"))) ||
-       (repr_of(c, recv).as_ty == TY_STRBUF && nt_kind(nt, recv) == NK_CallNode))) {
+       (repr_of(c, recv).as_ty == TY_STRBUF && nt_kind(nt, recv) == NK_CallNode) ||
+       slot_recv)) {
     /* the value is evaluated once, into a temp the store reads and the
        expression answers: evaluated again after the store, a call with
        effects ran twice, and a value the store read through a boxed
@@ -1157,6 +1227,16 @@ int emit_call_operator_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
       char tn[24]; snprintf(tn, sizeof tn, "_t%d", tv);
       /* in the prelude, where the store hoists its own reads of it */
       size_t pre0 = g_pre->len;
+      /* a global can hold nil where a String is its type. Whether it does is
+         read ahead of the value, as CRuby reads the receiver first, and the
+         NoMethodError is raised after the value ran, where the gate raised
+         it. */
+      int tnil = 0;
+      if (slot_recv) {
+        tnil = ++g_tmp;
+        emit_indent(g_pre, g_indent);
+        buf_printf(g_pre, "sp_bool _t%d = ((", tnil); emit_expr(c, recv, g_pre); buf_puts(g_pre, ") == NULL);\n");
+      }
       Buf vb; memset(&vb, 0, sizeof vb);
       emit_expr(c, va, &vb);
       emit_indent(g_pre, g_indent);
@@ -1168,6 +1248,7 @@ int emit_call_operator_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
       view_unbind(slot);
       if (ok) {
         buf_puts(b, "({ ");
+        if (slot_recv) buf_printf(b, "if (_t%d) sp_nil_recv(\"[]=\"); ", tnil);
         buf_puts(b, mb.p ? mb.p : "");
         if (want == vt || want == TY_UNKNOWN || want == TY_VOID) buf_puts(b, tn);
         else if (vt == TY_POLY) emit_unbox_text(c, want, tn, b);
@@ -1181,7 +1262,7 @@ int emit_call_operator_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
       free(vb.p); free(mb.p);
     }
     Buf mb; memset(&mb, 0, sizeof mb);
-    if (emit_array_mutate_stmt(c, id, &mb, 0)) {
+    if (!slot_recv && emit_array_mutate_stmt(c, id, &mb, 0)) {
       buf_puts(b, "({ ");
       buf_puts(b, mb.p ? mb.p : "");
       /* a value of a class with no #to_str (an Integer, a Symbol, nil, an
