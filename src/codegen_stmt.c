@@ -14342,12 +14342,8 @@ static int str_mutate_append_bang_arms(Compiler *c, int id, Buf *b, int indent, 
                       " if (_t%d > _t%d - _t%d) _t%d = _t%d - _t%d; ",
                    ti2, ti2, tn2, tl2,
                    tl2, tn2, ti2, tl2, tn2, ti2);
-        emit_expr(c, recv, b);
-        buf_puts(b, " = sp_str_concat(sp_str_sub_range(");
-        emit_expr(c, recv, b);
-        buf_printf(b, ", 0, _t%d), sp_str_sub_range(", ti2);
-        emit_expr(c, recv, b);
-        buf_printf(b, ", _t%d + _t%d, _t%d - _t%d - _t%d)); } }\n", ti2, tl2, tn2, ti2, tl2);
+        emit_slice_bang_rejoin(c, recv, NULL, ti2, tl2, tn2, b);
+        buf_puts(b, " } }\n");
         return 1;
       }
       if (argc == 2) {
@@ -14366,12 +14362,8 @@ static int str_mutate_append_bang_arms(Compiler *c, int id, Buf *b, int indent, 
                    ti2, ti2, tn2,
                    ti2, ti2, tn2, tl2,
                    tl2, tn2, ti2, tl2, tn2, ti2);
-        emit_expr(c, recv, b);
-        buf_puts(b, " = sp_str_concat(sp_str_sub_range(");
-        emit_expr(c, recv, b);
-        buf_printf(b, ", 0, _t%d), sp_str_sub_range(", ti2);
-        emit_expr(c, recv, b);
-        buf_printf(b, ", _t%d + _t%d, _t%d - _t%d - _t%d)); } }\n", ti2, tl2, tn2, ti2, tl2);
+        emit_slice_bang_rejoin(c, recv, NULL, ti2, tl2, tn2, b);
+        buf_puts(b, " } }\n");
         return 1;
       }
     }

@@ -1789,6 +1789,8 @@ void emit_float_coerce_expr(Compiler *c, int node, Buf *b);
    sp_Class struct) is voided and replaced by `zero` ("0" / "0.0"), so the
    raise survives but the struct never reaches an int/float slot. */
 void emit_scalar_operand(Compiler *c, int node, const char *zero, Buf *b);
+/* slice!'s receiver rebuilt from its head and its tail (codegen_call_recv.c) */
+void emit_slice_bang_rejoin(Compiler *c, int recv, const char *src, int ti, int tl, int tn, Buf *b);
 /* Emit `node` with `emit` into `val`, and the setup statements the emission
    spills into g_pre into `pre` instead. A statement expression that binds a
    receiver to a temp and only then evaluates an argument places `pre` right
