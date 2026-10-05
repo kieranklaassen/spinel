@@ -1,0 +1,23 @@
+A String a conditional hands over is its arm's own String however many arms
+
+    t = case k
+        when 0 then s0
+        when 1 then s1
+        # ... seventeen `when`s in all
+        when 16 then s16
+        else s17
+        end
+    t << "x"
+    p s16, t.equal?(s16)
+
+printed "16" and false for k = 16 where CRuby prints "16x" and true. A
+write whose value is a conditional over String locals hands its target the
+String of the arm taken, and the walk that pairs each arm's local with the
+target (an_strbuf_alias_leaves) wrote into an array of sixteen its callers
+held. A local only a later arm reads was left off it: that arm handed over
+a copy, and a change made through the new name never reached the String.
+
+The list now grows with the arms; the callers keep one across their loop
+and free it. Which Strings are shared is decided as before.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
