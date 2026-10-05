@@ -1086,15 +1086,19 @@ static int an_rewritten_rows_int(Compiler *c, int id) {
 
 /* The table a store is called on, looked through the calls ahead of it in
    a chain that answer their receiver: `T.push(r).push(s)`, `(T << r) << s`,
-   `T.each { }.push(s)`. */
+   `T.sort!.push(s)`, `T.each { }.push(s)`. `select!`, `reject!`, `uniq!`
+   and `compact!` answer it or nil. */
 static int an_store_table(Compiler *c, int recv) {
-  static const char *const answers_recv[] = { "insert", "concat", "fill", "replace", "map!", "collect!", "each", NULL };
+  static const char *const answers_recv[] = {
+    "insert", "concat", "fill", "replace", "clear", "map!", "collect!", "sort!", "sort_by!",
+    "reverse!", "rotate!", "shuffle!", "keep_if", "delete_if", "uniq!", "compact!",
+    "each", "each_index", "reverse_each", "tap", "itself", NULL };
   const NodeTable *nt = c->nt;
   while (recv >= 0) {
     recv = unwrap_parens(c, recv);
     if (recv < 0 || nt_kind(nt, recv) != NK_CallNode) break;
     const char *nm = nt_str(nt, recv, "name");
-    if (!nm || !(is_array_push_family(nm) || str_in(nm, answers_recv))) break;
+    if (!nm || !(is_array_push_family(nm) || is_select_reject_bang(nm) || str_in(nm, answers_recv))) break;
     recv = nt_ref(nt, recv, "receiver");
   }
   return recv;

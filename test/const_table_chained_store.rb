@@ -33,3 +33,19 @@ p D7[0], D7[1]
 D8 = [[1, 2], [3, 4]]
 D8.push([5, 6]).push([7]).unshift([8, 9])
 p D8[3], D8[4][0] + D8[3][1], D8[0].sum
+
+# the call ahead is any that answers its receiver
+D9 = [[3, 4], [1, 2]]
+D9.sort!.push(["a"])
+D9.reverse!.unshift([1.5])
+p D9[0], D9[1], D9[3]
+
+D10 = [[1, 2], [3, 4]]
+D10.tap { |t| t.size }.push([])
+p D10[2], D10[2].size
+D10.select! { |r| r.size > 1 }.push({})
+p D10[2], D10[1]
+
+D11 = [[1, 2], [3, 4]]
+D11.clear.push(["x"], [5])
+p D11[0], D11[1], D11.size
