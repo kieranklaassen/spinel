@@ -1,0 +1,1 @@
+A String changed in place in a boxed slot is refused by name

@@ -1,0 +1,37 @@
+A String changed in place in a boxed slot is refused by name
+
+`S = Struct.new(:x); c = S.new; c.x = +"q"; c.x << "z"` prints "qz" in
+CRuby and stopped in the C compiler here: "incompatible type for
+argument 1 of 'sp_String_append_bin'". So did an attr_accessor filled
+by its setter after `new(nil)`, and a member that holds a String or an
+Integer. The reader's read is marked to hand out its ivar's handle
+(#6179) and typed as one, while the ivar itself settles as a boxed
+value once it sees nil or another class's value, or a String that is
+itself boxed (a parameter its method changes in place: `def
+self.make(v) = (v << "i"; new(x: v))`). The read then renders an
+sp_RbVal where every consumer of the mark takes an sp_String *.
+
+The String sits in that slot boxed by value, so the change could only
+reach a copy of it. emit_object_call refuses such a read by name
+(refuse_boxed_handle_reader), for an attr reader, a Struct or Data
+member and a `def x = @x` reader, each called on a receiver, and
+docs/limitations.md lists it. The refusal's advice is to change the
+String before it is stored. An ivar that sees nil before it is
+promoted stays the nullable handle it was and still compiles
+(`K.new(nil)` beside `K.new(+"q")`).
+
+Not in this change: the same read on implicit self in a method of the
+Struct's own block (`def chg = x << "z"`, after `c = S.new; c.x =
++"q"`) is written by another arm and is still the C error it was.
+
+Only programs that stopped in the C compiler are refused. Of 864
+programs that change a String through the reader of a slot filled with
+nil, an Integer or a Symbol as well, this commit refuses 176, and each
+of them stopped in the C compiler on c6bbdfbc9. The count is the same
+above the commit that refuses the store and alone on master. The rest
+are what they were before it: above that commit, 240 that it refuses,
+96 refused already and 352 whose generated C is byte-identical; alone
+on master, 96 refused already and 592 byte-identical. `make cident`,
+both ways: 6056 identical, 0 differ, 0 refusal changes.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

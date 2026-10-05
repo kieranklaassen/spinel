@@ -1,0 +1,1 @@
+A String stored in a Struct member changed in place is refused by name
