@@ -1,0 +1,21 @@
+[false, true, true, false]
+["a\u0000b", "a\u0000c"]
+false
+true
+false
+false
+false
+"out"
+"in"
+"out"
+nil
+"a\u0000b"
+nil
+[nil, nil]
+"a\u0000b"
+["a\u0000a", "a\u0000b"]
+true
+false
+"c"
+"b"
+nil

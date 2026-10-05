@@ -3586,11 +3586,13 @@ sp_bool sp_srange_include(sp_StrRange r, const char *x) {
   sp_str_upto_each(r.first, r.last, r.excl, sp_srange_include_i, &v);
   return v == NULL;
 }
-/* #cover? / #=== compare lexicographically, no materialization. */
+/* #cover? / #=== compare lexicographically, no materialization. The
+   compare is byte-exact: strcmp stops at a NUL, and every String that
+   shares an end's bytes up to one was covered. */
 sp_bool sp_srange_cover(sp_StrRange r, const char *x) {
   if (!x) return 0;
-  if (r.first && strcmp(x, r.first) < 0) return 0;
-  if (r.last) { int d = strcmp(x, r.last); if (r.excl ? d >= 0 : d > 0) return 0; }
+  if (r.first && sp_str_cmp_bytes(x, r.first) < 0) return 0;
+  if (r.last) { int d = sp_str_cmp_bytes(x, r.last); if (r.excl ? d >= 0 : d > 0) return 0; }
   return 1;
 }
 /* #min / #max with no block, as CRuby's range_min / range_max: an open
@@ -3605,7 +3607,7 @@ static const char *sp_srange_walk_greatest(sp_StrRange r) {
   const char *best = NULL; SP_GC_ROOT_STR(best);
   for (sp_int i = 0; i < sp_StrArray_length(a); i++) {
     const char *s = sp_StrArray_get(a, i);
-    if (!best || strcmp(s, best) > 0) best = s;
+    if (!best || sp_str_cmp_bytes(s, best) > 0) best = s;
   }
   return best;
 }
@@ -3625,7 +3627,7 @@ const char *sp_srange_max_v(sp_StrRange r) {
     if (!r.first) sp_raise_cls("RangeError", "cannot get the maximum of beginless range with custom comparison method");
     return sp_srange_walk_greatest(r);
   }
-  if (r.first && strcmp(r.first, r.last) > 0) return NULL;
+  if (r.first && sp_str_cmp_bytes(r.first, r.last) > 0) return NULL;
   return r.last;
 }
 const char *sp_srange_to_s(sp_StrRange r) {
