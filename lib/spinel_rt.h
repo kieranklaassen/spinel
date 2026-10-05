@@ -16715,6 +16715,25 @@ static sp_RbVal sp_penum_call2(sp_Proc *blk, sp_RbVal v, sp_RbVal w) {
   return _sp_proc_poly_ret;
 }
 static sp_RbVal sp_penum_call1(sp_Proc *blk, sp_RbVal v);
+/* `when pat` with the pattern boxed is `pat === e` by the pattern's class at
+   run time: a Proc is called, a Regexp matches as a literal
+   `when /re/` does (a String, a shared one or a Symbol, and it sets the
+   match registers), and any other pattern is sp_poly_case_eq's -- a Class
+   its instances, a Range its cover, else equality. */
+static sp_bool sp_poly_when_eq_slow(sp_RbVal pat, sp_RbVal e) {
+  if (pat.tag == SP_TAG_OBJ) {
+    if (pat.cls_id == SP_BUILTIN_PROC) return sp_poly_truthy(sp_penum_call1((sp_Proc *)pat.v.p, e));
+    if (pat.cls_id == SP_BUILTIN_REGEX) return sp_re_case_eq((mrb_regexp_pattern *)pat.v.p, e);
+  }
+  return sp_poly_case_eq(pat, e);
+}
+/* The test a boxed `when` emits. Two Integers compare in place, and a
+   pattern that is no object and no Class is a plain value, whose === is ==. */
+static SP_INLINE sp_bool sp_poly_when_eq(sp_RbVal pat, sp_RbVal e) {
+  if (pat.tag == SP_TAG_INT && e.tag == SP_TAG_INT) return pat.v.i == e.v.i;
+  if (pat.tag != SP_TAG_OBJ && pat.tag != SP_TAG_CLASS) return sp_poly_eq_slow(pat, e);
+  return sp_poly_when_eq_slow(pat, e);
+}
 /* delete(key) { |k| } on a boxed Hash or Array: the block answers a key
    that was not there */
 static sp_RbVal sp_poly_delete_key_blk(sp_RbVal recv, sp_RbVal key, sp_Proc *blk) {

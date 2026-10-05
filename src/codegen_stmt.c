@@ -5479,16 +5479,32 @@ static void emit_case_obj_eq(Compiler *c, int cond, int t, TyKind pt, Buf *b) {
   }
 }
 
+/* Is a value of this kind boxed behind a heap copy -- a Range, a Time, a
+   Rational, a Complex, a value object? Boxing it is then an allocation. */
+static int ty_boxes_by_copy(Compiler *c, TyKind t) {
+  return t == TY_RANGE || t == TY_FLOAT_RANGE || t == TY_STR_RANGE || t == TY_TMS || t == TY_TIME ||
+         t == TY_COMPLEX || t == TY_RATIONAL || comp_ty_value_obj(c, t);
+}
+
+/* `when <cond>` with the condition held boxed (a parameter, a block
+   parameter, a container element): the kind of pattern is known only at run
+   time, so the runtime asks it `===` of the subject -- a Proc is called, a
+   Range covers, a Regexp matches, a Class tests membership. The pattern is
+   held and rooted while a by-value subject is boxed beside it: that box is
+   an allocation. */
 static void emit_when_boxed_test(Compiler *c, int cond, int t, TyKind pt, Buf *b) {
   char subjp[32]; snprintf(subjp, sizeof subjp, "_t%d", t);
-  int tpw = ++g_tmp;
-  buf_printf(b, "({ sp_RbVal _t%d = ", tpw); emit_boxed(c, cond, b);
-  buf_printf(b, "; _t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_PROC"
-                " ? sp_poly_truthy(sp_penum_call1((sp_Proc *)_t%d.v.p, ", tpw, tpw, tpw);
+  int held = ty_boxes_by_copy(c, pt);
+  if (held) {
+    int tp = ++g_tmp;
+    buf_printf(b, "({ sp_RbVal _t%d = ", tp); emit_boxed(c, cond, b);
+    buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); sp_poly_when_eq(_t%d, ", tp, tp);
+  }
+  else {
+    buf_puts(b, "sp_poly_when_eq("); emit_boxed(c, cond, b); buf_puts(b, ", ");
+  }
   if (pt == TY_POLY) buf_puts(b, subjp); else emit_boxed_text(c, pt, subjp, b);
-  buf_printf(b, ")) : sp_poly_eq(_t%d, ", tpw);
-  if (pt == TY_POLY) buf_puts(b, subjp); else emit_boxed_text(c, pt, subjp, b);
-  buf_puts(b, "); })");
+  buf_puts(b, held ? "); })" : ")");
 }
 
 static void emit_when_splat_test(Compiler *c, int cond, int t, TyKind pt, Buf *b) {

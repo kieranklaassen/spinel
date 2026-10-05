@@ -1,0 +1,17 @@
+[:hit, :miss, :miss, :hit, :miss, :miss]
+[:hit, :hit, :hit, :miss]
+[:hit, :miss, :miss]
+[:hit, :hit, :miss, :miss, :miss]
+[:hit, :miss, :hit, :hit, :hit, :hit]
+[:hit, :hit, :miss, :hit, :hit, :miss]
+[:hit, :miss, :hit]
+[:hit, :hit, :hit, :hit, :hit, :hit, :hit]
+[:hit, :miss, :miss, :miss]
+[:miss, :miss, :miss]
+[1, nil, 1, nil]
+[0, 1, 2, 3, 4, 5, -1]
+:high
+4..9
+[[true, false, false], [false, true, true], [false, false, true]]
+[:neither, :either, :either, :either]
+["12", "34", "12-34"]
