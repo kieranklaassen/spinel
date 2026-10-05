@@ -1,0 +1,27 @@
+undefined method 'new' for nil
+Box
+undefined method 'new' for false
+Box
+undefined method 'new' for nil
+undefined method 'new' for false
+undefined method 'new' for an instance of Integer
+undefined method 'new' for an instance of Float
+undefined method 'new' for an instance of String
+undefined method 'new' for an instance of Symbol
+undefined method 'new' for an instance of Array
+undefined method 'new' for an instance of Box
+undefined method 'new' for an instance of Cup
+undefined method 'new' for nil
+Box
+4
+undefined method 'new' for nil
+Box
+undefined method 'new' for an instance of Box
+6
+7
+undefined method 'new' for nil
+8
+undefined method 'new' for nil
+9
+undefined method 'new' for an instance of Integer
+NilClass

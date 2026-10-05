@@ -9248,6 +9248,15 @@ static void emit_builtin_new_arms_text(Compiler *c, const char *pre, const char 
                pre, rt2, kt, kt, argc_txt, argv_txt);
 }
 
+/* Open the `new` switch on the class `_t<kt>`. A boxed value that is no
+   class has a class id all the same (nil reads as 0, an instance as its
+   class's) and built that class's object: it switches on the id no class
+   has, and so takes the default, which raises CRuby's NoMethodError. */
+void emit_class_new_switch(int kt, int boxed, Buf *b) {
+  if (boxed) buf_printf(b, "switch(_t%d.tag == SP_TAG_CLASS ? _t%d.cls_id : SP_CLASS_NIL_ID){", kt, kt);
+  else buf_printf(b, "switch(_t%d.cls_id){", kt);
+}
+
 /* The arm of a Class-value `new` switch for a user exception class without
    its own initialize: built as the static `MyError.new(msg)` is, from the
    message argument `_t<atmp[0]>` when there is one. */
@@ -9390,7 +9399,8 @@ void emit_class_value_new_kw(Compiler *c, int id, int recv, int boxed, Buf *b) {
   buf_printf(b, "({ %s _t%d = ", boxed ? "sp_RbVal" : "sp_Class", kt); emit_expr(c, recv, b);
   buf_puts(b, "; ");
   int sv_cbt = hoist_ctor_block(c, id, b);
-  buf_printf(b, "sp_RbVal _t%d = sp_box_nil(); switch(_t%d.cls_id){", rt2, kt);
+  buf_printf(b, "sp_RbVal _t%d = sp_box_nil(); ", rt2);
+  emit_class_new_switch(kt, boxed, b);
   /* the operand of a sole `*splat`, or the SplatNode itself for an anonymous
      `*` forwarding the method's rest (`k.new(*)`) */
   int sole_splat = argc == 1 && nt_kind(nt, argv[0]) == NK_SplatNode ? nt_ref(nt, argv[0], "expression") : -1;
