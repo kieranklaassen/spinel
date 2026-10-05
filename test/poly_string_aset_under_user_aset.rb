@@ -99,3 +99,22 @@ p g.cells
 slots = [Grid.new, "abc".dup, [1, 2], { 1 => "b" }]
 slots.each { |x| x[0] = "Z" }
 p slots[0].cells, slots[1], slots[2], slots[3].to_a
+
+# where the kept store would go wrong it stands down: a value that rebinds
+# the receiver or moves the element's index changes no other String, and a
+# boxed value that holds no String leaves the String as it was
+t = [+"other", 1][0]
+u = [+"first", 1][0]
+u[0] = (u = t; "X")
+p u, t
+rows = [+"abc", +"xyz", 1]
+ri = 0
+rows[ri][0] = rows[ri += 1][1]
+p rows[1], ri
+w = [+"abc", 1][0]
+bv = [7, "z"][0]
+begin
+  w[0] = bv
+rescue TypeError
+end
+p w

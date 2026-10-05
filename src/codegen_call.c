@@ -7266,6 +7266,20 @@ static void emit_poly_aset_string(Compiler *c, int id, int recv, const char *nam
     slot = !bind;
   }
   if (kt != TY_INT && kt != TY_RANGE && !(slot && kt == TY_POLY)) return;
+  /* What the arm holds in no temp it reads again once the key and the value
+     have run: the receiver's variable or slot, and a key that runs no code.
+     A key or value that can rebind such a read (`s[0] = (s = t; "X")`,
+     `rows[i][0] = rows[i += 1][1]`), or that runs code beside a slot, which
+     may put another element there, would send the store to another object
+     or another place. The store then stays as the switch has it. */
+  for (int a = 0; a < argc && !bind; a++)
+    if (read_rebound_by(c, recv, argv[a]) ||
+        (slot && subtree_has_side_effect(c, argv[a]) && !subtree_is_pure_read(c, argv[a]))) return;
+  if (!subtree_has_side_effect(c, argv[0]) && read_rebound_by(c, argv[0], argv[1])) return;
+  /* a boxed key or value is tested through the dispatch's temp, and a typed
+     value there for nil */
+  if ((kt == TY_POLY) != (atmp_ty[0] == TY_POLY)) return;
+  if (vt == TY_POLY ? atmp_ty[1] != TY_POLY : atmp_ty[1] != TY_STRING && atmp_ty[1] != TY_STRBUF) return;
   int sv_temp_recv = g_aset_temp_recv;
   if (bind) { view_bind(recv, "_t%d", tv); g_aset_temp_recv = recv; }
   for (int a = 0; a < argc; a++)
@@ -7290,9 +7304,19 @@ static void emit_poly_aset_string(Compiler *c, int id, int recv, const char *nam
   view_pop(c, va);
   view_unbind(mark);
   g_aset_temp_recv = sv_temp_recv;
-  if (ok && nb->p && strncmp(nb->p, "sp_raise", 8) != 0)
-    buf_printf(b, "if (_t%d.tag == SP_TAG_STR || sp_poly_is_strbuf(_t%d)) { %s (void)(%s); } ",
-               tv, tv, pb->p && pb->len ? pb->p : "", nb->p);
+  if (ok && nb->p && strncmp(nb->p, "sp_raise", 8) != 0) {
+    /* The builtin emission stores any boxed value as its text and raises
+       TypeError for a boxed key that is no Integer, where CRuby raises
+       TypeError for the one and takes a String, a Regexp or a Range for the
+       other: only a value that holds a String and a key that holds an
+       Integer take the arm. */
+    buf_printf(b, "if ((_t%d.tag == SP_TAG_STR || sp_poly_is_strbuf(_t%d))", tv, tv);
+    if (vt == TY_POLY)
+      buf_printf(b, " && (_t%d.tag == SP_TAG_STR || sp_poly_is_strbuf(_t%d))", atmp[1], atmp[1]);
+    else buf_printf(b, " && _t%d", atmp[1]);
+    if (kt == TY_POLY) buf_printf(b, " && _t%d.tag == SP_TAG_INT", atmp[0]);
+    buf_printf(b, ") { %s (void)(%s); } ", pb->p && pb->len ? pb->p : "", nb->p);
+  }
   free(nb->p); free(nb); free(pb->p); free(pb);
 }
 
