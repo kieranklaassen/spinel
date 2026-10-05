@@ -1300,6 +1300,17 @@ int sn_guard_ahead(Compiler *c, int id) {
   return rrt == TY_NIL || rrt == TY_POLY || sn_typed_nil_recv(c, rrt);
 }
 
+/* Whether a `&.` call is a `then` with a block of its own whose result has
+   no C slot (ret is the call's type): the inlined form declares that result
+   boxed. */
+static int sn_then_boxed(Compiler *c, int id, TyKind ret) {
+  const NodeTable *nt = c->nt;
+  if (ret != TY_NIL && ret != TY_VOID && ret != TY_UNKNOWN) return 0;
+  const char *nm = nt_str(nt, id, "name");
+  int blk = nt_ref(nt, id, "block");
+  return nm && is_then_alias(nm) && blk >= 0 && nt_kind(nt, blk) == NK_BlockNode;
+}
+
 /* safe navigation (&.): a nil receiver answers nil, any other the call, guarded by a nil test */
 int emit_call_safe_nav_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv) {
   /* Safe navigation &. : nil receiver -> return nil/0; non-nil -> emit conditional */
@@ -1524,6 +1535,11 @@ int emit_call_safe_nav_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
         else if (ret2 == TY_INT) buf_puts(b, "SP_INT_NIL");
         else if (ret2 == TY_FLOAT) buf_puts(b, "sp_float_nil()");
         else if (ret2 == TY_STRING) buf_puts(b, "((const char *)NULL)");  /* string nil, not "" */
+        /* A `then` whose block answers nil, or only returns or raises, has
+           a result with no C slot of its own, and written inline it is
+           carried boxed (emit_tap_then_expr): the nil beside it is the
+           boxed one. A bare 0 there did not build. */
+        else if (sn_then_boxed(c, id, ret2)) buf_puts(b, "sp_box_nil()");
         else buf_puts(b, default_value_from_compiler(c, ret2) ? default_value_from_compiler(c, ret2) : "0");
         buf_puts(b, " : (");
         if (g_n_argov < MAX_ARG_OVERRIDE) {
