@@ -597,7 +597,7 @@ else i++;}}
 sp_StrArray*sp_StrArray_uniq(sp_StrArray*a){SP_GC_ROOT(a);sp_StrArray*b=sp_StrArray_new();if(!a)return b;for(sp_int i=0;i<a->len;i++){int found=0;for(sp_int j=0;j<b->len;j++){if(b->data[j]==a->data[i]||(b->data[j]&&a->data[i]&&!sp_str_cmp_bytes(b->data[j],a->data[i]))){found=1;break;}}if(!found)sp_StrArray_push(b,a->data[i]);}return b;}
 /* byte_len for both the separator and each element: an embedded NUL is a byte
    of the string, and strlen stopped at it (the opportunistic NUL policy). */
-const char*sp_StrArray_join(sp_StrArray*a,const char*sep){if(!sep)sep="";if(!a)return sp_str_empty;size_t sl=sp_str_byte_len(sep),cap=256;char*buf=(char*)sp_pl_alloc(cap);size_t len=0;for(sp_int i=0;i<a->len;i++){if(i>0){if(len+sl>=cap){cap*=2;buf=(char*)sp_pl_realloc(buf,cap);}memcpy(buf+len,sep,sl);len+=sl;}const char*_e=a->data[i]?a->data[i]:"";size_t el=sp_str_byte_len(_e);if(len+el>=cap){cap=((len+el)*2)+1;buf=(char*)sp_pl_realloc(buf,cap);}memcpy(buf+len,_e,el);len+=el;}buf[len]=0;char*r=sp_str_alloc(len);memcpy(r,buf,len);sp_str_set_len(r,len);sp_pl_free(buf);/* the joined bytes are binary if any part was: see sp_str_bin_from */if(sp_str_is_binary(sep))sp_str_mark_binary(r);for(sp_int i=0;i<a->len;i++)if(a->data[i]&&sp_str_is_binary(a->data[i])){sp_str_mark_binary(r);break;}return r;}
+const char*sp_StrArray_join(sp_StrArray*a,const char*sep){if(!sep)sep="";if(!a)return sp_str_empty;size_t sl=sp_str_byte_len(sep),cap=256;char*buf=(char*)sp_pl_alloc(cap);size_t len=0;for(sp_int i=0;i<a->len;i++){if(i>0){if(len+sl>=cap){cap*=2;buf=(char*)sp_pl_realloc(buf,cap);}memcpy(buf+len,sep,sl);len+=sl;}const char*_e=a->data[i]?a->data[i]:"";size_t el=sp_str_byte_len(_e);if(len+el>=cap){cap=((len+el)*2)+1;buf=(char*)sp_pl_realloc(buf,cap);}memcpy(buf+len,_e,el);len+=el;}buf[len]=0;char*r=sp_str_alloc(len);memcpy(r,buf,len);sp_str_set_len(r,len);sp_pl_free(buf);/* the joined encoding, part by part as CRuby picks it (sp_str_enc_step) */{int st=-1;size_t off=0;int sb=sp_str_is_binary(sep);for(sp_int i=0;i<a->len;i++){if(i>0){st=sp_str_enc_step(st,r,off,sep,sl,sb);off+=sl;}const char*_e=a->data[i]?a->data[i]:"";size_t el=sp_str_byte_len(_e);st=sp_str_enc_step(st,r,off,_e,el,a->data[i]&&sp_str_is_binary(_e));off+=el;}if(st==1)sp_str_mark_binary(r);}return r;}
 sp_bool sp_StrArray_include(sp_StrArray*a,const char*v){SP_GC_ROOT(a);SP_GC_ROOT_STR(v);if(!a)return FALSE;for(sp_int i=0;i<a->len;i++)if(sp_str_cmp_bytes(a->data[i],v)==0)return TRUE;return FALSE;}
 sp_StrArray*sp_StrArray_intersect(sp_StrArray*a,sp_StrArray*b){SP_GC_ROOT(a);SP_GC_ROOT(b);sp_StrArray*r=sp_StrArray_new();if(!a||!b)return r;for(sp_int i=0;i<a->len;i++){const char*v=a->data[i];if(sp_StrArray_include(b,v)&&!sp_StrArray_include(r,v))sp_StrArray_push(r,v);}return r;}
 sp_bool sp_StrArray_intersect_p(sp_StrArray*a,sp_StrArray*b){SP_GC_ROOT(a);SP_GC_ROOT(b);if(!a||!b)return 0;for(sp_int i=0;i<a->len;i++)if(sp_StrArray_include(b,a->data[i]))return 1;return 0;}
@@ -654,38 +654,100 @@ sp_StrArray*sp_StrArray_shuffle(sp_StrArray*a){SP_GC_ROOT(a);sp_StrArray*r=sp_St
 const char *sp_StrArray_sample(sp_StrArray*a){SP_GC_ROOT(a);if(a->len<=0)return sp_str_empty;return a->data[sp_krand_below(a->len)];}
 
 /* ============ poly/inspect-dependent array ops (display, concat, to_poly) ============ */
+/* The walk String#upto takes, a member at a time, in CRuby's
+   rb_str_upto_each order of cases: sp_str_walk_first answers the first
+   member or NULL, sp_str_walk_next the one after. Each member is a fresh
+   copy (the frozen begin is not handed out), so a caller may change it.
+   The caller roots w->cur, w->end and w->stop before the first call. */
+enum { SP_STR_WALK_OVER, SP_STR_WALK_BYTES, SP_STR_WALK_DIGITS, SP_STR_WALK_SUCC };
+static const char *sp_str_walk_member(sp_StrWalk *w) {
+  if (w->kind == SP_STR_WALK_BYTES) {
+    char one = (char)w->at;
+    return sp_str_from_bytes(&one, 1);
+  }
+  if (w->kind == SP_STR_WALK_DIGITS) {
+    char buf[32];
+    int n = snprintf(buf, sizeof buf, "%.*lld", w->width, w->at);
+    return sp_str_from_bytes(buf, (size_t)n);
+  }
+  return sp_str_from_bytes(w->cur, sp_str_byte_len(w->cur));
+}
+const char *sp_str_walk_first(sp_StrWalk *w, const char *s, const char *e, sp_int excl) {SP_GC_ROOT_STR(s);SP_GC_ROOT_STR(e);
+  w->kind = SP_STR_WALK_OVER;
+  if (!s || !e) return NULL;
+  size_t sl = sp_str_byte_len(s), el = sp_str_byte_len(e);
+  int ascii = 1;
+  for (size_t i = 0; i < sl; i++) if ((unsigned char)s[i] >= 0x80) ascii = 0;
+  for (size_t i = 0; i < el; i++) if ((unsigned char)e[i] >= 0x80) ascii = 0;
+  /* one ASCII character at each end: every byte between, so ("A".."c")
+     holds the punctuation between "Z" and "a" */
+  if (ascii && sl == 1 && el == 1) {
+    w->at = (unsigned char)s[0];
+    w->lim = (unsigned char)e[0] + (excl ? 0 : 1);
+    if (w->at >= w->lim) return NULL;
+    w->kind = SP_STR_WALK_BYTES;
+    return sp_str_walk_member(w);
+  }
+  /* two all-digit ends: the numbers between, zero-padded to the begin's
+     width, so ("9".."11") holds "9", "10", "11" (#3549) and ("1".."010")
+     stops at "10". Past 18 digits the succ walk below serves. */
+  int digits = ascii && sl > 0 && el > 0 && sl <= 18 && el <= 18;
+  for (size_t i = 0; digits && i < sl; i++) if (s[i] < '0' || s[i] > '9') digits = 0;
+  for (size_t i = 0; digits && i < el; i++) if (e[i] < '0' || e[i] > '9') digits = 0;
+  if (digits) {
+    w->at = strtoll(s, NULL, 10);
+    w->lim = strtoll(e, NULL, 10) + (excl ? 0 : 1);
+    w->width = (int)sl;
+    if (w->at >= w->lim) return NULL;
+    w->kind = SP_STR_WALK_DIGITS;
+    return sp_str_walk_member(w);
+  }
+  /* otherwise String#succ from the begin up to the end, never past the
+     end's length, so ("a".."bb") runs through "z" and on to "bb", and
+     ("aa".."z") -- whose begin is the end's successor -- is empty */
+  int cmp = sp_str_cmp_bytes(s, e);
+  if (cmp > 0 || (excl && cmp == 0)) return NULL;
+  /* `cur` walks the range via String#succ, allocating a fresh heap string each
+     step; the next sp_str_alloc can trigger a GC that would sweep the current
+     succ string, so the copy read freed memory (#3152). The caller's root on
+     the slot tracks each succ reassignment. */
+  w->cur = s; w->end = e; w->excl = excl;
+  w->stop = sp_str_succ(e);
+  if (sp_str_eq(w->cur, w->stop)) return NULL;
+  w->kind = SP_STR_WALK_SUCC;
+  return sp_str_walk_member(w);
+}
+const char *sp_str_walk_next(sp_StrWalk *w) {
+  if (w->kind == SP_STR_WALK_BYTES || w->kind == SP_STR_WALK_DIGITS) {
+    if (++w->at >= w->lim) { w->kind = SP_STR_WALK_OVER; return NULL; }
+    return sp_str_walk_member(w);
+  }
+  if (w->kind != SP_STR_WALK_SUCC) return NULL;
+  w->kind = SP_STR_WALK_OVER;
+  if (!w->excl && sp_str_eq(w->cur, w->end)) return NULL;
+  w->cur = sp_str_succ(w->cur);
+  if (w->excl && sp_str_eq(w->cur, w->end)) return NULL;
+  size_t cl = sp_str_byte_len(w->cur);
+  if (cl > sp_str_byte_len(w->end) || cl == 0) return NULL;
+  if (sp_str_eq(w->cur, w->stop)) return NULL;
+  w->kind = SP_STR_WALK_SUCC;
+  return sp_str_walk_member(w);
+}
+/* The same members, each passed to fn until it answers nonzero. */
+void sp_str_upto_each(const char *s, const char *e, sp_int excl, int (*fn)(const char *, void *), void *arg) {SP_GC_ROOT_STR(s);SP_GC_ROOT_STR(e);
+  sp_StrWalk w = {0};
+  SP_GC_ROOT_STR(w.cur); SP_GC_ROOT_STR(w.end); SP_GC_ROOT_STR(w.stop);
+  for (const char *m = sp_str_walk_first(&w, s, e, excl); m; m = sp_str_walk_next(&w))
+    if (fn(m, arg)) return;
+}
+static int sp_str_upto_push(const char *m, void *arg) {
+  sp_StrArray_push((sp_StrArray *)arg, m);
+  return 0;
+}
 sp_StrArray *sp_StrArray_from_string_range(const char *s, const char *e, sp_int excl) {SP_GC_ROOT_STR(s);SP_GC_ROOT_STR(e);
   sp_StrArray *a = sp_StrArray_new();
   SP_GC_ROOT(a);
-  if (!s || !e) return a;
-  /* `cur` walks the range via String#succ, allocating a fresh heap string each
-     step; the next sp_str_alloc can trigger a GC that would sweep both the
-     array under construction and the current (unrooted) succ string, so the
-     strcpy read freed memory (#3152). Root the slot -- it tracks each succ
-     reassignment. */
-  const char *cur = s;
-  SP_GC_ROOT_STR(cur);
-  int iters = 0;
-  /* Two all-digit endpoints walk numerically, so ("9".."11") holds "9", "10",
-     "11" -- a plain byte compare stops at once because "9" > "1" (#3549).
-     Anything else keeps the byte order, where ("y".."ab") is empty. */
-  size_t elen = strlen(e);
-  int numeric = *s && *e;
-  for (const char *q = s; numeric && *q; q++) if (*q < '0' || *q > '9') numeric = 0;
-  for (const char *q = e; numeric && *q; q++) if (*q < '0' || *q > '9') numeric = 0;
-  while (iters < 4096) {
-    size_t clen = strlen(cur);
-    int cmp = (numeric && clen != elen) ? (clen < elen ? -1 : 1)
-                                        : sp_str_cmp_bytes(cur, e);
-    if (cmp > 0) break;
-    if (cmp == 0 && excl) break;
-    char *copy = sp_str_alloc(strlen(cur));
-    strcpy(copy, cur);
-    sp_StrArray_push(a, copy);
-    if (cmp == 0) break;
-    cur = sp_str_succ(cur);
-    iters++;
-  }
+  sp_str_upto_each(s, e, excl, sp_str_upto_push, a);
   return a;
 }
 const char*sp_IntArray_inspect(sp_IntArray*a){SP_GC_ROOT(a);return a?sp_inspect_container(sp_box_obj(a,SP_BUILTIN_INT_ARRAY)):"nil";}
