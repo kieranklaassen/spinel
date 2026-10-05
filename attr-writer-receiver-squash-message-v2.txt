@@ -1,0 +1,51 @@
+The receiver of `recv.v = value` is held while the value is built
+
+    K.new("v").v = (made = Array.new(8) { |i| K.new("k#{i}") }; r)
+
+A plain attribute write takes its receiver into a C temp and builds
+the value after it. Nothing held a receiver that only the statement
+reaches: the value's allocations collected it, the next object took
+its place, and the store went into that object. 20,000 rounds of the
+line above leave one of the eight objects holding r for its v in a
+plain run, and 5,467 at SPINEL_GC_STRESS=1. Level 2 does not show it:
+a freed slot is not handed out again there.
+
+The temp is now rooted (writer_recv_wants_root) at the four places
+that take the receiver of a plain write first: the typed statement,
+the statement on a class with subclasses, the statement on a boxed
+receiver, and the write read for its value. It is rooted where the
+value can make something and can leave the receiver held by nothing
+else:
+
+- a receiver nothing keeps: an object made in place, a call's result;
+- a local or an instance variable the value itself rebinds
+  (`o.v = (o = nil; ...)`, read_rebound_by);
+- any other receiver something keeps (subtree_reads_held: a global, a
+  class variable, an element, a Hash's value under a builtin key, a
+  field read off one) where the value can take it out of its holder:
+  it rebinds a variable the receiver reads, or it can store into state
+  at all, as any call that is not a plain read can.
+
+    @@o.v = (@@o = nil; made = mk8; r)
+    self.o.v = (@o = nil; made = mk8; r)
+    (0; o).v = (o = nil; made = mk8; r)
+    a[0].v = (a.clear; made = mk8; r)
+
+Each of these stored into one of the eight objects mk8 makes on
+master: [2, 0, 0, 2] of 5,000 rounds in a plain run and
+[1628, 931, 3021, 5000] at SPINEL_GC_STRESS=1
+(test/attr_writer_holder_emptied.rb).
+
+No root is taken on self or a constant; on a receiver a statement
+around this one already ran into a temp of its own (arg_ran_first);
+on a held receiver whose value runs nothing (`$g.v = [i]`,
+`a[i].v = [i]`, `h[:k].v = [i]`, `CK.o.v = [i]`); or where the value
+makes nothing, an Integer, a Float or a boolean computed from plain
+reads among them (`K.new(i).v = i + 1`). Those compile to the C they
+did.
+
+An operator write on a receiver nothing keeps (`mk(r).v ||= x`,
+`K.new("v").v += x`) takes its receiver in other code and is not held
+by this change.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
