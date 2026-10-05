@@ -11851,6 +11851,307 @@ static void cn_neutralize(NodeTable *nt, int node) {
   nt_node_reset(nt, node, "NilNode");
 }
 
+/* ---- the statements of an anonymous Class.new block run at the call ----
+ *
+ * The anonymous class is named and defined ahead of the top-level statement
+ * that holds the call, and a class body's own statements run where the class
+ * is defined: `def one; Class.new { puts "body" }; end` printed "body" once,
+ * where `one` is defined, and never when `one` was called. The definitions
+ * of the block are the class's whenever the code runs; its other statements
+ * are CRuby's to run each time the call is reached. They stay in front of
+ * the statement that holds the call when each of them is closed: it names
+ * nothing of the class (no self, no instance or class variable, no local or
+ * constant of the body) and calls nothing on it.
+ *
+ * It is done for every such block of the program or for none. A block left
+ * running where its class is defined beside one moved to its call would run
+ * the two in an order neither CRuby nor the compiler before had, so a
+ * program with a block this cannot place is compiled as before. */
+
+/* the Kernel calls a class body runs where they stand
+   (emit_class_body_stmts), then the declarations the analysis reads and
+   nothing runs, then the hooks a definition runs */
+static const char *const cn_acts[] = { "puts", "print", "p", "pp", "printf", "putc", "warn",
+  "raise", "fail", "exit", "exit!", "abort", "sleep", "srand", NULL };
+static const char *const cn_decls[] = { "attr", "attr_reader", "attr_writer", "attr_accessor",
+  "include", "extend", "prepend", "private", "public", "protected", "private_class_method",
+  "public_class_method", "private_constant", "alias_method", "define_method", NULL };
+static const char *const cn_hooks[] = { "inherited", "included", "extended", "prepended",
+  "method_added", "singleton_method_added", "const_added", "append_features",
+  "prepend_features", "extend_object", NULL };
+
+/* what moving a statement asks of the rest of the program */
+typedef struct {
+  const int *parent;   /* each node's parent, as the pass found the tree */
+  int n0;              /* the nodes it found; later ones are its own */
+  int scanned;         /* `rebound` and `hooked` are filled in */
+  int hooked;          /* a hook is defined: a definition runs code */
+  char rebound[32];    /* cn_acts then cn_decls: a def or a symbol carries the name */
+} CnProgram;
+
+static int cn_name_at(const char *nm, const char *const *list) {
+  for (int i = 0; nm && list[i]; i++) if (sp_streq(nm, list[i])) return i;
+  return -1;
+}
+
+/* note which of cn_acts and cn_decls a def gives to a class, or a symbol
+   could (attr_accessor, alias_method, define_method), and whether a hook
+   is defined */
+static void cn_scan_names(const NodeTable *nt, CnProgram *pg) {
+  enum { NACTS = sizeof cn_acts / sizeof cn_acts[0] - 1 };
+  if (pg->scanned) return;
+  pg->scanned = 1;
+  for (int id = 0; id < pg->n0; id++) {
+    NodeKind k = nt_kind(nt, id);
+    const char *v = k == NK_DefNode ? nt_str(nt, id, "name") : k == NK_SymbolNode ? nt_str(nt, id, "value") : NULL;
+    int a = cn_name_at(v, cn_acts), d = cn_name_at(v, cn_decls);
+    if (a >= 0) pg->rebound[a] = 1;
+    if (d >= 0) pg->rebound[NACTS + d] = 1;
+    if (k == NK_DefNode && cn_name_at(v, cn_hooks) >= 0) pg->hooked = 1;
+  }
+}
+
+/* Does a receiver-less call of `nm` mean what `list` (cn_acts or cn_decls)
+   says, whatever self is? */
+static int cn_builtin_call(const NodeTable *nt, CnProgram *pg, const char *nm, const char *const *list) {
+  enum { NACTS = sizeof cn_acts / sizeof cn_acts[0] - 1 };
+  cn_scan_names(nt, pg);
+  int i = cn_name_at(nm, list);
+  return i >= 0 && !pg->rebound[list == cn_acts ? i : NACTS + i];
+}
+
+/* Is `node`, `level` blocks deep in a statement of the body, closed? */
+static int cn_closed(const NodeTable *nt, CnProgram *pg, int node, int level) {
+  static const char *const plain[] = { "ArgumentsNode", "StatementsNode", "ParenthesesNode",
+    "IntegerNode", "FloatNode", "StringNode", "SymbolNode", "InterpolatedStringNode",
+    "EmbeddedStatementsNode", "TrueNode", "FalseNode", "NilNode", "ArrayNode", "HashNode",
+    "AssocNode", "KeywordHashNode", "RangeNode", "ConstantReadNode", "ConstantPathNode",
+    "GlobalVariableReadNode", "GlobalVariableWriteNode", "GlobalVariableOperatorWriteNode",
+    "GlobalVariableOrWriteNode", "GlobalVariableAndWriteNode", "IndexOperatorWriteNode",
+    "IndexOrWriteNode", "IndexAndWriteNode", "IfNode", "UnlessNode", "ElseNode", "AndNode",
+    "OrNode", "WhileNode", "UntilNode", "CaseNode", "WhenNode", "BeginNode", "RescueNode",
+    "EnsureNode", "BlockParametersNode", "ParametersNode", "RequiredParameterNode",
+    "NumberedParametersNode", "ItParametersNode", "SourceLineNode", NULL };
+  static const char *const locals[] = { "LocalVariableReadNode", "LocalVariableWriteNode",
+    "LocalVariableOperatorWriteNode", "LocalVariableOrWriteNode", "LocalVariableAndWriteNode",
+    "LocalVariableTargetNode", "ItLocalVariableReadNode", NULL };
+  /* a block that is itself a class body */
+  static const char *const shapers[] = { "Class", "Module", "Struct", "Data", NULL };
+  if (node < 0) return 1;
+  if (node >= pg->n0) return 0;
+  const char *ty = nt_type(nt, node);
+  int inner = level;
+  if (cn_name_at(ty, locals) >= 0) {
+    /* a local of a block inside the statement; the body's own is the class's */
+    if (nt_int(nt, node, "depth", 0) >= level) return 0;
+  }
+  else if (ty && sp_streq(ty, "CallNode")) {
+    const char *nm = nt_str(nt, node, "name");
+    int recv = nt_ref(nt, node, "receiver");
+    if (!nm || is_eval_exec_family(nm)) return 0;
+    /* without a receiver the call is the class's */
+    if (recv < 0 && !cn_builtin_call(nt, pg, nm, cn_acts)) return 0;
+    if (recv >= 0 && nt_kind(nt, recv) == NK_ConstantReadNode &&
+        cn_name_at(nt_str(nt, recv, "name"), shapers) >= 0) return 0;
+  }
+  else if (ty && sp_streq(ty, "BlockNode")) inner = level + 1;
+  else if (cn_name_at(ty, plain) < 0) return 0;
+  int nr = nt_num_refs(nt, node);
+  for (int i = 0; i < nr; i++) if (!cn_closed(nt, pg, nt_ref_at(nt, node, i), inner)) return 0;
+  int na = nt_num_arrs(nt, node);
+  for (int i = 0; i < na; i++) {
+    int cnt = 0; const int *ids = nt_arr_at(nt, node, i, &cnt);
+    for (int j = 0; j < cnt; j++) if (!cn_closed(nt, pg, ids[j], inner)) return 0;
+  }
+  return 1;
+}
+
+/* a def of the class or of its singleton, as a body statement or as the
+   argument of `private` */
+static int cn_is_own_def(const NodeTable *nt, int node) {
+  if (nt_kind(nt, node) != NK_DefNode) return 0;
+  int dr = nt_ref(nt, node, "receiver");
+  return dr < 0 || nt_kind(nt, dr) == NK_SelfNode;
+}
+
+/* Is body statement `st` a definition the analysis reads, with nothing to
+   run: a def, an alias, or a declaration whose arguments are literal? */
+static int cn_is_definition(const NodeTable *nt, CnProgram *pg, int st) {
+  NodeKind k = nt_kind(nt, st);
+  if (k == NK_AliasMethodNode) return 1;
+  if (k == NK_DefNode) return cn_is_own_def(nt, st);
+  if (k != NK_CallNode || nt_ref(nt, st, "receiver") >= 0) return 0;
+  const char *nm = nt_str(nt, st, "name");
+  if (!nm || !cn_builtin_call(nt, pg, nm, cn_decls)) return 0;
+  int blk = nt_ref(nt, st, "block");
+  if (blk >= 0 && (!sp_streq(nm, "define_method") || nt_kind(nt, blk) != NK_BlockNode)) return 0;
+  int an = nt_ref(nt, st, "arguments");
+  int ac = 0; const int *av = an >= 0 ? nt_arr(nt, an, "arguments", &ac) : NULL;
+  for (int i = 0; i < ac; i++) {
+    NodeKind ak = nt_kind(nt, av[i]);
+    if (ak != NK_SymbolNode && ak != NK_StringNode && ak != NK_ConstantReadNode &&
+        ak != NK_ConstantPathNode && !cn_is_own_def(nt, av[i])) return 0;
+  }
+  return 1;
+}
+
+/* How many of the body statements `bs` are to run, when each of them is a
+   definition or closed; -1 when one is neither. */
+static int cn_statements_to_run(const NodeTable *nt, CnProgram *pg, const int *bs, int bn) {
+  int nrun = 0;
+  for (int i = 0; i < bn; i++) {
+    if (cn_is_definition(nt, pg, bs[i])) continue;
+    if (!cn_closed(nt, pg, bs[i], 0)) return -1;
+    nrun++;
+  }
+  return nrun;
+}
+
+/* The statement the call `id` belongs to, when the call is the first thing
+   that statement evaluates, once, every time it runs: the statement itself,
+   the value it assigns to a variable, or the receiver of such a call.
+   *out_list is the statement list it stands in. -1 otherwise. */
+static int cn_statement_of(const NodeTable *nt, const CnProgram *pg, int id, int *out_list) {
+  const int *parent = pg->parent;
+  int stn = id, p = parent[id];
+  for (; p >= 0 && nt_kind(nt, p) != NK_StatementsNode; stn = p, p = parent[p]) {
+    NodeKind pk = nt_kind(nt, p);
+    if (pk == NK_LocalVariableWriteNode || pk == NK_InstanceVariableWriteNode ||
+        pk == NK_GlobalVariableWriteNode) { if (nt_ref(nt, p, "value") != stn) return -1; }
+    else if (pk == NK_CallNode) { if (nt_ref(nt, p, "receiver") != stn) return -1; }
+    else return -1;
+  }
+  if (p < 0) return -1;
+  int n = 0, found = 0; const int *st = nt_arr(nt, p, "body", &n);
+  for (int i = 0; i < n; i++) found = found || st[i] == stn;
+  if (!found) return -1;
+  *out_list = p;
+  return stn;
+}
+
+static int cn_is_body_owner(const NodeTable *nt, int node) {
+  NodeKind k = nt_kind(nt, node);
+  return k == NK_DefNode || k == NK_BlockNode || k == NK_LambdaNode;
+}
+
+/* Does the statement list `list`, below the class body or top level
+   `host_st`, run its statements one after another, for what they do, each
+   time it is reached: the body of a method, a block or a lambda, or of a
+   branch, a loop or a begin that is itself a statement of such a list? A
+   branch whose value is used is an expression, and what its value meets
+   there may evaluate it twice. And is no block around the list a class body
+   of its own, or run with another self? */
+static int cn_list_runs_in_place(const NodeTable *nt, const CnProgram *pg, int list, int host_st) {
+  static const char *const clauses[] = { "ElseNode", "WhenNode", "RescueNode", "EnsureNode", NULL };
+  static const char *const stmts_of[] = { "IfNode", "UnlessNode", "CaseNode", "BeginNode",
+    "WhileNode", "UntilNode", NULL };
+  static const char *const shapers[] = { "Class", "Module", "Struct", "Data", NULL };
+  const int *parent = pg->parent;
+  for (int l = list; l != host_st; ) {
+    int o = parent[l];
+    while (o >= 0 && cn_name_at(nt_type(nt, o), clauses) >= 0) o = parent[o];
+    if (o < 0) return 0;
+    if (cn_is_body_owner(nt, o)) break;
+    if (cn_name_at(nt_type(nt, o), stmts_of) < 0) return 0;
+    /* an elsif is its `if`'s */
+    while (parent[o] >= 0 && nt_kind(nt, o) == NK_IfNode && nt_kind(nt, parent[o]) == NK_IfNode &&
+           nt_ref(nt, parent[o], "subsequent") == o) o = parent[o];
+    l = parent[o];
+    if (l < 0) return 0;
+    /* a method or block with a rescue has a begin for its body */
+    if (nt_kind(nt, o) == NK_BeginNode && cn_is_body_owner(nt, l)) break;
+    if (nt_kind(nt, l) != NK_StatementsNode) return 0;
+  }
+  for (int a = parent[list]; a >= 0; a = parent[a]) {
+    NodeKind ak = nt_kind(nt, a);
+    if (ak == NK_ClassNode || ak == NK_ModuleNode) break;
+    if (ak == NK_SingletonClassNode) return 0;
+    if (ak != NK_BlockNode) continue;
+    /* the block of a call this pass rewrote, of Class.new, Module.new,
+       Struct.new or Data.define, or one run with another self */
+    int bc = parent[a];
+    if (bc < 0 || nt_kind(nt, bc) != NK_CallNode) return 0;
+    const char *bn = nt_str(nt, bc, "name");
+    int br = nt_ref(nt, bc, "receiver");
+    if (!bn || is_eval_exec_family(bn) || sp_streq(bn, "define_method") ||
+        sp_streq(bn, "define_singleton_method")) return 0;
+    if (br >= 0 && nt_kind(nt, br) == NK_ConstantReadNode &&
+        cn_name_at(nt_str(nt, br, "name"), shapers) >= 0) return 0;
+  }
+  return 1;
+}
+
+/* Can the statements of every anonymous Class.new or Module.new block of
+   the program run where CRuby runs them: the class is defined right in
+   front of the statement that evaluates the call first, as before, or the
+   statements can be left in front of that statement? */
+static int cn_every_block_placed(const NodeTable *nt, CnProgram *pg) {
+  for (int id = 0; id < pg->n0; id++) {
+    if (nt_kind(nt, id) != NK_CallNode) continue;
+    const char *nm = nt_str(nt, id, "name");
+    int recv = nt_ref(nt, id, "receiver");
+    int blk = nt_ref(nt, id, "block");
+    if (!nm || !sp_streq(nm, "new") || recv < 0 || blk < 0 || nt_kind(nt, blk) != NK_BlockNode) continue;
+    if (nt_kind(nt, recv) != NK_ConstantReadNode) continue;
+    const char *rn = nt_str(nt, recv, "name");
+    int is_module = rn && sp_streq(rn, "Module");
+    if (!rn || (!is_module && !sp_streq(rn, "Class"))) continue;
+    int an = nt_ref(nt, id, "arguments");
+    int ac = 0; const int *av = an >= 0 ? nt_arr(nt, an, "arguments", &ac) : NULL;
+    int super_node = (!is_module && ac >= 1) ? av[0] : -1;
+    int bb = nt_ref(nt, blk, "body");
+    /* a class built at run time raises where it is reached, and one named
+       by a constant is defined where it stands */
+    if (super_node >= 0 && nt_kind(nt, super_node) != NK_ConstantReadNode &&
+        nt_kind(nt, super_node) != NK_ConstantPathNode) continue;
+    if (cn_reads_outer_local(nt, bb, 0)) continue;
+    int par = pg->parent[id];
+    if (par >= 0 && nt_kind(nt, par) == NK_ConstantWriteNode && nt_ref(nt, par, "value") == id) continue;
+    int bn = bb < 0 ? 0 : 1; const int *bs = &bb;
+    if (bb >= 0 && nt_kind(nt, bb) == NK_StatementsNode) bs = nt_arr(nt, bb, "body", &bn);
+    int nrun = cn_statements_to_run(nt, pg, bs, bn);
+    if (!nrun) continue;
+    cn_scan_names(nt, pg);
+    if (pg->hooked) return 0;
+    int host_st = nt_ref(nt, nt->root_id, "statements");
+    for (int a = par; a >= 0; a = pg->parent[a]) {
+      NodeKind ak = nt_kind(nt, a);
+      if (ak == NK_ClassNode || ak == NK_ModuleNode) { host_st = nt_ref(nt, a, "body"); break; }
+    }
+    int list = -1;
+    if (cn_statement_of(nt, pg, id, &list) < 0) return 0;
+    if (list == host_st) continue;
+    if (nrun < 0 || !cn_list_runs_in_place(nt, pg, list, host_st)) return 0;
+  }
+  return 1;
+}
+
+/* Leave the closed statements of the anonymous class body `body` in front
+   of the statement that holds its Class.new call `id`, and the definitions
+   in the body. */
+static void cn_leave_statements_at_call(NodeTable *nt, CnProgram *pg, int id, int body, int host_st) {
+  int list = -1;
+  int stn = cn_statement_of(nt, pg, id, &list);
+  if (stn < 0 || list == host_st || !cn_list_runs_in_place(nt, pg, list, host_st)) return;
+  int bn = 0; const int *bs = nt_arr(nt, body, "body", &bn);
+  int nrun = cn_statements_to_run(nt, pg, bs, bn);
+  if (nrun <= 0) return;
+  int ln = 0; const int *ls = nt_arr(nt, list, "body", &ln);
+  int *defs = malloc(sizeof(int) * (size_t)bn);
+  int *out = malloc(sizeof(int) * (size_t)(ln + nrun));
+  int nd = 0, no = 0;
+  for (int i = 0; i < ln; i++) {
+    if (ls[i] == stn)
+      for (int j = 0; j < bn; j++) if (!cn_is_definition(nt, pg, bs[j])) out[no++] = bs[j];
+    out[no++] = ls[i];
+  }
+  for (int j = 0; j < bn; j++) if (cn_is_definition(nt, pg, bs[j])) defs[nd++] = bs[j];
+  nt_node_set_arr(nt, list, "body", out, no);
+  nt_node_set_arr(nt, body, "body", defs, nd);
+  free(out);
+  free(defs);
+}
+
 int desugar_class_new_blocks(Compiler *c) {
   NodeTable *nt = (NodeTable *)c->nt;
   int n0 = nt->count, changed = 0, serial = 0;
@@ -11866,6 +12167,8 @@ int desugar_class_new_blocks(Compiler *c) {
       for (int j = 0; j < cnt; j++) if (ids[j] >= 0 && ids[j] < n0) parent[ids[j]] = p;
     }
   }
+  CnProgram pg = { parent, n0, 0, 0, { 0 } };
+  int leave = cn_every_block_placed(nt, &pg);
   for (int id = 0; id < n0; id++) {
     if (nt_kind(nt, id) != NK_CallNode) continue;
     const char *nm = nt_str(nt, id, "name");
@@ -11967,6 +12270,7 @@ int desugar_class_new_blocks(Compiler *c) {
       int at = -1;
       for (int k = 0; k < rn2 && at < 0; k++) if (cn_contains(nt, rs[k], id)) at = k;
       if (at < 0) continue;
+      if (leave) cn_leave_statements_at_call(nt, &pg, id, body, host_st);
       char name[64]; snprintf(name, sizeof name, "SpinelAnonClass%d", ++serial);
       int cls = cn_make_class(nt, id, is_module, name, super_node, body);
       if (cls < 0) continue;
