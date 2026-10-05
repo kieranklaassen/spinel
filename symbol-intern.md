@@ -48,7 +48,7 @@ The test's line in `GC_STRESS_TESTS` sits where the String Range inspect fix add
 GATE_LINES
 ```
 
-- [ ] New tests have `.expected` files that match CRuby 4.0 run with `--enable-frozen-string-literal` (the file was written from ruby 3.3.6 with that flag; it prints Symbols, Strings, Integers and Arrays of them)
+- [x] New tests have `.expected` files that match CRuby 4.0 run with `--enable-frozen-string-literal` (4.0.7)
 - [ ] Values past 2^31 are marked `# spinel: int64` (none)
 - [ ] If optcarrot's generated C changed: callgrind numbers, checksum 59662 (it changed by the function above; the numbers are in the table)
 - [ ] Depends on: # (nothing)
