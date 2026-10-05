@@ -1,0 +1,32 @@
+A call that answers only nil is nil in a Float slot, not NaN
+
+    def nothing = nil
+
+    def run(k)
+      r = k ? 1.5 : nothing
+      [r, 1]
+    end
+    p run(false)
+
+printed [NaN, 1] where CRuby prints [nil, 1]. `r + 1.0` was NaN where CRuby
+raises NoMethodError, `{ a: r }[:a].nil?` was false, and an Integer joined
+the same way and stored into a Hash was not nil there either.
+
+A Float or an Integer that also sees nil keeps its slot, with the nil as the
+slot's sentinel, and what boxes the value or computes with it asks whether it
+can be that sentinel (nullable_int_value). The literal nil answered yes, and
+so did a search miss and a method whose number can be nil. A call that can
+answer only nil, a method that returns nil or `puts`, answered no, so the
+local, the instance variable or the method's return it was joined into was
+never marked, and the sentinel was boxed as a number. It answers yes now.
+
+The same under a rescue, `r = nothing rescue 1.5`, and in a begin block.
+
+Left alone, as on master: a constant holding nil (`r = k ? 1.5 : NOTHING`),
+a local written from such a call (`x = nothing; r = k ? 1.5 : x`) and a block
+parameter given nil are still NaN when boxed.
+
+No program's C changes but the new test's (`make cident`), and scale-test
+keeps master's four ratios.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
