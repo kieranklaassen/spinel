@@ -804,6 +804,10 @@ spinel: a String stored in a Hash is passed to an appending value block: a Strin
 spinel: a String stored in a Hash is passed to an appending value block: a String is not yet shared by reference through a Hash's values. Append to the String before storing it in the Hash.
 == test/reject/string_hash_value_method_store_call.rb [promote] rc=1
 spinel: a String stored in a Hash is passed to an appending value block: a String is not yet shared by reference through a Hash's values. Append to the String before storing it in the Hash.
+== test/reject/string_hash_value_method_store_twice.rb [default] rc=1
+spinel: a String stored in a Hash is passed to an appending value block: a String is not yet shared by reference through a Hash's values. Append to the String before storing it in the Hash.
+== test/reject/string_hash_value_method_store_twice.rb [promote] rc=1
+spinel: a String stored in a Hash is passed to an appending value block: a String is not yet shared by reference through a Hash's values. Append to the String before storing it in the Hash.
 == test/reject/string_hash_value_param.rb [default] rc=1
 spinel: a String stored in a Hash is passed to an appending value block: a String is not yet shared by reference through a Hash's values. Append to the String before storing it in the Hash.
 == test/reject/string_hash_value_param.rb [promote] rc=1

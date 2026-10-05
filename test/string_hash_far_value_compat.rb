@@ -56,3 +56,39 @@ fill(r, :a, +"q")
 r.each_value { |x| p x + "!" }
 r.each_pair { |key, x| x = +"local"; x << "!"; p x }
 p r.to_a
+
+# A method that assigns its Hash parameter stores into another Hash.
+def relabel(hh); hh = {}; hh[:a] = +"q"; hh; end
+def recount(hh)
+  hh = hh.transform_values { |l| l.size.to_s }
+  hh[:total] = +"n"
+  hh
+end
+lists = {a: [1], b: [2, 3]}
+names = relabel(lists)
+sizes = recount(lists)
+lists.each_value { |l| l << 0 }
+p lists.to_a, names.to_a, sizes.to_a
+
+# A parameter another call hands an Array is not read as a String, in the
+# value block's scope or out of it.
+def make(v, close)
+  hh = {}
+  hh[:a] = v
+  hh.each_value { |l| l << 0 } if close
+  hh
+end
+p make(+"q", false).to_a, make([1], true).to_a
+
+class Box
+  def initialize; @h = {}; end
+  def put(k, v); @h[k] = v; end
+  def close; @h.each_value { |l| l << 0 }; end
+  def rows; @h.to_a; end
+end
+bn = Box.new
+bn.put(:a, +"q")
+bl = Box.new
+bl.put(:a, [1])
+bl.close
+p bn.rows, bl.rows
