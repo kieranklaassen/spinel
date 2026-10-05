@@ -722,6 +722,8 @@ Not yet shared:
 - through a global variable's Array, a String element mutated in place through the Array (`$b.each { |y| y << x }`, `$b[0] << x`);
 - into an Array or Hash a caller passes a method, a String the method stores (`def keep(a) = (a << n)`), when the caller mutates the element in place;
 
+- through a pattern that binds the subject to a local that is also appended to (`case line in String => t` with `t << x` anywhere in the method);
+
 - through an ivar's or a call's Array, a fresh Array literal, a narrowed boxed String element, or a fresh String's `tap`, into an appending block or parameter;
 
 - by keyword, through a curried proc;
