@@ -15,6 +15,10 @@ int is_call_alias(const char *n) {
   return sp_streq(n, "call") || sp_streq(n, "()") || sp_streq(n, "[]");
 }
 
+int is_method_invoke(const char *n) {
+  return is_call_alias(n) || sp_streq(n, "===");
+}
+
 int is_kind_query(const char *n) {
   return sp_streq(n, "is_a?") || sp_streq(n, "kind_of?") || sp_streq(n, "instance_of?");
 }
@@ -641,7 +645,7 @@ int is_string_append(const char *n) {
 int is_string_rebind_mutator(const char *n) {
   static const char *const MUT[] = {
     "<<", "concat", "prepend", "insert", "replace", "[]=", "slice!", "setbyte", "bytesplice",
-    "sub!", "gsub!", "tr!", "tr_s!", "delete!", "squeeze!", "delete_prefix!", "delete_suffix!",
+    "sub!", "gsub!", "chomp!", "scrub!", "tr!", "tr_s!", "delete!", "squeeze!", "delete_prefix!", "delete_suffix!",
     "append_as_bytes", "force_encoding", "encode!", "unicode_normalize!", NULL };
   for (int i = 0; MUT[i]; i++)
     if (sp_streq(n, MUT[i])) return 1;

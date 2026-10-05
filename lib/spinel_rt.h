@@ -20,6 +20,7 @@
 #include "sp_proc.h"    /* sp_Proc/sp_Curry + cold ops (lib/sp_proc.c) */
 static const char *sp_method_desc_cstr(sp_BoundMethod *m);
 #include "sp_exc.h"     /* sp_Exception + cold ops (lib/sp_exc.c) */
+#include "sp_exc_ctx.h" /* per-fiber handler context + sp_proc_home (lib/sp_exc.c) */
 sp_RbVal sp_env_shift(void);
 sp_int sp_env_size(void);
 sp_StrStrHash *sp_env_to_h(void);
@@ -934,12 +935,7 @@ static inline sp_int sp_int_clamp_range_ck(sp_int v, sp_Range r) {
 static const char *sp_sym_inspect(sp_sym id) { if (id == (sp_sym)-1) return SPL("nil"); /* nilable-symbol sentinel */ return sp_sym_inspect_name(sp_sym_to_s(id)); }
 static const char*sp_gets(void){char buf[4096];if(!fgets(buf,sizeof(buf),stdin))return NULL;size_t l=strlen(buf);char*r=sp_str_alloc_raw(l+1);memcpy(r,buf,l+1);return r;}
 static sp_StrArray*sp_readlines(void){sp_StrArray*a=sp_StrArray_new();SP_GC_ROOT(a);char buf[4096];while(fgets(buf,sizeof(buf),stdin)){size_t l=strlen(buf);char*r=sp_str_alloc_raw(l+1);memcpy(r,buf,l+1);sp_StrArray_push(a,r);}return a;}
-#ifdef SPINEL_EXT_HOST
-const char*sp_sprintf(const char*fmt,...);
-#else
-const char*sp_sprintf(const char*fmt,...){char _sp_tmp[4096];va_list ap;va_start(ap,fmt);int _sp_n=vsnprintf(_sp_tmp,sizeof(_sp_tmp),fmt,ap);va_end(ap);if(_sp_n<0)_sp_n=0;char*b=sp_str_alloc((size_t)_sp_n);if(_sp_n<(int)sizeof(_sp_tmp)){memcpy(b,_sp_tmp,(size_t)_sp_n);}
-else{/* result didn't fit the stack temp; re-render at full width (sp_str_alloc gives _sp_n bytes + NUL) so long string interpolations aren't truncated. re-arm the va_list rather than va_copy so the common fast path pays nothing */va_start(ap,fmt);vsnprintf(b,(size_t)_sp_n+1,fmt,ap);va_end(ap);}return b;}
-#endif
+/* sp_sprintf lives in libspinel_rt.a (lib/sp_cold.c); declared above. */
 /* Use a temp pointer for realloc so the original buffer is not leaked
    on allocation failure. Match the perror+exit pattern used elsewhere
    (see sp_IntArray_replace) instead of returning a partial result. */
@@ -2011,8 +2007,8 @@ static sp_int sp_poly_Integer_ex(sp_RbVal v, sp_int base, int raise);  /* fwd: K
 static sp_float sp_poly_Float_ex(sp_RbVal v, int raise);
 static inline int sp_poly_is_hash_kind(int cls_id);
 static inline const char *sp_poly_inspect(sp_RbVal v);
-static const char *sp_PolyArray_inspect(sp_PolyArray *a);  /* fwd: Array#to_s == inspect */
-static const char *sp_PtrArray_inspect_k(sp_PtrArray *a);   /* fwd: a pointer array by what it holds (#4486) */
+const char *sp_PolyArray_inspect(sp_PolyArray *a);  /* Array#to_s == inspect (lib/sp_inspect.c) */
+const char *sp_PtrArray_inspect_k(sp_PtrArray *a);   /* a pointer array by what it holds (#4486; lib/sp_inspect.c) */
 /* Runtime class table: set of cls_ids that are user exception subclasses.
    Populated by the codegen (src/codegen.c) for every class that
    `class_is_exc_subclass` returns true. Used by sp_raise_poly and the
@@ -2846,6 +2842,11 @@ static inline void *sp_poly_obj_ptr(sp_RbVal v) {
 }
 typedef sp_RbVal (*sp_user_binop_fn)(const char *op, sp_RbVal a, sp_RbVal b, sp_bool *handled);
 static sp_user_binop_fn sp_user_binop_hook = NULL;
+/* A reopened Time's or Range's own operator reaches its boxed values through
+   the hooks; the builtin it captured (`compare_without_coercion`, an alias of
+   the builtin `<=>`) runs inside that method and must not come back through
+   them, or the method calls itself for good. Depth of such a call. */
+static SP_THREAD_LOCAL int sp_builtin_hook_depth = 0;
 /* The same for a user `[]=` on a BOXED receiver (sp_user_aset_dispatch):
    `r[k] ||= v` and `r[k] += v` on a boxed r store through sp_poly_set_poly,
    which knows only the builtin containers. `[]` goes through the binop hook
@@ -2895,10 +2896,19 @@ static inline sp_bool sp_poly_tower_mismatch(sp_RbVal a, sp_RbVal b) {
 static sp_RbVal sp_poly_binop_bad(const char *op, sp_RbVal recv, sp_RbVal arg) {
   /* a program object, or a Time or Range whose reopening defines the
      operator (activesupport's Time#- taking a Duration) */
-  if (recv.tag == SP_TAG_OBJ && sp_user_binop_hook &&
-      (recv.cls_id >= 0 || recv.cls_id == SP_BUILTIN_TIME || recv.cls_id == SP_BUILTIN_RANGE)) {
+  if (recv.tag == SP_TAG_OBJ && sp_user_binop_hook && recv.cls_id >= 0) {
     sp_bool _h = FALSE;
     sp_RbVal _r = sp_user_binop_hook(op, recv, arg, &_h);
+    if (_h) return _r;
+  }
+  /* a Time or Range whose reopening defines the operator, once: the builtin
+     it captured runs inside and comes back here (see sp_builtin_hook_depth) */
+  if (recv.tag == SP_TAG_OBJ && sp_user_binop_hook && !sp_builtin_hook_depth &&
+      (recv.cls_id == SP_BUILTIN_TIME || recv.cls_id == SP_BUILTIN_RANGE)) {
+    sp_bool _h = FALSE;
+    sp_builtin_hook_depth++;
+    sp_RbVal _r = sp_user_binop_hook(op, recv, arg, &_h);
+    sp_builtin_hook_depth--;
     if (_h) return _r;
   }
   /* and only a NUMBER asks: String#+ and Array#+ raise for an operand they
@@ -2936,9 +2946,22 @@ static sp_RbVal sp_poly_binop_bad(const char *op, sp_RbVal recv, sp_RbVal arg) {
 static inline int sp_poly_is_user_obj(sp_RbVal v) {
   return v.tag == SP_TAG_OBJ && v.cls_id >= 0;
 }
+/* The operand of an Array operator (+ - | & concat) converted implicitly,
+   as CRuby's to_ary: a program object answering #to_ary becomes that
+   Array, and one whose #to_ary answers a non-Array is CRuby's TypeError.
+   Anything else comes back as it was, for the caller's own error. */
+static sp_RbVal sp_poly_ary_operand(sp_RbVal v) {
+  if (!(sp_poly_is_user_obj(v) && v.v.p && sp_obj_to_ary_fn)) return v;
+  sp_RbVal a = sp_obj_to_ary_fn(v);
+  if (a.tag == SP_TAG_NIL) return v;
+  if (a.tag == SP_TAG_OBJ && a.v.p && sp_poly_is_array_kind(a.cls_id)) return a;
+  const char *cn = sp_poly_class_name(v);
+  sp_raise_cls("TypeError", sp_sprintf("can't convert %s to Array (%s#to_ary gives %s)", cn, cn, sp_poly_class_name(a)));
+  return v;
+}
 static int sp_poly_user_cmp(const char *op, sp_RbVal a, sp_RbVal b, sp_RbVal *out);  /* fwd */
-static sp_RbVal sp_poly_add(sp_RbVal a, sp_RbVal b) { /* Two plain numbers are what a boxed arithmetic loop actually holds, and the tower checks below cannot match either tag: answer them first rather than after eight of them (#3984). */ if (a.tag == SP_TAG_FLT && b.tag == SP_TAG_FLT) return sp_box_float(a.v.f + b.v.f); if (a.tag == SP_TAG_INT && b.tag == SP_TAG_INT) return SP_POLY_INT_OP(add, a.v.i, b.v.i); if (a.tag == SP_TAG_FLT && b.tag == SP_TAG_INT) return sp_box_float(a.v.f + (sp_float)b.v.i); if (a.tag == SP_TAG_INT && b.tag == SP_TAG_FLT) return sp_box_float((sp_float)a.v.i + b.v.f); /* a user object on either side belongs to the binop hook and the coerce protocol, not to the tower branches below -- those match on the RECEIVER kind and would convert the object to a number of that kind */ if (SP_UNLIKELY(sp_poly_is_user_obj(a) || sp_poly_is_user_obj(b))) return sp_poly_binop_bad("+", a, b); /* A shared-mutable string handle behaves as its live string VALUE for every non-mutating operator, so it has to become one BEFORE the rules below read its kind -- reached as a handle it is neither a String nor a number, and the guard reported a missing method for an operator String has. */ if (SP_UNLIKELY(sp_poly_is_strbuf(a) || sp_poly_is_strbuf(b))) return sp_poly_add(sp_poly_strbuf_deref(a), sp_poly_strbuf_deref(b)); /* Time arithmetic takes any real number of the tower -- an offset may be a Rational or a Bignum -- so it answers before the guard below, which would otherwise call the pair a coercion failure. */ if (SP_UNLIKELY(a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_TIME && a.v.p)) { if (b.tag == SP_TAG_INT) return sp_box_time(sp_time_add_i(*(sp_Time *)a.v.p, b.v.i)); if (sp_poly_tower_p(b) && !(b.tag == SP_TAG_OBJ && b.cls_id == SP_BUILTIN_COMPLEX)) return sp_box_time(sp_time_add_f(*(sp_Time *)a.v.p, sp_poly_to_f_with_rational(b))); } if (SP_UNLIKELY(sp_poly_tower_mismatch(a, b))) return sp_poly_binop_bad("+", a, b); if ((a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_COMPLEX) || (b.tag == SP_TAG_OBJ && b.cls_id == SP_BUILTIN_COMPLEX)) return sp_box_complex(sp_complex_add(sp_poly_as_complex(a), sp_poly_as_complex(b))); if ((sp_poly_is_brat(a) || sp_poly_is_brat(b))) { if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) return sp_box_float(sp_poly_to_f(a) + sp_poly_to_f(b)); return sp_brat_add_poly(a, b); } if ((sp_poly_is_rational(a) || sp_poly_is_rational(b)) && a.tag != SP_TAG_FLT && b.tag != SP_TAG_FLT) return sp_box_rational(sp_rational_add(sp_poly_as_rational(a), sp_poly_as_rational(b))); if ((sp_poly_is_rational(a) || sp_poly_is_rational(b)) && (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT)) return sp_box_float(sp_poly_to_f_with_rational(a) + sp_poly_to_f_with_rational(b)); if (a.tag == SP_TAG_BIGINT || b.tag == SP_TAG_BIGINT) { if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) return sp_box_float(sp_poly_to_f(a) + sp_poly_to_f(b)); return sp_box_bigint(sp_bigint_add(sp_poly_as_bigint(a), sp_poly_as_bigint(b))); } if (a.tag == SP_TAG_INT && b.tag == SP_TAG_INT) return SP_POLY_INT_OP(add, a.v.i, b.v.i); if (a.tag == SP_TAG_FLT && b.tag == SP_TAG_FLT) return sp_box_float(a.v.f + b.v.f); if (a.tag == SP_TAG_INT && b.tag == SP_TAG_FLT) return sp_box_float((sp_float)a.v.i + b.v.f); if (a.tag == SP_TAG_FLT && b.tag == SP_TAG_INT) return sp_box_float(a.v.f + (sp_float)b.v.i); if (a.tag == SP_TAG_STR && b.tag == SP_TAG_STR) return sp_box_str(sp_str_concat(a.v.s, b.v.s)); if (a.tag == SP_TAG_OBJ && sp_poly_is_array_kind(a.cls_id) && b.tag == SP_TAG_OBJ && sp_poly_is_array_kind(b.cls_id)) { SP_GC_ROOT_RBVAL(a); SP_GC_ROOT_RBVAL(b); sp_PolyArray *pa = sp_poly_to_poly_array(a); SP_GC_ROOT(pa); sp_PolyArray *pb = sp_poly_to_poly_array(b); SP_GC_ROOT(pb); return sp_box_poly_array(sp_PolyArray_concat(pa, pb)); } return sp_poly_binop_bad("+", a, b); }
-static sp_RbVal sp_poly_sub(sp_RbVal a, sp_RbVal b) { /* Two plain numbers are what a boxed arithmetic loop actually holds, and the tower checks below cannot match either tag: answer them first rather than after eight of them (#3984). */ if (a.tag == SP_TAG_FLT && b.tag == SP_TAG_FLT) return sp_box_float(a.v.f - b.v.f); if (a.tag == SP_TAG_INT && b.tag == SP_TAG_INT) return SP_POLY_INT_OP(sub, a.v.i, b.v.i); if (a.tag == SP_TAG_FLT && b.tag == SP_TAG_INT) return sp_box_float(a.v.f - (sp_float)b.v.i); if (a.tag == SP_TAG_INT && b.tag == SP_TAG_FLT) return sp_box_float((sp_float)a.v.i - b.v.f); /* a user object on either side belongs to the binop hook and the coerce protocol, not to the tower branches below -- those match on the RECEIVER kind and would convert the object to a number of that kind */ if (SP_UNLIKELY(sp_poly_is_user_obj(a) || sp_poly_is_user_obj(b))) return sp_poly_binop_bad("-", a, b); /* A shared-mutable string handle behaves as its live string VALUE for every non-mutating operator, so it has to become one BEFORE the rules below read its kind -- reached as a handle it is neither a String nor a number, and the guard reported a missing method for an operator String has. */ if (SP_UNLIKELY(sp_poly_is_strbuf(a) || sp_poly_is_strbuf(b))) return sp_poly_sub(sp_poly_strbuf_deref(a), sp_poly_strbuf_deref(b)); /* see sp_poly_add: Time answers before the guard, and Time - Time is a Float count of seconds. */ if (SP_UNLIKELY(a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_TIME && a.v.p)) { if (b.tag == SP_TAG_OBJ && b.cls_id == SP_BUILTIN_TIME && b.v.p) return sp_box_float(sp_time_sub_t(*(sp_Time *)a.v.p, *(sp_Time *)b.v.p)); if (b.tag == SP_TAG_INT) return sp_box_time(sp_time_sub_i(*(sp_Time *)a.v.p, b.v.i)); if (sp_poly_tower_p(b) && !(b.tag == SP_TAG_OBJ && b.cls_id == SP_BUILTIN_COMPLEX)) return sp_box_time(sp_time_add_f(*(sp_Time *)a.v.p, -sp_poly_to_f_with_rational(b))); } if (SP_UNLIKELY(sp_poly_tower_mismatch(a, b))) return sp_poly_binop_bad("-", a, b); if ((a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_COMPLEX) || (b.tag == SP_TAG_OBJ && b.cls_id == SP_BUILTIN_COMPLEX)) return sp_box_complex(sp_complex_sub(sp_poly_as_complex(a), sp_poly_as_complex(b))); if ((sp_poly_is_brat(a) || sp_poly_is_brat(b))) { if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) return sp_box_float(sp_poly_to_f(a) - sp_poly_to_f(b)); return sp_brat_sub_poly(a, b); } if ((sp_poly_is_rational(a) || sp_poly_is_rational(b)) && a.tag != SP_TAG_FLT && b.tag != SP_TAG_FLT) return sp_box_rational(sp_rational_sub(sp_poly_as_rational(a), sp_poly_as_rational(b))); if ((sp_poly_is_rational(a) || sp_poly_is_rational(b)) && (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT)) return sp_box_float(sp_poly_to_f_with_rational(a) - sp_poly_to_f_with_rational(b)); if (a.tag == SP_TAG_BIGINT || b.tag == SP_TAG_BIGINT) { if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) return sp_box_float(sp_poly_to_f(a) - sp_poly_to_f(b)); return sp_box_bigint(sp_bigint_sub(sp_poly_as_bigint(a), sp_poly_as_bigint(b))); } if (a.tag == SP_TAG_INT && b.tag == SP_TAG_INT) return SP_POLY_INT_OP(sub, a.v.i, b.v.i); if (a.tag == SP_TAG_FLT && b.tag == SP_TAG_FLT) return sp_box_float(a.v.f - b.v.f); if (a.tag == SP_TAG_INT && b.tag == SP_TAG_FLT) return sp_box_float((sp_float)a.v.i - b.v.f); if (a.tag == SP_TAG_FLT && b.tag == SP_TAG_INT) return sp_box_float(a.v.f - (sp_float)b.v.i);
+static sp_RbVal sp_poly_add(sp_RbVal a, sp_RbVal b) { /* Two plain numbers are what a boxed arithmetic loop actually holds, and the tower checks below cannot match either tag: answer them first rather than after eight of them (#3984). */ if (a.tag == SP_TAG_FLT && b.tag == SP_TAG_FLT) return sp_box_float(a.v.f + b.v.f); if (a.tag == SP_TAG_INT && b.tag == SP_TAG_INT) return SP_POLY_INT_OP(add, a.v.i, b.v.i); if (a.tag == SP_TAG_FLT && b.tag == SP_TAG_INT) return sp_box_float(a.v.f + (sp_float)b.v.i); if (a.tag == SP_TAG_INT && b.tag == SP_TAG_FLT) return sp_box_float((sp_float)a.v.i + b.v.f); /* a user object on either side belongs to the binop hook and the coerce protocol, not to the tower branches below -- those match on the RECEIVER kind and would convert the object to a number of that kind */ if (a.tag == SP_TAG_OBJ && sp_poly_is_array_kind(a.cls_id) && sp_poly_is_user_obj(b)) b = sp_poly_ary_operand(b); if (SP_UNLIKELY(sp_poly_is_user_obj(a) || sp_poly_is_user_obj(b))) return sp_poly_binop_bad("+", a, b); /* A shared-mutable string handle behaves as its live string VALUE for every non-mutating operator, so it has to become one BEFORE the rules below read its kind -- reached as a handle it is neither a String nor a number, and the guard reported a missing method for an operator String has. */ if (SP_UNLIKELY(sp_poly_is_strbuf(a) || sp_poly_is_strbuf(b))) return sp_poly_add(sp_poly_strbuf_deref(a), sp_poly_strbuf_deref(b)); /* Time arithmetic takes any real number of the tower -- an offset may be a Rational or a Bignum -- so it answers before the guard below, which would otherwise call the pair a coercion failure. */ if (SP_UNLIKELY(a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_TIME && a.v.p)) { if (b.tag == SP_TAG_INT) return sp_box_time(sp_time_add_i(*(sp_Time *)a.v.p, b.v.i)); if (sp_poly_tower_p(b) && !(b.tag == SP_TAG_OBJ && b.cls_id == SP_BUILTIN_COMPLEX)) return sp_box_time(sp_time_add_f(*(sp_Time *)a.v.p, sp_poly_to_f_with_rational(b))); } if (SP_UNLIKELY(sp_poly_tower_mismatch(a, b))) return sp_poly_binop_bad("+", a, b); if ((a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_COMPLEX) || (b.tag == SP_TAG_OBJ && b.cls_id == SP_BUILTIN_COMPLEX)) return sp_box_complex(sp_complex_add(sp_poly_as_complex(a), sp_poly_as_complex(b))); if ((sp_poly_is_brat(a) || sp_poly_is_brat(b))) { if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) return sp_box_float(sp_poly_to_f(a) + sp_poly_to_f(b)); return sp_brat_add_poly(a, b); } if ((sp_poly_is_rational(a) || sp_poly_is_rational(b)) && a.tag != SP_TAG_FLT && b.tag != SP_TAG_FLT) return sp_box_rational(sp_rational_add(sp_poly_as_rational(a), sp_poly_as_rational(b))); if ((sp_poly_is_rational(a) || sp_poly_is_rational(b)) && (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT)) return sp_box_float(sp_poly_to_f_with_rational(a) + sp_poly_to_f_with_rational(b)); if (a.tag == SP_TAG_BIGINT || b.tag == SP_TAG_BIGINT) { if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) return sp_box_float(sp_poly_to_f(a) + sp_poly_to_f(b)); return sp_box_bigint(sp_bigint_add(sp_poly_as_bigint(a), sp_poly_as_bigint(b))); } if (a.tag == SP_TAG_INT && b.tag == SP_TAG_INT) return SP_POLY_INT_OP(add, a.v.i, b.v.i); if (a.tag == SP_TAG_FLT && b.tag == SP_TAG_FLT) return sp_box_float(a.v.f + b.v.f); if (a.tag == SP_TAG_INT && b.tag == SP_TAG_FLT) return sp_box_float((sp_float)a.v.i + b.v.f); if (a.tag == SP_TAG_FLT && b.tag == SP_TAG_INT) return sp_box_float(a.v.f + (sp_float)b.v.i); if (a.tag == SP_TAG_STR && b.tag == SP_TAG_STR) return sp_box_str(sp_str_concat(a.v.s, b.v.s)); if (a.tag == SP_TAG_OBJ && sp_poly_is_array_kind(a.cls_id) && b.tag == SP_TAG_OBJ && sp_poly_is_array_kind(b.cls_id)) { SP_GC_ROOT_RBVAL(a); SP_GC_ROOT_RBVAL(b); sp_PolyArray *pa = sp_poly_to_poly_array(a); SP_GC_ROOT(pa); sp_PolyArray *pb = sp_poly_to_poly_array(b); SP_GC_ROOT(pb); return sp_box_poly_array(sp_PolyArray_concat(pa, pb)); } return sp_poly_binop_bad("+", a, b); }
+static sp_RbVal sp_poly_sub(sp_RbVal a, sp_RbVal b) { /* Two plain numbers are what a boxed arithmetic loop actually holds, and the tower checks below cannot match either tag: answer them first rather than after eight of them (#3984). */ if (a.tag == SP_TAG_FLT && b.tag == SP_TAG_FLT) return sp_box_float(a.v.f - b.v.f); if (a.tag == SP_TAG_INT && b.tag == SP_TAG_INT) return SP_POLY_INT_OP(sub, a.v.i, b.v.i); if (a.tag == SP_TAG_FLT && b.tag == SP_TAG_INT) return sp_box_float(a.v.f - (sp_float)b.v.i); if (a.tag == SP_TAG_INT && b.tag == SP_TAG_FLT) return sp_box_float((sp_float)a.v.i - b.v.f); /* a user object on either side belongs to the binop hook and the coerce protocol, not to the tower branches below -- those match on the RECEIVER kind and would convert the object to a number of that kind */ if (a.tag == SP_TAG_OBJ && sp_poly_is_array_kind(a.cls_id) && sp_poly_is_user_obj(b)) b = sp_poly_ary_operand(b); if (SP_UNLIKELY(sp_poly_is_user_obj(a) || sp_poly_is_user_obj(b))) return sp_poly_binop_bad("-", a, b); /* A shared-mutable string handle behaves as its live string VALUE for every non-mutating operator, so it has to become one BEFORE the rules below read its kind -- reached as a handle it is neither a String nor a number, and the guard reported a missing method for an operator String has. */ if (SP_UNLIKELY(sp_poly_is_strbuf(a) || sp_poly_is_strbuf(b))) return sp_poly_sub(sp_poly_strbuf_deref(a), sp_poly_strbuf_deref(b)); /* see sp_poly_add: Time answers before the guard, and Time - Time is a Float count of seconds. */ if (SP_UNLIKELY(a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_TIME && a.v.p)) { if (b.tag == SP_TAG_OBJ && b.cls_id == SP_BUILTIN_TIME && b.v.p) return sp_box_float(sp_time_sub_t(*(sp_Time *)a.v.p, *(sp_Time *)b.v.p)); if (b.tag == SP_TAG_INT) return sp_box_time(sp_time_sub_i(*(sp_Time *)a.v.p, b.v.i)); if (sp_poly_tower_p(b) && !(b.tag == SP_TAG_OBJ && b.cls_id == SP_BUILTIN_COMPLEX)) return sp_box_time(sp_time_add_f(*(sp_Time *)a.v.p, -sp_poly_to_f_with_rational(b))); } if (SP_UNLIKELY(sp_poly_tower_mismatch(a, b))) return sp_poly_binop_bad("-", a, b); if ((a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_COMPLEX) || (b.tag == SP_TAG_OBJ && b.cls_id == SP_BUILTIN_COMPLEX)) return sp_box_complex(sp_complex_sub(sp_poly_as_complex(a), sp_poly_as_complex(b))); if ((sp_poly_is_brat(a) || sp_poly_is_brat(b))) { if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) return sp_box_float(sp_poly_to_f(a) - sp_poly_to_f(b)); return sp_brat_sub_poly(a, b); } if ((sp_poly_is_rational(a) || sp_poly_is_rational(b)) && a.tag != SP_TAG_FLT && b.tag != SP_TAG_FLT) return sp_box_rational(sp_rational_sub(sp_poly_as_rational(a), sp_poly_as_rational(b))); if ((sp_poly_is_rational(a) || sp_poly_is_rational(b)) && (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT)) return sp_box_float(sp_poly_to_f_with_rational(a) - sp_poly_to_f_with_rational(b)); if (a.tag == SP_TAG_BIGINT || b.tag == SP_TAG_BIGINT) { if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) return sp_box_float(sp_poly_to_f(a) - sp_poly_to_f(b)); return sp_box_bigint(sp_bigint_sub(sp_poly_as_bigint(a), sp_poly_as_bigint(b))); } if (a.tag == SP_TAG_INT && b.tag == SP_TAG_INT) return SP_POLY_INT_OP(sub, a.v.i, b.v.i); if (a.tag == SP_TAG_FLT && b.tag == SP_TAG_FLT) return sp_box_float(a.v.f - b.v.f); if (a.tag == SP_TAG_INT && b.tag == SP_TAG_FLT) return sp_box_float((sp_float)a.v.i - b.v.f); if (a.tag == SP_TAG_FLT && b.tag == SP_TAG_INT) return sp_box_float(a.v.f - (sp_float)b.v.i);
   /* two Arrays: the set difference, mirroring the concat branch sp_poly_add
      has. Without it a poly-carried Array pair reached the failure message,
      which then read "no implicit conversion of Array into Array" (#3475). */
@@ -3422,7 +3445,11 @@ static sp_float sp_poly_to_f_or_nil(sp_RbVal v) { return v.tag == SP_TAG_NIL ? s
 /* An FFI argument or callback return that C takes as an integer or a
    double: nil is no number there, and the ffi gem's NUM2INT / NUM2DBL raise
    TypeError for it. A boxed nil, an Integer slot's SP_INT_NIL and a Float
-   slot's nil NaN all are that nil; anything else passes as before. */
+   slot's nil NaN all are that nil. NUM2DBL also refuses a String, which
+   sp_poly_Float would parse, and a boolean, each with its own message; any
+   other value converts by its #to_f, as sp_poly_Float does. A user class's
+   own #to_f is reached only where the program has Kernel#Float's
+   conversion bridge. */
 static SP_NOINLINE SP_COLD void sp_ffi_nil_int_raise(void) { sp_raise_cls("TypeError", "no implicit conversion from nil to integer"); }
 static SP_NOINLINE SP_COLD void sp_ffi_nil_dbl_raise(void) { sp_raise_cls("TypeError", "no implicit conversion to float from nil"); }
 /* A boxed value read as an Integer ARGUMENT (an index, a count, a length, a
@@ -3446,6 +3473,12 @@ static SP_UNUSED sp_int sp_poly_cmp_ans(sp_RbVal r, sp_RbVal a, sp_RbVal b) {
 }
 /* A method nil does not have, called on a boxed receiver that is nil:
    NoMethodError, answered as a value so it sits in an expression arm. */
+/* Symbol#id2name on a boxed receiver: the Symbol's name as a String, as
+   to_s answers it; a value of any other kind has no id2name. */
+static const char *sp_poly_sym_id2name(sp_RbVal v) {
+  if (v.tag != SP_TAG_SYM) sp_raise_nomethod(sp_nomethod_msg("id2name", v));
+  return sp_sym_to_s_chilled((sp_sym)v.v.i);
+}
 static SP_UNUSED sp_RbVal sp_poly_nil_no_method(const char *m, sp_RbVal v) { sp_raise_nomethod(sp_nomethod_msg(m, v)); return sp_box_nil(); }
 /* The bounds of `for i in lo..hi` read out of a box or an Integer slot that
    may hold nil: a nil end is an endless range (the loop runs until a break),
@@ -3559,6 +3592,11 @@ static SP_UNUSED sp_float sp_range_max_f(sp_Range r) {
    a's, and b's end is within a's -- an excluded end of a admits b's end
    only when b excludes it too, or when b's greatest member is below it. */
 static SP_UNUSED sp_bool sp_range_cover_rng(sp_Range a, sp_Range b) {
+  /* an empty b ((3..2), (3...3)) holds nothing, so nothing is covered */
+  if (b.first != INTPTR_MIN && (b.fe || b.last != INTPTR_MAX)) {
+    sp_float be0 = sp_range_end_num(b);
+    if ((sp_float)b.first > be0 || ((sp_float)b.first == be0 && sp_range_excl_end(b))) return 0;
+  }
   if (!a.fe && !b.fe)
     return b.first >= a.first && (b.last - b.excl) <= (a.last - a.excl);
   if (a.first != INTPTR_MIN && (b.first == INTPTR_MIN || b.first < a.first)) return 0;
@@ -3575,6 +3613,26 @@ static SP_UNUSED sp_bool sp_range_cover_rng(sp_Range a, sp_Range b) {
      excluded end has none (CRuby's rescued TypeError) */
   if (b.fe) return 0;
   return (sp_float)(b.last - 1) <= ae;
+}
+/* Range#cover?(range) for a Float Range a and an Integer Range b, as
+   sp_range_cover_rng decides it for an Integer a (CRuby's
+   r_cover_range_p): b is not empty, its begin is not below a's, and its end
+   lies within a's. */
+static SP_UNUSED sp_bool sp_frange_cover_rng(sp_FloatRange a, sp_Range b) {
+  int abn = (a.omitted & SP_FRANGE_NO_BEGIN) != 0, aen = (a.omitted & SP_FRANGE_NO_END) != 0;
+  int bbn = b.first == INTPTR_MIN, ben = !b.fe && b.last == INTPTR_MAX;
+  sp_float be = sp_range_end_num(b);
+  int aex = a.excl != 0, bex = sp_range_excl_end(b);
+  if (!bbn && !ben && ((sp_float)b.first > be || ((sp_float)b.first == be && bex))) return 0;
+  if (!abn && (bbn || (sp_float)b.first < a.first)) return 0;
+  if (aen) return 1;
+  if (ben) return 0;
+  if (aex == bex) return be <= a.last;
+  if (aex) return be < a.last;
+  if (be <= a.last) return 1;
+  /* b excludes an end past a's: its greatest member decides */
+  if (b.fe) return 0;
+  return (sp_float)(b.last - 1) <= a.last;
 }
 /* Float#clamp(int_range): below the begin answers the begin, past the end
    the end -- the Float written for (1..2.5), where it answered the walk's 2 --
@@ -3798,9 +3856,16 @@ static SP_UNUSED sp_int sp_poly_time_field(sp_RbVal v, int i) {
   if (SP_UNLIKELY(v.tag == SP_TAG_NIL)) { if (i == 0) sp_raise_nil_to_int(1); return (i == 1 || i == 2) ? 1 : 0; }
   return sp_poly_to_i(v);
 }
-static SP_UNUSED sp_int sp_ffi_int_of(sp_RbVal v) { if (SP_UNLIKELY(v.tag == SP_TAG_NIL)) sp_ffi_nil_int_raise(); return v.v.i; }
+static SP_UNUSED sp_int sp_ffi_int_of(sp_RbVal v) { return sp_poly_arg_int_chk(v); }
 static SP_UNUSED sp_int sp_ffi_int_of_i(sp_int v) { if (SP_UNLIKELY(v == SP_INT_NIL)) sp_ffi_nil_int_raise(); return v; }
-static SP_UNUSED sp_float sp_ffi_dbl_of(sp_RbVal v) { if (SP_UNLIKELY(v.tag == SP_TAG_NIL)) sp_ffi_nil_dbl_raise(); return v.v.f; }
+static SP_UNUSED sp_float sp_ffi_dbl_of(sp_RbVal v) {
+  v = sp_poly_strbuf_deref(v);
+  if (SP_UNLIKELY(v.tag == SP_TAG_NIL || (v.tag == SP_TAG_INT && v.v.i == SP_INT_NIL))) sp_ffi_nil_dbl_raise();
+  if (SP_UNLIKELY(v.tag == SP_TAG_STR)) sp_raise_cls("TypeError", "no implicit conversion to float from string");
+  if (SP_UNLIKELY(v.tag == SP_TAG_BOOL))
+    sp_raise_cls("TypeError", v.v.b ? "no implicit conversion to float from true" : "no implicit conversion to float from false");
+  return sp_poly_Float(v);
+}
 static SP_UNUSED sp_float sp_ffi_dbl_of_f(sp_float v) { if (SP_UNLIKELY(sp_float_is_nil(v))) sp_ffi_nil_dbl_raise(); return v; }
 static SP_UNUSED sp_int sp_ffi_dbl_of_i(sp_int v) { if (SP_UNLIKELY(v == SP_INT_NIL)) sp_ffi_nil_dbl_raise(); return v; }
 static SP_UNUSED sp_float sp_ffi_int_of_f(sp_float v) { if (SP_UNLIKELY(sp_float_is_nil(v))) sp_ffi_nil_int_raise(); return v; }
@@ -3855,6 +3920,17 @@ static sp_bool sp_poly_eq_slow(sp_RbVal a, sp_RbVal b);
 static SP_INLINE sp_bool sp_poly_eq(sp_RbVal a, sp_RbVal b) {
   if (a.tag == SP_TAG_INT && b.tag == SP_TAG_INT) return a.v.i == b.v.i;
   return sp_poly_eq_slow(a, b);
+}
+/* `a == b` (or `!=`) answered as a value: a program object's own == gives
+   whatever it returns (Ruby's == may answer any object), `!=` its
+   negation; anything else the runtime equality. */
+static sp_RbVal sp_poly_eq_value(sp_RbVal a, sp_RbVal b, int ne) {
+  if (a.tag == SP_TAG_OBJ && a.cls_id >= 0 && sp_user_binop_hook) {
+    sp_bool h = FALSE;
+    sp_RbVal r = sp_user_binop_hook("==", a, b, &h);
+    if (h) return ne ? sp_box_bool(!sp_poly_truthy(r)) : r;
+  }
+  return sp_box_bool(sp_poly_eq(a, b) != (ne != 0));
 }
 /* The key a `case` over a boxed subject switches on when every `when` is an
    Integer literal. An Integer is its own key; any other value -- nil, a
@@ -3911,8 +3987,18 @@ static SP_INLINE sp_RbVal sp_poly_ary_chk(sp_RbVal v, const char *m, int range_o
 /* `length` on a boxed receiver: nil, a number and a user object have none, and
    sp_poly_length answers 0 for all three -- so `v.length` on a nil read out of
    a hash miss answered 0 instead of raising NoMethodError (#3974). */
+static sp_RbVal sp_poly_struct_values(sp_RbVal v);   /* defined below */
+static sp_int sp_poly_arr_len(sp_RbVal a);           /* defined below */
+/* A Struct's size and length are its member count; a program object of any
+   other class has neither. -1 when v is no Struct. */
+static sp_int sp_poly_struct_size(sp_RbVal v) {
+  if (!sp_poly_is_user_obj(v)) return -1;
+  sp_RbVal sv = sp_poly_struct_values(v);
+  return (sv.tag == SP_TAG_OBJ && sv.v.p && sp_poly_is_array_kind(sv.cls_id)) ? sp_poly_arr_len(sv) : -1;
+}
 static sp_int sp_poly_length_m(sp_RbVal v) {
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_QUEUE && v.v.p) return sp_Queue_size((sp_queue *)v.v.p);
+  { sp_int n = sp_poly_struct_size(v); if (n >= 0) return n; }
   if (v.tag == SP_TAG_NIL || v.tag == SP_TAG_INT || v.tag == SP_TAG_FLT ||
       v.tag == SP_TAG_BIGINT || v.tag == SP_TAG_BOOL || sp_poly_is_user_obj(v) ||
       (v.tag == SP_TAG_OBJ && (v.cls_id == SP_BUILTIN_RANGE || v.cls_id == SP_BUILTIN_STR_RANGE ||
@@ -3959,6 +4045,7 @@ void sp_enum_index_search_each_raise(void *e);   /* lib/sp_cold.c: raise for a b
 static sp_int sp_poly_size(sp_RbVal v) {
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_FLOAT_RANGE && v.v.p) { sp_frange_iter_raise((*(sp_FloatRange *)v.v.p), 0); return 0; }  /* a Float range has no size (TypeError) */
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_QUEUE && v.v.p) return sp_Queue_size((sp_queue *)v.v.p);
+  { sp_int n = sp_poly_struct_size(v); if (n >= 0) return n; }
   if (v.tag == SP_TAG_NIL || v.tag == SP_TAG_BOOL || v.tag == SP_TAG_FLT ||
       sp_poly_is_user_obj(v))
     sp_raise_poly_nomethod("size", v);
@@ -4019,6 +4106,26 @@ static const char *sp_poly_recv_s(sp_RbVal v, const char *meth) {
   sp_raise_nomethod(sp_nomethod_msg(meth, v));
   return sp_str_empty;
 }
+/* casecmp / casecmp? (`q`) on a boxed receiver. A Symbol compares with a
+   Symbol and a String with a String (or an operand answering #to_str), as the
+   typed forms do; any other operand answers nil, and a receiver that is
+   neither raises NoMethodError. */
+static sp_RbVal sp_poly_casecmp(sp_RbVal v, sp_RbVal o, int q) {
+  const char *m = q ? "casecmp?" : "casecmp";
+  const char *a, *bs;
+  if (v.tag == SP_TAG_SYM) {
+    if (o.tag != SP_TAG_SYM) return sp_box_nil();
+    a = sp_sym_to_s((sp_sym)v.v.i);
+    bs = sp_sym_to_s((sp_sym)o.v.i);
+  }
+  else {
+    a = sp_poly_recv_s(v, m);
+    bs = sp_poly_check_str(sp_poly_strbuf_deref(o));
+    if (!bs) return sp_box_nil();
+  }
+  int r = sp_str_casecmp(a, bs);
+  return q ? sp_box_bool(r == 0) : sp_box_int(r);
+}
 /* ...as the receiver of a String mutator. A shared handle hands out its own
    bytes, which a mutator such as setbyte writes in place, and its frozen flag
    is on the handle, not in the bytes: a frozen one refuses here, before the
@@ -4039,6 +4146,18 @@ static sp_bool sp_poly_enc_pred(sp_RbVal v, const char *meth) {
   if (meth[0] == 'd') return FALSE;
   const char *n = v.v.s ? v.v.s : "";
   return !(strncmp(n, "UTF-16", 6) == 0 || strncmp(n, "UTF-32", 6) == 0);
+}
+/* String#encoding / Symbol#encoding on a boxed receiver: a Symbol is
+   US-ASCII when its name is all ASCII and UTF-8 otherwise, as the typed
+   Symbol arm answers; a String is ASCII-8BIT or UTF-8; anything else raises
+   NoMethodError. */
+static sp_RbVal sp_poly_encoding(sp_RbVal v) {
+  if (v.tag == SP_TAG_SYM) {
+    for (const char *p = sp_sym_to_s((sp_sym)v.v.i); *p; p++)
+      if ((unsigned char)*p >= 0x80) return sp_box_encoding(sp_encoding_utf8());
+    return sp_box_encoding(sp_encoding_us_ascii());
+  }
+  return sp_box_encoding(sp_str_is_binary(sp_poly_recv_s(v, "encoding")) ? sp_encoding_binary() : sp_encoding_utf8());
 }
 
 static sp_RbVal sp_poly_case_conv(sp_RbVal v, const char *(*fn)(const char *), const char *meth) {
@@ -4166,7 +4285,7 @@ static sp_float sp_poly_Float(sp_RbVal v) {
 static sp_float sp_num_to_f(sp_RbVal v) {
   if (v.tag == SP_TAG_FLT) return v.v.f;
   if (v.tag == SP_TAG_INT) return (sp_float)v.v.i;
-  if (v.tag == SP_TAG_BIGINT) return (sp_float)sp_bigint_to_int((sp_Bigint *)v.v.p);
+  if (v.tag == SP_TAG_BIGINT) return sp_bigint_to_double((sp_Bigint *)v.v.p);
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_RATIONAL && v.v.p)
     return sp_rational_to_f(*(sp_Rational *)v.v.p);
   /* a Numeric of the program's own converts through its #to_f, as
@@ -4380,8 +4499,8 @@ static sp_bool sp_poly_nan_p(sp_RbVal v) { if (v.tag == SP_TAG_FLT) return isnan
    raised for them, whose `args` is the empty list */
 static sp_float sp_poly_next_float(sp_RbVal v) { if (v.tag == SP_TAG_FLT) return nextafter(v.v.f, INFINITY); sp_raise_cls("NoMethodError", sp_nomethod_msg_args("next_float", v, 0, NULL)); return 0.0; }
 static sp_float sp_poly_prev_float(sp_RbVal v) { if (v.tag == SP_TAG_FLT) return nextafter(v.v.f, -INFINITY); sp_raise_cls("NoMethodError", sp_nomethod_msg_args("prev_float", v, 0, NULL)); return 0.0; }
-static sp_bool sp_poly_finite_p(sp_RbVal v) { if (v.tag == SP_TAG_FLT) return isfinite(v.v.f) != 0; if (v.tag == SP_TAG_INT || v.tag == SP_TAG_BIGINT || ((sp_poly_is_rational(v) || sp_poly_is_brat(v)) && v.v.p)) return TRUE; sp_raise_poly_nomethod("finite?", v); }
-static sp_RbVal sp_poly_infinite(sp_RbVal v) { if (v.tag == SP_TAG_FLT) return isinf(v.v.f) ? sp_box_int(v.v.f > 0 ? 1 : -1) : sp_box_nil(); if (v.tag == SP_TAG_INT || v.tag == SP_TAG_BIGINT || ((sp_poly_is_rational(v) || sp_poly_is_brat(v)) && v.v.p)) return sp_box_nil(); sp_raise_poly_nomethod("infinite?", v); }
+static sp_bool sp_poly_finite_p(sp_RbVal v) { if (v.tag == SP_TAG_FLT) return isfinite(v.v.f) != 0; if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_COMPLEX && v.v.p) { sp_Complex *c = (sp_Complex *)v.v.p; return isfinite(c->re) && isfinite(c->im); } /* a Complex: both parts */ if (v.tag == SP_TAG_INT || v.tag == SP_TAG_BIGINT || ((sp_poly_is_rational(v) || sp_poly_is_brat(v)) && v.v.p)) return TRUE; sp_raise_poly_nomethod("finite?", v); }
+static sp_RbVal sp_poly_infinite(sp_RbVal v) { if (v.tag == SP_TAG_FLT) return isinf(v.v.f) ? sp_box_int(v.v.f > 0 ? 1 : -1) : sp_box_nil(); if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_COMPLEX && v.v.p) { sp_Complex *c = (sp_Complex *)v.v.p; return (isinf(c->re) || isinf(c->im)) ? sp_box_int(1) : sp_box_nil(); } /* a Complex: 1 when either part is infinite, whatever its sign */ if (v.tag == SP_TAG_INT || v.tag == SP_TAG_BIGINT || ((sp_poly_is_rational(v) || sp_poly_is_brat(v)) && v.v.p)) return sp_box_nil(); sp_raise_poly_nomethod("infinite?", v); }
 /* Complex-projection queries on a poly value read out of a container (#2882):
    a Complex yields its stored component (int- or float-classed per its flags),
    and any real number is its own real part with a zero imaginary part. */
@@ -4490,6 +4609,17 @@ static sp_PolyArray *sp_poly_rect(sp_RbVal v, const char *m) {
    UB for INT_MIN; promote mode boxes it as a bigint, wrap mode keeps the
    documented wrapping C arithmetic. fabs covers -0.0 -> 0.0 too. */
 static sp_RbVal sp_poly_abs(sp_RbVal v) { if (v.tag == SP_TAG_INT) { if (v.v.i >= 0) return v; return SP_POLY_INT_OP(sub, (sp_int)0, v.v.i); } if (v.tag == SP_TAG_FLT) return sp_box_float(fabs(v.v.f)); if (v.tag == SP_TAG_BIGINT) { sp_Bigint *b = (sp_Bigint *)v.v.p; return sp_bigint_sign(b) < 0 ? sp_box_bigint(sp_bigint_sub(sp_bigint_new_int(0), b)) : v; } if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_COMPLEX) return sp_complex_abs_v(*(sp_Complex *)v.v.p); if (sp_poly_is_rational(v)) return sp_box_rational(sp_rational_abs(sp_poly_as_rational(v))); if (sp_poly_is_brat(v) && v.v.p) { sp_BigRational *_br = (sp_BigRational *)v.v.p; return sp_bigint_sign(_br->num) < 0 ? sp_box_brat(sp_bigint_sub(sp_bigint_new_int(0), _br->num), _br->den) : v; } sp_raise_poly_nomethod("abs", v); }
+/* Numeric#polar on a poly value: [abs, arg], as the typed arms answer it. */
+static sp_PolyArray *sp_poly_polar(sp_RbVal v) {
+  if (!(v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_COMPLEX) && !sp_poly_numeric_p(v) && !sp_poly_is_rat_kind(v))
+    sp_raise_poly_nomethod("polar", v);
+  sp_RbVal r = sp_poly_abs(v); SP_GC_ROOT_RBVAL(r);
+  sp_RbVal t = sp_poly_arg(v, "polar"); SP_GC_ROOT_RBVAL(t);
+  sp_PolyArray *a = sp_PolyArray_new(); SP_GC_ROOT(a);
+  sp_PolyArray_push(a, r);
+  sp_PolyArray_push(a, t);
+  return a;
+}
 /* abs2 is abs squared for every real number, a Rational too, whose `abs`
    and `*` already answer on a boxed one */
 static sp_RbVal sp_poly_abs2(sp_RbVal v) { if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_COMPLEX) return sp_complex_abs2_v(*(sp_Complex *)v.v.p); if (sp_poly_numeric_p(v) || sp_poly_is_rat_kind(v)) { sp_RbVal a = sp_poly_abs(v); return sp_poly_mul(a, a); } sp_raise_poly_nomethod("abs2", v); }
@@ -4618,8 +4748,8 @@ static sp_int sp_brat_part_i(sp_Bigint *b) {
   sp_raise_cls("RangeError", "bignum too big to convert into 'long'");
   return 0;
 }
-static sp_RbVal sp_poly_numerator(sp_RbVal v) { if (v.tag == SP_TAG_BIGINT || v.tag == SP_TAG_INT) return v; if (sp_poly_is_rational(v)) return sp_box_int(sp_poly_as_rational(v).num); if (sp_poly_is_brat(v) && v.v.p) return sp_box_int(sp_brat_part_i(((sp_BigRational *)v.v.p)->num)); sp_raise_poly_nomethod("numerator", v); }
-static sp_RbVal sp_poly_denominator(sp_RbVal v) { if (v.tag == SP_TAG_BIGINT || v.tag == SP_TAG_INT) return sp_box_int(1); if (sp_poly_is_rational(v)) return sp_box_int(sp_poly_as_rational(v).den); if (sp_poly_is_brat(v) && v.v.p) return sp_box_int(sp_brat_part_i(((sp_BigRational *)v.v.p)->den)); sp_raise_poly_nomethod("denominator", v); }
+static sp_RbVal sp_poly_numerator(sp_RbVal v) { if (v.tag == SP_TAG_BIGINT || v.tag == SP_TAG_INT) return v; if (v.tag == SP_TAG_FLT) return sp_float_numerator(v.v.f); /* as the typed Float arm (#3011) */ if (sp_poly_is_rational(v)) return sp_box_int(sp_poly_as_rational(v).num); if (sp_poly_is_brat(v) && v.v.p) return sp_box_int(sp_brat_part_i(((sp_BigRational *)v.v.p)->num)); sp_raise_poly_nomethod("numerator", v); }
+static sp_RbVal sp_poly_denominator(sp_RbVal v) { if (v.tag == SP_TAG_BIGINT || v.tag == SP_TAG_INT) return sp_box_int(1); if (v.tag == SP_TAG_FLT) return sp_box_int(sp_float_denominator(v.v.f)); if (sp_poly_is_rational(v)) return sp_box_int(sp_poly_as_rational(v).den); if (sp_poly_is_brat(v) && v.v.p) return sp_box_int(sp_brat_part_i(((sp_BigRational *)v.v.p)->den)); sp_raise_poly_nomethod("denominator", v); }
 static sp_RbVal sp_poly_nonzero(sp_RbVal v) { if (!sp_poly_tower_p(v)) sp_raise_poly_nomethod("nonzero?", v); return sp_poly_zero_p(v) ? sp_box_nil() : v; }
 /* String#getbyte on a poly value; nil (not 0) for an out-of-range index, per
    CRuby, so the result is boxed. */
@@ -4747,11 +4877,28 @@ typedef sp_bool (*sp_obj_eq_fn)(sp_RbVal a, sp_RbVal b);
 static sp_obj_eq_fn sp_obj_eq_hook = NULL;
 /* The == arms that can walk back into the pair they started from (below). */
 static sp_bool sp_poly_eq_deep(sp_RbVal a, sp_RbVal b);
+/* An Integer Range and a Float Range are == when their ends are equal as
+   numbers (an omitted end only to an omitted one) and both exclude the end
+   or both include it: (1..10) == (1.0..10.0), as Range#== compares ends by ==. */
+static sp_bool sp_range_frange_eq(sp_Range r, sp_FloatRange f) {
+  int rb = r.first == INTPTR_MIN, re = !r.fe && r.last == INTPTR_MAX;
+  int fb = (f.omitted & SP_FRANGE_NO_BEGIN) != 0, fe = (f.omitted & SP_FRANGE_NO_END) != 0;
+  if (rb != fb || re != fe) return FALSE;
+  if (!rb && (sp_float)r.first != f.first) return FALSE;
+  if (!re && sp_range_end_num(r) != f.last) return FALSE;
+  return sp_range_excl_end(r) == (f.excl != 0);
+}
 static SP_NOINLINE sp_bool sp_poly_eq_slow(sp_RbVal a, sp_RbVal b) {
   /* a user class's own == answers before any builtin reading, the way its
      other operators now do; the field-wise hook below stays the default for
      a class that does not define one (#3501) */
   { sp_RbVal _u; if (sp_poly_user_cmp("==", a, b, &_u)) return sp_poly_truthy(_u); }
+  if (a.tag == SP_TAG_OBJ && b.tag == SP_TAG_OBJ && a.v.p && b.v.p) {
+    if (a.cls_id == SP_BUILTIN_RANGE && b.cls_id == SP_BUILTIN_FLOAT_RANGE)
+      return sp_range_frange_eq(*(sp_Range *)a.v.p, *(sp_FloatRange *)b.v.p);
+    if (a.cls_id == SP_BUILTIN_FLOAT_RANGE && b.cls_id == SP_BUILTIN_RANGE)
+      return sp_range_frange_eq(*(sp_Range *)b.v.p, *(sp_FloatRange *)a.v.p);
+  }
   /* Ruby 3.2's Process::Status#== compares the status word (to_i) with the
      other side, and Integer#== hands a non-number back to it, so `$? == 0`
      and `0 == $?` both read the word; two statuses compare their words */
@@ -4861,7 +5008,7 @@ static SP_INLINE sp_int sp_cmp_float3(sp_float x, sp_float y, sp_bool *comparabl
   *comparable = TRUE;
   return (x > y) - (x < y);
 }
-static sp_int sp_poly_cmp(sp_RbVal a, sp_RbVal b, sp_bool *comparable) { /* same reasoning as the arithmetic fast paths: two plain numbers match no branch below until the numeric one, eight tests later */ if ((a.tag == SP_TAG_FLT || a.tag == SP_TAG_INT) && (b.tag == SP_TAG_FLT || b.tag == SP_TAG_INT)) { if (a.tag == SP_TAG_INT && b.tag == SP_TAG_INT) { *comparable = TRUE; return (a.v.i > b.v.i) - (a.v.i < b.v.i); } sp_float _fa = a.tag == SP_TAG_FLT ? a.v.f : (sp_float)a.v.i; sp_float _fb = b.tag == SP_TAG_FLT ? b.v.f : (sp_float)b.v.i; return sp_cmp_float3(_fa, _fb, comparable); } if (a.tag == SP_TAG_CLASS && b.tag == SP_TAG_CLASS && sp_class_cmp_fn) { sp_RbVal _c = sp_class_cmp_fn(a, b); *comparable = _c.tag == SP_TAG_INT; return *comparable ? _c.v.i : 0; } /* A user class's own `<=>` comes first, exactly as its own &/|/^ does (#3501): the Rational arm below answers for the RECEIVER's sake and a user object is not one of its operands, so `Fixed.new(1) < Rational(1,2)` reported the comparison as failed even though the class compares them perfectly well (#4038). */ if (a.tag == SP_TAG_OBJ && a.cls_id >= 0 && sp_obj_cmp_hook) return sp_obj_cmp_hook(a, b, comparable); if (sp_poly_is_brat(a) || sp_poly_is_brat(b) || sp_poly_is_rational(a) || sp_poly_is_rational(b)) { if (sp_poly_num_is_nan(a) || sp_poly_num_is_nan(b)) { *comparable = FALSE; return 0; } if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) { sp_float _af = sp_poly_to_f(a), _bf = sp_poly_to_f(b); return sp_cmp_float3(_af, _bf, comparable); } int _oka = sp_poly_is_brat(a) || sp_poly_is_rational(a) || a.tag == SP_TAG_INT || a.tag == SP_TAG_BIGINT; int _okb = sp_poly_is_brat(b) || sp_poly_is_rational(b) || b.tag == SP_TAG_INT || b.tag == SP_TAG_BIGINT; if (_oka && _okb) { *comparable = TRUE; return sp_brat_cmp_poly(a, b); } *comparable = FALSE; return 0; } if (a.tag == SP_TAG_OBJ && b.tag == SP_TAG_OBJ && SP_IS_BUILTIN_ARRAY(a.cls_id) && SP_IS_BUILTIN_ARRAY(b.cls_id)) return sp_poly_arr_cmp(a, b, comparable); if (a.tag == SP_TAG_BIGINT || b.tag == SP_TAG_BIGINT) { if (sp_poly_num_is_nan(a) || sp_poly_num_is_nan(b)) { *comparable = FALSE; return 0; } /* against a Float, exactly (sp_bigint_cmp_f): sp_poly_as_bigint below would
+static sp_int sp_poly_cmp(sp_RbVal a, sp_RbVal b, sp_bool *comparable) { /* same reasoning as the arithmetic fast paths: two plain numbers match no branch below until the numeric one, eight tests later */ if ((a.tag == SP_TAG_FLT || a.tag == SP_TAG_INT) && (b.tag == SP_TAG_FLT || b.tag == SP_TAG_INT)) { if (a.tag == SP_TAG_INT && b.tag == SP_TAG_INT) { *comparable = TRUE; return (a.v.i > b.v.i) - (a.v.i < b.v.i); } sp_float _fa = a.tag == SP_TAG_FLT ? a.v.f : (sp_float)a.v.i; sp_float _fb = b.tag == SP_TAG_FLT ? b.v.f : (sp_float)b.v.i; return sp_cmp_float3(_fa, _fb, comparable); } if (a.tag == SP_TAG_CLASS && b.tag == SP_TAG_CLASS && sp_class_cmp_fn) { sp_RbVal _c = sp_class_cmp_fn(a, b); *comparable = _c.tag == SP_TAG_INT; return *comparable ? _c.v.i : 0; } /* A user class's own `<=>` comes first, exactly as its own &/|/^ does (#3501): the Rational arm below answers for the RECEIVER's sake and a user object is not one of its operands, so `Fixed.new(1) < Rational(1,2)` reported the comparison as failed even though the class compares them perfectly well (#4038). */ if (a.tag == SP_TAG_OBJ && (a.cls_id == SP_BUILTIN_TIME || a.cls_id == SP_BUILTIN_RANGE) && sp_obj_cmp_hook && !sp_builtin_hook_depth) { sp_bool _bok = FALSE; sp_builtin_hook_depth++; sp_int _br = sp_obj_cmp_hook(a, b, &_bok); sp_builtin_hook_depth--; if (_bok) { *comparable = TRUE; return _br; } } if (a.tag == SP_TAG_OBJ && a.cls_id >= 0 && sp_obj_cmp_hook) return sp_obj_cmp_hook(a, b, comparable); if (sp_poly_is_brat(a) || sp_poly_is_brat(b) || sp_poly_is_rational(a) || sp_poly_is_rational(b)) { if (sp_poly_num_is_nan(a) || sp_poly_num_is_nan(b)) { *comparable = FALSE; return 0; } if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) { sp_float _af = sp_poly_to_f(a), _bf = sp_poly_to_f(b); return sp_cmp_float3(_af, _bf, comparable); } int _oka = sp_poly_is_brat(a) || sp_poly_is_rational(a) || a.tag == SP_TAG_INT || a.tag == SP_TAG_BIGINT; int _okb = sp_poly_is_brat(b) || sp_poly_is_rational(b) || b.tag == SP_TAG_INT || b.tag == SP_TAG_BIGINT; if (_oka && _okb) { *comparable = TRUE; return sp_brat_cmp_poly(a, b); } *comparable = FALSE; return 0; } if (a.tag == SP_TAG_OBJ && b.tag == SP_TAG_OBJ && SP_IS_BUILTIN_ARRAY(a.cls_id) && SP_IS_BUILTIN_ARRAY(b.cls_id)) return sp_poly_arr_cmp(a, b, comparable); if (a.tag == SP_TAG_BIGINT || b.tag == SP_TAG_BIGINT) { if (sp_poly_num_is_nan(a) || sp_poly_num_is_nan(b)) { *comparable = FALSE; return 0; } /* against a Float, exactly (sp_bigint_cmp_f): sp_poly_as_bigint below would
    truncate the Float into a bignum */ if ((a.tag == SP_TAG_BIGINT && b.tag == SP_TAG_FLT) || (b.tag == SP_TAG_BIGINT && a.tag == SP_TAG_FLT)) { int _c = a.tag == SP_TAG_BIGINT ? sp_bigint_cmp_f((sp_Bigint *)a.v.p, b.v.f) : sp_bigint_cmp_f((sp_Bigint *)b.v.p, a.v.f); *comparable = _c != 2; if (_c == 2) return 0; return a.tag == SP_TAG_BIGINT ? _c : -_c; } sp_Bigint *ba = sp_poly_as_bigint(a), *bb = sp_poly_as_bigint(b); if (ba && bb) { *comparable = TRUE; return sp_bigint_cmp(ba, bb); } if (sp_poly_numeric_p(a) && sp_poly_numeric_p(b)) { sp_float af = sp_poly_to_f(a), bf = sp_poly_to_f(b); return sp_cmp_float3(af, bf, comparable); } *comparable = FALSE; return 0; } if (sp_poly_numeric_p(a) && sp_poly_numeric_p(b)) { sp_float af = sp_poly_to_f(a), bf = sp_poly_to_f(b); return sp_cmp_float3(af, bf, comparable); } if (a.tag == SP_TAG_STR && b.tag == SP_TAG_STR) { if (a.v.s == NULL || b.v.s == NULL) { *comparable = (a.v.s == b.v.s); return 0; } *comparable = TRUE; return sp_str_cmp_bytes(a.v.s, b.v.s); } { sp_int _sc; if (sp_poly_cmp_to_str(a, b, &_sc)) { *comparable = TRUE; return _sc; } } if (a.tag == SP_TAG_SYM && b.tag == SP_TAG_SYM) { *comparable = TRUE; if (sp_sym_name_fn) { /* byte-exact: a name may hold a NUL, and strcmp would call `:"a\0b"` equal to `:a` and order them arbitrarily (#nul symbols) */ const char *_na = sp_sym_name_fn((sp_sym)a.v.i), *_nb = sp_sym_name_fn((sp_sym)b.v.i); int _r = strcmp(_na, _nb); /* strcmp decides whenever the names differ before any NUL, and agrees with a byte-exact compare when it does. Only a TIE can hide a difference past an embedded NUL -- `:"a\0b"` against `:a` -- so the byte-exact compare runs just there (#nul symbols), keeping the ordinary comparison one pass. */ if (_r == 0) _r = sp_str_cmp_bytes(_na, _nb); /* Symbol#<=> answers -1/0/1, not strcmp's distance */ return (_r > 0) - (_r < 0); } return (a.v.i > b.v.i) - (a.v.i < b.v.i); } if (sp_poly_is_strbuf(a) || sp_poly_is_strbuf(b)) return sp_poly_cmp(sp_poly_strbuf_deref(a), sp_poly_strbuf_deref(b), comparable); if (a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_TIME && b.tag == SP_TAG_OBJ && b.cls_id == SP_BUILTIN_TIME && a.v.p && b.v.p) { *comparable = TRUE; return sp_time_cmp(*(sp_Time *)a.v.p, *(sp_Time *)b.v.p); } /* a boxed handle of the IO family answers as its typed <=> does: identity, or the mtime order of two stats (#sort over stats) */ if (a.tag == SP_TAG_OBJ && (a.cls_id == SP_BUILTIN_IO || a.cls_id == SP_BUILTIN_DIR)) { sp_RbVal _r = a.cls_id == SP_BUILTIN_IO ? sp_io_cmp((sp_File *)a.v.p, b) : sp_Dir_cmp((sp_Dir *)a.v.p, b); *comparable = _r.tag == SP_TAG_INT; return *comparable ? _r.v.i : 0; } if (a.tag == SP_TAG_OBJ && sp_obj_cmp_hook) return sp_obj_cmp_hook(a, b, comparable); *comparable = FALSE; return 0; }
 /* Lexicographic <=> between two boxed int arrays (Array#<=> over int elems),
    so Array#max/min/sort work on an array of int pairs ([delta, idx] tuples). */
@@ -5169,7 +5316,27 @@ static sp_Complex sp_complex_div_poly(sp_Complex a, sp_RbVal b) {
 }
 static sp_RbVal sp_poly_div(sp_RbVal a, sp_RbVal b) { /* Two plain numbers first, as add/sub/mul already do (#3984): none of the checks below can match either tag, and this is what a boxed arithmetic loop actually holds. */ if (a.tag == SP_TAG_INT && b.tag == SP_TAG_INT) return sp_box_int(sp_idiv(a.v.i, b.v.i)); if (a.tag == SP_TAG_FLT && b.tag == SP_TAG_FLT) return sp_box_float(a.v.f / b.v.f); /* before the tower branches, which match on the receiver kind and would convert a user object to a number of that kind */ if (SP_UNLIKELY(sp_poly_is_user_obj(a) || sp_poly_is_user_obj(b))) return sp_poly_binop_bad("/", a, b); if (SP_UNLIKELY(sp_poly_is_strbuf(a) || sp_poly_is_strbuf(b))) return sp_poly_div(sp_poly_strbuf_deref(a), sp_poly_strbuf_deref(b)); if (SP_UNLIKELY(sp_poly_tower_mismatch(a, b))) return sp_poly_binop_bad("/", a, b); if ((sp_poly_is_brat(a) || sp_poly_is_brat(b))) { if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) return sp_box_float(sp_poly_to_f(a) / sp_poly_to_f(b)); return sp_brat_div_poly(a, b); } if ((sp_poly_is_rational(a) || sp_poly_is_rational(b)) && a.tag != SP_TAG_FLT && b.tag != SP_TAG_FLT) return sp_box_rational(sp_rational_div(sp_poly_as_rational(a), sp_poly_as_rational(b))); /* A Complex divided by a REAL divides each component, and the typed arms have done that since #3616: boxing the real into c+0i and running the conjugate formula answers NaN where MRI answers Infinity for a Float divisor, and swallows the ZeroDivisionError an Integer 0 owes (integer division rules). The boxed path still boxed, so `Complex(20, 40) / z` with a zero z out of a container answered (NaN+NaN*i) in both modes instead of raising. Complex / Complex keeps the full formula. */ if (a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_COMPLEX) return sp_box_complex(sp_complex_div_poly(sp_poly_as_complex(a), b)); if ((a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_COMPLEX) || (b.tag == SP_TAG_OBJ && b.cls_id == SP_BUILTIN_COMPLEX)) return sp_box_complex(sp_complex_div(sp_poly_as_complex(a), sp_poly_as_complex(b))); if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) return sp_box_float(sp_poly_to_f_with_rational(a) / sp_poly_to_f_with_rational(b)); if ((a.tag == SP_TAG_BIGINT || b.tag == SP_TAG_BIGINT)) return sp_box_bigint(sp_bigint_div(sp_poly_as_bigint(a), sp_poly_as_bigint(b))); return sp_box_int(sp_idiv(sp_poly_to_i(a), sp_poly_to_i(b))); }
 static sp_RbVal sp_poly_str_mod(sp_RbVal a, sp_RbVal b);  /* fwd: defined beside the format helper */
-static sp_RbVal sp_poly_mod(sp_RbVal a, sp_RbVal b) { /* Two plain numbers first, as add/sub/mul already do (#3984). */ if (a.tag == SP_TAG_INT && b.tag == SP_TAG_INT) return sp_box_int(sp_imod(a.v.i, b.v.i)); if (a.tag == SP_TAG_FLT && b.tag == SP_TAG_FLT) return sp_box_float(sp_fmod(a.v.f, b.v.f)); if (a.tag == SP_TAG_STR || sp_poly_is_strbuf(a)) return sp_poly_str_mod(sp_poly_strbuf_deref(a), b); /* the user-object arm has to come before the float one: a Float on either side otherwise converted the object to a number (0.0) and answered a division by zero where CRuby coerces. */ if (sp_poly_is_user_obj(a) || sp_poly_is_user_obj(b)) return sp_poly_binop_bad("%", a, b); /* a strbuf RECEIVER already returned through sp_poly_str_mod above */ if (SP_UNLIKELY(sp_poly_is_strbuf(b))) return sp_poly_mod(a, sp_poly_strbuf_deref(b)); if (SP_UNLIKELY(sp_poly_tower_mismatch(a, b))) return sp_poly_binop_bad("%", a, b); if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) return sp_box_float(sp_fmod(sp_poly_to_f(a), sp_poly_to_f(b))); if (sp_poly_is_rational(a) || sp_poly_is_rational(b)) return sp_box_rational(sp_rational_mod(sp_poly_as_rational(a), sp_poly_as_rational(b))); if ((a.tag == SP_TAG_BIGINT || b.tag == SP_TAG_BIGINT)) return sp_box_bigint(sp_bigint_mod(sp_poly_as_bigint(a), sp_poly_as_bigint(b))); /* the sibling helpers (div_m, remainder, fdiv, divmod) all refuse a non-numeric RECEIVER; `%` did not, so nil/Array/Hash/Symbol/true/false reaching here (a poly-dispatch collision default, or plain `nil % 1`) fell through to sp_poly_to_i below and answered 0 instead of raising the method they lack (#4816). */ if (!sp_poly_numeric_p(a) && !sp_poly_is_rational(a) && !sp_poly_is_brat(a)) sp_raise_poly_nomethod("%", a); return sp_box_int(sp_imod(sp_poly_to_i(a), sp_poly_to_i(b))); }  /* sp_fmod: CRuby divisor-sign result + zero-divisor raise */
+/* Range#% (step) on a boxed Integer or Float Range, materialized as the
+   typed `range % n` is (an Integer or a Float Array): an Integer step over
+   an Integer Range walks Integers, any Float makes the walk Floats. */
+static sp_RbVal sp_poly_range_pct(sp_RbVal a, sp_RbVal b) {
+  /* CRuby raises this when the walk starts; materialized here, at the call */
+  if (b.tag != SP_TAG_INT && b.tag != SP_TAG_FLT)
+    sp_raise_cls("TypeError", sp_sprintf("%s can't be coerced into Integer",
+                 b.tag == SP_TAG_NIL ? "nil" : b.tag == SP_TAG_BOOL ? (b.v.b ? "true" : "false") : sp_poly_class_name(b)));
+  if (a.cls_id == SP_BUILTIN_RANGE) {
+    sp_Range r = *(sp_Range *)a.v.p;
+    if (b.tag == SP_TAG_INT) {
+      sp_range_int_only(r, "Range#step");
+      return sp_box_nullable_obj((void *)sp_IntArray_from_range_step(r.first, r.last, b.v.i, r.excl), SP_BUILTIN_INT_ARRAY);
+    }
+    return sp_box_nullable_obj((void *)sp_FloatArray_from_step((sp_float)r.first, sp_range_end_num(r), b.v.f,
+                                                              sp_range_excl_end(r)), SP_BUILTIN_FLT_ARRAY);
+  }
+  sp_FloatRange f = *(sp_FloatRange *)a.v.p;
+  return sp_box_nullable_obj((void *)sp_FloatArray_from_step(f.first, f.last, sp_poly_to_f(b), f.excl), SP_BUILTIN_FLT_ARRAY);
+}
+static sp_RbVal sp_poly_mod(sp_RbVal a, sp_RbVal b) { if (a.tag == SP_TAG_OBJ && a.v.p && (a.cls_id == SP_BUILTIN_RANGE || a.cls_id == SP_BUILTIN_FLOAT_RANGE)) return sp_poly_range_pct(a, b); /* Two plain numbers first, as add/sub/mul already do (#3984). */ if (a.tag == SP_TAG_INT && b.tag == SP_TAG_INT) return sp_box_int(sp_imod(a.v.i, b.v.i)); if (a.tag == SP_TAG_FLT && b.tag == SP_TAG_FLT) return sp_box_float(sp_fmod(a.v.f, b.v.f)); if (a.tag == SP_TAG_STR || sp_poly_is_strbuf(a)) return sp_poly_str_mod(sp_poly_strbuf_deref(a), b); /* the user-object arm has to come before the float one: a Float on either side otherwise converted the object to a number (0.0) and answered a division by zero where CRuby coerces. */ if (sp_poly_is_user_obj(a) || sp_poly_is_user_obj(b)) return sp_poly_binop_bad("%", a, b); /* a strbuf RECEIVER already returned through sp_poly_str_mod above */ if (SP_UNLIKELY(sp_poly_is_strbuf(b))) return sp_poly_mod(a, sp_poly_strbuf_deref(b)); if (SP_UNLIKELY(sp_poly_tower_mismatch(a, b))) return sp_poly_binop_bad("%", a, b); if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) return sp_box_float(sp_fmod(sp_poly_to_f(a), sp_poly_to_f(b))); if (sp_poly_is_rational(a) || sp_poly_is_rational(b)) return sp_box_rational(sp_rational_mod(sp_poly_as_rational(a), sp_poly_as_rational(b))); if ((a.tag == SP_TAG_BIGINT || b.tag == SP_TAG_BIGINT)) return sp_box_bigint(sp_bigint_mod(sp_poly_as_bigint(a), sp_poly_as_bigint(b))); /* the sibling helpers (div_m, remainder, fdiv, divmod) all refuse a non-numeric RECEIVER; `%` did not, so nil/Array/Hash/Symbol/true/false reaching here (a poly-dispatch collision default, or plain `nil % 1`) fell through to sp_poly_to_i below and answered 0 instead of raising the method they lack (#4816). */ if (!sp_poly_numeric_p(a) && !sp_poly_is_rational(a) && !sp_poly_is_brat(a)) sp_raise_poly_nomethod("%", a); return sp_box_int(sp_imod(sp_poly_to_i(a), sp_poly_to_i(b))); }  /* sp_fmod: CRuby divisor-sign result + zero-divisor raise */
 /* Numeric#modulo: same computation as `%`, but a receiver with no such
    method spells the message with "modulo" (CRuby distinguishes the two
    call syntaxes) and, unlike `%`, a String has no modulo method at all
@@ -5295,6 +5462,25 @@ static sp_RbVal sp_poly_remainder(sp_RbVal a, sp_RbVal b) {
 /* Numeric#coerce: [other, self], both lifted to the wider of the two kinds.
    The numeric protocol's entry point, so a boxed receiver has to answer it. */
 static sp_RbVal sp_poly_coerce(sp_RbVal a, sp_RbVal b) {
+  /* Rational#coerce: a Float makes both Floats, an Integer becomes a
+     Rational and a Rational stays one; any other operand is TypeError */
+  if (sp_poly_is_rat_kind(a)) {
+    sp_PolyArray *ro = sp_PolyArray_new(); SP_GC_ROOT(ro);
+    if (b.tag == SP_TAG_FLT) {
+      sp_PolyArray_push(ro, b);
+      sp_PolyArray_push(ro, sp_box_float(sp_poly_to_f_with_rational(a)));
+      return sp_box_poly_array(ro);
+    }
+    sp_RbVal x = b;
+    if (b.tag == SP_TAG_INT) x = sp_box_rational(sp_rational_new(b.v.i, 1));
+    else if (b.tag == SP_TAG_BIGINT) x = sp_box_brat((sp_Bigint *)b.v.p, sp_bigint_new_int(1));
+    else if (!sp_poly_is_rat_kind(b))
+      sp_raise_cls("TypeError", sp_sprintf("%s can't be coerced into Rational", sp_poly_class_name(b)));
+    SP_GC_ROOT_RBVAL(x);
+    sp_PolyArray_push(ro, x);
+    sp_PolyArray_push(ro, a);
+    return sp_box_poly_array(ro);
+  }
   if (!sp_poly_numeric_p(a)) sp_raise_poly_nomethod("coerce", a);
   sp_PolyArray *out = sp_PolyArray_new();
   SP_GC_ROOT(out);
@@ -5765,11 +5951,6 @@ static sp_StrArray *sp_StrArray_from_elems(sp_RbVal v) {
   for (sp_int i = 0; i < p->len; i++) sp_StrArray_push(r, sp_poly_elem_s(p->data[i]));
   return r;
 }
-static const char *sp_PtrArray_inspect_k(sp_PtrArray *a) {
-  if (!a) return SPL("nil");
-  if (a->elem_kind == SP_PTR_ELEM_UNKNOWN) return sp_PtrArray_inspect(a);   /* opaque, as the erased id always was */
-  return sp_PolyArray_inspect(sp_PtrArray_to_poly(a));
-}
 static sp_RbVal sp_poly_shl(sp_RbVal a, sp_RbVal b) {
   /* Proc#<< composes the other way round: `f << g` calls g then f (#2880) */
   if (a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_PROC &&
@@ -6025,15 +6206,20 @@ static sp_bool sp_case_splat_match(sp_RbVal scrut, sp_RbVal arr) {
   return FALSE;
 }
 /* `break *x` / `next *x`: Ruby's splat-to-array -- nil becomes [], an array
-   stays itself, a hash spreads its pairs, any other value wraps in a
+   stays itself, a hash spreads its pairs, an Integer or String Range its
+   members and an Enumerator the items it yields; any other value wraps in a
    one-element array. */
 static sp_PolyArray *sp_poly_to_a_arr(sp_RbVal v);
 static sp_PolyArray *sp_poly_to_a_arr_as(sp_RbVal v, const char *m, int nil_ok);
 static sp_RbVal sp_poly_enum_chk(sp_RbVal v, const char *m);
+static sp_PolyArray *sp_enum_items_from(sp_RbVal v);
 static sp_RbVal sp_splat_to_array(sp_RbVal v) {
   if (v.tag == SP_TAG_NIL) return sp_box_poly_array(sp_PolyArray_new());
   if (v.tag == SP_TAG_OBJ && sp_poly_is_array_kind(v.cls_id)) return v;
   if (v.tag == SP_TAG_OBJ && sp_poly_is_hash_kind(v.cls_id)) return sp_box_poly_array(sp_poly_to_a_arr(v));
+  if (v.tag == SP_TAG_OBJ && (v.cls_id == SP_BUILTIN_RANGE || v.cls_id == SP_BUILTIN_STR_RANGE ||
+                              (v.cls_id == SP_BUILTIN_ENUMERATOR && v.v.p)))
+    return sp_box_poly_array(sp_enum_items_from(v));
   { sp_PolyArray *r = sp_PolyArray_new(); SP_GC_ROOT(r); sp_PolyArray_push(r, v); return sp_box_poly_array(r); }
 }
 static sp_RbVal sp_poly_arr_get(sp_RbVal a, sp_int i) {
@@ -6094,6 +6280,7 @@ static sp_PolyArray *sp_poly_to_poly_array(sp_RbVal v) {
    message read "no implicit conversion of Array into Array" on two real
    Arrays (#3475). */
 static sp_PolyArray *sp_poly_set_operand(sp_RbVal v) {
+  v = sp_poly_ary_operand(v);
   if (v.tag == SP_TAG_OBJ && sp_poly_is_array_kind(v.cls_id))
     return sp_poly_to_poly_array(v);
   sp_raise_cls("TypeError", sp_sprintf("no implicit conversion of %s into Array",
@@ -7084,6 +7271,12 @@ static void sp_splat_puts(sp_RbVal a) {
   if (sp_poly_arr_len(a) == 0) { putchar(10); return; }
   sp_puts_elems(a);
 }
+/* io.print(*parts): each element written in turn, as print's own operands are */
+static SP_UNUSED void sp_File_splat_print(sp_File *f, sp_RbVal a) {
+  SP_GC_ROOT_RBVAL(a);
+  sp_int n = sp_poly_arr_len(a);
+  for (sp_int i = 0; i < n; i++) sp_File_write_poly(f, sp_poly_arr_get(a, i));
+}
 static void sp_splat_print(sp_RbVal a) {
   sp_int n = sp_poly_arr_len(a);
   for (sp_int i = 0; i < n; i++) sp_poly_print(sp_poly_arr_get(a, i));
@@ -8013,11 +8206,6 @@ static void sp_PolyArray_uniq_bang(sp_PolyArray*a){sp_gc_wb((void*)a); if(!a||a-
 else i++;}}
 static sp_RbVal sp_PolyArray_sample(sp_PolyArray *a) { if (a->len <= 0) return sp_box_nil(); return a->data[sp_krand_below(a->len)]; }
 
-/* Forward decl: sp_poly_inspect dispatches into sp_PolyArray_inspect
-   for nested poly arrays (under promote, an `each_cons` chain's outer
-   accumulator boxes each inner poly_array element), but the
-   sp_PolyArray_inspect body lives a few lines below. */
-static const char *sp_PolyArray_inspect(sp_PolyArray *a);
 /* An array of one user class narrowed to a pointer array (#4444): each
    element boxes with the class the compiler knew (cls), or with the id it
    carries when cls is negative (a class with subclasses), and renders through
@@ -8144,15 +8332,6 @@ static SP_NOINLINE SP_COLD void sp_raise_frozen_obj(sp_RbVal v, const char *what
 SP_NORETURN static void sp_raise_key_not_found(sp_RbVal key) {
   sp_exc_stage_key(key);
   sp_raise_cls("KeyError", sp_sprintf("key not found: %s", sp_poly_inspect(key)));
-}
-/* Array#inspect for heterogeneous poly arrays. Each element dispatches
-   through sp_poly_inspect, so a mixed `[1, "x", :y]` renders
-   `[1, "x", :y]` byte-for-byte identical to CRuby. NULL renders
-   "nil" so callers that store a nil-returning slot (assoc/rassoc
-   miss, etc.) round-trip cleanly through `.inspect`. */
-static const char *sp_PolyArray_inspect(sp_PolyArray *a) {
-  if (!a) { char *r = sp_str_alloc(3); r[0] = 'n'; r[1] = 'i'; r[2] = 'l'; r[3] = 0; sp_str_set_len(r, 3); return r; }
-  return sp_inspect_container(sp_box_poly_array(a));
 }
 /* Array#join for a mixed-element (poly) array: to_s each element via
    sp_poly_to_s and concatenate with sep. Mirrors sp_StrArray_join for
@@ -8327,6 +8506,33 @@ static const char*sp_StrPolyHash_inspect(sp_StrPolyHash*h){return h?sp_inspect_c
    raw pointer assignment would mix incompatible struct layouts
    (vals[] of const char** vs sp_RbVal*). See issue #614. A frozen source
    gives a frozen copy. */
+/* A String-keyed Hash of any values as the replacement Hash of sub/gsub:
+   each value read as its to_s (nil as ""), the String-to-String Hash the
+   substitution helpers take, as CRuby converts hash[match] with to_s; its
+   default value is converted too. */
+static sp_StrStrHash *sp_StrPolyHash_to_s_values(sp_StrPolyHash *h) {
+  SP_GC_ROOT(h);
+  sp_StrStrHash *r = sp_StrStrHash_new(); SP_GC_ROOT(r);
+  /* a missing match reads the default, as its to_s (nil's "" is no default) */
+  if (h && h->default_v.tag != SP_TAG_NIL) r->default_v = sp_poly_to_s(h->default_v);
+  if (h) for (sp_int i = 0; i < h->len; i++) {
+    const char *k = h->order[i];
+    sp_StrStrHash_set(r, k, sp_poly_to_s(sp_StrPolyHash_get(h, k)));
+  }
+  return r;
+}
+/* ...and an Integer-valued one, the same way (a nil value is the sentinel) */
+static sp_StrStrHash *sp_StrIntHash_to_s_values(sp_StrIntHash *h) {
+  SP_GC_ROOT(h);
+  sp_StrStrHash *r = sp_StrStrHash_new(); SP_GC_ROOT(r);
+  if (h && h->default_v != SP_INT_NIL) r->default_v = sp_int_to_s(h->default_v);
+  if (h) for (sp_int i = 0; i < h->len; i++) {
+    const char *k = h->order[i];
+    sp_int v = sp_StrIntHash_get(h, k);
+    sp_StrStrHash_set(r, k, v == SP_INT_NIL ? sp_str_frozen_empty : sp_int_to_s(v));
+  }
+  return r;
+}
 static sp_StrPolyHash*sp_StrPolyHash_from_str_str_hash(sp_StrStrHash*h){sp_StrPolyHash*r=sp_StrPolyHash_new();if(!h)return r;if(h->default_v)r->default_v=sp_box_str(h->default_v);for(sp_int i=0;i<h->len;i++){const char*k=h->order[i];sp_StrPolyHash_set(r,k,sp_box_str(sp_StrStrHash_get(h,k)));}if(sp_gc_is_frozen(h))sp_gc_freeze(r);return r;}
 /* MatchData#named_captures: {String name => group substring | nil}. A
    non-participating named group maps to nil, so the value side is poly. Lives
@@ -9043,6 +9249,17 @@ static sp_RbVal sp_poly_get_sym(sp_RbVal v, sp_sym key) {
   }
   return sp_box_nil();
 }
+/* What a boxed `x.to_h { |k, v| }` maps over (analyze rewrites it onto
+   `map { }.to_h`): a Struct or Data value's member Hash, whose map yields
+   the [member, value] pairs Struct#to_h yields, where the value's own map
+   yields its values; anything else is walked as it is. */
+static sp_RbVal sp_poly_to_h_subject(sp_RbVal v) {
+  if (v.tag == SP_TAG_OBJ && v.cls_id >= 0 && v.v.p && sp_obj_to_h_fn) {
+    sp_RbVal h = sp_obj_to_h_fn(v);
+    if (h.tag == SP_TAG_OBJ && h.cls_id == SP_BUILTIN_SYM_POLY_HASH) return h;
+  }
+  return v;
+}
 static void sp_PolyPolyHash_set(sp_PolyPolyHash*h,sp_RbVal k,sp_RbVal v){sp_gc_wb((void*)h); SP_GC_ROOT(h);SP_GC_ROOT_RBVAL(k);SP_GC_ROOT_RBVAL(v);sp_int hs=sp_hash_slot(sp_rbval_hash_key(k));if(h->len*2>=h->cap)sp_PolyPolyHash_grow(h);sp_int idx=(sp_int)(hs&h->mask);while(h->occ[idx]){if(h->hs[idx]==hs&&sp_rbval_eql_key(h->keys[idx],k)){h->vals[idx]=v;return;}idx=(idx+1)&h->mask;}if(k.tag==SP_TAG_STR&&k.v.s)k.v.s=sp_hash_key_str(k.v.s);else if(sp_poly_is_strbuf(k))k=sp_box_str(sp_hash_key_str(sp_String_cstr((sp_String*)k.v.p)));sp_gc_wb((void*)h);h->keys[idx]=k;h->vals[idx]=v;h->hs[idx]=hs;h->occ[idx]=TRUE;h->order[h->len]=idx;h->len++;}
 /* Marshal.dump/load hash vtable slots (sp_marshal_v.hash_new/hash_set):
    kept here (not moved to lib/sp_cold.c with the rest of the sp_marv_*
@@ -9625,6 +9842,14 @@ static sp_RbVal sp_poly_slice_or_call(sp_RbVal v, sp_RbVal a, sp_RbVal b) {
     if (n == 0) return sp_box_nullable_str(sp_re_match_str);
     if (n >= 1 && n <= 9) return sp_box_nullable_str(sp_re_captures[n]);
     return sp_box_nil();
+  }
+  /* `s[/(?<x>..)/, "x"]` or `, :x`: the named capture of the first match,
+     nil when there is none, as the typed emitter answers it */
+  if (v.tag == SP_TAG_STR && a.tag == SP_TAG_OBJ && a.v.p && a.cls_id == SP_BUILTIN_REGEX &&
+      (b.tag == SP_TAG_STR || b.tag == SP_TAG_SYM)) {
+    const char *nm = b.tag == SP_TAG_SYM ? sp_sym_to_s((sp_sym)b.v.i) : (b.v.s ? b.v.s : "");
+    if (sp_re_match((mrb_regexp_pattern *)a.v.p, v.v.s ? v.v.s : "") < 0) return sp_box_nil();
+    return sp_box_nullable_str(sp_re_named_capture((mrb_regexp_pattern *)a.v.p, nm));
   }
   /* a Method's [] too: its arguments of any kind are the call's, where
      sp_poly_slice took a String for an index and raised TypeError (#6179) */
@@ -10436,6 +10661,10 @@ static sp_RbVal sp_poly_fetch(sp_RbVal recv, sp_RbVal key, int has_dflt, sp_RbVa
 static sp_PolyPolyHash*sp_PolyPolyHash_dup(sp_PolyPolyHash*h);  /* fwd */
 static void (*sp_user_init_copy_hook)(sp_RbVal, sp_RbVal) = NULL;
 static sp_RbVal sp_poly_dup(sp_RbVal v, int keep_frozen) {
+  if (v.tag == SP_TAG_OBJ && v.v.p &&
+      (v.cls_id == SP_BUILTIN_RANGE || v.cls_id == SP_BUILTIN_FLOAT_RANGE || v.cls_id == SP_BUILTIN_STR_RANGE))
+    return sp_range_dup(v, keep_frozen);
+
   /* Hash#dup/#clone on a boxed hash: a shallow copy of the same variant. The
      hash went out as-is, so a `dup` taken to keep the caller's hash intact
      aliased it and every write through the copy landed in the original
@@ -10573,6 +10802,8 @@ static inline sp_RbVal sp_poly_freeze(sp_RbVal v) {
     /* the array mutators test the array's own field, not the header bit, so
        a boxed array frozen here went on taking pushes (found under #4486) */
     if (v.v.p) switch (v.cls_id) {
+      case SP_BUILTIN_RANGE: case SP_BUILTIN_FLOAT_RANGE: case SP_BUILTIN_STR_RANGE:
+        sp_range_freeze(v); break;
       case SP_BUILTIN_INT_ARRAY: case SP_BUILTIN_SYM_ARRAY: ((sp_IntArray *)v.v.p)->frozen = 1; break;
       case SP_BUILTIN_FLT_ARRAY:  ((sp_FloatArray *)v.v.p)->frozen = 1; break;
       case SP_BUILTIN_STR_ARRAY:  ((sp_StrArray *)v.v.p)->frozen = 1; break;
@@ -10585,6 +10816,11 @@ static inline sp_RbVal sp_poly_freeze(sp_RbVal v) {
   return v;
 }
 static inline sp_bool sp_poly_frozen(sp_RbVal v) {
+  if (v.tag == SP_TAG_OBJ && v.v.p) switch (v.cls_id) {
+    case SP_BUILTIN_RANGE: case SP_BUILTIN_FLOAT_RANGE: case SP_BUILTIN_STR_RANGE:
+      return sp_range_frozen(v);
+  }
+
   /* a Range is frozen, whatever its kind */
   if (v.tag == SP_TAG_OBJ && (v.cls_id == SP_BUILTIN_RANGE || v.cls_id == SP_BUILTIN_FLOAT_RANGE || v.cls_id == SP_BUILTIN_STR_RANGE)) return TRUE;
   if (v.tag == SP_TAG_STR) return v.v.s ? sp_str_is_frozen_val(v.v.s) : TRUE;
@@ -10648,15 +10884,21 @@ static sp_bool sp_poly_eql(sp_RbVal a, sp_RbVal b) {
        dedupe here (#2884). */
     return FALSE;
   }
-  /* Range#eql? compares endpoints with eql?, so an Integer bound is not eql?
-     to the same Float bound. A mixed literal like (0..1.0) is deliberately
-     carried on the integer representation (see the range literal rule in the
-     analyzer), which cannot tell that pair apart, so an integer Range answers
-     eql? only for itself; a String or Float Range has no such ambiguity and
-     compares by value through ==. */
+  /* an Integer Range and a Float Range: an Integer begin is never eql? to a
+     Float one, though the two may be == */
   if (a.tag == SP_TAG_OBJ && b.tag == SP_TAG_OBJ &&
-      a.cls_id == SP_BUILTIN_RANGE && b.cls_id == SP_BUILTIN_RANGE)
-    return a.v.p == b.v.p;
+      ((a.cls_id == SP_BUILTIN_RANGE && b.cls_id == SP_BUILTIN_FLOAT_RANGE) ||
+       (a.cls_id == SP_BUILTIN_FLOAT_RANGE && b.cls_id == SP_BUILTIN_RANGE))) return FALSE;
+  /* Range#eql? compares endpoints with eql?, so an Integer bound is not eql?
+     to the same Float bound. A mixed literal like (0..1.0) is carried on the
+     integer representation with its Float end marked (fe), which
+     sp_range_eql compares, so two Integer Ranges compare by value; a String
+     or Float Range compares by value through ==. */
+  if (a.tag == SP_TAG_OBJ && b.tag == SP_TAG_OBJ &&
+      a.cls_id == SP_BUILTIN_RANGE && b.cls_id == SP_BUILTIN_RANGE) {
+    if (a.v.p == b.v.p) return TRUE;
+    return a.v.p && b.v.p && sp_range_eql(*(sp_Range *)a.v.p, *(sp_Range *)b.v.p);
+  }
   return sp_poly_eq(a, b);
 }
 /* equal? for a poly value: object identity. Immediates (int, symbol, nil,
@@ -10681,7 +10923,6 @@ static sp_bool sp_poly_equal(sp_RbVal a, sp_RbVal b) {
 /* is_a?/kind_of? for a poly value against a BUILTIN class named `cn`. The
    caller (codegen) routes here only when `cn` is a known builtin; a user-class
    target is resolved inline via sp_class_le on the boxed object's cls_id. */
-static sp_int sp_exc_is_a(volatile struct sp_Exception_s *ve, const char *cn);  /* fwd (#3096) */
 extern const char *(*sp_user_exc_parent_fn)(const char *);  /* fwd: the program's exception parent table */
 static int (*sp_poly_is_a_hook)(sp_RbVal, sp_Class) = NULL;
 static sp_bool sp_poly_kind_of_builtin(sp_RbVal v, const char *cn) {
@@ -12815,10 +13056,7 @@ static void sp_rescue_push(void *e) {
    Ruby SystemStackError -- catching one needs a handler slot, which is exactly
    what has run out. (sp_rescue_push above keeps its own older wording, which
    names the nesting that overflowed.) */
-SP_NORETURN SP_COLD static void sp_stack_too_deep(void) {
-  fputs("stack level too deep (SystemStackError)\n", stderr);
-  exit(1);
-}
+SP_NORETURN SP_COLD void sp_stack_too_deep(void);   /* lib/sp_exc.c */
 /* Guard an exception-frame arm. Every arm stores into sp_exc_rootmark
    [sp_exc_top] (or sp_exc_msg[sp_exc_top]) before it bumps sp_exc_top, so what
    the check must precede is that first indexed store, not the ++; it opens the
@@ -13653,40 +13891,6 @@ SP_NORETURN void sp_raise_stop_iteration(sp_RbVal result) {
   sp_raise_cls("StopIteration", msg);
 }
 #endif
-/* Exception#is_a?(ClassName): checks class name and known hierarchy. */
-static sp_int sp_exc_is_a(volatile sp_Exception *ve, const char *cn) {
-  sp_Exception *e = (sp_Exception *)ve;
-  if (!e || !cn) return 0;
-  /* one authority for "does this level answer to cn", modules included: the
-     matcher rescue arms use. Without it #is_a?(SomeModule) said false where
-     `rescue SomeModule` said yes (#3366 follow-up). */
-  cn = sp_exc_canonical_name(cn);
-  if (sp_exc_cls_matches(e->cls_name, cn)) return 1;
-  /* find the exception's class chain and check if cn appears in it */
-  const char *cls = e->cls_name;
-  int used_parent = 0;
-  for (int depth = 0; depth < 20 && cls; depth++) {
-    if (!strcmp(cls, cn)) return 1;
-    const char *parent = sp_exc_parent_of_name(cls);
-    if (!parent) {
-      /* unknown (user) class: try user hierarchy first */
-      if (sp_user_exc_parent_fn) { parent = sp_user_exc_parent_fn(cls); }
-      if (!parent) {
-        if (!used_parent && e->parent_cls_name) {
-          cls = e->parent_cls_name;
-          used_parent = 1;
-          continue;
-        }
-        if (!strcmp(cn, "Exception")) return 1;
-        if (!strcmp(cn, "Object") || !strcmp(cn, "BasicObject")) return 1;
-        break;
-      }
-    }
-    cls = parent;
-  }
-  if (!strcmp(cn, "Object") || !strcmp(cn, "BasicObject") || !strcmp(cn, "Kernel")) return 1;
-  return 0;
-}
 
 /* a reason/tag staged as a plain string interns back to the Symbol it names */
 static sp_RbVal sp_exc_sym_slot(sp_RbVal v) {
@@ -13739,7 +13943,7 @@ void sp_bigint_raise_zerodiv(const char *msg);
 #else
 void sp_bigint_raise_zerodiv(const char *msg) { sp_raise_cls("ZeroDivisionError", msg); }
 #endif
-/* sp_exc_is_a: see earlier definition (takes volatile sp_Exception *) */
+/* sp_exc_is_a: lib/sp_exc.c (takes volatile sp_Exception *) */
 
 /* A non-local control-flow unwind -- a proc `return` or a `throw` -- runs the
    `ensure` blocks it passes over before delivering to its target, like an
@@ -13934,15 +14138,8 @@ static void sp_mark_brk_vals(void) {
    home. The `exc_top` field records the exception-handler depth at the method's
    entry so intervening ensures run and so an exception that unwinds the home pops
    the node (sp_handler_stacks_unwind). */
-typedef struct sp_proc_home {
-  jmp_buf jb;                 /* the home method's setjmp target (on its C stack) */
-  sp_RbVal val;               /* the in-flight return value (nil until delivered) */
-  int exc_top;                /* sp_exc_top at the method's entry */
-  int catch_top;              /* sp_catch_top at the method's entry */
-  int recur_mark;             /* walk-path depth at the method's entry (see sp_poly_recur_mark) */
-  sp_int id;                 /* fresh id captured by the home's returning procs */
-  struct sp_proc_home *prev;  /* enclosing home, forming the per-fiber chain */
-} sp_proc_home;
+/* sp_proc_home itself is in lib/sp_exc_ctx.h, beside the fiber context that
+   carries the chain head. */
 /* sp_proc_ret_head is the current fiber's chain of in-flight proc-return homes,
    swapped per fiber by sp_exc_ctx_save/load -- per-worker (SP_TLS) under N>1 like
    the exception stack. sp_proc_home_seq stays a single shared counter so home ids
@@ -14080,46 +14277,10 @@ static void sp_unwind_resume(void) {
    outgoing fiber's context and loads the incoming fiber's at each switch; the
    arrays then never alias across fibers. Only the active prefix is copied
    (top == 0 for a fiber that never rescues, e.g. optcarrot's PPU, so it is
-   free there). These are non-static: reached by name from libspinel_rt.a. */
-typedef struct {
-  jmp_buf *es; const char **em; const char **ec; void **eo; int en, ecap;
-  jmp_buf *cs; const char **ct; unsigned char *ctk; sp_RbVal *cv; int *cet;  int cn, ccap;
-  jmp_buf *bs; sp_RbVal *bv; sp_int *bser; int *bet;     int bn, bcap;  /* break scopes */
-  sp_proc_home *prhead;  /* this fiber's proc-return chain head (nodes on its C stack) */
-  int uk, ut, ue; sp_proc_home *uh;  /* transient unwind state (in flight only while running ensures) */
-  void **shand; int rn, rcap;        /* sp_exc_handling prefix [0..sp_rescue_sp) */
-  void *pcause;                      /* sp_pending_cause */
-  sp_poly_recur_frame *rrf; int rrn, rrcap;  /* sp_poly_recur_stack prefix [0..sp_poly_recur_top) */
-  int *rrem, *rrcm, *rrbm;           /* the walk-path marks of the exception, catch and break arms */
-  int *erm, *ersm, *crm;             /* the GC-root and rescue-stack watermarks of the exception
-                                        arms and the GC-root watermark of the catch arms: what a
-                                        handler restores sp_gc_nroots / sp_rescue_sp to. They are
-                                        per worker like the arms, so without travelling with the
-                                        context a green thread that parked inside a begin and
-                                        resumed after another fiber's arm sat at the same index
-                                        restored the OTHER fiber's watermark: a raise's dead root
-                                        stayed on the list and the next collection read a stack
-                                        slot that was no longer a string (#4546) */
-} sp_exc_ctx_t;
+   free there). These are non-static: reached by name from libspinel_rt.a.
+   sp_exc_ctx_t and its new/free/mark are in lib/sp_exc_ctx.h / lib/sp_exc.c:
+   they touch only the context, where save/load below read the TU's stacks. */
 
-#ifdef SPINEL_EXT_HOST
-void *sp_exc_ctx_new(void);
-#else
-void *sp_exc_ctx_new(void) { return calloc(1, sizeof(sp_exc_ctx_t)); }
-#endif
-#ifdef SPINEL_EXT_HOST
-void sp_exc_ctx_free(void *p);
-#else
-void sp_exc_ctx_free(void *p) {
-  sp_exc_ctx_t *x = (sp_exc_ctx_t *)p;
-  if (!x) return;
-  free(x->es); free(x->em); free(x->ec); free(x->eo);
-  free(x->cs); free(x->ct); free(x->ctk); free(x->cv); free(x->cet);
-  free(x->bs); free(x->bv); free(x->bser); free(x->bet); free(x->shand);
-  free(x->rrf); free(x->rrem); free(x->rrcm); free(x->rrbm);
-  free(x->erm); free(x->ersm); free(x->crm); free(x);
-}
-#endif
 #ifdef SPINEL_EXT_HOST
 void sp_exc_ctx_save(void *p);
 #else
@@ -14220,20 +14381,6 @@ void sp_exc_ctx_load(void *p) {            /* ctx -> current globals */
   for (int i = 0; i < x->rrn; i++) sp_poly_recur_stack[i] = x->rrf[i];
   sp_poly_recur_top = x->rrn;
   sp_poly_recur_ixtop = 0;   /* the index described the other context's frames */
-}
-#endif
-#ifdef SPINEL_EXT_HOST
-void sp_exc_ctx_mark(void *p);
-#else
-void sp_exc_ctx_mark(void *p) {            /* GC: mark a suspended fiber's carried exc objects */
-  sp_exc_ctx_t *x = (sp_exc_ctx_t *)p;
-  if (!x) return;
-  for (int i = 0; i < x->en; i++) if (x->eo[i]) sp_gc_mark(x->eo[i]);
-  /* a suspended fiber's proc-return chain (nodes on its preserved C stack) may
-     carry an in-flight return value; mark each so it survives a GC during yield. */
-  for (sp_proc_home *h = x->prhead; h; h = h->prev) sp_mark_rbval(h->val);
-  for (int i = 0; i < x->bn; i++) sp_mark_rbval(x->bv[i]);   /* carried break scopes */
-  for (int i = 0; i < x->rn; i++) if (x->shand[i]) sp_gc_mark(x->shand[i]);  /* handled excs */
 }
 #endif
 /* Trampoline base handler (#1474): the fiber trampoline arms a copy of its own
@@ -14706,6 +14853,58 @@ static sp_RbVal sp_poly_enum_chk(sp_RbVal v, const char *m) {
   if (v.tag == SP_TAG_OBJ && v.cls_id >= 0) return sp_box_poly_array(sp_poly_to_a_arr_as(v, m, 0));
   return v;
 }
+/* One end of a numeric Range for Range#overlap?: absent (nil), or an
+   Integer or a Float. */
+typedef struct { int nil, flt; sp_int i; sp_float f; } sp_range_end_t;
+static int sp_range_end_cmp(sp_range_end_t a, sp_range_end_t b) {
+  if (!a.flt && !b.flt) return (a.i > b.i) - (a.i < b.i);
+  sp_float x = a.flt ? a.f : (sp_float)a.i, y = b.flt ? b.f : (sp_float)b.i;
+  return (x > y) - (x < y);
+}
+/* The ends of a boxed Integer or Float Range; 0 when v is no such Range. */
+static int sp_range_ends(sp_RbVal v, sp_range_end_t *b, sp_range_end_t *e, int *excl) {
+  memset(b, 0, sizeof *b); memset(e, 0, sizeof *e);
+  if (v.tag != SP_TAG_OBJ || !v.v.p) return 0;
+  if (v.cls_id == SP_BUILTIN_RANGE) {
+    sp_Range r = *(sp_Range *)v.v.p;
+    b->nil = r.first == INTPTR_MIN; b->i = r.first;
+    if (r.fe) { e->flt = 1; e->f = r.fend; }
+    else { e->nil = r.last == INTPTR_MAX; e->i = r.last; }
+    *excl = sp_range_excl_end(r);
+    return 1;
+  }
+  if (v.cls_id == SP_BUILTIN_FLOAT_RANGE) {
+    sp_FloatRange r = *(sp_FloatRange *)v.v.p;
+    b->flt = e->flt = 1; b->f = r.first; e->f = r.last;
+    b->nil = (r.omitted & SP_FRANGE_NO_BEGIN) != 0;
+    e->nil = (r.omitted & SP_FRANGE_NO_END) != 0;
+    *excl = r.excl != 0;
+    return 1;
+  }
+  return 0;
+}
+/* No value lies between b and e: b past e, or equal with the end excluded.
+   An absent end bounds nothing. */
+static int sp_range_empty_region(sp_range_end_t b, sp_range_end_t e, int excl) {
+  if (b.nil || e.nil) return 0;
+  int c = sp_range_end_cmp(b, e);
+  return c > 0 || (c == 0 && excl);
+}
+/* Range#overlap? between two numeric Ranges, as CRuby's range_overlap
+   decides it: some value lies in both, so neither may be empty. The receiver
+   is no Range: NoMethodError; the argument is none: TypeError. */
+static sp_bool sp_range_overlap_v(sp_RbVal a, sp_RbVal o) {
+  sp_range_end_t ab, ae, ob, oe; int ax = 0, ox = 0;
+  if (!sp_range_ends(a, &ab, &ae, &ax)) sp_raise_nomethod(sp_nomethod_msg("overlap?", a));
+  if (!sp_range_ends(o, &ob, &oe, &ox)) {
+    if (o.tag == SP_TAG_OBJ && o.cls_id == SP_BUILTIN_STR_RANGE) return FALSE;  /* no value is both */
+    sp_raise_cls("TypeError", sp_sprintf("wrong argument type %s (expected Range)", sp_poly_class_name(o)));
+  }
+  if (sp_range_empty_region(ab, oe, ox) || sp_range_empty_region(ob, ae, ax)) return FALSE;
+  if (!ab.nil && !ob.nil) { if (sp_range_end_cmp(ab, ob) == 0) return TRUE; }
+  else if (ab.nil && ob.nil) return TRUE;
+  return !sp_range_empty_region(ab, ae, ax) && !sp_range_empty_region(ob, oe, ox);
+}
 /* Enumerable#entries on a boxed receiver: an Array's elements, a Hash's
    [key, value] pairs, an Integer or String Range's members, an Enumerator's
    values and a Struct's members, always in a new Array (an Array's to_a
@@ -14942,6 +15141,44 @@ static sp_PolyPolyHash *sp_poly_as_pp_hash(sp_RbVal v, const char *nm) {
     return NULL;
   }
   return sp_poly_hash_merge(v, sp_box_nil());
+}
+/* deconstruct_keys(keys) on a boxed receiver. A Struct or Data answers as
+   CRuby's Struct#deconstruct_keys: nil asks for every member; more keys than
+   members answer {}; otherwise each key in turn -- a member's Symbol or String
+   name, or for a Struct an index -- adds that member under the key as given,
+   and the first key naming no member ends the hash there. A Data takes names
+   only. Any other receiver is a Hash, answering itself, or NoMethodError. */
+static sp_PolyPolyHash *sp_poly_deconstruct_keys(sp_RbVal v, sp_RbVal keys) {
+  sp_RbVal m = (v.tag == SP_TAG_OBJ && v.cls_id >= 0 && v.v.p && sp_obj_to_h_fn) ? sp_obj_to_h_fn(v) : sp_box_nil();
+  if (!(m.tag == SP_TAG_OBJ && m.cls_id == SP_BUILTIN_SYM_POLY_HASH)) return sp_poly_as_pp_hash(v, "deconstruct_keys");
+  sp_SymPolyHash *mh = (sp_SymPolyHash *)m.v.p; SP_GC_ROOT(mh);
+  int is_data = sp_obj_is_data_fn && sp_obj_is_data_fn(v.cls_id);
+  sp_PolyPolyHash *out = sp_PolyPolyHash_new(); SP_GC_ROOT(out);
+  if (keys.tag == SP_TAG_NIL) {
+    for (sp_int i = 0; i < mh->len; i++)
+      sp_PolyPolyHash_set(out, sp_box_sym(mh->order[i]), sp_SymPolyHash_get(mh, mh->order[i]));
+    return out;
+  }
+  if (keys.tag != SP_TAG_OBJ || !sp_poly_is_array_kind(keys.cls_id))
+    sp_raise_cls("TypeError", sp_sprintf("wrong argument type %s (expected Array or nil)", sp_poly_class_name(keys)));
+  sp_PolyArray *ks = sp_poly_to_a_arr(keys); SP_GC_ROOT(ks);
+  if (ks->len > mh->len) return out;
+  for (sp_int i = 0; i < ks->len; i++) {
+    sp_RbVal k = ks->data[i];
+    sp_sym s = (sp_sym)-1;
+    if (k.tag == SP_TAG_SYM) s = (sp_sym)k.v.i;
+    else if (k.tag == SP_TAG_STR) s = sp_sym_intern(k.v.s ? k.v.s : "");
+    else if (is_data) sp_raise_cls("TypeError", sp_sprintf("%s is not a symbol nor a string", sp_poly_inspect(k)));
+    else {
+      sp_int ix = sp_poly_arg_int_chk(k);
+      if (ix < 0) ix += mh->len;
+      if (ix < 0 || ix >= mh->len) return out;
+      s = mh->order[ix];
+    }
+    if (!sp_SymPolyHash_has_key(mh, s)) return out;
+    sp_PolyPolyHash_set(out, k, sp_SymPolyHash_get(mh, s));
+  }
+  return out;
 }
 /* A boxed HANDLE back as its own pointer, for the exclusive-name face: the
    call site compiles the handle's own body against the result, so the runtime
@@ -15267,12 +15504,18 @@ static sp_RbVal sp_poly_compact_val(sp_RbVal v) {
   }
   return sp_box_poly_array(sp_poly_compact(v));
 }
-static sp_PolyArray *sp_poly_flatten(sp_RbVal v) {
-  if (!(v.tag == SP_TAG_OBJ && sp_poly_is_hash_kind(v.cls_id))) sp_poly_ary_chk(v, "flatten", 0);
+/* flatten / flatten(depth) on a boxed receiver: an Array flattens fully by
+   default, a Hash its [key, value] pairs one level (Hash#flatten is
+   to_a.flatten(1)); a depth unwraps that many levels, a negative one all. */
+static sp_PolyArray *sp_poly_flatten_d(sp_RbVal v, sp_int d, int has_d) {
+  int hash = v.tag == SP_TAG_OBJ && sp_poly_is_hash_kind(v.cls_id);
+  if (!hash) sp_poly_ary_chk(v, "flatten", 0);
   sp_PolyArray *src = sp_poly_arr_recv(v, "flatten");
   SP_GC_ROOT(src);
-  return sp_PolyArray_flatten(src);
+  if (!has_d && !hash) return sp_PolyArray_flatten(src);
+  return sp_PolyArray_flatten_depth(src, has_d ? d : 1);
 }
+static sp_PolyArray *sp_poly_flatten(sp_RbVal v) { return sp_poly_flatten_d(v, 0, 0); }
 /* String#gsub / #sub whose pattern is a poly value: a Regexp (the boxed
    compiled pattern) or a String, decided at runtime -- activesupport's
    inflection rules are [pattern, replacement] pairs of either kind, read

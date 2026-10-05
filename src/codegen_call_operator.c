@@ -6,6 +6,7 @@
 #include "codegen_internal.h"
 #include "codegen_poly.h"
 #include "builtin_ops.h"
+#include "repr.h"
 #include "call_plan.h"
 #include "codegen_call_arms.h"
 
@@ -782,23 +783,10 @@ int emit_call_compare_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
     /* an Integer or a Float reads its nil sentinel at run time, as nil?
        does: the nullable-value analysis does not see every way nil reaches
        one (a method's parameter only nil is passed to, a splat of a boxed
-       Array), and folded, a nil answered true to is_a?(Integer) */
+       Array), and folded, a nil answered true to is_a?(Integer). A nullable
+       String slot holds nil as NULL and answers the same way. */
     if (emit_scalar_class_test(c, recv, eff_rt, nt_str(nt, argv[0], "name"),
                                sp_streq(name, "instance_of?"), b)) return 1;
-    /* A nullable String slot answers at run time too: nil is a NilClass and
-       is not a String, whatever the slot's kind says. Object and its
-       ancestors hold for nil too. */
-    if (yes >= 0 && eff_rt == TY_STRING) {
-      const char *kn = nt_str(nt, argv[0], "name");
-      int nilcls = kn && sp_streq(kn, "NilClass");
-      int univ = kn && is_object_root(kn);
-      if (nilcls || (yes && !univ)) {
-        int tn = ++g_tmp;
-        buf_puts(b, "({ "); emit_ctype(c, eff_rt, b); buf_printf(b, " _t%d = ", tn); emit_expr(c, recv, b);
-        buf_printf(b, "; %s(_t%d == NULL); })", nilcls ? "" : "!", tn);
-        return 1;
-      }
-    }
     if (yes >= 0) { buf_puts(b, "((void)("); emit_expr(c, recv, b); buf_printf(b, "), %d)", yes); return 1; }
   }
 
@@ -998,7 +986,7 @@ int emit_call_operator_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
            receiver itself, as for the appends */
         buf_printf(b, "({ sp_String *_t%d = %s; sp_String_set_bin(_t%d, (&(\"\\xff\")[1]));",
                    tC2, srefC, tC2);
-        if (c->strbuf_box[id]) buf_printf(b, " _t%d; })", tC2);
+        if (repr_of(c, id).handle) buf_printf(b, " _t%d; })", tC2);
         else buf_printf(b, " sp_String_cstr(_t%d); })", tC2);
         return 1;
       } }
@@ -1097,10 +1085,10 @@ int emit_call_operator_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
   /* A reader call handing out the shared handle takes the same statement,
      through its shim (#3227). */
   if (recv >= 0 && sp_streq(name, "[]=") && (argc == 2 || argc == 3) &&
-      ((comp_ntype(c, recv) == TY_STRING &&
+      ((repr_of(c, recv).as_ty == TY_STRING &&
         nt_type(nt, recv) && (sp_streq(nt_type(nt, recv), "LocalVariableReadNode") ||
                               sp_streq(nt_type(nt, recv), "InstanceVariableReadNode"))) ||
-       (comp_ntype(c, recv) == TY_STRBUF && nt_kind(nt, recv) == NK_CallNode))) {
+       (repr_of(c, recv).as_ty == TY_STRBUF && nt_kind(nt, recv) == NK_CallNode))) {
     /* the value is evaluated once, into a temp the store reads and the
        expression answers: evaluated again after the store, a call with
        effects ran twice, and a value the store read through a boxed

@@ -2183,6 +2183,21 @@ static void class_note_included_mod(Compiler *c, int ci, int mod_ci) {
   cif->included_mods[cif->nincluded_mods++] = mod_ci;
 }
 
+/* A copied &block has the same Proc-or-NULL ABI as the original. It is
+   outside pnames, so copying the positional/keyword locals does not register
+   it. Seed it before inference; otherwise the body walk leaves an ordinary
+   UNKNOWN local which late widening turns into POLY. Reassignments already
+   use a separate local from desugar_blk_param_writes. */
+static void scope_copy_block_param(Scope *dst, const Scope *src) {
+  if (!src->blk_param) return;
+  dst->blk_param = strdup(src->blk_param);
+  if (dst->blk_param[0]) {
+    LocalVar *lv = scope_local_intern(dst, dst->blk_param);
+    lv->is_param = 1;
+    lv->type = TY_PROC;
+  }
+}
+
 /* Copy module `mod_ci`'s instance methods onto subclass `newci` (obj.extend). */
 static void sg_transplant_module(Compiler *c, int mod_ci, int newci) {
   const NodeTable *nt = c->nt;
@@ -2223,7 +2238,7 @@ static void sg_transplant_module(Compiler *c, int mod_ci, int newci) {
     dst->kwrest_idx = src->kwrest_idx;
     src->is_transplanted_source = 1;   /* the module original is copied away */
     dst->origin_module_ci = mod_ci + 1;  /* #owner names the module (#3662) */
-    if (src->blk_param) dst->blk_param = strdup(src->blk_param);
+    scope_copy_block_param(dst, src);
     dst->nparams = src->nparams;
     if (src->nparams > 0) {
       dst->pnames = malloc(sizeof(char *) * (size_t)src->nparams);
@@ -5051,7 +5066,8 @@ void process_include_body(Compiler *c, int ci, int body_node) {
     int anode = nt_ref(nt, s, "arguments");
     int an = 0;
     const int *args = anode >= 0 ? nt_arr(nt, anode, "arguments", &an) : NULL;
-    for (int j = 0; j < an; j++) {
+    /* `include A, B` includes B first, so A ends up in front (as extend) */
+    for (int j = an - 1; j >= 0; j--) {
       const char *aty = nt_type(nt, args[j]);
       const char *mname = (aty && (sp_streq(aty, "ConstantReadNode") || sp_streq(aty, "ConstantPathNode"))) ? nt_str(nt, args[j], "name") : NULL;
       int mod_id = mname ? comp_class_index(c, mname) : -1;
@@ -5238,7 +5254,7 @@ else {
         dst->nrequired = src->nrequired;
         dst->rest_idx = src->rest_idx;
         dst->kwrest_idx = src->kwrest_idx;
-        if (src->blk_param) dst->blk_param = strdup(src->blk_param);
+        scope_copy_block_param(dst, src);
         /* ...but a module_function original keeps its module-side spelling:
            `Rt.peek` is a real call whoever also includes Rt, so the source is
            not copied AWAY, only copied FROM. */
@@ -5940,7 +5956,7 @@ static void specialize_cmethod_for(Compiler *c, int mi, int def_cls, int ci) {
     dst->ret = ty_object(ci);
     dst->ret_specialized = 1;
   }
-  if (src->blk_param) dst->blk_param = strdup(src->blk_param);
+  scope_copy_block_param(dst, src);
   scope_copy_params(dst, src);
   scope_own_defaults(c, dst_idx);
   src = &c->scopes[mi]; dst = &c->scopes[dst_idx];
@@ -6326,7 +6342,7 @@ static void process_prepend_body(Compiler *c, int ci, int body) {
             dst->rest_idx = sc->rest_idx;
             dst->kwrest_idx = sc->kwrest_idx;
             dst->ret = sc->ret;
-            if (sc->blk_param) dst->blk_param = strdup(sc->blk_param);
+            scope_copy_block_param(dst, sc);
             /* register_locals has already run, so the parameters have to be
                copied across by hand and their locals re-interned -- exactly
                what the include clone does, and the half my first attempt at
@@ -6909,6 +6925,10 @@ static int pivs_param(Compiler *c, Scope *s, const char *pn, char *set, int dept
   for (int k = 0; k < on && i < 0; k++)
     if (sp_streq(nt_str(nt, op[k], "name"), pn)) { i = rn + k; dflt = nt_ref(nt, op[k], "value"); }
   if (i < 0) return 0;
+  /* Optional arguments precede the post-required arguments only when supplied. */
+  int posts = 0;
+  if (ps >= 0) nt_arr(nt, ps, "posts", &posts);
+  if (i >= rn && posts > 0) return 0;
   int si = (int)(s - c->scopes);
   for (int w = comp_lvw_first_sc(c, si, pn); w >= 0; w = comp_lvw_next_sc(c, w))
     if (c->nscope[w] == si && sp_streq(nt_str(nt, w, "name"), pn)) return 0;
@@ -6959,8 +6979,8 @@ static int pivs_local(Compiler *c, int v, char *set, int depth, int elems) {
     const char *un = nt_str(nt, u, "name");
     int known = 0;
     for (int j = 0; IT[j] && un && !known; j++) known = sp_streq(un, IT[j]);
-    if (!known || at != 0 || elems || rn != 1 && !sp_streq(un, "each_with_index") &&
-        !sp_streq(un, "each_with_object")) return 0;
+    if (!known || at != 0 || elems ||
+        (rn != 1 && !sp_streq(un, "each_with_index") && !sp_streq(un, "each_with_object"))) return 0;
     /* reassigned, it is not only the element */
     for (int w = comp_lvw_first_sc(c, si, vn); w >= 0; w = comp_lvw_next_sc(c, w))
       if (c->nscope[w] == si && sp_streq(nt_str(nt, w, "name"), vn)) return 0;
@@ -6990,9 +7010,11 @@ static int pivs_local(Compiler *c, int v, char *set, int depth, int elems) {
           for (int k = 0; k < ac; k++) if (!pivs_elems(c, av[k], set, depth + 1)) return 0;
         }
         else if (sp_streq(un, "[]=")) {
-          if (ac < 2 || !pivs_value(c, av[ac - 1], set, depth + 1)) return 0;
+          if (ac != 2 || nt_kind(nt, av[0]) != NK_IntegerNode) return 0;
+          if (!pivs_value(c, av[1], set, depth + 1)) return 0;
         }
-        else if (array_mutator_name(un) || nt_ref(nt, u, "block") >= 0 && nt_kind(nt, nt_ref(nt, u, "block")) == NK_BlockArgumentNode)
+        else if (array_mutator_name(un) ||
+                 (nt_ref(nt, u, "block") >= 0 && nt_kind(nt, nt_ref(nt, u, "block")) == NK_BlockArgumentNode))
           return 0;
       }
       /* handed as an argument it may be kept and grown, except to the
@@ -7100,7 +7122,8 @@ static int pivs_value(Compiler *c, int v, char *set, int depth) {
       if ((sp_streq(un, "[]") && ac == 1) || ((sp_streq(un, "first") || sp_streq(un, "last") ||
            sp_streq(un, "sample") || sp_streq(un, "shift") || sp_streq(un, "pop") || sp_streq(un, "min") ||
            sp_streq(un, "max")) && ac == 0) || ((sp_streq(un, "fetch") || sp_streq(un, "at")) && ac == 1))
-        return pivs_elems(c, r, set, depth + 1);
+        return (sp_streq(un, "fetch") && nt_ref(nt, v, "block") >= 0)
+                 ? 0 : pivs_elems(c, r, set, depth + 1);
       if ((sp_streq(un, "itself") || sp_streq(un, "dup") || sp_streq(un, "clone")) && ac == 0)
         return pivs_value(c, r, set, depth + 1);
       return 0;

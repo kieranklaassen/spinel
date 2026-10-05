@@ -108,6 +108,13 @@ typedef struct {
   int obj_nil_written; /* codegen's memo for an object-typed local: 1 when a
                        write in its scope stores nil, 2 when none does, 0 not
                        yet asked (#7262) */
+  int obj_may_nil;  /* (object-typed slots: locals, parameters, block
+                       parameters, globals, constants) the nil fact
+                       (analyze_nil.c, #7444): a read of the slot may answer
+                       nil -- a write stores a value that may be nil, a read
+                       can run before any write, a call site binds nil. Read
+                       through repr_of_slot's may_nil. Nonzero: where the
+                       nil comes from (NFW_*, analyze.h). */
   int box_nullable; /* an int parameter bound from an ivar that can be read
                        before anything assigned it: only BOXING it has to
                        yield nil. Kept apart from nullable_int, which also
@@ -357,6 +364,9 @@ typedef struct {
                            methods (`def pass(x) = x.p_`) and methods whose value
                            is their block's (`def key_of(x) = yield x`), which no
                            RBS signature covers (#3505). */
+  int ret_obj_may_nil; /* the nil fact for the method's value (analyze_nil.c,
+                          #7444): its body's value or a `return` may be nil;
+                          nonzero, where the nil comes from (NFW_*) */
   TyKind ret_oa_pin;   /* the pointer-array return type the narrowing pass gave
                           this method, re-asserted every round for the same
                           reason LocalVar.oa_pin is. TY_UNKNOWN = not narrowed. */
@@ -443,6 +453,12 @@ typedef struct {
                                      write pass replaced the narrowed type with
                                      something strictly worse. */
   int nivars, civars;
+  unsigned char *ivar_obj_may_nil; /* the nil fact per ivar (analyze_nil.c,
+                                     #7444), indexed as ivars was when the
+                                     analysis computed it, so read by name
+                                     (nil_fact_ivar); n_ivar_obj_may_nil
+                                     entries */
+  int n_ivar_obj_may_nil;
   char **rbs_pin_ivars; /* ivar names (incl '@') pinned by an --rbs seed: the
                            fixpoint must not widen their type */
   int n_rbs_pin_ivars, c_rbs_pin_ivars;
@@ -709,6 +725,10 @@ typedef struct {
   TyKind *nilnarrow; /* [node_cap] param-read narrowed by a `return .. if p.nil?`
                         guard: the read's non-nil type (codegen unboxes the poly
                         slot at the read site); TY_UNKNOWN = not narrowed */
+  unsigned char *nil_fact; /* [nil_fact_n] the nil fact per node (analyze_nil.c,
+                        #7444): NF_MAY_NIL when the node's value may be nil,
+                        NF_NOT_NIL when it cannot; read through nil_fact_node */
+  int nil_fact_n;
   int *nscope;      /* [node_cap] node id -> owning scope index */
   int *node_cbody;  /* [node_cap] node id -> enclosing class/module-body class id, or -1 */
   char *empty_arr_recv; /* [node_cap] empty `[]` used as a direct receiver/interpolation -> TY_POLY_ARRAY */
@@ -771,12 +791,28 @@ typedef struct {
   unsigned kind_version;
   int kind_built;
 
+  /* ReturnNode-by-scope chain; see comp_sret_first */
+  int *sret_head;       /* [sret_nscopes] first ReturnNode id in each scope */
+  int *sret_next;       /* [sret_count] next ReturnNode id in the same scope */
+  int sret_nscopes, sret_count;
+  unsigned sret_version;
+  int sret_built;
+
   /* CallNode-by-scope chain; see comp_scall_first */
   int *scall_head;      /* [scall_nscopes] first CallNode id in each scope */
   int *scall_next;      /* [scall_count] next CallNode id in the same scope */
   int scall_nscopes, scall_count;
   unsigned scall_version;
   int scall_built;
+
+  /* (CallNode, ivar-read argument)-by-ivar-name index; see comp_ivarg_first */
+  int *ivarg_head;      /* [ivarg_nbuckets] first entry in each name bucket */
+  int *ivarg_next;      /* [ivarg_count] next entry sharing the bucket */
+  int *ivarg_call;      /* [ivarg_count] an entry's CallNode */
+  int *ivarg_arg;       /* [ivarg_count] its InstanceVariableReadNode argument */
+  int ivarg_nbuckets, ivarg_count;
+  unsigned ivarg_version;
+  int ivarg_built;
 
   char **symbols;   /* interned symbol names; index = sp_sym id */
   size_t *symbol_lens;  /* each name's BYTE length: a name may hold a NUL, and
@@ -927,8 +963,15 @@ int comp_lvw_first_sc(Compiler *c, int scope_idx, const char *name);
 int comp_lvw_next_sc(const Compiler *c, int w);
 int comp_scall_first(Compiler *c, int scope_idx);
 int comp_scall_next(const Compiler *c, int u);
+int comp_ivarg_first(Compiler *c, const char *name);
+void comp_ivarg_invalidate(Compiler *c);
+int comp_ivarg_next(const Compiler *c, int e);
+int comp_ivarg_call(const Compiler *c, int e);
+int comp_ivarg_arg(const Compiler *c, int e);
 int comp_kind_first(Compiler *c, int kind);
 int comp_kind_next(const Compiler *c, int id);
+int comp_sret_first(Compiler *c, int scope_idx);
+int comp_sret_next(const Compiler *c, int r);
 int comp_bare_gets_is_argf(Compiler *c);
 int    comp_method_index(Compiler *c, const char *name); /* -1 if none */
 /* A receiverless call's target: the enclosing self's ancestry first, a

@@ -26,7 +26,7 @@ cd "$ROOT" || exit 2
 REV=${1-}
 [ -n "$REV" ] || { echo "usage: $0 <ref-rev>" >&2; exit 2; }
 SHA=$(git rev-parse --verify -q "$REV^{commit}") || { echo "cident: unknown revision $REV" >&2; exit 2; }
-JOBS=${CIDENT_JOBS:-$(nproc)}
+JOBS=${CIDENT_JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu)}
 NEW=$ROOT/bin/spinel
 [ -x "$NEW" ] || { echo "cident: build bin/spinel first" >&2; exit 2; }
 
@@ -54,15 +54,41 @@ emit() {
 CIDENT_FLAGS=${CIDENT_FLAGS-}
 export CIDENT_FLAGS
 FLAGKEY=$(printf "%s" "$CIDENT_FLAGS" | tr -c 'A-Za-z0-9=' '_')
-REFDIR=$ROOT/build/cident/$SHA${FLAGKEY:+-$FLAGKEY}
+# Include supporting files as well as entry points: require_relative and
+# compile-time reads can change a program without changing its own bytes.
+CORPUS=$(find test benchmark packages/*/test -type f 2>/dev/null; [ -f "$OC" ] && echo "$OC")
+CORPUS=$(printf '%s\n' "$CORPUS" | LC_ALL=C sort)
+CORPUSKEY=$({
+  printf '%s\n' "$CORPUS"
+  printf '%s\n' "$CORPUS" | git hash-object --stdin-paths
+} | git hash-object --stdin)
+REFDIR=$ROOT/build/cident/$SHA${FLAGKEY:+-$FLAGKEY}-$CORPUSKEY
+# A cold cache has one builder. Hold the lock through comparison so no
+# other run can remove or read its outputs while they are being written.
+# The lock is flock(2) on fd 9, which the kernel drops once no process
+# holds that descriptor any more, however the holder ended: a run killed
+# with SIGKILL leaves no stale lock, and compiles it orphaned keep the
+# cache locked only until they exit. macOS has no flock(1); perl has flock.
+LOCK=$REFDIR.lock
+mkdir -p "$(dirname "$REFDIR")"
+exec 9>"$LOCK"
+cident_lock() {
+  perl -MFcntl=:flock -e 'open(my $fh, ">&=", 9) or die "cident: cannot lock: $!\n";
+    flock($fh, LOCK_EX) or die "cident: cannot lock: $!\n"'
+}
+cident_lock || exit 2
+trap 'exit 2' HUP INT TERM
 if [ ! -f "$REFDIR/.done" ]; then
   # The C embeds the compiler's own tree path in a few string literals,
   # together with their lengths. A reference tree at a path of the same
   # length as this one lets a plain rename make those bytes equal.
   L=${#ROOT}
   # the process id keeps two runs against the same revision (from two
-  # checkouts whose paths have the same length) out of each other's tree
-  WT=$(printf "/tmp/cident-%s-%s%0100d" "$$" "$SHA" 0 | cut -c1-"$L")
+  # checkouts whose paths have the same length) out of each other's tree.
+  # The compiler embeds the resolved path, so /tmp is resolved too (it is
+  # /private/tmp on macOS).
+  TMPD=$(cd /tmp && pwd -P)
+  WT=$(printf "%s/cident-%s-%s%0100d" "$TMPD" "$$" "$SHA" 0 | cut -c1-"$L")
   [ "$L" -ge 20 ] && [ ${#WT} -eq "$L" ] || { echo "cident: cannot place a reference tree beside $ROOT" >&2; exit 2; }
   git worktree remove --force "$WT" >/dev/null 2>&1; rm -rf "$WT"
   git worktree add --detach "$WT" "$SHA" >/dev/null 2>&1 || { echo "cident: cannot check out $REV" >&2; exit 2; }
@@ -78,7 +104,10 @@ if [ ! -f "$REFDIR/.done" ]; then
   for d in packages/*/test; do mkdir -p "$WT/$d" && cp -r "$d/." "$WT/$d/"; done
   [ -f "$OC" ] && mkdir -p "$WT/build" && cp "$OC" "$WT/$OC"
   emit "$WT/bin/spinel" "$WT" "$REFDIR"
-  for c in "$REFDIR"/*.c; do [ -f "$c" ] && LC_ALL=C sed -i "s|$WT|$ROOT|g" "$c"; done
+  # no sed -i: BSD sed takes its argument as a backup suffix
+  for c in "$REFDIR"/*.c; do
+    [ -f "$c" ] && LC_ALL=C sed "s|$WT|$ROOT|g" "$c" > "$c.tmp" && mv "$c.tmp" "$c"
+  done
   git worktree remove --force "$WT" >/dev/null 2>&1
   : > "$REFDIR/.done"
 fi

@@ -175,9 +175,10 @@ no_gsub_enum:
       return 1;
     }
     /* poly receiver `poly =~ /re/`: String#=~ when it holds a string at runtime
-       (e.g. an element read out of an array that widened to poly), nil when it
-       holds nil (NilClass#=~ is always nil); any other tag has no =~ (Object#=~
-       was removed) -> NoMethodError, matching CRuby. */
+       (e.g. an element read out of an array that widened to poly), Symbol#=~
+       (its name) when it holds a Symbol, nil when it holds nil (NilClass#=~ is
+       always nil); any other tag has no =~ (Object#=~ was removed) ->
+       NoMethodError naming its class, matching CRuby. */
     if (are >= 0 && sp_streq(name, "=~") && rpoly) {
       /* Self-contained statement-expression: this can appear in a pure
          expression position (an `if`/ternary condition) where a g_pre prelude
@@ -187,9 +188,10 @@ no_gsub_enum:
       int tv = ++g_tmp;
       buf_printf(b, "({ sp_RbVal _t%d = sp_poly_strbuf_deref(", tv); emit_expr(c, recv, b);
       buf_printf(b, "); (_t%d.tag == SP_TAG_STR ? sp_re_match_poly(sp_re_pat_%d, _t%d.v.s)"
+                    " : _t%d.tag == SP_TAG_SYM ? sp_re_match_poly(sp_re_pat_%d, sp_sym_to_s((sp_sym)_t%d.v.i))"
                     " : _t%d.tag == SP_TAG_NIL ? sp_box_nil()"
-                    " : sp_raise_nomethod(\"undefined method '=~' for poly\")); })",
-                 tv, are, tv, tv);
+                    " : (sp_raise_nomethod(sp_nomethod_msg(\"=~\", _t%d)), sp_box_nil())); })",
+                 tv, are, tv, tv, are, tv, tv, tv);
       return 1;
     }
     /* poly receiver `poly !~ /re/`: nil !~ is always true, a string tests the
@@ -199,9 +201,10 @@ no_gsub_enum:
       int tv = ++g_tmp;
       buf_printf(b, "({ sp_RbVal _t%d = sp_poly_strbuf_deref(", tv); emit_expr(c, recv, b);
       buf_printf(b, "); (_t%d.tag == SP_TAG_STR ? sp_re_match(sp_re_pat_%d, _t%d.v.s) < 0"
+                    " : _t%d.tag == SP_TAG_SYM ? sp_re_match(sp_re_pat_%d, sp_sym_to_s((sp_sym)_t%d.v.i)) < 0"
                     " : _t%d.tag == SP_TAG_NIL ? 1"
-                    " : (sp_raise_nomethod(\"undefined method '=~' for poly\"), 0)); })",
-                 tv, are, tv, tv);
+                    " : (sp_raise_nomethod(sp_nomethod_msg(\"=~\", _t%d)), 0)); })",
+                 tv, are, tv, tv, are, tv, tv, tv);
       return 1;
     }
     if (are >= 0 && sp_streq(name, "!~")) {
@@ -212,6 +215,9 @@ no_gsub_enum:
        string, over its name when it holds a Symbol. NilClass has no match?, so
        nil raises here rather than answering false the way `nil !~` answers
        true. */
+    /* ...unless a program class answers match? itself: the boxed dispatch
+       has its arm, and the String one beside it */
+    if (are >= 0 && sp_streq(name, "match?") && rpoly && poly_name_user_claimed(c, name, argc)) return 0;
     if (are >= 0 && sp_streq(name, "match?") && rpoly) {
       int tv = ++g_tmp;
       /* a shared-string handle is a String (#4279) */
@@ -884,6 +890,12 @@ int emit_call_symbol_bool_string_arms(Compiler *c, int id, Buf *b, const NodeTab
       (sp_streq(name, "each_char") || sp_streq(name, "each_line") || sp_streq(name, "each_byte") ||
        sp_streq(name, "chars") || sp_streq(name, "lines") || sp_streq(name, "bytes") || sp_streq(name, "codepoints"))) {
     int block = nt_ref(nt, id, "block");
+    /* The loop below runs a literal block's body. A block argument that
+       reached here (`s.bytes(&pr)`, `s.chars(&b)` for a method's own &b)
+       has none: the loop ran nothing and answered the receiver, where CRuby
+       calls the proc for each element, or answers the Array when it is nil. */
+    if (nt_kind(nt, block) == NK_BlockArgumentNode)
+      unsupported(c, id, "a String iterator given its block as a block argument (&blk): write the block out, or use each_char / each_byte / each_line");
     int body = nt_ref(nt, block, "body");
     const char *p0 = block_param_name(c, block, 0); if (p0) p0 = rename_local(p0);
     int ts = ++g_tmp, ti = ++g_tmp;
@@ -894,6 +906,10 @@ int emit_call_symbol_bool_string_arms(Compiler *c, int id, Buf *b, const NodeTab
     Scope *cs_ech = p0 ? comp_scope_of(c, id) : NULL;
     LocalVar *clv_ech = (p0 && cs_ech) ? scope_local(cs_ech, p0) : NULL;
     int p0_box_poly_ech = clv_ech && clv_ech->type == TY_POLY;
+    /* a parameter the analysis made a shared handle (the line is stored
+       where an append reaches it): each line is a fresh String, so it is a
+       fresh handle */
+    int p0_handle_ech = clv_ech && clv_ech->type == TY_STRBUF;
     /* The loop below reads the receiver on every turn -- as its bound, and as
        the string it takes the next character or byte out of -- and the block
        between two turns may allocate. A temporary receiver (`array.join.
@@ -936,6 +952,7 @@ int emit_call_symbol_bool_string_arms(Compiler *c, int id, Buf *b, const NodeTab
                  ti, ti, tl, ti);
       if (p0) {
         if (p0_box_poly_ech) buf_printf(b, "lv_%s = sp_box_str(sp_StrArray_get(_t%d, _t%d)); ", p0, tl, ti);
+        else if (p0_handle_ech) buf_printf(b, "lv_%s = sp_String_new_shared(sp_StrArray_get(_t%d, _t%d)); ", p0, tl, ti);
         else buf_printf(b, "lv_%s = sp_StrArray_get(_t%d, _t%d); ", p0, tl, ti);
       }
     }
@@ -961,6 +978,7 @@ int emit_call_symbol_bool_string_arms(Compiler *c, int id, Buf *b, const NodeTab
       buf_printf(b, "for (sp_int _t%d = 0; _t%d < sp_str_length(_t%d); _t%d++) { ", ti, ti, ts, ti);
       if (p0) {
         if (p0_box_poly_ech) buf_printf(b, "lv_%s = sp_box_str(sp_str_char_at_or_nil(_t%d, _t%d)); ", p0, ts, ti);
+        else if (p0_handle_ech) buf_printf(b, "lv_%s = sp_String_new_shared(sp_str_char_at_or_nil(_t%d, _t%d)); ", p0, ts, ti);
         else buf_printf(b, "lv_%s = sp_str_char_at_or_nil(_t%d, _t%d); ", p0, ts, ti);
       }
     }
@@ -1144,7 +1162,7 @@ int emit_op_poly_case_options(Compiler *c, const BopCtx *x, Buf *b) {
 /* Boxed slice! arguments select the same overloads as typed arguments.
    Keep the argument rooted and evaluate it once before re-entering the arms. */
 static int emit_string_slice_poly(Compiler *c, int id, int arg, Buf *b) {
-  if (repr_of(c, arg).kind != RK_BOXED || g_n_argov >= MAX_ARG_OVERRIDE) return 0;
+  if (repr_of(c, arg).kind != RK_BOXED) return 0;
   int ta = ++g_tmp, tr = ++g_tmp;
   buf_printf(b, "({ sp_RbVal _t%d = ", ta); emit_boxed(c, arg, b);
   buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); _t%d = sp_poly_strbuf_deref(_t%d);"
@@ -1218,18 +1236,6 @@ int emit_op_string_slice(Compiler *c, const BopCtx *x, Buf *b) {
                  re_lit_index(c, argv[0]), ts3);
     }
     buf_printf(b, " _hit%d; })", tm3);
-    return 1;
-  }
-  if (argc == 1 && re_lit_index(c, argv[0]) >= 0) {
-    /* slice!(regexp): the removed first match (or nil), reassigning an
-       lvalue receiver with the remainder; sets the match registers. */
-    int to = ++g_tmp, ts2 = ++g_tmp, tr2 = ++g_tmp;
-    buf_printf(b, "({ const char *_t%d = ", to); emit_expr(c, recv, b);
-    buf_printf(b, "; const char *_t%d = _t%d;"
-                  " const char *_t%d = sp_str_slice_re(sp_re_pat_%d, _t%d, &_t%d);",
-               ts2, to, tr2, re_lit_index(c, argv[0]), to, ts2);
-    if (sb_asgn) { buf_puts(b, " "); emit_expr(c, recv, b); buf_printf(b, " = _t%d;", ts2); }
-    buf_printf(b, " _t%d; })", tr2);
     return 1;
   }
   if (argc == 1 && (comp_ntype(c, argv[0]) == TY_INT || comp_ntype(c, argv[0]) == TY_RANGE)) {
