@@ -10228,6 +10228,10 @@ static SP_NOINLINE sp_RbVal sp_poly_arr_get_hash_cold(sp_RbVal a, sp_int i) {
      when out of range. A String that widened to poly (e.g. a method with
      multiple return paths) reaches this generic index path; without this arm
      it fell through to sp_poly_arr_get and silently returned nil. */
+  /* Symbol#[int] is String#[int] on the Symbol's name, as its two-argument,
+     Range and Regexp forms already are: a Symbol read out of a container
+     matched no arm here and answered nil. */
+  if (a.tag == SP_TAG_SYM) a = sp_box_str(sp_sym_to_s((sp_sym)a.v.i));
   if (a.tag == SP_TAG_STR) {
     const char *s = a.v.s ? a.v.s : "";
     sp_int cl = sp_str_length(s);
