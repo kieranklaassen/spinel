@@ -2292,6 +2292,116 @@ static const char *lv_op_assign_src(Compiler *c, const char *lval, TyKind t,
   return tn;
 }
 
+/* A read of a local or an instance variable that holds a String handle: the
+   slot itself (strbuf_slot_ref's two slot forms). */
+static int strbuf_slot_read(Compiler *c, int n) {
+  if (strbuf_local_name(c, n)) return 1;
+  if (n < 0 || nt_kind(c->nt, n) != NK_InstanceVariableReadNode) return 0;
+  const char *nm = nt_str(c->nt, n, "name");
+  int cid = nm ? strbuf_ivar_owner(c, n) : -1;
+  int iv = cid >= 0 ? comp_ivar_index(&c->classes[cid], nm) : -1;
+  return iv >= 0 && c->classes[cid].ivar_types[iv] == TY_STRBUF;
+}
+/* An append chain that renders its base's handle: each link marked to
+   answer the handle (emit_string_handle_append) down to such a slot, or
+   down to a link from which the chain emitter marks the rest itself
+   (emit_str_append_chain_handle). A chain on a global, a constant or a
+   call's result carries the mark on its last link all the same and renders
+   a plain String. */
+static int strbuf_chain_on_slot(Compiler *c, int v) {
+  const NodeTable *nt = c->nt;
+  for (;;) {
+    if (v < 0 || nt_kind(nt, v) != NK_CallNode || nt_ref(nt, v, "block") >= 0) return 0;
+    const char *nm = nt_str(nt, v, "name");
+    int an = nt_ref(nt, v, "arguments"), argc = 0, links[64];
+    if (an >= 0) nt_arr(nt, an, "arguments", &argc);
+    Repr rp = repr_of(c, v);
+    if (!nm || !is_append_concat(nm) || argc < 1 || !rp.handle || rp.kind != RK_STRBUF) return 0;
+    if (str_append_chain_links(c, v, links)) return 1;
+    v = unwrap_parens(c, nt_ref(nt, v, "receiver"));
+    if (strbuf_slot_read(c, v)) return 1;
+  }
+}
+/* A String no other name holds yet: a literal, an interpolation, `+` of
+   either, and `x.dup`, `a + b` and `a * n` on a String. */
+static int strbuf_value_fresh(Compiler *c, int v) {
+  const NodeTable *nt = c->nt;
+  v = unwrap_parens(c, v);
+  if (v < 0) return 0;
+  NodeKind k = nt_kind(nt, v);
+  if (k == NK_StringNode || k == NK_InterpolatedStringNode) return 1;
+  if (k != NK_CallNode || nt_ref(nt, v, "block") >= 0) return 0;
+  const char *nm = nt_str(nt, v, "name");
+  int r = unwrap_parens(c, nt_ref(nt, v, "receiver")), an = nt_ref(nt, v, "arguments"), argc = 0;
+  if (an >= 0) nt_arr(nt, an, "arguments", &argc);
+  if (!nm || r < 0) return 0;
+  NodeKind rk = nt_kind(nt, r);
+  if (argc == 0 && sp_streq(nm, "+@")) return rk == NK_StringNode || rk == NK_InterpolatedStringNode;
+  TyKind rt = comp_ntype(c, r);
+  if (rt != TY_STRING && rt != TY_STRBUF) return 0;
+  return argc == 0 ? sp_streq(nm, "dup") : argc == 1 && (sp_streq(nm, "+") || sp_streq(nm, "*"));
+}
+/* Is the plain write of `v` into String-handle local `lv` proven to leave in
+   the slot the handle of the String CRuby would name there? emit_strbuf_value's
+   arms in its order, and of them only these:
+     nil                                  the NULL handle
+     a slot that holds a handle, `+slot`  that handle
+     `u = v` with u such a local          u's handle
+     an append chain on such a slot       that handle
+     a String no other name holds         a new handle over it
+   An arm that hands the value over as it renders is not among them, and
+   neither is a new handle over a String that has another name (a global, a
+   constant, a call's result, a box): that handle parts the two names. */
+static int strbuf_value_proven_handle(Compiler *c, LocalVar *lv, int v) {
+  const NodeTable *nt = c->nt;
+  if (v < 0) return 0;
+  NodeKind k = nt_kind(nt, v);
+  if (k == NK_NilNode) return 1;
+  int shared = repr_of_slot(c, lv).handle;
+  if (shared) {
+    int up = strbuf_uplus_operand(c, v);
+    if (strbuf_slot_read(c, v) || strbuf_slot_read(c, up)) return 1;
+    if (up >= 0 && nt_kind(nt, up) == NK_CallNode && (c->strbuf_box[up] || c->strbuf_handle_demand[up])) return 0;
+    int aw = strbuf_ivar_alias_value(nt, v);
+    if ((aw >= 0 && nt_kind(nt, aw) != NK_InstanceVariableReadNode) || strbuf_cond_has_handle_leaf(c, v, 0)) return 0;
+    if (k == NK_LocalVariableWriteNode) {
+      const char *un = nt_str(nt, v, "name");
+      LocalVar *ul = un ? scope_local(comp_scope_of(c, v), un) : NULL;
+      if (repr_of_slot(c, ul).handle) return 1;
+    }
+  }
+  TyKind vt = repr_of(c, v).as_ty;
+  if (vt == TY_STRBUF) {
+    if (k != NK_CallNode || c->strbuf_handle_demand[v]) return 0;
+    return strbuf_marked_yields_handle(c, v) ? strbuf_chain_on_slot(c, v) : strbuf_value_fresh(c, v);
+  }
+  if (vt != TY_STRING || c->strbuf_box[v] || strbuf_boxed_elem_read(c, v)) return 0;
+  int cb = str_alias_chain_base(c, v);
+  if (cb != v && shared && strbuf_slot_read(c, cb)) return 1;
+  return strbuf_value_fresh(c, cb);
+}
+/* Is every write of String-handle local `lv`, other than a `+=`, one the
+   list above proves? A parameter is bound by its callers and a target (of a
+   multiple assignment, a pattern, a rescue, a named capture) by an emitter
+   of its own: neither is on the list. */
+static int strbuf_local_writes_proven(Compiler *c, LocalVar *lv, const char *nm) {
+  const NodeTable *nt = c->nt;
+  if (lv->is_param || lv->is_block_param) return 0;
+  for (int w = comp_lvw_first(c, nm); w >= 0; w = comp_lvw_next(c, w)) {
+    const char *wn = nt_str(nt, w, "name");
+    if (!wn || !sp_streq(wn, nm) || scope_local(comp_scope_of(c, w), nm) != lv) continue;
+    NodeKind k = nt_kind(nt, w);
+    if (k == NK_LocalVariableOperatorWriteNode) {
+      const char *op = nt_str(nt, w, "binary_operator");
+      if (!op || !sp_streq(op, "+")) return 0;
+      continue;
+    }
+    if (k != NK_LocalVariableWriteNode && k != NK_LocalVariableOrWriteNode) return 0;
+    if (!strbuf_value_proven_handle(c, lv, nt_ref(nt, w, "value"))) return 0;
+  }
+  return 1;
+}
+
 static void emit_op_assign_lv(Compiler *c, int id, Buf *b, int indent,
                               const char *lval) {
   const NodeTable *nt = c->nt;
@@ -2336,7 +2446,7 @@ static void emit_op_assign_lv(Compiler *c, int id, Buf *b, int indent,
      the sum, and one that grows it cannot leave the read pointing at freed
      bytes. The operand converts as String#+ converts it (to_str, else
      TypeError); sp_str_plus raises for a nil receiver. */
-  if (t == TY_STRBUF && sp_streq(op, "+")) {
+  if (t == TY_STRBUF && sp_streq(op, "+") && strbuf_local_writes_proven(c, lv, nm)) {
     const char *rd = lv_op_assign_src(c, lval, t, cap, rtn, sizeof rtn);
     int k = ++g_tmp;
     buf_printf(b, "{ const char *_t%d = ", k);
