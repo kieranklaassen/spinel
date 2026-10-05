@@ -39,3 +39,4 @@ FrozenError
 "rescued"
 "rescued"
 "abcdef"
+"IndexError: negative length -1"

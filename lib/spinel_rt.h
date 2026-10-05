@@ -6765,8 +6765,9 @@ static inline sp_bool sp_poly_holds_str(sp_RbVal v) {
    IndexError the unfrozen store raises (sp_str_splice_at), and only a store
    that would be made is the FrozenError. It does not return, so the store's
    own path tests frozen once. A value that is no String is CRuby's
-   TypeError before either, which is not raised here yet: its store keeps
-   the order it had. */
+   TypeError once the length is known not to be negative and before the
+   start is looked at. That is not raised here yet: past the length its
+   store keeps the order it had. */
 static SP_NORETURN SP_COLD SP_NOINLINE void sp_str_frozen_store_index(const char *s, sp_int start, sp_int len) {
   sp_int n = (sp_int)sp_str_length(s);
   if (len < 0) sp_raise_cls("IndexError", sp_sprintf("negative length %lld", (long long)len));
@@ -6779,7 +6780,7 @@ static sp_RbVal sp_poly_splice(sp_RbVal recv, sp_int start, sp_int len, sp_RbVal
      store back, while a shared handle absorbs it in place -- which is the only
      form an element receiver can use, and the write was silently dropped
      before (#3940). */
-  if (recv.tag == SP_TAG_STR && recv.v.s && sp_str_is_frozen_val(recv.v.s) && sp_poly_holds_str(src)) sp_str_frozen_store_index(recv.v.s, start, len);
+  if (recv.tag == SP_TAG_STR && recv.v.s && sp_str_is_frozen_val(recv.v.s) && (len < 0 || sp_poly_holds_str(src))) sp_str_frozen_store_index(recv.v.s, start, len);
   if (recv.tag == SP_TAG_STR && recv.v.s && sp_str_is_frozen_val(recv.v.s)) sp_raise_frozen_str(recv.v.s);   /* #6328 */
   if (recv.tag == SP_TAG_STR || sp_poly_is_strbuf(recv)) {
     const char *cur = (recv.tag == SP_TAG_STR) ? (recv.v.s ? recv.v.s : sp_str_empty)

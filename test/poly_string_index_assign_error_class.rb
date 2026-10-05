@@ -78,3 +78,5 @@ p held { fz[9] = bn }
 p held { fz[9, 1] = bv }
 p held { fz[-9] = bv }
 p fz
+# a negative length is looked at before the value
+p try { fz[1, -1] = bv }
