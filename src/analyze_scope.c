@@ -2278,6 +2278,55 @@ static int superclass_includes_mod(Compiler *c, int ci, int mod_ci) {
   return 0;
 }
 
+/* The `prepend M` statements of the class bodies, as (class, module,
+   statement) triples: register_includes lists them, since the prepends
+   themselves are registered after every include. */
+static int *g_prep_stmts;
+static int g_nprep_stmts;
+
+static void list_prepend_stmts(Compiler *c, const int *bci, const int *bnode, int nb) {
+  const NodeTable *nt = c->nt;
+  for (int b = 0; b < nb; b++) {
+    int n = 0;
+    const int *stmts = bnode[b] >= 0 ? nt_arr(nt, bnode[b], "body", &n) : NULL;
+    for (int k = 0; k < n; k++) {
+      int s = stmts[k];
+      if (nt_kind(nt, s) != NK_CallNode || nt_ref(nt, s, "receiver") >= 0) continue;
+      const char *nm = nt_str(nt, s, "name");
+      if (!nm || !sp_streq(nm, "prepend")) continue;
+      int anode = nt_ref(nt, s, "arguments");
+      int an = 0;
+      const int *args = anode >= 0 ? nt_arr(nt, anode, "arguments", &an) : NULL;
+      for (int j = 0; j < an; j++) {
+        NodeKind ak = nt_kind(nt, args[j]);
+        const char *mname = (ak == NK_ConstantReadNode || ak == NK_ConstantPathNode) ? nt_str(nt, args[j], "name") : NULL;
+        int mod_id = mname ? comp_class_index(c, mname) : -1;
+        if (mod_id < 0) continue;
+        int *np = realloc(g_prep_stmts, sizeof(int) * 3 * (size_t)(g_nprep_stmts + 1));
+        if (!np) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+        g_prep_stmts = np;
+        np[3 * g_nprep_stmts] = bci[b]; np[3 * g_nprep_stmts + 1] = mod_id; np[3 * g_nprep_stmts + 2] = s;
+        g_nprep_stmts++;
+      }
+    }
+  }
+}
+
+/* Has the class prepended the module in a statement that comes before
+   `stmt`? */
+static int prepended_before(Compiler *c, int ci, int mod_ci, int stmt) {
+  for (int q = 0; q < g_nprep_stmts; q++)
+    if (g_prep_stmts[3 * q] == ci && g_prep_stmts[3 * q + 1] == mod_ci && g_prep_stmts[3 * q + 2] < stmt) return 1;
+  return 0;
+}
+
+/* Has a superclass of ci? */
+static int superclass_prepended_before(Compiler *c, int ci, int mod_ci, int stmt) {
+  for (int k = c->classes[ci].parent, n = 0; k >= 0 && n <= c->nclasses; k = c->classes[k].parent, n++)
+    if (prepended_before(c, k, mod_ci, stmt)) return 1;
+  return 0;
+}
+
 /* Copy module `mod_ci`'s instance methods onto subclass `newci` (obj.extend). */
 static void sg_transplant_module(Compiler *c, int mod_ci, int newci) {
   const NodeTable *nt = c->nt;
@@ -5309,8 +5358,13 @@ void process_include_body(Compiler *c, int ci, int body_node) {
       /* record membership for `rescue M` matching (dedup across reopenings) */
       class_note_included_mod(c, ci, mod_id);
       /* A module a superclass includes by now is in this class's chain
-         already, behind that superclass, and `include` adds nothing. */
-      int in_chain = superclass_includes_mod(c, ci, mod_id);
+         already, behind that superclass, and `include` adds nothing. So is
+         a module a superclass has prepended by now: it stands in front of
+         that class. */
+      int in_chain = superclass_includes_mod(c, ci, mod_id) || superclass_prepended_before(c, ci, mod_id, s);
+      /* And one the class itself has prepended by now. Its copy in front
+         is typed by this same class. */
+      int in_front = prepended_before(c, ci, mod_id, s);
       /* snapshot count before adding new scopes to avoid re-scanning them */
       int snap = c->nscopes;
       for (int ms = 0; ms < snap; ms++) {
@@ -5320,7 +5374,7 @@ void process_include_body(Compiler *c, int ci, int body_node) {
            One that asks nothing of its receiver runs the same in the copy
            the superclass holds, and is not copied again; any other keeps
            its own copy, typed by this class's methods. */
-        if (in_chain && scope_body_has_super(c, ms) && !module_function_self_dependent(c, ms)) continue;
+        if (scope_body_has_super(c, ms) && (in_front || (in_chain && !module_function_self_dependent(c, ms)))) continue;
         /* a module_function method whose body depends on its receiver needs a
            per-includer copy; everything else class-level stays module-side */
         if (src->is_cmethod &&
@@ -5496,6 +5550,7 @@ void register_includes(Compiler *c) {
      falls back to source order. */
   int *bci, *bnode;
   int nb = class_body_list(c, &bci, &bnode);
+  list_prepend_stmts(c, bci, bnode, nb);
   int *remaining = calloc((size_t)c->nclasses, sizeof(int));
   char *done = calloc((size_t)nb, 1);
   for (int b = 0; b < nb; b++) remaining[bci[b]]++;
@@ -5526,6 +5581,7 @@ void register_includes(Compiler *c) {
     }
   }
   free(bci); free(bnode); free(remaining); free(done);
+  free(g_prep_stmts); g_prep_stmts = NULL; g_nprep_stmts = 0;
   if (g_inc_did_clone) register_locals(c);
 }
 
