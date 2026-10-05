@@ -4760,7 +4760,13 @@ static void emit_zip_block_param(Compiler *c, TyKind slot, TyKind src_ty,
   else buf_puts(b, src);
 }
 
-static void emit_poly_auto_splat(Compiler *c, int block, int telem, Buf *b, int indent) {
+/* `thash` is the temp of a boxed receiver whose pairs `each` / `each_pair`
+   walk, or 0. Its value parameter typed an Array is the usage pass's reading
+   of a push in the block (`x << y`), which a String answers as well: the
+   String was unboxed to a null Array and the push crashed. An append there
+   could only reach a copy, so the bind raises for one
+   (sp_poly_appended_hash_value). */
+static void emit_poly_auto_splat(Compiler *c, int block, int telem, int thash, Buf *b, int indent) {
   Scope *bs = comp_scope_of(c, block);
   int npp = 0; while (block_param_name(c, block, npp)) npp++;
   emit_indent(b, indent + 1);
@@ -4770,7 +4776,10 @@ static void emit_poly_auto_splat(Compiler *c, int block, int telem, Buf *b, int 
     if (!pnj) break;
     LocalVar *plv = bs ? scope_local(bs, pnj) : NULL;
     TyKind pt = plv ? plv->type : TY_POLY;
-    char src[64]; snprintf(src, sizeof src, "sp_poly_arr_get(_t%d, %d)", telem, pj);
+    char src[112];
+    if (thash && pj == 1 && ty_is_array(pt) && dyn_block_appends(c, block, pj))
+      snprintf(src, sizeof src, "sp_poly_appended_hash_value(_t%d, sp_poly_arr_get(_t%d, %d))", thash, telem, pj);
+    else snprintf(src, sizeof src, "sp_poly_arr_get(_t%d, %d)", telem, pj);
     emit_indent(b, indent + 2);
     emit_block_param_from_boxed(c, rename_local(pnj), pt, src, b);
   }
@@ -5511,8 +5520,15 @@ static int iter_enum_poly_walk_arms(Compiler *c, int id, Buf *b, int indent, con
         Scope *bs0 = comp_scope_of(c, block);
         LocalVar *b0 = p0_orig ? scope_local(bs0, p0_orig) : NULL;
         TyKind p0t = (b0 && b0->type != TY_UNKNOWN) ? b0->type : TY_POLY;
-        char vb0[48];
-        snprintf(vb0, sizeof vb0, "sp_PolyArray_get(_t%d, _t%d)", ta, ti);
+        char vb0[96];
+        /* a boxed Hash's each_value: the String of an appending block whose
+           pushes typed the parameter an Array, as each's (emit_poly_auto_splat) */
+        const char *en = nt_kind(nt, recv) == NK_CallNode ? nt_str(nt, recv, "name") : NULL;
+        int er = en ? nt_ref(nt, recv, "receiver") : -1;
+        if (ty_is_array(p0t) && en && sp_streq(en, "each_value") && er >= 0 &&
+            comp_ntype(c, er) == TY_POLY && dyn_block_appends(c, block, 0))
+          snprintf(vb0, sizeof vb0, "sp_poly_appended_chain_value(sp_PolyArray_get(_t%d, _t%d))", ta, ti);
+        else snprintf(vb0, sizeof vb0, "sp_PolyArray_get(_t%d, _t%d)", ta, ti);
         emit_indent(b, indent + 1);
         buf_printf(b, "lv_%s = ", p0);
         if (p0t == TY_POLY) buf_puts(b, vb0);
@@ -5602,7 +5618,7 @@ static int iter_enum_poly_walk_arms(Compiler *c, int id, Buf *b, int indent, con
         int telem = ++g_tmp;
         emit_indent(b, indent + 1);
         buf_printf(b, "sp_RbVal _t%d = sp_PolyArray_get(_t%d, _t%d);\n", telem, ta, t);
-        emit_poly_auto_splat(c, block, telem, b, indent);
+        emit_poly_auto_splat(c, block, telem, 0, b, indent);
         did_destruct = 1;
       }
       if (!did_destruct) {
@@ -5802,7 +5818,7 @@ static void emit_zip_many_block(Compiler *c, int recv, int block, int body,
     emit_boxed_step_binds(c, block, vals, b, indent + 1, 0);
   }
   else if (block_lead_only(c, block) || (p0 && block_rest_marker(c, block)))
-    emit_poly_auto_splat(c, block, te, b, indent);
+    emit_poly_auto_splat(c, block, te, 0, b, indent);
   else if (p0) {
     Scope *zs = comp_scope_of(c, block);
     LocalVar *lv = zs ? scope_local(zs, block_param_name(c, block, 0)) : NULL;
@@ -6106,7 +6122,7 @@ static int iter_ewi_zip_poly_arms(Compiler *c, int id, Buf *b, int indent, const
       int telem = ++g_tmp;
       emit_indent(b, indent + 1);
       buf_printf(b, "sp_RbVal _t%d = sp_poly_each_elem(_t%d, _t%d);\n", telem, ta, ti);
-      emit_poly_auto_splat(c, block, telem, b, indent);
+      emit_poly_auto_splat(c, block, telem, is_each_or_pair(name) ? ta : 0, b, indent);
     }
     else if (pv_half < 0 && block_lone_rest(c, block)) {
       /* `each { |*r| }`: the element, a Hash entry's [k, v] pair included,

@@ -9781,6 +9781,32 @@ static sp_RbVal sp_poly_each_elem(sp_RbVal a, sp_int i) {
     default: return sp_box_nil();
   }
 }
+/* The value a boxed `each { |k, v| }` binds, when the block appends to v
+   and its pushes typed v an Array: a String out of a Hash is not that Array
+   and cannot be shared with the Hash, which is the appending value block a
+   Hash local is refused for when it is built (#7004, #7034). Here the
+   receiver's values are known only now. A frozen String is not part of
+   that refusal (its append raises FrozenError) and is bound as before. */
+static sp_bool sp_poly_unfrozen_string(sp_RbVal v) {
+  return (v.tag == SP_TAG_STR && v.v.s && !sp_str_is_frozen_val(v.v.s)) ||
+         (sp_poly_is_strbuf(v) && v.v.p && !sp_String_is_frozen((sp_String *)v.v.p));
+}
+static sp_RbVal sp_poly_appended_hash_value(sp_RbVal recv, sp_RbVal v) {
+  if (recv.tag == SP_TAG_OBJ && sp_poly_is_hash_kind(recv.cls_id) && sp_poly_unfrozen_string(v))
+    sp_raise_cls("NotImplementedError",
+                 "a String stored in a Hash is passed to an appending value block: "
+                 "a String is not yet shared by reference through a Hash's values. "
+                 "Append to the String before storing it in the Hash.");
+  return v;
+}
+/* The same for the value `each_value.with_index { |v, i| }` binds, whose
+   refusal has its own words. */
+static sp_RbVal sp_poly_appended_chain_value(sp_RbVal v) {
+  if (sp_poly_unfrozen_string(v))
+    sp_raise_cls("NotImplementedError",
+                 "a String is not yet shared by reference through a Hash's chained index into an appending block");
+  return v;
+}
 /* Array#zip with no arguments: each element alone in a one-element array
    ([1, 2].zip -> [[1], [2]]), the degenerate case of zipping nothing (#3612). */
 static sp_PolyArray *sp_poly_zip_none(sp_RbVal a) {
