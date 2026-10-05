@@ -1,0 +1,19 @@
+`when Integer` takes a Bignum in a boxed subject
+
+`when Integer` and `in Integer` beside a boxed subject tested the tag
+of an Integer that fits and no other. A Bignum in the box is an Integer
+under a tag of its own, so it fell to the next arm or to else, silently:
+
+    v = [2**70, :a][0]
+    case v
+    when Integer then p :integer
+    else p :other              # this one ran
+    end
+
+`v.is_a?(Integer)`, `Integer === v` and `when Numeric` already took it.
+The arm tests both tags, as is_a? does. Its body reads the subject
+boxed, so a Bignum goes on through the boxed operators.
+
+Test: case_when_integer_bignum
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
