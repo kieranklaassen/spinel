@@ -1,0 +1,41 @@
+A Range's first bound runs before its last
+
+    n = 3
+    p (n..(n = 5))                # 3..5 in CRuby, 5..5 here
+    p (lg(1)..lg(2)), $log        # logged 1 then 2 in CRuby, 2 then 1 here
+
+emit_range_expr writes the two bounds as arguments of one C call
+(sp_range_new, sp_frange_new, sp_srange_new), whose order C leaves
+open, and gcc runs the last one first. Two bounds with an effect ran
+in reverse, and a first bound read what the last had already changed:
+a local the last bound assigns, an instance or a global variable a
+call in it writes, a local a proc it calls assigns. Integer, Float and
+String Ranges alike, and whatever read the Range: to_a, size, each,
+map, step, include?, a `when`, clamp. clang ran them left to right.
+
+Where the order shows (args_order_matters: two bounds with an effect,
+or a first bound reading what the last can change) the first bound now
+runs into a temp at the Range, ahead of the last, and the form reads
+the temp. Any other Range is emitted as before.
+
+The temp is rooted when the collector follows its type. Two String
+bounds that both allocate left the one C built first unrooted while
+the other was built: (("a" * k)..("a" * (k - 1) + "c")).each stopped
+in the collector's check under SPINEL_GC_STRESS=2 with gcc and
+counted nothing with clang. It is right at every level now.
+
+Not kept: a first bound that returns the very String the last bound
+then changes in place, `(idn(s)..(s << "x"; "zz".dup))`, was right
+with gcc only because the last bound ran first. It now begins at the
+String as it was before the change, as with clang, and as the same two
+expressions do as the arguments of one call.
+
+Not here, as before: `a[lg(1)..lg(3)]`, `s[lg(1)..lg(3)]` and
+`a.slice(lg(1)..lg(3))` hand the bounds straight to the slice and
+still run the last first, and so does `for i in lg(1)..lg(3)`. A
+first bound that assigns what a last bound without a call reads,
+`((n = 1)..n + 2)`. A bound whose only effect is a raise that is not
+a call, `((10 / z)..lg(2))`, and a first bound that is a method that
+only raises.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
