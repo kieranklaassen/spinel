@@ -7386,8 +7386,10 @@ else {
    A bare read into a parameter that is the shared handle is the exception.
    Unless it reads a handle, the binder wraps the String in a handle of its
    own (emit_arg_or_default_fill): the argument is then an allocation as
-   fresh as a call's result, held by nothing where it is read. It is hoisted
-   as a call in its place would be. nil binds the NULL handle. */
+   fresh as a call's result, held by nothing where it is read. It wants the
+   root and, by the paragraph above, must not be hoisted: the answer is 2,
+   and emit_held_operand roots it where it stands. nil binds the NULL
+   handle. */
 int arg_wants_root(Compiler *c, TyKind pt, int provided) {
   if (pt != TY_POLY && !needs_root(pt)) return 0;
   if (provided < 0) return 1;
@@ -7400,7 +7402,7 @@ int arg_wants_root(Compiler *c, TyKind pt, int provided) {
     return 1;
   if (pt != TY_STRBUF || sp_streq(aty, "NilNode") || comp_ntype(c, provided) == TY_NIL) return 0;
   char sref[192];
-  return !strbuf_slot_ref(c, provided, sref, sizeof sref);
+  return strbuf_slot_ref(c, provided, sref, sizeof sref) ? 0 : 2;
 }
 
 /* Evaluate the already-rendered argument text `expr` into a g_pre temp of type
@@ -7423,6 +7425,25 @@ void emit_rooted_operand(Compiler *c, TyKind pt, int provided, const char *expr,
   buf_printf(out, "_t%d", t);
 }
 
+/* The rooted temp of an argument that must be evaluated where it stands
+   (arg_wants_root answering 2). Only the temp's declaration and its root go
+   into g_pre, as emit_rest_pack_kwh's array does; `expr` is assigned to it
+   in place, so a read in it sees every assignment the statement makes ahead
+   of the argument. The bytes written are counted for the parenthesized
+   sequence that is capturing g_pre (g_held_pre): a prelude of nothing but
+   these lines runs none of its tail's code. */
+void emit_held_operand(Compiler *c, TyKind pt, const char *expr, Buf *out) {
+  int t = ++g_tmp;
+  size_t at = g_pre->len;
+  emit_indent(g_pre, g_indent);
+  emit_ctype(c, pt, g_pre);
+  buf_printf(g_pre, " _t%d = NULL;\n", t);
+  emit_indent(g_pre, g_indent);
+  buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", t);
+  if (g_pre == g_held_pre) g_held_len += g_pre->len - at;
+  buf_printf(out, "({ _t%d = %s; _t%d; })", t, expr, t);
+}
+
 /* Like emit_arg_or_default, but hoists a pointer-backed / poly argument into a
    g_pre temp and roots it before the call. A fresh allocation passed straight
    into a callee that allocates before it roots the parameter -- the canonical
@@ -7440,10 +7461,12 @@ static void emit_arg_rooted(Compiler *c, Scope *m, int idx, int provided, Buf *o
   /* a byref out-param arg is a slot address, not a heap value: it hoists its
      own rooted temp when one is needed (see emit_arg_or_default) */
   if (p && p->byref_out) { emit_arg_or_default(c, m, idx, provided, out); return; }
-  if (!arg_wants_root(c, pt, provided)) { emit_arg_or_default(c, m, idx, provided, out); return; }
+  int wr = arg_wants_root(c, pt, provided);
+  if (!wr) { emit_arg_or_default(c, m, idx, provided, out); return; }
   Buf ab; memset(&ab, 0, sizeof ab);
   emit_arg_or_default(c, m, idx, provided, &ab);
-  emit_rooted_operand(c, pt, provided, ab.p ? ab.p : default_value_from_compiler(c, pt), out);
+  if (wr == 2 && ab.p) emit_held_operand(c, pt, ab.p, out);
+  else emit_rooted_operand(c, pt, provided, ab.p ? ab.p : default_value_from_compiler(c, pt), out);
   free(ab.p);
 }
 

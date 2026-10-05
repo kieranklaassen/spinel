@@ -9,6 +9,8 @@ Buf expr_buf(Compiler *c, int node) {
 }
 
 Buf *g_pre = NULL;
+Buf *g_held_pre = NULL;
+size_t g_held_len = 0;
 
 /* SP_COLLECT_ERRORS recovery: in collect mode a codegen gap longjmps back to a
    per-unit recovery point armed by the output driver (codegen.c), so one run

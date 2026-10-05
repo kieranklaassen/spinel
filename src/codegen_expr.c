@@ -4328,9 +4328,19 @@ static void emit_expr_node(Compiler *c, int id, Buf *b) {
       Buf cap; memset(&cap, 0, sizeof cap);
       Buf vb; memset(&vb, 0, sizeof vb);
       Buf *sv_pre = g_pre; g_pre = &cap;
+      Buf *sv_hp = g_held_pre; size_t sv_hl = g_held_len;
+      g_held_pre = &cap; g_held_len = 0;
       TyKind pvt = emit_paren_tail(c, id, bd[n - 1], &vb);
-      g_pre = sv_pre;
-      if (!(cap.p && cap.p[0])) {
+      /* A prelude of nothing but held temps, declared NULL and rooted and
+         assigned where the value is built, runs no code of the tail: it
+         goes ahead as it is and the sequence stays in place. */
+      int held_only = cap.p && cap.p[0] && cap.len == g_held_len;
+      g_pre = sv_pre; g_held_pre = sv_hp; g_held_len = sv_hl;
+      if (held_only) {
+        buf_puts(g_pre, cap.p);
+        if (g_pre == g_held_pre) g_held_len += cap.len;
+      }
+      if (!(cap.p && cap.p[0]) || held_only) {
         buf_puts(b, "({ ");
         for (int j = 0; j < n - 1; j++) {
           emit_stmt(c, bd[j], b, 0);

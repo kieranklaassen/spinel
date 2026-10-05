@@ -14,6 +14,16 @@ class Pair
   end
   def self.of(a, b) = new(a, b)
   def is?(odd) = odd ? @x == "s" && @y == "t" : @x == "q" && @y == "r"
+  # The String is read where the argument stands: what the statement
+  # writes ahead of it has been written.
+  def self.sum(s) = (s = "bb") + new(s, "t").x
+  def self.text(s) = "#{(s = "bb")}-#{new(s, "t").x}"
+  def self.two(s)
+    return (s = "bb"), new(s, "t").x
+  end
+  def self.late(s)
+    return s, (s = "bb"; new("x", "t").x)
+  end
 end
 
 class Named
@@ -71,3 +81,4 @@ p wrong(N) { |odd| odd ? pair_of("s", "t") : pair_of("q", "r") }     # parameter
 p wrong(N) { |odd| odd ? st.pair : qr.pair }                         # instance variables
 p wrong(N) { |odd| odd ? "s".with("t") : "q".with("r") }             # self
 p [d.x, d.y, e.x]
+p Pair.sum("a"), Pair.text("a"), Pair.two("a"), Pair.late("a")
