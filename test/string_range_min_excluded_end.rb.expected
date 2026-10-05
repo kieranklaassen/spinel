@@ -13,6 +13,10 @@ nil
 "a\u0000b"
 nil
 nil
+false
+"ax"
+false
+true
 nil
 "9"
 "11"
