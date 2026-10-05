@@ -5541,6 +5541,24 @@ static int emit_when_typed_test(Compiler *c, int cond, int t, TyKind pt, Buf *b)
   else if (reidx >= 0 && pt == TY_SYMBOL) {
     buf_printf(b, "sp_re_case_eq(sp_re_pat_%d, sp_box_sym(_t%d))", reidx, t);
   }
+  /* a Regexp that is no literal the compiler can name (held in a global, an
+     instance variable, a parameter, a local written twice) matches as the
+     literal does: a String, a Symbol by its name, a boxed subject by what it
+     holds. It was compared with ==, so it never matched. An unset one is
+     nil, which matches a nil subject alone. Beside any other subject a
+     Regexp, literal or not, is no match (`/a/ === /a/` is false): the arm
+     is evaluated for its effects. */
+  else if (comp_ntype(c, cond) == TY_REGEX && reidx < 0 && (pt == TY_STRING || pt == TY_POLY || pt == TY_SYMBOL)) {
+    int tr = ++g_tmp;
+    buf_puts(b, "({ "); emit_ctype(c, TY_REGEX, b); buf_printf(b, " _t%d = ", tr); emit_expr(c, cond, b);
+    if (pt == TY_STRING) buf_printf(b, "; _t%d && sp_re_match(_t%d, _t%d) >= 0; })", tr, tr, t);
+    else if (pt == TY_POLY) buf_printf(b, "; _t%d ? sp_re_case_eq(_t%d, _t%d) : _t%d.tag == SP_TAG_NIL; })", tr, tr, t, t);
+    else buf_printf(b, "; _t%d && sp_re_case_eq(_t%d, sp_box_sym(_t%d)); })", tr, tr, t);
+  }
+  else if (comp_ntype(c, cond) == TY_REGEX && pt != TY_STRING && pt != TY_POLY && pt != TY_SYMBOL &&
+           pt != TY_STRBUF && pt != TY_UNKNOWN) {
+    buf_printf(b, "((void)_t%d, (void)(", t); emit_expr(c, cond, b); buf_puts(b, "), 0)");
+  }
   else if (pt == TY_STRING && emit_when_string_range(c, cond, t, b)) {
     /* emitted the lexicographic cover check */
   }
