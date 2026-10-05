@@ -1,0 +1,39 @@
+begin and end of a String Range read from a boxed slot are its two Strings
+
+    spans = [("ab".."ae"), 1]
+    r = spans[0]
+    p r.begin
+    p r.end
+
+stopped at "undefined method 'begin' for an instance of Range
+(NoMethodError)"; CRuby prints "ab" and "ae". first and last of the same
+Range answer.
+
+The Range comes out of the Array boxed, and begin and end of a boxed
+value go to sp_poly_range_begin_v and sp_poly_range_end_v. Each has an
+arm for a Float Range and falls to the Integer Range's reader, which
+raises for anything else. A String Range had no arm.
+
+Each gains one, asked only of what is no Integer Range, on the way to
+the raise: the end as it sits in the sp_StrRange, boxed by sp_box_str,
+which boxes the NULL of an end left out as nil. That is how sp_poly_min
+and sp_poly_max hand back a String Range's end.
+
+No C changes: the two functions are in the runtime. 300,000 turns of
+`r.begin.to_i + r.end.to_i` on one boxed slot, with gcc 13.3: an
+Integer Range runs 33,061,902 instructions for 33,661,898, a Float
+Range 43,861,924 for 43,861,921, and a String Range, which raised,
+124,261,960. With clang 18.1 an Integer Range takes 41,124,681 for
+36,024,681 and a Float Range 43,224,717 for 42,324,717: clang compiles
+the loop another way once a third kind of Range can come back (tag and
+class as two compares where it made one, the Array's bounds test kept
+inside the loop), wherever the arm is put.
+
+Not here: an end changed in place after the Range is made is not seen
+through begin and end, as it is not through first and last (CRuby
+shares the String); include?, member? and cover? on a boxed String
+Range, each its own commit; step, which raises NoMethodError.
+
+Test: test/boxed_str_range_begin_end.rb (expected from CRuby 3.3.6).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

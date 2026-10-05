@@ -1,0 +1,43 @@
+include? and member? on a String Range read from a boxed slot walk its members
+
+    spans = [("ab".."ae"), 1]
+    r = spans[0]
+    p r.include?("ac")
+    p r.member?("ae")
+    p r.include?("zz")
+
+printed `false` three times; CRuby prints `true`, `true`, `false`.
+
+The Range comes out of the Array boxed, so the call goes through the
+switch emit_poly_cases_n writes over the receiver's class. For a String
+argument that switch had a case for a String Array and for each
+String-keyed Hash and none for a String Range, which fell to the default
+arm: sp_poly_user_include says "not a user Enumerable" and the call
+answers false.
+
+The switch gains `case SP_BUILTIN_STR_RANGE:` for a String argument, and
+for a boxed argument behind its tag (a boxed value that is not a String
+is not a member). Both call sp_srange_include, which the typed call
+uses, so a Range with an end left out raises TypeError here as it does
+typed and in CRuby; it answered false.
+
+The case is written for include? and member? only. key? and has_key?
+share this switch (is_key_query) and a Range has neither: a boxed String
+Range given key? gets the C it had and answers false as on master, where
+CRuby raises NoMethodError. An Integer or a Float Range takes its own
+cases as before.
+
+Cost: one more case in the switch of an include? or member? whose
+receiver is boxed and whose argument is a String or boxed. 99 corpus
+programs gain it (112 switches), their C otherwise byte for byte the
+same, and print what they printed. A loop of 300,000 such calls on a
+String Array, a Hash and an Integer Range runs 60,766,531 instructions
+for 60,767,275.
+
+Not here: begin, end and cover? on a boxed String Range (each its own
+commit). A beginless or endless String Range given a value that is not
+a String answers false, typed and boxed, where CRuby raises TypeError.
+
+Test: test/boxed_str_range_include.rb (expected from CRuby 3.3.6).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

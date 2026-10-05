@@ -1,0 +1,1 @@
+A String Range stored into an instance variable or a Struct member keeps its ends

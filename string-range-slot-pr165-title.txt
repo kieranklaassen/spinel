@@ -1,0 +1,1 @@
+begin and end of a String Range read from a boxed slot are its two Strings

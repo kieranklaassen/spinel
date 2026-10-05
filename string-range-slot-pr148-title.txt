@@ -1,0 +1,1 @@
+A String Range in a global, a constant or a class variable keeps its ends

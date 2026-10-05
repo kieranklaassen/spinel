@@ -1,0 +1,1 @@
+cover? on a Range read from a boxed slot takes a String

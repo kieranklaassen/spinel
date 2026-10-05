@@ -1,0 +1,45 @@
+cover? on a Range read from a boxed slot takes a String
+
+    spans = [("ab".."ae"), (1..5)]
+    p spans[0].cover?("ac")
+    p spans[0].cover?("zz")
+    p spans[1].cover?("ac")
+
+did not compile: "passing argument 2 of 'sp_range_include' makes integer
+from pointer without a cast". CRuby prints `true`, `false`, `false`.
+
+The Range comes out of the Array boxed, and the chain of tests
+emit_poly_prearms_n writes for cover? has an arm for a Range argument,
+one for a boxed argument, and for every other argument the Integer
+Range's test, which hands the argument to sp_range_include as a number.
+A String is none. So it is not only the String Range that failed: an
+Integer or a Float Range given a String did not build either.
+
+A String argument gets its own arm. A String Range answers by
+sp_srange_cover, which the typed call uses. An Integer or a Float Range
+covers a String only when both its ends were left out, and otherwise
+falls to the false the chain starts from. What is no Range has no
+cover?, and raises NoMethodError as in CRuby.
+
+A boxed argument could be compiled, and a String Range answered false
+for it whatever it held. It gains a test for a String Range after the
+numeric Ranges' own, which answers by sp_srange_cover when the boxed
+value is a String.
+
+A program with no cover? on a boxed receiver gets the C it had, and so
+does one whose argument is an Integer, a Float or a Range. With a boxed
+argument an Integer and a Float Range run the tests they ran: 300,000
+calls on those two take 41,914,732 instructions for 42,064,732 with
+gcc, 40,826,420 for 41,276,420 with clang.
+
+Not here, and as on master: a String Range as the argument (typed it
+does not build, boxed it answers false); a slot holding no Range given
+a boxed or an Integer argument, which answers false where CRuby raises
+NoMethodError; cover?(true) on a boxed Integer Range, which reads true
+as 1; a Range with both ends left out given a boxed String, which
+answers false. A Symbol Range is an Array of its Symbols here, so in
+the slot it has no cover? for a String either, as it has none typed.
+
+Test: test/boxed_range_cover_string.rb (expected from CRuby 3.3.6).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
