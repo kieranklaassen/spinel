@@ -45,6 +45,17 @@ p val
 for l in "a\nb\n".lines
   l.chomp!
 end
+# ...read again in a loop by a read that cannot tell what its last run
+# changed, and Strings a block builds
+grown = [+"q", +"rr"]
+2.times { grown.max_by { |s| s.size } << "*" }
+p grown.size
+built = %w[q rr].map { |s| s + "x" }
+built.find { |s| s.size == 3 } << "!"
+p built.size
+made = Array.new(2) { |i| "s#{i}" }
+made.find { |s| s == "s1" } << "!"
+p made.size
 # a frozen literal raises, as it does by every route
 fz = ["q", "rr"]
 begin
@@ -55,3 +66,10 @@ rescue FrozenError
   puts "frozen"
 end
 p fz
+FZ = %w[ann bo].freeze
+begin
+  FZ[1].upcase!
+rescue FrozenError
+  puts "frozen"
+end
+p FZ
