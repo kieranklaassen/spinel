@@ -1,0 +1,1 @@
+A next or a break with no value in instance_eval's block answers nil

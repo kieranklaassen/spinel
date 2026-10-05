@@ -1,0 +1,45 @@
+A next or a break with no value in instance_eval's block answers nil
+
+    class Box
+      def initialize; @v = 7; end
+    end
+    o = Box.new
+    c = ARGV.length == 0
+    t = o.instance_eval { next if c; 4 }
+    p t
+
+printed 4 where CRuby prints nil. `break if c` did the same, and with a
+String, a Symbol, `true`, an Array or an instance variable as the
+block's last expression the call did not answer nil either.
+
+The splice of such a block declares a slot for the call's value. The
+last expression stores into it, and so does a `next` or a `break` that
+carries a value. One with no value stores nothing and leaves the splice,
+so the call read a slot that nothing had written: the 4 above is what
+the C compiler made of that read.
+
+Where a `next` or a `break` with no value binds to the splice, the slot
+now starts as the nil of its type. ie_block_bare_jump finds one; it
+stops at a loop, a block, a lambda and a def, as ie_block_break_next_ty
+does.
+
+A bare `break` was not joined into the call's type as a bare `next`
+is. Beside `true` the slot was an sp_bool, which has no nil to start
+as. The join is made where the call of instance_eval is typed, and
+ie_splice_value_ty sizes the slot by the same rule.
+
+The receiver can be an object, self in a method, a method that forwards
+its block to instance_exec or instance_eval, or a class held by value.
+A receiver that is no object (5, nil, a boxed value) takes another
+path: a bare `next` there was right, and a `break` there is written as
+a C `break`, as before.
+
+A Float slot is left as it was. Its nil is a sentinel, and nothing
+boxes that sentinel as nil at such a call, so it would print as NaN.
+`next nil` and `break nil` beside an Integer still answer 0, as before:
+that value is written as the slot's zero.
+
+A block with no such jump is written as before.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+
