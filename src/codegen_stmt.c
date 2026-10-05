@@ -3055,6 +3055,15 @@ int emit_poly_class_when(Compiler *c, int cond_id, const char *tmp, Buf *b) {
   return 1;
 }
 
+/* A Rational beside a number, or two Complex: a struct in C, which `==`
+   does not compare, and a pair sp_poly_eq answers as CRuby does. A Complex
+   beside a real number is not one: boxed, `Complex(2, 0) == 2` is false. */
+static int num_struct_pair(TyKind a, TyKind b) {
+  if (a == TY_COMPLEX || b == TY_COMPLEX) return a == b;
+  return (a == TY_RATIONAL || b == TY_RATIONAL) &&
+         (a == TY_RATIONAL || ty_is_numeric(a)) && (b == TY_RATIONAL || ty_is_numeric(b));
+}
+
 /* Emit the match condition for a pattern into buf as a C boolean expression.
    Returns 1 if a condition was emitted (requires a runtime check),
    0 if the pattern always matches (no condition needed). */
@@ -3072,8 +3081,11 @@ void emit_pm_eq(Compiler *c, int t, TyKind pt, int valnode, Buf *b) {
   }
   /* an Array, a Hash or a Bignum subject is matched by the value's ===,
      which for those is ==, not by the pointers both sides hold; the value
-     is rooted across the comparison, whose == may allocate */
-  else if (ty_is_array(pt) || ty_is_hash(pt) || pt == TY_BIGINT) {
+     is rooted across the comparison, whose == may allocate. A Rational or
+     a Complex beside a number goes the same way: `_t == value` on the
+     struct did not build. */
+  else if (ty_is_array(pt) || ty_is_hash(pt) || pt == TY_BIGINT ||
+           num_struct_pair(pt, comp_ntype(c, valnode))) {
     char sn[24]; snprintf(sn, sizeof sn, "_t%d", t);
     int tp = ++g_tmp;
     buf_printf(b, "({ sp_RbVal _t%d = ", tp);
