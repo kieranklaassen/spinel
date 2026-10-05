@@ -28875,18 +28875,24 @@ static int ks_walk(Compiler *c, KsWalk *w, int node, int on, int kept, int depth
    mutates each of its locals, taken once a scope: a mutation can follow a
    hand-over only if it runs later, or in a loop that holds both.
    ks_check_arg asks this before it walks, so a scope of many Strings built
-   and then handed over is not walked once for each of them. */
+   and then handed over is not walked once for each of them. The same
+   numbers say which statements a walk has to enter (ks_next_statement). */
 typedef struct { const char *name; int seq, stmt; } KsMut;
 static struct {
-  int count, n;           /* nodes covered; calls numbered so far */
+  int count, n;           /* nodes covered; calls, names and path ends numbered so far */
   int *seq, *loop;        /* a call's number; the number its outermost loop starts at, or -1 */
   int *stmt, at;          /* the statement of the scope's body a call is in, or -1; the one being walked */
+  int *in, *out;          /* a statement's first number, and the first one after it */
   int depth, start;       /* loops open in the walk; where the outermost one began */
   int nscopes;
   char *done;             /* a scope is numbered */
   int *first, *last;      /* a scope's mutations in mut[], sorted by name and number */
   KsMut *mut;
   int nmut, cap;
+  int *mfirst, *mlast;    /* a scope's names in men[], sorted the same; a path's end is named "" */
+  KsMut *men;
+  int nmen, mcap;
+  int noskip;             /* the numbers do not cover the program: every statement is entered */
 } ks_ord;
 static void ks_ord_mutation(const char *name) {
   if (ks_ord.nmut == ks_ord.cap) {
@@ -28899,12 +28905,32 @@ static void ks_ord_mutation(const char *name) {
   ks_ord.mut[ks_ord.nmut].stmt = ks_ord.at;
   ks_ord.mut[ks_ord.nmut++].seq = ks_ord.n;
 }
+/* Number what a statement changes the walk's state with, besides a call:
+   a local of scope `si` it reads or writes, and the end of a path. */
+static void ks_ord_name(Compiler *c, int si, int node, NodeKind k) {
+  const char *name = "";
+  if (k != NK_ReturnNode && k != NK_RetryNode && k != NK_RedoNode && k != NK_NextNode && k != NK_BreakNode) {
+    const char *ty = nt_type(c->nt, node);
+    name = ty && !strncmp(ty, "LocalVariable", 13) && c->nscope[node] == si ? nt_str(c->nt, node, "name") : NULL;
+    if (!name) return;
+  }
+  if (ks_ord.nmen == ks_ord.mcap) {
+    int cap = ks_ord.mcap ? ks_ord.mcap * 2 : 256;
+    KsMut *m = (KsMut *)realloc(ks_ord.men, sizeof(KsMut) * (size_t)cap);
+    if (!m) { ks_ord.noskip = 1; return; }
+    ks_ord.men = m; ks_ord.mcap = cap;
+  }
+  ks_ord.men[ks_ord.nmen].name = name;
+  ks_ord.men[ks_ord.nmen].stmt = ks_ord.at;
+  ks_ord.men[ks_ord.nmen++].seq = ks_ord.n++;
+}
 /* Number call `call` of scope `si`, and note each local it mutates: the
    receiver of a String mutator, an argument lent to a parameter its method
    mutates in place (ks_call_mutates's two questions, for any local). */
 static void ks_ord_call(Compiler *c, int si, int call) {
   const NodeTable *nt = c->nt;
   if (call >= ks_ord.count) return;
+  if (ks_ord.seq[call] >= 0) ks_ord.noskip = 1;
   ks_ord.seq[call] = ks_ord.n;
   ks_ord.stmt[call] = ks_ord.at;
   ks_ord.loop[call] = ks_ord.depth ? ks_ord.start : -1;
@@ -28930,12 +28956,45 @@ static void ks_ord_scope(Compiler *c, int si) {
   KsWalk w = { -1, si, NULL, 0, 0, 0, 0, 0, 1, -1, -1 };
   ks_ord.done[si] = 1;
   ks_ord.first[si] = ks_ord.nmut;
+  ks_ord.mfirst[si] = ks_ord.nmen;
   ks_ord.depth = 0;
   ks_ord.at = -1;
   ks_walk(c, &w, c->scopes[si].body, 0, 0, 0);
   ks_ord.last[si] = ks_ord.nmut;
+  ks_ord.mlast[si] = ks_ord.nmen;
   int nm = ks_ord.last[si] - ks_ord.first[si];
   if (nm > 1) qsort(ks_ord.mut + ks_ord.first[si], (size_t)nm, sizeof(KsMut), ks_mut_cmp);
+  nm = ks_ord.mlast[si] - ks_ord.mfirst[si];
+  if (nm > 1) qsort(ks_ord.men + ks_ord.mfirst[si], (size_t)nm, sizeof(KsMut), ks_mut_cmp);
+}
+/* The first number at or after `t` that scope `si` gives `name`. */
+static int ks_ord_next(int si, const char *name, int t) {
+  int lo = ks_ord.mfirst[si], hi = ks_ord.mlast[si];
+  while (lo < hi) {
+    int mid = lo + (hi - lo) / 2, d = strcmp(ks_ord.men[mid].name, name);
+    if (d < 0 || (!d && ks_ord.men[mid].seq < t)) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo < ks_ord.mlast[si] && !strcmp(ks_ord.men[lo].name, name) ? ks_ord.men[lo].seq : INT_MAX;
+}
+/* The first of statements b[i..hi] the walk has to enter: one that holds
+   the hand-over, names the variable or ends a path. Every other one leaves
+   the walk's state as it found it, so a walk costs what the variable's own
+   statements cost, however long the scope. */
+static int ks_next_statement(const KsWalk *w, const int *b, int i, int hi) {
+  if (ks_ord.noskip || !ks_ord.seq || w->si >= ks_ord.nscopes || !ks_ord.done[w->si]) return i;
+  if (w->u >= ks_ord.count || ks_ord.seq[w->u] < 0 || b[i] >= ks_ord.count || ks_ord.in[b[i]] < 0) return i;
+  int t = ks_ord.in[b[i]];
+  int r = ks_ord_next(w->si, w->vn, t), e = ks_ord_next(w->si, "", t);
+  if (e < r) r = e;
+  if (ks_ord.seq[w->u] >= t && ks_ord.seq[w->u] < r) r = ks_ord.seq[w->u];
+  int lo = i, top = hi + 1;
+  while (lo < top) {
+    int mid = lo + (top - lo) / 2;
+    if (ks_ord.out[b[mid]] > r) top = mid;
+    else lo = mid + 1;
+  }
+  return lo;
 }
 /* Can a mutation of local `vn` follow hand-over `u` in scope `si`? If so,
    `from` and `to` are the statements of the scope's body that hold the
@@ -29034,6 +29093,7 @@ static int ks_walk(Compiler *c, KsWalk *w, int node, int on, int kept, int depth
   const NodeTable *nt = c->nt;
   if (node < 0 || w->hit || depth > 400) return on;
   NodeKind k = nt_kind(nt, node);
+  if (w->numbering) ks_ord_name(c, w->si, node, k);
   switch (k) {
     case NK_DefNode: case NK_ClassNode: case NK_ModuleNode: case NK_SingletonClassNode:
       return on;
@@ -29042,8 +29102,16 @@ static int ks_walk(Compiler *c, KsWalk *w, int node, int on, int kept, int depth
       int lo = 0, hi = n - 1;
       if (!depth && w->from >= 0) { lo = w->from; hi = w->to < hi ? w->to : hi; }
       for (int i = lo; i <= hi; i++) {
-        if (!depth && w->numbering) ks_ord.at = i;
+        if (w->numbering) {
+          if (!depth) ks_ord.at = i;
+          if (b[i] < ks_ord.count) {
+            if (ks_ord.in[b[i]] >= 0) ks_ord.noskip = 1;
+            ks_ord.in[b[i]] = ks_ord.n;
+          }
+        }
+        else if ((i = ks_next_statement(w, b, i, hi)) > hi) break;
         on = ks_walk(c, w, b[i], on, i == n - 1 ? kept : 0, depth + 1);
+        if (w->numbering && b[i] < ks_ord.count) ks_ord.out[b[i]] = ks_ord.n;
       }
       if (!depth && w->numbering) ks_ord.at = -1;
       return on;
@@ -29222,11 +29290,17 @@ static void refuse_kept_string_mutations(Compiler *c) {
   ks_ord.seq = (int *)malloc(sizeof(int) * (size_t)(nt->count + 1));
   ks_ord.loop = (int *)malloc(sizeof(int) * (size_t)(nt->count + 1));
   ks_ord.stmt = (int *)malloc(sizeof(int) * (size_t)(nt->count + 1));
+  ks_ord.in = (int *)malloc(sizeof(int) * (size_t)(nt->count + 1));
+  ks_ord.out = (int *)malloc(sizeof(int) * (size_t)(nt->count + 1));
   ks_ord.done = (char *)calloc((size_t)c->nscopes + 1, 1);
   ks_ord.first = (int *)calloc((size_t)c->nscopes + 1, sizeof(int));
   ks_ord.last = (int *)calloc((size_t)c->nscopes + 1, sizeof(int));
-  if (ks_ord.seq && ks_ord.loop && ks_ord.stmt && ks_ord.done && ks_ord.first && ks_ord.last) {
+  ks_ord.mfirst = (int *)calloc((size_t)c->nscopes + 1, sizeof(int));
+  ks_ord.mlast = (int *)calloc((size_t)c->nscopes + 1, sizeof(int));
+  if (ks_ord.seq && ks_ord.loop && ks_ord.stmt && ks_ord.in && ks_ord.out && ks_ord.done && ks_ord.first &&
+      ks_ord.last && ks_ord.mfirst && ks_ord.mlast) {
     memset(ks_ord.seq, -1, sizeof(int) * (size_t)(nt->count + 1));
+    memset(ks_ord.in, -1, sizeof(int) * (size_t)(nt->count + 1));
     ks_ord.count = nt->count; ks_ord.nscopes = c->nscopes;
   }
   else { free(ks_ord.seq); ks_ord.seq = NULL; }
@@ -29242,8 +29316,9 @@ static void refuse_kept_string_mutations(Compiler *c) {
   }
   free(ks_tab.off); free(ks_tab.kept);
   ks_tab.off = NULL; ks_tab.kept = NULL;
-  free(ks_ord.seq); free(ks_ord.loop); free(ks_ord.stmt); free(ks_ord.done); free(ks_ord.first);
-  free(ks_ord.last); free(ks_ord.mut);
+  free(ks_ord.seq); free(ks_ord.loop); free(ks_ord.stmt); free(ks_ord.in); free(ks_ord.out);
+  free(ks_ord.done); free(ks_ord.first); free(ks_ord.last); free(ks_ord.mut);
+  free(ks_ord.mfirst); free(ks_ord.mlast); free(ks_ord.men);
   memset(&ks_ord, 0, sizeof ks_ord);
 }
 
