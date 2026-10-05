@@ -1571,9 +1571,15 @@ int emit_call_object_override_arms(Compiler *c, int id, Buf *b, const NodeTable 
       buf_printf(&pb3, "({ sp_RbVal _t%d = ", tp3);
       { Buf rb3; memset(&rb3, 0, sizeof rb3); emit_boxed(c, pr, &rb3);
         buf_puts(&pb3, rb3.p ? rb3.p : "sp_box_nil()"); free(rb3.p); }
+      /* a by-value struct's box is held for the Proc it is handed to */
+      if (proc_slot_via_poly(c, comp_ntype(c, pv[0]))) buf_puts(&pb3, "; ");
+      int th3 = proc_arg_box_hold(c, comp_ntype(c, pv[0]), &pb3, 0);
       buf_printf(&pb3, "; _t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_PROC"
                        " ? sp_penum_call1((sp_Proc *)_t%d.v.p, ", tp3, tp3, tp3);
-      { Buf ab3; memset(&ab3, 0, sizeof ab3); emit_boxed(c, pv[0], &ab3);
+      { Buf ab3; memset(&ab3, 0, sizeof ab3);
+        if (th3 >= 0) buf_printf(&ab3, "(_t%d = ", th3);
+        emit_boxed(c, pv[0], &ab3);
+        if (th3 >= 0) buf_puts(&ab3, ")");
         buf_puts(&pb3, ab3.p ? ab3.p : "sp_box_nil()");
         /* Method#=== calls the method too, as its `[]` does: compared, a
            Method read out of a container answered false (#6179) */

@@ -8956,6 +8956,7 @@ static int sp_poly_is_call_aref(sp_RbVal v) {
          (v.cls_id == SP_BUILTIN_PROC || v.cls_id == SP_BUILTIN_METHOD);
 }
 static sp_RbVal sp_poly_call_aref(sp_RbVal v, sp_RbVal arg) {
+  SP_GC_ROOT_RBVAL(arg);   /* a by-value struct's box, made for this call alone */
   _sp_proc_poly_args[0] = arg;
   sp_int slot = sp_poly_slot_i(arg);
   return sp_poly_callable_call(v, 1, &slot);
