@@ -6583,11 +6583,13 @@ static sp_int sp_poly_arr_misfit(sp_RbVal orig, const sp_PolyArray *work) {
 /* A store into a frozen String raises for its index first, as CRuby does: a
    negative length or a start outside the String is the IndexError the
    unfrozen store raises (sp_str_splice_at), and only a store that would be
-   made reaches the FrozenError. */
-static SP_NOINLINE void sp_str_frozen_store_index(const char *s, sp_int start, sp_int len) {
+   made is the FrozenError. It does not return, so the store's own path
+   tests frozen once. */
+static SP_NORETURN SP_COLD SP_NOINLINE void sp_str_frozen_store_index(const char *s, sp_int start, sp_int len) {
   sp_int n = (sp_int)sp_str_length(s);
   if (len < 0) sp_raise_cls("IndexError", sp_sprintf("negative length %lld", (long long)len));
   if (start > n || start < -n) sp_raise_cls("IndexError", sp_sprintf("index %lld out of string", (long long)start));
+  sp_raise_frozen_str(s);
 }
 static sp_RbVal sp_poly_splice(sp_RbVal recv, sp_int start, sp_int len, sp_RbVal src) {
   /* `s[start, len] = v` through a poly receiver: spinel strings splice into a
