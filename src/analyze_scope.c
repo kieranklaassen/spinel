@@ -3064,6 +3064,35 @@ int is_c_ident(const char *s) {
   return 1;
 }
 
+/* A global the program only ever writes nil to, or never writes, is nil at
+   every read. It is boxed before the types are inferred, so a call on it and
+   whatever holds that call's value are typed with it: boxed only when the
+   fixpoint was over (an_phase_reconcile_check), `$log.to_a` had no type and
+   its value was dropped for nil. The interpreter's own flags keep theirs. */
+static void box_nil_only_globals(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  char *written = c->ngvars > 0 ? calloc((size_t)c->ngvars, 1) : NULL;
+  if (!written) return;
+  for (int id = 0; id < nt->count; id++) {
+    NodeKind k = nt_kind(nt, id);
+    if (k != NK_GlobalVariableWriteNode && k != NK_GlobalVariableOrWriteNode &&
+        k != NK_GlobalVariableAndWriteNode && k != NK_GlobalVariableOperatorWriteNode &&
+        k != NK_GlobalVariableTargetNode) continue;
+    if (k != NK_GlobalVariableOperatorWriteNode && k != NK_GlobalVariableTargetNode &&
+        nt_kind(nt, nt_ref(nt, id, "value")) == NK_NilNode) continue;
+    const char *nm = nt_str(nt, id, "name");
+    LocalVar *lv = nm ? comp_gvar(c, comp_resolve_gvar(c, nm + 1)) : NULL;
+    if (lv) written[lv - c->gvars] = 1;
+  }
+  for (int g = 0; g < c->ngvars; g++) {
+    LocalVar *lv = &c->gvars[g];
+    char g0 = lv->name ? lv->name[0] : 0;
+    if (written[g] || lv->type != TY_UNKNOWN || comp_gvar_is_interp_flag(lv->name)) continue;
+    if ((g0 >= 'a' && g0 <= 'z') || (g0 >= 'A' && g0 <= 'Z')) lv->type = TY_POLY;
+  }
+  free(written);
+}
+
 /* Register global variables ($g) and top-level constants (FOO). */
 void register_globals_consts(Compiler *c) {
   const NodeTable *nt = c->nt;
@@ -3164,6 +3193,7 @@ void register_globals_consts(Compiler *c) {
       }
     }
   }
+  box_nil_only_globals(c);
 }
 
 /* Extract a symbol or string literal text from a node, or NULL. */
