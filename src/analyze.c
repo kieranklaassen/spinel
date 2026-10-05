@@ -29129,6 +29129,44 @@ static int an_store_name(const char *pn) {
          sp_streq(pn, "fill") || sp_streq(pn, "concat") || sp_streq(pn, "replace") || sp_streq(pn, "update");
 }
 
+/* Is the value of statement `node` thrown away, also as the last statement
+   of the program, of an `ensure` or a `for` body, or of an arm of an `if`,
+   an `unless`, a `case` or a `begin` whose own value is? */
+static int an_last_value_dropped(const NodeTable *nt, const int *parent, int node) {
+  for (;;) {
+    if (an_value_dropped(nt, parent, node)) return 1;
+    int up = parent[node];
+    /* an `elsif` hangs off its `if` */
+    if (up >= 0 && nt_kind(nt, up) == NK_IfNode && nt_ref(nt, up, "subsequent") == node) { node = up; continue; }
+    int owner = up >= 0 && nt_kind(nt, up) == NK_StatementsNode ? parent[up] : -1;
+    const char *ot = owner >= 0 ? nt_type(nt, owner) : NULL;
+    if (!ot) return 0;
+    if (sp_streq(ot, "ProgramNode") || sp_streq(ot, "EnsureNode") || sp_streq(ot, "ForNode")) return 1;
+    while (sp_streq(ot, "ElseNode") || sp_streq(ot, "WhenNode") || sp_streq(ot, "InNode") || sp_streq(ot, "RescueNode")) {
+      owner = parent[owner];
+      ot = owner >= 0 ? nt_type(nt, owner) : NULL;
+      if (!ot) return 0;
+    }
+    if (!sp_streq(ot, "IfNode") && !sp_streq(ot, "UnlessNode") && !sp_streq(ot, "BeginNode") &&
+        !sp_streq(ot, "CaseNode") && !sp_streq(ot, "CaseMatchNode") && !sp_streq(ot, "ParenthesesNode")) return 0;
+    node = owner;
+  }
+}
+
+/* Is a value whose parent is `args` only printed? An interpolation makes a
+   String of its own. `puts` and `print` answer nil. `p` answers its
+   argument, or its arguments as an Array, so `x = p(a)` is a second name for
+   `a`: it is a print only where its own value is thrown away. */
+static int an_only_printed(const NodeTable *nt, const int *parent, int args) {
+  int g = args >= 0 ? parent[args] : -1;
+  if (g >= 0 && nt_kind(nt, args) == NK_StatementsNode && nt_kind(nt, g) == NK_EmbeddedStatementsNode) return 1;
+  const char *gn = g >= 0 && nt_kind(nt, g) == NK_CallNode && nt_ref(nt, g, "arguments") == args &&
+                   nt_ref(nt, g, "receiver") < 0 ? nt_str(nt, g, "name") : NULL;
+  if (!gn) return 0;
+  if (sp_streq(gn, "puts") || sp_streq(gn, "print")) return 1;
+  return sp_streq(gn, "p") && an_last_value_dropped(nt, parent, g);
+}
+
 /* Can a call `p` made on a container, or a call chained on it, store into
    the container out of this pass's sight, or hand it on? `a.to_a`,
    `a.itself`, `a.each { }` and `a << "r"` answer their receiver; kept under
@@ -29152,14 +29190,14 @@ static int an_container_answer_kept(Compiler *c, const int *parent, int p, const
     "invert", "merge", "transform_values", "transform_keys", "except", "fetch_values", "assoc", "rassoc",
     "transpose", "product", "combination", "permutation", "chunk_while", "slice_when", "minmax_by", "chunk",
     "slice_before", "slice_after", "tally_by", "intersect?", "intersection", "union", "difference",
-    "respond_to?", "object_id", "===", "!", NULL };
+    "respond_to?", "object_id", "===", "!", "delete", "delete_at", NULL };
   /* these answer their receiver and store nothing; the walks, without a
      block, an Enumerator, whose to_a is an Array of its own */
   static const char *const walks[] = {
     "each", "each_with_index", "each_slice", "each_cons", "each_entry", "reverse_each", "each_index",
     "each_value", "each_key", "each_pair", "cycle", "lazy", "with_index", NULL };
   static const char *const same[] = {
-    "to_a", "to_ary", "to_h", "itself", "delete", "delete_at", "delete_if", "clear", NULL };
+    "to_a", "to_ary", "to_h", "itself", "delete_if", "clear", NULL };
   const NodeTable *nt = c->nt;
   char nb[64];
   int r = -1, walk = 0;
@@ -29176,12 +29214,10 @@ static int an_container_answer_kept(Compiler *c, const int *parent, int p, const
     /* the stores are judged by what they store (an_named_container_seen) */
     if (!is_walk && !is_same && !an_store_name(nm)) return 1;
     walk = is_walk && blk < 0;
-    int up = parent[n], g = up >= 0 ? parent[up] : -1;
+    int up = parent[n];
     if (up >= 0 && nt_kind(nt, up) == NK_CallNode && nt_ref(nt, up, "receiver") == n) { n = up; continue; }
     /* printed: a read, as the name alone is */
-    const char *gn = g >= 0 && nt_kind(nt, g) == NK_CallNode && nt_ref(nt, g, "arguments") == up &&
-                     nt_ref(nt, g, "receiver") < 0 ? nt_str(nt, g, "name") : NULL;
-    if (gn && (sp_streq(gn, "p") || sp_streq(gn, "puts") || sp_streq(gn, "print"))) return 0;
+    if (an_only_printed(nt, parent, up)) return 0;
     return !an_value_dropped(nt, parent, n);
   }
 }
@@ -29233,11 +29269,8 @@ static int an_named_container_seen(Compiler *c, int r, const int *parent, AnLoca
     if (!pn) {
       /* printed, walked by a `for` or spread by a multiple assignment: a
          read. Any other use may store through another name. */
-      int g = p >= 0 ? parent[p] : -1;
-      const char *gn = g >= 0 && nt_kind(nt, g) == NK_CallNode && nt_ref(nt, g, "arguments") == p &&
-                       nt_ref(nt, g, "receiver") < 0 ? nt_str(nt, g, "name") : NULL;
       NodeKind pk = p >= 0 ? nt_kind(nt, p) : NK_NilNode;
-      if (!(gn && (sp_streq(gn, "p") || sp_streq(gn, "puts") || sp_streq(gn, "print"))) &&
+      if (!an_only_printed(nt, parent, p) &&
           !(pk == NK_ForNode && nt_ref(nt, p, "collection") == q) && !(pk == NK_MultiWriteNode && nt_ref(nt, p, "value") == q))
         frozen = 0;
       continue;

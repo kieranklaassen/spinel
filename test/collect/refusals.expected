@@ -760,6 +760,10 @@ spinel: a String is not yet shared by reference through an Array's `find` into a
 spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`
 == test/reject/string_frozen_literal_array_chained_store_dropped_append.rb [promote] rc=1
 spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`
+== test/reject/string_frozen_literal_array_printed_answer_kept_dropped_append.rb [default] rc=1
+spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`
+== test/reject/string_frozen_literal_array_printed_answer_kept_dropped_append.rb [promote] rc=1
+spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`
 == test/reject/string_frozen_literal_array_second_name_dropped_append.rb [default] rc=1
 spinel: a String is not yet shared by reference through an Array's `find` into an in-place `<<`
 == test/reject/string_frozen_literal_array_second_name_dropped_append.rb [promote] rc=1
