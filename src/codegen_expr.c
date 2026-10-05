@@ -1684,6 +1684,12 @@ static int emit_local_ivar_write_expr(Compiler *c, int id, Buf *b, const NodeTab
        inside a block that captured c by cell (e.g. `mutex.synchronize { c += 1 }`
        in a thread). */
     const char *nm = nt_str(nt, id, "name");
+    /* On a local that holds a String handle the VALUE of the write is that
+       String itself, and whatever keeps it (`v = (t += "x")`) would have to
+       hold the handle, which nothing pairs here. Refused, as it was before
+       the statement form had an arm. */
+    LocalVar *olv = nm ? scope_local(comp_scope_of(c, id), nm) : NULL;
+    if (olv && olv->type == TY_STRBUF) unsupported(c, id, "operator assignment");
     buf_puts(b, "({ ");
     emit_op_assign(c, id, b, 0);
     emit_local_ref(c, id, nm, b);
