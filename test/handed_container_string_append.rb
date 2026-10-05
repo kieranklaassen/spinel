@@ -196,3 +196,39 @@ g1 = {j: +"a"}
 hc_again(g1)
 g1[:x] << "y" * 40
 p g1.to_a
+
+# the element read into a boxed local, a second name for it, and a method
+# and an instance variable it is handed to
+def hc_poke(e); e << "y" * 40; end
+p1 = [+"a", 1]
+hc_put(p1, +"s")
+px = p1[2]
+px << "y" * 40
+p p1
+p2 = [+"a", 1]
+hc_put(p2, +"s")
+hc_put(p2, +"t")
+py = p2[2]
+pz = py
+pz << "y" * 40
+pw = p2[3]
+pw << "!"
+p p2
+p3 = [+"a", 1]
+hc_put(p3, +"s")
+pv = p3[2]
+hc_poke(pv)
+p p3
+class HcKeeper
+  def put(q, v); q << v; end
+  def run
+    l = [+"a", 1]
+    put(l, +"s")
+    @x = l[2]
+    @x << "y" * 40
+    k = l[2]
+    k << "!"
+    l
+  end
+end
+p HcKeeper.new.run

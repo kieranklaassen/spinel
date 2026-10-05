@@ -34,3 +34,7 @@ true
 FrozenError
 ["a", "lit"]
 [[:j, "ayyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"], [:x, "ayyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"]]
+["a", 1, "syyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"]
+["a", 1, "syyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy", "t!"]
+["a", 1, "syyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"]
+["a", 1, "syyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy!"]
