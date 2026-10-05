@@ -508,7 +508,7 @@ int emit_call_exception_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, c
     if (sp_streq(name, "class")) {  /* a Class carried by name (complete for every exception class) */
       /* a nil $! (outside any rescue) is NilClass, matching the sibling nil-guards. */
       int t = hoist_exc_recv(c, recv);
-      buf_printf(b, "((sp_Class){0, _t%d ? sp_exc_class_name(_t%d) : SPL(\"NilClass\")})", t, t);
+      buf_printf(b, "((sp_Class){(sp_int)-1, _t%d ? sp_exc_class_name(_t%d) : SPL(\"NilClass\")})", t, t);
       return 1;
     }
     /* object identity: the same raised object compares equal to $! / a `=> e`

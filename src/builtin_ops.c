@@ -719,7 +719,7 @@ static const BuiltinOp bop_rows[] = {
   { TY_STR_RANGE, "min",          1,   1, BF_NONE, TY_STR_ARRAY,   BOPE_TEMPLATE, "({ sp_StrRange _t$T = $r; sp_StrArray *_t$t = sp_srange_to_a(_t$T); SP_GC_ROOT(_t$t); sp_int _t$u = $i0; if (_t$u < 0) sp_raise_cls(\"ArgumentError\", \"negative array size\"); sp_StrArray_slice(_t$t, 0, _t$u); })", 0 },  /* the n smallest or largest members (#3665) */
   { TY_STR_RANGE, "max",          1,   1, BF_NONE, TY_STR_ARRAY,   BOPE_TEMPLATE, "({ sp_StrRange _t$T = $r; sp_StrArray *_t$t = sp_srange_to_a(_t$T); SP_GC_ROOT(_t$t); sp_int _t$u = $i0; if (_t$u < 0) sp_raise_cls(\"ArgumentError\", \"negative array size\"); sp_StrArray_reverse_bang(_t$t); sp_StrArray_slice(_t$t, 0, _t$u); })", 0 },
   { TY_STR_RANGE, "exclude_end?", 0,   0, BF_ANY,  TY_BOOL,        BOPE_TEMPLATE, "({ sp_StrRange _t$T = $r; (sp_bool)_t$T.excl; })", 0 },
-  { TY_STR_RANGE, "class",        0,   0, BF_ANY,  TY_CLASS,       BOPE_TEMPLATE, "((void)($r), ((sp_Class){0, SPL(\"Range\")}))", 0 },
+  { TY_STR_RANGE, "class",        0,   0, BF_ANY,  TY_CLASS,       BOPE_TEMPLATE, "((void)($r), ((sp_Class){(sp_int)-1, SPL(\"Range\")}))", 0 },
   { TY_STR_RANGE, "frozen?",      0,   0, BF_ANY,  TY_BOOL,        BOPE_TEMPLATE, "!($r).unfrozen", 0, 0, 0, 1 },
   { TY_STR_RANGE, "freeze",       0,   0, BF_ANY,  TY_STR_RANGE,   BOPE_RANGE_FREEZE, NULL, 0, 0, 0, 1 },
   { TY_STR_RANGE, "itself",       0,   0, BF_ANY,  TY_STR_RANGE,   BOPE_TEMPLATE, "$r", 0 },
@@ -797,7 +797,7 @@ static const BuiltinOp bop_rows[] = {
   { TY_FLOAT_RANGE, "to_s",         0,   0, BF_ANY,  TY_STRING,      BOPE_TEMPLATE, "({ sp_FloatRange _t$T = $r; sp_frange_inspect(_t$T); })", 0 },
   { TY_FLOAT_RANGE, "inspect",      0,   0, BF_ANY,  TY_STRING,      BOPE_TEMPLATE, "({ sp_FloatRange _t$T = $r; sp_frange_inspect(_t$T); })", 0 },
   { TY_FLOAT_RANGE, "step",         1,   1, BF_NONE, TY_FLOAT_ARRAY, BOPE_TEMPLATE, "({ sp_FloatRange _t$T = $r; sp_FloatArray_from_step(_t$T.first, _t$T.last, $f0, _t$T.excl); })", 0 },
-  { TY_FLOAT_RANGE, "class",        0,   0, BF_ANY,  TY_CLASS,       BOPE_TEMPLATE, "((void)($r), ((sp_Class){0, SPL(\"Range\")}))", 0 },
+  { TY_FLOAT_RANGE, "class",        0,   0, BF_ANY,  TY_CLASS,       BOPE_TEMPLATE, "((void)($r), ((sp_Class){(sp_int)-1, SPL(\"Range\")}))", 0 },
   { TY_FLOAT_RANGE, "frozen?",      0,   0, BF_ANY,  TY_BOOL,        BOPE_TEMPLATE, "!($r).unfrozen", 0, 0, 0, 1 },
   { TY_FLOAT_RANGE, "freeze",       0,   0, BF_ANY,  TY_FLOAT_RANGE, BOPE_RANGE_FREEZE, NULL, 0, 0, 0, 1 },
   { TY_FLOAT_RANGE, "itself",       0,   0, BF_ANY,  TY_FLOAT_RANGE, BOPE_TEMPLATE, "$r", 0 },

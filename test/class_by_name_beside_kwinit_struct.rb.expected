@@ -1,0 +1,18 @@
+ArgumentError
+ArgumentError
+got ArgumentError: x
+"z"
+true
+false
+ArgumentError
+ZeroDivisionError
+KeyError
+RuntimeError
+TypeError
+TypeError
+Random
+Random
+Range
+Range
+S(keyword_init: true)
+1
