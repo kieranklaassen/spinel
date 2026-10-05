@@ -1,14 +1,25 @@
 # A String made in place is kept alive while replace copies it.
 # The statement form of replace copies its source into a new String, and a
 # source only the call holds (a concatenation, a join, a method's result)
-# was held by nothing while that copy was allocated. Each round replaces
+# was held by nothing while that copy was allocated. So was a String two
+# names hold: reading it as the source makes a copy. Each round replaces
 # through a local, a global and an instance variable and counts the ones
 # that came out as another String.
 class Box
   attr_reader :s
-  def initialize = @s = +"qrst"
+  def initialize
+    @s = +"qrst"
+    @t = +"sh"
+  end
   def fill(n)
     @s.replace("i" + n.to_s)
+    @s
+  end
+  def refill(n)
+    @t = +"sh"
+    u = @t
+    u << n.to_s
+    @s.replace(@t)
     @s
   end
 end
@@ -28,6 +39,12 @@ bad = 0
   bad += 1 unless s == "M#{i}"
   $g.replace("g" + i.to_s)
   bad += 1 unless $g == "g#{i}"
+  t = +"sh"
+  u = t
+  u << i.to_s
+  s.replace(t)
+  bad += 1 unless s == "sh#{i}"
+  bad += 1 unless b.refill(i) == "sh#{i}"
   bad += 1 unless b.fill(i) == "i#{i}"
 end
 p bad
