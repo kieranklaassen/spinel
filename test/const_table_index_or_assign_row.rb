@@ -26,3 +26,25 @@ T6 = [[1, 2], nil, [3]]
 T6[1] ||= [7]
 T6[0] &&= [8, 9]
 p T6[1], T6[0], T6[1][0] + T6[0][1], T6
+
+# a table whose literal has no Integer row is not made a table of Integer
+# rows by such a store: its other rows are nil, or not there
+T7 = [nil, nil, nil]
+T7[1] ||= [7, 8]
+p T7[0].to_a, T7[1], T7[2].nil?
+
+T8 = []
+T8[1] ||= [7, 8]
+case T8[0]
+when nil then puts "nil"
+when Array then puts "array"
+end
+begin
+  p T8[2].size
+rescue NoMethodError
+  puts "no size"
+end
+
+T9 = [nil, nil]
+T9[0] &&= [7, 8]
+p T9[0].to_a, T9

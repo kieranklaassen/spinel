@@ -1207,7 +1207,9 @@ static int const_array_elems_all_int_array_impl(Compiler *c, const char *cname) 
       if (!rn || !sp_streq(rn, cname)) continue;
       int val = nt_ref(nt, id, "value");
       TyKind vt = val >= 0 ? comp_ntype(c, val) : TY_UNKNOWN;
-      if (vt == TY_INT_ARRAY) { saw = 1; continue; }
+      /* an Integer Array keeps a table of Integer Arrays one; it is not
+         what says the table is one */
+      if (vt == TY_INT_ARRAY) continue;
       if (val >= 0 && an_row_open_empty(c, val)) return 0;
       if (vt == TY_NIL || vt == TY_UNKNOWN) continue;
       return 0;
