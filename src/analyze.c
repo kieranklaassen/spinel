@@ -30189,10 +30189,11 @@ static int an_local_string_from_container(Compiler *c, int rd, const int *parent
    went to a copy that nothing read and the container printed as it was, with
    nothing said. The change is all such a statement is for, so it is refused.
    Where the changed String is read (`t = a.find { } << x`) its value is
-   right and only the container's element is not; that is left as it was,
-   and so is a mutator with a block, which runs for what the block does as
-   well. setbyte writes the byte where the String is, so it reaches the
-   container through the copy. A change no run can miss is left too
+   right and only the container's element is not; that is left as it was.
+   A block on the mutator (`sub!("q") { }`) is part of the change and loses
+   it the same way. setbyte writes the byte where the String is, so it
+   reaches the container through the copy; a concat or prepend of nothing
+   changes nothing. A change no run can miss is left too
    (an_container_change_unseen): refusing it would turn away a program that
    is right. Runs once sharing analysis settles: an element it shares is a
    handle here, not a String. */
@@ -30204,7 +30205,10 @@ static void refuse_dropped_container_string_change(Compiler *c) {
     const char *un = nt_str(nt, u, "name");
     int b = nt_ref(nt, u, "receiver"), cont = -1, read = -1, bind = -1;
     if (!un || b < 0 || !sp_str_mutator(un, SP_MUT_LOCAL) || sp_streq(un, "setbyte")) continue;
-    if (nt_ref(nt, u, "block") >= 0) continue;
+    int ac = 0, blk = nt_ref(nt, u, "block");
+    const int *av = nt_arr(nt, nt_ref(nt, u, "arguments"), "arguments", &ac);
+    if (ac == 0 && blk < 0 && (sp_streq(un, "concat") || sp_streq(un, "prepend"))) continue;
+    if (blk >= 0 && sp_streq(un, "scrub!")) continue;   /* refused by name where it is lowered */
     NodeKind bk = nt_kind(nt, b);
     if ((bk != NK_CallNode && bk != NK_LocalVariableReadNode) || comp_ntype(c, b) != TY_STRING) continue;
     if (c->strbuf_box[b] || c->strbuf_handle_demand[b]) continue;
@@ -30238,19 +30242,30 @@ static void refuse_dropped_container_string_change(Compiler *c) {
     if (bk == NK_LocalVariableReadNode &&
         !an_local_string_from_container(c, b, parent, &ix, 0, how, sizeof how, &cont, &read, &bind)) continue;
     if (an_container_change_unseen(c, cont, read, bind, un, parent, &ix)) continue;
-    /* the cure in the mutator's terms: `upcase!` is `upcase` stored back, and
-       any other change is made on a copy that is */
-    const char *el = cont >= 0 && ty_is_hash(comp_ntype(c, cont)) ? "h[k]" : "a[i]";
+    /* the cure in the mutator's terms, printed where following it is right:
+       `upcase!` is `upcase` stored back, and `<<` of a String is `+`. Any
+       other change is made on a copy that is stored back: `slice!` answers
+       the piece it cut, and `<<` takes an Integer where `+` does not. Master
+       refuses that copy stored into a Hash a constant or a global holds, so
+       for a Hash it is printed only where a local or an ivar holds it. */
+    int hash = cont >= 0 && ty_is_hash(comp_ntype(c, cont));
+    const char *el = hash ? "h[k]" : "a[i]";
+    const char *args = blk >= 0 && nt_kind(nt, blk) == NK_BlockNode ? (ac > 0 ? "(...) { ... }" : " { ... }")
+                     : blk >= 0 ? (ac > 0 ? "(..., &b)" : "(&b)") : ac > 0 ? "(...)" : "";
+    int str1 = ac == 1 && blk < 0 && comp_ntype(c, av[0]) == TY_STRING;
     size_t ul = strlen(un);
-    char cure[128], msg[400];
-    if (ul > 1 && un[ul - 1] == '!')
-      snprintf(cure, sizeof cure, "%s = %s.%.*s%s", el, el, (int)ul - 1, un, nt_ref(nt, u, "arguments") >= 0 ? "(...)" : "");
-    else if (sp_streq(un, "<<") || sp_streq(un, "concat")) snprintf(cure, sizeof cure, "%s = %s + x", el, el);
-    else if (sp_streq(un, "prepend")) snprintf(cure, sizeof cure, "%s = x + %s", el, el);
+    char cure[128] = "", msg[400];
+    if (ul > 1 && un[ul - 1] == '!' && !sp_streq(un, "slice!"))
+      snprintf(cure, sizeof cure, "%s = %s.%.*s%s", el, el, (int)ul - 1, un, args);
+    else if (str1 && (sp_streq(un, "<<") || sp_streq(un, "concat"))) snprintf(cure, sizeof cure, "%s = %s + x", el, el);
+    else if (str1 && sp_streq(un, "prepend")) snprintf(cure, sizeof cure, "%s = x + %s", el, el);
+    else if (hash && nt_kind(nt, an_unparen(nt, cont)) != NK_LocalVariableReadNode &&
+             nt_kind(nt, an_unparen(nt, cont)) != NK_InstanceVariableReadNode) cure[0] = 0;
+    else if (sp_streq(un, "<<")) snprintf(cure, sizeof cure, "s = %s.dup; s << x; %s = s", el, el);
     else if (sp_streq(un, "[]=")) snprintf(cure, sizeof cure, "s = %s.dup; s[j] = x; %s = s", el, el);
-    else snprintf(cure, sizeof cure, "s = %s.dup; s.%s%s; %s = s", el, un, nt_ref(nt, u, "arguments") >= 0 ? "(...)" : "", el);
-    snprintf(msg, sizeof msg, "a String is not yet shared by reference through %s into an in-place `%s`. "
-             "Store the new String back instead (%s)", how, un, cure);
+    else snprintf(cure, sizeof cure, "s = %s.dup; s.%s%s; %s = s", el, un, args, el);
+    snprintf(msg, sizeof msg, "a String is not yet shared by reference through %s into an in-place `%s`%s%s%s",
+             how, un, cure[0] ? ". Store the new String back instead (" : "", cure, cure[0] ? ")" : "");
     free(parent); free(ix.head); free(ix.next); free(ix.seen);
     unsupported_feature(c, u, msg);
   }
