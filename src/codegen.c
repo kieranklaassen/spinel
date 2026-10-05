@@ -6460,6 +6460,15 @@ static int block_stored_in_ivar(Compiler *c, int id, const char *bp) {
   return 0;
 }
 
+/* The end of a boxed post parameter's declaration. A value the body assigns
+   the parameter is held by nothing else, so that parameter is rooted; one
+   the body only reads keeps what the caller passed, which the caller holds,
+   and costs nothing. */
+static void emit_boxed_post_param_use(Compiler *c, Buf *pb, int body, const char *pp) {
+  if (subtree_writes_local(c, body, pp)) buf_printf(pb, "    SP_GC_ROOT_RBVAL(lv_%s); (void)lv_%s;\n", pp, pp);
+  else buf_printf(pb, "    (void)lv_%s;\n", pp);
+}
+
 /* The unified value type of every `return <expr>` that returns from a lambda
    whose body is `id`: the lambda's own body plus any lexically nested
    (non-lambda, non-def) block, since a block's `return` is a non-local return
@@ -7759,7 +7768,7 @@ else if (orecv >= 0 && onm) {
       if (lt == TY_POLY || lt == TY_UNKNOWN) {
         buf_printf(pb, "    sp_RbVal lv_%s = ({ sp_int __i = _sp_ps + %d;\n", pp, j);
         buf_puts(pb, "      (__i < argc && __i < 16) ? _sp_proc_poly_args[__i] : sp_box_nil(); });\n");
-        buf_printf(pb, "    SP_GC_ROOT_RBVAL(lv_%s); (void)lv_%s;\n", pp, pp);
+        emit_boxed_post_param_use(c, pb, body, pp);
         continue;
       }
       buf_printf(pb, "    sp_RbVal _pv_%s = (_sp_ps + %d < argc && _sp_ps + %d < 16) ? _sp_proc_poly_args[_sp_ps + %d]"
