@@ -29027,15 +29027,22 @@ static int an_kept_bang_receiver_read_again(Compiler *c, int call, KeptBangTabs 
 /* What the sentence tells the user to change instead of the kept value:
    the receiver, by its own name, when it is a variable or a constant.
    Changing that itself (`s.upcase!; s << x`, or `s << x if s.upcase!`)
-   builds and answers as CRuby does for every call of the list. NULL where
-   it does not, and the sentence stops before it: a change made on an
-   Array's element is lost as the kept value's is, not every call builds on
-   the value of a call (a reader), and `s.concat(a, b)` as a statement does
-   not build on a String two names hold. A second name for the receiver
-   (`s.upcase!; r = s`) is no cure either: it is a copy when the receiver is
-   a global, a class variable, a constant or a block parameter. Nothing is
-   said when the program defines a method of the name: its value may be a
-   String of its own, and the program right as it stands. */
+   builds for every call of the list, and answers as CRuby does where the
+   receiver's own name is what is read afterwards. It does not make every
+   program right: a String that is read through another holder not shared
+   with the receiver keeps losing the change, with or without a bang
+   method (a constant or a global given a local's String, a `for`
+   variable, a parameter given a constant or an Array's element), and a
+   parameter given a Struct member does not build. NULL where the rewrite
+   itself does not hold, and the sentence stops before it: a change made
+   on an Array's element is lost as the kept value's is, not every call
+   builds on the value of a call (a reader), and `s.concat(a, b)` as a
+   statement does not build on a String two names hold. A second name for
+   the receiver (`s.upcase!; r = s`) is no cure either: it is a copy when
+   the receiver is a global, a class variable, a constant or a block
+   parameter. Nothing is said when the program defines a method of the
+   name: its value may be a String of its own, and the program right as it
+   stands. */
 static const char *an_kept_bang_cure(Compiler *c, int call) {
   const NodeTable *nt = c->nt;
   const char *nm = nt_str(nt, call, "name");
