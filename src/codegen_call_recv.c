@@ -11309,9 +11309,7 @@ static void emit_face_str_bang(Compiler *c, int id, unsigned own, Buf *b) {
   /* A shared handle absorbs the new contents; a plain string box cannot,
      so an lvalue receiver takes the value back the way the typed path
      does for the same case. */
-  { const char *rvtb = nt_type(nt, recv);
-    if (rvtb && (sp_streq(rvtb, "LocalVariableReadNode") ||
-                 sp_streq(rvtb, "InstanceVariableReadNode"))) {
+  { if (poly_var_recv(c, recv)) {
       emit_expr(c, recv, b);
       buf_printf(b, " = sp_poly_str_become(_t%d, _t%d); ", tvb, tnb);
     }
@@ -13416,10 +13414,8 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
        receiver takes the result back, as `insert` does (#3445), when the
        source can be a String; a container is replaced through its pointer
        and answers itself */
-    const char *rvtr = nt_type(nt, recv);
     TyKind srt = comp_ntype(c, argv[0]);
-    int wb = rvtr && (sp_streq(rvtr, "LocalVariableReadNode") || sp_streq(rvtr, "InstanceVariableReadNode")) &&
-             (srt == TY_STRING || srt == TY_POLY);
+    int wb = poly_var_recv(c, recv) && (srt == TY_STRING || srt == TY_POLY);
     if (wb) { buf_puts(b, "("); emit_expr(c, recv, b); buf_puts(b, " = "); }
     buf_puts(b, "sp_poly_replace_any("); emit_expr(c, recv, b);
     buf_puts(b, ", "); emit_boxed(c, argv[0], b); buf_puts(b, ")");

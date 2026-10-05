@@ -1600,6 +1600,8 @@ void emit_concurrency_raise(Compiler *c, const char *rtext, int argc, const int 
    array (NULL when the node has no arguments). Shared by the call emitters. */
 const int *call_args(const NodeTable *nt, int id, int *argc);
 int poly_shl_root_slot(Compiler *c, int recv);   /* the boxed local/ivar a << chain starts at, or -1 */
+int poly_reader_slot(Compiler *c, int node);     /* the reader call of a boxed slot, emitted as the field */
+int poly_var_recv(Compiler *c, int recv);        /* a boxed local, ivar or such a reader call */
 /* Emit `node` into a fresh buffer and return it (caller reads .p, frees it).
    Collapses the `Buf b; memset(&b,0,sizeof b); emit_expr(c,node,&b);` idiom. */
 Buf expr_buf(Compiler *c, int node);

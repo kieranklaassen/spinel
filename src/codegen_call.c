@@ -2320,9 +2320,39 @@ static void emit_str_eq_ordered(Compiler *c, int recv, int arg, int eq, Buf *b) 
   emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, arg, b);
   buf_puts(b, eq ? ")" : "))");
 }
-/* The local or ivar a `<<` chain on a boxed value starts at (`out` in
-   `out << a << b`), or -1. A plain boxed String answers a new box from each
-   `<<`, so that slot has to take the result back. */
+int call_is_field_read(Compiler *c, int id, int *allocates);
+/* Is `node` the reader call of a boxed slot, emitted as the field itself
+   (`c.x` for an attr_reader or a Struct member, call_is_field_read) on a
+   receiver that is read without effect? The call then names that slot as
+   `@x` does inside the class, and can be read and stored to again. A value
+   type's field belongs to a copy of the object. */
+int poly_reader_slot(Compiler *c, int node) {
+  const NodeTable *nt = c->nt;
+  if (node < 0 || nt_kind(nt, node) != NK_CallNode || comp_ntype(c, node) != TY_POLY) return 0;
+  int recv = nt_ref(nt, node, "receiver"), copies = 0;
+  if (recv < 0) return 0;
+  NodeKind rk = nt_kind(nt, recv);
+  if (rk != NK_LocalVariableReadNode && rk != NK_InstanceVariableReadNode && rk != NK_SelfNode) return 0;
+  TyKind rt = comp_ntype(c, recv);
+  if (!ty_is_object(rt) || comp_ty_value_obj(c, rt) || !call_is_field_read(c, node, &copies)) return 0;
+  int cid = ty_object_class(rt), rdc = -1;
+  const char *nm = nt_str(nt, node, "name");
+  comp_reader_in_chain(c, cid, nm, &rdc);
+  char ivn[300]; snprintf(ivn, sizeof ivn, "@%s", comp_resolve_alias(c, cid, nm));
+  ClassInfo *owner = &c->classes[rdc >= 0 ? rdc : cid];
+  int iv = comp_ivar_index(owner, ivn);
+  return iv >= 0 && owner->ivar_types[iv] == TY_POLY;
+}
+/* Is the receiver a boxed variable a String mutator's result goes back
+   into: a local, an ivar, or the reader call of a boxed slot? */
+int poly_var_recv(Compiler *c, int recv) {
+  if (recv < 0) return 0;
+  NodeKind k = nt_kind(c->nt, recv);
+  return k == NK_LocalVariableReadNode || k == NK_InstanceVariableReadNode || poly_reader_slot(c, recv);
+}
+/* The local, ivar or boxed slot's reader call a `<<` chain on a boxed value
+   starts at (`out` in `out << a << b`), or -1. A plain boxed String answers
+   a new box from each `<<`, so that slot has to take the result back. */
 int poly_shl_root_slot(Compiler *c, int recv) {
   const NodeTable *nt = c->nt;
   int slot = recv;
@@ -2333,6 +2363,7 @@ int poly_shl_root_slot(Compiler *c, int recv) {
     slot = nt_ref(nt, slot, "receiver");
   }
   int kind = nt_kind(nt, slot);
+  if (kind == NK_CallNode) return poly_reader_slot(c, slot) ? slot : -1;
   if (kind != NK_LocalVariableReadNode && kind != NK_InstanceVariableReadNode) return -1;
   return comp_ntype(c, slot) == TY_POLY ? slot : -1;
 }
