@@ -202,7 +202,16 @@ void argov_reserve(void);
 /* The setter call (`obj.x = v`) emit_stmt is lowering: nothing reads its value,
    so emit_object_call leaves the value temp out (see setter_value_open). */
 extern int  g_setter_stmt_id;
+/* The statement emit_with_prelude is lowering: what its expressions hoist
+   runs ahead of the whole of it. */
+extern int  g_prelude_stmt;
 extern int  g_sn_skip;   /* safe-nav re-entry marker (see codegen_util.c) */
+/* Whether a `&.` call has yet to pass the nil guard emit_call_safe_nav_arms
+   writes for its receiver. What runs ahead of that guard runs although the
+   receiver is nil. */
+int sn_guard_ahead(Compiler *c, int id);
+/* Is `target` in the subtree at `root`? A def is not entered. */
+int subtree_holds(const NodeTable *nt, int root, int target);
 extern int  g_cls_tag_skip;   /* poly-dispatch builtin-arm re-entry marker */
 /* Ask subtree_may_allocate before leaving something unrooted across `id`:
    its "no" is a keyed decision (src/decide.c). subtree_allocates is the
