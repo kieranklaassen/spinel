@@ -1,0 +1,31 @@
+A method that matches keeps its caller's match alive across a collection
+
+The frame a matching method saves its caller's registers in
+(sp_re_frame, #3629) held their Strings unrooted. While the method ran,
+its own match was in the registers and nothing else named the caller's,
+so a collection inside the method freed them and the frame put the
+freed pointers back:
+
+    $keep = []
+    def busy(s)
+      s =~ /z/
+      GC.start
+      300.times { $keep << "y" * 4 }
+      s.size
+    end
+    "key" + 7.to_s =~ /(key\d)/
+    busy("abc")
+    p $1
+
+printed "yyyy"; CRuby prints "key7". Under SPINEL_GC_STRESS=2 the mark
+reported a freed heap string among the regex registers.
+
+sp_re_frame_push now roots each saved String that is set, and
+sp_re_frame_pop drops those roots as it puts the Strings back. A frame
+an exception leaves behind loses its roots where the landing resets the
+root stack, as every other root does.
+
+Test: test/regexp_frame_caller_match_gc.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+

@@ -1,0 +1,21 @@
+Regexp#match? counts its position in characters
+
+`re.match?(str, pos)` begins at character pos, as `str.match?(re, pos)`
+and `re.match(str, pos)` do. Spinel took pos for a byte offset:
+
+    s = "éab"
+    p /a/.match?(s, 2), /b/.match?(s, 3), //.match?(s, 4)
+
+printed true, true and true; CRuby prints false, false and false. Past
+a multi-byte character the search began one byte early for each extra
+byte, and a pos beyond the last character was let through up to the
+byte length.
+
+sp_re_match_p_at now bounds pos by the character length and converts
+it, as sp_re_matchdata_at does. A String of single bytes, and a binary
+one, count as they did.
+
+Test: test/regexp_match_p_pos_chars.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+

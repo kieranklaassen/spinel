@@ -1,0 +1,1 @@
+A method that matches keeps its caller's match alive across a collection
