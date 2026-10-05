@@ -1,0 +1,1 @@
+A String local a rescue can write stays rooted as a String
