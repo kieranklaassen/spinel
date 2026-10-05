@@ -31851,6 +31851,28 @@ static void an_phase_method_backstops(Compiler *c) {
   propagate_bigint_cascade(c);
 }
 
+/* True when a method body's last statement is an explicit `return`. */
+static int an_tail_is_return(Compiler *c, int body) {
+  const NodeTable *nt = c->nt;
+  if (body >= 0 && nt_kind(nt, body) == NK_StatementsNode) {
+    int n = 0; const int *b = nt_arr(nt, body, "body", &n);
+    body = n > 0 ? b[n - 1] : -1;
+  }
+  return body >= 0 && nt_kind(nt, body) == NK_ReturnNode;
+}
+
+/* True for `return f(x)`: one value, and it is a call on self. */
+static int an_return_is_self_call(Compiler *c, int rid) {
+  const NodeTable *nt = c->nt;
+  int args = nt_ref(nt, rid, "arguments"), n = 0;
+  const int *a = args >= 0 ? nt_arr(nt, args, "arguments", &n) : NULL;
+  if (n != 1) return 0;
+  int v = an_unparen(nt, a[0]);
+  if (v < 0 || nt_kind(nt, v) != NK_CallNode) return 0;
+  int recv = nt_ref(nt, v, "receiver");
+  return recv < 0 || nt_kind(nt, recv) == NK_SelfNode;
+}
+
 /* The late widening and narrowing: unresolved locals and returns to poly, ivars fed by nil-only params, the arithmetic widen, the object-array and poly-int narrowing, then the gc-root marks and the full node type cache (analyze_program's steps, in their order) */
 static void an_phase_late_widen(Compiler *c) {
   /* A non-parameter local that inference never resolved holds a value of unknown
@@ -31887,8 +31909,16 @@ static void an_phase_late_widen(Compiler *c) {
      (40 methods handing an empty `[]` down to the one that appends to it).
      It ends: a lift moves a return from UNKNOWN to a type or from NIL to
      POLY and none moves back, so a scope lifts twice at most. */
+  /* A method that ends in `return f(x)` has no tail value: its returns are
+     its value. They lift it when every one of them is a call on self that
+     has a type (rseen 1; 2 is a return that is not one, or not yet). A
+     return of anything else is not read here: what a local holds this late
+     may be the poly it was just declared. */
+  TyKind *racc = calloc((size_t)c->nscopes + 1, sizeof *racc);
+  char *rseen = calloc((size_t)c->nscopes + 1, 1);
   for (int iter = 0, cap = 2 * c->nscopes + 1; iter < cap; iter++) {
     int lifted = 0;
+    memset(rseen, 0, (size_t)c->nscopes);
     /* A NIL return was read off a local the loop above just made poly:
        `h = nil; h ||= {}; h` is nil through the fixpoint, because the
        element-less `{}` stays UNKNOWN, and the method then dropped the hash
@@ -31898,6 +31928,12 @@ static void an_phase_late_widen(Compiler *c) {
       if (rs && rs->ret == TY_NIL && return_node_type(c, rid) == TY_POLY &&
           !rs->ret_rbs_seeded && !rs->ret_specialized && !rs->cs_synth &&
           !rs->is_lowered_yield) { rs->ret = TY_POLY; lifted = 1; }
+      if (rs && rs->ret == TY_UNKNOWN && rseen[rs - c->scopes] != 2) {
+        int si = (int)(rs - c->scopes);
+        TyKind rt = an_return_is_self_call(c, rid) ? return_node_type(c, rid) : TY_UNKNOWN;
+        if (rt == TY_UNKNOWN || rt == TY_VOID) rseen[si] = 2;
+        else { racc[si] = rseen[si] ? ty_unify(racc[si], rt) : rt; rseen[si] = 1; }
+      }
     }
     for (int s = 0; s < c->nscopes; s++) {
       Scope *sc = &c->scopes[s];
@@ -31909,10 +31945,12 @@ static void an_phase_late_widen(Compiler *c) {
       }
       if (sc->ret != TY_UNKNOWN) continue;
       TyKind rl = infer_type(c, sc->body);
+      if ((rl == TY_UNKNOWN || rl == TY_VOID) && rseen[s] == 1 && an_tail_is_return(c, sc->body)) rl = racc[s];
       if (rl != TY_UNKNOWN && rl != TY_VOID) { sc->ret = rl; lifted = 1; }
     }
     if (!lifted) break;
   }
+  free(racc); free(rseen);
 
   /* Re-merge inherited ivar NAMES into subclasses now that the fixpoint has
      registered every ivar -- including ones a parent only gained from an
