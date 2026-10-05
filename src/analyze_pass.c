@@ -4093,6 +4093,15 @@ int infer_write_types(Compiler *c) {
         else if (ct == TY_BIGINT || vt == TY_BIGINT) newt = TY_BIGINT;
         else newt = TY_INT;
       }
+      /* an Integer local and a boxed operand of an arithmetic operator:
+         what the operator answers is known only at run time, so the local
+         is boxed, as `x = x + v` makes it. Not in a program whose builtin
+         classes have arithmetic or a coerce of their own: the boxed
+         operator does not reach those, and the slot's conversion of the
+         operand (true as 1) often answers what they do. */
+      else if ((ct == TY_INT || ct == TY_BIGINT) && vt == TY_POLY &&
+               is_arith_op(nt_str(nt, id, "binary_operator")) && !comp_nonnumber_arith_reopened(c))
+        newt = TY_POLY;
       else newt = ct;
     }
     else if (sp_streq(ty, "LocalVariableOrWriteNode") ||
