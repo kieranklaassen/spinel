@@ -19500,6 +19500,27 @@ static const char *dyn_lit_param_name(Compiler *c, int lit, int k) {
   nt_arr(nt, pnode, "posts", &sn);
   return sn == 0 && k >= rn && k - rn < on ? nt_str(nt, ov[k - rn], "name") : NULL;
 }
+/* Does statement `st` bind local `vn` to a new String made from nothing but
+   itself or a literal: `s = s.dup`, `s = s.clone`, `s = s + x`, `s = +"a"`? */
+static int dyn_binds_new_string(Compiler *c, int st, const char *vn) {
+  const NodeTable *nt = c->nt;
+  if (st < 0 || nt_kind(nt, st) != NK_LocalVariableWriteNode || !nt_str(nt, st, "name") ||
+      !sp_streq(nt_str(nt, st, "name"), vn)) return 0;
+  int v = nt_ref(nt, st, "value");
+  if (v >= 0 && nt_kind(nt, v) == NK_CallNode && nt_str(nt, v, "name") && sp_streq(nt_str(nt, v, "name"), "+@"))
+    v = nt_ref(nt, v, "receiver");
+  if (v < 0) return 0;
+  if (nt_kind(nt, v) == NK_StringNode || nt_kind(nt, v) == NK_InterpolatedStringNode) return 1;
+  if (v == nt_ref(nt, st, "value") && nt_kind(nt, v) == NK_CallNode && nt_ref(nt, v, "block") < 0) {
+    const char *nm = nt_str(nt, v, "name");
+    int r = nt_ref(nt, v, "receiver"), a = nt_ref(nt, v, "arguments"), ac = 0;
+    if (a >= 0) nt_arr(nt, a, "arguments", &ac);
+    if (!nm || r < 0 || nt_kind(nt, r) != NK_LocalVariableReadNode || !nt_str(nt, r, "name") ||
+        !sp_streq(nt_str(nt, r, "name"), vn)) return 0;
+    return ((sp_streq(nm, "dup") || sp_streq(nm, "clone")) && ac == 0) || (sp_streq(nm, "+") && ac == 1);
+  }
+  return 0;
+}
 /* The memo entry of a proc literal or a block: its positional parameters
    that a position binds whatever the count (dyn_lit_param_name). */
 static unsigned dyn_lit_bits(Compiler *c, int lit) {
@@ -19509,7 +19530,20 @@ static unsigned dyn_lit_bits(Compiler *c, int lit) {
   while (np < DYN_ARGS && (pn[np] = dyn_lit_param_name(c, lit, np))) np++;
   unsigned app = 0, kept = 0;
   int body = nt_kind(c->nt, lit) == NK_BlockNode ? nt_ref(c->nt, lit, "body") : a_proc_body(c, lit);
-  dyn_body_scan(c, body, pn, np, &app, &kept);
+  /* A parameter the body's first statement binds to a new String (`->(s) {
+     s = s.dup; s << x }`): the statements after it have that one under the
+     name, so only the first is read for the String the call hands over. */
+  int sn = 0, nw = -1;
+  const int *sv = body >= 0 && nt_kind(c->nt, body) == NK_StatementsNode ? nt_arr(c->nt, body, "body", &sn) : NULL;
+  for (int k = 0; k < np && sn > 0 && nw < 0; k++)
+    if (dyn_binds_new_string(c, sv[0], pn[k])) nw = k;
+  if (nw >= 0) {
+    const char *rest[DYN_ARGS];
+    for (int k = 0; k < np; k++) rest[k] = k == nw ? NULL : pn[k];
+    dyn_body_scan(c, sv[0], pn, np, &app, &kept);
+    for (int i = 1; i < sn; i++) dyn_body_scan(c, sv[i], rest, np, &app, &kept);
+  }
+  else dyn_body_scan(c, body, pn, np, &app, &kept);
   /* An optional whose default is a required parameter (`->(x, y = x)`) is
      that parameter's String when the call omits it, so what the body does
      to it is done to the required one (promote_default_alias_params). */
@@ -19530,7 +19564,7 @@ static unsigned dyn_lit_bits(Compiler *c, int lit) {
      that parameter's String: an append through it is one to the parameter,
      as an_param_mutated_in_place counts it for a method's */
   for (int k = 0; k < np; k++) {
-    if (app & (1u << k)) continue;
+    if ((app & (1u << k)) || k == nw) continue;
     const char *an[8]; int na = 0;
     an[na++] = pn[k];
     for (int i = 0; i < na && !(app & (1u << k)); i++) {
