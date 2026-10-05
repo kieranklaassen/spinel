@@ -2782,6 +2782,193 @@ static int send_name_defined(Compiler *c, const char *nm) {
   return 0;
 }
 
+static int enum_is_a_chain(Compiler *c, const char *rn, const int *defcls, int ndef);
+
+/* The call node `id` becomes `(body)`, as the two rewrites below leave it. */
+static void send_as_parens(Compiler *c, int id, int body, int base) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  int encl = c->nscope[id];
+  nt_node_set_type(nt, id, "ParenthesesNode");
+  nt_node_set_ref(nt, id, "body", body);
+  nt_node_set_ref(nt, id, "receiver", -1);
+  nt_node_set_ref(nt, id, "arguments", -1);
+  comp_grow_node_arrays(c);
+  for (int j = base; j < nt->count; j++) c->nscope[j] = encl;
+}
+
+/* A retargeted call whose receiver has settled on a class that owns the
+   name was that class's own call all along: `id` becomes `(recv.send(:m,
+   args))` over the arguments as they were written (`oargs`), a fresh call
+   that carries none of the retarget's stamps. */
+static int send_put_back(Compiler *c, int id, const char *nm_in, int oargs) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  char nm[32]; snprintf(nm, sizeof nm, "%s", nm_in);   /* copy before realloc */
+  int base = nt->count, recv = nt_ref(nt, id, "receiver");
+  const char *cop = nt_str(nt, id, "call_operator");
+  int safe_nav = cop && sp_streq(cop, "&.");
+  int own = nt_new_node(nt, "CallNode");
+  int body = nt_new_node(nt, "StatementsNode");
+  if (own < 0 || body < 0) return 0;
+  nt_node_set_str(nt, own, "name", nm);
+  nt_node_set_ref(nt, own, "receiver", recv);
+  nt_node_set_ref(nt, own, "arguments", oargs);
+  nt_node_set_int(nt, own, "send_own", 1);
+  if (safe_nav) { nt_node_set_str(nt, own, "call_operator", "&."); nt_node_set_str(nt, id, "call_operator", "."); }
+  nt_node_set_arr(nt, body, "body", &own, 1);
+  send_as_parens(c, id, body, base);
+  return 1;
+}
+
+/* A retargeted call whose receiver is still boxed once the types have
+   settled may hold an instance of a class that owns the name, which keeps
+   its own method, beside the values the retarget is for. `id` becomes
+     (__r = recv; __r.is_a?(K) ? __r.send(:m, args) : __r.m(args))
+   over the classes that define the name, the shape desugar_builtin_enum_calls
+   gives a boxed receiver beside a class's own each. The second arm is the
+   retargeted call as it was, its `&.` and its stamps included: nil is no
+   instance of K. Answers 0, and leaves the call alone, when a class it
+   cannot name in the test defines the name. */
+static int send_split_boxed(Compiler *c, int id, const char *nm_in, int oargs) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  char nm[32]; snprintf(nm, sizeof nm, "%s", nm_in);   /* copy before realloc */
+  char mname[256]; snprintf(mname, sizeof mname, "%s", nt_str(nt, id, "name"));
+  int defcls[64], ndef = 0;
+  for (int k = 0; k < c->nclasses; k++) {
+    ClassInfo *ci = &c->classes[k];
+    if (ci->is_native_class || !ci->name || comp_method_in_class(c, k, nm) < 0) continue;
+    /* a singleton or an unnamed Struct has no constant for the test, and
+       a reopened builtin's instances are not the test's to tell apart */
+    if (ci->is_singleton_of || ci->is_anon_struct || is_builtin_reopen(ci->name) ||
+        comp_class_index(c, ci->name) != k || ndef >= 64) return 0;
+    defcls[ndef++] = k;
+  }
+  if (ndef == 0) return 0;
+  int base = nt->count;
+  int recv = nt_ref(nt, id, "receiver"), gargs = nt_ref(nt, id, "arguments");
+  const char *cop = nt_str(nt, id, "call_operator");
+  int safe_nav = cop && sp_streq(cop, "&.");
+  int vis_enf = nt_str(nt, id, "vis_enforce") != NULL, blind = nt_str(nt, id, "send_blind") != NULL;
+  char rn[64]; snprintf(rn, sizeof rn, "__sendrecv_%s", comp_node_tag(c, id));
+  int w = nt_new_node(nt, "LocalVariableWriteNode");
+  int own = nt_new_node(nt, "CallNode");
+  int ownr = nt_new_node(nt, "LocalVariableReadNode");
+  int gen = nt_new_node(nt, "CallNode");
+  int genr = nt_new_node(nt, "LocalVariableReadNode");
+  int ifn = nt_new_node(nt, "IfNode");
+  int ts = nt_new_node(nt, "StatementsNode");
+  int es = nt_new_node(nt, "StatementsNode");
+  int eln = nt_new_node(nt, "ElseNode");
+  int body = nt_new_node(nt, "StatementsNode");
+  int pred = enum_is_a_chain(c, rn, defcls, ndef);
+  if (w < 0 || own < 0 || ownr < 0 || gen < 0 || genr < 0 || ifn < 0 || ts < 0 ||
+      es < 0 || eln < 0 || body < 0 || pred < 0) return 0;
+  nt_node_set_str(nt, w, "name", rn); nt_node_set_int(nt, w, "depth", 0);
+  nt_node_set_ref(nt, w, "value", recv);
+  nt_node_set_str(nt, ownr, "name", rn); nt_node_set_int(nt, ownr, "depth", 0);
+  nt_node_set_str(nt, genr, "name", rn); nt_node_set_int(nt, genr, "depth", 0);
+  /* the class's own method, the literal still its first argument */
+  nt_node_set_str(nt, own, "name", nm);
+  nt_node_set_ref(nt, own, "receiver", ownr);
+  nt_node_set_ref(nt, own, "arguments", oargs);
+  nt_node_set_int(nt, own, "send_own", 1);
+  /* the retargeted call, for every other value */
+  nt_node_set_str(nt, gen, "name", mname);
+  nt_node_set_ref(nt, gen, "receiver", genr);
+  nt_node_set_ref(nt, gen, "arguments", gargs);
+  if (safe_nav) { nt_node_set_str(nt, gen, "call_operator", "&."); nt_node_set_str(nt, id, "call_operator", "."); }
+  if (vis_enf) nt_node_set_str(nt, gen, "vis_enforce", "1");
+  if (blind) nt_node_set_str(nt, gen, "send_blind", "1");
+  nt_node_set_arr(nt, ts, "body", &own, 1);
+  nt_node_set_arr(nt, es, "body", &gen, 1);
+  nt_node_set_ref(nt, eln, "statements", es);
+  nt_node_set_ref(nt, ifn, "predicate", pred);
+  nt_node_set_ref(nt, ifn, "statements", ts);
+  nt_node_set_ref(nt, ifn, "subsequent", eln);
+  int stmts[2] = { w, ifn };
+  nt_node_set_arr(nt, body, "body", stmts, 2);
+  Scope *es2 = comp_scope_of(c, id);
+  if (es2) scope_local_intern(es2, rn);
+  send_as_parens(c, id, body, base);
+  return 1;
+}
+
+/* Whether the boxed receiver `recv` is a block's first parameter over an
+   Array typed with one class, where neither that class nor one under it
+   has `nm` of its own. The parameter was locked boxed while the Array was
+   still open (reset_locked_iter_block_params frees only the ones whose
+   Array had its type back in time), but no element of that Array is an
+   object the split below would find. */
+static int send_recv_elem_has_none(Compiler *c, int recv, const char *nm) {
+  const NodeTable *nt = c->nt;
+  if (nt_kind(nt, recv) != NK_LocalVariableReadNode) return 0;
+  const char *vn = nt_str(nt, recv, "name");
+  Scope *vs = vn ? comp_scope_of(c, recv) : NULL;
+  LocalVar *lv = vs ? scope_local(vs, vn) : NULL;
+  if (!lv || !lv->is_block_param) return 0;
+  for (int id = 0; id < nt->count; id++) {
+    if (nt_kind(nt, id) != NK_CallNode) continue;
+    int block = nt_ref(nt, id, "block"), ir = nt_ref(nt, id, "receiver");
+    if (block < 0 || nt_kind(nt, block) != NK_BlockNode || comp_scope_of(c, block) != vs) continue;
+    const char *p0 = block_param_name(c, block, 0);
+    if (!p0 || !sp_streq(p0, vn) || !subtree_has(nt, nt_ref(nt, block, "body"), recv)) continue;
+    TyKind at = ir >= 0 ? infer_type(c, ir) : TY_UNKNOWN;
+    if (!ty_is_obj_array(at)) return 0;
+    int k = ty_obj_array_class(at);
+    for (int d = 0; d < c->nclasses; d++)
+      if ((d == k || is_descendant(c, d, k)) && comp_method_in_chain(c, d, nm, NULL) >= 0) return 0;
+    return 1;
+  }
+  return 0;
+}
+
+/* The retarget in desugar_public_send_recv runs while the fixpoint does,
+   and a receiver that is boxed there says nothing yet: an element of
+   `@conns = []` is boxed until the re-narrow gives the Array its class.
+   Deciding on that would split, and box, every such call of a program
+   that defines the name, the ones on a class with no send of its own
+   among them. So the retarget goes ahead as it does anywhere and marks
+   the call (send_was, send_args), and this asks once the types have
+   settled: a receiver now typed with a class that owns the name gets its
+   call back (send_put_back), one still boxed is split on the class
+   (send_split_boxed) unless it is an element of an Array of a class with
+   no such method, and every other call stays the retargeted call it was.
+   Answers whether any call changed; the caller then infers again. */
+int desugar_send_settled(Compiler *c) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  int changed = 0, n0 = nt->count;
+  for (int id = 0; id < n0; id++) {
+    if (nt_kind(nt, id) != NK_CallNode) continue;
+    const char *was = nt_str(nt, id, "send_was");
+    if (!was || !*was) continue;
+    char nm[32]; snprintf(nm, sizeof nm, "%s", was);
+    nt_node_set_str(nt, id, "send_was", "");               /* asked once */
+    int recv = nt_ref(nt, id, "receiver"), oargs = nt_ref(nt, id, "send_args");
+    int gargs = nt_ref(nt, id, "arguments");
+    if (recv < 0 || oargs < 0 || gargs < 0 || nt_ref(nt, id, "block") >= 0) continue;
+    if (c->nscope[oargs] != c->nscope[id]) continue;       /* a copy of the call, in another scope */
+    /* still the call the retarget left: named by the literal, over the
+       other arguments as written */
+    int oc = 0, gc = 0;
+    const int *ov = nt_arr(nt, oargs, "arguments", &oc);
+    const int *gv = nt_arr(nt, gargs, "arguments", &gc);
+    if (oc < 1 || !ov || gc != oc - 1) continue;
+    NodeKind lk = nt_kind(nt, ov[0]);
+    const char *lit = lk == NK_SymbolNode ? nt_str(nt, ov[0], "value") : lk == NK_StringNode ? nt_str(nt, ov[0], "content") : NULL;
+    const char *cur = nt_str(nt, id, "name");
+    if (!lit || !cur || !sp_streq(lit, cur)) continue;
+    int same = 1;
+    for (int k = 0; k < gc && same; k++) same = gv[k] == ov[k + 1];
+    if (!same) continue;
+    TyKind rt = infer_type(c, recv);
+    if ((ty_is_object(rt) && send_name_owned(c, ty_object_class(rt), 0, nm)) ||
+        (rt == TY_CLASS && send_name_owned(c, class_recv_static_ci(c, recv), 1, nm)))
+      changed |= send_put_back(c, id, nm, oargs);
+    else if (rt == TY_POLY && !send_recv_elem_has_none(c, recv, nm))
+      changed |= send_split_boxed(c, id, nm, oargs);
+  }
+  return changed;
+}
+
 int desugar_implicit_send(Compiler *c) {
   NodeTable *nt = (NodeTable *)c->nt;
   int changed = 0;
@@ -2869,9 +3056,11 @@ int desugar_public_send_recv(Compiler *c) {
        looked for a method named hello and raised NoMethodError. The class
        has to be in hand, so while the receiver's type is still unresolved,
        wait rather than guess: g_infer_optimistic says the fixpoint has more
-       to say. A receiver that is boxed, or whose class only a subclass
-       gives the name, is retargeted as before. */
+       to say. A receiver whose class only a subclass gives the name is
+       retargeted as before; so is one that is boxed, marked for
+       desugar_send_settled to ask again. */
     int di = is_pub ? 2 : sp_streq(nm, "send") ? 0 : 1;
+    int unsettled = 0;
     if (defd[di] < 0) defd[di] = send_name_defined(c, nm);
     if (defd[di]) {
       int orecv = nt_ref(nt, id, "receiver");
@@ -2879,6 +3068,9 @@ int desugar_public_send_recv(Compiler *c) {
       if (ort == TY_UNKNOWN && g_infer_optimistic) continue;
       if (ty_is_object(ort) && send_name_owned(c, ty_object_class(ort), 0, nm)) continue;
       if (ort == TY_CLASS && send_name_owned(c, class_recv_static_ci(c, orecv), 1, nm)) continue;
+      unsettled = ort == TY_POLY || ort == TY_UNKNOWN;
+      /* the own call desugar_send_settled made stays that */
+      if (unsettled && nt_int(nt, id, "send_own", 0)) continue;
     }
     int args = nt_ref(nt, id, "arguments");
     if (args < 0) continue;
@@ -2917,6 +3109,10 @@ int desugar_public_send_recv(Compiler *c) {
     int encl = c->nscope[id];
     for (int j = base; j < nt->count; j++) c->nscope[j] = encl;
     expand_static_splat_args(c, id, id + 1);
+    if (unsettled) {
+      nt_node_set_str(nt, id, "send_was", di == 2 ? "public_send" : di == 1 ? "__send__" : "send");
+      nt_node_set_ref(nt, id, "send_args", args);
+    }
     changed = 1;
   }
   return changed;

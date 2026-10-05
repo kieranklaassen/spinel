@@ -30565,10 +30565,8 @@ static void an_round_cap_step(Compiler *c, AnRoundCap *rc, int iter) {
   if (!grew && iter + 1 == rc->cap && rc->cap < 128 + 4 * an_type_slots(c)) rc->cap++;
 }
 
-/* The inference fixpoint: two rounds with the proc-form clones made between them, then the optimistic re-narrow of the slots a transient poly locked (analyze_program's steps, in their order) */
-static void an_phase_infer_fixpoint(Compiler *c) {
-  g_fixpoint_rounds = 0;
-  g_fixpoint_capped = 0;
+/* The inference fixpoint's rounds: two, with the proc-form clones made between them */
+static void an_infer_fixpoint_rounds(Compiler *c) {
   /* Two rounds. The proc-form clones are made between them: knowing which
      methods a poly dispatch will name needs settled receiver types, and the
      clones' own bodies then need inferring like any other. The second round is
@@ -30768,6 +30766,13 @@ static void an_phase_infer_fixpoint(Compiler *c) {
   free(rc.seen);
   g_infer_optimistic = 0;
   }
+}
+
+/* The inference fixpoint: its rounds, then the optimistic re-narrow of the slots a transient poly locked (analyze_program's steps, in their order) */
+static void an_phase_infer_fixpoint(Compiler *c) {
+  g_fixpoint_rounds = 0;
+  g_fixpoint_capped = 0;
+  an_infer_fixpoint_rounds(c);
 
   /* Optimistic re-narrow: the monotonic fixpoint locks a slot to poly the
      first time it sees a transient poly (a value read before its type settled,
@@ -31027,6 +31032,14 @@ static void an_phase_infer_fixpoint(Compiler *c) {
     }
     free(recCi); free(recIv); free(recLs); free(recLi); free(recRs); free(nsoff); free(nsbad);
   }
+
+  /* A literal-name send on a receiver that was boxed while the rounds ran
+     is decided now that its type has settled (desugar_send_settled). A
+     call it changes is one no round has seen: the class's own send takes
+     arguments and answers a type the retargeted call did not have. The
+     rounds run again for them; types only widen there. Only a program
+     that defines send, __send__ or public_send can have such a call. */
+  if (desugar_send_settled(c)) an_infer_fixpoint_rounds(c);
 }
 
 /* After the fixpoint: the backstops for slots left without a type (empty literals, nullable params, unknown ivars and hashes), the nil-guard and is_a? narrowing, the return-type re-run, the param and hash-shape reconciliation, the bigint loop variables (analyze_program's steps, in their order) */
