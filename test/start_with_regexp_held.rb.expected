@@ -1,0 +1,15 @@
+true
+false
+true
+true
+true
+false
+true
+true
+false
+true
+true
+false
+"xa"
+"ybzab"
+TypeError: no implicit conversion of nil into String

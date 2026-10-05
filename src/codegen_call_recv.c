@@ -6387,6 +6387,14 @@ static int str_arms_case_search(Compiler *c, Buf *b, const NodeTable *nt, const 
     /* s.start_with?(/re/): true when the pattern matches at index 0 */
     buf_printf(b, "(sp_re_match(sp_re_pat_%d, %s) == 0)", re_lit_index(c, argv[0]), r);
   }
+  /* and so does one held in a variable, which was converted to a String */
+  else if (sp_streq(name, "start_with?") && argc == 1 && comp_ntype(c, argv[0]) == TY_REGEX) {
+    int ts = ++g_tmp;
+    char pat[32];
+    buf_printf(b, "({ const char *_t%d = %s; SP_GC_ROOT_STR(_t%d);", ts, r, ts);
+    emit_re_arg_pat(c, argv[0], "no implicit conversion of nil into String", b, pat);
+    buf_printf(b, " sp_re_match(%s, _t%d) == 0; })", pat, ts);
+  }
   else if (sp_streq(name, "start_with?") && argc == 1) {
     buf_printf(b, "sp_str_start_with(%s, ", r); emit_str_expr(c, argv[0], b); buf_puts(b, ")");
   }
