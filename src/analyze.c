@@ -29024,11 +29024,39 @@ static int an_kept_bang_receiver_read_again(Compiler *c, int call, KeptBangTabs 
   LocalVar *sv = scope_local(ss, sn);   /* asked last: it walks the scope's locals */
   return !sv || sv->is_param || sv->is_block_param;
 }
+/* What the sentence tells the user to change instead of the kept value:
+   the receiver, by its own name, when it is a variable or a constant.
+   Changing that itself (`s.upcase!; s << x`, or `s << x if s.upcase!`)
+   builds and answers as CRuby does for every call of the list. NULL where
+   it does not, and the sentence stops before it: a change made on an
+   Array's element is lost as the kept value's is, not every call builds on
+   the value of a call (a reader), and `s.concat(a, b)` as a statement does
+   not build on a String two names hold. A second name for the receiver
+   (`s.upcase!; r = s`) is no cure either: it is a copy when the receiver is
+   a global, a class variable, a constant or a block parameter. Nothing is
+   said when the program defines a method of the name: its value may be a
+   String of its own, and the program right as it stands. */
+static const char *an_kept_bang_cure(Compiler *c, int call) {
+  const NodeTable *nt = c->nt;
+  const char *nm = nt_str(nt, call, "name");
+  int a = nt_ref(nt, call, "arguments"), ac = 0;
+  if (a >= 0) nt_arr(nt, a, "arguments", &ac);
+  if ((ac >= 2 && sp_streq(nm, "concat")) || an_any_scope_by_name(c, nm) >= 0) return NULL;
+  int recv = an_unparen(nt, nt_ref(nt, call, "receiver"));
+  switch (nt_kind(nt, recv)) {
+    case NK_LocalVariableReadNode: case NK_InstanceVariableReadNode: case NK_GlobalVariableReadNode:
+    case NK_ClassVariableReadNode: case NK_ConstantReadNode:
+      return nt_str(nt, recv, "name");
+    default: return NULL;
+  }
+}
 /* `r = s.upcase!` keeps the String `s` in CRuby, so a later `r << x` shows
-   through `s`. Here the write keeps the value as a String of the local's
-   own, and the change stays in `r`: a copy with nothing said. Refused when
-   the local is the receiver of a String mutator, holds nothing but such
-   values (or nil), and the receiver's String can be read again.
+   through `s`. Here `r` is a String of its own (strip!, gsub!), or is the
+   receiver's bytes only until a change moves them (upcase!, squeeze!,
+   succ!): `r << "!"` may still show through `s`, a longer append does
+   not, with nothing said. Refused, as the scrub! refusal refuses both,
+   when the local is the receiver of a String mutator, holds nothing but
+   such values (or nil), and the receiver's String can be read again.
    A local that is only read holds the same bytes either way and is left
    alone. Asked once the types have settled: a receiver's type is not known
    before. */
@@ -29047,11 +29075,13 @@ static void refuse_kept_bang_values(Compiler *c) {
     LocalVar *lv = scope_local(ws, wn);   /* asked late: it walks the scope's locals */
     if (!lv || lv->is_param || lv->is_block_param || (lv->type != TY_STRING && lv->type != TY_STRBUF)) continue;
     if (!an_kept_bang_receiver_read_again(c, call, &t)) continue;
-    const char *nm = nt_str(nt, call, "name");
-    char msg[320];
-    snprintf(msg, sizeof msg, "the value of %s is kept and then changed in place (%s): a String is not yet "
-             "shared by reference through that value. Change the receiver instead (s.%s%s; r = s)",
-             nm, an_kept_bang_local_change(c, wn, ws), nm, nm[strlen(nm) - 1] == '!' ? "" : "(...)");
+    const char *cure = an_kept_bang_cure(c, call);
+    char msg[512];
+    int n = snprintf(msg, sizeof msg, "the value of %s is kept in %s and then changed in place (%s): a String is "
+                     "not yet shared by reference through that value", nt_str(nt, call, "name"), wn,
+                     an_kept_bang_local_change(c, wn, ws));
+    if (cure && n > 0 && n < (int)sizeof msg)
+      snprintf(msg + n, sizeof msg - (size_t)n, ". Change %s itself instead of %s", cure, wn);
     unsupported_feature(c, w, msg);
   }
   if (t.built) { sb_mut_tab_free(&t.chg); sb_mut_tab_free(&t.reads); sb_mut_tab_free(&t.wr); }
