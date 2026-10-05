@@ -434,7 +434,7 @@ const char*sp_str_dump(const char*s){SP_GC_ROOT_STR(s);
   }
   out[oi++]='"';out[oi]=0;sp_str_set_len(out,oi);return out;
 }
-const char*sp_str_delete_prefix(const char*s,const char*p){SP_GC_ROOT_STR(s);SP_GC_ROOT_STR(p);if(!s)sp_nil_recv("delete_prefix");if(!p)return s;size_t sl=strlen(s),pl=strlen(p);if(pl<=sl&&memcmp(s,p,pl)==0){char*r=sp_str_alloc_raw(sl-pl+1);memcpy(r,s+pl,sl-pl+1);sp_str_set_len(r,sl-pl);return r;}char*r=sp_str_alloc_raw(sl+1);memcpy(r,s,sl+1);sp_str_set_len(r,sl);return r;}
+const char*sp_str_delete_prefix(const char*s,const char*p){SP_GC_ROOT_STR(s);SP_GC_ROOT_STR(p);if(!s)sp_nil_recv("delete_prefix");if(!p)return s;size_t sl=sp_str_byte_len(s),pl=sp_str_byte_len(p);if(pl<=sl&&memcmp(s,p,pl)==0){char*r=sp_str_alloc_raw(sl-pl+1);memcpy(r,s+pl,sl-pl);r[sl-pl]=0;sp_str_set_len(r,sl-pl);return r;}char*r=sp_str_alloc_raw(sl+1);memcpy(r,s,sl+1);sp_str_set_len(r,sl);return r;}
 /* `s << x`: append in place when the buffer has room, else move to a buffer
    with room to spare. The emitted form used to be `s = concat(s, x)`, a fresh
    exact-sized copy per append, so building a document one piece at a time was
