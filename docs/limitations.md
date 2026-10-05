@@ -738,6 +738,12 @@ as `yield(*r)`), bound to a parameter that appends, is refused as well, and
 so is any String forwarded to the 17th position or past it, or handed on
 through more POLY parameters than the analysis follows.
 
+A constant's String is lent to a parameter that appends to it as a global's
+is (`write(OUT, s)` into `def write(buf, s) = buf << s`). Where a global is
+refused above and the refusal names the parameter that appends, so is a
+constant whose one assignment makes its String (`BUF = String.new`,
+`+"lit"`, a `dup`, an interpolation).
+
 Each is lifted in turn, and this list shrinks with it. Until then, return
 the String from the method and assign it, or append to it in the caller. A
 literal or any other expression passed there is not refused: nothing else

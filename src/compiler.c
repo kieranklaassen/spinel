@@ -367,6 +367,13 @@ LocalVar *comp_const(Compiler *c, const char *name) {
   return NULL;
 }
 LocalVar *comp_const_intern(Compiler *c, const char *name) { return lv_intern(&c->consts, &c->nconsts, &c->cconsts, name); }
+int comp_const_only_write(Compiler *c, const char *name) {
+  LocalVar *cv = comp_const(c, name);
+  int w = cv ? cv->const_write - 1 : -1;
+  if (w < 0 || w >= c->nt->count || nt_kind(c->nt, w) != NK_ConstantWriteNode) return -1;
+  const char *wn = nt_str(c->nt, w, "name");
+  return wn && sp_streq(wn, name) ? w : -1;
+}
 
 /* Intern a symbol name of a known BYTE length. A symbol's name may hold a NUL
    -- `:"a\0b"` -- and the node table carries it, so the compiler has to as

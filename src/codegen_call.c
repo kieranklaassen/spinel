@@ -18539,6 +18539,7 @@ static const char *strvar_arg(Compiler *c, int a, int *shared) {
   if (k == NK_InstanceVariableReadNode) return "an instance variable";
   if (k == NK_GlobalVariableReadNode) return "a global variable";
   if (k == NK_ClassVariableReadNode) return "a class variable";
+  if (const_string_fresh(c, a)) return "a constant";
   return NULL;
 }
 
@@ -18547,10 +18548,13 @@ static const char *strvar_arg(Compiler *c, int a, int *shared) {
    call emitted that has one (`[s].each(&method(:m))` is rewritten to a
    block whose nodes have none). */
 static int g_refuse_call = -1, g_refuse_outer = -1;
-static __attribute__((noreturn)) void refuse_string_copy(Compiler *c, int arg, const char *target,
-                                                         const char *pname, const char *through,
-                                                         const char *why) {
+static void refuse_string_copy(Compiler *c, int arg, const char *target,
+                               const char *pname, const char *through,
+                               const char *why) {
   int is_method = target && target[0] == '`';
+  /* a constant is refused only where the parameter that appends is named:
+     a target the compiler cannot name may be one that only reads it */
+  if (!pname && const_string_fresh(c, arg)) return;
   if (nt_int(c->nt, arg, "node_line", 0) <= 0 && g_refuse_call >= 0) arg = g_refuse_call;
   if (nt_int(c->nt, arg, "node_line", 0) <= 0 && g_refuse_outer >= 0) arg = g_refuse_outer;
   char msg[768];
@@ -19497,18 +19501,20 @@ static void refuse_unplaced_lead(Compiler *c, int id, const char *name, int recv
   }
 }
 
-/* A global's or a class variable's read, or its write (`m($g = s)`). */
-static int refuse_nonlocal_var(const NodeTable *nt, int a) {
-  NodeKind k = a >= 0 ? nt_kind(nt, a) : NK__COUNT;
+/* A global's or a class variable's read, or its write (`m($g = s)`), or a
+   constant's read (const_string_fresh). */
+static int refuse_nonlocal_var(Compiler *c, int a) {
+  NodeKind k = a >= 0 ? nt_kind(c->nt, a) : NK__COUNT;
   return k == NK_GlobalVariableReadNode || k == NK_ClassVariableReadNode ||
-         k == NK_GlobalVariableWriteNode || k == NK_ClassVariableWriteNode;
+         k == NK_GlobalVariableWriteNode || k == NK_ClassVariableWriteNode ||
+         (a >= 0 && const_string_fresh(c, a));
 }
 static int nonlocal_string_typed(Compiler *c, int a) {
   TyKind t = comp_ntype(c, a);
   return t == TY_STRING || t == TY_STRBUF;
 }
-/* A global or a class variable handed to a method's parameter that takes
-   a String's handle or box and appends to it. The binder wraps a fresh
+/* A global, a class variable or a constant handed to a method's parameter
+   that takes a String's handle or box and appends to it. The binder wraps a fresh
    handle of its bytes, or boxes a copy, since neither variable has a handle
    of its own to give; only a lent slot (the byref ABI) can carry it. A
    receiver that is boxed reaches every class's method of the name. */
@@ -19521,9 +19527,9 @@ static void refuse_nonlocal_param_args(Compiler *c, int id, const char *name) {
   for (int k = 0; k < ac && !any; k++) {
     if (nt_kind(nt, av[k]) == NK_KeywordHashNode) {
       int en = 0; const int *el = nt_arr(nt, av[k], "elements", &en);
-      for (int e = 0; e < en && !any; e++) any = refuse_nonlocal_var(nt, nt_ref(nt, el[e], "value"));
+      for (int e = 0; e < en && !any; e++) any = refuse_nonlocal_var(c, nt_ref(nt, el[e], "value"));
     }
-    else any = refuse_nonlocal_var(nt, av[k]);
+    else any = refuse_nonlocal_var(c, av[k]);
   }
   if (!any) return;
   int tg[64], n = 0;
@@ -19564,9 +19570,11 @@ static void refuse_nonlocal_param_args(Compiler *c, int id, const char *name) {
             arg = nt_ref(nt, el[e], "value");
         }
       }
-      if (!refuse_nonlocal_var(nt, arg) || !nonlocal_string_typed(c, arg)) continue;
+      if (!refuse_nonlocal_var(c, arg) || !nonlocal_string_typed(c, arg)) continue;
       const char *kind = nt_kind(nt, arg) == NK_GlobalVariableReadNode || nt_kind(nt, arg) == NK_GlobalVariableWriteNode
-                         ? "a global variable" : "a class variable";
+                         ? "a global variable"
+                         : nt_kind(nt, arg) == NK_ClassVariableReadNode || nt_kind(nt, arg) == NK_ClassVariableWriteNode
+                         ? "a class variable" : "a constant";
       char mt[96]; snprintf(mt, sizeof mt, "`%s`", m->name ? m->name : name);
       char why[128];
       snprintf(why, sizeof why, "from %s into a parameter that %s", kind,

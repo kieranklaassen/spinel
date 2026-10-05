@@ -2193,6 +2193,59 @@ void refuse_lent_global_rebound(Compiler *c, int arg, const char *slot, const ch
            (int)nt_int(c->nt, w, "node_line", 0));
   unsupported_feature(c, arg, msg);
 }
+/* The C global a constant read `node` reads (cst_), when it can be lent as
+   a global's is: the read is the plain slot, the one a String mutator on
+   the constant writes back through (str_mut_var_recv), and the constant's
+   one write cannot run during a call written at `node`, by the rule
+   lent_global_slot_rebound applies to a global's writes. A constant with a
+   second write is not lent. Fills `out` and answers 1, or 0. */
+int const_global_slot(Compiler *c, int node, char *out, size_t cap) {
+  const NodeTable *nt = c->nt;
+  NodeKind k = nt_kind(nt, node);
+  if (k != NK_ConstantReadNode && k != NK_ConstantPathNode) return 0;
+  int w = comp_const_only_write(c, nt_str(nt, node, "name"));
+  if (w < 0 || !str_mut_var_recv(c, node)) return 0;
+  Scope *ws = comp_scope_of(c, w);
+  int wb = lent_enclosing_closure(c, w);
+  if (!(wb < 0 && ws && !ws->name && ws->def_node < 0) &&
+      (ws != comp_scope_of(c, node) || wb != lent_enclosing_closure(c, node))) return 0;
+  int save = g_tmp;
+  Buf rb = expr_buf(c, node);
+  g_tmp = save;
+  int ok = rb.p && !strncmp(rb.p, "cst_", 4) && strlen(rb.p) < cap;
+  if (ok) snprintf(out, cap, "%s", rb.p);
+  free(rb.p);
+  return ok;
+}
+/* Does the constant read `node` hold a plain String its one write made
+   there, one the program can change in place: `+"lit"`, `String.new`, a
+   `dup`, a String's `+`, `*` or `%`, an interpolation? A literal is
+   frozen, and so can be what any other value hands over; an append through
+   such a constant raises, in a copy as in the String itself. */
+int const_string_fresh(Compiler *c, int node) {
+  const NodeTable *nt = c->nt;
+  NodeKind k = nt_kind(nt, node);
+  if ((k != NK_ConstantReadNode && k != NK_ConstantPathNode) || comp_ntype(c, node) != TY_STRING) return 0;
+  int w = comp_const_only_write(c, nt_str(nt, node, "name"));
+  int v = w >= 0 ? nt_ref(nt, w, "value") : -1;
+  if (v >= 0) v = unwrap_parens(c, v);
+  if (v < 0) return 0;
+  if (nt_kind(nt, v) == NK_InterpolatedStringNode) {
+    int pn = 0; const int *pv = nt_arr(nt, v, "parts", &pn);
+    for (int i = 0; i < pn; i++)
+      if (nt_kind(nt, pv[i]) == NK_EmbeddedStatementsNode) return 1;
+    return 0;
+  }
+  if (nt_kind(nt, v) != NK_CallNode) return 0;
+  const char *mn = nt_str(nt, v, "name");
+  int r = nt_ref(nt, v, "receiver");
+  if (!mn || r < 0) return 0;
+  if (sp_streq(mn, "new"))
+    return nt_kind(nt, r) == NK_ConstantReadNode && sp_streq(nt_str(nt, r, "name"), "String");
+  if (comp_ntype(c, r) != TY_STRING) return 0;
+  return sp_streq(mn, "+@") || sp_streq(mn, "dup") || sp_streq(mn, "+") || sp_streq(mn, "*") ||
+         sp_streq(mn, "%");
+}
 /* Emit-side lvalue for a shared-mutable string receiver: lv_<x> for a
    strbuf local, <self>-><iv_x> (or civ_Toplevel_x) for a strbuf ivar.
    Returns 1 and fills `out`, or 0 when the receiver is neither (#3227). */

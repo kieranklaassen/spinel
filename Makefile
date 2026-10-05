@@ -2098,6 +2098,7 @@ GC_MINOR_TESTS := test/zip_block_many_operands.rb \
                   test/string_handle_initialize.rb \
                   test/string_handle_poly_variable.rb \
                   test/string_lent_global_slot.rb \
+                  test/string_constant_lent_slot.rb \
                   test/string_alias_conditional_write.rb \
                   test/string_handle_poly_alias.rb \
                   test/string_handle_splat_gather.rb \

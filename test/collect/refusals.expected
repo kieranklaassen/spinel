@@ -664,6 +664,18 @@ spinel: 1 refusal, nothing written
 == test/reject/string_fresh_array_append.rb [promote] rc=1
 spinel: a String is not yet shared by reference through a fresh Array literal into an appending iterator block
 spinel: 1 refusal, nothing written
+== test/reject/string_fresh_constant_boxed_param.rb [default] rc=1
+spinel: a String is passed to `poly`'s parameter `io` through the call, which the method appends to: this call hands the method a copy, so the append would not reach the caller's String (a String is not yet shared by reference from a constant into a parameter that boxes it). Return the String from the method and assign it, or append to it in the caller.
+spinel: 1 refusal, nothing written
+== test/reject/string_fresh_constant_boxed_param.rb [promote] rc=1
+spinel: a String is passed to `poly`'s parameter `io` through the call, which the method appends to: this call hands the method a copy, so the append would not reach the caller's String (a String is not yet shared by reference from a constant into a parameter that boxes it). Return the String from the method and assign it, or append to it in the caller.
+spinel: 1 refusal, nothing written
+== test/reject/string_fresh_constant_proc_param.rb [default] rc=1
+spinel: a String is passed to a proc's parameter `t` through `add.call`, which the proc appends to: this call hands the proc a copy, so the append would not reach the caller's String (a String is not yet shared by reference from a constant). Return the String from the proc and assign it, or append to it in the caller.
+spinel: 1 refusal, nothing written
+== test/reject/string_fresh_constant_proc_param.rb [promote] rc=1
+spinel: a String is passed to a proc's parameter `t` through `add.call`, which the proc appends to: this call hands the proc a copy, so the append would not reach the caller's String (a String is not yet shared by reference from a constant). Return the String from the proc and assign it, or append to it in the caller.
+spinel: 1 refusal, nothing written
 == test/reject/string_gather_short_splat_lead.rb [default] rc=1
 spinel: a String is passed to `g`'s parameter `a` through a call that gathers its arguments, which the method appends to: this call hands the method a copy, so the append would not reach the caller's String (a String is not yet shared by reference from a local variable ahead of a splat whose length decides which parameter takes it). Return the String from the method and assign it, or append to it in the caller.
 spinel: 1 refusal, nothing written

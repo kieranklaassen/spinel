@@ -486,6 +486,11 @@ unsigned inline_alias_params(Compiler *c, int mi, const int *argv, int pargc, co
                                             : cvar_global_slot(c, an, gref, sizeof gref))) continue;
       gslot = 1;
     }
+    /* a constant's C global (cst_) likewise; const_global_slot answers for
+       a write of it that could run meanwhile */
+    else if (ak == NK_ConstantReadNode || ak == NK_ConstantPathNode) {
+      if (comp_ntype(c, an) != TY_STRING || !const_global_slot(c, an, gref, sizeof gref)) continue;
+    }
     /* a String that is the shared handle has no slot to lend: the
        parameter takes the handle (yield_splice_handles) or a copy */
     else if (ak != NK_LocalVariableReadNode || local_is_handle(c, an)) continue;
@@ -2568,11 +2573,14 @@ void emit_block_binds(Compiler *c, int blk, const int *yargs, int yc,
     NodeKind yk = poly_splat_tmp < 0 && k < yc ? nt_kind(nt, yargs[k]) : NK__COUNT;
     int gslot = (yk == NK_GlobalVariableReadNode && gvar_global_slot(c, yargs[k], gref, sizeof gref)) ||
                 (yk == NK_ClassVariableReadNode && cvar_global_slot(c, yargs[k], gref, sizeof gref));
+    /* a constant's likewise (const_global_slot) */
+    int cslot = (yk == NK_ConstantReadNode || yk == NK_ConstantPathNode) &&
+                comp_ntype(c, yargs[k]) == TY_STRING && const_global_slot(c, yargs[k], gref, sizeof gref);
     if (poly_splat_tmp < 0 && k < yc &&
-        ((yk == NK_LocalVariableReadNode && !local_is_handle(c, yargs[k])) || gslot) &&
+        ((yk == NK_LocalVariableReadNode && !local_is_handle(c, yargs[k])) || gslot || cslot) &&
         comp_ntype(c, yargs[k]) == TY_STRING && block_param_wants_alias(c, blk, k, -1)) {
       LocalVar *bl = bsc ? scope_local(bsc, bp) : NULL;
-      if (bl && al && !gslot) refuse_alias_of_snapshot(c, yargs[k], bp);
+      if (bl && al && !gslot && !cslot) refuse_alias_of_snapshot(c, yargs[k], bp);
       if (bl && al && gslot) refuse_lent_global_rebound(c, yargs[k], gref, "a block", bp);
       if (bl && al && al->n < (int)(sizeof al->lv / sizeof al->lv[0])) {
         if (!as_expr && !al->open) { buf_puts(b, "{\n"); emit_indent(b, indent); al->open = 1; }

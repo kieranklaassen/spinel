@@ -6597,6 +6597,12 @@ static void emit_arg_or_default_fill(Compiler *c, Scope *m, int idx, int provide
         buf_printf(out, "&%s", gref);
         return;
       }
+      /* a constant's C global likewise: the slot `S << x` writes back to */
+      if (aty && (sp_streq(aty, "ConstantReadNode") || sp_streq(aty, "ConstantPathNode")) &&
+          comp_ntype(c, provided) == TY_STRING && const_global_slot(c, provided, gref, sizeof gref)) {
+        buf_printf(out, "&%s", gref);
+        return;
+      }
     }
     Buf ab; memset(&ab, 0, sizeof ab);
     p->byref_out = 0;   /* reenter for the plain coerced value */

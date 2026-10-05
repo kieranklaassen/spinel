@@ -3063,8 +3063,11 @@ void register_globals_consts(Compiler *c) {
          target (`Mod::A, ::B = ...`) interns its leaf name flat, as the
          path write does */
       const char *nm = nt_str(nt, id, "name");
-      if (nm && is_c_ident(nm) && comp_class_index(c, nm) < 0)
-        comp_const_intern(c, nm)->const_def_write = 1;
+      if (nm && is_c_ident(nm) && comp_class_index(c, nm) < 0) {
+        LocalVar *cv = comp_const_intern(c, nm);
+        cv->const_def_write = 1;
+        cv->const_write = -1;
+      }
     }
     else if (sp_streq(ty, "ConstantPathWriteNode") || sp_streq(ty, "ConstantPathOrWriteNode") ||
              sp_streq(ty, "ConstantPathAndWriteNode") || sp_streq(ty, "ConstantPathOperatorWriteNode")) {
@@ -3076,6 +3079,7 @@ void register_globals_consts(Compiler *c) {
       if (nm && is_c_ident(nm) && comp_class_index(c, nm) < 0) {
         LocalVar *cv = comp_const_intern(c, nm);
         if (sp_streq(ty, "ConstantPathWriteNode")) cv->const_def_write = 1;
+        cv->const_write = -1;
       }
     }
     else if (sp_streq(ty, "ConstantOrWriteNode") || sp_streq(ty, "ConstantAndWriteNode") ||
@@ -3083,7 +3087,7 @@ void register_globals_consts(Compiler *c) {
       /* `CONST ||= v` (and friends) may be the constant's only definition */
       const char *nm = nt_str(nt, id, "name");
       if (nm && is_c_ident(nm) && comp_class_index(c, nm) < 0)
-        comp_const_intern(c, nm);
+        comp_const_intern(c, nm)->const_write = -1;
     }
     else if (sp_streq(ty, "ConstantWriteNode")) {
       const char *nm = nt_str(nt, id, "name");
@@ -3105,6 +3109,7 @@ void register_globals_consts(Compiler *c) {
       if (nm && is_c_ident(nm) && !is_regex_const) {
         LocalVar *cv = comp_const_intern(c, nm);
         cv->const_def_write = 1;
+        cv->const_write = cv->const_write ? -1 : id + 1;
         /* `CONST = SomeClass.new(...)`: reads of CONST during the new()
            (i.e. inside initialize or anything it calls) must raise
            NameError, since CONST is not yet bound. */

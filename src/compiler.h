@@ -173,6 +173,10 @@ typedef struct {
   int const_def_write; /* (consts) has a definite (non-or/and) assignment; an
                           or/and-write-only const is nil-defaulted (poly) so its
                           `||=` truthiness check fires on first use */
+  int const_write;  /* (consts) one past the ConstantWriteNode that assigns it,
+                       when that is its only write; -1 when it has several, or
+                       one of another form (`||=`, an operator write, a
+                       multiple assignment, `Mod::X = v`); 0 with none */
   int or_written; /* some write to this local is a `||=`, which can run before
                      any definite assignment (`v ||= 5; v += 2`, a definite
                      write in one branch only, a block local reset each
@@ -1011,6 +1015,9 @@ void comp_add_gvar_alias(Compiler *c, const char *from, const char *to);
 int comp_gvar_is_interp_flag(const char *name);
 LocalVar *comp_const(Compiler *c, const char *name);
 LocalVar *comp_const_intern(Compiler *c, const char *name);
+/* The ConstantWriteNode that is the only write of the constant `name`
+   (LocalVar.const_write), or -1 */
+int comp_const_only_write(Compiler *c, const char *name);
 /* 1 when `pred` is a statically-false `defined?(Const)` if-guard (optionally
    the left arm of an `&&` chain) over a constant that resolves to nothing;
    the guarded branch is compile-time dead. */
