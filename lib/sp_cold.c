@@ -1585,6 +1585,7 @@ sp_PolyArray *sp_str_chars_poly(const char *s) {SP_GC_ROOT_STR(s);
 #endif
 int sp_bt_enabled = 0;          /* set to 1 by debug-build main() */
 const char *sp_bt_srcfile = ""; /* toplevel .rb path, set by debug main() */
+const char *const *sp_bt_files = 0;
 static int sp_bt_is_runtime(const char *n) {
   static const char *pfx[] = {
     "int_", "str_", "float_", "sym_", "gc_", "bigint", "sprintf", "raise",
@@ -1612,7 +1613,7 @@ static int sp_bt_is_runtime(const char *n) {
      - macOS:       "<idx> <image> <addr> <symbol> + <off>".
    Returns NULL if it isn't a keepable user frame. Detect Linux by the '('
    that delimits the symbol (the macOS format has none). */
-static const char *sp_bt_symbol(const char *line) {
+static const char *sp_bt_symbol(const char *line, char *raw, size_t rawcap) {
   char sym[256];
   const char *lp = strchr(line, '(');
   if (lp) {                                       /* glibc/Linux paren form */
@@ -1637,6 +1638,7 @@ else {                                        /* macOS: "<idx> <image> <addr> <s
     if (len == 0 || len > 250) return 0;
     memcpy(sym, p, len); sym[len] = 0;
   }
+  if (raw && rawcap) snprintf(raw, rawcap, "%s", sym);
   /* The top level runs in the emitted body function, which the compiler
      hands to sp_main_stack_run (see lib/sp_fiber.c). That frame IS `<main>`;
      the C `main` beside it is the trampoline, on the other stack, and an
@@ -1692,9 +1694,15 @@ sp_StrArray *sp_bt_format(void **buf, int n) {
   if (!syms) return a;
   const char *src = (sp_bt_srcfile && sp_bt_srcfile[0]) ? sp_bt_srcfile : "(spinel)";
   for (int i = 0; i < n; i++) {
-    char *name = (char *)sp_bt_symbol(syms[i]);  /* always strdup'd; free after use */
+    char raw[256]; raw[0] = 0;
+    char *name = (char *)sp_bt_symbol(syms[i], raw, sizeof raw);  /* always strdup'd; free after use */
     if (!name) continue;
-    sp_StrArray_push(a, sp_sprintf("%s:in `%s'", src, name));
+    /* a method of a required file names that file, not the entry script */
+    const char *file = src;
+    if (sp_bt_files)
+      for (const char *const *f = sp_bt_files; f[0]; f += 2)
+        if (strcmp(f[0], raw) == 0) { file = f[1]; break; }
+    sp_StrArray_push(a, sp_sprintf("%s:in `%s'", file, name));
     free(name);
   }
   free(syms);
@@ -2727,6 +2735,7 @@ void sp_Enumerator_scan(void *p) {
   if (e->fib) sp_gc_mark(e->fib);
   if (e->gen_cap) sp_gc_mark(e->gen_cap);
   if (e->peeked) sp_mark_rbval(e->peek_val);
+  if (e->is_bsearch) sp_mark_rbval(e->bsearch_result);
   sp_mark_rbval(e->size);
   if (e->has_feed) sp_mark_rbval(e->feed);
   sp_mark_rbval(e->gen_result);
@@ -3016,7 +3025,40 @@ sp_RbVal sp_enum_gen_pull(sp_Enumerator *e) {SP_GC_ROOT(e); sp_gc_wb((void*)e);
   if (!sp_Fiber_alive(e->fib)) { e->gen_result = v; sp_gc_wb((void*)e); sp_raise_stop_iteration(v); }
   return v;
 }
+static void sp_enum_bsearch_advance(sp_Enumerator *e) {
+  if (!e->bsearch_waiting) return;
+  sp_RbVal v = e->has_feed ? e->feed : sp_box_nil();
+  e->has_feed = FALSE; e->feed = sp_box_nil();
+  if (v.tag == SP_TAG_INT) {
+    if (v.v.i == 0) { e->bsearch_result = e->items->data[e->bsearch_mid]; e->bsearch_hi = e->bsearch_mid - 1; }
+    else if (v.v.i < 0) e->bsearch_hi = e->bsearch_mid - 1;
+    else e->bsearch_lo = e->bsearch_mid + 1;
+  }
+  else if (v.tag == SP_TAG_FLT) {
+    if (v.v.f == 0.0) { e->bsearch_result = e->items->data[e->bsearch_mid]; e->bsearch_hi = e->bsearch_mid - 1; }
+    else if (v.v.f < 0.0) e->bsearch_hi = e->bsearch_mid - 1;
+    else e->bsearch_lo = e->bsearch_mid + 1;
+  }
+  else if (v.tag != SP_TAG_NIL && !(v.tag == SP_TAG_BOOL && !v.v.b)) {
+    e->bsearch_result = e->items->data[e->bsearch_mid];
+    e->bsearch_hi = e->bsearch_mid - 1;
+  }
+  else e->bsearch_lo = e->bsearch_mid + 1;
+  e->bsearch_waiting = FALSE;
+}
+static sp_RbVal sp_enum_bsearch_next(sp_Enumerator *e) {
+  SP_GC_ROOT(e);
+  sp_enum_bsearch_advance(e);
+  if (e->bsearch_lo > e->bsearch_hi) sp_raise_stop_iteration(e->bsearch_result);
+  e->bsearch_mid = e->bsearch_lo + (e->bsearch_hi - e->bsearch_lo + 1) / 2;
+  e->bsearch_waiting = TRUE;
+  return e->items->data[e->bsearch_mid];
+}
 sp_RbVal sp_Enumerator_next(sp_Enumerator *e) {SP_GC_ROOT(e);
+  if (e->is_bsearch) {
+    if (e->peeked) { e->peeked = FALSE; e->bsearch_waiting = TRUE; return e->peek_val; }
+    return sp_enum_bsearch_next(e);
+  }
   if (e->gen) {
     if (e->peeked) { e->peeked = FALSE; return e->peek_val; }
     return sp_enum_gen_pull(e);
@@ -3026,6 +3068,15 @@ sp_RbVal sp_Enumerator_next(sp_Enumerator *e) {SP_GC_ROOT(e);
   return e->items->data[e->cursor++];
 }
 sp_RbVal sp_Enumerator_peek(sp_Enumerator *e) {SP_GC_ROOT(e); sp_gc_wb((void*)e);
+  if (e->is_bsearch) {
+    if (!e->peeked) {
+      sp_enum_bsearch_advance(e);
+      if (e->bsearch_lo > e->bsearch_hi) sp_raise_stop_iteration(e->bsearch_result);
+      e->bsearch_mid = e->bsearch_lo + (e->bsearch_hi - e->bsearch_lo + 1) / 2;
+      e->peek_val = e->items->data[e->bsearch_mid]; e->peeked = TRUE;
+    }
+    return e->peek_val;
+  }
   if (e->gen) {
     if (!e->peeked) { e->peek_val = sp_enum_gen_pull(e); sp_gc_wb((void*)e); e->peeked = TRUE; }
     return e->peek_val;
@@ -3046,6 +3097,7 @@ sp_Enumerator *sp_Enumerator_rewind(sp_Enumerator *e) { sp_gc_wb((void*)e);
   if (!e) return NULL;
   if (e->gen) { e->fib = NULL; e->peeked = FALSE; e->gen_result = sp_box_nil(); }
   else e->cursor = 0;
+  if (e->is_bsearch) { e->bsearch_lo = 0; e->bsearch_hi = e->items ? e->items->len - 1 : -1; e->bsearch_mid = -1; e->bsearch_waiting = FALSE; e->bsearch_result = sp_box_nil(); e->peeked = FALSE; }
   e->feed = sp_box_nil(); e->has_feed = FALSE;
   return e;
 }
@@ -3165,9 +3217,10 @@ sp_RbVal sp_Enumerator_size(sp_Enumerator *e) {SP_GC_ROOT(e);
   if (e->gen_label) return sp_box_nil();
   /* an argless cycle is endless unless there is nothing to repeat */
   if (e->endless) return (e->items && e->items->len > 0) ? sp_box_float(1.0 / 0.0) : sp_box_int(0);
-  /* the index searches stop at their first hit, so CRuby gives their
-     Enumerator no size; nor gsub's or gsub!'s */
-  if (e->meth && (strcmp(e->meth, "index") == 0 || strcmp(e->meth, "rindex") == 0 ||
+  /* These searches can stop at their first hit, so CRuby gives their
+     Enumerator no size; neither gsub's nor gsub!'s Enumerator has one. */
+  if (e->meth && (strcmp(e->meth, "bsearch") == 0 ||
+                  strcmp(e->meth, "index") == 0 || strcmp(e->meth, "rindex") == 0 ||
                   strcmp(e->meth, "find_index") == 0 ||
                   strncmp(e->meth, "gsub(", 5) == 0 || strncmp(e->meth, "gsub!(", 6) == 0))
     return sp_box_nil();
@@ -3567,7 +3620,13 @@ else{while(u>0){sp_int d=u%base;tmp[i++]=d<10?'0'+d:'a'+d-10;u/=base;}}int j=0;i
    form). Two wrappers keep call-site emit local. */
 const char *sp_int_opt_inspect(sp_int v) { return sp_int_is_nil(v) ? "nil" : sp_int_to_s(v); }
 const char *sp_int_opt_to_s(sp_int v)    { return sp_int_is_nil(v) ? "" : sp_int_to_s(v); }
+SP_NORETURN void sp_raise_nil_int_op(sp_int a, sp_int b, const char *op);
 sp_int sp_int_pow(sp_int base, sp_int exp) {
+  /* A nil operand (the SP_INT_NIL sentinel, INTPTR_MIN) raises as it does for
+     the other operators (SP_INT_NIL_CK, which sp_idiv and sp_imod run): ahead
+     of the exponent's sign, since the sentinel is negative, so `3 ** nil`
+     answered RangeError "negative exponent" and `nil ** 2` an overflow. */
+  if (SP_UNLIKELY(base == SP_INT_NIL || exp == SP_INT_NIL)) sp_raise_nil_int_op(base, exp, "**");
   if (exp < 0) sp_raise_cls("RangeError", "negative exponent");
   /* Exact square-and-multiply (the old pow(double) round-trip lost precision
      above 2^53 and saturated on overflow). Overflow follows the +/-/* mode:
@@ -4006,9 +4065,11 @@ sp_bool sp_str_re_match_p_at(mrb_regexp_pattern *pat, const char *str, sp_int cp
   if (cpos < 0) cpos += cl;
   if (cpos < 0 || cpos > cl) return FALSE;
   size_t boff = sp_utf8_byte_offset(str, cpos);
-  int64_t slen = (int64_t)strlen(str);
+  /* the subject's own length and mode, as sp_re_match_p reads them: strlen
+     stopped at an embedded NUL, and a binary subject matched as UTF-8 */
+  int64_t slen = (int64_t)sp_str_byte_len(str);
   int caps[2];
-  return re_exec(pat, str, slen, (sp_int)boff, caps, 2, 0) > 0;
+  return re_exec(pat, str, slen, (sp_int)boff, caps, 2, sp_str_is_binary(str)) > 0;
 }
 /* Issue #910: sub(string, hash) -- literal-substring pattern
    with a hash replacement. Replaces only the first match. */
@@ -4920,12 +4981,13 @@ const char *sp_str_encode(const char *s, sp_RbVal dst, sp_RbVal src,
   if (!s) sp_nil_recv("encode");
   int from = sp_enc_kind(src, sp_str_is_binary(s) ? 2 : 1);
   int to = sp_enc_kind(dst, 1);
-  if (!from || !to) return s;
+  /* encode answers a new String even where nothing changes, as CRuby's */
+  if (!from || !to) return sp_str_dup(s);
   const char *repl = (replace.tag == SP_TAG_STR && replace.v.s) ? replace.v.s : NULL;
   SP_GC_ROOT_STR(repl);
   if (from == to) {
     if (from == 1 && sp_enc_kw_replace(invalid)) return sp_str_scrub(s, repl);
-    return s;
+    return sp_str_dup(s);
   }
   /* binary <-> UTF-8: the ASCII bytes carry over, nothing else does */
   size_t bl = sp_str_byte_len(s);

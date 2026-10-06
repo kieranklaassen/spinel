@@ -1,6 +1,7 @@
 /* builtin_ops.c -- the builtin method rows (see builtin_ops.h). */
 
 #include <assert.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "builtin_ops.h"
@@ -379,7 +380,12 @@ static const BuiltinOp bop_rows[] = {
   { TY_COMPLEX, "**",  1, 1, BF_ANY, TY_COMPLEX, BOPE_TEMPLATE, "sp_complex_pow($r, (sp_int)($e0))", BOP_K(TY_INT) },
   { TY_COMPLEX, "**",  1, 1, BF_ANY, TY_COMPLEX, BOPE_TEMPLATE, "sp_complex_pow_c($r, $c0)", BOP_K(TY_FLOAT) | BOP_K(TY_COMPLEX) },
   { TY_COMPLEX, "**",  1, 1, BF_ANY, TY_COMPLEX, BOPE_TEMPLATE, "sp_complex_pow_rational($r, $e0)", BOP_K(TY_RATIONAL) },
-  { TY_COMPLEX, "**",  1, 1, BF_ANY, TY_COMPLEX, BOPE_NONE, NULL, BOP_K(TY_POLY) },
+  /* a boxed exponent: sp_poly_pow picks the form by its class at run time
+     and answers a boxed Complex for a Complex base, which the row's
+     Complex result unboxes (the boxed answer went into sp_box_complex) */
+  { TY_COMPLEX, "**",  1, 1, BF_ANY, TY_COMPLEX, BOPE_TEMPLATE,
+    "({ sp_Complex _t$t = $r; sp_RbVal _t$u = $b0; SP_GC_ROOT_RBVAL(_t$u); sp_poly_as_complex(sp_poly_pow(sp_box_complex(_t$t), _t$u)); })",
+    BOP_K(TY_POLY) },
   { TY_COMPLEX, "**",  1, 1, BF_ANY, TY_COMPLEX, BOPE_TEMPLATE, CX_TYPEERROR },
   { TY_COMPLEX, "**",  0, 127, BF_ANY, TY_COMPLEX, BOPE_NONE },
   /* Complex has no modulo: NoMethodError, not a compile abort (#2618) */
@@ -1811,7 +1817,10 @@ static const BuiltinOp bop_rows[] = {
                        BOP_K(TY_FLOAT_ARRAY_ARRAY))
   { BOP_ANY_HASH, "compare_by_identity?", 0, 0, BF_ANY,  TY_BOOL,        BOPE_TEMPLATE, "((void)($r), 0)" },  /* always false; the receiver still runs */
   { BOP_ANY_HASH, "equal?",           1,   1, BF_ANY,      TY_BOOL,        BOPE_TEMPLATE, "((void *)($r) == (void *)($e0))", HASH_OR_ARRAY },  /* pointer identity */
-  { BOP_ANY_HASH, "equal?",           1,   1, BF_ANY,      TY_BOOL,        BOPE_TEMPLATE, "0" },
+  /* a boxed operand can hold this very Hash; anything else is another
+     object, the operand still evaluated for its effects */
+  { BOP_ANY_HASH, "equal?",           1,   1, BF_ANY,      TY_BOOL,        BOPE_TEMPLATE, "({ sp_RbVal _t$t = $b0; (sp_bool)(_t$t.tag == SP_TAG_OBJ && _t$t.v.p == (void *)($h)); })", BOP_K(TY_POLY) },
+  { BOP_ANY_HASH, "equal?",           1,   1, BF_ANY,      TY_BOOL,        BOPE_TEMPLATE, "((void)($r), (void)($e0), (sp_bool)0)" },
   { BOP_ANY_HASH, "length",           0,   0, BF_ANY,      TY_INT,         BOPE_TEMPLATE, "sp_$HHash_length($r)" },
   { BOP_ANY_HASH, "size",             0,   0, BF_ANY,      TY_INT,         BOPE_TEMPLATE, "sp_$HHash_length($r)" },
   { BOP_ANY_HASH, "count",            0,   0, BF_NONE,     TY_INT,         BOPE_TEMPLATE, "sp_$HHash_length($r)" },
@@ -1847,7 +1856,10 @@ static const BuiltinOp bop_rows[] = {
   { BOP_ANY_HASH, "merge",            0,   0, BF_ANY,      BOPR_SELF,      BOPE_TEMPLATE, "sp_$HHash_dup($r)", 0, 0, BOPF_COPY_CLASS | BOPF_ARGS_BUILTIN },  /* a copy (#2340) */
   { BOP_ANY_HASH, "slice",            0,   0, BF_ANY,      BOPR_SELF,      BOPE_TEMPLATE, "({ (void)($r); sp_$HHash_new(); })" },  /* an empty hash (#2349) */
   /* the mutators */
-  { BOP_ANY_HASH, "delete",           1,   1, BF_ANY,      BOPR_HASH_VAL,  BOPE_HASH_DELETE },  /* the deleted value, or nil */
+  { BOP_ANY_HASH, "delete",           1,   1, BF_NONE,     BOPR_HASH_VAL,  BOPE_HASH_DELETE },  /* the deleted value, or nil */
+  /* with a block: the deleted value or the block's, either kind, boxed by
+     the arm after the lookup */
+  { BOP_ANY_HASH, "delete",           1,   1, BF_REQUIRED, TY_POLY,        BOPE_NONE },
   { BOP_ANY_HASH, "shift",            0,   0, BF_NONE,     TY_POLY,        BOPE_HASH_SHIFT },  /* the first pair, or nil */
   { BOP_ANY_HASH, "replace",          1,   1, BF_ANY,      TY_UNKNOWN,     BOPE_HASH_REPLACE, NULL, 0, 0, BOPF_SELF | BOPF_ARGS_BUILTIN },
   { BOP_ANY_HASH, "default=",         1,   1, BF_ANY,      TY_UNKNOWN,     BOPE_HASH_SET_DEFAULT },
@@ -1894,7 +1906,6 @@ static const BuiltinOp bop_rows[] = {
   { BOP_ANY_HASH, "first",            1,   1, BF_NONE,     TY_POLY_ARRAY,  BOPE_HASH_TAKE },
   { BOP_ANY_HASH, "take",             1,   1, BF_NONE,     TY_POLY_ARRAY,  BOPE_HASH_TAKE },
   { BOP_ANY_HASH, "drop",             1,   1, BF_NONE,     TY_POLY_ARRAY,  BOPE_HASH_DROP },
-  { BOP_ANY_HASH, "to_h",             0,   0, BF_NONE,     BOPR_SELF,      BOPE_NONE, NULL, 0, 0, BOPF_SELF_EXACT },  /* identity */
   { BOP_ANY_HASH, "slice",            0, 127, BF_ANY,      BOPR_SELF,      BOPE_NONE },  /* a copy, or a key subset */
   { BOP_ANY_HASH, "except",           0, 127, BF_ANY,      BOPR_SELF,      BOPE_NONE },
   { BOP_ANY_HASH, "dup",              0, 127, BF_ANY,      BOPR_SELF,      BOPE_NONE, NULL, 0, 0, BOPF_COPY_CLASS },
@@ -1963,7 +1974,6 @@ static const BuiltinOp bop_rows[] = {
   { BOP_ANY_HASH, "hash",             0,   0, BF_ANY,      TY_UNKNOWN,     BOPE_NONE },
   { BOP_ANY_HASH, "default_proc=",    1,   1, BF_ANY,      TY_UNKNOWN,     BOPE_NONE },  /* the assigned proc */
   { BOP_ANY_HASH, "compare_by_identity", 0,   0, BF_ANY,      TY_UNKNOWN,     BOPE_NONE, NULL, 0, 0, BOPF_SELF },
-  { BOP_ANY_HASH, "freeze",           0,   0, BF_ANY,      TY_UNKNOWN,     BOPE_NONE, NULL, 0, 0, BOPF_SELF },
   { BOP_ANY_HASH, "merge",            1, 127, BF_ANY,      TY_UNKNOWN,     BOPE_NONE, NULL, 0, 0, BOPF_COPY_CLASS | BOPF_ARGS_BUILTIN },
   { BOP_ANY_HASH, "merge!",           0, 127, BF_ANY,      TY_UNKNOWN,     BOPE_NONE, NULL, 0, 0, BOPF_SELF | BOPF_ARGS_BUILTIN },
   { BOP_ANY_HASH, "update",           0, 127, BF_ANY,      TY_UNKNOWN,     BOPE_NONE, NULL, 0, 0, BOPF_SELF | BOPF_ARGS_BUILTIN },
@@ -2162,6 +2172,7 @@ static const BuiltinOp bop_rows[] = {
   { BOP_ANY_ARRAY, "first",                 0,   0, BF_ANY,      BOPR_ELEM,     BOPE_TEMPLATE, "sp_$AArray_get($r, 0)" },
   { BOP_ANY_ARRAY, "shift",                 0,   0, BF_ANY,      BOPR_ELEM,     BOPE_TEMPLATE, "sp_$AArray_shift($r)" },  /* the nil sentinel when empty */
   { BOP_ANY_ARRAY, "pop",                   0,   0, BF_ANY,      BOPR_ELEM,     BOPE_TEMPLATE, "sp_$AArray_pop($r)" },
+  { BOP_ANY_ARRAY, "sample",                0,   0, BF_ANY,      TY_UNKNOWN,    BOPE_TEMPLATE, "sp_$AArray_sample($r)" },  /* one element, or nil when empty */
   { BOP_ANY_ARRAY, "inspect",               0,   0, BF_ANY,      TY_STRING,     BOPE_TEMPLATE, "sp_$AArray_inspect($r)" },
   { BOP_ANY_ARRAY, "to_a",                  0,   0, BF_ANY,      BOPR_SELF,     BOPE_TEMPLATE, "$r", 0, 0, BOPF_SELF_EXACT },
   { BOP_ANY_ARRAY, "to_ary",                0,   0, BF_ANY,      BOPR_SELF,     BOPE_TEMPLATE, "$r", 0, 0, BOPF_SELF },
@@ -2323,12 +2334,28 @@ static const BuiltinOp bop_rows[] = {
   { BOP_ANY_ARRAY, "all?",                  1,   1, BF_NONE,     TY_BOOL,       BOPE_ARRAY_PRED_CLASS, 0, BOP_K(TY_CLASS), 0, 0, 5 },
   { BOP_ANY_ARRAY, "none?",                 1,   1, BF_NONE,     TY_BOOL,       BOPE_ARRAY_PRED_CLASS, 0, BOP_K(TY_CLASS), 0, 0, 5 },
   { BOP_ANY_ARRAY, "one?",                  1,   1, BF_NONE,     TY_BOOL,       BOPE_ARRAY_PRED_CLASS, 0, BOP_K(TY_CLASS), 0, 0, 5 },
+  /* Array and Hash, any kind: freeze, frozen? and a Hash's to_h, rows of
+     stage 1 looked up in emit_call_freeze_dup_arms, ahead of the families'
+     own arms, where the Ranges' rows of the same names are. An Array keeps
+     its frozen flag in the struct, a Hash in its GC header. Hash#freeze
+     types nothing, as its row did before it emitted: the rules after the
+     lookup answer it. */
+  { BOP_ANY_ARRAY, "freeze",                0,   0, BF_ANY,      BOPR_SELF,     BOPE_TEMPLATE, "({ sp_$AArray *_t$t = $r; if (_t$t) _t$t->frozen = 1; _t$t; })", 0, 0, BOPF_SELF, 1 },
+  { BOP_ANY_ARRAY, "frozen?",               0,   0, BF_ANY,      TY_BOOL,       BOPE_TEMPLATE, "(($r)->frozen != 0)", 0, 0, 0, 1 },
+  { BOP_ANY_HASH,  "freeze",                0,   0, BF_ANY,      TY_UNKNOWN,    BOPE_TEMPLATE, "sp_gc_freeze($r)", 0, 0, BOPF_SELF, 1 },
+  { BOP_ANY_HASH,  "frozen?",               0,   0, BF_ANY,      TY_BOOL,       BOPE_TEMPLATE, "sp_gc_is_frozen($r)", 0, 0, 0, 1 },
+  { BOP_ANY_HASH,  "to_h",                  0,   0, BF_NONE,     BOPR_SELF,     BOPE_TEMPLATE, "$r", 0, 0, BOPF_SELF_EXACT, 1 },  /* identity */
   /* The reflection lookup alone asks this family, after earlier overrides.
      A set's result depends on its value argument, so inference supplies it. */
   { BOP_IVAR_LESS, "instance_variable_get",      1, 1, BF_NONE, TY_NIL,        BOPE_IVAR_REFLECTION, "get" },
   { BOP_IVAR_LESS, "instance_variable_defined?", 1, 1, BF_NONE, TY_BOOL,       BOPE_IVAR_REFLECTION, "defined" },
   { BOP_IVAR_LESS, "instance_variables",         0, 0, BF_NONE, TY_POLY_ARRAY, BOPE_IVAR_REFLECTION, "list" },
   { BOP_IVAR_LESS, "instance_variable_set",      2, 2, BF_NONE, TY_UNKNOWN,    BOPE_IVAR_REFLECTION, "set" },
+  /* an ivar of a builtin class's self (desugar_builtin_ivars), on any receiver
+     kind: the runtime's map (sp_bivar_*) */
+  { BOP_IVAR_LESS, "__bivar_get",                1, 1, BF_NONE, TY_POLY,       BOPE_IVAR_REFLECTION, "bg" },
+  { BOP_IVAR_LESS, "__bivar_set",                2, 2, BF_NONE, TY_POLY,       BOPE_IVAR_REFLECTION, "bs" },
+  { BOP_IVAR_LESS, "__bivar_defined",            1, 1, BF_NONE, TY_BOOL,       BOPE_IVAR_REFLECTION, "bd" },
 
 };
 #define BOP_NROWS ((int)(sizeof bop_rows / sizeof bop_rows[0]))
@@ -2505,4 +2532,772 @@ int bop_covers(TyKind rt) {
     else hi = mid;
   }
   return lo < BOP_NROWS && bop_rows[bop_index[lo]].recv == rt;
+}
+
+/* ---- What a builtin call does with the Strings it is handed (#6765) ---- */
+
+typedef struct { TyKind fam; const char *name; unsigned char share; } BopShareRow;
+
+static const BopShareRow bop_share_rows[] = {
+  /* A String method copies the bytes of a String argument and answers a
+     String of its own, except the ones that answer the receiver itself
+     (str_self_call names the rest of them). A block a String method runs
+     is handed substrings, which are new Strings. */
+  { TY_STRING, "*",          BSH_PURE },
+  { TY_STRING, "<<",         BSH_RECV },
+  { TY_STRING, "concat",     BSH_RECV },
+  { TY_STRING, "+@",         BSH_RECV },
+  { TY_STRING, "freeze",     BSH_FROZEN },
+  { TY_STRING, "-@",         BSH_FROZEN },
+  { TY_STRING, "dedup",      BSH_FROZEN },
+  { TY_STRING, "dup",        BSH_PURE },
+  { TY_STRING, "clone",      BSH_PURE },
+  /* the bang methods answer the receiver itself (or nil when nothing
+     changed): `r = s.strip!` names s's String (slice! answers what it cut) */
+  { TY_STRING, "capitalize!", BSH_RECV },
+  { TY_STRING, "chomp!",     BSH_RECV },
+  { TY_STRING, "chop!",      BSH_RECV },
+  { TY_STRING, "delete!",    BSH_RECV },
+  { TY_STRING, "delete_prefix!", BSH_RECV },
+  { TY_STRING, "delete_suffix!", BSH_RECV },
+  { TY_STRING, "downcase!",  BSH_RECV },
+  { TY_STRING, "encode!",    BSH_RECV },
+  { TY_STRING, "lstrip!",    BSH_RECV },
+  { TY_STRING, "next!",      BSH_RECV },
+  { TY_STRING, "reverse!",   BSH_RECV },
+  { TY_STRING, "rstrip!",    BSH_RECV },
+  { TY_STRING, "scrub!",     BSH_RECV },
+  { TY_STRING, "squeeze!",   BSH_RECV },
+  { TY_STRING, "strip!",     BSH_RECV },
+  { TY_STRING, "succ!",      BSH_RECV },
+  { TY_STRING, "swapcase!",  BSH_RECV },
+  { TY_STRING, "tr!",        BSH_RECV },
+  { TY_STRING, "tr_s!",      BSH_RECV },
+  { TY_STRING, "unicode_normalize!", BSH_RECV },
+  { TY_STRING, "upcase!",    BSH_RECV },
+
+  /* An Array: what it answers out of its elements, and what it stores. A
+     name no row covers stores every argument and answers anything the
+     receiver holds (the BOP_ANY_ARRAY default, read by the analysis). */
+  { BOP_ANY_ARRAY, "[]",        BSH_ELEM },
+  { BOP_ANY_ARRAY, "at",        BSH_ELEM },
+  { BOP_ANY_ARRAY, "dig",       BSH_ELEM },
+  { BOP_ANY_ARRAY, "fetch",     BSH_FETCH },
+  { BOP_ANY_ARRAY, "first",     BSH_ELEM_N },
+  { BOP_ANY_ARRAY, "last",      BSH_ELEM_N },
+  { BOP_ANY_ARRAY, "pop",       BSH_ELEM_N },
+  { BOP_ANY_ARRAY, "shift",     BSH_ELEM_N },
+  { BOP_ANY_ARRAY, "sample",    BSH_ELEM_N },
+  { BOP_ANY_ARRAY, "delete",    BSH_ELEM },
+  { BOP_ANY_ARRAY, "delete_at", BSH_ELEM },
+  { BOP_ANY_ARRAY, "slice!",    BSH_ELEM_N },
+  { BOP_ANY_ARRAY, "slice",     BSH_ELEM_N },
+  { BOP_ANY_ARRAY, "push",      BSH_STORE_ALL },
+  { BOP_ANY_ARRAY, "<<",        BSH_STORE_ALL },
+  { BOP_ANY_ARRAY, "append",    BSH_STORE_ALL },
+  { BOP_ANY_ARRAY, "unshift",   BSH_STORE_ALL },
+  { BOP_ANY_ARRAY, "prepend",   BSH_STORE_ALL },
+  { BOP_ANY_ARRAY, "[]=",       BSH_STORE_LAST },
+  { BOP_ANY_ARRAY, "insert",    BSH_STORE_TAIL },
+  { BOP_ANY_ARRAY, "fill",      BSH_STORE_ALL },
+  { BOP_ANY_ARRAY, "concat",    BSH_MERGE },
+  { BOP_ANY_ARRAY, "replace",   BSH_MERGE },
+  { BOP_ANY_ARRAY, "+",         BSH_MERGE },
+  { BOP_ANY_ARRAY, "|",         BSH_MERGE },
+  { BOP_ANY_ARRAY, "union",     BSH_MERGE },
+  { BOP_ANY_ARRAY, "zip",       BSH_MERGE },
+  { BOP_ANY_ARRAY, "product",   BSH_MERGE },
+  { BOP_ANY_ARRAY, "-",         BSH_SUB },
+  { BOP_ANY_ARRAY, "&",         BSH_SUB },
+  { BOP_ANY_ARRAY, "difference", BSH_SUB },
+  { BOP_ANY_ARRAY, "intersection", BSH_SUB },
+  { BOP_ANY_ARRAY, "*",         BSH_SUB },
+  { BOP_ANY_ARRAY, "compact",   BSH_SUB },
+  { BOP_ANY_ARRAY, "compact!",  BSH_SUB },
+  { BOP_ANY_ARRAY, "flatten",   BSH_SUB },
+  { BOP_ANY_ARRAY, "flatten!",  BSH_SUB },
+  { BOP_ANY_ARRAY, "reverse",   BSH_SUB },
+  { BOP_ANY_ARRAY, "reverse!",  BSH_SUB },
+  { BOP_ANY_ARRAY, "rotate",    BSH_SUB },
+  { BOP_ANY_ARRAY, "rotate!",   BSH_SUB },
+  { BOP_ANY_ARRAY, "shuffle",   BSH_SUB },
+  { BOP_ANY_ARRAY, "shuffle!",  BSH_SUB },
+  { BOP_ANY_ARRAY, "take",      BSH_SUB },
+  { BOP_ANY_ARRAY, "drop",      BSH_SUB },
+  { BOP_ANY_ARRAY, "values_at", BSH_SUB },
+  { BOP_ANY_ARRAY, "dup",       BSH_SUB },
+  { BOP_ANY_ARRAY, "clone",     BSH_SUB },
+  { BOP_ANY_ARRAY, "to_a",      BSH_SUB },
+  { BOP_ANY_ARRAY, "entries",   BSH_SUB },
+  { BOP_ANY_ARRAY, "transpose", BSH_SUB },
+  { BOP_ANY_ARRAY, "sum",       BSH_PURE },
+  { BOP_ANY_ARRAY, "join",      BSH_PURE },
+  { BOP_ANY_ARRAY, "pack",      BSH_PURE },
+  { BOP_ANY_ARRAY, "to_s",      BSH_PURE },
+  { BOP_ANY_ARRAY, "inspect",   BSH_PURE },
+  { BOP_ANY_ARRAY, "include?",  BSH_PURE },
+  { BOP_ANY_ARRAY, "member?",   BSH_PURE },
+  { BOP_ANY_ARRAY, "index",     BSH_PURE },
+  { BOP_ANY_ARRAY, "find_index", BSH_PURE },
+  { BOP_ANY_ARRAY, "rindex",    BSH_PURE },
+  { BOP_ANY_ARRAY, "count",     BSH_PURE },
+  { BOP_ANY_ARRAY, "size",      BSH_PURE },
+  { BOP_ANY_ARRAY, "length",    BSH_PURE },
+  { BOP_ANY_ARRAY, "empty?",    BSH_PURE },
+  { BOP_ANY_ARRAY, "any?",      BSH_PURE },
+  { BOP_ANY_ARRAY, "all?",      BSH_PURE },
+  { BOP_ANY_ARRAY, "none?",     BSH_PURE },
+  { BOP_ANY_ARRAY, "one?",      BSH_PURE },
+  { BOP_ANY_ARRAY, "==",        BSH_PURE },
+  { BOP_ANY_ARRAY, "!=",        BSH_PURE },
+  { BOP_ANY_ARRAY, "eql?",      BSH_PURE },
+  { BOP_ANY_ARRAY, "<=>",       BSH_PURE },
+  { BOP_ANY_ARRAY, "hash",      BSH_PURE },
+  { BOP_ANY_ARRAY, "frozen?",   BSH_PURE },
+  { BOP_ANY_ARRAY, "clear",     BSH_PURE },
+
+  /* A Hash: a String key is dup'd and frozen as it is stored, so only the
+     values are elements; keys and key queries answer fresh Strings. */
+  { BOP_ANY_HASH, "[]",         BSH_ELEM },
+  { BOP_ANY_HASH, "dig",        BSH_ELEM },
+  { BOP_ANY_HASH, "fetch",      BSH_FETCH },
+  { BOP_ANY_HASH, "delete",     BSH_ELEM },
+  { BOP_ANY_HASH, "shift",      BSH_SUB },
+  { BOP_ANY_HASH, "values",     BSH_SUB },
+  { BOP_ANY_HASH, "values_at",  BSH_SUB },
+  { BOP_ANY_HASH, "fetch_values", BSH_SUB },
+  { BOP_ANY_HASH, "to_a",       BSH_SUB },
+  { BOP_ANY_HASH, "dup",        BSH_SUB },
+  { BOP_ANY_HASH, "clone",      BSH_SUB },
+  { BOP_ANY_HASH, "invert",     BSH_SUB },
+  { BOP_ANY_HASH, "compact",    BSH_SUB },
+  { BOP_ANY_HASH, "slice",      BSH_SUB },
+  { BOP_ANY_HASH, "except",     BSH_SUB },
+  { BOP_ANY_HASH, "first",      BSH_SUB },
+  { BOP_ANY_HASH, "[]=",        BSH_STORE_LAST },
+  { BOP_ANY_HASH, "store",      BSH_STORE_LAST },
+  { BOP_ANY_HASH, "default=",   BSH_STORE_LAST },
+  { BOP_ANY_HASH, "merge",      BSH_MERGE },
+  { BOP_ANY_HASH, "merge!",     BSH_MERGE },
+  { BOP_ANY_HASH, "update",     BSH_MERGE },
+  { BOP_ANY_HASH, "replace",    BSH_MERGE },
+  { BOP_ANY_HASH, "sum",        BSH_PURE },
+  { BOP_ANY_HASH, "keys",       BSH_PURE },
+  { BOP_ANY_HASH, "key",        BSH_PURE },
+  { BOP_ANY_HASH, "key?",       BSH_PURE },
+  { BOP_ANY_HASH, "has_key?",   BSH_PURE },
+  { BOP_ANY_HASH, "include?",   BSH_PURE },
+  { BOP_ANY_HASH, "member?",    BSH_PURE },
+  { BOP_ANY_HASH, "value?",     BSH_PURE },
+  { BOP_ANY_HASH, "has_value?", BSH_PURE },
+  { BOP_ANY_HASH, "count",      BSH_PURE },
+  { BOP_ANY_HASH, "size",       BSH_PURE },
+  { BOP_ANY_HASH, "length",     BSH_PURE },
+  { BOP_ANY_HASH, "empty?",     BSH_PURE },
+  { BOP_ANY_HASH, "any?",       BSH_PURE },
+  { BOP_ANY_HASH, "all?",       BSH_PURE },
+  { BOP_ANY_HASH, "none?",      BSH_PURE },
+  { BOP_ANY_HASH, "to_s",       BSH_PURE },
+  { BOP_ANY_HASH, "inspect",    BSH_PURE },
+  { BOP_ANY_HASH, "==",         BSH_PURE },
+  { BOP_ANY_HASH, "!=",         BSH_PURE },
+  { BOP_ANY_HASH, "hash",       BSH_PURE },
+  { BOP_ANY_HASH, "frozen?",    BSH_PURE },
+  { BOP_ANY_HASH, "clear",      BSH_PURE },
+
+  /* An IO copies what it writes and answers new Strings for what it reads;
+     the buffer forms of the reads fill their second argument in place. */
+  { TY_IO, "*",            BSH_PURE },
+  { TY_IO, "read",         BSH_FILL1 },
+  { TY_IO, "readpartial",  BSH_FILL1 },
+  { TY_IO, "sysread",      BSH_FILL1 },
+  { TY_IO, "read_nonblock", BSH_FILL1 },
+  { TY_IO, "pread",        BSH_FILL1 },
+
+  /* The scalars copy whatever String they are handed; their iterators hand
+     a block numbers or new Strings. */
+  { TY_INT,         "*", BSH_PURE },
+  { TY_BIGINT,      "*", BSH_PURE },
+  { TY_FLOAT,       "*", BSH_PURE },
+  { TY_SYMBOL,      "*", BSH_PURE },
+  { TY_BOOL,        "*", BSH_PURE },
+  { TY_NIL,         "*", BSH_PURE },
+  { TY_RANGE,       "*", BSH_PURE },
+  { TY_FLOAT_RANGE, "*", BSH_PURE },
+  { TY_TIME,        "*", BSH_PURE },
+  { TY_COMPLEX,     "*", BSH_PURE },
+  { TY_RATIONAL,    "*", BSH_PURE },
+  { TY_REGEX,       "*", BSH_PURE },
+  { TY_MATCHDATA,   "*", BSH_PURE },
+  { TY_RANDOM,      "*", BSH_PURE },
+
+  /* Kernel's functions. A name with no row (raise, throw, define_method,
+     lambda, ...) is not followed. */
+  { BOP_KERNEL, "puts",     BSH_PURE },
+  { BOP_KERNEL, "print",    BSH_PURE },
+  { BOP_KERNEL, "printf",   BSH_PURE },
+  { BOP_KERNEL, "sprintf",  BSH_PURE },
+  { BOP_KERNEL, "format",   BSH_PURE },
+  { BOP_KERNEL, "warn",     BSH_PURE },
+  { BOP_KERNEL, "require",  BSH_PURE },
+  { BOP_KERNEL, "require_relative", BSH_PURE },
+  { BOP_KERNEL, "exit",     BSH_PURE },
+  { BOP_KERNEL, "exit!",    BSH_PURE },
+  { BOP_KERNEL, "abort",    BSH_PURE },
+  { BOP_KERNEL, "sleep",    BSH_PURE },
+  { BOP_KERNEL, "rand",     BSH_PURE },
+  { BOP_KERNEL, "srand",    BSH_PURE },
+  { BOP_KERNEL, "Integer",  BSH_PURE },
+  { BOP_KERNEL, "Float",    BSH_PURE },
+  { BOP_KERNEL, "Rational", BSH_PURE },
+  { BOP_KERNEL, "Complex",  BSH_PURE },
+  { BOP_KERNEL, "gets",     BSH_PURE },
+  { BOP_KERNEL, "system",   BSH_PURE },
+  { BOP_KERNEL, "`",        BSH_PURE },
+  { BOP_KERNEL, "block_given?", BSH_PURE },
+  { BOP_KERNEL, "frozen?",  BSH_PURE },
+  { BOP_KERNEL, "freeze",   BSH_PURE },
+  /* throw compares the tag and keeps nothing */
+  { BOP_KERNEL, "throw",    BSH_PURE },
+  { BOP_KERNEL, "p",        BSH_ARGS },
+  { BOP_KERNEL, "pp",       BSH_ARGS },
+  { BOP_KERNEL, "String",   BSH_ARGS },
+  { BOP_KERNEL, "Array",    BSH_ARRAY_OF },
+  { BOP_KERNEL, "define_method", BSH_METHOD_REF },
+  { BOP_KERNEL, "method",   BSH_METHOD_REF },
+  { BOP_KERNEL, "instance_variable_get", BSH_IVAR_GET },
+  { BOP_KERNEL, "instance_variable_set", BSH_IVAR_SET },
+  { BOP_KERNEL, "instance_exec", BSH_EXEC },
+  { BOP_KERNEL, "instance_eval", BSH_EXEC },
+  { BOP_KERNEL, "class_exec",  BSH_EXEC },
+  { BOP_KERNEL, "class_eval",  BSH_EXEC },
+
+  /* Object's own methods, on any receiver */
+  { BOP_ANY_RECV, "==",          BSH_PURE },
+  { BOP_ANY_RECV, "!=",          BSH_PURE },
+  { BOP_ANY_RECV, "!",           BSH_PURE },
+  { BOP_ANY_RECV, "equal?",      BSH_PURE },
+  { BOP_ANY_RECV, "eql?",        BSH_PURE },
+  { BOP_ANY_RECV, "hash",        BSH_PURE },
+  { BOP_ANY_RECV, "is_a?",       BSH_PURE },
+  { BOP_ANY_RECV, "kind_of?",    BSH_PURE },
+  { BOP_ANY_RECV, "instance_of?", BSH_PURE },
+  { BOP_ANY_RECV, "respond_to?", BSH_PURE },
+  { BOP_ANY_RECV, "nil?",        BSH_PURE },
+  { BOP_ANY_RECV, "frozen?",     BSH_PURE },
+  { BOP_ANY_RECV, "class",       BSH_PURE },
+  { BOP_ANY_RECV, "object_id",   BSH_PURE },
+  { BOP_ANY_RECV, "inspect",     BSH_PURE },
+  { BOP_ANY_RECV, "to_s",        BSH_PURE },
+  { BOP_ANY_RECV, "display",     BSH_PURE },
+  { BOP_ANY_RECV, "instance_variables", BSH_PURE },
+  { BOP_ANY_RECV, "instance_variable_defined?", BSH_PURE },
+  { BOP_ANY_RECV, "===",         BSH_PURE },
+  { BOP_ANY_RECV, "=~",          BSH_PURE },
+  { BOP_ANY_RECV, "<=>",         BSH_PURE },
+  { BOP_ANY_RECV, "freeze",      BSH_RECV },
+  { BOP_ANY_RECV, "itself",      BSH_RECV },
+  { BOP_ANY_RECV, "dup",         BSH_RECV },
+  { BOP_ANY_RECV, "clone",       BSH_RECV },
+  { BOP_ANY_RECV, "method",      BSH_METHOD_REF },
+  { BOP_ANY_RECV, "public_method", BSH_METHOD_REF },
+  { BOP_ANY_RECV, "singleton_method", BSH_METHOD_REF },
+  { BOP_ANY_RECV, "instance_method", BSH_METHOD_REF },
+  { BOP_ANY_RECV, "define_method", BSH_METHOD_REF },
+  { BOP_ANY_RECV, "define_singleton_method", BSH_METHOD_REF },
+  { BOP_ANY_RECV, "instance_variable_get", BSH_IVAR_GET },
+  { BOP_ANY_RECV, "instance_variable_set", BSH_IVAR_SET },
+  { BOP_ANY_RECV, "instance_exec", BSH_EXEC },
+  { BOP_ANY_RECV, "instance_eval", BSH_EXEC },
+  { BOP_ANY_RECV, "class_exec",  BSH_EXEC },
+  { BOP_ANY_RECV, "class_eval",  BSH_EXEC },
+  { BOP_ANY_RECV, "module_exec", BSH_EXEC },
+  { BOP_ANY_RECV, "module_eval", BSH_EXEC },
+  { BOP_ANY_RECV, "new",         BSH_NEW },
+
+  /* a proc's, a lambda's or a Method's invocations */
+  { BOP_CALLABLE, "call",        BSH_CALL },
+  { BOP_CALLABLE, "()",          BSH_CALL },
+  { BOP_CALLABLE, "[]",          BSH_CALL },
+  { BOP_CALLABLE, "yield",       BSH_CALL },
+  { BOP_CALLABLE, "===",         BSH_CALL },
+
+  /* A hand row that wins over its iterator row: catch's block is handed
+     its tag and the call answers the block's value (or a throw's), a
+     shape no BSH_ITER_* answer has, so the row derives none. Read as
+     fresh, the analysis never names the tag or the answer (#6765). */
+  { BOP_KERNEL, "catch",    BSH_ITER_FRESH },
+};
+#define BOP_NSHARE ((int)(sizeof bop_share_rows / sizeof bop_share_rows[0]))
+
+/* ---- What a builtin iterator yields to its block, and answers (#6765) ----
+
+   The iterators some reader knows, by receiver family. A row says what
+   CRuby does; its IRF_GAP_* bits record where a reader's hand table (the
+   share rows' BSH_ITER_*, bs_yield_count, ty_block_yield) did not follow
+   it, so each reader answers as it did before the rows. The gaps, to be
+   cleared one at a time, each with a test:
+   - Receivers. The share analysis reads the String, Array, Hash, Kernel
+     and any-receiver rows: a number's or a Range's iterators hand numbers,
+     and the family's "*" row answers for them. The block-shape desugar
+     reads no Kernel row, and on a boxed receiver only the any-receiver
+     rows and the IRF_SHAPE_BOXED Array and Hash rows (names one of the two
+     answers alone, and not all of those). ty_block_yield (the
+     forwarded-&callable desugar, and the boxed-element widening) reads
+     only the Array (not an object Array's), Hash, Range, Integer and
+     String rows.
+   - Array. The share analysis does not read collect_concat, find_all or
+     to_h. The shape desugar does not read those two, uniq!, the
+     comparators (sort, sort!, min, max, minmax, bsearch, slice_when,
+     chunk_while), cycle, find, detect, min_by and max_by with an argument,
+     the seedless inject, product without an argument or zip with other
+     than one. ty_block_yield reads none of the in-place filters and
+     maps, uniq, uniq!, sort_by!, inject, each_with_object, each_index,
+     fill, the comparators, cycle, or the run and tuple iterators but
+     each_slice and each_cons.
+   - Hash. The share analysis does not read each_entry, reverse_each,
+     collect_concat, find_all, filter!, find_index, one?, take_while,
+     drop_while, each_slice or each_cons. The shape desugar reads none with
+     an argument (each_slice, each_cons, find(ifnone), sum(init), ...), nor
+     reverse_each, find_all, to_h, inject, reduce or the transforms.
+     ty_block_yield does not read the in-place filters, the transforms,
+     inject, each_with_object or each_with_index.
+   - each_with_index over a Hash: two values to the shape desugar, which
+     reads it on any receiver; none to ty_block_yield.
+   - Range. The shape desugar does not read reverse_each, find_all, to_h,
+     find, detect, min_by and max_by with an argument, or the seedless
+     inject; ty_block_yield does not read inject, each_with_object
+     or step.
+   - String. The shape desugar reads only each_char and each_line without
+     arguments and each_byte; ty_block_yield does not read scan; the
+     share analysis does not read split.
+   - Integer: ty_block_yield does not read step.
+   - Element kinds: the shape desugar types each_slice's and each_cons's
+     run as a boxed Array (IRF_GAP_RUN_BOXED), combination's as the
+     receiver's kind; ty_block_yield leaves a run untyped. */
+static const IterRow iter_rows[] = {
+  { TY_STRING, "each_char",  0, 0, 1, { YS_FRESH }, IA_RECV, 0 },
+  { TY_STRING, "each_line",  0, 0, 1, { YS_FRESH }, IA_RECV, 0 },
+  { TY_STRING, "each_line",  1, 2, 1, { YS_FRESH }, IA_RECV, IRF_GAP_SHAPE },
+  { TY_STRING, "each_byte",  0, 0, 1, { YS_NUM }, IA_RECV, 0 },
+  { TY_STRING, "each_grapheme_cluster", 0, 0, 1, { YS_FRESH }, IA_RECV, IRF_GAP_SHAPE },
+  { TY_STRING, "scan",       1, 1, 1, { YS_FRESH }, IA_RECV, IRF_GAP_SHAPE | IRF_GAP_FWD },
+  { TY_STRING, "gsub",       1, 1, 1, { YS_FRESH }, IA_FRESH, IRF_GAP_SHAPE },
+  { TY_STRING, "sub",        1, 1, 1, { YS_FRESH }, IA_FRESH, IRF_GAP_SHAPE },
+  { TY_STRING, "gsub!",      1, 1, 1, { YS_FRESH }, IA_RECV, IRF_GAP_SHAPE },
+  { TY_STRING, "sub!",       1, 1, 1, { YS_FRESH }, IA_RECV, IRF_GAP_SHAPE },
+  { TY_STRING, "upto",       1, 2, 1, { YS_FRESH }, IA_RECV, IRF_GAP_SHAPE },
+  { TY_STRING, "split",      0, 2, 1, { YS_FRESH }, IA_RECV, IRF_GAP_SHARE | IRF_GAP_SHAPE },
+
+  { BOP_ANY_ARRAY, "each",            0, 0, 1, { YS_ELEM }, IA_RECV, 0 },
+  { BOP_ANY_ARRAY, "each_entry",      0, 0, 1, { YS_ELEM }, IA_RECV, 0 },
+  { BOP_ANY_ARRAY, "reverse_each",    0, 0, 1, { YS_ELEM }, IA_RECV, 0 },
+  { BOP_ANY_ARRAY, "each_with_index", 0, 0, 2, { YS_ELEM, YS_INDEX }, IA_RECV, 0 },
+  { BOP_ANY_ARRAY, "map",             0, 0, 1, { YS_ELEM }, IA_BLOCKVALS, 0 },
+  { BOP_ANY_ARRAY, "collect",         0, 0, 1, { YS_ELEM }, IA_BLOCKVALS, 0 },
+  { BOP_ANY_ARRAY, "flat_map",        0, 0, 1, { YS_ELEM }, IA_BLOCKVALS, 0 },
+  { BOP_ANY_ARRAY, "collect_concat",  0, 0, 1, { YS_ELEM }, IA_BLOCKVALS, IRF_GAP_SHARE },
+  { BOP_ANY_ARRAY, "filter_map",      0, 0, 1, { YS_ELEM }, IA_BLOCKVALS, 0 },
+  { BOP_ANY_ARRAY, "map!",            0, 0, 1, { YS_ELEM }, IA_BLOCKVALS_INPLACE, IRF_GAP_FWD | IRF_SHAPE_BOXED },
+  { BOP_ANY_ARRAY, "collect!",        0, 0, 1, { YS_ELEM }, IA_BLOCKVALS_INPLACE, IRF_GAP_FWD | IRF_SHAPE_BOXED },
+  { BOP_ANY_ARRAY, "select",          0, 0, 1, { YS_ELEM }, IA_SOME, 0 },
+  { BOP_ANY_ARRAY, "filter",          0, 0, 1, { YS_ELEM }, IA_SOME, 0 },
+  { BOP_ANY_ARRAY, "reject",          0, 0, 1, { YS_ELEM }, IA_SOME, 0 },
+  { BOP_ANY_ARRAY, "find_all",        0, 0, 1, { YS_ELEM }, IA_SOME, IRF_GAP_SHARE | IRF_GAP_SHAPE },
+  { BOP_ANY_ARRAY, "select!",         0, 0, 1, { YS_ELEM }, IA_RECV, IRF_GAP_FWD },
+  { BOP_ANY_ARRAY, "filter!",         0, 0, 1, { YS_ELEM }, IA_RECV, IRF_GAP_FWD },
+  { BOP_ANY_ARRAY, "reject!",         0, 0, 1, { YS_ELEM }, IA_RECV, IRF_GAP_FWD },
+  { BOP_ANY_ARRAY, "keep_if",         0, 0, 1, { YS_ELEM }, IA_RECV, IRF_GAP_FWD },
+  { BOP_ANY_ARRAY, "delete_if",       0, 0, 1, { YS_ELEM }, IA_RECV, IRF_GAP_FWD },
+  { BOP_ANY_ARRAY, "find",            0, 0, 1, { YS_ELEM }, IA_ONE, 0 },
+  { BOP_ANY_ARRAY, "find",            1, 1, 1, { YS_ELEM }, IA_ONE, IRF_GAP_SHAPE },
+  { BOP_ANY_ARRAY, "detect",          0, 0, 1, { YS_ELEM }, IA_ONE, 0 },
+  { BOP_ANY_ARRAY, "detect",          1, 1, 1, { YS_ELEM }, IA_ONE, IRF_GAP_SHAPE },
+  { BOP_ANY_ARRAY, "find_index",      0, 0, 1, { YS_ELEM }, IA_OTHER, 0 },
+  { BOP_ANY_ARRAY, "min_by",          0, 0, 1, { YS_ELEM }, IA_ONE, 0 },
+  { BOP_ANY_ARRAY, "min_by",          1, 1, 1, { YS_ELEM }, IA_SOME, IRF_GAP_SHAPE },
+  { BOP_ANY_ARRAY, "max_by",          0, 0, 1, { YS_ELEM }, IA_ONE, 0 },
+  { BOP_ANY_ARRAY, "max_by",          1, 1, 1, { YS_ELEM }, IA_SOME, IRF_GAP_SHAPE },
+  { BOP_ANY_ARRAY, "sort_by",         0, 0, 1, { YS_ELEM }, IA_SOME, 0 },
+  { BOP_ANY_ARRAY, "sort_by!",        0, 0, 1, { YS_ELEM }, IA_RECV, IRF_GAP_FWD },
+  { BOP_ANY_ARRAY, "group_by",        0, 0, 1, { YS_ELEM }, IA_GROUPS, 0 },
+  { BOP_ANY_ARRAY, "partition",       0, 0, 1, { YS_ELEM }, IA_PARTS, 0 },
+  { BOP_ANY_ARRAY, "sum",             0, 1, 1, { YS_ELEM }, IA_OTHER, 0 },
+  { BOP_ANY_ARRAY, "count",           0, 0, 1, { YS_ELEM }, IA_OTHER, 0 },
+  { BOP_ANY_ARRAY, "any?",            0, 0, 1, { YS_ELEM }, IA_OTHER, 0 },
+  { BOP_ANY_ARRAY, "all?",            0, 0, 1, { YS_ELEM }, IA_OTHER, 0 },
+  { BOP_ANY_ARRAY, "none?",           0, 0, 1, { YS_ELEM }, IA_OTHER, 0 },
+  { BOP_ANY_ARRAY, "one?",            0, 0, 1, { YS_ELEM }, IA_OTHER, 0 },
+  { BOP_ANY_ARRAY, "take_while",      0, 0, 1, { YS_ELEM }, IA_SOME, 0 },
+  { BOP_ANY_ARRAY, "drop_while",      0, 0, 1, { YS_ELEM }, IA_SOME, 0 },
+  { BOP_ANY_ARRAY, "uniq",            0, 0, 1, { YS_ELEM }, IA_SOME, IRF_GAP_FWD },
+  { BOP_ANY_ARRAY, "uniq!",           0, 0, 1, { YS_ELEM }, IA_RECV, IRF_GAP_SHAPE | IRF_GAP_FWD },
+  { BOP_ANY_ARRAY, "to_h",            0, 0, 1, { YS_ELEM }, IA_BLOCKVALS, IRF_GAP_SHARE | IRF_GAP_SHAPE },
+  { BOP_ANY_ARRAY, "each_slice",      1, 1, 1, { YS_SUB }, IA_RECV, IRF_GAP_RUN_BOXED | IRF_SHAPE_BOXED },
+  { BOP_ANY_ARRAY, "each_cons",       1, 1, 1, { YS_SUB }, IA_RECV, IRF_GAP_RUN_BOXED | IRF_SHAPE_BOXED },
+  { BOP_ANY_ARRAY, "combination",     1, 1, 1, { YS_SUB }, IA_RECV, IRF_GAP_FWD | IRF_SHAPE_BOXED },
+  { BOP_ANY_ARRAY, "permutation",     0, 1, 1, { YS_SUB }, IA_RECV, IRF_GAP_FWD | IRF_SHAPE_BOXED },
+  { BOP_ANY_ARRAY, "repeated_combination", 1, 1, 1, { YS_SUB }, IA_RECV, IRF_GAP_FWD | IRF_SHAPE_BOXED },
+  { BOP_ANY_ARRAY, "repeated_permutation", 1, 1, 1, { YS_SUB }, IA_RECV, IRF_GAP_FWD | IRF_SHAPE_BOXED },
+  { BOP_ANY_ARRAY, "product",         1, BOP_ARGC_ANY, 1, { YS_TUPLE }, IA_RECV, IRF_GAP_FWD | IRF_SHAPE_BOXED },
+  { BOP_ANY_ARRAY, "product",         0, 0, 1, { YS_TUPLE }, IA_RECV, IRF_GAP_SHAPE | IRF_GAP_FWD },
+  { BOP_ANY_ARRAY, "zip",             1, 1, 1, { YS_TUPLE }, IA_OTHER, IRF_GAP_FWD | IRF_SHAPE_BOXED },
+  { BOP_ANY_ARRAY, "zip",             0, 0, 1, { YS_TUPLE }, IA_OTHER, IRF_GAP_SHAPE | IRF_GAP_FWD },
+  { BOP_ANY_ARRAY, "zip",             2, BOP_ARGC_ANY, 1, { YS_TUPLE }, IA_OTHER, IRF_GAP_SHAPE | IRF_GAP_FWD },
+  { BOP_ANY_ARRAY, "inject",          1, 1, 2, { YS_MEMO, YS_ELEM }, IA_MEMO, IRF_GAP_FWD },
+  { BOP_ANY_ARRAY, "inject",          0, 0, 2, { YS_MEMO, YS_ELEM }, IA_MEMO, IRF_GAP_SHAPE | IRF_GAP_FWD },
+  { BOP_ANY_ARRAY, "reduce",          1, 1, 2, { YS_MEMO, YS_ELEM }, IA_MEMO, IRF_GAP_FWD },
+  { BOP_ANY_ARRAY, "reduce",          0, 0, 2, { YS_MEMO, YS_ELEM }, IA_MEMO, IRF_GAP_SHAPE | IRF_GAP_FWD },
+  { BOP_ANY_ARRAY, "each_with_object", 1, 1, 2, { YS_ELEM, YS_MEMO }, IA_MEMO, IRF_GAP_FWD },
+  { BOP_ANY_ARRAY, "each_index",      0, 0, 1, { YS_INDEX }, IA_RECV, IRF_GAP_FWD | IRF_SHAPE_BOXED },
+  { BOP_ANY_ARRAY, "fill",            0, 2, 1, { YS_INDEX }, IA_RECV, IRF_GAP_FWD | IRF_SHAPE_BOXED },
+  { BOP_ANY_ARRAY, "cycle",           0, 1, 1, { YS_ELEM }, IA_OTHER, IRF_GAP_SHAPE | IRF_GAP_FWD },
+  { BOP_ANY_ARRAY, "min",             0, 0, 2, { YS_ELEM, YS_ELEM }, IA_ONE, IRF_GAP_SHAPE | IRF_GAP_FWD },
+  { BOP_ANY_ARRAY, "min",             1, 1, 2, { YS_ELEM, YS_ELEM }, IA_SOME, IRF_GAP_SHAPE | IRF_GAP_FWD },
+  { BOP_ANY_ARRAY, "max",             0, 0, 2, { YS_ELEM, YS_ELEM }, IA_ONE, IRF_GAP_SHAPE | IRF_GAP_FWD },
+  { BOP_ANY_ARRAY, "max",             1, 1, 2, { YS_ELEM, YS_ELEM }, IA_SOME, IRF_GAP_SHAPE | IRF_GAP_FWD },
+  { BOP_ANY_ARRAY, "minmax",          0, 0, 2, { YS_ELEM, YS_ELEM }, IA_PARTS, IRF_GAP_SHAPE | IRF_GAP_FWD },
+  { BOP_ANY_ARRAY, "bsearch",         0, 0, 1, { YS_ELEM }, IA_ONE, IRF_GAP_SHAPE | IRF_GAP_FWD },
+  { BOP_ANY_ARRAY, "sort",            0, 0, 2, { YS_ELEM, YS_ELEM }, IA_SOME, IRF_GAP_SHAPE | IRF_GAP_FWD },
+  { BOP_ANY_ARRAY, "sort!",           0, 0, 2, { YS_ELEM, YS_ELEM }, IA_RECV, IRF_GAP_SHAPE | IRF_GAP_FWD },
+  { BOP_ANY_ARRAY, "slice_when",      0, 0, 2, { YS_ELEM, YS_ELEM }, IA_PARTS, IRF_GAP_SHAPE | IRF_GAP_FWD },
+  { BOP_ANY_ARRAY, "chunk_while",     0, 0, 2, { YS_ELEM, YS_ELEM }, IA_PARTS, IRF_GAP_SHAPE | IRF_GAP_FWD },
+
+  { BOP_ANY_HASH, "each",             0, 0, 1, { YS_PAIR }, IA_RECV, 0 },
+  { BOP_ANY_HASH, "each_pair",        0, 0, 1, { YS_PAIR }, IA_RECV, 0 },
+  { BOP_ANY_HASH, "each_key",         0, 0, 1, { YS_PAIR_KEY }, IA_RECV, IRF_SHAPE_BOXED },
+  { BOP_ANY_HASH, "each_value",       0, 0, 1, { YS_PAIR_VAL }, IA_RECV, IRF_SHAPE_BOXED },
+  { BOP_ANY_HASH, "each_with_index",  0, 0, 2, { YS_PAIR, YS_INDEX }, IA_RECV, IRF_GAP_FWD },
+  { BOP_ANY_HASH, "each_entry",       0, 0, 1, { YS_PAIR }, IA_RECV, IRF_GAP_SHARE },
+  { BOP_ANY_HASH, "reverse_each",     0, 0, 1, { YS_PAIR }, IA_RECV, IRF_GAP_SHARE | IRF_GAP_SHAPE },
+  { BOP_ANY_HASH, "map",              0, 0, 1, { YS_PAIR }, IA_BLOCKVALS, 0 },
+  { BOP_ANY_HASH, "collect",          0, 0, 1, { YS_PAIR }, IA_BLOCKVALS, 0 },
+  { BOP_ANY_HASH, "flat_map",         0, 0, 1, { YS_PAIR }, IA_BLOCKVALS, 0 },
+  { BOP_ANY_HASH, "collect_concat",   0, 0, 1, { YS_PAIR }, IA_BLOCKVALS, IRF_GAP_SHARE },
+  { BOP_ANY_HASH, "filter_map",       0, 0, 1, { YS_PAIR }, IA_BLOCKVALS, 0 },
+  { BOP_ANY_HASH, "select",           0, 0, 2, { YS_PAIR_KEY, YS_PAIR_VAL }, IA_SOME, 0 },
+  { BOP_ANY_HASH, "filter",           0, 0, 2, { YS_PAIR_KEY, YS_PAIR_VAL }, IA_SOME, 0 },
+  { BOP_ANY_HASH, "reject",           0, 0, 2, { YS_PAIR_KEY, YS_PAIR_VAL }, IA_SOME, 0 },
+  { BOP_ANY_HASH, "find_all",         0, 0, 1, { YS_PAIR }, IA_SOME, IRF_GAP_SHARE | IRF_GAP_SHAPE },
+  { BOP_ANY_HASH, "select!",          0, 0, 2, { YS_PAIR_KEY, YS_PAIR_VAL }, IA_RECV, IRF_GAP_FWD },
+  { BOP_ANY_HASH, "filter!",          0, 0, 2, { YS_PAIR_KEY, YS_PAIR_VAL }, IA_RECV, IRF_GAP_SHARE | IRF_GAP_FWD },
+  { BOP_ANY_HASH, "reject!",          0, 0, 2, { YS_PAIR_KEY, YS_PAIR_VAL }, IA_RECV, IRF_GAP_FWD },
+  { BOP_ANY_HASH, "keep_if",          0, 0, 2, { YS_PAIR_KEY, YS_PAIR_VAL }, IA_RECV, IRF_GAP_FWD },
+  { BOP_ANY_HASH, "delete_if",        0, 0, 2, { YS_PAIR_KEY, YS_PAIR_VAL }, IA_RECV, IRF_GAP_FWD },
+  { BOP_ANY_HASH, "find",             0, 0, 1, { YS_PAIR }, IA_ONE, 0 },
+  { BOP_ANY_HASH, "find",             1, 1, 1, { YS_PAIR }, IA_ONE, IRF_GAP_SHAPE },
+  { BOP_ANY_HASH, "detect",           0, 0, 1, { YS_PAIR }, IA_ONE, 0 },
+  { BOP_ANY_HASH, "detect",           1, 1, 1, { YS_PAIR }, IA_ONE, IRF_GAP_SHAPE },
+  { BOP_ANY_HASH, "find_index",       0, 0, 1, { YS_PAIR }, IA_OTHER, IRF_GAP_SHARE },
+  { BOP_ANY_HASH, "min_by",           0, 0, 1, { YS_PAIR }, IA_ONE, 0 },
+  { BOP_ANY_HASH, "min_by",           1, 1, 1, { YS_PAIR }, IA_SOME, IRF_GAP_SHAPE },
+  { BOP_ANY_HASH, "max_by",           0, 0, 1, { YS_PAIR }, IA_ONE, 0 },
+  { BOP_ANY_HASH, "max_by",           1, 1, 1, { YS_PAIR }, IA_SOME, IRF_GAP_SHAPE },
+  { BOP_ANY_HASH, "sort_by",          0, 0, 1, { YS_PAIR }, IA_SOME, 0 },
+  { BOP_ANY_HASH, "group_by",         0, 0, 1, { YS_PAIR }, IA_GROUPS, 0 },
+  { BOP_ANY_HASH, "partition",        0, 0, 1, { YS_PAIR }, IA_PARTS, 0 },
+  { BOP_ANY_HASH, "sum",              0, 0, 1, { YS_PAIR }, IA_OTHER, 0 },
+  { BOP_ANY_HASH, "sum",              1, 1, 1, { YS_PAIR }, IA_OTHER, IRF_GAP_SHAPE },
+  { BOP_ANY_HASH, "count",            0, 0, 1, { YS_PAIR }, IA_OTHER, 0 },
+  { BOP_ANY_HASH, "any?",             0, 0, 1, { YS_PAIR }, IA_OTHER, 0 },
+  { BOP_ANY_HASH, "all?",             0, 0, 1, { YS_PAIR }, IA_OTHER, 0 },
+  { BOP_ANY_HASH, "none?",            0, 0, 1, { YS_PAIR }, IA_OTHER, 0 },
+  { BOP_ANY_HASH, "one?",             0, 0, 1, { YS_PAIR }, IA_OTHER, IRF_GAP_SHARE },
+  { BOP_ANY_HASH, "take_while",       0, 0, 1, { YS_PAIR }, IA_SOME, IRF_GAP_SHARE },
+  { BOP_ANY_HASH, "drop_while",       0, 0, 1, { YS_PAIR }, IA_SOME, IRF_GAP_SHARE },
+  { BOP_ANY_HASH, "to_h",             0, 0, 2, { YS_PAIR_KEY, YS_PAIR_VAL }, IA_BLOCKVALS, IRF_GAP_SHAPE },
+  { BOP_ANY_HASH, "each_slice",       1, 1, 1, { YS_SUB }, IA_RECV, IRF_GAP_SHARE | IRF_GAP_SHAPE },
+  { BOP_ANY_HASH, "each_cons",        1, 1, 1, { YS_SUB }, IA_RECV, IRF_GAP_SHARE | IRF_GAP_SHAPE },
+  { BOP_ANY_HASH, "transform_values", 0, 0, 1, { YS_PAIR_VAL }, IA_BLOCKVALS, IRF_GAP_SHAPE | IRF_GAP_FWD },
+  { BOP_ANY_HASH, "transform_values!", 0, 0, 1, { YS_PAIR_VAL }, IA_BLOCKVALS_INPLACE, IRF_GAP_SHAPE | IRF_GAP_FWD },
+  { BOP_ANY_HASH, "transform_keys",   0, 0, 1, { YS_PAIR_KEY }, IA_BLOCKVALS, IRF_GAP_SHAPE | IRF_GAP_FWD },
+  { BOP_ANY_HASH, "inject",           0, 1, 2, { YS_MEMO, YS_PAIR }, IA_MEMO, IRF_GAP_SHAPE | IRF_GAP_FWD },
+  { BOP_ANY_HASH, "reduce",           0, 1, 2, { YS_MEMO, YS_PAIR }, IA_MEMO, IRF_GAP_SHAPE | IRF_GAP_FWD },
+  { BOP_ANY_HASH, "each_with_object", 1, 1, 2, { YS_PAIR, YS_MEMO }, IA_MEMO, IRF_GAP_FWD },
+
+  /* an Integer range's elements are Integers */
+  { TY_RANGE, "each",             0, 0, 1, { YS_ELEM }, IA_RECV, 0 },
+  { TY_RANGE, "each_entry",       0, 0, 1, { YS_ELEM }, IA_RECV, 0 },
+  { TY_RANGE, "reverse_each",     0, 0, 1, { YS_ELEM }, IA_RECV, IRF_GAP_SHAPE },
+  { TY_RANGE, "each_with_index",  0, 0, 2, { YS_ELEM, YS_INDEX }, IA_RECV, 0 },
+  { TY_RANGE, "map",              0, 0, 1, { YS_ELEM }, IA_BLOCKVALS, 0 },
+  { TY_RANGE, "collect",          0, 0, 1, { YS_ELEM }, IA_BLOCKVALS, 0 },
+  { TY_RANGE, "flat_map",         0, 0, 1, { YS_ELEM }, IA_BLOCKVALS, 0 },
+  { TY_RANGE, "collect_concat",   0, 0, 1, { YS_ELEM }, IA_BLOCKVALS, 0 },
+  { TY_RANGE, "filter_map",       0, 0, 1, { YS_ELEM }, IA_BLOCKVALS, 0 },
+  { TY_RANGE, "select",           0, 0, 1, { YS_ELEM }, IA_SOME, 0 },
+  { TY_RANGE, "filter",           0, 0, 1, { YS_ELEM }, IA_SOME, 0 },
+  { TY_RANGE, "reject",           0, 0, 1, { YS_ELEM }, IA_SOME, 0 },
+  { TY_RANGE, "find_all",         0, 0, 1, { YS_ELEM }, IA_SOME, IRF_GAP_SHAPE },
+  { TY_RANGE, "find",             0, 0, 1, { YS_ELEM }, IA_ONE, 0 },
+  { TY_RANGE, "find",             1, 1, 1, { YS_ELEM }, IA_ONE, IRF_GAP_SHAPE },
+  { TY_RANGE, "detect",           0, 0, 1, { YS_ELEM }, IA_ONE, 0 },
+  { TY_RANGE, "detect",           1, 1, 1, { YS_ELEM }, IA_ONE, IRF_GAP_SHAPE },
+  { TY_RANGE, "find_index",       0, 0, 1, { YS_ELEM }, IA_OTHER, 0 },
+  { TY_RANGE, "min_by",           0, 0, 1, { YS_ELEM }, IA_ONE, 0 },
+  { TY_RANGE, "min_by",           1, 1, 1, { YS_ELEM }, IA_SOME, IRF_GAP_SHAPE },
+  { TY_RANGE, "max_by",           0, 0, 1, { YS_ELEM }, IA_ONE, 0 },
+  { TY_RANGE, "max_by",           1, 1, 1, { YS_ELEM }, IA_SOME, IRF_GAP_SHAPE },
+  { TY_RANGE, "sort_by",          0, 0, 1, { YS_ELEM }, IA_SOME, 0 },
+  { TY_RANGE, "group_by",         0, 0, 1, { YS_ELEM }, IA_GROUPS, 0 },
+  { TY_RANGE, "partition",        0, 0, 1, { YS_ELEM }, IA_PARTS, 0 },
+  { TY_RANGE, "sum",              0, 1, 1, { YS_ELEM }, IA_OTHER, 0 },
+  { TY_RANGE, "count",            0, 0, 1, { YS_ELEM }, IA_OTHER, 0 },
+  { TY_RANGE, "any?",             0, 0, 1, { YS_ELEM }, IA_OTHER, 0 },
+  { TY_RANGE, "all?",             0, 0, 1, { YS_ELEM }, IA_OTHER, 0 },
+  { TY_RANGE, "none?",            0, 0, 1, { YS_ELEM }, IA_OTHER, 0 },
+  { TY_RANGE, "one?",             0, 0, 1, { YS_ELEM }, IA_OTHER, 0 },
+  { TY_RANGE, "take_while",       0, 0, 1, { YS_ELEM }, IA_SOME, 0 },
+  { TY_RANGE, "drop_while",       0, 0, 1, { YS_ELEM }, IA_SOME, 0 },
+  { TY_RANGE, "to_h",             0, 0, 1, { YS_ELEM }, IA_BLOCKVALS, IRF_GAP_SHAPE },
+  { TY_RANGE, "each_slice",       1, 1, 1, { YS_SUB }, IA_RECV, IRF_GAP_RUN_BOXED },
+  { TY_RANGE, "each_cons",        1, 1, 1, { YS_SUB }, IA_RECV, IRF_GAP_RUN_BOXED },
+  { TY_RANGE, "inject",           1, 1, 2, { YS_MEMO, YS_ELEM }, IA_MEMO, IRF_GAP_FWD },
+  { TY_RANGE, "inject",           0, 0, 2, { YS_MEMO, YS_ELEM }, IA_MEMO, IRF_GAP_SHAPE | IRF_GAP_FWD },
+  { TY_RANGE, "reduce",           1, 1, 2, { YS_MEMO, YS_ELEM }, IA_MEMO, IRF_GAP_FWD },
+  { TY_RANGE, "reduce",           0, 0, 2, { YS_MEMO, YS_ELEM }, IA_MEMO, IRF_GAP_SHAPE | IRF_GAP_FWD },
+  { TY_RANGE, "each_with_object", 1, 1, 2, { YS_ELEM, YS_MEMO }, IA_MEMO, IRF_GAP_FWD },
+  { TY_RANGE, "step",             1, 1, 1, { YS_NUM }, IA_RECV, IRF_GAP_FWD },
+  { TY_FLOAT_RANGE, "step",       1, 1, 1, { YS_NUM }, IA_RECV, 0 },
+
+  { TY_INT, "times",   0, 0, 1, { YS_NUM }, IA_RECV, 0 },
+  { TY_INT, "upto",    1, 1, 1, { YS_NUM }, IA_RECV, 0 },
+  { TY_INT, "downto",  1, 1, 1, { YS_NUM }, IA_RECV, 0 },
+  { TY_INT, "step",    1, 2, 1, { YS_NUM }, IA_RECV, IRF_GAP_FWD },
+  { TY_FLOAT, "step",  1, 2, 1, { YS_NUM }, IA_RECV, 0 },
+
+  { BOP_KERNEL, "loop",  0, 0, 0, { YS_NONE }, IA_OTHER, 0 },
+  /* a catch's block is handed its tag: the one given, or a fresh Object */
+  { BOP_KERNEL, "catch", 0, 1, 1, { YS_ARG0 }, IA_BLOCKVAL, 0 },
+
+  { BOP_ANY_RECV, "tap",        0, 0, 1, { YS_RECV }, IA_RECV, 0 },
+  { BOP_ANY_RECV, "then",       0, 0, 1, { YS_RECV }, IA_BLOCKVAL, 0 },
+  { BOP_ANY_RECV, "yield_self", 0, 0, 1, { YS_RECV }, IA_BLOCKVAL, 0 },
+  /* Enumerable's, read by the shape desugar on any receiver */
+  { BOP_ANY_RECV, "each_with_index",  0, 0, 2, { YS_ELEM, YS_INDEX }, IA_RECV, IRF_GAP_SHARE },
+  { BOP_ANY_RECV, "each_with_object", 1, 1, 2, { YS_ELEM, YS_MEMO }, IA_MEMO, IRF_GAP_SHARE },
+};
+#define ITER_NROWS ((int)(sizeof iter_rows / sizeof iter_rows[0]))
+
+/* A hash over (family, name) of the share rows and then the iterator rows
+   (entry BOP_NSHARE + i), built on first use: the analysis asks for every
+   call node, every round of the fixpoint it runs in. A chain lists its
+   entries in table order, the share rows first. */
+enum { BOP_SHARE_BUCKETS = 512 };
+static int bop_share_head[BOP_SHARE_BUCKETS], bop_share_next[BOP_NSHARE + ITER_NROWS];
+static int bop_share_built;
+static unsigned bop_share_hash(TyKind fam, const char *name) {
+  return (sp_strhash(name) ^ ((unsigned)fam * 2654435761u)) & (BOP_SHARE_BUCKETS - 1);
+}
+static const char *bop_share_entry(int i, TyKind *fam) {
+  if (i < BOP_NSHARE) { *fam = bop_share_rows[i].fam; return bop_share_rows[i].name; }
+  *fam = iter_rows[i - BOP_NSHARE].fam;
+  return iter_rows[i - BOP_NSHARE].name;
+}
+static int bop_share_chain(TyKind fam, const char *name) {
+  if (!bop_share_built) {
+    for (int b = 0; b < BOP_SHARE_BUCKETS; b++) bop_share_head[b] = -1;
+    for (int i = BOP_NSHARE + ITER_NROWS - 1; i >= 0; i--) {
+      TyKind f;
+      const char *n = bop_share_entry(i, &f);
+      unsigned b = bop_share_hash(f, n);
+      bop_share_next[i] = bop_share_head[b];
+      bop_share_head[b] = i;
+    }
+    bop_share_built = 1;
+  }
+  return bop_share_head[bop_share_hash(fam, name)];
+}
+
+const IterRow *iter_row(TyKind fam, const char *name, int argc, unsigned skip) {
+  if (!name) return NULL;
+  for (int i = bop_share_chain(fam, name); i >= 0; i = bop_share_next[i]) {
+    if (i < BOP_NSHARE) continue;
+    const IterRow *r = &iter_rows[i - BOP_NSHARE];
+    if (r->fam != fam || (r->flags & skip) || !sp_streq(r->name, name)) continue;
+    if (argc >= 0 && (argc < r->argc_min || argc > r->argc_max)) continue;
+    return r;
+  }
+  return NULL;
+}
+
+/* Whether no value a step yields is one the receiver holds: a new String,
+   a number, an index, or a Hash's key (the frozen copy it made). */
+static int iter_yields_fresh(const IterRow *r) {
+  for (int k = 0; k < r->nyield; k++)
+    if (r->yield[k] != YS_FRESH && r->yield[k] != YS_NUM && r->yield[k] != YS_INDEX &&
+        r->yield[k] != YS_PAIR_KEY) return 0;
+  return 1;
+}
+
+/* The BSH_ITER_* (or BSH_PURE) answer of an iterator row: what the share
+   analysis (analyze_share.c sh_builtin) reads for the call. */
+static int iter_row_share(const IterRow *r) {
+  switch (r->answer) {
+  case IA_BLOCKVALS: return BSH_ITER_MAP;
+  case IA_BLOCKVALS_INPLACE: return BSH_ITER_MAP_BANG;
+  case IA_MEMO: return r->yield[0] == YS_MEMO ? BSH_ITER_MEMO0 : BSH_ITER_MEMO1;
+  case IA_GROUPS: case IA_PARTS: return BSH_ITER_SUB;
+  default: break;
+  }
+  for (int k = 0; k < r->nyield; k++)
+    if (r->yield[k] == YS_SUB || r->yield[k] == YS_TUPLE) return BSH_ITER_SUB;
+  if (r->nyield >= 1 && r->yield[0] == YS_RECV)
+    return r->answer == IA_RECV ? BSH_ITER_SELF : r->answer == IA_BLOCKVAL ? BSH_ITER_THEN : 0;
+  if (iter_yields_fresh(r)) return r->answer == IA_RECV ? BSH_ITER_FRESH_RECV : BSH_ITER_FRESH;
+  switch (r->answer) {
+  case IA_RECV:  return BSH_ITER;
+  case IA_SOME:  return BSH_ITER_SEL;
+  case IA_ONE:   return BSH_ITER_FIND;
+  case IA_OTHER: return BSH_PURE;
+  default:       return 0;
+  }
+}
+
+/* The families whose iterator rows the share analysis reads: a number's or
+   a Range's iterators hand their blocks numbers, and the family's "*" row
+   answers for them. */
+static int iter_share_family(TyKind fam) {
+  return fam == TY_STRING || fam == BOP_ANY_ARRAY || fam == BOP_ANY_HASH || fam == BOP_KERNEL ||
+         fam == BOP_ANY_RECV;
+}
+
+/* the hand row's answer for the name, or 0 */
+static int bop_share_hand(TyKind fam, const char *name) {
+  for (int i = bop_share_chain(fam, name); i >= 0 && i < BOP_NSHARE; i = bop_share_next[i])
+    if (bop_share_rows[i].fam == fam && sp_streq(bop_share_rows[i].name, name))
+      return bop_share_rows[i].share;
+  return 0;
+}
+
+/* The share answer of the iterator row the analysis reads for the name,
+   or 0: the first one (the analysis reads the argument count itself). */
+static int iter_share(TyKind fam, const char *name) {
+  if (!iter_share_family(fam)) return 0;
+  const IterRow *r = iter_row(fam, name, -1, IRF_GAP_SHARE);
+  return r ? iter_row_share(r) : 0;
+}
+
+/* a name's hand row, else its iterator row's answer */
+static int bop_share_find(TyKind fam, const char *name) {
+  int s = bop_share_hand(fam, name);
+  return s ? s : iter_share(fam, name);
+}
+
+int bop_share_named(TyKind fam, const char *name) {
+  return name ? bop_share_find(fam, name) : 0;
+}
+
+int bop_share_self_answer(const char *name, int has_block) {
+  size_t n = name ? strlen(name) : 0;
+  if (n == 0) return 0;
+  int s = bop_share_find(TY_STRING, name);
+  if (n >= 2 && name[n - 1] == '!') return s == BSH_RECV || s == BSH_ITER_FRESH_RECV;
+  if (!has_block) return 0;
+  /* the analysis reads the any-receiver row after the String one (tap) */
+  if (!s) s = bop_share_find(BOP_ANY_RECV, name);
+  return s == BSH_ITER_FRESH_RECV || s == BSH_ITER_SELF;
+}
+
+int bop_share(TyKind fam, const char *name) {
+  if (!name) return 0;
+  int s = bop_share_find(fam, name);
+  return s ? s : bop_share_find(fam, "*");
+}
+
+TyKind iter_yield_kind(const IterRow *r, int k, TyKind rt) {
+  int boxed = rt == TY_POLY;
+  switch (k >= 0 && k < r->nyield ? r->yield[k] : YS_NONE) {
+  case YS_ELEM:     return boxed ? TY_POLY : rt == TY_RANGE ? TY_INT : ty_array_elem(rt);
+  case YS_PAIR_KEY: return boxed ? TY_POLY : ty_hash_key(rt);
+  case YS_PAIR_VAL: return boxed ? TY_POLY : ty_hash_val(rt);
+  case YS_SUB:      return boxed || (r->flags & IRF_GAP_RUN_BOXED) ? TY_POLY_ARRAY : rt;
+  case YS_TUPLE:    return TY_POLY_ARRAY;
+  case YS_FRESH:    return TY_STRING;
+  case YS_NUM:      return rt == TY_FLOAT || rt == TY_FLOAT_RANGE ? TY_FLOAT : TY_INT;
+  case YS_INDEX:    return TY_INT;
+  case YS_RECV:     return rt;
+  default:          return TY_UNKNOWN;
+  }
+}
+
+/* The block-shape desugar's family of a receiver kind; a boxed receiver
+   reads the Array's IRF_SHAPE_BOXED rows, then the Hash's. */
+static const IterRow *iter_shape_row(TyKind rt, const char *nm, int argc) {
+  const IterRow *r = iter_row(BOP_ANY_RECV, nm, argc, IRF_GAP_SHAPE);
+  if (r) return r;
+  if (rt == TY_POLY) {
+    r = iter_row(BOP_ANY_ARRAY, nm, argc, IRF_GAP_SHAPE);
+    if (!r || !(r->flags & IRF_SHAPE_BOXED)) r = iter_row(BOP_ANY_HASH, nm, argc, IRF_GAP_SHAPE);
+    return r && (r->flags & IRF_SHAPE_BOXED) ? r : NULL;
+  }
+  TyKind fam = ty_is_hash(rt) ? BOP_ANY_HASH
+             : ty_is_array(rt) || ty_is_obj_array(rt) ? BOP_ANY_ARRAY
+             : rt == TY_INT || rt == TY_FLOAT || rt == TY_STRING || rt == TY_RANGE ||
+               rt == TY_FLOAT_RANGE ? rt
+             : TY_UNKNOWN;
+  return fam == TY_UNKNOWN ? NULL : iter_row(fam, nm, argc, IRF_GAP_SHAPE);
+}
+
+int iter_shape_count(TyKind rt, const char *nm, int argc, TyKind *elem, int *hash_pair) {
+  *hash_pair = 0;
+  *elem = TY_UNKNOWN;
+  const IterRow *r = iter_shape_row(rt, nm, argc);
+  if (!r || r->nyield == 0) return 0;
+  if (r->nyield > 1) return r->nyield;
+  if (r->yield[0] == YS_PAIR) { *hash_pair = 1; return 1; }
+  /* tap, then and yield_self yield the receiver, whatever it is */
+  *elem = iter_yield_kind(r, 0, rt);
+  return r->yield[0] == YS_RECV && rt == TY_UNKNOWN ? 0 : 1;
+}
+
+/* What is wrong with a row on its face, or NULL. */
+static const char *iter_row_malformed(const IterRow *r) {
+  if (r->fam != TY_STRING && r->fam != BOP_ANY_ARRAY && r->fam != BOP_ANY_HASH &&
+      r->fam != TY_RANGE && r->fam != TY_FLOAT_RANGE && r->fam != TY_INT && r->fam != TY_FLOAT &&
+      r->fam != BOP_KERNEL && r->fam != BOP_ANY_RECV) return "not a row family";
+  if (r->argc_min < 0 || r->argc_min > r->argc_max) return "argument counts out of order";
+  if (r->nyield > 3) return "more than three values a step";
+  int sub = 0;
+  for (int k = 0; k < 3; k++) {
+    if (k < r->nyield && (r->yield[k] == YS_NONE || r->yield[k] > YS_ARG0)) return "a yielded value with no source";
+    if (k >= r->nyield && r->yield[k] != YS_NONE) return "a source past the values a step yields";
+    if (r->yield[k] == YS_SUB) sub = 1;
+  }
+  if (r->answer > IA_OTHER) return "no answer";
+  if (r->flags & ~(IRF_GAP_SHARE | IRF_GAP_SHAPE | IRF_GAP_FWD | IRF_GAP_RUN_BOXED | IRF_SHAPE_BOXED))
+    return "an unknown flag";
+  if ((r->flags & IRF_GAP_RUN_BOXED) && !sub) return "IRF_GAP_RUN_BOXED on a row yielding no run";
+  if ((r->flags & IRF_SHAPE_BOXED) && r->fam != BOP_ANY_ARRAY && r->fam != BOP_ANY_HASH)
+    return "IRF_SHAPE_BOXED on a row neither an Array's nor a Hash's";
+  return NULL;
+}
+
+void iter_rows_check(void) {
+  for (int i = 0; i < ITER_NROWS; i++) {
+    const IterRow *r = &iter_rows[i];
+    const char *why = iter_row_malformed(r);
+    /* none of the rows after it of its family and name may take one of
+       its argument counts: iter_row would never reach that row there */
+    for (int j = i + 1; !why && j < ITER_NROWS; j++) {
+      const IterRow *o = &iter_rows[j];
+      if (o->fam == r->fam && sp_streq(o->name, r->name) &&
+          o->argc_min <= r->argc_max && r->argc_min <= o->argc_max)
+        why = "another row of the name takes one of its argument counts";
+    }
+    if (why) fprintf(stderr, "plan-check: iter-row-error: %s (family %d, %d..%d): %s\n",
+                     r->name, (int)r->fam, r->argc_min, r->argc_max, why);
+  }
+  /* a hand row with an iterator's answer overrides its row's: one with no
+     row to override is no iterator, and one that repeats the derived
+     answer is stale */
+  for (int i = 0; i < BOP_NSHARE; i++) {
+    const BopShareRow *h = &bop_share_rows[i];
+    if (h->share < BSH_ITER || h->share > BSH_ITER_THEN) continue;
+    const char *why = !iter_row(h->fam, h->name, -1, IRF_GAP_SHARE) ? "names no iterator row"
+                    : h->share == iter_share(h->fam, h->name) ? "repeats the answer its iterator row derives"
+                    : NULL;
+    if (why) fprintf(stderr, "plan-check: iter-row-error: %s (family %d): its hand share row %s\n",
+                     h->name, (int)h->fam, why);
+  }
 }

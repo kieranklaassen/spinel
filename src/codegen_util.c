@@ -1,6 +1,7 @@
 #include "codegen_internal.h"
 #include "call_plan.h"
 #include "repr.h"
+#include "builtin_ops.h"
 
 Buf expr_buf(Compiler *c, int node) {
   Buf b; memset(&b, 0, sizeof b);
@@ -351,6 +352,7 @@ void ucall_report(Compiler *c) {
   refuse_report(c);
   ucall_resolver_report(c);
   cplan_served_report();
+  iter_rows_check();
   pa_report();
   static const char *const via_name[] = { "none", "top", "inst", "cmeth", "super",
                                           "send_blind", "ie", "included", "reopen", "poly" };
@@ -1344,7 +1346,9 @@ void cg_memo_put(CgMemo *m, const char *key, int tag, int val) {
 
 static int re_lit_write_node(Compiler *c, int id) {
   NodeKind k = nt_kind(c->nt, id);
-  return k == NK_ConstantWriteNode || k == NK_ConstantPathWriteNode || k == NK_LocalVariableWriteNode;
+  return k == NK_ConstantWriteNode || k == NK_ConstantPathWriteNode || k == NK_LocalVariableWriteNode ||
+         k == NK_LocalVariableOrWriteNode || k == NK_LocalVariableAndWriteNode ||
+         k == NK_LocalVariableOperatorWriteNode || k == NK_LocalVariableTargetNode;
 }
 int re_lit_node(Compiler *c, int nid) {
   if (nid < 0) return -1;
@@ -1357,30 +1361,28 @@ int re_lit_node(Compiler *c, int nid) {
   if (!want_const && !want_local) return -1;
   const char *nm = nt_str(nt, nid, "name");
   if (!nm) return -1;
-  /* the answer is fixed by (name, kind): one scan per name, not per use */
+  /* a constant's answer is fixed by its name, a local's by its scope and
+     name: one scan per key, not per use */
   static CgMemo memo = { .touches = re_lit_write_node };
+  Scope *sc = want_local ? comp_scope_of(c, nid) : NULL;
+  int tag = want_const ? 1 : sc ? 2 + (int)(sc - c->scopes) : 0;
   int got;
-  if (cg_memo_get(c, &memo, nm, want_const, &got)) return got;
+  if (cg_memo_get(c, &memo, nm, tag, &got)) return got;
   int found = -1;
-  for (int k = 0; k < nt->count && found < 0; k++) {
+  if (want_local) found = an_regex_local_lit(c, nid);
+  for (int k = 0; want_const && k < nt->count && found < 0; k++) {
     const char *kt = nt_type(nt, k);
     if (!kt) continue;
-    if (want_const ? (!sp_streq(kt, "ConstantWriteNode") && !sp_streq(kt, "ConstantPathWriteNode"))
-                   : !sp_streq(kt, "LocalVariableWriteNode"))
-      continue;
+    if (!sp_streq(kt, "ConstantWriteNode") && !sp_streq(kt, "ConstantPathWriteNode")) continue;
     const char *kn = nt_str(nt, k, "name");
     if (!kn || !sp_streq(kn, nm)) continue;
-    /* a local is its own scope's: a top-level `re = /x/` is not the `re`
-       parameter of a method, which resolved to that literal by name alone and
-       scanned with the wrong pattern (a parameter has no write at all) */
-    if (want_local && comp_scope_of(c, k) != comp_scope_of(c, nid)) continue;
     int v = nt_ref(nt, k, "value");
-    if (want_const && v >= 0 && nt_type(nt, v) && sp_streq(nt_type(nt, v), "CallNode") &&
+    if (v >= 0 && nt_type(nt, v) && sp_streq(nt_type(nt, v), "CallNode") &&
         nt_str(nt, v, "name") && sp_streq(nt_str(nt, v, "name"), "freeze"))
       v = nt_ref(nt, v, "receiver");
     if (v >= 0 && nt_type(nt, v) && sp_streq(nt_type(nt, v), "RegularExpressionNode")) found = v;
   }
-  cg_memo_put(&memo, nm, want_const, found);
+  cg_memo_put(&memo, nm, tag, found);
   return found;
 }
 int re_lit_index(Compiler *c, int nid) {
@@ -2399,8 +2401,8 @@ int strbuf_boxed_elem_read(Compiler *c, int v) {
   if (!container_elem_read_p(c->nt, v)) return 0;
   int r = nt_ref(c->nt, v, "receiver");
   if (r < 0) return 0;
-  TyKind rt = comp_ntype(c, r);
-  return rt == TY_POLY || rt == TY_POLY_ARRAY || ty_is_hash(rt);
+  Repr rr = repr_of(c, r);
+  return rr.kind == RK_BOXED || rr.elem == TY_POLY || rr.key != TY_UNKNOWN;
 }
 /* A String is a const char * value, so a String mutator (`<<`, the bang
    methods, replace/insert/...) is lowered to a reassignment of its receiver:
@@ -2451,9 +2453,12 @@ int sb_shadowed_reader(int node) {
    reads as the shadow `lv__sbT`, with the handle marks lifted. Answers T, or 0
    when `recv` is no such call. */
 int sb_reader_shim_open(Compiler *c, int recv, char *sref, size_t cap, SbReaderSave *sv) {
-  if (recv < 0 || nt_kind(c->nt, recv) != NK_CallNode) return 0;
+  /* a global holding the handle (--share-strings) is such a slot too:
+     strbuf_slot_ref answers for it only then */
+  int gv = repr_share_rule(c) && recv >= 0 && repr_static_read_kind(nt_kind(c->nt, recv)) && !sb_shadowed_reader(recv);
+  if (recv < 0 || (nt_kind(c->nt, recv) != NK_CallNode && !gv)) return 0;
   Repr rp = repr_of(c, recv);
-  if (!rp.handle && !rp.demand) return 0;
+  if (!gv && !rp.handle && !rp.demand) return 0;
   if (g_n_argov >= MAX_ARG_OVERRIDE) return 0;
   if (!strbuf_slot_ref(c, recv, sref, cap)) return 0;
   int tH = ++g_tmp;
@@ -2489,6 +2494,16 @@ int strbuf_marked_yields_handle(Compiler *c, int v) {
   const char *nm = nt_str(nt, v, "name");
   return nm && (is_append_concat(nm) || str_self_call(nt, v));
 }
+/* A String method answering its receiver or nil (bop_share_self_answer:
+   a bang method, an iterator given a block) called on a local that holds
+   the shared handle: its value is that local's String, or nil. */
+int strbuf_bang_self_local(const Compiler *c, int v) {
+  const NodeTable *nt = c->nt;
+  if (v < 0 || nt_kind(nt, v) != NK_CallNode ||
+      !bop_share_self_answer(nt_str(nt, v, "name"), nt_ref(nt, v, "block") >= 0)) return 0;
+  int r = nt_ref(nt, v, "receiver");
+  return r >= 0 && nt_kind(nt, r) == NK_LocalVariableReadNode && repr_of(c, r).kind == RK_STRBUF;
+}
 int strbuf_slot_ref(Compiler *c, int recv, char *out, size_t cap) {
   const char *rn = strbuf_local_name(c, recv);
   if (rn) {
@@ -2516,13 +2531,19 @@ int strbuf_slot_ref(Compiler *c, int recv, char *out, size_t cap) {
        emits the sp_String * itself (#3941). */
     int erecv = nt_ref(c->nt, recv, "receiver");
     const char *cnm = nt_str(c->nt, recv, "name");
-    TyKind ert = erecv >= 0 ? comp_ntype(c, erecv) : TY_UNKNOWN;
+    Repr er = repr_of(c, erecv);
     int boxed = cnm && sp_streq(cnm, "[]") &&
-                (ert == TY_POLY || ert == TY_POLY_ARRAY || ty_is_hash(ert));
+                (er.kind == RK_BOXED || er.elem == TY_POLY || er.key != TY_UNKNOWN);
     int fit = rb2.p && strlen(rb2.p) + 24 <= cap;
     if (fit) snprintf(out, cap, boxed ? "sp_poly_as_strbuf(%s)" : "(%s)", rb2.p);
     free(rb2.p);
     return fit;
+  }
+  /* a global or a constant holding the handle (--share-strings, #6765) */
+  if (repr_share_rule(c) && recv >= 0 && repr_static_read_kind(nt_kind(c->nt, recv))) {
+    /* inside the shim over it, the read is its plain shadow */
+    if (sb_shadowed_reader(recv)) return 0;
+    return repr_handle_static_ref(c, recv, out, cap);
   }
   if (recv < 0 || nt_kind(c->nt, recv) != NK_InstanceVariableReadNode) return 0;
   const char *nm = nt_str(c->nt, recv, "name");
@@ -2963,7 +2984,14 @@ void emit_coerce_text(Compiler *c, int node, TyKind from, TyKind slot, int how,
     RCCT(CF_FIT);
     return;
   case CF_BOX:
-    emit_boxed_text(c, from, text, b); RCCT(CF_BOX); return;
+    /* (a String into a boxed slot the rule shares: emit_boxed's lift) */
+    if (repr_share_rule(c) && node >= 0 && c->poly_strbuf_lift[node] && from == TY_STRING) {
+      buf_puts(b, "sp_poly_strbuf_lift(");
+      emit_boxed_text(c, from, text, b);
+      buf_puts(b, ")");
+    }
+    else emit_boxed_text(c, from, text, b);
+    RCCT(CF_BOX); return;
   case CF_NIL_SENT:
     /* A value with no C type of its own -- a call that answers nothing, a
        raise -- is evaluated for its effect, and the slot takes its nil */
@@ -3693,14 +3721,30 @@ void emit_str_literal_src(Buf *b, const char *content, size_t len, int frozen) {
   if (content && len) emit_c_escaped_n(b, content, len);
   buf_printf(b, "\"; &_slit_%d[1]; })", lid);
 }
-/* Emit a catch/throw tag expression; returns the tag KIND (0 = name tag
-   matched by content, 1 = object tag matched by pointer identity). */
+/* Emit a catch/throw tag expression; returns the tag KIND (0 = a Symbol,
+   matched by name; 1 = an object, matched by pointer identity; 2 = a
+   String, matched by its pointer; 3 = a shared String, matched by its
+   handle). A String matches by identity, as equal? does: by content an
+   equal copy met the original, where CRuby raises UncaughtThrowError. A
+   literal is one object per content, as in CRuby. */
 int emit_catch_tag(Compiler *c, int id, Buf *b) {
   const char *ty = nt_type(c->nt, id);
   if (ty && sp_streq(ty, "SymbolNode")) { emit_str_literal(b, nt_str(c->nt, id, "value")); return 0; }
-  if (ty && sp_streq(ty, "StringNode")) { emit_str_literal(b, nt_str(c->nt, id, "unescaped")); return 0; }
   Repr tr = repr_of(c, id);
   TyKind t = tr.as_ty;
+  /* a variable holding the shared handle is that String, whichever face
+     its read is typed as: a read of the handle hands out a copy */
+  char href[256];
+  if ((t == TY_STRBUF || t == TY_STRING) && strbuf_slot_ref(c, id, href, sizeof href)) {
+    buf_printf(b, "((const char *)(void *)%s)", href);
+    return 3;
+  }
+  if (t == TY_STRBUF)
+    unsupported(c, id, "catch/throw with a shared String tag that no variable holds (bind it to a local first)");
+  if (t == TY_STRING) {
+    emit_expr(c, id, b);
+    return 2;
+  }
   if (t == TY_SYMBOL) {
     buf_puts(b, "sp_sym_to_s("); emit_expr(c, id, b); buf_puts(b, ")");
     return 0;
@@ -3723,12 +3767,6 @@ int emit_catch_tag(Compiler *c, int id, Buf *b) {
        pointer was the symbol's id, and it matched nothing (#4523). */
     emit_expr(c, id, b);
     return -1;
-  }
-  if (t == TY_STRING) {
-    /* a dynamic string tag: a valid pointer, matched by content (like the
-       StringNode-literal arm above) */
-    emit_expr(c, id, b);
-    return 0;
   }
   if (t == TY_INT) {
     /* an Integer tag: CRuby matches by identity, which for a Fixnum is value
@@ -3761,16 +3799,18 @@ int emit_catch_tag(Compiler *c, int id, Buf *b) {
    build ({1 => 2}.dig("a"), .fetch("a"), .except(obj)). The same kinds a
    poly key of another tag already misses on. A user object is a miss
    without asking whether its class defines #eql? and #hash: a typed table
-   holds no objects, so nothing in it can be eql? to one. */
+   holds no objects, so nothing in it can be eql? to one. The by-value kinds
+   (a Range, a Time, a Complex, a Rational...) are asked of their traits
+   row: none is a String, a Symbol or an Integer, and Complex(1, 0).eql?(1)
+   is false. */
 int hash_key_misses(Compiler *c, int key, TyKind kt) {
   TyKind actual = comp_ntype(c, key);
   if (kt == TY_POLY || actual == kt || actual == TY_POLY || actual == TY_UNKNOWN) return 0;
   if (kt == TY_STRING && actual == TY_STRBUF) return 0;
   return actual == TY_NIL || actual == TY_BOOL || actual == TY_INT ||
          actual == TY_BIGINT || actual == TY_FLOAT || actual == TY_SYMBOL ||
-         actual == TY_STRING || actual == TY_STRBUF || actual == TY_RANGE ||
-         actual == TY_FLOAT_RANGE || actual == TY_STR_RANGE || actual == TY_TIME ||
-         actual == TY_REGEX || ty_is_array(actual) || ty_is_hash(actual) ||
+         actual == TY_STRING || actual == TY_STRBUF || actual == TY_REGEX ||
+         ty_is_struct_valued(actual) || ty_is_array(actual) || ty_is_hash(actual) ||
          ty_is_object(actual);
 }
 
@@ -4188,12 +4228,14 @@ static void shadow_tab_build(Compiler *c) {
   g_shadow_c = c; g_shadow_n = n;
 }
 int scope_is_shadowed(Compiler *c, int s) {
+  if (c->scopes[s].c_name) return 0;
   if (!g_scopes_settled) return scope_is_shadowed_scan(c, s);
   if (g_shadow_c != c || g_shadow_n != c->nscopes) shadow_tab_build(c);
   return g_shadow_tab[s];
 }
 static int scope_is_shadowed_scan(Compiler *c, int s) {
   Scope *sc = &c->scopes[s];
+  if (sc->c_name) return 0;
   if (!sc->name) return 0;
   /* a redefined top-level method: only a later `def` of the same name
      shadows it, and comp_method_index answers that one. Emitting both was

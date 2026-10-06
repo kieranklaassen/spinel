@@ -193,6 +193,10 @@ typedef struct {
                        modifier `if`, one branch, a loop body), so the read
                        answers nil, and the slot starts as its nil sentinel
                        as an or-written one does */
+  int elems_shared; /* --share-strings: a String container whose elements
+                       the rule shares settled in its poly form, and its
+                       elements are boxed handles (repr_of_slot's
+                       elems_handle) */
   int str_shared;   /* (TY_STRBUF) a shared-mutable string: it is aliased
                        (`s2 = s1`) AND mutated in place, so the whole alias set
                        holds the one sp_String* handle -- reads hand out the live
@@ -264,6 +268,7 @@ typedef struct {
 
 typedef struct {
   char *name;       /* method name; NULL for the top-level scope */
+  char *c_name;     /* optional unique C symbol for a method without changing its Ruby name */
   int def_node;     /* DefNode id; -1 for top-level */
   int body;         /* StatementsNode id (-1 if empty) */
   int class_id;     /* owning class index, or -1 for free functions */
@@ -282,6 +287,9 @@ typedef struct {
   int is_include_copy;        /* this scope IS such a copy: a later include of a
                                  module defining the same name replaces it, and
                                  the replacement's super chains to it (#3731) */
+  int is_prepend_copy;        /* the instance method a `prepend` copied in, in
+                                 front of the class's own (its super reaches
+                                 that one -- the builtin's, for a builtin) */
   int is_extend_copy;         /* the class method an `extend` copied in: a later
                                  extend of a module defining the same name
                                  replaces it the same way */
@@ -467,6 +475,8 @@ typedef struct {
   unsigned char *cvar_nullable_int; /* the Integer or Float class variable can
                                        hold the nil sentinel, as
                                        ivar_nullable_int for an ivar */
+  unsigned char *cvar_str_shared;   /* --share-strings: the TY_STRBUF slot is
+                                       the shared handle, as ivar_str_shared */
   int ncvars, ccvars;
   char **readers;      /* attr reader method names (no '@') */
   int nreaders, creaders;
@@ -722,6 +732,12 @@ typedef struct {
                           append and the caller's variable are one String
                           (sp_poly_strbuf_lift). The node's TYPE is
                           unchanged. */
+  unsigned char *nil_tested; /* [node_cap] a builtin call's receiver whose nil
+                          its nil arm has already tested (cplan_nil, #7444):
+                          set only as a view (VR_NIL_TESTED) around the
+                          call's own emission, so the call is armed once;
+                          2 when a cached array read tests it in its
+                          out-of-range branch (emit_nil_target_cold) */
   TyKind *nilnarrow; /* [node_cap] param-read narrowed by a `return .. if p.nil?`
                         guard: the read's non-nil type (codegen unboxes the poly
                         slot at the read site); TY_UNKNOWN = not narrowed */
@@ -919,6 +935,22 @@ typedef struct {
      nil, is reachable only from such a program in practice, so the check on
      a store into one (int_slot_store_needs_ck) is emitted only for it. */
   int big_int_src;
+  /* --share-strings (SPINEL_SHARE_STRINGS): a mutable String is the shared
+     handle unless the analysis proves it local (repr_str_shares, #6765),
+     and the share classes that rule reads (share.h), rebuilt as the
+     analysis goes. Off, nothing builds them and the C is unchanged. */
+  int share_borrows;    /* arguments share_mark_borrows lets borrow the bytes */
+  /* the route refusals the flag left to the rule (share_route_defer),
+     checked against the final facts at seal */
+  struct ShareRoute *share_route;
+  int nshare_route, cshare_route;
+  int share_strings;
+  struct ShareFacts *share;
+  unsigned share_sig;   /* the types the facts were last applied over */
+  /* an ivar of a builtin value can be written (desugar_builtin_ivars): a
+     reflective read, list or copy of an Array, a Hash or a Random asks the
+     runtime's map (sp_bivar_*), and the boxed set gains its builtin arm */
+  int bivar_table;
 } Compiler;
 
 Compiler *comp_new(const NodeTable *nt);
@@ -1090,6 +1122,8 @@ const char *sym_static_value(Compiler *c, int node);  /* SymbolNode or sole-symb
 int sp_str_mutator(const char *nm, unsigned want);
 /* 1 iff call node `id` is a String method whose value is its receiver. */
 int str_self_call(const NodeTable *nt, int id);
+/* The RegularExpressionNode a Regexp local read at `read` always holds, or -1 (analyze_util.c). */
+int an_regex_local_lit(Compiler *c, int read);
 int fiber_storage_recv(const NodeTable *nt, int recv);
 int array_mutator_name(const char *nm);
 /* 1 iff `nm` is a stage that keeps a lazy chain lazy -- the set
@@ -1110,6 +1144,8 @@ int        recv_hash_new_default_arg(Compiler *c, int recv); /* the same through
 TyKind     hash_default_value_ty(Compiler *c, int dn);      /* the value type a Hash.new(d) default contributes */
 int        hash_new_blockless(Compiler *c, int recv);  /* blockless Hash.new / {} literal */
 int        const_owned_by_class(Compiler *c, const char *clsname, const char *constname);
+const char *const_get_recv_name(Compiler *c, int call, int recv);
+int        const_get_takes_value(Compiler *c, const char *rnm, const char *cgn);
 /* Class index of a `class_eval`/`module_eval { defs }` reopen, else -1.
    enclosing_class resolves bare/`self.` receivers (the class whose body we are
    directly in); ignored for constant receivers. */

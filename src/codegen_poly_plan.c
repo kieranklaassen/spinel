@@ -1266,7 +1266,7 @@ void poly_specials0(Compiler *c, int id, const char *name, PolySpecials0 *s) {
      union of an rbs-seeded Hash and a class instance, #3278): the user-class
      switch has no builtin arm, so the hash fell through to the nil seed. */
   int is_poly_to_a = sp_streq(name, "to_a") &&
-                     (comp_ntype(c, id) == TY_POLY_ARRAY || comp_ntype(c, id) == TY_POLY);
+                     (comp_ntype(c, id) == TY_POLY_ARRAY || repr_of(c, id).kind == RK_BOXED);
   /* to_h on a poly value that is really a builtin hash (or an Array of
      pairs, or a Struct): the user-class switch carries an arm per class that
      defines to_h and none for the builtin, so a plain Hash reached the
@@ -1274,7 +1274,7 @@ void poly_specials0(Compiler *c, int id, const char *name, PolySpecials0 *s) {
      sibling (to_a, to_s, keys, length) already had its arm (#4170). */
   int is_poly_to_h = sp_streq(name, "to_h") && argc == 0 &&
                      nt_ref(nt, id, "block") < 0 &&
-                     comp_ntype(c, id) == TY_POLY;
+                     repr_of(c, id).kind == RK_BOXED;
   int ncand = 0, ncall_arm = 0;
   /* a class neither defining nor reading the name, and not native, counts
      for neither: the name's memoized candidates are the classes to ask */
@@ -2156,6 +2156,14 @@ int emit_poly_defaults0(Compiler *c, int id, int recv, const char *name, const P
     buf_printf(b, " default: _t%d = sp_poly_to_h_val(_t%d); break;", tr, tv);
     obj_default_done = 1;
   }
+  /* display, the same shape: a class that defines it has its own case, and
+     every other receiver is Kernel#display's, to_s with no newline and nil */
+  if (!obj_default_done && argc == 0 && sp_streq(name, "display") && nt_ref(nt, id, "block") < 0) {
+    buf_printf(b, " default: fputs(sp_poly_to_s(_t%d), stdout);", tv);
+    if (ret == TY_POLY) buf_printf(b, " _t%d = sp_box_nil();", tr);
+    buf_puts(b, " break;");
+    obj_default_done = 1;
+  }
   /* The blockless index enumerators, same shape: an Array reaching this
      dispatch still answers them with an Enumerator. */
   if (argc == 0 && (is_indexed_each(name))) {
@@ -2312,7 +2320,7 @@ void poly_specials_n(Compiler *c, int id, const char *name, int argc, const int 
      index; in promote mode that index variable may have widened to poly, so
      accept poly too (the index is unboxed where it is used below). */
   int is_index = sp_streq(name, "[]") && argc == 1 &&
-                 (comp_ntype(c, argv[0]) == TY_INT || comp_ntype(c, argv[0]) == TY_POLY);
+                 (comp_ntype(c, argv[0]) == TY_INT || repr_of(c, argv[0]).kind == RK_BOXED);
   /* `fetch(key[, default])` on a poly value that is actually a str/sym-keyed
      hash: without a user `fetch` candidate the dispatch was skipped and the
      call collapsed to default_value (an empty string), dropping the lookup.
@@ -2534,7 +2542,7 @@ void poly_specials_n(Compiler *c, int id, const char *name, int argc, const int 
      compile. Standing down leaves the builtin case at the raise, which is the
      trade the dig / values_at arms below already make (#4319). */
   if (is_ppack || is_pjoin) {
-    TyKind pjr = comp_ntype(c, id);
+    TyKind pjr = repr_of(c, id).as_ty;
     if (!(pjr == TY_POLY || pjr == TY_STRING || pjr == TY_UNKNOWN)) {
       is_ppack = 0; is_pjoin = 0;
     }
@@ -2548,7 +2556,7 @@ void poly_specials_n(Compiler *c, int id, const char *name, int argc, const int 
      the constant's (#2325, #2585). */
   int is_ctryconv = sp_streq(name, "try_convert") && argc == 1 && !has_splat_arg && kw_pos &&
                     nt_ref(nt, id, "block") < 0 && !recv_user_defines(c, name) &&
-                    comp_ntype(c, id) == TY_POLY;
+                    repr_of(c, id).kind == RK_BOXED;
   s->index = is_index;
   s->fetch = is_fetch;
   s->pdelete = is_pdelete;
@@ -2645,6 +2653,23 @@ void emit_poly_prearms_n(Compiler *c, const char *name, const PolySpecialsN *ps,
                  tv, tv, tr, ret == TY_POLY ? "sp_box_bool(" : "",
                  atmp[0], atmp[0], atmp[0], tv, atmp[0], tv, atmp[0],
                  ret == TY_POLY ? ")" : "");
+    /* an argument of another class (a String, an Array, nil) compares
+       boxed, as a boxed one does: it went into sp_range_include's sp_int
+       slot raw, and did not build */
+    else if (atmp_ty[0] != TY_INT && atmp_ty[0] != TY_FLOAT) {
+      char tn7[24]; snprintf(tn7, sizeof tn7, "_t%d", atmp[0]);
+      Buf ab7; memset(&ab7, 0, sizeof ab7); emit_boxed_text(c, atmp_ty[0], tn7, &ab7);
+      buf_printf(b, "if (_t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_RANGE)"
+                    " { _t%d = %ssp_range_cover_poly((sp_Range *)_t%d.v.p, %s)%s; }\nelse ",
+                 tv, tv, tr, ret == TY_POLY ? "sp_box_bool(" : "", tv, ab7.p ? ab7.p : "sp_box_nil()",
+                 ret == TY_POLY ? ")" : "");
+      /* a String Range covers by string comparison, as its === does */
+      buf_printf(b, "if (_t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_STR_RANGE)"
+                    " { _t%d = %ssp_poly_case_eq(_t%d, %s)%s; }\nelse ",
+                 tv, tv, tr, ret == TY_POLY ? "sp_box_bool(" : "", tv, ab7.p ? ab7.p : "sp_box_nil()",
+                 ret == TY_POLY ? ")" : "");
+      free(ab7.p);
+    }
     else
     buf_printf(b, "if (_t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_RANGE)"
                   " { _t%d = %ssp_range_%s((sp_Range *)_t%d.v.p, _t%d)%s; }\nelse ",
@@ -3472,9 +3497,10 @@ void emit_poly_cases_n(Compiler *c, int id, const char *name, const PolySpecials
   }
   if (is_intersect) {
     if (g_plan_check) pa_observe(PA_BUILTIN, PA_KEY_BUILTIN + PB_INTERSECT, -1, TY_UNKNOWN, PC_SAME);
-    TyKind at2 = comp_ntype(c, argv[0]);
+    Repr ar2 = repr_of(c, argv[0]);
+    TyKind at2 = ar2.as_ty;
     char abox[96];
-    if (at2 == TY_POLY) snprintf(abox, sizeof abox, "_t%d", atmp[0]);
+    if (ar2.kind == RK_BOXED) snprintf(abox, sizeof abox, "_t%d", atmp[0]);
     else {
       Buf ab2; memset(&ab2, 0, sizeof ab2);
       char tn2[32]; snprintf(tn2, sizeof tn2, "_t%d", atmp[0]);
@@ -3612,7 +3638,7 @@ void emit_poly_cases_n(Compiler *c, int id, const char *name, const PolySpecials
      explicit poly key -- cover it here so a Hash reached by such a key is
      not dropped to nil (gemini review). */
   if ((is_aref || is_fetch) &&
-      (comp_ntype(c, argv[0]) == TY_POLY || comp_ntype(c, argv[0]) == TY_UNKNOWN)) {
+      (repr_of(c, argv[0]).kind == RK_BOXED || comp_ntype(c, argv[0]) == TY_UNKNOWN)) {
     if (g_plan_check) pa_observe(PA_BUILTIN, PA_KEY_BUILTIN + PB_AREF_POLY, -1, TY_UNKNOWN, PC_SAME);
     TyKind ptrt = is_scalar_ret(ret) ? ret : TY_INT;
     buf_puts(b, " case SP_BUILTIN_STR_POLY_HASH: case SP_BUILTIN_POLY_POLY_HASH:"
