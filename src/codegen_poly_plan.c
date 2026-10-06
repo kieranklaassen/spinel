@@ -2696,6 +2696,14 @@ void emit_poly_prearms_n(Compiler *c, const char *name, const PolySpecialsN *ps,
       else buf_printf(b, "sp_frange_cover(*(sp_FloatRange *)_t%d.v.p, (sp_float)_t%d)", tv, atmp[0]);
       buf_printf(b, "%s; }\nelse ", ret == TY_POLY ? ")" : "");
     }
+    /* a boxed argument on a String Range: by string comparison, as a
+       String argument above -- it had no arm and answered false. After the
+       numeric Ranges' tests, so that they run what they ran */
+    if (atmp_ty[0] == TY_POLY)
+      buf_printf(b, "if (_t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_STR_RANGE)"
+                    " { _t%d = %ssp_poly_case_eq(_t%d, _t%d)%s; }\nelse ",
+                 tv, tv, tr, ret == TY_POLY ? "sp_box_bool(" : "", tv, atmp[0],
+                 ret == TY_POLY ? ")" : "");
   }
   /* Klass.try_convert(x) on a class-tagged receiver, checked ahead of
      the cls_id switch: no user class defines the name, so no arm below
