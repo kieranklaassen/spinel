@@ -7503,18 +7503,27 @@ int emit_poly_default_blk_arm(Compiler *c, int id, const char *name, int argc, c
 /* the `outer[i]` receiver emit_poly_aset_string reads from the dispatch's temp */
 int g_aset_temp_recv = -1;
 
+/* An end of a Range literal that runs nothing: none, or an Integer pure
+   read with no call in it. */
+static int aset_range_end_is_quiet(Compiler *c, int e) {
+  return e < 0 || (comp_ntype(c, e) == TY_INT && !subtree_has_side_effect(c, e) && subtree_is_pure_read(c, e));
+}
+
 /* Is the operand proven to run none of the program's code and to store
-   nothing: a pure read (subtree_is_pure_read), a String literal, or an
-   interpolation of pure reads with no call in them that the builtin renders
-   -- a String, which is used as it stands; an Integer, a Float or a Symbol
-   whose class the program gives no to_s (emit_interp's own test); true,
-   false and nil? An interpolated object's to_s or inspect, a `when`
+   nothing: a pure read (subtree_is_pure_read), a String literal, a Range
+   literal of Integer ends (`1..2`, `i...j`: CRuby builds it without a call),
+   or an interpolation of pure reads with no call in them that the builtin
+   renders -- a String, which is used as it stands; an Integer, a Float or a
+   Symbol whose class the program gives no to_s (emit_interp's own test);
+   true, false and nil? An interpolated object's to_s or inspect, a `when`
    object's ===, an `in` object's deconstruct run code with no call written,
    so what is not named here is taken for code. */
 static int aset_operand_is_quiet(Compiler *c, int id) {
   const NodeTable *nt = c->nt;
   if (subtree_is_pure_read(c, id)) return 1;
   if (nt_kind(nt, id) == NK_StringNode) return 1;
+  if (nt_kind(nt, id) == NK_RangeNode)
+    return aset_range_end_is_quiet(c, nt_ref(nt, id, "left")) && aset_range_end_is_quiet(c, nt_ref(nt, id, "right"));
   if (nt_kind(nt, id) != NK_InterpolatedStringNode) return 0;
   int pn = 0;
   const int *parts = nt_arr(nt, id, "parts", &pn);

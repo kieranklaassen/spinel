@@ -192,3 +192,24 @@ qs = "q"
 hq = { title: +"draft", n: 1 }
 hq[:title][0] = "#{qs}#{qn}"
 p hq[:title]
+
+# a Range of Integers is built without a call, so it is a key beside an
+# element or an instance variable too
+hr = { 1 => +"draft", 2 => 5 }
+hr[1][0..1] = "Dr"
+p hr[1]
+ra = [+"abcdef", 1]
+rlo = 1
+rhi = 3
+ra[0][rlo...rhi] = "XY"
+p ra
+class Shelf
+  def initialize
+    @s = [+"abcdef", 1][0]
+  end
+  def go
+    @s[-2..] = "YZ"
+    p @s
+  end
+end
+Shelf.new.go
