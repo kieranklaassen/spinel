@@ -195,7 +195,7 @@ typedef struct{sp_int cls_id;const char *name;}sp_Class;
    table (`cur.cls_id>=0 ? sp_class_superclass : sp_builtin_superclass`), so a
    positive sentinel would be looked up as a user class. */
 #define SP_CLASS_NIL_ID ((sp_int)-900)
-#define sp_class_nil_p(c) ((c).name == NULL && (c).cls_id == SP_CLASS_NIL_ID)
+static inline int sp_class_nil_p(sp_Class c) { return c.name == NULL && c.cls_id == SP_CLASS_NIL_ID; }
 #define SP_CLASS_NIL ((sp_Class){SP_CLASS_NIL_ID, NULL})
 /* A class known only by name (see sp_box_class_name in sp_alloc.h): marks a
    boxed SP_TAG_CLASS value whose v.s carries the name instead of a resolved
