@@ -1,0 +1,42 @@
+"IndexError: index 9 out of string"
+"IndexError: index -9 out of string"
+"IndexError: index 9 out of string"
+"IndexError: index -9 out of string"
+"IndexError: negative length -1"
+"RangeError: 9..10 out of range"
+"RangeError: -9..1 out of range"
+"abcdef"
+"FrozenError"
+"FrozenError"
+"FrozenError"
+"FrozenError"
+"FrozenError"
+"FrozenError"
+"abcdef"
+"RangeError: 9..10 out of range"
+"RangeError: -9..1 out of range"
+"RangeError: -9...-8 out of range"
+"RangeError: 7.. out of range"
+"abcdef"
+:stored
+"abcdefX"
+:stored
+"YbcdefX"
+:stored
+"YZdefX"
+"RangeError: 9..10 out of range"
+"RangeError: -9..1 out of range"
+"RangeError: 9..10 out of range"
+"IndexError: index 9 out of string"
+"FrozenError"
+["abcdef", "uvwxyz", 1]
+[9, 2, 3]
+IndexError
+FrozenError
+"abXdef"
+"rescued"
+"rescued"
+"rescued"
+"rescued"
+"abcdef"
+"IndexError: negative length -1"

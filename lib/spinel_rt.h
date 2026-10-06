@@ -6583,12 +6583,31 @@ static sp_int sp_poly_arr_misfit(sp_RbVal orig, const sp_PolyArray *work) {
   }
   return -1;
 }
+/* Does the boxed value hold a String, plain or shared? */
+static inline sp_bool sp_poly_holds_str(sp_RbVal v) {
+  return v.tag == SP_TAG_STR || sp_poly_is_strbuf(v);
+}
+/* A store of a String into a frozen String raises for its index first, as
+   CRuby does: a negative length or a start outside the String is the
+   IndexError the unfrozen store raises (sp_str_splice_at), and only a store
+   that would be made is the FrozenError. It does not return, so the store's
+   own path tests frozen once. A value that is no String is CRuby's
+   TypeError once the length is known not to be negative and before the
+   start is looked at. That is not raised here yet: past the length its
+   store keeps the order it had. */
+static SP_NORETURN SP_COLD SP_NOINLINE void sp_str_frozen_store_index(const char *s, sp_int start, sp_int len) {
+  sp_int n = (sp_int)sp_str_length(s);
+  if (len < 0) sp_raise_cls("IndexError", sp_sprintf("negative length %lld", (long long)len));
+  if (start > n || start < -n) sp_raise_cls("IndexError", sp_sprintf("index %lld out of string", (long long)start));
+  sp_raise_frozen_str(s);
+}
 static sp_RbVal sp_poly_splice(sp_RbVal recv, sp_int start, sp_int len, sp_RbVal src) {
   /* `s[start, len] = v` through a poly receiver: spinel strings splice into a
      fresh buffer, so a plain string box answers the new value for the caller to
      store back, while a shared handle absorbs it in place -- which is the only
      form an element receiver can use, and the write was silently dropped
      before (#3940). */
+  if (recv.tag == SP_TAG_STR && recv.v.s && sp_str_is_frozen_val(recv.v.s) && (len < 0 || sp_poly_holds_str(src))) sp_str_frozen_store_index(recv.v.s, start, len);
   if (recv.tag == SP_TAG_STR && recv.v.s && sp_str_is_frozen_val(recv.v.s)) sp_raise_frozen_str(recv.v.s);   /* #6328 */
   if (recv.tag == SP_TAG_STR || sp_poly_is_strbuf(recv)) {
     const char *cur = (recv.tag == SP_TAG_STR) ? (recv.v.s ? recv.v.s : sp_str_empty)
@@ -6708,6 +6727,8 @@ static sp_RbVal sp_poly_splice_range(sp_RbVal recv, sp_Range r, sp_RbVal src) {
     sp_int sfirst = r.first;
     if (sfirst == INTPTR_MIN) sfirst = 0;
     else if (sfirst < 0) sfirst += slen;
+    /* a start outside the String is the RangeError, naming the Range */
+    if (sfirst < 0 || sfirst > slen) sp_raise_cls("RangeError", sp_sprintf("%s out of range", sp_range_str(r)));
     sp_int slen2;
     if (r.last == INTPTR_MAX) { slen2 = slen - sfirst; if (slen2 < 0) slen2 = 0; }
     else {
@@ -10997,6 +11018,7 @@ static sp_RbVal sp_poly_arr_widen_and_set(sp_RbVal v, sp_int idx, sp_RbVal val) 
      caller to reassign to the poly slot (sp_poly_arr_set is a no-op on a
      string, silently dropping the mutation) (#3172). */
   if (v.tag == SP_TAG_STR) {
+    if (v.v.s && sp_str_is_frozen_val(v.v.s) && sp_poly_holds_str(val)) sp_str_frozen_store_index(v.v.s, idx, 1);
     if (v.v.s && sp_str_is_frozen_val(v.v.s)) sp_raise_frozen_str(v.v.s);   /* #6328 */
     const char *rep = (val.tag == SP_TAG_STR) ? (val.v.s ? val.v.s : sp_str_empty)
                                               : sp_poly_to_s(val);
