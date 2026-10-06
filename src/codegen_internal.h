@@ -228,6 +228,12 @@ int subtree_may_run_proc(Compiler *c, int id);
    -- variable and literal reads, scalar arithmetic, typed-array reads and
    plain field reads, all the way down (codegen_call.c)? */
 int subtree_is_pure_read(Compiler *c, int id);
+/* Is the receiver an `outer[i]` whose slot a `[]=` or a splice on it stores
+   back through (codegen_call_recv.c)? */
+int splice_recv_index_slot(Compiler *c, int recv, int *outer, int *oidx);
+/* The `outer[i]` receiver the String arm of a `[]=` dispatch reads from the
+   dispatch's temp, or -1 (codegen_call.c). */
+extern int g_aset_temp_recv;
 /* Is the call a reader the emitter lowers to a plain field read? *allocates is
    set when the read builds a copy (a shared String slot). codegen_call.c */
 int call_is_field_read(Compiler *c, int id, int *allocates);

@@ -7500,6 +7500,175 @@ int emit_poly_default_blk_arm(Compiler *c, int id, const char *name, int argc, c
   return 1;
 }
 
+/* the `outer[i]` receiver emit_poly_aset_string reads from the dispatch's temp */
+int g_aset_temp_recv = -1;
+
+/* Is the operand proven to run none of the program's code and to store
+   nothing: a pure read (subtree_is_pure_read), a String literal, or an
+   interpolation of pure reads with no call in them that the builtin renders
+   -- a String, which is used as it stands; an Integer, a Float or a Symbol
+   whose class the program gives no to_s (emit_interp's own test); true,
+   false and nil? An interpolated object's to_s or inspect, a `when`
+   object's ===, an `in` object's deconstruct run code with no call written,
+   so what is not named here is taken for code. */
+static int aset_operand_is_quiet(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  if (subtree_is_pure_read(c, id)) return 1;
+  if (nt_kind(nt, id) == NK_StringNode) return 1;
+  if (nt_kind(nt, id) != NK_InterpolatedStringNode) return 0;
+  int pn = 0;
+  const int *parts = nt_arr(nt, id, "parts", &pn);
+  for (int k = 0; k < pn; k++) {
+    if (nt_kind(nt, parts[k]) == NK_StringNode) continue;
+    if (nt_kind(nt, parts[k]) == NK_InterpolatedStringNode) {
+      if (!aset_operand_is_quiet(c, parts[k])) return 0;
+      continue;
+    }
+    if (nt_kind(nt, parts[k]) != NK_EmbeddedStatementsNode) return 0;
+    int st = nt_ref(nt, parts[k], "statements"), bn = 0;
+    const int *body = st >= 0 ? nt_arr(nt, st, "body", &bn) : NULL;
+    if (bn != 1 || subtree_has_side_effect(c, body[0]) || !subtree_is_pure_read(c, body[0])) return 0;
+    TyKind t = comp_ntype(c, body[0]);
+    const char *cn = t == TY_INT ? "Integer" : t == TY_FLOAT ? "Float" : t == TY_SYMBOL ? "Symbol" : NULL;
+    int ci = cn ? comp_class_index(c, cn) : -1;
+    if (ci >= 0 && comp_method_in_chain(c, ci, "to_s", NULL) >= 0) return 0;
+    if (!cn && t != TY_STRING && t != TY_STRBUF && t != TY_BOOL && t != TY_NIL) return 0;
+  }
+  return 1;
+}
+
+/* May the arm emit the key or the value a second time? A quiet one with no
+   call written in it; any other is read from the dispatch's temp, where it
+   ran once. */
+static int aset_emits_again(Compiler *c, int id) {
+  return !subtree_has_side_effect(c, id) && aset_operand_is_quiet(c, id);
+}
+
+/* Can code that runs between two reads of x, with or without a call written,
+   change what x reads? Any code can assign an instance variable or a class
+   variable, through a method it reaches; a local only by a write of its own,
+   which read_rebound_by sees, or through a proc that assigns it. */
+static int aset_read_is_open(Compiler *c, int x) {
+  const NodeTable *nt = c->nt;
+  if (x < 0) return 0;
+  switch (nt_kind(nt, x)) {
+    case NK_LocalVariableReadNode: {
+      const char *nm = nt_str(nt, x, "name");
+      LocalVar *lv = nm ? scope_local(comp_scope_of(c, x), nm) : NULL;
+      return !lv || (lv->is_cell && lv->proc_rebinds);
+    }
+    case NK_InstanceVariableReadNode: case NK_ClassVariableReadNode:
+      return 1;
+    default:
+      break;
+  }
+  for (int i = 0; i < nt_num_refs(nt, x); i++)
+    if (aset_read_is_open(c, nt_ref_at(nt, x, i))) return 1;
+  for (int i = 0; i < nt_num_arrs(nt, x); i++) {
+    int n = 0; const int *ids = nt_arr_at(nt, x, i, &n);
+    for (int j = 0; j < n; j++) if (aset_read_is_open(c, ids[j])) return 1;
+  }
+  return 0;
+}
+
+/* `x[k] = v` where a user class owns `[]=` and x holds a String at run time.
+   The dispatch's default arm stores through sp_poly_set_poly, which reaches a
+   container or a user object and leaves a String as it was: the assignment
+   was dropped. Ahead of the dispatch, a String takes the builtin emission of
+   the same call, as it does in a program with no such class; the default arm
+   then stores nothing into it. A String's index assignment builds a new
+   String, and the builtin emission stores it back where the receiver came
+   from -- a variable, a slot of an Array or a Hash -- so the receiver is
+   read from there again, not from the dispatch's temp tv. A receiver that
+   cannot be read twice (a call, or a slot whose outer may be an object with
+   its own `[]`) stays the temp: a shared String changes in place through it.
+   Only a store the builtin emission keeps is worth the test: an Integer or a
+   Range key, a boxed key that holds an Integer on a slot
+   (sp_poly_slot_set_key), and a value that can be a String. */
+static void emit_poly_aset_string(Compiler *c, int id, int recv, const char *name, int argc,
+                                  const int *argv, const int *atmp, const TyKind *atmp_ty,
+                                  int tv, Buf *b) {
+  const NodeTable *nt = c->nt;
+  if (argc != 2 || !name || !sp_streq(name, "[]=") || recv < 0 || !argv || g_pd_skip == id ||
+      g_n_argov + argc + 1 > MAX_ARG_OVERRIDE) return;
+  TyKind kt = comp_ntype(c, argv[0]), vt = comp_ntype(c, argv[1]);
+  if (vt != TY_STRING && vt != TY_STRBUF && vt != TY_POLY) return;
+  /* The dispatch's temps: an operand the arm does not emit again is read
+     from its temp, in its own type; a boxed key or value is tested through
+     its temp, and a typed value there for nil. */
+  for (int a = 0; a < argc; a++)
+    if (nt_kind(nt, argv[a]) == NK_SplatNode ||
+        (!aset_emits_again(c, argv[a]) && comp_ntype(c, argv[a]) != atmp_ty[a]))
+      return;
+  if ((kt == TY_POLY) != (atmp_ty[0] == TY_POLY)) return;
+  if (vt == TY_POLY ? atmp_ty[1] != TY_POLY : atmp_ty[1] != TY_STRING && atmp_ty[1] != TY_STRBUF) return;
+  int mark = g_n_argov, outer, oidx;
+  int bind = subtree_has_side_effect(c, recv), slot = 0;
+  if (splice_recv_index_slot(c, recv, &outer, &oidx)) {
+    TyKind ot = comp_ntype(c, outer);
+    bind = !(ty_is_array(ot) || ty_is_hash(ot)) ||
+           (subtree_has_side_effect(c, outer) && !subtree_is_pure_read(c, outer)) ||
+           (subtree_has_side_effect(c, oidx) && !subtree_is_pure_read(c, oidx));
+    slot = !bind;
+  }
+  if (kt != TY_INT && kt != TY_RANGE && !(slot && kt == TY_POLY)) return;
+  /* What the arm holds in no temp it reads again once the key and the value
+     have run: the receiver's variable, or its slot's Array and index, and a
+     key it emits again. A receiver read again must be quiet: a `case` on an
+     object there would run its === twice. And code in the key or the value,
+     written or not, can change what such a read names (`s[0] = (s = t; "X")`,
+     `@s[0] = "#{o}"` for a to_s that assigns @s,
+     `rows[i][0] = rows[i += 1][1]`), and beside a slot it may put another
+     element there: the store would go to another object or another place.
+     It then stays as the switch has it. */
+  if (!bind && !(slot ? aset_operand_is_quiet(c, outer) && aset_operand_is_quiet(c, oidx)
+                      : aset_operand_is_quiet(c, recv))) return;
+  for (int a = 0; a < argc && !bind; a++)
+    if (read_rebound_by(c, recv, argv[a]) ||
+        (!aset_operand_is_quiet(c, argv[a]) && (slot || aset_read_is_open(c, recv)))) return;
+  if (!subtree_has_side_effect(c, argv[0]) &&
+      (read_rebound_by(c, argv[0], argv[1]) ||
+       (!aset_operand_is_quiet(c, argv[1]) && aset_read_is_open(c, argv[0])))) return;
+  int sv_temp_recv = g_aset_temp_recv;
+  if (bind) { view_bind(recv, "_t%d", tv); g_aset_temp_recv = recv; }
+  for (int a = 0; a < argc; a++)
+    if (!aset_emits_again(c, argv[a])) view_bind(argv[a], "_t%d", atmp[a]);
+  int va = view_push_arm(id, g_prbd_skip, 1);
+  /* under the silent probe: an emission that refuses drops the test, not the
+     build. On the heap: the probe may longjmp back after a write to them */
+  Buf *pb = calloc(1, sizeof *pb), *nb = calloc(1, sizeof *nb);
+  Buf *sv_gpre = g_pre;
+  int sv_probe = g_unsup_probe, sv_open_defaults = g_open_defaults;
+  ConvHold *sv_hold = g_conv_hold;
+  jmp_buf sv_jb; memcpy(sv_jb, g_unsup_recover, sizeof(jmp_buf));
+  volatile int ok = 1;
+  EmitUnitState *sv_state = emit_state_snapshot();
+  g_pre = pb; g_unsup_probe = 1;
+  if (setjmp(g_unsup_recover) == 0) emit_expr(c, id, nb);
+  else ok = 0;
+  emit_state_release(sv_state, !ok);
+  memcpy(g_unsup_recover, sv_jb, sizeof(jmp_buf));
+  g_conv_hold = sv_hold; g_open_defaults = sv_open_defaults;
+  g_unsup_probe = sv_probe; g_pre = sv_gpre;
+  view_pop(c, va);
+  view_unbind(mark);
+  g_aset_temp_recv = sv_temp_recv;
+  if (ok && nb->p && strncmp(nb->p, "sp_raise", 8) != 0) {
+    /* The builtin emission stores any boxed value as its text and raises
+       TypeError for a boxed key that is no Integer, where CRuby raises
+       TypeError for the one and takes a String, a Regexp or a Range for the
+       other: only a value that holds a String and a key that holds an
+       Integer take the arm. */
+    buf_printf(b, "if ((_t%d.tag == SP_TAG_STR || sp_poly_is_strbuf(_t%d))", tv, tv);
+    if (vt == TY_POLY)
+      buf_printf(b, " && (_t%d.tag == SP_TAG_STR || sp_poly_is_strbuf(_t%d))", atmp[1], atmp[1]);
+    else buf_printf(b, " && _t%d", atmp[1]);
+    if (kt == TY_POLY) buf_printf(b, " && _t%d.tag == SP_TAG_INT", atmp[0]);
+    buf_printf(b, ") { %s (void)(%s); } ", pb->p && pb->len ? pb->p : "", nb->p);
+  }
+  free(nb->p); free(nb); free(pb->p); free(pb);
+}
+
 static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
   /* Re-entered from this very dispatch's builtin-container arm: decline, so
      the call falls through to the builtin emitters the arm is there to
@@ -7880,6 +8049,9 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
           buf_puts(b, ", SP_BUILTIN_SYM_POLY_HASH)); ");
         }
       }
+      /* `x[k] = v` on a String, stored ahead of the dispatch and outside the
+         region below: it names the receiver's variable */
+      emit_poly_aset_string(c, id, recv, name, argc, argv, atmp, atmp_ty, tv, b);
       /* Seed the result temp (a setter dispatch yields the argument's temp
          instead and declares none). For `fetch(key, default)` the seed IS the
          supplied default, so a receiver whose runtime variant matches no switch
