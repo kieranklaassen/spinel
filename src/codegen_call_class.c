@@ -1453,6 +1453,67 @@ int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
 }
 
 /* new and allocate on a Class value, a poly receiver, self's class or a constant, and Cls.exception */
+/* Can a value that is no class answer `new` in this program? In CRuby only
+   through a method of that name below a class: a def, an alias, an attribute
+   or a member, a method_missing, or a method defined under a name the source
+   does not spell. Answered from the source alone, once: 0 only where it has
+   none of them, and there `new` on a value that is no class can only raise. */
+static int new_lit_is(const NodeTable *nt, int n, const char *const *names) {
+  NodeKind k = nt_kind(nt, n);
+  const char *v = k == NK_SymbolNode ? nt_str(nt, n, "value") : k == NK_StringNode ? nt_str(nt, n, "content") : NULL;
+  for (int i = 0; v && names[i]; i++) if (sp_streq(v, names[i])) return 1;
+  return 0;
+}
+static int program_answers_new_below_class(Compiler *c) {
+  /* the names that make or reach a method under a name given as a value */
+  static const char *const by_name[] = { "define_method", "define_singleton_method", "alias_method",
+    "attr", "attr_reader", "attr_accessor", "def_delegator", "def_delegators",
+    "def_instance_delegator", "def_instance_delegators", "delegate", NULL };
+  static const char *const by_code[] = { "send", "__send__", "public_send", "instance_eval", "class_eval",
+    "module_eval", "instance_exec", "class_exec", "module_exec", "eval", NULL };
+  static const char *const own[] = { "new", "method_missing", "respond_to_missing?", NULL };
+  static const char *const lib[] = { "OpenStruct", "SimpleDelegator", "Delegator", "DelegateClass", NULL };
+  static const NodeTable *seen; static int ans;
+  const NodeTable *nt = c->nt;
+  if (seen == nt) return ans;
+  seen = nt; ans = 1;
+  for (int n = 0; n < nt->count; n++) {
+    NodeKind k = nt_kind(nt, n);
+    const char *nm = k == NK_DefNode || k == NK_CallNode || k == NK_ConstantReadNode ? nt_str(nt, n, "name") : NULL;
+    if (k == NK_InterpolatedSymbolNode) return ans;
+    if (k == NK_SymbolNode || k == NK_StringNode) {
+      if (new_lit_is(nt, n, own) || new_lit_is(nt, n, by_name) || new_lit_is(nt, n, by_code)) return ans;
+      continue;
+    }
+    if (k == NK_AliasMethodNode) {
+      int nn = nt_ref(nt, n, "new_name");
+      if (nn < 0 || nt_kind(nt, nn) != NK_SymbolNode) return ans;
+      continue;
+    }
+    if (!nm) continue;
+    if (k == NK_DefNode) { for (int i = 0; own[i]; i++) if (sp_streq(nm, own[i])) return ans; continue; }
+    for (int i = 0; lib[i]; i++) if (sp_streq(nm, lib[i])) return ans;
+    if (k != NK_CallNode) continue;
+    if (sp_streq(nm, "new=")) return ans;
+    int ac; const int *av = call_args(nt, n, &ac);
+    int names = 0, code = 0, rcv = nt_ref(nt, n, "receiver");
+    for (int i = 0; by_name[i]; i++) if (sp_streq(nm, by_name[i])) names = 1;
+    for (int i = 0; by_code[i]; i++) if (sp_streq(nm, by_code[i])) code = 1;
+    /* a Struct's or a Data's members are methods too */
+    if (rcv >= 0 && nt_kind(nt, rcv) == NK_ConstantReadNode && nt_str(nt, rcv, "name") &&
+        ((sp_streq(nm, "new") && sp_streq(nt_str(nt, rcv, "name"), "Struct")) ||
+         (sp_streq(nm, "define") && sp_streq(nt_str(nt, rcv, "name"), "Data")))) names = 1;
+    /* a name not written as a literal may be `new`; a literal one was read above */
+    for (int a = 0; names && a < ac; a++) {
+      NodeKind ak = nt_kind(nt, av[a]);
+      if (ak != NK_SymbolNode && ak != NK_StringNode && ak != NK_KeywordHashNode) return ans;
+    }
+    if (code && ac > 0 && nt_kind(nt, av[0]) != NK_SymbolNode) return ans;
+  }
+  ans = 0;
+  return ans;
+}
+
 int emit_call_new_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv) {
   /* .new WITH arguments on a Class value whose class is only known at run time.
      A local statically holding one class folds to that class and never gets
@@ -1747,7 +1808,14 @@ int emit_call_new_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const c
       atmp[a] = ++g_tmp;
       buf_printf(b, "sp_RbVal _t%d = ", atmp[a]); emit_boxed(c, argv[a], b); buf_puts(b, "; ");
     }
-    buf_printf(b, "sp_RbVal _t%d = sp_box_nil(); switch(_t%d.cls_id){", rt2, kt);
+    /* A boxed value that is no class has a class id all the same (nil reads
+       as 0, an instance as its class's) and built that class's object. Where
+       no such value can answer `new`, it switches on the id no class has and
+       takes the default, which raises CRuby's NoMethodError. */
+    if (program_answers_new_below_class(c))
+      buf_printf(b, "sp_RbVal _t%d = sp_box_nil(); switch(_t%d.cls_id){", rt2, kt);
+    else
+      buf_printf(b, "sp_RbVal _t%d = sp_box_nil(); switch(_t%d.tag == SP_TAG_CLASS ? _t%d.cls_id : SP_CLASS_NIL_ID){", rt2, kt, kt);
     CtorArityArms aerr = {0};
     for (int ci = 0; ci < c->nclasses; ci++) {
       if (is_builtin_reopen(c->classes[ci].name) || c->classes[ci].is_native_class) continue;
