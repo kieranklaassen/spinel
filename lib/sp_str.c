@@ -526,6 +526,10 @@ const char *sp_str_append_grow(const char *s, const char *t) {SP_GC_ROOT_STR(s);
   if (lb == 0) return s;
   int text_append = sp_str_is_binary(s) && !sp_str_is_binary(t) &&
                     !sp_str_ascii_only(t) && sp_str_ascii_only(s);
+  /* The other way round: bytes past ASCII from a binary String, appended to
+     text that has none, make the receiver binary, as `s + t` is. */
+  int bytes_append = sp_str_is_binary(t) && !sp_str_is_binary(s) &&
+                     !sp_str_ascii_only(t) && sp_str_ascii_only(s);
   unsigned char m = ((const unsigned char *)s)[-1];
   if (m == 0xfe || m == 0xfc) {
     sp_str_hdr *h = ((sp_str_hdr *)(s - 1)) - 1;
@@ -537,6 +541,7 @@ const char *sp_str_append_grow(const char *s, const char *t) {SP_GC_ROOT_STR(s);
       sp_str_lcache_drop(s);
       sp_str_set_len((char *)s, la + lb);
       if (text_append) sp_str_as_text((char *)s);
+      if (bytes_append) sp_str_mark_binary((char *)s);
       return s;
     }
   }
@@ -546,6 +551,7 @@ const char *sp_str_append_grow(const char *s, const char *t) {SP_GC_ROOT_STR(s);
   memcpy(r + la, t, lb);
   r[la + lb] = 0;
   sp_str_set_len(r, la + lb);
+  if (bytes_append) sp_str_mark_binary(r);
   /* Preserve BINARY when growing the receiver. A compatible text append to
      an ASCII-only binary receiver is the exception: text_append has already
      selected UTF-8, so do not mark the replacement buffer binary. */

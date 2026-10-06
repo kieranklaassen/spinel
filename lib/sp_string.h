@@ -148,6 +148,11 @@ static inline void sp_String_append_bin(sp_String*s,const char*t){
     s->binary=0;
     sp_str_as_text(s->data);
   }
+  /* The other way round: bytes past ASCII from a binary String, appended to
+     text that has none, make the buffer binary, as `s + t` is. */
+  else if (!s->binary && sp_str_is_binary(t) &&
+           !sp_str_ascii_only(t) && sp_str_ascii_only(s->data))
+    s->binary=1;
   sp_fd_append_len(s,t,(int64_t)sp_str_byte_len(t));
 }
 /* Handle wrap for CODEGEN-emitted sources only: every spinel-emitted string
