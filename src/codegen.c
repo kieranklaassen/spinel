@@ -2014,12 +2014,23 @@ static int is_heavy_brk_call(Compiler *c, int id) {
   return call_breaks(c, id) && !brk_wrapper_surely_light(c, id);
 }
 
+/* `catch { }` runs its block under a setjmp a `throw` comes back to, so a
+   local written in the block before the throw is read after a longjmp, as
+   one written in a begin is. */
+static int is_catch_call(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  if (nt_kind(nt, id) != NK_CallNode || nt_ref(nt, id, "receiver") >= 0) return 0;
+  const char *nm = nt_str(nt, id, "name");
+  return nm && sp_streq(nm, "catch") && nt_ref(nt, id, "block") >= 0 && !bare_call_class_owned(c, id);
+}
+
 /* A node that emits a setjmp around its own subtree: a begin, an
-   `x rescue y` modifier, a `loop {}`, or a heavy break-carrying call. */
+   `x rescue y` modifier, a `loop {}`, a `catch {}`, or a heavy
+   break-carrying call. */
 static int is_setjmp_construct(Compiler *c, int id) {
   NodeKind k = nt_kind(c->nt, id);
   return k == NK_BeginNode || k == NK_RescueModifierNode ||
-         is_stopiter_loop(c, id) || is_heavy_brk_call(c, id);
+         is_stopiter_loop(c, id) || is_heavy_brk_call(c, id) || is_catch_call(c, id);
 }
 
 /* Does scope `si` itself emit a setjmp: one of the constructs above, or a
@@ -2048,9 +2059,9 @@ static int is_rescuing_yield_call(Compiler *c, int id) {
 }
 
 /* Does scope index `si` contain a begin/rescue, a rescue modifier, a
-   `loop {}`, a heavy (real-setjmp) break-carrying call, or a block spliced
-   under an inlined method's rescue (so its locals need volatile across the
-   setjmp it emits)? */
+   `loop {}`, a `catch {}`, a heavy (real-setjmp) break-carrying call, or a
+   block spliced under an inlined method's rescue (so its locals need
+   volatile across the setjmp it emits)? */
 int scope_has_begin(Compiler *c, int si) {
   if (scope_emits_setjmp(c, si)) return 1;
   int nids = 0; const int *ids = cg_scope_nodes(c, si, &nids);
