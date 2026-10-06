@@ -2061,12 +2061,44 @@ static int scope_emits_setjmp(Compiler *c, int si) {
   return 0;
 }
 
+/* Does the yielding method `mi` run its block under a setjmp: one of its
+   own, or that of a method it hands the block on to (`guarded { yield }`,
+   `guarded(&blk)`), however many methods away? Each such method is spliced
+   into the one above it, so the setjmp ends up in the frame of the first
+   caller. Settled once for a node table, to a fixed point: a method joins
+   once one it hands its block to has. */
+static int yield_method_guards(Compiler *c, int mi) {
+  static const NodeTable *for_nt = NULL;
+  static int for_scopes = -1;
+  static char *in = NULL;
+  if (for_nt != c->nt || for_scopes != c->nscopes) {
+    for_nt = c->nt; for_scopes = c->nscopes;
+    free(in);
+    in = (char *)calloc((size_t)c->nscopes + 1, 1);
+    for (int si = 0; in && si < c->nscopes; si++)
+      if (c->scopes[si].yields && scope_emits_setjmp(c, si)) in[si] = 1;
+    for (int grew = in != NULL; grew; ) {
+      grew = 0;
+      for (int si = 0; si < c->nscopes; si++) {
+        if (in[si] || !c->scopes[si].yields) continue;
+        int nids = 0; const int *ids = cg_scope_nodes(c, si, &nids);
+        for (int k = 0; k < nids && !in[si]; k++) {
+          if (nt_kind(c->nt, ids[k]) != NK_CallNode || nt_ref(c->nt, ids[k], "block") < 0) continue;
+          int to = call_user_yield_mi(c, ids[k]);
+          if (to >= 0 && in[to]) { in[si] = 1; grew = 1; }
+        }
+      }
+    }
+  }
+  return in && mi >= 0 && mi < c->nscopes && in[mi];
+}
+
 /* A block call to a yielding user method that is inlined here, and whose
-   body sets up a setjmp of its own (a rescue around the yield): the block is
-   spliced under that setjmp in this frame, so a local the block writes before
-   the raise is as indeterminate after the rescue as one a begin here writes.
-   The proc and lowered forms call the block as a proc, whose captures are
-   heap cells. */
+   body sets up a setjmp of its own (a rescue around the yield) or hands the
+   block on to one that does: the block is spliced under that setjmp in this
+   frame, so a local the block writes before the raise is as indeterminate
+   after the rescue as one a begin here writes. The proc and lowered forms
+   call the block as a proc, whose captures are heap cells. */
 static int is_rescuing_yield_call(Compiler *c, int id) {
   if (nt_kind(c->nt, id) != NK_CallNode) return 0;
   int blk = nt_ref(c->nt, id, "block");
@@ -2074,7 +2106,7 @@ static int is_rescuing_yield_call(Compiler *c, int id) {
   int mi = call_user_yield_mi(c, id);
   if (mi < 0) return 0;
   Scope *m = &c->scopes[mi];
-  return !m->is_proc_form && !m->is_lowered_yield && scope_emits_setjmp(c, mi);
+  return !m->is_proc_form && !m->is_lowered_yield && yield_method_guards(c, mi);
 }
 
 /* Does scope index `si` contain a begin/rescue, a rescue modifier, a
