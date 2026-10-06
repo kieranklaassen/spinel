@@ -1564,6 +1564,7 @@ sp_PolyArray *sp_str_chars_poly(const char *s) {SP_GC_ROOT_STR(s);
     int n = bin ? 1 : sp_utf8_advance(p);
     if (p + n > end) n = (int)(end - p);
     char *c = sp_str_alloc(n); memcpy(c, p, n); c[n] = 0;
+    if (bin) sp_str_mark_binary(c);
     sp_PolyArray_push(a, sp_box_str(c));
     p += n;
   }
