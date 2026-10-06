@@ -479,6 +479,27 @@ static void pk_str_bytes_directive(char spec, int64_t count, const char *s, size
 /* A typed array's nil is the slot's sentinel (SP_INT_NIL, the Float NaN
    payload), and nil converts to neither number: CRuby raises the
    conversion's TypeError where these packed the sentinel's bits. */
+/* What pack answers is UTF-8 text where its template holds a U and no
+   directive but U, m, M and u, as in CRuby; with any other directive it is
+   bytes. The walk is the one the pack entries make: the same three blanks,
+   the same count. */
+static int pk_fmt_utf8_walk(const char *fmt) {
+  int u = 0;
+  for (const char *p = fmt; *p; ) {
+    char spec = *p++;
+    if (spec == ' ' || spec == '\t' || spec == '\n') continue;
+    if (spec == 'U') u = 1;
+    else if (spec != 'm' && spec != 'M' && spec != 'u') return 0;
+    pk_parse_count(&p);
+  }
+  return u;
+}
+/* most templates say bytes with their first directive: no walk for them */
+static inline int pk_fmt_utf8(const char *fmt) {
+  while (*fmt == ' ' || *fmt == '\t' || *fmt == '\n') fmt++;
+  if (*fmt != 'U' && *fmt != 'm' && *fmt != 'M' && *fmt != 'u') return 0;
+  return pk_fmt_utf8_walk(fmt);
+}
 static int pk_int_directive_consumes(char spec) {
   return spec && strchr("CcnNvVsSlLqQU", spec) != NULL;   /* the ones pk_int_directive packs */
 }
@@ -551,7 +572,7 @@ const char *sp_IntArray_pack(sp_IntArray *arr, const char *fmt) {SP_GC_ROOT(arr)
   char *r = sp_str_alloc(len);
   memcpy(r, buf, len);
   sp_str_set_len(r, len);
-  sp_str_mark_binary(r);   /* pack answers ASCII-8BIT bytes: inspect them \xNN */
+  if (!pk_fmt_utf8(fmt)) sp_str_mark_binary(r);   /* pack answers ASCII-8BIT bytes: inspect them \xNN */
   free(buf);
   return r;
 }
@@ -610,7 +631,7 @@ const char *sp_FloatArray_pack(sp_FloatArray *arr, const char *fmt) {
   char *r = sp_str_alloc(len);
   memcpy(r, buf, len);
   sp_str_set_len(r, len);
-  sp_str_mark_binary(r);   /* pack answers ASCII-8BIT bytes: inspect them \xNN */
+  if (!pk_fmt_utf8(fmt)) sp_str_mark_binary(r);   /* pack answers ASCII-8BIT bytes: inspect them \xNN */
   free(buf);
   return r;
 }
@@ -712,7 +733,7 @@ const char *sp_PolyArray_pack(sp_PolyArray *arr, const char *fmt) {SP_GC_ROOT(ar
   char *r = sp_str_alloc(len);
   memcpy(r, buf, len);
   sp_str_set_len(r, len);
-  sp_str_mark_binary(r);   /* pack answers ASCII-8BIT bytes: inspect them \xNN */
+  if (!pk_fmt_utf8(fmt)) sp_str_mark_binary(r);   /* pack answers ASCII-8BIT bytes: inspect them \xNN */
   free(buf);
   return r;
 }
@@ -777,7 +798,7 @@ const char *sp_StrArray_pack(sp_StrArray *arr, const char *fmt) {
   char *r = sp_str_alloc(len);
   memcpy(r, buf, len);
   sp_str_set_len(r, len);
-  sp_str_mark_binary(r);   /* pack answers ASCII-8BIT bytes: inspect them \xNN */
+  if (!pk_fmt_utf8(fmt)) sp_str_mark_binary(r);   /* pack answers ASCII-8BIT bytes: inspect them \xNN */
   free(buf);
   return r;
 }
