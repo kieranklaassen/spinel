@@ -5,6 +5,7 @@
 #include <string.h>
 #include "repr.h"
 #include "codegen_internal.h"
+#include "share.h"
 
 static int repr_sealed_flag;
 
@@ -30,6 +31,24 @@ static ReprKind repr_kind_of_type(const Compiler *c, TyKind t) {
     if (cid >= 0 && cid < c->nclasses && c->classes[cid].is_value_type) return RK_VOBJ;
   }
   return RK_PTR;
+}
+
+/* The layout of a value stored as t that its type names and its kind does
+   not: every Array and Hash is a pointer, and which container it points to
+   -- what an Array holds its elements as (ty_array_elem), what a Hash
+   holds its keys and its values as (its variant's row: ty_hash_key,
+   ty_hash_val) -- decides the helpers a call on it takes and the C type
+   they name; an Integer is an sp_int scalar, and one held big an
+   sp_Bigint * pointer, which takes the Bignum helpers. */
+static void repr_layout(Repr *r, TyKind t) {
+  r->elem = ty_is_array(t) || ty_is_obj_array(t) ? ty_array_elem(t) : TY_UNKNOWN;
+  r->key = ty_hash_key(t);
+  r->val = ty_hash_val(t);
+  r->big = t == TY_BIGINT;
+}
+
+int repr_hash_is(Repr r, TyKind key, TyKind val) {
+  return r.key != TY_UNKNOWN && r.key == key && r.val == val;
 }
 
 /* an object whose class some other class inherits from: its static type is
@@ -78,6 +97,8 @@ static int repr_strbuf_src(const Compiler *c, int node, TyKind t) {
   const NodeTable *nt = c->nt;
   NodeKind k = nt_kind(nt, node);
   if (t == TY_STRING) {
+    /* a global holding the handle (--share-strings): its read boxes it */
+    if (repr_static_read_kind(k)) return repr_static_share(c, node) ? RS_HANDLE : RS_NONE;
     /* a local promoted to the handle after the node types were final */
     if (k != NK_LocalVariableReadNode) return RS_NONE;
     const char *ln = nt_str(nt, node, "name");
@@ -100,6 +121,9 @@ static int repr_strbuf_src(const Compiler *c, int node, TyKind t) {
     int iv = cid >= 0 ? comp_ivar_index(&c->classes[cid], nm) : -1;
     if (iv >= 0 && c->classes[cid].ivar_types[iv] == TY_STRBUF) return RS_HANDLE;
   }
+  /* a global holding the handle (--share-strings) */
+  if ((repr_static_read_kind(k) || k == NK_GlobalVariableWriteNode) && repr_static_share(c, node))
+    return RS_HANDLE;
   /* an ivar write's value is the slot */
   if (k == NK_InstanceVariableWriteNode) return RS_HANDLE;
   /* an element a boxed container hands out is a boxed handle already */
@@ -180,7 +204,7 @@ int repr_local_nullable_int(Compiler *c, int node) {
 Repr repr_of(const Compiler *c, int node) {
   Repr r;
   memset(&r, 0, sizeof r);
-  r.ty = r.as_ty = r.narrowed = TY_UNKNOWN;
+  r.ty = r.as_ty = r.narrowed = r.elem = r.key = r.val = TY_UNKNOWN;
   r.kind = RK_NONE;
   if (node < 0 || node >= c->nt->count) return r;
   r.ty = c->ntype[node];
@@ -190,21 +214,28 @@ Repr repr_of(const Compiler *c, int node) {
   r.demand = c->strbuf_handle_demand[node] != 0;
   r.read_raw = c->strbuf_read_raw ? c->strbuf_read_raw[node] != 0 : 0;
   r.poly_lift = c->poly_strbuf_lift ? c->poly_strbuf_lift[node] != 0 : 0;
+  r.nil_tested = c->nil_tested ? c->nil_tested[node] != 0 : 0;
+  r.nil_cold = c->nil_tested ? c->nil_tested[node] == 2 : 0;
   /* a node is boxed as the type it is stored as; a nil-guard narrowing is
      read where the value is used, not where it is boxed */
   TyKind kt = r.as_ty;
   r.kind = (unsigned char)repr_kind_of_type(c, kt);
   r.dyn_cls = repr_dyn_cls(c, kt);
+  repr_layout(&r, kt);
   if (repr_nil_scalar(c, node, kt)) {
     r.kind = RK_SENTINEL;
     r.may_nil = r.nil_scalar = 1;
   }
   r.strbuf_src = (unsigned char)repr_strbuf_src(c, node, kt);
+  r.share = (unsigned)repr_static_share(c, node);
   if (r.strbuf_src == RS_SLOT_POLY) r.kind = RK_BOXED;
   else if (r.strbuf_src != RS_NONE) r.kind = RK_STRBUF;
   /* a user object the nil fact says may be nil (analyze_nil.c, #7444); a
-     by-value one too, whose layout has no nil to hold it in */
-  if ((r.kind == RK_PTR || r.kind == RK_VOBJ) && ty_is_object(kt) && nil_fact_node(c, node))
+     by-value one too, whose layout has no nil to hold it in; a builtin
+     pointer (a String, an Array, a Hash, an IO) whose NULL is its nil, and
+     a shared String's handle */
+  if ((r.kind == RK_PTR || r.kind == RK_VOBJ || r.kind == RK_STRBUF) && nil_fact_tracked(kt) &&
+      nil_fact_node(c, node))
     r.may_nil = 1;
   return r;
 }
@@ -234,8 +265,10 @@ ReprForm repr_box_form(const Compiler *c, Repr r) {
   }
   (void)c;
   if (t == TY_STRING) return RF_STR;
-  if (t == TY_BIGINT) return RF_BIGINT;
-  if (ty_is_ptr_array(t)) return RF_PTR_ARRAY;
+  if (r.big) return RF_BIGINT;
+  /* an Array of pointers (objects, nested Arrays) is stamped with what its
+     elements are */
+  if (ty_is_object(r.elem) || ty_is_array(r.elem)) return RF_PTR_ARRAY;
   if (ty_is_object(t)) return r.dyn_cls ? RF_NULLABLE_DYN : RF_NULLABLE;
   return RF_NULLABLE;
 }
@@ -387,30 +420,39 @@ void repr_check_ask(const Compiler *c, int node) {
   if (node >= 0 && node < c->nt->count) (void)repr_of(c, node);
 }
 
+ReprKind repr_slot_kind(const Compiler *c, const LocalVar *lv) {
+  if (!lv) return RK_NONE;
+  /* an Integer or Float slot some write leaves nil in: its sentinel */
+  if ((lv->type == TY_INT || lv->type == TY_FLOAT) &&
+      (lv->nullable_int || lv->box_nullable || lv->maybe_unset))
+    return RK_SENTINEL;
+  return repr_kind_of_type(c, lv->type);
+}
 Repr repr_of_slot(const Compiler *c, const LocalVar *lv) {
   Repr r;
   memset(&r, 0, sizeof r);
-  r.ty = r.as_ty = r.narrowed = TY_UNKNOWN;
+  r.ty = r.as_ty = r.narrowed = r.elem = r.key = r.val = TY_UNKNOWN;
   r.kind = RK_NONE;
   if (!lv) return r;
   r.ty = r.as_ty = lv->type;
-  ReprKind k = repr_kind_of_type(c, lv->type);
-  /* an Integer or Float slot some write leaves nil in: its sentinel */
-  if ((lv->type == TY_INT || lv->type == TY_FLOAT) &&
-      (lv->nullable_int || lv->box_nullable || lv->maybe_unset)) {
-    k = RK_SENTINEL;
-    r.may_nil = 1;
-  }
+  repr_layout(&r, lv->type);
+  ReprKind k = repr_slot_kind(c, lv);
+  if (k == RK_SENTINEL) r.may_nil = 1;
   /* a `||=` can read the slot before any write: nil until then */
   if (lv->or_written) r.may_nil = 1;
-  /* an object slot the nil fact says may hold nil */
-  if (ty_is_object(lv->type) && lv->obj_may_nil) r.may_nil = 1;
+  /* an object slot, or a builtin pointer's, the nil fact says may hold nil */
+  if (nil_fact_tracked(lv->type) && lv->obj_may_nil) r.may_nil = 1;
   /* str_shared refines TY_STRBUF; it can outlive that storage type */
   if (lv->type == TY_STRBUF && lv->str_shared) r.handle = 1;
+  /* under the rule, that handle is the one it assigned */
+  r.share = r.handle && c->share_strings;
+  r.elems_handle = lv->elems_shared && lv->type == TY_POLY_ARRAY;
   r.kind = (unsigned char)k;
   r.dyn_cls = repr_dyn_cls(c, lv->type);
   return r;
 }
+
+static void repr_share_seal(Compiler *c);
 
 /* Method and constructor signatures pass a kept &block as sp_Proc *.
    Check the slot as well as expression boxing: a read can infer Proc even
@@ -430,7 +472,446 @@ static void repr_check_block_params(Compiler *c) {
 
 void repr_seal(Compiler *c) {
   if (g_repr_check) repr_check_block_params(c);
+  if (c->share_strings) repr_share_seal(c);
   repr_sealed_flag = 1;
 }
 
 int repr_sealed(void) { return repr_sealed_flag; }
+
+/* ---- --share-strings (#6765) ---- */
+
+int repr_static_read_kind(NodeKind k) {
+  return k == NK_GlobalVariableReadNode || k == NK_ConstantReadNode || k == NK_ConstantPathNode ||
+         k == NK_ClassVariableReadNode;
+}
+static int repr_const_node(NodeKind k) {
+  return k == NK_ConstantReadNode || k == NK_ConstantPathNode || k == NK_ConstantWriteNode || k == NK_ConstantOrWriteNode ||
+         k == NK_ConstantAndWriteNode || k == NK_ConstantOperatorWriteNode;
+}
+static int repr_cvar_node(NodeKind k) {
+  return k == NK_ClassVariableReadNode || k == NK_ClassVariableWriteNode || k == NK_ClassVariableOrWriteNode ||
+         k == NK_ClassVariableAndWriteNode || k == NK_ClassVariableOperatorWriteNode;
+}
+/* The class variable node `node` names, by the read emitter's rule
+   (cvar_global_slot): its owning class and index, or 0. */
+static int repr_cvar_slot(const Compiler *c, int node, int *cid, int *idx) {
+  const char *nm = nt_str(c->nt, node, "name");
+  Scope *s = comp_scope_of((Compiler *)c, node);
+  if (!nm || !s) return 0;
+  int k = s->class_id;
+  if (k < 0 && c->node_cbody && node < c->node_cap) k = c->node_cbody[node];
+  if (k < 0) k = comp_class_index((Compiler *)c, "Toplevel");
+  if (k < 0) return 0;
+  k = comp_cvar_owner((Compiler *)c, k, nm);
+  int i = comp_cvar_index(&c->classes[k], nm);
+  if (i < 0) return 0;
+  *cid = k; *idx = i;
+  return 1;
+}
+static LocalVar *repr_static_var(const Compiler *c, int node) {
+  const NodeTable *nt = c->nt;
+  NodeKind k = nt_kind(nt, node);
+  if (k == NK_GlobalVariableReadNode || k == NK_GlobalVariableWriteNode || k == NK_GlobalVariableOrWriteNode ||
+      k == NK_GlobalVariableAndWriteNode || k == NK_GlobalVariableOperatorWriteNode) {
+    const char *gn = nt_str(nt, node, "name");
+    const char *rn = gn && gn[0] == '$' ? comp_resolve_gvar((Compiler *)c, gn + 1) : NULL;
+    return rn ? comp_gvar((Compiler *)c, rn) : NULL;
+  }
+  if (repr_const_node(k)) {
+    const char *cn = nt_str(nt, node, "name");
+    return cn ? comp_const((Compiler *)c, cn) : NULL;
+  }
+  return NULL;
+}
+/* repr_of's `share` for a read or write node of a global, a constant or a
+   class variable: its slot's (only the rule makes one the handle). The
+   handle is an sp_String * slot: its kind is asked first, as repr_of asks
+   this of every node and the slot's whole Repr scans the classes for an
+   object's dyn_cls. */
+int repr_static_share(const Compiler *c, int node) {
+  if (node < 0 || !c->share_strings) return 0;
+  if (repr_cvar_node(nt_kind(c->nt, node))) {
+    int cid, idx;
+    return repr_cvar_slot(c, node, &cid, &idx) && repr_cvar_kind(c, cid, idx) == RK_STRBUF &&
+           repr_of_cvar(c, cid, idx).share;
+  }
+  LocalVar *lv = repr_static_var(c, node);
+  return lv && repr_slot_kind(c, lv) == RK_STRBUF && repr_of_slot(c, lv).share;
+}
+int repr_handle_static_ref(const Compiler *c, int node, char *out, size_t cap) {
+  if (!repr_static_share(c, node)) return 0;
+  NodeKind k = nt_kind(c->nt, node);
+  if (repr_cvar_node(k)) {
+    int cid, idx;
+    repr_cvar_slot(c, node, &cid, &idx);
+    snprintf(out, cap, "cvar_%s_%s", c->classes[cid].name, c->classes[cid].cvars[idx] + 2);
+  }
+  else snprintf(out, cap, "%s_%s", repr_const_node(k) ? "cst" : "gv", repr_static_var(c, node)->name);
+  return 1;
+}
+
+int repr_str_class_shares(unsigned flags, int holders) {
+  if (!(flags & SHF_MUT)) return 0;
+  return holders >= 2 || (flags & (SHF_UNKNOWN | SHF_INDIRECT | SHF_MULTI)) != 0;
+}
+
+int repr_str_shares(const Compiler *c, int holder) {
+  if (!c->share_strings || !c->share || holder < 0) return 0;
+  return repr_str_class_shares(share_class_flags(c, holder), share_class_holders(c, holder));
+}
+
+int repr_str_elems_share(const Compiler *c, int holder) {
+  if (!c->share_strings || !c->share || holder < 0) return 0;
+  int e = share_elem_holder(c, holder);
+  return e >= 0 && repr_str_class_shares(share_elem_flags(c, e), share_elem_holders(c, e));
+}
+
+/* The representation of share holder h's slot, now that the analysis is
+   final: a box (RK_BOXED) holds whatever is stored, the handle included;
+   `share` says the slot is the handle. A byref-out local is not (its slot
+   is the caller's), and a class variable is every class's of the name (the
+   facts key it by name alone): boxed if one is, and the handle only if
+   every String one is. ty is TY_UNKNOWN for a holder with no slot. */
+static Repr repr_of_holder(Compiler *c, const ShareHolder *h) {
+  Repr r;
+  memset(&r, 0, sizeof r);
+  r.ty = r.as_ty = TY_UNKNOWN;
+  switch (h->kind) {
+  case SHK_LOCAL: {
+    LocalVar *lv = &c->scopes[h->scope].locals[h->local];
+    r = repr_of_slot(c, lv);
+    if (lv->byref_out) r.share = 0;
+    break;
+  }
+  case SHK_IVAR: {
+    int iv = comp_ivar_index(&c->classes[h->cid], h->name);
+    if (iv >= 0) r = repr_of_ivar(c, h->cid, iv);
+    break;
+  }
+  case SHK_GVAR: {
+    LocalVar *gv = comp_gvar(c, h->name[0] == '$' ? h->name + 1 : h->name);
+    if (gv) r = repr_of_slot(c, gv);
+    break;
+  }
+  case SHK_CONST: {
+    LocalVar *cv = h->name ? comp_const(c, h->name) : NULL;
+    if (cv) r = repr_of_slot(c, cv);
+    break;
+  }
+  case SHK_CVAR:
+    for (int k = 0; k < c->nclasses; k++) {
+      int i = h->name ? comp_cvar_index(&c->classes[k], h->name) : -1;
+      if (i < 0) continue;
+      Repr ck = repr_of_cvar(c, k, i);
+      if (ck.ty == TY_POLY) { ck.kind = RK_BOXED; return ck; }
+      if (ck.share) r = ck;
+      else if (ck.ty == TY_STRING || ck.ty == TY_STRBUF) return ck;
+    }
+    break;
+  default:
+    break;
+  }
+  if (r.ty == TY_POLY) r.kind = RK_BOXED;
+  return r;
+}
+
+/* A container holder whose elements share: are they boxed (a box holds the
+   handle), or typed Strings (`const char *` elements)? 1, 0, or -1 for a
+   holder that is no container. */
+static int repr_share_elems_carried(Compiler *c, const ShareHolder *h) {
+  TyKind t = TY_UNKNOWN;
+  if (h->kind == SHK_LOCAL) t = c->scopes[h->scope].locals[h->local].type;
+  else if (h->kind == SHK_IVAR) {
+    int iv = comp_ivar_index(&c->classes[h->cid], h->name);
+    if (iv < 0) return -1;
+    t = c->classes[h->cid].ivar_types[iv];
+  }
+  if (!ty_is_array(t) && !ty_is_hash(t)) return -1;
+  return t == TY_STR_ARRAY || t == TY_STR_STR_HASH || t == TY_INT_STR_HASH ? 0 : 1;
+}
+
+static const char *repr_share_kind_name(int kind) {
+  switch (kind) {
+  case SHK_LOCAL: return "variable";
+  case SHK_IVAR:  return "instance variable";
+  case SHK_GVAR:  return "global variable";
+  case SHK_CVAR:  return "class variable";
+  case SHK_CONST: return "constant";
+  default:        return "value";
+  }
+}
+
+/* The analysis is final: every holder the rule shares has to hold the
+   handle now. One whose kind cannot carry it yet is refused, naming it,
+   rather than compiled holding a copy. SPINEL_SHARE_STATS=1 reports what
+   the rule decided. */
+static void repr_share_seal(Compiler *c) {
+  share_facts_build(c);
+  int nh = share_holder_count(c);
+  int bad = -1, bad_elems = 0;
+  int n_str = 0, n_shared = 0, n_kind[SHK_UNKNOWN + 1] = {0}, n_param = 0, n_elems = 0;
+  int n_route_only = 0, n_unknown = 0;
+  const char *stats = getenv("SPINEL_SHARE_STATS");
+  struct ShareFacts *closed = stats ? share_facts_build_closed(c) : NULL;
+  for (int h = 0; h < nh; h++) {
+    const ShareHolder *sh = share_holder(c, h);
+    int ec = repr_share_elems_carried(c, sh);
+    if (ec >= 0 && repr_str_elems_share(c, h)) {
+      n_elems++;
+      if (!ec && bad < 0) { bad = h; bad_elems = 1; }
+    }
+    /* does the holder hold the shared handle (a box holds what is stored,
+       the handle included)? -1 for one that holds no String */
+    Repr hr = repr_of_holder(c, sh);
+    int carried = hr.kind == RK_BOXED || hr.share ? 1 : hr.ty == TY_STRING || hr.ty == TY_STRBUF ? 0 : -1;
+    if (carried < 0) continue;
+    n_str++;
+    int shares = repr_str_shares(c, h);
+    if (!shares) {
+      /* a handle a route rule made that the rule does not ask for */
+      if (carried && sh->kind != SHK_CVAR && sh->kind != SHK_CONST &&
+          !(sh->kind == SHK_LOCAL && c->scopes[sh->scope].locals[sh->local].type == TY_POLY) &&
+          !(sh->kind == SHK_IVAR && c->classes[sh->cid].ivar_types[comp_ivar_index(&c->classes[sh->cid], sh->name)] == TY_POLY) &&
+          !(sh->kind == SHK_GVAR && carried == 1 && comp_gvar(c, sh->name[0] == '$' ? sh->name + 1 : sh->name)->type == TY_POLY))
+        n_route_only++;
+      continue;
+    }
+    n_shared++;
+    n_kind[sh->kind]++;
+    if (sh->kind == SHK_LOCAL && c->scopes[sh->scope].locals[sh->local].is_param) n_param++;
+    if (closed && !share_closed_shares(closed, sh)) n_unknown++;
+    if (!carried && bad < 0) bad = h;
+  }
+  /* a container literal no holder names, whose elements the rule shares
+     only once the facts settle after the fixpoint, kept a typed String
+     form: its elements would be copies */
+  int bad_lit = -1;
+  for (int n = 0; n < c->nt->count && bad_lit < 0; n++) {
+    NodeKind k = nt_kind(c->nt, n);
+    if (k != NK_ArrayNode && k != NK_HashNode) continue;
+    TyKind t = c->ntype[n];
+    int ne = 0;
+    nt_arr(c->nt, n, "elements", &ne);
+    /* an empty one holds no String yet: what is stored later goes through
+       the holder that keeps it; one nothing can reach again once its
+       expression is done (`p [a, b]`) keeps no name for its copies */
+    if (ne > 0 && (t == TY_STR_ARRAY || t == TY_STR_STR_HASH || t == TY_INT_STR_HASH) && share_node_elems_share(c, n) &&
+        share_node_anchored(c, n))
+      bad_lit = n;
+  }
+  if (stats && stats[0] == '3') share_dump_unknown_mutations(c);
+  if (stats && stats[0] == '2')
+    for (int h = 0; h < nh; h++) {
+      const ShareHolder *sh = share_holder(c, h);
+      const char *nm = sh->kind == SHK_LOCAL ? c->scopes[sh->scope].locals[sh->local].name : sh->name;
+      fprintf(stderr, "share-holder: %s %s%s%s flags=%u holders=%d shares=%d elems-share=%d\n",
+              repr_share_kind_name(sh->kind), nm ? nm : "?",
+              sh->kind == SHK_LOCAL ? " in " : "",
+              sh->kind == SHK_LOCAL ? (c->scopes[sh->scope].name ? c->scopes[sh->scope].name : "<top>") : "",
+              share_class_flags(c, h), share_class_holders(c, h), repr_str_shares(c, h),
+              repr_str_elems_share(c, h));
+    }
+  if (stats) {
+    fprintf(stderr, "share-stats: string-holders=%d shared=%d local=%d (param=%d) ivar=%d gvar=%d "
+            "cvar=%d const=%d containers=%d via-unknown=%d route-only=%d refused=%d borrows=%d\n",
+            n_str, n_shared, n_kind[SHK_LOCAL], n_param, n_kind[SHK_IVAR], n_kind[SHK_GVAR],
+            n_kind[SHK_CVAR], n_kind[SHK_CONST], n_elems, n_unknown, n_route_only, bad >= 0,
+            c->share_borrows);
+    share_facts_drop(closed);
+  }
+  /* a route master refuses, left to the rule: refused as master does
+     unless the final facts share its String */
+  share_routes_check(c);
+  if (bad < 0 && bad_lit >= 0)
+    unsupported_feature(c, bad_lit, "under --share-strings, the Strings this literal holds are shared with "
+                        "another name and changed in place, and a typed String container cannot hold the "
+                        "shared handle yet (#6765)");
+  if (bad >= 0) {
+    const ShareHolder *sh = share_holder(c, bad);
+    char nm[160];
+    if (sh->kind == SHK_LOCAL) snprintf(nm, sizeof nm, "`%s`", c->scopes[sh->scope].locals[sh->local].name);
+    else snprintf(nm, sizeof nm, "`%s`", sh->name ? sh->name : "?");
+    const char *kind = sh->kind == SHK_LOCAL && c->scopes[sh->scope].locals[sh->local].is_block_param
+                       ? "block parameter" : repr_share_kind_name(sh->kind);
+    char msg[512];
+    if (bad_elems)
+      snprintf(msg, sizeof msg, "under --share-strings, the Strings %s %s holds are shared with another "
+               "name and changed in place, and a typed String container cannot hold the shared handle "
+               "yet (#6765)", kind, nm);
+    else
+      snprintf(msg, sizeof msg, "under --share-strings, the String %s %s holds is shared with another "
+               "name and changed in place, and a %s cannot hold the shared handle yet (#6765)",
+               kind, nm, kind);
+    unsupported_feature(c, sh->node, msg);
+  }
+}
+
+/* ---- --dump-repr (#7501) ----
+   One line per slot with the representation chosen for it, sorted, so the
+   dumps two compilers give for one program can be diffed. A slot that
+   became a shared handle or a box, or left a by-value layout, costs at run
+   time without changing any output (#7482), and this is where it shows.
+   Locals, parameters, globals and constants are LocalVars and read through
+   repr_of_slot. An ivar and a method's value are not: they read their own
+   flags by the same rules. The dump only reads. It is taken once the
+   analysis is final and printed once the compile has passed, so a program
+   codegen refuses fails as a compile does; no C is written. */
+int g_dump_repr = 0;
+
+static const char *repr_kind_name(int k) {
+  static const char *const names[] = {
+    "none", "scalar", "sentinel", "struct", "vobj", "ptr", "strbuf", "boxed",
+  };
+  return k >= 0 && k <= RK_BOXED ? names[k] : "?";
+}
+
+/* an ivar's slot: every Integer ivar reads nil until written, as
+   repr_nil_scalar answers for its reads; a Float one when some write can
+   leave the sentinel */
+Repr repr_of_ivar(const Compiler *c, int cid, int iv) {
+  const ClassInfo *ci = &c->classes[cid];
+  Repr r;
+  memset(&r, 0, sizeof r);
+  r.ty = r.as_ty = ci->ivar_types[iv];
+  r.narrowed = TY_UNKNOWN;
+  r.kind = (unsigned char)repr_kind_of_type(c, r.ty);
+  if (r.ty == TY_INT || (r.ty == TY_FLOAT && ci->ivar_nullable_int[iv])) {
+    r.kind = RK_SENTINEL;
+    r.may_nil = 1;
+  }
+  if (ty_is_object(r.ty) && nil_fact_ivar(c, cid, ci->ivars[iv])) r.may_nil = 1;
+  if (r.ty == TY_STRBUF && ci->ivar_str_shared[iv]) r.handle = 1;
+  r.share = r.handle && c->share_strings;
+  r.dyn_cls = repr_dyn_cls(c, r.ty);
+  return r;
+}
+
+/* a class variable's slot, as an ivar's: an Integer or Float one some
+   write leaves nil in holds the sentinel */
+ReprKind repr_cvar_kind(const Compiler *c, int cid, int idx) {
+  const ClassInfo *ci = &c->classes[cid];
+  TyKind t = ci->cvar_types[idx];
+  if ((t == TY_INT || t == TY_FLOAT) && ci->cvar_nullable_int[idx]) return RK_SENTINEL;
+  return repr_kind_of_type(c, t);
+}
+/* Only the rule makes a class variable the shared handle
+   (cvar_str_shared). An object one has no nil fact (analyze_nil.c keeps
+   one per ivar): it may be nil, as nil_fact_ivar answers for an ivar it
+   has none for. */
+Repr repr_of_cvar(const Compiler *c, int cid, int idx) {
+  const ClassInfo *ci = &c->classes[cid];
+  Repr r;
+  memset(&r, 0, sizeof r);
+  r.ty = r.as_ty = ci->cvar_types[idx];
+  r.narrowed = r.elem = r.key = r.val = TY_UNKNOWN;
+  repr_layout(&r, r.ty);
+  r.kind = (unsigned char)repr_cvar_kind(c, cid, idx);
+  if (r.kind == RK_SENTINEL || ty_is_object(r.ty)) r.may_nil = 1;
+  if (r.ty == TY_STRBUF && ci->cvar_str_shared[idx]) r.handle = 1;
+  r.share = r.handle && c->share_strings;
+  r.dyn_cls = repr_dyn_cls(c, r.ty);
+  return r;
+}
+
+/* a method's value: its nilable scalar is the sentinel */
+static Repr repr_of_ret(const Compiler *c, const Scope *sc) {
+  Repr r;
+  memset(&r, 0, sizeof r);
+  r.ty = r.as_ty = sc->ret;
+  r.narrowed = TY_UNKNOWN;
+  r.kind = (unsigned char)repr_kind_of_type(c, r.ty);
+  if ((r.ty == TY_INT || r.ty == TY_FLOAT) && (sc->ret_nullable_int || sc->ret_rbs_nilable)) {
+    r.kind = RK_SENTINEL;
+    r.may_nil = 1;
+  }
+  if (ty_is_object(r.ty) && sc->ret_obj_may_nil) r.may_nil = 1;
+  r.dyn_cls = repr_dyn_cls(c, r.ty);
+  return r;
+}
+
+/* a type's name, with the class of a user object or of an object array */
+static void repr_dump_ty(const Compiler *c, TyKind t, char *out, size_t n) {
+  TyKind e = ty_is_obj_array(t) ? ty_array_elem(t) : t;
+  if (ty_is_object(e) && ty_object_class(e) < c->nclasses)
+    snprintf(out, n, "%s%s", ty_is_obj_array(t) ? "obj_array:" : "obj:",
+             c->classes[ty_object_class(e)].name);
+  else snprintf(out, n, "%s", ty_name(t));
+}
+
+typedef struct { char **v; int n, cap; } ReprLines;
+
+static void repr_dump_line(const Compiler *c, ReprLines *ls, const char *where, Repr r) {
+  char ty[256], line[1024];
+  repr_dump_ty(c, r.ty, ty, sizeof ty);
+  snprintf(line, sizeof line, "%s: %s ty=%s%s%s%s", where, repr_kind_name(r.kind), ty,
+           r.handle ? " handle" : "", r.may_nil ? " may_nil" : "", r.dyn_cls ? " dyn_cls" : "");
+  if (ls->n == ls->cap) {
+    ls->cap = ls->cap ? ls->cap * 2 : 64;
+    ls->v = realloc(ls->v, (size_t)ls->cap * sizeof *ls->v);
+  }
+  ls->v[ls->n++] = strdup(line);
+}
+
+static int repr_line_cmp(const void *a, const void *b) {
+  return strcmp(*(char *const *)a, *(char *const *)b);
+}
+
+/* A method's name as the dump prints it: Class#m, Class.m for a class
+   method, <main> for the top level, and a mark for each copy of a method
+   another scope also emits. */
+static void repr_scope_label(const Compiler *c, const Scope *sc, char *out, size_t n) {
+  const char *cls = sc->class_id >= 0 && sc->class_id < c->nclasses ? c->classes[sc->class_id].name : NULL;
+  snprintf(out, n, "%s%s%s%s%s%s", cls ? cls : "", cls ? (sc->is_cmethod ? "." : "#") : "",
+           sc->name ? sc->name : "<main>", sc->is_proc_form ? "(proc)" : "",
+           sc->is_include_copy ? "(include)" : "", sc->is_extend_copy ? "(extend)" : "");
+}
+
+char *repr_dump(const Compiler *c) {
+  ReprLines ls = {0};
+  char where[1024], label[512];
+  for (int si = 0; si < c->nscopes; si++) {
+    const Scope *sc = &c->scopes[si];
+    /* a method nothing calls is not run */
+    if (sc->def_node >= 0 && !sc->reachable) continue;
+    repr_scope_label(c, sc, label, sizeof label);
+    for (int k = 0; k < sc->nlocals; k++) {
+      const LocalVar *lv = &sc->locals[k];
+      if (!lv->name) continue;
+      snprintf(where, sizeof where, "%s %s %s", lv->is_param ? "param" : "local", label, lv->name);
+      repr_dump_line(c, &ls, where, repr_of_slot(c, lv));
+    }
+    if (sc->def_node >= 0) {
+      snprintf(where, sizeof where, "ret %s", label);
+      repr_dump_line(c, &ls, where, repr_of_ret(c, sc));
+    }
+  }
+  for (int cid = 0; cid < c->nclasses; cid++)
+    for (int iv = 0; iv < c->classes[cid].nivars; iv++) {
+      snprintf(where, sizeof where, "ivar %s %s", c->classes[cid].name, c->classes[cid].ivars[iv]);
+      repr_dump_line(c, &ls, where, repr_of_ivar(c, cid, iv));
+    }
+  for (int k = 0; k < c->ngvars; k++) {
+    snprintf(where, sizeof where, "gvar $%s", c->gvars[k].name);
+    repr_dump_line(c, &ls, where, repr_of_slot(c, &c->gvars[k]));
+  }
+  for (int k = 0; k < c->nconsts; k++) {
+    snprintf(where, sizeof where, "const %s", c->consts[k].name);
+    repr_dump_line(c, &ls, where, repr_of_slot(c, &c->consts[k]));
+  }
+  qsort(ls.v, (size_t)ls.n, sizeof *ls.v, repr_line_cmp);
+  size_t len = 1;
+  for (int k = 0; k < ls.n; k++) len += strlen(ls.v[k]) + 1;
+  char *out = malloc(len), *o = out;
+  for (int k = 0; k < ls.n; k++) {
+    size_t n = strlen(ls.v[k]);
+    memcpy(o, ls.v[k], n);
+    o[n] = '\n';
+    o += n + 1;
+    free(ls.v[k]);
+  }
+  *o = 0;
+  free(ls.v);
+  return out;
+}
+
+int repr_share_rule(const Compiler *c) { return c->share_strings; }

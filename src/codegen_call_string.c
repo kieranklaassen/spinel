@@ -219,21 +219,37 @@ no_gsub_enum:
     /* ...unless a program class answers match? itself: the boxed dispatch
        has its arm, and the String one beside it */
     if (are >= 0 && sp_streq(name, "match?") && rpoly && poly_name_user_claimed(c, name, argc)) return 0;
+    /* match?(pattern) or match?(pattern, pos): another count is the
+       boxed dispatch's, which raises the arity error */
+    if (are >= 0 && sp_streq(name, "match?") && rpoly && argc > 2) return 0;
     if (are >= 0 && sp_streq(name, "match?") && rpoly) {
-      int tv = ++g_tmp;
-      /* a shared-string handle is a String (#4279) */
-      buf_printf(b, "({ sp_RbVal _t%d = sp_poly_strbuf_deref(", tv); emit_expr(c, recv, b);
-      buf_puts(b, ")");
-      buf_printf(b, "; const char *_s%d = _t%d.tag == SP_TAG_SYM ? sp_sym_to_s((sp_sym)_t%d.v.i) : _t%d.v.s;",
+      int tv = ++g_tmp, tr = ++g_tmp;
+      /* The receiver is held, rooted, while the position runs, which may
+         allocate; the String it reads is taken after. A shared-string handle
+         is a String (#4279), its bytes kept by the held handle. */
+      buf_printf(b, "({ sp_RbVal _t%d = ", tr); emit_expr(c, recv, b);
+      buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d);", tr);
+      /* the position runs before the receiver is judged, whatever it is */
+      int tq = 0;
+      if (argc == 2) {
+        tq = ++g_tmp;
+        buf_printf(b, " sp_RbVal _t%d = ", tq); emit_boxed(c, argv[1], b);
+        buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d);", tq);
+      }
+      buf_printf(b, " sp_RbVal _t%d = sp_poly_strbuf_deref(_t%d);", tv, tr);
+      buf_printf(b, " const char *_s%d = _t%d.tag == SP_TAG_SYM ? sp_sym_to_s((sp_sym)_t%d.v.i) : _t%d.v.s;",
                  tv, tv, tv, tv);
       buf_printf(b, " (sp_bool)((_t%d.tag == SP_TAG_STR || _t%d.tag == SP_TAG_SYM) ? ", tv, tv);
       if (argc == 1) buf_printf(b, "sp_re_match_p(sp_re_pat_%d, _s%d)", are, tv);
-      else {
-        buf_printf(b, "sp_str_re_match_p_at(sp_re_pat_%d, _s%d, ", are, tv);
-        emit_expr(c, argv[1], b); buf_puts(b, ")");
-      }
-      buf_printf(b, " : (sp_raise_nomethod(sp_sprintf(\"undefined method 'match?' for an instance of %%s\","
-                    " sp_poly_class_name(_t%d))), 0)); })", tv);
+      else buf_printf(b, "sp_str_re_match_p_at(sp_re_pat_%d, _s%d, sp_poly_arg_int_chk(_t%d))", are, tv, tq);
+      /* any other receiver raises as CRuby does (sp_poly_match_check): a
+         Regexp's TypeError for the pattern, anything else's NoMethodError
+         (nil reads as itself) with the pattern and the position as its
+         args */
+      buf_printf(b, " : (sp_poly_match_check(_t%d, \"match?\", %d, (sp_RbVal[]){", tv, argc);
+      emit_boxed(c, argv[0], b);
+      if (argc == 2) buf_printf(b, ", _t%d", tq);
+      buf_puts(b, "}), 0)); })");
       return 1;
     }
     if (are >= 0 && sp_streq(name, "match?")) {
@@ -694,7 +710,7 @@ int emit_call_regexp_class_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
       nt_str(nt, recv, "name") && sp_streq(nt_str(nt, recv, "name"), "Regexp")) {
     Repr rar = repr_of(c, argv[0]);
     TyKind _re_at = rar.as_ty;
-    if (rar.kind == RK_BOXED) { buf_puts(b, "sp_re_escape(sp_poly_to_s("); emit_expr(c, argv[0], b); buf_puts(b, "))"); }
+    if (rar.kind == RK_BOXED) { buf_puts(b, "sp_re_escape_operand("); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
     else if (_re_at == TY_SYMBOL) {
       /* rb_reg_operand takes a Symbol by its name -- Regexp.escape(:"a.b")
          is "a\\.b" -- where the #to_str protocol of the String slot would
@@ -741,11 +757,24 @@ int emit_call_regexp_class_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
         buf_puts(b, ")");
         return 1;
       }
+      /* a lone boxed argument is told apart at run time: an Array joins
+         its elements, a Regexp is the answer itself */
+      if (!splat && repr_of(c, ua).kind == RK_BOXED) {
+        buf_puts(b, "sp_re_union_boxed("); emit_expr(c, ua, b); buf_puts(b, ")");
+        return 1;
+      }
     }
     /* A single Regexp operand is returned unchanged (CRuby keeps its source and
        flags verbatim, no option-group wrapper). */
     if (nops == 1 && re_lit_src(c, ops[0]) && emit_regex_pat_to_buf(c, ops[0], b))
       return 1;
+    /* a lone boxed element is told apart at run time as the lone argument
+       is; `*[v]` is the argument v itself, so an Array there joins too */
+    if (nops == 1 && !re_lit_src(c, ops[0]) && repr_of(c, ops[0]).kind == RK_BOXED) {
+      buf_puts(b, nt_kind(nt, argv[0]) == NK_SplatNode ? "sp_re_union_boxed(" : "sp_re_union_one(");
+      emit_expr(c, ops[0], b); buf_puts(b, ")");
+      return 1;
+    }
     int ts = ++g_tmp, tp = ++g_tmp;
     for (int i = 0; i < nops; i++) {
       Buf ab; memset(&ab, 0, sizeof ab);
@@ -766,7 +795,7 @@ int emit_call_regexp_class_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
         TyKind at = ar.as_ty;
         if (at != TY_STRING && ar.kind != RK_BOXED)
           unsupported(c, id, "Regexp.union operand without a compile-time source (runtime Regexp or non-String value)");
-        if (ar.kind == RK_BOXED) { buf_puts(&ab, "sp_re_escape(sp_poly_to_s("); emit_expr(c, ops[i], &ab); buf_puts(&ab, "))"); }
+        if (ar.kind == RK_BOXED) { buf_puts(&ab, "sp_re_union_operand("); emit_expr(c, ops[i], &ab); buf_puts(&ab, ")"); }
         else { buf_puts(&ab, "sp_re_escape("); emit_expr(c, ops[i], &ab); buf_puts(&ab, ")"); }
       }
       emit_indent(g_pre, g_indent);
