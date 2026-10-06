@@ -1934,6 +1934,76 @@ static int mrv_then_self(Compiler *c, int r) {
     if (c->nscope[w] == si && sp_streq(nt_str(nt, w, "name"), zn)) return 0;
   return 1;
 }
+/* Does the program define a method called `nm`, on any class or module,
+   or name one in a Symbol (define_method, alias_method)? Each ask walks
+   the program's defs and Symbols, so the answers are kept for the pass
+   that asks (desugar_mutator_chain_on_local empties them as it starts):
+   its rewrite adds no method. */
+static const char *mrv_own_nm[24];
+static int mrv_own_is[24], mrv_own_n;
+static int mrv_own_name(Compiler *c, const char *nm) {
+  const NodeTable *nt = c->nt;
+  int own = 0;
+  for (int i = 0; i < mrv_own_n; i++) if (sp_streq(mrv_own_nm[i], nm)) return mrv_own_is[i];
+  for (int k = 0; k < c->nclasses && !own; k++) own = comp_method_in_chain(c, k, nm, NULL) >= 0;
+  NT_FOREACH_KIND(nt, NK_DefNode, d) if (sp_streq(nt_str(nt, d, "name"), nm)) own = 1;
+  NT_FOREACH_KIND(nt, NK_SymbolNode, y) {
+    const char *yv = nt_str(nt, y, "value");
+    if (yv && sp_streq(yv, nm)) own = 1;
+  }
+  if (mrv_own_n < 24) { mrv_own_nm[mrv_own_n] = nm; mrv_own_is[mrv_own_n++] = own; }
+  return own;
+}
+/* Is block `o` a builtin loop's, which drops its block's value: `loop`, or
+   a loop method the program defines nowhere on an Array, a Hash, a Range
+   or an Integer? An `each` on anything else may read it (an Enumerator's
+   `y.yield`). */
+static int mrv_loop_block(Compiler *c, const int *par, int o) {
+  const NodeTable *nt = c->nt;
+  int call = par[o];
+  const char *bn = call >= 0 && nt_kind(nt, call) == NK_CallNode && nt_ref(nt, call, "block") == o ? nt_str(nt, call, "name") : NULL;
+  if (!bn || !is_block_loop_method(bn) || mrv_own_name(c, bn)) return 0;
+  int r = nt_ref(nt, call, "receiver");
+  if (r < 0) return sp_streq(bn, "loop");
+  TyKind rt = infer_type(c, r);
+  return rt == TY_INT || rt == TY_RANGE || ty_is_array(rt) || ty_is_hash(rt);
+}
+/* Is the value of `v` read by nothing? A statement that is not its
+   sequence's last is, and the last of a sequence whose own value is
+   dropped: the program's, a loop's, a paren's, a begin's, an arm's of a
+   conditional, a builtin loop's block's (mrv_loop_block).
+   `par` may be older than the tree, so its answer is asked of the node. */
+static int mrv_dropped(Compiler *c, const int *par, int pn, int v) {
+  const NodeTable *nt = c->nt;
+  for (int depth = 0; depth < 200; depth++) {
+    int st = v >= 0 && v < pn ? par[v] : -1, sn = 0, at = -1;
+    /* an elsif is its if's value */
+    if (st >= 0 && nt_kind(nt, st) == NK_IfNode && nt_ref(nt, st, "subsequent") == v) { v = st; continue; }
+    if (st < 0 || st >= pn || nt_kind(nt, st) != NK_StatementsNode) return 0;
+    const int *sb = nt_arr(nt, st, "body", &sn);
+    while (++at < sn && sb[at] != v) ;
+    if (at >= sn) return 0;
+    if (at < sn - 1) return 1;
+    int o = par[st];
+    if (o < 0 || o >= pn) return 0;
+    NodeKind ok = nt_kind(nt, o);
+    if (ok == NK_BlockNode) return nt_ref(nt, o, "body") == st && mrv_loop_block(c, par, o);
+    if (ok == NK_ParenthesesNode) { if (nt_ref(nt, o, "body") != st) return 0; v = o; continue; }
+    if (nt_ref(nt, o, "statements") != st) return 0;
+    const char *ot = nt_type(nt, o);
+    if (ok == NK_WhileNode || ok == NK_UntilNode || (ot && sp_streq(ot, "ProgramNode"))) return 1;
+    if (ok == NK_IfNode || ok == NK_UnlessNode || ok == NK_BeginNode) { v = o; continue; }
+    /* an else's or a when's is its conditional's */
+    int up = par[o];
+    if (up < 0 || up >= pn) return 0;
+    NodeKind uk = nt_kind(nt, up);
+    if (ok == NK_ElseNode && nt_ref(nt, up, uk == NK_IfNode ? "subsequent" : "else_clause") == o &&
+        (uk == NK_IfNode || uk == NK_UnlessNode || uk == NK_CaseNode || uk == NK_BeginNode)) { v = up; continue; }
+    if (ot && sp_streq(ot, "WhenNode") && uk == NK_CaseNode) { v = up; continue; }
+    return 0;
+  }
+  return 0;
+}
 int desugar_mutator_receiver_value(Compiler *c) {
   NodeTable *nt = (NodeTable *)c->nt;
   int n0 = nt->count, changed = 0;
@@ -2103,6 +2173,234 @@ int desugar_mutator_receiver_value(Compiler *c) {
     for (int j = base; j < nt->count; j++) c->nscope[j] = encl;
     changed = 1;
   }
+  return changed;
+}
+
+/* A chain of in-place String methods on a local changes the local with
+   every link in CRuby: `s.prepend("b").prepend("a")`,
+   `s.concat("a").concat("b")`, `s.clear << x`. A mutator is lowered to a
+   write of its receiver, and only a receiver that is a name has a place to
+   write: the second link changed the first one's value, a temporary, and s
+   kept the first change alone. (A chain of `<<` alone has its own lowering
+   and is left to it.) The links become calls on the local, in order:
+
+     s.m(x).n(y).o(z)   ->  ((s.m(x); s.n(y); s.o(z)))
+
+   Only a chain nothing reads the value of is rewritten: where a write
+   takes a sequence's value it takes a copy, and the chain's value was the
+   String itself (`r = s.clear.clear; r.equal?(s)`).
+
+   m and n always answer their receiver, so each next call is sent to s
+   itself: `<<`, concat with one argument, prepend, clear, reverse!, freeze,
+   force_encoding, and a replace by a String literal. The last call is any
+   String mutator but replace and insert.
+
+   Each link becomes the statement `s.m(x)`, and the chain is rewritten
+   only where that statement does what the link did. Every other chain
+   stays as it was:
+   - a link the program defines a method named as (the statement runs the
+     builtin whatever String answers);
+   - a local a lambda, a proc or a kept block reads or any block writes
+     (two of the statements on a captured local do not build);
+   - a local that may be nil: the rewrite needs every write of the name to
+     be a String made on the spot (mcl_string_made) and one of them to be a
+     statement ahead of the chain (the statements crash on nil where the
+     chain raised NoMethodError);
+   - a local the program names any other way: a parameter, a target, an
+     operator write (`s += x` is refused beside a statement's append);
+   - an insert (its statement does not root its argument), a replace by
+     anything but a literal (its statement leaves s naming a temporary),
+     encode!, `s.concat(x, y)`;
+   - after a link that may answer nil (`s.upcase!.concat(x)`), with a
+     block, a `&.`, or an argument that writes a variable. */
+static int mcl_unparen(const NodeTable *nt, int v) {
+  while (v >= 0 && nt_kind(nt, v) == NK_ParenthesesNode) {
+    int b = nt_ref(nt, v, "body"), bn = 0;
+    const int *bb = b >= 0 && nt_kind(nt, b) == NK_StatementsNode ? nt_arr(nt, b, "body", &bn) : NULL;
+    if (bn != 1) break;
+    v = bb[0];
+  }
+  return v;
+}
+static int mcl_plain_call(const NodeTable *nt, int v) {
+  const char *op = nt_str(nt, v, "call_operator");
+  return nt_ref(nt, v, "block") < 0 && !(op && sp_streq(op, "&.")) &&
+         !mrv_writes(nt, nt_ref(nt, v, "arguments"), NULL, 0);
+}
+static int mcl_self_link(const NodeTable *nt, int v) {
+  if (nt_kind(nt, v) != NK_CallNode || nt_ref(nt, v, "receiver") < 0 || !mcl_plain_call(nt, v)) return 0;
+  const char *nm = nt_str(nt, v, "name");
+  if (!nm) return 0;
+  int a = nt_ref(nt, v, "arguments"), an = 0;
+  const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
+  if (is_append_concat(nm)) return an == 1 && nt_kind(nt, av[0]) != NK_SplatNode;
+  if (!str_self_call(nt, v) || sp_streq(nm, "to_s") || sp_streq(nm, "to_str") || sp_streq(nm, "itself") ||
+      sp_streq(nm, "encode!") || sp_streq(nm, "insert")) return 0;
+  return !sp_streq(nm, "replace") || (an == 1 && nt_kind(nt, av[0]) == NK_StringNode);
+}
+/* The sequence's last call is its value: a replace there leaves the local
+   naming its argument's String, a frozen one when that is a literal. An
+   insert and an index assignment, as statements, do not root what they
+   are given. */
+static int mcl_last_call(const NodeTable *nt, int v) {
+  const char *nm = nt_str(nt, v, "name");
+  return nm && sp_str_mutator(nm, SP_MUT_LOCAL) && mcl_plain_call(nt, v) && !sp_streq(nm, "replace") &&
+         !sp_streq(nm, "insert") && !sp_streq(nm, "[]=");
+}
+/* A String that cannot be nil, by how it is written: a literal, `+` or
+   `dup` of one, String.new. */
+static int mcl_string_made(Compiler *c, int v) {
+  const NodeTable *nt = c->nt;
+  if ((v = mcl_unparen(nt, v)) < 0) return 0;
+  NodeKind k = nt_kind(nt, v);
+  if (k == NK_StringNode || k == NK_InterpolatedStringNode) return 1;
+  const char *nm = k == NK_CallNode ? nt_str(nt, v, "name") : NULL;
+  int r = nm ? mcl_unparen(nt, nt_ref(nt, v, "receiver")) : -1;
+  if (r < 0 || nt_ref(nt, v, "block") >= 0 || mrv_own_name(c, nm)) return 0;
+  NodeKind rk = nt_kind(nt, r);
+  if (sp_streq(nm, "new")) return rk == NK_ConstantReadNode && sp_streq(nt_str(nt, r, "name"), "String");
+  return (sp_streq(nm, "+@") || sp_streq(nm, "dup")) && nt_ref(nt, v, "arguments") < 0 &&
+         (rk == NK_StringNode || rk == NK_InterpolatedStringNode);
+}
+/* Is `v` in a lambda, or in a block that is not a builtin loop's: one a
+   call may keep and run later? The walk ends at v's method or class. */
+static int mcl_in_closure(Compiler *c, const int *par, int pn, int v) {
+  const NodeTable *nt = c->nt;
+  for (;;) {
+    v = v >= 0 && v < pn ? par[v] : -1;
+    if (v < 0) return 0;
+    NodeKind k = nt_kind(nt, v);
+    if (k == NK_DefNode || k == NK_ClassNode || k == NK_ModuleNode || k == NK_SingletonClassNode) return 0;
+    if (k == NK_LambdaNode || (k == NK_BlockNode && !mrv_loop_block(c, par, v))) return 1;
+  }
+}
+/* The method or class `v` is written in, or -1: where a local's name ends */
+static int mcl_scope_root(const NodeTable *nt, const int *par, int pn, int v) {
+  for (;;) {
+    v = v >= 0 && v < pn ? par[v] : -1;
+    if (v < 0) return -1;
+    NodeKind k = nt_kind(nt, v);
+    if (k == NK_DefNode || k == NK_ClassNode || k == NK_ModuleNode || k == NK_SingletonClassNode) return v;
+  }
+}
+/* Is the local `x` reads one the statements are proved on? `refs` are the
+   nodes that name a local and `rname` their names: each of x's name in x's
+   method is a read no closure makes, or a plain write of a String that
+   cannot be nil, made in no block. */
+static int mcl_local_proved(Compiler *c, const int *par, int pn, const int *refs, const char **rname, int nrefs, int x) {
+  const NodeTable *nt = c->nt;
+  const char *zn = nt_str(nt, x, "name");
+  int root = mcl_scope_root(nt, par, pn, x);
+  for (int i = 0; i < nrefs; i++) {
+    int w = refs[i];
+    if (!sp_streq(rname[i], zn) || mcl_scope_root(nt, par, pn, w) != root) continue;
+    NodeKind k = nt_kind(nt, w);
+    int deep = nt_int(nt, w, "depth", 0) > 0;
+    if (k == NK_LocalVariableReadNode) {
+      if (deep && mcl_in_closure(c, par, pn, w)) return 0;
+    }
+    else if (k != NK_LocalVariableWriteNode || deep || !mcl_string_made(c, nt_ref(nt, w, "value"))) return 0;
+  }
+  return 1;
+}
+/* Has every path to `v` written local `zn`: is a write of it a statement
+   ahead of v, in a sequence of v's method that holds v? */
+static int mcl_written_before(const NodeTable *nt, const int *par, int pn, int v, const char *zn) {
+  while (v >= 0 && v < pn) {
+    int st = par[v], sn = 0, at = 0;
+    if (st < 0 || st >= pn) return 0;
+    NodeKind k = nt_kind(nt, st);
+    if (k == NK_DefNode || k == NK_ClassNode || k == NK_ModuleNode || k == NK_SingletonClassNode) return 0;
+    if (k == NK_StatementsNode) {
+      const int *sb = nt_arr(nt, st, "body", &sn);
+      while (at < sn && sb[at] != v) at++;
+      if (at >= sn) return 0;
+      while (--at >= 0)
+        if (nt_kind(nt, sb[at]) == NK_LocalVariableWriteNode && sp_streq(nt_str(nt, sb[at], "name"), zn)) return 1;
+    }
+    v = st;
+  }
+  return 0;
+}
+int desugar_mutator_chain_on_local(Compiler *c) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  int n0 = nt->count, changed = 0;
+  /* the nodes that name a local and each node's parent, collected at the
+     first chain met: the rewrite adds no name */
+  int *refs = NULL, nrefs = -1, *par = NULL;
+  const char **rname = NULL;
+  mrv_own_n = 0;
+  for (int id = 0; id < n0; id++) {
+    if (nt_kind(nt, id) != NK_CallNode) continue;
+    const char *nm = nt_str(nt, id, "name");
+    if (!nm || nt_ref(nt, id, "receiver") < 0 || !mcl_last_call(nt, id)) continue;
+    int n = 0, only_shl = sp_streq(nm, "<<");
+    int x = mcl_unparen(nt, nt_ref(nt, id, "receiver"));
+    for (; mcl_self_link(nt, x); x = mcl_unparen(nt, nt_ref(nt, x, "receiver")), n++)
+      only_shl = only_shl && sp_streq(nt_str(nt, x, "name"), "<<");
+    if (n == 0 || only_shl) continue;
+    if (nt_kind(nt, x) != NK_LocalVariableReadNode || !mrv_is_string(infer_type(c, x))) continue;
+    if (nrefs < 0) {
+      nrefs = 0;
+      refs = malloc(sizeof(int) * (size_t)(n0 > 0 ? n0 : 1));
+      rname = malloc(sizeof(char *) * (size_t)(n0 > 0 ? n0 : 1));
+      par = du_parent_map(nt);
+      if (!refs || !rname || !par) break;
+      for (int w = 0; w < n0; w++) {
+        const char *wt = nt_type(nt, w), *wn = nt_str(nt, w, "name");
+        if (!wt || !wn || !(strstr(wt, "LocalVariable") || strstr(wt, "Parameter"))) continue;
+        rname[nrefs] = wn; refs[nrefs++] = w;
+      }
+    }
+    /* only a chain nothing reads the value of: the sequence's value is a
+       copy where a write takes it, and the chain's was the String itself */
+    if (!mrv_dropped(c, par, n0, id)) continue;
+    /* and only where each statement does what its link did */
+    int own = mrv_own_name(c, nm);
+    for (int y = mcl_unparen(nt, nt_ref(nt, id, "receiver")); !own && y != x; y = mcl_unparen(nt, nt_ref(nt, y, "receiver")))
+      own = mrv_own_name(c, nt_str(nt, y, "name"));
+    if (own || !mcl_local_proved(c, par, n0, refs, rname, nrefs, x) ||
+        !mcl_written_before(nt, par, n0, id, nt_str(nt, x, "name"))) continue;
+    int *seq = malloc(sizeof(int) * (size_t)(n + 1));
+    if (!seq) continue;
+    int base = nt->count;
+    long long line = nt_int(nt, id, "node_line", 0), file = nt_int(nt, id, "node_file", 0);
+    /* the new nodes first: a read of the local for each call sent to a
+       link. Should the table run out the chain stays as it is, without
+       them. */
+    int st = nt_new_node(nt, "StatementsNode"), pr = nt_new_node(nt, "ParenthesesNode");
+    int ok = st >= 0 && pr >= 0;
+    for (int k = 0; k < n && ok; k++) ok = (seq[k] = nt_clone_subtree(nt, x)) >= 0;
+    if (!ok) { nt->count = base; free(seq); continue; }
+    /* each call sent to a link takes its read; a paren that stood between
+       them goes */
+    for (int cur = id, k = n; k > 0; k--) {
+      int r = nt_ref(nt, cur, "receiver"), link = mcl_unparen(nt, r);
+      while (r != link) {
+        int b = nt_ref(nt, r, "body"), bn = 0, inner = nt_arr(nt, b, "body", &bn)[0];
+        nt_node_reset(nt, b, "NilNode");
+        nt_node_reset(nt, r, "NilNode");
+        r = inner;
+      }
+      nt_node_set_ref(nt, cur, "receiver", seq[k - 1]);
+      seq[k - 1] = cur = link;
+    }
+    /* the call moves into a new node; the call's own becomes the paren */
+    nt_swap_nodes(nt, id, pr);
+    nt_node_reset(nt, id, "ParenthesesNode");
+    seq[n] = pr;
+    nt_node_set_arr(nt, st, "body", seq, n + 1);
+    nt_node_set_ref(nt, id, "body", st);
+    if (line > 0) { nt_node_set_int(nt, id, "node_line", line); nt_node_set_int(nt, id, "node_file", file); }
+    free(seq);
+    comp_grow_node_arrays(c);
+    int encl = c->nscope[id];
+    for (int j = base; j < nt->count; j++) c->nscope[j] = encl;
+    changed = 1;
+  }
+  free(refs);
+  free(rname);
+  free(par);
   return changed;
 }
 
