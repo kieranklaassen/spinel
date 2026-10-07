@@ -1,0 +1,35 @@
++= on a String local that is also appended to is compiled
+
+  out = +""
+  out << "a"
+  out += "b"
+  out << "c"
+  p out
+
+prints "abc" in CRuby and was refused (unsupported operator
+assignment), where `out = out + "b"` compiled and was right. A local
+that is appended to holds its String by a handle, and
+emit_op_assign_lv had an arm for `+=` on a plain String only.
+
+The new arm does what the spelled-out write does. String#+ answers a
+new String, so the local gets a handle of its own and the String its
+other names hold is not touched. The operand runs first and the
+receiver is read after it; the operand converts by to_str, else
+TypeError; a nil receiver raises NoMethodError.
+
+The arm reads the local's slot as a handle, so it applies only where
+every other write of the local is on a list of writes proven to leave
+a handle there (strbuf_value_proven_handle): nil, a local or an
+instance variable that holds a handle, an append chain on one, a call
+on one that answers its receiver, and a String no other name holds.
+Any other write keeps master's refusal in master's words:
+`t = $g << "a"` answers the global's own String, which has no handle
+to give, and a handle made there would part t from the global. The
+value of the write (`v = (t += "x")`) stays refused: v would have to
+be the same String as t.
+
+test/string_appended_local_plus_assign.rb is refused on master. Four
+reject tests hold the value form and a first write that appends to a
+global, a constant and a method's result.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
