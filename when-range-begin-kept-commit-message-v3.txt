@@ -1,0 +1,22 @@
+The begin of a String Range written in a when is kept while its end is made
+
+    $x1 = 1.to_s
+    n = 0
+    1000000.times do |i|
+      s = (i + 1).to_s
+      case s
+      when i.to_s..(i + 3).to_s then n += 1
+      end
+    end
+    p n   # 999981, CRuby 999982
+
+A when whose Range is written on the spot compares the subject with the
+two ends, each bound to a temp. The begin was held by that temp alone
+while the end was made, so an end that allocates could free it: once in
+the million turns above, and at every turn under SPINEL_GC_STRESS=2.
+The begin's temp is rooted now when both ends may allocate
+(operand_may_allocate). A begin that is a literal without a NUL or a
+plain local read, or an end that allocates nothing, compiles to the C
+it did.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
