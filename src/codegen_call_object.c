@@ -1306,6 +1306,161 @@ int emit_call_freeze_dup_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, 
   return 0;
 }
 
+/* An operand evaluated after the `&.` call `call` that may as well run ahead
+   of it: a literal, or a read of a variable the call cannot rebind
+   (read_rebound_by) that is a scalar, or that the call has no effect on. */
+static int sn_later_operand_waits(Compiler *c, int call, int n) {
+  const NodeTable *nt = c->nt;
+  n = unwrap_parens(c, n);
+  switch (nt_kind(nt, n)) {
+    case NK_NilNode: case NK_TrueNode: case NK_FalseNode: case NK_FloatNode:
+    case NK_SymbolNode: case NK_StringNode:
+      return 1;
+    case NK_IntegerNode:
+      return comp_ntype(c, n) == TY_INT;
+    case NK_LocalVariableReadNode: case NK_InstanceVariableReadNode:
+    case NK_GlobalVariableReadNode: case NK_ClassVariableReadNode: {
+      if (read_rebound_by(c, n, call)) return 0;
+      TyKind t = comp_ntype(c, n);
+      return t == TY_INT || t == TY_FLOAT || t == TY_BOOL || t == TY_SYMBOL || t == TY_NIL ||
+             !subtree_has_side_effect(c, call);
+    }
+    case NK_EmbeddedStatementsNode: {
+      int st = nt_ref(nt, n, "statements"), bn = 0;
+      const int *bd = st >= 0 ? nt_arr(nt, st, "body", &bn) : NULL;
+      for (int i = 0; i < bn; i++) if (!sn_later_operand_waits(c, call, bd[i])) return 0;
+      return 1;
+    }
+    default:
+      return 0;
+  }
+}
+
+/* A part of an interpolation that hoists nothing: text, or one literal or
+   variable read. The parts' values are taken one after another, so such a
+   part after the call reads what the call left. */
+static int sn_part_hoists_nothing(Compiler *c, int n) {
+  const NodeTable *nt = c->nt;
+  if (nt_kind(nt, n) == NK_StringNode) return 1;
+  if (nt_kind(nt, n) != NK_EmbeddedStatementsNode) return 0;
+  int st = nt_ref(nt, n, "statements"), bn = 0;
+  const int *bd = st >= 0 ? nt_arr(nt, st, "body", &bn) : NULL;
+  if (bn != 1) return bn == 0;
+  switch (nt_kind(nt, unwrap_parens(c, bd[0]))) {
+    case NK_NilNode: case NK_TrueNode: case NK_FalseNode: case NK_FloatNode:
+    case NK_SymbolNode: case NK_StringNode: case NK_IntegerNode:
+    case NK_LocalVariableReadNode: case NK_InstanceVariableReadNode:
+    case NK_GlobalVariableReadNode: case NK_ClassVariableReadNode:
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+/* Whether `x` is one of the `n` nodes `v`, and every one after it waits. */
+static int sn_rest_waits(Compiler *c, int call, const int *v, int n, int x) {
+  int i = 0;
+  while (i < n && v[i] != x) i++;
+  if (i == n) return 0;
+  for (i++; i < n; i++) if (!sn_later_operand_waits(c, call, v[i])) return 0;
+  return 1;
+}
+
+/* Whether the value of the `&.` call `id` can stay in the call's place when
+   it hoists statements. They stay ahead of the statement, so what a LATER
+   operand hoists there would run before this call:
+   `"#{o&.bump([1])} #{o&.bump("a#{$c}")}"` read $c before the first bump.
+   Asked of the tree, from the call up to the statement being emitted
+   (view_stmt_top): in each node on the way, what is evaluated after the call
+   waits (sn_later_operand_waits). A node not listed answers no, and the
+   guard keeps its temp ahead of the statement. */
+static int sn_stays_in_place(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  int stmt = -1;
+  const void *spre = NULL;
+  if (!view_stmt_top(&stmt, &spre)) stmt = -1;
+  for (int n = id, hops = 0; hops < 64; hops++) {
+    if (n == stmt) return 1;
+    int p = node_parent(c, n);
+    if (p < 0) return 0;
+    int cn = 0;
+    const int *cv = NULL;
+    const char *pty = nt_type(nt, p);
+    if (pty && sp_streq(pty, "ArgumentsNode")) {
+      cv = nt_arr(nt, p, "arguments", &cn);
+      if (!sn_rest_waits(c, id, cv, cn, n)) return 0;
+      n = p;
+      continue;
+    }
+    switch (nt_kind(nt, p)) {
+      case NK_ParenthesesNode:
+        if (nt_ref(nt, p, "body") != n) return 0;
+        break;
+      case NK_EmbeddedStatementsNode:
+        if (nt_ref(nt, p, "statements") != n) return 0;
+        break;
+      case NK_StatementsNode: {
+        cv = nt_arr(nt, p, "body", &cn);
+        if (!sn_rest_waits(c, id, cv, cn, n)) return 0;
+        /* the value of a block's or a method's body is taken where the
+           body ends */
+        int own = node_parent(c, p);
+        NodeKind ok = own >= 0 ? nt_kind(nt, own) : NK_StatementsNode;
+        if (cv[cn - 1] == n && (ok == NK_BlockNode || ok == NK_LambdaNode || ok == NK_DefNode)) return 1;
+        break;
+      }
+      case NK_InterpolatedStringNode: {
+        cv = nt_arr(nt, p, "parts", &cn);
+        int i = 0;
+        while (i < cn && cv[i] != n) i++;
+        if (i == cn) return 0;
+        for (i++; i < cn; i++) if (!sn_part_hoists_nothing(c, cv[i])) return 0;
+        break;
+      }
+      case NK_ArrayNode:
+        cv = nt_arr(nt, p, "elements", &cn);
+        if (!sn_rest_waits(c, id, cv, cn, n)) return 0;
+        break;
+      case NK_CallNode: {
+        if (nt_ref(nt, p, "block") >= 0) return 0;
+        int args = nt_ref(nt, p, "arguments");
+        if (n == args) break;
+        if (n != nt_ref(nt, p, "receiver")) return 0;
+        cv = args >= 0 ? nt_arr(nt, args, "arguments", &cn) : NULL;
+        for (int i = 0; i < cn; i++) if (!sn_later_operand_waits(c, id, cv[i])) return 0;
+        break;
+      }
+      case NK_LocalVariableWriteNode: case NK_InstanceVariableWriteNode:
+      case NK_GlobalVariableWriteNode:
+        if (nt_ref(nt, p, "value") != n) return 0;
+        break;
+      case NK_MultiWriteNode: {
+        /* `x, y = ...`: the targets are assigned after the whole value */
+        int rn = 0;
+        nt_arr(nt, p, "rights", &rn);
+        if (nt_ref(nt, p, "value") != n || nt_ref(nt, p, "rest") >= 0 || rn > 0) return 0;
+        cv = nt_arr(nt, p, "lefts", &cn);
+        for (int i = 0; i < cn; i++) {
+          NodeKind lk = nt_kind(nt, cv[i]);
+          if (lk != NK_LocalVariableTargetNode && lk != NK_InstanceVariableTargetNode &&
+              lk != NK_GlobalVariableTargetNode) return 0;
+        }
+        break;
+      }
+      case NK_ReturnNode:
+        if (nt_ref(nt, p, "arguments") != n) return 0;
+        break;
+      case NK_IfNode: case NK_UnlessNode:
+        /* the condition of an `if` statement: its branches are statements */
+        return p == stmt && nt_ref(nt, p, "predicate") == n;
+      default:
+        return 0;
+    }
+    n = p;
+  }
+  return 0;
+}
+
 /* safe navigation (&.): a nil receiver answers nil, any other the call, guarded by a nil test */
 int emit_call_safe_nav_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv) {
   /* Safe navigation &. : nil receiver -> return nil/0; non-nil -> emit conditional */
@@ -1570,6 +1725,25 @@ int emit_call_safe_nav_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
         g_pre = sv_pre2;
         if (!preb2.p || !preb2.p[0])
           buf_printf(b, "(%s ? %s : (%s))", nilt, nilv, vbs.p ? vbs.p : "");
+        else if (sn_stays_in_place(c, id)) {
+          /* The guard steps over what the value hoisted, and the value
+             stays in the call's place. Computed with them ahead of the
+             statement, the call ran before what is written before it:
+             `"#{$c} #{o&.bump([1, 2])}"` read `$c` after `bump`. A jump
+             and not a block: the value names what they declare. A root
+             among them is pushed, and popped by the count saved here. */
+          int lsn = ++g_tmp;
+          if (sn_roots_to_pushes(&preb2)) {
+            emit_indent(g_pre, g_indent);
+            buf_printf(g_pre, "int SP_CLEANUP(sp_gc_cleanup) _sns%d = sp_gc_nroots;\n", lsn);
+          }
+          emit_indent(g_pre, g_indent);
+          buf_printf(g_pre, "if (%s) goto _snl%d;\n", nilt, lsn);
+          buf_puts(g_pre, preb2.p);
+          emit_indent(g_pre, g_indent);
+          buf_printf(g_pre, "_snl%d:;\n", lsn);
+          buf_printf(b, "(%s ? %s : (%s))", nilt, nilv, vbs.p ? vbs.p : "");
+        }
         else {
           int rsv = ++g_tmp;
           emit_indent(g_pre, g_indent);
