@@ -348,6 +348,16 @@ static void emit_int(int id, const char *field, long long val) {
   out_add("I %d %s %lld", id, field, val);
 }
 
+/* What the line map says of a statement on buffer line bl, its owner on ol:
+   `req_pop`, the line its required file ends at, where that is another file
+   than the owner's; `req_late`, in a file that loads when its require runs,
+   later than where it is spliced. */
+static void emit_req_marks(int id, int32_t bl, int32_t ol) {
+  if (bl < 1 || bl > sp_line_map_n) return;
+  if (sp_line_pop[bl] > 0 && sp_line_pop[bl] != sp_line_pop[ol]) emit_int(id, "req_pop", sp_line_pop[bl]);
+  if (sp_line_late[bl]) emit_int(id, "req_late", 1);
+}
+
 static void emit_float(int id, const char *field, double val) {
   /* Issue #766: 64-byte buf; "%.17g" produces at most 24 chars, plus
      ".0" trailer = 26. Safe by margin.
@@ -586,8 +596,7 @@ static int flatten_node(pm_node_t *node) {
     int32_t bl = pm_newline_list_line(&g_parser->newline_list, node->location.start, g_parser->start_line);
     int32_t ol = owner ? pm_newline_list_line(&g_parser->newline_list, owner, g_parser->start_line) : 0;
     g_stmt_next++;
-    if (bl >= 1 && bl <= sp_line_map_n && sp_line_pop[bl] > 0 && sp_line_pop[bl] != sp_line_pop[ol])
-      emit_int(id, "req_pop", sp_line_pop[bl]);
+    emit_req_marks(id, bl, ol);
   }
   if (t != PM_STATEMENTS_NODE) g_owner = t == PM_PROGRAM_NODE ? NULL : node->location.start;
 
@@ -768,9 +777,6 @@ static int flatten_node(pm_node_t *node) {
     N("ConstantWriteNode");
     NAME("name", n->name);
     R("value", n->value);
-    /* written by a file that loads when its require runs, later than here */
-    int32_t wl = pm_newline_list_line(&g_parser->newline_list, node->location.start, g_parser->start_line);
-    if (wl >= 1 && wl <= sp_line_map_n && sp_line_late[wl]) emit_int(id, "req_late", 1);
     break;
   }
   case PM_CONSTANT_PATH_WRITE_NODE: {
