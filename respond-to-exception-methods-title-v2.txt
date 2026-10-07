@@ -1,0 +1,1 @@
+respond_to? answers for message, backtrace and cause on a program's exception class
