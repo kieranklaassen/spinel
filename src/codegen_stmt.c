@@ -8191,8 +8191,9 @@ int subtree_has_retry(const NodeTable *nt, int id) {
 }
 
 /* Emit one rescue clause (and its `subsequent` chain) inside the handler
-   branch. Frame counter `fr` makes the saved cls/msg vars unique. */
-void emit_rescue(Compiler *c, int id, Buf *b, int indent, int fr, const char *resultvar) {
+   branch. Frame counter `fr` makes the saved cls/msg vars unique. `ens` is
+   the id of the begin's ensure region, -1 for a begin that has none. */
+void emit_rescue(Compiler *c, int id, Buf *b, int indent, int fr, int ens, const char *resultvar) {
   const NodeTable *nt = c->nt;
   int nexc = 0;
   const int *exc = nt_arr(nt, id, "exceptions", &nexc);
@@ -8517,7 +8518,14 @@ void emit_rescue(Compiler *c, int id, Buf *b, int indent, int fr, const char *re
     buf_puts(b, "}\n");
     emit_indent(b, indent);
     buf_puts(b, "else {\n");
-    if (sub >= 0) emit_rescue(c, sub, b, indent + 1, fr, resultvar);
+    if (sub >= 0) emit_rescue(c, sub, b, indent + 1, fr, ens, resultvar);
+    else if (ens >= 0) {
+      /* no clause matched and the begin has an ensure: it runs first, and
+         raises this again after its body, as for a begin with no rescue */
+      emit_indent(b, indent + 1);
+      buf_printf(b, "_excf%d = 1; _excmsg%d = _rmsg_%d; _exccls%d = _rcls_%d; _excobj%d = sp_exc_obj[sp_exc_top];\n",
+                 ens, ens, rc, ens, rc, ens);
+    }
     else {
       /* re-stage the carried object so a pass-through keeps ivars and the
          SystemExit status (#1415, #2761) */
@@ -8749,7 +8757,7 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
       buf_printf(b, "if (strcmp((const char *)sp_last_exc_cls, \"FiberKillSignal\") == 0) { _excf%d = 1; _excmsg%d = sp_exc_msg[sp_exc_top]; _exccls%d = sp_exc_cls[sp_exc_top]; }\n",
                  eid, eid, eid);
       emit_indent(b, indent + 2); buf_puts(b, "else {\n");
-      emit_rescue(c, rescue, b, indent + 3, fr, resultvar);
+      emit_rescue(c, rescue, b, indent + 3, fr, eid, resultvar);
       emit_indent(b, indent + 2); buf_puts(b, "}\n");
     }
     else {
@@ -8855,9 +8863,11 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
          and any value-position begin/ensure nested the same way. An
          intervening rescue shows up as an exception frame between this level
          and the outer ensure's own, so re-raise there and let that handler
-         match; with no such frame, propagate to the outer ensure as before. */
+         match; with no such frame, propagate to the outer ensure as before.
+         What this begin's own clauses let through leaves by the re-raise too,
+         as it did before it waited for the ensure. */
       emit_indent(b, indent);
-      if (g_exc_frame_depth > outer->exc_base + 1) {
+      if (g_exc_frame_depth > outer->exc_base + 1 || rescue >= 0) {
         buf_printf(b, "if (_excf%d) { sp_pending_exc_obj = _excobj%d; sp_raise_cls(_exccls%d, _excmsg%d); }\n",
                    eid, eid, eid, eid);
       }
@@ -8932,7 +8942,7 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
     emit_indent(b, indent + 2);
     buf_puts(b, "if (strcmp((const char *)sp_last_exc_cls, \"FiberKillSignal\") == 0) sp_raise_cls(\"FiberKillSignal\", sp_exc_msg[sp_exc_top]);\n");
     emit_indent(b, indent + 2); buf_puts(b, "else {\n");
-    emit_rescue(c, rescue, b, indent + 3, fr, resultvar);
+    emit_rescue(c, rescue, b, indent + 3, fr, -1, resultvar);
     emit_indent(b, indent + 2); buf_puts(b, "}\n");
     emit_indent(b, indent + 1); buf_puts(b, "}\n");
   }
