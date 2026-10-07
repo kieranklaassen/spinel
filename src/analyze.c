@@ -15453,6 +15453,43 @@ static int strbuf_demand_local_container(Compiler *c, const char *vn, Scope *vs,
 static int strbuf_demand_container_stores(Compiler *c, const char *contn, Scope *conts) {
   return strbuf_demand_local_container(c, contn, conts, 0, SB_DEMAND);
 }
+/* Does the element store take a handle for every String stored into local
+   (vn, vs) without refusing one or looking further? A String literal, an
+   interpolation, a plain String local and the new String of a receiverless
+   call or of one on a String, a number or a class do; a reader's or an
+   aliasing call's String, a parameter's and a boxed value do not
+   (strbuf_demand_store_leaf), and a call on anything else may answer a
+   String its receiver holds (`a[0]`). */
+static int sb_stores_take_handle(Compiler *c, const char *vn, Scope *vs) {
+  const NodeTable *nt = c->nt;
+  int ns = 0;
+  const int *sn = sb_store_nodes(c, vn, vs, &ns);
+  for (int i = 0; i < ns; i++) {
+    int st[64];
+    int n = strbuf_container_store_values(c, sn[i], vn, vs, 1, st);
+    for (int e = 0; e < n; e++) {
+      TyKind vt = infer_type(c, st[e]);
+      if (vt == TY_POLY || vt == TY_UNKNOWN) return 0;
+      if (vt != TY_STRING && vt != TY_STRBUF) continue;
+      int v = an_unparen(nt, st[e]);
+      NodeKind k = nt_kind(nt, v);
+      if (k == NK_StringNode || k == NK_InterpolatedStringNode) continue;
+      if (k == NK_CallNode) {
+        char rb[256]; int rdefc = -1;
+        int as = an_strbuf_alias_source(c, v);
+        if ((as >= 0 && as != v) || an_reader_ivar_of(c, v, &rdefc, rb, sizeof rb)) return 0;
+        int cr = nt_ref(nt, v, "receiver");
+        TyKind rt = cr >= 0 ? infer_type(c, cr) : TY_CLASS;
+        if (rt != TY_STRING && rt != TY_STRBUF && rt != TY_INT && rt != TY_FLOAT && rt != TY_CLASS) return 0;
+        continue;
+      }
+      if (k != NK_LocalVariableReadNode || v != st[e]) return 0;
+      LocalVar *lv = scope_local(comp_scope_of(c, v), nt_str(nt, v, "name"));
+      if (!lv || lv->is_param || lv->is_block_param) return 0;
+    }
+  }
+  return 1;
+}
 
 /* The values stored into container ivar (cid, ivn): what is written to it,
    and what is pushed or []='d into it. */
@@ -17947,6 +17984,19 @@ static int promote_shared_stored_strings(Compiler *c) {
     Scope *conts4 = contn4 ? comp_scope_of(c, recv4) : NULL;
     LocalVar *contv4 = (contn4 && conts4) ? scope_local(conts4, contn4) : NULL;
     TyKind contt4 = lit4 ? infer_type(c, recv4) : contv4 ? contv4->type : TY_UNKNOWN;
+    /* a local written only `[]` and filled by index (`r = []; r[0] = s`)
+       has no Array kind while the fixpoint runs (the index store guesses a
+       Hash) and becomes the general Array after it (an_phase_post_fixpoint).
+       Its stores take the handle here all the same, where each takes one
+       without a word (sb_stores_take_handle), or the block appended to a
+       copy of the element; the parameter is left to bind as that Array's
+       elements do. */
+    if (!lit4 && contv4 && !ty_is_array(contt4) && !contv4->is_param && !contv4->is_block_param &&
+        local_all_writes_empty_array(c, conts4, contn4)) {
+      if (!g_infer_optimistic && !alias_mut && sb_stores_take_handle(c, contn4, conts4))
+        changed |= strbuf_demand_container_stores_here(c, contn4, conts4, 0, SB_DEMAND);
+      continue;
+    }
     if (!lit4 && (!contv4 || (!ty_is_array(contt4) && contt4 != TY_UNKNOWN)))
       continue;
     /* the container's elements must be strings: gate on the receiver's
