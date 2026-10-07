@@ -1,0 +1,1 @@
+A local assigned a boxed String under is_a? is that String, not a copy
