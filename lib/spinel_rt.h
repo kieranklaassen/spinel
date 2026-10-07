@@ -5359,6 +5359,9 @@ static sp_float sp_poly_fdiv(sp_RbVal a, sp_RbVal b) {
      turned away from a method it has -- by the guard of a function whose
      very next line knows how to divide one (sp_poly_to_f_with_rational). */
   if (!sp_poly_numeric_p(a) && !sp_poly_is_rat_kind(a)) sp_raise_poly_nomethod("fdiv", a);
+  /* an operand that is no number raises the coercion failure before the
+     division converts it (nil and a Symbol as a Float, a String by Float()) */
+  if (SP_UNLIKELY(!sp_poly_tower_p(b)) && !sp_poly_divmod_converts) sp_poly_binop_bad("fdiv", a, b);
   return sp_poly_to_f_with_rational(a) / sp_poly_to_f_with_rational(b);
 }
 static sp_RbVal sp_poly_divmod(sp_RbVal a, sp_RbVal b) {
@@ -5370,6 +5373,12 @@ static sp_RbVal sp_poly_divmod(sp_RbVal a, sp_RbVal b) {
      below instead of raising the method it lacks. */
   if (!sp_poly_numeric_p(a) && !sp_poly_is_rational(a) && !sp_poly_is_brat(a))
     sp_raise_poly_nomethod("divmod", a);
+  /* and an OPERAND that is no number raises the coercion failure: the arms
+     below convert it (nil to 0, a Symbol to its index), so `7.divmod(nil)`
+     divided by zero and `7.divmod(true)` answered [7, 0]. A program whose
+     builtin classes have a coerce of their own keeps the conversion
+     (sp_poly_divmod_converts). */
+  if (SP_UNLIKELY(!sp_poly_tower_p(b)) && !sp_poly_divmod_converts) return sp_poly_binop_bad("divmod", a, b);
   sp_PolyArray *out = sp_PolyArray_new();
   SP_GC_ROOT(out);
   /* A Float operand is answered by the Float arm below, not read as a
@@ -5419,6 +5428,7 @@ static sp_RbVal sp_poly_div_m(sp_RbVal a, sp_RbVal b) {
   SP_POLY_COERCE_NUM("div");
   if (!sp_poly_numeric_p(a) && !sp_poly_is_rational(a) && !sp_poly_is_brat(a))
     sp_raise_poly_nomethod("div", a);
+  if (SP_UNLIKELY(!sp_poly_tower_p(b)) && !sp_poly_divmod_converts) return sp_poly_binop_bad("div", a, b);   /* see sp_poly_divmod */
   if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT ||
       sp_poly_is_rational(a) || sp_poly_is_rational(b)) {
     sp_float fb = sp_poly_to_f_with_rational(b);
@@ -5438,6 +5448,7 @@ static sp_RbVal sp_poly_remainder(sp_RbVal a, sp_RbVal b) {
   SP_POLY_COERCE_NUM("remainder");
   if (!sp_poly_numeric_p(a) && !sp_poly_is_rational(a) && !sp_poly_is_brat(a))
     sp_raise_poly_nomethod("remainder", a);
+  if (SP_UNLIKELY(!sp_poly_tower_p(b)) && !sp_poly_divmod_converts) return sp_poly_binop_bad("remainder", a, b);   /* see sp_poly_divmod */
   /* Two exact operands answer exactly, as the typed path does: reading a
      Rational through a double turned `Rational(3,4).remainder(2)` into 0.75
      where CRuby (and spinel's own typed arm) answer (3/4). */
