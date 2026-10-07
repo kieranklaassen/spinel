@@ -1,0 +1,50 @@
+A chain of in-place String methods on a local changes it at every link
+
+    s = +"c"
+    s.prepend("b").prepend("a")
+    p s
+
+printed "bc", where CRuby prints "abc". `s.concat("a").concat("b")` left
+"a", `s.clear.concat("z")` left "", and `s.replace("r").concat("s")`
+left "r". Only a chain in which every link is `<<` kept every change.
+
+A String mutator is lowered to a write of its receiver, and only a
+receiver that is a name has a place to write. The second link's receiver
+is the first link's value, a temporary, so its change went there and s
+kept the first one alone.
+
+A new pass, desugar_mutator_chain_on_local, makes the links calls on the
+local, in order:
+
+    s.m(x).n(y).o(z)  ->  (s.m(x); s.n(y); s.o(z))
+
+for links m and n that always answer their receiver: `<<` and concat
+with one argument, prepend, replace, clear, reverse!, freeze,
+force_encoding, and insert at a literal 0 or -1. Each argument runs once
+and in its order.
+
+Only a chain whose value nothing reads is rewritten: a statement that is
+not its sequence's last, or the last of the program, of a loop's body,
+of a begin, a paren or an arm of a conditional that is itself dropped,
+or of the block of a builtin loop method the program does not define.
+Where a write takes a sequence's value it takes a copy, so a chain whose
+value is assigned, passed, compared, returned or sent another call stays
+whole, as it was.
+
+What reads a value is asked of the parents the program's tree reaches
+(du_parent_map): the evidence calls a multiple assignment leaves in
+the table are unreachable and name live receivers.
+
+Left as they were, each for what the form it would take does today:
+
+- the call after a link that may answer nil (`s.upcase!.concat("z")`);
+- a chain whose last call is a replace, or an insert at anything but a
+  literal index from -1 up;
+- a link that is encode!, a concat with another count of arguments, or
+  an insert at any index but a literal 0 or -1;
+- a chain of `<<` alone, which has its own lowering;
+- a link with a block, a `&.`, or an argument that writes a variable;
+- a chain on a local a closure assigns, or on anything but a String
+  local.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

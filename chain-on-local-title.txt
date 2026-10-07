@@ -1,0 +1,1 @@
+A chain of in-place String methods on a local changes it at every link

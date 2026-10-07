@@ -1,0 +1,33 @@
+pack answers UTF-8 text for a template of U directives
+
+Array#pack answered a BINARY (ASCII-8BIT) String for every template.
+CRuby answers UTF-8 where the template holds a U and no directive but
+U, m, M and u:
+
+    s = "caf\xC3\xA9".codepoints.pack("U*")
+    s == "caf\xC3\xA9"                # false, CRuby true
+    s.size                            # 5, CRuby 4
+    s.encoding                        # ASCII-8BIT, CRuby UTF-8
+
+so a String built from codepoints was not the String it spells: ==,
+size, chars, [-1], inspect, ljust and a Hash key all read bytes.
+
+The four pack entries in lib/sp_pack.c each ended sp_str_mark_binary.
+They now ask pk_fmt_utf8 first. A template whose first directive is
+not U, m, M or u is bytes at once; otherwise pk_fmt_utf8_walk walks it
+as the entries do (the same three blanks, the same count) and answers
+1 for a U with nothing beside it but U, m, M and u. "UC", "CU",
+"U n", "Ux", "U@3" and "UC0" are bytes in CRuby too and stay marked.
+
+The cost is that test, on every pack: callgrind over a million calls,
+pack("C*") 818.7M to 845.7M instructions and pack("nNvV") 973.1M to
+1,000.1M, 27 a call; pack("U*"), which is walked, 852.8M to 913.8M,
+61 a call.
+
+Not covered, as before: a template of m, M or u alone, or an empty
+one, is US-ASCII in CRuby and ASCII-8BIT here; a "\r" or a `#`
+comment in a template is skipped by CRuby and makes bytes here.
+
+Test: test/pack_u_answers_text.rb. No generated C changes.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
