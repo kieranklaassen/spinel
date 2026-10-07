@@ -236,8 +236,9 @@ int emit_call_reflection_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, 
           for (int a = 0; a < cl->naliases; a++) emit_responds_name(c, k, cl->alias_new[a], tv, b);
         }
         const char *const *imp[] = { enumerable_names, comparable_names, struct_names,
-                                     (const char *const[]){ "members", "to_h", "deconstruct", "deconstruct_keys", "with", NULL } };
-        for (int l = 0; l < 4; l++)
+                                     (const char *const[]){ "members", "to_h", "deconstruct", "deconstruct_keys", "with", NULL },
+                                     exception_names };
+        for (int l = 0; l < 5; l++)
           for (int i = 0; imp[l][i]; i++)
             if (class_implicit_responds(c, k, imp[l][i])) emit_responds_name(c, k, imp[l][i], tv, b);
         buf_puts(b, "0)) || ");
