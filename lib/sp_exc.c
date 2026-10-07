@@ -346,10 +346,36 @@ const char *sp_exc_class_name(volatile sp_Exception *ve) {
   /* cls_name points into rodata (see sp_exc_gc_scan) and it comes from the
      raise site's bare literal, so it carries no marker byte. This name reaches
      Ruby as `e.class.to_s`, where the caller roots it and the collector reads
-     that byte -- hand back a string of our own instead. Every caller is a cold
-     path (a render, a cross-thread re-raise), so the copy costs nothing that
-     matters. */
-  return e && e->cls_name ? sp_str_dup_external(e->cls_name) : SPL("RuntimeError");
+     that byte -- hand back a marked copy instead. One copy is made for a name
+     and kept, as a literal is. A Class value carries its name in a plain
+     struct that no root and no scan knows (`k = e.class` held in a local, a
+     parameter or an instance variable), so a copy on the string heap was
+     collected under it and `k.to_s` answered the String that took its place. */
+  struct kept_name { const char *lit, *copy; };
+  static struct kept_name *kept = NULL;   /* guarded by the heap lock */
+  static int n = 0, cap = 0;
+  const char *r = NULL;
+  if (!e || !e->cls_name) return SPL("RuntimeError");
+  SP_HEAP_LOCK();
+  /* by the literal's address first, one compare a name; then by its text,
+     for the same name written at another address */
+  for (int i = 0; i < n && !r; i++)
+    if (kept[i].lit == e->cls_name && !strcmp(kept[i].copy, e->cls_name)) r = kept[i].copy;
+  for (int i = 0; i < n && !r; i++) if (!strcmp(kept[i].copy, e->cls_name)) r = kept[i].copy;
+  if (!r && n == cap) {
+    struct kept_name *nk = (struct kept_name *)realloc(kept, sizeof *kept * (size_t)(cap ? cap * 2 : 16));
+    if (nk) { kept = nk; cap = cap ? cap * 2 : 16; }
+  }
+  if (!r && n < cap) {
+    size_t len = strlen(e->cls_name);
+    char *m = (char *)malloc(len + 2);
+    if (m) {
+      m[0] = (char)0xff; memcpy(m + 1, e->cls_name, len + 1);
+      kept[n].lit = e->cls_name; r = kept[n++].copy = m + 1;
+    }
+  }
+  SP_HEAP_UNLOCK();
+  return r ? r : sp_str_dup_external(e->cls_name);   /* out of memory */
 }
 const char *sp_exc_message(volatile sp_Exception *ve) {
   sp_Exception *e = (sp_Exception *)ve;
