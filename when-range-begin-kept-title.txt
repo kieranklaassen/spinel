@@ -1,0 +1,1 @@
+The begin of a String Range written in a when is kept while its end is made

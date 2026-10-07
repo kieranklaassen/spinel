@@ -1,0 +1,15 @@
+The begin of a String Range written in a when is kept while its end is made
+
+    case s
+    when i.to_s..(i + 3).to_s then n += 1
+    end
+
+A when whose Range is written on the spot compares the subject with the
+two ends, each bound to a temp. The begin was held by that temp alone
+while the end was made, so an end that allocates could free it: the arm
+above matched 194 times in 200, and 0 times under SPINEL_GC_STRESS=2.
+The begin's temp is rooted now when both ends may allocate. A begin
+that is a literal or a plain local read, or an end that allocates
+nothing, compiles to the C it did.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
