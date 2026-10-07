@@ -6075,6 +6075,12 @@ void emit_case(Compiler *c, int id, Buf *b, int indent) {
           int inner = nt_ref(nt, conds[j], "expression");
           TyKind at = inner >= 0 ? comp_ntype(c, inner) : TY_UNKNOWN;
           int ta = ++g_tmp;
+          /* the typed search is for a list of the subject's own kind; any
+             other list is asked element by element, as in a case value */
+          TyKind lt = at;
+          if (!((at == TY_INT_ARRAY && pt == TY_INT) || (at == TY_STR_ARRAY && pt == TY_STRING) ||
+                (at == TY_FLOAT_ARRAY && (pt == TY_FLOAT || pt == TY_INT))))
+            at = TY_UNKNOWN;
           switch (at) {
           case TY_INT_ARRAY:
             buf_printf(b, "({ sp_IntArray *_t%d = ", ta); emit_expr(c, inner, b);
@@ -6088,14 +6094,18 @@ void emit_case(Compiler *c, int id, Buf *b, int indent) {
             buf_printf(b, "({ sp_FloatArray *_t%d = ", ta); emit_expr(c, inner, b);
             buf_printf(b, "; _t%d && sp_FloatArray_include(_t%d, _t%d); })", ta, ta, t);
             break;
-          case TY_POLY_ARRAY:
-            buf_printf(b, "({ sp_PolyArray *_t%d = ", ta); emit_expr(c, inner, b);
-            buf_printf(b, "; _t%d && sp_PolyArray_include(_t%d, ", ta, ta);
-            emit_boxed(c, pred, b);
-            buf_puts(b, "); })");
-            break;
           default:
-            buf_puts(b, "0 /* unsupported splat type */");
+            /* x may be an object of the program (a Struct, an Enumerable):
+               the case value does not spread one yet, so here it stays no
+               match, as it was */
+            if (lt == TY_POLY || ty_is_object(lt)) {
+              char st[32]; snprintf(st, sizeof st, "_t%d", t);
+              buf_printf(b, "({ sp_RbVal _t%d = ", ta); emit_boxed(c, inner, b);
+              buf_printf(b, "; !sp_poly_is_user_obj(_t%d) && sp_case_splat_match(", ta);
+              if (pt == TY_POLY) buf_puts(b, st); else emit_boxed_text(c, pt, st, b);
+              buf_printf(b, ", _t%d); })", ta);
+            }
+            else emit_when_splat_test(c, conds[j], t, pt, b);
             break;
           }
         }
