@@ -1,0 +1,30 @@
+A rest made in place outlives the argument beside it
+
+    def note(a, b, *r) = "#{a} #{b} #{r.size}"
+    puts note(ARGV.size, count)
+
+printed r.size 3 for 0 in a plain run of gcc's build once count
+allocated enough to collect; `def note(a, *r, b)` did in clang's.
+emit_rest_pack_kwh writes an empty rest, and a lone typed splat it
+converts whole, as a bare call among the C arguments, and
+emit_args_filled_argv leaves in place an argument bound to a parameter
+that takes no root (an Integer-typed call). C orders the two as it
+likes: where the Array is made first, the argument's call collects it.
+
+Where something beside the rest runs where it is written, the bare
+rest takes the general packing's form: a temp declared and rooted in
+the enclosing frame, assigned where the rest stands. emit_rest_pack_kwh
+answers whether what it wrote is bare, and binding_runs_in_place asks
+each argument, keyword value and default the call leaves out, with the
+parameter that takes it. A pure read runs nothing. What a parameter
+that takes a root is given runs ahead of the call, into its rooted temp
+(emit_arg_rooted), as does a keyword's value the call ran first and
+whatever a keyword rest collects (emit_kwrest_collect). A String
+literal bound to a plain String or a boxed parameter is a static, and a
+Range of pure reads bound to a Range parameter is a value. Anything
+else is a call C orders against the rest as it likes. Any other call is
+emitted as it was.
+
+Test: test/empty_rest_held_beside_argument.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

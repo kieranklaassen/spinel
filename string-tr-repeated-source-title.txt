@@ -1,0 +1,1 @@
+String#tr translates a repeated source character by its last position

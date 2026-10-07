@@ -1,0 +1,32 @@
+String#tr translates a repeated source character by its last position
+
+p "hello".tr("ll", "xy") printed "hexxo"; CRuby prints "heyyo". CRuby
+fills its translation table left to right, so a character the source set
+names more than once (twice in the text, or in a range and beside it:
+"hello".tr("a-yl", "b-zX") is "ifXXp") is translated by its last
+position. sp_str_tr and sp_str_tr_s stop at the first match.
+
+Scanning the set from its end would cost the calls that are right today
+(tr("a-z", "A-Z") on English text: 30% more instructions), so the scan
+stays and the set is looked at instead. Where it is a literal in plain
+ASCII that names no character twice, or a negated one, codegen keeps the
+call to sp_str_tr and the C is what it was. Every other set goes through
+sp_str_tr_any / sp_str_tr_s_any: they read the set in place, and only
+when a character does repeat they hand sp_str_tr the two sets rewritten
+without its earlier positions. tr!, tr_s! and a boxed receiver take the
+same road.
+
+Cost: a call whose set is not such a literal pays for the reading of its
+set, once a call and nothing a character: 134 instructions for a set of
+one member to 581 for "a-zA-Z" with gcc, 118 to 546 with clang.
+
+The two functions are in lib/sp_string.c because lib/sp_str.c sits at
+gcc's inline limit, where one more call changes how sp_str_concat3 is
+compiled; lib/sp_str.c is untouched.
+
+Not changed: tr! answers nil when the text comes out the same, where
+CRuby answers the receiver once a character was in the set.
+
+Test: test/string_tr_repeated_source.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
