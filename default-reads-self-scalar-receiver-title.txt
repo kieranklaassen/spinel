@@ -1,0 +1,1 @@
+A default that reads self runs on a String, Symbol, Range or Float receiver
