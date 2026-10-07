@@ -15159,6 +15159,7 @@ static int poly_local_shows_string(Compiler *c, const char *vn, Scope *vs) {
 static int sa_unseen_element(Compiler *c, int u, int k);
 static __attribute__((noreturn)) void sa_refuse(Compiler *c, int id, int route);
 static void sa_refuse_element(Compiler *c, int e, int u);
+static int sa_object_call_held(Compiler *c, int call);
 /* A String a block parameter holds that no element iterator binds (a
    proc's, a lambda's, the block of a method that yields, `each_char`'s):
    stored into a container whose elements are then mutated, the element
@@ -15183,6 +15184,10 @@ static int strbuf_demand_store_leaf(Compiler *c, int sn, int depth) {
     char rb[256]; int rdefc = -1;
     int as = an_strbuf_alias_source(c, snu);
     if ((as >= 0 && as != snu) || an_reader_ivar_of(c, snu, &rdefc, rb, sizeof rb)) sa_refuse(c, snu, 3);
+    /* `a << o.pick(f)` with `def pick(f) = f ? @s : "n"`, `a << o.id(s)`:
+       @s's or s's String too, through a method that is more than a reader */
+    int held = sa_object_call_held(c, snu);
+    if (held) sa_refuse(c, snu, held);
   }
   if (nt_kind(nt, sn) == NK_LocalVariableReadNode) {
     const char *snm = nt_str(nt, sn, "name");
@@ -31258,6 +31263,52 @@ static int sa_returned_args(Compiler *c, int call, int *out, int cap) {
     }
   }
   return got;
+}
+/* The route that refuses a call on an object whose method answers a String
+   another name holds: 3 where one of its values is an instance variable's
+   String (`def pick(f) = f ? @s : "n"`, a reader on that path; also the
+   value of `@s = v` and of `@s << x`, strbuf_ivar_alias_value), 1 where
+   one is a parameter and the argument here a variable (`o.id(s)`). 0 for
+   any other call, and for a method that may answer nil (an arm left out, a
+   bang's own nil): the store of a nil is right as it is. 0 too for a
+   method that ends in `@s` and answers nothing else, or in `@s ||= v`,
+   whatever its parameters: where the slot holds a handle the call hands
+   that handle out, as a reader's does, and the element is @s. */
+static int sa_object_call_held(Compiler *c, int call) {
+  const NodeTable *nt = c->nt;
+  call = an_unparen(nt, call);
+  if (call < 0 || nt_kind(nt, call) != NK_CallNode || c->strbuf_box[call]) return 0;
+  int r = nt_ref(nt, call, "receiver");
+  if (r < 0 || !ty_is_object(infer_type(c, r))) return 0;
+  int mi = an_call_target_mi(c, call);
+  if (mi <= 0) return 0;
+  int lv[16], route = 0;
+  int n = method_value_leaves(c, mi, lv, 16);
+  /* the reader's form: the method ends in `@s` and answers nothing else */
+  int last = scope_body_last(c, mi);
+  const char *tn = last >= 0 && nt_kind(nt, last) == NK_InstanceVariableReadNode ? nt_str(nt, last, "name") : NULL;
+  int same = tn != NULL && n > 0;
+  for (int i = 0; i < n && same; i++) {
+    int l = an_unparen(nt, lv[i]);
+    const char *ln = l >= 0 && nt_kind(nt, l) == NK_InstanceVariableReadNode ? nt_str(nt, l, "name") : NULL;
+    same = ln && sp_streq(ln, tn);
+  }
+  if (same || (n == 1 && an_memo_reader_ivar(c, mi))) return 0;
+  for (int i = 0; i < n; i++) {
+    int l = an_unparen(nt, lv[i]);
+    for (int d = 0; d < 8 && str_self_call(nt, l); d++) l = an_unparen(nt, nt_ref(nt, l, "receiver"));
+    if (l < 0 || nt_kind(nt, l) == NK_NilNode || sa_bang_receiver(c, l) >= 0) return 0;
+    /* the slot's own String: a read, a write's value, an append chain */
+    int iv = strbuf_ivar_alias_value(nt, lv[i]);
+    TyKind lt = iv >= 0 ? infer_type(c, iv) : TY_UNKNOWN;
+    if (lt == TY_STRING || lt == TY_STRBUF) route = 3;
+  }
+  if (n <= 0 || route) return route;
+  int ra[16], nra = sa_returned_args(c, call, ra, 16);
+  SaName from;
+  for (int i = 0; i < nra; i++)
+    if (sa_name(c, ra[i], &from)) return 1;
+  return 0;
 }
 /* The refusal's message for each route: 0 a global, 1 a method returning
    its parameter, 2 a bang method's result, 3 an Array element. */
