@@ -3716,6 +3716,14 @@ static SP_UNUSED sp_int sp_poly_recv_i(const char *m, sp_RbVal v) { if (SP_UNLIK
 /* sp_poly_recv_i for a method only Integer has: a value of any other class
    raises NoMethodError as nil does, where it was read as an Integer. */
 static SP_UNUSED sp_int sp_poly_recv_integer_i(const char *m, sp_RbVal v) { if (SP_LIKELY(v.tag == SP_TAG_INT)) return v.v.i; if (v.tag != SP_TAG_BIGINT) sp_raise_nomethod(sp_nomethod_msg(m, v)); return sp_poly_to_i(v); }
+/* chr with an encoding on a boxed value that is no Integer: String#chr takes
+   no argument, a Bignum is past any character, and no other value has the
+   method. */
+SP_NORETURN SP_COLD static SP_UNUSED void sp_poly_chr_enc_raise(sp_RbVal v) {
+  if (v.tag == SP_TAG_STR || sp_poly_is_strbuf(v)) sp_raise_cls("ArgumentError", "wrong number of arguments (given 1, expected 0)");
+  if (v.tag == SP_TAG_BIGINT) sp_raise_cls("RangeError", "bignum out of char range");
+  sp_raise_cls("NoMethodError", sp_nomethod_msg("chr", v));
+}
 /* Time.new / Time.utc / Time.local field `i` read out of a box: a nil month
    or day is 1 and a nil hour, minute or second 0, as CRuby defaults them; a
    nil year is the conversion TypeError. */
@@ -4478,9 +4486,9 @@ static sp_bool sp_poly_range_exclude_end_p(sp_RbVal v) {
 static sp_bool sp_poly_positive_p(sp_RbVal v) { if (v.tag == SP_TAG_INT) return v.v.i > 0; if (v.tag == SP_TAG_FLT) return v.v.f > 0.0; if (v.tag == SP_TAG_BIGINT) return sp_bigint_sign((sp_Bigint *)v.v.p) > 0; if (sp_poly_is_rat_kind(v)) return sp_poly_rat_sign(v) > 0; sp_raise_poly_nomethod("positive?", v); }
 static sp_bool sp_poly_negative_p(sp_RbVal v) { if (v.tag == SP_TAG_INT) return v.v.i < 0; if (v.tag == SP_TAG_FLT) return v.v.f < 0.0; if (v.tag == SP_TAG_BIGINT) return sp_bigint_sign((sp_Bigint *)v.v.p) < 0; if (sp_poly_is_rat_kind(v)) return sp_poly_rat_sign(v) < 0; sp_raise_poly_nomethod("negative?", v); }
 /* Integer#even? and #odd? on a boxed value: an Integer answers its parity
-   and a Bignum its own; no other class has the methods. */
-static SP_UNUSED sp_bool sp_poly_even_p(sp_RbVal v) { if (v.tag == SP_TAG_INT) return v.v.i % 2 == 0; if (v.tag == SP_TAG_BIGINT) return sp_bigint_even_p((sp_Bigint *)v.v.p) != 0; sp_raise_poly_nomethod("even?", v); }
-static SP_UNUSED sp_bool sp_poly_odd_p(sp_RbVal v) { if (v.tag == SP_TAG_INT) return v.v.i % 2 != 0; if (v.tag == SP_TAG_BIGINT) return !sp_bigint_even_p((sp_Bigint *)v.v.p); sp_raise_poly_nomethod("odd?", v); }
+   and a Bignum its own; no other class of Ruby's own has the methods. */
+static SP_UNUSED sp_bool sp_poly_even_p(sp_RbVal v) { if (SP_LIKELY(v.tag == SP_TAG_INT)) return v.v.i % 2 == 0; if (v.tag == SP_TAG_BIGINT) return sp_bigint_even_p((sp_Bigint *)v.v.p) != 0; sp_raise_poly_nomethod("even?", v); }
+static SP_UNUSED sp_bool sp_poly_odd_p(sp_RbVal v) { if (SP_LIKELY(v.tag == SP_TAG_INT)) return v.v.i % 2 != 0; if (v.tag == SP_TAG_BIGINT) return !sp_bigint_even_p((sp_Bigint *)v.v.p); sp_raise_poly_nomethod("odd?", v); }
 /* Numeric#arg (angle, phase) and #rect (rectangular) on a boxed number, as
    the typed arms answer them: a Complex its atan2(im, re) and its [re, im],
    a real number 0, or pi when negative, and [self, 0]. `m` is the name

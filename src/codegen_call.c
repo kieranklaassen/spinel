@@ -17116,15 +17116,11 @@ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
       int tvC = ++g_tmp;
       buf_printf(b, "({ sp_RbVal _t%d = ", tvC); emit_boxed(c, recv, b);
       /* as the bare chr beside it: only an Integer has chr with an
-         encoding. String#chr takes no argument, a Bignum is past any
-         character, and no other value has the method; each was read as
-         an Integer and answered a character. */
-      buf_printf(b, "; _t%d.tag == SP_TAG_INT ? sp_box_str(%s(_t%d.v.i))"
-                    " : ((_t%d.tag == SP_TAG_STR || sp_poly_is_strbuf(_t%d))"
-                    " ? sp_raise_cls(\"ArgumentError\", \"wrong number of arguments (given 1, expected 0)\")"
-                    " : _t%d.tag == SP_TAG_BIGINT ? sp_raise_cls(\"RangeError\", \"bignum out of char range\")"
-                    " : (void)sp_raise_nomethod(sp_nomethod_msg(\"chr\", _t%d)), sp_box_nil()); })",
-                 tvC, utf8 ? "sp_int_chr_utf8" : "sp_int_chr", tvC, tvC, tvC, tvC, tvC);
+         encoding. Any other value was read as an Integer and answered a
+         character; it raises now (sp_poly_chr_enc_raise). */
+      buf_printf(b, "; if (SP_UNLIKELY(_t%d.tag != SP_TAG_INT)) sp_poly_chr_enc_raise(_t%d);"
+                    " sp_box_str(%s(_t%d.v.i)); })",
+                 tvC, tvC, utf8 ? "sp_int_chr_utf8" : "sp_int_chr", tvC);
       return 1;
     }
   }
