@@ -9022,6 +9022,10 @@ void emit_class_new(Compiler *c, ClassInfo *ci, Buf *b) {
                  class_ruby_name(c, cid));
     }
     else if (init >= 0 && c->scopes[init].reachable && !c->scopes[init].yields) {
+      unsigned to_root = value_ctor_fields_to_root(c, ci, init);
+      for (int i = 0; i < ci->nivars; i++)
+        if (to_root & (1u << i))
+          buf_printf(b, "  SP_GC_ROOT(self.iv_%s);\n", iv_c(ci->ivars[i] + 1));
       buf_printf(b, "  sp_%s_initialize(&self", c->classes[initcls].c_name);
       Scope *s = &c->scopes[init];
       for (int i = 0; i < s->nparams; i++) buf_printf(b, ", lv_%s", s->pnames[i]);
