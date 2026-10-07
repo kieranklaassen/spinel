@@ -1,0 +1,1 @@
+A boxed Array or String takes a Range key where a class owns []=

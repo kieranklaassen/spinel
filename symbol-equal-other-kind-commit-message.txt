@@ -1,0 +1,23 @@
+A Symbol's equal? or eql? beside another kind of value answers false
+
+`:a.equal?(3)` raised NoMethodError (undefined method 'equal?' for an
+instance of Symbol), and so did eql?, for every argument that is not a
+Symbol by its type: an Integer, a String, nil, an object, and a boxed
+value even where it holds the same Symbol:
+
+    s = :a
+    p s.equal?(3)        # CRuby: false   Spinel: NoMethodError
+    x = [3, :a][1]
+    p s.eql?(x)          # CRuby: true    Spinel: NoMethodError
+
+The Symbol rows of the builtin table (src/builtin_ops.c) had none for
+equal? or eql?. The one arm was the compare of two Symbols by type,
+their ids; an Integer, a Float and a boolean receiver each answer the
+rest. Two rows now ask the boxed pair, sp_poly_equal or sp_poly_eql,
+the receiver read before the argument: a Symbol is itself alone. A
+Symbol slot that holds nil is boxed as nil there and equals nil. Two
+Symbols by type keep the compare they had.
+
+Test: test/symbol_equal_other_kind.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

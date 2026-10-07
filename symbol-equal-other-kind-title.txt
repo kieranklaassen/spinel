@@ -1,0 +1,1 @@
+A Symbol's equal? or eql? beside another kind of value answers false

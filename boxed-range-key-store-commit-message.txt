@@ -1,0 +1,23 @@
+A boxed Array or String takes a Range key where a class owns []=
+
+`x[1..2] = v` on a boxed receiver goes to the class dispatch as soon as a
+class in the program takes `[]=` with two arguments, and every Struct does.
+The dispatch has an arm for each such class; any other receiver stores
+through sp_poly_set_poly with the key boxed. A boxed Range is no Integer,
+so an Array raised TypeError (no implicit conversion of Range into
+Integer). A String has an arm of its own ahead of the switch, for an
+Integer, String, Regexp or boxed key; a Range key missed it, fell to the
+same default, and the store was dropped with no error. With no such class
+in the program the builtin path splices both (sp_poly_splice_range).
+
+sp_poly_set_poly now splices an Array for a Range key. The test sits in
+the branch that raised, so an Integer key pays nothing. The dispatch's
+String arm takes a Range key too: sp_poly_str_aset_key reads its span, a
+plain String is written back to a local or an instance variable and a
+shared one changes in place, as for the other keys.
+
+A boxed key that holds a Range (`k = [1..2, 0][0]; a[k] = [3]`) reaches
+the same Array arm with no class in the program; it raised the same
+TypeError and splices now.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
