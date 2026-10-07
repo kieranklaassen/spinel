@@ -1,7 +1,9 @@
 # A class's own then and yield_self, called with no block, run and answer for
-# its objects on a typed local and when the value is read out of a mixed Array,
-# whether or not the value is used; every other value keeps the Enumerator, and
-# the block form its block.
+# its objects where the receiver cannot be nil as written (a new object, a
+# local that only ever holds one, a read behind a guard, `&.`) and when the
+# value is read out of a mixed Array, whether or not the value is used; every
+# other value, nil in a typed slot too, keeps the Enumerator, and the block
+# form its block.
 class Job
   def then = :job_then
   def yield_self = :job_yield_self
@@ -34,7 +36,7 @@ p Sub.new.then
 p Link.new.then
 s = Step.new(Step.new(nil))
 p s.then.class
-p s.then.then
+p s.then&.then
 
 row = [j, Sub.new, Link.new, s, 5, "s", nil, :sym, 2.5, [1], Plain.new]
 row.each { |x| p x.then.class }
@@ -63,3 +65,14 @@ pair[0].then
 pair[1].then
 pair.each { |x| x.then }
 p t.n
+
+# a receiver that may be nil: the method runs behind a guard or `&.`, and nil
+# keeps Kernel's then
+def pick(flag) = flag ? Tally.new : nil
+u = pick(true)
+p u.then.n if u
+p u&.then&.n
+q = pick(false)
+q.then
+p q&.then
+p q.nil?

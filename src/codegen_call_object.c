@@ -864,14 +864,63 @@ int emit_call_instance_eval_arms(Compiler *c, int id, Buf *b, const NodeTable *n
   return 0;
 }
 
-/* Whether the receiver has `name` from the program: an object whose class
-   defines or reads it, or a boxed value beside a class that does. The call
-   then goes on to the class's own method, as a user-defined dup or clone
-   already does. */
-static int recv_names_own(Compiler *c, int recv, const char *name) {
+/* `X.new` as written */
+static int node_is_new(Compiler *c, int v) {
+  const NodeTable *nt = c->nt;
+  v = unwrap_parens(c, v);
+  if (v < 0 || nt_kind(nt, v) != NK_CallNode) return 0;
+  const char *nm = nt_str(nt, v, "name");
+  int r = nt_ref(nt, v, "receiver");
+  return nm && sp_streq(nm, "new") && r >= 0 && nt_kind(nt, r) == NK_ConstantReadNode;
+}
+
+/* A receiver that is an object and never nil, by what is written: `X.new`,
+   a local of its own scope whose every write stores one, or a local read
+   inside a truthiness guard of it (`if b`, `b && b.then`: the nil fact's
+   guarded read). The nil fact (repr_of's may_nil) is asked too, for a read
+   that can run before the write and a `new` the program defines. It is not
+   asked alone: it takes a builtin iteration's block parameter as not nil
+   without proof (analyze_nil.c). */
+static int recv_is_made_object(Compiler *c, int recv) {
+  const NodeTable *nt = c->nt;
+  recv = unwrap_parens(c, recv);
+  if (recv < 0 || repr_of(c, recv).may_nil) return 0;
+  if (node_is_new(c, recv)) return 1;
+  if (nt_kind(nt, recv) != NK_LocalVariableReadNode) return 0;
+  const char *ln = nt_str(nt, recv, "name");
+  int si = c->nscope[recv];
+  LocalVar *lv = ln ? scope_local(comp_scope_of(c, recv), ln) : NULL;
+  if (!lv || lv->is_cell || lv->proc_rebinds) return 0;
+  if (nil_fact_why(c, recv) == NFW_GUARDED) return 1;
+  if (lv->is_param || lv->is_block_param) return 0;
+  static const NodeKind writes[] = { NK_LocalVariableWriteNode, NK_LocalVariableTargetNode,
+    NK_LocalVariableOrWriteNode, NK_LocalVariableAndWriteNode, NK_LocalVariableOperatorWriteNode };
+  int made = 0;
+  for (int k = 0; k < 5; k++) {
+    NT_FOREACH_KIND(nt, writes[k], w) {
+      const char *wn = nt_str(nt, w, "name");
+      if (c->nscope[w] != si || !wn || !sp_streq(wn, ln)) continue;
+      if (k > 0 || !node_is_new(c, nt_ref(nt, w, "value"))) return 0;
+      made = 1;
+    }
+  }
+  return made;
+}
+
+/* Whether the receiver of call `id` has `name` from the program: an object
+   whose class defines or reads it, or a boxed value beside a class that
+   does. The call then goes on to the class's own method, as a user-defined
+   dup or clone already does. An object not proved never nil is left out:
+   nil answers the builtin, and the class's method would run with no self.
+   Under `&.` the call is made for no nil; a boxed nil takes the builtin by
+   its tag. */
+static int recv_names_own(Compiler *c, int id, int recv, const char *name) {
   TyKind rt = comp_ntype(c, recv);
-  if (ty_is_object(rt))
-    return comp_resolve_member(c, ty_object_class(rt), name, 0, NULL, NULL) != SP_MEMBER_NONE;
+  if (ty_is_object(rt)) {
+    const char *op = nt_str(c->nt, id, "call_operator");
+    return ((op && sp_streq(op, "&.")) || recv_is_made_object(c, recv)) &&
+           comp_resolve_member(c, ty_object_class(rt), name, 0, NULL, NULL) != SP_MEMBER_NONE;
+  }
   return repr_of(c, recv).kind == RK_BOXED && user_defines_or_reads(c, name);
 }
 
@@ -1263,7 +1312,7 @@ int emit_call_freeze_dup_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, 
     int blk = nt_ref(nt, id, "block");
     /* with NO block, an enumerator of one element -- the receiver (#4028),
        named `then` for either name, as CRuby's yield_self is then's alias */
-    if (blk < 0 && nt_ref(nt, id, "arguments") < 0 && !recv_names_own(c, recv, name)) {
+    if (blk < 0 && nt_ref(nt, id, "arguments") < 0 && !recv_names_own(c, id, recv, name)) {
       buf_puts(b, "sp_enum_of_one(");
       emit_boxed(c, recv, b);
       buf_puts(b, ", SPL(\"then\"))");
