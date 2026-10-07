@@ -3809,9 +3809,10 @@ const char *sp_frange_inspect(sp_FloatRange r) {
   const char *lo = (r.omitted & SP_FRANGE_NO_BEGIN) ? ""
                  : (r.omitted & SP_FRANGE_INT_BEGIN) ? sp_sprintf("%lld", (long long)r.first)
                  : sp_float_to_s(r.first);
-  const char *hi = (r.omitted & SP_FRANGE_NO_END) ? ""
-                 : (r.omitted & SP_FRANGE_INT_END) ? sp_sprintf("%lld", (long long)r.last)
-                 : sp_float_to_s(r.last);
+  if (r.omitted & SP_FRANGE_NO_END) return sp_sprintf("%s%s%s", lo, r.excl ? "..." : "..", "");
+  SP_GC_ROOT_STR(lo);   /* held while the upper bound's text is made */
+  const char *hi = (r.omitted & SP_FRANGE_INT_END) ? sp_sprintf("%lld", (long long)r.last)
+                                                   : sp_float_to_s(r.last);
   return sp_sprintf("%s%s%s", lo, r.excl ? "..." : "..", hi);
 }
 sp_RbVal sp_box_frange(sp_FloatRange v) {
