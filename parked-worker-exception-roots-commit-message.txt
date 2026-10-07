@@ -1,0 +1,49 @@
+A rescued exception survives a collection run by another thread
+
+    begin
+      Integer("zz")
+    rescue ArgumentError
+      puts "rescued"
+    end
+    t = Thread.new { a = []; 2000.times { |i| a << "s#{i}" }; a.length }
+    p t.value
+    b = []
+    2000.times { |i| b << "m#{i}" }
+
+Under SPINEL_GC_STRESS=2 this stopped in the main thread's next
+collection: "the mark reached a freed heap string", phase
+globals:exceptions.
+
+The exception stack is thread-local. The worker that collects marks
+its own in sp_mark_in_flight_exceptions: each frame's message and
+object, the slot one past the top that a rescue arm has popped and
+still reads, and it clears every slot above that. A worker parked
+while another one collects hands its roots over in
+sp_publish_worker_roots, and that published only the objects of the
+open frames. sp_raise_cls stores a heap copy of every message, so
+after any rescue the slot one past the top names a heap string: the
+other worker's collection freed it, and the parked worker's own next
+collection marked the freed string. An exception object nothing had
+bound went the same way, and so did whatever a slot above the window
+still named once the next begin put that slot back inside it.
+
+sp_publish_worker_roots now does for a parked worker what
+sp_mark_in_flight_exceptions does for the collecting one. It
+publishes each frame's message, the message and the object one past
+the top and the cause an ensure holds, and it clears the slots above.
+
+test/thread_parked_rescue_rooted.rb prints its .expected on master in
+a plain run and aborts there at SPINEL_GC_STRESS=2, so it joins
+GC_STRESS_TESTS. Each of the five things added here, taken out in
+turn, makes it abort again; the clearing of the slots above shows at
+level 2 in 4 runs of 12 and with SPINEL_GC_STRESS=1
+SPINEL_GC_VERIFY=1 in every run. test/fiber_cross_thread.rb,
+test/ffi_io_buffer_arg.rb and test/io_close_wakes_parked_reader.rb
+abort the same way on master at level 2 and pass with this.
+
+A park runs 291 instructions where it ran 253 (callgrind, a queue
+handed back and forth between two threads 300,000 times), and that
+program's wall time is within its spread from run to run. The
+compiler is untouched.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

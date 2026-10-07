@@ -1,0 +1,1 @@
+A rescued exception survives a collection run by another thread
