@@ -1,0 +1,1 @@
+`return r` up 9 methods defined callee first answers the Array, not nil

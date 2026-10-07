@@ -1,0 +1,1 @@
+A method with an Integer on one path answers the Array from 9 methods, not 0

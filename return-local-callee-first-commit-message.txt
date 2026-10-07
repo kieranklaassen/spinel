@@ -1,0 +1,38 @@
+`return r` up 9 methods defined callee first answers the Array, not nil
+
+  def f9(a)
+    a << 2.5
+  end
+  def f8(x)
+    r = f9(x)
+    return r
+  end
+  # ... f7 to f1 the same, each defined after the method it calls
+  x = []
+  r = f1(x)
+  p r
+
+prints [2.5] in CRuby and nil on master. 8 methods are right. Where
+each callee is defined before its caller a parameter's type goes down
+one call a round, and the loop that binds parameters after the
+inference fixpoint (infer_param_types with the write and return
+re-runs, in an_phase_method_backstops) had eight rounds. Past them the
+local that takes the next method's value had no type. The late lift
+boxes such a local and gives a method the type of its tail, not of
+its `return`, so the method compiled to a void function.
+
+The loop keeps its eight rounds, and goes on only in a program where
+one of them began with a `return` of a local that has no type
+(an_method_awaits_value). There it runs while the rounds move types
+(an_round_cap_step). A method none of whose values has a type is
+boxed whole by the backstops and is right as it is: a chain of
+`return f2(x)`, or one ending in the local with no `return`, keeps
+master's rounds and master's C.
+
+test/method_chain_return_local_callee_first.rb has such chains of 9
+to 30 methods over an Array and a Hash. Of its six sections, alone on
+master, two print nil, one does not build, one raises NoMethodError,
+one crashes and one (8 methods, and 12 ending in the local with no
+`return`) is right.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
