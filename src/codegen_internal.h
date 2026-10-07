@@ -147,6 +147,10 @@ int emit_strbuf_ivar_write_handle(Compiler *c, int v, Buf *b);
 /* A write whose slot holds the --share-strings handle, where a handle is
    taken: the write, valued as that handle (codegen_expr.c) */
 int emit_strbuf_write_handle(Compiler *c, int v, Buf *b);
+/* --share-strings: a value that is a call changing the handle its receiver
+   holds and answering it, stored where the slot holds the handle: that
+   handle (codegen_expr.c) */
+int emit_strbuf_kept_self_call(Compiler *c, int v, Buf *b);
 int operand_may_allocate(Compiler *c, int id);
 /* The same shim over a READER call that hands out the handle
    (`obj.name[0] = "X"`): no name to rename and no ivar node, so the call node

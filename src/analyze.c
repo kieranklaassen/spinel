@@ -31458,6 +31458,17 @@ static int sa_after_all_mutations(Compiler *c, SaOrder *o, int w) {
   }
   return o->after_all && w >= 0 && w < nt->count && o->after_all[w];
 }
+/* --share-strings: is `v` a `replace`, a `prepend` or a `clear` of the name
+   read at `g` itself? The write of its value then takes the receiver's
+   handle (emit_strbuf_kept_self_call), so the two names are one String and
+   nothing is copied. */
+static int sa_kept_handle_call(const NodeTable *nt, int v, int g) {
+  if (an_unparen(nt, nt_ref(nt, v, "receiver")) != g || nt_ref(nt, v, "block") >= 0) return 0;
+  const char *nm = nt_str(nt, v, "name");
+  int a = nt_ref(nt, v, "arguments"), ac = 0;
+  if (a >= 0) nt_arr(nt, a, "arguments", &ac);
+  return nm && ((ac == 1 && (sp_streq(nm, "replace") || sp_streq(nm, "prepend"))) || (ac == 0 && sp_streq(nm, "clear")));
+}
 /* Are the calls of write `w`'s value, from `v` down to the name read at `g`
    (`@t = @s.replace(x)`), the last String mutation the program runs: its
    only mutation sites, or all those of the top-level statement that holds
@@ -31511,12 +31522,13 @@ static void refuse_string_alias_copies(Compiler *c) {
          between two shared handles hands the handle over; through a call
          the write copies even then. `@t = s` and `t = @s.to_s` have walks
          of their own and are left alone. Under --share-strings the plain
-         write and a bang's result are the rule's, as a global's are */
+         write and a bang's result are the rule's, as a global's are, and
+         so is a call whose write takes the handle (sa_kept_handle_call) */
       else if (to.kind == NK_InstanceVariableReadNode && sa_name(c, g, &from) &&
                (from.kind == NK_InstanceVariableReadNode || (from.kind == NK_LocalVariableReadNode && g != v)) &&
                (comp_ntype(c, g) == TY_STRING || comp_ntype(c, g) == TY_STRBUF) &&
                !(from.kind == to.kind && from.cid == to.cid && sp_streq(to.name, from.name)) &&
-               (g != v ? !(c->share_strings && strchr(nt_str(nt, v, "name"), '!'))
+               (g != v ? !(c->share_strings && (strchr(nt_str(nt, v, "name"), '!') || sa_kept_handle_call(nt, v, g)))
                        : !c->share_strings && !(sa_handle(c, &to, 0) && sa_handle(c, &from, 0))) &&
                !sa_after_all_mutations(c, &order, w) &&
                sa_copy_observable(c, &to, &from, g) && !sa_value_mutates_last(c, &order, w, v, g))

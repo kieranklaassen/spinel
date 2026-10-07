@@ -1559,6 +1559,9 @@ void emit_strbuf_value(Compiler *c, LocalVar *lv, int v, Buf *b) {
       emit_expr(c, v, b);
       buf_printf(b, "); %s; })", srefC9);
     }
+    /* a call that changed the handle its receiver holds and answers it:
+       that handle (--share-strings) */
+    else if (shared && emit_strbuf_kept_self_call(c, v, b)) { }
     else {
       /* otherwise a mutable-string local wraps the (const char*) RHS in a
          fresh sp_String so later `<<` appends are amortized O(1). An RHS
@@ -11527,6 +11530,7 @@ static int emit_ivar_cvar_write_stmt(Compiler *c, int id, Buf *b, int indent, co
       else if (strbuf_slot_ref(c, v, srefW, sizeof srefW)) buf_puts(b, srefW);
       /* a write whose slot holds the rule's handle: that handle */
       else if (emit_strbuf_write_handle(c, v, b)) { }
+      else if (emit_strbuf_kept_self_call(c, v, b)) { }
       else {
         buf_puts(b, "sp_String_new_shared(");
         emit_str_expr(c, v, b);

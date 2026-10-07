@@ -1,6 +1,7 @@
 #include "codegen_internal.h"
 #include "repr.h"
 #include "holder.h"
+#include "share.h"
 
 /* defined? support: does this subtree reference a constant the compiler
    cannot resolve? Any such reference makes the whole defined? answer nil
@@ -1103,6 +1104,46 @@ int emit_strbuf_write_handle(Compiler *c, int v, Buf *b) {
   return 1;
 }
 
+/* --share-strings: a value that is a call changing its receiver in place
+   and answering it (`@r = @s.concat(a, b)`, `r = s.replace(x)`, `r =
+   s.clear`), stored where the slot holds the rule's handle. The receiver is
+   a variable that holds the handle (through `<<` and `concat` links), and
+   the rule has put the call's value in that variable's class: the call runs
+   under the handle mark, where its emitter answers the receiver's handle,
+   so both names hold one String. Wrapped, the slot held a second String
+   made from the bytes, which a later change through the receiver did not
+   reach. Answers 0 for any other value. */
+int emit_strbuf_kept_self_call(Compiler *c, int v, Buf *b) {
+  const NodeTable *nt = c->nt;
+  int u = unwrap_parens(c, v);
+  if (!repr_share_rule(c) || u < 0 || nt_kind(nt, u) != NK_CallNode || nt_ref(nt, u, "block") >= 0) return 0;
+  const char *nm = nt_str(nt, u, "name");
+  int a = nt_ref(nt, u, "arguments"), ac = 0;
+  if (a >= 0) nt_arr(nt, a, "arguments", &ac);
+  if (!nm || !((is_string_append_or_prepend(nm) && ac >= 1) || (sp_streq(nm, "replace") && ac == 1) ||
+               (sp_streq(nm, "clear") && ac == 0))) return 0;
+  /* an append's receiver may itself be appends over the variable, which
+     emit_str_append_chain_handle renders as the handle */
+  int base = unwrap_parens(c, nt_ref(nt, u, "receiver"));
+  while (base >= 0 && nt_kind(nt, base) == NK_CallNode && is_string_append_or_prepend(nm)) {
+    const char *ln = nt_str(nt, base, "name");
+    int la = nt_ref(nt, base, "arguments"), lc = 0;
+    if (la >= 0) nt_arr(nt, la, "arguments", &lc);
+    if (!ln || !is_append_concat(ln) || lc < 1 || nt_ref(nt, base, "block") >= 0) return 0;
+    base = unwrap_parens(c, nt_ref(nt, base, "receiver"));
+  }
+  char ref[1024];
+  if (base < 0 || (nt_kind(nt, base) != NK_LocalVariableReadNode && nt_kind(nt, base) != NK_InstanceVariableReadNode) ||
+      !strbuf_slot_ref(c, base, ref, sizeof ref)) return 0;
+  ShareRoute q = share_route(u, base, 0);
+  q.to = u;
+  if (!share_route_defer(c, &q, "")) return 0;
+  int sv = view_push_repr(c, u, VR_STRBUF_BOX, 1);
+  emit_expr(c, u, b);
+  view_pop(c, sv);
+  return 1;
+}
+
 static void emit_strbuf_slot_read(Compiler *c, int id, Repr rp, const char *sref, Buf *b);
 
 /* `REF ||= v` / `REF &&= v` in value position (write node id) on a slot
@@ -1848,6 +1889,7 @@ static int emit_local_ivar_write_expr(Compiler *c, int id, Buf *b, const NodeTab
       char srefW2[1024];
       if (strbuf_slot_ref(c, v, srefW2, sizeof srefW2)) buf_puts(b, srefW2);
       else if (emit_strbuf_write_handle(c, v, b)) { }
+      else if (emit_strbuf_kept_self_call(c, v, b)) { }
       else {
         buf_puts(b, "sp_String_new_shared(");
         emit_str_expr(c, v, b);
