@@ -12673,6 +12673,9 @@ static int emit_attr_global_const_write_stmt(Compiler *c, int id, Buf *b, int in
       free(rx.p);
       const char *acc = comp_ty_value_obj(c, rt) ? "." : "->";
       emit_indent(b, indent);
+      /* the store is the writer's: a frozen receiver raises as `s.n = v` does */
+      char rtmp[32]; snprintf(rtmp, sizeof rtmp, "_t%d", trecv);
+      emit_frozen_obj_guard(c, ty_object_class(rt), rtmp, b);
       if (ivt == TY_STRING) {
         buf_printf(b, "_t%d%siv_%s = sp_str_concat(_t%d%siv_%s, ", trecv, acc, iv_c(rn), trecv, acc, iv_c(rn));
         emit_poly_unboxed(c, val, rhst, "sp_poly_to_s(", b);
@@ -12829,6 +12832,8 @@ static int emit_attr_global_const_write_stmt(Compiler *c, int id, Buf *b, int in
         any = 1;
         emit_indent(b, indent + 1);
         buf_printf(b, "case %d: { sp_%s *_o = (sp_%s *)_t%d.v.p; ", k, cn, cn, trecv);
+        { char ko[320]; snprintf(ko, sizeof ko, "((sp_%s *)_t%d.v.p)", c->classes[k].c_name, trecv);
+          emit_frozen_obj_guard(c, k, ko, b); }
         if (ivt == TY_STRING) {
           buf_puts(b, "_o->iv_"); buf_puts(b, iv_c(rn)); buf_puts(b, " = sp_str_concat(_o->iv_"); buf_puts(b, iv_c(rn));
           buf_puts(b, ", ");
@@ -13503,14 +13508,18 @@ void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
         ivt2 == TY_FIBER || ivt2 == TY_THREAD || ivt2 == TY_QUEUE || ivt2 == TY_MUTEX || ivt2 == TY_CONDVAR || ivt2 == TY_PROC || ivt2 == TY_IO ||
         ivt2 == TY_MATCHDATA || ivt2 == TY_EXCEPTION || ivt2 == TY_REGEX)
       snprintf(cond2, sizeof cond2, "%s%s", is_or ? "!" : "", ref2);
+    /* an instance method's own ivar: a frozen self raises where it stores */
+    int fz2 = cws2 && !cws2->is_cmethod && cws2->class_id >= 0 ? cws2->class_id : -1;
     if (cond2[0]) {
       emit_indent(b, indent);
       buf_printf(b, "if (%s) { ", cond2);
+      emit_frozen_obj_guard(c, fz2, g_self ? g_self : "self", b);
       if (vpre.p) buf_puts(b, vpre.p);
       emit_splice_store_text(c, id, ref2, vval.p ? vval.p : "", ivt2 == TY_STRING, b); buf_puts(b, "; }\n");
     }
     else if (!is_or) {
       emit_indent(b, indent);
+      emit_frozen_obj_guard(c, fz2, g_self ? g_self : "self", b);
       buf_printf(b, "%s = ", ref2);
       emit_coerce(c, v, ivt2, CO_HOLD, "an instance variable's `||=` or `&&=`", b); buf_puts(b, ";\n");
     }
@@ -13549,7 +13558,11 @@ void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
        it, and the guard is the ivar's own: a pointer-backed attribute that
        was never assigned is NULL, not truthy (#5428). */
     char lhs[300]; snprintf(lhs, sizeof lhs, "_t%d->iv_%s", tr, iv_c(attr));
-    buf_puts(b, "(void)"); emit_slot_orw_value(c, ivt, lhs, v, is_or, b); buf_puts(b, "; }\n");
+    char rtmp[32]; snprintf(rtmp, sizeof rtmp, "_t%d", tr);
+    Buf fz; memset(&fz, 0, sizeof fz);
+    emit_frozen_obj_guard(c, class_id, rtmp, &fz);
+    buf_puts(b, "(void)"); emit_slot_orw_value(c, ivt, lhs, v, is_or, fz.p, b); buf_puts(b, "; }\n");
+    free(fz.p);
     return;
   }
   if (emit_ivar_cvar_write_stmt(c, id, b, indent, nt, ty)) return;
