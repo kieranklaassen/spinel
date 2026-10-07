@@ -6598,6 +6598,66 @@ static int find_hoistable_strlen(Compiler *c, int root) {
   return -1;
 }
 
+/* A node that reads a value and does nothing else: evaluated ahead of the
+   length read, it neither raises nor leaves a trace. A sum, difference or
+   product of such reads on Integers and Floats is one too (`i + 1 <
+   s.length`). */
+static int len_read_plain(Compiler *c, int n, int depth) {
+  const NodeTable *nt = c->nt;
+  switch (nt_kind(nt, n)) {
+    case NK_LocalVariableReadNode: case NK_InstanceVariableReadNode: case NK_IntegerNode:
+    case NK_FloatNode: case NK_NilNode: case NK_TrueNode: case NK_FalseNode: case NK_SelfNode:
+      return 1;
+    case NK_CallNode: {
+      const char *nm = nt_str(nt, n, "name");
+      int a = nt_ref(nt, n, "arguments"), ac = 0;
+      const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+      if (depth > 8 || !nm || ac != 1 || !call_is_scalar_op(c, n)) return 0;
+      if (!sp_streq(nm, "+") && !sp_streq(nm, "-") && !sp_streq(nm, "*")) return 0;
+      return len_read_plain(c, nt_ref(nt, n, "receiver"), depth + 1) && len_read_plain(c, av[0], depth + 1);
+    }
+    default: return 0;
+  }
+}
+
+/* Whether the first test of a loop reads `recv`'s length before anything
+   else happens. The hoisted read runs ahead of the loop, so it may only stand
+   for a read Ruby makes there too: one on the right of `&&` / `||`, in an arm
+   of a conditional or behind `&.` may never be reached (`while s && i <
+   s.length` with s nil raised NoMethodError ahead of its own guard), and one
+   after an operand with an effect raised ahead of that effect. */
+static int len_read_first(Compiler *c, int n, int recv) {
+  const NodeTable *nt = c->nt;
+  for (int depth = 0; n >= 0 && depth < 64; depth++) {
+    switch (nt_kind(nt, n)) {
+      case NK_ParenthesesNode: n = nt_ref(nt, n, "body"); break;
+      case NK_StatementsNode: {
+        int bn = 0; const int *bb = nt_arr(nt, n, "body", &bn);
+        n = bn > 0 ? bb[0] : -1;
+        break;
+      }
+      case NK_AndNode: case NK_OrNode: n = nt_ref(nt, n, "left"); break;
+      case NK_CallNode: {
+        const char *op = nt_str(nt, n, "call_operator");
+        if (op && sp_streq(op, "&.")) return 0;
+        int r = nt_ref(nt, n, "receiver");
+        if (r == recv) return 1;
+        if (r >= 0 && !len_read_plain(c, r, 0)) { n = r; break; }
+        /* the receiver read, the arguments come next, left to right */
+        int a = nt_ref(nt, n, "arguments"), ac = 0;
+        const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+        int k = 0;
+        while (k < ac && len_read_plain(c, av[k], 0)) k++;
+        if (k == ac) return 0;
+        n = av[k];
+        break;
+      }
+      default: return 0;
+    }
+  }
+  return 0;
+}
+
 /* Whether `root`'s subtree mutates the local `name` (reassignment or an
    in-place mutating method on it). Mirrors legacy body_mutates_var?. */
 static int subtree_changes_local(Compiler *c, int root, const char *name) {
@@ -7079,13 +7139,14 @@ void emit_while(Compiler *c, int id, Buf *b, int indent, int is_until) {
   }
   /* Hoist a loop-invariant string length out of the loop: if the predicate
      tests `s.length`/`s.size` for a string local `s` that neither the body
-     nor the predicate itself mutates,
+     nor the predicate itself mutates, and its first test reads that length
+     before anything else (len_read_first),
      compute strlen once before the loop and reuse it (avoids O(n) strlen per
      iteration). Save/restore the outer hoist state for nested loops. */
   const char *sv_hvar = g_hoist_len_var, *sv_hrecv = g_hoist_len_recv;
   char hbuf[24];
   int hr = find_hoistable_strlen(c, pred);
-  if (hr >= 0) {
+  if (hr >= 0 && len_read_first(c, pred, hr)) {
     const char *hn = nt_str(nt, hr, "name");
     if (hn && !subtree_changes_local(c, body, hn) && !subtree_changes_local(c, pred, hn)) {
       int ht = ++g_tmp;
