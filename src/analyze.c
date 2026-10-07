@@ -32674,7 +32674,7 @@ typedef struct { int cap; int nseen, cseen; uint64_t *seen; int nodes; } AnRound
    cross (an_type_slots), a slot widening a few times at most.
    Called as a round ends. */
 static void an_round_cap_step(Compiler *c, AnRoundCap *rc, int iter) {
-  if (iter < 64) return;
+  if (2 * iter < rc->cap) return;
   int grew = c->nt->count != rc->nodes;
   rc->nodes = c->nt->count;
   uint64_t st = an_type_state(c);
@@ -32686,6 +32686,18 @@ static void an_round_cap_step(Compiler *c, AnRoundCap *rc, int iter) {
   }
   rc->seen[rc->nseen++] = st;
   if (!grew && iter + 1 == rc->cap && rc->cap < 128 + 4 * an_type_slots(c)) rc->cap++;
+}
+
+/* Is a `return`'s value still untyped, in a method that has no return type
+   yet? While it is the method compiles to a void function, and each caller
+   takes nil for the value. */
+static int an_return_awaits_type(Compiler *c) {
+  NT_FOREACH_KIND(c->nt, NK_ReturnNode, rid) {
+    Scope *rs = comp_scope_of(c, rid);
+    if (rs && rs->reachable && rs->ret == TY_UNKNOWN && nt_ref(c->nt, rid, "arguments") >= 0 &&
+        return_node_type(c, rid) == TY_UNKNOWN) return 1;
+  }
+  return 0;
 }
 
 /* The inference fixpoint: two rounds with the proc-form clones made between them, then the optimistic re-narrow of the slots a transient poly locked (analyze_program's steps, in their order) */
@@ -34245,12 +34257,23 @@ static void an_phase_method_backstops(Compiler *c) {
      establishes. (#3459) */
   for (int iter = 0; iter < 8; iter++) if (!infer_container_flow(c)) break;
 
+  /* Eight rounds, and more only where one of them began with a `return`
+     whose value was still untyped (an_return_awaits_type): there the rounds
+     go on while they move types (an_round_cap_step). A type crosses one
+     method a round here, and sixteen methods of `r = f2(x); return r` left
+     the first of them void: `p f1([])` printed nil for the Array the last
+     one fills. */
   g_ret_no_new_poly = 1;
-  for (int iter = 0; iter < 8; iter++) {
+  AnRoundCap wc = { 8, 0, 0, NULL, 0 };
+  int waited = 0;
+  for (int iter = 0; iter < wc.cap; iter++) {
+    if (!waited) waited = an_return_awaits_type(c);
     int ch = infer_write_types(c);
     ch |= infer_return_types(c);
     if (!ch) break;
+    if (waited) an_round_cap_step(c, &wc, iter);
   }
+  free(wc.seen);
   g_ret_no_new_poly = 0;
 
   /* Widen an ivar shared with a push-widened helper param -- after the write
