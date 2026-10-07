@@ -1,0 +1,7 @@
+two locals: ["abcxdefy"]
+in parentheses: ["abcxdefy"]
+called by name: ["abcxdefy"]
+two instance variables: ["abcxdefy"]
+an assignment's value: ["abcxdefy"]
+a sequence's last statement: ["abcxdefy"]
+instance variables assigned: ["abcxdefy"]

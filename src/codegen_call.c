@@ -13365,6 +13365,34 @@ void emit_array_splice(Compiler *c, int id, int recv, TyKind rt,
   buf_printf(b, "%s; })", valtmp);
 }
 
+/* What evaluating an operand of a String sum does that the node table does
+   not show. 2: it ends in the read of a shared String slot, a fresh copy
+   that nothing holds (operand_may_allocate): the read itself, the last
+   statement of a parenthesised sequence (`(k; s)`), and an assignment to
+   such a variable, whose value is read back out of the slot (`(x = s)`).
+   1: it assigns such a copy to a plain variable, which holds it. 0: neither. */
+static int str_plus_operand_copy(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  while (id >= 0 && nt_kind(nt, id) == NK_ParenthesesNode) {
+    int body = nt_ref(nt, id, "body"), n = 0;
+    const int *bd = body >= 0 ? nt_arr(nt, body, "body", &n) : NULL;
+    id = n > 0 ? bd[n - 1] : -1;
+  }
+  if (id < 0) return 0;
+  const char *nm = nt_str(nt, id, "name");
+  if (nt_kind(nt, id) == NK_LocalVariableWriteNode) {
+    Scope *sc = nm ? comp_scope_of(c, id) : NULL;
+    if (repr_of_slot(c, sc ? scope_local(sc, nm) : NULL).kind == RK_STRBUF) return 2;
+    return str_plus_operand_copy(c, nt_ref(nt, id, "value")) ? 1 : 0;
+  }
+  if (nt_kind(nt, id) == NK_InstanceVariableWriteNode) {
+    int cid = nm ? strbuf_ivar_owner(c, id) : -1;
+    int iv = cid >= 0 ? comp_ivar_index(&c->classes[cid], nm) : -1;
+    if (iv >= 0 && c->classes[cid].ivar_types[iv] == TY_STRBUF) return 2;
+    return str_plus_operand_copy(c, nt_ref(nt, id, "value")) ? 1 : 0;
+  }
+  return operand_may_allocate(c, id) ? 2 : 0;
+}
 static int emit_array_arith_call(Compiler *c, int id, Buf *b) {
   const NodeTable *nt = c->nt;
   const char *name = nt_str(nt, id, "name");
@@ -13593,7 +13621,12 @@ static int emit_array_arith_call(Compiler *c, int id, Buf *b) {
          allocates or forces a GC (chained `a + b + c` with side-effecting
          operands -- concat_chain_operand_gc_root). Recurses naturally: a
          chain's left operand is itself a `+` and gets its own rooted block.
-         Pure literal / bare-read operands need no rooting. */
+         Pure literal / bare-read operands need no rooting. Two reads of
+         shared String slots are two fresh copies the node table does not
+         show (str_plus_operand_copy): the first is held by nothing while
+         the second is made, or while the other operand makes a copy of its
+         own. The guard of `s&.+(t)` has read the receiver into a rooted
+         temporary before it comes here. */
       /* A poly operand (statically typed string here, holds a string at
          runtime) must be coerced to a C string for sp_str_concat. */
       /* emit_str_expr coerces both a TY_POLY operand (sp_poly_to_s) and the
@@ -13613,7 +13646,10 @@ static int emit_array_arith_call(Compiler *c, int id, Buf *b) {
           return 1;
         }
       }
-      if (subtree_may_allocate(nt, recv) || subtree_may_allocate(nt, argv[0])) {
+      int cr = arg_ran_first(recv, 0) ? 0 : str_plus_operand_copy(c, recv);
+      int ca = arg_ran_first(argv[0], 0) ? 0 : str_plus_operand_copy(c, argv[0]);
+      if (subtree_may_allocate(nt, recv) || subtree_may_allocate(nt, argv[0]) ||
+          (cr && ca && cr + ca > 2)) {
         int ta = ++g_tmp, tb = ++g_tmp;
         buf_printf(b, "({ const char *_t%d = ", ta); emit_str_expr(c, recv, b);
         buf_printf(b, "; SP_GC_ROOT(_t%d); const char *_t%d = ", ta, tb);
