@@ -1272,6 +1272,7 @@ static inline int singleton_visible_ci(Compiler *c, int ci) {
 }
 int        class_var_static_ci(Compiler *c, int node);  /* local holding one class const */
 int        class_recv_static_ci(Compiler *c, int node); /* constant or local naming one class */
+int        class_recv_own_eqq(Compiler *c, int node);   /* its own `def self.===`, or -1 */
 int        dynamic_new_may_reach(Compiler *c, int call_id, int cid);  /* k.new can build cid */
 int        anon_struct_ci_for_value(Compiler *c, int val);  /* k = Struct.new(...) value node */
 const char *struct_call_dup_member(Compiler *c, int callnode);  /* first duplicate member sym name, or NULL */

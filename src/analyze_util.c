@@ -618,6 +618,28 @@ int class_recv_static_ci(Compiler *c, int node) {
   return class_var_static_ci(c, node);
 }
 
+/* The class method `Klass === x` calls: the receiver names one class at
+   compile time, that class defines === itself (`def self.===`) and the
+   method's one parameter is boxed. -1 for any other receiver; for a ===
+   whose `super` has no === of the program above it (that super is
+   Module#===, which the is_a? fold answers); and for a parameter the written
+   calls have given one type: the body compiled for that type can stop where
+   CRuby answers (`o.equal?(self)` for a Symbol), so the fold stays. */
+int class_recv_own_eqq(Compiler *c, int node) {
+  int def = -1;
+  int ci = class_recv_static_ci(c, node);
+  int own = ci >= 0 ? comp_cmethod_in_chain(c, ci, "===", &def) : -1;
+  for (int mi = own; mi >= 0 && scope_body_has_super(c, mi); ) {
+    int up = def >= 0 ? c->classes[def].parent : -1;
+    mi = up >= 0 ? comp_cmethod_in_chain(c, up, "===", &def) : -1;
+    if (mi < 0) return -1;
+  }
+  if (own < 0) return -1;
+  Scope *ws = &c->scopes[own];
+  LocalVar *wp = ws->nparams == 1 ? scope_local(ws, ws->pnames[0]) : NULL;
+  return wp && wp->type == TY_POLY ? own : -1;
+}
+
 /* The literal symbol behind a symbol-typed expression: a SymbolNode itself,
    or a local variable whose only write (in its scope, plain write) is one.
    Lets inject(:op)-style operator selection see through `s = :+; a.inject(s)`.

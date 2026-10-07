@@ -4470,8 +4470,12 @@ static int infer_class_module_call(Compiler *c, int id, const NodeTable *nt, con
     /* #superclass is a (nullable) class value: BasicObject's is the nil-class
        sentinel, carried within TY_CLASS (#2654). */
     if (argc == 0 && sp_streq(name, "superclass")) { *out = TY_CLASS; return 1; }
-    if (argc == 1 && (sp_streq(name, "==") || sp_streq(name, "eql?") || sp_streq(name, "!=") ||
-                      sp_streq(name, "==="))) { *out = TY_BOOL; return 1; }
+    if (argc == 1 && (sp_streq(name, "==") || sp_streq(name, "eql?") || sp_streq(name, "!=")))
+      { *out = TY_BOOL; return 1; }
+    /* Module#=== is a boolean. A class that defines === itself answers with
+       its own method's type, from the class-method dispatch below. */
+    if (argc == 1 && sp_streq(name, "===") && class_recv_own_eqq(c, recv) < 0)
+      { *out = TY_BOOL; return 1; }
     /* Class ordering is tri-state: true/false when related, nil when the two
        classes have no subclass relationship (CRuby). <=> is -1/0/1 or nil.
        A class that defines the operator itself answers with its own method's

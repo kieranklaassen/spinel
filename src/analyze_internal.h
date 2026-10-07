@@ -202,6 +202,7 @@ const int *poly_recv_classes(Compiler *c, int call, int *n);
 int an_arg_is_shared_handle(Compiler *c, int node);
 /* Last statement of a scope's body, or -1. */
 int scope_body_last(Compiler *c, int mi);
+int scope_body_has_super(Compiler *c, int scope_idx);   /* analyze_scope.c */
 /* The expressions whose value method scope mi answers (its body's and each
    `return`'s; see analyze_pass.c). Answers the count, or -1. */
 int method_value_leaves(Compiler *c, int mi, int *out, int cap);

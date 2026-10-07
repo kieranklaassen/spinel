@@ -2638,7 +2638,10 @@ int emit_call_class_value_arms(Compiler *c, int id, Buf *b, const NodeTable *nt,
       const char *rvt2 = nt_type(nt, recv);
       const char *rcn2 = (rvt2 && (sp_streq(rvt2, "ConstantReadNode") ||
                                    sp_streq(rvt2, "ConstantPathNode"))) ? nt_str(nt, recv, "name") : NULL;
-      if (rcn2 && (comp_class_index(c, rcn2) >= 0 ||
+      /* a class that defines === itself (`def self.===`) keeps its own
+         method, which the class-method dispatch below calls */
+      if (class_recv_own_eqq(c, recv) >= 0) { }
+      else if (rcn2 && (comp_class_index(c, rcn2) >= 0 ||
                    is_boolean_class_name(rcn2) ||
                    /* the roots: every object is one, and `Object === x` used to
                       fall past this arm into the missing-method gate */
@@ -2676,7 +2679,7 @@ int emit_call_class_value_arms(Compiler *c, int id, Buf *b, const NodeTable *nt,
          class, `Object`). It used to fall through to the missing-method
          gate, which took `arr.grep(Integer)` down with it the moment the
          literal became a parameter. */
-      if (!rcn2) {
+      else if (!rcn2) {
         int o = ++g_tmp;
         buf_printf(b, "({ sp_Class _cl%d = ", _clt); emit_expr(c, recv, b);
         buf_printf(b, "; sp_RbVal _t%d = ", o); emit_boxed(c, argv[0], b);
