@@ -1,0 +1,28 @@
+A `when` arm held boxed asks an object's own ===
+
+An object of a class that defines === matched as a `when` arm only
+while the compiler knew its class. Read out of an Array or a Hash, or
+through a block parameter, it was compared and never asked:
+
+    class Above
+      attr_accessor :n
+      def initialize(n) = @n = n
+      def ===(o) = o > @n
+    end
+    [Above.new(1), Above.new(5)].each do |pat|
+      case 3
+      when pat then puts "above #{pat.n}"   # CRuby: above 1
+      end                                   # Spinel: nothing
+    end
+
+=== joins the operators sp_user_binop_dispatch carries, as == and []
+did, and in a program that has such a class emit_when_boxed_test ends
+in sp_poly_when_eq, which asks that table before sp_poly_case_eq and
+holds the pattern and the subject across the call (the pattern may be
+a method's value and the method may allocate). An operand the method's
+parameter cannot take keeps sp_poly_case_eq's answer. A program with
+no class that defines === keeps its C.
+
+Test: test/case_when_boxed_user_case_eq.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

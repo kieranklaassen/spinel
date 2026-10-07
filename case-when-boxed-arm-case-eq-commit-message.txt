@@ -1,0 +1,27 @@
+A `when` arm held boxed is asked ===, not ==
+
+`case v when pat` is `pat === v`. An arm held boxed (a block
+parameter, an element of an Array of several kinds, a Hash value, a
+parameter given several kinds) called a Proc and compared every other
+pattern with sp_poly_eq, so a Range or a Class held that way never
+matched:
+
+    [(1..3), Integer, 2].each do |pat|
+      case 2
+      when pat then puts "hit"     # CRuby: hit, hit, hit
+      else puts "miss"             # Spinel: miss, miss, hit
+      end
+    end
+
+and a Range or a Class subject matched itself (`(1..3) === (1..3)` and
+`Integer === Integer` are false).
+
+emit_when_boxed_test now ends in sp_poly_case_eq, which the call
+`pat === v` on a boxed receiver already ends in: a Class its
+instances, a Range its cover, a Regexp its match against a String,
+else equality with the same object first. No arm that matched by
+equality stops matching.
+
+Test: test/case_when_boxed_pattern.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
