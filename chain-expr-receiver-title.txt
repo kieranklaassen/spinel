@@ -1,0 +1,1 @@
+A String mutator chain on a conditional receiver keeps every link

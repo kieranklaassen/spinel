@@ -1,0 +1,35 @@
+`s[re, n] = v` holds the head while it cuts the tail for any value
+
+`s[/re/, n] = v` with a value that is not typed String (a method that
+returns a String or an Integer, a value out of an Array of several
+kinds) lost a piece of the String in a plain run:
+
+    def pick(i) = i == 0 ? "XY" : 5
+    bad = 0
+    4000.times do |i|
+      n = 700 + (i * 37) % 900
+      s = +("a" * n + "ll" + "b" * n)
+      s[/(l)(l)/, 2] = pick(0)
+      bad += 1 unless s.count("a") == n && s[n + 1, 2] == "XY"
+    end
+    p bad   # 4; CRuby 0
+
+With the value in a local first it prints 4 as well; under
+SPINEL_GC_STRESS=1 either prints 3,861, and under SPINEL_GC_STRESS=2
+the statement aborts on a freed String.
+
+This arm built the answer in one nested call,
+sp_str_concat(sp_str_concat(head, value), tail): the joined head and
+value were in flight, held by nothing, while the tail allocated, and a
+collection there freed them. The String-value arm above it had the
+same shape and was fixed the same way: the head goes into a rooted
+temporary, the value into a temporary that is rooted unless it is a
+plain read, and sp_str_concat3 joins them with the tail. The tests,
+their order and the messages are untouched.
+
+One allocation fewer a statement: 140 instructions fewer with the
+value in a local (749,581,480 to 721,489,733 over 200,000 statements,
+callgrind), 125 fewer with the value read from a call.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+

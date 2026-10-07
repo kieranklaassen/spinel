@@ -1,0 +1,31 @@
+slice!(re, n) holds the head of the receiver while it cuts the tail
+
+slice! with a Regexp and a group rebuilds the receiver from what is left
+of it. The arm wrote that as one C expression,
+sp_str_concat(sp_str_byteslice(..), sp_str_byteslice(..)): whichever
+piece C built first was held by nothing while the other was allocated,
+since sp_str_concat roots its parameters only once entered. A collection
+between the two freed the first piece, and the receiver came back with
+other bytes in its place:
+
+    bad = 0
+    i = 0
+    while i < 4000
+      n = 700 + (i * 37) % 900
+      s = +("a" * n + "ll" + "b" * n)
+      r = s.slice!(/(l)(l)/, 2)
+      bad += 1 unless s.count("a") == n && s.count("b") == n
+      i += 1
+    end
+    p bad
+
+printed 2 in a plain run, 1191 with SPINEL_GC_STRESS=1, and stopped with
+"the mark reached a freed heap string" at level 2; CRuby prints 0.
+
+The head now goes into a rooted temp before the tail is cut, as the
+index assignment by a group does beside it.
+
+Test: test/string_slice_bang_group_rooted.rb, also in GC_STRESS_TESTS.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+

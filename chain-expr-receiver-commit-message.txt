@@ -1,0 +1,38 @@
+A String mutator chain on a conditional receiver keeps every link
+
+    a = +""; b = +""; c = ARGV.size > 5
+    (c ? a : b) << "1" << "2" << "3" << "4" << "5" << "6" << "7" << "8"
+    p b
+
+printed "1234567" under the warning that type inference did not
+converge, where CRuby prints "12345678". At 34 links the compiler
+crashed.
+
+desugar_mutator_receiver_value moves a mutator call into the arms of its
+conditional receiver, one call a round, and leaves a paren where the
+call stood. The next link has to cross every paren the links before it
+left, a round each, so a link took about twice the rounds of the one
+before. The eighth was still outside the arms when the fixpoint's 128
+rounds ran out, and it and each later link appended to a copy. The
+parens nest once a link, and at 34 links the analyzer's walk over them
+ran out of stack.
+
+The links of a chain now go into the arms together, in three rounds at
+any length, when all of this holds:
+
+- nothing reads the chain's value. A conditional's value is a copy
+  where a write takes it, so a chain that is assigned, passed or
+  compared moves a call a round, as it did;
+- all links are `<<`, or each is one the chain's write-back passes on
+  its way to the variable (insert at 0 or -1, prepend, concat, replace,
+  `<<`; pull request 7778), the last one of those but replace, or a
+  bang;
+- every path of the receiver ends in a String local no closure writes,
+  or for a chain of `<<` alone an instance variable;
+- a chain of `<<` alone has at most 65 calls, the number the append
+  chain's emitter writes. A longer one would have built and appended
+  65; it moves a call a round and the compiler crashes on it as before.
+
+Any other chain is rewritten node for node as before.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

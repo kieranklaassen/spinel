@@ -1,0 +1,1 @@
+slice!(re, n) holds the head of the receiver while it cuts the tail
