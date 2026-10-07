@@ -1,0 +1,26 @@
+`s += v` with a boxed right side takes String#+'s strict conversion
+
+def label(tag, v)
+  tag += v
+  tag
+end
+p label("id=".dup, "a")
+p label("id=".dup, 7)
+
+printed "id=7" for the second call; CRuby raises "no implicit conversion
+of Integer into String", as spinel does for `tag = tag + v`. The call
+with "a" boxes v for both callers. A boxed :name was added as "name", an
+object that has to_str as its inspect text, and nil as nothing.
+
+`s = s + v` converts a boxed right side with sp_poly_arg_str_chk. Five
+places that emit a compound String `+=` kept sp_poly_to_s, the
+conversion of puts: a local (emit_op_assign_str_rhs), an element of an
+Array of Strings (emit_index_op_write), and the three String arms of
+emit_attr_global_const_write_stmt, for `k.s += v` on an attribute, a
+Struct member and a boxed receiver. All five take the strict one now: a
+String is itself, an object is asked for to_str, anything else is the
+TypeError that names its class.
+
+Test: test/string_plus_assign_boxed.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
