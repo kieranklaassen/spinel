@@ -3823,6 +3823,23 @@ static SP_INLINE sp_bool sp_poly_rb_equal(sp_RbVal a, sp_RbVal b) {
     return TRUE;
   return sp_poly_eq(a, b);
 }
+/* A boxed needle of an Integer Array's search that is a number of another
+   kind. Array#index and #include? ask `element == needle`, and such a number
+   can equal an Integer: 1.0, -0.0, Rational(2, 1). It equals at most one, and
+   that Integer comes back boxed, to be searched for as an Integer needle is;
+   any other value comes back as it is, and is not there. The nil slot's word
+   (-2**63) is no element. */
+static SP_NOINLINE sp_RbVal sp_poly_int_needle(sp_RbVal v) {
+  if (v.tag == SP_TAG_FLT) {
+    sp_float f = v.v.f;
+    if (f > (sp_float)INTPTR_MIN && f < -(sp_float)INTPTR_MIN && f == (sp_float)(sp_int)f)
+      return sp_box_int((sp_int)f);
+  } else if (sp_poly_is_rational(v) && v.v.p) {
+    sp_Rational *r = (sp_Rational *)v.v.p;
+    if (r->den == 1 && r->num != SP_INT_NIL) return sp_box_int(r->num);
+  }
+  return v;
+}
 /* `a == b` (or `!=`) answered as a value: a program object's own == gives
    whatever it returns (Ruby's == may answer any object), `!=` its
    negation; anything else the runtime equality. */
