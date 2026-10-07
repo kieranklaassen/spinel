@@ -1,0 +1,25 @@
+A &. to a method that answers nil builds with an argument
+
+    class Logger
+      def info(msg) = puts("info: #{msg}")
+    end
+    log = ARGV.size > 5 ? nil : Logger.new
+    log&.info("started")
+
+did not build: "variable or field '_snr9' declared void". Where the
+value arm of a `&.` on a receiver with a C nil of its own hoists
+statements, emit_call_safe_nav_arms makes the guard an `if` and keeps
+the call's value in a _snr temp declared in the call's C type. Every
+argument of a call on an object runs into a temp ahead of it, so any
+argument hoists; and a method whose body ends in puts, or in nil,
+compiles to a void function, so the temp was `void _snr9 = 0;`.
+
+A guard of a call with no value is now the statement alone: the hoisted
+statements and the call inside the `if`, no temp. What reads the call
+reads `((void)0)`, a void expression as the unhoisted guard
+`(nil ? 0 : (call))` already is. A guard whose call has a value is
+emitted as it was.
+
+Test: test/safe_nav_void_call_arg_temp.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
