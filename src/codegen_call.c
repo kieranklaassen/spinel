@@ -18022,6 +18022,7 @@ int emit_poly_isa_test(Compiler *c, const char *cn, const char *v, int exact, Bu
   else if (sp_streq(cn, "NilClass")) buf_printf(b, "%s.tag == SP_TAG_NIL", v);
   else if (sp_streq(cn, "TrueClass"))  buf_printf(b, "(%s.tag == SP_TAG_BOOL && %s.v.b)", v, v);
   else if (sp_streq(cn, "FalseClass")) buf_printf(b, "(%s.tag == SP_TAG_BOOL && !%s.v.b)", v, v);
+  else if (sp_streq(cn, "Numeric") && exact) buf_puts(b, "0");   /* no number's own class */
   else if (sp_streq(cn, "Numeric"))
     buf_printf(b, "(%s.tag == SP_TAG_INT || %s.tag == SP_TAG_FLT || %s.tag == SP_TAG_BIGINT || "
                   "(%s.tag == SP_TAG_OBJ && (%s.cls_id == SP_BUILTIN_RATIONAL || "
