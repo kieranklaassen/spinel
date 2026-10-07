@@ -1,0 +1,58 @@
+String#concat and #prepend read several arguments in order and hold each
+
+Several arguments are nested in one C expression,
+`sp_str_concat(sp_str_concat(s, a), b)`. C does not say which operand
+of a call is built first, and nothing holds the text one argument made
+while the next is built:
+
+    n = 0
+    s = +"s"
+    p s.concat((n = 1; "x"), n.to_s)    # "sx1"; "sx0" built with gcc
+
+    300.times { |i| s = +"r#{i}"; x = s.concat("a#{i}", "b#{i}") }
+
+The loop aborts under SPINEL_GC_STRESS=2 with gcc and with clang.
+
+The arguments are now joined one statement at a time into a rooted temp
+(emit_str_args_joined): in emit_str_mutator_call, for concat used as a
+value and for prepend, on a String one name holds; and in the prepend
+arm of emit_string_handle_append, on a String two names hold, ahead of
+the ordered prepend that is there.
+
+Ruby hands concat the Strings themselves and reads their text when the
+call runs, after every argument: `s.concat(t, (t << "z"; "a"))` appends
+"tz". So a call is joined only where the join reads no String earlier
+than Ruby does (str_args_nested). Each argument is one of four: made
+where it stands (a literal, an interpolation of two parts or more, a
+builtin that builds its String); followed only by arguments that run no
+code of the program's; a String two names hold, read in the join
+through its handle; or a local only this call can assign, read in the
+join. The receiver of concat is asked the same (str_joined_recv). Code
+an argument hoists is written where the argument stands.
+
+Every other call compiles as before: arguments that are all literals
+and plain reads, a global's among them, which make nothing and need no
+order; an Integer among the arguments, which Ruby converts or refuses
+when the call runs; an argument the join could read too early (a
+global, a constant, an attribute, an element, a captured local or a
+method's result, followed by one that may run code); and more than 32
+arguments.
+
+Left as they are:
+
+- concat as a statement on a variable, which has an emitter of its own
+  and reads each argument where it stands: `s.concat(t, (t << "z";
+  "a"))` appends "t" there;
+- a prepend whose argument appends to its receiver:
+  `s.prepend((s << "z"; "b"), "x#{1}")` answers "bx1s" for "bx1sz";
+- a boxed String (a Hash's value), which goes through the boxed
+  dispatch;
+- the calls kept above, where the text an argument made can still be
+  lost under SPINEL_GC_STRESS.
+
+test/string_concat_args_held.rb goes through a local, a receiver that
+is no variable, an element and an instance variable, as a value and as
+a statement. On master it differs from Ruby in a plain run with gcc and
+with clang; it is added to GC_STRESS_TESTS.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
