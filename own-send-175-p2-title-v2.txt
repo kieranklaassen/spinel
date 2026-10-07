@@ -1,0 +1,1 @@
+A computed send beside a class's own send still names its method
