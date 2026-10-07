@@ -1,0 +1,55 @@
+A call to a yielding method the inliner declines is refused when its value is typed too
+
+  def wide(x)
+    a1 = x
+    ...                     # 127 locals in all
+    yield a127
+  end
+  p wide(1) { |v| v + 1 }
+
+prints 2 in CRuby and did not build: the C called `sp_wide`, which
+nothing defines. A method that yields has no function of its own. Each
+call is written out in place, its locals renamed through a table of 128
+names (MAX_RENAME), and with 128 names to add the inliner declines the
+call. emit_inline_expr refuses such a call by name where its value has
+no scalar type; where it has one it handed back the inliner's answer,
+and the plain call was emitted.
+
+The refusal now covers both. The same table runs out along a chain of
+yielding methods whose blocks yield on, each call being written out
+inside the one before: 26 methods of four parameters, or 12 of ten, did
+not link either and are refused.
+
+The cost is a call that never runs. Master's C names a function that
+nothing defines, and the program links only where the C compiler drops
+the call. Of 44 never-run forms, 33 are right on master and refused
+now. 17 are written dead: `p wide(1) { |v| v + 1 } if false`, the
+statement `if false`, `unless true`, `while false`, `until true`, the
+else of `if true`, `elsif false`, a ternary's dead arm, a `when` that
+cannot match, `false &&`, `nil &&`, `true ||`, and the call after a
+`return`, a `break`, a `next`, a rescued `raise` or an `exit`. 16 are
+false by a value the C compiler follows, and do not look dead:
+
+  def dbg? = false
+  p wide(1) { |v| v + 1 } if dbg?
+
+and likewise a class method that answers false, a false or nil
+constant, a constant compared (`LEVEL > 1`, `MODE == :dev`), a false or
+nil local, `unless ok`, a false global, `n = 3; ... if n > 5`,
+`mode = :prod; ... if mode == :dev`, an instance variable set false in
+initialize, a `while` never entered and `0.times { ... }`. Master's
+rightness there is the C optimiser's: at -O 0, 19 of the 33 do not
+link on master with gcc or with clang, and 3 more not with clang.
+Master refuses each of the 33 today where the block answers nil.
+
+The table is not changed. A call with a block to a method of 128 names
+that yields is still not compiled; it now says so, and
+docs/limitations.md has the row. The same method called without a block
+is not a block-driving call and still fails to link: another road, not
+taken here.
+
+test/reject/yielding_method_locals_past_inline_room.rb is the program
+above, in reject-test and with its two records in
+test/collect/refusals.expected.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
