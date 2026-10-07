@@ -4697,6 +4697,25 @@ static sp_int sp_poly_int_bit(sp_RbVal v, sp_int i) {
   sp_Bigint *bit = sp_bigint_and(sh, sp_bigint_new_int(1));
   return (sp_int)sp_bigint_to_int(bit);
 }
+/* Integer#[] by one index that is no Integer. A Float is cut. An index past a
+   word, a Bignum or a Float that large, is past every bit: the receiver's
+   sign above them, 0 below. A Bignum receiver takes no such Float: CRuby's
+   RangeError. Anything else is the Integer it converts to, or that
+   conversion's TypeError. */
+static SP_NOINLINE sp_int sp_poly_int_bit_other(sp_RbVal recv, sp_RbVal idx) {
+  int big = recv.tag == SP_TAG_BIGINT, far;
+  if (idx.tag == SP_TAG_BIGINT) far = sp_bigint_sign((sp_Bigint *)idx.v.p);
+  else if (idx.tag == SP_TAG_FLT) {
+    sp_float f = idx.v.f;
+    if (f < -(sp_float)INTPTR_MIN && f >= (sp_float)INTPTR_MIN) return sp_poly_int_bit(recv, (sp_int)f);
+    if (big)
+      sp_raise_cls("RangeError", isfinite(f) ? sp_sprintf("float %.10g out of range of integer", f)
+                   : sp_sprintf("float %s out of range of integer", isnan(f) ? "NaN" : f > 0 ? "Inf" : "-Inf"));
+    sp_poly_flo_domain_ck(f);
+    far = f > 0 ? 1 : -1;
+  } else return sp_poly_int_bit(recv, big ? sp_poly_arg_int_chk(idx) : sp_poly_arg_int_chk_w(idx, 1));
+  return far > 0 && sp_poly_negative_p(recv);
+}
 /* Rational#numerator / #denominator on a boxed value: a Rational reports its
    reduced parts; an Integer is n/1. Both commit to sp_int (analyze's TY_INT),
    matching the typed Rational path. */
@@ -10383,6 +10402,12 @@ static sp_RbVal sp_poly_index_poly(sp_RbVal recv, sp_RbVal idx) {
   if (recv.tag == SP_TAG_OBJ && sp_poly_is_hash_kind(recv.cls_id) &&
       recv.cls_id != SP_BUILTIN_POLY_POLY_HASH)
     return sp_poly_hash_foreign_miss(recv, idx);
+  /* An Integer read by a Float, nil, true, an Array or a Bignum fell to the
+     last line and answered bit 0, as it still does by a Float Range. Below
+     the Hash arms: a Hash's miss does not pass this test. */
+  if (SP_UNLIKELY(idx.tag != SP_TAG_INT) && (recv.tag == SP_TAG_INT || recv.tag == SP_TAG_BIGINT) &&
+      !(idx.tag == SP_TAG_OBJ && idx.cls_id == SP_BUILTIN_FLOAT_RANGE))
+    return sp_box_int(sp_poly_int_bit_other(recv, idx));
   return sp_poly_arr_get_hash(recv, i);
 }
 
