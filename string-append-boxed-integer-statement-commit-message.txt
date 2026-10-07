@@ -1,0 +1,29 @@
+A boxed Integer appended by a statement is a codepoint, as in the value position
+
+def emit(out, x) = out << x
+out = "".dup
+emit(out, "id=")
+emit(out, 55)
+emit(out, 10)
+p out
+
+printed "id=5510"; CRuby prints "id=7\n". The call with "id=" boxes x for
+every caller, and the boxed 55 was appended as its digits.
+
+emit_str_append_arg holds the rule: a typed Integer is a codepoint, and a
+boxed value asks its tag at run time. Two statement emitters kept a copy
+with the typed half only: the `<<` chain and concat on a String that is
+reassigned (a local, an instance variable, a global, a parameter), in
+str_mutate_append_bang_arms and str_mutate_reassign_arms. Both now call
+the helper, as the value position does. A boxed Integer there is its
+codepoint, one byte on a binary String, and a RangeError out of range.
+
+Cost: an append of a boxed String tests the tag first, 6 instructions an
+append with gcc and 3 with clang. The C of a typed argument is unchanged.
+
+Not changed: a boxed value that is neither a String nor an Integer is
+still appended as its text.
+
+Test: test/string_append_boxed_integer_statement.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
