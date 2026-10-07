@@ -12007,6 +12007,19 @@ int emit_boxed_class_aref(Compiler *c, int id, Buf *b) {
   return 0;
 }
 
+/* The builtin freeze of a boxed receiver. Where the call is typed for a
+   class's own freeze that answers the object, the boxed value goes back into
+   that slot: the object's pointer, nil as NULL. */
+static void emit_poly_freeze_builtin(Compiler *c, int id, int recv, Buf *b) {
+  TyKind ft = comp_ntype(c, id);
+  Buf fb; memset(&fb, 0, sizeof fb);
+  buf_puts(&fb, "sp_poly_freeze("); emit_expr(c, recv, &fb); buf_puts(&fb, ")");
+  if (ty_is_object(ft) && !comp_ty_value_obj(c, ft) && c->classes[ty_object_class(ft)].ary_root <= 0)
+    emit_unbox_text(c, ft, fb.p, b);
+  else buf_puts(b, fb.p);
+  free(fb.p);
+}
+
 /* A zero-argument call on a boxed receiver (emit_poly_call's arms, in their order) */
 static int emit_poly_call0_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, TyKind rt, int *out) {
   if (!(recv >= 0 && rt == TY_POLY && argc == 0)) return 0;
@@ -12515,7 +12528,9 @@ static int emit_poly_call0_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
     buf_printf(b, "%s(sp_poly_recv_s(", fn); emit_expr(c, recv, b); buf_printf(b, ", \"%s\"))", name);
     { *out = 1; return 1; }
   }
-  if (sp_streq(name, "freeze"))     { buf_puts(b, "sp_poly_freeze("); emit_expr(c, recv, b); buf_puts(b, ")"); { *out = 1; return 1; } }
+  /* a class's own freeze wins the dispatch, as its nil? does above, where
+     the dispatch keeps this line for every other value */
+  if (sp_streq(name, "freeze") && !(user_defines_or_reads(c, name) && poly_dispatch_keeps_builtin(c, id))) { emit_poly_freeze_builtin(c, id, recv, b); { *out = 1; return 1; } }
   /* the receiver of a boxed to_h { } rewritten onto map (analyze.c) */
   if (sp_streq(name, "__to_h_subject")) { buf_puts(b, "sp_poly_to_h_subject("); emit_boxed(c, recv, b); buf_puts(b, ")"); { *out = 1; return 1; } }
   return 0;

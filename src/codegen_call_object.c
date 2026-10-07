@@ -924,7 +924,10 @@ int emit_call_freeze_dup_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, 
       buf_puts(b, "sp_str_is_frozen_val("); emit_expr(c, recv, b); buf_puts(b, ")");
       return 1;
     }
-    if (frr.kind == RK_BOXED) {
+    /* a boxed value beside a class with a frozen? of its own goes on to the
+       dispatch: the class's method answers for its objects, and every other
+       value comes back here from the builtin arm, where the dispatch has one */
+    if (frr.kind == RK_BOXED && !(user_defines_or_reads(c, name) && poly_dispatch_keeps_builtin(c, id))) {
       buf_puts(b, "sp_poly_frozen("); emit_expr(c, recv, b); buf_puts(b, ")");
       return 1;
     }
