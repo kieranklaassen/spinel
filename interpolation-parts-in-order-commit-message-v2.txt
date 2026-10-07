@@ -1,0 +1,20 @@
+The parts of an interpolation run in order, each to its end
+
+    r = R.new(%w[( a ) b])
+    puts "#{r.item(r.nxt)} #{r.item(r.nxt)}"
+
+printed "[)] a" for "[a] b": in `"#{a.f(x1)} #{b.g(x2)}"` x1 and x2
+ran first, then f, then g. What a part's call hoists went to the
+statement's prelude, ahead of every part. interp_plan keeps it in the
+part's place unless running it ahead of the earlier parts changes
+nothing (interp_part_stays), for all the parts or none
+(interp_may_move): where the interpolation is sequenced against its
+statement, nothing written after it hoists, and no String part can be
+changed in place by a later part. Elsewhere the C is unchanged.
+
+Tests: test/interpolation_parts_run_in_order.rb (9 lines wrong
+before), test/interpolation_appended_parts_run_in_order.rb (1) and
+test/interpolation_later_sibling_hoists.rb (unchanged C). Expected
+output from CRuby 3.3.6.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
