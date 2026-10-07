@@ -5862,8 +5862,10 @@ static int emit_when_typed_test(Compiler *c, int cond, int t, TyKind pt, Buf *b)
     buf_puts(b, "), 0)");
   }
   else if (eq_family(pt) && eq_family(comp_ntype(c, cond)) && eq_family(pt) != eq_family(comp_ntype(c, cond))) {
-    /* a when value of a different comparable family never matches */
-    buf_puts(b, "0");
+    /* a when value of a different comparable family never matches; a call
+       in it still runs */
+    if (subtree_has_side_effect(c, cond)) { buf_puts(b, "((void)("); emit_expr(c, cond, b); buf_puts(b, "), 0)"); }
+    else buf_puts(b, "0");
   }
   else if (nt_type(c->nt, cond) && sp_streq(nt_type(c->nt, cond), "SplatNode")) {
     /* `when *arr`: membership via value equality (see the int-path arm) */
