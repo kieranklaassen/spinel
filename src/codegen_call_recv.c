@@ -10524,6 +10524,17 @@ TyKind emit_range_step_array(Compiler *c, int id, Buf *b) {
   return is_float ? TY_FLOAT_ARRAY : TY_INT_ARRAY;
 }
 
+/* The test of a String Range membership whose value arrives boxed: `fn`
+   asked of the Range in `_t<tr>` for the String the value in `_a<ta>` holds,
+   false for a value that is no String. A boxed shared String handle is a
+   String too: read its text. The plain String is asked first and does not
+   meet the handle's test. */
+void emit_srange_boxed_member(Buf *b, const char *fn, int tr, int ta) {
+  buf_printf(b, "(sp_bool)((_a%d.tag == SP_TAG_STR ||"
+                " (sp_poly_is_strbuf(_a%d) && (_a%d = sp_poly_strbuf_deref(_a%d), 1))) &&"
+                " %s(_t%d, _a%d.v.s))", ta, ta, ta, ta, fn, tr, ta);
+}
+
 int emit_range_call(Compiler *c, int id, Buf *b) {
   const NodeTable *nt = c->nt;
   const char *name = nt_str(nt, id, "name");
@@ -10547,12 +10558,7 @@ int emit_range_call(Compiler *c, int id, Buf *b) {
       if (a0 == TY_POLY) {
         buf_printf(b, "({ sp_StrRange _t%d = ", tr); emit_expr(c, recv, b);
         buf_printf(b, "; sp_RbVal _a%d = ", tr); emit_boxed(c, argv[0], b);
-        /* a boxed shared String handle is a String too: read its text.
-           The plain String is asked first and does not meet the handle's
-           test. */
-        buf_printf(b, "; (sp_bool)((_a%d.tag == SP_TAG_STR ||"
-                      " (sp_poly_is_strbuf(_a%d) && (_a%d = sp_poly_strbuf_deref(_a%d), 1))) &&"
-                      " %s(_t%d, _a%d.v.s)); })", tr, tr, tr, tr, fn, tr, tr);
+        buf_puts(b, "; "); emit_srange_boxed_member(b, fn, tr, tr); buf_puts(b, "; })");
         return 1;
       }
       buf_puts(b, "((void)("); emit_expr(c, argv[0], b); buf_puts(b, "), 0)"); return 1;
