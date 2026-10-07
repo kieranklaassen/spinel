@@ -4763,8 +4763,8 @@ int emit_array_filter_loop(Compiler *c, int recv, int block, TyKind rt, const ch
   emit_indent(b, indent + 1); buf_puts(b, "sp_gc_nroots = sp_exc_rootmark[sp_exc_top]; sp_rescue_sp = sp_rescue_mark[sp_exc_top];\n");
   emit_indent(b, indent + 1); buf_puts(b, "if (sp_unwind_kind == SP_UNWIND_NONE) {\n");
   emit_indent(b, indent + 2);
-  buf_printf(b, "_excf%d = 1; _excmsg%d = sp_exc_msg[sp_exc_top]; _exccls%d = sp_exc_cls[sp_exc_top]; _excobj%d = sp_exc_obj[sp_exc_top];\n",
-             eid, eid, eid, eid);
+  emit_ensure_exc_store(b, eid);
+  buf_puts(b, "\n");
   emit_indent(b, indent + 1); buf_puts(b, "}\n");
   emit_indent(b, indent); buf_puts(b, "}\n");
   g_ensure_depth--;

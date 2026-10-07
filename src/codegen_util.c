@@ -1191,6 +1191,12 @@ EnsureCtx g_ensure_stack[MAX_ENSURE_DEPTH];
 int       g_ensure_depth = 0;
 RescueSave g_rescue_save_stack[MAX_ENSURE_DEPTH];
 int        g_rescue_save_depth = 0;
+/* The exception an ensure region `eid` waits with while its ensure body
+   runs: read from the frame just landed, sp_exc_top being its index. */
+void emit_ensure_exc_store(Buf *b, int eid) {
+  buf_printf(b, "_excf%d = 1; _excmsg%d = sp_exc_msg[sp_exc_top]; _exccls%d = sp_exc_cls[sp_exc_top]; _excobj%d = sp_exc_obj[sp_exc_top];",
+             eid, eid, eid, eid);
+}
 
 /* rescue bodies crossed by an exit to frame-depth pop_base: those entered at or
    deeper than pop_base (their exc_base >= pop_base). */

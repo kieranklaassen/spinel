@@ -366,8 +366,9 @@ int emit_call_synchronize_arms(Compiler *c, int id, Buf *b, const NodeTable *nt,
     if (is_mx) {
       g_ensure_depth--;
       g_exc_frame_depth--;
-      buf_printf(b, "sp_exc_top--; }\nelse { sp_exc_top--; sp_gc_nroots = sp_exc_rootmark[sp_exc_top]; if (sp_unwind_kind == SP_UNWIND_NONE) { _excf%d = 1; _excmsg%d = sp_exc_msg[sp_exc_top]; _exccls%d = sp_exc_cls[sp_exc_top]; _excobj%d = sp_exc_obj[sp_exc_top]; } } ",
-                 eid, eid, eid, eid);
+      buf_puts(b, "sp_exc_top--; }\nelse { sp_exc_top--; sp_gc_nroots = sp_exc_rootmark[sp_exc_top]; if (sp_unwind_kind == SP_UNWIND_NONE) { ");
+      emit_ensure_exc_store(b, eid);
+      buf_puts(b, " } } ");
       buf_printf(b, "_ensure%d: ; sp_Mutex_unlock(_t%d); ", eid, mtmp);
       buf_puts(b, "if (sp_unwind_kind != SP_UNWIND_NONE) sp_unwind_resume(); ");
       /* a deferred `next` or `break` a nested ensure handed up, passed on the

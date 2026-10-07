@@ -466,6 +466,7 @@ void emit_line_directive(Compiler *c, int id, Buf *b);
 typedef struct { int lid; int has_retval; int exc_base; TyKind retv_ty; int body_rescue; } EnsureCtx;
 extern EnsureCtx g_ensure_stack[MAX_ENSURE_DEPTH];
 extern int       g_ensure_depth;
+void emit_ensure_exc_store(Buf *b, int eid);
 
 /* One entry per rescue body currently being emitted. exc_base records
    g_exc_frame_depth at that body's entry so a non-local exit can tell which
