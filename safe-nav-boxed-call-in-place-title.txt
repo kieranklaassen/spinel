@@ -1,0 +1,1 @@
+A `&.` call on a boxed receiver runs in its place

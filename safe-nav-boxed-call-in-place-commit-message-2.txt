@@ -1,0 +1,19 @@
+A `&.` call on a boxed receiver runs in its place
+
+    b = [K.new, nil, 5][0]
+    p "#{$c} #{b&.bump([1, 2])}"
+
+printed "1 [1, 2]" for a `bump` that adds one to $c; CRuby prints
+"0 [1, 2]". Where the value of a `&.` call on a boxed receiver hoists
+a statement, the guard was an `if` ahead of the whole statement with
+the call inside it, held in a temp: the call ran before what is
+written before it, in an interpolation, a multiple assignment, an
+array literal.
+
+The guard now jumps over what the value hoisted and the value stays
+in the call's place, as in the typed arm. The hoisted statements
+still do not run for a nil.
+
+Test: test/safe_nav_boxed_call_stays_in_place.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

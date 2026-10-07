@@ -1,0 +1,8 @@
+sn_typed_nil_recv names the typed receivers a `&.` guard tests
+
+The test emit_call_safe_nav_arms makes before it guards a typed
+receiver (an object pointer, a String, an Integer or a Float, a typed
+container) moves into a function of its own, with its comments. No
+generated C changes; the next commit asks it from a second place.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

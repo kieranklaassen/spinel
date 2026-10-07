@@ -1,0 +1,8 @@
+sn_guard_over_hoists writes the jump of a `&.` guard
+
+The statements a `&.` call's typed arm writes when its value hoists
+(the saved root count, the jump over the hoisted statements, its
+label) move into a function of their own. No generated C changes; the
+next commit calls it from the boxed arm.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
