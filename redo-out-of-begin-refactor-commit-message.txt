@@ -1,0 +1,12 @@
+One helper opens a redo label
+
+The four places that open a redo label (a loop body, the block spliced
+at a yield, an iterator's step statements and its loop statements) each
+tested the stack for room, took a temp for the label and stored the
+body and the label. redo_label_push does that once.
+
+No change in generated C. One case that cannot be seen: with 64 labels
+open, emit_loop_body took a temp number before it found the stack
+full; now none is taken.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

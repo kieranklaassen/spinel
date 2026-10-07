@@ -1,0 +1,1 @@
+A redo out of a begin or a rescue clause pops its frame and its exception

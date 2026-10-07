@@ -1,0 +1,33 @@
+A redo out of a begin or a rescue clause pops its frame and its exception
+
+    def read(items)
+      n = 0
+      items.each do |x|
+        n += 1
+        begin
+          raise IOError, "again" if n == 1
+        rescue IOError
+          redo
+        end
+      end
+      $!
+    end
+
+    p read([1, 2])
+
+printed #<IOError: again> where CRuby prints nil, and the 65th call
+stopped the program with "rescue nesting too deep". With the redo in
+the begin's body instead, the 64th call ended in a SystemStackError.
+
+A redo is a goto back to the label at the top of its body. It popped
+nothing: a begin written around it kept its setjmp frame on the
+handler stack, and a rescue clause around it kept its exception as the
+one being handled, one more at every redo.
+
+The label now keeps what stands open where it is placed (frames,
+ensure regions, rescue clauses), and a redo pops the frames and the
+clauses above it, as a next does for its loop. A redo with nothing
+between it and its body is the goto it was. So is one with an ensure
+in between: that ensure has to run first, which this does not take on.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
