@@ -15454,7 +15454,19 @@ static void emit_sym_class_name_rt(Compiler *c, Buf *b) {
     }
     /* dynamic intern pool: symbols minted at runtime (Symbol#upcase,
        :"interp", String#to_sym) get ids >= the static count. */
-    buf_puts(b, "static const char *sp_dyn_syms[SP_DYN_SYMS_MAX]; static int sp_ndyn = 0;\n");
+    buf_puts(b, "static const char *sp_dyn_syms0[SP_DYN_SYMS_MAX]; static const char **sp_dyn_syms = sp_dyn_syms0;"
+                " static int sp_dyn_cap = SP_DYN_SYMS_MAX; static int sp_ndyn = 0;\n");
+    /* The static array is the pool's first block, so -DSP_DYN_SYMS_MAX=<n>
+       still sizes what a program that interns little pays for. A full pool
+       moves to a heap block twice the size: answering an existing id for a new
+       name made two Symbols one. */
+    buf_puts(b, "static SP_NOINLINE SP_COLD void sp_dyn_syms_grow(void){"
+                "int nc=sp_dyn_cap>0?sp_dyn_cap*2:64;"
+                "const char **np=(const char **)malloc(sizeof(*np)*(size_t)nc);"
+                "if(!np)sp_raise_cls(\"NoMemoryError\",\"failed to grow the symbol table\");"
+                "memcpy(np,sp_dyn_syms,sizeof(*np)*(size_t)sp_ndyn);"
+                "if(sp_dyn_syms!=sp_dyn_syms0)free((void *)sp_dyn_syms);"
+                "sp_dyn_syms=np;sp_dyn_cap=nc;}\n");
     /* Those entries are string-heap strings (sp_str_dup_external) held only by
        this static array, which the collector does not walk: the string sweep
        freed them and the next intern compared against a corpse. Emitted here,
@@ -15497,9 +15509,10 @@ static void emit_sym_class_name_rt(Compiler *c, Buf *b) {
     buf_printf(b, "sp_sym sp_sym_intern_n(const char *s, size_t n){"
                    "for(int i=0;i<%d;i++){const char*_c=%s;if(_c[0]==s[0]&&sp_str_byte_len(_c)==n&&memcmp(_c,s,n)==0)return (sp_sym)i;}"
                    "for(int i=0;i<sp_ndyn;i++){const char*_c=sp_dyn_syms[i];if(_c[0]==s[0]&&sp_str_byte_len(_c)==n&&memcmp(_c,s,n)==0)return (sp_sym)(%d+i);}"
-                   "if(sp_ndyn<SP_DYN_SYMS_MAX){char *nb=(char*)malloc(n?n:1);if(!nb)sp_raise_cls(\"NoMemoryError\",\"failed to allocate memory\");"
-                   "memcpy(nb,s,n);sp_dyn_syms[sp_ndyn]=sp_str_from_bytes(nb,n);free(nb);return (sp_sym)(%d+sp_ndyn++);}"
-                   "return (sp_sym)0;}\n", ns, ns > 0 ? "sp_sym_names[i]" : "sp_str_empty", ns, ns);
+                   "if(sp_ndyn>=sp_dyn_cap)sp_dyn_syms_grow();"
+                   "char *nb=(char*)malloc(n?n:1);if(!nb)sp_raise_cls(\"NoMemoryError\",\"failed to allocate memory\");"
+                   "memcpy(nb,s,n);sp_dyn_syms[sp_ndyn]=sp_str_from_bytes(nb,n);free(nb);return (sp_sym)(%d+sp_ndyn++);}\n",
+                   ns, ns > 0 ? "sp_sym_names[i]" : "sp_str_empty", ns, ns);
     buf_printf(b, "%ssp_sym sp_sym_intern(const char *s){return sp_sym_intern_n(s,s?strlen(s):0);}\n\n",
                g_ext_init_name ? "" : "static ");
   }
