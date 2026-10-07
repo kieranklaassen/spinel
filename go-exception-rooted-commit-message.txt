@@ -1,0 +1,28 @@
+An exception made for a call stays rooted in a reopened base class's method
+
+    class StandardError
+      def checked
+        other = RuntimeError.new("zz" + message.size.to_s)
+        other.message.size > 0 ? message : ""
+      end
+    end
+    def made(i) = RuntimeError.new("m" + i.to_s)
+    bad = 0
+    i = 0
+    while i < 50_000
+      bad += 1 unless made(i).checked == "m" + i.to_s
+      i += 1
+    end
+    p bad
+
+printed 11; it is 0. For a method a reopening of a builtin exception
+class defines, emit_call_exception_arms binds the receiver to a C
+temporary and calls the method with it, and nothing held an exception
+made for the call (`RuntimeError.new("r").checked`, a method's answer):
+a collection inside the method freed it, and what the method allocated
+next took its place. The temporary is rooted where the receiver's
+expression can allocate; a local or an instance variable keeps its C.
+
+Test: test/exception_reopen_recv_held.rb, which joins GC_STRESS_TESTS.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

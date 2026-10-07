@@ -1,0 +1,15 @@
+The first Process::Status stays rooted while a second `$?` is read
+
+    system("exit 3")
+    p $? == $?
+
+printed false at SPINEL_GC_STRESS=2; it is true. A read of `$?` builds
+its Process::Status (sp_last_process_status allocates), and the `==`
+and `!=` templates of two statuses (builtin_ops.c) bound the first to a
+C temporary and then evaluated the second: that allocation collected
+the first, and its status word was read from freed memory. The two
+templates root the first before the second is made.
+
+Test: test/process_status_equality.rb joins GC_STRESS_TESTS.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

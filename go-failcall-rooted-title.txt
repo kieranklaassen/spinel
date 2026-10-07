@@ -1,0 +1,1 @@
+A failed call's arguments stay rooted while NoMethodError's list is made

@@ -1,0 +1,1 @@
+An exception made for a call stays rooted in a reopened base class's method

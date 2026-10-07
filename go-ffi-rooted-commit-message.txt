@@ -1,0 +1,29 @@
+A C function's String argument stays rooted beside an argument that allocates
+
+    module LibC
+      ffi_func :strncmp, [:str, :str, :int], :int
+    end
+    s = +"12"
+    t = s
+    t << "345"
+    p LibC.strncmp(s, t, s.size + 0)
+
+printed 170 at SPINEL_GC_STRESS=2; it is 0. A String held as a handle
+goes to a :str argument as a copy when another operand of the call runs
+code, and that copy is held by nothing but the C call's argument list:
+the second copy's allocation collected the first. A handle beside a
+call that builds a String, or beside an Integer argument that allocates
+on its way, lost its copy the same way (strncmp(s, joined(x, "345"), 5)
+answered -170, with clang 170).
+
+emit_call_cmethod_arms moved the String arguments to rooted temps only
+where the call can run Ruby code (a callback, a blocking call). It now
+does so too where a String argument that is a fresh value sits beside
+another argument whose evaluation allocates (ffi_str_arg_beside_alloc,
+asking operand_may_allocate). A call with one such argument, or with
+borrowed buffers and literals only, keeps its C.
+
+Test: test/ffi_str_arg_beside_alloc.rb; test/ffi_str_borrow.rb joins
+GC_STRESS_TESTS beside it.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

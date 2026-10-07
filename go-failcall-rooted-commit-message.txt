@@ -1,0 +1,27 @@
+A failed call's arguments stay rooted while NoMethodError's list is made
+
+    b = [nil, 5][ARGV.size]
+    begin
+      p b.slice(0..1)
+    rescue NoMethodError => e
+      p e.args
+    end
+
+stopped in the collector's check at SPINEL_GC_STRESS=2; it prints
+[0..1]. sp_nomethod_msg_args and sp_stage_args_msg take the failed
+call's arguments as a C array and allocate the list for
+NoMethodError#args before anything holds them: an argument made for the
+call (a Range boxed, a String just built) was freed by a collection
+there, and so was a receiver a method had just returned, which
+NoMethodError#receiver then read. Both now root the array's slots, and
+sp_nomethod_msg_args its receiver, before the list is allocated, as
+the boxed pow arms root theirs at the call. The path is the cold one
+of a call that raises.
+
+Two new arguments in one call are still unheld: the emitters box them
+into one C array, and the second is made while nothing holds the first.
+
+Test: test/nomethod_args_fresh_held.rb;
+test/boxed_slice_receiver_checked.rb joins GC_STRESS_TESTS.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

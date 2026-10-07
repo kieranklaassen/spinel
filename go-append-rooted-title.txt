@@ -1,0 +1,1 @@
+append_as_bytes keeps its String so far rooted while the next argument is made

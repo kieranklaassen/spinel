@@ -1,0 +1,19 @@
+sp_str_dedup roots the String it copies while the copy is allocated
+
+    k = ARGV.size
+    s = -("ab" + k.to_s)
+    p s
+
+printed "\xDB\xDB\xDB" at SPINEL_GC_STRESS=2; it prints "ab0". When
+the content is not interned yet sp_str_dedup allocates the frozen copy
+with sp_str_from_bytes, and nothing held the String it copies from: a
+collection in that allocation freed a receiver the caller had just
+built, and the copy was made of freed bytes. `(a + b).dedup` and the
+name of an exception's class, which is built for the call, went the
+same way. The String is rooted on that path only; a content already
+interned returns before the root, at its old cost.
+
+Test: test/string_dedup_fresh_held.rb;
+test/poly_user_exception_methods.rb joins GC_STRESS_TESTS.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
