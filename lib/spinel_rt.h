@@ -13540,6 +13540,9 @@ static sp_Exception *sp_syserr_build(const char *cls, sp_int argc, const sp_RbVa
    anything else is CRuby's TypeError. */
 SP_NORETURN SP_COLD static void sp_raise_poly(sp_RbVal v) {
   if (v.tag == SP_TAG_STR && v.v.s) sp_raise(v.v.s);
+  /* a String the program appends to is boxed as its shared handle. The
+     message is a copy of its text: the handle's buffer moves as it grows */
+  if (sp_poly_is_strbuf(v) && v.v.p) sp_raise(sp_str_dup(sp_String_cstr((sp_String *)v.v.p)));
   if (v.tag == SP_TAG_OBJ && v.v.p) {
     /* A carried exception object re-raises as itself. The base
      * sp_Exception uses cls_id SP_BUILTIN_EXCEPTION; a user subclass
