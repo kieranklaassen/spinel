@@ -1423,7 +1423,7 @@ int emit_gsub_block_expr(Compiler *c, int id, Buf *b) {
        `word.gsub!(inflections.acronyms_underscore_regex) { ... }` fell to
        a static NoMethodError. */
     if (comp_ntype(c, argv[0]) == TY_REGEX) dynre = 1;
-    /* a plain-String pattern: the same scan loop, matching by strstr (an
+    /* a plain-String pattern: the same scan loop, matching by sp_str_find (an
        empty needle degenerates to the zero-width branch, like CRuby) */
     else if (comp_ntype(c, argv[0]) == TY_STRING) strpat = 1;
     /* a pattern that is a Regexp or a String only at run time (an element
@@ -1460,7 +1460,7 @@ int emit_gsub_block_expr(Compiler *c, int id, Buf *b) {
      NUL: `"a\0b".gsub(/./m) { }` walked one character and stopped. */
   emit_indent(g_pre, g_indent); buf_printf(g_pre, "sp_int _t%d = (sp_int)sp_str_byte_len(_t%d);\n", tslen, ts);
   emit_indent(g_pre, g_indent); buf_printf(g_pre, "sp_String *_t%d = sp_String_new(\"\"); SP_GC_ROOT(_t%d);\n", tout, tout);
-  int tnd = 0, tnl = 0, tre = 0;
+  int tnd = 0, tnl = 0, tnn = 0, tre = 0;
   if (polypat) {
     int tp = ++g_tmp;
     tre = ++g_tmp; tnd = ++g_tmp; tnl = ++g_tmp;
@@ -1481,6 +1481,9 @@ int emit_gsub_block_expr(Compiler *c, int id, Buf *b) {
     buf_printf(g_pre, "SP_GC_ROOT_STR(_t%d);\n", tnd);
     emit_indent(g_pre, g_indent);
     buf_printf(g_pre, "sp_int _t%d = _t%d ? (sp_int)sp_str_byte_len(_t%d) : 0;\n", tnl, tnd, tnd);
+    tnn = ++g_tmp;
+    emit_indent(g_pre, g_indent);
+    buf_printf(g_pre, "int _t%d = sp_str_pat_nul(_t%d, (size_t)_t%d);\n", tnn, tnd, tnl);
   }
   else if (dynre) {
     tre = ++g_tmp;
@@ -1495,11 +1498,14 @@ int emit_gsub_block_expr(Compiler *c, int id, Buf *b) {
     emit_indent(g_pre, g_indent);
     buf_printf(g_pre, "const char *_t%d = %s;\n", tnd, ab.p ? ab.p : "\"\"");
     free(ab.p);
-    /* the needle is read by every strstr below, for the same reason */
+    /* the needle is read by every search below, for the same reason */
     emit_indent(g_pre, g_indent);
     buf_printf(g_pre, "SP_GC_ROOT_STR(_t%d);\n", tnd);
     emit_indent(g_pre, g_indent);
     buf_printf(g_pre, "sp_int _t%d = (sp_int)sp_str_byte_len(_t%d);\n", tnl, tnd);
+    tnn = ++g_tmp;
+    emit_indent(g_pre, g_indent);
+    buf_printf(g_pre, "int _t%d = sp_str_pat_nul(_t%d, (size_t)_t%d);\n", tnn, tnd, tnl);
   }
   /* `$~` is each turn's match inside the block and the last one after the
      call, or nil when nothing matched: the registers start cleared, every
@@ -1510,13 +1516,15 @@ int emit_gsub_block_expr(Compiler *c, int id, Buf *b) {
   emit_indent(g_pre, g_indent); buf_printf(g_pre, "while (_t%d <= _t%d) {\n", tpos, tslen);
   if (polypat) {
     emit_indent(g_pre, g_indent + 1);
-    buf_printf(g_pre, "sp_int _t%d = _t%d ? %s(_t%d, _t%d, _t%d) : ({ const char *_h = strstr(_t%d + _t%d, _t%d); _h ? (sp_int)(_h - (_t%d + _t%d)) : (sp_int)-1; });\n",
-               tm, tre, re_next, tre, ts, tpos, ts, tpos, tnd, ts, tpos);
+    buf_printf(g_pre, "sp_int _t%d = _t%d ? %s(_t%d, _t%d, _t%d) : ({ const char *_h = _t%d ? sp_str_find(_t%d + _t%d, _t%d + _t%d, _t%d, (size_t)_t%d, _t%d) : _t%d + _t%d; _h ? (sp_int)(_h - (_t%d + _t%d)) : (sp_int)-1; });\n",
+               tm, tre, re_next, tre, ts, tpos, tnl, ts, tpos, ts, tslen, tnd, tnl, tnn, ts, tpos, ts, tpos);
   }
   else if (strpat) {
     emit_indent(g_pre, g_indent + 1);
-    buf_printf(g_pre, "sp_int _t%d = ({ const char *_h = strstr(_t%d + _t%d, _t%d); _h ? (sp_int)(_h - (_t%d + _t%d)) : (sp_int)-1; });\n",
-               tm, ts, tpos, tnd, ts, tpos);
+    /* by bytes: strstr ends at the subject's first NUL byte, and reads a
+       needle that begins with one as empty */
+    buf_printf(g_pre, "sp_int _t%d = ({ const char *_h = _t%d ? sp_str_find(_t%d + _t%d, _t%d + _t%d, _t%d, (size_t)_t%d, _t%d) : _t%d + _t%d; _h ? (sp_int)(_h - (_t%d + _t%d)) : (sp_int)-1; });\n",
+               tm, tnl, ts, tpos, ts, tslen, tnd, tnl, tnn, ts, tpos, ts, tpos);
   }
   else if (dynre) {
     emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "sp_int _t%d = %s(_t%d, _t%d, _t%d);\n", tm, re_next, tre, ts, tpos);
