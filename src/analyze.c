@@ -31352,6 +31352,26 @@ static void refuse_string_alias_copies(Compiler *c) {
         while (nt_kind(nt, q.carry) == NK_LocalVariableWriteNode) q.carry = an_unparen(nt, nt_ref(nt, q.carry, "value"));
         if (!share_route_defer(c, &q, sa_msg(0))) sa_refuse(c, w, 0);
       }
+      /* `@t = @s`, `@t = @s.to_s`, `@t = s.itself`: no alias walk follows
+         an instance variable written from another, or from a local through
+         a call, so it holds a copy as a global does. A plain `@t = @s`
+         between two shared handles hands the handle over; through a call
+         the write copies even then. `@t = s` and `t = @s.to_s` have walks
+         of their own and are left alone. Under --share-strings the plain
+         write and a bang's result are the rule's, as a global's are */
+      else if (to.kind == NK_InstanceVariableReadNode && sa_name(c, g, &from) &&
+               (from.kind == NK_InstanceVariableReadNode || (from.kind == NK_LocalVariableReadNode && g != v)) &&
+               (comp_ntype(c, g) == TY_STRING || comp_ntype(c, g) == TY_STRBUF) &&
+               !(from.kind == to.kind && from.cid == to.cid && sp_streq(to.name, from.name)) &&
+               (g != v ? !(c->share_strings && strchr(nt_str(nt, v, "name"), '!'))
+                       : !c->share_strings && !(sa_handle(c, &to, 0) && sa_handle(c, &from, 0))) &&
+               !sa_after_all_mutations(c, &order, w) &&
+               sa_copy_observable(c, &to, &from, g))
+        unsupported_feature(c, w, "a String instance variable assigned from another instance variable, or from a "
+                            "local through `to_s` or another call answering its receiver, is mutated in place, "
+                            "or the String it was assigned from is (a String is not yet shared by reference "
+                            "through such an assignment). Mutate and read the String through one of the two "
+                            "names.");
       /* `t = id(s)`, `t = choose(+"x", s, flag)`: each argument it may answer */
       int ra[16], nra = sa_returned_args(c, v, ra, 16);
       for (int i = 0; i < nra; i++)
