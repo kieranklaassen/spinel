@@ -1797,6 +1797,19 @@ reject-test: $(SPINEL)
 	  echo "reject-test: FAIL (IO.popen compiled into a run-time NoMethodError)"; ok=0; \
 	else grep -q "IO.popen is not supported" "$$tmp/pop.out" || \
 	  { echo "reject-test: FAIL (IO.popen refused without saying why)"; sed -n 1,5p "$$tmp/pop.out"; ok=0; }; fi; \
+	for t in test/reject/string_pattern_bind_subject.rb test/reject/string_pattern_bind_appended_local.rb; do \
+	  if $(SPINEL) "$$t" -c --no-line-map -o "$$tmp/pb.c" >"$$tmp/pb.out" 2>&1; then \
+	    echo "reject-test: FAIL ($$t compiled)"; ok=0; \
+	  else grep -q "is not yet shared by reference through a pattern's binding" "$$tmp/pb.out" || \
+	    { echo "reject-test: FAIL ($$t refused without saying why)"; sed -n 1,5p "$$tmp/pb.out"; ok=0; }; fi; \
+	done; \
+	t=test/reject/string_pattern_bind_reader_subject.rb; \
+	for fl in "" --share-strings; do \
+	  if $(SPINEL) $$fl "$$t" -c --no-line-map -o "$$tmp/pb.c" >"$$tmp/pb.out" 2>&1; then \
+	    echo "reject-test: FAIL ($$t compiled $$fl)"; ok=0; \
+	  else grep -q "is not yet shared by reference through a pattern's binding" "$$tmp/pb.out" || \
+	    { echo "reject-test: FAIL ($$t refused $$fl without saying why)"; sed -n 1,5p "$$tmp/pb.out"; ok=0; }; fi; \
+	done; \
 	rm -rf "$$tmp"; \
 	if [ $$ok -eq 1 ]; then echo "reject-test: pass"; else exit 1; fi
 
