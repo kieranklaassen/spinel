@@ -1,0 +1,1 @@
+A value that is no object stays off a first Struct's []= arm

@@ -1,0 +1,1 @@
+A boxed String's index assignment is kept beside a user []=
