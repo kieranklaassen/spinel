@@ -4669,9 +4669,12 @@ void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail, int valu
   else buf_puts(b, sb.p ? sb.p : default_value_from_compiler(c, pt));
   free(sb.p);
   buf_puts(b, ";\n");
+  /* A subject kept by value is rooted through the Strings it carries: made
+     in place, the temp is their only holder while #deconstruct or
+     #deconstruct_keys runs. */
   if (needs_root(pt)) {
     emit_indent(b, indent);
-    emit_gc_root_tmp(c, pt, t, b);
+    emit_gc_root_tmp_refs(c, pt, t, b);
     buf_puts(b, "\n");
   }
   int saved_sentinel_t = g_pm_sentinel_t;
