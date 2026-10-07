@@ -2090,6 +2090,15 @@ int object_reopen_answers(Compiler *c, const char *cls, int call_id, TyKind *out
   return 1;
 }
 
+/* an_user_poly_arm asked of the program itself, whatever derivation runs: 1 iff
+   a class has `name` as a method or a reader. */
+static int an_class_defines_name(Compiler *c, const char *name, int argc) {
+  for (int k = 0; k < c->nclasses; k++)
+    if (comp_poly_arm_defines_n(c, k, name, argc) ||
+        (!c->classes[k].is_native_class && comp_reader_in_chain(c, k, name, NULL))) return 1;
+  return 0;
+}
+
 /* The analyze twin of codegen's poly_name_user_claimed, readers included: an
    attr_reader is an arm of the dispatch like a def. */
 static int an_user_poly_arm(Compiler *c, const char *name, int argc) {
@@ -2715,6 +2724,9 @@ static int infer_poly_operand_call(Compiler *c, int id, const NodeTable *nt, con
             sp_streq(name, "abs2") || sp_streq(name, "magnitude") ||
             sp_streq(name, "numerator") || sp_streq(name, "denominator") ||
             sp_streq(name, "nonzero?")) { *out = an_poly_concrete(c, name, TY_POLY); return 1; }
+        /* Numeric#i, where no class of the program has an i of its own
+           (sp_poly_imag_unit); beside one the call is typed as before */
+        if (sp_streq(name, "i") && !an_class_defines_name(c, name, argc)) { *out = TY_POLY; return 1; }
         if (sp_streq(name, "bytesize") || sp_streq(name, "ord") ||
             sp_streq(name, "bit_length")) { *out = an_poly_concrete(c, name, TY_INT); return 1; }
         /* a boxed Range's bound is boxed: an Integer, a Float or nil */

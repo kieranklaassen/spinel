@@ -4455,6 +4455,14 @@ static sp_RbVal sp_poly_conjugate(sp_RbVal v) {
   if (sp_poly_numeric_p(v) || sp_poly_is_rational(v)) return v;
   sp_raise_poly_nomethod("conjugate", v);
 }
+/* Numeric#i on a boxed value: the imaginary number an Integer or a Float
+   answers unboxed. A Complex has no i, as in CRuby; a Rational's would lose
+   its exact part here, so it raises as every other value does. */
+static SP_UNUSED sp_RbVal sp_poly_imag_unit(sp_RbVal v) {
+  if (v.tag == SP_TAG_INT) return sp_box_complex((sp_Complex){0.0, (sp_float)v.v.i, 0});
+  if (v.tag == SP_TAG_FLT) return sp_box_complex((sp_Complex){0.0, v.v.f, 2});
+  sp_raise_poly_nomethod("i", v);
+}
 /* Range#begin / #end on a boxed value (an int-backed sp_Range read out of a
    poly container): the endpoint as an Integer. */
 static sp_int sp_poly_range_begin(sp_RbVal v) { if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_RANGE) return ((sp_Range *)v.v.p)->first; sp_raise_poly_nomethod("begin", v); }

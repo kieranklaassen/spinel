@@ -39,6 +39,15 @@ static void emit_fallback_block_value(Compiler *c, const int *bb, int bn, const 
    value a call was given can be stored in? The block's own uses decide the
    slot's type: one that does `v << 1` makes it an Array, and storing a boxed
    value there is a C type error. */
+/* 1 iff a class of the program has `name` as a method or a reader:
+   poly_name_user_claimed without its exemption for a dispatch's builtin arm. */
+static int class_defines_name(Compiler *c, const char *name, int argc) {
+  for (int k = 0; k < c->nclasses; k++)
+    if (comp_poly_arm_defines_n(c, k, name, argc) ||
+        (!c->classes[k].is_native_class && comp_reader_in_chain(c, k, name, NULL))) return 1;
+  return 0;
+}
+
 static int block_param_is_boxed(Compiler *c, int blk, int site, const char *nm) {
   Scope *bs = comp_scope_of(c, blk);
   LocalVar *lv = bs ? scope_local(bs, nm) : NULL;
@@ -12202,6 +12211,14 @@ static int emit_poly_call0_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
       buf_printf(b, "%s(", pfn);
       emit_expr(c, recv, b); buf_puts(b, ")"); { *out = 1; return 1; }
     }
+  }
+  /* Numeric#i on a poly value, where no class of the program has an i of its
+     own. Beside one the call keeps that method's type and its dispatch, in
+     the dispatch's builtin arm too: the name is a common reader, and a
+     number there raises as before. */
+  if (sp_streq(name, "i") && argc == 0 && !class_defines_name(c, name, argc)) {
+    buf_puts(b, "sp_poly_imag_unit(");
+    emit_expr(c, recv, b); buf_puts(b, ")"); { *out = 1; return 1; }
   }
   /* Numeric#arg / #angle / #phase, #rect / #rectangular and #polar on a poly value,
      answered as the typed arms answer them. A user method, reader or class
