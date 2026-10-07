@@ -2628,6 +2628,7 @@ LocalVar *scope_local_intern(Scope *s, const char *name) {
   lv->str_append = 0;
   lv->poly_hash_pin = 0;
   lv->poly_array_pin = 0;
+  lv->usage_poly_array = 0;
   lv->nullable_int = 0;
   lv->nil_passed = 0;
   lv->bounded_counter = 0;
