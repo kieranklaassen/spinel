@@ -14680,11 +14680,16 @@ static int str_mutate_reassign_arms(Compiler *c, Buf *b, int indent, const NodeT
       NodeKind vk = nt_kind(nt, argv[2]);
       emit_re_group_span(b, tn, vk != NK_CallNode && vk != NK_ParenthesesNode &&
                                 vk != NK_StatementsNode && subtree_is_pure_read(c, argv[2]), 0);
+      /* the head and the value are held while the tail is cut: the joined
+         head and value were in flight when the tail allocated, and a
+         collection there freed them */
+      int th = ++g_tmp, tv = ++g_tmp;
+      buf_printf(b, "const char *_t%d = sp_str_byteslice(_t%d, 0, _b); SP_GC_ROOT_STR(_t%d); ", th, ts, th);
+      buf_printf(b, "const char *_t%d = ", tv); emit_str_expr(c, argv[2], b); buf_puts(b, "; ");
+      if (!subtree_is_pure_read(c, argv[2])) buf_printf(b, "SP_GC_ROOT_STR(_t%d); ", tv);
       emit_expr(c, recv, b);
-      buf_printf(b, " = sp_str_concat(sp_str_concat(sp_str_byteslice(_t%d, 0, _b), ", ts);
-      emit_str_expr(c, argv[2], b);
-      buf_printf(b, "), sp_str_byteslice(_t%d, _e, (sp_int)sp_str_byte_len(_t%d) - _e)); } }\n",
-                 ts, ts);
+      buf_printf(b, " = sp_str_concat3(_t%d, _t%d, sp_str_byteslice(_t%d, _e, (sp_int)sp_str_byte_len(_t%d) - _e)); } }\n",
+                 th, tv, ts, ts);
       return 1;
     }
     /* s[/re/] = v: replace the first match's span; no match raises IndexError */
