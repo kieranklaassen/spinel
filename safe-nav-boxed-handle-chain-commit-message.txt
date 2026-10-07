@@ -1,0 +1,20 @@
+A second `&.` on a boxed MatchData's or Enumerator's answer builds
+
+    m = ["xab-cd".match(/a(b)-(c)/), 0][ARGV.size]
+    p m&.captures&.size             # 2
+
+did not build ("incompatible type for argument 1 of
+'sp_PolyArray_length'"), nor did `m&.string&.size` or
+`e&.with_index(1)&.to_a`. The handle's emitter asks what the call
+answers with the receiver pinned to the handle, to box that answer into
+a poly slot ("A boxed handle's answer is boxed into a poly dispatch's
+slot"). infer_type recorded the answer on the call's node, so the
+second `&.` read an Array or a String there and took the typed arm on
+the boxed value. The question is now a pure read (an_pure_read_begin),
+which records nothing.
+
+Test: test/safe_nav_boxed_handle_chain.rb; it did not build. Expected
+output from CRuby 3.3.6.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+

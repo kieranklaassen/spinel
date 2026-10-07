@@ -1,0 +1,1 @@
+A second `&.` on a boxed MatchData's or Enumerator's answer builds
