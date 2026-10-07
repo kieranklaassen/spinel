@@ -1,0 +1,39 @@
+A splatted object arrives as itself in a program with no to_a
+
+A splat handed to a method of the program is spread in place where
+its operand is boxed, a scalar or an Array. An object of one of the
+program's classes was none of those, and the one-element array
+sp_splat_to_array wraps it in was passed as the argument:
+
+    class Foo
+      def initialize(n) = @n = n
+      def n = @n
+    end
+    def cls(a) = a.class
+    def num(a) = a.n
+    x = Foo.new(1)
+    p cls(*x)    # Array; CRuby Foo
+    p num(*x)    # undefined method 'n' for an instance of Array
+
+CRuby asks to_a only of a value that has one; any other value is the
+one argument, itself. splat_spreads_in_place and emit_splat_in_place
+now take such an object too, but only where the program has no way to
+a to_a at all (splat_program_may_make_to_a): the name is spelled
+nowhere, as a def, a Symbol or a String, so no alias, attr,
+define_method or send can make one; there is no method_missing, no
+Enumerable and no eval; no method is made under a name that is no
+literal; and no class above the object's is a Struct, a Data or a
+native class. The walk is made once a program and its answer kept on
+the compiler.
+
+Any other program compiles to the same C as before. Ruby can give an
+object a to_a the class tables do not show (`alias to_a
+instance_variables`, an Enumerable whose each is an alias, a
+define_method in an inherited hook), so the tables alone do not prove
+there is none.
+
+Test: test/splat_object_into_method.rb. `one(*Foo.new(2))` in it hands
+sp_splat_to_array a call's fresh answer, so it needs the root the
+commit beneath adds there.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

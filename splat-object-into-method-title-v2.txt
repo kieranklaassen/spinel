@@ -1,0 +1,1 @@
+A splatted object arrives as itself in a program with no to_a
