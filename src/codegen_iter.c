@@ -3177,6 +3177,28 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
       free(tb.p); }
     buf_puts(b, "; ");
   }
+  else if (as_expr && !nx_own && bn3 > 0 && is_block_call(c, bd3[bn3 - 1])) {
+    /* A tail `b.call(v)` on the block parameter of the method being written
+       out is a splice of the block handed in. As a statement that splice is
+       a compound, and where the block handed in ends in a call with a block
+       of its own the statement expression around it had no value (`def g(x,
+       &b) = pass(x) { |w| b.call(w) }; g(1) { |v| pass(v) { |w| w * 3 } }`
+       did not build). Emit the tail as an expression, the value form of the
+       same splice, as `b.call(v)` is emitted wherever else it is read. */
+    if (block_of_body(c, bbody) >= 0) emit_block_locals_reset(c, block_of_body(c, bbody), b, 0);
+    for (int k3 = 0; k3 < bn3 - 1; k3++) {
+      if (rd_lbl && k3 == rd_head) buf_printf(b, "_redo_%d: ; ", rd_lbl);
+      emit_stmt(c, bd3[k3], b, 0);
+    }
+    if (rd_lbl && rd_head >= bn3 - 1) buf_printf(b, "_redo_%d: ; ", rd_lbl);
+    { Buf tb; memset(&tb, 0, sizeof tb);
+      Buf *svp3 = g_pre; int svi3 = g_indent; g_pre = b; g_indent = 0;
+      emit_expr(c, bd3[bn3 - 1], &tb);
+      g_pre = svp3; g_indent = svi3;
+      if (tb.p) buf_puts(b, tb.p);
+      free(tb.p); }
+    buf_puts(b, "; ");
+  }
   else {
     if (rd_lbl && block_of_body(c, bbody) >= 0) g_redo_pending = rd_lbl;
     else if (rd_lbl && as_expr) buf_printf(b, "_redo_%d: ; ", rd_lbl);
