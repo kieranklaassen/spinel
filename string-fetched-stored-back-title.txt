@@ -1,0 +1,1 @@
+A String fetched out of a boxed container and stored back takes its appends

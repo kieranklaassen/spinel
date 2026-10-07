@@ -1,0 +1,19 @@
+A frozen String fetched and stored back stays the object it is
+
+    h = {}
+    h["k"] = h.fetch("k", "lit")
+    h["k"] << "x" if ARGV.size > 5
+    p h["k"].equal?("lit")
+
+prints true in CRuby and on master, where equal frozen literals are one
+object. The store of a fetched element lifted every plain String into a
+fresh handle around a copy of its bytes, so the element was no longer
+the literal and this printed false.
+
+A frozen String can take no change in place, so a handle has nothing to
+share for it. The store now lifts only a String that is not frozen
+(sp_poly_strbuf_lift_unfrozen) and passes a frozen one as the box it
+is; that also saves the copy. frozen? and FrozenError were right before
+and stay so.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
