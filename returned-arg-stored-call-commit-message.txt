@@ -1,0 +1,21 @@
+The returned-argument route asks a call stored into an Array or a Hash
+
+`def id(x) = x; q << id(u); u << "z"; p q` printed ["u"] where CRuby
+prints ["uz"]: the element is a copy of the String the method answers.
+The route refused `v = id(u); q << v` and `id(u) << x`, the two places
+sa_returned_args was asked. A call that is itself the value of a push or
+of `[]=`, or an element of a literal assigned to a variable, was asked
+nowhere.
+
+Both of the route's questions are now asked there, in its sentence: the
+variable passed in is mutated in place and the container is read
+(refuse_string_alias_copies), or an element is mutated in place and the
+variable is read (strbuf_demand_store_leaf, beside the refusal of
+`a << (s << "y")`).
+
+Not here: a constructor argument, `insert`, `concat`, a literal that is
+not assigned to a variable, and --share-strings, where a local that
+shares its handle through the method's parameter counts as mutated and
+the form with a local between compiles. Those still hold a copy.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

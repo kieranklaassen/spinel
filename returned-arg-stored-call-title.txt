@@ -1,0 +1,1 @@
+The returned-argument route asks a call stored into an Array or a Hash
