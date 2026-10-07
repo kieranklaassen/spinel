@@ -35929,13 +35929,19 @@ static void an_phase_value_types(Compiler *c) {
         }
       }
     }
-    /* unsafe uses that would need a heap pointer / boxing (void* slot) */
+    /* unsafe uses that would need a heap pointer / boxing (void* slot). A
+       Hash literal's element is a pair, and what it stores is the pair's key
+       and its value. */
     if (sp_streq(ty, "ArrayNode") || sp_streq(ty, "HashNode") ||
         sp_streq(ty, "KeywordHashNode")) {
       int n = 0; const int *els = nt_arr(c->nt, id, "elements", &n);
       for (int k = 0; k < n; k++) {
-        TyKind et = comp_ntype(c, els[k]);
-        if (ty_is_object(et)) { int q = ty_object_class(et); if (q >= 0 && q < c->nclasses) c->classes[q].is_value_type = 0; }
+        int pair = nt_kind(c->nt, els[k]) == NK_AssocNode;
+        int part[2] = { pair ? nt_ref(c->nt, els[k], "key") : els[k], pair ? nt_ref(c->nt, els[k], "value") : -1 };
+        for (int j = 0; j < 2 && part[j] >= 0; j++) {
+          TyKind et = comp_ntype(c, part[j]);
+          if (ty_is_object(et)) { int q = ty_object_class(et); if (q >= 0 && q < c->nclasses) c->classes[q].is_value_type = 0; }
+        }
       }
     }
     if (sp_streq(ty, "CallNode")) {
