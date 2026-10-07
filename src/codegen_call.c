@@ -12285,11 +12285,14 @@ static int emit_case_eq_call(Compiler *c, int id, Buf *b) {
   /* Object#equal? is pointer identity and is never overridden, so a plain user
      object (e.g. a package's Set) answers it even with no user-defined method
      (#2629). A pointer-backed arg compares by address; anything else (a scalar,
-     or a value-type object with no stable identity) is never the same object. */
+     or a value-type object with no stable identity) is never the same object.
+     A rescued exception is typed TY_EXCEPTION and is a pointer too: it can be
+     the very object a receiver of the program's exception class is. */
   if (argc == 1 && sp_streq(name, "equal?") && recv >= 0 && ty_is_object(rt) &&
       !comp_ty_value_obj(c, rt) &&
       comp_resolve_member(c, ty_object_class(rt), "equal?", 0, NULL, NULL) == SP_MEMBER_NONE) {
-    if (ty_is_object(a0) && !comp_ty_value_obj(c, a0)) {
+    if ((ty_is_object(a0) && !comp_ty_value_obj(c, a0)) ||
+        (a0 == TY_EXCEPTION && class_is_exc_subclass(c, ty_object_class(rt)))) {
       buf_puts(b, "((void *)("); emit_expr(c, recv, b); buf_puts(b, ") == (void *)(");
       emit_expr(c, argv[0], b); buf_puts(b, "))");
     }

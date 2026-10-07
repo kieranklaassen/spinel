@@ -14418,6 +14418,15 @@ static void emit_native_object_protocol_text(Compiler *c, const char *name, TyKi
       else buf_printf(&test, "_u%d.v.p == (void *)_t%d)", t, t);
     }
   }
+  else if (rt == TY_EXCEPTION && ty_is_object(at) && !comp_ty_value_obj(c, at) &&
+           class_is_exc_subclass(c, ty_object_class(at))) {
+    /* a value typed as a class the program puts under an exception is an
+       exception too, and can be the receiver itself: the same object is
+       equal by every test. Two objects stay unequal, as they were (== would
+       have to compare the backtraces, which sp_exc_eq does not). */
+    buf_printf(b, "%s _u%d = (%s)(%s); ", cty, t, cty, a);
+    buf_printf(&test, "(_t%d == _u%d)", t, t);
+  }
   else if (at == TY_NIL && kind == 1) {
     /* A pointer-backed handle IS nil when it is NULL in this backend: that is
        what `nil?` and the dedicated `handle != nil` arm both answer. `== nil`
