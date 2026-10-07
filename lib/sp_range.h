@@ -137,6 +137,7 @@ sp_bool sp_srange_cover(sp_StrRange r, const char *x);
 sp_bool sp_srange_include(sp_StrRange r, const char *x);
 const char *sp_srange_min_v(sp_StrRange r);
 const char *sp_srange_max_v(sp_StrRange r);
+void sp_srange_open_raise(int last);
 const char *sp_srange_to_s(sp_StrRange r);
 const char *sp_srange_inspect(sp_StrRange r);
 sp_RbVal sp_box_srange(sp_StrRange v);
