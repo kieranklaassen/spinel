@@ -82,6 +82,21 @@ static int emit_op_template(Compiler *c, const BopCtx *x, Buf *b) {
     free(r);
     r = strdup(tr);
   }
+  /* A row that names the receiver nowhere answers without it: Integer#size
+     is sizeof(sp_int), a Float Range covers no non-number. A receiver that
+     runs code was then never emitted: `bump.size` did not call bump, and
+     `(7 / z).size` answered 8 with z zero. It is emitted ahead of the
+     answer where the call is the first thing its statement runs
+     (call_runs_first); a variable or a literal has nothing to run. */
+  int unnamed = x->recv >= 0 && !strstr(x->op->arg, "$r") && !strstr(x->op->arg, "$R") &&
+                !strstr(x->op->arg, "$h") && !strstr(x->op->arg, "$g") &&
+                (nt_kind(c->nt, unwrap_parens(c, x->recv)) == NK_CallNode || !subtree_is_pure_read(c, x->recv)) &&
+                call_runs_first(c, x->id);
+  if (unnamed) {
+    char *rt = op_recv_text(c, x);
+    buf_printf(b, "((void)(%s), ", rt);
+    free(rt);
+  }
   for (const char *p = x->op->arg; *p; p++) {
     const char *tk = p[0] == '$' && p[1] ? strchr(tnames, p[1]) : NULL;
     if (p[0] == '$' && p[1] == 'r') {
@@ -147,6 +162,7 @@ static int emit_op_template(Compiler *c, const BopCtx *x, Buf *b) {
   }
   free(r);
   if (once) buf_puts(b, "; })");
+  if (unnamed) buf_puts(b, ")");
   if (held) buf_puts(b, "; })");
   free(hb.p);
   return 1;

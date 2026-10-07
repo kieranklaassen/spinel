@@ -3289,15 +3289,20 @@ static int emit_if_expr(Compiler *c, int id, Buf *b, const NodeTable *nt, const 
     }
     if (known >= 0) {
       int take_then = is_unless ? !known : known;
-      if (!take_then && !is_unless && sub >= 0 && nt_type(nt, sub) &&
-          sp_streq(nt_type(nt, sub), "IfNode")) {
-        emit_expr(c, sub, b);  /* the elsif chain continues as the value */
-        return 1;
-      }
       int live = take_then ? then_b : else_stmts;
       int ln = 0;
       const int *lb = live >= 0 ? nt_arr(nt, live, "body", &ln) : NULL;
-      if (ln == 0) { buf_puts(b, "sp_box_nil()"); return 1; }
+      /* the test's receiver still runs (folded_pred_recv): where the test
+         stood, or in the prelude ahead of a live arm's leading statements */
+      int lr = folded_pred_recv(c, pred);
+      if (lr >= 0 && ln > 1) { emit_stmt(c, lr, g_pre, g_indent); lr = -1; }
+      if (lr >= 0) { buf_puts(b, "((void)("); emit_expr(c, lr, b); buf_puts(b, "), "); }
+      if (!take_then && !is_unless && sub >= 0 && nt_type(nt, sub) &&
+          sp_streq(nt_type(nt, sub), "IfNode")) {
+        emit_expr(c, sub, b);  /* the elsif chain continues as the value */
+        goto folded;
+      }
+      if (ln == 0) { buf_puts(b, "sp_box_nil()"); goto folded; }
       /* The live arm still has to be rendered at the WHOLE expression's
          type, the way the unfolded pair below is: the slot receiving this
          was declared from that type, and the arm's own may be narrower.
@@ -3313,7 +3318,7 @@ static int emit_if_expr(Compiler *c, int id, Buf *b, const NodeTable *nt, const 
       int fbox = fres == TY_POLY && repr_of(c, lb[ln - 1]).kind != RK_BOXED;
       if (ln == 1) {
         if (fbox) emit_ternary_arm(c, lb[0], fres, b); else emit_expr(c, lb[0], b);
-        return 1;
+        goto folded;
       }
       /* The leading statements go into the PRELUDE, not inside a statement
          expression around the value. The last element is emitted with
@@ -3327,6 +3332,8 @@ static int emit_if_expr(Compiler *c, int id, Buf *b, const NodeTable *nt, const 
       for (int j = 0; j < ln - 1; j++) emit_stmt(c, lb[j], g_pre, g_indent);
       if (fbox) emit_ternary_arm(c, lb[ln - 1], fres, b);
       else emit_expr(c, lb[ln - 1], b);
+folded:
+      if (lr >= 0) buf_puts(b, ")");
       return 1;
     }
   }
