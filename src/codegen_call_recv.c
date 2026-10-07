@@ -6823,6 +6823,25 @@ static int str_arms_case_search(Compiler *c, Buf *b, const NodeTable *nt, const 
     else buf_printf(b, "(sp_int)sp_str_byte_len(_t%d)", tsr);
     buf_puts(b, "); })");
   }
+  /* a needle that is a Regexp or a String only at run time: the tag picks
+     the search, as the arm for index and rindex above does */
+  else if ((sp_streq(name, "byteindex") || sp_streq(name, "byterindex")) &&
+           (argc == 1 || argc == 2) && comp_ntype(c, argv[0]) == TY_POLY) {
+    const char *rv = name[4] == 'r' ? "r" : "";
+    int ts = ++g_tmp, tp = ++g_tmp, tn = ++g_tmp;
+    buf_printf(b, "({ const char *_t%d = %s; SP_GC_ROOT(_t%d); sp_RbVal _t%d = ", ts, r, ts, tp);
+    emit_boxed(c, argv[0], b);
+    buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); ", tp);
+    if (argc == 2) { buf_printf(b, "sp_int _t%d = ", tn); emit_int_expr(c, argv[1], b); buf_puts(b, "; "); }
+    buf_printf(b, "(_t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_REGEX)"
+                  " ? sp_re_byte%sindex_opt((mrb_regexp_pattern *)_t%d.v.p, _t%d, ", tp, tp, rv, tp, ts);
+    if (argc == 2) buf_printf(b, "_t%d", tn);
+    else if (*rv) buf_printf(b, "(sp_int)sp_str_byte_len(_t%d)", ts);
+    else buf_puts(b, "0");
+    buf_printf(b, ") : sp_str_byte%sindex%s(_t%d, sp_poly_arg_str_chk(_t%d)", rv, argc == 2 ? "_from" : "", ts, tp);
+    if (argc == 2) buf_printf(b, ", _t%d", tn);
+    buf_puts(b, "); })");
+  }
   else if (sp_streq(name, "byteindex") && argc == 1 && str_needle_p(c, argv[0])) {
     buf_printf(b, "sp_str_byteindex(%s, ", r); emit_str_expr(c, argv[0], b); buf_puts(b, ")");
   }
