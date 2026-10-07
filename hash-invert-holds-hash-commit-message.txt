@@ -1,0 +1,23 @@
+Hash#invert holds a String-to-Integer or Integer-to-String Hash while it reads it
+
+    def mk(i) = {i => "a", -1 => "b"}
+    bad = 0
+    200_000.times { |i| bad += 1 unless mk(i).invert.size == 2 }
+    p bad
+
+prints 0 in CRuby and printed 98; with a second allocation of a
+varying size in the loop it died by SIGSEGV, and so did the same loop
+over `{"a" => i, "b" => -1}`. sp_IntStrHash_invert and
+sp_StrIntHash_invert_poly allocate the answer before they read the
+Hash they invert, and a method's result is held by nothing else: a
+collection at that allocation freed it.
+
+Each now opens with SP_GC_ROOT(h), as sp_StrStrHash_invert roots its
+own through _set. No generated C changes. The root costs 3
+instructions of about 1,435 a call for String keys and 4 of 1,373 for
+Integer keys (callgrind).
+
+Test: test/hash_invert_receiver_rooted.rb, also in the
+SPINEL_GC_STRESS=2 list. It dies by SIGSEGV on master in a plain run.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

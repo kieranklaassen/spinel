@@ -1,0 +1,1 @@
+Hash#invert holds a String-to-Integer or Integer-to-String Hash while it reads it

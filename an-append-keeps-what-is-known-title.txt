@@ -1,0 +1,1 @@
+An append keeps what is known of a String's length

@@ -1,0 +1,1 @@
+A proc in a local that held nil first reads the argument it is given

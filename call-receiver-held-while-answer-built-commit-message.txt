@@ -1,0 +1,31 @@
+A receiver made by a call is held while `* n`, invert, compact and flatten build the answer
+
+    def mk(i) = {a: i, b: i + 1}
+    bad = 0
+    20_000.times { |i| bad += 1 unless mk(i).compact.size == 2 }
+    p bad
+
+prints 0 in CRuby and printed 10: ten of the Hashes came back empty.
+With a second allocation of a varying size in the loop, `mk(i) * 2`
+answered [] in 80 of 2,000,000 turns and `mk(i).invert` on a
+Symbol-keyed Hash died by SIGSEGV. The arms of emit_array_arith_call,
+emit_op_hash_invert, emit_op_hash_compact and emit_op_hash_flatten
+bind the receiver to a temporary, allocate the answer and root it, and
+then read the receiver. A method's result is held by nothing else, and
+a collection at that allocation freed it.
+
+The receiver's temporary is now rooted where the receiver runs code:
+emit_fresh_recv_rooted, which is emit_recv_rooted behind
+subtree_has_side_effect. A local, an instance variable and a literal
+are held already (a literal is built into a slot of the frame,
+whatever its elements run) and keep the C they had.
+
+The root costs 10 instructions of about 762 a turn of `mk(i) * 2`, 9
+of 2,124 for invert, 15 of 1,680 for compact and 11 of 1,110 for
+flatten (callgrind).
+
+Test: test/fresh_receiver_held_while_answer_built.rb, also in the
+SPINEL_GC_STRESS=2 list. Six of its twelve loops count wrong answers
+on master in a plain run.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
