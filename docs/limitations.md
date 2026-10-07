@@ -729,6 +729,10 @@ Not yet shared:
   String held by a block parameter, by a variable a block or proc captures,
   or by a global or class variable, and through a proc, a `Method` or a
   class value's `new`, one held by an instance variable;
+- into a method whose name an alias uses (`alias to_html render`,
+  `alias_method`), called by either name, a String variable handed to a
+  parameter the method appends to; a method written in place of the alias
+  that calls the other (`def to_html(out) = render(out)`) is shared;
 - through a `Method` bound to one of the String's own in-place mutators
   (`s.method(:<<)`, `s.method(:concat)`, `s.method(:upcase!)`, their
   `to_proc` and `&s.method(:<<)`): the Method is bound to the String's

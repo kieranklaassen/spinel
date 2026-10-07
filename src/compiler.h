@@ -282,6 +282,9 @@ typedef struct {
                              receiverless call in an includer is rewritten onto
                              it rather than cloned (#3734). */
   int is_transplanted_source; /* method was copied into another class via include/prepend */
+  int alias_plain_abi;       /* an alias touches the name, so the method keeps
+                                the value ABI where it would have been lent
+                                the caller's slot (compute_byref_out_params) */
   int origin_module_ci;      /* +1-based module this copy came from (0 = none):
                                 Method#owner names the module, not the includer */
   int is_include_copy;        /* this scope IS such a copy: a later include of a

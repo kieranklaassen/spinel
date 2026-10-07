@@ -1,6 +1,10 @@
 test/reject/hash_pair_string_mutation.rb
 test/reject/hash_values_at_appending_block.rb
 test/reject/scrub_bang_retained_append.rb
+test/reject/string_alias_method_append.rb
+test/reject/string_alias_method_called_by_alias.rb
+test/reject/string_alias_method_ivar.rb
+test/reject/string_alias_same_name_elsewhere.rb
 test/reject/string_append_through_kept_block_index.rb
 test/reject/string_append_through_new_global.rb
 test/reject/string_append_through_proc_keyword.rb

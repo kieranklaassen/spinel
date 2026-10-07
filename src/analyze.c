@@ -13723,6 +13723,7 @@ static void compute_byref_out_params(Compiler *c) {
 
   for (int si = 1; si < n; si++) {
     Scope *s = &c->scopes[si];
+    s->alias_plain_abi = 0;
     if (!s->name || s->def_node < 0 || s->body < 0) continue;
     if (s->yields || s->is_lowered_yield || s->dm_subst_name || s->cs_synth) continue;
     if (s->is_transplanted_source) continue;
@@ -13766,8 +13767,12 @@ static void compute_byref_out_params(Compiler *c) {
     for (int a = 0; a < cls->naliases; a++)
       for (int si = 1; si < n; si++)
         if (elig[si] && ((cls->alias_old[a] && sp_streq(cls->alias_old[a], c->scopes[si].name)) ||
-                         (cls->alias_new[a] && sp_streq(cls->alias_new[a], c->scopes[si].name))))
+                         (cls->alias_new[a] && sp_streq(cls->alias_new[a], c->scopes[si].name)))) {
           elig[si] = 0;
+          /* the emitters refuse a String variable handed to a parameter such
+             a method appends to (refuse_aliased_param_args): it is a copy */
+          c->scopes[si].alias_plain_abi = 1;
+        }
   }
   /* A name reached by a Symbol or String -- send / method(:x) /
      define_method / respond_to? / `&:x` / inject(:x) -- takes the plain

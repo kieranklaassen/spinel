@@ -656,6 +656,30 @@ spinel: test/reject/scrub_bang_retained_append.rb:2: a String is not yet shared 
 spinel: test/reject/singleton_on_untraceable_recv.rb:10: singleton method that needs a self, on a receiver that is not one user-class instance
 == test/reject/singleton_on_untraceable_recv.rb [promote] rc=1
 spinel: test/reject/singleton_on_untraceable_recv.rb:10: singleton method that needs a self, on a receiver that is not one user-class instance
+== test/reject/string_alias_method_append.rb [default] rc=1
+spinel: test/reject/string_alias_method_append.rb:15: a String is passed to `render`'s parameter `out` through the call, which the method appends to: this call hands the method a copy, so the append would not reach the caller's String (a String is not yet shared by reference from a local variable into a method whose name an alias uses: a method `to_html` that calls `render`, written in place of the alias, shares it). Return the String from the method and assign it, or append to it in the caller.
+spinel: 1 refusal, nothing written
+== test/reject/string_alias_method_append.rb [promote] rc=1
+spinel: test/reject/string_alias_method_append.rb:15: a String is passed to `render`'s parameter `out` through the call, which the method appends to: this call hands the method a copy, so the append would not reach the caller's String (a String is not yet shared by reference from a local variable into a method whose name an alias uses: a method `to_html` that calls `render`, written in place of the alias, shares it). Return the String from the method and assign it, or append to it in the caller.
+spinel: 1 refusal, nothing written
+== test/reject/string_alias_method_called_by_alias.rb [default] rc=1
+spinel: test/reject/string_alias_method_called_by_alias.rb:11: a String is passed to `add`'s parameter `v` through the call, which the method appends to: this call hands the method a copy, so the append would not reach the caller's String (a String is not yet shared by reference from a local variable into a method whose name an alias uses: a method `add2` that calls `add`, written in place of the alias, shares it). Return the String from the method and assign it, or append to it in the caller.
+spinel: 1 refusal, nothing written
+== test/reject/string_alias_method_called_by_alias.rb [promote] rc=1
+spinel: test/reject/string_alias_method_called_by_alias.rb:11: a String is passed to `add`'s parameter `v` through the call, which the method appends to: this call hands the method a copy, so the append would not reach the caller's String (a String is not yet shared by reference from a local variable into a method whose name an alias uses: a method `add2` that calls `add`, written in place of the alias, shares it). Return the String from the method and assign it, or append to it in the caller.
+spinel: 1 refusal, nothing written
+== test/reject/string_alias_method_ivar.rb [default] rc=1
+spinel: test/reject/string_alias_method_ivar.rb:7: a String is passed to `add`'s parameter `v` through the call, which the method appends to: this call hands the method a copy, so the append would not reach the caller's String (a String is not yet shared by reference from an instance variable into a method whose name an alias uses: a method `add2` that calls `add`, written in place of the alias, shares it). Return the String from the method and assign it, or append to it in the caller.
+spinel: 1 refusal, nothing written
+== test/reject/string_alias_method_ivar.rb [promote] rc=1
+spinel: test/reject/string_alias_method_ivar.rb:7: a String is passed to `add`'s parameter `v` through the call, which the method appends to: this call hands the method a copy, so the append would not reach the caller's String (a String is not yet shared by reference from an instance variable into a method whose name an alias uses: a method `add2` that calls `add`, written in place of the alias, shares it). Return the String from the method and assign it, or append to it in the caller.
+spinel: 1 refusal, nothing written
+== test/reject/string_alias_same_name_elsewhere.rb [default] rc=1
+spinel: test/reject/string_alias_same_name_elsewhere.rb:13: a String is passed to `bump`'s parameter `v` through the call, which the method appends to: this call hands the method a copy, so the append would not reach the caller's String (a String is not yet shared by reference from a local variable into a method whose name an alias uses: a method `bump2` that calls `bump`, written in place of the alias, shares it). Return the String from the method and assign it, or append to it in the caller.
+spinel: 1 refusal, nothing written
+== test/reject/string_alias_same_name_elsewhere.rb [promote] rc=1
+spinel: test/reject/string_alias_same_name_elsewhere.rb:13: a String is passed to `bump`'s parameter `v` through the call, which the method appends to: this call hands the method a copy, so the append would not reach the caller's String (a String is not yet shared by reference from a local variable into a method whose name an alias uses: a method `bump2` that calls `bump`, written in place of the alias, shares it). Return the String from the method and assign it, or append to it in the caller.
+spinel: 1 refusal, nothing written
 == test/reject/string_append_through_kept_block_index.rb [default] rc=1
 spinel: test/reject/string_append_through_kept_block_index.rb:10: a String is passed through `b[]`, and a proc or Method it can reach appends to the String it is handed: this call hands it a copy, so the append would not reach the caller's String (a String is not yet shared by reference from a block's parameter). Return the String from the proc or Method and assign it, or append to it in the caller.
 spinel: 1 refusal, nothing written
