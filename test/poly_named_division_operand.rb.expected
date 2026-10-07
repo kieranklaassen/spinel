@@ -1,0 +1,60 @@
+int.div nil: TypeError: nil can't be coerced into Integer
+int.divmod nil: TypeError: nil can't be coerced into Integer
+int.remainder nil: TypeError: nil can't be coerced into Integer
+int.fdiv nil: TypeError: nil can't be coerced into Integer
+flt.div nil: TypeError: nil can't be coerced into Float
+flt.divmod nil: TypeError: nil can't be coerced into Float
+flt.remainder nil: TypeError: nil can't be coerced into Float
+flt.fdiv nil: TypeError: nil can't be coerced into Float
+int.div str: TypeError: String can't be coerced into Integer
+int.divmod str: TypeError: String can't be coerced into Integer
+int.remainder str: TypeError: String can't be coerced into Integer
+int.fdiv str: TypeError: String can't be coerced into Integer
+flt.div str: TypeError: String can't be coerced into Float
+flt.divmod str: TypeError: String can't be coerced into Float
+flt.remainder str: TypeError: String can't be coerced into Float
+flt.fdiv str: TypeError: String can't be coerced into Float
+int.div sym: TypeError: :sym can't be coerced into Integer
+int.divmod sym: TypeError: :sym can't be coerced into Integer
+int.remainder sym: TypeError: :sym can't be coerced into Integer
+int.fdiv sym: TypeError: :sym can't be coerced into Integer
+flt.div sym: TypeError: :sym can't be coerced into Float
+flt.divmod sym: TypeError: :sym can't be coerced into Float
+flt.remainder sym: TypeError: :sym can't be coerced into Float
+flt.fdiv sym: TypeError: :sym can't be coerced into Float
+int.div true: TypeError: true can't be coerced into Integer
+int.divmod true: TypeError: true can't be coerced into Integer
+int.remainder true: TypeError: true can't be coerced into Integer
+int.fdiv true: TypeError: true can't be coerced into Integer
+flt.div true: TypeError: true can't be coerced into Float
+flt.divmod true: TypeError: true can't be coerced into Float
+flt.remainder true: TypeError: true can't be coerced into Float
+flt.fdiv true: TypeError: true can't be coerced into Float
+int.div ary: TypeError: Array can't be coerced into Integer
+int.divmod ary: TypeError: Array can't be coerced into Integer
+int.remainder ary: TypeError: Array can't be coerced into Integer
+int.fdiv ary: TypeError: Array can't be coerced into Integer
+flt.div ary: TypeError: Array can't be coerced into Float
+flt.divmod ary: TypeError: Array can't be coerced into Float
+flt.remainder ary: TypeError: Array can't be coerced into Float
+flt.fdiv ary: TypeError: Array can't be coerced into Float
+rat.div nil: TypeError: nil can't be coerced into Rational
+rat.divmod sym: TypeError: :sym can't be coerced into Rational
+rat.remainder true: TypeError: true can't be coerced into Rational
+rat.fdiv str: TypeError: String can't be coerced into Rational
+nil.div 2: NoMethodError
+str.divmod 2: NoMethodError
+sym.fdiv 2: NoMethodError
+7.div 2: 3
+7.divmod 2: [3, 1]
+7.remainder 2: 1
+7.fdiv 2: 3.5
+7.div 2.5: 2
+2.5.divmod 2: [1, 0.5]
+2.5.remainder 2: 0.5
+2.5.fdiv 2: 1.25
+7/2.div 2: 1
+7/2.divmod 2: [1, (3/2)]
+7.div 0: ZeroDivisionError
+7.divmod 0: ZeroDivisionError
+7.fdiv 0: Infinity
