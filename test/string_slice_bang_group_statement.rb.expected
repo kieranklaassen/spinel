@@ -1,0 +1,24 @@
+"helo"
+"heo"
+"helo"
+"hello"
+"hello"
+"helo"
+"helo"
+"abcdefghiklm"
+"helo"
+"l"
+"ll"
+[FrozenError, "can't modify frozen String: \"hello\""]
+[FrozenError, "can't modify frozen String: \"hello\""]
+"hello"
+"helo"
+["helo", "world"]
+"helo"
+"helo"
+"helo"
+"helo"
+"helo"
+"hlo"
+[TypeError, "no implicit conversion of String into Integer"]
+"hlo"

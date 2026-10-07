@@ -14367,6 +14367,15 @@ static int re_group_small(Compiler *c, int id) {
          nt_int(c->nt, id, "value", -1) >= 0 && nt_int(c->nt, id, "value", -1) <= 9;
 }
 
+/* Is `id` a Regexp literal with no more groups than a match keeps spans for
+   (the fifteenth)? Counted by its parentheses, so never too few. */
+static int re_lit_groups_kept(Compiler *c, int id) {
+  int ri = re_lit_index(c, id), n = 0;
+  if (ri < 0) return 0;
+  for (const char *p = g_re_src[ri]; *p; p++) n += *p == '(';
+  return n <= 15;
+}
+
 /* s[/re/, n] = v, once the pattern matched: the span of group _t<tn> in _b
    and _e, in a block this opens. With `tests`, a group the pattern has not and
    a group that took no part in the match raise CRuby's IndexError: past the
@@ -15078,7 +15087,7 @@ static int str_mutate_append_bang_arms(Compiler *c, int id, Buf *b, int indent, 
         buf_printf(b, ", _t%d + _t%d, _t%d - _t%d - _t%d)); } }\n", ti2, tl2, tn2, ti2, tl2);
         return 1;
       }
-      if (argc == 2) {
+      if (argc == 2 && !re_lit_groups_kept(c, argv[0])) {
         /* splice out [i, i+len): head + tail, bounds clamped to the string in
            characters (a negative i counts from the end; OOB is a no-op) (#3084) */
         int ti2 = ++g_tmp, tl2 = ++g_tmp, tn2 = ++g_tmp;
