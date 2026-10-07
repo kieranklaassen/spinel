@@ -1928,19 +1928,6 @@ void emit_boxed(Compiler *c, int node, Buf *b) {
 /* `vol` makes the local volatile (required for locals live across a setjmp
    in a begin/rescue). Pointers need the volatile on the pointer itself
    (T * volatile), value types take a leading qualifier. */
-/* A cell that shadows a plain C slot (an INLINED block's param, bound by the
-   loop emitters writing that slot) has to take the slot's current value before
-   a proc built here reads the cell. Emitted at the capture fill, which is the
-   one point every such proc goes through. */
-void emit_cell_shadow_store(Compiler *c, Scope *encl, const char *name, Buf *b, int indent) {
-  (void)c;
-  LocalVar *lv = encl && name ? scope_local(encl, name) : NULL;
-  if (!lv || !lv->is_cell || !lv->cell_shadow) return;
-  emit_indent(b, indent);
-  if (lv->type == TY_PROC) buf_printf(b, "*_cell_%s = (sp_int)(uintptr_t)lv_%s;\n", name, name);
-  else buf_printf(b, "*_cell_%s = lv_%s;\n", name, name);
-}
-
 void declare_local(Compiler *c, Buf *b, LocalVar *lv, int vol) {
   declare_local_named(c, b, lv, lv->name, vol);
 }
