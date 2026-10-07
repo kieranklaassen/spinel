@@ -14648,6 +14648,12 @@ static void emit_str_concat_handle(Compiler *c, const char *sref, int argc, cons
    Integer literal, a local that holds a String or an Integer, `+`, `-` or
    `*` of two such Integers, an interpolation of these. A list: what it does
    not name may run anything, an interpolated object's to_s included. */
+/* An Integer's to_s is the builtin one: the program gives Integer none. */
+static int integer_to_s_runs_nothing(Compiler *c) {
+  int ic = comp_class_index(c, "Integer");
+  return ic < 0 || comp_method_in_chain(c, ic, "to_s", NULL) < 0;
+}
+
 static int append_arg_runs_nothing(Compiler *c, int id) {
   const NodeTable *nt = c->nt;
   id = unwrap_parens(c, id);
@@ -14659,6 +14665,9 @@ static int append_arg_runs_nothing(Compiler *c, int id) {
       const char *nm = nt_str(nt, id, "name");
       int r = nt_ref(nt, id, "receiver"), an = nt_ref(nt, id, "arguments"), ac = 0;
       const int *av = an >= 0 ? nt_arr(nt, an, "arguments", &ac) : NULL;
+      /* `i.to_s`, what an interpolated Integer runs */
+      if (nm && sp_streq(nm, "to_s") && r >= 0 && ac == 0 && nt_ref(nt, id, "block") < 0)
+        return comp_ntype(c, r) == TY_INT && append_arg_runs_nothing(c, r) && integer_to_s_runs_nothing(c);
       return nm && (sp_streq(nm, "+") || sp_streq(nm, "-") || sp_streq(nm, "*")) && r >= 0 && ac == 1 &&
              nt_ref(nt, id, "block") < 0 && comp_ntype(c, r) == TY_INT && comp_ntype(c, av[0]) == TY_INT &&
              append_arg_runs_nothing(c, r) && append_arg_runs_nothing(c, av[0]);
@@ -14671,6 +14680,9 @@ static int append_arg_runs_nothing(Compiler *c, int id) {
         int st = nt_ref(nt, parts[k], "statements"), bn = 0;
         const int *body = st >= 0 ? nt_arr(nt, st, "body", &bn) : NULL;
         if (bn != 1 || !append_arg_runs_nothing(c, body[0])) return 0;
+        /* an Integer is interpolated through its to_s, which the program
+           may have written */
+        if (comp_ntype(c, unwrap_parens(c, body[0])) == TY_INT && !integer_to_s_runs_nothing(c)) return 0;
       }
       return 1;
     }
@@ -14721,7 +14733,11 @@ static int append_chain_hold(Compiler *c, int cur, const int *chain, int nchain)
     if (!append_arg_runs_nothing(c, chain[j])) quiet = 0;
   if (append_recv_reads_slot(c, cur)) {
     int owner = nt_ref(nt, cur, "receiver");
+    const char *op = nt_str(nt, cur, "call_operator");
     if (owner < 0 || nt_kind(nt, owner) == NK_SelfNode || comp_ty_value_obj(c, comp_ntype(c, owner))) return 0;
+    /* `o&.s` holds its receiver in a temp of its own, written ahead of the
+       statement: it runs once and the slot is read through it already */
+    if (op && sp_streq(op, "&.")) return 0;
     return subtree_is_pure_read(c, owner) && quiet ? 0 : 2;
   }
   return quiet;
@@ -14758,9 +14774,16 @@ static int str_mutate_append_bang_arms(Compiler *c, int id, Buf *b, int indent, 
     /* the owner's temp is numbered only once the slot is known to be one:
        the slot is rendered around a mark first, and the mark renamed */
     static const char mark[] = "_o_w_n_e_r_o_f_";   /* no shorter than a temp's name */
+    size_t pre0 = g_pre ? g_pre->len : 0;
     int bind = hold == 2 ? view_bind(owner, "%s", mark) : -1;
     int slot = nchain > 0 && strbuf_slot_ref(c, cur, srefC, sizeof srefC);
     if (bind >= 0) view_unbind(bind);
+    /* a temp written ahead of the statement while the mark stood for the
+       owner would keep the mark: the slot is taken again and nothing held */
+    if (hold == 2 && g_pre && g_pre->len > pre0) {
+      g_pre->len = pre0; g_pre->p[pre0] = 0;
+      hold = 0; slot = strbuf_slot_ref(c, cur, srefC, sizeof srefC);
+    }
     if (slot) {
       if (hold == 2 && !strstr(srefC, mark)) hold = 0;
       int th = hold ? ++g_tmp : 0;

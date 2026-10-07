@@ -134,3 +134,18 @@ t = 0
   t += q.size
 end
 p t
+
+# a reader reached through `&.`
+def say(v) = (puts v; v)
+k = Q.new(+"k")
+a = [k]
+k&.s << "a" << say("b")
+a[0]&.s << "c" << say("d")
+a.shift&.s << "e" << say("f")
+p k.s, a.size
+
+# an Integer's to_s as the argument runs nothing either
+$n = 0
+k = Q.new(+"k")
+k.b << v.to_s << "z"
+p k.s, $n
