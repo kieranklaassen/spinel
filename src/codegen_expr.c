@@ -4318,7 +4318,7 @@ static void emit_expr_node(Compiler *c, int id, Buf *b) {
         buf_printf(b, "sp_RbVal _t%d = sp_%sHash_get(_t%d, _t%d);", tc2, hn, ta2, tb2);
         buf_printf(b, " if (%ssp_poly_truthy(_t%d)) { ", is_or2 ? "!" : "", tc2);
         emit_guarded_poly_slot_assign(c, iv, tc2, b);
-        buf_printf(b, "; sp_%sHash_set(_t%d, _t%d, _t%d); } _t%d; })", hn, ta2, tb2, tc2, tc2);
+        buf_printf(b, "; if (sp_gc_is_frozen(_t%d)) sp_raise_frozen_hash_at(_t%d, %s); sp_%sHash_set(_t%d, _t%d, _t%d); } _t%d; })", ta2, ta2, hash_box_cls(irt), hn, ta2, tb2, tc2, tc2);
       }
       else {
         buf_printf(b, "%s _t%d = sp_%sHash_get(_t%d, _t%d);", c_type_name(vt), tc2, hn, ta2, tb2);
@@ -4326,7 +4326,7 @@ static void emit_expr_node(Compiler *c, int id, Buf *b) {
         emit_slot_nil_test(c, vt, tc2, is_or2, b);
         buf_puts(b, ") { ");
         emit_guarded_slot_assign(c, iv, tc2, b);
-        buf_printf(b, "; sp_%sHash_set(_t%d, _t%d, _t%d); } _t%d; })", hn, ta2, tb2, tc2, tc2);
+        buf_printf(b, "; if (sp_gc_is_frozen(_t%d)) sp_raise_frozen_hash_at(_t%d, %s); sp_%sHash_set(_t%d, _t%d, _t%d); } _t%d; })", ta2, ta2, hash_box_cls(irt), hn, ta2, tb2, tc2, tc2);
       }
     }
     else if (irt == TY_POLY) {
