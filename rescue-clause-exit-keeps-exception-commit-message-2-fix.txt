@@ -1,0 +1,37 @@
+A break, next or return inside a rescue clause keeps the clause's exception
+
+    begin
+      raise ArgumentError, "low"
+    rescue ArgumentError
+      [1, 2].each { |x| next }
+      p $!
+      raise KeyError, "high"
+    end
+
+printed nil, and the KeyError had no cause. The `next` popped the
+ArgumentError off the handled stack, and the clause's own pop at its end
+then took sp_rescue_sp below zero: the caller's `$!` was lost too, and a
+few such clauses in a row ended in a segmentation fault.
+
+An exit pops the rescue bodies it leaves, and it told them by frame
+depth: those at or above the depth of its target. But a rescue clause
+runs with its frame already popped, so a loop, an ensure region, an
+inlined method or a break wrapper opened inside the clause stands at the
+clause's own depth, and an exit to it counted the clause it never left.
+
+Each rescue body now records what was open at its entry (the loop depth,
+the ensure depth, the return funnel), and an exit to a loop, an ensure
+region or an inlined method's funnel counts the bodies begun inside its
+target. A deferred return, next or break pops at the deferral only the
+bodies inside the region, and each ensure tail pops the ones between it
+and the next target, so the ensure body still reads the clause's `$!`.
+A break wrapper puts sp_rescue_sp back at its landing, as it does the
+other depths: a thrown break passes frames that restore their own mark,
+so no count at the break could be right. Only a wrapper whose body
+handles an exception takes that snapshot.
+
+A rescue modifier's fallback is registered as a rescue body as well. It
+never was, so `x rescue next` left its exception handled, and inside a
+rescue clause that leak and the wrong pop had cancelled out.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

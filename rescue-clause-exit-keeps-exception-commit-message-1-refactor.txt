@@ -1,0 +1,9 @@
+One emitter writes the frame pops and rescue-body pops from their counts
+
+emit_frame_unwind found its two counts and wrote them out in one body, so
+a caller that counts the rescue bodies another way had to repeat the
+emission. The counts are now arguments of emit_unwind, and
+emit_frame_unwind and emit_cur_exc_restore find theirs as before and call
+it. No generated C changes.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

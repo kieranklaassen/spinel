@@ -1,0 +1,1 @@
+A Struct member a construction leaves nil keeps the String handle its writer gives it

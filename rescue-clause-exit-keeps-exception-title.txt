@@ -1,0 +1,1 @@
+A break, next or return inside a rescue clause keeps the clause's exception

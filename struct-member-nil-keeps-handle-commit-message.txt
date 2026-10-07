@@ -1,0 +1,34 @@
+A Struct member a construction leaves nil keeps the String handle its writer gives it
+
+    S = Struct.new(:buf)
+    s = S.new
+    s.buf = +""
+    3.times { |i| s.buf << i.to_s }
+    p s.buf
+
+prints "012" in CRuby and "" here. A class with attr_accessor in the
+Struct's place prints "012", and so does this with --share-strings.
+
+The writer's String makes the member the shared handle
+(promote_ivar_handle_stores), and the construction that omits the member
+types it nil. ty_unify keeps a String that also sees nil a String, whose
+NULL is nil, but has no such rule for the handle, so the member went to
+poly; the next round made it the handle again, and the two alternated
+until the round limit. It ended poly, a poly member's String is a value,
+and the append answered a new String that nothing kept.
+
+A handle member that a construction leaves nil now stays the handle: its
+NULL is nil, as a String member's is. The types settle. Without
+--share-strings only: with it these programs are right already.
+
+A call on such a member while it is nil stays CRuby's NoMethodError,
+which the poly member raised. That nil is the program's own, a `new`
+that hands the member nothing, so the member is marked
+(ivar_handle_unset) and the nil fact answers NFW_UNSET for its reader,
+for the value it reads and for the handle (an_nil_facts). The call
+plan's nil target then tests it as it tests any nil the program writes;
+cplan_nil takes one arm, for a handle a reader renders with that fact.
+A member no `new` leaves nil is not marked and keeps its C, and so does
+every other handle slot.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
