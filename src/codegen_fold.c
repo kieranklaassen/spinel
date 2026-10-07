@@ -9458,17 +9458,77 @@ static int splat_program_may_make_to_a(Compiler *c) {
   return c->splat_to_a_may;
 }
 
+static int splat_class_own_at(Compiler *c, int cid, int depth) {
+  if (cid < 0 || cid >= c->nclasses || depth > 64 || c->splat_cls_from[c->nclasses]) return 0;
+  for (int u = cid; u >= 0; u = c->classes[u].parent) {
+    const ClassInfo *ci = &c->classes[u];
+    if (c->splat_cls_from[u] != 1 || ci->is_native_class) return 0;
+    for (int i = 0; i < ci->nincluded_mods; i++)
+      if (!splat_class_own_at(c, ci->included_mods[i], depth + 1)) return 0;
+  }
+  return 1;
+}
+
+/* Did the program write class `cid` and every class and included module
+   above it itself? A class Spinel ships in packages/ is what Spinel wrote of
+   CRuby's class, not all of it, so a method it lacks proves nothing about
+   CRuby's: a StringIO, a Tempfile and a Zlib reader answer #to_a there.
+   Asked of the classes the compiler holds: a builtin exception above it and
+   Comparable or Kernel mixed in are none, and CRuby's have no #to_a. */
+static int splat_class_is_own(Compiler *c, int cid) {
+  const NodeTable *nt = c->nt;
+  if (c->splat_cls_from_n != c->nclasses + 1) {
+    free(c->splat_cls_from);
+    c->splat_cls_from = calloc((size_t)c->nclasses + 1, 1);
+    c->splat_cls_from_n = c->nclasses + 1;
+    for (int id = 0; id < nt->count; id++) {
+      NodeKind k = nt_kind(nt, id);
+      if (k != NK_ClassNode && k != NK_ModuleNode) continue;
+      int cp = nt_ref(nt, id, "constant_path");
+      const char *nm = cp >= 0 ? nt_str(nt, cp, "name") : NULL;
+      int ci = nm ? comp_class_index(c, nm) : -1;
+      if (ci >= 0) c->splat_cls_from[ci] |= nt_int(nt, id, "node_pkg", 0) ? 2 : 1;
+    }
+    /* `Point = Struct.new(:x)`, `Point = Data.define(:x)`: where the constant is written */
+    for (int i = 0; i < c->nclasses; i++) {
+      int dn = c->classes[i].def_node;
+      if (dn >= 0 && nt_kind(nt, dn) == NK_ConstantWriteNode)
+        c->splat_cls_from[i] |= nt_int(nt, dn, "node_pkg", 0) ? 2 : 1;
+    }
+    /* `prepend M` is recorded on no class: a program that prepends what it
+       did not write keeps every object's form (the last slot says so) */
+    NT_FOREACH_KIND(nt, NK_CallNode, id) {
+      if (nt_ref(nt, id, "receiver") >= 0 || !sp_streq(nt_str(nt, id, "name"), "prepend")) continue;
+      int an = 0, args = nt_ref(nt, id, "arguments");
+      const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+      int own = an > 0;
+      for (int k = 0; k < an && own; k++) {
+        NodeKind ak = nt_kind(nt, av[k]);
+        const char *nm = ak == NK_ConstantReadNode || ak == NK_ConstantPathNode
+                       ? nt_str(nt, av[k], "name") : NULL;
+        own = nm && splat_class_own_at(c, comp_class_index(c, nm), 0);
+      }
+      if (!own) c->splat_cls_from[c->nclasses] = 1;
+    }
+  }
+  /* a module included at the top level is above every class */
+  for (int i = 0; i < c->ntoplevel_includes; i++)
+    if (!splat_class_own_at(c, c->toplevel_includes[i], 0)) return 0;
+  return splat_class_own_at(c, cid, 0);
+}
+
 /* Is `t` an object that certainly answers no #to_a, so that splatted it is
    the one value, itself? No class above it may be a Struct, a Data or a
-   native class, and the program must have no way to a to_a anywhere. Any
-   other object keeps the form it had. */
+   native class, the program must have written its class and all above it
+   itself, and it must have no way to a to_a anywhere. Any other object
+   keeps the form it had. */
 static int splat_operand_is_plain_object(Compiler *c, TyKind t) {
   if (!ty_is_object(t)) return 0;
   int cid = ty_object_class(t);
   if (cid < 0 || cid >= c->nclasses) return 0;
   for (int u = cid; u >= 0; u = c->classes[u].parent)
     if (c->classes[u].is_struct || c->classes[u].is_data || c->classes[u].is_native_class) return 0;
-  return !splat_program_may_make_to_a(c);
+  return splat_class_is_own(c, cid) && !splat_program_may_make_to_a(c);
 }
 
 /* The positional count of a call with a splat among its positionals, as

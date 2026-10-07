@@ -931,6 +931,11 @@ typedef struct {
   /* splat_program_may_make_to_a: its answer (kept once it is 1) and the class
      and scope counts it was read at, each plus one */
   int splat_to_a_may, splat_to_a_ncls, splat_to_a_nscopes;
+  /* splat_class_is_own: per class, 1 where the program opens it and 2 where
+     a packages/ file does (`node_pkg`), and the class count that was read
+     at, plus one */
+  unsigned char *splat_cls_from;
+  int splat_cls_from_n;
 
   /* FFI registry: ffi_func declarations */
   FfiFunc *ffi_funcs;
