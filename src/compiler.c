@@ -2266,16 +2266,16 @@ static int vsite_key(Compiler *c, int v, NodeKind *kind, const char **name, int 
   if (!nm) return 0;
   Scope *s;
   switch (nt_kind(nt, v)) {
-    case NK_LocalVariableReadNode: case NK_LocalVariableWriteNode:
+    case NK_LocalVariableReadNode: case NK_LocalVariableWriteNode: case NK_LocalVariableOperatorWriteNode:
     case NK_LocalVariableOrWriteNode: case NK_LocalVariableAndWriteNode:
       s = comp_scope_of(c, v);
       *kind = NK_LocalVariableReadNode; *name = nm; *key = s ? (int)(s - c->scopes) : -1;
       return s != NULL;
-    case NK_InstanceVariableReadNode: case NK_InstanceVariableWriteNode:
+    case NK_InstanceVariableReadNode: case NK_InstanceVariableWriteNode: case NK_InstanceVariableOperatorWriteNode:
     case NK_InstanceVariableOrWriteNode: case NK_InstanceVariableAndWriteNode:
       *kind = NK_InstanceVariableReadNode; *name = nm; *key = comp_ivar_owner(c, v);
       return *key >= 0;
-    case NK_GlobalVariableReadNode: case NK_GlobalVariableWriteNode:
+    case NK_GlobalVariableReadNode: case NK_GlobalVariableWriteNode: case NK_GlobalVariableOperatorWriteNode:
     case NK_GlobalVariableOrWriteNode: case NK_GlobalVariableAndWriteNode:
       *kind = NK_GlobalVariableReadNode; *name = comp_resolve_gvar(c, nm + 1); *key = -1;
       return *name != NULL;
@@ -2308,10 +2308,18 @@ static int vsite_is_read(const NodeTable *nt, int n) {
   NodeKind k = n >= 0 ? nt_kind(nt, n) : NK_NONE;
   return k == NK_LocalVariableReadNode || k == NK_InstanceVariableReadNode || k == NK_GlobalVariableReadNode;
 }
+/* `x += v`, `x ||= v`, `x &&= v`: it reads the variable and writes it. */
+static int vsite_is_opwrite(NodeKind k) {
+  return k == NK_LocalVariableOperatorWriteNode || k == NK_LocalVariableOrWriteNode || k == NK_LocalVariableAndWriteNode ||
+         k == NK_InstanceVariableOperatorWriteNode || k == NK_InstanceVariableOrWriteNode ||
+         k == NK_InstanceVariableAndWriteNode || k == NK_GlobalVariableOperatorWriteNode ||
+         k == NK_GlobalVariableOrWriteNode || k == NK_GlobalVariableAndWriteNode;
+}
 
 /* Variable-site chains: for each variable the String refusals name, the
    nodes that read it (VS_READ), write it (VS_WRITE, `x = v`; VS_STORE, any
-   `=`, `||=` or `&&=`, a class variable's and a constant's too), call a String
+   `=`, `||=` or `&&=`, a class variable's and a constant's too), read and
+   write it in one (VS_OPWRITE, `x += v`), call a String
    mutator on it (VS_MUT: the call, also through the calls that answer their
    receiver, `x.to_s << y`) or call any method on it (VS_RECV: the call whose
    receiver it is), one entry per (kind, site), chained by (kind, variable)
@@ -2371,6 +2379,7 @@ static void vsite_build(Compiler *c, int toplevel) {
     if (vsite_is_read(nt, u)) vsite_add(c, VS_READ, u, u);
     else if (k == NK_LocalVariableWriteNode || k == NK_InstanceVariableWriteNode || k == NK_GlobalVariableWriteNode)
       vsite_add(c, VS_WRITE, u, u);
+    else if (vsite_is_opwrite(k)) vsite_add(c, VS_OPWRITE, u, u);
     else if (k == NK_StatementsNode) {
       int bn = 0; const int *bb = nt_arr(nt, u, "body", &bn);
       for (int i = 0; i + 1 < bn; i++) {
@@ -2419,6 +2428,10 @@ int comp_vsite_node(const Compiler *c, int e) {
 }
 int comp_vsite_var(const Compiler *c, int e) {
   return (e >= 0 && e < c->vs_count) ? c->vs_var[e] : -1;
+}
+int comp_vsite_is(Compiler *c, int e, NodeKind kind, const char *name, int key) {
+  NodeKind vk; const char *vn; int vkey;
+  return vsite_key(c, comp_vsite_var(c, e), &vk, &vn, &vkey) && vk == kind && vkey == key && sp_streq(vn, name);
 }
 int comp_recv_parent(Compiler *c, int n) {
   vsite_sync(c);

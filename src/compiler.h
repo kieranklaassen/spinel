@@ -1096,7 +1096,7 @@ int comp_ivarg_call(const Compiler *c, int e);
 int comp_ivarg_arg(const Compiler *c, int e);
 /* The owning class of an ivar read or write node, or -1. */
 int comp_ivar_owner(Compiler *c, int node);
-typedef enum { VS_READ, VS_WRITE, VS_MUT, VS_RECV, VS_STORE, VS_NKINDS } VsKind;
+typedef enum { VS_READ, VS_WRITE, VS_MUT, VS_RECV, VS_STORE, VS_OPWRITE, VS_NKINDS } VsKind;
 /* Variable-site chains (compiler.c, see vsite_build): the entries of one
    site kind of the variable named by read kind `kind`
    (NK_LocalVariableReadNode, NK_InstanceVariableReadNode,
@@ -1111,6 +1111,8 @@ int comp_vsite_first(Compiler *c, VsKind k, NodeKind kind, const char *name, int
 int comp_vsite_next(const Compiler *c, int e);
 int comp_vsite_node(const Compiler *c, int e);
 int comp_vsite_var(const Compiler *c, int e);
+/* Is entry e's variable the one `kind`, `name` and `key` name? */
+int comp_vsite_is(Compiler *c, int e, NodeKind kind, const char *name, int key);
 /* The call whose receiver node `n` is (through parentheses), or -1; and
    whether it is a statement the next statement follows, so its value is
    dropped. */
