@@ -2027,6 +2027,34 @@ int exc_subclass_defines(Compiler *c, const char *name) {
   return 0;
 }
 
+/* 1 iff the call is full_message or detailed_message given only the keywords
+   that ask for what the bare call gives: `highlight: false` (or nil) and
+   `order: :top` (or nil), as literals. The renderings have no terminal to
+   colour for and no backtrace to order, so such a call answers as the bare
+   one does, on every receiver the bare call has an arm for. Any other
+   keyword or value (highlight: true, order: :bottom, a variable) is left as
+   it was: it asks for another text, or CRuby raises for it. */
+int exc_rendering_kwargs(const NodeTable *nt, const char *name, int argc, const int *argv) {
+  if (argc != 1 || !is_exception_full_message(name) || nt_kind(nt, argv[0]) != NK_KeywordHashNode) return 0;
+  int n = 0; const int *els = nt_arr(nt, argv[0], "elements", &n);
+  if (n < 1) return 0;
+  for (int i = 0; i < n; i++) {
+    if (nt_kind(nt, els[i]) != NK_AssocNode) return 0;
+    int key = nt_ref(nt, els[i], "key"), val = nt_ref(nt, els[i], "value");
+    const char *kn = key >= 0 && nt_kind(nt, key) == NK_SymbolNode ? nt_str(nt, key, "value") : NULL;
+    if (!kn || val < 0) return 0;
+    NodeKind vk = nt_kind(nt, val);
+    if (vk == NK_NilNode) { if (!sp_streq(kn, "highlight") && !sp_streq(kn, "order")) return 0; }
+    else if (sp_streq(kn, "highlight")) { if (vk != NK_FalseNode) return 0; }
+    else if (sp_streq(kn, "order")) {
+      const char *vn = vk == NK_SymbolNode ? nt_str(nt, val, "value") : NULL;
+      if (!vn || !sp_streq(vn, "top")) return 0;
+    }
+    else return 0;
+  }
+  return 1;
+}
+
 /* analyze.c's an_class_can_be_reached, plus reopened builtin primitives: a
    class nothing can reach cannot own a name, and owning a name takes the
    BUILTIN away. A program that merely declared `Bucket#partition`, never
