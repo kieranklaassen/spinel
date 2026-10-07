@@ -6984,6 +6984,16 @@ static void emit_proc_param_slot(Compiler *c, Buf *pb, const char *name, const c
 /* A proc parameter whose value the sp_int slot does not carry reads the boxed
    channel every call publishes. Answers 0 for a type the slot does carry. */
 static int emit_proc_param_from_box(TyKind pt, int k, const char *p, Buf *pb) {
+  if (pt == TY_BIGINT) {
+    /* A parameter is a Bignum when some call passes one. Another call may
+       pass an Integer, which the slot carries as itself and the cast below
+       read as a pointer: 7 faulted, 0 was nil. The Bignum made of it is held
+       by nothing else. */
+    g_needs_proc_poly_argslot = 1;
+    buf_printf(pb, "(argc > %d) ? sp_proc_arg_bigint(_sp_proc_poly_args[%d], args[%d]) : NULL;\n", k, k, k);
+    buf_printf(pb, "    SP_GC_ROOT(lv_%s);\n", p);
+    return 1;
+  }
   if (pt != TY_STRBUF) return 0;
   /* A String parameter the body appends to is the shared handle (#6179):
      it reads the boxed channel every call publishes, which carries the

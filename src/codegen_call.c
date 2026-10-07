@@ -22235,10 +22235,15 @@ int emit_method_tramp_fn(Compiler *c, Scope *tm, int shift, const char *fname,
   /* a float/poly parameter, or the rest's surplus, reads back from the
      boxed side-channel the call site publishes */
   int needs_slot = boxed_src || (bind && has_any_kw);
+  /* A Bignum parameter reads the box as well as its slot, since a call may
+     pass it an Integer (sp_proc_arg_bigint); past the 16 arguments a call
+     site fills there is no box to read. */
+  int big_box = np - shift <= 16;
   for (int k = shift; k < np; k++) {
     LocalVar *pp = scope_local(tm, tm->pnames[k]);
     TyKind pt = pp ? pp->type : TY_INT;
-    if (pt == TY_POLY || pt == TY_FLOAT || (bind && (k == tm->rest_idx || proc_slot_via_poly(c, pt))))
+    if (pt == TY_POLY || pt == TY_FLOAT || (pt == TY_BIGINT && big_box) ||
+        (bind && (k == tm->rest_idx || proc_slot_via_poly(c, pt))))
       needs_slot = 1;
   }
   if (needs_slot && !g_needs_proc_poly_argslot) {
@@ -22497,6 +22502,13 @@ int emit_method_tramp_fn(Compiler *c, Scope *tm, int shift, const char *fname,
         /* a handle parameter (#6179) takes the caller's handle off the box;
            the sp_int slot holds bytes */
         else if (pt == TY_STRBUF) buf_printf(pb, "sp_poly_as_strbuf(%s)", slot);
+        else if (pt == TY_BIGINT && big_box) {
+          /* a post behind a rest is counted from the end, which more than
+             16 arguments put past the box */
+          if (tm->rest_idx >= 0 && strchr(idx, '-'))
+            buf_printf(pb, "argc > 16 ? (sp_Bigint *)(uintptr_t)args[%s] : ", idx);
+          buf_printf(pb, "sp_proc_arg_bigint(%s, args[%s])", slot, idx);
+        }
         else if (proc_slot_is_ptr(pt)) { buf_puts(pb, "("); emit_ctype(c, pt, pb); buf_printf(pb, ")(uintptr_t)args[%s]", idx); }
         else if (pt == TY_PROC) buf_printf(pb, "(sp_Proc *)(uintptr_t)args[%s]", idx);
         else if (proc_slot_via_poly(c, pt)) emit_unbox_text(c, pt, slot, pb);
@@ -22574,6 +22586,13 @@ int emit_method_tramp_fn(Compiler *c, Scope *tm, int shift, const char *fname,
     else if (pt == TY_FLOAT) buf_printf(&args, "sp_poly_to_f(_sp_proc_poly_args[%d])", k - shift);
     else if (pt == TY_SYMBOL) buf_printf(&args, "(sp_sym)args[%d]", k - shift);
     else if (pt == TY_STRBUF) buf_printf(&args, "sp_poly_as_strbuf(_sp_proc_poly_args[%d])", k - shift);
+    else if (pt == TY_BIGINT && big_box) {
+      /* read ahead of the call and rooted: the Bignum made of an Integer is
+         held by nothing else until the callee takes it */
+      buf_printf(pb, "  sp_Bigint *_a%d = sp_proc_arg_bigint(_sp_proc_poly_args[%d], args[%d]);\n  SP_GC_ROOT(_a%d);\n",
+                 k - shift, k - shift, k - shift, k - shift);
+      buf_printf(&args, "_a%d", k - shift);
+    }
     else if (proc_slot_is_ptr(pt)) {
       buf_puts(&args, "(");
       emit_ctype(c, pt, &args);
