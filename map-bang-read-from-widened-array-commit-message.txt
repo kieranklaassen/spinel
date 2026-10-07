@@ -1,0 +1,25 @@
+A local read out of an Array that map! rewrote holds the element
+
+`t.map! { }` whose block answers another kind makes the receiver the
+general Array, in a pass that runs once the types have settled
+(widen_arrays_from_map_bang). The locals were typed from their
+writes before that, so what was read out of the Array was typed from
+the Array as it began:
+
+    t = [1.5, 2.5]
+    t.map! { |e| e == t[0] ? :k : e }
+    r = t.first
+    p r      # TypeError (can't convert Symbol into Float); CRuby :k
+
+A String read out of what began as an Integer Array printed 0.
+
+The commit beneath brackets the container fold in infer_write_types:
+a typed local Array the fold makes the general Array sends the scan
+of the writes round again with that local held general, so what is
+read out of it is typed from the Array as it is. The map! widening
+now runs between the same two, beside the fold, and is seen the same
+way. Its call after the types settle is left where it was.
+
+Test: test/map_bang_read_from_widened_array.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
