@@ -10277,6 +10277,11 @@ static sp_RbVal sp_poly_index_poly(sp_RbVal recv, sp_RbVal idx) {
     sp_RbVal _u;
     if (sp_poly_user_cmp("[]", recv, idx, &_u)) return _u;
   }
+  /* a String key the program appends to is boxed as its shared handle, not
+     as SP_TAG_STR: a Hash is read by its text, where the key matched no arm
+     below and missed */
+  if (sp_poly_is_strbuf(idx) && recv.tag == SP_TAG_OBJ && sp_poly_is_hash_kind(recv.cls_id))
+    idx = sp_poly_strbuf_deref(idx);
   if (idx.tag == SP_TAG_STR) return sp_poly_get_str(recv, idx.v.s);
   if (idx.tag == SP_TAG_SYM) return sp_poly_get_sym(recv, (sp_sym)idx.v.i);
   /* a Range index on a poly STRING is a substring (String#[Range]); without
@@ -10384,6 +10389,10 @@ static sp_RbVal sp_poly_index_poly(sp_RbVal recv, sp_RbVal idx) {
    kind can never be present, so it reports FALSE. */
 static sp_bool sp_poly_has_key(sp_RbVal recv, sp_RbVal key) {
   if (recv.tag != SP_TAG_OBJ) return FALSE;
+  /* a String key the program appends to is boxed as its shared handle, not
+     as SP_TAG_STR: a String-keyed Hash is asked by its text (a PolyPolyHash
+     takes the box as it is) */
+  if (sp_poly_is_strbuf(key) && recv.cls_id != SP_BUILTIN_POLY_POLY_HASH) key = sp_poly_strbuf_deref(key);
   switch (recv.cls_id) {
     case SP_BUILTIN_POLY_POLY_HASH: return sp_PolyPolyHash_has_key((sp_PolyPolyHash *)recv.v.p, key);
     case SP_BUILTIN_STR_POLY_HASH:  return key.tag == SP_TAG_STR && sp_StrPolyHash_has_key((sp_StrPolyHash *)recv.v.p, key.v.s);
@@ -10410,6 +10419,8 @@ static sp_RbVal sp_fmt_hash_fetch(sp_RbVal h, sp_sym k, const char *nm) {
    answers for itself here instead. */
 static sp_RbVal sp_poly_delete_key(sp_RbVal recv, sp_RbVal key) {
   if (recv.tag == SP_TAG_OBJ && sp_poly_is_hash_kind(recv.cls_id)) {
+    /* an appended String key, as sp_poly_has_key reads it */
+    if (sp_poly_is_strbuf(key) && recv.cls_id != SP_BUILTIN_POLY_POLY_HASH) key = sp_poly_strbuf_deref(key);
     if (!sp_poly_has_key(recv, key)) return sp_box_nil();
     sp_RbVal was = sp_poly_index_poly(recv, key);
     switch (recv.cls_id) {
