@@ -6981,6 +6981,22 @@ static void emit_proc_param_slot(Compiler *c, Buf *pb, const char *name, const c
   free(dpre.p); free(dval.p);
 }
 
+/* A proc parameter whose value the sp_int slot does not carry reads the boxed
+   channel every call publishes. Answers 0 for a type the slot does carry. */
+static int emit_proc_param_from_box(TyKind pt, int k, const char *p, Buf *pb) {
+  if (pt != TY_STRBUF) return 0;
+  /* A String parameter the body appends to is the shared handle (#6179):
+     it reads the boxed channel every call publishes, which carries the
+     caller's handle when the caller's String is one, and a plain String
+     otherwise, wrapped in a handle of its own (sp_poly_as_strbuf). The
+     sp_int slot holds bytes, never a handle. */
+  g_needs_proc_poly_argslot = 1;
+  buf_printf(pb, "(argc > %d) ? sp_poly_as_strbuf(_sp_proc_poly_args[%d]) : NULL;\n", k, k);
+  /* the handle made for a plain String is held by nothing else */
+  buf_printf(pb, "    SP_GC_ROOT(lv_%s);\n", p);
+  return 1;
+}
+
 static void emit_proc_literal_here(Compiler *c, int create, Buf *b) {
   const NodeTable *nt = c->nt;
   const char *cty = nt_type(nt, create);
@@ -7760,17 +7776,7 @@ else if (orecv >= 0 && onm) {
       /* either nil makes it nullable, as an Integer's below */
       if (lv && pt == TY_FLOAT) lv->nullable_int = 1;
     }
-    else if (pt == TY_STRBUF && k < 16) {
-      /* A String parameter the body appends to is the shared handle (#6179):
-         it reads the boxed channel every call publishes, which carries the
-         caller's handle when the caller's String is one, and a plain String
-         otherwise, wrapped in a handle of its own (sp_poly_as_strbuf). The
-         sp_int slot holds bytes, never a handle. */
-      g_needs_proc_poly_argslot = 1;
-      buf_printf(pb, "(argc > %d) ? sp_poly_as_strbuf(_sp_proc_poly_args[%d]) : NULL;\n", k, k);
-      /* the handle made for a plain String is held by nothing else */
-      buf_printf(pb, "    SP_GC_ROOT(lv_%s);\n", p);
-    }
+    else if (k < 16 && emit_proc_param_from_box(pt, k, p, pb)) {}
     else if (proc_slot_is_ptr(pt)) {
       buf_printf(pb, "(argc > %d) ? (", k); emit_ctype(c, pt, pb);
       buf_printf(pb, ")(uintptr_t)args[%d] : NULL;\n", k);
