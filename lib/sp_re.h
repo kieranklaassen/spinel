@@ -139,6 +139,8 @@ typedef struct {
   const mrb_regexp_pattern *last_pat;
   int last_lit;
   int pp_span[2];
+  struct { sp_gc_frame_hdr h; void **p[13]; } roots;   /* the strings above, as one root frame */
+  int rooted;  /* whether sp_re_frame_push got it onto the root stack */
 } sp_re_frame;
 void sp_re_frame_push(sp_re_frame *f);
 void sp_re_frame_pop(sp_re_frame *f);

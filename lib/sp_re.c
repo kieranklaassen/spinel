@@ -119,9 +119,23 @@ void sp_re_frame_push(sp_re_frame *f) {
   f->last_pat = sp_re_last_pat;
   f->last_lit = sp_re_last_lit;
   f->pp_span[0] = sp_re_pp_span[0]; f->pp_span[1] = sp_re_pp_span[1];
+  /* The saved strings are the caller's. While this method runs its own match
+     is in the registers, so nothing else names them, and they go back into
+     the registers on the way out: they are roots until then, as one root
+     frame (sp_gc.h). The tags are added, not or-ed: the slots are aligned,
+     and the sum folds into the address. */
+  f->roots.h.nv = 0; f->roots.h.np = 13;
+  void **slot = (void **)((char *)&f->captures[1] + 2);
+  for (int i = 0; i < 9; i++) f->roots.p[i] = slot + i;
+  f->roots.p[9] = (void **)((char *)&f->last_str + 2);
+  f->roots.p[10] = (void **)((char *)&f->match_str + 2);
+  f->roots.p[11] = (void **)((char *)&f->match_pre + 2);
+  f->roots.p[12] = (void **)((char *)&f->match_post + 2);
+  f->rooted = _sp_gc_root_push((void **)((char *)&f->roots + 3));
 }
 void sp_re_frame_pop(sp_re_frame *f) {
   if (!f) return;
+  sp_gc_nroots -= f->rooted;
   for (int i = 0; i < 10; i++) sp_re_captures[i] = f->captures[i];
   for (int i = 0; i < 64; i++) sp_re_caps[i] = f->caps[i];
   sp_re_last_str = f->last_str;
