@@ -1,0 +1,37 @@
+A proc in a local that held nil first reads the argument it is given
+
+    h = nil
+    h = ->(x) { x * 2 }
+    p h.call(1.5)
+
+printed 0, and with `->(s) { s.length }` called on "wxyz" it raised
+NoMethodError for an Integer. A local that holds nil as well as the
+proc is a boxed slot, and the site loop of infer_block_params types a
+literal's parameters only for a receiver it knows as a Proc. The
+parameters kept the Integer default and read the argument's word
+through it. The same literal in a local written once was right.
+
+The loop now takes such a local too, and cs_type_proc_name an arm of a
+conditional the local is written with (`f = on ? ->(s) { ... } : nil`),
+where two things hold. The proc stays with its name: every read of the
+local is the receiver of call, (), yield, ===, nil? or !, or a
+condition, and no write of it is the value of something else, so the
+calls through the name are all the calls there are. And those calls
+agree: each hands the same number of plain arguments, one to four, of
+the same typed kind, and not all Integers (proc_locals_open). That is
+asked once, when the inference has settled as it does today; a program
+with no such local, or whose calls do not agree, is typed as before.
+
+So a parameter is never boxed by this. A callback handed Integers, a
+boxed value, its own result (`t = f.call(t)`) or two kinds keeps the C
+it had, and so does one copied to a second local, stored, answered or
+handed to a method, and one called as `f[x]`, which on a boxed receiver
+is an index.
+
+The guard walks its own parent map from the program's root. The
+rewrite of `g = (f = x)` points g's write at f's and leaves the
+parentheses behind, still naming f's write, and an_parent_map, which
+takes the last node that names a child, answered with them: f's write
+looked like a statement.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

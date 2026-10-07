@@ -1,0 +1,1 @@
+A block kept from inside a then or tap block reads its own run's parameter
