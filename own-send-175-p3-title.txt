@@ -1,0 +1,1 @@
+A boxed receiver that holds an object with its own send calls it

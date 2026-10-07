@@ -1,0 +1,29 @@
+A class's own object_id is the one its instances answer
+
+    class Token
+      def initialize(n) = @n = n
+      def object_id = @n * 10
+    end
+    p Token.new(4).object_id
+
+printed the object's address where CRuby prints 40: the builtin arm
+answers for any receiver. With an own __id__ that answers a String,
+`puts t.__id__` ended in a segmentation fault, the call typed Integer
+on one side and as the method on the other.
+
+The arm already stands down for a generated reader of the name, in the
+inference (infer_universal_call) and in the emitter
+(emit_call_identity_arms). It now stands down for any member of the
+receiver's class, a def as well as a reader: its own, an inherited one,
+an included module's, a Struct block's, as display's arms do since
+ee4a10a0. __id__ goes with object_id.
+
+Left as before: a boxed receiver, which takes the builtin whatever it
+holds, and a singleton method reached by a bare call in one of the
+class's methods. A class with neither name resolves no member, and its
+C is unchanged.
+
+Test: test/own_object_id.rb (expected from CRuby 3.3.6 with
+--enable-frozen-string-literal).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

@@ -1,0 +1,31 @@
+A class's own ivar reflection methods are the ones its instances answer
+
+    class Record
+      def initialize(n) = @n = n
+      def instance_variable_get(name) = "get #{name} of #{@n}"
+    end
+    p Record.new(3).instance_variable_get(:@n)
+
+printed 3 where CRuby prints "get @n of 3": on a typed object the call
+was lowered to a read of the field, and the class's method never ran.
+An own instance_variable_set wrote the field, an own
+instance_variable_defined? was answered from the layout, an own
+instance_variables listed the slots, an own remove_instance_variable
+answered the field, and on a Struct the set was refused.
+
+The lowerings now stand down where the receiver's class has a method of
+the name in its chain, as display's arms do: in the
+inference (infer_object_call for get, set and remove, infer_call_inner
+for the other two) and in the emitter (emit_object_ivar_call,
+emit_call_display_ivar_arms, emit_object_call's list and its remove
+arm). The call is then the ordinary call to that method, on a receiver
+and on self alike.
+
+Left as before: a boxed receiver, and a singleton method. A class with
+none of the five names takes the lowering it always took, and its C is
+unchanged.
+
+Test: test/own_ivar_reflection_methods.rb (expected from CRuby 3.3.6
+with --enable-frozen-string-literal).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

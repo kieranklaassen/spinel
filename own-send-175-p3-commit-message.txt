@@ -1,0 +1,49 @@
+A boxed receiver that holds an object with its own send calls it
+
+    @conns = []
+    @conns << Conn.new(:a)
+    @conns.each { |c| puts c.send("hello", 0) }
+
+with `def send(msg, flags)` on Conn called Conn#hello where the class
+has one, a silent wrong answer, and raised NoMethodError where it has
+none. CRuby calls Conn#send. The block parameter is boxed while the
+fixpoint runs, so the retarget in desugar_public_send_recv cannot read
+off whose send it is, and waiting does not help: the Array gets its
+class only in the re-narrow, after the last round.
+
+Now, in a program that defines the name, the retarget of a send,
+__send__ or public_send on a boxed receiver goes ahead as before and
+marks the call. Once the re-narrow has run, desugar_send_settled asks
+again:
+
+- a receiver now typed with a class that owns the name gets its call
+  back, `(c.send("hello", 0))`;
+- one still boxed becomes
+
+      (__r = recv; __r.is_a?(Conn) ? __r.send("hello", 0) : __r.hello(0))
+
+  over the classes that define the name (send_split_boxed), the shape
+  desugar_builtin_enum_calls gives a boxed receiver beside a class's
+  own each. The second arm is the retargeted call as it was, with its
+  `&.` and its visibility stamp; receiver and arguments are evaluated
+  once;
+- every other call stays the retargeted call it was. That includes a
+  block's parameter over an Array typed with a class that has no such
+  method: it stays boxed in the analysis, and the emitter declares it
+  from the element.
+
+A call that changed is one no round has seen, so the rounds run once
+more for it (an_infer_fixpoint_rounds, the fixpoint without its
+re-narrow; types only widen there).
+
+Retargeted as before: a send that carries a block, and any program
+where a singleton, an unnamed Struct or a reopened builtin defines the
+name. So is a send of a send, `c.send(:send, :open)`: it is retargeted
+twice, the call left is not the one written, and it carries no mark
+(send_hop). A program that defines none of the three names is never
+marked and compiles to the same C.
+
+Test: test/own_send_boxed_receiver.rb (expected from CRuby 3.3.6 with
+--enable-frozen-string-literal).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

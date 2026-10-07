@@ -1,0 +1,1 @@
+A class's own ivar reflection methods are the ones its instances answer

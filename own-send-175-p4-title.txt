@@ -1,0 +1,1 @@
+A class's own object_id is the one its instances answer

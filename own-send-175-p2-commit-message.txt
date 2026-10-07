@@ -1,0 +1,45 @@
+A computed send beside a class's own send still names its method
+
+    class Mailer
+      def send(msg, flags) = ...
+    end
+    m = [:sort, :reverse][i]
+    p [3, 1, 2].send(m)
+
+raised NoMethodError (undefined method 'send' for an instance of
+Array) where CRuby calls Array#sort. A bare `send("on_#{ev}")` in a
+class with no send of its own, `door.public_send(m)` and
+`door.__send__(m)` were refused: desugar_dynamic_send stood down for
+the whole program as soon as any scope was named send, __send__ or
+public_send, and every other computed send was left an ordinary call
+that nothing answers.
+
+Whose send a call reaches is a matter of its receiver. Now the lowering
+stands down for a call only where the program's own method can take it
+(an_send_may_be_own): the receiver's class, or a class under it, has
+the name in its chain; the receiver is boxed or has no type yet; self
+in a module's method or an instance_eval block; or the program has a
+top-level def of the name; or a builtin the program reopened defines
+it. `class Object; def send` is every receiver's method, and the chains
+asked here do not place a builtin among a class's ancestors, so there
+every computed send stays as written. Every other call is lowered as it
+is in a program that defines none: a typed object of another class, a
+builtin value, a class named at compile time, self in a class that has
+none. A public_send written bare at the top level is left as written
+too: a top-level def is private, which public_send does not call, and
+the lowering keeps no list of them.
+
+The arms are made while the receiver has one type, and a later round
+can widen it. So the two readers of dyn_send_arms, infer_call_inner and
+emit_dynamic_send, ask again and leave the call the ordinary one it was
+when the receiver has become one the program's own method can take.
+
+Left as on master: a computed send on a receiver that is boxed while
+the fixpoint runs, in a program that defines the name. A program that
+defines none of the three names never asks, and compiles to the same C.
+
+Tests: test/computed_send_beside_own_send.rb and
+test/computed_send_object_send.rb (expected from CRuby 3.3.6 with
+--enable-frozen-string-literal).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
