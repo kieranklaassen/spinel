@@ -3531,10 +3531,12 @@ void emit_iter_step_body(Compiler *c, int block, Buf *b, int indent) {
   const NodeTable *nt = c->nt;
   int body = nt_ref(nt, block, "body");
   int bn = 0; const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
+  CLoop loop = c_loop_enter();
   emit_block_locals_reset(c, block, b, indent);
   int rd_lbl = emit_iter_step_stmts(c, body, b, indent, NULL);
   if (bn > 0) emit_stmt(c, bb[bn - 1], b, indent);
   if (rd_lbl) g_redo_depth--;
+  c_loop_leave(loop);
 }
 
 /* A step's body inside the iterator's own C loop, through emit_stmts (the
@@ -3545,11 +3547,7 @@ void emit_iter_step_body(Compiler *c, int block, Buf *b, int indent) {
    no others, an ensure's deferred `next` ends in that continue, and a
    `next v` is not the value of an enclosing block. */
 void emit_iter_loop_stmts(Compiler *c, int body, Buf *b, int indent) {
-  int sv_lexc = g_loop_exc_base, sv_lens = g_loop_ensure_base;
-  const char *sv_nxv = g_ie_next_var; TyKind sv_nxt = g_ie_next_ty;
-  g_loop_exc_base = g_exc_frame_depth; g_loop_ensure_base = g_ensure_depth;
-  g_c_loop_depth++;
-  g_ie_next_var = NULL; g_ie_next_ty = TY_UNKNOWN;
+  CLoop loop = c_loop_enter();
   int lbl = 0;
   if (body >= 0 && subtree_has_own_redo(c->nt, body) &&
       g_redo_depth < (int)(sizeof g_redo_stack / sizeof g_redo_stack[0])) {
@@ -3560,9 +3558,7 @@ void emit_iter_loop_stmts(Compiler *c, int body, Buf *b, int indent) {
   }
   emit_stmts(c, body, b, indent);
   if (lbl) g_redo_depth--;
-  g_ie_next_var = sv_nxv; g_ie_next_ty = sv_nxt;
-  g_c_loop_depth--;
-  g_loop_exc_base = sv_lexc; g_loop_ensure_base = sv_lens;
+  c_loop_leave(loop);
 }
 
 /* Does block `block` need the step's frame: a `next` or a `redo` of its
@@ -3970,7 +3966,9 @@ int emit_each_with_index_terminal(Compiler *c, int id, Buf *b) {
      instead of going through emit_stmts, so reset explicitly) */
   if (block >= 0) emit_block_locals_reset(c, block, g_pre, din);
   if (is_each) {
+    CLoop loop = c_loop_enter();
     for (int j = 0; j < bn; j++) emit_stmt(c, bb[j], g_pre, din);
+    c_loop_leave(loop);
   }
   else if (collect_pair && block < 0) {   /* to_a / entries */
     emit_indent(g_pre, din); buf_printf(g_pre, "sp_PolyArray_push(_t%d, ", tres);
@@ -4498,9 +4496,8 @@ void emit_block_value_into(Compiler *c, int block, const char *dest,
   const NodeTable *nt = c->nt;
   int body = nt_ref(nt, block, "body");
   int bn = 0; const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
-  const char *sv_nx = g_ie_next_var; int sv_poly = g_ie_res_poly;
-  TyKind sv_nty = g_ie_next_ty;
-  int sv_lexc = g_loop_exc_base; g_loop_exc_base = g_exc_frame_depth;
+  int sv_poly = g_ie_res_poly;
+  CLoop loop = c_loop_enter();   /* the do{}while(0) wrapper makes `continue` valid */
   g_ie_next_var = dest; g_ie_res_poly = want_poly;
   /* The destination holds whatever the block answers, and the TAIL is what the
      inference typed for that -- so an empty `[]` reached through `next` is
@@ -4509,15 +4506,12 @@ void emit_block_value_into(Compiler *c, int block, const char *dest,
      slot's kind itself: the poly array, which the tail converts to below
      (#4747). */
   TyKind dest_ty = g_bv_dest_ty; g_bv_dest_ty = TY_UNKNOWN;
-  g_ie_next_ty = TY_UNKNOWN;
   if (!want_poly && bn > 0) {
     TyKind dt = dest_ty != TY_UNKNOWN ? dest_ty : repr_of(c, bb[bn - 1]).as_ty;
     if (ty_is_array(dt) || ty_is_hash(dt)) g_ie_next_ty = dt;
     /* an Integer or Float slot: a `next nil` spells the slot's sentinel */
     else if (dt == TY_INT || dt == TY_FLOAT) g_ie_next_ty = dt;
   }
-  int sv_lensd = g_loop_ensure_base; g_loop_ensure_base = g_ensure_depth;
-  g_c_loop_depth++;   /* the do{}while(0) wrapper makes `continue` valid */
   int sd = g_indent;
   /* Wrap the body in do{}while(0): an interior or tail `next <v>` assigns
      `dest` (via g_ie_next_var) then emits `continue`, which against while(0)
@@ -4557,10 +4551,8 @@ void emit_block_value_into(Compiler *c, int block, const char *dest,
   if (rd_lbl) g_redo_depth--;
   g_indent = sd;
   emit_indent(g_pre, indent); buf_puts(g_pre, "} while (0);\n");
-  g_c_loop_depth--;
-  g_ie_next_var = sv_nx; g_ie_res_poly = sv_poly; g_loop_exc_base = sv_lexc;
-  g_loop_ensure_base = sv_lensd;
-  g_ie_next_ty = sv_nty;
+  c_loop_leave(loop);
+  g_ie_res_poly = sv_poly;
 }
 
 /* map/select/reject/filter as an expression: build a result array via a
