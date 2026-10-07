@@ -2019,6 +2019,10 @@ static int *seq_build(const NodeTable *nt) {
       if (w >= 0) seq[w] &= ~1;
     }
   }
+  /* a file required inside a statement (a def, a block) is spliced ahead of
+     that statement and loads when the require runs: its writes stand in the
+     program earlier than they run */
+  NT_FOREACH_KIND(nt, NK_ConstantWriteNode, w) if (nt_int(nt, w, "req_late", 0) > 0) seq[w] &= ~1;
   if (anc & 2) memset(seq, 0, SEQ_LEN(nt) * sizeof(int));
   else seq[SEQ_LEN(nt) - 1] = anc;
   return seq;
