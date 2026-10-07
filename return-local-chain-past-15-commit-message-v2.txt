@@ -1,0 +1,36 @@
+`return r` up a chain of 16 methods answers the Array, not nil
+
+  def f1(x)
+    r = f2(x)
+    return r
+  end
+  # ... f2 to f15 the same
+  def f16(a)
+    a << 2.5
+  end
+  x = []
+  p f1(x)
+
+prints [2.5] in CRuby and nil on master; with an empty Hash filled at
+the far end, `f1(h)["k"]` crashes. An empty Array takes its kind after
+the inference fixpoint, from the method that fills it, and the kind
+comes back up as each method's return type one method a round, in a
+loop of eight rounds (infer_write_types and infer_return_types in
+an_phase_method_backstops). Past them the methods at the top had no
+return type and compiled to void functions.
+
+The loop keeps its eight rounds. A ninth and each one after it runs
+only while it begins with a `return` whose value is still untyped,
+and those go on while they move types, by the rule the fixpoint has
+(an_round_cap_step, which keeps its states from half of the cap it is
+given). A program whose `return`s have their types when the eighth
+round ends gets master's rounds and master's C, whatever else in it
+is still moving.
+
+test/method_chain_return_local_long.rb has chains of 16 to 40 methods
+over an Array and a Hash, top-level and instance methods. Of its
+seven sections, alone on master, four print nil, one does not build,
+one crashes and one (15 methods, and 20 ending in the local with no
+`return`) is right.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

@@ -1,0 +1,40 @@
+A method with an Integer on one path answers the Array from 9 methods, not 0
+
+  def f9(a)
+    a << 2.5
+  end
+  def f8(x)
+    return 1 if x.size > 99
+    f9(x)
+  end
+  # ... f7 to f1 the same, each defined after the method it calls
+  x = []
+  r = f1(x)
+  p r
+
+prints [2.5] in CRuby and 0 on master. 8 methods are right. Where
+each callee is defined before its caller a parameter's type goes down
+one call a round, and the loop that binds parameters after the
+inference fixpoint had eight rounds. Past them a method had its return
+type from the Integer alone, its caller's local took that type, and
+the value the backstops box later was read through it. With a String
+on the other path `p r` printed "[2.5]", a String; with a Float the
+program raised TypeError.
+
+The loop goes on, by the rule of the commit beneath, also while a
+round begins with a method that has its return type from one value
+while another has none (an_method_awaits_value). A nil return type
+does not count: it is lifted late with the untyped value.
+
+What this costs: which type the untyped value will have is not known
+before the rounds run, so a chain whose two values turn out the same
+(`return x if c; f2(x)`), right on master with its lower methods
+boxed, runs the rounds too and is typed all the way down.
+
+test/method_chain_return_mixed_callee_first.rb has such chains of 9
+and 12 methods. Of its seven sections, alone on master, four print 0,
+one prints the Array as a String, one raises TypeError and one (8
+methods, the parameter on the other path, nil on the other path) is
+right.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
