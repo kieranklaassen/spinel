@@ -1193,6 +1193,26 @@ static int an_rewritten_rows_int(Compiler *c, int id) {
   return en > 0;
 }
 
+/* The table a store is called on, looked through the calls ahead of it in
+   a chain that answer their receiver: `T.push(r).push(s)`, `(T << r) << s`,
+   `T.sort!.push(s)`, `T.each { }.push(s)`. `select!`, `reject!`, `uniq!`
+   and `compact!` answer it or nil. */
+static int an_store_table(Compiler *c, int recv) {
+  static const char *const answers_recv[] = {
+    "insert", "concat", "fill", "replace", "clear", "map!", "collect!", "sort!", "sort_by!",
+    "reverse!", "rotate!", "shuffle!", "keep_if", "delete_if", "uniq!", "compact!",
+    "each", "each_index", "reverse_each", "tap", "itself", NULL };
+  const NodeTable *nt = c->nt;
+  while (recv >= 0) {
+    recv = unwrap_parens(c, recv);
+    if (recv < 0 || nt_kind(nt, recv) != NK_CallNode) break;
+    const char *nm = nt_str(nt, recv, "name");
+    if (!nm || !(is_array_push_family(nm) || is_select_reject_bang(nm) || str_in(nm, answers_recv))) break;
+    recv = nt_ref(nt, recv, "receiver");
+  }
+  return recv;
+}
+
 /* Whether every element stored into poly-array ivar `@<ivname>` is an int
    array (a nested array of int arrays, e.g. @chr_banks / @nmt_mem). Element
    reads then yield an int array rather than a boxed poly. */
@@ -1326,7 +1346,8 @@ static int const_array_elems_all_int_array_impl(Compiler *c, const char *cname) 
       const char *nm = nt_str(nt, id, "name");
       int rewrite = nm && str_in(nm, rewrites);
       if (!rewrite && !an_call_stores_rows(nm)) continue;
-      int recv = nt_ref(nt, id, "receiver");
+      int on = nt_ref(nt, id, "receiver");
+      int recv = an_store_table(c, on);
       if (recv < 0 || !sp_streq(nt_type(nt, recv) ? nt_type(nt, recv) : "", "ConstantReadNode")) continue;
       const char *rn = nt_str(nt, recv, "name");
       if (!rn || !sp_streq(rn, cname)) continue;
@@ -1336,9 +1357,10 @@ static int const_array_elems_all_int_array_impl(Compiler *c, const char *cname) 
       }
       /* A row handed to the table by another call keeps a table of Integer
          Arrays one, and does not make one: `T = []; T << [7, 8]` reads
-         `T[1]` as nil, from a general table. */
+         `T[1]` as nil, from a general table. Nor does `T[i] = r` at the
+         end of a chain. */
       int kept = 0;
-      if (!an_stored_rows_int(c, id, is_store_alias(nm) ? &saw : &kept)) return 0;
+      if (!an_stored_rows_int(c, id, on == recv && is_store_alias(nm) ? &saw : &kept)) return 0;
       continue;
     }
     if (!sp_streq(ty, "ConstantWriteNode")) continue;
