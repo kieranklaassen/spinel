@@ -3232,7 +3232,9 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
     int bn2 = 0; const int *bd2 = bbody >= 0 ? nt_arr(nt, bbody, "body", &bn2) : NULL;
     int tail_ret = bn2 > 0 && nt_type(nt, bd2[bn2 - 1]) &&
                    sp_streq(nt_type(nt, bd2[bn2 - 1]), "ReturnNode");
-    if (tail_ret || stmts_diverge(c, bbody)) {
+    /* `{ break v }` leaves the yielding call the same way */
+    int tail_brk = bn2 > 0 && nt_kind(nt, bd2[bn2 - 1]) == NK_BreakNode;
+    if (tail_ret || tail_brk || stmts_diverge(c, bbody)) {
       /* The filler is read as the value of the statement expression, so the
          type it has to have is the CONSUMER's -- want_ty -- not the type of
          the value the unreachable return carries. Taking the return's own put
