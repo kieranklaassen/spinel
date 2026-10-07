@@ -1,0 +1,13 @@
+sub and gsub with a block answer in the subject's encoding
+
+The answer is built from the subject's bytes and the block's values.
+The subject's bytes go in by their length and bring no encoding, so
+the answer took its encoding from the block's values alone: a binary
+subject came back UTF-8 unless the block answered a binary String,
+and counted characters again.
+
+The answer now starts in the subject's encoding, as CRuby's does;
+what the block answers is appended by the rule << already follows.
+One test and one branch a call.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

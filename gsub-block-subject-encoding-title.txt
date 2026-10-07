@@ -1,0 +1,1 @@
+sub and gsub with a block answer in the subject's encoding

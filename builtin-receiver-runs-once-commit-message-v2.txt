@@ -1,0 +1,20 @@
+A builtin that reads its receiver twice runs it once
+
+    $n = 0
+    def bump = ($n += 1; -17)
+    p bump.divmod(7)    # [-3, 4]
+    p bump.nonzero?     # -17
+    p $n                # CRuby 2, spinel 4
+
+A row of builtin_ops.c that names $r twice repeats the receiver's text:
+Integer#nonzero?, #magnitude, #abs2 and #polar, Float#nonzero?, #abs2,
+#polar and #infinite?, Addrinfo#ipv4? and its kin. Three Rational rows
+(to_i, to_int, truncate) emit it again with $R, and the Integer#divmod
+and Bignum#abs2 arms print it twice. A receiver that runs code ran once
+for each, three times for Integer#polar.
+
+Such a receiver is now read into a temp first. One that only reads
+(subtree_is_pure_read), or whose C is one name already (a global, the
+temp a caller holds it in), emits the C it did.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
