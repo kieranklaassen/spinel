@@ -1,0 +1,1 @@
+clear on an instance variable's shared String empties it

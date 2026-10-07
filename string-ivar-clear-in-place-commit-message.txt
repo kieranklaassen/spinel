@@ -1,0 +1,44 @@
+clear on an instance variable's shared String empties it
+
+    class Buffer
+      def initialize(out)
+        @out = out
+      end
+
+      def line(text)
+        @out.clear
+        @out << text
+      end
+    end
+    shown = +"loading"
+    b = Buffer.new(shown)
+    b.line("ready")
+    puts shown
+
+printed "loadingready"; CRuby prints "ready".
+
+A String that an instance variable and its caller both hold lives in
+a handle. A statement that changes it by position goes through a shim
+(str_mutate_shared_arms): the String is read out to a shadow, the
+value arm runs against the shadow, and the shadow is written back.
+`clear` has no value arm for a handle: its arm empties the handle in
+place (str_mutate_reassign_arms). Under the shim it still did, and the
+shadow, read out before, was then written back over the emptied
+String. Nothing was cleared.
+
+The shim now leaves `clear` to that arm, which emits one
+sp_String_set_bin on the handle and raises for a frozen String as the
+shim did. The call in expression position (`@out.clear.size`, or as a
+method's last line) took that arm already and was right.
+
+Cost: none. Where the String was empty already, and master right, a
+call goes from 453 instructions to 49 (callgrind, gcc; 428 to 87 with
+clang): the copy to the shadow is gone.
+
+Not here: `@out.clear << "x"` still appends to a copy.
+
+Test: test/string_ivar_clear_in_place.rb (expected from CRuby 3.3.6).
+On master 15 of its 18 lines differ.
+C: no program of the corpus differs.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
