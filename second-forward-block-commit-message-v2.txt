@@ -1,0 +1,37 @@
+A `...` forward beside a yielding `super(...)` is given the block
+
+    class Reader
+      def each_row(n) = yield(n)
+    end
+    class Logged < Reader
+      def each_row(...) = [super(...), note(...)]
+      def note(n) = block_given? ? yield(n) : -1
+    end
+    p Logged.new.each_row(2) { |x| x * 3 }    # [6, 6]
+
+answered [6, -1], and with a bare `yield` in `note` it raised "no block
+given (yield)".
+
+A method whose `super(...)` reaches a parent that yields keeps its `...`
+and is inlined at the call, so that the site's block is spliced at the
+parent's yield. emit_inline_call_x chooses the block an inlined callee's
+yields run from the call's own block node, and takes the block the site
+runs under only for `inner(&)` and `inner(&b)`. `note(...)` has no block
+node, so it was inlined as a call with no block, beside a `super(...)`
+that was given it.
+
+The forward takes that block only where it is known to run right under
+it; every other forward keeps its C. The callee reaches its block by a
+`yield` of its own and by nothing else: no block parameter, no `&` or
+`...` argument, no `super`. The block holds no `break`. Where the callee
+reads what a yield answers, the block's last statement is one of a
+closed list that has a C value by construction: a literal, a local or
+instance variable, an Array literal of these, and `+ - * < > <= >= ==`
+between two of these that are Integer, Float or boxed, in a program
+with no operator of that name of its own. The callee has no default in
+a slot the forward would fill. And the method's proc form, which serves
+every call that finds the method at run time, forwards its proc only
+where every literal block the program hands a method of that name
+passes the same tests.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

@@ -1,0 +1,1 @@
+A `...` forward beside a yielding `super(...)` is given the block
