@@ -12515,7 +12515,8 @@ static int emit_poly_call0_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
     buf_printf(b, "%s(sp_poly_recv_s(", fn); emit_expr(c, recv, b); buf_printf(b, ", \"%s\"))", name);
     { *out = 1; return 1; }
   }
-  if (sp_streq(name, "freeze"))     { buf_puts(b, "sp_poly_freeze("); emit_expr(c, recv, b); buf_puts(b, ")"); { *out = 1; return 1; } }
+  /* a class's own freeze wins the dispatch, as its nil? does above */
+  if (sp_streq(name, "freeze") && !user_defines_or_reads(c, name)) { buf_puts(b, "sp_poly_freeze("); emit_expr(c, recv, b); buf_puts(b, ")"); { *out = 1; return 1; } }
   /* the receiver of a boxed to_h { } rewritten onto map (analyze.c) */
   if (sp_streq(name, "__to_h_subject")) { buf_puts(b, "sp_poly_to_h_subject("); emit_boxed(c, recv, b); buf_puts(b, ")"); { *out = 1; return 1; } }
   return 0;
