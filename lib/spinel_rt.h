@@ -7100,6 +7100,11 @@ static sp_RbVal sp_poly_splice(sp_RbVal recv, sp_int start, sp_int len, sp_RbVal
                                  : recv.cls_id == SP_BUILTIN_FLT_ARRAY ? "Float" : "String");
   return recv;
 }
+/* A Range that starts outside its String: CRuby's RangeError, naming the
+   Range. The ends travel as words so the caller's Range stays in registers. */
+static SP_NOINLINE SP_COLD void sp_raise_range_start(sp_int first, sp_int last, sp_int excl) {
+  sp_raise_cls("RangeError", sp_sprintf("%s out of range", sp_range_str(sp_range_new(first, last, excl))));
+}
 /* `arr[range] = src` on a poly receiver: resolve beginless (INTPTR_MIN -> 0) and
    endless (INTPTR_MAX -> length) endpoints and negative endpoints against the
    runtime length, then splice. A begin index below -length raises RangeError
@@ -7115,6 +7120,7 @@ static sp_RbVal sp_poly_splice_range(sp_RbVal recv, sp_Range r, sp_RbVal src) {
     sp_int sfirst = r.first;
     if (sfirst == INTPTR_MIN) sfirst = 0;
     else if (sfirst < 0) sfirst += slen;
+    if (sfirst < 0 || sfirst > slen) sp_raise_range_start(r.first, r.last, r.excl);
     sp_int slen2;
     if (r.last == INTPTR_MAX) { slen2 = slen - sfirst; if (slen2 < 0) slen2 = 0; }
     else {
