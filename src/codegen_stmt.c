@@ -8532,7 +8532,7 @@ void emit_rescue(Compiler *c, int id, Buf *b, int indent, int fr, int ens, const
       /* re-stage the carried object so a pass-through keeps ivars and the
          SystemExit status (#1415, #2761) */
       emit_indent(b, indent + 1);
-      buf_printf(b, "sp_pending_exc_obj = sp_exc_obj[sp_exc_top]; sp_bt_keep = 1;\n");
+      buf_printf(b, "sp_exc_pass_cause(sp_exc_obj[sp_exc_top], sp_pending_cause); sp_pending_exc_obj = sp_exc_obj[sp_exc_top]; sp_bt_keep = 1;\n");
       emit_indent(b, indent + 1);
       buf_printf(b, "sp_raise_cls(_rcls_%d, _rmsg_%d);\n", rc, rc);
     }
@@ -13237,6 +13237,7 @@ void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
        `exit 3` into a normal exit 0. */
     emit_indent(b, indent + 1);
     buf_puts(b, "if (!sp_exc_is_standard_error((const char *)sp_last_exc_cls)) {"
+                " sp_exc_pass_cause(sp_exc_obj[sp_exc_top], sp_pending_cause);"
                 " sp_pending_exc_obj = sp_exc_obj[sp_exc_top]; sp_bt_keep = 1;"
                 " sp_raise_cls((const char *)sp_last_exc_cls, sp_exc_msg[sp_exc_top]); }\n");
     /* $! and #cause threading inside the fallback, like a full rescue arm */
