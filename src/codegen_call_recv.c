@@ -3480,17 +3480,63 @@ static int str_bang_chain_var(Compiler *c, int recv) {
     return nt_kind(nt, cur) == NK_LocalVariableReadNode || nt_kind(nt, cur) == NK_InstanceVariableReadNode ? cur : -1;
   return (bt == TY_STRING || bt == TY_STRBUF) && str_mut_var_recv(c, cur) ? cur : -1;
 }
+/* Is the call `cur` one of a method the program gives String under its
+   name (emit_call's reopen dispatch)? */
+static int str_link_reopened(Compiler *c, int cur) {
+  int ci = comp_class_index(c, "String");
+  return ci >= 0 && !nt_int(c->nt, cur, "builtin_only", 0) &&
+         comp_method_in_chain(c, ci, nt_str(c->nt, cur, "name"), NULL) >= 0;
+}
+/* Has the chain `recv`, down to the variable `base`, such a link? */
+static int str_chain_reopened(Compiler *c, int recv, int base) {
+  for (int cur = unwrap_parens(c, recv); cur >= 0 && cur != base; cur = unwrap_parens(c, nt_ref(c->nt, cur, "receiver")))
+    if (str_link_reopened(c, cur)) return 1;
+  return 0;
+}
+/* Can a call from `top` down to the variable `base` its chain starts from
+   give `base` another String while the chain runs (read_rebound_by, asked
+   of the arguments and the block of each)? */
+static int str_chain_rebinds(Compiler *c, int top, int base) {
+  const NodeTable *nt = c->nt;
+  for (int cur = unwrap_parens(c, top); cur >= 0 && cur != base; cur = unwrap_parens(c, nt_ref(nt, cur, "receiver")))
+    if (read_rebound_by(c, base, nt_ref(nt, cur, "arguments")) || read_rebound_by(c, base, nt_ref(nt, cur, "block")))
+      return 1;
+  return 0;
+}
+/* A call of a chain that gives the chain's variable another String
+   (`t.insert(0, x).concat((t = y; z))`) leaves it naming that one, not the
+   String the chain ran on, and the write-back would hand it the chain's
+   result. Is the write-back of the mutator `id` one to test when the
+   program runs (emit_str_mut_writeback)? Where the variable is a plain
+   String slot, which the test compares by pointer, and a call of the chain
+   can rebind it. Not where a link is the program's own method, which may
+   change its receiver and answer it, another pointer here. */
+static int str_mut_writeback_tested(Compiler *c, int id, int lvw) {
+  int recv = nt_ref(c->nt, id, "receiver");
+  int base = lvw ? -1 : str_bang_chain_var(c, recv);
+  char sref[1024];
+  return base >= 0 && comp_ntype(c, base) == TY_STRING && !strbuf_slot_ref(c, base, sref, sizeof sref) &&
+         !str_chain_reopened(c, recv, base) && str_chain_rebinds(c, id, base);
+}
 /* A value-form mutator's write-back of its result _t<tn>: to the receiver
    when it is a variable (lvw), else to the variable a bang chain receiver
-   starts from, whose links the mutation reaches in CRuby (one object) */
-static void emit_str_mut_writeback(Compiler *c, int recv, int lvw, int tn, Buf *b) {
+   starts from, whose links the mutation reaches in CRuby (one object).
+   Where a call of the chain can rebind that variable
+   (str_mut_writeback_tested), only while it still names the String the
+   chain ran on: the mutator's receiver _t<trv>, which the arm roots, so
+   that no String the variable is given meanwhile takes its address. */
+static void emit_str_mut_writeback(Compiler *c, int id, int lvw, int trv, int tn, Buf *b) {
+  int recv = nt_ref(c->nt, id, "receiver");
   if (lvw) { emit_expr(c, recv, b); buf_printf(b, " = _t%d; ", tn); return; }
   int base = str_bang_chain_var(c, recv);
   if (base < 0) return;
   char sref[1024];
   if (strbuf_slot_ref(c, base, sref, sizeof sref))
     buf_printf(b, "sp_String_set_bin(%s, _t%d); ", sref, tn);
-  else if (comp_ntype(c, base) == TY_STRING) { emit_expr(c, base, b); buf_printf(b, " = _t%d; ", tn); }
+  else if (comp_ntype(c, base) == TY_STRING) {
+    if (str_mut_writeback_tested(c, id, lvw)) { buf_puts(b, "if ("); emit_expr(c, base, b); buf_printf(b, " == _t%d) ", trv); }
+    emit_expr(c, base, b); buf_printf(b, " = _t%d; ", tn);
+  }
   else if (comp_ntype(c, base) == TY_POLY) {
     emit_expr(c, base, b); buf_puts(b, " = sp_poly_str_become(");
     emit_expr(c, base, b); buf_printf(b, ", _t%d); ", tn);
@@ -3608,6 +3654,7 @@ static int emit_str_mutator_call(Compiler *c, int id, Buf *b, const NodeTable *n
         hbind = view_bind(recv, "_t%d", th);
       }
       buf_printf(b, "({ const char *_t%d = ", to); emit_expr(c, recv, b); buf_puts(b, "; (void)_t"); buf_printf(b, "%d; ", to);
+      if (str_mut_writeback_tested(c, id, lvw)) buf_printf(b, "SP_GC_ROOT_STR(_t%d); ", to);
       /* a chained bang that changed nothing answers nil, on which this one
          is NoMethodError for its own name, not the FrozenError the
          mutability check reads a NULL as */
@@ -3635,7 +3682,7 @@ static int emit_str_mutator_call(Compiler *c, int id, Buf *b, const NodeTable *n
         tchg2 = ++g_tmp;
         buf_printf(b, "int _t%d = !sp_str_eq(_t%d, _t%d)%s; ", tchg2, to, tn2, subm2 ? " || sp_re_sub_matched" : "");
       }
-      emit_str_mut_writeback(c, recv, lvw, tn2, b);
+      emit_str_mut_writeback(c, id, lvw, to, tn2, b);
       if (tchg2)
         buf_printf(b, "_t%d ? _t%d : NULL; })", tchg2, tn2);
       else if (sb_nil_nc)
@@ -3726,7 +3773,7 @@ static int emit_str_mutator_call(Compiler *c, int id, Buf *b, const NodeTable *n
          evaluates the args). sp_str_concat allocates a fresh string and never
          mutates the receiver, so a frozen receiver is still untouched here. */
       buf_printf(b, "sp_str_check_mutable(_t%d); ", trc);
-      emit_str_mut_writeback(c, recv, lvw, tn2, b);
+      emit_str_mut_writeback(c, id, lvw, trc, tn2, b);
       buf_printf(b, "_t%d; })", tn2);
       { *out = 1; return 1; }
     }
@@ -3741,7 +3788,7 @@ static int emit_str_mutator_call(Compiler *c, int id, Buf *b, const NodeTable *n
       buf_printf(b, " const char *_t%d = sp_str_splice_at(_t%d, _t%d, 0, ", tn2, to, ti2);
       emit_str_insert_text(c, argv[1], b);
       buf_puts(b, ", 0); ");
-      emit_str_mut_writeback(c, recv, lvw, tn2, b);
+      emit_str_mut_writeback(c, id, lvw, to, tn2, b);
       buf_printf(b, "_t%d; })", tn2);
       { *out = 1; return 1; }
     }
@@ -3762,13 +3809,21 @@ static int emit_str_mutator_call(Compiler *c, int id, Buf *b, const NodeTable *n
       }
       int lvw = str_mut_var_recv(c, recv) || sb_shadowed_reader(recv);
       int tn2 = ++g_tmp;
-      buf_printf(b, "({ sp_str_check_mutable(");   /* frozen -> FrozenError (#3003) */
-      emit_expr(c, recv, b);
+      /* the receiver is held where the write-back is tested against it */
+      int trc = str_mut_writeback_tested(c, id, lvw) ? ++g_tmp : -1;
+      if (trc >= 0) {
+        buf_printf(b, "({ const char *_t%d = ", trc); emit_recv_rooted(c, recv, trc, "SP_GC_ROOT_STR", b);
+        buf_printf(b, "sp_str_check_mutable(_t%d", trc);
+      }
+      else {
+        buf_printf(b, "({ sp_str_check_mutable(");   /* frozen -> FrozenError (#3003) */
+        emit_expr(c, recv, b);
+      }
       /* the receiver takes a copy of the argument's bytes: handed the
          argument's own pointer it became that object (`t.replace(s)` then
          `t.equal?(s)`, and `s.freeze` froze t) */
       buf_printf(b, "); const char *_t%d = sp_str_dup(", tn2); emit_str_expr(c, argv[0], b); buf_puts(b, "); ");
-      emit_str_mut_writeback(c, recv, lvw, tn2, b);
+      emit_str_mut_writeback(c, id, lvw, trc, tn2, b);
       buf_printf(b, "_t%d; })", tn2);
       { *out = 1; return 1; }
     }
