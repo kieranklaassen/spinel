@@ -1,0 +1,32 @@
+A constant table's row held by a local is the row, not a copy
+
+`T = [[1, 2], [3, 4]]; e = T[1]; e << "s"; p T[1]` printed [3, 4];
+CRuby prints [3, 4, "s"]. The same with `e[0] = "s"`, `e.insert`,
+`e.concat(["s"])`, with a Float, a Symbol or nil for the String, and
+with the row read by `T.first`, `T.last` or `T.at(1)`.
+
+const_array_elems_all_int_array answers that the table's rows are
+Integer Arrays. The push widens the local to a general Array, and the
+read then converts the row: the local held a copy, and the table kept
+the row as it was.
+
+Where the table is one literal of Integer Array literals that nothing
+stores a row into, and a local bound to one of its rows is given an
+element that is no Integer, the answer is now no. The rows are then
+built as general Arrays, as they are when the element is given through
+the table (`T[1] << "s"`), and the local reads the row itself.
+
+Every other table keeps its answer: one made by `map` or frozen, or
+with a row stored into it, has rows the literal walk does not rebuild,
+and with the answer no the push would raise a TypeError there. So
+would a value of two kinds (`e << (c ? "s" : 1)`), which rebuilds no
+literal. Those still hold a copy. Under --share-strings a `concat` is
+left as it was too: with the rows general Arrays the flag refuses the
+String literal handed to it once the table is walked.
+
+Test: test/const_table_row_under_local.rb (expected from CRuby 3.3.6
+with --enable-frozen-string-literal; master differs on 15 of its 42
+lines) and, for the flag, test/share/share_strings_const_row_concat.rb,
+which passes on master too.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

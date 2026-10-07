@@ -1,0 +1,1 @@
+A constant table's row held by a local is the row, not a copy
