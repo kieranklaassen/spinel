@@ -1,0 +1,59 @@
+An Array pattern binds an assigned local to an element of another class
+
+    t = "o"
+    case [3, "s"]
+    in [Integer => t, String]
+      p t                   # 3
+    end
+
+exited 139 with nothing printed; `n = 0` bound by
+`[String => n, Integer]` over ["a", 4] printed 0, and `t = "o"` bound
+by `[*, t]` over [1, 2] did not build. A binding converts the boxed
+element to the local's type (emit_pm_typed_assign), and
+infer_case_pattern_locals unified that type with the element only for
+a bare required target (`[t, String]`). A captured element, an element
+after the splat and the targets of a nested pattern kept the type the
+local's assignment gave it, so an Integer was unboxed as a String.
+
+Such a local is boxed now, in an Array pattern and in a find pattern's
+window, where both of these hold.
+
+The element is surely of another class than the local holds. Every
+assignment to the local is a statement `x = literal`, and
+- the capture names Integer, Float, String, Symbol, NilClass, Array
+  or Hash, a literal of one, an Array pattern, or alternatives of
+  those, and no assignment writes a literal of that class; or
+- the subject is an Array of Integers, of Floats or of Strings, and
+  the literals are of another class and none is nil.
+
+Every other use of the local is one a boxed local answers as the
+typed one did (pm_uses):
+- `puts x`, `print x`, a statement `p x`, and its interpolation;
+- `==` and `!=` with a literal, and `nil?`;
+- printed by puts or a statement p, or interpolated, at once: class,
+  inspect, to_s, `+` and `-` with an Integer literal, size, length,
+  empty?, upcase, reverse, first, to_sym, to_f.
+So the boxed value is printed or compared and goes nowhere: not into
+a container, an object, an argument, a block's or a method's answer.
+A local with any other use, and every other local, is typed as it was
+and writes the same C.
+
+Boxing wherever the class differs, whatever the uses, cures more and
+was not chosen: a boxed String stored into a container or an object is
+a copy, a boxed value answers `object_id` and `equal?` otherwise and
+has no `upto`, and programs that were right went wrong.
+
+Not cured here: a bare target after the splat over an Array whose
+element class is not typed (Symbols, true and false, nil, Arrays,
+Hashes, objects, Ranges, mixed), and the capture of an arm that then
+fails, which Ruby keeps.
+
+What the writes, the patterns and the reads say of each local is
+gathered in one walk per pass, keyed by scope and name as LWIndex is,
+so an arm asks with a lookup.
+
+Test: test/array_pattern_target_typed_before.rb (expected from CRuby
+3.3.6); master refuses it, for `w - 1` on a local it typed a String.
+No other program of the corpus changes its generated C.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

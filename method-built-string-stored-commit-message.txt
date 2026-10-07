@@ -1,0 +1,27 @@
+A String an object's method builds can be appended to where it is stored
+
+    class K
+      def initialize(s) = @s = s
+      def e = @s.dup
+    end
+    x = [K.new(+"hello").e]
+    x[0] << "!"
+    p x                 # ["hello!"]
+
+died with SIGSEGV (gcc) or did not build (clang). An element that is
+appended to is stored as a String handle, and strbuf_marked_yields_handle
+took every call on an object for a reader, which renders as the handle
+itself. A method that builds its String (`@s.dup`, `"#{@a}-#{@b}"`,
+`@n.to_s`) answers a plain `const char *`, so the store boxed that pointer
+as if it were a handle and the append wrote through it.
+
+Such a call is now wrapped as a fresh handle where it is stored, as a
+String call that makes a new String already is. It is taken only where the
+method's body is seen to end in a String it makes: an interpolated String,
+to_s, inspect or chr of an Integer or a Float, or a String method that
+always answers a new String. A subclass's method of the name must do the
+same, and a name that is also an attr reader is left as it was. Such a
+method can answer nil (`def m = @x&.upcase`), so the wrap boxes a nil as
+nil. Every other call renders as before.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
