@@ -1,0 +1,1 @@
+Hash#sort_by keeps a fresh block value alive until it is stored
