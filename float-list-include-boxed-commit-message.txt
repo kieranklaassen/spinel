@@ -1,0 +1,32 @@
+A Float list behind a boxed value answers include? of a Float it holds
+
+    h = { prices: [9.5, 10.5], name: "x" }
+    p h[:prices].include?(9.5)
+
+printed false where CRuby prints true. The same list as a row of a mixed
+Array, as the answer of a method of two kinds, or in a parameter or an
+instance variable that takes two kinds answered false too, and so did
+member?.
+
+A boxed receiver's include? switches on what the receiver is, with arms
+picked by the argument's type (emit_poly_cases_n). An Integer argument has
+an arm for an Integer Array. A Float argument had the two Range arms and none
+for a Float Array, so that receiver fell to the default arm, which asks a
+user Enumerable and answers false. It has the arm now: sp_FloatArray_include,
+the search a typed Float Array uses.
+
+A NaN keeps the default arm's answer, false. The search finds a NaN by its
+bits, so it would answer true for one computed elsewhere, which is
+not in the list (`[0.0 / 0.0].include?(0.0 / 0.0)` is false).
+
+key? and has_key? go through the same switch and are not an Array's methods:
+they keep the default arm and what they answer today.
+
+Left alone, as on master: a Float asked of an Integer list and an Integer
+asked of a Float list (`[80, 443]` behind a boxed value asked 80.0) are still
+false.
+
+Three corpus programs' C changes (`make cident`), each by the added case
+alone, and scale-test keeps master's four ratios.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
