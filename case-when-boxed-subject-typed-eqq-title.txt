@@ -1,0 +1,1 @@
+A boxed case subject reaches an object arm's === with a typed parameter

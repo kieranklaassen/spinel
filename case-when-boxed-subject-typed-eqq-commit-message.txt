@@ -1,0 +1,39 @@
+A boxed case subject reaches an object arm's === with a typed parameter
+
+`case x when big` is `big === x`. Where a call written out had typed
+the parameter of the arm's === and x is held boxed (an element of a
+mixed Array), the case compared x with the arm as a value and never
+called the method:
+
+    class Above
+      attr_accessor :n
+      def initialize(n) = @n = n
+      def ===(o) = o.is_a?(Integer) && o > @n
+    end
+    big = Above.new(3)
+    p(big === 1)                 # types the parameter an Integer
+    [1, 5, "x"].each do |x|
+      case x
+      when big then puts "big"   # CRuby: other, big, other
+      else puts "other"          # Spinel: other, other, other
+      end
+    end
+
+Without the `p(big === 1)` line the parameter is boxed and the case is
+right. emit_when_user_eq made the call only for a boxed parameter and
+left the rest to sp_poly_eq(subject, arm). For a parameter typed an
+Integer, a Float, a String, a Symbol or an object it now tests the
+subject's tag in place and calls the typed method where the subject
+holds that type; any other subject, and a nil arm, keep the
+sp_poly_eq the case made before. The tag test and the unboxed
+argument are the ones the operator tables use (user_dispatch_arg,
+no longer static).
+
+Left alone: a class with == and no ===, an answer that is neither a
+boolean nor boxed, a String parameter that is its caller's slot or the
+shared handle (a === that appends to its argument), a small read-only
+class kept by value.
+
+Test: test/case_when_boxed_subject_typed_eqq.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
