@@ -4117,7 +4117,8 @@ const char *sp_str_gsub_str_str_hash(const char *str, const char *pat, sp_StrStr
     memcpy(out + o, p, slen - (size_t)(p - str)); o += slen - (size_t)(p - str);
   }
   out[o] = 0;
-  if (sp_re_track_last) sp_re_set_lit_match(str, (sp_int)last, (sp_int)(last + plen));
+  /* setting the match allocates: the result is rooted across it */
+  if (sp_re_track_last) { SP_GC_ROOT_STR(out); sp_re_set_lit_match(str, (sp_int)last, (sp_int)(last + plen)); }
   return out;
 }
 /* Array#sum with a String initial value: concatenation fold ("abc" from
