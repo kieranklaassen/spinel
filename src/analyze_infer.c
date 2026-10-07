@@ -6876,7 +6876,8 @@ static TyKind infer_call_inner(Compiler *c, int id) {
   /* the accessors every exception carries, on an instance of a user subclass
      (#3732): #exception is self, #cause another exception, #backtrace the
      frames, and the two message renderings strings */
-  if (recv >= 0 && argc == 0 && ty_is_object(infer_type(c, recv)) &&
+  if (recv >= 0 && (argc == 0 || exc_rendering_kwargs(nt, name, argc, argv)) &&
+      ty_is_object(infer_type(c, recv)) &&
       class_is_exc_subclass(c, ty_object_class(infer_type(c, recv))) &&
       comp_method_in_chain(c, ty_object_class(infer_type(c, recv)), name, NULL) < 0) {
     if (sp_streq(name, "exception")) return infer_type(c, recv);
