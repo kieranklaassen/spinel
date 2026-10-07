@@ -1048,32 +1048,47 @@ sp_StrArray*sp_str_split_limit(const char*s,const char*sep,sp_int n){if(!s)sp_ni
   SP_GC_ROOT_STR(sep);
   sp_StrArray*a=sp_StrArray_new();
   SP_GC_ROOT(a);
-  if(*s==0)return a;
-  size_t sl=strlen(sep);
+  /* byte lengths, as sp_str_split_into: strlen stops at a NUL in the subject
+     or the separator */
+  size_t bl=sp_str_byte_len(s);
+  if(bl==0)return a;
+  size_t sl=sp_str_byte_len(sep);
+  const char*se=s+bl;
   if(sl==0){
     const char*p=s;
     sp_int k=0;
-    while(*p&&k<n-1){
+    while(p<se&&k<n-1){
       int cn=sp_utf8_advance(p);
+      if((size_t)cn>(size_t)(se-p))cn=(int)(se-p);
       sp_str_split_push(a,p,(size_t)cn);
       p+=cn;
       k++;
     }
-    if(*p)sp_str_split_push(a,p,strlen(p));
-    else if(!sp_str_byte_len(sep)&&p==s+sp_str_byte_len(s))sp_str_split_push(a,"",0);   /* every character is out: the limit leaves room for the empty field after them */
+    if(p<se)sp_str_split_push(a,p,(size_t)(se-p));
+    else sp_str_split_push(a,"",0);   /* every character is out: the limit leaves room for the empty field after them */
     return a;
   }
   const char*p=s;
   sp_int k=0;
+  int sep_nul=sl>1&&memchr(sep,0,sl)!=NULL;
   while(k<n-1){
-    const char*f=strstr(p,sep);
+    /* one byte by memchr; a separator holding a NUL by sp_bytestr; any other
+       by strstr, which stops at a NUL of the subject: the separator cannot
+       lie across that NUL, so the search goes on behind it */
+    const char*f;
+    if(sl==1)f=memchr(p,sep[0],(size_t)(se-p));
+    else if(sep_nul)f=sp_bytestr(p,(size_t)(se-p),sep,sl);
+    else{
+      const char*q=p;
+      while(!(f=strstr(q,sep))&&(q+=strlen(q))<se)q++;
+    }
     if(!f)break;
     size_t m=f-p;
     sp_str_split_push(a,p,m);
     p=f+sl;
     k++;
   }
-  sp_str_split_push(a,p,strlen(p));
+  sp_str_split_push(a,p,(size_t)(se-p));
   return a;
 }
 #define SP_SPLIT_WS(c) ((c)==' '||(c)=='\t'||(c)=='\n'||(c)=='\r'||(c)=='\f'||(c)=='\v')
