@@ -1,0 +1,1 @@
+String#split with a limit measures the String and its separator by bytes
