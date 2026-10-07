@@ -1,0 +1,50 @@
+An append chain through a reader keeps the reader's String at any length
+
+  class Box
+    attr_reader :b
+    def initialize = @b = +"b"
+  end
+  k = Box.new
+  t = k.b << "a" << "a" << "a"    # 17 links in all
+  p k.b.size, t.size, t.equal?(k.b)
+
+prints 18, 18 and true in CRuby and printed 2, 18 and false, with
+nothing said; 16 links are right. `t = obj.buf << x` keeps in t the
+String the reader hands out, and the pass that says so (the last loop of
+promote_shared_stored_strings) marks each append of the chain to emit
+the handle. It kept the links in an array of 16 and stopped walking
+when the array was full. What it had reached was then a link and not the
+reader, so the chain was left unmarked whole: t took a copy, and the
+reader's String kept the first link only.
+
+The links are now counted on the way down and walked again to be
+marked. A chain of `<<` and concat links is marked whole. One holding a
+prepend, a replace or a clear keeps the walk of 16 and is master's C
+byte for byte: a marked link of those renders its receiver twice, so
+each such link doubles the compile.
+
+From 17 links the kept local is a handle, as it is at 2 to 16, and two
+uses of it go from compiled to refused with that:
+
+  t = k.b << "a" << "a" << "a"    # 17 links or more
+  t += "x"                        # unsupported operator assignment
+  case "zz"
+  in t                            # a String bound by a pattern ...
+    p t
+  end
+
+Master refuses the first at 2 to 16 links, and the commit this stands
+on refuses the second there, where master's C does not build. From 17
+links master compiled both, t being a copy: right where the reader's
+String is not read again, and wrong where it is (`p k.b.size` after
+either prints 2 for 18).
+
+Not changed: a named capture and a `for` variable onto the kept local
+do not build, as at 2 to 16 links; the statement `k.b << "a" ...` loses
+its links from 65, and `t = @b << "a" ...` loses one from 66 (the
+chain's own walk of 64).
+
+test/string_reader_append_chain_long.rb has seven chains of 20 links and
+one of 100; 18 of its 22 lines differ on master.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
