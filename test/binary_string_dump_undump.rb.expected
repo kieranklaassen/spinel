@@ -1,0 +1,25 @@
+"="
+["ASCII-8BIT", "ASCII-8BIT", [61], true, true]
+"a/xC3/xA9"
+["ASCII-8BIT", "ASCII-8BIT", [97, 195, 169], true, true]
+"/xFF/x00="
+["ASCII-8BIT", "ASCII-8BIT", [255, 0, 61], true, true]
+"="
+["UTF-8", "UTF-8", [61], true, true]
+"a/u00E9"
+["UTF-8", "UTF-8", [97, 195, 169], true, true]
+""
+["ASCII-8BIT", "ASCII-8BIT", [], true, true]
+3
+2
+"ASCII-8BIT"
+"UTF-8"
+"UTF-8"
+"ASCII-8BIT"
+2
+"a/xC3/xA9"
+"ASCII-8BIT"
+"ASCII-8BIT"
+[61, 169, 195]
+3
+"ASCII-8BIT"

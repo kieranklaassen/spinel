@@ -475,6 +475,7 @@ const char*sp_str_capitalize_ascii(const char*s){SP_GC_ROOT_STR(s);if(!s)sp_nil_
 const char*sp_str_dump(const char*s){SP_GC_ROOT_STR(s);
   if(!s)sp_nil_recv("dump");
   size_t n=sp_str_byte_len(s);   /* a NUL is a byte to escape, not the end */
+  int bin=sp_str_is_binary(s);
   char*out=sp_str_alloc_raw((n*4)+3);size_t oi=0;
   out[oi++]='"';
   for(size_t i=0;i<n;i++){
@@ -498,6 +499,8 @@ const char*sp_str_dump(const char*s){SP_GC_ROOT_STR(s);
     /* #dump promises a pure-ASCII, re-evaluable form: a non-ASCII character
        is written as its \uXXXX escape (#3558) */
     else if(c>=0x80){
+      /* a binary String has no characters past ASCII: each byte is \xHH */
+      if(bin){oi+=(size_t)sprintf(out+oi,"\\x%02X",c);continue;}
       unsigned cp=0;int extra=0;
       if((c&0xE0)==0xC0){cp=c&0x1Fu;extra=1;}
       else if((c&0xF0)==0xE0){cp=c&0x0Fu;extra=2;}
@@ -510,7 +513,7 @@ const char*sp_str_dump(const char*s){SP_GC_ROOT_STR(s);
     }
     else{out[oi++]=(char)c;}
   }
-  out[oi++]='"';out[oi]=0;sp_str_set_len(out,oi);return out;
+  out[oi++]='"';out[oi]=0;sp_str_set_len(out,oi);return sp_str_bin_from(out,s);
 }
 const char*sp_str_delete_prefix(const char*s,const char*p){SP_GC_ROOT_STR(s);SP_GC_ROOT_STR(p);if(!s)sp_nil_recv("delete_prefix");if(!p)return s;size_t sl=strlen(s),pl=strlen(p);if(pl<=sl&&memcmp(s,p,pl)==0){char*r=sp_str_alloc_raw(sl-pl+1);memcpy(r,s+pl,sl-pl+1);sp_str_set_len(r,sl-pl);return sp_str_bin_from(r,s);}char*r=sp_str_alloc_raw(sl+1);memcpy(r,s,sl+1);sp_str_set_len(r,sl);return sp_str_bin_from(r,s);}
 /* `s << x`: append in place when the buffer has room, else move to a buffer
@@ -1028,6 +1031,7 @@ const char*sp_str_undump(const char*s){SP_GC_ROOT_STR(s);
   if(n<2||s[0]!='"'||s[n-1]!='"'){sp_raise_cls("RuntimeError","invalid dumped string");return sp_str_empty;}
   const char*p=s+1;const char*pe=s+n-1;
   char*out=sp_str_alloc_raw(n+1);size_t oi=0;
+  int u8=0;   /* a \u escape makes the result UTF-8, as in CRuby */
   while(p<pe){
     if(*p!='\\'){out[oi++]=*p++;continue;}
     p++;if(p>=pe)break;
@@ -1039,12 +1043,15 @@ const char*sp_str_undump(const char*s){SP_GC_ROOT_STR(s);
     else if(c=='#')out[oi++]='#';
     else if(c=='x'){int v=0,k=0;while(k<2&&p<pe&&isxdigit((unsigned char)*p)){v=(v*16)+_sp_hexval((unsigned char)*p);p++;k++;}out[oi++]=(char)v;}
     else if(c=='u'){
+      u8=1;
       if(p<pe&&*p=='{'){p++;while(p<pe&&*p!='}'){while(p<pe&&*p==' ')p++;uint32_t cp=0;int k=0;while(k<8&&p<pe&&isxdigit((unsigned char)*p)){cp=(cp*16)+(uint32_t)_sp_hexval((unsigned char)*p);p++;k++;}char enc[4];int el=sp_utf8_encode(cp,enc);for(int j=0;j<el;j++)out[oi++]=enc[j];while(p<pe&&*p==' ')p++;}if(p<pe&&*p=='}')p++;}
       else{uint32_t cp=0;int k=0;while(k<4&&p<pe&&isxdigit((unsigned char)*p)){cp=(cp*16)+(uint32_t)_sp_hexval((unsigned char)*p);p++;k++;}char enc[4];int el=sp_utf8_encode(cp,enc);for(int j=0;j<el;j++)out[oi++]=enc[j];}
     }
     else out[oi++]=c;
   }
-  out[oi]=0;sp_str_set_len(out,oi);return out;
+  out[oi]=0;sp_str_set_len(out,oi);
+  if(!u8)sp_str_bin_from(out,s);   /* else the dumped String's encoding */
+  return out;
 }
 const char*sp_str_succ_impl(const char*s){SP_GC_ROOT_STR(s);if(!s)sp_nil_recv("succ");size_t l=sp_str_byte_len(s);if(l==0){char*r=sp_str_alloc_raw(1);r[0]=0;sp_str_set_len(r,0);return sp_str_bin_from(r,s);}/* Find start of last codepoint */size_t lc=l-1;while(lc>0&&((unsigned char)s[lc]&0xC0)==0x80)lc--;if((unsigned char)s[lc]>=0x80&&!sp_str_is_binary(s)){/* Multibyte tail: increment its codepoint; a BINARY String has none */uint32_t cp;sp_utf8_decode(s+lc,&cp);cp++;char enc[4];int el=sp_utf8_encode(cp,enc);char*r=sp_str_alloc_raw(lc+el+1);memcpy(r,s,lc);memcpy(r+lc,enc,el);r[lc+el]=0;sp_str_set_len(r,lc+(size_t)el);return r;}/* ASCII tail: CRuby's alnum-aware carry. The rightmost alphanumeric
    increments; a wrap (9->0, z->a, Z->A) carries into the adjacent character
