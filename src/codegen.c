@@ -1517,8 +1517,10 @@ static void emit_boxed_strbuf(Compiler *c, int node, TyKind t, const Repr *rp, B
     }
   }
   /* a demanded literal / expression store: wrap a FRESH handle so the
-     container element is mutable in place (#3227 P3) */
-  buf_puts(b, "sp_box_obj(sp_String_new_shared(");
+     container element is mutable in place (#3227 P3); a method's new String
+     may be nil, whose handle is NULL */
+  buf_puts(b, k == NK_CallNode && call_answers_new_string(c, node) ? "sp_box_nullable_obj(sp_String_new_shared("
+                                                                   : "sp_box_obj(sp_String_new_shared(");
   { Buf eb0; memset(&eb0, 0, sizeof eb0);
     int sv_mark = view_push_repr(c, node, VR_STRBUF_BOX, 0);   /* emit the plain string value */
     emit_str_expr(c, node, &eb0);

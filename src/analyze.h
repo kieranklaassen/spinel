@@ -457,4 +457,7 @@ int gather_reaches(Compiler *c, Scope *m, const int *argv, int pos_argc, int gat
 int zsuper_kw_positional(Compiler *c, Scope *s, Scope *pm);
 int an_thread_arg_block(Compiler *c, int n);
 int cap_wrap_mutates_param(Compiler *c, int blk, const char *bp);
+/* Does call `v` on an object answer a String its method made on every path,
+   that no other name holds (analyze_pass.c)? */
+int call_answers_new_string(Compiler *c, int v);
 #endif

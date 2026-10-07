@@ -1,5 +1,6 @@
 #include "analyze_internal.h"
 #include "repr.h"
+#include "call_plan.h"
 int callee_has_kwarg(Compiler *c, Scope *m, const char *name);
 int callee_declares_kwargs(Compiler *c, Scope *m);
 int callee_param_is_declared_kwarg(Compiler *c, Scope *m, const char *name);
@@ -5269,6 +5270,62 @@ static int local_has_target_write(Compiler *c, Scope *sc, const char *name) {
   NT_FOREACH_KIND(c->nt, NK_LocalVariableTargetNode, t)
     if (comp_scope_of(c, t) == sc && sp_streq(nt_str(c->nt, t, "name"), name)) return 1;
   return 0;
+}
+
+/* Is String value `v` one its own expression makes, that no other name
+   holds: a literal, `+` of one, or a builtin's call the share rows say
+   keeps nothing it was handed and answers none of it (BSH_PURE, the rows
+   read in the share walk's order)? */
+static int value_is_new_string(Compiler *c, int v) {
+  const NodeTable *nt = c->nt;
+  v = an_unparen(nt, v);
+  if (v < 0) return 0;
+  NodeKind k = nt_kind(nt, v);
+  if (k == NK_StringNode || k == NK_InterpolatedStringNode) return 1;
+  const char *nm = k == NK_CallNode ? nt_str(nt, v, "name") : NULL;
+  if (!nm || comp_ntype(c, v) != TY_STRING || nt_ref(nt, v, "block") >= 0 || call_is_safe_nav(nt, v) ||
+      cplan_user_fresh(c, v)->mi >= 0)
+    return 0;
+  int r = an_unparen(nt, nt_ref(nt, v, "receiver"));
+  if (r < 0) return bop_share_named(BOP_KERNEL, nm) == BSH_PURE;
+  /* a literal is frozen, so its unary plus answers a copy */
+  if (sp_streq(nm, "+@")) return nt_kind(nt, r) == NK_StringNode || nt_kind(nt, r) == NK_InterpolatedStringNode;
+  TyKind rt = comp_ntype(c, r);
+  /* an exception's to_s is the String it was made with */
+  if (rt == TY_UNKNOWN || rt == TY_POLY || rt == TY_CLASS || rt == TY_EXCEPTION || ty_is_object(rt)) return 0;
+  /* over an empty receiver `sum` answers its argument, and MatchData#string
+     a frozen copy */
+  if (sp_streq(nm, "sum") || (rt == TY_MATCHDATA && sp_streq(nm, "string"))) return 0;
+  TyKind fam = rt == TY_STRBUF ? TY_STRING : ty_is_array(rt) ? BOP_ANY_ARRAY : ty_is_hash(rt) ? BOP_ANY_HASH : rt;
+  int sh = bop_share_named(fam, nm);
+  if (!sh && fam == TY_STRING && str_self_call(nt, v)) return 0;
+  if (!sh) sh = bop_share_named(BOP_ANY_RECV, nm);
+  if (!sh && fam != BOP_ANY_ARRAY && fam != BOP_ANY_HASH) sh = bop_share(fam, nm);
+  return sh == BSH_PURE;
+}
+/* Does call `v` on an object answer a String its method made on every
+   path, that no other name holds? Each value of the one method it reaches
+   is such a String (value_is_new_string) or nil. A reader, a method
+   answering an instance variable, a parameter or a variable's String, and
+   a call that may reach another body answer no. */
+int call_answers_new_string(Compiler *c, int v) {
+  const NodeTable *nt = c->nt;
+  v = an_unparen(nt, v);
+  if (v < 0 || nt_kind(nt, v) != NK_CallNode || nt_ref(nt, v, "block") >= 0 || call_is_safe_nav(nt, v)) return 0;
+  int r = nt_ref(nt, v, "receiver");
+  const char *nm = nt_str(nt, v, "name");
+  TyKind rt = r >= 0 ? comp_ntype(c, r) : TY_UNKNOWN;
+  int mi = nm && ty_is_object(rt) ? comp_method_in_chain(c, ty_object_class(rt), nm, NULL) : -1;
+  if (mi <= 0 || method_has_other_body(c, mi)) return 0;
+  int lv[16], made = 0;
+  int n = method_value_leaves_or_nil(c, mi, lv, 16);
+  for (int i = 0; i < n; i++) {
+    int l = an_unparen(nt, lv[i]);
+    if (l >= 0 && nt_kind(nt, l) == NK_NilNode) continue;
+    if (!value_is_new_string(c, l)) return 0;
+    made = 1;
+  }
+  return made;
 }
 
 /* The value a multiple assignment (`a, b = x, y`) binds its target `t`

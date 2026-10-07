@@ -169,11 +169,13 @@ static int repr_strbuf_src(const Compiler *c, int node, TyKind t) {
   /* an element a boxed container hands out is a boxed handle already */
   if (strbuf_boxed_elem_read(mc, node)) return RS_ELEM;
   /* a reader call (or a call answering its receiver) that renders the
-     handle itself */
+     handle itself; a method's own new String is a String, wrapped fresh
+     below as a receiverless call's is */
   if (k == NK_CallNode) {
     int r = nt_ref(nt, node, "receiver");
     if (r >= 0 && ty_is_object(comp_ntype(c, r)) &&
-        (strbuf_marked_yields_handle(mc, node) || c->strbuf_handle_demand[node]))
+        (strbuf_marked_yields_handle(mc, node) || c->strbuf_handle_demand[node]) &&
+        !call_answers_new_string(mc, node))
       return RS_DEMANDED;
   }
   /* a String value stored where a handle is demanded: a fresh one */
