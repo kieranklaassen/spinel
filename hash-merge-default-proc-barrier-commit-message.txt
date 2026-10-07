@@ -1,0 +1,22 @@
+A merged Hash's default proc survives a minor collection
+
+    names = Hash.new { |hash, k| "name #{k}" }
+    codes = Hash.new { |hash, k| "code #{k}" }
+    extra = {}
+    kept = names.merge(extra)
+    # ... later, after other merges
+    kept[7]                       # "code 7"
+
+sp_poly_hash_merge hands the receiver's default proc to the Hash it
+builds through a context object, allocated after that Hash. The
+allocation can collect; the new Hash is old after it, and the context
+was stored with no write barrier. The next minor collection freed the
+context and a missing key called through the freed slot: it got the
+default of whichever Hash was merged next, or the mark stopped under
+SPINEL_GC_STRESS=2. A merge that stores a pair records the new Hash by
+that store, so in a plain run only the merge of two empty Hashes showed
+it.
+
+The store takes the barrier.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
