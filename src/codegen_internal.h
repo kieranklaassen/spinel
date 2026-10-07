@@ -244,6 +244,14 @@ int subtree_may_reassign_state(Compiler *c, int id);
    Strings, Symbols, their ranges and typed Arrays can; a builtin over those
    alone, with no block, cannot: `total + i.to_s` (codegen_call.c). */
 int subtree_may_run_proc(Compiler *c, int id);
+/* Can running the subtree leave a Hash shorter? Only a method does that
+   (delete, shift, clear, reject!, ...), called there or in code of the
+   program's that the subtree runs. 0 where it provably runs neither: reads,
+   literals, writes of variables, conditions and loops, and blockless builtin
+   calls over numbers, Strings, Symbols and typed Arrays -- puts, print and p
+   of those, their own methods, a lookup or a store in a Hash of those. 1 for
+   anything else (codegen_call.c). */
+int subtree_may_shrink_hash(Compiler *c, int id);
 /* Does evaluating the subtree run no code, store nothing and allocate nothing
    -- variable and literal reads, scalar arithmetic, typed-array reads and
    plain field reads, all the way down (codegen_call.c)? */

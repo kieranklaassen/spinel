@@ -18502,6 +18502,171 @@ int subtree_may_run_proc(Compiler *c, int id) {
   return 0;
 }
 
+/* A call the program cannot have a hand in: no block, no splat, a name it
+   defines nowhere (and no method_missing to catch one), and every argument a
+   number, a String, a Symbol or a typed Array (ty_runs_no_code). */
+static int call_is_plain_builtin(Compiler *c, int id, const char *nm) {
+  const NodeTable *nt = c->nt;
+  if (nt_ref(nt, id, "block") >= 0 || comp_method_index(c, nm) >= 0 || any_class_defines(c, nm) ||
+      comp_method_index(c, "method_missing") >= 0 || any_class_defines(c, "method_missing")) return 0;
+  int a = nt_ref(nt, id, "arguments"); int ac = 0;
+  const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+  for (int i = 0; i < ac; i++)
+    if (nt_kind(nt, av[i]) == NK_SplatNode || nt_kind(nt, av[i]) == NK_KeywordHashNode ||
+        !ty_runs_no_code(comp_ntype(c, av[i]))) return 0;
+  return 1;
+}
+
+/* A Hash whose keys run no code when the table hashes or compares them, in a
+   program that gives no Hash a default block: a lookup or a store in it is
+   the table's own work, whatever it holds. A boxed key is hashed and compared
+   by the table too where the program defines none of the three methods. */
+static int ty_is_plain_hash(Compiler *c, TyKind t) {
+  static const char *const KEY_HOOKS[] = { "hash", "eql?", "==", NULL };
+  if (!ty_is_hash(t) || prog_has_hash_default_block(c)) return 0;
+  if (ty_runs_no_code(ty_hash_key(t))) return 1;
+  if (ty_hash_key(t) != TY_POLY) return 0;
+  for (int i = 0; KEY_HOOKS[i]; i++)
+    if (comp_method_index(c, KEY_HOOKS[i]) >= 0 || any_class_defines(c, KEY_HOOKS[i])) return 0;
+  return 1;
+}
+
+/* subtree_may_shrink_hash's walk. A whitelist, so a node or a call it does
+   not name counts as able to. `spliced` is 1 inside a block reached through
+   a yield, whose own yield is another method's. */
+static int may_shrink_hash(Compiler *c, int id, int spliced) {
+  static const char *const HASH_OPS[] = {
+    "[]", "[]=", "store", "fetch", "key?", "has_key?", "include?", "member?", "size", "length", "empty?",
+    "keys", "values", "to_a", NULL };
+  /* these compare the values, so the values must run no code either */
+  static const char *const HASH_VALUE_OPS[] = { "key", "value?", "has_value?", NULL };
+  static const char *const SENDS[] = {
+    "send", "__send__", "public_send", "method", "instance_eval", "instance_exec", "eval", NULL };
+  const NodeTable *nt = c->nt;
+  if (id < 0) return 0;
+  switch (nt_kind(nt, id)) {
+    case NK_StatementsNode: case NK_ParenthesesNode: case NK_IfNode: case NK_UnlessNode:
+    case NK_ElseNode: case NK_AndNode: case NK_OrNode: case NK_WhileNode: case NK_UntilNode:
+    case NK_BeginNode: case NK_NextNode: case NK_BreakNode: case NK_ReturnNode: case NK_ArrayNode:
+    case NK_InterpolatedStringNode: case NK_ConstantReadNode:
+    case NK_LocalVariableTargetNode: case NK_MultiTargetNode:
+    case NK_LocalVariableReadNode: case NK_InstanceVariableReadNode: case NK_GlobalVariableReadNode:
+    case NK_LocalVariableWriteNode: case NK_InstanceVariableWriteNode: case NK_GlobalVariableWriteNode:
+    case NK_LocalVariableAndWriteNode: case NK_LocalVariableOrWriteNode:
+    case NK_InstanceVariableAndWriteNode: case NK_InstanceVariableOrWriteNode:
+    case NK_IntegerNode: case NK_FloatNode: case NK_StringNode: case NK_SymbolNode:
+    case NK_NilNode: case NK_TrueNode: case NK_FalseNode: case NK_SelfNode:
+      break;
+    /* `"#{x}"` is x.to_s: a builtin's for these kinds (a class reopened with
+       its own to_s reads as a call already, desugar_interp_reopened_to_s) */
+    case NK_EmbeddedStatementsNode: {
+      int st = nt_ref(nt, id, "statements"); int bn = 0;
+      const int *body = st >= 0 ? nt_arr(nt, st, "body", &bn) : NULL;
+      if (bn > 0 && !ty_runs_no_code(comp_ntype(c, body[bn - 1]))) return 1;
+      break;
+    }
+    /* `k, v = pair` spreads an Array as it is; an object is asked to_ary */
+    case NK_MultiWriteNode: {
+      TyKind vt = comp_ntype(c, nt_ref(nt, id, "value"));
+      if (!ty_is_array(vt) && !(vt == TY_POLY && !any_class_defines(c, "to_ary"))) return 1;
+      break;
+    }
+    /* `s += v`, `a[i] += v`: the operator is a call on what the slot holds */
+    case NK_IndexOperatorWriteNode: case NK_IndexOrWriteNode: case NK_IndexAndWriteNode: {
+      TyKind rt = comp_ntype(c, nt_ref(nt, id, "receiver"));
+      if (!(ty_is_array(rt) && ty_runs_no_code(rt)) && !ty_is_plain_hash(c, rt)) return 1;
+      if (any_class_defines(c, "[]") || any_class_defines(c, "[]=")) return 1;
+      /* `||=` and `&&=` run no operator: the value is only stored */
+      if (nt_kind(nt, id) != NK_IndexOperatorWriteNode) break;
+    }
+    /* fall through */
+    case NK_LocalVariableOperatorWriteNode: case NK_InstanceVariableOperatorWriteNode:
+    case NK_GlobalVariableOperatorWriteNode: {
+      const char *op = nt_str(nt, id, "binary_operator");
+      if (op && (comp_method_index(c, op) >= 0 || any_class_defines(c, op))) return 1;
+      if (!ty_runs_no_code(comp_ntype(c, nt_ref(nt, id, "value")))) return 1;
+      break;
+    }
+    /* a method being spliced in (a Ruby-defined count or find over each)
+       runs the caller's literal block where it yields */
+    case NK_YieldNode:
+      if (spliced || g_current_scope_is_lowered || g_yield_proc_ref || g_block_id < 0 ||
+          may_shrink_hash(c, nt_ref(nt, g_block_id, "body"), 1)) return 1;
+      break;
+    case NK_CallNode: {
+      if (call_is_scalar_op(c, id)) break;
+      const char *nm = nt_str(nt, id, "name");
+      int recv = nt_ref(nt, id, "receiver");
+      if (!nm) return 1;
+      TyKind rt = recv >= 0 ? comp_ntype(c, recv) : TY_UNKNOWN;
+      /* a raise leaves the walk, whatever its arguments ran first (a rescue
+         in the body is not on the list); an append keeps what it is handed
+         and asks it nothing, and no builtin of that name shortens a Hash, so
+         a boxed receiver is as good as an Array where the program has no
+         method of the name */
+      if ((sp_streq(nm, "raise") && recv < 0) ||
+          ((sp_streq(nm, "<<") || sp_streq(nm, "push")) && (ty_is_array(rt) || rt == TY_POLY))) {
+        if (nt_ref(nt, id, "block") >= 0 || comp_method_index(c, nm) >= 0 || any_class_defines(c, nm) ||
+            comp_method_index(c, "method_missing") >= 0 || any_class_defines(c, "method_missing")) return 1;
+        if (recv < 0) return 0;
+        break;
+      }
+      /* a method of the program called by its bare name is asked through
+         its body and its defaults; its own yield is not this walk's, one
+         that calls itself runs out of depth and counts as able to, and so
+         does a name an alias may have given another body */
+      if (recv < 0 && nt_ref(nt, id, "block") < 0 && !any_class_defines(c, nm)) {
+        static int depth;
+        int mi = comp_method_index(c, nm);
+        if (mi >= 0) {
+          const char *al = comp_resolve_alias(c, comp_class_index(c, "Toplevel"), nm);
+          if (al && !sp_streq(al, nm)) return 1;
+          const Scope *m = &c->scopes[mi];
+          if (depth >= 4 || m->def_node < 0) return 1;
+          depth++;
+          int r = may_shrink_hash(c, nt_ref(nt, m->def_node, "body"), 1);
+          for (int i = 0; !r && i < m->nparams; i++)
+            if (m->pdefault[i] >= 0) r = may_shrink_hash(c, m->pdefault[i], 1);
+          depth--;
+          if (r) return 1;
+          break;
+        }
+      }
+      if (!call_is_plain_builtin(c, id, nm)) return 1;
+      if (sp_streq(nm, "respond_to?") && any_class_defines(c, "respond_to_missing?")) return 1;
+      for (int i = 0; SENDS[i]; i++) if (sp_streq(nm, SENDS[i])) return 1;
+      if (recv < 0) {
+        if (!sp_streq(nm, "puts") && !sp_streq(nm, "print") && !sp_streq(nm, "p")) return 1;
+        if (any_class_defines(c, "to_s") || any_class_defines(c, "inspect")) return 1;
+        break;
+      }
+      if (ty_runs_no_code(rt)) break;
+      int hit = 0;
+      for (int i = 0; HASH_OPS[i] && !hit; i++) hit = sp_streq(nm, HASH_OPS[i]);
+      if (ty_is_hash(rt) && ty_runs_no_code(ty_hash_val(rt)))
+        for (int i = 0; HASH_VALUE_OPS[i] && !hit; i++) hit = sp_streq(nm, HASH_VALUE_OPS[i]);
+      if (!hit || !ty_is_plain_hash(c, rt)) return 1;
+      break;
+    }
+    default: {
+      /* a call's argument list has no kind of its own */
+      const char *ty = nt_type(nt, id);
+      if (!ty || !sp_streq(ty, "ArgumentsNode")) return 1;
+      break;
+    }
+  }
+  for (int i = 0; i < nt_num_refs(nt, id); i++)
+    if (may_shrink_hash(c, nt_ref_at(nt, id, i), spliced)) return 1;
+  for (int i = 0; i < nt_num_arrs(nt, id); i++) {
+    int n = 0; const int *ids = nt_arr_at(nt, id, i, &n);
+    for (int j = 0; j < n; j++) if (may_shrink_hash(c, ids[j], spliced)) return 1;
+  }
+  return 0;
+}
+
+/* See codegen_internal.h. */
+int subtree_may_shrink_hash(Compiler *c, int id) { return may_shrink_hash(c, id, 0); }
+
 /* Does a local read in the operand `x` -- itself, or one its value is built
    of (`ar.first(v)`) -- read what the operand `after` can rebind
    (read_rebound_by)? A read that already ran into a temp reads that; a

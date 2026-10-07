@@ -6320,6 +6320,36 @@ static int iter_ewi_zip_poly_arms(Compiler *c, int id, Buf *b, int indent, const
   return -1;
 }
 
+/* A Hash walk's step where the block may delete the entry it is at: the next
+   entry then slides into slot `t`, and the index must stay. The key at `t` is
+   kept in `tk` before the body runs, and looked at again only on a turn that
+   left the Hash shorter than `tn` saw it. Only "is this still that entry" is
+   asked, so the key is compared by identity and never read through: a String
+   key is one pointer for as long as its entry lives, an Integer or Symbol key
+   its own word, and a boxed key its tag and its word (a NaN is itself, and a
+   key the turn deleted needs no root). */
+static void emit_hash_walk_key_decl(Buf *b, TyKind rt, int tk) {
+  if (rt == TY_POLY_POLY_HASH) buf_printf(b, "sp_RbVal _t%d = sp_box_nil();\n", tk);
+  else if (ty_hash_key(rt) == TY_STRING) buf_printf(b, "const char *_t%d = NULL;\n", tk);
+  else buf_printf(b, "sp_int _t%d = 0;\n", tk);
+}
+static void emit_hash_walk_key_save(Buf *b, TyKind rt, const char *h, int t, int tk) {
+  if (rt == TY_POLY_POLY_HASH) buf_printf(b, "_t%d = %s->keys[%s->order[_t%d]];\n", tk, h, h, t);
+  else if (ty_hash_key(rt) == TY_STRING) buf_printf(b, "_t%d = %s->order[_t%d];\n", tk, h, t);
+  else buf_printf(b, "_t%d = (sp_int)%s->order[_t%d];\n", tk, h, t);
+}
+static void emit_hash_walk_step(Buf *b, TyKind rt, const char *h, int t, int tn, int tk, int grown_raised) {
+  buf_printf(b, "if (%s->len < _t%d) { _t%d = %s->len; if (_t%d < %s->len && ", h, tn, tn, h, t, h);
+  if (rt == TY_POLY_POLY_HASH)
+    buf_printf(b, "%s->keys[%s->order[_t%d]].tag == _t%d.tag && %s->keys[%s->order[_t%d]].v.i == _t%d.v.i",
+               h, h, t, tk, h, h, t, tk);
+  else if (ty_hash_key(rt) == TY_STRING) buf_printf(b, "%s->order[_t%d] == _t%d", h, t, tk);
+  else buf_printf(b, "(sp_int)%s->order[_t%d] == _t%d", h, t, tk);
+  /* where a longer Hash has raised already, `tn` is the length here */
+  if (grown_raised) buf_printf(b, ") _t%d++; } else _t%d++;", t, t);
+  else buf_printf(b, ") _t%d++; } else { _t%d = %s->len; _t%d++; }", t, tn, h, t);
+}
+
 /* emit_iteration_stmt_body's Hash iterators: each / each_pair, each_value /
    each_key, and the in-place select! family (answers 1 emitted, 0 declined,
    -1 to go on) */
@@ -6351,11 +6381,18 @@ static int iter_hash_arms(Compiler *c, Buf *b, int indent, int block, const char
        this slot, so the index must not advance past it (#3569). */
     int tn0 = ++g_tmp, tk0 = ++g_tmp;
     int key_is_int = (ty_hash_key(rt) == TY_SYMBOL || ty_hash_key(rt) == TY_INT);
+    /* a String or boxed key is looked at again only where the block can
+       delete an entry at all */
+    int key_kept = !key_is_int && subtree_may_shrink_hash(c, body);
     emit_indent(b, indent);
     buf_printf(b, "sp_int _t%d = %s->len;\n", tn0, rb.p);
     if (key_is_int) {
       emit_indent(b, indent);
       buf_printf(b, "sp_int _t%d = 0;\n", tk0);
+    }
+    else if (key_kept) {
+      emit_indent(b, indent);
+      emit_hash_walk_key_decl(b, rt, tk0);
     }
     emit_indent(b, indent);
     /* The advance is the loop's own third clause, not a statement at the end of
@@ -6369,10 +6406,18 @@ static int iter_hash_arms(Compiler *c, Buf *b, int indent, int block, const char
       buf_printf(b, "if (_t%d < %s->len && (sp_int)%s->order[_t%d] == _t%d) _t%d++;"
                     " else _t%d = %s->len; })) {\n",
                  t, rb.p, rb.p, t, tk0, t, tn0, rb.p);
+    else if (key_kept) {
+      emit_hash_walk_step(b, rt, rb.p, t, tn0, tk0, 1);
+      buf_puts(b, " })) {\n");
+    }
     else buf_printf(b, "_t%d++; })) {\n", t);
     if (key_is_int) {
       emit_indent(b, indent + 1);
       buf_printf(b, "_t%d = (sp_int)%s->order[_t%d];\n", tk0, rb.p, t);
+    }
+    else if (key_kept) {
+      emit_indent(b, indent + 1);
+      emit_hash_walk_key_save(b, rt, rb.p, t, tk0);
     }
     if (p0 && !p1) {
       /* a SOLO block param receives the boxed [k, v] PAIR (CRuby yields the
@@ -6455,9 +6500,26 @@ static int iter_hash_arms(Compiler *c, Buf *b, int indent, int block, const char
     }
     Buf rb; memset(&rb, 0, sizeof rb);
     buf_printf(&rb, "_t%d", th2);
-    emit_indent(b, indent);
-    buf_printf(b, "for (sp_int _t%d = 0; _t%d < ", t, t);
-    buf_puts(b, rb.p); buf_printf(b, "->len; _t%d++) {\n", t);
+    /* the current key deleted slides the next entry into this slot, as in
+       each above, where the block can delete an entry at all */
+    if (subtree_may_shrink_hash(c, body)) {
+      int tn0 = ++g_tmp, tk0 = ++g_tmp;
+      emit_indent(b, indent);
+      buf_printf(b, "sp_int _t%d = %s->len;\n", tn0, rb.p);
+      emit_indent(b, indent);
+      emit_hash_walk_key_decl(b, rt, tk0);
+      emit_indent(b, indent);
+      buf_printf(b, "for (sp_int _t%d = 0; _t%d < %s->len; ({ ", t, t, rb.p);
+      emit_hash_walk_step(b, rt, rb.p, t, tn0, tk0, 0);
+      buf_puts(b, " })) {\n");
+      emit_indent(b, indent + 1);
+      emit_hash_walk_key_save(b, rt, rb.p, t, tk0);
+    }
+    else {
+      emit_indent(b, indent);
+      buf_printf(b, "for (sp_int _t%d = 0; _t%d < ", t, t);
+      buf_puts(b, rb.p); buf_printf(b, "->len; _t%d++) {\n", t);
+    }
     if (p0) {
       /* The param may be poly (shared name across hashes of differing
          element types); box a concrete element into the poly slot. */
