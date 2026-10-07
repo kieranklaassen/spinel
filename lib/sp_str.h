@@ -68,10 +68,12 @@ int sp_utf8_set_has(const uint32_t*cps,size_t n,uint32_t cp);
 uint32_t sp_uc_toupper(uint32_t cp);
 uint32_t sp_uc_tolower(uint32_t cp);
 sp_int sp_str_casecmp(const char*a,const char*b);
+sp_bool sp_str_casecmp_p(const char*a,const char*b);
 sp_bool sp_str_valid_encoding(const char*s);
 const char*sp_str_field(const char*s,const char*sep,sp_int n);
 sp_int sp_str_field_count(const char*s,const char*sep);
 const char*sp_str_concat(const char*a,const char*b);
+const char*sp_str_append_bytes(const char*a,const char*b);
 const char*sp_str_concat3(const char*a,const char*b,const char*c);
 const char*sp_str_concat4(const char*a,const char*b,const char*c,const char*d);
 const char*sp_str_concat_arr(const char *const *parts,int n);
@@ -113,6 +115,12 @@ const char*sp_str_byteslice1(const char*s,sp_int i);
 const char*sp_str_byteslice_range(const char*s,sp_int lo,sp_int hi,int excl,int lo_none,int hi_none);
 const char*sp_str_bytesplice(const char*s,sp_int start,sp_int len,const char*val);
 int sp_str_ascii_only(const char*s);
+int sp_str_enc_step(int state, const char *acc, size_t acc_len, const char *part, size_t part_len, int part_bin);
+/* the common step inline: a part in the encoding so far keeps it */
+static inline int sp_str_enc_step_i(int state, const char *acc, size_t acc_len, const char *part, size_t part_len, int part_bin) {
+  if (state == part_bin) return state;
+  return sp_str_enc_step(state, acc, acc_len, part, part_len, part_bin);
+}
 const char*sp_str_format_strarr(const char*fmt,sp_StrArray*a);
 const char*sp_str_sub(const char*s,const char*pat,const char*rep);
 const char*sp_str_remove_first(const char*s,const char*pat);
@@ -149,11 +157,39 @@ void sp_str_split_into(sp_StrArray*a,const char*s,const char*sep);
 const char*sp_str_undump(const char*s);
 const char*sp_str_succ_impl(const char*s);
 const char*sp_str_succ(const char*s);
+const char*sp_str_succ_n(const char*s,sp_int n);
 sp_StrArray*sp_str_split(const char*s,const char*sep);
 sp_StrArray*sp_str_split_drop_trailing(const char*s,const char*sep);
 sp_StrArray*sp_str_split_limit(const char*s,const char*sep,sp_int n);
 sp_StrArray*sp_str_split_ws(const char*s);
 sp_StrArray*sp_str_split_ws_limit(const char*s,sp_int n);
+/* The first occurrence in hay..end of a String pattern of nn bytes (nn > 0),
+   found by bytes. One byte is found by memchr. A longer pattern is sought by
+   strstr, as it was while the search ended at the subject's first NUL. Where
+   strstr finds nothing it ended at a NUL byte of the subject and no
+   occurrence begins before that byte, so one strlen says whether it is the
+   String's end, with nothing more to find, or lies inside it, and
+   sp_str_find_rest looks behind it by bytes. strstr reads the pattern to its
+   first NUL byte too, so at a call's first hit one strlen of the pattern says
+   whether it holds one (*nul, -1 until then): if not, every hit is the
+   pattern; if so, this search and the later ones go by bytes. */
+const char*sp_str_find_rest(const char*hay,const char*end,const char*need,size_t nn);
+static inline const char*sp_str_find(const char*hay,const char*end,const char*need,size_t nn,int*nul){
+  if(nn==1)return (const char*)memchr(hay,need[0],(size_t)(end-hay));
+  if(*nul<=0){
+    const char*f=strstr(hay,need);
+    if(f){
+      if(*nul<0)*nul=strlen(need)!=nn;
+      if(!*nul)return f;
+      hay=f;
+    }
+    else{
+      hay+=strlen(hay)+1;
+      if(hay>=end)return NULL;
+    }
+  }
+  return sp_str_find_rest(hay,end,need,nn);
+}
 sp_StrArray*sp_str_scan(const char*s,const char*pat);
 sp_int sp_str_scan_at(const char*s,const char*pat,sp_int pos);
 const char*sp_str_gsub(const char*s,const char*pat,const char*rep);
@@ -179,12 +215,16 @@ sp_IntArray*sp_str_codepoints_all(const char*s);
 sp_StrArray*sp_str_chars(const char*s);
 const char*sp_str_tr(const char*s,const char*from,const char*to);
 const char*sp_str_tr_s(const char*s,const char*from,const char*to);
+extern SP_TLS int sp_str_tr_s_met;   /* the last tr_s met a character of its set */
 const char*sp_str_delete(const char*s,const char*chars);
 const char*sp_str_squeeze(const char*s);
 const char*sp_str_squeeze_chars(const char*s,const char*cs);
 const char*sp_str_delete_n(const char*s,const char**chars,sp_int n);
 const char*sp_str_squeeze_n(const char*s,const char**chars,sp_int n);
 const char *sp_str_scrub(const char *s, const char *repl);
+const char *sp_str_scrub_utf8(const char *s, const char *repl);
+sp_int sp_str_scrub_bad(const char *s, sp_int bl, sp_int from, sp_int *len);
+const char *sp_str_scrub_repl(const char *r);
 const char *sp_str_encode(const char *s, sp_RbVal dst, sp_RbVal src, sp_RbVal invalid, sp_RbVal undef, sp_RbVal replace);
 const char *sp_str_scrub_bang(const char *s, const char *repl);
 const char*sp_str_ljust(const char*s,sp_int w);
