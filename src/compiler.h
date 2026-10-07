@@ -236,6 +236,12 @@ typedef struct {
                        Array: the reverse binding types it that Array, and the
                        type is re-asserted each round, as poly_hash_pin is,
                        since the literals re-derive the narrower kind. */
+  int usage_poly_array; /* this round's container fold made a typed Array
+                       local the general Array: infer_write_types types the
+                       writes again with the local held so, since what is read
+                       out of it was typed from the narrower kind. -1 while
+                       the fold runs: a typed Array local. Not kept across
+                       rounds. */
   TyKind oa_pin;    /* the pointer-array type the narrowing pass gave this slot,
                        re-asserted on every fixpoint round. infer_write_types
                        clears every local back to UNKNOWN and re-derives it from

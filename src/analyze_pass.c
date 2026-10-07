@@ -3971,6 +3971,42 @@ static int infer_write_multi_assign(Compiler *c, const NodeTable *nt) {
   return changed;
 }
 
+/* The container fold runs after the scan that types each local from its
+   writes, so what the scan read out of a local Array the fold then makes the
+   general Array was typed from the narrower kind (`t = [1, 2]; t << "s";
+   r = t.last`: r an Integer, and the boxed element narrowed into it, 0 for the
+   String). These two bracket the fold: the first marks the plain locals that
+   hold a typed Array, the second finds the ones the fold widened and, if there
+   are any, puts every other plain local back to UNKNOWN for the scan to run
+   again with those held as the general Array. */
+static void mark_typed_array_locals(Compiler *c) {
+  for (int s = 0; s < c->nscopes; s++)
+    for (int i = 0; i < c->scopes[s].nlocals; i++) {
+      LocalVar *lv = &c->scopes[s].locals[i];
+      if (lv->is_param || lv->is_block_param || lv->rbs_seeded) continue;
+      if (lv->usage_poly_array > 0) continue; /* widened earlier this round */
+      lv->usage_poly_array = ty_is_array(lv->type) && lv->type != TY_POLY_ARRAY ? -1 : 0;
+    }
+}
+static int reset_for_widened_array_locals(Compiler *c) {
+  int widened = 0;
+  for (int s = 0; s < c->nscopes; s++)
+    for (int i = 0; i < c->scopes[s].nlocals; i++) {
+      LocalVar *lv = &c->scopes[s].locals[i];
+      if (lv->usage_poly_array >= 0) continue;
+      lv->usage_poly_array = lv->type == TY_POLY_ARRAY;
+      widened |= lv->usage_poly_array;
+    }
+  if (!widened) return 0;
+  for (int s = 0; s < c->nscopes; s++)
+    for (int i = 0; i < c->scopes[s].nlocals; i++) {
+      LocalVar *lv = &c->scopes[s].locals[i];
+      if (lv->is_param || lv->is_block_param || lv->rbs_seeded) continue;
+      lv->type = lv->usage_poly_array > 0 ? TY_POLY_ARRAY : TY_UNKNOWN;
+    }
+  return 1;
+}
+
 int infer_write_types(Compiler *c) {
   const NodeTable *nt = c->nt;
   int changed = 0;
@@ -3994,6 +4030,7 @@ int infer_write_types(Compiler *c) {
         lv->gc_root = (int)lv->type;
         lv->type = TY_UNKNOWN;
       }
+      lv->usage_poly_array = 0;
     }
   /* Because of that reset, a site below that types a non-param local must NOT
      report `changed` itself: it is comparing against UNKNOWN, so it answers
@@ -4021,6 +4058,7 @@ int infer_write_types(Compiler *c) {
   LWIndex ivw_ix;
   ivw_index_build(c, &ivw_ix);
 
+scan_writes:
   for (int id = 0; id < nt->count; id++) {
     const char *ty = nt_type(nt, id);
     if (!ty) continue;
@@ -4079,6 +4117,13 @@ int infer_write_types(Compiler *c) {
             }
           }
         }
+      }
+      /* a typed Array written to a local this round's fold made the general
+         Array (reset_for_widened_array_locals), or a parameter's store did
+         (poly_array_pin), is written as that Array */
+      if (nm && ty_is_array(newt) && newt != TY_POLY_ARRAY) {
+        LocalVar *lv2 = scope_local(comp_scope_of(c, id), nm);
+        if (lv2 && (lv2->usage_poly_array > 0 || lv2->poly_array_pin)) newt = TY_POLY_ARRAY;
       }
     }
     else if (sp_streq(ty, "LocalVariableOperatorWriteNode")) {
@@ -4211,6 +4256,7 @@ int infer_write_types(Compiler *c) {
     }
   }
 
+  mark_typed_array_locals(c);
   changed |= infer_write_container_usage(c, nt, nfb, fb, lw_ix, ivw_ix);
 
   /* Propagate container widening across direct local aliases (`b = a`): the
@@ -4269,6 +4315,11 @@ int infer_write_types(Compiler *c) {
     if (!lv || lv->is_param || lv->is_block_param || lv->rbs_seeded) continue;
     TyKind merged = ty_unify(lv->type, TY_POLY);
     if (merged != lv->type) lv->type = merged;
+  }
+  if (reset_for_widened_array_locals(c)) {
+    infer_bigint_loop_locals(c);
+    changed |= infer_case_pattern_locals(c);
+    goto scan_writes;
   }
 
   /* Second pass: re-compute proc_ret for proc-typed locals after body-internal
