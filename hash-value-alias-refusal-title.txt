@@ -1,0 +1,1 @@
+A Hash value block appending through a local naming its value is refused
