@@ -19,6 +19,10 @@ from the commits its recipe lists.
 - `fam11-gen.rb OUT`: 368 programs (OUT/p) with a constant written by a bare
   name in a body that mixes in, opens or inherits one of CRuby's namespaces,
   and 234 (OUT/pv) with the value by a path through such a body.
+- `fam12-gen.rb OUT`: 156 programs (OUT/lib) with a body under a library's,
+  a builtin's or the program's own superclass or module, and 84 (OUT/sent)
+  with const_set through send and the program's own is_a? under a definer,
+  by a literal or a computed name.
 - `early-gen.rb OUT`: the twelve early-call shapes.
 - `num-gen.rb OUT`: the family of `instance_of?(Numeric)` on a boxed number.
 - `bl-gen.rb OUT`: the family of `rescue` and `raise` through a constant
@@ -30,8 +34,8 @@ from the commits its recipe lists.
 
 `texts/` holds the upstream texts of the three pieces as they are summed in
 the hand-over: `numeric-*` for the first (a boxed number's
-`instance_of?(Numeric)`), `pr-title.txt`, `pr-body-upstream-v8.md` and
-`commit-message-v8.txt` for the second (the constant in `is_a?`; the `-v7`
-files are its texts before the ninth commit of its recipe, 08f49af0), `bl1-*` for
+`instance_of?(Numeric)`), `pr-title.txt`, `pr-body-upstream-v9.md` and
+`commit-message-v9.txt` for the second (the constant in `is_a?`; the `-v7`
+and `-v8` files are its texts before the later commits of its recipe), `bl1-*` for
 the third (the constant in `rescue` and `raise`; its refactor's message is in
 commit 69d79bf9).
