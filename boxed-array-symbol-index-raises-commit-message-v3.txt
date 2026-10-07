@@ -1,0 +1,21 @@
+A Symbol or String index on a boxed Array raises TypeError
+
+    def pick(n) = n > 0 ? {a: 1} : [[1, "s"]]
+    h = pick(0)
+    p h[:a]   # nil; CRuby raises TypeError
+
+A Symbol or a String is no index of an Array. Through a boxed receiver
+the store already raises CRuby's TypeError (sp_poly_set_sym and
+sp_poly_set_str: "not a write to be dropped"), but the read,
+sp_poly_get_sym and sp_poly_get_str, answered nil for every receiver
+that is no Hash. Both now raise for an Array as the store does, with
+CRuby's message. That is the read behind h[:a], h["a"], slice(:a), at,
+`h[:a] += 1` and a later step of dig. A receiver of any other kind
+answers as before, and a Hash's or a Struct's read costs what it did:
+the test stands after their arms.
+
+No generated C changes: the two functions are in lib/spinel_rt.h.
+
+Test: test/boxed_array_index_symbol.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

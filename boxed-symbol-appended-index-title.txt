@@ -1,0 +1,1 @@
+A boxed Symbol's [] reads a Float, nil or appended String index
