@@ -322,6 +322,8 @@ extern const char *g_rescue_cls, *g_rescue_msg;
 /* When inside a rescue handler that can `retry`, holds the goto label for the
    retry target (just before `sp_exc_top++`). NULL otherwise. */
 extern const char *g_retry_label;
+extern int g_retry_exc_base, g_retry_ensure_base;
+void emit_retry_unwind(Buf *b);   /* pops the frames a retry leaves on its way to the label */
 /* Redo label stack: each enclosing loop that contains a `redo` pushes a fresh
    C label id; a RedoNode emits `goto _redo_<top>` to re-run the current
    iteration without re-testing the guard or advancing the iterator. */

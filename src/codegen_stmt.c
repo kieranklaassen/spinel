@@ -8784,10 +8784,11 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
     int ens_has_retry = (rescue >= 0) && subtree_has_retry(c->nt, rescue);
     char ens_retry_label[32]; ens_retry_label[0] = 0;
     const char *ens_saved_retry = g_retry_label;
+    int ens_saved_rxb = g_retry_exc_base, ens_saved_reb = g_retry_ensure_base;
     if (ens_has_retry) {
       snprintf(ens_retry_label, sizeof ens_retry_label, "_retry_%d", eid);
       buf_printf(b, "%s:;\n", ens_retry_label);
-      g_retry_label = ens_retry_label;
+      g_retry_label = ens_retry_label; g_retry_exc_base = g_exc_frame_depth; g_retry_ensure_base = g_ensure_depth;
     }
     emit_indent(b, indent); buf_puts(b, "sp_exc_check_depth();\n");
     emit_indent(b, indent); buf_puts(b, "sp_exc_rootmark[sp_exc_top] = sp_gc_nroots; sp_rescue_mark[sp_exc_top] = sp_rescue_sp;\n");
@@ -8942,7 +8943,7 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
       emit_indent(b, indent);
       buf_printf(b, "if (_excf%d) { sp_pending_exc_obj = _excobj%d; sp_raise_cls(_exccls%d, _excmsg%d); }\n", eid, eid, eid, eid);
     }
-    g_retry_label = ens_saved_retry;
+    g_retry_label = ens_saved_retry; g_retry_exc_base = ens_saved_rxb; g_retry_ensure_base = ens_saved_reb;
     return;
   }
 
@@ -8955,7 +8956,8 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
   if (has_retry) snprintf(retry_label, sizeof retry_label, "_retry_%d", rl);
   if (has_retry) buf_printf(b, "%s:;\n", retry_label);
   const char *saved_retry = g_retry_label;
-  if (has_retry) g_retry_label = retry_label;
+  int saved_rxb = g_retry_exc_base, saved_reb = g_retry_ensure_base;
+  if (has_retry) { g_retry_label = retry_label; g_retry_exc_base = g_exc_frame_depth; g_retry_ensure_base = g_ensure_depth; }
 
   emit_indent(b, indent); buf_puts(b, "sp_exc_check_depth();\n");
   emit_indent(b, indent); buf_puts(b, "sp_exc_rootmark[sp_exc_top] = sp_gc_nroots; sp_rescue_mark[sp_exc_top] = sp_rescue_sp;\n");
@@ -9020,7 +9022,7 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
   }
   emit_indent(b, indent + 1); buf_puts(b, "if (sp_unwind_kind != SP_UNWIND_NONE) sp_unwind_resume();\n");
   emit_indent(b, indent); buf_puts(b, "}\n");
-  g_retry_label = saved_retry;
+  g_retry_label = saved_retry; g_retry_exc_base = saved_rxb; g_retry_ensure_base = saved_reb;
 }
 
 /* Wrap a line-emitting statement so any expression preludes are flushed
@@ -13289,7 +13291,7 @@ void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
          innermost rescue save). */
       if (g_rescue_save_depth > 0)
         buf_puts(b, "sp_rescue_sp--; ");
-      buf_printf(b, "goto %s;\n", g_retry_label);
+      emit_retry_unwind(b); buf_printf(b, "goto %s;\n", g_retry_label);
     }
     else unsupported(c, id, "retry (outside rescue)");
     return;
