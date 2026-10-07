@@ -928,6 +928,9 @@ typedef struct {
   int *toplevel_includes;  /* class indices of modules included at top level */
   int ntoplevel_includes;
   int has_include_math;    /* program has `include Math`: expose bare PI/E/fns */
+  /* splat_program_may_make_to_a: its answer (kept once it is 1) and the class
+     and scope counts it was read at, each plus one */
+  int splat_to_a_may, splat_to_a_ncls, splat_to_a_nscopes;
 
   /* FFI registry: ffi_func declarations */
   FfiFunc *ffi_funcs;
