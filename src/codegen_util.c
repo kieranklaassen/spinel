@@ -1210,6 +1210,25 @@ void emit_ensure_exc_raise(Buf *b, int eid) {
   buf_printf(b, "sp_exc_pass_cause(_excobj%d, _exccause%d); sp_pending_exc_obj = _excobj%d; sp_raise_cls(_exccls%d, _excmsg%d);",
              eid, eid, eid, eid, eid);
 }
+/* A deferred `next` handed from the region `eid` to the enclosing one, at
+   whose ensure label it goes on: the one frame it pops is that region's.
+   Where `eid` stands in a rescue clause of the enclosing region the clause
+   runs under a frame of its own (emit_rescue), and its handler is one the
+   `next` did not count: the hand-on pops the frames down to the region's
+   base, whatever lies between, and the handlers of the clauses entered
+   beneath the depth here. */
+void emit_ensure_next_chain(Buf *b, int eid, const EnsureCtx *outer) {
+  buf_printf(b, "if (_nxtf%d) { _nxtf%d = 1; ", eid, outer->lid);
+  if (!outer->clause) buf_puts(b, "sp_exc_top--; ");
+  else {
+    int k = 0;
+    for (int i = 0; i < g_rescue_save_depth; i++)
+      if (g_rescue_save_stack[i].exc_base >= outer->exc_base && g_rescue_save_stack[i].exc_base < g_exc_frame_depth) k++;
+    buf_printf(b, "sp_exc_top -= %d; ", g_exc_frame_depth - outer->exc_base);
+    if (k > 0) buf_printf(b, "sp_rescue_sp -= %d; ", k);
+  }
+  buf_printf(b, "goto _ensure%d; }", outer->lid);
+}
 
 /* rescue bodies crossed by an exit to frame-depth pop_base: those entered at or
    deeper than pop_base (their exc_base >= pop_base). */

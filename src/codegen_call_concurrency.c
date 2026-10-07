@@ -374,8 +374,8 @@ int emit_call_synchronize_arms(Compiler *c, int id, Buf *b, const NodeTable *nt,
       /* a deferred `next` or `break` a nested ensure handed up, passed on the
          way an ordinary ensure frame passes its own (codegen_stmt.c) */
       if (g_ensure_depth > g_loop_ensure_base) {
-        EnsureCtx *o2 = &g_ensure_stack[g_ensure_depth - 1];
-        buf_printf(b, "if (_nxtf%d) { _nxtf%d = 1; sp_exc_top--; goto _ensure%d; } ", eid, o2->lid, o2->lid);
+        emit_ensure_next_chain(b, eid, &g_ensure_stack[g_ensure_depth - 1]);
+        buf_puts(b, " ");
       }
       else if (g_c_loop_depth > 0) buf_printf(b, "if (_nxtf%d) continue; ", eid);
       if (g_c_loop_depth > 0 && g_ensure_depth > g_loop_ensure_base) {

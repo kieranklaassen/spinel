@@ -4877,8 +4877,13 @@ static void emit_expr_node(Compiler *c, int id, Buf *b) {
          the same group (e.g. `(c = false; retry)`) must run first. GCC/clang
          permit a goto out of a statement expression; the dead 0 satisfies the
          value slot. */
-      buf_printf(b, "({ %sgoto %s; 0; })",
-                 g_rescue_save_depth > 0 ? "sp_rescue_sp--; " : "", g_retry_label);
+      buf_puts(b, "({ ");
+      if (g_rescue_save_depth > 0) {
+        RescueSave *rs = &g_rescue_save_stack[g_rescue_save_depth - 1];
+        if (rs->framed) buf_printf(b, "sp_exc_top -= %d; ", g_exc_frame_depth - rs->exc_base);
+        buf_puts(b, "sp_rescue_sp--; ");
+      }
+      buf_printf(b, "goto %s; 0; })", g_retry_label);
     }
     else unsupported(c, id, "retry (outside rescue)");
     return;
