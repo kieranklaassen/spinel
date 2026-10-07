@@ -1,0 +1,32 @@
+An omitted *rest is kept alive while a dispatch arm builds the **kwrest
+
+    class Img
+      def b(*r, **o) = [r, o]
+    end
+    class Other
+      def b = 0
+    end
+    y = [Img.new, Other.new][0]
+    p y.b           # [[], {}]
+
+aborts under SPINEL_GC_STRESS=2 ("the mark reached a freed slot"), and
+test/poly_dispatch_empty_kwrest.rb with it. With no stress setting, of
+300,000 such calls whose results are kept one reads back wrong.
+
+The arm of a call that passes nothing spells each omitted parameter's
+value in the call itself, `sp_Img_b(self, sp_PolyArray_new(),
+sp_SymPolyHash_new())`: neither object is rooted, and whichever C builds
+second collects the first. The empty Hash is there since cbc44cb5b (an
+omitted **kwrest is an empty Hash through a dispatch on several classes);
+a *rest alone or a **kwrest alone is one object, and the callee roots it.
+
+An arm that is given arguments already binds two such values to rooted
+locals ahead of its call (emit_poly_arm_args). The arm that is given none
+(emit_poly_user_arm0) now does the same for an omitted rest and an omitted
+**kwrest, through the two functions the first one's lines are split into
+(poly_arm_arg_fresh, emit_poly_arm_arg_held); the C of an arm given
+arguments is unchanged. The typed call holds both in temps already.
+
+test/poly_dispatch_empty_kwrest.rb joins gc-stress-test's list.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

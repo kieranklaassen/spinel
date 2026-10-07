@@ -1,0 +1,28 @@
+Two appended-to String arguments are kept alive in a dispatch arm
+
+    class Img
+      def both(s, t)
+        s << "x"
+        t << "y"
+        [s, t]
+      end
+    end
+    class Other
+      def both(s, t) = 0
+    end
+    y = [Img.new, Other.new][0]
+    p y.both(+"a", +"b")     # ["ax", "by"]
+
+dies under SPINEL_GC_STRESS=2 ("fault on the GC mark path": a bus error
+with gcc, a segfault with clang). A parameter its method appends to takes
+a handle on the caller's String, and the arm wraps each such argument in
+one inside its call, `sp_Img_both(self, sp_String_new_shared(_t1),
+sp_String_new_shared(_t2))`: the second handle's allocation collects the
+first.
+
+A fresh handle now counts as a fresh value in the arm, so two of them, or
+one beside a default that allocates, are bound to rooted locals ahead of
+the call. An argument that passes its variable's own handle allocates
+nothing and is as it was.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

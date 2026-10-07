@@ -1,0 +1,1 @@
+Two appended-to String arguments are kept alive in a dispatch arm

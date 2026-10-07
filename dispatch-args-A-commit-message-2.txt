@@ -1,0 +1,33 @@
+A default that allocates is kept alive in a dispatch arm
+
+    class Img
+      def two(x = "a" * 2, y = "c" * 2) = [x, y]
+    end
+    class Other
+      def two = 0
+    end
+    y = [Img.new, Other.new][0]
+    p y.two         # ["aa", "cc"]
+
+aborts under SPINEL_GC_STRESS=2 ("the mark reached a freed slot"). With no
+stress setting, of 300,000 such calls whose results are kept one reads
+back wrong.
+
+The arm spells an omitted parameter's default in its call,
+`sp_Img_two(self, sp_str_repeat(...), sp_str_repeat(...))`, where nothing
+roots it, and whichever C runs second collects the first. So does a
+default beside an omitted *rest or a **kwrest (`x = {}, *r`; `x = "a" *
+2, *r` and `x = "a" * 2, **o` with clang, whose order shows it), and a
+keyword's default (`k: "a" * 2, j: "c" * 2`), with arguments or without:
+the arm given arguments counted only a value built in a statement
+expression.
+
+Such a default now counts as a fresh value in both arms and is bound to a
+rooted local with the others. It counts when the parameter may take no
+argument (poly_arm_param_omitted: none reaches it, or a splat or a `**`
+may leave it out), the default may allocate (operand_may_allocate) and
+its emitter has not bound it to a temp already, as it does an Array
+literal; a keyword the call names, a default of nil, a number or a String
+literal are as they were.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
