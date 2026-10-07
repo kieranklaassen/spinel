@@ -6361,9 +6361,10 @@ static int desugar_str_range_methods(Compiler *c) {
     int recv = nt_ref(nt, id, "receiver");
     if (!nm || recv < 0) continue;
     if (infer_type(c, recv) != TY_STR_RANGE) continue;
-    /* `range % n` is `range.step(n)`; the arithmetic emitter has no arm for a
-       string range, so name it what it is (#3671) */
-    if (sp_streq(nm, "%")) { nt_node_set_str(nt, id, "name", "step"); changed = 1; continue; }
+    /* `range.%(n) { }` is `range.step(n) { }`, which has the arm that walks
+       it (#3671); with no block `%` keeps its name, by which the Enumerator
+       it answers inspects */
+    if (sp_streq(nm, "%") && nt_ref(nt, id, "block") >= 0) { nt_node_set_str(nt, id, "name", "step"); changed = 1; continue; }
     int argn = nt_ref(nt, id, "arguments");
     int an = 0;
     if (argn >= 0) nt_arr(nt, argn, "arguments", &an);

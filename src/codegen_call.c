@@ -13254,6 +13254,9 @@ static int emit_array_arith_call(Compiler *c, int id, Buf *b) {
   TyKind rt = recv >= 0 ? comp_ntype(c, recv) : TY_UNKNOWN;
   TyKind a0 = argc >= 1 ? comp_ntype(c, argv[0]) : TY_UNKNOWN;
   TyKind res = comp_ntype(c, id);
+  /* a String Range's `%` is its step(n) under the name it was called by: the
+     Enumerator's own row (builtin_ops.c) */
+  if (rt == TY_STR_RANGE && sp_streq(name, "%") && emit_builtin_op(c, id, recv, rt, name, b)) return 1;
   /* Array#* (repeat): arr * n  ->  new array with elements repeated n times.
      The count is emitted via emit_int_expr, which unboxes a promote-widened
      poly count, so accept TY_POLY as well as TY_INT -- otherwise `arr * n`
