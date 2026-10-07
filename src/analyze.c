@@ -31310,7 +31310,10 @@ static void refuse_string_alias_copies(Compiler *c) {
          the rule names every such result a shared handle, a read-only one
          too, so the calls are left to it */
       if (plain && (to.kind == NK_InstanceVariableReadNode || c->share_strings)) continue;
-      if (sa_mutated(c, &to) && sa_read_elsewhere(c, &from, b)) {
+      /* a local that shares its handle is read through the other name
+         (`t = s; r = t.strip!; r << x; p s`) */
+      int read = sa_read_elsewhere(c, &from, b) || (from.kind == NK_LocalVariableReadNode && sa_handle(c, &from, 0));
+      if (sa_mutated(c, &to) && read) {
         int route = plain ? 4 : 2;
         ShareRoute q = share_route(w, v, 0);
         q.to = w;
