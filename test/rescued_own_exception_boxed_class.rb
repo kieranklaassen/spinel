@@ -47,20 +47,3 @@ names = kept.map do |x|
   end
 end
 p names
-
-# A module the class includes answers the same way.
-module Tagged; end
-class Marked < StandardError
-  include Tagged
-end
-class MarkedMore < Marked; end
-marked = [3]
-[Marked, MarkedMore, Plain].each do |k|
-  begin
-    raise k, "m"
-  rescue => e
-    marked << e
-  end
-end
-p marked.map { |x| x.is_a?(Tagged) }, marked.map { |x| x.kind_of?(Tagged) }
-p marked.map { |x| case x when Tagged then :tagged else :plain end }

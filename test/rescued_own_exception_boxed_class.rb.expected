@@ -5,6 +5,3 @@
 [false, false, true, false, false, false, false]
 false
 [:plain, :deeper, :app, :other, :coded, :plain, :other]
-[false, true, true, false]
-[false, true, true, false]
-[:plain, :tagged, :tagged, :plain]

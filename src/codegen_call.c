@@ -17923,47 +17923,88 @@ int class_isa_user(Compiler *c, int k, int cid, const char *cn) {
          class_includes_module_named(c, k, cn);
 }
 
-/* Whether a boxed exception of class k answers yes to a test against `cid`
-   (named `cn`): k is an exception class of the program's own and is cid,
-   under it, or includes it. The name arm below lists these. */
-static int exc_name_arm_lists(Compiler *c, int k, int cid, const char *cn, int exact) {
-  return class_is_exc_subclass(c, k) && (k == cid || (!exact && class_isa_user(c, k, cid, cn)));
+/* A method a class test goes through, or `exception`, which chooses what a
+   raise raises. */
+static int class_test_method_name(const char *s) {
+  return s && (sp_streq(s, "is_a?") || sp_streq(s, "kind_of?") || sp_streq(s, "instance_of?") ||
+               sp_streq(s, "===") || sp_streq(s, "exception"));
+}
+
+/* The leaf of a class's or constant's stored name: one defined under two
+   namespaces is kept as `Mod__Leaf` (qualify_colliding_classes,
+   qualify_colliding_consts). */
+static const char *const_stored_leaf(const char *n) {
+  const char *leaf = n;
+  for (const char *p = n; p && (p = strstr(p, "__")) != NULL; p += 2) leaf = p + 2;
+  return leaf;
+}
+
+/* Is this a program where the name a boxed exception carries says what a
+   class test of it answers? The name arm below is right only where the test
+   is the builtin one and a class's name means one class wherever it is
+   written, so it is emitted for these programs alone and every other keeps
+   the test it had:
+   - none that defines, aliases or undefines is_a?, kind_of?, instance_of?,
+     === or exception: a def of that name anywhere, on either side, or the
+     name as a Symbol or a String (alias, undef, alias_method, define_method);
+   - none with a constant bound twice: two classes of one leaf name, a
+     constant written under a class's name, a class alias written twice, or
+     a constant written any way but `NAME = value`. A bare name there means
+     a class by where it is read, and a Class.new block reads as a class
+     body does. */
+static int prog_class_test_by_name(Compiler *c) {
+  static const Compiler *memo_c; static int memo;
+  if (memo_c == c) return memo;
+  memo_c = c; memo = 0;
+  const NodeTable *nt = c->nt;
+  for (int k = 0; k < c->nclasses; k++)
+    if (c->classes[k].name && strstr(c->classes[k].name, "__")) return 0;
+  for (int id = 0; id < nt->count; id++) {
+    NodeKind kd = nt_kind(nt, id);
+    if (kd == NK_DefNode) { if (class_test_method_name(nt_str(nt, id, "name"))) return 0; }
+    else if (kd == NK_SymbolNode) { if (class_test_method_name(nt_str(nt, id, "value"))) return 0; }
+    else if (kd == NK_StringNode) { if (class_test_method_name(nt_str(nt, id, "content"))) return 0; }
+    else if (kd == NK_ConstantWriteNode) {
+      const char *leaf = const_stored_leaf(nt_str(nt, id, "name"));
+      if (!leaf) return 0;
+      int ci = comp_class_index(c, leaf), dn = ci >= 0 ? c->classes[ci].def_node : -1;
+      if (dn >= 0 && (nt_kind(nt, dn) == NK_ClassNode || nt_kind(nt, dn) == NK_ModuleNode)) return 0;
+      int v = nt_ref(nt, id, "value");
+      if (v < 0 || (nt_kind(nt, v) != NK_ConstantReadNode && nt_kind(nt, v) != NK_ConstantPathNode)) continue;
+      NT_FOREACH_KIND(nt, NK_ConstantWriteNode, w)
+        if (w != id && sp_streq(const_stored_leaf(nt_str(nt, w, "name")), leaf)) return 0;
+    }
+    else if (kd != NK_ConstantReadNode && kd != NK_ConstantPathNode &&
+             nt_type(nt, id) && strncmp(nt_type(nt, id), "Constant", 8) == 0) return 0;
+  }
+  return memo = 1;
 }
 
 /* Does a class test against `cid` take the name arm below? An exception class
-   of the program's own, or a module one of them includes, in a program that
-   leaves the class predicates alone: where it defines is_a?, kind_of? or
-   instance_of? itself, or === on the class, the answer is the program's to
-   give and the test stays as it was. */
-int class_takes_exc_name_arm(Compiler *c, int cid, const char *cn, int exact) {
-  if (cid < 0 || (!class_is_exc_subclass(c, cid) && !class_is_module_def(c, cid))) return 0;
-  if (any_class_defines(c, "is_a?") || any_class_defines(c, "kind_of?") ||
-      any_class_defines(c, "instance_of?")) return 0;
-  if (comp_cmethod_in_chain(c, cid, "===", NULL) >= 0) return 0;
-  for (int k = 0; k < c->nclasses; k++) if (exc_name_arm_lists(c, k, cid, cn, exact)) return 1;
-  return 0;
+   of the program's own, in a program where the name says the answer. */
+int class_takes_exc_name_arm(Compiler *c, int cid) {
+  return cid >= 0 && class_is_exc_subclass(c, cid) && prog_class_test_by_name(c);
 }
 
 /* An exception of a class of the program's own is an sp_Exception, boxed as
    SP_BUILTIN_EXCEPTION, and its class is the name it carries: no class id
    tests it. Emits the arm that asks by name, ` || (...)`, after a class-id
    test of the boxed value `v` against class `cid`; nothing for a class that
-   does not take it. Every class that answers yes is the program's own, so
-   the test is that name against theirs, read where the exception keeps it:
-   a miss costs those comparisons, no walk up the hierarchy and no copy of
-   the name. */
-void emit_poly_exc_name_arm(Compiler *c, int cid, const char *cn, const char *v, int exact, Buf *b) {
-  if (!class_takes_exc_name_arm(c, cid, cn, exact)) return;
-  int t = ++g_tmp, first = 1;
+   does not take it. The classes that answer yes are `cid` and those under
+   it, all the program's own, so the test is that name against theirs, read
+   where the exception keeps it: a miss costs those comparisons, no walk up
+   the hierarchy and no copy of the name. */
+void emit_poly_exc_name_arm(Compiler *c, int cid, const char *v, int exact, Buf *b) {
+  if (!class_takes_exc_name_arm(c, cid)) return;
+  int t = ++g_tmp;
   buf_printf(b, " || (%s.tag == SP_TAG_OBJ && %s.cls_id == SP_BUILTIN_EXCEPTION && %s.v.p && "
                 "({ const char *_xn%d = ((sp_Exception *)%s.v.p)->cls_name; _xn%d && (", v, v, v, t, v, t);
-  for (int k = 0; k < c->nclasses; k++) {
-    const char *kn = exc_name_arm_lists(c, k, cid, cn, exact) ? class_ruby_name(c, k) : NULL;
-    if (!kn) continue;
-    buf_printf(b, "%sstrcmp(_xn%d, \"%s\") == 0", first ? "" : " || ", t, kn);
+  for (int k = 0, first = 1; k < c->nclasses; k++) {
+    if (k != cid && (exact || !is_descendant(c, k, cid))) continue;
+    buf_printf(b, "%sstrcmp(_xn%d, \"%s\") == 0", first ? "" : " || ", t, class_ruby_name(c, k));
     first = 0;
   }
-  buf_puts(b, first ? "0); }))" : "); }))");
+  buf_puts(b, "); }))");
 }
 
 /* The runtime test for `<poly value v> is_a? <class named cn>` (exact: the
@@ -18019,7 +18060,7 @@ int emit_poly_isa_test(Compiler *c, const char *cn, const char *v, int exact, Bu
         ext = 0;
         for (int k = 0; k < c->nclasses && !ext; k++) if (comp_class_singleton_has_module(c, k, cid)) ext = 1;
       }
-      int exc = class_takes_exc_name_arm(c, cid, cn, exact);
+      int exc = class_takes_exc_name_arm(c, cid);
       if (ext || exc) buf_puts(b, "(");
       buf_printf(b, "(%s.tag == SP_TAG_OBJ && (", v);
       int first = 1;
@@ -18036,7 +18077,7 @@ int emit_poly_isa_test(Compiler *c, const char *cn, const char *v, int exact, Bu
         }
       if (first) buf_puts(b, "0");
       buf_puts(b, "))");
-      if (exc) { emit_poly_exc_name_arm(c, cid, cn, v, exact, b); if (!ext) buf_puts(b, ")"); }
+      if (exc) { emit_poly_exc_name_arm(c, cid, v, exact, b); buf_puts(b, ")"); }
       if (ext) {
         buf_printf(b, " || (%s.tag == SP_TAG_CLASS && (", v);
         int any = 0;
