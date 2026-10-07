@@ -163,6 +163,20 @@ sp_StrArray*sp_str_split_drop_trailing(const char*s,const char*sep);
 sp_StrArray*sp_str_split_limit(const char*s,const char*sep,sp_int n);
 sp_StrArray*sp_str_split_ws(const char*s);
 sp_StrArray*sp_str_split_ws_limit(const char*s,sp_int n);
+/* The first occurrence in hay..end of a String pattern of nn bytes (nn > 0),
+   found by bytes. One byte is found by memchr. A longer pattern that holds
+   no NUL byte is found by strstr, as it was while the search ended at the
+   subject's first NUL: strstr ends there still, the pattern cannot lie
+   across that byte, and sp_str_find_rest looks behind it. `nul` says the
+   pattern holds a NUL byte (sp_str_pat_nul, asked once a call): strstr
+   cannot find that one, and it is found by bytes from the start. */
+const char*sp_str_find_rest(const char*hay,const char*end,const char*need,size_t nn,int nul);
+static inline int sp_str_pat_nul(const char*need,size_t nn){for(size_t i=0;i<nn;i++)if(!need[i])return 1;return 0;}
+static inline const char*sp_str_find(const char*hay,const char*end,const char*need,size_t nn,int nul){
+  if(nn==1)return (const char*)memchr(hay,need[0],(size_t)(end-hay));
+  const char*f=nul?NULL:strstr(hay,need);
+  return f?f:sp_str_find_rest(hay,end,need,nn,nul);
+}
 sp_StrArray*sp_str_scan(const char*s,const char*pat);
 sp_int sp_str_scan_at(const char*s,const char*pat,sp_int pos);
 const char*sp_str_gsub(const char*s,const char*pat,const char*rep);
