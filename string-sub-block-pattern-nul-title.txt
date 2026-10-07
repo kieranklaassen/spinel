@@ -1,0 +1,1 @@
+sub and gsub with a String pattern and a block find it by bytes

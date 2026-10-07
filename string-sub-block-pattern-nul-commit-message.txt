@@ -1,0 +1,39 @@
+sub and gsub with a String pattern and a block find it by bytes
+
+    "a\0b".sub("b") { "zz" }.bytes      # [97, 0, 98], CRuby [97, 0, 122, 122]
+    "a\0b".gsub("\0") { "::" }          # "::::::::", CRuby "a::b"
+    "ab\0b".gsub("b\0") { "!" }.bytes   # [97, 33, 33], CRuby [97, 33, 98]
+
+The loop emit_gsub_block_expr emits for a String pattern searched with
+strstr, which ends at the subject's first NUL byte and reads the pattern
+only to its own: a pattern that begins with a NUL was the empty pattern,
+and "b\0" was "b". A pattern that is a Regexp or a String only at run
+time took the same strstr when it was a String.
+
+The loop now searches the subject to its byte length. A pattern of one
+byte is found by memchr. A longer one is sought by strstr as before, and
+only where strstr finds nothing is what stands behind the NUL it ended
+at searched by sp_str_find_rest; a pattern that holds no NUL cannot lie
+across one, so nothing is missed. A pattern that holds a NUL byte is
+searched by sp_str_find_rest. Whether it holds one is known here for a
+literal, so its loop carries no test of it; for any other String one
+strlen says so at the call's first hit, and a call that finds nothing
+never reads the pattern. An empty pattern matches where it stands, as it
+did.
+
+The search is written out in the loop, not called as sp_str_find: with
+the call gcc no longer inlines sp_String_append_n into the loop, and
+`s.gsub(": ") { "=" }` costs 97 instructions a call more where this
+costs 42.
+
+A call whose last search finds nothing pays one strlen of what is left
+of the subject. By callgrind, gcc then clang, a call:
+"name: value: other: tail".gsub(": ") { "=" } +42 (+2.5%), +45 (+2.6%);
+s.sub("zz") { "!" } on a String of 2 bytes +41 (+5.9%), +25 (+3.7%), on
+880 bytes +138 (+6.7%), +122 (+6.0%); the same gsub with its pattern in
+a variable that may hold a Regexp +90 (+5.1%), +115 (+6.4%). A pattern
+of one byte is as cheap as it was or cheaper.
+
+Test: test/string_sub_block_pattern_nul.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
