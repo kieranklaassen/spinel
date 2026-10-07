@@ -6720,7 +6720,8 @@ enum { HC_INT, HC_FLOAT, HC_STR };
 typedef struct { char recv[200]; int kind; int nf; char guard[128]; } HcEntry;   /* nf: hc_array_nilfree asked;
                                                        guard: Float locals whose nil zeroes _hcn */
 typedef struct { int id; int n; HcEntry e[16]; NameSet wl, wi; char mark[32];
-                 char bi[64], ba[64]; } HcRegion;  /* bi/ba: see hc_bounded_index */
+                 char bi[64], ba[64];              /* bi/ba: see hc_bounded_index */
+                 int strs; } HcRegion;             /* strs: asked by len_loop_quiet */
 static HcRegion *g_hc = NULL;
 /* the loops' own numbering: drawn from g_tmp, it would renumber every temp
    after a loop that qualifies and then caches nothing */
@@ -6771,6 +6772,113 @@ static int hc_call_ok(Compiler *c, int id, int stmt) {
   return 0;
 }
 
+/* Whether the program has a method of its own that a `name` call on a value
+   of kind `t` reaches: one in the kind's class, or in a class or module every
+   value answers through. */
+static int len_name_taken(Compiler *c, TyKind t, const char *name) {
+  const char *cn[8]; int n = 0;
+  if (t == TY_INT) cn[n++] = "Integer";
+  else if (t == TY_FLOAT) cn[n++] = "Float";
+  else if (t == TY_STRING) cn[n++] = "String";
+  else if (t == TY_SYMBOL) cn[n++] = "Symbol";
+  else if (t == TY_BOOL) { cn[n++] = "TrueClass"; cn[n++] = "FalseClass"; }
+  else if (ty_is_array(t)) { cn[n++] = "Array"; cn[n++] = "Enumerable"; }
+  else if (ty_is_hash(t)) { cn[n++] = "Hash"; cn[n++] = "Enumerable"; }
+  if (t == TY_INT || t == TY_FLOAT) cn[n++] = "Numeric";
+  cn[n++] = "Comparable"; cn[n++] = "Object"; cn[n++] = "Kernel"; cn[n++] = "BasicObject";
+  for (int i = 0; i < n; i++) {
+    int ci = comp_class_index(c, cn[i]);
+    if (ci >= 0 && comp_method_in_chain(c, ci, name, NULL) >= 0) return 1;
+  }
+  return 0;
+}
+
+/* A call that reads a String and can change none: the reader names below on
+   a String receiver, each operand an Integer or a String as the name takes
+   it, and no block. What it answers may be a new String; nothing here
+   appends to one. */
+static int len_call_quiet(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  const char *nm = nt_str(nt, id, "name");
+  int recv = nt_ref(nt, id, "receiver");
+  if (!nm || recv < 0 || nt_ref(nt, id, "block") >= 0 || comp_ntype(c, recv) != TY_STRING) return 0;
+  int a = nt_ref(nt, id, "arguments"), ac = 0;
+  const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+  TyKind at[2] = { TY_UNKNOWN, TY_UNKNOWN };
+  if (ac > 2) return 0;
+  for (int i = 0; i < ac; i++) at[i] = comp_ntype(c, av[i]);
+  static const char *const NONE[] = { "ord", "bytesize", "empty?", "hash", "to_i", "to_f", "to_s", "to_str",
+    "to_sym", "chr", "upcase", "downcase", "capitalize", "swapcase", "strip", "lstrip", "rstrip", "chomp",
+    "chop", "reverse", NULL };
+  static const char *const STR[] = { "==", "!=", "eql?", "<", ">", "<=", ">=", "<=>", "+", "start_with?",
+    "end_with?", "include?", "index", "rindex", "count", NULL };
+  static const char *const INT[] = { "[]", "slice", "byteslice", "*", NULL };
+  if (ac == 0) { for (int i = 0; NONE[i]; i++) if (sp_streq(nm, NONE[i])) return 1; }
+  if (ac == 1 && at[0] == TY_STRING) { for (int i = 0; STR[i]; i++) if (sp_streq(nm, STR[i])) return 1; }
+  if (ac >= 1 && at[0] == TY_INT && (ac == 1 || at[1] == TY_INT)) {
+    for (int i = 0; INT[i]; i++) if (sp_streq(nm, INT[i])) return ac == 1 || INT[i][0] != '*';
+  }
+  return 0;
+}
+
+/* A read of a Hash that has no default block to run: one of the four kinds
+   with unboxed values (only the boxed-value kinds carry one), asked by a key
+   of its own kind. */
+static int len_hash_read(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  const char *nm = nt_str(nt, id, "name");
+  int recv = nt_ref(nt, id, "receiver");
+  if (!nm || recv < 0 || nt_ref(nt, id, "block") >= 0) return 0;
+  TyKind rt = comp_ntype(c, recv);
+  if (rt != TY_STR_INT_HASH && rt != TY_STR_STR_HASH && rt != TY_INT_INT_HASH && rt != TY_INT_STR_HASH) return 0;
+  int a = nt_ref(nt, id, "arguments"), ac = 0;
+  const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+  if (ac != 1 || comp_ntype(c, av[0]) != ty_hash_key(rt)) return 0;
+  return sp_streq(nm, "[]") || sp_streq(nm, "key?") || sp_streq(nm, "has_key?") ||
+         sp_streq(nm, "include?") || sp_streq(nm, "member?");
+}
+
+/* `x += v` calls x's `+`: a local that holds an Integer, a Float or a String,
+   an operand of the same kind, and no method of the program's under the
+   operator. A plain write, `||=` and `&&=` call nothing. */
+static int len_opwrite_ok(Compiler *c, int id, int local, const char *wn) {
+  const NodeTable *nt = c->nt;
+  const char *op = nt_str(nt, id, "binary_operator");
+  if (!op) return 1;
+  LocalVar *lv = local ? scope_local(comp_scope_of(c, id), wn) : NULL;
+  int v = nt_ref(nt, id, "value");
+  if (!lv || v < 0) return 0;
+  TyKind t = lv->type;
+  if (t != TY_INT && t != TY_FLOAT && t != TY_STRING) return 0;
+  if (t == TY_STRING ? !sp_streq(op, "+") : (!sp_streq(op, "+") && !sp_streq(op, "-") && !sp_streq(op, "*"))) return 0;
+  TyKind vt = comp_ntype(c, v);
+  if (t == TY_STRING ? vt != TY_STRING : (vt != TY_INT && vt != TY_FLOAT)) return 0;
+  return !len_name_taken(c, t, op);
+}
+
+/* A call a loop may hold while a String's length stays read ahead of it: one
+   hc_call_ok sees through or a String read, where the name is the builtin's
+   and not a method of the program's. */
+static int len_call_ok(Compiler *c, int id, int stmt) {
+  const NodeTable *nt = c->nt;
+  const char *nm = nt_str(nt, id, "name");
+  int recv = nt_ref(nt, id, "receiver");
+  if (!nm || recv < 0) return 0;
+  TyKind rt = comp_ntype(c, recv);
+  if (nt_kind(nt, recv) == NK_ConstantReadNode && comp_class_index(c, "Math") >= 0) return 0;
+  if (!ty_is_object(rt) && len_name_taken(c, rt, nm)) return 0;
+  /* an operand that is an object is asked in turn: `i == box` calls box's ==,
+     `i + box` its coerce */
+  int a = nt_ref(nt, id, "arguments"), ac = 0;
+  const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+  for (int i = 0; i < ac; i++) {
+    TyKind at = comp_ntype(c, av[i]);
+    if (at != TY_INT && at != TY_FLOAT && at != TY_BOOL && at != TY_STRING && at != TY_SYMBOL &&
+        at != TY_NIL && !(at == TY_CLASS && is_kind_query(nm))) return 0;
+  }
+  return hc_call_ok(c, id, stmt) || len_call_quiet(c, id) || len_hash_read(c, id);
+}
+
 /* Can the loop keep its arrays' headers across iterations? Collects the locals
    and ivars it assigns, which no cached expression may read. `stmt` is set for
    a node in statement position, where a write's value is unused. */
@@ -6787,7 +6895,11 @@ static int hc_node_ok(Compiler *c, int id, int stmt, HcRegion *r) {
       return 1;
     case NK_StatementsNode: kids_stmt = 1; break;
     case NK_ParenthesesNode: kids_stmt = stmt; break;
-    case NK_CallNode: if (!hc_call_ok(c, id, stmt)) return 0; break;
+    case NK_StringNode: case NK_SymbolNode: case NK_WhileNode: case NK_UntilNode:
+      if (!r->strs) return 0;
+      kids_stmt = 1;
+      break;
+    case NK_CallNode: if (r->strs ? !len_call_ok(c, id, stmt) : !hc_call_ok(c, id, stmt)) return 0; break;
     case NK_IndexOperatorWriteNode: {
       int rv = nt_ref(nt, id, "receiver");
       TyKind rt = rv >= 0 ? comp_ntype(c, rv) : TY_UNKNOWN;
@@ -6802,12 +6914,14 @@ static int hc_node_ok(Compiler *c, int id, int stmt, HcRegion *r) {
       if ((local || ivar) && strstr(ty, "WriteNode")) {
         const char *wn = nt_str(nt, id, "name");
         if (!wn) return 0;
+        if (r->strs && !len_opwrite_ok(c, id, local, wn)) return 0;
         nameset_add(local ? &r->wl : &r->wi, wn);
         break;
       }
       if (sp_streq(ty, "IfNode") || sp_streq(ty, "UnlessNode") || sp_streq(ty, "ElseNode") ||
           sp_streq(ty, "AndNode") || sp_streq(ty, "OrNode") || sp_streq(ty, "BreakNode") ||
-          sp_streq(ty, "NextNode") || sp_streq(ty, "ArgumentsNode"))
+          sp_streq(ty, "NextNode") || sp_streq(ty, "ArgumentsNode") ||
+          (r->strs && sp_streq(ty, "ReturnNode")))
         break;
       return 0;
     }
@@ -7104,6 +7218,26 @@ static void hc_close(HcRegion *r, const char *loop, Buf *b, int indent) {
   }
 }
 
+/* Whether nothing in a loop can change a String, so that a String's length
+   read ahead of the loop is its length at every test. Asked the other way
+   round (subtree_changes_local: does the loop name `s` under a mutator?) the
+   answer missed every road that does not spell the local: a callee appending
+   to its parameter, a second name for the String, a container, an object or
+   a closure holding it, a mutator the list lacks. So the loop is walked as
+   hc_node_ok walks one that runs no code, seeing through the String reads of
+   len_call_quiet, a Hash read that has no default block to run, a `return`
+   and a loop nested in it; a call to anything else, a block, a write to
+   `name`, or another thread or a finalizer at the loop's poll leaves the
+   length to be read at each test. */
+static int len_loop_quiet(Compiler *c, int pred, int body, const char *name) {
+  if (g_uses_threads || g_uses_finalizers) return 0;
+  HcRegion r; memset(&r, 0, sizeof r);
+  r.strs = 1;
+  int ok = hc_node_ok(c, pred, 0, &r) && hc_node_ok(c, body, 1, &r) && !nameset_has(&r.wl, name);
+  free(r.wl.v); free(r.wi.v);
+  return ok;
+}
+
 void emit_while(Compiler *c, int id, Buf *b, int indent, int is_until) {
   const NodeTable *nt = c->nt;
   int prev_stmt = g_stmt_cur == id ? g_stmt_prev : -1;
@@ -7138,9 +7272,9 @@ void emit_while(Compiler *c, int id, Buf *b, int indent, int is_until) {
     return;
   }
   /* Hoist a loop-invariant string length out of the loop: if the predicate
-     tests `s.length`/`s.size` for a string local `s` that neither the body
-     nor the predicate itself mutates, and its first test reads that length
-     before anything else (len_read_first),
+     tests `s.length`/`s.size` for a string local `s`, nothing in the loop
+     can change a String (len_loop_quiet), and its first test reads that
+     length before anything else (len_read_first),
      compute strlen once before the loop and reuse it (avoids O(n) strlen per
      iteration). Save/restore the outer hoist state for nested loops. */
   const char *sv_hvar = g_hoist_len_var, *sv_hrecv = g_hoist_len_recv;
@@ -7148,7 +7282,8 @@ void emit_while(Compiler *c, int id, Buf *b, int indent, int is_until) {
   int hr = find_hoistable_strlen(c, pred);
   if (hr >= 0 && len_read_first(c, pred, hr)) {
     const char *hn = nt_str(nt, hr, "name");
-    if (hn && !subtree_changes_local(c, body, hn) && !subtree_changes_local(c, pred, hn)) {
+    if (hn && !subtree_changes_local(c, body, hn) && !subtree_changes_local(c, pred, hn) &&
+        len_loop_quiet(c, pred, body, hn)) {
       int ht = ++g_tmp;
       emit_indent(b, indent);
       buf_printf(b, "sp_int _t%d = sp_str_length_m(", ht); emit_expr(c, hr, b); buf_puts(b, ");\n");
