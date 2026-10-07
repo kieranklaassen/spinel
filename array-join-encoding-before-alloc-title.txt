@@ -1,0 +1,1 @@
+Array#join picks its encoding before it allocates the result

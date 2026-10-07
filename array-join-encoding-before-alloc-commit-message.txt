@@ -1,0 +1,43 @@
+Array#join picks its encoding before it allocates the result
+
+    def pair(d, i) = [d.byteslice(7 + i % 2, 8), d.byteslice(0, 8)]
+    src = ("\xC3\xA9\xC3\xA9\xFF\xC3\xA9" + "z" * 12).b
+    utf8 = 0
+    k = 0
+    while k < 200_000
+      r = pair(src, k).join
+      utf8 += 1 if r.encoding.to_s != "ASCII-8BIT"
+      k += 1
+    end
+    p utf8                        # 7, CRuby 0
+
+sp_StrArray_join copies the pieces into a buffer, allocates the result,
+and then walked the Array a second time to pick the result's encoding
+(sp_str_enc_step), reading each element's length and binary mark. The
+function roots nothing, and the allocation in between can collect: an
+Array that only the call holds, as a method's value is, was freed there
+with its elements, and the second walk read them out of freed memory.
+Where the result took the slot of the piece that holds the high bytes,
+that piece read as text of the result's length, and a join of BINARY
+(ASCII-8BIT) pieces answered UTF-8: a String that is not valid, whose
+size counts characters. At SPINEL_GC_STRESS=2, where every allocation
+collects and what dies is poisoned, it is one join in eight: 25,000 of
+the 200,000 above.
+
+The second walk came with "Interpolation and Array#join pick their
+encoding as CRuby does". The interpolation changed there roots its
+parts, and the boxed join roots its Array; the typed join is the one
+that roots nothing.
+
+The encoding is now picked in the loop that copies, each step taken
+over the buffer as it stands before its part goes in: the same bytes
+and lengths the second walk gave it. Nothing is read from the Array or
+the separator after the one call that can collect, so nothing needs a
+root, and one walk is cheaper than two: callgrind, 200,000 joins of
+three Strings with a separator, 135.3M to 127.5M instructions; of five
+with a binary one among them, 202.2M to 192.2M.
+
+Test: test/array_join_encoding_before_alloc.rb, also listed in
+GC_STRESS_TESTS. No generated C changes.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
