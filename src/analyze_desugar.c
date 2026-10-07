@@ -14091,9 +14091,102 @@ static int ix_index_call(NodeTable *nt, const char *name, int recv, int a0, int 
   nt_node_set_ref(nt, call, "block", -1);
   return call;
 }
+/* `{...}` or `Hash.new`: a value that is a Hash whatever the analysis says. */
+static int ix_hash_value(const NodeTable *nt, int v) {
+  if (v < 0) return 0;
+  if (nt_kind(nt, v) == NK_HashNode) return 1;
+  const char *n = nt_kind(nt, v) == NK_CallNode ? nt_str(nt, v, "name") : NULL;
+  int r = n && sp_streq(n, "new") ? nt_ref(nt, v, "receiver") : -1;
+  const char *rn = r >= 0 && nt_kind(nt, r) == NK_ConstantReadNode ? nt_str(nt, r, "name") : NULL;
+  return rn && sp_streq(rn, "Hash");
+}
+/* The variable `recv` reads is only ever given a Hash: every write of its
+   name is `= {...}` or `= Hash.new`, and nothing else binds the name. A
+   local is looked for in its own method, where a block's parameter of the
+   name binds it too; an instance variable in the whole program, where `||=`
+   of a Hash counts and an attr writer or an instance_variable_set rules it
+   out. The receiver's type does not say so here: it is a guess while the
+   fixpoint runs (`c = []; c[0] ||= s` is a Hash of Integer to String for a
+   round), and the rewrite stays. Nodes from `n0` on are this pass's own. */
+static int ix_only_hash_written(Compiler *c, int recv, const int *parent, int n0) {
+  const NodeTable *nt = c->nt;
+  const char *nm = nt_str(nt, recv, "name");
+  int ivar = nt_kind(nt, recv) == NK_InstanceVariableReadNode, seen = 0;
+  Scope *sc = comp_scope_of(c, recv);
+  if (!nm || !parent) return 0;
+  for (int j = 0; j < n0; j++) {
+    NodeKind k = nt_kind(nt, j);
+    const char *n = nt_str(nt, j, "name");
+    if (!n) continue;
+    if (k == NK_CallNode) {
+      if (!ivar) continue;
+      if (sp_streq(n, "instance_variable_set")) return 0;
+      if (!sp_streq(n, "attr_writer") && !sp_streq(n, "attr_accessor")) continue;
+      int args = nt_ref(nt, j, "arguments"), an = 0;
+      const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+      for (int i = 0; i < an; i++) {
+        const char *a = nt_str(nt, av[i], nt_kind(nt, av[i]) == NK_StringNode ? "unescaped" : "value");
+        if (!a || sp_streq(a, nm + 1)) return 0;
+      }
+      continue;
+    }
+    if (!sp_streq(n, nm) || k == NK_DefNode) continue;
+    if (ivar) {
+      if (k == NK_InstanceVariableReadNode) continue;
+      if (k != NK_InstanceVariableWriteNode && k != NK_InstanceVariableOrWriteNode) return 0;
+    }
+    else {
+      if (k == NK_LocalVariableReadNode || comp_scope_of(c, j) != sc) continue;
+      if (k != NK_LocalVariableWriteNode) {
+        if (comp_is_local_write(k)) return 0;
+        const char *ty = nt_type(nt, j);
+        size_t tl = ty ? strlen(ty) : 0;
+        if (tl < 13 || !sp_streq(ty + tl - 13, "ParameterNode")) continue;
+        /* a method's parameter is that method's own variable */
+        int a = parent[j];
+        while (a >= 0 && nt_kind(nt, a) != NK_DefNode && nt_kind(nt, a) != NK_BlockNode &&
+               nt_kind(nt, a) != NK_LambdaNode) a = parent[a];
+        if (a >= 0 && nt_kind(nt, a) != NK_DefNode) return 0;
+        continue;
+      }
+    }
+    if (!ix_hash_value(nt, nt_ref(nt, j, "value"))) return 0;
+    seen = 1;
+  }
+  return seen;
+}
+/* `h[k] ||= v` / `h[k] &&= v` storing a String into a Hash a variable holds.
+   The or-write emitter has a store of its own, which boxes the String as a
+   plain value: `h[k] << x` then appends to a copy. `h[k] = v` stores the
+   handle that append needs, so the write is rewritten to it, as for a
+   receiver of a program class. Only where that store is the same program:
+     - a local that is no parameter: a store into a Hash the caller passed
+       has a refusal of its own, which the or-write does not meet today;
+     - an instance variable, where the write is a statement: its value form
+       inside a block does not build when written out;
+     - either one only ever given a Hash (ix_only_hash_written).
+   Every other or-write keeps the emitter's store. */
+static int ix_hash_string_store(Compiler *c, int id, int recv, TyKind rt, int v, int **parent, int n0) {
+  const NodeTable *nt = c->nt;
+  if (!ty_is_hash(rt) || nt_kind(nt, id) == NK_IndexOperatorWriteNode) return 0;
+  TyKind vt = comp_ntype(c, v);
+  if (vt != TY_STRING && vt != TY_STRBUF) vt = infer_type(c, v);
+  if (vt != TY_STRING && vt != TY_STRBUF) return 0;
+  if (!*parent) *parent = an_parent_map(nt);
+  if (nt_kind(nt, recv) == NK_LocalVariableReadNode) {
+    LocalVar *lv = scope_local(comp_scope_of(c, recv), nt_str(nt, recv, "name"));
+    return lv && !lv->is_param && ix_only_hash_written(c, recv, *parent, n0);
+  }
+  if (nt_kind(nt, recv) != NK_InstanceVariableReadNode) return 0;
+  int st = *parent ? (*parent)[id] : -1;
+  int sn = 0;
+  const int *sb = st >= 0 && nt_kind(nt, st) == NK_StatementsNode ? nt_arr(nt, st, "body", &sn) : NULL;
+  return sb && sb[sn - 1] != id && ix_only_hash_written(c, recv, *parent, n0);
+}
 int desugar_index_assign_user_recv(Compiler *c) {
   NodeTable *nt = (NodeTable *)c->nt;
   int n0 = nt->count, changed = 0;
+  int *parent = NULL;
   for (int id = 0; id < n0; id++) {
     NodeKind k = nt_kind(nt, id);
     if (k != NK_IndexOrWriteNode && k != NK_IndexAndWriteNode && k != NK_IndexOperatorWriteNode) continue;
@@ -14116,10 +14209,12 @@ int desugar_index_assign_user_recv(Compiler *c) {
     else {
       TyKind rt = comp_ntype(c, recv);
       if (!ty_is_object(rt)) rt = infer_type(c, recv);   /* a local's type lives in its scope slot */
-      if (!ty_is_object(rt)) continue;
-      int cid = ty_object_class(rt);
-      if (cid < 0 || cid >= c->nclasses) continue;
-      if (comp_method_in_chain(c, cid, "[]", NULL) < 0 || comp_method_in_chain(c, cid, "[]=", NULL) < 0) continue;
+      if (!ix_hash_string_store(c, id, recv, rt, v, &parent, n0)) {
+        if (!ty_is_object(rt)) continue;
+        int cid = ty_object_class(rt);
+        if (cid < 0 || cid >= c->nclasses) continue;
+        if (comp_method_in_chain(c, cid, "[]", NULL) < 0 || comp_method_in_chain(c, cid, "[]=", NULL) < 0) continue;
+      }
     }
     const char *op = k == NK_IndexOperatorWriteNode ? nt_str(nt, id, "binary_operator") : NULL;
     if (k == NK_IndexOperatorWriteNode && !op) continue;
@@ -14154,6 +14249,7 @@ int desugar_index_assign_user_recv(Compiler *c) {
     for (int j = base; j < nt->count; j++) { c->nscope[j] = encl; if (c->node_cbody) c->node_cbody[j] = cb; }
     changed = 1;
   }
+  free(parent);   /* the rewrite appends nodes; no or-write's parent changes */
   return changed;
 }
 
