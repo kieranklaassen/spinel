@@ -892,6 +892,24 @@ int poly_block_call_needs_dispatch(Compiler *c, int id) {
   return 0;
 }
 
+/* A `&.` tap, then or yield_self with a block on a receiver that is nil
+   alone. Their emitters carry a nil receiver boxed, for `nil.tap { }`, and
+   run the block without a look at the operator, so the guard takes the call
+   and its arm answers nil. A receiver that is itself a `&.` call no guard
+   takes is left to them. */
+int sn_nil_tap_then(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  const char *op = nt_str(nt, id, "call_operator"), *nm = nt_str(nt, id, "name");
+  int recv = nt_ref(nt, id, "receiver");
+  if (!op || !sp_streq(op, "&.") || recv < 0 || !nm || nt_ref(nt, id, "block") < 0) return 0;
+  if (!sp_streq(nm, "tap") && !is_then_alias(nm)) return 0;
+  Repr rr = repr_of(c, recv);
+  if (rr.as_ty != TY_NIL || rr.kind == RK_BOXED) return 0;
+  int rc = unwrap_parens(c, recv);
+  const char *rop = nt_str(nt, rc, "call_operator");
+  return !(rop && sp_streq(rop, "&.")) || sn_guard_pending(c, rc);
+}
+
 /* Whether a `&.` call has yet to pass through its nil guard. The guard re-enters the emission with g_sn_skip set on the node, so
    this answers false on that second pass. */
 int sn_guard_pending(Compiler *c, int id) {
@@ -903,6 +921,7 @@ int sn_guard_pending(Compiler *c, int id) {
   if (recv < 0) return 0;
   Repr rr = repr_of(c, recv);
   if (rr.kind == RK_BOXED) return 1;
+  if (sn_nil_tap_then(c, id)) return 1;
   /* every receiver holding a nil of its own C kind -- an Integer's or a
      Float's sentinel, a NULL String, container or object -- which
      emit_call_safe_nav_arms guards too (its sn_obj, sn_scalar and String

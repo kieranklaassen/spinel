@@ -4903,6 +4903,15 @@ static int emit_iteration_stmt_sn(Compiler *c, int id, Buf *b, int indent) {
 }
 
 int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
+  /* tap or then on a receiver that is nil alone: nothing of the call runs
+     but a receiver that is more than a read */
+  if (sn_nil_tap_then(c, id)) {
+    int recv = nt_ref(c->nt, id, "receiver");
+    if (!subtree_is_pure_read(c, recv)) {
+      emit_indent(b, indent); buf_puts(b, "(void)("); emit_expr(c, recv, b); buf_puts(b, ");\n");
+    }
+    return 1;
+  }
   if (sn_guard_pending(c, id)) {
     int r = emit_iteration_stmt_sn(c, id, b, indent);
     if (r >= 0) return r;
