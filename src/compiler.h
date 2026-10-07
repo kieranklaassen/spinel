@@ -944,8 +944,10 @@ typedef struct {
      the #to_hash row a boxed operand converts through (sp_kw_splat_conv). */
   int uses_kw_to_hash;
   /* body-node id -> enclosing BlockNode id (lazy; emit_stmts block-local
-     resets). Sized nt->count; -1 = not a block body. */
+     resets). blk_body_n nodes long, extended over appended nodes; -1 = not
+     a block body. */
   int *blk_body_map;
+  int blk_body_n;
   /* node id -> the number a name invented from the node carries
      (comp_node_ord), bit 0 set for a builtin's. Extended over appended
      nodes, never refilled. A builtin node counts within its base, the
