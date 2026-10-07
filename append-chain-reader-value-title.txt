@@ -1,0 +1,1 @@
+An append chain on a reader's String appends every link to it, not the later ones to a copy

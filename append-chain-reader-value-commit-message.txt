@@ -1,0 +1,44 @@
+An append chain on a reader's String appends every link to it, not the later ones to a copy
+
+  class Page
+    attr_reader :text
+    def initialize(t) = @text = +t
+  end
+  w = Page.new("t")
+  p(w.text << "1" << "2")
+  p w.text
+
+prints "t12" twice in CRuby; master prints "t12" and then "t1". The
+second link was appended to a copy. So was every link after the first
+where the chain stands after `return`, as a receiver
+(`(w.text << a << b).size`), an operand, an argument, in an
+interpolation, with `concat(a).concat(b)`, and on an attr_accessor or
+a Struct member. So were the links of a chain of 65 or more as a
+statement, and of 17 or more under a local write. The same chain as a
+method's last expression did not build ("returning 'sp_String *' from
+a function with incompatible return type 'const char *'").
+
+An append on a reader's String works on the handle the reader hands
+out, and answers that handle only where it is marked to. The mark was
+given to the links of a chain under a local write
+(`r = obj.buf << x << y`), to 16 of them. Anywhere else the first link
+answered the String read, and the next one concatenated onto that; a
+statement's chain is appended link by link without the mark, to 64 of
+them.
+
+A link that is the receiver of another append is now marked wherever
+the chain stands; the last link still answers the String read. In
+tail position such a chain is left to the value path, which runs the
+base once and answers the handle's text: the tail arm emits the base
+again after the chain, which here is the handle itself.
+
+test/string_append_chain_reader_value.rb has the chain as a method's
+last expression (on a bare reader, on self, on another object, under a
+condition, as a begin block's value, on a base that runs code), after
+`return`, as an argument, a receiver, an operand and in an
+interpolation, 65 links as a statement and 17 under a local write. On
+master it does not build, for its last-expression chains; where a
+chain's value is read, the reader's String is printed afterwards
+without the later links.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
