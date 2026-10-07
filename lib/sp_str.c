@@ -221,6 +221,11 @@ static int sp_str_cat_binary(const char *a, const char *b) {
   if (sp_str_ascii_only(a)) return bb;
   return 1;
 }
+/* For lib/sp_re.c. r was built from BINARY s with `op` written into it (NULL:
+   nothing was written): it is BINARY where s + op is. */
+void sp_str_mark_binary_with(char *r, const char *s, const char *op) {
+  if (!op || sp_str_cat_binary(s, op)) sp_str_mark_binary(r);
+}
 /* The same rule folded over a run of parts: `bin` is the encoding of the
    `pl` bytes of r already joined, s the next part. The prefix is scanned only
    when the two encodings differ. */
@@ -720,7 +725,7 @@ else{if(out+1>=cap){size_t nc=cap*2;char*nb=(char*)realloc(buf,nc);if(!nb){free(
 /* slice!(str): s without the first occurrence of pat, or s itself when there
    is none. Unlike sub it sets no `$~`, as CRuby's slice! sets none. */
 const char*sp_str_remove_first(const char*s,const char*pat){SP_GC_ROOT_STR(s);SP_GC_ROOT_STR(pat);if(!s||!pat)return s;size_t pl=sp_str_byte_len(pat),sl=sp_str_byte_len(s);const char*f=sp_bytestr(s,sl,pat,pl);if(!f)return s;size_t n=(size_t)(f-s);char*r=sp_str_alloc_raw(sl-pl+1);memcpy(r,s,n);memcpy(r+n,f+pl,sl-n-pl);r[sl-pl]=0;sp_str_set_len(r,sl-pl);return r;}
-const char*sp_str_sub(const char*s,const char*pat,const char*rep){SP_GC_ROOT_STR(s);SP_GC_ROOT_STR(pat);SP_GC_ROOT_STR(rep);if(!s)sp_nil_recv("sub");if(!pat||!rep)return s;size_t pl0=sp_str_byte_len(pat),sl0=sp_str_byte_len(s);const char*f=sp_bytestr(s,sl0,pat,pl0);if(!f){if(sp_re_track_last)sp_re_clear_last_match();return sp_str_dup(s);}sp_re_sub_matched=1;if(sp_re_track_last)sp_re_set_lit_match(s,(sp_int)(f-s),(sp_int)(f-s+pl0));char*rep_exp=sp_str_rep_expand(rep,pat,pl0);if(rep_exp)rep=rep_exp;size_t pl=pl0,rl=rep_exp?strlen(rep):sp_str_byte_len(rep),sl=sl0;char*r=sp_str_alloc_raw(sl-pl+rl+1);size_t n=f-s;memcpy(r,s,n);memcpy(r+n,rep,rl);memcpy(r+n+rl,f+pl,sl-n-pl);r[sl-pl+rl]=0;sp_str_set_len(r,sl-pl+rl);if(rep_exp)free(rep_exp);return r;}
+const char*sp_str_sub(const char*s,const char*pat,const char*rep){SP_GC_ROOT_STR(s);SP_GC_ROOT_STR(pat);SP_GC_ROOT_STR(rep);if(!s)sp_nil_recv("sub");if(!pat||!rep)return s;size_t pl0=sp_str_byte_len(pat),sl0=sp_str_byte_len(s);const char*f=sp_bytestr(s,sl0,pat,pl0);if(!f){if(sp_re_track_last)sp_re_clear_last_match();return sp_str_dup(s);}sp_re_sub_matched=1;if(sp_re_track_last)sp_re_set_lit_match(s,(sp_int)(f-s),(sp_int)(f-s+pl0));const char*rep0=rep;char*rep_exp=sp_str_rep_expand(rep,pat,pl0);if(rep_exp)rep=rep_exp;size_t pl=pl0,rl=rep_exp?strlen(rep):sp_str_byte_len(rep),sl=sl0;char*r=sp_str_alloc_raw(sl-pl+rl+1);size_t n=f-s;memcpy(r,s,n);memcpy(r+n,rep,rl);memcpy(r+n+rl,f+pl,sl-n-pl);r[sl-pl+rl]=0;sp_str_set_len(r,sl-pl+rl);if(rep_exp)free(rep_exp);if(sp_str_is_binary(s)&&sp_str_cat_binary(s,rep0))sp_str_mark_binary(r);return r;}
 const char*sp_str_capitalize(const char*s){SP_GC_ROOT_STR(s);if(!s)sp_nil_recv("capitalize");if(sp_str_is_binary(s))return sp_str_case_bytes(s,3);size_t l=sp_str_byte_len(s);char*r=sp_str_alloc_raw(l*3+1);size_t oi=0;int first=1;for(size_t i=0;i<l;){uint32_t cp;int n=sp_utf8_decode(s+i,&cp);i+=(size_t)n;if(first){uint32_t u=sp_uc_toupper(cp);if(cp==0xDF){r[oi++]='S';r[oi++]='S';}
 else oi+=(size_t)sp_utf8_encode(u,r+oi);first=0;}
 else oi+=(size_t)sp_utf8_encode(sp_uc_tolower(cp),r+oi);}r[oi]=0;sp_str_set_len(r,oi);return r;}
@@ -1196,14 +1201,15 @@ sp_StrArray*sp_str_scan(const char*s,const char*pat){if(!s)sp_nil_recv("scan");
   /* `$~` is the last match, or nil when there was none */
   if(pl==0){
     const char*p=s;
-    for(;;){sp_str_split_push(a,p,0);if(!*p)break;p+=sp_utf8_advance(p);}
+    int bin=sp_str_is_binary(s);
+    for(;;){sp_str_split_push(a,p,0);if(!*p)break;p+=bin?1:sp_utf8_advance(p);}
     if(sp_re_track_last)sp_re_set_lit_match(s,(sp_int)(p-s),(sp_int)(p-s));
-    return a;
+    return sp_str_pieces_bin_from(a,s);
   }
   const char*p=s,*f,*last=NULL;
   while((f=strstr(p,pat))!=NULL){sp_str_split_push(a,f,pl);last=f;p=f+pl;}
   if(sp_re_track_last){if(last)sp_re_set_lit_match(s,(sp_int)(last-s),(sp_int)(last-s+pl));else sp_re_clear_last_match();}
-  return a;
+  return sp_str_pieces_bin_from(a,s);
 }
 /* One turn of `s.scan(pat) { }` whose block reads `$~`: sp_str_scan builds
    the rows up front, so each turn finds its own match again from byte `pos`
@@ -1255,6 +1261,7 @@ const char*sp_str_gsub(const char*s,const char*pat,const char*rep){SP_GC_ROOT_ST
      embedded NUL, so a subject or pattern holding one was cut short (the
      opportunistic NUL policy). */
   size_t pl0=sp_str_byte_len(pat);
+  const char*rep0=rep;
   char*rep_exp=sp_str_rep_expand(rep,pat,pl0);
   if(rep_exp)rep=rep_exp;
   size_t pl=pl0,rl=rep_exp?strlen(rep):sp_str_byte_len(rep),sl=sp_str_byte_len(s);
@@ -1266,15 +1273,16 @@ const char*sp_str_gsub(const char*s,const char*pat,const char*rep){SP_GC_ROOT_ST
     char*out=(char*)malloc(cap);
     size_t ol=0;
     memcpy(out+ol,rep,rl); ol+=rl;
+    int bin=sp_str_is_binary(s);
     for(size_t i=0;i<sl;){
-      int n=sp_utf8_advance(s+i); if(n<1)n=1; if((size_t)n>sl-i)n=(int)(sl-i);
+      int n=bin?1:sp_utf8_advance(s+i); if(n<1)n=1; if((size_t)n>sl-i)n=(int)(sl-i);
       memcpy(out+ol,s+i,(size_t)n); ol+=(size_t)n;
       memcpy(out+ol,rep,rl); ol+=rl;
       i+=(size_t)n;
     }
     out[ol]=0;
     if(sp_re_track_last)sp_re_set_lit_match(s,(sp_int)sl,(sp_int)sl);   /* `$~`: the last, empty, match at the end */
-    char*r=sp_str_alloc(ol); memcpy(r,out,ol); sp_str_set_len(r,ol); free(out); if(rep_exp)free(rep_exp); return r;
+    char*r=sp_str_alloc(ol); memcpy(r,out,ol); sp_str_set_len(r,ol); free(out); if(rep_exp)free(rep_exp); if(sp_str_is_binary(s)&&sp_str_cat_binary(s,rep0))sp_str_mark_binary(r); return r;
   }
   size_t cap=(sl*2)+1;
   char*out=(char*)malloc(cap);
@@ -1293,7 +1301,7 @@ const char*sp_str_gsub(const char*s,const char*pat,const char*rep){SP_GC_ROOT_ST
   }
   /* `$~` is the last match, or nil when there was none */
   if(sp_re_track_last){if(last)sp_re_set_lit_match(s,(sp_int)(last-s),(sp_int)(last-s+pl));else sp_re_clear_last_match();}
-  out[ol]=0;char*r=sp_str_alloc(ol);memcpy(r,out,ol);sp_str_set_len(r,ol);free(out);if(rep_exp)free(rep_exp);return r;
+  out[ol]=0;char*r=sp_str_alloc(ol);memcpy(r,out,ol);sp_str_set_len(r,ol);free(out);if(rep_exp)free(rep_exp);if(sp_str_is_binary(s)&&(!last||sp_str_cat_binary(s,rep0)))sp_str_mark_binary(r);return r;
 }
 /* `s.index(sub)` -- leftmost occurrence; returns a codepoint offset (not a
    byte offset), or -1 if not found. */

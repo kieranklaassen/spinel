@@ -138,6 +138,7 @@ void sp_re_set_captures(const char *str, int *caps, int ncaps) {SP_GC_ROOT_STR(s
   sp_re_last_str = str;
   sp_re_last_ncap = ncaps;
   sp_re_last_lit = 0;
+  int bin = sp_str_is_binary(str);   /* what is cut from a BINARY subject is BINARY */
   for (int i = 0; i < 10; i++) sp_re_captures[i] = NULL;
   for (int i = 1; i < ncaps && i < 10; i++) {
     if (caps[i*2] >= 0 && caps[(i*2)+1] >= 0) {
@@ -145,6 +146,7 @@ void sp_re_set_captures(const char *str, int *caps, int ncaps) {SP_GC_ROOT_STR(s
       char *buf = sp_str_alloc_raw(len+1);
       memcpy(buf, str+caps[i*2], len); buf[len] = 0;
       sp_str_set_len(buf, (size_t)len);
+      if (bin) sp_str_mark_binary(buf);
       sp_re_captures[i] = buf;
     }
   }
@@ -161,6 +163,7 @@ void sp_re_set_captures(const char *str, int *caps, int ncaps) {SP_GC_ROOT_STR(s
     memcpy(m, str + caps[0], mlen); m[mlen] = 0;
     sp_str_set_len(m, (size_t)mlen);
     sp_str_set_len(m, (size_t)mlen);
+    if (bin) sp_str_mark_binary(m);
     sp_re_match_str = m;
     sp_re_pp_span[0] = caps[0]; sp_re_pp_span[1] = caps[1];
   }
@@ -209,6 +212,7 @@ const char *sp_re_pre_match(void) {
   memcpy(pre, sp_re_last_str, n); pre[n] = 0;
   sp_str_set_len(pre, (size_t)n);
   sp_str_set_len(pre, (size_t)n);
+  if (sp_str_is_binary(sp_re_last_str)) sp_str_mark_binary(pre);
   sp_re_match_pre = pre;
   return pre;
 }
@@ -222,6 +226,7 @@ const char *sp_re_post_match(void) {
   memcpy(post, sp_re_last_str + sp_re_pp_span[1], n); post[n] = 0;
   sp_str_set_len(post, (size_t)n);
   sp_str_set_len(post, (size_t)n);
+  if (sp_str_is_binary(sp_re_last_str)) sp_str_mark_binary(post);
   sp_re_match_post = post;
   return post;
 }
@@ -379,6 +384,7 @@ sp_StrArray *sp_re_rpartition(mrb_regexp_pattern *pat, const char *str) {
   char *after = sp_str_alloc_raw(alen + 1);
   memcpy(after, str + me, alen); after[alen] = 0;
   sp_str_set_len(after, (size_t)alen);
+  if (sp_str_is_binary(str)) { sp_str_mark_binary(before); sp_str_mark_binary(mid); sp_str_mark_binary(after); }
   sp_StrArray_push(r, before);
   sp_StrArray_push(r, mid);
   sp_StrArray_push(r, after);
@@ -602,10 +608,11 @@ const char *sp_re_gsub(mrb_regexp_pattern *pat, const char *str, const char *rep
   char *out = (char *)malloc(cap); size_t olen = 0;
   int64_t pos = 0; int caps[64];
   int lastcaps[64], lastn = 0;   /* the last match, for `$~` */
+  int hit = 0;                   /* rep was written: it has a say in the result's encoding */
   while (pos <= slen) {
     int n = re_exec(pat, str, slen, pos, caps, 64, sp_str_is_binary(str));
     if (n <= 0 || caps[0] < 0) break;
-    sp_re_sub_matched = 1;
+    sp_re_sub_matched = 1; hit = 1;
     if (sp_re_track_last) { lastn = n > 64 ? 64 : n; memcpy(lastcaps, caps, sizeof(int) * (size_t)lastn); }
     size_t before = caps[0] - pos;
     if (olen+before+rlen >= cap) { cap = ((olen+before+rlen)*2)+64; out = (char*)realloc(out, cap); }
@@ -639,6 +646,7 @@ else {
   char *res = sp_str_alloc(olen);
   memcpy(res, out, olen);
   free(out);
+  if (sp_str_is_binary(str)) sp_str_mark_binary_with(res, str, hit ? rep : NULL);
   return res;
 }
 const char *sp_re_sub(mrb_regexp_pattern *pat, const char *str, const char *rep) {SP_GC_ROOT_STR(str);SP_GC_ROOT_STR(rep);if(!str)sp_nil_recv("sub");
@@ -663,6 +671,7 @@ const char *sp_re_sub(mrb_regexp_pattern *pat, const char *str, const char *rep)
   char *res = sp_str_alloc(olen);
   memcpy(res, out, olen);
   free(out);
+  if (sp_str_is_binary(str)) sp_str_mark_binary_with(res, str, rep);
   return res;
 }
 sp_StrArray *sp_re_scan(mrb_regexp_pattern *pat, const char *str) {
@@ -672,6 +681,7 @@ sp_StrArray *sp_re_scan(mrb_regexp_pattern *pat, const char *str) {
   SP_GC_ROOT(arr);
   int64_t slen = (int64_t)sp_str_byte_len(str); int64_t pos = 0; int caps[64];
   int lastcaps[64], lastn = 0;   /* the last match, for `$~` */
+  int bin = sp_str_is_binary(str);
   while (pos <= slen) {
     int n = re_exec(pat, str, slen, pos, caps, 64, sp_str_is_binary(str));
     if (n <= 0 || caps[0] < 0) break;
@@ -679,6 +689,7 @@ sp_StrArray *sp_re_scan(mrb_regexp_pattern *pat, const char *str) {
     int len = caps[1] - caps[0];
     char *m = sp_str_alloc_raw(len+1); memcpy(m, str+caps[0], len); m[len] = 0;
     sp_str_set_len(m, (size_t)len);
+    if (bin) sp_str_mark_binary(m);
     sp_StrArray_push(arr, m);
     pos = caps[1]; if (caps[0] == caps[1]) pos++;
   }
@@ -701,6 +712,7 @@ static void split_push_slice(sp_StrArray *arr, const char *str, int64_t from, in
   char *m = sp_str_alloc_raw(len + 1);
   memcpy(m, str + from, len); m[len] = 0;
   sp_str_set_len(m, (size_t)len);
+  if (sp_str_is_binary(str)) sp_str_mark_binary(m);
   sp_StrArray_push(arr, m);
 }
 
@@ -852,6 +864,7 @@ const char *sp_re_named_capture(const mrb_regexp_pattern *pat, const char *name)
   int len = e - b;
   char *out = sp_str_alloc(len);
   memcpy(out, sp_re_last_str + b, len);
+  if (sp_str_is_binary(sp_re_last_str)) sp_str_mark_binary(out);
   return out;
 }
 /* `a|b`, built byte-wise: sp_sprintf's %s ends at an embedded NUL, so a
@@ -945,6 +958,7 @@ sp_PolyArray *sp_re_scan_poly(mrb_regexp_pattern *pat, const char *str) {
   int ncaps = 64;
   int caps[64];
   int lastcaps[64], lastn = 0;   /* the last match, for `$~` */
+  int bin = sp_str_is_binary(str);
   while (pos <= slen) {
     int n = re_exec(pat, str, slen, pos, caps, ncaps, sp_str_is_binary(str));
     if (n <= 0 || caps[0] < 0) break;
@@ -956,6 +970,7 @@ sp_PolyArray *sp_re_scan_poly(mrb_regexp_pattern *pat, const char *str) {
       memcpy(m, str + caps[0], len);
       m[len] = 0;
       sp_str_set_len(m, (size_t)len);
+      if (bin) sp_str_mark_binary(m);
       sp_PolyArray_push(arr, sp_box_str(m));
     }
 else {
@@ -968,6 +983,7 @@ else {
           memcpy(gm, str + caps[gi * 2], glen);
           gm[glen] = 0;
           sp_str_set_len(gm, (size_t)glen);
+          if (bin) sp_str_mark_binary(gm);
           sp_PolyArray_push(row, sp_box_str(gm));
         }
 else {
@@ -999,6 +1015,7 @@ sp_PolyArray *sp_re_match_data(mrb_regexp_pattern *pat, const char *str) {
   sp_re_set_captures(str, sp_re_caps, pairs);
   sp_PolyArray *arr = sp_PolyArray_new();
   SP_GC_ROOT(arr);
+  int bin = sp_str_is_binary(str);
   for (int i = 0; i < pairs; i++) {
     int start = sp_re_caps[i * 2];
     int end = sp_re_caps[(i * 2) + 1];
@@ -1008,6 +1025,7 @@ sp_PolyArray *sp_re_match_data(mrb_regexp_pattern *pat, const char *str) {
       memcpy(buf, str + start, len);
       buf[len] = 0;
       sp_str_set_len(buf, (size_t)len);
+      if (bin) sp_str_mark_binary(buf);
       sp_PolyArray_push(arr, sp_box_str(buf));
     }
 else {
@@ -1143,6 +1161,7 @@ const char *sp_MatchData_aref(sp_MatchData *m, sp_int i) {SP_GC_ROOT(m);
   memcpy(b, m->source + s, len);
   b[len] = 0;
   sp_str_set_len(b, (size_t)len);
+  if (sp_str_is_binary(m->source)) sp_str_mark_binary(b);
   return b;
 }
 /* group by name (`md[:name]` / `md["name"]`): resolve the name to its capture
@@ -1337,21 +1356,23 @@ sp_PolyArray *sp_MatchData_to_a(sp_MatchData *m) { return sp_md_groups_from(m, 0
 const char *sp_MatchData_pre_match(sp_MatchData *m) {SP_GC_ROOT(m);
   if (!m) return sp_str_empty;
   int e = m->caps[0];
-  if (e <= 0) return sp_str_empty;
+  if (e <= 0) return sp_str_is_binary(m->source) ? sp_str_empty_binary() : sp_str_empty;
   char *b = sp_str_alloc((size_t)e);
   memcpy(b, m->source, e); b[e] = 0;
   sp_str_set_len(b, (size_t)e);
+  if (sp_str_is_binary(m->source)) sp_str_mark_binary(b);
   return b;
 }
 const char *sp_MatchData_post_match(sp_MatchData *m) {SP_GC_ROOT(m);
   if (!m) return sp_str_empty;
   int s = m->caps[1];
   size_t sl = sp_str_byte_len(m->source);
-  if (s < 0 || (size_t)s >= sl) return sp_str_empty;
+  if (s < 0 || (size_t)s >= sl) return sp_str_is_binary(m->source) ? sp_str_empty_binary() : sp_str_empty;
   size_t len = sl - (size_t)s;
   char *b = sp_str_alloc(len);
   memcpy(b, m->source + s, len); b[len] = 0;
   sp_str_set_len(b, len);
+  if (sp_str_is_binary(m->source)) sp_str_mark_binary(b);
   return b;
 }
 void sp_re_default_error_handler(const char *msg) {SP_GC_ROOT_STR(msg);
