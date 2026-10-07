@@ -1,0 +1,1 @@
+A container that stores many of its own elements no longer stalls the compiler
