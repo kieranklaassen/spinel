@@ -4121,7 +4121,9 @@ const char *sp_str_sub_str_str_hash(const char *str, const char *pat, sp_StrStrH
   if (!found) { if (sp_re_track_last) sp_re_clear_last_match(); return str; }
   size_t before = (size_t)(found - str);
   if (sp_re_track_last) sp_re_set_lit_match(str, (sp_int)before, (sp_int)(before + plen));
-  const char *rep = (h && sp_StrStrHash_has_key(h, pat)) ? sp_StrStrHash_get(h, pat) : NULL;
+  /* a pattern the Hash has no key for takes the Hash's default, as the
+     Regexp form does: CRuby reads hash[match]; nil is "" */
+  const char *rep = sp_StrStrHash_get(h, pat);
   size_t rlen = sp_str_byte_len(rep);
   size_t rest = slen - before - plen;
   size_t total = before + rlen + rest;
@@ -4134,7 +4136,8 @@ const char *sp_str_sub_str_str_hash(const char *str, const char *pat, sp_StrStrH
   return out;
 }
 /* gsub(string, hash): every occurrence of the literal pattern replaced by
-   the hash's value for it ("" when absent or nil), $~ the last occurrence.
+   the hash's value for it (its default when absent, "" when that is nil),
+   $~ the last occurrence.
    An empty pattern matches at every character boundary -- every byte of a
    binary String -- as CRuby's does. */
 const char *sp_str_gsub_str_str_hash(const char *str, const char *pat, sp_StrStrHash *h) {SP_GC_ROOT_STR(pat);SP_GC_ROOT(h);SP_GC_ROOT_STR(str);
@@ -4144,7 +4147,7 @@ const char *sp_str_gsub_str_str_hash(const char *str, const char *pat, sp_StrStr
   size_t slen = sp_str_byte_len(str), plen = sp_str_byte_len(pat);
   const char *se = str + slen;
   int nul = -1;
-  const char *rep = (h && sp_StrStrHash_has_key(h, pat)) ? sp_StrStrHash_get(h, pat) : NULL;
+  const char *rep = sp_StrStrHash_get(h, pat);
   size_t rlen = sp_str_byte_len(rep), n = 0;
   if (!rep) rep = "";
   SP_GC_ROOT_STR(rep);

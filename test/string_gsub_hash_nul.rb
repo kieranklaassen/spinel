@@ -16,3 +16,10 @@ p "a\0b\0b".gsub("\0b", "\0b" => "-")
 t = +"a\0b"
 t.gsub!(/[ab]/, h)
 p t.bytes
+
+# the Hash's default, for a pattern found behind a NUL byte or holding one
+z = Hash.new("-")
+z["k"] = "v"
+p "a\0b".gsub("b", z).bytes
+p "a\0b\0".gsub("\0", z)
+p "a\0b\0".sub("\0", z)
