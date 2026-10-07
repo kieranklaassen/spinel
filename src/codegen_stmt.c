@@ -14886,8 +14886,9 @@ void emit_str_frozen_check(Compiler *c, int recv, Buf *b) {
    after its "not matched" IndexError: a boxed v is held boxed and converted
    at the splice, and a v of another type that is not a String stays there.
    Emits the temp (numbered `tv`, or a fresh number when `tv` is -1) and the
-   frozen check, and answers the text the splice passes for v (the caller
-   frees it). */
+   frozen check (not for a `recv` of -1: that arm checks after its own
+   tests), and answers the text the splice passes for v (the caller frees
+   it). */
 static char *emit_str_splice_value(Compiler *c, int recv, int v, int late, int tv, Buf *b) {
   int is_str = comp_ntype(c, v) == TY_STRING;
   int inert = nt_kind(c->nt, v) == NK_StringNode || subtree_is_pure_read(c, v) || arg_ran_first(v, 0);
@@ -14906,8 +14907,33 @@ static char *emit_str_splice_value(Compiler *c, int recv, int v, int late, int t
     buf_printf(&vb, "_v%d", tv);
   }
   else emit_str_insert_text(c, v, &vb);
-  buf_puts(b, " sp_str_check_mutable("); emit_expr(c, recv, b); buf_puts(b, ");");
+  if (recv >= 0) { buf_puts(b, " sp_str_check_mutable("); emit_expr(c, recv, b); buf_puts(b, ");"); }
   return vb.p;
+}
+/* s[/re/, n] = v, once the pattern matched: the span of group _t<tn> in _b
+   and _e, in a block this opens. With `ts`, the receiver's temp, a group the
+   pattern has not and a group that took no part in the match raise CRuby's
+   IndexError: past the pattern's groups sp_re_caps holds whatever an earlier
+   match left there, and a group left out of the match holds -1, where the
+   String was cut. That arm tests frozen last, as CRuby does; an index
+   refused here that CRuby takes (a negative one counted back from the last
+   group, a group past the ninth; _g is the group it names, and it took part
+   in the match) keeps the frozen test ahead of its IndexError. Without `ts`
+   (-1) the index is only held to nine, as it was. */
+static void emit_re_group_span(Buf *b, int tn, int ts) {
+  buf_printf(b, " if (_t%d < 0 || _t%d > 9", tn, tn);
+  if (ts >= 0)
+    buf_printf(b, " || _t%d >= sp_re_last_ncap) { sp_int _g = _t%d < 0 ? _t%d + sp_re_last_ncap : _t%d;"
+                  " if (_g > 0 && _g < sp_re_last_ncap && (_g > 15 || sp_re_caps[2 * _g] >= 0))"
+                  " sp_str_check_mutable(_t%d);", tn, tn, tn, tn, ts);
+  else buf_puts(b, ")");
+  buf_printf(b, " sp_raise_cls(\"IndexError\", sp_sprintf(\"index %%lld out of regexp\","
+                " (long long)_t%d));", tn);
+  if (ts >= 0) buf_puts(b, " }");
+  buf_printf(b, " { sp_int _b = sp_re_caps[2 * _t%d], _e = sp_re_caps[2 * _t%d + 1];", tn, tn);
+  if (ts >= 0)
+    buf_printf(b, " if (_b < 0) sp_raise_cls(\"IndexError\","
+                  " sp_sprintf(\"regexp group %%lld not matched\", (long long)_t%d));", tn);
 }
 /* emit_array_mutate_stmt_body's String mutators done by reassigning the
    receiver: replace, prepend, insert, concat, clear, delete_prefix! /
@@ -15146,18 +15172,27 @@ static int str_mutate_reassign_arms(Compiler *c, Buf *b, int indent, const NodeT
     /* s[/re/, n] = v: replace the nth capture group's span (#3548) */
     if (assignable && sp_streq(name, "[]=") && argc == 3 && re_lit_index(c, argv[0]) >= 0) {
       int ts = ++g_tmp, tn = ++g_tmp;
+      /* The group's tests and the nil test come once the value has run, in
+         CRuby's order: no match, the index, the group, a nil value, frozen.
+         A value of another type that runs code is read at the splice, where
+         what it raises is heard first: for it the arm is as it was. */
+      int vt = comp_ntype(c, argv[2]);
+      int ran = vt == TY_STRING || yield_site_type(c, argv[2]) == TY_POLY ||
+                subtree_is_pure_read(c, argv[2]) || arg_ran_first(argv[2], 0);
       emit_indent(b, indent);
       buf_printf(b, "{ sp_int _t%d = ", tn); emit_int_expr(c, argv[1], b); buf_puts(b, ";");
-      char *v = emit_str_splice_value(c, recv, argv[2], 1, tn, b);
+      char *v = emit_str_splice_value(c, ran ? -1 : recv, argv[2], 1, tn, b);
       buf_printf(b, " const char *_t%d = ", ts); emit_expr(c, recv, b);
       buf_printf(b, "; if (sp_re_match(sp_re_pat_%d, _t%d) < 0)"
                     " sp_raise_cls(\"IndexError\", \"regexp not matched\");",
                  re_lit_index(c, argv[0]), ts);
-      buf_printf(b, " if (_t%d < 0 || _t%d > 9)"
-                    " sp_raise_cls(\"IndexError\", sp_sprintf(\"index %%lld out of regexp\","
-                    " (long long)_t%d));", tn, tn, tn);
+      emit_re_group_span(b, tn, ran ? ts : -1);
+      /* a nil String value joined as "" */
+      if (ran && v && vt == TY_STRING && node_may_be_null_nil(c, argv[2]))
+        buf_printf(b, " if (!(%s)) sp_raise_cls(\"TypeError\","
+                      " \"no implicit conversion of nil into String\");", v);
+      if (ran) buf_printf(b, " sp_str_check_mutable(_t%d);", ts);
       /* each piece is rooted while the next one allocates */
-      buf_printf(b, " { sp_int _b = sp_re_caps[2 * _t%d], _e = sp_re_caps[2 * _t%d + 1];", tn, tn);
       buf_printf(b, " const char *_h = sp_str_byteslice(_t%d, 0, _b); SP_GC_ROOT_STR(_h);", ts);
       buf_printf(b, " const char *_r = sp_str_byteslice(_t%d, _e, (sp_int)sp_str_byte_len(_t%d) - _e); SP_GC_ROOT_STR(_r);", ts, ts);
       buf_printf(b, " const char *_p = sp_str_concat(_h, %s); SP_GC_ROOT_STR(_p); ", v ? v : "NULL");
