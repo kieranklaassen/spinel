@@ -1,0 +1,1 @@
+A pattern's whole-subject binding takes a constant's or a class variable's handle
