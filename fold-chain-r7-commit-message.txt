@@ -1,0 +1,29 @@
+The memo of a fold seeded with [] is an Array where a push chain fills it
+
+`s = String.new; x = ["a"].inject([]) { |m, v| m << v << s }; s << "x";
+p x` printed ["a", ""]; CRuby prints ["a", "x"]. The same with
+`m.push(v).push(s)`, `(m << v) << s`, `m << v << v << s` and
+`m.append(v) << s`, and over Integers, where the chain read as a shift.
+
+infer_block_params types a fold's memo from the seed. An empty [] has
+no type, and the memo took the receiver's element type: over Strings
+`m << v` read as a String append, and `s` was never seen stored into
+an Array.
+
+The memo is typed the Array it is where the block is one chain of two
+or more pushes onto it whose last operand is a local outside the block
+that `=` alone binds and whose other operands are the block's own.
+Every other block is typed as before. With the memo an Array a chain
+that pushes the outer String first (`m << s << v`, right as it is)
+would be refused as a chained push, and so would one that ends in a
+parameter its method changes in place (`def f(a, s); s << "x";
+a.inject([]) { |m, v| m << v << s }; end`, right as it is); over a
+`for` variable the types would not settle, and a local `||=` binds
+would go in as a copy.
+
+Under --share-strings this change stands down and the memo keeps the
+type it had. An Array memo is a block parameter holding the String,
+which the flag refuses, and a fold that is right as it is (`s = t =
++"s"`, the String already a handle) would be refused with it.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
