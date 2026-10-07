@@ -1,0 +1,33 @@
+A for loop keeps the Array it walks
+
+`for w in words(n)` takes the Array into a C temp and walks it from
+there:
+
+    { sp_StrArray *_t9 = sp_words(3000LL);
+      for (sp_int _t10 = 0; _t10 < sp_StrArray_length(_t9); _t10++) {
+
+The temp was rooted nowhere. For the Array a call answers it is the
+only holder, so the first collection the body caused took the Array:
+the walk read nil elements and raised NoMethodError, stopped early or
+crashed, in a plain run. A variable's Array went the same way once the
+body gave the variable another (`for w in ws; ws = mk(2); ...` summed
+1546860 for 13495500).
+
+The Array walk of emit_for (a typed Array or an Array of boxed values,
+one loop variable or several) now roots the Array, as the String Range,
+boxed value and Hash walks beside it do, unless a local, instance,
+class or global variable holds it and the body cannot give that
+variable another (read_rebound_by). Such a loop compiles as before, and
+so does a loop over a constant.
+
+The root is a second slot holding the same Array. SP_GC_ROOT takes its
+slot's address, and C reloads a temp whose address is out after every
+call in the body; with the walk's own temp left alone, the root costs
+the same whatever the Array's length.
+
+test/for_call_array_root.rb walks a method's answer, String#lines, the
+sum of two Arrays, pairs into two loop variables, an instance variable
+the body clears and a local the body rebinds. On master it raises in a
+plain run.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
