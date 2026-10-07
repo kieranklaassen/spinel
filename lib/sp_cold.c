@@ -3765,9 +3765,10 @@ sp_bool sp_frange_eq(sp_FloatRange a, sp_FloatRange b) {
 }
 const char *sp_frange_inspect(sp_FloatRange r) {
   /* an OMITTED bound prints as nothing; an explicit infinity prints itself */
-  const char *lo = (r.omitted & SP_FRANGE_NO_BEGIN) ? ""
+  const char *lo = (r.omitted & SP_FRANGE_NO_BEGIN) ? sp_str_empty
                  : (r.omitted & SP_FRANGE_INT_BEGIN) ? sp_sprintf("%lld", (long long)r.first)
                  : sp_float_to_s(r.first);
+  SP_GC_ROOT_STR(lo);   /* the end's text allocates */
   const char *hi = (r.omitted & SP_FRANGE_NO_END) ? ""
                  : (r.omitted & SP_FRANGE_INT_END) ? sp_sprintf("%lld", (long long)r.last)
                  : sp_float_to_s(r.last);
@@ -3861,6 +3862,7 @@ const char *sp_srange_to_s(sp_StrRange r) {
 }
 const char *sp_srange_inspect(sp_StrRange r) {
   const char *lo = r.first ? sp_str_inspect(r.first) : sp_str_empty;
+  SP_GC_ROOT_STR(lo);   /* the end's inspect allocates */
   const char *hi = r.last ? sp_str_inspect(r.last) : sp_str_empty;
   return sp_sprintf("%s%s%s", lo, r.excl ? "..." : "..", hi);
 }
