@@ -1,0 +1,37 @@
+A value object under construction roots the Strings initialize has written
+
+A by-value object is built in a struct of its constructor's own,
+
+    sp_Three self = {0}; ... sp_Three_initialize(&self, lv_r); return self;
+
+or in a temp at the call site where initialize yields or takes a block
+(emit_ctor_yield_inline), and no root reaches that struct. A String
+initialize has written is held by nothing while its next statement
+allocates:
+
+    def initialize(r)
+      @a = "abc" * r
+      @s = "hello world " * r
+      @z = "zed" * r
+    end
+
+lost @a to the collection that builds @s or @z: 1,666 of 100,000 such
+objects read back a wrong String in a plain run, and with two Strings
+the program aborts under SPINEL_GC_STRESS=2.
+
+The constructor and the inlined initialize now root the String fields
+that a statement of their own has written (`@a = v`, or
+`@a, @b = v, w`) ahead of a later statement that may allocate
+(value_ctor_fields_to_root). The last field written takes no root, nor
+does one set from a parameter initialize never assigns, which that
+frame's root holds: `@s = v` standing alone and `@a = a; @s = s` build
+as they did. Where a statement writes a field in any other way, under
+a condition or in a block, every String field is rooted.
+
+Two programs of the corpus change their C besides the new test, each
+by such roots in one constructor: case_when_string_range_nil_bound
+(`@lo = "d" if set_lo`) and string_param_dead_each_branch (writes under
+if and else after a first one). Neither allocates over a held field;
+they pay the root for a write the list does not name.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

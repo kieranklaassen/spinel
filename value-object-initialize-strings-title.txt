@@ -1,0 +1,1 @@
+A value object under construction roots the Strings initialize has written
