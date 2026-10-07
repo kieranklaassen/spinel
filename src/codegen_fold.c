@@ -573,10 +573,21 @@ int emit_hash_sort_by_expr(Compiler *c, int id, Buf *b) {
   buf_printf(g_pre, "sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);\n", ttmp, ttmp);
   emit_indent(g_pre, g_indent);
   buf_printf(g_pre, "for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++) {\n", ti, ti, trecv, ti);
+  /* The block's value is held by a C temp alone until the push below stores
+     it, and nothing may allocate in between: where that temp holds a
+     reference (ty_gc_holds_refs), the tuple is allocated ahead of the
+     block's code, which is why that code is built on the side first. */
+  Buf inner; memset(&inner, 0, sizeof inner);
+  Buf *sv_pre = g_pre; g_pre = &inner;
   TyKind bret;
   char *vb = emit_hash_block_eval(c, block, rr, hn, trecv, ti, block_param_name(c, block, 1) ? 0 : 2, &bret);
+  g_pre = sv_pre;
+  int held = ty_gc_holds_refs(c, bret);
+  if (!held && inner.p) buf_puts(g_pre, inner.p);
   emit_indent(g_pre, g_indent + 1);
   buf_printf(g_pre, "sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);\n", tup, tup);
+  if (held && inner.p) buf_puts(g_pre, inner.p);
+  free(inner.p);
   emit_indent(g_pre, g_indent + 1);
   buf_printf(g_pre, "sp_PolyArray_push(_t%d, ", tup);
   if (bret == TY_POLY) buf_puts(g_pre, vb ? vb : "sp_box_nil()");
