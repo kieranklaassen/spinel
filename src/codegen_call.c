@@ -4619,6 +4619,8 @@ int poly_pred_kind(const char *name, int argc) {
   if (argc == 0) return (sp_streq(name, "frozen?") || sp_streq(name, "nil?") ||
                          sp_streq(name, "zero?") || sp_streq(name, "positive?") ||
                          sp_streq(name, "negative?") ||
+                         /* Integer's parity, the same way */
+                         sp_streq(name, "even?") || sp_streq(name, "odd?") ||
                          /* the rest of the numeric predicates: a class merely
                             defining `finite?` took this switch for every
                             union-typed number in the program, and the Float
@@ -4674,6 +4676,8 @@ int emit_poly_pred_value(Compiler *c, int id, const char *tvref,
   if (argc == 0 && sp_streq(name, "zero?"))     { buf_printf(b, "sp_poly_zero_p(%s)", tvref); return 1; }
   if (argc == 0 && sp_streq(name, "positive?")) { buf_printf(b, "sp_poly_positive_p(%s)", tvref); return 1; }
   if (argc == 0 && sp_streq(name, "negative?")) { buf_printf(b, "sp_poly_negative_p(%s)", tvref); return 1; }
+  if (argc == 0 && sp_streq(name, "even?"))     { buf_printf(b, "sp_poly_even_p(%s)", tvref); return 1; }
+  if (argc == 0 && sp_streq(name, "odd?"))      { buf_printf(b, "sp_poly_odd_p(%s)", tvref); return 1; }
   if (argc == 0 && sp_streq(name, "finite?"))   { buf_printf(b, "sp_poly_finite_p(%s)", tvref); return 1; }
   if (argc == 0 && sp_streq(name, "nan?"))      { buf_printf(b, "sp_poly_nan_p(%s)", tvref); return 1; }
   if (argc == 0 && sp_streq(name, "real?"))     { buf_printf(b, "sp_poly_real_p(%s)", tvref); return 1; }
@@ -17145,7 +17149,18 @@ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
     if (utf8 || bytes) {
       int tvC = ++g_tmp;
       buf_printf(b, "({ sp_RbVal _t%d = ", tvC); emit_boxed(c, recv, b);
-      buf_printf(b, "; sp_box_str(%s(sp_poly_recv_i(\"chr\", _t%d))); })", utf8 ? "sp_int_chr_utf8" : "sp_int_chr", tvC);
+      /* as the bare chr beside it: only an Integer has chr with an
+         encoding. Any other value was read as an Integer and answered a
+         character; it raises now: a String the ArgumentError of its own
+         chr's count, read off the instance arity table, the rest by
+         sp_poly_chr_enc_raise. */
+      char exp[64];
+      buf_printf(b, "; if (SP_UNLIKELY(_t%d.tag != SP_TAG_INT)) {", tvC);
+      if (builtin_arity_expected("String", "chr", 0, argc, exp, sizeof exp))
+        buf_printf(b, " if (_t%d.tag == SP_TAG_STR || sp_poly_is_strbuf(_t%d)) sp_raise_cls(\"ArgumentError\", "
+                      "\"wrong number of arguments (given %d, expected %s)\");", tvC, tvC, argc, exp);
+      buf_printf(b, " sp_poly_chr_enc_raise(_t%d); } sp_box_str(%s(_t%d.v.i)); })",
+                 tvC, utf8 ? "sp_int_chr_utf8" : "sp_int_chr", tvC);
       return 1;
     }
   }
