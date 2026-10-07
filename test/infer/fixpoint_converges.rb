@@ -35,6 +35,38 @@ store(sub, 1)
 store({ 2 => 3 }, 2)
 p sub
 
+# A method that stores into its parameter under a String key, handed values
+# of two kinds: a Hash a block widened a round after the call first bound it,
+# a Hash and nil, two kinds of Hash, a Hash and nil by keyword. The binding
+# boxed the parameter, its own store typed it String-keyed again, and the
+# next round's binding boxed it again; to the cap.
+def fc_label(x)
+  x["a"] = "q"
+end
+late = { "a" => "x" }
+[1].each { |k| late[k] = "s" }
+fc_label(late)
+def fc_label_some(x)
+  x["a"] = "q" if x
+end
+some = { "a" => "x" }
+fc_label_some(some)
+fc_label_some(nil)
+def fc_label_both(x)
+  x["a"] = "q"
+end
+strs = { "a" => "x" }
+ints = { "c" => 3 }
+fc_label_both(strs)
+fc_label_both(ints)
+def fc_label_named(x:)
+  x["a"] = "q" if x
+end
+named = { "a" => "x" }
+fc_label_named(x: named)
+fc_label_named(x: nil)
+p late, some, strs, ints, named
+
 # Four more shapes, each to the cap for its own reason (#4962).
 #
 # A table the object-array narrowing withdrew: `fc_pair`'s value narrowed to

@@ -1846,10 +1846,12 @@ gc-phases-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
 GC_STRESS_TESTS := test/gc_root_frame_slots.rb \
                    test/gc_minor_byref_lent_slot.rb \
                    test/struct_values_fresh_receiver_root.rb \
+                   test/fresh_receiver_held_while_answer_built.rb \
                    test/hash_splat_to_a.rb \
                    test/proc_cell_capture_marked.rb \
                    test/poly_array_intersect.rb \
                    test/thread_new_args_rooted_across_fiber_alloc.rb \
+                   test/hash_mixed_values_copy_rooted.rb \
                    test/gc_root_volatile_string_slot.rb \
                    test/gc_root_gathered_handle_param.rb \
                    test/dispatch_arm_roots_operands.rb \

@@ -239,6 +239,9 @@ int call_is_field_read(Compiler *c, int id, int *allocates);
 int hc_array(Compiler *c, int recv, int is_float, char *d, char *l, char *w, size_t cap);
 int hc_index_in_range(Compiler *c, int recv, int idx);
 extern int g_loop_polls_in_cond;   /* the next emit_loop_body leaves its polls to the loop's condition */
+extern int g_hash_conv_value;      /* the value emit_assign is converting to its slot's Hash kind, or -1 */
+int hash_brackets_only_read(Compiler *c, int id);
+const char *hash_boxed_to_h_fn(Compiler *c, int id);
 int hc_string(Compiler *c, int recv, char *d, char *l, size_t cap);
 /* hc_array for a Float array whose in-range elements the reader needs to
    be no nil: *n names a length that is 0 while the array may hold one, or
@@ -656,6 +659,7 @@ void emit_index_op_write(Compiler *c, int id, Buf *b, int indent);
 void emit_index_and_or_write(Compiler *c, int id, Buf *b, int indent, int is_or);
 void emit_boxed(Compiler *c, int node, Buf *b);
 void emit_recv_rooted(Compiler *c, int recv, int t, const char *rootm, Buf *b);
+void emit_fresh_recv_rooted(Compiler *c, int recv, int t, const char *rootm, Buf *b);
 int  push_recv_in_slot(Compiler *c, int recv, int argc, const int *argv, TyKind art);
 void emit_rat_coerce(Compiler *c, int node, Buf *b);
 void emit_super(Compiler *c, int id, Buf *b);

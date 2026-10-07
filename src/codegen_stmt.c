@@ -1698,6 +1698,7 @@ int int_slot_store_needs_ck(Compiler *c, int v, TyKind slot_ty, int slot_nullabl
   if (bot >= 0 && nt_kind(c->nt, bot) == NK_IntegerNode) return 0;
   return 1;
 }
+int g_hash_conv_value = -1;
 void emit_assign(Compiler *c, int id, Buf *b, int indent) {
   const char *nm = nt_str(c->nt, id, "name");
   int v = nt_ref(c->nt, id, "value");
@@ -1912,7 +1913,7 @@ void emit_assign(Compiler *c, int id, Buf *b, int indent) {
            (comp_ntype(c, v) == TY_STR_STR_HASH || comp_ntype(c, v) == TY_STR_INT_HASH)) {
     /* widen a concrete str-keyed hash into the poly-valued slot */
     buf_printf(b, "sp_StrPolyHash_from_%s(", comp_ntype(c, v) == TY_STR_STR_HASH ? "str_str_hash" : "str_int_hash");
-    emit_expr(c, v, b); buf_puts(b, ")");
+    g_hash_conv_value = v; emit_expr(c, v, b); g_hash_conv_value = -1; buf_puts(b, ")");
   }
   /* A hash slot the analysis widened past its initializer's variant: the
      variants are separate C structs, so the pointer went in uncoerced and the
@@ -1927,7 +1928,7 @@ void emit_assign(Compiler *c, int id, Buf *b, int indent) {
     const char *conv = lv->type == TY_POLY_POLY_HASH ? "sp_poly_as_poly_poly_hash"
                      : lv->type == TY_SYM_POLY_HASH  ? "sp_poly_as_sym_poly_hash"
                      : "sp_poly_as_str_poly_hash";
-    buf_printf(b, "%s(", conv); emit_boxed(c, v, b); buf_puts(b, ")");
+    buf_printf(b, "%s(", conv); g_hash_conv_value = v; emit_boxed(c, v, b); g_hash_conv_value = -1; buf_puts(b, ")");
   }
   /* A poly-array slot with a poly RHS: the hash slots two arms up already
      convert, and the array one did not, so `kids = @focus.children` where the

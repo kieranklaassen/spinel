@@ -648,8 +648,8 @@ int emit_op_hash_invert(Compiler *c, const BopCtx *x, Buf *b) {
   else {
     /* generic: build PolyPolyHash by swapping key/value of each entry */
     int th = ++g_tmp, tr = ++g_tmp, ti = ++g_tmp;
-    buf_printf(b, "({ sp_%sHash *_t%d = ", hn, th); emit_expr(c, recv, b);
-    buf_printf(b, "; sp_PolyPolyHash *_t%d = sp_PolyPolyHash_new(); SP_GC_ROOT(_t%d);", tr, tr);
+    buf_printf(b, "({ sp_%sHash *_t%d = ", hn, th); emit_fresh_recv_rooted(c, recv, th, "SP_GC_ROOT", b);
+    buf_printf(b, "sp_PolyPolyHash *_t%d = sp_PolyPolyHash_new(); SP_GC_ROOT(_t%d);", tr, tr);
     buf_printf(b, " for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++) {", ti, ti, th, ti);
     /* key and value access depend on the hash variant */
     TyKind kt = ty_hash_key(rt), vt = ty_hash_val(rt);
@@ -702,8 +702,8 @@ int emit_op_hash_flatten(Compiler *c, const BopCtx *x, Buf *b) {
   /* interleave keys and values into a flat PolyArray */
   int th = ++g_tmp, tr = ++g_tmp, ti = ++g_tmp;
   TyKind kt = ty_hash_key(rt), vt = ty_hash_val(rt);
-  buf_printf(b, "({ sp_%sHash *_t%d = ", hn, th); emit_expr(c, recv, b);
-  buf_printf(b, "; sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);", tr, tr);
+  buf_printf(b, "({ sp_%sHash *_t%d = ", hn, th); emit_fresh_recv_rooted(c, recv, th, "SP_GC_ROOT", b);
+  buf_printf(b, "sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);", tr, tr);
   buf_printf(b, " for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++) {", ti, ti, th, ti);
   emit_push_hash_key(kt, tr, th, ti, b);
   /* a PolyPoly table's order lists slots, not keys: the value is read at
@@ -864,8 +864,8 @@ int emit_op_hash_compact(Compiler *c, const BopCtx *x, Buf *b) {
   }
   else if (rt == TY_POLY_POLY_HASH) {
     int th = ++g_tmp, tr = ++g_tmp, ti = ++g_tmp;
-    buf_printf(b, "({ sp_PolyPolyHash *_t%d = ", th); emit_expr(c, recv, b);
-    buf_printf(b, "; sp_PolyPolyHash *_t%d = sp_PolyPolyHash_new(); SP_GC_ROOT(_t%d);", tr, tr);
+    buf_printf(b, "({ sp_PolyPolyHash *_t%d = ", th); emit_fresh_recv_rooted(c, recv, th, "SP_GC_ROOT", b);
+    buf_printf(b, "sp_PolyPolyHash *_t%d = sp_PolyPolyHash_new(); SP_GC_ROOT(_t%d);", tr, tr);
     /* compact keeps the default and default proc, like dup */
     buf_printf(b, " _t%d->default_v = _t%d->default_v; _t%d->dproc = _t%d->dproc; _t%d->dproc_self = _t%d->dproc_self;", tr, th, tr, th, tr, th);
     buf_printf(b, " for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++) {", ti, ti, th, ti);
@@ -876,8 +876,8 @@ int emit_op_hash_compact(Compiler *c, const BopCtx *x, Buf *b) {
   else {
     /* SYM_POLY_HASH or other poly-valued hash */
     int th = ++g_tmp, tr = ++g_tmp, ti = ++g_tmp;
-    buf_printf(b, "({ sp_%sHash *_t%d = ", hn, th); emit_expr(c, recv, b);
-    buf_printf(b, "; sp_%sHash *_t%d = sp_%sHash_new(); SP_GC_ROOT(_t%d);", hn, tr, hn, tr);
+    buf_printf(b, "({ sp_%sHash *_t%d = ", hn, th); emit_fresh_recv_rooted(c, recv, th, "SP_GC_ROOT", b);
+    buf_printf(b, "sp_%sHash *_t%d = sp_%sHash_new(); SP_GC_ROOT(_t%d);", hn, tr, hn, tr);
     buf_printf(b, " _t%d->default_v = _t%d->default_v; _t%d->dproc = _t%d->dproc; _t%d->dproc_self = _t%d->dproc_self;", tr, th, tr, th, tr, th);
     buf_printf(b, " for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++) {", ti, ti, th, ti);
     buf_printf(b, " sp_RbVal _v%d = sp_%sHash_get(_t%d, _t%d->order[_t%d]);", ti, hn, th, th, ti);

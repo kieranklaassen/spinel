@@ -280,6 +280,33 @@ static TyKind bop_arg_ntype(const void *ud, int i) {
   return comp_ntype(a->c, a->argv[i]);
 }
 
+/* Is Hash[h], node `id`, only read by the call it is the receiver of? One
+   of these with no block neither keeps nor changes its receiver, so h itself
+   serves there, as it did. */
+int hash_brackets_only_read(Compiler *c, int id) {
+  static const char *const readers[] = {
+    "size", "length", "empty?", "count", "keys", "values", "to_a", "first", "key?", "has_key?",
+    "include?", "member?", "[]", "fetch", "dig", "merge", "==", "inspect", "to_s", NULL };
+  const NodeTable *nt = c->nt;
+  int seen = 0;
+  NT_FOREACH_KIND(nt, NK_CallNode, call) {
+    if (nt_ref(nt, call, "receiver") != id) continue;
+    const char *nm = nt_str(nt, call, "name");
+    int k = 0;
+    while (nm && readers[k] && !sp_streq(nm, readers[k])) k++;
+    if (!nm || !readers[k] || nt_ref(nt, call, "block") >= 0) return 0;
+    seen = 1;
+  }
+  return seen;
+}
+
+/* The runtime function for to_h on a boxed value: Hash[v] reaches the
+   emitter as v.to_h, and there a Hash is copied, not passed through. */
+const char *hash_boxed_to_h_fn(Compiler *c, int id) {
+  return nt_int(c->nt, id, "hash_brackets", 0) && !hash_brackets_only_read(c, id)
+           ? "sp_hash_brackets_one" : "sp_poly_to_h_m";
+}
+
 static int emit_builtin_op_ex(Compiler *c, int id, int recv, TyKind rt, const char *name,
                               const char *rtext, int t0, int stage, Buf *b) {
   if (recv < 0) return 0;
@@ -292,6 +319,24 @@ static int emit_builtin_op_ex(Compiler *c, int id, int recv, TyKind rt, const ch
   }
   int argc;
   const int *argv = call_args(c->nt, id, &argc);
+  /* Hash[h] reaches here as h.to_h (its desugar runs before h has a type),
+     and to_h answers h itself. Hash[h] is a new Hash of h's entries, without
+     its default. Three forms keep the C they had: a literal is new already,
+     one written straight into a local of another kind of Hash is converted,
+     which builds the new Hash, and one a call only reads is not kept. */
+  if (ty_is_hash(rt) && ty_hash_cname(rt) && argc == 0 && sp_streq(name, "to_h") &&
+      nt_int(c->nt, id, "hash_brackets", 0) && nt_ref(c->nt, id, "block") < 0 &&
+      nt_kind(c->nt, recv) != NK_HashNode && nt_kind(c->nt, recv) != NK_KeywordHashNode &&
+      id != g_hash_conv_value && !hash_brackets_only_read(c, id)) {
+    const char *hn = ty_hash_cname(rt);
+    int ts = ++g_tmp, tc = ++g_tmp;
+    buf_printf(b, "({ sp_%sHash *_t%d = ", hn, ts);
+    if (rtext) buf_puts(b, rtext); else emit_expr(c, recv, b);
+    buf_printf(b, "; SP_GC_ROOT(_t%d); sp_%sHash *_t%d = sp_%sHash_new(); SP_GC_ROOT(_t%d);"
+                  " if (_t%d) sp_%sHash_update(_t%d, _t%d); _t%d; })",
+               ts, hn, tc, hn, tc, ts, hn, tc, ts, tc);
+    return 1;
+  }
   BopArgs a = { c, argv };
   const BuiltinOp *op = bop_find_stage(lk, name, argc, nt_ref(c->nt, id, "block") >= 0,
                                        bop_arg_ntype, &a, stage);
