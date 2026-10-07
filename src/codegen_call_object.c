@@ -1409,8 +1409,8 @@ int emit_call_safe_nav_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
            a lowering that hoists STATEMENTS (the comprehension family --
            select, reject, reduce, chunk_while -- builds a loop) would
            otherwise put them in front of the guard, where they run on the very
-           nil the guard exists to stop. When that happens the guard becomes a
-           statement `if` instead of a ternary. */
+           nil the guard exists to stop. When that happens the guard steps
+           over them (sn_guard_over_hoists). */
         Buf nb; memset(&nb, 0, sizeof nb);
         Buf vb2; memset(&vb2, 0, sizeof vb2);
         Buf preb; memset(&preb, 0, sizeof preb);
@@ -1481,27 +1481,13 @@ int emit_call_safe_nav_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
                      tsn, nb.p ? nb.p : "sp_box_nil()", vb2.p ? vb2.p : "");
         }
         else {
-          int rsv = ++g_tmp;
-          emit_indent(g_pre, g_indent);
-          /* Both arms are BOXED unless the answer has a C nil of its own, so
-             the holding slot is sp_RbVal then -- not ret2, which names what the
-             value would be before boxing (a poly-hash answer declared its slot
-             sp_PolyPolyHash * and took sp_box_nil()). */
-          if (sn_ptr) emit_ctype(c, ret2, g_pre);
-          else buf_puts(g_pre, "sp_RbVal");
-          buf_printf(g_pre, " _snr%d = %s;\n", rsv, nb.p ? nb.p : "sp_box_nil()");
-          emit_indent(g_pre, g_indent);
-          if (!sn_ptr) buf_printf(g_pre, "SP_GC_ROOT_RBVAL(_snr%d);\n", rsv);
-          else if (ret2 == TY_STRING || ty_is_array(ret2) || sn_gcptr) buf_printf(g_pre, "SP_GC_ROOT(_snr%d);\n", rsv);
-          else buf_printf(g_pre, "(void)_snr%d;\n", rsv);
-          emit_indent(g_pre, g_indent);
-          buf_printf(g_pre, "if (_sn%d.tag != SP_TAG_NIL) {\n", tsn);
-          buf_puts(g_pre, preb.p);
-          emit_indent(g_pre, g_indent);
-          buf_printf(g_pre, "  _snr%d = (%s);\n", rsv, vb2.p ? vb2.p : "");
-          emit_indent(g_pre, g_indent);
-          buf_puts(g_pre, "}\n");
-          buf_printf(b, "_snr%d", rsv);
+          /* Held in a temp ahead of the statement, the call ran before what
+             is written before it (`"#{$c} #{b&.bump([1, 2])}"`), as in the
+             typed arm below. */
+          char nilt[64];
+          snprintf(nilt, sizeof nilt, "_sn%d.tag == SP_TAG_NIL", tsn);
+          sn_guard_over_hoists(nilt, &preb);
+          buf_printf(b, "(%s ? %s : (%s))", nilt, nb.p ? nb.p : "sp_box_nil()", vb2.p ? vb2.p : "");
         }
         free(nb.p); free(vb2.p); free(preb.p);
         return 1;
