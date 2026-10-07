@@ -1,0 +1,1 @@
+An object with no to_a splatted into a method arrives as itself

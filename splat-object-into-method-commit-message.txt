@@ -1,0 +1,32 @@
+An object with no to_a splatted into a method arrives as itself
+
+A splat handed to a method of the program is spread in place where
+its operand is boxed, a scalar or an Array. An object of one of the
+program's classes was none of those, and the one-element array
+sp_splat_to_array wraps it in was passed as the argument:
+
+    class Foo
+      def initialize(n) = @n = n
+      def n = @n
+    end
+    def cls(a) = a.class
+    def num(a) = a.n
+    x = Foo.new(1)
+    p cls(*x)    # Array; CRuby Foo
+    p num(*x)    # undefined method 'n' for an instance of Array
+
+CRuby asks to_a only of a value that has one; any other value is the
+one argument, itself. splat_spreads_in_place and emit_splat_in_place
+now take such an object too, where it certainly has no to_a
+(splat_operand_is_plain_object): none by a method, a reader or an
+Enumerable's each in its class, above it or in any class below it, no
+method_missing there, no Struct, Data or native class above it, and
+none at the top level, in a module included there or in a reopened
+Object, Kernel or BasicObject. Any other object compiles to the same
+C as before.
+
+Test: test/splat_object_into_method.rb. `one(*Foo.new(2))` in it hands
+sp_splat_to_array a call's fresh answer, so it needs the root the
+commit beneath adds there.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
