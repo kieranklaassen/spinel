@@ -1,0 +1,47 @@
+An attribute writer statement keeps a receiver its value rebinds
+
+`recv.x = value` reads its receiver, runs the value, then stores. A
+receiver that is a plain read (a local, an instance, class or global
+variable, a reader off one) was read in the store itself, so a value
+that assigned the variable stored into the new object:
+
+    c = a
+    c.n = (c = b; 1)
+    p [a.n, b.n]
+
+printed [0, 1] for [1, 0], with gcc and with clang. Where the
+assignment is in a method the value calls, the C compiler's order of
+the two sides decided:
+
+    def swap(b)
+      @held = b
+      6
+    end
+    def by_call(b)
+      @held.n = swap(b)
+    end
+
+stored into the first object with gcc and into `b` with clang.
+
+Where the slot can hold a pointer the write barrier's rewrite reads
+the receiver into a C temporary first, so the order is right, and
+nothing holds the temporary: a value that assigns the variable nil
+and then allocates leaves the receiver to be collected, and the store
+goes into whatever took its place.
+
+A statement whose value assigns what its receiver reads now takes the
+temporary the exact-class arm has for a receiver that is no plain
+read, rooted while a value that may allocate runs; the boxed
+receiver's arm, which reads the receiver first already, roots it. The
+assignment counts where the value shows it: written in the value, or
+in a method the value calls, found by the method's name three calls
+deep; a local a proc assigns is read_rebound_by's. What each
+method assigns and the methods it calls are read once, before emission
+starts, and only in a program that has such a writer: emission swaps a
+node's arguments out for a while here and there, and a method read
+then would be read without them. So the search costs a compile the
+same however many calls reach a method, and its answer does not turn
+on which statement asked first. Every other statement is emitted as
+before.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
