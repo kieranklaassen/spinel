@@ -1,0 +1,16 @@
+(0+5i)
+(0+1.5i)
+(0-3i)
+(0+0i)
+true
+(-25+0i)
+5
+(0+5i)
+(0+5i)
+(0+2i)
+(0+2.5i)
+(0+3i)
+(0+7i)
+"NoMethodError"
+"NoMethodError"
+"NoMethodError"

@@ -35,6 +35,19 @@ static void emit_fallback_block_value(Compiler *c, const int *bb, int bn, const 
   free(pre.p); free(val.p);
 }
 
+/* an_program_answers_name's twin: 1 iff a class or a module of the program
+   has `name` as a method, a reader or a class method, or the program
+   requires ostruct. poly_name_user_claimed without its exemption for a
+   dispatch's builtin arm, and with what a boxed Class or OpenStruct answers. */
+static int program_answers_name(Compiler *c, const char *name, int argc) {
+  if (sp_feature_required("ostruct")) return 1;
+  for (int k = 0; k < c->nclasses; k++)
+    if (comp_poly_arm_defines_n(c, k, name, argc) ||
+        (!c->classes[k].is_native_class && comp_reader_in_chain(c, k, name, NULL)) ||
+        comp_cmethod_in_chain(c, k, name, NULL) >= 0) return 1;
+  return 0;
+}
+
 /* Is the parameter `nm` of the spliced block `blk` a boxed slot, one that the
    value a call was given can be stored in? The block's own uses decide the
    slot's type: one that does `v << 1` makes it an Array, and storing a boxed
@@ -12430,6 +12443,15 @@ static int emit_poly_call0_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
       buf_printf(b, "%s(", pfn);
       emit_expr(c, recv, b); buf_puts(b, ")"); { *out = 1; return 1; }
     }
+  }
+  /* Numeric#i on a poly value, where nothing of the program's own answers an
+     i: no class or module has one as a method, a reader or a class method,
+     and no OpenStruct is about. Beside one the call keeps that answer's type
+     and its dispatch, in the dispatch's builtin arm too: the name is a
+     common reader, and a number there raises as before. */
+  if (sp_streq(name, "i") && argc == 0 && !program_answers_name(c, name, argc)) {
+    buf_puts(b, "sp_poly_imag_unit(");
+    emit_expr(c, recv, b); buf_puts(b, ")"); { *out = 1; return 1; }
   }
   /* Numeric#arg / #angle / #phase, #rect / #rectangular and #polar on a poly value,
      answered as the typed arms answer them. A user method, reader or class
