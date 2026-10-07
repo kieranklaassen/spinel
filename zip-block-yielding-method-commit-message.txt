@@ -1,0 +1,32 @@
+A zip or combination block in a method that yields is handed its elements
+
+    def each_pair_of(a, b)
+      a.zip(b) { |x, y| yield x, y }
+    end
+    each_pair_of([1, 2], ["a", "b"]) { |n, s| p [n, s] }
+
+printed [nil, nil] twice where CRuby prints [1, "a"] and [2, "b"], and
+`def pairs(a) = a.combination(2) { |x, y| yield x + y }` did not build
+for an Integer Array. The same with `&blk` and `blk.call`, with the
+yield after the loop, in a class's own `each`, and for `permutation`.
+
+A method that yields is spliced into its caller with its locals renamed
+(rename_local), and each is still declared in its scope under the name
+it was written with. iter_ewi_zip_poly_arms asked the scope for the
+block's parameters by the new name, found neither, and emitted the loop
+with no binding at all. iter_combination_cons_arms and
+emit_poly_combination_param asked the same way for the parameter's
+type, took the miss for a boxed value and wrote one into an Integer
+Array's slot.
+
+The four lookups now go through block_param_local, which asks by the
+name as written when the new one is not found. Where the first lookup
+finds the local, at the top level and in every method that is not
+spliced, the C is what it was.
+
+Test: test/zip_block_in_yielding_method.rb (expected from CRuby 3.3.6
+with --enable-frozen-string-literal). master does not build it; section
+by section, 17 of its 29 lines are wrong or raise and the other 12 are
+in the three sections that do not build.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

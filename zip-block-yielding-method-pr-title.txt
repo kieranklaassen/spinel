@@ -1,0 +1,1 @@
+A zip or combination block in a method that yields is handed its elements
