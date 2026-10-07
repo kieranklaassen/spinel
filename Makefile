@@ -1806,6 +1806,7 @@ GC_STRESS_TESTS := test/gc_root_frame_slots.rb \
                    test/hash_splat_to_a.rb \
                    test/proc_cell_capture_marked.rb \
                    test/poly_array_intersect.rb \
+                   test/string_regexp_group_assign_rooted.rb \
                    test/thread_new_args_rooted_across_fiber_alloc.rb \
                    test/gc_root_volatile_string_slot.rb \
                    test/gc_root_gathered_handle_param.rb
