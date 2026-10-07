@@ -14325,6 +14325,18 @@ static void buf_splice(Buf *b, size_t at, const char *s) {
   free(tail);
 }
 
+/* The table sp_splat_arg_items reads, for a program that built a list with
+   it: per class, 1 where the program wrote it and all above it itself. */
+static void emit_splat_own_table(Compiler *c, Buf *b, size_t at) {
+  if (!c->splat_own_used) return;
+  Buf t; memset(&t, 0, sizeof t);
+  buf_printf(&t, "static const unsigned char sp_splat_own_cls[%d] = {", c->nclasses + 1);
+  for (int i = 0; i < c->nclasses; i++) buf_printf(&t, "%d,", splat_class_is_own(c, i));
+  buf_puts(&t, "0};\n");
+  buf_splice(b, at, t.p);
+  free(t.p);
+}
+
 /* SystemCallError#initialize reads the errno through the class's own `Errno`
    constant, so a class of the program below SystemCallError that defines
    one picks the number its instances carry. The runtime knows the Errno
@@ -16383,6 +16395,7 @@ char *codegen_program(const NodeTable *nt) {
     fzl_emit_defs(b.p ? b.p : "", &fz);
     if (fz.len) buf_splice(&b, fzl_at, fz.p);
     free(fz.p); }
+  emit_splat_own_table(c, &b, fzl_at);
   if (g_line_map) line_map_reanchor(&b);
   free(g_procs.p); free(g_proc_protos.p);
   free(g_pd_protos.p); free(g_pd_defs.p);

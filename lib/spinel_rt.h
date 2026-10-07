@@ -14332,7 +14332,9 @@ static sp_Enumerator *sp_poly_bsearch_enum(sp_RbVal v) {
 /* The arguments a splat stands for in a list built for a proc, a Method or
    a yield, in a program with no way to a #to_a of its own (the compiler
    asks): sp_enum_items_from's items, and for an Integer, a Float, a Symbol,
-   true or false, a class or an object of the program the value itself.
+   true or false, a class or an object of a class the program wrote the
+   value itself (own[cls_id], the compiler's table: a class Spinel ships has
+   what Spinel wrote of CRuby's, which may answer #to_a where this has none).
    sp_enum_items_from has no items for such a value, so the argument was
    dropped. A String is left as it was: boxed here it would arrive as a
    copy, and a block that appends to its parameter would write to the copy. */
@@ -14349,10 +14351,11 @@ static SP_NOINLINE sp_PolyArray *sp_splat_arg_one(sp_RbVal v) {
   sp_PolyArray_push(r, v);
   return r;
 }
-static SP_NOINLINE sp_PolyArray *sp_splat_arg_items(sp_RbVal v) {
+static SP_NOINLINE sp_PolyArray *sp_splat_arg_items(sp_RbVal v, const unsigned char *own) {
   /* an Array, a Hash, a Range and every other builtin's object, nil and a String, as before */
   if (SP_LIKELY(v.tag == SP_TAG_OBJ))
-    return v.cls_id >= 0 && v.v.p != NULL ? sp_splat_arg_one(v) : sp_enum_items_from(v);
+    return v.cls_id >= 0 && v.v.p != NULL && own[v.cls_id] ? sp_splat_arg_one(v)
+                                                            : sp_enum_items_from(v);
   int one = v.tag == SP_TAG_INT || v.tag == SP_TAG_BIGINT || v.tag == SP_TAG_FLT ||
             v.tag == SP_TAG_SYM || v.tag == SP_TAG_BOOL || v.tag == SP_TAG_CLASS;
   return one ? sp_splat_arg_one(v) : sp_enum_items_from(v);
@@ -14360,8 +14363,9 @@ static SP_NOINLINE sp_PolyArray *sp_splat_arg_items(sp_RbVal v) {
 /* ... for the call of the Proc `p`. A lambda, and a Method's proc, counts
    its arguments: with the value dropped it raised ArgumentError, and it
    still does, the list being sp_enum_items_from's as before. */
-static inline sp_PolyArray *sp_splat_arg_items_of(sp_Proc *p, sp_RbVal v) {
-  return p && !p->lambda_p ? sp_splat_arg_items(v) : sp_enum_items_from(v);
+static inline sp_PolyArray *sp_splat_arg_items_of(sp_Proc *p, sp_RbVal v,
+                                                  const unsigned char *own) {
+  return p && !p->lambda_p ? sp_splat_arg_items(v, own) : sp_enum_items_from(v);
 }
 /* The items each_with_index walks on a boxed receiver: an Array's elements,
    and a Hash's [key, value] pairs, a Range's members or an Enumerator's
