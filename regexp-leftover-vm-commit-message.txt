@@ -1,0 +1,35 @@
+`s[re, n] = v` raises for a missing group after a computed value
+
+`s[/re/, n] = v` with a value that is not typed String and has code to
+run stored into a group that took no part in the match:
+
+    s = +"hello"
+    s[/(e)(x)?(l)/, 2] = [1, "Q"].last
+    p s   # "Qo"; CRuby raises IndexError "regexp group 2 not matched"
+
+and a number past the pattern's groups stored wherever an earlier,
+wider match had left a span (after `"abcdef" =~ /(a)(b)(c)(d)(e)(f)/`,
+`s[/(e)(l)/, 3] = [1, "Q"].last` made "hQhello"; CRuby raises
+IndexError "index 3 out of regexp").
+
+This arm reads its value after the match, and CRuby reads the value
+before it looks at the String, so the two group tests were left out
+ahead of a value that runs code: a value that raises must be heard
+first. They now come after it. What the match left (the span, and
+whether the number is within the pattern's groups) is noted before the
+value runs, since the value may match again; the value is read and
+held; then the two tests raise, in CRuby's order and with CRuby's
+messages. A value with nothing to run keeps the tests ahead of it, as
+it had them.
+
+Ten instructions a statement more with a value read from a call
+(722,685,669 to 724,687,380 over 200,000 statements, callgrind); none
+with a value in a local.
+
+Left as they are in this arm: a frozen receiver raises FrozenError
+first; a value of another kind (an Integer out of the call) raises its
+TypeError ahead of the group tests, where CRuby raises the IndexError;
+with a value that runs code a negative number and a group past the
+ninth still raise IndexError before the value is read.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

@@ -1,0 +1,1 @@
+slice!(re, n) cuts its group as a statement too

@@ -1,0 +1,25 @@
+`s[re, n] = v` counts a negative group back from the last one
+
+An index assignment by a Regexp and a group number refused every
+negative number:
+
+    s = +"hello"
+    s[/(e)(l)(l)/, -1] = "X"
+    p s
+
+raised IndexError "index -1 out of regexp"; CRuby prints "helXo". A
+negative number counts back from the last group there, and only one
+past the first group is out of the regexp.
+
+A number that is not a literal from 0 to 9 now names its group at run
+time. The group it comes to is tested like any other: one that took no
+part raises "regexp group 1 not matched" by the number it came to, as
+in CRuby, and a frozen receiver raises FrozenError only where CRuby
+gets as far. A literal from 0 to 9 is emitted as before, byte for byte,
+and so is the arm that tests no group because its value runs code of its
+own first: counted back there, a group that took no part would be
+spliced in at no position.
+
+Test: test/string_regexp_group_assign_negative.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

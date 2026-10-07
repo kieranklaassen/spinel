@@ -1,0 +1,27 @@
+slice!(re, n) cuts its group as a statement too
+
+`s.slice!(/re/, n)` with its value unused took the pattern for a
+position:
+
+    s = +"hello"
+    s.slice!(/(l)(l)/, 2)
+    p s
+
+raised TypeError "no implicit conversion of Regexp into Integer"; CRuby
+prints "helo". The statement form has arms of its own for a String, an
+Integer or a Range, and two Integers, and its two-argument arm read
+both arguments as Integers whatever the first was. It now declines a
+Regexp literal, so the statement falls to the arms that answer the
+value, which cut the group, and the value is dropped.
+
+A pattern that may have more than fifteen groups, counted by its
+parentheses, is left raising as it did: a match keeps no span past the
+fifteenth and the answering arm leaves the receiver whole there, so
+the raise would turn into a String silently not cut.
+
+Not touched: a group named by a String (`s.slice!(/(?<a>l)/, "a")`)
+raises TypeError before and after.
+
+Test: test/string_slice_bang_group_statement.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

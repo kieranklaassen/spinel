@@ -1,0 +1,1 @@
+`s[re, n] = v` counts a negative group back from the last one

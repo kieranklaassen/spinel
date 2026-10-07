@@ -1,0 +1,22 @@
+slice!(re, n) counts a negative group back and reaches the tenth
+
+slice! with a Regexp and a group number knew the groups 1 to 9 by the
+Strings the match keeps. Any other number answered nil and left the
+receiver whole:
+
+    s = +"hello"
+    p s.slice!(/(e)(l)(l)/, -1), s
+
+printed nil and "hello"; CRuby prints "l" and "helo". So did the tenth
+group and beyond of a pattern that has them.
+
+A number that is not a literal from 0 to 9 is now settled at run time: a
+negative one counts back from the last group (and one past the first is
+nil, as in CRuby), and a group from the tenth to the fifteenth, as far
+as spans are kept, is cut out of the receiver by its span and held while
+the receiver is rebuilt. A literal from 0 to 9 is emitted as before,
+byte for byte.
+
+Test: test/string_slice_bang_group_number.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

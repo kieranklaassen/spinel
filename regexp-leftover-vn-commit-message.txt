@@ -1,0 +1,33 @@
+`s[re, n] = v` counts its group after a computed value too
+
+`s[/re/, n] = v` with a value that is not typed String and has code to
+run (a call, an element of an Array of several kinds) still refused
+every negative group number and every group past the ninth:
+
+    s = +"hello"
+    s[/(e)(l)(l)/, -1] = [1, "X"].last
+    p s
+
+raised IndexError "index -1 out of regexp"; CRuby prints "helXo". With
+any other value the number already named its group at run time.
+
+Where the number is not a literal from 0 to 9, this arm now names the
+group as the other one does: a negative number counts back from the
+last group, and a group up to the fifteenth is replaced by its span.
+The value runs before the group is tested, as in CRuby, so a group
+that took no part raises "regexp group N not matched", by the number
+it came to, once the value has run. A number that names no group at
+all (past the pattern's groups, or a negative one past the first) is
+refused ahead of the value, as it was: with a value of another kind
+CRuby raises that IndexError and not the value's TypeError. A literal
+from 0 to 9 is emitted as before, byte for byte.
+
+One instruction a statement more with the number in a variable
+(728,082,970 to 728,282,970 over 200,000 statements, callgrind).
+
+Left as it is: where the number names no group, a value that prints or
+raises is still not heard before the IndexError.
+
+Test: test/string_regexp_group_assign_value_number.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

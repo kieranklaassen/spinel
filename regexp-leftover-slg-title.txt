@@ -1,0 +1,1 @@
+slice!(re, n) counts a negative group back and reaches the tenth

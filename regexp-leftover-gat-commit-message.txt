@@ -1,0 +1,21 @@
+`s[re, n] = v` replaces the tenth group and beyond
+
+An index assignment by a Regexp and a group number refused every group
+past the ninth:
+
+    w = +"abcdefghijklm"
+    w[/(a)(b)(c)(d)(e)(f)(g)(h)(i)(j)(k)(l)/, 10] = "X"
+    p w
+
+raised IndexError "index 10 out of regexp"; CRuby prints
+"abcdefghiXklm".
+
+The assignment replaces a group by its span, and the spans of the
+groups up to the fifteenth are kept, so the arm that names its group at
+run time now takes them, with the tests it makes of any group: past the
+pattern's groups is "out of regexp", and a group that took no part is
+"not matched". A group past the fifteenth is refused as before.
+
+Test: test/string_regexp_group_assign_tenth.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
