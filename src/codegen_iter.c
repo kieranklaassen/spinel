@@ -5412,13 +5412,25 @@ static int iter_range_upto_arms(Compiler *c, int id, Buf *b, int indent, const N
   return -1;
 }
 
+/* The local of a block's parameter `idx`, whose name the emitter holds as
+   `ren`. A method that yields is spliced into its caller with its locals
+   renamed (rename_local), and each is declared in its scope under the name
+   it was written with: asked by the new name alone, the parameter of a zip
+   or a combination in such a method was not found and never bound. */
+static LocalVar *block_param_local(Compiler *c, Scope *sc, int block, int idx, const char *ren) {
+  if (!sc || !ren) return NULL;
+  LocalVar *lv = scope_local(sc, ren);
+  const char *wr = lv ? NULL : block_param_name(c, block, idx);
+  return wr ? scope_local(sc, wr) : lv;
+}
+
 /* Combinatorial rows are boxed PolyArrays even when the parameter keeps
    the element-array type inferred from a yield-set receiver. Convert that
    row to the parameter's array representation before binding it. */
 static void emit_poly_combination_param(Compiler *c, int block, const char *pn,
                                         int tc, int ti, int indent, Buf *b) {
   Scope *sc = comp_scope_of(c, block);
-  LocalVar *lv = sc ? scope_local(sc, pn) : NULL;
+  LocalVar *lv = block_param_local(c, sc, block, 0, pn);
   TyKind pt = lv ? lv->type : TY_UNKNOWN;
   emit_indent(b, indent);
   if (pt == TY_POLY_ARRAY)
@@ -5468,7 +5480,7 @@ static int iter_combination_cons_arms(Compiler *c, int id, Buf *b, int indent, c
     emit_indent(b, indent + 1); buf_printf(b, "for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++) {\n", ti, ti, tc, ti);
     if (p0) {
       Scope *cbsc = comp_scope_of(c, block);
-      LocalVar *clv = cbsc ? scope_local(cbsc, p0) : NULL;
+      LocalVar *clv = block_param_local(c, cbsc, block, 0, p0);
       TyKind cpt = clv ? clv->type : TY_UNKNOWN;
       emit_indent(b, indent + 2);
       if (cpt == TY_POLY || cpt == TY_UNKNOWN)
@@ -5534,7 +5546,7 @@ static int iter_combination_cons_arms(Compiler *c, int id, Buf *b, int indent, c
     emit_indent(b, indent + 1); buf_printf(b, "for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++) {\n", ti, ti, tc, ti);
     if (p0) {
       Scope *cbsc = comp_scope_of(c, block);
-      LocalVar *clv = cbsc ? scope_local(cbsc, p0) : NULL;
+      LocalVar *clv = block_param_local(c, cbsc, block, 0, p0);
       TyKind cpt = clv ? clv->type : TY_UNKNOWN;
       emit_indent(b, indent + 2);
       if (cpt == TY_FLOAT_ARRAY)
@@ -6069,8 +6081,8 @@ static int iter_ewi_zip_poly_arms(Compiler *c, int id, Buf *b, int indent, const
         if (ty_is_array(a0t)) hoist_loop_recv(c, a0t, &ob, b, indent);
       }
       Scope *zs = comp_scope_of(c, id);
-      LocalVar *zlv0 = (p0 && zs) ? scope_local(zs, p0) : NULL;
-      LocalVar *zlv1 = (p1n && zs) ? scope_local(zs, p1n) : NULL;
+      LocalVar *zlv0 = block_param_local(c, zs, block, 0, p0);
+      LocalVar *zlv1 = block_param_local(c, zs, block, 1, p1n);
       int zs0 = 0, zs1 = 0;
       if (p0 && zlv0) zs0 = emit_shadow_save(c, zlv0->type, p0, b, indent);
       if (p1n && zlv1) zs1 = emit_shadow_save(c, zlv1->type, p1n, b, indent);
