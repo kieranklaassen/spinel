@@ -3819,6 +3819,8 @@ static int emit_str_mutator_call(Compiler *c, int id, Buf *b, const NodeTable *n
     if (comp_ntype(c, argv[0]) == TY_INT) { buf_puts(b, "sp_int_chr("); emit_int_expr(c, argv[0], b); buf_puts(b, ")"); }
     else emit_str_expr(c, argv[0], b);
     buf_puts(b, ")");
+    /* the String so far is held by nothing else while the next argument is made */
+    if (argc > 1) buf_printf(b, "; SP_GC_ROOT_STR(_t%d)", tn9);
     for (int a9 = 1; a9 < argc; a9++) {
       buf_printf(b, "; _t%d = sp_str_append_bytes(_t%d, ", tn9, tn9);
       if (comp_ntype(c, argv[a9]) == TY_INT) { buf_puts(b, "sp_int_chr("); emit_int_expr(c, argv[a9], b); buf_puts(b, ")"); }
