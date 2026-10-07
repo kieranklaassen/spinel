@@ -14473,6 +14473,22 @@ static const char *an_reader_ivar_of(Compiler *c, int node, int *defc,
   if (*defc < 0) *defc = c->scopes[rmi].class_id;
   return buf;
 }
+/* 1 when the method `v` is written in (or the top level) has a write that
+   builds onto a String local only while the local is a copy: a pattern
+   match (`case/in`, and `=>` and `in` as the desugaring leaves them) or a
+   Regexp match that writes named captures. */
+static int an_scope_writes_string_copy(Compiler *c, int v) {
+  const NodeTable *nt = c->nt;
+  Scope *vs = comp_scope_of(c, v);
+  NT_FOREACH_KIND(nt, NK_CaseMatchNode, id) {
+    if (comp_scope_of(c, id) == vs) return 1;
+  }
+  for (int id = 0; id < nt->count; id++) {
+    const char *ty = nt_type(nt, id);
+    if (ty && sp_streq(ty, "MatchWriteNode") && comp_scope_of(c, id) == vs) return 1;
+  }
+  return 0;
+}
 /* Does local `vn` participate in a pure alias (`x = vn` or `vn = x`)? */
 /* The LocalVariableReadNode an aliasing string write bottoms out at: a bare
    local read, or a value-position `<<`/`concat` chain over one (the chain's
@@ -14480,7 +14496,15 @@ static const char *an_reader_ivar_of(Compiler *c, int node, int *defc,
 static int an_strbuf_alias_source(Compiler *c, int v) {
   const NodeTable *nt = c->nt;
   int via_self = 0;
-  for (int depth = 0; v >= 0 && depth < 64; depth++) {
+  /* no depth limit: every step goes down to a child, and a chain is as
+     long as the program writes it (at 64 links `t = s << a << ...` stopped
+     naming s, and t became a copy). One method keeps the 64: one with a
+     write that needs the copy (an_scope_writes_string_copy). A pattern's
+     binding onto t or s, or of their String onto a third local, and a named
+     capture onto t build only where t is a copy, so naming s there would
+     lose a program that is right. */
+  for (int depth = 0; v >= 0; depth++) {
+    if (depth == 64 && an_scope_writes_string_copy(c, v)) return -1;
     const char *vt = nt_type(nt, v);
     if (!vt) return -1;
     if (sp_streq(vt, "ParenthesesNode")) {

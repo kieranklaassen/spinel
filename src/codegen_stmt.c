@@ -1443,6 +1443,43 @@ static int emit_strbuf_chain_in_place(Compiler *c, int v, int base, const char *
   return 1;
 }
 
+/* An aliasing write's chain of 64 or more one-argument `<<` / `concat`
+   links over a handle base (`t = s << a << ...`): the base's handle is taken
+   once and each link appends to it in place, innermost first; the value is
+   that handle. In the value form each link is a statement expression inside
+   the link above it, and a C compiler bounds that nesting (clang at 256). 0
+   for a shorter chain or any other link, which keep the value form. */
+static int emit_strbuf_long_chain_flat(Compiler *c, int v, int base, const char *bref, Buf *b) {
+  const NodeTable *nt = c->nt;
+  int n = 0;
+  for (int cur = unwrap_parens(c, v); cur != base; cur = unwrap_parens(c, nt_ref(nt, cur, "receiver"))) {
+    if (cur < 0 || nt_kind(nt, cur) != NK_CallNode) return 0;
+    const char *nm = nt_str(nt, cur, "name");
+    int a = nt_ref(nt, cur, "arguments"), ac = 0;
+    if (a >= 0) nt_arr(nt, a, "arguments", &ac);
+    if (!nm || !is_append_concat(nm) || ac != 1 || nt_ref(nt, cur, "block") >= 0) return 0;
+    n++;
+  }
+  if (n < 64) return 0;
+  int *args = malloc(sizeof(int) * n);
+  int na = 0;
+  for (int cur = unwrap_parens(c, v); cur != base; cur = unwrap_parens(c, nt_ref(nt, cur, "receiver"))) {
+    int ac = 0;
+    args[na++] = nt_arr(nt, nt_ref(nt, cur, "arguments"), "arguments", &ac)[0];
+  }
+  int th = ++g_tmp;
+  char rt[48]; snprintf(rt, sizeof rt, "sp_String_cstr(_t%d)", th);
+  buf_printf(b, "({ sp_String *_t%d = %s; ", th, bref);
+  for (int i = na - 1; i >= 0; i--) {
+    buf_printf(b, "sp_String_append(_t%d, ", th);
+    emit_str_append_arg(c, args[i], rt, b);
+    buf_puts(b, "); ");
+  }
+  buf_printf(b, "_t%d; })", th);
+  free(args);
+  return 1;
+}
+
 /* Is v (through single-statement parentheses) a write (`=`, `||=`, `&&=`)
    of a global (or `=` of a constant) holding the shared handle? Its slot's
    text to out. */
@@ -1555,9 +1592,11 @@ void emit_strbuf_value(Compiler *c, LocalVar *lv, int v, Buf *b) {
     }
     else if (cb9 != v && shared &&
         strbuf_slot_ref(c, cb9, srefC9, sizeof srefC9)) {
-      buf_puts(b, "({ (void)(");
-      emit_expr(c, v, b);
-      buf_printf(b, "); %s; })", srefC9);
+      if (!emit_strbuf_long_chain_flat(c, v, cb9, srefC9, b)) {
+        buf_puts(b, "({ (void)(");
+        emit_expr(c, v, b);
+        buf_printf(b, "); %s; })", srefC9);
+      }
     }
     else {
       /* otherwise a mutable-string local wraps the (const char*) RHS in a
