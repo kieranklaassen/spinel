@@ -1,0 +1,56 @@
+Refuse a String a block appends to through a reassigned parameter
+
+    def run(s) = yield(s)
+    s = +"a"
+    run(s) { |k| k ||= +"z"; k << "x" }
+    p s               # CRuby: "ax"    Spinel: "a"
+
+A block parameter the body assigns is renamed (`|k__bpin| k = k__bpin`,
+desugar_reassigned_block_params), so `k` is a local that is assigned
+again. Such a local is no pure alias of the parameter, dyn_lit_bits
+leaves its appends out, and no call pulls the caller's variable into
+the shared handle: the block grows a copy and the caller's String keeps
+its old bytes without a word. A proc and a lambda have the same hole
+for a local of their own (`->(k) { t = k; t ||= d; t << x }`). An
+append that fits the buffer the two still point at is seen, so a short
+append on a String that has grown before passes and a longer one is
+lost.
+
+dyn_lit_lost reads the body's statements in order and answers the
+parameters whose String is appended to through such a local: it holds
+the parameter from `t = k` until a statement gives it another value on
+every path (dyn_rebinds_all_paths): a write (`t = t.dup`, `t += x`,
+`t &&= v`, `t, j = v, w`, `j = t = v`); an `if`, an `unless`, a `case`
+or a `case/in` that has one on every arm, an else among them (a
+`case/in` needs none: a miss raises); a `begin` whose ensure has one,
+or whose body and every rescue have one; and `(t = v) << x`, whose
+write runs first. A write under a condition with no else, in a loop or
+in a begin's body alone leaves it holding. The answer travels beside
+the append bit (DynReach.lost; a proc form takes it from the method it
+copies, as it takes the append bits) and is asked only where a String
+variable is already refused or shared:
+
+- `f.call(s)`, `f.(s)`, `f[s]` and a yield into a proc passed with `&`;
+- a call with a literal block to a method that yields its parameter,
+  or calls its `&blk` with it, where the yield does not lend the block
+  the variable (block_param_wants_alias).
+
+A variable that is the shared handle already, handed to a parameter
+that is one, is shared as before and is not refused. Under
+--share-strings nothing is refused here (refuse_lost_append stands
+down: what the local holds is the rule's to say); the five tests are in
+test/share/reject.list.
+
+The same call site refuses a String variable in an Array literal bound
+to a parameter the method yields with a splat (`def y(a) = yield(*a)`;
+`y([s]) { |k| k << "x" }`), which was a copy for a plain append too.
+
+Still a silent copy, and not touched here: a value that reaches the
+local through a conditional or a method (`t = c ? k : d`, `t =
+same(k)`), an arm that takes the String back through a second local
+(`o = k; if c then k = +"p" else k = o end`), an Array variable
+splatted into the yield, a splat after a leading argument
+(`yield(n, *a)`), the iterators (`each`, `then`, `tap`), and a block
+forwarded with `&` through a second method.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
