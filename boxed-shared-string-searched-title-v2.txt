@@ -1,0 +1,1 @@
+A boxed String appended to is still a String to include? and casecmp

@@ -1,0 +1,21 @@
+A boxed String appended to is still a String to include? and casecmp
+
+    h = { "k" => +"ab", "n" => 1 }
+    h["k"] << "c"
+    p %w[abc cd].include?(h["k"]), "ABC".casecmp?(h["k"])
+
+prints true and true in CRuby and false and nil here. Without the append
+both are right.
+
+The append makes the Hash's String a shared handle, and the box around
+it then carries the handle where it carried the bytes. A String Array's
+include?, member?, index, find_index, rindex and delete, a String
+Range's include? and cover?, and casecmp and casecmp? each ask the box
+whether its tag is a String's, and the handle's is not: the search
+missed and casecmp answered nil.
+
+The emitters now read the argument through sp_poly_strbuf_deref, as
+String#== does for a boxed argument. A box that holds no String answers
+as before.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

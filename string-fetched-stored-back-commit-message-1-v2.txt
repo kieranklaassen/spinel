@@ -1,0 +1,36 @@
+A String fetched from a boxed container and stored back takes appends
+
+    h = {}
+    %w[a b a a].each do |w|
+      fresh = !h.key?(w)
+      h[w] = h.fetch(w, +"")
+      h[w] << "," unless fresh
+      h[w] << w
+    end
+    p h.to_a
+
+prints [["a", "a,a,a"], ["b", "b"]] in CRuby and did here until pull
+request 7462 ("A String handle demanded of a value that later widens is
+no handle"); since then it prints [["a", ""], ["b", ""]]. The Array
+form, `a[i] = a.fetch(i, +"")`, loses the append the same way, and
+`concat`, `prepend`, `setbyte`, `slice!` and `reverse!` on such an
+element raise NoMethodError.
+
+The fetch is a read the append's handle is demanded of, and its own
+value is boxed. While such a read was typed the handle, the store boxed
+it as one (emit_boxed_strbuf's element arm). That change types it as the
+boxed value it is, and the store then took the box as it came: a plain
+String in it stayed a plain String, the element held a value, and the
+append answered a new String that nothing kept.
+
+The store of such a read now lifts the box with sp_poly_strbuf_lift, the
+helper a boxed variable handed to an appending callee already goes
+through: a plain String becomes the handle, as it did before, and any
+other value passes as the box it is, as that change made it. The read's
+type stays as it left it; only the boxing of a marked element read
+changes.
+
+A Hash with Symbol keys and the block form on a Hash (`h.fetch(k) { +""
+}`) lost the append before that change as well and still do.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
