@@ -116,6 +116,8 @@ typedef struct ShareFacts {
      scopes by name, sorted for a binary search (built on first use) */
   struct ShNamed { const char *name; int k; } *attr_r, *attr_w;
   int nattr_r, nattr_w, named_built;
+  /* each node's parent, built for the first `o.x ||= s` (sh_orw_attr_slot) */
+  int *node_parent;
 } ShareFacts;
 
 /* ---- the union-find ---- */
@@ -919,6 +921,39 @@ static int sh_attr_ivars(ShareFacts *F, Compiler *c, const char *name, int node,
   return r;
 }
 
+/* The slot `o.x ||= s` / `o.x &&= s` (node n) stores into, where the store
+   is the one `o.x = s` makes: the value is the read of a local that holds a
+   String, the write is a statement, and `x` and `x=` are attr methods with
+   no method of either name written by hand. -1 for any other conditional
+   attribute write: its value stays unknown, as it was. An element, a
+   container or a call's answer on the right is not this store, and a write
+   whose value is used hands on what the reader answers. */
+static int sh_orw_attr_slot(ShareFacts *F, Compiler *c, int n, int value) {
+  const NodeTable *nt = c->nt;
+  NodeKind k = nt_kind(nt, n);
+  if (k != NK_CallOrWriteNode && k != NK_CallAndWriteNode) return -1;
+  if (value < 0 || nt_kind(nt, value) != NK_LocalVariableReadNode) return -1;
+  TyKind vt = comp_ntype(c, value);
+  if (vt != TY_STRING && vt != TY_STRBUF) return -1;
+  const char *name = nt_str(nt, n, "name");
+  size_t ln = name ? strlen(name) : 0;
+  if (!ln || name[ln - 1] == '=') return -1;
+  if (!F->node_parent) F->node_parent = an_parent_map(nt);
+  int st = F->node_parent ? F->node_parent[n] : -1;
+  int sn = 0;
+  const int *sb = st >= 0 && nt_kind(nt, st) == NK_StatementsNode ? nt_arr(nt, st, "body", &sn) : NULL;
+  if (!sb || sb[sn - 1] == n) return -1;
+  for (int i = 0; i < c->nscopes; i++) {
+    const char *mn = c->scopes[i].name;
+    if (mn && !strncmp(mn, name, ln) && (!mn[ln] || (mn[ln] == '=' && !mn[ln + 1]))) return -1;
+  }
+  sh_named_build(F, c);
+  int w = sh_named_first(F->attr_w, F->nattr_w, name);
+  if (w >= F->nattr_w || !sp_streq(F->attr_w[w].name, name)) return -1;
+  int writer = 0;
+  return sh_attr_ivars(F, c, name, n, &writer);
+}
+
 static int sh_unknown_call(ShareFacts *F, Compiler *c, int n, int blk);
 
 /* The share-row semantics of builtin call n. Answers its value. */
@@ -1671,12 +1706,11 @@ static int sh_val_compute(ShareFacts *F, Compiler *c, int n) {
     return e;
   }
   case NK_OperatorWriteNode: case NK_CallOrWriteNode: case NK_CallAndWriteNode: {
-    int v = sh_val(F, c, nt_ref(nt, n, "value"));
-    const char *rn = nt_str(nt, n, "read_name");
-    int writer = 0;
-    int iv = rn ? sh_attr_ivars(F, c, rn, n, &writer) : -1;
+    int value = nt_ref(nt, n, "value");
+    int v = sh_val(F, c, value);
+    int iv = sh_orw_attr_slot(F, c, n, value);
     if (iv < 0) { sh_union(F, v, F->unknown); return F->unknown; }
-    sh_ivar_store(F, c, iv, nt_ref(nt, n, "value"), v);
+    sh_ivar_store(F, c, iv, value, v);
     return iv;
   }
   case NK_ForNode:
@@ -2109,7 +2143,7 @@ static void sh_free(ShareFacts *F) {
   free(F->h); free(F->helem); free(F->bucket); free(F->hnext); free(F->nval);
   free(F->lend_arg); free(F->lend_par); free(F->lend_direct); free(F->lend_done);
   free(F->dyn); free(F->union_stack);
-  free(F->any_new_blk); free(F->attr_r); free(F->attr_w);
+  free(F->any_new_blk); free(F->attr_r); free(F->attr_w); free(F->node_parent);
   free(F->jump); free(F->jseen);
   free(F->key); free(F->lk_c); free(F->lk_k); free(F->lk_done);
   free(F);
