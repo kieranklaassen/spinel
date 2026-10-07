@@ -1,0 +1,1 @@
+dump and undump keep a binary String binary

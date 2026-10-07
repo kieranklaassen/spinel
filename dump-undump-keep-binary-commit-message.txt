@@ -1,0 +1,14 @@
+dump and undump keep a binary String binary
+
+Both answered a UTF-8 String whatever their receiver was. A binary
+String that went through them counted characters again, and dump
+wrote the bytes of a binary String as the \u escape of a character
+it does not hold: "a\xC3\xA9".b.dump was "aé" where CRuby
+writes "a\xC3\xA9".
+
+dump now writes each byte past ASCII of a binary receiver as \xHH and
+answers a binary String for one. undump answers in its receiver's
+encoding, or UTF-8 when the dump holds a \u escape, as CRuby does.
+A UTF-8 receiver gets the bytes it got.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

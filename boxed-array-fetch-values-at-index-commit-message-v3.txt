@@ -1,0 +1,25 @@
+fetch and values_at on a boxed Array refuse an index that is no Integer
+
+    def pick(n) = n > 0 ? {a: 1} : [10, "s", :z]
+    h = pick(0)
+    p h.fetch(true)       # 10; CRuby raises TypeError
+    p h.values_at(:a)     # ["s"]; CRuby raises TypeError
+    p h.fetch(1.5)        # 10; CRuby: "s"
+
+sp_poly_fetch and sp_poly_arr_values_at read the index of a boxed Array
+with sp_poly_to_i, which answers a number for anything: a Symbol, a
+String, true or an Array read element 0 or another wrong one, and
+fetch read a Float as 0 once it was in bounds. Both now convert the
+index as fetch with a block already does (sp_poly_fetch_blk), with
+sp_poly_arg_int_chk: a Float is cut, anything that is no number is
+CRuby's TypeError. An Integer index does not pay for it: fetch reads
+the element by the index it has converted, where it went back through
+the generic index, and values_at takes an Integer as it is. A Float
+Range in values_at, which CRuby slices by, is left to sp_poly_to_i as it
+was: converting it would raise where no raise is due.
+
+No generated C changes: the two functions are in lib/spinel_rt.h.
+
+Test: test/boxed_array_fetch_index.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

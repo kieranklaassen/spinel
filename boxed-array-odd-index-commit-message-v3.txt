@@ -1,0 +1,21 @@
+A Float, true or Array index on a boxed Array is not element 0
+
+    def pick(n) = n > 0 ? {a: 1} : [10, "s", :z]
+    h = pick(0)
+    p h[1.5]    # 10; CRuby: "s"
+    p h[true]   # 10; CRuby raises TypeError
+
+sp_poly_index_poly read a boxed Array through any index that was no
+Integer, nil, String, Symbol or Range as index 0. Such an index now
+converts as an Integer argument does (sp_poly_arg_int_chk): a Float or a
+Rational is cut, an object answers to_int, and true, false, an Array or
+a Hash is CRuby's TypeError. That is the read behind `h[i]`, `h.at(i)`
+and `h[i] ||= v`. An Integer index takes the line's first arm as before.
+A Float Range, which CRuby slices by, is left reading element 0:
+converting it would raise where no raise is due.
+
+No generated C changes: the function is in lib/spinel_rt.h.
+
+Test: test/boxed_array_index_not_integer.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

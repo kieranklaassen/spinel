@@ -1,0 +1,1 @@
+fetch and values_at on a boxed Array refuse an index that is no Integer
