@@ -1500,6 +1500,7 @@ void emit_proc_yield(Compiler *c, const char *ref, int yargc, const int *yargv, 
     g_yield_proc_expr = sv; }
   if (call_args_need_spread(c->nt, yargv, yargc)) {
     char kwp[24];
+    g_splat_callee = ref;   /* a lambda passed with `&` is asked too */
     int ta = emit_spread_args_kw(c, yargv, yargc, kwp, sizeof kwp);
     buf_printf(b, "sp_proc_yield_spread(%s, sp_box_poly_array(_t%d), %s)", ref, ta, kwp);
     return;

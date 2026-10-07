@@ -22763,12 +22763,135 @@ int emit_spread_args_kw(Compiler *c, const int *argv, int argc, char *kwpos, siz
 }
 
 int emit_spread_args(Compiler *c, const int *argv, int argc) {
+  g_splat_callee = "";   /* a literal block, bound in place */
   return emit_spread_args_into(c, argv, argc, NULL);
+}
+
+/* What the spread list being built is for, set by the caller and taken by
+   emit_spread_args_into as it starts: the C text of the Proc it calls, ""
+   for a literal block, NULL for a Method or a callee not in hand. */
+const char *g_splat_callee = NULL;
+
+/* In a program with no way to a #to_a, a splatted value that is no
+   collection is the argument itself (sp_splat_arg_items), a boxed one
+   decided at run time. The kind asked is the operand's own, never what its
+   #to_a call answers. Every other kind is spread as before; so is a
+   String, which would arrive in the list as a copy. */
+/* The operators a boxed receiver does not ask its class for: a comparison
+   of a boxed object is the builtin one (`q <=> 1` answers 1, `q != 1` true,
+   `+q` q itself, whatever the class wrote), and an object handed over
+   arrives boxed. Does class `cid`, a class above it or a module one of them
+   includes write such an operator? */
+static int splat_class_writes_blind_op(Compiler *c, int cid, int depth) {
+  static const char *const ops[] = { "!=", "<", "<=", ">", ">=", "<=>", "-@", "+@", "~", "!",
+                                     NULL };
+  if (depth > 64) return 1;
+  for (int u = cid; u >= 0 && u < c->nclasses; u = c->classes[u].parent) {
+    const ClassInfo *ci = &c->classes[u];
+    for (int i = 0; ops[i]; i++) {
+      if (comp_method_in_class(c, u, ops[i]) >= 0) return 1;
+      for (int k = 0; k < ci->naliases; k++)
+        if (sp_streq(ci->alias_new[k], ops[i])) return 1;
+    }
+    for (int i = 0; i < ci->nincluded_mods; i++)
+      if (splat_class_writes_blind_op(c, ci->included_mods[i], depth + 1)) return 1;
+  }
+  return 0;
+}
+
+/* Is an object of class `cid` handed over as itself: the program's own
+   class (splat_class_is_own) whose operators a boxed receiver reaches? */
+int splat_class_arrives_boxed(Compiler *c, int cid) {
+  if (!splat_class_is_own(c, cid)) return 0;
+  for (int i = 0; i < c->ntoplevel_includes; i++)
+    if (splat_class_writes_blind_op(c, c->toplevel_includes[i], 0)) return 0;
+  return !splat_class_writes_blind_op(c, cid, 0);
+}
+
+/* Does the program reopen a class Spinel has built in whose value a splat
+   hands over? The value arrives boxed, and a boxed receiver runs the builtin
+   method whatever the program wrote there (`q = [1.5, "s"][0]; q + 2.0` with
+   Float#+ reopened answers 3.5): such a program keeps the list it had. */
+static int splat_program_reopens_value_class(Compiler *c) {
+  static const char *const classes[] = { "Integer", "Float", "Symbol", "TrueClass", "FalseClass",
+                                         "NilClass", "Numeric", "Comparable", "Object", "Kernel",
+                                         "Class", "Module", NULL };
+  for (int k = 0; classes[k]; k++) {
+    int ci = comp_class_index(c, classes[k]);
+    if (ci < 0) continue;
+    for (int i = 0; i < c->nscopes; i++)
+      if (c->scopes[i].class_id == ci) return 1;
+  }
+  return 0;
+}
+
+static int splat_arg_is_one(Compiler *c, int sx) {
+  const NodeTable *nt = c->nt;
+  const char *sn = sx >= 0 && nt_kind(nt, sx) == NK_CallNode ? nt_str(nt, sx, "name") : NULL;
+  TyKind st = sx >= 0 && !(sn && sp_streq(sn, "to_a")) ? comp_ntype(c, sx) : TY_UNKNOWN;
+  int one = ty_is_object(st) ? splat_operand_is_plain_object(c, st) &&
+                               splat_class_arrives_boxed(c, ty_object_class(st))
+          : (st == TY_INT || st == TY_BIGINT || st == TY_FLOAT || st == TY_SYMBOL ||
+             st == TY_BOOL || st == TY_CLASS || st == TY_POLY) &&
+            !splat_program_may_make_to_a(c);
+  return one && !splat_program_reopens_value_class(c);
+}
+
+/* Does this subtree run no method at all: a local, an ivar, self or a
+   literal, in parentheses or not? An operator and an index are calls, and the
+   program may have written them (`class Float; def +`). */
+static int subtree_runs_no_method(const NodeTable *nt, int id) {
+  if (id < 0) return 1;
+  switch (nt_kind(nt, id)) {
+    case NK_LocalVariableReadNode: case NK_InstanceVariableReadNode:
+    case NK_ClassVariableReadNode: case NK_SelfNode: case NK_IntegerNode:
+    case NK_FloatNode: case NK_NilNode: case NK_TrueNode: case NK_FalseNode:
+    case NK_SymbolNode:
+      return 1;
+    case NK_ParenthesesNode: case NK_StatementsNode:
+      break;
+    default:
+      return 0;
+  }
+  int nr = nt_num_refs(nt, id);
+  for (int i = 0; i < nr; i++)
+    if (!subtree_runs_no_method(nt, nt_ref_at(nt, id, i))) return 0;
+  int na = nt_num_arrs(nt, id);
+  for (int i = 0; i < na; i++) {
+    int n = 0;
+    const int *ids = nt_arr_at(nt, id, i, &n);
+    for (int j = 0; j < n; j++)
+      if (!subtree_runs_no_method(nt, ids[j])) return 0;
+  }
+  return 1;
+}
+
+/* Does every argument, a splat's operand too, run no method? */
+int spread_args_pure_reads(Compiler *c, const int *argv, int argc) {
+  const NodeTable *nt = c->nt;
+  for (int k = 0; k < argc; k++) {
+    int splat = nt_kind(nt, argv[k]) == NK_SplatNode;
+    if (!subtree_runs_no_method(nt, splat ? nt_ref(nt, argv[k], "expression") : argv[k])) return 0;
+  }
+  return 1;
+}
+
+/* Does a splat among the arguments hand such a value over as itself? */
+int spread_args_take_one(Compiler *c, const int *argv, int argc) {
+  const NodeTable *nt = c->nt;
+  for (int k = 0; k < argc; k++) {
+    if (nt_kind(nt, argv[k]) != NK_SplatNode) continue;
+    if (splat_arg_is_one(c, nt_ref(nt, argv[k], "expression"))) return 1;
+  }
+  return 0;
 }
 
 /* kwflag: a C int set to 2 when a trailing keyword-splat-only hash is pushed */
 int emit_spread_args_into(Compiler *c, const int *argv, int argc, const char *kwflag) {
   const NodeTable *nt = c->nt;
+  /* taken here: an argument's own call builds its own list */
+  const char *callee = g_splat_callee;
+  g_splat_callee = NULL;
   g_needs_proc_poly_argslot = 1;
   int ta = ++g_tmp;
   emit_indent(g_pre, g_indent);
@@ -22780,11 +22903,20 @@ int emit_spread_args_into(Compiler *c, const int *argv, int argc, const char *kw
       int sx = nt_ref(nt, argv[k], "expression");
       if (sx >= 0) emit_boxed(c, sx, &ab);
       int ts = ++g_tmp, ti = ++g_tmp;
+      /* one value that is no collection (splat_arg_is_one) is the argument
+         itself for a block or a proc; a lambda's call and a Method's keep
+         the list they had, a Proc asked at run time which it is */
+      int one = callee && splat_arg_is_one(c, sx);
+      const char *items = !one ? "sp_enum_items_from"
+                        : callee[0] ? "sp_splat_arg_items_of" : "sp_splat_arg_items";
       emit_indent(g_pre, g_indent);
-      buf_printf(g_pre, "{ sp_PolyArray *_t%d = sp_enum_items_from(%s); SP_GC_ROOT(_t%d);"
+      if (one) c->splat_own_used = 1;
+      buf_printf(g_pre, "{ sp_PolyArray *_t%d = %s(%s%s%s%s); SP_GC_ROOT(_t%d);"
                         " for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++)"
                         " sp_PolyArray_push(_t%d, _t%d->data[_t%d]); }\n",
-                 ts, ab.p ? ab.p : "sp_box_nil()", ts, ti, ti, ts, ti, ta, ts, ti);
+                 ts, items, one ? callee : "", one && callee[0] ? ", " : "",
+                 ab.p ? ab.p : "sp_box_nil()", one ? ", sp_splat_own_cls" : "",
+                 ts, ti, ti, ts, ti, ta, ts, ti);
     }
     else {
       emit_boxed(c, argv[k], &ab);

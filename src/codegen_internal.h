@@ -712,6 +712,9 @@ void emit_inline_bind_params(Compiler *c, Scope *m, int args, const int *argv, i
 /* A splat operand whose static type is nil or a scalar: Ruby spreads nil to
    nothing and any of the others to itself. */
 int splat_operand_is_scalar(TyKind t);
+int splat_program_may_make_to_a(Compiler *c);
+int splat_operand_is_plain_object(Compiler *c, TyKind t);
+int splat_class_is_own(Compiler *c, int cid);
 /* A keyword key the callee has no parameter for: emits the ArgumentError and
    returns 1. Shared by emit_args_filled and the INLINE parameter binding, which
    walks parameters looking for keys and so could not see an unclaimed one
@@ -860,6 +863,10 @@ int call_args_need_spread(const NodeTable *nt, const int *argv, int argc);
 int emit_spread_args(Compiler *c, const int *argv, int argc);
 int emit_spread_args_kw(Compiler *c, const int *argv, int argc, char *kwpos, size_t kwsz);
 int emit_spread_args_into(Compiler *c, const int *argv, int argc, const char *kwflag);
+extern const char *g_splat_callee;
+int splat_class_arrives_boxed(Compiler *c, int cid);
+int spread_args_take_one(Compiler *c, const int *argv, int argc);
+int spread_args_pure_reads(Compiler *c, const int *argv, int argc);
 void emit_proc_yield(Compiler *c, const char *ref, int yargc, const int *yargv, Buf *b);
 /* Unbox the boxed proc result (_sp_proc_poly_ret) to a call's inferred type. */
 void emit_proc_ret_unbox(Compiler *c, TyKind rty, Buf *b);

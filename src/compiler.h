@@ -856,9 +856,10 @@ typedef struct {
   int splat_to_a_may, splat_to_a_ncls, splat_to_a_nscopes;
   /* splat_class_is_own: per class, 1 where the program opens it and 2 where
      a packages/ file does (`node_pkg`), and the class count that was read
-     at, plus one */
+     at, plus one. splat_own_used: a list was built that reads the table
+     sp_splat_own_cls, so the program gets one. */
   unsigned char *splat_cls_from;
-  int splat_cls_from_n;
+  int splat_cls_from_n, splat_own_used;
 
   /* FFI registry: ffi_func declarations */
   FfiFunc *ffi_funcs;
