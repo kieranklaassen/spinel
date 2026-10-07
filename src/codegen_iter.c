@@ -4097,6 +4097,14 @@ int emit_tap_then_expr(Compiler *c, int id, Buf *b) {
   if (use_shadow && et == TY_POLY && tsaved0 == TY_INT) unbox = "sp_poly_to_i_or_nil";
   else if (use_shadow && et == TY_POLY && tsaved0 == TY_FLOAT) unbox = "sp_poly_to_f_or_nil";
   if (unbox) use_shadow = 0;
+  /* A parameter a closure in the body captures lives in a cell of its
+     DECLARED type. Declared boxed over a typed receiver (an empty Array
+     literal filled two blocks down: `[].tap { |acc| xs.each { |i| bag.each
+     { |v| acc << i * v } } }` with a `bag.each` the program wrote), a typed
+     shadow was stored into the boxed cell and the C did not build: the
+     receiver is boxed into the parameter instead, as the body was inferred. */
+  int cell_boxed = use_shadow && tlv0->is_cell && tsaved0 == TY_POLY;
+  if (cell_boxed) use_shadow = 0;
   int din = g_indent;
   if (use_shadow) {
     tlv0->type = et;
@@ -4111,6 +4119,10 @@ int emit_tap_then_expr(Compiler *c, int id, Buf *b) {
   else if (p0) {
     emit_indent(g_pre, g_indent);
     if (unbox) buf_printf(g_pre, "lv_%s = %s(_t%d);\n", p0, unbox, tr);
+    else if (cell_boxed) {
+      char src[32]; snprintf(src, sizeof src, "_t%d", tr);
+      buf_printf(g_pre, "lv_%s = ", p0); emit_boxed_text(c, et, src, g_pre); buf_puts(g_pre, ";\n");
+    }
     else buf_printf(g_pre, "lv_%s = _t%d;\n", p0, tr);
     /* The block's parameter may be CELLED -- something inside the body needs it
        as a proc's capture, which here means a dispatch arm that hands the inner
@@ -4966,6 +4978,10 @@ static int iter_tap_slice_string_arms(Compiler *c, int id, Buf *b, int indent, c
        receiver keeps its shadow path -- boxing would strip its methods and
        break `nums.tap { |a| a.sort! }`. */
     int tap_escapes = tlv0 && tsaved0 == TY_POLY && ty_is_object(et);
+    /* a captured parameter's cell is of its declared type: a typed shadow
+       stored into a boxed cell did not build (emit_tap_then_expr) */
+    int tap_cell_boxed = use_shadow_t && tlv0->is_cell && tsaved0 == TY_POLY;
+    if (tap_cell_boxed) tap_escapes = 1;
     /* A boxed receiver over a SCALAR param: keep the param typed and unbox
        the value into it (raising past the word, as the other typed sinks
        do) rather than shadowing it as boxed -- the body was inferred against
@@ -5001,7 +5017,7 @@ static int iter_tap_slice_string_arms(Compiler *c, int id, Buf *b, int indent, c
            that escapes through `yield(_1)` widens to poly, so box the object
            into it rather than assigning the raw pointer (#3140) */
         TyKind ptt = tlv0 ? tlv0->type : et;
-        if (ptt == TY_POLY && ty_is_object(et)) {
+        if (ptt == TY_POLY && (ty_is_object(et) || tap_cell_boxed)) {
           char src[32]; snprintf(src, sizeof src, "_t%d", tr);
           buf_printf(b, "lv_%s = ", p0);
           emit_boxed_text(c, et, src, b);
