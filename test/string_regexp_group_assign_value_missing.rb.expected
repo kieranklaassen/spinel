@@ -1,0 +1,26 @@
+[0, "hQlo"]
+[1, "hQllo"]
+[2, IndexError, "regexp group 2 not matched"]
+[3, "heQlo"]
+[4, IndexError, "index 4 out of regexp"]
+[9, IndexError, "index 9 out of regexp"]
+[10, IndexError, "index 10 out of regexp"]
+value ok
+[1, "hVllo"]
+value ok
+[2, IndexError, "regexp group 2 not matched"]
+value ok
+[4, IndexError, "index 4 out of regexp"]
+value boom
+[2, ArgumentError, "boom"]
+value boom
+[4, ArgumentError, "boom"]
+value boom
+[3, ArgumentError, "boom"]
+[1, "hBllo"]
+[2, IndexError, "regexp group 2 not matched"]
+[3, "heBlo"]
+[4, IndexError, "index 4 out of regexp"]
+[2, "heQlo"]
+[3, IndexError, "index 3 out of regexp"]
+[5, IndexError, "index 5 out of regexp"]

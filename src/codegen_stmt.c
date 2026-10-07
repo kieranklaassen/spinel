@@ -14706,16 +14706,29 @@ static int str_mutate_reassign_arms(Compiler *c, Buf *b, int indent, const NodeT
       NodeKind vk = nt_kind(nt, argv[2]);
       int tests = vk != NK_CallNode && vk != NK_ParenthesesNode &&
                   vk != NK_StatementsNode && subtree_is_pure_read(c, argv[2]);
-      /* untested, the number stays held to nine as it was: a negative one
-         may come to a group that took no part */
+      /* untested here, the number stays held to nine as it was; the group
+         tests of such a value come after it, below */
       emit_re_group_span(b, tn, tests, 0, !tests || re_group_small(c, argv[1]));
       /* the head and the value are held while the tail is cut: the joined
          head and value were in flight when the tail allocated, and a
          collection there freed them */
       int th = ++g_tmp, tv = ++g_tmp;
-      buf_printf(b, "const char *_t%d = sp_str_byteslice(_t%d, 0, _b); SP_GC_ROOT_STR(_t%d); ", th, ts, th);
+      if (tests)
+        buf_printf(b, "const char *_t%d = sp_str_byteslice(_t%d, 0, _b); SP_GC_ROOT_STR(_t%d); ", th, ts, th);
+      else
+        /* a value that runs code: what the match left is noted before the
+           value can match again, and the group tests raise once the value
+           has run, as CRuby raises them */
+        buf_printf(b, "int _m = _t%d >= sp_re_last_ncap ? 1 : _b < 0 ? 2 : 0; ", tn);
       buf_printf(b, "const char *_t%d = ", tv); emit_str_expr(c, argv[2], b); buf_puts(b, "; ");
       if (!subtree_is_pure_read(c, argv[2])) buf_printf(b, "SP_GC_ROOT_STR(_t%d); ", tv);
+      if (!tests) {
+        buf_printf(b, "if (_m == 1) sp_raise_cls(\"IndexError\", sp_sprintf(\"index %%lld out of regexp\","
+                      " (long long)_t%d)); ", tn);
+        buf_printf(b, "if (_m) sp_raise_cls(\"IndexError\","
+                      " sp_sprintf(\"regexp group %%lld not matched\", (long long)_t%d)); ", tn);
+        buf_printf(b, "const char *_t%d = sp_str_byteslice(_t%d, 0, _b); SP_GC_ROOT_STR(_t%d); ", th, ts, th);
+      }
       emit_expr(c, recv, b);
       buf_printf(b, " = sp_str_concat3(_t%d, _t%d, sp_str_byteslice(_t%d, _e, (sp_int)sp_str_byte_len(_t%d) - _e)); } }\n",
                  th, tv, ts, ts);
