@@ -4543,6 +4543,9 @@ static void emit_expr_node(Compiler *c, int id, Buf *b) {
         free(inner.p);
         return;
       }
+      /* A yield whose block answers nil at this site: its splice hands
+         back a bare 0, which the boxed consumer cannot take. */
+      if (ptt == TY_NIL && n == 1 && nt_kind(nt, bd[0]) == NK_YieldNode) { emit_boxed(c, bd[0], b); return; }
     }
     if (n == 1) {
       buf_puts(b, "("); emit_expr(c, bd[0], b); buf_puts(b, ")");
