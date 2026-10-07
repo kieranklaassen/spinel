@@ -8061,6 +8061,38 @@ static void ipt_work_end(IptWork *w) {
   free(w->bhead); free(w->bnext); free(w->bseen); free(w->cand); free(w->dirty);
 }
 
+/* `case v when obj` is `obj === v`: an arm object's own === (its == where
+   it has none, which Object#=== calls) takes the case subject as its
+   argument, as the call written out does and as a Proc arm's parameter
+   does (infer_block_params). Only a parameter another call has typed is
+   widened; one no call types, or that only a nil reaches, keeps the boxed
+   default it has. Left out, one `near === Pt.new(3)` typed the parameter
+   a Pt, and a case then compared a boxed subject with the arm as a value,
+   never a match, or passed a Float subject into an Integer parameter. */
+static int bind_when_arm_subject(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  int pred = nt_ref(nt, id, "predicate");
+  if (pred < 0) return 0;
+  int changed = 0, nw = 0;
+  const int *whens = nt_arr(nt, id, "conditions", &nw);
+  for (int k = 0; k < nw; k++) {
+    int wc = 0;
+    const int *wconds = nt_arr(nt, whens[k], "conditions", &wc);
+    for (int j = 0; j < wc; j++) {
+      TyKind wt = infer_type(c, wconds[j]);
+      if (!ty_is_object(wt)) continue;
+      int mi = comp_method_in_chain(c, ty_object_class(wt), "===", NULL);
+      if (mi < 0) mi = comp_method_in_chain(c, ty_object_class(wt), "==", NULL);
+      if (mi < 0) continue;
+      Scope *m = &c->scopes[mi];
+      LocalVar *p = m->nparams == 1 ? scope_local(m, m->pnames[0]) : NULL;
+      if (!p || p->type == TY_UNKNOWN || p->type == TY_NIL) continue;
+      changed |= bind_args_params(c, id, mi, &pred, 1);
+    }
+  }
+  return changed;
+}
+
 static int infer_param_types_ex(Compiler *c, int settle);
 int infer_param_types(Compiler *c) { return infer_param_types_ex(c, 0); }
 int infer_param_types_settle(Compiler *c) { return infer_param_types_ex(c, 1); }
@@ -8079,6 +8111,7 @@ static int infer_param_types_ex(Compiler *c, int settle) {
     int id = ids ? ids[k] : k;
     const char *ty = nt_type(nt, id);
     if (!ty) continue;
+    if (sp_streq(ty, "CaseNode")) { changed |= bind_when_arm_subject(c, id); continue; }
     if (sp_streq(ty, "SuperNode") || sp_streq(ty, "ForwardingSuperNode")) {
       Scope *s = comp_scope_of(c, id);
       if (s->class_id < 0 || !s->name) continue;
