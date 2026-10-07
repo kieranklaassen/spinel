@@ -1,0 +1,21 @@
+An empty row stored into an ivar's table of Integer rows is such a row
+
+`@t = [[1, 2], [3, 4]]`, then `@t << []; p @t[2]`, printed
+[0, 0, 0, 0, 0, 0, 0, 0], and `@t[1] = []` did not compile: an
+sp_IntArray * initialised from an sp_PolyArray *. CRuby prints [].
+
+narrow_int_table_ivars pins such an ivar as a table of Integer
+Arrays and lets an empty `[]` stored into it pass, "typed by the
+table it lands in". Nothing typed it. The literal had no kind until
+mark_empty_array_operands, which builds the empty argument of any
+method but the same-kind ones as a poly array, and the table's
+reader took that poly array as a bare sp_IntArray *.
+
+mark_empty_array_operands now gives an empty literal pushed into a
+table of Integer rows, or stored into it at an Integer index, the
+kind of its rows. A table held in a local had its rows stamped by
+narrow_object_arrays already; the stamp is set only where none is.
+Under a Range (`@t[0..0] = []`) the `[]` is a list of rows, and it
+is built as before.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

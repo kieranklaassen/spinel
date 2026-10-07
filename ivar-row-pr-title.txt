@@ -1,0 +1,1 @@
+An empty row stored into an ivar's table of Integer rows is such a row
