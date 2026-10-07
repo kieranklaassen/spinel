@@ -5002,9 +5002,23 @@ static int emit_hash_merge_misfit(Compiler *c, int id, TyKind rt, Buf *b) {
   return 1;
 }
 
+/* Is operand `id` of a merge held where it stands: a local's or an ivar's
+   read, or a temp the call's operand order already bound and rooted? */
+static int merge_operand_held(Compiler *c, int id) {
+  NodeKind k = nt_kind(c->nt, id);
+  return k == NK_LocalVariableReadNode || k == NK_InstanceVariableReadNode ||
+         arg_ran_first(id, 0);
+}
+
 /* merge of two String-keyed Hashes of different value kinds: a concrete side
    (str_int, str_str) is copied to the boxed kind and the copies merged, and
-   a str_poly receiver takes the argument's copy alone. 0 for another pair. */
+   a str_poly receiver takes the argument's copy alone. As two arguments of
+   one C call, whichever copy was made first had no root while the second
+   allocated its own. So the receiver itself, when it is not a held read or
+   the argument runs code, is bound to a rooted temp first; the argument's
+   copy to a second; and the receiver's copy is made last, inside the merge
+   call, where it sees what the argument wrote to the receiver
+   (`h.merge((h["b"] = 2; other))`). 0 for another pair. */
 static int emit_str_keyed_merge(Compiler *c, int recv, int arg, TyKind rt, TyKind at, Buf *b) {
   const char *rfn = rt == TY_STR_INT_HASH ? "sp_StrPolyHash_from_str_int_hash("
                   : rt == TY_STR_STR_HASH ? "sp_StrPolyHash_from_str_str_hash(" : NULL;
@@ -5012,13 +5026,28 @@ static int emit_str_keyed_merge(Compiler *c, int recv, int arg, TyKind rt, TyKin
                   : at == TY_STR_STR_HASH ? "sp_StrPolyHash_from_str_str_hash(" : NULL;
   if (rfn ? (!ty_is_hash(at) || ty_hash_key(at) != TY_STRING || at == rt)
           : (rt != TY_STR_POLY_HASH || !afn)) return 0;
-  buf_puts(b, "sp_StrPolyHash_merge(");
-  if (rfn) { buf_puts(b, rfn); emit_expr(c, recv, b); buf_puts(b, ")"); }
-  else emit_expr(c, recv, b);
-  buf_puts(b, ", ");
+  Buf rb; memset(&rb, 0, sizeof rb);
+  int open = 0;
+  if (!merge_operand_held(c, recv) ||
+      (!arg_ran_first(arg, 0) && subtree_has_side_effect(c, arg)))
+    open = hold_recv_open(c, recv, 0, rt == TY_STR_INT_HASH ? "sp_StrIntHash *" :
+                          rt == TY_STR_STR_HASH ? "sp_StrStrHash *" : "sp_StrPolyHash *",
+                          "SP_GC_ROOT", b, &rb);
+  else emit_expr(c, recv, &rb);
+  int t = rfn && (afn || !merge_operand_held(c, arg)) ? ++g_tmp : 0;
+  if (t) {
+    buf_printf(b, "%ssp_StrPolyHash *_t%d = ", open ? "" : "({ ", t);
+    open = 1;
+  }
+  else {
+    buf_puts(b, "sp_StrPolyHash_merge(");
+    if (rfn) buf_printf(b, "%s%s), ", rfn, rb.p); else buf_printf(b, "%s, ", rb.p);
+  }
   if (afn) { buf_puts(b, afn); emit_expr(c, arg, b); buf_puts(b, ")"); }
   else emit_expr(c, arg, b);
-  buf_puts(b, ")");
+  if (t) buf_printf(b, "; SP_GC_ROOT(_t%d); sp_StrPolyHash_merge(%s%s), _t%d", t, rfn, rb.p, t);
+  buf_puts(b, open ? "); })" : ")");
+  free(rb.p);
   return 1;
 }
 

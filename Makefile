@@ -1843,6 +1843,7 @@ GC_STRESS_TESTS := test/gc_root_frame_slots.rb \
                    test/gc_minor_byref_lent_slot.rb \
                    test/struct_values_fresh_receiver_root.rb \
                    test/hash_splat_to_a.rb \
+                   test/hash_merge_converted_copy_held.rb \
                    test/proc_cell_capture_marked.rb \
                    test/poly_array_intersect.rb \
                    test/thread_new_args_rooted_across_fiber_alloc.rb \

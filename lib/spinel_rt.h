@@ -8374,7 +8374,7 @@ static sp_StrStrHash *sp_StrIntHash_to_s_values(sp_StrIntHash *h) {
   }
   return r;
 }
-static sp_StrPolyHash*sp_StrPolyHash_from_str_str_hash(sp_StrStrHash*h){sp_StrPolyHash*r=sp_StrPolyHash_new();if(!h)return r;if(h->default_v)r->default_v=sp_box_str(h->default_v);for(sp_int i=0;i<h->len;i++){const char*k=h->order[i];sp_StrPolyHash_set(r,k,sp_box_str(sp_StrStrHash_get(h,k)));}if(sp_gc_is_frozen(h))sp_gc_freeze(r);return r;}
+static sp_StrPolyHash*sp_StrPolyHash_from_str_str_hash(sp_StrStrHash*h){SP_GC_ROOT(h);sp_StrPolyHash*r=sp_StrPolyHash_new();if(!h)return r;if(h->default_v)r->default_v=sp_box_str(h->default_v);for(sp_int i=0;i<h->len;i++){const char*k=h->order[i];sp_StrPolyHash_set(r,k,sp_box_str(sp_StrStrHash_get(h,k)));}if(sp_gc_is_frozen(h))sp_gc_freeze(r);return r;}
 /* MatchData#named_captures: {String name => group substring | nil}. A
    non-participating named group maps to nil, so the value side is poly. Lives
    here (not sp_re.c) because the typed-hash machinery is TU-coupled. */
@@ -8415,7 +8415,7 @@ static sp_int sp_gc_stat_key(sp_RbVal k) {
   if (!sp_StrIntHash_has_key(h, kn)) sp_raise_cls("ArgumentError", sp_sprintf("unknown key: %s", kn));
   return sp_StrIntHash_get(h, kn);
 }
-static sp_StrPolyHash*sp_StrPolyHash_from_str_int_hash(sp_StrIntHash*h){sp_StrPolyHash*r=sp_StrPolyHash_new();if(!h)return r;/* the int hash's nil default (the sentinel) and a sentinel element are nil in the boxed hash, not the sentinel as an Integer: read as a number, a missing key answered SP_INT_NIL + 100 through `h[k] &&= h[k] + 100` */ r->default_v=sp_box_int_or_nil(h->default_v);for(sp_int i=0;i<h->len;i++){const char*k=h->order[i];sp_StrPolyHash_set(r,k,sp_box_int_or_nil(sp_StrIntHash_get(h,k)));}if(sp_gc_is_frozen(h))sp_gc_freeze(r);return r;}
+static sp_StrPolyHash*sp_StrPolyHash_from_str_int_hash(sp_StrIntHash*h){SP_GC_ROOT(h);sp_StrPolyHash*r=sp_StrPolyHash_new();if(!h)return r;/* the int hash's nil default (the sentinel) and a sentinel element are nil in the boxed hash, not the sentinel as an Integer: read as a number, a missing key answered SP_INT_NIL + 100 through `h[k] &&= h[k] + 100` */ r->default_v=sp_box_int_or_nil(h->default_v);for(sp_int i=0;i<h->len;i++){const char*k=h->order[i];sp_StrPolyHash_set(r,k,sp_box_int_or_nil(sp_StrIntHash_get(h,k)));}if(sp_gc_is_frozen(h))sp_gc_freeze(r);return r;}
 
 /* SymPolyHash: symbol keys, sp_RbVal values -- same shape as SymStrHash but with poly values. */
 /* Named struct so lib/sp_fiber.c can forward-declare it for sp_Fiber's
