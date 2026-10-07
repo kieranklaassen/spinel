@@ -8286,8 +8286,11 @@ static sp_bool sp_PolyArray_eq(sp_PolyArray *a, sp_PolyArray *b) {
 }
 /* Box a typed (int/str/float) array into a fresh poly array element-wise.
    `kind` is the typed array's SP_BUILTIN_* tag; a sentinel boxes as the nil
-   it stands for. */
+   it stands for. The source is held while the new array is allocated, as
+   sp_IntArray_to_poly and its kin hold theirs: one that nothing else holds
+   (a method's result) was collected by that allocation and read after. */
 static sp_PolyArray *sp_typed_to_poly(void *tp, int kind) {
+  SP_GC_ROOT(tp);
   sp_PolyArray *tb = sp_PolyArray_new();
   if (!tp) return tb;
   if (kind == SP_BUILTIN_STR_ARRAY) {
@@ -8308,7 +8311,7 @@ static sp_PolyArray *sp_typed_to_poly(void *tp, int kind) {
    typed side element-wise. `kind` is the typed array's SP_BUILTIN_* tag. */
 static sp_bool sp_PolyArray_eq_typed(sp_PolyArray *pa, void *tp, int kind) {
   if (!pa || !tp) return FALSE;
-  SP_GC_ROOT(pa); SP_GC_ROOT(tp);  /* sp_typed_to_poly allocates */
+  SP_GC_ROOT(pa);  /* sp_typed_to_poly allocates */
   return sp_PolyArray_eq(pa, sp_typed_to_poly(tp, kind));
 }
 static sp_bool sp_PolyArray_include(sp_PolyArray *a, sp_RbVal v) {
