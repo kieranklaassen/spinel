@@ -22780,11 +22780,23 @@ int emit_spread_args_into(Compiler *c, const int *argv, int argc, const char *kw
       int sx = nt_ref(nt, argv[k], "expression");
       if (sx >= 0) emit_boxed(c, sx, &ab);
       int ts = ++g_tmp, ti = ++g_tmp;
+      /* In a program with no way to a #to_a, a value that is no collection is
+         the argument itself (sp_splat_arg_items), a boxed one decided at run
+         time. The kind asked is the operand's own, never what its #to_a call
+         answers. Every other kind is spread as before; so is a String, which
+         would arrive here as a copy. */
+      const char *sn = sx >= 0 && nt_kind(nt, sx) == NK_CallNode ? nt_str(nt, sx, "name") : NULL;
+      TyKind st = sx >= 0 && !(sn && sp_streq(sn, "to_a")) ? comp_ntype(c, sx) : TY_UNKNOWN;
+      int one = ty_is_object(st) ? splat_operand_is_plain_object(c, st)
+              : (st == TY_INT || st == TY_BIGINT || st == TY_FLOAT || st == TY_SYMBOL ||
+                 st == TY_BOOL || st == TY_CLASS || st == TY_POLY) &&
+                !splat_program_may_make_to_a(c);
       emit_indent(g_pre, g_indent);
-      buf_printf(g_pre, "{ sp_PolyArray *_t%d = sp_enum_items_from(%s); SP_GC_ROOT(_t%d);"
+      buf_printf(g_pre, "{ sp_PolyArray *_t%d = %s(%s); SP_GC_ROOT(_t%d);"
                         " for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++)"
                         " sp_PolyArray_push(_t%d, _t%d->data[_t%d]); }\n",
-                 ts, ab.p ? ab.p : "sp_box_nil()", ts, ti, ti, ts, ti, ta, ts, ti);
+                 ts, one ? "sp_splat_arg_items" : "sp_enum_items_from",
+                 ab.p ? ab.p : "sp_box_nil()", ts, ti, ti, ts, ti, ta, ts, ti);
     }
     else {
       emit_boxed(c, argv[k], &ab);

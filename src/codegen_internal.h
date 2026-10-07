@@ -712,6 +712,8 @@ void emit_inline_bind_params(Compiler *c, Scope *m, int args, const int *argv, i
 /* A splat operand whose static type is nil or a scalar: Ruby spreads nil to
    nothing and any of the others to itself. */
 int splat_operand_is_scalar(TyKind t);
+int splat_program_may_make_to_a(Compiler *c);
+int splat_operand_is_plain_object(Compiler *c, TyKind t);
 /* A keyword key the callee has no parameter for: emits the ArgumentError and
    returns 1. Shared by emit_args_filled and the INLINE parameter binding, which
    walks parameters looking for keys and so could not see an unclaimed one
