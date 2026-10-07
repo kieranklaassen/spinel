@@ -1,0 +1,1 @@
+A method ending in an instance variable write of a shared String answers the String

@@ -1,0 +1,19 @@
+A method added to a builtin is not called on nil after &.
+
+`class String; def pair(a) = "#{self}-#{a}"; end` and then `s&.pair(1)`
+with a nil `s` printed "-1": the method ran on the nil, and its arguments
+ran too. The same for a method added to Integer or Float, and for a
+builtin's name the program redefines (`s&.upcase`).
+
+emit_call_body asks for a reopened String, Integer, Float, Symbol or Range
+method ahead of every builtin arm. That site never looked at the operator,
+so it took the call before the nil guard (emit_call_safe_nav_arms) saw it.
+It now waits while the guard is pending (sn_guard_pending), as the chain
+emitters below it do: the guard re-enters with the receiver in its temp,
+and the site takes the call then.
+
+"v&.fdiv(2) and the other Ruby-defined Integer methods keep the &." left
+such a call on its typed emitter; for a method the program defines, that
+emitter is this site.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
