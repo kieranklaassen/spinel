@@ -25,8 +25,10 @@
    into or leaves a gap in (one level in, below: NFW_ELEM_NIL); a container call
    other than the element reads and picks that can miss (an Array's or a
    Hash's own methods); and a builtin value a builtin call answers other
-   than those picks and a String's slice (`gets` at the end of its input, a
-   bang method that changed nothing).
+   than those picks, a String's slice or bang method, and the reads of a
+   MatchData and an IO that can miss (ENV's read of a name that is not set,
+   a block's value through then or a Proc's call, a Struct's member read by
+   index, an empty String Range's min).
 
    Flow: the slots are flow-insensitive (a slot one write leaves nil may be
    nil at every read), except that a read of a local inside a truthiness
@@ -690,7 +692,8 @@ static int nf_call(NF *f, int v) {
   if (r >= 0 && nf_container(rt)) {
     static const char *const picks[] = { "find", "detect", "first", "last", "min", "max", "min_by",
       "max_by", "sample", "shift", "pop", "[]", "at", "dig", "delete", "delete_at", "slice",
-      "slice!", "inject", "reduce", "sum", "find_index", "key", "fetch", "assoc", "rassoc", "values_at", NULL };
+      "slice!", "inject", "reduce", "sum", "find_index", "key", "fetch", "assoc", "rassoc", "values_at",
+      "bsearch", NULL };
     for (int i = 0; picks[i]; i++)
       if (sp_streq(nm, picks[i]))
         /* an element of an Array that can hold nil may be nil wherever it is */
@@ -702,11 +705,24 @@ static int nf_call(NF *f, int v) {
   if (r >= 0 && (rt == TY_STRING || rt == TY_STRBUF) &&
       (sp_streq(nm, "[]") || sp_streq(nm, "slice") || sp_streq(nm, "slice!") || sp_streq(nm, "byteslice")))
     return NFW_ELEM;
+  /* a String's bang method that changed nothing (BOPF_SELF_OR_NIL) */
+  if (r >= 0 && (rt == TY_STRING || rt == TY_STRBUF) &&
+      (bop_answers_self(rt, nm, an, nt_ref(nt, v, "block") >= 0) & BOPF_SELF_OR_NIL))
+    return NFW_OPAQUE;
+  /* a read that finds nothing: a MatchData's group that took no part, an
+     IO at the end of its input */
+  if (r >= 0 && nt_kind(nt, r) == NK_ConstantReadNode && nt_str(nt, r, "name") &&
+      sp_streq(nt_str(nt, r, "name"), "Regexp") && sp_streq(nm, "last_match") && an >= 1)
+    return NFW_ELEM;
+  if (r >= 0 && rt == TY_MATCHDATA && sp_streq(nm, "[]")) return NFW_ELEM;
+  int io = r >= 0 && (rt == TY_IO || rt == TY_ARGF);
+  if ((io || r < 0) && sp_streq(nm, "gets")) return NFW_ELEM;
+  if (io && (sp_streq(nm, "getc") || (sp_streq(nm, "read") && an >= 1))) return NFW_ELEM;
   /* the builtin surface: an object-typed answer of a call it does not model
      (send, instance_variable_get, a Method's or a Proc's call, a yield's
      value through then) may be nil; a builtin-typed one is taken as not nil
      (see the header) */
-  (void)an; (void)av;
+  (void)av;
   return ty_is_object(c->ntype[v]) ? NFW_OPAQUE : NFW_NONE;
 }
 

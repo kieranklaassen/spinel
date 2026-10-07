@@ -63,7 +63,7 @@ enum {
                     leaves a gap in (a block parameter an iteration over it
                     binds, an element read or pick out of it) */
   NFW_ELEM,      /* an element read or a pick that can miss (Array, Hash,
-                    String) */
+                    String, a MatchData, an IO at its end) */
   NFW_GLOBAL,    /* a global, or the main object's ivar, read where no write
                     can be shown to run first (a method's read of one) */
   NFW_IVAR,      /* an ivar some class's initialize does not set first, or one
