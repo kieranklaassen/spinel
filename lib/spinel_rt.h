@@ -15345,6 +15345,7 @@ static SP_UNUSED sp_RbVal sp_enum_with_index_kept(sp_Enumerator *e, sp_PolyArray
   return sp_box_poly_array(r);
 }
 static sp_PolyArray *sp_enum_hash_side(sp_RbVal h, int keyside) {
+  SP_GC_ROOT_RBVAL(h);   /* the receiver is the caller's temporary: the answer's allocation and each pair's come before the last read */
   sp_int n = sp_poly_length(h);
   sp_PolyArray *r = sp_PolyArray_new(); SP_GC_ROOT(r);
   for (sp_int i = 0; i < n; i++) {
