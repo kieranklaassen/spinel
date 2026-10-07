@@ -10927,6 +10927,63 @@ static int emit_multi_write_scalar(Compiler *c, int id, Buf *b, int indent, cons
   return 0;
 }
 
+/* Is tuple element `el` a new String written as one, which its element
+   target wraps in a handle of its own (repr_of's RS_FRESH): an
+   interpolation, `+"lit"`, `"lit".dup`? Only these kinds: a value in
+   parentheses, a bang method's result or a lambda's call names a String
+   that lives elsewhere, and a second handle around it would be a copy. */
+static int masgn_el_fresh_str(Compiler *c, int el) {
+  const NodeTable *nt = c->nt;
+  Repr er = repr_of(c, el);
+  if (er.as_ty != TY_STRBUF || er.strbuf_src != RS_FRESH) return 0;
+  NodeKind k = nt_kind(nt, el);
+  if (k == NK_InterpolatedStringNode) return 1;
+  if (k != NK_CallNode) return 0;
+  const char *nm = nt_str(nt, el, "name");
+  int r = nt_ref(nt, el, "receiver");
+  if (!nm || r < 0 || nt_ref(nt, el, "arguments") >= 0 || nt_ref(nt, el, "block") >= 0) return 0;
+  if (!sp_streq(nm, "+@") && !sp_streq(nm, "dup")) return 0;
+  return nt_kind(nt, r) == NK_StringNode || nt_kind(nt, r) == NK_InterpolatedStringNode;
+}
+
+/* A target the wrap is proved for: `r[k]` on a local that is typed an
+   Array or a Hash, k a literal or a local (no part of it runs code or
+   allocates). A boxed local (a block's parameter, a local of two kinds)
+   stores by another road, whatever it holds. */
+static int masgn_plain_element_target(Compiler *c, int t) {
+  const NodeTable *nt = c->nt;
+  if (nt_kind(nt, t) != NK_IndexTargetNode || nt_ref(nt, t, "block") >= 0) return 0;
+  int r = nt_ref(nt, t, "receiver"), args = nt_ref(nt, t, "arguments"), an = 0;
+  const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+  if (r < 0 || nt_kind(nt, r) != NK_LocalVariableReadNode || an != 1) return 0;
+  TyKind rt = comp_ntype(c, r);
+  if (!ty_is_array(rt) && !ty_is_hash(rt)) return 0;
+  NodeKind k = nt_kind(nt, av[0]);
+  return k == NK_IntegerNode || k == NK_SymbolNode || k == NK_StringNode || k == NK_LocalVariableReadNode;
+}
+
+/* Whether the statement is one whose new Strings are held as handles
+   (masgn_el_fresh_str): as many values as targets, every target a plain
+   element or a local, every value a new String, a literal or a local, and
+   one new String at least bound for an element. Any other statement is
+   emitted as it was. */
+static int masgn_fresh_stmt(Compiler *c, int id, const int *lefts, int ln, const int *els, int en) {
+  const NodeTable *nt = c->nt;
+  int rn = 0, any = 0;
+  nt_arr(nt, id, "rights", &rn);
+  if (!els || en != ln || rn > 0 || nt_ref(nt, id, "rest") >= 0) return 0;
+  for (int i = 0; i < ln; i++) {
+    int elem = masgn_plain_element_target(c, lefts[i]);
+    if (!elem && nt_kind(nt, lefts[i]) != NK_LocalVariableTargetNode) return 0;
+    NodeKind k = nt_kind(nt, els[i]);
+    if (masgn_el_fresh_str(c, els[i])) { if (elem) any = 1; }
+    else if (k != NK_IntegerNode && k != NK_FloatNode && k != NK_SymbolNode && k != NK_StringNode &&
+             k != NK_NilNode && k != NK_TrueNode && k != NK_FalseNode && k != NK_LocalVariableReadNode)
+      return 0;
+  }
+  return any;
+}
+
 /* A MultiWriteNode statement (a, b = ...) (emit_stmt_inner's arms, in their order) */
 static int emit_multi_write_stmt(Compiler *c, int id, Buf *b, int indent, const NodeTable *nt, const char *ty) {
   if (!(sp_streq(ty, "MultiWriteNode"))) return 0;
@@ -11077,6 +11134,10 @@ static int emit_multi_write_stmt(Compiler *c, int id, Buf *b, int indent, const 
   /* evaluate all RHS values into temps first (so `a, b = b, a` swaps).
      Save each temp index separately: emit_expr may consume extra g_tmp
      slots via preludes (e.g. array literals), so base+i is unreliable. */
+  /* a statement whose new Strings are held as handles roots every temp:
+     the handle is built after the values before it and stored into a
+     container that can grow */
+  int fresh_stmt = masgn_fresh_stmt(c, id, lefts, ln, els, en);
   int *tmps = en > 0 ? alloca(sizeof(int) * (size_t)en) : NULL;
   /* The RESOLVED C type each temp was declared with (empty-literal adoption
      below can override the element node's inferred type); the assign loop
@@ -11151,7 +11212,7 @@ static int emit_multi_write_stmt(Compiler *c, int id, Buf *b, int indent, const 
       else buf_printf(b, hup >= 0 ? "sp_String * _t%d = sp_String_uplus(%s);" : "sp_String * _t%d = %s;", tmps[i], hsrc);
       free(hw.p);
       if (tmpts) tmpts[i] = TY_STRBUF;
-      int later_alloc_h = store_alloc;
+      int later_alloc_h = store_alloc || fresh_stmt;
       for (int j = i + 1; j < en && !later_alloc_h; j++) later_alloc_h = masgn_part_allocates(c, els[j]);
       if (later_alloc_h) masgn_root(c, TY_STRBUF, tmps[i], b);
       buf_puts(b, "\n");
@@ -11160,6 +11221,8 @@ static int emit_multi_write_stmt(Compiler *c, int id, Buf *b, int indent, const 
     /* an element with no C type of its own (an unresolved call, which
        raises) is held boxed: `void _tN` is no declaration */
     int boxed_el = !nilish && !c_type_name(elt) && !ty_is_object(elt);
+    int fresh_str = fresh_stmt && elt == TY_STRBUF && masgn_el_fresh_str(c, els[i]) &&
+                    masgn_plain_element_target(c, lefts[i]);
     emit_ctype(c, nilish || boxed_el ? TY_POLY : elt, b);
     buf_printf(b, " _t%d = ", tmps[i]);
     if (nilish) {
@@ -11187,6 +11250,15 @@ static int emit_multi_write_stmt(Compiler *c, int id, Buf *b, int indent, const 
     else if (poly_empty_hash)
       buf_puts(b, "sp_box_obj(sp_PolyPolyHash_new(), SP_BUILTIN_POLY_POLY_HASH)");
     else if (boxed_el) emit_coerce(c, els[i], TY_POLY, CO_HOLD, "a multiple assignment's value", b);
+    /* held as the handle its target wraps it in, as a store wraps one
+       (emit_boxed); handed over bare, the C did not build */
+    else if (fresh_str) {
+      int sv = view_push_repr(c, els[i], VR_STRBUF_BOX, 0);
+      buf_puts(b, "sp_String_new_shared(");
+      emit_str_expr(c, els[i], b);
+      buf_puts(b, ")");
+      view_pop(c, sv);
+    }
     else {
       Buf vb; memset(&vb, 0, sizeof vb); emit_expr(c, els[i], &vb);
       buf_puts(b, vb.p ? vb.p : ""); free(vb.p);
@@ -11196,9 +11268,9 @@ static int emit_multi_write_stmt(Compiler *c, int id, Buf *b, int indent, const 
     /* Nothing holds the temp until its target takes it, and whatever can
        allocate after it can run user code that drops its other holder, so
        it is rooted while a later value or a store can collect. */
-    int later_alloc = store_alloc;
+    int later_alloc = store_alloc || fresh_stmt;
     for (int j = i + 1; j < en && !later_alloc; j++) later_alloc = masgn_part_allocates(c, els[j]);
-    if (!nilish && !masgn_rodata(c, els[i]) && later_alloc) masgn_root(c, elt, tmps[i], b);
+    if (!nilish && (!masgn_rodata(c, els[i]) || fresh_str) && later_alloc) masgn_root(c, elt, tmps[i], b);
     buf_puts(b, "\n");
   }
   /* assign lefts */
