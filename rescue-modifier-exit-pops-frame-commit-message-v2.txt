@@ -1,0 +1,35 @@
+A return, next or break out of a rescue modifier's expression pops its frame
+
+    def first_number(words)
+      words.each do |w|
+        return Integer(w) if w =~ /\A\d+\z/
+      end rescue nil
+      0
+    end
+
+    p first_number(["a", "42", "b"])
+    p Integer("oops")
+
+printed 42 and then "*** stack smashing detected ***: terminated"
+where CRuby reports the ArgumentError. Called 65 times, first_number
+alone stopped the program with a SystemStackError.
+
+`expr rescue fallback` arms a setjmp frame around expr, but the frame
+was never counted in g_exc_frame_depth, the number a return, next or
+break reads to pop the frames it leaves. Such an exit left the
+modifier's frame on the stack, its jmp_buf in a function that had
+returned, and the next uncaught raise jumped into it. An ensure inside
+the expression miscounted the same way: under an outer ensure it handed
+its exception straight to that one, past the modifier that rescues it.
+
+Both forms of the modifier now count their frame while the expression
+is emitted. A block's `break` is the one exit that asks whether any
+frame stands between it and its wrapper, to choose a goto over a throw.
+Past nothing but modifier frames it stays the goto it was: they have no
+ensure to run, and the wrapper's landing restores sp_exc_top.
+g_exc_modifier_frames records which frames are a modifier's, for that
+question alone. It is 64 frames wide, as the runtime's stack is unless
+a build raises SP_EXC_STACK_MAX; a modifier under more frames than that
+is emitted as it was.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
