@@ -1,0 +1,29 @@
+A rescue clause matches by the class its operand holds
+
+    def with_retry(klass)
+      tries = 0
+      begin
+        tries += 1
+        yield tries
+      rescue klass
+        retry if tries < 3
+        "gave up"
+      end
+    end
+
+retried a TypeError under `with_retry(ArgumentError)`: the clause caught
+every exception. So did one whose class was held in a local, an instance
+variable, a global, a call's answer, `e.class` or an element, and
+`rescue k, IOError` caught the IOError alone. `K = ArgumentError` and then
+`rescue K` caught nothing.
+
+The loop over a clause's operands wrote a test for a splat and for a
+constant, and nothing for any other operand: a clause with nothing written
+matched always, and a constant that only names a class was compared by its
+own name. Such an operand is now matched at run time by
+`sp_exc_matches_splat`, as a splat's members are: by the class it holds,
+with CRuby's TypeError for a value that is no class or module.
+
+A clause of spelled-out classes emits the C it did.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
