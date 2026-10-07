@@ -541,6 +541,21 @@ static int ffi_str_arg_collectable(Compiler *c, int node) {
   return k != NK_StringNode && k != NK_NilNode;
 }
 
+/* Is a String argument of FFI function fi's call a fresh value (a shared
+   handle's copy, a call's answer) beside another argument whose evaluation
+   allocates? Nothing holds it while that one runs. */
+static int ffi_str_arg_beside_alloc(Compiler *c, int fi, int argc, const int *argv, int fixed_argc, int is_vararg) {
+  int nfresh = 0, nalloc = 0;
+  for (int ai = 0; ai < argc; ai++) {
+    if (!operand_may_allocate(c, argv[ai])) continue;
+    nalloc++;
+    nfresh += (ai < fixed_argc ? ffi_spec_is_str(c->ffi_funcs[fi].args[ai])
+                               : is_vararg && comp_ntype(c, argv[ai]) == TY_STRING) &&
+              ffi_str_arg_collectable(c, argv[ai]);
+  }
+  return nfresh && nalloc >= 2;
+}
+
 /* Move the converted FFI argument at call->p + at out to the temp _b<tb>_<ai>
    of C type ctype, declared in pre ahead of the call, rooting it for the
    call when it is a String (root_str) that Ruby code run by the call could
@@ -724,6 +739,8 @@ int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
             root_strs = (ai < fixed_argc ? ffi_spec_is_str(c->ffi_funcs[fi].args[ai])
                                          : is_vararg && comp_ntype(c, argv[ai]) == TY_STRING) &&
                         ffi_str_arg_collectable(c, argv[ai]);
+        /* so can a sibling argument that allocates, with no Ruby code in sight */
+        if (!root_strs) root_strs = ffi_str_arg_beside_alloc(c, fi, argc, argv, fixed_argc, is_vararg);
         int use_temps = blocking || iob_temps || nstr_args >= 2 || root_strs;
         Buf pre_buf; memset(&pre_buf, 0, sizeof pre_buf);
         Buf base_buf; memset(&base_buf, 0, sizeof base_buf);
