@@ -76,7 +76,11 @@ int nil_fact_why(const Compiler *c, int node);
    a bang method) can reach while it may be nil -- the write does nothing on
    a NULL handle. The call plan guards neither for a nil it cannot bound (a
    slice or a pick that missed), so the read stays untested: answering nil
-   there would hide the error CRuby raises. */
+   there would hide the error CRuby raises. So does every such read of a
+   local behind a guard that does not hold, which lets the same write run:
+   a write inside the guard's condition, a loop that tests after its body,
+   a program that defines what a guard is made of (its own fail, a String's
+   nil?). */
 #define NF_UNRAISED 0x80
 int nil_fact_unraised(const Compiler *c, int node);
 const char *nil_fact_why_name(int why);

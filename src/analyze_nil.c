@@ -1241,6 +1241,53 @@ static void nf_free_lists(Compiler *c, int **v, int *n) {
   free(v); free(n);
 }
 
+/* 1 for a name nf_is_jump takes as leaving, 2 for a predicate
+   nf_truthy_implies and nf_falsy_implies take as Ruby's own. */
+static int nf_guard_name(const char *s) {
+  static const char *const k[] = { "raise", "fail", "exit", "abort", "throw",
+    "nil?", "==", "!=", "!", "is_a?", "kind_of?", "instance_of?", NULL };
+  for (int i = 0; s && k[i]; i++) if (sp_streq(s, k[i])) return i < 5 ? 1 : 2;
+  return 0;
+}
+
+/* Does the program define what a guard is made of? A guard is read by its
+   names, so `fail("x") if t.nil?` proves t is not nil after it only where
+   fail is Kernel's and nil? is Ruby's: a class's own `def fail` returns, and
+   a String's own `nil?` answers for a NULL one. A def, a name a
+   define_method or an alias_method is given, and a Symbol of the name (an
+   alias, an attribute, a Struct's member; not `&:nil?`, which only calls
+   it) count; a predicate a program class defines answers no String, so it
+   does not. */
+static int nf_guard_redefined(NF *f) {
+  const NodeTable *nt = f->nt;
+  for (int i = 0; i < f->ndyn; i++) if (nf_guard_name(f->dyn[i])) return 1;
+  NT_FOREACH_KIND(nt, NK_SymbolNode, s)
+    if (nf_guard_name(nt_str(nt, s, "value")) && (f->par[s] < 0 || nt_kind(nt, f->par[s]) != NK_BlockArgumentNode))
+      return 1;
+  NT_FOREACH_KIND(nt, NK_DefNode, d) {
+    int g = nf_guard_name(nt_str(nt, d, "name"));
+    if (!g) continue;
+    if (g == 1) return 1;
+    int p = f->par[d];
+    while (p >= 0 && nt_kind(nt, p) != NK_ClassNode && nt_kind(nt, p) != NK_ModuleNode) p = f->par[p];
+    int cp = p >= 0 && nt_kind(nt, p) == NK_ClassNode ? nt_ref(nt, p, "constant_path") : -1;
+    const char *cn = cp >= 0 ? nt_str(nt, cp, "name") : NULL;
+    if (!cn || is_builtin_class_name(cn) || is_builtin_module_name(cn)) return 1;
+  }
+  return 0;
+}
+
+/* Is n inside a loop that tests after its body (`begin ... end while c`,
+   Prism's begin-modifier flag)? */
+static int nf_in_post_test_loop(NF *f, int n) {
+  for (int p = f->par[n]; p >= 0; p = f->par[p]) {
+    NodeKind k = nt_kind(f->nt, p);
+    if (k == NK_DefNode || k == NK_ClassNode || k == NK_ModuleNode) return 0;
+    if (k == NK_WhileNode && (nt_int(f->nt, p, "flags", 0) & 4)) return 1;
+  }
+  return 0;
+}
+
 void an_nil_facts(Compiler *c) {
   const NodeTable *nt = c->nt;
   NF f;
@@ -1391,9 +1438,34 @@ void an_nil_facts(Compiler *c) {
     if (sp_str_mutator(un, SP_MUT_LOCAL) || (ul > 1 && un[ul - 1] == '!')) lv->nil_past_write = 1;
     else c->nil_fact[ur] |= NF_UNRAISED;
   }
+  /* A guard that does not hold lets the same write run. Two the fact takes:
+     a write in a condition after the part that proves (`t.nil? || (t = nil;
+     false)`), and the body of a loop that tests after it (`begin ... end
+     while t`), which runs once untested. */
+  static const NodeKind junction[] = { NK_AndNode, NK_OrNode };
+  for (int q = 0; q < 2; q++)
+    NT_FOREACH_KIND(nt, junction[q], j) {
+      Scope *js = comp_scope_of(c, j);
+      int jl = nt_ref(nt, j, "left"), jr = nt_ref(nt, j, "right");
+      for (int k = 0; js && k < js->nlocals; k++) {
+        LocalVar *lv = &js->locals[k];
+        if (lv->type == TY_STRBUF && lv->obj_may_nil && nf_writes_local(nt, jr, lv->name, 0) &&
+            (nf_truthy_implies(c, jl, lv->name) || nf_falsy_implies(c, jl, lv->name)))
+          lv->nil_past_write = 1;
+      }
+    }
   NT_FOREACH_KIND(nt, NK_LocalVariableReadNode, r) {
     LocalVar *lv = nf_local_of(&f, r, nt_str(nt, r, "name"));
-    if (lv && lv->nil_past_write && nil_fact_node(c, r)) c->nil_fact[r] |= NF_UNRAISED;
+    if (lv && lv->type == TY_STRBUF && lv->obj_may_nil && !lv->nil_past_write && nf_in_post_test_loop(&f, r))
+      lv->nil_past_write = 1;
+  }
+  /* and no guard holds for sure where the program defines what one is made
+     of: there every read keeps master's C */
+  int unsure = nf_guard_redefined(&f);
+  NT_FOREACH_KIND(nt, NK_LocalVariableReadNode, r) {
+    LocalVar *lv = nf_local_of(&f, r, nt_str(nt, r, "name"));
+    if (lv && (lv->nil_past_write || (unsure && lv->type == TY_STRBUF)) && nil_fact_node(c, r))
+      c->nil_fact[r] |= NF_UNRAISED;
   }
   /* the ivars, by class */
   for (int k = 0; k < c->nclasses; k++) {

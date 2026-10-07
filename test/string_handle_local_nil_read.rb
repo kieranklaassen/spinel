@@ -107,3 +107,7 @@ p u
 u = +"z"
 u << "y"
 p u
+
+# `&:nil?` only calls nil?; it defines nothing, and the reads above stay
+# tested.
+p ["a", nil].map(&:nil?)
