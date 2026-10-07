@@ -229,6 +229,10 @@ int is_str_string_yield(const char *n) {
          sp_streq(n, "chars") || sp_streq(n, "lines") || sp_streq(n, "split") || sp_streq(n, "scrub");
 }
 
+int is_unpack_name(const char *n) {
+  return sp_streq(n, "unpack");
+}
+
 int is_diverging_call(const char *n) {
   return sp_streq(n, "raise") || sp_streq(n, "fail") || sp_streq(n, "throw") ||
          sp_streq(n, "exit") || sp_streq(n, "exit!") || sp_streq(n, "abort");
@@ -361,6 +365,10 @@ int is_with_index_alias(const char *n) {
 
 int is_text_print(const char *n) {
   return sp_streq(n, "puts") || sp_streq(n, "print");
+}
+
+int is_printf_name(const char *n) {
+  return sp_streq(n, "printf");
 }
 
 int is_match_operator(const char *n) {

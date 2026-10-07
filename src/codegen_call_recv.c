@@ -7461,15 +7461,15 @@ static int int_arms_round_divide(Compiler *c, int id, Buf *b, const NodeTable *n
     buf_puts(b, ", "); emit_int_expr(c, argv[1], b); buf_puts(b, ")");
   }
   else if (sp_streq(name, "divmod") && argc == 1 && comp_ntype(c, argv[0]) == TY_FLOAT) {
-    /* a Float divisor divides as floats: [floor-quotient Integer, Float mod] */
-    int tb = ++g_tmp, tq = ++g_tmp, o = ++g_tmp;
+    /* a Float divisor divides as floats, CRuby's flodivmod (sp_flo_divmod):
+       [Integer quotient, Float mod] */
+    int tb = ++g_tmp, tq = ++g_tmp, tm = ++g_tmp, o = ++g_tmp;
     buf_printf(b, "({ double _t%d = ", tb); emit_expr(c, argv[0], b);
-    buf_printf(b, "; if (_t%d == 0.0) sp_raise_cls(\"ZeroDivisionError\", \"divided by 0\");"
-                  " sp_int _t%d = (sp_int)floor((double)(%s) / _t%d);"
+    buf_printf(b, "; double _t%d, _t%d; sp_flo_divmod((double)(%s), _t%d, &_t%d, &_t%d);"
                   " sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);"
-                  " sp_PolyArray_push(_t%d, sp_box_int(_t%d));"
-                  " sp_PolyArray_push(_t%d, sp_box_float((double)(%s) - (double)_t%d * _t%d)); _t%d; })",
-               tb, tq, r, tb, o, o, o, tq, o, r, tq, tb, o);
+                  " sp_PolyArray_push(_t%d, sp_box_int(sp_float_fit_i(_t%d)));"
+                  " sp_PolyArray_push(_t%d, sp_box_float(_t%d)); _t%d; })",
+               tq, tm, r, tb, tq, tm, o, o, o, tq, o, tm, o);
   }
   else if (sp_streq(name, "divmod") && argc == 1 &&
            comp_ntype(c, argv[0]) != TY_RATIONAL) {
@@ -7961,8 +7961,8 @@ static int emit_scalar_recv_arms(Compiler *c, int id, Buf *b, const NodeTable *n
     }
     else if (sp_streq(name, "to_i"))  buf_printf(b, repr_of(c, id).kind == RK_BOXED ? "sp_box_f_to_int(%s)" : "sp_float_to_i_checked(%s)", r);
     else if (sp_streq(name, "divmod") && argc == 1) {
-      /* Float#divmod(n) -> [floor(x/n) (Integer), x - q*n (Float)] */
-      int tx = ++g_tmp, tn = ++g_tmp, tq = ++g_tmp, o = ++g_tmp;
+      /* Float#divmod(n) -> [Integer quotient, Float mod], CRuby's flodivmod */
+      int tx = ++g_tmp, tn = ++g_tmp, tq = ++g_tmp, tm = ++g_tmp, o = ++g_tmp;
       buf_printf(b, "({ sp_float _t%d = (%s); sp_float _t%d = ", tx, r, tn);
       emit_coerce(c, argv[0], TY_FLOAT, CO_CONVERT, "a Float operand", b);
       buf_printf(b, "; if (isnan(_t%d) || isnan(_t%d)) sp_raise_cls(\"FloatDomainError\", \"NaN\");"
@@ -7976,18 +7976,19 @@ static int emit_scalar_recv_arms(Compiler *c, int id, Buf *b, const NodeTable *n
                     " sp_PolyArray_push(_t%d, sp_box_int(0)); sp_PolyArray_push(_t%d, sp_box_float(_t%d)); }"
                     "\nelse { sp_PolyArray_push(_t%d, sp_box_int(-1)); sp_PolyArray_push(_t%d, sp_box_float(_t%d)); } }"
                     "\nelse {"
-                    " sp_int _t%d = sp_float_fit_i(floor(_t%d / _t%d));"
-                    " sp_PolyArray_push(_t%d, sp_box_int(_t%d));"
-                    " sp_PolyArray_push(_t%d, sp_box_float(_t%d - (sp_float)_t%d * _t%d)); } _t%d; })",
+                    /* CRuby's flodivmod: the quotient follows the remainder */
+                    " double _t%d, _t%d; sp_flo_divmod(_t%d, _t%d, &_t%d, &_t%d);"
+                    " sp_PolyArray_push(_t%d, sp_box_int(sp_float_fit_i(_t%d)));"
+                    " sp_PolyArray_push(_t%d, sp_box_float(_t%d)); } _t%d; })",
                  tx, tn, tx, tx, tn,
                  o, o,
                  tn,
                  tx, tx, tn,
                  o, o, tx,
                  o, o, tn,
-                 tq, tx, tn,
+                 tq, tm, tx, tn, tq, tm,
                  o, tq,
-                 o, tx, tq, tn, o);
+                 o, tm, o);
     }
     else if (sp_streq(name, "to_int")) buf_printf(b, repr_of(c, id).kind == RK_BOXED ? "sp_box_f_to_int(%s)" : "sp_float_to_i_checked(%s)", r);  /* alias of to_i (#2317); raises on Inf/NaN */
     /* a nil bound is an open side: clamp one-sided (or return the receiver),
@@ -9075,9 +9076,11 @@ static int emit_object_kind_nil(Compiler *c, int id, Buf *b, const NodeTable *nt
      else: the arm below answers for the class alone, so `v.is_a?(Shape)` on
      a `v` holding nil said true. The receiver is read once into a temp; the
      arm below answers for a live object, reading the temp, and nil answers
-     as nil does. */
-  static int isa_nil_open = 0;
-  if (!isa_nil_open && recv >= 0 && ty_is_object(rt) && argc == 1 &&
+     as nil does. The live arm re-enters the call with its receiver viewed
+     as tested (VR_NIL_TESTED), so the re-entry of this call is not armed
+     twice; a kind query nested in its class argument has a receiver of its
+     own and still gets its arm. */
+  if (recv >= 0 && !repr_of(c, recv).nil_tested && ty_is_object(rt) && argc == 1 &&
       !comp_ty_value_obj(c, rt) && nt_kind(nt, recv) != NK_SelfNode &&
       is_kind_query(name) &&
       comp_method_in_chain(c, ty_object_class(rt), name, NULL) < 0 &&
@@ -9091,14 +9094,26 @@ static int emit_object_kind_nil(Compiler *c, int id, Buf *b, const NodeTable *nt
       Buf rb = expr_buf(c, recv);
       emit_indent(g_pre, g_indent);
       emit_ctype(c, rt, g_pre); buf_printf(g_pre, " _t%d = %s;\n", tr, rb.p ? rb.p : "NULL");
-      if (dyn && subtree_has_side_effect(c, argv[0])) emit_gc_root_tmp(c, rt, tr, g_pre);
       free(rb.p);
+      /* both arms read the class argument: one that runs code is read once,
+         after the receiver, so a call in it -- a nested kind query's
+         receiver its arm hoists, too -- runs once */
+      int mark = g_n_argov;
+      if (dyn && subtree_has_side_effect(c, argv[0])) {
+        emit_gc_root_tmp(c, rt, tr, g_pre);
+        TyKind at = comp_ntype(c, argv[0]);
+        int ta = ++g_tmp;
+        Buf ab = expr_buf(c, argv[0]);
+        emit_indent(g_pre, g_indent);
+        emit_ctype(c, at, g_pre); buf_printf(g_pre, " _t%d = %s;\n", ta, ab.p ? ab.p : "");
+        free(ab.p);
+        view_bind(argv[0], "_t%d", ta);
+      }
       view_bind(recv, "_t%d", tr);
       Buf ib; memset(&ib, 0, sizeof ib);
-      isa_nil_open = 1;
+      int vt = view_push_repr(c, recv, VR_NIL_TESTED, 1);
       int ok = emit_object_call(c, id, &ib);
-      isa_nil_open = 0;
-      view_unbind(g_n_argov - 1);
+      view_pop(c, vt);
       if (ok) {
         buf_printf(b, "(_t%d ? (%s) : ", tr, ib.p ? ib.p : "0");
         if (dyn) {
@@ -9117,9 +9132,11 @@ static int emit_object_kind_nil(Compiler *c, int id, Buf *b, const NodeTable *nt
           buf_printf(b, "%d", yes);
         }
         buf_puts(b, ")");
+        view_unbind(mark);
         free(ib.p);
         return 1;
       }
+      view_unbind(mark);
       free(ib.p);
     }
   }
@@ -13226,6 +13243,18 @@ static int emit_poly_numeric_call(Compiler *c, int id, Buf *b, const NodeTable *
   return 0;
 }
 
+/* pow(n) on a boxed receiver. pow is Integer's alone: sp_poly_pow is `**`,
+   which a Float, a Rational or a Complex answers too, so a boxed one
+   answered pow where CRuby raises NoMethodError. */
+static void emit_poly_int_pow(Compiler *c, int recv, int arg, Buf *b) {
+  int tv = ++g_tmp;
+  buf_printf(b, "({ sp_RbVal _t%d = ", tv); emit_boxed(c, recv, b);
+  buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); (_t%d.tag == SP_TAG_INT || _t%d.tag == SP_TAG_BIGINT) ? sp_poly_pow(_t%d, ",
+             tv, tv, tv, tv);
+  emit_boxed(c, arg, b);
+  buf_printf(b, ") : (sp_raise_nomethod(sp_nomethod_msg(\"pow\", _t%d)), sp_box_nil()); })", tv);
+}
+
 int emit_poly_call(Compiler *c, int id, Buf *b) {
   const NodeTable *nt = c->nt;
   const char *name = nt_str(nt, id, "name");
@@ -13377,9 +13406,7 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
     for (int kk = 0; kk < c->nclasses && !has_user; kk++)
       if (comp_poly_arm_defines_n(c, kk, name, argc)) has_user = 1;
     if (!has_user) {
-      if (sp_streq(name, "pow") && argc == 1) {
-        buf_puts(b, "sp_poly_pow("); emit_boxed(c, recv, b); buf_puts(b, ", "); emit_boxed(c, argv[0], b); buf_puts(b, ")");
-      }
+      if (sp_streq(name, "pow") && argc == 1) emit_poly_int_pow(c, recv, argv[0], b);
       else if (sp_streq(name, "pow")) {
         buf_puts(b, "sp_poly_int_powmod("); emit_boxed(c, recv, b);
         buf_puts(b, ", "); emit_boxed(c, argv[0], b); buf_puts(b, ", "); emit_boxed(c, argv[1], b); buf_puts(b, ")");

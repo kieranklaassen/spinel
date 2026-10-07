@@ -322,6 +322,20 @@ static inline double sp_fmod(double a, double b) {
   if (r != 0.0 && ((r < 0.0) != (b < 0.0))) r += b;
   return r;
 }
+/* Float#divmod's pair as CRuby's flodivmod computes it: the remainder from
+   fmod, and the quotient from the remainder -- round((x - mod) / y) -- not
+   floor(x / y), which disagreed with the remainder wherever x / y rounded
+   up to a whole number (1.0.divmod(0.1) answered [10, 0.0] where CRuby has
+   [9, 0.09999999999999995]); then both are moved to the divisor's sign. A
+   zero divisor raises; a NaN one answers NaN for both. */
+static inline void sp_flo_divmod(double x, double y, double *divp, double *modp) {
+  if (isnan(y)) { *divp = *modp = y; return; }
+  if (y == 0.0) sp_raise_cls("ZeroDivisionError", "divided by 0");
+  double mod = (x == 0.0 || (isinf(y) && !isinf(x))) ? x : fmod(x, y);
+  double div = (isinf(x) && !isinf(y)) ? x : round((x - mod) / y);
+  if (y * mod < 0) { mod += y; div -= 1.0; }
+  *divp = div; *modp = mod;
+}
 /* Float#remainder: plain C fmod, but a zero divisor raises the way every other
    Float division-derived operation does (#3649). */
 static inline double sp_fremainder(double a, double b) {
@@ -3864,6 +3878,7 @@ static sp_int sp_poly_struct_size(sp_RbVal v) {
   return (sv.tag == SP_TAG_OBJ && sv.v.p && sp_poly_is_array_kind(sv.cls_id)) ? sp_poly_arr_len(sv) : -1;
 }
 static sp_int sp_poly_length_m(sp_RbVal v) {
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_MATCHDATA && v.v.p) return sp_MatchData_length((sp_MatchData *)v.v.p);
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_QUEUE && v.v.p) return sp_Queue_size((sp_queue *)v.v.p);
   { sp_int n = sp_poly_struct_size(v); if (n >= 0) return n; }
   if (v.tag == SP_TAG_NIL || v.tag == SP_TAG_INT || v.tag == SP_TAG_FLT ||
@@ -3909,7 +3924,18 @@ static sp_RbVal sp_poly_io_truncate(sp_RbVal v, sp_int n) {
 }
 sp_RbVal sp_Enumerator_size_p(void *e);   /* lib/sp_cold.c; sp_Enumerator is declared further down */
 void sp_enum_index_search_each_raise(void *e);   /* lib/sp_cold.c: raise for a boxed index search's each */
+/* A boxed MatchData's group, by index or by name, boxed: a group that did
+   not take part in the match is nil. */
+static sp_RbVal sp_poly_md_group(sp_MatchData *m, sp_RbVal k) {
+  const char *g = NULL;
+  if (k.tag == SP_TAG_SYM && sp_sym_name_fn) g = sp_MatchData_aref_name(m, sp_sym_name_fn((sp_sym)k.v.i));
+  else if (k.tag == SP_TAG_STR) g = sp_MatchData_aref_name(m, k.v.s ? k.v.s : "");
+  else g = sp_MatchData_aref(m, sp_poly_to_i(k));
+  return g ? sp_box_str(g) : sp_box_nil();
+}
 static sp_int sp_poly_size(sp_RbVal v) {
+  /* MatchData#size is its group count, 0 never: it had no arm */
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_MATCHDATA && v.v.p) return sp_MatchData_length((sp_MatchData *)v.v.p);
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_FLOAT_RANGE && v.v.p) { sp_frange_iter_raise((*(sp_FloatRange *)v.v.p), 0); return 0; }  /* a Float range has no size (TypeError) */
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_QUEUE && v.v.p) return sp_Queue_size((sp_queue *)v.v.p);
   { sp_int n = sp_poly_struct_size(v); if (n >= 0) return n; }
@@ -5183,6 +5209,42 @@ static void sp_sort_idx_by_poly(sp_int *idx, const sp_RbVal *keys, sp_int n) {
   if (src != idx) for (sp_int x = 0; x < n; x++) idx[x] = src[x];   /* odd #levels: result is in tmp */
   free(tmp);
 }
+/* sort_by's `<=>` for a pair of keys, as CRuby asks it: sp_poly_spaceship
+   (a class's own `<=>` first, so a nil answer raises even for one object
+   against itself; Object#<=>'s 0 for equal values only where none answers),
+   but Integer#<=> for a Bignum against a non-number -- the operand's coerce,
+   or the class's own `<=>` when the Bignum is the operand, else nil.
+   sp_poly_cmp's Bignum arm reads such an operand as 0 and orders the pair;
+   that arm is master's, and this header's changes are additive only. */
+static int sp_sort_key_number_p(sp_RbVal v) SP_UNUSED;
+static int sp_sort_key_number_p(sp_RbVal v) {
+  return sp_poly_numeric_p(v) || sp_poly_is_rational(v) || sp_poly_is_brat(v);
+}
+static sp_int sp_sort_key_cmp(sp_RbVal a, sp_RbVal b) SP_UNUSED;
+/* a `<=>` answer as rb_cmpint reads it: nil is no order; any other value
+   orders by its sign, so a Float or Rational answer (0.5, 1/3) is not cut
+   to 0 as sp_poly_to_i would */
+static sp_int sp_sort_cmpint(sp_RbVal u) SP_UNUSED;
+static sp_int sp_sort_cmpint(sp_RbVal u) {
+  if (u.tag == SP_TAG_NIL) return SP_INT_NIL;
+  sp_bool ok; sp_int c = sp_poly_cmp(u, sp_box_int(0), &ok);
+  if (ok) return c < 0 ? -1 : (c > 0 ? 1 : 0);
+  return sp_poly_to_i(u);
+}
+static sp_int sp_sort_key_cmp(sp_RbVal a, sp_RbVal b) {
+  sp_RbVal u;
+  if ((a.tag == SP_TAG_BIGINT && !sp_sort_key_number_p(b)) ||
+      (b.tag == SP_TAG_BIGINT && !sp_sort_key_number_p(a))) {
+    if (sp_poly_user_cmp("<=>", a, b, &u) || sp_poly_coerce_binop("<=>", a, b, &u))
+      return sp_sort_cmpint(u);
+    return SP_INT_NIL;
+  }
+  /* a class's own <=> (or a coerce) first, as sp_poly_spaceship asks it,
+     but read by its sign */
+  if (sp_poly_user_cmp("<=>", a, b, &u) || sp_poly_coerce_binop("<=>", a, b, &u))
+    return sp_sort_cmpint(u);
+  return sp_poly_spaceship(a, b);
+}
 /* sp_sort_idx_by_poly for keys that need not compare (sort_by over keys of
    more than one kind, a nil, a Float): a pair whose `<=>` is nil raises
    CRuby's ArgumentError, where the unchecked sort keeps the pair in place.
@@ -5200,10 +5262,8 @@ static void sp_sort_idx_by_poly_ck(sp_int *idx, const sp_RbVal *keys, sp_int n) 
       sp_int hi = lo + 2 * width < n ? lo + 2 * width : n;
       sp_int i = lo, j = mid, k = lo;
       while (i < mid && j < hi) {
-        sp_bool ok; sp_int c = sp_poly_cmp(keys[src[i]], keys[src[j]], &ok);
-        /* Object#<=>: equal values compare 0 (nil with nil, true with true) */
-        if (!ok && sp_poly_eq(keys[src[i]], keys[src[j]])) { ok = TRUE; c = 0; }
-        if (!ok) {
+        sp_int c = sp_sort_key_cmp(keys[src[i]], keys[src[j]]);
+        if (c == SP_INT_NIL) {
           sp_RbVal ka = keys[src[i]], kb = keys[src[j]];
           free(tmp);
           sp_raise_cls("ArgumentError", sp_sprintf("comparison of %s with %s failed", sp_poly_class_name(ka), sp_cmperr_desc(kb)));
@@ -5312,11 +5372,12 @@ static sp_RbVal sp_poly_divmod(sp_RbVal a, sp_RbVal b) {
   if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) {
     sp_float fa = sp_poly_to_f(a), fb = sp_poly_to_f(b);
     if (fb == 0) sp_raise_cls("ZeroDivisionError", "divided by 0");
-    sp_float q = floor(fa / fb);
+    sp_float q, m;
+    sp_flo_divmod(fa, fb, &q, &m);
     /* CRuby answers the quotient as an Integer (7.0.divmod(3) => [2, 1.0]);
        only one that no Integer can hold stays a Float. */
     sp_PolyArray_push(out, (q >= -9.2e18 && q <= 9.2e18) ? sp_box_int((sp_int)q) : sp_box_float(q));
-    sp_PolyArray_push(out, sp_box_float(sp_fmod(fa, fb)));
+    sp_PolyArray_push(out, sp_box_float(m));
     return sp_box_poly_array(out);
   }
   /* a Bignum pair: sp_poly_to_i below truncates it to 64 bits and answered a
@@ -8999,6 +9060,7 @@ static sp_RbVal sp_poly_get_sym(sp_RbVal v, sp_sym key) {
     case SP_BUILTIN_CURRY: return sp_curry_call_poly((sp_Curry *)v.v.p, 1, (sp_RbVal[]){sp_box_sym(key)});
     case SP_BUILTIN_SYM_POLY_HASH: return sp_SymPolyHash_get((sp_SymPolyHash*)v.v.p, key);
     case SP_BUILTIN_POLY_POLY_HASH: return sp_PolyPolyHash_get((sp_PolyPolyHash*)v.v.p, sp_box_sym(key));
+    case SP_BUILTIN_MATCHDATA: return v.v.p ? sp_poly_md_group((sp_MatchData *)v.v.p, sp_box_sym(key)) : sp_box_nil();
     /* a Symbol is no key of a String- or Integer-keyed Hash: a miss */
     case SP_BUILTIN_STR_POLY_HASH: case SP_BUILTIN_STR_STR_HASH: case SP_BUILTIN_STR_INT_HASH:
     case SP_BUILTIN_INT_INT_HASH: case SP_BUILTIN_INT_STR_HASH:
@@ -9391,6 +9453,11 @@ static sp_RbVal sp_poly_shift(sp_RbVal v) {
   return sp_box_nil();
 }
 static sp_RbVal sp_poly_get_str(sp_RbVal v, const char *key) {
+  /* MatchData#["name"]: the named group */
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_MATCHDATA && v.v.p) {
+    const char *g = sp_MatchData_aref_name((sp_MatchData *)v.v.p, key ? key : "");
+    return g ? sp_box_str(g) : sp_box_nil();
+  }
   /* `s["sub"]` is String#[str]: the substring itself when present, else nil.
      Both string representations answer it, and neither did here -- an
      immediate string was rejected by the tag test on the next line and a
@@ -9466,6 +9533,7 @@ static sp_RbVal sp_enum_walker_boxed(sp_RbVal v);
 static sp_bool sp_enum_is_walker(sp_RbVal v);
 static sp_int sp_enum_walk_len(sp_RbVal v);
 static sp_RbVal sp_enum_walk_at(sp_RbVal v, sp_int i);
+static sp_PolyArray *sp_enum_finite_items(sp_RbVal v);   /* fwd: a finite materialized one's items */
 static sp_RbVal sp_poly_iter_walk(sp_RbVal v) {
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_ENUMERATOR && v.v.p) {
     sp_RbVal w = sp_enum_walker_boxed(v);
@@ -9495,6 +9563,9 @@ static void sp_poly_iter_check(sp_RbVal v, const char *m) {
 static sp_int sp_poly_arr_len_ex(sp_RbVal a) {
   if (a.tag != SP_TAG_OBJ) return 0;
   if (sp_enum_is_walker(a)) return sp_enum_walk_len(a);
+  /* a finite materialized Enumerator is its items: read as none, any?, all?,
+     none? and one? on a boxed one counted nothing and answered as if empty */
+  { sp_PolyArray *fi = sp_enum_finite_items(a); if (fi) return fi->len; }
   switch (a.cls_id) {
     case SP_BUILTIN_RANGE: { sp_Range *r = (sp_Range *)a.v.p; sp_int n = r->last - r->first + (r->excl ? 0 : 1); return n > 0 ? n : 0; }
     default:
@@ -9513,6 +9584,7 @@ static sp_RbVal sp_poly_each_elem(sp_RbVal a, sp_int i) {
   SP_GC_ROOT_RBVAL(a);   /* the boxing arms below allocate */
   if (a.tag != SP_TAG_OBJ) return sp_box_nil();
   if (sp_enum_is_walker(a)) return sp_enum_walk_at(a, i);
+  { sp_PolyArray *fi = sp_enum_finite_items(a); if (fi) return (i >= 0 && i < fi->len) ? fi->data[i] : sp_box_nil(); }
   switch (a.cls_id) {
     case SP_BUILTIN_INT_ARRAY: case SP_BUILTIN_FLT_ARRAY:
     case SP_BUILTIN_STR_ARRAY: case SP_BUILTIN_POLY_ARRAY: case SP_BUILTIN_PTR_ARRAY:
@@ -9910,6 +9982,11 @@ static SP_INLINE sp_RbVal sp_poly_arr_get_hash(sp_RbVal a, sp_int i) {
 }
 
 static SP_NOINLINE sp_RbVal sp_poly_arr_get_hash_cold(sp_RbVal a, sp_int i) {
+  /* MatchData#[i]: the group, nil where it did not match */
+  if (a.tag == SP_TAG_OBJ && a.v.p && a.cls_id == SP_BUILTIN_MATCHDATA) {
+    const char *g = sp_MatchData_aref((sp_MatchData *)a.v.p, i);
+    return g ? sp_box_str(g) : sp_box_nil();
+  }
   /* Proc#[] is #call: an Integer index on a callable is a one-argument call.
      The emitter's int-key read reaches this cold arm (a Proc is not an array
      kind), so a boxed Proc used to answer nil (#4395). */
@@ -11926,6 +12003,14 @@ static sp_RbVal sp_poly_struct_values(sp_RbVal v) {
 }
 /* Array#values_at indexes; Hash#values_at looks the keys up. */
 static sp_RbVal sp_poly_arr_values_at(sp_RbVal v, sp_PolyArray *idx) {
+  /* MatchData#values_at: each group by index or name (it took the Array
+     path, which reads no MatchData, and answered nils) */
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_MATCHDATA && v.v.p) {
+    SP_GC_ROOT_RBVAL(v); SP_GC_ROOT(idx);
+    sp_PolyArray *out = sp_PolyArray_new(); SP_GC_ROOT(out);
+    for (sp_int i = 0; idx && i < idx->len; i++) sp_PolyArray_push(out, sp_poly_md_group((sp_MatchData *)v.v.p, idx->data[i]));
+    return sp_box_poly_array(out);
+  }
   sp_poly_coll_chk(v, "values_at");
   if (!(v.tag == SP_TAG_OBJ && sp_poly_is_hash_kind(v.cls_id))) sp_poly_ary_chk(v, "values_at", 0);
   SP_GC_ROOT_RBVAL(v); SP_GC_ROOT(idx);
@@ -11982,6 +12067,9 @@ static sp_RbVal sp_poly_min(sp_RbVal v) {
        nil, an open side raises, and nothing is materialized */
     case SP_BUILTIN_RANGE: return sp_box_int_or_nil(sp_range_min_v(*(sp_Range *)v.v.p));
     case SP_BUILTIN_STR_RANGE: { const char *m = v.v.p ? sp_srange_min_v(*(sp_StrRange *)v.v.p) : NULL; return m ? sp_box_str(m) : sp_box_nil(); }
+    /* an Enumerator walks its items, as sort and sum on one already do */
+    case SP_BUILTIN_ENUMERATOR: if (v.v.p) return sp_PolyArray_min(sp_enum_to_a_boxed(v));
+      /* fallthrough */
     default: { sp_PolyArray *ue = sp_poly_user_elems(v);
                return ue ? sp_PolyArray_min(ue) : sp_raise_nomethod(sp_nomethod_msg("min", v)); }
   }
@@ -11999,6 +12087,9 @@ static sp_RbVal sp_poly_max(sp_RbVal v) {
     case SP_BUILTIN_POLY_ARRAY: return sp_PolyArray_max((sp_PolyArray *)v.v.p);
     case SP_BUILTIN_RANGE: return sp_range_max_box(*(sp_Range *)v.v.p);
     case SP_BUILTIN_STR_RANGE: { const char *m = v.v.p ? sp_srange_max_v(*(sp_StrRange *)v.v.p) : NULL; return m ? sp_box_str(m) : sp_box_nil(); }
+    /* an Enumerator walks its items, as sort and sum on one already do */
+    case SP_BUILTIN_ENUMERATOR: if (v.v.p) return sp_PolyArray_max(sp_enum_to_a_boxed(v));
+      /* fallthrough */
     default: { sp_PolyArray *ue = sp_poly_user_elems(v);
                return ue ? sp_PolyArray_max(ue) : sp_raise_nomethod(sp_nomethod_msg("max", v)); }
   }
@@ -12031,18 +12122,19 @@ static sp_PolyArray *sp_poly_hash_sum_arr(sp_RbVal v, sp_PolyArray *init) {
 /* Time#deconstruct_keys(nil): every field, for a hash pattern to match
    against (#3702). The symbols are interned at run time because these names
    are synthesized after the static symbol table is written. */
+/* Time#deconstruct_keys(nil): CRuby's keys in its order. :mon and :mday are
+   no keys of it -- they were here too, so `in {mon: 11}` matched a Time that
+   CRuby's pattern does not. */
 static sp_SymPolyHash *sp_time_deconstruct_all(sp_Time t) {
   sp_SymPolyHash *h = sp_SymPolyHash_new(); SP_GC_ROOT(h);
   sp_SymPolyHash_set(h, sp_sym_intern("year"), sp_box_int(sp_time_year(t)));
   sp_SymPolyHash_set(h, sp_sym_intern("month"), sp_box_int(sp_time_mon(t)));
-  sp_SymPolyHash_set(h, sp_sym_intern("mon"), sp_box_int(sp_time_mon(t)));
   sp_SymPolyHash_set(h, sp_sym_intern("day"), sp_box_int(sp_time_mday(t)));
-  sp_SymPolyHash_set(h, sp_sym_intern("mday"), sp_box_int(sp_time_mday(t)));
+  sp_SymPolyHash_set(h, sp_sym_intern("yday"), sp_box_int(sp_time_yday(t)));
+  sp_SymPolyHash_set(h, sp_sym_intern("wday"), sp_box_int(sp_time_wday(t)));
   sp_SymPolyHash_set(h, sp_sym_intern("hour"), sp_box_int(sp_time_hour(t)));
   sp_SymPolyHash_set(h, sp_sym_intern("min"), sp_box_int(sp_time_min(t)));
   sp_SymPolyHash_set(h, sp_sym_intern("sec"), sp_box_int(sp_time_sec(t)));
-  sp_SymPolyHash_set(h, sp_sym_intern("wday"), sp_box_int(sp_time_wday(t)));
-  sp_SymPolyHash_set(h, sp_sym_intern("yday"), sp_box_int(sp_time_yday(t)));
   sp_SymPolyHash_set(h, sp_sym_intern("subsec"),
                      t.tv_nsec == 0 ? sp_box_int(0)
                                     : sp_box_rational(sp_rational_new((sp_int)t.tv_nsec, 1000000000)));
@@ -14730,7 +14822,40 @@ static sp_PolyPolyHash *sp_poly_as_pp_hash(sp_RbVal v, const char *nm) {
    name, or for a Struct an index -- adds that member under the key as given,
    and the first key naming no member ends the hash there. A Data takes names
    only. Any other receiver is a Hash, answering itself, or NoMethodError. */
+/* The subject of a hash pattern on a boxed value, as the keyed hash its
+   #deconstruct_keys answers: a Time's fields (sp_time_deconstruct_all, what
+   the typed pattern reads), a user object through its to_h hook, and any
+   other value as it is. Time was left as it is, so `in {year:}` never
+   matched a Time read out of a container. */
+static sp_RbVal sp_poly_pat_keyed(sp_RbVal v) {
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_TIME && v.v.p)
+    return sp_box_obj(sp_time_deconstruct_all(*(sp_Time *)v.v.p), SP_BUILTIN_SYM_POLY_HASH);
+  if (v.tag == SP_TAG_OBJ && v.cls_id >= 0 && !sp_poly_is_hash_kind(v.cls_id) && sp_obj_to_h_fn)
+    return sp_obj_to_h_fn(v);
+  return v;
+}
 static sp_PolyPolyHash *sp_poly_deconstruct_keys(sp_RbVal v, sp_RbVal keys) {
+  /* Time#deconstruct_keys: every field for nil, else the requested Symbols
+     it has, skipping the rest (CRuby's, which ignores a key it does not
+     know rather than stopping there as a Struct does) */
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_TIME && v.v.p) {
+    sp_SymPolyHash *th = sp_time_deconstruct_all(*(sp_Time *)v.v.p); SP_GC_ROOT(th);
+    sp_PolyPolyHash *tout = sp_PolyPolyHash_new(); SP_GC_ROOT(tout);
+    if (keys.tag == SP_TAG_NIL) {
+      for (sp_int i = 0; i < th->len; i++)
+        sp_PolyPolyHash_set(tout, sp_box_sym(th->order[i]), sp_SymPolyHash_get(th, th->order[i]));
+      return tout;
+    }
+    if (keys.tag != SP_TAG_OBJ || !sp_poly_is_array_kind(keys.cls_id))
+      sp_raise_cls("TypeError", sp_sprintf("wrong argument type %s (expected Array or nil)", sp_poly_class_name(keys)));
+    sp_PolyArray *tks = sp_poly_to_a_arr(keys); SP_GC_ROOT(tks);
+    for (sp_int i = 0; i < tks->len; i++) {
+      sp_RbVal k = tks->data[i];
+      if (k.tag == SP_TAG_SYM && sp_SymPolyHash_has_key(th, (sp_sym)k.v.i))
+        sp_PolyPolyHash_set(tout, k, sp_SymPolyHash_get(th, (sp_sym)k.v.i));
+    }
+    return tout;
+  }
   sp_RbVal m = (v.tag == SP_TAG_OBJ && v.cls_id >= 0 && v.v.p && sp_obj_to_h_fn) ? sp_obj_to_h_fn(v) : sp_box_nil();
   if (!(m.tag == SP_TAG_OBJ && m.cls_id == SP_BUILTIN_SYM_POLY_HASH)) return sp_poly_as_pp_hash(v, "deconstruct_keys");
   sp_SymPolyHash *mh = (sp_SymPolyHash *)m.v.p; SP_GC_ROOT(mh);
@@ -15460,6 +15585,7 @@ static sp_Enumerator *sp_Enumerator_new_indices(sp_RbVal arr) {
    the other callers of sp_poly_to_a_arr (a `for` loop, `deconstruct`, the
    Enumerable names) keep a Time's NoMethodError, as CRuby raises. */
 static sp_PolyArray *sp_poly_to_a_call(sp_RbVal v) {
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_MATCHDATA && v.v.p) return sp_MatchData_to_a((sp_MatchData *)v.v.p);
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_FLOAT_RANGE && v.v.p) { sp_frange_iter_raise((*(sp_FloatRange *)v.v.p), 1); return NULL; }
   if (!(v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_TIME && v.v.p)) return sp_poly_to_a_arr(v);
   sp_Time t = *(sp_Time *)v.v.p;
@@ -15887,6 +16013,14 @@ static SP_COLD SP_NOINLINE sp_RbVal sp_enum_walker_boxed(sp_RbVal v) {
 static sp_bool sp_enum_is_walker(sp_RbVal v) {
   return v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_ENUMERATOR && v.v.p &&
          ((sp_Enumerator *)v.v.p)->walk_buf != NULL;
+}
+/* The items of a finite materialized Enumerator (not a generator, not
+   endless, not a walker), which an index walk reads in place; NULL for any
+   other value. */
+static sp_PolyArray *sp_enum_finite_items(sp_RbVal v) {
+  if (!(v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_ENUMERATOR && v.v.p)) return NULL;
+  sp_Enumerator *e = (sp_Enumerator *)v.v.p;
+  return (e->items && !e->gen && !e->endless && !e->walk_buf) ? e->items : NULL;
 }
 /* The walk's length so far: one past the index it reads next while the
    source still has that item, pulling it now if it has not been. */

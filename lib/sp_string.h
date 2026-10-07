@@ -74,11 +74,11 @@ static inline void sp_fd_publish(sp_String *s){
   sp_fd_publish_len(s);
   sp_str_lcache_drop(s->data);   /* the bytes just changed: the 7-bit hint and the cached count go */
 }
-/* The same after an append: the `la` bytes ahead of it did not change, so
-   what is known of the length is carried forward (sp_str_lcache_grown). Out
-   of line (lib/sp_string.c): the append around it stays small enough to be
-   inlined wherever it was. */
-void sp_fd_publish_grown(sp_String *s, int64_t la);
+/* After an append of `tl` bytes: the bytes ahead of them did not change, so
+   what is known of the length is carried forward (sp_str_lcache_grown). Out of
+   line (lib/sp_string.c): the append around it is inlined into generated code
+   and stays no larger than it was. */
+void sp_fd_publish_grown(sp_String *s, int64_t tl);
 /* A handle whose payload sits inside its own GC object, right after the
    struct (sp_String_new_fresh): no malloc and no finalizer, which are most of
    what a handle costs to make and to collect. Its first growth moves the
@@ -137,7 +137,7 @@ static inline sp_String*sp_String_new_inline_len(const char*s,int64_t len){
 }
 /* Shared append core: `tl` is the operand byte length (strlen for the
    bare-literal-safe entry, sp_str_byte_len for the binary one). */
-static inline void sp_fd_append_len(sp_String*s,const char*t,int64_t tl){if(!sp_fd_grow(s,s->len+tl))return;int64_t la=s->len;memcpy(s->data+la,t,tl);s->len+=tl;s->data[s->len]=0;sp_fd_publish_grown(s,la);}
+static inline void sp_fd_append_len(sp_String*s,const char*t,int64_t tl){if(!sp_fd_grow(s,s->len+tl))return;memcpy(s->data+s->len,t,tl);s->len+=tl;s->data[s->len]=0;sp_fd_publish_grown(s,tl);}
 static inline void sp_String_append(sp_String*s,const char*t){if(!s||!t)return;if(sp_String_is_frozen(s)){sp_raise_frozen_str(s->data);return;}sp_fd_append_len(s,t,(int64_t)strlen(t));}
 /* Binary-safe append: sizes the operand with the header length so an embedded
    NUL is preserved (Ruby String#<< / concat on a marked spinel string). */

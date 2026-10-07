@@ -54,6 +54,7 @@ int is_identity_query(const char *n); /* equal? object_id __id__ frozen?: tells 
 int is_len_alias(const char *n);      /* length size */
 int is_str_each_iter(const char *n);  /* each_char each_line each_byte each_codepoint: String's element iterators */
 int is_str_string_yield(const char *n); /* each_char each_line upto chars lines split scrub: String methods whose block takes a String */
+int is_unpack_name(const char *n); /* unpack: a String decoded into values, which a block takes one by one */
 int is_diverging_call(const char *n); /* raise fail throw exit exit! abort: a Kernel call that never returns */
 int is_block_loop_method(const char *n); /* times each upto downto step loop each_with_index: a block run an unbounded number of times */
 
@@ -87,6 +88,7 @@ int is_hash_default_setter(const char *n); /* default= */
 int is_pop_shift(const char *n); /* pop shift */
 int is_prepend_alias(const char *n); /* prepend unshift */
 int is_text_print(const char *n); /* print puts */
+int is_printf_name(const char *n); /* printf: formats its operands, then writes them */
 int is_union_alias(const char *n); /* union | */
 int is_eq_or_ne(const char *n); /* != == */
 int is_size_or_count(const char *n); /* count size */

@@ -1385,6 +1385,18 @@ const char *ty_box_nil_fn(TyKind t) {
   return tr ? tr->box_nil : NULL;
 }
 
+/* --share-strings: a write in value position whose slot holds the handle
+   (`x ||= (o = +"o")`, `a << (@s = +"s")`, repr_write_share) is that slot:
+   box its handle (emit_strbuf_write_handle). 0 for any other node. */
+static int emit_boxed_write_handle(Compiler *c, int node, Buf *b) {
+  if (!repr_write_share(c, node)) return 0;
+  buf_puts(b, "sp_box_nullable_obj(");
+  emit_strbuf_write_handle(c, node, b);
+  buf_puts(b, ", SP_BUILTIN_STRBUF)");
+  RC(RF_STRBUF_HANDLE, RW_NONE);
+  return 1;
+}
+
 /* A shared-mutable String's box, by where its handle comes from
    (repr_of's strbuf_src). */
 static void emit_boxed_strbuf(Compiler *c, int node, TyKind t, const Repr *rp, Buf *b) {
@@ -1405,6 +1417,8 @@ static void emit_boxed_strbuf(Compiler *c, int node, TyKind t, const Repr *rp, B
       RC(RF_STRBUF_HANDLE, RW_RAN_FIRST);
       return;
     }
+    /* a write whose slot holds the rule's handle: that handle */
+    if (emit_boxed_write_handle(c, node, b)) return;
     strbuf_slot_ref(c, node, srefS, sizeof srefS);
     buf_printf(b, "sp_box_nullable_obj(%s, SP_BUILTIN_STRBUF)", srefS);
     RC(RF_STRBUF_HANDLE, RW_NONE);
@@ -1456,6 +1470,9 @@ static void emit_boxed_strbuf(Compiler *c, int node, TyKind t, const Repr *rp, B
     RC(RF_STRBUF_HANDLE, RW_NONE);
     return;
   }
+  /* any other write whose slot holds the rule's handle, typed as the
+     handle (a value a handle is demanded of), as the String-typed one */
+  if (rp->strbuf_src == RS_HANDLE && emit_boxed_write_handle(c, node, b)) return;
   /* an element read is ALREADY a boxed handle when the container holds
      one: pass it through (as a handle box either way) so the alias keeps
      the container's own string rather than a fresh copy of it (#3941) */
@@ -11251,6 +11268,29 @@ static void super_plan_check(int id, const char *what, const char *name, int ser
             id, name, what, mi, dcls, omi, odef);
 }
 
+/* self, boxed, in a method of class `cls`: a builtin's reopening holds it
+   as the builtin's own C value (emit_method_signature) -- a double for a
+   Float, the sp_RbVal already for an Array or Object -- and an ordinary
+   class as its object pointer. What a super into Object's (boxed-self)
+   method hands on. */
+static void emit_reopen_self_boxed(Compiler *c, int cls, Buf *b) {
+  const char *cn = cls >= 0 ? c->classes[cls].c_name : NULL;
+  const char *rn = cls >= 0 ? c->classes[cls].name : NULL;
+  if (!cn) { emit_boxed_text(c, ty_object(cls), g_self, b); return; }
+  if (sp_streq(cn, "String"))       emit_boxed_text(c, TY_STRING, g_self, b);
+  else if (sp_streq(cn, "Integer")) emit_boxed_text(c, TY_INT, g_self, b);
+  else if (sp_streq(cn, "Float"))   emit_boxed_text(c, TY_FLOAT, g_self, b);
+  else if (sp_streq(cn, "Symbol"))  emit_boxed_text(c, TY_SYMBOL, g_self, b);
+  else if (sp_streq(rn, "NilClass")) buf_puts(b, "sp_box_nil()");
+  else if (sp_streq(rn, "TrueClass") || sp_streq(rn, "FalseClass")) emit_boxed_text(c, TY_BOOL, g_self, b);
+  else if (sp_streq(cn, "Array") || sp_streq(cn, "Hash") || sp_streq(cn, "Object") || sp_streq(cn, "Numeric"))
+    buf_puts(b, g_self);
+  else if (sp_streq(cn, "Range")) emit_boxed_text(c, TY_RANGE, g_self, b);
+  else if (sp_streq(cn, "Time"))  emit_boxed_text(c, TY_TIME, g_self, b);
+  else emit_boxed_text(c, ty_object(cls), g_self, b);
+}
+
+
 void emit_super(Compiler *c, int id, Buf *b) {
   if (g_plan_check) ucall_emitted(id);
   { Scope *ss = comp_scope_of(c, id);
@@ -11692,7 +11732,7 @@ void emit_super(Compiler *c, int id, Buf *b) {
        activesupport's HashWithIndifferentAccess#reverse_merge -- and which
        have no struct to cast self to. */
     buf_printf(b, "sp_%s_%s(", c->classes[defcls].c_name, mc(uname));
-    emit_boxed_text(c, ty_object(s->class_id), g_self, b);
+    emit_reopen_self_boxed(c, s->class_id, b);
   }
   /* a user exception subclass's super reaching its builtin parent's
      reopening: that method takes the runtime's sp_Exception */
@@ -12298,15 +12338,19 @@ static void emit_obj_hashkey_dispatch(Compiler *c, Buf *b) {
        A member that holds the struct itself now contributes a large fixed
        constant, so a two-member struct whose self-reference is not last
        overflows on the very next multiply (UBSan caught it). */
-    buf_printf(b, "    case %d: { sp_%s *o = (sp_%s *)p; uint64_t _h = %d;\n",
-               comp_class_index(c, ci->name), ci->c_name, ci->c_name, ci->nmembers + 1);
+    /* The same fold as the inline Struct#hash at a typed call site
+       (codegen_call_recv.c), so a Struct read out of a container answers
+       #hash with the value a typed one does; with h*31+x here the two
+       disagreed for equal structs. */
+    buf_printf(b, "    case %d: { sp_%s *o = (sp_%s *)p; uint64_t _h = 1469598103934665603ULL;\n",
+               comp_class_index(c, ci->name), ci->c_name, ci->c_name);
     for (int i = 0; i < ci->nmembers; i++) {
       char fe[128]; snprintf(fe, sizeof fe, "o->iv_%s", iv_c(ci->ivars[i] + 1));
       Buf bx; memset(&bx, 0, sizeof bx); emit_boxed_text(c, ci->ivar_types[i], fe, &bx);
-      buf_printf(b, "      _h = _h * 31 + (uint64_t)sp_rbval_hash_key(%s);\n", bx.p ? bx.p : fe);
+      buf_printf(b, "      _h = (_h ^ (uint64_t)sp_rbval_hash_key(%s)) * 1099511628211ULL;\n", bx.p ? bx.p : fe);
       free(bx.p);
     }
-    buf_puts(b, "      return (sp_int)_h; }\n");
+    buf_puts(b, "      return (sp_int)(_h >> 1); }\n");
   }
   buf_puts(b, "    default: break;\n  }\n  return (sp_int)(uintptr_t)p;\n}\n");
 
