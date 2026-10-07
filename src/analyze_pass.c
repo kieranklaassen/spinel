@@ -8929,6 +8929,24 @@ const char *block_param_name(Compiler *c, int block, int idx) {
   return NULL;
 }
 
+/* scrub with a block on a boxed receiver runs the String receiver's loop
+   where that loop fits the block: a literal block with no break or return of
+   its own, that names no parameter or whose first is a required one. The
+   block-parameter pass types the parameter a String by this test and
+   emit_poly_scrub takes the block by it, so the two cannot disagree: a
+   parameter taken but left untyped read as an Integer in a lambda that
+   captured it. proc_body_has_return is defined in codegen.c and reached by
+   name, since analyze does not include codegen_internal.h. */
+int proc_body_has_return(Compiler *c, int id);
+int poly_scrub_takes_block(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  int block = nt_ref(nt, id, "block");
+  if (block < 0 || nt_kind(nt, block) != NK_BlockNode) return 0;
+  int body = nt_ref(nt, block, "body");
+  if (block_has_top_break(c, body) || proc_body_has_return(c, body)) return 0;
+  return block_param_name(c, block, 0) || nt_ref(nt, block, "parameters") < 0;
+}
+
 static const char *block_rest_kind_name(Compiler *c, int block, const char *field, const char *kind) {
   int bp = nt_ref(c->nt, block, "parameters");      /* BlockParametersNode */
   if (bp < 0) return NULL;
@@ -14234,6 +14252,8 @@ int infer_block_params(Compiler *c) {
       pt = TY_INT;
     else if (rt == TY_STRING && is_str_string_yield(name))
       pt = TY_STRING;  /* split { |piece| } yields each substring, scrub each invalid sequence */
+    else if (rt == TY_POLY && sp_streq(name, "scrub") && poly_scrub_takes_block(c, id))
+      pt = TY_STRING;  /* a boxed receiver hands its block a String too: the arm unboxes one or raises */
     else if ((rt == TY_STRING || rt == TY_POLY) &&
              (sp_streq(name, "gsub") || sp_streq(name, "sub") ||
               sp_streq(name, "gsub!") || sp_streq(name, "sub!")))   /* the bang forms are rewritten to these */

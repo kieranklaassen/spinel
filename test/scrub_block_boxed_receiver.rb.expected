@@ -1,0 +1,31 @@
+"ab?cd??ef"
+"ab<fe>cd<fd><fc>ef"
+[[[254], "UTF-8", false], [[253], "UTF-8", false], [[252], "UTF-8", false]]
+"ab-cd--ef"
+"UTF-8"
+true
+"x2y"
+"q!r"
+3
+"m__n"
+7
+"ab1cd23ef"
+3
+"aéb"
+3
+"ab1cd11ef"
+both of block and replacement given
+TypeError
+"ab\xFE\xFDcd"
+"ASCII-8BIT"
+3
+"ab.cd..ef"
+NoMethodError
+"ab?cd??ef"
+[[254], [253], [252]]
+"ab1cd11ef"
+"ab1cd11ef"
+"aéb"
+"ab5cd55ef"
+"ab�cd��ef"
+"ab!cd!!ef"

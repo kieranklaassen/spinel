@@ -11999,6 +11999,38 @@ int emit_boxed_class_aref(Compiler *c, int id, Buf *b) {
   return 0;
 }
 
+/* scrub on a boxed receiver: sp_poly_recv_s unboxes the String, and raises
+   NoMethodError for any other value. A block was dropped here, and each
+   invalid sequence became U+FFFD. Where poly_scrub_takes_block says the
+   String arm's loop (emit_op_string_scrub_block) fits the block, and the
+   analysis typed the block's parameter a String by the same test, that loop
+   runs over the unboxed String. Any other call keeps the arm it had. */
+static int emit_poly_scrub_block(Compiler *c, int id, int recv, int argc, Buf *b) {
+  if (!poly_scrub_takes_block(c, id)) return 0;
+  int block = nt_ref(c->nt, id, "block");
+  const char *p0 = block_param_name(c, block, 0);
+  if (p0) {
+    Scope *ps = comp_scope_of(c, block);
+    LocalVar *plv = ps ? scope_local(ps, p0) : NULL;
+    if (!plv || plv->type != TY_STRING) return 0;
+  }
+  Buf rb; memset(&rb, 0, sizeof rb);
+  buf_puts(&rb, "sp_poly_recv_s("); emit_expr(c, recv, &rb); buf_puts(&rb, ", \"scrub\")");
+  BopCtx x; memset(&x, 0, sizeof x);
+  x.id = id; x.recv = recv; x.argc = argc; x.rt = TY_STRING; x.name = "scrub"; x.rtext = rb.p;
+  buf_puts(b, "sp_box_str(");
+  int ok = emit_op_string_scrub_block(c, &x, b);
+  buf_puts(b, ")");
+  free(rb.p);
+  return ok;
+}
+static void emit_poly_scrub(Compiler *c, int id, int recv, int argc, const int *argv, Buf *b) {
+  if (emit_poly_scrub_block(c, id, recv, argc, b)) return;
+  buf_puts(b, "sp_box_str(sp_str_scrub(sp_poly_recv_s("); emit_expr(c, recv, b); buf_puts(b, ", \"scrub\"), ");
+  if (argc == 1) emit_str_expr(c, argv[0], b); else buf_puts(b, "0");
+  buf_puts(b, "))");
+}
+
 /* A zero-argument call on a boxed receiver (emit_poly_call's arms, in their order) */
 static int emit_poly_call0_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, TyKind rt, int *out) {
   if (!(recv >= 0 && rt == TY_POLY && argc == 0)) return 0;
@@ -12370,9 +12402,7 @@ static int emit_poly_call0_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
   if (sp_streq(name, "b") && argc == 0) {   /* a binary copy, as the String arm answers (#4441) */
     buf_puts(b, "sp_box_str(sp_str_b(sp_poly_recv_s("); emit_expr(c, recv, b); buf_puts(b, ", \"b\")))"); { *out = 1; return 1; }
   }
-  if (sp_streq(name, "scrub") && argc == 0) {
-    buf_puts(b, "sp_box_str(sp_str_scrub(sp_poly_recv_s("); emit_expr(c, recv, b); buf_puts(b, ", \"scrub\"), 0))"); { *out = 1; return 1; }
-  }
+  if (sp_streq(name, "scrub") && argc == 0) { emit_poly_scrub(c, id, recv, argc, argv, b); *out = 1; return 1; }
   if (sp_streq(name, "dump") && argc == 0) {   /* the quoted form, as the String arm answers */
     buf_puts(b, "sp_box_str(sp_str_dump(sp_poly_recv_s("); emit_expr(c, recv, b); buf_puts(b, ", \"dump\")))"); { *out = 1; return 1; }
   }
@@ -14040,11 +14070,7 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
       if (argc == 2) { buf_puts(b, ", "); emit_int_expr(c, argv[1], b); }
       buf_puts(b, "))");
     }
-    else if (sp_streq(name, "scrub")) {
-      buf_puts(b, "sp_box_str(sp_str_scrub(sp_poly_recv_s(");
-      emit_expr(c, recv, b); buf_puts(b, ", \"scrub\"), ");
-      emit_str_expr(c, argv[0], b); buf_puts(b, "))");
-    }
+    else if (sp_streq(name, "scrub")) emit_poly_scrub(c, id, recv, argc, argv, b);
     else if (is_encoding_mutator(name)) {
       /* the String receiver's arm on the unboxed value: a `String | nil` slot
          holding a String answered NoMethodError for want of this (#4441) */
