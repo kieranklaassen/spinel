@@ -11960,12 +11960,14 @@ static int emit_attr_global_const_write_stmt(Compiler *c, int id, Buf *b, int in
     int val = nt_ref(nt, id, "value");
     TyKind rt = recv >= 0 ? comp_ntype(c, recv) : TY_UNKNOWN;
     TyKind rhst = val >= 0 ? comp_ntype(c, val) : TY_UNKNOWN;
-    /* the dynamic operator for a boxed (poly) slot, and the bitwise set the
-       boxed slot handles via unbox-op-rebox (both mirror the ivar op-assign
-       poly arms above). The shifts take the dynamic operator too, as a boxed
-       local's `x <<= n` does (emit_poly_op_assign): it promotes past the word
-       and shifts the other way for a negative count, where unbox-op-rebox
-       wrapped (`obj.v <<= 70` was 64, `obj.v <<= -1` was 0). */
+    /* the dynamic operator for a boxed (poly) slot (it mirrors the ivar
+       op-assign poly arms above). The shifts take the dynamic operator too,
+       as a boxed local's `x <<= n` does (emit_poly_op_assign): it promotes
+       past the word and shifts the other way for a negative count, where
+       unbox-op-rebox wrapped (`obj.v <<= 70` was 64, `obj.v <<= -1` was 0).
+       So do `&`, `|` and `^`, with sp_poly_bitop's operator number in
+       `cpx`: unbox-op-rebox read whatever the slot held as an Integer
+       (`obj.v &= 1` on "s" was 0, on true 1). */
     const char *cpf = op && sp_streq(op, "+") ? "sp_poly_add"
                     : op && sp_streq(op, "-") ? "sp_poly_sub"
                     : op && sp_streq(op, "*") ? "sp_poly_mul"
@@ -11973,7 +11975,9 @@ static int emit_attr_global_const_write_stmt(Compiler *c, int id, Buf *b, int in
                     : op && sp_streq(op, "%") ? "sp_poly_mod"
                     : op && sp_streq(op, "**") ? "sp_poly_pow"
                     : op && sp_streq(op, "<<") ? "sp_poly_shl"
-                    : op && sp_streq(op, ">>") ? "sp_poly_shr" : NULL;
+                    : op && sp_streq(op, ">>") ? "sp_poly_shr"
+                    : op && is_bit_op(op) ? "sp_poly_bitop" : NULL;
+    const char *cpx = !(op && is_bit_op(op)) ? "" : sp_streq(op, "&") ? ", 0" : sp_streq(op, "|") ? ", 1" : ", 2";
     int bitop = op && is_int_bit_op(op);
     int rdcls = -1;
     /* Ruby desugars `recv.attr op= v` into a reader call AND a writer call;
@@ -11993,7 +11997,7 @@ static int emit_attr_global_const_write_stmt(Compiler *c, int id, Buf *b, int in
          type error) */
       if (ivt == TY_STRING && !(op && sp_streq(op, "+")))
         unsupported(c, id, "call operator write (operator on a string attribute)");
-      if (ivt == TY_POLY && !cpf && !bitop)
+      if (ivt == TY_POLY && !cpf)
         unsupported(c, id, "call operator write (operator on a boxed attribute)");
       /* the receiver is bound in g_pre, ahead of any prelude the rhs leaves
          there: Ruby evaluates it first, and an array slot's op-assign reads
@@ -12020,14 +12024,7 @@ static int emit_attr_global_const_write_stmt(Compiler *c, int id, Buf *b, int in
         /* boxed slot: dynamic operator on boxed operands (same as the
            poly-receiver dispatch arms below). */
         buf_printf(b, "_t%d%siv_%s = %s(_t%d%siv_%s, ", trecv, acc, iv_c(rn), cpf, trecv, acc, iv_c(rn));
-        emit_boxed(c, val, b); buf_puts(b, ");\n");
-      }
-      else if (ivt == TY_POLY) {
-        /* bitwise op-assign on a boxed slot: coerce to int, re-box */
-        buf_printf(b, "_t%d%siv_%s = sp_box_int((sp_poly_recv_i(\"%s\", _t%d%siv_%s) %s (",
-                   trecv, acc, iv_c(rn), op, trecv, acc, iv_c(rn), op);
-        emit_poly_unboxed(c, val, rhst, op_assign_int_conv(TY_INT, op), b);
-        buf_puts(b, ")));\n");
+        emit_boxed(c, val, b); buf_printf(b, "%s);\n", cpx);
       }
       else if (ty_is_array(ivt) || ivt == TY_POLY_ARRAY) {
         char aref[400]; snprintf(aref, sizeof aref, "_t%d%siv_%s", trecv, acc, iv_c(rn));
@@ -12076,7 +12073,7 @@ static int emit_attr_global_const_write_stmt(Compiler *c, int id, Buf *b, int in
           unsupported(c, id, "call operator write (bitwise operator on a float attribute)");
         if (nstr && !(op && sp_streq(op, "+")))
           unsupported(c, id, "call operator write (operator other than + on a string attribute)");
-        if (nany && !cpf && !bitop)
+        if (nany && !cpf)
           unsupported(c, id, "call operator write (operator on a boxed attribute)");
         int trecv = ++g_tmp;
         emit_indent(b, indent);
@@ -12095,14 +12092,7 @@ static int emit_attr_global_const_write_stmt(Compiler *c, int id, Buf *b, int in
         }
         else if (nany && cpf) {
           buf_printf(b, "%s(_t%d, %s(%s(_t%d), ", nwm->csym, trecv, cpf, nrm->csym, trecv);
-          emit_boxed(c, val, b); buf_puts(b, "));\n");
-        }
-        else if (nany) {
-          /* bitwise on a boxed attribute: coerce to int, re-box */
-          buf_printf(b, "%s(_t%d, sp_box_int(sp_poly_recv_i(\"%s\", %s(_t%d)) %s (",
-                     nwm->csym, trecv, op, nrm->csym, trecv, op);
-          emit_poly_unboxed(c, val, rhst, op_assign_int_conv(TY_INT, op), b);
-          buf_puts(b, ")));\n");
+          emit_boxed(c, val, b); buf_printf(b, "%s));\n", cpx);
         }
         else if (rhst != TY_POLY && !bitop) {
           char slot[300]; snprintf(slot, sizeof slot, "%s(_t%d)", nrm->csym, trecv);
@@ -12162,7 +12152,7 @@ static int emit_attr_global_const_write_stmt(Compiler *c, int id, Buf *b, int in
            the default raise instead -- same skip-on-static-mismatch shape
            as the poly attr-write dispatch above. */
         if (ivt == TY_STRING && !(op && sp_streq(op, "+"))) continue;
-        if (ivt == TY_POLY && !cpf && !bitop) continue;
+        if (ivt == TY_POLY && !cpf) continue;
         const char *cn = c->classes[pdcls].name;
         any = 1;
         emit_indent(b, indent + 1);
@@ -12180,14 +12170,7 @@ static int emit_attr_global_const_write_stmt(Compiler *c, int id, Buf *b, int in
           buf_puts(b, "_o->iv_"); buf_puts(b, iv_c(rn));
           buf_printf(b, " = %s(_o->iv_", cpf); buf_puts(b, iv_c(rn)); buf_puts(b, ", ");
           emit_boxed(c, val, b);
-          buf_puts(b, "); break; }\n");
-        }
-        else if (ivt == TY_POLY) {
-          /* bitwise op-assign on a boxed slot: coerce to int, re-box */
-          buf_puts(b, "_o->iv_"); buf_puts(b, iv_c(rn));
-          buf_printf(b, " = sp_box_int((sp_poly_recv_i(\"%s\", _o->iv_%s) %s (", op, iv_c(rn), op);
-          emit_poly_unboxed(c, val, rhst, op_assign_int_conv(TY_INT, op), b);
-          buf_puts(b, "))); break; }\n");
+          buf_printf(b, "%s); break; }\n", cpx);
         }
         else {
           char lval[320]; snprintf(lval, sizeof lval, "_o->iv_%s", iv_c(rn));
