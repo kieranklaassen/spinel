@@ -5382,6 +5382,7 @@ static sp_Complex sp_complex_div_poly(sp_Complex a, sp_RbVal b) {
    def /(o) = 0; end`), so it is kept for that program. Static, as the hooks
    are: a unit that never sets it folds the test away. */
 static int sp_poly_divmod_converts = 0;
+SP_COLD SP_NOINLINE static sp_bool sp_poly_operand_bad(sp_RbVal b) { return !sp_poly_tower_p(b) && !sp_poly_divmod_converts; }
 static sp_RbVal sp_poly_div(sp_RbVal a, sp_RbVal b) { /* Two plain numbers first, as add/sub/mul already do (#3984): none of the checks below can match either tag, and this is what a boxed arithmetic loop actually holds. */ if (a.tag == SP_TAG_INT && b.tag == SP_TAG_INT) return sp_box_int(sp_idiv(a.v.i, b.v.i)); if (a.tag == SP_TAG_FLT && b.tag == SP_TAG_FLT) return sp_box_float(a.v.f / b.v.f); /* an Integer beside a Float too, as + - and * answer it: the check for a value that is no number, below, then costs no pair of plain numbers */ if (a.tag == SP_TAG_FLT && b.tag == SP_TAG_INT) return sp_box_float(a.v.f / (sp_float)b.v.i); if (a.tag == SP_TAG_INT && b.tag == SP_TAG_FLT) return sp_box_float((sp_float)a.v.i / b.v.f); /* before the tower branches, which match on the receiver kind and would convert a user object to a number of that kind */ if (SP_UNLIKELY(sp_poly_is_user_obj(a) || sp_poly_is_user_obj(b))) return sp_poly_binop_bad("/", a, b); if (SP_UNLIKELY(sp_poly_is_strbuf(a) || sp_poly_is_strbuf(b))) return sp_poly_div(sp_poly_strbuf_deref(a), sp_poly_strbuf_deref(b)); if (SP_UNLIKELY(sp_poly_tower_mismatch(a, b))) return sp_poly_binop_bad("/", a, b); /* An Integer or a Float owns no arm, and unlike + - and * this operator has no failure of its own to fall to: the Float branch below tests either tag and the last line converts both sides, so `7 / nil` divided by zero and `nil / 2` answered 0. */ if (SP_UNLIKELY(!sp_poly_tower_p(a) || !sp_poly_tower_p(b)) && !sp_poly_divmod_converts) return sp_poly_binop_bad("/", a, b); if ((sp_poly_is_brat(a) || sp_poly_is_brat(b))) { if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) return sp_box_float(sp_poly_to_f(a) / sp_poly_to_f(b)); return sp_brat_div_poly(a, b); } if ((sp_poly_is_rational(a) || sp_poly_is_rational(b)) && a.tag != SP_TAG_FLT && b.tag != SP_TAG_FLT) return sp_box_rational(sp_rational_div(sp_poly_as_rational(a), sp_poly_as_rational(b))); /* A Complex divided by a REAL divides each component, and the typed arms have done that since #3616: boxing the real into c+0i and running the conjugate formula answers NaN where MRI answers Infinity for a Float divisor, and swallows the ZeroDivisionError an Integer 0 owes (integer division rules). The boxed path still boxed, so `Complex(20, 40) / z` with a zero z out of a container answered (NaN+NaN*i) in both modes instead of raising. Complex / Complex keeps the full formula. */ if (a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_COMPLEX) return sp_box_complex(sp_complex_div_poly(sp_poly_as_complex(a), b)); if ((a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_COMPLEX) || (b.tag == SP_TAG_OBJ && b.cls_id == SP_BUILTIN_COMPLEX)) return sp_box_complex(sp_complex_div(sp_poly_as_complex(a), sp_poly_as_complex(b))); if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) return sp_box_float(sp_poly_to_f_with_rational(a) / sp_poly_to_f_with_rational(b)); if ((a.tag == SP_TAG_BIGINT || b.tag == SP_TAG_BIGINT)) return sp_box_bigint(sp_bigint_div(sp_poly_as_bigint(a), sp_poly_as_bigint(b))); return sp_box_int(sp_idiv(sp_poly_to_i(a), sp_poly_to_i(b))); }
 static sp_RbVal sp_poly_str_mod(sp_RbVal a, sp_RbVal b);  /* fwd: defined beside the format helper */
 /* Range#% (step) on a boxed Integer or Float Range, materialized as the
@@ -5470,6 +5471,9 @@ static sp_float sp_poly_fdiv(sp_RbVal a, sp_RbVal b) {
      turned away from a method it has -- by the guard of a function whose
      very next line knows how to divide one (sp_poly_to_f_with_rational). */
   if (!sp_poly_numeric_p(a) && !sp_poly_is_rat_kind(a)) sp_raise_poly_nomethod("fdiv", a);
+  /* an operand that is no number raises the coercion failure before the
+     division converts it (nil and a Symbol as a Float, a String by Float()) */
+  if (SP_UNLIKELY(!sp_poly_tower_p(b)) && !sp_poly_divmod_converts) sp_poly_binop_bad("fdiv", a, b);
   return sp_poly_to_f_with_rational(a) / sp_poly_to_f_with_rational(b);
 }
 static sp_RbVal sp_poly_divmod(sp_RbVal a, sp_RbVal b) {
@@ -5481,6 +5485,12 @@ static sp_RbVal sp_poly_divmod(sp_RbVal a, sp_RbVal b) {
      below instead of raising the method it lacks. */
   if (!sp_poly_numeric_p(a) && !sp_poly_is_rational(a) && !sp_poly_is_brat(a))
     sp_raise_poly_nomethod("divmod", a);
+  /* and an OPERAND that is no number raises the coercion failure: the arms
+     below convert it (nil to 0, a Symbol to its index), so `7.divmod(nil)`
+     divided by zero and `7.divmod(true)` answered [7, 0]. A program whose
+     builtin classes have a coerce of their own keeps the conversion
+     (sp_poly_divmod_converts). */
+  if (b.tag != SP_TAG_INT && b.tag != SP_TAG_FLT && sp_poly_operand_bad(b)) return sp_poly_binop_bad("divmod", a, b);
   /* the operands are read after the pair's allocation, which can collect a
      fresh one (a Bignum or a big Rational built for this call) */
   SP_GC_ROOT_RBVAL(a); SP_GC_ROOT_RBVAL(b);
@@ -5568,6 +5578,7 @@ static sp_RbVal sp_poly_div_m(sp_RbVal a, sp_RbVal b) {
   SP_POLY_COERCE_NUM("div");
   if (!sp_poly_numeric_p(a) && !sp_poly_is_rational(a) && !sp_poly_is_brat(a))
     sp_raise_poly_nomethod("div", a);
+  if (b.tag != SP_TAG_INT && b.tag != SP_TAG_FLT && sp_poly_operand_bad(b)) return sp_poly_binop_bad("div", a, b);   /* see sp_poly_divmod */
   /* a Rational with no Float beside it divides exactly (sp_rat_floor_div_v);
      a big Rational fell to the Integer arms below, which raised RangeError,
      or ZeroDivisionError beside a Bignum */
@@ -5656,6 +5667,7 @@ static sp_RbVal sp_poly_remainder(sp_RbVal a, sp_RbVal b) {
   SP_POLY_COERCE_NUM("remainder");
   if (!sp_poly_numeric_p(a) && !sp_poly_is_rational(a) && !sp_poly_is_brat(a))
     sp_raise_poly_nomethod("remainder", a);
+  if (b.tag != SP_TAG_INT && b.tag != SP_TAG_FLT && sp_poly_operand_bad(b)) return sp_poly_binop_bad("remainder", a, b);   /* see sp_poly_divmod */
   /* two exact numbers with a Rational, a Bignum or a big Rational among
      them, in Bignums (sp_rat_mod_v) */
   if ((sp_poly_is_rat_kind(a) || sp_poly_is_rat_kind(b)) &&
