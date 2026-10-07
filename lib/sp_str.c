@@ -1298,29 +1298,36 @@ sp_StrArray*sp_str_chars(const char*s){SP_GC_ROOT_STR(s);sp_StrArray*a=sp_StrArr
 const char*sp_str_tr(const char*s,const char*from,const char*to){SP_GC_ROOT_STR(s);SP_GC_ROOT_STR(from);SP_GC_ROOT_STR(to);if(!s)sp_nil_recv("tr");if(!from||!to)return s;int negate=0;const char*fp=from;if(*fp=='^'&&*(fp+1)){negate=1;fp++;}size_t fn,tn;uint32_t*fcps=sp_utf8_decode_charset_n(fp,sp_str_byte_len(from)-(size_t)(fp-from),&fn);uint32_t*tcps=sp_utf8_decode_charset_n(to,sp_str_byte_len(to),&tn);size_t bl=sp_str_byte_len(s);size_t cap=((bl*4))+1;char*buf=(char*)malloc(cap);size_t n=0;const char*p=s,*pe=s+bl;while(p<pe){uint32_t cp;int cn=sp_utf8_decode(p,&cp);size_t mi=fn;for(size_t j=0;j<fn;j++)if(fcps[j]==cp){mi=j;break;}int in_set=(mi<fn);if(negate)in_set=!in_set;if(in_set&&tn>0){uint32_t rep=negate?tcps[tn-1]:(mi<tn?tcps[mi]:tcps[tn-1]);n+=sp_utf8_encode(rep,buf+n);}
 else if(in_set){}
 else{memcpy(buf+n,p,cn);n+=cn;}p+=cn;}buf[n]=0;char*r=sp_str_alloc(n);memcpy(r,buf,n+1);free(buf);free(fcps);free(tcps);return r;}
+/* tr_s! answers nil when no character of the set was met: one translated
+   to itself leaves the same text (sp_str.h) */
+SP_TLS int sp_str_tr_s_met = 0;
 const char*sp_str_tr_s(const char*s,const char*from,const char*to){SP_GC_ROOT_STR(s);SP_GC_ROOT_STR(from);SP_GC_ROOT_STR(to);
   if(!s)sp_nil_recv("tr_s");
+  int met=0;
+  sp_str_tr_s_met=0;
   if(!from||!to)return s;
   int negate=0;const char*fp=from;
-  if(*fp=='^'&&*(fp+1)){negate=1;fp++;}
+  if(*fp=='^'&&sp_str_byte_len(from)>1){negate=1;fp++;}
   size_t fn,tn;
   uint32_t*fcps=sp_utf8_decode_charset_n(fp,sp_str_byte_len(from)-(size_t)(fp-from),&fn);
   uint32_t*tcps=sp_utf8_decode_charset_n(to,sp_str_byte_len(to),&tn);
-  size_t bl=strlen(s);
+  size_t bl=sp_str_byte_len(s);
   size_t cap=(((bl*4)))+1;
   char*buf=(char*)malloc(cap);
   size_t n=0;
-  const char*p=s;
+  const char*p=s,*pe=s+bl;
   uint32_t last_emit=0; int has_last=0; int last_was_translated=0;
-  while(*p){
+  while(p<pe){
     uint32_t cp; int cn=sp_utf8_decode(p,&cp);
     size_t mi=fn;
-    for(size_t j=0;j<fn;j++)if(fcps[j]==cp){mi=j;break;}
+    /* a character the set names twice is translated by its last naming */
+    for(size_t j=fn;j-->0;)if(fcps[j]==cp){mi=j;break;}
     int in_set=(mi<fn);
     if(negate)in_set=!in_set;
     uint32_t emit_cp;
     int translated=0;
     if(in_set){
+      met=1;
       if(tn>0){
         emit_cp=negate?tcps[tn-1]:(mi<tn?tcps[mi]:tcps[tn-1]);
         translated=1;
@@ -1349,6 +1356,7 @@ else {
   buf[n]=0;
   char*r=sp_str_alloc(n);
   memcpy(r,buf,n+1);
+  sp_str_tr_s_met=met;
   free(buf); free(fcps); free(tcps);
   return r;
 }

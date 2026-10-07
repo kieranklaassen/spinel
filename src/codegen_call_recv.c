@@ -3523,6 +3523,9 @@ static int emit_str_mutator_call(Compiler *c, int id, Buf *b, const NodeTable *n
     }
     int sb_nil_nc = !(sb_fl & PF_STR_SELF);
     int sb_sub = sbi >= 0 && (sp_streq(sb_bang, "gsub!") || sp_streq(sb_bang, "sub!"));
+    /* tr_s! answers nil when no character of its set was met, which the
+       text comparison cannot tell from one translated to itself */
+    const char *sb_met = sbi >= 0 && sp_streq(sb_bang, "tr_s!") ? " || sp_str_tr_s_met" : "";
     /* gsub!(pattern) with no replacement and no block answers an
        Enumerator, which its own arm builds: the value form below answers
        the String, and with a pattern the plain form refuses it went into
@@ -3576,7 +3579,7 @@ static int emit_str_mutator_call(Compiler *c, int id, Buf *b, const NodeTable *n
           int tchg = ++g_tmp;
           buf_printf(b, "const char *_t%d = %s; ", tnb, nbB.p ? nbB.p : "");
           if (sb_nil_nc)
-            buf_printf(b, "int _t%d = !sp_str_eq(_t%d, _t%d)%s; ", tchg, tob, tnb, subm ? " || sp_re_sub_matched" : "");
+            buf_printf(b, "int _t%d = !sp_str_eq(_t%d, _t%d)%s; ", tchg, tob, tnb, subm ? " || sp_re_sub_matched" : sb_met);
           buf_printf(b, "sp_String_set_bin(_t%d, _t%d); ", tsb, tnb);
           free(nbB.p);
           if (sb_nil_nc)
@@ -3627,7 +3630,8 @@ static int emit_str_mutator_call(Compiler *c, int id, Buf *b, const NodeTable *n
       free(nb.p);
       emit_str_mut_writeback(c, recv, lvw, tn2, b);
       if (sb_nil_nc)
-        buf_printf(b, "(sp_str_eq(_t%d, _t%d)%s) ? NULL : _t%d; })", to, tn2, subm2 ? " && !sp_re_sub_matched" : "", tn2);
+        buf_printf(b, "(sp_str_eq(_t%d, _t%d)%s) ? NULL : _t%d; })", to, tn2,
+                   subm2 ? " && !sp_re_sub_matched" : *sb_met ? " && !sp_str_tr_s_met" : "", tn2);
       else
         buf_printf(b, "_t%d; })", tn2);
       { *out = 1; return 1; }
@@ -11867,7 +11871,9 @@ static void emit_face_str_bang(Compiler *c, int id, unsigned own, Buf *b) {
   int tchg = 0;
   if (nil_nc) {
     tchg = ++g_tmp;
-    buf_printf(b, "int _t%d = !sp_str_eq(_t%d, _t%d); ", tchg, tob, tnb);
+    /* tr_s! answers nil when no character of its set was met */
+    buf_printf(b, "int _t%d = !sp_str_eq(_t%d, _t%d)%s; ", tchg, tob, tnb,
+               sp_streq(bang, "tr_s!") ? " || sp_str_tr_s_met" : "");
   }
   /* A shared handle absorbs the new contents; a plain string box cannot,
      so an lvalue receiver takes the value back the way the typed path

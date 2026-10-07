@@ -188,6 +188,7 @@ sp_IntArray*sp_str_codepoints_all(const char*s);
 sp_StrArray*sp_str_chars(const char*s);
 const char*sp_str_tr(const char*s,const char*from,const char*to);
 const char*sp_str_tr_s(const char*s,const char*from,const char*to);
+extern SP_TLS int sp_str_tr_s_met;   /* the last tr_s met a character of its set */
 const char*sp_str_delete(const char*s,const char*chars);
 const char*sp_str_squeeze(const char*s);
 const char*sp_str_squeeze_chars(const char*s,const char*cs);
