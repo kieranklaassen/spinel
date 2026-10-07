@@ -12383,6 +12383,15 @@ static int sp_poly_queue_push_n(sp_RbVal v, int argc, const sp_RbVal *args) {
                                                 argc, sized ? "1..2" : "1"));
   return 1;
 }
+/* push / append with one argument, as a statement on a boxed value: an Array
+   appends and a queue takes a push. Nothing else has the method: a String, an
+   Integer or an IO has `<<` only, which sp_poly_shl would run for it. */
+static void sp_poly_push_stmt(sp_RbVal v, sp_RbVal x, const char *m) SP_UNUSED;
+static void sp_poly_push_stmt(sp_RbVal v, sp_RbVal x, const char *m) {
+  if (!(v.tag == SP_TAG_OBJ && (sp_poly_is_array_kind(v.cls_id) || (v.cls_id == SP_BUILTIN_QUEUE && m[0] == 'p'))))
+    sp_raise_nomethod(sp_nomethod_msg(m, v));
+  sp_poly_shl(v, x);
+}
 /* a boxed sleep timeout as seconds: CRuby's TypeError for anything that is
    not a number (nil, meaning none, is the caller's to check first) */
 static double sp_poly_time_interval(sp_RbVal v) {
