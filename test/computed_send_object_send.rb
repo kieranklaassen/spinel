@@ -3,7 +3,7 @@
 # program leaves alone are still Object's own and name their method.
 
 class Object
-  def send(m, *a) = "Object#send #{m} #{a.size}"
+  def send(m, n = 0) = "Object#send #{m} #{n}"
 end
 
 class Door
@@ -23,7 +23,7 @@ def size = 7
 
 m = [:open, :size][ARGV.size]
 puts Door.new.send(m)
-puts Door.new.send(m, 1, 2)
+puts Door.new.send(m, 2)
 puts Door.new.knock(m)
 puts Door.new.ring(m)
 puts Pt.new(1).send(m)
