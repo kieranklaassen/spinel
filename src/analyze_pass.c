@@ -13870,6 +13870,227 @@ static int infer_block_params_call_arms(Compiler *c, const NodeTable *nt, int id
   return changed;
 }
 
+/* Locals written with a proc literal, directly or as an arm of a conditional
+   (`f = on ? ->(s) { ... } : nil`): triples of scope index, one write of the
+   name, and whether the proc stays with the name (-1: not asked yet), in
+   the order of pkl_cmp. Built once per node table. */
+static const NodeTable *pkl_nt = NULL;
+static int pkl_ntc = -1, pkl_n = 0;
+static int *pkl = NULL, *pkl_parent = NULL, pkl_asked = 0;
+static int pkl_key_cmp(const NodeTable *nt, int si, const char *name, const int *e) {
+  if (si != e[0]) return si < e[0] ? -1 : 1;
+  return strcmp(name, nt_str(nt, e[1], "name"));
+}
+static int pkl_cmp(const void *a, const void *b) {
+  const int *x = (const int *)a, *y = (const int *)b;
+  int c = pkl_key_cmp(pkl_nt, x[0], nt_str(pkl_nt, x[1], "name"), y);
+  return c ? c : (x[1] > y[1]) - (x[1] < y[1]);
+}
+static int pkl_find(Compiler *c, Scope *sc, const char *name) {
+  const NodeTable *nt = c->nt;
+  if (pkl_nt != nt || pkl_ntc != nt->count) {
+    int cap = 0, n = 0;
+    free(pkl); pkl = NULL; pkl_n = 0;
+    free(pkl_parent); pkl_parent = NULL; pkl_asked = 0;
+    pkl_nt = nt; pkl_ntc = nt->count;
+    NT_FOREACH_KIND(nt, NK_LocalVariableWriteNode, w) {
+      int leaf[16], has = 0;
+      int ln = value_leaves_ex(c, nt_ref(nt, w, "value"), leaf, 0, 16, 1);
+      for (int i = 0; i < ln && !has; i++) has = is_proc_create(c, leaf[i]);
+      Scope *ws = comp_scope_of(c, w);
+      if (!has || !nt_str(nt, w, "name") || !ws) continue;
+      if (n >= cap) {
+        cap = cap ? cap * 2 : 16;
+        int *np = realloc(pkl, sizeof(int) * 3 * (size_t)cap);
+        if (!np) break;
+        pkl = np;
+      }
+      pkl[n * 3] = (int)(ws - c->scopes); pkl[n * 3 + 1] = w; pkl[n * 3 + 2] = -1;
+      n++;
+    }
+    if (n > 1) qsort(pkl, (size_t)n, sizeof(int) * 3, pkl_cmp);
+    /* one entry a name */
+    for (int i = 0; i < n; i++) {
+      if (pkl_n > 0 && pkl_key_cmp(nt, pkl[i * 3], nt_str(nt, pkl[i * 3 + 1], "name"), &pkl[(pkl_n - 1) * 3]) == 0) continue;
+      memcpy(&pkl[pkl_n * 3], &pkl[i * 3], sizeof(int) * 3);
+      pkl_n++;
+    }
+  }
+  int si = (int)(sc - c->scopes), lo = 0, hi = pkl_n - 1;
+  while (lo <= hi) {
+    int mid = lo + (hi - lo) / 2;
+    int d = pkl_key_cmp(nt, si, name, &pkl[mid * 3]);
+    if (d == 0) return mid;
+    if (d < 0) hi = mid - 1; else lo = mid + 1;
+  }
+  return -1;
+}
+
+/* Each node's parent as the program reaches it from its root: -1 for a node
+   it does not reach, -2 for one it reaches twice. A rewrite can leave the old
+   wrapper of a node behind (the parentheses of `g = (f = x)`), still naming
+   the node it wrapped, and a map filled from every node answers with that
+   wrapper. */
+static int *pkl_reached_parents(const NodeTable *nt) {
+  int *parent = malloc(sizeof(int) * ((size_t)nt->count + 1));
+  int *stack = malloc(sizeof(int) * ((size_t)nt->count + 1));
+  char *seen = calloc((size_t)nt->count + 1, 1);
+  int top = 0;
+  if (!parent || !stack || !seen || nt->root_id < 0 || nt->root_id >= nt->count) {
+    free(parent); free(stack); free(seen);
+    return NULL;
+  }
+  for (int id = 0; id < nt->count; id++) parent[id] = -1;
+  seen[nt->root_id] = 1; stack[top++] = nt->root_id;
+  while (top > 0) {
+    int id = stack[--top], nr = nt_num_refs(nt, id), na = nt_num_arrs(nt, id);
+    for (int i = 0; i < nr + na; i++) {
+      int one = i < nr ? nt_ref_at(nt, id, i) : -1, an = 1;
+      const int *av = i < nr ? &one : nt_arr_at(nt, id, i - nr, &an);
+      for (int e = 0; e < an; e++) {
+        int ch = av[e];
+        if (ch < 0 || ch >= nt->count) continue;
+        if (seen[ch]) { parent[ch] = -2; continue; }
+        seen[ch] = 1; parent[ch] = id; stack[top++] = ch;
+      }
+    }
+  }
+  free(stack); free(seen);
+  return parent;
+}
+
+/* Whether the proc a local was written with stays with that name: every read
+   of the local is a call through it or a test of it, and no write of it is
+   the value of something else. The calls the site scan sees are then all the
+   calls there are, also where the local holds nil as well. A proc that is
+   copied to a second name, stored or answered is called from where the scan
+   does not look, and is left as it was. */
+static int proc_stays_with_local(Compiler *c, int rd) {
+  const NodeTable *nt = c->nt;
+  Scope *sc = comp_scope_of(c, rd);
+  const char *name = nt_str(nt, rd, "name");
+  if (!sc || !name) return 0;
+  int at = pkl_find(c, sc, name);
+  if (at < 0) return 0;
+  if (pkl_asked) return pkl[at * 3 + 2] > 0;
+  /* every name of the table in one walk of the nodes */
+  pkl_asked = 1;
+  pkl_parent = pkl_reached_parents(nt);
+  if (!pkl_parent) { for (int i = 0; i < pkl_n; i++) pkl[i * 3 + 2] = 0; return 0; }
+  for (int x = 0; x < nt->count; x++) {
+    NodeKind k = nt_kind(nt, x);
+    if (k != NK_LocalVariableReadNode && !comp_is_local_write(k)) continue;
+    if (k == NK_LocalVariableTargetNode || pkl_parent[x] == -1) continue;
+    const char *xn = nt_str(nt, x, "name");
+    Scope *xs = xn ? comp_scope_of(c, x) : NULL;
+    int e = xs ? pkl_find(c, xs, xn) : -1;
+    if (e < 0 || pkl[e * 3 + 2] == 0) continue;
+    int ok = 1;
+    /* reached twice, itself or what holds it: which use is meant is not known */
+    for (int q = x; ok && q != nt->root_id; q = pkl_parent[q]) ok = pkl_parent[q] >= 0;
+    if (!ok) { pkl[e * 3 + 2] = 0; continue; }
+    if (k != NK_LocalVariableReadNode) { if (value_handed_on(nt, pkl_parent, x)) pkl[e * 3 + 2] = 0; continue; }
+    int p = pkl_parent[x];
+    NodeKind pk = p >= 0 ? nt_kind(nt, p) : NK_NilNode;
+    const char *pn = pk == NK_CallNode && nt_ref(nt, p, "receiver") == x ? nt_str(nt, p, "name") : NULL;
+    /* not `f[x]`: on a boxed receiver that is an index, and the proc is
+       handed the boxed argument with its Integer conversion beside it */
+    if (pn) ok = sp_streq(pn, "call") || sp_streq(pn, "()") || sp_streq(pn, "yield") || sp_streq(pn, "===") ||
+                 sp_streq(pn, "nil?") || sp_streq(pn, "!");
+    else ok = ((pk == NK_IfNode || pk == NK_UnlessNode) && nt_ref(nt, p, "predicate") == x) ||
+              (pk == NK_AndNode && nt_ref(nt, p, "left") == x);
+    if (!ok) pkl[e * 3 + 2] = 0;
+  }
+  for (int i = 0; i < pkl_n; i++) if (pkl[i * 3 + 2] < 0) pkl[i * 3 + 2] = 1;
+  return pkl[at * 3 + 2];
+}
+
+/* The locals of proc_stays_with_local whose calls all hand the same kinds of
+   value, by scope index and name. Read once, when the rounds have settled
+   without them (proc_locals_open): a callback handed a boxed value, or two
+   kinds, is not in it and is inferred as it was. */
+static const NodeTable *pkq_nt = NULL;
+static int pkq_n = 0, pkq_cap = 0;
+static struct ProcLocalSites { int si; char *name; int argc, bad; TyKind kind[4]; } *pkq = NULL;
+
+static int pkq_find(Compiler *c, int rd) {
+  Scope *sc = comp_scope_of(c, rd);
+  const char *name = nt_str(c->nt, rd, "name");
+  if (!sc || !name) return -1;
+  int si = (int)(sc - c->scopes);
+  for (int i = 0; i < pkq_n; i++)
+    if (pkq[i].si == si && sp_streq(pkq[i].name, name)) return i;
+  return -1;
+}
+
+/* Whether the calls through local read `rd` type its proc's parameters */
+static int proc_local_takes_sites(Compiler *c, int rd) {
+  if (pkq_nt != c->nt) return 0;
+  int at = pkq_find(c, rd);
+  return at >= 0 && !pkq[at].bad && proc_stays_with_local(c, rd);
+}
+
+static int proc_local_kind_ok(TyKind t) {
+  return t == TY_INT || t == TY_FLOAT || t == TY_STRING || t == TY_SYMBOL || t == TY_BOOL ||
+         t == TY_RANGE || ty_is_array(t) || ty_is_hash(t) || ty_is_object(t);
+}
+
+/* The rounds have settled: look once at every call through a local that
+   held nil as well as its proc, and keep the locals whose calls agree on
+   the kind of each argument. Answers whether there is one, so that the
+   rounds go on and type its parameters. */
+int proc_locals_open(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  if (pkq_nt == nt) return 0;
+  pkq_nt = nt;
+  for (int i = 0; i < pkq_n; i++) free(pkq[i].name);
+  pkq_n = 0;
+  NT_FOREACH_KIND(nt, NK_CallNode, id) {
+    const char *cname = nt_str(nt, id, "name");
+    if (!cname || !(is_call_alias(cname) || sp_streq(cname, "yield") || sp_streq(cname, "==="))) continue;
+    if (nt_int(nt, id, "rt_probe", 0)) continue;
+    int recv = nt_ref(nt, id, "receiver");
+    if (recv < 0 || nt_kind(nt, recv) != NK_LocalVariableReadNode) continue;
+    if (infer_type(c, recv) != TY_POLY || !proc_stays_with_local(c, recv)) continue;
+    int at = pkq_find(c, recv);
+    if (at < 0) {
+      if (pkq_n >= pkq_cap) {
+        int ncap = pkq_cap ? pkq_cap * 2 : 8;
+        struct ProcLocalSites *np = realloc(pkq, sizeof *pkq * (size_t)ncap);
+        if (!np) break;
+        pkq = np; pkq_cap = ncap;
+      }
+      at = pkq_n++;
+      memset(&pkq[at], 0, sizeof pkq[at]);
+      pkq[at].si = (int)(comp_scope_of(c, recv) - c->scopes);
+      pkq[at].name = strdup(nt_str(nt, recv, "name"));
+      pkq[at].argc = -1;
+      if (!pkq[at].name) { pkq[at].name = NULL; pkq[at].bad = 1; pkq_n--; break; }
+    }
+    struct ProcLocalSites *e = &pkq[at];
+    int call_args = nt_ref(nt, id, "arguments");
+    int argc = 0; const int *argv = NULL;
+    if (call_args >= 0) argv = nt_arr(nt, call_args, "arguments", &argc);
+    if (argc < 1 || argc > 4 || nt_ref(nt, id, "block") >= 0 || (e->argc >= 0 && e->argc != argc)) { e->bad = 1; continue; }
+    for (int k = 0; k < argc; k++) {
+      NodeKind ak = nt_kind(nt, argv[k]);
+      TyKind t = ak == NK_SplatNode || ak == NK_KeywordHashNode || ak == NK_BlockArgumentNode ? TY_UNKNOWN : infer_type(c, argv[k]);
+      if (!proc_local_kind_ok(t) || (e->argc >= 0 && e->kind[k] != t)) e->bad = 1;
+      e->kind[k] = t;
+    }
+    e->argc = argc;
+  }
+  /* every argument an Integer: the parameters have that already */
+  int any = 0;
+  for (int i = 0; i < pkq_n; i++) {
+    int ints = 1;
+    for (int k = 0; k < pkq[i].argc && k < 4; k++) ints = ints && pkq[i].kind[k] == TY_INT;
+    if (ints) pkq[i].bad = 1;
+    any = any || !pkq[i].bad;
+  }
+  return any;
+}
+
 /* A Proc expression `recv` invoked at `site` with these arguments
    (pr.call(a), pr === a, `case a when pr`): type the parameters of the proc
    literal it is -- the literal itself, or the one a local, constant or ivar
@@ -13918,8 +14139,16 @@ static int cs_type_proc_site(Compiler *c, int site, int recv, const int *argv, i
     const char *wname = nt_str(nt, w, "name");
     if (!wname || !sp_streq(wname, varname)) continue;
     int val = nt_ref(nt, w, "value");
-    if (val < 0 || !is_proc_create(c, val)) continue;
-    if (cs_type_params_site(c, val, argv, argc)) changed = 1;
+    if (val >= 0 && is_proc_create(c, val)) {
+      if (cs_type_params_site(c, val, argv, argc)) changed = 1;
+      continue;
+    }
+    /* an arm of a conditional the local is written with */
+    if (want_kind != 0 || !proc_local_takes_sites(c, recv)) continue;
+    int leaf[16];
+    int ln = value_leaves_ex(c, val, leaf, 0, 16, 1);
+    for (int i = 0; i < ln; i++)
+      if (is_proc_create(c, leaf[i]) && cs_type_params_site(c, leaf[i], argv, argc)) changed = 1;
   }
   return changed;
 }
@@ -14176,7 +14405,15 @@ int infer_block_params(Compiler *c) {
     if (!cname || !(is_call_alias(cname) || sp_streq(cname, "yield") || sp_streq(cname, "==="))) continue;
     if (nt_int(nt, id, "rt_probe", 0)) continue;  /* analysis-only respond_to? probe */
     int recv = nt_ref(nt, id, "receiver");
-    if (recv < 0 || infer_type(c, recv) != TY_PROC) continue;
+    if (recv < 0) continue;
+    /* A local that holds nil as well as the proc (`f = nil` first, the usual
+       way to declare a callback) is a boxed slot, and its literal is found by
+       the local's name all the same. Left out, the parameters took the
+       Integer default and read a String, a Float or an Array through it. */
+    TyKind rt = infer_type(c, recv);
+    if (rt != TY_PROC &&
+        !(rt == TY_POLY && nt_kind(nt, recv) == NK_LocalVariableReadNode && proc_local_takes_sites(c, recv)))
+      continue;
     int call_args = nt_ref(nt, id, "arguments");
     int argc = 0; const int *argv = NULL;
     if (call_args >= 0) argv = nt_arr(nt, call_args, "arguments", &argc);
