@@ -12726,6 +12726,14 @@ static SP_TLS int sp_bt_keep = 0;
    rather than reading as "no cause given" (#2990). */
 static SP_TLS void *sp_explicit_cause = NULL;
 static SP_TLS int sp_explicit_cause_set = 0;
+/* A raise that only hands an exception on (a rescue none of whose clauses
+   matched) keeps the cause it was raised with: left to the raise, the cause
+   would be whatever is being handled where it passes, or nothing. An object
+   that already carries a cause keeps its own. */
+static inline void sp_exc_pass_cause(void *obj, void *cause) {
+  if (obj && ((sp_Exception *)obj)->cause) return;
+  sp_explicit_cause = cause; sp_explicit_cause_set = 1;
+}
 /* The exception handled at each active rescue-body depth (CRuby's per-rescue
    errinfo). The "currently handled" exception -- what Exception#cause threads --
    is the innermost: sp_rescue_sp>0 ? sp_exc_handling[sp_rescue_sp-1] : NULL. A
