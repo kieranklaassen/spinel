@@ -7113,6 +7113,29 @@ static int str_arms_pattern(Compiler *c, int id, Buf *b, const NodeTable *nt, co
 /* An Integer receiver's clamp, digits, allbits? / anybits? / nobits?,
    ceildiv, pow, coerce, eql? and equal? (emit_scalar_recv_arms's Integer
    chain; answers 1 when a branch was taken) */
+/* Does emitting this receiver run something? Not when the node is a pure
+   read, and not when its text is a name or a number alone: a temporary an
+   outer arm already bound, a variable, a literal. */
+static int scalar_recv_runs(Compiler *c, int recv, const char *r) {
+  if (subtree_is_pure_read(c, recv)) return 0;
+  if (!r || !*r) return 1;
+  for (const char *p = r; *p; p++)
+    if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || (*p >= '0' && *p <= '9') || *p == '_' || *p == '.'))
+      return 1;
+  return 0;
+}
+
+/* The same question of a receiver not emitted yet: its text when emitting it
+   runs something (the caller frees it), NULL when it does not. */
+static char *recv_text_if_it_runs(Compiler *c, int recv) {
+  if (subtree_is_pure_read(c, recv)) return NULL;
+  Buf rb; memset(&rb, 0, sizeof rb);
+  emit_expr(c, recv, &rb);
+  if (rb.p && scalar_recv_runs(c, recv, rb.p)) return rb.p;
+  free(rb.p);
+  return NULL;
+}
+
 static int int_arms_clamp_pow(Compiler *c, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, TyKind a0, const char *r) {
   /* a nil bound is an open side: clamp one-sided (or return the receiver),
      boxed so the chosen operand keeps its class (#2588) */
@@ -7324,10 +7347,20 @@ static int int_arms_clamp_pow(Compiler *c, Buf *b, const NodeTable *nt, const ch
       emit_boxed(c, argv[0], b); buf_puts(b, ")");
     }
     else if (a0 == TY_INT) { buf_printf(b, "((%s) == (", r); emit_expr(c, argv[0], b); buf_puts(b, "))"); }
+    /* a receiver that is more than a read is evaluated, and first: the
+       arms below emitted it after the argument, or not at all */
+    else if (a0 == TY_POLY && scalar_recv_runs(c, recv, r)) {
+      int tr = ++g_tmp, te = ++g_tmp;
+      buf_printf(b, "({ sp_int _t%d = (%s); sp_RbVal _t%d = ", tr, r, te); emit_boxed(c, argv[0], b);
+      buf_printf(b, "; _t%d.tag == SP_TAG_INT && _t%d.v.i == _t%d; })", te, te, tr);
+    }
     else if (a0 == TY_POLY) {
       int te = ++g_tmp;
       buf_printf(b, "({ sp_RbVal _t%d = ", te); emit_boxed(c, argv[0], b);
       buf_printf(b, "; _t%d.tag == SP_TAG_INT && _t%d.v.i == (%s); })", te, te, r);
+    }
+    else if (scalar_recv_runs(c, recv, r)) {
+      buf_printf(b, "((void)(%s), (void)(", r); emit_expr(c, argv[0], b); buf_puts(b, "), 0)");
     }
     else { buf_puts(b, "(("); emit_expr(c, argv[0], b); buf_puts(b, "), 0)"); }
   }
@@ -8093,6 +8126,12 @@ static int emit_scalar_recv_arms(Compiler *c, int id, Buf *b, const NodeTable *n
         emit_boxed(c, argv[0], b); buf_puts(b, ")");
       }
       else if (a0 == TY_FLOAT) { buf_printf(b, "((%s) == (", r); emit_expr(c, argv[0], b); buf_puts(b, "))"); }
+      /* a receiver that is more than a read is evaluated, and first */
+      else if (scalar_recv_runs(c, recv, r)) {
+        int tr = ++g_tmp, te = ++g_tmp;
+        buf_printf(b, "({ sp_float _t%d = (%s); sp_RbVal _t%d = ", tr, r, te); emit_boxed(c, argv[0], b);
+        buf_printf(b, "; _t%d.tag == SP_TAG_FLT && _t%d.v.f == _t%d; })", te, te, tr);
+      }
       else {
         int te = ++g_tmp;
         buf_printf(b, "({ sp_RbVal _t%d = ", te); emit_boxed(c, argv[0], b);
@@ -8120,6 +8159,9 @@ static int emit_scalar_recv_arms(Compiler *c, int id, Buf *b, const NodeTable *n
         int tq = ++g_tmp;
         buf_printf(b, "({ sp_RbVal _t%d = ", tq); emit_boxed(c, argv[0], b);
         buf_printf(b, "; sp_poly_eq(_t%d, sp_box_float(%s)); })", tq, r);
+      }
+      else if (scalar_recv_runs(c, recv, r)) {
+        buf_printf(b, "((void)(%s), (void)(", r); emit_expr(c, argv[0], b); buf_puts(b, "), 0)");
       }
       else {
         buf_puts(b, "((void)("); emit_expr(c, argv[0], b); buf_puts(b, "), 0)");
@@ -8368,7 +8410,13 @@ static void emit_identity_equal(Compiler *c, int recv, int arg, TyKind rt, TyKin
     buf_printf(b, "; _t%d.tag == SP_TAG_OBJ && _t%d.v.p == (void*)(", te, te);
     emit_expr(c, recv, b); buf_puts(b, "); })");
   }
-  else { buf_puts(b, "(("); emit_expr(c, arg, b); buf_puts(b, "), 0)"); }
+  else {
+    /* a receiver that is more than a read is evaluated, and first */
+    char *rr = recv_text_if_it_runs(c, recv);
+    if (rr) { buf_printf(b, "((void)(%s), (void)(", rr); emit_expr(c, arg, b); buf_puts(b, "), 0)"); }
+    else { buf_puts(b, "(("); emit_expr(c, arg, b); buf_puts(b, "), 0)"); }
+    free(rr);
+  }
 }
 /* The root of a Struct receiver's temp `_tN`, for an arm that runs no Ruby
    code between the receiver and its last member read. A receiver made in
@@ -9198,7 +9246,12 @@ int emit_object_call(Compiler *c, int id, Buf *b) {
       return 1;
     }
     if (same_sefree_lvalue(c, recv, argv[0])) { buf_puts(b, "(("); emit_expr(c, argv[0], b); buf_puts(b, "), 1)"); }
-    else { buf_puts(b, "(("); emit_expr(c, argv[0], b); buf_puts(b, "), 0)"); }
+    else {
+      char *rr = recv_text_if_it_runs(c, recv);
+      if (rr) { buf_printf(b, "((void)(%s), (void)(", rr); emit_expr(c, argv[0], b); buf_puts(b, "), 0)"); }
+      else { buf_puts(b, "(("); emit_expr(c, argv[0], b); buf_puts(b, "), 0)"); }
+      free(rr);
+    }
     return 1;
   }
 
