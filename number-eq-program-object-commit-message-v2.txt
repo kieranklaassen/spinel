@@ -1,0 +1,36 @@
+A number == an object asks the object's own ==
+
+    class Money
+      attr_reader :cents
+      def initialize(cents) = @cents = cents
+      def ==(other) = other.is_a?(Money) ? cents == other.cents : cents == other
+    end
+    row = [Money.new(0), "paid", 3]
+    balance = row[0]
+    p 0 == balance                    # true
+    puts "settled" if 0 == balance    # settled
+
+printed false and nothing. Integer#== and Float#==, and a Bignum's and
+a Rational's, hand an operand that is no number back to it:
+`0 == balance` is `balance == 0`. The boxed == asked a program
+object's == only with the object on the left, so one comparison was
+true one way round and false the other, `row.count { |v| 0 == v }` was
+0 and `[0, "x"].include?(balance)` false.
+
+sp_poly_eq_slow now asks the object when the left side is a number,
+beside the arms that do it for `0 == $?` and for an Array against an
+object with to_ary. Which object is asked is settled at compile time:
+codegen writes sp_user_eq_tab, one byte a class, 1 where the class has
+an == of its own, an ancestor's or a module's, or Comparable's through
+its <=>. An object of any other class is not asked, so a class with a
+<=> and no Comparable stays unequal to a number. A program with no
+such class does not define SP_TU_USER_EQ: the test is not compiled
+into its unit, which is the machine code it was.
+
+Only == hands the pair over. eql? and <=> answer for the number alone:
+sp_poly_eql and the key lookup of Hash#<= end in sp_poly_eq_alone, and
+the Object#<=> fallback of the <=> operator answers nil for the pair.
+`0.eql?(balance)` stays false and `0 <=> balance` nil, and uniq, |, a
+Set and a Hash key keep the two apart as they did.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

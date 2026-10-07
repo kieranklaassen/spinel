@@ -1,0 +1,28 @@
+A Bignum == a boxed value asks what the value holds
+
+    total = 2**64
+    total -= 2**64
+    row = [nil, "paid", 3.7]
+    p total == row[0]                         # false
+    puts "nothing owed" if total == row[0]
+
+printed true and "nothing owed". Where one side of == or != is typed a
+Bignum and the other is boxed, the two were compared by sp_bigint_cmp
+with the box read by sp_poly_as_bigint, and that answers 0 for a value
+that is not an Integer, a Bignum or a Float, and truncates a Float. A
+zero Bignum was == nil, a String, a Symbol, an Array and false; a
+Bignum 3 was == 3.7; 2**70 was != the Float of the same value.
+
+The pair now goes to sp_bigint_eq_poly, or to sp_poly_eq_bigint with
+the box on the left. A boxed Integer or Bignum is read as it was. nil,
+a String, a Symbol, true and false equal no Bignum. An object of the
+program is asked its own ==, as Bignum#== hands an operand that is no
+number back to it. A Float or a builtin object is asked by sp_poly_eq.
+Two Bignums, and a Bignum against an Integer or a Float typed as one,
+keep the C they had.
+
+So does `box != bignum` in a program where a class defines a != of
+its own: the pair would answer for an object of that class by negating
+its ==, and the boxed path calls no != of the program's.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
