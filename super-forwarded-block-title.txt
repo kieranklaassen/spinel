@@ -1,0 +1,1 @@
+A forwarded block's value reaches a method called only by `super`

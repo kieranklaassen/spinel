@@ -1,0 +1,41 @@
+A block written at a super finds the caller's block when handed on
+
+    class Shape
+      attr_reader :area
+      def initialize(side, &blk)
+        @area = measure(side, &blk)
+      end
+      def measure(side) = yield(side)
+    end
+    class Square < Shape
+      def initialize(side) = super(side) { |n| yield n }
+    end
+    p Square.new(3) { |n| n * n }.area
+
+raised "no block given (yield) (LocalJumpError)" where CRuby prints 9.
+The same where the parent wraps the block in one of its own
+(`pass(a) { |z| yield z }`), and through three classes whatever the
+parent does.
+
+A literal block of an inlined call is recorded as yielding to the block
+current at its call site (the yield-target entries), so its own `yield`
+is found from however deep it is run. The inliner of a `super` and the
+one of a constructor whose initialize yields recorded none: once the
+parent handed the block on through another inlined call, that call
+found no entry, named the block as its own fallback, and the `yield`
+in it had no block. Both now record the block they make current, as
+emit_inline_call_x does, and keep the fallback of a forwarded block
+that has an entry.
+
+With the block found, the value the parent's forwarding call answers
+needs its type, or the store drops it: the test that lets
+yvt_forwarded_value ask the super route (every super landing on the
+method hands on its caller's block) also takes a super that writes a
+block.
+
+Not here: the same super in an ordinary method is refused as before
+(a block written in a proc-form method does not capture the method's
+own block).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+

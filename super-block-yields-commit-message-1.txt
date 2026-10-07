@@ -1,0 +1,12 @@
+yield_target_push: the yield-target entry is pushed by one function
+
+emit_inline_call_x records a literal block as yielding to the block
+current at its call site, with the context that block runs under. The
+push, its pop and the test for a forwarded block that has an entry move
+out into yield_target_push, yield_target_pop and
+yield_target_is_current, so the two other inliners that make a literal
+block current (a `super`, a constructor whose initialize yields) can
+record theirs the same way. No change in the emitted C.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+

@@ -1,0 +1,34 @@
+A forwarded block's value reaches a method called only by `super`
+
+    class Shape
+      attr_reader :area
+      def initialize(side, &blk)
+        @area = measure(side, &blk)
+      end
+      def measure(side) = yield(side)
+    end
+    class Square < Shape
+      def initialize(side, &blk) = super(side, &blk)
+    end
+    p Square.new(3) { |n| n * n }.area
+
+printed nil where CRuby prints 9. With the value in an Array literal
+the C did not build, and as a condition the program was refused.
+
+`yvt_forwarded_value` types what a block handed on (`h(a, &blk)`,
+`h(...)`, `h(a, &)`) answers from the call sites of the method that
+hands it on. A method the program reaches only through a child's
+`super` has none, so the value had no type and the store dropped it.
+It now asks `yield_value_type_via_super`, as the two sites in
+analyze_infer.c do. A method with a call site of its own never gets
+there.
+
+It asks only where every `super` that lands on the method hands on the
+block its own method was given (a bare `super`, `super(...)`,
+`super(a, &b)`), and so do the supers that land on those. A `super`
+with a literal block that yields again (`super(a) { |q| yield q }`) is
+left as it was: that child raises LocalJumpError today whatever the
+parent does with the value, and a type there would turn a build that
+fails into that raise.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

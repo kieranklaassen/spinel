@@ -1,0 +1,1 @@
+A block written at a super finds the caller's block when handed on
