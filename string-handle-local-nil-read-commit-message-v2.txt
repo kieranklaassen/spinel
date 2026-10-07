@@ -1,0 +1,45 @@
+A String handle local that may be nil reads as nil
+
+    t = +""
+    t << "a"
+    t << "b"
+    t = nil
+    p t
+
+died with SIGSEGV; CRuby prints nil. Two appends in a row, or one in a
+loop, make t an sp_String handle (TY_STRBUF), and nil is a NULL handle.
+The local read in emit_local_ivar_write_expr copies sp_String_cstr(t),
+and tested the handle only for a parameter, a dynamic handle and a
+shared one. It now tests it wherever the nil fact says the local may be
+nil (Repr.may_nil); a local the fact proves not nil keeps its C.
+
+The same handle read before its first write (assigned only in a branch
+not taken) had no fact: the definite-assignment seed in an_nil_facts
+skipped a TY_STRBUF local, so `t.size` there had no nil target and died
+too. The seed now covers it, and the call raises NoMethodError as it
+does for a handle assigned nil.
+
+The read stays untested where its nil would be past a NoMethodError
+the call plan does not raise (nil_fact_unraised): the plan guards no
+call for a nil it cannot bound, such as a slice that missed. There an
+append does nothing on the NULL handle, and a nil read after it, or as
+the receiver of a call nil does not answer, would hide CRuby's error.
+
+A guard that does not hold lets the same append run, so a local behind
+one keeps master's C at every read. The fact takes three: a write in a
+condition after the part that proves (`return if t.nil? || (t = nil;
+false)`); the body of a loop that tests after it (`begin ... end while
+t`), which runs once untested; and any guard in a program that defines
+what one is made of: raise, fail, exit, abort or throw, or a nil?, ==,
+!=, !, is_a?, kind_of? or instance_of? a String could answer
+(nf_guard_redefined).
+
+An append under another link of a chain (`t << a << b`) is emitted with
+no nil arm, whatever the plan says of it: the statement emitter walks
+down to t and appends each link (str_append_chain_base). So a local
+appended to that way keeps master's C at every read too
+(nf_append_chained).
+
+Test: test/string_handle_local_nil_read.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
