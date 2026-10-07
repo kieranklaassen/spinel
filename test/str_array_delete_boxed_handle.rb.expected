@@ -1,0 +1,11 @@
+hash: "ab" ["cd", "ef"]
+array: "ab" ["cd", "ef"]
+local: "ab" ["cd", "ef"]
+block: "ab" ["cd", "ef"]
+block, gone: "none" ["cd", "ef"]
+statement: ["cd", "ef"]
+beside: "cd" ["ef"]
+integer: nil nil ["ef"]
+empty: "" ["ab", "cd"]
+longer: abz "abz" ["ab"]
+made by the call: 0

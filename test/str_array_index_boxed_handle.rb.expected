@@ -1,0 +1,11 @@
+hash index: 0
+hash find_index: 0
+hash rindex: 2
+array: 0 2
+local: 0 2
+beside: 1 1
+integer: nil nil
+nil: nil 1
+empty: 1 2 nil
+longer: abz nil 1
+made by the call: 0
