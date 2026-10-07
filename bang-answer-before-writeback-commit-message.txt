@@ -1,0 +1,26 @@
+A bang on a String mutator chain answers before the chain writes back
+
+    class Doc
+      def initialize(s) = @s = s
+      def shout = @s.concat("!").upcase!
+      def s = @s
+    end
+    d = Doc.new(+"ok")
+    p d.shout, d.s
+
+printed nil and "OK!" where CRuby prints "OK!" twice. Before pull
+request 7778 the answer was "OK!". Since it, the bang's result is
+written back to the variable the chain starts from, and the write-back
+was emitted ahead of the "did it change?" comparison. Where that
+variable holds a shared String, the receiver read `_to` points into its
+buffer: the write-back overwrote it, the new text was compared with
+itself, and every bang that changed the String answered nil.
+`s.concat("x").upcase!.concat("y")` then raised FrozenError on that
+nil, and with --share-strings `h[:k] = s.concat("x").upcase!` crashed.
+
+The comparison now runs before the chain's write-back, into an int, as
+the arm above does for a receiver that is the handle itself; its
+comment says why. A bang whose receiver is the variable, and one with
+no chain to write back through, are emitted as they were.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

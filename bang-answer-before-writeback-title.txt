@@ -1,0 +1,1 @@
+A bang on a String mutator chain answers before the chain writes back
