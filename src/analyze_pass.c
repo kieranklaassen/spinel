@@ -1674,9 +1674,10 @@ static int infer_case_pattern_locals(Compiler *c) {
              `Integer => x`, inside a nested pattern) a local only patterns
              bind is boxed already. One an assignment writes too has the
              assignment's type, and the element was read at that type whatever
-             its class. Where the class surely differs, and pm_local_assigned
+             its class. Where the class surely differs, or a bare target takes
+             an element whose class nothing tells, and pm_local_assigned
              allows, it is boxed. */
-          int also = k >= apn, differs = 0;
+          int also = k >= apn, differs = 0, bare = 1;
           if (pm_is_container_pat(nt, el)) {
             changed |= pm_seed_locals_poly(c, ms, el, 1);
             continue;
@@ -1687,6 +1688,7 @@ static int infer_case_pattern_locals(Compiler *c) {
             el = nt_ref(nt, el, "target");
             if (el < 0 || !nt_type(nt, el)) continue;
             also = 1;
+            bare = 0;
           }
           if (!sp_streq(nt_type(nt, el), "LocalVariableTargetNode")) continue;
           const char *lnm = nt_str(nt, el, "name");
@@ -1702,11 +1704,14 @@ static int infer_case_pattern_locals(Compiler *c) {
           TyKind et = (elem_t != TY_UNKNOWN) ? elem_t
                     : (darr != TY_UNKNOWN) ? ty_array_elem(darr)
                     : ty_is_object(array_scrutinee) ? TY_INT : TY_POLY;
-          /* such a local is boxed, and only where the class surely differs:
-             a known element type says so, or else the capture does */
+          /* such a local is boxed where the class surely differs: a known
+             element type says so, or else the capture does. A bare target has
+             no capture to say it, and over an Array of Symbols, of true and
+             false, of Arrays or of a mix the type tells no class either: the
+             element may be of any, so the local is boxed there too */
           if (also) {
             int known = et != TY_POLY && (elem_t != TY_UNKNOWN || darr != TY_UNKNOWN);
-            if (known ? !pm_element_differs(c, ms, lnm, et) : !differs) continue;
+            if (known ? !pm_element_differs(c, ms, lnm, et) : !bare && !differs) continue;
             et = TY_POLY;
           }
           TyKind mg = ty_unify(lv->type, et);
