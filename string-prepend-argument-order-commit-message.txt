@@ -1,0 +1,35 @@
+String#prepend takes its arguments in the order written and holds them
+
+    s = +"abcdefgh"
+    s.prepend((s.replace("k"); "z"), "q")
+    p s
+
+printed "zqabcdefgh". CRuby prints "zqk".
+
+The arm had two faults, and one cure.
+
+With several arguments, or with its value read in place, prepend put
+its receiver in a temporary before the arguments ran, so an argument
+that changes the receiver was not seen: `p v.prepend((v << tail; "z"))`
+dropped the tail from v as well. With one argument, as a statement,
+the argument and the receiver were two arguments of one sp_str_concat
+call, read in the order the C compiler picks: `t.prepend((t << "y";
+"z"))` lost the "y" built with gcc.
+
+And with several arguments none was held while the next was built:
+
+    u = +"t"
+    u.prepend("h#{u.size}-", "m#{u.size}-")
+
+aborts at SPINEL_GC_STRESS=2, the mark reaching a freed String.
+
+prepend now takes its arguments as the concat statement does: each in
+order into a temporary before anything is prepended, held while a
+later one is built, and a receiver that is a variable is read after
+them. That applies where two arguments are built, or where one runs
+code and the receiver is a variable. Every other prepend emits the C
+it did: one argument that runs no code, several literals or variables.
+
+Test: test/string_prepend_argument_order.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
