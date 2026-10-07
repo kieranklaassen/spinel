@@ -1808,6 +1808,7 @@ GC_STRESS_TESTS := test/gc_root_frame_slots.rb \
                    test/poly_array_intersect.rb \
                    test/thread_new_args_rooted_across_fiber_alloc.rb \
                    test/gc_root_volatile_string_slot.rb \
+                   test/when_string_range_fresh_begin.rb \
                    test/gc_root_gathered_handle_param.rb
 gc-stress-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
 	@tmp=$$(mktemp -d /tmp/spinel-gcstress.XXXXXX); ok=1; \
