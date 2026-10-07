@@ -1,0 +1,1 @@
+A String Range read ahead of its argument keeps its two ends

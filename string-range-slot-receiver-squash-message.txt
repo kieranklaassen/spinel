@@ -1,0 +1,23 @@
+A String Range read ahead of its argument keeps its two ends
+
+Ruby reads a call's receiver before the arguments. For a receiver read
+from a global, an instance variable or a class variable, beside an
+argument that can run code, emit_call_held reads the slot into a C temp
+first, so `$r == f(i)` compares the Range `$r` held before `f` gave it
+another. A String Range is two Strings by value, and emit_pre_root
+rooted nothing for it: once the argument had rebound the slot, the temp
+was the only holder of the two ends. The argument's own allocation
+collected them and the call read two freed Strings. Of 1,000 calls of
+`$r == rebind(i)`, 17 answer false in a plain run.
+
+emit_pre_root now roots whatever ty_gc_holds_refs counts, with
+emit_gc_root_tmp_refs: the two ends of a String Range beside the
+pointer, the box and the by-value object it rooted before. Only
+emit_call_held hands it a String Range, for `==`, `!=`, `eql?`,
+`include?` and `member?`; every other temp is rooted as it was.
+
+test/string_range_slot_receiver_held.rb counts the wrong answers of
+1,000 calls through eight forms, a global and a class variable. On
+master every line is wrong in a plain run.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
