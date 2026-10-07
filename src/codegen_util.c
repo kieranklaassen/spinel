@@ -1192,10 +1192,11 @@ int       g_ensure_depth = 0;
 RescueSave g_rescue_save_stack[MAX_ENSURE_DEPTH];
 int        g_rescue_save_depth = 0;
 /* The exception an ensure region `eid` waits with while its ensure body
-   runs: read from the frame just landed, sp_exc_top being its index. */
+   runs: read from the frame just landed, sp_exc_top being its index. Its
+   cause waits with it: the raise that hands it on would decide another. */
 void emit_ensure_exc_store(Buf *b, int eid) {
-  buf_printf(b, "_excf%d = 1; _excmsg%d = sp_exc_msg[sp_exc_top]; _exccls%d = sp_exc_cls[sp_exc_top]; _excobj%d = sp_exc_obj[sp_exc_top];",
-             eid, eid, eid, eid);
+  buf_printf(b, "_excf%d = 1; _excmsg%d = sp_exc_msg[sp_exc_top]; _exccls%d = sp_exc_cls[sp_exc_top]; _excobj%d = sp_exc_obj[sp_exc_top]; _exccause%d = sp_pending_cause;",
+             eid, eid, eid, eid, eid);
 }
 
 /* rescue bodies crossed by an exit to frame-depth pop_base: those entered at or
@@ -1241,7 +1242,8 @@ void emit_ensure_exc_out(Buf *b, int eid, int bt) {
   else {
     buf_printf(b, "if (_excf%d) { ", eid);
     if (bt && g_debug) buf_printf(b, "sp_bt_restore(&_excbt%d); ", eid);
-    buf_printf(b, "sp_pending_exc_obj = _excobj%d; sp_raise_cls(_exccls%d, _excmsg%d); }", eid, eid, eid);
+    buf_printf(b, "sp_exc_pass_cause(_excobj%d, _exccause%d); sp_pending_exc_obj = _excobj%d; sp_raise_cls(_exccls%d, _excmsg%d); }",
+               eid, eid, eid, eid, eid);
   }
 }
 Buf g_procs;
@@ -4648,11 +4650,12 @@ void emit_main_exit(Buf *b) {
    No frame lands with the exception, so it is put in the slot at sp_exc_top
    as a landing would have left it: the collector keeps what the slots hold
    up to there, and the slot the exception was read from lies above that
-   once a frame is popped, or was taken by a begin of the ensure body. */
+   once a frame is popped, or was taken by a begin of the ensure body. Its
+   cause goes where the raise left it for the same reason. */
 void emit_ensure_exc_hand_on(Buf *b, int eid, int outer, int pop) {
-  buf_printf(b, "if (_excf%d) { _excf%d = 1; _excmsg%d = _excmsg%d; _exccls%d = _exccls%d; _excobj%d = _excobj%d;%s"
-                " sp_exc_msg[sp_exc_top] = _excmsg%d; sp_exc_obj[sp_exc_top] = _excobj%d; goto _ensure%d; }",
-             eid, outer, outer, eid, outer, eid, outer, eid, pop ? " sp_exc_top--;" : "", outer, outer, outer);
+  buf_printf(b, "if (_excf%d) { _excf%d = 1; _excmsg%d = _excmsg%d; _exccls%d = _exccls%d; _excobj%d = _excobj%d; _exccause%d = _exccause%d;%s"
+                " sp_exc_msg[sp_exc_top] = _excmsg%d; sp_exc_obj[sp_exc_top] = _excobj%d; sp_pending_cause = _exccause%d; goto _ensure%d; }",
+             eid, outer, outer, eid, outer, eid, outer, eid, outer, eid, pop ? " sp_exc_top--;" : "", outer, outer, outer, outer);
 }
 
 void emit_retf_return(int eid, int has_retval, Buf *b) {

@@ -8523,8 +8523,8 @@ void emit_rescue(Compiler *c, int id, Buf *b, int indent, int fr, int ens, const
       /* no clause matched and the begin has an ensure: it runs first, and
          raises this again after its body, as for a begin with no rescue */
       emit_indent(b, indent + 1);
-      buf_printf(b, "_excf%d = 1; _excmsg%d = _rmsg_%d; _exccls%d = _rcls_%d; _excobj%d = sp_exc_obj[sp_exc_top];",
-                 ens, ens, rc, ens, rc, ens);
+      buf_printf(b, "_excf%d = 1; _excmsg%d = _rmsg_%d; _exccls%d = _rcls_%d; _excobj%d = sp_exc_obj[sp_exc_top]; _exccause%d = sp_pending_cause;",
+                 ens, ens, rc, ens, rc, ens, ens);
       if (g_debug) buf_printf(b, " sp_bt_save(&_excbt%d);", ens);
       buf_puts(b, "\n");
     }
@@ -8682,6 +8682,7 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
     emit_indent(b, indent); buf_printf(b, "const char *_excmsg%d = NULL;\n", eid);
     emit_indent(b, indent); buf_printf(b, "const char *_exccls%d = NULL;\n", eid);
     emit_indent(b, indent); buf_printf(b, "void *_excobj%d = NULL;\n", eid);
+    emit_indent(b, indent); buf_printf(b, "void *_exccause%d = NULL;\n", eid);
     /* a debug build's frames, saved when no clause matched and put back for
        the raise after the ensure body */
     if (rescue >= 0 && g_debug) { emit_indent(b, indent); buf_printf(b, "sp_bt_saved _excbt%d; _excbt%d.n = -1;\n", eid, eid); }
@@ -8805,8 +8806,8 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
       emit_indent(b, indent);
       buf_printf(b, "{ int _exr%d SP_CLEANUP(sp_gc_cleanup) = sp_gc_nroots;"
                     " if (_excf%d) { _sp_gc_root_push((void **)((uintptr_t)&_excmsg%d | (uintptr_t)2));"
-                    " _sp_gc_root_push((void **)&_excobj%d); }\n",
-                 eid, eid, eid, eid);
+                    " _sp_gc_root_push((void **)&_excobj%d); _sp_gc_root_push((void **)&_exccause%d); }\n",
+                 eid, eid, eid, eid, eid);
     }
     emit_stmts(c, ensure_stmts, b, indent);
     emit_indent(b, indent);

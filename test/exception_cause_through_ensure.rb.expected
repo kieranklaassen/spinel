@@ -1,0 +1,22 @@
+TypeError cause=ArgumentError:first 0
+TypeError cause=ArgumentError:first 1
+RuntimeError cause=ArgumentError:first 2
+MyErr cause=ArgumentError:first 3
+TypeError cause=KeyError:given
+TypeError cause=nil
+TypeError cause=ArgumentError:first 0
+TypeError cause=ArgumentError:first 1
+RuntimeError cause=ArgumentError:first 2
+MyErr cause=ArgumentError:first 3
+TypeError cause=KeyError:given
+TypeError cause=nil
+TypeError cause=ArgumentError:first 0
+TypeError cause=ArgumentError:first 0
+TypeError cause=ArgumentError:first 1
+TypeError cause=KeyError:given
+TypeError cause=ArgumentError:first 0
+TypeError cause=ArgumentError:first 1
+TypeError cause=ArgumentError:first 0
+MyErr cause=ArgumentError:first 3
+ArgumentError cause=nil
+18
