@@ -1,0 +1,22 @@
+A keyword forwarded with `...` is typed by name
+
+    class Base
+      def use(a, k:, j:) = yield([a, k + 1, j + "!"])
+    end
+    class Kept < Base
+      def use(...) = super(...)
+    end
+    p Kept.new.use(5, j: "t", k: 3) { |x| x }    # [5, 4, "t!"]
+
+raised `no implicit conversion of Integer into String`, and with the
+keywords bound by name it stopped in the C compiler: an Integer
+assigned to a String.
+
+The analyzer types the parameters a `...` forward reaches from the
+forwarder's parameters, slot by slot (bind_args_params), so k took the
+type of the first key the site names, j. A declared keyword now takes
+the type of the forwarder's parameter of its own name, as it is bound,
+and none where the forwarder has no such parameter: its default types
+it.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

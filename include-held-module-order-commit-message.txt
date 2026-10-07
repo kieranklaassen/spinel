@@ -1,0 +1,54 @@
+Including a module a class already has does not move it to the front
+
+    module Defaults
+      def timeout = 5
+    end
+    module Fast
+      def timeout = 1
+    end
+    module Client
+      include Defaults
+      include Fast
+    end
+    module Logging
+      include Defaults
+    end
+    class Job
+      include Client
+      include Logging
+    end
+    p Job.ancestors.first(5)
+    p Job.new.timeout
+
+printed [Job, Logging, Client, Fast, Defaults] and 5; CRuby prints 1.
+The same for the module itself named again behind one that includes it
+(`include Titled; include Named`), and for a module a superclass
+includes: there the copy went over the superclass's own method.
+
+`include` copies the module's methods into the class, and a later copy
+of a name takes the place of an earlier one. Logging holds a copy of
+Defaults#timeout, so `include Logging` put it over Fast#timeout. CRuby
+leaves out a module the class or a superclass holds already: Defaults
+keeps its place behind Fast.
+
+register_includes now works out CRuby's order of the modules behind
+each class (inc_own), once, when some include names a module held
+already. Where such an include reaches a class, a name is copied from
+the def that order gives the class, from the body that defines it. The
+scopes, the shadow names and the super chains are made as before; only
+the def behind a copy changes.
+
+The order is worked out only where the statements give it: every
+include and every def is a plain statement of a class or module body
+in the program's own file, the statements before the last include only
+define, and the program has no prepend, no extend but `extend self`,
+no hook, no define_method, undef or class_eval. A name is corrected
+only where the def in front calls no super and no reader, writer,
+alias, module_function or def made after the first statement that runs
+stands on the way. A module keeps the copies it has: what it holds is
+copied on, and is corrected in the class. Everything else compiles to
+master's C.
+
+Test: test/include_module_already_included.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
