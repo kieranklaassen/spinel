@@ -2260,6 +2260,24 @@ static void scope_copy_block_param(Scope *dst, const Scope *src) {
   }
 }
 
+/* Is the module `mod_ci` among the modules `ci` includes, or the ones those
+   include? */
+static int includes_mod(Compiler *c, int ci, int mod_ci, int depth) {
+  if (depth > c->nclasses) return 0;
+  for (int m = 0; m < c->classes[ci].nincluded_mods; m++) {
+    int k = c->classes[ci].included_mods[m];
+    if (k == mod_ci || includes_mod(c, k, mod_ci, depth + 1)) return 1;
+  }
+  return 0;
+}
+
+/* Has a superclass of ci included the module so far? */
+static int superclass_includes_mod(Compiler *c, int ci, int mod_ci) {
+  for (int p = c->classes[ci].parent, n = 0; p >= 0 && n <= c->nclasses; p = c->classes[p].parent, n++)
+    if (includes_mod(c, p, mod_ci, 0)) return 1;
+  return 0;
+}
+
 /* Copy module `mod_ci`'s instance methods onto subclass `newci` (obj.extend). */
 static void sg_transplant_module(Compiler *c, int mod_ci, int newci) {
   const NodeTable *nt = c->nt;
@@ -5290,11 +5308,19 @@ void process_include_body(Compiler *c, int ci, int body_node) {
       }
       /* record membership for `rescue M` matching (dedup across reopenings) */
       class_note_included_mod(c, ci, mod_id);
+      /* A module a superclass includes by now is in this class's chain
+         already, behind that superclass, and `include` adds nothing. */
+      int in_chain = superclass_includes_mod(c, ci, mod_id);
       /* snapshot count before adding new scopes to avoid re-scanning them */
       int snap = c->nscopes;
       for (int ms = 0; ms < snap; ms++) {
         Scope *src = &c->scopes[ms];
         if (src->class_id != mod_id || !src->name) continue;
+        /* Copied here a second time, a method that calls super ran twice.
+           One that asks nothing of its receiver runs the same in the copy
+           the superclass holds, and is not copied again; any other keeps
+           its own copy, typed by this class's methods. */
+        if (in_chain && scope_body_has_super(c, ms) && !module_function_self_dependent(c, ms)) continue;
         /* a module_function method whose body depends on its receiver needs a
            per-includer copy; everything else class-level stays module-side */
         if (src->is_cmethod &&
