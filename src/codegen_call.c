@@ -7141,12 +7141,14 @@ static int poly_arm_param_omitted(Compiler *c, Scope *ms, int a, const ArgLayout
 
 /* Does an arm's argument, spelled `text`, build an object that another
    argument's allocation can collect? One built in a statement expression is
-   rooted only to that expression's end. An omitted parameter's value is not
-   rooted at all: the empty Array of a rest, the empty Hash of a **kwrest, a
-   default that allocates and that its emitter has not bound to a temp. */
+   rooted only to that expression's end, and the fresh handle an appended-to
+   String parameter takes (emit_poly_shared_arg) is not rooted at all. Nor is
+   an omitted parameter's value: the empty Array of a rest, the empty Hash of
+   a **kwrest, a default that allocates and that its emitter has not bound
+   to a temp. */
 int poly_arm_arg_fresh(Compiler *c, Scope *ms, int a, int omitted, const char *text) {
   if (!text || !text[0]) return 0;
-  if (strstr(text, "SP_GC_ROOT(")) return 1;
+  if (strstr(text, "SP_GC_ROOT(") || strstr(text, "sp_String_new_shared(")) return 1;
   const char *pnm = ms->pnames ? ms->pnames[a] : NULL;
   LocalVar *pv = pnm ? scope_local(ms, pnm) : NULL;
   if (!omitted || (pv && pv->byref_out)) return 0;
