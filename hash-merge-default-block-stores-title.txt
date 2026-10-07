@@ -1,0 +1,1 @@
+A merged Hash's default block is given the merged Hash

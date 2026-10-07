@@ -1,0 +1,23 @@
+A merged Hash's default block is given the merged Hash
+
+    words = Hash.new { |hash, key| hash[key] = "made #{key}" }
+    words[:a] = "a"
+    extra = {}
+    extra[:b] = "b"
+    merged = words.merge(extra)
+    merged[:zz]
+    p merged.size    # 2; CRuby: 3
+    p words.size     # 2; CRuby: 1
+
+merge gives its result the receiver's default block through a bridge
+that keeps the receiver (sp_poly_hash_dproc_bridge). Where the default
+was set by default_proc= on a String- or Symbol-keyed Hash the bridge
+hands the block the result; where it came from Hash.new { } it handed
+the block the receiver. A block that stores stored there: the key
+appeared in the receiver, and the result never kept it and ran the
+block at every read. A block that reads its Hash read the receiver.
+
+The bridge hands that block the result too. dup, clone and a merge of
+a merge go through the same bridge.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
