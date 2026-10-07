@@ -1306,6 +1306,25 @@ int emit_call_freeze_dup_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, 
   return 0;
 }
 
+/* The guard of a `&.` call steps over what its value hoisted (`pre`) when
+   `nilt` holds, and the value stays in the call's place. Computed with them
+   ahead of the statement, the call ran before what is written before it:
+   `"#{$c} #{o&.bump([1, 2])}"` read `$c` after `bump`. A jump and not a
+   block: the value names what they declare. A root among them is pushed,
+   and popped by the count saved here. */
+static void sn_guard_over_hoists(const char *nilt, Buf *pre) {
+  int lsn = ++g_tmp;
+  if (sn_roots_to_pushes(pre)) {
+    emit_indent(g_pre, g_indent);
+    buf_printf(g_pre, "int SP_CLEANUP(sp_gc_cleanup) _sns%d = sp_gc_nroots;\n", lsn);
+  }
+  emit_indent(g_pre, g_indent);
+  buf_printf(g_pre, "if (%s) goto _snl%d;\n", nilt, lsn);
+  buf_puts(g_pre, pre->p);
+  emit_indent(g_pre, g_indent);
+  buf_printf(g_pre, "_snl%d:;\n", lsn);
+}
+
 /* safe navigation (&.): a nil receiver answers nil, any other the call, guarded by a nil test */
 int emit_call_safe_nav_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv) {
   /* Safe navigation &. : nil receiver -> return nil/0; non-nil -> emit conditional */
@@ -1571,22 +1590,7 @@ int emit_call_safe_nav_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
         if (!preb2.p || !preb2.p[0])
           buf_printf(b, "(%s ? %s : (%s))", nilt, nilv, vbs.p ? vbs.p : "");
         else {
-          /* The guard steps over what the value hoisted, and the value
-             stays in the call's place. Computed with them ahead of the
-             statement, the call ran before what is written before it:
-             `"#{$c} #{o&.bump([1, 2])}"` read `$c` after `bump`. A jump
-             and not a block: the value names what they declare. A root
-             among them is pushed, and popped by the count saved here. */
-          int lsn = ++g_tmp;
-          if (sn_roots_to_pushes(&preb2)) {
-            emit_indent(g_pre, g_indent);
-            buf_printf(g_pre, "int SP_CLEANUP(sp_gc_cleanup) _sns%d = sp_gc_nroots;\n", lsn);
-          }
-          emit_indent(g_pre, g_indent);
-          buf_printf(g_pre, "if (%s) goto _snl%d;\n", nilt, lsn);
-          buf_puts(g_pre, preb2.p);
-          emit_indent(g_pre, g_indent);
-          buf_printf(g_pre, "_snl%d:;\n", lsn);
+          sn_guard_over_hoists(nilt, &preb2);
           buf_printf(b, "(%s ? %s : (%s))", nilt, nilv, vbs.p ? vbs.p : "");
         }
         free(vbs.p); free(preb2.p);
