@@ -2177,6 +2177,21 @@ static const char *const match_call_names[] = {
   "split", "slice", "index", "rindex", "partition", "rpartition",
   "start_with?", "end_with?", "grep", "grep_v", "[]", "===", NULL };
 
+/* Does a pattern of `in` or `=>` hold a Regexp, however deep it sits? */
+static int pattern_has_regexp(Compiler *c, int id, int depth) {
+  const NodeTable *nt = c->nt;
+  if (id < 0 || depth > 400) return 0;
+  if (comp_ntype(c, id) == TY_REGEX) return 1;
+  int nr = nt_num_refs(nt, id);
+  for (int i = 0; i < nr; i++) if (pattern_has_regexp(c, nt_ref_at(nt, id, i), depth + 1)) return 1;
+  int na = nt_num_arrs(nt, id);
+  for (int i = 0; i < na; i++) {
+    int n = 0; const int *ids = nt_arr_at(nt, id, i, &n);
+    for (int k = 0; k < n; k++) if (pattern_has_regexp(c, ids[k], depth + 1)) return 1;
+  }
+  return 0;
+}
+
 static int scope_performs_match(Compiler *c, int si) {
   const NodeTable *nt = c->nt;
   const char *const *mnames = match_call_names;
@@ -2184,9 +2199,15 @@ static int scope_performs_match(Compiler *c, int si) {
   for (int k = 0; k < nids; k++) {
     int id = ids[k];
     if (nt_kind(nt, id) != NK_CallNode) {
-      /* a `when` arm asks its Regexp's === of the subject */
+      /* a `when` arm asks its Regexp's === of the subject, and so does a
+         pattern of `in` and `=>` */
       const char *ty = g_match_frame_closed ? nt_type(nt, id) : NULL;
-      if (!ty || !sp_streq(ty, "WhenNode")) continue;
+      if (!ty) continue;
+      if (sp_streq(ty, "InNode") || sp_streq(ty, "MatchPredicateNode") || sp_streq(ty, "MatchRequiredNode")) {
+        if (pattern_has_regexp(c, nt_ref(nt, id, "pattern"), 0)) return 1;
+        continue;
+      }
+      if (!sp_streq(ty, "WhenNode")) continue;
       int wc = 0; const int *conds = nt_arr(nt, id, "conditions", &wc);
       for (int j = 0; j < wc && conds; j++)
         if (comp_ntype(c, conds[j]) == TY_REGEX) return 1;
@@ -2196,14 +2217,17 @@ static int scope_performs_match(Compiler *c, int si) {
     if (!nm) continue;
     int hit = 0;
     for (int k = 0; mnames[k] && !hit; k++) if (sp_streq(nm, mnames[k])) hit = 1;
-    /* and so do any?, all?, none? and one? of each element */
-    if (!hit && g_match_frame_closed) hit = is_quantifier(nm);
+    /* and so do any?, all?, none? and one? of each element, slice! and an
+       index assignment that names a group (`s[re] = v` sets no register) */
+    if (!hit && g_match_frame_closed)
+      hit = is_quantifier(nm) || sp_streq(nm, "slice!") || sp_streq(nm, "[]=");
     if (!hit) continue;
     /* only when a regexp is actually involved: the receiver or an argument */
     int r = nt_ref(nt, id, "receiver");
     if (r >= 0 && comp_ntype(c, r) == TY_REGEX) return 1;
     int a = nt_ref(nt, id, "arguments");
     int an = 0; const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
+    if (an < 3 && sp_streq(nm, "[]=")) continue;
     for (int k = 0; k < an && av; k++)
       if (comp_ntype(c, av[k]) == TY_REGEX) return 1;
     /* gsub, sub and scan on a String set them for a String pattern too, and
