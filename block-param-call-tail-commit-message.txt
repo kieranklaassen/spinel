@@ -1,0 +1,25 @@
+A block that ends in a call of the method's block parameter keeps its value
+
+  def pass(v) = yield(v)
+  def g(x, &b) = pass(x) { |w| b.call(w) }
+  p g(1) { |v| pass(v) { |w| w * 3 } }
+
+prints 3 in CRuby and did not build: "void value not ignored as it
+ought to be". `g` is written out at its call, and `b.call(w)` there is a
+splice of the block handed in. As the last expression of a block it was
+emitted as a statement, and the splice of a block that itself ends in a
+call with a block is a compound with no value, where the block around it
+is read for one.
+
+Such a tail is now emitted as an expression, the value form of the same
+splice, as `b.call(w)` is emitted wherever else its value is read. The
+arm is the last before the plain one, so a tail an earlier arm boxes or
+coerces keeps the C it had.
+
+test/block_param_call_block_tail.rb has the forms that did not build
+(the block handed in ending in one or two such calls, the same one
+method further up, a chain of three over a yielding far end, instance
+methods) and three that were right and stay so.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+

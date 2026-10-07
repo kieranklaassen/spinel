@@ -1,0 +1,34 @@
+Yielding methods that call each other no longer crash the compiler
+
+  def ea(n)
+    if n == 0
+      yield 0
+    else
+      eb(n - 1) { |v| yield v + 1 }
+    end
+  end
+  def eb(n)
+    if n == 0
+      yield 0
+    else
+      ea(n - 1) { |v| yield v + 1 }
+    end
+  end
+  p ea(5) { |v| v * 2 }
+
+prints 10 in CRuby, and the compiler died of a segmentation fault.
+Whether a yield's Integer or Float value can be nil is asked of the
+blocks at the method's call sites (nullable_int_value, by the tail of
+each block). Here such a tail is the other method's yield, whose blocks
+end in this method's yield again, and the two were asked about each
+other until the stack ran out.
+
+A method whose yield is being asked is not asked again. The second
+asking has no tail the first does not see, so the answer is the same.
+
+test/yielding_methods_call_each_other.rb has two and three such
+methods, at the top level and in a class, with an Integer, an Integer
+that may be nil and a Float.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+

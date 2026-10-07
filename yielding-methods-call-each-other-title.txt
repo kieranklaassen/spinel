@@ -1,0 +1,1 @@
+Yielding methods that call each other no longer crash the compiler
