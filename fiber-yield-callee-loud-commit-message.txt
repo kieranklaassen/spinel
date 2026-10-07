@@ -1,0 +1,39 @@
+A method that yields its fiber keeps the copy of its String parameter
+
+The read-only parameter borrow hands a quiet method the live buffer of a
+shared String. It is off for a program that has a thread, a fiber, a
+signal handler or an ffi_callback (pull request 7674), and the fiber is
+asked for by Fiber.new alone. An Enumerator's next runs its block on a
+fiber with no Fiber.new in the program:
+
+    def peek(s)
+      Fiber.yield 1
+      s.getbyte(0) + s.bytesize
+    end
+    s = +"hello"
+    t = s
+    t << " world"
+    e = Enumerator.new { |y| y << peek(s) }
+    e.next
+    s << ("x" * 1_000_000)
+    p e.next
+
+peek is paused holding the buffer, the append frees it, and peek reads
+it: a different number on each run (valgrind: invalid read in
+_fiber_body_1, of a block freed by realloc in sp_String_append_bin), a
+segfault with e.peek for the first e.next. with_index, each_slice and
+to_enum(:each) on a class's each read the freed buffer the same way.
+
+A method that itself calls Fiber.yield is now loud (param_borrow_loud):
+it keeps the copy, and the program prints 115, the String as it was at
+the call. Only such a method changes. One paused through a block it
+yields to, a method it calls, a proc or a Yielder is loud already, so
+the test follows no call.
+
+The cost: where the String is changed in place while the method is
+paused and its buffer does not move (s.upcase!, an append that fits),
+the borrow read what CRuby reads and the copy does not: 104 for CRuby's
+72. Fiber.new has the same answer since pull request 7674. CRuby's needs
+the parameter to be the handle.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
