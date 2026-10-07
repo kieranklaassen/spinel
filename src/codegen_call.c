@@ -18531,12 +18531,113 @@ static int subtree_reads_moved_by(Compiler *c, int id, int by) {
   return 0;
 }
 
+/* Where `txt` holds `pat` with its temps renumbered (`_t7`, `_cap7`, `_l7`:
+   an underscore, letters, a number): the same operand rendered a second
+   time. Answers the end of it in `txt`. */
+static const char *text_find_renumbered(const char *txt, const char *pat, const char **end) {
+  for (const char *s = txt; txt && pat && *s; s++) {
+    const char *t = s, *p = pat;
+    while (*p && *t) {
+      const char *w = p;
+      while (w > pat && w[-1] >= 'a' && w[-1] <= 'z') w--;
+      int tmp = w < p && w > pat && w[-1] == '_' &&
+                !(w - pat >= 2 && (w[-2] == '_' || (w[-2] >= 'a' && w[-2] <= 'z') || (w[-2] >= 'A' && w[-2] <= 'Z') ||
+                                   (w[-2] >= '0' && w[-2] <= '9')));
+      if (tmp && *p >= '0' && *p <= '9' && *t >= '0' && *t <= '9') {
+        while (*p >= '0' && *p <= '9') p++;
+        while (*t >= '0' && *t <= '9') t++;
+      }
+      else if (*p++ != *t++) break;
+      if (!*p) { *end = t; return s; }
+    }
+  }
+  return NULL;
+}
+
+/* How many calls run beside the span [s, e) of `txt`: at each level of
+   nesting around it, the calls of the statement it stands in, the span left
+   out. The statements before and after that one run apart from it, and so
+   does the other side of a `||` or `&&`, whose answer is a boolean. */
+static int text_calls_beside(const char *txt, const char *s, const char *e) {
+  int cur[48] = {0}, all[48] = {0}, fin[48] = {0}, d = 0, n = 0, extra = 0, live = 0;
+  for (const char *q = txt; *q; q++) {
+    if (q == s) {
+      for (int i = 0; i <= d; i++) n += cur[i];
+      if (!*(q = e)) break;
+    }
+    int after = q >= e, id = q > txt && (q[-1] == '_' || (q[-1] >= 'a' && q[-1] <= 'z') ||
+                                         (q[-1] >= 'A' && q[-1] <= 'Z') || (q[-1] >= '0' && q[-1] <= '9'));
+    if (*q == '"' || *q == '\'') {
+      for (char c = *q++; *q && *q != c; q++)
+        if (*q == '\\' && q[1]) q++;
+      if (!*q) break;
+    }
+    else if (*q == '(' || *q == '{') {
+      if (!after) {
+        if (*q == '(' && id) { cur[d]++; all[d]++; }
+        if (++d >= 48) return 99;
+        cur[d] = all[d] = fin[d] = 0;
+      }
+      else {
+        if (!extra++) live = !fin[d];
+        if (*q == '(' && id && live) n++;
+      }
+    }
+    else if (*q == ')' || *q == '}') {
+      if (!after) {
+        if (d < 1) return 99;
+        d--;
+        cur[d] += all[d + 1]; all[d] += all[d + 1];
+      }
+      else if (extra) extra--;
+      else if (--d < 0) return 99;
+    }
+    else if (*q == ';' || ((*q == '|' || *q == '&') && q[1] == *q)) {
+      if (!after) cur[d] = 0;
+      else if (!extra) fin[d] = 1;
+    }
+  }
+  return n;
+}
+
+/* Is the temp `_t<n>` used up in `txt` before `s`: every read of it in a
+   statement or a `||`/`&&` arm that has ended by then, none of them a copy
+   under another name (`T x = _t<n>;`)? `start_with?` with two prefixes is
+   `f(r, a) || f(r, b)`: the first is done with before the second is made. */
+static int text_tmp_done_before(const char *txt, int n, const char *s) {
+  int seen = 0;
+  for (const char *p = text_first_use_of_tmp(txt, n); p; p = text_first_use_of_tmp(p + 1, n)) {
+    const char *q = p + 2;
+    while (*q >= '0' && *q <= '9') q++;
+    if (p >= s || (*q == ';' && p - txt >= 3 && strncmp(p - 3, " = ", 3) == 0)) return 0;
+    int d = 0, low = 0, ended = 0;
+    for (; q < s; q++) {
+      if (*q == '"' || *q == '\'') {
+        for (char c = *q++; q < s && *q != c; q++)
+          if (*q == '\\' && q + 1 < s) q++;
+      }
+      else if (*q == '(' || *q == '{') d++;
+      else if (*q == ')' || *q == '}') { if (--d < low) { low = d; ended = 0; } }
+      else if ((*q == ';' || ((*q == '|' || *q == '&') && q[1] == *q)) && d == low) ended = 1;
+    }
+    if (!ended) return 0;
+    seen = 1;
+  }
+  return seen;
+}
+
 /* Is operand `id` an interpolated String that is a String value and nothing
    else? Bound to a rooted temp it is the String an arm would have made where
-   the operand stands, made where Ruby makes it. */
+   the operand stands, made where Ruby makes it. Not adjacent literals
+   (`"ta" "g"`): they fold to a static String and make nothing. */
 static int operand_is_interp_str(Compiler *c, int id) {
-  return nt_kind(c->nt, id) == NK_InterpolatedStringNode &&
-         comp_ntype(c, id) == TY_STRING && repr_of(c, id).as_ty == TY_STRING;
+  const NodeTable *nt = c->nt;
+  if (nt_kind(nt, id) != NK_InterpolatedStringNode || comp_ntype(c, id) != TY_STRING ||
+      repr_of(c, id).as_ty != TY_STRING) return 0;
+  int n = 0, made = 0;
+  const int *parts = nt_arr(nt, id, "parts", &n);
+  for (int i = 0; i < n && !made; i++) made = nt_kind(nt, parts[i]) != NK_StringNode;
+  return made;
 }
 
 /* An operand emit_operands_in_order cannot bind, the `u`th, renders where
@@ -18627,13 +18728,16 @@ static int operand_hoists_effect(Compiler *c, int node) {
 /* Was the rewrite of call `id` declined (emit_operands_in_order): 1, with its
    computed operands bound, so the call is emitted again without them; 2,
    after its operands were rendered to ask whether the arm holds them in
-   turn? `set` records it. Neither is asked a second time: asked on every
-   emission, a nest of such calls was emitted 2^depth times. */
+   turn? 4 is no decline: its last interpolated String is bound too. Nor
+   are the bits from 256 up: operand `i` (256 << i) is an interpolated
+   String the arm uses up before the next is made, bound for none. `set`
+   records it. None is asked a second time: asked on every emission, a nest
+   of such calls was emitted 2^depth times. */
 static int operand_order_declined(Compiler *c, int id, int set) {
-  static const Compiler *memo_c; static unsigned char *memo; static int memo_n;
+  static const Compiler *memo_c; static unsigned *memo; static int memo_n;
   if (memo_c != c) {
     free(memo);
-    memo_c = c; memo_n = c->nt->count; memo = calloc((size_t)memo_n + 1, 1);
+    memo_c = c; memo_n = c->nt->count; memo = calloc((size_t)memo_n + 1, sizeof *memo);
   }
   if (!memo || id < 0 || id >= memo_n) return 0;
   memo[id] |= set;
@@ -18810,11 +18914,21 @@ static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
      String slot, left where it stands above, which its arm reads in its own
      order (`s.start_with?("z#{n}", l.call)` with `l` assigning s). A constant
      the program never assigns (`File`, a class) is not read at all. Where
-     master binds calls alone, that is master's order. */
-  int made_left = nmade, ahead[8], nahead = 0;
-  for (int i = 0; i < obs_at && (made_here || unb >= 0); i++) {
+     master binds calls alone, that is master's order.
+
+     Two interpolated Strings made in place are held by nothing either, and
+     the second can collect the first: `"as#{n}b".include?("s#{n}")`. One
+     with another made after it is bound too, in the order written, so only
+     the last is made in the call; and that one as well (`all`) where the
+     arm was seen to make it beside a call of its own, below. A reader or an
+     element read beside them runs nothing and stays in the call. */
+  int made_left = nmade, ahead[8], nahead = 0, for_later = 0;
+  int all = operand_order_declined(c, id, 0) & 4, in_turn = operand_order_declined(c, id, 0) >> 8;
+  int read_only = observable == 1 && !runs && !converts;
+  int reach = made_here || unb >= 0 || observable == 0 || read_only;
+  for (int i = 0; i < nop && (reach || all); i++) {
     NodeKind k = nt_kind(nt, operand[i]);
-    int moved = 0;
+    int moved = 0, later = 0;
     if (obs[i] || k == NK_SelfNode ||
         (k == NK_ConstantReadNode && !comp_const(c, nt_str(nt, operand[i], "name")))) continue;
     for (int j = i + 1; j <= obs_at && !moved; j++) {
@@ -18824,14 +18938,20 @@ static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
         moved = subtree_may_reassign_state(c, operand[j]);
       else moved = subtree_reads_moved_by(c, operand[i], operand[j]);
     }
-    if (!moved) continue;
-    if (!plain_arm || nb + nahead >= 8 || !operand_is_interp_str(c, operand[i])) {
-      if (observable > 1) goto decline;
-      made_here = nahead = 0;
-      break;
+    int str = plain_arm && nb + nahead < 8 && operand_is_interp_str(c, operand[i]);
+    for (int j = i + 1; j < nop && str && !later && !((in_turn >> i) & 1); j++)
+      later = !obs[j] && operand_is_interp_str(c, operand[j]);
+    if (str && (moved || later || all)) {
+      if (!moved && !all) for_later |= 1 << i;
+      ahead[nahead++] = i;
+      continue;
     }
-    ahead[nahead++] = i;
+    if (!moved || !reach) continue;
+    if (observable > 1) goto decline;
+    made_here = nahead = 0;
+    break;
   }
+  if (read_only && nahead) { obs[obs_at] = 0; obs_at = -1; observable = nb = 0; }
   for (int a = 0; a < nahead; a++) {
     int p = nb++;
     for (; p > 0 && at[p - 1] > ahead[a]; p--) {
@@ -18840,7 +18960,7 @@ static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
     node[p] = operand[ahead[a]]; ty[p] = TY_STRING; fresh[p] = 0; at[p] = ahead[a];
     nstr++; made_left--;
   }
-  int lone = observable < 2 && !made_here;
+  int lone = observable < 2 && !made_here && !(observable == 0 && nahead);
   if ((lone && (unb >= 0 || !(converts && observable >= 1))) || nb < 1 ||
       g_n_argov + nb > MAX_ARG_OVERRIDE) goto decline;
   if (operand_order_declined(c, id, 0) & 2) goto decline;
@@ -18877,7 +18997,7 @@ static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
   size_t pre_mark = g_pre->len;
   int saved_tmp = g_tmp;
   Buf opb[8], opp[8];
-  int rendered = 0, ok = 1;
+  int rendered = 0, ok = 1, again = 0, turn = 0;
   /* A lone observable operand is kept only when the call converts, which the
      call's own emission tells; render the operand after that, so a declined
      rewrite has not rendered it. Rendered first, a decline re-rendered it with
@@ -18951,10 +19071,41 @@ static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
        reader by its receiver, and `label` for `self.label` counted as a call.
        An interpolated String beside one is the only operand that runs,
        unless another is made in place. */
-    if (!lone && observable < 2 && ok && g_conv_emitted == conv_mark &&
-        operand_is_self_field(c, node[nb - 1], fresh[nb - 1])) ok = 0;
+    for (int i = 0; i < nb && ok && !lone && observable == 1 && g_conv_emitted == conv_mark; i++)
+      if (at[i] == obs_at && operand_is_self_field(c, node[i], fresh[i])) ok = 0;
     for (int i = 0; i < nb && ok && unb >= 0 && nmade == 0 && g_conv_emitted == conv_mark; i++)
       if (operand_is_self_field(c, node[i], fresh[i]) && --nrun < 2) ok = 0;
+    /* ...and the last interpolated String is still made in the call. Where
+       the statement that makes it is one C call, it is an argument beside
+       values that are held. Where another call runs beside it (`concat`
+       with two folds the first in, `sub!` on a String the program shares
+       copies its receiver) that call's result is held by nothing: the
+       String is bound as the ones before it, and the call emitted again. */
+    int last = -1;
+    for (int i = 0; i < nop && ok && plain_arm && !all; i++)
+      if (!obs[i] && operand_is_interp_str(c, operand[i])) last = i;
+    for (int i = 0; i < nb && last >= 0; i++)
+      if (at[i] == last) last = -1;
+    if (last >= 0) {
+      int mark = g_tmp;
+      Buf o, p;
+      render_operand(c, operand[last], 0, &o, &p);
+      const char *le = NULL, *ls = o.p && !(p.p && p.p[0]) ? text_find_renumbered(ob.p, o.p, &le) : NULL;
+      if (ls && text_calls_beside(ob.p, ls, le) > 1) again = !(ok = 0);
+      /* ...or no call runs beside it, and a String bound for the one made
+         after it is used up before that one: an arm that takes its operands
+         one at a time (`start_with?` with two prefixes, a typed `push` of
+         two) holds nothing across a make, as master's C does. That String
+         is left where it stands, and the call emitted again. */
+      for (int i = nb - 1; i >= 0 && ls && ok && for_later; i--) {
+        if (!operand_is_interp_str(c, node[i])) continue;
+        if (((for_later >> at[i]) & 1) && text_tmp_done_before(ob.p, tmp[i], ls)) turn |= 256 << at[i];
+        ls = text_first_use_of_tmp(ob.p, tmp[i]);
+      }
+      if (turn) ok = 0;
+      free(o.p); free(p.p);
+      g_tmp = mark;
+    }
     for (; operands_last && rendered < nb && ok; rendered++) {
       render_operand(c, node[rendered], fresh[rendered], &opb[rendered], &opp[rendered]);
       if (text_is_raise_token(opb[rendered].p)) ok = 0;
@@ -18966,8 +19117,10 @@ static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
     g_pre->len = pre_mark;
     if (g_pre->p) g_pre->p[pre_mark] = '\0';
     g_tmp = saved_tmp;
-    if (!nlate) goto decline;
-    operand_order_declined(c, id, 1);
+    if (again) operand_order_declined(c, id, 4);
+    else if (turn) operand_order_declined(c, id, turn);
+    else if (!nlate) goto decline;
+    else operand_order_declined(c, id, 1);
     return emit_operands_in_order(c, id, b);
   }
   /* an operand's hoisted statements stay ahead of the call unless they run
