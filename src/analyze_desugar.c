@@ -11064,11 +11064,51 @@ int desugar_enum_pair_lone_param(Compiler *c) {
    Its to_a is the chunks themselves, so a block over it binds each chunk
    as the one value it is (`runs.map { |*r| r }` is [[chunk]], `&:sum`
    sums the chunk). */
-static int one_value_enum_source(const NodeTable *nt, int hop) {
+static int one_value_enum_source(Compiler *c, int hop) {
+  const NodeTable *nt = c->nt;
   int src = hop >= 0 && nt_kind(nt, hop) == NK_CallNode ? nt_ref(nt, hop, "receiver") : -1;
   const char *sn = src >= 0 && nt_kind(nt, src) == NK_CallNode ? nt_str(nt, src, "name") : NULL;
-  return sn && (sp_streq(sn, "chunk_while") || sp_streq(sn, "slice_when") || sp_streq(sn, "chunk") ||
-                sp_streq(sn, "slice_before") || sp_streq(sn, "slice_after"));
+  if (!sn || !(sp_streq(sn, "chunk_while") || sp_streq(sn, "slice_when") || sp_streq(sn, "chunk") ||
+               sp_streq(sn, "slice_before") || sp_streq(sn, "slice_after")))
+    return 0;
+  /* ...when the method is the builtin's. A method, reader or Struct member
+     of the program's own by one of these names answers what it likes
+     (`def chunk = [5, 6].each_with_index` yields two values), and its hop
+     reads the Enumerator's flag as any other does: 0 where the program owns
+     what the call reaches, 2 where a receiver of no settled class may be
+     the program's object or a builtin, 1 for the builtin's. */
+  int sr = nt_ref(nt, src, "receiver");
+  if (sr < 0 || nt_kind(nt, sr) == NK_SelfNode) {
+    const Scope *s = comp_scope_of(c, src);
+    if (!s || s->class_id < 0) return comp_method_index(c, sn) < 0;
+    return !((s->is_cmethod ? comp_cmethod_in_chain(c, s->class_id, sn, NULL) >= 0 : 0) ||
+             comp_method_in_chain(c, s->class_id, sn, NULL) >= 0 || comp_reader_in_chain(c, s->class_id, sn, NULL));
+  }
+  TyKind st = infer_type(c, sr);
+  if (ty_is_object(st)) {
+    /* its class's own; Object's is behind an Enumerable the class includes */
+    int dc = -1, mi = comp_method_in_chain(c, ty_object_class(st), sn, &dc);
+    if (mi >= 0 && dc >= 0 && !sp_streq(c->classes[dc].name, "Object") && !sp_streq(c->classes[dc].name, "Kernel")) return 0;
+    return !comp_reader_in_chain(c, ty_object_class(st), sn, NULL);
+  }
+  if (nt_kind(nt, sr) == NK_ConstantReadNode) {
+    int ci = comp_class_index(c, nt_str(nt, sr, "name"));
+    if (ci >= 0) return comp_cmethod_in_chain(c, ci, sn, NULL) < 0;
+  }
+  if (st == TY_POLY || st == TY_UNKNOWN) {
+    for (int k = 0; k < c->nclasses; k++)
+      if (comp_method_in_chain(c, k, sn, NULL) >= 0 || comp_reader_in_chain(c, k, sn, NULL)) return 2;
+    return 1;
+  }
+  /* a builtin's value: the builtin's method, unless the program reopened
+     the receiver's class, or Enumerable, with the name */
+  const char *own[] = { ty_is_array(st) ? "Array" : ty_is_hash(st) ? "Hash" : st == TY_RANGE ? "Range"
+                        : st == TY_ENUMERATOR ? "Enumerator" : st == TY_STRING ? "String" : NULL, "Enumerable" };
+  for (int k = 0; k < 2; k++) {
+    int ci = own[k] ? comp_class_index(c, own[k]) : -1;
+    if (ci >= 0 && comp_method_in_chain(c, ci, sn, NULL) >= 0) return 0;
+  }
+  return 1;
 }
 
 void enum_hop_yield_view(Compiler *c, int id, int hop) {
@@ -11076,7 +11116,8 @@ void enum_hop_yield_view(Compiler *c, int id, int hop) {
   int blk = nt_ref(nt, id, "block");
   const char *nm = nt_str(nt, id, "name");
   if (blk < 0 || !nm || !enum_pair_spread_iter(nm) || enum_pair_source_call(nt, hop)) return;
-  if (one_value_enum_source(nt, hop)) return;
+  int ov = one_value_enum_source(c, hop);
+  if (ov == 1 || (ov == 2 && nt_kind(nt, blk) != NK_BlockNode)) return;
   /* the builtins' own walks (builtins/, `each { |x| yield x }`) hand the
      packed item on as the one value their block takes */
   const char *sn = comp_scope_of(c, id)->name;
@@ -11114,6 +11155,9 @@ void enum_hop_yield_view(Compiler *c, int id, int hop) {
       if (rn && *rn) lone_rest = rest;
     }
   }
+  /* the builtin's chunks or the program's own Enumerator: a lone `|x|`
+     reads either rightly by the flag, the other forms stay as written */
+  if (ov == 2 && (mn || !lone_req)) return;
   int req = -1;
   if (mn && xn) {
     /* { |__spa| x = __spa[0]; __spa.length > 1 ? x.m(__spa[1]) : x.m } */
