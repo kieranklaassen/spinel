@@ -911,6 +911,25 @@ static int inline_target_same(const InlineTarget *a, const InlineTarget *b) {
          a->cm_self_id == b->cm_self_id && a->implicit_self == b->implicit_self;
 }
 
+/* The `&callable` argument of a call whose method is spliced in, as the
+   sp_Proc * its yields call. A Method made in place (`run(x, &method(:g))`)
+   has no root until the proc holds it, and the proc's allocation can
+   collect: it is rooted across that. A bare read is reachable where it
+   lives (arg_wants_root) and goes as before. */
+static void emit_inline_block_arg(Compiler *c, int fe, Buf *b) {
+  if (comp_ntype(c, fe) == TY_PROC) { emit_expr(c, fe, b); return; }
+  if (comp_ntype(c, fe) == TY_METHOD && repr_of(c, fe).kind != RK_BOXED && arg_wants_root(c, TY_METHOD, fe)) {
+    int tm = ++g_tmp;
+    buf_printf(b, "({ sp_BoundMethod *_t%d = ", tm);
+    emit_expr(c, fe, b);
+    /* nil stays "no block", as sp_poly_to_block answers it */
+    buf_printf(b, "; SP_GC_ROOT(_t%d); _t%d ? sp_method_to_proc(_t%d) : NULL; })", tm, tm, tm);
+    return;
+  }
+  /* nil here is "no block", not a TypeError: see sp_poly_to_block */
+  buf_puts(b, "sp_poly_to_block("); emit_boxed(c, fe, b); buf_puts(b, ")");
+}
+
 int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
   if (g_plan_check) ucall_emitted(id);
   const NodeTable *nt = c->nt;
@@ -1210,9 +1229,7 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
   if (fwd_proc_expr >= 0) {
     emit_indent(b, indent + 1);
     buf_printf(b, "sp_Proc *_t%d = ", fwd_proc_tmp);
-    if (comp_ntype(c, fwd_proc_expr) == TY_PROC) emit_expr(c, fwd_proc_expr, b);
-    /* nil here is "no block", not a TypeError: see sp_poly_to_block */
-    else { buf_puts(b, "sp_poly_to_block("); emit_boxed(c, fwd_proc_expr, b); buf_puts(b, ")"); }
+    emit_inline_block_arg(c, fwd_proc_expr, b);
     buf_printf(b, "; SP_GC_ROOT(_t%d);\n", fwd_proc_tmp);
   }
   /* instance method: bind self to the receiver. A heap object is a pointer; a
