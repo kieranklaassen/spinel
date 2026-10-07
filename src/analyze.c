@@ -1783,15 +1783,314 @@ static void reject_dynamic_mixin_args(Compiler *c) {
   }
 }
 
+/* The write of constant `name` when the program writes it exactly once, by
+   any form (`A = v`, `A ||= v`, `Mod::A = v`, a multiple-assignment target);
+   -1 when there is none or more than one. */
+static int const_only_write(const NodeTable *nt, const char *name) {
+  static const NodeKind wk[] = {
+    NK_ConstantWriteNode, NK_ConstantOrWriteNode, NK_ConstantAndWriteNode,
+    NK_ConstantOperatorWriteNode, NK_ConstantTargetNode, NK_ConstantPathWriteNode,
+    NK_ConstantPathOrWriteNode, NK_ConstantPathAndWriteNode,
+    NK_ConstantPathOperatorWriteNode, NK_ConstantPathTargetNode };
+  int only = -1, writes = 0;
+  for (size_t q = 0; q < sizeof wk / sizeof wk[0]; q++)
+    NT_FOREACH_KIND(nt, wk[q], w) {
+      int t = nt_ref(nt, w, "target");
+      const char *wn = nt_str(nt, t >= 0 ? t : w, "name");
+      if (wn && sp_streq(wn, name)) { only = w; writes++; }
+    }
+  return writes == 1 ? only : -1;
+}
+
+/* A constant read that can name a constant the program wrote: a bare name,
+   `::A`, or `Mod::A` under a class or module of the program's own. A path
+   under anything else (`IO::Buffer`, `Errno::ENOENT`) names that namespace's
+   constant, whatever `A` the program has. */
+static int const_read_is_programs(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  NodeKind k = nt_kind(nt, id);
+  if (k != NK_ConstantPathNode) return k == NK_ConstantReadNode;
+  int par = nt_ref(nt, id, "parent");
+  NodeKind pk = nt_kind(nt, par);
+  const char *pn = (pk == NK_ConstantReadNode || pk == NK_ConstantPathNode) ? nt_str(nt, par, "name") : NULL;
+  return par < 0 || (pn && comp_class_index(c, pn) >= 0);
+}
+
+/* A value that runs no method: a constant or a plain literal (or a def, as
+   the argument of `private def m`). */
+static int node_runs_nothing(const NodeTable *nt, int id) {
+  switch (nt_kind(nt, id)) {
+  case NK_ConstantPathNode: { int par = nt_ref(nt, id, "parent"); return par < 0 || node_runs_nothing(nt, par); }
+  case NK_ConstantReadNode: case NK_SymbolNode: case NK_StringNode: case NK_IntegerNode: case NK_FloatNode:
+  case NK_TrueNode: case NK_FalseNode: case NK_NilNode: case NK_DefNode:
+    return 1;
+  default: return 0;
+  }
+}
+
+/* Declarations that run none of the program's methods, and the hooks a
+   definition runs when the program defines them. */
+static const char *const quiet_decls[] = { "attr_reader", "attr_writer", "attr_accessor", "private", "public",
+  "protected", "module_function", "include", "extend", "prepend", "require", "require_relative", NULL };
+static const char *const def_hooks[] = { "inherited", "included", "extended", "prepended", "method_added",
+  "singleton_method_added", "const_added", "const_missing", "append_features", "prepend_features",
+  "extend_object", NULL };
+/* CRuby's own classes and modules that hold constants: a bare name in a body
+   of theirs, or of a class that inherits or mixes one in, reads theirs first. */
+static const char *const const_holders[] = { "Complex", "DidYouMean", "Encoding", "Enumerator", "Errno",
+  "ErrorHighlight", "File", "Float", "GC", "Gem", "IO", "Marshal", "Math", "ObjectSpace", "Pathname", "Process",
+  "Ractor", "Random", "RbConfig", "Regexp", "Ruby", "RubyVM", "Set", "SyntaxSuggest", "Thread", "ThreadGroup",
+  NULL };
+static int name_listed(const char *const *list, const char *n) {
+  for (int i = 0; n && list[i]; i++) if (sp_streq(list[i], n)) return 1;
+  return 0;
+}
+
+/* The name a Symbol or String literal spells. */
+static const char *literal_name(const NodeTable *nt, int id) {
+  NodeKind k = nt_kind(nt, id);
+  const char *u = k == NK_StringNode ? nt_str(nt, id, "unescaped") : NULL;
+  return k == NK_SymbolNode ? nt_str(nt, id, "value") : u ? u : k == NK_StringNode ? nt_str(nt, id, "content") : NULL;
+}
+
+/* What the name of a body, a superclass or a mixed-in module says: 0 for a
+   constant outside const_holders, 1 for one of them or for no constant at
+   all, 2 for BasicObject, whose instances answer no is_a? and whose bodies
+   read no constant of the program's own level. */
+static int ancestry_kind(const NodeTable *nt, int id) {
+  for (; id >= 0; id = nt_ref(nt, id, "parent")) {
+    NodeKind k = nt_kind(nt, id);
+    const char *n = nt_str(nt, id, "name");
+    if ((k != NK_ConstantReadNode && k != NK_ConstantPathNode) || !n) return 1;
+    if (sp_streq(n, "BasicObject")) return 2;
+    if (name_listed(const_holders, n)) return 1;
+    if (k == NK_ConstantReadNode) break;
+  }
+  return 0;
+}
+
+/* `Struct.new(...)` or `Data.define(...)`: a new class with no constants. */
+static int is_struct_new(const NodeTable *nt, int s) {
+  int recv = nt_kind(nt, s) == NK_CallNode ? nt_ref(nt, s, "receiver") : -1;
+  const char *n = nt_str(nt, s, "name"), *rn = nt_kind(nt, recv) == NK_ConstantReadNode ? nt_str(nt, recv, "name") : NULL;
+  return n && rn && ((sp_streq(rn, "Struct") && sp_streq(n, "new")) || (sp_streq(rn, "Data") && sp_streq(n, "define")));
+}
+
+/* A statement that runs none of the program's methods: a def, an alias, a
+   constant given a constant, a literal or a new Struct or Data class, or a
+   declaration of such (`attr_reader :a`, `private`, `include M`). */
+static int stmt_runs_nothing(const NodeTable *nt, int s) {
+  if (nt_kind(nt, s) == NK_ConstantWriteNode) {
+    s = nt_ref(nt, s, "value");
+    if (nt_kind(nt, s) != NK_CallNode) return node_runs_nothing(nt, s);
+  }
+  if (nt_kind(nt, s) != NK_CallNode) return nt_kind(nt, s) == NK_DefNode || nt_kind(nt, s) == NK_AliasMethodNode;
+  int recv = nt_ref(nt, s, "receiver");
+  const char *n = nt_str(nt, s, "name");
+  if (nt_ref(nt, s, "block") >= 0 || !n) return 0;
+  if (recv < 0 ? !name_listed(quiet_decls, n) : !is_struct_new(nt, s)) return 0;
+  int args = nt_ref(nt, s, "arguments"), argc = 0;
+  const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &argc) : NULL;
+  for (int i = 0; i < argc; i++) if (!node_runs_nothing(nt, argv[i])) return 0;
+  return 1;
+}
+
+/* Number the statements of the program in the order they run, by fours. A
+   statement's seq[] has bit 0 set; every node inside it carries the number,
+   with bit 1 set inside a method body (a def, a define_method block). A class
+   or module body that is a statement is numbered through, as its statements
+   run in place. seq[nt->count] is the number of the first statement that may
+   run a method of the program (0: none does); BEGIN { } runs before all.
+   After it, one more entry a node: the class or module whose body the node's
+   statement is in (its node id + 1; 0 at the program's own level). */
+static void seq_stamp(const NodeTable *nt, int node, int v, int own, int *seq) {
+  if (node < 0) return;
+  NodeKind k = nt_kind(nt, node);
+  const char *n = k == NK_CallNode ? nt_str(nt, node, "name") : NULL;
+  if (k == NK_DefNode || (n && (sp_streq(n, "define_method") || sp_streq(n, "define_singleton_method")))) v |= 2;
+  seq[node] = v; seq[nt->count + 1 + node] = own;
+  int nr = nt_num_refs(nt, node);
+  for (int i = 0; i < nr; i++) seq_stamp(nt, nt_ref_at(nt, node, i), v, own, seq);
+  int na = nt_num_arrs(nt, node);
+  for (int i = 0; i < na; i++) {
+    int m = 0; const int *ids = nt_arr_at(nt, node, i, &m);
+    for (int j = 0; j < m; j++) seq_stamp(nt, ids[j], v, own, seq);
+  }
+}
+
+static void seq_statements(const NodeTable *nt, int stmts, int own, int *seq, int *n) {
+  int *runs = &seq[nt->count];
+  if (stmts < 0) return;
+  if (nt_kind(nt, stmts) != NK_StatementsNode) { if (!*runs) *runs = *n + 4; return; }
+  int m = 0; const int *ids = nt_arr(nt, stmts, "body", &m);
+  for (int j = 0; j < m; j++) {
+    NodeKind k = nt_kind(nt, ids[j]);
+    if (k == NK_PreExecutionNode) { *runs = 1; continue; }
+    if (k == NK_ClassNode || k == NK_ModuleNode) {
+      int sup = k == NK_ClassNode ? nt_ref(nt, ids[j], "superclass") : -1;
+      if (!*runs && sup >= 0 && !node_runs_nothing(nt, sup)) *runs = *n + 4;
+      seq[nt->count + 1 + ids[j]] = own;
+      seq_statements(nt, nt_ref(nt, ids[j], "body"), ids[j] + 1, seq, n);
+      continue;
+    }
+    *n += 4; seq_stamp(nt, ids[j], *n, own, seq); seq[ids[j]] |= 1;
+    if (!*runs && !stmt_runs_nothing(nt, ids[j])) *runs = *n;
+  }
+}
+
+/* The numbering of the whole program. A program that defines a hook, or a
+   declaration's own name, runs it at a definition: nothing is quiet then. A
+   program that names is_a?, kind_of? or instance_of? as a method of its own
+   (a def, or its symbol or string: alias, define_method) is not numbered at
+   all: its method answers its own question. Neither is one with a class
+   under BasicObject. A constant written again, hidden or taken away by its
+   name (const_set, private_constant, remove_const) loses its write's mark:
+   no write node shows what it holds, or who may read it. The last entry is
+   set when a body may read a constant of CRuby's before the program's: the
+   program opens, inherits or mixes in one of const_holders, or something no
+   constant names. */
+#define SEQ_LEN(nt) (2 * (size_t)(nt)->count + 2)
+static int *seq_build(const NodeTable *nt) {
+  int *seq = calloc(SEQ_LEN(nt), sizeof(int));
+  if (!seq) return NULL;
+  static const NodeKind lk[] = { NK_SymbolNode, NK_StringNode };
+  for (int q = 0; q < 2; q++)
+    NT_FOREACH_KIND(nt, lk[q], s) {
+      const char *sv = literal_name(nt, s);
+      if (sv && is_kind_query(sv)) return seq;
+    }
+  NT_FOREACH_KIND(nt, NK_DefNode, d) {
+    const char *dn = nt_str(nt, d, "name");
+    if (dn && is_kind_query(dn)) return seq;
+    if (name_listed(def_hooks, dn) || name_listed(quiet_decls, dn)) seq[nt->count] = 1;
+  }
+  int n = 0, anc = 0; seq_statements(nt, nt_ref(nt, nt->root_id, "statements"), 0, seq, &n);
+  static const NodeKind bk[] = { NK_ClassNode, NK_ModuleNode };
+  for (int q = 0; q < 2; q++)
+    NT_FOREACH_KIND(nt, bk[q], b) {
+      int sup = q ? -1 : nt_ref(nt, b, "superclass");
+      anc |= ancestry_kind(nt, nt_ref(nt, b, "constant_path")) | (is_struct_new(nt, sup) ? 0 : ancestry_kind(nt, sup));
+    }
+  NT_FOREACH_KIND(nt, NK_SingletonClassNode, sc)
+    if (nt_kind(nt, nt_ref(nt, sc, "expression")) != NK_SelfNode) anc |= 1;
+  NT_FOREACH_KIND(nt, NK_CallNode, id) {
+    const char *cn = nt_str(nt, id, "name");
+    int args = nt_ref(nt, id, "arguments"), argc = 0, a0 = 0, recv = nt_ref(nt, id, "receiver");
+    const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &argc) : NULL;
+    if (cn && is_send_family(cn) && argc && nt_kind(nt, argv[0]) == NK_SymbolNode) { cn = nt_str(nt, argv[0], "value"); a0 = 1; }
+    if (!cn) continue;
+    NodeKind rk = nt_kind(nt, recv);
+    const char *rn = rk == NK_ConstantReadNode || rk == NK_ConstantPathNode ? nt_str(nt, recv, "name") : NULL;
+    if (sp_streq(cn, "include") || sp_streq(cn, "extend") || sp_streq(cn, "prepend") ||
+        (sp_streq(cn, "new") && rn && sp_streq(rn, "Class")))
+      for (int i = a0; i < argc; i++) anc |= ancestry_kind(nt, argv[i]);
+    int set = sp_streq(cn, "const_set");
+    if (!set && !sp_streq(cn, "private_constant") && !sp_streq(cn, "remove_const")) continue;
+    for (int i = a0; i < (set && argc > a0 ? a0 + 1 : argc); i++) {   /* const_set: the name alone */
+      const char *an = literal_name(nt, argv[i]);
+      if (!an) anc |= 2;   /* any name */
+      int w = an ? const_only_write(nt, an) : -1;
+      if (w >= 0) seq[w] &= ~1;
+    }
+  }
+  /* a file required inside a statement (a def, a block) is spliced ahead of
+     that statement and loads when the require runs: its writes stand in the
+     program earlier than they run */
+  NT_FOREACH_KIND(nt, NK_ConstantWriteNode, w) if (nt_int(nt, w, "req_late", 0) > 0) seq[w] &= ~1;
+  if (anc & 2) memset(seq, 0, SEQ_LEN(nt) * sizeof(int));
+  else seq[SEQ_LEN(nt) - 1] = anc;
+  return seq;
+}
+
+/* Whether a read names the constant written in the body `ow` (as seq_build
+   records it): `::A` reads the program's own level, `Mod::A` the body of a
+   top-level Mod, and a bare `A` the program's own level or a body the read
+   sits in. Another body's constant of that name is not the one read, and a
+   Mod that a nested class or module shares its name with may be that one. */
+static int const_read_reaches(const NodeTable *nt, int rd, int ow, const int *own) {
+  if (nt_kind(nt, rd) != NK_ConstantPathNode) {
+    int o = own[rd];
+    while (o && o != ow) o = own[o - 1];
+    return o == ow;
+  }
+  int par = nt_ref(nt, rd, "parent");
+  if (par < 0 || !ow) return par < 0 && !ow;
+  int cp = nt_ref(nt, ow - 1, "constant_path");
+  const char *pn = nt_str(nt, par, "name"), *on = nt_str(nt, cp, "name");
+  if (nt_kind(nt, par) != NK_ConstantReadNode || nt_kind(nt, cp) != NK_ConstantReadNode ||
+      own[ow - 1] || !pn || !on || !sp_streq(pn, on)) return 0;
+  static const NodeKind bk[] = { NK_ClassNode, NK_ModuleNode };
+  for (int q = 0; q < 2; q++)
+    NT_FOREACH_KIND(nt, bk[q], b) {
+      const char *bn = own[b] ? nt_str(nt, nt_ref(nt, b, "constant_path"), "name") : NULL;
+      for (const char *u = bn ? strstr(bn, "__") : NULL; u; u = strstr(u + 2, "__")) bn = u + 2;
+      if (bn && sp_streq(bn, pn)) return 0;
+    }
+  return 1;
+}
+
+/* Whether the class is opened by its own definition alone (a builtin: by no
+   body). `class A` under a module reopens the class a constant `A` of
+   another body holds (walk_scope), so a second body of the class may be one
+   written with the constant's name, which then names two things. */
+static int class_opened_once(Compiler *c, const char *cn) {
+  const NodeTable *nt = c->nt;
+  int ci = is_builtin_class_name(cn) ? -1 : comp_class_index(c, cn);
+  int def = ci >= 0 ? c->classes[ci].def_node : -1;
+  static const NodeKind bk[] = { NK_ClassNode, NK_ModuleNode };
+  for (int q = 0; q < 2; q++)
+    NT_FOREACH_KIND(nt, bk[q], b) {
+      const char *bn = nt_str(nt, nt_ref(nt, b, "constant_path"), "name");
+      if (b != def && bn && sp_streq(bn, cn)) return 0;
+    }
+  return 1;
+}
+
+/* `x.is_a?(A)` (kind_of?, instance_of?) where `A = SomeClass`: rewrite the
+   argument's name to the class the constant holds, as `A.foo` and `when A`
+   read it, so every arm that names the class and the narrowing after it see
+   the class. Only where the constant is known to hold that class when the
+   call runs: its one write is `A = <constant>`, a statement, and has run by
+   then. A read at the program's or a class body's own level sits in a later
+   statement. A method body runs whenever something calls it, and a call
+   before the write may reach a body written after it: there, nothing that
+   runs a method of the program comes before the write. A second write may
+   hold another class, and before the write CRuby raises NameError. */
+static void rewrite_const_alias_kind_arg(Compiler *c, int id, int **seq) {
+  const NodeTable *nt = c->nt;
+  const char *name = nt_str(nt, id, "name");
+  if (!name || !is_kind_query(name)) return;
+  int args = nt_ref(nt, id, "arguments"), argc = 0;
+  const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &argc) : NULL;
+  if (argc != 1 || !const_read_is_programs(c, argv[0])) return;
+  const char *an = nt_str(nt, argv[0], "name");
+  if (!an || comp_class_index(c, an) >= 0) return;   /* already a class name */
+  const char *real = resolve_class_alias(c, an);
+  if (!real || sp_streq(real, an) || !class_opened_once(c, real)) return;
+  int w = const_only_write(nt, an);
+  if (nt_kind(nt, w) != NK_ConstantWriteNode || !const_read_is_programs(c, nt_ref(nt, w, "value"))) return;
+  if (!*seq && !(*seq = seq_build(nt))) return;
+  int sw = (*seq)[w], sr = (*seq)[argv[0]], runs = (*seq)[nt->count];
+  if (!(sw & 1)) return;                                   /* the write is no statement */
+  if (sr & 2 ? runs && runs <= sw : (sr | 3) <= (sw | 3)) return;
+  const int *own = *seq + nt->count + 1;
+  if (!const_read_reaches(nt, argv[0], own[w], own)) return;
+  if ((*seq)[SEQ_LEN(nt) - 1] && nt_kind(nt, argv[0]) == NK_ConstantReadNode && own[argv[0]] != own[w]) return;
+  char buf[256]; snprintf(buf, sizeof buf, "%s", real);  /* copy: set frees an */
+  nt_set_str((NodeTable *)nt, argv[0], "name", buf);
+}
+
 /* `A = SomeClass` (a constant aliasing a class) then `A.foo`: rewrite the
    ConstantRead receiver's name to the underlying class so class-method dispatch
    resolves it exactly like the direct `SomeClass.foo`. Mirrors the `class CONST`
    reopening rewrite in walk_scope. Runs once after classes are registered. */
 void rewrite_const_alias_receivers(Compiler *c) {
   const NodeTable *nt = c->nt;
+  int *seq = NULL;   /* statement numbers, built for the first kind query that asks */
   for (int id = 0; id < nt->count; id++) {
     const char *ty = nt_type(nt, id);
     if (!ty || !sp_streq(ty, "CallNode")) continue;
+    rewrite_const_alias_kind_arg(c, id, &seq);
     int recv = nt_ref(nt, id, "receiver");
     if (recv < 0 || !nt_type(nt, recv)) continue;
     const char *rvty = nt_type(nt, recv);
@@ -1807,6 +2106,7 @@ void rewrite_const_alias_receivers(Compiler *c) {
       nt_set_str((NodeTable *)nt, recv, "name", buf);
     }
   }
+  free(seq);
 }
 
 /* For a receiverless instance_eval/exec CallNode with a literal block inside
