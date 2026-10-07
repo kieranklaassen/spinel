@@ -1,0 +1,20 @@
+A yield under && or || hands a true-or-false block's value on boxed
+
+    def kept(c)
+      x = (c && yield)
+      x
+    end
+    p kept(true) { true }
+    p kept(true) { 9 }
+
+did not build ("incompatible types when assigning to type 'sp_RbVal'
+from type 'int'"), where CRuby prints true and 9.
+
+Where blocks of different types make a yield's value boxed, an `&&` or
+`||` over it is boxed too, and each call site emits the chain for its
+own block. At a site whose block answers true or false both sides are
+booleans, so the chain took the flat C `&&` and handed its int on as
+it stood. That arm now boxes its result where the chain is boxed for
+the sites together.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
