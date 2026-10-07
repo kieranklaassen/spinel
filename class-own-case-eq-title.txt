@@ -1,0 +1,1 @@
+A class that defines === itself is asked it by `Klass === x`

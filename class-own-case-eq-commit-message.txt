@@ -1,0 +1,30 @@
+A class that defines === itself is asked it by `Klass === x`
+
+`Klass === x` was folded to x.is_a?(Klass) for every class of the
+program. A class that defines === itself had its method compiled and
+never called:
+
+    class Even
+      def self.===(o) = o.is_a?(Integer) && o.even?
+    end
+    p(Even === 4)          # CRuby: true    Spinel: false
+    p(Even === Even.new)   # CRuby: false   Spinel: true
+
+The ordering operators already keep a class's own method
+(`def self.<(o)`): the fold stands aside and the class-method dispatch
+calls it. === now does the same, in the fold (emit_call_class_value_arms)
+and in the type of the call (infer_class_module_call), which was always
+a boolean and is now the method's own answer. class_recv_own_eqq
+(analyze_util.c) finds the method: `def self.===`, `class << self`, a
+module's own, one that `extend` brings, an inherited one.
+
+A === whose `super` has no === of the program above it is Module#===,
+which only the fold answers: such a class keeps the fold
+(scope_body_has_super, no longer static).
+
+`case x when Klass` and `in Klass` still fold, as do grep(Klass) and
+any?(Klass).
+
+Test: test/class_own_case_eq.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
