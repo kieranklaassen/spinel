@@ -1,0 +1,23 @@
+recv
+tick 1
+tick 2
+5
+[1, 2]
+recv
+tick 3
+5
+["abc", 3]
+["bc", 2]
+["abc"]
+5
+["abc", "bbc"]
+tick 4
+5
+["abc", 4, ["bc", 1]]
+["abc", ["bc", 1], "cbc"]
+["bc0", 2]
+["a0"]
+["bc1", 2]
+["a1"]
+["bc2", 2]
+["a2"]

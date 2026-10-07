@@ -17229,6 +17229,55 @@ static void emit_gate_args_effect(Compiler *c, int id, const char *sep, Buf *b) 
   if (blk >= 0 && nt_kind(nt, blk) == NK_BlockArgumentNode)
     emit_gate_arg_effect(c, nt_ref(nt, blk, "expression"), sep, b);
 }
+/* A call that no method answers hands its receiver and its arguments to
+   the error in one C call, `sp_nomethod_msg_args("zork", <receiver>, n,
+   (sp_RbVal[]){<arguments>})`. C leaves the order of a call's arguments
+   open, and a compound literal is not a GC root: gcc ran the arguments
+   before the receiver, and a receiver or an argument that is a temporary
+   (`mk(x).zork("a" + s)`) was held by nothing while the next one, or the
+   error's list, was allocated. Such a call binds the receiver and then each
+   argument to a rooted temporary first (emit_rooted_arg_list). What makes
+   a temporary is a call that is more than a read, an interpolated String,
+   and an Array or Hash literal of one; a value a dispatch already holds in
+   one is not made again. A call with one temporary keeps the C it had:
+   nothing runs between it and the helper it is handed to. The binding is
+   for a receiver and an argument that both run, and for two arguments of
+   which one is a heap value. */
+static int gate_val_is_temp(Compiler *c, int n) {
+  const NodeTable *nt = c->nt;
+  n = n >= 0 ? unwrap_parens(c, n) : n;
+  if (n < 0) return 0;
+  for (int i = 0; i < g_n_argov; i++) if (g_argov_node[i] == n) return 0;
+  switch (nt_kind(nt, n)) {
+    case NK_CallNode: return !subtree_is_pure_read(c, n);
+    case NK_InterpolatedStringNode: return 1;
+    case NK_ArrayNode: case NK_HashNode: {
+      int en = 0; const int *el = nt_arr(nt, n, "elements", &en);
+      for (int e = 0; e < en; e++) if (gate_val_is_temp(c, el[e])) return 1;
+      return 0;
+    }
+    case NK_AssocNode:
+      return gate_val_is_temp(c, nt_ref(nt, n, "key")) || gate_val_is_temp(c, nt_ref(nt, n, "value"));
+    default: return 0;
+  }
+}
+/* 1: an argument is a temporary; 2: two are, one of them a heap value. */
+static int gate_args_temp(Compiler *c, const int *av, int ac) {
+  int n = 0, heap = 0;
+  for (int k = 0; k < ac; k++)
+    if (gate_val_is_temp(c, av[k])) { n++; heap |= needs_root(comp_ntype(c, av[k])); }
+  return n >= 2 && heap ? 2 : n > 0;
+}
+/* The receiver bound to a rooted temporary, its own setup ahead of it. */
+static int emit_gate_held_recv(Compiler *c, int recv, Buf *b) {
+  int tr = ++g_tmp;
+  Buf pre = {0}, val = {0};
+  emit_split_pre(c, recv, emit_boxed, &pre, &val);
+  if (pre.len) buf_puts(b, pre.p);
+  buf_printf(b, "sp_RbVal _t%d = %s; SP_GC_ROOT_RBVAL(_t%d); ", tr, val.p ? val.p : "sp_box_nil()", tr);
+  free(pre.p); free(val.p);
+  return tr;
+}
 int emit_unresolved_call(Compiler *c, int id, Buf *b) {
   const NodeTable *nt = c->nt;
   const char *name = nt_str(nt, id, "name");
@@ -17852,15 +17901,29 @@ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
             if (gty && (sp_streq(gty, "SplatNode") || sp_streq(gty, "BlockArgumentNode") ||
                         sp_streq(gty, "KeywordHashNode"))) gstage = 0;
           }
+          /* the receiver, then each argument, held before the list is made */
+          int grtemp = gate_val_is_temp(c, recv), gatemp = gate_args_temp(c, gav, gac);
+          int ghold = gstage && ((grtemp && gatemp) || gatemp == 2);
+          int ghr = -1, gha = -1;
+          #define EMIT_GATE_HOLD() do { \
+            if (ghold) { \
+              buf_puts(b, "({ "); ghr = emit_gate_held_recv(c, recv, b); \
+              gha = emit_rooted_arg_list(c, gav, gac, "sp_RbVal", "SP_GC_ROOT_RBVAL", emit_boxed, b); \
+            } \
+          } while (0)
           #define EMIT_GATE_ARGS() do { \
             buf_printf(b, ", %d, (sp_RbVal[]){", gac); \
-            for (int gk = 0; gk < gac; gk++) { if (gk) buf_puts(b, ", "); emit_boxed(c, gav[gk], b); } \
+            for (int gk = 0; gk < gac; gk++) { \
+              if (gk) buf_puts(b, ", "); \
+              if (ghold) buf_printf(b, "_t%d", gha + gk); else emit_boxed(c, gav[gk], b); \
+            } \
             if (gac == 0) buf_puts(b, "sp_box_nil()"); \
             buf_puts(b, "}"); \
           } while (0)
           /* arguments that are not staged still run, after the receiver */
           #define EMIT_GATE_POLY_RECV() do { \
-            if (gstage) emit_boxed(c, recv, b); \
+            if (ghold) buf_printf(b, "_t%d", ghr); \
+            else if (gstage) emit_boxed(c, recv, b); \
             else { \
               Buf grb; memset(&grb, 0, sizeof grb); emit_boxed(c, recv, &grb); \
               Buf gfx; memset(&gfx, 0, sizeof gfx); emit_gate_args_effect(c, id, "; ", &gfx); \
@@ -17874,19 +17937,22 @@ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
             } \
           } while (0)
           if (sp_streq(dflt, "sp_box_nil()") && !ret_scalar) {
-            buf_printf(b, "sp_raise_nomethod(sp_nomethod_msg%s(\"%s\", ",
-                       gstage ? "_args" : "", nm ? nm : "?");
+            buf_puts(b, "sp_raise_nomethod(");
+            EMIT_GATE_HOLD();
+            buf_printf(b, "sp_nomethod_msg%s(\"%s\", ", gstage ? "_args" : "", nm ? nm : "?");
             EMIT_GATE_POLY_RECV();
             if (gstage) EMIT_GATE_ARGS();
-            buf_puts(b, "))");
+            buf_puts(b, ghold ? "); }))" : "))");
           }
           else {
-            buf_printf(b, "(sp_raise_cls(\"NoMethodError\", sp_nomethod_msg%s(\"%s\", ",
-                       gstage ? "_args" : "", nm ? nm : "?");
+            buf_puts(b, "(sp_raise_cls(\"NoMethodError\", ");
+            EMIT_GATE_HOLD();
+            buf_printf(b, "sp_nomethod_msg%s(\"%s\", ", gstage ? "_args" : "", nm ? nm : "?");
             EMIT_GATE_POLY_RECV();
             if (gstage) EMIT_GATE_ARGS();
-            buf_printf(b, ")), %s)", ret_scalar ? default_value_from_compiler(c, ret) : dflt);
+            buf_printf(b, "%s), %s)", ghold ? "); })" : ")", ret_scalar ? default_value_from_compiler(c, ret) : dflt);
           }
+          #undef EMIT_GATE_HOLD
           return 1;
         }
         {
@@ -17964,8 +18030,20 @@ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
           int recv_run = recv >= 0 && !recv_stageable && !recv_evaluated;
           int rrt = recv_run ? ++g_tmp : -1;
           if (recv_run) recv_stageable = 1;
+          /* two arguments that are temporaries, one a heap value, are held
+             before the list is made (gate_val_is_temp), a receiver staged
+             beside them ahead of them; one that ran above is first and
+             rooted already */
+          int ghold = gstage && gate_args_temp(c, gav, gac) == 2;
+          #define EMIT_GATE_STAGED_ARGS() do { \
+            for (int gk = 0; gk < gac; gk++) { \
+              if (gk) buf_puts(b, ", "); \
+              if (ghold) buf_printf(b, "_t%d", gha + gk); else emit_boxed(c, gav[gk], b); \
+            } \
+            if (gac == 0) buf_puts(b, "sp_box_nil()"); \
+          } while (0)
           #define EMIT_GATE_MSG() do { \
-            int gparen = 0; \
+            int gparen = 0, ghr = -1, gha = -1; \
             if (recv_run) { \
               buf_printf(b, "({ sp_RbVal _t%d = ", rrt); emit_boxed(c, recv, b); \
               buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); ", rrt); \
@@ -17976,26 +18054,31 @@ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
               if (gfx.p && *gfx.p) { buf_puts(b, "("); buf_puts(b, gfx.p); gparen = 1; } \
               free(gfx.p); \
             } \
+            else if (ghold) { \
+              buf_puts(b, "({ "); \
+              if (recv_stageable) ghr = emit_gate_held_recv(c, recv, b); \
+            } \
+            if (ghold) gha = emit_rooted_arg_list(c, gav, gac, "sp_RbVal", "SP_GC_ROOT_RBVAL", emit_boxed, b); \
             const char *_stagefn = gstage ? "sp_stage_recv_args_msg" : "sp_stage_recv_msg"; \
             if (recv_stageable) { \
               buf_printf(b, "%s(%s, ", _stagefn, gmsg); \
-              if (recv_run) buf_printf(b, "_t%d", rrt); else emit_boxed(c, recv, b); \
+              if (recv_run) buf_printf(b, "_t%d", rrt); \
+              else if (ghr >= 0) buf_printf(b, "_t%d", ghr); \
+              else emit_boxed(c, recv, b); \
               if (gstage) { \
                 buf_printf(b, ", %d, (sp_RbVal[]){", gac); \
-                for (int gk = 0; gk < gac; gk++) { if (gk) buf_puts(b, ", "); emit_boxed(c, gav[gk], b); } \
-                if (gac == 0) buf_puts(b, "sp_box_nil()"); \
+                EMIT_GATE_STAGED_ARGS(); \
                 buf_puts(b, "}"); \
               } \
               buf_puts(b, ")"); \
             } \
             else if (gstage) { \
               buf_printf(b, "sp_stage_args_msg(%s, %d, (sp_RbVal[]){", gmsg, gac); \
-              for (int gk = 0; gk < gac; gk++) { if (gk) buf_puts(b, ", "); emit_boxed(c, gav[gk], b); } \
-              if (gac == 0) buf_puts(b, "sp_box_nil()"); \
+              EMIT_GATE_STAGED_ARGS(); \
               buf_puts(b, "})"); \
             } \
             else buf_puts(b, gmsg); \
-            if (recv_run) buf_puts(b, "; })"); \
+            if (recv_run || ghold) buf_puts(b, "; })"); \
             else if (gparen) buf_puts(b, ")"); \
           } while (0)
           /* A receiver the message could not stage is still evaluated, once,
@@ -18025,6 +18108,7 @@ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
           }
           #undef EMIT_GATE_RECV_MSG
           #undef EMIT_GATE_MSG
+          #undef EMIT_GATE_STAGED_ARGS
           #undef EMIT_GATE_ARGS
           #undef EMIT_GATE_POLY_RECV
         }
