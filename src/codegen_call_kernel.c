@@ -1089,6 +1089,10 @@ int emit_call_kernel_flow_arms(Compiler *c, int id, Buf *b, const NodeTable *nt,
       emit_indent(g_pre, g_indent); buf_puts(g_pre, "sp_catch_exc_top[sp_catch_top] = sp_exc_top;\n");
       emit_indent(g_pre, g_indent); buf_puts(g_pre, "sp_catch_rootmark[sp_catch_top] = sp_gc_nroots;\n");
       emit_indent(g_pre, g_indent); buf_puts(g_pre, "sp_catch_top++;\n");
+      /* a throw out of a rescue body, here or in a callee, leaves that body's
+         handled exception pushed: the landing puts sp_rescue_sp back to its
+         depth here */
+      emit_indent(g_pre, g_indent); buf_printf(g_pre, "int _crs%d = sp_rescue_sp;\n", t);
       emit_indent(g_pre, g_indent);
       buf_puts(g_pre, "if (setjmp(sp_catch_stack[sp_catch_top-1]) == 0) {\n");
       /* a bare break in a catch body keeps today's C-break behavior */
@@ -1128,6 +1132,7 @@ int emit_call_kernel_flow_arms(Compiler *c, int id, Buf *b, const NodeTable *nt,
       emit_indent(g_pre, g_indent); buf_puts(g_pre, "else {\n");
       emit_indent(g_pre, g_indent + 1); buf_puts(g_pre, "sp_catch_top--;\n");
       emit_indent(g_pre, g_indent + 1); buf_puts(g_pre, "sp_gc_nroots = sp_catch_rootmark[sp_catch_top];\n");
+      emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "sp_rescue_sp = _crs%d;\n", t);
       emit_indent(g_pre, g_indent + 1);
       /* a kind with an unbox of its own reads through it (emit_unbox_text): a
          String thrown as a mutable String's box carries the handle, not the

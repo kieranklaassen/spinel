@@ -20,6 +20,7 @@ typedef struct sp_proc_home {
   sp_RbVal val;               /* the in-flight return value (nil until delivered) */
   int exc_top;                /* sp_exc_top at the method's entry */
   int catch_top;              /* sp_catch_top at the method's entry */
+  int rescue_sp;              /* sp_rescue_sp at the method's entry */
   int recur_mark;             /* walk-path depth at the method's entry (see sp_poly_recur_mark) */
   sp_int id;                 /* fresh id captured by the home's returning procs */
   struct sp_proc_home *prev;  /* enclosing home, forming the per-fiber chain */

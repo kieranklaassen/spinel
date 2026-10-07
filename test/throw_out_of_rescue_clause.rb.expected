@@ -1,0 +1,18 @@
+top throw here: 1 nil nil
+top throw in a callee: 2 nil nil
+top throw past an ensure: 3 ensure nil
+top catch in a clause: 2 KeyError: around the catch then nil
+top return from a clause: 4 nil nil
+top return under a clause: 5 nil nil
+top return from a proc object: 6 nil nil
+in a clause throw here: 1 TypeError: outer TypeError: outer
+in a clause throw in a callee: 2 TypeError: outer TypeError: outer
+in a clause throw past an ensure: 3 ensure TypeError: outer
+in a clause catch in a clause: 2 KeyError: around the catch then TypeError: outer
+in a clause return from a clause: 4 TypeError: outer TypeError: outer
+in a clause return under a clause: 5 TypeError: outer TypeError: outer
+in a clause return from a proc object: 6 TypeError: outer TypeError: outer
+TypeError: outer
+nil
+3000
+nil
