@@ -31136,7 +31136,10 @@ static int sa_returned_args(Compiler *c, int call, int *out, int cap) {
    value of `@s = v` and of `@s << x`, strbuf_ivar_alias_value), 1 where
    one is a parameter and the argument here a variable (`o.id(s)`). 0 for
    any other call, and for a method that may answer nil (an arm left out, a
-   bang's own nil): the store of a nil is right as it is. */
+   bang's own nil): the store of a nil is right as it is. 0 too for a
+   method that ends in `@s` and answers nothing else, or in `@s ||= v`,
+   whatever its parameters: where the slot holds a handle the call hands
+   that handle out, as a reader's does, and the element is @s. */
 static int sa_object_call_held(Compiler *c, int call) {
   const NodeTable *nt = c->nt;
   call = an_unparen(nt, call);
@@ -31147,6 +31150,16 @@ static int sa_object_call_held(Compiler *c, int call) {
   if (mi <= 0) return 0;
   int lv[16], route = 0;
   int n = method_value_leaves(c, mi, lv, 16);
+  /* the reader's form: the method ends in `@s` and answers nothing else */
+  int last = scope_body_last(c, mi);
+  const char *tn = last >= 0 && nt_kind(nt, last) == NK_InstanceVariableReadNode ? nt_str(nt, last, "name") : NULL;
+  int same = tn != NULL && n > 0;
+  for (int i = 0; i < n && same; i++) {
+    int l = an_unparen(nt, lv[i]);
+    const char *ln = l >= 0 && nt_kind(nt, l) == NK_InstanceVariableReadNode ? nt_str(nt, l, "name") : NULL;
+    same = ln && sp_streq(ln, tn);
+  }
+  if (same || (n == 1 && an_memo_reader_ivar(c, mi))) return 0;
   for (int i = 0; i < n; i++) {
     int l = an_unparen(nt, lv[i]);
     for (int d = 0; d < 8 && str_self_call(nt, l); d++) l = an_unparen(nt, nt_ref(nt, l, "receiver"));
