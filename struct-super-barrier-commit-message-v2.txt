@@ -1,0 +1,39 @@
+A Struct's super takes each write barrier after its argument is built
+
+`super(a, b)` in a Struct's own initialize sets the members in one C
+comma expression. Inside an expression the barrier pass can only wrap
+the holder, `SP_WBO(self)->iv_tags = sp_tags_of(lv_i)`, so with gcc
+the barrier ran before the argument was built. A collection inside
+the argument promotes the Struct and starts the remembered set over;
+the store then lands unrecorded, and the next minor mark frees the
+young value in its slot:
+
+    Pair = Struct.new(:name, :tags) do
+      def initialize(i)
+        super("n#{i}", tags_of(i))
+      end
+    end
+
+Of 300 of these, with a tags_of that allocates before it answers, 37
+read back another value in a plain run built with gcc. clang builds
+the argument first there and is right. It is the hazard the comment in
+gc_wb_insert_seg describes for a statement and leaves open for a
+store inside a larger expression.
+
+A store whose argument may allocate (operand_may_allocate), into a
+member that holds a reference, is now two statements inside the comma
+expression: the argument is built into a temp of the slot's type, and
+the temp is stored,
+
+    ({ __typeof__(self->iv_tags) _sa1 = sp_tags_of(lv_i);
+       self->iv_tags = _sa1; 0; })
+
+where the pass puts the barrier after the store. The argument stays
+out of the store's own statement: the pass rewrites a store statement
+whole and scans on past it, so a store inside the argument,
+`super((o.v = x).first, t)`, would be left with no barrier at all
+there. Built into the temp, that store is met by the pass as it is on
+master. Every other store of a super, and every super with no such
+argument, is emitted as before.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
