@@ -1479,6 +1479,10 @@ int emit_gsub_block_expr(Compiler *c, int id, Buf *b) {
   if (bn < 1) return 0;
   int ts = ++g_tmp, tpos = ++g_tmp, tslen = ++g_tmp, tout = ++g_tmp,
       tm = ++g_tmp, tms = ++g_tmp, tme = ++g_tmp;
+  /* sub! / gsub! asks whether a match was found. The runtime flag cannot say
+     it for a block form: the block runs between the match and the answer, and
+     a sub or gsub in it clears and sets the flag for itself. A C local does. */
+  int tsm = g_sub_bang_id == id ? ++g_tmp : 0;
   /* poly values reaching here are strings, like the blockless poly gsub/sub
      arm in codegen_call_recv.c -- unbox through sp_poly_to_s to get the same
      `const char *` the typed String receiver emits directly. */
@@ -1548,6 +1552,7 @@ int emit_gsub_block_expr(Compiler *c, int id, Buf *b) {
      (sp_re_match_next). Only a program that reads them pays for it. */
   const char *re_next = g_reads_match_regs ? "sp_re_match_next" : "sp_re_match_at";
   if (g_reads_match_regs) { emit_indent(g_pre, g_indent); buf_puts(g_pre, "sp_re_clear_last_match();\n"); }
+  if (tsm) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "int _t%d = 0;\n", tsm); }
   emit_indent(g_pre, g_indent); buf_printf(g_pre, "while (_t%d <= _t%d) {\n", tpos, tslen);
   if (polypat) {
     emit_indent(g_pre, g_indent + 1);
@@ -1567,6 +1572,7 @@ int emit_gsub_block_expr(Compiler *c, int id, Buf *b) {
   }
   emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "if (_t%d < 0) { sp_String_append_bin(_t%d, _t%d + _t%d); break; }\n", tm, tout, ts, tpos);
   emit_indent(g_pre, g_indent + 1); buf_puts(g_pre, "sp_re_sub_matched = 1;\n");   /* the bang forms' nil contract */
+  if (tsm) { emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "_t%d = 1;\n", tsm); }
   if (polypat) {
     emit_indent(g_pre, g_indent + 1);
     buf_printf(g_pre, "sp_int _t%d = _t%d ? sp_re_caps[0] - _t%d : _t%d;\n", tms, tre, tpos, tm);
@@ -1627,6 +1633,7 @@ int emit_gsub_block_expr(Compiler *c, int id, Buf *b) {
   }
   emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
   buf_printf(b, "_t%d->data", tout);
+  if (tsm) g_sub_bang_tm = tsm;
   return 1;
 }
 

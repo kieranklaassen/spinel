@@ -575,6 +575,10 @@ extern int g_uses_program_name;/* $0 / $PROGRAM_NAME read somewhere */
    match (sp_re_track_last), which costs a copy of the match and its groups
    per call; one that never reads them keeps the plain scans. */
 extern int g_reads_match_regs;
+/* sub! / gsub! with a block: the bang arm names its call here, and the block
+   form (emit_gsub_block_expr) answers with the C local that says whether its
+   loop found a match. */
+extern int g_sub_bang_id, g_sub_bang_tm;
 extern int g_gen_obj_hash;
 extern int g_gen_obj_to_json;  /* a package wants obj reflection + >=1 user #to_json */  /* a package wants obj reflection + >=1 struct: emit+install sp_obj_to_hash */
 extern int g_gen_obj_struct_values;  /* >=1 instantiated Struct (not Data): emit+install sp_obj_struct_values (poly member array) */

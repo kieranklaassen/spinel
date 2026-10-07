@@ -3512,6 +3512,24 @@ static void emit_str_mut_writeback(Compiler *c, int recv, int lvw, int tn, Buf *
   }
 }
 
+/* sub! / gsub! ask the runtime's flag whether the call made a substitution.
+   Their plain form's call is entered through the wrapper that clears the
+   flag after the arguments have run (sp_str_sub_own and its kin, in
+   spinel_rt.h): an argument that is a sub of its own
+   (`y.sub!("q", z.sub("a", "b"))`) left its answer there. Any other text
+   reads the flag as it did. */
+static void sub_bang_entry(Buf *nb) {
+  static const char *const fn[] = { "sp_str_sub(", "sp_str_gsub(", "sp_re_sub(", "sp_re_gsub(", "sp_poly_pat_gsub(" };
+  if (!nb->p) return;
+  for (size_t k = 0; k < sizeof fn / sizeof fn[0]; k++) {
+    size_t n = strlen(fn[k]);
+    if (strncmp(nb->p, fn[k], n) != 0) continue;
+    Buf t; memset(&t, 0, sizeof t);
+    buf_printf(&t, "%.*s_own(%s", (int)(n - 1), fn[k], nb->p + n);
+    free(nb->p); *nb = t;
+    return;
+  }
+}
 /* A String mutator: the value-form bangs, the in-place mutators, append_as_bytes, bytesplice (emit_array_call's arms, in their order) */
 static int emit_str_mutator_call(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, TyKind rt, int *out) {
   /* String value-form mutators: the expression yields the post-mutation
@@ -3580,7 +3598,15 @@ static int emit_str_mutator_call(Compiler *c, int id, Buf *b, const NodeTable *n
             if (was_sb) { view_push(c, recv, TY_STRING); nC = 3; }
             view_bind(recv, "_t%d", tob);
           }
+          /* a block form answers "a match was found" in a C local of its
+             loop, which the block cannot touch (emit_gsub_block_expr) */
+          int sv_sbB = g_sub_bang_id; g_sub_bang_id = subm ? id : -1; g_sub_bang_tm = 0;
           emit_expr(c, id, &nbB);
+          int tsmB = g_sub_bang_tm; g_sub_bang_id = sv_sbB; g_sub_bang_tm = 0;
+          char smB[40] = "";
+          if (tsmB) snprintf(smB, sizeof smB, " || _t%d", tsmB);
+          else if (subm) snprintf(smB, sizeof smB, " || sp_re_sub_matched");
+          if (subm && !tsmB) sub_bang_entry(&nbB);
           if (rd_call) {
             view_unbind(g_n_argov - 1);
             for (int k = nC - 1; k >= 0; k--) view_pop(c, vC + k);
@@ -3593,7 +3619,7 @@ static int emit_str_mutator_call(Compiler *c, int id, Buf *b, const NodeTable *n
           int tchg = ++g_tmp;
           buf_printf(b, "const char *_t%d = %s; ", tnb, nbB.p ? nbB.p : "");
           if (sb_nil_nc)
-            buf_printf(b, "int _t%d = !sp_str_eq(_t%d, _t%d)%s; ", tchg, tob, tnb, subm ? " || sp_re_sub_matched" : "");
+            buf_printf(b, "int _t%d = !sp_str_eq(_t%d, _t%d)%s; ", tchg, tob, tnb, smB);
           buf_printf(b, "sp_String_set_bin(_t%d, _t%d); ", tsb, tnb);
           free(nbB.p);
           if (sb_nil_nc)
@@ -3636,7 +3662,13 @@ static int emit_str_mutator_call(Compiler *c, int id, Buf *b, const NodeTable *n
       nt_node_set_str((NodeTable *)nt, id, "name", sb_plain);
       Buf nb; memset(&nb, 0, sizeof nb);
       int nbind = lvw || held || hbind >= 0 ? -1 : view_bind(recv, "_t%d", to);
+      int sv_sb = g_sub_bang_id; g_sub_bang_id = subm2 ? id : -1; g_sub_bang_tm = 0;
       emit_expr(c, id, &nb);
+      int tsm = g_sub_bang_tm; g_sub_bang_id = sv_sb; g_sub_bang_tm = 0;   /* a block form: its loop's local, as above */
+      char sm[40] = "";
+      if (tsm) snprintf(sm, sizeof sm, " && !_t%d", tsm);
+      else if (subm2) snprintf(sm, sizeof sm, " && !sp_re_sub_matched");
+      if (subm2 && !tsm) sub_bang_entry(&nb);
       if (nbind >= 0) view_unbind(nbind);
       if (hbind >= 0) view_unbind(hbind);
       nt_node_set_str((NodeTable *)nt, id, "name", sb_bang);
@@ -3644,7 +3676,7 @@ static int emit_str_mutator_call(Compiler *c, int id, Buf *b, const NodeTable *n
       free(nb.p);
       emit_str_mut_writeback(c, recv, lvw, tn2, b);
       if (sb_nil_nc)
-        buf_printf(b, "(sp_str_eq(_t%d, _t%d)%s) ? NULL : _t%d; })", to, tn2, subm2 ? " && !sp_re_sub_matched" : "", tn2);
+        buf_printf(b, "(sp_str_eq(_t%d, _t%d)%s) ? NULL : _t%d; })", to, tn2, sm, tn2);
       else
         buf_printf(b, "_t%d; })", tn2);
       { *out = 1; return 1; }
