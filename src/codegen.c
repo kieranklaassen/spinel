@@ -9059,13 +9059,18 @@ void emit_class_new(Compiler *c, ClassInfo *ci, Buf *b) {
   int init_pf = ctor_init_proc_form(c, cid);
   buf_printf(b, "static sp_%s *sp_%s_new%s(", ci->c_name, ci->c_name, init_pf >= 0 ? "_noinit" : "");
   emit_ctor_params(c, init, init_has_blk, b);
+  buf_puts(b, ") {\n");
+  /* The block is the one argument a `new` site builds in place: nothing
+     holds the proc while the object below is allocated (initialize's own
+     root of it comes after). */
+  if (init_has_blk) buf_printf(b, "  SP_GC_ROOT(lv_%s);\n", c->scopes[init].blk_param);
   /* Exception subclasses: use sp_exc_new_sub as underlying storage so that
      sp_raise/rescue machinery sees the right cls_name and parent. */
   if (class_is_exc_subclass(c, cid)) {
     const char *cn2 = class_ruby_name(c, cid); if (!cn2) cn2 = ci->name;
     const char *par = exc_builtin_parent(c, cid);
     if (ci->nivars == 0) {
-      buf_printf(b, ") {\n  sp_%s *self = sp_exc_new_sub(\"%s\", \"%s\", (&(\"\\xff\")[1]));\n",
+      buf_printf(b, "  sp_%s *self = sp_exc_new_sub(\"%s\", \"%s\", (&(\"\\xff\")[1]));\n",
                  ci->c_name, cn2, par);
       buf_printf(b, "  SP_GC_ROOT(self);\n");
     }
@@ -9074,7 +9079,7 @@ void emit_class_new(Compiler *c, ClassInfo *ci, Buf *b) {
          (sp_exc_new_sub would only size the 3-field base). The leading
          members mirror sp_Exception so the raise/message machinery's casts
          work; the ivars live after and are set by initialize. */
-      buf_printf(b, ") {\n  sp_%s *self = (sp_%s *)sp_gc_alloc(sizeof(sp_%s), NULL, sp_%s__gc_scan);\n",
+      buf_printf(b, "  sp_%s *self = (sp_%s *)sp_gc_alloc(sizeof(sp_%s), NULL, sp_%s__gc_scan);\n",
                  ci->c_name, ci->c_name, ci->c_name, ci->c_name);
       buf_printf(b, "  self->cls_name = \"%s\";\n", cn2);
       buf_printf(b, "  self->parent_cls_name = \"%s\";\n", par);
@@ -9095,9 +9100,9 @@ void emit_class_new(Compiler *c, ClassInfo *ci, Buf *b) {
     }
   }
   else if (ci->ary_root > 0)
-    buf_printf(b, ") {\n  sp_%s *self = sp_%s__alloc();\n  SP_GC_ROOT(self);\n", ci->c_name, ci->c_name);
+    buf_printf(b, "  sp_%s *self = sp_%s__alloc();\n  SP_GC_ROOT(self);\n", ci->c_name, ci->c_name);
   else {
-  buf_printf(b, ") {\n  sp_%s *self = SP_POOL_NEW(%s, %s%s%s);\n",
+  buf_printf(b, "  sp_%s *self = SP_POOL_NEW(%s, %s%s%s);\n",
             ci->c_name, ci->c_name,
             class_needs_scan(ci) ? "sp_" : "", class_needs_scan(ci) ? ci->c_name : "NULL",
             class_needs_scan(ci) ? "__gc_scan" : "");

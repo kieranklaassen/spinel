@@ -1,0 +1,9 @@
+kept in a list: 0
+one at a time: 0
+an argument ahead of the block: 0
+initialize inherited: 0
+handed on by super: 0
+an exception class: 0
+an Array subclass: 0
+a proc passed with &: 0
+no block given: false
