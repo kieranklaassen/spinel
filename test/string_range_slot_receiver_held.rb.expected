@@ -1,0 +1,8 @@
+a global, ==: 0
+a global, !=: 0
+a global, eql?: 0
+a global, include?: 0
+a global, member?: 0
+a class variable, ==: 0
+a class variable, !=: 0
+a class variable, include?: 0
