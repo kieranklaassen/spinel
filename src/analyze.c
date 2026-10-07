@@ -1949,6 +1949,27 @@ static int program_names_method(const NodeTable *nt, const char *const *list) {
   return 0;
 }
 
+/* Whether the program defines one of the listed methods: by a def, an alias,
+   or a define_method, define_singleton_method or alias_method of that name,
+   or of a name no literal spells. `:fail` and "raise" as plain values, which
+   programs do write, define nothing. */
+static const char *const exc_protocol[] = { "===", "exception", "raise", "fail", NULL };
+static const char *const definers[] = { "define_method", "define_singleton_method", "alias_method", NULL };
+static int program_defines_method(const NodeTable *nt, const char *const *list) {
+  NT_FOREACH_KIND(nt, NK_DefNode, d) if (name_listed(list, nt_str(nt, d, "name"))) return 1;
+  NT_FOREACH_KIND(nt, NK_AliasMethodNode, a) if (name_listed(list, literal_name(nt, nt_ref(nt, a, "new_name")))) return 1;
+  NT_FOREACH_KIND(nt, NK_CallNode, id) {
+    const char *cn = nt_str(nt, id, "name");
+    int args = nt_ref(nt, id, "arguments"), argc = 0, a0 = 0;
+    const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &argc) : NULL;
+    if (cn && is_send_family(cn) && argc && nt_kind(nt, argv[0]) == NK_SymbolNode) { cn = nt_str(nt, argv[0], "value"); a0 = 1; }
+    if (!name_listed(definers, cn) || argc <= a0) continue;
+    const char *dn = literal_name(nt, argv[a0]);
+    if (!dn || name_listed(list, dn)) return 1;
+  }
+  return 0;
+}
+
 /* The numbering of the whole program. A program that defines a hook, or a
    declaration's own name, runs it at a definition: nothing is quiet then. A
    program that names is_a?, kind_of? or instance_of? as a method of its own
@@ -2088,14 +2109,24 @@ static void rewrite_const_alias_read(Compiler *c, int rd, int **seq) {
 void rewrite_const_alias_receivers(Compiler *c) {
   const NodeTable *nt = c->nt;
   int *seq = NULL;   /* statement numbers, built for the first read that asks */
+  /* `rescue A` and `raise A` ask the class by `===` and `exception`: a
+     program with its own is left alone, as one with its own is_a? is */
+  int exc = !program_defines_method(nt, exc_protocol);
   for (int id = 0; id < nt->count; id++) {
     const char *ty = nt_type(nt, id);
+    if (exc && ty && sp_streq(ty, "RescueNode")) {   /* rescue A, B */
+      int n = 0;
+      const int *ex = nt_arr(nt, id, "exceptions", &n);
+      for (int i = 0; i < n; i++) rewrite_const_alias_read(c, ex[i], &seq);
+    }
     if (!ty || !sp_streq(ty, "CallNode")) continue;
-    {   /* x.is_a?(A), kind_of?, instance_of? */
+    {   /* x.is_a?(A), kind_of?, instance_of?; raise A, raise A, "msg" */
       const char *name = nt_str(nt, id, "name");
       int args = nt_ref(nt, id, "arguments"), argc = 0;
       const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &argc) : NULL;
-      if (name && argc == 1 && is_kind_query(name)) rewrite_const_alias_read(c, argv[0], &seq);
+      if (name && ((argc == 1 && is_kind_query(name)) ||
+                   (exc && argc >= 1 && nt_ref(nt, id, "receiver") < 0 && is_raise_alias(name))))
+        rewrite_const_alias_read(c, argv[0], &seq);
     }
     int recv = nt_ref(nt, id, "receiver");
     if (recv < 0 || !nt_type(nt, recv)) continue;
