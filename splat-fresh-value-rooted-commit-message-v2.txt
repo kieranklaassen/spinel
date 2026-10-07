@@ -1,0 +1,26 @@
+A splatted value is rooted while its one-element array is allocated
+
+sp_splat_to_array wraps a value that is no Array, Hash, Range or
+Enumerator in a one-element array. It allocated the array first and
+pushed the value after, with only the array rooted, so a value nothing
+else holds yet, the fresh answer of a call, could be collected by that
+allocation:
+
+    def str(n) = "s" + n.to_s
+    a = [0, "s"]
+    a.push(*str(2))
+    p a
+
+A plain run printed the right answer. Under SPINEL_GC_STRESS=2 this
+aborted with "the mark reached a freed slot", and `puts(*Foo.new(2))`
+printed the freed object's bytes and exited 0.
+
+The value is now rooted in that arm before the array is allocated, as
+sp_enum_items_from roots its own. The arms above it return first and
+cost nothing more. A splat that reaches the arm costs 11 instructions
+more (callgrind, gcc: 200,000 splats of a String ran 84,466,612 before
+and 86,674,702 after). No generated C changes.
+
+Test: test/splat_fresh_value_rooted.rb, added to GC_STRESS_TESTS.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
