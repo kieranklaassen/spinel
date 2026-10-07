@@ -1,0 +1,24 @@
+#<Foo 1>
+#<Foo 2>
+Foo
+1
+[0, #<Foo 1>]
+[#<Foo 1>, 9]
+[#<Foo 1>, 0]
+[#<Foo 1>, 2]
+[#<Foo 1>]
+#<Foo 1>
+#<Foo 1>
+#<Foo 1>
+#<Foo 1>
+[#<Foo 1>]
+#<Foo 1>
+#<Foo 3>
+true
+5
+[#<Foo 5>, 0]
+wrong number of arguments (given 0, expected 1)
+wrong number of arguments (given 1, expected 2)
+[#<Foo 1>]
+[7, 8]
+[8, 9]
