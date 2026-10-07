@@ -7,6 +7,7 @@ module Mod; end
 class Tagged; include Mod; end
 class MyErr < StandardError; end
 S = Struct.new(:x)
+def int?(v) = v.is_a?(K)   # defined before K is written, called after
 
 K = Integer
 PK = Pt
@@ -25,6 +26,7 @@ end
 p 7.is_a?(K), 7.kind_of?(K), 7.instance_of?(K), "s".is_a?(K)
 p 1.5.is_a?(Cfg::F), 1.is_a?(Cfg::F)
 p Holder.array?([1]), Holder.array?(7)
+p int?(7), int?("s")
 
 # a boxed receiver
 [7, "s", nil].each { |v| p v.is_a?(K) }
@@ -70,3 +72,13 @@ rescue NameError
 end
 p early(7)
 LATE = Integer
+
+# a call made before the write, to a method a later body replaces
+class Gate
+  def ok?(v) = false
+end
+p Gate.new.ok?(7)
+AFTER = Integer
+class Gate
+  def ok?(v) = v.is_a?(AFTER)
+end

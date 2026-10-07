@@ -1816,12 +1816,60 @@ static int const_read_is_programs(Compiler *c, int id) {
   return par < 0 || (pn && comp_class_index(c, pn) >= 0);
 }
 
-/* Number the statements of the program in the order they run. A statement's
-   seq[] is odd and grows; every node inside it carries the even number below.
-   A class or module body that is a statement is numbered through, as its
-   statements run in place. BEGIN { } runs first and anything else stays 0. */
+/* A value that runs no method: a constant or a plain literal (or a def, as
+   the argument of `private def m`). */
+static int node_runs_nothing(const NodeTable *nt, int id) {
+  switch (nt_kind(nt, id)) {
+  case NK_ConstantPathNode: { int par = nt_ref(nt, id, "parent"); return par < 0 || node_runs_nothing(nt, par); }
+  case NK_ConstantReadNode: case NK_SymbolNode: case NK_StringNode: case NK_IntegerNode: case NK_FloatNode:
+  case NK_TrueNode: case NK_FalseNode: case NK_NilNode: case NK_DefNode:
+    return 1;
+  default: return 0;
+  }
+}
+
+/* Declarations that run none of the program's methods, and the hooks a
+   definition runs when the program defines them. */
+static const char *const quiet_decls[] = { "attr_reader", "attr_writer", "attr_accessor", "private", "public",
+  "protected", "module_function", "include", "extend", "prepend", "require", "require_relative", NULL };
+static const char *const def_hooks[] = { "inherited", "included", "extended", "prepended", "method_added",
+  "singleton_method_added", "const_added", NULL };
+static int name_listed(const char *const *list, const char *n) {
+  for (int i = 0; n && list[i]; i++) if (sp_streq(list[i], n)) return 1;
+  return 0;
+}
+
+/* A statement that runs none of the program's methods: a def, an alias, a
+   constant given a constant, a literal or a new Struct or Data class, or a
+   declaration of such (`attr_reader :a`, `private`, `include M`). */
+static int stmt_runs_nothing(const NodeTable *nt, int s) {
+  if (nt_kind(nt, s) == NK_ConstantWriteNode) {
+    s = nt_ref(nt, s, "value");
+    if (nt_kind(nt, s) != NK_CallNode) return node_runs_nothing(nt, s);
+  }
+  if (nt_kind(nt, s) != NK_CallNode) return nt_kind(nt, s) == NK_DefNode || nt_kind(nt, s) == NK_AliasMethodNode;
+  int recv = nt_ref(nt, s, "receiver");
+  const char *n = nt_str(nt, s, "name"), *rn = nt_kind(nt, recv) == NK_ConstantReadNode ? nt_str(nt, recv, "name") : NULL;
+  if (nt_ref(nt, s, "block") >= 0 || !n) return 0;
+  if (recv < 0 ? !name_listed(quiet_decls, n)
+               : !(rn && ((sp_streq(rn, "Struct") && sp_streq(n, "new")) || (sp_streq(rn, "Data") && sp_streq(n, "define"))))) return 0;
+  int args = nt_ref(nt, s, "arguments"), argc = 0;
+  const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &argc) : NULL;
+  for (int i = 0; i < argc; i++) if (!node_runs_nothing(nt, argv[i])) return 0;
+  return 1;
+}
+
+/* Number the statements of the program in the order they run, by fours. A
+   statement's seq[] has bit 0 set; every node inside it carries the number,
+   with bit 1 set inside a method body (a def, a define_method block). A class
+   or module body that is a statement is numbered through, as its statements
+   run in place. seq[nt->count] is the number of the first statement that may
+   run a method of the program (0: none does); BEGIN { } runs before all. */
 static void seq_stamp(const NodeTable *nt, int node, int v, int *seq) {
   if (node < 0) return;
+  NodeKind k = nt_kind(nt, node);
+  const char *n = k == NK_CallNode ? nt_str(nt, node, "name") : NULL;
+  if (k == NK_DefNode || (n && (sp_streq(n, "define_method") || sp_streq(n, "define_singleton_method")))) v |= 2;
   seq[node] = v;
   int nr = nt_num_refs(nt, node);
   for (int i = 0; i < nr; i++) seq_stamp(nt, nt_ref_at(nt, node, i), v, seq);
@@ -1833,21 +1881,47 @@ static void seq_stamp(const NodeTable *nt, int node, int v, int *seq) {
 }
 
 static void seq_statements(const NodeTable *nt, int stmts, int *seq, int *n) {
-  if (nt_kind(nt, stmts) != NK_StatementsNode) return;
+  int *runs = &seq[nt->count];
+  if (stmts < 0) return;
+  if (nt_kind(nt, stmts) != NK_StatementsNode) { if (!*runs) *runs = *n + 4; return; }
   int m = 0; const int *ids = nt_arr(nt, stmts, "body", &m);
   for (int j = 0; j < m; j++) {
     NodeKind k = nt_kind(nt, ids[j]);
-    if (k == NK_ClassNode || k == NK_ModuleNode) seq_statements(nt, nt_ref(nt, ids[j], "body"), seq, n);
-    else if (k != NK_PreExecutionNode) { *n += 2; seq_stamp(nt, ids[j], *n, seq); seq[ids[j]] = *n + 1; }
+    if (k == NK_PreExecutionNode) { *runs = 1; continue; }
+    if (k == NK_ClassNode || k == NK_ModuleNode) {
+      int sup = k == NK_ClassNode ? nt_ref(nt, ids[j], "superclass") : -1;
+      if (!*runs && sup >= 0 && !node_runs_nothing(nt, sup)) *runs = *n + 4;
+      seq_statements(nt, nt_ref(nt, ids[j], "body"), seq, n);
+      continue;
+    }
+    *n += 4; seq_stamp(nt, ids[j], *n, seq); seq[ids[j]] |= 1;
+    if (!*runs && !stmt_runs_nothing(nt, ids[j])) *runs = *n;
   }
+}
+
+/* The numbering of the whole program. A program that defines a hook, or a
+   declaration's own name, runs it at a definition: nothing is quiet then. */
+static int *seq_build(const NodeTable *nt) {
+  int *seq = calloc((size_t)nt->count + 1, sizeof(int));
+  if (!seq) return NULL;
+  NT_FOREACH_KIND(nt, NK_DefNode, d) {
+    const char *dn = nt_str(nt, d, "name");
+    if (name_listed(def_hooks, dn) || name_listed(quiet_decls, dn)) seq[nt->count] = 1;
+  }
+  int n = 0; seq_statements(nt, nt_ref(nt, nt->root_id, "statements"), seq, &n);
+  return seq;
 }
 
 /* `x.is_a?(A)` (kind_of?, instance_of?) where `A = SomeClass`: rewrite the
    argument's name to the class the constant holds, as `A.foo` and `when A`
    read it, so every arm that names the class and the narrowing after it see
    the class. Only where the constant is known to hold that class when the
-   call runs: its one write is `A = <constant>` and has run by then. A second
-   write may hold another class, and before the write CRuby raises NameError. */
+   call runs: its one write is `A = <constant>`, a statement, and has run by
+   then. A read at the program's or a class body's own level sits in a later
+   statement. A method body runs whenever something calls it, and a call
+   before the write may reach a body written after it: there, nothing that
+   runs a method of the program comes before the write. A second write may
+   hold another class, and before the write CRuby raises NameError. */
 static void rewrite_const_alias_kind_arg(Compiler *c, int id, int **seq) {
   const NodeTable *nt = c->nt;
   const char *name = nt_str(nt, id, "name");
@@ -1861,11 +1935,10 @@ static void rewrite_const_alias_kind_arg(Compiler *c, int id, int **seq) {
   if (!real || sp_streq(real, an)) return;
   int w = const_only_write(nt, an);
   if (nt_kind(nt, w) != NK_ConstantWriteNode || !const_read_is_programs(c, nt_ref(nt, w, "value"))) return;
-  if (!*seq) {
-    if (!(*seq = calloc((size_t)nt->count, sizeof(int)))) return;
-    int n = 0; seq_statements(nt, nt_ref(nt, nt->root_id, "statements"), *seq, &n);
-  }
-  if (!((*seq)[w] & 1) || (*seq)[argv[0]] < (*seq)[w]) return;   /* not after a statement's write */
+  if (!*seq && !(*seq = seq_build(nt))) return;
+  int sw = (*seq)[w], sr = (*seq)[argv[0]], runs = (*seq)[nt->count];
+  if (!(sw & 1)) return;                                   /* the write is no statement */
+  if (sr & 2 ? runs && runs <= sw : (sr | 3) <= (sw | 3)) return;
   char buf[256]; snprintf(buf, sizeof buf, "%s", real);  /* copy: set frees an */
   nt_set_str((NodeTable *)nt, argv[0], "name", buf);
 }
