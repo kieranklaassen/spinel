@@ -1,0 +1,24 @@
+String#replace holds an argument made for the call while it copies it
+
+    buf = +""
+    bad = 0
+    400.times do |i|
+      buf.replace("x" * 300_000 + i.to_s)
+      bad += 1 unless buf.start_with?("xxxx")
+    end
+    p bad                        # 5, CRuby: 0
+
+replace as a statement on a local, an instance variable or a global
+copies the argument's bytes into a new String. The argument was read
+into a C temporary that nothing held, and the copy allocates before
+it reads: a collection at that allocation freed the argument, and the
+receiver took whatever the freed bytes then held. `s.replace(s.upcase)`,
+`s.replace(n.to_s)` and `s.replace("#{a}#{b}")` are all this.
+
+The temporary is now rooted where the argument may allocate. An
+argument that is a literal or a variable keeps the C it had.
+
+Test: test/string_replace_fresh_source_held.rb, also in
+GC_STRESS_TESTS.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
