@@ -7482,7 +7482,16 @@ static int int_arms_round_divide(Compiler *c, int id, Buf *b, const NodeTable *n
   else if (sp_streq(name, "divmod") && argc == 1 &&
            comp_ntype(c, argv[0]) != TY_RATIONAL) {
     int tb = ++g_tmp, o = ++g_tmp;
-    buf_printf(b, "({ sp_int _t%d = ", tb); emit_int_expr(c, argv[0], b);
+    /* the quotient and the remainder each read the receiver: one that runs
+       code is read into a temp first, so `bump.divmod(7)` calls bump once */
+    char tr[24];
+    buf_puts(b, "({ ");
+    if (!subtree_is_pure_read(c, nt_ref(nt, id, "receiver")) && !c_text_is_name(r)) {
+      snprintf(tr, sizeof tr, "_t%d", ++g_tmp);
+      buf_printf(b, "sp_int %s = (%s); ", tr, r);
+      r = tr;
+    }
+    buf_printf(b, "sp_int _t%d = ", tb); emit_int_expr(c, argv[0], b);
     buf_printf(b, "; sp_IntArray *_t%d = sp_IntArray_new(); sp_IntArray_push(_t%d, sp_idiv(%s, _t%d));"
                   " sp_IntArray_push(_t%d, sp_imod(%s, _t%d)); _t%d; })", o, o, r, tb, o, r, tb, o);
   }
