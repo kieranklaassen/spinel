@@ -501,6 +501,9 @@ static int sp_name_collides_runtime(const char *n) {
        rational and socket-option carriers, IO::Buffer's and Process::Status's */
     "Tms", "StrRange", "FloatRange", "BigRational", "RbValue", "SockOpt",
     "ProcessStatus", "IOBuffer",
+    /* the accumulator of Array#sum and Enumerable#sum, and the socket
+       address carrier (a class only under require "socket") */
+    "SumState", "Addrinfo",
     /* Classes the runtime builds in C. A reopening is refused, but a NEW class
        of that name (`App::Mutex`, or OpenStruct without require "ostruct")
        would clash with the runtime's C names. The builtin-name checks read
