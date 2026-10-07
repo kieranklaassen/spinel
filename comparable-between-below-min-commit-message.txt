@@ -1,0 +1,19 @@
+between? below min answers false when max cannot be compared
+
+    12.between?(20, "a")            # false
+    1.5.between?(2.0, Float::NAN)   # false
+
+raised ArgumentError ("comparison of Integer with String failed").
+CRuby's Comparable#between? answers false as soon as the receiver is
+below min and does not compare with max. builtins/comparable.rb
+compared with both bounds before it answered.
+
+The test for "below min" sits in the branch taken when the compare
+with max fails, so a call whose bounds compare runs the code it ran.
+A max that answers coerce still has it called below min.
+
+Test: test/comparable_between_stops_at_min.rb; 10 of its 19 lines
+raised. Expected output from CRuby 3.3.6.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+
