@@ -11939,18 +11939,47 @@ static int emit_ivar_cvar_write_stmt(Compiler *c, int id, Buf *b, int indent, co
   return 0;
 }
 
-/* Call-operator, global-variable and constant writes: o.x += v, $g = v and its operator and or/and forms, C = v, A::B = v and their operator and or/and forms (emit_stmt_inner's arms, in their order) */
+/* Whether a call in the subtree has an argument that is no Integer or Float.
+   subtree_is_pure_read passes a scalar operator on its receiver and result
+   alone, and one with a boxed argument (`5 <=> o.w`) reaches the runtime's
+   comparison, which may call the program's coerce. */
+static int subtree_call_arg_not_number(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  if (id < 0) return 0;
+  if (nt_kind(nt, id) == NK_CallNode) {
+    int a = nt_ref(nt, id, "arguments"); int ac = 0;
+    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+    for (int i = 0; i < ac; i++) {
+      TyKind at = comp_ntype(c, av[i]);
+      if (at != TY_INT && at != TY_FLOAT) return 1;
+    }
+  }
+  int nr = nt_num_refs(nt, id);
+  for (int i = 0; i < nr; i++)
+    if (subtree_call_arg_not_number(c, nt_ref_at(nt, id, i))) return 1;
+  int na = nt_num_arrs(nt, id);
+  for (int i = 0; i < na; i++) {
+    int n = 0;
+    const int *ids = nt_arr_at(nt, id, i, &n);
+    for (int j = 0; j < n; j++)
+      if (subtree_call_arg_not_number(c, ids[j])) return 1;
+  }
+  return 0;
+}
 /* The slot of a boxed attribute's `&=`, `|=` or `^=`, read ahead of a right
    operand that is more than a plain read: Ruby reads the slot first, and the
-   operand may write it (`o.v ^= o.bump`). The value goes to a rooted temp,
-   since the operand may also drop it from the slot and allocate. Answers the
-   temp, or 0 when the operand is a plain read and the slot is read in place. */
+   operand may write it (`o.v ^= o.bump`, or a coerce reached from
+   `o.v ^= (5 <=> o.w)`). The value goes to a rooted temp, since the operand
+   may also drop it from the slot and allocate. Answers the temp, or 0 when
+   the operand is a plain read and the slot is read in place. */
 static int emit_boxed_slot_read_first(Compiler *c, int val, const char *slot, const char *lead, Buf *b) {
-  if (subtree_is_pure_read(c, val)) return 0;
+  if (subtree_is_pure_read(c, val) && !subtree_call_arg_not_number(c, val)) return 0;
   int t = ++g_tmp;
   buf_printf(b, "%ssp_RbVal _t%d = %s; SP_GC_ROOT_RBVAL(_t%d);", lead, t, slot, t);
   return t;
 }
+
+/* Call-operator, global-variable and constant writes: o.x += v, $g = v and its operator and or/and forms, C = v, A::B = v and their operator and or/and forms (emit_stmt_inner's arms, in their order) */
 static int emit_attr_global_const_write_stmt(Compiler *c, int id, Buf *b, int indent, const NodeTable *nt, const char *ty) {
   if (sp_streq(ty, "CallOperatorWriteNode")) {
     /* `recv.attr op= value` (e.g. doom's `sector.ceiling_height -=

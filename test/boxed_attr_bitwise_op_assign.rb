@@ -83,6 +83,34 @@ t("read first Array") { b = Box.new([3, 1]); b.v &= b.swap; b.v }
 r = [Box.new(6), 0][ARGV.size]
 t("read first boxed") { r.v ^= r.bump; r.v }
 
+# and before a comparison whose boxed argument's coerce writes it
+class Num
+  def initialize(b, w) = (@b = b; @w = w)
+  def coerce(n)
+    @b.v = @w
+    [n, 9]
+  end
+end
+class Pair
+  attr_accessor :v, :w
+  def initialize(v) = (@v = v; @w = nil)
+  def xor_cmp
+    self.v ^= (5 <=> @w)
+    v
+  end
+end
+Pair.new("z").w = 1
+def pair(v, w)
+  o = Pair.new(v)
+  o.w = Num.new(o, w)
+  o
+end
+t("coerce ^= <=>") { o = pair(6, 12); o.v ^= (5 <=> o.w); o.v }
+t("coerce &= <") { o = pair(nil, true); o.v &= (5 < o.w); o.v }
+t("coerce |= Float") { o = pair(6, 12); o.v |= (1.5 <=> o.w); o.v }
+t("coerce self") { pair(6, 12).xor_cmp }
+t("coerce local") { o = pair(6, 12); w = o.w; o.v &= (5 <=> w); o.v }
+
 # an Integer attribute that may be nil keeps its own slot
 class Count
   attr_accessor :n

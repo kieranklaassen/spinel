@@ -115,4 +115,9 @@ read first nil: false
 read first String: NoMethodError
 read first Array: [1]
 read first boxed: 3
+coerce ^= <=>: -7
+coerce &= <: false
+coerce |= Float: -1
+coerce self: -7
+coerce local: 6
 Integer slot: 11
