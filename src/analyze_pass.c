@@ -13240,6 +13240,51 @@ static int infer_block_params_container_arms(Compiler *c, const NodeTable *nt, i
   return changed;
 }
 
+/* Whether the local read at `rd` is one `=` alone binds: no parameter of a
+   method or of a block, no `for` variable, and nothing `||=`, `&&=`, an
+   operator write or a multiple assignment writes. */
+static int local_bound_by_assignment_alone(Compiler *c, int rd) {
+  static const NodeKind others[] = {NK_LocalVariableTargetNode, NK_LocalVariableOrWriteNode,
+                                    NK_LocalVariableAndWriteNode, NK_LocalVariableOperatorWriteNode};
+  const NodeTable *nt = c->nt;
+  const char *nm = nt_str(nt, rd, "name");
+  Scope *sc = comp_scope_of(c, rd);
+  LocalVar *lv = nm && sc ? scope_local(sc, nm) : NULL;
+  if (!lv || lv->is_param || lv->is_block_param) return 0;
+  for (size_t k = 0; k < sizeof(others) / sizeof(others[0]); k++)
+    NT_FOREACH_KIND(nt, others[k], w)
+      if (comp_scope_of(c, w) == sc && sp_streq(nt_str(nt, w, "name"), nm)) return 0;
+  return 1;
+}
+
+/* Whether a fold's block is one chain of pushes onto its memo that ends in
+   a variable from outside the block: `m << v << s`, `m.push(v).push(s)`,
+   `(m << v) << v << s`. Each push takes one operand; the last operand is the
+   outer variable, a local `=` alone binds, and every other one is the block's
+   own parameter. */
+static int fold_block_chain_ends_in_outer(Compiler *c, int block, const char *memo) {
+  const NodeTable *nt = c->nt;
+  if (!memo || nt_kind(nt, block) != NK_BlockNode) return 0;
+  int body = nt_ref(nt, block, "body"), bn = 0, links = 0;
+  const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
+  if (bn != 1) return 0;
+  int node = unwrap_parens(c, bb[0]);
+  for (; node >= 0 && nt_kind(nt, node) == NK_CallNode; node = unwrap_parens(c, nt_ref(nt, node, "receiver")), links++) {
+    const char *nm = nt_str(nt, node, "name"), *op = nt_str(nt, node, "call_operator");
+    int a = nt_ref(nt, node, "arguments"), an = 0;
+    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
+    if (!nm || !is_push_alias(nm) || (op && sp_streq(op, "&.")) || nt_ref(nt, node, "block") >= 0 ||
+        an != 1 || nt_kind(nt, av[0]) != NK_LocalVariableReadNode) return 0;
+    const char *vn = nt_str(nt, av[0], "name");
+    int own = nt_int(nt, av[0], "depth", 0) == 0;
+    if (!vn || sp_streq(vn, memo) || own != (links > 0)) return 0;
+    if (!own && !local_bound_by_assignment_alone(c, av[0])) return 0;
+  }
+  return links >= 2 && node >= 0 && nt_kind(nt, node) == NK_LocalVariableReadNode &&
+         nt_int(nt, node, "depth", 0) == 0 && nt_str(nt, node, "name") &&
+         sp_streq(nt_str(nt, node, "name"), memo);
+}
+
 /* infer_block_params's per-call arms for the Enumerable family's blocks:
    each_cons / each_slice and their map / with_index / inject chains,
    with_index, combination / permutation, sort and the comparator blocks,
@@ -13485,13 +13530,19 @@ static int infer_block_params_enum_arms(Compiler *c, const NodeTable *nt, int id
     TyKind acc_t = (rargc > 0 && rargv) ? infer_type(c, rargv[0]) : et2;
     /* An empty `[]` / `{}` seed the block only hands to a callable has no
        fill to type it from; the element type of the RECEIVER is not what it
-       holds, so answer the general boxed container (#3657). */
+       holds, so answer the general boxed container (#3657). So does one a
+       push chain ending in an outer variable fills: typed as the receiver's
+       element, `m << v << s` read as a String append that copies `s`. Not
+       under --share-strings: an Array memo is a block parameter holding the
+       String, which the flag refuses, and a fold that is right as it is
+       (`s = t = +"s"`, already a handle) would be refused with it. */
     if (rargc > 0 && rargv && acc_t == TY_UNKNOWN) {
       const char *s0 = nt_type(nt, rargv[0]);
       int sn0 = 0;
       if (s0 && sp_streq(s0, "ArrayNode") &&
           (nt_arr(nt, rargv[0], "elements", &sn0), sn0 == 0) &&
-          ewo_memo_passed_to_callable_at(c, id, 0))
+          (ewo_memo_passed_to_callable_at(c, id, 0) ||
+           (!c->share_strings && fold_block_chain_ends_in_outer(c, block, p0))))
         acc_t = TY_POLY_ARRAY;
       else if (s0 && sp_streq(s0, "HashNode") &&
                (nt_arr(nt, rargv[0], "elements", &sn0), sn0 == 0))
