@@ -1,0 +1,1 @@
+block_of_body's map follows the nodes codegen appends

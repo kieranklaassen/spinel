@@ -1,0 +1,24 @@
+block_of_body's map follows the nodes codegen appends
+
+The map from a statement list to its BlockNode is made at the first
+ask, one entry for each node the table then had, and every later ask
+tested its node against the table's count of the moment. A refused
+method of a class that is never built is emitted again with a raising
+body (deferred_raise_body) made of nodes appended after that, so
+emit_stmts asked for an entry past the end of the map:
+
+    class Module
+      def drop_if_defined(method)
+        undef_method(method) if method_defined?(method)
+      end
+    end
+
+A plain compile of test/computed_undef_beside_string_class_eval.rb
+read four bytes past its 212-byte map (make san-check names it). What
+the read finds decides whether the raising body is taken for a block's
+and opens with that block's local resets.
+
+The map keeps its own length now and is extended over appended nodes,
+as cg_block_owner's and comp_node_ord's are. No generated C changes.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
