@@ -1,0 +1,1 @@
+`s += v` with a boxed right side takes String#+'s strict conversion

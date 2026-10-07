@@ -1,0 +1,39 @@
+case/when takes a String Range arm for a boxed subject
+
+    def band(v)
+      case v
+      when "a".."m" then "low"
+      when "n".."z" then "high"
+      when 1..9 then "digit"
+      else "other"
+      end
+    end
+    puts band("c"), band("q"), band(5), band(nil)
+
+printed `other`, `other`, `digit`, `other`; CRuby prints `low`, `high`,
+`digit`, `other`.
+
+v is boxed: it is given a String, an Integer and nil.
+emit_when_typed_test has an arm for a String subject against a String
+Range, and for a boxed subject against an Integer or a Float Range, and
+none for a boxed subject against a String Range. The when fell to the
+equality of the subject and the boxed Range, which no String satisfies.
+
+The arm is added. It asks sp_srange_cover of the Range for the String
+the subject holds, through emit_srange_boxed_member: a subject that is
+a shared String handle is read as its text, and one that is no String
+takes no arm.
+
+The Range is not boxed for the test. Handing it boxed to the runtime's
+case equality (sp_poly_case_eq) allocates between the subject and the
+test, and a subject made by the case itself was read after it was freed
+at SPINEL_GC_STRESS=2.
+
+Cost: none where the arm is not written. Where it is, 300,000 turns of
+two such cases that master answered right run 131,468,247 instructions
+for master's 249,624,742 with gcc 13.3 and 126,023,872 for 225,684,389
+with clang 18.1.
+
+Test: test/case_when_str_range_boxed.rb (expected from CRuby 3.3.6).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

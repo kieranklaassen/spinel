@@ -1,0 +1,11 @@
+The boxed argument of a String Range's membership is tested in one function
+
+emit_range_call wrote the test of cover?, include? and member? for a
+boxed argument inline: the plain String first, then the shared handle
+read as its text. It moves to emit_srange_boxed_member, so that the
+`when` arm of a boxed subject can ask the same test of its Range.
+
+No C changes: cident against the commit before, 6,429 programs
+identical, none different.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

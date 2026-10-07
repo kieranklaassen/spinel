@@ -1,0 +1,34 @@
+=== of a String Range with a boxed argument is membership
+
+    h = {"k" => "ab", "n" => 5}
+    r = ("aa".."az")
+    p r === h["k"]
+    p ["c", 5, "q", nil].grep("a".."m")
+
+printed `false` and `[]`; CRuby prints `true` and `["c"]`.
+
+`===` of a receiver that compares by value (a number, a String, a
+boolean, a Symbol) with a boxed argument is written as sp_poly_eq of
+the two. That arm leaves out an Integer Range and a Float Range, which
+cover, by their families 5 and 6 of eq_family; a String Range is family
+7 and was not left out, so `("aa".."az") === x` asked whether the Range
+equals x. No String does.
+
+The arm leaves 7 out as well, and the call falls to emit_range_call,
+which answers `===` with sp_srange_cover as it does for a String
+argument: a boxed value that is no String is not covered. grep and
+grep_v with a String Range, and a block that asks `===` of each
+element, are right with it.
+
+The Range is no longer boxed for the question. 300,000 turns of two
+such calls that master answered right (an Integer, and a String outside
+the Range) run 64,267,976 instructions for master's 178,217,460 with
+gcc 13.3 and 65,722,959 for 159,676,814 with clang 18.1.
+
+Not here: case/when with a boxed subject (the next commit).
+`["c", "d"].all?("a".."m")` on a String Array answers false, and
+`in "a".."m"` raises TypeError.
+
+Test: test/str_range_case_eq_boxed.rb (expected from CRuby 3.3.6).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

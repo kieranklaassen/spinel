@@ -1,0 +1,24 @@
+A parameter named before the `...` is not forwarded with it
+
+    class Base
+      def one(a) = yield([a])
+    end
+    class Kept < Base
+      def one(x, ...) = [x, super(...)]
+    end
+    p Kept.new.one(1, 6) { |v| v }    # [1, [6]]
+
+printed [1, [1]], and with a String for x it did not build.
+
+A method that keeps its `...` has a parameter for each one it names,
+then a slot for each argument its `...` takes. The binder of the inlined
+parent read the forwarder's parameters from the first, so `a` took x.
+It now starts past the ones the forwarder names (fwd_lead_count), and a
+declared keyword is looked for by name from there.
+
+It starts there only where each positional parameter of the parent then
+has a forwarded slot of its own. A parent that keeps its `...` too is
+bound slot for slot from the forwarder, as before: `def far(y, ...)`
+over `def far(x, ...)` keeps its C.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
