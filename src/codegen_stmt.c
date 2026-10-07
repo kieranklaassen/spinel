@@ -14408,6 +14408,10 @@ static int str_mutate_reassign_arms(Compiler *c, Buf *b, int indent, const NodeT
          reads as its string, TypeError for anything else */
       buf_printf(b, "{ const char *_t%d = ", trep); emit_str_expr(c, argv[0], b);
       buf_printf(b, "; ");
+      /* a source made in place is held by this temp alone while the copy
+         is allocated, and so is the copy a shared String is read as */
+      char hs[1024];
+      if ((!expr_is_held_ref(c, argv[0]) || strbuf_slot_ref(c, argv[0], hs, sizeof hs)) && nt_kind(nt, argv[0]) != NK_StringNode) buf_printf(b, "SP_GC_ROOT(_t%d); ", trep);
       emit_expr(c, recv, b);
       buf_printf(b, " = sp_str_from_bytes(_t%d, sp_str_byte_len(_t%d)); }\n", trep, trep);
       return 1;
