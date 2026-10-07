@@ -34,6 +34,13 @@ module ExtKernel
     n
   end
 
+  # Raises its argument as the message: a C host reads a message as a C
+  # string, whatever bytes it holds.
+  def self.refuse(s)
+    raise ArgumentError, s if s.bytesize > 0
+    s
+  end
+
   def self.pause_total(arr, delay)
     sleep(delay)
     total(arr)
@@ -49,4 +56,5 @@ if __FILE__ == $0
   p ExtKernel.must_pos(9)
   p ExtKernel.pair_sum(["ab", "c"], ["def"])
   p ExtKernel.pause_total([1, 2, 3], 0.001)
+  p ExtKernel.refuse("")
 end
