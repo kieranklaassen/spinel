@@ -1,0 +1,1 @@
+A `when` arm with an inherited == or === is passed as the class that defines it

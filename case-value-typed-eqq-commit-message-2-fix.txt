@@ -1,0 +1,27 @@
+A case value asks an object arm its === where it takes the subject's type
+
+A case statement calls an object arm's own === directly. The case
+value did so only where the parameter is boxed (emit_when_user_eq);
+where the method takes the subject's own type the arm went to
+emit_case_obj_eq, which compares an arm of another class as a pointer,
+and the else arm was taken:
+
+    class Above
+      attr_accessor :n
+      def initialize(n) = @n = n
+      def ===(o) = o > @n
+    end
+    above = Above.new(3)
+    p(above === 1)
+    p(case 5 when above then :hit else :miss end)   # Spinel: :miss, CRuby: :hit
+
+The case value now calls emit_when_obj_call for an arm of another
+class whose === or == has one parameter of the subject's type and
+answers a boolean. Every other arm keeps the test it had: an arm of
+the subject's own class, a class kept by value, a method with a
+parameter of another type, an optional or rest parameter, or an
+answer that is no boolean.
+
+Test: test/case_when_value_typed_eqq.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

@@ -1,0 +1,30 @@
+A `when` arm with an inherited == or === is passed as the class that defines it
+
+`when P.new(1)` beside a subject whose class takes its == or === from a
+parent calls the parent's typed function with the arm as `self`. The
+arm was passed as its own class, and the C did not compile:
+
+    class Base
+      attr_reader :v
+      def initialize(v) = @v = v
+      def ===(o) = v == o.v
+    end
+    class P < Base; end
+    p(P.new(8) === P.new(9))
+    case P.new(1)
+    when P.new(1) then puts "same"
+    else puts "other"
+    end
+
+    error: passing argument 1 of 'sp_Base__set_set_set' from
+    incompatible pointer type
+
+The two places that call the method directly, the statement's typed
+call in emit_case and the class's own method in emit_case_obj_eq, now
+cast the arm to the defining class, as the call written out
+(`P.new(8) === P.new(9)`) and emit_when_user_eq already do. An arm
+whose class defines the method itself compiles as before.
+
+Test: test/case_when_inherited_eq.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

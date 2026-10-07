@@ -1,0 +1,1 @@
+A case value asks an object arm its === where it takes the subject's type
