@@ -1,0 +1,21 @@
+["a", "b", "c"]
+["a", "b", "c", "d"]
+["a", "b"]
+["z", "aa", "ab"]
+["1", "2", "3"]
+"AC"
+29
+["a", "b", "c", "d"]
+["a"]
+[]
+[]
+[]
+["a", "b", "c"]
+[]
+range
+count
+["a", "b"]
+range
+count
+["a", "b"]
+attempt to take negative size
