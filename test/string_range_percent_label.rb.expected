@@ -1,0 +1,8 @@
+#<Enumerator: "a".."e":%(2)>
+#<Enumerator: "a".."e":step(2)>
+#<Enumerator: "a".."e":%(3)>
+["a", "d"]
+"a"
+["a", "c", "e"]
+#<Enumerator: "a".."e":%(4)>
+ace
