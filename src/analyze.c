@@ -32878,6 +32878,369 @@ static void an_round_cap_step(Compiler *c, AnRoundCap *rc, int iter) {
   if (!grew && iter + 1 == rc->cap && rc->cap < 128 + 4 * an_type_slots(c)) rc->cap++;
 }
 
+/* A name, sorted for bsearch. An attribute's mark: another name can reach
+   its String. A local's: how many nodes bind the name. */
+typedef struct { const char *name; int mark; } OrwName;
+
+static int orw_name_cmp(const void *a, const void *b) {
+  return strcmp(((const OrwName *)a)->name, ((const OrwName *)b)->name);
+}
+
+static OrwName *orw_find(OrwName *v, int n, const char *name) {
+  OrwName key = { name, 0 };
+  return n > 0 ? (OrwName *)bsearch(&key, v, (size_t)n, sizeof *v, orw_name_cmp) : NULL;
+}
+
+/* Sorts `v` and keeps one of each name; answers how many are left. */
+static int orw_sort(OrwName *v, int n) {
+  int m = 0;
+  if (n > 0) qsort(v, (size_t)n, sizeof *v, orw_name_cmp);
+  for (int i = 0; i < n; i++)
+    if (!m || strcmp(v[m - 1].name, v[i].name) != 0) v[m++] = v[i];
+  return m;
+}
+
+typedef struct {
+  Compiler *c;
+  const int *parent;
+  OrwName *attrs, *locals;
+  int nattrs, nlocals;
+} OrwWalk;
+
+/* A statement whose value nothing takes: not the last of its sequence, or
+   the last of the program's, of a `while` body, or of an `if` / `unless`
+   arm when the conditional is such a statement. (Not the last of a block:
+   `each` may be a method that keeps what its block answers.) */
+static int orw_stmt(const NodeTable *nt, const int *parent, int node) {
+  for (;;) {
+    int st = parent[node], sn = 0;
+    if (st < 0 || nt_kind(nt, st) != NK_StatementsNode) return 0;
+    const int *sb = nt_arr(nt, st, "body", &sn);
+    if (sn > 0 && sb[sn - 1] != node) return 1;
+    int owner = parent[st];
+    if (owner < 0) return 0;
+    NodeKind ok = nt_kind(nt, owner);
+    const char *ot = nt_type(nt, owner);
+    if (ok == NK_WhileNode || ok == NK_UntilNode || (ot && sp_streq(ot, "ProgramNode"))) return 1;
+    if (ok == NK_ElseNode) owner = parent[owner];
+    /* an `elsif` is its `if`'s */
+    while (owner >= 0 && parent[owner] >= 0 && nt_kind(nt, parent[owner]) == NK_IfNode &&
+           nt_ref(nt, parent[owner], "subsequent") == owner)
+      owner = parent[owner];
+    if (owner < 0 || (nt_kind(nt, owner) != NK_IfNode && nt_kind(nt, owner) != NK_UnlessNode)) return 0;
+    node = owner;
+  }
+}
+
+/* A value that is a String nothing else names and nothing froze: an
+   interpolation, `+"lit"`, `String.new`, a `dup`. */
+static int orw_fresh_string(const NodeTable *nt, int v) {
+  v = an_unparen(nt, v);
+  if (v < 0) return 0;
+  NodeKind k = nt_kind(nt, v);
+  if (k == NK_InterpolatedStringNode) return 1;
+  int recv = k == NK_CallNode ? nt_ref(nt, v, "receiver") : -1;
+  const char *nm = nt_str(nt, v, "name");
+  if (recv < 0 || !nm || nt_ref(nt, v, "block") >= 0) return 0;
+  NodeKind rk = nt_kind(nt, recv);
+  if (sp_streq(nm, "+@")) return rk == NK_StringNode || rk == NK_InterpolatedStringNode;
+  const char *rn = nt_str(nt, recv, "name");
+  if (sp_streq(nm, "new")) return rk == NK_ConstantReadNode && rn && sp_streq(rn, "String");
+  return sp_streq(nm, "dup") && nt_ref(nt, v, "arguments") < 0;
+}
+
+/* How many arguments `call` gives when each is a String and it has no
+   block; -1 otherwise. */
+static int orw_string_args(Compiler *c, int call) {
+  const NodeTable *nt = c->nt;
+  if (nt_ref(nt, call, "block") >= 0) return -1;
+  int a = nt_ref(nt, call, "arguments"), n = 0;
+  const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &n) : NULL;
+  for (int i = 0; i < n; i++) {
+    TyKind t = infer_type(c, av[i]);
+    if (t != TY_STRING && t != TY_STRBUF) return -1;
+  }
+  return n;
+}
+
+/* A String mutator the typed slot serves through a reader call as the box
+   does: given Strings, or nothing where it takes nothing. */
+static int orw_mutator(Compiler *c, int call) {
+  static const char *const bare[] = {
+    "clear", "upcase!", "downcase!", "capitalize!", "swapcase!", "strip!", "lstrip!", "rstrip!",
+    "chomp!", "chop!", "squeeze!", "reverse!", "succ!", "next!", NULL };
+  static const char *const given[] = { "<<", "concat", "prepend", "replace", NULL };
+  const char *nm = nt_str(c->nt, call, "name");
+  int n = nm ? orw_string_args(c, call) : -1;
+  return n == 0 ? str_in(nm, bare) : n > 0 && str_in(nm, given);
+}
+
+/* Whether the mutator statement `top`, on the read `r` of `attr`, stands
+   after a `||=` of the attribute on the same receiver -- self, or a local
+   the program binds once -- in its own sequence or one a conditional or a
+   `while` it stands in belongs to. There the slot holds a String: the
+   typed slot's mutators do not raise for nil as the box's do. */
+static int orw_written_before(const OrwWalk *w, const char *attr, int r, int top) {
+  const NodeTable *nt = w->c->nt;
+  const int *parent = w->parent;
+  int rr = nt_kind(nt, r) == NK_CallNode ? nt_ref(nt, r, "receiver") : -1;
+  NodeKind rk = rr >= 0 ? nt_kind(nt, rr) : NK_SelfNode;   /* `x`, `@x`: self's */
+  const char *rn = rk == NK_LocalVariableReadNode ? nt_str(nt, rr, "name") : NULL;
+  if (rk != NK_SelfNode && !rn) return 0;
+  if (rn) {
+    OrwName *l = orw_find(w->locals, w->nlocals, rn);
+    if (!l || l->mark != 1) return 0;
+  }
+  for (int cur = top;;) {
+    int up = parent[cur];
+    if (up >= 0 && nt_kind(nt, up) == NK_StatementsNode) {
+      int sn = 0;
+      const int *sb = nt_arr(nt, up, "body", &sn);
+      for (int i = 0; i < sn && sb[i] != cur; i++) {
+        if (nt_kind(nt, sb[i]) != NK_CallOrWriteNode) continue;
+        const char *wn = nt_str(nt, sb[i], "name");
+        int wr = nt_ref(nt, sb[i], "receiver");
+        if (!wn || wr < 0 || !sp_streq(wn, attr) || nt_kind(nt, wr) != rk) continue;
+        const char *wrn = rn ? nt_str(nt, wr, "name") : NULL;
+        if (!rn || (wrn && sp_streq(wrn, rn))) return 1;
+      }
+      up = parent[up];
+    }
+    if (up < 0) return 0;
+    NodeKind uk = nt_kind(nt, up);
+    if (uk != NK_IfNode && uk != NK_UnlessNode && uk != NK_ElseNode && uk != NK_WhileNode &&
+        uk != NK_UntilNode) return 0;
+    cur = up;
+  }
+}
+
+/* Whether the read `r` of `attr`'s String is used up where it stands: the
+   receiver of a String method that answers something else; of a mutator
+   that is a statement after the write (through the appends ahead of it,
+   which answer their receiver); printed; interpolated; or a statement
+   itself. */
+static int orw_read_used_up(const OrwWalk *w, const char *attr, int r) {
+  static const char *const bare[] = {
+    "size", "length", "bytesize", "empty?", "nil?", "dup", "upcase", "downcase", "reverse", NULL };
+  static const char *const given[] = { "==", "!=", "+", "include?", "start_with?", "end_with?", NULL };
+  Compiler *c = w->c;
+  const NodeTable *nt = c->nt;
+  const int *parent = w->parent;
+  int up = parent[r];
+  if (up < 0) return 0;
+  NodeKind uk = nt_kind(nt, up);
+  if (uk == NK_CallNode && nt_ref(nt, up, "receiver") == r) {
+    const char *un = nt_str(nt, up, "name");
+    int n = un ? orw_string_args(c, up) : -1;
+    if (n == 0 ? str_in(un, bare) : n > 0 && str_in(un, given)) return 1;
+    int top = up;
+    while (orw_mutator(c, top) && is_string_append(nt_str(nt, top, "name")) && parent[top] >= 0 &&
+           nt_kind(nt, parent[top]) == NK_CallNode && nt_ref(nt, parent[top], "receiver") == top)
+      top = parent[top];
+    return orw_mutator(c, top) && orw_stmt(nt, parent, top) && orw_written_before(w, attr, r, top);
+  }
+  const char *ut = nt_type(nt, up);
+  if (ut && sp_streq(ut, "ArgumentsNode")) {
+    int call = parent[up];
+    if (call < 0 || nt_kind(nt, call) != NK_CallNode || nt_ref(nt, call, "receiver") >= 0 ||
+        nt_ref(nt, call, "arguments") != up) return 0;
+    const char *cn = nt_str(nt, call, "name");
+    if (!cn || an_any_scope_by_name(c, cn) >= 0) return 0;
+    if (sp_streq(cn, "puts") || sp_streq(cn, "print")) return 1;
+    return sp_streq(cn, "p") && orw_stmt(nt, parent, call);
+  }
+  if (uk != NK_StatementsNode) return 0;
+  int sn = 0;
+  nt_arr(nt, up, "body", &sn);
+  if (sn == 1 && parent[up] >= 0 && nt_kind(nt, parent[up]) == NK_EmbeddedStatementsNode) return 1;
+  return orw_stmt(nt, parent, r);
+}
+
+/* Marks each attribute whose String can be reached under another name. It
+   cannot where every conditional write is a statement given a fresh String,
+   every read is used up where it stands, and nothing else names the
+   attribute -- no other write but initialize's `@x = nil`, no method of
+   the name, no Symbol outside its declaration, no call by a computed name,
+   no alias, no change to String or a class above it. Taken by name, in one
+   walk of the program, so a receiver of no known class counts. Answers 0
+   when every attribute is to be taken as shared. */
+static int orw_mark_shared(OrwWalk *w) {
+  static const char *const computed[] = {
+    "send", "__send__", "public_send", "method", "public_method", "instance_variable_get",
+    "instance_variables", "instance_eval", "instance_exec", "initialize", "to_sym", "intern",
+    "to_proc", "define_method", "define_singleton_method", "alias_method", NULL };
+  static const char *const decl[] = { "attr_accessor", "attr_reader", "attr_writer", NULL };
+  /* the classes whose methods the reads above are taken to be */
+  static const char *const base[] = { "String", "NilClass", "Object", "BasicObject", "Kernel", "Comparable", NULL };
+  Compiler *c = w->c;
+  const NodeTable *nt = c->nt;
+  const int *parent = w->parent;
+  for (int i = 0; base[i]; i++)
+    if (comp_class_index(c, base[i]) >= 0) return 0;   /* reopened */
+  /* the nodes that bind each receiver local: any of the name but a read or
+     a call */
+  for (int id = 0; w->nlocals && id < nt->count; id++) {
+    NodeKind k = nt_kind(nt, id);
+    const char *s = k == NK_LocalVariableReadNode || k == NK_CallNode ? NULL : nt_str(nt, id, "name");
+    OrwName *l = s ? orw_find(w->locals, w->nlocals, s) : NULL;
+    if (l) l->mark++;
+  }
+  for (int id = 0; id < nt->count; id++) {
+    NodeKind k = nt_kind(nt, id);
+    if (k == NK_InterpolatedSymbolNode || k == NK_AliasMethodNode) return 0;
+    const char *s = nt_str(nt, id, k == NK_SymbolNode ? "value" : "name");
+    if (!s) continue;
+    if (k == NK_CallNode && str_in(s, computed)) return 0;
+    /* one of those classes called on, but for `String.new` */
+    if (k == NK_ConstantReadNode && str_in(s, base)) {
+      int call = parent[id];
+      const char *cn = call >= 0 && nt_kind(nt, call) == NK_CallNode && nt_ref(nt, call, "receiver") == id
+                         ? nt_str(nt, call, "name") : NULL;
+      if (cn && !(sp_streq(s, "String") && sp_streq(cn, "new"))) return 0;
+      continue;
+    }
+    /* the attribute, its writer `name=` or its instance variable `@name` */
+    char stem[256];
+    size_t l = strlen(s);
+    int ivar = s[0] == '@', writer = !ivar && l > 1 && s[l - 1] == '=';
+    l -= (size_t)(ivar + writer);
+    if (l >= sizeof stem) continue;
+    memcpy(stem, s + ivar, l);
+    stem[l] = 0;
+    OrwName *a = orw_find(w->attrs, w->nattrs, stem);
+    if (!a || a->mark) continue;
+    int ok = 1;
+    switch (k) {
+      case NK_CallNode:
+        ok = !writer && nt_ref(nt, id, "arguments") < 0 && nt_ref(nt, id, "block") < 0 &&
+             orw_read_used_up(w, a->name, id);
+        break;
+      case NK_InstanceVariableReadNode:
+        ok = orw_read_used_up(w, a->name, id);
+        break;
+      case NK_InstanceVariableWriteNode: {
+        int v = nt_ref(nt, id, "value"), def = id;
+        while (def >= 0 && nt_kind(nt, def) != NK_DefNode) def = parent[def];
+        const char *dn = def >= 0 ? nt_str(nt, def, "name") : NULL;
+        ok = v >= 0 && nt_kind(nt, v) == NK_NilNode && dn && sp_streq(dn, "initialize");
+        break;
+      }
+      case NK_CallOrWriteNode: case NK_CallAndWriteNode:
+        ok = orw_stmt(nt, parent, id) && orw_fresh_string(nt, nt_ref(nt, id, "value"));
+        break;
+      case NK_SymbolNode: {
+        int args = parent[id], call = args >= 0 ? parent[args] : -1;
+        const char *cn = call >= 0 && nt_kind(nt, call) == NK_CallNode && nt_ref(nt, call, "receiver") < 0
+                           ? nt_str(nt, call, "name") : NULL;
+        ok = !ivar && !writer && cn && str_in(cn, decl);
+        break;
+      }
+      case NK_DefNode: case NK_CallTargetNode:
+      case NK_InstanceVariableOrWriteNode: case NK_InstanceVariableAndWriteNode:
+      case NK_InstanceVariableOperatorWriteNode: case NK_InstanceVariableTargetNode:
+        ok = 0;
+        break;
+      default: {
+        const char *ty = nt_type(nt, id);
+        ok = !(ty && sp_streq(ty, "CallOperatorWriteNode"));
+        break;
+      }
+    }
+    if (!ok) a->mark = 1;
+  }
+  return 1;
+}
+
+/* An attribute written only by `o.x ||= v` / `o.x &&= v` has a slot no write
+   types: infer_ivar_types takes `o.x = v`, and the backstop then boxes the
+   slot, so `r.x ||= +"ab"; r.x << "z"` appended to a copy of the boxed
+   String. Called once the types have settled: a slot still untyped, whose
+   conditional writes each give a String, takes the String's type, as
+   `o.x = v` would have given it. A slot another write typed, or one a
+   conditional write gives another kind (in its class or one sharing the
+   slot), keeps what it has. So does one the box serves better
+   (orw_mark_shared): the box hands every reader the one String, so a
+   freeze through another name is seen, and its mutators raise for nil; a
+   typed slot hands out a copy and its mutators take the slot as written.
+   Answers 1 when it typed a slot. */
+static int type_or_written_string_slots(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  static const NodeKind kinds[] = { NK_CallOrWriteNode, NK_CallAndWriteNode };
+  int nw = 0;
+  for (int k = 0; k < 2; k++)
+    NT_FOREACH_KIND(nt, kinds[k], id) nw++;
+  if (!nw) return 0;
+  int *off = (int *)malloc(sizeof(int) * (size_t)(c->nclasses + 1));
+  /* the attribute of each conditional write, and its receiver when a local */
+  OrwName *names = (OrwName *)calloc((size_t)nw * 2, sizeof *names);
+  if (!off || !names) { free(off); free(names); return 0; }
+  OrwWalk w = { c, NULL, names, names + nw, 0, 0 };
+  off[0] = 0;
+  for (int k = 0; k < c->nclasses; k++) off[k + 1] = off[k] + c->classes[k].nivars;
+  /* per slot: 1 = given Strings only, 2 = given another kind */
+  char *given = (char *)calloc((size_t)off[c->nclasses] + 1, 1);
+  if (!given) { free(off); free(names); return 0; }
+  int any = 0, changed = 0;
+  for (int k = 0; k < 2; k++)
+    NT_FOREACH_KIND(nt, kinds[k], id) {
+      const char *name = nt_str(nt, id, "name");
+      int recv = nt_ref(nt, id, "receiver"), val = nt_ref(nt, id, "value");
+      if (!name || recv < 0 || val < 0 || strlen(name) > 250) continue;
+      w.attrs[w.nattrs++].name = name;
+      const char *ln = nt_kind(nt, recv) == NK_LocalVariableReadNode ? nt_str(nt, recv, "name") : NULL;
+      if (ln) w.locals[w.nlocals++].name = ln;
+      char ivn[256];
+      snprintf(ivn, sizeof ivn, "@%s", name);
+      TyKind rt = infer_type(c, recv);
+      int known = ty_is_object(rt), str = infer_type(c, val) == TY_STRING;
+      /* a receiver of no known class may be any class with the writer */
+      int lo = known ? ty_object_class(rt) : 0, hi = known ? lo + 1 : c->nclasses;
+      for (int ci = lo; ci < hi; ci++) {
+        ClassInfo *cl = &c->classes[ci];
+        int iv = comp_is_writer(cl, name) ? comp_ivar_index(cl, ivn) : -1;
+        if (iv < 0) continue;
+        char *g = &given[off[ci] + iv];
+        if (!str || !known || cl->is_struct) *g = 2;
+        else if (!*g) { *g = 1; any = 1; }
+      }
+    }
+  if (any) {
+    int *parent = an_parent_map(nt);
+    w.parent = parent;
+    w.nattrs = orw_sort(w.attrs, w.nattrs);
+    w.nlocals = orw_sort(w.locals, w.nlocals);
+    any = parent && orw_mark_shared(&w);
+    free(parent);
+  }
+  for (int ci = 0; any && ci < c->nclasses; ci++) {
+    ClassInfo *cl = &c->classes[ci];
+    for (int iv = 0; iv < cl->nivars; iv++) {
+      if (given[off[ci] + iv] != 1 || cl->ivar_types[iv] != TY_UNKNOWN || class_ivar_pinned(cl, cl->ivars[iv])) continue;
+      /* the classes that share the slot: the root's subtree, as the
+         backstop walks it */
+      int root = ci, ok = 1;
+      while (c->classes[root].parent >= 0) root = c->classes[root].parent;
+      for (int cj = 0; cj < c->nclasses && ok; cj++) {
+        int an = cj;
+        while (an >= 0 && an != root) an = c->classes[an].parent;
+        int jv = an == root ? comp_ivar_index(&c->classes[cj], cl->ivars[iv]) : -1;
+        if (jv < 0) continue;
+        TyKind jt = c->classes[cj].ivar_types[jv];
+        if (given[off[cj] + jv] == 2 || (jt != TY_UNKNOWN && jt != TY_STRING)) ok = 0;
+      }
+      OrwName *a = orw_find(w.attrs, w.nattrs, cl->ivars[iv] + 1);
+      if (!ok || !a || a->mark) continue;
+      sp_ivwatch(cl->ivars[iv], "or_write_string", TY_UNKNOWN, TY_STRING);
+      cl->ivar_types[iv] = TY_STRING;
+      changed = 1;
+    }
+  }
+  free(names);
+  free(given);
+  free(off);
+  return changed;
+}
+
 /* The inference fixpoint: two rounds with the proc-form clones made between them, then the optimistic re-narrow of the slots a transient poly locked (analyze_program's steps, in their order) */
 static void an_phase_infer_fixpoint(Compiler *c) {
   g_fixpoint_rounds = 0;
@@ -33057,6 +33420,16 @@ static void an_phase_infer_fixpoint(Compiler *c) {
     ch |= infer_return_types(c);
     ch |= backprop_hash_return_types(c);
     if (!ch) {
+      /* Converged: an attribute slot only `o.x ||= v` writes takes its
+         String now, and the rounds go on from it. */
+      static int orw_typed;
+      if (!orw_typed) {
+        orw_typed = 1;
+        if (type_or_written_string_slots(c)) {
+          if (iter + 1 == rc.cap) rc.cap++;
+          continue;
+        }
+      }
       /* Converged with the ambiguous guesses held at bottom. Clear the flag
          and keep going: a slot whose evidence never arrived is genuinely
          untypable, so it now takes the pessimistic type and the slots it
