@@ -1,0 +1,36 @@
+A String key's store into a boxed String element reaches its slot
+
+    def pick(i) = i == 0 ? "hello world".dup : 3
+    a = [pick(0), pick(1)]
+    a[0]["world"] = "there"
+    p a
+
+printed ["hello world", 3]. CRuby prints ["hello there", 3].
+
+A String that is not shared has no place to change in:
+sp_poly_str_aset_key answers its new contents, and the caller stores
+them where the String was read. For a local or an instance variable
+the emitter does. For an element of an Array or a Hash it dropped the
+answer, so the store ran and was lost, while the Integer index on the
+same element (`a[0][6] = "W"`) writes its slot.
+
+emit_poly_index_call now keeps the String it read from `outer[i]`,
+and when the call has answered, puts the answer into the slot if the
+slot still holds that String. A Hash, an Array or a shared String in
+the slot stores as it did: for those the only added work is one test
+of the element's tag and one of a pointer.
+
+The arm applies where reading `outer[i]` a second time is the same
+read: the outer is an Array or a Hash of boxed values, neither it nor
+its index runs code, and a key or a value that runs code has run
+already, in Ruby's order (emit_operands_in_order). Everything else
+emits the C it did.
+
+A second name taken for the element before the store (`b = a[0]`)
+keeps the old contents, as it does after the Integer index's store.
+`a[0] == b` is then false where CRuby says true; it was true here
+only while the store was lost.
+
+Test: test/boxed_string_slot_aset_key.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

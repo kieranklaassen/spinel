@@ -1,0 +1,1 @@
+A String key's store into a boxed String element reaches its slot
