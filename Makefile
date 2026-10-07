@@ -2350,6 +2350,14 @@ backtrace-test: $(SPINEL) $(SP_RT_LIB)
 	for f in "Chain#inner" "Chain#mid" "Chain#outer" "Chain#top"; do \
 	  grep -q "$$f" "$$tmp/pt.out" || { echo "backtrace-test: FAIL (#5084: frame $$f cut by a rescue that did not match)"; cat "$$tmp/pt.out"; ok=0; }; \
 	done; \
+	$(SPINEL) --debug --no-inline-hot test/backtrace/pass_through_ensure.rb -o "$$tmp/pe" >/dev/null 2>&1 || \
+	  { echo "backtrace-test: FAIL (compile pass_through_ensure)"; ok=0; }; \
+	"$$tmp/pe" > "$$tmp/pe.out" 2>&1; \
+	for t in outer noisy fibered reraised unmatched; do for f in "Chain#inner" "Chain#mid" "Chain#$$t" "Chain#top"; do \
+	  grep "^  $$t " "$$tmp/pe.out" | grep -q "$$f" || { echo "backtrace-test: FAIL ($$t: frame $$f cut by the ensure beside a rescue that did not match)"; cat "$$tmp/pe.out"; ok=0; }; \
+	done; done; \
+	! grep -q "Chain#quiet" "$$tmp/pe.out" || \
+	  { echo "backtrace-test: FAIL (frames of a raise the ensure body rescued given to the exception passing)"; cat "$$tmp/pe.out"; ok=0; }; \
 	$(SPINEL) --debug --no-inline-hot test/backtrace/required_main.rb -o "$$tmp/rq" >/dev/null 2>&1 || \
 	  { echo "backtrace-test: FAIL (compile required_main)"; ok=0; }; \
 	"$$tmp/rq" > "$$tmp/rq.out" 2>&1; \
