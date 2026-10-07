@@ -228,7 +228,7 @@ const char *sp_re_post_match(void) {
 sp_int sp_re_match(mrb_regexp_pattern *pat, const char *str) {SP_GC_ROOT_STR(str);
   if (!str) return -1;
   int64_t slen = (int64_t)sp_str_byte_len(str);
-  int ncaps = 32;
+  int ncaps = 64;
   int n = re_exec(pat, str, slen, 0, sp_re_caps, ncaps, sp_str_is_binary(str));
   if (n > 0) { sp_re_last_pat = pat; sp_re_set_captures(str, sp_re_caps, n/2); return sp_re_caps[0]; }
   /* Issue #848: clear backrefs on no-match so a subsequent `$1`
@@ -250,7 +250,7 @@ sp_int sp_re_match(mrb_regexp_pattern *pat, const char *str) {SP_GC_ROOT_STR(str
 sp_int sp_re_match_at(mrb_regexp_pattern *pat, const char *str, sp_int pos) {SP_GC_ROOT_STR(str);
   if (!str) return -1;
   int64_t slen = (int64_t)sp_str_byte_len(str);
-  int ncaps = 32;
+  int ncaps = 64;
   int n = re_exec(pat, str, slen, pos, sp_re_caps, ncaps, sp_str_is_binary(str));
   if (n > 0) { sp_re_last_pat = pat; sp_re_set_captures(str, sp_re_caps, n/2); return sp_re_caps[0] - pos; }
   for (int i = 0; i < 10; i++) sp_re_captures[i] = NULL;
@@ -311,7 +311,7 @@ const char *sp_str_splice_re(mrb_regexp_pattern *pat, const char *s, const char 
 const char *sp_str_slice_re(mrb_regexp_pattern *pat, const char *s, const char **rest_out) {SP_GC_ROOT_STR(s);
   if (!s) s = &("\xff" "")[1];  /* header-safe empty: s flows to sp_str_byteslice -> sp_str_byte_len(s[-1]) */
   int64_t slen = (int64_t)sp_str_byte_len(s);
-  int n = re_exec(pat, s, slen, 0, sp_re_caps, 32, sp_str_is_binary(s));
+  int n = re_exec(pat, s, slen, 0, sp_re_caps, 64, sp_str_is_binary(s));
   if (n <= 0) {
     for (int i = 0; i < 10; i++) sp_re_captures[i] = NULL;
     sp_re_last_str = NULL;
