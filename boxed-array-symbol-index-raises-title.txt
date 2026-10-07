@@ -1,0 +1,1 @@
+A Symbol or String index on a boxed Array raises TypeError
