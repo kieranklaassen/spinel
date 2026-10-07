@@ -35,3 +35,15 @@ puts $n
 puts $n
 2.tap { $n += 100000 }&.times { $n += 1 }
 puts $n
+# a receiver that is itself a `&.` call whose argument is built: the call ran twice
+class K
+  def bump(a)
+    $n += 1000000
+    a
+  end
+end
+def mk(v) = v ? K.new : nil
+k = mk(true)
+w = 3
+k&.bump([w, 2])&.size
+puts $n
