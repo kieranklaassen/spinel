@@ -14420,8 +14420,16 @@ int infer_block_params(Compiler *c) {
           LocalVar *lp2 = scope_local_intern(s, pnj2); lp2->is_block_param = 1;
           /* Don't widen a param already typed as a concrete array (e.g. a
              desugared destructure temp bound to an each_cons/each_slice window)
-             down to a poly scalar; that mismatches the array the codegen binds. */
-          if (ty_is_array(lp2->type)) continue;
+             down to a poly scalar; that mismatches the array the codegen binds.
+             A pure block parameter is the exception, as it is for a walk's one
+             parameter below: in `h.each { |k, v| v << x }` the push typed v an
+             Array of Strings before h was boxed, each boxed value was then read
+             as one, and the program crashed. Not under --share-strings, where
+             a push onto the boxed v does not build yet. */
+          if (ty_is_array(lp2->type)) {
+            if (!c->share_strings && pure_block_param(c, s, pnj2)) { lp2->type = TY_POLY; changed = 1; }
+            continue;
+          }
           if (lv_widen(lp2, TY_POLY)) changed = 1;
         }
         continue;
