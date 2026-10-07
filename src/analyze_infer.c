@@ -7805,7 +7805,7 @@ static int value_arm_is(const NodeTable *nt, int v, int node) {
    rebuilt per fixpoint iteration and when the table grows, like the
    receiver set above, and each node on it is checked as the walk did, so
    one that no longer holds the yield answers no. */
-enum { YU_WRITE, YU_ELEMENT, YU_ARGUMENT, YU_RECEIVER, YU_FRAME, YU_BLOCK, YU_TAIL };
+enum { YU_WRITE, YU_ELEMENT, YU_ARGUMENT, YU_RECEIVER, YU_FRAME, YU_BLOCK, YU_TAIL, YU_RETURN };
 static const NodeKind yu_write_kinds[] = {
   NK_LocalVariableWriteNode, NK_LocalVariableOperatorWriteNode,
   NK_LocalVariableOrWriteNode, NK_LocalVariableAndWriteNode,
@@ -7907,6 +7907,12 @@ static int yield_uses(Compiler *c, int y) {
     for (int s = 1; s < c->nscopes; s++) {
       int tl = scope_joined_tail(c, s);
       if (tl >= 0) yu_collect(nt, tl, tl, YU_TAIL);
+    }
+    NT_FOREACH_KIND(nt, NK_ReturnNode, w) {
+      int an = nt_ref(nt, w, "arguments");
+      if (an < 0) continue;
+      int ac = 0; const int *av = nt_arr(nt, an, "arguments", &ac);
+      if (ac == 1 && !value_arm_has_sequence(nt, av[0])) yu_collect(nt, av[0], w, YU_RETURN);
     }
     g_yu_gen = g_narrow_gen; g_yu_nt = nt; g_yu_cnt = nt->count;
   }
@@ -8419,6 +8425,19 @@ static int infer_yield_node(Compiler *c, int id, const NodeTable *nt, NodeKind n
         if (scope_joined_tail(c, ymi) == w && value_arm_is(nt, w, id) &&
             !yield_values_fit_one_slot(c, ymi, -1, id)) { *out = TY_POLY; return 1; }
         break;
+      case YU_RETURN: {
+        /* The value of an explicit `return` likewise (`return yield`,
+           `return (c ? yield : :none)`): it joins the method's return
+           with the first site's type, and no per-site coercion reaches
+           it. A parenthesized sequence in it is left alone, as in the
+           method's last statement. */
+        int an = nt_ref(nt, w, "arguments");
+        if (an < 0) break;
+        int ac = 0; const int *av = nt_arr(nt, an, "arguments", &ac);
+        if (ac == 1 && !value_arm_has_sequence(nt, av[0]) && value_arm_is(nt, av[0], id) &&
+            !yield_values_fit_one_slot(c, ymi, -1, id)) { *out = TY_POLY; return 1; }
+        break;
+      }
       }
     }
   }
