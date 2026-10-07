@@ -1,0 +1,44 @@
+A block handed to new is held for the call
+
+    class Keep
+      attr_reader :blk
+      def initialize(a, &b)
+        @blk = b
+        @a = a
+      end
+    end
+    ks = []
+    200_000.times { |i| ks << Keep.new(i) { |x| x + i } }
+    s = 0
+    ks.each { |k| s += k.blk.call(1) }
+    p s    # 20000100000; master prints 20000100004
+
+That is a plain run, gcc and clang, exit 0. One
+`Keep.new(2) { |x| x * 3 }` aborts under SPINEL_GC_STRESS=2, and at
+SPINEL_GC_STRESS=1 `Agg.new(&make(i)).v` prints 2 for 7.
+
+A block handed to `new` is a proc built at the call site, written inside
+the constructor call's parentheses:
+`sp_Keep_new(lv_i, sp_proc_new_meta(...))`. Nothing roots it there. The
+constructor allocates the object before initialize stores the block, and
+that allocation collects the proc; so does an argument built beside it
+(C leaves the order between the two open). A `&` of a lambda, of
+`proc { }`, of `method(:m)`, of a Symbol or of a call that answers a
+proc is fresh the same way, and so is a proc handed to a yielding
+initialize (sp_X_new_blk).
+
+The proc now goes to a rooted temp, as a method call's block does
+(emit_ctor_block_held, which emit_ctor_block_slot and
+emit_ctor_new_with_proc call). A literal block or lambda runs none of
+the program's code, so it is built ahead of the call; any other built
+value is assigned to its temp where it stands, so nothing runs earlier
+than it did. A bare name (`Agg.new(&pr)`, the temp a dispatch on a Class
+value hoisted, no block) is written as it was.
+
+Three tests of the corpus abort under SPINEL_GC_STRESS=2 for this and
+nothing else: test/ctor_ivar_default_keywords.rb,
+test/forward_all_block_reaches_callee.rb and
+test/zsuper_in_proc_captures_params.rb. They join GC_STRESS_TESTS beside
+the new test.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
