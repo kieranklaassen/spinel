@@ -1,0 +1,41 @@
+A String's length is counted again after setbyte
+
+    s = +"abc"
+    s.size               # 3
+    s.setbyte(0, 0xC3)
+    s.setbyte(1, 0xA9)
+    p s.size             # 3, CRuby: 2
+
+A String remembers its character count once it is asked for: a hint in
+its header, or an entry in the length cache (sp_str_length).
+sp_str_setbyte_cow wrote the byte and kept the cache entry, and for a
+String held by a handle (one under two names, one in an instance
+variable) the hint as well. size, length, negative indexes and slices
+then answered for the bytes that were there before, until another
+mutation dropped the entry.
+
+setbyte now forgets both through sp_str_lcache_drop when the byte
+written or the byte it replaces is past 7 bits: one 7-bit byte over
+another changes no count. A binary String is left alone: its length is
+its byte count and nothing remembered is read while it is binary, so
+force_encoding forgets for it when it makes it text again
+(sp_str_force_text, which emit_str_force_encoding now names). The two
+other callers of sp_str_as_text are appends, which forget already, so
+sp_str_as_text stays as it is.
+
+Where setbyte leaves the String invalid UTF-8, it is now counted as any
+invalid String is, by its bytes; master answered from the count taken
+before the write.
+
+Instructions a call, callgrind, on master 8b3ba5c4, a loop of setbyte
+over a 1 KB String, plain and under two names: binary 68 -> 73 and
+76 -> 80; text, 7-bit bytes 70 -> 78 and 80 -> 87; text, bytes past
+7 bits 70 -> 97 and 80 -> 108.
+
+The generated C changes in that one name, where force_encoding names a
+text encoding; the rest is in lib/.
+
+Test: test/setbyte_counts_length_again.rb; 16 of its 45 lines differ on
+master.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

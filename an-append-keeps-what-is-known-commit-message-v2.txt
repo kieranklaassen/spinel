@@ -1,0 +1,68 @@
+An append keeps what is known of a String's length
+
+    s = +""
+    n = ARGV[0].to_i
+    t = 0
+    n.times { s << "ab"; t += s.size }
+    p t
+
+Instructions, callgrind, on master 8b3ba5c4, for n = 25,000, 50,000
+and 100,000:
+
+    before      713,057,158  2,831,708,137 11,287,776,066
+    after         7,806,739     14,956,222     29,271,074
+
+A String remembers its character count once it is asked for: a hint in
+its header, or an entry in the length cache. Every append in place
+dropped both (sp_str_append_grow, sp_str_append_grow_n and
+sp_fd_publish under sp_fd_append_len), so the next size, length,
+negative index or slice counted every byte again, and a buffer that is
+appended to and measured in one loop was quadratic.
+
+An append leaves the bytes ahead of it alone, so it now keeps what was
+known (sp_str_lcache_grown):
+
+- the hint, while every appended byte is below 0x80;
+- a cache entry, which records the new length and that its count is
+  short of it. The append counts nothing. The next sp_str_length counts
+  only the bytes added since (sp_str_length_grown) and adds the two
+  counts where both halves are valid UTF-8; where it cannot tell, it
+  counts the whole String as before.
+
+An entry is kept only if the length it was following is the length the
+append started from; any other entry is dropped, as all were. A text
+append that makes a 7-bit binary String text again forgets as before
+(sp_str_force_text in sp_str_append_grow): what was remembered before
+the String was binary may be of other bytes.
+
+With "b\u00e9" appended in the same loop: 13,647,677, 26,724,497 and
+52,967,970 after.
+
+Cost, instructions a call, callgrind, the same master:
+
+- an append to a String nobody has measured: 89 -> 90; through an
+  instance variable 251.6 -> 246.6; of an interpolated String
+  294.2 -> 296.2;
+- an append to a String whose hint is set: +27, the scan of the
+  appended bytes;
+- an append to a String with a cache entry: +5;
+- size of a String answered from the cache: +4, and replace +1 (the
+  entry is a word longer, and its count is tested for the mark).
+
+A handle's append (sp_fd_append_len, inlined in generated code) makes
+one call out of line (sp_fd_publish_grown) where it had the header's
+update and the drop inline, so the code around each append is no
+larger than it was.
+
+No generated C changes: the change is in lib/.
+
+Left alone: a String that moves when it grows forgets as before (it is
+counted once after each move, and the capacity doubles, so the loop
+stays linear); s.concat(x) on a local, ascii_only? and rindex after an
+append, which are slow for reasons of their own.
+
+Test: test/string_append_keeps_length.rb. It holds the answers after
+each kind of append and passes without this commit; the counts above
+are what shows the change.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
