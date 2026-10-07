@@ -7193,21 +7193,23 @@ static sp_RbVal sp_poly_str_mod(sp_RbVal a, sp_RbVal b) {
 }
 static const char *sp_str_format_splat(sp_RbVal a) {
   sp_int n = sp_poly_arr_len(a);
-  const char *fmt = n > 0 ? sp_poly_to_s(sp_poly_arr_get(a, 0)) : "";
+  const char *fmt = n > 0 ? sp_poly_to_s(sp_poly_arr_get(a, 0)) : sp_str_empty;
   sp_PolyArray *rest = sp_PolyArray_new(); SP_GC_ROOT(rest);
   for (sp_int i = 1; i < n; i++) sp_PolyArray_push(rest, sp_poly_arr_get(a, i));
-  return sp_str_format_polyarr(fmt ? fmt : "", rest);
+  return sp_str_format_polyarr(fmt ? fmt : sp_str_empty, rest);
 }
 const char *sp_poly_inspect(sp_RbVal v);            /* %p; defined after the container types */
 static const char *sp_str_format_polyarr(const char *fmt, sp_PolyArray *a) {
-  size_t cap = strlen(fmt) + 64;
+  size_t fl = sp_str_byte_len(fmt);
+  size_t cap = fl + 64;
   char *buf = (char *)malloc(cap);
   if (!buf) { perror("malloc"); exit(1); }
-  size_t out = 0; sp_int idx = 0; const char *p = fmt;
+  size_t out = 0; sp_int idx = 0; const char *p = fmt, *pe = fmt + fl;
   /* CRuby refuses to mix numbered (%1$s), sequential (%s) and named (%<a>d)
      references in one format string (#3723) */
   sp_bool used_numbered = FALSE, used_sequential = FALSE, used_named = FALSE;
-  while (*p) {
+  /* to the template's byte length: a NUL byte before it is a byte to copy */
+  while (*p || p < pe) {
     if (*p != '%') {
       if (out + 1 >= cap) { cap = cap * 2; buf = (char *)realloc(buf, cap); }
       buf[out++] = *p++; continue;
