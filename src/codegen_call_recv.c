@@ -4994,6 +4994,26 @@ static int emit_hash_merge_misfit(Compiler *c, int id, TyKind rt, Buf *b) {
   return 1;
 }
 
+/* merge of two String-keyed Hashes of different value kinds: a concrete side
+   (str_int, str_str) is copied to the boxed kind and the copies merged, and
+   a str_poly receiver takes the argument's copy alone. 0 for another pair. */
+static int emit_str_keyed_merge(Compiler *c, int recv, int arg, TyKind rt, TyKind at, Buf *b) {
+  const char *rfn = rt == TY_STR_INT_HASH ? "sp_StrPolyHash_from_str_int_hash("
+                  : rt == TY_STR_STR_HASH ? "sp_StrPolyHash_from_str_str_hash(" : NULL;
+  const char *afn = at == TY_STR_INT_HASH ? "sp_StrPolyHash_from_str_int_hash("
+                  : at == TY_STR_STR_HASH ? "sp_StrPolyHash_from_str_str_hash(" : NULL;
+  if (rfn ? (!ty_is_hash(at) || ty_hash_key(at) != TY_STRING || at == rt)
+          : (rt != TY_STR_POLY_HASH || !afn)) return 0;
+  buf_puts(b, "sp_StrPolyHash_merge(");
+  if (rfn) { buf_puts(b, rfn); emit_expr(c, recv, b); buf_puts(b, ")"); }
+  else emit_expr(c, recv, b);
+  buf_puts(b, ", ");
+  if (afn) { buf_puts(b, afn); emit_expr(c, arg, b); buf_puts(b, ")"); }
+  else emit_expr(c, arg, b);
+  buf_puts(b, ")");
+  return 1;
+}
+
 int emit_hash_call(Compiler *c, int id, Buf *b) {
   const NodeTable *nt = c->nt;
   const char *name = nt_str(nt, id, "name");
@@ -5737,21 +5757,8 @@ else {
             buf_printf(b, "sp_%sHash_dup(", hn); emit_expr(c, recv, b); buf_puts(b, ")");
             return 1;
           } }
-        /* cross-variant str merge: promote both sides to str_poly_hash */
-        if ((rt == TY_STR_INT_HASH || rt == TY_STR_STR_HASH) &&
-            ty_is_hash(at) && ty_hash_key(at) == TY_STRING && at != rt) {
-          buf_puts(b, "sp_StrPolyHash_merge(");
-          const char *rfn = rt == TY_STR_INT_HASH ? "sp_StrPolyHash_from_str_int_hash("
-                                                   : "sp_StrPolyHash_from_str_str_hash(";
-          buf_puts(b, rfn); emit_expr(c, recv, b); buf_puts(b, "), ");
-          const char *afn = at == TY_STR_INT_HASH ? "sp_StrPolyHash_from_str_int_hash("
-                          : at == TY_STR_STR_HASH  ? "sp_StrPolyHash_from_str_str_hash("
-                                                   : NULL;
-          if (afn) { buf_puts(b, afn); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
-          else { emit_expr(c, argv[0], b); }
-          buf_puts(b, ")");
-          return 1;
-        }
+        /* cross-variant str merge: promote the concrete side to str_poly_hash */
+        if (emit_str_keyed_merge(c, recv, argv[0], rt, at, b)) return 1;
         /* any other cross-variant merge (mismatched key or value layout):
            fold both sides through the universal boxed merge -- passing the
            argument raw into the receiver-layout helper read it through the
@@ -5800,13 +5807,7 @@ else {
           }
         }
         buf_printf(b, "sp_%sHash_merge(", hn); emit_expr(c, recv, b); buf_puts(b, ", ");
-        /* a str_poly receiver may be merged with a concrete str-keyed hash;
-           coerce the argument to the receiver's variant first */
-        if (rt == TY_STR_POLY_HASH && (at == TY_STR_STR_HASH || at == TY_STR_INT_HASH)) {
-          buf_printf(b, "sp_StrPolyHash_from_%s(", at == TY_STR_STR_HASH ? "str_str_hash" : "str_int_hash");
-          emit_expr(c, argv[0], b); buf_puts(b, ")");
-        }
-        else if (at == TY_POLY && rt == TY_POLY_POLY_HASH) {
+        if (at == TY_POLY && rt == TY_POLY_POLY_HASH) {
           /* A boxed argument holds whichever variant the value really is, so
              the pointer cast below would read a Sym-keyed hash through a
              Poly-keyed struct. The general hash can be rebuilt from any of
