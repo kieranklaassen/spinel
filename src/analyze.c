@@ -29832,6 +29832,9 @@ static int sd_is_string(NodeTable *nt, int recv) {
   return sd_call(nt, "is_a?", nt_clone_subtree(nt, recv), &k, 1);
 }
 
+/* the raise arms marked for desugar_index_splat_callable */
+static int *g_index_splat_arms, g_index_splat_n, g_index_splat_cap;
+
 /* `recv.m(pre, *a, post)` where a's length is only known at run time and m
    is a builtin taking lo..hi arguments. Expanding to the required count
    dropped every optional argument (`h.fetch(*[:k, 0])` ran fetch(:k) and
@@ -30063,6 +30066,14 @@ static int splat_dispatch_on_length(Compiler *c, int id, const int *argv, int ar
   nt_node_set_ref(nt, arm, "receiver", -1);
   nt_node_set_ref(nt, arm, "arguments", eargs);
   nt_node_set_ref(nt, arm, "block", -1);
+  /* `[]` is `call` on a Proc or a Method, which take any count: the arm is
+     theirs once the receiver is typed (desugar_index_splat_callable) */
+  if (sp_streq(cnm, "[]") && argc == 1 && blk < 0 && !odyn) {
+    nn_push(&g_index_splat_arms, &g_index_splat_n, &g_index_splat_cap, arm);
+    nt_node_set_int(nt, arm, "idx_splat_recv", recv);
+    nt_node_set_str(nt, arm, "idx_splat_list", anm);
+    nt_node_set_int(nt, arm, "idx_splat_depth", adepth);
+  }
   if (variadic == 2) {
     /* any other count keeps the splat call (see splat_builtin_range) */
     int args[32];
@@ -30173,6 +30184,115 @@ static int splat_dispatch_on_length(Compiler *c, int id, const int *argv, int ar
   comp_grow_node_arrays(c);
   for (int j = base; j < nt->count; j++) c->nscope[j] = encl;
   return 1;
+}
+/* A Method whose `call` checks its count as CRuby does: one bound to a def
+   of the program. A builtin's and an accessor's are bound through a
+   __bam_ wrapper, and one with no target here is called by name; their
+   `call` drops or misreads what is past the count. */
+static int method_node_is_own_def(Compiler *c, int mn) {
+  const char *sym = mn >= 0 ? method_sym_arg(c, mn) : NULL;
+  return sym && strncmp(sym, "__bam_", 6) != 0 && method_obj_target_mi(c, mn) >= 0;
+}
+/* Is `v` a Proc, or a Method of the program's own def? */
+static int value_is_own_callable(Compiler *c, int v) {
+  TyKind t = infer_type(c, v);
+  return t == TY_PROC || (t == TY_METHOD && method_node_is_own_def(c, method_recv_node(c, v)));
+}
+/* Does the program make a Proc out of anything but its own blocks and
+   defs? A curried one, Symbol#to_proc (a lambda by now, stp_arity), a
+   Method that is not its own def, and `to_proc` or `&x` of a value that
+   is neither a Proc nor such a Method: a Hash, a Symbol in a variable
+   and an object with its own to_proc are blocks by now, their `&x` off
+   the tree but still in the table. `&:sym` (a block the parser made,
+   sym_proc; `&:+` as written) is a Proc only under proc, lambda and
+   new, or where a method of the program keeps its block (`&blk`). */
+static int program_makes_foreign_proc(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  int keeps = 0;
+  NT_FOREACH_KIND(nt, NK_BlockParameterNode, bp) { (void)bp; keeps = 1; break; }
+  NT_FOREACH_KIND(nt, NK_BlockArgumentNode, ba) {
+    int ex = nt_ref(nt, ba, "expression");
+    if (ex >= 0 && nt_kind(nt, ex) != NK_SymbolNode && !value_is_own_callable(c, ex)) return 1;
+  }
+  NT_FOREACH_KIND(nt, NK_CallNode, id) {
+    const char *nm = nt_str(nt, id, "name");
+    if (!nm) continue;
+    if (sp_streq(nm, "curry") || nt_int(nt, id, "stp_arity", 0)) return 1;
+    if (sp_streq(nm, "method") || sp_streq(nm, "instance_method") ||
+        sp_streq(nm, "public_method") || sp_streq(nm, "singleton_method")) {
+      if (!method_node_is_own_def(c, id)) return 1;
+      continue;
+    }
+    int recv = nt_ref(nt, id, "receiver");
+    if (sp_streq(nm, "to_proc") && recv >= 0 && !value_is_own_callable(c, recv)) return 1;
+    int blk = nt_ref(nt, id, "block");
+    if (blk < 0 || (nt_kind(nt, blk) == NK_BlockNode && !nt_str(nt, blk, "sym_proc"))) continue;
+    if (nt_kind(nt, blk) == NK_BlockArgumentNode) {
+      int ex = nt_ref(nt, blk, "expression");
+      if (ex < 0 || nt_kind(nt, ex) != NK_SymbolNode) continue;
+    }
+    if (keeps || sp_streq(nm, "proc") || sp_streq(nm, "lambda") || sp_streq(nm, "new")) return 1;
+  }
+  return 0;
+}
+/* `recv[*list]` whose list holds a count Array#[], String#[] and Hash#[] do
+   not take: the dispatch above raises the arity error in its last arm. A
+   Proc and a Method take any count, `[]` being `call`. The dispatch is
+   built before the receiver is typed, so it marks that arm and the arm
+   becomes `recv.call(*list)` here, in the settled rounds, for a receiver
+   typed a Proc or a Method of the program's own def, whose `call` counts
+   as CRuby does (program_makes_foreign_proc). Any other receiver keeps the
+   raise, a boxed one too. The raise is kept off the tree, where the scan
+   for a class used as a value still reads its class as a raise's, and is
+   put back if the receiver stops being such a callable. */
+static int desugar_index_splat_callable(Compiler *c) {
+  if (!g_index_splat_n || g_infer_optimistic) return 0;
+  NodeTable *nt = (NodeTable *)c->nt;
+  int changed = 0, foreign = -1;
+  for (int k = 0; k < g_index_splat_n; k++) {
+    int id = g_index_splat_arms[k];
+    int recv = (int)nt_int(nt, id, "idx_splat_recv", -1);
+    int state = (int)nt_int(nt, id, "idx_splat_state", 0);
+    const char *nm = nt_str(nt, id, "name");
+    if (state == 2 || !nm || !sp_streq(nm, state ? "call" : "raise")) continue;
+    TyKind t = infer_type(c, recv);
+    int own = t == TY_METHOD && method_node_is_own_def(c, method_recv_node(c, recv));
+    if (t == TY_PROC) {
+      if (foreign < 0) foreign = program_makes_foreign_proc(c);
+      own = !foreign;
+    }
+    if (own == (state == 1)) continue;
+    if (own) {
+      int base = nt->count;
+      int rd = nt_new_node(nt, "LocalVariableReadNode");
+      nt_node_set_str(nt, rd, "name", nt_str(nt, id, "idx_splat_list"));
+      nt_node_set_int(nt, rd, "depth", nt_int(nt, id, "idx_splat_depth", 0));
+      int spn = nt_new_node(nt, "SplatNode");
+      nt_node_set_ref(nt, spn, "expression", rd);
+      int cargs = nt_new_node(nt, "ArgumentsNode");
+      nt_node_set_arr(nt, cargs, "arguments", &spn, 1);
+      int fail = nt_new_node(nt, "CallNode");
+      nt_node_set_str(nt, fail, "name", "raise");
+      nt_node_set_ref(nt, fail, "receiver", -1);
+      nt_node_set_ref(nt, fail, "arguments", nt_ref(nt, id, "arguments"));
+      nt_node_set_ref(nt, fail, "block", -1);
+      nt_node_set_int(nt, id, "idx_splat_raise", fail);
+      nt_node_set_str(nt, id, "name", "call");
+      nt_node_set_ref(nt, id, "receiver", nt_clone_subtree(nt, recv));
+      nt_node_set_ref(nt, id, "arguments", cargs);
+      comp_grow_node_arrays(c);
+      for (int j = base; j < nt->count; j++) c->nscope[j] = c->nscope[id];
+    }
+    else {
+      int fail = (int)nt_int(nt, id, "idx_splat_raise", -1);
+      nt_node_set_str(nt, id, "name", "raise");
+      nt_node_set_ref(nt, id, "receiver", -1);
+      nt_node_set_ref(nt, id, "arguments", nt_ref(nt, fail, "arguments"));
+    }
+    nt_node_set_int(nt, id, "idx_splat_state", own ? 1 : 2);
+    changed = 1;
+  }
+  return changed;
 }
 void expand_static_splat_args(Compiler *c, int from, int count) {
   NodeTable *nt = (NodeTable *)c->nt;
@@ -34247,6 +34367,7 @@ static void an_phase_infer_fixpoint(Compiler *c) {
     ch |= desugar_proc_expr_block_arg(c);      /* &(a >> b) -> hoisted temp */
     ch |= desugar_to_hash_splat(c);            /* f(**obj) -> f(**obj.to_hash) */
     ch |= desugar_splat_to_a(c);               /* [*h] -> [*h.to_a] (Hash, user #to_a) */
+    ch |= desugar_index_splat_callable(c);     /* pr[*list], any count -> pr.call(*list) */
     ch |= desugar_value_callable_forwards(c);  /* &proc -> { |x| proc.call(x) } */
     if (desugar_builtin_enum_calls(c)) {       /* recv.m(a) { } -> __enum_m(recv, a) { } */
       ch = 1;
