@@ -180,11 +180,13 @@ int emit_call_bigint_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
     /* clamp(lo, hi): compare in bigint; an sp_int bound promotes (#3129) */
     if (sp_streq(name, "clamp") && argc == 2) {
       int tcl = ++g_tmp, tch = ++g_tmp;
+      /* each bound is held across the other's evaluation and the
+         receiver's, which can allocate (#4049) */
       buf_printf(b, "({ sp_Bigint *_t%d = ", tcl); emit_bigint_operand(c, argv[0], b);
-      buf_printf(b, "; sp_Bigint *_t%d = ", tch); emit_bigint_operand(c, argv[1], b);
-      buf_printf(b, "; sp_bigint_cmp(%s, _t%d) < 0 ? _t%d"
+      buf_printf(b, "; SP_GC_ROOT(_t%d); sp_Bigint *_t%d = ", tcl, tch); emit_bigint_operand(c, argv[1], b);
+      buf_printf(b, "; SP_GC_ROOT(_t%d); sp_bigint_cmp(%s, _t%d) < 0 ? _t%d"
                     " : sp_bigint_cmp(%s, _t%d) > 0 ? _t%d : (%s); })",
-                 r, tcl, tcl, r, tch, tch, r);
+                 tch, r, tcl, tcl, r, tch, tch, r);
       free(rs.p); return 1;
     }
     if (sp_streq(name, "bit_length") && argc == 0) {
@@ -336,12 +338,16 @@ int emit_call_bigint_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
     }
     if (sp_streq(name, "divmod") && argc == 1) {
       int td = ++g_tmp, tb2 = ++g_tmp, to2 = ++g_tmp;
-      buf_printf(b, "({ sp_Bigint *_t%d = %s; sp_Bigint *_t%d = ", td, r, tb2);
+      /* both operands are held across the pair's allocation, which can
+         collect: a fresh one (a literal divisor's sp_bigint_new_int, a
+         computed receiver) was swept, and the division read its cleared
+         value as a zero divisor */
+      buf_printf(b, "({ sp_Bigint *_t%d = %s; SP_GC_ROOT(_t%d); sp_Bigint *_t%d = ", td, r, td, tb2);
       emit_bigint_operand(c, argv[0], b);
-      buf_printf(b, "; sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);"
+      buf_printf(b, "; SP_GC_ROOT(_t%d); sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);"
                     " sp_PolyArray_push(_t%d, sp_box_bigint(sp_bigint_div(_t%d, _t%d)));"
                     " sp_PolyArray_push(_t%d, sp_box_bigint(sp_bigint_mod(_t%d, _t%d))); _t%d; })",
-                 to2, to2, to2, td, tb2, to2, td, tb2, to2);
+                 tb2, to2, to2, to2, td, tb2, to2, td, tb2, to2);
       free(rs.p); return 1;
     }
     if (sp_streq(name, "[]") && argc == 1 && comp_ntype(c, argv[0]) == TY_RANGE) {
@@ -567,7 +573,7 @@ int emit_op_float_rationalize(Compiler *c, const BopCtx *x, Buf *b) {
   TyKind et = comp_ntype(c, arg);
   /* an epsilon that is no number: CRuby asks it for its #abs, which
      it does not answer -- NoMethodError, not a conversion's TypeError */
-  if (et != TY_RATIONAL && et != TY_INT && et != TY_FLOAT && et != TY_BIGINT && et != TY_POLY &&
+  if (et != TY_RATIONAL && et != TY_COMPLEX && et != TY_INT && et != TY_FLOAT && et != TY_BIGINT && et != TY_POLY &&
       et != TY_UNKNOWN) {
     buf_printf(b, "({ (void)(%s); sp_raise_nomethod(sp_nomethod_msg(\"abs\", ", r);
     emit_boxed(c, arg, b);
@@ -576,6 +582,12 @@ int emit_op_float_rationalize(Compiler *c, const BopCtx *x, Buf *b) {
   else {
     buf_printf(b, "sp_float_rationalize(%s, ", r);
     if (et == TY_RATIONAL) { buf_puts(b, "sp_rational_to_f("); emit_expr(c, arg, b); buf_puts(b, ")"); }
+    else if (et == TY_COMPLEX) { buf_puts(b, "sp_complex_abs("); emit_expr(c, arg, b); buf_puts(b, ")"); }
+    else if (et == TY_POLY || et == TY_UNKNOWN) {
+      int t = ++g_tmp;
+      buf_printf(b, "({ sp_RbVal _t%d = ", t); emit_boxed(c, arg, b);
+      buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); sp_poly_to_f_with_rational(sp_poly_abs(_t%d)); })", t, t);
+    }
     else emit_float_expr(c, arg, b);
     buf_puts(b, ")");
   }

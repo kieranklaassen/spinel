@@ -1,0 +1,13 @@
+["1", "2"]
+"#<Enumerator: \"a1b2c3\":gsub(/\\d/)>"
+["1", "2", "3"]
+["1"]
+["a", "b"]
+"#<Enumerator: \"a1b2\":gsub(/[a-c]/)>"
+[]
+"#<Enumerator: \"a1b2\":gsub!(/\\d/)>"
+["1", "2"]
+548400
+"a11b22"
+["1", "2"]
+TypeError

@@ -79,7 +79,6 @@ sp_int sp_re_match(mrb_regexp_pattern *pat, const char *str);
 sp_int sp_re_match_at(mrb_regexp_pattern *pat, const char *str, sp_int pos);
 sp_int sp_re_match_next(mrb_regexp_pattern *pat, const char *str, sp_int pos);
 sp_int sp_re_rindex(mrb_regexp_pattern *pat, const char *str);
-sp_StrArray *sp_re_partition(mrb_regexp_pattern *pat, const char *str);
 sp_StrArray *sp_re_rpartition(mrb_regexp_pattern *pat, const char *str);
 sp_bool sp_re_match_p(mrb_regexp_pattern *pat, const char *str);
 sp_bool sp_re_match_p_at(mrb_regexp_pattern *pat, const char *str, sp_int pos);
@@ -87,6 +86,7 @@ sp_bool sp_re_case_eq(mrb_regexp_pattern *pat, sp_RbVal v);
 /* poly-operand match forms: either side may carry the pattern (#3961) */
 mrb_regexp_pattern *sp_poly_as_pattern(sp_RbVal v);
 sp_bool sp_poly_match_p(sp_RbVal a, sp_RbVal b);
+sp_bool sp_poly_match_p_at(sp_RbVal a, sp_RbVal b, sp_int pos);
 sp_MatchData *sp_poly_match_data(sp_RbVal a, sp_RbVal b);
 sp_int sp_poly_match_index(sp_RbVal a, sp_RbVal b);
 void sp_re_expand_rep(const mrb_regexp_pattern *pat, char **out_io, size_t *olen_io, size_t *cap_io, const char *rep, size_t rlen, const char *src, int *caps, int ncaps);

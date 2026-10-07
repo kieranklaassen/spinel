@@ -221,25 +221,35 @@ between the fact and the read (a plain write, a proc, lambda, Fiber or
 stored proc that writes the local, a method that yields to a block that
 does, by send, `method(:m).call` or instance_exec, a rescue that retries,
 an ensure, a redo, a loop of each kind, a case/when or case/in arm, a
-multiple assignment, `&&=`, `||=`, instance_variable_set), where the nil
-it writes comes from (an Integer parameter that may be nil, or a value typed
-nil), the compare or arithmetic read last, the local that carries the value
-(a local, a method's or a block's parameter), its type, and for an index
-read the array's slot (a local or an ivar), a call on it that may answer the
-array itself (CRuby's own list: the methods that answer their receiver with
-or without a block, and the Enumerators whose `each` does), where that
-answer is held (a local, a method's answer, an ivar, a Hash value, a Struct
-member, an attr_reader, instance_variable_get, a user `each`'s kept block
-value, `super` in initialize) and the write through it that leaves a gap or
-a nil. Each case is a method run four times, the fact kept and broken, and
-each run prints `p`, the reads that do not raise for a nil, and the last
-read, so a finding's kind names the run of the first line that differs
-(`break: no-raise(NoMethodError)` is a nil the breaker left that read as a
-number). Most of what it finds on master is older than the narrowing: to
-tell the two apart, run it again against a spinel whose narrowing is
-switched off (`nn_fresh` in `src/analyze.c` answering 0) and compare the
-case files. A pairwise run (the default: 2810 cases, taking 5598 of the
-7392 pairs of levels; a pair another factor rules out, such as an alias for
+multiple assignment, `&&=`, `||=`, instance_variable_set, or a helper local
+written by `||=` and an op-assign, by `&&=` or by a multiple assignment),
+the loop or block a redo or a helper runs in (a `while`, or an each, map,
+select or times block), where the nil it writes comes from (an Integer
+parameter that may be nil, or a value typed nil), the compare or arithmetic
+read last, the local that carries the value (a local, a method's or a
+block's parameter), its type, and for an index read the array's slot (a
+local or an ivar), a call on it that may answer the array itself (CRuby's
+own list: the methods that answer their receiver with or without a block,
+and the Enumerators whose `each` does), its block's parameters (its own,
+two, or a splat, which print what they were given), where that answer is
+held (a local, a method's answer, an ivar, a Hash value, a Struct member, an
+attr_reader, instance_variable_get, a user `each`'s kept block value,
+`super` in initialize), whether the call is made on the array or on what is
+read back from where it is held (a Hash value or a kept block value is
+boxed), and the write through it that leaves a gap or a nil. The rows are
+pairwise, and on top of that cover every 3-way combination of the factors
+`--strength3` names: by default the call, where it is held, what it is made
+on and the element type, so that each call meets each boxed receiver;
+`--strength3 ''` asks for none. Each case is a method run four times, the
+fact kept and broken, and each run prints `p`, the reads that do not raise
+for a nil, and the last read, so a finding's kind names the run of the
+first line that differs (`break: no-raise(NoMethodError)` is a nil the
+breaker left that read as a number). Most of what it finds on master is
+older than the narrowing: to tell the two apart, run it again against a
+spinel whose narrowing is switched off (`nn_fresh` in `src/analyze.c`
+answering 0) and compare the case files. The default run (3474 cases,
+taking 7145 of the 9159 pairs of levels and 2086 of the 2196 3-way
+combinations; a combination another factor rules out, such as an alias for
 a guard, is never taken) takes about ten minutes at `--jobs 2` with
 `--no-reduce`. On master most of its several hundred findings are older
 bugs, so reduce only a run whose findings are few. Like the other probes it
@@ -608,6 +618,53 @@ sibling reads), and what a call does when its operands are not calls: the
 wrap makes every operand a call of a user method, so a finding says that
 the call, given such operands, runs them out of order, not that the
 program as written answers wrong.
+
+## Cost tools: repr_diff, c_costs, alloc_diff
+
+A change can keep every answer right and still make programs slower: a
+String slot that becomes a shared handle copies its bytes at each call that
+only reads it (#7482), a receiver that may be a Struct moves to the
+out-of-line class dispatch. The tests, the probes and rubyspec check
+answers, so none of them sees it. These three compare two compilers on the
+same programs (#7501); `make repr-diff`, `make c-costs` and
+`make alloc-diff` run them with `REF_SPINEL=<another tree>/bin/spinel`
+against this tree's compiler over `COST_PROGS` (default: the corpus and
+the benchmarks).
+
+```
+tools/repr_diff.sh REF_SPINEL NEW_SPINEL PROGS...
+tools/c_costs.sh REF_SPINEL NEW_SPINEL PROGS...     # or REF.c NEW.c, --list FILE
+tools/alloc_diff.sh REF_SPINEL NEW_SPINEL PROGS...
+```
+
+- **repr_diff** pairs the slots of `spinel --dump-repr` (one sorted line
+  per local, parameter and method value, ivar, global and constant, with
+  the kind repr_of_slot gives it: scalar, sentinel, struct, vobj, ptr,
+  strbuf, boxed) and reports "N slots became String buffers (strbuf), M
+  became boxed, K left a by-value layout, J other changes", then each
+  slot. A String buffer is an `sp_String *`, the shared handle or the
+  buffer a loop builds in; a read-only use of either copies its bytes. A
+  compiler older than the flag is compared through the slot declarations
+  of its C (`sp_String *` against `const char *`).
+- **c_costs** counts, per program, the snapshot copies of a handle
+  (`sp_str_concat(sp_String_cstr(h), "")`), the other copy helpers
+  (`sp_*_dup`, `sp_*_copy`), the boxings, the out-of-line dispatches
+  (`sp_pd_*`) and the GC root registrations, everywhere and inside loops
+  (a `for`/`while`/`do` body or header, or a function a loop calls), and
+  lists each new copy inside a loop with its function: an O(len) operation
+  per iteration.
+- **alloc_diff** builds each program with both compilers, runs each binary
+  once under `SPINEL_ALLOC_REPORT` (with its `.args` and `.stdin`, as the
+  suite does) and flags a program whose allocations or bytes grew by more
+  than 20% and 1000 allocations or 64 KiB. Programs that print or exit
+  differently on the two sides, or whose source reads the clock, threads,
+  randomness or the environment, are skipped and listed.
+
+The first two locate a cost and are cheap (no C compiler); the third
+measures it. #5113 against its parent, over #7482's repro (1 MB, 200
+calls): repr_diff reports `ivar Holder @buf: c=const char * -> c=sp_String
+*`, c_costs a new snapshot copy inside the loop of `sp_Holder_run`, and
+alloc_diff the bytes going from 1,000,091 to 202,000,123.
 
 ## Adding a tool
 

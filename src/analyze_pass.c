@@ -1,4 +1,5 @@
 #include "analyze_internal.h"
+#include "repr.h"
 int callee_has_kwarg(Compiler *c, Scope *m, const char *name);
 int callee_declares_kwargs(Compiler *c, Scope *m);
 int callee_param_is_declared_kwarg(Compiler *c, Scope *m, const char *name);
@@ -6,6 +7,7 @@ int is_fresh_array(Compiler *c, int v);
 static int widen_nested_literals(Compiler *c, int recv, int is_push, int is_splice, TyKind kt, TyKind vt);
 int kwh_only_spreads(const NodeTable *nt, int kwh);
 #include <stdint.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -1200,9 +1202,9 @@ static int infer_case_pattern_locals(Compiler *c) {
    the post-fixpoint write re-run (a callee's return widens last, once its
    parameter has seen a second class): the emitted assignment hands an sp_RbVal
    to an sp_Foo * and the C build fails. Widen the slot to poly -- the value
-   really can be either class. Object slots only: a scalar slot has a coercion
-   at the assignment, an object slot has none. (#3964) */
-int widen_object_locals_from_poly_writes(Compiler *c) {
+   really can be either class (#3964). A scalar without a nil representation must
+   widen too: coercing a boxed nil into a Bool or Symbol loses the value. */
+int widen_locals_from_poly_writes(Compiler *c) {
   const NodeTable *nt = c->nt;
   int changed = 0;
   for (int id = 0; id < nt->count; id++) {
@@ -1211,7 +1213,7 @@ int widen_object_locals_from_poly_writes(Compiler *c) {
     Scope *s = nm ? comp_scope_of(c, id) : NULL;
     LocalVar *lv = s ? scope_local(s, nm) : NULL;
     if (!lv || lv->is_param || lv->is_block_param || lv->rbs_seeded) continue;
-    if (!ty_is_object(lv->type)) continue;
+    if (!ty_is_object(lv->type) && an_ty_holds_nil(lv->type)) continue;
     int v = nt_ref(nt, id, "value");
     if (v < 0 || infer_type(c, v) != TY_POLY) continue;
     lv->type = TY_POLY;
@@ -1291,6 +1293,14 @@ void intern_block_params(Compiler *c) {
       if (lv) lv->is_block_param = 1;
     }
   }
+}
+
+/* --share-strings: is lv the shared handle a String of type t is held in?
+   A pass that types the slot as that String leaves it so; resetting it each
+   round, against share_default_apply setting it back, kept the fixpoint
+   from settling. */
+static int lv_is_handle_of(const Compiler *c, const LocalVar *lv, TyKind t) {
+  return t == TY_STRING && repr_of_slot(c, lv).share;
 }
 
 static int lv_widen(LocalVar *lv, TyKind t) {
@@ -2649,6 +2659,7 @@ static TyKind index_op_write_value_type(Compiler *c, int id, int recv, TyKind vt
   return et == TY_FLOAT ? TY_FLOAT : vt;
 }
 
+static int value_leaves(Compiler *c, int n, int *out, int nout, int cap);
 static int infer_write_container_usage(Compiler *c, const NodeTable *nt, int nfb, int *fb, LWIndex lw_ix, LWIndex ivw_ix) {
   int changed = 0;
   /* Fold container usage into the local type so an empty `[]` / `{}` gets
@@ -2710,11 +2721,16 @@ static int infer_write_container_usage(Compiler *c, const NodeTable *nt, int nfb
            a container parameter reads this, through the call sites */
         elem_argv = argv; elem_an = an; elem_splat_index = 1;
       }
-      else if (name && sp_streq(name, "concat") && an == 1) {
-        /* concat(other): the other array's elements splice in */
+      else if (name && sp_streq(name, "concat") && an >= 1) {
+        /* concat(other, ...): each other array's elements splice in, so
+           every argument is evidence, as push's are; one that is no array
+           raises before anything is stored */
         is_push = 1; vt = splice_incoming_elem(c, argv[0]);
-        TyKind cat = infer_type(c, argv[0]);
-        concat_scalar = cat != TY_UNKNOWN && cat != TY_POLY && !ty_is_array(cat);
+        for (int ai = 1; ai < an; ai++) vt = ty_unify(vt, splice_incoming_elem(c, argv[ai]));
+        for (int ai = 0; ai < an && !concat_scalar; ai++) {
+          TyKind cat = infer_type(c, argv[ai]);
+          concat_scalar = cat != TY_UNKNOWN && cat != TY_POLY && !ty_is_array(cat);
+        }
       }
       else if (name && sp_streq(name, "replace") && an == 1 && recv >= 0 &&
                ty_is_array(infer_type(c, argv[0])) &&
@@ -2796,6 +2812,17 @@ static int infer_write_container_usage(Compiler *c, const NodeTable *nt, int nfb
         is_idx_write = 1; kt = infer_type(c, argv[0]); vt = infer_type(c, argv[1]);
         knode = argv[0]; vnode = argv[1];
       }
+      else if (name && is_hash_default_setter(name) && an == 1 && recv >= 0 &&
+               ty_is_hash(infer_type(c, recv)) && nt_kind(nt, argv[0]) != NK_NilNode) {
+        /* the default is a value the Hash answers (`h[missing]`), so it is
+           value evidence as a store is, under the key the Hash has. A nil
+           literal is none: a missing key already answers nil, and a typed
+           Hash keeps a nil default in its values' slot
+           (emit_op_hash_set_default). A local that holds nil reaches the
+           setter boxed, so it still counts. */
+        is_idx_write = 1; kt = ty_hash_key(infer_type(c, recv)); vt = infer_type(c, argv[0]);
+        vnode = argv[0];
+      }
       else if (name && (is_hash_merge_bang(name)) && an >= 1) {
         /* merging hashes into an empty-{} local writes their keys/values:
            key+value evidence exactly like []= (#2434) */
@@ -2830,10 +2857,13 @@ static int infer_write_container_usage(Compiler *c, const NodeTable *nt, int nfb
         is_idx_write = 1; is_splice = 1; is_fill = 1; vt = infer_type(c, argv[0]);
         kt = TY_INT;  /* a positional span, never hash evidence */
       }
-      else if (name && sp_streq(name, "fill") && an <= 2 && nt_ref(nt, id, "block") >= 0 &&
-               nt_kind(nt, nt_ref(nt, id, "block")) == NK_BlockNode) {
+      else if (name && ((sp_streq(name, "fill") && an <= 2) || (is_map_bang_alias(name) && an == 0)) &&
+               nt_ref(nt, id, "block") >= 0 && nt_kind(nt, nt_ref(nt, id, "block")) == NK_BlockNode) {
         /* the block form, fill([start[, len]]) { |i| v }: the block's value
-           is what goes into each slot of the span, the same evidence */
+           is what goes into each slot of the span, the same evidence. map!
+           { |x| v } writes every slot the same way, so a typed parameter or
+           ivar whose elements cannot hold v widens as for fill, where
+           widen_arrays_from_map_bang widens only a plain local. */
         int fblk = nt_ref(nt, id, "block");
         int fbody = nt_ref(nt, fblk, "body");
         int fbn = 0; const int *fbs = fbody >= 0 ? nt_arr(nt, fbody, "body", &fbn) : NULL;
@@ -2943,6 +2973,14 @@ static int infer_write_container_usage(Compiler *c, const NodeTable *nt, int nfb
       continue;
     }
     if (recv < 0) continue;
+    /* a parenthesized sequence stores into its value, the last statement's
+       (`(log << :d; a).push(x)` fills a as `a.push(x)` does); a single
+       parenthesized expression keeps the readings below */
+    int recv0 = recv;  /* as written, for widen_nested_literals */
+    if (nt_kind(nt, unwrap_parens(c, recv)) == NK_ParenthesesNode) {
+      int leaf = -1;
+      if (value_leaves(c, recv, &leaf, 0, 1) == 1) recv = leaf;
+    }
     if (elem_splat_index && nt_kind(nt, recv) != NK_LocalVariableReadNode) continue;
     const char *rty = nt_type(nt, recv);
     /* `(@h ||= {})[k] = v` fills @h exactly as `@h ||= {}; @h[k] = v` does,
@@ -2975,9 +3013,9 @@ static int infer_write_container_usage(Compiler *c, const NodeTable *nt, int nfb
       /* each pushed value is its own evidence (`a[0].push(2, "x")`) */
       if (elem_argv && elem_an - elem_from > 1)
         for (int ai = elem_from; ai < elem_an; ai++)
-          changed |= widen_nested_literals(c, recv, is_push, is_splice, (TyKind)kt, push_elem_ty(c, elem_argv[ai]));
+          changed |= widen_nested_literals(c, recv0, is_push, is_splice, (TyKind)kt, push_elem_ty(c, elem_argv[ai]));
       else
-        changed |= widen_nested_literals(c, recv, is_push, is_splice, (TyKind)kt, (TyKind)vt);
+        changed |= widen_nested_literals(c, recv0, is_push, is_splice, (TyKind)kt, (TyKind)vt);
     }
     /* fold into a local's type or an ivar's type (an empty `@buf=[]` filled by
        `@buf << x` infers its element type the same way a local does) */
@@ -2997,8 +3035,18 @@ static int infer_write_container_usage(Compiler *c, const NodeTable *nt, int nfb
          decided at run time is exempt, as it is for a typed parameter
          (#4481): the boxed store checks it, and raises for a foreign one. */
       if (lv && (!lv->is_param || lv->is_block_param) && lv->type == TY_POLY && (is_push || (is_idx_write && (is_splice || kt == TY_INT))) &&
-          vt != TY_UNKNOWN && vt != TY_POLY && !concat_scalar && (!is_splice || is_fill || splice_arr))
-        changed |= widen_boxed_array_sources(c, recv, (TyKind)vt, 0);
+          !concat_scalar && (!is_splice || is_fill || splice_arr)) {
+        /* each pushed value is its own evidence (`z.push(1, [2])`): their
+           join is poly, which says nothing about the arrays z holds */
+        if (elem_argv && elem_an - elem_from > 1) {
+          for (int ai = elem_from; ai < elem_an; ai++) {
+            TyKind et = push_elem_ty(c, elem_argv[ai]);
+            if (et != TY_UNKNOWN && et != TY_POLY) changed |= widen_boxed_array_sources(c, recv, et, 0);
+          }
+        }
+        else if (vt != TY_UNKNOWN && vt != TY_POLY)
+          changed |= widen_boxed_array_sources(c, recv, (TyKind)vt, 0);
+      }
       /* A proc or lambda literal's boxed parameter written as a Hash
          (`proc { |t| t[:k] = 2 }`): the Hashes its calls hand it take the
          key and value, as a method's boxed parameter's callers do */
@@ -3918,7 +3966,10 @@ int infer_write_types(Compiler *c) {
          temp whose type IS its receiver's); the per-iteration reset must not
          wipe it -- users of such a temp can precede its own (late, synthesized)
          write in node order and would re-derive from UNKNOWN forever (#2723) */
-      if (!lv->is_param && !lv->is_block_param && !lv->rbs_seeded) { lv->gc_root = (int)lv->type; lv->type = TY_UNKNOWN; }
+      if (!lv->is_param && !lv->is_block_param && !lv->rbs_seeded) {
+        lv->gc_root = (int)lv->type;
+        lv->type = TY_UNKNOWN;
+      }
     }
   /* Because of that reset, a site below that types a non-param local must NOT
      report `changed` itself: it is comparing against UNKNOWN, so it answers
@@ -4131,7 +4182,7 @@ int infer_write_types(Compiler *c) {
         const char *pnm = nt_str(nt, reqs[0], "name");
         Scope *lsc = pnm ? comp_scope_of(c, conds[j]) : NULL;
         LocalVar *plv = lsc ? scope_local(lsc, pnm) : NULL;
-        if (plv && plv->type != cpt) { plv->type = cpt; changed = 1; }
+        if (plv && plv->type != cpt && !lv_is_handle_of(c, plv, cpt)) { plv->type = cpt; changed = 1; }
       }
     }
   }
@@ -4330,6 +4381,9 @@ int infer_write_types(Compiler *c) {
       LocalVar *lv = &c->scopes[s].locals[i];
       if ((lv->str_shared || lv->str_append) &&
           (lv->type == TY_STRING || lv->type == TY_STR_ARRAY)) lv->type = TY_STRBUF;
+      /* --share-strings: a String Array the rule settled in its poly form
+         keeps it (share_default_apply) */
+      if (lv->elems_shared && lv->type == TY_STR_ARRAY) lv->type = TY_POLY_ARRAY;
     }
 
   /* Detect change vs the stashed old types -- over EXACTLY the slots the reset
@@ -5041,14 +5095,21 @@ static int container_literals(Compiler *c, int n, int *out, int nout, int cap, i
 }
 
 /* An element write or push whose receiver is an element read (`y[k][j] = v`,
-   `a[0] << v`) stores into a container literal nested in another: widens
+   `a[0] << v`), or a parenthesized sequence ending in a literal, stores
+   into a container literal (nested in another): widens
    each such literal the evidence does not fit, as a store through a
    variable holding it would. A boxed value is exempt, as it is there.
    Returns 1 on a change. */
 static int widen_nested_literals(Compiler *c, int recv, int is_push, int is_splice, TyKind kt, TyKind vt) {
   const NodeTable *nt = c->nt;
-  int r = unwrap_parens(c, recv);
-  if (r < 0 || nt_kind(nt, r) != NK_CallNode) return 0;
+  int r = unwrap_parens(c, recv), seq = 0;
+  /* `(log << :d; [9]).push([2])`: the sequence's value, its last statement,
+     is the literal stored into (a bare literal receiver is its own call's) */
+  if (r >= 0 && nt_kind(nt, r) == NK_ParenthesesNode) {
+    int leaf = -1;
+    if (value_leaves(c, r, &leaf, 0, 1) == 1) { r = leaf; seq = 1; }
+  }
+  if (r < 0 || !(nt_kind(nt, r) == NK_CallNode || (seq && nt_kind(nt, r) == NK_ArrayNode))) return 0;
   int lits[32];
   int nl = container_literals(c, r, lits, 0, 32, 0);
   int changed = 0;
@@ -7785,13 +7846,200 @@ static int infer_conditional_writer_param(Compiler *c, int id) {
   return slot_take(c, pv, infer_type(c, val), val);
 }
 
-int infer_param_types(Compiler *c) {
+static int ipt_id_cmp(const void *a, const void *b) {
+  int x = *(const int *)a, y = *(const int *)b;
+  return (x > y) - (x < y);
+}
+/* A parameter takes its type from the arguments its call sites pass, and
+   the pass binds every call site once, in node order. A chain whose callers
+   come later in the file (`def m1(s) = m2(s)` defined after m2, ... `m0`
+   last) then bound one link per round of the fixpoint, and each round
+   re-walks the whole program: quadratic in the chain. Here the call sites
+   inside a method whose parameter types the pass changed are bound again
+   at once, from a per-scope node index, so the chain settles in the pass.
+   After the first pass only the scopes the calls just bound may name are
+   looked at again, so each link costs its own calls. Bounded so an
+   oscillation is left to the fixpoint. The pass's own state: freed with
+   it. */
+typedef struct {
+  TyKind *snap;            /* per scope, its parameters' types, flattened */
+  int *off;                /* per scope, its first entry in snap */
+  int *nhead, *nnext;      /* per scope, its nodes (built on first use) */
+  int *bhead, *bnext;      /* the scopes by name, hashed into ns buckets
+                              (built on first use) */
+  int *bseen;              /* per bucket, the pass that last listed it */
+  int *cand; int ncand;    /* the scopes the last pass's calls may have
+                              bound; -1 after the first pass: every scope */
+  int *dirty; int ndirty;  /* the scopes whose parameters moved */
+  int *list; int nlist;    /* the nodes of the next pass */
+  long budget;
+  int pass;
+  int ns;                  /* the scopes at the pass's start: a binding may add
+                              a scope (a specialized copy), which only the next
+                              round of the fixpoint sees */
+} IptWork;
+/* Whether scope s's parameter types moved since the last look; records
+   the new ones */
+static int ipt_moved(Compiler *c, IptWork *w, int s) {
+  Scope *sc = &c->scopes[s];
+  /* a parameter a binding adds (a forwarder's) waits for the next round */
+  int np = w->off[s + 1] - w->off[s], moved = 0;
+  for (int k = 0; k < sc->nparams && k < np; k++) {
+    LocalVar *lv = sc->pnames[k] ? scope_local(sc, sc->pnames[k]) : NULL;
+    TyKind t = lv ? lv->type : TY_UNKNOWN;
+    if (w->snap[w->off[s] + k] != t) moved = 1;
+    w->snap[w->off[s] + k] = t;
+  }
+  return moved;
+}
+/* A value made of scope sc's own parameters and literals alone: a read of
+   one, a literal, or a builtin operator over such values (`k + 1`) */
+static int ipt_param_value(Compiler *c, Scope *sc, int v, int depth) {
+  const NodeTable *nt = c->nt;
+  if (v < 0 || depth > 4) return 0;
+  switch (nt_kind(nt, v)) {
+  case NK_IntegerNode: case NK_FloatNode: case NK_StringNode: case NK_SymbolNode:
+  case NK_TrueNode: case NK_FalseNode: case NK_NilNode:
+    return 1;
+  case NK_LocalVariableReadNode: {
+    const char *nm = nt_str(nt, v, "name");
+    LocalVar *lv = nm && sc ? scope_local(sc, nm) : NULL;
+    return lv && lv->is_param && nt_int(nt, v, "depth", 0) == 0;
+  }
+  case NK_CallNode: {
+    const char *nm = nt_str(nt, v, "name");
+    int a = nt_ref(nt, v, "arguments"), an = 0;
+    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
+    if (!nm || an != 1 || nt_ref(nt, v, "block") >= 0 || !is_basic_arith(nm)) return 0;
+    if (comp_method_index(c, nm) >= 0) return 0;   /* a user operator answers what it likes */
+    return ipt_param_value(c, sc, nt_ref(nt, v, "receiver"), depth + 1) &&
+           ipt_param_value(c, sc, av[0], depth + 1);
+  }
+  default:
+    return 0;
+  }
+}
+
+/* A call that hands its scope's parameters straight on to a method it names
+   on self: no receiver (or `self`), no block, and every argument made of the
+   scope's own parameters and literals (ipt_param_value). What it binds depends on those
+   parameters alone. Any other call reads a value the round derived before
+   this pass moved the parameters -- a local the write pass re-derives, a
+   receiver whose type follows them -- and bound again now it would hand a
+   callee a stale, wider type that a parameter never sheds (a computed
+   receiver still unknown binds every method of the name): it waits for the
+   next round, as before. */
+static int ipt_forwards_params(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  if (nt_kind(nt, id) != NK_CallNode || nt_ref(nt, id, "block") >= 0) return 0;
+  int r = nt_ref(nt, id, "receiver");
+  if (r >= 0 && nt_kind(nt, r) != NK_SelfNode) return 0;
+  int a = nt_ref(nt, id, "arguments"), an = 0;
+  const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
+  if (an == 0) return 0;
+  Scope *sc = comp_scope_of(c, id);
+  for (int k = 0; k < an; k++)
+    if (!ipt_param_value(c, sc, av[k], 0)) return 0;
+  return 1;
+}
+
+static void *ipt_alloc(size_t n, size_t sz, int zero) {
+  void *p = zero ? calloc(n ? n : 1, sz) : malloc((n ? n : 1) * sz);
+  if (!p) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+  return p;
+}
+static void ipt_work_begin(Compiler *c, IptWork *w) {
+  memset(w, 0, sizeof *w);
+  int ns = c->nscopes, np = 0;
+  w->ns = ns;
+  w->off = ipt_alloc((size_t)ns + 1, sizeof(int), 0);
+  for (int s = 0; s < ns; s++) { w->off[s] = np; np += c->scopes[s].nparams; }
+  w->off[ns] = np;
+  w->snap = ipt_alloc((size_t)np, sizeof(TyKind), 0);
+  for (int s = 0; s < ns; s++) ipt_moved(c, w, s);
+  w->cand = ipt_alloc((size_t)ns, sizeof(int), 0);
+  w->dirty = ipt_alloc((size_t)ns, sizeof(int), 0);
+  w->ncand = -1;
+  w->budget = 4L * c->nt->count + 64;
+}
+static void ipt_work_index(Compiler *c, IptWork *w) {
+  const NodeTable *nt = c->nt;
+  int ns = w->ns;
+  w->nhead = ipt_alloc((size_t)ns, sizeof(int), 0);
+  w->nnext = ipt_alloc((size_t)nt->count, sizeof(int), 0);
+  w->list = ipt_alloc((size_t)nt->count, sizeof(int), 0);
+  w->bhead = ipt_alloc((size_t)ns, sizeof(int), 0);
+  w->bnext = ipt_alloc((size_t)ns, sizeof(int), 0);
+  w->bseen = ipt_alloc((size_t)ns, sizeof(int), 1);
+  for (int s = 0; s < ns; s++) w->nhead[s] = w->bhead[s] = -1;
+  for (int id = nt->count - 1; id >= 0; id--) {
+    int s = c->nscope[id];
+    if (s < 0 || s >= ns) continue;
+    w->nnext[id] = w->nhead[s]; w->nhead[s] = id;
+  }
+  for (int s = ns - 1; s >= 0; s--) {
+    const char *nm = c->scopes[s].name;
+    if (!nm) continue;
+    unsigned b = sp_strhash(nm) % (unsigned)ns;
+    w->bnext[s] = w->bhead[b]; w->bhead[b] = s;
+  }
+}
+static int ipt_work_next(Compiler *c, IptWork *w, const int **ids, int *nids) {
+  const NodeTable *nt = c->nt;
+  int ns = w->ns;
+  w->ndirty = 0;
+  if (w->ncand < 0) {
+    for (int s = 0; s < ns; s++)
+      if (ipt_moved(c, w, s)) w->dirty[w->ndirty++] = s;
+  }
+  else {
+    for (int i = 0; i < w->ncand; i++)
+      if (ipt_moved(c, w, w->cand[i])) w->dirty[w->ndirty++] = w->cand[i];
+  }
+  if (!w->ndirty || w->budget <= 0) return 0;
+  if (!w->nhead) ipt_work_index(c, w);
+  w->nlist = 0;
+  for (int i = 0; i < w->ndirty; i++)
+    for (int id = w->nhead[w->dirty[i]]; id >= 0; id = w->nnext[id])
+      if (ipt_forwards_params(c, id)) w->list[w->nlist++] = id;
+  qsort(w->list, (size_t)w->nlist, sizeof(int), ipt_id_cmp);
+  w->budget -= w->nlist;
+  /* the scopes these calls may bind: every method of their names, each
+     bucket once */
+  w->pass++;
+  w->ncand = 0;
+  for (int i = 0; i < w->nlist; i++) {
+    const char *nm = nt_str(nt, w->list[i], "name");
+    if (!nm) continue;
+    unsigned b = sp_strhash(nm) % (unsigned)ns;
+    if (w->bseen[b] == w->pass) continue;
+    w->bseen[b] = w->pass;
+    for (int s = w->bhead[b]; s >= 0; s = w->bnext[s]) w->cand[w->ncand++] = s;
+  }
+  *ids = w->list; *nids = w->nlist;
+  return w->nlist > 0;
+}
+static void ipt_work_end(IptWork *w) {
+  free(w->snap); free(w->off); free(w->nhead); free(w->nnext); free(w->list);
+  free(w->bhead); free(w->bnext); free(w->bseen); free(w->cand); free(w->dirty);
+}
+
+static int infer_param_types_ex(Compiler *c, int settle);
+int infer_param_types(Compiler *c) { return infer_param_types_ex(c, 0); }
+int infer_param_types_settle(Compiler *c) { return infer_param_types_ex(c, 1); }
+static int infer_param_types_ex(Compiler *c, int settle) {
   const NodeTable *nt = c->nt;
   int changed = 0, any = 0;
   /* the walks the bindings start share what they found unchanged, until a
      binding reports a change (widen_boxed_array_sources) */
   wbas_share_begin(&changed, &any);
-  for (int id = 0; id < nt->count; id++, wbas_share_step(&changed, &any)) {
+  IptWork w;
+  ipt_work_begin(c, &w);
+  const int *ids = NULL;
+  int nids = nt->count;
+  for (;;) {
+  for (int k = 0; k < nids; k++, wbas_share_step(&changed, &any)) {
+    int id = ids ? ids[k] : k;
     const char *ty = nt_type(nt, id);
     if (!ty) continue;
     if (sp_streq(ty, "SuperNode") || sp_streq(ty, "ForwardingSuperNode")) {
@@ -8289,6 +8537,12 @@ int infer_param_types(Compiler *c) {
          field read and arithmetic on it went through the boxed path (#3984). */
       int lci = (rty && sp_streq(rty, "LocalVariableReadNode") && sp_streq(name, "new"))
                 ? class_var_static_ci(c, recv) : -1;
+      /* So is one built inline, `Struct.new(:a).new(v)` or
+         `Data.define(:a).new(a: v)`: the anon class synthesized for that
+         call node. Left poly, a String member was a boxed copy that an
+         append through its reader never reached. */
+      if (lci < 0 && nt_kind(nt, recv) == NK_CallNode && is_struct_constructor(name) && is_struct_call(c, recv))
+        lci = class_var_static_ci(c, recv);
       if (lci >= 0 && !c->classes[lci].is_struct) lci = -1;
       if ((rty && (sp_streq(rty, "ConstantReadNode") ||
                    sp_streq(rty, "ConstantPathNode"))) || lci >= 0) {
@@ -8435,15 +8689,24 @@ int infer_param_types(Compiler *c) {
           changed |= bind_call_params(c, id, pcs[pi].mi);
       }
     }
-    /* a builtin receiver (a Hash, an Array, ...) whose class the program does
-       not reopen with the name: the call is Object's method (codegen's
-       universal fallback), which then takes this call's arguments */
+    /* A builtin receiver's own reopening takes this call's arguments too,
+       including non-Symbol keys that widen its keyword-rest hash. */
     else if (rt != TY_UNKNOWN && rt != TY_VOID && name) {
+      const char *bc = rt == TY_RANDOM ? "Random" :
+                       rt == TY_STRBUF ? "String" : builtin_class_of_type(rt);
+      int bci = bc ? comp_class_index(c, bc) : -1;
+      int bmi = bci >= 0 && !nt_int(nt, id, "builtin_only", 0)
+                ? comp_method_in_chain(c, bci, name, NULL) : -1;
+      if (bmi >= 0) { changed |= bind_call_params(c, id, bmi); continue; }
+      /* Without one, the call reaches Object's universal fallback. */
       int ocb = comp_class_index(c, "Object");
       int omb = ocb >= 0 ? comp_method_in_chain(c, ocb, name, NULL) : -1;
       if (omb >= 0 && !c->scopes[omb].is_cmethod) changed |= bind_call_params(c, id, omb);
     }
   }
+  if (!settle || !ipt_work_next(c, &w, &ids, &nids)) break;
+  }
+  ipt_work_end(&w);
   wbas_share_end();
   return changed | any;
 }
@@ -8585,6 +8848,10 @@ int infer_catch_block_params(Compiler *c) {
     TyKind want = an == 1 ? infer_type(c, av[0]) : TY_STRING;
     if (want == TY_UNKNOWN) continue;
     if (an == 1 && lv->type != TY_UNKNOWN && lv->type != want) want = TY_POLY;
+    /* --share-strings: a String tag the rule made the shared handle is
+       that String already; resetting it each round kept the fixpoint from
+       settling */
+    if (lv_is_handle_of(c, lv, want)) continue;
     if (lv->type != want) { lv->type = want; changed = 1; }
   }
   return changed;
@@ -12829,8 +13096,15 @@ static int infer_block_params_container_arms(Compiler *c, const NodeTable *nt, i
           int re_n2 = 0;
           const int *re_els2 = nt_arr(nt, recv, "elements", &re_n2);
           TyKind common_at = TY_UNKNOWN;
-          for (int ri = 0; ri < re_n2; ri++)
-            common_at = ty_unify(common_at, infer_type(c, re_els2[ri]));
+          for (int ri = 0; ri < re_n2; ri++) {
+            TyKind row_at = infer_type(c, re_els2[ri]);
+            /* An empty `[]` row has no kind of its own and is built boxed, as
+               a poly array. Left open it unified away, the parameters took
+               the other rows' element type, and the loop read that row as a
+               typed array: `[[1, 2], []].each { |a, b| }` bound 0 and 0. */
+            if (row_at == TY_UNKNOWN && node_is_empty_container(nt, re_els2[ri])) row_at = TY_POLY;
+            common_at = ty_unify(common_at, row_at);
+          }
           if (ty_is_array(common_at)) inner_elem = ty_array_elem(common_at);
           else inner_elem = TY_POLY;
         }
@@ -13692,7 +13966,7 @@ int infer_block_params(Compiler *c) {
         const char *nm = numbered_param_name(c, pn, k - 1);
         if (!nm) continue;
         LocalVar *lv = scope_local_intern(bs, nm); lv->is_block_param = 1;
-        if (!intern_only && lv->type != rt) { lv->type = rt; changed = 1; }
+        if (!intern_only && lv->type != rt && !lv_is_handle_of(c, lv, rt)) { lv->type = rt; changed = 1; }
       }
       continue;
     }
@@ -13703,7 +13977,7 @@ int infer_block_params(Compiler *c) {
       const char *p = nt_str(nt, reqs[k], "name");
       if (!p) continue;
       LocalVar *lv = scope_local_intern(bs, p); lv->is_block_param = 1;
-      if (!intern_only && lv->type != rt) { lv->type = rt; changed = 1; }
+      if (!intern_only && lv->type != rt && !lv_is_handle_of(c, lv, rt)) { lv->type = rt; changed = 1; }
     }
   }
 
@@ -13861,6 +14135,8 @@ int infer_block_params(Compiler *c) {
     /* then / yield_self: block param receives the receiver value */
     if ((is_then_alias(name)) && p0) {
       Scope *bs = comp_scope_of(c, block);
+      LocalVar *plv = scope_local(bs, p0);
+      if (plv && lv_is_handle_of(c, plv, rt)) continue;
       if (bp_widen(bs, p0, rt == TY_NIL ? TY_POLY : rt)) changed = 1;
       continue;
     }
@@ -14068,6 +14344,11 @@ int infer_block_params(Compiler *c) {
                  to a const char * */
               sp_streq(name, "transform_keys") || sp_streq(name, "transform_values") ||
               sp_streq(name, "each_key") || sp_streq(name, "each_value") ||
+              /* each_pair is each's alias: left off, its key param kept the
+                 Symbol a round typed it with while one site's Symbol-keyed
+                 Hash was all the receiver held, and once another site widened
+                 the receiver to a boxed value a String key read as a Symbol */
+              sp_streq(name, "each_pair") ||
               sp_streq(name, "delete_if") || sp_streq(name, "keep_if") ||
               sp_streq(name, "select!") || sp_streq(name, "filter!") ||
               sp_streq(name, "reject!")))
@@ -14076,6 +14357,16 @@ int infer_block_params(Compiler *c) {
     { int r = infer_block_params_enum_arms(c, nt, id, block, name, recv, rt, p0); changed |= r & 1; if (r & 2) continue; }
 
     { int r = infer_block_params_container_arms(c, nt, id, block, name, recv, rt, p0, pt); changed |= r & 1; if (r & 2) continue; }
+
+    /* A stage of a lazy chain (`[s].lazy.map { |x| }`) binds each element
+       boxed, as the pipeline reads it out of sp_enum_items_from. Left
+       untyped, the usage pass typed the parameter from its body instead:
+       `x << "!"` made it an Array, the String element was read as one, and
+       the program crashed. A stage with several parameters destructures
+       boxed elements already. */
+    if (pt == TY_UNKNOWN && rt == TY_UNKNOWN && recv >= 0 && p0 &&
+        !block_param_name(c, block, 1) && chain_is_lazy_valued(c, recv))
+      pt = TY_POLY;
 
     if (pt == TY_UNKNOWN) continue;
     Scope *s = comp_scope_of(c, block);
@@ -14361,6 +14652,383 @@ int backprop_hash_return_types(Compiler *c) {
   return changed;
 }
 
+/* infer_return_types' per-pass tables, which irt_scope reads */
+typedef struct {
+  TyKind *ret_acc; char *has_ret; char *ret_empty;
+  int *ret_head, *ret_next;
+  TyKind *ret_narrow;
+  char *moved;            /* per scope: the pass changed its value */
+} IrtCtx;
+static int irt_settle_callers(Compiler *c, IrtCtx *x);
+
+/* infer_return_types' derivation of scope s's value from its body and its
+   explicit returns (x's tables); 1 when anything it sets changed */
+static int irt_scope(Compiler *c, int s, IrtCtx *x) {
+  const NodeTable *nt = c->nt;
+  TyKind *ret_acc = x->ret_acc; char *has_ret = x->has_ret; char *ret_empty = x->ret_empty;
+  int *ret_head = x->ret_head, *ret_next = x->ret_next;
+  (void)ret_empty; (void)ret_next;
+  int ch = 0;
+  Scope *sc = &c->scopes[s];
+  /* Specialized inherited-cls-new copies keep their fixed subclass return
+     type (the shared body's bare `new` would otherwise infer the base). */
+  if (sc->ret_specialized) return ch;
+  /* An --rbs-seeded return is pinned, with one exception: a scalar-valued
+     str-keyed hash return (Hash[String,String] / Hash[String,Integer]) whose
+     body actually builds a poly-valued StrPolyHash (mixed / non-scalar
+     values -- the RBS value type is too narrow for what the code returns).
+     Emitting the StrPolyHash body through a StrStrHash* signature is a layout
+     mismatch that corrupts every read, so let the body widen the return to
+     its poly-valued sibling. Every other rbs-seeded return stays pinned. */
+  if (sc->ret_rbs_seeded) {
+    if (sc->ret == TY_STR_STR_HASH || sc->ret == TY_STR_INT_HASH) {
+      TyKind br = sc->body >= 0 ? infer_type(c, sc->body) : TY_UNKNOWN;
+      if (has_ret && has_ret[s]) br = ty_unify(br, ret_acc[s]);
+      if (br == TY_STR_POLY_HASH) { sc->ret = TY_STR_POLY_HASH; ch = 1; }
+    }
+    /* Same shape, and the same reason. RBS `Integer` covers both machine
+       ints and bignums, so a body that grew a bignum is a valid inhabitant
+       of the declared type -- but the seed had already pinned the signature
+       to sp_int, and returning an sp_Bigint* through it truncates the
+       pointer and answers garbage. Declaring the type correctly made the
+       program worse than not declaring it at all (#3518). */
+    else if (sc->ret == TY_INT) {
+      TyKind br = sc->body >= 0 ? infer_type(c, sc->body) : TY_UNKNOWN;
+      if (has_ret && has_ret[s]) br = ty_unify(br, ret_acc[s]);
+      if (br == TY_BIGINT) { sc->ret = TY_BIGINT; ch = 1; }
+    }
+    return ch;
+  }
+  /* A return narrowed to a pointer array is pinned the same way. The body
+     still reads the poly array, and those two array KINDS unify to the plain
+     poly SCALAR -- so re-deriving would make the slot strictly worse, and
+     reporting that as a change every round runs the fixpoint to its cap. */
+  if (sc->ret_oa_pin != TY_UNKNOWN) return ch;
+  /* synthesized compiler_state methods carry a fixed return type (no AST). */
+  if (sc->cs_synth) return ch;
+  /* A lowered self-recursive yield method returns its block's value through
+     a raw sp_int carrier pinned when the lowering rewrites the scope
+     (post-fixpoint); re-deriving from the body would break that ABI. */
+  if (sc->is_lowered_yield) return ch;
+  /* An empty method body returns nil; if its value is used at all it must
+     be poly (a void C function yields nothing to read). */
+  int empty_body = sc->body < 0;
+  if (sc->body >= 0 && nt_kind(nt, sc->body) == NK_StatementsNode) {
+    int bn = 0; nt_arr(nt, sc->body, "body", &bn); if (bn == 0) empty_body = 1;
+  }
+  /* A trailing infinite loop (`while true` / `until false`) with no
+     top-level break can't fall through, so its nil value is unreachable:
+     when explicit returns exist, they alone type the method instead of
+     nil-widening it to poly. A breaking or finite loop still contributes
+     its nil fall-through, as CRuby does. */
+  int tail_unreachable = 0;
+  if (!empty_body && has_ret && has_ret[s] &&
+      nt_kind(nt, sc->body) == NK_StatementsNode) {
+    int bn2 = 0; const int *bb2 = nt_arr(nt, sc->body, "body", &bn2);
+    if (bn2 > 0) {
+      int last = bb2[bn2 - 1];
+      NodeKind lk = nt_kind(nt, last);
+      if (lk == NK_WhileNode || lk == NK_UntilNode) {
+        int pred = nt_ref(nt, last, "predicate");
+        const char *cty = pred >= 0 ? nt_type(nt, pred) : NULL;
+        int infinite = cty && ((lk == NK_WhileNode && sp_streq(cty, "TrueNode")) ||
+                               (lk == NK_UntilNode && sp_streq(cty, "FalseNode")));
+        int lbody = nt_ref(nt, last, "statements");
+        if (infinite && (lbody < 0 || !block_has_top_break(c, lbody)))
+          tail_unreachable = 1;
+      }
+      /* A trailing `raise` is unreachable-fall-through for the same reason:
+         the method never returns through it, so its (void) value must not
+         be unified with the explicit returns. Unifying void with Integer
+         has no rule and lands on poly, which then boxes the return of a
+         `return x if cond; raise` guard method and everything downstream
+         of its callers. Same rule the branch arms got for raise. */
+      else if (lk == NK_CallNode && nt_ref(nt, last, "receiver") < 0) {
+        const char *lnm = nt_str(nt, last, "name");
+        if (lnm && is_diverging_call(lnm))
+          tail_unreachable = 1;
+      }
+    }
+  }
+  TyKind r = empty_body ? TY_POLY
+           : tail_unreachable ? ret_acc[s]
+           : infer_type(c, sc->body);
+  /* a bare `Array.new` tail returns the poly array a marked `[]` tail
+     does (mark_empty_literal_tails) */
+  if (r == TY_UNKNOWN && !empty_body && !(has_ret && has_ret[s]) &&
+      an_empty_container_kind(c, sc->body) == 1)
+    r = TY_POLY_ARRAY;
+  /* A yielding method whose body ends in `if block_given? ... else ... end`
+     has two values, one per call form, and the inliner keeps only the arm a
+     call site takes: the block arm types the call with a block, the else
+     arm the call without one (Scope.ret_noblock, read by method_call_ret).
+     Unified, the Enumerator of the one arm and the memo of the other made
+     the method poly for both (builtins/enumerable.rb). */
+  if (!empty_body && !tail_unreachable && sc->yields && nt_kind(nt, sc->body) == NK_StatementsNode) {
+    int bn3 = 0; const int *bb3 = nt_arr(nt, sc->body, "body", &bn3);
+    int last = bn3 > 0 ? bb3[bn3 - 1] : -1;
+    int pred = last >= 0 && nt_kind(nt, last) == NK_IfNode ? nt_ref(nt, last, "predicate") : -1;
+    int sub = last >= 0 ? nt_ref(nt, last, "subsequent") : -1;
+    if (pred >= 0 && nt_kind(nt, pred) == NK_CallNode && nt_ref(nt, pred, "receiver") < 0 &&
+        nt_str(nt, pred, "name") && sp_streq(nt_str(nt, pred, "name"), "block_given?") &&
+        sub >= 0 && nt_kind(nt, sub) == NK_ElseNode) {
+      int ts = nt_ref(nt, last, "statements"), es = nt_ref(nt, sub, "statements");
+      int tn3 = 0; const int *tb3 = ts >= 0 ? nt_arr(nt, ts, "body", &tn3) : NULL;
+      int en3 = 0; const int *eb3 = es >= 0 ? nt_arr(nt, es, "body", &en3) : NULL;
+      TyKind et = en3 > 0 ? infer_type(c, eb3[en3 - 1]) : TY_NIL;
+      if (et != TY_UNKNOWN && sc->ret_noblock != et) sc->ret_noblock = et;
+      /* a block arm ending in `yield` is typed per call site by
+         method_call_ret, as a yield-tailed body is; any other block arm
+         types the method alone, even while it is still unknown: letting
+         the unified body type stand in would hand a call with a block the
+         else arm's Enumerator on the round before the memo settles, and a
+         local only widens from there */
+      if (!(tn3 > 0 && nt_kind(nt, tb3[tn3 - 1]) == NK_YieldNode)) {
+        TyKind bt = tn3 > 0 ? infer_type(c, tb3[tn3 - 1]) : TY_NIL;
+        r = bt != TY_UNKNOWN && has_ret && has_ret[s] ? ty_unify(bt, ret_acc[s]) : bt;
+        goto ret_decided;
+      }
+    }
+  }
+  /* explicit returns within this scope (collected above) */
+  if (!tail_unreachable && has_ret && has_ret[s]) {
+    /* An empty `[]` / `{}` value is still untyped, and the unify took the
+       other values' type for it: `return 1 if b; {}` returned the hash
+       pointer through an sp_int. Beside a value of another kind it is a
+       container all the same, so the method boxes (the if/else rule). */
+    int tk = empty_body ? 0 : an_empty_container_kind(c, sc->body);
+    if (r == TY_UNKNOWN && an_empty_container_disagrees(tk, ret_acc[s])) r = TY_POLY;
+    r = ty_unify(r, ret_acc[s]);
+  }
+  if (has_ret && has_ret[s] && ret_empty && ret_empty[s] &&
+      (an_empty_container_disagrees(ret_empty[s] & 1, r) ||
+       an_empty_container_disagrees(ret_empty[s] & 2, r)))
+    r = TY_POLY;
+  ret_decided:
+  /* A value a caller's parameter stores elements of another kind into is
+     the general Array (widen_array_sources); its values re-derive their
+     typed kinds, which unify to the poly scalar when they differ. One that
+     stops being an array at all loses the pin. */
+  if (sc->ret_poly_array_pin) {
+    if (r == TY_UNKNOWN || r == TY_POLY || (ty_is_array(r) && !ty_is_ptr_array(r))) r = TY_POLY_ARRAY;
+    else sc->ret_poly_array_pin = 0;
+  }
+  /* Post-backstop re-runs fill returns whose body only settled after the
+     main fixpoint (a `r = expr; r` chain, #1670). Adopting a NEW poly there
+     is a net loss: the late-settling chains that matter are scalar, while a
+     previously-UNKNOWN return deriving poly is typically a store-style
+     method whose value no caller reads -- boxing it puts an sp_RbVal
+     return in optcarrot's hottest poke path for ~4% fps. Keep those at
+     their pre-pass type; the main fixpoint still widens to poly freely. */
+  if (g_ret_no_new_poly == 1 && r == TY_POLY && sc->ret != TY_POLY) return ch;
+  /* At 2 (the late ivar-widening re-run) a return follows its body only
+     where the ivar the body answers widened after the return was derived:
+     a concrete type to poly (a String reading over a poly value does not
+     build, #4451), and an Integer to a Bignum (`def get = @v` returned a
+     promoted loop local's Bignum through an sp_int). Everything else is
+     left where the earlier, gated re-runs settled it. */
+  if (g_ret_no_new_poly == 2 &&
+      !(r == TY_POLY && sc->ret != TY_POLY && sc->ret != TY_UNKNOWN && sc->ret != TY_VOID && sc->ret != TY_NIL) &&
+      !(r == TY_BIGINT && sc->ret == TY_INT)) return ch;
+  /* An element-less-hash body (`{}` / Hash.new) infers TY_UNKNOWN every pass
+     (no witnessed element). Once a caller has pinned it to a concrete hash
+     (backprop_hash_return_types), don't collapse it back to UNKNOWN -- that
+     would re-emit a void C signature the caller can't assign (#1680). */
+  if (r == TY_UNKNOWN && ty_is_hash(sc->ret) && scope_tail_empty_hash(c, s) >= 0) return ch;
+  /* A void body-recompute must not downgrade an established return: an
+     abstract/raising body infers TY_VOID every pass, while the slot's real
+     type comes from descendant-override dispatch unification (or a caller
+     backprop). Re-deriving VOID here would flip the slot every iteration
+     and the fixpoint never converges. */
+  if (r == TY_VOID && sc->ret != TY_UNKNOWN && sc->ret != TY_VOID) return ch;
+  /* A tail that nothing resolves derives UNKNOWN every round. The arm at the
+     end of this pass owns that case -- it gives such a method POLY when a
+     caller reads its value -- and its own guard then skips the method. Undo
+     that here and the two take turns to the fixpoint's cap (#4116). Narrow
+     on purpose: only an established POLY, and only for the shape that arm
+     claims, so a return that re-derives UNKNOWN for any other reason still
+     corrects downward. */
+  if (r == TY_UNKNOWN && sc->ret == TY_POLY && scope_tail_unresolved_call(c, s)) return ch;
+  if (r != sc->ret) {
+    if (ty_degraded(r) && !ty_degraded(sc->ret)) {
+      /* the value that degraded the return: the body's tail if its type
+         did, else the first explicit return whose value did, else (two
+         concrete kinds that disagree) the tail, with the first return as
+         the other side */
+      int node = -1, other = -1; TyKind then = TY_UNKNOWN;
+      int tail = (!empty_body && !tail_unreachable && sc->body >= 0) ? sc->body : -1;
+      if (tail >= 0 && tail < c->node_cap && ty_degraded(c->ntype[tail])) { node = tail; then = c->ntype[tail]; }
+      else if (ret_head && ret_next) {
+        for (int rid = ret_head[s]; rid >= 0; rid = ret_next[rid]) {
+          TyKind rt = return_node_type(c, rid);
+          if (ty_degraded(rt)) { node = return_value_node(c, rid); then = rt; break; }
+        }
+      }
+      if (node < 0) {
+        /* two concrete kinds met. One side is the tail when it has a type
+           at this point, else the first typed `return`; the other is the
+           first `return` of a different kind (the list's head can be one
+           of the same kind, which said "String, where a `return` gives
+           String"; String and its mutable refinement are one kind). */
+        TyKind tt = (tail >= 0 && tail < c->node_cap) ? c->ntype[tail] : TY_UNKNOWN;
+        if (tt != TY_UNKNOWN) { node = tail; then = tt; }
+        if (ret_head)
+          for (int rid = ret_head[s]; rid >= 0; rid = ret_next[rid]) {
+            TyKind rt = return_node_type(c, rid);
+            if (rt == TY_UNKNOWN) continue;
+            if (node < 0) { node = return_value_node(c, rid); then = rt; continue; }
+            int same = rt == then || ((rt == TY_STRING || rt == TY_STRBUF) && (then == TY_STRING || then == TY_STRBUF));
+            if (!same) { other = return_value_node(c, rid); break; }
+          }
+        if (node < 0) { node = tail; then = r; }
+      }
+      sc->ret_why.node = node; sc->ret_why.other = other; sc->ret_why.prev = sc->ret;
+      sc->ret_why.then = then; sc->ret_why.round = g_infer_round;
+    }
+    else if (!ty_degraded(r)) why_reset(&sc->ret_why);
+    sc->ret = r; ch = 1;
+  }
+  /* For a method with a &block param, record the value type its block yields
+     (unified across all call sites). Blocks passed to it are emitted returning
+     this common type so the sp_proc_call ABI is consistent. */
+  if (sc->blk_param && sc->blk_param[0] && !sc->yields && !sc->is_lowered_yield) {
+    TyKind bvt = yield_value_type(c, (int)(sc - c->scopes));
+    if (bvt != TY_UNKNOWN && sc->blk_ret != (int)bvt) { sc->blk_ret = (int)bvt; ch = 1; }
+  }
+  /* When the method returns a proc, record the proc's body return type so a
+     caller's `m.call(...)` resolves its result type (factory pattern). */
+  if (r == TY_PROC) {
+    TyKind pr = TY_UNKNOWN;
+    if (sc->body >= 0) {
+      int bn = 0; const int *bb = nt_arr(nt, sc->body, "body", &bn);
+      if (bn > 0) pr = proc_ret_of(c, bb[bn - 1]);
+    }
+    if (ret_head && ret_next) {
+      for (int id = ret_head[s]; id >= 0; id = ret_next[id]) {
+        int a = nt_ref(nt, id, "arguments"); int an = 0;
+        const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
+        if (an > 0) pr = ty_unify(pr == TY_UNKNOWN ? TY_UNKNOWN : pr, proc_ret_of(c, av[0]));
+      }
+    }
+    else for (int id = 0; id < nt->count; id++) {
+      const char *ty = nt_type(nt, id);
+      if (ty && sp_streq(ty, "ReturnNode") && comp_scope_of(c, id) == sc) {
+        int a = nt_ref(nt, id, "arguments"); int an = 0;
+        const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
+        if (an > 0) pr = ty_unify(pr == TY_UNKNOWN ? TY_UNKNOWN : pr, proc_ret_of(c, av[0]));
+      }
+    }
+    if (pr != TY_UNKNOWN && sc->ret_proc_ret != (int)pr) { sc->ret_proc_ret = (int)pr; ch = 1; }
+  }
+  return ch;
+}
+
+/* Scope s's explicit returns typed again (the pass collected them before
+   any method's value moved): ret_acc and has_ret from its own return list */
+static void irt_explicit_returns(Compiler *c, int s, IrtCtx *x) {
+  if (!x->ret_head || !x->ret_next) return;
+  x->has_ret[s] = 0;
+  for (int id = x->ret_head[s]; id >= 0; id = x->ret_next[id]) {
+    TyKind rt = (x->ret_narrow && x->ret_narrow[id]) ? x->ret_narrow[id] : return_node_type(c, id);
+    x->ret_acc[s] = x->has_ret[s] ? ty_unify(x->ret_acc[s], rt) : rt;
+    x->has_ret[s] = 1;
+    if (rt == TY_UNKNOWN && x->ret_empty)
+      x->ret_empty[s] |= (char)an_empty_container_kind(c, return_value_node(c, id));
+  }
+}
+
+/* The value of a method that ends in a call is its callee's, and the pass
+   above derives every method once, in definition order. A chain whose
+   callees come later in the file (`def m0(s) = m1(s)` ... `def mN(s) =
+   s.size`) then settled one link per round of the fixpoint, and each round
+   re-walks the whole program: a 1,200-method chain took 1,203 rounds and
+   6 s. Here a method whose value changed has its callers derived again
+   at once, from a worklist, so the chain settles in the pass. The callers
+   are found by name (the scopes whose calls, blocks included, use the
+   changed method's name), which over-approximates a dispatch; a
+   caller derived again only reaches the answer a later round would have.
+   Bounded so an oscillation is left to the fixpoint. */
+static int irt_settle_callers(Compiler *c, IrtCtx *x) {
+  const NodeTable *nt = c->nt;
+  int ns = c->nscopes, changed = 0;
+  if (ns < 2) return 0;
+  /* nothing moved (a settled round): no caller to derive again */
+  int any = 0;
+  for (int s = 1; s < ns && !any; s++) any = x->moved[s];
+  if (!any) return 0;
+  /* The callers by called NAME: one group per distinct name a call uses,
+     holding the scopes that make such a call, each once. A method moving
+     queues its name's group, so the cost is linear in the calls and the
+     scopes however many classes define the name (a name in N classes called
+     from M sites is one group of at most M scopes, not N x M edges). Built
+     only in a pass where a value moved: one walk of the calls, as the pass
+     itself walks the program. */
+  int ncall = 0;
+  NT_FOREACH_KIND(nt, NK_CallNode, id) ncall++;
+  int nb = ncall > 0 ? ncall : 1;
+  int *bhead = malloc(sizeof(int) * (size_t)nb);          /* bucket -> group */
+  const char **gname = malloc(sizeof(char *) * (size_t)nb);
+  int *gnext = malloc(sizeof(int) * (size_t)nb);          /* group chain in its bucket */
+  int *gfirst = malloc(sizeof(int) * (size_t)nb);         /* group -> its first member */
+  int *mscope = malloc(sizeof(int) * (size_t)nb), *mnext = malloc(sizeof(int) * (size_t)nb);
+  int *last = malloc(sizeof(int) * (size_t)nb);           /* group -> its last member's scope */
+  if (!bhead || !gname || !gnext || !gfirst || !mscope || !mnext || !last) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+  for (int b = 0; b < nb; b++) bhead[b] = -1;
+  int ng = 0, nm = 0;
+  NT_FOREACH_KIND(nt, NK_CallNode, id) {
+    const char *nmv = nt_str(nt, id, "name");
+    int caller = c->nscope[id];
+    if (!nmv || caller < 1 || caller >= ns) continue;
+    unsigned b = sp_strhash(nmv) % (unsigned)nb;
+    int g = bhead[b];
+    while (g >= 0 && !sp_streq(gname[g], nmv)) g = gnext[g];
+    if (g < 0) { g = ng++; gname[g] = nmv; gnext[g] = bhead[b]; bhead[b] = g; gfirst[g] = -1; last[g] = -1; }
+    if (last[g] == caller) continue;   /* calls of one scope are mostly adjacent */
+    last[g] = caller;
+    mscope[nm] = caller; mnext[nm] = gfirst[g]; gfirst[g] = nm; nm++;
+  }
+  /* a scope's group, through its name */
+  int *sgroup = malloc(sizeof(int) * (size_t)ns);
+  if (!sgroup) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+  for (int s = 0; s < ns; s++) {
+    sgroup[s] = -1;
+    const char *sn = c->scopes[s].name;
+    if (!sn || s == 0) continue;
+    int g = bhead[sp_strhash(sn) % (unsigned)nb];
+    while (g >= 0 && !sp_streq(gname[g], sn)) g = gnext[g];
+    sgroup[s] = g;
+  }
+  /* two worklists: the name groups a moved method queued, and the scopes
+     their callers are; a scope or a group is queued at most once at a time */
+  int *wl = malloc(sizeof(int) * (size_t)ns), *gl = malloc(sizeof(int) * (size_t)(ng > 0 ? ng : 1));
+  char *queued = calloc((size_t)ns, 1), *gqueued = calloc((size_t)(ng > 0 ? ng : 1), 1);
+  if (!wl || !gl || !queued || !gqueued) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+  int wn = 0, gn = 0;
+  for (int s = 1; s < ns; s++)
+    if (x->moved[s] && sgroup[s] >= 0 && !gqueued[sgroup[s]]) { gqueued[sgroup[s]] = 1; gl[gn++] = sgroup[s]; }
+  long budget = 4L * ns + 64;
+  for (;;) {
+    while (gn > 0) {
+      int g = gl[--gn];
+      gqueued[g] = 0;
+      for (int m = gfirst[g]; m >= 0; m = mnext[m])
+        if (!queued[mscope[m]]) { queued[mscope[m]] = 1; wl[wn++] = mscope[m]; }
+    }
+    if (wn == 0 || budget-- <= 0) break;
+    int s = wl[--wn];
+    queued[s] = 0;
+    irt_explicit_returns(c, s, x);
+    TyKind before = c->scopes[s].ret;
+    changed |= irt_scope(c, s, x);
+    if (c->scopes[s].ret != before && sgroup[s] >= 0 && !gqueued[sgroup[s]]) {
+      gqueued[sgroup[s]] = 1; gl[gn++] = sgroup[s];
+    }
+  }
+  free(bhead); free(gname); free(gnext); free(gfirst); free(mscope); free(mnext); free(last);
+  free(sgroup); free(wl); free(gl); free(queued); free(gqueued);
+  return changed;
+}
+
 int infer_return_types(Compiler *c) {
   const NodeTable *nt = c->nt;
   int changed = 0;
@@ -14476,259 +15144,16 @@ int infer_return_types(Compiler *c) {
     free(noblk);
   }
   /* implicit return: the body's value */
+  char *moved = calloc((size_t)(ns > 0 ? ns : 1), 1);
+  if (!moved) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+  IrtCtx x = { ret_acc, has_ret, ret_empty, ret_head, ret_next, ret_narrow, moved };
   for (int s = 1; s < c->nscopes; s++) {
-    Scope *sc = &c->scopes[s];
-    /* Specialized inherited-cls-new copies keep their fixed subclass return
-       type (the shared body's bare `new` would otherwise infer the base). */
-    if (sc->ret_specialized) continue;
-    /* An --rbs-seeded return is pinned, with one exception: a scalar-valued
-       str-keyed hash return (Hash[String,String] / Hash[String,Integer]) whose
-       body actually builds a poly-valued StrPolyHash (mixed / non-scalar
-       values -- the RBS value type is too narrow for what the code returns).
-       Emitting the StrPolyHash body through a StrStrHash* signature is a layout
-       mismatch that corrupts every read, so let the body widen the return to
-       its poly-valued sibling. Every other rbs-seeded return stays pinned. */
-    if (sc->ret_rbs_seeded) {
-      if (sc->ret == TY_STR_STR_HASH || sc->ret == TY_STR_INT_HASH) {
-        TyKind br = sc->body >= 0 ? infer_type(c, sc->body) : TY_UNKNOWN;
-        if (has_ret && has_ret[s]) br = ty_unify(br, ret_acc[s]);
-        if (br == TY_STR_POLY_HASH) { sc->ret = TY_STR_POLY_HASH; changed = 1; }
-      }
-      /* Same shape, and the same reason. RBS `Integer` covers both machine
-         ints and bignums, so a body that grew a bignum is a valid inhabitant
-         of the declared type -- but the seed had already pinned the signature
-         to sp_int, and returning an sp_Bigint* through it truncates the
-         pointer and answers garbage. Declaring the type correctly made the
-         program worse than not declaring it at all (#3518). */
-      else if (sc->ret == TY_INT) {
-        TyKind br = sc->body >= 0 ? infer_type(c, sc->body) : TY_UNKNOWN;
-        if (has_ret && has_ret[s]) br = ty_unify(br, ret_acc[s]);
-        if (br == TY_BIGINT) { sc->ret = TY_BIGINT; changed = 1; }
-      }
-      continue;
-    }
-    /* A return narrowed to a pointer array is pinned the same way. The body
-       still reads the poly array, and those two array KINDS unify to the plain
-       poly SCALAR -- so re-deriving would make the slot strictly worse, and
-       reporting that as a change every round runs the fixpoint to its cap. */
-    if (sc->ret_oa_pin != TY_UNKNOWN) continue;
-    /* synthesized compiler_state methods carry a fixed return type (no AST). */
-    if (sc->cs_synth) continue;
-    /* A lowered self-recursive yield method returns its block's value through
-       a raw sp_int carrier pinned when the lowering rewrites the scope
-       (post-fixpoint); re-deriving from the body would break that ABI. */
-    if (sc->is_lowered_yield) continue;
-    /* An empty method body returns nil; if its value is used at all it must
-       be poly (a void C function yields nothing to read). */
-    int empty_body = sc->body < 0;
-    if (sc->body >= 0 && nt_kind(nt, sc->body) == NK_StatementsNode) {
-      int bn = 0; nt_arr(nt, sc->body, "body", &bn); if (bn == 0) empty_body = 1;
-    }
-    /* A trailing infinite loop (`while true` / `until false`) with no
-       top-level break can't fall through, so its nil value is unreachable:
-       when explicit returns exist, they alone type the method instead of
-       nil-widening it to poly. A breaking or finite loop still contributes
-       its nil fall-through, as CRuby does. */
-    int tail_unreachable = 0;
-    if (!empty_body && has_ret && has_ret[s] &&
-        nt_kind(nt, sc->body) == NK_StatementsNode) {
-      int bn2 = 0; const int *bb2 = nt_arr(nt, sc->body, "body", &bn2);
-      if (bn2 > 0) {
-        int last = bb2[bn2 - 1];
-        NodeKind lk = nt_kind(nt, last);
-        if (lk == NK_WhileNode || lk == NK_UntilNode) {
-          int pred = nt_ref(nt, last, "predicate");
-          const char *cty = pred >= 0 ? nt_type(nt, pred) : NULL;
-          int infinite = cty && ((lk == NK_WhileNode && sp_streq(cty, "TrueNode")) ||
-                                 (lk == NK_UntilNode && sp_streq(cty, "FalseNode")));
-          int lbody = nt_ref(nt, last, "statements");
-          if (infinite && (lbody < 0 || !block_has_top_break(c, lbody)))
-            tail_unreachable = 1;
-        }
-        /* A trailing `raise` is unreachable-fall-through for the same reason:
-           the method never returns through it, so its (void) value must not
-           be unified with the explicit returns. Unifying void with Integer
-           has no rule and lands on poly, which then boxes the return of a
-           `return x if cond; raise` guard method and everything downstream
-           of its callers. Same rule the branch arms got for raise. */
-        else if (lk == NK_CallNode && nt_ref(nt, last, "receiver") < 0) {
-          const char *lnm = nt_str(nt, last, "name");
-          if (lnm && is_diverging_call(lnm))
-            tail_unreachable = 1;
-        }
-      }
-    }
-    TyKind r = empty_body ? TY_POLY
-             : tail_unreachable ? ret_acc[s]
-             : infer_type(c, sc->body);
-    /* a bare `Array.new` tail returns the poly array a marked `[]` tail
-       does (mark_empty_literal_tails) */
-    if (r == TY_UNKNOWN && !empty_body && !(has_ret && has_ret[s]) &&
-        an_empty_container_kind(c, sc->body) == 1)
-      r = TY_POLY_ARRAY;
-    /* A yielding method whose body ends in `if block_given? ... else ... end`
-       has two values, one per call form, and the inliner keeps only the arm a
-       call site takes: the block arm types the call with a block, the else
-       arm the call without one (Scope.ret_noblock, read by method_call_ret).
-       Unified, the Enumerator of the one arm and the memo of the other made
-       the method poly for both (builtins/enumerable.rb). */
-    if (!empty_body && !tail_unreachable && sc->yields && nt_kind(nt, sc->body) == NK_StatementsNode) {
-      int bn3 = 0; const int *bb3 = nt_arr(nt, sc->body, "body", &bn3);
-      int last = bn3 > 0 ? bb3[bn3 - 1] : -1;
-      int pred = last >= 0 && nt_kind(nt, last) == NK_IfNode ? nt_ref(nt, last, "predicate") : -1;
-      int sub = last >= 0 ? nt_ref(nt, last, "subsequent") : -1;
-      if (pred >= 0 && nt_kind(nt, pred) == NK_CallNode && nt_ref(nt, pred, "receiver") < 0 &&
-          nt_str(nt, pred, "name") && sp_streq(nt_str(nt, pred, "name"), "block_given?") &&
-          sub >= 0 && nt_kind(nt, sub) == NK_ElseNode) {
-        int ts = nt_ref(nt, last, "statements"), es = nt_ref(nt, sub, "statements");
-        int tn3 = 0; const int *tb3 = ts >= 0 ? nt_arr(nt, ts, "body", &tn3) : NULL;
-        int en3 = 0; const int *eb3 = es >= 0 ? nt_arr(nt, es, "body", &en3) : NULL;
-        TyKind et = en3 > 0 ? infer_type(c, eb3[en3 - 1]) : TY_NIL;
-        if (et != TY_UNKNOWN && sc->ret_noblock != et) sc->ret_noblock = et;
-        /* a block arm ending in `yield` is typed per call site by
-           method_call_ret, as a yield-tailed body is; any other block arm
-           types the method alone, even while it is still unknown: letting
-           the unified body type stand in would hand a call with a block the
-           else arm's Enumerator on the round before the memo settles, and a
-           local only widens from there */
-        if (!(tn3 > 0 && nt_kind(nt, tb3[tn3 - 1]) == NK_YieldNode)) {
-          TyKind bt = tn3 > 0 ? infer_type(c, tb3[tn3 - 1]) : TY_NIL;
-          r = bt != TY_UNKNOWN && has_ret && has_ret[s] ? ty_unify(bt, ret_acc[s]) : bt;
-          goto ret_decided;
-        }
-      }
-    }
-    /* explicit returns within this scope (collected above) */
-    if (!tail_unreachable && has_ret && has_ret[s]) {
-      /* An empty `[]` / `{}` value is still untyped, and the unify took the
-         other values' type for it: `return 1 if b; {}` returned the hash
-         pointer through an sp_int. Beside a value of another kind it is a
-         container all the same, so the method boxes (the if/else rule). */
-      int tk = empty_body ? 0 : an_empty_container_kind(c, sc->body);
-      if (r == TY_UNKNOWN && an_empty_container_disagrees(tk, ret_acc[s])) r = TY_POLY;
-      r = ty_unify(r, ret_acc[s]);
-    }
-    if (has_ret && has_ret[s] && ret_empty && ret_empty[s] &&
-        (an_empty_container_disagrees(ret_empty[s] & 1, r) ||
-         an_empty_container_disagrees(ret_empty[s] & 2, r)))
-      r = TY_POLY;
-    ret_decided:
-    /* A value a caller's parameter stores elements of another kind into is
-       the general Array (widen_array_sources); its values re-derive their
-       typed kinds, which unify to the poly scalar when they differ. One that
-       stops being an array at all loses the pin. */
-    if (sc->ret_poly_array_pin) {
-      if (r == TY_UNKNOWN || r == TY_POLY || (ty_is_array(r) && !ty_is_ptr_array(r))) r = TY_POLY_ARRAY;
-      else sc->ret_poly_array_pin = 0;
-    }
-    /* Post-backstop re-runs fill returns whose body only settled after the
-       main fixpoint (a `r = expr; r` chain, #1670). Adopting a NEW poly there
-       is a net loss: the late-settling chains that matter are scalar, while a
-       previously-UNKNOWN return deriving poly is typically a store-style
-       method whose value no caller reads -- boxing it puts an sp_RbVal
-       return in optcarrot's hottest poke path for ~4% fps. Keep those at
-       their pre-pass type; the main fixpoint still widens to poly freely. */
-    if (g_ret_no_new_poly == 1 && r == TY_POLY && sc->ret != TY_POLY) continue;
-    /* At 2 (the late ivar-widening re-run) a return follows its body only
-       where the ivar the body answers widened after the return was derived:
-       a concrete type to poly (a String reading over a poly value does not
-       build, #4451), and an Integer to a Bignum (`def get = @v` returned a
-       promoted loop local's Bignum through an sp_int). Everything else is
-       left where the earlier, gated re-runs settled it. */
-    if (g_ret_no_new_poly == 2 &&
-        !(r == TY_POLY && sc->ret != TY_POLY && sc->ret != TY_UNKNOWN && sc->ret != TY_VOID && sc->ret != TY_NIL) &&
-        !(r == TY_BIGINT && sc->ret == TY_INT)) continue;
-    /* An element-less-hash body (`{}` / Hash.new) infers TY_UNKNOWN every pass
-       (no witnessed element). Once a caller has pinned it to a concrete hash
-       (backprop_hash_return_types), don't collapse it back to UNKNOWN -- that
-       would re-emit a void C signature the caller can't assign (#1680). */
-    if (r == TY_UNKNOWN && ty_is_hash(sc->ret) && scope_tail_empty_hash(c, s) >= 0) continue;
-    /* A void body-recompute must not downgrade an established return: an
-       abstract/raising body infers TY_VOID every pass, while the slot's real
-       type comes from descendant-override dispatch unification (or a caller
-       backprop). Re-deriving VOID here would flip the slot every iteration
-       and the fixpoint never converges. */
-    if (r == TY_VOID && sc->ret != TY_UNKNOWN && sc->ret != TY_VOID) continue;
-    /* A tail that nothing resolves derives UNKNOWN every round. The arm at the
-       end of this pass owns that case -- it gives such a method POLY when a
-       caller reads its value -- and its own guard then skips the method. Undo
-       that here and the two take turns to the fixpoint's cap (#4116). Narrow
-       on purpose: only an established POLY, and only for the shape that arm
-       claims, so a return that re-derives UNKNOWN for any other reason still
-       corrects downward. */
-    if (r == TY_UNKNOWN && sc->ret == TY_POLY && scope_tail_unresolved_call(c, s)) continue;
-    if (r != sc->ret) {
-      if (ty_degraded(r) && !ty_degraded(sc->ret)) {
-        /* the value that degraded the return: the body's tail if its type
-           did, else the first explicit return whose value did, else (two
-           concrete kinds that disagree) the tail, with the first return as
-           the other side */
-        int node = -1, other = -1; TyKind then = TY_UNKNOWN;
-        int tail = (!empty_body && !tail_unreachable && sc->body >= 0) ? sc->body : -1;
-        if (tail >= 0 && tail < c->node_cap && ty_degraded(c->ntype[tail])) { node = tail; then = c->ntype[tail]; }
-        else if (ret_head && ret_next) {
-          for (int rid = ret_head[s]; rid >= 0; rid = ret_next[rid]) {
-            TyKind rt = return_node_type(c, rid);
-            if (ty_degraded(rt)) { node = return_value_node(c, rid); then = rt; break; }
-          }
-        }
-        if (node < 0) {
-          /* two concrete kinds met. One side is the tail when it has a type
-             at this point, else the first typed `return`; the other is the
-             first `return` of a different kind (the list's head can be one
-             of the same kind, which said "String, where a `return` gives
-             String"; String and its mutable refinement are one kind). */
-          TyKind tt = (tail >= 0 && tail < c->node_cap) ? c->ntype[tail] : TY_UNKNOWN;
-          if (tt != TY_UNKNOWN) { node = tail; then = tt; }
-          if (ret_head)
-            for (int rid = ret_head[s]; rid >= 0; rid = ret_next[rid]) {
-              TyKind rt = return_node_type(c, rid);
-              if (rt == TY_UNKNOWN) continue;
-              if (node < 0) { node = return_value_node(c, rid); then = rt; continue; }
-              int same = rt == then || ((rt == TY_STRING || rt == TY_STRBUF) && (then == TY_STRING || then == TY_STRBUF));
-              if (!same) { other = return_value_node(c, rid); break; }
-            }
-          if (node < 0) { node = tail; then = r; }
-        }
-        sc->ret_why.node = node; sc->ret_why.other = other; sc->ret_why.prev = sc->ret;
-        sc->ret_why.then = then; sc->ret_why.round = g_infer_round;
-      }
-      else if (!ty_degraded(r)) why_reset(&sc->ret_why);
-      sc->ret = r; changed = 1;
-    }
-    /* For a method with a &block param, record the value type its block yields
-       (unified across all call sites). Blocks passed to it are emitted returning
-       this common type so the sp_proc_call ABI is consistent. */
-    if (sc->blk_param && sc->blk_param[0] && !sc->yields && !sc->is_lowered_yield) {
-      TyKind bvt = yield_value_type(c, (int)(sc - c->scopes));
-      if (bvt != TY_UNKNOWN && sc->blk_ret != (int)bvt) { sc->blk_ret = (int)bvt; changed = 1; }
-    }
-    /* When the method returns a proc, record the proc's body return type so a
-       caller's `m.call(...)` resolves its result type (factory pattern). */
-    if (r == TY_PROC) {
-      TyKind pr = TY_UNKNOWN;
-      if (sc->body >= 0) {
-        int bn = 0; const int *bb = nt_arr(nt, sc->body, "body", &bn);
-        if (bn > 0) pr = proc_ret_of(c, bb[bn - 1]);
-      }
-      if (ret_head && ret_next) {
-        for (int id = ret_head[s]; id >= 0; id = ret_next[id]) {
-          int a = nt_ref(nt, id, "arguments"); int an = 0;
-          const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
-          if (an > 0) pr = ty_unify(pr == TY_UNKNOWN ? TY_UNKNOWN : pr, proc_ret_of(c, av[0]));
-        }
-      }
-      else for (int id = 0; id < nt->count; id++) {
-        const char *ty = nt_type(nt, id);
-        if (ty && sp_streq(ty, "ReturnNode") && comp_scope_of(c, id) == sc) {
-          int a = nt_ref(nt, id, "arguments"); int an = 0;
-          const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
-          if (an > 0) pr = ty_unify(pr == TY_UNKNOWN ? TY_UNKNOWN : pr, proc_ret_of(c, av[0]));
-        }
-      }
-      if (pr != TY_UNKNOWN && sc->ret_proc_ret != (int)pr) { sc->ret_proc_ret = (int)pr; changed = 1; }
-    }
+    TyKind before = c->scopes[s].ret;
+    changed |= irt_scope(c, s, &x);
+    if (c->scopes[s].ret != before) moved[s] = 1;
   }
+  if (ret_acc && has_ret) changed |= irt_settle_callers(c, &x);
+  free(moved);
 
   /* An abstract base method (`def self.table_name; raise; end`) infers a void
      return, but a subclass overrides it with a value-returning version. A call
@@ -15105,27 +15530,231 @@ static void bi_scan_loop_body(Compiler *c, int body) {
 }
 
 
+/* The loop body node `id` is, when it is a loop the scan reads: a `while`,
+   and in promote mode a block an iterating method runs. -1 otherwise.
+   Promote mode additionally treats block-iteration loops as growth sites:
+   `n.times { f = f * x }`, `(a..b).each { ... }`, etc. The block body is a
+   BlockNode -> statements; reuse the same self-referential-multiply scan.
+   Only in promote mode: the wrap-pinned optcarrot must not pay a
+   block-loop bigint widening, which is why the default path stays
+   `while`-only. */
+static int bi_loop_body(const NodeTable *nt, int id) {
+  const char *ty = nt_type(nt, id);
+  if (!ty) return -1;
+  if (sp_streq(ty, "WhileNode")) return nt_ref(nt, id, "statements");
+  if (g_promote_mode && sp_streq(ty, "CallNode")) {
+    const char *mname = nt_str(nt, id, "name");
+    int block = nt_ref(nt, id, "block");
+    if (mname && is_block_loop_method(mname) && block >= 0 &&
+        nt_type(nt, block) && sp_streq(nt_type(nt, block), "BlockNode"))
+      return nt_ref(nt, block, "body");
+  }
+  return -1;
+}
+
+/* The scan per loop body walks a body again for every loop it sits in, so a
+   round costs the sum of the bodies' sizes: the program's size times its
+   loop nesting, which in machine-generated code runs hundreds deep.
+   bi_round gets the same answers from one walk of the program per round.
+
+   The walk numbers the nodes in the order the scan visits them, so a loop's
+   body is the run of numbers from the body's own to its end. At each node
+   it records what the scan would: the `dst = src` pairs bi_collect_assigns
+   collects and the writes bi_scan_loop_node asks about, each with the
+   number of the nearest node above it where the scan stops (a definition,
+   or a node without a type). A loop's pairs are then the first
+   BI_MAX_PAIRS of its run that no such stop cuts off, the list
+   bi_collect_assigns builds, and a write is asked against them as before.
+   bi_promote only ever widens one local to Bignum, the same whichever
+   write and loop ask, so a write that has promoted is not asked again by
+   the loops around it. A node the walk reaches twice (a subtree two
+   parents share) makes the numbering ambiguous, and the round falls back
+   to the scan per loop; a body the walk never numbered is scanned on its
+   own. */
+enum { BI_OPW, BI_MUL, BI_ADD };
+static struct {
+  int cap, n;                     /* nodes numbered */
+  int *pos, *end;                 /* [node] its number (-1: none), one past its subtree's last */
+  unsigned char *ref, *open;      /* [node] some node refers to it; it is being walked */
+  int limit;                      /* the most numbers a round hands out */
+  int npe, cpe;                   /* the pairs, in walk order */
+  int *pe_pos, *pe_cut;
+  BiPair *pe;
+  int nce, cce;                   /* the writes the scan asks about, in walk order */
+  int *ce_pos, *ce_cut, *ce_node;
+  unsigned char *ce_kind, *ce_done;
+  const char **ce_l, **ce_r, **ce_a;
+} bi_rw;
+/* `p` resized to `cap` elements of `elt` bytes; stops on out of memory */
+static void *bi_resize(void *p, int cap, size_t elt) {
+  void *q = realloc(p, elt * (size_t)cap);
+  if (!q) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+  return q;
+}
+/* the next capacity at least `need`, doubling from `cap` */
+static int bi_next_cap(int cap, int need) {
+  int nc = cap ? cap : 64;
+  while (nc < need) nc *= 2;
+  return nc;
+}
+static void bi_rw_pair(int pos, int cut, const char *dst, const char *src) {
+  if (bi_rw.npe == bi_rw.cpe) {
+    int cap = bi_next_cap(bi_rw.cpe, bi_rw.npe + 1);
+    bi_rw.pe_pos = bi_resize(bi_rw.pe_pos, cap, sizeof(int));
+    bi_rw.pe_cut = bi_resize(bi_rw.pe_cut, cap, sizeof(int));
+    bi_rw.pe = bi_resize(bi_rw.pe, cap, sizeof(BiPair));
+    bi_rw.cpe = cap;
+  }
+  int k = bi_rw.npe++;
+  bi_rw.pe_pos[k] = pos; bi_rw.pe_cut[k] = cut; bi_rw.pe[k].dst = dst; bi_rw.pe[k].src = src;
+}
+static void bi_rw_cand(int pos, int cut, int node, int kind, const char *l, const char *r, const char *a) {
+  if (bi_rw.nce == bi_rw.cce) {
+    int cap = bi_next_cap(bi_rw.cce, bi_rw.nce + 1);
+    bi_rw.ce_pos = bi_resize(bi_rw.ce_pos, cap, sizeof(int));
+    bi_rw.ce_cut = bi_resize(bi_rw.ce_cut, cap, sizeof(int));
+    bi_rw.ce_node = bi_resize(bi_rw.ce_node, cap, sizeof(int));
+    bi_rw.ce_kind = bi_resize(bi_rw.ce_kind, cap, 1);
+    bi_rw.ce_done = bi_resize(bi_rw.ce_done, cap, 1);
+    bi_rw.ce_l = bi_resize(bi_rw.ce_l, cap, sizeof(const char *));
+    bi_rw.ce_r = bi_resize(bi_rw.ce_r, cap, sizeof(const char *));
+    bi_rw.ce_a = bi_resize(bi_rw.ce_a, cap, sizeof(const char *));
+    bi_rw.cce = cap;
+  }
+  int k = bi_rw.nce++;
+  bi_rw.ce_pos[k] = pos; bi_rw.ce_cut[k] = cut; bi_rw.ce_node[k] = node;
+  bi_rw.ce_kind[k] = (unsigned char)kind; bi_rw.ce_done[k] = 0;
+  bi_rw.ce_l[k] = l; bi_rw.ce_r[k] = r; bi_rw.ce_a[k] = a;
+}
+/* Numbers `id`'s subtree from bi_rw.n; `cut` is the number of the nearest
+   stop above. A subtree two parents share is numbered at each place, as the
+   scan walks it at each, and keeps the numbers of the first: its runs are
+   alike, stops included, so a loop inside reads the same from either. 0 on
+   a node inside itself, or a sharing so wide the numbers run past
+   bi_rw.limit. */
+static int bi_rw_walk(const NodeTable *nt, int id, int cut) {
+  if (id < 0) return 1;
+  if (bi_rw.open[id] || bi_rw.n >= bi_rw.limit) return 0;
+  int p = bi_rw.n++, first = bi_rw.pos[id] < 0;
+  if (first) bi_rw.pos[id] = p;
+  bi_rw.open[id] = 1;
+  const char *ty = nt_type(nt, id);
+  NodeKind k = ty ? nt_kind(nt, id) : NK_NONE;
+  int stop = !ty || k == NK_DefNode || k == NK_ClassNode || k == NK_ModuleNode;
+  if (!stop && k == NK_LocalVariableWriteNode) {
+    const char *dst = nt_str(nt, id, "name");
+    int v = nt_ref(nt, id, "value");
+    const char *src = bi_local_name(nt, v);
+    if (src && dst) bi_rw_pair(p, cut, dst, src);
+    const char *vty = v >= 0 ? nt_type(nt, v) : NULL;
+    if (dst && vty && sp_streq(vty, "CallNode")) {
+      const char *op = nt_str(nt, v, "name");
+      const char *rname = bi_local_name(nt, nt_ref(nt, v, "receiver"));
+      int args = nt_ref(nt, v, "arguments");
+      int an = 0; const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+      const char *aname = an >= 1 ? bi_local_name(nt, argv[0]) : NULL;
+      if (op && is_mul_or_pow(op)) { if (rname || aname) bi_rw_cand(p, cut, id, BI_MUL, dst, rname, aname); }
+      else if (op && sp_streq(op, "+") && rname && aname) bi_rw_cand(p, cut, id, BI_ADD, dst, rname, aname);
+    }
+  }
+  if (!stop && k == NK_MultiWriteNode) {
+    int ln = 0, rn = 0;
+    const int *lhs = nt_arr(nt, id, "lefts", &ln);
+    int v = nt_ref(nt, id, "value");
+    const int *rhs = masgn_tuple_rhs(nt, v) ? nt_arr(nt, v, "elements", &rn) : NULL;
+    for (int q = 0; lhs && rhs && q < ln && q < rn; q++) {
+      const char *lty = nt_type(nt, lhs[q]);
+      if (!lty || !sp_streq(lty, "LocalVariableTargetNode")) continue;
+      const char *src = bi_local_name(nt, rhs[q]);
+      const char *dst = nt_str(nt, lhs[q], "name");
+      if (src && dst) bi_rw_pair(p, cut, dst, src);
+    }
+  }
+  if (!stop && k == NK_LocalVariableOperatorWriteNode) {
+    const char *op = nt_str(nt, id, "binary_operator");
+    const char *lname = nt_str(nt, id, "name");
+    if (op && lname && is_mul_or_pow(op)) bi_rw_cand(p, cut, id, BI_OPW, lname, NULL, NULL);
+  }
+  int sub = stop ? p : cut;
+  int nr = nt_num_refs(nt, id);
+  for (int i = 0; i < nr; i++) if (!bi_rw_walk(nt, nt_ref_at(nt, id, i), sub)) return 0;
+  int na = nt_num_arrs(nt, id);
+  for (int i = 0; i < na; i++) {
+    int n = 0;
+    const int *ids = nt_arr_at(nt, id, i, &n);
+    for (int j = 0; j < n; j++) if (!bi_rw_walk(nt, ids[j], sub)) return 0;
+  }
+  if (first) bi_rw.end[id] = bi_rw.n;
+  bi_rw.open[id] = 0;
+  return 1;
+}
+/* the first index of a walk-ordered array of numbers at or past `b` */
+static int bi_rw_from(const int *pos, int n, int b) {
+  int lo = 0, hi = n;
+  while (lo < hi) { int m = (lo + hi) / 2; if (pos[m] < b) lo = m + 1; else hi = m; }
+  return lo;
+}
+/* One round by one walk; 0 when the round has to scan per loop instead. */
+static int bi_round(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  int n = nt->count;
+  if (n > bi_rw.cap) {
+    int cap = bi_next_cap(bi_rw.cap, n);
+    bi_rw.pos = bi_resize(bi_rw.pos, cap, sizeof(int));
+    bi_rw.end = bi_resize(bi_rw.end, cap, sizeof(int));
+    bi_rw.ref = bi_resize(bi_rw.ref, cap, 1);
+    bi_rw.open = bi_resize(bi_rw.open, cap, 1);
+    bi_rw.cap = cap;
+  }
+  memset(bi_rw.ref, 0, (size_t)n);
+  memset(bi_rw.open, 0, (size_t)n);
+  bi_rw.limit = n > (INT_MAX - 1024) / 4 ? INT_MAX : 4 * n + 1024;
+  for (int id = 0; id < n; id++) {
+    bi_rw.pos[id] = -1;
+    int nr = nt_num_refs(nt, id);
+    for (int i = 0; i < nr; i++) { int ch = nt_ref_at(nt, id, i); if (ch >= 0 && ch < n) bi_rw.ref[ch] = 1; }
+    int na = nt_num_arrs(nt, id);
+    for (int i = 0; i < na; i++) {
+      int m = 0;
+      const int *ids = nt_arr_at(nt, id, i, &m);
+      for (int j = 0; j < m; j++) if (ids[j] >= 0 && ids[j] < n) bi_rw.ref[ids[j]] = 1;
+    }
+  }
+  bi_rw.n = 0; bi_rw.npe = 0; bi_rw.nce = 0;
+  for (int id = 0; id < n; id++)
+    if (!bi_rw.ref[id] && !bi_rw_walk(nt, id, -1)) return 0;
+  BiPair pairs[BI_MAX_PAIRS];
+  for (int id = 0; id < n; id++) {
+    int body = bi_loop_body(nt, id);
+    if (body < 0) continue;
+    if (bi_rw.pos[body] < 0) { bi_scan_loop_body(c, body); continue; }
+    int b = bi_rw.pos[body], e = bi_rw.end[body], np = -1;
+    for (int q = bi_rw_from(bi_rw.ce_pos, bi_rw.nce, b); q < bi_rw.nce && bi_rw.ce_pos[q] < e; q++) {
+      if (bi_rw.ce_done[q] || bi_rw.ce_cut[q] >= b) continue;
+      int grows = bi_rw.ce_kind[q] == BI_OPW;
+      if (!grows) {
+        if (np < 0) {
+          np = 0;
+          for (int r = bi_rw_from(bi_rw.pe_pos, bi_rw.npe, b); r < bi_rw.npe && bi_rw.pe_pos[r] < e && np < BI_MAX_PAIRS; r++)
+            if (bi_rw.pe_cut[r] < b) pairs[np++] = bi_rw.pe[r];
+        }
+        const char *l = bi_rw.ce_l[q], *rn = bi_rw.ce_r[q], *an = bi_rw.ce_a[q];
+        if (bi_rw.ce_kind[q] == BI_MUL)
+          grows = (rn && bi_reaches(pairs, np, l, rn, 0)) || (an && bi_reaches(pairs, np, l, an, 0));
+        else
+          grows = bi_reaches(pairs, np, l, rn, 0) && bi_reaches(pairs, np, l, an, 0);
+      }
+      if (grows) { bi_promote(c, bi_rw.ce_node[q], bi_rw.ce_l[q]); bi_rw.ce_done[q] = 1; }
+    }
+  }
+  return 1;
+}
+
 void infer_bigint_loop_locals(Compiler *c) {
+  if (bi_round(c)) return;
   const NodeTable *nt = c->nt;
   for (int id = 0; id < nt->count; id++) {
-    const char *ty = nt_type(nt, id);
-    if (!ty) continue;
-    if (sp_streq(ty, "WhileNode")) {
-      bi_scan_loop_body(c, nt_ref(nt, id, "statements"));
-      continue;
-    }
-    /* Promote mode additionally treats block-iteration loops as growth sites:
-       `n.times { f = f * x }`, `(a..b).each { ... }`, etc. The block body is a
-       BlockNode -> statements; reuse the same self-referential-multiply scan.
-       Only in promote mode: the wrap-pinned optcarrot must not pay a
-       block-loop bigint widening, which is why the default path stays
-       `while`-only. */
-    if (g_promote_mode && sp_streq(ty, "CallNode")) {
-      const char *mname = nt_str(nt, id, "name");
-      int block = nt_ref(nt, id, "block");
-      if (mname && is_block_loop_method(mname) && block >= 0 &&
-          nt_type(nt, block) && sp_streq(nt_type(nt, block), "BlockNode"))
-        bi_scan_loop_body(c, nt_ref(nt, block, "body"));
-    }
+    int body = bi_loop_body(nt, id);
+    if (body >= 0) bi_scan_loop_body(c, body);
   }
 }
