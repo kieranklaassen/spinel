@@ -1,0 +1,22 @@
+A program with its own Set keeps a splatted object's form
+
+CRuby has a Set before the program runs, and it is Enumerable. So a
+`class Set` of the program's own reopens it and its objects have
+Set's to_a, where Spinel compiles a class with no parent:
+
+    class Set
+      def n = 1
+    end
+    def num(a) = a.n
+    x = Set.new
+    p num(*x)    # 1; CRuby ArgumentError (given 0, expected 1)
+
+The walk (splat_program_walk_for_to_a) took such a program for one
+with no way to a to_a. It now answers "may" where Set is named, and
+Gem, whose List and Platform are the other classes of this kind met:
+such a program compiles to the C it had before the two commits
+beneath, and the call raises as it did.
+
+Test: test/splat_object_reopened_set.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

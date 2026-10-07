@@ -1,0 +1,44 @@
+A to_a made without its name spelled keeps a splatted object's form
+
+The walk that finds a program with no way to a to_a
+(splat_program_walk_for_to_a) read a new method's name only where a
+def or a call spells it. Ruby makes a method in other ways, and such
+a program was taken for one with no to_a: its splatted object was
+handed over as itself where CRuby asks the to_a.
+
+    class Foo
+      def initialize(n) = @n = n
+      def n = @n
+      def items = [n, :s]
+      alias :"to_#{:a}" items
+    end
+    def num(a) = a.n
+    x = Foo.new(1)
+    p num(*x)    # 1; CRuby ArgumentError (given 2, expected 1)
+
+The walk now answers "may" as well for:
+
+- an `alias` whose new name is no plain Symbol;
+- a Symbol or String literal that names a way to call, fetch or mix
+  in by name (send, method, instance_method, const_get, include,
+  extend, prepend, to_proc, an eval), and a method maker's name
+  anywhere but as the first argument of a send;
+- a send of a maker with a later argument that is no literal;
+- method, instance_method or const_get given a name that is no
+  literal, and include, extend or prepend given anything but a
+  constant or self;
+- to_proc on anything but a Symbol literal, and a `&x` whose x is
+  neither a Symbol literal nor a Proc or a Method;
+- a def of respond_to?, which a splat asks before to_a;
+- a class whose parent is not a class of the program, a builtin
+  exception or Object (a delegator, a lazy enumerator), and
+  BasicObject or ObjectSpace named anywhere.
+
+Such a program compiles to the C it had before the commit beneath.
+`undef` and an alias of global variables make no method and are not
+asked.
+
+Test: test/splat_object_alias_built_name.rb, five spellings of the
+alias. Each raises as it did before the commit beneath.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
