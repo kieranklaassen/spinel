@@ -2,6 +2,7 @@
    prepend / insert / replace / dup are off the hot string-building path, so they
    are compiled once here instead of inline in every generated TU. */
 #include "sp_string.h"
+#include "sp_str.h"
 #include <string.h>
 
 void sp_String_prepend(sp_String*s,const char*t){SP_GC_ROOT(s);SP_GC_ROOT_STR(t);if(!s||!t)return;if(sp_String_is_frozen(s)){sp_raise_frozen_str(s->data);return;}int64_t tl=(int64_t)strlen(t);if(!sp_fd_grow(s,s->len+tl))return;memmove(s->data+tl,s->data,s->len+1);memcpy(s->data,t,tl);s->len+=tl;sp_fd_publish(s);}
@@ -90,3 +91,61 @@ const char*sp_sym_to_s_chilled(sp_sym id){
   SP_HEAP_UNLOCK();
   return r;
 }
+
+/* String#tr / #tr_s with a source set that may name a character twice. CRuby
+   fills its table left to right, so such a character takes its LAST position
+   (`"hello".tr("ll", "xy")` is "heyyo"); sp_str_tr stops at the first.
+   Codegen calls sp_str_tr itself for a literal set it can see has no repeat
+   (str_tr_set_names_once) and these for every other set. They are here and
+   not in sp_str.c, which sits at gcc's inline limit. */
+/* May the set name a character twice? It is read in place, as
+   sp_utf8_decode_charset_n reads it (a backslash escapes, `a-c` is a range):
+   no when its members ascend, and told exactly when they are all ASCII. A
+   negated set is a membership test, where a repeat changes nothing. What
+   cannot be told here is a yes. */
+static int sp_tr_set_repeats(const char*f){
+  if(!f||(f[0]=='^'&&f[1]))return 0;
+  const char*p=f,*end=f+sp_str_byte_len(f);
+  char seen[128]={0};int asc=1,ascii=1,has_prev=0;uint32_t prev=0;int64_t last=-1;
+  while(p<end){
+    uint32_t lo,hi;int range=0;
+    p+=sp_utf8_decode(p,&lo);
+    if(lo=='\\'&&p<end)p+=sp_utf8_decode(p,&lo);
+    else if(lo=='-'&&has_prev&&p<end)range=1;
+    hi=lo;
+    if(range){p+=sp_utf8_decode(p,&hi);lo=prev+1;if(hi<prev)return 1;}
+    if(lo<=hi){
+      if((int64_t)lo<=last)asc=0;
+      last=hi;
+      if(hi>=0x80)ascii=0;
+      else for(uint32_t ch=lo;ch<=hi;ch++){if(seen[ch])return 1;seen[ch]=1;}
+    }
+    prev=hi;has_prev=!range;
+  }
+  return !asc&&!ascii;
+}
+/* Rewrite the two sets with the earlier positions of a repeated character
+   dropped, each member escaped and beside its own replacement: what
+   sp_str_tr reads from those is CRuby's table. A set that turns out to have
+   no repeat (seen at once when it ascends, as a range does) is left alone. */
+static void sp_tr_last_wins(const char**from,const char**to){
+  size_t fn,tn,a=0,b=0,j,k;
+  uint32_t*fc=sp_utf8_decode_charset_n(*from,sp_str_byte_len(*from),&fn);
+  for(j=1;j<fn&&fc[j]>fc[j-1];j++);
+  for(j=j<fn?0:fn;j<fn;j++){for(k=j+1;k<fn&&fc[k]!=fc[j];k++);if(k<fn)break;}
+  if(j>=fn){free(fc);return;}
+  uint32_t*tc=sp_utf8_decode_charset_n(*to,sp_str_byte_len(*to),&tn);
+  char*nf=(char*)malloc(fn*5+1),*nt=(char*)malloc(fn*5+1);
+  for(j=0;j<fn;j++){
+    for(k=j+1;k<fn&&fc[k]!=fc[j];k++);
+    if(k<fn)continue;
+    nf[a++]='\\';a+=sp_utf8_encode(fc[j],nf+a);
+    if(tn){nt[b++]='\\';b+=sp_utf8_encode(tc[j<tn?j:tn-1],nt+b);}
+  }
+  nf[a]=0;nt[b]=0;
+  char*r=sp_str_alloc(a);memcpy(r,nf,a+1);*from=r;
+  r=sp_str_alloc(b);memcpy(r,nt,b+1);*to=r;
+  free(nf);free(nt);free(fc);free(tc);
+}
+const char*sp_str_tr_any(const char*s,const char*from,const char*to){if(!s||!to||!sp_tr_set_repeats(from))return sp_str_tr(s,from,to);SP_GC_ROOT_STR(s);SP_GC_ROOT_STR(from);SP_GC_ROOT_STR(to);sp_tr_last_wins(&from,&to);return sp_str_tr(s,from,to);}
+const char*sp_str_tr_s_any(const char*s,const char*from,const char*to){if(!s||!to||!sp_tr_set_repeats(from))return sp_str_tr_s(s,from,to);SP_GC_ROOT_STR(s);SP_GC_ROOT_STR(from);SP_GC_ROOT_STR(to);sp_tr_last_wins(&from,&to);return sp_str_tr_s(s,from,to);}

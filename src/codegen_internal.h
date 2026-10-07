@@ -1547,6 +1547,9 @@ typedef struct {
   int t0;              /* a temp the caller took for the family ($T), or 0 */
 } BopCtx;
 int emit_builtin_op(Compiler *c, int id, int recv, TyKind rt, const char *name, Buf *b);
+/* 1 when the literal source set of a String#tr names no character twice, so
+   that the direct call answers as CRuby does (codegen_ops.c) */
+int str_tr_set_names_once(Compiler *c, int set);
 /* the same, the receiver already rendered as rtext by a family that renders
    it once before its own arms */
 int emit_builtin_op_text(Compiler *c, int id, int recv, TyKind rt, const char *name,

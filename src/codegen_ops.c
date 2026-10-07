@@ -130,6 +130,49 @@ static int emit_op_template(Compiler *c, const BopCtx *x, Buf *b) {
   return 1;
 }
 
+/* Does the literal source set of String#tr name no character twice? Read as
+   sp_utf8_decode_charset_n reads it, for plain ASCII only: a backslash
+   escapes the next character and `a-c` is a range. A negated set is a
+   membership test, where a repeat changes nothing. */
+int str_tr_set_names_once(Compiler *c, int set) {
+  if (nt_kind(c->nt, set) != NK_StringNode) return 0;
+  const char *s = nt_str(c->nt, set, "content");
+  size_t n = s ? nt_str_len(c->nt, set, "content") : 0;
+  if (n >= 2 && s[0] == '^' && s[1]) return 1;
+  char seen[128] = { 0 };
+  int prev = -1;
+  for (size_t i = 0; i < n; i++) {
+    int lo = (unsigned char)s[i], hi, range = 0;
+    if (lo == '\\' && i + 1 < n) lo = (unsigned char)s[++i];
+    else if (lo == '-' && prev >= 0 && i + 1 < n) range = 1;
+    hi = range ? (unsigned char)s[++i] : lo;
+    if (range) lo = prev;
+    if (!lo || hi >= 0x80 || hi < lo) return 0;
+    for (int ch = lo + range; ch <= hi; ch++) {
+      if (seen[ch]) return 0;
+      seen[ch] = 1;
+    }
+    prev = range ? -1 : hi;
+  }
+  return 1;
+}
+
+/* String#tr / #tr_s. CRuby translates a character the source set names
+   twice by its last position (`"hello".tr("ll", "xy")` is "heyyo") and
+   sp_str_tr by its first, so only a set seen to have no repeat keeps the
+   direct call. Any other goes through the _any entry, which drops the
+   earlier positions first. */
+static int emit_op_str_tr(Compiler *c, const BopCtx *x, Buf *b) {
+  int argc;
+  const int *argv = call_args(c->nt, x->id, &argc);
+  if (str_tr_set_names_once(c, argv[0])) return emit_op_template(c, x, b);
+  BuiltinOp any = *x->op;
+  BopCtx y = *x;
+  any.arg = sp_streq(any.name, "tr") ? "sp_str_tr_any($r, $s0, $s1)" : "sp_str_tr_s_any($r, $s0, $s1)";
+  y.op = &any;
+  return emit_op_template(c, &y, b);
+}
+
 /* Process::Status#success?: the runtime answers -1 for CRuby's nil, when
    the process did not exit normally */
 static int emit_op_pstatus_success(Compiler *c, const BopCtx *x, Buf *b) {
@@ -210,6 +253,7 @@ static int (*const bop_emitters[BOPE__COUNT])(Compiler *, const BopCtx *, Buf *)
   [BOPE_POLY_CASE_OPTIONS] = emit_op_poly_case_options,
   [BOPE_STR_SET_N] = emit_op_str_set_n,
   [BOPE_STR_AFFIX_ANY] = emit_op_str_affix_any,
+  [BOPE_STR_TR] = emit_op_str_tr,
   [BOPE_HASH_PATTERN] = emit_op_hash_pattern,
   [BOPE_HASH_PATTERN_ALL] = emit_op_hash_pattern_all,
   [BOPE_HASH_DEFAULT_PROC] = emit_op_hash_default_proc,

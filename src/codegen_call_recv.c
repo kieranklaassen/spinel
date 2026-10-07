@@ -13734,7 +13734,7 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
       return 1;
     }
     if (sp_streq(name, "tr") && argc == 2) {
-      buf_puts(b, "sp_str_tr(sp_poly_recv_s("); emit_expr(c, recv, b);
+      buf_printf(b, "sp_str_tr%s(sp_poly_recv_s(", str_tr_set_names_once(c, argv[0]) ? "" : "_any"); emit_expr(c, recv, b);
       buf_puts(b, ", \"tr\"), "); emit_str_expr(c, argv[0], b);
       buf_puts(b, ", "); emit_str_expr(c, argv[1], b); buf_puts(b, ")");
       return 1;

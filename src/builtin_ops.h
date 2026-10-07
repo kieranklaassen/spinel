@@ -71,6 +71,7 @@ typedef enum {
   BOPE_POLY_CASE_OPTIONS, /* boxed String/Symbol case mapping with options */
   BOPE_STR_SET_N,         /* String#squeeze / #delete / #count over several sets */
   BOPE_STR_AFFIX_ANY,     /* String#start_with? / #end_with? over several candidates */
+  BOPE_STR_TR,            /* String#tr / #tr_s: arg, or its _any twin for a set that may repeat */
   /* Hash (codegen_call_hash.c) */
   BOPE_HASH_PATTERN,      /* any?/none?/one?/count with a pattern, no block */
   BOPE_HASH_PATTERN_ALL,  /* all? with a pattern, no block */
