@@ -6281,6 +6281,39 @@ static int when_obj_arm_eq_runs(Compiler *c, TyKind ct) {
   return 0;
 }
 
+/* `when <obj>`: the arm's own === (or ==) called as the typed function,
+   with the subject in _t<t> boxed where the parameter is and as it is
+   otherwise. Answers 0, emitting nothing, for an arm that has neither
+   method or is kept by value. */
+static int emit_when_obj_call(Compiler *c, int cond, int t, TyKind pt, Buf *b) {
+  TyKind wpt = comp_ntype(c, cond);
+  int wcid = ty_is_object(wpt) ? ty_object_class(wpt) : -1;
+  int wdef = -1;
+  int weq = wcid >= 0 ? comp_method_in_chain(c, wcid, "===", &wdef) : -1;
+  if (weq < 0 && wcid >= 0) weq = comp_method_in_chain(c, wcid, "==", &wdef);
+  if (weq < 0 || wdef < 0 || comp_ty_value_obj(c, wpt)) return 0;
+  int wta = emit_when_arm_root(c, cond, wpt, b);
+  buf_printf(b, "sp_%s_%s(", c->classes[wdef].c_name, mc(c->scopes[weq].name));
+  /* an inherited method takes the class that defines it */
+  if (wdef != wcid) buf_printf(b, "(sp_%s *)(", c->classes[wdef].c_name);
+  if (wta) buf_printf(b, "_t%d", wta);
+  else emit_expr(c, cond, b);
+  if (wdef != wcid) buf_puts(b, ")");
+  buf_printf(b, ", ");
+  /* the user method takes its argument boxed when its parameter is
+     poly, which is the shape these comparison methods settle on */
+  { Scope *ws = &c->scopes[weq];
+    LocalVar *wp = ws->nparams > 0 ? scope_local(ws, ws->pnames[0]) : NULL;
+    TyKind wpt2 = wp ? wp->type : TY_POLY;
+    char sref[24]; snprintf(sref, sizeof sref, "_t%d", t);
+    if (wpt2 == TY_POLY) { Buf bx; memset(&bx, 0, sizeof bx);
+      emit_boxed_text(c, pt, sref, &bx); buf_puts(b, bx.p ? bx.p : sref); free(bx.p); }
+    else buf_puts(b, sref); }
+  buf_puts(b, ")");
+  if (wta) buf_puts(b, "; })");
+  return 1;
+}
+
 /* `when <cond>` against the subject in _t<t>: the subject class's own ===
    or == when cond has its type, else a native === or the pointer compare. */
 static void emit_case_obj_eq(Compiler *c, int cond, int t, TyKind pt, Buf *b) {
@@ -6836,38 +6869,13 @@ void emit_case(Compiler *c, int id, Buf *b, int indent) {
             /* `when <obj>` is `<obj> === scrutinee`, which for a plain object
                is its own ==; comparing the two pointers answered false for two
                equal instances of a class that defines one (#3741). */
-            TyKind wpt = comp_ntype(c, conds[j]);
-            int wcid = ty_is_object(wpt) ? ty_object_class(wpt) : -1;
-            int wdef = -1;
-            int weq = wcid >= 0 ? comp_method_in_chain(c, wcid, "===", &wdef) : -1;
             /* Object#=== finds the same object equal before its == runs:
                an arm of the subject's own class that defines only == is
                tested as the case value tests it */
-            int same_first = wpt == pt && wcid >= 0 && weq < 0;
-            if (weq < 0 && wcid >= 0) weq = comp_method_in_chain(c, wcid, "==", &wdef);
-            if (same_first && weq >= 0 && wdef >= 0 && !comp_ty_value_obj(c, wpt)) emit_case_obj_eq(c, conds[j], t, pt, b);
-            else if (weq >= 0 && wdef >= 0 && !comp_ty_value_obj(c, wpt)) {
-              int wta = emit_when_arm_root(c, conds[j], wpt, b);
-              buf_printf(b, "sp_%s_%s(", c->classes[wdef].c_name, mc(c->scopes[weq].name));
-              /* an inherited method takes the class that defines it */
-              if (wdef != wcid) buf_printf(b, "(sp_%s *)(", c->classes[wdef].c_name);
-              if (wta) buf_printf(b, "_t%d", wta);
-              else emit_expr(c, conds[j], b);
-              if (wdef != wcid) buf_puts(b, ")");
-              buf_printf(b, ", ");
-              /* the user method takes its argument boxed when its parameter is
-                 poly, which is the shape these comparison methods settle on */
-              { Scope *ws = &c->scopes[weq];
-                LocalVar *wp = ws->nparams > 0 ? scope_local(ws, ws->pnames[0]) : NULL;
-                TyKind wpt2 = wp ? wp->type : TY_POLY;
-                char sref[24]; snprintf(sref, sizeof sref, "_t%d", t);
-                if (wpt2 == TY_POLY) { Buf bx; memset(&bx, 0, sizeof bx);
-                  emit_boxed_text(c, pt, sref, &bx); buf_puts(b, bx.p ? bx.p : sref); free(bx.p); }
-                else buf_puts(b, sref); }
-              buf_puts(b, ")");
-              if (wta) buf_puts(b, "; })");
-            }
-            else emit_case_obj_eq(c, conds[j], t, pt, b);
+            TyKind wpt = comp_ntype(c, conds[j]);
+            int same_first = wpt == pt && ty_is_object(wpt) &&
+                             comp_method_in_chain(c, ty_object_class(wpt), "===", NULL) < 0;
+            if (same_first || !emit_when_obj_call(c, conds[j], t, pt, b)) emit_case_obj_eq(c, conds[j], t, pt, b);
           }
           } /* close non-ConstantReadNode else */
           } /* close else { int reidx... } */
