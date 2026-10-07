@@ -1,0 +1,52 @@
+An attribute of an exception class with no initialize is nil until set, and is marked once set
+
+    class ParseError < StandardError; attr_accessor :line, :ctx; end
+    kept = []
+    begin
+      raise ParseError, "m"
+    rescue StandardError => e
+      kept << e
+    end
+    kept.each { |v| p v.ctx if v.respond_to?(:ctx) }   # 0; CRuby: nil
+
+A class of the program's under a builtin exception, with ivars and no
+initialize in its chain, has no constructor on its path, so the runtime
+builds it. Caught by an arm that names no class of the program, it was
+built by sp_exc_new_for_catch as a plain exception of the base size, and
+a dispatch on the kept value went past the end of it: the read above,
+and a segfault from a method of the class that stores three ivars.
+
+Built by `.new`, or by the rescue that catches a raise by its name, it
+had its own size, but sp_exc_new_sub_sized zeroed the struct and gave it
+the base exception's scan:
+
+    e = ParseError.new("m")
+    p e.line          # 0; CRuby: nil
+    e.ctx = rows(3)
+    20000.times { rows(3) }
+    p e.ctx           # [1, "r1"]; CRuby: the three rows
+
+An ivar nothing had set read as the zero pattern, 0 for a boxed or an
+Integer slot, where a constructor seeds nil; and an ivar the program
+stored was never marked, and its value was freed under the exception in
+a plain run.
+
+One builder cures both. sp_exc_new_sub_ivars takes the class's own scan
+and a function that seeds the slots whose nil is not zero
+(sp_<Class>__ivnil, emitted beside the scan of such a class and only
+for one). In a program that has such a class a rescue builds what it
+caught through sp_exc_new_for_catch_own, which asks the program first
+(sp_user_exc_new_fn, a hook set as sp_user_exc_parent_fn is) and builds
+such a class by its name with that builder. Every other program calls
+sp_exc_new_for_catch as it did, and that function is as it was.
+sp_exc_new_sub_sized stays, with the base scan, for a class with an
+initialize of its own, and that class's C does not change.
+
+Not here: a class with an initialize of its own raised through a Class
+value (`raise k, "m"`). No initialize runs for it and it is still built
+at the base size.
+
+Tests: test/exception_attribute_without_initialize.rb,
+test/exception_attribute_marked.rb (added to GC_STRESS_TESTS)
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
