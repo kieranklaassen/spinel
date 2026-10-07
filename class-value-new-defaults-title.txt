@@ -1,0 +1,1 @@
+A class-value new runs the defaults of the class it builds

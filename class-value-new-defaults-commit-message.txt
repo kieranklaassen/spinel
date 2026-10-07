@@ -1,0 +1,29 @@
+A class-value new runs the defaults of the class it builds
+
+    $log = []
+    def note(s) = ($log << s; s)
+    class Img
+      def initialize(d = note("img") * 2) = (@d = d)
+    end
+    class Other
+      def initialize(d = note("other") * 2) = (@d = d)
+    end
+    kl = [Img, Other][1]
+    kl.new
+    p $log    # ["other"]; master prints ["img", "other"]
+
+`k.new` on a Class value is a switch over the classes it may hold, one
+arm a class. A default the call leaves out is filled in the arm, but a
+statement that default hoists (the rooted temp of a value that
+allocates, an iteration) went to the enclosing statement's prelude,
+ahead of the switch, where it ran whichever class the value held. With
+no argument that is every default that allocates; with arguments, a
+default that iterates; and the same through a class's own `self.new`.
+
+The keyword and splat form (emit_class_value_new_kw) already keeps such
+statements in the arm. The positional arms, the no-argument arms and
+the own-`new` arm now do too: g_pre is the arm's prefix while its
+arguments are laid out, and an arm that has a prefix is a block. An arm
+whose defaults hoist nothing is written as it was.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
