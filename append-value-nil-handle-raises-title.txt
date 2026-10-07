@@ -1,0 +1,1 @@
+An append that is its body's value raises on a nil String handle

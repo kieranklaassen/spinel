@@ -1,0 +1,28 @@
+An append that is its body's value raises on a nil String handle
+
+    def app(clear)
+      t = +""
+      t << "a"
+      t << "b"
+      t = nil if clear
+      t << "c"
+    end
+    app(true)
+
+died with SIGSEGV; CRuby raises NoMethodError. Two appends in a row
+make t an sp_String handle (TY_STRBUF), and nil is a NULL handle. As a
+statement the last append is emitted behind the nil arm the call plan
+gives it (emit_nil_target_stmt) and raises. As the value of its body it
+goes through emit_stmt_tail_inner's own arm, which called
+emit_array_mutate_stmt past that arm: the append did nothing on the
+NULL handle, and the read of t that the arm returns died.
+
+The tail arm now emits its append behind the same nil arm
+(tail_append_nil_armed). It does so for a handle local, and only where
+the plan raises for the call; any other append keeps its C. A lambda's
+last line and the last line of a conditional that is the method's value
+go through the same arm.
+
+Test: test/string_handle_append_value_nil.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
