@@ -13932,6 +13932,22 @@ static SP_NOINLINE void sp_re_frame_enter(void) {
   sp_re_nnotes++;
   sp_re_clear_last_match();
 }
+/* Give the block a spliced method yields to its writer's registers: the frame
+   `at` holds them (lib/sp_re.h). The method's own are noted first, as a frame
+   would note them, so a raise that arrives with a signal before the exchange
+   is whole puts the method's back; only then is the note an exchange. */
+static SP_NOINLINE void sp_re_frame_swap_enter(int at) {
+  if (SP_UNLIKELY(sp_re_nnotes == sp_re_notes_cap)) sp_re_notes_grow();
+  sp_re_frame_note *n = &sp_re_notes[sp_re_nnotes];
+  sp_re_frame_save(&n->f);
+  n->depth[SP_RE_FRAME_EXC] = sp_exc_top;
+  n->depth[SP_RE_FRAME_CATCH] = sp_catch_top;
+  n->depth[SP_RE_FRAME_BRK] = sp_brk_top;
+  n->home = sp_proc_ret_head ? sp_proc_ret_head->id : -1;
+  sp_re_nnotes++;
+  sp_re_frame_pop(&sp_re_notes[at].f);
+  n->swap = sp_re_nnotes - 1 - at;
+}
 /* Leave the frames a return to the home `id` leaves. A home has no depth to
    note, but its id is its age: a frame entered with that home or a younger
    one innermost was entered inside the home's method. */

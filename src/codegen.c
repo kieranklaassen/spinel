@@ -13805,17 +13805,64 @@ static int call_name_matches(const char *nm) {
   return is_quantifier(nm);
 }
 
+/* A method that yields and takes its block no other way has no function: its
+   body is spliced where it is called, and the block where it yields. */
+static int scope_spliced_only(Compiler *c, int si) {
+  const NodeTable *nt = c->nt;
+  const Scope *s = &c->scopes[si];
+  if (!s->yields || s->def_node < 0 || s->is_lowered_yield || s->is_proc_form) return 0;
+  if (s->blk_param && s->blk_param[0]) return 0;
+  int ps = nt_ref(nt, s->def_node, "parameters");
+  return ps < 0 || nt_ref(nt, ps, "block") < 0;
+}
+
+/* Is every method of this name spliced so? A clone that takes the block as a
+   Proc (`name#pf`), a reader of the name or a constructor says no. */
+static int name_spliced_only(Compiler *c, const char *nm) {
+  size_t ln = strlen(nm);
+  int seen = 0;
+  if (sp_streq(nm, "initialize")) return 0;
+  for (int k = 0; k < c->nclasses; k++)
+    if (comp_reader_in_chain(c, k, nm, NULL)) return 0;
+  for (int si = 0; si < c->nscopes; si++) {
+    const char *sn = c->scopes[si].name;
+    if (!sn || strncmp(sn, nm, ln) != 0 || (sn[ln] && sn[ln] != '#')) continue;
+    if (sn[ln] || !scope_spliced_only(c, si)) return 0;
+    seen = 1;
+  }
+  return seen;
+}
+
+/* Does a method of this name call `super`? The parent's body is then spliced
+   into the child's, with no frame of its own. */
+static int name_calls_super(Compiler *c, const char *nm) {
+  const NodeTable *nt = c->nt;
+  for (int si = 0; si < c->nscopes; si++) {
+    const char *sn = c->scopes[si].name;
+    if (!sn || !sp_streq(sn, nm)) continue;
+    int nids = 0; const int *ids = cg_scope_nodes(c, si, &nids);
+    for (int k = 0; k < nids; k++) {
+      NodeKind nk = nt_kind(nt, ids[k]);
+      if (nk == NK_SuperNode || nk == NK_ForwardingSuperNode) return 1;
+    }
+  }
+  return 0;
+}
+
 /* A block given to a built-in value's own method runs where it is written:
-   the loop is emitted around it, and so are `loop` and `catch`. Any other
-   block may be handed on as a Proc, and counts as one. */
+   the loop is emitted around it, and so are `loop` and `catch`; and so does a
+   block given to a method that is only ever spliced. Any other block may be
+   handed on as a Proc, and counts as one. */
 static int block_runs_in_place(Compiler *c, int call) {
   const NodeTable *nt = c->nt;
   const char *nm = nt_str(nt, call, "name");
   if (!nm || nt_kind(nt, call) != NK_CallNode) return 0;
   int r = nt_ref(nt, call, "receiver");
-  if (r < 0) return (sp_streq(nm, "loop") || sp_streq(nm, "catch")) && !diag_user_defines(c, nm);
-  if (recv_user_defines(c, nm)) return 0;
+  int spliced = name_spliced_only(c, nm);
+  if (r < 0) return spliced || ((sp_streq(nm, "loop") || sp_streq(nm, "catch")) && !diag_user_defines(c, nm));
+  if (recv_user_defines(c, nm) && !spliced) return 0;
   TyKind t = comp_ntype(c, r);
+  if (spliced && ty_is_object(t)) return 1;
   return ty_is_array(t) || ty_is_hash(t) || t == TY_INT || t == TY_BIGINT || t == TY_FLOAT ||
          t == TY_STRING || t == TY_STRBUF || t == TY_SYMBOL || t == TY_RANGE ||
          t == TY_FLOAT_RANGE || t == TY_STR_RANGE || t == TY_MATCHDATA || t == TY_REGEX ||
@@ -13831,9 +13878,40 @@ static int block_runs_in_place(Compiler *c, int call) {
    module body, a `class << self` body or the top level of a required file,
    which run in the top level's frame here; an END body, which runs at exit
    inside whichever method is running; a method's parameters, whose defaults
-   are evaluated by the caller before the frame opens. */
+   are evaluated by the caller before the frame opens.
+   A method that takes a block only by yielding is its own frame all the same
+   where it matches: the frame is opened in the splice, and a block it yields
+   to is given its writer's registers meanwhile (sp_re_frame_swap_enter). Not
+   so a constructor or a method reached by `super`, which other emitters
+   splice, nor one that yields from a block that may run as a function. The
+   parameters of a block spliced so are bound before the exchange, by the
+   method. */
 static char *g_match_other = NULL;   /* per node, where the test passed: another frame's code */
 static char *g_match_inner = NULL;   /* and: inside the block of a call that itself matches */
+static char *g_match_spliced = NULL; /* per scope: a spliced method that opens a frame */
+int match_splice_framed(int mi) {
+  return g_match_frame_closed && g_match_spliced && mi >= 0 && g_match_spliced[mi];
+}
+/* Does the block touch the registers anywhere, or run its writer's own block
+   (a yield, a call of a block parameter, a block handed on, `super`), which
+   may? Only then is the exchange emitted around it. */
+int match_block_touches(Compiler *c, int blk) {
+  const NodeTable *nt = c->nt;
+  int n = nt->count, hit = 0;
+  if (blk < 0 || nt_kind(nt, blk) != NK_BlockNode) return 0;
+  char *in = (char *)calloc((size_t)(n > 0 ? n : 1), 1);
+  if (!in) return 1;
+  a_mark_subtree(c, blk, in);
+  for (int id = 0; id < n && !hit; id++) {
+    if (!in[id]) continue;
+    NodeKind k = nt_kind(nt, id);
+    const char *nm = k == NK_CallNode ? nt_str(nt, id, "name") : NULL;
+    hit = k == NK_YieldNode || k == NK_BlockArgumentNode || k == NK_SuperNode ||
+          k == NK_ForwardingSuperNode || (nm && sp_streq(nm, "call")) || node_touches_match(c, id);
+  }
+  free(in);
+  return hit;
+}
 int match_sets_last(int id) {
   return g_match_frame_closed && g_match_inner && id >= 0 && !g_match_inner[id];
 }
@@ -13843,8 +13921,12 @@ static int match_frame_closed(Compiler *c) {
   char *other = (char *)calloc((size_t)(n > 0 ? n : 1), 1);
   char *inner = (char *)calloc((size_t)(n > 0 ? n : 1), 1);
   char *framed = (char *)calloc((size_t)(c->nscopes > 0 ? c->nscopes : 1), 1);
+  char *spliced = (char *)calloc((size_t)(c->nscopes > 0 ? c->nscopes : 1), 1);
   char *apart = (char *)calloc((size_t)(n > 0 ? n : 1), 1);   /* in a `class << self` body */
-  if (!other || !inner || !framed || !apart) { free(other); free(inner); free(framed); free(apart); return 0; }
+  if (!other || !inner || !framed || !spliced || !apart) {
+    free(other); free(inner); free(framed); free(spliced); free(apart);
+    return 0;
+  }
   int main_file = 0;   /* the entry script's place in the file table */
   for (int k = 0; k < nt->nfiles; k++) {
     const char *fp = nt_file_path(nt, k);
@@ -13861,9 +13943,30 @@ static int match_frame_closed(Compiler *c) {
       blk = nt_ref(nt, id, "block");
       if (blk >= 0 && nt_kind(nt, blk) == NK_BlockNode && !inner[blk] && call_name_matches(nt_str(nt, id, "name")))
         a_mark_subtree(c, blk, inner);
-      if (blk >= 0 && (nt_kind(nt, blk) != NK_BlockNode || block_runs_in_place(c, id))) blk = -1;
+      if (blk >= 0 && nt_kind(nt, blk) == NK_BlockNode && block_runs_in_place(c, id)) {
+        const char *nm = nt_str(nt, id, "name");
+        blk = nm && name_spliced_only(c, nm) ? nt_ref(nt, blk, "parameters") : -1;
+      }
+      else if (blk >= 0 && nt_kind(nt, blk) != NK_BlockNode) blk = -1;
     }
     if (blk >= 0 && !other[blk]) a_mark_subtree(c, blk, other);
+  }
+  /* 1: a method whose function saves a frame; 2: a method with none; 3: a
+     spliced method whose splice opens one */
+  for (int si = 0; si < c->nscopes; si++) {
+    Scope *s = &c->scopes[si];
+    if (!s->name) continue;
+    framed[si] = (s->def_node >= 0 && scope_performs_match(c, si)) ? 1 : 2;
+    if (framed[si] == 2 || !(s->yields || s->blk_param)) continue;
+    framed[si] = (scope_spliced_only(c, si) && !sp_streq(s->name, "initialize") &&
+                  !name_calls_super(c, s->name)) ? 3 : 2;
+  }
+  for (int id = 0; id < n; id++) {
+    int si = c->nscope[id];
+    if (nt_kind(nt, id) == NK_YieldNode && other[id] && si >= 0 && si < c->nscopes && framed[si] == 3)
+      framed[si] = 2;
+  }
+  for (int id = 0; id < n; id++) {
     int si = c->nscope[id];
     if (si < 0 || si >= c->nscopes) continue;
     Scope *s = &c->scopes[si];
@@ -13872,13 +13975,14 @@ static int match_frame_closed(Compiler *c) {
           (int)nt_int(nt, id, "node_file", main_file) != main_file) other[id] = 1;
       continue;
     }
-    if (!framed[si]) framed[si] = (s->def_node >= 0 && scope_performs_match(c, si)) ? 1 : 2;
-    if (s->yields || s->blk_param || framed[si] == 2) other[id] = 1;
+    if (framed[si] == 2) other[id] = 1;
   }
   for (int id = 0; id < n && !hit; id++)
     if (other[id]) hit = node_touches_match(c, id);
+  for (int si = 0; si < c->nscopes; si++) spliced[si] = framed[si] == 3;
   free(framed); free(apart);
-  if (hit) { free(other); free(inner); } else { g_match_other = other; g_match_inner = inner; }
+  if (hit) { free(other); free(inner); free(spliced); }
+  else { g_match_other = other; g_match_inner = inner; g_match_spliced = spliced; }
   return !hit;
 }
 
@@ -13895,13 +13999,17 @@ static void match_frame_check(Compiler *c) {
   for (int id = 0; lifted && id < n && id < g_ndecide_cap; id++)
     if (g_ndecide[id] == ND_BLOCK_PROC && !lifted[id]) a_mark_subtree(c, id, lifted);
   for (int id = 0; lifted && id < n; id++) {
-    if (!lifted[id] || g_match_other[id] || !node_touches_match(c, id)) continue;
+    if (!lifted[id] || g_match_other[id]) continue;
+    /* nor may such a block yield for a method whose frame is in the splice */
+    if (!node_touches_match(c, id) &&
+        !(nt_kind(nt, id) == NK_YieldNode && match_splice_framed(c->nscope[id]))) continue;
     fprintf(stderr, "spinel: internal error: %s:%d: a block that became a function of its own touches the match registers, and match_frame_closed did not count it\n",
             emit_file_path(c, (int)nt_int(nt, id, "node_file", 0)), (int)nt_int(nt, id, "node_line", 0));
     exit(1);
   }
   free(lifted); free(g_match_other); g_match_other = NULL;
   free(g_match_inner); g_match_inner = NULL;
+  free(g_match_spliced); g_match_spliced = NULL;
 }
 
 /* Whole-program scan for the prologue features (see codegen_internal.h). Each

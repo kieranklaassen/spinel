@@ -564,6 +564,8 @@ extern int g_match_frame_closed;
    holds, and the call is not in the block of a call that itself matches and
    puts its own match back after the block (gsub, scan, grep). */
 int match_sets_last(int id);
+int match_splice_framed(int mi);
+int match_block_touches(Compiler *c, int blk);
 extern int g_gen_obj_hash;
 extern int g_gen_obj_to_json;  /* a package wants obj reflection + >=1 user #to_json */  /* a package wants obj reflection + >=1 struct: emit+install sp_obj_to_hash */
 extern int g_gen_obj_struct_values;  /* >=1 instantiated Struct (not Data): emit+install sp_obj_struct_values (poly member array) */

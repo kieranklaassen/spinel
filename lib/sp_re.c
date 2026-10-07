@@ -167,6 +167,7 @@ void sp_re_notes_grow(void) {
   int cap = sp_re_notes_cap ? sp_re_notes_cap * 2 : 64;
   sp_re_frame_note *p = (sp_re_frame_note *)realloc(sp_re_notes, sizeof(*p) * (size_t)cap);
   if (!p) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+  for (int i = sp_re_notes_cap; i < cap; i++) p[i].swap = 0;
   sp_re_notes = p; sp_re_notes_cap = cap;
 }
 /* A frame is put back before it stops counting: a raise that arrives with a
@@ -176,8 +177,23 @@ void sp_re_frame_leave(char *unused) {
   sp_re_frame_pop(&sp_re_notes[sp_re_nnotes - 1].f);
   sp_re_nnotes--;
 }
+/* The end of an exchange (sp_re_frame_swap_enter): what the block left in the
+   registers is its writer's, and goes back into the frame the exchange was
+   with; the method's own come back. Each step leaves the notes and the
+   registers agreeing, as a frame's entry and leave do. */
+void sp_re_frame_swap_leave(char *unused) {
+  (void)unused;
+  sp_re_frame_note *n = &sp_re_notes[sp_re_nnotes - 1];
+  sp_re_frame_fill(&(n - n->swap)->f);
+  n->swap = 0;
+  sp_re_frame_pop(&n->f);
+  sp_re_nnotes--;
+}
 void sp_re_frames_pop_to(int keep) {
-  while (sp_re_nnotes > keep) sp_re_frame_leave(NULL);
+  while (sp_re_nnotes > keep) {
+    if (sp_re_notes[sp_re_nnotes - 1].swap) sp_re_frame_swap_leave(NULL);
+    else sp_re_frame_leave(NULL);
+  }
 }
 void sp_re_set_captures(const char *str, int *caps, int ncaps) {SP_GC_ROOT_STR(str);
   sp_re_last_str = str;

@@ -906,6 +906,28 @@ static int inline_target_plan(Compiler *c, int id, const char *name, int recv, i
   return 0;
 }
 
+/* The spliced methods being emitted, innermost last, for the match frame a
+   splice opens (match_splice_framed). `up` is the splice the call is written
+   in, `blk` the block its yields splice and `def` the splice that block is
+   written in: the block is spliced back under `def`, so a yield inside it is
+   its writer's. g_re_cur is the splice whose body, or whose writer's block,
+   is being emitted. */
+typedef struct { int up, blk, def, tag, framed; } MatchSplice;
+static MatchSplice g_re_inl[SP_INLINE_DEPTH_MAX + 1];
+static int g_re_ninl;
+static int g_re_cur = -1;
+
+/* The frame of a spliced method that matches, in the scope of its body (the
+   one its `return` leaves, or one opened here), so that every way out of the
+   body puts its caller's registers back. _sp_rfi<tag> is where the frame is
+   kept, for the exchange around a block the method yields to. */
+static void emit_splice_match_frame(Buf *b, int din, int tag, int scope_open) {
+  if (!scope_open) { emit_indent(b, din); buf_puts(b, "{\n"); }
+  emit_indent(b, din + 1);
+  buf_printf(b, "int _sp_rfi%d = sp_re_nnotes; (void)_sp_rfi%d; char _sp_rf SP_CLEANUP(sp_re_frame_leave);"
+             " sp_re_frame_enter();\n", tag, tag);
+}
+
 static int inline_target_same(const InlineTarget *a, const InlineTarget *b) {
   return a->mi == b->mi && a->recv_class == b->recv_class && a->cm_class == b->cm_class &&
          a->cm_self_id == b->cm_self_id && a->implicit_self == b->implicit_self;
@@ -1310,6 +1332,13 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
     g_self = selfbuf;
     g_self_deref = recv_self_deref;
   }
+  /* the body is this method's from here: its match frame opens with it */
+  int re_up = g_re_cur;
+  int re_framed = match_splice_framed(mi);
+  g_re_inl[g_re_ninl] = (MatchSplice){ re_up, block,
+                                       (block >= 0 && block == saved_block && re_up >= 0)
+                                       ? g_re_inl[re_up].def : re_up, tag, re_framed };
+  g_re_cur = g_re_ninl++;
   if (recv_class >= 0) g_emitting_class_id = recv_class;
   /* A class method's body inlined into another class's method: its bare `new`
      asks g_emitting_class_id, which was still the HOST's. `Http.start { }`
@@ -1364,7 +1393,9 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
          instead of jumping over them in the same scope (a C error). */
       emit_indent(b, din); buf_puts(b, "{\n");
     }
-    emit_stmts_tail(c, m->body, b, m_has_ret ? din + 1 : din);
+    if (re_framed) emit_splice_match_frame(b, din, tag, m_has_ret);
+    emit_stmts_tail(c, m->body, b, m_has_ret || re_framed ? din + 1 : din);
+    if (re_framed && !m_has_ret) { emit_indent(b, din); buf_puts(b, "}\n"); }
     if (m_has_ret) {
       g_method_pr_label = sv_prl; g_method_pr_var = sv_prv; g_ret_type = sv_prt;
       g_method_pr_exc_depth = sv_prexc;
@@ -1383,7 +1414,9 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
       g_method_pr_ensure_depth = g_ensure_depth;
       emit_indent(b, din); buf_puts(b, "{\n");   /* see expr-path comment */
     }
-    emit_stmts(c, m->body, b, m_has_ret ? din + 1 : din);
+    if (re_framed) emit_splice_match_frame(b, din, tag, m_has_ret);
+    emit_stmts(c, m->body, b, m_has_ret || re_framed ? din + 1 : din);
+    if (re_framed && !m_has_ret) { emit_indent(b, din); buf_puts(b, "}\n"); }
     if (m_has_ret) {
       g_method_pr_label = sv_prl; g_method_pr_var = sv_prv;
       g_method_pr_exc_depth = sv_prexc;
@@ -1392,6 +1425,7 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
       emit_indent(b, din); buf_printf(b, "_yret%d: ;\n", tag);
     }
   }
+  g_re_cur = re_up; g_re_ninl--;
   if (as_expr) { emit_indent(b, indent); buf_puts(b, "})"); }
   else { emit_indent(b, indent); buf_puts(b, "}\n"); }
 
@@ -2834,6 +2868,17 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
   refuse_yield_capwrap(c, blk, yc, yargs);
   if (as_expr) buf_puts(b, "({ ");
   emit_block_binds(c, blk, yargs, yc, b, indent, as_expr, &bi, &al);
+  /* The block runs in its writer's frame: where the method yielding to it
+     opened a match frame in its splice, the registers are exchanged with that
+     frame's for the block's run, once the method has bound what it yields. */
+  int re_from = (g_re_cur >= 0 && g_re_inl[g_re_cur].blk == blk) ? g_re_cur : -1;
+  int re_swap = re_from >= 0 && g_re_inl[re_from].framed && match_block_touches(c, blk);
+  if (re_from >= 0) g_re_cur = g_re_inl[re_from].def;
+  if (re_swap) {
+    if (!as_expr) { emit_indent(b, indent); buf_puts(b, "{ "); }
+    buf_printf(b, "char _sp_rs SP_CLEANUP(sp_re_frame_swap_leave); sp_re_frame_swap_enter(_sp_rfi%d);%s",
+               g_re_inl[re_from].tag, as_expr ? " " : "\n");
+  }
   /* Keep the rename table active for the block body: the block's variable
      references are in the same lexical scope as the surrounding inlined
      method, so renames like x → _y3_x must stay visible. Nested inlines
@@ -3201,6 +3246,8 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
     else { emit_indent(b, indent); buf_puts(b, "} while(0);\n"); }
     g_ie_next_var = sv_nx2; g_ie_res_poly = sv_poly2; g_ie_next_ty = sv_nty2;
   }
+  if (re_swap && !as_expr) { emit_indent(b, indent); buf_puts(b, "}\n"); }
+  if (re_from >= 0) g_re_cur = re_from;
   block_aliases_release(&al);
   if (al.open) { emit_indent(b, indent); buf_puts(b, "}\n"); }
   g_self = sv_bself; g_self_deref = sv_bderef;

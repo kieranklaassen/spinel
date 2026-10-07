@@ -152,12 +152,20 @@ void sp_re_frame_pop(sp_re_frame *f);
    home that was innermost then (-1 for none). The collector marks the saved
    strings from here (sp_re_mark_globals), so they are not rooted. */
 enum { SP_RE_FRAME_EXC, SP_RE_FRAME_CATCH, SP_RE_FRAME_BRK };
-typedef struct { sp_re_frame f; int depth[3]; sp_int home; } sp_re_frame_note;
+/* A method that yields has no function of its own: its body is spliced where
+   it is called and the block where it yields, so its frame is entered there,
+   and while the block runs the registers are exchanged with the frame's: the
+   block's writer has its own back, and what the block sets goes to its writer
+   when the method is done. The exchange is a note too, `swap` notes below the
+   frame it exchanged with, and holds the method's registers meanwhile. A note
+   that is not counted has swap 0, so a frame's entry does not write it. */
+typedef struct { sp_re_frame f; int depth[3]; int swap; sp_int home; } sp_re_frame_note;
 extern SP_TLS sp_re_frame_note *sp_re_notes;   /* the entered frames, innermost last */
 extern SP_TLS int sp_re_nnotes, sp_re_notes_cap;
 void sp_re_notes_grow(void);
 void sp_re_frame_save(sp_re_frame *f);        /* the registers into f, rooting nothing */
 void sp_re_frame_leave(char *unused);         /* the cleanup of an entered frame */
+void sp_re_frame_swap_leave(char *unused);    /* the cleanup of an exchange */
 void sp_re_frames_pop_to(int keep);
 /* What a jump out of methods calls before it jumps (see sp_re_frames_pop_to):
    leave every frame but the first `keep`, or every frame entered at `depth`
