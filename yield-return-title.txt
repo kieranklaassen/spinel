@@ -1,0 +1,1 @@
+A yield in a return's value keeps each site's block type
