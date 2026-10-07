@@ -2208,10 +2208,11 @@ static int scope_performs_match(Compiler *c, int si) {
       if (comp_ntype(c, av[k]) == TY_REGEX) return 1;
     /* gsub, sub and scan on a String set them for a String pattern too, and
        for a pattern that is a Regexp or a String only at run time, in a
-       program that reads them */
+       program that reads them; and so does match */
     if (g_reads_match_regs && r >= 0 && an > 0 && av &&
         (sp_streq(nm, "gsub") || sp_streq(nm, "gsub!") || sp_streq(nm, "sub") ||
-         sp_streq(nm, "sub!") || sp_streq(nm, "scan"))) {
+         sp_streq(nm, "sub!") || sp_streq(nm, "scan") ||
+         (g_match_frame_closed && sp_streq(nm, "match")))) {
       TyKind rt = comp_ntype(c, r), pt = comp_ntype(c, av[0]);
       if ((rt == TY_STRING || rt == TY_POLY) && (pt == TY_STRING || pt == TY_POLY)) return 1;
     }
