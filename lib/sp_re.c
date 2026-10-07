@@ -1174,6 +1174,22 @@ sp_MatchData *sp_re_matchdata_at(mrb_regexp_pattern *pat, const char *str, sp_in
   for (int i = 0; i < pairs * 2; i++) m->caps[i] = caps[i];
   return m;
 }
+/* `match` in a frame whose registers are its own: `$~` takes the match's
+   positions and pattern as well, where sp_re_matchdata hands the registers
+   its Strings alone. */
+static sp_MatchData *re_matchdata_last(sp_MatchData *m) {
+  if (m) {
+    for (int i = 0; i < m->ncap * 2; i++) sp_re_caps[i] = m->caps[i];
+    sp_re_last_pat = m->pat;
+  }
+  return m;
+}
+sp_MatchData *sp_re_matchdata_last(mrb_regexp_pattern *pat, const char *str) {
+  return re_matchdata_last(sp_re_matchdata(pat, str));
+}
+sp_MatchData *sp_re_matchdata_last_at(mrb_regexp_pattern *pat, const char *str, sp_int cpos) {
+  return re_matchdata_last(sp_re_matchdata_at(pat, str, cpos));
+}
 /* group i substring, or NULL for a non-participating / out-of-range group */
 const char *sp_MatchData_aref(sp_MatchData *m, sp_int i) {SP_GC_ROOT(m);
   if (!m) return NULL;
