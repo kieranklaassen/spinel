@@ -1,0 +1,16 @@
+["z"]
+["ab?"]
+"ab?"
+["a", 0]
+["b", 1]
+"a0"
+"b1"
+["a", 0]
+["b", 1]
+:b
+:a
+"UTF-8"
+"ASCII-8BIT"
+"US-ASCII"
+count=3 bad=0
+ITEM2
