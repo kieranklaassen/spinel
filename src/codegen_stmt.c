@@ -11302,10 +11302,14 @@ static int emit_call_stmt(Compiler *c, int id, Buf *b, int indent, const NodeTab
             buf_printf(b, "{ sp_RbVal _t%d = ", tv); emit_expr(c, recv, b); buf_puts(b, "; ");
             if (nil_rhs) {
               /* a nil literal has nothing to run; any other value of nil
-                 type (a method that answers nil, `(bump; nil)`) runs first */
-              buf_printf(b, "sp_RbVal _t%d = ", tval);
-              if (nt_kind(nt, argv[0]) == NK_NilNode) buf_puts(b, "sp_box_nil();");
-              else { buf_puts(b, "((void)("); emit_expr(c, argv[0], b); buf_puts(b, "), sp_box_nil());"); }
+                 type (a method that answers nil, `(bump; nil)`) runs first,
+                 with the receiver rooted: nothing else may hold it, and the
+                 value may collect */
+              if (nt_kind(nt, argv[0]) == NK_NilNode) buf_printf(b, "sp_RbVal _t%d = sp_box_nil();", tval);
+              else {
+                buf_printf(b, "SP_GC_ROOT_RBVAL(_t%d); sp_RbVal _t%d = ((void)(", tv, tval);
+                emit_expr(c, argv[0], b); buf_puts(b, "), sp_box_nil());");
+              }
             }
             else if (unk_rhs) {
               buf_printf(b, "sp_RbVal _t%d = ", tval); emit_expr(c, argv[0], b); buf_puts(b, ";");

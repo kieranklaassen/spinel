@@ -38,3 +38,19 @@ pairs = [Pair.new(1), Pair.new(2)]
 p pairs.map { |q| q.left = bump }
 p pairs.map { |q| q.left }
 p $calls
+
+# A receiver nothing else holds stays alive while the value runs: the value
+# allocates, and the store comes after it.
+def churn
+  a = []
+  40.times { |i| a << ("s" + i.to_s) * 3 }
+  nil
+end
+def mk(n) = [Node.new(n), 1][0]
+keep = []
+mk("a").parent = churn
+keep << "k1" * 5
+30.times { |i| mk("l").parent = churn; keep << "k2" if i == 29 }
+mk("s")&.parent = churn
+keep << "k3" * 2
+p keep
