@@ -1,0 +1,4 @@
+two locals: ["abcxdefy"]
+in parentheses: ["abcxdefy"]
+called by name: ["abcxdefy"]
+two instance variables: ["abcxdefy"]

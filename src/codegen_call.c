@@ -13522,7 +13522,10 @@ static int emit_array_arith_call(Compiler *c, int id, Buf *b) {
          allocates or forces a GC (chained `a + b + c` with side-effecting
          operands -- concat_chain_operand_gc_root). Recurses naturally: a
          chain's left operand is itself a `+` and gets its own rooted block.
-         Pure literal / bare-read operands need no rooting. */
+         Pure literal / bare-read operands need no rooting. Two reads of
+         shared String slots are two fresh copies the node table does not
+         show (operand_may_allocate): the first is held by nothing while the
+         second is made. */
       /* A poly operand (statically typed string here, holds a string at
          runtime) must be coerced to a C string for sp_str_concat. */
       /* emit_str_expr coerces both a TY_POLY operand (sp_poly_to_s) and the
@@ -13542,7 +13545,8 @@ static int emit_array_arith_call(Compiler *c, int id, Buf *b) {
           return 1;
         }
       }
-      if (subtree_may_allocate(nt, recv) || subtree_may_allocate(nt, argv[0])) {
+      if (subtree_may_allocate(nt, recv) || subtree_may_allocate(nt, argv[0]) ||
+          (operand_may_allocate(c, recv) && operand_may_allocate(c, argv[0]))) {
         int ta = ++g_tmp, tb = ++g_tmp;
         buf_printf(b, "({ const char *_t%d = ", ta); emit_str_expr(c, recv, b);
         buf_printf(b, "; SP_GC_ROOT(_t%d); const char *_t%d = ", ta, tb);
