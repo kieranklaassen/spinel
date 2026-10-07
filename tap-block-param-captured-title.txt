@@ -1,0 +1,1 @@
+A tap or then block's parameter captured by a closure is the receiver
