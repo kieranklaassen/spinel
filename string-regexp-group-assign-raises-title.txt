@@ -1,0 +1,1 @@
+String#[]= with a Regexp group raises for a missing group or nil
