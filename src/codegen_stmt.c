@@ -5691,15 +5691,36 @@ static int emit_when_arm_root(Compiler *c, int cond, TyKind wpt, Buf *b) {
 /* `when <obj>`: the arm's own === (or ==) called as the typed function,
    with the subject in _t<t> boxed where the parameter is and as it is
    otherwise. Answers 0, emitting nothing, for an arm that has neither
-   method or is kept by value. */
-static int emit_when_obj_call(Compiler *c, int cond, int t, TyKind pt, Buf *b) {
+   method or is kept by value. With `fits`, also for an arm of the
+   subject's own type and for a method other than one taking the subject's
+   type and answering a boolean: the caller has its own test for those. */
+static int emit_when_obj_call(Compiler *c, int cond, int t, TyKind pt, int fits, Buf *b) {
   TyKind wpt = comp_ntype(c, cond);
   int wcid = ty_is_object(wpt) ? ty_object_class(wpt) : -1;
   int wdef = -1;
   int weq = wcid >= 0 ? comp_method_in_chain(c, wcid, "===", &wdef) : -1;
   if (weq < 0 && wcid >= 0) weq = comp_method_in_chain(c, wcid, "==", &wdef);
   if (weq < 0 || wdef < 0 || comp_ty_value_obj(c, wpt)) return 0;
+  if (fits) {
+    Scope *fs = &c->scopes[weq];
+    LocalVar *fp = fs->nparams == 1 ? scope_local(fs, fs->pnames[0]) : NULL;
+    if (wpt == pt || !fp || fp->type != pt || fs->ret != TY_BOOL ||
+        fs->rest_idx >= 0 || fs->kwrest_idx >= 0 || fs->blk_param) return 0;
+  }
   int wta = emit_when_arm_root(c, cond, wpt, b);
+  char sref[24]; snprintf(sref, sizeof sref, "_t%d", t);
+  /* the case value compared this arm before, and a comparison takes an arm
+     or a subject that is nil at run time (a method's value, an instance
+     variable): the call is made where both are there, the comparison stays
+     where one is not */
+  if (fits) {
+    if (!wta) {
+      wta = ++g_tmp;
+      buf_puts(b, "({ "); emit_ctype(c, wpt, b); buf_printf(b, " _t%d = ", wta);
+      emit_expr(c, cond, b); buf_puts(b, "; ");
+    }
+    buf_printf(b, "_t%d%s%s ? ", wta, ty_is_object(pt) ? " && " : "", ty_is_object(pt) ? sref : "");
+  }
   buf_printf(b, "sp_%s_%s(", c->classes[wdef].c_name, mc(c->scopes[weq].name));
   /* an inherited method takes the class that defines it */
   if (wdef != wcid) buf_printf(b, "(sp_%s *)(", c->classes[wdef].c_name);
@@ -5712,11 +5733,15 @@ static int emit_when_obj_call(Compiler *c, int cond, int t, TyKind pt, Buf *b) {
   { Scope *ws = &c->scopes[weq];
     LocalVar *wp = ws->nparams > 0 ? scope_local(ws, ws->pnames[0]) : NULL;
     TyKind wpt2 = wp ? wp->type : TY_POLY;
-    char sref[24]; snprintf(sref, sizeof sref, "_t%d", t);
     if (wpt2 == TY_POLY) { Buf bx; memset(&bx, 0, sizeof bx);
       emit_boxed_text(c, pt, sref, &bx); buf_puts(b, bx.p ? bx.p : sref); free(bx.p); }
     else buf_puts(b, sref); }
   buf_puts(b, ")");
+  if (fits) {
+    char aref[24]; snprintf(aref, sizeof aref, "_t%d", wta);
+    buf_puts(b, " : sp_poly_eq("); emit_boxed_text(c, wpt, aref, b);
+    buf_puts(b, ", "); emit_boxed_text(c, pt, sref, b); buf_puts(b, ")");
+  }
   if (wta) buf_puts(b, "; })");
   return 1;
 }
@@ -6263,7 +6288,7 @@ void emit_case(Compiler *c, int id, Buf *b, int indent) {
             TyKind wpt = comp_ntype(c, conds[j]);
             int same_first = wpt == pt && ty_is_object(wpt) &&
                              comp_method_in_chain(c, ty_object_class(wpt), "===", NULL) < 0;
-            if (same_first || !emit_when_obj_call(c, conds[j], t, pt, b)) emit_case_obj_eq(c, conds[j], t, pt, b);
+            if (same_first || !emit_when_obj_call(c, conds[j], t, pt, 0, b)) emit_case_obj_eq(c, conds[j], t, pt, b);
           }
           } /* close non-ConstantReadNode else */
           } /* close else { int reidx... } */
@@ -6585,6 +6610,9 @@ void emit_case_expr(Compiler *c, int id, Buf *b) {
         else if (emit_case_container_eq(c, conds[j], t, pt, b)) { }
         else if (emit_when_user_eq(c, conds[j], t, pt, b)) { }
         else if (pt == TY_POLY) { buf_printf(b, "sp_poly_eq(_t%d, ", t); emit_boxed(c, conds[j], b); buf_puts(b, ")"); }
+        /* an arm of another class whose === takes the subject's type is
+           asked it, as the case statement asks it */
+        else if (emit_when_obj_call(c, conds[j], t, pt, 1, b)) { }
         else emit_case_obj_eq(c, conds[j], t, pt, b);
         } /* close non-ConstantReadNode else */
       }

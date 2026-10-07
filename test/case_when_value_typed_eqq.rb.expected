@@ -1,0 +1,19 @@
+false
+:hit
+:miss
+eight
+listed
+:high
+:mid
+:low
+false
+:near
+:far
+[1, 0]
+hit
+:hit
+:miss
+:miss
+:miss
+:hit
+:hit
