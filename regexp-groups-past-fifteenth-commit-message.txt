@@ -1,0 +1,18 @@
+=~, when and slice! keep the positions of groups past the fifteenth
+
+The match registers hold the positions of 32 groups (sp_re_caps[64]),
+but sp_re_match, sp_re_match_at and sp_str_slice_re told the engine the
+array held 32 ints. It wrote the first sixteen groups' positions and
+the rest stayed zero, or the match before's:
+
+    s = "abcdefghijklmnopqrstuvwxyz"
+    s =~ /(a)(b)(c)(d)(e)(f)(g)(h)(i)(j)(k)(l)(m)(n)(o)(p)(q)(r)(s)(t)/
+    p $~.to_a[16], $~.begin(20)
+
+printed "" and 0; CRuby prints "p" and 19. The three now pass 64, as
+String#match, gsub, sub and scan do. The engine copies no more than the
+pattern has, so a match costs what it did.
+
+Test: test/regexp_positions_past_fifteen_groups.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
