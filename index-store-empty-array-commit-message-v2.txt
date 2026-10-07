@@ -1,0 +1,29 @@
+A String stored by index into an empty Array is changed in place by a block over it
+
+    r = []
+    r[0] = +"ab"
+    r.each { |e| e << "z" }
+    p r
+
+prints ["abz"] in CRuby and printed ["ab"] here: the block appended to a
+copy and the element never saw it. `r << +"ab"` in place of the index
+store was right.
+
+An Array whose elements a block changes in place has each String stored
+into it wrapped in a handle (promote_shared_stored_strings), and the pass
+asks that of a local whose kind is an Array. A local written only `[]`
+and filled by index has no Array kind while the fixpoint runs: the index
+store guesses a Hash for it, and an_phase_post_fixpoint makes it the
+general Array afterwards. The pass skipped it, and the element stayed a
+plain String that the block's `<<` rebinds its own parameter over.
+
+The pass now asks the stores of such a local for the handle as well. It
+does so only where each stored String takes one without a refusal and
+without a further look (sb_stores_take_handle: a literal, an
+interpolation, a plain String local, the new String of a receiverless
+call or of one on a String, a number or a class) and the block changes
+its parameter itself; any other program has master's C. The block's
+parameter is left to bind as the Array's elements do: bound here, `map!`
+over the local no longer settled.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

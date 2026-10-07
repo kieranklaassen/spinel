@@ -1,0 +1,1 @@
+A String stored by index into an empty Array is changed in place by a block over it
