@@ -1,0 +1,1 @@
+A class's own freeze and frozen? run through a boxed value
