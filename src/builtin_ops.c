@@ -1354,6 +1354,15 @@ static const BuiltinOp bop_rows[] = {
   { TY_SYMBOL, "id2name",         0, 127, BF_ANY,      TY_STRING,     BOPE_TEMPLATE, "sp_sym_to_s_chilled($r)", 0 },
   { TY_SYMBOL, "name",            0, 127, BF_ANY,      TY_STRING,     BOPE_TEMPLATE, "sp_str_uminus_val(sp_sym_to_s($r))", 0 },
   { TY_SYMBOL, "inspect",         0, 127, BF_ANY,      TY_STRING,     BOPE_TEMPLATE, "sp_sym_inspect($r)", 0 },
+  /* equal? / eql? beside an argument that is no Symbol by its type: a
+     Symbol is itself alone, so the boxed pair answers (false for any other
+     kind, true for a boxed value holding the same Symbol). The receiver is
+     read before the argument. Two Symbols by type are compared by id
+     before these rows are read. */
+  { TY_SYMBOL, "equal?",          1,   1, BF_ANY,      TY_BOOL,       BOPE_TEMPLATE,
+    "({ sp_sym _t$t = $r; sp_RbVal _t$u = $b0; sp_poly_equal(sp_box_sym(_t$t), _t$u); })", 0 },
+  { TY_SYMBOL, "eql?",            1,   1, BF_ANY,      TY_BOOL,       BOPE_TEMPLATE,
+    "({ sp_sym _t$t = $r; sp_RbVal _t$u = $b0; sp_poly_eql(sp_box_sym(_t$t), _t$u); })", 0 },
   { TY_SYMBOL, "upcase",          0, 127, BF_ANY,      TY_SYMBOL,     BOPE_TEMPLATE, "sp_sym_intern(sp_str_upcase(sp_sym_to_s($r)))", 0 },
   { TY_SYMBOL, "downcase",        0, 127, BF_ANY,      TY_SYMBOL,     BOPE_TEMPLATE, "sp_sym_intern(sp_str_downcase(sp_sym_to_s($r)))", 0 },
   { TY_SYMBOL, "capitalize",      0, 127, BF_ANY,      TY_SYMBOL,     BOPE_TEMPLATE, "sp_sym_intern(sp_str_capitalize(sp_sym_to_s($r)))", 0 },
