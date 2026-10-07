@@ -9116,6 +9116,182 @@ static int slot_takes_subclass(Compiler *c, TyKind slot, TyKind val) {
   return is_descendant(c, vc, sc);
 }
 
+/* What a subtree assigns where it is written, and the methods it calls:
+   the answer to "does running this assign @o, or call the writer of the
+   attribute n?" without walking a method's body once for each call that
+   reaches it. `keys` are the variables written, a letter for the kind in
+   front (I @iv, C @@cv, G $gv), and W with the attribute a writer call
+   names; `callees` are the scopes of the methods a call in it names. */
+typedef struct {
+  int done;
+  char **keys; int nkeys;
+  int *callees; int ncallees;
+} SubtreeAssigns;
+
+static SubtreeAssigns *g_scope_assigns = NULL;   /* one a scope, filled when first asked */
+static int *g_scopes_by_name = NULL;             /* the method scopes, sorted by name */
+static int g_scopes_by_name_n = 0, g_scope_assigns_n = -1;
+static Scope *g_scopes_by_name_base = NULL;
+static unsigned char *g_shows_assign_memo = NULL; /* three bytes a scope: 0 not asked, 1 no, 2 yes */
+static char *g_shows_assign_q = NULL;             /* the question the memo answers */
+
+static int scopes_by_name_cmp(const void *a, const void *b) {
+  return strcmp(g_scopes_by_name_base[*(const int *)a].name, g_scopes_by_name_base[*(const int *)b].name);
+}
+
+static void assigns_add_key(SubtreeAssigns *sa, char kind, const char *nm, size_t n) {
+  for (int i = 0; i < sa->nkeys; i++)
+    if (sa->keys[i][0] == kind && !strncmp(sa->keys[i] + 1, nm, n) && !sa->keys[i][n + 1]) return;
+  char *k = (char *)malloc(n + 2);
+  k[0] = kind; memcpy(k + 1, nm, n); k[n + 1] = 0;
+  sa->keys = (char **)realloc(sa->keys, sizeof(char *) * (size_t)(sa->nkeys + 1));
+  sa->keys[sa->nkeys++] = k;
+}
+
+static void assigns_collect(Compiler *c, int id, SubtreeAssigns *sa) {
+  const NodeTable *nt = c->nt;
+  if (id < 0) return;
+  const char *ty = nt_type(nt, id);
+  if (!ty) return;
+  const char *nm = nt_str(nt, id, "name");
+  int write = strstr(ty, "WriteNode") || strstr(ty, "TargetNode");
+  if (nm && write) {
+    if (!strncmp(ty, "InstanceVariable", 16)) assigns_add_key(sa, 'I', nm, strlen(nm));
+    else if (!strncmp(ty, "ClassVariable", 13)) assigns_add_key(sa, 'C', nm, strlen(nm));
+    else if (!strncmp(ty, "GlobalVariable", 14)) assigns_add_key(sa, 'G', nm, strlen(nm));
+  }
+  if (nm && !strncmp(ty, "Call", 4)) {
+    /* `o.x = v` and a target name the writer; `o.x += v` names the reader */
+    size_t n = strlen(nm);
+    if (n > 0 && nm[n - 1] == '=') assigns_add_key(sa, 'W', nm, n - 1);
+    if (write) assigns_add_key(sa, 'W', nm, n);
+    int lo = 0, hi = g_scopes_by_name_n;
+    while (lo < hi) {
+      int mid = (lo + hi) / 2;
+      if (strcmp(c->scopes[g_scopes_by_name[mid]].name, nm) < 0) lo = mid + 1; else hi = mid;
+    }
+    for (; lo < g_scopes_by_name_n && sp_streq(c->scopes[g_scopes_by_name[lo]].name, nm); lo++) {
+      int mi = g_scopes_by_name[lo], seen = 0;
+      for (int i = 0; i < sa->ncallees && !seen; i++) seen = sa->callees[i] == mi;
+      if (seen) continue;
+      sa->callees = (int *)realloc(sa->callees, sizeof(int) * (size_t)(sa->ncallees + 1));
+      sa->callees[sa->ncallees++] = mi;
+    }
+  }
+  for (int i = 0; i < nt_num_refs(nt, id); i++) assigns_collect(c, nt_ref_at(nt, id, i), sa);
+  for (int i = 0; i < nt_num_arrs(nt, id); i++) {
+    int n = 0; const int *ids = nt_arr_at(nt, id, i, &n);
+    for (int j = 0; j < n; j++) assigns_collect(c, ids[j], sa);
+  }
+}
+
+/* Is the key written in `sa`, or in a method it calls, three calls deep?
+   A method's answer is kept by the depth it was asked at: a yes there is a
+   yes from any depth above it, a no there a no from any depth below. */
+static int assigns_show(Compiler *c, const SubtreeAssigns *sa, const char *var, const char *attr, int depth) {
+  for (int i = 0; i < sa->nkeys; i++)
+    if (sp_streq(sa->keys[i], var) || (attr && sp_streq(sa->keys[i], attr))) return 1;
+  for (int i = 0; depth < 3 && i < sa->ncallees; i++) {
+    int mi = sa->callees[i];
+    unsigned char *a = g_shows_assign_memo + (size_t)mi * 3;
+    if (!a[depth]) {
+      SubtreeAssigns *m = &g_scope_assigns[mi];
+      if (!m->done) { m->done = 1; assigns_collect(c, nt_ref(c->nt, c->scopes[mi].def_node, "body"), m); }
+      if (assigns_show(c, m, var, attr, depth + 1))
+        for (int d = 0; d <= depth; d++) a[d] = 2;
+      else
+        for (int d = depth; d < 3; d++) a[d] = 1;
+    }
+    if (a[depth] == 2) return 1;
+  }
+  return 0;
+}
+
+/* Does running the subtree assign the variable `var` -- an instance, class
+   or global variable; `kind` is I, C or G -- or call the writer of the
+   attribute `attr` (NULL: none is asked about)? An assignment written in
+   the subtree, or in a method it calls, found by the method's name, three
+   calls deep. */
+static int subtree_shows_assign(Compiler *c, int id, char kind, const char *var, const char *attr) {
+  if (g_scope_assigns_n != c->nscopes) {
+    /* first asked (or the scopes grew): the methods by name, nothing collected yet */
+    for (int i = 0; i < g_scope_assigns_n; i++) {
+      for (int k = 0; k < g_scope_assigns[i].nkeys; k++) free(g_scope_assigns[i].keys[k]);
+      free(g_scope_assigns[i].keys); free(g_scope_assigns[i].callees);
+    }
+    free(g_scope_assigns); free(g_scopes_by_name); free(g_shows_assign_memo); free(g_shows_assign_q);
+    g_shows_assign_q = NULL;
+    g_scope_assigns_n = c->nscopes;
+    size_t n = (size_t)(c->nscopes > 0 ? c->nscopes : 1);
+    g_scope_assigns = (SubtreeAssigns *)calloc(n, sizeof(SubtreeAssigns));
+    g_scopes_by_name = (int *)malloc(sizeof(int) * n);
+    g_shows_assign_memo = (unsigned char *)calloc(n, 3);
+    g_scopes_by_name_n = 0;
+    for (int mi = 0; mi < c->nscopes; mi++)
+      if (c->scopes[mi].def_node >= 0 && c->scopes[mi].name) g_scopes_by_name[g_scopes_by_name_n++] = mi;
+    g_scopes_by_name_base = c->scopes;
+    qsort(g_scopes_by_name, (size_t)g_scopes_by_name_n, sizeof(int), scopes_by_name_cmp);
+  }
+  size_t vn = strlen(var), an = attr ? strlen(attr) : 0;
+  char *q = (char *)malloc(vn + an + 4);
+  q[0] = kind; memcpy(q + 1, var, vn + 1);
+  char *qa = q + vn + 2;
+  qa[0] = 'W'; memcpy(qa + 1, attr ? attr : "", an + 1);
+  /* the memo holds for the question it was filled for */
+  if (!g_shows_assign_q || strcmp(g_shows_assign_q, q) || strcmp(g_shows_assign_q + vn + 2, qa)) {
+    memset(g_shows_assign_memo, 0, (size_t)(c->nscopes > 0 ? c->nscopes : 1) * 3);
+    free(g_shows_assign_q);
+    g_shows_assign_q = q;
+  } else {
+    free(q);
+    q = g_shows_assign_q; qa = q + vn + 2;
+  }
+  SubtreeAssigns sa = {0};
+  assigns_collect(c, id, &sa);
+  int r = assigns_show(c, &sa, q, attr ? qa : NULL, 0);
+  for (int k = 0; k < sa.nkeys; k++) free(sa.keys[k]);
+  free(sa.keys); free(sa.callees);
+  return r;
+}
+
+/* The receiver of `recv.x = value` is read before the value runs. Does the
+   value assign what the receiver reads? A local it assigns, or one a proc
+   it may call assigns (read_rebound_by: `c.x = (c = d; 1)`); an instance,
+   class or global variable (`@o.x = (@o = d; 1)`, `@o.x = swap`); the
+   field a reader receiver reads (`self.o.x = (@o = d; 1)`, `h.o.x =
+   (h.o = d; 1)`). Only an assignment subtree_shows_assign finds counts:
+   every other statement keeps its receiver read in place. */
+static int writer_recv_let_go(Compiler *c, int recv, int value) {
+  const NodeTable *nt = c->nt;
+  if (recv < 0) return 0;
+  const char *nm = nt_str(nt, recv, "name");
+  switch (nt_kind(nt, recv)) {
+    case NK_LocalVariableReadNode: return read_rebound_by(c, recv, value);
+    case NK_InstanceVariableReadNode: return nm && subtree_shows_assign(c, value, 'I', nm, nm + 1);
+    case NK_ClassVariableReadNode: return nm && subtree_shows_assign(c, value, 'C', nm, NULL);
+    case NK_GlobalVariableReadNode: return nm && subtree_shows_assign(c, value, 'G', nm, NULL);
+    case NK_CallNode: {
+      int alloc = 0;
+      char ivn[300];
+      if (!nm || !call_is_field_read(c, recv, &alloc)) return 0;
+      snprintf(ivn, sizeof ivn, "@%s", nm);
+      return subtree_shows_assign(c, value, 'I', ivn, nm) ||
+             writer_recv_let_go(c, nt_ref(nt, recv, "receiver"), value);
+    }
+    case NK_ParenthesesNode: case NK_StatementsNode: {
+      for (int i = 0; i < nt_num_refs(nt, recv); i++)
+        if (writer_recv_let_go(c, nt_ref_at(nt, recv, i), value)) return 1;
+      for (int i = 0; i < nt_num_arrs(nt, recv); i++) {
+        int n = 0; const int *ids = nt_arr_at(nt, recv, i, &n);
+        for (int j = 0; j < n; j++)
+          if (writer_recv_let_go(c, ids[j], value)) return 1;
+      }
+      return 0;
+    }
+    default: return 0;
+  }
+}
+
 void emit_boxed_writer_arms(Compiler *c, const char *base, const char *nm,
                             const char *objp, const char *src, TyKind at, Buf *b) {
   for (int k = 0; k < c->nclasses; k++) {
@@ -11222,6 +11398,15 @@ static int emit_call_stmt(Compiler *c, int id, Buf *b, int indent, const NodeTab
                          nt_kind(nt, recv) != NK_GlobalVariableReadNode &&
                          !subtree_is_pure_read(c, recv) && !subtree_is_pure_read(c, argv[0]);
               int hroot = hold && subtree_may_allocate(nt, argv[0]);
+              /* A receiver that is a plain read is read in place, kept by
+                 what it reads, unless the value gives that another value:
+                 the store goes into the receiver read first, which only
+                 the temporary may hold by then. */
+              if (!hold && rc >= 0 && rc < c->nclasses && !c->classes[rc].is_value_type &&
+                  writer_recv_let_go(c, recv, argv[0])) {
+                hold = 1;
+                hroot = subtree_may_allocate(nt, argv[0]);
+              }
               int braces = fo || (hold && !g_pre);
               int tw = fo || hold ? ++g_tmp : -1;
               if (fo || hold) {
@@ -11325,6 +11510,7 @@ static int emit_call_stmt(Compiler *c, int id, Buf *b, int indent, const NodeTab
             int tv = ++g_tmp, tval = ++g_tmp;
             emit_indent(b, indent);
             buf_printf(b, "{ sp_RbVal _t%d = ", tv); emit_expr(c, recv, b); buf_puts(b, "; ");
+            if (subtree_may_allocate(nt, argv[0]) && writer_recv_let_go(c, recv, argv[0])) buf_printf(b, "SP_GC_ROOT_RBVAL(_t%d); ", tv);
             if (nil_rhs) {
               buf_printf(b, "sp_RbVal _t%d = sp_box_nil();", tval);
             }
