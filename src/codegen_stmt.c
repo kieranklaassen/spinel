@@ -15114,7 +15114,7 @@ void emit_str_frozen_check(Compiler *c, int recv, Buf *b) {
 /* A String value the analysis says can be nil is no String: the TypeError
    CRuby raises where it converts the value, which the splice took for "".
    `text` is the value as the splice reads it. */
-static void emit_str_splice_nil(Compiler *c, int v, const char *text, Buf *b) {
+void emit_str_splice_nil(Compiler *c, int v, const char *text, Buf *b) {
   if (!text || comp_ntype(c, v) != TY_STRING || !repr_of(c, v).may_nil) return;
   buf_printf(b, " if (!(%s)) sp_raise_cls(\"TypeError\", \"no implicit conversion of nil into String\");", text);
 }

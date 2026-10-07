@@ -3746,6 +3746,7 @@ static int emit_str_mutator_call(Compiler *c, int id, Buf *b, const NodeTable *n
       buf_printf(b, "sp_int _t%d = ", ti2); emit_int_expr(c, argv[0], b);
       buf_printf(b, "; const char *_v%d = ", tn2); emit_str_insert_text(c, argv[1], b);
       buf_printf(b, "; SP_GC_ROOT_STR(_v%d); ", tn2);
+      { char vt[32]; snprintf(vt, sizeof vt, "_v%d", tn2); emit_str_splice_nil(c, argv[1], vt, b); }
       if (lvw) { buf_printf(b, "const char *_t%d = ", to); emit_recv_rooted(c, recv, to, "SP_GC_ROOT_STR", b); }
       buf_printf(b, "sp_str_check_mutable(_t%d);", to);   /* frozen -> FrozenError (#3003) */
       /* -1 appends; an index past the ends raises IndexError, as CRuby */
