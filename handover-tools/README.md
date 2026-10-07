@@ -29,6 +29,16 @@ from the commits its recipe lists.
   const_set of the class's name, and a write before the class's definition.
 - `gd-gen.rb OUT`: 831 programs (OUT/p) asking a rescued exception for its
   class where two modules name a class alike (the fourth piece).
+- `gd2-gen.rb OUT`: 2,580 one-row programs of the fourth piece with the
+  name bound to something else (a constant at the program's level, in
+  another module, an or-write, a second name, the module's own name held by
+  a constant), asked bare, as a path and rooted from eleven places.
+- `gd3-gen.rb OUT`: 648 one-row programs of the fourth piece with the name
+  also held by an included module, a superclass or an enclosing module.
+- `cmpcell.rb DIR A B` makes the two-rule table of two `include-order/quick.rb` runs cell
+  by cell, for programs that print one row.
+- `gd-attacks/`: the fourth piece's hand attacks (`r1` to `r6` the reader's
+  programs, `c11` a module of the same name reached through an include).
 - `early-gen.rb OUT`: the twelve early-call shapes.
 - `num-gen.rb OUT`: the family of `instance_of?(Numeric)` on a boxed number.
 - `bl-gen.rb OUT`: the family of `rescue` and `raise` through a constant
@@ -86,3 +96,14 @@ refactor. The emitted C is the same before and after (`tools/cident.sh`, and
 the sums of `csum.sh` over the earlier sets); the two programs counted with
 callgrind are 2,000 lines `K<i> = Integer`, `x = 5`, 4,000 lines
 `p x.is_a?(K<i>)`, alone and with `class Bo < BasicObject; end` ahead.
+
+The fourth piece asks the class table only where the path as written is
+that class (`gd-pr-body-upstream-v3.md`, `gd-commit-message-v2.txt`; the
+title is unchanged): `patches/piece4-exception-is-a-on-759d120fd207.patch`
+is the piece on 759d120fd207, and `piece4-lexical-delta.patch` the change
+on the piece as it was (it applies above the old patch on 759d120fd207 and
+on this branch). On 759d120fd207 against CRuby 3.3.6: `gd-gen.rb`, 315 of
+831 change, 254 lines wrong to right; `gd2-gen.rb`, 96 of 2,580 change, 96
+cells wrong to right (the piece as it was: 903 change, 114 cells right to
+wrong); `gd3-gen.rb`, 414 of 648 change, 414 cells wrong to right (as it
+was: 534 change, 12 cells right to wrong); no line or cell right to wrong.

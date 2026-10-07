@@ -41,36 +41,3 @@ begin
 rescue => e
   p kinds(e)
 end
-
-# One nested class, named bare from the bodies around the call.
-module Lib
-  class Fault < StandardError; end
-  def self.mine?(e) = e.is_a?(Fault)
-  class Client
-    def mine?(e) = e.kind_of?(Fault)
-  end
-end
-
-begin
-  raise Lib::Fault, "odd"
-rescue => e
-  p [Lib.mine?(e), Lib::Client.new.mine?(e), e.instance_of?(Lib::Fault)]
-end
-
-# A path's first name is the module Ruby finds from the body: the Net an
-# included module holds, not the program's own.
-module Mixin
-  module Net
-    class Error < StandardError; end
-  end
-end
-module Wrap
-  include Mixin
-  def self.mine?(e) = e.is_a?(Net::Error)
-end
-
-begin
-  raise Net::Error, "down"
-rescue => e
-  p [Wrap.mine?(e), e.is_a?(Net::Error), e.is_a?(Mixin::Net::Error)]
-end
