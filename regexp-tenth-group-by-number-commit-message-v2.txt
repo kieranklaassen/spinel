@@ -1,0 +1,38 @@
+A Regexp's tenth group and beyond are read by number
+
+A match keeps the Strings of nine groups (sp_re_captures) and the
+positions of thirty-two (sp_re_caps), and every read by number asked
+the Strings, with a bound of 9:
+
+    "abcdefghijk" =~ /(a)(b)(c)(d)(e)(f)(g)(h)(i)(j)(k)/
+    p $9, $10, $~[11], Regexp.last_match(10), $~[-1]
+
+printed "i", nil, nil, nil, nil; CRuby prints "i", "j", "k", "j", "k".
+defined?($10) and s[re, 10] answered nil the same way.
+
+sp_re_group answers a group by number: the kept String for 1 to 9, and
+past the ninth the subject cut at the kept position, which is how $`
+and $' are built already. A negative number counts back from the
+pattern's last group.
+
+The positions are the match's own only where the match filled
+sp_re_caps. String#match and Regexp#match run the engine into a caps
+array of their own and hand $~ their Strings alone, so one int,
+sp_re_caps_own, says which it was, and a group past the ninth is cut
+only where it holds; elsewhere it reads nil as before. A method's frame
+saves the int in a spare bit of the flag beside it: the frame is on the
+C stack and stays the 400 bytes it was. The collector's marks stay as
+they are.
+
+$N and Regexp.last_match(N) with a literal N of 1 to 9 read
+sp_re_captures[N] as before. The reads by a number known only at run
+time ($~[n], Regexp.last_match(n), s[re, n]) go through one emitter,
+emit_re_group_read, so the bound is written once.
+
+slice!(re, n) and s[re, n] = v keep their bound of 9: they move text by
+the same positions and are a change of their own.
+
+Tests: test/regexp_group_past_ninth.rb, and
+test/regexp_group_past_ninth_kept_match.rb, a program left alone.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

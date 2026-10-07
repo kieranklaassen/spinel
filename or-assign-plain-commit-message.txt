@@ -1,0 +1,30 @@
+A String stored with `h[k] ||= v` is the one `h[k] << x` appends to
+
+`h = {}; h[:k] ||= +""; h[:k] << "v"; p h` printed `{k: ""}` in the
+default build: the append went to a copy and nothing said so, where the
+same store written `h[:k] = +""` is right. Under --share-strings the
+previous commit lists the value of `c[k] ||= v` and `c[k] &&= v` as a
+store, as the last argument of `[]=` is. This lists it in the default
+build too, so the usual way to gather Strings by key (`h[w] ||= +""`
+then `h[w] << x` in a loop) keeps its appends, in a local Hash, in an
+Array slot and in a Hash or an Array an instance variable or a parameter
+holds.
+
+This adds no holder, container or leaf: `h[k] ||= v` is the store
+`h[k] = v` that the default build already shares, and the listing missed
+the spelling. Where `c[k] = v` is not shared today (a Hash a global, a
+constant, a reader or another element holds), `c[k] ||= v` is not
+either.
+
+It also carries a refusal over. A Hash that took a String by `[]=` and
+is walked by a block that appends to what it is handed is refused,
+because the block is handed a copy; the check reads the list of stores,
+so the same Hash filled by `||=` is now refused in the same words. The
+check cannot tell whether the append reaches the String:
+`h[:list] ||= []; h[:name] ||= +"n"` walked by
+`h.each_value { |v| v << "item" if v.is_a?(Array) }` is right today and
+stops building, as it does today when written with `=`.
+
+The test moves out of test/share: it is right in both builds now.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

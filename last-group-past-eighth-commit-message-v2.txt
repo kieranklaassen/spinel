@@ -1,0 +1,22 @@
+$+ is the last group that took part, past the eighth too
+
+$+ walked the kept Strings one place off (sp_re_captures[_bri-1], from
+9 down), so a ninth group answered the eighth, and a group past the
+ninth was never reached:
+
+    "abcdefghi" =~ /(a)(b)(c)(d)(e)(f)(g)(h)(i)/
+    p $+
+
+printed "h"; CRuby prints "i". With twelve groups it printed "h" where
+CRuby prints the twelfth.
+
+$+ now calls sp_re_last_paren_match. Past the ninth group it walks the
+kept positions from the pattern's last group down, where the positions
+are this match's own (sp_re_caps_own), and reads the first that took
+part through sp_re_group; the first nine it knows by their kept
+Strings, from the ninth down.
+
+Tests: test/regexp_last_paren_match_past_eighth.rb, and
+test/regexp_last_paren_match_kept_match.rb, a program left alone.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
