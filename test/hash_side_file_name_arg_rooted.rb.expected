@@ -1,0 +1,14 @@
+3961110
+[:a, :b]
+[1, 2]
+["ha", "hb"]
+[1, "hlit"]
+[1, "hk", :s]
+["ha", 2, nil]
+"hello worldhxyz.txt"
+"hxyz.tar"
+".hello world"
+[:a, :b]
+[3, 2]
+".rb"
+"hello world"

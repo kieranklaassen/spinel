@@ -1848,6 +1848,7 @@ GC_STRESS_TESTS := test/gc_root_frame_slots.rb \
                    test/thread_new_args_rooted_across_fiber_alloc.rb \
                    test/hash_mixed_values_copy_rooted.rb \
                    test/gc_root_volatile_string_slot.rb \
+                   test/hash_side_file_name_arg_rooted.rb \
                    test/gc_root_gathered_handle_param.rb \
                    test/dispatch_arm_roots_operands.rb
 gc-stress-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)

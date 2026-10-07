@@ -1369,6 +1369,7 @@ const char *sp_file_basename(const char *path) {SP_GC_ROOT_STR(path);
    any other suffix strips a literal tail match (#2774). */
 const char *sp_file_basename2(const char *path, const char *suffix) {SP_GC_ROOT_STR(path);SP_GC_ROOT_STR(suffix);
   const char *base = sp_file_basename(path);
+  SP_GC_ROOT_STR(base);   /* fresh, and read again after the answer's own allocation */
   size_t n = strlen(base);
   if (suffix && strcmp(suffix, ".*") == 0) {
     const char *dot = strrchr(base, '.');
@@ -1384,7 +1385,7 @@ const char *sp_file_basename2(const char *path, const char *suffix) {SP_GC_ROOT_
   return r;
 }
 
-const char *sp_file_extname(const char *path) {
+const char *sp_file_extname(const char *path) {SP_GC_ROOT_STR(path);
   const char *base = strrchr(path, '/');
   base = base ? base + 1 : path;
   const char *dot = strrchr(base, '.');
