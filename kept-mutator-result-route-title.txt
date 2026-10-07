@@ -1,0 +1,1 @@
+Refuse a kept result of the String mutators that answer self without a bang
