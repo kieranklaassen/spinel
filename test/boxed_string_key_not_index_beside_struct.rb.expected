@@ -1,0 +1,14 @@
+"TypeError: no implicit conversion of Symbol into Integer"
+"st"
+"TypeError: no implicit conversion from nil to integer"
+"st"
+"TypeError: no implicit conversion of true into Integer"
+"st"
+"TypeError: no implicit conversion of Symbol into Integer"
+"st!"
+"TypeError: no implicit conversion from nil to integer"
+"st!"
+7
+2
+"St"
+"St!"
