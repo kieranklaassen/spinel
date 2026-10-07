@@ -33,6 +33,7 @@
    directly onto the one shared heap, so no sp_ext_str_* shim is needed. */
 #include "sp_alloc.h"   /* string + object allocation, sp_box_*, sp_PolyArray */
 #include "sp_str.h"     /* sp_nil_recv for the nil-receiver unpack raise */
+#include "sp_string.h"  /* sp_String: a shared String handle element */
 
 /* ---------- Helpers ---------- */
 
@@ -336,12 +337,49 @@ static double pk_poly_to_flt(sp_RbVal v) {
   }
 }
 
-static const char *pk_poly_to_str(sp_RbVal v) {
-  switch (v.tag) {
-    case SP_TAG_STR: return v.v.s ? v.v.s : "";
-    case SP_TAG_NIL: return "";
-    default:         return "";
+const char *sp_poly_class_name(sp_RbVal v);   /* lib/sp_poly_cold.c */
+
+/* The value a conversion TypeError names: nil, true and false by
+   themselves, anything else by its class. */
+static const char *pk_conv_name(sp_RbVal v) {
+  if (v.tag == SP_TAG_NIL) return "nil";
+  if (v.tag == SP_TAG_BOOL) return v.v.b ? "true" : "false";
+  return sp_poly_class_name(v);
+}
+
+/* The bytes one element gives a String directive, as CRuby's pack reads
+   them. M takes any value's #to_s (rb_obj_as_string; nil's is ""). The
+   others take a String, or a user object's #to_str (StringValue); nil is no
+   bytes for a A Z B b H h, which pad it, where m and u have no nil arm.
+   Anything else is CRuby's TypeError ("no implicit conversion of Integer
+   into String"): the element read as no bytes, so `[1].pack("a*")`
+   answered "" and `[1].pack("a")` a NUL. A shared String handle in a poly
+   Array is its live bytes; it too read as none. */
+static const char *pk_str_elem_bytes(char spec, sp_RbVal v, size_t *n) {
+  *n = 0;
+  if (v.tag == SP_TAG_STR && v.v.s) { *n = sp_str_byte_len(v.v.s); return v.v.s; }
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_STRBUF && v.v.p) {
+    sp_String *h = (sp_String *)v.v.p;
+    if (!h->data) return "";
+    *n = (size_t)h->len;
+    return h->data;
   }
+  if (spec == 'M') {
+    const char *s = v.tag == SP_TAG_NIL ? ""
+                  : v.tag == SP_TAG_INT ? sp_int_to_s(v.v.i)
+                  : v.tag == SP_TAG_FLT ? sp_float_to_s(v.v.f)
+                  : sp_poly_to_s_fn ? sp_poly_to_s_fn(v) : "";
+    *n = s ? strlen(s) : 0;
+    return s ? s : "";
+  }
+  if (v.tag == SP_TAG_NIL && spec != 'm' && spec != 'u') return "";
+  if (v.tag == SP_TAG_OBJ && v.cls_id >= 0 && v.v.p && sp_obj_to_str_fn) {
+    SP_GC_ROOT_RBVAL(v);   /* across the user #to_str */
+    const char *r = sp_obj_to_str_fn((int)v.cls_id, v.v.p);
+    if (r) { *n = sp_str_byte_len(r); return r; }
+  }
+  sp_raise_cls("TypeError", sp_sprintf("no implicit conversion of %s into String", pk_conv_name(v)));
+  return "";
 }
 
 /* ---------- Base64 (`m`) and quoted-printable (`M`) encoders ---------- */
@@ -471,6 +509,32 @@ static void pk_str_bytes_directive(char spec, int64_t count, const char *s, size
 }
 
 
+/* The String directives: each takes one element, its count a width. */
+static int pk_is_str_spec(char spec) {
+  return spec && strchr("aAZmMuHhBb", spec) != NULL;
+}
+
+/* One String directive over element `e` (`have` 0: the elements ran out,
+   which packs no bytes), shared by the four pack entry points so a typed
+   Array's element converts as a poly one's does. */
+static void pk_str_spec(char spec, int64_t count, sp_RbVal e, int have,
+                        char **buf, size_t *len, size_t *cap) {
+  size_t sl = 0;
+  const char *s = have ? pk_str_elem_bytes(spec, e, &sl) : "";
+  if (spec == 'a' || spec == 'A' || spec == 'Z') {
+    size_t want = (count < 0) ? sl : (size_t)count;
+    if (spec == 'Z' && count < 0) want = sl + 1;
+    size_t take = sl < want ? sl : want;
+    pk_append(buf, len, cap, s, take);
+    if (take < want) {
+      char pad = (spec == 'A') ? ' ' : 0;
+      for (size_t pi = 0; pi < want - take; pi++) pk_append(buf, len, cap, &pad, 1);
+    }
+  }
+  else if (spec == 'm' || spec == 'M') pk_str_directive(spec, count, s, sl, buf, len, cap);
+  else pk_str_bytes_directive(spec, count, s, sl, buf, len, cap);
+}
+
 /* ---------- Pack entry points ---------- */
 
 /* A typed array's nil is the slot's sentinel (SP_INT_NIL, the Float NaN
@@ -481,6 +545,22 @@ static int pk_int_directive_consumes(char spec) {
 }
 static SP_NORETURN void pk_nil_elem(int flt) {
   sp_raise_cls("TypeError", flt ? "can't convert nil into Float" : "no implicit conversion of nil into Integer");
+}
+
+/* CRuby's pack result encoding: a template of U directives (m, M and u
+   alongside them too) answers UTF-8 text, and any other directive makes the
+   bytes ASCII-8BIT -- so [233].pack("U") is "\u00e9", one character, where it
+   was marked binary and read as two bytes. */
+static int pk_fmt_utf8(const char *fmt) {
+  int u = 0;
+  for (const char *q = fmt; q && *q; q++) {
+    char d = *q;
+    if (d == ' ' || d == '\t' || d == '\n' || d == '*' || d == '_' || d == '!' ||
+        d == '<' || d == '>' || (d >= '0' && d <= '9')) continue;
+    if (d == 'U') u = 1;
+    else if (d != 'm' && d != 'M' && d != 'u') return 0;
+  }
+  return u;
 }
 
 const char *sp_IntArray_pack(sp_IntArray *arr, const char *fmt) {SP_GC_ROOT(arr);
@@ -508,6 +588,15 @@ const char *sp_IntArray_pack(sp_IntArray *arr, const char *fmt) {SP_GC_ROOT(arr)
       size_t abs = count < 0 ? len : (size_t)count;
       if (abs <= len) len = abs;
       else { char _z = 0; while (len < abs) pk_append(&buf, &len, &cap, &_z, 1); }
+      continue;
+    }
+    /* a String directive converts the element as CRuby does: an Integer
+       is no String (TypeError), the nil sentinel is nil */
+    if (pk_is_str_spec(spec)) {
+      int have = idx < arr->len;
+      sp_int v = have ? arr->data[arr->start + idx] : 0;
+      pk_str_spec(spec, count, v == SP_INT_NIL ? sp_box_nil() : sp_box_int(v), have, &buf, &len, &cap);
+      idx++;
       continue;
     }
     /* w: BER-compressed integers (base-128, high bit = continuation). */
@@ -548,7 +637,7 @@ const char *sp_IntArray_pack(sp_IntArray *arr, const char *fmt) {SP_GC_ROOT(arr)
   char *r = sp_str_alloc(len);
   memcpy(r, buf, len);
   sp_str_set_len(r, len);
-  sp_str_mark_binary(r);   /* pack answers ASCII-8BIT bytes: inspect them \xNN */
+  if (!pk_fmt_utf8(fmt)) sp_str_mark_binary(r);   /* pack answers ASCII-8BIT bytes: inspect them \xNN */
   free(buf);
   return r;
 }
@@ -586,6 +675,15 @@ const char *sp_FloatArray_pack(sp_FloatArray *arr, const char *fmt) {
       else { char _z = 0; while (len < abs) pk_append(&buf, &len, &cap, &_z, 1); }
       continue;
     }
+    /* a String directive converts the element as CRuby does: a Float is no
+       String (TypeError), the nil sentinel is nil */
+    if (pk_is_str_spec(spec)) {
+      int have = idx < arr->len;
+      sp_float v = have ? arr->data[idx] : 0.0;
+      pk_str_spec(spec, count, sp_float_is_nil(v) ? sp_box_nil() : sp_box_float(v), have, &buf, &len, &cap);
+      idx++;
+      continue;
+    }
     if (count < 0) count = arr->len - idx;
     if (count < 0) count = 0;
     if (pk_is_flt_spec(spec)) {
@@ -607,7 +705,7 @@ const char *sp_FloatArray_pack(sp_FloatArray *arr, const char *fmt) {
   char *r = sp_str_alloc(len);
   memcpy(r, buf, len);
   sp_str_set_len(r, len);
-  sp_str_mark_binary(r);   /* pack answers ASCII-8BIT bytes: inspect them \xNN */
+  if (!pk_fmt_utf8(fmt)) sp_str_mark_binary(r);   /* pack answers ASCII-8BIT bytes: inspect them \xNN */
   free(buf);
   return r;
 }
@@ -639,34 +737,12 @@ const char *sp_PolyArray_pack(sp_PolyArray *arr, const char *fmt) {SP_GC_ROOT(ar
       else { char _z = 0; while (len < abs) pk_append(&buf, &len, &cap, &_z, 1); }
       continue;
     }
-    if (spec == 'a' || spec == 'A' || spec == 'Z') {
-      const char *s = (idx < arr->len) ? pk_poly_to_str(arr->data[idx]) : "";
+    /* a/A/Z, m/M, H/h, B/b, u: consume one element, converted as CRuby
+       converts it (pk_str_elem_bytes) */
+    if (pk_is_str_spec(spec)) {
+      int have = idx < arr->len;
+      pk_str_spec(spec, count, have ? arr->data[idx] : sp_box_nil(), have, &buf, &len, &cap);
       idx++;
-      size_t sl = strlen(s);
-      size_t want = (count < 0) ? sl : (size_t)count;
-      if (spec == 'Z' && count < 0) want = sl + 1;
-      size_t take = sl < want ? sl : want;
-      pk_append(&buf, &len, &cap, s, take);
-      if (take < want) {
-        char pad = (spec == 'A') ? ' ' : 0;
-        for (size_t pi = 0; pi < want - take; pi++) pk_append(&buf, &len, &cap, &pad, 1);
-      }
-      continue;
-    }
-    if (spec == 'm' || spec == 'M') {
-      const char *s = ""; size_t sl = 0;
-      if (idx < arr->len) {
-        sp_RbVal e = arr->data[idx];
-        if (e.tag == SP_TAG_STR && e.v.s) { s = e.v.s; sl = sp_str_byte_len(s); }
-      }
-      idx++;
-      pk_str_directive(spec, count, s, sl, &buf, &len, &cap);
-      continue;
-    }
-    /* H/h (hex), B/b (bit), u (uuencode): consume one string element. */
-    if (spec == 'H' || spec == 'h' || spec == 'B' || spec == 'b' || spec == 'u') {
-      const char *s = (idx < arr->len) ? pk_poly_to_str(arr->data[idx]) : ""; idx++;
-      pk_str_bytes_directive(spec, count, s, strlen(s), &buf, &len, &cap);
       continue;
     }
     /* w: BER-compressed integers (base-128, high bit = continuation). */
@@ -708,7 +784,7 @@ const char *sp_PolyArray_pack(sp_PolyArray *arr, const char *fmt) {SP_GC_ROOT(ar
   char *r = sp_str_alloc(len);
   memcpy(r, buf, len);
   sp_str_set_len(r, len);
-  sp_str_mark_binary(r);   /* pack answers ASCII-8BIT bytes: inspect them \xNN */
+  if (!pk_fmt_utf8(fmt)) sp_str_mark_binary(r);   /* pack answers ASCII-8BIT bytes: inspect them \xNN */
   free(buf);
   return r;
 }
@@ -744,27 +820,16 @@ const char *sp_StrArray_pack(sp_StrArray *arr, const char *fmt) {
       else { char _z = 0; while (len < abs) pk_append(&buf, &len, &cap, &_z, 1); }
       continue;
     }
-    const char *s = (idx < arr->len) ? sp_StrArray_get(arr, idx) : NULL;
-    size_t sl = s ? sp_str_byte_len(s) : 0;
-    if (!s) s = "";
+    /* a nil element (NULL) is nil to the String directives: padding for
+       a A Z B b H h, "" for M, and the TypeError m and u raise */
+    if (pk_is_str_spec(spec)) {
+      int have = idx < arr->len;
+      pk_str_spec(spec, count, sp_box_str(have ? sp_StrArray_get(arr, idx) : NULL), have, &buf, &len, &cap);
+      idx++;
+      continue;
+    }
     idx++;
-    if (spec == 'a' || spec == 'A' || spec == 'Z') {
-      size_t want = (count < 0) ? sl : (size_t)count;
-      if (spec == 'Z' && count < 0) want = sl + 1;
-      size_t take = sl < want ? sl : want;
-      pk_append(&buf, &len, &cap, s, take);
-      if (take < want) {
-        char pad = (spec == 'A') ? ' ' : 0;
-        for (size_t pi = 0; pi < want - take; pi++) pk_append(&buf, &len, &cap, &pad, 1);
-      }
-    }
-    else if (spec == 'm' || spec == 'M') {
-      pk_str_directive(spec, count, s, sl, &buf, &len, &cap);
-    }
-    else if (spec == 'H' || spec == 'h' || spec == 'B' || spec == 'b' || spec == 'u') {
-      pk_str_bytes_directive(spec, count, s, sl, &buf, &len, &cap);
-    }
-    else if (strchr("cCsSlLqQnNvVjJiIfdeEgGUw", spec)) {
+    if (strchr("cCsSlLqQnNvVjJiIfdeEgGUw", spec)) {
       /* a numeric directive cannot take a String element: CRuby's TypeError
          (the directive was silently dropped before) */
       sp_raise_cls("TypeError", "no implicit conversion of String into Integer");
@@ -773,7 +838,7 @@ const char *sp_StrArray_pack(sp_StrArray *arr, const char *fmt) {
   char *r = sp_str_alloc(len);
   memcpy(r, buf, len);
   sp_str_set_len(r, len);
-  sp_str_mark_binary(r);   /* pack answers ASCII-8BIT bytes: inspect them \xNN */
+  if (!pk_fmt_utf8(fmt)) sp_str_mark_binary(r);   /* pack answers ASCII-8BIT bytes: inspect them \xNN */
   free(buf);
   return r;
 }
@@ -856,7 +921,23 @@ static SP_NORETURN void uk_unknown_directive(char type, const char *fmt, size_t 
   int bin = sp_str_is_binary(fmt);
   if (t >= 0x20 && t < 0x7f) o += (size_t)snprintf(msg + o, cap - o, "unknown unpack directive '%c' in '", type);
   else o += (size_t)snprintf(msg + o, cap - o, "unknown unpack directive '\\x%02x' in '", t);
-  for (size_t i = 0; i < flen; i++) {
+  /* A format every character of which is printable is shown as it is, as
+     CRuby's rb_str_quote_unprintable leaves it ('Cé'); only one holding an
+     unprintable character is escaped as a whole. */
+  int printable = 1;
+  for (size_t i = 0; i < flen && printable; i++) {
+    unsigned char ch = (unsigned char)fmt[i];
+    if (ch < 0x20 || ch == 0x7f) printable = 0;
+    else if (ch >= 0x80) {
+      int len = bin ? 0 : ch >= 0xC2 && ch < 0xE0 ? 2 : ch >= 0xE0 && ch < 0xF0 ? 3 : ch >= 0xF0 && ch < 0xF5 ? 4 : 0;
+      if (!len || i + (size_t)len > flen) { printable = 0; break; }
+      for (int j = 1; j < len; j++)
+        if (((unsigned char)fmt[i + j] & 0xC0) != 0x80) { printable = 0; break; }
+      i += (size_t)len - 1;
+    }
+  }
+  if (printable) { memcpy(msg + o, fmt, flen); o += flen; }
+  for (size_t i = 0; i < flen && !printable; i++) {
     unsigned char ch = (unsigned char)fmt[i];
     const char *esc = NULL;
     switch (ch) {
