@@ -1,0 +1,34 @@
+A multiple assignment follows a right side widened after inference
+
+rejoin_local_writes lets a local follow the writes whose values widen
+after infer_write_types has joined them. A multiple assignment was
+left where it was. Its targets are joined inside infer_write_types,
+before the container fold makes an Integer Array that is pushed a
+String the general Array, so they kept the element's first type:
+
+    t = [1, 2]
+    t << "s"
+    a, b, c = t
+    p c          # 94886088126521; CRuby "s"
+
+`c` kept the Integer slot and the String's pointer was read as a
+number. Out of a Float Array the target read 0.0 or 5.0e-324,
+`a, *r = t` printed [2, 0] or raised TypeError, `x, *m, z = t` did not
+compile, and a literal right side over reads of such an Array
+(`a, b = t.last, 5`) printed 0.
+
+infer_write_multi_assign now notes in lw_joined what the right side
+read as when it joined the targets: the value's type, or each value's
+of a literal right side. rejoin_local_writes joins the targets of an
+assignment whose right side reads differently since, with the pass
+that joined them, called for that one assignment, and a local it
+changes takes the steps a plain write's local takes there. An
+assignment whose right side is unchanged is not joined again, so a
+narrowing made on purpose stays.
+
+The targets then hold what they hold where the Array is written mixed
+from the start (`t = [1, 2, "s"]`): boxed values.
+
+Test: test/multi_assign_from_widened_array.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
