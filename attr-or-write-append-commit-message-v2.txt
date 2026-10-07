@@ -1,0 +1,23 @@
+A String or-assigned to an attribute is the one `r.x << s` appends to
+
+`r.x ||= +"ab"; r.x << "z"; p r.x` printed "ab". An attribute written only
+by `o.x ||= v` / `o.x &&= v` has a slot no write types (infer_ivar_types
+takes `o.x = v`), the backstop boxes it, and the append went to a copy of
+the boxed String. Written `r.x = +"ab"` the slot is a String's and the
+append lands.
+
+Once the types have settled, a slot still untyped whose conditional writes
+each give a String takes the String's type, as `o.x = v` would have given
+it, but only where the box does nothing the typed slot does not. The box
+hands every reader the one String, so a freeze through another name is
+seen, and its mutators raise for nil; a typed slot hands out a copy and
+its mutators take the slot as written. So the slot is typed only where a
+listed mutator is called on the attribute (one nothing mutates is right
+in its box), each conditional write is a statement given a fresh String,
+each read is the receiver of a listed String method, printed,
+interpolated or a statement, each mutator is a statement after the `||=`
+on the same receiver (self, or a local bound once) in one sequence, and
+nothing else names the attribute. Taken by name in one walk of the
+program; anything else keeps the box and its generated C.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
