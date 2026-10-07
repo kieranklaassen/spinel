@@ -3127,7 +3127,12 @@ int emit_lazy_pipeline_expr(Compiler *c, int id, Buf *b) {
     /* The running value is boxed (poly); the block param may infer a narrower
        type, so unbox to match its C type. A |k, v| header destructures a
        pair element (hash.lazy rides the pair array, #2845). */
-    if (!emit_iter_autosplat(c, blk, TY_POLY_ARRAY, vbuf, g_indent + 1)) {
+    /* a block of any other shape than plain requireds (a rest, an optional,
+       a post, a keyword) binds the value by the proc distribution: `|*r|`
+       was never bound and read nil */
+    char gvals[256]; snprintf(gvals, sizeof gvals, "sp_yielded_args(0, %s)", vbuf);
+    if (emit_boxed_step_binds(c, blk, gvals, g_pre, g_indent + 1, 0)) {}
+    else if (!emit_iter_autosplat(c, blk, TY_POLY_ARRAY, vbuf, g_indent + 1)) {
       Scope *bs = comp_scope_of(c, blk);
       LocalVar *plv = (bs && bp0) ? scope_local(bs, bp0) : NULL;
       TyKind pt = (plv && plv->type != TY_UNKNOWN) ? plv->type : TY_POLY;
@@ -3568,7 +3573,7 @@ void emit_syserr_call(Compiler *c, int id, const char *fn, const char *lead,
   for (int a = 0; a < argc; a++) {
     const char *aty = nt_type(c->nt, argv[a]);
     if (aty && (sp_streq(aty, "SplatNode") || sp_streq(aty, "KeywordHashNode") ||
-                sp_streq(aty, "BlockArgumentNode") || sp_streq(aty, "ForwardingArgumentsNode")))
+                sp_streq(aty, "BlockArgumentNode") || nt_kind(c->nt, argv[a]) == NK_ForwardingArgumentsNode))
       unsupported(c, id, "a splat, keyword or block argument to a SystemCallError constructor");
   }
   if (argc == 0) { buf_printf(b, "%s(%s0, NULL)", fn, lead); return; }
@@ -9125,7 +9130,7 @@ static int subtree_sees_block(const NodeTable *nt, int node, const char *bname) 
     case NK_NONE: case NK_DefNode: case NK_ClassNode: case NK_ModuleNode:
     case NK_SingletonClassNode: return 0;
     case NK_BlockArgumentNode: case NK_YieldNode: case NK_SuperNode:
-    case NK_ForwardingSuperNode: return 1;
+    case NK_ForwardingSuperNode: case NK_ForwardingArgumentsNode: return 1;
     case NK_CallNode: {
       const char *nm = nt_str(nt, node, "name");
       if (nt_ref(nt, node, "receiver") < 0 && nm &&
@@ -9135,7 +9140,6 @@ static int subtree_sees_block(const NodeTable *nt, int node, const char *bname) 
     }
     default: {
       const char *ty = nt_type(nt, node), *nm = nt_str(nt, node, "name");
-      if (ty && sp_streq(ty, "ForwardingArgumentsNode")) return 1;
       if (ty && !strncmp(ty, "LocalVariable", 13) && nm && sp_streq(nm, bname)) return 1;
     }
   }
@@ -15081,6 +15085,15 @@ int builtin_ops_arity_check(void) {
   fprintf(stderr, "check-bop-arity: %d rows checked, %d outside CRuby's counts\n", checked, bad);
   return bad;
 }
+/* The count CRuby expects of cls#name for a call of argc arguments (with a
+   block when with_block), into exp, when the instance arity table refuses
+   the count; NULL when it admits it or has no row. */
+const char *builtin_arity_expected(const char *cls, const char *name, int with_block, int argc,
+                                   char *exp, size_t n) {
+  exp[0] = 0;
+  if (!arity_spec_row(sp_builtin_arity_spec_tbl, cls, name, with_block, argc, exp, n)) return NULL;
+  return exp[0] ? exp : NULL;
+}
 int builtin_arity_admits(const char *cls, const char *name, int argc) {
   char exp[64];
   exp[0] = 0;
@@ -15231,7 +15244,7 @@ static int arity_call_block(const NodeTable *nt, int id, int *argc) {
   for (int i = 0; i < *argc; i++) {
     const char *at = nt_type(nt, argv[i]);
     if (at && (sp_streq(at, "SplatNode") || sp_streq(at, "KeywordHashNode") ||
-               sp_streq(at, "ForwardingArgumentsNode") ||
+               nt_kind(nt, argv[i]) == NK_ForwardingArgumentsNode ||
                sp_streq(at, "BlockArgumentNode")))
       return -1;
   }
@@ -15460,9 +15473,7 @@ int emit_native_splat_call(Compiler *c, int id, int cid, const char *name, int r
            c->classes[cid].name, kind ? "." : "#", name);
   for (int a = 0; a < argc; a++) {
     NodeKind k = nt_kind(nt, argv[a]);
-    const char *ty = nt_type(nt, argv[a]);
-    if (k == NK_KeywordHashNode || k == NK_BlockArgumentNode ||
-        (ty && sp_streq(ty, "ForwardingArgumentsNode")))
+    if (k == NK_KeywordHashNode || k == NK_BlockArgumentNode || k == NK_ForwardingArgumentsNode)
       unsupported(c, id, why);
     if (k == NK_SplatNode) {
       int so = nt_ref(nt, argv[a], "expression");
@@ -15586,7 +15597,7 @@ int emit_native_count_mismatch(Compiler *c, int id, int cid, const char *name, i
   for (int a = 0; a < argc; a++) {
     const char *at = nt_type(nt, argv[a]);
     if (at && (sp_streq(at, "SplatNode") || sp_streq(at, "KeywordHashNode") ||
-               sp_streq(at, "ForwardingArgumentsNode") || sp_streq(at, "BlockArgumentNode")))
+               nt_kind(nt, argv[a]) == NK_ForwardingArgumentsNode || sp_streq(at, "BlockArgumentNode")))
       return 0;
   }
   int blk = nt_ref(nt, id, "block");
@@ -17045,7 +17056,7 @@ int hoist_dispatch_args(Compiler *c, int argsN, int **sv, int **vw) {
     if (!aty || (!rebound && (sp_streq(aty, "LocalVariableReadNode") ||
                               sp_streq(aty, "InstanceVariableReadNode"))) ||
         sp_streq(aty, "SplatNode") || sp_streq(aty, "KeywordHashNode") ||
-        sp_streq(aty, "BlockArgumentNode") || sp_streq(aty, "ForwardingArgumentsNode") ||
+        sp_streq(aty, "BlockArgumentNode") || nt_kind(nt, hn[a]) == NK_ForwardingArgumentsNode ||
         sp_streq(aty, "SelfNode") || sp_streq(aty, "IntegerNode") ||
         sp_streq(aty, "FloatNode") || sp_streq(aty, "StringNode") ||
         sp_streq(aty, "SymbolNode") || sp_streq(aty, "NilNode") ||
@@ -17298,13 +17309,13 @@ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
        below would have raised. Guarded on the node id like the hash face: the
        re-entry asks the inference again, and a type cache is not a recursion
        guard (#4158 follow-up). */
-    if (grt == TY_POLY && g_handle_face_node != id && argc == 0 &&
-        ty_poly_handle_face(nt_str(nt, id, "name")) != TY_UNKNOWN &&
+    if (grt == TY_POLY && g_handle_face_node != id &&
+        ty_poly_handle_face_args(nt_str(nt, id, "name"), argc) != TY_UNKNOWN &&
         !user_defines_or_reads(c, nt_str(nt, id, "name")) &&
         !native_class_defines(c, nt_str(nt, id, "name")) &&
         g_n_argov < MAX_ARG_OVERRIDE) {
       const char *knm = nt_str(nt, id, "name");
-      TyKind kt = ty_poly_handle_face(knm);
+      TyKind kt = ty_poly_handle_face_args(knm, argc);
       int tkv = ++g_tmp;
       Buf krb; memset(&krb, 0, sizeof krb); emit_boxed(c, recv, &krb);
       emit_indent(g_pre, g_indent);
@@ -20532,7 +20543,7 @@ static void refuse_unplaced_lead(Compiler *c, int id, const char *name, int recv
   int fs = -1;
   for (int k = 0; k < ac && fs < 0; k++) {
     NodeKind ak = nt_kind(nt, av[k]);
-    if (ak == NK_BlockArgumentNode || (nt_type(nt, av[k]) && sp_streq(nt_type(nt, av[k]), "ForwardingArgumentsNode")))
+    if (ak == NK_BlockArgumentNode || ak == NK_ForwardingArgumentsNode)
       return;
     if (ak == NK_SplatNode) fs = k;
   }
@@ -23977,7 +23988,7 @@ int file_block_param_poly(Compiler *c, int id, const char *pname) {
 int raise_plain_arg(const NodeTable *nt, int node) {
   const char *t = nt_type(nt, node);
   return !(t && (sp_streq(t, "SplatNode") || sp_streq(t, "KeywordHashNode") ||
-                 sp_streq(t, "BlockArgumentNode") || sp_streq(t, "ForwardingArgumentsNode")));
+                 sp_streq(t, "BlockArgumentNode") || nt_kind(nt, node) == NK_ForwardingArgumentsNode));
 }
 
 /* A Fiber storage key. The storage is keyed by Symbol, and CRuby takes a
