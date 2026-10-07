@@ -11444,15 +11444,21 @@ static sp_RbVal sp_poly_set_poly(sp_RbVal v, sp_RbVal key, sp_RbVal val) {
     if (h) return val;
   }
   /* Every array arm below wants an integer index. A Float converts through
-     #to_int, and anything else is the TypeError the static path raises rather
+     #to_int, a Range is the splice `a[r] = v` writes where the key's type is
+     known, and anything else is the TypeError the static path raises rather
      than a write to drop on the floor (#3926). */
   if (sp_poly_is_array_kind(v.cls_id)) {
     if (key.tag == SP_TAG_FLT) key = sp_box_int((sp_int)key.v.f);
-    else if (key.tag != SP_TAG_INT)
+    else if (key.tag != SP_TAG_INT) {
+      if (key.tag == SP_TAG_OBJ && key.cls_id == SP_BUILTIN_RANGE && key.v.p) {
+        sp_poly_splice_range(v, *(sp_Range *)key.v.p, val);
+        return val;
+      }
       sp_raise_cls("TypeError", key.tag == SP_TAG_NIL
                    ? SPL("no implicit conversion from nil to integer")
                    : sp_sprintf("no implicit conversion of %s into Integer",
                                 sp_poly_class_name(key)));
+    }
   }
   switch (v.cls_id) {
     case SP_BUILTIN_STR_POLY_HASH:

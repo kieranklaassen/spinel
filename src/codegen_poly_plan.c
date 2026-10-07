@@ -2426,13 +2426,14 @@ void poly_specials_n(Compiler *c, int id, const char *name, int argc, const int 
                   nt_ref(nt, id, "block") < 0;
   /* `s[i] = v` on a boxed String when a user class owns `[]=` (any Struct
      does): the switch has no String arm, so the store was dropped -- see
-     emit_poly_str_aset_prearm. An Integer index, a String or Regexp key,
-     or a boxed one (an Integer, a Range, a String or a Regexp at run time),
-     the forms the builtin path writes back. */
+     emit_poly_str_aset_prearm. An Integer index, a String, Regexp or Range
+     key, or a boxed one (any of them at run time), the forms the builtin
+     path writes back. */
   TyKind straset_k = argc == 2 ? comp_ntype(c, argv[0]) : TY_UNKNOWN;
   int is_straset = is_element_access(name) && is_store_alias(name) && argc == 2 && !has_splat_arg &&
                    nt_ref(nt, id, "block") < 0 &&
-                   (straset_k == TY_INT || straset_k == TY_STRING || straset_k == TY_REGEX || straset_k == TY_POLY);
+                   (straset_k == TY_INT || straset_k == TY_STRING || straset_k == TY_REGEX || straset_k == TY_RANGE ||
+                    straset_k == TY_POLY);
   /* split(sep) on a TAG_STR receiver, when a user class also owns `split`
      (the bundled Pathname does) and the dispatch therefore lost the String
      arm. Same hole #3394 closed for the zero-arg form (#3401). */
