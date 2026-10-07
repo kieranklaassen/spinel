@@ -1,0 +1,39 @@
+A String mutator chain writes back only to the String it ran on
+
+    t = +"abc"
+    t.insert(0, "a").concat((t = +"q"; "x"))
+    p t
+
+printed "aabcx" where CRuby prints "q". The chain a value-form mutator
+writes its result back through passes insert, prepend, concat, replace
+and << since pull request 7778, and the write-back is to the variable
+by name: an argument that had given the variable another String lost
+it to the chain's result. Before that pull request the chain ended at
+the insert and t kept "q". `t.upcase!.sub!((t = +"q"; "A"), "z")`
+left "zBC" the same way, and has since a bang chain first wrote back.
+
+The mutator's receiver is the String the chain ran on, and each arm
+holds it in a temp. Where a call of the chain can rebind the variable
+the result now goes back only while the variable still names that
+String:
+
+    if (lv_t == _t2) lv_t = _t1;
+
+"Can rebind" is read_rebound_by, asked of the arguments and the block
+of each call of the chain: an assignment, a call that may run a proc
+assigning the local, and for an instance variable or a global anything
+that may run code assigning it. The test is on the pointer, so the arm
+roots the temp where it was not: a String the variable is given
+meanwhile cannot take the old one's address. replace held its receiver
+in no temp; it does where the test is emitted.
+
+A chain none of whose calls can rebind its variable is emitted as it
+was. So is one that cannot take the test:
+
+- a chain with a link the program gives String a method under
+  (`def prepend(*a) = +"other"`): that method may change its receiver
+  and answer it, another pointer here, so the write-back stays;
+- a variable that holds a shared String or a boxed value: the
+  write-back goes through the handle or the box, not a pointer.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
