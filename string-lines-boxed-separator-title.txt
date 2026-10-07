@@ -1,0 +1,1 @@
+String#each_line and #lines take a separator known only at run time

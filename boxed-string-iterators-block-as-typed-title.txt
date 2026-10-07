@@ -1,0 +1,1 @@
+A boxed String's iterators run their block as a typed String's do

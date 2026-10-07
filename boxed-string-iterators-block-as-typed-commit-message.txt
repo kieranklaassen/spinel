@@ -1,0 +1,34 @@
+A boxed String's iterators run their block as a typed String's do
+
+    g = { "a" => "x\ny\nz\n", "n" => 1 }
+    g["a"].each_line { |l| y ||= l; print y }
+
+prints x three times; CRuby prints x, y, z. The block's own local kept
+its value from one turn to the next. In the same loops a next under a
+begin popped the begin's rescue frame, so the raise here is not
+rescued:
+
+    begin
+      g["a"].each_line { |l| next if l.size > 2 }
+      raise "late"
+    rescue => e
+      puts e.message
+    end
+
+Under an ensure the next ended the whole loop, and in a proc it
+returned from the proc.
+
+A String whose class is known only at run time has loops of its own
+for each_line with and without arguments, each_char,
+each_grapheme_cluster, each_byte, each_codepoint and scan with a
+block. Each walked the block's statements itself, where the typed
+String's loops call emit_iter_loop_stmts: nothing reset the block's
+locals and nothing recorded the loop for a next. They now make that
+call.
+
+Test: test/boxed_str_loop_block_as_typed.rb. Eleven such loops, each
+with a local first set inside the block, with a next under a begin,
+under an ensure, in a proc and beside an ensure inside the block, and
+with a break under a begin, which was right and stays right.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

@@ -1,0 +1,22 @@
+String#each_line and #lines take a separator known only at run time
+
+    g = { "sep" => ",", "n" => 1 }
+    "a,b\nc,d".each_line(g["sep"]) { |l| p l }
+
+printed "a,b\n" and "c,d"; CRuby prints "a,", "b\nc," and "d". The
+block form of each_line and lines takes its separator only when the
+argument is typed String; a boxed one was dropped and the receiver was
+split at newlines. Without a block, lines(g["sep"]) and
+each_line(g["sep"]) raised NoMethodError for a String. A String that
+is itself boxed raised it for each_line with a block too.
+
+A boxed separator now goes to sp_str_lines_sep_poly, for a typed
+String and for a boxed one. A String splits as the typed call does,
+one the program appends to as well. nil is no separator: the one line
+is the receiver itself, as in CRuby. Anything else takes the strict
+conversion and raises CRuby's TypeError. A typed separator emits what
+it did.
+
+Test: test/string_lines_boxed_separator.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
