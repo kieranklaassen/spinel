@@ -9156,6 +9156,103 @@ int splat_operand_is_scalar(TyKind t) {
          t == TY_STRBUF || t == TY_SYMBOL || t == TY_BOOL;
 }
 
+static int splat_name_in(const char *s, const char *const *set) {
+  for (int i = 0; s && set[i]; i++)
+    if (sp_streq(s, set[i])) return 1;
+  return 0;
+}
+
+/* Can the program give an object a #to_a at all? It can where the name is
+   spelled anywhere (a def, a Symbol, a String: an alias, an attr, a
+   define_method, a send), where a method_missing, Enumerable or an eval is,
+   where a method is made under a name that is no literal, and where a
+   Struct, a Data or a native class sits below a class that is none. */
+static int splat_program_walk_for_to_a(Compiler *c) {
+  static const char *const names[] = { "to_a", "method_missing", "respond_to_missing?",
+                                       "__enum_to_a", NULL };
+  static const char *const consts[] = { "Enumerable", NULL };
+  static const char *const senders[] = { "send", "__send__", "public_send", NULL };
+  static const char *const makers[] = {
+    "define_method", "define_singleton_method", "alias_method", "attr", "attr_reader",
+    "attr_writer", "attr_accessor", "def_delegator", "def_delegators", "def_instance_delegator",
+    "def_instance_delegators", "delegate", "instance_delegate", NULL };
+  static const char *const evals[] = { "eval", "instance_eval", "class_eval", "module_eval",
+                                       "instance_exec", "class_exec", "module_exec", NULL };
+  const NodeTable *nt = c->nt;
+  for (int i = 0; names[i]; i++)
+    if (comp_method_index(c, names[i]) >= 0) return 1;
+  for (int k = 0; k < c->nclasses; k++) {
+    ClassInfo *ci = &c->classes[k], *up = ci->parent >= 0 ? &c->classes[ci->parent] : NULL;
+    /* a Struct's own to_a reaches no object outside it, unless it has a
+       parent that is none: then an object typed as the parent may be one */
+    if (ci->is_struct || ci->is_data || ci->is_native_class) {
+      if (up && !(up->is_struct || up->is_data || up->is_native_class)) return 1;
+      continue;
+    }
+    if (comp_reader_in_chain(c, k, "to_a", NULL)) return 1;
+    for (int i = 0; names[i]; i++)
+      if (comp_method_in_chain(c, k, names[i], NULL) >= 0) return 1;
+    for (int i = 0; i < ci->naliases; i++)
+      if (splat_name_in(ci->alias_new[i], names)) return 1;
+  }
+  NT_FOREACH_KIND(nt, NK_DefNode, id)
+    if (splat_name_in(nt_str(nt, id, "name"), names)) return 1;
+  NT_FOREACH_KIND(nt, NK_SymbolNode, id)
+    if (splat_name_in(nt_str(nt, id, "value"), names)) return 1;
+  NT_FOREACH_KIND(nt, NK_StringNode, id) {
+    const char *s = nt_str(nt, id, "content");
+    /* "spinel: ...": the message of the raise left where a def was dropped
+       (a class_eval on a variable, a Class.new built at run time) */
+    if (s && (strstr(s, names[0]) || strstr(s, names[1]) || !strncmp(s, "spinel: ", 8)))
+      return 1;
+  }
+  NT_FOREACH_KIND(nt, NK_ConstantReadNode, id)
+    if (splat_name_in(nt_str(nt, id, "name"), consts)) return 1;
+  NT_FOREACH_KIND(nt, NK_ConstantPathNode, id)
+    if (splat_name_in(nt_str(nt, id, "name"), consts)) return 1;
+  NT_FOREACH_KIND(nt, NK_CallNode, id) {
+    const char *name = nt_str(nt, id, "name");
+    if (splat_name_in(name, evals)) return 1;
+    int sent = splat_name_in(name, senders);
+    if (!sent && !splat_name_in(name, makers)) continue;
+    int ca = nt_ref(nt, id, "arguments"), argc = 0;
+    const int *av = ca >= 0 ? nt_arr(nt, ca, "arguments", &argc) : NULL;
+    for (int k = 0; k < argc; k++) {
+      NodeKind ak = nt_kind(nt, av[k]);
+      if (ak != NK_SymbolNode && ak != NK_StringNode) return 1;
+      /* a send of a name that makes no method: its other arguments are free */
+      if (sent && !splat_name_in(nt_str(nt, av[k], ak == NK_SymbolNode ? "value" : "content"),
+                                 makers)) break;
+    }
+    if (sent && argc == 0) return 1;
+  }
+  return 0;
+}
+
+/* One walk a program: the answer is kept on the compiler, and asked again
+   only while the classes and methods are still being counted. */
+static int splat_program_may_make_to_a(Compiler *c) {
+  if (c->splat_to_a_may) return 1;
+  if (c->splat_to_a_ncls == c->nclasses + 1 && c->splat_to_a_nscopes == c->nscopes + 1) return 0;
+  c->splat_to_a_ncls = c->nclasses + 1;
+  c->splat_to_a_nscopes = c->nscopes + 1;
+  c->splat_to_a_may = splat_program_walk_for_to_a(c);
+  return c->splat_to_a_may;
+}
+
+/* Is `t` an object that certainly answers no #to_a, so that splatted it is
+   the one value, itself? No class above it may be a Struct, a Data or a
+   native class, and the program must have no way to a to_a anywhere. Any
+   other object keeps the form it had. */
+static int splat_operand_is_plain_object(Compiler *c, TyKind t) {
+  if (!ty_is_object(t)) return 0;
+  int cid = ty_object_class(t);
+  if (cid < 0 || cid >= c->nclasses) return 0;
+  for (int u = cid; u >= 0; u = c->classes[u].parent)
+    if (c->classes[u].is_struct || c->classes[u].is_data || c->classes[u].is_native_class) return 0;
+  return !splat_program_may_make_to_a(c);
+}
+
 /* The positional count of a call with a splat among its positionals, as
    the run time measures it, into `b`: each splat's length, one for each
    other positional, and the one a keyword hash adds that is a positional
@@ -9386,7 +9483,7 @@ static int splat_spreads_in_place(Compiler *c, int splat) {
   }
   TyKind at = comp_ntype(c, inner);
   return at == TY_POLY || at == TY_UNKNOWN || splat_operand_is_scalar(at) || ty_is_array(at) ||
-         at == TY_POLY_ARRAY;
+         at == TY_POLY_ARRAY || splat_operand_is_plain_object(c, at);
 }
 
 /* `argv` may be NULL for `pos_argc` plain arguments that are no nodes (a
@@ -9907,7 +10004,9 @@ static int emit_splat_in_place(Compiler *c, int splat, TyKind *at) {
   TyKind t = inner >= 0 ? repr_of(c, inner).as_ty : TY_UNKNOWN;
   Buf anon; memset(&anon, 0, sizeof anon);
   int is_anon = inner < 0 && emit_anon_rest_ref(c, splat, &anon);
-  int boxed = !is_anon && inner >= 0 && (t == TY_POLY || t == TY_UNKNOWN || splat_operand_is_scalar(t));
+  int boxed = !is_anon && inner >= 0 &&
+              (t == TY_POLY || t == TY_UNKNOWN || splat_operand_is_scalar(t) ||
+               splat_operand_is_plain_object(c, t));
   if (is_anon || boxed) t = TY_POLY_ARRAY;
   *at = t;
   int tmp = ++g_tmp;
