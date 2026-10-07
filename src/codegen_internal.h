@@ -478,6 +478,9 @@ extern int        g_rescue_save_depth;
    (deferred return), both are wrapped in `if (guard) { ... }`. Returns 1 if it
    emitted anything. */
 int emit_frame_unwind(Buf *b, int pop_base, const char *guard);
+/* The same emission from the two counts: `pops` frames, `k` rescue bodies. */
+int emit_unwind(Buf *b, int pops, int k, const char *guard);
+void emit_rescue_pops(Buf *b, int k);
 int rescues_crossed(int pop_base);
 /* Pop the sp_rescue_sp handlers crossed (no frame pop), for the begin..ensure
    deferred return whose frame-pop text is special. */

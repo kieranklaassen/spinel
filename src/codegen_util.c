@@ -1200,21 +1200,24 @@ int rescues_crossed(int pop_base) {
     if (g_rescue_save_stack[i].exc_base >= pop_base) k++;
   return k;
 }
+void emit_rescue_pops(Buf *b, int k) {
+  if (k > 0) buf_printf(b, "sp_rescue_sp -= %d; ", k);
+}
 /* Pop the k crossed rescue-body handlers (no frame pop). Used at sites whose
    frame-pop text is special (the begin..ensure deferred-return). */
 void emit_cur_exc_restore(Buf *b, int pop_base) {
-  int k = rescues_crossed(pop_base);
-  if (k > 0) buf_printf(b, "sp_rescue_sp -= %d; ", k);
+  emit_rescue_pops(b, rescues_crossed(pop_base));
 }
-int emit_frame_unwind(Buf *b, int pop_base, const char *guard) {
-  int pops = g_exc_frame_depth - pop_base;
-  int k = rescues_crossed(pop_base);
+int emit_unwind(Buf *b, int pops, int k, const char *guard) {
   if (pops <= 0 && k == 0) return 0;
   if (guard) buf_printf(b, "if (%s) { ", guard);
   if (pops > 0) buf_printf(b, "sp_exc_top -= %d; ", pops);
-  if (k > 0) buf_printf(b, "sp_rescue_sp -= %d; ", k);
+  emit_rescue_pops(b, k);
   if (guard) buf_puts(b, "}");
   return 1;
+}
+int emit_frame_unwind(Buf *b, int pop_base, const char *guard) {
+  return emit_unwind(b, g_exc_frame_depth - pop_base, rescues_crossed(pop_base), guard);
 }
 Buf g_procs;
 Buf g_proc_protos;
