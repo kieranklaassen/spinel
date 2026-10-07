@@ -1,0 +1,1 @@
+setbyte reads a handle's buffer after its arguments have run

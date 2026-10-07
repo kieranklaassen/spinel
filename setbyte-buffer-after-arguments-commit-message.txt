@@ -1,0 +1,30 @@
+setbyte reads a handle's buffer after its arguments have run
+
+    s = +"abc"
+    t = s
+    s.setbyte(0, (s << ("x" * 4000); 0x41))
+    p s[0]
+
+printed "a" in a plain run; CRuby prints "A". valgrind reported an
+invalid read in sp_str_setbyte_cow, inside a block realloc had freed.
+The index form, s.setbyte((s << ("x" * 4000); 0), 0x41), did the same.
+
+For a String held by a handle (one under two names, or reached through
+a reader) emit_scalar_call_arms read the handle's buffer pointer and
+then ran the value and the index. An append inside either one grows
+the handle and frees the buffer it had, so the byte went into the freed
+block and the String kept its old byte.
+
+The value and the index now go to temporaries, in the order they ran
+before, and the buffer is read after both. With plain arguments the
+call costs what it did.
+
+Not here: the value still runs before the index (CRuby runs the index
+first), and the frozen check still stands before the arguments.
+
+Test: test/setbyte_argument_appends.rb (expected from CRuby 3.3.6). On
+master 13 of its 21 lines differ or are missing in a plain run.
+C: 11 programs of the corpus differ, each in this arm's lines;
+optcarrot's is unchanged.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
