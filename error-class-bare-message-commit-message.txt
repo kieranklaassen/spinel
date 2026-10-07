@@ -1,0 +1,33 @@
+A bare message in a program's own exception class is the exception's message
+
+    class ValErr < StandardError
+      def shout = message.upcase
+    end
+    begin
+      raise ValErr, "m"
+    rescue ValErr => e
+      p e.shout
+    end
+
+compiled, and raised NameError (undefined local variable or method
+'message') when shout ran. CRuby prints "M", and so did `self.message`.
+In two positions it was not even the NameError: `message.bytes.sum`
+printed nil and `@memo ||= message` stored 0.
+
+A receiverless call is resolved against the Ruby methods of self's class,
+and Exception#message is not one of them. A builtin exception's reopening
+already gives such a call its self (desugar_handle_reopen_self_recv); a
+class the program derives from an exception was not given it.
+
+The bare call now takes self as its receiver in an instance method of such
+a class, and from there goes the way `self.message` does. It is left as it
+was where the program answers the name itself: a method or a reader called
+message in the class, an ancestor or a descendant, a descendant's own to_s
+or an undef of either, or a free function of either name. It is also left
+inside a block, whose self may be another object (instance_eval, a method
+that hands its block on).
+
+Not changed: a bare backtrace, cause, full_message or detailed_message in
+such a class is still the NameError.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

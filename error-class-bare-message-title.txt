@@ -1,0 +1,1 @@
+A bare message in a program's own exception class is the exception's message
