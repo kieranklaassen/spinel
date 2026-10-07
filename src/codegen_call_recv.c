@@ -6328,11 +6328,6 @@ static int str_arms_convert(Compiler *c, int id, Buf *b, const NodeTable *nt, co
     }
     else buf_printf(b, "%s(%s)", is_chomp ? "sp_str_lines_chomp" : "sp_str_lines", r);
   }
-  /* lines(sep) with a boxed separator, read at run time */
-  else if (sp_streq(name, "lines") && argc == 1 && nt_ref(nt, id, "block") < 0 &&
-           lines_sep_boxed(c, argv[0])) {
-    buf_printf(b, "sp_str_lines_sep_poly(%s, ", r); emit_boxed(c, argv[0], b); buf_puts(b, ")");
-  }
   else if (sp_streq(name, "bytes") && argc == 0)   buf_printf(b, "sp_str_bytes(%s)", r);
   else if (sp_streq(name, "codepoints") && argc == 0) buf_printf(b, "sp_str_codepoints(%s)", r);
   /* unpack(fmt, offset: n): a trailing KeywordHashNode carries the offset. */

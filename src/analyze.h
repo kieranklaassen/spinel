@@ -171,7 +171,6 @@ void an_pure_read_end(void);
    (sep, chomp: ...), sep a String -- what a boxed receiver takes the
    typed String path for. */
 int poly_lines_args(Compiler *c, int argc, const int *argv);
-int lines_sep_boxed(Compiler *c, int node);
 
 /* `recv` is a blockless call making an Enumerator that yields two values per
    element: each_with_index, with_index, each_with_object, with_object. */
