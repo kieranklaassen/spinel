@@ -31635,7 +31635,7 @@ static const HvSum hv_none = { -1, -1, 0, 0, 0 };
    own): a call on self goes to that class's method. `pass` is the walk of
    one value block that last worked the entry out, -1 once it is settled. */
 enum { HV_LOCAL, HV_VAR_STORE, HV_ANSWER, HV_PASSED_LOST, HV_PASSED_STORE, HV_LITERAL, HV_SELF, HV_CALLED, HV_GOES, HV_SELF_GOES };
-enum { HV_DEPTH = 64, HV_PASSES = 6, HV_SELVES = 8 };
+enum { HV_DEPTH = 64, HV_PASSES = 6, HV_SELVES = 64 };
 typedef struct { int kind, owner; const char *name; int self, pass, busy; HvSum s; } HvMemo;
 static HvMemo *hv_memo;
 static int *hv_slot, *hv_open;
