@@ -11428,6 +11428,7 @@ static int isa_array_read_only(const char *nm) {
   return str_in(nm, R);
 }
 
+static int isa_alias_changed_in_place(Compiler *c, const char *vn, Scope *vs, int depth);
 /* Like nng_mark_reads, but a bare read that is a direct ELEMENT of an array
    or hash literal stays unnarrowed: narrowing it retypes the container literal
    (`[v]` becomes a typed array), which cascades into the container's consumers
@@ -11445,6 +11446,20 @@ static void isa_mark_reads(Compiler *c, int root, Scope *s, const char *pn, TyKi
   if (root < 0) return;
   const NodeTable *nt = c->nt;
   const char *ty = nt_type(nt, root);
+  /* `t = v` under a String guard, t changed in place (`t << x`): the
+     narrowed read is a copy of the String the box holds, as an Array's is
+     below, and the append never reached it. Left boxed, t is a second name
+     for the one String (lift_poly_alias_reads). `t = u = v` is the same
+     for each name that is changed (isa_alias_changed_in_place). */
+  if (t == TY_STRING && ty && nt_kind(nt, root) == NK_LocalVariableWriteNode) {
+    int wv = root, changed = 0;
+    while (wv >= 0 && nt_kind(nt, wv) == NK_LocalVariableWriteNode) {
+      if (comp_scope_of(c, wv) == s && isa_alias_changed_in_place(c, nt_str(nt, wv, "name"), s, 0)) changed = 1;
+      wv = nt_ref(nt, wv, "value");
+    }
+    const char *vn = wv >= 0 && nt_kind(nt, wv) == NK_LocalVariableReadNode ? nt_str(nt, wv, "name") : NULL;
+    if (changed && vn && sp_streq(vn, pn) && comp_scope_of(c, wv) == s) return;
+  }
   if (ty && sp_streq(ty, "LocalVariableReadNode")) {
     const char *nm = nt_str(nt, root, "name");
     if (nm && sp_streq(nm, pn) && comp_scope_of(c, root) == s && t != TY_POLY_ARRAY)
@@ -18784,6 +18799,51 @@ static void handle_arg_tab_init(Compiler *c, HandleArgTab *t) {
     }
   }
   free(tg.v);
+}
+
+/* Is local `vn` of scope `vs` changed in place as a String: the receiver
+   of a mutator (`t << x`, `t.upcase!`), assigned to a name that is
+   (`u = t`), or handed to a method's parameter that is (`add(t)`)?
+   isa_mark_reads asks it of the local a guarded read is assigned to. */
+static int isa_alias_changed_in_place(Compiler *c, const char *vn, Scope *vs, int depth) {
+  if (!vn || !vs || depth > 4) return 0;
+  if (strbuf_any_str_mut(c, vn, vs)) return 1;
+  const NodeTable *nt = c->nt;
+  NT_FOREACH_KIND(nt, NK_LocalVariableWriteNode, w) {
+    int v = nt_ref(nt, w, "value");
+    if (v < 0 || nt_kind(nt, v) != NK_LocalVariableReadNode || comp_scope_of(c, v) != vs) continue;
+    const char *rn = nt_str(nt, v, "name");
+    if (rn && sp_streq(rn, vn) && comp_scope_of(c, w) == vs &&
+        isa_alias_changed_in_place(c, nt_str(nt, w, "name"), vs, depth + 1))
+      return 1;
+  }
+  ACallTargets tg = { NULL, 0, 0, -1, 0 };
+  int hit = 0;
+  NT_FOREACH_KIND(nt, NK_CallNode, u) {
+    if (hit || comp_scope_of(c, u) != vs) continue;
+    int aa = nt_ref(nt, u, "arguments"), ac = 0, has = 0;
+    const int *av = aa >= 0 ? nt_arr(nt, aa, "arguments", &ac) : NULL;
+    for (int k = 0; k < ac && !has; k++) {
+      const char *an = nt_kind(nt, av[k]) == NK_LocalVariableReadNode ? nt_str(nt, av[k], "name") : NULL;
+      has = an && sp_streq(an, vn) && comp_scope_of(c, av[k]) == vs;
+    }
+    if (!has) continue;
+    an_call_targets_of(c, u, &tg);
+    for (int k = 0; k < tg.n && !hit; k++) {
+      int mi = tg.v[k];
+      if (mi < 0 || mi >= c->nscopes) continue;
+      Scope *m = &c->scopes[mi];
+      for (int pj = 0; pj < m->nparams && !hit; pj++) {
+        int a = arg_layout_param_node(c, m, u, pj, NULL);
+        const char *an = a >= 0 && nt_kind(nt, a) == NK_LocalVariableReadNode ? nt_str(nt, a, "name") : NULL;
+        if (an && sp_streq(an, vn) && comp_scope_of(c, a) == vs &&
+            isa_alias_changed_in_place(c, m->pnames[pj], m, depth + 1))
+          hit = 1;
+      }
+    }
+  }
+  free(tg.v);
+  return hit;
 }
 
 static void handle_arg_tab_free(HandleArgTab *t) {
