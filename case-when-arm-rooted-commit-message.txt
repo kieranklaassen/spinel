@@ -1,0 +1,35 @@
+A `when` arm that makes its object is rooted across its own == or ===
+
+`when Pt.new(3)` beside a subject of a class that defines == or ===
+with a typed parameter calls that method with the arm as `self`. The
+case statement, and the case value for a class with ===, handed the
+fresh object straight to the call, in no root. The method collected,
+the arm was freed, and the next object of its size took its place:
+
+    class Pt
+      attr_accessor :v
+      def initialize(v); @v = v; end
+      def ===(o)
+        $pad = "x" * 4_000_000
+        junk = []
+        64.times { |i| junk << Pt.new(i + 100) }
+        v == o.v
+      end
+    end
+    p(Pt.new(1) === Pt.new(2))    # false; === takes a Pt
+    p(case Pt.new(3) when Pt.new(3) then :same else :other end)
+                                  # Spinel: :other, CRuby: :same
+
+An arm that allocates is now held in a rooted temporary while the call
+runs (emit_when_arm_root), at the two places that pass it directly:
+the statement's typed call in emit_case and the class's own method in
+emit_case_obj_eq. An arm that allocates nothing (a local, a constant,
+an instance variable) is held where it is read and compiles as before.
+
+Left alone: a small read-only class kept by value, whose temporary is
+not a pointer to root.
+
+Test: test/case_when_arm_rooted.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+

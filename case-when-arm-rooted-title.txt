@@ -1,0 +1,1 @@
+A `when` arm that makes its object is rooted across its own == or ===
