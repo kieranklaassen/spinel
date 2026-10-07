@@ -1,0 +1,1 @@
+A Hash named by two locals takes one variant under both names
