@@ -1377,12 +1377,14 @@ static int strbuf_route_begin(Compiler *c, int v) {
 }
 /* --share-strings: a `yield` to a literal block spliced in here whose
    value is a variable's String (`yield` under `o.set { s }`): the splice
-   answers its handle (emit_block_invoke). */
+   answers its handle (emit_block_invoke). The method's own block
+   parameter called in place (`blk.call`, is_block_call) is that splice
+   too. */
 static int strbuf_route_yield(Compiler *c, int v) {
   const NodeTable *nt = c->nt;
   v = unwrap_parens(c, v);
-  if (!repr_share_rule(c) || v < 0 || nt_kind(nt, v) != NK_YieldNode || g_block_id < 0 ||
-      g_current_scope_is_lowered || g_yield_proc_ref) return 0;
+  if (!repr_share_rule(c) || v < 0 || (nt_kind(nt, v) != NK_YieldNode && !is_block_call(c, v)) ||
+      g_block_id < 0 || g_current_scope_is_lowered || g_yield_proc_ref) return 0;
   int body = nt_ref(nt, g_block_id, "body");
   int n = 0;
   const int *bb = body >= 0 ? nt_arr(nt, body, "body", &n) : NULL;
@@ -1435,7 +1437,8 @@ static int strbuf_route_inline_call(Compiler *c, int v) {
 }
 /* --share-strings: a proc's answer read as a String (`pr.call`, the
    BSH_CALL row's names). The proc hands it back boxed, a String the rule
-   shares as its handle's box. */
+   shares as its handle's box. A block parameter whose block is spliced in
+   here is no proc: its call is the yield's (strbuf_route_yield). */
 static int strbuf_route_proc_call(Compiler *c, int v) {
   const NodeTable *nt = c->nt;
   v = unwrap_parens(c, v);
@@ -1443,6 +1446,7 @@ static int strbuf_route_proc_call(Compiler *c, int v) {
   int recv = nt_ref(nt, v, "receiver");
   TyKind vt = comp_ntype(c, v);
   return recv >= 0 && comp_ntype(c, recv) == TY_PROC && (vt == TY_STRING || vt == TY_STRBUF) &&
+         !is_block_call(c, v) &&
          bop_share_named(BOP_CALLABLE, nt_str(nt, v, "name")) == BSH_CALL;
 }
 /* Does value v hand over a String the rule shares as the handle itself: a
