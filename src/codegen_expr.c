@@ -74,7 +74,369 @@ typedef struct {
 static void interp_plan_free(InterpPlan *pl) {
   free(pl->lits.p); free(pl->decls.p); free(pl->wp); free(pl->flat);
 }
-static void interp_plan(Compiler *c, int id, InterpPlan *pl) {
+/* ---- where a later part's operands run ----
+   A part's value is evaluated in its place in `decls`, but what its call
+   hoists (the operands emit_operands_in_order binds, a receiver's temp)
+   goes to the statement's prelude, ahead of every part:
+   `"#{a.f(x1)} #{b.g(x2)}"` ran x1, x2, f, g. The questions below say when
+   those operands are kept in the part's place instead. */
+
+/* Is a value of type `t` changed by assigning what holds it? A String is
+   (`s << "x"` is `lv_s = sp_str_..(lv_s, ..)`), a boxed value may be one,
+   and an object kept by value is copied by each read. */
+static int interp_type_assigned_in_place(Compiler *c, TyKind t) {
+  return t == TY_STRING || t == TY_STRBUF || t == TY_POLY || t == TY_UNKNOWN ||
+         (ty_is_object(t) && comp_ty_value_obj(c, t));
+}
+
+/* Does a default argument of the program's run a call or an assignment?
+   read_rebound_by follows a callee's body, and a default is evaluated at the
+   call: with `def step(a = (@n += 1))`, a part that calls `step` writes @n
+   and nothing shows it. Asked once. */
+static int interp_default_runs_code(Compiler *c) {
+  static const NodeTable *known_nt;
+  static int known;
+  const NodeTable *nt = c->nt;
+  if (known_nt == nt) return known;
+  known_nt = nt; known = 0;
+  for (int n = 0; n < nt->count && !known; n++) {
+    const char *ty = nt_type(nt, n);
+    if (ty && (sp_streq(ty, "OptionalParameterNode") || sp_streq(ty, "OptionalKeywordParameterNode")))
+      known = subtree_has_side_effect(c, nt_ref(nt, n, "value"));
+  }
+  return known;
+}
+
+/* Does `n`, evaluated beside the interpolation `id` in the order the C
+   compiler picks, see nothing `id` can change? A literal, self, a constant
+   or a variable `id` cannot give another value, whose value is not assigned
+   in place, arithmetic over those; a block reads when it runs. */
+static int interp_operands_see_nothing(Compiler *c, int n, int id);
+static int interp_operand_sees_nothing(Compiler *c, int n, int id) {
+  const NodeTable *nt = c->nt;
+  if (n < 0) return 1;
+  switch (nt_kind(nt, n)) {
+    case NK_NilNode: case NK_TrueNode: case NK_FalseNode: case NK_IntegerNode:
+    case NK_FloatNode: case NK_SymbolNode: case NK_StringNode: case NK_SelfNode:
+    case NK_BlockNode: case NK_LambdaNode:
+      return 1;
+    case NK_LocalVariableReadNode:
+      return !interp_type_assigned_in_place(c, comp_ntype(c, n)) && !read_rebound_by(c, n, id);
+    case NK_InstanceVariableReadNode: case NK_ClassVariableReadNode: case NK_GlobalVariableReadNode:
+      return !interp_type_assigned_in_place(c, comp_ntype(c, n)) && !read_rebound_by(c, n, id) &&
+             !interp_default_runs_code(c);
+    case NK_ConstantReadNode: case NK_ConstantPathNode:
+      return !interp_type_assigned_in_place(c, comp_ntype(c, n));
+    case NK_CallNode:
+      if (!call_is_scalar_op(c, n)) return 0;
+      break;
+    case NK_ParenthesesNode: case NK_StatementsNode:
+      break;
+    default: {
+      const char *ty = nt_type(nt, n);
+      if (!ty || !sp_streq(ty, "ArgumentsNode")) return 0;
+    }
+  }
+  return interp_operands_see_nothing(c, n, id);
+}
+
+/* ...and so for each operand of `n`. */
+static int interp_operands_see_nothing(Compiler *c, int n, int id) {
+  const NodeTable *nt = c->nt;
+  for (int i = 0; i < nt_num_refs(nt, n); i++)
+    if (!interp_operand_sees_nothing(c, nt_ref_at(nt, n, i), id)) return 0;
+  for (int i = 0; i < nt_num_arrs(nt, n); i++) {
+    int cnt = 0; const int *ids = nt_arr_at(nt, n, i, &cnt);
+    for (int j = 0; j < cnt; j++) if (!interp_operand_sees_nothing(c, ids[j], id)) return 0;
+  }
+  return 1;
+}
+
+/* Do the operands of `expr` hold a call or an assignment? */
+static int interp_operands_have_effect(Compiler *c, int expr) {
+  const NodeTable *nt = c->nt;
+  if (expr < 0) return 0;
+  for (int i = 0; i < nt_num_refs(nt, expr); i++)
+    if (subtree_has_side_effect(c, nt_ref_at(nt, expr, i))) return 1;
+  for (int i = 0; i < nt_num_arrs(nt, expr); i++) {
+    int cnt = 0; const int *ids = nt_arr_at(nt, expr, i, &cnt);
+    for (int j = 0; j < cnt; j++) if (subtree_has_side_effect(c, ids[j])) return 1;
+  }
+  return 0;
+}
+
+/* Must what part `pid` hoists stay in the part's place? In the prelude it
+   runs ahead of every earlier part, so it may go there only where that
+   changes nothing. Operands that hold a call or an assignment: where each
+   earlier part is a literal or a read `pid` cannot change. Operands that
+   are plain reads: where no earlier part can change one. Both are
+   interp_operand_sees_nothing. Past 64 earlier parts the answer is yes
+   unasked, so that one long interpolation costs its length and not its
+   square. */
+static int interp_part_stays(Compiler *c, int pid, int expr, const int *parts, int k) {
+  const NodeTable *nt = c->nt;
+  if (expr < 0) return 0;
+  if (k > 64) return 1;
+  int effect = interp_operands_have_effect(c, expr);
+  for (int e = 0; e < k; e++) {
+    if (nt_kind(nt, parts[e]) != NK_EmbeddedStatementsNode) continue;
+    if (effect ? !interp_operand_sees_nothing(c, nt_ref(nt, parts[e], "statements"), pid)
+               : !interp_operands_see_nothing(c, expr, parts[e])) return 1;
+  }
+  return 0;
+}
+
+/* The parent of `n` in the program's tree. The map is built at the first
+   question and kept: codegen adds nodes (a part's to_s call) and moves none,
+   so it stays true for every node it was built over, and a node made later
+   has no parent here. */
+int *du_parent_map(const NodeTable *nt);
+static int interp_parent(Compiler *c, int n) {
+  static const NodeTable *map_nt;
+  static int *map;
+  static int map_n;
+  const NodeTable *nt = c->nt;
+  if (map_nt != nt) {
+    free(map);
+    map = du_parent_map(nt);
+    if (!map) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+    map_nt = nt; map_n = nt->count;
+  }
+  return n >= 0 && n < map_n ? map[n] : -1;
+}
+
+/* Does evaluating `n` put nothing in the statement's prelude? A literal or
+   a plain read. What a sibling written after the interpolation hoists stays
+   in the prelude, so it would run ahead of operands kept in a part's place:
+   in `buf << "#{a.f(x)}" << g(y)` y would run before x. */
+static int interp_hoists_nothing(Compiler *c, int n) {
+  const NodeTable *nt = c->nt;
+  if (n < 0) return 1;
+  switch (nt_kind(nt, n)) {
+    case NK_NilNode: case NK_TrueNode: case NK_FalseNode: case NK_IntegerNode:
+    case NK_FloatNode: case NK_SymbolNode: case NK_StringNode: case NK_SelfNode:
+    case NK_LocalVariableReadNode: case NK_InstanceVariableReadNode:
+    case NK_ClassVariableReadNode: case NK_GlobalVariableReadNode: case NK_ConstantReadNode:
+      return 1;
+    case NK_EmbeddedStatementsNode: case NK_StatementsNode: {
+      int body = nt_kind(nt, n) == NK_StatementsNode ? n : nt_ref(nt, n, "statements");
+      int cnt = 0; const int *ids = body >= 0 ? nt_arr(nt, body, "body", &cnt) : NULL;
+      for (int i = 0; i < cnt; i++) if (!interp_hoists_nothing(c, ids[i])) return 0;
+      return 1;
+    }
+    default: return 0;
+  }
+}
+
+/* Do the values of every `when` of the case `cs`, but `skip`, hoist nothing?
+   They are tested in one C statement, with one prelude. */
+static int interp_whens_hoist_nothing(Compiler *c, int cs, int skip) {
+  const NodeTable *nt = c->nt;
+  int nw = 0; const int *whens = nt_arr(nt, cs, "conditions", &nw);
+  for (int w = 0; w < nw; w++) {
+    int wc = 0; const int *conds = nt_arr(nt, whens[w], "conditions", &wc);
+    for (int i = 0; i < wc; i++)
+      if (conds[i] != skip && !interp_hoists_nothing(c, conds[i])) return 0;
+  }
+  return 1;
+}
+
+/* Is the interpolation `id` evaluated where Ruby evaluates it, against
+   everything else its statement evaluates? Up from `id` to the body it is
+   written in, each node either is sequenced by C as by Ruby (a statement
+   list, a conditional, `&&`, a plain assignment) or holds operands of one C
+   expression, whose order the C compiler picks: then the others must see
+   nothing (interp_operand_sees_nothing). A `case` and an interpolation
+   around this one share one prelude with what is written after it there,
+   so that must hoist nothing. Any other place answers no, and there a
+   part's operands stay ahead of the statement, where a read beside the
+   interpolation finds them done:
+   `"#{a.f(1)}#{b.g(lg(2), (n += 1))}".center(n)`. */
+static int interp_sequenced(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  for (int n = id; n >= 0; ) {
+    int p = interp_parent(c, n);
+    const char *pty = p >= 0 ? nt_type(nt, p) : NULL;
+    if (!pty) return 0;
+    if (sp_streq(pty, "ProgramNode")) return 1;
+    int operands = sp_streq(pty, "ArgumentsNode");
+    if (sp_streq(pty, "WhenNode")) {
+      /* a value of the `when`; its body is a statement list */
+      if (n != nt_ref(nt, p, "statements") && !interp_whens_hoist_nothing(c, interp_parent(c, p), n)) return 0;
+    }
+    else if (!operands && !sp_streq(pty, "EnsureNode"))
+      switch (nt_kind(nt, p)) {
+        case NK_DefNode: case NK_BlockNode: case NK_LambdaNode:
+        case NK_ClassNode: case NK_ModuleNode: case NK_SingletonClassNode:
+          return 1;
+        case NK_CaseNode:
+          if (n == nt_ref(nt, p, "predicate") && !interp_whens_hoist_nothing(c, p, -1)) return 0;
+          break;
+        case NK_InterpolatedStringNode: {
+          /* the parts written after this one */
+          int cnt = 0; const int *parts = nt_arr(nt, p, "parts", &cnt);
+          int at = 0;
+          while (at < cnt && parts[at] != n) at++;
+          for (int i = at + 1; i < cnt; i++) if (!interp_hoists_nothing(c, parts[i])) return 0;
+          break;
+        }
+        case NK_StatementsNode: case NK_ParenthesesNode: case NK_EmbeddedStatementsNode:
+        case NK_IfNode: case NK_UnlessNode: case NK_ElseNode:
+        case NK_AndNode: case NK_OrNode: case NK_WhileNode: case NK_UntilNode:
+        case NK_BeginNode: case NK_RescueNode:
+        case NK_LocalVariableWriteNode: case NK_InstanceVariableWriteNode:
+        case NK_GlobalVariableWriteNode: case NK_ClassVariableWriteNode: case NK_ConstantWriteNode:
+          break;
+        case NK_CallNode: case NK_ArrayNode: case NK_HashNode: case NK_AssocNode:
+        case NK_KeywordHashNode: case NK_ReturnNode: case NK_YieldNode: case NK_SuperNode:
+          operands = 1;
+          break;
+        default:
+          return 0;
+      }
+    if (operands) {
+      for (int i = 0; i < nt_num_refs(nt, p); i++) {
+        int ch = nt_ref_at(nt, p, i);
+        if (ch != n && !interp_operand_sees_nothing(c, ch, id)) return 0;
+      }
+      for (int i = 0; i < nt_num_arrs(nt, p); i++) {
+        int cnt = 0; const int *ids = nt_arr_at(nt, p, i, &cnt);
+        for (int j = 0; j < cnt; j++)
+          if (ids[j] != n && !interp_operand_sees_nothing(c, ids[j], id)) return 0;
+      }
+    }
+    n = p;
+  }
+  return 0;
+}
+
+/* Does the program change a String in place anywhere: a mutator the
+   compiler knows (an_str_mutator_name, is_string_rebind_mutator) on a
+   receiver that may be a String, a read into a buffer (`f.read(3, buf)`),
+   a call by a computed name, or a mutator's name as a Symbol (`&:strip!`,
+   `alias_method :add, :<<`)? Asked once. */
+static int interp_prog_mutates_string(Compiler *c) {
+  static const NodeTable *known_nt;
+  static int known;
+  const NodeTable *nt = c->nt;
+  if (known_nt == nt) return known;
+  known_nt = nt; known = 0;
+  for (int n = 0; n < nt->count && !known; n++) {
+    const char *ty = nt_type(nt, n);
+    if (!ty) continue;
+    const char *nm = sp_streq(ty, "CallNode") ? nt_str(nt, n, "name") : NULL;
+    const char *sym = sp_streq(ty, "SymbolNode") ? nt_str(nt, n, "value") : NULL;
+    if (sym && (an_str_mutator_name(sym) || is_string_rebind_mutator(sym))) { known = 1; break; }
+    static const char *const BUF[] = { "read", "sysread", "readpartial", "read_nonblock", "pread",
+                                       "recv", "recv_nonblock", "recvfrom", "recvmsg", NULL };
+    int into = 0, argc = 0;
+    for (int i = 0; nm && BUF[i] && !into; i++) into = sp_streq(nm, BUF[i]);
+    if (into) {
+      int args = nt_ref(nt, n, "arguments");
+      if (args >= 0) nt_arr(nt, args, "arguments", &argc);
+    }
+    if (argc >= 2) known = 1;
+    else if (nm && (sp_streq(nm, "send") || sp_streq(nm, "public_send") || sp_streq(nm, "__send__") ||
+                    sp_streq(nm, "method") || sp_streq(nm, "instance_eval") || sp_streq(nm, "instance_exec")))
+      known = 1;
+    else if ((nm && (an_str_mutator_name(nm) || is_string_rebind_mutator(nm))) || strncmp(ty, "Index", 5) == 0) {
+      int r = nt_ref(nt, n, "receiver");
+      TyKind t = r >= 0 ? comp_ntype(c, r) : TY_UNKNOWN;
+      known = t == TY_STRING || t == TY_STRBUF || t == TY_POLY || t == TY_UNKNOWN;
+    }
+  }
+  return known;
+}
+
+/* Can the value of a part be a String object that a later part changes in
+   place? CRuby reads a String part when it joins the parts, so the change
+   shows: `"#{s}#{k.two((s << "x").size, 1)}"` begins "sx". Here a part is
+   read in its place, and master is right there only because the later
+   part's operands run first. A number, a Symbol, true, false and nil are
+   converted where they stand, and an interpolation makes a String of its
+   own. */
+static int interp_part_may_be_string(Compiler *c, int expr) {
+  if (expr < 0 || nt_kind(c->nt, expr) == NK_InterpolatedStringNode) return 0;
+  TyKind t = comp_ntype(c, expr);
+  const char *rcn = t == TY_INT || t == TY_BIGINT ? "Integer" : t == TY_FLOAT ? "Float"
+                  : t == TY_SYMBOL ? "Symbol" : NULL;
+  if (rcn) {      /* its own to_s may hand out a String it keeps */
+    int rci = comp_class_index(c, rcn);
+    return rci >= 0 && comp_method_in_chain(c, rci, "to_s", NULL) >= 0;
+  }
+  return t != TY_BOOL && t != TY_NIL;
+}
+
+/* May the hoists of the interpolation `id` be kept in its parts' places?
+   Only all of them or none: one left ahead of the statement while another
+   moves runs in neither master's order nor Ruby's. So `id` must be
+   sequenced (or be appended as its own statement), no part that may be a
+   String may stand before a part whose operands have an effect, in a
+   program that changes a String in place, and every interpolation under a
+   part must answer yes too. A part that is itself an interpolation
+   (`"a#{x}" "b"`) is planned with this one; a block's body has statements
+   of its own. */
+static int interp_may_move(Compiler *c, int id, int own_stmt);
+static int interp_holds_unmoved(Compiler *c, int n, int part) {
+  const NodeTable *nt = c->nt;
+  if (n < 0) return 0;
+  NodeKind k = nt_kind(nt, n);
+  if (k == NK_DefNode || k == NK_BlockNode || k == NK_LambdaNode) return 0;
+  /* a String, a Symbol, a Regexp or a command */
+  const char *ty = nt_type(nt, n);
+  int interp = ty && strncmp(ty, "Interpolated", 12) == 0;
+  if (interp && !(part && k == NK_InterpolatedStringNode) && !interp_may_move(c, n, 0)) return 1;
+  for (int i = 0; i < nt_num_refs(nt, n); i++)
+    if (interp_holds_unmoved(c, nt_ref_at(nt, n, i), 0)) return 1;
+  for (int i = 0; i < nt_num_arrs(nt, n); i++) {
+    int cnt = 0; const int *ids = nt_arr_at(nt, n, i, &cnt);
+    for (int j = 0; j < cnt; j++) if (interp_holds_unmoved(c, ids[j], interp)) return 1;
+  }
+  return 0;
+}
+static int interp_may_move(Compiler *c, int id, int own_stmt) {
+  const NodeTable *nt = c->nt;
+  if (!own_stmt && !interp_sequenced(c, id)) return 0;
+  int *parts = NULL, n = 0, cap = 0, ok = 1, str_before = 0;
+  interp_flatten(nt, id, &parts, &n, &cap);
+  for (int k = 0; k < n && ok; k++) {
+    if (nt_kind(nt, parts[k]) != NK_EmbeddedStatementsNode) continue;
+    int st = nt_ref(nt, parts[k], "statements"), bn = 0;
+    const int *body = st >= 0 ? nt_arr(nt, st, "body", &bn) : NULL;
+    int expr = bn > 0 ? body[bn - 1] : -1;
+    if (str_before && interp_operands_have_effect(c, expr) && interp_prog_mutates_string(c)) ok = 0;
+    else if (interp_holds_unmoved(c, parts[k], 1)) ok = 0;
+    if (interp_part_may_be_string(c, expr)) str_before = 1;
+  }
+  free(parts);
+  return ok;
+}
+
+/* Is the append of the interpolation `id` the last thing its statement
+   hoists for? `buf << "..." << x` is one statement with one prelude: every
+   link written after this one must hoist nothing. */
+static int interp_append_own_statement(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  int link = interp_parent(c, interp_parent(c, id));   /* the `<<` or concat */
+  for (;;) {
+    int up = link >= 0 ? interp_parent(c, link) : -1;
+    if (up < 0) return 0;
+    /* parentheses around a link */
+    if (nt_kind(nt, up) == NK_StatementsNode && nt_kind(nt, interp_parent(c, up)) == NK_ParenthesesNode) {
+      int cnt = 0; nt_arr(nt, up, "body", &cnt);
+      if (cnt != 1) return 0;
+      link = interp_parent(c, up);
+      continue;
+    }
+    if (nt_kind(nt, up) != NK_CallNode || nt_ref(nt, up, "receiver") != link) return 1;
+    int args = nt_ref(nt, up, "arguments"), argc = 0;
+    const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &argc) : NULL;
+    for (int i = 0; i < argc; i++) if (!interp_hoists_nothing(c, argv[i])) return 0;
+    link = up;
+  }
+}
+
+static void interp_plan(Compiler *c, int id, InterpPlan *pl, int own_stmt) {
   const NodeTable *nt = c->nt;
   int n = 0;
   int *flat = NULL, fcap = 0;
@@ -83,6 +445,8 @@ static void interp_plan(Compiler *c, int id, InterpPlan *pl) {
   WPart *wp = malloc(sizeof(WPart) * (size_t)(n > 0 ? n : 1));
   if (!wp) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
   int nwp = 0, ndyn_or_scalar = 0;
+  int dyn_before = 0;                   /* an earlier part is not a literal */
+  int sequenced = -1;                   /* interp_may_move(c, id, own_stmt), asked once */
   Buf lits; memset(&lits, 0, sizeof lits);
   Buf decls; memset(&decls, 0, sizeof decls);
   long fixed_cap = 0;
@@ -188,6 +552,11 @@ static void interp_plan(Compiler *c, int id, InterpPlan *pl) {
         buf_printf(&decls, " _t%d = ", tv); emit_local_ref(c, expr, vn, &decls); buf_puts(&decls, "; ");
         snprintf(vexpr, sizeof vexpr, "_t%d", tv);
       }
+      /* What this part's value hoists is caught here, to go in the part's
+         place unless running it ahead of the earlier parts changes nothing. */
+      Buf ppre; memset(&ppre, 0, sizeof ppre);
+      Buf *sv_pre = g_pre;
+      if (dyn_before && interp_part_stays(c, pid, expr, parts, k)) g_pre = &ppre;
       /* Build this part's conversion expression. Bounded scalars keep their
          native C type (written digit-by-digit later); everything else
          converts to a marker-carrying string whose byte length is summed. */
@@ -371,11 +740,19 @@ static void interp_plan(Compiler *c, int id, InterpPlan *pl) {
         EMIT_IV(); buf_puts(&conv, ")");
       }
       else {
+        g_pre = sv_pre; free(ppre.p);
         free(conv.p); free(lits.p); free(decls.p); free(wp); free(flat);
         unsupported(c, pid, "interpolation value");
       }
       iv_done:
       free(iv_pre);
+      g_pre = sv_pre;
+      if (ppre.len) {
+        if (sequenced < 0) sequenced = interp_may_move(c, id, own_stmt);
+        buf_puts(sequenced ? &decls : g_pre, ppre.p);
+      }
+      free(ppre.p);
+      dyn_before = 1;
       #undef EMIT_IV
       /* Pre-evaluate into an ordered temp. A dynamic part's string is rooted
          (its bytes are copied after later parts may allocate, and the final
@@ -427,7 +804,7 @@ static void interp_plan(Compiler *c, int id, InterpPlan *pl) {
 
 void emit_interp(Compiler *c, int id, Buf *b) {
   InterpPlan pl; memset(&pl, 0, sizeof pl);
-  interp_plan(c, id, &pl);
+  interp_plan(c, id, &pl, 0);
   WPart *wp = pl.wp; int nwp = pl.nwp, ndyn_or_scalar = pl.ndyn_or_scalar;
   Buf lits = pl.lits, decls = pl.decls; long fixed_cap = pl.fixed_cap; int *flat = pl.flat;
 
@@ -529,7 +906,7 @@ void emit_interp(Compiler *c, int id, Buf *b) {
    dynamic part (a literal fold, left to the plain path). */
 int emit_interp_append(Compiler *c, int id, const char *open, const char *open_n, Buf *b, int indent) {
   InterpPlan pl; memset(&pl, 0, sizeof pl);
-  interp_plan(c, id, &pl);
+  interp_plan(c, id, &pl, interp_append_own_statement(c, id));
   if (pl.ndyn_or_scalar == 0) { interp_plan_free(&pl); return 0; }
   emit_indent(b, indent);
   buf_printf(b, "{ %s\n", pl.decls.p ? pl.decls.p : "");
