@@ -2456,15 +2456,18 @@ else {
     const char *fn = (is_membership_alias(name)) ? "include" : "index";
     /* A boxed argument into a String array is an equality scan. A foreign
        kind misses rather than raising in unboxing (#4458); nil searches
-       for a NULL element, which is distinct from the empty String. */
+       for a NULL element, which is distinct from the empty String. A
+       shared String handle is a String too and is asked last, so the
+       plain String and nil do not meet its test. */
     TyKind sat = repr_of(c, argv[0]).as_ty;
     if (rt == TY_STR_ARRAY && (sat == TY_POLY || sat == TY_NIL)) {
       int ta = ++g_tmp, tv = ++g_tmp;
       buf_printf(b, "({ sp_StrArray *_t%d = ", ta); emit_recv_rooted(c, recv, ta, "SP_GC_ROOT", b);
       buf_printf(b, "sp_RbVal _t%d = ", tv); emit_boxed(c, argv[0], b);
       buf_printf(b, "; _t%d.tag == SP_TAG_STR ? sp_StrArray_%s(_t%d, _t%d.v.s)"
-                    " : _t%d.tag == SP_TAG_NIL ? sp_StrArray_%s(_t%d, NULL) : FALSE; })",
-                 tv, fn, ta, tv, tv, fn, ta);
+                    " : _t%d.tag == SP_TAG_NIL ? sp_StrArray_%s(_t%d, NULL)"
+                    " : sp_poly_is_strbuf(_t%d) ? sp_StrArray_%s(_t%d, sp_poly_strbuf_deref(_t%d).v.s) : FALSE; })",
+                 tv, fn, ta, tv, tv, fn, ta, tv, fn, ta, tv);
       { *out = 1; return 1; }
     }
     /* The same for an Integer array: a search for a value of another kind
