@@ -1,0 +1,36 @@
+A Range splatted into new spreads over the constructor's parameters
+
+A Range, a String Range or an Enumerator splatted into a method of
+the program is rewritten to `*x.to_a`, so its elements land on the
+parameters. A constructor was left out unless the class had a class
+method `new`, and its rest took the whole Range as one element:
+
+    class D
+      def initialize(a, *r); @r = r; end
+      def r = @r
+    end
+    p D.new(1, *(1..3)).r      # [1..3]; CRuby [1, 2, 3]
+
+With an optional before the rest (`a, b = 9, *r`) the optional took
+the Array and the rest stayed empty. Into three plain parameters the
+program raised TypeError, and `Pair.new(*(1..2))` on a Struct did
+not compile.
+
+splat_feeds_user_method now answers yes for `new` on a class whose
+initialize the program wrote, on a Struct and on a Data, as it did
+for a class with a class method `new`. A class with none of these
+compiles to the C it had: a builtin exception's child without an
+initialize and a builtin class the program reopens take their
+arguments in arms of their own.
+
+The constructor was left out because the spread makes a fresh Array
+in its argument list, and a constructor allocated the object before
+initialize held its parameters. The commit beneath roots the rest
+ahead of that allocation, so this one stands on it.
+
+Not changed: `M::D.new(*r)`, a `new` with no receiver inside a class
+method and `self.class.new(*r)` still hand the Range over whole.
+
+Test: test/splat_range_into_new.rb, added to GC_STRESS_TESTS.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

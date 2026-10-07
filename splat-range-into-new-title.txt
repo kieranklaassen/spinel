@@ -1,0 +1,1 @@
+A Range splatted into new spreads over the constructor's parameters
