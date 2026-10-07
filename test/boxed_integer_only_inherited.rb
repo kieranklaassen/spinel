@@ -1,5 +1,6 @@
 # odd? and even? defined where an Integer inherits them: an Integer in the
-# box still answers Integer's own, and a Float reaches Numeric's.
+# box still answers Integer's own. The Float in the box is read as an
+# Integer, as it always was, which is what Numeric's definition here answers.
 class Object
   def odd? = false
 end

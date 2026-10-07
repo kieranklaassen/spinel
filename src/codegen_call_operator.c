@@ -986,8 +986,9 @@ int emit_call_compare_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
 /* String concatenation, unary -@ +@ ~ !, element stores and the arithmetic on a poly operand */
 /* Whether the program defines `name` where an Integer would find it after
    its own methods: in Integer, Numeric, Comparable, Object, Kernel or
-   BasicObject (a module included in one of them is copied into it), or at
-   the top level. A definition in any other class cannot answer an Integer. */
+   BasicObject (a module included in one of them is copied into it), at the
+   top level, or by an alias in any class. A plain definition in any other
+   class cannot answer an Integer. */
 static int parity_def_above_integer(Compiler *c, const char *name) {
   static const char *const above[] = {
     "Integer", "Numeric", "Comparable", "Object", "Kernel", "BasicObject", "Toplevel", NULL };
@@ -1223,9 +1224,9 @@ int emit_call_operator_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
   }
   /* poly parity predicates beside a definition of the name that an Integer
      inherits (parity_def_above_integer): the receiver is read as an Integer,
-     as it always was, so an Integer in the box answers Integer's own odd?
-     and not Object's or Numeric's. Everywhere else the call goes on to the
-     tag dispatch (sp_poly_odd_p, sp_poly_even_p). */
+     as it always was, so an Integer in the box answers the builtin odd? and
+     not Object's or Numeric's. Everywhere else the call goes on to the tag
+     dispatch (sp_poly_odd_p, sp_poly_even_p). */
   if (recv >= 0 && rt == TY_POLY && argc == 0 &&
       (sp_streq(name, "even?") || sp_streq(name, "odd?")) && parity_def_above_integer(c, name)) {
     int t = ++g_tmp;
