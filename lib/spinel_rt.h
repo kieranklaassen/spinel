@@ -5799,7 +5799,13 @@ static void sp_PolyArray_insert(sp_PolyArray *a, sp_int i, sp_RbVal v) {sp_gc_wb
    sp_poly_eq, which is inline-per-TU in this file, not linkable from the
    separately-compiled cold array library. */
 static sp_RbVal sp_PolyArray_delete(sp_PolyArray *a, sp_RbVal v) {sp_gc_wb((void*)a); 
-  if (a && a->frozen) { sp_raise_frozen_array_at(a, SP_BUILTIN_POLY_ARRAY); return sp_box_nil(); }
+  if (a && a->frozen) {
+    /* CRuby raises only for an element it would remove */
+    SP_GC_ROOT(a); SP_GC_ROOT_RBVAL(v);
+    for (sp_int i = 0; i < a->len; i++)
+      if (sp_poly_rb_equal(a->data[i], v)) sp_raise_frozen_array_at(a, SP_BUILTIN_POLY_ARRAY);
+    return sp_box_nil();
+  }
   if (!a) return sp_box_nil();
   /* sp_poly_eq can allocate (bigint promotion) and so trigger a collection
      mid-loop; a and v may be reachable only through the call expression. */
