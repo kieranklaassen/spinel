@@ -1,0 +1,25 @@
+A block call on a receiver of several classes runs the receiver once
+
+    def tick; $c += 10000; 1; end
+    class K
+      def blk(a); $c += 1; yield(a); end
+    end
+    class K2 < K
+      def blk(a); $c += 2; yield(a + 1); end
+    end
+    $c = 0
+    h = { 1 => K2.new, 2 => K.new }
+    h[[tick, 1][1]].blk(1) { |q| $c += 10 }
+    p $c
+
+printed 20012 where CRuby prints 10012: `tick` ran twice.
+emit_poly_recv_block_dispatch writes the receiver into its switch,
+and the statements the receiver hoists go ahead of the statement. An
+arm whose method a subclass overrides is not spliced, so the switch
+is dropped and the ordinary dispatch emits the call; the hoisted
+statements stayed behind, and the receiver ran again.
+
+The declining return takes them back, as emit_or_take_back does for
+an emitter of a value.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
