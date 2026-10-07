@@ -3949,7 +3949,10 @@ static void gc_roots_take_back(Compiler *c, Scope *s, Buf *b, size_t fn_off) {
   {
     const char *fn = b->p + fn_off;
     if (strstr(fn, "setjmp") || strstr(fn, "while (") || strstr(fn, "for (") ||
-        strstr(fn, "do {") || strstr(fn, "goto ")) return;
+        strstr(fn, "do {")) return;
+    /* a `&.` guard's jump only steps forward, over what its value hoisted */
+    for (const char *g = strstr(fn, "goto "); g; g = strstr(g + 1, "goto "))
+      if (strncmp(g, "goto _snl", 9)) return;
   }
   for (int i = 0; i < s->nlocals; i++) {
     LocalVar *lv = &s->locals[i];
@@ -4127,6 +4130,53 @@ static size_t frame_skip_noncode(const char *p, size_t i, size_t end) {
   }
   return i;
 }
+/* A `&.` guard jumps over what its value hoisted (emit_call_safe_nav_arms),
+   and a jump may not pass a declaration that has a cleanup: clang refuses
+   it, and gcc runs the cleanup on a flag nothing set. The roots are the only
+   such declarations in that text, and they come from several hundred sites,
+   so they are read back out of it as the frame pass below reads them: each
+   root at the text's own depth becomes a bare push, for the caller to pop
+   with one count saved ahead of the jump (as SP_GC_SAVE does). An inner
+   guard's count goes, the caller's covers it. Answers how many it took. */
+int sn_roots_to_pushes(Buf *pre) {
+  const char *p = pre->p;
+  size_t end = pre->len, i = 0;
+  Buf o; memset(&o, 0, sizeof o);
+  int depth = 0, n = 0;
+  while (i < end) {
+    size_t j = frame_skip_noncode(p, i, end);
+    if (j != i) { buf_putn(&o, p + i, j - i); i = j; continue; }
+    size_t k = i;
+    while (k < end && frame_idch(p[k])) k++;
+    size_t w = k - i;
+    if (!w) {
+      if (p[i] == '{') depth++; else if (p[i] == '}') depth--;
+      buf_putn(&o, p + i, 1); i++; continue;
+    }
+    const char *tag = w == 10 && !strncmp(p + i, "SP_GC_ROOT", 10) ? "PTR" :
+                      w == 16 && !strncmp(p + i, "SP_GC_ROOT_RBVAL", 16) ? "RBVAL" :
+                      w == 14 && !strncmp(p + i, "SP_GC_ROOT_STR", 14) ? "STR" : NULL;
+    if (depth == 0 && tag && k < end && p[k] == '(') {
+      size_t q = k + 1; int pd = 1;
+      while (q < end && pd) { if (p[q] == '(') pd++; else if (p[q] == ')') pd--; q++; }
+      if (!pd) {
+        buf_printf(&o, "(void)_sp_gc_root_push(SP_GC_ENTRY_%s", tag);
+        buf_putn(&o, p + k, q - k);
+        buf_puts(&o, ")");
+        i = q; n++; continue;
+      }
+    }
+    if (depth == 0 && end - i > 34 && !strncmp(p + i, "int SP_CLEANUP(sp_gc_cleanup) _sns", 34)) {
+      while (i < end && p[i] != '\n') i++;
+      n++; continue;
+    }
+    buf_putn(&o, p + i, w); i = k;
+  }
+  free(pre->p);
+  *pre = o;
+  return n;
+}
+
 /* Does the text before i end with `word` as a whole word (spaces between
    allowed)? Returns the offset where that word starts, or 0 for no. */
 static size_t frame_preceded_by(const char *p, size_t i, size_t lo, const char *word) {
@@ -4237,7 +4287,9 @@ static int gc_frame_build(Buf *b, size_t ins, const char *site) {
   frame_collect(p, ins, end, &ts);
   int any = 0;
   for (int i = 0; i < ts.n; i++) if (frame_convertible(&ts.v[i])) { any = 1; break; }
-  if (!any && !strstr(p + ins, "SP_GC_ROOT")) { free(ts.v); free(ts.h); return 0; }
+  if (!any && !strstr(p + ins, "SP_GC_ROOT") && !strstr(p + ins, "(SP_GC_ENTRY_")) {
+    free(ts.v); free(ts.h); return 0;
+  }
 
   Buf nb; memset(&nb, 0, sizeof nb);
   int depth = 1, wm = 0, peak = 0, np = 0;
@@ -4284,6 +4336,26 @@ static int gc_frame_build(Buf *b, size_t ins, const char *site) {
         }
       }
       buf_putn(&nb, p + i, n); i = k; continue;
+    }
+    /* what a `&.` guard steps over (sn_roots_to_pushes): at the top scope
+       its pushes are entries like any other, and its saved count goes */
+    if (depth == 1 && n == 16 && !strncmp(p + i, "_sp_gc_root_push", 16) &&
+        end - k > 13 && !strncmp(p + k, "(SP_GC_ENTRY_", 13) &&
+        nb.len >= 6 && !strncmp(nb.p + nb.len - 6, "(void)", 6)) {
+      size_t q = k + 1; int pd = 1;
+      while (q < end && pd) { if (p[q] == '(') pd++; else if (p[q] == ')') pd--; q++; }
+      if (pd == 0 && q < end && p[q] == ';') {
+        nb.len -= 6;
+        buf_printf(&nb, "_gcf.p[%d] = ", np++);
+        buf_putn(&nb, p + k + 1, q - 2 - k);
+        i = q; continue;
+      }
+    }
+    if (depth == 1 && n == 3 && end - i > 34 &&
+        !strncmp(p + i, "int SP_CLEANUP(sp_gc_cleanup) _sns", 34)) {
+      while (nb.len && nb.p[nb.len - 1] == ' ') nb.len--;
+      while (i < end && p[i] != '\n') i++;
+      i++; continue;
     }
     size_t tl = frame_temp_len(p + i, end - i);
     FrameTemp *t = tl ? frame_temp(&ts, p + i, tl, 0) : NULL;
