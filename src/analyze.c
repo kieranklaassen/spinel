@@ -32956,6 +32956,25 @@ static int an_return_awaits_type(Compiler *c) {
   return 0;
 }
 
+/* Is a method waiting for the type of one of its values in a way the
+   backstops do not mend? A method none of whose values has a type is boxed
+   whole there, and is right. A `return` of a local that has no type is not:
+   the late lift boxes the local and reads a method's tail, not its `return`. */
+static int an_method_awaits_value(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  NT_FOREACH_KIND(nt, NK_ReturnNode, rid) {
+    Scope *rs = comp_scope_of(c, rid);
+    if (!rs || !rs->reachable || return_node_type(c, rid) != TY_UNKNOWN) continue;
+    int an = 0;
+    const int *av = nt_arr(nt, nt_ref(nt, rid, "arguments"), "arguments", &an);
+    int v = an == 1 ? unwrap_parens(c, av[0]) : -1;
+    if (v < 0 || nt_kind(nt, v) != NK_LocalVariableReadNode) continue;
+    LocalVar *lv = scope_local(rs, nt_str(nt, v, "name"));
+    if (lv && !lv->is_param) return 1;
+  }
+  return 0;
+}
+
 /* The inference fixpoint: two rounds with the proc-form clones made between them, then the optimistic re-narrow of the slots a transient poly locked (analyze_program's steps, in their order) */
 static void an_phase_infer_fixpoint(Compiler *c) {
   g_fixpoint_rounds = 0;
@@ -34386,7 +34405,15 @@ static void an_phase_method_backstops(Compiler *c) {
      holding `M.callee`'s parameter open, and the .rbs never mentioned callee
      (#4165). The fixpoint's own copy runs after its binding, which is why it
      recovered on the next iteration and this loop never did. */
-  for (int it = 0; it < 8; it++) {
+  /* Eight rounds, and a ninth and later only while one begins with a
+     method waiting for a value's type (an_method_awaits_value): those go on
+     while they move types (an_round_cap_step). A parameter goes down one
+     call a round where the callee is defined before its caller. */
+  AnRoundCap bc = { 8, 0, 0, NULL, 0 };
+  int bwaited = 0;
+  for (int it = 0; it < bc.cap; it++) {
+    if (!bwaited || it >= 8) bwaited = an_method_awaits_value(c);
+    if (it >= 8 && !bwaited) break;
     reassert_rbs_param_seeds(c);
     int ch = infer_param_types(c);
     /* A binding here is a type change after the fixpoint too: a parameter
@@ -34402,7 +34429,9 @@ static void an_phase_method_backstops(Compiler *c) {
     ch |= infer_write_types(c);
     ch |= infer_return_types(c);
     if (!ch) break;
+    if (bwaited) an_round_cap_step(c, &bc, it);
   }
+  free(bc.seen);
   reassert_rbs_param_seeds(c);
 
   /* method_missing is not honored: spinel resolves every call statically and

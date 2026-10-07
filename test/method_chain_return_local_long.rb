@@ -72,6 +72,33 @@ def six16(a) a << 2.5 end
 s = []
 p six1(s)
 
+# the far end returns explicitly, and the value is appended to: the local
+# that takes it is typed by the rounds of the binding loop (the C did not build)
+def far1(x) r = far2(x); return r end
+def far2(x) r = far3(x); return r end
+def far3(x) r = far4(x); return r end
+def far4(x) r = far5(x); return r end
+def far5(x) r = far6(x); return r end
+def far6(x) r = far7(x); return r end
+def far7(x) r = far8(x); return r end
+def far8(x) r = far9(x); return r end
+def far9(x) r = far10(x); return r end
+def far10(x) r = far11(x); return r end
+def far11(x) r = far12(x); return r end
+def far12(x) r = far13(x); return r end
+def far13(x) r = far14(x); return r end
+def far14(x) r = far15(x); return r end
+def far15(x) r = far16(x); return r end
+def far16(x) r = far17(x); return r end
+def far17(x) r = far18(x); return r end
+def far18(x) r = far19(x); return r end
+def far19(x) r = far20(x); return r end
+def far20(a) a << "s"; return a end
+y = []
+q = far1(y)
+q << q[0]
+p y
+
 # two returns of the local
 def two1(x) r = two2(x); return r if x.size > 99; return r end
 def two2(x) r = two3(x); return r if x.size > 99; return r end
