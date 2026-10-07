@@ -38,8 +38,10 @@ int ffi_find_writer(Compiler *c, const char *mod, const char *name);
    recursive method forwards its block to itself (e.g. countdown { blk.call }).
    The methods being answered, outermost first; it grows, as a block forwarded
    through N methods is answered N deep. A method nothing calls is asked no
-   deeper than MAX_YVT_DEPTH. */
+   deeper than MAX_YVT_DEPTH, and no more than MAX_YVT_INLINED methods that
+   yield are answered at once (yvt_enter). */
 #define MAX_YVT_DEPTH 32
+#define MAX_YVT_INLINED 64
 extern int *g_yvt_mi;
 extern int g_yvt_depth;
 

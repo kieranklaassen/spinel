@@ -413,3 +413,72 @@ p site1(1) { |v| v * 2 }
 p site1(2) { |v| v.to_s }
 p site1(3) { |v| v > 5 ? v : nil }
 p site1(9) { |v| v > 5 ? v : nil }
+
+# the block handed on as a proc each method calls, through 65 methods: these
+# have functions of their own, so the chain is as long as it likes
+def call1(x, &b) = call2(x) { |v| b.call(v) }
+def call2(x, &b) = call3(x) { |v| b.call(v) }
+def call3(x, &b) = call4(x) { |v| b.call(v) }
+def call4(x, &b) = call5(x) { |v| b.call(v) }
+def call5(x, &b) = call6(x) { |v| b.call(v) }
+def call6(x, &b) = call7(x) { |v| b.call(v) }
+def call7(x, &b) = call8(x) { |v| b.call(v) }
+def call8(x, &b) = call9(x) { |v| b.call(v) }
+def call9(x, &b) = call10(x) { |v| b.call(v) }
+def call10(x, &b) = call11(x) { |v| b.call(v) }
+def call11(x, &b) = call12(x) { |v| b.call(v) }
+def call12(x, &b) = call13(x) { |v| b.call(v) }
+def call13(x, &b) = call14(x) { |v| b.call(v) }
+def call14(x, &b) = call15(x) { |v| b.call(v) }
+def call15(x, &b) = call16(x) { |v| b.call(v) }
+def call16(x, &b) = call17(x) { |v| b.call(v) }
+def call17(x, &b) = call18(x) { |v| b.call(v) }
+def call18(x, &b) = call19(x) { |v| b.call(v) }
+def call19(x, &b) = call20(x) { |v| b.call(v) }
+def call20(x, &b) = call21(x) { |v| b.call(v) }
+def call21(x, &b) = call22(x) { |v| b.call(v) }
+def call22(x, &b) = call23(x) { |v| b.call(v) }
+def call23(x, &b) = call24(x) { |v| b.call(v) }
+def call24(x, &b) = call25(x) { |v| b.call(v) }
+def call25(x, &b) = call26(x) { |v| b.call(v) }
+def call26(x, &b) = call27(x) { |v| b.call(v) }
+def call27(x, &b) = call28(x) { |v| b.call(v) }
+def call28(x, &b) = call29(x) { |v| b.call(v) }
+def call29(x, &b) = call30(x) { |v| b.call(v) }
+def call30(x, &b) = call31(x) { |v| b.call(v) }
+def call31(x, &b) = call32(x) { |v| b.call(v) }
+def call32(x, &b) = call33(x) { |v| b.call(v) }
+def call33(x, &b) = call34(x) { |v| b.call(v) }
+def call34(x, &b) = call35(x) { |v| b.call(v) }
+def call35(x, &b) = call36(x) { |v| b.call(v) }
+def call36(x, &b) = call37(x) { |v| b.call(v) }
+def call37(x, &b) = call38(x) { |v| b.call(v) }
+def call38(x, &b) = call39(x) { |v| b.call(v) }
+def call39(x, &b) = call40(x) { |v| b.call(v) }
+def call40(x, &b) = call41(x) { |v| b.call(v) }
+def call41(x, &b) = call42(x) { |v| b.call(v) }
+def call42(x, &b) = call43(x) { |v| b.call(v) }
+def call43(x, &b) = call44(x) { |v| b.call(v) }
+def call44(x, &b) = call45(x) { |v| b.call(v) }
+def call45(x, &b) = call46(x) { |v| b.call(v) }
+def call46(x, &b) = call47(x) { |v| b.call(v) }
+def call47(x, &b) = call48(x) { |v| b.call(v) }
+def call48(x, &b) = call49(x) { |v| b.call(v) }
+def call49(x, &b) = call50(x) { |v| b.call(v) }
+def call50(x, &b) = call51(x) { |v| b.call(v) }
+def call51(x, &b) = call52(x) { |v| b.call(v) }
+def call52(x, &b) = call53(x) { |v| b.call(v) }
+def call53(x, &b) = call54(x) { |v| b.call(v) }
+def call54(x, &b) = call55(x) { |v| b.call(v) }
+def call55(x, &b) = call56(x) { |v| b.call(v) }
+def call56(x, &b) = call57(x) { |v| b.call(v) }
+def call57(x, &b) = call58(x) { |v| b.call(v) }
+def call58(x, &b) = call59(x) { |v| b.call(v) }
+def call59(x, &b) = call60(x) { |v| b.call(v) }
+def call60(x, &b) = call61(x) { |v| b.call(v) }
+def call61(x, &b) = call62(x) { |v| b.call(v) }
+def call62(x, &b) = call63(x) { |v| b.call(v) }
+def call63(x, &b) = call64(x) { |v| b.call(v) }
+def call64(x, &b) = call65(x) { |v| b.call(v) }
+def call65(x) = yield(x)
+p call1(:a) { |v| v }
