@@ -3819,6 +3819,11 @@ traits-check-test: $(SPINEL)
 SCALE_LIMIT ?= 5.2
 # Not a timed test: the #5718 per-hop rescan gave ~450x here, and a work count cannot drift with the machine.
 IE_FORWARD_LIMIT ?= 2.5
+# An append through delegating readers: a bus of N classes that hand one
+# another's `peek` on by name, with N append sites (test/scale/reader_bus.sh),
+# at N=64 and N=128. Looking through every scope again for the result of each
+# method walked read 4.35x; one look a name a demand reads 2.59x.
+READER_BUS_LIMIT ?= 3.0
 # The code generator's scaling: the same two programs compiled to C (-c), where
 # the leg above stops after the analysis (--emit-rbs), so the count also holds
 # every pass the emission runs. gen.sh's C grows linearly (4.03x at 4x the
@@ -3876,12 +3881,18 @@ scale-test: $(SPINEL_WORK)
 	sh test/scale/ie_forward_chain.sh 2 > "$$tmp/f2.rb"; sh test/scale/ie_forward_chain.sh 4 > "$$tmp/f4.rb"; \
 	fa=$$(sw -c -o "$$tmp/f2.c" "$$tmp/f2.rb") || { rm -rf "$$tmp"; exit 1; }; \
 	fb=$$(sw -c -o "$$tmp/f4.c" "$$tmp/f4.rb") || { rm -rf "$$tmp"; exit 1; }; \
+	sh test/scale/reader_bus.sh 64 > "$$tmp/r1.rb"; sh test/scale/reader_bus.sh 128 > "$$tmp/r2.rb"; \
+	ra=$$(sw -c -o "$$tmp/r1.c" "$$tmp/r1.rb") || { rm -rf "$$tmp"; exit 1; }; \
+	rb=$$(sw -c -o "$$tmp/r2.c" "$$tmp/r2.rb") || { rm -rf "$$tmp"; exit 1; }; \
 	rm -rf "$$tmp"; \
-	if [ -z "$$wa" ] || [ -z "$$wb" ] || [ -z "$$fa" ] || [ -z "$$fb" ] || \
+	if [ -z "$$wa" ] || [ -z "$$wb" ] || [ -z "$$fa" ] || [ -z "$$fb" ] || [ -z "$$ra" ] || [ -z "$$rb" ] || \
 	   [ -z "$$ca" ] || [ -z "$$cb" ] || [ -z "$$sa" ] || [ -z "$$sb" ]; then echo "scale-test: FAIL (the counting compiler reported no work count)"; exit 1; fi; \
 	awk -v a="$$fa" -v b="$$fb" -v lim="$(IE_FORWARD_LIMIT)" 'BEGIN { r = b / a; \
 	  printf "scale-test: instance_eval forwarding work at 2x the wrappers is %.2fx (limit %.2f)\n", r, lim; exit (r > lim) }' || \
 	  { echo "scale-test: FAIL (the instance_eval forwarding walk grew superlinearly in the wrapper classes, see build_ie_map)"; exit 1; }; \
+	awk -v a="$$ra" -v b="$$rb" -v lim="$(READER_BUS_LIMIT)" 'BEGIN { r = b / a; \
+	  printf "scale-test: delegating-reader work at 2x the bus is %.2fx (limit %.2f)\n", r, lim; exit (r > lim) }' || \
+	  { echo "scale-test: FAIL (an append through delegating readers looked through every scope per method walked, see strbuf_demand_user_elem_call)"; exit 1; }; \
 	awk -v a="$$wa" -v b="$$wb" -v lim="$(SCALE_LIMIT)" 'BEGIN { r = b / a; \
 	  printf "scale-test: work at 4x the program is %.2fx (linear 4.00, limit %.2f)\n", r, lim; exit (r > lim) }' || \
 	  { echo "scale-test: FAIL (the front end grew superlinearly: some pass rescans per node; profile per pass, see rubys/roundhouse#72)"; exit 1; }; \
