@@ -1097,6 +1097,25 @@ int g_proc_toplevel_return = 0;
    g_method_pr_exc_depth snapshots the depth at the return-funnel target so
    funnel gotos pop only the frames they actually exit. */
 int g_exc_frame_depth = 0;
+/* Which of those frames are a rescue modifier's: bit i is the frame pushed at
+   depth i. Every exit counts such a frame like a begin's; a block's `break`
+   alone asks, because past nothing but these it stays a goto -- they have no
+   ensure to run and the wrapper's landing puts sp_exc_top back. */
+unsigned long long g_exc_modifier_frames = 0;
+void exc_modifier_frame_enter(void) {
+  if (g_exc_frame_depth < 64) g_exc_modifier_frames |= 1ULL << g_exc_frame_depth;
+  g_exc_frame_depth++;
+}
+void exc_modifier_frame_leave(void) {
+  g_exc_frame_depth--;
+  if (g_exc_frame_depth < 64) g_exc_modifier_frames &= ~(1ULL << g_exc_frame_depth);
+}
+int exc_frames_all_modifier(int base) {
+  if (base > g_exc_frame_depth) return 0;
+  for (int i = base; i < g_exc_frame_depth; i++)
+    if (i >= 64 || !((g_exc_modifier_frames >> i) & 1)) return 0;
+  return 1;
+}
 int g_loop_exc_base = 0;        /* frame depth at the innermost C-loop entry */
 int g_loop_ensure_base = 0;     /* ensure depth at the innermost C-loop entry */
 int g_brk_exc_base = 0;         /* frame depth at the valued-break wrapper */

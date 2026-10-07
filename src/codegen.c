@@ -5136,7 +5136,7 @@ void emit_method(Compiler *c, Scope *s, Buf *b) {
     g_self = cm_self9;
   }
   g_ret_type = method_is_void(s) ? TY_VOID : s->ret;
-  g_exc_frame_depth = 0; g_method_pr_exc_depth = 0; g_rescue_save_depth = 0;
+  g_exc_frame_depth = 0; g_method_pr_exc_depth = 0; g_rescue_save_depth = 0; g_exc_modifier_frames = 0;
   /* real-function funnel mirror: no proc-return frame yet (set below when
      one exists); block bodies spliced by yield-inlines restore from these. */
   g_fn_pr_label = NULL; g_fn_pr_var = NULL; g_fn_ret_type = g_ret_type;
@@ -6293,8 +6293,8 @@ void emit_fiber_new(Compiler *c, int id, Buf *b, int as_gen, int size_node) {
   int sv_fbbody = g_fiber_body; g_fiber_body = body;
   int sv_fbskip = g_brk_skip_id; g_brk_skip_id = -1;
   int sv_fbexcd = g_exc_frame_depth, sv_fbprexcd = g_method_pr_exc_depth;
-  int sv_fbrsd = g_rescue_save_depth;
-  g_exc_frame_depth = 0; g_method_pr_exc_depth = 0; g_rescue_save_depth = 0;
+  int sv_fbrsd = g_rescue_save_depth; unsigned long long sv_fbmodf = g_exc_modifier_frames;
+  g_exc_frame_depth = 0; g_method_pr_exc_depth = 0; g_rescue_save_depth = 0; g_exc_modifier_frames = 0;
 
   /* Unpack capture struct */
   if (ncap > 0 || cap_self) {
@@ -6518,7 +6518,7 @@ void emit_fiber_new(Compiler *c, int id, Buf *b, int as_gen, int size_node) {
   g_cap_struct = sv_fbcap; g_cap_names = sv_fbcapn;
   g_c_loop_depth = sv_fbcld; g_fiber_body = sv_fbbody;
   g_exc_frame_depth = sv_fbexcd; g_method_pr_exc_depth = sv_fbprexcd;
-  g_rescue_save_depth = sv_fbrsd;
+  g_rescue_save_depth = sv_fbrsd; g_exc_modifier_frames = sv_fbmodf;
 
   /* Emit creation expression:
      If there are captures, allocate a GC-managed capture struct, fill it,
@@ -7536,8 +7536,8 @@ else if (orecv >= 0 && onm) {
   const char *sv_pr_label = g_method_pr_label, *sv_pr_var = g_method_pr_var, *sv_prh = g_proc_return_home;
   g_method_pr_label = NULL; g_method_pr_var = NULL;
   int sv_excd = g_exc_frame_depth, sv_prexcd = g_method_pr_exc_depth;
-  int sv_rsd = g_rescue_save_depth;
-  g_exc_frame_depth = 0; g_method_pr_exc_depth = 0; g_rescue_save_depth = 0;
+  int sv_rsd = g_rescue_save_depth; unsigned long long sv_modf = g_exc_modifier_frames;
+  g_exc_frame_depth = 0; g_method_pr_exc_depth = 0; g_rescue_save_depth = 0; g_exc_modifier_frames = 0;
   const char *sv_fn_prl = g_fn_pr_label, *sv_fn_prv = g_fn_pr_var; TyKind sv_fn_rt = g_fn_ret_type;
   g_fn_pr_label = NULL; g_fn_pr_var = NULL; g_fn_ret_type = ret;
   char home_acc[48] = "";
@@ -8211,7 +8211,7 @@ else if (orecv >= 0 && onm) {
   g_method_pr_label = sv_pr_label; g_method_pr_var = sv_pr_var; g_proc_return_home = sv_prh;
   g_proc_toplevel_return = sv_ptr;
   g_exc_frame_depth = sv_excd; g_method_pr_exc_depth = sv_prexcd;
-  g_rescue_save_depth = sv_rsd;
+  g_rescue_save_depth = sv_rsd; g_exc_modifier_frames = sv_modf;
   g_fn_pr_label = sv_fn_prl; g_fn_pr_var = sv_fn_prv; g_fn_ret_type = sv_fn_rt;
 
   if (ie_mark >= 0) buf_puts(b, "({ sp_Proc *_pie = ");
@@ -13998,6 +13998,7 @@ typedef struct EmitUnitState {
   int c_ret_void, in_proc_body, result_poly, proc_body_kind, proc_toplevel_return;
   int indent, nren, block_nren, block_id, c_loop_depth, ensure_depth;
   int emitting_class_id, inline_recv_class, ie_class_id, dm_subst_node, exc_frame_depth;
+  unsigned long long exc_modifier_frames;
   int open_defaults;
   int loop_exc_base, loop_ensure_base, redo_depth;
   /* whether the unit's block is a lowered method's proc parameter */
@@ -14017,6 +14018,7 @@ void emit_unit_state_save(EmitUnitState *s) {
   s->c_loop_depth = g_c_loop_depth; s->ensure_depth = g_ensure_depth;
   s->emitting_class_id = g_emitting_class_id; s->inline_recv_class = g_inline_recv_class;
   s->ie_class_id = g_ie_class_id; s->dm_subst_node = g_dm_subst_node; s->exc_frame_depth = g_exc_frame_depth;
+  s->exc_modifier_frames = g_exc_modifier_frames;
   s->loop_exc_base = g_loop_exc_base; s->loop_ensure_base = g_loop_ensure_base; s->redo_depth = g_redo_depth;
   s->ie_next_ty = g_ie_next_ty;
   s->open_defaults = g_open_defaults;
@@ -14070,6 +14072,7 @@ void emit_unit_state_restore(const EmitUnitState *s) {
   g_c_loop_depth = s->c_loop_depth; g_ensure_depth = s->ensure_depth;
   g_emitting_class_id = s->emitting_class_id; g_inline_recv_class = s->inline_recv_class;
   g_ie_class_id = s->ie_class_id; g_dm_subst_node = s->dm_subst_node; g_exc_frame_depth = s->exc_frame_depth;
+  g_exc_modifier_frames = s->exc_modifier_frames;
   g_loop_exc_base = s->loop_exc_base; g_loop_ensure_base = s->loop_ensure_base; g_redo_depth = s->redo_depth;
   g_ie_next_ty = s->ie_next_ty;
   g_open_defaults = s->open_defaults;
