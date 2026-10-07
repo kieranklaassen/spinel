@@ -9539,6 +9539,25 @@ static void emit_ensure_return(Compiler *c, int eid, int has_retval, Buf *b, int
   else emit_retf_return(eid, has_retval, b);
 }
 
+/* Does the ensure body `stmts` only name nil, true or false, each alone or
+   stored in a local or an instance variable? Nothing it runs allocates or
+   rescues a raise then, so the exception that waits stays as the begin
+   left it. */
+static int ensure_body_only_stores(const NodeTable *nt, int stmts) {
+  int n = 0; const int *bb = nt_arr(nt, stmts, "body", &n);
+  for (int i = 0; i < n; i++) {
+    int v = bb[i];
+    NodeKind k = nt_kind(nt, v);
+    if (k == NK_LocalVariableWriteNode || k == NK_InstanceVariableWriteNode) {
+      v = nt_ref(nt, v, "value");
+      if (v < 0) return 0;
+      k = nt_kind(nt, v);
+    }
+    if (k != NK_NilNode && k != NK_TrueNode && k != NK_FalseNode) return 0;
+  }
+  return 1;
+}
+
 /* begin/body/rescue (ensure/else deferred) via the setjmp exception model.
    When resultvar != NULL, the body's and rescue handlers' values are
    assigned to it (begin/rescue as an expression). */
@@ -9718,8 +9737,25 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
        as its cause. */
     emit_indent(b, indent);
     buf_printf(b, "{ void *_icr%d SP_CLEANUP(sp_inflight_restore) = _ic%d; (void)_icr%d;\n", eid, eid, eid);
+    /* The deferred exception waits in _excmsg and _excobj while the ensure
+       body runs, and nothing else holds it there: a begin entered by that
+       body takes the slot the message was read from, and a raise it rescues
+       takes sp_inflight_cause. Both are rooted for the body, and only when
+       an exception waits, so the path with none pays a saved count. */
+    int holds = !ensure_body_only_stores(nt, ensure_stmts);
+    if (holds) {
+      emit_indent(b, indent);
+      buf_printf(b, "{ int _exr%d SP_CLEANUP(sp_gc_cleanup) = sp_gc_nroots;"
+                    " if (_excf%d) { _sp_gc_root_push((void **)((uintptr_t)&_excmsg%d | (uintptr_t)2));"
+                    " _sp_gc_root_push((void **)&_excobj%d); }\n",
+                 eid, eid, eid, eid);
+    }
     emit_stmts(c, ensure_stmts, b, indent);
     emit_indent(b, indent);
+    if (holds) {
+      buf_puts(b, "}\n");
+      emit_indent(b, indent);
+    }
     buf_puts(b, "}\n");
     emit_indent(b, indent);
     buf_printf(b, "sp_unwind_kind = _uk%d; sp_unwind_target = _ut%d; sp_unwind_exc_top = _ue%d; sp_unwind_home = _uh%d;\n",
