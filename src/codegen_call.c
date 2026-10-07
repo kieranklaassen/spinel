@@ -1692,6 +1692,17 @@ static int name_is_comparable_module_method(const char *m) {
   return 0;
 }
 
+/* Exception's own public instance methods, for respond_to? on an instance of
+   a class the program puts under a builtin exception: they are the runtime's
+   and stand in no method table. to_s, inspect and == are every object's. */
+const char *const exception_names[] = {
+    "message", "full_message", "detailed_message", "backtrace",
+    "backtrace_locations", "cause", "exception", "set_backtrace", NULL };
+static int name_is_exception_own_method(const char *m) {
+  for (int i = 0; exception_names[i]; i++) if (sp_streq(m, exception_names[i])) return 1;
+  return 0;
+}
+
 /* Method#arity reads the introspection column of the shared facts. */
 #define BAI(c,m,a,...) {c,m,a},
 #define BAM(c,m,a) {c,m,a},
@@ -14075,6 +14086,11 @@ int class_implicit_responds(Compiler *c, int cid, const char *qm) {
   if (comp_method_in_chain(c, cid, "<=>", NULL) >= 0 &&
       name_is_comparable_module_method(qm) &&
       class_mixes_in(c, cid, "Comparable", 0)) return 1;
+  /* a class under a builtin exception has Exception's own methods, unless it
+     took the name away (undef_method) or made it private */
+  if (class_is_exc_subclass(c, cid) && name_is_exception_own_method(qm) &&
+      !comp_is_undeffed_in_chain(c, cid, qm) &&
+      comp_method_vis_in_chain(c, cid, qm) == SP_VIS_PUBLIC) return 1;
   int sk = class_struct_kind(c, cid);
   if (!sk) return 0;
   if (sp_streq(qm, "members") || sp_streq(qm, "to_h") ||
