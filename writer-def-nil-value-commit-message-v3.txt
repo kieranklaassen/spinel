@@ -1,0 +1,41 @@
+A hand-written writer takes a value that answers nil
+
+    class Node
+      def initialize(n) = @name = n
+      def parent=(x)
+        @parent = x
+      end
+    end
+    def detach(nd)
+      puts "detach"
+      nil
+    end
+    a = Node.new("a")
+    a.parent = detach(a)
+    # error: variable or field 'lv___sv2' declared void
+
+The value of `obj.x = v` is its right-hand side, not what a hand-written
+`def x=` returns, so the call binds a value that is no literal or
+variable to a temporary, hands that to the writer and reads it back. A
+value of nil type that is neither (a method that answers nil,
+`(bump; nil)`, `(bump if c)`) made the temporary a `void` local, and the
+generated C did not build.
+
+Such a value has nothing a temporary could hold. It now runs for its
+effect ahead of the call, where every other value runs into its
+temporary, and the call is handed a nil literal. The value is emitted
+before g_setter_value_inner is raised, so a writer assignment in it, a
+block's last one among them, answers its own right-hand side.
+
+The receiver runs first, as in CRuby: one that is not self is read into
+a temporary of its own ahead of the value and the call reads it there,
+so a value that gives the variable another object (`a.v = (a = b; nil)`,
+an interpolation whose to_s assigns a) still writes to the first one.
+The temporary is rooted while a value that may allocate runs: a
+receiver nothing else holds would be collected under it. `x&.v = g`
+keeps its C and still does not build; a receiver of a class held by
+value keeps its C too, since a temporary would be a copy.
+
+The test is in GC_STRESS_TESTS.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
