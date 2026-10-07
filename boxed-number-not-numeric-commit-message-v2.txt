@@ -1,0 +1,18 @@
+A boxed number is not an instance_of? Numeric
+
+    [1, 1.5].each { |v| p v.instance_of?(Numeric) }
+
+printed true twice; CRuby prints false: instance_of? asks for the
+object's own class, and no number's class is Numeric. A receiver typed
+as a number was right, but for a Rational past the machine range
+(`(2**70).to_r`), which is boxed. emit_poly_isa_test's Numeric arm
+listed every numeric tag whatever `exact` said, so the boxed test
+answered as is_a? does, for an Integer, a Float, a Bignum, a Rational
+and a Complex.
+
+The arm now answers false for the exact form. is_a?, kind_of? and
+`Numeric === v` are untouched.
+
+Test: test/instance_of_numeric_boxed.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

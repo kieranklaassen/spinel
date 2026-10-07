@@ -1,0 +1,36 @@
+A constant holding an exception class names it in rescue and raise
+
+    E = ArgumentError
+    begin
+      raise ArgumentError, "a"
+    rescue E => e
+      puts "got #{e.class}"
+    end
+
+stopped with the exception uncaught; CRuby prints "got ArgumentError".
+`raise E, "a"` raised an exception whose class was named E: `rescue
+ArgumentError` let it through, and `rescue => e` printed E for
+e.class. After `rescue CE => e` with CE a class of the program's, e
+had no type and `e.code + 1` did not build. The rescue and raise
+emitters read the name in the clause, and E names no class.
+
+rewrite_const_alias_receivers now rewrites the names of a rescue list
+and the first argument of a receiverless raise or fail, under the
+guards the is_a? argument has: the constant holds that class when the
+clause runs, and the read names that constant. The C is that of the
+clause written with the class.
+
+rescue asks the class by `===` and raise by `exception`, and a program
+may define raise or fail: a program that defines any of the four, by a
+def, an alias, or a define_method, define_singleton_method or
+alias_method of that name or of a name no literal spells, is left
+alone. `:fail` or "raise" as a plain value defines nothing.
+
+Not here: a superclass (`class X < K`), a constant of a constant
+(`J = K`) and a module's constant through one (`M = Math; M::PI`).
+
+Tests: test/const_alias_rescue_raise.rb, which master refuses to
+build; test/const_alias_rescue_own.rb pins a class with its own `===`
+and passes on master.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
