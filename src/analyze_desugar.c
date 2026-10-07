@@ -9611,9 +9611,19 @@ int desugar_builtin_scalar_calls(Compiler *c) {
        see the comment where they are re-added. */
     /* `v&.fdiv(2)`: the rewrite onto the generic's copy is a plain call,
        which loses the safe navigation, so a nil `v` reached the method;
-       the call keeps its `&.` and its typed emitter */
+       the call keeps its `&.` and its typed emitter. That emitter does not
+       serve a boxed argument (`f&.clamp(1.0, x)` raised NoMethodError,
+       `i&.between?(x, y)` did not build, `i&.remainder(x)` answered an
+       Integer for a Float `x`), so with one the call is moved after all,
+       under a nil test (below). */
+    int sn = 0;
     { const char *cop = nt_str(nt, id, "call_operator");
-      if (cop && sp_streq(cop, "&.")) continue; }
+      int a0 = nt_ref(nt, id, "arguments");
+      int n = 0; const int *v = a0 >= 0 ? nt_arr(nt, a0, "arguments", &n) : NULL;
+      if (cop && sp_streq(cop, "&.")) {
+        for (int j = 0; j < n && !sn; j++) sn = infer_type(c, v[j]) == TY_POLY;
+        if (!sn) continue;
+      } }
     int ok = 0;
     if (bx == SP_BX_INTEGER) ok = (rt == TY_INT || rt == TY_BIGINT);
     else if (bx == SP_BX_FLOAT) ok = (rt == TY_FLOAT);
@@ -9692,6 +9702,57 @@ int desugar_builtin_scalar_calls(Compiler *c) {
     na[0] = recv; for (int j = 0; j < an; j++) na[j + 1] = av[j];
     int nargs = nt_new_node(nt, "ArgumentsNode");
     if (nargs < 0) { free(na); continue; }
+    if (sn) {
+      /* (__bxr_N = recv; __bxr_N.nil? ? nil : copy(__bxr_N, args)): the
+         receiver once and no argument under a nil one, the shape the
+         Enumerable move gives a `&.` call (desugar_builtin_enum_calls) */
+      char tname[48]; snprintf(tname, sizeof tname, "__bxr_%s", comp_node_tag(c, id));
+      char gnb[256]; snprintf(gnb, sizeof gnb, "%s", gn);
+      int w = nt_new_node(nt, "LocalVariableWriteNode");
+      int nr = nt_new_node(nt, "LocalVariableReadNode");
+      int nq = nt_new_node(nt, "CallNode");
+      int nil_n = nt_new_node(nt, "NilNode");
+      int ts = nt_new_node(nt, "StatementsNode");
+      int r2 = nt_new_node(nt, "LocalVariableReadNode");
+      int mv = nt_new_node(nt, "CallNode");
+      int es = nt_new_node(nt, "StatementsNode");
+      int eln = nt_new_node(nt, "ElseNode");
+      int ifn = nt_new_node(nt, "IfNode");
+      int body = nt_new_node(nt, "StatementsNode");
+      if (w < 0 || nr < 0 || nq < 0 || nil_n < 0 || ts < 0 || r2 < 0 || mv < 0 || es < 0 ||
+          eln < 0 || ifn < 0 || body < 0) { free(na); return changed; }
+      nt_node_set_str(nt, w, "name", tname); nt_node_set_int(nt, w, "depth", 0);
+      nt_node_set_ref(nt, w, "value", recv);
+      nt_node_set_str(nt, nr, "name", tname); nt_node_set_int(nt, nr, "depth", 0);
+      nt_node_set_str(nt, nq, "name", "nil?");
+      nt_node_set_ref(nt, nq, "receiver", nr);
+      nt_node_set_arr(nt, ts, "body", &nil_n, 1);
+      nt_node_set_str(nt, r2, "name", tname); nt_node_set_int(nt, r2, "depth", 0);
+      na[0] = r2;
+      nt_node_set_arr(nt, nargs, "arguments", na, an + 1);
+      free(na);
+      nt_node_set_str(nt, mv, "name", gnb);
+      nt_node_set_ref(nt, mv, "receiver", -1);
+      nt_node_set_ref(nt, mv, "arguments", nargs);
+      nt_node_set_arr(nt, es, "body", &mv, 1);
+      nt_node_set_ref(nt, eln, "statements", es);
+      nt_node_set_ref(nt, ifn, "predicate", nq);
+      nt_node_set_ref(nt, ifn, "statements", ts);
+      nt_node_set_ref(nt, ifn, "subsequent", eln);
+      int stmts[2] = { w, ifn };
+      nt_node_set_arr(nt, body, "body", stmts, 2);
+      nt_node_set_type(nt, id, "ParenthesesNode");
+      nt_node_set_ref(nt, id, "body", body);
+      nt_node_set_str(nt, id, "call_operator", ".");
+      nt_node_set_ref(nt, id, "receiver", -1);
+      nt_node_set_ref(nt, id, "arguments", -1);
+      Scope *sc = comp_scope_of(c, id);
+      if (sc) scope_local_intern(sc, tname);
+      comp_grow_node_arrays(c);
+      for (int j = base; j < nt->count; j++) c->nscope[j] = encl;
+      changed = 1;
+      continue;
+    }
     nt_node_set_arr(nt, nargs, "arguments", na, an + 1);
     free(na);
     nt_node_set_ref(nt, id, "arguments", nargs);
