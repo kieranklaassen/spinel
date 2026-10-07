@@ -1,0 +1,32 @@
+A Proc called with [] takes a splatted list of any length
+
+`pr[*list]` is `pr.call(*list)`, and a Proc takes whatever the list
+holds. With a list whose length is known only at run time the call was
+built as Array#[] is, an arm a length and a raise past two:
+
+    pr = proc { |*x| x }
+    l = [1, 2, 3].dup
+    p pr[*l]    # ArgumentError (given 3, expected 1..2)
+                # CRuby: [1, 2, 3]
+
+The arms are built before the receiver has a type, so
+splat_dispatch_on_length only marks its raise arm, and
+desugar_index_splat_callable, run in the fixpoint once the types have
+settled, makes that arm `recv.call(*list)` where the receiver is a
+Proc or a Method. The raise is kept as a node off the tree and put
+back if the receiver's type moves on.
+
+It is made only for the receivers whose `call(*list)` is right today:
+a Method of a def of the program, and a Proc in a program whose Procs
+are all blocks, lambdas or such Methods. A program that curries, takes
+a builtin's Method, or makes a Proc from a Symbol, a Hash or another
+object keeps the raise: `call(*list)` answers wrongly for some of
+those, and the ArgumentError is better than that answer. A boxed
+receiver and a splat beside other arguments keep it too.
+
+An Array, a String or a Hash receiver compiles to the C it had. A
+program with no `x[*list]` pays one test a round of the fixpoint.
+
+Test: test/proc_index_splat_any_count.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
