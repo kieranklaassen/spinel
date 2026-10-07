@@ -1,0 +1,1 @@
+T << row stores a row into a constant table as T[i] = row does
