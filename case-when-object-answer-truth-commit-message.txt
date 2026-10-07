@@ -1,0 +1,26 @@
+What a `when obj` object's === answers is read for its Ruby truth
+
+emit_when_user_eq asks an object arm its own === (or ==) only when the
+method answers a boolean or a boxed value. One that answers anything
+else was left to the older paths:
+
+    class OneOf
+      def initialize(*xs) = @xs = xs
+      def ===(o) = @xs.index(o)
+    end
+    small = OneOf.new(1, 2, 3)
+    p(case 1 when small then :hit else :miss end)
+
+printed :miss; CRuby prints :hit. In a case value and beside a boxed
+subject such an arm was compared with == and never matched. In a case
+statement beside a typed subject the C word was read as it stood: a 0
+or a 0.0 was a miss and the nil of an Integer or a Float a hit. A ===
+that answers nil on every path is a void function, and the statement
+did not build ("void value not ignored as it ought to be").
+
+emit_when_user_eq takes every kind of answer and reads it for its Ruby
+truth: an Integer, a Float or a Symbol is nil at its sentinel, a String,
+an Array, a Hash or an object at the null pointer, and anything else
+they hold is true. A void method is called and the arm is no match.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

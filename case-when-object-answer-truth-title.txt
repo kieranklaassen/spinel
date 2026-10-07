@@ -1,0 +1,1 @@
+What a `when obj` object's === answers is read for its Ruby truth
