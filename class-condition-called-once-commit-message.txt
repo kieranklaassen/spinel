@@ -1,0 +1,24 @@
+A condition over a method that answers a class calls it once
+
+    class K; end
+    def one
+      puts "one"
+      K
+    end
+    puts "t" if one
+
+printed one twice: CRuby prints it once. sp_class_nil_p was a macro
+that read its operand twice, and three places hand it the call itself:
+a condition over a class value (if, unless, ?:, elsif, until, and the
+answer of a block or a lambda under one), `!`, and respond_to?. Each
+ran the method twice when it answers a class or a module.
+
+sp_class_nil_p is a static inline function now and takes the class by
+value. Its other callers (&&, ||, ||=, boxing a class) already hand it
+a temporary or a variable. The compiler is untouched, so every
+generated C file is as before.
+
+Test: test/class_answer_condition_once.rb (expected from CRuby 3.3.6)
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+

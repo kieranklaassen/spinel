@@ -1,0 +1,1 @@
+A condition over a method that answers a class calls it once
