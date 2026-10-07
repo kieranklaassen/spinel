@@ -351,20 +351,28 @@ const char *sp_exc_class_name(volatile sp_Exception *ve) {
      struct that no root and no scan knows (`k = e.class` held in a local, a
      parameter or an instance variable), so a copy on the string heap was
      collected under it and `k.to_s` answered the String that took its place. */
-  static const char **kept = NULL;   /* guarded by the heap lock */
+  struct kept_name { const char *lit, *copy; };
+  static struct kept_name *kept = NULL;   /* guarded by the heap lock */
   static int n = 0, cap = 0;
   const char *r = NULL;
   if (!e || !e->cls_name) return SPL("RuntimeError");
   SP_HEAP_LOCK();
-  for (int i = 0; i < n && !r; i++) if (!strcmp(kept[i], e->cls_name)) r = kept[i];
+  /* by the literal's address first, one compare a name; then by its text,
+     for the same name written at another address */
+  for (int i = 0; i < n && !r; i++)
+    if (kept[i].lit == e->cls_name && !strcmp(kept[i].copy, e->cls_name)) r = kept[i].copy;
+  for (int i = 0; i < n && !r; i++) if (!strcmp(kept[i].copy, e->cls_name)) r = kept[i].copy;
   if (!r && n == cap) {
-    const char **nk = (const char **)realloc((void *)kept, sizeof(char *) * (size_t)(cap ? cap * 2 : 16));
+    struct kept_name *nk = (struct kept_name *)realloc(kept, sizeof *kept * (size_t)(cap ? cap * 2 : 16));
     if (nk) { kept = nk; cap = cap ? cap * 2 : 16; }
   }
   if (!r && n < cap) {
     size_t len = strlen(e->cls_name);
     char *m = (char *)malloc(len + 2);
-    if (m) { m[0] = (char)0xff; memcpy(m + 1, e->cls_name, len + 1); r = kept[n++] = m + 1; }
+    if (m) {
+      m[0] = (char)0xff; memcpy(m + 1, e->cls_name, len + 1);
+      kept[n].lit = e->cls_name; r = kept[n++].copy = m + 1;
+    }
   }
   SP_HEAP_UNLOCK();
   return r ? r : sp_str_dup_external(e->cls_name);   /* out of memory */
