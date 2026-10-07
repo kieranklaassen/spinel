@@ -1,0 +1,36 @@
+A loop that can change a String reads its length at every test
+
+    def grow(x)
+      x << "!"
+    end
+    s = +"ab"
+    i = 0
+    while i < s.length
+      grow(s) if i < 3
+      i += 1
+    end
+    p i, s
+
+printed 2 and "ab!!"; CRuby prints 5 and "ab!!!". emit_while reads a
+String local's length once ahead of the loop unless
+subtree_changes_local finds the local assigned or named under one of 32
+mutators. That list is of what does change a String, so each road it
+does not spell was a wrong count: a method appending to its parameter, a
+second name, an Array, a Hash, an object or a lambda holding the String,
+`chop!`, `succ!`, `rstrip!`, `s, n = ...`, `force_encoding` through
+another holder.
+
+Now the length is read ahead only where nothing in the loop can change a
+String (len_loop_quiet): the loop is walked as hc_node_ok walks one that
+runs no code, with String reads under names the program has not
+redefined, a read of a Hash kind that has no default block, a `return`
+and a nested loop taken too. A name missing from this list costs a read
+of the length at each test, never an answer.
+
+Not covered: a loop that calls a method of the program, appends to
+another String or stores into a Hash reads the length at each test, and
+so does every loop of a program that uses threads or finalizers.
+
+Test: test/while_length_changed.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

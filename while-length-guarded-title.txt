@@ -1,0 +1,1 @@
+A while's String length is read ahead of the loop only where its first test reads it

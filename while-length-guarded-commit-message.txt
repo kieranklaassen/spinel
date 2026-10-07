@@ -1,0 +1,19 @@
+A while's String length is read ahead of the loop only where its first test reads it
+
+`while s && i < s.length` with s nil raised NoMethodError. emit_while
+reads a String local's length once ahead of the loop, and it took that
+read from anywhere in the test; Ruby does not make it when the guard
+says no. The same happened behind `!s.nil? &&`, `until s.nil? ||`, a
+ternary, an `if` modifier, `&.` and a flag. A read on the right of
+`||`, or after an operand with an effect (`(i += 1) < s.length`),
+raised ahead of the passes and the effect Ruby runs first.
+
+The length is read ahead of the loop only when the first test reads it
+before anything else: down the receivers, past operands that are plain
+reads, and on the left of `&&` and `||`. Any other loop reads the
+length in its test, as a loop with nothing to hoist does. `while i <
+s.length && ...` and `while i + 1 < s.size` keep their C.
+
+Test: test/while_length_guarded.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

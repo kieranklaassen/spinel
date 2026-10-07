@@ -1,0 +1,1 @@
+A loop that can change a String reads its length at every test
