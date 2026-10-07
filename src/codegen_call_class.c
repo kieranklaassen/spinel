@@ -1265,6 +1265,36 @@ int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
               Buf aval; memset(&aval, 0, sizeof aval);
               { Buf *sv_pre = g_pre; g_pre = &apre; emit_one_arg(c, saved0, 0, &aval); g_pre = sv_pre; }
               if (!g_pre) buf_puts(b, "({ ");
+              /* The receiver runs before the value. One that is more than a
+                 read is held in a temporary of its own ahead of the value's,
+                 rooted while a value that may allocate runs, and the call
+                 reads it there. */
+              const char *rop = nt_str(nt, id, "call_operator");
+              int saved_recv = -1;
+              char rvn[32]; rvn[0] = 0;
+              if (!subtree_is_pure_read(c, recv) && !(rop && sp_streq(rop, "&.")) &&
+                  repr_of(c, recv).kind != RK_BOXED && repr_of(c, recv).as_ty == _art) {
+                snprintf(rvn, sizeof rvn, "__svr%d", ++g_tmp);
+                LocalVar *rlv = scope_local_intern(esc, rvn);
+                rlv->type = _art;
+                int rrd = nt_new_node((NodeTable *)nt, "LocalVariableReadNode");
+                nt_node_set_str((NodeTable *)nt, rrd, "name", rvn);
+                comp_grow_node_arrays(c);
+                c->nscope[rrd] = c->nscope[id];
+                c->ntype[rrd] = _art;
+                Buf rpre; memset(&rpre, 0, sizeof rpre);
+                Buf rval; memset(&rval, 0, sizeof rval);
+                { Buf *sv_pre = g_pre; g_pre = &rpre; emit_expr(c, recv, &rval); g_pre = sv_pre; }
+                if (rpre.p) buf_puts(decl, rpre.p);
+                if (g_pre) emit_indent(g_pre, g_indent);
+                emit_ctype(c, _art, decl); buf_printf(decl, " lv_%s = %s; ", rvn, rval.p ? rval.p : "0");
+                free(rpre.p); free(rval.p);
+                if (subtree_may_allocate(nt, saved0) && needs_root(_art) && !comp_ty_value_obj(c, _art))
+                  buf_printf(decl, "SP_GC_ROOT(lv_%s); ", rvn);
+                if (g_pre) buf_puts(g_pre, "\n");
+                saved_recv = recv;
+                nt_node_set_ref((NodeTable *)nt, id, "receiver", rrd);
+              }
               if (apre.p) buf_puts(decl, apre.p);
               if (g_pre) emit_indent(g_pre, g_indent);
               emit_ctype(c, at, decl); buf_printf(decl, " lv_%s = %s; ", svn, aval.p ? aval.p : "0");
@@ -1282,6 +1312,15 @@ int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
               buf_puts(b, "); ");
               int back[1] = { saved0 };
               nt_node_set_arr((NodeTable *)nt, argsn, "arguments", back, 1);
+              if (saved_recv >= 0) {
+                nt_node_set_ref((NodeTable *)nt, id, "receiver", saved_recv);
+                for (int k = esc->nlocals - 1; k >= 0; k--)
+                  if (sp_streq(esc->locals[k].name, rvn)) {
+                    memmove(&esc->locals[k], &esc->locals[k + 1], sizeof(LocalVar) * (size_t)(esc->nlocals - k - 1));
+                    esc->nlocals--;
+                    break;
+                  }
+              }
               buf_printf(b, "lv_%s; })", svn);
               for (int k = esc->nlocals - 1; k >= 0; k--)
                 if (sp_streq(esc->locals[k].name, svn)) {
