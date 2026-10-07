@@ -4848,7 +4848,7 @@ int emit_array_filter_loop(Compiler *c, int recv, int block, TyKind rt, const ch
       emit_indent(b, indent); emit_ctype(c, g_ret_type, b);
       buf_printf(b, " _retv%d = %s;\n", eid, default_value_from_compiler(c, g_ret_type));
     }
-    g_ensure_stack[g_ensure_depth++] = (EnsureCtx){ eid, has_retval, g_exc_frame_depth, g_ret_type };
+    g_ensure_stack[g_ensure_depth++] = (EnsureCtx){ eid, has_retval, g_exc_frame_depth, g_ret_type, 1 };
     emit_indent(b, indent); buf_puts(b, "sp_exc_check_depth();\n");
     emit_indent(b, indent); buf_puts(b, "sp_exc_rootmark[sp_exc_top] = sp_gc_nroots; sp_rescue_mark[sp_exc_top] = sp_rescue_sp;\n");
     emit_indent(b, indent); buf_puts(b, "sp_exc_msg[sp_exc_top] = 0; sp_exc_obj[sp_exc_top] = 0; sp_exc_top++;\n");
@@ -4935,7 +4935,7 @@ int emit_array_filter_loop(Compiler *c, int recv, int block, TyKind rt, const ch
     else
       buf_printf(b, "if (_retf%d) { _retf%d = 1; sp_exc_top--; goto _ensure%d; }\n", eid, outer->lid, outer->lid);
     emit_indent(b, indent);
-    emit_ensure_exc_hand_on(b, eid, outer->lid);
+    emit_ensure_exc_block_out(b, eid, outer);
     buf_puts(b, "\n");
   }
   else {

@@ -524,7 +524,9 @@ void emit_line_directive(Compiler *c, int id, Buf *b);
    yield then defers a `return` belonging to the OUTER method into it. Reading
    g_ret_type at the store site therefore asked the wrong function whether to
    box, and a String went into an sp_RbVal slot unboxed. */
-typedef struct { int lid; int has_retval; int exc_base; TyKind retv_ty; } EnsureCtx;
+/* live: the region's own frame is armed, which it is while its body is emitted
+   and no longer in its rescue and else clauses. */
+typedef struct { int lid; int has_retval; int exc_base; TyKind retv_ty; int live; } EnsureCtx;
 extern EnsureCtx g_ensure_stack[MAX_ENSURE_DEPTH];
 extern int       g_ensure_depth;
 
@@ -939,6 +941,7 @@ void emit_pd_cell_alias_into(Compiler *c, LocalVar *plv, const char *uniq, Buf *
 void emit_inlined_locals(Compiler *c, Scope *m, int tag, Buf *b, int din);
 void emit_retf_return(int eid, int has_retval, Buf *b);
 void emit_ensure_exc_hand_on(Buf *b, int eid, int outer);
+void emit_ensure_exc_block_out(Buf *b, int eid, const EnsureCtx *outer);
 void emit_main_exit(Buf *b);
 /* The assignment target for an inlined method's parameter, spelled by the same
    rule that declared it (a cell-promoted one is `(*_cell_x)`). See codegen.c. */
@@ -1959,7 +1962,7 @@ void emit_for(Compiler *c, int id, Buf *b, int indent);
 void emit_return(Compiler *c, int id, Buf *b, int indent);
 int rescue_is_catchall_name(const char *n);
 int subtree_has_retry(const NodeTable *nt, int id);
-void emit_rescue(Compiler *c, int id, Buf *b, int indent, int fr, const char *resultvar);
+void emit_rescue(Compiler *c, int id, Buf *b, int indent, int fr, int ens, const char *resultvar);
 void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar);
 void emit_with_prelude(Compiler *c, int id, Buf *b, int indent, void (*inner)(Compiler *, int, Buf *, int));
 void emit_stmt(Compiler *c, int id, Buf *b, int indent);
