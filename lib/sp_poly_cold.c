@@ -1038,6 +1038,8 @@ sp_PolyPolyHash *sp_poly_hash_merge(sp_RbVal a, sp_RbVal b)
       sp_poly_hash_dproc_ctx *ctx = (sp_poly_hash_dproc_ctx *)sp_gc_alloc(
           sizeof(*ctx), NULL, sp_poly_hash_dproc_ctx_scan);
       ctx->source = a;
+      /* the allocation above can collect, and r is old after it */
+      sp_gc_wb((void *)r);
       r->dproc = sp_poly_hash_dproc_bridge;
       r->dproc_self = ctx;
     }
