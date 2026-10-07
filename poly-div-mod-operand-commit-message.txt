@@ -1,0 +1,40 @@
+A boxed `/` or `%` beside a value that is no number raises
+
+sp_poly_div and sp_poly_mod convert both sides to an Integer on their
+last line, and their Float branch tests either side's tag, so a value
+that is no number was computed with: nil as 0, a String as the number
+it starts with, a Symbol as its index in the symbol table, true as 1.
+
+    row = [nil, 2]
+    p row[0] / row[1]          # Spinel: 0, CRuby: NoMethodError
+
+    row = [7, nil]
+    p row[0] / row[1]          # Spinel: ZeroDivisionError, CRuby: TypeError
+
+`7 % true` answered 0, and `2.5 / "s"` raised ArgumentError for the
+String's conversion.
+
++ - and * end in sp_poly_binop_bad for such a pair, which is why
+sp_poly_tower_mismatch asks only of a pair with a Bignum, Rational or
+Complex side. / and % have no such ending, so each now asks it of
+every pair, after the mismatch check and before the first branch that
+converts. sp_poly_binop_bad raises as it does for the other three:
+NoMethodError for a receiver without the operator, TypeError ("nil
+can't be coerced into Integer") for an operand. A String receiver of
+% and a Range receiver answer above the check, and a program object is
+sent to its own method above it, as before.
+
+Each function gains the one check; no other text of the two lines
+changes. Two Integers and two Floats answer on the first lines: a
+million boxed Integer divisions run the same 118.7 million
+instructions under callgrind. A mixed pair passes the check: Integer /
+Float runs 153.7 million where it ran 156.7, Float % Integer 252.7
+million where it ran 231.7.
+
+Left alone: div, divmod, fdiv, remainder and ** convert the same way
+in functions of their own.
+
+Test: test/poly_div_mod_operand.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+
