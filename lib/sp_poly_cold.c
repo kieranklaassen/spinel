@@ -24,6 +24,8 @@
 const char *(*sp_class_name_fn)(sp_Class);
 /* the hooks the generated unit installs for this unit (SP_INSTALL_HOOK) */
 sp_user_binop_fn sp_user_binop_hook_lib;
+const unsigned char *sp_user_eq_cls_lib;
+int sp_user_eq_ncls_lib;
 sp_obj_eq_fn sp_obj_eq_hook_lib;
 sp_obj_hash_fn sp_obj_hash_hook_lib;
 sp_obj_eql_fn sp_obj_eql_hook_lib;

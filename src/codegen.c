@@ -12567,6 +12567,7 @@ void emit_regex_section(Compiler *c, Buf *b) {
     buf_puts(b, "static sp_int sp_obj_cmp_dispatch(sp_RbVal a, sp_RbVal b, sp_bool *comparable);\n");
   if (g_has_user_binop)
     buf_puts(b, "static sp_RbVal sp_user_binop_dispatch(const char *op, sp_RbVal a, sp_RbVal b, sp_bool *handled);\n");
+  emit_user_eq_table(c, b);
   if (g_has_user_aset)
     buf_puts(b, "static void sp_user_aset_dispatch(sp_RbVal a, sp_RbVal k, sp_RbVal v, sp_bool *handled);\n");
   if (g_has_user_coerce)
@@ -12666,6 +12667,8 @@ void emit_regex_section(Compiler *c, Buf *b) {
     buf_puts(b, "  sp_obj_cmp_hook = sp_obj_cmp_dispatch;\n");
   if (g_has_user_binop)
     buf_puts(b, "  SP_INSTALL_HOOK(sp_user_binop_hook, sp_user_binop_dispatch);\n");
+  if (emit_user_eq_table(c, NULL))
+    buf_printf(b, "  SP_INSTALL_HOOK(sp_user_eq_cls, sp_user_eq_tab); SP_INSTALL_HOOK(sp_user_eq_ncls, %d);\n", c->nclasses);
   if (g_has_user_aset)
     buf_puts(b, "  sp_user_aset_hook = sp_user_aset_dispatch;\n");
   if (g_has_user_coerce)
@@ -15982,6 +15985,10 @@ char *codegen_program(const NodeTable *nt) {
      this TU deliberately omits). */
   if (!g_emit_sym_rt)
     buf_puts(&b, "#define SP_TU_NO_POLY_RENDER 1\n");
+  /* A class of the program answers ==: the header compiles the hand-back of
+     `5 == obj` to it only into such a unit (sp_poly_num_obj_p). */
+  if (emit_user_eq_table(c, NULL))
+    buf_puts(&b, "#define SP_TU_USER_EQ 1\n");
   buf_puts(&b, "#include \"spinel_rt.h\"\n");
   /* the frozen literals' file-scope objects go here, once the unit is done */
   size_t fzl_at = b.len;

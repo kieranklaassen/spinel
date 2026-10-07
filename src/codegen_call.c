@@ -14154,6 +14154,29 @@ static int class_mixes_in(Compiler *c, int cid, const char *mod, int depth) {
   }
   return 0;
 }
+/* sp_user_eq_tab: one byte a class, 1 where an object of the class answers
+   an == of its own, its class's or an ancestor's, or Comparable's through
+   its <=>. The boxed == reads it before it hands `5 == obj` to the object,
+   so an object whose class has none is not called. With no buffer it only
+   answers whether the program has such a class; one without gets no table. */
+int emit_user_eq_table(Compiler *c, Buf *b) {
+  int any = 0;
+  for (int k = 0; k < c->nclasses; k++) {
+    int own = c->classes[k].instantiated &&
+              (comp_method_in_chain(c, k, "==", NULL) >= 0 ||
+               (comp_method_in_chain(c, k, "<=>", NULL) >= 0 && class_mixes_in(c, k, "Comparable", 0)));
+    if (b && any) buf_printf(b, "%s%d", k ? "," : "", own);
+    else if (own && !any) {
+      any = 1;
+      if (!b) return 1;
+      buf_printf(b, "static const unsigned char sp_user_eq_tab[%d] = {", c->nclasses);
+      for (int z = 0; z < k; z++) buf_puts(b, "0,");
+      buf_puts(b, "1");
+    }
+  }
+  if (any) buf_puts(b, "};\n");
+  return any;
+}
 /* 1 for a class whose chain reaches a Struct.new class, 2 for a Data.define
    one, 0 otherwise. */
 int class_struct_kind(Compiler *c, int cid) {

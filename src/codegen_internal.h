@@ -1491,6 +1491,7 @@ int emit_arysub_call_stmt(Compiler *c, int id, Buf *b, int indent);
 const char *class_builtin_superclass_name(Compiler *c, int i);   /* codegen.c */
 int class_builtin_parent(Compiler *c, int cid);      /* codegen.c */
 int class_includes_module_named(Compiler *c, int cid, const char *mod_name);
+int emit_user_eq_table(Compiler *c, Buf *b);
 int class_isa_user(Compiler *c, int k, int cid, const char *cn);  /* codegen_call.c */
 int dispatch_impl_count(Compiler *c, int cid, const char *name);
 /* do a dispatch switch's arms bind the call's arguments differently (each

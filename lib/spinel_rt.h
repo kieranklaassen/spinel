@@ -2780,6 +2780,32 @@ static sp_RbVal sp_poly_binop_bad(const char *op, sp_RbVal recv, sp_RbVal arg) {
 static inline int sp_poly_is_user_obj(sp_RbVal v) {
   return v.tag == SP_TAG_OBJ && v.cls_id >= 0;
 }
+/* sp_user_eq_tab, written by codegen: one byte a class of the program, 1
+   where an object of the class answers an == of its own. A unit whose
+   program has such a class defines SP_TU_USER_EQ before the include; in any
+   other the tests of the table are not compiled. */
+#ifdef SPINEL_EXT_HOST
+#define SP_USER_EQ_P 1
+extern const unsigned char *sp_user_eq_cls_lib;
+extern int sp_user_eq_ncls_lib;
+#define sp_user_eq_cls sp_user_eq_cls_lib
+#define sp_user_eq_ncls sp_user_eq_ncls_lib
+#else
+#ifdef SP_TU_USER_EQ
+#define SP_USER_EQ_P 1
+#else
+#define SP_USER_EQ_P 0
+#endif
+static const unsigned char *sp_user_eq_cls = NULL;
+static int sp_user_eq_ncls = 0;
+extern const unsigned char *sp_user_eq_cls_lib;
+extern int sp_user_eq_ncls_lib;
+#endif
+/* A number on the left of a program object whose class answers ==. */
+static inline int sp_poly_num_obj_p(sp_RbVal a, sp_RbVal b) {
+  return SP_USER_EQ_P && b.tag == SP_TAG_OBJ && (unsigned)b.cls_id < (unsigned)sp_user_eq_ncls &&
+         sp_user_eq_cls[b.cls_id] && !sp_poly_is_user_obj(a) && sp_poly_tower_p(a);
+}
 /* The operand of an Array operator (+ - | & concat) converted implicitly,
    as CRuby's to_ary: a program object answering #to_ary becomes that
    Array, and one whose #to_ary answers a non-Array is CRuby's TypeError.
@@ -3814,6 +3840,16 @@ static SP_INLINE sp_bool sp_poly_eq(sp_RbVal a, sp_RbVal b) {
   if (a.tag == SP_TAG_INT && b.tag == SP_TAG_INT) return a.v.i == b.v.i;
   return sp_poly_eq_slow(a, b);
 }
+/* eql?, <=> and a Hash key ask a number alone: it is never handed to a
+   program object's == */
+static SP_NOINLINE sp_bool sp_poly_eq_alone_obj(sp_RbVal a, sp_RbVal b) {
+  return !sp_poly_num_obj_p(a, b) && sp_poly_eq_slow(a, b);
+}
+static SP_INLINE sp_bool sp_poly_eq_alone(sp_RbVal a, sp_RbVal b) {
+  if (a.tag == SP_TAG_INT && b.tag == SP_TAG_INT) return a.v.i == b.v.i;
+  if (SP_USER_EQ_P && b.tag == SP_TAG_OBJ) return sp_poly_eq_alone_obj(a, b);
+  return sp_poly_eq_slow(a, b);
+}
 /* CRuby's rb_equal, the equality its containers and Object#=== use: the
    same object is equal to itself before any `==` runs, so `[k].include?(k)`
    answers true without calling a user `==` (one that may answer false).
@@ -3851,7 +3887,7 @@ static sp_RbVal sp_poly_hash_get_pair_val(sp_RbVal h, sp_RbVal key, sp_bool *fou
   for (sp_int i = 0; i < n; i++) {
     sp_RbVal k, v;
     sp_poly_hash_pair(h, i, &k, &v);
-    if (sp_poly_eq(k, key)) { *found = TRUE; return v; }
+    if (sp_poly_eq_alone(k, key)) { *found = TRUE; return v; }
   }
   *found = FALSE;
   return sp_box_nil();
@@ -4899,6 +4935,8 @@ static SP_NOINLINE sp_bool sp_poly_eq_slow(sp_RbVal a, sp_RbVal b) {
       sp_RbVal _y = _pb ? sp_box_int(((sp_ProcessStatus *)b.v.p)->status) : b;
       return sp_poly_eq(_x, _y);
     } }
+  /* so do Float#==, a Bignum's and a Rational's: `5 == obj` is `obj == 5` */
+  { sp_RbVal _u; if (sp_poly_num_obj_p(a, b) && sp_poly_user_cmp("==", b, a, &_u)) return sp_poly_truthy(_u); }
   { sp_RbVal _u; if (a.tag == SP_TAG_OBJ && sp_poly_is_array_kind(a.cls_id) && sp_poly_is_user_obj(b) && sp_obj_to_ary_fn &&
                      sp_obj_to_ary_fn((sp_RbVal){ .tag = SP_TAG_OBJ, .cls_id = b.cls_id }).tag == SP_TAG_BOOL &&
                      sp_poly_user_cmp("==", b, a, &_u)) return sp_poly_truthy(_u); }
@@ -5065,6 +5103,8 @@ static sp_int sp_poly_spaceship(sp_RbVal a, sp_RbVal b) {
   if (a.tag == b.tag &&
       (a.tag == SP_TAG_NIL || (a.tag == SP_TAG_BOOL && a.v.b == b.v.b)))
     return 0;
+  /* Integer#<=> and Float#<=> ask no object's ==: `5 <=> obj` is nil */
+  if (sp_poly_num_obj_p(a, b)) return SP_INT_NIL;
   /* the default Object#<=> answers 0 when the operands are ==, nil otherwise
      -- so an object compared with itself is 0, not nil (#3017) */
   if (sp_poly_rb_equal(a, b)) return 0;
@@ -11018,7 +11058,7 @@ static sp_bool sp_poly_eql(sp_RbVal a, sp_RbVal b) {
     if (a.v.p == b.v.p) return TRUE;
     return a.v.p && b.v.p && sp_range_eql(*(sp_Range *)a.v.p, *(sp_Range *)b.v.p);
   }
-  return sp_poly_eq(a, b);
+  return sp_poly_eq_alone(a, b);
 }
 /* equal? for a poly value: object identity. Immediates (int, symbol, nil,
    bool, flonum) are their own identity by value; everything heap-backed
