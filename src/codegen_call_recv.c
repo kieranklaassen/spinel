@@ -6835,17 +6835,20 @@ static int str_arms_case_search(Compiler *c, Buf *b, const NodeTable *nt, const 
   }
   else if (sp_streq(name, "partition") && argc == 1 && re_lit_index(c, argv[0]) >= 0) {
     /* [before, match, after] from the first regex match, else [s, "", ""] */
-    int tr = ++g_tmp;
+    int tr = ++g_tmp, ts = ++g_tmp;
     /* rooted: both arms allocate (the match pieces, the unmatched copies)
-       while the array is only in _t */
+       while the array is only in _t. The receiver is evaluated once, into
+       a temporary of its own: nothing allocates between a match that
+       fails and the copy, and sp_str_dup roots what it copies. */
     buf_printf(b, "({ sp_StrArray *_t%d = sp_StrArray_new(); SP_GC_ROOT(_t%d);"
-                  " if (sp_re_match(sp_re_pat_%d, %s) >= 0) {"
+                  " const char *_t%d = %s;"
+                  " if (sp_re_match(sp_re_pat_%d, _t%d) >= 0) {"
                   " sp_StrArray_push(_t%d, sp_re_pre_match()); sp_StrArray_push(_t%d, sp_re_match_str);"
                   " sp_StrArray_push(_t%d, sp_re_post_match()); }\nelse {"
-                  " sp_StrArray_push(_t%d, sp_str_dup(%s)); sp_StrArray_push(_t%d, sp_str_dup(sp_str_empty));"
+                  " sp_StrArray_push(_t%d, sp_str_dup(_t%d)); sp_StrArray_push(_t%d, sp_str_dup(sp_str_empty));"
                   " sp_StrArray_push(_t%d, sp_str_dup(sp_str_empty)); }"
                   " _t%d; })",
-               tr, tr, re_lit_index(c, argv[0]), r, tr, tr, tr, tr, r, tr, tr, tr);
+               tr, tr, ts, r, re_lit_index(c, argv[0]), ts, tr, tr, tr, tr, ts, tr, tr, tr);
   }
   else if (sp_streq(name, "rpartition") && argc == 1 && re_lit_index(c, argv[0]) >= 0) {
     buf_printf(b, "sp_re_rpartition(sp_re_pat_%d, %s)", re_lit_index(c, argv[0]), r);
