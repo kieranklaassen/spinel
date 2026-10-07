@@ -82,3 +82,13 @@ AFTER = Integer
 class Gate
   def ok?(v) = v.is_a?(AFTER)
 end
+
+# a class under a module is not another body's constant of its name
+class Crate; end
+module Dock
+  class Bin; end
+end
+class Yard
+  Bin = Crate
+end
+p Crate.new.is_a?(Dock::Bin)

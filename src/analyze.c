@@ -1864,23 +1864,25 @@ static int stmt_runs_nothing(const NodeTable *nt, int s) {
    with bit 1 set inside a method body (a def, a define_method block). A class
    or module body that is a statement is numbered through, as its statements
    run in place. seq[nt->count] is the number of the first statement that may
-   run a method of the program (0: none does); BEGIN { } runs before all. */
-static void seq_stamp(const NodeTable *nt, int node, int v, int *seq) {
+   run a method of the program (0: none does); BEGIN { } runs before all.
+   After it, one more entry a node: the class or module whose body the node's
+   statement is in (its node id + 1; 0 at the program's own level). */
+static void seq_stamp(const NodeTable *nt, int node, int v, int own, int *seq) {
   if (node < 0) return;
   NodeKind k = nt_kind(nt, node);
   const char *n = k == NK_CallNode ? nt_str(nt, node, "name") : NULL;
   if (k == NK_DefNode || (n && (sp_streq(n, "define_method") || sp_streq(n, "define_singleton_method")))) v |= 2;
-  seq[node] = v;
+  seq[node] = v; seq[nt->count + 1 + node] = own;
   int nr = nt_num_refs(nt, node);
-  for (int i = 0; i < nr; i++) seq_stamp(nt, nt_ref_at(nt, node, i), v, seq);
+  for (int i = 0; i < nr; i++) seq_stamp(nt, nt_ref_at(nt, node, i), v, own, seq);
   int na = nt_num_arrs(nt, node);
   for (int i = 0; i < na; i++) {
     int m = 0; const int *ids = nt_arr_at(nt, node, i, &m);
-    for (int j = 0; j < m; j++) seq_stamp(nt, ids[j], v, seq);
+    for (int j = 0; j < m; j++) seq_stamp(nt, ids[j], v, own, seq);
   }
 }
 
-static void seq_statements(const NodeTable *nt, int stmts, int *seq, int *n) {
+static void seq_statements(const NodeTable *nt, int stmts, int own, int *seq, int *n) {
   int *runs = &seq[nt->count];
   if (stmts < 0) return;
   if (nt_kind(nt, stmts) != NK_StatementsNode) { if (!*runs) *runs = *n + 4; return; }
@@ -1891,10 +1893,11 @@ static void seq_statements(const NodeTable *nt, int stmts, int *seq, int *n) {
     if (k == NK_ClassNode || k == NK_ModuleNode) {
       int sup = k == NK_ClassNode ? nt_ref(nt, ids[j], "superclass") : -1;
       if (!*runs && sup >= 0 && !node_runs_nothing(nt, sup)) *runs = *n + 4;
-      seq_statements(nt, nt_ref(nt, ids[j], "body"), seq, n);
+      seq[nt->count + 1 + ids[j]] = own;
+      seq_statements(nt, nt_ref(nt, ids[j], "body"), ids[j] + 1, seq, n);
       continue;
     }
-    *n += 4; seq_stamp(nt, ids[j], *n, seq); seq[ids[j]] |= 1;
+    *n += 4; seq_stamp(nt, ids[j], *n, own, seq); seq[ids[j]] |= 1;
     if (!*runs && !stmt_runs_nothing(nt, ids[j])) *runs = *n;
   }
 }
@@ -1902,14 +1905,58 @@ static void seq_statements(const NodeTable *nt, int stmts, int *seq, int *n) {
 /* The numbering of the whole program. A program that defines a hook, or a
    declaration's own name, runs it at a definition: nothing is quiet then. */
 static int *seq_build(const NodeTable *nt) {
-  int *seq = calloc((size_t)nt->count + 1, sizeof(int));
+  int *seq = calloc(2 * (size_t)nt->count + 1, sizeof(int));
   if (!seq) return NULL;
   NT_FOREACH_KIND(nt, NK_DefNode, d) {
     const char *dn = nt_str(nt, d, "name");
     if (name_listed(def_hooks, dn) || name_listed(quiet_decls, dn)) seq[nt->count] = 1;
   }
-  int n = 0; seq_statements(nt, nt_ref(nt, nt->root_id, "statements"), seq, &n);
+  int n = 0; seq_statements(nt, nt_ref(nt, nt->root_id, "statements"), 0, seq, &n);
   return seq;
+}
+
+/* Whether a read names the constant written in the body `ow` (as seq_build
+   records it): `::A` reads the program's own level, `Mod::A` the body of a
+   top-level Mod, and a bare `A` the program's own level or a body the read
+   sits in. Another body's constant of that name is not the one read, and a
+   Mod that a nested class or module shares its name with may be that one. */
+static int const_read_reaches(const NodeTable *nt, int rd, int ow, const int *own) {
+  if (nt_kind(nt, rd) != NK_ConstantPathNode) {
+    int o = own[rd];
+    while (o && o != ow) o = own[o - 1];
+    return o == ow;
+  }
+  int par = nt_ref(nt, rd, "parent");
+  if (par < 0 || !ow) return par < 0 && !ow;
+  int cp = nt_ref(nt, ow - 1, "constant_path");
+  const char *pn = nt_str(nt, par, "name"), *on = nt_str(nt, cp, "name");
+  if (nt_kind(nt, par) != NK_ConstantReadNode || nt_kind(nt, cp) != NK_ConstantReadNode ||
+      own[ow - 1] || !pn || !on || !sp_streq(pn, on)) return 0;
+  static const NodeKind bk[] = { NK_ClassNode, NK_ModuleNode };
+  for (int q = 0; q < 2; q++)
+    NT_FOREACH_KIND(nt, bk[q], b) {
+      const char *bn = own[b] ? nt_str(nt, nt_ref(nt, b, "constant_path"), "name") : NULL;
+      for (const char *u = bn ? strstr(bn, "__") : NULL; u; u = strstr(u + 2, "__")) bn = u + 2;
+      if (bn && sp_streq(bn, pn)) return 0;
+    }
+  return 1;
+}
+
+/* Whether the class is opened by its own definition alone (a builtin: by no
+   body). `class A` under a module reopens the class a constant `A` of
+   another body holds (walk_scope), so a second body of the class may be one
+   written with the constant's name, which then names two things. */
+static int class_opened_once(Compiler *c, const char *cn) {
+  const NodeTable *nt = c->nt;
+  int ci = is_builtin_class_name(cn) ? -1 : comp_class_index(c, cn);
+  int def = ci >= 0 ? c->classes[ci].def_node : -1;
+  static const NodeKind bk[] = { NK_ClassNode, NK_ModuleNode };
+  for (int q = 0; q < 2; q++)
+    NT_FOREACH_KIND(nt, bk[q], b) {
+      const char *bn = nt_str(nt, nt_ref(nt, b, "constant_path"), "name");
+      if (b != def && bn && sp_streq(bn, cn)) return 0;
+    }
+  return 1;
 }
 
 /* `x.is_a?(A)` (kind_of?, instance_of?) where `A = SomeClass`: rewrite the
@@ -1932,13 +1979,15 @@ static void rewrite_const_alias_kind_arg(Compiler *c, int id, int **seq) {
   const char *an = nt_str(nt, argv[0], "name");
   if (!an || comp_class_index(c, an) >= 0) return;   /* already a class name */
   const char *real = resolve_class_alias(c, an);
-  if (!real || sp_streq(real, an)) return;
+  if (!real || sp_streq(real, an) || !class_opened_once(c, real)) return;
   int w = const_only_write(nt, an);
   if (nt_kind(nt, w) != NK_ConstantWriteNode || !const_read_is_programs(c, nt_ref(nt, w, "value"))) return;
   if (!*seq && !(*seq = seq_build(nt))) return;
   int sw = (*seq)[w], sr = (*seq)[argv[0]], runs = (*seq)[nt->count];
   if (!(sw & 1)) return;                                   /* the write is no statement */
   if (sr & 2 ? runs && runs <= sw : (sr | 3) <= (sw | 3)) return;
+  const int *own = *seq + nt->count + 1;
+  if (!const_read_reaches(nt, argv[0], own[w], own)) return;
   char buf[256]; snprintf(buf, sizeof buf, "%s", real);  /* copy: set frees an */
   nt_set_str((NodeTable *)nt, argv[0], "name", buf);
 }
