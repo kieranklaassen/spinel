@@ -403,6 +403,7 @@ const char *sp_StrArray_sample(sp_StrArray *a);
 /* ---- poly/inspect-dependent ops (lib/sp_array.c; need sp_inspect.h/sp_str.h) ---- */
 void sp_str_upto_each(const char *s, const char *e, sp_int excl, int (*fn)(const char *, void *), void *arg);
 sp_StrArray *sp_StrArray_from_string_range(const char *s, const char *e, sp_int excl);
+sp_PolyArray *sp_PolyArray_from_symbol_range(const char *s, const char *e, sp_int excl, sp_sym (*intern)(const char *));
 const char*sp_IntArray_inspect(sp_IntArray*a);
 const char*sp_FloatArray_inspect(sp_FloatArray*a);
 const char*sp_FloatArray_join(sp_FloatArray*a,const char*sep);

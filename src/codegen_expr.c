@@ -3837,22 +3837,83 @@ static int emit_and_or_begin_expr(Compiler *c, int id, Buf *b, const NodeTable *
   return 0;
 }
 
+/* Is the walk String#upto takes from the name `s` to the name `e` the one
+   the loop below makes: String#succ from the begin until the end is met or
+   the name grows past the end's length? String#upto's cases, in its order:
+   two names of one character walk every character between, and #succ
+   steps one character except from 9, Z and z; two names of digits walk
+   the numbers between at the begin's width, and the loop meets the end
+   only where the end is its own number at that width; any other pair
+   walks nothing when the begin sorts after the end or is the end's
+   successor (a begin longer than the end may be). Names of ASCII with no
+   NUL only. */
+static int sym_range_plain_walk(const char *s, size_t sl, const char *e, size_t el) {
+  if (!s || !e || sl < 1 || el < 1) return 0;
+  int digits = 1;
+  for (size_t i = 0; i < sl; i++) {
+    if (!s[i] || (unsigned char)s[i] >= 0x80) return 0;
+    if (s[i] < '0' || s[i] > '9') digits = 0;
+  }
+  for (size_t i = 0; i < el; i++) {
+    if (!e[i] || (unsigned char)e[i] >= 0x80) return 0;
+    if (e[i] < '0' || e[i] > '9') digits = 0;
+  }
+  if (sl == 1 && el == 1) {
+    if (s[0] > e[0]) return 0;
+    for (int ch = s[0]; ch < e[0]; ch++)
+      if (ch == '9' || ch == 'Z' || ch == 'z') return 0;
+    return 1;
+  }
+  if (digits) {
+    if (sl > 18 || el > 18) return 0;
+    long long from = 0, to = 0;
+    for (size_t i = 0; i < sl; i++) from = from * 10 + (s[i] - '0');
+    for (size_t i = 0; i < el; i++) to = to * 10 + (e[i] - '0');
+    if (from > to) return 0;
+    char last[32];
+    int n = snprintf(last, sizeof last, "%.*lld", (int)sl, to);
+    return n == (int)el && memcmp(last, e, el) == 0;
+  }
+  if (sl > el || memcmp(s, e, sl) > 0) return 0;
+  /* `09` and `9` both step to `10`, and `z.09` and `z.9` to `z.10`: where
+     the end's carry lands on a 0 that no letter or digit stands before, a
+     shorter name may step to the end's successor too, and String#upto
+     stops at the successor. */
+  for (size_t i = el; i-- > 0; ) {
+    if (!isalnum((unsigned char)e[i]) || e[i] == '9' || e[i] == 'z' || e[i] == 'Z') continue;
+    if (e[i] == '0' && (i == 0 || !isalnum((unsigned char)e[i - 1]))) return 0;
+    break;
+  }
+  return 1;
+}
+
 /* A Range literal in value position (a..b, a...b, endless and beginless) (emit_expr_node's arms, in their order) */
 static int emit_range_expr(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *ty) {
   if (!(sp_streq(ty, "RangeNode"))) return 0;
   int left = nt_ref(nt, id, "left");
   int right = nt_ref(nt, id, "right");
   int excl = (int)(nt_int(nt, id, "flags", 0) & 4) ? 1 : 0;
-  /* (:a..:e): a poly array of boxed symbols, walked by name succession
+  /* (:a..:e): a poly array of boxed symbols, the names String#upto walks
      (interning through the generated TU's own table) */
   if (left >= 0 && right >= 0 &&
       nt_type(nt, left) && sp_streq(nt_type(nt, left), "SymbolNode") &&
       nt_type(nt, right) && sp_streq(nt_type(nt, right), "SymbolNode")) {
+    if (!sym_range_plain_walk(nt_str(nt, left, "value"), nt_str_len(nt, left, "value"),
+                              nt_str(nt, right, "value"), nt_str_len(nt, right, "value"))) {
+      buf_puts(b, "sp_PolyArray_from_symbol_range(sp_sym_to_s(");
+      emit_expr(c, left, b);
+      buf_puts(b, "), sp_sym_to_s(");
+      emit_expr(c, right, b);
+      buf_printf(b, "), %d, sp_sym_intern)", excl);
+      return 1;
+    }
     int ta = ++g_tmp, ts = ++g_tmp, te = ++g_tmp;
     buf_printf(b, "({ sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);"
                   " const char *_t%d = sp_sym_to_s(", ta, ta, ts);
     emit_expr(c, left, b);
-    buf_printf(b, "); const char *_t%d = sp_sym_to_s(", te);
+    /* the cursor is a String of its own from the first step on, and
+       interning it allocates */
+    buf_printf(b, "); SP_GC_ROOT_STR(_t%d); const char *_t%d = sp_sym_to_s(", ts, te);
     emit_expr(c, right, b);
     buf_printf(b, "); for (;;) {"
                   " if (%d && sp_str_eq(_t%d, _t%d)) break;"

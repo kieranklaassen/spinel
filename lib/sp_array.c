@@ -716,6 +716,20 @@ sp_StrArray *sp_StrArray_from_string_range(const char *s, const char *e, sp_int 
   sp_str_upto_each(s, e, excl, sp_str_upto_push, a);
   return a;
 }
+/* (:a..:e): the Symbols whose names String#upto walks from the begin's name
+   to the end's. `intern` is the generated unit's own. */
+struct sp_sym_range_walk { sp_PolyArray *a; sp_sym (*intern)(const char *); };
+static int sp_sym_range_push(const char *m, void *arg) {SP_GC_ROOT_STR(m);
+  struct sp_sym_range_walk *w = (struct sp_sym_range_walk *)arg;
+  sp_PolyArray_push(w->a, sp_box_sym(w->intern(m)));
+  return 0;
+}
+sp_PolyArray *sp_PolyArray_from_symbol_range(const char *s, const char *e, sp_int excl, sp_sym (*intern)(const char *)) {SP_GC_ROOT_STR(s);SP_GC_ROOT_STR(e);
+  struct sp_sym_range_walk w = { sp_PolyArray_new(), intern };
+  SP_GC_ROOT(w.a);
+  sp_str_upto_each(s, e, excl, sp_sym_range_push, &w);
+  return w.a;
+}
 const char*sp_IntArray_inspect(sp_IntArray*a){SP_GC_ROOT(a);return a?sp_inspect_container(sp_box_obj(a,SP_BUILTIN_INT_ARRAY)):"nil";}
 const char*sp_FloatArray_inspect(sp_FloatArray*a){SP_GC_ROOT(a);return a?sp_inspect_container(sp_box_obj(a,SP_BUILTIN_FLT_ARRAY)):"nil";}
 /* the sentinel joins as nil, as sp_IntArray_join's does */
