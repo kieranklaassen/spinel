@@ -1,0 +1,1 @@
+push as a statement on a boxed String or Integer raises NoMethodError

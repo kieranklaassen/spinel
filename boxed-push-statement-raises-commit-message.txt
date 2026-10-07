@@ -1,0 +1,19 @@
+push as a statement on a boxed String or Integer raises NoMethodError
+
+    v = [+"s", 5][0]
+    v.push("!")
+    p v    # "s"; CRuby: undefined method 'push' for an instance of String
+
+push and append with one argument, as a statement on a boxed receiver,
+were emitted as sp_poly_shl, the receiver's `<<`. That is right for an
+Array and for a queue. A String and an Integer answer `<<` themselves, so
+`v.push("!")` ran the String's `<<` and `v.push(1)` shifted the Integer,
+with no NoMethodError; a Float, a Symbol, nil or a Hash raised it naming
+'<<'. The value form (`r = v.push("!")`) and push with another argument
+count already test the receiver at run time. The statement now does too,
+in sp_poly_push_stmt: an Array appends, a queue takes a push, anything
+else raises naming the method sent. `<<` is emitted as before.
+
+Test: test/boxed_push_statement.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
