@@ -23,6 +23,12 @@ from the commits its recipe lists.
   a builtin's or the program's own superclass or module, and 84 (OUT/sent)
   with const_set through send and the program's own is_a? under a definer,
   by a literal or a computed name.
+- `fam13-gen.rb OUT`: 406 programs (OUT/p) with a constant given a class by
+  a path whose body holds the class, inherits it or lacks it, under a
+  const_missing of the program written six ways, and a bare value beside a
+  const_set of the class's name.
+- `gd-gen.rb OUT`: 831 programs (OUT/p) asking a rescued exception for its
+  class where two modules name a class alike (the fourth piece).
 - `early-gen.rb OUT`: the twelve early-call shapes.
 - `num-gen.rb OUT`: the family of `instance_of?(Numeric)` on a boxed number.
 - `bl-gen.rb OUT`: the family of `rescue` and `raise` through a constant
@@ -30,12 +36,15 @@ from the commits its recipe lists.
 - `run.rb DIR TREE LABEL [JOBS]` builds and runs a directory under gcc and
   clang at collector stress unset, 1 and 2, against CRuby.
 - `csum.sh TREE DIR OUT` sums the C a tree emits for a directory (tree path
-  masked); `sum3.rb` makes the two-rule table from the runs and the sums.
+  masked); `sum3.rb` makes the two-rule table from the runs and the sums,
+  `tab2.rb` the table from two runs alone, and `cmp4.rb` counts by the sums
+  what a later head of a piece gives up against an earlier one.
 
 `texts/` holds the upstream texts of the three pieces as they are summed in
 the hand-over: `numeric-*` for the first (a boxed number's
-`instance_of?(Numeric)`), `pr-title.txt`, `pr-body-upstream-v9.md` and
-`commit-message-v9.txt` for the second (the constant in `is_a?`; the `-v7`
-and `-v8` files are its texts before the later commits of its recipe), `bl1-*` for
-the third (the constant in `rescue` and `raise`; its refactor's message is in
-commit 69d79bf9).
+`instance_of?(Numeric)`), `pr-title.txt`, `pr-body-upstream-v10.md` and
+`commit-message-v10.txt` for the second (the constant in `is_a?`; the `-v7`
+to `-v9` files are its texts before the later commits of its recipe), `bl1-*`
+for the third (the constant in `rescue` and `raise`; its refactor's message
+is in commit 69d79bf9), `gd-*` for the fourth (an exception's `is_a?` where
+two modules name a class alike).
