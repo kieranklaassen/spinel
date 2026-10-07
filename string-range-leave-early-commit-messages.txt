@@ -1,0 +1,106 @@
+The String Range walk can be taken a member at a time
+
+sp_str_upto_each hands each member to a callback, which serves a caller
+that collects (to_a) or searches (include?). A caller whose loop body is
+inline C, as each's block is, cannot be a callback.
+
+sp_str_walk_first and sp_str_walk_next take the same walk, case for
+case, over a small sp_StrWalk the caller roots, and each member is a
+fresh copy as before. sp_str_upto_each stays as it is: with its loop in
+one function a caller that takes every member pays less than through
+the member form (`p ("a".."zz").to_a.size` is 5% more instructions that
+way).
+
+The pair has an object of its own, lib/sp_str_walk.c. lib/sp_array.c,
+where sp_str_upto_each is, and lib/sp_cold.c, where the other String
+Range functions are, each sit at gcc's inline limit for a unit, and a
+function added to either changes what gcc inlines into that file's
+other functions: with the pair in lib/sp_cold.c, sp_str_eq was no
+longer inlined into nine of them, sp_srange_eq, sp_dir_pwd and
+sp_math_lgamma among them. In its own object no other object of the
+runtime changes. Nothing calls the pair yet.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+
+----
+each over a String Range walks it member by member
+
+`("a".."zzzzzzzz").each { |s| break if s == "c" }` builds the range's
+whole element array before the block sees "a": every traversal of a
+String Range rides `R.to_a`. `for s in r` builds it too, and
+String#upto with a block is its range's each. That array is the range,
+here 2 * 10^11 Strings, so a walk left at its third member runs out of
+memory.
+
+each with a literal block of at most one plain parameter has its own
+arm now, and `for` shares its loop: sp_str_walk_first, then
+sp_str_walk_next. A parameter that is the String handle takes a handle
+of its member, as the element array's each binds its element. The arm
+is taken where nothing reads the call's value: a statement, the body of
+a for, the arm of an if that is itself a statement, the last statement
+of the program. A method whose last statement is each on a local walks
+too and answers that local.
+
+Where the value is read (`x = r.each { }`, a condition, a receiver) the
+call rides the element array as before, and so does a block of two
+parameters, a splat parameter or `&blk`.
+
+So does a block that may change its member: one that appends to it,
+hands it to a method that does, or appends through another name, by
+the tests promote_shared_stored_strings makes of an element's block.
+What refuses or shares an element changed in a block decides it there
+as it did, with --share-strings and without, and the sharing pass is
+not touched.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+
+
+----
+A block method defined over each walks a String Range itself
+
+`p ("a".."zzzzzzzz").find { |s| s == "c" }` runs out of memory: every
+method but the native few is handed the range's element array, and that
+array is the whole range.
+
+The methods builtins/enumerable.rb defines (find, detect, find_index,
+any?, all?, none?, one?, take_while, drop_while, each_with_object,
+count, partition, group_by, filter_map, flat_map and the rest) are
+written over `each`, and each over a String Range takes a member at a
+time. Called with a block on a String Range they are now left to that
+definition, so one that leaves early reads only the members it asks
+for.
+
+Four names keep the array. inject and reduce: their definition seeds
+from `first`, which is a Range's begin even when the Range holds
+nothing, so ("b".."a").inject { } would answer "b" where it is nil.
+grep and grep_v: their block may change the member it is handed, and
+the array's member is its own. each_with_index, which answers its
+receiver, walks only where that value is dropped or ends a method on a
+local, as each does. A call with no block, min_by, max_by and cycle
+keep it too.
+
+A block that may change its member (`find { |s| s << "!" }`) keeps the
+array too, as each's does, by the same test.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+
+
+----
+first(n) and take(n) of a String Range leave the walk at the nth member
+
+`("a".."zzzzzzzz").first(3)` runs out of memory. first(n) and take(n)
+are served by the element array, and min(n), which is first(n) in
+CRuby, builds it in its own row; that array is the whole range, 487 MB
+for the 12 million members of ("a".."zzzzz") and no end for the one
+above.
+
+CRuby's range_first stops its each at the nth member. The three now go
+through sp_srange_first_n, whose sp_str_upto_each callback answers
+"stop" at the count. first and take keep the element array for a count
+that is not an Integer; the messages for a negative count are the ones
+each had.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+
+
+----
