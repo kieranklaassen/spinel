@@ -1,0 +1,26 @@
+sub with a block copies no tail when the match ends past the subject
+
+    x = ""
+    p x.sub("\0") { "" }.bytes
+
+aborts in the allocator ("malloc(): corrupted top size") after the
+commit before this one; CRuby and master print [].
+
+That commit gives the tail copy its length, the subject's length less
+the match's end. A String pattern is sought by strstr, which reads
+it to its first NUL, while the match's end is counted by the pattern's
+byte length. With a NUL in the pattern the end can lie past the
+subject's end: the length came out negative and the copy ran over the
+heap.
+
+sub's tail copy is now emitted under a test that the end lies inside
+the subject, so such a match has no tail, as before. gsub's own tail
+line is already under its loop's bound.
+
+A String pattern is still cut at its first NUL:
+`"ab".sub("b\0") { "q" }` answers "aq" where CRuby finds no match, as it
+did.
+
+Test: two lines more in test/gsub_block_subject_tail.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
