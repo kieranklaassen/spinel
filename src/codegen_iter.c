@@ -599,6 +599,61 @@ static void fwd_left_out_add(int tag, const char *pname) {
   nameset_add(&g_fwd_left_out, strdup(rn));
 }
 
+/* A call that writes out each keyword it passes: no `**`, no `...`. */
+static int site_keys_written(const NodeTable *nt, const int *argv, int argc, int kwh) {
+  int en = 0; const int *el = kwh >= 0 ? nt_arr(nt, kwh, "elements", &en) : NULL;
+  for (int i = 0; i < argc; i++)
+    if (nt_kind(nt, argv[i]) == NK_ForwardingArgumentsNode) return 0;
+  for (int e = 0; e < en; e++)
+    if (nt_kind(nt, el[e]) != NK_AssocNode || nt_kind(nt, nt_ref(nt, el[e], "key")) != NK_SymbolNode) return 0;
+  return 1;
+}
+
+/* The mark an expansion of a method that keeps its `...` carries when every
+   keyword it was handed is one of its parameters: bound at such a call, or
+   from a forwarder that has the mark and the same parameters. It is read
+   through the expansion's name for its first parameter. */
+static int fwd_keys_known(const Scope *fwd) {
+  const char *p0 = fwd->nparams > 0 ? fwd->pnames[0] : NULL, *rn = p0 ? rename_local(p0) : "";
+  size_t nl = p0 ? strlen(p0) : 0, pl = strlen(rn);
+  char key[128];
+  if (pl < nl + 4 || rn[0] != '_' || rn[1] != 'y' || pl - nl + 4 > sizeof key) return 0;
+  snprintf(key, sizeof key, "%.*s...", (int)(pl - nl), rn);
+  return nameset_has(&g_fwd_left_out, key);
+}
+static int fwd_hands_keys_on(Compiler *c, const Scope *m, const Scope *fwd) {
+  int pn = m->def_node >= 0 ? nt_ref(c->nt, m->def_node, "parameters") : -1;
+  const char *kr = pn >= 0 ? nt_type(c->nt, nt_ref(c->nt, pn, "keyword_rest")) : NULL;
+  if (!kr || !sp_streq(kr, "ForwardingParameterNode") || (fwd && fwd->nparams != m->nparams)) return 0;
+  for (int i = 0; fwd && i < m->nparams; i++)
+    if (!m->pnames[i] || !fwd->pnames[i] || !sp_streq(m->pnames[i], fwd->pnames[i])) return 0;
+  return 1;
+}
+
+/* The forwarder's parameter that carries the key `name`, when a site passes
+   that key and this one did: its index, else the forwarder's count. */
+static int fwd_key_param(const Scope *fwd, const char *name) {
+  int fi = 0;
+  while (fi < fwd->nparams && !(fwd->pnames[fi] && sp_streq(fwd->pnames[fi], name))) fi++;
+  return fi < fwd->nparams && nameset_has(&g_fwd_left_out, rename_local(fwd->pnames[fi])) ? fwd->nparams : fi;
+}
+
+/* `missing keyword`, in CRuby's words, for the required keywords of `m` that
+   a `...` forward does not carry. Returns 1 when it raised. */
+static int emit_fwd_missing_kwarg_raise(Compiler *c, Scope *m, const Scope *fwd) {
+  char msg[512]; int n = 0, len = 0;
+  for (int i = 0; i < m->nparams; i++) {
+    if (i == m->kwrest_idx || m->pdefault[i] >= 0 || !callee_param_is_declared_kwarg(c, m, m->pnames[i]) ||
+        fwd_key_param(fwd, m->pnames[i]) < fwd->nparams) continue;
+    len += snprintf(msg + len, sizeof msg - (size_t)len, "%s:%s", n++ ? ", " : "", m->pnames[i]);
+    if (len >= (int)sizeof msg) return 0;
+  }
+  if (!n) return 0;
+  char full[600]; snprintf(full, sizeof full, "missing keyword%s: %s", n > 1 ? "s" : "", msg);
+  emit_argument_error(full);
+  return 1;
+}
+
 /* Bind an inlined yielding method's parameters from a call's arguments:
    a splat spread at run time, a keyword hash by name, a rest and its posts
    packed, as the ordinary call paths bind them. The expansion's renames
@@ -642,8 +697,10 @@ void emit_inline_bind_params(Compiler *c, Scope *m, int args, const int *argv, i
      was simply dropped, and a missing one bound its zero value: `y1 { }` on
      `def y1(x)` ran with x padded, `y(1, 2) { }` on `def y(x, k: 1)`
      dropped the 2. A `...` forward carries the forwarder's own params. */
-  if (fwd_encl) emit_unknown_kwarg_raise(c, m, argv, argc);
-  else emit_call_arity_check(c, m, argc, argv);
+  int keys_known = fwd_encl ? fwd_keys_known(fwd_encl) : site_keys_written(nt, argv, argc, kwh);
+  if (!fwd_encl) emit_call_arity_check(c, m, argc, argv);
+  else if (!keys_known || !emit_fwd_missing_kwarg_raise(c, m, fwd_encl)) emit_unknown_kwarg_raise(c, m, argv, argc);
+  if (keys_known && fwd_hands_keys_on(c, m, fwd_encl)) fwd_left_out_add(tag, "...");
   /* The options-hash idiom: a braceless keyword hash no keyword parameter
      claims packs into the first unfilled positional (`def check(sel, opts =
      nil)` called `check(".x", count: 0)`). The other two call paths have done
