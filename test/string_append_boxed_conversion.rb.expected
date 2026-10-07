@@ -1,0 +1,22 @@
+"cd /tmp"
+"cd /tmp/x"
+"cd /tmp"
+"cd /tmp"
+no implicit conversion of Symbol into String
+"k="
+no implicit conversion of nil into String
+"k="
+no implicit conversion of true into String
+"k="
+no implicit conversion of Float into String
+"k="
+no implicit conversion of Array into String
+"k="
+no implicit conversion of Symbol into String
+"k="
+no implicit conversion of Symbol into String
+"k="
+no implicit conversion of Symbol into String
+""
+"abx/"
+"abA"

@@ -169,15 +169,18 @@ void emit_str_append_arg(Compiler *c, int arg, const char *rtext, Buf *b) {
      in it had changed (#4425). Decided at run time on the tag, because that is
      where the answer is: the typed arm above is the same rule with the tag
      known at compile time. */
+  /* What is no Integer takes the strict conversion, as a typed argument does
+     (`s << :sym` is CRuby's TypeError and `s << obj` asks `to_str`): the loose
+     one appended a Symbol's name and an object's inspect text. */
   if (comp_ntype(c, arg) == TY_POLY) {
     int ta = ++g_tmp;
     buf_printf(b, "({ sp_RbVal _t%d = ", ta); emit_boxed(c, arg, b);
     if (rtext)
       buf_printf(b, "; _t%d.tag == SP_TAG_INT ? sp_int_codepoint_to_str_in(%s, _t%d.v.i)"
-                    " : sp_poly_to_s(_t%d); })", ta, rtext, ta, ta);
+                    " : sp_poly_arg_str_chk(_t%d); })", ta, rtext, ta, ta);
     else
       buf_printf(b, "; _t%d.tag == SP_TAG_INT ? sp_int_codepoint_to_str(_t%d.v.i)"
-                    " : sp_poly_to_s(_t%d); })", ta, ta, ta);
+                    " : sp_poly_arg_str_chk(_t%d); })", ta, ta, ta);
     return;
   }
   emit_str_expr(c, arg, b);
