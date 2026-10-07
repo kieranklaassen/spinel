@@ -1931,6 +1931,14 @@ static sp_RbVal sp_poly_bitop(sp_RbVal a, sp_RbVal b, int op) {  /* 0:& 1:| 2:^ 
   sp_int ai = sp_poly_to_i(a), bi = sp_poly_to_i(b);
   return sp_box_int(op == 0 ? (ai & bi) : op == 1 ? (ai | bi) : (ai ^ bi));
 }
+/* sp_poly_bitop with the Integer arm first and in line, for an attribute's
+   `&=`, `|=` and `^=`: two Integers are what a boxed flag word holds, and
+   they answer without the call. */
+static inline sp_RbVal sp_poly_bitop_int_first(sp_RbVal a, sp_RbVal b, int op) {
+  if (SP_LIKELY(a.tag == SP_TAG_INT && b.tag == SP_TAG_INT))
+    return sp_box_int(op == 0 ? (a.v.i & b.v.i) : op == 1 ? (a.v.i | b.v.i) : (a.v.i ^ b.v.i));
+  return sp_poly_bitop(a, b, op);
+}
 /* forward-declare the program-emitted class
    name lookup so sp_poly_to_s's SP_TAG_CLASS arm resolves.
    The codegen emits a 1-line stub when no class const is used,
