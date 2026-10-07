@@ -68,6 +68,172 @@ static int emit_exception_object_accessor(Compiler *c, int id, int recv, const c
   return 0;
 }
 
+static int exc_leaf_cmp(const void *a, const void *b) {
+  return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+/* Whether the program writes a constant under the name of one of its own
+   classes or modules, or one holding a class or module of its own
+   (`Error = Plain` beside Net::Error, `Net = Disk`), other than by making
+   the class there (`Pt = Struct.new`): a name may then hold another class
+   than the one the class table knows by it. A const_set counts. The names
+   are compared by their last part, as qualify_colliding_consts and
+   qualify_colliding_classes left them (`A__Error`). Asked once a program. */
+static int exc_const_named_as_class(Compiler *c) {
+  static const NodeTable *asked = NULL;
+  static int answer = 0;
+  static const NodeKind kinds[] = {
+    NK_ConstantWriteNode, NK_ConstantOrWriteNode, NK_ConstantAndWriteNode, NK_ConstantOperatorWriteNode,
+    NK_ConstantTargetNode, NK_ConstantPathTargetNode, NK_ConstantPathWriteNode, NK_ConstantPathOrWriteNode,
+    NK_ConstantPathAndWriteNode, NK_ConstantPathOperatorWriteNode };
+  const NodeTable *nt = c->nt;
+  if (asked == nt) return answer;
+  asked = nt; answer = 0;
+  /* the names as the bodies are written: a constant holding a module can
+     stand for it in the class table */
+  int nc = 0, nmod = 0, n = 0;
+  nt_nodes_of_kind(nt, NK_ClassNode, &nc);
+  nt_nodes_of_kind(nt, NK_ModuleNode, &nmod);
+  const char **leaf = malloc(sizeof *leaf * (size_t)(nc + nmod + 1));
+  if (!leaf) return answer = 1;
+  for (int pass = 0; pass < 2; pass++)
+    NT_FOREACH_KIND(nt, pass ? NK_ModuleNode : NK_ClassNode, d) {
+      const char *nm = nt_str(nt, nt_ref(nt, d, "constant_path"), "name");
+      if (!nm) continue;
+      for (const char *q; (q = strstr(nm, "__")) && q[2]; ) nm = q + 2;
+      leaf[n++] = nm;
+    }
+  qsort(leaf, (size_t)n, sizeof *leaf, exc_leaf_cmp);
+  for (size_t k = 0; !answer && k < sizeof kinds / sizeof kinds[0]; k++)
+    NT_FOREACH_KIND(nt, kinds[k], w) {
+      int t = nt_ref(nt, w, "target"), v = nt_ref(nt, w, "value");
+      const char *nm = nt_str(nt, t >= 0 ? t : w, "name");
+      const char *vn = nt_kind(nt, v) == NK_CallNode ? nt_str(nt, v, "name") : NULL;
+      const char *vr = vn && nt_kind(nt, nt_ref(nt, v, "receiver")) == NK_ConstantReadNode ? nt_str(nt, nt_ref(nt, v, "receiver"), "name") : NULL;
+      if (!nm || answer) continue;
+      if (vr && ((sp_streq(vn, "new") && (sp_streq(vr, "Struct") || sp_streq(vr, "Class"))) ||
+                 (sp_streq(vn, "define") && sp_streq(vr, "Data")))) continue;
+      for (const char *q; (q = strstr(nm, "__")) && q[2]; ) nm = q + 2;
+      if (bsearch(&nm, leaf, (size_t)n, sizeof *leaf, exc_leaf_cmp)) answer = 1;
+      /* ... or holds one of them: the bodies written under the constant's
+         name are then the held module's */
+      NodeKind vk = nt_kind(nt, v);
+      nm = vk == NK_ConstantReadNode || vk == NK_ConstantPathNode ? nt_str(nt, v, "name") : NULL;
+      for (const char *q; nm && (q = strstr(nm, "__")) && q[2]; ) nm = q + 2;
+      if (nm && bsearch(&nm, leaf, (size_t)n, sizeof *leaf, exc_leaf_cmp)) answer = 1;
+    }
+  NT_FOREACH_KIND(nt, NK_CallNode, id) {
+    const char *nm = nt_str(nt, id, "name");
+    if (nm && sp_streq(nm, "const_set")) answer = 1;
+  }
+  free(leaf);
+  return answer;
+}
+
+/* Whether two of the program's classes or modules have `name` for the last
+   part of their names (Net and Mixin::Net). The names are sorted once a
+   program. */
+static int exc_leaf_shared(Compiler *c, const char *name) {
+  static const NodeTable *asked = NULL;
+  static const char **leaf = NULL;
+  static int n = 0;
+  if (asked != c->nt) {
+    free(leaf);
+    leaf = malloc(sizeof *leaf * (size_t)(c->nclasses + 1));
+    asked = leaf ? c->nt : NULL; n = 0;
+    for (int k = 0; leaf && k < c->nclasses; k++) {
+      const char *rn = singleton_visible_ci(c, k) == k ? class_ruby_name(c, k) : NULL;
+      const char *q = rn ? strrchr(rn, ':') : NULL;
+      if (rn) leaf[n++] = q ? q + 1 : rn;
+    }
+    if (leaf) qsort(leaf, (size_t)n, sizeof *leaf, exc_leaf_cmp);
+  }
+  if (!leaf) return 1;
+  const char **at = bsearch(&name, leaf, (size_t)n, sizeof *leaf, exc_leaf_cmp);
+  return at && ((at > leaf && sp_streq(at[-1], name)) || (at + 1 < leaf + n && sp_streq(at[1], name)));
+}
+
+/* The class or module node whose body `node` stands in: -1 at the program's
+   level, -2 for a node the program's statements do not reach (the copy of
+   a method an include made: the body it was written in is not kept).
+   Filled once a program, on the first question. */
+static int *g_exc_body = NULL;
+static int g_exc_body_n = 0;
+static const NodeTable *g_exc_body_nt = NULL;
+static void exc_body_fill(const NodeTable *nt, int node, int body) {
+  if (node < 0 || node >= g_exc_body_n) return;
+  g_exc_body[node] = body;
+  NodeKind k = nt_kind(nt, node);
+  if (k == NK_ClassNode || k == NK_ModuleNode) body = node;
+  int nr = nt_num_refs(nt, node);
+  for (int i = 0; i < nr; i++) exc_body_fill(nt, nt_ref_at(nt, node, i), body);
+  int na = nt_num_arrs(nt, node);
+  for (int i = 0; i < na; i++) {
+    int m = 0;
+    const int *ids = nt_arr_at(nt, node, i, &m);
+    for (int j = 0; j < m; j++) exc_body_fill(nt, ids[j], body);
+  }
+}
+static int exc_body_of(const NodeTable *nt, int node) {
+  if (g_exc_body_nt != nt) {
+    free(g_exc_body);
+    g_exc_body = malloc(sizeof(int) * (size_t)(nt->count + 1));
+    g_exc_body_nt = g_exc_body ? nt : NULL;
+    g_exc_body_n = g_exc_body ? nt->count : 0;
+    for (int i = 0; i < g_exc_body_n; i++) g_exc_body[i] = -2;
+    exc_body_fill(nt, nt->root_id, -1);
+  }
+  return node >= 0 && node < g_exc_body_n ? g_exc_body[node] : -2;
+}
+
+/* The name an exception's is_a?, kind_of? or instance_of? compares with. An
+   exception carries its class's Ruby name ("A::E"), and the argument's path
+   arrives with a leaf qualify_colliding_classes may have renamed (`A::E` is
+   `A__E` beside a `B::E`): the path's text, "A::A__E", is a name no
+   exception answers to. The class table has the name the raise site uses,
+   as the `when` arm asks it (exc_when_cls_name), and it is taken only where
+   the path as written is that class: read from the program's level, or
+   from a class or module body the call stands in (the bodies Ruby looks
+   the first name up in; `class A::B` stands in no body of A), in a
+   program where no constant is named as, or holds, a class or module of
+   its own (exc_const_named_as_class). Every other argument compares as its
+   text: so does a method an include copied, and a path from a body whose
+   first name two modules have. A path under one of CRuby's namespaces
+   (`Errno::ENOENT`, `Math::DomainError`) names that namespace's class,
+   whatever the program calls its own. */
+static const char *exc_query_cls_name(Compiler *c, int id, int arg, char *buf, size_t n) {
+  const NodeTable *nt = c->nt;
+  const char *qn = isa_const_qualname(nt, arg, buf, n);
+  const char *leaf = qn ? nt_str(nt, arg, "name") : NULL;
+  int ci = leaf ? comp_class_index(c, leaf) : -1, head = arg, rooted = 0;
+  if (ci < 0) return qn;
+  const char *rn = class_ruby_name(c, ci);
+  size_t ql = strlen(qn), ll = strlen(leaf);
+  if (!rn || sp_streq(rn, qn) || ql < ll || is_builtin_exception_name(qn)) return qn;
+  while (nt_kind(nt, head) == NK_ConstantPathNode && !rooted) {
+    if (nt_ref(nt, head, "parent") < 0) rooted = 1; else head = nt_ref(nt, head, "parent");
+  }
+  /* the path as written, its leaf under the name the program gave it */
+  const char *last = strrchr(rn, ':');
+  char text[256];
+  last = last ? last + 1 : rn;
+  if (snprintf(text, sizeof text, "%.*s%s", (int)(ql - ll), qn, last) >= (int)sizeof text) return qn;
+  int at = rooted ? -1 : exc_body_of(nt, id);
+  /* from a body, a first name another module also has may be that one,
+     reached through an include or a superclass */
+  if (at < -1 || (at >= 0 && head != arg && exc_leaf_shared(c, nt_str(nt, head, "name")))) return qn;
+  int found = sp_streq(rn, text);
+  for (int b = at; !found && b >= 0; b = exc_body_of(nt, b)) {
+    const char *bn = nt_str(nt, nt_ref(nt, b, "constant_path"), "name");
+    int k = bn ? comp_class_index(c, bn) : -1;
+    const char *kn = k >= 0 ? class_ruby_name(c, k) : NULL;
+    size_t kl = kn ? strlen(kn) : 0;
+    found = kn && strncmp(rn, kn, kl) == 0 && rn[kl] == ':' && rn[kl + 1] == ':' && sp_streq(rn + kl + 2, text);
+  }
+  if (!found || exc_const_named_as_class(c)) return qn;
+  snprintf(buf, n, "%s", rn);
+  return buf;
+}
+
 /* the methods of an exception object: message, full_message, backtrace, set_backtrace, cause, ==, and the rest of TY_EXCEPTION */
 int emit_call_exception_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv) {
   /* A specialized rescue var (`rescue MyError => e`, MyError carrying ivars)
@@ -544,7 +710,7 @@ int emit_call_exception_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, c
          so a nested-path argument must compare with the whole path -- the
          flat leaf name never matched (#3260) */
       char qbuf[192];
-      const char *cn = isa_const_qualname(nt, argv[0], qbuf, sizeof qbuf);
+      const char *cn = exc_query_cls_name(c, id, argv[0], qbuf, sizeof qbuf);
       if (cn) {
         /* instance_of? is an exact-class test, not an ancestor walk: an
            ArgumentError is not instance_of?(StandardError) (#3013) */
