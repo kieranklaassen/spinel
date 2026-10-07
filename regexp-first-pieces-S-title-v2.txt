@@ -1,0 +1,1 @@
+any?, all?, none? and one? given a Regexp stop where CRuby stops
