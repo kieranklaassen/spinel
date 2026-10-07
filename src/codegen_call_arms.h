@@ -113,6 +113,7 @@ void emit_io_reopen_responds(Compiler *c, int tv, const char *qm, int include_al
 void emit_poly_dispatch_key(Compiler *c, int tv, int cls0_cand, int prim_cand, int exc_cand, Buf *b);
 void emit_responds_name(Compiler *c, int k, const char *nm, int tv, Buf *b);
 extern const char *const enumerable_names[];
+extern const char *const exception_names[];
 extern int g_rto_nil_obj;
 int method_hidden_from_reflection(Compiler *c, int cid, const char *m);
 int name_is_synth_method(Compiler *c, const char *m);
