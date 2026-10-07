@@ -1,0 +1,25 @@
+Array#join grows its buffer to fit a long separator
+
+    def mk(i) = ["a" + i.to_s, "b"]
+    r = mk(1).join("x" * 1000)
+    p r.bytesize, r.count("x")
+
+prints 1003 and 510 where CRuby prints 1003 and 1000: 490 bytes of the
+separator are lost, and NUL bytes stand where they were.
+
+The String, Integer and Float Array joins build the result in a buffer
+of 256 bytes. For an element they grow it to fit. For a separator they
+doubled it once, whatever the separator's length, so a separator that
+did not fit the doubled buffer was copied past its end. With
+SPINEL_GC_SLAB=0 valgrind reports the write ("Invalid write of size 1
+... 0 bytes after a block of size 512") and glibc aborts with
+"realloc(): invalid next size"; with the slab allocator the bytes land
+in the slots behind the buffer and the run can go on.
+
+The three joins now double the buffer until the separator fits, as
+sp_FloatArray_join already does for an element.
+
+Test: test/array_join_long_separator.rb. The generated C does not
+change.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
