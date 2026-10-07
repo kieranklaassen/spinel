@@ -92,3 +92,26 @@ bl = Box.new
 bl.put(:a, [1])
 bl.close
 p bn.rows, bl.rows
+
+# A method a subclass overrides is the receiver's class's own: a store in
+# the override is not one the parent's method makes, called by name or on
+# self, nor is a Hash handed to the parent one the override's block walks.
+class Plain
+  def run(hh); fill(hh); end
+  def fill(hh); hh.size; end
+  def touch(hh); hh.size; end
+end
+class Namer < Plain
+  def fill(hh); hh[:a] = +"q"; hh.size; end
+  def touch(hh); hh.each_value { |l| l << 0 }; hh.size; end
+end
+pl = {a: [1]}
+Plain.new.fill(pl)
+Plain.new.run(pl)
+nm = {}
+Namer.new.fill(nm)
+pl.each_value { |l| l << 0 }
+strs = {a: +"q"}
+Plain.new.touch(strs)
+Namer.new.touch(pl)
+p pl.to_a, nm.to_a, strs.to_a
