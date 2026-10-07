@@ -1,0 +1,34 @@
+An exception read out of an Array is == to itself as the rescued value
+
+    class MyErr < StandardError; end
+    begin
+      raise MyErr, "a"
+    rescue MyErr => e
+      p e == [e, 3][0]    # false; CRuby: true
+    end
+
+One exception reaches a comparison boxed two ways: a value typed as the
+program's class is boxed with the class's id, and the value a rescue reads
+is boxed as an Exception. sp_poly_eq answered false as soon as the two ids
+differed, so the same object was unequal to itself: `e != xs[0]` was true,
+and for `k = MyErr.new("n")` kept in an Array before `raise k`, include?,
+index, count, `-`, `|` and a `when` arm all missed the rescued value.
+Where the ids differ, one of them is the Exception's and the two pointers
+are the same, sp_poly_eq now answers true, or what the class's own ==
+answers where it has one.
+
+The rescued value as the receiver (`rescue => e; e == ks[0]`, equal?, eql?,
+!=) has an arm of its own, which asked the boxed operand for the
+Exception's id before anything else. It takes the same pointer under any
+id too, in a program with an exception class of its own that leaves the
+method called alone.
+
+Two objects stay unequal either way, as they were. A == of two boxed
+objects of different classes costs 3 instructions more (the pointer test);
+two boxed Integers, two boxed Strings and two objects of one class cost
+what they did.
+
+Test: test/exception_boxed_two_ways_equal.rb,
+test/exception_boxed_two_ways_own_eq.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

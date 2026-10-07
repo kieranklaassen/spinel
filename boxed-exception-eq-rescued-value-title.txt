@@ -1,0 +1,1 @@
+An exception read out of an Array is == to itself as the rescued value
