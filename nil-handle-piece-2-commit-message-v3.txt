@@ -1,0 +1,23 @@
+to_i and to_f on a nil String handle local answer 0 and 0.0
+
+    t = +""
+    t << "4"
+    t << "2"
+    t = nil if ARGV.empty?
+    p t.to_i
+
+died with SIGSEGV with gcc and printed 42 with clang, with and without
+--share-strings; CRuby prints 0. to_i and to_f only read the receiver's
+bytes, so emit_scalar_recv_arms hands them the handle's live buffer
+(emit_strbuf_read_ref): sp_String_cstr(t), with no test of the handle,
+and nil is a NULL handle. Where the receiver is a local of its own the
+nil fact says may be nil and nil answers the method itself, the read is
+now (t ? sp_String_cstr(t) : NULL), and the conversion of NULL is 0, as
+it is for a plain String local that is nil. A local the fact proves not
+nil, a parameter or a shared handle (another name writes through it),
+a read whose nil would be past an error the build does not raise
+(nil_fact_unraised), and every other method keep their C.
+
+Test: test/string_handle_local_nil_to_i.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
