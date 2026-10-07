@@ -9173,8 +9173,11 @@ void emit_boxed_writer_arms(Compiler *c, const char *base, const char *nm,
        NoMethodError for a writer the receiver has. */
     if (at != ivt && at != TY_POLY && ivt != TY_POLY && !slot_takes_subclass(c, ivt, at)) continue;
     buf_printf(b, " case %d: ", k);
-    { char opn[64]; snprintf(opn, sizeof opn, "((sp_%s *)%s)", c->classes[k].c_name, objp);
-      emit_frozen_obj_guard(c, k, opn, b); }
+    { size_t on = strlen(c->classes[k].c_name) + strlen(objp) + 16;
+      char *opn = (char *)malloc(on);
+      snprintf(opn, on, "((sp_%s *)%s)", c->classes[k].c_name, objp);
+      emit_frozen_obj_guard(c, k, opn, b);
+      free(opn); }
     buf_printf(b, "((sp_%s *)%s)->iv_%s = ", c->classes[k].c_name, objp, iv_c(base));
     if (ivt == TY_POLY && at != TY_POLY) emit_boxed_text(c, at, src, b);
     else if (at == TY_POLY && ivt != TY_POLY) emit_unbox_text(c, ivt, src, b);
@@ -13291,6 +13294,17 @@ static int str_alias_chain_base(Compiler *c, int id) {
    wanted the receiver has to be put back afterwards. Returns the receiver's
    node when this call is one AND the receiver is a plain read (it is re-read,
    not re-evaluated, so anything with a side effect is out), else -1. */
+/* `x.each.with_index { }` over an Array: the blockless each hop's receiver */
+static int each_with_index_chain(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  int r = nt_ref(nt, id, "receiver");
+  if (r < 0 || nt_kind(nt, r) != NK_CallNode || nt_ref(nt, r, "block") >= 0 ||
+      nt_ref(nt, r, "arguments") >= 0 || !nt_str(nt, r, "name") ||
+      !sp_streq(nt_str(nt, r, "name"), "each")) return 0;
+  int rr = nt_ref(nt, r, "receiver");
+  return rr >= 0 && ty_is_array(comp_ntype(c, rr));
+}
+
 int tail_iter_receiver(Compiler *c, int id) {
   const NodeTable *nt = c->nt;
   if (nt_kind(nt, id) != NK_CallNode || nt_ref(nt, id, "block") < 0) return -1;
@@ -13696,7 +13710,10 @@ void emit_stmt_tail_inner(Compiler *c, int id, Buf *b, int indent) {
                         sp_streq(tv_name, "yield_self") ||
                         sp_streq(tv_name, "select!") || sp_streq(tv_name, "filter!") ||
                         sp_streq(tv_name, "reject!") || sp_streq(tv_name, "keep_if") ||
-                        sp_streq(tv_name, "delete_if"));
+                        sp_streq(tv_name, "delete_if") ||
+                        /* `a.each.with_index { }` answers a, which only the
+                           value form reads back */
+                        (sp_streq(tv_name, "with_index") && each_with_index_chain(c, id)));
   /* An iterator whose value is its receiver, called on something that is NOT
      a plain read (`s.keys.each { }`, `s.dup.each { }`): the statement form
      below produces the tail value by RE-READING the receiver, which it cannot

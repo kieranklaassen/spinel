@@ -74,6 +74,22 @@ const CallPlan *cplan_user(Compiler *c, int id);
    analyze_nil.c): it answers from the types as they stand. The answer
    lasts until the next call. */
 const CallPlan *cplan_user_fresh(Compiler *c, int id);
+/* Every user method the call node id may reach, into out (at most cap):
+   its plan's method and, for a switch, each member. Answered from the types
+   as they stand, never kept past cplan_targets_drop.
+     n >= 0      the methods, 0 for none (a builtin, a CP_REFUSE plan, a
+                 node that is no call): follow nothing
+     CPT_UNKNOWN too many members (more than cap or CPT_MAX), or a call
+                 whose receiver type is not settled: the caller must treat
+                 the call as reaching code it cannot see, never as a
+                 shorter list
+   The answers are held until cplan_targets_drop, which the caller calls
+   when a type may have changed (once per round of a fixpoint); a held
+   answer is not carried across a drop, because a later round may widen a
+   receiver and add members, and nothing here promises a set only grows. */
+enum { CPT_UNKNOWN = -1, CPT_MAX = 64 };
+int cplan_targets(Compiler *c, int id, int *out, int cap);
+void cplan_targets_drop(void);
 /* Object fallback behind a class-gated exception accessor, or -1. */
 int cplan_exc_object_method(Compiler *c, const char *name);
 
@@ -167,7 +183,7 @@ typedef enum {
   /* its builtin `default:` arms, the first that applies, and the named
      cases after them (emit_poly_defaults0) */
   PB_D_ENUM_EACH, PB_D_TO_S, PB_D_CASE_CONV, PB_D_NUM, PB_D_DIGITS, PB_D_ARRAY_TRANSFORM, PB_D_PRED,
-  PB_D_TO_IF, PB_D_ANY_NONE, PB_D_TO_H,
+  PB_D_TO_IF, PB_D_ANY_NONE, PB_D_TO_H, PB_D_DISPLAY,
   PB_N_EACH_INDEX, PB_N_JOIN, PB_N_ALIVE, PB_N_KILL, PB_N_STATUS, PB_N_QUEUE, PB_N_IO_READ,
   PB_N_IO_FLUSH, PB_N_IO_CLOSE, PB_N_ENUM_TO_A,
   /* the tag pre-arms of a dispatch with arguments (emit_poly_prearms_n) */
