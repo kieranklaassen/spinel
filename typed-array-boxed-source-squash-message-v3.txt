@@ -1,0 +1,25 @@
+An Array a call returns is held while its elements are boxed
+
+`take(*floats(i))` fills the rest parameter with a new Array of boxed
+values made from the Float Array, and `fmt % ints(i)` hands String#% one
+made from the Integer Array. Both come from sp_typed_to_poly, which
+allocates the new Array before it reads the old one and holds the old
+one nowhere. A result no variable holds was collected by that allocation
+and its elements were read out of a buffer already given back.
+
+A source that something holds needs no root (typed_array_src_held): a
+variable, a constant or self; a field read off one, an attr_reader's
+or a Struct member's slot; an element of such a typed Array; a
+conditional, an `||` or an `&&` of two such reads; or an Array
+literal, which sits in a rooted temp. Those calls compile as before.
+A source the list does not prove held is boxed by
+sp_typed_to_poly_unheld, which holds it for the call.
+
+sp_PolyArray_eq_typed held the source and compared against a boxed copy
+that nothing held. An element's own == allocates, and at
+SPINEL_GC_STRESS=2 the copy was collected under the comparison. The slot
+that holds the source now holds the copy once it is made, and the copy
+holds the Strings of a source nothing else holds, so a comparison keeps
+its two roots.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
