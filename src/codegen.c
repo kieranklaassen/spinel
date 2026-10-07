@@ -4481,6 +4481,16 @@ static int main_body_split(Compiler *c, Buf *body, size_t open, size_t *frame_in
 
    Only reference fields: a barrier on every ivar store, scalars included,
    costs 14% on optcarrot where the reference-only one costs 0.5%. */
+/* Whether an ivar of type `t` holds a heap reference. A String range is one
+   without being a pointer: the struct sits in the object by value and carries
+   two GC strings, which needs_root cannot report because the slot itself is
+   not a reference (#4353). The scan and the barrier both ask this: a slot the
+   one marks and the other does not record is a young string freed while an
+   old object still names it. */
+static int ivar_holds_ref(TyKind t) {
+  return needs_root(t) || t == TY_STR_RANGE;
+}
+
 /* The class whose struct is named `sp_<name>`, or -1. */
 static int wb_class_by_cname(Compiler *c, const char *nm, size_t n) {
   for (int k = 0; k < c->nclasses; k++) {
@@ -4513,7 +4523,7 @@ static int wb_field_is_ref_in(Compiler *c, int only, const char *fld, size_t n) 
          value type. There is no old holder for a store into it to record. */
       if (ci->is_value_type) continue;
       TyKind t = ci->ivar_types[i];
-      if (needs_root(t) && !comp_ty_value_obj(c, t)) return 1;
+      if (ivar_holds_ref(t) && !comp_ty_value_obj(c, t)) return 1;
     }
   }
   return 0;
@@ -8650,14 +8660,11 @@ void emit_class_struct(Compiler *c, ClassInfo *ci, Buf *b) {
   buf_puts(b, "};\n");
 }
 
-/* A class needs a GC scan iff any ivar holds a heap reference. A String range
-   is one without being a pointer: the struct sits in the object by value and
-   carries two GC strings, which needs_root cannot report because the slot
-   itself is not a reference (#4353). */
+/* A class needs a GC scan iff any ivar holds a heap reference. */
 int class_needs_scan(ClassInfo *ci) {
   if (ci->ary_root > 0) return 1;   /* its own scan names its class (#7449) */
   for (int i = 0; i < ci->nivars; i++) {
-    if (needs_root(ci->ivar_types[i]) || ci->ivar_types[i] == TY_STR_RANGE) return 1;
+    if (ivar_holds_ref(ci->ivar_types[i])) return 1;
   }
   return 0;
 }
