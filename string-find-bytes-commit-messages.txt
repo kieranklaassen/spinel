@@ -1,0 +1,48 @@
+scan with a String pattern finds it by bytes
+
+`"a\0b".scan("b")` answered [] and `"x,a\0b".scan("a\0b")[0].bytesize`
+was 1: sp_str_scan measured the pattern by strlen and searched with
+strstr, which ends at the subject's first NUL byte. sp_str_scan_at,
+the turn of a block that reads `$~`, did the same.
+
+Both read byte lengths and search with sp_str_find. One byte is found
+by memchr. A longer pattern without a NUL is still found by strstr.
+Where strstr finds nothing, one strlen says where it ended: at the
+String's end there is nothing more to find, and behind a NUL inside
+the String sp_str_find_rest looks by sp_bytestr, as it does from the
+start for a pattern that holds a NUL. A pattern without one cannot lie
+across that NUL, so nothing is missed. The strlen and its compare are
+inline, so a subject without a NUL is searched as before and pays that
+one strlen when a pattern of two bytes or more is not found, or once
+behind its last occurrence. The empty pattern walks to the byte length
+too.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+----
+gsub and sub with a Hash read their Strings by bytes
+
+`"a\0b".gsub(/[ab]/, "a" => "1", "b" => "2").bytesize` was 1: the four
+functions behind gsub and sub with a Hash measured the subject and the
+replacement by strlen, so the answer ended at the first NUL byte of
+either. The pair for a String pattern also searched with strstr, and
+answered a String whose length was never set.
+
+They read byte lengths, and the String pattern is found by
+sp_str_find. A Regexp's match that holds a NUL byte is looked up as a
+String of its own, since the transient key is read as a C string:
+`"a\0b".gsub(/\0/, "\0" => "N")` is "aNb".
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+----
+lines with a separator reads the String by bytes
+
+`"a\0b".lines("\0")` answered ["a"], and `"\0ab".lines("b")` answered
+[]: sp_str_lines_sep took a String that begins with a NUL byte for the
+empty one, measured the String and the separator by strlen and
+searched with strstr, so the lines ended at the String's first NUL
+byte. The chomp: form measured each line by strlen again.
+
+Both read byte lengths, and the separator is found by sp_str_find.
+each_line with a separator rides them.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

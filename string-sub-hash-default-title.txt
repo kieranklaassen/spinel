@@ -1,0 +1,1 @@
+sub and gsub with a String pattern read the Hash's default

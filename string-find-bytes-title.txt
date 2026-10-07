@@ -1,0 +1,1 @@
+scan, lines and sub and gsub with a Hash find a String pattern by bytes

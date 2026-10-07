@@ -1,0 +1,13 @@
+sub and gsub with a String pattern read the Hash's default
+
+`h = Hash.new("?"); h["q"] = "1"; "abq".gsub("b", h)` answered "aq"
+where CRuby answers "a?q": the pair behind sub and gsub with a String
+pattern and a Hash asked has_key first and took "" for a pattern the
+Hash has no key for. CRuby reads hash[match], which answers the Hash's
+default, and the pair for a Regexp reads it so already.
+
+Both read sp_StrStrHash_get, which answers the default on a miss. A
+Hash of other values is converted with its default as its to_s, so
+`Hash.new(0)` substitutes "0".
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
