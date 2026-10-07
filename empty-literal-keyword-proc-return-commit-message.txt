@@ -1,0 +1,39 @@
+A proc returning an empty literal argument answers through a parameter
+
+    def keep(x) = x
+    def vals(n, k:) = -> { {"n" => n, "k" => k} }
+    p keep(vals(1, k: [])).call.values   # [1, []]; spinel [0, 0]
+
+    def hold(n, k:) = -> { [n, k] }
+    f = keep(hold(1, k: []))
+    p f.call   # [1, []]; spinel raised TypeError: an Array holding
+               # Array reached a slot typed as an Integer Array
+
+A parameter that only an empty literal reaches has no type of its own.
+The backstop bind pass, run once as the fixpoint converges, types it
+for a positional `[]`, and the fixpoint goes on so that what was read
+from the parameter is read again. An empty keyword literal and a
+positional `{}` had no such rule: k stayed untyped to the end and was
+boxed afterwards (never bound). By then the proc's return, read as an
+Integer Array while k had no type, was the type keep's x calls the
+proc by, and a slot that takes a proc only unifies; nothing after the
+fixpoint reads again what was typed from `x.call`.
+
+The pass notes the empty `{}` and the keyword's empty literal, and
+boxes the parameter once it has read every call site, where no other
+argument reaches it untyped: one that does (`e = []`, a local) is
+typed after the fixpoint and types the parameter the container, as it
+did. A keyword's `[]` is boxed, not the untyped array a positional one
+is: beside a `{}` from another call site the keywords have no rule to
+widen under, and the two would not build.
+
+Cost. A value typed by leaving the untyped parameter out of it, and
+right because the parameter was empty, is boxed as the parameter is:
+a proc's `k.empty? ? [n] : k`, the Hash a proc wrote an element into
+and returns, the elements of `@k << n` read back by each. The answers
+are the same; a call takes 482 instructions for 418, 340 for 295, an
+element 4 more. And the fixpoint runs on where the rule fills a
+parameter, as it does for a positional `[]`: optcarrot with one such
+call added compiles in 9.83 billion instructions for 8.21.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

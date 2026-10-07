@@ -1,0 +1,1 @@
+A proc returning an empty literal argument answers through a parameter
