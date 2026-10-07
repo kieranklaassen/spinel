@@ -1,0 +1,28 @@
+Range#overlap? keeps its receiver alive while its argument is made
+
+`(x..(x + 1.0)).overlap?((x + 5.0)..(x + 6.0))` answered true once in
+3,000,000 calls of a plain run, and every time under SPINEL_GC_STRESS=2.
+A boxed Range a method answers did so five times in 3,000,000, and an
+Integer Range under stress.
+
+sp_range_overlap_v takes two boxed values, and the emitters wrote both
+as arguments of the one call: `sp_range_overlap_v(sp_box_frange(r),
+sp_box_frange(o))`. A typed Range is boxed by a copy into a fresh cell,
+which nothing holds while the other argument's cell is allocated. A
+collection there frees it, the second box takes the same cell, and a
+Range overlaps itself. C does not order the two arguments either: gcc
+makes the argument first, so `(lo(x)..y).overlap?(hi(z)..w)` ran hi
+before lo.
+
+The three sites (a Float Range, an Integer Range, a boxed receiver) now
+write the call through emit_range_overlap. A receiver whose value is
+made at the call is bound to a rooted temp before the argument is made.
+One that is a plain read of a boxed value, or one asked about such an
+argument, has nothing allocated beside it and keeps its C.
+
+test/float_range_overlap_cover.rb, test/int_float_exact_compare.rb and
+test/range_overlap_array_flatten_depth.rb each printed a wrong line under
+SPINEL_GC_STRESS=2 for this and pass there now. The new test joins
+GC_STRESS_TESTS.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

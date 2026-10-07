@@ -1,0 +1,32 @@
+Array.new(n, value) holds a value made in place while the Array is made
+
+    rows << Array.new(2, s + t)
+
+run 3,000 times between other allocations left one Array holding
+["xyzabc", "xyzabc"], a String made after it; CRuby holds "abcdef" in
+every one. The arm in emit_new_call_arms binds the value to a C
+temporary and allocates the Array next, so a collection that falls on
+that allocation frees a value nothing else holds. Under
+SPINEL_GC_STRESS=2 the mark stops on the freed value.
+
+The temporary is now rooted unless something else holds the value
+(array_fill_value_held): an Integer, a Float, a Symbol, true, false and
+nil have nothing on the heap; a variable or a constant holds what is
+read from it, and a literal String is static. Those keep their C. A
+value that enters an Array of mixed values through a box that copies
+it to the heap (a Range) is rooted even when it is read from a local:
+the copy is made in place. self is rooted as well: in a method the
+program adds to String, Array or Hash nothing holds a receiver made in
+place, as in (s + t).twice.
+
+Not here: Range.new(s + t, s + u) and ((s + t)..(s + u)) hold neither
+bound while the other is made, and stop the same way under
+SPINEL_GC_STRESS=2. A value made by statements of its own
+(begin; s + t; end) beside a size that allocates is made before the
+size runs and is not held across it.
+
+Test: test/array_new_fill_value_rooted.rb (expected from CRuby 3.3.6),
+added to GC_STRESS_TESTS. On master two of its lines are wrong in a
+plain run and six under SPINEL_GC_STRESS=1.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

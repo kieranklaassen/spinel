@@ -1,0 +1,1 @@
+Range#overlap? keeps its receiver alive while its argument is made

@@ -1,0 +1,26 @@
+Array.new(n, value) evaluates n before the value
+
+    def note(x); puts "n#{x}"; x; end
+    p Array.new(note(2), [note(4), note(5)])
+
+printed n4 n5 n2; CRuby prints n2 n4 n5. The arm in emit_new_call_arms
+wrote the value's statements before the line that computes the size,
+so a value that needs statements of its own (an Array literal with
+elements, begin ... end, a call with a block) ran first. The size's
+line is now written before them.
+
+A value those statements make was also left unheld while the size
+ran: Array.new((s + u).size - 4, begin; s + t; end) lost its String
+under SPINEL_GC_STRESS=1 and stopped in the mark under 2.
+
+The negative-size check stays where it was, after the value's
+statements: Array.new(-1, [note(9), note(10)]) prints n9 n10 before
+the ArgumentError, as CRuby does. Not here: a value written as a
+plain expression is still evaluated after that check, so
+Array.new(-1, note(3)) raises before note(3) runs.
+
+Test: test/array_new_size_before_value.rb (expected from CRuby 3.3.6),
+added to GC_STRESS_TESTS. On master five of its lines are wrong in a
+plain run and seven under SPINEL_GC_STRESS=1.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
