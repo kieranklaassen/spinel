@@ -1,0 +1,92 @@
+=====
+chomp cuts a separator that begins with a NUL byte
+
+`"PATH=/bin\0".chomp("\0")` answered the String unchanged, and
+`"a\n".chomp("\0")` answered "a": sp_str_chomp_sep took a separator
+whose first byte is NUL for the empty one, which strips trailing
+newlines. The separator is the empty one when its byte length is 0.
+chomp! rides the same function.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+
+=====
+tr_s walks the String to its byte length
+
+`"a\0b".tr_s("a", "z").bytesize` was 1: sp_str_tr_s sized its buffer by
+strlen and walked while a byte was not NUL, so the answer ended at the
+String's first NUL byte, whatever the two sets named. It reads the byte
+length and walks to it, as sp_str_tr does.
+
+A set is negated when a byte follows its "^", and that too was asked of
+the C string: "^\0" was read as the two characters. With the walk alone
+`"a\0b".tr_s("^\0", "x").bytes` would have gone from [97] to
+[97, 120, 98]; the set's byte length says it now, and the answer is
+CRuby's [120, 0, 120].
+
+Two answers that the cut had hidden come with the walk, and are cured
+with it.
+
+tr_s! answered nil when the text was as it had been. CRuby answers nil
+when no character of the set was met, so `s.tr_s!("b", "b")` is the
+String. For "a\0b" the cut text differed and the answer was right; with
+the String walked whole it would have been nil. sp_str_tr_s now says
+whether it met one (sp_str_tr_s_met), and the three places that emit
+tr_s! ask it beside the comparison. `"a-b".dup.tr_s!("b", "b")`, nil
+before, is the String too.
+
+A character the set names twice is translated by its last naming in
+CRuby, and was by its first here: `"aa".tr_s("aa", "xy")` was "x" for
+"y". Behind a NUL that is a wrong line where there was none.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+
+=====
+Array#sum with a String seed joins the whole of each String
+
+`["a\0b", "c"].sum("").bytesize` was 2: sp_StrArray_sum_str measured
+the seed and every member by strlen, so each was joined only up to its
+first NUL byte. They are measured by their byte length.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+
+=====
+String#chr of a String that begins with a NUL byte is that byte
+
+`"\0ab".chr` answered "": sp_str_chr took a first byte of NUL for the
+empty String. It is the empty String when its byte length is 0 as
+well; otherwise the NUL is the first character.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+
+=====
+format reads its template to the byte length
+
+`format("a\0b%s", "c").bytesize` was 1: sp_str_format_polyarr sized
+its buffer by strlen of the template and walked it while a byte was
+not NUL, so the answer ended at the template's first NUL byte and the
+arguments behind it were never read. It walks to the template's byte
+length; sprintf, String#% and a File's printf ride the same function.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+
+=====
+split with a Regexp keeps a trailing field that begins with a NUL byte
+
+`"ab\0".split(/b/)` answered ["a"], and `"\0ab".split(/b/)` answered
+[]: sp_re_split_limit strips trailing empty fields by testing each
+one's first byte, and a field that begins with a NUL byte passed for
+empty. A field is empty when its byte length is 0.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+
+=====
+ARGF.read keeps what follows a NUL byte on each line
+
+ARGF.read of the five lines "a\0b", "\0cd", "ef\0", "\0", "g\0h"
+answered "aefg": sp_argf_read joins the lines sp_argf_gets reads, each
+whole with its byte count, through sp_String_append, which takes its
+argument to end at a NUL byte. It joins them by their byte length
+(sp_String_append_bytes).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+
