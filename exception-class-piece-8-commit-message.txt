@@ -1,0 +1,21 @@
+!= between a value of a program's exception class and a rescued exception answers, as == does
+
+    class MyErr < StandardError; end
+    begin
+      raise MyErr, "a"
+    rescue MyErr => e
+      p(e != e)
+    end
+    # unsupported equality: node 17 (CallNode `!=`) ... ; CRuby: false
+
+The receiver there is typed as the class and the argument as a rescued
+exception (the same variable, read without the narrowing). `k != e` with
+`k = MyErr.new("n")` and a `rescue => e` is refused the same way. For that
+pair of types emit_call_exception_arms has an arm for == and eql?
+(sp_exc_eq, class and message) and none for !=, which fell through every
+equality arm to the refusal. != takes the same arm now, turned round, so
+it is `!(a == b)` as in CRuby, unless the class defines == itself.
+
+Test: test/exception_class_ne_rescued.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

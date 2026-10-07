@@ -1,0 +1,30 @@
+full_message(highlight: false) answers on a program's exception class and on a boxed exception
+
+    class MyErr < StandardError; end
+    e = MyErr.new("q")
+    p e.detailed_message(highlight: false)
+    # undefined method 'detailed_message' for an instance of MyErr (NoMethodError)
+    # CRuby: "q (MyErr)"
+
+full_message(highlight: false) raised the same way, on a value typed as
+the program's exception class (`MyErr.new`, `rescue MyErr => e`) and on any
+exception kept as a boxed value, a builtin one too; as the argument of puts
+the call on a boxed value was refused. The bare calls answer on all of
+them, and so does `rescue => e; e.full_message(highlight: false)`: the arms
+for the typed and the boxed receiver took the call only with no argument.
+
+They take it now with the keywords that ask for what the bare call gives,
+written as literals: `highlight: false` or nil, `order: :top` or nil. The
+renderings have no terminal to colour for and no backtrace to order, so the
+call emits the bare call's C.
+
+Any other keyword or value is left as it was: `highlight: true` and
+`order: :bottom` ask for another text, a variable can hold either, and
+CRuby raises for `highlight: 3`.
+
+full_message's text stays Spinel's own (`MyErr: q`, with no file and
+line, as test/exception_object_methods.rb has it for the bare call).
+
+Test: test/exception_rendering_keywords.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

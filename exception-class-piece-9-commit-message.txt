@@ -1,0 +1,21 @@
+A class of the program's own named SumState or Addrinfo builds
+
+    class SumState
+      def initialize(total) = @total = total
+    end
+    SumState.new(1)
+
+did not build: the C compiler stopped at "conflicting types for
+'sp_SumState'". The runtime has C types of those two names, the accumulator
+of Array#sum and the socket address carrier, and sp_name_collides_runtime,
+which gives a program's class another C name where it meets one of the
+runtime's, did not list them. Of the runtime's type names that are no Ruby
+class's, these are the two that were missing.
+
+Addrinfo under require "socket" is the socket class, as before: a reopening
+of it is refused by name, and a class of that name in a module of the
+program's (Net::Addrinfo) now builds beside it.
+
+Test: test/class_named_as_runtime_type.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

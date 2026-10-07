@@ -1,0 +1,1 @@
+!= between a value of a program's exception class and a rescued exception answers, as == does

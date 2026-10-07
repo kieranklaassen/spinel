@@ -1,0 +1,1 @@
+full_message(highlight: false) answers on a program's exception class and on a boxed exception
