@@ -5672,6 +5672,22 @@ static int emit_when_user_eq(Compiler *c, int cond, int t, TyKind pt, Buf *b) {
   return 1;
 }
 
+/* The arm of a `when` as the receiver of its own == or ===. An arm that
+   makes its object (`when Pt.new(3)`) is held in a rooted temporary: the
+   method may collect while its `self` is in no root. Opens the statement
+   expression and answers the temporary's number; answers 0 for an arm that
+   allocates nothing, which the caller passes as written. */
+static int emit_when_arm_root(Compiler *c, int cond, TyKind wpt, Buf *b) {
+  if (!needs_root(wpt) || comp_ty_value_obj(c, wpt) || !subtree_allocates(c->nt, cond)) return 0;
+  int ta = ++g_tmp;
+  buf_puts(b, "({ ");
+  emit_ctype(c, wpt, b);
+  buf_printf(b, " _t%d = ", ta);
+  emit_expr(c, cond, b);
+  buf_printf(b, "; SP_GC_ROOT(_t%d); ", ta);
+  return ta;
+}
+
 /* `when <cond>` against the subject in _t<t>: the subject class's own ===
    or == when cond has its type, else a native === or the pointer compare. */
 static void emit_case_obj_eq(Compiler *c, int cond, int t, TyKind pt, Buf *b) {
@@ -5699,17 +5715,18 @@ static void emit_case_obj_eq(Compiler *c, int cond, int t, TyKind pt, Buf *b) {
       emit_expr(c, cond, b);
       buf_printf(b, "; SP_GC_ROOT(_t%d); _t%d == _t%d || ", tc, tc, t);
     }
+    else tc = emit_when_arm_root(c, cond, pt, b);
     buf_puts(b, "(");
     emit_method_cname(c, ems, b);
     buf_puts(b, "(");
-    if (ident) buf_printf(b, "_t%d", tc);
+    if (tc) buf_printf(b, "_t%d", tc);
     else emit_expr(c, cond, b);
     buf_puts(b, ", ");
     { char sref[32]; snprintf(sref, sizeof sref, "_t%d", t);
       if (pty != pt && pt != TY_UNKNOWN) emit_boxed_text(c, pt, sref, b);
       else buf_puts(b, sref); }
     buf_puts(b, "))");
-    if (ident) buf_puts(b, "; })");
+    if (tc) buf_puts(b, "; })");
   }
   else {
     char sref2[32]; snprintf(sref2, sizeof sref2, "_t%d", t);
@@ -6214,8 +6231,10 @@ void emit_case(Compiler *c, int id, Buf *b, int indent) {
             if (weq < 0 && wcid >= 0) weq = comp_method_in_chain(c, wcid, "==", &wdef);
             if (same_first && weq >= 0 && wdef >= 0 && !comp_ty_value_obj(c, wpt)) emit_case_obj_eq(c, conds[j], t, pt, b);
             else if (weq >= 0 && wdef >= 0 && !comp_ty_value_obj(c, wpt)) {
+              int wta = emit_when_arm_root(c, conds[j], wpt, b);
               buf_printf(b, "sp_%s_%s(", c->classes[wdef].c_name, mc(c->scopes[weq].name));
-              emit_expr(c, conds[j], b);
+              if (wta) buf_printf(b, "_t%d", wta);
+              else emit_expr(c, conds[j], b);
               buf_printf(b, ", ");
               /* the user method takes its argument boxed when its parameter is
                  poly, which is the shape these comparison methods settle on */
@@ -6227,6 +6246,7 @@ void emit_case(Compiler *c, int id, Buf *b, int indent) {
                   emit_boxed_text(c, pt, sref, &bx); buf_puts(b, bx.p ? bx.p : sref); free(bx.p); }
                 else buf_puts(b, sref); }
               buf_puts(b, ")");
+              if (wta) buf_puts(b, "; })");
             }
             else emit_case_obj_eq(c, conds[j], t, pt, b);
           }
