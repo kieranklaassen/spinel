@@ -32,6 +32,22 @@ while i < 40
 end
 puts "member: #{bad} #{s.r.first}..#{s.r.last}"
 
+# a plain run loses them too: over enough turns a minor collection falls
+# between a store and its read
+def churn_small
+  (1..40).map { |k| "j#{k}" }.size
+end
+
+bad = 0
+i = 0
+while i < 2000
+  fill_member(s, i)
+  churn_small
+  bad += 1 unless s.r.first == "a#{i}" && s.r.last == "z#{i}"
+  i += 1
+end
+puts "member, 2000 turns: #{bad}"
+
 # an instance variable, written by a method and by an attribute writer
 class Shelf
   attr_accessor :r
