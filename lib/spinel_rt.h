@@ -11561,6 +11561,19 @@ static sp_Time sp_time_at_args(sp_RbVal args) {
   return sp_time_add_nsec(t, (int64_t)(sp_poly_to_f_with_rational(sub) * (double)mult));
 }
 sp_RbVal sp_poly_to_h_m(sp_RbVal v);
+/* Hash[v] with one boxed argument: a Hash gives a new Hash of its entries,
+   without its default; anything else is the list of pairs sp_poly_to_h_m
+   reads. */
+static SP_UNUSED sp_RbVal sp_hash_brackets_one(sp_RbVal v) {
+  if (!(v.tag == SP_TAG_OBJ && sp_poly_is_hash_kind(v.cls_id))) return sp_poly_to_h_m(v);
+  SP_GC_ROOT_RBVAL(v);
+  sp_PolyPolyHash *src = sp_poly_as_poly_poly_hash(v);
+  SP_GC_ROOT(src);
+  sp_PolyPolyHash *r = sp_PolyPolyHash_new();
+  SP_GC_ROOT(r);
+  sp_PolyPolyHash_update(r, src);
+  return sp_box_obj(r, SP_BUILTIN_POLY_POLY_HASH);
+}
 /* Hash[*args]: the splatted list is Hash[]'s argument list. One argument is
    a Hash (copied) or a list of pairs; an even count alternates keys and
    values, which pair up into the list sp_poly_to_h_m reads. */
