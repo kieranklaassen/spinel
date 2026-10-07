@@ -1,0 +1,1 @@
+A yield in an arm of a method's value keeps each site's block type

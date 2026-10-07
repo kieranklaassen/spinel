@@ -1,0 +1,29 @@
+A yield in an arm of a method's value keeps each site's block type
+
+    def guarded
+      yield rescue :rescued
+    end
+    p guarded { :s }
+    p guarded { 9 }
+
+printed :s and :"", where CRuby prints :s and 9. The same with the
+yield in one arm of an if or a ternary, beside `||`, and in a `case`;
+with a String among the blocks the program did not build.
+
+When a yielding method's blocks answer different types at different
+call sites, a yield whose value goes into a local, an Array literal, an
+argument, a receiver or a rescue frame is typed poly, so that each
+spliced site boxes its own block's value. One arm of the method's own
+last statement was not in that list: the other arm and the first
+site's block settled the method's return, and a later site's value was
+converted to it.
+
+The method's last statement is now one of those places, unless
+method_call_ret types the call from each site's block already (a bare
+`yield` tail, a call of the block parameter, the block arm of an
+`if block_given?`). The walk through value arms also learns the rescue
+modifier and `case`, so `v = (yield rescue :none)` and a `case` arm on
+the way into a local, an element or an argument keep their site's type
+too.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
