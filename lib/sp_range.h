@@ -136,6 +136,7 @@ sp_StrArray *sp_srange_to_a(sp_StrRange r);
 typedef struct { const char *cur, *end, *stop; long long at, lim; sp_int excl; int width, kind; } sp_StrWalk;
 const char *sp_str_walk_first(sp_StrWalk *w, const char *s, const char *e, sp_int excl);
 const char *sp_str_walk_next(sp_StrWalk *w);
+sp_StrArray *sp_srange_first_n(sp_StrRange r, sp_int n);
 sp_bool sp_srange_eq(sp_StrRange a, sp_StrRange b);
 sp_bool sp_srange_cover(sp_StrRange r, const char *x);
 sp_bool sp_srange_include(sp_StrRange r, const char *x);

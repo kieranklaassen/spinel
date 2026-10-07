@@ -6569,6 +6569,11 @@ static int desugar_str_range_methods(Compiler *c) {
       int blk = nt_ref(nt, id, "block");
       if (str_range_each_block_plain(c, blk) && !str_range_block_changes_member(c, blk)) native = 1;
     }
+    /* first(n) and take(n) leave the walk at the nth member: their own arm,
+       where the element array would hold the whole range first */
+    if (!native && an == 1 && nt_ref(nt, id, "block") < 0 &&
+        is_first_or_take(nm) &&
+        infer_type(c, nt_arr(nt, argn, "arguments", &an)[0]) == TY_INT) native = 1;
     /* A name builtins/enumerable.rb defines, called with a block: the
        definition walks its receiver with `each`, and a String Range's each
        takes a member at a time, so `("a".."zzzzzzzz").find { |s| s == "c" }`
