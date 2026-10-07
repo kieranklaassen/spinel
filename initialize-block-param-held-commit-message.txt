@@ -1,0 +1,27 @@
+A block handed to new is held while the object is allocated
+
+`Agg.new { |v| v + i }` builds the proc in place as the constructor's
+argument,
+
+    lv_b = sp_Agg_new(sp_proc_new_meta(...));
+
+and sp_Agg_new allocated the object before anything held that proc:
+initialize roots its block parameter, but runs after the allocation. A
+collection there freed the proc, and the object then called whatever
+took its place. Of 2,000 such objects kept in a list one answers wrong
+in a plain run; under SPINEL_GC_STRESS=2 the program dies, and two
+tests of the corpus abort there (kept_block_param_not_hash,
+poly_index_or_op_write_user_aref).
+
+The constructor now roots the block parameter ahead of the allocation,
+on the condition initialize's own root has (a real &blk; a yielding
+initialize is inlined at the call site), as the Struct constructor
+above it roots its reference arguments. The `) {` each allocation arm
+printed moves ahead of the arms, so the root comes first in all four:
+the pooled object, the two exception layouts and the Array subclass.
+
+A String or an Array argument reaches the constructor from a temp its
+caller roots; the block is the one argument built in place. A
+constructor with no block parameter is the C it was.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
