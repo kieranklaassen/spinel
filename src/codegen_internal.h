@@ -231,6 +231,13 @@ int subtree_is_pure_read(Compiler *c, int id);
 /* Is the call a reader the emitter lowers to a plain field read? *allocates is
    set when the read builds a copy (a shared String slot). codegen_call.c */
 int call_is_field_read(Compiler *c, int id, int *allocates);
+/* What each method assigns and the methods it calls, read once, before
+   emission starts: a writer statement asks it whether its value assigns
+   what its receiver reads (subtree_shows_assign). Emission swaps a node's
+   arguments or receiver for a while here and there, and a method read then
+   would be read without them, so the answer would turn on which statement
+   asked first. */
+void writer_assigns_prepare(Compiler *c);
 /* Typed-array headers cached across an innermost loop (codegen_stmt.c, see
    emit_while). hc_array / hc_string answer 1 and the names of the cached
    header locals when the receiver is cached in the loop being emitted;
