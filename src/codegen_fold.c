@@ -7551,9 +7551,17 @@ void emit_rooted_operand(Compiler *c, TyKind pt, int provided, const char *expr,
    ...) that builds a NEW container, rooted only inside the converter. The
    read's own root does not reach the copy, and a callee that allocates before
    it roots the parameter (sp_<C>_new) can collect it: the object then holds
-   freed memory. */
+   freed memory. The same for a read kept by value (a Range, a Rational, a
+   Complex, a Time) that reaches a boxed parameter: its box copies it into
+   a new cell (sp_box_range, sp_box_rational, ...) nothing holds, and the
+   object's allocation, a sibling's box or the cell of a captured parameter
+   collects it. A Class is boxed by its tag and has no cell. */
 int arg_read_converts(Compiler *c, TyKind pt, int provided) {
-  if (provided < 0 || pt == TY_POLY) return 0;
+  if (provided < 0) return 0;
+  if (pt == TY_POLY) {
+    TyKind vt = repr_of(c, provided).as_ty;
+    return ty_is_struct_valued(vt) && vt != TY_CLASS;
+  }
   if (!(ty_is_array(pt) || ty_is_obj_array(pt) || ty_is_hash(pt))) return 0;
   Repr sr = repr_of(c, provided);
   TyKind st = sr.as_ty;
@@ -7568,8 +7576,11 @@ int arg_read_converts(Compiler *c, TyKind pt, int provided) {
 void emit_rooted_conversion(Compiler *c, TyKind pt, const char *expr, Buf *out) {
   int t = ++g_tmp;
   emit_indent(g_pre, g_indent);
-  emit_ctype(c, pt, g_pre);
-  buf_printf(g_pre, " _t%d = NULL; SP_GC_ROOT(_t%d);\n", t, t);
+  if (pt == TY_POLY) buf_printf(g_pre, "sp_RbVal _t%d = sp_box_nil(); SP_GC_ROOT_RBVAL(_t%d);\n", t, t);
+  else {
+    emit_ctype(c, pt, g_pre);
+    buf_printf(g_pre, " _t%d = NULL; SP_GC_ROOT(_t%d);\n", t, t);
+  }
   buf_printf(out, "(_t%d = %s)", t, expr);
 }
 
