@@ -448,7 +448,12 @@ void emit_interp(Compiler *c, int id, Buf *b) {
       lead = k;
     }
   int lead_lit = lead >= 0 && wp[lead].kind == WK_LIT;
-  if (eid >= 0) buf_printf(b, "int _e%d = %d; ", eid, lead_lit ? 0 : -1);
+  /* and so does one part alone, "#{s}": CRuby answers UTF-8 for it unless
+     the part holds a byte past ASCII in another encoding, which the step
+     below then gives it */
+  int nparts = 0;
+  for (int k = 0; k < nwp; k++) if (wp[k].kind != WK_LIT || wp[k].lit_len > 0) nparts++;
+  if (eid >= 0) buf_printf(b, "int _e%d = %d; ", eid, (lead_lit || nparts == 1) ? 0 : -1);
   for (int k = 0; k < nwp; k++) {
     if (eid >= 0 && wp[k].kind == WK_LIT && wp[k].lit_len > 0 && !(lead_lit && k == lead))
       buf_printf(b, "_e%d = sp_str_enc_step_i(_e%d, _t%d, (size_t)(_t%d - _t%d), \"%.*s\", %ld, 0); ",
