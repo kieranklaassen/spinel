@@ -11025,6 +11025,26 @@ static int emit_multi_write_stmt(Compiler *c, int id, Buf *b, int indent, const 
   return 0;
 }
 
+/* Is the receiver of a boxed writer statement held while its value `v`, of
+   type `at`, runs? Not for a value that runs nothing: a literal, a variable
+   or self. And not for a by-value struct (a Range, a Time, a Rational, a
+   value object): the store boxes it behind a heap copy after the barrier it
+   takes on the receiver, and a receiver that lives on would hold the copy
+   unseen. */
+static int boxed_writer_holds_recv(Compiler *c, int v, TyKind at) {
+  if (ty_is_struct_valued(at) || comp_ty_value_obj(c, at)) return 0;
+  switch (nt_kind(c->nt, v)) {
+    case NK_NilNode: case NK_TrueNode: case NK_FalseNode: case NK_IntegerNode: case NK_FloatNode:
+    case NK_SymbolNode: case NK_StringNode: case NK_LocalVariableReadNode:
+    case NK_InstanceVariableReadNode: case NK_SelfNode:
+      break;
+    default: return 1;
+  }
+  if (operand_may_allocate(c, v)) return 1;
+  return !(at == TY_BOOL || at == TY_INT || at == TY_FLOAT || at == TY_SYMBOL || at == TY_STRING ||
+           at == TY_POLY || ty_is_object(at));
+}
+
 /* A CallNode statement: the statement-level fast paths ahead of emit_expr (emit_stmt_inner's arms, in their order) */
 static int emit_call_stmt(Compiler *c, int id, Buf *b, int indent, const NodeTable *nt, const char *ty) {
   if (!(sp_streq(ty, "CallNode"))) return 0;
@@ -11297,6 +11317,9 @@ static int emit_call_stmt(Compiler *c, int id, Buf *b, int indent, const NodeTab
             int tv = ++g_tmp, tval = ++g_tmp;
             emit_indent(b, indent);
             buf_printf(b, "{ sp_RbVal _t%d = ", tv); emit_expr(c, recv, b); buf_puts(b, "; ");
+            /* the value runs between the receiver's read and the store, and
+               would collect a receiver nothing else holds */
+            if (!nil_rhs && boxed_writer_holds_recv(c, argv[0], at)) buf_printf(b, "SP_GC_ROOT_RBVAL(_t%d); ", tv);
             if (nil_rhs) {
               /* a nil literal has nothing to run; any other value of nil
                  type (a method that answers nil, `(bump; nil)`) runs first,
