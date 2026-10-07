@@ -1,0 +1,30 @@
+A String case subject asks an object arm its ===
+
+`case str when obj` is `obj === str`, but the String arm of `when`
+answered false for every arm that is not a String, before an object
+arm's own === (or ==, which Object#=== calls) was asked:
+
+    class Prefix
+      attr_accessor :s
+      def initialize(s) = @s = s
+      def ===(o) = o.start_with?(@s)
+    end
+    case "abc"
+    when Prefix.new("ab") then puts "hit"    # CRuby
+    else puts "miss"                         # Spinel
+    end
+
+An Array or a Hash subject already asks such an arm
+(emit_case_container_eq), and an Integer subject does. A String
+subject now does too: emit_when_str_obj_eq, called from
+emit_when_typed_test, so the statement and the case value share it.
+It calls the method where its one parameter is boxed
+(emit_when_user_eq) or a String and it answers a boolean; the arm is
+rooted across the call, and a nil arm matches only a nil subject.
+Every other arm keeps the answer it had: a class kept by value, a
+parameter a call has typed as something else, an optional or rest
+parameter, an answer that is no boolean.
+
+Test: test/case_when_string_subject_object_arm.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
