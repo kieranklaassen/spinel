@@ -1,0 +1,119 @@
+diff --git a/src/analyze.c b/src/analyze.c
+index 909f3684..23baffc6 100644
+--- a/src/analyze.c
++++ b/src/analyze.c
+@@ -1958,6 +1958,17 @@ static void seq_statements(const NodeTable *nt, int stmts, int own, int *seq, in
+   }
+ }
+ 
++/* Whether the program names one of the listed methods as its own: by a def,
++   or by a Symbol or String literal anywhere (alias, define_method, undef). */
++static const char *const kind_queries[] = { "is_a?", "kind_of?", "instance_of?", NULL };
++static int program_names_method(const NodeTable *nt, const char *const *list) {
++  static const NodeKind lk[] = { NK_SymbolNode, NK_StringNode };
++  for (int q = 0; q < 2; q++)
++    NT_FOREACH_KIND(nt, lk[q], s) if (name_listed(list, literal_name(nt, s))) return 1;
++  NT_FOREACH_KIND(nt, NK_DefNode, d) if (name_listed(list, nt_str(nt, d, "name"))) return 1;
++  return 0;
++}
++
+ /* The numbering of the whole program. A program that defines a hook, or a
+    declaration's own name, runs it at a definition: nothing is quiet then. A
+    program that names is_a?, kind_of? or instance_of? as a method of its own
+@@ -1973,15 +1984,9 @@ static void seq_statements(const NodeTable *nt, int stmts, int own, int *seq, in
+ static int *seq_build(const NodeTable *nt) {
+   int *seq = calloc(SEQ_LEN(nt), sizeof(int));
+   if (!seq) return NULL;
+-  static const NodeKind lk[] = { NK_SymbolNode, NK_StringNode };
+-  for (int q = 0; q < 2; q++)
+-    NT_FOREACH_KIND(nt, lk[q], s) {
+-      const char *sv = literal_name(nt, s);
+-      if (sv && is_kind_query(sv)) return seq;
+-    }
++  if (program_names_method(nt, kind_queries)) return seq;
+   NT_FOREACH_KIND(nt, NK_DefNode, d) {
+     const char *dn = nt_str(nt, d, "name");
+-    if (dn && is_kind_query(dn)) return seq;
+     if (name_listed(def_hooks, dn) || name_listed(quiet_decls, dn)) seq[nt->count] = 1;
+   }
+   int n = 0, anc = 0; seq_statements(nt, nt_ref(nt, nt->root_id, "statements"), 0, seq, &n);
+@@ -2071,31 +2076,27 @@ static int class_opened_once(Compiler *c, const char *cn) {
+   return 1;
+ }
+ 
+-/* `x.is_a?(A)` (kind_of?, instance_of?) where `A = SomeClass`: rewrite the
+-   argument's name to the class the constant holds, as `A.foo` and `when A`
+-   read it, so every arm that names the class and the narrowing after it see
+-   the class. Only where the constant is known to hold that class when the
+-   call runs: its one write is `A = <constant>`, a statement, and has run by
+-   then. A read at the program's or a class body's own level sits in a later
+-   statement. A method body runs whenever something calls it, and a call
+-   before the write may reach a body written after it: there, nothing that
+-   runs a method of the program comes before the write. A second write may
+-   hold another class, and before the write CRuby raises NameError. */
+-static void rewrite_const_alias_kind_arg(Compiler *c, int id, int **seq) {
+-  const NodeTable *nt = c->nt;
+-  const char *name = nt_str(nt, id, "name");
+-  if (!name || !is_kind_query(name)) return;
+-  int args = nt_ref(nt, id, "arguments"), argc = 0;
+-  const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &argc) : NULL;
+-  if (argc != 1 || !const_read_is_programs(c, argv[0])) return;
+-  const char *an = nt_str(nt, argv[0], "name");
++/* A read of `A` where `A = SomeClass`, in a place that takes a class by its
++   name: rewrite the name to the class the constant holds, as `A.foo` and
++   `when A` read it, so every reader of that place sees the class. Only where
++   the constant is known to hold that class when the read runs: its one write
++   is `A = <constant>`, a statement, and has run by then. A read at the
++   program's or a class body's own level sits in a later statement. A method
++   body runs whenever something calls it, and a call before the write may
++   reach a body written after it: there, nothing that runs a method of the
++   program comes before the write. A second write may hold another class, and
++   before the write CRuby raises NameError. */
++static void rewrite_const_alias_read(Compiler *c, int rd, int **seq) {
++  const NodeTable *nt = c->nt;
++  if (!const_read_is_programs(c, rd)) return;
++  const char *an = nt_str(nt, rd, "name");
+   if (!an || comp_class_index(c, an) >= 0) return;   /* already a class name */
+   const char *real = is_builtin_class_name(an) ? NULL : resolve_class_alias(c, an);   /* a builtin: no scan */
+   if (!real || sp_streq(real, an) || !class_opened_once(c, real)) return;
+   int w = const_only_write(nt, an);
+   if (nt_kind(nt, w) != NK_ConstantWriteNode || !const_read_is_programs(c, nt_ref(nt, w, "value"))) return;
+   if (!*seq && !(*seq = seq_build(nt))) return;
+-  int sw = (*seq)[w], sr = (*seq)[argv[0]], runs = (*seq)[nt->count];
++  int sw = (*seq)[w], sr = (*seq)[rd], runs = (*seq)[nt->count];
+   if (!(sw & 1)) return;                                   /* the write is no statement */
+   /* the value is read where and when the write stands: it is the class
+      where its definition is a statement before the write, one a bare name
+@@ -2112,10 +2113,10 @@ static void rewrite_const_alias_kind_arg(Compiler *c, int id, int **seq) {
+   }
+   if (sr & 2 ? runs && runs <= sw : (sr | 3) <= (sw | 3)) return;
+   const int *own = *seq + nt->count + 1;
+-  if (!const_read_reaches(nt, argv[0], own[w], own)) return;
+-  if ((*seq)[SEQ_LEN(nt) - 1] && nt_kind(nt, argv[0]) == NK_ConstantReadNode && own[argv[0]] != own[w]) return;
++  if (!const_read_reaches(nt, rd, own[w], own)) return;
++  if ((*seq)[SEQ_LEN(nt) - 1] && nt_kind(nt, rd) == NK_ConstantReadNode && own[rd] != own[w]) return;
+   char buf[256]; snprintf(buf, sizeof buf, "%s", real);  /* copy: set frees an */
+-  nt_set_str((NodeTable *)nt, argv[0], "name", buf);
++  nt_set_str((NodeTable *)nt, rd, "name", buf);
+ }
+ 
+ /* `A = SomeClass` (a constant aliasing a class) then `A.foo`: rewrite the
+@@ -2124,11 +2125,16 @@ static void rewrite_const_alias_kind_arg(Compiler *c, int id, int **seq) {
+    reopening rewrite in walk_scope. Runs once after classes are registered. */
+ void rewrite_const_alias_receivers(Compiler *c) {
+   const NodeTable *nt = c->nt;
+-  int *seq = NULL;   /* statement numbers, built for the first kind query that asks */
++  int *seq = NULL;   /* statement numbers, built for the first read that asks */
+   for (int id = 0; id < nt->count; id++) {
+     const char *ty = nt_type(nt, id);
+     if (!ty || !sp_streq(ty, "CallNode")) continue;
+-    rewrite_const_alias_kind_arg(c, id, &seq);
++    {   /* x.is_a?(A), kind_of?, instance_of? */
++      const char *name = nt_str(nt, id, "name");
++      int args = nt_ref(nt, id, "arguments"), argc = 0;
++      const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &argc) : NULL;
++      if (name && argc == 1 && is_kind_query(name)) rewrite_const_alias_read(c, argv[0], &seq);
++    }
+     int recv = nt_ref(nt, id, "receiver");
+     if (recv < 0 || !nt_type(nt, recv)) continue;
+     const char *rvty = nt_type(nt, recv);

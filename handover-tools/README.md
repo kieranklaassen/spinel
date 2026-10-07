@@ -55,3 +55,8 @@ for the third (the constant in `rescue` and `raise`; its refactor's message
 is in commit 69d79bf9), `gd-*` for the fourth (an exception's `is_a?` where
 two modules name a class alike), `qc-*` for the fifth (the compile time of a
 constant's lookup through a diamond of includes).
+
+`patches/` holds each piece as a diff on the master it was last built on
+(the file's name ends in that master's id): `git apply --index` on that
+master gives the tree the hand-over names, and the piece's commit message
+is the text beside it in `texts/`.
