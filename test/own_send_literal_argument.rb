@@ -1,0 +1,78 @@
+# A class's own #send is the method a call reaches on its instances, also
+# when the first argument is a literal Symbol or String: it is the message,
+# not the name of a method.
+
+# The builtin is still the call's where the program's method hands the call
+# back to it: under an alias of the builtin, and through super.
+class Old
+  def hi = "hi"
+  alias_method :orig_send, :__send__
+  def __send__(m, *a) = orig_send(m, *a)
+end
+p Old.new.__send__(:hi)
+
+class Sup
+  def hi = "hi"
+  def public_send(m, *a) = m == :own ? "own" : super
+end
+p Sup.new.public_send(:hi)
+
+class Conn
+  attr_reader :out
+  def initialize(tag)
+    @tag = tag
+    @out = []
+  end
+
+  def send(msg, flags)
+    @out << [msg, flags]
+    "#{@tag}:#{msg}:#{flags}"
+  end
+
+  def twice(msg) = [send(msg, 1), send(:again, 2), self.send("self", 3)]
+end
+
+class TcpConn < Conn
+end
+
+module Posting
+  def send(to) = "posted to #{to}"
+end
+
+class Mailer
+  include Posting
+end
+
+class Feed
+  def self.send(what, n) = "class #{what} #{n}"
+end
+
+Frame = Struct.new(:tag) do
+  def send(msg) = "#{tag}<#{msg}>"
+end
+
+class Calc
+  def double(n) = n * 2
+end
+
+c = Conn.new(:a)
+puts c.send("hello", 0)
+puts c.send(:bye, 1)
+p c.out
+p c.twice(:hey)
+puts c&.send(:nav, 4)
+puts Conn.new(:new).send(:hello, 5)
+puts TcpConn.new(:tcp).send(:hello, 6)
+puts Mailer.new.send(:kieran)
+puts Feed.send(:hello, 7)
+puts Frame.new(:f).send(:hello)
+[1, 2].each { |i| puts c.send(:each, i) }
+puts c.public_send(:send, :through, 8)
+p c.__send__(:out).size
+
+# a receiver that may be nil has Kernel's send, and nil has no such method
+n = ARGV.size > 5 ? Conn.new(:n) : nil
+p((n.send(:out) rescue "nil has no out"))
+
+# a class with no send of its own keeps Object#send
+puts Calc.new.send(:double, 21)

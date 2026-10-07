@@ -618,6 +618,117 @@ int class_recv_static_ci(Compiler *c, int node) {
   return class_var_static_ci(c, node);
 }
 
+/* The program class a receiver is an instance of, proved by its shape where
+   it stands, or -1. A user method compiled for an object runs with a NULL
+   self on nil, so a rule that gives a builtin's name to the program's own
+   method asks this first: `K.new(...)` of a class with no `new` of its own,
+   and a local every write of which is `K.new(...)` of one class, read where
+   a write has run on every path (du_read_maybe_unset). A parameter, an
+   ivar, a method's value or an element may be nil: not answered. */
+static int new_call_class(Compiler *c, int v) {
+  const NodeTable *nt = c->nt;
+  v = unwrap_parens(c, v);
+  int k = v >= 0 && nt_kind(nt, v) == NK_CallNode ? nt_ref(nt, v, "receiver") : -1;
+  const char *n = k >= 0 ? nt_str(nt, v, "name") : NULL;
+  if (!n || !sp_streq(n, "new") || nt_kind(nt, k) != NK_ConstantReadNode) return -1;
+  int ci = comp_class_index(c, nt_str(nt, k, "name"));
+  return ci >= 0 && comp_cmethod_in_chain(c, ci, "new", NULL) < 0 ? ci : -1;
+}
+/* the def, class or module whose locals node n's are, or -1 for the program's */
+static int local_owner(const NodeTable *nt, const int *par, int n) {
+  for (int g = 0; n >= 0 && g < 4096; n = par[n], g++) {
+    NodeKind k = nt_kind(nt, n);
+    if (k == NK_DefNode || k == NK_ClassNode || k == NK_ModuleNode || k == NK_SingletonClassNode) return n;
+  }
+  return -1;
+}
+int recv_object_class_proved(Compiler *c, int recv) {
+  const NodeTable *nt = c->nt;
+  recv = unwrap_parens(c, recv);
+  if (recv < 0 || nt_kind(nt, recv) != NK_LocalVariableReadNode) return new_call_class(c, recv);
+  const char *ln = nt_str(nt, recv, "name");
+  int *par = ln ? du_parent_map(nt) : NULL;
+  if (!par) return -1;
+  int own = local_owner(nt, par, recv), ci = -1;
+  for (int n = 0; n < nt->count && ci != -2; n++) {
+    const char *ty = nt_type(nt, n);
+    size_t tl = ty ? strlen(ty) : 0;
+    int w = ty && comp_is_local_write(nt_kind(nt, n));
+    /* a parameter of the name, a method's or a block's, is bound by a call */
+    if (!w && !(tl > 13 && sp_streq(ty + tl - 13, "ParameterNode")) && !(ty && sp_streq(ty, "BlockLocalVariableNode"))) continue;
+    const char *nn = nt_str(nt, n, "name");
+    if (!nn || !sp_streq(nn, ln) || local_owner(nt, par, n) != own) continue;
+    int wc = nt_kind(nt, n) == NK_LocalVariableWriteNode ? new_call_class(c, nt_ref(nt, n, "value")) : -1;
+    ci = wc < 0 || (ci >= 0 && wc != ci) ? -2 : wc;
+  }
+  if (ci >= 0) {
+    DUPos dp = { malloc(sizeof(int) * ((size_t)nt->count + 1)), calloc((size_t)nt->count + 1, 1) };
+    if (!dp.pos || !dp.done) ci = -1;
+    else {
+      for (int k = 0; k < nt->count; k++) dp.pos[k] = -1;
+      if (du_read_maybe_unset(nt, par, &dp, recv, ln)) ci = -1;
+    }
+    free(dp.pos); free(dp.done);
+    du_memo_free();
+  }
+  free(par);
+  return ci < 0 ? -1 : ci;
+}
+
+/* Whether node `id`, in a def, hands the def's call on to the builtin of its
+   name: `super`, the method object of a name, or a call `kin` names (the
+   builtin under another of its names). */
+static int def_hands_call_on(const NodeTable *nt, int id, int (*kin)(const char *)) {
+  if (id < 0) return 0;
+  NodeKind k = nt_kind(nt, id);
+  if (k == NK_SuperNode || k == NK_ForwardingSuperNode) return 1;
+  const char *n = k == NK_CallNode ? nt_str(nt, id, "name") : NULL;
+  if (n && ((kin && kin(n)) || sp_streq(n, "method") || sp_streq(n, "public_method") || sp_streq(n, "instance_method")))
+    return 1;
+  for (int i = 0; i < nt_num_refs(nt, id); i++)
+    if (def_hands_call_on(nt, nt_ref_at(nt, id, i), kin)) return 1;
+  for (int i = 0; i < nt_num_arrs(nt, id); i++) {
+    int an = 0; const int *av = nt_arr_at(nt, id, i, &an);
+    for (int j = 0; j < an; j++) if (def_hands_call_on(nt, av[j], kin)) return 1;
+  }
+  return 0;
+}
+/* Whether the program defines a method `nm`, a builtin's name, that takes a
+   call of the name in the builtin's place: every def of it keeps the call
+   (def_hands_call_on: a body that hands it on reaches the builtin again),
+   and no alias names it (an alias of the builtin binds another name to it,
+   and a def that calls that name hands the call on). A program with no def
+   of the name answers 0. */
+int own_def_takes_call(Compiler *c, const char *nm, int (*kin)(const char *)) {
+  const NodeTable *nt = c->nt;
+  int defd = 0;
+  for (int s = 0; s < c->nscopes; s++) {
+    const Scope *sc = &c->scopes[s];
+    if (!sc->name || !sp_streq(sc->name, nm)) continue;
+    if (sc->def_node < 0 || nt_kind(nt, sc->def_node) != NK_DefNode || def_hands_call_on(nt, sc->def_node, kin)) return 0;
+    defd = 1;
+  }
+  if (!defd) return 0;
+  NT_FOREACH_KIND(nt, NK_AliasMethodNode, a)
+    for (int k = 0; k < 2; k++) {
+      int sy = nt_ref(nt, a, k ? "old_name" : "new_name");
+      const char *v = sy >= 0 ? nt_str(nt, sy, "value") : NULL;
+      if (!v || sp_streq(v, nm)) return 0;
+    }
+  NT_FOREACH_KIND(nt, NK_CallNode, a) {
+    const char *cn = nt_str(nt, a, "name");
+    if (!cn || !sp_streq(cn, "alias_method")) continue;
+    int args = nt_ref(nt, a, "arguments"), an = 0;
+    const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+    for (int k = 0; k < an; k++) {
+      NodeKind ak = nt_kind(nt, av[k]);
+      const char *v = ak == NK_SymbolNode ? nt_str(nt, av[k], "value") : ak == NK_StringNode ? nt_str(nt, av[k], "content") : NULL;
+      if (!v || sp_streq(v, nm)) return 0;
+    }
+  }
+  return 1;
+}
+
 /* The literal symbol behind a symbol-typed expression: a SymbolNode itself,
    or a local variable whose only write (in its scope, plain write) is one.
    Lets inject(:op)-style operator selection see through `s = :+; a.inject(s)`.
