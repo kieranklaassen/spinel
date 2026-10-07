@@ -138,6 +138,25 @@ void emit_strbuf_param_bind(Compiler *c, const LocalVar *pv, TyKind want, const 
 void emit_strbuf_orw_guard(Compiler *c, const char *ref, int v, int is_or, Buf *b);
 /* The value a write hands a shared-handle String slot `lv` (codegen_stmt.c) */
 void emit_strbuf_value(Compiler *c, LocalVar *lv, int v, Buf *b);
+/* The handle such a slot takes from value v: its own, or a new one */
+void emit_strbuf_handle_of(Compiler *c, int v, Buf *b);
+/* --share-strings: the handle a value route that answers the String it is
+   handed (`+s`, `String(s)`, `s.then { |x| x }`) hands on: 1, or 0 with
+   nothing emitted */
+int emit_strbuf_route(Compiler *c, int v, Buf *b);
+/* String mutator id's receiver recv as the handle it changes: 1 a slot, 2
+   a route (read once, nil raising NoMethodError for id), 0 neither
+   (codegen_stmt.c) */
+int strbuf_recv_handle(Compiler *c, int id, int recv, char *out, size_t cap);
+/* --share-strings: the handle slot a variable's read names, 0 for any
+   other node (codegen_stmt.c) */
+int strbuf_var_handle(Compiler *c, int n, char *out, size_t cap);
+/* --share-strings: does value v hand over a shared String as its handle
+   (a variable, a route, a conditional with such an arm)? (codegen_stmt.c) */
+int strbuf_value_carries(Compiler *c, int v);
+/* A `next` value a block's boxed answer slot takes: a shared String as its
+   handle's box under --share-strings (codegen_stmt.c) */
+void emit_boxed_next_value(Compiler *c, int v, Buf *b);
 /* The value a Struct constructor or an attribute writer stores into a String
    ivar slot (codegen_stmt.c) */
 void emit_strbuf_ivar_store(Compiler *c, int shared, int v, Buf *b);
@@ -157,6 +176,7 @@ typedef struct { unsigned char box, demand; TyKind ty; int tok, ntok; } SbReader
 int sb_reader_shim_open(Compiler *c, int recv, char *sref, size_t cap, SbReaderSave *sv);
 void sb_reader_shim_close(Compiler *c, int recv, const SbReaderSave *sv);
 int sb_shadowed_reader(int node);
+int sb_shim_args_first(Compiler *c, int id, Buf *pre, int indent);
 int str_mut_var_recv(Compiler *c, int recv);
 void emit_str_frozen_check(Compiler *c, int recv, Buf *b);
 int strbuf_boxed_elem_read(Compiler *c, int v);
@@ -693,6 +713,9 @@ int arg_ran_first(int node, int from);
 /* The handle temp a shared String slot's argument took when it ran first
    (emit_arg_temp), -1 when there is none. */
 int ran_first_handle(int node);
+/* Bind node v to its value temp _t<t>, with th its handle's temp or -1
+   (codegen_fold.c) */
+void ran_first_bind(int v, int t, int th);
 int emit_splat_gather(Compiler *c, Scope *m, const int *argv, const ArgLayout *L);
 /* Does parameter i take the argument written at index i ahead of the first
    splat, however long the splats run? */
@@ -1200,6 +1223,7 @@ int eq_family(TyKind t);
 /* Compile-time `is_a?` for a concrete builtin receiver type: 1 yes, 0 no,
    -1 not determinable here. `exact` is instance_of? (no ancestor match). */
 int ty_matches_class(TyKind t, const char *cn, int exact);
+int builtin_reopen_includes_module(Compiler *c, int mod);
 void emit_method_call(Compiler *c, int id, Buf *b);
 /* A receiverless call the enclosing class's own chain answers (see
    codegen_call.c): the Kernel arms must stand down for it. */
@@ -1565,6 +1589,15 @@ int view_push_arm(int pd_skip, int prbd_skip, int builtin_arm);
    pushed and popped like a view (view_pop) and put back by view_unwind
    (face_of, analyze.h). */
 int view_push_face(int node, TyKind kind);
+/* the statement whose prelude buffer `pre` is open (emit_with_prelude), and
+   the innermost such statement: 0 when none is open. view_push_stmt answers
+   -1 (nothing to pop) when the stack is too deep to take one. */
+int view_push_stmt(int node, const void *pre);
+int view_stmt_top(int *node, const void **pre);
+/* Whether anything in statement `stmt` can bind the local `name` that the
+   read `read` (inside it) names: 1 also when the statement is unknown (< 0),
+   binds a local the walk cannot name, or the read is not in its subtree. */
+int stmt_may_rebind_local(Compiler *c, int stmt, int read, const char *name);
 /* A node bound to the text emit_expr writes for it instead (g_argov_*):
    view_bind answers the binding's slot; view_unbind(n) drops every binding
    from slot n up. */

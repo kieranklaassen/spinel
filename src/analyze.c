@@ -133,7 +133,7 @@ static int bare_rescue_spec_cid(Compiler *c, int rescue_id) {
    loop calls each. Reachability keeps such a method alive; a pass reasoning
    about how a method is entered or what its C signature may be must likewise
    treat it as having a caller it cannot see. */
-static int method_name_implicitly_invoked(const char *nm) {
+int method_name_implicitly_invoked(const char *nm) {
   static const char *const implicit[] = {
     "to_s", "inspect", "==", "<=>", "eql?", "hash", "each", "coerce",
     "to_str", "to_ary", "to_a", "to_i", "to_int", "to_h", "to_hash", "to_proc", "call",
@@ -13466,11 +13466,13 @@ static int an_byref_group_member_string(Compiler *c, Scope *m, int pi) {
     return 0;
   return 1;
 }
-static int an_byref_promote_group(Compiler *c, const char *nm, int pi,
-                                  const char *elig, const unsigned *blocked, int n,
-                                  unsigned *handle) {
+/* Can the name group of `nm` take parameter pi by reference: the lent
+   slot, or, where *captured comes back set, the shared handle? 0 when one
+   member keeps the whole group on the value ABI. blocked (the parameters
+   each scope rebinds) may be NULL: none. */
+static int an_byref_group_takes_ref(Compiler *c, const char *nm, int pi, const char *elig,
+                                    const unsigned *blocked, int n, int *captured) {
   if (!nm || pi < 0 || pi >= 32) return 0;
-  int captured = 0;
   for (int k = 1; k < n; k++) {
     Scope *m = &c->scopes[k];
     if (!m->name || !sp_streq(m->name, nm)) continue;
@@ -13488,14 +13490,14 @@ static int an_byref_promote_group(Compiler *c, const char *nm, int pi,
        member of the name kept the value ABI and appended to a copy. */
     if (!elig[k] && !m->is_transplanted_source) {
       if (!yield_lowers_block(c, k)) return 0;
-      captured = 1;
+      *captured = 1;
     }
     if (pi >= m->nparams || !m->pnames[pi]) return 0;
     /* a parameter rebound after its append (`io << x; io = String.new`)
        cannot be the caller's slot, whose String the rebind would replace:
        the group takes the shared handle, which the rebind leaves to the
        caller. Refused, the append before the rebind went to a copy. */
-    if (blocked[k] & (1u << pi)) captured = 1;
+    if (blocked && (blocked[k] & (1u << pi))) *captured = 1;
     LocalVar *q = scope_local(m, m->pnames[pi]);
     if (!q || !q->is_param || q->is_block_param || q->type != TY_STRING) return 0;
     /* celled for a proc that can outlive the call (a stored proc, a Thread
@@ -13510,8 +13512,15 @@ static int an_byref_promote_group(Compiler *c, const char *nm, int pi,
        slot through it exactly as when byref promoted first -- refusing it
        made the ABI depend on which of the two passes ran first, and the
        caller's buffer came back empty (#4568). */
-    if (q->is_cell && !q->byref_out && q->cell_outlives) captured = 1;
+    if (q->is_cell && !q->byref_out && q->cell_outlives) *captured = 1;
   }
+  return 1;
+}
+static int an_byref_promote_group(Compiler *c, const char *nm, int pi,
+                                  const char *elig, const unsigned *blocked, int n,
+                                  unsigned *handle) {
+  int captured = 0;
+  if (!an_byref_group_takes_ref(c, nm, pi, elig, blocked, n, &captured)) return 0;
   int did = 0;
   for (int k = 1; k < n; k++) {
     Scope *m = &c->scopes[k];
@@ -13523,6 +13532,13 @@ static int an_byref_promote_group(Compiler *c, const char *nm, int pi,
     if (q && !q->byref_out) { q->byref_out = 1; q->is_cell = 1; did = 1; }
   }
   return did;
+}
+
+int an_byref_param_by_value(Compiler *c, const char *elig, int mi, int pi) {
+  Scope *m = &c->scopes[mi];
+  if (!m->name || pi < 0 || !an_byref_group_member_string(c, m, pi)) return 0;
+  int captured = 0;
+  return !an_byref_group_takes_ref(c, m->name, pi, elig, NULL, c->nscopes, &captured);
 }
 
 /* The method a plain call `id` names, by its receiver: self or none (the
@@ -13806,15 +13822,37 @@ static int an_inline_param_lent(Compiler *c, int mi, int j, int blk) {
 }
 
 int a_super_target(Compiler *c, Scope *m);
-static void compute_byref_out_params(Compiler *c) {
+/* The scope indices of the named methods, ordered by name, for the name
+   lookups an_byref_eligible_scopes makes per alias and per literal. */
+typedef struct { const char *name; int si; } ByrefName;
+static int byref_name_cmp(const void *a, const void *b) {
+  const ByrefName *x = a, *y = b;
+  int d = strcmp(x->name, y->name);
+  return d ? d : x->si - y->si;
+}
+/* every method named nm keeps the plain ABI */
+static void byref_name_ineligible(const ByrefName *idx, int ni, const char *nm, char *elig) {
+  if (!nm) return;
+  int lo = 0, hi = ni;
+  while (lo < hi) {
+    int mid = lo + (hi - lo) / 2;
+    if (strcmp(idx[mid].name, nm) < 0) lo = mid + 1;
+    else hi = mid;
+  }
+  for (int i = lo; i < ni && sp_streq(idx[i].name, nm); i++) elig[idx[i].si] = 0;
+}
+
+/* Which methods the default build may lend a String parameter's slot by
+   address (elig[si], c->nscopes entries): a method with a body and
+   parameters, not yielding, not a constructor, not in a Struct or a
+   native class, and no alias, Symbol or String reaching its name. A name
+   group takes the slot only when every member may
+   (an_byref_group_takes_ref). compute_byref_out_params promotes from it,
+   and --share-strings asks it which parameters it can lend (#6765). */
+void an_byref_eligible_scopes(Compiler *c, char *elig) {
   const NodeTable *nt = c->nt;
   int n = c->nscopes;
-  char *elig = calloc((size_t)n, 1);
-  unsigned *blocked = calloc((size_t)n, sizeof(unsigned));  /* per-scope param bitmask */
-  char *polyr = calloc((size_t)n, 1);   /* a POLY receiver reaches the name */
-  unsigned *cellh = calloc((size_t)n, sizeof(unsigned));  /* a proc captures the param */
-  if (!elig || !blocked || !polyr || !cellh) { free(elig); free(blocked); free(polyr); free(cellh); return; }
-
+  memset(elig, 0, (size_t)(n > 0 ? n : 1));
   for (int si = 1; si < n; si++) {
     Scope *s = &c->scopes[si];
     if (!s->name || s->def_node < 0 || s->body < 0) continue;
@@ -13853,15 +13891,23 @@ static void compute_byref_out_params(Compiler *c) {
     if (s->name && sp_streq(s->name, "initialize")) continue;
     elig[si] = 1;
   }
+  ByrefName *idx = malloc(sizeof *idx * (size_t)(n > 0 ? n : 1));
+  if (!idx) {
+    fprintf(stderr, "spinel: out of memory\n");
+    exit(1);
+  }
+  int ni = 0;
+  for (int si = 1; si < n; si++)
+    if (elig[si]) idx[ni++] = (ByrefName){ c->scopes[si].name, si };
+  qsort(idx, (size_t)ni, sizeof *idx, byref_name_cmp);
   /* an aliased name reaches the method under another spelling; the alias call
      sites keep the plain ABI, so the method must too */
   for (int ci = 0; ci < c->nclasses; ci++) {
     ClassInfo *cls = &c->classes[ci];
-    for (int a = 0; a < cls->naliases; a++)
-      for (int si = 1; si < n; si++)
-        if (elig[si] && ((cls->alias_old[a] && sp_streq(cls->alias_old[a], c->scopes[si].name)) ||
-                         (cls->alias_new[a] && sp_streq(cls->alias_new[a], c->scopes[si].name))))
-          elig[si] = 0;
+    for (int a = 0; a < cls->naliases; a++) {
+      byref_name_ineligible(idx, ni, cls->alias_old[a], elig);
+      byref_name_ineligible(idx, ni, cls->alias_new[a], elig);
+    }
   }
   /* A name reached by a Symbol or String -- send / method(:x) /
      define_method / respond_to? / `&:x` / inject(:x) -- takes the plain
@@ -13904,8 +13950,7 @@ static void compute_byref_out_params(Compiler *c) {
     dyn_nonlit = 1;
   }
   for (int id = 0; id < nt->count; id++) {
-    const char *ty = nt_type(nt, id);
-    if (!ty) continue;
+    if (!nt_type(nt, id)) continue;
     /* a symbol/string literal spelling the name (see DYN above) */
     const char *v = NULL;
     int lit = -1;
@@ -13925,8 +13970,7 @@ static void compute_byref_out_params(Compiler *c) {
                  if (jk == NK_SymbolNode || jk == NK_StringNode) {
                    const char *jv = jk == NK_SymbolNode ? nt_str(nt, av[j], "value") : nt_str(nt, av[j], "content");
                    if (!jv) jv = nt_str(nt, av[j], "unescaped");
-                   if (jv) for (int si = 1; si < n; si++)
-                     if (elig[si] && sp_streq(c->scopes[si].name, jv)) elig[si] = 0;
+                   byref_name_ineligible(idx, ni, jv, elig);
                  }
                } }
       }
@@ -13942,9 +13986,24 @@ static void compute_byref_out_params(Compiler *c) {
         if (!v) v = nt_str(nt, lit, "unescaped");
       }
     }
-    if (v)
-      for (int si = 1; si < n; si++)
-        if (elig[si] && sp_streq(c->scopes[si].name, v)) elig[si] = 0;
+    byref_name_ineligible(idx, ni, v, elig);
+  }
+  free(idx);
+}
+
+static void compute_byref_out_params(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  int n = c->nscopes;
+  char *elig = calloc((size_t)n, 1);
+  unsigned *blocked = calloc((size_t)n, sizeof(unsigned));  /* per-scope param bitmask */
+  char *polyr = calloc((size_t)n, 1);   /* a POLY receiver reaches the name */
+  unsigned *cellh = calloc((size_t)n, sizeof(unsigned));  /* a proc captures the param */
+  if (!elig || !blocked || !polyr || !cellh) { free(elig); free(blocked); free(polyr); free(cellh); return; }
+  an_byref_eligible_scopes(c, elig);
+
+  for (int id = 0; id < nt->count; id++) {
+    const char *ty = nt_type(nt, id);
+    if (!ty) continue;
     /* A POLY receiver reaches the method through the cls_id switch, and that
        switch hoists its arguments once, by the argument's own type, for every
        arm to share -- it has no callee to ask, and the arms are what it is
@@ -14109,7 +14168,10 @@ static void compute_byref_out_params(Compiler *c) {
       q->type = TY_STRBUF; q->str_shared = 1;
     }
   }
-  free(elig);
+  /* the share facts built from here on ask the same answer */
+  free(c->byref_elig);
+  c->byref_elig = elig;
+  c->nbyref_elig = n;
   free(blocked);
   free(polyr);
   free(cellh);
@@ -14853,6 +14915,15 @@ static int an_arg_is_shared_handle(Compiler *c, int node) {
       int el = nt_ref(nt, g, "else_clause");
       if (ok && el >= 0) ok = an_stmts_last_shared(c, nt_ref(nt, el, "statements"));
       return ok;
+    }
+    /* `x.then { |v| v }`: a block that is one read of a handle answers it,
+       and that read publishes it */
+    if (g >= 0 && nt_kind(nt, g) == NK_CallNode && nt_str(nt, g, "name") && is_then_alias(nt_str(nt, g, "name")) &&
+        nt_ref(nt, g, "receiver") >= 0 && nt_ref(nt, g, "arguments") < 0) {
+      int blk = nt_ref(nt, g, "block");
+      int body = blk >= 0 && nt_kind(nt, blk) == NK_BlockNode ? nt_ref(nt, blk, "body") : -1;
+      int bn = 0; const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
+      return bn == 1 && nt_kind(nt, bb[0]) == NK_LocalVariableReadNode && an_arg_is_shared_handle(c, bb[0]);
     } }
   /* `h[:k]` / `a[0]` -- an element of a container that holds strings. The
      container-store rules make those elements shared handles as soon as one
@@ -17461,9 +17532,24 @@ static int an_returns_shared_handles(Compiler *c, int mi3, const int *ret_start,
   }
   return ok;
 }
+/* The method a deep-return pickup call reaches: a receiverless call's
+   uniquely named method, or under --share-strings a class method of that
+   name called on its own class (`K.get`), which the pickup takes alike
+   (emit_call_body); else -1. */
+static int an_pickup_target(Compiler *c, int wv) {
+  const NodeTable *nt = c->nt;
+  int wr = nt_ref(nt, wv, "receiver");
+  if (nt_ref(nt, wv, "block") >= 0 || (wr >= 0 && !c->share_strings)) return -1;
+  const char *mn = nt_str(nt, wv, "name");
+  int mi3 = mn ? an_unique_scope_by_name(c, mn) : -1;
+  if (mi3 <= 0 || wr < 0) return mi3;
+  return infer_type(c, wr) == TY_CLASS && c->scopes[mi3].is_cmethod &&
+         c->scopes[mi3].class_id == class_recv_static_ci(c, wr) ? mi3 : -1;
+}
 /* --share-strings: a String mutator whose receiver is a receiverless call
-   of a uniquely named method answering a shared handle on every path
-   (`def get = $g`, `get << x`): the rule shares that String, so the call is
+   (or a class method's call on its class) of a uniquely named method
+   answering a shared handle on every path (`def get = $g`, `get << x`,
+   `K.get << x`): the rule shares that String, so the call is
    marked to hand out the handle its tail publishes, as the deep-return
    pickup marks `r = get`. */
 static int an_mutated_handle_returns(Compiler *c, int **ret_start, int **ret_list) {
@@ -17473,9 +17559,7 @@ static int an_mutated_handle_returns(Compiler *c, int **ret_start, int **ret_lis
     const char *qn = nt_str(nt, q, "name");
     int wv = nt_ref(nt, q, "receiver");
     if (!qn || !sp_str_mutator(qn, 0) || wv < 0 || nt_kind(nt, wv) != NK_CallNode || c->strbuf_box[wv]) continue;
-    if (nt_ref(nt, wv, "receiver") >= 0 || nt_ref(nt, wv, "block") >= 0) continue;
-    const char *mn = nt_str(nt, wv, "name");
-    int mi3 = mn ? an_unique_scope_by_name(c, mn) : -1;
+    int mi3 = an_pickup_target(c, wv);
     if (mi3 <= 0) continue;
     if (!*ret_start) an_returns_by_scope(c, ret_start, ret_list);
     int saw = 0;
@@ -18253,10 +18337,7 @@ static int promote_shared_stored_strings(Compiler *c) {
     int wv = nt_ref(nt, w, "value");
     if (wv < 0 || nt_kind(nt, wv) != NK_CallNode) continue;
     if (c->strbuf_box[wv]) continue;
-    if (nt_ref(nt, wv, "receiver") >= 0) continue;
-    if (nt_ref(nt, wv, "block") >= 0) continue;
-    const char *mn = nt_str(nt, wv, "name");
-    int mi3 = mn ? an_unique_scope_by_name(c, mn) : -1;
+    int mi3 = an_pickup_target(c, wv);
     if (mi3 <= 0) continue;
     if (!ret_start) an_returns_by_scope(c, &ret_start, &ret_list);
     /* every return tail (implicit + explicit) must be a shared slot read */

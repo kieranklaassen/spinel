@@ -1767,7 +1767,6 @@ reject-test: $(SPINEL)
 	  echo "reject-test: FAIL (a refusal after a dynamic send's probed arms did not report cleanly, exit $$st)"; sed -n 1,5p "$$tmp/ds.out"; ok=0; fi; \
 	for spec in "complex_bignum_component:a Complex component given an Integer past 64 bits" \
 	            "rational_pow_bignum:the receiver of a Float \`**\` given a Rational" \
-	            "bignum_div_rational:an Integer operand of a Bignum operation given a Rational" \
 	            "array_push_other_class_temporary:an Array push given a String"; do \
 	  t=test/reject/$${spec%%:*}.rb; why=$${spec#*:}; \
 	  if $(SPINEL) "$$t" -c --no-line-map -o "$$tmp/co.c" >"$$tmp/co.out" 2>&1; then \
@@ -1859,7 +1858,8 @@ GC_STRESS_TESTS := test/gc_root_frame_slots.rb \
                    test/gc_root_volatile_string_slot.rb \
                    test/gc_root_gathered_handle_param.rb \
                    test/dispatch_arm_roots_operands.rb \
-                   test/exception_message_nul.rb
+                   test/exception_message_nul.rb \
+                   test/string_aset_value_runs_first.rb
 gc-stress-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
 	@tmp=$$(mktemp -d /tmp/spinel-gcstress.XXXXXX); ok=1; \
 	if $(CC) -O1 -w -Ilib test/gc-stress/lost.c $(SP_RT_LIB) $(LDFLAGS) -lm -o "$$tmp/lost" 2>"$$tmp/cc.err"; then \
@@ -3317,6 +3317,9 @@ infer-test: $(SPINEL) $(SP_RT_LIB)
 	done; \
 	grep -q 'sp_rb_kw_leaf(const char \* volatile \*_cell_s, const char \* lv_suffix) {' "$$tmp/bsv.c" && \
 	grep -q 'sp_two_slots(const char \* \*_cell_plain, const char \* volatile \*_cell_guarded) {' "$$tmp/bsv.c" || { echo "infer-test: FAIL (borrowed volatility is not selective per parameter or through keywords)"; ok=0; }; \
+	$(SPINEL) test/gc_root_stmt_local_arg.rb -c --no-line-map -o "$$tmp/rsl.c" >/dev/null 2>&1 || { echo "infer-test: FAIL (gc_root_stmt_local_arg: -c)"; ok=0; }; \
+	grep -A1 -E 'sp_Vec \* _t[0-9]+ = lv_ray;' "$$tmp/rsl.c" | head -2 | grep -q 'lv_isect;' || { echo "infer-test: FAIL (a local nothing in its statement rebinds is copied into a rooted argument temp)"; ok=0; }; \
+	grep -A1 -E 'sp_Vec \* _t[0-9]+ = lv_isect;' "$$tmp/rsl.c" | grep -q 'SP_GC_ROOT(_t' || { echo "infer-test: FAIL (a local its statement rebinds lost its argument temp's root)"; ok=0; }; \
 	for cap in fib proc; do \
 	  grep -q "typedef struct { sp_String \* \*c_s; } _$${cap}_cap_" "$$tmp/bsv.c" || { echo "infer-test: FAIL (an owned $$cap capture became a borrowed volatile slot)"; ok=0; }; \
 	done; \

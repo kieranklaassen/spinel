@@ -4541,6 +4541,8 @@ void emit_block_value_into(Compiler *c, int block, const char *dest,
       /* a typed-array tail into the poly-array slot a `next` arm widened */
       const char *apf = (g_ie_next_ty == TY_POLY_ARRAY && tr.elem != TY_POLY) ? array_to_poly_fn(tt) : NULL;
       if (want_poly && tr.kind != RK_BOXED) emit_boxed(c, tail, &vb);
+      /* a `then` read as the shared handle (emit_tap_then_expr): the tail's */
+      else if (dest_ty == TY_STRBUF && repr_share_rule(c)) emit_strbuf_handle_of(c, tail, &vb);
       else if (apf) { buf_printf(&vb, "%s(", apf); emit_expr(c, tail, &vb); buf_puts(&vb, ")"); }
       else emit_expr(c, tail, &vb);
       emit_indent(g_pre, bi);
@@ -5448,8 +5450,11 @@ int emit_with_index_expr(Compiler *c, int id, Buf *b) {
     int saveInd = g_indent; g_indent = innerIndent;
     Buf vb; memset(&vb, 0, sizeof vb);
     TyKind body_ty = TY_UNKNOWN;
+    /* select/reject test the block's value by Ruby's truthiness: an Integer
+       0 keeps its element, and a boxed value is no C scalar (read raw, 0 was
+       dropped and a boxed value did not build) */
     if (is_map) body_ty = emit_iter_step_tail(c, &st, &vb);
-    else emit_iter_step_cond(c, &st, 1, &vb);
+    else emit_iter_step_cond(c, &st, 0, &vb);
     g_indent = saveInd;
     if (is_map) {
       emit_indent(g_pre, innerIndent); buf_printf(g_pre, "sp_%sArray_push%s(_t%d, ", rk, nil_store_sfx(c, rk, bb[bn - 1]), tres);
@@ -7961,6 +7966,30 @@ int kwh_out_of_order(Compiler *c, Scope *m, int kwh) {
   return 0;
 }
 
+/* Bind node v to its value temp _t<t> (its uses read the temp), with th
+   the temp holding its shared handle, or -1 (ran_first_handle answers it).
+   A handle that is itself the value is t == th. */
+void ran_first_bind(int v, int t, int th) {
+  /* every argument, however many: past the table's first MAX_ARG_OVERRIDE
+     entries the rest never ran where a static check refuses the call, or ran
+     at their slots, after the ones that follow them */
+  argov_reserve();
+  int k = 0;
+  for (int j = 0; j < g_n_ran_hnd; j++)
+    if (g_ran_hnd[j].idx < g_n_argov) g_ran_hnd[k++] = g_ran_hnd[j];
+  g_n_ran_hnd = k;
+  if (th >= 0) {
+    if (g_n_ran_hnd == g_cap_ran_hnd) {
+      g_cap_ran_hnd = g_cap_ran_hnd ? g_cap_ran_hnd * 2 : 16;
+      RanHandle *nr = realloc(g_ran_hnd, sizeof *g_ran_hnd * (size_t)g_cap_ran_hnd);
+      if (!nr) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+      g_ran_hnd = nr;
+    }
+    g_ran_hnd[g_n_ran_hnd++] = (RanHandle){ g_n_argov, v, t, th };
+  }
+  view_bind(v, "_t%d", t);
+}
+
 /* The value `v` evaluated into a rooted temp in g_pre, pushed onto the
    g_argov overrides so its uses read the temp. */
 static void emit_arg_temp(Compiler *c, int v) {
@@ -8002,24 +8031,7 @@ static void emit_arg_temp(Compiler *c, int v) {
   else if (needs_root(at)) buf_printf(g_pre, " SP_GC_ROOT(_t%d);", t);
   buf_puts(g_pre, "\n");
   free(hb.p);
-  /* every argument, however many: past the table's first MAX_ARG_OVERRIDE
-     entries the rest never ran where a static check refuses the call, or ran
-     at their slots, after the ones that follow them */
-  argov_reserve();
-  int k = 0;
-  for (int j = 0; j < g_n_ran_hnd; j++)
-    if (g_ran_hnd[j].idx < g_n_argov) g_ran_hnd[k++] = g_ran_hnd[j];
-  g_n_ran_hnd = k;
-  if (th >= 0) {
-    if (g_n_ran_hnd == g_cap_ran_hnd) {
-      g_cap_ran_hnd = g_cap_ran_hnd ? g_cap_ran_hnd * 2 : 16;
-      RanHandle *nr = realloc(g_ran_hnd, sizeof *g_ran_hnd * (size_t)g_cap_ran_hnd);
-      if (!nr) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
-      g_ran_hnd = nr;
-    }
-    g_ran_hnd[g_n_ran_hnd++] = (RanHandle){ g_n_argov, v, t, th };
-  }
-  view_bind(v, "_t%d", t);
+  ran_first_bind(v, t, th);
 }
 
 /* See codegen_internal.h. */
@@ -10895,22 +10907,48 @@ int emit_reader_override_dispatch(Compiler *c, int id, int cid, const char *name
 /* An Object, Array, Hash or Numeric reopening: its instance methods take
    `sp_RbVal self` (emit_method_signature), any value, with no struct of the
    class's own to cast it to. */
-/* A read of a parameter its method never assigns. The parameter's own slot
-   holds that value for the whole call and is rooted on entry
-   (emit_scope_decls), so an argument temp copied from it is reachable without
-   a root of its own however much the later arguments allocate. Not a captured
-   one (its cell is the slot), a lent String (a slot's address), a poly
-   array-or-nil one (gc_roots_take_back may drop its root) or a block
-   parameter (a yielding method's is not rooted). */
-static int read_of_fixed_param(Compiler *c, int node) {
-  if (node < 0 || nt_kind(c->nt, node) != NK_LocalVariableReadNode) return 0;
+/* The local a LocalVariableReadNode reads, when the local's own slot is
+   rooted for as long as it is in scope (emit_scope_decls, declare_local):
+   not a captured one (its cell is the slot), a lent String (a slot's
+   address), a block parameter (a yielding method's is not rooted) or a poly
+   array-or-nil one (gc_roots_take_back may drop its root). NULL otherwise. */
+static LocalVar *read_of_rooted_local(Compiler *c, int node, Scope **sp) {
+  if (node < 0 || nt_kind(c->nt, node) != NK_LocalVariableReadNode) return NULL;
   const char *nm = nt_str(c->nt, node, "name");
   Scope *s = nm ? comp_scope_of(c, node) : NULL;
   LocalVar *lv = s ? scope_local(s, nm) : NULL;
-  if (!lv || !lv->is_param || lv->is_cell || lv->byref_out || lv->arr_or_nil ||
+  if (!lv || lv->is_cell || lv->byref_out || lv->arr_or_nil ||
       lv->type == TY_PROC || (s->blk_param && sp_streq(s->blk_param, nm)))
-    return 0;
-  return s->def_node >= 0 && !subtree_writes_local(c, s->def_node, nm);
+    return NULL;
+  *sp = s;
+  return lv;
+}
+
+/* A read of a parameter its method never assigns. The parameter's own slot
+   holds that value for the whole call and is rooted on entry
+   (emit_scope_decls), so an argument temp copied from it is reachable without
+   a root of its own however much the later arguments allocate. */
+static int read_of_fixed_param(Compiler *c, int node) {
+  Scope *s = NULL;
+  LocalVar *lv = read_of_rooted_local(c, node, &s);
+  return lv && lv->is_param && s->def_node >= 0 &&
+         !subtree_writes_local(c, s->def_node, nt_str(c->nt, node, "name"));
+}
+
+/* A read of a local nothing in the statement around it can rebind, when the
+   argument temp copying it is written into that statement's own prelude:
+   everything that runs between the temp's assignment and the callee's
+   entry is that statement's code or a callee's, and a callee cannot assign
+   a non-captured local of this frame. The local's own root holds the value
+   meanwhile. A temp written into any other buffer -- a private one spliced
+   elsewhere, or with no statement open -- is not judged. */
+static int read_unbound_in_stmt(Compiler *c, int node) {
+  Scope *s = NULL;
+  if (!read_of_rooted_local(c, node, &s)) return 0;
+  int st = -1;
+  const void *pre = NULL;
+  if (!view_stmt_top(&st, &pre) || pre != (const void *)g_pre) return 0;
+  return !stmt_may_rebind_local(c, st, node, nt_str(c->nt, node, "name"));
 }
 
 static int reopen_takes_boxed_self(Compiler *c, int cid) {
@@ -11363,12 +11401,14 @@ else {
         buf_puts(g_pre, ab.p ? ab.p : ""); buf_puts(g_pre, ";\n");
         /* Root heap-typed arg temps: evaluating a later argument may allocate
            and collect an earlier one still sitting in its temp. A copy of a
-           parameter nothing reassigns is held by the parameter's own root:
-           Interp#visit passed its env on through a pushed and popped root at
-           every recursive call. */
+           parameter nothing reassigns, or of a local nothing in this
+           statement can rebind, is held by the local's own root: Interp#visit
+           passed its env on through a pushed and popped root at every
+           recursive call, and ao_render's sampling loop its ray and isect at
+           each of four intersect calls. */
         int held = (att == TY_POLY || needs_root(att)) &&
                    provided >= 0 && repr_of(c, provided).as_ty == att &&
-                   read_of_fixed_param(c, provided);
+                   (read_of_fixed_param(c, provided) || read_unbound_in_stmt(c, provided));
         if (held) {}
         else if (att == TY_POLY) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT_RBVAL(_t%d);\n", atmp[k]); }
         else if (needs_root(att)) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", atmp[k]); }

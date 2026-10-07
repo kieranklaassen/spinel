@@ -249,6 +249,9 @@ void comp_free(Compiler *c) {
   if (!c) return;
   share_facts_free(c);
   share_routes_free(c);
+  free(c->byref_elig);
+  c->byref_elig = NULL;
+  c->nbyref_elig = 0;
   free(c->vs_head); free(c->vs_site); free(c->vs_var); free(c->vs_next); free(c->vs_kind);
   free(c->vs_rparent); free(c->vs_dropped);
   c->vs_head = c->vs_site = c->vs_var = c->vs_next = c->vs_rparent = NULL;
@@ -313,6 +316,9 @@ void comp_free(Compiler *c) {
   }
   free(c->ffi_sources);
   free(c->nscope);
+  if (c->stmt_wr_names)
+    for (int i = 0; i < c->stmt_wr_cap; i++) free(c->stmt_wr_names[i]);
+  free(c->stmt_wr_names); free(c->stmt_wr_state); free(c->stmt_wr_mark);
   free(c->ntype);
   free(c->norigin);
   free(c->node_cbody);

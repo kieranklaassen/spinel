@@ -4396,10 +4396,18 @@ static int emit_complex_rational_call(Compiler *c, int id, Buf *b) {
       buf_puts(b, ") / sp_rational_to_f("); emit_expr(c, argv[0], b); buf_puts(b, "))");
       return 1;
     }
+    /* in the boxed slot promote gives the call, the exact floor, which can
+       pass the word (sp_poly_div_m) */
+    if (crt == TY_INT && argc == 1 && sp_streq(name, "div") &&
+        comp_ntype(c, argv[0]) == TY_RATIONAL && repr_of(c, id).kind == RK_BOXED) {
+      buf_puts(b, "sp_poly_div_m(sp_box_int("); emit_expr(c, recv, b);
+      buf_puts(b, "), sp_box_rational("); emit_expr(c, argv[0], b); buf_puts(b, "))");
+      return 1;
+    }
     if (crt == TY_INT && argc == 1 && sp_streq(name, "div") &&
         comp_ntype(c, argv[0]) == TY_RATIONAL) {
-      buf_puts(b, "sp_rational_floor_i(sp_rational_div(sp_rational_new((sp_int)(");
-      emit_expr(c, recv, b); buf_puts(b, "), 1), "); emit_expr(c, argv[0], b); buf_puts(b, "))");
+      buf_puts(b, "sp_int_rat_div(");
+      emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, ")");
       return 1;
     }
     /* An Integer viewed as a Rational: numerator is self, denominator is 1.
@@ -4518,8 +4526,8 @@ static int emit_complex_rational_call(Compiler *c, int id, Buf *b) {
     /* Integer <op> Rational: lift the Integer to n/1 (covers `2/3r`, `1 + r`). */
     if (crt == TY_INT && argc == 1 && comp_ntype(c, argv[0]) == TY_RATIONAL) {
       if (is_modulo_alias(name)) {
-        buf_puts(b, "sp_rational_mod(sp_rational_new((sp_int)("); emit_expr(c, recv, b);
-        buf_puts(b, "), 1), "); emit_expr(c, argv[0], b); buf_puts(b, ")");
+        buf_puts(b, "sp_int_rat_mod("); emit_expr(c, recv, b);
+        buf_puts(b, ", "); emit_expr(c, argv[0], b); buf_puts(b, ")");
         return 1;
       }
       if (is_basic_arith(name)) {
@@ -4703,6 +4711,12 @@ int emit_poly_pred_value(Compiler *c, int id, const char *tvref,
         return 1;
       }
       int target = comp_class_index(c, cn);   /* a user class in this program? */
+      /* a program module may be mixed into a builtin by reopening it, so a
+         builtin value answers it too: the ancestor walk, which reads those */
+      if (target >= 0 && comp_class_is_module(c, &c->classes[target])) {
+        buf_printf(b, "sp_poly_is_a(%s, (sp_Class){%d})", tvref, target);
+        return 1;
+      }
       if (target >= 0) {   /* user-class target: chain check on the object cls_id */
         buf_printf(b, "(%s.tag == SP_TAG_OBJ && %s.cls_id >= 0 && "
                       "sp_class_le((sp_Class){%s.cls_id}, (sp_Class){%d}))",
@@ -18087,6 +18101,11 @@ int emit_poly_isa_test(Compiler *c, const char *cn, const char *v, int exact, Bu
           }
         buf_puts(b, ")))");
       }
+      /* a module a builtin's reopening includes (`class Hash; include M;
+         end`): a builtin value carries no program class id, so ask the
+         ancestor walk, which reads those reopenings */
+      if (!exact && builtin_reopen_includes_module(c, cid))
+        buf_printf(b, " || sp_poly_is_a(%s, (sp_Class){%d})", v, cid);
     }
     /* a builtin ancestor not covered above (Object/BasicObject/Kernel hold
        for every value but a BasicObject.new, which is only a BasicObject;
@@ -19072,6 +19091,34 @@ static int nil_target_operands(Compiler *c, int id, int *node, TyKind *ty, int m
   return n;
 }
 
+/* Receiver r of a nil-tested call, when it is a route over a shared String
+   (emit_strbuf_route): its handle held in a rooted temp after `lead`, and
+   r bound to the handle's read (a copy, as r's own read is) with that
+   handle beside it (ran_first_bind), which a mutator changes
+   (strbuf_recv_handle). Answers the read's temp, or -1 with nothing
+   emitted. */
+static int emit_nil_target_route(Compiler *c, int r, Buf *b, const char *lead) {
+  Buf hb, op;
+  memset(&hb, 0, sizeof hb);
+  memset(&op, 0, sizeof op);
+  Buf *sv = g_pre;
+  g_pre = &op;
+  int ok = emit_strbuf_route(c, r, &hb);
+  g_pre = sv;
+  int t = -1;
+  if (ok) {
+    int th = ++g_tmp;
+    t = ++g_tmp;
+    if (op.p) buf_puts(b, op.p);
+    buf_puts(b, lead);
+    buf_printf(b, "sp_String * _t%d = %s; SP_GC_ROOT(_t%d);", th, hb.p, th);
+    buf_printf(b, " const char * _t%d = sp_strbuf_read_pub(_t%d); SP_GC_ROOT(_t%d);", t, th, t);
+    buf_puts(b, *lead ? "\n" : " ");
+    ran_first_bind(r, t, th);
+  }
+  free(hb.p); free(op.p);
+  return t;
+}
 /* The temps' declarations and the test, into b, each statement after
    `lead` (a statement prefix: an indent, or nothing inside an expression).
    The operands are bound to the temps; the caller unbinds from *mark. */
@@ -19084,6 +19131,13 @@ static void emit_nil_target_head(Compiler *c, int id, Buf *b, const char *lead, 
   *mark = g_n_argov;
   for (int i = 0; i < n; i++) {
     Buf ob, op;
+    /* --share-strings: a receiver that is a route over a shared String
+       (emit_strbuf_route) is held as the handle it hands on, which the
+       mutator then changes (strbuf_recv_handle reads it) */
+    if (node[i] == r && repr_share_rule(c) && (ty[i] == TY_STRING || ty[i] == TY_STRBUF)) {
+      int t = emit_nil_target_route(c, r, b, lead);
+      if (t >= 0) { snprintf(rtext, sizeof rtext, "_t%d", t); continue; }
+    }
     /* not fresh: ty[i] declares the temp, and a fresh String (#7580) renders as the String
        where its stored type is the handle */
     render_operand(c, node[i], 0, &ob, &op);

@@ -751,6 +751,19 @@ typedef struct {
   TyKind *nilnarrow; /* [node_cap] param-read narrowed by a `return .. if p.nil?`
                         guard: the read's non-nil type (codegen unboxes the poly
                         slot at the read site); TY_UNKNOWN = not narrowed */
+  /* What a statement binds, for codegen's question whether anything in the
+     statement around an argument temp can rebind the local the temp copies
+     (stmt_may_rebind_local, codegen_util.c). Filled per statement on its first
+     query and kept: stmt_wr_state[stmt] is 0 (not yet), 1 (computed) or 2
+     (opaque: a binding the walk cannot name); stmt_wr_names[stmt] the
+     NULL-terminated local names its subtree writes, targets or takes as
+     block parameters; stmt_wr_mark[node] the last statement whose walk
+     reached the node. [stmt_wr_cap] each, grown with the node table, NULL
+     until a program asks. */
+  unsigned char *stmt_wr_state;
+  const char ***stmt_wr_names;
+  int *stmt_wr_mark;
+  int stmt_wr_cap;
   unsigned char *nil_fact; /* [nil_fact_n] the nil fact per node (analyze_nil.c,
                         #7444): NF_MAY_NIL when the node's value may be nil,
                         NF_NOT_NIL when it cannot; read through nil_fact_node */
@@ -981,6 +994,11 @@ typedef struct {
   int share_strings;
   struct ShareFacts *share;
   unsigned share_sig;   /* the types the facts were last applied over */
+  /* the methods compute_byref_out_params let take a lent slot
+     (an_byref_eligible_scopes), kept for the share facts built after it
+     (nbyref_elig scopes; NULL before it runs) */
+  char *byref_elig;
+  int nbyref_elig;
   /* an ivar of a builtin value can be written (desugar_builtin_ivars): a
      reflective read, list or copy of an Array, a Hash or a Random asks the
      runtime's map (sp_bivar_*), and the boxed set gains its builtin arm */

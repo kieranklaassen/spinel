@@ -1531,6 +1531,27 @@ static void emit_boxed_strbuf(Compiler *c, int node, TyKind t, const Repr *rp, B
       return;
     }
   }
+  /* --share-strings: a variable that holds a handle the rule shares (a
+     `next s` an Array.new block answers), or a route that hands on one
+     (emit_strbuf_route): that handle's box */
+  { char vref[1024];
+    /* a `next s` tail is its value's */
+    int vn = node, na = 0;
+    if (nt_kind(c->nt, node) == NK_NextNode && nt_ref(c->nt, node, "arguments") >= 0 &&
+        nt_arr(c->nt, nt_ref(c->nt, node, "arguments"), "arguments", &na) && na == 1)
+      vn = nt_arr(c->nt, nt_ref(c->nt, node, "arguments"), "arguments", &na)[0];
+    if (strbuf_var_handle(c, vn, vref, sizeof vref)) {
+      buf_printf(b, "sp_box_nullable_obj(%s, SP_BUILTIN_STRBUF)", vref);
+      RC(RF_STRBUF_HANDLE, RW_NONE);
+      return;
+    } }
+  { Buf hb; memset(&hb, 0, sizeof hb);
+    if (emit_strbuf_route(c, node, &hb)) {
+      buf_printf(b, "sp_box_nullable_obj(%s, SP_BUILTIN_STRBUF)", hb.p);
+      free(hb.p);
+      RC(RF_STRBUF_HANDLE, RW_NONE);
+      return;
+    } }
   /* a demanded literal / expression store: wrap a FRESH handle so the
      container element is mutable in place (#3227 P3) */
   buf_puts(b, "sp_box_obj(sp_String_new_shared(");
@@ -1917,7 +1938,28 @@ void emit_boxed(Compiler *c, int node, Buf *b) {
   /* --share-strings: a String stored into a boxed slot the rule shares (an
      ivar that also holds nil) is boxed as its handle, which a later `<<`
      on the slot's box appends to in place (share_lift_poly_ivar_stores) */
+  /* --share-strings: a `next v` that is a block's boxed answer (a proc's
+     tail) boxes v as a next does (emit_boxed_next_value) */
+  if (repr_share_rule(c) && node >= 0 && nt_kind(c->nt, node) == NK_NextNode && nt_ref(c->nt, node, "arguments") >= 0) {
+    int na = 0;
+    const int *av = nt_arr(c->nt, nt_ref(c->nt, node, "arguments"), "arguments", &na);
+    TyKind at = na == 1 ? comp_ntype(c, av[0]) : TY_UNKNOWN;
+    if ((at == TY_STRING || at == TY_STRBUF) && strbuf_value_carries(c, av[0])) {
+      emit_boxed_next_value(c, av[0], b);
+      return;
+    }
+  }
   int lift = repr_share_rule(c) && node >= 0 && c->poly_strbuf_lift[node] && comp_ntype(c, node) == TY_STRING;
+  /* a route that hands on a handle (`q ||= s.then { |v| v }`,
+     emit_strbuf_route): that handle's box, not a new handle around a copy */
+  if (lift) {
+    Buf hb; memset(&hb, 0, sizeof hb);
+    if (emit_strbuf_route(c, node, &hb)) {
+      buf_printf(b, "sp_box_nullable_obj(%s, SP_BUILTIN_STRBUF)", hb.p);
+      free(hb.p);
+      return;
+    }
+  }
   if (lift) buf_puts(b, "sp_poly_strbuf_lift(");
   rc_depth++;
   emit_boxed_impl(c, node, b);
@@ -6442,6 +6484,7 @@ void emit_fiber_new(Compiler *c, int id, Buf *b, int as_gen, int size_node) {
       int last = bb[bn - 1];
       Repr lr = repr_of(c, last);
       TyKind lty = lr.as_ty;
+      char sref_fb[1024];
       if (as_gen && stmt_is_yielder_push(c, last, bp0)) {
         /* A generator ending in a bare `y << v` yields v, then terminates with
            the yielder as its result, which `<<` answers. */
@@ -6455,6 +6498,22 @@ void emit_fiber_new(Compiler *c, int id, Buf *b, int as_gen, int size_node) {
       else if (lty == TY_NIL) {
         emit_stmt(c, last, pb, 1);
         buf_puts(pb, "    _fb->yielded_value = sp_box_nil();\n");
+      }
+      /* --share-strings: a String the rule shares is the thread's value
+         itself (`Thread.new { s }.value << x` changes s): its handle, boxed */
+      else if ((lty == TY_STRING || lty == TY_STRBUF) && strbuf_var_handle(c, last, sref_fb, sizeof sref_fb)) {
+        buf_printf(pb, "    _fb->yielded_value = sp_box_nullable_obj(%s, SP_BUILTIN_STRBUF);\n", sref_fb);
+      }
+      /* a route over one, or a conditional with such an arm (`c ? s : nil`) */
+      else if ((lty == TY_STRING || lty == TY_STRBUF) && strbuf_value_carries(c, last)) {
+        Buf pre2 = {0}, vb = {0};
+        Buf *sv2 = g_pre; int sv2i = g_indent;
+        g_pre = &pre2; g_indent = 1;
+        emit_strbuf_handle_of(c, last, &vb);
+        g_pre = sv2; g_indent = sv2i;
+        if (pre2.p) buf_puts(pb, pre2.p);
+        buf_printf(pb, "    _fb->yielded_value = sp_box_nullable_obj(%s, SP_BUILTIN_STRBUF);\n", vb.p ? vb.p : "NULL");
+        free(pre2.p); free(vb.p);
       }
       else {
         Buf pre2 = {0}, vb = {0};
@@ -14986,6 +15045,19 @@ static void emit_class_machinery(const NodeTable *nt, Compiler *c, Buf *b, char 
     buf_puts(b, "        if(sp_class_anc_step(a,want,sp_box_class(cur)))return 1; break;\n      }\n");
     buf_puts(b, "      while(1){\n");
     buf_puts(b, "        if(sp_class_anc_step(a,want,sp_box_class(cur)))return 1;\n");
+    /* the modules a program's reopening of this builtin includes (`class
+       Hash; include DeepMergeable; end`) come right after it: a Hash value
+       carries the builtin's id, never the reopening's, so the includes
+       recorded on the reopening were not reached by is_a? / === */
+    for (int ci = 0; ci < c->nclasses; ci++) {
+      if (cls_nincs[ci] == 0 || !c->classes[ci].name) continue;
+      int bid = builtin_class_id(c->classes[ci].name);
+      if (bid >= 0) continue;
+      buf_printf(b, "        if(cur.cls_id==%d){", bid);
+      for (int q = cls_nincs[ci] - 1; q >= 0; q--)
+        buf_printf(b, "if(sp_class_anc_step(a,want,sp_box_class(((sp_Class){%d}))))return 1;", cls_incs[ci][q]);
+      buf_puts(b, "}\n");
+    }
     /* Numeric includes Comparable; Array/Hash include Enumerable; String includes Comparable */
     buf_puts(b, "        if(cur.cls_id==-113) if(sp_class_anc_step(a,want,sp_box_class(((sp_Class){-114}))))return 1;\n");  /* Numeric->Comparable */
     buf_puts(b, "        if(cur.cls_id==-104||cur.cls_id==-105||cur.cls_id==-106||cur.cls_id==-144||cur.cls_id==-145) if(sp_class_anc_step(a,want,sp_box_class(((sp_Class){-115}))))return 1;\n");  /* Array/Hash/Range/Enumerator/Struct->Enumerable */
@@ -15788,10 +15860,12 @@ static void emit_user_exc_dispatch(Compiler *c, Buf *b) {
   }
 }
 
+extern const Compiler *g_tmc_c;
 char *codegen_program(const NodeTable *nt) {
   char *isa_ext = NULL;  /* sp_poly_is_a's class-value arms, and where they go */
   size_t isa_ext_at = 0;
   Compiler *c = comp_new(nt);
+  g_tmc_c = c;
   analyze_program(c);
   if (g_dump_traits) { ty_traits_dump(c); exit(0); }
   /* --dump-repr: the analysis's answer, printed once the compile passes */

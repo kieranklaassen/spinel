@@ -479,19 +479,23 @@ static int sb_iv_expr_shim(Compiler *c, int id, int recvS, Buf *b,
   int icid = strbuf_ivar_owner(c, recvS);
   const char *ivn = nt_str(nt, recvS, "name");
   if (!ivn || icid < 0 || !strbuf_slot_ref(c, recvS, srefI, sizeof srefI)) return 0;
+  Buf pre; memset(&pre, 0, sizeof pre);
+  int mark = sb_shim_args_first(c, id, &pre, g_indent);
   int tH = ++g_tmp;
   Buf armb; memset(&armb, 0, sizeof armb);
   snprintf(g_sb_iv_repl, sizeof g_sb_iv_repl, "lv__sb%d", tH);
   g_sb_iv_name = ivn; g_sb_iv_cid = icid;
   int handled = rerun(c, id, &armb);
   g_sb_iv_name = NULL; g_sb_iv_cid = -1;
-  if (!handled) { free(armb.p); return 0; }
+  view_unbind(mark);
+  if (!handled) { free(armb.p); free(pre.p); return 0; }
   TyKind resty = repr_of(c, id).as_ty;
-  buf_printf(b, "({ sp_String *_t%d = %s;"
+  buf_printf(b, "({ sp_String *_t%d = %s;%s"
                 " if (sp_String_is_frozen(_t%d)) sp_raise_frozen_str(_t%d->data);"
                 " const char *lv__sb%d = sp_str_concat(sp_String_cstr(_t%d), (&(\"\\xff\")[1]));"
                 " SP_GC_ROOT(lv__sb%d); ",
-             tH, srefI, tH, tH, tH, tH, tH);
+             tH, srefI, pre.p ? pre.p : "", tH, tH, tH, tH, tH);
+  free(pre.p);
   emit_ctype(c, resty == TY_UNKNOWN || resty == TY_VOID ? TY_STRING : resty, b);
   buf_printf(b, " _res%d = %s;", tH, armb.p ? armb.p : "0");
   free(armb.p);
@@ -507,16 +511,20 @@ static int sb_reader_expr_shim(Compiler *c, int id, int recvS, Buf *b,
   SbReaderSave svR;
   int tH = sb_reader_shim_open(c, recvS, srefR, sizeof srefR, &svR);
   if (!tH) return 0;
+  Buf pre; memset(&pre, 0, sizeof pre);
+  int mark = sb_shim_args_first(c, id, &pre, g_indent);
   Buf armb; memset(&armb, 0, sizeof armb);
   int handled = rerun(c, id, &armb);
+  view_unbind(mark);
   sb_reader_shim_close(c, recvS, &svR);
-  if (!handled) { free(armb.p); return 0; }
+  if (!handled) { free(armb.p); free(pre.p); return 0; }
   TyKind resty = repr_of(c, id).as_ty;
-  buf_printf(b, "({ sp_String *_t%d = %s;"
+  buf_printf(b, "({ sp_String *_t%d = %s;%s"
                 " if (sp_String_is_frozen(_t%d)) sp_raise_frozen_str(_t%d->data);"
                 " const char *lv__sb%d = sp_str_concat(sp_String_cstr(_t%d), (&(\"\\xff\")[1]));"
                 " SP_GC_ROOT(lv__sb%d); ",
-             tH, srefR, tH, tH, tH, tH, tH);
+             tH, srefR, pre.p ? pre.p : "", tH, tH, tH, tH, tH);
+  free(pre.p);
   emit_ctype(c, resty == TY_UNKNOWN || resty == TY_VOID ? TY_STRING : resty, b);
   buf_printf(b, " _res%d = %s;", tH, armb.p ? armb.p : "0");
   free(armb.p);
@@ -709,16 +717,22 @@ static void emit_fetch_blk_param(Compiler *c, int id, int blk, TyKind kt, int tk
   Scope *fbs = comp_scope_of(c, blk);
   LocalVar *flv = fbs ? scope_local(fbs, fp0) : NULL;
   if (!flv) { Scope *fes = comp_scope_of(c, id); flv = fes ? scope_local(fes, fp0) : NULL; }
+  int fac = 0; const int *fav = call_args(c->nt, id, &fac);
+  char kref[1024];
   if (flv && flv->type == TY_POLY && kt != TY_POLY) {
     char ktn[32]; snprintf(ktn, sizeof ktn, "_t%d", tk);
-    buf_printf(b, "lv_%s = ", rename_local(fp0)); emit_boxed_text(c, kt, ktn, b); buf_puts(b, "; ");
+    buf_printf(b, "lv_%s = ", rename_local(fp0));
+    /* --share-strings: the String asked for is the key the block is handed
+       (`fetch(s) { |k| k << x }` changes s): its handle, boxed */
+    if (kt == TY_STRING && fac >= 1 && strbuf_var_handle(c, fav[0], kref, sizeof kref))
+      buf_printf(b, "sp_box_nullable_obj(%s, SP_BUILTIN_STRBUF)", kref);
+    else emit_boxed_text(c, kt, ktn, b);
+    buf_puts(b, "; ");
   }
   /* a parameter that is the shared handle (--share-strings) takes the key
      argument's handle, the String it was asked for, or a handle of its own
      around a key that is a String of its own */
   else if (flv && repr_of_slot(c, flv).kind == RK_STRBUF && kt == TY_STRING) {
-    int fac = 0; const int *fav = call_args(c->nt, id, &fac);
-    char kref[1024];
     if (fac >= 1 && strbuf_slot_ref(c, fav[0], kref, sizeof kref))
       buf_printf(b, "lv_%s = %s; ", rename_local(fp0), kref);
     else buf_printf(b, "lv_%s = sp_String_new_shared(_t%d); ", rename_local(fp0), tk);
@@ -3540,12 +3554,14 @@ static int emit_str_mutator_call(Compiler *c, int id, Buf *b, const NodeTable *n
          alias/container observes it: recompute via the non-bang transform of
          the current contents, then replace the buffer (#3227). */
       { char srefB[1024];
-        if (strbuf_slot_ref(c, recv, srefB, sizeof srefB)) {
+        int hrB = strbuf_recv_handle(c, id, recv, srefB, sizeof srefB);
+        if (hrB) {
           /* a reader call answering the handle (`obj.name.strip!`, `name.strip!`
              inside the class) emits as the sp_String *, which the plain form
              below cannot take as its receiver: it reads the contents already
-             bound in _tob instead, and the call runs once (#6436) */
-          int rd_call = nt_kind(nt, recv) == NK_CallNode && g_n_argov < MAX_ARG_OVERRIDE;
+             bound in _tob instead, and the call runs once (#6436); so does a
+             route over a handle (`(+s).upcase!`, --share-strings) */
+          int rd_call = (nt_kind(nt, recv) == NK_CallNode || hrB == 2) && g_n_argov < MAX_ARG_OVERRIDE;
           int tsb = ++g_tmp, tob = ++g_tmp, tnb = ++g_tmp;
           buf_printf(b, "({ sp_String *_t%d = %s; const char *_t%d = sp_String_cstr(_t%d); (void)_t%d; ",
                      tsb, srefB, tob, tsb, tob);
@@ -3727,14 +3743,22 @@ static int emit_str_mutator_call(Compiler *c, int id, Buf *b, const NodeTable *n
     if (sp_streq(name, "insert") && argc == 2) {
       int lvw = str_mut_var_recv(c, recv) || sb_shadowed_reader(recv);
       int to = ++g_tmp, ti2 = ++g_tmp, tn2 = ++g_tmp;
-      /* rooted across the index and the text, which may allocate */
-      buf_printf(b, "({ const char *_t%d = ", to); emit_recv_rooted(c, recv, to, "SP_GC_ROOT_STR", b);
+      /* CRuby evaluates the receiver, the index and the text, and only then
+         reads the String: a variable receiver is read after them, so a text
+         that changes it (`s.insert(1, (s << "x"; "y"))`) is seen; any other
+         receiver is taken first and rooted across them, which may allocate.
+         The text is converted, and rooted, before the frozen check, where
+         CRuby raises its TypeError. */
+      buf_puts(b, "({ ");
+      if (!lvw) { buf_printf(b, "const char *_t%d = ", to); emit_recv_rooted(c, recv, to, "SP_GC_ROOT_STR", b); }
+      buf_printf(b, "sp_int _t%d = ", ti2); emit_int_expr(c, argv[0], b);
+      buf_printf(b, "; const char *_v%d = ", tn2); emit_str_insert_text(c, argv[1], b);
+      buf_printf(b, "; SP_GC_ROOT_STR(_v%d); ", tn2);
+      if (lvw) { buf_printf(b, "const char *_t%d = ", to); emit_recv_rooted(c, recv, to, "SP_GC_ROOT_STR", b); }
       buf_printf(b, "sp_str_check_mutable(_t%d);", to);   /* frozen -> FrozenError (#3003) */
-      buf_printf(b, " sp_int _t%d = ", ti2); emit_int_expr(c, argv[0], b);
-      buf_printf(b, "; if (_t%d < 0) _t%d += (sp_int)sp_str_length(_t%d) + 1;", ti2, ti2, to);
-      buf_printf(b, " const char *_t%d = sp_str_splice_at(_t%d, _t%d, 0, ", tn2, to, ti2);
-      emit_str_insert_text(c, argv[1], b);
-      buf_puts(b, ", 0); ");
+      /* -1 appends; an index past the ends raises IndexError, as CRuby */
+      buf_printf(b, " const char *_t%d = sp_str_splice_at(_t%d, _t%d == -1 ? (sp_int)sp_str_length(_t%d) : _t%d < 0 ? _t%d + 1 : _t%d, 0, _v%d, 0); ",
+                 tn2, to, ti2, to, ti2, ti2, ti2, tn2);
       emit_str_mut_writeback(c, recv, lvw, tn2, b);
       buf_printf(b, "_t%d; })", tn2);
       { *out = 1; return 1; }
@@ -3742,7 +3766,7 @@ static int emit_str_mutator_call(Compiler *c, int id, Buf *b, const NodeTable *n
     if (sp_streq(name, "replace") && argc == 1) {
       /* shared-mutable local: swap the buffer contents in place (#3227) */
       { char srefR[1024];
-        if (strbuf_slot_ref(c, recv, srefR, sizeof srefR)) {
+        if (strbuf_recv_handle(c, id, recv, srefR, sizeof srefR)) {
           int tbR = ++g_tmp;
           buf_printf(b, "({ sp_String *_t%d = %s; sp_String_set_bin(_t%d, ",
                      tbR, srefR, tbR);
@@ -3775,7 +3799,7 @@ static int emit_str_mutator_call(Compiler *c, int id, Buf *b, const NodeTable *n
   if (rt == TY_STRING && sp_streq(name, "bytesplice") && argc == 2 && recv >= 0 &&
       comp_ntype(c, argv[0]) == TY_RANGE) {
     { char srefBR[1024];
-      if (strbuf_slot_ref(c, recv, srefBR, sizeof srefBR)) {
+      if (strbuf_recv_handle(c, id, recv, srefBR, sizeof srefBR)) {
         int tm2 = ++g_tmp, tr3 = ++g_tmp, tn3 = ++g_tmp;
         buf_printf(b, "({ sp_String *_t%d = %s; sp_Range _t%d = sp_range_ix(", tm2, srefBR, tr3);
         emit_expr(c, argv[0], b); buf_puts(b, ")");
@@ -3801,7 +3825,7 @@ static int emit_str_mutator_call(Compiler *c, int id, Buf *b, const NodeTable *n
   /* append_as_bytes copies bytes without negotiating the receiver's encoding. */
   if (rt == TY_STRING && sp_streq(name, "append_as_bytes") && argc >= 1 && recv >= 0) {
     { char srefAB[1024];
-      if (strbuf_slot_ref(c, recv, srefAB, sizeof srefAB)) {
+      if (strbuf_recv_handle(c, id, recv, srefAB, sizeof srefAB)) {
         int tm2 = ++g_tmp;
         buf_printf(b, "({ sp_String *_t%d = %s;", tm2, srefAB);
         for (int a9 = 0; a9 < argc; a9++) {
@@ -3837,7 +3861,7 @@ static int emit_str_mutator_call(Compiler *c, int id, Buf *b, const NodeTable *n
   if (rt == TY_STRING && sp_streq(name, "bytesplice") && argc == 3 && recv >= 0) {
     /* shared handle receiver: swap the buffer in place (#3227) */
     { char srefBS[1024];
-      if (strbuf_slot_ref(c, recv, srefBS, sizeof srefBS)) {
+      if (strbuf_recv_handle(c, id, recv, srefBS, sizeof srefBS)) {
         int tm2 = ++g_tmp, tn3 = ++g_tmp;
         buf_printf(b, "({ sp_String *_t%d = %s;"
                       " const char *_t%d = sp_str_bytesplice(sp_String_cstr(_t%d), ",
@@ -4031,6 +4055,8 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
       if (sbn && g_nren < MAX_RENAME) {
         Scope *shs = comp_scope_of(c, recvS);
         LocalVar *shlv = scope_local(shs, sbn);
+        Buf pre; memset(&pre, 0, sizeof pre);
+        int mark = sb_shim_args_first(c, id, &pre, g_indent);
         int tH = ++g_tmp;
         Buf armb; memset(&armb, 0, sizeof armb);
         snprintf(g_ren_from[g_nren], sizeof g_ren_from[0], "%s", sbn);
@@ -4040,14 +4066,16 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
         int handled = emit_array_call(c, id, &armb);
         shlv->type = sv_ty;
         g_nren--;
-        if (!handled) { free(armb.p); }
+        view_unbind(mark);
+        if (!handled) { free(armb.p); free(pre.p); }
         else {
           TyKind resty = repr_of(c, id).as_ty;
-          buf_printf(b, "({ sp_String *_t%d = lv_%s;"
+          buf_printf(b, "({ sp_String *_t%d = lv_%s;%s"
                         " if (sp_String_is_frozen(_t%d)) sp_raise_frozen_str(_t%d->data);"
                         " const char *lv__sb%d = sp_str_concat(sp_String_cstr(_t%d), (&(\"\\xff\")[1]));"
                         " SP_GC_ROOT(lv__sb%d); ",
-                     tH, rename_local(sbn), tH, tH, tH, tH, tH);
+                     tH, rename_local(sbn), pre.p ? pre.p : "", tH, tH, tH, tH, tH);
+          free(pre.p);
           emit_ctype(c, resty == TY_UNKNOWN || resty == TY_VOID ? TY_STRING : resty, b);
           buf_printf(b, " _res%d = %s;", tH, armb.p ? armb.p : "0");
           free(armb.p);
@@ -7540,6 +7568,14 @@ static int int_arms_round_divide(Compiler *c, int id, Buf *b, const NodeTable *n
                   " sp_PolyArray_push(_t%d, sp_box_float(_t%d)); _t%d; })",
                tq, tm, r, tb, tq, tm, o, o, o, tq, o, tm, o);
   }
+  /* a divisor known only at run time: the pair Numeric#divmod makes for its
+     kind (a Rational's is exact, sp_rat_mod_v). It was read as an Integer,
+     and 7.divmod(Rational(-3, 2)) answered [-7, 0] */
+  else if (sp_streq(name, "divmod") && argc == 1 &&
+           repr_of(c, argv[0]).kind == RK_BOXED && comp_ntype(c, id) == TY_POLY_ARRAY) {
+    buf_printf(b, "sp_poly_to_poly_array(sp_poly_divmod(sp_box_int(%s), ", r);
+    emit_expr(c, argv[0], b); buf_puts(b, "))");
+  }
   else if (sp_streq(name, "divmod") && argc == 1 &&
            comp_ntype(c, argv[0]) != TY_RATIONAL) {
     int tb = ++g_tmp, o = ++g_tmp;
@@ -7572,9 +7608,13 @@ static int int_arms_round_divide(Compiler *c, int id, Buf *b, const NodeTable *n
   }
   /* a boxed divisor answers by its run-time kind: a Float floors the real
      quotient as the typed arm above does. It was converted to an Integer
-     first, and 17.div(2.5) answered 8 where CRuby answers 6. */
+     first, and 17.div(2.5) answered 8 where CRuby answers 6. A Bignum or a
+     Rational divides as Numeric#div does (sp_int_div_poly). */
   else if (sp_streq(name, "div") && argc == 1 && repr_of(c, argv[0]).kind == RK_BOXED) {
-    buf_printf(b, "sp_int_div_boxed(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")");
+    /* the boxed slot promote gives the call holds a quotient past the word */
+    if (repr_of(c, id).kind == RK_BOXED) buf_printf(b, "sp_poly_div_m(sp_box_int(%s), ", r);
+    else buf_printf(b, "sp_int_div_poly(%s, ", r);
+    emit_expr(c, argv[0], b); buf_puts(b, ")");
   }
   else if (is_div_or_modulo(name) && argc == 1 &&
            int_divisor_coerce_fail(c, r, argv[0], b)) {}
@@ -7616,14 +7656,17 @@ static int int_arms_round_divide(Compiler *c, int id, Buf *b, const NodeTable *n
   else if ((sp_streq(name, "modulo") || sp_streq(name, "%%")) && argc == 1 &&
            comp_ntype(c, argv[0]) == TY_RATIONAL) {
     /* Integer % Rational lifts the receiver to n/1 (floor modulo) */
-    buf_printf(b, "sp_rational_mod(sp_rational_new((sp_int)(%s), 1), ", r);
+    buf_printf(b, "sp_int_rat_mod(%s, ", r);
     emit_expr(c, argv[0], b); buf_puts(b, ")");
   }
   /* a boxed Float divisor answers a Float CRuby's way (17.modulo(2.5) is
      2.0), which the Integer-typed call cannot hold: raise rather than answer
      the modulo of a divisor cut to an Integer (it answered 1) */
   else if (sp_streq(name, "modulo") && argc == 1 && repr_of(c, argv[0]).kind == RK_BOXED) {
-    buf_printf(b, "sp_int_modulo_boxed(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")");
+    /* typed boxed, as `%` is: the modulo of the divisor's run-time kind */
+    if (repr_of(c, id).kind == RK_BOXED) buf_printf(b, "sp_poly_modulo(sp_box_int(%s), ", r);
+    else buf_printf(b, "sp_int_modulo_boxed(%s, ", r);
+    emit_expr(c, argv[0], b); buf_puts(b, ")");
   }
   else if (sp_streq(name, "modulo") && argc == 1) { buf_printf(b, "sp_imod(%s, ", r); emit_int_divisor(c, argv[0], b); buf_puts(b, ")"); }
   else if (sp_streq(name, "remainder") && argc == 1 && comp_ntype(c, argv[0]) == TY_FLOAT) {
@@ -7637,21 +7680,16 @@ static int int_arms_round_divide(Compiler *c, int id, Buf *b, const NodeTable *n
   }
   else if (sp_streq(name, "remainder") && argc == 1 &&
            comp_ntype(c, argv[0]) == TY_RATIONAL) {
-    buf_printf(b, "sp_rational_rem(sp_rational_new((sp_int)(%s), 1), ", r);
+    buf_printf(b, "sp_int_rat_rem(%s, ", r);
     emit_expr(c, argv[0], b); buf_puts(b, ")");
   }
   else if (sp_streq(name, "remainder") && argc == 1) { buf_printf(b, "sp_iremainder(%s, ", r); emit_int_expr(c, argv[0], b); buf_puts(b, ")"); }
   else if (sp_streq(name, "divmod") && argc == 1 && comp_ntype(c, argv[0]) == TY_RATIONAL) {
-    /* [floor quotient (Integer), self - q*b (Rational)] */
-    int ta = ++g_tmp, tb2 = ++g_tmp, tq2 = ++g_tmp, to2 = ++g_tmp;
-    buf_printf(b, "({ sp_Rational _t%d = sp_rational_new((sp_int)(%s), 1); sp_Rational _t%d = ", ta, r, tb2);
-    emit_expr(c, argv[0], b);
-    buf_printf(b, "; sp_int _t%d = sp_rational_floor_i(sp_rational_div(_t%d, _t%d));"
-                  " sp_Rational _r = sp_rational_sub(_t%d, sp_rational_mul(sp_rational_new(_t%d, 1), _t%d));"
-                  " sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);"
-                  " sp_PolyArray_push(_t%d, sp_box_int(_t%d));"
-                  " sp_PolyArray_push(_t%d, sp_box_rational(_r)); _t%d; })",
-               tq2, ta, tb2, ta, tq2, tb2, to2, to2, to2, tq2, to2, to2);
+    /* [floor quotient (Integer), self - q*b (Rational)]; the quotient
+       past the word a Bignum (sp_int_rat_divmod) */
+    int ta = ++g_tmp;
+    buf_printf(b, "({ sp_int _t%d = (%s); sp_int_rat_divmod(_t%d, ", ta, r, ta);
+    emit_expr(c, argv[0], b); buf_puts(b, "); })");
   }
   else if (sp_streq(name, "gcdlcm") && argc == 1 &&
            comp_ntype(c, argv[0]) == TY_FLOAT) {
@@ -8247,16 +8285,18 @@ static int emit_scalar_call_arms(Compiler *c, int id, Buf *b) {
        mutates a heap string in place and copies only a static literal, so the
        handle's buffer serves directly and the republish is needed only in
        that one case. */
+    /* (--share-strings: a route over a handle, `(+s).setbyte(0, 90)`, too) */
     if (nmS && recvS >= 0 && sp_streq(nmS, "setbyte") &&
         (repr_of(c, recvS).as_ty == TY_STRBUF ||
-         (comp_ntype(c, recvS) == TY_STRING && strbuf_local_name(c, recvS)))) {
+         (comp_ntype(c, recvS) == TY_STRING && (strbuf_local_name(c, recvS) || repr_share_rule(c))))) {
       int aS = nt_ref(ntS, id, "arguments"); int acS = 0;
       const int *avS = aS >= 0 ? nt_arr(ntS, aS, "arguments", &acS) : NULL;
       char srefB[1024];
       const char *sbnB = strbuf_local_name(c, recvS);
-      int haveB = sbnB ? (snprintf(srefB, sizeof srefB, "lv_%s", sbnB), 1)
-                       : strbuf_slot_ref(c, recvS, srefB, sizeof srefB);
-      if (avS && acS == 2 && haveB) {
+      int haveB = avS && acS == 2 &&
+                  (sbnB ? (snprintf(srefB, sizeof srefB, "lv_%s", sbnB), 1)
+                        : strbuf_recv_handle(c, id, recvS, srefB, sizeof srefB));
+      if (haveB) {
         int tH = ++g_tmp;
         buf_printf(b, "({ sp_String *_t%d = %s;"
                       " if (sp_String_is_frozen(_t%d)) sp_raise_frozen_str(_t%d->data);"
