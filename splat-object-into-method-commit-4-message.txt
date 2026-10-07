@@ -1,0 +1,37 @@
+Only an object of the program's own class is splatted as itself
+
+The commits beneath hand a splatted object over as itself where no
+class above it is a Struct, a Data or a native class and the program
+has no way to a to_a. A class Spinel ships in packages/ passed that
+test, but it is what Spinel wrote of CRuby's class, not all of it:
+the to_a it lacks proves nothing. CRuby asks a StringIO, a Tempfile
+and a Zlib reader for to_a, and an empty one answers []:
+
+    require "tempfile"
+    def n(a) = a.class
+    tf = Tempfile.new
+    p n(*tf)       # Tempfile; CRuby raises ArgumentError
+
+Such an object keeps the form it had before those commits. Its
+answer there (Array) was wrong and still is; it is not made another
+wrong one that reads as right.
+
+The parser stamps a class or a module opened in a file the require
+resolver took from packages/, and a constant written there
+(`node_pkg`, read off the splice markers as `node_bi` is, so a build
+without a line map has it too). splat_class_is_own asks whether the
+program opened the class and every class and module above it that
+the compiler holds as a class, with no packages/ file opening it too
+and none of them native. A builtin exception above it and Comparable
+or Kernel mixed in are no such classes and are not asked: CRuby's
+have no to_a. A program that prepends a module it did not write
+keeps every object's form. splat_operand_is_plain_object asks it
+before it answers yes.
+
+An object of the program's own class is handed over as before, also
+in a program that requires such packages, also where its class
+includes Comparable or sits beneath a builtin exception.
+
+Test: test/splat_object_beside_package.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
