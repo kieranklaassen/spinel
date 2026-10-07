@@ -553,6 +553,23 @@ static void ffi_arg_to_temp(Buf *call, size_t at, Buf *pre, const char *ctype, i
   buf_printf(call, "_b%d_%d", tb, ai);
 }
 
+/* Does the subtree hold a writer assignment (`obj.x = v`)? */
+static int subtree_has_setter_assign(const NodeTable *nt, int id) {
+  if (id < 0) return 0;
+  if (nt_kind(nt, id) == NK_CallNode && call_is_setter_assign(nt, id)) return 1;
+  int nr = nt_num_refs(nt, id);
+  for (int i = 0; i < nr; i++)
+    if (subtree_has_setter_assign(nt, nt_ref_at(nt, id, i))) return 1;
+  int na = nt_num_arrs(nt, id);
+  for (int i = 0; i < na; i++) {
+    int n = 0;
+    const int *ids = nt_arr_at(nt, id, i, &n);
+    for (int j = 0; j < n; j++)
+      if (subtree_has_setter_assign(nt, ids[j])) return 1;
+  }
+  return 0;
+}
+
 /* a call on a module or a class: native and FFI functions, singleton accessors, a writer in an instance_eval block, class methods */
 int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv) {
   /* native binding dispatch (Path B): Module.func(...) where Module declared
@@ -1235,6 +1252,18 @@ int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
             buf_puts(b, "); ");
             emit_expr(c, argv[0], b);
             buf_puts(b, "; })");
+            return 1;
+          }
+          /* a value of nil type that is no literal (a method that answers
+             nil) is run once by the call and has nothing to read back: a
+             temporary for it would be declared void. Not where the receiver
+             or the value holds a writer assignment of its own: the call is
+             emitted with g_setter_value_inner raised, and one that ends a
+             block there answers the writer's body. */
+          if (at == TY_NIL && !subtree_has_setter_assign(nt, recv) && !subtree_has_setter_assign(nt, argv[0])) {
+            buf_puts(b, "({ (void)(");
+            g_setter_value_inner++; emit_call_body(c, id, b); g_setter_value_inner--;
+            buf_puts(b, "); 0; })");
             return 1;
           }
           if (at != TY_UNKNOWN && at != TY_VOID) {
