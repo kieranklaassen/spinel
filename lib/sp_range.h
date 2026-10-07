@@ -132,6 +132,10 @@ sp_RbVal sp_box_frange(sp_FloatRange v);
 sp_float sp_frange_max(sp_FloatRange r);
 sp_StrRange sp_srange_new(const char *f, const char *l, sp_int e);
 sp_StrArray *sp_srange_to_a(sp_StrRange r);
+/* a String Range walked a member at a time (lib/sp_str_walk.c) */
+typedef struct { const char *cur, *end, *stop; long long at, lim; sp_int excl; int width, kind; } sp_StrWalk;
+const char *sp_str_walk_first(sp_StrWalk *w, const char *s, const char *e, sp_int excl);
+const char *sp_str_walk_next(sp_StrWalk *w);
 sp_bool sp_srange_eq(sp_StrRange a, sp_StrRange b);
 sp_bool sp_srange_cover(sp_StrRange r, const char *x);
 sp_bool sp_srange_include(sp_StrRange r, const char *x);
