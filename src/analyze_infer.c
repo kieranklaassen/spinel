@@ -1331,6 +1331,108 @@ static int ivar_array_elems_all_int_array(Compiler *c, int cid, const char *ivna
   return v;
 }
 
+/* Whether `v` is an Array literal whose every element is an Array literal of
+   Integers. */
+static int an_int_row_literals(Compiler *c, int v) {
+  const NodeTable *nt = c->nt;
+  if (nt_kind(nt, v) != NK_ArrayNode) return 0;
+  int en = 0;
+  const int *ev = nt_arr(nt, v, "elements", &en);
+  for (int e = 0; e < en; e++)
+    if (nt_kind(nt, ev[e]) != NK_ArrayNode || comp_ntype(c, ev[e]) != TY_INT_ARRAY) return 0;
+  return en > 0;
+}
+
+/* The stores made through a local that holds a row of a constant table:
+   `e = T[i]` and, in the same scope, `e << v`, `e[i] = v`, `e.insert(i, v)`
+   or `e.concat([v])`. One list for the program, rebuilt per fixpoint
+   iteration like the receiver set above, and when the table grows: asked
+   per table, the walk was every such local times every call. */
+typedef struct { const Scope *sc; const char *ln; const char *cn; } RowLocal;
+typedef struct { const char *cn; int call; } RowStore;
+static RowStore *g_rowst;
+static int g_rowst_n, g_rowst_cnt = -1;
+static unsigned g_rowst_gen;
+static const NodeTable *g_rowst_nt;
+static int row_local_cmp(const void *a, const void *b) {
+  const RowLocal *x = a, *y = b;
+  if (x->sc != y->sc) return x->sc < y->sc ? -1 : 1;
+  int d = strcmp(x->ln, y->ln);
+  return d ? d : strcmp(x->cn, y->cn);
+}
+static void row_stores_build(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  RowLocal *loc = NULL; int nloc = 0, cloc = 0;
+  NT_FOREACH_KIND(nt, NK_LocalVariableWriteNode, w) {
+    int v = unwrap_parens(c, nt_ref(nt, w, "value"));
+    if (v < 0 || nt_kind(nt, v) != NK_CallNode || !sp_streq(nt_str(nt, v, "name"), "[]")) continue;
+    int r = nt_ref(nt, v, "receiver");
+    const char *ln = nt_str(nt, w, "name");
+    if (r < 0 || nt_kind(nt, r) != NK_ConstantReadNode || !ln || !nt_str(nt, r, "name")) continue;
+    if (nloc == cloc) {
+      cloc = cloc ? cloc * 2 : 16;
+      loc = realloc(loc, (size_t)cloc * sizeof *loc);
+      if (!loc) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+    }
+    loc[nloc++] = (RowLocal){ comp_scope_of(c, w), ln, nt_str(nt, r, "name") };
+  }
+  free(g_rowst); g_rowst = NULL; g_rowst_n = 0;
+  int cst = 0;
+  if (nloc) qsort(loc, (size_t)nloc, sizeof *loc, row_local_cmp);
+  if (nloc) NT_FOREACH_KIND(nt, NK_CallNode, call) {
+    int cr = nt_ref(nt, call, "receiver");
+    const char *cn = nt_str(nt, call, "name");
+    if (cr < 0 || !cn || nt_kind(nt, cr) != NK_LocalVariableReadNode) continue;
+    if (!is_store_alias(cn) && !sp_streq(cn, "insert") && !sp_streq(cn, "concat") && !is_array_push_family(cn)) continue;
+    const Scope *sc = comp_scope_of(c, cr);
+    const char *ln = nt_str(nt, cr, "name");
+    if (!ln) continue;
+    int lo = 0, hi = nloc;
+    while (lo < hi) {
+      int mid = (lo + hi) / 2;
+      if (loc[mid].sc < sc || (loc[mid].sc == sc && strcmp(loc[mid].ln, ln) < 0)) lo = mid + 1;
+      else hi = mid;
+    }
+    for (int k = lo; k < nloc && loc[k].sc == sc && sp_streq(loc[k].ln, ln); k++) {
+      if (k > lo && sp_streq(loc[k].cn, loc[k - 1].cn)) continue;
+      if (g_rowst_n == cst) {
+        cst = cst ? cst * 2 : 16;
+        g_rowst = realloc(g_rowst, (size_t)cst * sizeof *g_rowst);
+        if (!g_rowst) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+      }
+      g_rowst[g_rowst_n++] = (RowStore){ loc[k].cn, call };
+    }
+  }
+  free(loc);
+  g_rowst_gen = g_narrow_gen; g_rowst_nt = nt; g_rowst_cnt = nt->count;
+}
+
+/* Whether a local holding a row of constant table `cname` (`e = T[i]`) is
+   given an element that is no Integer: `e << "s"`, `e[0] = 1.5`,
+   `e.concat(["s"])`. The local is the row, not a copy of it, so the table
+   holds a row of another kind from then on. */
+static int const_row_local_widened(Compiler *c, const char *cname) {
+  const NodeTable *nt = c->nt;
+  if (g_rowst_gen != g_narrow_gen || g_rowst_nt != nt || g_rowst_cnt != nt->count) row_stores_build(c);
+  for (int k = 0; k < g_rowst_n; k++) {
+    if (!sp_streq(g_rowst[k].cn, cname)) continue;
+    int call = g_rowst[k].call;
+    const char *cn = nt_str(nt, call, "name");
+    int is_store = is_store_alias(cn), is_insert = sp_streq(cn, "insert"), is_concat = sp_streq(cn, "concat");
+    int args = nt_ref(nt, call, "arguments"), an = 0;
+    const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+    /* under --share-strings a concat is left as it was: the flag refuses
+       the String literal handed to a general Array */
+    if (is_concat && c->share_strings) continue;
+    for (int a = is_store || is_insert ? 1 : 0; a < an; a++) {
+      TyKind vt = comp_ntype(c, av[a]);
+      /* a boxed value widens no literal (widen_nested_literals) */
+      if (vt != TY_UNKNOWN && vt != TY_POLY && vt != (is_concat ? TY_INT_ARRAY : TY_INT)) return 1;
+    }
+  }
+  return 0;
+}
+
 /* Whether every element of poly-array constant `CNAME` is an int array
    (e.g. `WAVE_FORM = [..].map { (0..7).map { .. } }`). Element reads then
    yield sp_IntArray* instead of a boxed poly. All writes to the constant and
@@ -1338,6 +1440,8 @@ static int ivar_array_elems_all_int_array(Compiler *c, int cid, const char *ivna
 static int const_array_elems_all_int_array_impl(Compiler *c, const char *cname) {
   const NodeTable *nt = c->nt;
   int saw = 0;
+  /* the table is one literal of Integer Array literals nothing stores a row into */
+  int lit_rows = 1, writes = 0;
   for (int id = 0; id < nt->count; id++) {
     const char *ty = nt_type(nt, id);
     if (!ty) continue;
@@ -1351,6 +1455,7 @@ static int const_array_elems_all_int_array_impl(Compiler *c, const char *cname) 
       if (recv < 0 || !sp_streq(nt_type(nt, recv) ? nt_type(nt, recv) : "", "ConstantReadNode")) continue;
       const char *rn = nt_str(nt, recv, "name");
       if (!rn || !sp_streq(rn, cname)) continue;
+      lit_rows = 0;
       if (rewrite) {
         if (!an_rewritten_rows_int(c, id)) return 0;
         continue;
@@ -1368,6 +1473,7 @@ static int const_array_elems_all_int_array_impl(Compiler *c, const char *cname) 
     if (!nm || !sp_streq(nm, cname)) continue;
     int v = nt_ref(nt, id, "value");
     if (v < 0) return 0;
+    if (writes++ || !an_int_row_literals(c, v)) lit_rows = 0;
     /* `CNAME = [...].freeze` binds the same literal */
     if (nt_type(nt, v) && sp_streq(nt_type(nt, v), "CallNode") &&
         nt_str(nt, v, "name") && sp_streq(nt_str(nt, v, "name"), "freeze") &&
@@ -1389,7 +1495,11 @@ static int const_array_elems_all_int_array_impl(Compiler *c, const char *cname) 
     }
     if (arr < 0 || !an_elems_int_rows(c, arr, &saw)) return 0;
   }
-  return saw;
+  /* A row of such a table held under a local and given another kind there
+     is built as a general Array, as a global's is, and the table is a
+     general one: read as an Integer Array the local was a converted copy,
+     and the table kept the row as it was. */
+  return saw && !(lit_rows && const_row_local_widened(c, cname));
 }
 
 int const_array_elems_all_int_array(Compiler *c, const char *cname) {
