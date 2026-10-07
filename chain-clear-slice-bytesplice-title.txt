@@ -1,0 +1,1 @@
+clear, slice! and bytesplice after a String mutator reach the variable

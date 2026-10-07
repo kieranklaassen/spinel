@@ -1,0 +1,44 @@
+clear, slice! and bytesplice after a String mutator reach the variable
+
+    t = +"abc"
+    t.clear.concat("z")
+    p t
+
+printed "" where CRuby prints "z", and `t.concat("x").clear` left
+"abcx". Pull request 7778 took the chain a value-form mutator writes
+its result back through (str_bang_chain_var) past insert, prepend,
+concat, replace and <<. Two things were left.
+
+clear, force_encoding, bytesplice and append_as_bytes answer their
+receiver as those five do, and the chain ended at them:
+`s.bytesplice(0, 1, "Z") << "x"` lost the "x". The chain passes them
+now.
+
+clear, slice! and bytesplice change their receiver in place where it
+is a variable and write nothing back, so after a link they changed the
+link's value, a copy. On a chain from a String variable the chain now
+runs once, for what it does, and the call is then emitted on the
+variable (emit_str_chain_own_call): the chain's value is that
+variable's String. A bang link that changed nothing answers nil and
+the call raises NoMethodError, as before. slice! and bytesplice ran
+such a receiver two to four times: `t.concat("1").bytesplice(0, 2,
+"Q")` left "abcdef11". It runs once.
+
+Both are made only where the chain's value is the variable's String.
+The rest is as it was:
+
+- a chain with a link the program gives String a method under, and a
+  last call under such a name: that method need not answer its
+  receiver;
+- a last clear, slice! or bytesplice where a call of the chain can
+  rebind the variable (read_rebound_by). Through one of the four links
+  the write-back is tested when the program runs, as it is through the
+  other five; where it cannot be tested, on a shared String or a boxed
+  value, the chain ends at that link;
+- a local read as a String out of a boxed slot (`if x.is_a?(String)`):
+  its read is no lvalue, and the chain ends at the link. Through the
+  other five such a chain does not build, where it was silently wrong
+  before pull request 7778;
+- a last clear, slice! or bytesplice on a chain from a boxed variable.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
