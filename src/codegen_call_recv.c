@@ -8054,9 +8054,14 @@ static int emit_scalar_recv_arms(Compiler *c, int id, Buf *b, const NodeTable *n
       buf_printf(b, "sp_num_clamp_open(sp_box_float(%s), ", r); emit_boxed(c, argv[0], b); buf_puts(b, ", "); emit_boxed(c, argv[1], b); buf_puts(b, ")");
     }
     /* a Rational bound: box the operands and clamp through sp_num_clamp, which
-       understands Rational and returns the applied operand unchanged (#3232) */
+       understands Rational and returns the applied operand unchanged (#3232).
+       A boxed bound too, as in the Integer chain: it reaches here under `&.`
+       (a `.` call was moved onto builtins/comparable.rb's definition). Not
+       in a program with a clamp of its own, which the receiver may answer to */
     else if (sp_streq(name, "clamp") && argc == 2 &&
-             (comp_ntype(c, argv[0]) == TY_RATIONAL || comp_ntype(c, argv[1]) == TY_RATIONAL)) {
+             (comp_ntype(c, argv[0]) == TY_RATIONAL || comp_ntype(c, argv[1]) == TY_RATIONAL ||
+              ((comp_ntype(c, argv[0]) == TY_POLY || comp_ntype(c, argv[1]) == TY_POLY) &&
+               !any_class_defines(c, name)))) {
       buf_printf(b, "sp_num_clamp(sp_box_float(%s), ", r); emit_boxed(c, argv[0], b); buf_puts(b, ", "); emit_boxed(c, argv[1], b); buf_puts(b, ")");
     }
     /* Float#clamp with float bounds always yields a float (the returned bound

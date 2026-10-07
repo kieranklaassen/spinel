@@ -109,9 +109,14 @@ int emit_call_identity_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
     }
     /* An Integer/Float receiver with a Rational bound: `>=`/`<=` against an
        sp_Rational struct will not compile. Box both sides and compare through
-       sp_poly_cmp_ck, which orders Rational against Integer/Float exactly (#3232). */
+       sp_poly_cmp_ck, which orders Rational against Integer/Float exactly (#3232).
+       A boxed bound too: it reaches here under `&.` (a `.` call was moved
+       onto builtins/comparable.rb's definition). Not in a program with a
+       between? of its own, which the receiver may answer to. */
     if ((rt == TY_INT || rt == TY_FLOAT) &&
-        (comp_ntype(c, argv[0]) == TY_RATIONAL || comp_ntype(c, argv[1]) == TY_RATIONAL)) {
+        (comp_ntype(c, argv[0]) == TY_RATIONAL || comp_ntype(c, argv[1]) == TY_RATIONAL ||
+         ((comp_ntype(c, argv[0]) == TY_POLY || comp_ntype(c, argv[1]) == TY_POLY) &&
+          !any_class_defines(c, name)))) {
       int ts = hoist_boxed_rooted(c, recv);
       int tlo = hoist_boxed_rooted(c, argv[0]), thi = hoist_boxed_rooted(c, argv[1]);
       buf_printf(b, "(sp_poly_cmp_ck(_t%d, _t%d) >= 0 && sp_poly_cmp_ck(_t%d, _t%d) <= 0)",
