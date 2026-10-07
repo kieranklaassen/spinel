@@ -2233,7 +2233,10 @@ void emit_proc_call_args(Compiler *c, int call, int argc, const int *argv, Buf *
       buf_printf(b, "_sp_proc_poly_args[%d] = ", k);
       /* a handle parameter is NULL for a nil argument: it boxes as nil */
       if (at == TY_STRBUF) buf_printf(b, "(%s ? sp_box_obj(%s, SP_BUILTIN_STRBUF) : sp_box_nil())", tn, tn);
-      else if (storable) emit_boxed_text(c, at, tn, b);
+      /* held for the call where the box is a new cell: the slot keeps it
+         only until the body takes it for its parameter and clears the slot,
+         and nothing roots the parameter */
+      else if (storable) emit_boxed_text_held(c, at, tn, b);
       else buf_puts(b, "sp_box_nil()");
       buf_puts(b, ", ");
     }
@@ -5477,7 +5480,7 @@ static int emit_poly_kw_param(Compiler *c, Scope *ms, int a, const PolyKw *kw,
     TyKind kpt = kpv ? kpv->type : TY_UNKNOWN;
     TyKind at = kw->kwty[e_found];
     char tn[32]; snprintf(tn, sizeof tn, "_t%d", kw->kwtmp[e_found]);
-    if (kpt == TY_POLY && at != TY_POLY) emit_boxed_text(c, at, tn, pa);
+    if (kpt == TY_POLY && at != TY_POLY) emit_boxed_text_held(c, at, tn, pa);
     /* a boxed value may be nil, which an Integer or Float keyword takes as
        its own nil: the plain unbox read the zero under the nil tag */
     else if (at == TY_POLY && kpt != TY_POLY && kpt != TY_UNKNOWN) emit_unbox_nilable_text(c, kpt, tn, pa);
@@ -5876,7 +5879,7 @@ int emit_poly_callable_prearm(Compiler *c, const char *name, int argc,
       char tn[24]; snprintf(tn, sizeof tn, "_t%d", atmp[k]);
       buf_printf(&pubs, "_sp_proc_poly_args[%d] = ", k);
       if (atmp_ty[k] == TY_POLY) buf_puts(&pubs, tn);
-      else emit_boxed_text(c, atmp_ty[k], tn, &pubs);
+      else emit_boxed_text_held(c, atmp_ty[k], tn, &pubs);
       buf_puts(&pubs, ", ");
     }
   }
@@ -6564,6 +6567,10 @@ static int pd_hoist(Compiler *c, int id, const char *name, Buf *b, size_t from, 
       if (!fzl && !spn) { ok = 0; break; }
       continue;
     }
+    /* an arm that holds a box for its call, `(_tN = sp_box_...)`
+       (emit_rooted_conversion): inline, the temp is a slot of the enclosing
+       frame; out of line it is a root pushed and popped on every call */
+    if (st > 0 && r[st - 1] == '(' && i + 10 <= rn && memcmp(r + i, " = sp_box_", 10) == 0) { ok = 0; break; }
     int num = atoi(w + 2);
     int seen = -1;
     for (int k = 0; k < nt; k++) if (tnum[k] == num) { seen = k; break; }
@@ -6793,10 +6800,11 @@ void poly_arm_layout(Compiler *c, Scope *ms, const PolyArgs *A, ArgLayout *L) {
   L->kw = P;
 }
 
-/* Temp `tmp` of type `at` as a parameter of type `pt`. */
+/* Temp `tmp` of type `at` as a parameter of type `pt`. A box that is a new
+   cell is held in the arm's prefix (g_pre), for the arm's call. */
 static void emit_poly_temp_as(Compiler *c, TyKind pt, int tmp, TyKind at, Buf *pa) {
   char tn[32]; snprintf(tn, sizeof tn, "_t%d", tmp);
-  if (pt == TY_POLY && at != TY_POLY) emit_boxed_text(c, at, tn, pa);
+  if (pt == TY_POLY && at != TY_POLY) emit_boxed_text_held(c, at, tn, pa);
   /* a boxed argument may be nil, which an Integer or Float parameter takes
      as its own nil: the plain unbox read the zero under the nil tag */
   else if (at == TY_POLY && pt != TY_POLY && pt != TY_UNKNOWN) emit_unbox_nilable_text(c, pt, tn, pa);
@@ -10830,6 +10838,11 @@ static int emit_struct_new_call(Compiler *c, int id, int ci, int argc, const int
         emit_struct_member_value(c, cls, a, vnode, &mv);
         if (arg_wants_root(c, cls->ivar_types[a], vnode) && !arg_ran_first(vnode, argov_saved))
           emit_rooted_operand(c, cls->ivar_types[a], -1, mv.p ? mv.p : "", b);
+        /* a by-value read boxed for a boxed member: the box is a new cell
+           (arg_read_converts) that sp_<S>_new's allocation, or the next
+           member's box, collects */
+        else if (g_pre && cls->ivar_types[a] == TY_POLY && arg_read_converts(c, TY_POLY, vnode))
+          emit_rooted_conversion(c, TY_POLY, mv.p ? mv.p : "", b);
         else buf_puts(b, mv.p ? mv.p : "");
         free(mv.p);
       }

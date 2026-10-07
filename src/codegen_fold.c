@@ -7569,6 +7569,18 @@ int arg_read_converts(Compiler *c, TyKind pt, int provided) {
   return !same && st != TY_NIL && st != TY_UNKNOWN && st != TY_VOID;
 }
 
+/* The value `expr` of type `at`, boxed. A by-value kind's box is a new cell
+   nothing holds (arg_read_converts): it is assigned to a rooted temp where
+   it stands, for a callee that allocates before it roots what it was given
+   (a proc's body, an arm of a call on a receiver of several classes). */
+void emit_boxed_text_held(Compiler *c, TyKind at, const char *expr, Buf *out) {
+  if (!g_pre || !ty_is_struct_valued(at) || at == TY_CLASS) { emit_boxed_text(c, at, expr, out); return; }
+  Buf bx; memset(&bx, 0, sizeof bx);
+  emit_boxed_text(c, at, expr, &bx);
+  emit_rooted_conversion(c, TY_POLY, bx.p ? bx.p : "sp_box_nil()", out);
+  free(bx.p);
+}
+
 /* Root a converted bare read across the call without moving its evaluation:
    the temp is declared NULL and rooted in g_pre, and assigned where the
    argument stands, so the read sees the value at its own position (the stale

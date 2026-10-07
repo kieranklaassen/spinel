@@ -1889,7 +1889,7 @@ int emit_call_poly_callable_arms(Compiler *c, int id, Buf *b, const NodeTable *n
              The temps stay in the prelude: they are what the roots are on. */
           buf_printf(&pubs, "_sp_proc_poly_args[%d] = ", k);
           { char tn[24]; snprintf(tn, sizeof tn, "_t%d", aptmp[k]);
-            if (storable) emit_boxed_text(c, at, tn, &pubs); else buf_puts(&pubs, "sp_box_nil()"); }
+            if (storable) emit_boxed_text_held(c, at, tn, &pubs); else buf_puts(&pubs, "sp_box_nil()"); }
           buf_puts(&pubs, ", ");
           free(inner.p); free(valb.p);
         }
