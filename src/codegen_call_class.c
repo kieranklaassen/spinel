@@ -1584,6 +1584,7 @@ int emit_call_new_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const c
         if (is2) {
           Buf ub; memset(&ub, 0, sizeof ub);
           emit_ctor_arm_param(c, is2, j, &L, atmp, &pdpre, &ub);
+          if (!pd_uid) ctor_arm_hold(c, is2, j, &L, &pdpre, &ub);
           ctor_arm_arg(c, is2, j, ub.p ? ub.p : "", pd_uid, &pdpre, &ab); free(ub.p);
           continue;
         }
@@ -1756,6 +1757,13 @@ int emit_call_new_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const c
     for (int a = 0; a < argc; a++) {
       atmp[a] = ++g_tmp;
       buf_printf(b, "sp_RbVal _t%d = ", atmp[a]); emit_boxed(c, argv[a], b); buf_puts(b, "; ");
+      /* a fresh argument is rooted, as the Class-valued form above roots every
+         one: the next argument's allocation, or the constructor's of the
+         object, collects it. One already bound to a rooted temp is held. */
+      TyKind at = comp_ntype(c, argv[a]);
+      if (!arg_ran_first(argv[a], 0) && arg_wants_root(c, TY_POLY, argv[a]) &&
+          (at == TY_POLY || at == TY_UNKNOWN || needs_root(at)))
+        buf_printf(b, "SP_GC_ROOT_RBVAL(_t%d); ", atmp[a]);
     }
     buf_printf(b, "sp_RbVal _t%d = sp_box_nil(); switch(_t%d.cls_id){", rt2, kt);
     CtorArityArms aerr = {0};
@@ -1858,6 +1866,7 @@ int emit_call_new_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const c
         if (is) {
           Buf ub; memset(&ub, 0, sizeof ub);
           emit_ctor_arm_param(c, is, j, &L, atmp, &pdpre, &ub);
+          if (!pd_uid) ctor_arm_hold(c, is, j, &L, &pdpre, &ub);
           ctor_arm_arg(c, is, j, ub.p ? ub.p : "", pd_uid, &pdpre, &ab); free(ub.p);
           continue;
         }
