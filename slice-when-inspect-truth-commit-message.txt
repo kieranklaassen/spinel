@@ -1,0 +1,26 @@
+slice_when read through inspect tests its block's value by Ruby's truth
+
+    puts [1, 2, 4, 9].slice_when { |x, y| y - x - 1 }.to_a.inspect
+
+printed [[1, 2], [4], [9]] where CRuby prints [[1], [2], [4], [9]]: an
+Integer is true, and so is 0. A Float went the same way, and the
+program's first Symbol; `(y - x) > 1 ? nil : 0` cut where it answered
+nil; and a block ending in `c && y` or `c || nil` did not build.
+
+The slice_when arm of emit_slice_when_chunk_inspect_expr wrote the
+block's last statement with emit_expr into a C `if`, so the value was
+tested by C's truth: 0, 0.0 and the Symbol numbered 0 were false, nil's
+sentinel was true, and a boxed value was a struct in a condition. It is
+now written with emit_cond, as emit_chunk_while_expr writes it for
+`.to_a` alone. A block ending in a comparison or a predicate emits the
+C it did.
+
+Not here: a `next` with a value in this block is still the walk's own
+`continue`, and `slice_when { }.inspect` with no `to_a` between prints
+the runs where CRuby prints an Enumerator.
+
+Test: test/slice_when_inspect_block_truth.rb (expected from CRuby 3.3.6
+with --enable-frozen-string-literal). master does not build it; line by
+line, 9 of its 14 are wrong, 2 do not build and 3 are right.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

@@ -1,0 +1,1 @@
+slice_when read through inspect tests its block's value by Ruby's truth
