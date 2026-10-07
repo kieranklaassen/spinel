@@ -850,6 +850,18 @@ spinel: 1 refusal, nothing written
 spinel: test/reject/string_global_alias_mutation.rb:5: a String variable assigned from or to a global variable is mutated in place (a String is not yet shared by reference through a global variable). Mutate the String through the global, or assign the global again after the mutation.
 == test/reject/string_global_alias_mutation.rb [promote] rc=1
 spinel: test/reject/string_global_alias_mutation.rb:5: a String variable assigned from or to a global variable is mutated in place (a String is not yet shared by reference through a global variable). Mutate the String through the global, or assign the global again after the mutation.
+== test/reject/string_global_alias_operator_write.rb [default] rc=1
+spinel: test/reject/string_global_alias_operator_write.rb:5: a String variable assigned from or to a global variable is mutated in place (a String is not yet shared by reference through a global variable). Mutate the String through the global, or assign the global again after the mutation.
+== test/reject/string_global_alias_operator_write.rb [promote] rc=1
+spinel: test/reject/string_global_alias_operator_write.rb:5: a String variable assigned from or to a global variable is mutated in place (a String is not yet shared by reference through a global variable). Mutate the String through the global, or assign the global again after the mutation.
+== test/reject/string_global_alias_reader.rb [default] rc=1
+spinel: test/reject/string_global_alias_reader.rb:7: a String variable assigned from or to a global variable is mutated in place (a String is not yet shared by reference through a global variable). Mutate the String through the global, or assign the global again after the mutation.
+== test/reject/string_global_alias_reader.rb [promote] rc=1
+spinel: test/reject/string_global_alias_reader.rb:7: a String variable assigned from or to a global variable is mutated in place (a String is not yet shared by reference through a global variable). Mutate the String through the global, or assign the global again after the mutation.
+== test/reject/string_global_alias_subclass_read.rb [default] rc=1
+spinel: test/reject/string_global_alias_subclass_read.rb:7: a String variable assigned from or to a global variable is mutated in place (a String is not yet shared by reference through a global variable). Mutate the String through the global, or assign the global again after the mutation.
+== test/reject/string_global_alias_subclass_read.rb [promote] rc=1
+spinel: test/reject/string_global_alias_subclass_read.rb:7: a String variable assigned from or to a global variable is mutated in place (a String is not yet shared by reference through a global variable). Mutate the String through the global, or assign the global again after the mutation.
 == test/reject/string_global_array_each_mutation.rb [default] rc=1
 spinel: test/reject/string_global_array_each_mutation.rb:7: an element of a global Array is a String mutated in place through the Array (a String is not yet shared by reference through a global variable's Array). Keep the Array in a local or an instance variable.
 == test/reject/string_global_array_each_mutation.rb [promote] rc=1
