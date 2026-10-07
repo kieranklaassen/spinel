@@ -206,6 +206,10 @@ void argov_reserve(void);
    so emit_object_call leaves the value temp out (see setter_value_open). */
 extern int  g_setter_stmt_id;
 extern int  g_sn_skip;   /* safe-nav re-entry marker (see codegen_util.c) */
+/* Whether emit_call_safe_nav_arms has yet to write the nil guard of the `&.`
+   call `id` and re-enter it. What is emitted before that runs although the
+   receiver is nil. */
+int sn_guard_ahead(Compiler *c, int id);
 extern int  g_cls_tag_skip;   /* poly-dispatch builtin-arm re-entry marker */
 /* Ask subtree_may_allocate before leaving something unrooted across `id`:
    its "no" is a keyed decision (src/decide.c). subtree_allocates is the

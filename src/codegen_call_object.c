@@ -1326,6 +1326,17 @@ static int sn_typed_nil_recv(Repr rrr) {
   return needs_root(rrt) && rrt != TY_POLY && !ty_is_object(rrt);
 }
 
+/* See codegen_internal.h. */
+int sn_guard_ahead(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  if (g_sn_skip == id) return 0;
+  const char *op = nt_str(nt, id, "call_operator");
+  int recv = nt_ref(nt, id, "receiver");
+  if (recv < 0 || !op || !sp_streq(op, "&.")) return 0;
+  Repr rrr = repr_of(c, recv);
+  return rrr.kind == RK_BOXED || sn_typed_nil_recv(rrr);
+}
+
 /* The guard of a `&.` call steps over what its value hoisted (`pre`) when
    `nilt` holds, and the value stays in the call's place. Computed with them
    ahead of the statement, the call ran before what is written before it:
