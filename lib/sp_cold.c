@@ -3855,6 +3855,7 @@ const char *sp_srange_to_s(sp_StrRange r) {
 }
 const char *sp_srange_inspect(sp_StrRange r) {
   const char *lo = r.first ? sp_str_inspect(r.first) : sp_str_empty;
+  SP_GC_ROOT_STR(lo);   /* the end's inspect allocates */
   const char *hi = r.last ? sp_str_inspect(r.last) : sp_str_empty;
   return sp_sprintf("%s%s%s", lo, r.excl ? "..." : "..", hi);
 }
