@@ -6629,6 +6629,34 @@ static int str_arms_slice_encode(Compiler *c, int id, Buf *b, const char *name, 
   else if (sp_streq(name, "split") && argc == 2) {
     buf_printf(b, "sp_str_split_limit(%s, ", r); emit_str_pattern_expr(c, argv[0], b); buf_puts(b, ", "); emit_int_expr(c, argv[1], b); buf_puts(b, ")");
   }
+  /* a boxed bound is whatever it holds at run time, so the boxed clamp
+     decides and the call is typed poly (analyze_infer.c, the same shape
+     test): its answer is the receiver or the bound itself, which for a
+     String the program appends to is the shared handle. An operand that
+     is a slot holding the handle is boxed as that handle, not as the copy
+     its read is (promote_shared_stored_strings makes a String variable
+     mutated in place one). The three operands fill rooted temporaries in
+     Ruby's order, as the typed arm below fills its own; as the arguments
+     of one C call they ran hi, lo, receiver with gcc. */
+  else if (sp_streq(name, "clamp") && argc == 2 && !user_defines_or_reads(c, name) &&
+           (comp_ntype(c, argv[0]) == TY_POLY || comp_ntype(c, argv[1]) == TY_POLY) &&
+           (comp_ntype(c, argv[0]) == TY_POLY || comp_ntype(c, argv[0]) == TY_STRING) &&
+           (comp_ntype(c, argv[1]) == TY_POLY || comp_ntype(c, argv[1]) == TY_STRING)) {
+    int tc = ++g_tmp, tlo = ++g_tmp, thi = ++g_tmp;
+    char href[1024];
+    buf_printf(b, "({ sp_RbVal _t%d = ", tc);
+    /* a receiver that holds no String is nil, which has no clamp */
+    if (strbuf_slot_ref(c, recv, href, sizeof href)) buf_printf(b, "sp_box_nullable_obj(%s, SP_BUILTIN_STRBUF)", href);
+    else buf_printf(b, "sp_box_nullable_str(%s)", r);
+    for (int k = 0; k < 2; k++) {
+      int tk = k ? thi : tlo;
+      buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); sp_RbVal _t%d = ", k ? tlo : tc, tk);
+      if (comp_ntype(c, argv[k]) == TY_STRING && strbuf_slot_ref(c, argv[k], href, sizeof href))
+        buf_printf(b, "sp_box_nullable_obj(%s, SP_BUILTIN_STRBUF)", href);
+      else emit_boxed(c, argv[k], b);
+    }
+    buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); sp_poly_clamp(_t%d, _t%d, _t%d); })", thi, tc, tlo, thi);
+  }
   else if (sp_streq(name, "clamp") && (argc == 2 ||
            (argc == 1 && nt_type(c->nt, argv[0]) && sp_streq(nt_type(c->nt, argv[0]), "RangeNode")))) {
     int lo_n, hi_n;

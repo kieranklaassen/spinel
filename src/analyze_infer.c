@@ -3862,6 +3862,17 @@ static int infer_string_recv_call(Compiler *c, int id, const NodeTable *nt, cons
     /* promote mode: a String#to_i past sp_int is a Bignum (sp_str_to_i_promote).
        It reads the mode, so it sits ahead of the to_i row. */
     if (g_promote_mode && sp_streq(name, "to_i") && argc <= 1) { *out = TY_POLY; return 1; }
+    /* clamp(lo, hi) answers the receiver or the bound that applies, itself.
+       A boxed bound is whatever it holds at run time, and a String the
+       program appends to is held there as a shared handle, so the answer is
+       boxed: read back as a `const char *` it could only be a copy. It sits
+       ahead of the clamp row, which types the call String. The emitter takes
+       the same shape test (str_arms_slice_encode). */
+    if (sp_streq(name, "clamp") && argc == 2 && !an_user_defines_or_reads(c, name)) {
+      TyKind lo = infer_type(c, argv[0]), hi = infer_type(c, argv[1]);
+      if ((lo == TY_POLY || hi == TY_POLY) && (lo == TY_POLY || lo == TY_STRING) &&
+          (hi == TY_POLY || hi == TY_STRING)) { *out = TY_POLY; return 1; }
+    }
     /* builtin-op rows (builtin_ops.c): the calls typed by name, arity and
        block form */
     {
