@@ -2294,6 +2294,28 @@ static void widen_ivar_hash_literals(Compiler *c, const LWIndex *ivw, int cls, c
   }
 }
 
+/* The empty hash literals class `cls` assigns to `inm` take the variant the
+   ivar's slot settled on (a write of a shared String widens String values to
+   the poly-valued variant): left as the String-valued default, the literal
+   builds a hash the slot's boxed store cannot fill. 1 when one changed. */
+static int retype_ivar_empty_hash_literals(Compiler *c, const LWIndex *ivw, int cls, const char *inm, TyKind want) {
+  const NodeTable *nt = c->nt;
+  int changed = 0;
+  if (!c->hash_want) return 0;
+  for (int r = ivw_index_first(ivw, inm); r >= 0; r = ivw->next[r]) {
+    int wi = ivw->node[r];
+    const char *wnm = nt_str(nt, wi, "name");
+    if (!wnm || !sp_streq(wnm, inm)) continue;
+    Scope *ws = comp_scope_of(c, wi);
+    if (!ws || ws->class_id != cls) continue;
+    int wv = nt_ref(nt, wi, "value");
+    if (wv < 0 || wv >= c->node_cap || nt_kind(nt, wv) != NK_HashNode) continue;
+    int hen = 0; nt_arr(nt, wv, "elements", &hen);
+    if (hen == 0 && c->hash_want[wv] != want) { c->hash_want[wv] = want; changed = 1; }
+  }
+  return changed;
+}
+
 int a_proc_params_node(Compiler *c, int create);
 
 static int proc_literal_escapes_as_arg(Compiler *c, int lit);
@@ -2848,20 +2870,31 @@ static int infer_write_container_usage(Compiler *c, const NodeTable *nt, int nfb
         /* replace(other) splices the WHOLE other container in: a hash local
            must be able to hold other's variant (transform_keys! desugars to
            replace and may change the key type). Differing variants widen the
-           local to the universally-boxed PolyPoly hash. */
+           local to the universally-boxed PolyPoly hash, and so does a boxed
+           other, which holds whichever variant the value really is. */
         TyKind ot = infer_type(c, argv[0]);
-        if (recv < 0 || !ty_is_hash(ot)) continue;
-        const char *rpty = nt_type(nt, recv);
-        if (!rpty || !sp_streq(rpty, "LocalVariableReadNode")) continue;
-        const char *rpnm = nt_str(nt, recv, "name");
-        Scope *rpsc = rpnm ? comp_scope_of(c, recv) : NULL;
-        LocalVar *rplv = rpsc ? scope_local(rpsc, rpnm) : NULL;
-        if (rplv && !rplv->is_param && !rplv->is_block_param &&
-            ty_is_hash(rplv->type) && rplv->type != ot &&
-            rplv->type != TY_POLY_POLY_HASH) {
-          rplv->type = TY_POLY_POLY_HASH;   /* a reset local: the sweep reports */
+        if (recv < 0 || (!ty_is_hash(ot) && ot != TY_POLY)) continue;
+        NodeKind rpk = nt_kind(nt, recv);
+        if (rpk == NK_LocalVariableReadNode) {
+          const char *rpnm = nt_str(nt, recv, "name");
+          Scope *rpsc = rpnm ? comp_scope_of(c, recv) : NULL;
+          LocalVar *rplv = rpsc ? scope_local(rpsc, rpnm) : NULL;
+          if (!rplv || rplv->is_block_param) continue;
+          if (!rplv->is_param) {
+            if (ty_is_hash(rplv->type) && rplv->type != ot && rplv->type != TY_POLY_POLY_HASH)
+              rplv->type = TY_POLY_POLY_HASH;   /* a reset local: the sweep reports */
+            continue;
+          }
         }
-        continue;
+        else if (rpk != NK_InstanceVariableReadNode) continue;
+        /* A parameter's or an ivar's Hash is held elsewhere too: the
+           other's keys and values are the evidence a merge! of it is, and
+           the fold below widens the Hash where it is built (a boxed other
+           is of kinds nothing here knows) */
+        if (!ty_is_hash(infer_type(c, recv))) continue;
+        is_idx_write = 1; is_merge = 1;
+        kt = ty_is_hash(ot) ? ty_hash_key(ot) : TY_POLY;
+        vt = ty_is_hash(ot) ? ty_hash_val(ot) : TY_POLY;
       }
       else if (name && sp_streq(name, "[]=") && an == 2) {
         is_idx_write = 1; kt = infer_type(c, argv[0]);
@@ -3593,6 +3626,8 @@ static int infer_write_container_usage(Compiler *c, const NodeTable *nt, int nfb
     if (*slot != before && !slot_reset) changed = 1;
     if (watch_nm && before != TY_POLY_ARRAY && *slot == TY_POLY_ARRAY)
       changed |= widen_ivar_array_params(c, &ivw_ix, watch_cls, watch_nm);
+    if (watch_nm && !is_push && !is_splice && ty_is_hash(before) && ty_is_hash(*slot) && *slot != before)
+      changed |= retype_ivar_empty_hash_literals(c, &ivw_ix, watch_cls, watch_nm, *slot);
     /* A LOCAL that widened to the poly array under a push and whose writes
        read ivar arrays (directly, or through a conditional's arms) is an
        ALIAS of those arrays: widen the sources too, or the local's read
@@ -13950,11 +13985,14 @@ static int infer_block_params_call_arms(Compiler *c, const NodeTable *nt, int id
   return changed;
 }
 
-/* A Proc expression `recv` invoked at `site` with these arguments
+/* A Proc expression `recv` invoked with these arguments
    (pr.call(a), pr === a, `case a when pr`): type the parameters of the proc
-   literal it is -- the literal itself, or the one a local, constant or ivar
-   of that name was assigned. Answers whether a parameter type changed. */
-static int cs_type_proc_site(Compiler *c, int site, int recv, const int *argv, int argc) {
+   literal it is -- the literal itself, or the one a local, constant, ivar
+   or global of that name was assigned, or the one the name a write copies
+   (`q = pr`, the `__fwdc = $pr` an `&$pr` forward reads) was assigned in
+   turn, `depth` such copies deep. Answers whether a parameter type
+   changed. */
+static int cs_type_proc_name(Compiler *c, int recv, const int *argv, int argc, int depth) {
   const NodeTable *nt = c->nt;
   int changed = 0;
   const char *rty = nt_type(nt, recv);
@@ -13967,25 +14005,31 @@ static int cs_type_proc_site(Compiler *c, int site, int recv, const int *argv, i
   /* A proc reached through a name: type the literal that name was assigned.
      A LOCAL was the only name looked at, so the identical lambda written to a
      constant or an instance variable kept the no-evidence int default and
-     answered Integer for whatever it was really called with (#3942). A
-     constant is program-wide, so its write is matched by name alone; a local
-     and an ivar are matched within their scope and class. */
+     answered Integer for whatever it was really called with (#3942), and a
+     global still did. A constant and a global are program-wide, so their
+     writes are matched by name alone; a local and an ivar are matched within
+     their scope and class. */
   const char *varname = nt_str(nt, recv, "name");
-  if (!varname) return 0;
-  int want_kind;
-  if (sp_streq(rty, "LocalVariableReadNode")) want_kind = 0;
-  else if (sp_streq(rty, "ConstantReadNode") || sp_streq(rty, "ConstantPathNode")) want_kind = 1;
-  else if (sp_streq(rty, "InstanceVariableReadNode")) want_kind = 2;
-  else return 0;
-  Scope *call_scope = comp_scope_of(c, site);
+  if (!varname || depth > 4) return 0;
+  /* the name's kind, and the writes of that name, through the kind index
+     (every match is taken, so the kinds' order does not matter) */
+  int want_kind, nwk = 1;
+  NodeKind wks[2] = { NK_NONE, NK_NONE };
+  switch (nt_kind(nt, recv)) {
+  case NK_LocalVariableReadNode:
+    want_kind = 0; wks[0] = NK_LocalVariableWriteNode; break;
+  case NK_ConstantReadNode:
+  case NK_ConstantPathNode:
+    want_kind = 1; wks[0] = NK_ConstantWriteNode; wks[1] = NK_ConstantPathWriteNode; nwk = 2; break;
+  case NK_InstanceVariableReadNode:
+    want_kind = 2; wks[0] = NK_InstanceVariableWriteNode; break;
+  case NK_GlobalVariableReadNode:
+    want_kind = 3; wks[0] = NK_GlobalVariableWriteNode; break;
+  default:
+    return 0;
+  }
+  Scope *call_scope = comp_scope_of(c, recv);
   int call_cls = call_scope ? call_scope->class_id : -1;
-  /* the writes of that name, through the kind index (every match is
-     taken, so the kinds' order does not matter) */
-  static const NodeKind wk_local[] = { NK_LocalVariableWriteNode };
-  static const NodeKind wk_const[] = { NK_ConstantWriteNode, NK_ConstantPathWriteNode };
-  static const NodeKind wk_ivar[] = { NK_InstanceVariableWriteNode };
-  const NodeKind *wks = want_kind == 0 ? wk_local : want_kind == 1 ? wk_const : wk_ivar;
-  int nwk = want_kind == 1 ? 2 : 1;
   for (int wki = 0; wki < nwk; wki++)
   NT_FOREACH_KIND(nt, wks[wki], w) {
     if (want_kind == 0) {
@@ -13998,8 +14042,14 @@ static int cs_type_proc_site(Compiler *c, int site, int recv, const int *argv, i
     const char *wname = nt_str(nt, w, "name");
     if (!wname || !sp_streq(wname, varname)) continue;
     int val = nt_ref(nt, w, "value");
-    if (val < 0 || !is_proc_create(c, val)) continue;
-    if (cs_type_params_site(c, val, argv, argc)) changed = 1;
+    if (val < 0) continue;
+    if (is_proc_create(c, val)) {
+      if (cs_type_params_site(c, val, argv, argc)) changed = 1;
+    }
+    /* a write that copies another name's proc: the literal is that name's */
+    else if (val != recv && infer_type(c, val) == TY_PROC &&
+             cs_type_proc_name(c, val, argv, argc, depth + 1))
+      changed = 1;
   }
   return changed;
 }
@@ -14261,7 +14311,7 @@ int infer_block_params(Compiler *c) {
     int argc = 0; const int *argv = NULL;
     if (call_args >= 0) argv = nt_arr(nt, call_args, "arguments", &argc);
     if (argc == 0) continue;
-    if (cs_type_proc_site(c, id, recv, argv, argc)) changed = 1;
+    if (cs_type_proc_name(c, recv, argv, argc, 0)) changed = 1;
   }
   /* `case v when pr` is `pr === v`: a Proc condition's parameter takes the
      case subject's type. Left out, `case "seven" when ->(s) { s.length }`
@@ -14273,7 +14323,7 @@ int infer_block_params(Compiler *c) {
     for (int k = 0; k < nw; k++) {
       int wc = 0; const int *wconds = nt_arr(nt, whens[k], "conditions", &wc);
       for (int j = 0; j < wc; j++)
-        if (infer_type(c, wconds[j]) == TY_PROC && cs_type_proc_site(c, wconds[j], wconds[j], &pred, 1))
+        if (infer_type(c, wconds[j]) == TY_PROC && cs_type_proc_name(c, wconds[j], &pred, 1, 0))
           changed = 1;
     }
   }

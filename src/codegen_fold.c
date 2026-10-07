@@ -7568,8 +7568,14 @@ void emit_rooted_conversion(Compiler *c, TyKind pt, const char *expr, Buf *out) 
    (the .new / super arg path) emitted args inline; normal method calls already
    hoist+root via emit_dispatch. Rooting in the caller's frame keeps the value
    alive across the whole call. A scalar (int/float/...) arg needs no root and is
-   emitted inline. */
-static void emit_arg_rooted(Compiler *c, Scope *m, int idx, int provided, Buf *out) {
+   emitted inline.
+
+   `held` is the temp the call's hoist (emit_args_filled_argv) already
+   evaluated the argument into and rooted, or 0. An argument that renders as
+   that temp unconverted is passed as it is: copying it into a second rooted
+   temp only rooted the same pointer twice, a frame slot and a store on every
+   call (`Node.new(make_tree(d), make_tree(d))` held each subtree in two). */
+static void emit_arg_rooted(Compiler *c, Scope *m, int idx, int provided, int held, Buf *out) {
   LocalVar *p = scope_local(m, m->pnames[idx]);
   TyKind pt = p ? p->type : TY_UNKNOWN;
   /* a byref out-param arg is a slot address, not a heap value: it hoists its
@@ -7585,7 +7591,13 @@ static void emit_arg_rooted(Compiler *c, Scope *m, int idx, int provided, Buf *o
   }
   Buf ab; memset(&ab, 0, sizeof ab);
   emit_arg_or_default(c, m, idx, provided, &ab);
-  emit_rooted_operand(c, pt, provided, ab.p ? ab.p : default_value_from_compiler(c, pt), out);
+  char ht[24] = "";
+  if (held > 0) snprintf(ht, sizeof ht, "_t%d", held);
+  if (held > 0 && provided >= 0 && ab.p && sp_streq(ab.p, ht)) {
+    emit_obj_upcast_prefix(c, pt, comp_ntype(c, provided), out);
+    buf_puts(out, ht);
+  }
+  else emit_rooted_operand(c, pt, provided, ab.p ? ab.p : default_value_from_compiler(c, pt), out);
   free(ab.p);
 }
 
@@ -10151,7 +10163,7 @@ void emit_args_filled_argv(Compiler *c, int callee_idx, const int *argv, int arg
         if (mt == TY_POLY && et != TY_POLY) emit_boxed_text(c, et, txt, out);
         else buf_puts(out, txt);
       }
-      else emit_arg_rooted(c, m, i, -1, out);
+      else emit_arg_rooted(c, m, i, -1, 0, out);
     }
     return;
   }
@@ -10328,6 +10340,9 @@ void emit_args_filled_argv(Compiler *c, int callee_idx, const int *argv, int arg
     return;
   }
 
+  /* the rooted temp each positional argument was hoisted into, or 0
+     (emit_arg_rooted passes such a temp as it is) */
+  int *held = splat_idx < 0 && kwh < 0 && argv && pos_argc > 0 ? calloc((size_t)pos_argc, sizeof *held) : NULL;
   if (splat_idx < 0 && kwh < 0 && argv) {
     /* Ruby evaluates arguments left to right; C leaves a call's operand order
        unspecified (gcc walks it right to left). Once two arguments can observe
@@ -10389,6 +10404,7 @@ void emit_args_filled_argv(Compiler *c, int callee_idx, const int *argv, int arg
         buf_printf(g_pre, "sp_String *_t%d = %s; SP_GC_ROOT(_t%d);\n", ht, hb.p, ht);
         free(hb.p);
         view_bind(argv[k], "_t%d", ht);
+        if (held) held[k] = ht;
         continue;
       }
       /* any other write whose slot holds the --share-strings handle runs
@@ -10410,6 +10426,7 @@ else {
       }
       free(hb.p);
       view_bind(argv[k], "_t%d", ht);
+      if (held && root) held[k] = ht;
     }
   }
   for (int i = 0; i < m->nparams; i++) {
@@ -10440,7 +10457,7 @@ else {
       int is_kwparam = m->pnames[i] && callee_has_kwarg(c, m, m->pnames[i]);
       int kv = (kwh >= 0 && is_kwparam && !kw_merged) ? kwh_lookup(nt, kwh, m->pnames[i]) : -1;
       if (kv >= 0) {
-        emit_arg_rooted(c, m, i, kv, out);
+        emit_arg_rooted(c, m, i, kv, 0, out);
       }
       else if (ds_hash_tmp >= 0 && is_kwparam && i != m->kwrest_idx) {
         /* Double-splat: extract param by name from the pre-eval'd hash. */
@@ -10467,7 +10484,7 @@ else {
            keywords, so they still bind here.) A post takes its argument from
            the end of the call's, and a positional after a mid-list splat the
            layout could not gather (`g(1, *m, 4)`) a tail parameter. */
-        emit_arg_rooted(c, m, i, argv[L.arg[i]], out);
+        emit_arg_rooted(c, m, i, argv[L.arg[i]], held ? held[L.arg[i]] : 0, out);
       }
       else {
         /* No positional arg and no keyword match. If the param is hash-typed
@@ -10491,11 +10508,12 @@ else {
         /* ...and only into the FIRST unfilled positional slot. Every later
            one hit this same fallback, so `def f(a = nil, b = nil); f(k: 1)`
            handed the hash to both (found while fixing #4030). */
-        emit_arg_rooted(c, m, i, L.from[i] == ARG_KWH ? kwh : -1, out);
+        emit_arg_rooted(c, m, i, L.from[i] == ARG_KWH ? kwh : -1, 0, out);
       }
     }
   }
   view_unbind(argov_saved);  /* drop this call's hoisted-arg overrides */
+  free(held);
   arg_layout_free(&L);
 }
 
@@ -10863,6 +10881,24 @@ int emit_reader_override_dispatch(Compiler *c, int id, int cid, const char *name
 /* An Object, Array, Hash or Numeric reopening: its instance methods take
    `sp_RbVal self` (emit_method_signature), any value, with no struct of the
    class's own to cast it to. */
+/* A read of a parameter its method never assigns. The parameter's own slot
+   holds that value for the whole call and is rooted on entry
+   (emit_scope_decls), so an argument temp copied from it is reachable without
+   a root of its own however much the later arguments allocate. Not a captured
+   one (its cell is the slot), a lent String (a slot's address), a poly
+   array-or-nil one (gc_roots_take_back may drop its root) or a block
+   parameter (a yielding method's is not rooted). */
+static int read_of_fixed_param(Compiler *c, int node) {
+  if (node < 0 || nt_kind(c->nt, node) != NK_LocalVariableReadNode) return 0;
+  const char *nm = nt_str(c->nt, node, "name");
+  Scope *s = nm ? comp_scope_of(c, node) : NULL;
+  LocalVar *lv = s ? scope_local(s, nm) : NULL;
+  if (!lv || !lv->is_param || lv->is_cell || lv->byref_out || lv->arr_or_nil ||
+      lv->type == TY_PROC || (s->blk_param && sp_streq(s->blk_param, nm)))
+    return 0;
+  return s->def_node >= 0 && !subtree_writes_local(c, s->def_node, nm);
+}
+
 static int reopen_takes_boxed_self(Compiler *c, int cid) {
   const char *cn = cid >= 0 ? c->classes[cid].c_name : NULL;
   return cn && (sp_streq(cn, "Object") || sp_streq(cn, "Array") ||
@@ -11312,8 +11348,13 @@ else {
         buf_printf(g_pre, " _t%d = ", atmp[k]);
         buf_puts(g_pre, ab.p ? ab.p : ""); buf_puts(g_pre, ";\n");
         /* Root heap-typed arg temps: evaluating a later argument may allocate
-           and collect an earlier one still sitting in its temp. */
-        if (att == TY_POLY) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT_RBVAL(_t%d);\n", atmp[k]); }
+           and collect an earlier one still sitting in its temp. A copy of a
+           parameter nothing reassigns is held by the parameter's own root:
+           Interp#visit passed its env on through a pushed and popped root at
+           every recursive call. */
+        int held = provided >= 0 && repr_of(c, provided).as_ty == att && read_of_fixed_param(c, provided);
+        if (held) {}
+        else if (att == TY_POLY) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT_RBVAL(_t%d);\n", atmp[k]); }
         else if (needs_root(att)) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", atmp[k]); }
       }
       if (pd_active && pm->pnames[k] && g_nren < MAX_RENAME) {

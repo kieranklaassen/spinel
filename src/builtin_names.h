@@ -143,6 +143,7 @@ int is_match_operator(const char *n); /* !~ =~ */
 int is_object_receiver_handoff(const char *n); /* to_enum enum_for instance_eval instance_exec method public_method */
 int is_div_or_mod(const char *n); /* % / */
 int is_div_or_modulo(const char *n); /* div modulo: the named floored quotient and remainder */
+int is_div_name(const char *n); /* div: the named floored quotient */
 int is_add_or_mul(const char *n); /* * + */
 int is_push_operator(const char *n); /* << push */
 int is_eq_or_eql(const char *n); /* == eql? */
@@ -207,6 +208,7 @@ int is_ivar_set(const char *n);      /* instance_variable_set */
 int is_string_append_or_prepend(const char *n); /* << concat prepend */
 
 int is_string_append(const char *n); /* << concat: appends answering the receiver */
+int is_replace_name(const char *n); /* replace: a String's, Array's or Hash's contents swapped for another's, which ignores a block */
 
 int is_string_rebind_mutator(const char *n); /* mutators needing argument-rebind snapshots */
 

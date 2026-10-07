@@ -7490,14 +7490,14 @@ static int int_arms_round_divide(Compiler *c, int id, Buf *b, const NodeTable *n
   }
   else if (sp_streq(name, "div") && argc == 1 && comp_ntype(c, argv[0]) == TY_FLOAT) {
     /* Integer#div(Float) floors the real quotient (7.div(2.5) == 2) (#2425);
-       a zero divisor is ZeroDivisionError, a NaN one FloatDomainError and a
-       quotient past the Integer range sp_float_fit_i's RangeError */
+       a zero divisor is ZeroDivisionError, a NaN one FloatDomainError, and
+       a quotient past the Integer range sp_float_fit_i's RangeError -- or,
+       in the boxed slot promote mode gives the call, its Bignum */
     int tx = ++g_tmp, tn = ++g_tmp;
     buf_printf(b, "({ sp_int _t%d = (%s); sp_float _t%d = ", tx, r, tn);
     emit_expr(c, argv[0], b);
-    buf_printf(b, "; if (_t%d == 0.0) sp_raise_cls(\"ZeroDivisionError\", \"divided by 0\");"
-                  " if (isnan(_t%d)) sp_raise_cls(\"FloatDomainError\", \"NaN\");"
-                  " sp_float_fit_i(floor((double)_t%d / _t%d)); })", tn, tn, tx, tn);
+    buf_printf(b, "; sp_float_div_%s((double)_t%d, _t%d); })",
+               repr_of(c, id).kind == RK_BOXED ? "v" : "i", tx, tn);
   }
   /* int receiver, Bignum divisor: the receiver always fits an sp_int, but
      the quotient has to be computed in bigint since the divisor cannot
@@ -7857,9 +7857,17 @@ static int emit_scalar_recv_arms(Compiler *c, int id, Buf *b, const NodeTable *n
     if (half_fn) cfn = half_fn;
     if (half_fn && sp_streq(half_fn, "sp_round_half_even")) precop = "SP_PREC_HALF_EVEN";
     else if (half_fn && sp_streq(half_fn, "sp_round_half_down")) precop = "SP_PREC_HALF_DOWN";
+    /* Float#div into the boxed slot promote mode gives it: the Integer
+       floor, a Bignum past the word, where the row's sp_float_div_i raises */
+    if (is_div_name(name) && argc == 1 && repr_of(c, id).kind == RK_BOXED) {
+      int tx = ++g_tmp, ty = ++g_tmp;
+      buf_printf(b, "({ sp_float _t%d = (%s); sp_float _t%d = ", tx, r, ty);
+      emit_float_expr(c, argv[0], b);
+      buf_printf(b, "; sp_float_div_v(_t%d, _t%d); })", tx, ty);
+    }
     /* the arms that read only the receiver and the arguments: builtin-op
        rows (builtin_ops.c) */
-    if (emit_builtin_op_text(c, id, recv, rt, name, r, b)) ;
+    else if (emit_builtin_op_text(c, id, recv, rt, name, r, b)) ;
     else if (is_round_family(name)) {
       if (nonlit) {
         /* The class depends on the runtime ndigits: Float when n > 0, Integer
@@ -12660,9 +12668,32 @@ static int emit_poly_index_call(Compiler *c, int id, Buf *b, const NodeTable *nt
     buf_puts(b, "({ sp_RbVal _t"); buf_printf(b, "%d = ", tv); emit_boxed(c, argv[1], b);
     if (at != TY_INT || subtree_has_side_effect(c, argv[0])) buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); ", tv);
     else buf_puts(b, "; ");
-    if (at == TY_STRING) {
-      buf_printf(b, "sp_poly_set_str("); emit_expr(c, recv, b);
-      buf_puts(b, ", "); emit_expr(c, argv[0], b);
+    int skey_outer, skey_oidx;
+    NodeKind srk = nt_kind(nt, recv);
+    /* a boxed key may be any of String#[]='s at run time (Integer, Range,
+       String, Regexp): the String arm takes it as a Regexp's is taken */
+    int pkey = at == TY_POLY && !splice_recv_index_slot(c, recv, &skey_outer, &skey_oidx);
+    if ((at == TY_STRING || pkey || (at == TY_REGEX && !splice_recv_index_slot(c, recv, &skey_outer, &skey_oidx))) &&
+        (srk == NK_LocalVariableReadNode || srk == NK_InstanceVariableReadNode)) {
+      /* a String receiver replaces the key's first match: a plain one into
+         a fresh buffer, stored back as the Integer index's widen_and_set
+         is, a shared one in place; any other receiver stores as before.
+         The key runs once, into a temp both stores read. */
+      int tk = ++g_tmp;
+      if (at == TY_STRING) { buf_printf(b, "const char *_t%d = ", tk); emit_expr(c, argv[0], b); }
+      else { buf_printf(b, "sp_RbVal _t%d = ", tk); emit_boxed(c, argv[0], b); }
+      buf_puts(b, "; if ("); emit_expr(c, recv, b); buf_puts(b, ".tag == SP_TAG_STR || sp_poly_is_strbuf(");
+      emit_expr(c, recv, b); buf_puts(b, ")) ");
+      emit_expr(c, recv, b);
+      buf_puts(b, " = sp_poly_str_aset_key("); emit_expr(c, recv, b);
+      buf_printf(b, at == TY_STRING ? ", sp_box_str(_t%d), _t%d);\nelse " : ", _t%d, _t%d);\nelse ", tk, tv);
+      buf_printf(b, at == TY_STRING ? "sp_poly_set_str(" : "sp_poly_set_poly("); emit_expr(c, recv, b);
+      buf_printf(b, ", _t%d", tk);
+    }
+    else if (at == TY_STRING || pkey || (at == TY_REGEX && !splice_recv_index_slot(c, recv, &skey_outer, &skey_oidx))) {
+      /* a shared String changes in place; anything else stores as before */
+      buf_printf(b, "sp_poly_str_aset_key("); emit_expr(c, recv, b);
+      buf_puts(b, ", "); emit_boxed(c, argv[0], b);
     }
     else if (at == TY_SYMBOL) {
       buf_printf(b, "sp_poly_set_sym("); emit_expr(c, recv, b);
@@ -13258,14 +13289,15 @@ static int emit_poly_numeric_call(Compiler *c, int id, Buf *b, const NodeTable *
 
 /* pow(n) on a boxed receiver. pow is Integer's alone: sp_poly_pow is `**`,
    which a Float, a Rational or a Complex answers too, so a boxed one
-   answered pow where CRuby raises NoMethodError. */
+   answered pow where CRuby raises NoMethodError. The exponent is evaluated
+   before the call, as CRuby evaluates arguments, and sp_poly_int_pow
+   raises with it as the error's args. */
 static void emit_poly_int_pow(Compiler *c, int recv, int arg, Buf *b) {
-  int tv = ++g_tmp;
+  int tv = ++g_tmp, te = ++g_tmp;
   buf_printf(b, "({ sp_RbVal _t%d = ", tv); emit_boxed(c, recv, b);
-  buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); (_t%d.tag == SP_TAG_INT || _t%d.tag == SP_TAG_BIGINT) ? sp_poly_pow(_t%d, ",
-             tv, tv, tv, tv);
+  buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); sp_RbVal _t%d = ", tv, te);
   emit_boxed(c, arg, b);
-  buf_printf(b, ") : (sp_raise_nomethod(sp_nomethod_msg(\"pow\", _t%d)), sp_box_nil()); })", tv);
+  buf_printf(b, "; sp_poly_int_pow(_t%d, _t%d); })", tv, te);
 }
 
 int emit_poly_call(Compiler *c, int id, Buf *b) {
@@ -13421,7 +13453,7 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
     if (!has_user) {
       if (sp_streq(name, "pow") && argc == 1) emit_poly_int_pow(c, recv, argv[0], b);
       else if (sp_streq(name, "pow")) {
-        buf_puts(b, "sp_poly_int_powmod("); emit_boxed(c, recv, b);
+        buf_puts(b, "sp_poly_int_powmod_recv("); emit_boxed(c, recv, b);
         buf_puts(b, ", "); emit_boxed(c, argv[0], b); buf_puts(b, ", "); emit_boxed(c, argv[1], b); buf_puts(b, ")");
       }
       else if (is_bits_query(name)) {

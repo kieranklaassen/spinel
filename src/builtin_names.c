@@ -695,6 +695,10 @@ int is_div_or_modulo(const char *n) {
   return sp_streq(n, "div") || sp_streq(n, "modulo");
 }
 
+int is_div_name(const char *n) {
+  return sp_streq(n, "div");
+}
+
 int is_initialize_family(const char *n) {
   return sp_streq(n, "initialize_copy") || sp_streq(n, "initialize");
 }
@@ -793,6 +797,10 @@ int is_string_append_or_prepend(const char *n) {
 
 int is_string_append(const char *n) {
   return sp_streq(n, "<<") || sp_streq(n, "concat");
+}
+
+int is_replace_name(const char *n) {
+  return sp_streq(n, "replace");
 }
 
 int is_string_rebind_mutator(const char *n) {
