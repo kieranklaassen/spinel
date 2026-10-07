@@ -50,12 +50,6 @@ void sp_re_push_match_roots(void) {
 #undef SP_RE_PUSH_LIVE
 }
 
-const char *sp_re_last_paren_match(void) {
-  for (int i = 9; i >= 1; i--) {
-    if (sp_re_captures[i]) return sp_re_captures[i];
-  }
-  return NULL;
-}
 void sp_MatchData_scan(void *p);   /* defined below */
 static sp_MatchData *sp_md_alloc(int pairs);   /* defined below */
 SP_TLS int sp_re_last_ncap = 0;
@@ -254,6 +248,18 @@ const char *sp_re_group(sp_int n) {
   memcpy(g, sp_re_last_str + beg, len); g[len] = 0;
   sp_str_set_len(g, (size_t)len);
   return g;
+}
+/* $+ -- the last group that took part in the last match. Past the ninth a
+   group is known by its position, where the positions are this match's
+   (sp_re_caps_own); the first nine by their kept Strings. */
+const char *sp_re_last_paren_match(void) {
+  if (!sp_re_last_str) return NULL;
+  if (sp_re_caps_own)
+    for (int i = (sp_re_last_ncap > 32 ? 32 : sp_re_last_ncap) - 1; i > 9; i--)
+      if (sp_re_caps[2 * i] >= 0) return sp_re_group(i);
+  for (int i = 9; i >= 1; i--)
+    if (sp_re_captures[i]) return sp_re_captures[i];
+  return NULL;
 }
 sp_int sp_re_match(mrb_regexp_pattern *pat, const char *str) {SP_GC_ROOT_STR(str);
   if (!str) return -1;

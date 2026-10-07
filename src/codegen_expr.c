@@ -2315,7 +2315,7 @@ static int emit_ivar_cvar_gvar_expr(Compiler *c, int id, Buf *b, const NodeTable
     if (nm && sp_streq(nm, "$`"))                          { buf_puts(b, "sp_re_pre_match()");  return 1; }
     if (nm && sp_streq(nm, "$'"))                          { buf_puts(b, "sp_re_post_match()"); return 1; }
     if (nm && sp_streq(nm, "$+")) {
-      buf_puts(b, "({ int _bri = 9; while (_bri > 0 && !sp_re_captures[_bri-1]) _bri--; _bri > 0 ? sp_re_captures[_bri-1] : NULL; })");
+      buf_puts(b, "sp_re_last_paren_match()");
       return 1;
     }
     if (nm && nm[0] == '$') {
@@ -2347,8 +2347,8 @@ static int emit_ivar_cvar_gvar_expr(Compiler *c, int id, Buf *b, const NodeTable
     else if (sp_streq(nm, "$`"))                 buf_puts(b, "sp_re_pre_match()");
     else if (sp_streq(nm, "$'"))                 buf_puts(b, "sp_re_post_match()");
     else if (sp_streq(nm, "$+")) {
-      /* last group that participated: scan captures[] backwards */
-      buf_puts(b, "({ int _bri = 9; while (_bri > 0 && !sp_re_captures[_bri-1]) _bri--; _bri > 0 ? sp_re_captures[_bri-1] : NULL; })");
+      /* last group that participated */
+      buf_puts(b, "sp_re_last_paren_match()");
     }
     else buf_puts(b, "NULL");
     return 1;
