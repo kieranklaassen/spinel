@@ -1,0 +1,1 @@
+An uncaught exception whose message holds a NUL prints the message
