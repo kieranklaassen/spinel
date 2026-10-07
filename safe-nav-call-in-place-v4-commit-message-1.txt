@@ -1,0 +1,8 @@
+node_parent answers a node's parent from the kept map
+
+lent_enclosing_closure built a parent map of the tree and kept it until
+the tree changed, for its own walk up to a block. The map and its
+keeping are now node_parent, which answers one node's parent, so that
+another walk up the tree can ask it. No generated C changes.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

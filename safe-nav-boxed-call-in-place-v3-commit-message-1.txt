@@ -1,0 +1,9 @@
+sn_guard_over_hoists writes the jump of a `&.` guard
+
+The typed arm of emit_call_safe_nav_arms wrote, in line, the jump that
+steps over what a guarded call's value hoisted: the saved root count,
+the test, the hoisted text and the label. That is now
+sn_guard_over_hoists, so that another arm can call it. No generated C
+changes.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

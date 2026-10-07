@@ -1,0 +1,21 @@
+A `&.` call on a nil receiver runs none of its arguments
+
+    s = nil_or_string
+    r = s&.rjust(lg(5), lg("b"))
+
+ran both `lg` calls for a nil `s`; CRuby runs neither. A call to a
+builtin has its operands ordered ahead of it (emit_operands_in_order),
+and for a `&.` call that was ahead of the nil guard too: an argument
+with an effect ran, or raised, on the very nil the guard stops.
+
+The guard re-enters the call's emission under its nil test, so the
+ordering now waits for that re-entry (sn_guard_ahead) where the guard
+will run, a boxed receiver and the typed ones it tests, and where the
+call's value can stay in its place (sn_stays_in_place). There the
+order against the statement's other operands is kept. Where a later
+operand of the statement is more than a literal or a plain read, the
+call is as it was.
+
+Test: test/safe_nav_nil_receiver_runs_no_operand.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
