@@ -553,6 +553,55 @@ static void ffi_arg_to_temp(Buf *call, size_t at, Buf *pre, const char *ctype, i
   buf_printf(call, "_b%d_%d", tb, ai);
 }
 
+/* The nodes written inside the setter call being emitted
+   (g_setter_value_node) carry its id here: set once when that emission
+   starts, handed back to the call around it when it ends. Asking is then one
+   read, where a walk of the call for every writer assignment in it cost the
+   square of the assignments in one receiver's block. */
+static int *g_setter_inner_of;
+static int g_setter_inner_cap;
+
+static void setter_call_mark(const NodeTable *nt, int root, int with) {
+  if (root < 0) return;
+  int nr = nt_num_refs(nt, root);
+  for (int i = 0; i < nr; i++) {
+    int r = nt_ref_at(nt, root, i);
+    if (r >= 0 && r < g_setter_inner_cap) { g_setter_inner_of[r] = with; setter_call_mark(nt, r, with); }
+  }
+  int na = nt_num_arrs(nt, root);
+  for (int i = 0; i < na; i++) {
+    int n = 0;
+    const int *ids = nt_arr_at(nt, root, i, &n);
+    for (int j = 0; j < n; j++)
+      if (ids[j] >= 0 && ids[j] < g_setter_inner_cap) { g_setter_inner_of[ids[j]] = with; setter_call_mark(nt, ids[j], with); }
+  }
+}
+
+/* The setter call `id` starts its emission; answers the call around it. */
+static int setter_value_enter(const NodeTable *nt, int id) {
+  if (nt->count > g_setter_inner_cap) {
+    int *p = realloc(g_setter_inner_of, sizeof *p * (size_t)nt->count);
+    if (!p) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+    for (int i = g_setter_inner_cap; i < nt->count; i++) p[i] = -1;
+    g_setter_inner_of = p; g_setter_inner_cap = nt->count;
+  }
+  int around = g_setter_value_node;
+  g_setter_value_inner++; g_setter_value_node = id;
+  setter_call_mark(nt, id, id);
+  return around;
+}
+
+static void setter_value_leave(const NodeTable *nt, int id, int around) {
+  setter_call_mark(nt, id, around);
+  g_setter_value_inner--; g_setter_value_node = around;
+}
+
+/* Is `target` written inside the setter call being emitted, and not that call itself? */
+static int setter_call_holds(int target) {
+  return g_setter_value_node >= 0 && target != g_setter_value_node && target >= 0 &&
+         target < g_setter_inner_cap && g_setter_inner_of[target] == g_setter_value_node;
+}
+
 /* a call on a module or a class: native and FFI functions, singleton accessors, a writer in an instance_eval block, class methods */
 int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv) {
   /* native binding dispatch (Path B): Module.func(...) where Module declared
@@ -1219,7 +1268,8 @@ int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
            argument (a literal, a variable) is re-emitted after the call; any
            other is bound once to a temporary local that the call reads. */
         if (argc == 1 && comp_method_in_chain(c, _arc, name, NULL) >= 0 &&
-            nt_ref(nt, id, "block") < 0 && !g_setter_value_inner &&
+            nt_ref(nt, id, "block") < 0 &&
+            (!g_setter_value_inner || setter_call_holds(id)) &&
             call_is_setter_assign(nt, id) &&   /* not a send's plain call (#4921) */
             (name[0] == '_' || (name[0] >= 'a' && name[0] <= 'z') || (name[0] >= 'A' && name[0] <= 'Z'))) {   /* a setter, not ==, <=, [] = */
           const char *aty = nt_type(nt, argv[0]);
@@ -1231,7 +1281,9 @@ int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
           TyKind at = repr_of(c, argv[0]).as_ty;
           if (simple) {
             buf_puts(b, "({ (void)(");
-            g_setter_value_inner++; emit_call_body(c, id, b); g_setter_value_inner--;
+            int around = setter_value_enter(nt, id);
+            emit_call_body(c, id, b);
+            setter_value_leave(nt, id, around);
             buf_puts(b, "); ");
             emit_expr(c, argv[0], b);
             buf_puts(b, "; })");
@@ -1308,7 +1360,9 @@ int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
               if (g_pre) { buf_puts(g_pre, "\n"); buf_puts(b, "({ "); }
               nt_node_set_arr((NodeTable *)nt, argsn, "arguments", one, 1);
               buf_puts(b, "(void)(");
-              g_setter_value_inner++; emit_call_body(c, id, b); g_setter_value_inner--;
+              int around = setter_value_enter(nt, id);
+              emit_call_body(c, id, b);
+              setter_value_leave(nt, id, around);
               buf_puts(b, "); ");
               int back[1] = { saved0 };
               nt_node_set_arr((NodeTable *)nt, argsn, "arguments", back, 1);

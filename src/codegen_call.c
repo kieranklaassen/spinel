@@ -18751,6 +18751,10 @@ static void emit_call_held(Compiler *c, int id, Buf *b);
    already arranged (the `def x=` value-position arm); the emission may go
    through a copy of the node, so a depth rather than the node id */
 int g_setter_value_inner = 0;
+/* the setter call whose emission that is: a writer assignment written
+   inside it (in a block of its receiver's call) is another assignment, and
+   answers its own right-hand side */
+int g_setter_value_node = -1;
 
 /* Every String a call's operands convert to is declared in a rooted temp in
    front of the call, inside one statement expression, so a #to_path that
