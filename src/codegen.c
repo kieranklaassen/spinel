@@ -12121,6 +12121,8 @@ static void emit_user_binop_dispatch(Compiler *c, Buf *b) {
     /* the comparisons too: a boxed receiver reached sp_poly_cmp, which knows
        nothing of a user `<`, and answered ArgumentError (#3501) */
     "<", ">", "<=", ">=", "<=>", "==",
+    /* a != of the class's own, which a boxed != asks (sp_poly_ne_own) */
+    "!=",
     /* and the element read, which a boxed `r[k] ||= v` / `r[k] += v` reads
        through sp_poly_index_poly */
     "[]", NULL };
@@ -12158,8 +12160,10 @@ static void emit_user_op_dispatch(Compiler *c, Buf *b, const char *fname, const 
     }
     else if (!c->classes[k].instantiated) continue;
     int any = 0;
+    /* a != only where a boxed != asks it (class_own_ne) */
+    int own_ne = !bcase ? class_own_ne(c, k) : -1;
     for (int u = 0; uops[u] && !any; u++)
-      if (comp_method_in_chain(c, k, uops[u], NULL) >= 0) any = 1;
+      if (sp_streq(uops[u], "!=") ? own_ne >= 0 : comp_method_in_chain(c, k, uops[u], NULL) >= 0) any = 1;
     if (!any) continue;
     int cid = comp_class_index(c, c->classes[k].name);
     if (bcase) buf_printf(b, "    case %s: {\n", bcase);
@@ -12167,7 +12171,7 @@ static void emit_user_op_dispatch(Compiler *c, Buf *b, const char *fname, const 
     for (int u = 0; uops[u]; u++) {
       int defcls = -1;
       int mi = comp_method_in_chain(c, k, uops[u], &defcls);
-      if (mi < 0) continue;
+      if (mi < 0 || (sp_streq(uops[u], "!=") && own_ne < 0)) continue;
       if (bcase && defcls != k) continue;   /* the reopening's own */
       Scope *m = &c->scopes[mi];
       /* only methods this TU actually emits: an unreachable / yielding /
@@ -16450,6 +16454,8 @@ char *codegen_program(const NodeTable *nt) {
       if (!c->classes[k].instantiated && !breopen) continue;
       for (int u = 0; uops[u]; u++)
         if (comp_method_in_chain(c, k, uops[u], NULL) >= 0) { g_has_user_binop = 1; break; }
+      /* a != of the class's own, which a boxed != asks (sp_poly_ne_own) */
+      if (!g_has_user_binop && c->classes[k].instantiated && class_own_ne(c, k) >= 0) { g_has_user_binop = 1; break; }
       /* a `<=>` with no `==` is Comparable's equality, which the table
          derives: a boxed `m == n` (a block parameter, a hash value, a
          `when FIVE`) reaches it only through the table */
