@@ -1,0 +1,1 @@
+A next in a String iterator, each_index or Array.new ends its own turn

@@ -1,0 +1,24 @@
+The sum of two shared Strings holds the first copy while the second is made
+
+    s = +"abc"; a = s; a << "x"
+    t = +"def"; b = t; b << "y"
+    r = s + t
+
+in a loop that keeps other Strings answered "abcxabcx" on some turns,
+and "defydefy" built with clang; CRuby answers "abcxdefy". A String
+another name appends to in place is read by copying it. The + arm
+bound its operands to rooted temporaries only where the node table
+shows an allocation, which a bare read does not, so both copies sat
+in one C call: a collection that fell on the second freed the first,
+and the second took its slot.
+
+The arm now does so as well when both operands are such reads
+(operand_may_allocate, the question == asks already). One shared
+operand beside a plain String keeps its C: sp_str_plus roots its
+arguments across its own allocation.
+
+Test: test/string_plus_shared_operands.rb (expected from CRuby 3.3.6),
+added to GC_STRESS_TESTS. On master its four lines are wrong in a
+plain run.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

@@ -1,0 +1,24 @@
+An uncaught exception whose message holds a NUL prints the message
+
+    raise TypeError, "left" + "\0right"
+
+ended the program with the bytes ff fe 43 4d fd 01 0a and " (TypeError)"
+on stderr, where CRuby ends with "left\0right (TypeError)": the six
+bytes that mark a counted message and the low byte of its length, and
+none of the text. Before "An exception message that holds a NUL keeps
+its bytes" the line was "left (TypeError)".
+
+Such a message travels from the raise in a counted form: six marker
+bytes, the length, then the text. Making the exception object decodes
+it, so a rescue reads it right. An exception that nothing rescues never
+becomes an object: its last line is written from the raise's own slot
+with %s, which printed the marker and stopped at the length's first
+zero byte. The report of a thread that dies of its exception is written
+the same way.
+
+Both lines now go through one writer, which writes the counted form's
+text by its length. Any other message goes out by the fprintf it had,
+and so does a message that only begins with the marker bytes: it is not
+in the counted form, and the test raises one.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
