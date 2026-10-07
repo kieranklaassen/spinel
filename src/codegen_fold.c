@@ -1460,6 +1460,12 @@ int emit_gsub_block_expr(Compiler *c, int id, Buf *b) {
      NUL: `"a\0b".gsub(/./m) { }` walked one character and stopped. */
   emit_indent(g_pre, g_indent); buf_printf(g_pre, "sp_int _t%d = (sp_int)sp_str_byte_len(_t%d);\n", tslen, ts);
   emit_indent(g_pre, g_indent); buf_printf(g_pre, "sp_String *_t%d = sp_String_new(\"\"); SP_GC_ROOT(_t%d);\n", tout, tout);
+  /* The answer starts in the SUBJECT's encoding, as CRuby's does, and what is
+     appended follows the rule of `<<`. The subject's own bytes go in by their
+     length and bring no mark, so without this a binary subject answered UTF-8
+     unless the block's value was binary. Only the handle is marked: the loop's
+     first turn always appends, and an append stamps the bytes from the handle. */
+  emit_indent(g_pre, g_indent); buf_printf(g_pre, "if (sp_str_is_binary(_t%d)) _t%d->binary = 1;\n", ts, tout);
   int tnd = 0, tnl = 0, tre = 0;
   if (polypat) {
     int tp = ++g_tmp;
