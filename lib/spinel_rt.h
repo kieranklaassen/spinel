@@ -1514,6 +1514,16 @@ extern SP_TLS sp_RbVal _sp_proc_poly_ret;
    host too: sp_proc_call_blk, inlined into the host's TU, and the kernel's
    sp_proc_call and proc bodies must meet in the same slot. */
 extern SP_TLS sp_Proc *_sp_proc_blk;
+/* What a Signal.trap block's run sets aside of that channel (sp_trap_call):
+   the values of the call it interrupted, which its own call writes over.
+   They are marked as the channel's are, since nothing else points at them
+   and one the interrupted code had done with may be stale. The kernel TU
+   owns the list, as it owns the channel. */
+struct sp_trap_chan {
+  sp_RbVal ret, args[SP_PROC_ARG_SLOTS]; sp_Proc *blk; int kwpos;
+  struct sp_trap_chan *up;
+};
+extern SP_TLS struct sp_trap_chan *sp_trap_chan_top;
 static void sp_re_mark_globals(void) {
   /* The sub-markers below are static and inline away, so a fault in one of
      them reports as this frame with nothing to distinguish them. Under verify,
@@ -1561,6 +1571,10 @@ static void sp_re_mark_globals(void) {
   SP_GLB_PHASE("globals:proc-channel");
   sp_mark_rbval_scratch(_sp_proc_poly_ret);
   for (int i = 0; i < SP_PROC_ARG_SLOTS; i++) sp_mark_rbval_scratch(_sp_proc_poly_args[i]);
+  for (struct sp_trap_chan *t = sp_trap_chan_top; t; t = t->up) {
+    sp_mark_rbval_scratch(t->ret);
+    for (int i = 0; i < SP_PROC_ARG_SLOTS; i++) sp_mark_rbval_scratch(t->args[i]);
+  }
   SP_GLB_PHASE("globals");
 #undef SP_GLB_PHASE
 }
@@ -16864,9 +16878,20 @@ static sp_RbVal sp_Fiber_blocking_proc(sp_Proc *blk) {
    blocked for good: land here first, unblock it, then pass the raise or
    unwind on. The frame is armed before anything is rooted, so its root mark
    is the interrupted code's. */
+/* The signal can arrive while a proc is being called: the caller has left
+   the arguments, the block and the keyword flag in the calling convention's
+   side channel, or the proc its answer, and the other side has not read them
+   yet. This call and the block's own calls write the same slots, so the
+   channel is set aside and put back when the proc returns. A proc that
+   leaves by a jump abandons the interrupted call. */
 #ifndef SPINEL_EXT_HOST
+SP_TLS struct sp_trap_chan *sp_trap_chan_top;
 void sp_trap_call(sp_Proc *p, int no) {
   sp_exc_check_depth();
+  struct sp_trap_chan chan;
+  chan.ret = _sp_proc_poly_ret; memcpy(chan.args, _sp_proc_poly_args, sizeof chan.args);
+  chan.blk = _sp_proc_blk; chan.kwpos = _sp_proc_kwpos;
+  chan.up = sp_trap_chan_top; sp_trap_chan_top = &chan;
   sp_exc_rootmark[sp_exc_top] = sp_gc_nroots; sp_rescue_mark[sp_exc_top] = sp_rescue_sp;
   sp_exc_msg[sp_exc_top] = 0; sp_exc_obj[sp_exc_top] = 0; sp_exc_top++;
   if (setjmp(sp_exc_stack[sp_exc_top - 1]) == 0) {
@@ -16875,9 +16900,13 @@ void sp_trap_call(sp_Proc *p, int no) {
     _sp_proc_poly_args[0] = sp_box_int((sp_int)no);
     sp_proc_call(p, 1, &slot);
     sp_exc_top--;
+    sp_trap_chan_top = chan.up;
+    _sp_proc_poly_ret = chan.ret; memcpy(_sp_proc_poly_args, chan.args, sizeof chan.args);
+    _sp_proc_blk = chan.blk; _sp_proc_kwpos = chan.kwpos;
     return;
   }
   sp_exc_top--;
+  sp_trap_chan_top = chan.up;   /* the interrupted call is abandoned */
   sp_gc_nroots = sp_exc_rootmark[sp_exc_top]; sp_rescue_sp = sp_rescue_mark[sp_exc_top];
   /* Take the exit before unblocking: a delivery that was pending runs its
      proc right there, reusing this slot, and must not see (or clear) an
