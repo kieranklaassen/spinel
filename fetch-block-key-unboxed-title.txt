@@ -1,0 +1,1 @@
+A fetch block's Symbol or String-literal key is unboxed into its slot
