@@ -13,6 +13,9 @@ from the commits its recipe lists.
   program's own is_a?.
 - `fam9-gen.rb OUT`: 612 programs with a body CRuby looks up elsewhere first,
   BasicObject, remove_const, or the query named by a String.
+- `fam10-gen.rb OUT`: 90 programs with a constant written by a required file,
+  the require at the margin, inside a def, a block or an expression, or under
+  a condition.
 - `early-gen.rb OUT`: the twelve early-call shapes.
 - `num-gen.rb OUT`: the family of `instance_of?(Numeric)` on a boxed number.
 - `bl-gen.rb OUT`: the family of `rescue` and `raise` through a constant
