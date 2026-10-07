@@ -1,0 +1,1 @@
+An attribute writer statement keeps a receiver its value rebinds
