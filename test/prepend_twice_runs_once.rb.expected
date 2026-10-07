@@ -1,0 +1,14 @@
+[:root, :own, :m]
+[Mark, Twice, Root]
+[:root, :m]
+[:root, :own, :m]
+[:root, :own, :m]
+[:root, :own, :m]
+[:root, :own, :m, :n]
+[Note, Mark, Between, Root]
+11
+12
+[3, 6]
+[:shout]
+[:root, :own, :m]
+[:root, :m, :own, :m]
