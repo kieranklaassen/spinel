@@ -32704,6 +32704,72 @@ static void an_round_cap_step(Compiler *c, AnRoundCap *rc, int iter) {
   if (!grew && iter + 1 == rc->cap && rc->cap < 128 + 4 * an_type_slots(c)) rc->cap++;
 }
 
+/* An attribute written only by `o.x ||= v` / `o.x &&= v` has a slot no write
+   types: infer_ivar_types takes `o.x = v`, and the backstop then boxes the
+   slot, so `r.x ||= +"ab"; r.x << "z"` appended to a copy of the boxed
+   String. Called once the types have settled: a slot still untyped, whose
+   conditional writes each give a String, takes the String's type, as
+   `o.x = v` would have given it. A slot another write typed, or one a
+   conditional write gives another kind (in its class or one sharing the
+   slot), keeps what it has. Answers 1 when it typed a slot. */
+static int type_or_written_string_slots(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  static const NodeKind kinds[] = { NK_CallOrWriteNode, NK_CallAndWriteNode };
+  int *off = (int *)malloc(sizeof(int) * (size_t)(c->nclasses + 1));
+  if (!off) return 0;
+  off[0] = 0;
+  for (int k = 0; k < c->nclasses; k++) off[k + 1] = off[k] + c->classes[k].nivars;
+  /* per slot: 1 = given Strings only, 2 = given another kind */
+  char *given = (char *)calloc((size_t)off[c->nclasses] + 1, 1);
+  if (!given) { free(off); return 0; }
+  int any = 0, changed = 0;
+  for (int k = 0; k < 2; k++)
+    NT_FOREACH_KIND(nt, kinds[k], id) {
+      const char *name = nt_str(nt, id, "name");
+      int recv = nt_ref(nt, id, "receiver"), val = nt_ref(nt, id, "value");
+      if (!name || recv < 0 || val < 0 || strlen(name) > 250) continue;
+      char ivn[256];
+      snprintf(ivn, sizeof ivn, "@%s", name);
+      TyKind rt = infer_type(c, recv);
+      int known = ty_is_object(rt), str = infer_type(c, val) == TY_STRING;
+      /* a receiver of no known class may be any class with the writer */
+      int lo = known ? ty_object_class(rt) : 0, hi = known ? lo + 1 : c->nclasses;
+      for (int ci = lo; ci < hi; ci++) {
+        ClassInfo *cl = &c->classes[ci];
+        int iv = comp_is_writer(cl, name) ? comp_ivar_index(cl, ivn) : -1;
+        if (iv < 0) continue;
+        char *g = &given[off[ci] + iv];
+        if (!str || !known || cl->is_struct) *g = 2;
+        else if (!*g) { *g = 1; any = 1; }
+      }
+    }
+  for (int ci = 0; any && ci < c->nclasses; ci++) {
+    ClassInfo *cl = &c->classes[ci];
+    for (int iv = 0; iv < cl->nivars; iv++) {
+      if (given[off[ci] + iv] != 1 || cl->ivar_types[iv] != TY_UNKNOWN || class_ivar_pinned(cl, cl->ivars[iv])) continue;
+      /* the classes that share the slot: the root's subtree, as the
+         backstop walks it */
+      int root = ci, ok = 1;
+      while (c->classes[root].parent >= 0) root = c->classes[root].parent;
+      for (int cj = 0; cj < c->nclasses && ok; cj++) {
+        int an = cj;
+        while (an >= 0 && an != root) an = c->classes[an].parent;
+        int jv = an == root ? comp_ivar_index(&c->classes[cj], cl->ivars[iv]) : -1;
+        if (jv < 0) continue;
+        TyKind jt = c->classes[cj].ivar_types[jv];
+        if (given[off[cj] + jv] == 2 || (jt != TY_UNKNOWN && jt != TY_STRING)) ok = 0;
+      }
+      if (!ok) continue;
+      sp_ivwatch(cl->ivars[iv], "or_write_string", TY_UNKNOWN, TY_STRING);
+      cl->ivar_types[iv] = TY_STRING;
+      changed = 1;
+    }
+  }
+  free(given);
+  free(off);
+  return changed;
+}
+
 /* The inference fixpoint: two rounds with the proc-form clones made between them, then the optimistic re-narrow of the slots a transient poly locked (analyze_program's steps, in their order) */
 static void an_phase_infer_fixpoint(Compiler *c) {
   g_fixpoint_rounds = 0;
@@ -32882,6 +32948,16 @@ static void an_phase_infer_fixpoint(Compiler *c) {
     ch |= infer_return_types(c);
     ch |= backprop_hash_return_types(c);
     if (!ch) {
+      /* Converged: an attribute slot only `o.x ||= v` writes takes its
+         String now, and the rounds go on from it. */
+      static int orw_typed;
+      if (!orw_typed) {
+        orw_typed = 1;
+        if (type_or_written_string_slots(c)) {
+          if (iter + 1 == rc.cap) rc.cap++;
+          continue;
+        }
+      }
       /* Converged with the ambiguous guesses held at bottom. Clear the flag
          and keep going: a slot whose evidence never arrived is genuinely
          untypable, so it now takes the pessimistic type and the slots it
