@@ -1,0 +1,28 @@
+A default a spread does not reach is held while the next argument is built
+
+    def two(x = "a" * 2, y = "c" * 2) = [x, y]
+    xs = []
+    p two(*xs)                      # ["aa", "cc"]
+
+aborts under SPINEL_GC_STRESS=2 ("the mark reached a freed slot") with
+gcc and clang. With no stress setting, of 300,000 such calls 2 answer
+wrong, and 2 of the results kept from every 7th read back wrong, with
+both compilers.
+
+A parameter read out of a spread (a splat's element, the gathered
+positionals, a `**`'s key) is written where the argument stands, with its
+default as the other branch:
+`sp_two((0 < len ? _t2->data[0] : sp_box_str(sp_str_repeat("a", 2))),
+(1 < len ? _t2->data[1] : sp_box_str(sp_str_repeat("c", 2))))`. A default
+that allocates is then fresh inside the call's parentheses, where nothing
+roots it: the other default's allocation collects it, and in
+`Img.new(*xs)` the object's own allocation does.
+
+Such a value is now assigned to a rooted temp where it stands
+(emit_rooted_conversion, which a converted bare read uses already), so
+nothing runs earlier than it did. Only a parameter whose default may
+allocate and whose type takes a root gets the temp; every other spread
+read is written as it was. emit_rooted_conversion learns the boxed
+parameter's declaration.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
