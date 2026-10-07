@@ -13551,6 +13551,17 @@ static SP_TLS int sp_reraise_current = 0;
    method and up, never the statement that raised (#5084). The pass-through
    sets this so the raise keeps the snapshot it already has. */
 static SP_TLS int sp_bt_keep = 0;
+/* The same exception waiting for an ensure beside that rescue: the ensure
+   body may raise and rescue on its own, which takes the one buffer, so the
+   frames are saved before the body and put back for the raise after it. */
+typedef struct { int n; void *buf[256]; } sp_bt_saved;
+static inline void sp_bt_save(sp_bt_saved *s) {
+  s->n = sp_bt_n; memcpy(s->buf, sp_bt_buf, sizeof(void *) * (size_t)sp_bt_n);
+}
+static inline void sp_bt_restore(const sp_bt_saved *s) {
+  if (s->n < 0) return;
+  sp_bt_n = s->n; memcpy(sp_bt_buf, s->buf, sizeof(void *) * (size_t)s->n); sp_bt_keep = 1;
+}
 /* `raise ..., cause: exc`: the explicit cause overrides the implicit
    currently-handled exception for exactly one raise. The `_set` flag records
    that a cause: was given at all, so `cause: nil` suppresses the implicit cause
