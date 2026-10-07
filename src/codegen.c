@@ -11305,6 +11305,22 @@ static void emit_reopen_self_boxed(Compiler *c, int cls, Buf *b) {
 }
 
 
+/* Closes the store of an exception's message that `super` makes in the
+   class's `initialize`, opened as `(self->msg = <value>` with its `=` at
+   `eq`. The value may be made after the exception is: making it can collect,
+   and a collection promotes the rooted exception, so an old holder then
+   takes a young String. The barrier pass knows a store by `->iv_` and does
+   not see this one, so it is recorded here, after the store as there, and
+   with that pass's exemption: a value that is never young needs none. The
+   expression's value stays the message. */
+static void emit_exc_msg_store_end(Buf *b, size_t eq) {
+  size_t end = b->len;
+  buf_puts(b, ")");
+  if (wb_value_never_young(b, eq)) return;
+  b->len = end;
+  buf_printf(b, ", sp_gc_wb((void *)%s), %s->msg)", g_self, g_self);
+}
+
 void emit_super(Compiler *c, int id, Buf *b) {
   if (g_plan_check) ucall_emitted(id);
   { Scope *ss = comp_scope_of(c, id);
@@ -11472,11 +11488,13 @@ void emit_super(Compiler *c, int id, Buf *b) {
            must be coerced, not assigned raw. emit_str_expr also coerces the
            unresolved-call gate (TY_UNKNOWN sp_raise_nomethod) that comp_ntype
            can't see. */
-        buf_printf(b, "(%s->msg = ", g_self);
+        buf_printf(b, "(%s->msg ", g_self);
+        size_t eq = b->len;
+        buf_puts(b, "= ");
         /* nilable: Exception#initialize STRINGIFIES its message (super(nil)
            keeps the class-name default in CRuby), it never type-checks it */
         emit_str_expr_nilable(c, argv2[0], b);
-        buf_puts(b, ")");
+        emit_exc_msg_store_end(b, eq);
       }
       else if (ty && sp_streq(ty, "ForwardingSuperNode") && s->nparams > 0) {
         LocalVar *p0 = scope_local(s, s->pnames[0]);
@@ -11484,10 +11502,13 @@ void emit_super(Compiler *c, int id, Buf *b) {
         /* Effective type mirrors emit_method_signature: a NULL/TY_UNKNOWN
            param is declared TY_POLY (sp_RbVal), so it too must be coerced. */
         TyKind pt = (p0 && p0->type != TY_UNKNOWN) ? p0->type : TY_POLY;
+        buf_printf(b, "(%s->msg ", g_self);
+        size_t eq = b->len;
         if (pt == TY_POLY)
-          buf_printf(b, "(%s->msg = sp_poly_to_s(%s))", g_self, rn.p);
+          buf_printf(b, "= sp_poly_to_s(%s)", rn.p);
         else
-          buf_printf(b, "(%s->msg = %s)", g_self, rn.p);
+          buf_printf(b, "= %s", rn.p);
+        emit_exc_msg_store_end(b, eq);
         free(rn.p);
       }
       else

@@ -11222,14 +11222,18 @@ static int emit_new_call_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, 
           buf_printf(b, "); SP_GC_ROOT(_t%d);", te3);
           if (key_v >= 0) {
             buf_printf(b, " _t%d->xkey = ", te3);
-            emit_boxed(c, key_v, b); buf_puts(b, ";");
+            emit_boxed(c, key_v, b);
+            /* made after the exception is, as a message handed to `super` is
+               (emit_exc_msg_store_end); each store is recorded, since making
+               the receiver can collect again */
+            buf_printf(b, "; sp_gc_wb((void *)_t%d);", te3);
           }
           else if (sp_streq(cn, "KeyError")) buf_printf(b, " _t%d->has_key = 0;", te3);
           if (recv_v < 0) buf_printf(b, " _t%d->has_recv = 0;", te3);
           if (recv_v >= 0) {
             buf_printf(b, " _t%d->xrecv = ", te3);
             emit_boxed(c, recv_v, b);
-            buf_printf(b, "; _t%d->has_recv = 1;", te3);
+            buf_printf(b, "; sp_gc_wb((void *)_t%d); _t%d->has_recv = 1;", te3, te3);
           }
           buf_printf(b, " _t%d; })", te3);
           { *out = 1; return 1; }
