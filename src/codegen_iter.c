@@ -5017,7 +5017,8 @@ static int emit_iteration_stmt_body(Compiler *c, int id, Buf *b, int indent);
    receiver once into a temp, and emit the loop over it inside an `if` that
    skips a nil, re-entering with g_sn_skip set so the guard is not asked
    again. Answers what the inner emission answers; when it declines, nothing
-   is written. */
+   is written: the statements the receiver hoisted are taken back too, or the
+   plain emission that follows would run them a second time. */
 static int emit_iteration_stmt_sn(Compiler *c, int id, Buf *b, int indent) {
   const NodeTable *nt = c->nt;
   int recv = nt_ref(nt, id, "receiver");
@@ -5028,6 +5029,7 @@ static int emit_iteration_stmt_sn(Compiler *c, int id, Buf *b, int indent) {
   int t = ++g_tmp;
   Buf gb; memset(&gb, 0, sizeof gb);
   Buf rb; memset(&rb, 0, sizeof rb);
+  size_t pre0 = g_pre ? g_pre->len : 0;
   if (boxed) emit_boxed(c, recv, &rb); else emit_expr(c, recv, &rb);
   emit_indent(&gb, indent);
   buf_puts(&gb, "{ ");
@@ -5048,6 +5050,7 @@ static int emit_iteration_stmt_sn(Compiler *c, int id, Buf *b, int indent) {
   emit_indent(&gb, indent);
   buf_puts(&gb, "} }\n");
   if (ok) buf_puts(b, gb.p ? gb.p : "");
+  else if (g_pre && g_pre->len > pre0) { g_pre->len = pre0; g_pre->p[pre0] = 0; }
   free(gb.p);
   return ok;
 }
