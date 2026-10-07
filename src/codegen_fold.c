@@ -9423,7 +9423,10 @@ static int splat_literal_reaches_to_a(const char *s, int is_string) {
 static int splat_program_walk_for_to_a(Compiler *c) {
   static const char *const names[] = { "to_a", "method_missing", "respond_to_missing?",
                                        "respond_to?", "__enum_to_a", NULL };
-  static const char *const consts[] = { "Enumerable", "ObjectSpace", "BasicObject", NULL };
+  /* Set and Gem: classes CRuby has before the program runs, which a
+     `class Set` of the program's own reopens */
+  static const char *const consts[] = { "Enumerable", "ObjectSpace", "BasicObject", "Set", "Gem",
+                                        NULL };
   static const char *const senders[] = { "send", "__send__", "public_send", NULL };
   static const char *const getters[] = { "method", "public_method", "singleton_method",
                                          "instance_method", "public_instance_method",
