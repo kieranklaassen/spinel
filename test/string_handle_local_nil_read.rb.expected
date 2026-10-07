@@ -17,6 +17,10 @@ nil
 "y"
 nil
 "ab"
+true
+2
+NoMethodError
+false
 "012"
 nil
 "zy"
