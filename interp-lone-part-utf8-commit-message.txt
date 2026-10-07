@@ -1,0 +1,22 @@
+An interpolation that is one part alone starts UTF-8
+
+    b = "a".b
+    p "#{b}".encoding           # BINARY, CRuby UTF-8
+    p ("#{b}" + "").encoding    # BINARY, CRuby UTF-8
+
+An interpolation picks its encoding part by part (sp_str_enc_step),
+from its first part's unless a literal leads. For "#{b}", one part
+and no literal, that made the result the part's own encoding: an
+ASCII-only binary String came back binary where CRuby answers UTF-8,
+and keeps binary only for a part that holds a byte past ASCII
+("#{"\xff".b}").
+
+emit_interp now starts such an interpolation at UTF-8, as it starts
+one a literal leads; the step then gives a part with high bytes its
+own encoding, as before. An interpolation of two parts or more is not
+touched: "#{b}#{b}" is UTF-8 in CRuby 3.3 and BINARY in 4.0, and
+answers BINARY here as it did.
+
+Test: test/string_interp_lone_part_encoding.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

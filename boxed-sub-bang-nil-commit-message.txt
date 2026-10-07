@@ -1,0 +1,21 @@
+sub! and gsub! on a boxed String answer nil only when nothing matched
+
+sub! and gsub! answer nil when no substitution was made. For a boxed
+receiver (a String read out of a mixed Array or Hash, a method's boxed
+value) the answer came from comparing the text before and after, so a
+substitution that wrote the bytes it found answered nil:
+
+    a = [+"ab=", 1]
+    a[0].sub!("=") { "=" }   # nil, CRuby: "ab="
+
+A String receiver reads the runtime's matched flag for this, and the
+boxed arm now reads it too. It marks the flag 2 where it was already
+set, so that a 1 after the call is the call's own, and puts the old
+value back when the call made no substitution: every other reader
+finds the flag as it would have.
+
+Only where the arguments are literals or plain reads. An argument
+that runs code may run a sub of its own, so such a call keeps the
+comparison.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
