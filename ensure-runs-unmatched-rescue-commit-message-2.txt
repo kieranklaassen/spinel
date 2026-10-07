@@ -1,0 +1,22 @@
+An exception that waits for an ensure keeps its frames
+
+In a --debug build
+
+    def outer(x)
+      mid(x)
+    rescue ArgumentError
+      nil
+    ensure
+      @seen = true
+    end
+
+cut the backtrace of a TypeError raised under `mid` to `outer` and up. The
+arm for no match sets sp_bt_keep before it raises again; the raise after
+the ensure body did not, and took a new snapshot at the begin.
+
+A debug build now saves the frames when no clause matches and puts them
+back for the raise after the ensure body, so they survive a body that
+raises and rescues an exception of its own, which takes the one buffer.
+A build without --debug emits the C it did.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

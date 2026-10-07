@@ -1,0 +1,27 @@
+An ensure runs when no rescue clause of its begin matches
+
+    def go
+      raise TypeError, "t"
+    rescue ArgumentError
+      puts "not reached"
+    ensure
+      puts "ensure"
+    end
+
+never printed "ensure": the exception went on and the ensure body was
+skipped, so a lock stayed held and a file stayed open. `exit` inside a begin
+with a bare rescue skipped it the same way. A begin with an ensure and no
+rescue was right, and so was a clause that matched.
+
+Such a begin has one frame. On landing the clauses run with that frame
+popped, and the arm for no match raised again at once: a jump to the
+enclosing frame, past the ensure. That arm now stores the exception as the
+begin with no rescue does and falls into the ensure, which raises it again
+after its body. What the clauses let through still leaves by that raise and
+not by the short way to an enclosing ensure, which would pass the rescue
+clauses around this begin.
+
+Nothing is added on the path with no exception, and a begin that lacks
+either clause emits the C it did.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
