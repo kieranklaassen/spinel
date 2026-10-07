@@ -1,0 +1,36 @@
+A mutated element from a method answering @s or its argument is refused
+
+    class C
+      def initialize = (@s = +"a")
+      def pick(f) = f ? @s : "n"
+      def show = @s
+    end
+    c = C.new
+    a = []
+    a << c.pick(true)
+    a[0] << "!"
+    p a, c.show
+
+died with a segmentation fault: CRuby prints ["a!"] and "a!". The
+element is @s itself, and a String is not shared through such a call
+yet. With a reader, `def pick = @s`, the same program is refused at
+compile time; a method that is more than a reader slipped past, and
+its const char * was boxed as the handle it is not.
+
+A call on an object is now refused at that store, in the two sentences
+the compiler already has: the reader's when a value of its method is
+an instance variable's String (`@s`, also as the value of `@s = v` or
+`@s << x`), and the one for a method returning its parameter when a
+value is a parameter and the argument a variable. A method that may
+answer nil is left alone, as is every other call. So is a method that
+ends in `@s` and answers nothing else, whatever its parameters: where
+the slot holds a handle its call already hands that handle out.
+
+Test: test/reject/string_array_method_ivar_value.rb,
+test/reject/string_array_method_ivar_append_value.rb,
+test/reject/string_array_method_param_value.rb, and their lines in
+test/collect/refusals.expected; test/object_method_ivar_tail_shared.rb
+(the kept shape; expected from CRuby 3.3.6)
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+
