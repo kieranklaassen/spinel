@@ -11007,6 +11007,29 @@ static int emit_array_new_from_value(Compiler *c, int arg, Buf *b) {
   return 1;
 }
 
+/* Whether something else holds the fill value `v` of Array.new(n, v) while
+   the Array, laid out as `ar`, is allocated. Nothing of an Integer, a Float, a
+   Symbol, true, false or nil is on the heap. A variable or a constant holds
+   what is read from it, and a literal String is static -- unless the value
+   enters a poly slot through a box that copies it to the heap (a Range, a
+   by-value Struct): that copy is made in place whatever it was read from.
+   Any other value is taken as made in place. */
+static int array_fill_value_held(Compiler *c, int v, Repr ar) {
+  int boxed = ar.elem == TY_POLY;
+  TyKind vt = boxed ? repr_of(c, v).as_ty : ar.elem;
+  if (vt == TY_INT || vt == TY_FLOAT || vt == TY_BOOL || vt == TY_NIL || vt == TY_SYMBOL) return 1;
+  if (operand_may_allocate(c, v)) return 0;
+  if (boxed && vt != TY_POLY && (!needs_root(vt) || comp_ty_value_obj(c, vt))) return 0;
+  switch (nt_kind(c->nt, unwrap_parens(c, v))) {
+    case NK_LocalVariableReadNode: case NK_InstanceVariableReadNode: case NK_ClassVariableReadNode:
+    case NK_GlobalVariableReadNode: case NK_ConstantReadNode: case NK_ConstantPathNode:
+    case NK_StringNode:
+      return 1;
+    default:
+      return 0;
+  }
+}
+
 /* A .new call (and the default-hash form): user classes, Struct and Data, the builtin constructors (emit_class_new_call's arms, in their order) */
 /* Hash.new(&pr): the block argument is the default proc, a Proc held as
    itself (emit_block_arg_proc), which the hash's default calls through
@@ -11837,6 +11860,12 @@ static int emit_new_call_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, 
           buf_printf(g_pre, " _t%d = ", tv); buf_puts(g_pre, vb.p ? vb.p : "");
         }
         buf_puts(g_pre, ";\n");
+        /* a fill value made in place (`t + u`) is held by this temporary
+           alone while the Array it fills is allocated */
+        if (!array_fill_value_held(c, argv[1], ar)) {
+          emit_indent(g_pre, g_indent);
+          buf_printf(g_pre, "SP_GC_ROOT%s(_t%d);\n", ar.elem == TY_POLY ? "_RBVAL" : "", tv);
+        }
         emit_indent(g_pre, g_indent);
         if (is_numeric_literal_tag(k)) {
           buf_printf(g_pre, "sp_%sArray *_t%d = sp_%sArray_new_fill(_t%d, _t%d);\n", k, tr, k, tn, tv);
