@@ -5870,8 +5870,23 @@ static void sp_PolyArray_insert(sp_PolyArray *a, sp_int i, sp_RbVal v) {sp_gc_wb
    sp_array.c, home of sp_IntArray_delete et al) because it needs
    sp_poly_eq, which is inline-per-TU in this file, not linkable from the
    separately-compiled cold array library. */
+static SP_INLINE sp_bool sp_poly_delete_eq_plain(sp_RbVal v) {
+  return v.tag == SP_TAG_INT || v.tag == SP_TAG_STR || v.tag == SP_TAG_SYM || v.tag == SP_TAG_NIL ||
+         v.tag == SP_TAG_BOOL || (v.tag == SP_TAG_FLT && v.v.f == v.v.f);
+}
 static sp_RbVal sp_PolyArray_delete(sp_PolyArray *a, sp_RbVal v) {sp_gc_wb((void*)a); 
-  if (a && a->frozen) { sp_raise_frozen_array_at(a, SP_BUILTIN_POLY_ARRAY); return sp_box_nil(); }
+  if (a && a->frozen) {
+    /* CRuby raises only for an element it would remove. The search answers
+       nil only where the runtime equality is CRuby's for both sides (an
+       Integer, a String, a Symbol, nil, true, false, a Float that is a
+       number); a NaN, a Complex or an object with its own == raises as it
+       did. */
+    if (!sp_poly_delete_eq_plain(v)) sp_raise_frozen_array_at(a, SP_BUILTIN_POLY_ARRAY);
+    for (sp_int i = 0; i < a->len; i++)
+      if (!sp_poly_delete_eq_plain(a->data[i]) || sp_poly_rb_equal(a->data[i], v))
+        sp_raise_frozen_array_at(a, SP_BUILTIN_POLY_ARRAY);
+    return sp_box_nil();
+  }
   if (!a) return sp_box_nil();
   /* sp_poly_eq can allocate (bigint promotion) and so trigger a collection
      mid-loop; a and v may be reachable only through the call expression. */
