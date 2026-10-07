@@ -1,0 +1,1 @@
+A `&.` call to a builtins/ scalar method takes a boxed argument

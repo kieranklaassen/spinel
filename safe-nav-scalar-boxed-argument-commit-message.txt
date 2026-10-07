@@ -1,0 +1,21 @@
+A `&.` call to a builtins/ scalar method takes a boxed argument
+
+    def id(x) = x
+    id(:s)
+    def flt(v) = v ? 1.5 : nil
+    f = flt(true)
+    p f&.clamp(1.0, id(1.2))    # 1.2
+
+This raises NoMethodError ("undefined method 'clamp' for an instance of
+Float"); `i&.between?(id(1), id(20))` does not build, and
+`i&.remainder(id(5.0))` answers 2 for 2.0. All three were right before
+"v&.fdiv(2) and the other Ruby-defined Integer methods keep the &.":
+that left every `&.` call on the typed emitter, which does not serve a
+boxed argument.
+
+With a boxed argument the call is moved onto its builtins/ definition
+after all, as `(t = recv; t.nil? ? nil : copy(t, args))`, the shape the
+Enumerable move gives a `&.` call. Any other `&.` call stays on the
+typed emitter.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
