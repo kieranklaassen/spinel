@@ -1816,7 +1816,8 @@ int infer_poly_call(Compiler *c, int id, TyKind rt, TyKind *out) {
   /* exception accessors on a poly receiver (an exception rescued into a
      union-typed local) delegate at runtime; message and its renderings are
      Strings, the rest carry boxed values (#3120, #3122). */
-  if (recv >= 0 && rt == TY_POLY && argc == 0 && nt_ref(nt, id, "block") < 0 &&
+  if (recv >= 0 && rt == TY_POLY && (argc == 0 || exc_rendering_kwargs(nt, name, argc, argv)) &&
+      nt_ref(nt, id, "block") < 0 &&
       !an_user_recv_defines_method(c, name) &&
       (sp_streq(name, "message") || sp_streq(name, "result") ||
        sp_streq(name, "errno") ||

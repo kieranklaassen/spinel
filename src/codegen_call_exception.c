@@ -126,7 +126,8 @@ int emit_call_exception_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, c
       buf_puts(b, "), (sp_Exception *)("); emit_expr(c, argv[0], b); buf_puts(b, "))");
       return 1;
     }
-    if (argc == 0 && (sp_streq(name, "cause") || sp_streq(name, "backtrace") ||
+    if ((argc == 0 || exc_rendering_kwargs(nt, name, argc, argv)) &&
+        (sp_streq(name, "cause") || sp_streq(name, "backtrace") ||
                       sp_streq(name, "full_message") || sp_streq(name, "detailed_message") ||
                       sp_streq(name, "exception")) &&
         comp_method_in_chain(c, ty_object_class(comp_ntype(c, recv)), name, NULL) < 0) {
@@ -276,7 +277,8 @@ int emit_call_exception_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, c
      class defines the name (which would need the poly method dispatch)
      (#3120, #3122). That dispatch's builtin default arm, for a receiver
      none of those classes own, lands here too. */
-  if (recv >= 0 && comp_ntype(c, recv) == TY_POLY && argc == 0 &&
+  if (recv >= 0 && comp_ntype(c, recv) == TY_POLY &&
+      (argc == 0 || exc_rendering_kwargs(nt, name, argc, argv)) &&
       nt_ref(nt, id, "block") < 0 &&
       (sp_streq(name, "message") || sp_streq(name, "result") ||
        sp_streq(name, "errno") ||
