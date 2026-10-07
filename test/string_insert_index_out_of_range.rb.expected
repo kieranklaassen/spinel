@@ -1,0 +1,53 @@
+IndexError: index -8 out of string
+"ab"
+IndexError: index -3 out of string
+"ab"
+"xab"
+"axb"
+"abx"
+"xab"
+"axb"
+"abx"
+IndexError: index 3 out of string
+"ab"
+IndexError: index 9 out of string
+"ab"
+IndexError: index -3 out of string
+"ab"
+true
+"xab"
+true
+"abx"
+IndexError: index 3 out of string
+"ab"
+IndexError: index 3 out of string
+IndexError: index -3 out of string
+IndexError: index -3 out of string
+"yabx"
+IndexError: index -6 out of string
+IndexError: index 6 out of string
+7
+9
+true
+IndexError: index 5 out of string
+IndexError: index -4 out of string
+"axb"
+IndexError: index 4 out of string
+"abz"
+true
+IndexError: index -3 out of string
+"ab"
+"aqb"
+FrozenError: can't modify frozen String: "ab"
+IndexError: index 7 out of string
+IndexError: index -6 out of string
+"ab"
+"axbcdef"
+NoMethodError
+NoMethodError
+nil
+TypeError: no implicit conversion of nil into String
+TypeError: no implicit conversion of nil into String
+"abc"
+"bxa"
+"bXY"
