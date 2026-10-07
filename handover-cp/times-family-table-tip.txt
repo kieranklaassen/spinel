@@ -1,0 +1,24 @@
+programs: 3132
+  M: class 714, nobuild 32, raise 1104, right 620, silent 3, wording 649, wrong 10
+  P: class 114, nobuild 32, raise 324, right 2000, silent 3, wording 649, wrong 10
+M / P:
+  class / class                114
+  class / right                600
+  nobuild / nobuild            32
+  raise / raise                324
+  raise / right                780
+  right / right                620
+  silent / silent              3
+  wording / wording            649
+  wrong / wrong                10
+moved: class on M, right on P: 600
+    buf__bfbig__attr
+    buf__bfbig__block
+    buf__bfbig__idx
+    buf__bfbig__inject
+moved: raise on M, right on P: 780
+    buf__bf05__attr
+    buf__bf05__block
+    buf__bf05__idx
+    buf__bf05__inject
+output differs across SPINEL_GC_STRESS: 0
