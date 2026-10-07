@@ -1,0 +1,48 @@
+cover? on a String Range read from a boxed slot takes a boxed String
+
+    r = [("ab".."ae"), 1][0]
+    ks = ["ac", 3]
+    p r.cover?("ac")
+    p r.cover?(ks[0])
+
+printed `true` and `false`; CRuby prints `true` twice.
+
+The Range comes out of the Array boxed. For a String argument written in
+place the chain of tests emit_poly_prearms_n writes for cover? has a
+String Range arm (upstream pull request 7605), which answers by
+sp_poly_case_eq. For a boxed argument it has an Integer Range's arm and
+a Float Range's and none for a String Range, so the call fell to the
+false the chain starts from whatever the argument held.
+
+The boxed argument gains the String Range's test, after the numeric
+Ranges' own so that they run what they ran. It answers by
+sp_poly_case_eq too: a boxed String is covered between the ends, and a
+boxed value that is no String is not covered.
+
+A program with no cover? on a boxed receiver gets the C it had, and so
+does one whose argument is not boxed. On an Integer and a Float Range by
+turns, 300,000 calls with a boxed Integer take 41,311,153 instructions
+for 41,461,167 with gcc and 41,572,766 before and after with clang; with
+a boxed String, which neither covers, 28,561,052 for 26,911,066 with gcc
+(5.5 a call) and 25,222,665 for 25,372,665 with clang.
+
+The boxed argument now answers what the String argument answers on the
+same receiver, also where that is not CRuby's: a String with a NUL byte
+compares up to it, and an end changed in place after the Range was made
+is not seen. Where CRuby's answer there is false, the boxed call's false
+was right and is now true. The first is cured by comparing whole Strings
+and the second by a Range that holds its ends as handles; neither is in
+this change.
+
+Not here, and as before: case/when with a boxed String on such a Range
+takes the else arm; include? and member? with a boxed String answer
+false; a String Range as the argument answers false; a String Range
+whose two ends are nil, given a boxed value that is no String, answers
+false; a Range with both ends left out given a boxed String answers
+false; a slot that holds no Range answers false where CRuby raises
+NoMethodError; where a class of the program defines cover?, a boxed
+Range raises NoMethodError.
+
+Test: test/boxed_str_range_cover_boxed.rb (expected from CRuby 3.3.6).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
