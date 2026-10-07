@@ -1,0 +1,22 @@
+A parenthesized yield hands a nil block's value on boxed
+
+    def show(x)
+      x
+    end
+    def passed
+      show((yield))
+    end
+    p passed { 9 }
+    p passed { "s" }
+    p passed { nil }
+
+did not build ("incompatible types when assigning to type 'sp_RbVal'
+from type 'int'"), where CRuby prints 9, "s" and nil.
+
+Where blocks of different types make a yield's value boxed, the
+parentheses around it box what each call site's block answers, by
+that block's own type. A block answering nil was left out: its splice
+answers a bare 0, and the parentheses handed that on as it stood. They
+now box it as nil, as the same yield without parentheses is.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

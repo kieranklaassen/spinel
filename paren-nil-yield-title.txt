@@ -1,0 +1,1 @@
+A parenthesized yield hands a nil block's value on boxed
