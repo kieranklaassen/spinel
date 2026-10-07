@@ -790,6 +790,7 @@ void emit_str_pattern_expr(Compiler *c, int node, Buf *b);
 void emit_boxed_text(Compiler *c, TyKind t, const char *expr, Buf *b);
 /* the form --repr-check records when emit_boxed_text boxes a kind t (RF_*) */
 int emit_boxed_text_form(Compiler *c, TyKind t);
+extern int g_hold_recv_bound;
 int hold_recv_open(Compiler *c, int recv, int boxed, const char *ctype, const char *rootm,
                    Buf *b, Buf *rb);
 void emit_yielder_yield(Compiler *c, int id, const char *cn, Buf *b);

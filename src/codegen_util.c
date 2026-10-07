@@ -469,7 +469,9 @@ static const char *unsup_pos(Compiler *c, int id, int *line) {
    override table (g_argov_node), the operand-order rewrite or an arm that
    re-dispatches through a temp has already declared and rooted the temp in
    front of the call, so rb receives the receiver as rendered and nothing is
-   opened. boxed renders through emit_boxed. The caller frees rb. */
+   opened, and g_hold_recv_bound names the receiver: the arm would have held
+   it itself. boxed renders through emit_boxed. The caller frees rb. */
+int g_hold_recv_bound = -1;
 int hold_recv_open(Compiler *c, int recv, int boxed, const char *ctype, const char *rootm,
                    Buf *b, Buf *rb) {
   memset(rb, 0, sizeof *rb);
@@ -477,6 +479,7 @@ int hold_recv_open(Compiler *c, int recv, int boxed, const char *ctype, const ch
   for (int i = 0; i < g_n_argov; i++)
     if (g_argov_node[i] == recv) bound = 1;
   if (bound) {
+    g_hold_recv_bound = recv;
     if (boxed) emit_boxed(c, recv, rb); else emit_expr(c, recv, rb);
     if (!rb->p) buf_putn(rb, "", 0);
     return 0;
