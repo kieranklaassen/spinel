@@ -395,6 +395,11 @@ extern int g_loop_exc_base;
 extern int g_loop_ensure_base;  /* g_ensure_depth at the innermost C-loop entry:
    a `next` crossing ensure regions opened INSIDE the loop defers through them
    (runs their bodies) before the C continue */
+/* An emitter's own C loop around a block's body, recorded for the `next`
+   and `break` inside it (c_loop_enter, codegen_iter.c) */
+typedef struct { int exc_base, ensure_base; const char *next_var; TyKind next_ty; } CLoop;
+CLoop c_loop_enter(void);
+void c_loop_leave(CLoop saved);
 extern int g_brk_exc_base;
 extern int g_block_brk_exc_base;
 /* Return type of the method currently being emitted, so a tail/return value

@@ -3929,16 +3929,14 @@ int next_is_block_value(Compiler *c, int next) {
   return next >= 0 && next < nt->count && mark[next];
 }
 
-/* Emit a loop body, prefixing a `_redo_N:` label (and pushing it on the redo
-   stack) when the body contains a `redo` that targets this loop. The label
-   sits at the body top so `redo` re-runs the body without advancing. */
-void emit_loop_body(Compiler *c, int body, Buf *b, int indent) {
+/* Enter a C loop the emitter writes around a body; c_loop_leave undoes it. */
+CLoop c_loop_enter(void) {
+  CLoop saved = { g_loop_exc_base, g_loop_ensure_base, g_ie_next_var, g_ie_next_ty };
   /* break/next inside this body exit THIS C loop: record the live
      begin/rescue frame depth at loop entry so their emission can pop the
-     frames opened inside the body (mirrors emit_return's accounting). */
-  int sv_lexc = g_loop_exc_base;
+     frames opened inside the body (mirrors emit_return's accounting), and
+     the ensure depth, so they run the ensures opened inside it and no others. */
   g_loop_exc_base = g_exc_frame_depth;
-  int sv_lens = g_loop_ensure_base;
   g_loop_ensure_base = g_ensure_depth;
   g_c_loop_depth++;
   /* A `next <v>` in this body leaves THIS loop's iteration, so the value slot
@@ -3946,11 +3944,26 @@ void emit_loop_body(Compiler *c, int body, Buf *b, int indent) {
      inject body's destination) is not its target: left set, the inner next
      assigned the outer block's slot before its continue, which built only
      when the two kinds agreed and was then right by accident, the tail
-     overwriting it (#4748). The slot's kind goes with it. g_ie_res_poly
+     overwriting it (#4748). The slot's kind goes with it; a loop that
+     collects its block's value names its own slot after this. g_ie_res_poly
      stays: the while-as-value emitter sets it for its own `break` value, which
      the break emitter reads inside this body. */
-  const char *sv_nxv = g_ie_next_var; TyKind sv_nxt = g_ie_next_ty;
   g_ie_next_var = NULL; g_ie_next_ty = TY_UNKNOWN;
+  return saved;
+}
+
+void c_loop_leave(CLoop saved) {
+  g_c_loop_depth--;
+  g_ie_next_var = saved.next_var; g_ie_next_ty = saved.next_ty;
+  g_loop_exc_base = saved.exc_base;
+  g_loop_ensure_base = saved.ensure_base;
+}
+
+/* Emit a loop body, prefixing a `_redo_N:` label (and pushing it on the redo
+   stack) when the body contains a `redo` that targets this loop. The label
+   sits at the body top so `redo` re-runs the body without advancing. */
+void emit_loop_body(Compiler *c, int body, Buf *b, int indent) {
+  CLoop loop = c_loop_enter();
   int has_redo = subtree_has_own_redo(c->nt, body);
   int lbl = 0;
   if (has_redo) {
@@ -3982,10 +3995,7 @@ void emit_loop_body(Compiler *c, int body, Buf *b, int indent) {
   if (polls_here && g_uses_finalizers) { emit_indent(b, indent); buf_printf(b, "if (SP_UNLIKELY(SP_ATOMIC_LOAD(&sp_fin_pending_flag, __ATOMIC_RELAXED))) sp_fin_run_pending()%s;\n", hc_mark()); }
   emit_stmts(c, body, b, indent);
   if (has_redo) g_redo_depth--;
-  g_c_loop_depth--;
-  g_ie_next_var = sv_nxv; g_ie_next_ty = sv_nxt;
-  g_loop_exc_base = sv_lexc;
-  g_loop_ensure_base = sv_lens;
+  c_loop_leave(loop);
 }
 
 /* `recv.tap { |x| body }` / `recv.then { |x| body }` (alias yield_self) in
@@ -4147,19 +4157,13 @@ int emit_tap_then_expr(Compiler *c, int id, Buf *b) {
   else {
     /* tap discards the block's value, but a `next` still leaves the block --
        same wrapper, no destination. */
-    const char *sv_nxv = g_ie_next_var;
-    g_ie_next_var = NULL;
-    int sv_lexcw = g_loop_exc_base, sv_lensw = g_loop_ensure_base;
-    g_loop_exc_base = g_exc_frame_depth; g_loop_ensure_base = g_ensure_depth;
-    g_c_loop_depth++;
+    CLoop loop = c_loop_enter();
     emit_indent(g_pre, din); buf_puts(g_pre, "do {\n");
     int bi = din + 1; g_indent = bi;
     emit_iter_step_body(c, block, g_pre, bi);
     g_indent = din;
     emit_indent(g_pre, din); buf_puts(g_pre, "} while (0);\n");
-    g_c_loop_depth--;
-    g_loop_exc_base = sv_lexcw; g_loop_ensure_base = sv_lensw;
-    g_ie_next_var = sv_nxv;
+    c_loop_leave(loop);
   }
   g_indent = sv;
   if (use_shadow) { emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n"); }
@@ -4467,12 +4471,10 @@ int emit_iter_value_expr(Compiler *c, int id, Buf *b) {
 static void emit_filter_body(Compiler *c, int body, int tnv, int tk, int is_rej, Buf *b, int indent) {
   const NodeTable *nt = c->nt;
   int bn = 0; const int *bb = nt_arr(nt, body, "body", &bn);
-  const char *sv_nx = g_ie_next_var; int sv_poly = g_ie_res_poly; TyKind sv_nty = g_ie_next_ty;
-  int sv_lexc = g_loop_exc_base, sv_lens = g_loop_ensure_base;
+  int sv_poly = g_ie_res_poly;
+  CLoop loop = c_loop_enter();
   char nxbuf[32]; snprintf(nxbuf, sizeof nxbuf, "_t%d", tnv);
-  g_ie_next_var = nxbuf; g_ie_res_poly = 1; g_ie_next_ty = TY_UNKNOWN;
-  g_loop_exc_base = g_exc_frame_depth; g_loop_ensure_base = g_ensure_depth;
-  g_c_loop_depth++;
+  g_ie_next_var = nxbuf; g_ie_res_poly = 1;
   /* the step's setup: locals fresh, and a redo's label after them */
   if (block_of_body(c, body) >= 0) emit_block_locals_reset(c, block_of_body(c, body), b, indent + 1);
   int rd_lbl = emit_iter_step_stmts(c, body, b, indent + 1, NULL);
@@ -4492,9 +4494,8 @@ static void emit_filter_body(Compiler *c, int body, int tnv, int tk, int is_rej,
     free(cexpr.p);
   }
   if (rd_lbl) g_redo_depth--;
-  g_c_loop_depth--;
-  g_loop_exc_base = sv_lexc; g_loop_ensure_base = sv_lens;
-  g_ie_next_var = sv_nx; g_ie_res_poly = sv_poly; g_ie_next_ty = sv_nty;
+  c_loop_leave(loop);
+  g_ie_res_poly = sv_poly;
 }
 
 /* The in-place filter loop of select! / filter! / reject! / keep_if /
