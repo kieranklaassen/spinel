@@ -1,0 +1,20 @@
+clear through a boxed receiver raises for a frozen Array or Hash
+
+    a = [1, "x", nil].freeze
+    h = { "a" => a, "n" => 1 }
+    h["a"].clear
+    p a
+
+printed []: the frozen Array was emptied. CRuby raises FrozenError
+(can't modify frozen Array: [1, "x", nil]). An Array or a Hash read
+back from a Hash or an Array, or passed to a parameter that takes
+both, is cleared by sp_poly_clear, which set the length of every kind
+with no look at the frozen flag. The typed clear raises.
+
+sp_poly_clear now raises before it removes anything, for an empty
+receiver too: a Hash by the flag in its header, an Array by the flag
+in its struct.
+
+Test: test/boxed_frozen_clear.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

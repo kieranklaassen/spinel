@@ -1,0 +1,1 @@
+String#clamp builds with a bound known only at run time

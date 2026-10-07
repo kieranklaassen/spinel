@@ -1,0 +1,23 @@
+delete answers nil for an element a frozen Array does not hold
+
+    a = ["x", "y"].freeze
+    p a.delete("zz")
+    p a.delete("zz") { "none" }
+
+raised FrozenError (can't modify frozen Array: ["x", "y"]) at its
+first delete; CRuby prints nil and "none". CRuby's Array#delete
+raises only once it has found an element to remove, and an Array that
+does not hold the element is left alone. The delete functions of the
+four Array kinds (Integer and Symbol, Float, String, boxed) raised for
+a frozen Array before they searched.
+
+Each now searches a frozen Array first and answers nil where the
+search proves the element absent. A boxed Array proves it only among
+Integers, Strings, Symbols, nil, true, false and Floats that are
+numbers, where the runtime equality is CRuby's; with a NaN, a Complex
+or an object that has its own == on either side it raises as it did.
+An Array that is not frozen takes the path it took.
+
+Test: test/frozen_array_delete_absent.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

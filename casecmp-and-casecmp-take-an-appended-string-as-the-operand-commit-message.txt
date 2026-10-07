@@ -1,0 +1,23 @@
+casecmp and casecmp? take an appended String as the operand
+
+    h = { "k" => +"AB", "n" => 1 }
+    h["k"] << "c"
+    p "abc".casecmp(h["k"]), "abc".casecmp?(h["k"])
+
+printed nil and nil; CRuby prints 0 and true. A boxed String the
+program appends to is kept as a shared handle, and its tag is not
+SP_TAG_STR. The arm for a String receiver with a boxed operand asked
+sp_poly_check_str, which answers NULL for a handle, so the operand was
+taken for no String and the call answered nil.
+
+The two templates now read a handle's text, through
+sp_str_casecmp_strbuf, where sp_poly_check_str answered NULL, so a
+plain String operand takes the path it took. It still answers nil
+where CRuby does: the two encodings differ and each side has a byte
+past ASCII. The operand is only compared, so nothing keeps the
+handle's buffer. A boxed receiver read a handle operand already
+(sp_poly_casecmp).
+
+Test: test/casecmp_appended_operand.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

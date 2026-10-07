@@ -1,0 +1,21 @@
+String#clamp builds with a bound known only at run time
+
+    g = { "lo" => "b", "hi" => "d", "n" => 1 }
+    p "a".clamp(g["lo"], g["hi"])
+
+did not build: the C compiler refused the generated C (incompatible
+types when initializing type 'const char *' using type 'sp_RbVal').
+CRuby prints "b". The String arm of clamp emits each bound as a C
+string, and a boxed bound is a boxed value.
+
+A boxed bound now goes to sp_str_clamp_poly: the boxed clamp decides,
+so nil is an open side and a bound that is no String raises CRuby's
+comparison error, and the answer is read back as the String it is.
+The receiver or a plain String bound is answered itself, as the typed
+arm answers. A bound the program appends to is answered as a copy of
+its text, since its buffer moves as it grows: a later append to the
+answer does not reach that bound, nor the reverse.
+
+Test: test/string_clamp_boxed_bound.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

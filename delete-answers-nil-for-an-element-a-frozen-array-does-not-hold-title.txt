@@ -1,0 +1,1 @@
+delete answers nil for an element a frozen Array does not hold

@@ -1,0 +1,25 @@
+A typed String Array's searches take an appended String as the needle
+
+    h = { "k" => +"a", "n" => 1 }
+    h["k"] << "b"
+    a = ["ab", "c", "ab"]
+    p a.include?(h["k"]), a.index(h["k"]), a.delete(h["k"])
+
+printed false, nil and nil; CRuby prints true, 0 and "ab". A boxed
+String the program appends to is kept as a shared handle, and its tag
+is not SP_TAG_STR. The arms that search a typed String Array with a
+boxed needle (include?, member?, index, find_index, rindex, and delete
+with or without a block) tested that tag alone, so they answered as
+they do for a needle that is no String.
+
+Each now reads a handle's text, through sp_poly_is_strbuf and
+sp_poly_unbox_s, after the tests it made before, so a plain String
+needle takes the path it took. The needle is only compared, and delete
+answers the Array's own element, so nothing keeps the handle's buffer.
+
+delete on a frozen Array relies on the commit beneath, which lets it
+answer nil for a needle the Array does not hold.
+
+Test: test/str_array_search_appended_needle.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

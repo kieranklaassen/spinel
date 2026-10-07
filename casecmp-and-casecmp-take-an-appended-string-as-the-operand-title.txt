@@ -1,0 +1,1 @@
+casecmp and casecmp? take an appended String as the operand
