@@ -1,0 +1,1 @@
+A boxed value appended to a String takes the strict conversion

@@ -1,0 +1,25 @@
+A boxed value appended to a String takes the strict conversion
+
+class Path
+  def initialize(s) = @s = s
+  def to_str = @s
+end
+def part(i) = i > 0 ? Path.new("/tmp") : "/"
+s = "cd ".dup
+v = part(1)
+s << v
+p s
+
+printed "cd #<Path:0x...>"; CRuby prints "cd /tmp". With a boxed :name
+the append gave "k=name", where CRuby raises "no implicit conversion of
+Symbol into String".
+
+emit_str_append_arg sent a boxed value that is no Integer through
+sp_poly_to_s, the conversion of puts and interpolation. An append takes
+sp_poly_arg_str_chk, as a typed argument already does: a String is itself,
+an object is asked for to_str, and anything else is the TypeError that
+names its class. `<<` and concat, as a statement and as a value.
+
+Test: test/string_append_boxed_conversion.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
