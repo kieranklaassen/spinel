@@ -1,0 +1,57 @@
+respond_to? answers for Exception's own methods on a program's exception class
+
+    class MyErr < StandardError; end
+    e = MyErr.new("q")
+    puts(e.respond_to?(:message) ? e.message : "no message")
+    # no message; CRuby: q
+
+respond_to? was false for every method Exception gives on an instance of
+a class the program puts under a builtin exception: a typed one
+(`MyErr.new`, `rescue MyErr => e`) and one boxed without having been
+raised. Those methods are the runtime's and stand in no method table.
+class_implicit_responds, the one list the typed fold and the check for a
+boxed receiver both read, had the names Comparable, Enumerable and a
+Struct bring and not Exception's. It has message, full_message,
+detailed_message, backtrace and cause now.
+
+Only in a program where nothing can change that answer or leave the call
+it guards without an arm. prog_exception_names_plain reads the program
+once a compile, and the five names join the list only when:
+
+- no def, Symbol or String spells respond_to?, respond_to_missing?,
+  method_missing, a hook (inherited, included, extended, prepended,
+  method_added), private, protected, module_function, undef_method,
+  remove_method, send, __send__, public_send or an eval, and no call
+  evaluates a block as another object;
+- a call that takes a method name (private, undef_method, alias_method,
+  define_method, attr_reader, send, method, ...) is given literal names
+  only, none of them Exception's own; `undef` and `alias` name none; no
+  Symbol held in a variable is passed as a block or to inject;
+- no def of one of the five stands in a program with a bare `private`,
+  `protected` or `module_function`;
+- each of the five is called on a receiver other than self, with no
+  block, and with no argument but the keywords a rendering takes.
+
+Every other program keeps the C it had: the answer stays false there, as
+it was, also where CRuby says true.
+
+Only those five names: they are the ones such an instance can be called
+with both typed and boxed. backtrace_locations, exception and
+set_backtrace still answer false where CRuby says true, because the call
+is not there yet on one or the other, and a true would lead a guarded
+call into NoMethodError.
+
+Not here: the names a builtin parent adds (KeyError's `key` and
+`receiver`). A raised exception kept as a boxed value answers as before,
+from the runtime's own list.
+
+Depends on the change that lets full_message and detailed_message take
+the keywords asking for the bare call's text: a guarded
+`e.detailed_message(highlight: false) if e.respond_to?(:detailed_message)`
+reaches a call that answers only above it.
+
+Tests: test/exception_class_responds_to_exception_methods.rb,
+test/exception_class_responds_to_hidden_name.rb,
+test/exception_class_responds_to_guarded_bare_call.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
