@@ -27118,12 +27118,28 @@ int nullable_int_value(Compiler *c, int v) {
     Scope *ys = comp_scope_of(c, v);
     int ymi = ys ? (int)(ys - c->scopes) : -1;
     if (ymi < 0) return 0;
+    /* A tail may be a yield again, and that one's tails may come back to this
+       method: two yielding methods that call each other, each handing on a
+       block that yields (`def a(n) ... b(n - 1) { |v| yield v + 1 }`). The
+       method asked a second time has no tail the first asking does not see,
+       and asking it again never ended (the compiler ran out of stack). */
+    static unsigned char *asked; static int asked_cap;
+    if (ymi >= asked_cap) {
+      int nc = c->nscopes > ymi ? c->nscopes : ymi + 1;
+      asked = (unsigned char *)realloc(asked, (size_t)nc);
+      memset(asked + asked_cap, 0, (size_t)(nc - asked_cap));
+      asked_cap = nc;
+    }
+    if (asked[ymi]) return 0;
+    asked[ymi] = 1;
     int tails[32];
     int n = yield_block_tails(c, ymi, tails, (int)(sizeof tails / sizeof tails[0]));
     /* no literal block in sight (an escaping &blk called through the proc ABI):
        its value arrives boxed, so nothing unboxed carries a sentinel */
-    for (int i = 0; i < n; i++) if (nullable_int_value(c, tails[i])) return 1;
-    return 0;
+    int nil = 0;
+    for (int i = 0; i < n && !nil; i++) nil = nullable_int_value(c, tails[i]);
+    asked[ymi] = 0;
+    return nil;
   }
   if (nt_kind(nt, v) == NK_CallNode) {
     if (nn_index_inbounds(c, v)) return 0;
