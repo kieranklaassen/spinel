@@ -1,0 +1,17 @@
+chained, an Array: 0
+chained, a String: 0
+chained, an object: 0
+chained, a Hash: 0
+under an instance variable write: 0
+in a ternary: 0
+after ||: 0
+after ||=: 0
+three deep: 0
+in a block: 0
+in a method that yields: 0
+in an initialize that takes a block: 0
+two captured locals: 0
+q->iv_str = 'a599' "b599
+a String that spells a store: 0
+(*_cell_t) = 'a599' "b599
+a String that spells a captured local's store: 0
