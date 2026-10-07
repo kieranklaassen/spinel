@@ -7668,6 +7668,37 @@ static int spread_default_held(const char *v, size_t n) {
   return strstr(g_pre->p, root) != NULL;
 }
 
+/* True when the default `d` of a parameter of type `pt` leaves a heap value
+   made where it stands: it can allocate (operand_may_allocate: any call) and
+   what it leaves is no scalar -- `1 + 1` and a method that answers an
+   Integer are calls too, with nothing to hold -- or it is kept by value and
+   boxed for a boxed parameter into a new cell (arg_read_converts). */
+static int spread_default_fresh(Compiler *c, TyKind pt, int d) {
+  if (d < 0) return 0;
+  if (pt == TY_POLY && arg_read_converts(c, pt, d)) return 1;
+  TyKind dt = comp_ntype(c, d);
+  if (dt == TY_INT || dt == TY_FLOAT || dt == TY_BOOL || dt == TY_NIL || dt == TY_SYMBOL) return 0;
+  return operand_may_allocate(c, d);
+}
+
+/* True when `v`, the text of parameter i read out of a spread (a splat's
+   element, the gathered positionals, a `**`'s key), leaves a value built
+   where it stands with nothing to hold it. Where the spread does not reach
+   the parameter the text falls back to its default, `(n < len ? element :
+   DEFAULT)`, written inside the call's parentheses: a fresh one is collected
+   by the next argument's allocation, or by the callee's own before it roots
+   the parameter. A text that is one temp is bound already, and a default the
+   prelude built and rooted (spread_default_held) is held. A program with a
+   finalizer keeps its C: the held value would outlive the call, and its
+   finalizer run late. */
+static int spread_slot_fresh(Compiler *c, Scope *m, int i, const char *v, size_t n) {
+  LocalVar *p = m->pnames[i] ? scope_local(m, m->pnames[i]) : NULL;
+  if (g_uses_finalizers || !p || p->byref_out || !(p->type == TY_POLY || needs_root(p->type))) return 0;
+  if (!spread_default_fresh(c, p->type, m->pdefault ? m->pdefault[i] : -1)) return 0;
+  int bound = n > 2 && v[0] == '_' && v[1] == 't' && 2 + strspn(v + 2, "0123456789") == n;
+  return !bound && !spread_default_held(v, n);
+}
+
 /* True when slot j of that list can allocate where it stands, inside the
    call's parentheses. A slot hoisted ahead of the call has run by then; one
    this cannot show quiet counts as allocating. */
@@ -10704,15 +10735,18 @@ else {
     }
   }
   /* where each slot's text starts, and the slots whose value is built where
-     it stands with nothing to hold it (a by-value read's box) */
+     it stands with nothing to hold it (a by-value read's box, a default a
+     spread does not reach) */
   size_t *at = m->nparams > 0 ? calloc((size_t)m->nparams, sizeof *at) : NULL;
   int *fresh = NULL, fr = 0;
   for (int i = 0; i < m->nparams; i++) {
     buf_puts(out, i == 0 ? lead : ", ");
     at[i] = out->len;
     if (L.gather && emit_gather_lead_lent(c, m, i, argv, argc, out)) {}
-    else if (L.from[i] == ARG_GATHERED)
+    else if (L.from[i] == ARG_GATHERED) {
       emit_gathered_param(c, m, i, splat_tmp, out);
+      fr = spread_slot_fresh(c, m, i, out->p + at[i], out->len - at[i]);
+    }
     else if (L.from[i] == ARG_REST) {
       /* rest collects middle args; stop before post-splat params */
       int rest_end = rest_argc - m->npost_rest;
@@ -10724,8 +10758,10 @@ else {
         emit_rest_pack_kwh(c, i, rest_end, argv, L.rest_kwh, out);
       }
     }
-else if (L.from[i] == ARG_ELEM)
+else if (L.from[i] == ARG_ELEM) {
       emit_elem_param(c, m, i, L.arg[i], splat_tmp, splat_at, splat_all, out);
+      fr = spread_slot_fresh(c, m, i, out->p + at[i], out->len - at[i]);
+    }
 else {
       /* Check if this param has a keyword match (lookup by param name in kwh).
          Only a true KEYWORD param consumes a key -- a positional param whose
@@ -10741,6 +10777,7 @@ else {
       else if (ds_hash_tmp >= 0 && is_kwparam && i != m->kwrest_idx) {
         /* Double-splat: extract param by name from the pre-eval'd hash. */
         emit_ds_param_extract(c, m, i, ds_hash_tmp, ds_hash_type, out);
+        fr = spread_slot_fresh(c, m, i, out->p + at[i], out->len - at[i]);
       }
       else if (m->kwrest_idx >= 0 && i == m->kwrest_idx) {
         /* Collect remaining (unbound) keyword args into a sp_SymPolyHash. When
