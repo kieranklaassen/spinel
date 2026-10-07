@@ -11210,12 +11210,37 @@ static int emit_call_stmt(Compiler *c, int id, Buf *b, int indent, const NodeTab
               emit_indent(b, indent);
               int fo = rc >= 0 && rc < c->nclasses &&
                        c->classes[rc].freeze_observed && !c->classes[rc].is_value_type;
-              int tw = fo ? ++g_tmp : -1;
-              if (fo) {
+              /* The receiver runs before the value and is held while it
+                 runs. The plain store is one C assignment, whose two sides
+                 the C compiler orders; what the value hoists runs ahead of
+                 the statement; and a receiver nothing else holds is
+                 collected by a value that allocates. So where neither side
+                 is a plain read the receiver goes into a temporary, declared
+                 ahead of what the value hoists and rooted while a value that
+                 may allocate runs. (A global is a plain read here.) */
+              int hold = rc >= 0 && rc < c->nclasses && !c->classes[rc].is_value_type &&
+                         nt_kind(nt, recv) != NK_GlobalVariableReadNode &&
+                         !subtree_is_pure_read(c, recv) && !subtree_is_pure_read(c, argv[0]);
+              int hroot = hold && subtree_may_allocate(nt, argv[0]);
+              int braces = fo || (hold && !g_pre);
+              int tw = fo || hold ? ++g_tmp : -1;
+              if (fo || hold) {
                 char twn[32]; snprintf(twn, sizeof twn, "_t%d", tw);
-                buf_printf(b, "{ sp_%s *_t%d = ", c->classes[rc].c_name, tw);
-                emit_expr(c, recv, b); buf_puts(b, "; ");
-                emit_frozen_obj_guard(c, rc, twn, b);
+                if (hold && g_pre) {
+                  Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
+                  emit_indent(g_pre, g_indent);
+                  buf_printf(g_pre, "sp_%s *_t%d = %s; ", c->classes[rc].c_name, tw, rb.p ? rb.p : "");
+                  free(rb.p);
+                  if (hroot) buf_printf(g_pre, "SP_GC_ROOT(_t%d); ", tw);
+                  buf_puts(g_pre, "\n");
+                  if (fo) buf_puts(b, "{ ");
+                }
+                else {
+                  buf_printf(b, "{ sp_%s *_t%d = ", c->classes[rc].c_name, tw);
+                  emit_expr(c, recv, b); buf_puts(b, "; ");
+                  if (hroot) buf_printf(b, "SP_GC_ROOT(_t%d); ", tw);
+                }
+                if (fo) emit_frozen_obj_guard(c, rc, twn, b);
                 buf_printf(b, "_t%d->iv_%s = ", tw, iv_c(base));
               }
               else {
@@ -11248,7 +11273,7 @@ static int emit_call_stmt(Compiler *c, int id, Buf *b, int indent, const NodeTab
               else if (ivt != TY_POLY && ivt != TY_UNKNOWN)
                 emit_coerce(c, argv[0], ivt, CO_HOLD, "an attribute writer", b);
               else emit_expr(c, argv[0], b);
-              buf_puts(b, fo ? "; }\n" : ";\n");
+              buf_puts(b, braces ? "; }\n" : ";\n");
               return 1;
             }
           }
