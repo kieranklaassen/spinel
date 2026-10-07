@@ -1,0 +1,39 @@
+A boxed div, divmod, remainder or fdiv raises for an operand that is no number
+
+Each of the four refuses a receiver without the method and then
+converts its operand: nil to 0, true to 1, a Symbol to its index, a
+String through strtoll or Float().
+
+    row = [7, true]
+    p row[0].divmod(row[1])    # Spinel: [7, 0], CRuby: TypeError
+
+    row = [7, nil]
+    p row[0].div(row[1])       # Spinel: ZeroDivisionError, CRuby: TypeError
+
+`2.5.fdiv("s")` raised ArgumentError, and the Float arms worded the
+TypeError as a conversion ("can't convert nil into Float") where CRuby
+words it as a coercion.
+
+Below its receiver guard each now sends an operand outside the numeric
+tower to sp_poly_binop_bad, which raises "nil can't be coerced into
+Integer" (Float, Rational, by the receiver). A program object with
+coerce has answered above, in sp_poly_coerce_binop. Nothing is removed
+and no arm changes; sp_poly_divmod's Float arm is the one that calls
+sp_flo_divmod.
+
+A program whose builtin classes have arithmetic or a coerce of their
+own is left as it is, as for the boxed / and %: the helpers do not ask
+a reopened TrueClass#coerce, and the conversion often answers what it
+does (`class TrueClass; def coerce(n) = [n, 1]; end` and
+`7.divmod(true)`: [7, 0] on CRuby and, by the conversion, here). The
+four checks read sp_poly_divmod_converts after the operand has failed
+them.
+
+Left alone: `**`, which converts the same way in sp_poly_pow; a
+receiver the compiler knows to be an Integer or a Float, which does not
+come through these functions.
+
+Tests: test/poly_named_division_operand.rb,
+test/poly_named_division_reopened_builtin.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
