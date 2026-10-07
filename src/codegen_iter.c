@@ -1758,6 +1758,9 @@ static void emit_block_arg_coerced(Compiler *c, int node, TyKind ot, Buf *b) {
     view_pop(c, svt);
     view_pop(c, svm);
   }
+  /* an Integer into a parameter another yield made a Bignum, as a plain
+     assignment of one widens it */
+  else if (ot == TY_BIGINT && at == TY_INT) emit_bigint_operand_ext(c, node, b);
   else emit_expr(c, node, b);
 }
 

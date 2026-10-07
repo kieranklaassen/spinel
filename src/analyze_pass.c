@@ -12433,11 +12433,18 @@ static int cs_type_params(Compiler *c, int create, const int *argv, int argc) {
   char *absent = calloc((size_t)np + 1, 1);
   block_site_types(c, &s, argv, argc, pos, absent, pos + np);
   int changed = 0;
+  /* The slot of a Bignum parameter carries the pointer only from a call in
+     sight that passes each argument as itself. */
+  int slot_site = argc == s.P && proc_literal_calls_in_sight(c, create);
+  for (int a = 0; a < argc && slot_site; a++)
+    slot_site = nt_kind(nt, argv[a]) != NK_SplatNode && nt_kind(nt, argv[a]) != NK_KeywordHashNode &&
+                nt_kind(nt, argv[a]) != NK_BlockArgumentNode;
   for (int k = 0; k < s.P; k++) {
     const char *p = block_sig_name(c, &s, k);
     LocalVar *lv = p ? scope_local(bs, p) : NULL;
     TyKind at = pos[k];
     if (!lv) continue;
+    if (!slot_site || at != TY_BIGINT) lv->big_boxed = 1;
     /* A literal nil here (bs_join_val) beside an Integer, at this call or
        across two: the nil makes the param nil first, as it does the
        bare-int guess, and marks it nil_passed, after which an Integer keeps
@@ -14219,6 +14226,10 @@ int infer_block_params(Compiler *c) {
   int changed = 0;
   block_sites_index(c);
   bsn_n = 0;
+  /* big_boxed is each run's own finding, so the last run's is of the types
+     that stand */
+  for (int si = 0; si < c->nscopes; si++)
+    for (int l = 0; l < c->scopes[si].nlocals; l++) c->scopes[si].locals[l].big_boxed = 0;
 
   /* Splat-rest / trailing-post params of proc literals: register them on the
      proc's scope so they are locals, not "uncaptured outer variables". The

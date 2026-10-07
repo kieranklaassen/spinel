@@ -3215,6 +3215,15 @@ static SP_INLINE sp_Bigint *sp_bm_arg_bigint(sp_RbVal v) {
   if (v.tag == SP_TAG_NIL) return NULL;
   sp_bm_arg_mismatch(v, "Integer");
 }
+/* A proc's Bignum parameter. The sp_int slot carries the pointer of a Bignum
+   a call passed, but an Integer another call passed rides it as itself, and
+   the runtime's own calls fill it with the Bignum's low bits. The box the
+   call published says which; nil, and any other kind, read as before. */
+static SP_INLINE sp_Bigint *sp_proc_arg_bigint(sp_RbVal v, sp_int slot) {
+  if (v.tag == SP_TAG_BIGINT) return (sp_Bigint *)v.v.p;
+  if (v.tag == SP_TAG_INT && v.v.i != SP_INT_NIL) return sp_bigint_new_int(v.v.i);
+  return (sp_Bigint *)(uintptr_t)slot;
+}
 static SP_INLINE void *sp_bm_arg_ptr(void *p, sp_RbVal v, const char *want) {
   if (p || v.tag == SP_TAG_NIL) return p;
   sp_bm_arg_mismatch(v, want);
