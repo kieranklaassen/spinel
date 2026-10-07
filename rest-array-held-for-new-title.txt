@@ -1,0 +1,1 @@
+A rest array handed to new is held while the object is allocated
