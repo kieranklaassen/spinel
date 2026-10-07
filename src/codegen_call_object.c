@@ -1571,22 +1571,23 @@ int emit_call_safe_nav_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
         if (!preb2.p || !preb2.p[0])
           buf_printf(b, "(%s ? %s : (%s))", nilt, nilv, vbs.p ? vbs.p : "");
         else {
-          int rsv = ++g_tmp;
+          /* The guard steps over what the value hoisted, and the value
+             stays in the call's place. Computed with them ahead of the
+             statement, the call ran before what is written before it:
+             `"#{$c} #{o&.bump([1, 2])}"` read `$c` after `bump`. A jump
+             and not a block: the value names what they declare. A root
+             among them is pushed, and popped by the count saved here. */
+          int lsn = ++g_tmp;
+          if (sn_roots_to_pushes(&preb2)) {
+            emit_indent(g_pre, g_indent);
+            buf_printf(g_pre, "int SP_CLEANUP(sp_gc_cleanup) _sns%d = sp_gc_nroots;\n", lsn);
+          }
           emit_indent(g_pre, g_indent);
-          emit_ctype(c, ret2, g_pre);
-          buf_printf(g_pre, " _snr%d = %s;\n", rsv, nilv);
-          emit_indent(g_pre, g_indent);
-          if (ret2 == TY_POLY) buf_printf(g_pre, "SP_GC_ROOT_RBVAL(_snr%d);\n", rsv);
-          else if (needs_root(ret2)) buf_printf(g_pre, "SP_GC_ROOT(_snr%d);\n", rsv);
-          else buf_printf(g_pre, "(void)_snr%d;\n", rsv);
-          emit_indent(g_pre, g_indent);
-          buf_printf(g_pre, "if (!(%s)) {\n", nilt);
+          buf_printf(g_pre, "if (%s) goto _snl%d;\n", nilt, lsn);
           buf_puts(g_pre, preb2.p);
           emit_indent(g_pre, g_indent);
-          buf_printf(g_pre, "  _snr%d = (%s);\n", rsv, vbs.p ? vbs.p : "");
-          emit_indent(g_pre, g_indent);
-          buf_puts(g_pre, "}\n");
-          buf_printf(b, "_snr%d", rsv);
+          buf_printf(g_pre, "_snl%d:;\n", lsn);
+          buf_printf(b, "(%s ? %s : (%s))", nilt, nilv, vbs.p ? vbs.p : "");
         }
         free(vbs.p); free(preb2.p);
         return 1;
