@@ -104,6 +104,12 @@ static const char *sp_bytestr(const char *hay, size_t hn, const char *need, size
     if (hay[i] == need[0] && memcmp(hay + i, need, nn) == 0) return hay + i;
   return NULL;
 }
+/* sp_str_find's search where strstr found nothing (sp_str.h): behind the
+   NUL byte strstr ended at, or from the start for a pattern that holds one. */
+const char *sp_str_find_rest(const char *hay, const char *end, const char *need, size_t nn, int nul) {
+  if (!nul) hay += strlen(hay) + 1;
+  return hay < end ? sp_bytestr(hay, (size_t)(end - hay), need, nn) : NULL;
+}
 int sp_utf8_set_has(const uint32_t*cps,size_t n,uint32_t cp){for(size_t i=0;i<n;i++)if(cps[i]==cp)return 1;return 0;}
 /* Case-insensitive byte comparison over the REAL lengths: stopping at the
    first NUL made two strings differing only after one compare equal (#3471). */
@@ -1135,16 +1141,19 @@ sp_StrArray*sp_str_scan(const char*s,const char*pat){if(!s)sp_nil_recv("scan");
   SP_GC_ROOT_STR(s);SP_GC_ROOT_STR(pat);
   sp_StrArray*a=sp_StrArray_new();SP_GC_ROOT(a);
   if(!pat)sp_raise_cls("TypeError","wrong argument type nil (expected Regexp)");
-  size_t pl=strlen(pat);
+  /* byte lengths: strlen ends at a NUL in the subject or the pattern */
+  size_t pl=sp_str_byte_len(pat);
+  const char*se=s+sp_str_byte_len(s);
   /* `$~` is the last match, or nil when there was none */
   if(pl==0){
     const char*p=s;
-    for(;;){sp_str_split_push(a,p,0);if(!*p)break;p+=sp_utf8_advance(p);}
+    for(;;){sp_str_split_push(a,p,0);if(p>=se)break;p+=sp_utf8_advance(p);if(p>se)p=se;}
     if(sp_re_track_last)sp_re_set_lit_match(s,(sp_int)(p-s),(sp_int)(p-s));
     return a;
   }
+  int nul=sp_str_pat_nul(pat,pl);
   const char*p=s,*f,*last=NULL;
-  while((f=strstr(p,pat))!=NULL){sp_str_split_push(a,f,pl);last=f;p=f+pl;}
+  while((f=sp_str_find(p,se,pat,pl,nul))!=NULL){sp_str_split_push(a,f,pl);last=f;p=f+pl;}
   if(sp_re_track_last){if(last)sp_re_set_lit_match(s,(sp_int)(last-s),(sp_int)(last-s+pl));else sp_re_clear_last_match();}
   return a;
 }
@@ -1152,13 +1161,14 @@ sp_StrArray*sp_str_scan(const char*s,const char*pat){if(!s)sp_nil_recv("scan");
    the rows up front, so each turn finds its own match again from byte `pos`
    and sets the registers to it (#3601). Answers where the next turn looks. */
 sp_int sp_str_scan_at(const char*s,const char*pat,sp_int pos){SP_GC_ROOT_STR(s);
-  size_t pl=strlen(pat);
-  const char*f=pl?strstr(s+pos,pat):s+pos;
+  size_t pl=sp_str_byte_len(pat);
+  const char*se=s+sp_str_byte_len(s);
+  const char*f=pl?sp_str_find(s+pos,se,pat,pl,sp_str_pat_nul(pat,pl)):s+pos;
   if(!f)return pos;
   sp_int at=(sp_int)(f-s);
   sp_re_set_lit_match(s,at,at+(sp_int)pl);
   if(pl)return at+(sp_int)pl;
-  return *f?at+sp_utf8_advance(f):at+1;
+  return f<se?at+sp_utf8_advance(f):at+1;
 }
 /* String#gsub(pat, rep) for literal (non-regex) patterns. Issue #827: the
    result must come from sp_str_alloc, not a raw malloc buffer, because the
