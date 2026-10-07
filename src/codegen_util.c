@@ -1216,6 +1216,28 @@ int emit_frame_unwind(Buf *b, int pop_base, const char *guard) {
   if (guard) buf_puts(b, "}");
   return 1;
 }
+/* What an ensure region does, after its ensure body, with the exception it
+   deferred. The exception belongs to the nearest enclosing HANDLER, which is
+   not always the enclosing ensure: a begin's frame between the two is one
+   (walking past it ran the outer ensure twice and killed the program -- what
+   `Dir.chdir(a) { begin; Dir.chdir(b) { raise }; rescue; end }` does), and
+   so are the enclosing region's own rescue clauses while its body is what
+   is being left, since they share the ensure's frame. Either takes a
+   re-raise. With neither, the exception goes straight to the enclosing
+   ensure, whose frame is popped there if it is still live: inside that
+   region's rescue clause it no longer is. `bt`: a debug build saved the
+   frames when the region took the exception, and the re-raise puts them
+   back. */
+void emit_ensure_exc_out(Buf *b, int eid, int bt) {
+  EnsureCtx *outer = g_ensure_depth > 0 ? &g_ensure_stack[g_ensure_depth - 1] : NULL;
+  if (outer && g_exc_frame_depth <= outer->exc_base + 1 && !outer->body_rescue)
+    emit_ensure_exc_hand_on(b, eid, outer->lid, g_exc_frame_depth > outer->exc_base);
+  else {
+    buf_printf(b, "if (_excf%d) { ", eid);
+    if (bt && g_debug) buf_printf(b, "sp_bt_restore(&_excbt%d); ", eid);
+    buf_printf(b, "sp_pending_exc_obj = _excobj%d; sp_raise_cls(_exccls%d, _excmsg%d); }", eid, eid, eid);
+  }
+}
 Buf g_procs;
 Buf g_proc_protos;
 Buf g_pd_protos;
@@ -4616,14 +4638,15 @@ void emit_main_exit(Buf *b) {
 
 /* The ensure region `eid`, its body done, hands the exception it waits with
    to the ensure region around it: `outer`'s locals take it, its frame is
-   popped, and its ensure body runs next. That frame never lands, so the
-   exception is put in its slot as a landing would have left it: the
-   collector keeps what the slots hold up to sp_exc_top, and the slot the
-   exception was read from lies above that once the frame is popped. */
-void emit_ensure_exc_hand_on(Buf *b, int eid, int outer) {
-  buf_printf(b, "if (_excf%d) { _excf%d = 1; _excmsg%d = _excmsg%d; _exccls%d = _exccls%d; _excobj%d = _excobj%d; sp_exc_top--;"
+   popped when `pop` says it is still live, and its ensure body runs next.
+   No frame lands with the exception, so it is put in the slot at sp_exc_top
+   as a landing would have left it: the collector keeps what the slots hold
+   up to there, and the slot the exception was read from lies above that
+   once a frame is popped, or was taken by a begin of the ensure body. */
+void emit_ensure_exc_hand_on(Buf *b, int eid, int outer, int pop) {
+  buf_printf(b, "if (_excf%d) { _excf%d = 1; _excmsg%d = _excmsg%d; _exccls%d = _exccls%d; _excobj%d = _excobj%d;%s"
                 " sp_exc_msg[sp_exc_top] = _excmsg%d; sp_exc_obj[sp_exc_top] = _excobj%d; goto _ensure%d; }",
-             eid, outer, outer, eid, outer, eid, outer, eid, outer, outer, outer);
+             eid, outer, outer, eid, outer, eid, outer, eid, pop ? " sp_exc_top--;" : "", outer, outer, outer);
 }
 
 void emit_retf_return(int eid, int has_retval, Buf *b) {

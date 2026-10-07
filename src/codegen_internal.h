@@ -461,7 +461,9 @@ void emit_line_directive(Compiler *c, int id, Buf *b);
    yield then defers a `return` belonging to the OUTER method into it. Reading
    g_ret_type at the store site therefore asked the wrong function whether to
    box, and a String went into an sp_RbVal slot unboxed. */
-typedef struct { int lid; int has_retval; int exc_base; TyKind retv_ty; } EnsureCtx;
+/* body_rescue: the region's body is being emitted and the region has rescue
+   clauses, so an exception leaving that body is theirs before the ensure's. */
+typedef struct { int lid; int has_retval; int exc_base; TyKind retv_ty; int body_rescue; } EnsureCtx;
 extern EnsureCtx g_ensure_stack[MAX_ENSURE_DEPTH];
 extern int       g_ensure_depth;
 
@@ -479,6 +481,7 @@ extern int        g_rescue_save_depth;
    emitted anything. */
 int emit_frame_unwind(Buf *b, int pop_base, const char *guard);
 int rescues_crossed(int pop_base);
+void emit_ensure_exc_out(Buf *b, int eid, int bt);
 /* Pop the sp_rescue_sp handlers crossed (no frame pop), for the begin..ensure
    deferred return whose frame-pop text is special. */
 void emit_cur_exc_restore(Buf *b, int pop_base);
@@ -844,7 +847,7 @@ void emit_inlined_local_decl(Compiler *c, LocalVar *lv, const char *rn, Buf *b, 
 void emit_pd_cell_alias_into(Compiler *c, LocalVar *plv, const char *uniq, Buf *b, int indent);
 void emit_inlined_locals(Compiler *c, Scope *m, int tag, Buf *b, int din);
 void emit_retf_return(int eid, int has_retval, Buf *b);
-void emit_ensure_exc_hand_on(Buf *b, int eid, int outer);
+void emit_ensure_exc_hand_on(Buf *b, int eid, int outer, int pop);
 void emit_main_exit(Buf *b);
 /* The assignment target for an inlined method's parameter, spelled by the same
    rule that declared it (a cell-promoted one is `(*_cell_x)`). See codegen.c. */

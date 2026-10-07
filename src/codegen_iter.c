@@ -4784,9 +4784,6 @@ int emit_array_filter_loop(Compiler *c, int recv, int block, TyKind rt, const ch
                  eid, outer->lid, eid, outer->lid, outer->lid);
     else
       buf_printf(b, "if (_retf%d) { _retf%d = 1; sp_exc_top--; goto _ensure%d; }\n", eid, outer->lid, outer->lid);
-    emit_indent(b, indent);
-    emit_ensure_exc_hand_on(b, eid, outer->lid);
-    buf_puts(b, "\n");
   }
   else {
     {
@@ -4796,9 +4793,10 @@ int emit_array_filter_loop(Compiler *c, int recv, int block, TyKind rt, const ch
     if (has_retval && g_ret_type == TY_POLY && proc_ret_slot())
       buf_printf(b, "if (_retf%d) { %s = _retv%d; return 0; }\n", eid, proc_ret_slot(), eid);
     else emit_retf_return(eid, has_retval, b);
-    emit_indent(b, indent);
-    buf_printf(b, "if (_excf%d) { sp_pending_exc_obj = _excobj%d; sp_raise_cls(_exccls%d, _excmsg%d); }\n", eid, eid, eid, eid);
   }
+  emit_indent(b, indent);
+  emit_ensure_exc_out(b, eid, 0);
+  buf_puts(b, "\n");
   if (flv) flv->type = fsaved;
   *tr = t; *torig = to; *twp = tw;
   return 1;

@@ -399,8 +399,6 @@ int emit_call_synchronize_arms(Compiler *c, int id, Buf *b, const NodeTable *nt,
                      eid, outer->lid, eid, outer->lid, outer->lid);
         else
           buf_printf(b, "if (_retf%d) { _retf%d = 1; sp_exc_top--; goto _ensure%d; } ", eid, outer->lid, outer->lid);
-        emit_ensure_exc_hand_on(b, eid, outer->lid);
-        buf_puts(b, " ");
       }
       else {
         /* the deferred return leaves through every enclosing live begin
@@ -427,8 +425,9 @@ int emit_call_synchronize_arms(Compiler *c, int id, Buf *b, const NodeTable *nt,
         /* a proc body returns sp_int: see the sibling in codegen_iter.c */
         else if (g_in_proc_body) buf_printf(b, "if (_retf%d) return 0; ", eid);
         else buf_printf(b, "if (_retf%d) return; ", eid);
-        buf_printf(b, "if (_excf%d) { sp_pending_exc_obj = _excobj%d; sp_raise_cls(_exccls%d, _excmsg%d); } ", eid, eid, eid, eid);
       }
+      emit_ensure_exc_out(b, eid, 0);
+      buf_puts(b, " ");
     }
     if (scalar) buf_printf(b, "_t%d; })", rv);
     else buf_puts(b, "0; })");
