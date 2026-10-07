@@ -6559,7 +6559,8 @@ static int desugar_str_range_methods(Compiler *c) {
        what refuses or shares an element changed in a block decides it
        there, as it did. */
     int dropped = 0;
-    if (!native && nt_ref(nt, id, "block") >= 0 && sp_streq(nm, "each")) {
+    if (!native && nt_ref(nt, id, "block") >= 0 &&
+        (sp_streq(nm, "each") || sp_streq(nm, "each_with_index"))) {
       if (!par) par = an_parent_map(nt);
       dropped = par && (str_range_call_value_dropped(c, par, id) ||
                         str_range_call_ends_def_on_local(nt, par, id));
@@ -6567,6 +6568,26 @@ static int desugar_str_range_methods(Compiler *c) {
     if (!native && an == 0 && sp_streq(nm, "each") && dropped) {
       int blk = nt_ref(nt, id, "block");
       if (str_range_each_block_plain(c, blk) && !str_range_block_changes_member(c, blk)) native = 1;
+    }
+    /* A name builtins/enumerable.rb defines, called with a block: the
+       definition walks its receiver with `each`, and a String Range's each
+       takes a member at a time, so `("a".."zzzzzzzz").find { |s| s == "c" }`
+       leaves the range at its third member where the element array would
+       hold all of it first. The call waits one round for
+       desugar_builtin_enum_calls; one it does not take rides the array.
+       Not inject and reduce, whose definition seeds from `first`, a Range's
+       begin even when the Range is empty; nor grep and grep_v, whose block
+       may change its member on the array; each_with_index, which answers
+       its receiver, only where that value is dropped; and none whose block
+       may change its member, as each. */
+    if (!native && nt_ref(nt, id, "block") >= 0 && builtin_enum_name_index(nm) >= 0 &&
+        !is_reduce_alias(nm) && !sp_streq(nm, "grep") && !sp_streq(nm, "grep_v") &&
+        (!sp_streq(nm, "each_with_index") || dropped) &&
+        !nt_int(nt, id, "str_range_enum_seen", 0) &&
+        !str_range_block_changes_member(c, nt_ref(nt, id, "block"))) {
+      nt_node_set_int(nt, id, "str_range_enum_seen", 1);
+      changed = 1;
+      continue;
     }
     if (native) continue;
     int toa = nt_new_node(nt, "CallNode");
