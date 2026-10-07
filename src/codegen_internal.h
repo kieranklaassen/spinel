@@ -1555,6 +1555,13 @@ typedef struct {
   int t0;              /* a temp the caller took for the family ($T), or 0 */
 } BopCtx;
 int emit_builtin_op(Compiler *c, int id, int recv, TyKind rt, const char *name, Buf *b);
+/* String#tr: "" or "_any", the runtime entry the two sets need, and the sets
+   as its arguments (codegen_ops.c) */
+const char *str_tr_entry(Compiler *c, int set, int repl);
+void emit_str_tr_sets(Compiler *c, int set, int repl, Buf *b);
+/* tr! / tr_s!: lead and "a character of _t<old> is in the set", where the
+   texts alone no longer say that the call changed something */
+void emit_str_tr_bang_hit(Compiler *c, int id, int old, const char *lead, Buf *b);
 /* the same, the receiver already rendered as rtext by a family that renders
    it once before its own arms */
 int emit_builtin_op_text(Compiler *c, int id, int recv, TyKind rt, const char *name,
