@@ -992,6 +992,16 @@ int g_ie_discard_value = 0;
 int g_ie_nil_ivars = 0;
 const char *g_rescue_cls = NULL, *g_rescue_msg = NULL;
 const char *g_retry_label = NULL;
+/* the frame and ensure depths at that label: what a retry written deeper,
+   inside a begin or a rescue modifier of the clause, has to pop. A retry
+   written in the body of the label's own begin is not that begin's (it
+   belongs to a begin further out): it stays the bare goto it was. */
+int g_retry_exc_base = 0, g_retry_ensure_base = 0, g_retry_in_body = 0;
+void emit_retry_unwind(Buf *b) {
+  if (g_retry_in_body) return;
+  int pops = g_exc_frame_depth - g_retry_exc_base;
+  if (pops > 0 && g_ensure_depth == g_retry_ensure_base) buf_printf(b, "sp_exc_top -= %d; ", pops);
+}
 int g_redo_stack[64];
 int g_redo_depth = 0;
 int g_redo_pending = 0;
