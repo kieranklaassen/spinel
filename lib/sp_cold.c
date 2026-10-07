@@ -3381,6 +3381,17 @@ sp_StrIntHash*sp_gc_stat(void){
   SP_HEAP_UNLOCK();
 #endif
   sp_StrIntHash*h=sp_StrIntHash_new();sp_StrIntHash_set(h,SPL("bytes"),(sp_int)SP_GC_CTR_GET(sp_gc_bytes));sp_StrIntHash_set(h,SPL("old_bytes"),(sp_int)sp_gc_old_bytes);sp_StrIntHash_set(h,SPL("threshold"),(sp_int)sp_gc_threshold);sp_StrIntHash_set(h,SPL("cycle"),(sp_int)sp_gc_cycle);sp_StrIntHash_set(h,SPL("full_runs"),(sp_int)sp_gc_full_runs);sp_StrIntHash_set(h,SPL("remembered"),(sp_int)sp_gc_nremembered);sp_StrIntHash_set(h,SPL("remembered_peak"),(sp_int)sp_gc_rem_peak);sp_StrIntHash_set(h,SPL("str_bytes"),(sp_int)str_bytes);sp_StrIntHash_set(h,SPL("str_count"),str_count);return h;}
+/* A byte past 7 bits, written or overwritten, can make or break a character,
+   so setbyte then forgets the length remembered for the bytes as they were:
+   the 7-bit hint and the cached count (sp_str_length). One 7-bit byte over
+   another changes no count. A binary String is left alone. Its length is its
+   byte count, nothing remembered is read while it is binary, and
+   sp_str_as_text forgets for it when it becomes text again -- so a byte
+   written into a byte buffer pays a test or two here. */
+static inline void sp_str_setbyte_forget(const char *s, sp_int i, sp_int v) {
+  if (SP_UNLIKELY((((const sp_str_hdr *)(s - 1)) - 1)->size & SP_STR_SIZE_BINARY)) return;
+  if (SP_UNLIKELY((((const unsigned char *)s)[i] | (unsigned char)v) & 0x80)) sp_str_lcache_drop(s);
+}
 /* String#setbyte over value-semantics strings: copy-on-write (a literal's
    bytes are static storage). The caller re-binds an lvalue receiver. */
 const char *sp_str_setbyte_cow(const char *s, sp_int i, sp_int v) {SP_GC_ROOT_STR(s);
@@ -3404,10 +3415,11 @@ const char *sp_str_setbyte_cow(const char *s, sp_int i, sp_int v) {SP_GC_ROOT_ST
     if (m == 0xfe || m == 0xfc) {
       (((sp_str_hdr *)(s - 1)) - 1)->hash = 0;  /* invalidate cached key hash */
       (((sp_str_hdr *)(s - 1)) - 1)->size &= ~SP_STR_SIZE_ASCII7;  /* and the 7-bit answer */
+      sp_str_setbyte_forget(s, i, v);
       ((char *)s)[i] = (char)(v & 0xff);
       return s;
     }
-    if (m == 0xfd) { ((char *)s)[i] = (char)(v & 0xff); return s; }
+    if (m == 0xfd) { sp_str_setbyte_forget(s, i, v); ((char *)s)[i] = (char)(v & 0xff); return s; }
   }
   char *r = sp_str_alloc((size_t)n);
   memcpy(r, s, (size_t)n);
