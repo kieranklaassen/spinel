@@ -7494,6 +7494,17 @@ void emit_builtin_len_cases(Buf *b, int tr, int tv, const char *open, const char
   buf_printf(b, " case SP_BUILTIN_INT_INT_HASH: _t%d = %s((sp_IntIntHash *)_t%d.v.p)->len%s; break;", tr, open, tv, close);
 }
 
+/* The value of the dispatch emit_poly_aset3_user asked for (`x[a, b] = v`
+   beside its splice, codegen_call_recv.c): v, boxed, as the splice answers
+   it, whatever the class's method answered. Closes the dispatch. */
+static void emit_poly_aset3_value(Compiler *c, int vtmp, TyKind vty, Buf *b) {
+  char vn[32]; snprintf(vn, sizeof vn, "_t%d", vtmp);
+  buf_puts(b, " ");
+  if (vty == TY_POLY) buf_puts(b, vn);
+  else emit_boxed_text(c, vty, vn, b);
+  buf_puts(b, "; })");
+}
+
 /* The dispatch default's block arms: sum(init) { } beside a class's own
    sum (an Array, Hash or Range adds the block's answers to init),
    fetch(key) { } and merge!/update(other, ...) { }, the block (a proc
@@ -8015,7 +8026,8 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
       }
       if (!pd_done) buf_puts(b, " }");
       if (kw_pos) emit_poly_str_aset_writeback(c, recv, &ps, &ptemps, b);
-      buf_printf(b, " _t%d; })", pd_done || !is_setter_val ? tr : atmp[0]);
+      if (id == g_poly_aset3) emit_poly_aset3_value(c, atmp[2], atmp_ty[2], b);
+      else buf_printf(b, " _t%d; })", pd_done || !is_setter_val ? tr : atmp[0]);
       free(atmp);
       free(atmp_ty);
       free(htmp);
