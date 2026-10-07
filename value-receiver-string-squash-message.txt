@@ -1,0 +1,30 @@
+A value object made in place keeps its Strings while its call runs
+
+A small class that is never written is kept by value: the struct lives
+in the C temp its call reads it from. For a receiver made in place
+(`Name.new(x).has(a + b)`, or a method's answer) that temp was the only
+holder of the object's String fields and was rooted nowhere. The String
+was collected while the call's arguments were built, or while the
+method itself allocated, and the method read a freed String: with a
+2,880-byte String, 1,111 of 100,000 calls answer wrong in a plain run.
+
+The temp of a pointer receiver is rooted at each of these places
+already. A by-value temp must not be rooted as a pointer and was
+skipped. Its String fields are now rooted one by one with
+emit_gc_root_tmp_refs, the way a local of that class is, at the four
+places that take such a receiver into a temp:
+
+- emit_object_call, the plain call;
+- emit_inline_call_x, a method with a block expanded at its call;
+- emit_pre_root, which a comparison the class defines goes through;
+- interp_plan, an interpolated part with its own to_s.
+
+A receiver read from a local, an instance variable or self is held
+there and compiles as before, and so does a by-value class with no
+String field.
+
+test/value_object_receiver_string_root.rb counts the wrong answers of
+2,000 calls through eight forms. On master every form is wrong in a
+plain run.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

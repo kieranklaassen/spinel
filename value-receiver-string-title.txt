@@ -1,0 +1,1 @@
+A value object made in place keeps its Strings while its call runs
