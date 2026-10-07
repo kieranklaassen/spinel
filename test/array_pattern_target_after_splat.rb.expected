@@ -1,0 +1,45 @@
+:r
+:r
+[2]
+[2] Array
+true
+nil
+nil
+Hash
+3..4
+#<Pt 2>
+pt2
+false
+"s"
+true
+"s"
+s is String
+"z"
+"z"
+"z"
+"z"
+matched
+r is Symbol
+matched
+2.5 is Float
+too short
+none is String
+true
+false
+false
+:b
+2.5
+:no
+2.5
+true
+:r
+:q
+hit
+"sy"
+hit
+"sm"
+hit
+["s", "t", "u"]
+hit
+true
+false
