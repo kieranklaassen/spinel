@@ -227,8 +227,9 @@ int emit_call_identity_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
     else if (rt == TY_SYMBOL) { buf_puts(b, "((sp_int)("); emit_expr(c, recv, b); buf_puts(b, ")*2)"); }
     else if (rt == TY_NIL) { buf_puts(b, "((void)("); emit_expr(c, recv, b); buf_puts(b, "), 4)"); }
     else if (rt == TY_BOOL) { buf_puts(b, "(("); emit_expr(c, recv, b); buf_puts(b, ") ? 20 : 0)"); }
-    /* a boxed value: its identity is the boxed payload (heap pointer / int) */
-    else if (rt == TY_POLY) { buf_puts(b, "((sp_int)(uintptr_t)("); emit_expr(c, recv, b); buf_puts(b, ").v.p)"); }
+    /* a boxed value: what its kind answers unboxed for an immediate, the
+       payload's bits for the rest (sp_poly_object_id) */
+    else if (rt == TY_POLY) { buf_puts(b, "sp_poly_object_id("); emit_expr(c, recv, b); buf_puts(b, ")"); }
     /* a mutable String held as its shared sp_String: that handle is the
        identity, and the one a box of it carries; its text is a fresh copy
        on every read */
