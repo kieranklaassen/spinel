@@ -1,0 +1,41 @@
+The class of a rescued error keeps its name
+
+    def churn(n)
+      keep = []
+      n.times { |j| keep << "junk-" + (j % 10).to_s + "-junk-" }
+    end
+    bad = 0
+    1000.times do |i|
+      begin
+        raise ArgumentError, "bad #{i}"
+      rescue => e
+        k = e.class
+        churn(400)
+        bad += 1 unless k.to_s == "ArgumentError"
+      end
+    end
+    p bad
+
+prints 0 in CRuby and printed 55: k.to_s answered "junk-0-junk-".
+
+An exception carries its class name as a bare C literal, which has no
+marker byte, so sp_exc_class_name hands Ruby a marked copy. It made
+that copy on the string heap, a new one each call. `e.class` puts the
+copy in a Class value, a plain struct of an id and a name that no root
+and no scan knows. Held in a local, a parameter or an instance variable
+while Strings were made, the copy was collected and the class answered
+with the String that took its place.
+
+sp_exc_class_name now keeps one marked copy for a name, off the string
+heap, as a literal is. Every holder of the Class value is right at
+once, no generated C changes, and reading e.class no longer allocates.
+
+Two `e.class.to_s` are now the same String, as two `ArgumentError.to_s`
+already are. CRuby answers a new String for each.
+
+test/exception_class_name_kept.rb holds the class in a local, a
+parameter and an instance variable and reads it back by to_s, name,
+inspect, interpolation and ==. On master each of the seven forms is
+wrong in a plain run.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
