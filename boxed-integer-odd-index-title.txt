@@ -1,0 +1,1 @@
+A boxed Integer's [] reads a Float, nil or Bignum index

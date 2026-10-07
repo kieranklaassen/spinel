@@ -1,0 +1,1 @@
+A boxed Array converts an index that is no Integer as Array#[] does

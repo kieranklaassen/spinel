@@ -1,0 +1,36 @@
+instance_of? with the class in a variable answers for a boxed exception
+
+    kept = []
+    begin; raise ArgumentError, "m"; rescue => e; kept << e; end
+    k = ArgumentError
+    p kept.map { |x| x.instance_of?(k) }    # [false]; CRuby: [true]
+
+It was false for every boxed exception asked with its class as a value: a
+local, a parameter, an instance variable, an element, or a path such as
+App::Missing. That arm compares sp_poly_get_class's id with the class
+value's, and sp_poly_get_class has no id for a boxed exception, which
+carries its class by name: it answers Object. `is_a?(k)` beside it goes
+through sp_poly_is_a, which reads the name. For a boxed exception the arm
+now asks sp_poly_is_a_dyn for the exact class, where the class value is one
+with an id and no name of its own, as a constant's is. A class read off an
+object (`k = other.class`) carries a name on the heap that nothing roots:
+it takes the id compare it took, and so does every value that is not a
+boxed exception.
+
+The answer goes by the class Spinel raised. Five raise sites raise another
+class than CRuby does, and instance_of?(k) for that class answers true
+there now, as instance_of? with the class written out already does:
+File.read of a path through a file (RuntimeError; CRuby Errno::ENOTDIR), a
+Hash pattern whose key is missing (NoMatchingPatternError; CRuby
+NoMatchingPatternKeyError), setbyte past the end of a frozen String
+(FrozenError; CRuby IndexError), Timeout.timeout (NameError; CRuby
+Timeout::Error) and `raise UncaughtThrowError, "m"` (UncaughtThrowError;
+CRuby ArgumentError).
+
+A test of a boxed raised exception costs about 200 instructions more (the
+class's name is looked up and compared); of any other boxed value, 3.
+
+Test: test/boxed_exception_instance_of_class_value.rb,
+test/boxed_exception_instance_of_class_read_off.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

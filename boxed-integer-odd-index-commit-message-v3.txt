@@ -1,0 +1,17 @@
+A boxed Integer's [] reads a Float, nil or Bignum index
+
+    g = { "n" => 5, "f" => 1.5 }
+    p g["n"][g["f"]]
+
+printed 1, bit 0 of 5, where CRuby prints 0, bit 1. sp_poly_index_poly
+reads one bit of a boxed Integer by an Integer index; an index of any
+other kind that no earlier arm takes fell to the last line, which reads
+offset 0. Such an index is now converted as Integer#[] converts it: a
+Float is cut, nil, true or an Array is CRuby's TypeError, and an index
+past a word (a Bignum, or a Float that large) reads the receiver's
+sign. A Bignum receiver takes no such Float: CRuby's RangeError. A
+Float Range still reads bit 0.
+
+Test: test/boxed_integer_index_not_integer.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
