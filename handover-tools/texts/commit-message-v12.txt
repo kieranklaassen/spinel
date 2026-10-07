@@ -1,0 +1,82 @@
+A constant holding a class names it in is_a?, kind_of? and instance_of?
+
+    K = Integer
+    p 7.is_a?(K)
+
+printed false; CRuby prints true. kind_of? and instance_of? did the
+same, for a builtin class or module, a class of the program's own, a
+Struct and an exception class behind the constant, on a typed and on a
+boxed receiver, so `raise TypeError unless v.is_a?(K)` raised. The
+emitters read the argument's name (isa_const_name, isa_match_name), and
+K names no class. `K === 7` and `K.new` were right:
+rewrite_const_alias_receivers rewrites a receiver's name to the class
+resolve_class_alias finds.
+
+It now rewrites the argument of the three too, so every arm and the
+narrowing after the test see the class, and the C is that of the call
+written with the class.
+
+Only where the constant holds that class when the call runs: the
+program writes it once, as a statement `K = C` or `K = Mod::C` with
+Mod its own. A read at the program's or a class body's own level sits
+in a later statement. A read in a method body needs a write that no
+method of the program can run before: only defs, classes, constants
+and declarations precede it. A second write holds what was written
+last, `IO::Buffer` is not the program's Buffer, and before the write
+CRuby raises NameError. A file required inside a def, a block or an
+expression is spliced ahead of that statement and loads when the
+require runs: the parser marks the statements of such a file
+(`req_late`, set beside `req_pop` by emit_req_marks, so flatten_node
+does not grow), and its constant writes are left alone.
+
+And only where the read names that constant: `::K` reads the program's
+own level, `Mod::K` the body of a top-level Mod, a bare `K` the
+program's level or a body the read sits in. `class K` under a module
+reopens the class another body's constant `K` holds (walk_scope), so
+the class behind the constant must be opened by its own definition
+alone. Inside a class or module CRuby looks a bare name up in that
+body and in what the class inherits or mixes in before the program's
+level. A body brings no constant of CRuby's or a library's only where
+it reopens no namespace that holds some and what it inherits or mixes
+in is a builtin with none (bc_builtin_constless, the list
+refuse_unreachable_bare_constants asks) or a class or module the
+program defines that no library names (bc_toplevel_known). Where one
+body of the program is not such (`module Process`, `include Math`,
+`< Socket`, a module the program does not define), a bare read in
+another body than the write's is left.
+
+A write's value is read where and when the write stands. The class's
+definition must be a statement before it, in no file that loads when
+its require runs, one a bare name finds from there or in the top-level
+body a path (`K = Lib::C`) names: where it is not, a const_missing of
+the program answers the name with whatever it returns, or CRuby
+raises. By the same lookup `ERR = DomainError` under `include Math`
+holds Math's, so where a body may read CRuby's constants first a bare
+value is taken at the program's own level alone.
+
+A constant named by const_set, private_constant or remove_const is
+left alone, through send, __send__ and public_send too. A program
+that defines is_a?, kind_of? or instance_of? itself, or a class under
+BasicObject, is left whole: there the builtin test is not what
+answers. So is one that sends or defines a method by a name no
+literal spells (`send(m, ...)`, `define_method(n)`), which may be any
+of these, and one that sets by const_set a name it writes no constant
+of (the name of a class, set in a body beside it).
+
+Not here: `K ||= C`, `Mod::K = C`, a multiple assignment,
+`K = 5.class`, a write under a condition, a constant of a constant
+(`J = K`), a value by a longer path or through a parent's body
+(`K = A::B::C`, `K = Sub::C` for a C of Sub's parent), a class of a
+library the compiler loads unasked (`K = Set` with no `require "set"`:
+its file is spliced as one required late), a class opened twice, and a
+method's read in a program that prints or calls before the constant's
+write. They answer as before.
+
+Tests: test/const_alias_is_a.rb, and one program each for what
+leaves a whole program alone, a body's reads or a file's writes:
+test/const_alias_is_a_own.rb, test/const_alias_is_a_basic.rb,
+test/const_alias_is_a_computed.rb, test/const_alias_is_a_scope.rb,
+test/const_alias_is_a_library.rb, test/const_alias_is_a_late.rb,
+test/const_alias_is_a_missing.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

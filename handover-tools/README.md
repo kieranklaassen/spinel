@@ -42,9 +42,9 @@ from the commits its recipe lists.
 
 `texts/` holds the upstream texts of the three pieces as they are summed in
 the hand-over: `numeric-*` for the first (a boxed number's
-`instance_of?(Numeric)`), `pr-title.txt`, `pr-body-upstream-v11.md` and
-`commit-message-v11.txt` for the second (the constant in `is_a?`; the `-v7`
-to `-v10` files are its texts before the later commits of its recipe), `bl1-*`
+`instance_of?(Numeric)`), `pr-title.txt`, `pr-body-upstream-v12.md` and
+`commit-message-v12.txt` for the second (the constant in `is_a?`; the `-v7`
+to `-v11` files are its earlier texts), `bl1-*`
 for the third (the constant in `rescue` and `raise`; its refactor's message
 is in commit 69d79bf9), `gd-*` for the fourth (an exception's `is_a?` where
 two modules name a class alike).
