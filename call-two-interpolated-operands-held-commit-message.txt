@@ -1,0 +1,39 @@
+The first of two interpolated String operands is held while the second is made
+
+    n = 1
+    p "as#{n}b".include?("s#{n}")
+
+prints true in CRuby and false under SPINEL_GC_STRESS=2, built with
+gcc or clang; `s.sub("s#{n}", "q#{n}")` aborts there. The two Strings
+are made where they stand, arguments of one C call, each held by
+nothing: making the second can collect the first. Neither runs code,
+so emit_operands_in_order saw nothing to order and declined.
+
+An interpolated String with another made after it is now bound to a
+rooted temp, in the order written; the last is still made in the
+call. That is one root, eleven instructions a call: 200,000 turns of
+`"a#{i % 10}b".include?("#{i % 7}")` go from 52,728,624 to
+54,928,630, and of `s.sub("s#{i % 3}", "q#{i % 10}")` from
+143,143,553 to 145,975,091. A call with fewer than two interpolated
+Strings among its operands does not pay it; nor does one whose
+receiver is not of a kind in ty_runs_no_code, nor one whose arm holds
+each String itself as it makes it (`"a#{n}" + "b#{n}"`,
+`s.count("a#{n}", "b#{n}")`, a typed unshift). Adjacent literals
+(`("ta" "g").equal?("t" "ag")`) fold to a static String and make
+nothing: operand_is_interp_str no longer answers for them. Each of
+those is master's C.
+
+Of the 6,379 programs tools/cident.sh compiles, two change their C:
+the new test and test/frozen_literal_identity.rb
+(`"#{n}".equal?("#{n}")`); both pass.
+
+Not here, each as on master, under stress only: a reader's value
+beside the two (`o.name.sub("s#{n}", "q#{n}")`), a String made in a
+conditional's arm (`s.sub(c ? "s#{n}" : "z", "q#{n}")`),
+`(+s).concat("s#{n}", "q#{n}")` and a String beside a Symbol made
+from one (`"q#{n}".to_sym.to_s + "s#{n}"`).
+
+Test: test/call_two_interpolated_operands_held.rb, also in the
+SPINEL_GC_STRESS=2 list; on master it fails only there.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
