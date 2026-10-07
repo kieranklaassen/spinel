@@ -1,0 +1,36 @@
+A trap block that returns leaves alone a root being pushed
+
+A root push is two stores, the entry and the count
+(`sp_gc_roots[sp_gc_nroots++] = p`), and the C compiler orders them. gcc
+stores the entry first at 21 sites of the runtime library, and
+sp_gc_root_push_slow does too. Signal.trap runs its block inside the signal
+handler. Arriving between the two stores of such a push, sp_trap_call rooted
+its proc at that same index and popped it again on return, and the
+interrupted push then counted an entry naming a local of sp_trap_call: the
+root it meant to add was gone and a dead C frame stood in the table, read
+by the next collection.
+
+    Signal.trap("USR1") { }
+    s = "ab\n" * 20
+    i = 0
+    n = 0
+    while i < 60000
+      n += s.lines("\n", chomp: true).size
+      i += 1
+    end
+    p n
+
+Sent SIGUSR1 in a loop from a shell at SPINEL_GC_STRESS=2, this aborted in
+the root phase ("collector reached a non-heap/corrupt object") where CRuby
+prints 1200000: the first push of sp_str_lines_sep_chomp is one of the 21.
+
+sp_trap_call now keeps the entry at the count it finds and puts it back
+when the block returns. A block that leaves by a raise or a throw abandons
+the interrupted push, so nothing is put back there. Nothing outside
+sp_trap_call changes.
+
+The test sends itself the signal while a method's roots are live, which
+pins the path. No program can place its own signal between two
+instructions, so the test passes before this change too.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

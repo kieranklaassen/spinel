@@ -1,0 +1,1 @@
+`h[k] ||= v` and `h[k] &&= v` raise FrozenError on a frozen Hash

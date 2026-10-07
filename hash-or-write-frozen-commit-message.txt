@@ -1,0 +1,19 @@
+`h[k] ||= v` and `h[k] &&= v` raise FrozenError on a frozen Hash
+
+    h = { a: 1 }.freeze
+    h[:k] ||= 2
+    p h.size
+
+printed 2: the key was added and nothing said so. CRuby raises
+FrozenError, and so does `h[:k] = 2` here. `h[:a] &&= 3` wrote too, and
+so did the write used as a value, `x = (h[:k] ||= 2)`.
+
+`h[k] = v` and `h[k] += v` emit the frozen check in front of the Hash's
+set. The or-write has a set of its own, in its statement form and in
+its value form, and neither had the check. Both have it now, after the
+value: Ruby runs the value before []= raises, as the op-assign form
+does. A write the guard skips raises nothing, as before.
+
+The check runs only where the write happens.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
