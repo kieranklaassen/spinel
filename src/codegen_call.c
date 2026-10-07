@@ -17431,8 +17431,12 @@ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
       int svkn = g_handle_face_node; g_handle_face_node = id;
       /* the handle's own emitter answers its own type (MatchData#string a
          `const char *`); a poly slot gets it boxed, or the arm assigned the
-         raw pointer into an sp_RbVal */
+         raw pointer into an sp_RbVal. A pure read: the answer under the
+         face is not the node's type, and a later `&.` on this call reads
+         that to pick its arm */
+      an_pure_read_begin();
       TyKind got = infer_type(c, id);
+      an_pure_read_end();
       if (want == TY_POLY && got != TY_POLY && got != TY_UNKNOWN && got != TY_VOID) {
         Buf fb; memset(&fb, 0, sizeof fb);
         emit_call(c, id, &fb);
