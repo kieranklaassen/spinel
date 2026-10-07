@@ -137,7 +137,7 @@ int re_src_has_backref(const char *s) {
   return 0;
 }
 
-static void emit_ctor_block_value(Compiler *c, int id, Buf *b);
+static void emit_ctor_block_held(Compiler *c, int id, Buf *b);
 
 /* `new(..., &pr)` into a yielding initialize, the proc known only at run time
    (emit_ctor_yield_inline declined it): the constructor that hands it to the
@@ -150,7 +150,7 @@ int emit_ctor_new_with_proc(Compiler *c, int id, int ci, Buf *b) {
   buf_printf(b, "sp_%s_new_blk(", c->classes[ci].c_name);
   emit_args_filled(c, initm, nt_ref(c->nt, id, "arguments"), "", b);
   if (c->scopes[initm].nparams > 0) buf_puts(b, ", ");
-  emit_ctor_block_value(c, id, b);
+  emit_ctor_block_held(c, id, b);
   buf_puts(b, ")");
   return 1;
 }
@@ -9265,10 +9265,40 @@ const char *ctor_blk_lead(const Buf *b) {
   size_t n = b->p ? strlen(b->p) : 0;
   return (n && b->p[n - 1] != '(') ? ", " : "";
 }
+/* The block a constructor call hands its initialize, held for the call. A
+   proc built at the site is in nothing a collection sees: an argument built
+   beside it, or the constructor's own allocation of the object, collects
+   it. A literal block or lambda runs none of the program's code, so its
+   proc is built into a rooted temp ahead of the call, as a method call's
+   block is; any other built value (`&make(i)`) is assigned to a rooted temp
+   where it stands, so nothing runs earlier than it did. A bare name (`&pr`,
+   the temp a dispatch hoisted, NULL) is held where it lives and is written
+   as it was. */
+static void emit_ctor_block_held(Compiler *c, int id, Buf *b) {
+  Buf pb; memset(&pb, 0, sizeof pb);
+  emit_ctor_block_value(c, id, &pb);
+  const char *v = pb.p ? pb.p : "NULL";
+  if (!g_pre || !strchr(v, '(')) { buf_puts(b, v); free(pb.p); return; }
+  int blk = resolve_forwarded_block(c, nt_ref(c->nt, id, "block"));
+  int lit = nt_kind(c->nt, blk) == NK_BlockNode ||
+            (nt_kind(c->nt, blk) == NK_BlockArgumentNode &&
+             nt_kind(c->nt, nt_ref(c->nt, blk, "expression")) == NK_LambdaNode);
+  int t = ++g_tmp;
+  emit_indent(g_pre, g_indent);
+  if (lit) {
+    buf_printf(g_pre, "sp_Proc *_t%d = %s; SP_GC_ROOT(_t%d);\n", t, v, t);
+    buf_printf(b, "_t%d", t);
+  }
+  else {
+    buf_printf(g_pre, "sp_Proc *_t%d = NULL; SP_GC_ROOT(_t%d);\n", t, t);
+    buf_printf(b, "(_t%d = %s)", t, v);
+  }
+  free(pb.p);
+}
 void emit_ctor_block_slot(Compiler *c, int id, int initm, const char *lead, Buf *b) {
   if (!ctor_init_takes_block(c, initm)) return;
   buf_puts(b, lead);
-  if (ctor_init_uses_block(c, initm)) emit_ctor_block_value(c, id, b);
+  if (ctor_init_uses_block(c, initm)) emit_ctor_block_held(c, id, b);
   else buf_puts(b, "NULL");
 }
 
