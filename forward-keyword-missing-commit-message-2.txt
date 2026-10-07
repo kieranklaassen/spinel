@@ -1,0 +1,25 @@
+A required keyword a `...` forward does not carry raises `missing keyword`
+
+    class Base
+      def one(a, k:) = yield([a, k])
+    end
+    class Kept < Base
+      def one(...) = super(...)
+    end
+    Kept.new.one(5) { |x| p x }    # missing keyword: :k (ArgumentError)
+
+printed [5, 0], with no error.
+
+A call judges its keywords before it binds them (emit_call_arity_check),
+but a `...` forward has no keyword hash to judge: its keys are the
+forwarder's parameters. The binder now asks, for each required keyword
+of the parent, whether the forwarder carries that key from this site,
+and raises CRuby's message for the ones it does not, ahead of the
+unknown-keyword check as CRuby orders them.
+
+It raises only where the forwarder is known to hold every keyword it
+was handed: its call wrote each key out. A key that arrives by `**`, or
+through another `...` whose parameters are not the same, is not one of
+the forwarder's parameters, and those calls keep their C.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

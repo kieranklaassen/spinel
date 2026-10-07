@@ -1,0 +1,8 @@
+Share emit_argument_error with the inline binder
+
+The raise of an ArgumentError whose arguments have already run was
+static in codegen_fold.c. The binder of an inlined yielding method
+(codegen_iter.c) needs it for a keyword error of its own, so it is
+declared in codegen_internal.h. No change in the generated C.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
