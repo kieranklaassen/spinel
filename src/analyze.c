@@ -1947,7 +1947,8 @@ static void seq_statements(const NodeTable *nt, int stmts, int own, int *seq, in
     if (k == NK_PreExecutionNode) { *runs = 1; continue; }
     if (k == NK_ClassNode || k == NK_ModuleNode) {
       int sup = k == NK_ClassNode ? nt_ref(nt, ids[j], "superclass") : -1;
-      if (!*runs && sup >= 0 && !node_runs_nothing(nt, sup)) *runs = *n + 4;
+      *n += 4; seq[ids[j]] = *n | 1;   /* the definition's place among the statements */
+      if (!*runs && sup >= 0 && !node_runs_nothing(nt, sup)) *runs = *n;
       seq[nt->count + 1 + ids[j]] = own;
       seq_statements(nt, nt_ref(nt, ids[j], "body"), ids[j] + 1, seq, n);
       continue;
@@ -2117,15 +2118,16 @@ static void rewrite_const_alias_read(Compiler *c, int rd, int **seq) {
   if (!*seq && !(*seq = seq_build(nt))) return;
   int sw = (*seq)[w], sr = (*seq)[rd], runs = (*seq)[nt->count];
   if (!(sw & 1)) return;                                   /* the write is no statement */
-  /* the value is read where the write stands: it is the class where a bare
-     name finds the definition from there, or a path names the body that
-     holds it (elsewhere a const_missing of the program may answer). And a
-     constant of CRuby (Math::DomainError under `include Math`) may come
-     before a bare name in a body */
+  /* the value is read where and when the write stands: it is the class
+     where its definition is a statement before the write, one a bare name
+     finds from there or in the body a path names (elsewhere a const_missing
+     of the program may answer). And a constant of CRuby (Math::DomainError
+     under `include Math`) may come before a bare name in a body */
   {
     const int *in = *seq + nt->count + 1;
     int v = nt_ref(nt, w, "value"), bare = nt_kind(nt, v) == NK_ConstantReadNode, ci = comp_class_index(c, real);
-    int def = ci >= 0 ? c->classes[ci].def_node : -1;
+    int def = ci >= 0 ? c->classes[ci].def_node : -1, sd = def >= 0 ? (*seq)[def] : 1;
+    if (!(sd & 1) || sd > sw || (def >= 0 && nt_int(nt, def, "req_late", 0) > 0)) return;
     if (def >= 0 ? !const_read_reaches(nt, v, in[def], in) : !bare && nt_ref(nt, v, "parent") >= 0) return;
     if ((*seq)[SEQ_LEN(nt) - 1] && bare && in[w]) return;
   }
