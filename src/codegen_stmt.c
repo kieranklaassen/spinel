@@ -9782,8 +9782,8 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
                    eid, eid, eid, eid);
       }
       else {
-        buf_printf(b, "if (_excf%d) { _excf%d = 1; _excmsg%d = _excmsg%d; _exccls%d = _exccls%d; _excobj%d = _excobj%d; sp_exc_top--; goto _ensure%d; }\n",
-                   eid, outer->lid, outer->lid, eid, outer->lid, eid, outer->lid, eid, outer->lid);
+        emit_ensure_exc_hand_on(b, eid, outer->lid);
+        buf_puts(b, "\n");
       }
     }
     else {

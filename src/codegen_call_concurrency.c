@@ -399,8 +399,8 @@ int emit_call_synchronize_arms(Compiler *c, int id, Buf *b, const NodeTable *nt,
                      eid, outer->lid, eid, outer->lid, outer->lid);
         else
           buf_printf(b, "if (_retf%d) { _retf%d = 1; sp_exc_top--; goto _ensure%d; } ", eid, outer->lid, outer->lid);
-        buf_printf(b, "if (_excf%d) { _excf%d = 1; _excmsg%d = _excmsg%d; _exccls%d = _exccls%d; _excobj%d = _excobj%d; sp_exc_top--; goto _ensure%d; } ",
-                   eid, outer->lid, outer->lid, eid, outer->lid, eid, outer->lid, eid, outer->lid);
+        emit_ensure_exc_hand_on(b, eid, outer->lid);
+        buf_puts(b, " ");
       }
       else {
         /* the deferred return leaves through every enclosing live begin
