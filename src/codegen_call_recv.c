@@ -2207,7 +2207,8 @@ else {
           buf_puts(b, "({ ");
           if (!held[0]) { buf_printf(b, "sp_RbVal %s = ", tvn); emit_boxed(c, argv[0], b); buf_puts(b, "; "); }
           buf_printf(b, "const char *_t%d = %s.tag == SP_TAG_STR ? sp_StrArray_delete(%s, %s.v.s)"
-                        " : (const char *)0; _t%d ? sp_box_str(_t%d) : ", tdr, nd, rdb.p, nd, tdr, tdr);
+                        " : sp_poly_is_strbuf(%s) ? sp_StrArray_delete(%s, sp_poly_unbox_s(%s))"
+                        " : (const char *)0; _t%d ? sp_box_str(_t%d) : ", tdr, nd, rdb.p, nd, nd, rdb.p, nd, tdr, tdr);
         }
         else {
           buf_printf(b, "({ const char *_t%d = sp_StrArray_delete(%s, ", tdr, rdb.p);
@@ -2242,8 +2243,9 @@ else {
       int tv = ++g_tmp;
       buf_printf(b, "({ sp_RbVal _t%d = ", tv); emit_boxed(c, argv[0], b);
       buf_printf(b, "; _t%d.tag == SP_TAG_STR ? sp_StrArray_delete(%s, _t%d.v.s)"
-                    " : _t%d.tag == SP_TAG_NIL ? sp_StrArray_delete(%s, NULL) : (const char *)0; })",
-                 tv, rdl.p, tv, tv, rdl.p);
+                    " : _t%d.tag == SP_TAG_NIL ? sp_StrArray_delete(%s, NULL)"
+                    " : sp_poly_is_strbuf(_t%d) ? sp_StrArray_delete(%s, sp_poly_unbox_s(_t%d)) : (const char *)0; })",
+                 tv, rdl.p, tv, tv, rdl.p, tv, rdl.p, tv);
     }
     else {
       buf_printf(b, "sp_%sArray_delete%s(%s, ", k, df_boxed ? "_key" : "", rdl.p);
@@ -2370,7 +2372,9 @@ else {
       buf_printf(b, "({ sp_StrArray *_t%d = ", ta); emit_recv_rooted(c, recv, ta, "SP_GC_ROOT", b);
       buf_printf(b, "sp_RbVal _t%d = ", tv); emit_boxed(c, argv[0], b);
       buf_printf(b, "; _t%d.tag == SP_TAG_STR ? sp_StrArray_%s(_t%d, _t%d.v.s)"
-                    " : _t%d.tag == SP_TAG_NIL ? sp_StrArray_%s(_t%d, NULL) : sp_box_nil(); })", tv, fn, ta, tv, tv, fn, ta);
+                    " : _t%d.tag == SP_TAG_NIL ? sp_StrArray_%s(_t%d, NULL)"
+                    " : sp_poly_is_strbuf(_t%d) ? sp_StrArray_%s(_t%d, sp_poly_unbox_s(_t%d)) : sp_box_nil(); })",
+                 tv, fn, ta, tv, tv, fn, ta, tv, fn, ta, tv);
       { *out = 1; return 1; }
     }
     if (nil_needle) {
@@ -2449,8 +2453,9 @@ else {
       buf_printf(b, "({ sp_StrArray *_t%d = ", ta); emit_recv_rooted(c, recv, ta, "SP_GC_ROOT", b);
       buf_printf(b, "sp_RbVal _t%d = ", tv); emit_boxed(c, argv[0], b);
       buf_printf(b, "; _t%d.tag == SP_TAG_STR ? sp_StrArray_%s(_t%d, _t%d.v.s)"
-                    " : _t%d.tag == SP_TAG_NIL ? sp_StrArray_%s(_t%d, NULL) : FALSE; })",
-                 tv, fn, ta, tv, tv, fn, ta);
+                    " : _t%d.tag == SP_TAG_NIL ? sp_StrArray_%s(_t%d, NULL)"
+                    " : sp_poly_is_strbuf(_t%d) ? sp_StrArray_%s(_t%d, sp_poly_unbox_s(_t%d)) : FALSE; })",
+                 tv, fn, ta, tv, tv, fn, ta, tv, fn, ta, tv);
       { *out = 1; return 1; }
     }
     /* The same for an Integer array: a search for a value of another kind
