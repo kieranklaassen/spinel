@@ -1407,12 +1407,19 @@ int call_is_safe_nav(const NodeTable *nt, int id) {
   return op && sp_streq(op, "&.");
 }
 
+/* The separator of String#lines / #each_line is boxed: its class is known
+   only at run time (not a splat, which is no single argument) */
+int lines_sep_boxed(Compiler *c, int node) {
+  const char *ty = nt_type(c->nt, node);
+  return infer_type(c, node) == TY_POLY && !(ty && sp_streq(ty, "SplatNode"));
+}
+
 /* Boxed (poly) receivers: the run of poly-face arms of infer_call */
 int poly_lines_args(Compiler *c, int argc, const int *argv) {
   const NodeTable *nt = c->nt;
   int kw = argc >= 1 && nt_type(nt, argv[argc - 1]) &&
            sp_streq(nt_type(nt, argv[argc - 1]), "KeywordHashNode");
-  if (argc == 1) return kw || infer_type(c, argv[0]) == TY_STRING;
+  if (argc == 1) return kw || infer_type(c, argv[0]) == TY_STRING || lines_sep_boxed(c, argv[0]);
   if (argc == 2) return kw && infer_type(c, argv[0]) == TY_STRING;
   return 0;
 }

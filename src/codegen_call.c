@@ -7783,7 +7783,7 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
       /* Root the receiver temp across the arms, as the zero-arg dispatch does:
          an arm's callee may allocate and collect the otherwise-unreferenced
          receiver out from under itself (#3476). */
-      buf_printf(b, "({ sp_RbVal _t%d = ", tv); emit_expr(c, recv, b);
+      buf_printf(b, "({ sp_RbVal _t%d = ", tv); emit_poly_str_aset_recv(c, recv, &ps, argv, b);
       buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); ", tv);
       emit_poly_vis_precheck(c, id, tv, b);
       /* something with an effect has run: a later argument's prelude is held
@@ -16624,13 +16624,16 @@ int emit_blockless_enumerator(Compiler *c, int id, Buf *b) {
      segments. */
   if (recv >= 0 && comp_ntype(c, recv) == TY_STRING && argc == 1 &&
       nt_ref(nt, id, "block") < 0 && sp_streq(name, "each_line") &&
-      comp_ntype(c, argv[0]) == TY_STRING) {
+      (comp_ntype(c, argv[0]) == TY_STRING || lines_sep_boxed(c, argv[0]))) {
+    /* a boxed separator is read at run time */
+    int psep = comp_ntype(c, argv[0]) != TY_STRING;
     int tsrc3 = ++g_tmp;
     buf_printf(b, "({ const char *_t%d = ", tsrc3);
     emit_expr(c, recv, b);
     buf_printf(b, "; SP_GC_ROOT(_t%d); "
-                  "sp_enum_with_src(sp_Enumerator_new_from(sp_box_str_array(sp_str_lines_sep(_t%d, ",
-               tsrc3, tsrc3);
+                  "sp_enum_with_src(sp_Enumerator_new_from(sp_box_str_array(%s(_t%d, ",
+               tsrc3, psep ? "sp_str_lines_sep_poly" : "sp_str_lines_sep", tsrc3);
+    if (psep) emit_boxed(c, argv[0], b); else
     emit_expr(c, argv[0], b);
     buf_printf(b, "))), sp_box_str(_t%d), SPL(\"each_line\")); })", tsrc3);
     return 1;
