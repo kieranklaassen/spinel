@@ -1,0 +1,42 @@
+int / nil: TypeError: nil can't be coerced into Integer
+int % nil: TypeError: nil can't be coerced into Integer
+flt / nil: TypeError: nil can't be coerced into Float
+flt % nil: TypeError: nil can't be coerced into Float
+int / str: TypeError: String can't be coerced into Integer
+int % str: TypeError: String can't be coerced into Integer
+flt / str: TypeError: String can't be coerced into Float
+flt % str: TypeError: String can't be coerced into Float
+int / sym: TypeError: :sym can't be coerced into Integer
+int % sym: TypeError: :sym can't be coerced into Integer
+flt / sym: TypeError: :sym can't be coerced into Float
+flt % sym: TypeError: :sym can't be coerced into Float
+int / true: TypeError: true can't be coerced into Integer
+int % true: TypeError: true can't be coerced into Integer
+flt / true: TypeError: true can't be coerced into Float
+flt % true: TypeError: true can't be coerced into Float
+int / ary: TypeError: Array can't be coerced into Integer
+int % ary: TypeError: Array can't be coerced into Integer
+flt / ary: TypeError: Array can't be coerced into Float
+flt % ary: TypeError: Array can't be coerced into Float
+7 / nil: TypeError: nil can't be coerced into Integer
+7 % sym: TypeError: :sym can't be coerced into Integer
+2.5 / str: TypeError: String can't be coerced into Float
+2.5 % true: TypeError: true can't be coerced into Float
+7.modulo sym: TypeError: :sym can't be coerced into Integer
+nil / 2: NoMethodError
+nil / 2.5: NoMethodError
+sym / 2: NoMethodError
+true / true: NoMethodError
+ary / 2: NoMethodError
+nil % 2.5: NoMethodError
+sym % 2.5: NoMethodError
+7 / 2: 3
+7 % 2: 1
+7 / 2.5: 2.8
+7 % 2.5: 2.0
+2.5 / 2: 1.25
+2.5 % 2: 0.5
+7 / 0: ZeroDivisionError
+7 % 0: ZeroDivisionError
+2.5 / 0: Infinity
+str % int: "005"
