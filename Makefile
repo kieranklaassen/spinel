@@ -1847,6 +1847,7 @@ GC_STRESS_TESTS := test/gc_root_frame_slots.rb \
                    test/gc_minor_byref_lent_slot.rb \
                    test/call_result_held_beside_made_operand.rb \
                    test/call_interpolated_operand_held_in_order.rb \
+                   test/call_two_interpolated_operands_held.rb \
                    test/struct_values_fresh_receiver_root.rb \
                    test/hash_splat_to_a.rb \
                    test/proc_cell_capture_marked.rb \

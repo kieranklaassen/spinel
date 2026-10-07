@@ -18533,10 +18533,16 @@ static int subtree_reads_moved_by(Compiler *c, int id, int by) {
 
 /* Is operand `id` an interpolated String that is a String value and nothing
    else? Bound to a rooted temp it is the String an arm would have made where
-   the operand stands, made where Ruby makes it. */
+   the operand stands, made where Ruby makes it. Not adjacent literals
+   (`"ta" "g"`): they fold to a static String and make nothing. */
 static int operand_is_interp_str(Compiler *c, int id) {
-  return nt_kind(c->nt, id) == NK_InterpolatedStringNode &&
-         comp_ntype(c, id) == TY_STRING && repr_of(c, id).as_ty == TY_STRING;
+  const NodeTable *nt = c->nt;
+  if (nt_kind(nt, id) != NK_InterpolatedStringNode || comp_ntype(c, id) != TY_STRING ||
+      repr_of(c, id).as_ty != TY_STRING) return 0;
+  int n = 0, made = 0;
+  const int *parts = nt_arr(nt, id, "parts", &n);
+  for (int i = 0; i < n && !made; i++) made = nt_kind(nt, parts[i]) != NK_StringNode;
+  return made;
 }
 
 /* An operand emit_operands_in_order cannot bind, the `u`th, renders where
@@ -18810,11 +18816,16 @@ static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
      String slot, left where it stands above, which its arm reads in its own
      order (`s.start_with?("z#{n}", l.call)` with `l` assigning s). A constant
      the program never assigns (`File`, a class) is not read at all. Where
-     master binds calls alone, that is master's order. */
+     master binds calls alone, that is master's order.
+
+     Two interpolated Strings made in place are held by nothing either, and
+     the second can collect the first: `"as#{n}b".include?("s#{n}")`. One
+     with another made after it is bound too, in the order written, so only
+     the last is made in the call. */
   int made_left = nmade, ahead[8], nahead = 0;
-  for (int i = 0; i < obs_at && (made_here || unb >= 0); i++) {
+  for (int i = 0; i < nop && (made_here || unb >= 0 || observable == 0); i++) {
     NodeKind k = nt_kind(nt, operand[i]);
-    int moved = 0;
+    int moved = 0, later = 0;
     if (obs[i] || k == NK_SelfNode ||
         (k == NK_ConstantReadNode && !comp_const(c, nt_str(nt, operand[i], "name")))) continue;
     for (int j = i + 1; j <= obs_at && !moved; j++) {
@@ -18824,13 +18835,14 @@ static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
         moved = subtree_may_reassign_state(c, operand[j]);
       else moved = subtree_reads_moved_by(c, operand[i], operand[j]);
     }
+    int str = plain_arm && nb + nahead < 8 && operand_is_interp_str(c, operand[i]);
+    for (int j = i + 1; j < nop && str && !later; j++)
+      later = !obs[j] && operand_is_interp_str(c, operand[j]);
+    if (str && (moved || later)) { ahead[nahead++] = i; continue; }
     if (!moved) continue;
-    if (!plain_arm || nb + nahead >= 8 || !operand_is_interp_str(c, operand[i])) {
-      if (observable > 1) goto decline;
-      made_here = nahead = 0;
-      break;
-    }
-    ahead[nahead++] = i;
+    if (observable > 1) goto decline;
+    made_here = nahead = 0;
+    break;
   }
   for (int a = 0; a < nahead; a++) {
     int p = nb++;
@@ -18840,7 +18852,7 @@ static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
     node[p] = operand[ahead[a]]; ty[p] = TY_STRING; fresh[p] = 0; at[p] = ahead[a];
     nstr++; made_left--;
   }
-  int lone = observable < 2 && !made_here;
+  int lone = observable < 2 && !made_here && !(observable == 0 && nahead);
   if ((lone && (unb >= 0 || !(converts && observable >= 1))) || nb < 1 ||
       g_n_argov + nb > MAX_ARG_OVERRIDE) goto decline;
   if (operand_order_declined(c, id, 0) & 2) goto decline;
@@ -18951,8 +18963,8 @@ static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
        reader by its receiver, and `label` for `self.label` counted as a call.
        An interpolated String beside one is the only operand that runs,
        unless another is made in place. */
-    if (!lone && observable < 2 && ok && g_conv_emitted == conv_mark &&
-        operand_is_self_field(c, node[nb - 1], fresh[nb - 1])) ok = 0;
+    for (int i = 0; i < nb && ok && !lone && observable == 1 && g_conv_emitted == conv_mark; i++)
+      if (at[i] == obs_at && operand_is_self_field(c, node[i], fresh[i])) ok = 0;
     for (int i = 0; i < nb && ok && unb >= 0 && nmade == 0 && g_conv_emitted == conv_mark; i++)
       if (operand_is_self_field(c, node[i], fresh[i]) && --nrun < 2) ok = 0;
     for (; operands_last && rendered < nb && ok; rendered++) {
