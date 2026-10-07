@@ -9503,7 +9503,11 @@ static sp_RbVal sp_poly_get_str(sp_RbVal v, const char *key) {
   }
   if (sp_poly_is_call_aref(v)) return sp_poly_call_aref(v, sp_box_str(key));
   sp_poly_coll_chk(v, "[]");
-  if (v.tag != SP_TAG_OBJ) return sp_box_nil();
+  if (v.tag != SP_TAG_OBJ) {
+    /* Symbol#["sub"] is its name's, the substring when present: it answered nil */
+    if (v.tag == SP_TAG_SYM && key && sp_str_include(sp_sym_to_s((sp_sym)v.v.i), key)) return sp_box_str(key);
+    return sp_box_nil();
+  }
   switch (v.cls_id) {
     case SP_BUILTIN_CURRY: return sp_curry_call_poly((sp_Curry *)v.v.p, 1, (sp_RbVal[]){sp_box_str(key)});
     case SP_BUILTIN_STR_POLY_HASH: return sp_StrPolyHash_get((sp_StrPolyHash*)v.v.p, key);
