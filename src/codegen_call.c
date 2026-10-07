@@ -2767,6 +2767,65 @@ static void lazy_stage_bind(Compiler *c, int blk, const char *vbuf, const char *
   buf_puts(g_pre, ";\n");
 }
 
+/* Whether the body of block `blk` reads or assigns its local `nm`. */
+static int lazy_block_names(Compiler *c, int blk, const char *nm) {
+  int body = nt_ref(c->nt, blk, "body");
+  return nm && *nm && (subtree_reads_local(c->nt, body, nm) || subtree_writes_local(c, body, nm));
+}
+
+/* Whether block `blk` has a local for its parameter `nm`, or it has no
+   name: a post or a keyword the body never reads has none. */
+static int lazy_param_local(Compiler *c, int blk, const char *nm) {
+  Scope *bs = comp_scope_of(c, blk);
+  return !nm || !*nm || (bs && scope_local(bs, nm));
+}
+
+/* Whether a lazy drop_while binds its block as the other stages do
+   (lazy_stage_bind), where binding its first parameter to the whole value
+   leaves the block wrong: it has no first parameter; or its body names an
+   optional, a rest, a post or a keyword; or the value it is `fed` can be
+   an Array, which a block with more to take positionally takes apart, and
+   its body names one of those parameters. Every other block has all it
+   reads in the first name, a second required parameter reading nil. Not a
+   block with a parameter that has no local: emit_boxed_step_binds would
+   write the name. Nor `|x, *|`, which no stage takes apart. Nor, over an
+   Enumerator's own `step`, a block that takes one value whole: the step
+   can be more than one value (each_with_index), which every stage reads
+   as one Array. */
+static int lazy_dw_binds_all(Compiler *c, int blk, int fed, int step) {
+  const char *k, *rest = block_rest_name(c, blk), *kwr = block_kwrest_name(c, blk);
+  int named = lazy_block_names(c, blk, rest) || lazy_block_names(c, blk, kwr);
+  if (step) {
+    int P = 0, O = 0, Q = 0, R = block_rest_marker(c, blk);
+    while (block_param_name(c, blk, P)) P++;
+    while (block_opt_name(c, blk, O)) O++;
+    while (block_post_name(c, blk, Q)) Q++;
+    if ((P + O + Q > 0 || (rest && *rest)) && !block_auto_splats(P, O, Q, R)) return 0;
+  }
+  if (block_binds_gathered(c, blk)) {
+    if (!lazy_param_local(c, blk, rest) || !lazy_param_local(c, blk, kwr)) return 0;
+    for (int i = 0; (k = block_param_name(c, blk, i)); i++) if (!lazy_param_local(c, blk, k)) return 0;
+    for (int i = 0; (k = block_opt_name(c, blk, i)); i++) {
+      if (!lazy_param_local(c, blk, k)) return 0;
+      named |= lazy_block_names(c, blk, k);
+    }
+    for (int i = 0; (k = block_post_name(c, blk, i)); i++) {
+      if (!lazy_param_local(c, blk, k)) return 0;
+      named |= lazy_block_names(c, blk, k);
+    }
+    for (int i = 0; (k = block_keyword_name(c, blk, i)); i++) {
+      if (!lazy_param_local(c, blk, k)) return 0;
+      named |= lazy_block_names(c, blk, k);
+    }
+  }
+  if (named || !block_param_name(c, blk, 0)) return 1;
+  if (!fed) return 0;
+  for (int i = 1; (k = block_param_name(c, blk, i)); i++) if (lazy_block_names(c, blk, k)) return 1;
+  return lazy_block_names(c, blk, block_param_name(c, blk, 0)) &&
+         (block_param_name(c, blk, 1) || block_opt_name(c, blk, 0) || block_post_name(c, blk, 0) ||
+          (rest && *rest));
+}
+
 /* May the lazy source `src` hold a String? A String Array does; an Array
    literal (or a local whose one write is one) does when an element is a
    String or may be one; any other boxed source may. */
@@ -3190,19 +3249,33 @@ int emit_lazy_pipeline_expr(Compiler *c, int id, Buf *b) {
          false clears the flag and lets everything through untouched */
       emit_indent(g_pre, g_indent + 1);
       buf_printf(g_pre, "if (_t%d) {\n", ops[oi].cnt);
-      Scope *dws = comp_scope_of(c, blk);
-      LocalVar *dwl = (dws && bp0) ? scope_local(dws, bp0) : NULL;
-      TyKind dwt = (dwl && dwl->type != TY_UNKNOWN) ? dwl->type : TY_POLY;
-      emit_indent(g_pre, g_indent + 2);
-      buf_printf(g_pre, "lv_%s = ", bp);
-      if (dwt == TY_POLY) buf_puts(g_pre, vbuf);
-      else { Buf ub; memset(&ub, 0, sizeof ub); emit_unbox_text(c, dwt, vbuf, &ub); buf_puts(g_pre, ub.p ? ub.p : vbuf); free(ub.p); }
-      buf_puts(g_pre, ";\n");
+      /* where only filters stand before the stage the value is the
+         source's own: no Array from an Integer Range or an Integer, Float
+         or String Array, an Enumerator's step from an Enumerator */
+      int own = 1;
+      for (int oj = nops - 1; oj > oi && own; oj--) {
+        int k = ops[oj].kind;
+        own = k == OP_FILTER || k == OP_TAKEWHILE || k == OP_DROPWHILE || k == OP_TAKE || k == OP_DROP;
+      }
+      int fed = !own || !(src_is_range || src_is_intarr || (!src_is_enum && (sr.elem == TY_STRING || sr.elem == TY_FLOAT)));
+      /* a block that holds a `break` is bound as it was, too (lazy_block_plain) */
+      int dwall = !ops[oi].plain && lazy_dw_binds_all(c, blk, fed, own && src_is_enum);
+      if (dwall) lazy_stage_bind(c, blk, vbuf, bp0, bp, g_indent + 2);
+      else {
+        Scope *dws = comp_scope_of(c, blk);
+        LocalVar *dwl = (dws && bp0) ? scope_local(dws, bp0) : NULL;
+        TyKind dwt = (dwl && dwl->type != TY_UNKNOWN) ? dwl->type : TY_POLY;
+        emit_indent(g_pre, g_indent + 2);
+        buf_printf(g_pre, "lv_%s = ", bp);
+        if (dwt == TY_POLY) buf_puts(g_pre, vbuf);
+        else { Buf ub; memset(&ub, 0, sizeof ub); emit_unbox_text(c, dwt, vbuf, &ub); buf_puts(g_pre, ub.p ? ub.p : vbuf); free(ub.p); }
+        buf_puts(g_pre, ";\n");
+      }
       int dwb = nt_ref(nt, blk, "body");
       int dwn = 0; if (dwb >= 0) nt_arr(nt, dwb, "body", &dwn);
-      /* only the first parameter is bound here: with more to bind, a redo
-         stays refused */
-      int dwp = ops[oi].plain || (dwb >= 0 && subtree_has_own_redo(nt, dwb) && lazy_dw_more_params(c, blk));
+      /* where only the first parameter is bound and there is more to bind,
+         a redo stays refused */
+      int dwp = ops[oi].plain || (!dwall && dwb >= 0 && subtree_has_own_redo(nt, dwb) && lazy_dw_more_params(c, blk));
       IterStep dst; lazy_step_open(c, blk, dwp, g_indent + 2, &dst);
       if (dwn >= 1) {
         Buf cb; memset(&cb, 0, sizeof cb);
