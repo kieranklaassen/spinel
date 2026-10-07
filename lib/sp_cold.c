@@ -3870,11 +3870,27 @@ static SP_NOINLINE int sp_srange_cmp_past_nul(const char *a, const char *b) {
   if (c) return c;
   return la < lb ? -1 : la > lb;
 }
-/* #cover? / #=== compare lexicographically, no materialization. */
+static inline int sp_srange_cmp(const char *a, const char *b) {
+  int c = strcmp(a, b);
+  return c ? c : sp_srange_cmp_past_nul(a, b);
+}
+/* #cover? / #=== compare lexicographically, no materialization. The
+   compare is by the bytes alone: strcmp stops at a NUL, and every String
+   that shares an end's bytes up to one was covered. */
+/* Not static (its prototype is in sp_range.h): with cover?'s own arguments
+   it is reached by a jump, and the common path of cover? keeps nothing
+   more across strcmp than it did. */
+SP_NOINLINE sp_bool sp_srange_cover_past_nul(sp_StrRange r, const char *x) {
+  if (r.first && sp_srange_cmp(x, r.first) < 0) return 0;
+  if (r.last) { int d = sp_srange_cmp(x, r.last); if (r.excl ? d >= 0 : d > 0) return 0; }
+  return 1;
+}
 sp_bool sp_srange_cover(sp_StrRange r, const char *x) {
   if (!x) return 0;
-  if (r.first && strcmp(x, r.first) < 0) return 0;
-  if (r.last) { int d = strcmp(x, r.last); if (r.excl ? d >= 0 : d > 0) return 0; }
+  /* a difference strcmp finds decides as it did; an end strcmp takes x to
+     equal is compared again past a NUL */
+  if (r.first) { int c = strcmp(x, r.first); if (c <= 0) return c ? 0 : sp_srange_cover_past_nul(r, x); }
+  if (r.last) { int d = strcmp(x, r.last); if (d >= 0) return d ? 0 : sp_srange_cover_past_nul(r, x); }
   return 1;
 }
 /* #min / #max with no block, as CRuby's range_min / range_max: an open
@@ -3884,9 +3900,35 @@ sp_bool sp_srange_cover(sp_StrRange r, const char *x) {
    "10" -- and so is the maximum the end, but for an excluded end, which
    walks the members for the greatest, since a String end cannot be stepped
    back from. NULL is nil. */
+/* Whether the members are compared past a NUL: the begin holds one, both
+   ends are 7-bit and the begin has a letter or a digit. succ then moves
+   letters and digits alone, so every member holds the NUL and the walk is
+   CRuby's. Any other walk can hold members CRuby's does not (succ past
+   0x7f, or with no letter or digit to move), and strcmp stands for it. */
+static int sp_srange_walk_past_nul(sp_StrRange r) {
+  size_t fl = sp_str_byte_len(r.first), ll = sp_str_byte_len(r.last);
+  if (!memchr(r.first, 0, fl)) return 0;
+  int alnum = 0;
+  for (size_t i = 0; i < fl; i++) {
+    unsigned char c = (unsigned char)r.first[i];
+    if (c >= 0x80) return 0;
+    if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) alnum = 1;
+  }
+  for (size_t i = 0; i < ll; i++) if ((unsigned char)r.last[i] >= 0x80) return 0;
+  return alnum;
+}
 static const char *sp_srange_walk_extreme(sp_StrRange r, int greatest) {
   sp_StrArray *a = sp_srange_to_a(r); SP_GC_ROOT(a);
   const char *best = NULL; SP_GC_ROOT_STR(best);
+  if (greatest && sp_srange_walk_past_nul(r)) {
+    for (sp_int i = 0; i < sp_StrArray_length(a); i++) {
+      const char *s = sp_StrArray_get(a, i);
+      /* the walk of two binary ends can yield the excluded end: no member */
+      if (!sp_srange_cmp(s, r.last)) continue;
+      if (!best || sp_srange_cmp(s, best) > 0) best = s;
+    }
+    return best;
+  }
   for (sp_int i = 0; i < sp_StrArray_length(a); i++) {
     const char *s = sp_StrArray_get(a, i);
     if (!best || (greatest ? strcmp(s, best) > 0 : strcmp(s, best) < 0)) best = s;
@@ -3927,13 +3969,20 @@ const char *sp_srange_min_v(sp_StrRange r) {
   }
   return r.first;
 }
+/* Not static, as sp_srange_cover_past_nul is not. */
+SP_NOINLINE const char *sp_srange_max_past_nul(sp_StrRange r) {
+  return sp_srange_cmp_past_nul(r.first, r.last) > 0 ? NULL : r.last;
+}
 const char *sp_srange_max_v(sp_StrRange r) {
   if (!r.last) sp_raise_cls("RangeError", "cannot get the maximum of endless range");
   if (r.excl) {
     if (!r.first) sp_raise_cls("RangeError", "cannot get the maximum of beginless range with custom comparison method");
     return sp_srange_walk_extreme(r, 1);
   }
-  if (r.first && strcmp(r.first, r.last) > 0) return NULL;
+  if (r.first) {
+    int c = strcmp(r.first, r.last);
+    if (c >= 0) return c ? NULL : sp_srange_max_past_nul(r);
+  }
   return r.last;
 }
 const char *sp_srange_to_s(sp_StrRange r) {
