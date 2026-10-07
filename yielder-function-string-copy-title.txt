@@ -1,0 +1,1 @@
+A String variable handed to a yielding method compiled as a function is refused

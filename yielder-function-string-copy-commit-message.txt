@@ -1,0 +1,33 @@
+A String variable handed to a yielding method compiled as a function is refused
+
+A yielding method is spliced into its call, where its parameters name
+the caller's Strings. One that calls itself with a block that yields,
+keeps its block as a value or yields inside a Thread's body is compiled
+as a function instead, and no yielding method takes a lent slot
+(an_byref_eligible_scopes). Its String parameter is then the caller's
+text by value, and an append the method made was lost with nothing said:
+
+    def countdown(out, n)
+      out << n.to_s
+      if n > 0
+        countdown(out, n - 1) { |v| yield v }
+      else
+        yield out.size
+      end
+    end
+    buf = +""
+    r = countdown(buf, 3) { |v| v * 2 }
+    p r, buf      # 8 and "3210" in CRuby, 8 and "" compiled
+
+The call is refused by name with refuse_string_copy, as the other
+routes that would copy are, where a String variable is handed to a
+parameter such a method appends to. Under --share-strings a parameter
+that is the shared handle is left alone, and the rest goes through the
+routed form.
+
+Two calls cannot observe the copy and compile as before: a plain local
+that is read nowhere else and stands in no loop or block, and the
+method's own appended parameter handed on by its last call with a block
+that does not read it, whose callers are asked at their own calls.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
