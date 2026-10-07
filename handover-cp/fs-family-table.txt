@@ -1,0 +1,16 @@
+programs: 2616
+  M: nobuild 6, right 2002, wrong 608
+  P: nobuild 6, right 2302, wrong 308
+M / P:
+  nobuild / nobuild            6
+  right / right                2002
+  wrong / right                300
+  wrong / wrong                308
+moved: wrong on M, right on P: 300
+    ivar_find_index_f62_elem
+    ivar_find_index_f62_hval
+    ivar_find_index_f62_meth
+output differs across SPINEL_GC_STRESS: 0
+cured (receiver, needle): ivar/f62 20, ivar/flt1 20, ivar/flt2 20, ivar/fltn0 20, ivar/rat1 20, lit/f62 20, lit/flt1 20, lit/flt2 20, lit/fltn0 20, lit/rat1 20, pushed/f62 20, pushed/flt1 20, pushed/flt2 20, pushed/fltn0 20, pushed/rat1 20
+not right on the piece: flt/cpx1/count/wrong 4, flt/cpx1/search/wrong 20, flt/obj/count/wrong 4, flt/obj/search/wrong 20, flt/rat1/search/wrong 20, ivar/cpx1/count/wrong 4, ivar/cpx1/search/wrong 20, ivar/obj/count/wrong 4, ivar/obj/search/wrong 20, lit/cpx1/count/wrong 4, lit/cpx1/search/wrong 20, lit/obj/count/wrong 4, lit/obj/search/wrong 20, nilable/cpx1/count/wrong 4, nilable/cpx1/search/wrong 20, nilable/obj/count/wrong 4, nilable/obj/search/wrong 20, pushed/cpx1/count/wrong 4, pushed/cpx1/search/wrong 20, pushed/obj/count/wrong 4, pushed/obj/search/wrong 20
+typed needles: flt/cpx1/nobuild/as master 1, flt/cpx1/wrong/as master 5, flt/flt1/right/as master 6, flt/flt15/right/as master 6, flt/rat1/nobuild/as master 1, flt/rat1/wrong/as master 5, lit/cpx1/nobuild/as master 1, lit/cpx1/wrong/as master 5, lit/flt1/right/as master 6, lit/flt15/wrong/as master 6, lit/rat1/nobuild/as master 1, lit/rat1/wrong/as master 5, nilable/cpx1/wrong/as master 6, nilable/flt1/right/as master 6, nilable/flt15/right/as master 6, nilable/rat1/right/as master 6, pushed/cpx1/nobuild/as master 1, pushed/cpx1/wrong/as master 5, pushed/flt1/right/as master 6, pushed/flt15/wrong/as master 6, pushed/rat1/nobuild/as master 1, pushed/rat1/wrong/as master 5

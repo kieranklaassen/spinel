@@ -1,0 +1,5 @@
+s = File.read("mkn2.rb")
+i = s.index("{\n  \"S5\""); j = s.index("}.each")
+s[i...j] = File.read("shapes3.txt")
+s.sub!("anchor = b[", "wr += \"static SP_INLINE sp_RbVal sp_poly_int_needle_i(sp_RbVal v) { return (v.tag == SP_TAG_FLT || v.tag == SP_TAG_OBJ) ? sp_poly_int_needle(v) : v; }\\n\"\nanchor = b[")
+File.write("mkn3.rb", s)
