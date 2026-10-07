@@ -61,6 +61,27 @@ static int emit_op_template(Compiler *c, const BopCtx *x, Buf *b) {
   char *r = NULL;
   int argc;
   const int *argv = call_args(c->nt, x->id, &argc);
+  /* A later $r repeats the receiver's text and $R emits it again, so a
+     receiver that runs code ran once for each: `bump.nonzero?` called bump
+     twice. It is read into a temp first; a variable or a literal repeats as
+     it did, and so does a text that is one C name already (a global, the
+     temp a caller holds the receiver in). The temp is not rooted: a row
+     that allocates between two reads of a heap receiver needs $h. */
+  const char *r1 = strstr(x->op->arg, "$r");
+  int twice = r1 && (strstr(r1 + 2, "$r") || strstr(x->op->arg, "$R")) && x->recv >= 0 &&
+              !subtree_is_pure_read(c, x->recv);
+  int once = 0;
+  if (twice) {
+    r = op_recv_text(c, x);
+    once = !c_text_is_name(r);
+  }
+  if (once) {
+    char tr[24];
+    snprintf(tr, sizeof tr, "_t%d", ++g_tmp);
+    buf_printf(b, "({ %s %s = (%s); ", c_type_name(x->rt), tr, r);
+    free(r);
+    r = strdup(tr);
+  }
   for (const char *p = x->op->arg; *p; p++) {
     const char *tk = p[0] == '$' && p[1] ? strchr(tnames, p[1]) : NULL;
     if (p[0] == '$' && p[1] == 'r') {
@@ -99,7 +120,7 @@ static int emit_op_template(Compiler *c, const BopCtx *x, Buf *b) {
       p++;
     }
     else if (p[0] == '$' && p[1] == 'R') {
-      emit_expr(c, x->recv, b);
+      if (twice) buf_puts(b, r); else emit_expr(c, x->recv, b);
       p++;
     }
     else if (tk) {
@@ -125,6 +146,7 @@ static int emit_op_template(Compiler *c, const BopCtx *x, Buf *b) {
     else { char ch[2] = { *p, 0 }; buf_puts(b, ch); }
   }
   free(r);
+  if (once) buf_puts(b, "; })");
   if (held) buf_puts(b, "; })");
   free(hb.p);
   return 1;
