@@ -15285,7 +15285,17 @@ static int str_mutate_reassign_arms(Compiler *c, Buf *b, int indent, const NodeT
          once more: `s[-5..1] = "x"` on "abc" answered "ax". */
       buf_printf(b, " if (_a%d < 0 || _a%d > _len%d) sp_raise_range_start(_t%d.first, _t%d.last, _t%d.excl);", ti, ti, ti, ti, ti, ti);
       buf_puts(b, " sp_str_check_mutable("); emit_expr(c, recv, b); buf_puts(b, ");");
-      buf_printf(b, " int _oe%d = _t%d.last == SP_INT_NIL;", ti, ti);
+      /* An endless Range carries INTPTR_MAX, and from a start of 0 the count
+         below ran over: `s[0..] = "x"` kept all of s behind the x. Any other
+         start counts as it did. An end written here that is an Integer and
+         cannot be nil is never endless (emit_range_endpoint). */
+      int rg = unwrap_parens(c, argv[0]);
+      int re = nt_kind(nt, rg) == NK_RangeNode ? nt_ref(nt, rg, "right") : -1;
+      int counted = re >= 0 && repr_of(c, re).kind != RK_BOXED && repr_of(c, re).as_ty == TY_INT &&
+                    !nullable_int_value(c, re);
+      buf_printf(b, " int _oe%d = _t%d.last == SP_INT_NIL", ti, ti);
+      if (!counted) buf_printf(b, " || (_t%d.last == INTPTR_MAX && _a%d == 0)", ti, ti);
+      buf_puts(b, ";");
       buf_printf(b, " sp_int _e%d = _oe%d ? _len%d - 1 :"
                     " (_t%d.last < 0 ? _t%d.last + _len%d : _t%d.last);", ti, ti, ti, ti, ti, ti, ti);
       buf_printf(b, " sp_int _n%d = _e%d - _a%d + ((_t%d.excl && !_oe%d) ? 0 : 1);", ti, ti, ti, ti, ti);
