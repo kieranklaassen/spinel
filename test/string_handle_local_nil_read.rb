@@ -1,7 +1,8 @@
 # A String local that is appended to twice in a row, or in a loop, is held
 # as a handle. While it is nil the handle is NULL, and reading the local
-# answers nil: after a write of nil, after a call hands it nil, and before
-# its first write. A String method called on one that was never assigned
+# answers nil: after a write of nil, after a call hands it nil, before its
+# first write, and in the nil test a program makes on a slice that missed
+# before it appends. A String method called on one that was never assigned
 # raises NoMethodError, as on any nil.
 
 def joined(parts)
@@ -25,6 +26,14 @@ def found(words, want)
   t << "a"
   t << "b"
   t = words.find { |w| w == want }
+  t
+end
+
+def tail(s)
+  t = s[10, 2]
+  return "none" if t.nil?
+  t << "a"
+  t << "b"
   t
 end
 
@@ -81,6 +90,8 @@ puts label(true)
 puts label(false)
 p found(["x", "y"], "q")
 p found(["x", "y"], "y")
+puts tail("abc")
+puts tail("0123456789xy")
 p unset(false)
 p unset(true)
 p unset_size(false)
