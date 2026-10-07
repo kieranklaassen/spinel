@@ -1,0 +1,1 @@
+A Hash of mixed values is held while its copy is made

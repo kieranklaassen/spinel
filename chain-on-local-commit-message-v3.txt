@@ -1,0 +1,64 @@
+A chain of in-place String methods on a local changes it at every link
+
+    s = +"c"
+    s.prepend("b").prepend("a")
+    p s
+
+printed "bc", where CRuby prints "abc". `s.concat("a").concat("b")` left
+"a", `s.clear.concat("z")` left "", and `s.replace("r").concat("s")`
+left "r". Only a chain in which every link is `<<` kept every change.
+
+`s = +""; s.reverse!.concat("x").clear` left "x": the middle link is
+written back after a bang, and the last one changed a temporary.
+
+A String mutator is lowered to a write of its receiver, and only a
+receiver that is a name has a place to write. The second link's receiver
+is the first link's value, a temporary, so its change went there and s
+kept the first one alone.
+
+A new pass, desugar_mutator_chain_on_local, makes the links calls on the
+local, in order:
+
+    s.m(x).n(y).o(z)  ->  (s.m(x); s.n(y); s.o(z))
+
+for links m and n that always answer their receiver: `<<` and concat
+with one argument, prepend, clear, reverse!, freeze, force_encoding, and
+replace by a String literal. Each argument runs once and in its order.
+
+Only a chain whose value nothing reads is rewritten: a statement that is
+not its sequence's last, or the last of the program, of a loop's body,
+of a begin, a paren or an arm of a conditional that is itself dropped,
+or of the block of `loop` or of a loop method on an Array, a Hash, a
+Range or an Integer that the program neither defines nor names in a
+Symbol. An Enumerator is typed as an Array when this pass runs, so the
+block of its `each` counts too; `y.yield` answers nil there today.
+Where a write takes a sequence's value it takes a copy, so a
+chain whose value is assigned, passed, compared, returned or sent
+another call stays whole. What reads a value is asked of the parents the
+program's tree reaches (du_parent_map).
+
+Each link becomes the statement `s.m(x)`, so the rewrite is made only
+where that statement does what the link did. Left as they were, each
+for what its statement does today:
+
+- a link or a last call the program defines a method named as, in any
+  class or by a Symbol: the statement runs the builtin;
+- a local a lambda, a proc or a kept block reads, or any block writes:
+  two of the statements on a captured local do not build;
+- a local that may be nil, where the chain raises NoMethodError and the
+  statements crash. The nil facts are made after this pass, so it asks
+  for less: every write of the name in its method is a String made on
+  the spot (a literal, `+` or dup of one, String.new) and one of them
+  is a statement ahead of the chain. A parameter is not such a local;
+- a local that is also a target, or written with an operator: `s += x`
+  beside a statement's append is refused;
+- an insert, as a link or as the last call, and an index assignment as
+  the last call: their statements do not root what they are given;
+- a replace by anything but a literal: its statement leaves the local
+  naming a temporary. A chain that ends with a replace;
+- the call after a link that may answer nil (`s.upcase!.concat("z")`);
+- encode!, a concat with another count of arguments, a chain of `<<`
+  alone (it has its own lowering), a link with a block, a `&.`, or an
+  argument that writes a variable; anything but a String local.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

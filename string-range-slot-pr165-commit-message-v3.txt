@@ -1,0 +1,46 @@
+begin and end of a String Range read from a boxed slot are its two Strings
+
+    spans = [("ab".."ae"), 1]
+    r = spans[0]
+    p r.begin
+    p r.end
+
+stopped at "undefined method 'begin' for an instance of Range
+(NoMethodError)"; CRuby prints "ab" and "ae". first and last of the same
+Range answer.
+
+The Range comes out of the Array boxed, and begin and end of a boxed
+value go to sp_poly_range_begin_v and sp_poly_range_end_v. Each has an
+arm for a Float Range and falls to the Integer Range's reader, which
+raises for anything else. A String Range had no arm.
+
+Each gains one, asked only of what is no Integer Range, on the way to
+the raise: the end as it sits in the sp_StrRange, boxed by sp_box_str,
+which boxes the NULL of an end left out as nil. That is how sp_poly_min
+and sp_poly_max hand back a String Range's end.
+
+No C changes: the two functions are in the runtime. Callgrind on master
+8684d54c, 300,000 turns of `r.begin.to_i + r.end.to_i` on one boxed
+slot. With gcc 13.3 an Integer Range runs 33,058,322 instructions for
+master's 33,658,305, a Float Range 43,858,348 for 43,858,333, and a
+String Range, which raised, 124,258,380. With clang 18.1 an Integer
+Range takes 41,121,395 for 36,021,399 (17 a turn, 14%), a Float Range
+43,221,463 for 42,321,463, and a String Range 124,522,203.
+
+clang tests the tag and class of a boxed value in one compare while two
+kinds of Range are asked for, and in two once a third is. The cost is
+in that test, not in the String that comes back: on an Integer Range
+the same arm answering nil counts the same. Five other placements of
+the arm (ahead of the Integer Range's reader with and without
+SP_UNLIKELY, after it, out of line with and without the raise) cost
+clang 12 to 17 a turn too and gcc 2 to 9; this one costs gcc nothing.
+What it buys is the answer, where begin and end raised.
+
+Not here: an end changed in place after the Range is made is not seen
+through begin and end, as it is not through first and last (CRuby
+shares the String); include?, member? and cover? on a boxed String
+Range, each its own commit; step, which raises NoMethodError.
+
+Test: test/boxed_str_range_begin_end.rb (expected from CRuby 3.3.6).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
