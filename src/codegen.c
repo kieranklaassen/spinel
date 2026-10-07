@@ -15579,13 +15579,14 @@ static void emit_sym_class_name_rt(Compiler *c, Buf *b) {
     /* The static array is the pool's first block, so -DSP_DYN_SYMS_MAX=<n>
        still sizes what a program that interns little pays for. A full pool
        moves to a heap block twice the size: answering an existing id for a new
-       name made two Symbols one. */
+       name made two Symbols one. The block it leaves is kept: a Thread that
+       read the pool's address before the move still finds its Symbol's name
+       there, and the heap blocks left behind sum to less than the one in use. */
     buf_puts(b, "static SP_NOINLINE SP_COLD void sp_dyn_syms_grow(void){"
                 "int nc=sp_dyn_cap>0?sp_dyn_cap*2:64;"
                 "const char **np=(const char **)malloc(sizeof(*np)*(size_t)nc);"
                 "if(!np)sp_raise_cls(\"NoMemoryError\",\"failed to grow the symbol table\");"
                 "memcpy(np,sp_dyn_syms,sizeof(*np)*(size_t)sp_ndyn);"
-                "if(sp_dyn_syms!=sp_dyn_syms0)free((void *)sp_dyn_syms);"
                 "sp_dyn_syms=np;sp_dyn_cap=nc;}\n");
     /* Those entries are string-heap strings (sp_str_dup_external) held only by
        this static array, which the collector does not walk: the string sweep
