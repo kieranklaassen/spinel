@@ -168,7 +168,12 @@ static const char *sp_exc_msg_copy(const char *m) {
   memcpy(r, m, n);
   return r;
 }
+void *(*sp_user_exc_new_fn)(const char *cls, const char *msg) = NULL;
 sp_Exception *sp_exc_new_for_catch(const char *cls, const char *msg) {if (msg != sp_exc_no_msg) msg = sp_msg_heapify(msg); SP_GC_ROOT_STR(msg);
+  /* a class of the program's with ivars is built at its own size: a caller
+     that reads one through the caught value stays inside the object */
+  sp_Exception *u = (sp_user_exc_new_fn && cls) ? (sp_Exception *)sp_user_exc_new_fn(cls, msg) : NULL;
+  if (u) return u;
   sp_Exception *e = sp_exc_new(cls, msg);
   if (sp_user_exc_parent_fn) {
     const char *par = sp_user_exc_parent_fn(cls);
@@ -183,18 +188,21 @@ sp_Exception *sp_exc_new_for_catch(const char *cls, const char *msg) {if (msg !=
   return e;
 }
 /* Allocate a zeroed exception-subclass struct of `sz` bytes with the base
-   {cls_name, parent_cls_name, msg} prefix set, for the degenerate catch path
-   where a user subclass with ivars was raised without a carried object
-   (#1415). Its ivar fields stay zero (nil/0). msg is the only heap field, so
-   the base scan suffices. */
-void *sp_exc_new_sub_sized(size_t sz, const char *cls_name, const char *msg) {if (msg != sp_exc_no_msg) msg = sp_msg_heapify(msg); SP_GC_ROOT_STR(msg);
-  sp_Exception *e = (sp_Exception *)sp_gc_alloc(sz, NULL, sp_exc_gc_scan);
+   {cls_name, parent_cls_name, msg} prefix set, for a user subclass with
+   ivars that no constructor of its own builds. `scan` marks the struct; a
+   class whose instances are built here and then written to passes its own,
+   so an ivar the program stores is marked with the object. `nils`, when
+   given, seeds the ivars whose nil is not the zero pattern. */
+void *sp_exc_new_sub_ivars(size_t sz, const char *cls_name, const char *msg,
+                           void (*scan)(void *), void (*nils)(void *)) {if (msg != sp_exc_no_msg) msg = sp_msg_heapify(msg); SP_GC_ROOT_STR(msg);
+  sp_Exception *e = (sp_Exception *)sp_gc_alloc(sz, NULL, scan);
   memset(e, 0, sz);
   e->cls_name = cls_name ? cls_name : "RuntimeError";
   e->result = sp_box_nil();   /* memset left tag 0 (int 0); StopIteration#result wants nil */
   e->xname = sp_box_nil();
   e->xkey = sp_box_nil();
   e->xrecv = sp_box_nil();
+  if (nils) nils(e);
   if (sp_user_exc_parent_fn) e->parent_cls_name = sp_user_exc_parent_fn(e->cls_name);
   if (e->parent_cls_name) sp_exc_syserr_init(e);
   /* heap-launder the message (see sp_exc_new); memset left msg NULL, so a GC
@@ -208,6 +216,12 @@ void *sp_exc_new_sub_sized(size_t sz, const char *cls_name, const char *msg) {if
      the store, since the allocation would clear a record made before it. */
   sp_gc_wb((void *)e);
   return e;
+}
+/* The same with the base scan and no seeds, for the degenerate catch path
+   where a user subclass with ivars and an initialize of its own was raised
+   without a carried object (#1415). */
+void *sp_exc_new_sub_sized(size_t sz, const char *cls_name, const char *msg) {
+  return sp_exc_new_sub_ivars(sz, cls_name, msg, sp_exc_gc_scan, NULL);
 }
 void sp_exc_gc_scan(void *p) {
   sp_Exception *e = (sp_Exception *)p;

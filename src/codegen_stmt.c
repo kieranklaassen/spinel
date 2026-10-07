@@ -8873,6 +8873,10 @@ void emit_rescue(Compiler *c, int id, Buf *b, int indent, int fr, const char *re
   emit_indent(b, indent);
   if (spec_cid >= 0) {
     const char *xn = c->classes[spec_cid].name;
+    /* a class with ivars and no initialize is raised by its name and built
+       here: with its own scan and nil seeds, as Klass.new builds it */
+    int by_name = class_exc_built_by_name(c, spec_cid);
+    const char *fn = by_name ? "sp_exc_new_sub_ivars" : "sp_exc_new_sub_sized";
     if (bare) {
       /* A bare arm matches any StandardError, so the carried-object cast to
          the specialized class must be guarded by a class match: a foreign
@@ -8880,13 +8884,15 @@ void emit_rescue(Compiler *c, int id, Buf *b, int indent, int fr, const char *re
       const char *qn = class_ruby_name(c, spec_cid);
       buf_printf(b, "sp_Exception *_ce_%d = (sp_exc_obj[sp_exc_top] && sp_exc_cls_matches(_rcls_%d, \"%s\"))"
                     " ? (sp_Exception *)sp_exc_obj[sp_exc_top]"
-                    " : (sp_Exception *)sp_exc_new_sub_sized(sizeof(sp_%s), _rcls_%d, _rmsg_%d);\n",
-                 rc, rc, qn ? qn : xn, xn, rc, rc);
+                    " : (sp_Exception *)%s(sizeof(sp_%s), _rcls_%d, _rmsg_%d",
+                 rc, rc, qn ? qn : xn, fn, xn, rc, rc);
     }
     else
       buf_printf(b, "sp_Exception *_ce_%d = sp_exc_obj[sp_exc_top] ? (sp_Exception *)sp_exc_obj[sp_exc_top]"
-                    " : (sp_Exception *)sp_exc_new_sub_sized(sizeof(sp_%s), _rcls_%d, _rmsg_%d);\n",
-                 rc, xn, rc, rc);
+                    " : (sp_Exception *)%s(sizeof(sp_%s), _rcls_%d, _rmsg_%d",
+                 rc, fn, xn, rc, rc);
+    if (by_name) emit_exc_ivars_tail(c, spec_cid, b);
+    buf_puts(b, ");\n");
   }
   else
     buf_printf(b, "sp_Exception *_ce_%d = sp_exc_obj[sp_exc_top] ? (sp_Exception *)sp_exc_obj[sp_exc_top]"
