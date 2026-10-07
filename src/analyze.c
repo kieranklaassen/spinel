@@ -31132,7 +31132,8 @@ static int sa_returned_args(Compiler *c, int call, int *out, int cap) {
 }
 /* The route that refuses a call on an object whose method answers a String
    another name holds: 3 where one of its values is an instance variable's
-   String (`def pick(f) = f ? @s : "n"`, a reader on that path), 1 where
+   String (`def pick(f) = f ? @s : "n"`, a reader on that path; also the
+   value of `@s = v` and of `@s << x`, strbuf_ivar_alias_value), 1 where
    one is a parameter and the argument here a variable (`o.id(s)`). 0 for
    any other call, and for a method that may answer nil (an arm left out, a
    bang's own nil): the store of a nil is right as it is. */
@@ -31150,7 +31151,9 @@ static int sa_object_call_held(Compiler *c, int call) {
     int l = an_unparen(nt, lv[i]);
     for (int d = 0; d < 8 && str_self_call(nt, l); d++) l = an_unparen(nt, nt_ref(nt, l, "receiver"));
     if (l < 0 || nt_kind(nt, l) == NK_NilNode || sa_bang_receiver(c, l) >= 0) return 0;
-    TyKind lt = nt_kind(nt, l) == NK_InstanceVariableReadNode ? infer_type(c, l) : TY_UNKNOWN;
+    /* the slot's own String: a read, a write's value, an append chain */
+    int iv = strbuf_ivar_alias_value(nt, lv[i]);
+    TyKind lt = iv >= 0 ? infer_type(c, iv) : TY_UNKNOWN;
     if (lt == TY_STRING || lt == TY_STRBUF) route = 3;
   }
   if (n <= 0 || route) return route;
