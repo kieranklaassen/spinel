@@ -73,9 +73,9 @@ static int exc_leaf_cmp(const void *a, const void *b) {
 }
 /* Whether the program writes a constant under the name of one of its own
    classes or modules, or one holding a class or module of its own
-   (`Error = Plain` beside Net::Error, `Net = Disk`), other than by making
-   the class there (`Pt = Struct.new`): a name may then hold another class
-   than the one the class table knows by it. A const_set counts. The names
+   (`Error = Plain` or `Error = Class.new(StandardError)` beside Net::Error,
+   `Net = Disk`): a name may then hold another class than the one the class
+   table knows by it. A const_set counts. The names
    are compared by their last part, as qualify_colliding_consts and
    qualify_colliding_classes left them (`A__Error`). Asked once a program. */
 static int exc_const_named_as_class(Compiler *c) {
@@ -107,11 +107,7 @@ static int exc_const_named_as_class(Compiler *c) {
     NT_FOREACH_KIND(nt, kinds[k], w) {
       int t = nt_ref(nt, w, "target"), v = nt_ref(nt, w, "value");
       const char *nm = nt_str(nt, t >= 0 ? t : w, "name");
-      const char *vn = nt_kind(nt, v) == NK_CallNode ? nt_str(nt, v, "name") : NULL;
-      const char *vr = vn && nt_kind(nt, nt_ref(nt, v, "receiver")) == NK_ConstantReadNode ? nt_str(nt, nt_ref(nt, v, "receiver"), "name") : NULL;
       if (!nm || answer) continue;
-      if (vr && ((sp_streq(vn, "new") && (sp_streq(vr, "Struct") || sp_streq(vr, "Class"))) ||
-                 (sp_streq(vn, "define") && sp_streq(vr, "Data")))) continue;
       for (const char *q; (q = strstr(nm, "__")) && q[2]; ) nm = q + 2;
       if (bsearch(&nm, leaf, (size_t)n, sizeof *leaf, exc_leaf_cmp)) answer = 1;
       /* ... or holds one of them: the bodies written under the constant's

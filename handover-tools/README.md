@@ -35,10 +35,16 @@ from the commits its recipe lists.
   a constant), asked bare, as a path and rooted from eleven places.
 - `gd3-gen.rb OUT`: 648 one-row programs of the fourth piece with the name
   also held by an included module, a superclass or an enclosing module.
+- `gd4-gen.rb OUT`: 920 one-row programs of the fourth piece with a constant
+  made by `Class.new` (or an alias constant) under the name of a class two
+  modules also name, written at the program's level, in an inner module, a
+  class, another module or a superclass, and asked from five places.
 - `cmpcell.rb DIR A B` makes the two-rule table of two `include-order/quick.rb` runs cell
   by cell, for programs that print one row.
 - `gd-attacks/`: the fourth piece's hand attacks (`r1` to `r6` the reader's
-  programs, `c11` a module of the same name reached through an include).
+  programs, `c11` a module of the same name reached through an include,
+  `reader1-r1` to `reader1-r5` the reader's `Class.new` programs, `classnew-h*`
+  two `Class.new` constants of one name, `Struct.new` and `Data.define`).
 - `early-gen.rb OUT`: the twelve early-call shapes.
 - `num-gen.rb OUT`: the family of `instance_of?(Numeric)` on a boxed number.
 - `bl-gen.rb OUT`: the family of `rescue` and `raise` through a constant
@@ -107,6 +113,18 @@ on this branch). On 759d120fd207 against CRuby 3.3.6: `gd-gen.rb`, 315 of
 cells wrong to right (the piece as it was: 903 change, 114 cells right to
 wrong); `gd3-gen.rb`, 414 of 648 change, 414 cells wrong to right (as it
 was: 534 change, 12 cells right to wrong); no line or cell right to wrong.
+
+On master 42557a3c0e7c the fourth piece is re-cut after the reader's find
+(a constant made by `Class.new`, `Struct.new` or `Data.define` under the
+name of a class counts like any other constant; the program then compares
+as text): `gd-pr-body-upstream-v4.md`, `gd-commit-message-v3.txt`,
+`patches/piece4-exception-is-a-on-42557a3c0e7c.patch` (a mail) and
+`piece4-class-new-delta-on-42557a3c0e7c.patch` (the change on the piece as
+it was, applied to 42557a3c0e7c). Against CRuby 3.3.6 there: `gd-gen.rb`
+315 of 831 change, 243 wrong to right, 61 right on both, 8 wrong and 3
+stopped with master's output; `gd2-gen.rb` 96 of 2,580, 96 cells wrong to
+right; `gd3-gen.rb` 414 of 648, 414 cells; `gd4-gen.rb` 172 of 920, 124
+cells, 48 programs stop as on master; no line or cell right to wrong.
 
 On master 8dc5522541bb the patches are format-patch mails (`git am` on the
 commit named gives the commit, with its message and both dates): the fourth
