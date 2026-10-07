@@ -2493,6 +2493,44 @@ static void emit_poly_eq_ordered(Compiler *c, int recv, int arg, int eq, Buf *b)
   emit_poly_cmp_ordered(c, "sp_poly_eq", recv, arg, b);
   buf_puts(b, eq ? "" : ")");
 }
+/* Whether a lazy stage's block keeps the reading it had, its leading
+   statements written into the pipeline's loop and its tail read as the
+   answer, with no step frame (emit_iter_step_open). A `break` inside the
+   frame would leave only the frame, and the stage would go on with nil where
+   the block raises LocalJumpError. A `redo` stays refused where the stage
+   would answer wrongly with it: in find_all, which answers nil here with
+   or without it, and beside a destructured parameter, which is by now an
+   assignment the block opens with (desugar_block_destructure_params) and
+   the redo would run again. */
+static int lazy_block_plain(Compiler *c, const char *nm, int blk) {
+  const NodeTable *nt = c->nt;
+  int body = nt_ref(nt, blk, "body");
+  if (body < 0) return 0;
+  if (block_has_top_break(c, body)) return 1;
+  if (!subtree_has_own_redo(nt, body)) return 0;
+  if (sp_streq(nm, "find_all")) return 1;
+  int bn = 0; const int *bb = nt_arr(nt, body, "body", &bn);
+  for (int k = 0; k < bn; k++) if (nt_int(nt, bb[k], "destr_splice", 0)) return 1;
+  return 0;
+}
+
+/* Whether a lazy drop_while's block has more to bind than the first
+   parameter, the one its branch binds. */
+static int lazy_dw_more_params(Compiler *c, int blk) {
+  return block_param_name(c, blk, 1) || block_opt_name(c, blk, 0) || block_post_name(c, blk, 0) ||
+         block_rest_marker(c, blk) || block_keyword_name(c, blk, 0) || block_kwrest_name(c, blk);
+}
+
+/* Opens one step of a lazy stage's block: in the step's frame, or, for a
+   block that keeps the reading it had (lazy_block_plain), as that reading. */
+static void lazy_step_open(Compiler *c, int blk, int plain, int indent, IterStep *st) {
+  if (!plain) { emit_iter_step_open(c, blk, 1, indent, st); return; }
+  int body = nt_ref(c->nt, blk, "body");
+  int bn = 0; const int *bb = body >= 0 ? nt_arr(c->nt, body, "body", &bn) : NULL;
+  st->block = blk; st->want_poly = 1; st->slot = 0; st->slot_ty = TY_UNKNOWN;
+  for (int k = 0; k + 1 < bn; k++) emit_stmt(c, bb[k], g_pre, indent);
+}
+
 /* The lazy stages emit_lazy_pipeline_expr fuses, as tables. lazy_stage_name
    (analyze_util.c) is the shared NAME authority -- these tables give each
    name its op kind; `adj_only` marks a stage that only works adjacent to the
@@ -2762,7 +2800,7 @@ int emit_lazy_pipeline_expr(Compiler *c, int id, Buf *b) {
   /* arg/cnt/lim are used only by the blockless counter stages (take/drop):
      arg is the count AST node, lim a prelude temp holding its value, cnt a
      prelude counter initialised to 0. */
-  struct { int kind; int block; int negate; int arg; int cnt; int lim; } ops[16];
+  struct { int kind; int block; int negate; int arg; int cnt; int lim; int plain; } ops[16];
   int nops = 0, cur = recv, lazy_src = -1;
   /* The chain may be held in a variable (`b = arr.lazy.map { }; b.first(2)`).
      Resolve a single-plain-write local back to the chain it was assigned so
@@ -2828,6 +2866,7 @@ int emit_lazy_pipeline_expr(Compiler *c, int id, Buf *b) {
     ops[nops].kind = LAZY_BLOCK_STAGE[bs].kind;
     ops[nops].negate = LAZY_BLOCK_STAGE[bs].negate;
     ops[nops].block = blk;
+    ops[nops].plain = lazy_block_plain(c, nm, blk);
     ops[nops].arg = -1; ops[nops].cnt = -1; ops[nops].lim = -1;
     nops++;
     cur = nt_ref(nt, cur, "receiver");
@@ -3136,11 +3175,14 @@ int emit_lazy_pipeline_expr(Compiler *c, int id, Buf *b) {
       else { Buf ub; memset(&ub, 0, sizeof ub); emit_unbox_text(c, dwt, vbuf, &ub); buf_puts(g_pre, ub.p ? ub.p : vbuf); free(ub.p); }
       buf_puts(g_pre, ";\n");
       int dwb = nt_ref(nt, blk, "body");
-      int dwn = 0; const int *dwv = dwb >= 0 ? nt_arr(nt, dwb, "body", &dwn) : NULL;
-      for (int k = 0; k < dwn - 1; k++) emit_stmt(c, dwv[k], g_pre, g_indent + 2);
+      int dwn = 0; if (dwb >= 0) nt_arr(nt, dwb, "body", &dwn);
+      /* only the first parameter is bound here: with more to bind, a redo
+         stays refused */
+      int dwp = ops[oi].plain || (dwb >= 0 && subtree_has_own_redo(nt, dwb) && lazy_dw_more_params(c, blk));
+      IterStep dst; lazy_step_open(c, blk, dwp, g_indent + 2, &dst);
       if (dwn >= 1) {
         Buf cb; memset(&cb, 0, sizeof cb);
-        int svind = g_indent; g_indent += 2; emit_cond(c, dwv[dwn - 1], &cb); g_indent = svind;
+        int svind = g_indent; g_indent += 2; emit_iter_step_cond(c, &dst, 0, &cb); g_indent = svind;
         emit_indent(g_pre, g_indent + 2);
         buf_printf(g_pre, "if (%s) continue;\n", cb.p ? cb.p : "0");
         free(cb.p);
@@ -3173,19 +3215,22 @@ int emit_lazy_pipeline_expr(Compiler *c, int id, Buf *b) {
       }
     }
     int bbody = nt_ref(nt, blk, "body");
-    int bn = 0; const int *bb = bbody >= 0 ? nt_arr(nt, bbody, "body", &bn) : NULL;
-    for (int k = 0; k < bn - 1; k++) emit_stmt(c, bb[k], g_pre, g_indent + 1);
+    int bn = 0; if (bbody >= 0) nt_arr(nt, bbody, "body", &bn);
+    /* the stage's answer is the block's, a `next v` included: read as the
+       leading statements and then the tail, the next was the pipeline's own
+       `continue` and dropped the element (emit_iter_step_open) */
+    IterStep st; lazy_step_open(c, blk, ops[oi].plain, g_indent + 1, &st);
     if (bn < 1) continue;
     if (ops[oi].kind == OP_MAP) {
       Buf eb; memset(&eb, 0, sizeof eb);
-      int svind = g_indent; g_indent += 1; emit_boxed(c, bb[bn - 1], &eb); g_indent = svind;
+      int svind = g_indent; g_indent += 1; emit_iter_step_tail(c, &st, &eb); g_indent = svind;
       emit_indent(g_pre, g_indent + 1);
       buf_printf(g_pre, "%s = %s;\n", vbuf, eb.p ? eb.p : "sp_box_nil()"); free(eb.p);
     }
     else if (ops[oi].kind == OP_FILTERMAP) {
       /* map, then drop a falsy result */
       Buf eb; memset(&eb, 0, sizeof eb);
-      int svind = g_indent; g_indent += 1; emit_boxed(c, bb[bn - 1], &eb); g_indent = svind;
+      int svind = g_indent; g_indent += 1; emit_iter_step_tail(c, &st, &eb); g_indent = svind;
       emit_indent(g_pre, g_indent + 1);
       buf_printf(g_pre, "%s = %s;\n", vbuf, eb.p ? eb.p : "sp_box_nil()"); free(eb.p);
       emit_indent(g_pre, g_indent + 1);
@@ -3196,7 +3241,7 @@ int emit_lazy_pipeline_expr(Compiler *c, int id, Buf *b) {
          result pushes as itself), honoring the terminal count, then skip the
          shared tail push. Only ever the last-applied stage (oi == 0). */
       Buf eb; memset(&eb, 0, sizeof eb);
-      int svind = g_indent; g_indent += 1; emit_boxed(c, bb[bn - 1], &eb); g_indent = svind;
+      int svind = g_indent; g_indent += 1; emit_iter_step_tail(c, &st, &eb); g_indent = svind;
       int tfm = ++g_tmp, tfj = ++g_tmp;
       emit_indent(g_pre, g_indent + 1);
       buf_printf(g_pre, "sp_RbVal _t%d = %s; SP_GC_ROOT_RBVAL(_t%d);\n", tfm, eb.p ? eb.p : "sp_box_nil()", tfm); free(eb.p);
@@ -3216,7 +3261,7 @@ int emit_lazy_pipeline_expr(Compiler *c, int id, Buf *b) {
     }
     else {
       Buf cb; memset(&cb, 0, sizeof cb);
-      int svind = g_indent; g_indent += 1; emit_cond(c, bb[bn - 1], &cb); g_indent = svind;
+      int svind = g_indent; g_indent += 1; emit_iter_step_cond(c, &st, 0, &cb); g_indent = svind;
       emit_indent(g_pre, g_indent + 1);
       if (ops[oi].kind == OP_TAKEWHILE)
         buf_printf(g_pre, "if (!(%s)) break;\n", cb.p ? cb.p : "0");
