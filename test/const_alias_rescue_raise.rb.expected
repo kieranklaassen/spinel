@@ -1,0 +1,16 @@
+E ArgumentError: a
+ME MyErr: b
+ME Lib::Err: c
+none
+svc MyErr: i
+MyErr: d
+42
+outer f
+ArgumentError: g
+MyErr: MyErr
+Lib::Err: h
+n=3
+done
+outer j
+stopped
+none
