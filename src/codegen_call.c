@@ -7121,6 +7121,32 @@ static void emit_poly_arm_param(Compiler *c, Scope *ms, int a, const ArgLayout *
   g_self = saved_self;
 }
 
+/* Does an arm's argument, spelled `text`, build an object that another
+   argument's allocation can collect? One built in a statement expression is
+   rooted only to that expression's end, and the empty Array of an omitted
+   rest or the empty Hash of an omitted **kwrest is not rooted at all. */
+int poly_arm_arg_fresh(Scope *ms, int a, int omitted, const char *text) {
+  if (!text) return 0;
+  if (strstr(text, "SP_GC_ROOT(")) return 1;
+  return omitted && (a == ms->rest_idx || a == ms->kwrest_idx) &&
+         (strstr(text, "Array_new()") || strstr(text, "Hash_new()"));
+}
+
+/* Binds such an argument to a local of the parameter's type in `pre`, rooted
+   where the type holds a pointer, and passes the local. */
+void emit_poly_arm_arg_held(Compiler *c, Scope *ms, int a, const char *text, Buf *pre, Buf *cb) {
+  const char *pnm = ms->pnames ? ms->pnames[a] : NULL;
+  LocalVar *pv = pnm ? scope_local(ms, pnm) : NULL;
+  TyKind pt = pv ? pv->type : TY_POLY;
+  if (pt == TY_UNKNOWN) pt = TY_POLY;
+  int tf = ++g_tmp;
+  emit_ctype(c, pt, pre);
+  buf_printf(pre, " _t%d = %s; ", tf, text);
+  if (needs_root(pt))
+    buf_printf(pre, pt == TY_POLY ? "SP_GC_ROOT_RBVAL(_t%d); " : "SP_GC_ROOT(_t%d); ", tf);
+  buf_printf(cb, "_t%d", tf);
+}
+
 /* An arm's arguments into `cb`, the first after `lead`, each parameter as
    the layout says; what they need ahead of the call into `pre`: the gather
    and its count, then the keywords' checks (the count first, as CRuby
@@ -7152,7 +7178,7 @@ void emit_poly_arm_args(Compiler *c, Scope *m, Scope *ms, const ArgLayout *L,
     pav = calloc((size_t)ms->nparams, sizeof *pav);
     for (int a = 0; pav && a < ms->nparams; a++) {
       emit_poly_arm_param(c, ms, a, L, A, ct, selfd, &pav[a]);
-      if (pav[a].p && strstr(pav[a].p, "SP_GC_ROOT(")) nfresh++;
+      if (poly_arm_arg_fresh(ms, a, 0, pav[a].p)) nfresh++;
     }
   }
   for (int a = 0; a < ms->nparams; a++) {
@@ -7160,17 +7186,8 @@ void emit_poly_arm_args(Compiler *c, Scope *m, Scope *ms, const ArgLayout *L,
     Buf pa; memset(&pa, 0, sizeof pa);
     if (pav) {
       pa = pav[a];
-      if (nfresh > 1 && pa.p && strstr(pa.p, "SP_GC_ROOT(")) {
-        const char *pnm = ms->pnames ? ms->pnames[a] : NULL;
-        LocalVar *pv = pnm ? scope_local(ms, pnm) : NULL;
-        TyKind pt = pv ? pv->type : TY_POLY;
-        if (pt == TY_UNKNOWN) pt = TY_POLY;
-        int tf = ++g_tmp;
-        emit_ctype(c, pt, pre);
-        buf_printf(pre, " _t%d = %s; ", tf, pa.p);
-        if (needs_root(pt))
-          buf_printf(pre, pt == TY_POLY ? "SP_GC_ROOT_RBVAL(_t%d); " : "SP_GC_ROOT(_t%d); ", tf);
-        buf_printf(cb, "_t%d", tf);
+      if (nfresh > 1 && poly_arm_arg_fresh(ms, a, 0, pa.p)) {
+        emit_poly_arm_arg_held(c, ms, a, pa.p, pre, cb);
         free(pa.p);
         continue;
       }

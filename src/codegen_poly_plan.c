@@ -338,6 +338,7 @@ static void emit_poly_user_arm0(Compiler *c, int id, const char *name, TyKind re
     /* Build the call; append default values for any optional params
        not provided by the (zero-arg) call site. */
     Buf cb; memset(&cb, 0, sizeof cb);
+    Buf hold; memset(&hold, 0, sizeof hold);
     /* A reopened primitive (Integer/Float/String/Symbol) method takes the
        unboxed value, not a struct pointer -- read the matching union field
        instead of casting .v.p to a non-existent sp_<Prim> struct. */
@@ -415,9 +416,25 @@ static void emit_poly_user_arm0(Compiler *c, int id, const char *name, TyKind re
       /* the defaults are spelled for the proc form's own parameter
          types when that is the symbol called (#4492) */
       Scope *ds = &c->scopes[pfi9 >= 0 ? pfi9 : mi];
-      for (int ai = 0; ai < ds->nparams; ai++) {
-        buf_puts(&cb, ", "); emit_arg_or_default(c, ds, ai, -1, &cb);
+      /* an omitted rest and an omitted **kwrest each build an empty
+         object: bare in the call, the second one's allocation collected
+         the first. They are bound to rooted locals ahead of the call, as
+         an arm given arguments binds them (emit_poly_arm_args). */
+      Buf *dv = ds->nparams > 1 ? calloc((size_t)ds->nparams, sizeof *dv) : NULL;
+      int nfresh = 0;
+      for (int ai = 0; dv && ai < ds->nparams; ai++) {
+        emit_arg_or_default(c, ds, ai, -1, &dv[ai]);
+        if (poly_arm_arg_fresh(ds, ai, 1, dv[ai].p)) nfresh++;
       }
+      for (int ai = 0; ai < ds->nparams; ai++) {
+        buf_puts(&cb, ", ");
+        if (!dv) emit_arg_or_default(c, ds, ai, -1, &cb);
+        else if (nfresh > 1 && poly_arm_arg_fresh(ds, ai, 1, dv[ai].p))
+          emit_poly_arm_arg_held(c, ds, ai, dv[ai].p, &hold, &cb);
+        else buf_puts(&cb, dv[ai].p ? dv[ai].p : "");
+        if (dv) free(dv[ai].p);
+      }
+      free(dv);
       g_self = saved_self; g_self_deref = saved_deref;
     }
     /* self is always the first argument here, so a zero-param method
@@ -436,6 +453,7 @@ static void emit_poly_user_arm0(Compiler *c, int id, const char *name, TyKind re
     buf_puts(&cb, ")");
     const char *call = cb.p ? cb.p : "";
     buf_printf(b, " case %d: ", k);
+    if (hold.p) buf_printf(b, "{ %s", hold.p);
     /* A proc form is a separately inferred clone, so its own return type
        is the one to read -- not the original's, which an inlined-only
        method never needed (#3399). */
@@ -460,8 +478,9 @@ static void emit_poly_user_arm0(Compiler *c, int id, const char *name, TyKind re
       else if (slotty == TY_FLOAT && cret9 == TY_BIGINT) { buf_printf(b, "sp_bigint_to_double(%s)", call); pconv = PC_NUM; }
       else buf_puts(b, call);
     }
-    buf_puts(b, "; break;");
+    buf_puts(b, hold.p ? "; } break;" : "; break;");
     free(cb.p);
+    free(hold.p);
     if (g_plan_check) pa_observe(pf9 ? PA_PROC_FORM : PA_USER, k, mi, cret9, pconv);
     return;
   }
