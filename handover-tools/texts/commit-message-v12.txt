@@ -25,9 +25,11 @@ and declarations precede it. A second write holds what was written
 last, `IO::Buffer` is not the program's Buffer, and before the write
 CRuby raises NameError. A file required inside a def, a block or an
 expression is spliced ahead of that statement and loads when the
-require runs: the parser marks the statements of such a file
-(`req_late`, set beside `req_pop` by emit_req_marks, so flatten_node
-does not grow), and its constant writes are left alone.
+require runs: the parser marks the constant writes, classes and
+modules of such a file (`req_late`, set beside `req_pop` by
+emit_req_marks, so flatten_node does not grow; on no def, so the defs
+of a file spliced twice stay equal for desugar_conditional_defs), and
+its constant writes are left alone.
 
 And only where the read names that constant: `::K` reads the program's
 own level, `Mod::K` the body of a top-level Mod, a bare `K` the
