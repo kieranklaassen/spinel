@@ -542,6 +542,75 @@ static int ffi_str_arg_collectable(Compiler *c, int node) {
   return k != NK_StringNode && k != NK_NilNode;
 }
 
+/* Is argument `node` a call of a method whose whole body is one plain read
+   -- an instance variable, a constant, a literal -- on a receiver that is a
+   plain read itself? It is the one method the receiver's class and those
+   under it define for the name, it takes nothing, and what it answers is
+   its body's own value: it builds nothing, and its owner holds the answer,
+   as an attr_reader's does. */
+static int ffi_arg_plain_reader(Compiler *c, int node) {
+  const NodeTable *nt = c->nt;
+  int id = unwrap_parens(c, node);
+  if (id < 0 || nt_kind(nt, id) != NK_CallNode) return 0;
+  const char *nm = nt_str(nt, id, "name");
+  int recv = nt_ref(nt, id, "receiver");
+  if (!nm || recv < 0 || nt_ref(nt, id, "block") >= 0 || nt_ref(nt, id, "arguments") >= 0 ||
+      !subtree_is_pure_read(c, recv))
+    return 0;
+  TyKind rt = comp_ntype(c, recv);
+  int cid = ty_is_object(rt) ? ty_object_class(rt) : -1;
+  if (cid < 0 || cid >= c->nclasses || c->classes[cid].is_native_class) return 0;
+  int mi = comp_method_in_chain(c, cid, nm, NULL);
+  int def = mi >= 0 ? c->scopes[mi].def_node : -1;
+  if (def < 0 || dispatch_impl_count(c, cid, nm) != 1 || nt_ref(nt, def, "parameters") >= 0) return 0;
+  int body = nt_ref(nt, def, "body"), bn = 0;
+  const int *bd = body >= 0 && nt_kind(nt, body) == NK_StatementsNode ? nt_arr(nt, body, "body", &bn) : NULL;
+  if (bn != 1) return 0;
+  switch (nt_kind(nt, bd[0])) {
+    case NK_InstanceVariableReadNode: case NK_ConstantReadNode: case NK_StringNode: case NK_SymbolNode:
+    case NK_IntegerNode: case NK_FloatNode: case NK_NilNode: case NK_TrueNode: case NK_FalseNode:
+      break;
+    default:
+      return 0;
+  }
+  if (nt_kind(nt, bd[0]) != NK_StringNode && !subtree_is_pure_read(c, bd[0])) return 0;
+  return !operand_may_allocate(c, bd[0]) && comp_ntype(c, id) == comp_ntype(c, bd[0]);
+}
+
+/* Does evaluating argument `node` of an FFI call allocate where it stands in
+   the call? Not one the operand order ran ahead of the call (it is its
+   temp's read, and the temp holds it), not a read of a value its owner
+   holds, a plain reader's call among them, and not a handle's read that
+   hands C the live buffer. */
+static int ffi_arg_allocates(Compiler *c, int node) {
+  if (arg_ran_first(node, 0) || !operand_may_allocate(c, node) || operand_is_held_read(c, node) ||
+      ffi_arg_plain_reader(c, node))
+    return 0;
+  int n = unwrap_parens(c, node);
+  return !(repr_of(c, n).read_raw && decide_node(c->nt, n, "strbuf-raw", NULL));
+}
+
+/* Is argument ai of FFI function fi's call a String made where it stands
+   (a shared handle's copy, a call's answer)? Nothing holds it but the C
+   call's argument list. */
+static int ffi_str_arg_fresh(Compiler *c, int fi, int ai, const int *argv, int fixed_argc, int is_vararg) {
+  return (ai < fixed_argc ? ffi_spec_is_str(c->ffi_funcs[fi].args[ai])
+                          : is_vararg && comp_ntype(c, argv[ai]) == TY_STRING) &&
+         ffi_str_arg_collectable(c, argv[ai]) && ffi_arg_allocates(c, argv[ai]);
+}
+
+/* Does such a String sit beside another argument whose evaluation
+   allocates? That one can collect it. */
+static int ffi_str_arg_beside_alloc(Compiler *c, int fi, int argc, const int *argv, int fixed_argc, int is_vararg) {
+  int nfresh = 0, nalloc = 0;
+  for (int ai = 0; ai < argc; ai++) {
+    if (!ffi_arg_allocates(c, argv[ai])) continue;
+    nalloc++;
+    nfresh += ffi_str_arg_fresh(c, fi, ai, argv, fixed_argc, is_vararg);
+  }
+  return nfresh && nalloc >= 2;
+}
+
 /* Move the converted FFI argument at call->p + at out to the temp _b<tb>_<ai>
    of C type ctype, declared in pre ahead of the call, rooting it for the
    call when it is a String (root_str) that Ruby code run by the call could
@@ -552,6 +621,19 @@ static void ffi_arg_to_temp(Buf *call, size_t at, Buf *pre, const char *ctype, i
     buf_printf(pre, "SP_GC_ROOT_STR(_b%d_%d); ", tb, ai);
   buf_erase(call, at, call->len - at);
   buf_printf(call, "_b%d_%d", tb, ai);
+}
+
+/* Hold the converted String argument at call->p + at where it stands in the
+   call, in a slot _bs<tb>_<ai> declared in pre and rooted ahead of the call.
+   The argument keeps its place, so the arguments run in the order the C
+   compiler ran them in. */
+static void ffi_arg_hold(Buf *call, size_t at, Buf *pre, int tb, int ai) {
+  Buf arg; memset(&arg, 0, sizeof arg);
+  buf_puts(&arg, call->p + at);
+  buf_erase(call, at, call->len - at);
+  buf_printf(pre, "const char *_bs%d_%d = NULL; SP_GC_ROOT_STR(_bs%d_%d); ", tb, ai, tb, ai);
+  buf_printf(call, "(_bs%d_%d = %s)", tb, ai, arg.p);
+  free(arg.p);
 }
 
 /* a call on a module or a class: native and FFI functions, singleton accessors, a writer in an instance_eval block, class methods */
@@ -726,13 +808,20 @@ int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
                                          : is_vararg && comp_ntype(c, argv[ai]) == TY_STRING) &&
                         ffi_str_arg_collectable(c, argv[ai]);
         int use_temps = blocking || iob_temps || nstr_args >= 2 || root_strs;
+        /* So can a sibling argument that allocates, with no Ruby code in
+           sight: a String made where it stands in the call (a handle's copy,
+           a call's answer) is held by the C argument list alone. Each such
+           String is rooted where it stands -- its temp when the call takes
+           the temp form, else a slot it is assigned to in its own place --
+           and no argument moves: they run in the order they ran in. */
+        int hold_strs = !root_strs && ffi_str_arg_beside_alloc(c, fi, argc, argv, fixed_argc, is_vararg);
         Buf pre_buf; memset(&pre_buf, 0, sizeof pre_buf);
         Buf base_buf; memset(&base_buf, 0, sizeof base_buf);
         /* blocking: the buffers are locked across the call (hold after every
            base is taken, since taking one may raise) and released after it */
         Buf hold_buf; memset(&hold_buf, 0, sizeof hold_buf);
         Buf rel_buf; memset(&rel_buf, 0, sizeof rel_buf);
-        int tb = use_temps ? ++g_tmp : 0;
+        int tb = use_temps || hold_strs ? ++g_tmp : 0;
         /* Build the raw C call */
         Buf call_buf; memset(&call_buf, 0, sizeof call_buf);
         if (is_vararg && fixed_argc == 0) {
@@ -854,11 +943,13 @@ int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
               emit_expr(c, argv[ai], &call_buf); buf_puts(&call_buf, "))");
             }
           }
+          int hold = hold_strs && ffi_str_arg_fresh(c, fi, ai, argv, fixed_argc, is_vararg);
           if (use_temps) {
             /* move the converted argument out to a temp ahead of the call */
             ffi_arg_to_temp(&call_buf, arg_at, &pre_buf, ffi_c_type(spec), tb, ai,
-                            root_strs && ffi_spec_is_str(spec) && ffi_str_arg_collectable(c, argv[ai]));
+                            hold || (root_strs && ffi_spec_is_str(spec) && ffi_str_arg_collectable(c, argv[ai])));
           }
+          else if (hold) ffi_arg_hold(&call_buf, arg_at, &pre_buf, tb, ai);
         }
         /* Extra variadic args: promote by inferred type (int->sp_int,
            float->double, str->const char*, ptr->void*). A poly-typed vararg
@@ -896,6 +987,8 @@ int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
               ffi_arg_to_temp(&call_buf, arg_at, &pre_buf,
                               at == TY_STRING ? "const char *" : at == TY_FLOAT ? "double" : "sp_int",
                               tb, ai, at == TY_STRING && ffi_str_arg_collectable(c, argv[ai]));
+            else if (hold_strs && ffi_str_arg_fresh(c, fi, ai, argv, fixed_argc, is_vararg))
+              ffi_arg_hold(&call_buf, arg_at, &pre_buf, tb, ai);
           }
         }
         buf_puts(&call_buf, ")");
@@ -912,7 +1005,7 @@ int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
                        ffi_c_type(ret_spec), tb, tb, call_buf.p, rel_buf.p ? rel_buf.p : "", tb);
           free(call_buf.p); call_buf = w;
         }
-        else if (use_temps) {
+        else if (use_temps || hold_strs) {
           Buf w; memset(&w, 0, sizeof w);
           if (is_void_ret)
             buf_printf(&w, "({ %s%s%s; })", pre_buf.p ? pre_buf.p : "", base_buf.p ? base_buf.p : "", call_buf.p);
