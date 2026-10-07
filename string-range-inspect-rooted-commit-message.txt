@@ -1,0 +1,10 @@
+The inspect of a String Range keeps its begin across the end's inspect
+
+Under SPINEL_GC_STRESS=2 `p ("aa".."ac")` printed four poisoned bytes
+where "aa" belongs. sp_srange_inspect builds the begin's inspect, then
+the end's, and nothing held the first String while the second was
+allocated. It is rooted now.
+
+test/str_range_inspect_root.rb joins GC_STRESS_TESTS.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

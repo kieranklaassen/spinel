@@ -1,0 +1,10 @@
+first of a beginless String Range and last of an endless one raise RangeError
+
+`p ("aa"..).last` and `p (.."ad").first` printed nil, where CRuby raises
+RangeError (cannot get the last element of endless range, cannot get
+the first element of beginless range). #first and #last shared the
+template of #begin and #end, which rightly answer nil for the open
+side. Their templates now test the bound and raise for an absent one
+(sp_srange_open_raise).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

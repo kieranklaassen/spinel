@@ -1,0 +1,1 @@
+first of a beginless String Range and last of an endless one raise RangeError

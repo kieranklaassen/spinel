@@ -1,0 +1,1 @@
+The inspect of a String Range keeps its begin across the end's inspect

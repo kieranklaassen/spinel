@@ -1,0 +1,15 @@
+A boxed String or Symbol is no bound of an Integer Range
+
+`p (1..x).to_a` with x "ab" read out of a mixed Hash printed [] and
+`p (x..x).to_a` printed [0]. sp_range_new_pend, sp_range_lo_bound and
+the `for` loop's sp_for_lo and sp_for_hi convert a boxed bound through
+sp_poly_to_i, which reads a String as its leading digits and a Symbol
+as its id, so the program walked a Range of numbers it never wrote.
+
+Beside an Integer begin such an end is CRuby's ArgumentError (bad
+value for range), and so it is here. In every other place CRuby may
+build a String or Symbol Range, which the Integer representation
+cannot hold: the Range is refused when it is built, with
+NotImplementedError, as a Float begin decided at run time already is.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
