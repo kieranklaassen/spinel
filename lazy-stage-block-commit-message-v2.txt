@@ -1,0 +1,44 @@
+A lazy stage's block answers with its next, has fresh locals and runs a redo
+
+[1, 5, 2, 8, 3].lazy.map { |x| next 0 if x > 3; x * 2 }.to_a answered
+[2, 4, 6] where CRuby has [2, 0, 4, 0, 6], [1, 2, 3].lazy.map { |x|
+y ||= x; y }.to_a answered [1, 1, 1], and a redo in the block was
+refused. emit_lazy_pipeline_expr wrote the block's leading statements
+straight into the pipeline's one C loop and read the last one as the
+answer: a next was the loop's own continue and dropped the element,
+nothing reset the block's locals, and a redo had no label to go to.
+Under a begin that next also popped the rescue's frame, as a next that
+leaves the begin does, and a raise after the pipeline went uncaught.
+
+Each stage now opens its block as the other builtin iterators do, with
+emit_iter_step_open, and reads the answer through emit_iter_step_tail or
+emit_iter_step_cond. A block with no next, no redo and no local of its
+own emits the C it did; a parameter the block assigns is such a local.
+
+A block that holds a break is read as it was (lazy_block_plain). In the
+step's frame the break would leave only the frame, and the stage would
+go on with nil where the block raises LocalJumpError. So in such a block
+a next still drops the element, the locals are not reset and a redo is
+still refused. A redo is also still refused where the stage would answer
+wrongly with it: in find_all, which answers nil here with or without it;
+in a drop_while block of more than one parameter, whose branch binds the
+first alone; and beside a destructured parameter, which the redo would
+bind again.
+
+The cost is the reset every eager iterator's block already pays, 2
+instructions a local for each element, and it falls on a block with a
+local of its own that master ran right: map { |x| y = x + 1; y * 2 }
+.select { |x| z = x % 3; z == 0 } over 200,000 Integers, ten times,
+goes from 399,562,760 to 407,562,815.
+
+docs/limitations.md says where a redo in a lazy stage is still refused,
+and the refusal test takes a stage's block that holds a break.
+
+Test: test/lazy_stage_step_frame.rb (expected from CRuby 3.3.6 with
+--enable-frozen-string-literal). master refuses it at its first redo
+line and, with the three redo lines out, differs on 16 of the other 24.
+test/lazy_stage_break_beside_next.rb and
+test/lazy_drop_while_break_beside_next.rb hold the break beside a next;
+they pass on master too.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
