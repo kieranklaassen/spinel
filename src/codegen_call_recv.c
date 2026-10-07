@@ -4996,7 +4996,10 @@ static int emit_hash_merge_misfit(Compiler *c, int id, TyKind rt, Buf *b) {
 
 /* merge of two String-keyed Hashes of different value kinds: a concrete side
    (str_int, str_str) is copied to the boxed kind and the copies merged, and
-   a str_poly receiver takes the argument's copy alone. 0 for another pair. */
+   a str_poly receiver takes the argument's copy alone. The receiver's copy,
+   or a receiver that runs code, is held in a rooted temp while the
+   argument's is made: as two arguments of one C call, whichever was made
+   first had no root while the second allocated its own. 0 for another pair. */
 static int emit_str_keyed_merge(Compiler *c, int recv, int arg, TyKind rt, TyKind at, Buf *b) {
   const char *rfn = rt == TY_STR_INT_HASH ? "sp_StrPolyHash_from_str_int_hash("
                   : rt == TY_STR_STR_HASH ? "sp_StrPolyHash_from_str_str_hash(" : NULL;
@@ -5004,13 +5007,24 @@ static int emit_str_keyed_merge(Compiler *c, int recv, int arg, TyKind rt, TyKin
                   : at == TY_STR_STR_HASH ? "sp_StrPolyHash_from_str_str_hash(" : NULL;
   if (rfn ? (!ty_is_hash(at) || ty_hash_key(at) != TY_STRING || at == rt)
           : (rt != TY_STR_POLY_HASH || !afn)) return 0;
+  Buf rb; memset(&rb, 0, sizeof rb);
+  int held = 0;
+  if (rfn) {
+    int t = ++g_tmp;
+    buf_printf(b, "({ sp_StrPolyHash *_t%d = %s", t, rfn); emit_expr(c, recv, b);
+    buf_printf(b, "); SP_GC_ROOT(_t%d); ", t);
+    buf_printf(&rb, "_t%d", t);
+    held = 1;
+  }
+  else if (subtree_has_side_effect(c, recv))
+    held = hold_recv_open(c, recv, 0, "sp_StrPolyHash *", "SP_GC_ROOT", b, &rb);
   buf_puts(b, "sp_StrPolyHash_merge(");
-  if (rfn) { buf_puts(b, rfn); emit_expr(c, recv, b); buf_puts(b, ")"); }
-  else emit_expr(c, recv, b);
+  if (rb.p) buf_puts(b, rb.p); else emit_expr(c, recv, b);
   buf_puts(b, ", ");
   if (afn) { buf_puts(b, afn); emit_expr(c, arg, b); buf_puts(b, ")"); }
   else emit_expr(c, arg, b);
-  buf_puts(b, ")");
+  buf_puts(b, held ? "); })" : ")");
+  free(rb.p);
   return 1;
 }
 
