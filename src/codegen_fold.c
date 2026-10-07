@@ -7591,9 +7591,17 @@ void emit_rooted_operand(Compiler *c, TyKind pt, int provided, const char *expr,
    ...) that builds a NEW container, rooted only inside the converter. The
    read's own root does not reach the copy, and a callee that allocates before
    it roots the parameter (sp_<C>_new) can collect it: the object then holds
-   freed memory. */
+   freed memory. The same for a read kept by value (a Range, a Rational, a
+   Complex, a Time) that reaches a boxed parameter: its box copies it into
+   a new cell (sp_box_range, sp_box_rational, ...) nothing holds, and the
+   object's allocation, a sibling's box or the cell of a captured parameter
+   collects it. A Class is boxed by its tag and has no cell. */
 int arg_read_converts(Compiler *c, TyKind pt, int provided) {
-  if (provided < 0 || pt == TY_POLY) return 0;
+  if (provided < 0) return 0;
+  if (pt == TY_POLY) {
+    TyKind vt = repr_of(c, provided).as_ty;
+    return ty_is_struct_valued(vt) && vt != TY_CLASS;
+  }
   if (!(ty_is_array(pt) || ty_is_obj_array(pt) || ty_is_hash(pt))) return 0;
   Repr sr = repr_of(c, provided);
   TyKind st = sr.as_ty;
@@ -7608,9 +7616,118 @@ int arg_read_converts(Compiler *c, TyKind pt, int provided) {
 void emit_rooted_conversion(Compiler *c, TyKind pt, const char *expr, Buf *out) {
   int t = ++g_tmp;
   emit_indent(g_pre, g_indent);
-  emit_ctype(c, pt, g_pre);
-  buf_printf(g_pre, " _t%d = NULL; SP_GC_ROOT(_t%d);\n", t, t);
+  if (pt == TY_POLY) buf_printf(g_pre, "sp_RbVal _t%d = sp_box_nil(); SP_GC_ROOT_RBVAL(_t%d);\n", t, t);
+  else {
+    emit_ctype(c, pt, g_pre);
+    buf_printf(g_pre, " _t%d = NULL; SP_GC_ROOT(_t%d);\n", t, t);
+  }
   buf_printf(out, "(_t%d = %s)", t, expr);
+}
+
+/* The list emit_args_filled_argv has written into `out`, for the questions
+   asked of it once it stands (arg_built_exposed): slot j is the text from
+   at[j] to the separator ahead of at[j + 1]. */
+typedef struct {
+  const ArgLayout *L; const int *argv; const char *lead; const Buf *out; const size_t *at;
+  int kwh, kw_merged, ds, argov;
+} ArgList;
+
+/* True when the default a spread slot falls back to, the tail of its text
+   `(n < len ? element : DEFAULT)`, stands as a temp the prelude has built
+   and rooted, bare or boxed (a pointer's box allocates nothing): a Hash or
+   an Array literal is written so, ahead of the call. The written text is
+   asked, not the node: only it says where the value was built. */
+static int spread_default_held(const char *v, size_t n) {
+  if (n < 2 || v[n - 1] != ')' || !g_pre || !g_pre->p) return 0;
+  size_t k = n - 1;
+  for (int depth = 0; k > 1; k--) {
+    char ch = v[k - 1];
+    if (ch == ')') depth++;
+    else if (ch == '(' && depth-- == 0) return 0;
+    else if (ch == ':' && depth == 0 && v[k - 2] == ' ' && v[k] == ' ') break;
+  }
+  if (k <= 1) return 0;
+  const char *d = v + k + 1;
+  size_t dn = n - 1 - (k + 1), q = 0;
+  if (dn > 7 && memcmp(d, "sp_box_", 7) == 0) {
+    while (q < dn && d[q] != '(') q++;
+    if (q++ >= dn) return 0;
+    if (dn - q > 9 && memcmp(d + q, "(void *)(", 9) == 0) q += 9;
+  }
+  if (dn - q < 3 || d[q] != '_' || d[q + 1] != 't') return 0;
+  size_t e = q + 2;
+  while (e < dn && d[e] >= '0' && d[e] <= '9') e++;
+  if (e == q + 2 || (q == 0 && e != dn) || memchr(d + e, '(', dn - e)) return 0;
+  char root[48];
+  snprintf(root, sizeof root, "SP_GC_ROOT(_t%.*s);", (int)(e - q - 2), d + q + 2);
+  return strstr(g_pre->p, root) != NULL;
+}
+
+/* True when slot j of that list can allocate where it stands, inside the
+   call's parentheses. A slot hoisted ahead of the call has run by then; one
+   this cannot show quiet counts as allocating. */
+static int arg_slot_allocates(Compiler *c, Scope *m, const ArgList *al, int j) {
+  const ArgLayout *L = al->L;
+  LocalVar *p = m->pnames[j] ? scope_local(m, m->pnames[j]) : NULL;
+  if (!p || p->byref_out || repr_of_slot(c, p).handle) return 1;
+  TyKind pt = p->type;
+  int d = m->pdefault ? m->pdefault[j] : -1;
+  int d_allocs = d >= 0 && ((pt == TY_POLY && arg_read_converts(c, pt, d)) ||
+                            (operand_may_allocate(c, d) && !subtree_is_pure_read(c, d)));
+  if (L->from[j] == ARG_REST) return 1;   /* packs its Array in place */
+  int kw = callee_has_kwarg(c, m, m->pnames[j]);
+  int kv = al->kwh >= 0 && kw && !al->kw_merged ? kwh_lookup(c->nt, al->kwh, m->pnames[j]) : -1;
+  if (L->from[j] == ARG_GATHERED || L->from[j] == ARG_ELEM ||
+      (kv < 0 && al->ds >= 0 && kw && j != m->kwrest_idx)) {
+    /* an element or a key read; a typed container parameter converts it */
+    if (pt != TY_POLY && pt != TY_STRING && needs_root(pt)) return 1;
+    size_t end = j + 1 < m->nparams ? al->at[j + 1] - 2 : al->out->len;
+    return d_allocs && !spread_default_held(al->out->p + al->at[j], end - al->at[j]);
+  }
+  if (kv < 0 && j == m->kwrest_idx) return 0;   /* collected ahead of the call */
+  int provided = kv >= 0 ? kv : L->from[j] == ARG_NODE ? al->argv[L->arg[j]] :
+                 L->from[j] == ARG_KWH ? al->kwh : -1;
+  /* ran into its temp ahead of the call, or is hoisted (emit_arg_rooted) */
+  if ((provided >= 0 && arg_ran_first(provided, al->argov)) || arg_wants_root(c, pt, provided)) return 0;
+  if (provided < 0) return d_allocs;
+  return arg_read_converts(c, pt, provided) || operand_may_allocate(c, provided);
+}
+
+/* True when a value built where an argument stands can be collected before
+   the callee roots the parameter it is for: something allocates in between.
+   That is the callee itself where the list is a constructor's (an
+   `initialize` whose list opens the parentheses: sp_<C>_new allocates the
+   object first; behind a receiver, as in `super`, the object exists) or
+   where it has a captured parameter (its cell is allocated on entry, ahead
+   of the parameters' roots), and otherwise a second slot of the list that
+   allocates where it stands: C leaves the order between two arguments open.
+   One such value into a method that roots its parameters first is safe as
+   it is. */
+static int arg_built_exposed(Compiler *c, Scope *m, const ArgList *al) {
+  if (m->name && sp_streq(m->name, "initialize") && !(al->lead && al->lead[0])) return 1;
+  for (int j = 0; j < m->nlocals; j++)
+    if (m->locals[j].is_cell && (m->locals[j].is_param || (m->blk_param && m->locals[j].name &&
+                                                           sp_streq(m->locals[j].name, m->blk_param))))
+      return 1;
+  int n = 0;
+  for (int j = 0; j < m->nparams && n < 2; j++) n += arg_slot_allocates(c, m, al, j);
+  return n >= 2;
+}
+
+/* Hold slot j of that list, a value built where it stands that nothing
+   else holds: its text becomes an assignment to a rooted temp where it
+   stood (emit_rooted_conversion), so nothing runs earlier than it did.
+   `*grown` is what the holds ahead of this slot have added to the text. */
+static void arg_slot_hold(Compiler *c, Scope *m, const ArgList *al, int j, size_t *grown, Buf *out) {
+  size_t at = al->at[j] + *grown;
+  size_t end = j + 1 < m->nparams ? al->at[j + 1] - 2 + *grown : out->len;
+  char *slot = strndup(out->p + at, end - at), *rest = strdup(out->p + end);
+  LocalVar *p = scope_local(m, m->pnames[j]);
+  out->len = at; out->p[at] = 0;
+  emit_rooted_conversion(c, p->type, slot, out);
+  *grown += out->len - end;
+  buf_puts(out, rest);
+  free(slot); free(rest);
 }
 
 /* Like emit_arg_or_default, but hoists a pointer-backed / poly argument into a
@@ -7629,15 +7746,24 @@ void emit_rooted_conversion(Compiler *c, TyKind pt, const char *expr, Buf *out) 
    evaluated the argument into and rooted, or 0. An argument that renders as
    that temp unconverted is passed as it is: copying it into a second rooted
    temp only rooted the same pointer twice, a frame slot and a store on every
-   call (`Node.new(make_tree(d), make_tree(d))` held each subtree in two). */
-static void emit_arg_rooted(Compiler *c, Scope *m, int idx, int provided, int held, Buf *out) {
+   call (`Node.new(make_tree(d), make_tree(d))` held each subtree in two).
+
+   A read kept by value that is boxed for a boxed parameter is written as
+   it was and reported in `*fresh`: its box is a new cell, and whether
+   anything can collect it is the whole list's to say (arg_built_exposed). */
+static void emit_arg_rooted(Compiler *c, Scope *m, int idx, int provided, int held, int *fresh, Buf *out) {
   LocalVar *p = scope_local(m, m->pnames[idx]);
   TyKind pt = p ? p->type : TY_UNKNOWN;
   /* a byref out-param arg is a slot address, not a heap value: it hoists its
      own rooted temp when one is needed (see emit_arg_or_default) */
   if (p && p->byref_out) { emit_arg_or_default(c, m, idx, provided, out); return; }
   if (!arg_wants_root(c, pt, provided)) {
-    if (!arg_read_converts(c, pt, provided)) { emit_arg_or_default(c, m, idx, provided, out); return; }
+    int converts = arg_read_converts(c, pt, provided);
+    if (!converts || pt == TY_POLY) {
+      if (converts && fresh) *fresh = 1;
+      emit_arg_or_default(c, m, idx, provided, out);
+      return;
+    }
     Buf cb; memset(&cb, 0, sizeof cb);
     emit_arg_or_default(c, m, idx, provided, &cb);
     emit_rooted_conversion(c, pt, cb.p ? cb.p : "NULL", out);
@@ -10225,7 +10351,7 @@ void emit_args_filled_argv(Compiler *c, int callee_idx, const int *argv, int arg
         if (mt == TY_POLY && et != TY_POLY) emit_boxed_text(c, et, txt, out);
         else buf_puts(out, txt);
       }
-      else emit_arg_rooted(c, m, i, -1, 0, out);
+      else emit_arg_rooted(c, m, i, -1, 0, NULL, out);
     }
     return;
   }
@@ -10491,8 +10617,13 @@ else {
       if (held && root) held[k] = ht;
     }
   }
+  /* where each slot's text starts, and the slots whose value is built where
+     it stands with nothing to hold it (a by-value read's box) */
+  size_t *at = m->nparams > 0 ? calloc((size_t)m->nparams, sizeof *at) : NULL;
+  int *fresh = NULL, fr = 0;
   for (int i = 0; i < m->nparams; i++) {
     buf_puts(out, i == 0 ? lead : ", ");
+    at[i] = out->len;
     if (L.gather && emit_gather_lead_lent(c, m, i, argv, argc, out)) {}
     else if (L.from[i] == ARG_GATHERED)
       emit_gathered_param(c, m, i, splat_tmp, out);
@@ -10519,7 +10650,7 @@ else {
       int is_kwparam = m->pnames[i] && callee_has_kwarg(c, m, m->pnames[i]);
       int kv = (kwh >= 0 && is_kwparam && !kw_merged) ? kwh_lookup(nt, kwh, m->pnames[i]) : -1;
       if (kv >= 0) {
-        emit_arg_rooted(c, m, i, kv, 0, out);
+        emit_arg_rooted(c, m, i, kv, 0, &fr, out);
       }
       else if (ds_hash_tmp >= 0 && is_kwparam && i != m->kwrest_idx) {
         /* Double-splat: extract param by name from the pre-eval'd hash. */
@@ -10546,7 +10677,7 @@ else {
            keywords, so they still bind here.) A post takes its argument from
            the end of the call's, and a positional after a mid-list splat the
            layout could not gather (`g(1, *m, 4)`) a tail parameter. */
-        emit_arg_rooted(c, m, i, argv[L.arg[i]], held ? held[L.arg[i]] : 0, out);
+        emit_arg_rooted(c, m, i, argv[L.arg[i]], held ? held[L.arg[i]] : 0, &fr, out);
       }
       else {
         /* No positional arg and no keyword match. If the param is hash-typed
@@ -10570,10 +10701,23 @@ else {
         /* ...and only into the FIRST unfilled positional slot. Every later
            one hit this same fallback, so `def f(a = nil, b = nil); f(k: 1)`
            handed the hash to both (found while fixing #4030). */
-        emit_arg_rooted(c, m, i, L.from[i] == ARG_KWH ? kwh : -1, 0, out);
+        emit_arg_rooted(c, m, i, L.from[i] == ARG_KWH ? kwh : -1, 0, &fr, out);
       }
     }
+    if (fr) {
+      if (!fresh) fresh = calloc((size_t)m->nparams, sizeof *fresh);
+      fresh[i] = 1; fr = 0;
+    }
   }
+  if (fresh && g_pre) {
+    /* held where the list, as written, leaves such a value exposed */
+    const ArgList al = { &L, argv, lead, out, at, kwh, kw_merged, ds_hash_tmp, argov_saved };
+    size_t grown = 0;
+    if (arg_built_exposed(c, m, &al))
+      for (int i = 0; i < m->nparams; i++)
+        if (fresh[i]) arg_slot_hold(c, m, &al, i, &grown, out);
+  }
+  free(at); free(fresh);
   view_unbind(argov_saved);  /* drop this call's hoisted-arg overrides */
   free(held);
   arg_layout_free(&L);
