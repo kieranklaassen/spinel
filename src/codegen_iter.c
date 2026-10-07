@@ -662,6 +662,21 @@ static int fwd_named_params(Compiler *c, const Scope *fwd) {
   return nreq + nopt;
 }
 
+/* Where the binding of `m` starts among the parameters of `def f(a, ...)`:
+   past the ones it names itself, which its `...` does not forward, where
+   each positional parameter of `m` then has a slot of its own. 0 where one
+   has none, or where `m` keeps its `...` too and is bound slot for slot. */
+static int fwd_slot(const Scope *fwd, int i) {
+  return i < fwd->nparams && fwd->pnames[i] && strncmp(fwd->pnames[i], "__fwd_", 6) == 0;
+}
+static int fwd_lead_count(Compiler *c, Scope *m, const Scope *fwd) {
+  int base = fwd_named_params(c, fwd);
+  if (!base || fwd_hands_keys_on(c, m, NULL)) return 0;
+  for (int i = 0; i < m->nparams; i++)
+    if (i != m->kwrest_idx && !callee_param_is_declared_kwarg(c, m, m->pnames[i]) && !fwd_slot(fwd, base + i)) return 0;
+  return base;
+}
+
 /* A call that writes out each positional argument it passes: no `*`. */
 static int site_args_written(const NodeTable *nt, const int *argv, int argc) {
   for (int i = 0; i < argc; i++)
@@ -754,6 +769,9 @@ void emit_inline_bind_params(Compiler *c, Scope *m, int args, const int *argv, i
      CRuby judges first */
   emit_ds_kwarg_check(c, m, kwh, ds_tmp, ds_type);
   ren_unpark(&park0);
+  /* `def f(a, ...)` forwards what follows the parameters it names, as the
+     other call paths do: the binding starts past them */
+  int fwd_base = fwd_encl ? fwd_lead_count(c, m, fwd_encl) : 0;
   for (int i = 0; i < m->nparams; i++) {
     emit_indent(b, din);
     int aliased = i < 32 && (alias_mask & (1u << i));
@@ -776,9 +794,9 @@ void emit_inline_bind_params(Compiler *c, Scope *m, int args, const int *argv, i
     /* a declared keyword binds by name, as at a call that spells it out:
        from the forwarder's parameter of that name (it has one for each key
        its sites pass), and where it has none, to the keyword's own default */
-    int fi = i, is_kw = fwd_encl && callee_param_is_declared_kwarg(c, m, m->pnames[i]);
+    int fi = fwd_base + i, is_kw = fwd_encl && callee_param_is_declared_kwarg(c, m, m->pnames[i]);
     if (is_kw)
-      for (fi = 0; fi < fwd_encl->nparams; fi++)
+      for (fi = fwd_base; fi < fwd_encl->nparams; fi++)
         if (fwd_encl->pnames[fi] && sp_streq(fwd_encl->pnames[fi], m->pnames[i])) break;
     /* and a key the site left out of the forwarder's own call is not passed
        on: the keyword takes its default, and a forwarder between the two
