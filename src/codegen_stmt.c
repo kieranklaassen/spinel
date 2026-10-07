@@ -5537,6 +5537,9 @@ static int emit_when_string_range(Compiler *c, int cond, int t, Buf *b) {
   buf_puts(b, "({ ");
   if (left >= 0) {
     buf_printf(b, "const char *_t%d = ", tl); emit_expr(c, left, b); buf_puts(b, "; ");
+    /* a begin made on the spot is held by its temp alone while the end is made */
+    if (right >= 0 && operand_may_allocate(c, left) && operand_may_allocate(c, right))
+      buf_printf(b, "SP_GC_ROOT_STR(_t%d); ", tl);
   }
   if (right >= 0) {
     buf_printf(b, "const char *_t%d = ", tr); emit_expr(c, right, b); buf_puts(b, "; ");
