@@ -1931,6 +1931,29 @@ static void emit_boxed_impl(Compiler *c, int node, Buf *b) {
   /* a pointer kind with no box: evaluate for side-effects, yield nil */
   buf_puts(b, "("); emit_expr(c, node, b); buf_puts(b, ", sp_box_nil())"); RC(RF_NIL_EFFECT, RW_NONE);
 }
+/* Does `node` make its String itself, so that the program has no other name
+   for it: a call of a String method that answers a new String whatever it is
+   given, under a name no class of the program defines, aliases or reads? */
+static int boxed_value_unnamed(Compiler *c, int node) {
+  static const char *const made[] = {
+    "succ", "next", "upcase", "downcase", "capitalize", "swapcase", "reverse", "+", "*",
+    "strip", "lstrip", "rstrip", "chomp", "chop", "sub", "gsub", "tr", "center", "ljust", "rjust", NULL };
+  const NodeTable *nt = c->nt;
+  const char *nm = nt_kind(nt, node) == NK_CallNode ? nt_str(nt, node, "name") : NULL;
+  int i = 0;
+  while (nm && made[i] && !sp_streq(nm, made[i])) i++;
+  if (!nm || !made[i] || nt_ref(nt, node, "receiver") < 0 || nt_ref(nt, node, "block") >= 0 ||
+      comp_method_index(c, nm) >= 0)
+    return 0;
+  for (int k = 0; k < c->nclasses; k++) {
+    if (comp_method_in_chain(c, k, nm, NULL) >= 0 || comp_method_in_chain(c, k, "method_missing", NULL) >= 0 ||
+        comp_reader_in_chain(c, k, nm, NULL))
+      return 0;
+    for (int a = 0; a < c->classes[k].naliases; a++)
+      if (sp_streq(c->classes[k].alias_new[a], nm)) return 0;
+  }
+  return 1;
+}
 /* emit_boxed: the boxing of node `node`'s value (emit_boxed_impl); under
    --repr-check it keeps the nesting the recorder reads */
 void emit_boxed(Compiler *c, int node, Buf *b) {
@@ -1960,6 +1983,18 @@ void emit_boxed(Compiler *c, int node, Buf *b) {
       return;
     }
   }
+  /* A value marked for the shared handle whose kind is boxed: the mark is
+     made on a String, and the node answers poly once its value widens. The
+     String among what it holds becomes the handle the mark asked for, as a
+     marked String does above (emit_boxed_strbuf); any other value passes as
+     it is. Stored bare, the String of `@xs[0] = @xs[0].succ` was one no
+     later change reached. A read marked to lift its variable has done it.
+     Only a value the store's own right side makes (boxed_value_unnamed): one
+     the program names elsewhere (`x = @xs[0].succ; @xs[0] = x`) would be two
+     Strings, the handle and the one `x` keeps. */
+  if (node >= 0 && c->strbuf_box[node] && !c->poly_strbuf_lift[node] && comp_ntype(c, node) == TY_POLY &&
+      boxed_value_unnamed(c, node))
+    lift = 1;
   if (lift) buf_puts(b, "sp_poly_strbuf_lift(");
   rc_depth++;
   emit_boxed_impl(c, node, b);
