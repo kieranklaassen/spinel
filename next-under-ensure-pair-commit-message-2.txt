@@ -1,0 +1,52 @@
+A next in a String iterator, each_index or Array.new ends its own turn
+
+    count = proc { |s|
+      n = 0
+      s.each_line { |l| next if l.strip.empty?; n += 1 }
+      n
+    }
+    p count.call("a\n\nb\n")
+
+prints nil; CRuby prints 2. The next returned from the proc. Under a
+begin the same next popped the begin's rescue frame, so the raise here
+is not rescued:
+
+    begin
+      "a\nbb\nc".each_line { |l| next if l.size > 2 }
+      raise "late"
+    rescue => e
+      puts e.message
+    end
+
+Under an ensure the next ended the whole loop and went to the ensure.
+With an ensure inside the block it ran the ensure and then the rest of
+the turn. With a value, inside the block of a map, it did not build.
+
+A String's each_line, lines, each_char, chars, each_byte, bytes,
+each_codepoint, codepoints and each_grapheme_cluster with a block,
+Array#each_index and Array.new with a block run the block inside a C
+loop of their own, and their emitters (emit_iter_loop_stmts, and
+Array.new's own walk of the body) did not record that loop. A next
+there was emitted for whatever stood around the call: the frame base of
+an outer loop or of none, the ensure around the call, the proc body,
+the value slot of the block around it.
+
+They now record the loop as emit_loop_body does for the other
+iterators: the frame depth and the ensure depth at its entry, the C
+loop depth, the body, and no value slot. Array.new keeps its own slot
+for the element. Only a block that holds a next of its own is
+recorded; any other block emits the C it did.
+
+With the loop recorded, a next under an ensure in the block takes the
+ensure's deferred continue, which is why the commit before this one
+makes that continue pop the frames it leaves.
+
+Test: test/iter_loop_next_own_turn.rb. Sixteen such loops, each under
+a begin, under an ensure, with an ensure, with a rescue and with an
+ensure in a begin/rescue inside the block, in a proc, and under a
+rescue modifier as a statement and as a method's value; seventy turns
+with no raise; each_char.each and a scan as a value in Array.new's
+block; then 65 other iterators and loops under a begin, which were
+right and stay right. Without the change it does not build.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

@@ -1,0 +1,29 @@
+A Hash value block appending through a local naming its value is refused
+
+A Hash value block binds copies of the stored Strings, so one that
+appends to its value parameter is refused. One that appends through a
+local assigned from the parameter compiled, and the append went to the
+copy with nothing said:
+
+    h = {}
+    h[:a] = +"ab"
+    h.each_value { |e| t = e; t << "z" }
+    p h                  # {a: "ab"}; CRuby prints {a: "abz"}
+
+The Array arm of promote_shared_stored_strings asks
+an_block_param_alias_mutated for this shape
+(`a.each { |x| t = x; t << "!" }`). an_value_block_appends now asks the
+same question before it leaves a block alone, so the refusal in view
+and the one that follows the Hash to a store out of the block's scope
+both see the local. It is no new rule: the test, the refusal and the
+Strings it refuses are the ones that were there, and under
+--share-strings the route goes to share_route_defer as before.
+
+Covered with it: a chain (`t = u = e`), any change in place
+(`t.upcase!`) and a local handed to a method that appends, in
+`each_value`, `each`, `each_pair` and the iterators over `values`,
+`values_at` and `fetch_values`. A local that is also assigned something
+else (`t = e; t = t + "x"`) or a copy (`t = e.dup`) is no alias and
+compiles as before.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

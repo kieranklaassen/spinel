@@ -1,0 +1,53 @@
+A next under an ensure pops the rescue frames it leaves
+
+    begin
+      ["a", "b"].each { |c|
+        begin
+          begin
+            next if c == "a"
+          ensure
+            print "e"
+          end
+        rescue
+          print "r"
+        end
+      }
+      raise "late"
+    rescue => ex
+      puts ex.message
+    end
+
+prints eerlate; CRuby prints eelate. The next ran the ensure and then
+the loop's C continue, and the frame of the begin/rescue around the
+ensure stayed on the exception stack. The raise after the loop landed
+in it: the rescue clause of a turn that was over ran, and what follows
+the loop ran a second time. One frame stayed for every such next, so
+two hundred turns ended in SystemStackError with no raise in them.
+
+The deferred break in the same tail pops the frames it leaves: down to
+the enclosing ensure's when it chains to one, down to the loop's before
+the C break. The deferred next popped one frame when it chained and
+none before the continue. It now pops the same counts.
+
+The loop's base is that of the innermost loop an emitter recorded, and
+some iterators run their block in a C loop they do not record. A begin
+in such a block stands under the base of a loop around the call, and
+popping down to that base would take that loop's frames. So
+emit_loop_body names the body it runs (g_loop_body) and the next pops
+these counts only where that body owns the begin, by the source
+(subtree_owns_next, which now answers for any node), as a fiber's body
+is asked about a next. Every other begin keeps the lines it had, as a
+begin with no next in it does.
+
+Not here: the block of each_with_index, map or select, which another
+emitter runs, leaves the same frames as before.
+
+Test: test/next_under_ensure_pops_frames.rb. each with the ensure in
+one begin/rescue, in two, between two ensures and in a rescue clause;
+in a method, where what follows the loop must run once; while, for, a
+Range, upto and a Hash; a next with a value, a break and a raise
+beside the next, right before and after; two hundred turns. Without
+the change six of its eight lines are wrong and the last loop ends in
+SystemStackError.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

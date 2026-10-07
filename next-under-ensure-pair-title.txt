@@ -1,0 +1,1 @@
+A next under an ensure, or in a String iterator, ends its own turn
