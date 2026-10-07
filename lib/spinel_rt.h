@@ -9065,6 +9065,10 @@ static sp_RbVal sp_poly_get_sym(sp_RbVal v, sp_sym key) {
   if (sp_poly_is_call_aref(v)) return sp_poly_call_aref(v, sp_box_sym(key));
   sp_poly_coll_chk(v, "[]");
   if (v.tag != SP_TAG_OBJ) return sp_box_nil();
+  /* An Array indexed by a Symbol is a TypeError, as the store raises it
+     (sp_poly_set_sym): the read answered nil. */
+  if (sp_poly_is_array_kind(v.cls_id))
+    sp_raise_cls("TypeError", SPL("no implicit conversion of Symbol into Integer"));
   switch (v.cls_id) {
     case SP_BUILTIN_CURRY: return sp_curry_call_poly((sp_Curry *)v.v.p, 1, (sp_RbVal[]){sp_box_sym(key)});
     case SP_BUILTIN_SYM_POLY_HASH: return sp_SymPolyHash_get((sp_SymPolyHash*)v.v.p, key);
@@ -9478,6 +9482,9 @@ static sp_RbVal sp_poly_get_str(sp_RbVal v, const char *key) {
   if (sp_poly_is_call_aref(v)) return sp_poly_call_aref(v, sp_box_str(key));
   sp_poly_coll_chk(v, "[]");
   if (v.tag != SP_TAG_OBJ) return sp_box_nil();
+  /* nor is a String an Array's index (sp_poly_set_str) */
+  if (sp_poly_is_array_kind(v.cls_id))
+    sp_raise_cls("TypeError", SPL("no implicit conversion of String into Integer"));
   switch (v.cls_id) {
     case SP_BUILTIN_CURRY: return sp_curry_call_poly((sp_Curry *)v.v.p, 1, (sp_RbVal[]){sp_box_str(key)});
     case SP_BUILTIN_STR_POLY_HASH: return sp_StrPolyHash_get((sp_StrPolyHash*)v.v.p, key);
