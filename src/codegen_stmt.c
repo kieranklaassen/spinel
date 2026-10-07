@@ -15852,7 +15852,11 @@ static int str_mutate_shared_arms(Compiler *c, int id, Buf *b, int indent, const
        (#4363). Without this the arm ran against `self->iv_x` itself, which is
        an sp_String * and not the const char * lvalue the arm assigns to:
        `lvalue required as left operand of assignment`. */
-    if (!strbuf_local_name(c, recv) && nt_kind(nt, recv) == NK_InstanceVariableReadNode) {
+    /* `clear` has no value arm to re-run: its arm empties the handle in place
+       (str_mutate_reassign_arms), here as anywhere. Under the shim it did so
+       too, and the shadow written back after it undid the clear. */
+    if (!strbuf_local_name(c, recv) && nt_kind(nt, recv) == NK_InstanceVariableReadNode &&
+        !(sp_streq(name, "clear") && nt_ref(nt, id, "arguments") < 0)) {
       char srefI[1024];
       int icid = strbuf_ivar_owner(c, recv);
       const char *ivn = nt_str(nt, recv, "name");
