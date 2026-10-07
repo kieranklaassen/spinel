@@ -3623,6 +3623,146 @@ static int str_chain_var_given_new(Compiler *c, int id, int lvw) {
   }
   return given;
 }
+/* Is `n` a read of the variable `base` reads (a local at the same depth)? */
+static int str_reads_var(const NodeTable *nt, int n, int base) {
+  const char *a = n >= 0 ? nt_str(nt, n, "name") : NULL, *b = nt_str(nt, base, "name");
+  return a && b && nt_kind(nt, n) == nt_kind(nt, base) && sp_streq(a, b) &&
+         (nt_kind(nt, base) != NK_LocalVariableReadNode || nt_int(nt, n, "depth", 0) == nt_int(nt, base, "depth", 0));
+}
+/* Does the subtree `n` call one of String's mutators on the variable `base`
+   reads, or on a chain from it that answers it (str_bang_chain_var)? */
+static int str_subtree_mutates_var(Compiler *c, int n, int base) {
+  const NodeTable *nt = c->nt;
+  if (n < 0 || nt_kind(nt, n) == NK_DefNode) return 0;
+  const char *nm = nt_kind(nt, n) == NK_CallNode ? nt_str(nt, n, "name") : NULL;
+  if (nm && (is_string_rebind_mutator(nm) || ty_str_typed_bang_flags(nm) || sp_streq(nm, "clear"))) {
+    int r = unwrap_parens(c, nt_ref(nt, n, "receiver"));
+    int rb = r >= 0 ? str_bang_chain_var(c, r) : -1;
+    if (str_reads_var(nt, r, base) || (rb >= 0 && str_reads_var(nt, rb, base))) return 1;
+  }
+  for (int i = 0; i < nt_num_refs(nt, n); i++)
+    if (str_subtree_mutates_var(c, nt_ref_at(nt, n, i), base)) return 1;
+  for (int i = 0; i < nt_num_arrs(nt, n); i++) {
+    int m = 0; const int *ids = nt_arr_at(nt, n, i, &m);
+    for (int j = 0; j < m; j++) if (str_subtree_mutates_var(c, ids[j], base)) return 1;
+  }
+  return 0;
+}
+/* Does the subtree `n` run nothing that can assign the variable `base`
+   reads: no write of it, no block, and no call but one of String's own
+   mutators on a String or an operator over scalars? */
+static int str_subtree_cannot_assign(Compiler *c, int n, int base) {
+  const NodeTable *nt = c->nt;
+  if (n < 0) return 1;
+  const char *ty = nt_type(nt, n), *bty = nt_type(nt, base);
+  if (!ty || !bty) return 0;
+  NodeKind k = nt_kind(nt, n);
+  if (k == NK_DefNode || k == NK_BlockNode || k == NK_LambdaNode || k == NK_YieldNode || strstr(ty, "Super")) return 0;
+  if (strstr(ty, "Write") || strstr(ty, "Target")) {
+    const char *wn = nt_str(nt, n, "name");
+    size_t pl = strlen(bty) - strlen("ReadNode");
+    if (!wn || (!strncmp(ty, bty, pl) && sp_streq(wn, nt_str(nt, base, "name")))) return 0;
+  }
+  if (k == NK_CallNode && !call_is_scalar_op(c, n)) {
+    const char *nm = nt_str(nt, n, "name");
+    int r = nt_ref(nt, n, "receiver");
+    TyKind t = r >= 0 ? comp_ntype(c, r) : TY_UNKNOWN;
+    if (!nm || (t != TY_STRING && t != TY_STRBUF) || nt_ref(nt, n, "block") >= 0 || str_link_reopened(c, n) ||
+        !(is_string_rebind_mutator(nm) || ty_str_typed_bang_flags(nm) || sp_streq(nm, "clear")))
+      return 0;
+  }
+  for (int i = 0; i < nt_num_refs(nt, n); i++)
+    if (!str_subtree_cannot_assign(c, nt_ref_at(nt, n, i), base)) return 0;
+  for (int i = 0; i < nt_num_arrs(nt, n); i++) {
+    int m = 0; const int *ids = nt_arr_at(nt, n, i, &m);
+    for (int j = 0; j < m; j++) if (!str_subtree_cannot_assign(c, ids[j], base)) return 0;
+  }
+  return 1;
+}
+/* A link reads its receiver before its arguments run, and an argument that
+   changes the chain's variable in place (`s.insert(0, "a").concat((s << "y";
+   "z"))`) changes, in CRuby, the String the link is about to change; in a
+   plain String slot it leaves the variable naming the changed text and the
+   link's temp the text before it, which the write-back then put over the
+   change. The variable such a link `id` is to be made on after its
+   arguments (emit_str_link_after_args), or -1: the variable is a plain
+   String slot, every link is String's own, an argument of `id` calls a
+   String mutator on the variable, and no argument from the first link to
+   `id` can assign it, so that it names the chain's String still. */
+static int str_link_arg_mutates_base(Compiler *c, int id, const char *name, int recv, int argc, const int *argv) {
+  const NodeTable *nt = c->nt;
+  char sref[1024];
+  if (!(ty_str_typed_bang_flags(name) || (str_self_mutator_name(name) && !sp_streq(name, "replace"))) ||
+      nt_ref(nt, id, "block") >= 0 || comp_ntype(c, id) == TY_ENUMERATOR)
+    return -1;
+  const char *op = nt_str(nt, id, "call_operator");
+  int base = str_bang_chain_var(c, recv), hit = 0;
+  if (base < 0) return -1;
+  NodeKind bk = nt_kind(nt, base);
+  if ((bk != NK_LocalVariableReadNode && bk != NK_InstanceVariableReadNode && bk != NK_GlobalVariableReadNode &&
+       bk != NK_ClassVariableReadNode) ||
+      comp_ntype(c, base) != TY_STRING || strbuf_slot_ref(c, base, sref, sizeof sref) || strbuf_local_name(c, base) ||
+      (op && sp_streq(op, "&.")) || str_link_reopened(c, id) || str_chain_reopened(c, recv, base))
+    return -1;
+  /* a local read as a String out of a boxed slot (`if x.is_a?(String)`) is
+     no slot of its own */
+  if (bk == NK_LocalVariableReadNode) {
+    LocalVar *lv = scope_local(comp_scope_of(c, base), nt_str(nt, base, "name"));
+    if (!lv || lv->type != TY_STRING) return -1;
+  }
+  for (int i = 0; i < argc; i++) {
+    TyKind at = comp_ntype(c, argv[i]);
+    /* a Regexp literal runs nothing and stays where it is */
+    if (nt_kind(nt, argv[i]) == NK_RegularExpressionNode) continue;
+    if (at != TY_STRING && at != TY_INT) return -1;
+    hit |= str_subtree_mutates_var(c, argv[i], base);
+  }
+  if (!hit) return -1;
+  for (int cur = id; cur >= 0 && cur != base; cur = unwrap_parens(c, nt_ref(nt, cur, "receiver"))) {
+    int args = nt_ref(nt, cur, "arguments"), blk = nt_ref(nt, cur, "block");
+    if (read_rebound_by(c, base, args) && !str_subtree_cannot_assign(c, args, base)) return -1;
+    if (read_rebound_by(c, base, blk)) return -1;
+  }
+  return base;
+}
+/* Such a link: the chain runs for what it does, the arguments run, and the
+   mutator is then the variable's own, on the String it names by then. A
+   chain that answered nil (a bang that changed nothing) raises as it did,
+   after the arguments. */
+static int emit_str_link_after_args(Compiler *c, int id, Buf *b, const char *name, int recv, int argc, const int *argv) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  int base = str_link_arg_mutates_base(c, id, name, recv, argc, argv);
+  if (base < 0) return 0;
+  int tr = ++g_tmp, bound = g_n_argov;
+  buf_printf(b, "({ const char *_t%d = ", tr); emit_expr(c, recv, b); buf_puts(b, "; ");
+  for (int i = 0; i < argc; i++) {
+    if (nt_kind(nt, argv[i]) == NK_RegularExpressionNode) continue;
+    int ta = ++g_tmp;
+    if (comp_ntype(c, argv[i]) == TY_INT) {
+      buf_printf(b, "sp_int _t%d = ", ta); emit_expr(c, argv[i], b); buf_puts(b, "; ");
+    }
+    else {
+      buf_printf(b, "const char *_t%d = ", ta); emit_expr(c, argv[i], b);
+      buf_printf(b, "; SP_GC_ROOT_STR(_t%d); ", ta);
+    }
+    argov_reserve();
+    view_bind(argv[i], "_t%d", ta);
+  }
+  buf_printf(b, "if (!_t%d) sp_nil_recv(\"%s\"); ", tr, name);
+  /* the chain ran on the variable and answered its String: the call is not
+     behind a nil arm of its own, whose head would go ahead of these temps */
+  int guarded = g_ivar_nil_guarded_id;
+  nt_node_set_ref(nt, id, "receiver", base);
+  g_ivar_nil_guarded_id = id;
+  int vt = view_push_repr(c, base, VR_NIL_TESTED, 1);
+  emit_expr(c, id, b);
+  view_pop(c, vt);
+  g_ivar_nil_guarded_id = guarded;
+  nt_node_set_ref(nt, id, "receiver", recv);
+  view_unbind(bound);
+  buf_puts(b, "; })");
+  return 1;
+}
 /* A value-form mutator's write-back of its result _t<tn>: to the receiver
    when it is a variable (lvw), else to the variable a bang chain receiver
    starts from, whose links the mutation reaches in CRuby (one object);
@@ -3659,6 +3799,7 @@ static int emit_str_mutator_call(Compiler *c, int id, Buf *b, const NodeTable *n
      while the statement form -- which asks strbuf_slot_ref directly, not the
      node type -- compiled. */
   if ((rt == TY_STRING || rt == TY_STRBUF) && recv >= 0) {
+    if (emit_str_link_after_args(c, id, b, name, recv, argc, argv)) { *out = 1; return 1; }
     /* a String value-form bang (ty_str_typed_bang_flags), which answers nil
        when nothing changed unless it answers self (PF_STR_SELF). The names
        are copied: the node's name is rewritten to the plain form and back
