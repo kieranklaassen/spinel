@@ -1,0 +1,1 @@
+A return, next or break out of a rescue modifier's expression pops its frame

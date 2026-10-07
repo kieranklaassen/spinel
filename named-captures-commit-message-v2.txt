@@ -1,0 +1,63 @@
+MatchData#named_captures keeps each group's text under its own name
+
+    m = ("ab" * 100 + " " + "cd" * 100).match(/(?<a>\w+) (?<b>\w+)/)
+    keep = []
+    2000.times { keep << m.named_captures }
+    p keep.map { |h| h.values.map { |v| v[0, 2] } }.uniq
+
+printed [["ab", "cd"], ["ab", "ab"]]: one of the 2,000 Hashes answered
+group a's text for b. CRuby prints [["ab", "cd"]]. With the MatchData
+as the call's own temporary, 6,000 rounds of
+s.match(re).named_captures(symbolize_names: true) crashed in a plain
+run (exit 139), compiled with gcc or with clang.
+
+Two faults in the builders of lib/spinel_rt.h.
+
+sp_md_named_captures passed the name's copy (sp_str_dup) and the
+group's text (sp_MatchData_aref) to sp_StrPolyHash_set as two arguments
+of one call. Both are fresh Strings and nothing held the one built
+first while the other was allocated, so a collection there freed it
+and its bytes were given out again. gcc builds the text first, which
+is the wrong text above. clang builds the name first, and with texts
+as short as the names a Hash then holds a text as its own name:
+[["aaaaa", "aaaaa"], ["b", "bbbbb"], ["c", "ccccc"]] for
+"aaaaa bbbbb ccccc". sp_md_named_captures_sym, behind
+named_captures(symbolize_names: true) and deconstruct_keys(nil), lost
+the text the same way when sp_sym_intern allocated a name it had not
+seen. The name is now built first, into a rooted local for the String
+keys and as a Symbol for the others, and the text goes straight into
+the store. One root a group is enough, because sp_StrPolyHash_set
+holds both across its own allocation: 1,346 instructions a call with
+one named group and 4,004 with five, against 1,362 and 4,080 with the
+text in a rooted local too.
+
+sp_md_named_captures, sp_md_named_captures_sym and
+sp_md_deconstruct_keys allocate a Hash and then each group's text, and
+nothing held the MatchData they read meanwhile. In a local or an
+instance variable it is held by its frame; the call's own temporary
+(`s.match(re)`, `re.match(s)`, and `$~`, a new MatchData at each read)
+is held by nobody, so a collection inside the call freed it and the
+next group was read out of whatever had taken its place. The readers
+in lib/sp_re.c open with SP_GC_ROOT(m); these three now do too.
+
+The two are one commit because the receiver's root alone leaves a
+wrong answer where master crashed: a loop of
+s.match(re).named_captures then runs to the end and, compiled with
+gcc, 3 of its 6,000 Hashes hold a wrong text.
+
+Cost (callgrind, instructions a call, the receiver in a local):
+named_captures 1,328 to 1,346 with one named group and 3,958 to 4,004
+with five; named_captures(symbolize_names: true) 1,051 to 1,064;
+deconstruct_keys([:w]) 1,266 to 1,285.
+
+Not here: a MatchData read out of an Array or a Hash still answers {}
+for named_captures and [] for names, and after `re.match(s)` as a
+statement of its own Regexp.last_match and $~ answer empty groups.
+
+Tests: test/matchdata_named_captures_rooted.rb and
+test/matchdata_named_captures_temp_receiver.rb (expected from CRuby).
+On master a plain run of the first prints 6 and 97 for its first two
+zeros compiled with gcc, 2 and 0 with clang, and then crashes; the
+second crashes before its first line.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
