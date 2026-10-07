@@ -1,0 +1,17 @@
+A yield whose value is read takes a block that ends in `break`
+
+    class T
+      def pair(a) = [1, yield(a)]
+    end
+    p T.new.pair(2) { |x| break 9 }    # 9
+
+did not build: "void value not ignored as it ought to be".
+
+The block is spliced where the yield stood. Its last statement leaves
+by a jump, so the statement expression had no value for the Array to
+read. `{ return v }` and `{ raise }` leave the same hole, and
+emit_block_invoke fills it with a value of the type the consumer wants
+that is never reached. A block whose last statement is `break` now
+takes that filler too.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

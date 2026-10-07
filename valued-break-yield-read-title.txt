@@ -1,0 +1,1 @@
+A yield whose value is read takes a block that ends in `break`
