@@ -272,9 +272,18 @@ int emit_ctor_yield_inline(Compiler *c, int id, int ci, Buf *b) {
      ivar's `[]`, a push into it). Unrooted across those allocations the object
      is swept out from under its own initializer and the writes land in freed
      memory -- `Set[1, 2]` came out as `Set[]` under SPINEL_GC_STRESS=1, and a
-     longer program crashed. A value-type class has nothing to root: its
-     constructor answers the value itself. */
+     longer program crashed. A value-type class answers the value itself, and
+     the temp holds it: there the Strings the body writes ahead of a later
+     allocation are rooted, as its constructor roots them. */
   if (!is_val) { emit_indent(b, g_indent + 1); buf_printf(b, "SP_GC_ROOT(_t%d);\n", st); }
+  else {
+    unsigned to_root = value_ctor_fields_to_root(c, &c->classes[ci], mi);
+    for (int i = 0; i < c->classes[ci].nivars; i++)
+      if (to_root & (1u << i)) {
+        emit_indent(b, g_indent + 1);
+        buf_printf(b, "SP_GC_ROOT(_t%d.iv_%s);\n", st, iv_c(c->classes[ci].ivars[i] + 1));
+      }
+  }
   snprintf(selfbuf, sizeof selfbuf, "_t%d", st);
   g_self = selfbuf;
   g_self_deref = is_val ? "." : "->";
@@ -22657,6 +22666,72 @@ static int ie_body_writes_ivar(const NodeTable *nt, int node) {
     for (int j = 0; j < m; j++) if (ie_body_writes_ivar(nt, ids[j])) return 1;
   }
   return 0;
+}
+
+/* The bit of the String field a write in initialize sets from `v`, held by
+   the object alone from there on. No bit for a field of another kind, or for
+   one set from a parameter that initialize never assigns: the frame's root
+   of the parameter holds that String. */
+static unsigned value_ctor_field_held(Compiler *c, ClassInfo *ci, Scope *s, int write, int v) {
+  const NodeTable *nt = c->nt;
+  const char *nm = nt_str(nt, write, "name");
+  int iv = nm ? comp_ivar_index(ci, nm) : -1;
+  if (iv < 0) return ~0u;
+  if (ci->ivar_types[iv] != TY_STRING) return 0;
+  const char *from = nt_kind(nt, v) == NK_LocalVariableReadNode ? nt_str(nt, v, "name") : NULL;
+  for (int k = 0; from && k < s->nparams; k++)
+    if (sp_streq(s->pnames[k], from) && !subtree_writes_local(c, s->body, from)) return 0;
+  return 1u << iv;
+}
+/* Which String fields of a by-value object have to be rooted while its
+   initialize runs? The object is built in a struct of the constructor's
+   own, or of the call site's where initialize takes a block, and no root
+   reaches that struct: a field initialize has written is held by nothing
+   while what follows allocates, so `@a = "x" * r; @s = "y" * r` could lose
+   @a to the collection that builds @s. The answer is a bit per instance
+   variable (a by-value class has at most eight): the fields a statement of
+   their own has written (`@a = v`, or `@a, @b = v, w`, whose values are all
+   run before any is stored) ahead of a later statement that may allocate.
+   None, then, for `@s = v` standing alone or for `@a = a; @s = s`; that
+   object is built as it was. Every String field where a statement writes
+   one in any other way. */
+unsigned value_ctor_fields_to_root(Compiler *c, ClassInfo *ci, int init) {
+  const NodeTable *nt = c->nt;
+  Scope *s = &c->scopes[init];
+  int n = 0;
+  unsigned all = 0, held = 0, need = 0;
+  for (int i = 0; i < ci->nivars; i++)
+    if (ci->ivar_types[i] == TY_STRING) all |= 1u << i;
+  if (!all || s->body < 0) return 0;
+  if (nt_kind(nt, s->body) != NK_StatementsNode) return all;
+  const int *st = nt_arr(nt, s->body, "body", &n);
+  for (int i = 0; i < n; i++) {
+    int sid = unwrap_parens(c, st[i]);
+    NodeKind k = nt_kind(nt, sid);
+    int v = (k == NK_InstanceVariableWriteNode || k == NK_MultiWriteNode) ? nt_ref(nt, sid, "value") : -1;
+    int plain = v >= 0 && !ie_body_writes_ivar(nt, v);
+    int nl = 0, ne = 0, nr = 0;
+    const int *lefts = NULL, *elems = NULL;
+    if (k == NK_MultiWriteNode) {
+      lefts = nt_arr(nt, sid, "lefts", &nl);
+      if (nt_kind(nt, v) == NK_ArrayNode) elems = nt_arr(nt, v, "elements", &ne);
+      nt_arr(nt, sid, "rights", &nr);
+      plain = plain && ne == nl && nr == 0 && nt_ref(nt, sid, "rest") < 0;
+      for (int j = 0; plain && j < nl; j++)
+        plain = nt_kind(nt, lefts[j]) == NK_InstanceVariableTargetNode &&
+                nt_kind(nt, elems[j]) != NK_SplatNode;
+    }
+    if (!plain) {
+      if (ie_body_writes_ivar(nt, sid)) return all;
+      need |= held;
+      continue;
+    }
+    if (operand_may_allocate(c, v)) need |= held;
+    if (!lefts) held |= value_ctor_field_held(c, ci, s, sid, v);
+    for (int j = 0; lefts && j < nl; j++)
+      held |= value_ctor_field_held(c, ci, s, lefts[j], elems[j]);
+  }
+  return need & all;
 }
 
 /* Does the body still make a receiverless call that one of the candidate
