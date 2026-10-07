@@ -12813,7 +12813,20 @@ static int emit_poly_index_call(Compiler *c, int id, Buf *b, const NodeTable *nt
       int tv = ++g_tmp, tval = ++g_tmp;
       buf_printf(b, "({ sp_RbVal _t%d = ", tv); emit_expr(c, recv, b);
       buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); ", tv);
-      if (nil_rhs) buf_printf(b, "sp_RbVal _t%d = sp_box_nil();", tval);
+      if (nil_rhs) {
+        /* as the statement form: a value of nil type that is no literal
+           and that this place can emit runs (boxed_writer_nil_value_runs),
+           what it hoists with it, after the receiver */
+        if (!boxed_writer_nil_value_runs(nt, argv[0])) buf_printf(b, "sp_RbVal _t%d = sp_box_nil();", tval);
+        else {
+          Buf pre; memset(&pre, 0, sizeof pre);
+          Buf val; memset(&val, 0, sizeof val);
+          { Buf *sv = g_pre; g_pre = &pre; emit_expr(c, argv[0], &val); g_pre = sv; }
+          buf_printf(b, "\n%ssp_RbVal _t%d = ((void)(%s), sp_box_nil());", pre.p ? pre.p : "", tval,
+                     val.p && val.p[0] ? val.p : "0");
+          free(pre.p); free(val.p);
+        }
+      }
       else { emit_ctype(c, at, b); buf_printf(b, " _t%d = ", tval); emit_one_arg(c, argv[0], 0, b); buf_puts(b, ";"); }
       buf_printf(b, " switch (_t%d.tag == SP_TAG_OBJ ? _t%d.cls_id : 0x7fffffff) {", tv, tv);
       char src[32]; snprintf(src, sizeof src, "_t%d", tval);
