@@ -1,0 +1,39 @@
+A writer assignment inside another's receiver answers its right-hand side
+
+    class Job
+      attr_reader :state, :owner
+      def initialize = @state = :new
+      def state=(s)
+        @state = s
+        @log = "state #{s}"
+      end
+      def owner=(o)
+        @owner = o
+        @log = "owner #{o}"
+      end
+    end
+    def claim(job)
+      tag = yield
+      puts "claimed for #{tag}"
+      job
+    end
+    a = Job.new
+    b = Job.new
+    claim(a) { b.owner = "kai" }.state = :taken
+
+printed "claimed for owner kai"; CRuby prints "claimed for kai".
+
+`obj.x = v` answers v, whatever a hand-written `def x=` returns. The
+arm that sees to it emits the call itself with g_setter_value_inner
+raised, so that the call is not wrapped a second time. The counter
+switched the arm off for every writer assignment emitted meanwhile, and
+those are the ones written in a block or an argument of the receiver's
+call: they answered what the writer returns, or did not build where it
+returns nothing a slot can hold.
+
+The emission now also keeps the node it is for (g_setter_value_node).
+A writer assignment written inside that node is another assignment and
+keeps its arm. The counter stays: the emission may go through a copy of
+the node, and a copy is not inside it.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

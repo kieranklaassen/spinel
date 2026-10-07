@@ -1,0 +1,1 @@
+A hand-written writer's receiver runs before its value

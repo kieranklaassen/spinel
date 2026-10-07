@@ -1,0 +1,42 @@
+A hand-written writer's receiver runs before its value
+
+    class Account
+      attr_reader :balance
+      def balance=(b)
+        @balance = b
+      end
+    end
+    def account(a)
+      puts "account"
+      a
+    end
+    def amount
+      puts "amount"
+      100
+    end
+    a = Account.new
+    account(a).balance = amount
+
+printed "amount" and then "account"; CRuby runs the receiver first.
+
+The value of `obj.x = v` is its right-hand side, not what a hand-written
+`def x=` returns, so the call binds a value that is no literal or
+variable to a temporary and reads it back after the writer. That
+temporary is declared ahead of everything the call's own emission
+hoists, and the receiver was among those.
+
+A receiver that is more than a read (subtree_is_pure_read) is now held
+in a temporary of its own ahead of the value's, and the call reads it
+there. It is rooted while a value that may allocate runs: a receiver
+nothing else holds would be collected, and the writer would run on the
+freed object. A receiver that is a plain read keeps its C, and so does
+`x&.v = value`.
+
+Not cured: a local receiver that the value assigns
+(`c.v = (c = b; val)` stores into b), and a generated attribute writer
+(`recv(a).v = val + 1` runs val first): its store is one C assignment,
+whose sides the C compiler orders.
+
+The test is in GC_STRESS_TESTS.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

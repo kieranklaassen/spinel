@@ -1,0 +1,43 @@
+An attribute writer statement holds its receiver while its value runs
+
+`recv.x = value` as a statement, through a generated writer, did not
+hold its receiver while the value ran.
+
+A receiver nothing else holds was collected by a value that allocates,
+and the store's write barrier recorded the freed object:
+
+    class Account
+      attr_accessor :note
+      def initialize(name)
+        @name = name
+        @tags = [name]
+      end
+    end
+    def fresh(name) = Account.new(name + "!")
+    fresh("f").note = churn.last
+
+right at SPINEL_GC_STRESS=0, a fault on the GC mark path at 2.
+
+And the value could run before the receiver:
+
+    account(a).balance = amount + 1
+
+printed "amount" and then "account". Where the slot needs no barrier
+the store is one C assignment, `(recv)->iv_x = value`, whose two sides
+the C compiler orders; and what a value hoists (a block's loop) ran
+ahead of the whole statement.
+
+Where neither the receiver nor the value is a plain read
+(subtree_is_pure_read; a global receiver counts as one), the receiver
+now goes into a temporary declared ahead of what the value hoists,
+rooted (SP_GC_ROOT) while a value that may allocate runs. A class
+whose freeze is observed keeps its guard on that temporary. Every
+other store keeps its C.
+
+Not cured: the value form, `x = (recv.v = value)`, whose store takes
+its write barrier before the value runs; and a receiver that is a plain
+read and that the value changes (`c.v = (c = b; val)` stores into b).
+
+The test is in GC_STRESS_TESTS.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
