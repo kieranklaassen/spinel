@@ -1,0 +1,21 @@
+"abcdefghiXklm"
+"abcdefghijkYYm"
+"abcdefghijkm"
+"Abcdefghijkm"
+[9, "abcdefgh<9>jklm"]
+[10, "abcdefghi<10>klm"]
+[11, "abcdefghij<11>lm"]
+[12, "abcdefghijk<12>m"]
+[13, IndexError, "regexp group 13 not matched"]
+[14, IndexError, "index 14 out of regexp"]
+[-1, IndexError, "regexp group 13 not matched"]
+[-2, "abcdefghijk<-2>m"]
+[-4, "abcdefghi<-4>klm"]
+[-13, "<-13>bcdefghijklm"]
+[-14, IndexError, "index -14 out of regexp"]
+"äöüÄÖÜßéèà=x"
+"äöüÄÖÜßéèa=x"
+[10, FrozenError]
+[12, FrozenError]
+[13, IndexError]
+[14, IndexError]

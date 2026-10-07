@@ -14381,11 +14381,11 @@ static void emit_re_group_span(Buf *b, int tn, int tests, int fz, int small) {
   if (!small) {
     /* any number but a literal from 0 to 9: a negative one counts back from
        the last group, as CRuby counts it, and names the group in the
-       "not matched" message by the number it came to */
+       "not matched" message by the number it came to. The tenth group and
+       beyond are replaced by their span like the rest, as far as spans are
+       kept (the fifteenth) */
     buf_printf(b, " sp_int _g = _t%d < 0 ? _t%d + sp_re_last_ncap : _t%d;", tn, tn, tn);
-    buf_printf(b, " if (_g < 0 || _g > 9 || (_t%d < 0 && _g == 0)", tn);
-    if (tests) buf_puts(b, " || _g >= sp_re_last_ncap");
-    buf_puts(b, ")");
+    buf_printf(b, " if (_g < 0 || _g > 15 || (_t%d < 0 && _g == 0) || _g >= sp_re_last_ncap)", tn);
     if (fz)
       buf_printf(b, " { if (_g > 0 && _g < sp_re_last_ncap && (_g > 15 || sp_re_caps[2 * _g] >= 0))"
                     " sp_str_check_mutable(_t%d);", fz);
