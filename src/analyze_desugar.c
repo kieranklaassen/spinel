@@ -5721,12 +5721,15 @@ static int splat_feeds_user_method(Compiler *c, int sp) {
     const char *nm = nt_str(nt, id, "name");
     if (k == NK_SuperNode) return 1;
     if (nm && sp_streq(nm, "new")) {
-      /* a constructor, whatever else the program names `new`, unless the
-         class has a class method `new` of its own */
+      /* a constructor, whatever else the program names `new`: of a class
+         whose `initialize` or class method `new` the program wrote, of a
+         Struct or of a Data */
       int r = nt_ref(nt, id, "receiver");
       const char *rn = r >= 0 && nt_kind(nt, r) == NK_ConstantReadNode ? nt_str(nt, r, "name") : NULL;
       int ci = rn ? comp_class_index(c, rn) : -1;
-      return ci >= 0 && comp_cmethod_in_chain(c, ci, "new", NULL) >= 0;
+      return ci >= 0 && (comp_cmethod_in_chain(c, ci, "new", NULL) >= 0 ||
+                         comp_method_in_chain(c, ci, "initialize", NULL) >= 0 ||
+                         c->classes[ci].is_struct || c->classes[ci].is_data);
     }
     for (int si = 0; nm && si < c->nscopes; si++)
       if (c->scopes[si].name && sp_streq(c->scopes[si].name, nm)) return 1;
