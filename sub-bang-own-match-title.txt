@@ -1,0 +1,1 @@
+sub! and gsub! answer by their own match, not by an argument's

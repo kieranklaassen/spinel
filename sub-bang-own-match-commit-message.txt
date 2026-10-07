@@ -1,0 +1,34 @@
+sub! and gsub! answer by their own match, not by an argument's
+
+    y = "zz".dup
+    z = "ab".dup
+    p y.sub!("q", z.sub("a", "b"))
+
+printed "zz" where CRuby prints nil: nothing in y matches. And
+
+    x = "ab".dup
+    p x.gsub!("a") { y.sub!("q", "-") ? "b" : "a" }
+
+printed nil where CRuby prints "ab": the block put "a" for "a".
+
+sub! and gsub! answer nil when no substitution was made. The text
+cannot say that, since a match may write the same bytes, so they read
+the runtime's flag sp_re_sub_matched. It is cleared ahead of the
+statement, before the call's arguments run, and a block form's loop
+sets it before the block runs: a sub or gsub in an argument, in the
+pattern or in the block left its own answer there.
+
+The call enters the runtime through a wrapper that clears the flag
+after the arguments have run (sp_str_sub_own and its kin, static
+inline in spinel_rt.h), and a block form answers from a C local of
+its loop, which the block cannot reach. A plain sub or gsub does not
+come this way: its C is what it was, and the runtime library is
+unchanged byte for byte.
+
+Not here: with a Hash for the replacement
+(`s.sub!("a", { "a" => "a" })`) a match that writes the same text
+answers nil, as before; those runtime forms do not set the flag.
+
+Test: test/sub_bang_answers_by_its_own_match.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
