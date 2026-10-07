@@ -1237,6 +1237,15 @@ int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
             buf_puts(b, "; })");
             return 1;
           }
+          /* a value of nil type that is no literal (a method that answers
+             nil) is run once by the call and has nothing to read back: a
+             temporary for it would be declared void */
+          if (at == TY_NIL) {
+            buf_puts(b, "({ (void)(");
+            g_setter_value_inner++; emit_call_body(c, id, b); g_setter_value_inner--;
+            buf_puts(b, "); 0; })");
+            return 1;
+          }
           if (at != TY_UNKNOWN && at != TY_VOID) {
             Scope *esc = comp_scope_of(c, id);
             int saved0_arg = argv[0];
