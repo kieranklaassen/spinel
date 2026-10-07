@@ -4579,6 +4579,18 @@ void emit_recv_rooted(Compiler *c, int recv, int t, const char *rootm, Buf *b) {
   else buf_printf(b, "; %s(_t%d); ", rootm, t);
 }
 
+/* emit_recv_rooted for an arm that takes no argument's code between the
+   receiver and its own allocation: only a receiver that runs code needs the
+   root. A local and an instance variable are held already, and so is a
+   literal, whatever its elements run: it is built into a slot of the frame.
+   These keep the C they had. */
+void emit_fresh_recv_rooted(Compiler *c, int recv, int t, const char *rootm, Buf *b) {
+  NodeKind k = nt_kind(c->nt, unwrap_parens(c, recv));
+  if (k != NK_ArrayNode && k != NK_HashNode && subtree_has_side_effect(c, recv))
+    emit_recv_rooted(c, recv, t, rootm, b);
+  else { emit_expr(c, recv, b); buf_puts(b, "; "); }
+}
+
 /* A compound literal is not a GC root. Evaluate and root each operand
    before the next one's setup or value can allocate; only the held values
    go into the array passed to the builtin. The caller owns the scope. */
