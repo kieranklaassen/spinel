@@ -1904,6 +1904,13 @@ void emit_boxed(Compiler *c, int node, Buf *b) {
      ivar that also holds nil) is boxed as its handle, which a later `<<`
      on the slot's box appends to in place (share_lift_poly_ivar_stores) */
   int lift = repr_share_rule(c) && node >= 0 && c->poly_strbuf_lift[node] && comp_ntype(c, node) == TY_STRING;
+  /* A value marked for the shared handle whose kind is boxed: the mark is
+     made on a String, and the node answers poly once its value widens. The
+     String among what it holds becomes the handle the mark asked for, as a
+     marked String does above (emit_boxed_strbuf); any other value passes as
+     it is. Stored bare, the String of `@xs[0] = @xs[0].succ` was one no
+     later change reached. A read marked to lift its variable has done it. */
+  if (node >= 0 && c->strbuf_box[node] && !c->poly_strbuf_lift[node] && comp_ntype(c, node) == TY_POLY) lift = 1;
   if (lift) buf_puts(b, "sp_poly_strbuf_lift(");
   rc_depth++;
   emit_boxed_impl(c, node, b);
