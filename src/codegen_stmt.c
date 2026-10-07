@@ -5231,22 +5231,37 @@ static const char *pm_target_name(const NodeTable *nt, int pat) {
    the shared String handle (--share-strings: the share facts join it with
    the subject) takes the subject's own handle when the subject is a
    variable that holds it, so a change through the local is the subject's;
-   any other String subject is a new one, which a fresh handle wraps. */
-static void emit_pattern_bind_handle(Compiler *c, int subj, int t, Buf *b) {
+   any other String subject is a new one, which a fresh handle wraps. A
+   constant and a class variable hold the handle in their slot as well.
+   Their slot is read where the arm binds, so it is taken only where no
+   arm before this one (`arm` of the case `id`) runs code in its pattern
+   or its guard: `in String => t if (@@c = +"other"; false)` assigns the
+   class variable after the case read its subject. */
+static int pm_earlier_arm_runs_code(Compiler *c, int id, int arm) {
+  int cn = 0;
+  const int *conds = nt_arr(c->nt, id, "conditions", &cn);
+  for (int w = 0; w < arm && w < cn; w++)
+    if (subtree_has_side_effect(c, nt_ref(c->nt, conds[w], "pattern"))) return 1;
+  return 0;
+}
+static void emit_pattern_bind_handle(Compiler *c, int id, int arm, int subj, int t, Buf *b) {
   NodeKind sk = subj >= 0 ? nt_kind(c->nt, subj) : NK_NONE;
   int var = sk == NK_LocalVariableReadNode || sk == NK_InstanceVariableReadNode ||
-            sk == NK_GlobalVariableReadNode;
+            sk == NK_GlobalVariableReadNode ||
+            (repr_static_read_kind(sk) && !pm_earlier_arm_runs_code(c, id, arm));
   if (var && emit_handle_var_ref(c, subj, b)) return;
   buf_printf(b, "sp_String_new_shared(_t%d)", t);
 }
 
-static void emit_pattern_bind(Compiler *c, int id, int subj, const char *lnm, TyKind pt, int t, int indent, Buf *b) {
+static void emit_pattern_bind(Compiler *c, int id, int arm, int subj, const char *lnm, TyKind pt, int t, int indent,
+                              Buf *b) {
   if (!lnm) return;
   emit_indent(b, indent);
   buf_printf(b, "lv_%s = ", rename_local(lnm));
   LocalVar *plv = scope_local(comp_scope_of(c, id), lnm);
   if (plv && plv->type == TY_POLY && pt != TY_POLY && pt != TY_UNKNOWN) emit_boxed_tmp(c, pt, t, b);
-  else if (plv && pt == TY_STRING && repr_of_slot(c, plv).handle) emit_pattern_bind_handle(c, subj, t, b);
+  else if (plv && pt == TY_STRING && repr_of_slot(c, plv).handle)
+    emit_pattern_bind_handle(c, id, arm, subj, t, b);
   else buf_printf(b, "_t%d", t);
   buf_puts(b, ";\n");
 }
@@ -5735,7 +5750,7 @@ void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail, int valu
 
     if (sp_streq(pty, "LocalVariableTargetNode")) {
       const char *lnm = nt_str(nt, pat, "name");
-      emit_pattern_bind(c, id, pred, lnm, pt, t, body_indent, b);
+      emit_pattern_bind(c, id, w, pred, lnm, pt, t, body_indent, b);
     }
     else if (sp_streq(pty, "IfNode")) {
       guard = nt_ref(nt, pat, "predicate");
@@ -5747,7 +5762,7 @@ void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail, int valu
           const char *bty = nt_type(nt, body[k]);
           if (bty && sp_streq(bty, "LocalVariableTargetNode")) {
             const char *lnm = nt_str(nt, body[k], "name");
-            emit_pattern_bind(c, id, pred, lnm, pt, t, body_indent, b);
+            emit_pattern_bind(c, id, w, pred, lnm, pt, t, body_indent, b);
           }
         }
       }
@@ -5757,7 +5772,7 @@ void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail, int valu
       if (tgt >= 0 && nt_type(nt, tgt) &&
           sp_streq(nt_type(nt, tgt), "LocalVariableTargetNode")) {
         const char *lnm = nt_str(nt, tgt, "name");
-        emit_pattern_bind(c, id, pred, lnm, pt, t, body_indent, b);
+        emit_pattern_bind(c, id, w, pred, lnm, pt, t, body_indent, b);
       }
       int val = nt_ref(nt, pat, "value");
       if (val >= 0 && nt_type(nt, val) && sp_streq(nt_type(nt, val), "ArrayPatternNode"))
