@@ -911,6 +911,121 @@ static int inline_target_same(const InlineTarget *a, const InlineTarget *b) {
          a->cm_self_id == b->cm_self_id && a->implicit_self == b->implicit_self;
 }
 
+/* Does this subtree read the value of a `yield`: one that is not a statement
+   on its own? The last statement of a list is read when the list's value is
+   (`tail_read`); a nested list is taken as read. */
+static int subtree_reads_yield(const NodeTable *nt, int node, int tail_read) {
+  if (node < 0) return 0;
+  NodeKind k = nt_kind(nt, node);
+  if (k == NK_YieldNode) return 1;
+  if (k == NK_DefNode || k == NK_ClassNode || k == NK_ModuleNode) return 0;
+  if (k == NK_StatementsNode) {
+    int n = 0; const int *bb = nt_arr(nt, node, "body", &n);
+    for (int i = 0; i < n; i++) {
+      if (nt_kind(nt, bb[i]) == NK_YieldNode && (i < n - 1 || !tail_read)) {
+        if (subtree_reads_yield(nt, nt_ref(nt, bb[i], "arguments"), 1)) return 1;
+        continue;
+      }
+      if (subtree_reads_yield(nt, bb[i], 1)) return 1;
+    }
+    return 0;
+  }
+  int nr = nt_num_refs(nt, node);
+  for (int i = 0; i < nr; i++) if (subtree_reads_yield(nt, nt_ref_at(nt, node, i), 1)) return 1;
+  int na = nt_num_arrs(nt, node);
+  for (int i = 0; i < na; i++) {
+    int n = 0; const int *el = nt_arr_at(nt, node, i, &n);
+    for (int j = 0; j < n; j++) if (subtree_reads_yield(nt, el[j], 1)) return 1;
+  }
+  return 0;
+}
+
+static int block_tail_needs_value_form(Compiler *c, int id);
+
+/* Has this last statement of a block a C value where the block is spliced as
+   one (emit_block_invoke)? The kinds whose statement form is an expression,
+   those the splice emits as one, and an iterator whose receiver it puts
+   back. A plain call has no such test: it has a value unless its statement
+   form is one of the void ones named here. */
+static int tail_has_value(Compiler *c, int tail) {
+  static const char *const void_calls[] = { "srand", "rand", "concat", "insert", "replace", "[]=", NULL };
+  const NodeTable *nt = c->nt;
+  tail = unwrap_parens(c, tail);
+  switch (nt_kind(nt, tail)) {
+  case NK_IntegerNode: case NK_FloatNode: case NK_StringNode: case NK_InterpolatedStringNode:
+  case NK_SymbolNode: case NK_TrueNode: case NK_FalseNode: case NK_NilNode: case NK_SelfNode:
+  case NK_ArrayNode: case NK_HashNode:
+  case NK_LocalVariableReadNode: case NK_InstanceVariableReadNode: case NK_GlobalVariableReadNode:
+  case NK_ConstantReadNode:
+  case NK_LocalVariableWriteNode: case NK_InstanceVariableWriteNode: case NK_GlobalVariableWriteNode:
+  case NK_LocalVariableOperatorWriteNode: case NK_InstanceVariableOperatorWriteNode:
+  case NK_GlobalVariableOperatorWriteNode:
+  case NK_AndNode: case NK_OrNode:
+  case NK_IfNode: case NK_UnlessNode: case NK_CaseNode: case NK_CaseMatchNode: case NK_BeginNode:
+  case NK_YieldNode:
+    return 1;
+  case NK_CallNode: {
+    if (block_tail_needs_value_form(c, tail) || tail_iter_receiver(c, tail) >= 0) return 1;
+    if (nt_ref(nt, tail, "block") >= 0) return 0;
+    const char *nm = nt_str(nt, tail, "name");
+    for (int i = 0; nm && void_calls[i]; i++) if (sp_streq(nm, void_calls[i])) return 0;
+    return nm != NULL;
+  }
+  default:
+    return 0;
+  }
+}
+
+/* May `inner(...)` hand this literal block on to the callee `mi`? Not a block
+   that can `break`, and, where the callee reads the value of a yield, only
+   one whose last statement has a C value: spliced as a value no other
+   builds, with the dots or with `inner(&)`, and a program whose block leaves
+   the method before the forward is reached runs right without it. */
+static int fwd_block_splices(Compiler *c, int blk, int mi, int as_expr) {
+  const NodeTable *nt = c->nt;
+  int body = nt_ref(nt, blk, "body");
+  if (block_has_top_break(c, body)) return 0;
+  if (!subtree_reads_yield(nt, nt_ref(nt, c->scopes[mi].def_node, "body"), as_expr)) return 1;
+  int n = 0; const int *bb = body >= 0 ? nt_arr(nt, body, "body", &n) : NULL;
+  return bb && n > 0 && tail_has_value(c, bb[n - 1]);
+}
+
+/* May the proc form of a method named `name` forward its proc to `mi`? Only
+   where every literal block the program hands a method of that name would
+   splice into `mi` too: the proc form serves every site, and a program whose
+   sites are left as they were is not built by it into their LocalJumpError. */
+static int fwd_sites_splice(Compiler *c, const char *name, int mi) {
+  const NodeTable *nt = c->nt;
+  size_t nl = name ? strcspn(name, "#") : 0;
+  if (nl == 0 || (nl == 10 && strncmp(name, "initialize", nl) == 0)) return 0;
+  for (int id = 0; id < nt->count; id++) {
+    if (nt_kind(nt, id) != NK_CallNode) continue;
+    int blk = nt_ref(nt, id, "block"), recv = nt_ref(nt, id, "receiver");
+    const char *nm = nt_str(nt, id, "name");
+    if (blk < 0 || nt_kind(nt, blk) != NK_BlockNode || !nm || strlen(nm) != nl || strncmp(nm, name, nl) != 0)
+      continue;
+    TyKind rt = recv >= 0 ? comp_ntype(c, recv) : TY_UNKNOWN;
+    if (!ty_is_object(rt) && rt != TY_POLY && rt != TY_UNKNOWN) continue;   /* a builtin's own */
+    if (!fwd_block_splices(c, blk, mi, 1)) return 0;
+  }
+  return 1;
+}
+
+/* Would `inner(...)` fill a parameter the callee has a default for? The kept
+   `...` binds by position, so a slot the site left empty carries nil where
+   the default belongs. */
+static int fwd_fills_default(Compiler *c, int fwd_args, const Scope *m) {
+  Scope *encl = comp_scope_of(c, fwd_args);
+  if (!encl) return 0;
+  int fwd_base = 0;
+  while (fwd_base < encl->nparams &&
+         (!encl->pnames[fwd_base] || strncmp(encl->pnames[fwd_base], "__fwd_", 6) != 0)) fwd_base++;
+  if (fwd_base >= encl->nparams) fwd_base = 0;
+  for (int i = 0; i < m->nparams && fwd_base + i < encl->nparams; i++)
+    if (m->pdefault[i] >= 0) return 1;
+  return 0;
+}
+
 int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
   if (g_plan_check) ucall_emitted(id);
   const NodeTable *nt = c->nt;
@@ -1046,6 +1161,25 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
     }
     /* a proc value drives the yields; the site's own block is not this one */
     block = (fwd_yield_proc && !fwd_encl) ? -1 : g_block_id;
+  }
+  /* `inner(...)` in a method that kept its `...` (one whose `super(...)` or
+     `new(...)` reaches a method that yields) hands on the block this site
+     runs under, as `inner(&)` does and as the `super(...)` beside it does */
+  else if (block < 0) {
+    int fa = nt_ref(nt, id, "arguments"), fac = 0;
+    const int *fav = fa >= 0 ? nt_arr(nt, fa, "arguments", &fac) : NULL;
+    Scope *fe = fac >= 1 && fav && nt_kind(nt, fav[fac - 1]) == NK_ForwardingArgumentsNode
+                    ? comp_scope_of(c, fav[fac - 1]) : NULL;
+    if (fe && !fwd_fills_default(c, fav[fac - 1], m)) {
+      if (g_block_id >= 0) {
+        if (fwd_block_splices(c, g_block_id, mi, as_expr)) block = g_block_id;
+      }
+      else if (g_yield_proc_ref && (!fe->is_proc_form || fwd_sites_splice(c, fe->name, mi))) {
+        snprintf(yprocbuf, sizeof yprocbuf, "%s", g_yield_proc_ref);
+        fwd_yield_proc = yprocbuf;
+        if (g_yield_proc_expr_ref == g_yield_proc_ref) fwd_value = g_yield_proc_expr;
+      }
+    }
   }
   if (g_nren + m->nlocals >= MAX_RENAME) return 0;
   /* Pre-check: every body local must have an emittable type. Bail BEFORE
