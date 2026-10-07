@@ -1570,6 +1570,19 @@ int emit_call_safe_nav_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
         g_pre = sv_pre2;
         if (!preb2.p || !preb2.p[0])
           buf_printf(b, "(%s ? %s : (%s))", nilt, nilv, vbs.p ? vbs.p : "");
+        else if (!ty_is_object(ret2) && (!c_type_name(ret2) || sp_streq(c_type_name(ret2), "void"))) {
+          /* a method that answers nothing has no value for a slot to hold
+             (`void _snr = 0;` is no C): the guarded call is the statement,
+             and what reads the call reads no value, as it does unhoisted */
+          emit_indent(g_pre, g_indent);
+          buf_printf(g_pre, "if (!(%s)) {\n", nilt);
+          buf_puts(g_pre, preb2.p);
+          emit_indent(g_pre, g_indent);
+          buf_printf(g_pre, "  %s;\n", vbs.p ? vbs.p : "");
+          emit_indent(g_pre, g_indent);
+          buf_puts(g_pre, "}\n");
+          buf_puts(b, "((void)0)");
+        }
         else {
           int rsv = ++g_tmp;
           emit_indent(g_pre, g_indent);
