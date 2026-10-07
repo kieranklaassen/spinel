@@ -3133,11 +3133,11 @@ int emit_lazy_pipeline_expr(Compiler *c, int id, Buf *b) {
       else { Buf ub; memset(&ub, 0, sizeof ub); emit_unbox_text(c, dwt, vbuf, &ub); buf_puts(g_pre, ub.p ? ub.p : vbuf); free(ub.p); }
       buf_puts(g_pre, ";\n");
       int dwb = nt_ref(nt, blk, "body");
-      int dwn = 0; const int *dwv = dwb >= 0 ? nt_arr(nt, dwb, "body", &dwn) : NULL;
-      for (int k = 0; k < dwn - 1; k++) emit_stmt(c, dwv[k], g_pre, g_indent + 2);
+      int dwn = 0; if (dwb >= 0) nt_arr(nt, dwb, "body", &dwn);
+      IterStep dst; emit_iter_step_open(c, blk, 1, g_indent + 2, &dst);
       if (dwn >= 1) {
         Buf cb; memset(&cb, 0, sizeof cb);
-        int svind = g_indent; g_indent += 2; emit_cond(c, dwv[dwn - 1], &cb); g_indent = svind;
+        int svind = g_indent; g_indent += 2; emit_iter_step_cond(c, &dst, 0, &cb); g_indent = svind;
         emit_indent(g_pre, g_indent + 2);
         buf_printf(g_pre, "if (%s) continue;\n", cb.p ? cb.p : "0");
         free(cb.p);
@@ -3170,19 +3170,22 @@ int emit_lazy_pipeline_expr(Compiler *c, int id, Buf *b) {
       }
     }
     int bbody = nt_ref(nt, blk, "body");
-    int bn = 0; const int *bb = bbody >= 0 ? nt_arr(nt, bbody, "body", &bn) : NULL;
-    for (int k = 0; k < bn - 1; k++) emit_stmt(c, bb[k], g_pre, g_indent + 1);
+    int bn = 0; if (bbody >= 0) nt_arr(nt, bbody, "body", &bn);
+    /* the stage's answer is the block's, a `next v` included: read as the
+       leading statements and then the tail, the next was the pipeline's own
+       `continue` and dropped the element (emit_iter_step_open) */
+    IterStep st; emit_iter_step_open(c, blk, 1, g_indent + 1, &st);
     if (bn < 1) continue;
     if (ops[oi].kind == OP_MAP) {
       Buf eb; memset(&eb, 0, sizeof eb);
-      int svind = g_indent; g_indent += 1; emit_boxed(c, bb[bn - 1], &eb); g_indent = svind;
+      int svind = g_indent; g_indent += 1; emit_iter_step_tail(c, &st, &eb); g_indent = svind;
       emit_indent(g_pre, g_indent + 1);
       buf_printf(g_pre, "%s = %s;\n", vbuf, eb.p ? eb.p : "sp_box_nil()"); free(eb.p);
     }
     else if (ops[oi].kind == OP_FILTERMAP) {
       /* map, then drop a falsy result */
       Buf eb; memset(&eb, 0, sizeof eb);
-      int svind = g_indent; g_indent += 1; emit_boxed(c, bb[bn - 1], &eb); g_indent = svind;
+      int svind = g_indent; g_indent += 1; emit_iter_step_tail(c, &st, &eb); g_indent = svind;
       emit_indent(g_pre, g_indent + 1);
       buf_printf(g_pre, "%s = %s;\n", vbuf, eb.p ? eb.p : "sp_box_nil()"); free(eb.p);
       emit_indent(g_pre, g_indent + 1);
@@ -3193,7 +3196,7 @@ int emit_lazy_pipeline_expr(Compiler *c, int id, Buf *b) {
          result pushes as itself), honoring the terminal count, then skip the
          shared tail push. Only ever the last-applied stage (oi == 0). */
       Buf eb; memset(&eb, 0, sizeof eb);
-      int svind = g_indent; g_indent += 1; emit_boxed(c, bb[bn - 1], &eb); g_indent = svind;
+      int svind = g_indent; g_indent += 1; emit_iter_step_tail(c, &st, &eb); g_indent = svind;
       int tfm = ++g_tmp, tfj = ++g_tmp;
       emit_indent(g_pre, g_indent + 1);
       buf_printf(g_pre, "sp_RbVal _t%d = %s; SP_GC_ROOT_RBVAL(_t%d);\n", tfm, eb.p ? eb.p : "sp_box_nil()", tfm); free(eb.p);
@@ -3213,7 +3216,7 @@ int emit_lazy_pipeline_expr(Compiler *c, int id, Buf *b) {
     }
     else {
       Buf cb; memset(&cb, 0, sizeof cb);
-      int svind = g_indent; g_indent += 1; emit_cond(c, bb[bn - 1], &cb); g_indent = svind;
+      int svind = g_indent; g_indent += 1; emit_iter_step_cond(c, &st, 0, &cb); g_indent = svind;
       emit_indent(g_pre, g_indent + 1);
       if (ops[oi].kind == OP_TAKEWHILE)
         buf_printf(g_pre, "if (!(%s)) break;\n", cb.p ? cb.p : "0");
