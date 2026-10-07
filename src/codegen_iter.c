@@ -609,16 +609,17 @@ static int site_keys_written(const NodeTable *nt, const int *argv, int argc, int
   return 1;
 }
 
-/* The mark an expansion of a method that keeps its `...` carries when every
-   keyword it was handed is one of its parameters: bound at such a call, or
-   from a forwarder that has the mark and the same parameters. It is read
+/* The marks an expansion of a method that keeps its `...` carries: `...`
+   when every keyword it was handed is one of its parameters, `*` when every
+   positional is too. It was bound at a call that writes them out, or from a
+   forwarder that has the mark and the same parameters. A mark is read
    through the expansion's name for its first parameter. */
-static int fwd_keys_known(const Scope *fwd) {
+static int fwd_has_mark(const Scope *fwd, const char *mark) {
   const char *p0 = fwd->nparams > 0 ? fwd->pnames[0] : NULL, *rn = p0 ? rename_local(p0) : "";
   size_t nl = p0 ? strlen(p0) : 0, pl = strlen(rn);
   char key[128];
   if (pl < nl + 4 || rn[0] != '_' || rn[1] != 'y' || pl - nl + 4 > sizeof key) return 0;
-  snprintf(key, sizeof key, "%.*s...", (int)(pl - nl), rn);
+  snprintf(key, sizeof key, "%.*s%s", (int)(pl - nl), rn, mark);
   return nameset_has(&g_fwd_left_out, key);
 }
 static int fwd_hands_keys_on(Compiler *c, const Scope *m, const Scope *fwd) {
@@ -651,6 +652,38 @@ static int emit_fwd_missing_kwarg_raise(Compiler *c, Scope *m, const Scope *fwd)
   if (!n) return 0;
   char full[600]; snprintf(full, sizeof full, "missing keyword%s: %s", n > 1 ? "s" : "", msg);
   emit_argument_error(full);
+  return 1;
+}
+
+/* The parameters `def f(a, ...)` names itself, ahead of its `...`. */
+static int fwd_named_params(Compiler *c, const Scope *fwd) {
+  int pn = nt_ref(c->nt, fwd->def_node, "parameters"), nreq = 0, nopt = 0;
+  nt_arr(c->nt, pn, "requireds", &nreq); nt_arr(c->nt, pn, "optionals", &nopt);
+  return nreq + nopt;
+}
+
+/* A call that writes out each positional argument it passes: no `*`. */
+static int site_args_written(const NodeTable *nt, const int *argv, int argc) {
+  for (int i = 0; i < argc; i++)
+    if (nt_kind(nt, argv[i]) == NK_SplatNode) return 0;
+  return 1;
+}
+
+/* The count error, in CRuby's words, where the __fwd_ slots a site filled
+   are not as many as `m` takes. Returns 1 when it raised. A key into a
+   method that declares no keyword is one more positional, a Hash, which no
+   slot holds: not judged. */
+static int emit_fwd_count_raise(Compiler *c, Scope *m, const Scope *fwd) {
+  int given = 0, keys = 0, kw = m->kwrest_idx >= 0, lead = fwd_named_params(c, fwd);
+  for (int i = 0; i < m->nparams && !kw; i++) kw = callee_param_is_declared_kwarg(c, m, m->pnames[i]);
+  for (int i = 0; i < fwd->nparams; i++) {
+    if (!fwd->pnames[i] || nameset_has(&g_fwd_left_out, rename_local(fwd->pnames[i]))) continue;
+    if (strncmp(fwd->pnames[i], "__fwd_", 6) == 0) given++;
+    else if (i >= lead) keys++;
+  }
+  char msg[512];
+  if ((keys && !kw) || !arity_count_error(c, m, given, msg, sizeof msg)) return 0;
+  emit_argument_error(msg);
   return 1;
 }
 
@@ -697,10 +730,18 @@ void emit_inline_bind_params(Compiler *c, Scope *m, int args, const int *argv, i
      was simply dropped, and a missing one bound its zero value: `y1 { }` on
      `def y1(x)` ran with x padded, `y(1, 2) { }` on `def y(x, k: 1)`
      dropped the 2. A `...` forward carries the forwarder's own params. */
-  int keys_known = fwd_encl ? fwd_keys_known(fwd_encl) : site_keys_written(nt, argv, argc, kwh);
+  int keys_known = fwd_encl ? fwd_has_mark(fwd_encl, "...") : site_keys_written(nt, argv, argc, kwh);
+  int args_known = keys_known && (fwd_encl ? fwd_has_mark(fwd_encl, "*") : site_args_written(nt, argv, argc));
+  /* CRuby's order: the count, then a missing keyword, then an unknown one */
   if (!fwd_encl) emit_call_arity_check(c, m, argc, argv);
-  else if (!keys_known || !emit_fwd_missing_kwarg_raise(c, m, fwd_encl)) emit_unknown_kwarg_raise(c, m, argv, argc);
-  if (keys_known && fwd_hands_keys_on(c, m, fwd_encl)) fwd_left_out_add(tag, "...");
+  else if (!(args_known && emit_fwd_count_raise(c, m, fwd_encl)) &&
+           !(keys_known && emit_fwd_missing_kwarg_raise(c, m, fwd_encl))) emit_unknown_kwarg_raise(c, m, argv, argc);
+  if (keys_known && fwd_hands_keys_on(c, m, fwd_encl)) {
+    fwd_left_out_add(tag, "...");
+    /* a forwarder between that names a parameter itself takes it from the
+       forwarded ones and is bound slot for slot: its count is not known */
+    if (args_known && !(fwd_encl && fwd_named_params(c, m))) fwd_left_out_add(tag, "*");
+  }
   /* The options-hash idiom: a braceless keyword hash no keyword parameter
      claims packs into the first unfilled positional (`def check(sel, opts =
      nil)` called `check(".x", count: 0)`). The other two call paths have done
