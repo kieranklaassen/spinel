@@ -1,0 +1,25 @@
+The memo of a fold seeded with [] is an Array, not an element
+
+`s = String.new; x = ["a"].inject([]) { |m, v| m << v << s };
+s << "x"; p x` printed ["a", ""]; CRuby prints ["a", "x"]. So did
+`(m << v) << s`, `m.push(v).push(s)` and `m << v << v << s`, and the
+same chain over Integers. `m << s` and `m << v; m << s` were right.
+
+infer_block_params types a fold's memo from the seed. An empty `[]`
+has no type, and the memo took the receiver's element type, so the
+analysis read `m << v` as a String append (or a shift) and the rule
+that shares a String pushed onto an Array never saw `s` pushed.
+
+The memo is now typed the Array it is when the block answers it at
+every step: the block's value is the memo, a push onto it (a chain
+of them too) or a conditional whose arms are, and the block neither
+assigns the memo nor leaves a step early. Any other block is typed as
+before: its value replaces the memo and need not be an Array.
+
+A block that changes its element in place and then pushes it
+(`{ |m, v| v << "!"; m << v }` over unfrozen Strings) left the
+receiver's Strings unchanged before, with nothing said. Without
+--share-strings it now dies, as the same block over a typed seed
+(`inject([1, +"q"])`) does already.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
