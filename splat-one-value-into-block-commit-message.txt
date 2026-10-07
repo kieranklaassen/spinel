@@ -1,0 +1,36 @@
+One value with no to_a splatted into a yield or a proc arrives as itself
+
+A splat in the argument list built for a yield, a proc's call or a
+lambda's call was spread with sp_enum_items_from, which has no items
+for a value that is no collection. So one value splatted there was
+dropped:
+
+    def g(v) = yield(*v)
+    p(g(5) { |a| a })              # nil; CRuby 5
+    f = proc { |a| a }
+    x = :k
+    p f.call(*x)                   # nil; CRuby :k
+    p lambda { |a| a }.call(*x)    # ArgumentError (given 0, expected 1)
+
+CRuby asks to_a only of a value that has one; any other value is the
+one argument, itself. emit_spread_args_into now spreads such a splat
+with sp_splat_arg_items, a new helper beside sp_enum_items_from: an
+Integer (a big one too), a Float, a Symbol, true, false, a class and
+an object with no to_a, or whose to_a answers nil, are the value
+itself, and an object is asked for its to_a once. Everything else
+goes to sp_enum_items_from as before.
+
+The helper is chosen at compile time, only where the splat's kind is
+one of those or is boxed; a splat known to be an Array, a Hash or a
+Range compiles to the same C. A boxed Array pays 7 instructions a call
+(callgrind, gcc: 200,000 calls ran 142,265,195 before and 143,665,195
+after), 9 with clang.
+
+A String is not changed: it is dropped there as before. The list holds
+boxed values and a boxed String is a copy, so a block that appends to
+its parameter would write to the copy.
+
+Tests: test/splat_one_value_into_block.rb, and
+test/splat_one_value_into_block_bigint.rb for a big Integer.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

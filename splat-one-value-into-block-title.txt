@@ -1,0 +1,1 @@
+One value with no to_a splatted into a yield or a proc arrives as itself
