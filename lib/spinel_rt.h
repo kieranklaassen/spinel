@@ -1148,11 +1148,19 @@ static void sp_fstr_insert(const char *f) {  /* caller holds the heap lock */
   while (sp_fstr_tab[idx]) idx = (idx + 1) & mask;
   sp_fstr_tab[idx] = f; sp_fstr_len++;
 }
+static SP_NOINLINE const char *sp_str_dedup_new(const char *s);
 static const char *sp_str_dedup(const char *s) {
   SP_HEAP_LOCK();
   const char *hit = sp_fstr_lookup(s);
   SP_HEAP_UNLOCK();
   if (hit) return hit;
+  return sp_str_dedup_new(s);
+}
+/* The content is not interned yet. A String just built is held by nothing
+   else across the copy's allocation, so it is rooted here; in a function
+   of its own, so that the root costs a content already interned nothing. */
+static SP_NOINLINE const char *sp_str_dedup_new(const char *s) {
+  SP_GC_ROOT_STR(s);
   /* byte_len-aware copy so an embedded NUL is preserved (sp_str_dup_external
      would truncate at the first NUL), then freeze it to the immortal 0xf1. */
   const char *f = sp_str_freeze_val(sp_str_from_bytes(s, sp_str_byte_len(s)));
