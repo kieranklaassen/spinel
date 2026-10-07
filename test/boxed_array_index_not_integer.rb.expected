@@ -1,0 +1,21 @@
+"s"
+:z
+"s"
+TypeError: no implicit conversion of true into Integer
+TypeError: no implicit conversion of false into Integer
+TypeError: no implicit conversion of Array into Integer
+TypeError: no implicit conversion of Hash into Integer
+"s"
+TypeError: no implicit conversion of true into Integer
+TypeError: no implicit conversion of true into Integer
+"s"
+TypeError: no implicit conversion of true into Integer
+[10, "s", :z]
+:z
+10
+:z
+[10, "s"]
+TypeError: no implicit conversion from nil to integer
+:f
+:t
+:a

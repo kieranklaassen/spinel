@@ -10288,7 +10288,12 @@ static sp_RbVal sp_poly_index_poly(sp_RbVal recv, sp_RbVal idx) {
   if (idx.tag == SP_TAG_FLT && recv.tag == SP_TAG_OBJ && recv.cls_id >= 0 && sp_obj_to_h_fn &&
       idx.v.f > -2147483649.0 && idx.v.f < 2147483648.0)
     idx = sp_box_int((sp_int)idx.v.f);
-  sp_int i = (idx.tag == SP_TAG_INT) ? idx.v.i : 0;
+  /* An Array's index of any other kind converts as an Integer argument does:
+     a Float is cut, and true, an Array or a Hash is CRuby's TypeError. Each
+     read element 0, as a Float Range still does. */
+  sp_int i = (idx.tag == SP_TAG_INT) ? idx.v.i
+           : (recv.tag == SP_TAG_OBJ && sp_poly_is_array_kind(recv.cls_id) &&
+              !(idx.tag == SP_TAG_OBJ && idx.cls_id == SP_BUILTIN_FLOAT_RANGE)) ? sp_poly_arg_int_chk(idx) : 0;
   /* Struct#[n] is the nth MEMBER, in declaration order -- the order #to_h
      preserves -- not an array index (#3369). */
   if (idx.tag == SP_TAG_INT && recv.tag == SP_TAG_OBJ && recv.cls_id >= 0 && sp_obj_to_h_fn) {
