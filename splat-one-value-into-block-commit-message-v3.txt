@@ -1,0 +1,77 @@
+One value with no to_a splatted into a yield or a proc arrives as itself
+
+A splat in the argument list built for a yield or a proc's call was
+spread with sp_enum_items_from, which has no items for a value that
+is no collection. So one value splatted there was dropped:
+
+    def g(v) = yield(*v)
+    p(g(5) { |a| a })              # nil; CRuby 5
+    f = proc { |a| a }
+    x = :k
+    p f.call(*x)                   # nil; CRuby :k
+
+CRuby asks to_a only of a value that has one; any other value is the
+one argument, itself. emit_spread_args_into now spreads such a splat
+with sp_splat_arg_items, a new helper beside sp_enum_items_from: an
+Integer (a big one too), a Float, a Symbol, true, false, a class and
+an object of a class the program wrote are the value itself.
+Everything else goes to sp_enum_items_from as before.
+
+The helper is chosen only in a program with no way to a to_a of its
+own, the walk the commits beneath make
+(splat_program_may_make_to_a): an Integer has a to_a where the
+program reopens Integer, a class where it defines self.to_a. A splat
+known to be an Array, a Hash or a Range compiles to the C it had.
+
+Only an object of the program's own class is handed over. A class
+Spinel ships in packages/ is what Spinel wrote of CRuby's class, not
+all of it: CRuby asks a StringIO, a Tempfile and a Zlib reader for
+to_a, and an empty one answers [], so its splat is no argument at
+all, which is what the list holds. The parser stamps a class or a
+module opened in a file the require resolver took from packages/,
+and a constant written there (`node_pkg`, read off the splice
+markers as `node_bi` is, so a build without a line map has it too).
+splat_class_is_own asks whether the program opened the class and
+every class and included module above it, none of them native; a
+program that prepends a module it did not write keeps every object's
+form. A typed operand is asked at compile time. For a boxed one the
+run time reads a table of the answers per class (sp_splat_own_cls,
+emitted only into a program that builds such a list).
+
+A lambda's call and a Method's keep the list they had. Both count
+their arguments: with the value dropped they raise ArgumentError,
+and in a program whose to_a the compiler cannot see (a skipped
+require, a name built at run time) CRuby raises ArgumentError there
+too, for the two values the to_a answers. Handing the value over
+would make that raise an answer. Which of the two a Proc is, only
+the run time knows, so it is asked there (sp_splat_arg_items_of):
+`pr.call(*x)` reads its receiver before the list is built, as CRuby
+runs it, a local no argument can write where it stands and anything
+else through a rooted temp, and only where a splat may hand a value
+over. A lambda passed to a yield with `&` is asked too. A lambda
+written in place, a Method and a curried Proc compile to the C they
+had. So `lambda { |a| a }.call(*5)` still raises ArgumentError where
+CRuby answers 5.
+
+A boxed Array splatted into a proc held in a local pays 13
+instructions a call (callgrind, gcc: 200,000 calls ran 152,473,500
+before and 155,074,628 after), 24 where the receiver is itself a
+call.
+
+Not changed: a String. It is dropped there as before. The list is
+built of boxed values and a boxed String is a copy, so a block that
+appends to its parameter would write to the copy and the caller's
+String would stay as it was, where passing the String without the
+splat changes it. That wants the String handed over shared, which is
+not this change's to decide.
+
+Not changed either: a typed Proc, Regexp, Rational or Encoding and a
+builtin exception are still dropped there. `f[*x]`, a splat after or
+before another argument and a splat into a method take other paths.
+
+Tests: test/splat_one_value_into_block.rb,
+test/splat_one_value_into_block_bigint.rb for a big Integer, and
+test/splat_package_object_into_block.rb for a StringIO, a Tempfile
+and a class of the program beneath one.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
