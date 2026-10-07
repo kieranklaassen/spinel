@@ -1,0 +1,38 @@
+def nilf
+  puts "nilf"
+  nil
+end
+$c = 0
+def bump
+  $c += 1
+  puts "bump"
+  nil
+end
+class K
+  def initialize(n = "k")
+    @name = n
+  end
+  def name = @name
+  def v=(x)
+    @v = x
+    42
+  end
+  def v = @v
+  def w=(x)
+    @w = x
+    "wret"
+  end
+  def w = @w
+end
+def nal(o)
+  s = o.name + "!"
+  $last = s
+  nil
+end
+t = 0
+200.times do |i|
+  k = K.new("f#{i}")
+  k.v = nal(K.new("tmp#{i}"))
+  t += $last.length
+end
+p t

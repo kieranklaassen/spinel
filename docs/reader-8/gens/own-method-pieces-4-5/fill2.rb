@@ -1,0 +1,6 @@
+f = "/home/claude/r8/reports/pr175-pieces-4-5.md"; s = File.read(f)
+def sub!(s, a, b) = (s.sub!(a, b) or abort("missing: #{a[0, 40]}"))
+sub!(s, "- The programs whose C is byte-identical (PENDING-IDENT): how wrong the shapes left alone are was measured by hand probes only (T6).", "- The programs whose C is byte-identical were not built or run on 26d456ec (they cannot change): how wrong the shapes left alone are\n  was measured by hand probes only (T6).")
+sub!(s, "10. A value that is one of two classes, `p z.__id__.class`: master's C does not build", "10. A value that is one of two classes, one of them with its own `__id__` answering a String, `p z.__id__.class`: master's C does not build")
+sub!(s, "11. A class reopened to add `instance_variable_get` after a first call: whole-program, so on the piece the first call answers the\n    later method too (T6).\n", "")
+File.write(f, s)
