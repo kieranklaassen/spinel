@@ -1,0 +1,23 @@
+A block call on a receiver of several classes runs its arguments once
+
+    def tick; $c += 10000; 1; end
+    class K
+      def blk(a); $c += 1; yield(a); end
+    end
+    class L
+      def blk(a); $c += 4; yield(a + 1); end
+    end
+    $c = 0
+    x = [K.new, L.new][0]
+    x.blk([tick, 2][0]) { |q| $c += q }
+    p $c
+
+printed 20002 where CRuby prints 10002: `tick` ran twice, once a
+class. emit_poly_recv_block_dispatch splices one arm a class into its
+switch, and the statements an arm's arguments hoist went to the
+statement's prelude, ahead of the switch: every arm's ran, whatever
+class the receiver had.
+
+Each arm now collects them and writes them into its own case.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

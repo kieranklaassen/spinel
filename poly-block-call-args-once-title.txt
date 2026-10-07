@@ -1,0 +1,1 @@
+A block call on a receiver of several classes runs its arguments once
