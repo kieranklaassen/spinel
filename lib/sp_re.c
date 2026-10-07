@@ -1096,7 +1096,9 @@ sp_MatchData *sp_re_matchdata(mrb_regexp_pattern *pat, const char *str) {SP_GC_R
     return NULL;
   }
   int pairs = (n > 64 ? 64 : n) / 2;
-  sp_re_set_captures(str, caps, pairs);
+  /* $~ is this match too: its positions and pattern go to the registers, not
+     the Strings alone, or `$~.to_a` read the positions of the match before */
+  sp_re_set_last_match(pat, str, caps, pairs * 2);
   sp_MatchData *m = sp_md_alloc(pairs);
   m->source = str;
   m->ncap = pairs;
@@ -1121,7 +1123,7 @@ sp_MatchData *sp_re_matchdata_at(mrb_regexp_pattern *pat, const char *str, sp_in
     return NULL;
   }
   int pairs = (n > 64 ? 64 : n) / 2;
-  sp_re_set_captures(str, caps, pairs);
+  sp_re_set_last_match(pat, str, caps, pairs * 2);
   sp_MatchData *m = sp_md_alloc(pairs);
   m->source = str;
   m->ncap = pairs;
