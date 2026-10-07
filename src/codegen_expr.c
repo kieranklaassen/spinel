@@ -3546,6 +3546,10 @@ static int emit_and_or_begin_expr(Compiler *c, int id, Buf *b, const NodeTable *
       Buf rarm; memset(&rarm, 0, sizeof rarm);
       Buf rpre; memset(&rpre, 0, sizeof rpre);
       { Buf *sv_pre2 = g_pre; g_pre = &rpre; emit_expr(c, right, &rarm); g_pre = sv_pre2; }
+      /* A yield typed per site can be true-or-false here while the chain
+         itself is poly for its other sites: the consumer takes a boxed value. */
+      int boxed = res == TY_POLY;
+      if (boxed) buf_puts(b, "sp_box_bool(");
       if (!(rpre.p && rpre.p[0])) {
         buf_puts(b, "(");
         emit_expr(c, left, b);
@@ -3562,6 +3566,7 @@ static int emit_and_or_begin_expr(Compiler *c, int id, Buf *b, const NodeTable *
         else        buf_printf(b, ") { _t%d = 1; }\nelse {\n%s_t%d = %s;\n} _t%d; })",
                                tr, rpre.p, tr, rarm.p ? rarm.p : "0", tr);
       }
+      if (boxed) buf_puts(b, ")");
       free(rarm.p); free(rpre.p);
       return 1;
     }
