@@ -1,0 +1,1 @@
+An attribute's `||=` shares the local's String under --share-strings

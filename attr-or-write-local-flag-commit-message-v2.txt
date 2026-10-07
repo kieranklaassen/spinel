@@ -1,0 +1,36 @@
+An attribute's `||=` shares the local's String under --share-strings
+
+    class Box
+      attr_accessor :x
+    end
+
+    r = Box.new
+    s = +"ab"
+    r.x ||= s
+    r.x << "z"
+    p s, r.x
+
+printed "ab" twice under --share-strings: the append went to a copy
+and nothing said so. CRuby prints "abz" twice, and so does the flag
+when the store is written `r.x = s`.
+
+The share walk has a case for `o.x ||= v` and `o.x &&= v`, and it asked
+the node for "read_name", a field the parser does not write. So the
+case found no attribute, the value joined no slot, and the local and
+the slot each kept a copy.
+
+Reading the name for every such write would be too much: a conditional
+store is not `x=` called with the value. With an element, a Hash's
+value, a container or a call's answer on the right, with the write used
+as a value, or with a writer written by hand, the unknown value is what
+keeps those programs right or refused today. So the case joins the slot
+only for the store that is the `=` store: a statement whose value is
+the read of a local that holds a String, where `x` and `x=` are attr
+methods and no method of either name is written by hand. Every other
+conditional attribute write keeps the unknown value and its generated
+C.
+
+The walk runs only under --share-strings; the default build's
+generated C is unchanged.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
