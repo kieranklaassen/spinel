@@ -1,0 +1,31 @@
+A `when` arm of a class kept by value is asked its ===
+
+A small read-only class is kept by value, and emit_when_user_eq
+turned such an arm away on its first line. The arm was then boxed and
+compared with the subject as a value, so its own === never ran:
+
+    class Above
+      def initialize(n) = @n = n
+      def ===(o) = o > @n
+    end
+    case 5
+    when Above.new(3) then puts "big"     # Spinel: other, CRuby: big
+    else puts "other"
+    end
+
+Give the class a writer, or keep an instance in an Array, and it is
+held by pointer and the case was right.
+
+emit_when_user_eq now calls the method on the arm as it stands, with
+the subject boxed and rooted as for a pointer arm. There is no pointer
+to test for nil or to compare as the same object. What the method
+answers is read for its Ruby truth as before.
+
+One arm keeps the compare it had: one that may allocate for an object
+holding a String (`when Len.new(a + b)`, a method's answer, a ternary
+whose condition is a call), which has nowhere to be rooted while the
+method runs; read from a local or a constant it is asked.
+
+Test: test/case_when_value_class_arm.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
