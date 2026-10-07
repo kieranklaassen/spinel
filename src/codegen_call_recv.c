@@ -7611,8 +7611,12 @@ static int emit_scalar_recv_arms(Compiler *c, int id, Buf *b, const NodeTable *n
      the bytes and answers a scalar or a freshly built string keeps nothing,
      so it can read the live buffer instead -- `text[i]` in a scan loop was
      copying the whole subject on every character. */
-  if (rt == TY_STRING && name && str_recv_reads_only(name))
-    emit_strbuf_read_ref(c, recv, &rs);
+  if (rt == TY_STRING && name && str_recv_reads_only(name)) {
+    /* a receiver that may be nil has no buffer where nil answers the name
+       itself (to_i, to_f) */
+    if (is_nil_method(name) && repr_of(c, recv).may_nil) emit_strbuf_read_ref_nil(c, recv, &rs);
+    else emit_strbuf_read_ref(c, recv, &rs);
+  }
   if (!rs.p) emit_expr(c, recv, &rs);
   const char *r = rs.p ? rs.p : "";
   /* A Float receiver that can be its nil sentinel (a NaN payload) is nil,
