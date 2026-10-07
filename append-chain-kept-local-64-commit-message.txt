@@ -1,0 +1,31 @@
+A local kept from an append chain of 64 links or more is the same String
+
+  s = +"b"
+  t = s << "a" << "a" << "a"     # ... 64 links
+  t << "!"
+  p s.size
+
+prints 66 in CRuby and 65 on master. `s << a << ...` is s itself, so t
+names the same String. The walk that says so for a kept chain
+(an_strbuf_alias_source) gave up after 64 steps: from 64 links t no
+longer named s, it took a copy, and what was appended through t never
+reached s.
+
+The walk has no limit now; every step goes down to a child, so it ends
+where the chain does. One method keeps the 64: one that holds a pattern
+match or a Regexp match that writes named captures. A binding onto t
+there builds only where t is a copy, so naming s would lose a program
+that is right.
+
+From 64 links the write emits one append a link on s's handle
+(emit_strbuf_long_chain_flat). The value form a shorter chain keeps
+nests a statement expression a link, and clang stops at 256 levels:
+a chain of 300 links kept and only read builds there on master, and
+would not have.
+
+test/string_append_chain_kept_long.rb has kept chains of 64 to 300
+links: `<<` and `concat` links, a String a method has appended to, a
+chain in a method with interpolated links, and `+=` after the chain;
+eleven of its eighteen lines differ on master.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

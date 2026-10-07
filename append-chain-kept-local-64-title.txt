@@ -1,0 +1,1 @@
+A local kept from an append chain of 64 links or more is the same String
