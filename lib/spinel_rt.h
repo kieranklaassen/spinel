@@ -2987,6 +2987,17 @@ static SP_INLINE const char *sp_poly_arg_str_chk(sp_RbVal v) {
   if (v.tag == SP_TAG_STR) return v.v.s;
   return sp_poly_arg_str_chk_slow(v);
 }
+/* String#lines / #each_line with a separator whose class is known only at run
+   time. nil is no separator: the one line is the receiver itself, as in
+   CRuby, an empty one too. Any other value takes the strict conversion, so
+   an Integer raises CRuby's TypeError. */
+static SP_NOINLINE sp_StrArray *sp_str_lines_sep_poly(const char *s, sp_RbVal sep) {
+  SP_GC_ROOT_STR(s);
+  if (sep.tag != SP_TAG_NIL) return sp_str_lines_sep(s, sp_poly_arg_str_chk(sep));
+  sp_StrArray *a = sp_StrArray_new(); SP_GC_ROOT(a);
+  if (s) sp_StrArray_push(a, s);
+  return a;
+}
 /* String#split's separator slot: the one String slot CRuby documents nil in
    (nil = whitespace mode). NULL preserves that answer, where the loose form
    above stringifies nil to "" and turns the call into a character split; a

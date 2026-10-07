@@ -993,6 +993,13 @@ int emit_call_symbol_bool_string_arms(Compiler *c, int id, Buf *b, const NodeTab
         emit_expr(c, eline_sep, b);
         buf_puts(b, "); ");
       }
+      /* a boxed separator is read at run time: a String splits, nil is the
+         whole String, anything else is CRuby's TypeError */
+      else if (argc == 1 && argv && lines_sep_boxed(c, argv[0])) {
+        buf_printf(b, "sp_StrArray *_t%d = sp_str_lines_sep_poly(_t%d, ", tl, ts);
+        emit_boxed(c, argv[0], b);
+        buf_puts(b, "); ");
+      }
       else
         buf_printf(b, "sp_StrArray *_t%d = %s(_t%d); ",
                    tl, eline_chomp ? "sp_str_lines_chomp" : "sp_str_lines", ts);

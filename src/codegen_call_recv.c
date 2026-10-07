@@ -4549,6 +4549,9 @@ static int emit_array_call_arms(Compiler *c, int id, Buf *b) {
     if (argc == 1 && comp_ntype(c, argv[0]) == TY_STRING) {
       buf_printf(b, "sp_str_lines_sep(%s, ", rl); emit_expr(c, argv[0], b); buf_puts(b, ")");
     }
+    else if (argc == 1 && lines_sep_boxed(c, argv[0])) {
+      buf_printf(b, "sp_str_lines_sep_poly(%s, ", rl); emit_boxed(c, argv[0], b); buf_puts(b, ")");
+    }
     else str_arms_convert(c, id, b, nt, name, recv, argc, argv, TY_UNKNOWN, rl);
     buf_puts(b, "; })");
     return 1;
@@ -4559,6 +4562,9 @@ static int emit_array_call_arms(Compiler *c, int id, Buf *b) {
      poly.each_line { } does */
   if (recv >= 0 && rt == TY_POLY && sp_streq(name, "each_line") &&
       poly_lines_args(c, argc, argv) &&
+      /* beside a class of the program that has an each_line, a boxed
+         separator stays with the dispatch's own default */
+      !(g_poly_builtin_arm && argc == 1 && lines_sep_boxed(c, argv[0])) &&
       !user_defines_or_reads(c, "each_line") && !user_defines_or_reads(c, "lines")) {
     int tl = ++g_tmp, ta = ++g_tmp;
     char rl[32]; snprintf(rl, sizeof rl, "_t%d", tl);
@@ -4566,6 +4572,9 @@ static int emit_array_call_arms(Compiler *c, int id, Buf *b) {
     buf_printf(b, ", \"each_line\"); SP_GC_ROOT(_t%d); sp_StrArray *_t%d = ", tl, ta);
     if (argc == 1 && comp_ntype(c, argv[0]) == TY_STRING) {
       buf_printf(b, "sp_str_lines_sep(%s, ", rl); emit_expr(c, argv[0], b); buf_puts(b, ")");
+    }
+    else if (argc == 1 && lines_sep_boxed(c, argv[0])) {
+      buf_printf(b, "sp_str_lines_sep_poly(%s, ", rl); emit_boxed(c, argv[0], b); buf_puts(b, ")");
     }
     else str_arms_convert(c, id, b, nt, "lines", recv, argc, argv, TY_UNKNOWN, rl);
     buf_printf(b, "; SP_GC_ROOT(_t%d);", ta);
@@ -6322,6 +6331,11 @@ static int str_arms_convert(Compiler *c, int id, Buf *b, const NodeTable *nt, co
       buf_printf(b, " ? sp_str_lines_chomp(%s) : sp_str_lines(%s))", r, r);
     }
     else buf_printf(b, "%s(%s)", is_chomp ? "sp_str_lines_chomp" : "sp_str_lines", r);
+  }
+  /* lines(sep) with a boxed separator, read at run time */
+  else if (sp_streq(name, "lines") && argc == 1 && nt_ref(nt, id, "block") < 0 &&
+           lines_sep_boxed(c, argv[0])) {
+    buf_printf(b, "sp_str_lines_sep_poly(%s, ", r); emit_boxed(c, argv[0], b); buf_puts(b, ")");
   }
   else if (sp_streq(name, "bytes") && argc == 0)   buf_printf(b, "sp_str_bytes(%s)", r);
   else if (sp_streq(name, "codepoints") && argc == 0) buf_printf(b, "sp_str_codepoints(%s)", r);

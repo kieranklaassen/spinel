@@ -3898,8 +3898,8 @@ static int infer_string_recv_call(Compiler *c, int id, const NodeTable *nt, cons
         nt_type(nt, argv[0]) && sp_streq(nt_type(nt, argv[0]), "KeywordHashNode"))
       { *out = TY_ENUMERATOR; return 1; }  /* each_line(chomp: ...) blockless */
     if (sp_streq(name, "each_line") && argc == 1 && nt_ref(nt, id, "block") < 0 &&
-        infer_type(c, argv[0]) == TY_STRING)
-      { *out = TY_ENUMERATOR; return 1; }  /* each_line(sep) blockless */
+        (infer_type(c, argv[0]) == TY_STRING || lines_sep_boxed(c, argv[0])))
+      { *out = TY_ENUMERATOR; return 1; }  /* each_line(sep) blockless; a boxed sep is read at run time */
     if (sp_streq(name, "lines") && argc == 1 && infer_type(c, argv[0]) == TY_STRING)
       { *out = TY_STR_ARRAY; return 1; }   /* lines(sep) */
     if (sp_streq(name, "lines") && argc == 2 && infer_type(c, argv[0]) == TY_STRING &&
