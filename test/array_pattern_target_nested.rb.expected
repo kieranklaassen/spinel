@@ -1,0 +1,45 @@
+:q
+:q
+"b"
+1.5
+b String
+true
+[2, 3]
+[2, 3] is Array
+7
+:x
+7
+:x
+"v"
+:v
+"v"
+:v
+"a"
+["a", "b"]
+"s"
+true
+matched
+:q is Symbol
+matched
+1.5 is Float
+no
+"none" is String
+true
+false
+false
+:b
+2.5
+:no
+2.5
+true
+:q
+:q
+hit
+"sy"
+hit
+"sm"
+hit
+["s", "t", "u"]
+hit
+true
+false

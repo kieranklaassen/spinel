@@ -1419,9 +1419,21 @@ static int pm_element_differs(Compiler *c, Scope *ms, const char *name, TyKind e
   return f && f->classes && !(f->classes & (PM_OTHER | PM_NIL | ec));
 }
 
-/* With `differing`, only the target of a capture pm_capture_differs names is
-   boxed, and only where pm_local_assigned allows: every other local the
-   pattern binds is boxed already, or is read at its own type. */
+static int pm_seed_locals_poly(Compiler *c, Scope *ms, int pat, int differing);
+
+/* The pattern P of a `P => x`, with `differing`: the locals a pattern there
+   binds arrive boxed. In `a => x` the a names the value itself and is not
+   bound here: it keeps the type it has. */
+static int pm_seed_capture_value(Compiler *c, Scope *ms, int capture) {
+  int value = nt_ref(c->nt, capture, "value");
+  if (value < 0 || nt_kind(c->nt, value) == NK_LocalVariableTargetNode) return 0;
+  return pm_seed_locals_poly(c, ms, value, 1);
+}
+
+/* With `differing`, a local an assignment also writes is boxed only where
+   pm_local_assigned allows: the target of a capture pm_capture_differs names,
+   and a bare target, whose element may be of any class. Every other local
+   the pattern binds is boxed already, or is read at its own type. */
 static int pm_seed_locals_poly(Compiler *c, Scope *ms, int pat, int differing) {
   const NodeTable *nt = c->nt;
   int changed = 0;
@@ -1435,19 +1447,23 @@ static int pm_seed_locals_poly(Compiler *c, Scope *ms, int pat, int differing) {
        inside that pass, so the slot was cleared to UNKNOWN moments ago and
        seeding it POLY looks like a change every round even when the answer is
        last round's. The end-of-pass sweep reports it. (#4116) */
-    if (lv && !lv->is_param && !lv->is_block_param && !differing)
+    if (lv && !lv->is_param && !lv->is_block_param &&
+        (!differing || pm_local_assigned(c, ms, lnm)))
       lv->type = ty_unify(lv->type, TY_POLY);
     return changed;
   }
   if (sp_streq(pty, "CapturePatternNode")) {
     int tgt = nt_ref(nt, pat, "target");
+    /* a capture says its target's class: where it may be the local's own,
+       the local keeps its type, as a bare target does not */
     if (differing && pm_capture_differs(c, ms, pat)) {
       LocalVar *lv = scope_local(ms, nt_str(nt, tgt, "name"));
       if (lv && !lv->is_param && !lv->is_block_param && pm_local_assigned(c, ms, lv->name))
         lv->type = ty_unify(lv->type, TY_POLY);
     }
-    else changed |= pm_seed_locals_poly(c, ms, tgt, differing);
-    changed |= pm_seed_locals_poly(c, ms, nt_ref(nt, pat, "value"), differing);
+    else if (!differing) changed |= pm_seed_locals_poly(c, ms, tgt, 0);
+    changed |= differing ? pm_seed_capture_value(c, ms, pat)
+                         : pm_seed_locals_poly(c, ms, nt_ref(nt, pat, "value"), 0);
     return changed;
   }
   if (sp_streq(pty, "SplatNode"))
@@ -1626,7 +1642,7 @@ static int infer_case_pattern_locals(Compiler *c) {
           }
           /* a `lit => x` window capture binds its target to an element */
           if (sp_streq(lty2, "CapturePatternNode")) {
-            changed |= pm_seed_locals_poly(c, ms, nt_ref(nt, reqs[k], "value"), 1);
+            changed |= pm_seed_capture_value(c, ms, reqs[k]);
             tgt = nt_ref(nt, reqs[k], "target");
             if (tgt < 0 || !nt_type(nt, tgt)) continue;
           }
@@ -1676,7 +1692,7 @@ static int infer_case_pattern_locals(Compiler *c) {
             continue;
           }
           if (sp_streq(lty2, "CapturePatternNode")) {
-            changed |= pm_seed_locals_poly(c, ms, nt_ref(nt, el, "value"), 1);
+            changed |= pm_seed_capture_value(c, ms, el);
             differs = pm_capture_differs(c, ms, el);
             el = nt_ref(nt, el, "target");
             if (el < 0 || !nt_type(nt, el)) continue;
