@@ -1,0 +1,11 @@
+An empty row written in parentheses is an empty row
+
+`T = [[1, 2], ([]), [3]]; p T[1]` printed [0, 0, 0, 0, 0, 0, 0, 0],
+and `[[1, 2], ([]), [3, 4]].each { |a, b| p [a, b] }` bound 0 and 0
+for the row. CRuby prints [] and [nil, nil].
+
+The two places that ask whether a row is an empty container asked
+the ParenthesesNode around it, which is none. They look through it
+now.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

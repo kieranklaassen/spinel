@@ -1,0 +1,19 @@
+A local holding an empty container is an empty row of a table too
+
+`e = {}; T = [[1, 2], e, [3]]; p T[1]` ended in SIGSEGV, and with
+`e = []` it printed [0, 0, 0, 0, 0, 0, 0, 0]. A table the local is
+stored into (`e = []; T[1] = e`) answered 8 for `T[1].size`. CRuby
+prints {}, [] and 0.
+
+The test for a table of Integer Arrays steps over a row whose type
+is not settled yet, and takes an empty literal for a row of another
+kind. A local that is never filled is not typed either, and is built
+as the boxed container its literal is. Its read was stepped over, the
+table was called a table of Integer Arrays, and the row was read as
+an sp_IntArray without a test.
+
+A read of a local whose every write is an empty container, while
+nothing has typed it, is now such a row. A local that is filled is
+typed by what fills it and is the row it was.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
