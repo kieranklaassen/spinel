@@ -1,0 +1,54 @@
+The defaults a call fills run in the order of the parameters
+
+    $n = 0
+    def m(x = ($n += 1), y = "s#{$n += 1}") = [x, y]
+    p m
+
+printed [2, "s1"] compiled with gcc and with clang; CRuby prints
+[1, "s2"]. With two scalar defaults,
+def m(x = ($n += 1), y = ($n += 1)), a gcc build printed [2, 1].
+
+emit_args_filled_argv writes a default in its parameter's slot of the
+call's parentheses, and C runs a call's arguments in any order: gcc
+runs the last first. A default of a kind that takes a root (a String,
+an Array, an object) is made in the prelude instead, so it ran ahead of
+a scalar default written before it, whatever the compiler.
+
+From the first default that stays in the parentheses while a later one
+can tell the order (both write, or one writes what the other reads),
+each default whose order can be told is now made ahead of the call, in
+order, in the call's own expression:
+
+    ({ sp_int _t1 = <x's default>; _t2 = <y's default>;
+       sp_m(_t1, _t2); })
+
+A scalar takes a plain temp; a kind that takes a root takes a rooted
+temp declared in the prelude and assigned here, as
+emit_rooted_conversion holds a converted read. The statements stay
+where the call stands, so "#{bump} #{m}" still runs bump first; a
+prelude temp would run ahead of bump, where a clang build is right
+today. The call's site puts the statements in front of its call
+(emit_call_ahead), so the change reaches the three sites that now ask
+for them (emit_args_filled_ahead): a top-level method, a class method
+or module function called on its constant, and new. A call with one
+default that runs code, with literal defaults, with its arguments
+given, with a splat or a `**` keeps its C, and so does every other
+site.
+
+Cost (callgrind, instructions a call): two scalar defaults 24 to 24,
+three 33 to 33. Where a default that takes a root is among them, 1 in
+a program that was right (x = one, y = label, two methods that write
+nothing: 82 to 83), and 1 for new with gcc (18 to 19).
+
+Not here: a site that does not ask (super(), a method a subclass
+overrides called on an instance, a class method called by its sibling)
+still fills its defaults in C's order, and a default the prelude
+builds (an Array literal) still runs ahead of the defaults before it.
+
+Test: test/default_args_filled_in_order.rb (expected from CRuby
+3.3.6). On master 25 of its 33 lines differ compiled with gcc, 7
+compiled with clang.
+C: no program of the corpus changes but the new test; optcarrot's is
+byte-identical.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

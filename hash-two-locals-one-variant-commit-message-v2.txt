@@ -1,0 +1,51 @@
+A Hash named by two locals takes one variant under both names
+
+    h = {a: 1}
+    g = h
+    m = {1 => :a}
+    g.merge!(m)
+    p h.to_a
+
+printed [[:a, 1]] with nothing said. The argument widened `g` to the
+poly-keyed variant while `h` kept its literal's, so `g = h` was written
+as a conversion, which builds another Hash, and what went in through
+`g` never reached `h`. The same entries were lost the other way round
+(`h.merge!(m)`, read through `g`), with `update`, `replace`, `store`,
+an index store and a store in a block.
+
+The alias loop in infer_write_types already gives an Array under two
+names the boxed kind on both. A Hash now takes the poly-keyed variant
+under every name it goes by and keeps it: the literal is marked for it
+and the slots are pinned, as widen_arg_hash does for a caller's local,
+so every write of the round sees the kind the Hash is built in and a
+copy kept in a local (`c = h.dup`) is typed from it. It does so where
+each local is written once, with a literal, `Hash.new` or another such
+local.
+
+The names of one Hash are a group, joined whole or not at all. Only a
+write into a variant with boxed values is written as a conversion; a
+Hash of another kind written into any other variant is refused when
+the C is written, the literal's own write among them. A group with
+such a write is left alone and stays refused: joined, the program
+would build and run on into whatever came after the refusal.
+
+A program is left alone, too, where master refuses or raises for a
+value's kind and would not for the same value boxed: an `op=` whose
+operand is of another kind than its slot (`t = 0; h.each { |_k, v|
+t += v }` over String values; a local, a global, an attribute or an
+Array's element), and a Range between two kinds (`(1..v)`). Joined,
+the values are boxed, and given a boxed operand `op=` adds whatever
+number or text it reads as, as a boxed String bound of a Range counts
+as 0: the program would build and print a sum where master refuses it.
+
+A second name is typed from the first before the first's own stores
+widen it, so it runs one round behind and often reaches the same kind
+by itself. A group is joined on kinds each of its names had last round
+too (LocalVar.hash_alias_seen), and one that waits on that asks for
+one more round.
+
+A local written twice, a conditional (`g = c ? h : k`), a parameter and
+a Hash that came from a call, an instance variable or an element are
+left as they were, and still convert.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
