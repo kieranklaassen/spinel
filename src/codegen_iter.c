@@ -665,12 +665,19 @@ void emit_inline_bind_params(Compiler *c, Scope *m, int args, const int *argv, i
        nothing declares (#3943). Park the entries across the argument, not just
        the count. */
     RenPark park = ren_park(saved_nren);
-    if (fwd_encl && i < fwd_encl->nparams) {
-      LocalVar *ep = scope_local(fwd_encl, fwd_encl->pnames[i]);
+    /* a declared keyword binds by name, as at a call that spells it out:
+       from the forwarder's parameter of that name (it has one for each key
+       its sites pass), and where it has none, to the keyword's own default */
+    int fi = i;
+    if (fwd_encl && callee_param_is_declared_kwarg(c, m, m->pnames[i]))
+      for (fi = 0; fi < fwd_encl->nparams; fi++)
+        if (fwd_encl->pnames[fi] && sp_streq(fwd_encl->pnames[fi], m->pnames[i])) break;
+    if (fwd_encl && fi < fwd_encl->nparams) {
+      LocalVar *ep = scope_local(fwd_encl, fwd_encl->pnames[fi]);
       LocalVar *mp = scope_local(m, m->pnames[i]);
       TyKind et = ep ? ep->type : TY_POLY;
       TyKind mt = mp ? mp->type : TY_POLY;
-      char txt[128]; snprintf(txt, sizeof txt, "lv_%s", rename_local(fwd_encl->pnames[i]));
+      char txt[128]; snprintf(txt, sizeof txt, "lv_%s", rename_local(fwd_encl->pnames[fi]));
       if (mt == TY_POLY && et != TY_POLY) emit_boxed_text(c, et, txt, b);
       else buf_puts(b, txt);
     }
