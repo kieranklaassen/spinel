@@ -1,0 +1,14 @@
+A boxed String Range's first and last raise RangeError on its open side
+
+    h = { a: ("aa"..), n: 1 }
+    p h[:a].last
+
+printed nil, where CRuby raises RangeError (cannot get the last
+element of endless range); p [(.."ad")].map { |r| r.first } printed
+[nil]. sp_poly_first and sp_poly_last answered a boxed String Range's
+bound without a test. Their String Range arm now tests it and raises
+for an absent one through sp_srange_open_raise.
+
+Test: test/boxed_str_range_open_first_last.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

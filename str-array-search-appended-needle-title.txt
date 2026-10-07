@@ -1,0 +1,1 @@
+A typed String Array's searches take an appended String as the needle

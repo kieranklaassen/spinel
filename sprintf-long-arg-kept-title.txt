@@ -1,0 +1,1 @@
+sp_sprintf renders a long text before it allocates the result

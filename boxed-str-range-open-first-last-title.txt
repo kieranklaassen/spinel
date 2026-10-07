@@ -1,0 +1,1 @@
+A boxed String Range's first and last raise RangeError on its open side

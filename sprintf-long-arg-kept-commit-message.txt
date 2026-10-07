@@ -1,0 +1,24 @@
+sp_sprintf renders a long text before it allocates the result
+
+    s = "ab" * 2100
+    bad = 0
+    300.times do |i|
+      t = s + i.to_s
+      bad += 1 unless t.each_byte.inspect == "#<Enumerator: " + t.inspect + ":each_byte>"
+    end
+    p bad
+
+prints 15 in a plain run; CRuby prints 0. sp_sprintf formats into a
+4,096-byte buffer on the stack. For a longer text it allocated the
+result and then formatted a second time from its arguments. A caller
+often hands it a fresh String nothing else holds (here the receiver's
+inspect), that allocation could collect it, and the second pass read
+freed bytes. The long text is now rendered into a malloc buffer first,
+in a helper of its own, and copied into the result.
+
+Cost (callgrind, gcc): a text under 4,096 bytes takes 3 instructions
+more a call, a 5 KB text 2,820 more.
+
+test/sprintf_long_arg_kept.rb joins GC_STRESS_TESTS.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

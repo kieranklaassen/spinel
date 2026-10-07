@@ -1,0 +1,1 @@
+gsub with a String and a Hash keeps its result while the match is set
