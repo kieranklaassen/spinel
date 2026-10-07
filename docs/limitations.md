@@ -720,6 +720,8 @@ Not yet shared:
 - through a Hash's `[key, value]` pairs (`h.to_a`, `h.first`, `h.min_by { }`, `k, v = h.first`, an iterator over them), a String value that is then mutated;
 - through `yield` into a capture-wrapper block, a String variable whose captured parameter appends to it without already being the shared handle, including a splatted yield;
 - through an Array's chained index into an appending block;
+- through a block, a proc or a lambda that assigns its parameter, or a local it assigned the parameter to, and appends to it while it may still hold the String (`{ |s| s ||= d; s << x }`, `t = s; t ||= d; t << x`), a String variable that is not already the shared handle;
+- through an Array literal bound to a parameter a method yields with a splat (`def y(a) = yield(*a)`, `y([s]) { |t| t << x }`), a String variable in it that is not already the shared handle;
 
 - through a retained `scrub!` result that is appended to; `scrub!` with a block is also refused because the block would be ignored;
 - through a container element, a String a boxed local holds (`s = [+"xy", 1][k]`) stored into an Array, a Hash, an instance variable's or a global's Array and mutated in place through an element read or an iterator's block parameter (`[s][0].prepend(x)`, `[s].each { |e| e << x }`);

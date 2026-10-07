@@ -48,6 +48,8 @@ test/reject/string_lent_global_rebound_block.rb
 test/reject/string_lent_ivar_rebound.rb
 test/reject/string_nested_masgn_deep.rb
 test/reject/string_nested_masgn_target.rb
+test/reject/string_proc_alias_assigned.rb
+test/reject/string_proc_param_assigned.rb
 test/reject/string_rest_splat_yield.rb
 test/reject/string_splat_changed_array.rb
 test/reject/string_splat_global_toplevel.rb
@@ -59,7 +61,10 @@ test/reject/string_thread_block_param_arg.rb
 test/reject/string_thread_global_arg.rb
 test/reject/string_thread_ivar_arg.rb
 test/reject/string_thread_method_param_arg.rb
+test/reject/string_yield_block_param_assigned.rb
 test/reject/string_yield_captured_param.rb
 test/reject/string_yield_poly_param_global.rb
+test/reject/string_yield_proc_param_assigned.rb
+test/reject/string_yield_splat_array_literal.rb
 test/reject/string_yield_splat_captured.rb
 test/reject/yield_splat_elem_append.rb
