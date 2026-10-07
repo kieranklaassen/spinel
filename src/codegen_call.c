@@ -17874,6 +17874,20 @@ int class_isa_user(Compiler *c, int k, int cid, const char *cn) {
          class_includes_module_named(c, k, cn);
 }
 
+/* An exception of a class of the program's own is an sp_Exception, boxed as
+   SP_BUILTIN_EXCEPTION, and its class is the name it carries: no class id
+   tests it. Emits the arm that asks by name, ` || (...)`, after a class-id
+   test of the boxed value `v` against class `cid`; nothing for a class that
+   is no exception. */
+void emit_poly_exc_name_arm(Compiler *c, int cid, const char *v, int exact, Buf *b) {
+  if (cid < 0 || !class_is_exc_subclass(c, cid)) return;
+  const char *rn = class_ruby_name(c, cid);
+  if (!rn) return;
+  buf_printf(b, " || (%s.tag == SP_TAG_OBJ && %s.cls_id == SP_BUILTIN_EXCEPTION && ", v, v);
+  if (exact) buf_printf(b, "strcmp(sp_poly_class_name(%s), \"%s\") == 0)", v, rn);
+  else buf_printf(b, "sp_poly_kind_of_builtin(%s, \"%s\"))", v, rn);
+}
+
 /* The runtime test for `<poly value v> is_a? <class named cn>` (exact: the
    instance_of? form, no ancestry). Shared by is_a?/kind_of?/instance_of? and by
    `Klass === poly`, which used to carry its own shorter copy of the table and
@@ -17927,7 +17941,8 @@ int emit_poly_isa_test(Compiler *c, const char *cn, const char *v, int exact, Bu
         ext = 0;
         for (int k = 0; k < c->nclasses && !ext; k++) if (comp_class_singleton_has_module(c, k, cid)) ext = 1;
       }
-      if (ext) buf_puts(b, "(");
+      int exc = class_is_exc_subclass(c, cid);
+      if (ext || exc) buf_puts(b, "(");
       buf_printf(b, "(%s.tag == SP_TAG_OBJ && (", v);
       int first = 1;
       /* a module is an ancestor of every class that includes it: an
@@ -17943,6 +17958,7 @@ int emit_poly_isa_test(Compiler *c, const char *cn, const char *v, int exact, Bu
         }
       if (first) buf_puts(b, "0");
       buf_puts(b, "))");
+      if (exc) { emit_poly_exc_name_arm(c, cid, v, exact, b); buf_puts(b, ")"); }
       if (ext) {
         buf_printf(b, " || (%s.tag == SP_TAG_CLASS && (", v);
         int any = 0;
