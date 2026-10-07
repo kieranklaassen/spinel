@@ -14268,6 +14268,12 @@ static int exc_boxed_by_class_id(Compiler *c, const char *name) {
   }
   return any;
 }
+/* Whether an exception class of the program has a != of its own. */
+int exc_class_has_own_ne(Compiler *c) {
+  for (int k = 0; k < c->nclasses; k++)
+    if (class_is_exc_subclass(c, k) && comp_method_in_chain(c, k, "!=", NULL) >= 0) return 1;
+  return 0;
+}
 /* Object's universal protocol -- ===, ==, !=, equal?, eql?, frozen?, freeze,
    and on the IO family (a File/IO/File::Stat handle, a Dir handle) to_s and
    <=> as well -- on the native handle and value kinds that have no arm of
