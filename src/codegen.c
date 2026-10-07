@@ -4680,7 +4680,7 @@ static int wb_header_has_param(const Buf *b, size_t h, const char *nm, size_t nn
   }
   return 0;
 }
-static size_t wb_stmt_end(const Buf *b, size_t q) {
+static size_t wb_stmt_end_or_value(const Buf *b, size_t q, int *is_value) {
   size_t k = q + 1, d = 0, send = 0;
   int str = 0, ch = 0;
   for (; k < b->len; k++) {
@@ -4693,12 +4693,53 @@ static size_t wb_stmt_end(const Buf *b, size_t q) {
     else if (x == ')' || x == ']' || x == '}') { if (!d) break; d--; }
     else if (x == ';' && !d) { send = k; break; }
   }
-  if (send) {                       /* not when it is a statement expression's value */
+  *is_value = 0;
+  if (send) {                       /* a statement expression's value is told apart */
     size_t k2 = send + 1;
     while (k2 < b->len && (b->p[k2] == ' ' || b->p[k2] == '\n' || b->p[k2] == '\t')) k2++;
-    if (k2 + 1 < b->len && b->p[k2] == '}' && b->p[k2+1] == ')') send = 0;
+    if (k2 + 1 < b->len && b->p[k2] == '}' && b->p[k2+1] == ')') *is_value = 1;
   }
   return send;
+}
+/* The `;` that ends the statement of the store at `q`, or 0 when there is
+   none or the statement is a statement expression's value. */
+static size_t wb_stmt_end(const Buf *b, size_t q) {
+  int is_value;
+  size_t send = wb_stmt_end_or_value(b, q, &is_value);
+  return is_value ? 0 : send;
+}
+/* The `;` that ends the store at `q` when that store is the last statement
+   of a statement expression, and so its value; 0 otherwise. */
+static size_t wb_value_end(const Buf *b, size_t q) {
+  int is_value;
+  size_t send = wb_stmt_end_or_value(b, q, &is_value);
+  return is_value ? send : 0;
+}
+/* Is the text from `from` to `to` a value built already: names, casts,
+   field reads and the box of one, with no call that can allocate? The
+   barrier can run before such a store, since nothing collects between the
+   two. Any other call, and a statement expression, says no. */
+static int wb_value_is_built(const Buf *b, size_t from, size_t to) {
+  static const char *const boxes[] = {
+    "sp_box_nullable_obj", "sp_box_obj", "sp_box_int", "sp_box_str", "sp_box_float", "sp_box_bool",
+    "sp_box_nil", "sp_box_sym", "sp_box_int_array", "sp_box_float_array", "sp_box_str_array",
+    "sp_box_poly_array", NULL};
+  for (size_t k = from; k < to; k++) {
+    char x = b->p[k];
+    if (x == '{' || x == '"' || x == '\'') return 0;
+    if (x != '(') continue;
+    size_t n = k;
+    while (n > from && (isalnum((unsigned char)b->p[n - 1]) || b->p[n - 1] == '_')) n--;
+    if (n == k) {                            /* a group; after `)` only a pointer cast's operand */
+      if (k > from + 1 && (b->p[k - 1] == ']' || (b->p[k - 1] == ')' && b->p[k - 2] != '*'))) return 0;
+      continue;
+    }
+    int ok = 0;
+    for (int j = 0; boxes[j] && !ok; j++)
+      ok = strlen(boxes[j]) == k - n && !strncmp(b->p + n, boxes[j], k - n);
+    if (!ok) return 0;
+  }
+  return 1;
 }
 /* A store rewritten at statement position is scanned on into its value, since
    a store can sit in there: `k.w = @last.w = v` is one C statement, and so is
@@ -4941,6 +4982,7 @@ static void gc_wb_insert_seg(Compiler *c, Buf *b, size_t fn_off) {
     int at_stmt = 1;
     for (size_t k = bol; k < st; k++)
       if (b->p[k] != ' ' && b->p[k] != '\t') { at_stmt = 0; break; }
+    int plain_stmt = at_stmt;
     /* `if (cond) obj->f = v;` -- the store is the whole substatement, so a
        block around it is still a statement and the barrier can follow. */
     if (!at_stmt) {
@@ -5004,6 +5046,40 @@ static void gc_wb_insert_seg(Compiler *c, Buf *b, size_t fn_off) {
          `k.w = @last.w = [a, b]` was held only by an old `@last` no minor
          mark walks, and was freed in the slot. */
       i = st + lv_end;
+      free(ins.p);
+      continue;
+    }
+    /* The last statement of a statement expression, which is how a writer
+       read for its value is emitted (`({ T *_t = recv; _t->f = rhs; })`):
+       the wrapper below would run the barrier and then the right-hand side,
+       the hazard above. There is room for statements here, so the store
+       keeps its value in a temp, the barrier follows, and the temp is the
+       expression's value:
+       T _wb = obj; typeof(_wb->f) _wv = (_wb->f = rhs); wb(_wb); _wv;
+       A value built before the store has nothing to collect in it, and
+       keeps the wrapper. */
+    size_t vend = plain_stmt ? wb_value_end(b, q) : 0;
+    if (vend && !wb_value_is_built(b, q + 1, vend)) {
+      int wid = ++g_tmp;
+      buf_printf(&ins, "__typeof__(");
+      buf_putn(&ins, b->p + st, i - st);
+      buf_printf(&ins, ") _wb%d = ", wid);
+      buf_putn(&ins, b->p + st, i - st);
+      buf_printf(&ins, "; __typeof__(_wb%d", wid);
+      buf_putn(&ins, b->p + i, e - i);
+      buf_printf(&ins, ") _wv%d = (_wb%d", wid, wid);
+      size_t lv_end = ins.len;
+      buf_putn(&ins, b->p + i, vend - i);
+      buf_printf(&ins, "); sp_gc_wb((void *)_wb%d); _wv%d;", wid, wid);
+      size_t grew2 = ins.len - (vend + 1 - st);
+      size_t tail2 = b->len - (vend + 1);
+      for (size_t g = 0; g < grew2; g++) buf_putn(b, "\0", 1);
+      memmove(b->p + st + ins.len, b->p + st + (vend + 1 - st), tail2);
+      memcpy(b->p + st, ins.p, ins.len);
+      b->p[b->len] = '\0';
+      if (st < val_end) val_end += grew2;
+      else val_end = st + ins.len;
+      i = st + lv_end;                       /* on into the value, as above */
       free(ins.p);
       continue;
     }
