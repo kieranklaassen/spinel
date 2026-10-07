@@ -89,6 +89,25 @@ int emit_call_poly_builtin_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
            one alone (#4164) */
         if (nt_type(nt, argv[k]) && sp_streq(nt_type(nt, argv[k]), "SplatNode")) {
           int sx9 = nt_ref(nt, argv[k], "expression");
+          TyKind st9 = sx9 >= 0 ? comp_ntype(c, sx9) : TY_POLY;
+          /* a splatted Range gives its members and a splatted scalar is the
+             index itself: read as an Array below, either was empty and the
+             call answered from its other indexes alone */
+          if (st9 == TY_RANGE) {
+            Buf rb9; memset(&rb9, 0, sizeof rb9); emit_expr(c, sx9, &rb9);
+            emit_indent(g_pre, g_indent);
+            buf_printf(g_pre, "sp_poly_values_at_range(_t%d, %s);\n", ti9, rb9.p ? rb9.p : "");
+            free(rb9.p);
+            continue;
+          }
+          if (splat_operand_is_scalar(st9) && st9 != TY_NIL) {
+            Buf vb9; memset(&vb9, 0, sizeof vb9);
+            emit_boxed(c, sx9, &vb9);
+            emit_indent(g_pre, g_indent);
+            buf_printf(g_pre, "sp_PolyArray_push(_t%d, %s);\n", ti9, vb9.p ? vb9.p : "sp_box_nil()");
+            free(vb9.p);
+            continue;
+          }
           int ts9 = ++g_tmp, tj9 = ++g_tmp;
           emit_indent(g_pre, g_indent);
           buf_printf(g_pre, "sp_PolyArray *_t%d = sp_poly_to_poly_array(", ts9);
