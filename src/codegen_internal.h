@@ -1753,6 +1753,7 @@ void emit_index_and_or_write(Compiler *c, int id, Buf *b, int indent, int is_or)
 int scope_has_return(Compiler *c, int scope_idx);
 int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr);
 int emit_inline_call(Compiler *c, int id, Buf *b, int indent);
+int emit_inline_call_sn(Compiler *c, int id, Buf *b, int indent);
 int emit_poly_recv_block_dispatch(Compiler *c, int id, Buf *b, int indent);
 int emit_poly_recv_block_value(Compiler *c, int id, Buf *b);
 int is_block_call(Compiler *c, int id);

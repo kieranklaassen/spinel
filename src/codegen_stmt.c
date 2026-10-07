@@ -11256,7 +11256,7 @@ static int emit_call_stmt(Compiler *c, int id, Buf *b, int indent, const NodeTab
     return 1;
   }
   if (emit_output_call(c, id, b, indent)) return 1;
-  if (emit_inline_call(c, id, b, indent)) return 1;
+  if (emit_inline_call_sn(c, id, b, indent) || emit_inline_call(c, id, b, indent)) return 1;
   if (emit_poly_recv_block_dispatch(c, id, b, indent)) return 1;
   /* emit_inline_call is the inliner for a user method that yields; if it
      declined this block-driving call, no plain-call fallback is valid (a

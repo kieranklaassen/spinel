@@ -3697,6 +3697,9 @@ static int call_targets_yielding_method(Compiler *c, int id) {
 }
 
 int emit_inline_expr(Compiler *c, int id, Buf *b) {
+  /* a `&.` call whose guard is pending is spliced when the guard re-enters
+     (emit_call_safe_nav_arms), not on the nil */
+  if (sn_guard_pending(c, id)) return 0;
   /* only when a value is actually produced (scalar return) */
   TyKind rt = repr_of(c, id).as_ty;
   if (!is_scalar_ret(rt)) {
@@ -4868,8 +4871,10 @@ static int emit_iteration_stmt_body(Compiler *c, int id, Buf *b, int indent);
    skips a nil, re-entering with g_sn_skip set so the guard is not asked
    again. Answers what the inner emission answers; when it declines, nothing
    is written: the statements the receiver hoisted are taken back too, or the
-   plain emission that follows would run them a second time. */
-static int emit_iteration_stmt_sn(Compiler *c, int id, Buf *b, int indent) {
+   plain emission that follows would run them a second time. `body` is the
+   emission the guard goes around. */
+static int emit_iteration_stmt_sn(Compiler *c, int id, Buf *b, int indent,
+                                  int (*body)(Compiler *, int, Buf *, int)) {
   const NodeTable *nt = c->nt;
   int recv = nt_ref(nt, id, "receiver");
   if (recv < 0 || g_n_argov >= MAX_ARG_OVERRIDE) return -1;
@@ -4894,7 +4899,7 @@ static int emit_iteration_stmt_sn(Compiler *c, int id, Buf *b, int indent) {
   else buf_printf(&gb, " if (_sn%d != NULL) {\n", t);
   int slot = view_bind(recv, "_sn%d", t);
   int sv = g_sn_skip; g_sn_skip = id;
-  int ok = emit_ivar_nil_guarded(c, id, &gb, indent + 1, emit_iteration_stmt_body);
+  int ok = emit_ivar_nil_guarded(c, id, &gb, indent + 1, body);
   g_sn_skip = sv;
   view_unbind(slot);
   emit_indent(&gb, indent);
@@ -4907,10 +4912,25 @@ static int emit_iteration_stmt_sn(Compiler *c, int id, Buf *b, int indent) {
 
 int emit_iteration_stmt(Compiler *c, int id, Buf *b, int indent) {
   if (sn_guard_pending(c, id)) {
-    int r = emit_iteration_stmt_sn(c, id, b, indent);
+    int r = emit_iteration_stmt_sn(c, id, b, indent, emit_iteration_stmt_body);
     if (r >= 0) return r;
   }
   return emit_ivar_nil_guarded(c, id, b, indent, emit_iteration_stmt_body);
+}
+
+/* A `&.` call of a method that yields, as a statement. emit_inline_call and
+   emit_poly_recv_block_dispatch splice the method's body in place and never
+   look at the operator, so the method ran, and its block with it, on a nil
+   receiver, and a receiver of several classes raised NoMethodError for the
+   nil. The guard of a `&.` iterator goes around the spliced body. */
+static int emit_yield_splice_stmt(Compiler *c, int id, Buf *b, int indent) {
+  return emit_inline_call(c, id, b, indent) || emit_poly_recv_block_dispatch(c, id, b, indent);
+}
+int emit_inline_call_sn(Compiler *c, int id, Buf *b, int indent) {
+  int cand[64];
+  if (!sn_guard_pending(c, id)) return 0;
+  if (!call_targets_yielding_method(c, id) && !poly_block_dispatch_cands(c, id, cand, 64)) return 0;
+  return emit_iteration_stmt_sn(c, id, b, indent, emit_yield_splice_stmt) > 0;
 }
 /* Block parameter pj of an each_slice / each_cons row: element pj of the
    row that starts at `_t<ti>` of the array `_t<ta>` (of kind k and type rt)
