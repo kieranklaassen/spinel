@@ -6440,7 +6440,7 @@ int emit_lent_local(LocalVar *lv, const char *vn, Buf *out) {
     buf_printf(out, "&lv_%s", srn);
     return 1;
   }
-  if (g_cap_struct && g_cap_names && nameset_has(g_cap_names, vn)) {
+  if (local_is_capture(vn)) {
     /* a capture of another type has a cell of that type, no String slot */
     if (lv && lv->type != TY_STRING) return 0;
     /* inside a proc body: the capture struct holds the cell pointer */

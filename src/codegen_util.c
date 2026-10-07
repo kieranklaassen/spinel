@@ -1608,7 +1608,7 @@ void emit_scope_local_ref(Compiler *c, Scope *s, const char *name, Buf *b) {
     buf_printf(b, "lv_%s", rn);
     return;
   }
-  if (g_cap_struct && g_cap_names && nameset_has(g_cap_names, name)) {
+  if (local_is_capture(name)) {
     /* A TY_PROC capture is stored as (sp_int)(uintptr_t)sp_Proc* in the cell.
        Cast it back to sp_Proc* so call sites work. A heap-object cell is a real
        typed pointer, so its deref is already the right lvalue (no cast). */
@@ -2647,6 +2647,14 @@ const char *rename_local_cell(const char *nm) {
   for (int i = g_nren - 1; i >= 0; i--)
     if (sp_streq(g_ren_from[i], nm) && !sb_shim_shadow(nm, g_ren_to[i])) return g_ren_to[i];
   return nm;
+}
+/* Is `nm` a capture of the proc function being emitted? A local of a
+   method inlined in that body is not, whatever the proc captures under the
+   same name: the rename map holds the method's own, and the capture is out
+   of scope until the inline ends (a block the method yields to is emitted
+   with the map parked, and reads the capture again). */
+int local_is_capture(const char *nm) {
+  return g_cap_struct && g_cap_names && nm && nameset_has(g_cap_names, nm) && rename_local_cell(nm) == nm;
 }
 const char *rename_local(const char *nm) {
   /* Innermost first. A nested inline pushes its own locals above the caller's,

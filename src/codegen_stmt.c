@@ -1203,13 +1203,13 @@ static const char *nil_sentinel(TyKind t) {
 static int emit_proc_cell_lvalue(Compiler *c, int scope_node, const char *nm, Buf *b) {
   LocalVar *lv = nm ? scope_local(comp_scope_of(c, scope_node), nm) : NULL;
   if (!lv || lv->type != TY_PROC) return 0;
-  int captured = g_cap_struct && g_cap_names && nameset_has(g_cap_names, nm);
+  int captured = local_is_capture(nm);
   if (!lv->is_cell && !captured) return 0;
   /* Parenthesised deref, which is what gc_wb_cells matches: a bare `*_cell_x`
      is the one cell store shape its `(*X) =` scan does not see, so a Proc went
      into an already-old cell with no barrier at all (see emit_assign). */
   if (captured) buf_printf(b, "(*((%s *)_cap)->c_%s)", g_cap_struct, nm);
-  else buf_printf(b, "(*_cell_%s)", nm);
+  else buf_printf(b, "(*_cell_%s)", rename_local_cell(nm));
   buf_puts(b, " = (sp_int)(uintptr_t)(");
   return 1;
 }
@@ -2163,17 +2163,16 @@ void emit_assign(Compiler *c, int id, Buf *b, int indent) {
      is a typed pointer whose deref is already assignable, so it takes the
      ordinary `emit_local_ref = value` path below. */
   int laundered_cell = lv && lv->type == TY_PROC;
-  if (laundered_cell &&
-      (lv->is_cell || (g_cap_struct && g_cap_names && nameset_has(g_cap_names, nm)))) {
+  if (laundered_cell && (lv->is_cell || local_is_capture(nm))) {
     /* Parenthesised, so gc_wb_cells sees this store: it matches `(*X) =`, and
        the bare `*_cell_x` this used to emit was invisible to it -- the cell is
        hoisted to scope entry, so it is old by the time a Proc is stored into
        it, and the young Proc was on no remembered set. A minor mark does not
        walk the old list, so it was swept while live. */
-    if (g_cap_struct && g_cap_names && nameset_has(g_cap_names, nm))
+    if (local_is_capture(nm))
       buf_printf(b, "(*((%s *)_cap)->c_%s)", g_cap_struct, nm);
     else
-      buf_printf(b, "(*_cell_%s)", nm);
+      buf_printf(b, "(*_cell_%s)", rename_local_cell(nm));
     buf_puts(b, " = (sp_int)(uintptr_t)(");
     const char *pvty = nt_type(c->nt, v);
     if (pvty && sp_streq(pvty, "NilNode")) buf_puts(b, "NULL");
@@ -2185,8 +2184,7 @@ void emit_assign(Compiler *c, int id, Buf *b, int indent) {
      variable (emit_inline_call_x): a plain rebind is the callee's own new
      binding, so it repoints the cell at the expansion's private local and
      the caller's variable keeps what the body appended before it. */
-  if (lv && lv->is_param && lv->is_cell && lv->inline_alias &&
-      !(g_cap_struct && g_cap_names && nameset_has(g_cap_names, nm))) {
+  if (lv && lv->is_param && lv->is_cell && lv->inline_alias && !local_is_capture(nm)) {
     const char *arn = rename_local(nm);
     buf_printf(b, "(*(_cell_%s = &lv_%s))", arn, arn);
   }

@@ -973,6 +973,7 @@ void emit_yblk_ref(Buf *b);
 void emit_tail_lead(Buf *b);
 const char *rename_local(const char *nm);
 const char *rename_local_cell(const char *nm);
+int local_is_capture(const char *nm);   /* a capture of the proc being emitted, not an inlined method's local */
 int sb_shim_shadow(const char *name, const char *rn);
 typedef struct { TyKind type, shim_ty; int shim_lift; } SbShimSave;
 SbShimSave sb_shim_enter(LocalVar *lv);

@@ -6632,7 +6632,7 @@ static void emit_fiber_new_here(Compiler *c, int id, Buf *b, int as_gen, int siz
          `keep { i }; i += 100; keep { i }` had the second fill copy the
          loop's stale slot over the 100 the first proc was to see. */
       emit_indent(g_pre, g_indent);
-      if (g_cap_struct && g_cap_names && nameset_has(g_cap_names, caps.v[i]))
+      if (local_is_capture(caps.v[i]))
         buf_printf(g_pre, "_t%d->c_%s = ((%s *)_cap)->c_%s;\n", tc, caps.v[i], g_cap_struct, caps.v[i]);
       else if (lv && lv->is_cell)
         /* the rename resolved above, before the fiber body's own emission
@@ -8312,7 +8312,7 @@ else if (orecv >= 0 && onm) {
       for (int i = 0; i < ncap; i++) {
         /* no shadow publish here either: see the fiber/thread fill above */
         emit_indent(g_pre, g_indent);
-        if (g_cap_struct && g_cap_names && nameset_has(g_cap_names, caps.v[i]))
+        if (local_is_capture(caps.v[i]))
           buf_printf(g_pre, "_capv_%d->c_%s = ((%s *)_cap)->c_%s;\n", pid, caps.v[i], g_cap_struct, caps.v[i]);
         else
           /* as the sibling site above, minus a shim's shadow rename: it names no cell */
