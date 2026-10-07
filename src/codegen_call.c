@@ -22763,12 +22763,116 @@ int emit_spread_args_kw(Compiler *c, const int *argv, int argc, char *kwpos, siz
 }
 
 int emit_spread_args(Compiler *c, const int *argv, int argc) {
+  g_splat_callee = "";   /* a literal block, bound in place */
   return emit_spread_args_into(c, argv, argc, NULL);
+}
+
+/* What the spread list being built is for, set by the caller and taken by
+   emit_spread_args_into as it starts: the C text of the Proc it calls, ""
+   for a literal block, NULL for a Method or a callee not in hand. */
+const char *g_splat_callee = NULL;
+
+/* In a program with no way to a #to_a, a splatted value that is no
+   collection is the argument itself (sp_splat_arg_items), a boxed one
+   decided at run time. The kind asked is the operand's own, never what its
+   #to_a call answers. Every other kind is spread as before; so is a
+   String, which would arrive in the list as a copy. */
+/* Did the program itself write class `cid` and every class and module above
+   it? Only of such a class does a missing #to_a say CRuby's has none: a
+   class of packages/ is what Spinel wrote of CRuby's (a Tempfile, a StringIO
+   and a Zlib reader answer #to_a there and have none here), and a native
+   class is C. A class that no `class` or `module` of the program opens and
+   no constant of it holds (a Struct in a local) keeps the form it had. */
+static int splat_class_own_at(Compiler *c, int cid, int depth) {
+  if (cid < 0 || cid >= c->nclasses || depth > 64 || c->splat_cls_from[c->nclasses]) return 0;
+  for (int u = cid; u >= 0; u = c->classes[u].parent) {
+    const ClassInfo *ci = &c->classes[u];
+    if (c->splat_cls_from[u] != 1 || ci->is_native_class) return 0;
+    for (int i = 0; i < ci->nincluded_mods; i++)
+      if (!splat_class_own_at(c, ci->included_mods[i], depth + 1)) return 0;
+  }
+  return 1;
+}
+
+int splat_class_is_own(Compiler *c, int cid) {
+  const NodeTable *nt = c->nt;
+  if (c->splat_cls_from_n != c->nclasses + 1) {
+    free(c->splat_cls_from);
+    c->splat_cls_from = calloc((size_t)c->nclasses + 1, 1);
+    c->splat_cls_from_n = c->nclasses + 1;
+    for (int id = 0; id < nt->count; id++) {
+      NodeKind k = nt_kind(nt, id);
+      if (k != NK_ClassNode && k != NK_ModuleNode) continue;
+      int cp = nt_ref(nt, id, "constant_path");
+      const char *nm = cp >= 0 ? nt_str(nt, cp, "name") : NULL;
+      int ci = nm ? comp_class_index(c, nm) : -1;
+      if (ci >= 0) c->splat_cls_from[ci] |= nt_int(nt, id, "node_pkg", 0) ? 2 : 1;
+    }
+    /* `Point = Struct.new(:x)`, `Point = Data.define(:x)`: where the constant is written */
+    for (int i = 0; i < c->nclasses; i++) {
+      int dn = c->classes[i].def_node;
+      if (dn >= 0 && nt_kind(nt, dn) == NK_ConstantWriteNode)
+        c->splat_cls_from[i] |= nt_int(nt, dn, "node_pkg", 0) ? 2 : 1;
+    }
+    /* `prepend M` is recorded on no class: a program that prepends what it
+       did not write keeps every object's form (the last slot says so) */
+    NT_FOREACH_KIND(nt, NK_CallNode, id) {
+      if (nt_ref(nt, id, "receiver") >= 0 || !sp_streq(nt_str(nt, id, "name"), "prepend")) continue;
+      int an = 0, args = nt_ref(nt, id, "arguments");
+      const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+      int own = an > 0;
+      for (int k = 0; k < an && own; k++) {
+        NodeKind ak = nt_kind(nt, av[k]);
+        const char *nm = ak == NK_ConstantReadNode || ak == NK_ConstantPathNode
+                       ? nt_str(nt, av[k], "name") : NULL;
+        own = nm && splat_class_own_at(c, comp_class_index(c, nm), 0);
+      }
+      if (!own) c->splat_cls_from[c->nclasses] = 1;
+    }
+  }
+  /* a module included at the top level is above every class */
+  for (int i = 0; i < c->ntoplevel_includes; i++)
+    if (!splat_class_own_at(c, c->toplevel_includes[i], 0)) return 0;
+  return splat_class_own_at(c, cid, 0);
+}
+
+static int splat_arg_is_one(Compiler *c, int sx) {
+  const NodeTable *nt = c->nt;
+  const char *sn = sx >= 0 && nt_kind(nt, sx) == NK_CallNode ? nt_str(nt, sx, "name") : NULL;
+  TyKind st = sx >= 0 && !(sn && sp_streq(sn, "to_a")) ? comp_ntype(c, sx) : TY_UNKNOWN;
+  return ty_is_object(st) ? splat_class_is_own(c, ty_object_class(st)) &&
+                            splat_operand_is_plain_object(c, st)
+       : (st == TY_INT || st == TY_BIGINT || st == TY_FLOAT || st == TY_SYMBOL ||
+          st == TY_BOOL || st == TY_CLASS || st == TY_POLY) &&
+         !splat_program_may_make_to_a(c);
+}
+
+/* Is every argument, a splat's operand too, a plain read (subtree_is_pure_read)? */
+int spread_args_pure_reads(Compiler *c, const int *argv, int argc) {
+  const NodeTable *nt = c->nt;
+  for (int k = 0; k < argc; k++) {
+    int splat = nt_kind(nt, argv[k]) == NK_SplatNode;
+    if (!subtree_is_pure_read(c, splat ? nt_ref(nt, argv[k], "expression") : argv[k])) return 0;
+  }
+  return 1;
+}
+
+/* Does a splat among the arguments hand such a value over as itself? */
+int spread_args_take_one(Compiler *c, const int *argv, int argc) {
+  const NodeTable *nt = c->nt;
+  for (int k = 0; k < argc; k++) {
+    if (nt_kind(nt, argv[k]) != NK_SplatNode) continue;
+    if (splat_arg_is_one(c, nt_ref(nt, argv[k], "expression"))) return 1;
+  }
+  return 0;
 }
 
 /* kwflag: a C int set to 2 when a trailing keyword-splat-only hash is pushed */
 int emit_spread_args_into(Compiler *c, const int *argv, int argc, const char *kwflag) {
   const NodeTable *nt = c->nt;
+  /* taken here: an argument's own call builds its own list */
+  const char *callee = g_splat_callee;
+  g_splat_callee = NULL;
   g_needs_proc_poly_argslot = 1;
   int ta = ++g_tmp;
   emit_indent(g_pre, g_indent);
@@ -22780,11 +22884,20 @@ int emit_spread_args_into(Compiler *c, const int *argv, int argc, const char *kw
       int sx = nt_ref(nt, argv[k], "expression");
       if (sx >= 0) emit_boxed(c, sx, &ab);
       int ts = ++g_tmp, ti = ++g_tmp;
+      /* one value that is no collection (splat_arg_is_one) is the argument
+         itself for a block or a proc; a lambda's call and a Method's keep
+         the list they had, a Proc asked at run time which it is */
+      int one = callee && splat_arg_is_one(c, sx);
+      const char *items = !one ? "sp_enum_items_from"
+                        : callee[0] ? "sp_splat_arg_items_of" : "sp_splat_arg_items";
       emit_indent(g_pre, g_indent);
-      buf_printf(g_pre, "{ sp_PolyArray *_t%d = sp_enum_items_from(%s); SP_GC_ROOT(_t%d);"
+      if (one) c->splat_own_used = 1;
+      buf_printf(g_pre, "{ sp_PolyArray *_t%d = %s(%s%s%s%s); SP_GC_ROOT(_t%d);"
                         " for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++)"
                         " sp_PolyArray_push(_t%d, _t%d->data[_t%d]); }\n",
-                 ts, ab.p ? ab.p : "sp_box_nil()", ts, ti, ti, ts, ti, ta, ts, ti);
+                 ts, items, one ? callee : "", one && callee[0] ? ", " : "",
+                 ab.p ? ab.p : "sp_box_nil()", one ? ", sp_splat_own_cls" : "",
+                 ts, ti, ti, ts, ti, ta, ts, ti);
     }
     else {
       emit_boxed(c, argv[k], &ab);

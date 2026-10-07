@@ -9289,7 +9289,7 @@ static int splat_program_walk_for_to_a(Compiler *c) {
 
 /* One walk a program: the answer is kept on the compiler, and asked again
    only while the classes and methods are still being counted. */
-static int splat_program_may_make_to_a(Compiler *c) {
+int splat_program_may_make_to_a(Compiler *c) {
   if (c->splat_to_a_may) return 1;
   if (c->splat_to_a_ncls == c->nclasses + 1 && c->splat_to_a_nscopes == c->nscopes + 1) return 0;
   c->splat_to_a_ncls = c->nclasses + 1;
@@ -9302,7 +9302,7 @@ static int splat_program_may_make_to_a(Compiler *c) {
    the one value, itself? No class above it may be a Struct, a Data or a
    native class, and the program must have no way to a to_a anywhere. Any
    other object keeps the form it had. */
-static int splat_operand_is_plain_object(Compiler *c, TyKind t) {
+int splat_operand_is_plain_object(Compiler *c, TyKind t) {
   if (!ty_is_object(t)) return 0;
   int cid = ty_object_class(t);
   if (cid < 0 || cid >= c->nclasses) return 0;
