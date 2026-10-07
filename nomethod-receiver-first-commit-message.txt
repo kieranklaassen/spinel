@@ -1,0 +1,41 @@
+A call no method answers runs its receiver before its arguments
+
+    def recv = (puts "recv"; ARGV.size > 5 ? "s" : 5)
+    def tick(n) = (puts "tick #{n}"; n)
+    begin
+      recv.zork(tick(1), tick(2))
+    rescue NoMethodError
+      puts "no zork"
+    end
+
+printed "tick 1", "tick 2", "recv" when built with gcc, where CRuby
+prints "recv" first.
+
+emit_unresolved_call hands the receiver and the arguments of such a
+call to the error in one C call, sp_nomethod_msg_args("zork",
+<receiver>, n, (sp_RbVal[]){<arguments>}). C leaves the order of a
+call's arguments open, and gcc ran the list before the receiver.
+Nothing held one of them either while the next was made: with
+SPINEL_GC_STRESS=2
+
+    r.zork("a" + x, "b" + x)
+
+aborts with "the mark reached a freed heap string", the first String
+freed while the second is built. With SPINEL_GC_STRESS=1 the new test
+runs to its end and the arguments of `5.zork("a" + x, mk(x), "c" + x)`
+read ["abc", [...], "cbc"].
+
+Where a receiver and an argument both run, or two arguments are
+temporaries and one is a heap value, the receiver and then each
+argument is bound to a rooted temporary first, with
+emit_rooted_arg_list, as the boxed key-list builtins bind theirs. A
+temporary is a call that is more than a read, an interpolated String,
+and an Array or Hash literal that holds one.
+
+Every other call compiles to the C it did: of the 6,420 programs of
+the corpus the generated C of one changes, the new test.
+
+Test: test/nomethod_runs_receiver_first.rb, also one of
+GC_STRESS_TESTS.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

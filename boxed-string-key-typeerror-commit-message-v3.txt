@@ -1,0 +1,28 @@
+A boxed String raises TypeError for a key that is no index
+
+`s[:a] = "x"` on a boxed value holding a String went on in silence: the
+store was dropped and the String read back as it was. CRuby raises
+TypeError, no implicit conversion of Symbol into Integer. The same for a
+nil, true, false, Array or Hash key.
+
+    def pick(n) = n > 0 ? {a: 1} : +"st"
+    s = pick(0)
+    s[:a] = "x"     # TypeError in CRuby; went on, s still "st"
+
+The boxed stores have no String arm. sp_poly_set_sym (a Symbol key) and
+sp_poly_set_poly (a boxed key, any key beside a class that owns `[]=`)
+answer the value for a receiver that is no object, and a shared String
+fell to `default:`. A boxed Array given such a key already raises this
+TypeError; a String receiver now does too, plain or shared
+(sp_poly_str_key_refuse).
+
+Where the program gives String a `[]=` of its own, or a module it
+includes or prepends does, the key is that method's to take: the stores
+are left as they were (sp_str_own_aset, set at startup).
+
+An Integer, a Float, a String, a Regexp and a Range are String#[]='s own
+keys and are not touched: where they reach these two functions they do
+what they did. A receiver that is an object runs the code it ran, with
+no added test.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
