@@ -1589,7 +1589,12 @@ int emit_gsub_block_expr(Compiler *c, int id, Buf *b) {
   g_indent = save;
   emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "sp_String_append_bin(_t%d, %s);\n", tout, vb.p ? vb.p : "\"\""); free(vb.p);
   if (once) {
-    emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "sp_String_append_n(_t%d, _t%d + _t%d + _t%d, (size_t)(_t%d - _t%d - _t%d)); break;\n", tout, ts, tpos, tme, tslen, tpos, tme);
+    /* A String pattern is sought by strstr, which reads it to its first NUL,
+       while the match's end is taken from the pattern's byte length: with a
+       NUL in the pattern the end can lie past the subject's end, and there is
+       no tail then. */
+    emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "if (_t%d + _t%d < _t%d) sp_String_append_n(_t%d, _t%d + _t%d + _t%d, (size_t)(_t%d - _t%d - _t%d));\n", tpos, tme, tslen, tout, ts, tpos, tme, tslen, tpos, tme);
+    emit_indent(g_pre, g_indent + 1); buf_puts(g_pre, "break;\n");
   }
   else {
     emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "if (_t%d == _t%d) { if (_t%d + _t%d < _t%d) sp_String_append_n(_t%d, _t%d + _t%d + _t%d, 1); _t%d += _t%d + 1; }\n",
