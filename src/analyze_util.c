@@ -2104,7 +2104,7 @@ int scope_joined_tail(Compiler *c, int mi) {
   int last = scope_body_last(c, mi);
   if (last < 0 || block_given_tail_then_last(c, last) >= 0) return -1;
   int u = an_unparen(nt, last);
-  if (u < 0 || nt_kind(nt, u) == NK_YieldNode || is_blk_param_call(c, u, mi)) return -1;
+  if (u < 0 || nt_kind(nt, last) == NK_YieldNode || is_blk_param_call(c, u, mi)) return -1;
   if (value_arm_has_sequence(nt, last)) return -1;
   return last;
 }
