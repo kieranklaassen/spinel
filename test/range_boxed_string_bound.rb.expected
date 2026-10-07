@@ -1,0 +1,20 @@
+ArgumentError: bad value for range
+ArgumentError: bad value for range
+ArgumentError: bad value for range
+ArgumentError: bad value for range
+ArgumentError: bad value for range
+ArgumentError: bad value for range
+ArgumentError: bad value for range
+ArgumentError: bad value for range
+NotImplementedError: a Range with a String end decided at run time is not supported by spinel
+NotImplementedError: a Range with a String begin decided at run time is not supported by spinel
+NotImplementedError: a Range with a String begin decided at run time is not supported by spinel
+NotImplementedError: a Range with a Symbol begin decided at run time is not supported by spinel
+NotImplementedError: a Range with a String end decided at run time is not supported by spinel
+NotImplementedError: a Range with a String begin decided at run time is not supported by spinel
+[1, 2, 3]
+[3, 4, 5]
+[3]
+[1, 2]
+[1, 2]
+123:done

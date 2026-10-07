@@ -3849,12 +3849,19 @@ const char *sp_srange_max_v(sp_StrRange r) {
   if (r.first && strcmp(r.first, r.last) > 0) return NULL;
   return r.last;
 }
+/* #first of a beginless String Range, #last of an endless one: CRuby's
+   RangeError (#begin / #end answer nil there). */
+void sp_srange_open_raise(int last) {
+  sp_raise_cls("RangeError", last ? "cannot get the last element of endless range"
+                                  : "cannot get the first element of beginless range");
+}
 const char *sp_srange_to_s(sp_StrRange r) {
   return sp_sprintf("%s%s%s", r.first ? r.first : sp_str_empty,
                     r.excl ? "..." : "..", r.last ? r.last : sp_str_empty);
 }
 const char *sp_srange_inspect(sp_StrRange r) {
   const char *lo = r.first ? sp_str_inspect(r.first) : sp_str_empty;
+  SP_GC_ROOT_STR(lo);   /* the end's inspect allocates */
   const char *hi = r.last ? sp_str_inspect(r.last) : sp_str_empty;
   return sp_sprintf("%s%s%s", lo, r.excl ? "..." : "..", hi);
 }

@@ -1,5 +1,6 @@
 #include "compiler.h"
 #include "share.h"
+#include "builtin_names.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -248,6 +249,12 @@ void comp_free(Compiler *c) {
   if (!c) return;
   share_facts_free(c);
   share_routes_free(c);
+  free(c->vs_head); free(c->vs_site); free(c->vs_var); free(c->vs_next); free(c->vs_kind);
+  free(c->vs_rparent); free(c->vs_dropped);
+  c->vs_head = c->vs_site = c->vs_var = c->vs_next = c->vs_rparent = NULL;
+  c->vs_dropped = c->vs_kind = NULL;
+  c->vs_count = c->vs_cap = 0;
+  c->vs_built = 0;
   free(c->hash_default_arg_memo);
   c->hash_default_arg_memo = NULL;
   free(c->blk_body_map);
@@ -299,6 +306,7 @@ void comp_free(Compiler *c) {
   for (int i = 0; i < c->nconsts; i++) free(c->consts[i].name);
   free(c->consts);
   free(c->toplevel_includes);
+  free(c->ary_viewed);
   for (int i = 0; i < c->n_ffi_sources; i++) {
     free(c->ffi_sources[i].mod);
     free(c->ffi_sources[i].val);
@@ -499,6 +507,12 @@ static int sp_name_collides_runtime(const char *n) {
        rational and socket-option carriers, IO::Buffer's and Process::Status's */
     "Tms", "StrRange", "FloatRange", "BigRational", "RbValue", "SockOpt",
     "ProcessStatus", "IOBuffer",
+    /* Classes the runtime builds in C. A reopening is refused, but a NEW class
+       of that name (`App::Mutex`, or OpenStruct without require "ostruct")
+       would clash with the runtime's C names. The builtin-name checks read
+       the Ruby name, not this stem, so mangling is safe here. */
+    "Monitor", "Mutex", "Queue", "SizedQueue", "ConditionVariable", "Encoding",
+    "OpenStruct",
     NULL };
   for (int i = 0; reserved[i]; i++) if (sp_streq(n, reserved[i])) return 1;
   return 0;
@@ -836,6 +850,106 @@ int comp_method_in_chain(Compiler *c, int class_id, const char *name, int *def_c
     if (mi >= 0) { if (def_class) *def_class = cid; return mi; }
   }
   return -1;
+}
+
+int comp_ary_root(Compiler *c, int cid) {
+  return cid >= 0 && cid < c->nclasses ? c->classes[cid].ary_root - 1 : -1;
+}
+int comp_ty_ary_root(Compiler *c, TyKind t) {
+  return ty_is_object(t) ? comp_ary_root(c, ty_object_class(t)) : -1;
+}
+/* An Array subclass nothing is ever put into holds boxed values, as an empty
+   `[]` that never settles does. While the inference is still optimistic an
+   unsettled kind stays unknown, so a later push can still narrow it. */
+TyKind comp_ary_kind(Compiler *c, int cid) {
+  int r = comp_ary_root(c, cid);
+  if (r < 0) return TY_UNKNOWN;
+  TyKind k = c->classes[r].ary_kind;
+  return k == TY_UNKNOWN && !g_infer_optimistic ? TY_POLY_ARRAY : k;
+}
+
+int builtin_instance_method_known(const char *cls, const char *m);
+/* A name an Array answers: its own methods and Enumerable's, and the
+   Object methods it answers as the Array (#7449). */
+int comp_array_method_name(const char *n) {
+  return builtin_instance_method_known("Array", n) || is_arysub_kernel_name(n);
+}
+/* Whether a call named n on an instance of Array subclass cid is Array's:
+   no method, reader or writer of the class chain takes the name, it asks
+   nothing about the object itself, and Array (or Enumerable, which Array
+   includes) has it. */
+int comp_arysub_name_is_array(Compiler *c, int cid, const char *n) {
+  if (comp_ary_root(c, cid) < 0 || !n) return 0;
+  if (comp_method_in_chain(c, cid, n, NULL) >= 0 || comp_reader_in_chain(c, cid, n, NULL)) return 0;
+  size_t l = strlen(n);
+  if (l > 1 && n[l - 1] == '=' && n[l - 2] != '=' && n[l - 2] != '!' && n[l - 2] != '<' &&
+      n[l - 2] != '>' && n[l - 2] != '[') {
+    char base[256];
+    snprintf(base, sizeof base, "%.*s", (int)(l - 1), n);
+    if (comp_writer_in_chain(c, cid, base, NULL)) return 0;
+  }
+  return !is_arysub_object_name(n) && comp_array_method_name(n);
+}
+/* Whether call `id` on a receiver of type rt, an Array subclass instance, is
+   Array's (comp_arysub_name_is_array), or a `super` into Array was rewritten
+   into it (builtin_only). *kind is the embedded Array's kind to answer it as. */
+int comp_arysub_call(Compiler *c, int id, TyKind rt, TyKind *kind) {
+  int cid = ty_is_object(rt) ? ty_object_class(rt) : -1;
+  if (comp_ary_root(c, cid) < 0 || nt_kind(c->nt, id) != NK_CallNode) return 0;
+  const char *n = nt_str(c->nt, id, "name");
+  if (!n) return 0;
+  if (!nt_int(c->nt, id, "builtin_only", 0) && !comp_arysub_name_is_array(c, cid, n)) return 0;
+  *kind = comp_ary_kind(c, cid);
+  return 1;
+}
+/* The builtin-op row flags of call `id` on an Array (#7449): what it answers
+   (bop_answers_self) or, with args_builtin, whether it reads an Array
+   argument as an Array (bop_args_as_builtin). Every Array kind reads the
+   same family rows. */
+static int arysub_call_flags(Compiler *c, int id, int args_builtin) {
+  const char *n = nt_str(c->nt, id, "name");
+  int args = nt_ref(c->nt, id, "arguments"), argc = 0;
+  if (!n) return 0;
+  if (args >= 0) nt_arr(c->nt, args, "arguments", &argc);
+  int blk = nt_ref(c->nt, id, "block") >= 0;
+  return args_builtin ? bop_args_as_builtin(TY_POLY_ARRAY, n, argc, blk)
+                      : bop_answers_self(TY_POLY_ARRAY, n, argc, blk);
+}
+int comp_arysub_answer(Compiler *c, int id) { return arysub_call_flags(c, id, 0); }
+/* Array's answer to call `id` is its receiver -- always (BOPF_SELF) or when
+   it changed it (BOPF_SELF_OR_NIL) -- so on an Array subclass instance it
+   is the instance (#7449). */
+int comp_arysub_self_result(Compiler *c, int id) {
+  return (comp_arysub_answer(c, id) & (BOPF_SELF | BOPF_SELF_OR_NIL)) != 0;
+}
+
+/* Whether the arguments of call `id`, on a receiver of type rt (-1: none),
+   are read as Arrays, so an Array subclass instance among them is its Array
+   (#7449): the methods of an Array receiver that compare, combine or copy
+   another Array (BOPF_ARGS_BUILTIN) -- not the stores, which keep the
+   instance itself as an element -- and Kernel#puts, which prints an Array's
+   elements. */
+int comp_arysub_args_viewed(Compiler *c, int id, TyKind rt) {
+  const NodeTable *nt = c->nt;
+  const char *n = nt_str(nt, id, "name");
+  if (!n || nt_kind(nt, id) != NK_CallNode) return 0;
+  if (nt_ref(nt, id, "receiver") < 0)
+    return sp_streq(n, "puts") && comp_method_index(c, n) < 0;
+  return array_new_copies(rt) && arysub_call_flags(c, id, 1);
+}
+
+/* `Array(x)`: of an Array subclass instance x it is x itself (Kernel#Array
+   takes an Array as it is, #7449). x's node, else -1; the caller asks x's
+   type. */
+int comp_arysub_kernel_array(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  const char *n = nt_kind(nt, id) == NK_CallNode ? nt_str(nt, id, "name") : NULL;
+  if (!n || !sp_streq(n, "Array") || nt_ref(nt, id, "receiver") >= 0 || nt_ref(nt, id, "block") >= 0 ||
+      comp_method_index(c, n) >= 0) return -1;
+  int args = nt_ref(nt, id, "arguments"), an = 0;
+  const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+  if (an != 1 || nt_kind(nt, av[0]) == NK_SplatNode) return -1;
+  return av[0];
 }
 
 /* The method a program's reopen of a builtin kind's own class defines under
@@ -2040,6 +2154,170 @@ int comp_ivarg_call(const Compiler *c, int e) {
 }
 int comp_ivarg_arg(const Compiler *c, int e) {
   return (e >= 0 && e < c->ivarg_count) ? c->ivarg_arg[e] : -1;
+}
+
+/* The owning class of an ivar READ/WRITE node under the same storage rules
+   the emitters use (instance method -> class, top-level -> Toplevel; class
+   methods / instance_eval contexts return -1). */
+int comp_ivar_owner(Compiler *c, int node) {
+  Scope *cs = comp_scope_of(c, node);
+  if (!cs) return -1;
+  /* a class method's ivar is its class's civ_ slot, typed with the class's
+     ivars (strbuf_ivar_owner): the same rules make it the handle */
+  if (cs->is_cmethod) return cs->class_id;
+  if (cs->class_id >= 0) return cs->class_id;
+  return comp_class_index(c, "Toplevel");
+}
+
+/* The variable a site names, by the read kind, name and key the String
+   refusals name a variable by (SaName): a local by its scope, an ivar by its
+   owning class (comp_ivar_owner), a global by its name with aliases resolved
+   (key -1). 0 when node `v` names none of them. */
+static int vsite_key(Compiler *c, int v, NodeKind *kind, const char **name, int *key) {
+  const NodeTable *nt = c->nt;
+  const char *nm = v >= 0 ? nt_str(nt, v, "name") : NULL;
+  if (!nm) return 0;
+  Scope *s;
+  switch (nt_kind(nt, v)) {
+    case NK_LocalVariableReadNode: case NK_LocalVariableWriteNode:
+      s = comp_scope_of(c, v);
+      *kind = NK_LocalVariableReadNode; *name = nm; *key = s ? (int)(s - c->scopes) : -1;
+      return s != NULL;
+    case NK_InstanceVariableReadNode: case NK_InstanceVariableWriteNode:
+      *kind = NK_InstanceVariableReadNode; *name = nm; *key = comp_ivar_owner(c, v);
+      return *key >= 0;
+    case NK_GlobalVariableReadNode: case NK_GlobalVariableWriteNode:
+      *kind = NK_GlobalVariableReadNode; *name = comp_resolve_gvar(c, nm + 1); *key = -1;
+      return *name != NULL;
+    default:
+      return 0;
+  }
+}
+static unsigned vsite_hash(VsKind k, NodeKind kind, const char *name, int key) {
+  return sp_strhash(name) ^ ((unsigned)kind * 0x9e3779b1u) ^ ((unsigned)(key + 1) * 2654435761u) ^
+         ((unsigned)(k + 1) * 0x85ebca6bu);
+}
+static int vsite_is_read(const NodeTable *nt, int n) {
+  NodeKind k = n >= 0 ? nt_kind(nt, n) : NK_NONE;
+  return k == NK_LocalVariableReadNode || k == NK_InstanceVariableReadNode || k == NK_GlobalVariableReadNode;
+}
+
+/* Variable-site chains: for each variable the String refusals name, the
+   nodes that read it (VS_READ), write it (VS_WRITE, `x = v`), call a String
+   mutator on it (VS_MUT: the call, also through the calls that answer their
+   receiver, `x.to_s << y`) or call any method on it (VS_RECV: the call whose
+   receiver it is), one entry per (kind, site), chained by (kind, variable)
+   in node order. The refusals asked each of those by walking a
+   node kind per candidate. Beside the chains, two per-node lookups the
+   same walk fills: the call whose receiver a node is (comp_recv_parent),
+   and whether it is a statement the next statement follows
+   (comp_value_dropped). Chains
+   carry hash collisions: callers keep their kind/name/key filters
+   (comp_vsite_var is the read or write naming an entry's variable).
+   Revalidated against nt->version, the scope index's generation and the
+   Toplevel class an ivar may key on, as the mutation tables are; while the
+   scope index is not frozen each question rebuilds. */
+static void vsite_add(Compiler *c, VsKind k, int site, int var) {
+  NodeKind vk; const char *vn; int key;
+  if (!vsite_key(c, var, &vk, &vn, &key)) return;
+  if (c->vs_count == c->vs_cap) {
+    c->vs_cap = c->vs_cap ? c->vs_cap * 2 : 256;
+    c->vs_site = realloc(c->vs_site, sizeof(int) * (size_t)c->vs_cap);
+    c->vs_var = realloc(c->vs_var, sizeof(int) * (size_t)c->vs_cap);
+    c->vs_next = realloc(c->vs_next, sizeof(int) * (size_t)c->vs_cap);
+    c->vs_kind = realloc(c->vs_kind, (size_t)c->vs_cap);
+    if (!c->vs_site || !c->vs_var || !c->vs_next || !c->vs_kind) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+  }
+  int e = c->vs_count++;
+  int *head = &c->vs_head[vsite_hash(k, vk, vn, key) & (unsigned)(c->vs_nbuckets - 1)];
+  c->vs_kind[e] = (unsigned char)k;
+  c->vs_site[e] = site;
+  c->vs_var[e] = var;
+  c->vs_next[e] = *head;
+  *head = e;
+}
+static void vsite_build(Compiler *c, int toplevel) {
+  const NodeTable *nt = c->nt;
+  int n = nt->count;
+  int nb = 16;
+  while (nb < n && nb < (1 << 22)) nb <<= 1;
+  size_t sz = (size_t)(n > 0 ? n : 1);
+  free(c->vs_head); free(c->vs_rparent); free(c->vs_dropped);
+  c->vs_head = malloc(sizeof(int) * (size_t)nb);
+  c->vs_rparent = malloc(sz * sizeof(int));
+  c->vs_dropped = calloc(sz, 1);
+  if (!c->vs_head || !c->vs_rparent || !c->vs_dropped) {
+    fprintf(stderr, "spinel: out of memory\n");
+    exit(1);
+  }
+  c->vs_nbuckets = nb;
+  c->vs_count = 0;
+  c->vs_nodes = n;
+  for (int b = 0; b < nb; b++) c->vs_head[b] = -1;
+  for (int i = 0; i < n; i++) c->vs_rparent[i] = -1;
+  for (int u = n - 1; u >= 0; u--) {   /* reverse: chains run in node order */
+    NodeKind k = nt_kind(nt, u);
+    if (vsite_is_read(nt, u)) vsite_add(c, VS_READ, u, u);
+    else if (k == NK_LocalVariableWriteNode || k == NK_InstanceVariableWriteNode || k == NK_GlobalVariableWriteNode)
+      vsite_add(c, VS_WRITE, u, u);
+    else if (k == NK_StatementsNode) {
+      int bn = 0; const int *bb = nt_arr(nt, u, "body", &bn);
+      for (int i = 0; i + 1 < bn; i++) {
+        int v = an_unparen(nt, bb[i]);
+        if (v >= 0 && v < n) c->vs_dropped[v] = 1;
+      }
+    }
+    else if (k == NK_CallNode && nt_ref(nt, u, "receiver") >= 0) {
+      int r = nt_ref(nt, u, "receiver"), ru = an_unparen(nt, r);
+      const char *un = nt_str(nt, u, "name");
+      if (ru >= 0 && ru < n) c->vs_rparent[ru] = u;
+      if (vsite_is_read(nt, ru)) vsite_add(c, VS_RECV, u, ru);
+      if (un && sp_str_mutator(un, SP_MUT_LOCAL)) {
+        while (str_self_call(nt, an_unparen(nt, r))) r = nt_ref(nt, an_unparen(nt, r), "receiver");
+        int base = an_unparen(nt, r);
+        if (vsite_is_read(nt, base)) vsite_add(c, VS_MUT, u, base);
+      }
+    }
+  }
+  c->vs_version = nt->version;
+  c->vs_gen = comp_scope_index_gen();
+  c->vs_toplevel = toplevel;
+  c->vs_built = 1;
+}
+static void vsite_sync(Compiler *c) {
+  int toplevel = comp_class_index(c, "Toplevel");
+  if (!c->vs_built || !comp_scope_index_is_frozen() || c->vs_version != c->nt->version ||
+      c->vs_nodes != c->nt->count || c->vs_gen != comp_scope_index_gen() || c->vs_toplevel != toplevel)
+    vsite_build(c, toplevel);
+}
+/* the entry e or the first after it of e's own kind */
+static int vsite_same_kind(const Compiler *c, int e, int k) {
+  while (e >= 0 && c->vs_kind[e] != k) e = c->vs_next[e];
+  return e;
+}
+int comp_vsite_first(Compiler *c, VsKind k, NodeKind kind, const char *name, int key) {
+  vsite_sync(c);
+  if (!name) return -1;
+  return vsite_same_kind(c, c->vs_head[vsite_hash(k, kind, name, key) & (unsigned)(c->vs_nbuckets - 1)], k);
+}
+int comp_vsite_next(const Compiler *c, int e) {
+  return (e >= 0 && e < c->vs_count) ? vsite_same_kind(c, c->vs_next[e], c->vs_kind[e]) : -1;
+}
+int comp_vsite_node(const Compiler *c, int e) {
+  return (e >= 0 && e < c->vs_count) ? c->vs_site[e] : -1;
+}
+int comp_vsite_var(const Compiler *c, int e) {
+  return (e >= 0 && e < c->vs_count) ? c->vs_var[e] : -1;
+}
+int comp_recv_parent(Compiler *c, int n) {
+  vsite_sync(c);
+  n = an_unparen(c->nt, n);
+  return n >= 0 && n < c->vs_nodes ? c->vs_rparent[n] : -1;
+}
+int comp_value_dropped(Compiler *c, int n) {
+  vsite_sync(c);
+  n = an_unparen(c->nt, n);
+  return n >= 0 && n < c->vs_nodes && c->vs_dropped[n];
 }
 
 /* Every node of one kind, chained in node order. The string-promotion passes

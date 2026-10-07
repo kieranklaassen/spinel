@@ -568,8 +568,7 @@ int emit_call_instance_eval_arms(Compiler *c, int id, Buf *b, const NodeTable *n
         free(vb.p);
         ie_body_restore(c, nsnap);
         g_self = sv_self; g_self_deref = sv_deref;
-        for (int a = 0; a < nal.n; a++)
-          if (--nal.lv[a]->inline_alias == 0) nal.lv[a]->is_cell = 0;
+        block_aliases_release(&nal);
         emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
         if (nal_tr >= 0) buf_printf(b, "_t%d", nal_tr);
         else buf_puts(b, nbox ? "sp_box_nil()" : default_value_from_compiler(c, nbt));
@@ -851,8 +850,7 @@ int emit_call_instance_eval_arms(Compiler *c, int id, Buf *b, const NodeTable *n
         g_ie_discard_value = saved_discard;
       }
       /* the aliases end with the body, which the result temps outlive */
-      for (int a = 0; a < ie_al.n; a++)
-        if (--ie_al.lv[a]->inline_alias == 0) ie_al.lv[a]->is_cell = 0;
+      block_aliases_release(&ie_al);
       if (ie_al.open) { emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n"); }
       g_ie_class_id = saved_ie;
       if (ie_flip) { ie_sc->is_cmethod = ie_sv_cm; ie_sc->class_id = ie_sv_cls; comp_scope_move_end(); }
@@ -991,6 +989,39 @@ int emit_call_freeze_dup_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, 
           else if (kvt && sp_streq(kvt, "FalseNode")) { freeze_mode = 0; dkw_ok = 1; }
         }
       }
+    }
+    if (dkw_ok && comp_ty_ary_root(c, drt) >= 0) {
+      /* an Array subclass instance: its class's own copy (sp_X__dup), by the
+         class it carries when a subclass's instance can be behind it (#7449) */
+      int cid = ty_object_class(drt), t = ++g_tmp, d = ++g_tmp;
+      const char *cn = c->classes[cid].c_name;
+      int mode = sp_streq(name, "dup") ? 0 : freeze_mode < 0 ? 1 : freeze_mode ? 3 : 2;
+      buf_printf(b, "({ sp_%s *_t%d = ", cn, t);
+      emit_expr(c, recv, b);
+      buf_printf(b, "; SP_GC_ROOT(_t%d); sp_%s *_t%d = !_t%d ? NULL : ", t, cn, d, t);
+      for (int k = 0; k < c->nclasses; k++)
+        if (k != cid && is_descendant(c, k, cid) && c->classes[k].instantiated)
+          buf_printf(b, "_t%d->cls_id == %d ? (sp_%s *)sp_%s__dup(_t%d, %d) : ",
+                     t, k, cn, c->classes[k].c_name, t, mode);
+      buf_printf(b, "(sp_%s *)sp_%s__dup(_t%d, %d); SP_GC_ROOT(_t%d); ", cn, cn, t, mode, d);
+      /* the class's initialize_copy hook, as for any program object; its
+         super into Array is a replace, which the copy has already done */
+      int defcls = -1;
+      int ic = comp_method_in_chain(c, cid, "initialize_copy", &defcls);
+      LocalVar *icp = ic >= 0 && c->scopes[ic].nparams == 1 && !c->scopes[ic].yields
+        ? scope_local(&c->scopes[ic], c->scopes[ic].pnames[0]) : NULL;
+      if (ic >= 0 && (!icp || !ty_is_object(icp->type)))
+        unsupported_feature(c, id, "an initialize_copy of an Array subclass whose parameter is not "
+                                   "typed as the class is not supported yet");
+      else if (ic >= 0) {
+        const char *nb = c->scopes[ic].blk_param && c->scopes[ic].blk_param[0] ? ", NULL" : "";
+        buf_printf(b, "if (_t%d) ", d);
+        emit_method_cname(c, &c->scopes[ic], b);
+        buf_printf(b, "((sp_%s *)_t%d, (sp_%s *)_t%d%s); ", c->classes[defcls].c_name, d,
+                   c->classes[ty_object_class(icp->type)].c_name, t, nb);
+      }
+      buf_printf(b, "_t%d; })", d);
+      return 1;
     }
     if (dkw_ok && ty_is_object(drt) && drr.kind != RK_VOBJ) {
       int cid = ty_object_class(drt);
