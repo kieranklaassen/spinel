@@ -13773,6 +13773,14 @@ static int node_touches_match(Compiler *c, int id) {
   return 0;
 }
 
+/* A call that may itself match, by its name: the matching calls and the
+   quantifiers. */
+static int call_name_matches(const char *nm) {
+  if (!nm) return 0;
+  for (int k = 0; match_call_names[k]; k++) if (sp_streq(nm, match_call_names[k])) return 1;
+  return is_quantifier(nm);
+}
+
 /* A block given to a built-in value's own method runs where it is written:
    the loop is emitted around it, and so are `loop` and `catch`. Any other
    block may be handed on as a Proc, and counts as one. */
@@ -13801,13 +13809,18 @@ static int block_runs_in_place(Compiler *c, int call) {
    inside whichever method is running; a method's parameters, whose defaults
    are evaluated by the caller before the frame opens. */
 static char *g_match_other = NULL;   /* per node, where the test passed: another frame's code */
+static char *g_match_inner = NULL;   /* and: inside the block of a call that itself matches */
+int match_sets_last(int id) {
+  return g_match_frame_closed && g_match_inner && id >= 0 && !g_match_inner[id];
+}
 static int match_frame_closed(Compiler *c) {
   const NodeTable *nt = c->nt;
   int n = nt->count, hit = 0;
   char *other = (char *)calloc((size_t)(n > 0 ? n : 1), 1);
+  char *inner = (char *)calloc((size_t)(n > 0 ? n : 1), 1);
   char *framed = (char *)calloc((size_t)(c->nscopes > 0 ? c->nscopes : 1), 1);
   char *apart = (char *)calloc((size_t)(n > 0 ? n : 1), 1);   /* in a `class << self` body */
-  if (!other || !framed || !apart) { free(other); free(framed); free(apart); return 0; }
+  if (!other || !inner || !framed || !apart) { free(other); free(inner); free(framed); free(apart); return 0; }
   int main_file = 0;   /* the entry script's place in the file table */
   for (int k = 0; k < nt->nfiles; k++) {
     const char *fp = nt_file_path(nt, k);
@@ -13822,6 +13835,8 @@ static int match_frame_closed(Compiler *c) {
     else if (ty && sp_streq(ty, "DefNode")) blk = nt_ref(nt, id, "parameters");
     else {
       blk = nt_ref(nt, id, "block");
+      if (blk >= 0 && nt_kind(nt, blk) == NK_BlockNode && !inner[blk] && call_name_matches(nt_str(nt, id, "name")))
+        a_mark_subtree(c, blk, inner);
       if (blk >= 0 && (nt_kind(nt, blk) != NK_BlockNode || block_runs_in_place(c, id))) blk = -1;
     }
     if (blk >= 0 && !other[blk]) a_mark_subtree(c, blk, other);
@@ -13839,7 +13854,7 @@ static int match_frame_closed(Compiler *c) {
   for (int id = 0; id < n && !hit; id++)
     if (other[id]) hit = node_touches_match(c, id);
   free(framed); free(apart);
-  if (hit) free(other); else g_match_other = other;
+  if (hit) { free(other); free(inner); } else { g_match_other = other; g_match_inner = inner; }
   return !hit;
 }
 
@@ -13862,6 +13877,7 @@ static void match_frame_check(Compiler *c) {
     exit(1);
   }
   free(lifted); free(g_match_other); g_match_other = NULL;
+  free(g_match_inner); g_match_inner = NULL;
 }
 
 /* Whole-program scan for the prologue features (see codegen_internal.h). Each
