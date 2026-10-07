@@ -553,6 +553,20 @@ static void ffi_arg_to_temp(Buf *call, size_t at, Buf *pre, const char *ctype, i
   buf_printf(call, "_b%d_%d", tb, ai);
 }
 
+/* Is the receiver of the writer assignment `id` the same object after its
+   value has run: self, or a variable the value cannot rebind, under no `&.`? */
+static int nil_value_recv_fixed(Compiler *c, int id, int recv, int value) {
+  const char *op = nt_str(c->nt, id, "call_operator");
+  if (op && sp_streq(op, "&.")) return 0;
+  switch (nt_kind(c->nt, recv)) {
+    case NK_SelfNode: return 1;
+    case NK_LocalVariableReadNode: case NK_InstanceVariableReadNode:
+    case NK_GlobalVariableReadNode: case NK_ClassVariableReadNode:
+      return !read_rebound_by(c, recv, value);
+    default: return 0;
+  }
+}
+
 /* a call on a module or a class: native and FFI functions, singleton accessors, a writer in an instance_eval block, class methods */
 int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv) {
   /* native binding dispatch (Path B): Module.func(...) where Module declared
@@ -1236,6 +1250,34 @@ int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
             buf_puts(b, "); ");
             emit_expr(c, argv[0], b);
             buf_puts(b, "; })");
+            return 1;
+          }
+          /* a value of nil type that is no literal (a method that answers
+             nil, `(bump; nil)`) has nothing a temporary could hold: it would
+             be declared void. It runs for its effect ahead of the call, as
+             every other value does, and the call is handed a nil literal.
+             The receiver is read after it, so only where that is self or a
+             variable the value cannot rebind, and the call is no `&.`. */
+          if (at == TY_NIL && nil_value_recv_fixed(c, id, recv, argv[0])) {
+            int nl = nt_new_node((NodeTable *)nt, "NilNode");
+            comp_grow_node_arrays(c);
+            c->nscope[nl] = c->nscope[id];
+            c->ntype[nl] = TY_NIL;
+            int saved0 = argv[0];
+            int argsn = nt_ref(nt, id, "arguments");
+            int one[1] = { nl };
+            Buf apre; memset(&apre, 0, sizeof apre);
+            Buf aval; memset(&aval, 0, sizeof aval);
+            { Buf *sv_pre = g_pre; g_pre = &apre; emit_expr(c, saved0, &aval); g_pre = sv_pre; }
+            buf_puts(b, "({ ");
+            if (apre.p) buf_puts(b, apre.p);
+            buf_printf(b, "(void)(%s); (void)(", aval.p ? aval.p : "0");
+            free(apre.p); free(aval.p);
+            nt_node_set_arr((NodeTable *)nt, argsn, "arguments", one, 1);
+            g_setter_value_inner++; emit_call_body(c, id, b); g_setter_value_inner--;
+            int back[1] = { saved0 };
+            nt_node_set_arr((NodeTable *)nt, argsn, "arguments", back, 1);
+            buf_puts(b, "); 0; })");
             return 1;
           }
           if (at != TY_UNKNOWN && at != TY_VOID) {
