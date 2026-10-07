@@ -1,0 +1,34 @@
+A value object in an argument temp roots its Strings, not itself
+
+A value object lives in the temp that holds it, and the four places
+that run a call's arguments into temps rooted such a temp as a pointer:
+
+    sp_Name  _t5 = sp_Name_new(240LL); SP_GC_ROOT(_t5);
+
+That hands the collector the struct's first word, the class id, as a
+pointer. For the first class of a program that is NULL: nothing is
+held, and the object's String is freed while the next argument is
+built (8 of 2,000 yields read a wrong String in a plain run). For any
+later class the mark follows the id and the program dies with a
+segmentation fault.
+
+The four: emit_arg_temp (`yield Name.new(240), "ab" + "cd"`, and a
+keyword value beside a call), emit_rooted_operand and emit_dispatch's
+own temp (a keyword value beside an interpolated String, in either
+order), and the local emit_args_filled_argv hoists each argument into
+when a default reads an earlier parameter. Each now roots the object's
+String fields, as a local of the kind does, and takes no root when it
+has none.
+
+A class with no String took the whole root too, as a keyword value
+beside an interpolated String, and faults only under SPINEL_GC_STRESS.
+
+A value object reaches an argument at a yield, as a keyword value, and
+as a default that reads self; a class whose instance is written as a
+method's positional argument is no value type. One program of the
+corpus has one, test/poly_recv_default_value_type.rb
+(`def join(part, sep = self)`): it dies with a segmentation fault on
+master under SPINEL_GC_STRESS=2 and now runs. cident reports it and
+the new test, and both join GC_STRESS_TESTS.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
