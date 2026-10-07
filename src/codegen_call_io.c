@@ -161,10 +161,27 @@ int emit_call_poly_io_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
                  tio3, tfs, tpa);
       return 1;
     }
+    /* rewind takes no argument, an Enumerator's or a stream's: given one,
+       CRuby raises ArgumentError for either and NoMethodError for any other
+       receiver (sp_poly_as_io's), once the arguments have run. The stream
+       arm below took such a call and answered its sp_int into the boxed
+       slot, which did not build. */
+    if (!iocand && is_rewind_name(name) && argc > 0 && !call_has_splat_arg(nt, argv, argc)) {
+      int tv = ++g_tmp;
+      char msg[96]; arity_message(msg, sizeof msg, argc, 0, 0, NULL);
+      buf_printf(b, "({ sp_RbVal _t%d = ", tv);
+      emit_boxed(c, recv, b);
+      buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); ", tv);
+      for (int k = 0; k < argc; k++) { buf_puts(b, "(void)("); emit_expr(c, argv[k], b); buf_puts(b, "); "); }
+      buf_printf(b, "if (!(_t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_ENUMERATOR)) (void)sp_poly_as_io(_t%d, \"rewind\");"
+                    " sp_raise_cls(\"ArgumentError\", \"%s\"); %s; })",
+                 tv, tv, tv, msg, raise_tail_value(comp_ntype(c, id)));
+      return 1;
+    }
     /* rewind on a boxed value: an Enumerator rewinds and answers itself,
        a stream answers its 0. It took the stream arm alone, and an
        Enumerator read back out of a container raised NoMethodError. */
-    if (!iocand && sp_streq(name, "rewind") && argc == 0) {
+    if (!iocand && is_rewind_name(name) && argc == 0) {
       int tv = ++g_tmp;
       int boxed = repr_of(c, id).kind == RK_BOXED;
       buf_printf(b, "({ sp_RbVal _t%d = ", tv);
@@ -576,6 +593,21 @@ static int emit_io_syswrite_count(Compiler *c, const char *r, const int *argv, i
   return 1;
 }
 
+/* A write lowered to one call per operand (write, print and puts with
+   several, printf, which formats its operands first) names the handle in
+   each call: a receiver with an effect ran once per operand, and printf's
+   ran after its operands. Such a receiver is held in a rooted temp first,
+   ahead of the operands, as CRuby evaluates it; `rb` then names the temp. */
+static void io_hold_effectful_recv(Compiler *c, const char *name, int recv, int argc, Buf *rb) {
+  if (!((argc >= 2 && (is_io_write(name) || is_text_print(name))) || (argc >= 1 && is_printf_name(name))) ||
+      !subtree_has_side_effect(c, recv)) return;
+  int th = ++g_tmp;
+  emit_indent(g_pre, g_indent);
+  buf_printf(g_pre, "sp_File *_t%d = %s; SP_GC_ROOT(_t%d);\n", th, rb->p ? rb->p : "NULL", th);
+  rb->len = 0;
+  buf_printf(rb, "_t%d", th);
+}
+
 /* the instance methods of an IO / File handle (TY_IO) */
 /* pread(len, off[, buf]) and pwrite(str, off) on a boxed receiver: the
    receiver and then every argument run before the handle is unboxed, so a
@@ -642,6 +674,7 @@ int emit_call_io_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const ch
     const char *r = NULL;
     Buf rb = {0};
     emit_expr(c, recv, &rb);
+    io_hold_effectful_recv(c, name, recv, argc, &rb);
     r = rb.p ? rb.p : "NULL";
     /* metadata via the handle's path (#2790) */
     /* f.chown(uid, gid) on the handle's path; a nil id leaves it unchanged and

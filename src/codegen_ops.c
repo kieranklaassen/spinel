@@ -39,6 +39,9 @@ static char *op_recv_text(Compiler *c, const BopCtx *x) {
      $eN  argument N by emit_expr
      $bN  argument N boxed (emit_boxed)
      $fN  argument N as a double (emit_float_expr)
+     $FN  argument N as an arithmetic method's Float operand: any other
+          class than a Numeric is "X can't be coerced into Float"
+          (emit_float_coerce_expr)
      $iN  argument N as an sp_int (emit_int_expr)
      $sN  argument N as a String (emit_str_expr)
      $cN  argument N as an sp_Complex (emit_complex_coerce)
@@ -101,13 +104,14 @@ static int emit_op_template(Compiler *c, const BopCtx *x, Buf *b) {
       buf_printf(b, "%d", tn[tk - tnames]);
       p++;
     }
-    else if (p[0] == '$' && p[1] && strchr("ebficqs", p[1]) &&
+    else if (p[0] == '$' && p[1] && strchr("ebfFicqs", p[1]) &&
              p[2] >= '0' && p[2] <= '9' && p[2] - '0' < argc) {
       int a = argv[p[2] - '0'];
       switch (p[1]) {
       case 'e': emit_expr(c, a, b); break;
       case 'b': emit_boxed(c, a, b); break;
       case 'f': emit_float_expr(c, a, b); break;
+      case 'F': emit_float_coerce_expr(c, a, b); break;
       case 'i': emit_int_expr(c, a, b); break;
       case 's': emit_str_expr(c, a, b); break;
       case 'c': emit_complex_coerce(c, a, b); break;
@@ -189,6 +193,7 @@ static int (*const bop_emitters[BOPE__COUNT])(Compiler *, const BopCtx *, Buf *)
   [BOPE_FLOAT_RATIONALIZE] = emit_op_float_rationalize,
   [BOPE_STRING_SCAN_CHECKED] = emit_op_string_scan_checked,
   [BOPE_STRING_SLICE] = emit_op_string_slice,
+  [BOPE_STRING_SCRUB_BLOCK] = emit_op_string_scrub_block,
   [BOPE_THREAD_RAISE] = emit_op_thread_raise,
   [BOPE_THREAD_TLS] = emit_op_thread_tls,
   [BOPE_MUTEX_SLEEP] = emit_op_mutex_sleep,

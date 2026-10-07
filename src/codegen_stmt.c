@@ -1,5 +1,6 @@
 #include "codegen_internal.h"
 #include "repr.h"
+#include "holder.h"
 #include "builtin_ops.h"
 #include "call_plan.h"
 
@@ -1249,16 +1250,22 @@ static LocalVar *g_strbuf_case_lv;
    `v` can hand over (an_strbuf_alias_leaves' arms)? */
 static int strbuf_cond_has_handle_leaf(Compiler *c, int v, int depth) {
   const NodeTable *nt = c->nt;
-  if (v < 0 || depth > 8) return 0;
+  /* depth counts the conditionals the walk is inside (a wrapper adds none);
+     emit_strbuf_cond_value reaches any depth (its arms past its own limit
+     start a walk of their own), so this one looks as deep as is sane */
+  if (v < 0 || depth > 64) return 0;
   switch (nt_kind(nt, v)) {
+    /* a wrapper adds no conditional level, but what it holds is no longer
+       the value itself (depth 0, which the read arms leave to the caller):
+       `(1; s)` hands over s's handle */
     case NK_ParenthesesNode:
-      return strbuf_cond_has_handle_leaf(c, nt_ref(nt, v, "body"), depth + 1);
+      return strbuf_cond_has_handle_leaf(c, nt_ref(nt, v, "body"), depth ? depth : 1);
     case NK_StatementsNode: {
       int n = 0; const int *bb = nt_arr(nt, v, "body", &n);
-      return n > 0 && strbuf_cond_has_handle_leaf(c, bb[n - 1], depth + 1);
+      return n > 0 && strbuf_cond_has_handle_leaf(c, bb[n - 1], depth ? depth : 1);
     }
     case NK_ElseNode:
-      return strbuf_cond_has_handle_leaf(c, nt_ref(nt, v, "statements"), depth + 1);
+      return strbuf_cond_has_handle_leaf(c, nt_ref(nt, v, "statements"), depth ? depth : 1);
     case NK_IfNode: case NK_UnlessNode:
       return strbuf_cond_has_handle_leaf(c, nt_ref(nt, v, "statements"), depth + 1) ||
              strbuf_cond_has_handle_leaf(c, nt_ref(nt, v, nt_kind(nt, v) == NK_IfNode ? "subsequent" : "else_clause"),
@@ -1295,8 +1302,10 @@ static int strbuf_cond_has_handle_leaf(Compiler *c, int v, int depth) {
       char gr[256];
       return depth > 0 && strbuf_gvar_write_handle(c, v, gr, sizeof gr);
     }
+    /* any other write whose slot holds the rule's handle (an ivar's, a
+       class variable's, an `||=`): emit_strbuf_value hands it over */
     default:
-      return 0;
+      return depth > 0 && repr_write_share(c, v);
   }
 }
 /* Assign conditional `v`'s value to the handle temp `dst` as statements,
@@ -1317,20 +1326,30 @@ static void emit_strbuf_cond_arm(Compiler *c, LocalVar *lv, int v, const char *d
 static void emit_strbuf_cond_value(Compiler *c, LocalVar *lv, int v, const char *dst, Buf *b, int depth) {
   const NodeTable *nt = c->nt;
   NodeKind k = v >= 0 ? nt_kind(nt, v) : NK_NilNode;
-  if (depth > 8) k = NK_NilNode;
+  /* depth counts the conditionals the walk is inside (a wrapper adds none).
+     A conditional past its limit is a value like any other, whose walk
+     starts again from it (emit_strbuf_value): read as nil, a deep arm's
+     String was lost and its effects skipped */
+  if (depth > 8 && (k == NK_IfNode || k == NK_UnlessNode || k == NK_OrNode || k == NK_AndNode ||
+                    k == NK_CaseNode)) {
+    buf_printf(b, "%s = ", dst);
+    emit_strbuf_value(c, lv, v, b);
+    buf_puts(b, ";");
+    return;
+  }
   switch (k) {
     case NK_ParenthesesNode:
-      emit_strbuf_cond_value(c, lv, nt_ref(nt, v, "body"), dst, b, depth + 1);
+      emit_strbuf_cond_value(c, lv, nt_ref(nt, v, "body"), dst, b, depth);
       return;
     case NK_StatementsNode: {
       int n = 0; const int *bb = nt_arr(nt, v, "body", &n);
       for (int i = 0; i < n - 1; i++) emit_stmt(c, bb[i], b, 0);
-      if (n > 0) emit_strbuf_cond_value(c, lv, bb[n - 1], dst, b, depth + 1);
+      if (n > 0) emit_strbuf_cond_value(c, lv, bb[n - 1], dst, b, depth);
       else buf_printf(b, "%s = NULL;\n", dst);
       return;
     }
     case NK_ElseNode:
-      emit_strbuf_cond_value(c, lv, nt_ref(nt, v, "statements"), dst, b, depth + 1);
+      emit_strbuf_cond_value(c, lv, nt_ref(nt, v, "statements"), dst, b, depth);
       return;
     case NK_IfNode: case NK_UnlessNode: {
       int is_unless = k == NK_UnlessNode;
@@ -1438,7 +1457,7 @@ static int strbuf_gvar_write_handle(Compiler *c, int v, char *out, size_t cap) {
   NodeKind k = v >= 0 ? nt_kind(nt, v) : NK_NilNode;
   if (k != NK_GlobalVariableWriteNode && k != NK_GlobalVariableOrWriteNode && k != NK_GlobalVariableAndWriteNode &&
       k != NK_ConstantWriteNode && k != NK_ClassVariableWriteNode) return 0;
-  return repr_handle_static_ref(c, v, out, cap);
+  return holder_static_handle_text(c, v, out, cap);
 }
 
 /* The value a write hands a mutable-String slot `lv` (TY_STRBUF), as an
@@ -1489,6 +1508,9 @@ void emit_strbuf_value(Compiler *c, LocalVar *lv, int v, Buf *b) {
     emit_strbuf_cond_value(c, lv, v, dst, b, 0);
     buf_printf(b, " %s; })", dst);
   }
+  /* any other write whose slot holds the rule's handle (a local's `||=`,
+     an ivar's `&&=`, a class variable's): that handle */
+  else if (shared && emit_strbuf_write_handle(c, v, b)) { }
   /* a demand-marked read (a reader call, a container element) already
      yields the handle: alias it directly (#3227 P5). Any other marked call
      -- `+"lit"`, a `dup` the alias leaves demanded -- renders as a fresh
@@ -3193,7 +3215,10 @@ int emit_poly_class_when(Compiler *c, int cond_id, const char *tmp, Buf *b) {
       int first = 1;
       for (int k = 0; k < c->nclasses; k++) {
         if (class_isa_user(c, k, cid, cn)) {
-          buf_printf(b, "%s%s.cls_id == %d", first ? "" : " || ", tmp, k);
+          /* an Array subclass instance is boxed as its Array (#7449) */
+          if (c->classes[k].ary_root > 0)
+            buf_printf(b, "%ssp_bsub_cls_of(%s) == %d", first ? "" : " || ", tmp, k);
+          else buf_printf(b, "%s%s.cls_id == %d", first ? "" : " || ", tmp, k);
           first = 0;
         }
       }
@@ -3386,9 +3411,7 @@ static void emit_pm_hash_cond_poly(Compiler *c, int pat, const char *hexpr, Buf 
   int hc_const = nt_ref(nt, pat, "constant");
   char subj0[24]; snprintf(subj0, sizeof subj0, "_t%d", th0);
   buf_printf(b, "({ sp_RbVal _t%d = %s; sp_RbVal _t%d = ", th0, hexpr, th);
-  buf_printf(b, "(_t%d.tag == SP_TAG_OBJ && _t%d.cls_id >= 0 && !sp_poly_is_hash_kind(_t%d.cls_id) && sp_obj_to_h_fn)"
-                " ? sp_obj_to_h_fn(_t%d) : _t%d;",
-             th0, th0, th0, th0, th0);
+  buf_printf(b, "sp_poly_pat_keyed(_t%d);", th0);
   buf_printf(b, " sp_bool _t%d = 0; (void)_t%d; "
                 "int _t%d = (_t%d.tag == SP_TAG_OBJ && sp_poly_is_hash_kind(_t%d.cls_id));",
              tf, tf, tok, th, th);
@@ -4475,8 +4498,7 @@ static void emit_pm_bind_hash_poly(Compiler *c, int pat, const char *hexpr, int 
      left untouched by the runtime guard (#3161/#3180). */
   int thd = ++g_tmp;
   emit_indent(b, indent);
-  buf_printf(b, "sp_RbVal _t%d = %s; if (_t%d.tag == SP_TAG_OBJ && _t%d.cls_id >= 0 && !sp_poly_is_hash_kind(_t%d.cls_id) && sp_obj_to_h_fn) _t%d = sp_obj_to_h_fn(_t%d);\n",
-             thd, hexpr, thd, thd, thd, thd, thd);
+  buf_printf(b, "sp_RbVal _t%d = sp_poly_pat_keyed(%s);\n", thd, hexpr);
   char hbuf[24]; snprintf(hbuf, sizeof hbuf, "_t%d", thd);
   hexpr = hbuf;
   for (int i = 0; i < en; i++) {
@@ -9105,31 +9127,12 @@ void emit_boxed_writer_arms(Compiler *c, const char *base, const char *nm,
     int writer_wins = (kind == SP_MEMBER_ATTR);
     if (!writer_wins) {
       Scope *arm = &c->scopes[kmi];
-      /* The parameter the value lands in: the first positional one -- a
-         `def x=(...)` or `def x=(*v)` takes it as its rest. A method one
-         value cannot call (a second required positional, a required
-         keyword) takes no arm, as a class without the writer takes none. */
-      int pos = -1, callable = 1;
-      for (int j = 0; j < arm->nparams && callable; j++) {
-        if (j == arm->kwrest_idx) continue;
-        int dflt = arm->pdefault && arm->pdefault[j] >= 0;
-        if (arm->pnames && arm->pnames[j] && callee_param_is_declared_kwarg(c, arm, arm->pnames[j])) {
-          if (!dflt) callable = 0;
-          continue;
-        }
-        if (pos < 0) { pos = j; continue; }
-        if (j != arm->rest_idx && !dflt) callable = 0;
-      }
-      if (pos < 0 || !callable) continue;
-      int into_rest = pos == arm->rest_idx;
       TyKind pt = TY_POLY;
-      if (arm->pnames && arm->pnames[pos]) {
-        LocalVar *pl = scope_local(arm, arm->pnames[pos]);
+      int api = arm_arg_param(c, arm);
+      if (api >= 0 && arm->pnames && arm->pnames[api]) {
+        LocalVar *pl = scope_local(arm, arm->pnames[api]);
         pt = (pl && pl->type != TY_UNKNOWN) ? pl->type : TY_POLY;
       }
-      /* the rest holds the value boxed, in a general Array */
-      if (into_rest && pt != TY_POLY_ARRAY && pt != TY_POLY) continue;
-      if (into_rest) pt = TY_POLY;
       /* Skip a class whose PARAMETER cannot take this concrete value -- the
          attr arm below has had this skip all along, and the method arm did
          not: an unrelated class's `def session=` seeded `(Integer?)` by an
@@ -9141,40 +9144,22 @@ void emit_boxed_writer_arms(Compiler *c, const char *base, const char *nm,
           pt != TY_POLY && pt != TY_UNKNOWN &&
           !(ty_is_numeric(at) && ty_is_numeric(pt)))
         continue;
-      buf_printf(b, " case %d: sp_%s_%s((sp_%s *)%s", k,
-                 c->classes[wmdc].c_name, mc(arm->name), c->classes[wmdc].c_name, objp);
-      for (int j = 0; j < arm->nparams; j++) {
-        buf_puts(b, ", ");
-        if (j == pos) {
-          int ra = -1;
-          if (into_rest) {
-            ra = ++g_tmp;
-            buf_printf(b, "({ sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d); sp_PolyArray_push(_t%d, ",
-                       ra, ra, ra);
-          }
-          if (pt == TY_POLY && at != TY_POLY && at != TY_UNKNOWN) emit_boxed_text(c, at, src, b);
-          else if (at == TY_POLY && pt != TY_POLY && pt != TY_UNKNOWN) emit_unbox_text(c, pt, src, b);
-          else buf_puts(b, src);
-          if (into_rest) {
-            LocalVar *rl = scope_local(arm, arm->pnames[pos]);
-            char rt[24]; snprintf(rt, sizeof rt, "_t%d", ra);
-            buf_printf(b, "); ");
-            if (rl && rl->type == TY_POLY) emit_boxed_text(c, TY_POLY_ARRAY, rt, b);
-            else buf_puts(b, rt);
-            buf_puts(b, "; })");
-          }
-        }
-        else if (j == arm->kwrest_idx) {
-          LocalVar *kl = arm->pnames && arm->pnames[j] ? scope_local(arm, arm->pnames[j]) : NULL;
-          TyKind kt = kl && kl->type != TY_UNKNOWN ? kl->type : TY_POLY;
-          if (kt == TY_POLY) emit_boxed_text(c, TY_SYM_POLY_HASH, "sp_SymPolyHash_new()", b);
-          else buf_puts(b, kt == TY_POLY_POLY_HASH ? "sp_PolyPolyHash_new()" : "sp_SymPolyHash_new()");
-        }
-        else emit_arg_or_default(c, arm, j, -1, b);
-      }
-      /* a block parameter the method keeps: no block is given */
-      if (arm->blk_param && arm->blk_param[0] && !arm->yields) buf_puts(b, ", NULL");
-      buf_puts(b, "); break;");
+      Buf vb; memset(&vb, 0, sizeof vb);
+      if (pt == TY_POLY && at != TY_POLY && at != TY_UNKNOWN) emit_boxed_text(c, at, src, &vb);
+      else if (at == TY_POLY && pt != TY_POLY && pt != TY_UNKNOWN) emit_unbox_text(c, pt, src, &vb);
+      else buf_puts(&vb, src);
+      char selfp[160];
+      snprintf(selfp, sizeof selfp, "((sp_%s *)%s)", c->classes[wmdc].c_name, objp);
+      const char *val = vb.p ? vb.p : "";
+      Buf pre; memset(&pre, 0, sizeof pre);
+      Buf args; memset(&args, 0, sizeof args);
+      char raise[640];
+      if (emit_arm_args_text(c, kmi, selfp, &val, 1, &pre, &args, NULL, raise, sizeof raise))
+        buf_printf(b, " case %d: { %ssp_%s_%s(%s%s); break; }", k, pre.p ? pre.p : "",
+                   c->classes[wmdc].c_name, mc(arm->name), selfp, args.p ? args.p : "");
+      else
+        buf_printf(b, " case %d: { %s break; }", k, raise);
+      free(vb.p); free(pre.p); free(args.p);
       continue;
     }
     char ivn[256]; snprintf(ivn, sizeof ivn, "@%s", base);
@@ -10573,11 +10558,18 @@ static int emit_multi_write_stmt(Compiler *c, int id, Buf *b, int indent, const 
       htl = scope_local(comp_scope_of(c, id), nt_str(nt, lefts[i], "name"));
     int hshared = repr_of_slot(c, htl).handle;
     int hup = hshared ? strbuf_uplus_operand(c, els[i]) : -1;
-    if (hshared && elt != TY_STRBUF &&
+    int hread = hshared && elt != TY_STRBUF &&
         ((nt_kind(nt, els[i]) == NK_LocalVariableReadNode && strbuf_slot_ref(c, els[i], hsrc, sizeof hsrc)) ||
-         (hup >= 0 && nt_kind(nt, hup) == NK_LocalVariableReadNode && strbuf_slot_ref(c, hup, hsrc, sizeof hsrc)))) {
+         (hup >= 0 && nt_kind(nt, hup) == NK_LocalVariableReadNode && strbuf_slot_ref(c, hup, hsrc, sizeof hsrc)));
+    /* a write whose slot holds the rule's handle (--share-strings): that
+       handle, as a local's read hands over its own */
+    Buf hw; memset(&hw, 0, sizeof hw);
+    int hwrite = hshared && elt != TY_STRBUF && !hread && emit_strbuf_write_handle(c, els[i], &hw);
+    if (hread || hwrite) {
       /* `+s` is s itself unless s is frozen */
-      buf_printf(b, hup >= 0 ? "sp_String * _t%d = sp_String_uplus(%s);" : "sp_String * _t%d = %s;", tmps[i], hsrc);
+      if (hwrite) buf_printf(b, "sp_String * _t%d = %s;", tmps[i], hw.p ? hw.p : "NULL");
+      else buf_printf(b, hup >= 0 ? "sp_String * _t%d = sp_String_uplus(%s);" : "sp_String * _t%d = %s;", tmps[i], hsrc);
+      free(hw.p);
       if (tmpts) tmpts[i] = TY_STRBUF;
       int later_alloc_h = store_alloc;
       for (int j = i + 1; j < en && !later_alloc_h; j++) later_alloc_h = masgn_part_allocates(c, els[j]);
@@ -11036,6 +11028,7 @@ static int emit_multi_write_stmt(Compiler *c, int id, Buf *b, int indent, const 
 /* A CallNode statement: the statement-level fast paths ahead of emit_expr (emit_stmt_inner's arms, in their order) */
 static int emit_call_stmt(Compiler *c, int id, Buf *b, int indent, const NodeTable *nt, const char *ty) {
   if (!(sp_streq(ty, "CallNode"))) return 0;
+  if (emit_arysub_call_stmt(c, id, b, indent)) return 1;   /* #7449 */
   /* Reflection-mutation calls (remove_method/undef_method/remove_class_variable)
      in a class body are otherwise dropped silently; report the documented
      limit instead of pretending they took effect (#2954, #2955). */
@@ -11529,6 +11522,8 @@ static int emit_ivar_cvar_write_stmt(Compiler *c, int id, Buf *b, int indent, co
       char srefW[1024];
       if (vty && sp_streq(vty, "NilNode")) buf_puts(b, "NULL");
       else if (strbuf_slot_ref(c, v, srefW, sizeof srefW)) buf_puts(b, srefW);
+      /* a write whose slot holds the rule's handle: that handle */
+      else if (emit_strbuf_write_handle(c, v, b)) { }
       else {
         buf_puts(b, "sp_String_new_shared(");
         emit_str_expr(c, v, b);
@@ -11611,19 +11606,16 @@ static int emit_ivar_cvar_write_stmt(Compiler *c, int id, Buf *b, int indent, co
   if (sp_streq(ty, "ClassVariableWriteNode")) {
     const char *nm = nt_str(nt, id, "name");  /* "@@x" */
     int v = nt_ref(nt, id, "value");
-    int sc = comp_scope_of(c, id)->class_id;
-    if (sc < 0) sc = g_class_body_id;
-    if (sc < 0) sc = comp_class_index(c, "Toplevel");
-    if (sc < 0) { unsupported(c, id, "class variable write (no class scope)"); return 1; }
-    sc = comp_cvar_owner(c, sc, nm);
-    TyKind ct = TY_INT;
-    int idx = comp_cvar_index(&c->classes[sc], nm);
-    if (idx >= 0) ct = c->classes[sc].cvar_types[idx];
+    HolderRef h;
+    if (!holder_of_node_in(c, id, g_class_body_id, &h)) { unsupported(c, id, "class variable write (no class scope)"); return 1; }
+    int sc = h.cid;
+    TyKind ct = h.idx >= 0 ? c->classes[sc].cvar_types[h.idx] : TY_INT;
+    char ref[300]; holder_slot_text(c, &h, ref, sizeof ref);
     emit_indent(b, indent);
-    buf_printf(b, "cvar_%s_%s = ", c->classes[sc].name, nm + 2);
+    buf_printf(b, "%s = ", ref);
     /* --share-strings: a class variable holding the shared handle takes an
        alias's handle or a fresh one, as a handle local's write does */
-    if (idx >= 0 && repr_of_cvar(c, sc, idx).share) {
+    if (h.r.share) {
       LocalVar slot;
       memset(&slot, 0, sizeof slot);
       slot.type = TY_STRBUF;
@@ -11651,18 +11643,13 @@ static int emit_ivar_cvar_write_stmt(Compiler *c, int id, Buf *b, int indent, co
     return 1;
   }
   if (sp_streq(ty, "ClassVariableOperatorWriteNode")) {
-    const char *nm = nt_str(nt, id, "name");
     const char *op = nt_str(nt, id, "binary_operator");
     int v = nt_ref(nt, id, "value");
-    int sc = comp_scope_of(c, id)->class_id;
-    if (sc < 0) sc = g_class_body_id;
-    if (sc < 0) sc = comp_class_index(c, "Toplevel");
-    if (sc < 0) { unsupported(c, id, "class variable op-write (no class scope)"); return 1; }
-    sc = comp_cvar_owner(c, sc, nm);
-    TyKind ct = TY_INT;
-    int idx = comp_cvar_index(&c->classes[sc], nm);
-    if (idx >= 0) ct = c->classes[sc].cvar_types[idx];
-    char ref[300]; snprintf(ref, sizeof ref, "cvar_%s_%s", c->classes[sc].name, nm + 2);
+    HolderRef h;
+    if (!holder_of_node_in(c, id, g_class_body_id, &h)) { unsupported(c, id, "class variable op-write (no class scope)"); return 1; }
+    int sc = h.cid, idx = h.idx;
+    TyKind ct = idx >= 0 ? c->classes[sc].cvar_types[idx] : TY_INT;
+    char ref[300]; holder_slot_text(c, &h, ref, sizeof ref);
     emit_indent(b, indent);
     if (ct == TY_STRING && op && sp_streq(op, "+")) {
       buf_printf(b, "%s = sp_str_concat(%s, ", ref, ref);
@@ -11682,21 +11669,21 @@ static int emit_ivar_cvar_write_stmt(Compiler *c, int id, Buf *b, int indent, co
     int is_or = sp_streq(ty, "ClassVariableOrWriteNode");
     const char *nm = nt_str(nt, id, "name");
     int v = nt_ref(nt, id, "value");
-    int sc = comp_scope_of(c, id)->class_id;
-    if (sc < 0) sc = g_class_body_id;
-    if (sc < 0) sc = comp_class_index(c, "Toplevel");
-    if (sc < 0) { unsupported(c, id, is_or ? "class variable or-write (no class scope)" : "class variable and-write (no class scope)"); return 1; }
-    sc = comp_cvar_owner(c, sc, nm);
-    char ref[300]; snprintf(ref, sizeof ref, "cvar_%s_%s", c->classes[sc].name, nm + 2);
-    int oidx = comp_cvar_index(&c->classes[sc], nm);
-    TyKind ot = oidx >= 0 ? c->classes[sc].cvar_types[oidx] : TY_UNKNOWN;
+    HolderRef h;
+    if (!holder_of_node_in(c, id, g_class_body_id, &h)) { unsupported(c, id, is_or ? "class variable or-write (no class scope)" : "class variable and-write (no class scope)"); return 1; }
+    int sc = h.cid;
+    char ref[300]; holder_slot_text(c, &h, ref, sizeof ref);
+    TyKind ot = h.idx >= 0 ? c->classes[sc].cvar_types[h.idx] : TY_UNKNOWN;
     emit_indent(b, indent);
     /* --share-strings: a class variable holding the shared handle, as a
        global's slot (#6765) */
-    if (oidx >= 0 && repr_of_cvar(c, sc, oidx).share) {
+    if (h.r.share) {
       emit_strbuf_orw_guard(c, ref, v, is_or, b);
       buf_puts(b, " ");
-      emit_cvar_set_flag(c, sc, nm, 0, b);
+      /* `||=` leaves the class variable defined whether or not it stored;
+         `&&=` stores only into one that holds a String, so already set --
+         flagging it after the guard called an unset one defined */
+      if (is_or) emit_cvar_set_flag(c, sc, nm, 0, b);
       buf_puts(b, "\n");
       return 1;
     }
@@ -12817,6 +12804,7 @@ void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
          anything else in a fresh handle, as the plain write does */
       else if (ivt2 == TY_STRBUF) {
         if (strbuf_slot_ref(c, v, srefO2, sizeof srefO2)) buf_puts(&vval, srefO2);
+        else if (emit_strbuf_write_handle(c, v, &vval)) { }
         else { buf_puts(&vval, "sp_String_new_shared("); emit_str_expr(c, v, &vval); buf_puts(&vval, ")"); }
       }
       else if (ty_is_object(ivt2) || ty_is_array(ivt2) || ty_is_hash(ivt2) ||
@@ -13533,6 +13521,12 @@ void emit_stmt_tail_inner(Compiler *c, int id, Buf *b, int indent) {
       int icls9 = tl9 >= 0 ? tl9 : ics9->class_id;
       int iidx9 = comp_ivar_index(&c->classes[icls9], inm9);
       TyKind it9 = iidx9 >= 0 ? c->classes[icls9].ivar_types[iidx9] : TY_UNKNOWN;
+      /* a slot that holds the --share-strings handle answers its String,
+         read out with the handle published, as the value form's is: the
+         caller's deep-return pickup takes it (an_returns_shared_handles).
+         Without the rule nothing picks it up, and the tail is as before. */
+      int sb8 = it9 == TY_STRBUF && repr_write_share(c, id);
+      if (sb8) it9 = TY_STRING;
       int want_poly8 = g_result_var ? g_result_poly : (g_ret_type == TY_POLY);
       int slot_ok8 = iidx9 >= 0 && it9 != TY_UNKNOWN && it9 != TY_VOID &&
                      (want_poly8 || it9 == (g_result_var ? g_result_ty : g_ret_type));
@@ -13540,9 +13534,16 @@ void emit_stmt_tail_inner(Compiler *c, int id, Buf *b, int indent) {
         emit_stmt(c, id, b, indent);
         emit_indent(b, indent); emit_tail_lead(b);
         char islot9[512];
-        if (cmeth9) snprintf(islot9, sizeof islot9, "civ_%s_%s", c->classes[ics9->class_id].name, iv_c(inm9 + 1));
-        else if (tl9 >= 0) snprintf(islot9, sizeof islot9, "civ_Toplevel_%s", iv_c(inm9 + 1));
-        else snprintf(islot9, sizeof islot9, "%s%siv_%s", g_self, g_self_deref, iv_c(inm9 + 1));
+        HolderRef h9;
+        holder_ivar(c, id, icls9, cmeth9 || tl9 >= 0, &h9);
+        holder_slot_text(c, &h9, islot9, sizeof islot9);
+        if (sb8) {
+          char h8[512];
+          snprintf(h8, sizeof h8, "%s", islot9);
+          snprintf(islot9, sizeof islot9,
+                   "(_sp_ret_strbuf = (void *)%s, %s ? sp_str_concat(sp_String_cstr(%s), (&(\"\\xff\")[1])) : NULL)",
+                   h8, h8, h8);
+        }
         if (want_poly8 && it9 != TY_POLY) {
           Buf bx8; memset(&bx8, 0, sizeof bx8);
           emit_boxed_text(c, it9, islot9, &bx8);
@@ -13565,45 +13566,51 @@ void emit_stmt_tail_inner(Compiler *c, int id, Buf *b, int indent) {
   if (sp_streq(ty, "LocalVariableWriteNode") ||
       sp_streq(ty, "LocalVariableOrWriteNode") ||
       sp_streq(ty, "LocalVariableAndWriteNode")) {
-    const char *lnm = nt_str(nt, id, "name");
-    LocalVar *lv9 = lnm ? scope_local(comp_scope_of(c, id), lnm) : NULL;
+    HolderRef h9;
+    LocalVar *lv9 = holder_of_node(c, id, &h9) ? h9.lv : NULL;
     TyKind lt9 = lv9 ? lv9->type : TY_UNKNOWN;
     int want_poly9 = g_result_var ? g_result_poly : (g_ret_type == TY_POLY);
     int slot_ok = lv9 && lt9 != TY_UNKNOWN && lt9 != TY_VOID &&
                   (want_poly9 || lt9 == (g_result_var ? g_result_ty : g_ret_type));
     emit_stmt(c, id, b, indent);
     if (!slot_ok) return;
-    Buf rb9; memset(&rb9, 0, sizeof rb9); emit_local_ref(c, id, lnm, &rb9);
+    char lref9[1024];
+    holder_slot_text(c, &h9, lref9, sizeof lref9);
     emit_indent(b, indent); emit_tail_lead(b);
     if (want_poly9 && lt9 != TY_POLY) {
       Buf bx9; memset(&bx9, 0, sizeof bx9);
-      emit_boxed_text(c, lt9, rb9.p ? rb9.p : "0", &bx9);
+      emit_boxed_text(c, lt9, lref9, &bx9);
       buf_printf(b, "%s;\n", bx9.p ? bx9.p : "sp_box_nil()");
       free(bx9.p);
     }
-    else buf_printf(b, "%s;\n", rb9.p ? rb9.p : "0");
-    free(rb9.p);
+    else buf_printf(b, "%s;\n", lref9);
     return;
   }
   /* A tail GLOBAL write answers the stored value too (`def m; $g = v; end`),
      and the statement form returned nil. Same shape as the local write:
      emit the write, then hand back the slot. */
   if (sp_streq(ty, "GlobalVariableWriteNode")) {
-    const char *gnm = nt_str(nt, id, "name");
-    const char *grn = gnm ? comp_resolve_gvar(c, gnm + 1) : NULL;
-    LocalVar *gv9 = grn ? comp_gvar(c, grn) : NULL;
+    HolderRef h9;
+    LocalVar *gv9 = holder_of_node(c, id, &h9) ? h9.lv : NULL;
     TyKind gt9 = gv9 ? gv9->type : TY_UNKNOWN;
     /* a global holding the shared handle answers its String */
-    int sb9 = gv9 && repr_of_slot(c, gv9).kind == RK_STRBUF;
+    int sb9 = gv9 && h9.r.kind == RK_STRBUF;
     if (sb9) gt9 = TY_STRING;
     int want_poly9 = g_result_var ? g_result_poly : (g_ret_type == TY_POLY);
     int slot_ok = gv9 && gt9 != TY_UNKNOWN && gt9 != TY_VOID &&
                   (want_poly9 || gt9 == (g_result_var ? g_result_ty : g_ret_type));
     emit_stmt(c, id, b, indent);
     if (!slot_ok) return;
-    char gref9[256];
-    if (sb9) snprintf(gref9, sizeof gref9, "(gv_%s ? sp_str_concat(sp_String_cstr(gv_%s), (&(\"\\xff\")[1])) : NULL)", grn, grn);
-    else snprintf(gref9, sizeof gref9, "gv_%s", grn);
+    char gslot9[256], gref9[512];
+    holder_slot_text(c, &h9, gslot9, sizeof gslot9);
+    /* read out with the handle published, as the value form's is, where
+       the --share-strings rule's pickup takes it */
+    if (sb9 && h9.r.share)
+      snprintf(gref9, sizeof gref9,
+               "(_sp_ret_strbuf = (void *)%s, %s ? sp_str_concat(sp_String_cstr(%s), (&(\"\\xff\")[1])) : NULL)",
+               gslot9, gslot9, gslot9);
+    else if (sb9) snprintf(gref9, sizeof gref9, "(%s ? sp_str_concat(sp_String_cstr(%s), (&(\"\\xff\")[1])) : NULL)", gslot9, gslot9);
+    else snprintf(gref9, sizeof gref9, "%s", gslot9);
     emit_indent(b, indent); emit_tail_lead(b);
     if (want_poly9 && gt9 != TY_POLY) {
       Buf bx9; memset(&bx9, 0, sizeof bx9);

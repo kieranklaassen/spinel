@@ -2640,6 +2640,28 @@ static int table_row_alias(Compiler *c, const LWIndex *lw, const char *nm, Scope
   return 0;
 }
 
+/* A store or a push on an Array subclass instance (#7449) is evidence about
+   the Array its class embeds: folded into the root class's ary_kind, as a
+   local's is into the local. An index is an Integer there or the store
+   raises, so an element store reads as a push of its value; a fold that
+   would leave no Array kind the instance can embed widens to boxed elements.
+   A store the class's own method takes is no evidence about the Array.
+   Answers whether the receiver was such an instance. */
+static int arysub_container_evidence(Compiler *c, int id, int recv, int is_push, int is_splice,
+                                     TyKind vt, int *changed) {
+  TyKind rt = infer_type(c, recv), k;
+  int root = comp_ty_ary_root(c, rt);
+  if (root < 0) return 0;
+  if (nt_kind(c->nt, id) == NK_CallNode ? !comp_arysub_call(c, id, rt, &k)
+                                        : comp_method_in_chain(c, ty_object_class(rt), "[]=", NULL) >= 0)
+    return 1;
+  TyKind *slot = &c->classes[root].ary_kind, was = *slot, now = was;
+  fold_container_evidence(&now, is_push || !is_splice, is_splice && !is_push, TY_INT, vt);
+  if (now != was && !array_new_copies(now)) now = TY_POLY_ARRAY;
+  if (now != was) { *slot = now; *changed = 1; }
+  return 1;
+}
+
 /* infer_write_types's pass that folds container usage into a local's type:
    an empty [] or {} takes its element, key and value types from how it is
    filled (answers whether it changed a type) */
@@ -2699,7 +2721,7 @@ static int infer_write_container_usage(Compiler *c, const NodeTable *nt, int nfb
            keeps the push promotion. */
         if (sp_streq(name, "<<") && recv >= 0 &&
             (an_user_defines_method(c, "<<") || an_native_defines_method(c, "<<")) &&
-            !recv_has_array_write(c, recv)) continue;
+            !recv_has_array_write(c, recv) && comp_ty_ary_root(c, infer_type(c, recv)) < 0) continue;
         is_push = 1; elem_argv = argv; elem_an = an; vt = push_elem_ty(c, argv[0]);
         for (int ai = 1; ai < an; ai++) vt = ty_unify(vt, push_elem_ty(c, argv[ai]));
         if (an == 1) vnode = argv[0];
@@ -2734,7 +2756,7 @@ static int infer_write_container_usage(Compiler *c, const NodeTable *nt, int nfb
       }
       else if (name && sp_streq(name, "replace") && an == 1 && recv >= 0 &&
                ty_is_array(infer_type(c, argv[0])) &&
-               recv_has_array_write(c, recv)) {
+               (recv_has_array_write(c, recv) || comp_ty_ary_root(c, infer_type(c, recv)) >= 0)) {
         /* replace(other) makes the other's elements the receiver's WHOLE
            contents, which is the same evidence about what it holds -- and a
            local's static type is an upper bound, so the union answers here as
@@ -2983,6 +3005,8 @@ static int infer_write_container_usage(Compiler *c, const NodeTable *nt, int nfb
     }
     if (elem_splat_index && nt_kind(nt, recv) != NK_LocalVariableReadNode) continue;
     const char *rty = nt_type(nt, recv);
+    if ((is_push || is_idx_write) && !elem_splat_index &&
+        arysub_container_evidence(c, id, recv, is_push, is_splice, (TyKind)vt, &changed)) continue;
     /* `(@h ||= {})[k] = v` fills @h exactly as `@h ||= {}; @h[k] = v` does,
        and so does a write through a getter whose value is that or-write.
        Without this the write was no evidence, the empty literal left @h
@@ -5140,36 +5164,43 @@ static int widen_nested_literals(Compiler *c, int recv, int is_push, int is_spli
    through parentheses, the last statement, and each arm of an `if`,
    `unless` or `case`. Answers the new count, or -1 when a path has no
    such expression (an arm left out answers nil) or out[] is full. */
-static int value_leaves(Compiler *c, int n, int *out, int nout, int cap) {
+/* With `nil_ok`, a path that answers nil (an arm left out, an empty body, a
+   bare `return`) adds no expression instead of answering -1. */
+static int value_leaves_ex(Compiler *c, int n, int *out, int nout, int cap, int nil_ok) {
   const NodeTable *nt = c->nt;
+  if (nout < 0) return -1;
   n = unwrap_parens(c, n);
-  if (n < 0 || nout < 0) return -1;
+  if (n < 0) return nil_ok ? nout : -1;
   NodeKind k = nt_kind(nt, n);
   if (k == NK_StatementsNode) {
     int bn = 0; const int *bb = nt_arr(nt, n, "body", &bn);
-    return bn > 0 ? value_leaves(c, bb[bn - 1], out, nout, cap) : -1;
+    return bn > 0 ? value_leaves_ex(c, bb[bn - 1], out, nout, cap, nil_ok) : nil_ok ? nout : -1;
   }
-  if (k == NK_ParenthesesNode) return value_leaves(c, nt_ref(nt, n, "body"), out, nout, cap);
-  if (k == NK_ElseNode) return value_leaves(c, nt_ref(nt, n, "statements"), out, nout, cap);
+  if (k == NK_ParenthesesNode) return value_leaves_ex(c, nt_ref(nt, n, "body"), out, nout, cap, nil_ok);
+  if (k == NK_ElseNode) return value_leaves_ex(c, nt_ref(nt, n, "statements"), out, nout, cap, nil_ok);
   if (k == NK_IfNode || k == NK_UnlessNode) {
     int alt = nt_ref(nt, n, k == NK_IfNode ? "subsequent" : "else_clause");
-    nout = value_leaves(c, nt_ref(nt, n, "statements"), out, nout, cap);
-    return value_leaves(c, alt, out, nout, cap);
+    nout = value_leaves_ex(c, nt_ref(nt, n, "statements"), out, nout, cap, nil_ok);
+    return value_leaves_ex(c, alt, out, nout, cap, nil_ok);
   }
   if (k == NK_CaseNode) {
     int an = 0; const int *arms = nt_arr(nt, n, "conditions", &an);
-    for (int i = 0; i < an; i++) nout = value_leaves(c, nt_ref(nt, arms[i], "statements"), out, nout, cap);
-    return value_leaves(c, nt_ref(nt, n, "else_clause"), out, nout, cap);
+    for (int i = 0; i < an; i++) nout = value_leaves_ex(c, nt_ref(nt, arms[i], "statements"), out, nout, cap, nil_ok);
+    return value_leaves_ex(c, nt_ref(nt, n, "else_clause"), out, nout, cap, nil_ok);
   }
   if (k == NK_ReturnNode) {
     int a = nt_ref(nt, n, "arguments"), an = 0;
     const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
+    if (an == 0 && nil_ok) return nout;
     if (an != 1 || nt_kind(nt, av[0]) == NK_SplatNode) return -1;
-    return value_leaves(c, av[0], out, nout, cap);
+    return value_leaves_ex(c, av[0], out, nout, cap, nil_ok);
   }
   if (nout >= cap) return -1;
   out[nout++] = n;
   return nout;
+}
+static int value_leaves(Compiler *c, int n, int *out, int nout, int cap) {
+  return value_leaves_ex(c, n, out, nout, cap, 0);
 }
 
 /* The values method scope `mi` answers: its body's, and each `return`'s.
@@ -5177,19 +5208,27 @@ static int value_leaves(Compiler *c, int n, int *out, int nout, int cap) {
    follow, so the returns come from the scope's own chain (comp_sret_first,
    in node order as the scan was) once scope shape is fixed, instead of a
    scan of every ReturnNode of the program per question. */
-static int method_value_leaves(Compiler *c, int mi, int *out, int cap) {
+static int method_value_leaves_ex(Compiler *c, int mi, int *out, int cap, int nil_ok) {
   Scope *m = &c->scopes[mi];
-  int n = m->body >= 0 ? value_leaves(c, m->body, out, 0, cap) : -1;
+  int n = m->body >= 0 ? value_leaves_ex(c, m->body, out, 0, cap, nil_ok) : nil_ok ? 0 : -1;
   if (comp_scope_index_is_frozen()) {
     for (int r = comp_sret_first(c, mi); r >= 0 && n >= 0; r = comp_sret_next(c, r))
-      n = value_leaves(c, r, out, n, cap);
+      n = value_leaves_ex(c, r, out, n, cap, nil_ok);
     return n;
   }
   NT_FOREACH_KIND(c->nt, NK_ReturnNode, r) {
     if (n < 0) break;
-    if (comp_scope_of(c, r) == m) n = value_leaves(c, r, out, n, cap);
+    if (comp_scope_of(c, r) == m) n = value_leaves_ex(c, r, out, n, cap, nil_ok);
   }
   return n;
+}
+int method_value_leaves(Compiler *c, int mi, int *out, int cap) {
+  return method_value_leaves_ex(c, mi, out, cap, 0);
+}
+/* The same, a path that answers nil adding nothing: the expressions whose
+   value the method may answer, beside a nil. */
+int method_value_leaves_or_nil(Compiler *c, int mi, int *out, int cap) {
+  return method_value_leaves_ex(c, mi, out, cap, 1);
 }
 
 /* 1 when a call bound to method scope `mi` can reach another definition: an
@@ -14118,6 +14157,7 @@ int infer_block_params(Compiler *c) {
 
     if (recv < 0) continue;
     TyKind rt = infer_type(c, recv);
+    { TyKind ak; if (comp_arysub_call(c, id, rt, &ak)) rt = ak; }   /* an Array subclass walks its Array (#7449) */
     /* A Range Enumerable served by materializing to an int array (each_slice/
        each_cons block forms, ...): type the block params as the array version,
        matching infer_call's redispatch and the codegen mirrors. */
@@ -14192,9 +14232,8 @@ int infer_block_params(Compiler *c) {
       pt = TY_INT;
     else if (rt == TY_POLY && sp_streq(name, "each_byte"))
       pt = TY_INT;
-    else if (rt == TY_STRING && (sp_streq(name, "each_char") || sp_streq(name, "each_line") || sp_streq(name, "upto") ||
-                                 sp_streq(name, "chars") || sp_streq(name, "lines") || sp_streq(name, "split")))
-      pt = TY_STRING;  /* split { |piece| } yields each substring */
+    else if (rt == TY_STRING && is_str_string_yield(name))
+      pt = TY_STRING;  /* split { |piece| } yields each substring, scrub each invalid sequence */
     else if ((rt == TY_STRING || rt == TY_POLY) &&
              (sp_streq(name, "gsub") || sp_streq(name, "sub") ||
               sp_streq(name, "gsub!") || sp_streq(name, "sub!")))   /* the bang forms are rewritten to these */
@@ -15256,6 +15295,13 @@ void cr_collect_calls(Compiler *c, const NodeTable *nt, int id,
     cr_collect_calls(c, nt, nt_ref(nt, id, "statements"), out, n, cap);
     return;
   }
+  /* A respond_to? probe (desugar_respond_to_probe) is analysis-only: it asks
+     whether `recv.m` would type, and is never emitted or run. Reached through
+     the respond_to? node's "rt_probes" array, it counted as a call of m, so a
+     method nothing calls but a respond_to? names was emitted, its parameters
+     widened to poly by the never-bound backstop, and a refusal in its body
+     stopped the build. Its receiver is the respond_to?'s own, walked there. */
+  if (nt_kind(nt, id) == NK_CallNode && nt_int(nt, id, "rt_probe", 0)) return;
   /* Collect method name from CallNode, or operator name from op-assign nodes
      (e.g. `a += 1` → InstanceVariableOperatorWriteNode with binary_operator "+"). */
   const char *nm = NULL;

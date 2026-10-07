@@ -1029,6 +1029,49 @@ static void sclass_walk_stmt(Compiler *c, int s, int scope_idx, int target_class
   sclass_walk_stmt(c, nt_ref(nt, s, "else_clause"), scope_idx, target_class, depth + 1);
 }
 
+/* The four builtin classes that also live under Thread (`Thread::Mutex`). */
+static int is_thread_class_name(const char *n) {
+  return sp_streq(n, "Queue") || sp_streq(n, "SizedQueue") ||
+         sp_streq(n, "Mutex") || sp_streq(n, "ConditionVariable");
+}
+
+/* The name of the C-built class that `class cname` would reopen, else NULL.
+   These classes have C names of their own, so a reopening would make a second,
+   empty class (or drop the methods). A bare name reopens at the top level, in
+   `class Object`, and (for the Thread four) in `class Thread`; `::Name` always
+   does; `Thread::Name` does for the Thread four only. Any other path or
+   enclosing module names a new class in CRuby. OpenStruct is builtin only with
+   require "ostruct". */
+static const char *reopened_native_class(Compiler *c, int cp, int class_id, const char *leaf) {
+  static const char *const native[] = { "Monitor", "Mutex", "Queue", "SizedQueue",
+    "ConditionVariable", "OpenStruct", "Encoding", NULL };
+  if (cp < 0 || !str_in(leaf, native)) return NULL;
+  if (sp_streq(leaf, "OpenStruct") && !sp_feature_required("ostruct")) return NULL;
+  NodeKind k = nt_kind(c->nt, cp);
+  int only_thread = 0;
+  if (k == NK_ConstantReadNode) {
+    const char *en = class_id >= 0 ? c->classes[class_id].name : NULL;
+    if (class_id < 0 || (en && sp_streq(en, "Object"))) return leaf;
+    if (!en || !sp_streq(en, "Thread")) return NULL;
+    only_thread = 1;
+  } else if (k == NK_ConstantPathNode) {
+    int par = nt_ref(c->nt, cp, "parent");
+    if (par >= 0) {
+      const char *pn = nt_kind(c->nt, par) == NK_ConstantReadNode ? nt_str(c->nt, par, "name") : NULL;
+      if (class_id >= 0 || !pn || !sp_streq(pn, "Thread")) return NULL;
+      only_thread = 1;
+    }
+  } else return NULL;
+  return only_thread && !is_thread_class_name(leaf) ? NULL : leaf;
+}
+
+/* Builtin classes that the builtin class table lacks, so a nested class of
+   that name cannot be kept apart from the C-built one. Refused at any depth.
+   OpenStruct is builtin only with require "ostruct". */
+static int is_untabled_native_name(const char *n) {
+  return sp_streq(n, "Monitor") || (sp_streq(n, "OpenStruct") && sp_feature_required("ostruct"));
+}
+
 void walk_scope(Compiler *c, int id, int scope_idx, int class_id) {
   if (id < 0 || id >= c->nt->count) return;
   c->nscope[id] = scope_idx;
@@ -1084,6 +1127,13 @@ void walk_scope(Compiler *c, int id, int scope_idx, int class_id) {
   if (ty && (sp_streq(ty, "ClassNode") || sp_streq(ty, "ModuleNode"))) {
     int cp = nt_ref(c->nt, id, "constant_path");
     const char *cname = cp >= 0 ? nt_str(c->nt, cp, "name") : NULL;
+    int cls_toplevel = class_id < 0 && cp >= 0 && nt_type(c->nt, cp) &&
+                       sp_streq(nt_type(c->nt, cp), "ConstantReadNode");
+    /* An earlier pass mangles a nested name to `Outer__Inner`: test the leaf. */
+    const char *cls_leaf = cname;
+    if (cname && !cls_toplevel) {
+      for (const char *q = strstr(cname, "__"); q; q = strstr(q + 1, "__")) cls_leaf = q + 2;
+    }
     /* `module String` reopening a builtin CLASS is CRuby's TypeError; reject
        with that message instead of colliding with the runtime's sp_<Name> C
        type (a raw C error). A lexically nested or path-qualified
@@ -1091,12 +1141,11 @@ void walk_scope(Compiler *c, int id, int scope_idx, int class_id) {
        C type is the bare tail name and still collides -- refuse that loudly
        too, as unsupported rather than TypeError. */
     if (sp_streq(ty, "ModuleNode") && cname &&
-        is_builtin_class_name(cname) && !is_builtin_module_name(cname)) {
+        ((is_builtin_class_name(cname) && !is_builtin_module_name(cname)) ||
+         is_untabled_native_name(cls_leaf))) {
       int ln = (int)nt_int(c->nt, id, "node_line", 0);
       const char *file = c->nt->source_file ? c->nt->source_file : "source.rb";
-      int toplevel = class_id < 0 && cp >= 0 && nt_type(c->nt, cp) &&
-                     sp_streq(nt_type(c->nt, cp), "ConstantReadNode");
-      if (toplevel)
+      if (cls_toplevel)
         fprintf(stderr, "spinel: %s:%d: %s is not a module (TypeError)\n", file, ln, cname);
       else
         fprintf(stderr, "spinel: %s:%d: unsupported module name '%s': "
@@ -1107,13 +1156,6 @@ void walk_scope(Compiler *c, int id, int scope_idx, int class_id) {
        which CRuby refuses with a TypeError. A nested or path-qualified name
        is a fresh constant in CRuby, but the generated C name is the bare
        tail and collides, so refuse that as unsupported. */
-    int cls_toplevel = class_id < 0 && cp >= 0 && nt_type(c->nt, cp) &&
-                       sp_streq(nt_type(c->nt, cp), "ConstantReadNode");
-    /* An earlier pass mangles a nested name to `Outer__Inner`: test the leaf. */
-    const char *cls_leaf = cname;
-    if (cname && !cls_toplevel) {
-      for (const char *q = strstr(cname, "__"); q; q = strstr(q + 1, "__")) cls_leaf = q + 2;
-    }
     if (sp_streq(ty, "ClassNode") && cname && bc_builtin_module(cls_leaf)) {
       int ln = (int)nt_int(c->nt, id, "node_line", 0);
       const char *file = c->nt->source_file ? c->nt->source_file : "source.rb";
@@ -1138,6 +1180,24 @@ void walk_scope(Compiler *c, int id, int scope_idx, int class_id) {
         char buf[256]; snprintf(buf, sizeof buf, "%s", real);  /* copy: set frees cname */
         nt_set_str((NodeTable *)c->nt, cp, "name", buf);
         cname = nt_str(c->nt, cp, "name");
+        cls_leaf = cname;  /* the old leaf pointed into the freed name */
+      }
+    }
+    if (sp_streq(ty, "ClassNode") && cname) {
+      const char *nat = reopened_native_class(c, cp, class_id, cls_leaf);
+      if (!nat && is_untabled_native_name(cls_leaf)) {
+        int ln = (int)nt_int(c->nt, id, "node_line", 0);
+        const char *file = c->nt->source_file ? c->nt->source_file : "source.rb";
+        fprintf(stderr, "spinel: %s:%d: unsupported class name '%s': "
+                        "collides with the builtin class of that name\n", file, ln, cls_leaf);
+        exit(1);
+      }
+      if (nat) {
+        int ln = (int)nt_int(c->nt, id, "node_line", 0);
+        const char *file = c->nt->source_file ? c->nt->source_file : "source.rb";
+        fprintf(stderr, "spinel: %s:%d: reopening the builtin class %s is not supported\n",
+                file, ln, nat);
+        exit(1);
       }
     }
     if (cname && comp_class_index(c, cname) < 0) {
@@ -4728,8 +4788,10 @@ static void check_unrewritten_delegators(Compiler *c) {
    lexical lookup may well find that class instead. Object, BasicObject, the
    exceptions, Struct / Data, Numeric, and package classes written in Ruby
    (Set, Date, ...) are absent: a subclass of those works. OpenStruct is a
-   type of the runtime's own here, so it is listed with the builtins. */
-static const char *refused_builtin_superclass(Compiler *c, int sc) {
+   type of the runtime's own here, so it is listed with the builtins. Array
+   is listed too, but a subclass of it is no longer refused: its instances
+   are real Arrays (#7449, mark_array_subclasses). */
+static const char *builtin_value_superclass(Compiler *c, int sc) {
   static const char *const refused[] = {
     "Array", "Hash", "String", "Range", "Proc", "Method", "UnboundMethod",
     "Integer", "Float", "Symbol", "Rational", "Complex",
@@ -4747,8 +4809,7 @@ static const char *refused_builtin_superclass(Compiler *c, int sc) {
     if (par >= 0) {
       const char *pn = nt_kind(nt, par) == NK_ConstantReadNode ? nt_str(nt, par, "name") : NULL;
       if (!pn || !sp_streq(pn, "Thread") ||
-          !(sp_streq(nm, "Queue") || sp_streq(nm, "SizedQueue") ||
-            sp_streq(nm, "Mutex") || sp_streq(nm, "ConditionVariable")))
+          !is_thread_class_name(nm))
         return NULL;
     }
     return nm;
@@ -4761,15 +4822,20 @@ static const char *refused_builtin_superclass(Compiler *c, int sc) {
   return nm;
 }
 
+static const char *refused_builtin_superclass(Compiler *c, int sc) {
+  const char *nm = builtin_value_superclass(c, sc);
+  return nm && sp_streq(nm, "Array") ? NULL : nm;
+}
+
 /* A program class whose superclass is a builtin of that kind, or a class a
    package binds to C (StringIO), is refused where it is declared: it would
    build and then answer differently from CRuby (#7075). The fix is a real
-   subclass -- an instance that IS an Array with the subclass's methods
-   dispatched on it -- which spinel does not have yet; rewriting the class
-   into one that delegates to a wrapped value answers differently too
-   (`is_a?`, `==`, `p`), so wrapping is left to the program. `Class.new(Hash)`
-   without a block is the same class spelled as a call (the block form
-   arrives here already rewritten into a ClassNode). */
+   subclass -- an instance that IS a Hash with the subclass's methods
+   dispatched on it -- which Array has (#7449) and the others do not yet;
+   rewriting the class into one that delegates to a wrapped value answers
+   differently too (`is_a?`, `==`, `p`), so wrapping is left to the program.
+   `Class.new(Hash)` without a block is the same class spelled as a call (the
+   block form arrives here already rewritten into a ClassNode). */
 static void refuse_builtin_subclass(Compiler *c, int at, const char *what, const char *par) {
   char msg[512];
   snprintf(msg, sizeof msg,
@@ -4789,6 +4855,17 @@ static void check_builtin_subclasses(Compiler *c) {
     int cp = nt_ref(nt, id, "constant_path");
     const char *cn = cp >= 0 ? nt_str(nt, cp, "name") : NULL;
     const char *par = refused_builtin_superclass(c, sc);
+    /* a program that reopens Array has a class of its own named Array, which
+       resolve_parents would take for the superclass */
+    if (!par && (par = builtin_value_superclass(c, sc)) != NULL) {
+      if (comp_class_index(c, "Array") >= 0) {
+        char msg[400];
+        snprintf(msg, sizeof msg, "class %s < Array: subclassing Array in a program that "
+                 "also reopens Array is not supported yet", cn ? cn : "?");
+        unsupported_feature(c, sc, msg);
+      }
+      continue;
+    }
     if (!par) {
       NodeKind sk = nt_kind(nt, sc);
       if (sk != NK_ConstantReadNode && sk != NK_ConstantPathNode) continue;
@@ -4812,8 +4889,13 @@ static void check_builtin_subclasses(Compiler *c) {
     int args = nt_ref(nt, id, "arguments"), ac = 0;
     const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &ac) : NULL;
     if (!av || ac != 1) continue;
-    const char *par = refused_builtin_superclass(c, av[0]);
-    if (par) {
+    const char *par = builtin_value_superclass(c, av[0]);
+    if (par && sp_streq(par, "Array"))
+      /* no class of the program's own stands for a class made by the call */
+      unsupported_feature(c, id, "Class.new(Array) without a block is not supported yet "
+                                 "(the call makes its class at run time); declare it as "
+                                 "`class Name < Array`");
+    else if (par) {
       char what[64];
       snprintf(what, sizeof what, "Class.new(%s)", par);
       refuse_builtin_subclass(c, id, what, par);
@@ -4883,6 +4965,25 @@ static void refuse_anon_superclass_reflection(Compiler *c) {
   }
 }
 
+/* The classes whose chain reaches the builtin Array (#7449): each records the
+   root of its chain, the class right below Array, whose instances and its
+   descendants' share one embedded Array kind. A program that reopens Array
+   was refused above. */
+static void mark_array_subclasses(Compiler *c) {
+  for (int i = 0; i < c->nclasses; i++) {
+    int r = i;
+    for (int g = 0; c->classes[r].parent >= 0 && c->classes[r].parent != r && g < 256; g++)
+      r = c->classes[r].parent;
+    int dn = c->classes[r].def_node;
+    if (dn < 0 || nt_kind(c->nt, dn) != NK_ClassNode) continue;
+    const char *par = builtin_value_superclass(c, nt_ref(c->nt, dn, "superclass"));
+    if (par && sp_streq(par, "Array") && comp_class_index(c, "Array") < 0) {
+      c->classes[i].ary_root = r + 1;
+      c->has_arysub = 1;
+    }
+  }
+}
+
 void resolve_parents(Compiler *c) {
   check_class_redeclarations(c);
   check_blk_param_writes(c);
@@ -4902,6 +5003,7 @@ void resolve_parents(Compiler *c) {
       if (p >= 0 && p != i) c->classes[i].parent = p;
     }
   }
+  mark_array_subclasses(c);
   /* A `class << self; attr_accessor :x` is a method of the singleton class,
      and a subclass's singleton class inherits it: the accessor answers
      through the subclass, on the subclass's own slot (nil until assigned),
