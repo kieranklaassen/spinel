@@ -1,0 +1,9 @@
+[true, 1]
+[:same, 0]
+[:equal, 1]
+[:none, 1]
+[:second, 1]
+[:hit, 0]
+[:miss, 1]
+false
+na
