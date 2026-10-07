@@ -12313,7 +12313,7 @@ static sp_RbVal sp_poly_first(sp_RbVal v) {
      materialize: without this it fell through to the array read and answered
      nil (a boxed 1.5..2.5 reaching a run-time-typed callable, #4804) */
   if (v.cls_id == SP_BUILTIN_FLOAT_RANGE) return sp_box_float(((sp_FloatRange *)v.v.p)->first);
-  if (v.cls_id == SP_BUILTIN_STR_RANGE) return sp_box_str(((sp_StrRange *)v.v.p)->first);
+  if (v.cls_id == SP_BUILTIN_STR_RANGE) { const char *f = ((sp_StrRange *)v.v.p)->first; if (!f) sp_srange_open_raise(0); return sp_box_str(f); }
   /* an Enumerator answers the first item it yields, running a generator
      only that far */
   if (v.cls_id == SP_BUILTIN_ENUMERATOR && v.v.p) return sp_enum_first_boxed(v);
@@ -12343,8 +12343,8 @@ static sp_RbVal sp_poly_last(sp_RbVal v) {
      Integer range above (#4804) */
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_FLOAT_RANGE)
     return sp_box_float(((sp_FloatRange *)v.v.p)->last);
-  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_STR_RANGE)
-    return sp_box_str(((sp_StrRange *)v.v.p)->last);
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_STR_RANGE) {
+    const char *l = ((sp_StrRange *)v.v.p)->last; if (!l) sp_srange_open_raise(1); return sp_box_str(l); }
   { sp_PolyArray *ue = v.tag == SP_TAG_OBJ ? sp_poly_user_elems(v) : NULL;
     if (ue) return ue->len > 0 ? ue->data[ue->len - 1] : sp_box_nil(); }
   sp_int n = sp_poly_length(v);
