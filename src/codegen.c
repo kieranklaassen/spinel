@@ -2153,11 +2153,21 @@ static int scope_performs_match(Compiler *c, int si) {
   int nids = 0; const int *ids = cg_scope_nodes(c, si, &nids);
   for (int k = 0; k < nids; k++) {
     int id = ids[k];
-    if (nt_kind(nt, id) != NK_CallNode) continue;
+    if (nt_kind(nt, id) != NK_CallNode) {
+      /* a `when` arm asks its Regexp's === of the subject */
+      const char *ty = g_match_frame_closed ? nt_type(nt, id) : NULL;
+      if (!ty || !sp_streq(ty, "WhenNode")) continue;
+      int wc = 0; const int *conds = nt_arr(nt, id, "conditions", &wc);
+      for (int j = 0; j < wc && conds; j++)
+        if (comp_ntype(c, conds[j]) == TY_REGEX) return 1;
+      continue;
+    }
     const char *nm = nt_str(nt, id, "name");
     if (!nm) continue;
     int hit = 0;
     for (int k = 0; mnames[k] && !hit; k++) if (sp_streq(nm, mnames[k])) hit = 1;
+    /* and so do any?, all?, none? and one? of each element */
+    if (!hit && g_match_frame_closed) hit = is_quantifier(nm);
     if (!hit) continue;
     /* only when a regexp is actually involved: the receiver or an argument */
     int r = nt_ref(nt, id, "receiver");
@@ -13694,7 +13704,10 @@ static void scan_prologue_features(Compiler *c) {
     }
   }
   /* and no fiber, under which a method's frame would sit suspended */
-  g_match_frame_closed = g_reads_match_regs && !fibers && !g_uses_threads && match_frame_closed(c);
+  /* The test is put to the frames a program that passes it gets: there a
+     `when` arm and a quantifier save one too (scope_performs_match). */
+  g_match_frame_closed = g_reads_match_regs && !fibers && !g_uses_threads;
+  if (g_match_frame_closed) g_match_frame_closed = match_frame_closed(c);
   /* Generic object reflection: when a native package declared it consumes
      object->hash reflection (native_obj_reflect, e.g. json) and the program
      defines any Struct, emit + install sp_obj_to_hash. No feature is named
