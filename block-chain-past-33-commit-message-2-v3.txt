@@ -1,0 +1,51 @@
+A block handed down through more than 33 methods keeps its value
+
+  def f1(x)
+    f2(x) { |v| yield v }
+  end
+  ...                       # 34 methods, each one's block yielding on
+  def f34(x) = yield(x + 1)
+  p f1(1) { |v| v * 2 }
+
+prints 4 in CRuby and printed nil, with nothing said. The type a
+`yield` answers is read from the blocks at the method's call sites, and
+where such a block's value is itself a `yield` the question goes on to
+the method that block is written in. The methods being asked are kept
+on a stack (g_yvt_mi), so that one handing its block to itself ends,
+and the stack was an array of 32: asked 33 deep the question was
+answered "unknown", the call had no type, and its value was boxed as
+nil.
+
+The stack grows. The four functions that push on it (yield_value_type,
+yield_block_tails, yield_value_type_via_super, method_block_presence)
+share one helper for the push (yvt_enter); a method already on the
+stack still ends the walk.
+
+Past the 32 master asks, only a method that yields and that something
+calls is asked, and only while fewer than 64 such methods are being
+answered. Its call is written out in place and needs the type of the
+block handed down to it; one more would be written out 65 deep inside
+the others, which the inliner refuses (SP_INLINE_DEPTH_MAX). Every
+other method stops at 32, as on master: one nothing calls has no block
+to answer for its yield, and one with a function of its own, such as
+one that calls its block as `b.call`, has its value boxed there, which
+is right. The walk keeps no memory of what it has asked, so each method
+of a chain asks the whole chain above it, and the bound keeps those
+chains at master's time: 400 and 800 methods that call their block as
+`b.call` compile in 10.5 and 49.6 s (10.1 and 49.5 s on master), to
+master's C, and 800, 1,600 and 3,200 methods that nothing calls in
+0.25, 0.57 and 1.38 s (0.21, 0.46 and 1.29 s).
+
+Wrong on master from 34 methods and right now: the block yielded on
+from a literal block and handed on as `&b`, the callee defined first,
+instance methods, a String, the value kept in a local on the way up, a
+block that may answer nil, two call sites answering different types,
+and block_given? at the far end. They are right for as long a chain as
+the inliner's rename table has room for, 64 methods of one parameter,
+and from there the call is refused by name as it is on master.
+
+test/yield_chain_long.rb has four chains of 40 methods, six of whose
+seven lines are nil on master, and a chain of 65 methods that call
+their block as `b.call`, which is right on master and stays so.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
