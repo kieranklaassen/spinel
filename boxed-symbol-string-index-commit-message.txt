@@ -1,0 +1,18 @@
+A String index on a boxed Symbol answers its name's substring
+
+    def pick(n) = n > 0 ? {a: 1} : :stone
+    s = pick(0)
+    p s["ton"]   # nil; CRuby: "ton"
+
+Symbol#[] is String#[] on the Symbol's name. sp_poly_get_str answers
+the substring for a String and for a shared String, and answered nil for
+a Symbol with every other value that is no object. A Symbol now answers
+as its name does. The test stands where the receiver is already known
+to be no object, so a Hash's read does not meet it.
+
+No generated C changes: the function is in lib/spinel_rt.h.
+
+Test: test/boxed_symbol_index_string.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+

@@ -1,0 +1,32 @@
+A number == an object asks the object's own ==
+
+    class Money
+      attr_reader :cents
+      def initialize(cents) = @cents = cents
+      def ==(other) = other.is_a?(Money) ? cents == other.cents : cents == other
+    end
+    row = [Money.new(0), "paid", 3]
+    balance = row[0]
+    p 0 == balance                    # true
+    puts "settled" if 0 == balance    # settled
+
+printed false and nothing. Integer#== and Float#==, and a Bignum's and
+a Rational's, hand an operand that is no number back to it:
+`0 == balance` is `balance == 0`. The boxed == asked a program
+object's == only with the object on the left, so one comparison was
+true one way round and false the other, `row.count { |v| 0 == v }` was
+0 and `[0, "x"].include?(balance)` false.
+
+sp_poly_eq_slow now asks the object when the left side is a number, in
+the sentence the Process::Status arm uses for `0 == $?`. A class with
+no == of its own is not asked. A Bignum the compiler has typed never
+reaches the boxed ==, and a Complex on the left raises, both as before.
+
+Only == hands the pair over. eql? and <=> answer for the number alone,
+so the three places that reach the boxed == for one of them return
+before it for this pair: sp_poly_eql, the Object#<=> fallback of the
+<=> operator, and the key lookup of Hash#<=. `0.eql?(balance)` stays
+false and `0 <=> balance` nil, and uniq, |, a Set and a Hash key keep
+the two apart as they did.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

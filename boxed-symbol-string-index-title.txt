@@ -1,0 +1,1 @@
+A String index on a boxed Symbol answers its name's substring

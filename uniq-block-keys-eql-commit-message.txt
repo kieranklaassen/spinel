@@ -1,0 +1,25 @@
+uniq with a block compares its keys by eql?
+
+    p [1, 2, 3].uniq { |x| x.odd? ? 1 : 1.0 }   # [1, 2]
+
+printed [1]. The loop that keeps the first element of each block value
+compared the values with ==, so 1 and 1.0 were one key, and so were two
+objects of a class that defines == and no eql?:
+
+    p [1, 2, 3].uniq { |x| Tag.new(1) }         # [1, 2, 3], printed [1]
+
+Array#uniq keys by hash and eql?, with a block as without one, and uniq
+without a block already compares its elements with sp_poly_eql. The two
+loops codegen writes for a block now compare by eql? where the block's
+value can be of more than one kind, or is an Array, a Hash or an object,
+and so does the Enumerator's uniq in the runtime. A block whose value is
+typed as an Integer, a Float, a String, a Symbol, true or false, or nil
+keeps sp_poly_eq and the C it had: for those the two agree.
+
+The loops call sp_poly_eql_key, which is sp_poly_eql with the pairs for
+which eql? is == answered first: two Integers inline, as sp_poly_eq
+answers them, and a pair with no object and no Float in it, or two
+values of one kind, by sp_poly_eq_slow. Every arm of sp_poly_eql but
+its last line needs an object or the Integer and Float pair.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

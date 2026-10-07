@@ -1,0 +1,1 @@
+A number == an object asks the object's own ==
