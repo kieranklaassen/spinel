@@ -1,0 +1,93 @@
+A matching method starts with no match; a jump out restores its caller's
+
+A method that matches saves its caller's match registers in a frame
+(sp_re_frame) and a cleanup attribute puts them back when the method
+returns. Two ends were open. The frame started with the caller's
+match still in the registers, so the method read it as its own. And a
+jump out of the method runs no cleanup, so the method it landed in read
+its callee's match:
+
+    def first(s)
+      was = $1
+      s =~ /a(.)/
+      was
+    end
+    def boom(s)
+      s =~ /z(.)/
+      raise ArgumentError, "x"
+    end
+    "k9" =~ /k(\d)/
+    p first("ab")
+    begin
+      boom("zq")
+    rescue ArgumentError
+    end
+    p $1
+
+printed "9" and "q"; CRuby prints nil and "9". The second held for a
+throw to a catch, a break out of the block of a method reached through
+a boxed receiver, and a proc's return through the methods it was handed
+to.
+
+The frame now starts empty, and each jump pops the frames of the
+methods it leaves before it jumps. Each frame entered is noted,
+innermost last, with the depth of the exception, catch and break
+stacks at its entry, which is how sp_handler_stacks_unwind already
+tells a catch entry, a break scope or a proc-return home opened inside
+the landing frame from one opened before it. So no begin, catch or
+break arm records anything. A proc-return home has no depth to note, so
+a note takes the id of the innermost home, which is its age: a frame
+noted with the home returned to, or a younger one, is left.
+
+A frame entered this way is kept beside the C stack with its note, and
+the method keeps one byte for its cleanup. The collector marks the
+strings such a frame saved (sp_re_mark_globals), so they are not rooted.
+A matching method's C frame is smaller by the frame than it was, and a
+recursion runs deeper than it did.
+
+A frame counts only once it is whole, and is put back before it stops
+counting, so a raise that arrives with a signal finds the frames and
+the registers agreeing.
+
+Both ends and all four jumps are closed together because none stands
+alone. A frame that starts empty and is not put back by a raise hands
+the caller no match where it had one. A frame put back by a raise and
+not emptied shows the next method a match the leftover had hidden. A
+frame a throw left noted would be read by the next raise out of a C
+frame that had already returned.
+
+This is done only in a program where the registers a method sees are
+provably its own frame's (match_frame_closed): the program reads them,
+runs no Fiber, Enumerator or Thread, and no code of another frame reads
+them or may set them. Such code is:
+
+  - a block that may run as a function of its own, its parameters'
+    defaults included: every block and lambda but one given to loop, to
+    catch, or to a built-in value's method of a name no class of the
+    program or of the Ruby prelude defines;
+  - a method that takes a block, and a method that saves no frame;
+  - a class or module body, a `class << self` body and the top level of
+    a required file, which run in the top level's frame here;
+  - an END body, which runs at exit inside whichever method is running;
+  - a method's parameters, whose defaults the caller evaluates before
+    the method's frame opens.
+
+In such a program `$~` in a method is the method's own from its entry
+to every way out. Every other program is emitted as before, byte for
+byte: there a closure or a Fiber shares the registers with the method
+that runs it, and taking the frame back would take its match away.
+
+The test answers before anything is emitted, so it is held to the
+emitter afterwards where the emitter keeps a record: each block it
+makes a Proc or a Fiber body, and each END body (nd_stamp, kept until
+now only for --emit-types). A program that passes keeps that record,
+and such a body that touches the registers and was not counted stops
+the compile with an internal error naming the line. No test meets it.
+
+Tests: test/regexp_frame_starts_empty.rb and
+test/regexp_frame_left_by_jump.rb. The eight
+test/regexp_frame_jump_*.rb are programs the test leaves alone, one
+for a condition.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+
