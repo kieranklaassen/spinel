@@ -3746,6 +3746,9 @@ static int emit_and_or_begin_expr(Compiler *c, int id, Buf *b, const NodeTable *
         !ty_is_numeric(rt) && nt_type(nt, e) && sp_streq(nt_type(nt, e), "CallNode"))
       e_diverges = 1;
     buf_puts(b, "  ");
+    /* the frame is live for the expression: a return, next or break written
+       inside it pops it on the way out, as it does a begin's */
+    int counted = exc_modifier_frame_enter();
     /* the expression arm's own preludes (an inline-spliced body, a rooted
        temp) must land INSIDE the protected region -- with the enclosing
        statement's g_pre they would run before the setjmp, unprotected
@@ -3774,6 +3777,7 @@ static int emit_and_or_begin_expr(Compiler *c, int id, Buf *b, const NodeTable *
       buf_printf(b, "%s;", ev.p ? ev.p : "");
       free(epre.p); free(ev.p);
     }
+    exc_modifier_frame_leave(counted);
     /* restore the handled-exception depth too: a body that exits by raising
        out of its own rescue leaves its push behind, and `$!` would keep
        reading it long after the handler is gone (#3726) */

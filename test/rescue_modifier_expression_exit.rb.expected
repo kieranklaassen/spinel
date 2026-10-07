@@ -1,0 +1,44 @@
+top first_number: 42 0
+top parse: 80 8 1
+top sum_skipping: 206
+top sum_until_stop: 201
+top each_skipping: 206
+top each_until_stop: 201
+top stop_in_clause: 201
+top nested: -1 8 -1
+top with_ensure: -1 8 -1 eee
+top ensure_inside: 8 -1 ioio
+top lines_skipping: 106
+top chars_until_stop: 103
+top first_digit: 7 -1
+top index_skipping: 206
+top filled: 206
+top lines_inside: 103
+top chars_inside: 103
+top index_inside: 104
+top codepoint_inside: 99 0
+top $!: nil
+in a clause first_number: 42 0
+in a clause parse: 80 8 1
+in a clause sum_skipping: 206
+in a clause sum_until_stop: 201
+in a clause each_skipping: 206
+in a clause each_until_stop: 201
+in a clause stop_in_clause: 201
+in a clause nested: -1 8 -1
+in a clause with_ensure: -1 8 -1 eee
+in a clause ensure_inside: 8 -1 ioio
+in a clause lines_skipping: 106
+in a clause chars_until_stop: 103
+in a clause first_digit: 7 -1
+in a clause index_skipping: 206
+in a clause filled: 206
+in a clause lines_inside: 103
+in a clause chars_inside: 103
+in a clause index_inside: 104
+in a clause codepoint_inside: 99 0
+in a clause $!: ArgumentError: outer
+434200
+600
+later: ArgumentError: invalid value for Integer(): "later" cause nil
+nil

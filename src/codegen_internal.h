@@ -409,6 +409,10 @@ void inl_dflt_leave(InlDflt saved);
 extern int g_expr_depth;
 extern int g_proc_toplevel_return;
 extern int g_exc_frame_depth;      /* live begin/rescue setjmp frames (see codegen_util.c) */
+extern unsigned long long g_exc_modifier_frames;   /* which of them are a rescue modifier's */
+int exc_modifier_frame_enter(void);        /* 1 when the frame was counted */
+void exc_modifier_frame_leave(int counted);
+int exc_frames_all_modifier(int base);   /* 1 when no other frame stands above `base` */
 extern int g_method_pr_exc_depth;
 extern int g_method_pr_ensure_depth;  /* g_ensure_depth at the return-funnel target (see codegen_util.c) */
 extern int g_loop_exc_base;

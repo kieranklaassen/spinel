@@ -13664,7 +13664,7 @@ void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
          ensure bodies run (accepting the catch/throw-class register hazard). */
       int light = strncmp(g_brk_ser_var, "_brklt", 6) == 0;   /* a wrapper with no setjmp scope */
       int brk_goto = (g_ensure_depth == g_brk_ensure_base) &&
-                     (g_exc_frame_depth == g_brk_exc_base) &&
+                     exc_frames_all_modifier(g_brk_exc_base) &&
                      (strncmp(g_brk_ser_var, "_brkser", 7) == 0 || light);
       const char *sfx = brk_goto ? g_brk_ser_var + (light ? 6 : 7) : NULL;   /* wrapper temp id */
       emit_indent(b, indent);
@@ -13876,7 +13876,11 @@ void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
     emit_indent(b, indent); buf_puts(b, "sp_exc_rootmark[sp_exc_top] = sp_gc_nroots; sp_rescue_mark[sp_exc_top] = sp_rescue_sp;\n");
     emit_indent(b, indent); buf_puts(b, "sp_exc_msg[sp_exc_top] = 0; sp_exc_obj[sp_exc_top] = 0; sp_exc_top++;\n");
     emit_indent(b, indent); buf_puts(b, "if (setjmp(sp_exc_stack[sp_exc_top-1]) == 0) {\n");
+    /* the frame is live for the expression: a return, next or break written
+       inside it pops it on the way out, as it does a begin's */
+    int counted = exc_modifier_frame_enter();
     if (e >= 0) emit_stmt(c, e, b, indent + 1);
+    exc_modifier_frame_leave(counted);
     emit_indent(b, indent + 1); buf_puts(b, "sp_exc_top--;\n");
     emit_indent(b, indent); buf_puts(b, "}\n");
     emit_indent(b, indent); buf_puts(b, "else {\n");
