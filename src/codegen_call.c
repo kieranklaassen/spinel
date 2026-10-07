@@ -208,8 +208,18 @@ int emit_ctor_yield_inline(Compiler *c, int id, int ci, Buf *b) {
      construct), and g_self points into this buffer -- a shared static would be
      clobbered by the nested inline. */
   char selfbuf[320];   /* a class name plus a cast: 64 truncated the longest of them */
-  g_yield_block_fallback = saved_block;
-  g_yield_block_fallback_nren = saved_bnren;
+  /* The block written at `new` yields to the block current here: recorded
+     as emit_inline_call_x records a literal block, so a `yield` in it is
+     found from however deep initialize hands the block on. A forwarded
+     block that has an entry keeps the fallback naming its target. */
+  int fwd_kept = fwd_block && yield_target_is_current(saved_block);
+  if (!fwd_kept) {
+    g_yield_block_fallback = saved_block;
+    g_yield_block_fallback_nren = saved_bnren;
+  }
+  int saved_ytgt_cur;
+  int pushed_ytgt = yield_target_push(fwd_block ? saved_block : block, saved_block, saved_bpn, saved_nren,
+                                      g_brk_ser_var, g_brk_ensure_base, &saved_ytgt_cur);
   /* the block being captured is caller code: record the caller's self so
      emit_block_invoke can restore it around the spliced block body. Aliasing
      g_self by pointer is safe now that selfbuf is stack-local: it names an
@@ -450,6 +460,7 @@ int emit_ctor_yield_inline(Compiler *c, int id, int ci, Buf *b) {
   g_emitting_class_id = saved_emcls;
   g_block_param_name = saved_bpn;
   g_yield_block_fallback = saved_yfb;
+  yield_target_pop(pushed_ytgt, saved_ytgt_cur);
   g_yield_self_fallback = saved_self_fb;
   g_yield_self_fallback2 = saved_self_fb2; g_yield_self_deref_fallback2 = saved_deref_fb2;
   g_yield_emitting_class_fallback2 = saved_emcls_fb2;

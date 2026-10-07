@@ -1529,9 +1529,16 @@ TyKind block_next_value_ty(Compiler *c, int node) {
   return r;
 }
 
+/* A `super` with a block written at it (`super(a) { |q| yield q }`). */
+static int super_writes_block(const NodeTable *nt, int id) {
+  int block = nt_ref(nt, id, "block");
+  return block >= 0 && nt_kind(nt, block) == NK_BlockNode;
+}
+
 /* Whether a `super` lands on method `mi` and every one that does hands on
    the block its own method was given (a bare `super`, `super(...)`,
-   `super(a, &b)`), as do the supers that land on those methods in turn. */
+   `super(a, &b)`) or writes one, as do the supers that land on those
+   methods in turn. */
 static int supers_into_forward_block(Compiler *c, int mi, int depth) {
   const NodeTable *nt = c->nt;
   if (depth > 8) return 0;
@@ -1542,7 +1549,7 @@ static int supers_into_forward_block(Compiler *c, int mi, int depth) {
     if (!cs || cs->class_id < 0 || !cs->name) continue;
     int cmi = (int)(cs - c->scopes);
     if (cmi == mi || a_super_target(c, cs) != mi) continue;
-    if (!super_forwards_caller_block(c, yvt_sup_ids[ii])) return 0;
+    if (!super_forwards_caller_block(c, yvt_sup_ids[ii]) && !super_writes_block(nt, yvt_sup_ids[ii])) return 0;
     for (int jj = 0; jj < yvt_sup_n; jj++) {
       Scope *gs = comp_scope_of(c, yvt_sup_ids[jj]);
       if (gs && gs->class_id >= 0 && gs->name && gs != cs && a_super_target(c, gs) == cmi) {

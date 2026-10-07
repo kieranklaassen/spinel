@@ -10952,10 +10952,21 @@ int emit_super_inline(Compiler *c, int id, Buf *b, int indent, int as_expr) {
   int saved_bbexc = g_block_brk_exc_base, saved_bexc = g_brk_exc_base;
   int saved_ebase = g_brk_ensure_base;
 
-  g_yield_block_fallback = saved_block;
-  g_yield_block_fallback_nren = saved_bnren;
-  g_yield_blk_brk_fallback = saved_bbv;
-  g_yield_blk_brk_efallback = saved_bbe;
+  /* A block written at the super yields to the block current here, as a
+     literal block of an inlined call does: record it, so the parent can
+     hand it on through another inlined call and its own `yield` still
+     reaches this method's block. A forwarded block that has an entry keeps
+     the fallback naming its target (see emit_inline_call_x). */
+  int fwd_kept = block == saved_block && yield_target_is_current(block);
+  if (!fwd_kept) {
+    g_yield_block_fallback = saved_block;
+    g_yield_block_fallback_nren = saved_bnren;
+    g_yield_blk_brk_fallback = saved_bbv;
+    g_yield_blk_brk_efallback = saved_bbe;
+  }
+  int saved_ytgt_cur;
+  int pushed_ytgt = yield_target_push(block, saved_block, saved_bpn, saved_nren, saved_ser, saved_ebase,
+                                      &saved_ytgt_cur);
   g_block_id = block;
   g_block_nren = (block == saved_block) ? saved_bnren : saved_nren;
   /* same break-context rules as emit_inline_call_x */
@@ -11088,6 +11099,7 @@ int emit_super_inline(Compiler *c, int id, Buf *b, int indent, int as_expr) {
   g_block_brk_var = saved_bbv; g_yield_blk_brk_fallback = saved_yfbv;
   g_block_brk_ebase = saved_bbe; g_yield_blk_brk_efallback = saved_yfbe;
   g_block_brk_exc_base = saved_bbexc; g_brk_exc_base = saved_bexc;
+  yield_target_pop(pushed_ytgt, saved_ytgt_cur);
   g_brk_ser_var = saved_ser; g_brk_ensure_base = saved_ebase;
   g_yield_proc_ref = saved_ypr; g_yield_slot_ty = saved_yslot;
   g_current_scope_is_lowered = saved_low;
