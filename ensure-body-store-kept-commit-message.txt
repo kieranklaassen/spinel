@@ -1,0 +1,43 @@
+An ensure body runs to its end under a throw, a break or a return
+
+An ensure body is entered with the unwind that reached it still set in
+`sp_unwind_kind`: the state is saved in locals, the body runs, the
+state is put back and the unwind resumed. Every begin/ensure ends that
+way, so one inside the body, its own or one of a method the body
+called, found the outer unwind set, took it for its own and resumed it
+from there. The rest of the outer body never ran:
+
+    def log(s)
+      begin
+        print s
+      ensure
+        print "."
+      end
+    end
+
+    def called
+      catch(:x) do
+        begin
+          throw :x, 8
+        ensure
+          log("a")
+          log("b")
+          print " c "
+        end
+      end
+    end
+    p called
+
+printed `a.8` where CRuby prints `a.b. c 8`. The same under a break
+out of a block and under a proc's return, with an ensure written inside
+the body, through a method's or a block's own ensure, and at any depth.
+What the body did after such a call was lost with it: a return, a raise
+or a second throw from the ensure never took over.
+
+The body now runs with no unwind in flight: `sp_unwind_kind` is cleared
+once it is saved, and the saved state is put back after the body, as
+before. A body that runs no code of the program and holds no ensure of
+its own (`$n += 1`) has nothing in it that could resume an unwind, and
+compiles to the C it did.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
