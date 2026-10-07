@@ -919,7 +919,516 @@ static TyKind pm_object_deconstruct_array(Compiler *c, TyKind scrut) {
   return ty_is_array(rt) ? rt : TY_POLY_ARRAY;
 }
 
-static int pm_seed_locals_poly(Compiler *c, Scope *ms, int pat) {
+/* The classes a write or a pattern can tell, one bit each; PM_OTHER is a
+   value whose class the node does not say. */
+enum { PM_INT = 1, PM_FLT = 2, PM_STR = 4, PM_SYM = 8, PM_NIL = 16, PM_ARY = 32, PM_HSH = 64,
+       PM_OTHER = 128, PM_ANY = 255 };
+
+static int pm_own(const char *name, const char *asks);
+
+/* The class a literal, or a String built from one (`+"s"`, `"s".dup`), is of;
+   0 when the node does not say. `+@` or `dup` of the program's own may answer
+   anything, so that spelling says nothing then. */
+static unsigned pm_literal_class(const NodeTable *nt, int v) {
+  switch (nt_kind(nt, v)) {
+    case NK_IntegerNode: return PM_INT;
+    case NK_FloatNode: return PM_FLT;
+    case NK_StringNode: case NK_InterpolatedStringNode: return PM_STR;
+    case NK_SymbolNode: return PM_SYM;
+    case NK_NilNode: return PM_NIL;
+    case NK_ArrayNode: return PM_ARY;
+    case NK_HashNode: return PM_HSH;
+    case NK_CallNode: {
+      const char *m = nt_str(nt, v, "name");
+      int recv = nt_ref(nt, v, "receiver");
+      if (m && (sp_streq(m, "+@") || sp_streq(m, "dup")) && nt_ref(nt, v, "arguments") < 0 &&
+          recv >= 0 && nt_kind(nt, recv) == NK_StringNode && !pm_own(m, NULL)) return PM_STR;
+      return 0;
+    }
+    default: return 0;
+  }
+}
+
+/* Set by pm_facts_build: the program has a class of its own whose objects an
+   Array pattern, or the name Array, matches (one that deconstructs, a Struct,
+   a subclass of Array). */
+static int pm_binds_own;
+
+/* The classes a value the pattern P of `P => x` matches may be of: one where
+   P names it (`Integer`), is a literal of it (`5`) or is an Array pattern,
+   theirs for alternatives of such, and any class otherwise. */
+static unsigned pm_pattern_classes(const NodeTable *nt, int pat) {
+  static const struct { const char *name; unsigned bit; } named[] = {
+    {"Integer", PM_INT}, {"Float", PM_FLT}, {"String", PM_STR}, {"Symbol", PM_SYM},
+    {"NilClass", PM_NIL}, {"Array", PM_ARY}, {"Hash", PM_HSH}};
+  NodeKind k = nt_kind(nt, pat);
+  if (k == NK_AlternationPatternNode)
+    return pm_pattern_classes(nt, nt_ref(nt, pat, "left")) | pm_pattern_classes(nt, nt_ref(nt, pat, "right"));
+  unsigned ary = PM_ARY | (pm_binds_own ? PM_OTHER : 0);
+  if (k == NK_ArrayPatternNode) return ary;
+  if (k == NK_ConstantReadNode) {
+    const char *nm = nt_str(nt, pat, "name");
+    for (size_t i = 0; nm && i < sizeof named / sizeof named[0]; i++)
+      if (sp_streq(nm, named[i].name)) return named[i].bit == PM_ARY ? ary : named[i].bit;
+    return PM_ANY;
+  }
+  unsigned lit = pm_literal_class(nt, pat);
+  return lit ? lit : PM_ANY;
+}
+
+/* What the assignments and the patterns of the program say of each local,
+   keyed by (scope, name) as LWIndex is: gathered in one walk the first time
+   an infer_case_pattern_locals pass asks, so a pass pays for the walk once
+   and not once per pattern element. */
+typedef struct {
+  const char *name;  /* NULL: an empty slot */
+  int scope;
+  int assigned;      /* an assignment (`x = v`, `x ||= v`, `x += v`) writes it */
+  int targets;       /* times it is bound as a target of any kind */
+  int inner;         /* of those, inside an Array or find pattern */
+  int stmts;         /* of its `x = v`, those that stand as statements */
+  int writes;        /* its `x = v` in all */
+  int reads;         /* times it is read */
+  int listed;        /* of those, by a use of pm_uses or as a printed value */
+  unsigned classes;  /* the classes its assignments write */
+  unsigned bound;    /* the classes those patterns may bind it to */
+  unsigned unproven; /* the classes one of its uses is not proven for */
+} PmFact;
+/* Of the names of pm_name_bit, `own`: those the program has a method of its
+   own under that may answer for a builtin's value; `own_obj`: those a class
+   of its own has one under, which answers for that class's objects, and
+   which a boxed call by the name is compiled to reach too. */
+static struct { PmFact *rec; int cap, built; unsigned own, own_obj; } pm_facts;
+
+static PmFact *pm_fact(int scope, const char *name, int make) {
+  if (!name || !pm_facts.cap) return NULL;
+  unsigned mask = (unsigned)(pm_facts.cap - 1), h = lw_hash(name, scope) & mask;
+  while (pm_facts.rec[h].name && (pm_facts.rec[h].scope != scope || !sp_streq(pm_facts.rec[h].name, name)))
+    h = (h + 1) & mask;
+  if (!pm_facts.rec[h].name) {
+    if (!make) return NULL;
+    pm_facts.rec[h].name = name;
+    pm_facts.rec[h].scope = scope;
+  }
+  return &pm_facts.rec[h];
+}
+
+static PmFact *pm_fact_of_node(Compiler *c, int id) {
+  return pm_fact((int)(comp_scope_of(c, id) - c->scopes), nt_str(c->nt, id, "name"), 1);
+}
+
+/* Counts the targets a pattern binds inside an Array or find pattern: to an
+   element, a rest, or a nested pattern's own target. */
+static void pm_count_inner(Compiler *c, int pat, int inner) {
+  const NodeTable *nt = c->nt;
+  const char *pty = pat >= 0 ? nt_type(nt, pat) : NULL;
+  if (!pty) return;
+  if (sp_streq(pty, "LocalVariableTargetNode")) {
+    PmFact *f = inner ? pm_fact_of_node(c, pat) : NULL;
+    if (f) { f->inner++; f->bound |= PM_ANY; }
+    return;
+  }
+  if (sp_streq(pty, "CapturePatternNode")) {
+    int tgt = nt_ref(nt, pat, "target"), value = nt_ref(nt, pat, "value");
+    PmFact *f = inner && nt_kind(nt, tgt) == NK_LocalVariableTargetNode ? pm_fact_of_node(c, tgt) : NULL;
+    if (f) { f->inner++; f->bound |= value >= 0 ? pm_pattern_classes(nt, value) : PM_ANY; }
+    else pm_count_inner(c, tgt, inner);
+    pm_count_inner(c, value, inner);
+    return;
+  }
+  if (sp_streq(pty, "SplatNode")) { pm_count_inner(c, nt_ref(nt, pat, "expression"), inner); return; }
+  if (sp_streq(pty, "AssocNode") || sp_streq(pty, "AssocSplatNode") || sp_streq(pty, "ImplicitNode")) {
+    pm_count_inner(c, nt_ref(nt, pat, "value"), inner);
+    return;
+  }
+  int hash = sp_streq(pty, "HashPatternNode"), n = 0, np = 0;
+  if (!hash && !sp_streq(pty, "ArrayPatternNode") && !sp_streq(pty, "FindPatternNode")) return;
+  if (!hash) inner = 1;
+  pm_count_inner(c, nt_ref(nt, pat, "rest"), inner);
+  pm_count_inner(c, nt_ref(nt, pat, "left"), inner);
+  pm_count_inner(c, nt_ref(nt, pat, "right"), inner);
+  const int *kids = nt_arr(nt, pat, hash ? "elements" : "requireds", &n);
+  for (int i = 0; i < n; i++) pm_count_inner(c, kids[i], inner);
+  const int *posts = nt_arr(nt, pat, "posts", &np);
+  for (int i = 0; i < np; i++) pm_count_inner(c, posts[i], inner);
+}
+
+/* The calls a boxed local answers as CRuby does, each with the classes of
+   receiver it is proven for (the programs of the proof are generated: see the
+   commit). A call that answers true or false is listed wherever it stands;
+   the others only where their value is printed or interpolated at once, so
+   that no boxed value of the local's goes on to another use. A boxed Symbol
+   counts its bytes, and its upcase is not rooted: off for those three. */
+enum { PM_ARG_NONE, PM_ARG_INT, PM_ARG_LIT };
+typedef struct { const char *name; int arg, anywhere; unsigned proven; } PmUse;
+#define PM_NAMED (PM_ANY & ~PM_OTHER)  /* the seven classes a literal or a pattern names */
+static const PmUse pm_uses[] = {
+  {"==", PM_ARG_LIT, 1, PM_ANY}, {"!=", PM_ARG_LIT, 1, PM_ANY}, {"nil?", PM_ARG_NONE, 1, PM_ANY},
+  {"class", PM_ARG_NONE, 0, PM_ANY}, {"inspect", PM_ARG_NONE, 0, PM_ANY}, {"to_s", PM_ARG_NONE, 0, PM_ANY},
+  {"+", PM_ARG_INT, 0, PM_NAMED}, {"-", PM_ARG_INT, 0, PM_NAMED},
+  {"size", PM_ARG_NONE, 0, PM_NAMED & ~PM_SYM}, {"length", PM_ARG_NONE, 0, PM_NAMED & ~PM_SYM},
+  {"upcase", PM_ARG_NONE, 0, PM_NAMED & ~PM_SYM}, {"empty?", PM_ARG_NONE, 0, PM_NAMED},
+  {"reverse", PM_ARG_NONE, 0, PM_NAMED}, {"first", PM_ARG_NONE, 0, PM_NAMED},
+  {"to_sym", PM_ARG_NONE, 0, PM_NAMED}, {"to_f", PM_ARG_NONE, 0, PM_NAMED},
+};
+
+/* The names this walk reads as the builtin's: the calls of pm_uses, then p,
+   puts and print, then deconstruct, then the two that make a String of a
+   literal. One bit each. */
+enum { PM_N_USES = sizeof pm_uses / sizeof pm_uses[0] };
+#define PM_PRINTS (7u << PM_N_USES)
+#define PM_DECONSTRUCT (8u << PM_N_USES)
+static unsigned pm_name_bit(const char *name) {
+  static const char *const more[] = {"p", "puts", "print", "deconstruct", "+@", "dup"};
+  for (int i = 0; name && i < PM_N_USES + 6; i++)
+    if (sp_streq(name, i < PM_N_USES ? pm_uses[i].name : more[i - PM_N_USES])) return 1u << i;
+  /* a method_missing may answer any name */
+  return name && sp_streq(name, "method_missing") ? ~0u : 0;
+}
+
+/* The name a statement makes, removes or hides a method under: its bit, or
+   every bit where the name is not a literal's. A def or a call there
+   (`private def m`, `private attr_reader :m`) is counted where it stands. */
+static unsigned pm_made_name(const NodeTable *nt, int v) {
+  NodeKind k = nt_kind(nt, v);
+  const char *s = k == NK_SymbolNode ? nt_str(nt, v, "value") : k == NK_StringNode ? nt_str(nt, v, "content") : NULL;
+  return s ? pm_name_bit(s) : k == NK_DefNode || k == NK_CallNode ? 0 : ~0u;
+}
+
+/* A class of the program's own, with no builtin at or above it: each class
+   up the chain is written `class Name` over another such or over none. */
+static int pm_own_class(Compiler *c, int k) {
+  const NodeTable *nt = c->nt;
+  if (k < 0) return 0;
+  for (; k >= 0; k = c->classes[k].parent) {
+    const ClassInfo *ci = &c->classes[k];
+    if (ci->def_node < 0 || nt_kind(nt, ci->def_node) != NK_ClassNode || !ci->name) return 0;
+    if (ci->is_struct || ci->is_data || ci->ary_root || ci->is_native_class || ci->is_singleton_of) return 0;
+    if (is_builtin_class_name(ci->name) || is_builtin_module_name(ci->name) || is_builtin_exception_name(ci->name))
+      return 0;
+    if (ci->parent < 0 && (nt_ref(nt, ci->def_node, "superclass") >= 0 || nt_int(nt, ci->def_node, "anon_super", 0)))
+      return 0;
+  }
+  return 1;
+}
+
+/* A method under these names, of class `cls` (-1: of no class the walk can
+   tell). In a class of the program's own it answers for that class's
+   objects only; but its p, puts or print is what a call without a receiver
+   reaches there. Anywhere else it may answer for a builtin's value, on the
+   typed path or on the boxed one, and the two are not shown to agree. */
+static void pm_own_at(Compiler *c, int cls, unsigned bits) {
+  if (pm_own_class(c, cls)) {
+    pm_facts.own_obj |= bits & ~PM_PRINTS;
+    bits &= PM_PRINTS;
+  }
+  pm_facts.own |= bits;
+}
+
+/* The names the program has a method of its own under: what the compiler's
+   tables hold (a def, a method an alias or a define_method makes, a reader,
+   an undef, a visibility), and every statement that makes, removes or hides
+   a method, read or not. `!=` asks `==`. */
+static void pm_own_names(Compiler *c) {
+  static const char *const makers[] = {"alias_method", "define_method", "define_singleton_method", "undef_method",
+                                       "remove_method", "attr", "attr_reader", "attr_accessor", "private",
+                                       "protected", "public", "module_function"};
+  const NodeTable *nt = c->nt;
+  int kn, n;
+  pm_facts.own = pm_facts.own_obj = 0;
+  pm_binds_own = 0;
+  for (int si = 1; si < c->nscopes; si++) {
+    const Scope *sc = &c->scopes[si];
+    int def = sc->def_node >= 0 && nt_kind(nt, sc->def_node) == NK_DefNode ? sc->def_node : -1;
+    int recv = def >= 0 ? nt_ref(nt, def, "receiver") : -1;
+    /* `def obj.m` is a method of that one object, whatever its class */
+    int cls = recv >= 0 && nt_kind(nt, recv) != NK_SelfNode ? -1 : sc->class_id;
+    pm_own_at(c, cls, pm_name_bit(sc->name) | (def >= 0 ? pm_name_bit(nt_str(nt, def, "name")) : 0));
+  }
+  for (int k = 0; k < c->nclasses; k++) {
+    const ClassInfo *ci = &c->classes[k];
+    for (int i = 0; i < ci->naliases; i++) pm_own_at(c, k, pm_name_bit(ci->alias_new[i]));
+    for (int i = 0; i < ci->nreaders; i++) pm_own_at(c, k, pm_name_bit(ci->readers[i]));
+    for (int i = 0; i < ci->nundefs; i++) pm_own_at(c, k, pm_name_bit(ci->undefs[i]));
+    for (int i = 0; i < ci->nvis; i++) pm_own_at(c, k, pm_name_bit(ci->vis_names[i]));
+    if (ci->is_struct || ci->is_data || ci->ary_root) pm_binds_own = 1;
+  }
+  const int *ids = nt_nodes_of_kind(nt, NK_AliasMethodNode, &kn);
+  for (int j = 0; j < kn; j++)
+    pm_own_at(c, self_class_body(c, ids[j]), pm_made_name(nt, nt_ref(nt, ids[j], "new_name")));
+  ids = nt_nodes_of_kind(nt, NK_UndefNode, &kn);
+  for (int j = 0; j < kn; j++) {
+    const int *names = nt_arr(nt, ids[j], "names", &n);
+    for (int i = 0; i < n; i++) pm_own_at(c, self_class_body(c, ids[j]), pm_made_name(nt, names[i]));
+  }
+  ids = nt_nodes_of_kind(nt, NK_CallNode, &kn);
+  for (int j = 0; j < kn; j++) {
+    const char *m = nt_str(nt, ids[j], "name");
+    int args = nt_ref(nt, ids[j], "arguments");
+    const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &n) : NULL;
+    for (size_t i = 0; m && av && i < sizeof makers / sizeof makers[0]; i++) {
+      if (!sp_streq(m, makers[i])) continue;
+      int cls = nt_ref(nt, ids[j], "receiver") >= 0 ? -1 : self_class_body(c, ids[j]);
+      /* the first three name one method, the others one for each argument */
+      for (int a = 0; a < (i < 3 ? 1 : n) && a < n; a++) pm_own_at(c, cls, pm_made_name(nt, av[a]));
+    }
+  }
+  if (pm_facts.own & pm_name_bit("==")) pm_facts.own |= pm_name_bit("!=");
+  if (pm_facts.own_obj & pm_name_bit("==")) pm_facts.own_obj |= pm_name_bit("!=");
+  if ((pm_facts.own | pm_facts.own_obj) & PM_DECONSTRUCT) pm_binds_own = 1;
+}
+
+/* Is a call by this name, or what it asks of its argument, the program's own? */
+static int pm_own(const char *name, const char *asks) {
+  return (pm_facts.own & (pm_name_bit(name) | pm_name_bit(asks))) != 0;
+}
+
+/* The classes a use by this entry is not proven for. */
+static unsigned pm_unproven(const PmUse *u) {
+  return PM_ANY & ~u->proven;
+}
+
+static int pm_plain_literal(const NodeTable *nt, int v) {
+  switch (nt_kind(nt, v)) {
+    case NK_IntegerNode: case NK_FloatNode: case NK_StringNode: case NK_SymbolNode:
+    case NK_NilNode: case NK_TrueNode: case NK_FalseNode: return 1;
+    default: return 0;
+  }
+}
+
+/* The entry of pm_uses a call with a receiver is, or NULL: also where the
+   program has a method of its own by that name, in any class. A boxed call
+   is compiled as a dispatch over every class of the program's that has a
+   method by the name, with whatever parameters it takes. */
+static const PmUse *pm_use_of(const NodeTable *nt, int call) {
+  const char *m = nt_str(nt, call, "name"), *op = nt_str(nt, call, "call_operator");
+  if (!m || nt_ref(nt, call, "block") >= 0 || (op && sp_streq(op, "&."))) return NULL;
+  int args = nt_ref(nt, call, "arguments"), an = 0;
+  const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+  for (size_t i = 0; i < sizeof pm_uses / sizeof pm_uses[0]; i++) {
+    const PmUse *u = &pm_uses[i];
+    if (!sp_streq(m, u->name) || an != (u->arg != PM_ARG_NONE)) continue;
+    if (u->arg == PM_ARG_INT && nt_kind(nt, av[0]) != NK_IntegerNode) continue;
+    if (u->arg == PM_ARG_LIT && !pm_plain_literal(nt, av[0])) continue;
+    return pm_own(m, NULL) || (pm_facts.own_obj & pm_name_bit(m)) ? NULL : u;
+  }
+  return NULL;
+}
+
+/* A read of a local by a listed use, proven for all classes but `unproven`. */
+static void pm_listed_read(Compiler *c, int rd, unsigned unproven) {
+  if (rd < 0 || nt_kind(c->nt, rd) != NK_LocalVariableReadNode) return;
+  PmFact *f = pm_fact((int)(comp_scope_of(c, rd) - c->scopes), nt_str(c->nt, rd, "name"), 0);
+  if (f) { f->listed++; f->unproven |= unproven; }
+}
+
+/* A value that is printed or interpolated and goes nowhere else: the local
+   itself, or a listed call on it. */
+static void pm_printed(Compiler *c, int v) {
+  const NodeTable *nt = c->nt;
+  if (v < 0 || nt_kind(nt, v) != NK_CallNode) { pm_listed_read(c, v, 0); return; }
+  const PmUse *u = nt_ref(nt, v, "receiver") >= 0 ? pm_use_of(nt, v) : NULL;
+  if (u && !u->anywhere) pm_listed_read(c, nt_ref(nt, v, "receiver"), pm_unproven(u));
+}
+
+/* A statement whose value nothing takes: `x = v` there writes and `p x`
+   there prints, and what either answers goes nowhere. Every statement but
+   the last of a list is one; this follows the last into the branches of a
+   statement that is one itself. */
+static void pm_statement(Compiler *c, int id);
+static void pm_last_statement(Compiler *c, int list) {
+  int n = 0;
+  const int *body = list >= 0 && nt_kind(c->nt, list) == NK_StatementsNode ? nt_arr(c->nt, list, "body", &n) : NULL;
+  if (body && n > 0) pm_statement(c, body[n - 1]);
+}
+static void pm_statement(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  if (id < 0) return;
+  switch (nt_kind(nt, id)) {
+    case NK_LocalVariableWriteNode: {
+      PmFact *f = pm_fact_of_node(c, id);
+      if (f) f->stmts++;
+      break;
+    }
+    case NK_CallNode: {
+      const char *m = nt_str(nt, id, "name");
+      int args = nt_ref(nt, id, "arguments"), an = 0;
+      const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+      if (!m || !sp_streq(m, "p") || nt_ref(nt, id, "receiver") >= 0 || nt_ref(nt, id, "block") >= 0) break;
+      if (pm_own("p", "inspect")) break;
+      for (int k = 0; k < an; k++) pm_printed(c, av[k]);
+      break;
+    }
+    case NK_StatementsNode: pm_last_statement(c, id); break;
+    case NK_ParenthesesNode: pm_last_statement(c, nt_ref(nt, id, "body")); break;
+    case NK_IfNode: case NK_UnlessNode:
+      pm_last_statement(c, nt_ref(nt, id, "statements"));
+      pm_statement(c, nt_ref(nt, id, nt_kind(nt, id) == NK_UnlessNode ? "else_clause" : "subsequent"));
+      break;
+    case NK_ElseNode:
+      pm_last_statement(c, nt_ref(nt, id, "statements"));
+      break;
+    case NK_CaseMatchNode: case NK_CaseNode: {
+      int n = 0;
+      const int *arms = nt_arr(nt, id, "conditions", &n);
+      for (int k = 0; k < n; k++) pm_last_statement(c, nt_ref(nt, arms[k], "statements"));
+      pm_statement(c, nt_ref(nt, id, "else_clause"));
+      break;
+    }
+    default: break;
+  }
+}
+
+/* Counts every read of a local, and those of them a listed use makes. */
+static void pm_uses_build(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  int kn;
+  const int *ids = nt_nodes_of_kind(nt, NK_LocalVariableReadNode, &kn);
+  for (int j = 0; j < kn; j++) {
+    PmFact *f = pm_fact((int)(comp_scope_of(c, ids[j]) - c->scopes), nt_str(nt, ids[j], "name"), 0);
+    if (f) f->reads++;
+  }
+  ids = nt_nodes_of_kind(nt, NK_CallNode, &kn);
+  for (int j = 0; j < kn; j++) {
+    int recv = nt_ref(nt, ids[j], "receiver"), args = nt_ref(nt, ids[j], "arguments"), an = 0;
+    const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+    const char *m = nt_str(nt, ids[j], "name");
+    if (recv < 0) {
+      int puts = m && sp_streq(m, "puts");
+      if (!m || (!puts && !sp_streq(m, "print")) || nt_ref(nt, ids[j], "block") >= 0) continue;
+      /* a program's own puts or print takes its argument like any method,
+         and its own to_s is what the builtin one asks of the argument */
+      if (pm_own(m, "to_s")) continue;
+      /* print takes the local itself only: `print x.class` of a boxed x is refused */
+      for (int k = 0; k < an; k++)
+        if (puts) pm_printed(c, av[k]);
+        else pm_listed_read(c, av[k], 0);
+      continue;
+    }
+    const PmUse *u = pm_use_of(nt, ids[j]);
+    if (u && u->anywhere) pm_listed_read(c, recv, pm_unproven(u));
+    /* `7 == x`: the literal's own comparison takes the boxed value. Not
+       shown of an object of the program's own class, which Ruby asks for
+       its `==` there. */
+    else if (m && an == 1 && (sp_streq(m, "==") || sp_streq(m, "!=")) && pm_plain_literal(nt, recv) &&
+             nt_ref(nt, ids[j], "block") < 0 && !pm_own(m, NULL))
+      pm_listed_read(c, av[0], PM_OTHER);
+  }
+  ids = nt_nodes_of_kind(nt, NK_InterpolatedStringNode, &kn);
+  for (int j = 0; j < kn && !pm_own("to_s", NULL); j++) {
+    int pn = 0, bn = 0;
+    const int *parts = nt_arr(nt, ids[j], "parts", &pn);
+    for (int k = 0; k < pn; k++) {
+      if (nt_kind(nt, parts[k]) != NK_EmbeddedStatementsNode) continue;
+      int list = nt_ref(nt, parts[k], "statements");
+      const int *body = list >= 0 ? nt_arr(nt, list, "body", &bn) : NULL;
+      if (body && bn == 1) pm_printed(c, body[0]);
+    }
+  }
+  ids = nt_nodes_of_kind(nt, NK_StatementsNode, &kn);
+  for (int j = 0; j < kn; j++) {
+    int bn = 0;
+    const int *body = nt_arr(nt, ids[j], "body", &bn);
+    for (int k = 0; k + 1 < bn; k++) pm_statement(c, body[k]);
+  }
+  pm_last_statement(c, nt_ref(nt, nt->root_id, "statements"));
+  for (int t = 0; t < 2; t++) {
+    ids = nt_nodes_of_kind(nt, t ? NK_UntilNode : NK_WhileNode, &kn);
+    for (int j = 0; j < kn; j++) pm_last_statement(c, nt_ref(nt, ids[j], "statements"));
+  }
+}
+
+static void pm_facts_build(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  int n = 0, kn, cap = 16;
+  for (int t = 0; t < 4; t++) { nt_nodes_of_kind(nt, lw_write_kinds[t], &kn); n += kn; }
+  const int *tgts = nt_nodes_of_kind(nt, NK_LocalVariableTargetNode, &kn);
+  n += kn;
+  while (cap < n * 2) cap <<= 1;
+  if (cap > pm_facts.cap) {
+    free(pm_facts.rec);
+    pm_facts.rec = (PmFact *)malloc(sizeof(PmFact) * (size_t)cap);
+    if (!pm_facts.rec) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+    pm_facts.cap = cap;
+  }
+  memset(pm_facts.rec, 0, sizeof(PmFact) * (size_t)pm_facts.cap);
+  pm_facts.built = 1;
+  for (int j = 0; j < kn; j++) {
+    PmFact *f = pm_fact_of_node(c, tgts[j]);
+    if (f) f->targets++;
+  }
+  pm_own_names(c);
+  for (int t = 0; t < 4; t++) {
+    const int *ids = nt_nodes_of_kind(nt, lw_write_kinds[t], &kn);
+    for (int j = 0; j < kn; j++) {
+      PmFact *f = pm_fact_of_node(c, ids[j]);
+      if (!f) continue;
+      f->assigned = 1;
+      /* only `x = literal` tells a class: `x += 1` and `x ||= v` read x too */
+      unsigned wc = t ? 0 : pm_literal_class(nt, nt_ref(nt, ids[j], "value"));
+      f->classes |= wc ? wc : PM_OTHER;
+      if (!t) f->writes++;
+    }
+  }
+  const int *arms = nt_nodes_of_kind(nt, NK_InNode, &kn);
+  for (int j = 0; j < kn; j++) pm_count_inner(c, nt_ref(nt, arms[j], "pattern"), 0);
+  pm_uses_build(c);
+}
+
+static const PmFact *pm_local_fact(Compiler *c, Scope *ms, const char *name) {
+  if (!pm_facts.built) pm_facts_build(c);
+  return pm_fact((int)(ms - c->scopes), name, 0);
+}
+
+/* May this local be typed by the element an Array or find pattern binds it
+   to? Only where the program is shown to do with a boxed local what it does
+   with a typed one; anywhere else the local keeps the type it had.
+   - Every assignment to it is a statement `x = literal`, and beside those
+     only Array and find patterns bind it. A pattern that binds a whole
+     subject, one under a guard, a named capture, a multiple assignment and
+     the other targets each type the local their own way.
+   - Every read of it is a listed use (pm_uses, or its value printed or
+     interpolated), proven for each class an assignment writes or a pattern
+     may bind. So the boxed value is printed or compared and goes nowhere: not
+     into a container, an object, an argument, a block or a method's answer. */
+static int pm_local_assigned(Compiler *c, Scope *ms, const char *name) {
+  const PmFact *f = pm_local_fact(c, ms, name);
+  if (!f || !f->assigned || f->targets != f->inner) return 0;
+  if (!f->classes || (f->classes & PM_OTHER) || f->writes != f->stmts) return 0;
+  return f->reads == f->listed && !((f->classes | f->bound) & f->unproven);
+}
+
+/* Does `P => x` bind a value that is surely of another class than the local
+   holds? Every assignment to the local writes a literal, and P matches no
+   value of a literal's class. Then no run that binds was right, and the
+   local is boxed. Where the classes may agree the element is read at the
+   local's type, as it was. */
+static int pm_capture_differs(Compiler *c, Scope *ms, int capture) {
+  const NodeTable *nt = c->nt;
+  int value = nt_ref(nt, capture, "value"), tgt = nt_ref(nt, capture, "target");
+  if (value < 0 || tgt < 0 || nt_kind(nt, tgt) != NK_LocalVariableTargetNode) return 0;
+  const char *lnm = nt_str(nt, tgt, "name");
+  if (!lnm || !scope_local(ms, lnm)) return 0;
+  const PmFact *f = pm_local_fact(c, ms, lnm);
+  return f && f->classes && !(f->classes & PM_OTHER) && !(f->classes & pm_pattern_classes(nt, value));
+}
+
+/* Is an element of this type surely of another class than the local holds?
+   The type is Integer, Float or String, every assignment to the local writes
+   a literal of another class, and none writes nil: a nil beside one of those
+   is typed as that with its nil, not boxed, and nothing here is shown of it. */
+static int pm_element_differs(Compiler *c, Scope *ms, const char *name, TyKind et) {
+  unsigned ec = et == TY_INT ? PM_INT
+              : et == TY_FLOAT ? PM_FLT
+              : et == TY_STRING || et == TY_STRBUF ? PM_STR : PM_ANY;
+  const PmFact *f = pm_local_fact(c, ms, name);
+  return f && f->classes && !(f->classes & (PM_OTHER | PM_NIL | ec));
+}
+
+/* With `differing`, only the target of a capture pm_capture_differs names is
+   boxed, and only where pm_local_assigned allows: every other local the
+   pattern binds is boxed already, or is read at its own type. */
+static int pm_seed_locals_poly(Compiler *c, Scope *ms, int pat, int differing) {
   const NodeTable *nt = c->nt;
   int changed = 0;
   if (pat < 0) return 0;
@@ -932,32 +1441,38 @@ static int pm_seed_locals_poly(Compiler *c, Scope *ms, int pat) {
        inside that pass, so the slot was cleared to UNKNOWN moments ago and
        seeding it POLY looks like a change every round even when the answer is
        last round's. The end-of-pass sweep reports it. (#4116) */
-    if (lv && !lv->is_param && !lv->is_block_param)
+    if (lv && !lv->is_param && !lv->is_block_param && !differing)
       lv->type = ty_unify(lv->type, TY_POLY);
     return changed;
   }
   if (sp_streq(pty, "CapturePatternNode")) {
-    changed |= pm_seed_locals_poly(c, ms, nt_ref(nt, pat, "target"));
-    changed |= pm_seed_locals_poly(c, ms, nt_ref(nt, pat, "value"));
+    int tgt = nt_ref(nt, pat, "target");
+    if (differing && pm_capture_differs(c, ms, pat)) {
+      LocalVar *lv = scope_local(ms, nt_str(nt, tgt, "name"));
+      if (lv && !lv->is_param && !lv->is_block_param && pm_local_assigned(c, ms, lv->name))
+        lv->type = ty_unify(lv->type, TY_POLY);
+    }
+    else changed |= pm_seed_locals_poly(c, ms, tgt, differing);
+    changed |= pm_seed_locals_poly(c, ms, nt_ref(nt, pat, "value"), differing);
     return changed;
   }
   if (sp_streq(pty, "SplatNode"))
-    return pm_seed_locals_poly(c, ms, nt_ref(nt, pat, "expression"));
+    return pm_seed_locals_poly(c, ms, nt_ref(nt, pat, "expression"), differing);
   if (sp_streq(pty, "AssocNode"))
-    return pm_seed_locals_poly(c, ms, nt_ref(nt, pat, "value"));
+    return pm_seed_locals_poly(c, ms, nt_ref(nt, pat, "value"), differing);
   if (sp_streq(pty, "AssocSplatNode"))
-    return pm_seed_locals_poly(c, ms, nt_ref(nt, pat, "value"));
+    return pm_seed_locals_poly(c, ms, nt_ref(nt, pat, "value"), differing);
   if (sp_streq(pty, "ArrayPatternNode") || sp_streq(pty, "FindPatternNode") ||
       sp_streq(pty, "HashPatternNode")) {
     int n = 0;
     const int *kids = nt_arr(nt, pat, sp_streq(pty, "HashPatternNode") ? "elements" : "requireds", &n);
-    for (int i = 0; i < n; i++) changed |= pm_seed_locals_poly(c, ms, kids[i]);
+    for (int i = 0; i < n; i++) changed |= pm_seed_locals_poly(c, ms, kids[i], differing);
     int np = 0;
     const int *posts = nt_arr(nt, pat, "posts", &np);
-    for (int i = 0; i < np; i++) changed |= pm_seed_locals_poly(c, ms, posts[i]);
-    changed |= pm_seed_locals_poly(c, ms, nt_ref(nt, pat, "rest"));
-    changed |= pm_seed_locals_poly(c, ms, nt_ref(nt, pat, "left"));
-    changed |= pm_seed_locals_poly(c, ms, nt_ref(nt, pat, "right"));
+    for (int i = 0; i < np; i++) changed |= pm_seed_locals_poly(c, ms, posts[i], differing);
+    changed |= pm_seed_locals_poly(c, ms, nt_ref(nt, pat, "rest"), differing);
+    changed |= pm_seed_locals_poly(c, ms, nt_ref(nt, pat, "left"), differing);
+    changed |= pm_seed_locals_poly(c, ms, nt_ref(nt, pat, "right"), differing);
     return changed;
   }
   return 0;
@@ -977,6 +1492,7 @@ static int pm_is_container_pat(const NodeTable *nt, int pat) {
 static int infer_case_pattern_locals(Compiler *c) {
   const NodeTable *nt = c->nt;
   int changed = 0;
+  pm_facts.built = 0;  /* gathered again by the first arm that asks */
   /* CaseMatchNode: `case X; in PATTERN; ...` -- infer locals bound by pattern.
      Handles: bare LV (`in x`), guard (`in x if cond`), capture (`in P => x`),
      and array patterns (`in [first, *rest]` / `in Array(head, *tail)`). */
@@ -1065,13 +1581,13 @@ static int infer_case_pattern_locals(Compiler *c) {
           /* a nested container value ({a: {b:}}, {data: [*, y, *]}) delivers
              its inner bindings boxed */
           if (pm_is_container_pat(nt, ptgt)) {
-            changed |= pm_seed_locals_poly(c, ms, ptgt);
+            changed |= pm_seed_locals_poly(c, ms, ptgt, 0);
             continue;
           }
           int btgt = ptgt;  /* `k: PAT => v` binds v to the value */
           if (sp_streq(nt_type(nt, ptgt), "CapturePatternNode")) {
             int cv = nt_ref(nt, ptgt, "value");
-            if (pm_is_container_pat(nt, cv)) changed |= pm_seed_locals_poly(c, ms, cv);
+            if (pm_is_container_pat(nt, cv)) changed |= pm_seed_locals_poly(c, ms, cv, 0);
             btgt = nt_ref(nt, ptgt, "target");
             if (btgt < 0 || !nt_type(nt, btgt)) continue;
           }
@@ -1108,8 +1624,15 @@ static int infer_case_pattern_locals(Compiler *c) {
           const char *lty2 = nt_type(nt, reqs[k]);
           if (!lty2) continue;
           int tgt = reqs[k];
+          /* a nested window pattern delivers its inner bindings boxed (see
+             the array pattern below for which of them are typed) */
+          if (pm_is_container_pat(nt, tgt)) {
+            changed |= pm_seed_locals_poly(c, ms, tgt, 1);
+            continue;
+          }
           /* a `lit => x` window capture binds its target to an element */
           if (sp_streq(lty2, "CapturePatternNode")) {
+            changed |= pm_seed_locals_poly(c, ms, nt_ref(nt, reqs[k], "value"), 1);
             tgt = nt_ref(nt, reqs[k], "target");
             if (tgt < 0 || !nt_type(nt, tgt)) continue;
           }
@@ -1134,21 +1657,42 @@ static int infer_case_pattern_locals(Compiler *c) {
       /* Handle ArrayPatternNode requireds and rest splat */
       if (array_pat >= 0) {
         TyKind elem_t = ty_is_array(array_scrutinee) ? ty_array_elem(array_scrutinee) : TY_UNKNOWN;
-        int apn = 0;
+        int apn = 0, apost = 0;
         const int *reqs = nt_arr(nt, array_pat, "requireds", &apn);
-        for (int k = 0; k < apn; k++) {
-          const char *lty2 = nt_type(nt, reqs[k]);
+        const int *posts = nt_arr(nt, array_pat, "posts", &apost);
+        for (int k = 0; k < apn + apost; k++) {
+          int el = k < apn ? reqs[k] : posts[k - apn];
+          const char *lty2 = nt_type(nt, el);
           if (!lty2) continue;
           /* a hash/find element pattern ([{name:}]) delivers its inner
-             bindings boxed; nested array elements keep their own typing */
-          if (sp_streq(lty2, "HashPatternNode") || sp_streq(lty2, "FindPatternNode")) {
-            changed |= pm_seed_locals_poly(c, ms, reqs[k]);
+             bindings boxed */
+          if (k < apn && (sp_streq(lty2, "HashPatternNode") || sp_streq(lty2, "FindPatternNode"))) {
+            changed |= pm_seed_locals_poly(c, ms, el, 0);
             continue;
           }
-          if (!sp_streq(lty2, "LocalVariableTargetNode")) continue;
-          const char *lnm = nt_str(nt, reqs[k], "name");
+          /* Wherever else the pattern binds an element (after the splat, as
+             `Integer => x`, inside a nested pattern) a local only patterns
+             bind is boxed already. One an assignment writes too has the
+             assignment's type, and the element was read at that type whatever
+             its class. Where the class surely differs, and pm_local_assigned
+             allows, it is boxed. */
+          int also = k >= apn, differs = 0;
+          if (pm_is_container_pat(nt, el)) {
+            changed |= pm_seed_locals_poly(c, ms, el, 1);
+            continue;
+          }
+          if (sp_streq(lty2, "CapturePatternNode")) {
+            changed |= pm_seed_locals_poly(c, ms, nt_ref(nt, el, "value"), 1);
+            differs = pm_capture_differs(c, ms, el);
+            el = nt_ref(nt, el, "target");
+            if (el < 0 || !nt_type(nt, el)) continue;
+            also = 1;
+          }
+          if (!sp_streq(nt_type(nt, el), "LocalVariableTargetNode")) continue;
+          const char *lnm = nt_str(nt, el, "name");
           LocalVar *lv = lnm ? scope_local(ms, lnm) : NULL;
           if (!lv || lv->is_param || lv->is_block_param) continue;
+          if (also && !pm_local_assigned(c, ms, lnm)) continue;
           /* A poly/untyped VALUE scrutinee yields boxed elements, so a required
              binding is poly -- not int. TY_INT here reinterpreted a boxed
              element's bits and produced garbage. An object scrutinee's elements
@@ -1158,6 +1702,13 @@ static int infer_case_pattern_locals(Compiler *c) {
           TyKind et = (elem_t != TY_UNKNOWN) ? elem_t
                     : (darr != TY_UNKNOWN) ? ty_array_elem(darr)
                     : ty_is_object(array_scrutinee) ? TY_INT : TY_POLY;
+          /* such a local is boxed, and only where the class surely differs:
+             a known element type says so, or else the capture does */
+          if (also) {
+            int known = et != TY_POLY && (elem_t != TY_UNKNOWN || darr != TY_UNKNOWN);
+            if (known ? !pm_element_differs(c, ms, lnm, et) : !differs) continue;
+            et = TY_POLY;
+          }
           TyKind mg = ty_unify(lv->type, et);
           if (mg != lv->type) lv->type = mg;
         }
