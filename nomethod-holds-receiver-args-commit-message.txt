@@ -1,0 +1,35 @@
+A NoMethodError holds its receiver and arguments before it lists them
+
+    def id(s) = s
+    def pick(c, x) = c ? 5 : [x, 2]
+    x = id("bc")
+    begin
+      pick(ARGV.size > 5, x).zork(1)
+    rescue NoMethodError => e
+      p e.receiver
+    end
+
+aborts with SPINEL_GC_STRESS=2, "the mark reached a freed slot"
+(phase globals:break-values). So do `5.zork("a" + x)`,
+`pick(c, x).chr` and `pick(c, x).next_float`. With
+SPINEL_GC_STRESS=1 the new test runs to its end and two lines are
+wrong: the receiver of the next_float call reads [] and the
+arguments of `r.zork("v=#{x}", [x, 1])` read ["5", ["bc", 1]].
+
+sp_nomethod_msg_args and sp_stage_args_msg build NoMethodError#args.
+They allocated the list first, and the receiver was staged after it.
+A receiver or an argument that is a temporary is held by nothing
+else, so that allocation can collect it, and the error keeps a freed
+value.
+
+Both now root the argument slots before they allocate, and
+sp_nomethod_msg_args stages the receiver first (sp_nomethod_msg
+stages it again, into the same slot).
+
+The two helpers are SP_COLD and run only on the way to a raise. No
+generated C changes.
+
+Test: test/nomethod_holds_receiver_and_args.rb, one of
+GC_STRESS_TESTS.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

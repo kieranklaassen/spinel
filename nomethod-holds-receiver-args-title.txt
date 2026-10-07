@@ -1,0 +1,1 @@
+A NoMethodError holds its receiver and arguments before it lists them
