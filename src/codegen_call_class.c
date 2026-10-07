@@ -1444,14 +1444,17 @@ int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
       }
       if (mi >= 0) {
         nd_callee(c, id, mi, defcls, 0);
+        size_t at = b->len;
+        Buf ahead; memset(&ahead, 0, sizeof ahead);
         buf_printf(b, "sp_%s_s_%s(", c->classes[defcls].c_name, mc(c->scopes[mi].name));
         const char *lead1 = emit_cmethod_self_cls_arg(c, mi, ci, b);
-        emit_args_filled(c, mi, nt_ref(nt, id, "arguments"), lead1, b);
+        emit_args_filled_ahead(c, mi, nt_ref(nt, id, "arguments"), lead1, b, &ahead);
         /* Pass &block as sp_Proc * when the class method keeps a real &blk
            param and isn't yield-inlined -- the instance-method and bare-call
            paths already do this; a module/class-method call must too. */
         emit_cmethod_block_arg(c, id, &c->scopes[mi], -1, b);
         buf_puts(b, ")");
+        emit_call_ahead(b, at, &ahead);
         return 1;
       }
     }
