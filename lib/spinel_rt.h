@@ -13298,6 +13298,15 @@ static sp_int sp_int_round_half_v(sp_int v, sp_int nd, sp_RbVal mode) {
   return sp_int_round_half(v, nd, md < 0 ? 1 : md);
 }
 
+/* `rescue k`, the operand a value read at run time: the clause matches when
+   the raised class is (or descends from) the class or module it holds. Any
+   other value, an Array among them, is a TypeError. */
+static sp_bool sp_exc_matches_class(const char *raised, sp_RbVal k) {
+  if (k.tag != SP_TAG_CLASS)
+    sp_raise_cls("TypeError", "class or module required for rescue clause");
+  return sp_exc_cls_matches(raised, sp_class_val_name(k));
+}
+
 /* `rescue *list`: the clause matches when the raised class is (or descends
    from) one named in the list. A non-class element is a TypeError, and an
    empty list matches nothing, so the exception keeps propagating (#3712). */
