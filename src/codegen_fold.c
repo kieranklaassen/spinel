@@ -7928,6 +7928,12 @@ static void emit_arg_temp(Compiler *c, int v) {
   else emit_ctype(c, at, g_pre);
   buf_printf(g_pre, " _t%d = %s;", t, hb.p ? hb.p : default_value_from_compiler(c, at));
   if (at == TY_POLY) buf_printf(g_pre, " SP_GC_ROOT_RBVAL(_t%d);", t);
+  /* A value object lives in the temp itself: a root on the temp hands the
+     collector the struct's first word, its class id, as a pointer, and
+     leaves its Strings unheld. Root those, as a local of the kind does. */
+  else if (comp_ty_value_obj(c, at)) {
+    if (ty_gc_holds_refs(c, at)) { buf_puts(g_pre, " "); emit_gc_root_tmp_refs(c, at, t, g_pre); }
+  }
   else if (needs_root(at)) buf_printf(g_pre, " SP_GC_ROOT(_t%d);", t);
   buf_puts(g_pre, "\n");
   free(hb.p);
