@@ -671,6 +671,8 @@ void emit_poly_vis_precheck(Compiler *c, int id, int tv, Buf *b);
    `base` writer slot through the object pointer text `objp` (codegen_stmt.c). */
 void emit_boxed_writer_arms(Compiler *c, const char *base, const char *nm,
                             const char *objp, const char *src, TyKind at, Buf *b);
+/* A boxed writer's value of nil type that runs for its effects (codegen_stmt.c). */
+int boxed_writer_nil_value_runs(const NodeTable *nt, int id);
 int  method_is_void(Scope *s);
 void emit_index_op_write(Compiler *c, int id, Buf *b, int indent);
 void emit_index_and_or_write(Compiler *c, int id, Buf *b, int indent, int is_or);

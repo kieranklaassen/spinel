@@ -9579,6 +9579,46 @@ static int slot_takes_subclass(Compiler *c, TyKind slot, TyKind val) {
   return is_descendant(c, vc, sc);
 }
 
+/* Every node of `id` is of a kind listed here. */
+static int nil_value_kinds_emit(const NodeTable *nt, int id) {
+  static const char *const kinds[] = {
+    "NilNode", "TrueNode", "FalseNode", "IntegerNode", "FloatNode", "StringNode", "SymbolNode",
+    "InterpolatedStringNode", "EmbeddedStatementsNode", "ArrayNode", "HashNode", "AssocNode",
+    "KeywordHashNode", "RangeNode", "LocalVariableReadNode", "GlobalVariableReadNode",
+    "ConstantReadNode", "InstanceVariableReadNode", "SelfNode", "LocalVariableWriteNode",
+    "LocalVariableOperatorWriteNode", "GlobalVariableWriteNode", "GlobalVariableOperatorWriteNode",
+    "CallNode", "ArgumentsNode", "BlockNode", "BlockParametersNode", "ParametersNode",
+    "RequiredParameterNode", "ParenthesesNode", "StatementsNode", "BeginNode", "EnsureNode",
+    "IfNode", "UnlessNode", "ElseNode", "CaseNode", "WhenNode", "AndNode", "OrNode", "WhileNode",
+    "UntilNode", NULL };
+  if (id < 0) return 1;
+  const char *ty = nt_type(nt, id);
+  int listed = 0;
+  for (int i = 0; ty && kinds[i] && !listed; i++) listed = sp_streq(ty, kinds[i]);
+  if (!listed) return 0;
+  int nr = nt_num_refs(nt, id);
+  for (int i = 0; i < nr; i++) if (!nil_value_kinds_emit(nt, nt_ref_at(nt, id, i))) return 0;
+  int na = nt_num_arrs(nt, id);
+  for (int i = 0; i < na; i++) {
+    int n = 0; const int *ids = nt_arr_at(nt, id, i, &n);
+    for (int k = 0; k < n; k++) if (!nil_value_kinds_emit(nt, ids[k])) return 0;
+  }
+  return 1;
+}
+
+/* Does the boxed writer run `id`, its value of nil type, for its effects? A
+   nil literal has none. Any other value runs where this place is known to
+   emit it: a call, a sequence, `begin`, a conditional, a loop, over
+   literals, variables and local or global writes. The list is of what
+   emits, not of what does not: a rescue modifier over a nil-typed
+   expression declares a `void` temporary, an instance-variable write at
+   top level names a `self` that is not there, a `yield` whose block ends in
+   a boxed writer is a void expression; those and every kind unlisted keep
+   the plain nil. */
+int boxed_writer_nil_value_runs(const NodeTable *nt, int id) {
+  return nt_kind(nt, id) != NK_NilNode && nil_value_kinds_emit(nt, id);
+}
+
 void emit_boxed_writer_arms(Compiler *c, const char *base, const char *nm,
                             const char *objp, const char *src, TyKind at, Buf *b) {
   for (int k = 0; k < c->nclasses; k++) {
@@ -11783,7 +11823,23 @@ static int emit_call_stmt(Compiler *c, int id, Buf *b, int indent, const NodeTab
             emit_indent(b, indent);
             buf_printf(b, "{ sp_RbVal _t%d = ", tv); emit_expr(c, recv, b); buf_puts(b, "; ");
             if (nil_rhs) {
-              buf_printf(b, "sp_RbVal _t%d = sp_box_nil();", tval);
+              /* a nil literal has nothing to run; any other value of nil
+                 type this place can emit (a method that answers nil,
+                 `(bump; nil)`) runs first, with the receiver rooted: nothing
+                 else may hold it, and the value may collect. What the value
+                 hoists runs with it, after the receiver; under `&.` a nil
+                 receiver skips both, as it skips the call. */
+              if (!boxed_writer_nil_value_runs(nt, argv[0])) buf_printf(b, "sp_RbVal _t%d = sp_box_nil();", tval);
+              else {
+                const char *cop = nt_str(nt, id, "call_operator");
+                Buf pre; memset(&pre, 0, sizeof pre);
+                Buf val; memset(&val, 0, sizeof val);
+                { Buf *sv = g_pre; g_pre = &pre; emit_expr(c, argv[0], &val); g_pre = sv; }
+                buf_printf(b, "SP_GC_ROOT_RBVAL(_t%d); sp_RbVal _t%d = sp_box_nil(); ", tv, tval);
+                if (cop && sp_streq(cop, "&.")) buf_printf(b, "if (_t%d.tag != SP_TAG_NIL) ", tv);
+                buf_printf(b, "{\n%s(void)(%s); }", pre.p ? pre.p : "", val.p && val.p[0] ? val.p : "0");
+                free(pre.p); free(val.p);
+              }
             }
             else if (unk_rhs) {
               buf_printf(b, "sp_RbVal _t%d = ", tval); emit_expr(c, argv[0], b); buf_puts(b, ";");
