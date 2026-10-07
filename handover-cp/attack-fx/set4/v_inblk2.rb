@@ -1,0 +1,12 @@
+class W
+  def initialize; @n = 0; end
+  def n; @n; end
+  def me = self
+  def then
+    @n += 1
+    self
+  end
+end
+c = W.new
+[1].each { |i| b = W.new; [2].each { |j| b = c.me }; b.then }
+puts "done"

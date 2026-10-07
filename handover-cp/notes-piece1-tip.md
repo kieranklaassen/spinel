@@ -1,0 +1,7 @@
+### Piece 1 on the tips of 10-07 (an addendum to notes-piece1-v5.md; row 111)
+
+No change to the commit's patch (6a37641168d3 on a39414338a22). Class: fix.
+
+- On master fc6e90cc8d29 (the tip at 12:55 UTC): 333f3aff9de3318ae1b0f3df91a7f4882ff64bef, tree 7e49b2a15dd3. Built; the four tests pass with gcc and clang at SPINEL_GC_STRESS unset, 1 and 2 (24 of 24 cells); `ruby tools/gate.rb check` with the piece staged exits 0.
+- On master 4f8b737c1402 (the tip at 13:39 and 13:55 UTC): f53781fe7278c828429b56104d097703f143cf88, tree 9726b9f13256 (clean). REBUILT there, because d02a49fb7f74..4f8b737c1402 changes `emit_call_compare_arms` and `emit_call_operator_arms` in src/codegen_call_operator.c, where the piece's hunks sit. 24 of 24 cells; staged gate check exits 0. On the bare tip (built): `_bignum` 5 of 12 lines wrong, `_receiver` 39 of 71 wrong, `_own_method` does not build, `_inherited` passes (the guard).
+- Does upstream alter what the arm emits: no. Over the piece's 1,800-program family (`gen-piece1-family.rb`), `diff master.c piece.c` is line for line the same on a39414338a22 and on fc6e90cc8d29, and the same again on 4f8b737c1402 (1,764 programs with a change, 36 with none; `bridge2.rb`, four trees built each time). Master's own C is the same on a39414338a22 and fc6e90cc8d29 for all 1,800; on 4f8b737c1402 it moved in 1,170 of them (upstream's repr_of reads), the piece's lines not among what moved.
