@@ -6801,6 +6801,25 @@ static int emit_poly_arg_temp(Compiler *c, int node, TyKind ty, int boxed, int t
   return held >= 0 ? held : tn;
 }
 
+/* A splatted argument of a poly dispatch into its temp `_tN`, a rooted
+   PolyArray. Once something has run, what it hoists is held in its place as
+   emit_poly_arg_temp holds an argument's: `r.m(tick(8), *xs.map { |i| tick(i) })`
+   ran the map ahead of tick(8). 1 when the argument has an effect of its
+   own. */
+static int emit_poly_splat_temp(Compiler *c, int node, int tn, int ran, Buf *b) {
+  Buf pre; memset(&pre, 0, sizeof pre);
+  Buf val; memset(&val, 0, sizeof val);
+  Buf *sv_pre = g_pre;
+  int inner = nt_ref(c->nt, node, "expression");
+  if (ran && inner >= 0 && operand_hoists_effect(c, inner)) g_pre = &pre;
+  emit_expr(c, node, &val);
+  g_pre = sv_pre;
+  if (pre.p) buf_puts(b, pre.p);
+  buf_printf(b, "sp_PolyArray *_t%d = %s; SP_GC_ROOT(_t%d); ", tn, val.p ? val.p : "", tn);
+  free(pre.p); free(val.p);
+  return subtree_has_side_effect(c, node);
+}
+
 /* `sp_raise_cls("ArgumentError", msg);` with msg a C string literal: a
    keyword's #inspect in it (`unknown keyword: "s"`) carries quotes. */
 void emit_poly_arity_raise(Buf *b, const char *msg) {
@@ -7898,8 +7917,7 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
           /* the SplatNode's own lowering: nil to [], a scalar to [v], any
              array kind rebuilt as a PolyArray */
           atmp_ty[a] = TY_POLY_ARRAY;
-          buf_printf(b, "sp_PolyArray *_t%d = ", atmp[a]); emit_expr(c, argv[a], b);
-          buf_printf(b, "; SP_GC_ROOT(_t%d); ", atmp[a]);
+          ran |= emit_poly_splat_temp(c, argv[a], atmp[a], ran, b);
           continue;
         }
         TyKind at = repr_of(c, argv[a]).as_ty;
@@ -18669,10 +18687,10 @@ static void render_operand(Compiler *c, int node, int fresh, Buf *out, Buf *pre)
   g_pre = sv;
 }
 /* Does what operand `node` hoists run code of its own -- a call in its
-   receiver or arguments, below the operand's own call? Only then can its
-   place against the operands to its left be seen; a hoisted read of
-   `node.right` stays in the prelude, where it roots into the frame. */
-static int operand_hoists_effect(Compiler *c, int node) {
+   receiver, its arguments or its block, below the operand's own call? Only
+   then can its place against the operands to its left be seen; a hoisted
+   read of `node.right` stays in the prelude, where it roots into the frame. */
+int operand_hoists_effect(Compiler *c, int node) {
   const NodeTable *nt = c->nt;
   if (nt_kind(nt, node) != NK_CallNode) return !subtree_is_pure_read(c, node);
   int recv = nt_ref(nt, node, "receiver");
@@ -18680,6 +18698,11 @@ static int operand_hoists_effect(Compiler *c, int node) {
   int a = nt_ref(nt, node, "arguments"), ac = 0;
   const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
   for (int i = 0; i < ac; i++) if (!subtree_is_pure_read(c, av[i])) return 1;
+  /* a block is a loop the call writes ahead of the statement, and one passed
+     with `&` is whatever it is given: `xs.select { |i| tick(i) }` */
+  int blk = nt_ref(nt, node, "block");
+  if (blk >= 0 && (nt_kind(nt, blk) != NK_BlockNode ||
+                   !subtree_is_pure_read(c, nt_ref(nt, blk, "body")))) return 1;
   return 0;
 }
 

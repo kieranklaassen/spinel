@@ -7383,8 +7383,17 @@ void emit_rest_pack_kwh(Compiler *c, int from, int pos_argc, const int *argv, in
   emit_indent(g_pre, g_indent);
   buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", t);
   buf_printf(b, "({ _t%d = sp_PolyArray_new();", t);
+  int ran = 0;
   for (int i = from; i < pos_argc; i++) {
     const char *aty = nt_type(nt, argv[i]);
+    /* Once an element has run code, what a later one hoists is held here,
+       in its place: in the prelude it ran ahead of the whole array
+       (`r(tick(8), *xs.map { |i| tick(i) })` ran the map first). */
+    int el_node = nt_kind(nt, argv[i]) == NK_SplatNode ? nt_ref(nt, argv[i], "expression") : argv[i];
+    int hold = ran && el_node >= 0 && operand_hoists_effect(c, el_node);
+    Buf held, elb, *sv_pre = g_pre, *sv_b = b;
+    memset(&held, 0, sizeof held); memset(&elb, 0, sizeof elb);
+    if (hold) { g_pre = &held; b = &elb; }
     if (aty && sp_streq(aty, "SplatNode")) {
       int inner = nt_ref(nt, argv[i], "expression");
       Buf arr; memset(&arr, 0, sizeof arr);
@@ -7451,6 +7460,11 @@ else {
       buf_printf(b, " sp_PolyArray_push(_t%d, %s);", t, el.p ? el.p : "sp_box_nil()");
       free(el.p);
     }
+    g_pre = sv_pre; b = sv_b;
+    if (held.p) buf_puts(b, held.p);
+    if (elb.p) buf_puts(b, elb.p);
+    free(held.p); free(elb.p);
+    ran |= subtree_has_side_effect(c, argv[i]);
   }
   Buf kel; memset(&kel, 0, sizeof kel);
   if (kwh >= 0 && !kwh_only_spreads(nt, kwh)) {

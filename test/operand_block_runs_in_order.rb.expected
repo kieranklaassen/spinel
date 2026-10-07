@@ -1,0 +1,148 @@
+arr 8
+tick 1
+tick 2
+[8, 1, 1, 2]
+arr 8
+tick 1
+tick 2
+[8]
+arr 8
+tick 1
+tick 2
+[8, 1, 1, 2]
+arr 8
+tick 1
+tick 2
+[[8, 2], [1, 1]]
+arr 8
+tick 1
+tick 2
+false
+arr 8
+tick 1
+tick 2
+[8, 1]
+tick 1
+tick 1
+tick 2
+[3]
+tick 8
+tick 1
+tick 2
+8
+1
+2
+name 8
+name a
+name b
+false
+tick 8
+tick 1
+tick 2
+[8, 1, 2]
+tick 8
+tick 1
+tick 2
+[8, [1, 2]]
+list 7
+tick 1
+tick 2
+[7, 7, [1, 2]]
+tick 8
+tick 1
+tick 2
+[8, [1, 2]]
+tick 8
+name a
+name b
+[8, ["sa", "sb"]]
+tick 8
+tick 9
+tick 1
+tick 2
+[8, 9, [2, 1]]
+tick 8
+tick 1
+tick 2
+tick 9
+[8, [1, 2], 9]
+tick 8
+tick 1
+tick 2
+[8, [1, 2]]
+tick 8
+tick 1
+tick 2
+[8, [1, 2]]
+tick 8
+tick 1
+tick 2
+[8, [1, 2]]
+tick 8
+tick 1
+tick 2
+[8, 1, 2]
+tick 8
+tick 1
+tick 2
+tick 9
+[8, 1, 2, 9]
+list 7
+tick 1
+tick 2
+[7, 7, [1, 2]]
+tick 8
+tick 1
+tick 2
+[[1, 2], 8]
+tick 8
+name a
+name b
+[["sa", "sb"], 8]
+tick 8
+tick 9
+tick 1
+tick 2
+[[2, 1], 9, 8]
+tick 8
+tick 1
+tick 2
+tick 9
+[9, [1, 2], 8]
+tick 8
+tick 1
+tick 2
+[[1, 2], 8]
+tick 8
+tick 1
+tick 2
+[[1, 2], 8]
+tick 8
+tick 1
+tick 2
+[[1, 2], 8]
+tick 8
+tick 1
+tick 2
+[2, 1, 8]
+tick 8
+tick 1
+tick 2
+tick 9
+[9, 2, 1, 8]
+list 7
+tick 1
+tick 2
+[[1, 2], 7, 7]
+tick 8
+tick 1
+tick 2
+[[1, 2], 8]
+tick 8
+tick 1
+tick 2
+[2, 1, 8]
+tick 8
+tick 1
+tick 2
+[[1, 2], 8]

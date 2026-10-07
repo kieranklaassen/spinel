@@ -248,6 +248,9 @@ int subtree_may_run_proc(Compiler *c, int id);
    -- variable and literal reads, scalar arithmetic, typed-array reads and
    plain field reads, all the way down (codegen_call.c)? */
 int subtree_is_pure_read(Compiler *c, int id);
+/* Does what operand `node` hoists ahead of its statement run code of its own
+   (codegen_call.c)? */
+int operand_hoists_effect(Compiler *c, int node);
 /* Is the call a reader the emitter lowers to a plain field read? *allocates is
    set when the read builds a copy (a shared String slot). codegen_call.c */
 int call_is_field_read(Compiler *c, int id, int *allocates);
