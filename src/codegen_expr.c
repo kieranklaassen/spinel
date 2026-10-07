@@ -3852,7 +3852,9 @@ static int emit_range_expr(Compiler *c, int id, Buf *b, const NodeTable *nt, con
     buf_printf(b, "({ sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);"
                   " const char *_t%d = sp_sym_to_s(", ta, ta, ts);
     emit_expr(c, left, b);
-    buf_printf(b, "); const char *_t%d = sp_sym_to_s(", te);
+    /* the cursor is a String of its own from the first step on, and
+       interning it allocates */
+    buf_printf(b, "); SP_GC_ROOT_STR(_t%d); const char *_t%d = sp_sym_to_s(", ts, te);
     emit_expr(c, right, b);
     buf_printf(b, "); for (;;) {"
                   " if (%d && sp_str_eq(_t%d, _t%d)) break;"
