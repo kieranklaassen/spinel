@@ -6135,6 +6135,38 @@ static int case_subject_needs_root(Compiler *c, TyKind pt, const int *whens, int
    (statement and value position) read this one arm; when only the
    statement emitter had it, `r = case arr when [1, 2]` fell through to the
    pointer compare and took the else arm. */
+static int emit_when_arm_root(Compiler *c, int cond, TyKind wpt, Buf *b);
+/* Whether the boxed arm of a `when` needs a root of its own while its
+   compare runs a method of the program (an element's own ==). An arm that
+   allocates nothing does not; nor a literal Array or Hash, which its own
+   temporary holds; nor an Array or Hash of Integers, Floats or Strings,
+   whose compare calls nothing of the program; nor an element read of an
+   Array or Hash that a variable holds (`rows[i]`). */
+static int when_boxed_arm_needs_root(Compiler *c, int cond) {
+  const NodeTable *nt = c->nt;
+  if (!subtree_allocates(nt, cond)) return 0;
+  cond = unwrap_parens(c, cond);
+  const char *ty = nt_type(nt, cond);
+  if (sp_streq(ty, "ArrayNode") || sp_streq(ty, "HashNode")) return 0;
+  TyKind wt = comp_ntype(c, cond);
+  if (ty_is_array(wt) && !ty_is_obj_array(wt) && ty_array_elem(wt) != TY_POLY) return 0;
+  if (ty_is_hash(wt)) {
+    TyKind hv = ty_hash_val(wt);
+    if (hv == TY_INT || hv == TY_FLOAT || hv == TY_STRING) return 0;
+  }
+  const char *nm = sp_streq(ty, "CallNode") ? nt_str(nt, cond, "name") : NULL;
+  if (nm && sp_streq(nm, "[]") && nt_ref(nt, cond, "block") < 0) {
+    int rv = nt_ref(nt, cond, "receiver");
+    const char *rty = rv >= 0 ? nt_type(nt, rv) : NULL;
+    TyKind rt = rv >= 0 ? comp_ntype(c, rv) : TY_UNKNOWN;
+    if (rty && (sp_streq(rty, "LocalVariableReadNode") || sp_streq(rty, "InstanceVariableReadNode") ||
+                sp_streq(rty, "ConstantReadNode") || sp_streq(rty, "GlobalVariableReadNode")) &&
+        (ty_is_array(rt) || ty_is_obj_array(rt) || ty_is_hash(rt)) &&
+        !subtree_allocates(nt, nt_ref(nt, cond, "arguments")))
+      return 0;
+  }
+  return 1;
+}
 static int emit_case_container_eq(Compiler *c, int cond, int t, TyKind pt, Buf *b) {
   if (!ty_is_array(pt) && !ty_is_obj_array(pt) && !ty_is_hash(pt)) return 0;
   TyKind wat = comp_ntype(c, cond);
@@ -6142,11 +6174,19 @@ static int emit_case_container_eq(Compiler *c, int cond, int t, TyKind pt, Buf *
   if (ty_is_array(wat) || ty_is_obj_array(wat) || ty_is_hash(wat) || wat == TY_POLY || wat == TY_UNKNOWN) {
     /* the arm is the receiver of `===`, so it is the left operand: an
        element's own == is asked of the arm's element, as Ruby asks it */
+    int ta = when_boxed_arm_needs_root(c, cond) ? ++g_tmp : 0;
+    if (ta) {
+      buf_printf(b, "({ sp_RbVal _t%d = ", ta);
+      emit_boxed(c, cond, b);
+      buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); ", ta);
+    }
     buf_puts(b, "sp_poly_eq(");
-    emit_boxed(c, cond, b);
+    if (ta) buf_printf(b, "_t%d", ta);
+    else emit_boxed(c, cond, b);
     buf_puts(b, ", ");
     emit_boxed_text(c, pt, stmp, b);
     buf_puts(b, ")");
+    if (ta) buf_puts(b, "; })");
   }
   else if (ty_is_object(wat) &&
            (comp_method_in_chain(c, ty_object_class(wat), "===", NULL) >= 0 ||
@@ -6159,14 +6199,17 @@ static int emit_case_container_eq(Compiler *c, int cond, int t, TyKind pt, Buf *
     LocalVar *eplv = ems->nparams > 0 ? scope_local(ems, ems->pnames[0]) : NULL;
     TyKind pty = eplv ? eplv->type : TY_POLY;
     int poly_ret = ems->ret == TY_POLY;
+    int ta = emit_when_arm_root(c, cond, wat, b);
     buf_puts(b, poly_ret ? "sp_poly_truthy(" : "(");
     emit_method_cname(c, ems, b);
     buf_puts(b, "(");
-    emit_expr(c, cond, b);
+    if (ta) buf_printf(b, "_t%d", ta);
+    else emit_expr(c, cond, b);
     buf_puts(b, ", ");
     if (pty != pt) emit_boxed_text(c, pt, stmp, b);
     else buf_puts(b, stmp);
     buf_puts(b, "))");
+    if (ta) buf_puts(b, "; })");
   }
   else {
     buf_printf(b, "((void)_t%d, (void)(", t); emit_expr(c, cond, b); buf_puts(b, "), 0)");
@@ -6225,6 +6268,19 @@ static int emit_when_arm_root(Compiler *c, int cond, TyKind wpt, Buf *b) {
   return ta;
 }
 
+/* Whether the boxed compare of an object arm runs code of the program: its
+   class has an == or a <=> in its chain (a Comparable's == comes from its
+   <=>), or is a Struct or a Data, whose == asks its members. Any other
+   class compares by identity. */
+static int when_obj_arm_eq_runs(Compiler *c, TyKind ct) {
+  if (!ty_is_object(ct)) return 0;
+  int k = ty_object_class(ct);
+  if (comp_method_in_chain(c, k, "==", NULL) >= 0 || comp_method_in_chain(c, k, "<=>", NULL) >= 0) return 1;
+  for (int p = k, n = 0; p >= 0 && n < 64; p = c->classes[p].parent, n++)
+    if (c->classes[p].is_struct || c->classes[p].is_data) return 1;
+  return 0;
+}
+
 /* `when <cond>` against the subject in _t<t>: the subject class's own ===
    or == when cond has its type, else a native === or the pointer compare. */
 static void emit_case_obj_eq(Compiler *c, int cond, int t, TyKind pt, Buf *b) {
@@ -6280,11 +6336,16 @@ static void emit_case_obj_eq(Compiler *c, int cond, int t, TyKind pt, Buf *b) {
          Point). The pointer compare below answered identity for all. */
       TyKind ct = comp_ntype(c, cond);
       if (ty_is_object(pt) || ty_is_object(ct)) {
+        /* the arm's own == runs inside sp_poly_eq with the arm as its
+           `self`: an arm that makes its object is rooted here too */
+        int ta = when_obj_arm_eq_runs(c, ct) ? emit_when_arm_root(c, cond, ct, b) : 0;
         buf_puts(b, "sp_poly_eq(");
-        emit_boxed(c, cond, b);
+        if (ta) { char aref[24]; snprintf(aref, sizeof aref, "_t%d", ta); emit_boxed_text(c, ct, aref, b); }
+        else emit_boxed(c, cond, b);
         buf_puts(b, ", ");
         emit_boxed_text(c, pt, sref2, b);
         buf_puts(b, ")");
+        if (ta) buf_puts(b, "; })");
       }
       /* an Integer subject against a Float pattern, or the reverse, is
          equal exactly, as == is (#7505); a literal within 2^53 keeps the
