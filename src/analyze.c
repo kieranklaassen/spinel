@@ -1973,7 +1973,6 @@ static int program_names_method(const NodeTable *nt, const char *const *list) {
    or of a name no literal spells. `:fail` and "raise" as plain values, which
    programs do write, define nothing. */
 static const char *const exc_protocol[] = { "===", "exception", "raise", "fail", NULL };
-static const char *const definers[] = { "define_method", "define_singleton_method", "alias_method", NULL };
 static int program_defines_method(const NodeTable *nt, const char *const *list) {
   NT_FOREACH_KIND(nt, NK_DefNode, d) if (name_listed(list, nt_str(nt, d, "name"))) return 1;
   NT_FOREACH_KIND(nt, NK_AliasMethodNode, a) if (name_listed(list, literal_name(nt, nt_ref(nt, a, "new_name")))) return 1;
@@ -1982,7 +1981,7 @@ static int program_defines_method(const NodeTable *nt, const char *const *list) 
     int args = nt_ref(nt, id, "arguments"), argc = 0, a0 = 0;
     const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &argc) : NULL;
     if (cn && is_send_family(cn) && argc && nt_kind(nt, argv[0]) == NK_SymbolNode) { cn = nt_str(nt, argv[0], "value"); a0 = 1; }
-    if (!name_listed(definers, cn) || argc <= a0) continue;
+    if (!name_listed(method_definers, cn) || argc <= a0) continue;
     const char *dn = literal_name(nt, argv[a0]);
     if (!dn || name_listed(list, dn)) return 1;
   }
