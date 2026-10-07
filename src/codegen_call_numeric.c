@@ -129,7 +129,14 @@ int emit_call_bigint_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
       buf_printf(b, "sp_bigint_abs_v(%s)", r); free(rs.p); return 1;   /* (#2418) */
     }
     if (sp_streq(name, "abs2") && argc == 0) {
-      buf_printf(b, "sp_bigint_mul(%s, %s)", r, r); free(rs.p); return 1;   /* (#2424) */
+      /* the receiver is both factors: one that runs code is read into a
+         temp first, so it runs once */
+      if (subtree_is_pure_read(c, recv)) buf_printf(b, "sp_bigint_mul(%s, %s)", r, r);   /* (#2424) */
+      else {
+        int tr = ++g_tmp;
+        buf_printf(b, "({ %s _t%d = (%s); sp_bigint_mul(_t%d, _t%d); })", c_type_name(TY_BIGINT), tr, r, tr, tr);
+      }
+      free(rs.p); return 1;
     }
     /* Bignum#downto(hi)/#upto(hi) with no block: materialize the Bignum sequence
        as a poly array (a Bignum range has no lazy Enumerator type) (#2305). */

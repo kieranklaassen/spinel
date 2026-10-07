@@ -59,6 +59,21 @@ static int emit_op_template(Compiler *c, const BopCtx *x, Buf *b) {
   char *r = NULL;
   int argc;
   const int *argv = call_args(c->nt, x->id, &argc);
+  /* A later $r repeats the receiver's text and $R emits it again, so a
+     receiver that runs code ran once for each: `bump.nonzero?` called bump
+     twice. It is read into a temp first; a variable or a literal repeats as
+     it did. */
+  const char *r1 = strstr(x->op->arg, "$r");
+  int once = r1 && (strstr(r1 + 2, "$r") || strstr(x->op->arg, "$R")) && x->recv >= 0 &&
+             !subtree_is_pure_read(c, x->recv);
+  if (once) {
+    char *rt = op_recv_text(c, x);
+    char tr[24];
+    snprintf(tr, sizeof tr, "_t%d", ++g_tmp);
+    buf_printf(b, "({ %s %s = (%s); ", c_type_name(x->rt), tr, rt);
+    free(rt);
+    r = strdup(tr);
+  }
   for (const char *p = x->op->arg; *p; p++) {
     const char *tk = p[0] == '$' && p[1] ? strchr(tnames, p[1]) : NULL;
     if (p[0] == '$' && p[1] == 'r') {
@@ -97,7 +112,7 @@ static int emit_op_template(Compiler *c, const BopCtx *x, Buf *b) {
       p++;
     }
     else if (p[0] == '$' && p[1] == 'R') {
-      emit_expr(c, x->recv, b);
+      if (once) buf_puts(b, r); else emit_expr(c, x->recv, b);
       p++;
     }
     else if (tk) {
@@ -122,6 +137,7 @@ static int emit_op_template(Compiler *c, const BopCtx *x, Buf *b) {
     else { char ch[2] = { *p, 0 }; buf_puts(b, ch); }
   }
   free(r);
+  if (once) buf_puts(b, "; })");
   if (held) buf_puts(b, "; })");
   free(hb.p);
   return 1;
