@@ -1,0 +1,39 @@
+An operand in parentheses keeps a call's operands in order
+
+    def mk = ($o = Box.new; "t")
+    p mk.length + ($o.val > 9 ? 1 : 2)
+
+raised "undefined method 'val' for nil" where CRuby prints 3.
+
+emit_operands_in_order declines the whole rewrite when an observable
+operand is not bindable, and it asked the kind of the operand as
+written: a call or a conditional in parentheses is a ParenthesesNode.
+The operands were then left to C's order, and what the one in
+parentheses hoisted (the nil check of $o, an Array literal, the leading
+statements of an `if` arm) ran in the statement's prelude, ahead of the
+operand written before it. `mk * (late)` ran late first under gcc.
+
+The kind is asked of what the parentheses hold when that is a single
+statement (unwrap_parens), so `(call)` and `(c ? a : b)` bind as the
+call and the conditional do. A Range, a literal, a write or a sequence
+in parentheses is not bound.
+
+Not where an operand left in the call ahead of a bound one is computed:
+it is read after every bound operand has run. Bound around it,
+`nums.values_at(($i + 5), (bump))` would read the $i bump left, a
+Symbol's conditional the same, and `(7 / z)` would raise after bump had
+run, where the arm left alone runs them first. The parentheses are
+looked through only where each operand left ahead of the last bound one
+is a literal or a variable's read (operand_is_plain), and a call that
+ran the operands ahead of an unbound one first
+(emit_operands_before_unbound) still does.
+
+Nor where an operand before the last may be a String in a program that
+changes a String in place: CRuby reads the String when the call runs,
+so `k.name * (k.rename)` shows the rename, which a String bound first
+misses. Those calls compile as they did. Whether the program changes
+one is scanned once, before any code is emitted: the statement arm of
+gsub!, sub!, tr! and delete! renames its node to the plain form while
+it emits it, and a scan first asked for from there would read `gsub`.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
