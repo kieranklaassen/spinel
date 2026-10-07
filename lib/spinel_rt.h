@@ -10622,7 +10622,11 @@ static sp_RbVal sp_poly_delete_key(sp_RbVal recv, sp_RbVal key) {
         return r == SP_INT_NIL ? sp_box_nil() : key;
       }
       case SP_BUILTIN_STR_ARRAY: {
-        if (key.tag != SP_TAG_STR) return sp_box_nil();
+        if (key.tag != SP_TAG_STR) {
+          /* a shared String handle is a String too: its text */
+          if (!sp_poly_is_strbuf(key)) return sp_box_nil();
+          key = sp_poly_strbuf_deref(key);
+        }
         const char *r = sp_StrArray_delete((sp_StrArray *)recv.v.p, key.v.s);
         return r ? sp_box_str(r) : sp_box_nil();
       }

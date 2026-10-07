@@ -1,0 +1,6 @@
+hash: "ab" ["cd", "ef"]
+array: "ab" ["cd", "ef"]
+beside: "cd" ["ef"]
+integer: nil nil ["ef"]
+longer: abz "abz" ["ab"]
+made by the call: 0
