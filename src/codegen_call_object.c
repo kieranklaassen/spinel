@@ -1307,6 +1307,26 @@ int emit_call_freeze_dup_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, 
   return 0;
 }
 
+/* Whether a `&.` receiver of type `rrt` is a C value one of the guards below
+   tests for nil: a pointer, or a scalar with its own nil. */
+static int sn_typed_nil_recv(Repr rrr) {
+  TyKind rrt = rrr.as_ty;
+  /* A concretely-typed OBJECT receiver is still a nullable C pointer
+     (a nil-able ivar like doom's `@combat&.sprites` after death):
+     dropping the `&.` deref'd NULL. The same holds for a concrete
+     STRING receiver (NULL is the string nil, e.g. the nil arm of a
+     chained `obj&.field&.length`). */
+  if (rrt == TY_STRING || (ty_is_object(rrt) && rrr.kind != RK_VOBJ)) return 1;
+  /* A specialized container answers a miss with the ELEMENT type's own C
+     nil -- a NULL string, SP_INT_NIL -- so `h["zz"]&.empty?` reaches the
+     guard with a concrete receiver, not a poly one. Guard those too, or
+     the miss takes the result type's zero and `&.` answers false (#4070). */
+  if (rrt == TY_INT || rrt == TY_FLOAT) return 1;
+  /* a typed array or hash is a pointer too, and a slice past the end
+     (`a[4..]&.size`) or a container miss hands it NULL (#4524) */
+  return needs_root(rrt) && rrt != TY_POLY && !ty_is_object(rrt);
+}
+
 /* An operand evaluated after the `&.` call `call` that may as well run ahead
    of it: a literal, or a read of a variable the call cannot rebind
    (read_rebound_by) that is a scalar, or that the call has no effect on. */
@@ -1671,24 +1691,14 @@ int emit_call_safe_nav_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
         free(nb.p); free(vb2.p); free(preb.p);
         return 1;
       }
-      /* A concretely-typed OBJECT receiver is still a nullable C pointer
-         (a nil-able ivar like doom's `@combat&.sprites` after death):
-         dropping the `&.` deref'd NULL. The same holds for a concrete
-         STRING receiver (NULL is the string nil, e.g. the nil arm of a
-         chained `obj&.field&.length`). Emit a guard, then re-enter the
+      /* A concretely-typed receiver that is a C pointer, or a scalar with a
+         nil of its own (sn_typed_nil_recv). Emit a guard, then re-enter the
          normal call emission with the receiver substituted by the guarded
          temp (via the arg-override table); g_sn_skip suppresses this block
          on re-entry. */
       int sn_obj = ty_is_object(rrt) && rrr.kind != RK_VOBJ;
-      /* A specialized container answers a miss with the ELEMENT type's own C
-         nil -- a NULL string, SP_INT_NIL -- so `h["zz"]&.empty?` reaches the
-         guard with a concrete receiver, not a poly one. Guard those too, or
-         the miss takes the result type's zero and `&.` answers false (#4070). */
-      int sn_scalar = (rrt == TY_INT || rrt == TY_FLOAT);
-      /* a typed array or hash is a pointer too, and a slice past the end
-         (`a[4..]&.size`) or a container miss hands it NULL (#4524) */
       int sn_cont = needs_root(rrt) && rrt != TY_POLY && rrt != TY_STRING && !ty_is_object(rrt);
-      if ((sn_obj || rrt == TY_STRING || sn_scalar || sn_cont) && g_sn_skip != id) {
+      if (sn_typed_nil_recv(rrr) && g_sn_skip != id) {
         int tsn2 = ++g_tmp;
         TyKind ret2 = repr_of(c, id).as_ty;
         /* The temp lives in g_pre (statement scope), not an inline ({ }):
