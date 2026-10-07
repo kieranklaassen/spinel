@@ -351,8 +351,13 @@ static sp_int sp_io_write_raw(sp_File *f, const char *s, size_t n) {
      the descriptor past where stdio thinks it is, and a zero-length write
      is still a valid sync point. Without this, a subsequent ftello,
      buffered read, or buffered write on the same stream would use the
-     stale stdio offset. */
-  if (fseeko(f->fp, 0, SEEK_CUR) != 0) sp_file_raise_errno("write", "file");
+     stale stdio offset. The stream is set to the descriptor's own offset:
+     a relative seek (SEEK_CUR) counts from stdio's cached offset, which the
+     raw write did not move, and moved the descriptor back to it, so the
+     next syswrite overwrote this one. A descriptor with no offset (a pipe,
+     a terminal) has none to share, where the relative seek raised ESPIPE. */
+  off_t pos = lseek(fd, 0, SEEK_CUR);
+  if (pos >= 0 && fseeko(f->fp, pos, SEEK_SET) != 0) sp_file_raise_errno("write", "file");
   return (sp_int)n;
 }
 
@@ -740,8 +745,32 @@ sp_File *sp_sock_pair_end(sp_int domain, sp_int type, sp_int proto, sp_int which
 }
 
 /* Socket.getaddrinfo: one row per resolution, in CRuby's 7-element shape. */
-sp_PolyArray *sp_sock_getaddrinfo(const char *host, sp_int port) {SP_GC_ROOT_STR(host);
-  extern int sp_net_getaddrinfo_at(const char *host, int port, int socktype, int idx,
+/* A family or socktype argument of Socket.getaddrinfo: nil is 0
+   (unrestricted), an Integer as given, a String or Symbol by name with or
+   without its AF_ / SOCK_ prefix, as CRuby reads it. An unknown name is CRuby's
+   SocketError. */
+sp_int sp_sock_addrinfo_hint(sp_RbVal v, sp_int is_family) {
+  if (v.tag == SP_TAG_NIL) return 0;
+  if (v.tag == SP_TAG_INT) return v.v.i;
+  const char *name = NULL;
+  if (v.tag == SP_TAG_STR) name = v.v.s;
+  else if (v.tag == SP_TAG_SYM && sp_sym_name_fn) name = sp_sym_name_fn((sp_sym)v.v.i);
+  if (!name) sp_raise_cls("TypeError", "no implicit conversion into Integer");
+  const char *prefix = is_family ? "AF_" : "SOCK_";
+  size_t pl = strlen(prefix);
+  if (strncmp(name, prefix, pl) == 0) name += pl;
+  if (is_family && strcmp(name, "UNSPEC") == 0) return 0;
+  char full[64];
+  snprintf(full, sizeof full, "%s%s", prefix, name);
+  sp_int r = sp_sock_const(full);
+  if (r < 0) sp_raise_cls("SocketError", is_family ? "unknown socket domain" : "unknown socket type");
+  return r;
+}
+
+/* Socket.getaddrinfo(host, port [, family [, socktype]]): a family or socktype
+   of 0 (nil) leaves it unrestricted, as in CRuby. */
+sp_PolyArray *sp_sock_getaddrinfo(const char *host, sp_int port, sp_int family, sp_int socktype) {SP_GC_ROOT_STR(host);
+  extern int sp_net_getaddrinfo_at(const char *host, int port, int want_family, int socktype, int idx,
                                    int *family, int *stype, int *proto,
                                    char *ipbuf, int ipcap, int *port_out);
   sp_PolyArray *out = sp_PolyArray_new();
@@ -749,7 +778,7 @@ sp_PolyArray *sp_sock_getaddrinfo(const char *host, sp_int port) {SP_GC_ROOT_STR
   for (int i = 0; i < 64; i++) {
     int fam = 0, stype = 0, proto = 0, p = 0;
     char ip[64];
-    if (sp_net_getaddrinfo_at(host, (int)port, 0, i, &fam, &stype, &proto,
+    if (sp_net_getaddrinfo_at(host, (int)port, (int)family, (int)socktype, i, &fam, &stype, &proto,
                               ip, (int)sizeof ip, &p) != 0) break;
     const char *ips = sp_str_from_bytes(ip, strlen(ip));
     sp_PolyArray *row = sp_PolyArray_new();
@@ -872,16 +901,40 @@ sp_int sp_sock_send(sp_File *f, const char *data, sp_int len, const char *host, 
   if (n < 0) sp_file_raise_errno("send", host ? host : "");
   return (sp_int)n;
 }
+static long sp_io_buffered(sp_File *f);
 /* #recv reads one datagram (or up to `len` stream bytes) as a String;
    #recvfrom pairs it with the sender's address, CRuby's 4-element form. */
 const char *sp_sock_recv(sp_File *f, sp_int len) {SP_GC_ROOT(f);
   extern int sp_net_udp_recv_from(int fd, char *buf, int cap, char *ipbuf, int ipcap, int *port_out);
   sp_sock_require(f, "recv");
   if (len <= 0) return sp_str_from_bytes("", 0);
+  /* bytes a read on the stream already pulled into stdio's buffer are the
+     peer's next ones: served first, as readpartial does, or recv stepped
+     over them (#7195) */
+  long pend = sp_io_buffered(f);
+  if (pend > 0) {
+    size_t want = (size_t)len < (size_t)pend ? (size_t)len : (size_t)pend;
+    char *r = sp_str_alloc(want);
+    size_t got = fread(r, 1, want, f->fp);
+    r[got] = 0;
+    sp_str_set_len(r, got);
+    return r;
+  }
+  /* park until the peer writes, as readpartial does: a close from another
+     thread then wakes this one with CRuby's IOError, where a recv(2) already
+     blocked in the kernel answered EBADF, or read a descriptor that was by
+     then someone else's (#7555) */
+  sp_io_wait_readable(f);
   char *buf = (char *)malloc((size_t)len);
   if (!buf) sp_raise_cls("NoMemoryError", "recv");
   int n = sp_net_udp_recv_from(fileno(f->fp), buf, (int)len, NULL, 0, NULL);
   if (n < 0) { free(buf); sp_file_raise_errno("recv", ""); }
+  /* a stream socket at EOF answers nil (Ruby 3.3 and later); an empty
+     datagram is still "" */
+  if (n == 0) {
+    int st = 0; socklen_t sl = sizeof st;
+    if (getsockopt(fileno(f->fp), SOL_SOCKET, SO_TYPE, &st, &sl) == 0 && st == SOCK_STREAM) { free(buf); return NULL; }
+  }
   const char *s = sp_str_from_bytes(buf, (size_t)n);
   free(buf);
   return s;
@@ -893,6 +946,7 @@ const char *sp_sock_recvfrom(sp_File *f, sp_int len, const char **ip_out, sp_int
   char ipbuf[64];
   int port = 0;
   if (len <= 0) { *ip_out = sp_str_from_bytes("", 0); *port_out = 0; return sp_str_from_bytes("", 0); }
+  sp_io_wait_readable(f);   /* as sp_sock_recv (#7555) */
   char *buf = (char *)malloc((size_t)len);
   if (!buf) sp_raise_cls("NoMemoryError", "recvfrom");
   int n = sp_net_udp_recv_from(fileno(f->fp), buf, (int)len, ipbuf, (int)sizeof ipbuf, &port);
@@ -909,6 +963,22 @@ sp_int sp_sock_shutdown(sp_File *f, sp_int how) {SP_GC_ROOT(f);
   if (sp_net_shutdown(fileno(f->fp), (int)how) != 0) sp_file_raise_errno("shutdown", "");
   return 0;
 }
+/* A setsockopt value as the int the option takes: an Integer, true/false as
+   1/0, or the option's packed bytes ([1].pack("i")), as CRuby accepts it. */
+sp_int sp_sock_optval(sp_RbVal v) {
+  if (v.tag == SP_TAG_INT) return v.v.i;
+  if (v.tag == SP_TAG_BOOL) return v.v.i != 0;
+  if (v.tag == SP_TAG_STR && v.v.s) {
+    int n = 0;
+    if (sp_str_byte_len(v.v.s) != sizeof n)
+      sp_raise_cls("ArgumentError", "only an int-sized packed option value is supported");
+    memcpy(&n, v.v.s, sizeof n);
+    return n;
+  }
+  sp_raise_cls("TypeError", "no implicit conversion into Integer");
+  return 0;
+}
+
 sp_int sp_sock_setsockopt(sp_File *f, sp_int level, sp_int opt, sp_int value) {SP_GC_ROOT(f);
   extern int sp_net_setsockopt_int(int fd, int level, int optname, int value);
   sp_sock_require(f, "setsockopt");
@@ -1036,7 +1106,8 @@ const char *sp_sock_read_nb(sp_File *f, sp_int len, sp_bool exc, sp_bool is_recv
   if (eof) *eof = 0;
   if (is_recv) sp_sock_nb_prepare(f, "recv_nonblock");
   else SP_IO_OPEN(f);
-  if (len <= 0) return sp_str_from_bytes("", 0);
+  /* the bytes read are BINARY, as CRuby's read_nonblock and recv answer them */
+  if (len <= 0) { char *e = (char *)sp_str_from_bytes("", 0); sp_str_mark_binary(e); return e; }
   char *buf = (char *)malloc((size_t)len);
   if (!buf) sp_raise_cls("NoMemoryError", "read_nonblock");
   ssize_t n;
@@ -1052,14 +1123,15 @@ const char *sp_sock_read_nb(sp_File *f, sp_int len, sp_bool exc, sp_bool is_recv
     sp_io_nb_end(f, saved);
     errno = e;
   }
-  if (n > 0) { const char *s = sp_str_from_bytes(buf, (size_t)n); free(buf); return s; }
+  if (n > 0) { char *s = (char *)sp_str_from_bytes(buf, (size_t)n); free(buf); sp_str_mark_binary(s); return s; }
   if (n == 0) {
     free(buf);
     if (eof) *eof = 1;
-    /* recv_nonblock answers "" at EOF in BOTH forms -- it does not raise
-       EOFError and it does not answer nil. read_nonblock is the one that
-       tells them apart: nil for `exception: false`, EOFError otherwise. */
-    if (is_recv) return sp_str_from_bytes("", 0);
+    /* recv_nonblock answers nil at EOF in BOTH forms (Ruby 3.3 and later;
+       it was "" before) -- it does not raise EOFError. read_nonblock is the
+       one that tells them apart: nil for `exception: false`, EOFError
+       otherwise. */
+    if (is_recv) return NULL;
     if (!exc) return NULL;                     /* CRuby: nil at EOF */
     sp_raise_cls("EOFError", "end of file reached");
   }
@@ -1399,10 +1471,11 @@ void sp_File_ungetbyte(sp_File *f, sp_int byte) {
   SP_IO_OPEN(f);
   ungetc((int)(unsigned char)byte, f->fp);
 }
-/* IO#binmode?: true after #binmode, or for a handle opened in binary mode. */
+/* IO#binmode?: true after #binmode, or for a handle opened in binary mode.
+   A socket is binary too, as CRuby's is (its encoding is BINARY). */
 sp_bool sp_File_binmode_p(sp_File *f) {
   SP_IO_OPEN(f);
-  if (f->bin_flag) return 1;
+  if (f->bin_flag || f->is_sock) return 1;
   return f->mode && strchr(f->mode, 'b') != NULL;
 }
 void sp_File_set_binmode(sp_File *f) { SP_IO_OPEN(f); f->bin_flag = 1; }
