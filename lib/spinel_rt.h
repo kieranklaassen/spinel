@@ -8388,6 +8388,7 @@ static sp_StrPolyHash*sp_StrPolyHash_from_str_str_hash(sp_StrStrHash*h){sp_StrPo
    non-participating named group maps to nil, so the value side is poly. Lives
    here (not sp_re.c) because the typed-hash machinery is TU-coupled. */
 static sp_StrPolyHash *sp_md_named_captures(sp_MatchData *m) {
+  SP_GC_ROOT(m);      /* m may be the caller's bare temporary; the hash allocates */
   sp_StrPolyHash *h = sp_StrPolyHash_new();
   if (!m) return h;
   SP_GC_ROOT(h);      /* sp_str_dup and the aref below allocate */
@@ -8395,7 +8396,13 @@ static sp_StrPolyHash *sp_md_named_captures(sp_MatchData *m) {
   for (int i = 0; i < n; i++) {
     int g = -1;
     const char *nm = re_named_name(m->pat, i, &g);
-    if (nm) sp_StrPolyHash_set(h, sp_str_dup(nm), sp_box_nullable_str(sp_MatchData_aref(m, g)));
+    if (nm) {
+      /* one at a time: as two arguments of one call the name's copy and
+         the group's text were both fresh, and the one built first was
+         collected by the other */
+      const char *k = sp_str_dup(nm); SP_GC_ROOT_STR(k);
+      sp_StrPolyHash_set(h, k, sp_box_nullable_str(sp_MatchData_aref(m, g)));
+    }
   }
   return h;
 }
@@ -8539,6 +8546,7 @@ sp_sym sp_sym_intern(const char *s);
 static sp_sym sp_sym_intern(const char *s);
 #endif
 static sp_SymPolyHash *sp_md_named_captures_sym(sp_MatchData *m) {
+  SP_GC_ROOT(m);      /* m may be the caller's bare temporary; the hash allocates */
   sp_SymPolyHash *h = sp_SymPolyHash_new();
   if (!m) return h;
   SP_GC_ROOT(h);      /* sp_sym_intern and the aref below allocate */
@@ -8546,7 +8554,12 @@ static sp_SymPolyHash *sp_md_named_captures_sym(sp_MatchData *m) {
   for (int i = 0; i < n; i++) {
     int g = -1;
     const char *nm = re_named_name(m->pat, i, &g);
-    if (nm) sp_SymPolyHash_set(h, sp_sym_intern(nm), sp_box_nullable_str(sp_MatchData_aref(m, g)));
+    if (nm) {
+      /* the name first: a name interned for the first time allocates, and
+         collected the group's text built ahead of it as the other argument */
+      sp_sym k = sp_sym_intern(nm);
+      sp_SymPolyHash_set(h, k, sp_box_nullable_str(sp_MatchData_aref(m, g)));
+    }
   }
   return h;
 }
@@ -8555,6 +8568,7 @@ static sp_SymPolyHash *sp_md_named_captures_sym(sp_MatchData *m) {
    empty hash right away when more keys are asked for than exist (#3015). */
 static sp_SymPolyHash *sp_md_deconstruct_keys(sp_MatchData *m, sp_RbVal keys) {
   if (keys.tag == SP_TAG_NIL) return sp_md_named_captures_sym(m);
+  SP_GC_ROOT(m);      /* m may be the caller's bare temporary; the hash allocates */
   /* only an Array of Symbols selects keys; anything else is a TypeError (#3643) */
   if (!(keys.tag == SP_TAG_OBJ && sp_poly_is_array_kind(keys.cls_id)))
     sp_raise_cls("TypeError", sp_sprintf("wrong argument type %s (expected Array or nil)",
