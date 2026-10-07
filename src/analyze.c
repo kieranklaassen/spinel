@@ -31384,8 +31384,10 @@ static int sa_mutation_site(const NodeTable *nt, int u) {
 }
 /* refuse_string_alias_copies' order facts, built on the first question:
    the top-level statements that run once, after every String mutation the
-   program has (a node-indexed mark), or none. */
-typedef struct { unsigned char *after_all; int built; } SaOrder;
+   program has (a node-indexed mark), or none; the count of the mutation
+   sites, whether the program asks an identity, and the top-level statement
+   that holds the last mutation site when each runs once (or -1). */
+typedef struct { unsigned char *after_all; int built, total, identity, last; } SaOrder;
 /* The mutation sites under `n` that run while `n` runs and never again: not
    inside a block, a lambda, a method or an END block, which may run later. */
 static int sa_mutations_run_once(const NodeTable *nt, int n) {
@@ -31439,6 +31441,9 @@ static int sa_after_all_mutations(Compiler *c, SaOrder *o, int w) {
     int bn = 0; const int *bb = ps >= 0 ? nt_arr(nt, ps, "body", &bn) : NULL;
     int seen = 0, i = 0;
     for (; i < bn && seen < total; i++) seen += sa_mutations_run_once(nt, bb[i]);
+    o->total = total;
+    o->identity = identity;
+    o->last = seen == total && i > 0 ? an_unparen(nt, bb[i - 1]) : -1;
     /* a later `equal?`, `object_id` or `frozen?` would still tell the copy
        from the String, so a program that asks any of them anywhere keeps
        the refusal */
@@ -31452,6 +31457,20 @@ static int sa_after_all_mutations(Compiler *c, SaOrder *o, int w) {
     }
   }
   return o->after_all && w >= 0 && w < nt->count && o->after_all[w];
+}
+/* Are the calls of write `w`'s value, from `v` down to the name read at `g`
+   (`@t = @s.replace(x)`), the last String mutation the program runs: its
+   only mutation sites, or all those of the top-level statement that holds
+   the last one? The copy the write makes then follows the mutation, and
+   nothing mutates either name after it. An identity query could still
+   tell the copy from the String, as in sa_after_all_mutations. */
+static int sa_value_mutates_last(Compiler *c, SaOrder *o, int w, int v, int g) {
+  const NodeTable *nt = c->nt;
+  int own = 0;
+  for (int x = v; x != g; x = an_unparen(nt, nt_ref(nt, x, "receiver"))) own += sa_mutation_site(nt, x);
+  if (!own) return 0;
+  (void)sa_after_all_mutations(c, o, w);
+  return !o->identity && (own == o->total || (w == o->last && sa_mutations_run_once(nt, w) == own));
 }
 static void refuse_string_alias_copies(Compiler *c) {
   const NodeTable *nt = c->nt;
@@ -31486,6 +31505,26 @@ static void refuse_string_alias_copies(Compiler *c) {
         while (nt_kind(nt, q.carry) == NK_LocalVariableWriteNode) q.carry = an_unparen(nt, nt_ref(nt, q.carry, "value"));
         if (!share_route_defer(c, &q, sa_msg(0))) sa_refuse(c, w, 0);
       }
+      /* `@t = @s`, `@t = @s.to_s`, `@t = s.itself`: no alias walk follows
+         an instance variable written from another, or from a local through
+         a call, so it holds a copy as a global does. A plain `@t = @s`
+         between two shared handles hands the handle over; through a call
+         the write copies even then. `@t = s` and `t = @s.to_s` have walks
+         of their own and are left alone. Under --share-strings the plain
+         write and a bang's result are the rule's, as a global's are */
+      else if (to.kind == NK_InstanceVariableReadNode && sa_name(c, g, &from) &&
+               (from.kind == NK_InstanceVariableReadNode || (from.kind == NK_LocalVariableReadNode && g != v)) &&
+               (comp_ntype(c, g) == TY_STRING || comp_ntype(c, g) == TY_STRBUF) &&
+               !(from.kind == to.kind && from.cid == to.cid && sp_streq(to.name, from.name)) &&
+               (g != v ? !(c->share_strings && strchr(nt_str(nt, v, "name"), '!'))
+                       : !c->share_strings && !(sa_handle(c, &to, 0) && sa_handle(c, &from, 0))) &&
+               !sa_after_all_mutations(c, &order, w) &&
+               sa_copy_observable(c, &to, &from, g) && !sa_value_mutates_last(c, &order, w, v, g))
+        unsupported_feature(c, w, "a String instance variable assigned from another instance variable, or from a "
+                            "local through `to_s` or another call answering its receiver, is mutated in place, "
+                            "or the String it was assigned from is (a String is not yet shared by reference "
+                            "through such an assignment). Mutate and read the String through one of the two "
+                            "names.");
       /* `t = id(s)`, `t = choose(+"x", s, flag)`: each argument it may answer */
       int ra[16], nra = sa_returned_args(c, v, ra, 16);
       for (int i = 0; i < nra; i++)
