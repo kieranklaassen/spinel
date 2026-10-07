@@ -1,0 +1,13 @@
+[:root, :own, :m]
+[:root, :own, :m]
+[:root, :parent, :m, :child]
+[:root, :parent, :m, :child]
+true
+true
+[:root, :parent, :m, :n, :noted]
+[:root, :m, :own, :m]
+[:root, :early, :m, :m, :late]
+11
+12
+[1]
+["a", "b"]
