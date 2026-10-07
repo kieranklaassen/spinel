@@ -1456,10 +1456,15 @@ int emit_op_string_slice(Compiler *c, const BopCtx *x, Buf *b) {
       buf_printf(b, " if (_t%d && _t%d >= 0 && _t%d <= 9) {"
                     " sp_int _b = sp_re_caps[2 * _t%d], _e = sp_re_caps[2 * _t%d + 1]; ",
                  th, tn, tn, tn, tn);
+      /* the head is held while the tail is cut: as two arguments of one
+         call, whichever C built first was in flight while the other
+         allocated, and a collection there freed it */
+      int tp = ++g_tmp;
+      buf_printf(b, "const char *_t%d = sp_str_byteslice(_t%d, 0, _b); SP_GC_ROOT_STR(_t%d); ", tp, ts, tp);
       emit_expr(c, recv, b);
-      buf_printf(b, " = sp_str_concat(sp_str_byteslice(_t%d, 0, _b),"
+      buf_printf(b, " = sp_str_concat(_t%d,"
                     " sp_str_byteslice(_t%d, _e, (sp_int)sp_str_byte_len(_t%d) - _e)); }",
-                 ts, ts, ts);
+                 tp, ts, ts);
     }
     buf_printf(b, " _t%d; })", th);
     return 1;

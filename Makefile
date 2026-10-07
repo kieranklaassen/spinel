@@ -1848,6 +1848,7 @@ GC_STRESS_TESTS := test/gc_root_frame_slots.rb \
                    test/thread_new_args_rooted_across_fiber_alloc.rb \
                    test/gc_root_volatile_string_slot.rb \
                    test/string_regexp_group_assign_rooted.rb \
+                   test/string_slice_bang_group_rooted.rb \
                    test/gc_root_gathered_handle_param.rb \
                    test/dispatch_arm_roots_operands.rb \
                    test/exception_message_nul.rb
