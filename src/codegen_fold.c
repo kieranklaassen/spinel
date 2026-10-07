@@ -1242,9 +1242,20 @@ int block_tail_is_unresolved(Compiler *c, int node) {
   return !diag_user_defines(c, nm);
 }
 
+/* The function that compares two keys of a uniq with a block. Array#uniq
+   keys by eql?, as uniq without a block compares its elements: 1 and 1.0 are
+   two keys, and a class with == and no eql? makes none. A block value typed
+   as a kind whose eql? is its == keeps the cheaper sp_poly_eq. */
+static const char *uniq_key_eq(Compiler *c, const IterStep *st, int tail) {
+  TyKind kt = st->slot ? TY_POLY : repr_of(c, tail).as_ty;
+  if (kt == TY_INT || kt == TY_FLOAT || kt == TY_STRING || kt == TY_SYMBOL || kt == TY_BOOL || kt == TY_NIL)
+    return "sp_poly_eq";
+  return "sp_poly_eql_key";
+}
+
 /* poly `uniq`/`uniq!` with a block, as an expression: the receiver boxes an
-   array; keep the first element for each distinct block-key value (compared with
-   sp_poly_eq), and for the bang form write the survivors back in place. Yields
+   array; keep the first element for each distinct block-key value (compared by
+   uniq_key_eq), and for the bang form write the survivors back in place. Yields
    the (boxed) array. Returns 1 if handled. */
 int emit_poly_uniq_block(Compiler *c, int id, Buf *b) {
   const NodeTable *nt = c->nt;
@@ -1332,8 +1343,8 @@ int emit_poly_uniq_block(Compiler *c, int id, Buf *b) {
     Buf kb; memset(&kb, 0, sizeof kb); emit_iter_step_tail(c, &st, &kb); g_indent = save;
     emit_indent(g_pre, din); buf_printf(g_pre, "sp_RbVal _t%d = %s;\n", tkey, kb.p ? kb.p : "sp_box_nil()"); free(kb.p);
     emit_indent(g_pre, din);
-    buf_printf(g_pre, "int _t%d = 0; for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++) if (sp_poly_eq(_t%d->data[_t%d], _t%d)) { _t%d = 1; break; }\n",
-               tdup, tj, tj, tseen, tj, tseen, tj, tkey, tdup);
+    buf_printf(g_pre, "int _t%d = 0; for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++) if (%s(_t%d->data[_t%d], _t%d)) { _t%d = 1; break; }\n",
+               tdup, tj, tj, tseen, tj, uniq_key_eq(c, &st, bb[bn - 1]), tseen, tj, tkey, tdup);
     emit_indent(g_pre, din);
     if (splat) buf_printf(g_pre, "if (!_t%d) { sp_PolyArray_push(_t%d, _t%d); sp_%sArray_push(_t%d, %s); }\n", tdup, tseen, tkey, rk, tres, es);
     else buf_printf(g_pre, "if (!_t%d) { sp_PolyArray_push(_t%d, _t%d); sp_%sArray_push(_t%d, lv_%s); }\n", tdup, tseen, tkey, rk, tres, p0);
@@ -1388,8 +1399,8 @@ int emit_poly_uniq_block(Compiler *c, int id, Buf *b) {
   Buf kb; memset(&kb, 0, sizeof kb); emit_iter_step_tail(c, &st, &kb); g_indent = save;
   emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "sp_RbVal _t%d = %s;\n", tkey, kb.p ? kb.p : "sp_box_nil()"); free(kb.p);
   emit_indent(g_pre, g_indent + 1);
-  buf_printf(g_pre, "int _t%d = 0; for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++) if (sp_poly_eq(_t%d->data[_t%d], _t%d)) { _t%d = 1; break; }\n",
-             tdup, tj, tj, tseen, tj, tseen, tj, tkey, tdup);
+  buf_printf(g_pre, "int _t%d = 0; for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++) if (%s(_t%d->data[_t%d], _t%d)) { _t%d = 1; break; }\n",
+             tdup, tj, tj, tseen, tj, uniq_key_eq(c, &st, bb[bn - 1]), tseen, tj, tkey, tdup);
   emit_indent(g_pre, g_indent + 1);
   buf_printf(g_pre, "if (!_t%d) { sp_PolyArray_push(_t%d, _t%d); sp_PolyArray_push(_t%d, %s); }\n", tdup, tseen, tkey, tres, es);
   emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");

@@ -7038,6 +7038,15 @@ static sp_int sp_poly_arr_index_val(sp_RbVal a, sp_RbVal v, int rev) {
 /* Membership for the set operations (-, |, &, intersect?): Ruby matches their
    elements by hash/eql?, not ==, so 2 and 2.0 are different elements. */
 static sp_bool sp_poly_eql(sp_RbVal a, sp_RbVal b);
+/* eql? for the keys of a uniq with a block. Two Integers answer here, as
+   sp_poly_eq answers them for ==. With no object and no Float in the pair,
+   or two values of one kind, eql? is ==; the rest is sp_poly_eql's. */
+static SP_INLINE sp_bool sp_poly_eql_key(sp_RbVal a, sp_RbVal b) {
+  if (a.tag == SP_TAG_INT && b.tag == SP_TAG_INT) return a.v.i == b.v.i;
+  if (a.tag != SP_TAG_OBJ && b.tag != SP_TAG_OBJ &&
+      (a.tag == b.tag || (a.tag != SP_TAG_FLT && b.tag != SP_TAG_FLT))) return sp_poly_eq_slow(a, b);
+  return sp_poly_eql(a, b);
+}
 static sp_bool sp_PolyArray_include_eql(sp_PolyArray *a, sp_RbVal v) { if (!a) return FALSE; for (sp_int i = 0; i < a->len; i++) if (sp_poly_eql(a->data[i], v)) return TRUE; return FALSE; }
 static sp_PolyArray *sp_PolyArray_intersect(sp_PolyArray *a, sp_PolyArray *b) { SP_GC_ROOT(a); SP_GC_ROOT(b); sp_PolyArray *r = sp_PolyArray_new(); SP_GC_ROOT(r); if (!a || !b) return r; for (sp_int i = 0; i < a->len; i++) { sp_RbVal v = a->data[i]; if (sp_PolyArray_include_eql(b, v) && !sp_PolyArray_include_eql(r, v)) sp_PolyArray_push(r, v); } return r; }
 /* intersect? predicate: early-exit, no allocation (matches CRuby's non-building Array#intersect?). */
@@ -17269,7 +17278,7 @@ static sp_RbVal sp_poly_enum_proc(sp_RbVal recv, int op, sp_Proc *blk) {
       for (sp_int i = 0; i < n; i++) {
         sp_RbVal k = sp_penum_call1(blk, src->data[i]);
         sp_bool dup = FALSE;
-        for (sp_int j = 0; j < seen->len; j++) if (sp_poly_eq(seen->data[j], k)) { dup = TRUE; break; }
+        for (sp_int j = 0; j < seen->len; j++) if (sp_poly_eql_key(seen->data[j], k)) { dup = TRUE; break; }
         if (!dup) { sp_PolyArray_push(seen, k); sp_PolyArray_push(out, src->data[i]); }
       }
       return sp_box_poly_array(out);
