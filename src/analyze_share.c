@@ -1358,7 +1358,7 @@ static int sh_val_compute(ShareFacts *F, Compiler *c, int n) {
   }
   case NK_OperatorWriteNode: case NK_CallOrWriteNode: case NK_CallAndWriteNode: {
     int v = sh_val(F, c, nt_ref(nt, n, "value"));
-    const char *rn = nt_str(nt, n, "read_name");
+    const char *rn = nt_str(nt, n, "name");
     int writer = 0;
     int iv = rn ? sh_attr_ivars(F, c, rn, n, &writer) : -1;
     if (iv < 0) { sh_union(F, v, F->unknown); return F->unknown; }

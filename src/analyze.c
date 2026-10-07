@@ -16579,6 +16579,18 @@ static int share_lift_poly_ivar_stores(Compiler *c, int cid, const char *name) {
       v = av[1];
     if (v >= 0) changed |= share_lift_value(c, v);
   }
+  /* `@name ||= v` / `@name &&= v`, and the attribute's `o.name ||= v` /
+     `o.name &&= v`: the same store when it stores */
+  static const NodeKind cond[] = { NK_InstanceVariableOrWriteNode, NK_InstanceVariableAndWriteNode,
+                                   NK_CallOrWriteNode, NK_CallAndWriteNode };
+  for (int k = 0; k < 4; k++)
+    NT_FOREACH_KIND(nt, cond[k], w) {
+      const char *wn = nt_str(nt, w, "name");
+      int v = nt_ref(nt, w, "value");
+      if (!wn || v < 0) continue;
+      if (k < 2 ? !sp_streq(wn, name) || comp_ivar_owner(c, w) != cid : !sp_streq(wn, name + 1)) continue;
+      changed |= share_lift_value(c, v);
+    }
   return changed;
 }
 
