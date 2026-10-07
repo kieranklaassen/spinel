@@ -1,0 +1,1 @@
+A boxed writer statement holds its receiver while its value runs

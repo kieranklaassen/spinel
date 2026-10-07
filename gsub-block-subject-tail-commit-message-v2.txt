@@ -1,0 +1,55 @@
+sub and gsub with a block copy the subject's tail by its own length
+
+    s = ([40, 0, 0, 0] + [65] * 8 + [0xFE] + [99, 100]).pack("C*")
+    s.sub(/\xFE/n) { "-" }.bytesize               # 53, CRuby 15
+
+38 of the 53 bytes are whatever the heap holds past the subject, another
+String's among them. With ordinary text in the subject the answer is
+larger: "0123456789abcdef\xFEtail".b.gsub("\xFE".b) { "-" } is a String
+of 926,299,461 bytes, and a loop over such Strings faults in a plain
+run. A shorter subject loses its tail instead, and so does a text String
+that holds a NUL:
+
+    "ab\xFEcd=ef".b.sub("\xFE".b) { "-" }.bytes   # [97, 98, 45]
+    "a\0bXc\0d".sub(/X/) { "-" }                  # "a\u0000b-c"
+
+emit_gsub_block_expr copied what stands before, between and after the
+matches with sp_String_append_bin(out, subject + pos) and
+sp_str_substr(subject + pos, ...). A pointer into a String has no header
+of its own, and both calls read one: the byte before the pointer, the
+last byte of the match, is taken for the marker. Where it is a byte a
+heap String's marker uses (0xFE, 0xFC, 0xFD, 0xF1, 0xFB, 0xFA, 0xF8) the
+length is read from the four bytes thirteen to ten before the pointer,
+which are the subject's own; where it is not, the length is strlen's and
+stops at a NUL. sp_str_substr also roots the pointer, so the collector
+met a slot that is no String: at SPINEL_GC_STRESS=2 it faults on the
+mark path.
+
+The emitter knows every length, so it now says them: sp_String_append_n
+with the byte count for the text before a match, the tail and the byte
+stepped over after an empty match. No header is read behind a pointer
+into the subject.
+
+The block's parameter was cut through the same pointer, so from the
+second match on its encoding was read from that byte too. It is now cut
+from the String CRuby takes it from. A Regexp's match is the subject's
+bytes with the subject's encoding: sp_str_substr(subject, pos + start,
+length). A String pattern's match is the pattern, with the pattern's
+encoding at every match:
+
+    "ab=cd".b.sub("=") { |m| m.encoding.to_s }    # "abASCII-8BITcd"
+                                                  # CRuby "abUTF-8cd"
+
+The block form is cheaper for it, one allocation fewer a match:
+callgrind, 200,000 calls on a 25-byte String, s.gsub("=") { ":" }
+459.0M to 324.4M instructions, s.gsub(/[=;]/) { |m| m + m } 2,375.7M
+to 2,160.0M, s.sub(";") { "+" } 270.6M to 227.6M. A call that finds no
+match costs what it did.
+
+Not covered, as before: the answer of the block form on a binary String
+is UTF-8 where CRuby answers ASCII-8BIT, and a String pattern finds no
+match after a NUL in the subject.
+
+Test: test/gsub_block_subject_tail.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

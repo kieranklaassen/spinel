@@ -1,0 +1,1 @@
+Refuse a String a block appends to through a reassigned parameter

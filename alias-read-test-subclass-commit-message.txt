@@ -1,0 +1,54 @@
+The String alias refusals see a subclass's read, a reader and an operator write
+
+The refusals of a String copied through a global, through a method that
+returns its parameter or through a bang method's result ask whether the
+other name is read (sa_read_elsewhere). The variable-site chains answer
+with the read nodes of the variable, an instance variable keyed by the
+class of each node. Three reads are not there, and the copy was built
+with no word:
+
+    class Doc
+      def initialize = @body = +"az"
+      def publish
+        $last = @body
+        $last << "!"
+      end
+    end
+    class Page < Doc
+      def body = @body
+    end
+    page = Page.new
+    page.publish
+    p page.body        # CRuby "az!", spinel "az"
+
+- a read in a class above or below the variable's own: the slot is the
+  object's, and the subclass's read is another key;
+- a reader (`attr_reader :body`, `attr_accessor`), which has no read
+  node;
+- an operator write (`s += x`, `@s ||= x`, `$g &&= x`), which reads the
+  variable it writes.
+
+With `def body = @body` in Doc, or with `s = s + x`, master refuses the
+same program.
+
+sa_read_elsewhere asks the three too. Operator writes are chained as a
+site kind of their own (VS_OPWRITE; comp_vsite_is tells an entry's
+variable), so the Array route's read test, which walks VS_READ
+(sa_array_observed), answers as before. For an instance variable the
+classes in its line are asked for a reader and for their reads; a class
+that is neither above nor below is not.
+
+Under --share-strings the rule shares these Strings and the flag builds
+them right, so the three are asked with the flag off only. Asked there,
+the rule's route check refuses programs the flag compiles correctly.
+
+Right on master and refused now: a read that comes before the copy, a
+reader the program never calls, a mutation that changes nothing. Master
+refuses each once the read is written as a plain read.
+
+Still silent: `inspect` and `instance_variable_get`, an instance
+variable that may be nil (a reader in a class that never assigns it), a
+mutation in a subclass or through a reader, and an operator write as
+the copied value (`$g = (s += x)`).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
