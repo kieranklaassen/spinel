@@ -1,0 +1,32 @@
+fetch and values_at on a boxed Array refuse an index that is no Integer
+
+    def pick(n) = n > 0 ? {a: 1} : [10, "s", :z]
+    h = pick(0)
+    p h.values_at(:a)         # ["s"]; CRuby raises TypeError
+    p h.values_at(nil)        # [10]; CRuby raises TypeError
+    p h.fetch(2**70)          # 10; CRuby raises RangeError
+    p h.fetch(0.0 / 0.0, 9)   # 9; CRuby raises RangeError
+
+sp_poly_fetch and sp_poly_arr_values_at read the index of a boxed Array
+with sp_poly_to_i, which answers a number for anything. values_at read
+an element for a Symbol, true or nil; fetch read element 0 for a Bignum
+and answered its default for a NaN and, on an empty Array, for an index
+of any kind. Both now convert the index as an Integer argument is
+converted (sp_poly_arg_int_chk), with Array#fill's check for a Float or
+a Bignum past a word in front of it: a Float is cut, a NaN, a far Float
+and a Bignum past a word are CRuby's RangeError, anything that is no
+number is its TypeError. The smallest Integer is a word, so it stays the
+offset it was, past every Array, whether its box says Integer or
+Bignum. Out of an int slot it arrives as nil, so on an empty Array,
+where no raise tells the two apart, nil stays the offset 0 it was. An
+Integer index does not pay for it: fetch reads the element by the index
+it has converted rather than through the generic index, and values_at
+takes an Integer as it is. A Float Range in values_at, which CRuby
+slices by, is left to sp_poly_to_i as it was: converting it would raise
+where no raise is due.
+
+No generated C changes: the two functions are in lib/spinel_rt.h.
+
+Test: test/boxed_array_fetch_index.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

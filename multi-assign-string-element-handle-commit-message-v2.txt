@@ -1,0 +1,34 @@
+A multiple assignment's new String element is held as its handle
+
+    r = [+"q"]
+    r[0], r[1] = +"ab", +"cd"
+    r[0] << "z"
+    p r
+
+prints ["abz", "cd"] in CRuby and does not build here, with and without
+--share-strings: "initialization of 'sp_String *' from incompatible
+pointer type 'const char *'". `r[0] = +"ab"; r[1] = +"cd"` in place of
+the multiple assignment builds and is right.
+
+A String stored where an element is changed in place is wrapped in a
+handle of its own (repr_of's RS_FRESH), and a single store does that at
+the store (emit_boxed). A multiple assignment holds each value in a temp
+first. The temp was declared by the value's stored type, the handle, and
+filled with what the value renders as, the String.
+
+The temp is now the handle the store would have made,
+sp_String_new_shared over the String, where a list proves it
+(masgn_fresh_stmt): the value is a new String written as one, an
+interpolation, `+"lit"` or `"lit".dup` (masgn_el_fresh_str); its target
+is an element of a local, the key a literal or a local; and the
+statement has as many values as targets, every other target such an
+element or a local, every other value a literal or a local. A value in
+parentheses, a bang method's result or a lambda's call names a String
+that lives elsewhere, and a second handle around it would be a copy:
+those, a nested or a rest target and a computed key are emitted as
+before, and still do not build.
+
+Every temp of such a statement is rooted: the handle is built after the
+values before it and is stored into a container that can grow.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
