@@ -1,0 +1,1 @@
+A boxed exception of a program's own class answers is_a?, instance_of? and when

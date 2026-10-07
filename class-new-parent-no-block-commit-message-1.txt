@@ -1,0 +1,23 @@
+A boxed exception of a program's own class answers is_a?, instance_of? and when
+
+    class MyErr < StandardError; end
+    kept = []
+    begin; raise MyErr, "a"; rescue StandardError => e; kept << e; end
+    p kept.map { |x| x.is_a?(MyErr) }    # [false]; CRuby: [true]
+
+instance_of?(MyErr) answered false too, and `case x when MyErr` took its
+else arm. emit_poly_isa_test and the `when` class test compare the boxed
+value's class id with the ids of MyErr and its subclasses, but a raised
+exception is an sp_Exception boxed as SP_BUILTIN_EXCEPTION, and it carries
+its class by name. For an exception class of the program's own the test now
+has a second arm that asks a boxed exception by name, as the arm for a
+builtin exception class does.
+
+The class-id arm is as it was: an exception never raised (`MyErr.new` kept
+in the Array) is boxed as an object of its class and answers as before, and
+a test for a class that is no exception emits the same C.
+
+Test: test/rescued_own_exception_boxed_class.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+

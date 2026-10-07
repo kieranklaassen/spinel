@@ -1,0 +1,66 @@
+raise_rescue_own  C:same  out:same  twin-on-master:0  master-prog:0  cruby:0
+  piece prog   : "there\ngot x MyErr\n" "" rc=0
+  master twin  : "there\ngot x MyErr\n" "" rc=0
+  master prog  : "not yet\ngot x MyErr\n" "" rc=0
+  cruby prog   : "not yet\ngot x MyErr\n" "" rc=0
+raise_rescue_bare  C:same  out:same  twin-on-master:0  master-prog:0  cruby:0
+  piece prog   : "there\ngot x MyErr\n" "" rc=0
+  master twin  : "there\ngot x MyErr\n" "" rc=0
+  master prog  : "not yet\ngot x MyErr\n" "" rc=0
+  cruby prog   : "not yet\ngot x MyErr\n" "" rc=0
+raise_rescue_exception  C:same  out:same  twin-on-master:0  master-prog:0  cruby:0
+  piece prog   : "there\ngot x MyErr\n" "" rc=0
+  master twin  : "there\ngot x MyErr\n" "" rc=0
+  master prog  : "not yet\ngot x MyErr\n" "" rc=0
+  cruby prog   : "not yet\ngot x MyErr\n" "" rc=0
+rescue_unrelated_first  C:same  out:same  twin-on-master:0  master-prog:0  cruby:0
+  piece prog   : "there\nouter x\n" "" rc=0
+  master twin  : "there\nouter x\n" "" rc=0
+  master prog  : "not yet\nouter x\n" "" rc=0
+  cruby prog   : "not yet\nouter x\n" "" rc=0
+rescue_modifier  C:same  out:same  twin-on-master:0  master-prog:0  cruby:0
+  piece prog   : "there\nsaved\n" "" rc=0
+  master twin  : "there\nsaved\n" "" rc=0
+  master prog  : "not yet\nsaved\n" "" rc=0
+  cruby prog   : "not yet\nsaved\n" "" rc=0
+rescue_list  C:same  out:same  twin-on-master:0  master-prog:0  cruby:0
+  piece prog   : "there\ngot x MyErr\n" "" rc=0
+  master twin  : "there\ngot x MyErr\n" "" rc=0
+  master prog  : "not yet\ngot x MyErr\n" "" rc=0
+  cruby prog   : "not yet\ngot x MyErr\n" "" rc=0
+rescue_order_child_first  C:same  out:same  twin-on-master:0  master-prog:0  cruby:0
+  piece prog   : "there\nchild arm x\n" "" rc=0
+  master twin  : "there\nchild arm x\n" "" rc=0
+  master prog  : "not yet\nchild arm x\n" "" rc=0
+  cruby prog   : "not yet\nchild arm x\n" "" rc=0
+parent_not_caught_by_child  C:same  out:same  twin-on-master:0  master-prog:0  cruby:0
+  piece prog   : "there\nouter from parent StandardError\n" "" rc=0
+  master twin  : "there\nouter from parent StandardError\n" "" rc=0
+  master prog  : "not yet\nouter from parent StandardError\n" "" rc=0
+  cruby prog   : "not yet\nouter from parent StandardError\n" "" rc=0
+uncaught  C:same  out:same  twin-on-master:1  master-prog:1  cruby:1
+  piece prog   : "there\nbefore\n" "x (MyErr)" rc=1
+  master twin  : "there\nbefore\n" "x (MyErr)" rc=1
+  master prog  : "not yet\nbefore\n" "x (MyErr)" rc=1
+  cruby prog   : "not yet\nbefore\n" "uncaught.rb:10:in `<main>': x (MyErr)" rc=1
+case_when_own  C:same  out:same  twin-on-master:0  master-prog:0  cruby:0
+  piece prog   : "there\nown arm\n" "" rc=0
+  master twin  : "there\nown arm\n" "" rc=0
+  master prog  : "not yet\nown arm\n" "" rc=0
+  cruby prog   : "not yet\nown arm\n" "" rc=0
+exc_inspect  C:same  out:same  twin-on-master:0  master-prog:0  cruby:0
+  piece prog   : "there\n#<MyErr: x>\nx\n#<MyErr: x>\n" "" rc=0
+  master twin  : "there\n#<MyErr: x>\nx\n#<MyErr: x>\n" "" rc=0
+  master prog  : "not yet\n#<MyErr: x>\nx\n#<MyErr: x>\n" "" rc=0
+  cruby prog   : "not yet\n#<MyErr: x>\nx\n#<MyErr: x>\n" "" rc=0
+raise_with_cause  C:same  out:same  twin-on-master:0  master-prog:0  cruby:0
+  piece prog   : "there\nsecond\nArgumentError\nfirst\n" "" rc=0
+  master twin  : "there\nsecond\nArgumentError\nfirst\n" "" rc=0
+  master prog  : "not yet\nsecond\nArgumentError\nfirst\n" "" rc=0
+  cruby prog   : "not yet\nsecond\nArgumentError\nfirst\n" "" rc=0
+full_message_name  C:same  out:same  twin-on-master:0  master-prog:0  cruby:0
+  piece prog   : "there\nMyErr\n5\n" "" rc=0
+  master twin  : "there\nMyErr\n5\n" "" rc=0
+  master prog  : "not yet\nMyErr\n5\n" "" rc=0
+  cruby prog   : "not yet\nMyErr\n5\n" "" rc=0
+programs 13: piece's C is master's C for the twin 13; prints as the twin on master 13

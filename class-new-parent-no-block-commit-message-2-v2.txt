@@ -1,0 +1,41 @@
+Name = Class.new(Base) with no block defines the class Name < Base
+
+    Err = Class.new(StandardError)
+    begin
+      raise Err, "x"
+    rescue StandardError => e
+      puts "got #{e.message}"
+    end
+
+died with "x (Err)", uncaught, where CRuby prints "got x". Err.new raised
+NameError, and so did Pt.new after `Pt = Class.new`. A blockless Class.new
+under a constant write defined nothing: desugar_class_new_blocks turns only
+the block form into a class, so `raise Err` built an exception that had the
+name and no parent.
+
+Such an assignment is now the class `class Err < StandardError; end`
+defines, and the program compiles to the C that declaration compiles to. It
+is taken only where the text settles that the two are the same program:
+
+- the assignment is a statement of the program or of a class or module
+  body;
+- the name is declared nowhere else and named nowhere before it;
+- Base is a class declared before it in an enclosing body, or Object,
+  BasicObject or a builtin exception the program does not declare.
+
+Any other blockless Class.new is the call it was and compiles as before: in
+a condition, a block or a begin, assigned twice, read first, or given a
+module, a builtin value class, a Struct, a path or an expression as parent.
+
+Not here: a method can be called above its def, as with any class. With
+`def early = Err.new("e")` under the assignment, a bare `early` above it
+reached the NameError of Err, and `rescue NameError` printed what CRuby
+prints for a method not defined yet. It answers now, as it does on master
+with the class written with the keyword, from the same C.
+
+docs/limitations.md says which assignments are taken.
+
+Test: test/class_new_no_block_named.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+

@@ -1,0 +1,1 @@
+Name = Class.new(Base) with no block defines the class Name < Base
