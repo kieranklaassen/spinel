@@ -1,0 +1,24 @@
+Exception#exception keeps a message that holds a NUL
+
+    e = RuntimeError.new("first")
+    p e.exception("AAAAAAAAAA\0tail").message.bytesize
+    p e.exception("\0abc").message.bytesize
+
+printed 10 and 12, where CRuby prints 15 and 4.
+
+A raise hands its message through sp_exc_msg_given, which sends a
+String that holds a NUL in the counted form, so its length survives
+the `const char *` the exception path carries. Exception#exception
+handed the String as it was, and sp_exc_exception read it as a C
+string: the copy's message stopped at the NUL, and one that begins
+with a NUL read as no message at all, which is the class name.
+
+The call now goes to sp_exc_exception_given. A message that holds a
+NUL it gives as a raise does; any other goes on to sp_exc_exception
+as it came. The counted message is built there and not in the
+generated C, where it would stand unrooted while the receiver is
+evaluated. sp_raise_poly_msg, which gives its message itself, calls
+sp_exc_exception as before. An empty message still gives the class
+name; that is a fault of its own.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

@@ -1,0 +1,1 @@
+Exception#exception keeps a message that holds a NUL
