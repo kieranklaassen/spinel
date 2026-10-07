@@ -1,0 +1,25 @@
+sp_str_dedup roots the String it copies while the copy is allocated
+
+    a = "x" * 100_000
+    b = "y" * 100_000
+    x = -(a + b)
+    p x[0, 3], x.count("x")
+
+printed "\u0000\u0000\u0000" and 3984; CRuby prints "xxx" and 100000.
+When the content is not interned yet sp_str_dedup allocates the frozen
+copy with sp_str_from_bytes, and nothing held the String it copies
+from: a collection in that allocation freed a receiver the caller had
+just built, and the copy was made of freed bytes. A String this large
+starts that collection in a plain run; a short one does under
+SPINEL_GC_STRESS=2, as do `(a + b).dedup` and the name of an
+exception's class, which is built for the call.
+
+The String is now rooted while it is copied. That path is a function of
+its own (sp_str_dedup_new): the root takes its parameter's address, and
+in sp_str_dedup itself that cost a content already interned an
+instruction or more a call.
+
+Test: test/string_dedup_fresh_held.rb;
+test/poly_user_exception_methods.rb joins GC_STRESS_TESTS.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
