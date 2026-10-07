@@ -1,0 +1,1 @@
+each_key.to_a, File.extname and File.basename with a suffix hold what they read

@@ -1,0 +1,35 @@
+each_key.to_a, File.extname and File.basename with a suffix hold what they read
+
+    def mk(i) = {a: "x#{i}", b: "lit", c: "z"}
+    sig = 0
+    3000.times do |i|
+      junk = Array.new(i % 200, 0)
+      r = mk(i).each_value.to_a
+      sig += r.to_s.size + r.inspect.sum
+    end
+    p sig
+
+prints 3961110 in CRuby and printed 3961208, in a plain run.
+sp_enum_hash_side, which makes the Array for each_key.to_a and
+each_value.to_a, allocates it before it reads the Hash; sp_file_extname
+allocates its answer before it copies from `path`; and
+sp_file_basename2 roots `path` and `suffix` but not the fresh String
+sp_file_basename just answered, across its own allocation. A value
+made in the call is held by nothing else there. The two File functions
+show it under SPINEL_GC_STRESS=2, where a name came back as bytes of
+0xdb; no plain run of them did in 2,000,000 turns of each.
+
+Each now roots what it reads. No generated C changes. The root costs
+18 instructions of about 378 a call of File.extname and 27 of 628 for
+File.basename with a suffix; each_key.to_a measures the same before
+and after (callgrind).
+
+Not changed: File.basename with both arguments made in the call
+(`File.basename("dir/f#{i}.rb", suf(i))`) still aborts under
+SPINEL_GC_STRESS=2. The two operands are the caller's to hold.
+
+Test: test/hash_side_file_name_arg_rooted.rb, also in the
+SPINEL_GC_STRESS=2 list. Its first line is wrong on master in a plain
+run.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
