@@ -6758,8 +6758,13 @@ void emit_case(Compiler *c, int id, Buf *b, int indent) {
             int wcid = ty_is_object(wpt) ? ty_object_class(wpt) : -1;
             int wdef = -1;
             int weq = wcid >= 0 ? comp_method_in_chain(c, wcid, "===", &wdef) : -1;
+            /* Object#=== finds the same object equal before its == runs:
+               an arm of the subject's own class that defines only == is
+               tested as the case value tests it */
+            int same_first = wpt == pt && wcid >= 0 && weq < 0;
             if (weq < 0 && wcid >= 0) weq = comp_method_in_chain(c, wcid, "==", &wdef);
-            if (weq >= 0 && wdef >= 0 && !comp_ty_value_obj(c, wpt)) {
+            if (same_first && weq >= 0 && wdef >= 0 && !comp_ty_value_obj(c, wpt)) emit_case_obj_eq(c, conds[j], t, pt, b);
+            else if (weq >= 0 && wdef >= 0 && !comp_ty_value_obj(c, wpt)) {
               buf_printf(b, "sp_%s_%s(", c->classes[wdef].c_name, mc(c->scopes[weq].name));
               emit_expr(c, conds[j], b);
               buf_printf(b, ", ");
