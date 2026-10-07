@@ -1,0 +1,1 @@
+A value object in an argument temp roots its Strings, not itself

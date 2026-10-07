@@ -1,0 +1,24 @@
+A value object in an argument temp roots its Strings, not itself
+
+When a later argument may allocate, emit_arg_temp runs each argument
+into a temp and roots it on needs_root alone. A value object lives in
+the temp itself, so `yield Name.new(240), "ab" + "cd"` gave
+
+    sp_Name  _t5 = sp_Name_new(240LL); SP_GC_ROOT(_t5);
+
+which hands the collector the struct's first word, the class id, as a
+pointer. For the first class of a program that is NULL: nothing is
+held, and the object's String is freed while the second argument is
+built (8 of 2,000 yields read a wrong String in a plain run). For any
+later class the mark follows the id and the program dies with a
+segmentation fault. A keyword argument's value goes through the same
+temp (`takes(n: Name.new(240), k: "ab" + "cd")`).
+
+The temp now roots the object's String fields, as a local of the kind
+does (emit_gc_root_tmp_refs), and takes no root when it has none. A
+value object reaches an argument temp only at a yield and as a keyword
+value, since a class whose instance is a method's positional argument
+is no value type, and no program of the corpus has one: cident reports
+the new test alone.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
