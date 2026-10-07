@@ -15764,6 +15764,22 @@ static sp_bool sp_poly_case_eq(sp_RbVal pat, sp_RbVal e) {
     return sp_re_case_eq((mrb_regexp_pattern *)pat.v.p, e);
   return sp_poly_rb_equal(pat, e);
 }
+/* `when pat` with the pattern held boxed, in a program that has a class with
+   its own ===: an object of such a class is asked it, through the operator
+   table the program carries (sp_user_binop_dispatch has an arm for === for
+   this); any other pattern, and an operand the method's parameter cannot
+   take, is sp_poly_case_eq's. The pattern may be a temporary of the `when`
+   (a method's value) and the method may allocate, so both operands are
+   held across the call. */
+static sp_bool sp_poly_when_eq(sp_RbVal pat, sp_RbVal e) {
+  if (sp_poly_is_user_obj(pat) && sp_user_binop_hook) {
+    SP_GC_ROOT_RBVAL(pat); SP_GC_ROOT_RBVAL(e);
+    sp_bool h = FALSE;
+    sp_RbVal r = sp_user_binop_hook("===", pat, e, &h);
+    if (h) return sp_poly_truthy(r);
+  }
+  return sp_poly_case_eq(pat, e);
+}
 static sp_PolyArray *sp_poly_slice_groups(sp_RbVal arr, sp_RbVal pat, int after) {
   /* The pattern is read on every element while the loop below allocates a
      group per boundary, and it is a temporary at the call site

@@ -12033,7 +12033,10 @@ static void emit_user_binop_dispatch(Compiler *c, Buf *b) {
     "<", ">", "<=", ">=", "<=>", "==",
     /* and the element read, which a boxed `r[k] ||= v` / `r[k] += v` reads
        through sp_poly_index_poly */
-    "[]", NULL };
+    "[]",
+    /* a `when` whose pattern is held boxed asks the pattern's own ===
+       (sp_poly_when_eq) */
+    "===", NULL };
   buf_puts(b, "static sp_RbVal sp_user_binop_dispatch(const char *op, sp_RbVal a, sp_RbVal b, sp_bool *handled) {\n");
   buf_puts(b, "  *handled = FALSE;\n  switch (a.cls_id) {\n");
   for (int k = 0; k < c->nclasses; k++) {
@@ -16269,7 +16272,7 @@ char *codegen_program(const NodeTable *nt) {
   g_has_user_binop = 0;
   {
     static const char *const uops[] = {
-      "+", "-", "*", "/", "%", "**", "<<", ">>", "&", "|", "^", "==", "[]", NULL };
+      "+", "-", "*", "/", "%", "**", "<<", ">>", "&", "|", "^", "==", "[]", "===", NULL };
     /* A class that defines a #coerce needs the table for its COMPARISONS too:
        the protocol routes `5 < obj` to the boxed entry, which reaches the
        class through this hook. Only for such a class, though -- an ordinary
