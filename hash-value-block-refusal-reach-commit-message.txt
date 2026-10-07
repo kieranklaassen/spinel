@@ -1,0 +1,41 @@
+Refuse an appending Hash value block whose stores are out of its scope
+
+The refusal of an appending Hash value block lists what the block's own
+scope stores into a Hash local. With the store anywhere else the program
+compiled and the append went to a copy:
+
+    def fill(h, k, v); h[k] = v; end
+    h = {}
+    fill(h, :a, +"q")
+    h.each_value { |x| x << "!" }
+    p h                  # {a: "q"}; CRuby prints {a: "q!"}
+
+The same held for a Hash that is a parameter, a method's answer, an
+instance variable's or a global's, a default block's or `to_h`'s. A pass
+that runs once the sharing analysis has settled follows the Hash to those
+stores and refuses with the same message. It adds no sharing rule: under
+--share-strings it puts the route to share_route_defer, as the refusal
+in view does.
+
+The leaf is the one in view: a typed String that is no literal. A frozen
+literal still compiles and raises FrozenError, and so does a local that
+only ever holds a literal. A parameter stands for the argument of the
+call that reached it, so `fill(h, :a, "lit")` beside
+`fill(other, :b, +"fresh")` refuses only the second Hash's block. A
+method that assigns its Hash parameter stores into another Hash. With no
+call to say what a stored parameter is, it counts only where it is read
+as a String. A method that subclasses override is followed in the class
+of the receiver, for a call on self the class the method making it was
+called on.
+
+Each holder has one summary, worked out once and kept for every later
+value block: a store of such a String, the parameters a store stores,
+and the parameters that are the Hash. A call turns those parameters into
+its own arguments, and a cycle of methods is walked again until nothing
+more is found. The lists the walk reads are made on the first appending
+value block the pass meets; a program with no such block builds none.
+
+docs/limitations.md says where the store is looked for and names the
+stores that are not found.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
