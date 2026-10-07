@@ -1,0 +1,26 @@
+[-1, "hello worldQ"]
+[-2, "hello worlQ!"]
+[-6, IndexError, "regexp group 8 not matched"]
+[-13, "Qello world!"]
+[-14, IndexError, "index -14 out of regexp"]
+[0, "Q"]
+[8, IndexError, "regexp group 8 not matched"]
+[9, "hello wQrld!"]
+[10, "hello woQld!"]
+[13, "hello worldQ"]
+[14, IndexError, "index 14 out of regexp"]
+[16, IndexError, "index 16 out of regexp"]
+value ok
+[-1, "hello worldV"]
+value ok
+[-6, IndexError, "regexp group 8 not matched"]
+value ok
+[10, "hello woVld!"]
+value boom
+[-6, ArgumentError, "boom"]
+value boom
+[12, ArgumentError, "boom"]
+[-2, TypeError, "no implicit conversion of Integer into String"]
+"hello worldQ"
+"hello woQld!"
+"Qello world!"

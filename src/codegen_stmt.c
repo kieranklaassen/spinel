@@ -14706,16 +14706,27 @@ static int str_mutate_reassign_arms(Compiler *c, Buf *b, int indent, const NodeT
       NodeKind vk = nt_kind(nt, argv[2]);
       int tests = vk != NK_CallNode && vk != NK_ParenthesesNode &&
                   vk != NK_StatementsNode && subtree_is_pure_read(c, argv[2]);
-      /* untested here, the number stays held to nine as it was; the group
-         tests of such a value come after it, below */
-      emit_re_group_span(b, tn, tests, 0, !tests || re_group_small(c, argv[1]));
+      /* untested here, a literal number from 0 to 9 keeps its early test.
+         Any other names its group at run time: a number that names no group
+         is refused ahead of the value, as it was, and one that names a
+         group is tested after the value, below */
+      int late = !tests && !re_group_small(c, argv[1]);
+      if (late)
+        buf_printf(b, " sp_int _g = _t%d < 0 ? _t%d + sp_re_last_ncap : _t%d;"
+                      " if ((_t%d < 0 && _g <= 0) || _t%d > 15 || (_t%d > 9 && _t%d >= sp_re_last_ncap))"
+                      " sp_raise_cls(\"IndexError\", sp_sprintf(\"index %%lld out of regexp\", (long long)_t%d));"
+                      " { int _m = _g >= sp_re_last_ncap ? 1 : sp_re_caps[2 * _g] < 0 ? 2 : 0;"
+                      " sp_int _b = _m ? 0 : sp_re_caps[2 * _g], _e = _m ? 0 : sp_re_caps[2 * _g + 1]; ",
+                   tn, tn, tn, tn, tn, tn, tn, tn);
+      else
+        emit_re_group_span(b, tn, tests, 0, !tests || re_group_small(c, argv[1]));
       /* the head and the value are held while the tail is cut: the joined
          head and value were in flight when the tail allocated, and a
          collection there freed them */
       int th = ++g_tmp, tv = ++g_tmp;
       if (tests)
         buf_printf(b, "const char *_t%d = sp_str_byteslice(_t%d, 0, _b); SP_GC_ROOT_STR(_t%d); ", th, ts, th);
-      else
+      else if (!late)
         /* a value that runs code: what the match left is noted before the
            value can match again, and the group tests raise once the value
            has run, as CRuby raises them */
@@ -14725,8 +14736,12 @@ static int str_mutate_reassign_arms(Compiler *c, Buf *b, int indent, const NodeT
       if (!tests) {
         buf_printf(b, "if (_m == 1) sp_raise_cls(\"IndexError\", sp_sprintf(\"index %%lld out of regexp\","
                       " (long long)_t%d)); ", tn);
-        buf_printf(b, "if (_m) sp_raise_cls(\"IndexError\","
-                      " sp_sprintf(\"regexp group %%lld not matched\", (long long)_t%d)); ", tn);
+        if (late)
+          buf_puts(b, "if (_m) sp_raise_cls(\"IndexError\","
+                      " sp_sprintf(\"regexp group %lld not matched\", (long long)_g)); ");
+        else
+          buf_printf(b, "if (_m) sp_raise_cls(\"IndexError\","
+                        " sp_sprintf(\"regexp group %%lld not matched\", (long long)_t%d)); ", tn);
         buf_printf(b, "const char *_t%d = sp_str_byteslice(_t%d, 0, _b); SP_GC_ROOT_STR(_t%d); ", th, ts, th);
       }
       emit_expr(c, recv, b);
