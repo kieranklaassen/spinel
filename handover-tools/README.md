@@ -46,6 +46,20 @@ from the commits its recipe lists.
   bodies define, and the diamond of includes its table times; `csumt.sh`
   sums the C under a time limit and `utime.rb` prints a compile's user time.
 
+- `include-order/`: the sixth piece's programs (method lookup through a
+  module a class includes twice). `mro-gen.rb`, `mro2-gen.rb`, `mro3-gen.rb`
+  and `mro4-gen.rb OUT [GRAPHS] [SEED]` write the four sets (1,080; 9,150
+  with 40 graphs; 9,320 with 20; 4,480 with 45), one answer a program, the
+  shape in the file's name; `csum4.sh TREE DIR OUT` sums the C, `quick.rb
+  DIR TREE LABEL` runs each program once against CRuby's answer and
+  `cmp2.rb DIR A B` makes the two-rule table; `own-check2.rb DIR SPINEL`
+  compares the order of modules the compiler works out with CRuby's
+  `ancestors` (SPINEL built with `order-dump.patch` on the piece);
+  `cost-gen.rb OUT` writes the compile-time programs; `hand/` holds the
+  attacks written by hand, among them the two that broke an earlier cut
+  (`a1.rb`, a def under a condition; `d1.rb` and `d3.rb`, a class the order
+  is not worked out for that copies from a module it was).
+
 `texts/` holds the upstream texts of the three pieces as they are summed in
 the hand-over: `numeric-*` for the first (a boxed number's
 `instance_of?(Numeric)`), `pr-title.txt`, `pr-body-upstream-v12.md` and
@@ -54,7 +68,8 @@ to `-v11` files are its earlier texts), `bl1-*`
 for the third (the constant in `rescue` and `raise`; its refactor's message
 is in commit 69d79bf9), `gd-*` for the fourth (an exception's `is_a?` where
 two modules name a class alike), `qc-*` for the fifth (the compile time of a
-constant's lookup through a diamond of includes).
+constant's lookup through a diamond of includes), `inc-*` for the sixth (a
+module a class includes twice).
 
 `patches/` holds each piece as a diff on the master it was last built on
 (the file's name ends in that master's id): `git apply --index` on that

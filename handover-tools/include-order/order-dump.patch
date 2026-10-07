@@ -1,0 +1,19 @@
+--- a/src/analyze_scope.c
++++ b/src/analyze_scope.c
+@@ -5567,8 +5567,15 @@
+     if (!inc_own || !inc_nown || !inc_dim || !inc_bent || !inc_again || inc_run(c, &r) <= 0 ||
+         !inc_plain_program(c, r.nstmt, r.ndef))
+       inc_order_free();
+-    else
++    else {
+       inc_index_defs(c);
++      if (getenv("SPINEL_INC_DUMP"))
++        for (int k = 0; k < nc; k++) {
++          fprintf(stderr, "OWN %s:", c->classes[k].name);
++          for (int i = 0; i < inc_nown[k]; i++) fprintf(stderr, " %s", c->classes[inc_own[k][i]].name);
++          fprintf(stderr, "\n");
++        }
++    }
+   }
+   free(r.ci); free(r.mod); free(r.stmt);
+ }
