@@ -2386,8 +2386,8 @@ static int strbuf_box_ref_as(Compiler *c, int recv, const char *fmt, Buf *b) {
    makes (#3227). Answers 0 when the receiver is not such a slot, so the caller
    falls back to emit_expr. */
 int emit_strbuf_read_ref(Compiler *c, int recv, Buf *b) { return strbuf_box_ref_as(c, recv, "sp_String_cstr(%s)", b); }
-/* The same for a receiver that may be nil: its handle is NULL then, read
-   as a plain String's nil is. */
+/* The same for a local that may be nil: its handle is NULL then, read as
+   a plain String's nil is. */
 int emit_strbuf_read_ref_nil(Compiler *c, int recv, Buf *b) {
   Buf h; memset(&h, 0, sizeof h);
   if (!strbuf_box_ref_as(c, recv, "%s", &h)) return 0;
