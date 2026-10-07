@@ -1,0 +1,1 @@
+A trap block that returns leaves alone a proc call in flight

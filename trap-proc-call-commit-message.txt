@@ -1,0 +1,43 @@
+A trap block that returns leaves alone a proc call in flight
+
+A proc is called through a side channel: the caller leaves the boxed
+arguments in `_sp_proc_poly_args`, the block in `_sp_proc_blk` and what
+the last argument is in `_sp_proc_kwpos`, and reads the answer back
+from `_sp_proc_poly_ret`. Signal.trap runs its block inside the signal
+handler, and sp_trap_call calls that block the same way. Arriving after
+one side of a call has written the channel and before the other has
+read it, the block's run wrote over the call it interrupted:
+
+    Signal.trap("USR1") { }
+    pr = proc { |x| x }
+    vals = ["s", 7, :y, 2.5]
+    i = 0
+    bad = 0
+    while i < 20000000
+      v = vals[i & 3]
+      bad += 1 if pr.call(v) != v
+      i += 1
+    end
+    p bad
+
+Sent SIGUSR1 in a loop from a shell, this printed a count from 3,818 to
+5,493 in six runs, gcc and clang, where CRuby prints 0, and exited 0:
+the proc was handed the signal's number for its argument, or the caller
+read the trap block's answer. Calls with a block and calls with
+keywords went wrong as often.
+
+sp_trap_call now sets the channel aside and puts it back when the block
+returns. The values set aside are marked for the collector as the
+channel's own are, through a list the kernel unit owns, since an answer
+on its way back has nothing else pointing at it. A block that leaves by
+a raise or a throw abandons the interrupted call, so nothing is put
+back there. Nothing outside sp_trap_call and the globals marker
+changes.
+
+The test is each side of a call caught at that point: a C fragment
+writes its part of the channel, sends itself the signal and answers
+what it reads back, while the block calls procs of its own with
+arguments, a block and keywords, and collects. Before this change it
+printed 0, 0, 0, 0, "lost" and "lost".
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
