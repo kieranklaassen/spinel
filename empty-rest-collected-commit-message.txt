@@ -1,0 +1,20 @@
+A rest made in place outlives the argument beside it
+
+    def note(a, b, *r) = "#{a} #{b} #{r.size}"
+    puts note(ARGV.size, count)
+
+printed r.size 3 for 0 in a plain run of gcc's build once count
+allocated enough to collect; `def note(a, *r, b)` did in clang's.
+emit_rest_pack_kwh writes an empty rest, and a lone typed splat it
+converts whole, as a bare call among the C arguments, and
+emit_args_filled leaves in place an argument whose type needs no root
+(an Integer-typed call). C orders the two as it likes: where the Array
+is made first, the argument's call collects it.
+
+Where an argument, a keyword value or a default the call leaves out is
+not a pure read, the bare rest takes the general packing's form: a
+temp declared and rooted in the enclosing frame, assigned where the
+rest stands. emit_rest_pack_kwh answers whether what it wrote is bare.
+Any other call is emitted as it was.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
