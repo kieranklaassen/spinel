@@ -413,8 +413,27 @@ static inline char *sp_str_alloc_nogc(size_t len) {
    the byte before it for one, which for some neighbouring byte looks like a
    header's marker and answers a made-up length (#7556 did, and a copied
    message gained NUL bytes in some builds). */
+/* A "counted" message: a raise message that is a Spinel String with a NUL inside it
+   (sp_exc_msg_given builds it, #7556). The one place a message's length survives the
+   const char * the exception path carries it as, and only for a message the generated
+   code gave: it starts with six bytes no C string of ours starts with (a raw buffer's
+   neighbour bytes are never read; these are compared from the pointer on, stopping
+   at the first mismatch, and a NUL ends any shorter string), then the payload's
+   length, then the payload. A bare C string, whose length is strlen's, never matches. */
+#define SP_CMSG_HDR 10
+static inline int sp_cmsg_p(const char *m) {
+  return m && (unsigned char)m[0] == 0xff && (unsigned char)m[1] == 0xfe && m[2] == 'C' &&
+         m[3] == 'M' && (unsigned char)m[4] == 0xfd && (unsigned char)m[5] == 0x01;
+}
+static inline size_t sp_cmsg_len(const char *m) { uint32_t n; memcpy(&n, m + 6, sizeof n); return n; }
 static inline const char *sp_msg_heapify(const char *m) {
   if (!m) return NULL;
+  if (sp_cmsg_p(m)) {   /* stays counted: a later stage decodes it */
+    size_t total = SP_CMSG_HDR + sp_cmsg_len(m);
+    char *c = sp_str_alloc_nogc(total);
+    memcpy(c, m, total);
+    return c;
+  }
   size_t n = strlen(m);
   char *r = sp_str_alloc_nogc(n);
   memcpy(r, m, n);
@@ -463,10 +482,16 @@ static inline const char *sp_str_as_binary(const char *s) {
   sp_str_mark_binary((char *)s);
   return s;
 }
-/* The inverse, for force_encoding back to the text side. A length remembered
-   before the bytes were binary may be of other bytes by now (setbyte forgets
-   nothing on a binary String, lib/sp_cold.c), so it goes with the tag. */
+/* The inverse, for force_encoding back to the text side. */
 static inline const char *sp_str_as_text(const char *s) {
+  if (s && sp_str_has_hdr(s)) (((sp_str_hdr *)(s - 1)) - 1)->size &= ~SP_STR_SIZE_BINARY;
+  return s;
+}
+/* force_encoding itself. A length remembered before the bytes were binary may
+   be of other bytes by now (setbyte forgets nothing on a binary String,
+   lib/sp_cold.c), so it goes with the tag. An append that makes a binary
+   String text has forgotten already, as every append does. */
+static inline const char *sp_str_force_text(const char *s) {
   if (s && sp_str_is_binary(s)) {
     (((sp_str_hdr *)(s - 1)) - 1)->size &= ~SP_STR_SIZE_BINARY;
     sp_str_lcache_drop(s);

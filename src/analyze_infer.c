@@ -6019,7 +6019,7 @@ static int infer_nil_chain_call(Compiler *c, int id, const NodeTable *nt, const 
        ((sp_streq(name, "slice_before") || sp_streq(name, "slice_after")) &&
         nt_ref(nt, id, "arguments") < 0))) {
     TyKind crt = infer_type(c, recv);
-    if (crt == TY_POLY_ARRAY || crt == TY_INT_ARRAY || crt == TY_STR_ARRAY ||
+    if (crt == TY_POLY_ARRAY || crt == TY_INT_ARRAY || crt == TY_FLOAT_ARRAY || crt == TY_STR_ARRAY ||
         (crt == TY_RANGE && range_enum_redispatch(c, id))) {
       if (!an_chunk_family_to_a(c, id)) { *out = TY_ENUMERATOR; return 1; }
     }
@@ -6191,10 +6191,10 @@ static int infer_last_resort_call(Compiler *c, int id, const NodeTable *nt, cons
      if the receiver were that handle. Codegen unboxes it back to exactly that
      before re-dispatching, and checks the runtime cls_id first, so a value of
      any other kind still raises NoMethodError (#4158 follow-up). */
-  if (recv >= 0 && rt == TY_POLY && !face_active() && argc == 0 &&
-      ty_poly_handle_face(name) != TY_UNKNOWN &&
+  if (recv >= 0 && rt == TY_POLY && !face_active() &&
+      ty_poly_handle_face_args(name, argc) != TY_UNKNOWN &&
       !an_user_defines_or_reads(c, name) && !an_native_defines_method(c, name)) {
-    an_face_push(recv, ty_poly_handle_face(name));
+    an_face_push(recv, ty_poly_handle_face_args(name, argc));
     TyKind kt = infer_call(c, id);
     an_face_pop();
     if (kt != TY_UNKNOWN) { *out = kt; return 1; }

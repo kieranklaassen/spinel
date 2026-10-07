@@ -1008,6 +1008,7 @@ int builtin_class_id(const char *name);
 int builtin_class_parent_id(int id);   /* analyze_util.c */
 int is_builtin_class_name(const char *n);
 int is_builtin_module_name(const char *n);
+int builtin_module_at(int i, const char **name, int *id);
 int is_builtin_exception_name(const char *n);
 const char *superclass_builtin_exc_name(const NodeTable *nt, int sc);   /* analyze_util.c */
 const char *errno_canonical_name(const char *n);   /* analyze_util.c */
@@ -1047,6 +1048,7 @@ const char *nil_store_sfx(Compiler *c, const char *k, int node);
 int enum_builtin_node(Compiler *c, int node);
 const char *nomethod_head(const char *name);
 const char *enum_walk_name(Compiler *c, int id, int recv, const char *name);
+void emit_walk_arity_raise(Compiler *c, int id, int recv, const char *name, int t, int indent, Buf *b);
 int typed_array_lit_flag_free(Compiler *c, int node);
 void emit_may_nil_text(Compiler *c, int node, TyKind t, const char *arr, Buf *b);
 const char *raise_tail_value(TyKind t);
@@ -1414,6 +1416,7 @@ int int_slot_store_needs_ck(Compiler *c, int v, TyKind slot_ty, int slot_nullabl
 const char *int_shift_fn(Compiler *c, const char *op, int v);
 int class_def_body(Compiler *c, int def_node);
 int class_body_list(Compiler *c, int **out_ci, int **out_body);
+int local_all_writes_empty_array(Compiler *c, Scope *sc, const char *name);
 TyKind an_builtin_answer(Compiler *c, int id);
 int an_yield_site_builtin_answer(Compiler *c, int id, TyKind kind, TyKind *out);
 int node_is_empty_container(const NodeTable *nt, int node);
@@ -1716,6 +1719,9 @@ int poly_name_user_claimed(Compiler *c, const char *name, int argc);
 /* Does CRuby take argc arguments to cls#name, by the instance arity table
    (sp_builtin_arity_spec_tbl)? 1 for a name the table has no row for. */
 int builtin_arity_admits(const char *cls, const char *name, int argc);
+/* ...and the count it expects when it does not (NULL when it admits it) */
+const char *builtin_arity_expected(const char *cls, const char *name, int with_block, int argc,
+                                   char *exp, size_t n);
 void emit_complex_coerce(Compiler *c, int node, Buf *b);
 int emit_complex_real_args(Compiler *c, const int *argv, int argc, int polar, Buf *b);
 void emit_brk_wrapped_call(Compiler *c, int id, Buf *b);

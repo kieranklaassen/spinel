@@ -4305,6 +4305,13 @@ static sp_int sp_poly_to_i_meth(sp_RbVal v) {
   /* a shared String handle converts as the String it holds (#7263) */
   if (SP_UNLIKELY(sp_poly_is_strbuf(v))) v = sp_poly_strbuf_deref(v);
   if (v.tag == SP_TAG_OBJ && v.cls_id >= 0) sp_raise_nomethod(sp_nomethod_msg("to_i", v));
+  /* true, false, a Symbol, an Array, a Hash and a Range have no #to_i: the
+     conversion below answered 1, 0 or the Symbol's id where CRuby raises */
+  if (v.tag == SP_TAG_BOOL || v.tag == SP_TAG_SYM ||
+      (v.tag == SP_TAG_OBJ && (sp_poly_is_array_kind(v.cls_id) || sp_poly_is_hash_kind(v.cls_id) ||
+                               v.cls_id == SP_BUILTIN_RANGE || v.cls_id == SP_BUILTIN_FLOAT_RANGE ||
+                               v.cls_id == SP_BUILTIN_STR_RANGE)))
+    sp_raise_nomethod(sp_nomethod_msg("to_i", v));
   /* The call answers an sp_int, and a Bignum is one Integer that does not
      fit it: say so rather than hand back its low word (#4665). Promoting
      the slot is the wider question of #2024. */
@@ -10148,9 +10155,14 @@ static sp_RbVal sp_poly_dig_step_key(sp_RbVal a, sp_RbVal k) {
 /* dig(*keys): the key list is a runtime array, so walk it one step at a time.
    A nil at any step stops, as CRuby's #dig does. */
 static sp_RbVal sp_poly_index_poly(sp_RbVal recv, sp_RbVal idx);
+static int sp_poly_diggable(sp_RbVal v);   /* defined below */
+static int sp_poly_dig_recv_ok(sp_RbVal v);   /* defined below */
 static sp_RbVal sp_poly_dig_list(sp_RbVal recv, sp_PolyArray *keys) {
   if (!keys) return sp_box_nil();
   SP_GC_ROOT(keys);
+  /* a receiver that cannot be dug (nil answered nil) is the call's
+     NoMethodError, with the keys as its args */
+  if (!sp_poly_dig_recv_ok(recv)) sp_raise_nomethod(sp_nomethod_msg_args("dig", recv, keys->len, keys->data));
   sp_RbVal cur = recv;
   for (sp_int i = 0; i < keys->len; i++) {
     if (cur.tag == SP_TAG_NIL) return sp_box_nil();
@@ -10411,6 +10423,17 @@ static int sp_poly_diggable(sp_RbVal v) {
   return sp_poly_is_hash_kind(v.cls_id) || sp_poly_is_array_kind(v.cls_id) ||
          v.cls_id >= 0;   /* a user object: its own #dig answers, or NoMethodError does */
 }
+/* Has boxed `v` a #dig the builtin walk answers, as the receiver of the
+   call? sp_poly_diggable's answer, but a program object must be a Struct:
+   one whose class defines dig is routed to it before the walk
+   (poly_name_user_claimed), and any other has no #dig. The member-array
+   dispatch, installed wherever a Struct meets a boxed dig, tells a Struct by
+   answering one. */
+static int sp_poly_dig_recv_ok(sp_RbVal v) {
+  if (!sp_poly_diggable(v)) return 0;
+  if (v.cls_id < 0) return 1;
+  return sp_obj_struct_values_fn && sp_obj_struct_values_fn(v).tag != SP_TAG_NIL;
+}
 /* One step of a dig has landed on `v`: nil ends the walk, a container
    continues it, and anything else is the TypeError CRuby raises. */
 static void sp_poly_dig_check(sp_RbVal v) {
@@ -10421,6 +10444,9 @@ static void sp_poly_dig_check(sp_RbVal v) {
 static sp_RbVal sp_poly_dig_n(sp_RbVal recv, sp_int n, const sp_RbVal *keys) {
   /* only a nil reached PART WAY through the walk ends it quietly; a nil
      RECEIVER has no dig (#4485) */
+  /* nor has any other receiver that cannot be dug: the call's NoMethodError,
+     with the keys as its args (the TypeError below is a step's) */
+  if (!sp_poly_dig_recv_ok(recv)) sp_raise_nomethod(sp_nomethod_msg_args("dig", recv, n, (sp_RbVal *)keys));
   sp_poly_coll_chk(recv, "dig");
   sp_RbVal cur = recv;
   for (sp_int i = 0; i < n; i++) {
@@ -11498,7 +11524,7 @@ static sp_RbVal sp_poly_to_a_m(sp_RbVal v) {
     return sp_box_poly_array(sp_poly_to_poly_array(v));
   { sp_PolyArray *ue = sp_poly_user_elems(v);
     if (ue) return sp_box_poly_array(ue); }
-  sp_raise_cls("NoMethodError", sp_sprintf("undefined method 'to_a' for %s", sp_poly_class_name(v)));
+  sp_raise_nomethod(sp_nomethod_msg("to_a", v));  /* CRuby's wording, as for to_r */
 }
 /* Time.at(*args): the splatted list is Time.at's argument list -- the
    seconds (a Time, Integer, Float or Rational), then a subsecond part in
@@ -11590,7 +11616,7 @@ static sp_RbVal sp_poly_with_m(sp_RbVal v, sp_RbVal ov) {
     sp_RbVal r = sp_obj_with_fn(v, ov);
     if (r.tag == SP_TAG_OBJ) return r;
   }
-  sp_raise_cls("NoMethodError", sp_sprintf("undefined method 'with' for %s", sp_poly_class_name(v)));
+  sp_raise_nomethod(sp_nomethod_msg("with", v));  /* CRuby's wording, as for to_r */
 }
 static sp_RbVal sp_poly_to_r_m(sp_RbVal v) {
   v = sp_poly_strbuf_deref(v);   /* a shared String handle reads as its String (#7263) */
@@ -11611,7 +11637,7 @@ static sp_RbVal sp_poly_to_r_m(sp_RbVal v) {
      poly, and `v&.to_r` is exactly that shape. */
   if (v.tag == SP_TAG_STR) return sp_box_rational(sp_str_to_r(v.v.s ? v.v.s : sp_str_empty));
   if (sp_poly_is_strbuf(v)) return sp_poly_to_r_m(sp_poly_strbuf_deref(v));
-  sp_raise_cls("NoMethodError", sp_sprintf("undefined method 'to_r' for %s", sp_poly_class_name(v)));
+  sp_raise_nomethod(sp_nomethod_msg("to_r", v));  /* "for true", "for an instance of Array", as CRuby words it */
 }
 /* #rationalize on a boxed value, with `argc` epsilons (0 or 1): nil and an
    Integer ignore it and answer (0/1) and (n/1); a Float answers the simplest
@@ -11628,7 +11654,7 @@ static sp_RbVal sp_poly_rationalize_m(sp_RbVal v, int argc, sp_RbVal eps) {
     if (!argc) return v;
     return sp_box_rational(sp_float_rationalize(sp_rational_to_f(*(sp_Rational *)v.v.p), sp_poly_to_f(eps)));
   }
-  sp_raise_cls("NoMethodError", sp_sprintf("undefined method 'rationalize' for %s", sp_poly_class_name(v)));
+  sp_raise_nomethod(sp_nomethod_msg("rationalize", v));  /* CRuby's wording, as for to_r */
 }
 static sp_RbVal sp_poly_to_c_m(sp_RbVal v) {
   v = sp_poly_strbuf_deref(v);   /* a shared String handle reads as its String (#7263) */
@@ -11644,7 +11670,7 @@ static sp_RbVal sp_poly_to_c_m(sp_RbVal v) {
   if (v.tag == SP_TAG_STR) return sp_box_complex(sp_str_to_c(v.v.s ? v.v.s : sp_str_empty));
   if (sp_poly_is_strbuf(v)) return sp_poly_to_c_m(sp_poly_strbuf_deref(v));
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_COMPLEX) return v;
-  sp_raise_cls("NoMethodError", sp_sprintf("undefined method 'to_c' for %s", sp_poly_class_name(v)));
+  sp_raise_nomethod(sp_nomethod_msg("to_c", v));  /* "for true", "for an instance of Array", as CRuby words it */
 }
 /* Array-reduction methods on a boxed array value -- an element of a poly array,
    e.g. a run produced by chunk_while / slice_when. Each switches on the boxed
@@ -12857,6 +12883,7 @@ void sp_fin_run_exit(void);   /* lib/sp_gc.c: finalizers still registered at exi
    places print it now: the end of sp_raise_cls, and a hook whose own exception
    reached the drain's protect frame. */
 static void sp_exc_print_uncaught(const char *cls, const char *msg);
+void sp_exc_resignal(const char *cls, const char *msg);   /* lib/sp_cold.c */
 /* CRuby's tail format "<message> (<ClassName>)", prefixed by the raising frame
    and followed by its callers when the backtrace substrate is live (a --debug
    build). Without it there is no location to print, and an uncaught raise in a
@@ -13035,6 +13062,7 @@ SP_NORETURN SP_COLD void sp_raise_cls(const char *cls, const char *msg) {
     if (_bt_keep_n > 0) { memcpy(sp_bt_buf, _bt_keep, sizeof(void *) * (size_t)_bt_keep_n); sp_bt_n = _bt_keep_n; }
 #endif
     sp_exc_print_uncaught(cls, msg);
+    sp_exc_resignal(cls, msg);
     exit(status); } }
 #endif
 static void sp_raise(const char *msg) { sp_raise_cls("RuntimeError", msg); }
@@ -13618,9 +13646,9 @@ static sp_RbVal sp_poly_exc_acc(sp_RbVal v, const char *which) {
   if (!strcmp(which, "cause"))
     return e->cause ? sp_box_obj(e->cause, SP_BUILTIN_EXCEPTION) : sp_box_nil();
   if (!strcmp(which, "full_message"))
-    return sp_box_str(sp_sprintf("%s: %s", sp_exc_class_name(e), sp_exc_message(e)));
+    return sp_box_str(sp_exc_full_text(e, sp_exc_message(e)));
   if (!strcmp(which, "detailed_message"))
-    return sp_box_str(sp_sprintf("%s (%s)", sp_exc_message(e), sp_exc_class_name(e)));
+    return sp_box_str(sp_exc_detailed_text(e, sp_exc_message(e)));
   /* nil for an exception never raised, the frames once it was -- the
      logger gem's Formatter asks `if msg.backtrace` of a poly message */
   if (!strcmp(which, "backtrace")) return e->backtrace ? sp_box_str_array(e->backtrace) : sp_box_nil();
@@ -16501,6 +16529,31 @@ void sp_trap_call(sp_Proc *p, int no) {
   sp_unwind_kind = uk; sp_unwind_target = ut; sp_unwind_exc_top = ue; sp_unwind_home = uh;
   if (sp_unwind_kind != SP_UNWIND_NONE) sp_unwind_resume();
   sp_pending_exc_obj = eobj; sp_raise_cls(ecls, emsg);
+}
+#endif
+/* The default of SIGINT and SIGTERM, as CRuby's: an Interrupt (a SignalException
+   "SIGTERM", #signo 15) raised where the signal arrived, so rescue and ensure
+   run. The handler is left by a jump, so its signal is unblocked first (as
+   sp_trap_call does). A trap the program sets replaces it (sp_signal_trap). Armed
+   by a program that starts no thread: the signal may arrive on any OS thread of a
+   scheduler, and the raise has to land in the main Ruby thread (#7202). */
+#ifndef SPINEL_EXT_HOST
+static SP_UNUSED void sp_sig_default_handler(int no) {
+  sp_sig_unblock(no, 0);
+  if (no == SIGINT) sp_raise_cls("Interrupt", sp_exc_no_msg);   /* the message is empty, as the interrupt CRuby raises for the signal */
+  sp_pending_exc_obj = sp_signal_exc_new(sp_box_int((sp_int)no));
+  sp_raise_cls("SignalException", "SIGTERM");
+}
+static SP_UNUSED void sp_sig_install_defaults(void) {
+  static const int sigs[] = { SIGINT, SIGTERM };
+  for (int i = 0; i < 2; i++) {
+    int no = sigs[i];
+    if (sp_trap_proc[no] || sp_trap_state[no]) continue;
+    struct sigaction sa; memset(&sa, 0, sizeof sa);
+    sa.sa_handler = sp_sig_default_handler;
+    sigemptyset(&sa.sa_mask);
+    sigaction(no, &sa, NULL);
+  }
 }
 #endif
 typedef struct { sp_RbVal obj; int which; int had; sp_RbVal ans; } sp_obj_conv_probe;

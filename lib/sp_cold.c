@@ -2707,6 +2707,7 @@ sp_RbVal sp_Enumerator_feed(sp_Enumerator *e, sp_RbVal v);
 sp_PolyArray *sp_Enumerator_take(sp_Enumerator *e, sp_int n);
 sp_PolyArray *sp_Enumerator_to_a(sp_Enumerator *e);
 void sp_sig_c_handler(int no);
+void sp_exc_resignal(const char *cls, const char *msg);
 void sp_sig_exit_dispatch(void);
 sp_RbVal sp_signal_trap(sp_RbVal sig, sp_RbVal handler);
 sp_int sp_process_kill1(sp_RbVal sig, sp_int pid);
@@ -3386,11 +3387,11 @@ sp_StrIntHash*sp_gc_stat(void){
    the 7-bit hint and the cached count (sp_str_length). One 7-bit byte over
    another changes no count. A binary String is left alone. Its length is its
    byte count, nothing remembered is read while it is binary, and
-   sp_str_as_text forgets for it when it becomes text again -- so a byte
+   sp_str_force_text forgets for it when it becomes text again -- so a byte
    written into a byte buffer pays a test or two here. */
 static inline void sp_str_setbyte_forget(const char *s, sp_int i, sp_int v) {
   if (SP_UNLIKELY((((const sp_str_hdr *)(s - 1)) - 1)->size & SP_STR_SIZE_BINARY)) return;
-  if (SP_UNLIKELY((((const unsigned char *)s)[i] | (unsigned char)v) & 0x80)) sp_str_lcache_drop(s);
+  if ((((const unsigned char *)s)[i] | (unsigned char)v) & 0x80) sp_str_lcache_drop(s);
 }
 /* String#setbyte over value-semantics strings: copy-on-write (a literal's
    bytes are static storage). The caller re-binds an lvalue receiver. */
@@ -4829,6 +4830,16 @@ sp_Exception *sp_signal_exc_new_m(sp_RbVal sig, const char *msg) {SP_GC_ROOT_RBV
 }
 sp_Exception *sp_signal_exc_new(sp_RbVal sig) {SP_GC_ROOT_RBVAL(sig);
   return sp_signal_exc_new_m(sig, NULL);
+}
+/* An exception nothing rescued that is a signal's: the process ends by that
+   signal, as CRuby's does, so its parent reads 130 for an Interrupt. */
+void sp_exc_resignal(const char *cls, const char *msg) {
+  int no = !strcmp(cls, "Interrupt") ? SIGINT
+         : (!strcmp(cls, "SignalException") && msg && !strcmp(msg, "SIGTERM")) ? SIGTERM : 0;
+  if (!no) return;
+  fflush(NULL);   /* the buffered output exit() would have written */
+  signal(no, SIG_DFL);
+  raise(no);
 }
 sp_Exception *sp_interrupt_new(const char *msg) {SP_GC_ROOT_STR(msg);
   sp_Exception *e = sp_exc_new("Interrupt", (msg && msg[0]) ? msg : "Interrupt");

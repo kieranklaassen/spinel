@@ -102,6 +102,25 @@ z << "\xFF".b
 z << "cd"
 puts z.size, z.bytesize
 
+# a text append makes a 7-bit binary String text again: what was remembered
+# before it was binary is not kept
+bt = +""
+bt << "é1"
+puts bt.size
+bt.force_encoding("BINARY")
+bt.setbyte(0, 0x41)
+bt.setbyte(1, 0x42)
+bt << "é"
+puts bt.size, bt.encoding
+$g = +""
+$g << "é1"
+puts $g.size
+$g.force_encoding("BINARY")
+$g.setbyte(0, 0x41)
+$g.setbyte(1, 0x42)
+$g << "é"
+puts $g.size, $g.encoding
+
 # the loop this is for
 buf = +""
 total = 0

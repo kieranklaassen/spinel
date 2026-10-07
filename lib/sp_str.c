@@ -485,7 +485,7 @@ const char *sp_str_append_grow(const char *s, const char *t) {SP_GC_ROOT_STR(s);
       sp_str_lcache_grown(s, la, lb);
       h->len = (uint32_t)(la + lb);   /* sp_str_set_len would clear the 7-bit hint just kept */
       h->hash = 0;
-      if (text_append) sp_str_as_text((char *)s);
+      if (text_append) sp_str_force_text((char *)s);
       return s;
     }
   }

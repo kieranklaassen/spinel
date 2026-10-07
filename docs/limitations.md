@@ -119,6 +119,7 @@ Limited today, but additively fixable; listed roughly easiest-first.
 | Feature | Today | Path to relax |
 |---|---|---|
 | `Exception#backtrace` / `Kernel#caller` | return `[]` in a release build (class + message work). A `--debug` build, or `-g` with `-O0` / `-O1`, names each frame `file:in 'Class#method'` with the file the method was written in, but no line. `-g` at the default `-O2` drops the frames the C compiler inlined (a method called from one place usually is), so use `--debug` for a backtrace | the line within a frame, from the debug info's address-to-line table (#7658); a release build would need a pc→line table in every binary |
+| SIGINT / SIGTERM with no `trap` | a program that starts no thread raises `Interrupt` (`#signo` 2) / `SignalException` (`#signo` 15) in the main thread, as CRuby does, so `rescue` and `ensure` run; unrescued, it flushes its output and ends by the signal (a parent reads 130). A program that starts a thread keeps the system default: the process ends at once, with no `rescue` or `ensure` | deliver the raise to the main Ruby thread through the scheduler, whichever OS thread the signal reaches |
 | `class Thread` / `class Fiber` reopenings, `Thread.attr_accessor :x` / `Fiber.attr_accessor :x` (activesupport's IsolatedExecutionState) | supported | a reopening's instance methods take the runtime handle as self, and `Thread.current` / `Fiber.current` reach them (also through a class value or a class held in a poly slot). A thread's attribute lives in its thread-local table under a private key; a fiber's in a table of the fiber's own that a new fiber does not inherit (an attribute on a fresh fiber is nil). `thread_variable_get` / `_set` / `?` share the store `Thread#[]` / `[]=` / `key?` keep: one table per thread for both, where CRuby's `[]` is fiber-local |
 | `Thread` real parallelism | implemented as a true M:N runtime (no GVL): N OS workers (`min(online cores, SPINEL_WORKERS)`) run green threads in parallel over a stop-the-world GC, with real `Mutex`/`Queue`/`SizedQueue`/`ConditionVariable`. A monitor thread timeslices CPU-bound threads (~10ms quantum) so a thread looping without yielding cannot starve its siblings (it signals the worker with `SIGURG`, overridable via `SPINEL_PREEMPT_SIGNAL`). The single-threaded archive is unchanged (a non-`Thread` program is byte-identical) | the N workers run per-worker run queues with work stealing, and `Kernel#sleep` and blocking I/O are scheduler-aware (a sleeping / I/O-blocked thread frees its OS worker). preemption is taken at safepoint polls (loop back-edges), so a thread spending a long time inside a single runtime call with no poll yields only when that call returns; concurrent allocation is thread-safe (heap-lock-protected allocators, atomic heap byte counters, per-worker object pools) but every allocation still crosses one global heap lock; remaining work: fully async (signal-interrupted) preemption of such regions, and per-worker allocation buffers (TLAB) to make allocation-heavy parallel code scale. See [docs/thread.md](thread.md) |
 | `Marshal` of user objects with container-typed ivars | primitives + Array + Hash + Bignum + Complex + Rational + plain user objects work, including cyclic and shared references (`Marshal.dump`/`load`, CRuby 4.8 wire format, byte-compatible for the supported subset); an object whose ivar is a *statically typed* Array/Hash (not a poly ivar) is not yet dumpable | a user object dumps/loads through a compile-time-generated per-class dispatcher. Supported ivar types: scalars (Integer/Float/String/true/false/Symbol/Bignum), `poly` (mixed) ivars, and nested user objects. A typed-container ivar would mismatch the loader's always-poly containers, so such a class raises `TypeError` on dump; value-type and Exception-subclass objects are also out of scope. Complex's components are float-only, so they round-trip as Floats |
@@ -488,6 +489,18 @@ literal `s[h[k]..]` does. A genuine `-9223372036854775808` stored in such a
 slot is indistinguishable from nil, which is the price of the
 representation.
 
+That holds in every `--int-overflow` mode (#7612): an Integer that is exactly
+-2**63 -- `-9223372036854775807 - 1` computed without overflowing, a wrapping
+`+ - *`, `~0x7fffffffffffffff` -- is the sentinel's word, so it reads as `nil`
+where it is printed, tested for nil or truthiness, or computed on, and no mode
+raises for it. This is deliberate: checking the result of every `+ - *` costs
+10 to 37% of the run time on integer-heavy programs (measured on `bm_tarai`,
+`bm_tak`, `bm_sudoku`, `bm_structaref` and `bm_throw`), and an error where the
+word was a real nil (a nil the analysis did not mark) would be wrong the other
+way. The literal `-9223372036854775808` is not affected, and neither is a
+value that travels as a Bignum (promote mode). A program that really uses
+-2**63 as a number (a sentinel of its own, a hash seed) differs from CRuby.
+
 #### `Integer#**` with a negative exponent
 
 CRuby evaluates a negative integer exponent to a `Rational`. Spinel matches
@@ -763,7 +776,8 @@ literal or any other expression passed there is not refused: nothing else
 can see its growth.
 
 The block of a lazy stage (`[s].lazy.map { |x| x << "!" }`, and `select`,
-`take_while` and the other stages up to the first `map`) is handed a boxed
+`take_while` and the other stages up to the first `map`, past a `with_index`
+too) is handed a boxed
 copy of the element, so a block that changes its String element in place
 is refused as well, naming the line. Drop the `.lazy` (the eager form
 shares the String), or return a new String (`x + "!"`).
