@@ -14524,6 +14524,57 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
   return 0;
 }
 
+
+/* Whether a boxed value can be an exception that carries the id of a class
+   of the program's own (the other box of sp_poly_eq's pair), in a program
+   whose exception classes leave method `name` alone. */
+static int exc_boxed_by_class_id(Compiler *c, const char *name) {
+  int any = 0;
+  for (int k = 0; k < c->nclasses; k++) {
+    if (!class_is_exc_subclass(c, k)) continue;
+    if (comp_method_in_chain(c, k, name, NULL) >= 0) return 0;
+    any = 1;
+  }
+  return any;
+}
+/* Whether a program with an exception class of its own defines a !=
+   anywhere: a def of that name, a Symbol or a String that spells it
+   (define_method, alias, alias_method, in whatever class), or a method made
+   under a name that is no literal. Nothing is asked about where the method
+   lands: on Object, Kernel or BasicObject it answers for an exception too.
+   Read once a compile. */
+static int names_ne_or_definer(const char *s) {
+  return s && (sp_streq(s, "!=") || sp_streq(s, "define_method") || sp_streq(s, "define_singleton_method") ||
+               sp_streq(s, "alias_method"));
+}
+int prog_defines_ne(Compiler *c) {
+  static const Compiler *memo_c; static int memo;
+  if (memo_c == c) return memo;
+  memo_c = c; memo = 0;
+  int any = 0;
+  for (int k = 0; k < c->nclasses && !any; k++) any = class_is_exc_subclass(c, k);
+  if (!any) return 0;
+  const NodeTable *nt = c->nt;
+  memo = 1;
+  /* every node by its own kind: a pass that turned a String into a Symbol
+     in place (`alias_method "!=", "ne2"`) left the per-kind lists as they
+     were */
+  for (int id = 0; id < nt->count; id++) {
+    NodeKind kd = nt_kind(nt, id);
+    if (kd == NK_DefNode) { if (names_ne_or_definer(nt_str(nt, id, "name"))) return 1; }
+    else if (kd == NK_SymbolNode) { if (names_ne_or_definer(nt_str(nt, id, "value"))) return 1; }
+    else if (kd == NK_StringNode) { if (names_ne_or_definer(nt_str(nt, id, "content"))) return 1; }
+    else if (kd == NK_CallNode) {
+      const char *m = nt_str(nt, id, "name");
+      if (!names_ne_or_definer(m) || sp_streq(m, "!=")) continue;
+      int args = nt_ref(nt, id, "arguments"), an = 0;
+      const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+      NodeKind ak = an > 0 ? nt_kind(nt, av[0]) : NK_NilNode;
+      if (ak != NK_SymbolNode && ak != NK_StringNode) return 1;
+    }
+  }
+  return memo = 0;
+}
 /* Object's universal protocol -- ===, ==, !=, equal?, eql?, frozen?, freeze,
    and on the IO family (a File/IO/File::Stat handle, a Dir handle) to_s and
    <=> as well -- on the native handle and value kinds that have no arm of
@@ -14660,9 +14711,14 @@ static void emit_native_object_protocol_text(Compiler *c, const char *name, TyKi
     buf_printf(b, "sp_RbVal _u%d = %s; ", t, a);
     if (!bid) buf_printf(&test, "((void)_u%d, 0)", t);
     else {
-      buf_printf(&test, "(_u%d.tag == SP_TAG_OBJ && _u%d.cls_id == %s && ", t, t, bid);
+      /* one exception can be boxed two ways (sp_poly_eq): the operand may
+         be the receiver itself under the id of the program's class */
+      int two = rt == TY_EXCEPTION && exc_boxed_by_class_id(c, is_ne ? "==" : name) &&
+                !prog_defines_ne(c);
+      buf_printf(&test, "(_u%d.tag == SP_TAG_OBJ && %s_u%d.cls_id == %s && ", t, two ? "((" : "", t, bid);
       if (fn) buf_printf(&test, "%s(_t%d, (%s)_u%d.v.p))", fn, t, cty, t);
       else buf_printf(&test, "_u%d.v.p == (void *)_t%d)", t, t);
+      if (two) buf_printf(&test, " || (_t%d && _u%d.v.p == (void *)_t%d)))", t, t, t);
     }
   }
   else if (at == TY_NIL && kind == 1) {
