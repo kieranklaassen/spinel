@@ -1,0 +1,43 @@
+An append chain written as a statement runs its receiver once
+
+  class Q; attr_reader :s; def initialize(s) = @s = s; end
+  a = [Q.new(+"p"), Q.new(+"q"), Q.new(+"r")]
+  b = a.dup
+  a.shift.s << "x" << "y"
+  puts b.map(&:s).join(","), a.size
+
+prints pxy,q,r and 2 in CRuby and printed px,qy,r and 1: the Array was
+shifted twice. str_mutate_append_bang_arms writes a statement's append
+chain as one append a link, and each link was handed the receiver's own
+text, so a receiver that is a call ran once a link. One link had it
+written again too where its argument is an Integer, a boxed value or an
+interpolation.
+
+The receiver now runs once, ahead of the chain. What is held there is
+decided by a list (append_chain_hold), and whatever it does not name is
+the C master writes.
+
+A reader (an attribute read): its owner is held and the slot is read
+through it at each link, as master reads it, because a link may put the
+receiver's String back in the slot under a new handle
+(`o.s << "a#{o.touch}"`). The owner is held where running it does
+something or where an argument runs something. self, a value object and
+a `&.` reader, which holds its receiver itself, are not held.
+
+Any other call (a method's result): its handle is held only where no
+argument runs anything: a String or an Integer literal, a String or an
+Integer local, `+`, `-` or `*` of such Integers, and to_s or an
+interpolation of these where the program gives Integer no to_s of its
+own.
+
+A local, an instance variable and one plain link keep the C they had.
+Left as on master: a method's result under an argument that calls
+(`k.b << f(1) << "z"` runs b once a link) and a chain past 64
+links.
+
+test/string_append_chain_call_receiver.rb prints 34 lines; master
+prints 19 of them, 13 wrong, and raises.
+test/string_append_chain_integer_to_s.rb is right on master: the list
+must not hold there.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

@@ -1,0 +1,1 @@
+An append chain written as a statement runs its receiver once
