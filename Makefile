@@ -2204,6 +2204,7 @@ GC_MINOR_TESTS := test/reopened_builtin_kwrest_keys.rb \
                   test/string_handle_eql.rb \
                   test/string_handle_yield_exec.rb \
                   test/gc_minor_barrier_holders.rb \
+                  test/gc_minor_struct_super_store.rb \
                   test/bound_method_fresh_receiver.rb \
                   test/issue_2890.rb \
                   test/thread_new_args_rooted_across_fiber_alloc.rb \

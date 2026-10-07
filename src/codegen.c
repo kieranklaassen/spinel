@@ -11627,7 +11627,24 @@ void emit_super(Compiler *c, int id, Buf *b) {
         int roff = -1;
         int pk = is_fwd ? struct_zsuper_param(c, s, a, cls->ivars[a] + 1, &roff) : -1;
         if (is_fwd && pk < 0) continue;
-        buf_printf(b, "%s->iv_%s = ", g_self, iv_c(cls->ivars[a] + 1));
+        /* These stores sit inside an expression, where the barrier pass can
+           only wrap the holder, so the barrier runs before the value is
+           made. An argument that allocates can collect, and a collection
+           starts the remembered set over: the store then lands unrecorded,
+           and the next minor mark frees the young value in its slot. Such a
+           store, into a slot that holds a reference, is written as a
+           statement of its own, where the pass puts the barrier after it.
+           The argument is built into a temp of the slot's type first and the
+           statement stores the temp: the pass rewrites a store statement
+           whole and scans on past it, so a store inside the argument
+           (`super((o.v = x).first, t)`) would be left with no barrier if
+           the argument stood in that statement. */
+        int val = is_fwd ? -1 : kwh >= 0 ? struct_kwarg_value(c, kwh, cls->ivars[a] + 1) : sargv[a];
+        int as_stmt = val >= 0 && !g_no_write_barrier && !cls->is_value_type && needs_root(ivt) &&
+                      !comp_ty_value_obj(c, ivt) && operand_may_allocate(c, val);
+        int sa = as_stmt ? ++g_tmp : 0;
+        if (as_stmt) buf_printf(b, "({ __typeof__(%s->iv_%s) _sa%d = ", g_self, iv_c(cls->ivars[a] + 1), sa);
+        else buf_printf(b, "%s->iv_%s = ", g_self, iv_c(cls->ivars[a] + 1));
         if (is_fwd && roff >= 0) {
           LocalVar *rv = scope_local(s, s->pnames[pk]);
           Buf src; memset(&src, 0, sizeof src); emit_scope_local_ref(c, s, s->pnames[pk], &src);
@@ -11690,6 +11707,7 @@ void emit_super(Compiler *c, int id, Buf *b) {
           }
           else emit_expr(c, sargv[a], b);
         }
+        if (as_stmt) buf_printf(b, "; %s->iv_%s = _sa%d; 0; })", g_self, iv_c(cls->ivars[a] + 1), sa);
         buf_puts(b, ", ");
       }
       buf_printf(b, "%s)", default_value_from_compiler(c, repr_of(c, id).as_ty));
