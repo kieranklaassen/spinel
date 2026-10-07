@@ -274,8 +274,8 @@ Repr repr_of(const Compiler *c, int node) {
      by-value one too, whose layout has no nil to hold it in; a builtin
      pointer (a String, an Array, a Hash, an IO) whose NULL is its nil, and
      a shared String's handle */
-  if ((r.kind == RK_PTR || r.kind == RK_VOBJ || r.kind == RK_STRBUF) && nil_fact_tracked(kt) &&
-      nil_fact_node(c, node))
+  if ((r.kind == RK_PTR || r.kind == RK_VOBJ || r.kind == RK_STRBUF) &&
+      (nil_fact_tracked(kt) || kt == TY_STRBUF) && nil_fact_node(c, node))
     r.may_nil = 1;
   return r;
 }
