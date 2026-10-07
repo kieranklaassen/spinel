@@ -18413,6 +18413,70 @@ static int operand_hoists_effect(Compiler *c, int node) {
   return 0;
 }
 
+/* Does `txt` open by holding the temp `_t<n>` itself, `({ T _t<k> = _t<n>;
+   SP_GC_ROOT...`? An arm that binds its receiver to a rooted temp ahead of
+   everything else it emits needs no second one. */
+static int text_opens_holding_tmp(const char *txt, int n) {
+  if (!txt || strncmp(txt, "({ ", 3) != 0) return 0;
+  char want[40];
+  int wl = snprintf(want, sizeof want, " = _t%d", n);
+  const char *semi = strchr(txt, ';');
+  return semi && semi - txt > wl && strncmp(semi - wl, want, (size_t)wl) == 0 &&
+         strncmp(semi, "; SP_GC_ROOT", 12) == 0;
+}
+
+/* Does operand `id`, one that runs no code, make its value where it stands,
+   held by nothing: an interpolated String, an empty Hash or Array, a Hash or
+   an Array that is an arm (`o || {}`)? A literal with members that is the
+   operand itself is built ahead of the statement, into a rooted temp. */
+static int subtree_makes_value(const NodeTable *nt, int id) {
+  if (id < 0) return 0;
+  NodeKind k = nt_kind(nt, id);
+  if (k == NK_InterpolatedStringNode || k == NK_HashNode || k == NK_ArrayNode) return 1;
+  int nr = nt_num_refs(nt, id);
+  for (int i = 0; i < nr; i++)
+    if (subtree_makes_value(nt, nt_ref_at(nt, id, i))) return 1;
+  int na = nt_num_arrs(nt, id);
+  for (int i = 0; i < na; i++) {
+    int n = 0;
+    const int *ids = nt_arr_at(nt, id, i, &n);
+    for (int j = 0; j < n; j++)
+      if (subtree_makes_value(nt, ids[j])) return 1;
+  }
+  return 0;
+}
+static int operand_made_here(const NodeTable *nt, int id) {
+  NodeKind k = id >= 0 ? nt_kind(nt, id) : NK_NilNode;
+  if (k == NK_HashNode || k == NK_ArrayNode) {
+    int n = 0;
+    nt_arr(nt, id, "elements", &n);
+    if (n > 0) return 0;
+  }
+  return subtree_makes_value(nt, id);
+}
+/* Does subtree `id` read a variable that operand `by` can move: an ivar, a
+   class variable or a global it may reassign, a local it may rebind? */
+static int subtree_reads_moved_by(Compiler *c, int id, int by) {
+  const NodeTable *nt = c->nt;
+  if (id < 0) return 0;
+  NodeKind k = nt_kind(nt, id);
+  if (k == NK_InstanceVariableReadNode || k == NK_ClassVariableReadNode ||
+      k == NK_GlobalVariableReadNode)
+    return subtree_may_reassign_state(c, by);
+  if (k == NK_LocalVariableReadNode) return operand_local_rebound_by(c, id, by);
+  int nr = nt_num_refs(nt, id);
+  for (int i = 0; i < nr; i++)
+    if (subtree_reads_moved_by(c, nt_ref_at(nt, id, i), by)) return 1;
+  int na = nt_num_arrs(nt, id);
+  for (int i = 0; i < na; i++) {
+    int n = 0;
+    const int *ids = nt_arr_at(nt, id, i, &n);
+    for (int j = 0; j < n; j++)
+      if (subtree_reads_moved_by(c, ids[j], by)) return 1;
+  }
+  return 0;
+}
+
 static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
   if (emit_or_take_back(c, id, b, emit_str_append_chain_handle)) return 1;
   const NodeTable *nt = c->nt;
@@ -18469,7 +18533,8 @@ static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
   int effects = 0;
   for (int i = 0; i < nop; i++)
     if (subtree_may_reassign_state(c, operand[i])) effects++;
-  int observable = 0, converts = 0;
+  int observable = 0, converts = 0, runs = 0;
+  int made[9], nmade = 0, obs_at = -1, made_bare = 1;
   for (int i = 0; i < nop; i++) {
     /* an operand that may convert -- a user object, a boxed value -- is
        converted by the arm, in a hold that runs before the call: the
@@ -18494,8 +18559,16 @@ static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
     char sref[192];
     if ((state_read || local_read) && strbuf_slot_ref(c, operand[i], sref, sizeof sref))
       state_read = local_read = 0;
-    if (!local_read && (state_read ? effects < 1 : !subtree_has_side_effect(c, operand[i]))) continue;
+    if (!local_read && (state_read ? effects < 1 : !subtree_has_side_effect(c, operand[i]))) {
+      if (operand_made_here(nt, operand[i])) {
+        made[nmade++] = i;
+        if (k != NK_HashNode && k != NK_ArrayNode) made_bare = 0;
+      }
+      continue;
+    }
     observable++;
+    obs_at = i;
+    if (!subtree_is_pure_read(c, operand[i])) runs = 1;
     /* a conditional's value is bound as a call's is: `f(a: r.int, b: c ? r.int : 0)`
        declined whole and left every keyword to C's order */
     int bindable = (k == NK_CallNode || k == NK_SuperNode || k == NK_IfNode || k == NK_UnlessNode ||
@@ -18522,8 +18595,18 @@ static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
     if (pure) return 0;
   }
   /* One observable operand has no sibling to be ordered against or collected by:
-     it is the only thing running, and the call consumes it immediately. */
-  if ((observable < 2 && !(converts && observable >= 1)) || nb < 1 ||
+     it is the only thing running, and the call consumes it immediately. Not
+     when it runs code beside an operand made where it stands: that one is
+     held by nothing, and whichever of the two C evaluates second can collect
+     the other -- gcc made the String of `label(n).include?("s#{n}")` first
+     and label's allocations freed it. The observable operand is bound, so
+     the other is made last; one written ahead of it is left to C's order
+     when it reads what the bound operand can move (`"#{@n}" + bump`). */
+  int made_here = observable == 1 && runs && nmade > 0;
+  for (int m = 0; m < nmade && made_here; m++)
+    if (made[m] < obs_at && subtree_reads_moved_by(c, operand[made[m]], operand[obs_at])) made_here = 0;
+  int lone = observable < 2 && !made_here;
+  if ((lone && !(converts && observable >= 1)) || nb < 1 ||
       g_n_argov + nb > MAX_ARG_OVERRIDE) return 0;
 
   size_t pre_mark = g_pre->len;
@@ -18559,7 +18642,15 @@ static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
        and costs a rooted temp on what may be a hot path (`@fetch[addr][addr]`
        is poly, and converts nothing). Counted as emitted, not as held: a
        #to_int renders inline and IO#write holds per operand. */
-    if (observable < 2 && g_conv_emitted == conv_mark) ok = 0;
+    if (lone && g_conv_emitted == conv_mark) ok = 0;
+    /* bound for an operand made beside it (made_here): an arm that holds
+       the operand first by itself already runs in that order */
+    if (!lone && observable < 2 && g_conv_emitted == conv_mark &&
+        text_opens_holding_tmp(ob.p, tmp[0])) ok = 0;
+    /* ...and an empty literal the arm folded away was never made: `r == []`
+       is a length test, `h.merge({})` a copy */
+    if (!lone && observable < 2 && g_conv_emitted == conv_mark && made_bare && ob.p &&
+        !strstr(ob.p, "Hash_new(") && !strstr(ob.p, "Array_new(")) ok = 0;
     /* An arm that stores back into its receiver -- a poly `[]=` splice
        answering a new String, `@bytes = sp_poly_splice(@bytes, ...)` -- treats
        the operand as its slot; bound, the store lands in the temp and the
