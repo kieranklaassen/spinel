@@ -212,3 +212,19 @@ const char *sp_PtrArray_inspect_k(sp_PtrArray *a) {
   if (a->elem_kind == SP_PTR_ELEM_UNKNOWN) return sp_PtrArray_inspect(a);   /* opaque, as the erased id always was */
   return sp_PolyArray_inspect(sp_PtrArray_to_poly(a));
 }
+
+/* delete on a frozen typed Array. CRuby raises FrozenError only for an element
+   it would remove, so each of these raises when the Array holds v and returns
+   when it does not; the caller then answers nil. They live in this unit, not
+   in lib/sp_array.c beside their callers: that unit is at gcc's inline unit
+   limit, and code added there moves what gcc inlines into its other
+   functions. */
+SP_COLD void sp_IntArray_delete_frozen(sp_IntArray *a, sp_int v) {
+  if (sp_IntArray_include(a, v)) sp_raise_frozen_array_at(a, SP_BUILTIN_INT_ARRAY);
+}
+SP_COLD void sp_FloatArray_delete_frozen(sp_FloatArray *a, sp_float v) {
+  if (sp_FloatArray_include(a, v)) sp_raise_frozen_array_at(a, SP_BUILTIN_FLT_ARRAY);
+}
+SP_COLD void sp_StrArray_delete_frozen(sp_StrArray *a, const char *v) {
+  if (sp_StrArray_include(a, v)) sp_raise_frozen_array_at(a, SP_BUILTIN_STR_ARRAY);
+}

@@ -101,6 +101,10 @@ sp_int sp_IntArray_index(sp_IntArray *a, sp_int v);
 sp_int sp_IntArray_rindex(sp_IntArray *a, sp_int v);
 sp_int sp_IntArray_delete_at(sp_IntArray *a, sp_int i);
 sp_int sp_IntArray_delete(sp_IntArray *a, sp_int v);
+/* delete on a frozen Array (lib/sp_inspect.c): raises FrozenError when the
+   Array holds v and returns when it does not. Out of line and cold: only a
+   frozen Array comes here. */
+SP_COLD void sp_IntArray_delete_frozen(sp_IntArray *a, sp_int v);
 void sp_IntArray_insert(sp_IntArray *a, sp_int i, sp_int v);
 sp_IntArray *sp_IntArray_uniq(sp_IntArray *a);
 sp_IntArray *sp_IntArray_intersect(sp_IntArray *a, sp_IntArray *b);
@@ -200,6 +204,7 @@ sp_bool sp_FloatArray_include(sp_FloatArray *a, sp_float v);
 sp_int sp_FloatArray_index(sp_FloatArray *a, sp_float v);
 sp_int sp_FloatArray_rindex(sp_FloatArray *a, sp_float v);
 sp_float sp_FloatArray_delete(sp_FloatArray *a, sp_float v);
+SP_COLD void sp_FloatArray_delete_frozen(sp_FloatArray *a, sp_float v);
 sp_FloatArray *sp_FloatArray_intersect(sp_FloatArray *a, sp_FloatArray *b);
 sp_bool sp_FloatArray_intersect_p(sp_FloatArray *a, sp_FloatArray *b);
 sp_FloatArray *sp_FloatArray_union(sp_FloatArray *a, sp_FloatArray *b);
@@ -395,6 +400,7 @@ sp_int sp_FloatArray_truthy_scan(sp_FloatArray *a);
 #define sp_FloatArray_nil_sum_if_flagged(a, fs) ({ sp_FloatArray *_ff_a = (a); (_ff_a && SP_MAY_NIL(_ff_a)) ? sp_FloatArray_nil_sum_ck(_ff_a, (fs)) : _ff_a; })
 const char *sp_StrArray_delete_at(sp_StrArray *a, sp_int i);
 const char *sp_StrArray_delete(sp_StrArray *a, const char *v);
+SP_COLD void sp_StrArray_delete_frozen(sp_StrArray *a, const char *v);
 void sp_StrArray_insert(sp_StrArray *a, sp_int i, const char *v);
 void sp_StrArray_shuffle_bang(sp_StrArray *a);
 sp_StrArray *sp_StrArray_dup(sp_StrArray *a);
