@@ -1534,7 +1534,13 @@ int emit_gsub_block_expr(Compiler *c, int id, Buf *b) {
   else {
     emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "sp_int _t%d = %s(sp_re_pat_%d, _t%d, _t%d);\n", tm, re_next, reidx, ts, tpos);
   }
-  emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "if (_t%d < 0) { sp_String_append_bin(_t%d, _t%d + _t%d); break; }\n", tm, tout, ts, tpos);
+  /* What is appended from the subject is given its length: `_ts + _tpos` points
+     into the subject and has no header of its own, so a runtime call that asks
+     for its length or its encoding reads the byte before it, the last byte of
+     the match. Where that byte is one a heap String's marker uses (0xfe ...)
+     the length came from the subject's own bytes: the rest of the String was
+     dropped, or bytes past its end were copied. */
+  emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "if (_t%d < 0) { sp_String_append_n(_t%d, _t%d + _t%d, (size_t)(_t%d - _t%d)); break; }\n", tm, tout, ts, tpos, tslen, tpos);
   emit_indent(g_pre, g_indent + 1); buf_puts(g_pre, "sp_re_sub_matched = 1;\n");   /* the bang forms' nil contract */
   if (polypat) {
     emit_indent(g_pre, g_indent + 1);
@@ -1560,14 +1566,20 @@ int emit_gsub_block_expr(Compiler *c, int id, Buf *b) {
     emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "sp_int _t%d = sp_re_caps[0] - _t%d;\n", tms, tpos);
     emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "sp_int _t%d = sp_re_caps[1] - _t%d;\n", tme, tpos);
   }
-  emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "sp_String_append_bin(_t%d, sp_str_substr(_t%d + _t%d, 0, _t%d));\n", tout, ts, tpos, tms);
+  emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "sp_String_append_n(_t%d, _t%d + _t%d, (size_t)_t%d);\n", tout, ts, tpos, tms);
   if (p0) {
     Scope *ps = comp_scope_of(c, block);
     LocalVar *plv = ps ? scope_local(ps, block_param_name(c, block, 0)) : NULL;
     int box = plv && plv->type == TY_POLY;
+    /* A String pattern's match is the pattern, and that is what CRuby hands the
+       block: the pattern's bytes with the pattern's encoding, whatever the
+       subject's is. A Regexp's match is the subject's bytes, with its encoding. */
     emit_indent(g_pre, g_indent + 1);
-    buf_printf(g_pre, "lv_%s = %ssp_str_substr(_t%d + _t%d, _t%d, _t%d - _t%d)%s;\n",
-               p0, box ? "sp_box_str(" : "", ts, tpos, tms, tme, tms, box ? ")" : "");
+    buf_printf(g_pre, "lv_%s = %s", p0, box ? "sp_box_str(" : "");
+    if (polypat) buf_printf(g_pre, "!_t%d ? sp_str_substr(_t%d, 0, _t%d) : ", tre, tnd, tnl);
+    if (strpat) buf_printf(g_pre, "sp_str_substr(_t%d, 0, _t%d)", tnd, tnl);
+    else buf_printf(g_pre, "sp_str_substr(_t%d, _t%d + _t%d, _t%d - _t%d)", ts, tpos, tms, tme, tms);
+    buf_printf(g_pre, "%s;\n", box ? ")" : "");
   }
   IterStep st; emit_iter_step_open(c, block, 0, g_indent + 1, &st);
   int save = g_indent; g_indent++;
@@ -1587,10 +1599,10 @@ int emit_gsub_block_expr(Compiler *c, int id, Buf *b) {
   g_indent = save;
   emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "sp_String_append_bin(_t%d, %s);\n", tout, vb.p ? vb.p : "\"\""); free(vb.p);
   if (once) {
-    emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "sp_String_append_bin(_t%d, _t%d + _t%d + _t%d); break;\n", tout, ts, tpos, tme);
+    emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "sp_String_append_n(_t%d, _t%d + _t%d + _t%d, (size_t)(_t%d - _t%d - _t%d)); break;\n", tout, ts, tpos, tme, tslen, tpos, tme);
   }
   else {
-    emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "if (_t%d == _t%d) { if (_t%d + _t%d < _t%d) sp_String_append_bin(_t%d, sp_str_substr(_t%d + _t%d, _t%d, 1)); _t%d += _t%d + 1; }\n",
+    emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "if (_t%d == _t%d) { if (_t%d + _t%d < _t%d) sp_String_append_n(_t%d, _t%d + _t%d + _t%d, 1); _t%d += _t%d + 1; }\n",
                tme, tms, tpos, tme, tslen, tout, ts, tpos, tme, tpos, tme);
     emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "else { _t%d += _t%d; }\n", tpos, tme);
   }
