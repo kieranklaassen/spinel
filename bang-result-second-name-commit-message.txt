@@ -1,0 +1,13 @@
+The bang-result route asks a receiver read through its other name
+
+`t = s; r = t.strip!; r << "!"; p s` printed "ab" where CRuby prints
+"ab!". The bang-result route of refuse_string_alias_copies refused the
+kept result only when the receiver's own name is read again, and t is
+not: the String is read through s, the name t shares its handle with.
+
+The route now also takes a local receiver that shares its handle
+(sa_handle), as sa_mutated already does for the name that keeps the
+result. --share-strings is asked as before and compiles the program,
+which answers as CRuby does there.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
