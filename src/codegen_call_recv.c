@@ -6505,9 +6505,9 @@ static int str_arms_slice_encode(Compiler *c, int id, Buf *b, const char *name, 
     int pi = re_lit_index(c, argv[0]);
     int tn = ++g_tmp;
     buf_printf(b, "({ sp_int _t%d = ", tn); emit_int_expr(c, argv[1], b);
-    buf_printf(b, "; sp_re_match(sp_re_pat_%d, %s) >= 0 ? "
-                  "(_t%d == 0 ? sp_re_match_str : (_t%d >= 1 && _t%d <= 9 ? sp_re_captures[_t%d] : NULL)) : NULL; })",
-               pi, r, tn, tn, tn, tn);
+    char ix[24]; snprintf(ix, sizeof ix, "_t%d", tn);
+    buf_printf(b, "; sp_re_match(sp_re_pat_%d, %s) >= 0 ? ", pi, r);
+    emit_re_group_read(b, ix); buf_puts(b, " : NULL; })");
   }
   /* The same three forms with the Regexp arriving as a VALUE -- a
      parameter, a constant, a local -- whose class the type already
@@ -6539,9 +6539,9 @@ static int str_arms_slice_encode(Compiler *c, int id, Buf *b, const char *name, 
     int tp = ++g_tmp, tn = ++g_tmp;
     buf_printf(b, "({ mrb_regexp_pattern *_t%d = ", tp); emit_expr(c, argv[0], b);
     buf_printf(b, "; sp_int _t%d = ", tn); emit_int_expr(c, argv[1], b);
-    buf_printf(b, "; _t%d && sp_re_match(_t%d, %s) >= 0 ? "
-                  "(_t%d == 0 ? sp_re_match_str : (_t%d >= 1 && _t%d <= 9 ? sp_re_captures[_t%d] : NULL)) : NULL; })",
-               tp, tp, r, tn, tn, tn, tn);
+    char ix[24]; snprintf(ix, sizeof ix, "_t%d", tn);
+    buf_printf(b, "; _t%d && sp_re_match(_t%d, %s) >= 0 ? ", tp, tp, r);
+    emit_re_group_read(b, ix); buf_puts(b, " : NULL; })");
   }
   else if ((is_slice_alias(name)) && argc == 1 &&
            comp_ntype(c, argv[0]) == TY_RANGE &&

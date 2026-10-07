@@ -2332,10 +2332,11 @@ static int emit_ivar_cvar_gvar_expr(Compiler *c, int id, Buf *b, const NodeTable
     unsupported(c, id, "global variable read");
   }
   if (sp_streq(ty, "NumberedReferenceReadNode")) {
-    /* $1..$9 -> the n-th capture of the last match (NULL when absent) */
+    /* $1..$9 -> the n-th capture of the last match (NULL when absent); a
+       group past the ninth is cut from the subject where it is read */
     long long n = nt_int(nt, id, "number", 0);
     if (n >= 1 && n <= 9) buf_printf(b, "sp_re_captures[%lld]", n);
-    else buf_puts(b, "NULL");
+    else buf_printf(b, "sp_re_group(%lld)", n);
     return 1;
   }
   if (sp_streq(ty, "BackReferenceReadNode")) {
@@ -2924,6 +2925,8 @@ static int emit_defined_expr(Compiler *c, int id, Buf *b, const NodeTable *nt, c
       buf_printf(b, "(sp_re_captures[%d] ? SPL(\"global-variable\") : NULL)", refn);
       return 1;
     }
+    buf_printf(b, "(sp_re_group(%d) ? SPL(\"global-variable\") : NULL)", refn);
+    return 1;
   }
   /* defined?(yield) answers "yield" only when the current method actually
      received a block, else nil -- the same runtime question as block_given?.

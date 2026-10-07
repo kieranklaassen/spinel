@@ -70,6 +70,7 @@ void sp_re_push_match_roots(void);
 
 /* ---- wrappers (lib/sp_re.c) ---- */
 const char *sp_re_last_paren_match(void);
+const char *sp_re_group(sp_int n);   /* group n of the last match, past the ninth too */
 void sp_re_set_captures(const char *str, int *caps, int ncaps);
 extern int sp_re_track_last;   /* gsub / sub / scan record `$~` (sp_re.c) */
 void sp_re_clear_last_match(void);

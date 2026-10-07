@@ -879,6 +879,7 @@ int re_engine_flags(int pf);
 /* Find or add a RegularExpressionNode literal; returns its table index, or
    -1 if the node isn't a static regex literal. */
 int re_lit_index(Compiler *c, int nid);
+void emit_re_group_read(Buf *b, const char *ix);   /* group ix of the last match */
 int re_lit_node(Compiler *c, int nid);
 /* Codegen's whole-program lookups, built once and rebuilt when the node or
    scope count changes (#4966). cg_scope_nodes: the node ids whose nscope is

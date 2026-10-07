@@ -66,6 +66,11 @@ SP_TLS const mrb_regexp_pattern *sp_re_last_pat = NULL;
    read (sp_re_lit_pattern). The matched text is the pattern's own bytes, so
    sp_re_match_str is what it is built from. */
 SP_TLS int sp_re_last_lit = 0;
+/* Whether sp_re_caps holds the positions of the match in the registers. A
+   match made into a caps array of its own (sp_re_matchdata) hands over its
+   Strings alone and leaves sp_re_caps at the match before, so a group read by
+   its position (sp_re_group) asks this first. */
+SP_TLS int sp_re_caps_own = 0;
 /* The Regexp a String-pattern match answers for `$~.regexp`. The last one
    built is kept, so reading `$~` after every turn of a loop that does the same
    `gsub("x", ...)` compiles once. A pattern it replaces is not freed: a
@@ -117,7 +122,9 @@ void sp_re_frame_push(sp_re_frame *f) {
   f->match_post = sp_re_match_post;
   f->last_ncap = sp_re_last_ncap;
   f->last_pat = sp_re_last_pat;
-  f->last_lit = sp_re_last_lit;
+  /* two flags in the one int: the frame is on the C stack, and stays the
+     size it was */
+  f->last_lit = sp_re_last_lit | (sp_re_caps_own << 1);
   f->pp_span[0] = sp_re_pp_span[0]; f->pp_span[1] = sp_re_pp_span[1];
 }
 void sp_re_frame_pop(sp_re_frame *f) {
@@ -130,7 +137,8 @@ void sp_re_frame_pop(sp_re_frame *f) {
   sp_re_match_post = f->match_post;
   sp_re_last_ncap = f->last_ncap;
   sp_re_last_pat = f->last_pat;
-  sp_re_last_lit = f->last_lit;
+  sp_re_last_lit = f->last_lit & 1;
+  sp_re_caps_own = f->last_lit >> 1;
   /* the span $` and $' are built from lazily: the caller's, not the callee's */
   sp_re_pp_span[0] = f->pp_span[0]; sp_re_pp_span[1] = f->pp_span[1];
 }
@@ -138,6 +146,7 @@ void sp_re_set_captures(const char *str, int *caps, int ncaps) {SP_GC_ROOT_STR(s
   sp_re_last_str = str;
   sp_re_last_ncap = ncaps;
   sp_re_last_lit = 0;
+  sp_re_caps_own = (caps == sp_re_caps);
   for (int i = 0; i < 10; i++) sp_re_captures[i] = NULL;
   for (int i = 1; i < ncaps && i < 10; i++) {
     if (caps[i*2] >= 0 && caps[(i*2)+1] >= 0) {
@@ -224,6 +233,27 @@ const char *sp_re_post_match(void) {
   sp_str_set_len(post, (size_t)n);
   sp_re_match_post = post;
   return post;
+}
+/* Group n of the last match, for a read by number: $10, $~[n],
+   Regexp.last_match(n), s[re, n]. The Strings of groups 1 to 9 are kept
+   (sp_re_captures); a group past the ninth is cut from the subject by its
+   kept position, as $` and $' are, where the positions are this match's
+   (sp_re_caps_own). A negative n counts back from the pattern's last group
+   and never reaches the whole match. NULL where the group took no part, the
+   pattern has no such group, or nothing matched. */
+const char *sp_re_group(sp_int n) {
+  if (!sp_re_last_str) return NULL;
+  if (n < 0 && (n += sp_re_last_ncap) <= 0) return NULL;
+  if (n >= sp_re_last_ncap || n >= 32) return NULL;
+  if (n == 0) return sp_re_match_str;
+  if (n <= 9) return sp_re_captures[n];
+  if (!sp_re_caps_own) return NULL;
+  int beg = sp_re_caps[2 * n], len = sp_re_caps[2 * n + 1] - beg;
+  if (beg < 0 || len < 0) return NULL;
+  char *g = sp_str_alloc_raw(len + 1);
+  memcpy(g, sp_re_last_str + beg, len); g[len] = 0;
+  sp_str_set_len(g, (size_t)len);
+  return g;
 }
 sp_int sp_re_match(mrb_regexp_pattern *pat, const char *str) {SP_GC_ROOT_STR(str);
   if (!str) return -1;

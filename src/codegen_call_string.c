@@ -659,6 +659,14 @@ no_gsub_enum:
 }
 
 /* Regexp's class methods: last_match, try_convert, timeout, escape / quote, union, linear_time? and compile */
+/* Group `ix` of the last match, read by a number known only when it runs
+   (`ix` names a temp): the whole match for 0, the kept String for 1 to 9,
+   and sp_re_group for the rest -- a group past the ninth, a negative index. */
+void emit_re_group_read(Buf *b, const char *ix) {
+  buf_printf(b, "(%s == 0 ? sp_re_match_str : (%s >= 1 && %s <= 9 ? sp_re_captures[%s] : sp_re_group(%s)))",
+             ix, ix, ix, ix, ix);
+}
+
 int emit_call_regexp_class_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv) {
   /* Regexp.last_match -> the last MatchData ($~), or nil */
   if (recv >= 0 && argc == 0 && sp_streq(name, "last_match") &&
@@ -697,7 +705,7 @@ int emit_call_regexp_class_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
       long long idx = nt_int(nt, argv[0], "value", 0);
       if (idx == 0) { buf_puts(b, "sp_re_match_str"); return 1; }
       if (idx >= 1 && idx <= 9) { buf_printf(b, "sp_re_captures[%d]", (int)idx); return 1; }
-      buf_puts(b, "NULL");
+      buf_printf(b, "sp_re_group(%lld)", idx);
       return 1;
     }
     /* a name selects a named group of the pattern that last matched; it was
@@ -721,8 +729,7 @@ int emit_call_regexp_class_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
     int tv = ++g_tmp;
     emit_indent(g_pre, g_indent);
     { Buf ib_; memset(&ib_, 0, sizeof ib_); emit_int_expr(c, argv[0], &ib_); buf_printf(g_pre, "sp_int _t%d = %s;\n", tv, ib_.p ? ib_.p : "0"); free(ib_.p); }
-    buf_printf(b, "(_t%d == 0 ? sp_re_match_str : (_t%d >= 1 && _t%d <= 9 ? sp_re_captures[_t%d] : NULL))",
-               tv, tv, tv, tv);
+    { char ix[24]; snprintf(ix, sizeof ix, "_t%d", tv); emit_re_group_read(b, ix); }
     return 1;
   }
   /* Regexp.escape / Regexp.quote -> escape special regex characters */
