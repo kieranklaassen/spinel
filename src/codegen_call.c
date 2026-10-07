@@ -24265,8 +24265,8 @@ void emit_call_body(Compiler *c, int id, Buf *b) {
     const NodeTable *ntR = c->nt;
     int recvR = nt_ref(ntR, id, "receiver");
     const char *nmR = nt_str(ntR, id, "name");
-    /* an alias that captured the builtin (builtin_only) is the builtin's */
-    if (recvR >= 0 && nmR && nt_ref(ntR, id, "block") < 0 && !nt_int(ntR, id, "builtin_only", 0)) {
+    /* an alias that captured the builtin (builtin_only) is the builtin's; a `&.` call waits for its nil guard */
+    if (recvR >= 0 && nmR && nt_ref(ntR, id, "block") < 0 && !nt_int(ntR, id, "builtin_only", 0) && !sn_guard_pending(c, id)) {
       TyKind rtR = comp_ntype(c, recvR);
       const char *ocR = rtR == TY_STRING ? "String"
                       : rtR == TY_INT ? "Integer"
