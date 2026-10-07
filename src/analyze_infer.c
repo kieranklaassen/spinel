@@ -3886,10 +3886,13 @@ static int infer_string_recv_call(Compiler *c, int id, const NodeTable *nt, cons
     }
     if (sp_streq(name, "unpack1") && (argc == 1 || argc == 2)) { *out = an_unpack1_lit_type(nt, argv[0]); return 1; }
     /* byteindex/byterindex over a String or Regexp needle -> byte offset or
-       nil (SP_INT_NIL). */
+       nil (SP_INT_NIL). A boxed needle is one of the two at run time (or the
+       conversion's TypeError), and the emitter searches for it: the answer
+       has the same type, where it was left untyped and read as nil. */
     if ((sp_streq(name, "byteindex") || sp_streq(name, "byterindex")) &&
         (argc == 1 || argc == 2) &&
-        (comp_ntype(c, argv[0]) == TY_STRING || comp_ntype(c, argv[0]) == TY_REGEX))
+        (comp_ntype(c, argv[0]) == TY_STRING || comp_ntype(c, argv[0]) == TY_REGEX ||
+         comp_ntype(c, argv[0]) == TY_POLY))
       { *out = TY_INT; return 1; }
     /* each_line and lines read their separator argument */
     if (sp_streq(name, "each_line") && argc == 0 && nt_ref(nt, id, "block") < 0)
