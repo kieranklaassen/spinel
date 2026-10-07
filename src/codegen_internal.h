@@ -567,6 +567,9 @@ extern int g_uses_threads;
 extern int g_uses_finalizers;
 extern int g_has_user_cmp;
 extern int g_has_user_binop;
+/* a boxed value handed to a typed parameter: its tag test and its unboxed form */
+int user_dispatch_arg(Compiler *c, Scope *m, int pi, const char *v,
+                      char *guard, size_t gsz, char *arg, size_t asz);
 extern int g_has_user_aset;
 extern int g_has_user_coerce;
 /* 1 if class k defines a #coerce this TU emits and can call: one parameter,

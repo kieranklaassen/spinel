@@ -11900,8 +11900,8 @@ static void emit_obj_cmp_dispatch(Compiler *c, Buf *b) {
    user dispatch tables below pass it: `guard` (empty when any value will do)
    tests that the value fits the parameter, and `arg` is the value in the
    parameter's C type. 0 when the parameter's type has no such form. */
-static int user_dispatch_arg(Compiler *c, Scope *m, int pi, const char *v,
-                             char *guard, size_t gsz, char *arg, size_t asz) {
+int user_dispatch_arg(Compiler *c, Scope *m, int pi, const char *v,
+                      char *guard, size_t gsz, char *arg, size_t asz) {
   TyKind pt = scope_param_type(m, pi);
   guard[0] = 0;
   if (ty_is_object(pt)) {

@@ -5654,9 +5654,32 @@ static int emit_when_user_eq(Compiler *c, int cond, int t, TyKind pt, Buf *b) {
   if (weq < 0) return 0;
   Scope *ws = &c->scopes[weq];
   LocalVar *wp = ws->nparams == 1 ? scope_local(ws, ws->pnames[0]) : NULL;
-  if (!wp || wp->type != TY_POLY || ws->rest_idx >= 0 || ws->kwrest_idx >= 0 || ws->blk_param ||
+  if (!wp || ws->rest_idx >= 0 || ws->kwrest_idx >= 0 || ws->blk_param ||
       (ws->ret != TY_BOOL && ws->ret != TY_POLY)) return 0;
   const char *dcn = c->classes[wdef].c_name;
+  if (wp->type != TY_POLY) {
+    /* a === whose parameter a written call has typed, beside a boxed
+       subject: the method is called where the subject holds that type, and
+       the comparison the case made stays where it holds anything else. A
+       parameter that is its caller's String slot or the shared handle is
+       not this call's to make. */
+    char sref[24], g[160], a[96];
+    snprintf(sref, sizeof sref, "_t%d", t);
+    if (pt != TY_POLY || via_eq || repr_of_slot(c, wp).kind == RK_STRBUF || comp_byref_param(c, ws, 0) ||
+        !user_dispatch_arg(c, ws, 0, sref, g, sizeof g, a, sizeof a) || !g[0]) return 0;
+    int ta = ++g_tmp;
+    buf_printf(b, "({ sp_%s *_t%d = (sp_%s *)(", dcn, ta, dcn);
+    emit_expr(c, cond, b);
+    buf_puts(b, "); ");
+    if (subtree_allocates(c->nt, cond)) buf_printf(b, "SP_GC_ROOT(_t%d); ", ta);
+    buf_printf(b, "_t%d && %s ? ", ta, g);
+    buf_puts(b, ws->ret == TY_POLY ? "sp_poly_truthy(" : "(");
+    emit_method_cname(c, ws, b);
+    buf_printf(b, "(_t%d, %s)) : sp_poly_eq(%s, ", ta, a, sref);
+    { char aref[24]; snprintf(aref, sizeof aref, "_t%d", ta); emit_boxed_text(c, wpt, aref, b); }
+    buf_puts(b, "); })");
+    return 1;
+  }
   int ta = ++g_tmp;
   buf_printf(b, "({ sp_%s *_t%d = (sp_%s *)(", dcn, ta, dcn);
   emit_expr(c, cond, b);
