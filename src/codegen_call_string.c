@@ -1108,7 +1108,12 @@ int emit_op_string_scrub_block(Compiler *c, const BopCtx *x, Buf *b) {
   emit_indent(g_pre, g_indent + 1);
   buf_printf(g_pre, "sp_int _t%d, _t%d = sp_str_scrub_bad(_t%d, _t%d, _t%d, &_t%d);\n", tn, tb, ts, tl, tp, tn);
   emit_indent(g_pre, g_indent + 1);
-  buf_printf(g_pre, "sp_String_append_bin(_t%d, sp_str_substr(_t%d + _t%d, 0, _t%d - _t%d));\n", tout, ts, tp, tb, tp);
+  /* A valid run is appended by its length, and the block's parameter is cut
+     from the receiver itself: `_ts + _tp` points into the receiver and has no
+     header of its own, and the byte before it, the last invalid byte, is one a
+     heap String's marker uses when it is 0xfe or 0xfd. sp_str_substr rooted
+     that pointer, and the collector then marked a slot that is no String. */
+  buf_printf(g_pre, "sp_String_append_n(_t%d, _t%d + _t%d, (size_t)(_t%d - _t%d));\n", tout, ts, tp, tb, tp);
   emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "if (_t%d >= _t%d) break;\n", tb, tl);
   const char *p0 = block_param_name(c, block, 0);
   if (p0) {
@@ -1116,7 +1121,7 @@ int emit_op_string_scrub_block(Compiler *c, const BopCtx *x, Buf *b) {
     LocalVar *plv = ps ? scope_local(ps, p0) : NULL;
     int box = plv && plv->type == TY_POLY;
     emit_indent(g_pre, g_indent + 1);
-    buf_printf(g_pre, "lv_%s = %ssp_str_substr(_t%d + _t%d, 0, _t%d)%s;\n",
+    buf_printf(g_pre, "lv_%s = %ssp_str_substr(_t%d, _t%d, _t%d)%s;\n",
                rename_local(p0), box ? "sp_box_str(" : "", ts, tb, tn, box ? ")" : "");
   }
   int save = g_indent; g_indent++;
