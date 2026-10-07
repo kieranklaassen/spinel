@@ -1279,6 +1279,7 @@ int        comp_arysub_kernel_array(Compiler *c, int id);
 int        comp_array_method_name(const char *n);
 int        comp_builtin_kind_reopen_mi(Compiler *c, TyKind t, const char *name);
 int        comp_builtin_name_reopened(Compiler *c, const char *name);
+int        comp_nonnumber_arith_reopened(Compiler *c);
 int        comp_yield_chain_reopened(Compiler *c, int call);
 /* Record method `name`'s visibility on a class (overwrite-or-append). */
 void       comp_method_vis_set(ClassInfo *ci, const char *name, int kind);
