@@ -10457,8 +10457,9 @@ static sp_RbVal sp_poly_delete_key(sp_RbVal recv, sp_RbVal key) {
         return r == SP_INT_NIL ? sp_box_nil() : key;
       }
       case SP_BUILTIN_STR_ARRAY: {
-        if (key.tag != SP_TAG_STR) return sp_box_nil();
-        const char *r = sp_StrArray_delete((sp_StrArray *)recv.v.p, key.v.s);
+        const char *ks;
+        if (key.tag == SP_TAG_STR) ks = key.v.s; else if (sp_poly_is_strbuf(key)) ks = sp_poly_unbox_s(key); else return sp_box_nil();
+        const char *r = sp_StrArray_delete((sp_StrArray *)recv.v.p, ks);
         return r ? sp_box_str(r) : sp_box_nil();
       }
       case SP_BUILTIN_FLT_ARRAY: {
