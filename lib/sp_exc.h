@@ -15,7 +15,7 @@
  *
  * sp_exc_sym_slot/sp_exc_recover_named (need sp_sym_intern, a REAL
  * program-generated function whose body differs per compiled program --
- * not a hook) and sp_exc_is_a (poly value-dispatch) stay in spinel_rt.h,
+ * not a hook) stay in spinel_rt.h,
  * along with sp_exc_reason_acc/sp_exc_tag_acc (the two accessors that
  * call sp_exc_sym_slot) and the raise/longjmp control flow
  * (sp_raise_exc/sp_raise_cls and friends), which threads through the
@@ -63,10 +63,15 @@ extern SP_TLS sp_RbVal sp_pending_exc_recv, sp_pending_exc_key, sp_pending_exc_v
 extern SP_TLS unsigned char sp_pending_exc_flags;
 
 int sp_exc_cls_matches(const char *raised, const char *target);
+sp_bool sp_exc_has_acc(sp_Exception *e, const char *acc);   /* has the class-gated accessor */
 int sp_exc_nearest_cls(const char *raised, const char *const *targets, int n);
 SP_COLD void sp_exc_acc_gate(sp_Exception *e, const char *cls, const char *acc);
 int sp_exc_is_standard_error(const char *raised);
 sp_Exception *sp_exc_new_for_catch(const char *cls, const char *msg);
+/* A class of the program's with ivars that no constructor builds: the
+   exception of that name at the class's own size, or NULL for another name
+   (set by the generated main()). */
+extern void *(*sp_user_exc_new_fn)(const char *cls, const char *msg);
 /* The message a bare `raise` carries: empty, and distinct from "no message
    given" (which falls back to the class name, as Exception.new does) (#3711). */
 extern const char *const sp_exc_no_msg;
@@ -76,6 +81,8 @@ static inline const char *sp_exc_msg_given(const char *m) {
   return (m && !m[0]) ? sp_exc_no_msg : m;
 }
 void *sp_exc_new_sub_sized(size_t sz, const char *cls_name, const char *msg);
+void *sp_exc_new_sub_ivars(size_t sz, const char *cls_name, const char *msg,
+                           void (*scan)(void *), void (*nils)(void *));
 
 void sp_exc_gc_scan(void *p);
 sp_Exception *sp_exc_new(const char *cls_name, const char *msg);
@@ -144,5 +151,9 @@ static inline void sp_arity_check(sp_int given, sp_int min, sp_int max, const ch
    "missing" or "unknown", naming the `count` keywords in `names`, each
    already inspected and joined by ", ". */
 SP_NORETURN void sp_raise_kw_error(const char *kind, sp_int count, const char *names);
+/* Exception#is_a?(ClassName), modules and the user hierarchy included. */
+sp_int sp_exc_is_a(volatile sp_Exception *ve, const char *cn);
+/* A fixed-depth handler stack overflowed: CRuby's words on stderr, then exit. */
+SP_NORETURN SP_COLD void sp_stack_too_deep(void);
 
 #endif

@@ -1,0 +1,26 @@
+[true, true, true, true]
+false
+false
+true
+never raised
+nil
+nil
+true
+true
+true
+never raised (MyErr)
+true
+true
+true
+true
+true
+Array
+error: boxed
+error: d
+value: 3
+value: "s"
+value: nil
+[true, false, false]
+true
+true
+false
