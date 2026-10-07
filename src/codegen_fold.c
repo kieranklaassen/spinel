@@ -1433,7 +1433,7 @@ int emit_gsub_block_expr(Compiler *c, int id, Buf *b) {
        `word.gsub!(inflections.acronyms_underscore_regex) { ... }` fell to
        a static NoMethodError. */
     if (comp_ntype(c, argv[0]) == TY_REGEX) dynre = 1;
-    /* a plain-String pattern: the same scan loop, matching by strstr (an
+    /* a plain-String pattern: the same scan loop, matching by bytes (an
        empty needle degenerates to the zero-width branch, like CRuby) */
     else if (comp_ntype(c, argv[0]) == TY_STRING) strpat = 1;
     /* a pattern that is a Regexp or a String only at run time (an element
@@ -1470,7 +1470,7 @@ int emit_gsub_block_expr(Compiler *c, int id, Buf *b) {
      NUL: `"a\0b".gsub(/./m) { }` walked one character and stopped. */
   emit_indent(g_pre, g_indent); buf_printf(g_pre, "sp_int _t%d = (sp_int)sp_str_byte_len(_t%d);\n", tslen, ts);
   emit_indent(g_pre, g_indent); buf_printf(g_pre, "sp_String *_t%d = sp_String_new(\"\"); SP_GC_ROOT(_t%d);\n", tout, tout);
-  int tnd = 0, tnl = 0, tre = 0;
+  int tnd = 0, tnl = 0, tnn = 0, tre = 0;
   if (polypat) {
     int tp = ++g_tmp;
     tre = ++g_tmp; tnd = ++g_tmp; tnl = ++g_tmp;
@@ -1491,6 +1491,9 @@ int emit_gsub_block_expr(Compiler *c, int id, Buf *b) {
     buf_printf(g_pre, "SP_GC_ROOT_STR(_t%d);\n", tnd);
     emit_indent(g_pre, g_indent);
     buf_printf(g_pre, "sp_int _t%d = _t%d ? (sp_int)sp_str_byte_len(_t%d) : 0;\n", tnl, tnd, tnd);
+    tnn = ++g_tmp;
+    emit_indent(g_pre, g_indent);
+    buf_printf(g_pre, "int _t%d = -1;\n", tnn);
   }
   else if (dynre) {
     tre = ++g_tmp;
@@ -1505,11 +1508,21 @@ int emit_gsub_block_expr(Compiler *c, int id, Buf *b) {
     emit_indent(g_pre, g_indent);
     buf_printf(g_pre, "const char *_t%d = %s;\n", tnd, ab.p ? ab.p : "\"\"");
     free(ab.p);
-    /* the needle is read by every strstr below, for the same reason */
+    /* the needle is read by every search below, for the same reason */
     emit_indent(g_pre, g_indent);
     buf_printf(g_pre, "SP_GC_ROOT_STR(_t%d);\n", tnd);
     emit_indent(g_pre, g_indent);
     buf_printf(g_pre, "sp_int _t%d = (sp_int)sp_str_byte_len(_t%d);\n", tnl, tnd);
+    /* whether the pattern holds a NUL byte: a literal says so here, any
+       other String at the call's first hit (-1 until then) */
+    int lit_nul = -1;
+    if (nt_kind(nt, argv[0]) == NK_StringNode) {
+      const char *sc = nt_str(nt, argv[0], "content");
+      lit_nul = sc && memchr(sc, 0, nt_str_len(nt, argv[0], "content")) != NULL;
+    }
+    tnn = ++g_tmp;
+    emit_indent(g_pre, g_indent);
+    buf_printf(g_pre, "int _t%d = %d;\n", tnn, lit_nul);
   }
   /* `$~` is each turn's match inside the block and the last one after the
      call, or nil when nothing matched: the registers start cleared, every
@@ -1518,15 +1531,30 @@ int emit_gsub_block_expr(Compiler *c, int id, Buf *b) {
   const char *re_next = g_reads_match_regs ? "sp_re_match_next" : "sp_re_match_at";
   if (g_reads_match_regs) { emit_indent(g_pre, g_indent); buf_puts(g_pre, "sp_re_clear_last_match();\n"); }
   emit_indent(g_pre, g_indent); buf_printf(g_pre, "while (_t%d <= _t%d) {\n", tpos, tslen);
+  /* A String pattern is found by bytes. One byte goes by memchr. A longer
+     pattern goes by strstr, which ends at the subject's first NUL byte: where
+     it finds nothing, what stands behind that byte is searched by
+     sp_str_find_rest. strstr reads the pattern to its first NUL byte too, so
+     at the call's first hit one strlen says whether the pattern holds one (-1
+     until then), and such a pattern is searched by sp_str_find_rest. An empty
+     pattern matches where it stands. */
+  Buf sb; memset(&sb, 0, sizeof sb);
+  if (polypat || strpat)
+    buf_printf(&sb, "({ const char *_a = _t%d + _t%d, *_e = _t%d + _t%d, *_h; "
+                    "if (_t%d == 1) _h = (const char *)memchr(_a, _t%d[0], (size_t)(_e - _a)); "
+                    "else { _h = _t%d > 0 ? NULL : strstr(_a, _t%d); "
+                    "if (_h && _t%d < 0) _t%d = strlen(_t%d) != (size_t)_t%d; "
+                    "if (_t%d > 0) _h = sp_str_find_rest(_h ? _h : _a, _e, _t%d, (size_t)_t%d); "
+                    "else if (!_h) { _a += strlen(_a) + 1; _h = _a < _e ? sp_str_find_rest(_a, _e, _t%d, (size_t)_t%d) : NULL; } } "
+                    "_h ? (sp_int)(_h - (_t%d + _t%d)) : (sp_int)-1; })",
+               ts, tpos, ts, tslen, tnl, tnd, tnn, tnd, tnn, tnn, tnd, tnl, tnn, tnd, tnl, tnd, tnl, ts, tpos);
   if (polypat) {
     emit_indent(g_pre, g_indent + 1);
-    buf_printf(g_pre, "sp_int _t%d = _t%d ? %s(_t%d, _t%d, _t%d) : ({ const char *_h = strstr(_t%d + _t%d, _t%d); _h ? (sp_int)(_h - (_t%d + _t%d)) : (sp_int)-1; });\n",
-               tm, tre, re_next, tre, ts, tpos, ts, tpos, tnd, ts, tpos);
+    buf_printf(g_pre, "sp_int _t%d = _t%d ? %s(_t%d, _t%d, _t%d) : %s;\n", tm, tre, re_next, tre, ts, tpos, sb.p);
   }
   else if (strpat) {
     emit_indent(g_pre, g_indent + 1);
-    buf_printf(g_pre, "sp_int _t%d = ({ const char *_h = strstr(_t%d + _t%d, _t%d); _h ? (sp_int)(_h - (_t%d + _t%d)) : (sp_int)-1; });\n",
-               tm, ts, tpos, tnd, ts, tpos);
+    buf_printf(g_pre, "sp_int _t%d = %s;\n", tm, sb.p);
   }
   else if (dynre) {
     emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "sp_int _t%d = %s(_t%d, _t%d, _t%d);\n", tm, re_next, tre, ts, tpos);
@@ -1534,6 +1562,7 @@ int emit_gsub_block_expr(Compiler *c, int id, Buf *b) {
   else {
     emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "sp_int _t%d = %s(sp_re_pat_%d, _t%d, _t%d);\n", tm, re_next, reidx, ts, tpos);
   }
+  free(sb.p);
   /* What is appended from the subject is given its length: `_ts + _tpos` points
      into the subject and has no header of its own, so a runtime call that asks
      for its length or its encoding reads the byte before it, the last byte of
@@ -1599,10 +1628,8 @@ int emit_gsub_block_expr(Compiler *c, int id, Buf *b) {
   g_indent = save;
   emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "sp_String_append_bin(_t%d, %s);\n", tout, vb.p ? vb.p : "\"\""); free(vb.p);
   if (once) {
-    /* A String pattern is sought by strstr, which reads it to its first NUL,
-       while the match's end is taken from the pattern's byte length: with a
-       NUL in the pattern the end can lie past the subject's end, and there is
-       no tail then. */
+    /* A match lies inside the subject, a String pattern being found by
+       bytes: one that ends at the subject's end has no tail. */
     emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "if (_t%d + _t%d < _t%d) sp_String_append_n(_t%d, _t%d + _t%d + _t%d, (size_t)(_t%d - _t%d - _t%d));\n", tpos, tme, tslen, tout, ts, tpos, tme, tslen, tpos, tme);
     emit_indent(g_pre, g_indent + 1); buf_puts(g_pre, "break;\n");
   }
