@@ -1,0 +1,61 @@
+A call's result is held while the String or empty Hash beside it is made
+
+    def label(n)
+      s = ""
+      30000.times { |i| s = "q#{i % 1000}" }
+      "s#{n % 1000}t"
+    end
+    wrong = 0
+    20.times { |n| wrong += 1 unless label(n).include?("s#{n % 1000}") }
+    p wrong
+
+prints 0 in CRuby and printed 20 built with gcc. The call was emitted
+as sp_str_include(sp_label(n), <the interpolated String>): two
+arguments of one C call, which C evaluates in either order. gcc made
+the String first; label's allocations collected, and the String, held
+by nothing, was freed and its slot given to one of label's own. clang
+makes the call's result first and can lose that one to the sibling's
+allocation: `any(1).dup.merge({})` aborts under SPINEL_GC_STRESS=2
+built with either.
+
+emit_operands_in_order declined a call with one observable operand: it
+"has no sibling to be ordered against or collected by". That is not so
+beside an operand that runs no code but is made where it stands: an
+interpolated String, an empty Hash or Array, a Hash or an Array in an
+arm (`o || {}`). Beside one, an observable operand that is not a plain
+read is now bound to its rooted temp, the function's own path, and the
+sibling is made last. That is Ruby's order too: `bump.include?("#{@n}")`
+read @n before bump ran with gcc.
+
+Everything else keeps master's C: a reader or a local beside such an
+operand, a literal with members (it is built ahead of the statement,
+rooted), an empty one the arm folds away (`r == []` is a length test,
+a typed `h.merge({})` a copy), an arm that opens by holding the
+operand itself (Hash#fetch), a receiver an enclosing emitter already
+holds (a `&.` call's is its guard's rooted temp), and most operands
+written ahead of the call. Ruby makes those first, so one is made
+after the call only when it is built of literals and of variables that
+hold an Integer, a Float, a Symbol, true, false or nil and that the
+call cannot rebind or reassign. `"#{s}-" + s.concat("x")` reads s
+first, `"#{o}"` runs o's to_s, `"#{10 / z}"` can raise, a block can
+assign a constant: each stays in C's order, as does every
+interpolation in a program that reopens Integer, Float, Symbol,
+NilClass, TrueClass or FalseClass.
+
+Of the 6,357 programs tools/cident.sh compiles, 30 change their C:
+the new test and 29 in test/; all 30 pass.
+The bound call pays the root, eleven instructions: 200,000 turns of
+`ms(i).include?("#{i % 10}")` go from 69,229,253 to 71,436,683.
+
+Not here: two operands made in place, beside a call or alone
+(`ms(1).sub("s#{n}", "q#{n}")`, `"a#{n}b".include?("s#{n}")`: the
+second can free the first), and a String made ahead of the call from
+a String or an Array (`"#{dir}/a".start_with?(root(1))`); a receiver
+that is `(any(1) || {})`, an interpolated Symbol, a Range boxed where
+it stands, and a merge that converts the bound Hash beside its own
+`{}` (`mh(n).merge(nil || {})`).
+
+Test: test/call_result_held_beside_made_operand.rb, also in the
+SPINEL_GC_STRESS=2 list.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
