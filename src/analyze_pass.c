@@ -3520,14 +3520,38 @@ static int infer_write_container_usage(Compiler *c, const NodeTable *nt, int nfb
   return changed;
 }
 
+/* Note what a multiple assignment's right side reads as now (lw_joined: the
+   value's type, or each value's of a literal right side), and answer whether
+   that differs from the last note. */
+static int masgn_rhs_note(Compiler *c, const NodeTable *nt, int id) {
+  int value = nt_ref(nt, id, "value"), n = 1, moved = 0;
+  const int *vs = &id;
+  if (masgn_tuple_rhs(nt, value)) vs = nt_arr(nt, value, "elements", &n);
+  for (int i = 0; i < n; i++) {
+    int at = vs[i], v = at == id ? value : at;
+    if (at < 0 || at >= c->node_cap || v < 0) continue;
+    NodeKind k = nt_kind(nt, at);
+    /* a local write among the values keeps the note infer_write_types made */
+    if (k == NK_LocalVariableWriteNode || k == NK_LocalVariableOperatorWriteNode ||
+        k == NK_LocalVariableOrWriteNode || k == NK_LocalVariableAndWriteNode) continue;
+    TyKind t = infer_type(c, v);
+    if (t == c->lw_joined[at]) continue;
+    c->lw_joined[at] = t;
+    moved = 1;
+  }
+  return moved;
+}
+
 /* infer_write_types's pass over multiple assignments: each target takes its
-   element's type (answers whether it changed a type) */
-static int infer_write_multi_assign(Compiler *c, const NodeTable *nt) {
+   element's type (answers whether it changed a type). `only` >= 0 is the one
+   assignment to join (rejoin_local_writes). */
+static int infer_write_multi_assign(Compiler *c, const NodeTable *nt, int only) {
   int changed = 0;
   /* Multiple assignment `a, b = e0, e1`: each target gets its element's
      type (the RHS ArrayNode is a tuple here, not an array value). */
-  for (int id = 0; id < nt->count; id++) {
+  for (int id = only >= 0 ? only : 0; id < (only >= 0 ? only + 1 : nt->count); id++) {
     if (!sp_streq(nt_type(nt, id) ? nt_type(nt, id) : "", "MultiWriteNode")) continue;
+    masgn_rhs_note(c, nt, id);
     int ln = 0;
     const int *lefts = nt_arr(nt, id, "lefts", &ln);
     int value = nt_ref(nt, id, "value");
@@ -4319,7 +4343,7 @@ int infer_write_types(Compiler *c) {
     slot_take(c, lv, newt, val_id);
   }
 
-  changed |= infer_write_multi_assign(c, nt);
+  changed |= infer_write_multi_assign(c, nt, -1);
   infer_write_reads_widened(c, nt);
 
   changed |= infer_case_pattern_locals(c);
@@ -4488,6 +4512,42 @@ static TyKind lw_join(TyKind cur, TyKind v) {
   return ty_unify(cur, v);
 }
 
+/* The plain locals among the targets of multiple assignment (or nested
+   target) `tgt`, into out[cap]; answers how many. */
+static int masgn_local_targets(Compiler *c, Scope *ms, int tgt, LocalVar **out, int cap) {
+  const NodeTable *nt = c->nt;
+  const char *sides[2] = { "lefts", "rights" };
+  int n = 0;
+  for (int s = 0; s < 3; s++) {
+    int tn = 1, rest = s == 2 ? nt_ref(nt, tgt, "rest") : -1;
+    const int *ts = &rest;
+    if (s < 2) ts = nt_arr(nt, tgt, sides[s], &tn);
+    else if (rest >= 0 && nt_kind(nt, rest) == NK_SplatNode) rest = nt_ref(nt, rest, "expression");
+    for (int i = 0; i < tn && n < cap; i++) {
+      if (ts[i] < 0) continue;
+      if (nt_kind(nt, ts[i]) == NK_MultiTargetNode)
+        n += masgn_local_targets(c, ms, ts[i], out + n, cap - n);
+      else if (nt_kind(nt, ts[i]) == NK_LocalVariableTargetNode) {
+        const char *nm = nt_str(nt, ts[i], "name");
+        LocalVar *lv = nm ? scope_local(ms, nm) : NULL;
+        if (lv && !lv->is_param && !lv->is_block_param && !lv->rbs_seeded) out[n++] = lv;
+      }
+    }
+  }
+  return n;
+}
+
+/* A local the re-join has boxed, kept for the parameters typed from it. */
+static void rejoin_note_boxed(LocalVar ***boxed, int *n, int *cap, LocalVar *lv) {
+  if (*n == *cap) {
+    *cap = *cap ? *cap * 2 : 8;
+    LocalVar **nb = (LocalVar **)realloc(*boxed, sizeof *nb * (size_t)*cap);
+    if (!nb) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+    *boxed = nb;
+  }
+  (*boxed)[(*n)++] = lv;
+}
+
 /* Re-join every local with the writes whose values read differently since
    the slot was last joined with them (lw_joined). infer_write_types fixes a
    local's type from its writes, but the passes after it still widen what
@@ -4526,15 +4586,30 @@ int rejoin_local_writes(Compiler *c) {
       lv_keep_decisions(lv, 0);
       if (lv->type == was) continue;
       changed = 1;
-      if (lv->type != TY_POLY) continue;
-      if (nboxed == cboxed) {
-        cboxed = cboxed ? cboxed * 2 : 8;
-        LocalVar **nb = (LocalVar **)realloc(boxed, sizeof *nb * (size_t)cboxed);
-        if (!nb) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
-        boxed = nb;
-      }
-      boxed[nboxed++] = lv;
+      if (lv->type == TY_POLY) rejoin_note_boxed(&boxed, &nboxed, &cboxed, lv);
     }
+  /* A multiple assignment follows its right side the same way (`a, b = t`
+     with `t` an Integer Array a later store made hold a String: `b` kept the
+     Integer slot and read the String's pointer as a number). Its targets are
+     joined again by the pass that joined them. */
+  NT_FOREACH_KIND(nt, NK_MultiWriteNode, id) {
+    if (id >= c->node_cap || !masgn_rhs_note(c, nt, id)) continue;
+    LocalVar *tg[32];
+    TyKind was[32];
+    int ntg = masgn_local_targets(c, comp_scope_of(c, id), id, tg, 32);
+    for (int i = 0; i < ntg; i++) was[i] = tg[i]->type;
+    changed |= infer_write_multi_assign(c, nt, id);
+    if (ntg == 32) changed = 1;   /* more targets than are watched here */
+    for (int i = 0; i < ntg; i++) {
+      LocalVar *lv = tg[i];
+      if (lv->type == was[i]) continue;
+      if (lv->oa_pin != TY_UNKNOWN && lv->type != lv->oa_pin) lv->oa_pin = TY_UNKNOWN;
+      lv_keep_decisions(lv, 0);
+      if (lv->type == was[i]) continue;
+      changed = 1;
+      if (lv->type == TY_POLY) rejoin_note_boxed(&boxed, &nboxed, &cboxed, lv);
+    }
+  }
   /* A parameter typed from a local the re-join has just boxed keeps the
      scalar it was typed with: `hit(x, bits)` with `bits` now boxed read the
      box through the Integer slot, nil as the sentinel, which the callee then
