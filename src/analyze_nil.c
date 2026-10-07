@@ -1318,7 +1318,10 @@ void an_nil_facts(Compiler *c) {
       NT_FOREACH_KIND(nt, rk[q], r) {
         const char *nm = nt_str(nt, r, "name");
         LocalVar *lv = nf_local_of(&f, r, nm);
-        if (!lv || lv->is_param || lv->is_block_param || !nf_open(lv->obj_may_nil) || !nil_fact_tracked(lv->type)) continue;
+        /* a String local held as a handle (TY_STRBUF) is a pointer whose
+           NULL is nil too */
+        if (!lv || lv->is_param || lv->is_block_param || !nf_open(lv->obj_may_nil) ||
+            !(nil_fact_tracked(lv->type) || lv->type == TY_STRBUF)) continue;
         if (du_read_maybe_unset(nt, f.par, &f.dp, r, nm)) nf_set(&f, &lv->obj_may_nil, NFW_UNSET);
       }
     du_memo_free();
