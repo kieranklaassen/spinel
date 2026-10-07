@@ -79,6 +79,20 @@ int nil_fact_why(const Compiler *c, int node);
    are pointers that the program stores nil into or leaves a gap in
    (NFW_ELEM_NIL's Arrays)? */
 int nil_elem_fact_node(const Compiler *c, int node);
+/* A read of a String handle local that may be nil, where the nil would be
+   past a NoMethodError this build does not raise: the receiver of a call
+   nil does not answer, or any read of a local an in-place write (`t << x`,
+   a bang method) can reach while it may be nil -- the write does nothing on
+   a NULL handle. The call plan guards neither for a nil it cannot bound (a
+   slice or a pick that missed), so the read stays untested: answering nil
+   there would hide the error CRuby raises. So does every such read of a
+   local behind a guard that does not hold, which lets the same write run:
+   a write inside the guard's condition, a loop that tests after its body,
+   a program that defines what a guard is made of (its own fail, a String's
+   nil?). And of a local appended to under another link of a chain (`t << a
+   << b`), which the statement emitter appends with no nil arm. */
+#define NF_UNRAISED 0x80
+int nil_fact_unraised(const Compiler *c, int node);
 const char *nil_fact_why_name(int why);
 /* Does the fact track a value of type t: an object, or a builtin held as a
    pointer that is NULL for nil (a String, an Array, a Hash, an IO)? */

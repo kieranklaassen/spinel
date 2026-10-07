@@ -124,6 +124,9 @@ typedef struct {
                        NF_EL_STORED bit says a nil was stored through this
                        name, which reaches the slots the Array came from.
                        Read through repr_of_slot's elem_nil_marked. */
+  int nil_past_write; /* (TY_STRBUF locals) an in-place write can run on
+                       the local while it may be nil, with no raise from the
+                       call plan (analyze_nil.c, nil_fact_unraised) */
   int box_nullable; /* an int parameter bound from an ivar that can be read
                        before anything assigned it: only BOXING it has to
                        yield nil. Kept apart from nullable_int, which also
