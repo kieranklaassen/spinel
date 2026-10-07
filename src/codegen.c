@@ -2310,6 +2310,24 @@ static void emit_cell_decl(Compiler *c, Scope *s, LocalVar *lv, Buf *b) {
       return;
 }
 
+/* Root parameter `lv` in its frame, by the form its type takes. */
+static void emit_param_root(Compiler *c, LocalVar *lv, Buf *b) {
+  /* A poly param is an sp_RbVal by value: root through the tagged
+     RBVAL form so the collector reads the boxed pointer, not the
+     struct's first word (the tag). */
+  switch (lv->type) {
+  case TY_POLY: buf_printf(b, "    SP_GC_ROOT_RBVAL(lv_%s);\n", lv->name); break;
+  case TY_STR_RANGE:   /* two GC strings by value; see emit_local_decl */
+    buf_printf(b, "    SP_GC_ROOT_STR(lv_%s.first);\n", lv->name);
+    buf_printf(b, "    SP_GC_ROOT_STR(lv_%s.last);\n", lv->name);
+    break;
+  case TY_STRING: buf_printf(b, "    SP_GC_ROOT_STR(lv_%s);\n", lv->name); break;   /* see emit_local_decl */
+  default:
+    if (needs_root(lv->type) && !comp_ty_value_obj(c, lv->type)) buf_printf(b, "    SP_GC_ROOT(lv_%s);\n", lv->name);
+    break;
+  }
+}
+
 void emit_scope_decls(Compiler *c, Scope *s, Buf *b) {
   emit_scope_decls_ends(c, s, b, NULL);
 }
@@ -2371,22 +2389,7 @@ void emit_scope_decls_ends(Compiler *c, Scope *s, Buf *b, size_t *ends) {
       free(d.p);
       continue;
     }
-    if (lv->is_param) {
-      /* A poly param is an sp_RbVal by value: root through the tagged
-         RBVAL form so the collector reads the boxed pointer, not the
-         struct's first word (the tag). */
-      switch (lv->type) {
-      case TY_POLY: buf_printf(b, "    SP_GC_ROOT_RBVAL(lv_%s);\n", lv->name); break;
-      case TY_STR_RANGE:   /* two GC strings by value; see emit_local_decl */
-        buf_printf(b, "    SP_GC_ROOT_STR(lv_%s.first);\n", lv->name);
-        buf_printf(b, "    SP_GC_ROOT_STR(lv_%s.last);\n", lv->name);
-        break;
-      case TY_STRING: buf_printf(b, "    SP_GC_ROOT_STR(lv_%s);\n", lv->name); break;   /* see emit_local_decl */
-      default:
-        if (needs_root(lv->type) && !comp_ty_value_obj(c, lv->type)) buf_printf(b, "    SP_GC_ROOT(lv_%s);\n", lv->name);
-        break;
-      }
-    }
+    if (lv->is_param) emit_param_root(c, lv, b);
     else {
       /* A BLOCK parameter the analyzer never typed still needs storage: the
          loop emitter binds it, and an empty literal receiver leaves no element
