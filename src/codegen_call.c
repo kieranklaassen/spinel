@@ -17128,10 +17128,16 @@ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
       buf_printf(b, "({ sp_RbVal _t%d = ", tvC); emit_boxed(c, recv, b);
       /* as the bare chr beside it: only an Integer has chr with an
          encoding. Any other value was read as an Integer and answered a
-         character; it raises now (sp_poly_chr_enc_raise). */
-      buf_printf(b, "; if (SP_UNLIKELY(_t%d.tag != SP_TAG_INT)) sp_poly_chr_enc_raise(_t%d);"
-                    " sp_box_str(%s(_t%d.v.i)); })",
-                 tvC, tvC, utf8 ? "sp_int_chr_utf8" : "sp_int_chr", tvC);
+         character; it raises now: a String the ArgumentError of its own
+         chr's count, read off the instance arity table, the rest by
+         sp_poly_chr_enc_raise. */
+      char exp[64];
+      buf_printf(b, "; if (SP_UNLIKELY(_t%d.tag != SP_TAG_INT)) {", tvC);
+      if (builtin_arity_expected("String", "chr", 0, argc, exp, sizeof exp))
+        buf_printf(b, " if (_t%d.tag == SP_TAG_STR || sp_poly_is_strbuf(_t%d)) sp_raise_cls(\"ArgumentError\", "
+                      "\"wrong number of arguments (given %d, expected %s)\");", tvC, tvC, argc, exp);
+      buf_printf(b, " sp_poly_chr_enc_raise(_t%d); } sp_box_str(%s(_t%d.v.i)); })",
+                 tvC, utf8 ? "sp_int_chr_utf8" : "sp_int_chr", tvC);
       return 1;
     }
   }

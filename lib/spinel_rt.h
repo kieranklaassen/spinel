@@ -3716,11 +3716,10 @@ static SP_UNUSED sp_int sp_poly_recv_i(const char *m, sp_RbVal v) { if (SP_UNLIK
 /* sp_poly_recv_i for a method only Integer has: a value of any other class
    raises NoMethodError as nil does, where it was read as an Integer. */
 static SP_UNUSED sp_int sp_poly_recv_integer_i(const char *m, sp_RbVal v) { if (SP_LIKELY(v.tag == SP_TAG_INT)) return v.v.i; if (v.tag != SP_TAG_BIGINT) sp_raise_nomethod(sp_nomethod_msg(m, v)); return sp_poly_to_i(v); }
-/* chr with an encoding on a boxed value that is no Integer: String#chr takes
-   no argument, a Bignum is past any character, and no other value has the
-   method. */
+/* chr with an encoding on a boxed value that is no Integer (a String has
+   raised for its own chr's count): a Bignum is past any character, and no
+   other value has the method. */
 SP_NORETURN SP_COLD static SP_UNUSED void sp_poly_chr_enc_raise(sp_RbVal v) {
-  if (v.tag == SP_TAG_STR || sp_poly_is_strbuf(v)) sp_raise_cls("ArgumentError", "wrong number of arguments (given 1, expected 0)");
   if (v.tag == SP_TAG_BIGINT) sp_raise_cls("RangeError", "bignum out of char range");
   sp_raise_cls("NoMethodError", sp_nomethod_msg("chr", v));
 }
