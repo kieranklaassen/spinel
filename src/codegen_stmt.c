@@ -14342,6 +14342,20 @@ void emit_str_frozen_check(Compiler *c, int recv, Buf *b) {
   buf_puts(b, "if ("); emit_expr(c, recv, b); buf_puts(b, ") sp_str_check_mutable(");
   emit_expr(c, recv, b); buf_puts(b, ");");
 }
+/* s[/re/, n] = v, once the pattern matched: the span of group _t<tn> in _b
+   and _e, in a block this opens. A group the pattern has not and a group that
+   took no part in the match raise CRuby's IndexError: past the pattern's
+   groups sp_re_caps holds whatever an earlier match left there, and a group
+   left out of the match holds -1. */
+static void emit_re_group_span(Buf *b, int tn) {
+  buf_printf(b, " if (_t%d < 0 || _t%d > 9 || _t%d >= sp_re_last_ncap)"
+                " sp_raise_cls(\"IndexError\", sp_sprintf(\"index %%lld out of regexp\","
+                " (long long)_t%d));", tn, tn, tn, tn);
+  buf_printf(b, " { sp_int _b = sp_re_caps[2 * _t%d], _e = sp_re_caps[2 * _t%d + 1];"
+                " if (_b < 0) sp_raise_cls(\"IndexError\","
+                " sp_sprintf(\"regexp group %%lld not matched\", (long long)_t%d)); ", tn, tn, tn);
+}
+
 /* emit_array_mutate_stmt_body's String mutators done by reassigning the
    receiver: replace, prepend, insert, concat, clear, delete_prefix! /
    delete_suffix! (answers 1 emitted, 0 declined, -1 to go on) */
@@ -14603,10 +14617,10 @@ static int str_mutate_reassign_arms(Compiler *c, Buf *b, int indent, const NodeT
       buf_printf(b, " if (sp_re_match(sp_re_pat_%d, _t%d) < 0)"
                     " sp_raise_cls(\"IndexError\", \"regexp not matched\");",
                  re_lit_index(c, argv[0]), ts);
-      buf_printf(b, " if (_t%d < 0 || _t%d > 9)"
-                    " sp_raise_cls(\"IndexError\", sp_sprintf(\"index %%lld out of regexp\","
-                    " (long long)_t%d));", tn, tn, tn);
-      buf_printf(b, " { sp_int _b = sp_re_caps[2 * _t%d], _e = sp_re_caps[2 * _t%d + 1]; ", tn, tn);
+      emit_re_group_span(b, tn);
+      if (node_may_be_null_nil(c, argv[2]))
+        buf_printf(b, "if (!_t%d) sp_raise_cls(\"TypeError\","
+                      " \"no implicit conversion of nil into String\"); ", tv);
       buf_printf(b, "const char *_t%d = sp_str_byteslice(_t%d, 0, _b); SP_GC_ROOT_STR(_t%d); ", th, ts, th);
       emit_expr(c, recv, b);
       buf_printf(b, " = sp_str_concat3(_t%d, _t%d, sp_str_byteslice(_t%d, _e, (sp_int)sp_str_byte_len(_t%d) - _e)); } }\n",
@@ -14623,10 +14637,7 @@ static int str_mutate_reassign_arms(Compiler *c, Buf *b, int indent, const NodeT
       buf_printf(b, "; if (sp_re_match(sp_re_pat_%d, _t%d) < 0)"
                     " sp_raise_cls(\"IndexError\", \"regexp not matched\");",
                  re_lit_index(c, argv[0]), ts);
-      buf_printf(b, " if (_t%d < 0 || _t%d > 9)"
-                    " sp_raise_cls(\"IndexError\", sp_sprintf(\"index %%lld out of regexp\","
-                    " (long long)_t%d));", tn, tn, tn);
-      buf_printf(b, " { sp_int _b = sp_re_caps[2 * _t%d], _e = sp_re_caps[2 * _t%d + 1]; ", tn, tn);
+      emit_re_group_span(b, tn);
       emit_expr(c, recv, b);
       buf_printf(b, " = sp_str_concat(sp_str_concat(sp_str_byteslice(_t%d, 0, _b), ", ts);
       emit_str_expr(c, argv[2], b);
