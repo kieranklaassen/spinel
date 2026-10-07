@@ -10299,6 +10299,30 @@ static sp_RbVal sp_poly_index_poly(sp_RbVal recv, sp_RbVal idx) {
   return sp_poly_arr_get_hash(recv, i);
 }
 
+/* String#[] and #slice by one index whose kind is known only at run time.
+   An Integer is the character read. A String is searched for, and the
+   answer is a copy of it, a new String as CRuby's is: one the program
+   appends to is boxed as its shared handle, whose buffer moves as it
+   grows. A Range or a Regexp slices as each does through a boxed
+   receiver. Anything else is the Integer conversion (a Float is cut), or
+   that conversion's TypeError. */
+static SP_NOINLINE const char *sp_str_aref_poly_other(const char *s, sp_RbVal idx) {
+  if (!s) sp_nil_recv("[]");
+  if (idx.tag == SP_TAG_STR || sp_poly_is_strbuf(idx)) {
+    const char *k = sp_poly_strbuf_deref(idx).v.s;
+    return (k && sp_str_include(s, k)) ? sp_str_dup(k) : NULL;
+  }
+  if (idx.tag == SP_TAG_OBJ && (idx.cls_id == SP_BUILTIN_RANGE || idx.cls_id == SP_BUILTIN_REGEX)) {
+    sp_RbVal r = sp_poly_index_poly(sp_box_str(s), idx);
+    return r.tag == SP_TAG_STR ? r.v.s : NULL;
+  }
+  return sp_str_char_at_or_nil(s, sp_poly_arg_int_chk(idx));
+}
+static SP_INLINE const char *sp_str_aref_poly(const char *s, sp_RbVal idx) {
+  if (idx.tag == SP_TAG_INT && idx.v.i != SP_INT_NIL) return sp_str_char_at_or_nil(s, idx.v.i);
+  return sp_str_aref_poly_other(s, idx);
+}
+
 /* Presence check for a Hash reached through a poly value, keyed by a poly key.
    The dispatch mirrors sp_poly_index_poly's storage kinds so `fetch` can tell a
    present key (return the value) from an absent one (default / KeyError) --

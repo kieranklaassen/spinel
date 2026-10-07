@@ -6583,6 +6583,15 @@ static int str_arms_slice_encode(Compiler *c, int id, Buf *b, const char *name, 
     buf_printf(b, "({ const char *_t%d = ", tsub); emit_str_expr(c, argv[0], b);
     buf_printf(b, "; (strstr(%s, _t%d) ? _t%d : NULL); })", r, tsub, tsub);
   }
+  else if ((is_slice_alias(name)) && argc == 1 && yield_site_type(c, argv[0]) == TY_POLY &&
+           !(nt_type(c->nt, argv[0]) && sp_streq(nt_type(c->nt, argv[0]), "SplatNode"))) {
+    /* an index whose kind is known only at run time: a String, a Range or
+       a Regexp slices as its typed arm above does, where the Integer
+       conversion below raised TypeError for each. The conversion still
+       runs for any other kind, and is counted as emit_int_expr counts it. */
+    if (prog_has_conv_method(c, "to_int", TY_INT)) g_conv_emitted++;
+    buf_printf(b, "sp_str_aref_poly(%s, ", r); emit_expr(c, argv[0], b); buf_puts(b, ")");
+  }
   else if ((is_slice_alias(name)) && argc == 1) {
     buf_printf(b, "sp_str_char_at_or_nil(%s, ", r); emit_int_expr(c, argv[0], b); buf_puts(b, ")");
   }
