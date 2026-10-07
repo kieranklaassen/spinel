@@ -1155,6 +1155,7 @@ static const char *sp_str_dedup(const char *s) {
   if (hit) return hit;
   /* byte_len-aware copy so an embedded NUL is preserved (sp_str_dup_external
      would truncate at the first NUL), then freeze it to the immortal 0xf1. */
+  SP_GC_ROOT_STR(s);   /* a String just built is held by nothing else across the copy's allocation */
   const char *f = sp_str_freeze_val(sp_str_from_bytes(s, sp_str_byte_len(s)));
   SP_HEAP_LOCK();
   const char *hit2 = sp_fstr_lookup(f);  /* another thread may have won the race */
