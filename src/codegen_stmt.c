@@ -15111,6 +15111,13 @@ void emit_str_frozen_check(Compiler *c, int recv, Buf *b) {
   buf_puts(b, "if ("); emit_expr(c, recv, b); buf_puts(b, ") sp_str_check_mutable(");
   emit_expr(c, recv, b); buf_puts(b, ");");
 }
+/* A String value the analysis says can be nil is no String: the TypeError
+   CRuby raises where it converts the value, which the splice took for "".
+   `text` is the value as the splice reads it. */
+static void emit_str_splice_nil(Compiler *c, int v, const char *text, Buf *b) {
+  if (!text || comp_ntype(c, v) != TY_STRING || !repr_of(c, v).may_nil) return;
+  buf_printf(b, " if (!(%s)) sp_raise_cls(\"TypeError\", \"no implicit conversion of nil into String\");", text);
+}
 /* The value of a String splice (`s[...] = v`, `s.insert(i, v)`), emitted
    after the arm took its index into temps. CRuby evaluates every argument
    before it reads the String, and C orders a call's operands as it likes: a v
@@ -15146,6 +15153,9 @@ static char *emit_str_splice_value(Compiler *c, int recv, int v, int late, int t
     buf_printf(&vb, "_v%d", tv);
   }
   else emit_str_insert_text(c, v, &vb);
+  /* a nil value, where the arm leaves the frozen check here: a late arm
+     and one that passes no receiver raise for it after their own tests */
+  if (recv >= 0 && !late) emit_str_splice_nil(c, v, vb.p, b);
   if (recv >= 0) { buf_puts(b, " sp_str_check_mutable("); emit_expr(c, recv, b); buf_puts(b, ");"); }
   return vb.p;
 }
@@ -15345,6 +15355,7 @@ static int str_mutate_reassign_arms(Compiler *c, Buf *b, int indent, const NodeT
          negative went on to sp_str_splice_at, which counted it from the end
          once more: `s[-5..1] = "x"` on "abc" answered "ax". */
       buf_printf(b, " if (_a%d < 0 || _a%d > _len%d) sp_raise_range_start(_t%d.first, _t%d.last, _t%d.excl);", ti, ti, ti, ti, ti, ti);
+      emit_str_splice_nil(c, argv[1], v, b);
       buf_puts(b, " sp_str_check_mutable("); emit_expr(c, recv, b); buf_puts(b, ");");
       buf_printf(b, " int _oe%d = _t%d.last == SP_INT_NIL;", ti, ti);
       buf_printf(b, " sp_int _e%d = _oe%d ? _len%d - 1 :"
@@ -15383,6 +15394,7 @@ static int str_mutate_reassign_arms(Compiler *c, Buf *b, int indent, const NodeT
       char *v = emit_str_splice_value(c, recv, argv[1], 1, ti, b);
       buf_printf(b, " sp_int _a%d = sp_str_index_opt(", ti); emit_expr(c, recv, b);
       buf_printf(b, ", _t%d); if (_a%d == SP_INT_NIL) sp_raise_cls(\"IndexError\", \"string not matched\");", ti, ti);
+      emit_str_splice_nil(c, argv[1], v, b);
       buf_puts(b, " "); emit_expr(c, recv, b); buf_puts(b, " = sp_str_splice_at(");
       emit_expr(c, recv, b);
       buf_printf(b, ", _a%d, (sp_int)sp_str_length(_t%d), %s, 0); }\n", ti, ti, v ? v : "NULL");
@@ -15414,7 +15426,17 @@ static int str_mutate_reassign_arms(Compiler *c, Buf *b, int indent, const NodeT
     /* s[/re/] = v: replace the first match's span; no match raises IndexError */
     if (assignable && sp_streq(name, "[]=") && argc == 2 && re_lit_index(c, argv[0]) >= 0) {
       emit_indent(b, indent); buf_puts(b, "{");
-      char *v = emit_str_splice_value(c, recv, argv[1], 0, -1, b);
+      /* CRuby converts the value once the pattern matched. A String needs
+         no converting, so it is taken as a late arm takes it, the same C;
+         a nil one raises only where the pattern matches, and a miss is
+         left to sp_str_splice_re's IndexError. */
+      int vstr = comp_ntype(c, argv[1]) == TY_STRING;
+      char *v = emit_str_splice_value(c, recv, argv[1], vstr, -1, b);
+      if (v && vstr && repr_of(c, argv[1]).may_nil) {
+        buf_printf(b, " if (!(%s) && sp_re_match(sp_re_pat_%d, ", v, re_lit_index(c, argv[0]));
+        emit_expr(c, recv, b);
+        buf_puts(b, ") >= 0) sp_raise_cls(\"TypeError\", \"no implicit conversion of nil into String\");");
+      }
       buf_puts(b, " "); emit_expr(c, recv, b);
       buf_printf(b, " = sp_str_splice_re(sp_re_pat_%d, ", re_lit_index(c, argv[0]));
       emit_expr(c, recv, b); buf_printf(b, ", %s); }\n", v ? v : "NULL");
