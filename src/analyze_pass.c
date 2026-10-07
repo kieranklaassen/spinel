@@ -4507,6 +4507,10 @@ scan_writes:
     changed |= infer_write_container_usage(c, nt, nfb, fb, lw_ix, ivw_ix, &reads);
     if (reads.rw) reads_widened_free(&reads);
   }
+  /* `t.map! { }` whose block answers another kind makes the receiver the
+     general Array as a store of another kind does: between the same two, so
+     what is read out of it is typed from the Array as it is */
+  widen_arrays_from_map_bang(c);
 
   /* Propagate container widening across direct local aliases (`b = a`): the
      fold above runs AFTER the write-site unification, so an alias assigned
