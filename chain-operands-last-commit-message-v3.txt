@@ -1,0 +1,18 @@
+A call that declined its operands once renders them last
+
+    def where(x) = (@w << x; self)
+    q = Q.new.where(col(1)).where(col(2))...
+
+took seconds to compile at 16 links and a minute at 20.
+emit_operands_in_order renders two or more observable operands, emits
+the call with them bound, and declines when the call did not take
+them so; the caller renders the whole call again. A method written in
+Ruby declines every time, and as the receiver of the next link it is
+emitted twice, so each link doubled the work below it. A call that
+has declined is now remembered by node and takes the operands_last
+path, as a lone operand does: 200 links compile in seconds.
+
+`make scale-test` compiles test/scale/call_chain_operands.rb, forty
+links in seven shapes; without the change it is killed at the limit.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
