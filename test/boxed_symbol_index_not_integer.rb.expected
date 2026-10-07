@@ -1,0 +1,20 @@
+"t"
+"e"
+"t"
+"t"
+"t"
+TypeError: no implicit conversion of true into Integer
+TypeError: no implicit conversion of false into Integer
+TypeError: no implicit conversion from nil to integer
+TypeError: no implicit conversion of Array into Integer
+TypeError: no implicit conversion of Hash into Integer
+"to"
+"to"
+"tone"
+"sto"
+TypeError: no implicit conversion of String into Integer
+"to"
+"to"
+"t"
+"to"
+"on"

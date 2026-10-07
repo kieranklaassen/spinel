@@ -10404,6 +10404,10 @@ static sp_RbVal sp_poly_index_poly(sp_RbVal recv, sp_RbVal idx) {
      character */
   if (SP_UNLIKELY(idx.tag != SP_TAG_INT) && idx.tag != SP_TAG_BIGINT && recv.tag == SP_TAG_STR)
     return sp_poly_str_aref_other(recv.v.s, &idx);
+  /* a Symbol's [] is its name's: the same index on a Symbol read the name's
+     first character too */
+  if (SP_UNLIKELY(idx.tag != SP_TAG_INT) && idx.tag != SP_TAG_BIGINT && recv.tag == SP_TAG_SYM)
+    return sp_poly_str_aref_other(sp_sym_to_s((sp_sym)recv.v.i), &idx);
   return sp_poly_arr_get_hash(recv, i);
 }
 
