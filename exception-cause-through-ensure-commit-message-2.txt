@@ -1,0 +1,33 @@
+An exception keeps its cause through an ensure
+
+    def go
+      begin
+        raise ArgumentError, "first"
+      rescue ArgumentError
+        raise TypeError, "second"
+      end
+    end
+
+    def mid
+      go
+    ensure
+      $n = 1
+    end
+
+    begin
+      mid
+    rescue => g
+      p g.cause
+    end
+
+printed nil. CRuby prints #<ArgumentError: first>.
+
+An ensure holds the exception in its region's locals while its body runs
+and raises it again after, and that raise decided the cause anew, from
+what was being handled there. The cause now waits with the exception, in
+a local each of the three frames declares: it is a root while the ensure
+body runs, it is handed to an outer ensure with the rest (through
+sp_pending_cause, which the collector marks, until that region roots it),
+and `sp_exc_pass_cause` gives it to the raise.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

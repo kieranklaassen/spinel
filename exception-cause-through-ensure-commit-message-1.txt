@@ -1,0 +1,8 @@
+One helper stores the exception an ensure region waits with
+
+The store of the landed frame's exception into an ensure region's locals
+was written three times: in emit_begin, in emit_call_synchronize_arms and
+in emit_array_filter_loop. `emit_ensure_exc_store` writes it. The C is
+unchanged.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

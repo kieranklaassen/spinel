@@ -1,0 +1,21 @@
+An ensure runs when the else clause of its begin raises
+
+    def go(s)
+      Integer(s)
+    rescue TypeError
+      puts "not reached"
+    else
+      raise IOError, "from else"
+    ensure
+      puts "ensure"
+    end
+
+never printed "ensure" for `go("1")`. The else clause was emitted after the
+begin's frame was popped, so what it raised went to the enclosing frame.
+
+The frame is now popped after the else clause, and a flag set before it
+sends the landing by the rescue clauses, which are not for what the else
+raised, straight to the ensure. The flag is one store on the way in, in a
+begin that has an else and an ensure; any other begin emits the C it did.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

@@ -1,0 +1,1 @@
+A rescue that does not match hands the exception on with its cause

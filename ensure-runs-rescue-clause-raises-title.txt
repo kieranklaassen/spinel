@@ -1,0 +1,1 @@
+An ensure runs when a rescue clause of its begin raises

@@ -1,0 +1,1 @@
+An ensure runs when the else clause of its begin raises
