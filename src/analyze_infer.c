@@ -6149,7 +6149,18 @@ static int infer_last_resort_call(Compiler *c, int id, const NodeTable *nt, cons
   /* safe navigation &. with unresolved type: return poly (receiver may be nil at runtime) */
   {
     const char *call_op = nt_str(nt, id, "call_operator");
-    if (recv >= 0 && call_op && sp_streq(call_op, "&.")) { *out = TY_POLY; return 1; }
+    if (recv >= 0 && call_op && sp_streq(call_op, "&.")) {
+      /* unless it is a boxed handle's own name: under the nil guard codegen
+         renders that on the unboxed handle, in the type the handle answers */
+      TyKind kt = infer_boxed_handle_call(c, id, name, recv, argc, rt);
+      if (kt != TY_UNKNOWN) { *out = kt; return 1; }
+      /* a native class's method of the name stands that rule down: a
+         dispatch's builtin arm then has no answer, as for a `.` call */
+      if (!(an_builtin_only && rt == TY_POLY && ty_poly_handle_face_args(name, argc) != TY_UNKNOWN)) {
+        *out = TY_POLY;
+        return 1;
+      }
+    }
   }
 
   /* Builtin class reopening: look up user-defined methods on Array/Numeric/Object
