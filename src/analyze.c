@@ -31905,7 +31905,10 @@ static int hv_call_target(Compiler *c, int u, int sk, int *ck) {
   TyKind rt = on_self ? TY_UNKNOWN : infer_type(c, rc);
   int k = on_self ? (sk >= 0 ? sk : hv_own_class(us)) : ty_is_object(rt) ? ty_object_class(rt) : -1;
   int mi = k >= 0 ? comp_method_in_chain(c, k, un, NULL) : -1;
-  if (mi < 0 || !an_call_targets_scope(c, u, mi, &c->scopes[mi])) {
+  /* an object's class's own is always among the candidates; a call on self
+     asks (a second infer_type of every receiver is the square of a scope's
+     locals) */
+  if (mi < 0 || sp_streq(un, "new") || (on_self && !an_call_targets_scope(c, u, mi, &c->scopes[mi]))) {
     /* a receiver of no one class under a name several methods define
        reaches all of them or none */
     int open = !on_self && k < 0 && nt_kind(nt, rc) != NK_ConstantReadNode && nt_kind(nt, rc) != NK_ConstantPathNode &&
