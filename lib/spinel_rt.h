@@ -10248,6 +10248,32 @@ static sp_RbVal sp_poly_dig_list(sp_RbVal recv, sp_PolyArray *keys) {
   return cur;
 }
 /* poly[poly_key]: dispatch on key tag at runtime. */
+/* String#[] by one index that is no Integer, String, Integer Range or
+   Regexp. A String the program appends to is boxed as its shared handle: it
+   is searched for, and the answer is a copy of its text, since the handle's
+   buffer moves as it grows. A Float Range slices by its ends cut to
+   Integers; a String Range has no Integer ends. Anything else is the
+   Integer the typed read converts it to (a Float is cut), or that
+   conversion's TypeError. The index comes by address: passed by value,
+   clang's caller sets up the copy on every read, the Integer one too. */
+static SP_NOINLINE sp_RbVal sp_poly_str_aref_other(const char *s, const sp_RbVal *ip) {
+  sp_RbVal idx = *ip;
+  if (!s) s = sp_str_empty;
+  if (sp_poly_is_strbuf(idx)) {
+    const char *k = sp_poly_strbuf_deref(idx).v.s;
+    return sp_str_include(s, k) ? sp_box_str(sp_str_dup(k)) : sp_box_nil();
+  }
+  if (idx.tag == SP_TAG_OBJ && idx.cls_id == SP_BUILTIN_FLOAT_RANGE && idx.v.p) {
+    sp_FloatRange fr = *(sp_FloatRange *)idx.v.p;
+    int noend = (fr.omitted & SP_FRANGE_NO_END) != 0;
+    sp_int lo = (fr.omitted & SP_FRANGE_NO_BEGIN) ? 0 : sp_poly_arg_int_chk(sp_box_float(fr.first));
+    sp_int hi = noend ? INTPTR_MAX : sp_poly_arg_int_chk(sp_box_float(fr.last));
+    return sp_box_str(sp_str_sub_range_r(s, lo, hi, noend ? 0 : (int)fr.excl));
+  }
+  if (idx.tag == SP_TAG_OBJ && idx.cls_id == SP_BUILTIN_STR_RANGE)
+    sp_raise_cls("TypeError", "no implicit conversion of String into Integer");
+  return sp_box_nullable_str(sp_str_char_at_or_nil(s, sp_poly_arg_int_chk(idx)));
+}
 static sp_RbVal sp_poly_index_poly(sp_RbVal recv, sp_RbVal idx) {
   /* a curried Proc applies its [] argument whatever the key kind -- claimed
      here, before the key-typed dispatch below coerces it to an index */
@@ -10373,6 +10399,11 @@ static sp_RbVal sp_poly_index_poly(sp_RbVal recv, sp_RbVal idx) {
   if (recv.tag == SP_TAG_OBJ && sp_poly_is_hash_kind(recv.cls_id) &&
       recv.cls_id != SP_BUILTIN_POLY_POLY_HASH)
     return sp_poly_hash_foreign_miss(recv, idx);
+  /* a String read by an index of another kind (an appended String, a Float,
+     nil, an Array, ...) matched no arm above and answered its first
+     character */
+  if (SP_UNLIKELY(idx.tag != SP_TAG_INT) && idx.tag != SP_TAG_BIGINT && recv.tag == SP_TAG_STR)
+    return sp_poly_str_aref_other(recv.v.s, &idx);
   return sp_poly_arr_get_hash(recv, i);
 }
 
