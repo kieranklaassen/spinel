@@ -8608,6 +8608,42 @@ static size_t boxed_pointer_end(const char *s) {
   while (s[k] == '_' || (s[k] >= '0' && s[k] <= '9') || (s[k] >= 'A' && s[k] <= 'Z') || (s[k] >= 'a' && s[k] <= 'z')) k++;
   return k > i + 3 && s[k] == ')' && !s[k + 1] ? i : 0;
 }
+/* Does this default read self for more than its class? `self.class` is
+   answered from the receiver's type. */
+static int default_reads_self_value(Compiler *c, Scope *m, int node, int depth) {
+  const NodeTable *nt = c->nt;
+  if (depth > 60 || !ctor_default_reads_self(c, m, node, 0)) return 0;
+  int r = nt_kind(nt, node) == NK_CallNode ? nt_ref(nt, node, "receiver") : -1;
+  if (r >= 0 && nt_kind(nt, r) == NK_SelfNode && sp_streq(nt_str(nt, node, "name"), "class")) return 0;
+  const SpNode *nd = &nt->nodes[node];
+  int below = 0;
+  for (int i = 0; i < nd->nr; i++)
+    if (ctor_default_reads_self(c, m, nd->r[i].ref, 0)) {
+      below = 1;
+      if (default_reads_self_value(c, m, nd->r[i].ref, depth + 1)) return 1;
+    }
+  for (int i = 0; i < nd->na; i++)
+    for (int j = 0; j < nd->a[i].n; j++)
+      if (ctor_default_reads_self(c, m, nd->a[i].ids[j], 0)) {
+        below = 1;
+        if (default_reads_self_value(c, m, nd->a[i].ids[j], depth + 1)) return 1;
+      }
+  return !below;
+}
+/* Does the call leave out a default that reads self: a positional it does
+   not reach, or a keyword its hash does not write? 2 where one reads the
+   value, 1 where they read only its class. */
+static int reopen_leaves_self_default(Compiler *c, Scope *m, const int *argv, int argc, int n) {
+  int kwh = argc > 0 && nt_kind(c->nt, argv[argc - 1]) == NK_KeywordHashNode ? argv[argc - 1] : -1, left = 0;
+  for (int i = 0; m->pdefault && i < m->nparams; i++) {
+    if (m->pdefault[i] < 0 || !ctor_default_reads_self(c, m, m->pdefault[i], 0)) continue;
+    if (callee_param_is_declared_kwarg(c, m, m->pnames[i]) ? kwh >= 0 && struct_kwarg_value(c, kwh, m->pnames[i]) >= 0
+                                                           : arg_slot_for_param(c, m, i, n) >= 0) continue;
+    if (default_reads_self_value(c, m, m->pdefault[i], 0)) return 2;
+    left = 1;
+  }
+  return left;
+}
 /* The receiver and the arguments of a call into a builtin reopening's
    method, whose text starts at `at` in b with the callee's name and its
    parenthesis. When the receiver must run first the call is opened as a
@@ -8615,15 +8651,21 @@ static size_t boxed_pointer_end(const char *s) {
    what the arguments hoist, then calls: nothing of it goes ahead of the
    statement the call stands in. Answers 1 for that, and the caller closes
    with "; })" after its own ")"; otherwise the receiver is emitted in
-   place, as it always was. */
-int emit_reopen_recv_in_order(Compiler *c, int id, int mi, int recv, int boxed, const char *box_fn, size_t at, Buf *b) {
+   place, as it always was. `own`: the method is the receiver class's own
+   and takes the value itself for self, so a default the call leaves out
+   that reads self reads that temp (g_arm_self, emit_arg_or_default), and
+   the call is opened for it. A receiver that is `self` is what the default
+   reads where the call stands, and holds nothing. */
+static int reopen_recv_in_order(Compiler *c, int id, int mi, int recv, int boxed, const char *box_fn, size_t at, int own, Buf *b) {
   const NodeTable *nt = c->nt;
   Scope *m = &c->scopes[mi];
   int args = nt_ref(nt, id, "arguments"), argc = 0;
   const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &argc) : NULL;
   int n = call_has_splat_arg(nt, argv, argc) ? 0
         : argc - (argc > 0 && nt_kind(nt, argv[argc - 1]) == NK_KeywordHashNode);
-  if (!reopen_recv_runs_first(c, m, recv, argv, argc, n)) {
+  int held = own && nt_kind(nt, recv) != NK_SelfNode ? reopen_leaves_self_default(c, m, argv, argc, n) : 0;
+  int first = reopen_recv_runs_first(c, m, recv, argv, argc, n);
+  if (!held && !first) {
     emit_reopen_recv(c, recv, boxed, box_fn, b);
     emit_args_filled(c, mi, args, ", ", b);
     return 0;
@@ -8645,17 +8687,31 @@ int emit_reopen_recv_in_order(Compiler *c, int id, int mi, int recv, int boxed, 
   }
   else {
     buf_printf(g_pre, "%s _t%d = %s; ", boxed ? "sp_RbVal" : c_type_name(rt), t, rx.p ? rx.p : "");
-    if (boxed || rt == TY_POLY) buf_printf(g_pre, "SP_GC_ROOT_RBVAL(_t%d); ", t);
+    /* held for its class alone, the temp is never read: master's C but
+       for a name, at master's cost, unless an argument's allocation
+       could now fall after the receiver's */
+    int bare = held == 1 && !first;
+    for (int i = 0; bare && i < argc; i++) bare = !subtree_allocates(nt, recv) || !subtree_allocates(nt, argv[i]);
+    if (bare) ;
+    else if (boxed || rt == TY_POLY) buf_printf(g_pre, "SP_GC_ROOT_RBVAL(_t%d); ", t);
     else if (needs_root(rt)) buf_printf(g_pre, "SP_GC_ROOT(_t%d); ", t);
     buf_printf(&ab, "_t%d", t);
   }
+  char self[32]; snprintf(self, sizeof self, "_t%d", t);
+  const char *sv_arm_self = g_arm_self; const Scope *sv_arm_scope = g_arm_scope;
+  int sv_arm_depth = g_arm_depth;
+  if (held) { g_arm_self = self; g_arm_scope = m; g_arm_depth = g_expr_depth; }
   emit_args_filled(c, mi, args, ", ", &ab);
+  g_arm_self = sv_arm_self; g_arm_scope = sv_arm_scope; g_arm_depth = sv_arm_depth;
   g_pre = sv_pre;
   char *callee = strdup(b->p + at);
   b->len = at; b->p[at] = '\0';
   buf_printf(b, "({ %s%s%s", pre.p, callee, ab.p);
   free(callee); free(pre.p); free(rx.p); free(ab.p);
   return 1;
+}
+int emit_reopen_recv_in_order(Compiler *c, int id, int mi, int recv, int boxed, const char *box_fn, size_t at, Buf *b) {
+  return reopen_recv_in_order(c, id, mi, recv, boxed, box_fn, at, 0, b);
 }
 int emit_reopen_recv_args(Compiler *c, int id, int mi, int recv, int boxed, const char *box_fn, size_t at, Buf *b) {
   const NodeTable *nt = c->nt;
@@ -24883,7 +24939,7 @@ void emit_call_body(Compiler *c, int id, Buf *b) {
           if (g_plan_check) ucall_observe(c, id, miR, ciR, 0);
           size_t atR = b->len;
           buf_printf(b, "sp_%s_%s(", mc_reopen_cls(c, ciR, nmR), mc(nmR));
-          int openR = emit_reopen_recv_in_order(c, id, miR, recvR, 0, NULL, atR, b);
+          int openR = reopen_recv_in_order(c, id, miR, recvR, 0, NULL, atR, c->scopes[miR].class_id == ciR, b);
           emit_callee_block_arg(c, id, &c->scopes[miR], b);
           buf_puts(b, openR ? "); })" : ")");
           return;
