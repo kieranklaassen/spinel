@@ -11853,6 +11853,30 @@ static void emit_face_str_bang(Compiler *c, int id, unsigned own, Buf *b) {
                     " const char *_t%d = sp_poly_recv_s(_t%d, \"%s\"); SP_GC_ROOT(_t%d);\n",
              tvb, rbb.p ? rbb.p : "sp_box_nil()", tvb, tob, tvb, bang, tob);
   free(rbb.p);
+  /* sub!/gsub! answer nil when no SUBSTITUTION was made, which the text
+     comparison below cannot tell from one that wrote the same bytes
+     (`a[0].sub!("=") { "=" }`): the runtime's matched flag says, as it does
+     for a String receiver. The flag is marked 2 where it was already set, so
+     that a 1 after the call is this call's own; a call that made none puts
+     the old value back, and every other reader finds the flag as it would
+     have. A block form's loop goes ahead of the statement, so its marks do.
+     Only where no argument can run a sub of its own. */
+  int subm = nil_nc && (sp_streq(bang, "sub!") || sp_streq(bang, "gsub!"));
+  int sblk = nt_ref(nt, id, "block");
+  if (subm) {
+    int args = nt_ref(nt, id, "arguments"), argc = 0;
+    const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &argc) : NULL;
+    for (int a = 0; a < argc; a++) {
+      int k = nt_kind(nt, argv[a]);
+      if (k != NK_StringNode && k != NK_RegularExpressionNode && !subtree_is_pure_read(c, argv[a])) subm = 0;
+    }
+    if (sblk >= 0 && nt_kind(nt, sblk) != NK_BlockNode) subm = 0;
+  }
+  int tsv = subm ? ++g_tmp : 0, tsm = subm && sblk >= 0 ? ++g_tmp : 0;
+  if (tsm) {
+    emit_indent(g_pre, g_indent);
+    buf_printf(g_pre, "int _t%d = sp_re_sub_matched; if (_t%d) sp_re_sub_matched = 2;\n", tsv, tsv);
+  }
   view_bind(recv, "_t%d", tob);
   int v = view_push(c, recv, TY_STRING);
   nt_node_set_str((NodeTable *)nt, id, "name", plain);
@@ -11860,7 +11884,13 @@ static void emit_face_str_bang(Compiler *c, int id, unsigned own, Buf *b) {
   nt_node_set_str((NodeTable *)nt, id, "name", bang);
   view_pop(c, v);
   view_unbind(g_n_argov - 1);
-  buf_printf(b, "({ const char *_t%d = %s; ", tnb, nbb.p ? nbb.p : "\"\"");
+  if (tsm) {
+    emit_indent(g_pre, g_indent);
+    buf_printf(g_pre, "int _t%d = sp_re_sub_matched == 1; if (sp_re_sub_matched == 2) sp_re_sub_matched = _t%d;\n", tsm, tsv);
+  }
+  buf_puts(b, "({ ");
+  if (subm && !tsm) buf_printf(b, "int _t%d = sp_re_sub_matched; if (_t%d) sp_re_sub_matched = 2; ", tsv, tsv);
+  buf_printf(b, "const char *_t%d = %s; ", tnb, nbb.p ? nbb.p : "\"\"");
   free(nbb.p);
   /* Decide "did it change?" BEFORE the mutation. The receiver's old text
      is the LIVE payload of a shared handle, so once become() has written
@@ -11869,7 +11899,10 @@ static void emit_face_str_bang(Compiler *c, int id, unsigned own, Buf *b) {
   int tchg = 0;
   if (nil_nc) {
     tchg = ++g_tmp;
-    buf_printf(b, "int _t%d = !sp_str_eq(_t%d, _t%d); ", tchg, tob, tnb);
+    buf_printf(b, "int _t%d = !sp_str_eq(_t%d, _t%d)", tchg, tob, tnb);
+    if (tsm) buf_printf(b, " || _t%d; ", tsm);
+    else if (subm) buf_printf(b, " || sp_re_sub_matched == 1; if (sp_re_sub_matched == 2) sp_re_sub_matched = _t%d; ", tsv);
+    else buf_puts(b, "; ");
   }
   /* A shared handle absorbs the new contents; a plain string box cannot,
      so an lvalue receiver takes the value back the way the typed path
