@@ -1,0 +1,81 @@
+An interpolated String operand is made in the order written and held
+
+    x = 1
+    l = ->(v) { x = 5; "a" }
+    p "#{x}-" + [1].map(&l).join
+
+prints "1-a" in CRuby and printed "5-a". emit_operands_in_order binds
+each operand that runs code to a rooted temp, in the order written,
+but only a call form; at an interpolated String it gave up and left
+the operands as arguments of one C call. Here the map's statements
+are hoisted ahead of that call, so the lambda ran before "#{x}-" was
+made. With a call on each side, C picks the order:
+
+    $log = []
+    def a(n) = ($log << "a#{n}"; "s#{n}t")
+    def b(n) = ($log << "b#{n}"; n)
+    a(1).include?("s#{b(2)}")
+    puts $log.join(" ")
+
+prints "a1 b2" in CRuby and "b2 a1" built with gcc. And whichever of
+the two is made first is held by nothing while the other runs:
+`label(n).include?("s#{k(n)}")` lost its String to label's
+allocations (wrong 20 times of 20, gcc). The other operand need not
+be a call. Beside a String made in place,
+
+    def k(n)
+      s = ""
+      30000.times { |i| s = "q#{i % 1000}" }
+      n % 10
+    end
+    wrong = 0
+    20.times { |n| wrong += 1 unless "a#{k(n)}b".include?("#{n % 10}") }
+    p wrong
+
+prints 20 for 0 built with gcc: the argument was made first and k's
+allocations freed it. `"a#{n % 10}".center(9, "*#{k(n)}")` loses its
+receiver the same way built with clang.
+
+An interpolated String is now bound as a call is, to its own rooted
+temp where it is written, when the receiver is of a kind whose
+methods run no code of the program's (ty_runs_no_code) and either two
+operands run code, or it runs code beside an operand made in place,
+or it is written ahead of an operand that runs code and reads what
+that one can move or change (`@s.sub("x#{@n}", "y#{bump}")` reads @n
+first).
+
+Everything else is master's C, through emit_operands_before_unbound
+as before: an interpolated String beside readers and locals only (it
+is the one operand that runs), a bare reader of self beside it, an
+arm that already holds its operands itself, one after the other
+(String#+, a typed unshift, join) unless a later operand hoists
+statements ahead of the call, as the map above does, and a call with
+anything else computed ahead of a bound operand
+(`ms(1).center(@i + 5, "#{bump}")`: left in the call, it would be
+read after bump).
+
+Of the 6,358 programs tools/cident.sh compiles, 5 change their C
+beyond the 30 of the change this one stands on: the new test and four
+in test/, each with a call of this shape; all pass.
+A bound call pays one root an operand, eleven instructions: 200,000
+turns of `"a#{one(i)}b".include?("#{i % 7}")` go from 52,726,130 to
+54,926,132, of `ms(i).include?("s#{one(i)}")` from 53,921,637 to
+58,321,635 (two roots), of `"#{dir}/a".start_with?(ms(i))` from
+69,443,113 to 74,256,605 (two).
+
+The arm that holds its operands itself is known only once they are
+rendered; such a call is remembered, so it is not rendered again as
+the receiver of the next one. Chains and nests of these calls 18 and
+30 deep compile in master's time.
+
+Not here, each as on master: a call with no receiver
+(`Integer("1#{f(1)}", f(10))` runs f(10) first, built with gcc), a
+receiver that is a Hash or an object (`mh["k#{f(1)}"]`), an
+interpolated Regexp or Symbol, and two operands made in place
+(`ms(1).sub("s#{n}", "q#{n}")`: the second can free the first, under
+stress only).
+
+Test: test/call_interpolated_operand_held_in_order.rb, also in the
+SPINEL_GC_STRESS=2 list.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
