@@ -7267,8 +7267,7 @@ static TyKind infer_call_inner(Compiler *c, int id) {
   }
   /* Object#instance_variables: a static symbol list for a typed object */
   if (recv >= 0 && ty_is_object(rt) && argc == 0 &&
-      sp_streq(name, "instance_variables") &&
-      comp_method_in_chain(c, ty_object_class(rt), name, NULL) < 0)
+      sp_streq(name, "instance_variables") && comp_method_in_chain(c, ty_object_class(rt), name, NULL) < 0)
     return TY_POLY_ARRAY;
   if (recv >= 0 && ty_is_object(rt) &&
       (sp_streq(name, "methods") || sp_streq(name, "public_methods") ||
