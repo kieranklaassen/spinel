@@ -6294,6 +6294,30 @@ static int emit_poly_builtin_default_spread(Compiler *c, int id, int recv, const
   free(arms.p);
   return 1;
 }
+/* The builtin answers its receiver, boxed, into a dispatch slot typed for a
+   class's object: a box the analysis types by the class holds that object
+   or nil, and nil is the slot's NULL. `freeze` alone, and only where every
+   class's freeze answers that same object type, as each arm writes the slot. */
+static int poly_builtin_answers_recv(Compiler *c, const char *name, int argc, TyKind bt, TyKind ret) {
+  if (argc != 0 || !name || !sp_streq(name, "freeze") || bt != TY_POLY || !ty_is_object(ret) ||
+      comp_ty_value_obj(c, ret) || c->classes[ty_object_class(ret)].ary_root > 0) return 0;
+  int npc = 0;
+  const PolyCand *pcs = comp_poly_candidates(c, name, &npc);
+  for (int pi = 0; pi < npc; pi++)
+    if (pcs[pi].mi < 0 || (TyKind)c->scopes[pcs[pi].mi].ret != ret) return 0;
+  return 1;
+}
+/* Whether the dispatch keeps the builtin for call `id` in its default arm:
+   emit_poly_builtin_default_at's own test, for a call with no argument and
+   no block. Where the slot is typed for another answer of the class the arm
+   declines and the default raises NoMethodError for nil and every other value. */
+int poly_dispatch_keeps_builtin(Compiler *c, int id) {
+  TyKind ret = comp_ntype(c, id);
+  TyKind bt = (c->poly_builtin_ty && id < c->node_cap) ? c->poly_builtin_ty[id] : TY_UNKNOWN;
+  if (bt == TY_UNKNOWN) bt = an_builtin_answer(c, id);
+  return bt != TY_UNKNOWN && (ret == TY_POLY || bt == ret ||
+                              poly_builtin_answers_recv(c, nt_str(c->nt, id, "name"), 0, bt, ret));
+}
 int emit_poly_builtin_default(Compiler *c, int id, int recv, const char *name,
                                      int argc, const int *argv, const int *atmp,
                                      const TyKind *atmp_ty, TyKind ret, int tv, int tr,
@@ -6342,7 +6366,8 @@ static int emit_poly_builtin_default_at(Compiler *c, int id, int recv, const cha
   if (bt == TY_UNKNOWN && argc >= 1 && argc <= 2 && sp_streq(name, "respond_to?")) bt = TY_BOOL;
   if (bt == TY_UNKNOWN) bt = an_builtin_answer(c, id);
   if (bt == TY_UNKNOWN) return 0;
-  if (ret != TY_POLY && bt != ret) return 0;
+  int as_recv = poly_builtin_answers_recv(c, name, argc, bt, ret);
+  if (ret != TY_POLY && bt != ret && !as_recv) return 0;
   int slot = view_bind(recv, "_t%d", tv);
   for (int a = 0; a < argc; a++) {
     if (!subtree_has_side_effect(c, argv[a])) continue;
@@ -6376,6 +6401,7 @@ static int emit_poly_builtin_default_at(Compiler *c, int id, int recv, const cha
   Buf ib; memset(&ib, 0, sizeof ib);
   if (ok && nb->p) {
     if (ret == TY_POLY && bt != TY_POLY) emit_boxed_text(c, bt, nb->p, &ib);
+    else if (as_recv) emit_unbox_text(c, ret, nb->p, &ib);
     else buf_puts(&ib, nb->p);
   }
   free(nb->p); free(nb);
