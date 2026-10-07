@@ -31040,10 +31040,37 @@ static int sa_mutated(Compiler *c, const SaName *a) {
   if (a->kind == NK_InstanceVariableReadNode) return strbuf_ivar_any_str_mut(c, a->cid, a->name);
   return sa_site_first(c, a, VS_MUT) >= 0;
 }
-/* Is the name read anywhere but at node `except`? */
+/* Does an operator write (`s += x`, `@s ||= x`) read the name? */
+static int sa_opwrite_reads(Compiler *c, const SaName *a) {
+  int key = a->kind == NK_LocalVariableReadNode ? (int)(a->scope - c->scopes)
+          : a->kind == NK_InstanceVariableReadNode ? a->cid : -1;
+  for (int e = comp_vsite_first(c, VS_OPWRITE, a->kind, a->name, key); e >= 0; e = comp_vsite_next(c, e))
+    if (comp_vsite_is(c, e, a->kind, a->name, key)) return 1;
+  return 0;
+}
+/* Is class `k` class `cid`, above it or below it? */
+static int sa_class_in_line(Compiler *c, int k, int cid) {
+  for (int p = k; p >= 0; p = c->classes[p].parent) if (p == cid) return 1;
+  for (int p = cid; p >= 0; p = c->classes[p].parent) if (p == k) return 1;
+  return 0;
+}
+/* Is the name read anywhere but at node `except`: by a read, by an operator
+   write, or, an instance variable, by a class above or below its own or
+   through a reader one of them has? The slot is the object's, and the
+   chains key it by the class of each node. Under --share-strings the rule
+   shares what those reach, and its answers stay as they are. */
 static int sa_read_elsewhere(Compiler *c, const SaName *a, int except) {
   for (int e = sa_site_first(c, a, VS_READ); e >= 0; e = sa_site_next(c, a, e))
     if (comp_vsite_node(c, e) != except) return 1;
+  if (c->share_strings) return 0;
+  if (sa_opwrite_reads(c, a)) return 1;
+  for (int k = 0; a->kind == NK_InstanceVariableReadNode && k < c->nclasses; k++) {
+    SaName b = *a;
+    b.cid = k;
+    if (!sa_class_in_line(c, k, a->cid)) continue;
+    if (comp_is_reader(&c->classes[k], a->name + 1)) return 1;
+    if (k != a->cid && (sa_site_first(c, &b, VS_READ) >= 0 || sa_opwrite_reads(c, &b))) return 1;
+  }
   return 0;
 }
 /* Can a copy between `to` and `from` (read at `from_read`) be seen: `to`

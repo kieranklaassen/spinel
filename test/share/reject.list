@@ -14,6 +14,8 @@ test/reject/string_forward_poly_chain.rb
 test/reject/string_forward_rest_past16.rb
 test/reject/string_fresh_array_append.rb
 test/reject/string_gather_short_splat_lead.rb
+test/reject/string_global_alias_reader.rb
+test/reject/string_global_alias_subclass_read.rb
 test/reject/string_global_handle_param.rb
 test/reject/string_hash_call.rb
 test/reject/string_hash_chained_index_alias.rb
