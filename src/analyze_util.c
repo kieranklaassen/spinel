@@ -1538,6 +1538,71 @@ TyKind block_next_value_ty(Compiler *c, int node) {
   return r;
 }
 
+/* Whether a `super` lands on method `mi` and every one that does hands on
+   the block its own method was given (a bare `super`, `super(...)`,
+   `super(a, &b)`), as do the supers that land on those methods in turn.
+   Where each `super` is and where it lands is found once, and each method's
+   answer kept, under the stamps the poly-candidate memo is kept under. */
+static int *sifb_from = NULL, *sifb_to = NULL;   /* per yvt_sup_ids entry */
+static signed char *sifb_memo = NULL;            /* per scope: 0 not asked, 1 yes, 2 no */
+static const NodeTable *sifb_nt = NULL;
+static int sifb_ntc = -1, sifb_nsc = -1, sifb_ncl = -1;
+static unsigned sifb_sgen = 0, sifb_tgen = 0;
+static int supers_into_forward_block_at(Compiler *c, int mi, int depth) {
+  if (depth > 8) return 0;
+  int any = 0;
+  for (int ii = 0; ii < yvt_sup_n; ii++) {
+    int cmi = sifb_from[ii];
+    if (sifb_to[ii] != mi || cmi == mi) continue;
+    if (!super_forwards_caller_block(c, yvt_sup_ids[ii])) return 0;
+    int lands = 0;
+    for (int jj = 0; jj < yvt_sup_n && !lands; jj++) lands = sifb_to[jj] == cmi && sifb_from[jj] != cmi;
+    if (lands && !supers_into_forward_block_at(c, cmi, depth + 1)) return 0;
+    any = 1;
+  }
+  return any;
+}
+static int supers_into_forward_block(Compiler *c, int mi) {
+  const NodeTable *nt = c->nt;
+  if (yvt_nt != nt || yvt_ntc != nt->count) yvt_build(c);
+  if (sifb_nt != nt || sifb_ntc != nt->count || sifb_nsc != c->nscopes || sifb_ncl != c->nclasses ||
+      sifb_sgen != comp_scope_index_gen() || sifb_tgen != comp_table_gen) {
+    free(sifb_from); free(sifb_to); free(sifb_memo);
+    sifb_nt = NULL;
+    sifb_from = malloc((size_t)(yvt_sup_n > 0 ? yvt_sup_n : 1) * sizeof(int));
+    sifb_to = malloc((size_t)(yvt_sup_n > 0 ? yvt_sup_n : 1) * sizeof(int));
+    sifb_memo = calloc((size_t)(c->nscopes > 0 ? c->nscopes : 1), 1);
+    if (!sifb_from || !sifb_to || !sifb_memo) return 0;
+    for (int ii = 0; ii < yvt_sup_n; ii++) {
+      Scope *cs = comp_scope_of(c, yvt_sup_ids[ii]);
+      int in = cs && cs->class_id >= 0 && cs->name;
+      sifb_from[ii] = in ? (int)(cs - c->scopes) : -1;
+      sifb_to[ii] = in ? a_super_target(c, cs) : -1;
+    }
+    sifb_nt = nt; sifb_ntc = nt->count; sifb_nsc = c->nscopes; sifb_ncl = c->nclasses;
+    sifb_sgen = comp_scope_index_gen(); sifb_tgen = comp_table_gen;
+  }
+  if (mi < 0 || mi >= sifb_nsc) return 0;
+  if (!sifb_memo[mi]) sifb_memo[mi] = supers_into_forward_block_at(c, mi, 0) ? 1 : 2;
+  return sifb_memo[mi] == 1;
+}
+/* Whether method `mi` is one only ever spliced into the methods that reach
+   it by `super`: an `initialize`, or a copy a module left beneath the
+   class's own method. A method some other class of its chain defines too is
+   given a proc form (pf_in_class_dispatch), and its forwarded value is poly
+   through that (see yield_value_type); it is not asked here, before the
+   form is made or after. */
+static int super_reached_inline_only(Compiler *c, int mi) {
+  Scope *s = &c->scopes[mi];
+  if (s->is_proc_form || !s->name || s->class_id < 0 || s->is_cmethod) return 0;
+  if (scope_proc_form_of(c, mi) >= 0) return 0;
+  if (sp_streq(s->name, "initialize")) return 1;
+  if (!supers_into_forward_block(c, mi)) return 0;
+  for (int ii = 0; ii < yvt_sup_n; ii++)
+    if (sifb_to[ii] == mi && sifb_from[ii] >= 0 && c->scopes[sifb_from[ii]].class_id != s->class_id) return 0;
+  return 1;
+}
+
 /* The value a block forwarded out of method `emi` (`callee(&)`,
    `callee(&b)`, `callee(...)`) answers inside it. The forwarding call is one
    node in emi's body, shared by every site emi is spliced into, so the first
@@ -1548,9 +1613,14 @@ TyKind block_next_value_ty(Compiler *c, int node) {
    `const char *` and the C did not build. */
 static TyKind yvt_forwarded_value(Compiler *c, int emi) {
   TyKind first = yield_value_type(c, emi);
+  /* A method reached only through a child's `super` has no site of its own:
+     the block it forwards is the one the child was called with, at each of
+     the child's sites. */
+  int below = first == TY_UNKNOWN && super_reached_inline_only(c, emi) && supers_into_forward_block(c, emi);
+  if (below) first = yield_value_type_via_super(c, emi);
   if (g_yvt_unify_all || first == TY_UNKNOWN || first == TY_VOID) return first;
   g_yvt_unify_all = 1;
-  TyKind all = yield_value_type(c, emi);
+  TyKind all = below ? yield_value_type_via_super(c, emi) : yield_value_type(c, emi);
   g_yvt_unify_all = 0;
   return all != first && all != TY_UNKNOWN ? TY_POLY : first;
 }
