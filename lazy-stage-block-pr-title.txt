@@ -1,0 +1,1 @@
+A lazy stage's block answers with its next, has fresh locals and runs a redo

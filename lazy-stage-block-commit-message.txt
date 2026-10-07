@@ -1,0 +1,24 @@
+A lazy stage's block answers with its next, has fresh locals and runs a redo
+
+[1, 5, 2, 8, 3].lazy.map { |x| next 0 if x > 3; x * 2 }.to_a answered
+[2, 4, 6] where CRuby has [2, 0, 4, 0, 6], [1, 2, 3].lazy.map { |x|
+y ||= x; y }.to_a answered [1, 1, 1], and a redo in the block was
+refused. emit_lazy_pipeline_expr wrote the block's leading statements
+straight into the pipeline's one C loop and read the last one as the
+answer: a next was the loop's own continue and dropped the element,
+nothing reset the block's locals, and a redo had no label to go to.
+
+Each stage now opens its block as the other builtin iterators do, with
+emit_iter_step_open, and reads the answer through emit_iter_step_tail or
+emit_iter_step_cond. A block with no next, no redo and no local of its
+own emits the C it did.
+
+The redo refusal test moves to chunk_while, one of the emitters still
+without a label, and docs/limitations.md takes the lazy stages out of
+that row.
+
+Test: test/lazy_stage_step_frame.rb (expected from CRuby 3.3.6 with
+--enable-frozen-string-literal). master refuses it at its redo line and,
+with that line out, differs on 13 of the other 18.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

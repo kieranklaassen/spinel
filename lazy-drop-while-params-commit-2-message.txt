@@ -1,0 +1,24 @@
+A lazy drop_while's block binds all its parameters, as the other stages do
+
+[[1, 2], [3, 9], [5, 1]].lazy.drop_while { |x, y| y < 4 }.to_a raised
+NoMethodError (undefined method '<' for nil) where CRuby has
+[[3, 9], [5, 1]]; { |x, y = 9| y == 9 } over [1, [3, 4], 5] dropped
+nothing; { |*r| ... } did not build. drop_while's branch of
+emit_lazy_pipeline_expr bound the block's first parameter alone, to the
+whole element, where every other stage tries emit_boxed_step_binds and
+emit_iter_autosplat first.
+
+It now calls lazy_stage_bind, as they do. A block of one plain parameter
+emits the C it did.
+
+Not covered, each a fault the other stages have on master and a
+drop_while that raised now reaches: a bare next in the block is the
+pipeline's own continue; and over each_with_index an optional first
+parameter, or a map { |z| ... } after the stage, is handed the pair
+where CRuby hands it the first value.
+
+Test: test/lazy_drop_while_block_params.rb (expected from CRuby 3.3.6
+with --enable-frozen-string-literal). master does not build it; line by
+line it differs on 11 of the 14.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
