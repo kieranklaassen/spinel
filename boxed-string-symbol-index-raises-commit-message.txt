@@ -1,0 +1,21 @@
+A Symbol index on a boxed String or Symbol raises TypeError
+
+    def pick(n) = n > 0 ? {a: 1} : +"abc"
+    s = pick(0)
+    p s[:a]   # nil; CRuby raises TypeError
+
+A Symbol is no index of a String, nor of a Symbol, whose [] is its
+String's. sp_poly_get_sym answered nil for both. It now raises CRuby's
+TypeError, "no implicit conversion of Symbol into Integer", for a
+String, a shared String and a Symbol. That is the read behind `s[:a]`,
+`s[:a] += "x"`, `s[:a] ||= 1` and an index that is itself boxed. An
+Integer, a String, a Range or a Regexp index takes other paths and
+answers as before. Nothing is added in front of a Hash's arm: the test
+stands where the receiver is already known to be no object, and the
+shared String is one more arm of the switch.
+
+No generated C changes: the function is in lib/spinel_rt.h.
+
+Test: test/boxed_string_index_symbol.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
