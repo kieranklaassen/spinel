@@ -9449,7 +9449,7 @@ static int splat_program_walk_for_to_a(Compiler *c) {
 
 /* One walk a program: the answer is kept on the compiler, and asked again
    only while the classes and methods are still being counted. */
-static int splat_program_may_make_to_a(Compiler *c) {
+int splat_program_may_make_to_a(Compiler *c) {
   if (c->splat_to_a_may) return 1;
   if (c->splat_to_a_ncls == c->nclasses + 1 && c->splat_to_a_nscopes == c->nscopes + 1) return 0;
   c->splat_to_a_ncls = c->nclasses + 1;
@@ -9475,7 +9475,7 @@ static int splat_class_own_at(Compiler *c, int cid, int depth) {
    CRuby's: a StringIO, a Tempfile and a Zlib reader answer #to_a there.
    Asked of the classes the compiler holds: a builtin exception above it and
    Comparable or Kernel mixed in are none, and CRuby's have no #to_a. */
-static int splat_class_is_own(Compiler *c, int cid) {
+int splat_class_is_own(Compiler *c, int cid) {
   const NodeTable *nt = c->nt;
   if (c->splat_cls_from_n != c->nclasses + 1) {
     free(c->splat_cls_from);
@@ -9522,7 +9522,7 @@ static int splat_class_is_own(Compiler *c, int cid) {
    native class, the program must have written its class and all above it
    itself, and it must have no way to a to_a anywhere. Any other object
    keeps the form it had. */
-static int splat_operand_is_plain_object(Compiler *c, TyKind t) {
+int splat_operand_is_plain_object(Compiler *c, TyKind t) {
   if (!ty_is_object(t)) return 0;
   int cid = ty_object_class(t);
   if (cid < 0 || cid >= c->nclasses) return 0;

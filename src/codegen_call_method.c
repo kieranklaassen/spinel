@@ -12,6 +12,15 @@
 
 /* calling a Method or a Proc (call / () / [] / ===), composing Procs (<< >>), and a Proc's
    own methods (its builtin-op rows, parameters, source_location) */
+/* a lambda written in place: `->(a) { }` or `lambda { }` */
+static int proc_literal_is_lambda(const NodeTable *nt, int id) {
+  if (id < 0) return 0;
+  if (nt_kind(nt, id) == NK_LambdaNode) return 1;
+  const char *nm = nt_kind(nt, id) == NK_CallNode ? nt_str(nt, id, "name") : NULL;
+  if (!nm || !sp_streq(nm, "lambda")) return 0;
+  return nt_ref(nt, id, "receiver") < 0 && nt_ref(nt, id, "block") >= 0;
+}
+
 int emit_call_callable_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv) {
   /* <method>.call(args) / [] -> invoke the bound function. A top-level
      method ref calls its function directly; an object-bound Method casts
@@ -556,10 +565,38 @@ int emit_call_callable_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
     {
       if (call_args_need_spread(nt, argv, argc)) {
         char kwp[24];
+        /* a splat that may hand one value over as itself asks the Proc
+           whether it is a lambda, so the list reads the receiver as the
+           call does: a local or an ivar where it stands, asked once the
+           splatted value is in hand, unless an argument can give it
+           another value (read_rebound_by) or one after the splat runs
+           code; anything else is run first, as CRuby runs it, into a
+           rooted temp both read. A lambda literal is one, and its call is
+           left as it was */
+        char rcv[24] = "";
+        Buf rb; memset(&rb, 0, sizeof rb);
+        if (!proc_literal_is_lambda(nt, recv) && spread_args_take_one(c, argv, argc)) {
+          emit_expr(c, recv, &rb);
+          g_splat_callee = rb.p;
+          int rk = nt_kind(nt, recv);
+          int hold = !rb.p || (rk != NK_LocalVariableReadNode && rk != NK_InstanceVariableReadNode);
+          for (int k = 0; k < argc && !hold; k++) hold = read_rebound_by(c, recv, argv[k]);
+          hold = hold || spread_args_run_after_one(c, argv, argc);
+          if (hold) {
+            int tr = ++g_tmp;
+            emit_indent(g_pre, g_indent);
+            buf_printf(g_pre, "sp_Proc *_t%d = %s; SP_GC_ROOT(_t%d);\n",
+                       tr, rb.p ? rb.p : "NULL", tr);
+            snprintf(rcv, sizeof rcv, "_t%d", tr);
+            g_splat_callee = rcv;
+          }
+        }
+        const char *rtext = rcv[0] ? rcv : rb.p;
         int ta = emit_spread_args_kw(c, argv, argc, kwp, sizeof kwp);
         buf_puts(b, blk_tmp[0] ? "((void)sp_proc_call_spread_blk(" : "((void)sp_proc_call_spread(");
         if (proc_nil_raises) buf_puts(b, "sp_proc_recv(");
-        emit_expr(c, recv, b);
+        if (rtext) buf_puts(b, rtext); else emit_expr(c, recv, b);
+        free(rb.p);
         if (proc_nil_raises) buf_printf(b, ", \"%s\")", proc_meth);
         if (blk_tmp[0]) buf_printf(b, ", %s", blk_tmp);
         buf_printf(b, ", sp_box_poly_array(_t%d), %s), ", ta, kwp);
@@ -1839,6 +1876,12 @@ int emit_call_poly_callable_arms(Compiler *c, int id, Buf *b, const NodeTable *n
       {
         if (call_args_need_spread(nt, argv, argc)) {
           char kwp[24];
+          /* a Proc is asked whether it is a lambda; a Method and a curried
+             one keep the list they had */
+          char pc[96];
+          snprintf(pc, sizeof pc, "(_t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_PROC"
+                                  " ? (sp_Proc *)_t%d.v.p : NULL)", t, t, t);
+          g_splat_callee = pc;
           int ta = emit_spread_args_kw(c, argv, argc, kwp, sizeof kwp);
           buf_printf(b, "sp_poly_callable_spread(_t%d, sp_box_poly_array(_t%d), %s)%s", t, ta, kwp, yield_else);
           return 1;
