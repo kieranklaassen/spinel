@@ -1,0 +1,1 @@
+A next in a File, ARGF or Dir loop, a product or a scan ends its own turn

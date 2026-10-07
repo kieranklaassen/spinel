@@ -1,0 +1,48 @@
+A next in a File, ARGF or Dir loop, a product or a scan ends its own turn
+
+    n = 0
+    begin
+      File.open("lines.txt").each_line { |l| next if l.size > 3; n += 1 }
+      raise "late"
+    rescue => e
+      puts e.message
+    end
+
+ends with an uncaught "late"; CRuby prints late. The next popped the
+begin's rescue frame. Under an ensure the same next ended the whole
+loop and went to the ensure, and in a proc it returned from the proc.
+
+Each of these runs its block inside a C loop its emitter writes, and
+the emitter did not record that loop, so a next there was emitted for
+whatever stood around the call: a File's each_line, each, each_char,
+each_byte and each_codepoint, ARGF.each_line, a Dir's each, each_child
+and each_entry; product with a block; and, read as a value, scan with
+a block, each.with_index with a block and each.with_index followed by
+each.
+
+The File, ARGF and Dir loops and the scan now run the block through
+emit_iter_loop_stmts, as a String's each_line does. That call also
+makes the block's own locals new in every turn, which these loops did
+not (File#each_line { |l| y ||= l; print y } printed the first line
+in every turn), and places the label a redo needs, which they refused.
+emit_iter_step_body records the loop it runs in (c_loop_enter), for
+product and each.with_index; tap's own record around it goes.
+each.with_index followed by each enters and leaves the loop around its
+walk of the body.
+
+Not changed: the loops that take the block's value as their answer
+(find with a fallback proc, an Enumerator's find, detect and
+take_while, a boxed Array's index and rindex, each.with_index followed
+by reduce, take_while.with_index, and slice_when, chunk and
+chunk_while followed by to_a) have the same next, and it cannot be
+cured there alone: they also drop the value a next carries.
+
+Test: test/loop_block_next_own_turn.rb. Fifteen such loops, each with
+a next under a begin, under an ensure, in a proc and beside an ensure
+inside the block, and ARGF.each_line under a begin; a break under a
+begin where it was right before, which stays right; the File, Dir and
+scan loops also with a local first set inside the block. Without the
+change the File loops print their first line in every turn and the
+first raise ends the program.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
