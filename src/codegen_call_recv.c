@@ -10004,7 +10004,7 @@ void emit_str_force_encoding(Compiler *c, const char *name, const char *r, const
   buf_printf(b, "({ const char *_t%d = %s; if (!_t%d) sp_nil_recv(\"%s\"); sp_str_check_mutable(_t%d); ",
              trc, r, trc, name, trc);
   if (fe_bin) buf_printf(b, "sp_str_as_binary(_t%d); })", trc);
-  else if (fe_txt) buf_printf(b, "sp_str_as_text(_t%d); })", trc);
+  else if (fe_txt) buf_printf(b, "sp_str_force_text(_t%d); })", trc);
   else buf_printf(b, "_t%d; })", trc);
 }
 /* The same on a shared String handle (#6179), whose ASCII-8BIT tag lives on

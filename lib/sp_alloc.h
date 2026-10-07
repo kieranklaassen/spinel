@@ -451,6 +451,17 @@ static inline const char *sp_str_as_text(const char *s) {
   if (s && sp_str_has_hdr(s)) (((sp_str_hdr *)(s - 1)) - 1)->size &= ~SP_STR_SIZE_BINARY;
   return s;
 }
+/* force_encoding itself. A length remembered before the bytes were binary may
+   be of other bytes by now (setbyte forgets nothing on a binary String,
+   lib/sp_cold.c), so it goes with the tag. An append that makes a binary
+   String text has forgotten already, as every append does. */
+static inline const char *sp_str_force_text(const char *s) {
+  if (s && sp_str_is_binary(s)) {
+    (((sp_str_hdr *)(s - 1)) - 1)->size &= ~SP_STR_SIZE_BINARY;
+    sp_str_lcache_drop(s);
+  }
+  return s;
+}
 static inline int sp_str_is_ascii7(const char *s) {
   if (!s || !sp_str_has_hdr(s)) return 0;
   return (((const sp_str_hdr *)(s - 1)) - 1)->size & SP_STR_SIZE_ASCII7 ? 1 : 0;
