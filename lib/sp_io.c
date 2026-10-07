@@ -757,6 +757,7 @@ sp_PolyArray *sp_sock_getaddrinfo(const char *host, sp_int port) {SP_GC_ROOT_STR
     if (sp_net_getaddrinfo_at(host, (int)port, 0, i, &fam, &stype, &proto,
                               ip, (int)sizeof ip, &p) != 0) break;
     const char *ips = sp_str_from_bytes(ip, strlen(ip));
+    SP_GC_ROOT_STR(ips);   /* making the row can collect */
     sp_PolyArray *row = sp_PolyArray_new();
     sp_PolyArray_push(row, sp_box_str(fam == AF_INET6 ? "AF_INET6" : "AF_INET"));
     sp_PolyArray_push(row, sp_box_int((sp_int)p));
