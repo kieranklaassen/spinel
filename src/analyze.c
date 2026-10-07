@@ -18094,8 +18094,13 @@ static int promote_shared_stored_strings(Compiler *c) {
       if (an_hash_value_block(c, itn, recv4, &hr, &vi)) {
         const char *vp = block_param_name(c, blk4, vi);
         Scope *vs = vp ? comp_scope_of(c, blk4) : NULL;
-        if (!vp || (strbuf_mut_kind(c, vp, vs) != 1 && !cap_wrap_mutates_param(c, blk4, vp) &&
-            !an_subtree_hands_to_appender(c, nt_ref(nt, blk4, "body"), vp, 0))) continue;
+        if (!vp) continue;
+        if (strbuf_mut_kind(c, vp, vs) != 1 && !cap_wrap_mutates_param(c, blk4, vp) &&
+            !an_subtree_hands_to_appender(c, nt_ref(nt, blk4, "body"), vp, 0)) {
+          /* appended to through a local that names it (`{ |v| t = v; t << "!" }`) */
+          if (!bpa_built) { an_local_aliases_build(c, &bpa); bpa_built = 1; }
+          if (!an_block_param_alias_mutated(c, &bpa, vs, vp)) continue;
+        }
         an_hash_store_routes(c, hr, -1, blk4, vp,
             "a String stored in a Hash is passed to an appending value block: "
             "a String is not yet shared by reference through a Hash's values. "
