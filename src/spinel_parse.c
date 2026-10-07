@@ -337,6 +337,7 @@ static size_t prism_kind_to_pascal(const char *raw, char *out, size_t out_size) 
 /* ---- Forward ---- */
 static int flatten(pm_node_t *node);
 static int sp_in_builtin(const uint8_t *at);   /* a builtins/ splice (below) */
+static int sp_in_splice(const uint8_t *at, int pkg);   /* ... or a packages/ one */
 
 /* ---- Emit helpers ---- */
 static void emit_str(int id, const char *field, const char *val) {
@@ -559,10 +560,20 @@ static int sp_program_guard(pm_node_t *node) {
    its top-level statement. -1 outside builtins/. */
 static int g_bi_base = -1;
 static int flatten_node(pm_node_t *node);
+/* a class or a module opened in a packages/ file, and a constant written
+   there, is stamped `node_pkg` (sp_bi_pkg, below) */
+static void stamp_pkg_node(int id, pm_node_t *node) {
+  pm_node_type_t t = PM_NODE_TYPE(node);
+  if ((t == PM_CLASS_NODE || t == PM_MODULE_NODE || t == PM_CONSTANT_WRITE_NODE) &&
+      sp_in_splice(node->location.start, 1))
+    emit_int(id, "node_pkg", 1);
+}
+
 static int flatten(pm_node_t *node) {
   int saved = g_bi_base;
   int id = flatten_node(node);
   g_bi_base = saved;
+  if (id >= 0) stamp_pkg_node(id, node);
   return id;
 }
 
@@ -2291,28 +2302,39 @@ static void sp_includes_free(void) {
    Read off the splice markers, which every build keeps, not off the line
    map, which only a build with line maps has. */
 static size_t *sp_bi_lo = NULL, *sp_bi_hi = NULL;
+/* ... and the ranges a file of the compiler's own packages/ directory was
+   spliced into, the stdlib Spinel ships written in Ruby (sp_bi_pkg). A class
+   or a module opened in one, and a constant written there, is stamped
+   `node_pkg`: the class holds what Spinel has of CRuby's, not all of it, so
+   a method it lacks proves nothing about CRuby's (a Tempfile, a StringIO and
+   a Zlib reader answer #to_a there). */
+static char *sp_bi_pkg = NULL, *sp_bi_path_pkg = NULL;
 /* The files the require resolver took from the compiler's own builtins/
    directory: a splice is a builtin's by where it came from, not by a
    "/builtins/" somewhere in its path -- a program's own lib/builtins/x.rb
    is the program's. */
 static char **sp_bi_paths = NULL;
 static int sp_bi_npaths = 0;
-static void sp_note_builtin_path(const char *path) {
+static void sp_note_builtin_path(const char *path, int pkg) {
   for (int i = 0; i < sp_bi_npaths; i++) if (!strcmp(sp_bi_paths[i], path)) return;
   char **np = realloc(sp_bi_paths, sizeof(char *) * (size_t)(sp_bi_npaths + 1));
-  if (!np) { fprintf(stderr, "spinel_parse: out of memory\n"); exit(1); }
-  sp_bi_paths = np;
+  char *nk = realloc(sp_bi_path_pkg, (size_t)(sp_bi_npaths + 1));
+  if (!np || !nk) { fprintf(stderr, "spinel_parse: out of memory\n"); exit(1); }
+  sp_bi_paths = np; sp_bi_path_pkg = nk;
+  sp_bi_path_pkg[sp_bi_npaths] = (char)pkg;
   sp_bi_paths[sp_bi_npaths++] = strdup(path);
 }
+/* 1 for a builtins/ file, 2 for a packages/ file, 0 for any other */
 static int sp_is_builtin_path(const char *p, size_t n) {
   for (int i = 0; i < sp_bi_npaths; i++)
-    if (strlen(sp_bi_paths[i]) == n && !strncmp(sp_bi_paths[i], p, n)) return 1;
+    if (strlen(sp_bi_paths[i]) == n && !strncmp(sp_bi_paths[i], p, n)) return 1 + sp_bi_path_pkg[i];
   return 0;
 }
 static int sp_bi_n = 0;
 static const char *sp_bi_base = NULL;
 static void sp_find_builtin_ranges(const char *src) {
-  free(sp_bi_lo); free(sp_bi_hi); sp_bi_lo = sp_bi_hi = NULL; sp_bi_n = 0;
+  free(sp_bi_lo); free(sp_bi_hi); free(sp_bi_pkg); sp_bi_lo = sp_bi_hi = NULL; sp_bi_n = 0;
+  sp_bi_pkg = NULL;
   sp_bi_base = src;
   size_t stk_lo[64]; int stk_bi[64]; int sp = 0, cap = 0;
   for (const char *line = src; *line; ) {
@@ -2331,8 +2353,12 @@ static void sp_find_builtin_ranges(const char *src) {
           cap = cap ? cap * 2 : 8;
           sp_bi_lo = realloc(sp_bi_lo, sizeof(size_t) * (size_t)cap);
           sp_bi_hi = realloc(sp_bi_hi, sizeof(size_t) * (size_t)cap);
-          if (!sp_bi_lo || !sp_bi_hi) { fprintf(stderr, "spinel_parse: out of memory\n"); exit(1); }
+          sp_bi_pkg = realloc(sp_bi_pkg, (size_t)cap);
+          if (!sp_bi_lo || !sp_bi_hi || !sp_bi_pkg) {
+            fprintf(stderr, "spinel_parse: out of memory\n"); exit(1);
+          }
         }
+        sp_bi_pkg[sp_bi_n] = stk_bi[sp] == 2;
         sp_bi_lo[sp_bi_n] = stk_lo[sp]; sp_bi_hi[sp_bi_n] = (size_t)(line - src); sp_bi_n++;
       }
     }
@@ -2340,12 +2366,14 @@ static void sp_find_builtin_ranges(const char *src) {
     line = eol + 1;
   }
 }
-static int sp_in_builtin(const uint8_t *at) {
+static int sp_in_splice(const uint8_t *at, int pkg) {
   if (!sp_bi_base || !at) return 0;
   size_t off = (size_t)((const char *)at - sp_bi_base);
-  for (int i = 0; i < sp_bi_n; i++) if (off >= sp_bi_lo[i] && off < sp_bi_hi[i]) return 1;
+  for (int i = 0; i < sp_bi_n; i++)
+    if (sp_bi_pkg[i] == pkg && off >= sp_bi_lo[i] && off < sp_bi_hi[i]) return 1;
   return 0;
 }
+static int sp_in_builtin(const uint8_t *at) { return sp_in_splice(at, 0); }
 
 static char **sp_file_table = NULL;  /* id -> path (declared above flatten) */
 static int sp_file_count = 0, sp_file_cap = 0;
@@ -4096,7 +4124,7 @@ else {
             snprintf(gp, sizeof(gp), "%.*s/../%s.rb", base_len, lib_dir, lib_name);
             content = read_file(gp);
           }
-          if (content) sp_note_builtin_path(gp);
+          if (content) sp_note_builtin_path(gp, 0);
         }
         if (!content) snprintf(gp, sizeof(gp), "%.*s/packages/%s/%s.rb", base_len, lib_dir, first, lib_name);
         if (!content) content = read_file(gp);
@@ -4105,6 +4133,7 @@ else {
           snprintf(gp, sizeof(gp), "%.*s/../packages/%s/%s.rb", base_len, lib_dir, first, lib_name);
           content = read_file(gp);
         }
+        if (content) sp_note_builtin_path(gp, 1);
         /* the ffi package is glue over the system libffi, built only where
            that is installed: without its object the require stays the
            builtin DSL's (the tolerated no-op below) */
