@@ -32300,6 +32300,12 @@ static void refuse_far_hash_value_stores(Compiler *c) {
     q.to = blk;
     q.to_name = vp;
     q.carry = nt_kind(nt, st) == NK_CallNode ? hv_call_stored(nt, st) : -1;
+    /* the rule answers for a stored value typed a String; a parameter two
+       classes are handed is a box, which under the flag holds the handle */
+    if (c->share_strings && q.carry >= 0) {
+      TyKind ct = infer_type(c, q.carry);
+      if (ct != TY_STRING && ct != TY_STRBUF) continue;
+    }
     if (!share_route_defer(c, &q, an_hash_value_block_refusal)) unsupported_feature(c, st, an_hash_value_block_refusal);
   }
   if (listed) {
