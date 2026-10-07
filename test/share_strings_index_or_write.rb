@@ -1,5 +1,3 @@
-# Flag-only: without the flag (as on master) the String `c[k] ||= v` stores
-# is a copy and misses the append.
 # `c[k] ||= v` stores v as `c[k] = v` does: a String it leaves in a Hash or
 # an Array is the one a later `c[k] << x` appends to.
 
