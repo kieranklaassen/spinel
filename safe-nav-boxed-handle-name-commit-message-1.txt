@@ -1,0 +1,9 @@
+infer_boxed_handle_call holds the boxed handle rule
+
+The rule that types a call to a boxed handle's own name
+(`m.pre_match`, `e.with_index(1)`, with `m` and `e` read out of a
+container) moves out of infer_last_resort_call into a function of its
+own, called where it stood. No generated C changes; the next commit
+asks it from a second place.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

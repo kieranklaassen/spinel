@@ -1,0 +1,27 @@
+A `&.` call to a name a boxed MatchData or Enumerator answers builds
+
+    class Tok
+      attr_reader :string
+      def initialize(s) = @string = s
+    end
+    t = [Tok.new("ab"), nil][ARGV.size]
+    p t&.string                   # "ab"
+
+This does not build ("incompatible types when assigning to type
+'sp_RbVal' from type 'const char *'"); it was right before "A boxed
+MatchData answers string". Nor do `m&.begin(0)`, `m&.pre_match`,
+`m&.captures` or `e&.with_index(1)` on a MatchData or an Enumerator
+read out of a container, since the merges that gave the boxed handles
+those names.
+
+Under a `&.` guard, and in the builtin arm of a dispatch, codegen
+renders such a name on the unboxed handle, in the handle's C type. The
+inference typed the call poly: infer_last_resort_call answers a `&.`
+call before it reaches the boxed handle rule. It now asks that rule
+first. Where a native class's method of the name stands the rule down
+(StringScanner#string), the builtin arm has no answer, as for a `.`
+call.
+
+Not here: `&.regexp`. A Regexp's C slot has no nil the guard can use.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
