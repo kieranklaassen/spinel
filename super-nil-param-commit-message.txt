@@ -1,0 +1,40 @@
+A nil that super hands on is nil in the parent's parameter
+
+    class Account
+      attr_reader :rate
+      def initialize(rate)
+        @rate = rate
+      end
+      def summary = ["rate", @rate]
+    end
+    class Savings < Account
+      def initialize(rate) = super
+    end
+    p Savings.new(1.5).summary
+    p Savings.new(nil).summary
+
+printed ["rate", NaN] for the second where CRuby prints ["rate", nil].
+The same through `super(k)`, `super(k, &b)`, a keyword, a second
+parameter, a module's method and a chain of supers, wherever the
+parent boxes the value: an Array or a Hash it builds, a yield,
+`k || 1.0`. An Integer read from an instance variable nothing set,
+handed on by `super(@n, &b)`, answered false to `nil?` in the block.
+
+A Float or an Integer that can also be nil keeps its scalar slot with
+nil as the sentinel, and what boxes it asks the slot's mark whether it
+can be the sentinel. mark_nullable_int_locals hands that mark from a
+call's argument to the parameter it binds, for CallNodes only. A
+`super` is not one, so the parent's parameter never got the mark and
+its reads were boxed as a plain number.
+
+The same round now walks every `super`: one with arguments hands them
+through mark_nullable_params_of_call to the method it calls, and a
+bare `super` hands each of its method's parameters' marks to the
+parameter it fills, a positional one in order and a keyword by name.
+
+A parent's parameter that a `super` can hand nil now pays the sentinel
+test where it is read, as the parameter of an ordinary call does. The
+bundled ffi and fiddle packages have such a parameter (`super(nt.kind,
+...)`, an Integer read from an instance variable).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
