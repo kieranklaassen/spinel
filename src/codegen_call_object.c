@@ -1318,7 +1318,12 @@ int emit_call_safe_nav_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
         /* nil&.foo always returns nil */
         TyKind ret = repr_of(c, id).as_ty;
         const char *dv = default_value_from_compiler(c, ret);
-        buf_puts(b, dv ? dv : "0");
+        if (subtree_is_pure_read(c, recv)) buf_puts(b, dv ? dv : "0");
+        else {
+          /* the receiver is more than a read: evaluate it, then answer nil */
+          buf_puts(b, "((void)("); emit_expr(c, recv, b);
+          buf_printf(b, "), %s)", dv ? dv : "0");
+        }
         return 1;
       }
       /* The poly builtins that answer an UNBOXED scalar: the safe-nav result is
