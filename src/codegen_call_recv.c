@@ -14413,7 +14413,7 @@ static void emit_native_object_protocol_text(Compiler *c, const char *name, TyKi
       /* one exception can be boxed two ways (sp_poly_eq): the operand may
          be the receiver itself under the id of the program's class */
       int two = rt == TY_EXCEPTION && exc_boxed_by_class_id(c, is_ne ? "==" : name) &&
-                (!is_ne || exc_boxed_by_class_id(c, "!="));
+                !exc_class_has_own_ne(c);
       buf_printf(&test, "(_u%d.tag == SP_TAG_OBJ && %s_u%d.cls_id == %s && ", t, two ? "((" : "", t, bid);
       if (fn) buf_printf(&test, "%s(_t%d, (%s)_u%d.v.p))", fn, t, cty, t);
       else buf_printf(&test, "_u%d.v.p == (void *)_t%d)", t, t);
