@@ -1,0 +1,32 @@
+A lambda's call keeps its list when one value is splatted into it
+
+The commit beneath hands a splatted value that is no collection over
+as itself wherever a list is built for a call: to a block and a proc,
+and to a lambda and a Method as well. Those two count their
+arguments. With the value dropped they raised ArgumentError, and in a
+program whose to_a the compiler cannot see (a skipped require, a name
+built at run time) CRuby raises ArgumentError there too, for the two
+values the to_a answers. Handing the value over made that raise an
+answer.
+
+    la = lambda { |a| a.class }
+    p la.call(*x)   # ArgumentError; Foo with the commit beneath;
+                    # ArgumentError in CRuby when x has such a to_a
+
+The list for a lambda's call and a Method's is built as it was
+(sp_enum_items_from). Which one a Proc is, only the run time knows,
+so it is asked there (sp_splat_arg_items_of): `pr.call(*x)` reads
+its receiver before the list is built, as CRuby runs it, a local no
+argument can write where it stands and anything else through a
+rooted temp, and only where a splat may hand a value over. A lambda
+passed to a yield with `&` is asked too. A lambda written in place,
+a Method and a curried Proc compile to the C they had on master.
+
+So `lambda { |a| a }.call(*5)` still raises ArgumentError where
+CRuby answers 5. A block and a proc do not count their arguments and
+are handed the value as before.
+
+The tests call a proc where they called a lambda; their .expected
+files are unchanged.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
