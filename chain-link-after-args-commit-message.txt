@@ -1,0 +1,39 @@
+A String mutator chain link keeps what its argument did to the variable
+
+    s = +"a-"
+    s.insert(0, "a").concat((s << "y"; ""))
+    p s
+
+printed "aa-" where CRuby prints "aa-y", and printed "aa-y" before
+pull request 7778. A link of a chain reads its receiver before its
+arguments run. In CRuby the receiver is the variable's String, and an
+argument that changes that String in place changes what the link is
+about to change. In a plain String slot the argument's change leaves
+the variable naming a new text, the link computes from the text it
+read, and the write-back of pull request 7778 put that over the
+change. Before it the chain ended at the insert and the concat changed
+a copy: the "y" stayed and what the concat added was lost, so
+`concat((s << "y"; "z"))` gave "aa-y", and gives "aa-z" now, where
+CRuby gives "aa-yz".
+
+Such a link is now made on the variable after its arguments
+(emit_str_link_after_args): the chain runs for what it does, the
+arguments run into temps, and the mutator is then the variable's own
+call, on the String it names by then. A chain that answered nil (a
+bang that changed nothing) raises NoMethodError after the arguments,
+as in CRuby.
+
+Only where that is certain (str_link_arg_mutates_base): the variable
+is a plain String slot, every link is String's own, an argument of the
+link calls a String mutator on the variable, and no argument from the
+first link on can assign it, so that it names the chain's String
+still. For a local that is nothing that can rebind it
+(read_rebound_by); for an instance, global or class variable, an
+argument that runs nothing but String mutators and operators over
+scalars. Every other chain is emitted as it was.
+
+Not here: a shared String, where the same loss stands; a link called
+by `&.`; and the variable's own call, `s.prepend((s << "y"; "z"))`,
+which is no chain.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

@@ -1,0 +1,1 @@
+A String mutator chain link keeps what its argument did to the variable
