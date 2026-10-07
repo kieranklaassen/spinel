@@ -1718,12 +1718,13 @@ static int name_reshapes_respond(const char *s) {
   return 0;
 }
 
-/* A literal method name, or a def, that is none of Exception's own. */
+/* A literal method name, or a def, that is none of Exception's own, nor
+   `new`: a class's own `new` may answer what is no instance of it. */
 static int names_another_method(const NodeTable *nt, int n) {
   NodeKind k = n >= 0 ? nt_kind(nt, n) : NK_NilNode;
   const char *s = k == NK_SymbolNode ? nt_str(nt, n, "value") : k == NK_StringNode ? nt_str(nt, n, "content") :
                   k == NK_DefNode ? nt_str(nt, n, "name") : NULL;
-  return s && !name_is_exception_own_method(s);
+  return s && !name_is_exception_own_method(s) && !sp_streq(s, "new");
 }
 
 /* A value that may be a Symbol made at run time: a method name the scan
@@ -1745,7 +1746,7 @@ static int names_by_value(Compiler *c, int n) {
      names, none of them Exception's own, `undef` and `alias` name none, and
      no Symbol held in a variable is passed as a block or to inject;
    - no def of one of the names in a program with a bare `private`,
-     `protected` or `module_function`;
+     `protected` or `module_function`, and no def of `new`;
    - each of the names is called on a receiver other than self, with no
      block, and with no argument but the keywords a rendering takes. */
 static int prog_exception_names_plain(Compiler *c) {
@@ -1760,7 +1761,7 @@ static int prog_exception_names_plain(Compiler *c) {
     else if (kd == NK_StringNode) { if (name_reshapes_respond(nt_str(nt, id, "content"))) return 0; }
     else if (kd == NK_DefNode) {
       const char *n = nt_str(nt, id, "name");
-      if (!n || name_reshapes_respond(n)) return 0;
+      if (!n || name_reshapes_respond(n) || sp_streq(n, "new")) return 0;
       if (name_is_exception_own_method(n)) own_def = 1;
     }
     else if (kd == NK_UndefNode) {
