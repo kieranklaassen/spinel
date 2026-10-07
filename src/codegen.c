@@ -2218,7 +2218,7 @@ static int scope_performs_match(Compiler *c, int si) {
     int hit = 0;
     for (int k = 0; mnames[k] && !hit; k++) if (sp_streq(nm, mnames[k])) hit = 1;
     /* and so do any?, all?, none? and one? of each element, slice! and an
-       index assignment that names a group (`s[re] = v` sets no register) */
+       index assignment by a Regexp */
     if (!hit && g_match_frame_closed)
       hit = is_quantifier(nm) || sp_streq(nm, "slice!") || sp_streq(nm, "[]=");
     if (!hit) continue;
@@ -2227,7 +2227,9 @@ static int scope_performs_match(Compiler *c, int si) {
     if (r >= 0 && comp_ntype(c, r) == TY_REGEX) return 1;
     int a = nt_ref(nt, id, "arguments");
     int an = 0; const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
-    if (an < 3 && sp_streq(nm, "[]=")) continue;
+    /* `s[/re/] = v` of a String; a Regexp as a Hash key is no match */
+    if (an < 3 && sp_streq(nm, "[]=") &&
+        !(an == 2 && av && re_lit_index(c, av[0]) >= 0 && r >= 0 && comp_ntype(c, r) == TY_STRING)) continue;
     for (int k = 0; k < an && av; k++)
       if (comp_ntype(c, av[k]) == TY_REGEX) return 1;
     /* gsub, sub and scan on a String set them for a String pattern too, and

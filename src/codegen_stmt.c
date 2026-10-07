@@ -14701,12 +14701,15 @@ static int str_mutate_reassign_arms(Compiler *c, Buf *b, int indent, const NodeT
                  ts, ts);
       return 1;
     }
-    /* s[/re/] = v: replace the first match's span; no match raises IndexError */
+    /* s[/re/] = v: replace the first match's span; no match raises
+       IndexError. It is a match like any other, and leaves $~ at what it
+       replaced, where the method has a frame for it (match_sets_last). */
     if (assignable && sp_streq(name, "[]=") && argc == 2 && re_lit_index(c, argv[0]) >= 0) {
+      int sets = match_sets_last(argv[0]) && comp_ntype(c, recv) == TY_STRING;
       emit_indent(b, indent); buf_puts(b, "sp_str_check_mutable("); emit_expr(c, recv, b); buf_puts(b, ");\n");
       emit_indent(b, indent);
       emit_expr(c, recv, b);
-      buf_printf(b, " = sp_str_splice_re(sp_re_pat_%d, ", re_lit_index(c, argv[0]));
+      buf_printf(b, " = sp_str_splice_re%s(sp_re_pat_%d, ", sets ? "_last" : "", re_lit_index(c, argv[0]));
       emit_expr(c, recv, b); buf_puts(b, ", "); emit_str_expr(c, argv[1], b);
       buf_puts(b, ");\n");
       return 1;

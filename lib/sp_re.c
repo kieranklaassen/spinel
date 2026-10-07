@@ -350,6 +350,15 @@ const char *sp_str_splice_re(mrb_regexp_pattern *pat, const char *s, const char 
   if (n <= 0) { sp_raise_cls("IndexError", "regexp not matched"); return s; }
   return sp_sprintf("%.*s%s%s", (int)caps[0], s, val, s + caps[1]);
 }
+/* s[/re/] = val as a match: the same replacement, and the registers are left
+   at the match as sp_re_match leaves them (cleared where nothing matches,
+   before the IndexError). */
+const char *sp_str_splice_re_last(mrb_regexp_pattern *pat, const char *s, const char *val) {SP_GC_ROOT_STR(s);SP_GC_ROOT_STR(val);
+  if (!s) s = &("\xff" "")[1];
+  if (!val) val = "";
+  if (sp_re_match(pat, s) < 0) { sp_raise_cls("IndexError", "regexp not matched"); return s; }
+  return sp_sprintf("%.*s%s%s", (int)sp_re_caps[0], s, val, s + sp_re_caps[1]);
+}
 /* String#slice!(regexp): the removed match (or NULL when unmatched), with
    the receiver's remainder written through rest_out and the match
    registers set (cleared on no-match, like sp_re_match). */
