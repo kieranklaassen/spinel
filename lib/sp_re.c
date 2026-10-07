@@ -107,6 +107,10 @@ sp_MatchData *sp_re_last_matchdata(void) {
    returns. The registers here are per-worker globals, so a method that matches
    saves them on entry and puts them back on the way out; the emitter gives
    such a method one of these frames (#3629). */
+/* Root one saved string, tagged as the registers' own are marked. */
+static int sp_re_frame_root(const char **slot) {
+  return *slot ? _sp_gc_root_push((void **)((uintptr_t)slot | (uintptr_t)2)) : 0;
+}
 void sp_re_frame_push(sp_re_frame *f) {
   if (!f) return;
   for (int i = 0; i < 10; i++) f->captures[i] = sp_re_captures[i];
@@ -119,9 +123,19 @@ void sp_re_frame_push(sp_re_frame *f) {
   f->last_pat = sp_re_last_pat;
   f->last_lit = sp_re_last_lit;
   f->pp_span[0] = sp_re_pp_span[0]; f->pp_span[1] = sp_re_pp_span[1];
+  /* The saved strings are the caller's. While this method runs its own match
+     is in the registers, so nothing else names them, and they go back into
+     the registers on the way out: they are roots until then. */
+  f->nroot = 0;
+  for (int i = 0; i < 10; i++) f->nroot += sp_re_frame_root(&f->captures[i]);
+  f->nroot += sp_re_frame_root(&f->last_str);
+  f->nroot += sp_re_frame_root(&f->match_str);
+  f->nroot += sp_re_frame_root(&f->match_pre);
+  f->nroot += sp_re_frame_root(&f->match_post);
 }
 void sp_re_frame_pop(sp_re_frame *f) {
   if (!f) return;
+  sp_gc_nroots -= f->nroot;
   for (int i = 0; i < 10; i++) sp_re_captures[i] = f->captures[i];
   for (int i = 0; i < 64; i++) sp_re_caps[i] = f->caps[i];
   sp_re_last_str = f->last_str;
