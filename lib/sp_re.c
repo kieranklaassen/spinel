@@ -111,8 +111,7 @@ sp_MatchData *sp_re_last_matchdata(void) {
 static int sp_re_frame_root(const char **slot) {
   return *slot ? _sp_gc_root_push((void **)((uintptr_t)slot | (uintptr_t)2)) : 0;
 }
-void sp_re_frame_push(sp_re_frame *f) {
-  if (!f) return;
+static inline void sp_re_frame_fill(sp_re_frame *f) {
   for (int i = 0; i < 10; i++) f->captures[i] = sp_re_captures[i];
   for (int i = 0; i < 64; i++) f->caps[i] = sp_re_caps[i];
   f->last_str = sp_re_last_str;
@@ -123,10 +122,15 @@ void sp_re_frame_push(sp_re_frame *f) {
   f->last_pat = sp_re_last_pat;
   f->last_lit = sp_re_last_lit;
   f->pp_span[0] = sp_re_pp_span[0]; f->pp_span[1] = sp_re_pp_span[1];
+  f->nroot = 0;
+}
+void sp_re_frame_save(sp_re_frame *f) { sp_re_frame_fill(f); }
+void sp_re_frame_push(sp_re_frame *f) {
+  if (!f) return;
+  sp_re_frame_fill(f);
   /* The saved strings are the caller's. While this method runs its own match
      is in the registers, so nothing else names them, and they go back into
      the registers on the way out: they are roots until then. */
-  f->nroot = 0;
   for (int i = 0; i < 10; i++) f->nroot += sp_re_frame_root(&f->captures[i]);
   f->nroot += sp_re_frame_root(&f->last_str);
   f->nroot += sp_re_frame_root(&f->match_str);
@@ -147,6 +151,30 @@ void sp_re_frame_pop(sp_re_frame *f) {
   sp_re_last_lit = f->last_lit;
   /* the span $` and $' are built from lazily: the caller's, not the callee's */
   sp_re_pp_span[0] = f->pp_span[0]; sp_re_pp_span[1] = f->pp_span[1];
+}
+/* A raise, a throw, a break out of a block and a proc's return jump out of
+   methods without running a cleanup, so the frames above would never be
+   popped and the method the jump lands in would read its callee's match as
+   its own. sp_re_frame_enter therefore notes each frame it opens, and each
+   jump pops the frames of the methods it leaves first, innermost first, which
+   walks the registers back to what the landing method had. Which frames a jump
+   leaves is the jump's to say (sp_re_frames_leave, sp_re_frames_leave_to): a
+   frame entered inside the handler it lands on noted that handler stack at
+   the landing depth or deeper, and one entered before it noted less. */
+SP_TLS sp_re_frame_note *sp_re_notes = NULL;
+SP_TLS int sp_re_nnotes = 0, sp_re_notes_cap = 0;
+void sp_re_notes_grow(void) {
+  int cap = sp_re_notes_cap ? sp_re_notes_cap * 2 : 64;
+  sp_re_frame_note *p = (sp_re_frame_note *)realloc(sp_re_notes, sizeof(*p) * (size_t)cap);
+  if (!p) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+  sp_re_notes = p; sp_re_notes_cap = cap;
+}
+void sp_re_frame_leave(char *unused) {
+  (void)unused;
+  sp_re_frame_pop(&sp_re_notes[--sp_re_nnotes].f);
+}
+void sp_re_frames_pop_to(int keep) {
+  while (sp_re_nnotes > keep) sp_re_frame_pop(&sp_re_notes[--sp_re_nnotes].f);
 }
 void sp_re_set_captures(const char *str, int *caps, int ncaps) {SP_GC_ROOT_STR(str);
   sp_re_last_str = str;

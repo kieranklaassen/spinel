@@ -1509,6 +1509,15 @@ static void sp_re_mark_globals(void) {
   sp_mark_string(sp_re_match_str);
   sp_mark_string(sp_re_match_pre);
   sp_mark_string(sp_re_match_post);
+  /* and the callers' registers the entered frames keep (sp_re_frame_enter) */
+  for (int k = 0; k < sp_re_nnotes; k++) {
+    const sp_re_frame *f = &sp_re_notes[k].f;
+    sp_mark_string(f->last_str);
+    for (int i = 0; i < 10; i++) sp_mark_string(f->captures[i]);
+    sp_mark_string(f->match_str);
+    sp_mark_string(f->match_pre);
+    sp_mark_string(f->match_post);
+  }
   SP_GLB_PHASE("globals:argv");
   for (sp_int i = 0; i < sp_argv.len; i++) sp_mark_string(sp_argv.data[i]);
   if (sp_argv_array_cache) sp_gc_mark(sp_argv_array_cache);
@@ -12758,6 +12767,10 @@ static SP_TLS int sp_poly_recur_mark[SP_EXC_STACK_MAX];
    jumped over, so give the path back the depth that frame recorded. */
 static inline void sp_poly_recur_unwind(void) {
   if (sp_exc_top > 0) sp_poly_recur_pop(sp_poly_recur_mark[sp_exc_top - 1]);
+  /* and the methods jumped over that match give their callers' `$~` back
+     (lib/sp_re.c); a frame notes the depth it was entered at, as the entries
+     sp_handler_stacks_unwind drops do, so no arm pays for it */
+  if (SP_UNLIKELY(sp_re_nnotes != 0)) sp_re_frames_leave(SP_RE_FRAME_EXC, sp_exc_top);
 }
 #define sp_cur_handled() (sp_rescue_sp > 0 ? sp_exc_handling[sp_rescue_sp-1] : NULL)
 /* Push a handled exception. sp_rescue_sp grows with recursion *through* rescue
@@ -13738,6 +13751,7 @@ static void sp_throw(const char *tag, int kind, sp_RbVal val) {
         longjmp(sp_exc_stack[sp_exc_top - 1], 1);
       }
       sp_poly_recur_pop(sp_catch_recur_mark[i]);
+      sp_re_frames_leave(SP_RE_FRAME_CATCH, i + 1);
       longjmp(sp_catch_stack[i], 1);
     }
     i--;
@@ -13826,6 +13840,7 @@ static SP_NORETURN void sp_brk_throw(sp_int serial, sp_RbVal v) {
       longjmp(sp_exc_stack[sp_exc_top - 1], 1);
     }
     sp_poly_recur_pop(sp_brk_recur_mark[i]);
+    sp_re_frames_leave(SP_RE_FRAME_BRK, i + 1);
     longjmp(sp_brk_stack[i], 1);
   }
   /* no live scope carries the serial: an escaped/foreign proc's break. An
@@ -13889,6 +13904,28 @@ static sp_int sp_proc_home_next(void) {
   return sp_proc_home_seq++;
 #endif
 }
+/* Open a matching method's match frame beside the C stack (sp_re_frame_note,
+   lib/sp_re.h) and note where each handler stack stands, so that a jump out
+   of the method can tell it is being left. The stacks are this file's own, so
+   the note is taken here. Not inlined: the method's own C frame stays small. */
+static SP_NOINLINE void sp_re_frame_enter(void) {
+  if (SP_UNLIKELY(sp_re_nnotes == sp_re_notes_cap)) sp_re_notes_grow();
+  sp_re_frame_note *n = &sp_re_notes[sp_re_nnotes++];
+  sp_re_frame_save(&n->f);
+  n->depth[SP_RE_FRAME_EXC] = sp_exc_top;
+  n->depth[SP_RE_FRAME_CATCH] = sp_catch_top;
+  n->depth[SP_RE_FRAME_BRK] = sp_brk_top;
+  n->home = sp_proc_ret_head ? sp_proc_ret_head->id : -1;
+  sp_re_clear_last_match();
+}
+/* Leave the frames a return to the home `id` leaves. A home has no depth to
+   note, but its id is its age: a frame entered with that home or a younger
+   one innermost was entered inside the home's method. */
+static inline void sp_re_frames_leave_home(sp_int id) {
+  int keep = sp_re_nnotes;
+  while (keep > 0 && sp_re_notes[keep - 1].home >= id) keep--;
+  sp_re_frames_leave_to(keep);
+}
 static void sp_proc_return(sp_int id, sp_RbVal v) {
   for (sp_proc_home *h = sp_proc_ret_head; h; h = h->prev) {
     if (h->id == id) {
@@ -13899,6 +13936,7 @@ static void sp_proc_return(sp_int id, sp_RbVal v) {
         longjmp(sp_exc_stack[sp_exc_top - 1], 1);
       }
       sp_poly_recur_pop(h->recur_mark);
+      sp_re_frames_leave_home(h->id);
       longjmp(h->jb, 1);
     }
   }
@@ -13994,13 +14032,16 @@ static void sp_unwind_resume(void) {
      the way here) */
   if (kind == SP_UNWIND_PROCRET) {
     sp_poly_recur_pop(sp_unwind_home->recur_mark);
+    sp_re_frames_leave_home(sp_unwind_home->id);
     longjmp(sp_unwind_home->jb, 1);
   }
   if (kind == SP_UNWIND_BREAK) {
     sp_poly_recur_pop(sp_brk_recur_mark[sp_unwind_target]);
+    sp_re_frames_leave(SP_RE_FRAME_BRK, sp_unwind_target + 1);
     longjmp(sp_brk_stack[sp_unwind_target], 1);
   }
   sp_poly_recur_pop(sp_catch_recur_mark[sp_unwind_target]);
+  sp_re_frames_leave(SP_RE_FRAME_CATCH, sp_unwind_target + 1);
   longjmp(sp_catch_stack[sp_unwind_target], 1);
 }
 
