@@ -1,0 +1,1 @@
+A method that matches starts with no match, and a jump out of it gives its caller's back
