@@ -2197,21 +2197,26 @@ int cvar_global_slot(Compiler *c, int node, char *out, size_t cap) {
   if (!nm || nm[0] != '@' || nm[1] != '@' || !holder_of_node(c, node, &h) || h.kind != HK_CVAR) return 0;
   return holder_slot_text(c, &h, out, cap);
 }
+/* See codegen_internal.h. */
+int *an_parent_map(const NodeTable *nt);
+static int *g_node_parent;
+static int g_node_parent_n = -1;
+static unsigned g_node_parent_ver;
+int node_parent(Compiler *c, int node) {
+  const NodeTable *nt = c->nt;
+  if (!g_node_parent || g_node_parent_n != nt->count || g_node_parent_ver != nt->version) {
+    free(g_node_parent);
+    g_node_parent = an_parent_map(nt);
+    if (!g_node_parent) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+    g_node_parent_n = nt->count; g_node_parent_ver = nt->version;
+  }
+  return node >= 0 && node < nt->count ? g_node_parent[node] : -1;
+}
 /* The innermost block or lambda `node` is written in, within its method;
    -1 at the method's own level. */
-int *an_parent_map(const NodeTable *nt);
-static int *g_lent_parent;
-static int g_lent_parent_n = -1;
-static unsigned g_lent_parent_ver;
 static int lent_enclosing_closure(Compiler *c, int node) {
   const NodeTable *nt = c->nt;
-  if (!g_lent_parent || g_lent_parent_n != nt->count || g_lent_parent_ver != nt->version) {
-    free(g_lent_parent);
-    g_lent_parent = an_parent_map(nt);
-    if (!g_lent_parent) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
-    g_lent_parent_n = nt->count; g_lent_parent_ver = nt->version;
-  }
-  for (int p = node >= 0 && node < nt->count ? g_lent_parent[node] : -1; p >= 0; p = g_lent_parent[p]) {
+  for (int p = node_parent(c, node); p >= 0; p = node_parent(c, p)) {
     NodeKind k = nt_kind(nt, p);
     if (k == NK_BlockNode || k == NK_LambdaNode) return p;
     if (k == NK_DefNode) return -1;
