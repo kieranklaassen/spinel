@@ -7553,9 +7553,31 @@ int arg_read_converts(Compiler *c, TyKind pt, int provided) {
 void emit_rooted_conversion(Compiler *c, TyKind pt, const char *expr, Buf *out) {
   int t = ++g_tmp;
   emit_indent(g_pre, g_indent);
-  emit_ctype(c, pt, g_pre);
-  buf_printf(g_pre, " _t%d = NULL; SP_GC_ROOT(_t%d);\n", t, t);
+  if (pt == TY_POLY) buf_printf(g_pre, "sp_RbVal _t%d = sp_box_nil(); SP_GC_ROOT_RBVAL(_t%d);\n", t, t);
+  else {
+    emit_ctype(c, pt, g_pre);
+    buf_printf(g_pre, " _t%d = NULL; SP_GC_ROOT(_t%d);\n", t, t);
+  }
   buf_printf(out, "(_t%d = %s)", t, expr);
+}
+
+/* Write `vb`, the text of parameter i read out of a spread (a splat's
+   element, the gathered positionals, a `**`'s key), as the call's argument.
+   Where the spread does not reach the parameter the text falls back to its
+   default, written where the argument stands: one that allocates is fresh
+   inside the call's parentheses, and the next argument's allocation, or the
+   callee's own before it roots the parameter, collects it. Such a value is
+   assigned to a rooted temp where it stands (emit_rooted_conversion), so
+   nothing is evaluated earlier than it was. */
+static void emit_spread_param_held(Compiler *c, Scope *m, int i, Buf *vb, Buf *out) {
+  LocalVar *p = m->pnames[i] ? scope_local(m, m->pnames[i]) : NULL;
+  const char *v = vb->p ? vb->p : "";
+  int bound = v[0] == '_' && v[1] == 't' && !v[2 + strspn(v + 2, "0123456789")];
+  if (!bound && g_pre && p && !p->byref_out && m->pdefault && m->pdefault[i] >= 0 &&
+      operand_may_allocate(c, m->pdefault[i]) && (p->type == TY_POLY || needs_root(p->type)))
+    emit_rooted_conversion(c, p->type, v, out);
+  else buf_puts(out, v);
+  free(vb->p);
 }
 
 /* Like emit_arg_or_default, but hoists a pointer-backed / poly argument into a
@@ -10415,8 +10437,11 @@ else {
   for (int i = 0; i < m->nparams; i++) {
     buf_puts(out, i == 0 ? lead : ", ");
     if (L.gather && emit_gather_lead_lent(c, m, i, argv, argc, out)) {}
-    else if (L.from[i] == ARG_GATHERED)
-      emit_gathered_param(c, m, i, splat_tmp, out);
+    else if (L.from[i] == ARG_GATHERED) {
+      Buf vb; memset(&vb, 0, sizeof vb);
+      emit_gathered_param(c, m, i, splat_tmp, &vb);
+      emit_spread_param_held(c, m, i, &vb, out);
+    }
     else if (L.from[i] == ARG_REST) {
       /* rest collects middle args; stop before post-splat params */
       int rest_end = rest_argc - m->npost_rest;
@@ -10428,8 +10453,11 @@ else {
         emit_rest_pack_kwh(c, i, rest_end, argv, L.rest_kwh, out);
       }
     }
-else if (L.from[i] == ARG_ELEM)
-      emit_elem_param(c, m, i, L.arg[i], splat_tmp, splat_at, splat_all, out);
+else if (L.from[i] == ARG_ELEM) {
+      Buf vb; memset(&vb, 0, sizeof vb);
+      emit_elem_param(c, m, i, L.arg[i], splat_tmp, splat_at, splat_all, &vb);
+      emit_spread_param_held(c, m, i, &vb, out);
+    }
 else {
       /* Check if this param has a keyword match (lookup by param name in kwh).
          Only a true KEYWORD param consumes a key -- a positional param whose
@@ -10444,7 +10472,9 @@ else {
       }
       else if (ds_hash_tmp >= 0 && is_kwparam && i != m->kwrest_idx) {
         /* Double-splat: extract param by name from the pre-eval'd hash. */
-        emit_ds_param_extract(c, m, i, ds_hash_tmp, ds_hash_type, out);
+        Buf vb; memset(&vb, 0, sizeof vb);
+        emit_ds_param_extract(c, m, i, ds_hash_tmp, ds_hash_type, &vb);
+        emit_spread_param_held(c, m, i, &vb, out);
       }
       else if (m->kwrest_idx >= 0 && i == m->kwrest_idx) {
         /* Collect remaining (unbound) keyword args into a sp_SymPolyHash. When
