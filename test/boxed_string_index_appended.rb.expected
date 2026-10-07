@@ -1,0 +1,25 @@
+"ab"
+"ab"
+"ab"
+"cabab"
+nil
+"a"
+"b"
+"a"
+"ab"
+"ab"
+"abab"
+"cab"
+nil
+"ab"
+TypeError: no implicit conversion from nil to integer
+TypeError: no implicit conversion of true into Integer
+TypeError: no implicit conversion of Array into Integer
+TypeError: no implicit conversion from nil to integer
+TypeError: no implicit conversion of String into Integer
+"ab"
+nil
+"a"
+"ab"
+"ab"
+"a"
