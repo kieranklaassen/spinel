@@ -618,6 +618,22 @@ int class_recv_static_ci(Compiler *c, int node) {
   return class_var_static_ci(c, node);
 }
 
+/* The class method `Klass === x` calls: the receiver names one class at
+   compile time and that class defines === itself (`def self.===`). -1 for
+   any other receiver, and for a === whose `super` has no === of the program
+   above it: that super is Module#===, which the is_a? fold answers. */
+int class_recv_own_eqq(Compiler *c, int node) {
+  int def = -1;
+  int ci = class_recv_static_ci(c, node);
+  int own = ci >= 0 ? comp_cmethod_in_chain(c, ci, "===", &def) : -1;
+  for (int mi = own; mi >= 0 && scope_body_has_super(c, mi); ) {
+    int up = def >= 0 ? c->classes[def].parent : -1;
+    mi = up >= 0 ? comp_cmethod_in_chain(c, up, "===", &def) : -1;
+    if (mi < 0) return -1;
+  }
+  return own;
+}
+
 /* The literal symbol behind a symbol-typed expression: a SymbolNode itself,
    or a local variable whose only write (in its scope, plain write) is one.
    Lets inject(:op)-style operator selection see through `s = :+; a.inject(s)`.

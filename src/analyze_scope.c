@@ -5120,7 +5120,7 @@ void resolve_inherited_aliases(Compiler *c) {
 
 /* True if the method scope's body contains a `super` (an explicit-arg SuperNode
    or a bare ForwardingSuperNode). */
-static int scope_body_has_super(Compiler *c, int scope_idx) {
+int scope_body_has_super(Compiler *c, int scope_idx) {
   const NodeTable *nt = c->nt;
   for (int id = 0; id < nt->count; id++) {
     if (c->nscope[id] != scope_idx) continue;
