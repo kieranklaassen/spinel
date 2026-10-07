@@ -13830,8 +13830,9 @@ static int byref_name_cmp(const void *a, const void *b) {
   int d = strcmp(x->name, y->name);
   return d ? d : x->si - y->si;
 }
-/* every method named nm keeps the plain ABI */
-static void byref_name_ineligible(const ByrefName *idx, int ni, const char *nm, char *elig) {
+/* every method named nm keeps the plain ABI; `aliased` (the scopes, or NULL)
+   marks the ones an alias takes the slot from (alias_plain_abi) */
+static void byref_name_ineligible(const ByrefName *idx, int ni, const char *nm, char *elig, Scope *aliased) {
   if (!nm) return;
   int lo = 0, hi = ni;
   while (lo < hi) {
@@ -13839,7 +13840,10 @@ static void byref_name_ineligible(const ByrefName *idx, int ni, const char *nm, 
     if (strcmp(idx[mid].name, nm) < 0) lo = mid + 1;
     else hi = mid;
   }
-  for (int i = lo; i < ni && sp_streq(idx[i].name, nm); i++) elig[idx[i].si] = 0;
+  for (int i = lo; i < ni && sp_streq(idx[i].name, nm); i++) {
+    if (aliased && elig[idx[i].si]) aliased[idx[i].si].alias_plain_abi = 1;
+    elig[idx[i].si] = 0;
+  }
 }
 
 /* Which methods the default build may lend a String parameter's slot by
@@ -13855,6 +13859,7 @@ void an_byref_eligible_scopes(Compiler *c, char *elig) {
   memset(elig, 0, (size_t)(n > 0 ? n : 1));
   for (int si = 1; si < n; si++) {
     Scope *s = &c->scopes[si];
+    s->alias_plain_abi = 0;
     if (!s->name || s->def_node < 0 || s->body < 0) continue;
     if (s->yields || s->is_lowered_yield || s->dm_subst_name || s->cs_synth) continue;
     if (s->is_transplanted_source) continue;
@@ -13904,9 +13909,11 @@ void an_byref_eligible_scopes(Compiler *c, char *elig) {
      sites keep the plain ABI, so the method must too */
   for (int ci = 0; ci < c->nclasses; ci++) {
     ClassInfo *cls = &c->classes[ci];
+    /* the emitters refuse a String variable handed to a parameter such a
+       method appends to (refuse_aliased_param_args): it is a copy */
     for (int a = 0; a < cls->naliases; a++) {
-      byref_name_ineligible(idx, ni, cls->alias_old[a], elig);
-      byref_name_ineligible(idx, ni, cls->alias_new[a], elig);
+      byref_name_ineligible(idx, ni, cls->alias_old[a], elig, c->scopes);
+      byref_name_ineligible(idx, ni, cls->alias_new[a], elig, c->scopes);
     }
   }
   /* A name reached by a Symbol or String -- send / method(:x) /
@@ -13970,7 +13977,7 @@ void an_byref_eligible_scopes(Compiler *c, char *elig) {
                  if (jk == NK_SymbolNode || jk == NK_StringNode) {
                    const char *jv = jk == NK_SymbolNode ? nt_str(nt, av[j], "value") : nt_str(nt, av[j], "content");
                    if (!jv) jv = nt_str(nt, av[j], "unescaped");
-                   byref_name_ineligible(idx, ni, jv, elig);
+                   byref_name_ineligible(idx, ni, jv, elig, NULL);
                  }
                } }
       }
@@ -13986,7 +13993,7 @@ void an_byref_eligible_scopes(Compiler *c, char *elig) {
         if (!v) v = nt_str(nt, lit, "unescaped");
       }
     }
-    byref_name_ineligible(idx, ni, v, elig);
+    byref_name_ineligible(idx, ni, v, elig, NULL);
   }
   free(idx);
 }
