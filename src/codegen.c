@@ -2061,12 +2061,41 @@ static int scope_emits_setjmp(Compiler *c, int si) {
   return 0;
 }
 
+/* Is a `yield` under `id`? */
+static int subtree_yields(const NodeTable *nt, int id) {
+  if (id < 0 || id >= nt->count) return 0;
+  if (nt_kind(nt, id) == NK_YieldNode) return 1;
+  int nr = nt_num_refs(nt, id);
+  for (int i = 0; i < nr; i++)
+    if (subtree_yields(nt, nt_ref_at(nt, id, i))) return 1;
+  int na = nt_num_arrs(nt, id);
+  for (int i = 0; i < na; i++) {
+    int n; const int *a = nt_arr_at(nt, id, i, &n);
+    for (int j = 0; j < n; j++)
+      if (subtree_yields(nt, a[j])) return 1;
+  }
+  return 0;
+}
+
+/* Is `blk`, the block of a call in the yielding method `m`, the block that
+   method was given: one that holds its `yield`, or its own `&blk`? */
+static int block_hands_on(Compiler *c, Scope *m, int blk) {
+  const NodeTable *nt = c->nt;
+  if (nt_kind(nt, blk) == NK_BlockNode) return subtree_yields(nt, blk);
+  if (nt_kind(nt, blk) != NK_BlockArgumentNode) return 0;
+  int e = nt_ref(nt, blk, "expression");
+  if (e < 0) return 1;
+  const char *nm = nt_kind(nt, e) == NK_LocalVariableReadNode ? nt_str(nt, e, "name") : NULL;
+  return nm && m->blk_param && sp_streq(nm, m->blk_param);
+}
+
 /* Does the yielding method `mi` run its block under a setjmp: one of its
    own, or that of a method it hands the block on to (`guarded { yield }`,
    `guarded(&blk)`), however many methods away? Each such method is spliced
    into the one above it, so the setjmp ends up in the frame of the first
    caller. Settled once for a node table, to a fixed point: a method joins
-   once one it hands its block to has. */
+   once one it hands its block to has. Another block it gives such a method
+   (`guarded { 1 }` beside `plain { yield }`) hands nothing on. */
 static int yield_method_guards(Compiler *c, int mi) {
   static const NodeTable *for_nt = NULL;
   static int for_scopes = -1;
@@ -2083,9 +2112,10 @@ static int yield_method_guards(Compiler *c, int mi) {
         if (in[si] || !c->scopes[si].yields) continue;
         int nids = 0; const int *ids = cg_scope_nodes(c, si, &nids);
         for (int k = 0; k < nids && !in[si]; k++) {
-          if (nt_kind(c->nt, ids[k]) != NK_CallNode || nt_ref(c->nt, ids[k], "block") < 0) continue;
+          int blk = nt_kind(c->nt, ids[k]) == NK_CallNode ? nt_ref(c->nt, ids[k], "block") : -1;
+          if (blk < 0) continue;
           int to = call_user_yield_mi(c, ids[k]);
-          if (to >= 0 && in[to]) { in[si] = 1; grew = 1; }
+          if (to >= 0 && in[to] && block_hands_on(c, &c->scopes[si], blk)) { in[si] = 1; grew = 1; }
         }
       }
     }
