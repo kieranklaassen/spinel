@@ -1844,6 +1844,7 @@ GC_STRESS_TESTS := test/gc_root_frame_slots.rb \
                    test/struct_values_fresh_receiver_root.rb \
                    test/hash_splat_to_a.rb \
                    test/proc_cell_capture_marked.rb \
+                   test/new_rest_and_block_held.rb \
                    test/poly_array_intersect.rb \
                    test/thread_new_args_rooted_across_fiber_alloc.rb \
                    test/gc_root_volatile_string_slot.rb \
