@@ -1,0 +1,5 @@
+Test a failed call's new arguments and receiver under GC stress
+
+Test: test/nomethod_args_fresh_held.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
