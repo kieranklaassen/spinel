@@ -12646,6 +12646,27 @@ static int emit_poly_call0_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
   return 0;
 }
 
+/* Can `outer[oidx]` be read again after a store into its element, to see
+   whether it still holds the element the store read? The outer is an Array
+   or a Hash of boxed values, and neither it nor its index runs code. The
+   key and the value run none either, or have run already, in their order
+   (emit_operands_in_order): the element is then read where it was. */
+static int slot_reads_again(Compiler *c, int outer, int oidx, int key, int val) {
+  TyKind ot = comp_ntype(c, outer);
+  return (ot == TY_POLY_ARRAY || ot == TY_POLY_POLY_HASH) &&
+         !subtree_has_side_effect(c, outer) && !subtree_has_side_effect(c, oidx) &&
+         (!subtree_has_side_effect(c, key) || arg_ran_first(key, 0)) &&
+         (!subtree_has_side_effect(c, val) || arg_ran_first(val, 0));
+}
+/* The typed read ("get") or store ("set") of such a slot, up to its last
+   argument. */
+static void emit_slot_access(Compiler *c, const char *op, int outer, int oidx, Buf *b) {
+  int arr = comp_ntype(c, outer) == TY_POLY_ARRAY;
+  buf_printf(b, arr ? "sp_PolyArray_%s(" : "sp_PolyPolyHash_%s(", op); emit_expr(c, outer, b);
+  buf_puts(b, arr ? ", " : ", sp_box_int("); emit_int_expr(c, oidx, b);
+  if (!arr) buf_puts(b, ")");
+}
+
 /* Element access on a boxed receiver: an index read, []= and [] with one or two arguments (emit_poly_call's arms, in their order) */
 static int emit_poly_index_call(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, TyKind rt, int *out) {
   /* poly receiver: arr[start, len] = src -- 3-arg splice assign
@@ -12807,6 +12828,24 @@ static int emit_poly_index_call(Compiler *c, int id, Buf *b, const NodeTable *nt
       buf_printf(b, at == TY_STRING ? ", sp_box_str(_t%d), _t%d);\nelse " : ", _t%d, _t%d);\nelse ", tk, tv);
       buf_printf(b, at == TY_STRING ? "sp_poly_set_str(" : "sp_poly_set_poly("); emit_expr(c, recv, b);
       buf_printf(b, ", _t%d", tk);
+    }
+    else if (at == TY_STRING && splice_recv_index_slot(c, recv, &skey_outer, &skey_oidx) &&
+             slot_reads_again(c, skey_outer, skey_oidx, argv[0], argv[1])) {
+      /* an element of an Array or a Hash: a plain String answers its new
+         contents, and they go back into the slot while it still holds the
+         String read, as the Integer index's store writes them; any other
+         element stores as before */
+      int te = ++g_tmp, ts = ++g_tmp, tr = ++g_tmp, tn = ++g_tmp;
+      buf_printf(b, "sp_RbVal _t%d = ", te); emit_expr(c, recv, b);
+      buf_printf(b, "; const char *_t%d = _t%d.tag == SP_TAG_STR ? _t%d.v.s : NULL; "
+                    "sp_RbVal _t%d = sp_poly_str_aset_key(_t%d, ", ts, te, te, tr, te);
+      emit_boxed(c, argv[0], b);
+      buf_printf(b, ", _t%d); if (SP_UNLIKELY(_t%d != NULL)) { sp_RbVal _t%d = ", tv, ts, tn);
+      emit_slot_access(c, "get", skey_outer, skey_oidx, b);
+      buf_printf(b, "); if (_t%d.tag == SP_TAG_STR && _t%d.v.s == _t%d) ", tn, tn, ts);
+      emit_slot_access(c, "set", skey_outer, skey_oidx, b);
+      buf_printf(b, ", _t%d); } _t%d; })", tr, tv);
+      { *out = 1; return 1; }
     }
     else if (at == TY_STRING || pkey || (at == TY_REGEX && !splice_recv_index_slot(c, recv, &skey_outer, &skey_oidx))) {
       /* a shared String changes in place; anything else stores as before */
