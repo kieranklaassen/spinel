@@ -9395,16 +9395,40 @@ static int splat_name_in(const char *s, const char *const *set) {
   return 0;
 }
 
+/* A literal the program spells: does it reach a to_a by itself? It does as
+   the name, as Enumerable, and as the name of anything that calls, fetches
+   or mixes in by a name: what such a name is then handed is not followed. */
+static int splat_literal_reaches_to_a(const char *s, int is_string) {
+  static const char *const reach[] = {
+    "to_a", "method_missing", "respond_to_missing?", "respond_to?", "Enumerable", "ObjectSpace",
+    "eval", "instance_eval", "class_eval", "module_eval", "instance_exec", "class_exec",
+    "module_exec", "send", "__send__", "public_send", "method", "public_method",
+    "singleton_method", "instance_method", "public_instance_method", "const_get", "include",
+    "extend", "prepend", "to_proc", "BasicObject", NULL };
+  if (!s) return 0;
+  /* "spinel: ...": the message of the raise left where a def was dropped
+     (a class_eval or a Class.new whose receiver is not known) */
+  if (is_string && (strstr(s, reach[0]) || strstr(s, reach[1]) || strstr(s, reach[4]) ||
+                    !strncmp(s, "spinel: ", 8))) return 1;
+  return splat_name_in(s, reach);
+}
+
 /* Can the program give an object a #to_a at all? It can where the name is
    spelled anywhere (a def, a Symbol, a String: an alias, an attr, a
-   define_method, a send), where a method_missing, Enumerable or an eval is,
-   where a method is made under a name that is no literal, and where a
-   Struct, a Data or a native class sits below a class that is none. */
+   define_method, a send), where a method_missing, a respond_to?, Enumerable
+   or an eval is, where a method is made, called, fetched or mixed in under a
+   name that is no literal, where a class has a parent that is not the
+   program's, and where a Struct, a Data or a native class sits below a class
+   that is none. */
 static int splat_program_walk_for_to_a(Compiler *c) {
   static const char *const names[] = { "to_a", "method_missing", "respond_to_missing?",
-                                       "__enum_to_a", NULL };
-  static const char *const consts[] = { "Enumerable", NULL };
+                                       "respond_to?", "__enum_to_a", NULL };
+  static const char *const consts[] = { "Enumerable", "ObjectSpace", "BasicObject", NULL };
   static const char *const senders[] = { "send", "__send__", "public_send", NULL };
+  static const char *const getters[] = { "method", "public_method", "singleton_method",
+                                         "instance_method", "public_instance_method",
+                                         "const_get", NULL };
+  static const char *const mixers[] = { "include", "extend", "prepend", NULL };
   static const char *const makers[] = {
     "define_method", "define_singleton_method", "alias_method", "attr", "attr_reader",
     "attr_writer", "attr_accessor", "def_delegator", "def_delegators", "def_instance_delegator",
@@ -9412,6 +9436,7 @@ static int splat_program_walk_for_to_a(Compiler *c) {
   static const char *const evals[] = { "eval", "instance_eval", "class_eval", "module_eval",
                                        "instance_exec", "class_exec", "module_exec", NULL };
   const NodeTable *nt = c->nt;
+  int named = 0, sent_named = 0; /* literals naming a maker; those a send leads with */
   for (int i = 0; names[i]; i++)
     if (comp_method_index(c, names[i]) >= 0) return 1;
   for (int k = 0; k < c->nclasses; k++) {
@@ -9428,16 +9453,30 @@ static int splat_program_walk_for_to_a(Compiler *c) {
     for (int i = 0; i < ci->naliases; i++)
       if (splat_name_in(ci->alias_new[i], names)) return 1;
   }
+  /* a parent that is no class of the program (a delegator, a lazy
+     enumerator) brings methods the tables do not hold */
+  NT_FOREACH_KIND(nt, NK_ClassNode, id) {
+    int sup = nt_ref(nt, id, "superclass");
+    NodeKind sk = sup >= 0 ? nt_kind(nt, sup) : NK_NilNode;
+    const char *sn = sk == NK_ConstantReadNode || sk == NK_ConstantPathNode
+                   ? nt_str(nt, sup, "name") : NULL;
+    if (sup >= 0 && !(sn && (comp_class_index(c, sn) >= 0 || is_builtin_exception_name(sn) ||
+                             sp_streq(sn, "Object")))) return 1;
+  }
   NT_FOREACH_KIND(nt, NK_DefNode, id)
     if (splat_name_in(nt_str(nt, id, "name"), names)) return 1;
-  NT_FOREACH_KIND(nt, NK_SymbolNode, id)
-    if (splat_name_in(nt_str(nt, id, "value"), names)) return 1;
+  /* `alias :"to_#{s}" items`: the keyword is no call, its new name no Symbol */
+  NT_FOREACH_KIND(nt, NK_AliasMethodNode, id)
+    if (nt_kind(nt, nt_ref(nt, id, "new_name")) != NK_SymbolNode) return 1;
+  NT_FOREACH_KIND(nt, NK_SymbolNode, id) {
+    const char *s = nt_str(nt, id, "value");
+    if (splat_literal_reaches_to_a(s, 0)) return 1;
+    named += splat_name_in(s, makers);
+  }
   NT_FOREACH_KIND(nt, NK_StringNode, id) {
     const char *s = nt_str(nt, id, "content");
-    /* "spinel: ...": the message of the raise left where a def was dropped
-       (a class_eval on a variable, a Class.new built at run time) */
-    if (s && (strstr(s, names[0]) || strstr(s, names[1]) || !strncmp(s, "spinel: ", 8)))
-      return 1;
+    if (splat_literal_reaches_to_a(s, 1)) return 1;
+    named += splat_name_in(s, makers);
   }
   NT_FOREACH_KIND(nt, NK_ConstantReadNode, id)
     if (splat_name_in(nt_str(nt, id, "name"), consts)) return 1;
@@ -9445,21 +9484,37 @@ static int splat_program_walk_for_to_a(Compiler *c) {
     if (splat_name_in(nt_str(nt, id, "name"), consts)) return 1;
   NT_FOREACH_KIND(nt, NK_CallNode, id) {
     const char *name = nt_str(nt, id, "name");
+    int recv = nt_ref(nt, id, "receiver"), blk = nt_ref(nt, id, "block");
     if (splat_name_in(name, evals)) return 1;
-    int sent = splat_name_in(name, senders);
-    if (!sent && !splat_name_in(name, makers)) continue;
+    /* a Symbol that is no literal, made a block: it calls what it names */
+    if (name && sp_streq(name, "to_proc") && (recv < 0 || nt_kind(nt, recv) != NK_SymbolNode))
+      return 1;
+    if (blk >= 0 && nt_kind(nt, blk) == NK_BlockArgumentNode) {
+      int x = nt_ref(nt, blk, "expression");
+      TyKind xt = x >= 0 && nt_kind(nt, x) != NK_SymbolNode ? comp_ntype(c, x) : TY_PROC;
+      if (xt != TY_PROC && xt != TY_METHOD) return 1;
+    }
+    int sent = splat_name_in(name, senders), mixed = splat_name_in(name, mixers);
+    if (!sent && !mixed && !splat_name_in(name, getters) && !splat_name_in(name, makers)) continue;
     int ca = nt_ref(nt, id, "arguments"), argc = 0;
     const int *av = ca >= 0 ? nt_arr(nt, ca, "arguments", &argc) : NULL;
+    if (sent && argc == 0) return 1;
     for (int k = 0; k < argc; k++) {
       NodeKind ak = nt_kind(nt, av[k]);
+      if (mixed) {
+        if (ak != NK_ConstantReadNode && ak != NK_ConstantPathNode && ak != NK_SelfNode) return 1;
+        continue;
+      }
       if (ak != NK_SymbolNode && ak != NK_StringNode) return 1;
+      if (!sent || k > 0) continue;
       /* a send of a name that makes no method: its other arguments are free */
-      if (sent && !splat_name_in(nt_str(nt, av[k], ak == NK_SymbolNode ? "value" : "content"),
-                                 makers)) break;
+      if (!splat_name_in(nt_str(nt, av[k], ak == NK_SymbolNode ? "value" : "content"), makers))
+        break;
+      sent_named++;
     }
-    if (sent && argc == 0) return 1;
   }
-  return 0;
+  /* a maker's name that no send leads with is on its way somewhere else */
+  return named != sent_named;
 }
 
 /* One walk a program: the answer is kept on the compiler, and asked again
