@@ -89,6 +89,10 @@ module Comparable
     end
     c2 = self <=> max
     if c2.nil?
+      # below min CRuby answers false and never compares with max, so a
+      # max that cannot be compared is no error there. The test sits in
+      # this branch to leave a call whose bounds compare as it was.
+      return false if c1 < 0
       raise ArgumentError, "comparison of #{self.class} with #{__cmp_repr(max)} failed"
     end
     c1 >= 0 && c2 <= 0
@@ -110,7 +114,7 @@ module Comparable
       # a STRICT ordering violation only: equal bounds are a valid (empty)
       # range, and `clamp` answers the receiver or that shared bound.
       if c > 0
-        raise ArgumentError, "min argument must be smaller than max argument"
+        raise ArgumentError, "min argument must be less than or equal to max argument"
       end
     end
     unless lo.nil?
