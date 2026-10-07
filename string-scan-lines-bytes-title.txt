@@ -1,0 +1,1 @@
+scan and lines find a String pattern by bytes
