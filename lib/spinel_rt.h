@@ -9882,6 +9882,10 @@ static sp_RbVal sp_poly_insert(sp_RbVal v, sp_int i, sp_RbVal x) {
     const char *s = sp_poly_strbuf_deref(v).v.s;
     if (!s) s = (&("\xff")[1]);
     if (i < 0) i += (sp_int)sp_str_length(s) + 1;
+    /* An index below the start is the IndexError, naming it as CRuby does.
+       Still negative it went on to the splice, which counted it from the
+       end once more: `box.insert(-4, "x")` on "ab" answered "axb". */
+    if (i < 0) sp_raise_cls("IndexError", sp_sprintf("index %lld out of string", (long long)(i - (sp_int)sp_str_length(s))));
     return sp_poly_str_become(v, sp_str_splice_at(s, i, 0, sp_poly_to_s(x), 0));
   }
   if (v.tag == SP_TAG_OBJ && v.v.p) {

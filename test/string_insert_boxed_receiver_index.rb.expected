@@ -1,0 +1,30 @@
+IndexError: index -8 out of string
+"ab"
+IndexError: index -3 out of string
+"ab"
+"xab"
+"axb"
+"abx"
+"xab"
+"axb"
+"abx"
+IndexError: index 3 out of string
+"ab"
+IndexError: index 9 out of string
+"ab"
+IndexError: index -3 out of string
+"ab"
+"xab"
+"xab"
+"abx"
+"abx"
+IndexError: index 3 out of string
+"ab"
+IndexError: index -6 out of string
+"¿héllo!"
+"IndexError: index -3 out of string"
+"xab"
+["x", 1, 2]
+[1, "x", 2]
+IndexError: index -3 out of string
+"ab"
