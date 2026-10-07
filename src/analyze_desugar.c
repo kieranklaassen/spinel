@@ -1549,6 +1549,79 @@ int desugar_handle_reopen_self_recv(Compiler *c) {
   return changed;
 }
 
+/* ---- a bare `message` in a program's own exception class -------------------
+   `class ValErr < StandardError; def shout = message.upcase; end`: the bare
+   name is the exception's own reader on self, as it is in a builtin
+   exception's reopening above and as `self.message` already answered. With
+   no receiver to dispatch through it was a NameError when the method ran.
+
+   Only in the method's own body: a block may run with another self
+   (instance_eval, a method that hands its block on), and which one is not
+   known before the types settle. And only where no class self can be an
+   instance of answers the name itself: a method or a reader of the class, an
+   ancestor or a descendant binds first, and so does a descendant's own #to_s,
+   which #message is. A free function of either name stays the callee, as a
+   `def obj.message` is one, and an undef of either leaves the call alone. */
+static int exc_member_owner(Compiler *c, int cid, const char *nm) {
+  int dc = -1;
+  return comp_resolve_member(c, cid, nm, 0, &dc, NULL) == SP_MEMBER_NONE ? -1 : dc;
+}
+
+static int exc_message_is_users(Compiler *c, int cid) {
+  if (comp_method_index(c, "message") >= 0 || comp_method_index(c, "to_s") >= 0) return 1;
+  int to_s = exc_member_owner(c, cid, "to_s");
+  for (int k = 0; k < c->nclasses; k++) {
+    if (!is_descendant(c, k, cid)) continue;
+    if (exc_member_owner(c, k, "message") >= 0 || exc_member_owner(c, k, "to_s") != to_s ||
+        comp_is_undeffed_in_chain(c, k, "message") || comp_is_undeffed_in_chain(c, k, "to_s"))
+      return 1;
+  }
+  return 0;
+}
+
+static int exc_bare_message_in(Compiler *c, int node, int cid) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  if (node < 0) return 0;
+  NodeKind k = nt_kind(nt, node);
+  if (k == NK_DefNode || k == NK_ClassNode || k == NK_ModuleNode || k == NK_SingletonClassNode ||
+      k == NK_BlockNode || k == NK_LambdaNode) return 0;
+  int changed = 0;
+  const char *nm = k == NK_CallNode ? nt_str(nt, node, "name") : NULL;
+  if (nm && sp_streq(nm, "message") && nt_ref(nt, node, "receiver") < 0 &&
+      nt_ref(nt, node, "arguments") < 0 && nt_ref(nt, node, "block") < 0 &&
+      !exc_message_is_users(c, cid)) {
+    int sf = nt_new_node(nt, "SelfNode");
+    if (sf >= 0) {
+      nt_node_set_int(nt, sf, "node_line", nt_int(nt, node, "node_line", 0));
+      nt_node_set_int(nt, sf, "node_file", nt_int(nt, node, "node_file", 0));
+      nt_node_set_ref(nt, node, "receiver", sf);
+      comp_grow_node_arrays(c);
+      c->nscope[sf] = c->nscope[node];
+      changed = 1;
+    }
+  }
+  int nr = nt_num_refs(nt, node);
+  for (int i = 0; i < nr; i++) changed |= exc_bare_message_in(c, nt_ref_at(nt, node, i), cid);
+  int na = nt_num_arrs(nt, node);
+  for (int i = 0; i < na; i++) {
+    int n = 0; const int *ids = nt_arr_at(nt, node, i, &n);
+    for (int j = 0; j < n; j++) changed |= exc_bare_message_in(c, ids[j], cid);
+  }
+  return changed;
+}
+
+int desugar_exception_bare_message(Compiler *c) {
+  int changed = 0;
+  for (int s = 1; s < c->nscopes; s++) {
+    const Scope *sc = &c->scopes[s];
+    if (!sc->name || sc->is_cmethod || sc->class_id < 0 || sc->class_id >= c->nclasses) continue;
+    const char *cn = c->classes[sc->class_id].name;
+    if (!cn || is_builtin_exception_name(cn) || !class_is_exc_subclass(c, sc->class_id)) continue;
+    changed |= exc_bare_message_in(c, sc->body, sc->class_id);
+  }
+  return changed;
+}
+
 /* ---- `Thread.attr_accessor :x` / `Fiber.attr_accessor :x` -------------------
    An attribute on every thread and fiber object -- activesupport's
    IsolatedExecutionState gives both an active_support_execution_state. A
