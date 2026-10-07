@@ -116,6 +116,9 @@ const char *strbuf_local_name(Compiler *c, int recv);
 int ivar_global_slot(Compiler *c, int node, char *out, size_t cap);
 int gvar_global_slot(Compiler *c, int node, char *out, size_t cap);
 int cvar_global_slot(Compiler *c, int node, char *out, size_t cap);
+/* The node that names `node` as a child, -1 for a root (an_parent_map, kept
+   until the tree changes). */
+int node_parent(Compiler *c, int node);
 int lent_global_slot_rebound(Compiler *c, int arg, const char *slot);
 void refuse_lent_global_rebound(Compiler *c, int arg, const char *slot, const char *target, const char *pname);
 int strbuf_ivar_owner(Compiler *c, int node);
