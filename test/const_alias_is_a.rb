@@ -92,3 +92,19 @@ class Yard
   Bin = Crate
 end
 p Crate.new.is_a?(Dock::Bin)
+
+# a constant written again by its name holds what was written last
+RS = Integer
+Object.const_set(:RS, String)
+p 7.is_a?(RS)
+
+# a hidden constant is not read from outside its body
+module Vault
+  HK = Integer
+  private_constant :HK
+end
+begin
+  p 7.is_a?(Vault::HK)
+rescue NameError
+  p false
+end

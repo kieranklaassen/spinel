@@ -1833,7 +1833,8 @@ static int node_runs_nothing(const NodeTable *nt, int id) {
 static const char *const quiet_decls[] = { "attr_reader", "attr_writer", "attr_accessor", "private", "public",
   "protected", "module_function", "include", "extend", "prepend", "require", "require_relative", NULL };
 static const char *const def_hooks[] = { "inherited", "included", "extended", "prepended", "method_added",
-  "singleton_method_added", "const_added", NULL };
+  "singleton_method_added", "const_added", "const_missing", "append_features", "prepend_features",
+  "extend_object", NULL };
 static int name_listed(const char *const *list, const char *n) {
   for (int i = 0; n && list[i]; i++) if (sp_streq(list[i], n)) return 1;
   return 0;
@@ -1903,15 +1904,40 @@ static void seq_statements(const NodeTable *nt, int stmts, int own, int *seq, in
 }
 
 /* The numbering of the whole program. A program that defines a hook, or a
-   declaration's own name, runs it at a definition: nothing is quiet then. */
+   declaration's own name, runs it at a definition: nothing is quiet then. A
+   program that names is_a?, kind_of? or instance_of? as a method of its own
+   (a def, or the symbol: alias, define_method) is not numbered at all: its
+   method answers its own question. A constant written again or hidden by its
+   name (const_set, private_constant) loses its write's mark: no write node
+   shows what it holds, or who may read it. */
 static int *seq_build(const NodeTable *nt) {
   int *seq = calloc(2 * (size_t)nt->count + 1, sizeof(int));
   if (!seq) return NULL;
+  NT_FOREACH_KIND(nt, NK_SymbolNode, s) {
+    const char *sv = nt_str(nt, s, "value");
+    if (sv && is_kind_query(sv)) return seq;
+  }
   NT_FOREACH_KIND(nt, NK_DefNode, d) {
     const char *dn = nt_str(nt, d, "name");
+    if (dn && is_kind_query(dn)) return seq;
     if (name_listed(def_hooks, dn) || name_listed(quiet_decls, dn)) seq[nt->count] = 1;
   }
   int n = 0; seq_statements(nt, nt_ref(nt, nt->root_id, "statements"), 0, seq, &n);
+  NT_FOREACH_KIND(nt, NK_CallNode, id) {
+    const char *cn = nt_str(nt, id, "name");
+    int args = nt_ref(nt, id, "arguments"), argc = 0, a0 = 0;
+    const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &argc) : NULL;
+    if (cn && is_send_family(cn) && argc && nt_kind(nt, argv[0]) == NK_SymbolNode) { cn = nt_str(nt, argv[0], "value"); a0 = 1; }
+    int set = cn && sp_streq(cn, "const_set");
+    if (!set && !(cn && sp_streq(cn, "private_constant"))) continue;
+    for (int i = a0; i < (set && argc > a0 ? a0 + 1 : argc); i++) {   /* const_set: the name alone */
+      NodeKind ak = nt_kind(nt, argv[i]);
+      const char *an = ak == NK_SymbolNode ? nt_str(nt, argv[i], "value") : ak == NK_StringNode ? nt_str(nt, argv[i], "content") : NULL;
+      if (!an) { memset(seq, 0, (2 * (size_t)nt->count + 1) * sizeof(int)); return seq; }   /* any name */
+      int w = const_only_write(nt, an);
+      if (w >= 0) seq[w] &= ~1;
+    }
+  }
   return seq;
 }
 
