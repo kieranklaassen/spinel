@@ -590,12 +590,16 @@ sp_RbVal sp_poly_clear(sp_RbVal v)
   if (v.tag == SP_TAG_STR) { sp_str_check_mutable(v.v.s); return sp_box_str(sp_str_from_bytes("", 0)); }
   sp_poly_coll_chk(v, "clear");
   if (v.tag != SP_TAG_OBJ || !v.v.p) return v;
+  /* a frozen Array or Hash is not emptied: CRuby raises before it removes
+     anything, for an empty one too. A Hash's flag is in its header, an
+     Array's in its struct. */
+  if (sp_gc_is_frozen(v.v.p) && sp_poly_is_hash_kind(v.cls_id)) sp_raise_frozen_hash_at(v.v.p, v.cls_id);
   switch (v.cls_id) {
-    case SP_BUILTIN_INT_ARRAY:      ((sp_IntArray *)v.v.p)->len = 0; break;
-    case SP_BUILTIN_FLT_ARRAY:      ((sp_FloatArray *)v.v.p)->len = 0; break;
-    case SP_BUILTIN_STR_ARRAY:      ((sp_StrArray *)v.v.p)->len = 0; break;
-    case SP_BUILTIN_POLY_ARRAY:     ((sp_PolyArray *)v.v.p)->len = 0; break;
-    case SP_BUILTIN_PTR_ARRAY:      ((sp_PtrArray *)v.v.p)->len = 0; break;
+    case SP_BUILTIN_INT_ARRAY:      if (((sp_IntArray *)v.v.p)->frozen) goto frozen_array; ((sp_IntArray *)v.v.p)->len = 0; break;
+    case SP_BUILTIN_FLT_ARRAY:      if (((sp_FloatArray *)v.v.p)->frozen) goto frozen_array; ((sp_FloatArray *)v.v.p)->len = 0; break;
+    case SP_BUILTIN_STR_ARRAY:      if (((sp_StrArray *)v.v.p)->frozen) goto frozen_array; ((sp_StrArray *)v.v.p)->len = 0; break;
+    case SP_BUILTIN_POLY_ARRAY:     if (((sp_PolyArray *)v.v.p)->frozen) goto frozen_array; ((sp_PolyArray *)v.v.p)->len = 0; break;
+    case SP_BUILTIN_PTR_ARRAY:      if (((sp_PtrArray *)v.v.p)->frozen) goto frozen_array; ((sp_PtrArray *)v.v.p)->len = 0; break;
     case SP_BUILTIN_STRBUF: {
       sp_String *_m = (sp_String *)v.v.p;
       if (sp_String_is_frozen(_m)) { sp_raise_frozen_str(_m->data); break; }
@@ -611,6 +615,9 @@ sp_RbVal sp_poly_clear(sp_RbVal v)
     case SP_BUILTIN_POLY_POLY_HASH: sp_PolyPolyHash_clear((sp_PolyPolyHash *)v.v.p); break;
     default: sp_raise_nomethod(sp_nomethod_msg("clear", v)); break;
   }
+  return v;
+frozen_array:
+  sp_raise_frozen_array_at(v.v.p, (int)v.cls_id);
   return v;
 }
 

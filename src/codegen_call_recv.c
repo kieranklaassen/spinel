@@ -2207,7 +2207,8 @@ else {
           buf_puts(b, "({ ");
           if (!held[0]) { buf_printf(b, "sp_RbVal %s = ", tvn); emit_boxed(c, argv[0], b); buf_puts(b, "; "); }
           buf_printf(b, "const char *_t%d = %s.tag == SP_TAG_STR ? sp_StrArray_delete(%s, %s.v.s)"
-                        " : (const char *)0; _t%d ? sp_box_str(_t%d) : ", tdr, nd, rdb.p, nd, tdr, tdr);
+                        " : sp_poly_is_strbuf(%s) ? sp_StrArray_delete(%s, sp_poly_unbox_s(%s))"
+                        " : (const char *)0; _t%d ? sp_box_str(_t%d) : ", tdr, nd, rdb.p, nd, nd, rdb.p, nd, tdr, tdr);
         }
         else {
           buf_printf(b, "({ const char *_t%d = sp_StrArray_delete(%s, ", tdr, rdb.p);
@@ -2242,8 +2243,9 @@ else {
       int tv = ++g_tmp;
       buf_printf(b, "({ sp_RbVal _t%d = ", tv); emit_boxed(c, argv[0], b);
       buf_printf(b, "; _t%d.tag == SP_TAG_STR ? sp_StrArray_delete(%s, _t%d.v.s)"
-                    " : _t%d.tag == SP_TAG_NIL ? sp_StrArray_delete(%s, NULL) : (const char *)0; })",
-                 tv, rdl.p, tv, tv, rdl.p);
+                    " : _t%d.tag == SP_TAG_NIL ? sp_StrArray_delete(%s, NULL)"
+                    " : sp_poly_is_strbuf(_t%d) ? sp_StrArray_delete(%s, sp_poly_unbox_s(_t%d)) : (const char *)0; })",
+                 tv, rdl.p, tv, tv, rdl.p, tv, rdl.p, tv);
     }
     else {
       buf_printf(b, "sp_%sArray_delete%s(%s, ", k, df_boxed ? "_key" : "", rdl.p);
@@ -2370,7 +2372,9 @@ else {
       buf_printf(b, "({ sp_StrArray *_t%d = ", ta); emit_recv_rooted(c, recv, ta, "SP_GC_ROOT", b);
       buf_printf(b, "sp_RbVal _t%d = ", tv); emit_boxed(c, argv[0], b);
       buf_printf(b, "; _t%d.tag == SP_TAG_STR ? sp_StrArray_%s(_t%d, _t%d.v.s)"
-                    " : _t%d.tag == SP_TAG_NIL ? sp_StrArray_%s(_t%d, NULL) : sp_box_nil(); })", tv, fn, ta, tv, tv, fn, ta);
+                    " : _t%d.tag == SP_TAG_NIL ? sp_StrArray_%s(_t%d, NULL)"
+                    " : sp_poly_is_strbuf(_t%d) ? sp_StrArray_%s(_t%d, sp_poly_unbox_s(_t%d)) : sp_box_nil(); })",
+                 tv, fn, ta, tv, tv, fn, ta, tv, fn, ta, tv);
       { *out = 1; return 1; }
     }
     if (nil_needle) {
@@ -2449,8 +2453,9 @@ else {
       buf_printf(b, "({ sp_StrArray *_t%d = ", ta); emit_recv_rooted(c, recv, ta, "SP_GC_ROOT", b);
       buf_printf(b, "sp_RbVal _t%d = ", tv); emit_boxed(c, argv[0], b);
       buf_printf(b, "; _t%d.tag == SP_TAG_STR ? sp_StrArray_%s(_t%d, _t%d.v.s)"
-                    " : _t%d.tag == SP_TAG_NIL ? sp_StrArray_%s(_t%d, NULL) : FALSE; })",
-                 tv, fn, ta, tv, tv, fn, ta);
+                    " : _t%d.tag == SP_TAG_NIL ? sp_StrArray_%s(_t%d, NULL)"
+                    " : sp_poly_is_strbuf(_t%d) ? sp_StrArray_%s(_t%d, sp_poly_unbox_s(_t%d)) : FALSE; })",
+                 tv, fn, ta, tv, tv, fn, ta, tv, fn, ta, tv);
       { *out = 1; return 1; }
     }
     /* The same for an Integer array: a search for a value of another kind
@@ -6321,6 +6326,11 @@ static int str_arms_convert(Compiler *c, int id, Buf *b, const NodeTable *nt, co
     }
     else buf_printf(b, "%s(%s)", is_chomp ? "sp_str_lines_chomp" : "sp_str_lines", r);
   }
+  /* lines(sep) with a boxed separator, read at run time */
+  else if (sp_streq(name, "lines") && argc == 1 && nt_ref(nt, id, "block") < 0 &&
+           lines_sep_boxed(c, argv[0])) {
+    buf_printf(b, "sp_str_lines_sep_poly(%s, ", r); emit_boxed(c, argv[0], b); buf_puts(b, ")");
+  }
   else if (sp_streq(name, "bytes") && argc == 0)   buf_printf(b, "sp_str_bytes(%s)", r);
   else if (sp_streq(name, "codepoints") && argc == 0) buf_printf(b, "sp_str_codepoints(%s)", r);
   /* unpack(fmt, offset: n): a trailing KeywordHashNode carries the offset. */
@@ -6608,6 +6618,15 @@ static int str_arms_slice_encode(Compiler *c, int id, Buf *b, const char *name, 
   else if (sp_streq(name, "split") && argc == 2) {
     buf_printf(b, "sp_str_split_limit(%s, ", r); emit_str_pattern_expr(c, argv[0], b); buf_puts(b, ", "); emit_int_expr(c, argv[1], b); buf_puts(b, ")");
   }
+  /* a boxed bound holds a String only at run time: the boxed clamp decides,
+     and its answer is read back as the String it is */
+  else if (sp_streq(name, "clamp") && argc == 2 &&
+           (comp_ntype(c, argv[0]) == TY_POLY || comp_ntype(c, argv[1]) == TY_POLY) &&
+           (comp_ntype(c, argv[0]) == TY_POLY || comp_ntype(c, argv[0]) == TY_STRING) &&
+           (comp_ntype(c, argv[1]) == TY_POLY || comp_ntype(c, argv[1]) == TY_STRING)) {
+    buf_printf(b, "sp_str_clamp_poly(%s, ", r); emit_boxed(c, argv[0], b);
+    buf_puts(b, ", "); emit_boxed(c, argv[1], b); buf_puts(b, ")");
+  }
   else if (sp_streq(name, "clamp") && (argc == 2 ||
            (argc == 1 && nt_type(c->nt, argv[0]) && sp_streq(nt_type(c->nt, argv[0]), "RangeNode")))) {
     int lo_n, hi_n;
@@ -6871,17 +6890,20 @@ static int str_arms_case_search(Compiler *c, Buf *b, const NodeTable *nt, const 
   }
   else if (sp_streq(name, "partition") && argc == 1 && re_lit_index(c, argv[0]) >= 0) {
     /* [before, match, after] from the first regex match, else [s, "", ""] */
-    int tr = ++g_tmp;
+    int tr = ++g_tmp, ts = ++g_tmp;
     /* rooted: both arms allocate (the match pieces, the unmatched copies)
-       while the array is only in _t */
+       while the array is only in _t. The receiver is evaluated once, into
+       a temporary of its own: nothing allocates between a match that
+       fails and the copy, and sp_str_dup roots what it copies. */
     buf_printf(b, "({ sp_StrArray *_t%d = sp_StrArray_new(); SP_GC_ROOT(_t%d);"
-                  " if (sp_re_match(sp_re_pat_%d, %s) >= 0) {"
+                  " const char *_t%d = %s;"
+                  " if (sp_re_match(sp_re_pat_%d, _t%d) >= 0) {"
                   " sp_StrArray_push(_t%d, sp_re_pre_match()); sp_StrArray_push(_t%d, sp_re_match_str);"
                   " sp_StrArray_push(_t%d, sp_re_post_match()); }\nelse {"
-                  " sp_StrArray_push(_t%d, sp_str_dup(%s)); sp_StrArray_push(_t%d, sp_str_dup(sp_str_empty));"
+                  " sp_StrArray_push(_t%d, sp_str_dup(_t%d)); sp_StrArray_push(_t%d, sp_str_dup(sp_str_empty));"
                   " sp_StrArray_push(_t%d, sp_str_dup(sp_str_empty)); }"
                   " _t%d; })",
-               tr, tr, re_lit_index(c, argv[0]), r, tr, tr, tr, tr, r, tr, tr, tr);
+               tr, tr, ts, r, re_lit_index(c, argv[0]), ts, tr, tr, tr, tr, ts, tr, tr, tr);
   }
   else if (sp_streq(name, "rpartition") && argc == 1 && re_lit_index(c, argv[0]) >= 0) {
     buf_printf(b, "sp_re_rpartition(sp_re_pat_%d, %s)", re_lit_index(c, argv[0]), r);

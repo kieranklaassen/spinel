@@ -3526,7 +3526,7 @@ void emit_poly_cases_n(Compiler *c, int id, const char *name, const PolySpecials
       buf_printf(b, " case SP_BUILTIN_FLT_ARRAY: _t%d = %s(_t%d.tag == SP_TAG_FLT || _t%d.tag == SP_TAG_NIL) &&"
                     " sp_FloatArray_include((sp_FloatArray *)_t%d.v.p, _t%d.tag == SP_TAG_NIL ? sp_float_nil() : _t%d.v.f)%s; break;",
                  tr, ibo, atmp[0], atmp[0], tv, atmp[0], atmp[0], ibc);
-      buf_printf(b, " case SP_BUILTIN_STR_ARRAY: _t%d = %s_t%d.tag == SP_TAG_STR && sp_StrArray_include((sp_StrArray *)_t%d.v.p, _t%d.v.s)%s; break;", tr, ibo, atmp[0], tv, atmp[0], ibc);
+      buf_printf(b, " case SP_BUILTIN_STR_ARRAY: _t%d = %s(_t%d.tag == SP_TAG_STR ? sp_StrArray_include((sp_StrArray *)_t%d.v.p, _t%d.v.s) : sp_poly_is_strbuf(_t%d) && sp_StrArray_include((sp_StrArray *)_t%d.v.p, sp_poly_unbox_s(_t%d)))%s; break;", tr, ibo, atmp[0], tv, atmp[0], atmp[0], tv, atmp[0], ibc);
       break;
     case TY_NIL:
       /* an Integer or Float array holds nil as its sentinel */

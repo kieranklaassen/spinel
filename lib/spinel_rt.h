@@ -2987,6 +2987,17 @@ static SP_INLINE const char *sp_poly_arg_str_chk(sp_RbVal v) {
   if (v.tag == SP_TAG_STR) return v.v.s;
   return sp_poly_arg_str_chk_slow(v);
 }
+/* String#lines / #each_line with a separator whose class is known only at run
+   time. nil is no separator: the one line is the receiver itself, as in
+   CRuby, an empty one too. Any other value takes the strict conversion, so
+   an Integer raises CRuby's TypeError. */
+static SP_NOINLINE sp_StrArray *sp_str_lines_sep_poly(const char *s, sp_RbVal sep) {
+  SP_GC_ROOT_STR(s);
+  if (sep.tag != SP_TAG_NIL) return sp_str_lines_sep(s, sp_poly_arg_str_chk(sep));
+  sp_StrArray *a = sp_StrArray_new(); SP_GC_ROOT(a);
+  if (s) sp_StrArray_push(a, s);
+  return a;
+}
 /* String#split's separator slot: the one String slot CRuby documents nil in
    (nil = whitespace mode). NULL preserves that answer, where the loose form
    above stringifies nil to "" and turns the call into a character split; a
@@ -4003,6 +4014,14 @@ static const char *sp_poly_recv_s(sp_RbVal v, const char *meth) {
   if (sp_poly_is_strbuf(v)) return sp_poly_to_s(v);
   sp_raise_nomethod(sp_nomethod_msg(meth, v));
   return sp_str_empty;
+}
+/* casecmp's operand when it is a String the program appends to: its text,
+   or NULL where CRuby answers nil, the two encodings differing with a byte
+   past ASCII on each side. */
+static SP_NOINLINE const char *sp_str_casecmp_strbuf(const char *recv, sp_RbVal o) {
+  const char *s = sp_poly_unbox_s(o);
+  if (!s || !recv || sp_str_is_binary(recv) == sp_str_is_binary(s)) return s;
+  return sp_str_ascii_only(recv) || sp_str_ascii_only(s) ? s : NULL;
 }
 /* casecmp / casecmp? (`q`) on a boxed receiver. A Symbol compares with a
    Symbol and a String with a String (or an operand answering #to_str), as the
@@ -5638,6 +5657,17 @@ static sp_RbVal sp_poly_clamp(sp_RbVal v, sp_RbVal lo, sp_RbVal hi) {
     return sp_obj_clamp(v, lo, hi);
   return sp_num_clamp(v, lo, hi);
 }
+/* String#clamp with a bound whose class is known only at run time: the boxed
+   clamp decides, and its answer, the receiver or a bound, is read back as
+   the String it is. A bound the program appends to answers a copy of its
+   text, since its buffer moves as it grows. */
+static SP_NOINLINE const char *sp_str_clamp_poly(const char *s, sp_RbVal lo, sp_RbVal hi) {
+  sp_RbVal r = sp_poly_clamp(sp_box_nullable_str(s), lo, hi);
+  if (r.tag == SP_TAG_STR) return r.v.s;
+  if (sp_poly_is_strbuf(r)) return sp_str_dup(sp_poly_strbuf_deref(r).v.s);
+  sp_raise_cls("ArgumentError", sp_sprintf("comparison of String with %s failed", sp_poly_cmp_err_repr(r)));
+  return NULL;
+}
 /* clamp(range) on a boxed value: an exclusive range with a real end cannot
    clamp (CRuby); the INTPTR_MIN/MAX beginless/endless sentinels act as
    unbounded sides for numerics and nil bounds for user objects. */
@@ -5870,8 +5900,23 @@ static void sp_PolyArray_insert(sp_PolyArray *a, sp_int i, sp_RbVal v) {sp_gc_wb
    sp_array.c, home of sp_IntArray_delete et al) because it needs
    sp_poly_eq, which is inline-per-TU in this file, not linkable from the
    separately-compiled cold array library. */
+static SP_INLINE sp_bool sp_poly_delete_eq_plain(sp_RbVal v) {
+  return v.tag == SP_TAG_INT || v.tag == SP_TAG_STR || v.tag == SP_TAG_SYM || v.tag == SP_TAG_NIL ||
+         v.tag == SP_TAG_BOOL || (v.tag == SP_TAG_FLT && v.v.f == v.v.f);
+}
 static sp_RbVal sp_PolyArray_delete(sp_PolyArray *a, sp_RbVal v) {sp_gc_wb((void*)a); 
-  if (a && a->frozen) { sp_raise_frozen_array_at(a, SP_BUILTIN_POLY_ARRAY); return sp_box_nil(); }
+  if (a && a->frozen) {
+    /* CRuby raises only for an element it would remove. The search answers
+       nil only where the runtime equality is CRuby's for both sides (an
+       Integer, a String, a Symbol, nil, true, false, a Float that is a
+       number); a NaN, a Complex or an object with its own == raises as it
+       did. */
+    if (!sp_poly_delete_eq_plain(v)) sp_raise_frozen_array_at(a, SP_BUILTIN_POLY_ARRAY);
+    for (sp_int i = 0; i < a->len; i++)
+      if (!sp_poly_delete_eq_plain(a->data[i]) || sp_poly_rb_equal(a->data[i], v))
+        sp_raise_frozen_array_at(a, SP_BUILTIN_POLY_ARRAY);
+    return sp_box_nil();
+  }
   if (!a) return sp_box_nil();
   /* sp_poly_eq can allocate (bigint promotion) and so trigger a collection
      mid-loop; a and v may be reachable only through the call expression. */
@@ -10506,8 +10551,9 @@ static sp_RbVal sp_poly_delete_key(sp_RbVal recv, sp_RbVal key) {
         return r == SP_INT_NIL ? sp_box_nil() : key;
       }
       case SP_BUILTIN_STR_ARRAY: {
-        if (key.tag != SP_TAG_STR) return sp_box_nil();
-        const char *r = sp_StrArray_delete((sp_StrArray *)recv.v.p, key.v.s);
+        const char *ks;
+        if (key.tag == SP_TAG_STR) ks = key.v.s; else if (sp_poly_is_strbuf(key)) ks = sp_poly_unbox_s(key); else return sp_box_nil();
+        const char *r = sp_StrArray_delete((sp_StrArray *)recv.v.p, ks);
         return r ? sp_box_str(r) : sp_box_nil();
       }
       case SP_BUILTIN_FLT_ARRAY: {
@@ -12381,7 +12427,7 @@ static sp_RbVal sp_poly_first(sp_RbVal v) {
      materialize: without this it fell through to the array read and answered
      nil (a boxed 1.5..2.5 reaching a run-time-typed callable, #4804) */
   if (v.cls_id == SP_BUILTIN_FLOAT_RANGE) return sp_box_float(((sp_FloatRange *)v.v.p)->first);
-  if (v.cls_id == SP_BUILTIN_STR_RANGE) return sp_box_str(((sp_StrRange *)v.v.p)->first);
+  if (v.cls_id == SP_BUILTIN_STR_RANGE) { const char *f = ((sp_StrRange *)v.v.p)->first; if (!f) sp_srange_open_raise(0); return sp_box_str(f); }
   /* an Enumerator answers the first item it yields, running a generator
      only that far */
   if (v.cls_id == SP_BUILTIN_ENUMERATOR && v.v.p) return sp_enum_first_boxed(v);
@@ -12411,8 +12457,8 @@ static sp_RbVal sp_poly_last(sp_RbVal v) {
      Integer range above (#4804) */
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_FLOAT_RANGE)
     return sp_box_float(((sp_FloatRange *)v.v.p)->last);
-  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_STR_RANGE)
-    return sp_box_str(((sp_StrRange *)v.v.p)->last);
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_STR_RANGE) {
+    const char *l = ((sp_StrRange *)v.v.p)->last; if (!l) sp_srange_open_raise(1); return sp_box_str(l); }
   { sp_PolyArray *ue = v.tag == SP_TAG_OBJ ? sp_poly_user_elems(v) : NULL;
     if (ue) return ue->len > 0 ? ue->data[ue->len - 1] : sp_box_nil(); }
   sp_int n = sp_poly_length(v);

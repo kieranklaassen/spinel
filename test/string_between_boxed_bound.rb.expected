@@ -1,0 +1,12 @@
+true
+true
+true
+false
+false
+true
+false
+true
+[false, true, false]
+ArgumentError: comparison of String with 1 failed
+ArgumentError: comparison of String with nil failed
+false
