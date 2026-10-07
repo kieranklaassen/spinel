@@ -1,0 +1,37 @@
+An append through delegating readers looks each method name up once
+
+A bus of 512 classes that hand one another's `peek` on
+(`def peek(i) = @nxt.peek(i)`), with 512 lines `bus.peek(k) << "!"`,
+compiled in 4.5 seconds before pull request 7806 ("A method reached
+again from nearer the top follows its results") and takes 29.7 now.
+Twice the bus took 3.9 times as long before it and takes 6.8 times as
+long now.
+
+That change is right and what it does stays: a method first met at the
+walk's bound is walked again when it is reached from nearer the top,
+since "A method a demand reaches again is walked again only if its
+walk was cut" only where the walk was cut. In the bus every walk is.
+A receiver of no known class goes by name. The first descent takes
+nearly every class's `peek` to the bound, each is then walked again at
+every depth above it, and each of those walks looked through all the
+scopes for the methods of its result, to find them walked. A demand
+made about four times N such scans where it had made four.
+
+strbuf_demand_user_elem_call now keeps, for a demand, the depth at
+which each name's by-name loop was begun. Such a loop takes every
+method of the name to its own depth or nearer the top, so a call of
+the name no nearer the top than one begun, ended or still running, has
+nothing to add and returns. What the scan handed up was whether a walk
+it skipped was cut; the call hands up the loop's own answer once the
+loop has ended, and "cut" while it runs, which at most has a method
+walked again. A receiver of a known class has one method of the name;
+it is looked up once a call instead of once a scope, which takes back
+half of what the first change added for one class whose methods reach
+one another by several routes (1,024 methods, five routes each: 7.2
+seconds before, 18.2 on master, 9.5 with this).
+
+No generated C changes. make scale-test gains the bus at 64 and 128
+classes (test/scale/reader_bus.sh): the work at twice the bus is 2.56
+times before that change, 4.37 on master and 2.59 with this.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

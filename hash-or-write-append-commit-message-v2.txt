@@ -1,0 +1,36 @@
+A String `h[k] ||= v` stores is the one `h[k] << x` appends to
+
+    u = {}
+    %w[a b a].each { |w| u[w] ||= +""; u[w] << w }
+    p u.to_a
+
+printed [["a", ""], ["b", ""]]: every append went to a copy and nothing
+said so. CRuby prints [["a", "aa"], ["b", "b"]], and so does this
+program with the store written `u[w] = +"" unless u.key?(w)`.
+
+`h[k] = v` stores a String as the handle an in-place change through the
+index needs. The or-write emitter has a store of its own, which boxes
+the String as a plain value, so the read hands `<<` a copy; `concat` on
+it raised NoMethodError.
+
+The index or-write of a program class is already rewritten to what Ruby
+defines it as, `h[k] || (h[k] = v)`. The same rewrite is now taken for
+a Hash where it is the same program: the value is a String, and the
+receiver is a local that is no parameter, or an instance variable where
+the write is a statement. Not a parameter: a String stored into a Hash
+the caller passed has a refusal of its own, which the or-write does not
+meet today, and meeting it would refuse programs that are right. Not
+the value form on an instance variable: written out, it does not build
+inside a block.
+
+That the receiver is a Hash is read from the program, not from its
+type: every write of the variable gives it `{...}` or `Hash.new`. The
+type is a guess while the fixpoint runs (`c = []; c[0] ||= s` is a Hash
+of Integer to String for a round), and a rewrite made on the guess
+stays.
+
+Every other or-write keeps the emitter's store and its generated C: a
+value that is no String, a key or a receiver that is a call, an Array's
+slot, a Hash a method answered.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

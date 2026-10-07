@@ -1,0 +1,1 @@
+A String `h[k] ||= v` stores is the one `h[k] << x` appends to
