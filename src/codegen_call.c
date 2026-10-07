@@ -8538,6 +8538,52 @@ void emit_ctor_arm_param(Compiler *c, Scope *is, int j, const ArgLayout *L, cons
   else emit_unbox_text(c, pt, at, out);
 }
 
+/* Does a `k.new(...)` arm bind parameter j's value to a rooted local
+   (ctor_arm_hold)? A default that may allocate, or the empty **kwrest, into a
+   parameter whose type takes a root. */
+static int ctor_arm_holds(Compiler *c, Scope *is, int j, const ArgLayout *L) {
+  if (L->from[j] == ARG_NODE || L->from[j] == ARG_REST) return 0;
+  LocalVar *pp = is->pnames && is->pnames[j] ? scope_local(is, is->pnames[j]) : NULL;
+  TyKind pt = pp && pp->type != TY_UNKNOWN ? pp->type : TY_POLY;
+  if ((pp && pp->byref_out) || (pt != TY_POLY && !needs_root(pt))) return 0;
+  return j == is->kwrest_idx ||
+         (is->pdefault && is->pdefault[j] >= 0 && operand_may_allocate(c, is->pdefault[j]));
+}
+
+/* A value a `k.new(...)` arm builds itself (a default the call leaves out,
+   an empty **kwrest) stands fresh inside the constructor call's parentheses,
+   where the next such value's allocation, or the constructor's own of the
+   object, collects it. `ub` is parameter j's text as emit_ctor_arm_param
+   wrote it: such a value is bound to a rooted local in the arm's prefix, as
+   the rest is, and `ub` left naming it. The prefix runs ahead of the call,
+   so a default to the left of one bound there is bound there too, in the
+   parameters' order: `(x, y = bump(7), z = "a" * 2)` runs bump first. A
+   literal runs nothing and stays in the call. */
+void ctor_arm_hold(Compiler *c, Scope *is, int j, const ArgLayout *L, Buf *pdpre, Buf *ub) {
+  if (!ub->p) return;
+  LocalVar *pp = is->pnames && is->pnames[j] ? scope_local(is, is->pnames[j]) : NULL;
+  TyKind pt = pp && pp->type != TY_UNKNOWN ? pp->type : TY_POLY;
+  if (!ctor_arm_holds(c, is, j, L)) {
+    if (L->from[j] == ARG_NODE || L->from[j] == ARG_REST || (pp && pp->byref_out) ||
+        !(is->pdefault && is->pdefault[j] >= 0)) return;
+    switch (nt_kind(c->nt, is->pdefault[j])) {
+      case NK_IntegerNode: case NK_FloatNode: case NK_NilNode: case NK_TrueNode:
+      case NK_FalseNode: case NK_SymbolNode: case NK_StringNode: return;
+      default: break;
+    }
+    int later = 0;
+    for (int k = j + 1; k < is->nparams && !later; k++) later = ctor_arm_holds(c, is, k, L);
+    if (!later) return;
+  }
+  int t = ++g_tmp;
+  emit_ctype(c, pt, pdpre);
+  buf_printf(pdpre, " _t%d = %s; ", t, ub->p);
+  if (pt == TY_POLY) buf_printf(pdpre, "SP_GC_ROOT_RBVAL(_t%d); ", t);
+  else if (needs_root(pt)) buf_printf(pdpre, "SP_GC_ROOT(_t%d); ", t);
+  free(ub->p); memset(ub, 0, sizeof *ub);
+  buf_printf(ub, "_t%d", t);
+}
+
 /* Is some parameter of `is` concretely typed and its argument concretely
    typed otherwise? The unbox would read the argument's bits as the
    parameter's type: `initialize(a = 1, b = 2)` types `a` Int, so `k.new("x")`
@@ -9537,7 +9583,12 @@ int emit_user_new_arm(Compiler *c, int id, int ci, int argc, const int *atmp,
       if (pn && callee_param_is_declared_kwarg(c, ks, pn)) {
         int dflt = ks->pdefault && ks->pdefault[a] >= 0;
         if (kw_temp < 0) {
-          if (dflt) emit_arg_or_default(c, ks, a, -1, &cb);
+          if (dflt) {
+            Buf ub; memset(&ub, 0, sizeof ub);
+            emit_arg_or_default(c, ks, a, -1, &ub);
+            ctor_arm_hold(c, ks, a, &L, &apre, &ub);
+            buf_puts(&cb, ub.p ? ub.p : ""); free(ub.p);
+          }
           else buf_printf(&cb, "(sp_raise_cls(\"ArgumentError\", \"missing keyword: :%s\"), %s)",
                           pn, default_value_from_compiler(c, pt));
           continue;
@@ -9556,7 +9607,10 @@ int emit_user_new_arm(Compiler *c, int id, int ci, int argc, const int *atmp,
       /* the positionals by the call's layout: a *rest takes what the
          parameters around it leave, those ahead of it first, the posts from
          the tail */
-      emit_ctor_arm_param(c, ks, a, &L, atmp, &apre, &cb);
+      Buf ub; memset(&ub, 0, sizeof ub);
+      emit_ctor_arm_param(c, ks, a, &L, atmp, &apre, &ub);
+      ctor_arm_hold(c, ks, a, &L, &apre, &ub);
+      buf_puts(&cb, ub.p ? ub.p : ""); free(ub.p);
     }
     g_pre = sv_pre;
     arg_layout_free(&L);
@@ -9696,6 +9750,7 @@ void emit_raise_class_value(Compiler *c, int kn, int mn, Buf *b) {
       if (j) buf_puts(&ab, ", ");
       Buf ub; memset(&ub, 0, sizeof ub);
       emit_ctor_arm_param(c, is, j, &L, &mt, &pdpre, &ub);
+      if (!pd_uid) ctor_arm_hold(c, is, j, &L, &pdpre, &ub);
       ctor_arm_arg(c, is, j, ub.p ? ub.p : "", pd_uid, &pdpre, &ab);
       free(ub.p);
     }
