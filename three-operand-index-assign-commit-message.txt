@@ -1,0 +1,41 @@
+A boxed receiver's x[a, b] = v calls a user []= that takes three arguments
+
+`x[a, b] = v` on a receiver read out of a mixed container was lowered to
+the Array and String splice before the class dispatch was tried
+(emit_poly_index_call), and sp_poly_splice leaves any other value as it
+was. Beside a class defining `[]=(x, y, v)` or `[]=(*keys, v)` the
+assignment into an object of that class was dropped without a word and
+its method never ran. `x[k] = v` was not affected: the two-operand arm
+already stands down for a class whose `[]=` takes two.
+
+Where a class takes `[]=` with three arguments the call is now emitted
+twice, behind sp_poly_is_user_obj. An object of the program's own takes
+the class dispatch, which calls the method, raises ArgumentError or
+NoMethodError as CRuby does for a class that counts otherwise or has
+none, and answers v. Every other value takes the splice, emitted as it
+was, so an Array or a String in the same slot is spliced as before and
+a plain String's new value is still stored where the receiver was read
+from.
+
+Two kinds of object keep the splice, as before, because the class
+dispatch would raise NoMethodError where CRuby does not. A Struct whose
+class defines no `[]=`: its own takes two, and CRuby raises
+ArgumentError for three. And every object in a program that defines
+method_missing or respond_to_missing?, which may answer the call: such
+a program emits the C it did.
+
+Only one arm runs, so a receiver and the operands that may run code are
+held in temps ahead of the test, in CRuby's order. Whatever is not a
+pure read (subtree_is_pure_read), a String literal or the `[]` literal
+may: an interpolated object's to_s and a `when` object's === run code
+with no call written. An `outer[i]` receiver's index is among them, since the
+splice reads that slot again. Where emit_operands_in_order has already
+read such a receiver into a temp, the call is given back to it and
+comes again unbound, so the index runs once. A call whose operand the
+dispatch has no temp of the right type for, or one of whose arms is
+refused, keeps the splice alone, as before.
+
+A program in which no class takes `[]=` with three arguments emits the
+same C. `x[a, b] += v` on a boxed receiver is still refused by name.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
