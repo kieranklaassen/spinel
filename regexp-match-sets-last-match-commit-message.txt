@@ -1,0 +1,22 @@
+String#match and Regexp#match leave $~ at their match
+
+sp_re_matchdata and sp_re_matchdata_at ran the engine into a caps array
+of their own and handed the registers the Strings alone. The positions
+(sp_re_caps) and the pattern (sp_re_last_pat) stayed those of the match
+before, and $~ is built from them:
+
+    line = "2026-10-05 x"
+    line.match(/(\d+)-(\d+)/)
+    p $~.to_a, $~.begin(2)
+
+printed ["", "", ""] and 0; CRuby prints ["2026-10", "2026", "10"] and
+5. After a match on another String it printed pieces of the new subject
+cut at the old positions, and a named group of the new pattern raised
+IndexError. $1 and $~[2] were right: they read the Strings.
+
+Both now hand the match to sp_re_set_last_match, as gsub, sub and scan
+do.
+
+Test: test/match_last_match_positions.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

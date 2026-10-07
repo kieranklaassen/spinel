@@ -1,0 +1,1 @@
+A block handed on to a rescuing method keeps the locals it writes

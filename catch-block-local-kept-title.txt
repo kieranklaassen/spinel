@@ -1,0 +1,1 @@
+A local written in a catch block keeps the write after the throw

@@ -1,0 +1,30 @@
+A local written in a catch block keeps the write after the throw
+
+```ruby
+def run
+  n = 3
+  catch(:out) do
+    n = 5
+    throw :out
+  end
+  n
+end
+p run
+```
+
+printed 3 at -O1 and above and with clang, where CRuby prints 5. Silent;
+-O0 was right, and so was a block that ended without the throw.
+
+`catch` runs its block under a setjmp that the `throw` comes back to,
+and the analysis that says which locals must be volatile across a
+setjmp counts a begin, a rescue modifier, a `loop` and a break that
+crosses a frame, never a `catch`. is_setjmp_construct counts it
+now, so every place that asks counts it: scope_has_begin,
+begin_volatile_names, and a block spliced under a method that yields
+inside a `catch`.
+
+An Integer, a Float, a Symbol and a true or false were lost, in a local
+and in a parameter; a String or an Array was kept, as a rooted local has
+its address taken.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

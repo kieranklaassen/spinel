@@ -1,0 +1,40 @@
+A block handed on to a rescuing method keeps the locals it writes
+
+```ruby
+def guarded
+  begin
+    yield
+  rescue
+    :rescued
+  end
+end
+
+def twice_guarded
+  guarded { yield }
+end
+
+def run
+  n = 0
+  twice_guarded { n = 7; raise "no" }
+  n
+end
+p run
+```
+
+printed 0 at -O1 and above and with clang, where CRuby prints 7. Silent;
+-O0 was right, and so was `guarded { n = 7; raise "no" }` itself.
+
+A method that yields is spliced into its caller, and so is the one it
+hands its block on to, so the block's `n = 7` runs under guarded's
+setjmp inside run's C function. is_rescuing_yield_call asked whether
+the method called holds a setjmp of its own; twice_guarded holds none.
+It now asks yield_method_guards, which also counts a method that hands
+its block on (`guarded { yield }`, `guarded(&blk)`) to one that does,
+however many methods away. The answer is settled once for the program,
+to a fixed point over the methods that yield, so a call asks in
+constant time.
+
+An Integer, a Float, a Symbol and a true or false were lost, in a local
+and in a parameter of the caller.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
