@@ -12517,8 +12517,8 @@ const char*sp_PolyPolyHash_inspect(sp_PolyPolyHash*h);
    poly_poly_hash so any (key, value) pair shape is uniformly
    representable. str_str_hash_invert lives above (line ~1132)
    and stays as a same-type round-trip. */
-static sp_PolyPolyHash*sp_StrIntHash_invert_poly(sp_StrIntHash*h){sp_PolyPolyHash*r=sp_PolyPolyHash_new();if(!h)return r;for(sp_int i=0;i<h->len;i++)sp_PolyPolyHash_set(r,sp_box_int(sp_StrIntHash_get(h,h->order[i])),sp_box_str(h->order[i]));return r;}
-static sp_PolyPolyHash*sp_IntStrHash_invert(sp_IntStrHash*h){sp_PolyPolyHash*r=sp_PolyPolyHash_new();if(!h)return r;for(sp_int i=0;i<h->len;i++)sp_PolyPolyHash_set(r,sp_box_str(sp_IntStrHash_get(h,h->order[i])),sp_box_int(h->order[i]));return r;}
+static sp_PolyPolyHash*sp_StrIntHash_invert_poly(sp_StrIntHash*h){SP_GC_ROOT(h);sp_PolyPolyHash*r=sp_PolyPolyHash_new();if(!h)return r;for(sp_int i=0;i<h->len;i++)sp_PolyPolyHash_set(r,sp_box_int(sp_StrIntHash_get(h,h->order[i])),sp_box_str(h->order[i]));return r;}
+static sp_PolyPolyHash*sp_IntStrHash_invert(sp_IntStrHash*h){SP_GC_ROOT(h);sp_PolyPolyHash*r=sp_PolyPolyHash_new();if(!h)return r;for(sp_int i=0;i<h->len;i++)sp_PolyPolyHash_set(r,sp_box_str(sp_IntStrHash_get(h,h->order[i])),sp_box_int(h->order[i]));return r;}
 static sp_bool sp_PolyPolyHash_eq(sp_PolyPolyHash*a,sp_PolyPolyHash*b){if(!a||!b)return a==b;if(a->len!=b->len)return FALSE;for(sp_int i=0;i<a->len;i++){sp_RbVal k=a->keys[a->order[i]];if(!sp_PolyPolyHash_has_key(b,k))return FALSE;if(!sp_poly_rb_equal(sp_PolyPolyHash_get(a,k),sp_PolyPolyHash_get(b,k)))return FALSE;}return TRUE;}
 /* --- cross-variant hash equality ------------------------------------------
    Boxed key/value of the i-th insertion-ordered pair, per variant. */
