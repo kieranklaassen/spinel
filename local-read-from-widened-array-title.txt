@@ -1,0 +1,1 @@
+A local read out of a widened Array holds the element itself

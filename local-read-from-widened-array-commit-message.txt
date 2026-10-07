@@ -1,0 +1,34 @@
+A local read out of a widened Array holds the element itself
+
+A local Array that a later store gives another kind of element is
+made the general Array by the container fold, which runs after the
+scan that types each local from its writes. The scan typed a local
+read out of the Array from the Array as first written, every round,
+so the boxed element was narrowed into that local:
+
+    t = [1, 2]
+    t << "s"
+    r = t.last
+    p r          # 0; CRuby "s"
+
+An Integer read out of what began as a String array came out as "1",
+a String out of a Float array raised ArgumentError (invalid value
+for Float(): "s"), and `a, b, c = t` printed a pointer for c.
+
+infer_write_types now marks the plain locals that hold a typed Array
+before the fold and looks at them after it. If the fold widened any,
+the other plain locals go back to UNKNOWN and the scan runs again in
+the same round with those locals held as the general Array, so what
+is read out of them, and what is made of that, is typed from the
+Array as it is. A local that a parameter's store widened
+(poly_array_pin) is written as the general Array by the scan too.
+
+Nothing is kept across rounds, so a local that was the general Array
+only on an early estimate narrows as before. A program in which the
+fold widens no typed local Array runs the scan once and compiles to
+the same C.
+
+Test: test/local_read_from_widened_array.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+
