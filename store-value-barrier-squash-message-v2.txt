@@ -1,0 +1,56 @@
+A store read for its value takes its write barrier after the value
+
+    def fill(h, i)
+      h.s = mk(i)
+    end
+
+A store that is read for its value, here the method's, is the last
+statement of a C statement expression:
+`({ T *_t = h; _t->iv_s = sp_mk(i); })`. The barrier pass puts the
+barrier after a store only where the store is a statement of its own.
+Here it wrapped the holder, `SP_WBO(_t)->iv_s = sp_mk(i)`, and the
+barrier ran before the value was built. A collection while the value
+is built starts the remembered set over, so the old holder's young
+value is recorded nowhere and the next minor mark frees it in the
+slot: the hazard the comment in gc_wb_insert_seg describes for a
+statement (issue 3513), left open for "a store inside a larger
+expression".
+
+Write once into each of 400 old holders through `fill`, with a `mk`
+that allocates enough for a collection to fall inside it, and 78 of
+them read back another String in a plain run built with gcc (none
+with SPINEL_GC_MINOR=0). clang builds the value before it calls the
+barrier there and is right in a plain run; with either compiler
+`self.r = (a..z)` as a method's value loses 397 of 400 Ranges at
+SPINEL_GC_STRESS=1, and SPINEL_GC_STRESS=2 aborts.
+
+That position has room for statements, so the store keeps its value
+in a temp, the barrier follows the store, and the temp is the
+expression's value:
+
+    ({ T *_t = h; __typeof__(_t) _wb1 = _t;
+       __typeof__(_wb1->iv_s) _wv1 = (_wb1->iv_s = sp_mk(i));
+       sp_gc_wb((void *)_wb1); _wv1; })
+
+A value built before the store, a name or the box of one, has nothing
+in it that can collect, and that store keeps the wrapper and its C. So
+does a store anywhere else inside a larger expression.
+
+The pass goes on into the value of the store it rewrote, as the change
+this one stands on made it do for a statement, so a store in there keeps
+its barrier: `y = (k.s = last.s = mk(i))`.
+
+test/gc_minor_store_value.rb counts the holders that read back
+something else: the store as a method's value, a local's value, an
+argument, under `||=`, a Range through self, and a store in such a
+store's value. Before this commit it prints 78, 87, 87, 0, 0, 80 in a
+plain run built with gcc and 0, 0, 0, 0, 397, 0 at SPINEL_GC_STRESS=1
+with gcc and clang, level 2 aborts, and the gc-minor-test leg's
+verifier names the unrecorded holder 1,585 times (gcc) and 397
+(clang). It prints six zeros now under each.
+
+Not changed: `(*X) = v` on a reference cell as a statement
+expression's value (gc_wb_cells) has the same wrapper. No program
+found for it.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
