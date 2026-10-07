@@ -1,0 +1,28 @@
+A call answered at compile time still runs its receiver
+
+    $n = 0
+    def bump = ($n += 1; 7)
+    p bump.size                          # 8
+    p bump.respond_to?(:abs)             # true
+    puts "no" unless bump.is_a?(Shape)   # no
+    p $n                                 # CRuby 3, spinel 0
+
+Integer#size is sizeof(sp_int), and a Float Range covers, includes and
+is eql? to no non-number, whatever the receiver holds: those six rows
+of builtin_ops.c did not name $r, so the receiver was never emitted.
+bump was not called, and `(7 / z).size` answered 8 with z zero. The rows
+now name it as the table's other constant rows do, `((void)($r), ...)`.
+
+respond_to? with a literal name is answered from the receiver's type,
+and an if, unless or ternary on it, or on is_a?, kind_of? or
+instance_of? of a class the type rules out, keeps only the live arm.
+Each emitted the answer alone. Where the receiver can act
+(subtree_has_side_effect) it is now emitted first: in place where the
+call is a value, as a statement ahead of a folded if. A receiver that
+is a variable, a constant or a literal emits the C it did.
+
+Not changed here: `K.new.class`, `1.5.eql?(1)` and `!` of a nil drop an
+acting receiver the same way through arms of their own, and the rows
+that name $r twice (Integer#nonzero?, #magnitude, #polar) run it twice.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

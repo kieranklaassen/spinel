@@ -1,0 +1,1 @@
+A call answered at compile time still runs its receiver
