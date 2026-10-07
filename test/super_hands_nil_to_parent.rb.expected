@@ -1,0 +1,17 @@
+["rate", 1.5]
+["rate", nil]
+2.5
+nil
+false
+true
+1.0
+[nil, 1]
+[0.5, 2]
+["a", nil]
+["b", 3.5]
+[nil]
+[2.5]
+false
+"5"
+true
+"nil"

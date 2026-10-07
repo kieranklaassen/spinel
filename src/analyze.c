@@ -28197,6 +28197,44 @@ static int mark_nullable_params_of_call(Compiler *c, int id, int mi) {
   return changed;
 }
 
+/* The marks a `super` hands the parameters of the method it calls: the
+   arguments written at it as a call's are, and under a bare `super` the
+   method's own parameters, each to the one it fills (a positional one in
+   order, a keyword by its name). Returns 1 if any mark was set. */
+static int mark_nullable_params_of_supers(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  int changed = 0;
+  for (int id = 0; id < nt->count; id++) {
+    NodeKind k = nt_kind(nt, id);
+    if (k != NK_SuperNode && k != NK_ForwardingSuperNode) continue;
+    Scope *s = comp_scope_of(c, id);
+    int mi = s && s->class_id >= 0 && s->name ? a_super_target(c, s) : -1;
+    if (mi < 0) continue;
+    if (k == NK_SuperNode) { changed |= mark_nullable_params_of_call(c, id, mi); continue; }
+    if (s->rest_idx >= 0) continue;
+    Scope *pm = &c->scopes[mi];
+    int npos = 0;
+    while (npos < s->nparams && npos != s->kwrest_idx &&
+           !callee_param_is_declared_kwarg(c, s, s->pnames[npos])) npos++;
+    for (int i = 0; i < pm->nparams; i++) {
+      const char *pn = pm->pnames[i];
+      if (!pn || i == pm->kwrest_idx) continue;
+      LocalVar *from = NULL;
+      if (callee_param_is_declared_kwarg(c, pm, pn)) {
+        if (callee_param_is_declared_kwarg(c, s, pn)) from = scope_local(s, pn);
+      } else {
+        int a = arg_layout_plain_arg(c, pm, npos, i);
+        if (a >= 0 && s->pnames[a]) from = scope_local(s, s->pnames[a]);
+      }
+      LocalVar *p = scope_local(pm, pn);
+      if (!from || !p || (p->type != TY_INT && p->type != TY_FLOAT)) continue;
+      if (from->nullable_int && !p->nullable_int) { p->nullable_int = 1; changed = 1; }
+      if (from->box_nullable && !p->box_nullable) { p->box_nullable = 1; changed = 1; }
+    }
+  }
+  return changed;
+}
+
 /* Mark the int locals that can hold that sentinel, so codegen boxes them as
    nil rather than as INTPTR_MIN. Boxing every int through the nil check costs
    ~8% on optcarrot -- every pixel goes through it -- so the marking is static
@@ -28951,6 +28989,8 @@ static void mark_nullable_int_locals(Compiler *c) {
         free(mns);
       }
     }
+    /* ... and a `super` binds the parameters of the method above */
+    changed |= mark_nullable_params_of_supers(c);
     /* A BLOCK parameter bound from such a value: the sites that bind the
        block -- each yield of the method the call reaches, or an
        instance_exec's own arguments -- typed again by the binding plan
