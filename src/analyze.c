@@ -16696,6 +16696,14 @@ static int share_lift_poly_ivar_stores(Compiler *c, int cid, const char *name) {
       v = av[1];
     if (v >= 0) changed |= share_lift_value(c, v);
   }
+  /* `o.name ||= v` / `o.name &&= v` (the attribute's conditional write) */
+  static const NodeKind cond[] = { NK_CallOrWriteNode, NK_CallAndWriteNode };
+  for (int k = 0; k < 2; k++)
+    NT_FOREACH_KIND(nt, cond[k], w) {
+      const char *wn = nt_str(nt, w, "name");
+      int v = an_unparen(nt, nt_ref(nt, w, "value"));
+      if (wn && v >= 0 && sp_streq(wn, name + 1)) changed |= share_lift_value(c, v);
+    }
   return changed;
 }
 
