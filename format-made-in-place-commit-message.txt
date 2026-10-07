@@ -1,0 +1,25 @@
+A format made in place is held while its arguments are built
+
+`fmt % args` builds two things, the format and the list of arguments,
+as the two arguments of one C call. A format made where it is written
+(an interpolation, a call's result) was held by nothing while the
+list was built, and C does not say which of the two is built first:
+
+    w = 5
+    ints = [3, 4]
+    p "%#{w}d %d|" % ints
+
+At SPINEL_GC_STRESS=2 clang builds the format first, the copy of
+`ints` into a boxed list collects it, and the line prints seven 0xDB
+bytes and exits 0. The one-element list a single argument goes into
+was held by nothing while that argument was built:
+`p("%.2f" % (1r/3))` in test/string_format_scalar_operands.rb raises
+"can't modify frozen Array" there with gcc and with clang, the freed
+list's poisoned header read as frozen.
+
+Such a format now goes into a rooted temporary ahead of the
+arguments (emit_str_format_held), and the one-element list is rooted
+where its argument may allocate. A literal format, a format read
+from a variable and a list that is a variable are emitted as before.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
