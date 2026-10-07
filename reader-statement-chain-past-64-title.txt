@@ -1,0 +1,1 @@
+A statement append chain past 64 links reaches a reader's String

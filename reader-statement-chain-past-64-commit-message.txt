@@ -1,0 +1,25 @@
+A statement append chain past 64 links reaches a reader's String
+
+  class Page
+    attr_reader :text
+    def initialize = @text = +"t"
+  end
+  pg = Page.new
+  pg.text << "a" << "a" << "a"     # ... 65 links
+  p pg.text.size
+
+prints 66 in CRuby and 2 on master. The statement arm for an append
+onto a shared String (str_mutate_append_bang_arms) walks 64 links, and
+a longer chain goes on to the arms that write each link back to the
+variable the chain stands on. A reader's String has no variable: the
+first link reached it and the rest went to a copy.
+
+A chain past 64 links that stands on a call is now walked whole by the
+statement arm. One that stands on a variable keeps the arms it had.
+
+test/string_reader_statement_chain_long.rb has such chains of 65 to
+100 links on a reader, an accessor, a reader written by hand, a reader
+of a reader, `self.text` and a Struct member; nine of its twelve lines
+differ on master.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
