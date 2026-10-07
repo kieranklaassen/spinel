@@ -1,0 +1,25 @@
+Under --share-strings a block parameter's call spliced in place takes the yield's route
+
+    class Box
+      def initialize(r, &blk)
+        @s = blk.call(r)
+      end
+      def s = @s
+    end
+    x = +"hi"
+    n = Box.new(3) { |r| x }
+    n.s << "!"
+    p x                           # "hi!"
+
+did not compile with --share-strings: "invalid initializer".
+
+`blk.call` on a method's own block parameter, where the literal block
+is spliced in place, is emitted as a yield is (is_block_call): its
+value is the block's String itself. strbuf_route_proc_call took it for
+a proc's answer, which comes back boxed, and declared an sp_RbVal for
+it.
+
+The proc route now leaves such a call alone and strbuf_route_yield
+takes it, so `@s` holds x's handle as it does for `@s = yield(r)`.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
