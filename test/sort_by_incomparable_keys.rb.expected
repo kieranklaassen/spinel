@@ -1,0 +1,20 @@
+AE: comparison failed
+AE: comparison failed
+AE: comparison failed
+AE: comparison failed
+AE: comparison failed
+AE: comparison failed
+AE: comparison failed
+AE: comparison failed
+AE: comparison failed
+AE: comparison failed
+AE: comparison failed
+AE: comparison failed
+AE: comparison failed
+[nil, nil]
+[1, 2]
+[3, 2, 1]
+["a", "bb"]
+[[1, "a"], [2, "b"]]
+[1.5, 2.5]
+[["b", 2], ["a", 1]]

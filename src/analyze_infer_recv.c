@@ -1014,6 +1014,8 @@ int infer_array_call(Compiler *c, int id, TyKind rt, TyKind *out) {
                     nt_type(nt, argv[0]) && sp_streq(nt_type(nt, argv[0]), "KeywordHashNode");
     if (sp_streq(name, "sample") && argc == 1 && !sample_kw)
       { *out = rt; return 1; }  /* n-arg form -> subarray */
+    if (sp_streq(name, "sample") && argc == 2)
+      { *out = rt; return 1; }  /* sample(n, random: g) -> subarray */
     /* a countless blockless cycle is an Enumerator too (#3758) */
     if (sp_streq(name, "cycle") && argc == 0 && nt_ref(nt, id, "block") < 0 &&
         !call_is_chain_receiver_with_block(c, id))
@@ -1113,6 +1115,52 @@ int infer_array_call(Compiler *c, int id, TyKind rt, TyKind *out) {
     }
   }
   return 0;
+}
+
+/* An Array method given an Array subclass instance as the Array it compares,
+   combines or copies (comp_arysub_args_viewed): answered with the argument
+   pinned to the instance's Array, as the emitter views it (#7449). The face
+   pins one node, so it is the first such argument. */
+static int infer_arysub_arg_call(Compiler *c, int id, TyKind rt, TyKind *out) {
+  int args = nt_ref(c->nt, id, "arguments"), an = 0;
+  const int *av = args >= 0 ? nt_arr(c->nt, args, "arguments", &an) : NULL;
+  for (int i = 0; i < an; i++) {
+    TyKind at = infer_type(c, av[i]);
+    if (comp_ty_ary_root(c, at) < 0) continue;
+    if (!comp_arysub_args_viewed(c, id, rt)) return 0;
+    TyKind k = comp_ary_kind(c, ty_object_class(at));
+    if (k == TY_UNKNOWN) { *out = TY_UNKNOWN; return 1; }
+    an_face_push(av[i], k);
+    *out = infer_call(c, id);
+    an_face_pop();
+    return 1;
+  }
+  return 0;
+}
+
+/* A call on an Array subclass instance that Array answers (#7449): the call
+   re-inferred with its receiver pinned to the embedded Array's kind, as a
+   boxed receiver's face is, and the emitter re-enters the Array emitters under
+   the same pin. A method whose answer is its receiver answers the instance. */
+int infer_arysub_call(Compiler *c, int id, TyKind *out) {
+  if (!c->has_arysub) return 0;
+  int recv = nt_ref(c->nt, id, "receiver");
+  /* Kernel#Array hands an Array back as it is, an Array subclass instance
+     included */
+  int an = comp_arysub_kernel_array(c, id);
+  if (an >= 0 && comp_ty_ary_root(c, infer_type(c, an)) >= 0) { *out = infer_type(c, an); return 1; }
+  if (recv < 0 || face_of(recv) != TY_UNKNOWN) return 0;
+  TyKind rt = infer_type(c, recv), k = TY_UNKNOWN;
+  if (!comp_arysub_call(c, id, rt, &k)) return infer_arysub_arg_call(c, id, rt, out);
+  int self = comp_arysub_self_result(c, id);
+  TyKind r = TY_UNKNOWN;
+  if (k != TY_UNKNOWN) {
+    an_face_push(recv, k);
+    r = infer_call(c, id);
+    an_face_pop();
+  }
+  *out = self ? rt : r;
+  return 1;
 }
 
 /* Object receivers: the user-object face of infer_call */
@@ -1337,7 +1385,7 @@ int poly_blockless_enum_name(const char *name) {
 }
 
 /* A call written `recv&.name`. */
-static int call_is_safe_nav(const NodeTable *nt, int id) {
+int call_is_safe_nav(const NodeTable *nt, int id) {
   const char *op = nt_str(nt, id, "call_operator");
   return op && sp_streq(op, "&.");
 }
@@ -1831,7 +1879,7 @@ int infer_poly_call(Compiler *c, int id, TyKind rt, TyKind *out) {
           sp_streq(name, "rfc2822") || sp_streq(name, "rfc822")) &&
          sp_feature_enabled("time")))
       { *out = TY_STRING; return 1; }
-    if (sp_streq(name, "asctime")) { *out = TY_STRING; return 1; }
+    if (sp_streq(name, "asctime") || sp_streq(name, "ctime")) { *out = TY_STRING; return 1; }
     if (sp_streq(name, "subsec")) { *out = TY_POLY; return 1; }
   }
   /* iso8601(n) / xmlschema(n) on a boxed Time: the fraction-digits form the

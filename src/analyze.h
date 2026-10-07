@@ -238,6 +238,7 @@ int block_has_top_break(Compiler *c, int node);
    receiver, not instance_exec/eval). When true, the call returns the break
    value on break, so its result type widens to poly. */
 int call_breaks(Compiler *c, int id);
+int an_poly_str_upto(Compiler *c, int id);   /* a boxed upto a String receiver may take */
 /* Scope of an inline-able yielding user method a block-bearing CallNode
    resolves to (its literal block is spliced at yield sites), else -1. */
 int call_user_yield_mi(Compiler *c, int id);
@@ -250,6 +251,9 @@ extern int g_ret_no_new_poly;
 /* Recompute a node's type without consulting the cache (used by the break
    wrapper with g_infer_ignore_brk set to recover the normal result type). */
 TyKind infer_uncached(Compiler *c, int id);
+/* infer_type answered node id as an Array subclass instance's Array (#7449) */
+void an_ary_viewed_mark(Compiler *c, int id);
+int an_ary_viewed(Compiler *c, int id);
 /* Pin/read the receiver node the inference should answer as `kind` while
    codegen re-enters a typed emitter for a boxed receiver (the face table in
    types.h). Node -1 clears the pin. */

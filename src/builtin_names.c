@@ -34,6 +34,14 @@ int is_kind_query(const char *n) {
   return sp_streq(n, "is_a?") || sp_streq(n, "kind_of?") || sp_streq(n, "instance_of?");
 }
 
+/* A call that answers about the receiver itself without reading any of
+   its instance variables: its class, its identity, nil?, frozen?. */
+int is_member_blind_query(const char *n) {
+  return is_kind_query(n) || sp_streq(n, "class") || sp_streq(n, "object_id") ||
+         sp_streq(n, "__id__") || sp_streq(n, "nil?") || sp_streq(n, "frozen?") ||
+         sp_streq(n, "equal?") || sp_streq(n, "respond_to?");
+}
+
 int is_round_family(const char *n) {
   return sp_streq(n, "round") || sp_streq(n, "ceil") || sp_streq(n, "floor") || sp_streq(n, "truncate");
 }
@@ -193,6 +201,12 @@ int is_push_unshift(const char *n) {
          sp_streq(n, "unshift");
 }
 
+/* A call whose answer tells an object from a copy of it: its identity, or
+   whether it is frozen (a copy of a String later frozen is not). */
+int is_identity_query(const char *n) {
+  return sp_streq(n, "equal?") || sp_streq(n, "object_id") || sp_streq(n, "__id__") || sp_streq(n, "frozen?");
+}
+
 int is_len_alias(const char *n) {
   return sp_streq(n, "length") || sp_streq(n, "size");
 }
@@ -208,6 +222,11 @@ int is_int_bit_op(const char *n) {
 int is_str_each_iter(const char *n) {
   return sp_streq(n, "each_char") || sp_streq(n, "each_line") ||
          sp_streq(n, "each_byte") || sp_streq(n, "each_codepoint");
+}
+
+int is_str_string_yield(const char *n) {
+  return sp_streq(n, "each_char") || sp_streq(n, "each_line") || sp_streq(n, "upto") ||
+         sp_streq(n, "chars") || sp_streq(n, "lines") || sp_streq(n, "split") || sp_streq(n, "scrub");
 }
 
 int is_diverging_call(const char *n) {
@@ -422,6 +441,10 @@ int is_bounded_int_step(const char *n) {
   return sp_streq(n, "upto") || sp_streq(n, "downto");
 }
 
+int is_upto_name(const char *n) {
+  return sp_streq(n, "upto");
+}
+
 int is_add_sub(const char *n) {
   return sp_streq(n, "+") || sp_streq(n, "-");
 }
@@ -501,6 +524,10 @@ int is_directory_entries(const char *n) {
 
 int is_io_position(const char *n) {
   return sp_streq(n, "tell") || sp_streq(n, "pos");
+}
+
+int is_rewind_name(const char *n) {
+  return sp_streq(n, "rewind");
 }
 
 int is_byte_codepoint_each(const char *n) {
@@ -641,6 +668,10 @@ int is_succ_alias(const char *n) {
 
 int is_div_or_mod(const char *n) {
   return sp_streq(n, "/") || sp_streq(n, "%");
+}
+
+int is_div_or_modulo(const char *n) {
+  return sp_streq(n, "div") || sp_streq(n, "modulo");
 }
 
 int is_initialize_family(const char *n) {
@@ -843,3 +874,35 @@ int is_nil_method(const char *n) {
 int is_positional_io(const char *n) {
   return sp_streq(n, "pread") || sp_streq(n, "pwrite");
 }
+
+/* An Array subclass instance's questions about the object itself rather
+   than its elements (#7449): the class's own answers, through the object
+   paths. dup and clone keep the class and copy the elements. */
+int is_arysub_object_name(const char *n) {
+  static const char *const names[] = {
+    "class", "singleton_class", "is_a?", "kind_of?", "instance_of?", "respond_to?",
+    "equal?", "object_id", "__id__", "dup", "clone", "itself", "tap", "then",
+    "yield_self", "instance_variable_get", "instance_variable_set",
+    "instance_variable_defined?", "instance_variables", "remove_instance_variable",
+    "send", "public_send", "__send__", "method", "public_method", "methods",
+    "public_methods", "singleton_methods", "define_singleton_method", "extend",
+    "instance_eval", "instance_exec", "nil?", "!", "display", NULL };
+  for (int i = 0; names[i]; i++) if (sp_streq(n, names[i])) return 1;
+  return 0;
+}
+
+/* The Object methods an Array subclass instance answers as its Array
+   (#7449): to_enum and enum_for walk its elements, frozen? reads the
+   Array's frozen flag, != negates Array#==. */
+int is_arysub_kernel_name(const char *n) {
+  return sp_streq(n, "to_enum") || sp_streq(n, "enum_for") || sp_streq(n, "frozen?") || sp_streq(n, "!=");
+}
+
+int array_unseen_add_kind(const char *n) {
+  if (sp_streq(n, "concat")) return ARRAY_ADD_CONCAT;
+  if (sp_streq(n, "insert")) return ARRAY_ADD_INSERT;
+  if (sp_streq(n, "prepend")) return ARRAY_ADD_PREPEND;
+  return ARRAY_ADD_NONE;
+}
+
+int is_scan_name(const char *n) { return sp_streq(n, "scan"); }

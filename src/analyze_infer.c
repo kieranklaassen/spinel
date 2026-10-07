@@ -2,6 +2,7 @@
 #include "builtin_ops.h"
 #include "call_plan.h"
 #include "repr.h"
+#include "holder.h"
 #include <stdint.h>
 #include <limits.h>
 
@@ -802,6 +803,27 @@ int block_has_top_break(Compiler *c, int node) {
    the wrapper's setjmp in exactly the right C scope). Receiverless
    NON-methods (loop / catch / proc / lambda literals) run their own scopes
    and stay excluded, as does instance_exec/eval (handled inline). */
+/* `poly.upto(lim [, exclusive])` whose receiver may be a String at run
+   time: a limit that is a String or boxed, or the exclusive flag only
+   String#upto takes. Its own emitter tests the receiver's tag
+   (emit_poly_str_upto); with an Integer limit the Integer face keeps it. */
+int an_poly_str_upto(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  const char *name = nt_str(nt, id, "name");
+  int recv = nt_ref(nt, id, "receiver");
+  int a = nt_ref(nt, id, "arguments"), an = 0;
+  const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
+  if (!name || !is_upto_name(name) || recv < 0 || an < 1 || an > 2) return 0;
+  for (int i = 0; i < an; i++) {
+    NodeKind k = nt_kind(nt, av[i]);
+    if (k == NK_SplatNode || k == NK_KeywordHashNode || k == NK_BlockArgumentNode) return 0;
+  }
+  if (nt_kind(nt, nt_ref(nt, id, "block")) == NK_BlockArgumentNode) return 0;
+  if (infer_type(c, recv) != TY_POLY || an_user_defines_or_reads(c, name)) return 0;
+  TyKind lt = infer_type(c, av[0]);
+  return an == 2 || lt == TY_STRING || lt == TY_STRBUF || lt == TY_POLY || lt == TY_BIGINT;
+}
+
 int call_breaks(Compiler *c, int id) {
   const NodeTable *nt = c->nt;
   const char *ty = nt_type(nt, id);
@@ -2719,6 +2741,16 @@ static int infer_poly_operand_call(Compiler *c, int id, const NodeTable *nt, con
                         sp_streq(name, "quo") || sp_streq(name, "div") ||
                         sp_streq(name, "remainder") || sp_streq(name, "coerce")))
         { *out = an_poly_concrete(c, name, TY_POLY); return 1; }
+      /* shuffle / shuffle! / sample given `random:` (emit_array_random_kw):
+         the keyword is not a count, so sample answers one element and shuffle
+         an Array; shuffle! answers the receiver, and sample(n, random:) n
+         elements */
+      if ((argc == 1 || argc == 2) && nt_ref(nt, id, "block") < 0 &&
+          (sp_streq(name, "sample") || (argc == 1 && (sp_streq(name, "shuffle") || sp_streq(name, "shuffle!"))))) {
+        int nkv = 0; int ka = nt_ref(nt, id, "arguments"); const int *kv = ka >= 0 ? nt_arr(nt, ka, "arguments", &nkv) : NULL;
+        if (kv && nkv == argc && nt_kind(nt, kv[argc - 1]) == NK_KeywordHashNode)
+          { *out = an_poly_concrete(c, name, (argc == 2 || sp_streq(name, "shuffle")) ? TY_POLY_ARRAY : TY_POLY); return 1; }
+      }
       /* String#getbyte on a boxed value: int byte or nil on out-of-range. */
       if (argc == 1 && sp_streq(name, "getbyte")) { *out = an_poly_concrete(c, name, TY_POLY); return 1; }
       /* The count-taking Array reads on a boxed array. Their value is a new
@@ -6190,6 +6222,13 @@ static int infer_last_resort_call(Compiler *c, int id, const NodeTable *nt, cons
            its emitter worked on (see emit_face_arm) */
         if (ty_poly_face_owner_flags(name, argc, blk, nt_call_args_plain(nt, id), bit) & PF_VAL_SELF) ht = TY_POLY;
         r = r == TY_UNKNOWN ? ht : ty_unify(r, ht);
+        /* a blockless step(n) on a Range that is endless at run time answers
+           an Enumerator (sp_poly_range_endless_step), which no array slot
+           holds: with a Float step every owner's answer is a Float Array,
+           and the call was typed one and materialized the endless Range */
+        if (sp_streq(name, "step") && argc == 1 && !blk &&
+            (ty_poly_face_kind(bit) == TY_RANGE || ty_poly_face_kind(bit) == TY_FLOAT_RANGE))
+          r = TY_POLY;
       }
       if (r != TY_UNKNOWN) { *out = r; return 1; }
     }
@@ -6321,6 +6360,10 @@ static int infer_block_iter_call(Compiler *c, int id, const NodeTable *nt, const
       (sp_streq(name, "uniq") || sp_streq(name, "uniq!")) &&
       infer_type(c, recv) == TY_POLY)
     { *out = TY_POLY; return 1; }
+  /* a boxed upto whose limit can be a String (an_poly_str_upto) answers the
+     receiver boxed with a block, and boxed without one (a String's
+     Enumerator or an Integer's Range) */
+  if (an_poly_str_upto(c, id)) { *out = TY_POLY; return 1; }
   /* `poly.times { }` / `upto(n) { }` / `downto(n) { }` answer the receiver,
      which codegen unboxes to an sp_int before handing the call to the typed
      emitters. step is left out: a Float owns it too. */
@@ -6582,6 +6625,7 @@ static TyKind infer_call_inner(Compiler *c, int id) {
   if (!name) return TY_UNKNOWN;
   /* a boxed value's enum_for no generator serves (desugar_to_enum) */
   if (sp_streq(name, "__poly_enum_for")) return TY_ENUMERATOR;
+  { TyKind ar; if (infer_arysub_call(c, id, &ar)) return ar; }   /* Array's, on an Array subclass (#7449) */
 
   /* Array#to_a and #to_ary answer the receiver itself, and a boxed typed
      array can only hand out a converted copy as an sp_PolyArray. Where that
@@ -6949,7 +6993,7 @@ static TyKind infer_call_inner(Compiler *c, int id) {
         (((sp_streq(hn, "[]") || sp_streq(hn, "fetch") || sp_streq(hn, "delete")) && hac == 1) ||
          (sp_streq(hn, "values") && hac == 0))) {
       int hcls = hv_value_class(c, recv);
-      if (hcls >= 0) return sp_streq(hn, "values") ? ty_obj_array(hcls) : ty_object(hcls);
+      if (hcls >= 0) return !sp_streq(hn, "values") ? ty_object(hcls) : comp_ary_root(c, hcls) >= 0 ? TY_POLY_ARRAY : ty_obj_array(hcls);   /* an Array subclass boxes as its Array (#7449) */
     }
   }
   /* A block call on a poly receiver whose candidates include a YIELDING method
@@ -8694,19 +8738,14 @@ TyKind infer_uncached(Compiler *c, int id) {
     return ci->ivar_types[iv];
   }
   if (nk == NK_ClassVariableReadNode) {
-    const char *nm = nt_str(nt, id, "name");
-    Scope *s = comp_scope_of(c, id);
-    int cid = s->class_id;
-    if (cid < 0 && id < c->node_cap) cid = c->node_cbody[id];
-    /* a body-level read in a (reopened) class body: the body's class */
-    if (cid < 0 && c->node_cbody && id < c->node_cap) cid = c->node_cbody[id];
-    if (cid < 0) cid = comp_class_index(c, "Toplevel");
-    if (cid < 0) return TY_UNKNOWN;
-    cid = comp_cvar_owner(c, cid, nm);
-    int idx = nm ? comp_cvar_index(&c->classes[cid], nm) : -1;
-    /* a class variable whose slot is an sp_String * handle reads as a String */
-    if (idx >= 0 && repr_cvar_kind(c, cid, idx) == RK_STRBUF) return TY_STRING;
-    return idx >= 0 ? c->classes[cid].cvar_types[idx] : TY_UNKNOWN;
+    /* a body-level read in a (reopened) class body: the body's class
+       (holder_of_node) */
+    HolderRef h;
+    if (!holder_of_node(c, id, &h) || h.idx < 0) return TY_UNKNOWN;
+    /* a class variable whose slot is an sp_String * handle reads as a
+       String (h.r.kind is repr_cvar_kind) */
+    if (h.r.kind == RK_STRBUF) return TY_STRING;
+    return c->classes[h.cid].cvar_types[h.idx];
   }
   if (nk == NK_ClassVariableOperatorWriteNode || nk == NK_ClassVariableWriteNode ||
       nk == NK_ClassVariableOrWriteNode || nk == NK_ClassVariableAndWriteNode) {
@@ -8715,15 +8754,9 @@ TyKind infer_uncached(Compiler *c, int id) {
        when widened under promote) -- so the expression's type is the cvar's, not
        v's. (For a non-widened cvar this equals v's type, so default mode is
        unchanged.) */
-    const char *nm = nt_str(nt, id, "name");
-    Scope *s = comp_scope_of(c, id);
-    int cid = s ? s->class_id : -1;
-    if (cid < 0 && c->node_cbody && id < c->node_cap) cid = c->node_cbody[id];
-    if (cid < 0) cid = comp_class_index(c, "Toplevel");
-    cid = comp_cvar_owner(c, cid, nm);
-    int idx = (cid >= 0 && nm) ? comp_cvar_index(&c->classes[cid], nm) : -1;
-    if (idx >= 0 && repr_cvar_kind(c, cid, idx) == RK_STRBUF) return TY_STRING;
-    if (idx >= 0) return c->classes[cid].cvar_types[idx];
+    HolderRef h;
+    if (holder_of_node(c, id, &h) && h.idx >= 0)
+      return h.r.kind == RK_STRBUF ? TY_STRING : c->classes[h.cid].cvar_types[h.idx];
     return infer_type(c, nt_ref(nt, id, "value"));
   }
   if (nk == NK_IndexOrWriteNode || nk == NK_IndexAndWriteNode ||
@@ -9353,6 +9386,22 @@ int an_program_news_object(Compiler *c) {
   return found;
 }
 
+/* The nodes infer_type answered as an Array subclass instance's Array
+   (ary_operand, #7449): the emitter casts each to that Array. */
+void an_ary_viewed_mark(Compiler *c, int id) {
+  if (id >= c->ary_viewed_cap) {
+    int cap = c->node_cap > id ? c->node_cap : id + 1;
+    unsigned char *nv = realloc(c->ary_viewed, (size_t)cap);
+    /* a dropped mark would emit the node uncast: no recovery */
+    if (!nv) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+    c->ary_viewed = nv;
+    memset(c->ary_viewed + c->ary_viewed_cap, 0, (size_t)(cap - c->ary_viewed_cap));
+    c->ary_viewed_cap = cap;
+  }
+  c->ary_viewed[id] = 1;
+}
+int an_ary_viewed(Compiler *c, int id) { return id >= 0 && id < c->ary_viewed_cap && c->ary_viewed[id]; }
+
 TyKind infer_type(Compiler *c, int id) {
   if (id < 0 || id >= c->nt->count) return TY_UNKNOWN;
   if (g_io_skip_reopen && id != g_io_skip_node) {
@@ -9384,6 +9433,17 @@ TyKind infer_type(Compiler *c, int id) {
   g_infer_depth++;
   TyKind t = infer_uncached(c, id);
   g_infer_depth--;
+  /* an Array subclass instance read where an Array is wanted -- a splat, a
+     destructuring, an element write that is no call (marked ary_operand) --
+     is its Array (#7449) */
+  if (ty_is_object(t) && comp_ty_ary_root(c, t) >= 0) {
+    long long op = nt_int(c->nt, id, "ary_operand", 0);
+    if (op == 1 || (op == 2 && comp_method_in_chain(c, ty_object_class(t), "[]", NULL) < 0 &&
+                    comp_method_in_chain(c, ty_object_class(t), "[]=", NULL) < 0)) {
+      t = comp_ary_kind(c, ty_object_class(t));
+      an_ary_viewed_mark(c, id);
+    }
+  }
   /* The builtin-only re-derivation (see an_builtin_only) asks what this call
      would be if no user class owned the name. That answer is not the node's
      real type, and neither are the child types derived under it, so the cache

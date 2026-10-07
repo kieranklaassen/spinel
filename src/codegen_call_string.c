@@ -29,7 +29,9 @@ int emit_call_regexp_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
       return 1;
     }
     if (rre >= 0 && sp_streq(name, "match?") && argc == 2) {
-      buf_printf(b, "sp_re_match_p_at(sp_re_pat_%d, ", rre); emit_expr(c, argv[0], b);
+      /* the subject converts as match(str, pos)'s does: a boxed or nil one
+         went into the const char * slot raw */
+      buf_printf(b, "sp_re_match_p_at(sp_re_pat_%d, ", rre); emit_str_expr_nilable(c, argv[0], b);
       buf_puts(b, ", "); emit_int_expr(c, argv[1], b); buf_puts(b, ")");
       return 1;
     }
@@ -311,7 +313,7 @@ no_gsub_enum:
   /* /re/.match(str) and /re/.match(str, pos) */
   {
     int rre = re_lit_index(c, recv);
-    if (rre >= 0 && sp_streq(name, "match") && argc == 1 && nt_ref(nt, id, "block") >= 0) {
+    if (rre >= 0 && sp_streq(name, "match") && (argc == 1 || argc == 2) && nt_ref(nt, id, "block") >= 0) {
       /* /re/.match(str) { |m| body }: the same block form String#match already
          had -- yield the MatchData on a hit and evaluate to the block's value,
          nil on a miss. Without the arm the MatchData itself was the value and
@@ -322,8 +324,14 @@ no_gsub_enum:
       int mbody = nt_ref(nt, mblk, "body");
       int mbn = 0; const int *mbb = mbody >= 0 ? nt_arr(nt, mbody, "body", &mbn) : NULL;
       int tm = ++g_tmp, tr2 = ++g_tmp;
-      buf_printf(b, "({ sp_MatchData *_t%d = sp_re_matchdata(sp_re_pat_%d, ", tm, rre);
-      emit_str_expr(c, argv[0], b);
+      /* match(str, pos) { |m| ... } starts the scan at pos, as without a
+         block: its MatchData was the value, where the call is typed by the
+         block's */
+      buf_printf(b, "({ sp_MatchData *_t%d = sp_re_matchdata%s(sp_re_pat_%d, ", tm, argc == 2 ? "_at" : "", rre);
+      /* a nil subject answers nil without running the block, as the
+         blockless form's does: the matchers return NULL for it */
+      emit_str_expr_nilable(c, argv[0], b);
+      if (argc == 2) { buf_puts(b, ", "); emit_int_expr(c, argv[1], b); }
       buf_printf(b, "); sp_RbVal _t%d = sp_box_nil(); SP_GC_ROOT_RBVAL(_t%d); if (_t%d) { ",
                  tr2, tr2, tm);
       if (mp0r) buf_printf(b, "lv_%s = _t%d; ", mp0r, tm);
@@ -436,7 +444,21 @@ no_gsub_enum:
                        tv, rp.p, tv);
             free(rp.p); return 1;
           }
-          if (sp_streq(name, "!~")) {
+          if (sp_streq(name, "!~") && argc == 1) {
+            /* a poly receiver answers as the literal pattern's poly arm does:
+               nil !~ is true, a String or a Symbol tests the negated match,
+               any other class has no =~. Read raw, the box went into
+               sp_re_match's const char * slot. */
+            if (rt == TY_POLY) {
+              int tv = ++g_tmp;
+              buf_printf(b, "({ sp_RbVal _t%d = sp_poly_strbuf_deref(", tv); emit_expr(c, recv, b);
+              buf_printf(b, "); SP_GC_ROOT_RBVAL(_t%d); (_t%d.tag == SP_TAG_STR ? sp_re_match(%s, _t%d.v.s) < 0"
+                            " : _t%d.tag == SP_TAG_SYM ? sp_re_match(%s, sp_sym_to_s((sp_sym)_t%d.v.i)) < 0"
+                            " : _t%d.tag == SP_TAG_NIL ? 1"
+                            " : (sp_raise_nomethod(sp_nomethod_msg(\"=~\", _t%d)), 0)); })",
+                         tv, tv, rp.p, tv, tv, rp.p, tv, tv, tv);
+              free(rp.p); return 1;
+            }
             buf_printf(b, "(sp_re_match(%s, ", rp.p); emit_expr(c, recv, b); buf_puts(b, ") < 0)");
             free(rp.p); return 1;
           }
@@ -1057,6 +1079,56 @@ int emit_op_string_scan_checked(Compiler *c, const BopCtx *x, Buf *b) {
   buf_printf(b, "%s(%s, ", repr_of(c, x->id).as_ty == TY_POLY_ARRAY ? "sp_scan_boxed_poly" : "sp_scan_boxed", x->rtext);
   emit_boxed(c, argv[0], b);
   buf_puts(b, ")");
+  return 1;
+}
+
+/* String#scrub { |bytes| ... }: the receiver's valid runs copied through,
+   and each invalid sequence (sp_str_scrub_bad) handed to the block, whose
+   answer replaces it: a String, converted as CRuby's implicit conversion
+   does, and valid UTF-8 (sp_str_scrub_repl). A replacement argument besides
+   the block is CRuby's ArgumentError unless it is nil. */
+int emit_op_string_scrub_block(Compiler *c, const BopCtx *x, Buf *b) {
+  const NodeTable *nt = c->nt;
+  int block = nt_ref(nt, x->id, "block");
+  if (block < 0 || nt_kind(nt, block) != NK_BlockNode) return 0;
+  int argc;
+  const int *argv = call_args(nt, x->id, &argc);
+  int ts = ++g_tmp, tl = ++g_tmp, tp = ++g_tmp, tout = ++g_tmp, tb = ++g_tmp, tn = ++g_tmp;
+  emit_indent(g_pre, g_indent); buf_printf(g_pre, "const char *_t%d = %s; SP_GC_ROOT_STR(_t%d);\n", ts, x->rtext, ts);
+  if (argc == 1 && nt_kind(nt, argv[0]) != NK_NilNode) {
+    Buf ab; memset(&ab, 0, sizeof ab); emit_boxed(c, argv[0], &ab);
+    emit_indent(g_pre, g_indent);
+    buf_printf(g_pre, "if (!sp_poly_nil_p(%s)) sp_raise_cls(\"ArgumentError\", \"both of block and replacement given\");\n",
+               ab.p ? ab.p : "sp_box_nil()");
+    free(ab.p);
+  }
+  emit_indent(g_pre, g_indent); buf_printf(g_pre, "sp_int _t%d = (sp_int)sp_str_byte_len(_t%d), _t%d = 0;\n", tl, ts, tp);
+  emit_indent(g_pre, g_indent); buf_printf(g_pre, "sp_String *_t%d = sp_String_new(\"\"); SP_GC_ROOT(_t%d);\n", tout, tout);
+  emit_indent(g_pre, g_indent); buf_printf(g_pre, "while (_t%d < _t%d) {\n", tp, tl);
+  emit_indent(g_pre, g_indent + 1);
+  buf_printf(g_pre, "sp_int _t%d, _t%d = sp_str_scrub_bad(_t%d, _t%d, _t%d, &_t%d);\n", tn, tb, ts, tl, tp, tn);
+  emit_indent(g_pre, g_indent + 1);
+  buf_printf(g_pre, "sp_String_append_bin(_t%d, sp_str_substr(_t%d + _t%d, 0, _t%d - _t%d));\n", tout, ts, tp, tb, tp);
+  emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "if (_t%d >= _t%d) break;\n", tb, tl);
+  const char *p0 = block_param_name(c, block, 0);
+  if (p0) {
+    Scope *ps = comp_scope_of(c, block);
+    LocalVar *plv = ps ? scope_local(ps, p0) : NULL;
+    int box = plv && plv->type == TY_POLY;
+    emit_indent(g_pre, g_indent + 1);
+    buf_printf(g_pre, "lv_%s = %ssp_str_substr(_t%d + _t%d, 0, _t%d)%s;\n",
+               rename_local(p0), box ? "sp_box_str(" : "", ts, tb, tn, box ? ")" : "");
+  }
+  int save = g_indent; g_indent++;
+  IterStep st; emit_iter_step_open(c, block, 1, g_indent, &st);
+  Buf vb; memset(&vb, 0, sizeof vb); emit_iter_step_tail(c, &st, &vb);
+  g_indent = save;
+  emit_indent(g_pre, g_indent + 1);
+  buf_printf(g_pre, "sp_String_append_bin(_t%d, sp_str_scrub_repl(sp_poly_arg_str_chk(%s)));\n", tout, vb.p ? vb.p : "sp_box_nil()");
+  free(vb.p);
+  emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "_t%d = _t%d + _t%d;\n", tp, tb, tn);
+  emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
+  buf_printf(b, "_t%d->data", tout);
   return 1;
 }
 
