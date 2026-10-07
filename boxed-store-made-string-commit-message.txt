@@ -1,0 +1,50 @@
+A boxed String stored where a handle is asked for is the handle
+
+    class C
+      attr_reader :xs
+      def initialize = @xs = [+"az"]
+      def head
+        @xs[0] = @xs[0].succ
+        @xs[0]
+      end
+    end
+    c = C.new
+    c.head.succ!
+    p c.xs
+
+printed ["ba"], where CRuby prints ["bb"]. `c.head << "x"` and
+`c.head; c.xs[0].succ!` lost their change the same way, and so did a
+store of `@xs[0] + "q"` or of `@xs[0].upcase`.
+
+@xs holds its Strings as shared handles, and the value stored back is
+marked for one (strbuf_box). But that value comes from a call on a
+boxed element, so it is boxed itself, and a marked node whose value is
+boxed is typed as the box, not as the handle. emit_boxed then wrote the
+bare box: a plain String in an Array of handles, which no later change
+reaches.
+
+emit_boxed now hands such a node to sp_poly_strbuf_lift, which a boxed
+argument already goes through for a parameter its callee appends to: a
+String becomes the handle the mark asked for, and any other value (an
+Integer, nil) passes as it is. No mark is added and no rule about what
+is shared: the node is one the existing rule marked.
+
+Only where the store's own right side makes the String, so that the
+program has no other name for it (boxed_value_unnamed): a call of succ,
+upcase, + or another String method that answers a new String, under a
+name no class of the program defines. A value the program names too,
+
+    x = @xs[0].succ
+    @xs[0] = x
+
+is stored as it was. Lifted, the Array would hold the handle and `x`
+the String it was made from: two Strings where CRuby has one, and
+`x.equal?(@xs[0])` would turn false.
+
+The program printed ["bb"] until "An append through a method's element
+reaches the Array it holds", after which it did not build
+(sp_String_new_shared was handed the box), and it has printed ["ba"]
+since "A String handle demanded of a value that later widens is no
+handle".
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

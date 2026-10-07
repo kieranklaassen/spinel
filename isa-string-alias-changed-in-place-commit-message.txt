@@ -1,0 +1,29 @@
+A local assigned a boxed String under its is_a? guard is that String, not a copy
+
+    r = [+"ab", 5]
+    e = r[0]
+    if e.is_a?(String)
+      t = e
+      t << "z"
+    end
+    p r
+
+prints ["abz", 5] in CRuby and ["ab", 5] here, with and without
+--share-strings. Under `case e when String` it prints ["abz", 5].
+
+The guard narrows the reads of e in its arm to String, and a narrowed
+read unboxes: `t = e` took the bytes out of the box, t was a String of
+its own, and the append grew that one. The when arm narrows nothing, so
+there t is boxed too and lift_poly_alias_reads makes the two names one
+String.
+
+isa_mark_reads already leaves an Array read boxed where it is handed
+on, because the narrowed read is a copy. It now leaves a String read
+boxed where it is the value of a local's assignment and that local is
+changed in place as a String: itself, under a name it is assigned to
+(`t = u = e`, `u = e; t = u`), or by a method it is handed to whose
+parameter is (`add(t)`). The lift then does for the is_a? arm what it
+does for the when arm. A local that is only read is assigned the
+narrowed String as before, and has the C it had.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

@@ -1,0 +1,1 @@
+A local assigned a boxed String under its is_a? guard is that String, not a copy

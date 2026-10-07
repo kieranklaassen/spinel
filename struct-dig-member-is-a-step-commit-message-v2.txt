@@ -1,0 +1,36 @@
+A Struct member dug into is a step of the dig, not its receiver
+
+    S = Struct.new(:a, :b)
+    v = S.new("str", :sym)
+    begin
+      p v.dig(:a, 0)
+    rescue TypeError
+      puts "TypeError"
+    end
+
+prints TypeError in CRuby and did here until "A boxed value's dig raises
+NoMethodError for a receiver that cannot be dug"; since then it dies with
+NoMethodError (undefined method 'dig' for an instance of String), which
+the rescue does not catch.
+
+A Struct's dig reads the member its first key names itself and hands the
+other keys to the run-time walk, with that member's value in the
+receiver's place (emit_struct_recv_call, for a literal member and for
+one chosen at run time). sp_poly_dig_n tests its receiver, and that
+change added the test for a receiver that cannot be dug. A member's
+value is a step of the walk: CRuby ends it at nil and raises TypeError
+naming the class of anything else that has no dig.
+
+The walk's loop is now sp_poly_dig_rest. sp_poly_dig_n runs it after its
+receiver tests, and the Struct emitter calls it for the keys past the
+first. A nil member (`S.new(nil, 1).dig(:a, 0)` is nil in CRuby) and an
+Integer, a Float or a true one met the older receiver tests the same way
+and raised NoMethodError before that change as well; they are right
+with this.
+
+A member that is an object of one of the program's own classes keeps
+the NoMethodError it has (CRuby raises TypeError, or calls the object's
+own dig): the walk answers nil for such an object wherever it meets
+one, and a raise is not traded for that nil here.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
