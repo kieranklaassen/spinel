@@ -1,0 +1,1 @@
+An attribute of an exception class with no initialize is nil until set, and is marked once set
