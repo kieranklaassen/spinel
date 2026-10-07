@@ -925,7 +925,7 @@ int emit_call_module_fn_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, c
   if (recv >= 0 && nt_type(nt, recv) && sp_streq(nt_type(nt, recv), "ConstantReadNode") &&
       nt_str(nt, recv, "name") && sp_streq(nt_str(nt, recv, "name"), "Integer") &&
       sp_streq(name, "sqrt") && argc == 1) {
-    if (comp_ntype(c, argv[0]) == TY_BIGINT) {
+    if (repr_of(c, argv[0]).big) {
       buf_puts(b, "sp_bigint_isqrt("); emit_expr(c, argv[0], b); buf_puts(b, ")");  /* (#2420) */
       return 1;
     }
@@ -1108,7 +1108,7 @@ else {
     if (sp_streq(name, "ldexp") && argc == 2) {
       /* a Bignum exponent overflows a C long -> RangeError (CRuby), not a
          pointer-to-int cast that silently truncates to Infinity (#2616) */
-      if (comp_ntype(c, argv[1]) == TY_BIGINT) {
+      if (repr_of(c, argv[1]).big) {
         buf_puts(b, "((void)("); emit_math_arg(c, argv[0], b); buf_puts(b, "), (void)(");
         emit_expr(c, argv[1], b);
         buf_puts(b, "), (sp_raise_cls(\"RangeError\", \"bignum too big to convert into `long'\"), 0.0))");
@@ -1165,6 +1165,19 @@ else {
 }
 
 /* the class methods of the builtin classes named by a constant (Thread, an exception class, ...), ahead of the Class.new dispatch */
+/* A family (or socktype) argument of Socket.getaddrinfo: nil or absent is 0
+   (unrestricted), anything else goes to sp_sock_addrinfo_hint, which reads an
+   Integer, or a String or Symbol name, as CRuby does. */
+static void emit_getaddrinfo_hint(Compiler *c, int arg, int is_family, Buf *b) {
+  if (arg < 0 || nt_kind(c->nt, arg) == NK_NilNode) {
+    buf_puts(b, "0");
+    return;
+  }
+  buf_puts(b, "sp_sock_addrinfo_hint(");
+  emit_boxed(c, arg, b);
+  buf_printf(b, ", %d)", is_family);
+}
+
 int emit_call_builtin_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv) {
   /* Thread class methods: Thread.current / Thread.pass (recv is the Thread
      constant). Handled before the Class.new dispatch since they are not `new`. */
@@ -1269,6 +1282,11 @@ int emit_call_builtin_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable 
         buf_puts(b, ", ");
         if (nt_type(nt, argv[1]) && sp_streq(nt_type(nt, argv[1]), "NilNode")) buf_puts(b, "0");
         else emit_int_expr(c, argv[1], b);
+        /* the family and socktype restrict the answer, as in CRuby */
+        buf_puts(b, ", ");
+        emit_getaddrinfo_hint(c, argc > 2 ? argv[2] : -1, 1, b);
+        buf_puts(b, ", ");
+        emit_getaddrinfo_hint(c, argc > 3 ? argv[3] : -1, 0, b);
         buf_puts(b, ")");
         return 1;
       }
@@ -1771,7 +1789,7 @@ int emit_call_enum_random_arms(Compiler *c, int id, Buf *b, const NodeTable *nt,
         buf_puts(b, "sp_Random_rand_float_bound(sp_random_default_get(), ");
         emit_expr(c, argv[0], b); buf_puts(b, ")");
       }
-      else if (argc >= 1 && comp_ntype(c, argv[0]) == TY_BIGINT) {
+      else if (argc >= 1 && repr_of(c, argv[0]).big) {
         /* Random.rand(Bignum bound): a uniform Bigint in [0, bound) (#3058) */
         buf_puts(b, "sp_bigint_rand(sp_random_default_get(), ");
         emit_expr(c, argv[0], b); buf_puts(b, ")");
@@ -1863,14 +1881,14 @@ int emit_call_enum_random_arms(Compiler *c, int id, Buf *b, const NodeTable *nt,
         buf_puts(b, "sp_Random_rand_float_bound("); emit_expr(c, recv, b); buf_puts(b, ", ");
         emit_expr(c, argv[0], b); buf_puts(b, ")");
       }
-      else if (argc >= 1 && comp_ntype(c, argv[0]) == TY_FLOAT_RANGE) {
+      else if (argc >= 1 && repr_of(c, argv[0]).range == TY_FLOAT) {
         /* Random#rand(1.0..2.0) -> a Float in [first, last), exact endpoints. */
         int tr = ++g_tmp;
         buf_printf(b, "({ sp_FloatRange _t%d = ", tr); emit_expr(c, argv[0], b);
         buf_puts(b, "; sp_Random_rand_float_range("); emit_expr(c, recv, b);
         buf_printf(b, ", _t%d.first, _t%d.last); })", tr, tr);
       }
-      else if (argc >= 1 && comp_ntype(c, argv[0]) == TY_RANGE) {
+      else if (argc >= 1 && repr_of(c, argv[0]).range == TY_INT) {
         /* a Float-endpoint range yields a Float (#2521); an int range an Int. */
         const char *atype = nt_type(nt, argv[0]);
         int islit = atype && sp_streq(atype, "RangeNode");
@@ -1901,7 +1919,7 @@ int emit_call_enum_random_arms(Compiler *c, int id, Buf *b, const NodeTable *nt,
         buf_puts(b, "sp_rand_poly("); emit_expr(c, recv, b); buf_puts(b, ", ");
         emit_boxed(c, argv[0], b); buf_puts(b, ", 0)");
       }
-      else if (argc >= 1 && comp_ntype(c, argv[0]) == TY_BIGINT) {
+      else if (argc >= 1 && repr_of(c, argv[0]).big) {
         /* rand(Bignum bound): a uniform Bigint in [0, bound) (#3058) */
         buf_puts(b, "sp_bigint_rand("); emit_expr(c, recv, b); buf_puts(b, ", ");
         emit_expr(c, argv[0], b); buf_puts(b, ")");

@@ -115,6 +115,12 @@ static const BuiltinClass BUILTIN_CLASSES[] = {
   { "Enumerator::Chain",            0,     BC_CLASS },
   { "Enumerator::Lazy",             0,     BC_CLASS },
   { "Enumerator::Product",          0,     BC_CLASS },
+  /* the json package's errors, which lib/sp_exc.c gives their parents (JSONError < StandardError):
+     a known name makes `rescue JSON::JSONError` climb that hierarchy, not compare a name (#7797) */
+  { "JSON::JSONError",              0,     BC_EXCEPTION },
+  { "JSON::ParserError",            0,     BC_EXCEPTION },
+  { "JSON::NestingError",           0,     BC_EXCEPTION },
+  { "JSON::GeneratorError",         0,     BC_EXCEPTION },
   { "Encoding::CompatibilityError",        0, BC_EXCEPTION },
   { "Encoding::InvalidByteSequenceError",  0, BC_EXCEPTION },
   { "Encoding::UndefinedConversionError",  0, BC_EXCEPTION },
@@ -159,6 +165,18 @@ int is_builtin_class_name(const char *n) {
 int is_builtin_module_name(const char *n) {
   const BuiltinClass *r = builtin_row(n);
   return r && (r->flags & BC_MODULE);
+}
+/* The i-th builtin MODULE (Comparable, Enumerable, Kernel, Math, Signal,
+   GC, ObjectSpace, Process): its name and runtime class id, 0 for one that
+   is a class value by name only. Answers 0 past the last. */
+int builtin_module_at(int i, const char **name, int *id) {
+  for (int k = 0; k < BUILTIN_CLASS_N; k++) {
+    if (!(BUILTIN_CLASSES[k].flags & BC_MODULE)) continue;
+    if (i-- > 0) continue;
+    *name = BUILTIN_CLASSES[k].name; *id = BUILTIN_CLASSES[k].id;
+    return 1;
+  }
+  return 0;
 }
 int is_builtin_exception_name(const char *n) {
   const BuiltinClass *r = builtin_row(n);
@@ -1271,8 +1289,7 @@ static int *yvt_ids = NULL, *yvt_sup_ids = NULL;
 static int yvt_call_forwards_block(const NodeTable *nt, int cid) {
   int a = nt_ref(nt, cid, "arguments");
   int an = 0; const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
-  return an == 1 && av && nt_type(nt, av[0]) &&
-         sp_streq(nt_type(nt, av[0]), "ForwardingArgumentsNode");
+  return an == 1 && av && nt_kind(nt, av[0]) == NK_ForwardingArgumentsNode;
 }
 /* Could block-passing call site `cid` reach method `mi` at all? A callee is
    found by name: the call's own name, that name through an `alias`, or `new`

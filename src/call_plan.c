@@ -451,6 +451,104 @@ const CallPlan *cplan_user_fresh(Compiler *c, int id) {
   return &fresh;
 }
 
+/* ---- cplan_targets: the user methods a call may reach ---- */
+
+/* Held answers, per node id: g_ct_n[id] is CT_NONE (not asked), CPT_UNKNOWN
+   or the count, with the methods in g_ct_pool at g_ct_off[id]. The index
+   lists the scopes ordered by name, so a switch finds its same-named
+   candidates without walking every scope; both are dropped together. */
+enum { CT_NONE = -2 };
+static int *g_ct_n, *g_ct_off, g_ct_cap;
+static int *g_ct_pool, g_ct_npool, g_ct_poolcap;
+static int *g_ct_idx, g_ct_nidx;
+static Compiler *g_ct_c;
+
+static const Compiler *g_ct_sort_c;
+static int ct_idx_cmp(const void *a, const void *b) {
+  const char *x = g_ct_sort_c->scopes[*(const int *)a].name;
+  const char *y = g_ct_sort_c->scopes[*(const int *)b].name;
+  int d = strcmp(x, y);
+  return d ? d : *(const int *)a - *(const int *)b;
+}
+
+void cplan_targets_drop(void) {
+  for (int i = 0; i < g_ct_cap; i++) g_ct_n[i] = CT_NONE;
+  g_ct_npool = 0;
+  g_ct_nidx = -1;
+}
+
+static void ct_index_build(Compiler *c) {
+  free(g_ct_idx);
+  g_ct_idx = (int *)malloc((size_t)(c->nscopes ? c->nscopes : 1) * sizeof *g_ct_idx);
+  g_ct_nidx = 0;
+  for (int k = 0; k < c->nscopes; k++)
+    if (c->scopes[k].name) g_ct_idx[g_ct_nidx++] = k;
+  g_ct_sort_c = c;
+  qsort(g_ct_idx, (size_t)g_ct_nidx, sizeof *g_ct_idx, ct_idx_cmp);
+}
+
+static int ct_resolve(Compiler *c, int id, int *out) {
+  const CallPlan *p = cplan_user_fresh(c, id);
+  if (p->mi < 0 || p->dispatch == CP_REFUSE) {
+    int recv = nt_ref(c->nt, id, "receiver");
+    if (recv >= 0 && comp_ntype(c, recv) == TY_UNKNOWN) return CPT_UNKNOWN;
+    return 0;
+  }
+  CallPlan plan = *p;
+  int n = 0;
+  out[n++] = plan.mi;
+  if (plan.dispatch < CP_SWITCH) return n;
+  const char *name = c->scopes[plan.mi].name;
+  if (!name) return n;
+  if (g_ct_nidx < 0) ct_index_build(c);
+  int lo = 0, hi = g_ct_nidx;
+  g_ct_sort_c = c;
+  while (lo < hi) {
+    int mid = (lo + hi) / 2;
+    if (strcmp(c->scopes[g_ct_idx[mid]].name, name) < 0) lo = mid + 1;
+    else hi = mid;
+  }
+  for (int i = lo; i < g_ct_nidx && sp_streq(c->scopes[g_ct_idx[i]].name, name); i++) {
+    int k = g_ct_idx[i];
+    if (k == plan.mi || !cplan_virtual_member(c, id, &plan, k)) continue;
+    if (n == CPT_MAX) return CPT_UNKNOWN;
+    out[n++] = k;
+  }
+  return n;
+}
+
+int cplan_targets(Compiler *c, int id, int *out, int cap) {
+  if (id < 0 || id >= c->node_cap) return 0;
+  if (g_ct_c != c || g_ct_cap < c->node_cap) {
+    int ncap = c->node_cap;
+    int fresh = g_ct_c != c;
+    g_ct_n = (int *)realloc(g_ct_n, (size_t)ncap * sizeof *g_ct_n);
+    g_ct_off = (int *)realloc(g_ct_off, (size_t)ncap * sizeof *g_ct_off);
+    for (int i = fresh ? 0 : g_ct_cap; i < ncap; i++) g_ct_n[i] = CT_NONE;
+    g_ct_cap = ncap;
+    if (fresh) { g_ct_npool = 0; g_ct_nidx = -1; }
+    g_ct_c = c;
+  }
+  if (g_ct_n[id] == CT_NONE) {
+    int tmp[CPT_MAX];
+    int n = ct_resolve(c, id, tmp);
+    if (n > 0) {
+      if (g_ct_npool + n > g_ct_poolcap) {
+        g_ct_poolcap = (g_ct_npool + n) * 2;
+        g_ct_pool = (int *)realloc(g_ct_pool, (size_t)g_ct_poolcap * sizeof *g_ct_pool);
+      }
+      memcpy(g_ct_pool + g_ct_npool, tmp, (size_t)n * sizeof *tmp);
+      g_ct_off[id] = g_ct_npool;
+      g_ct_npool += n;
+    }
+    g_ct_n[id] = n;
+  }
+  int n = g_ct_n[id];
+  if (n > cap) return CPT_UNKNOWN;
+  if (n > 0) memcpy(out, g_ct_pool + g_ct_off[id], (size_t)n * sizeof *out);
+  return n;
+}
+
 /* ---- CP_REFUSE ---- */
 
 /* The positional-argument count of a CallNode (0 when it has none). */
@@ -576,7 +674,10 @@ const char *cplan_feature_why(Compiler *c, int id, int *stop) {
   const char *rcn = (rty && (sp_streq(rty, "ConstantReadNode") || sp_streq(rty, "ConstantPathNode")))
                     ? nt_str(nt, recv, "name") : NULL;
   const char *why = hit >= 0 ? tbl[hit].why : NULL;
-  if (!why && cplan_str_method_mutator(c, id))
+  /* resolved to String#method's own wrapper, so a user `method` elsewhere
+     (`def method` in some Foo) is not what the call reaches */
+  int str_mutator = !why && cplan_str_method_mutator(c, id);
+  if (str_mutator)
     why = "String#method is not supported for a method that changes the String in place "
           "(`<<`, `concat`, `upcase!`, ...): the Method object is bound to the String's "
           "value, not to the String, so calling it could not change the String it came "
@@ -633,7 +734,7 @@ const char *cplan_feature_why(Compiler *c, int id, int *stop) {
   }
 
   if (!why) { *stop = 0; return NULL; }
-  if (!restructure && diag_user_defines(c, name)) return NULL;
+  if (!restructure && !str_mutator && diag_user_defines(c, name)) return NULL;
   return why;
 }
 
@@ -1025,6 +1126,9 @@ static void cpoly_cases_n(Compiler *c, int id, const char *name, int argc, const
   if (sp_streq(name, "read_nonblock") && ps->pos_argc == 1 && splat_a < 0) cpoly_family(p, cap, PB_IO_READ_NB);
   if ((sp_streq(name, "readpartial") || sp_streq(name, "sysread")) && argc == 1 && plain)
     cpoly_family(p, cap, PB_IO_READPARTIAL);
+  if ((sp_streq(name, "readpartial") || sp_streq(name, "sysread")) && argc == 2 && plain)
+    cpoly_family(p, cap, PB_IO_READPARTIAL_BUF);
+  if (sp_streq(name, "setsockopt") && argc == 3 && plain) cpoly_family(p, cap, PB_IO_SETSOCKOPT);
   if (sp_streq(name, "write") && argc == 1 && plain) cpoly_family(p, cap, PB_IO_WRITE);
   if (sp_streq(name, "syswrite") && argc == 1 && plain) cpoly_family(p, cap, PB_IO_SYSWRITE);
   if ((is_text_print(name)) && plain) cpoly_family(p, cap, PB_IO_PRINT);
@@ -1126,6 +1230,7 @@ static void cpoly_prearms_n(Compiler *c, int id, const char *name, int argc, con
        : kwh >= 0 && !ps.has_splat_arg ? argc <= SP_PROC_ARG_SLOTS
        : splat_last))
     cpoly_family(p, cap, PB_CALLABLE);
+  if (ps.kw_pos && ps.straset) cpoly_family(p, cap, PB_STR_ASET);
   if (ps.kw_pos && !ps.has_splat_arg && cpoly_str_trial(c, id, name, argc, argv, atmp_ty, ret, p))
     cpoly_trial(p, cap, PT_STR);
   cpoly_cases_n(c, id, name, argc, argv, ret, atmp_ty, &ps, splat_a, p, cap);
@@ -1424,6 +1529,7 @@ static void cpoly_defaults0(Compiler *c, int id, const char *name, const PolySpe
   else if (is_numeric_conversion(name)) fam = PB_D_TO_IF;
   else if (blockless && (sp_streq(name, "any?") || sp_streq(name, "none?"))) fam = PB_D_ANY_NONE;
   else if (sp_streq(name, "to_h") && blockless && ret == TY_POLY) fam = PB_D_TO_H;
+  else if (sp_streq(name, "display") && blockless) fam = PB_D_DISPLAY;
   if (fam >= 0) cpoly_family(p, cap, fam);
   if (is_indexed_each(name)) cpoly_family(p, cap, PB_N_EACH_INDEX);
   if (sp_streq(name, "join")) cpoly_family(p, cap, PB_N_JOIN);
@@ -1485,7 +1591,7 @@ static void cpoly_resolve(Compiler *c, int id, PolyPlan *p, int full) {
     /* a default written by now (the Object reopening's, a builtin one), or
        the builtin surface's, and the raise when it declines */
     int done = n1 > n0;
-    for (int f = PB_D_ENUM_EACH; f <= PB_D_TO_H; f++) done |= cpoly_has_family(p, f);
+    for (int f = PB_D_ENUM_EACH; f <= PB_D_DISPLAY; f++) done |= cpoly_has_family(p, f);
     if (cpoly_has_family(p, PB_D_ARRAY_TRANSFORM)) cpoly_trial(p, &cap, PT_ARRAY_FALLBACK);
     if (!done) cpoly_trial(p, &cap, PT_DEFAULT0);
   }

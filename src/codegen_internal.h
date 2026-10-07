@@ -138,12 +138,34 @@ void emit_strbuf_param_bind(Compiler *c, const LocalVar *pv, TyKind want, const 
 void emit_strbuf_orw_guard(Compiler *c, const char *ref, int v, int is_or, Buf *b);
 /* The value a write hands a shared-handle String slot `lv` (codegen_stmt.c) */
 void emit_strbuf_value(Compiler *c, LocalVar *lv, int v, Buf *b);
+/* The handle such a slot takes from value v: its own, or a new one */
+void emit_strbuf_handle_of(Compiler *c, int v, Buf *b);
+/* --share-strings: the handle a value route that answers the String it is
+   handed (`+s`, `String(s)`, `s.then { |x| x }`) hands on: 1, or 0 with
+   nothing emitted */
+int emit_strbuf_route(Compiler *c, int v, Buf *b);
+/* String mutator id's receiver recv as the handle it changes: 1 a slot, 2
+   a route (read once, nil raising NoMethodError for id), 0 neither
+   (codegen_stmt.c) */
+int strbuf_recv_handle(Compiler *c, int id, int recv, char *out, size_t cap);
+/* --share-strings: the handle slot a variable's read names, 0 for any
+   other node (codegen_stmt.c) */
+int strbuf_var_handle(Compiler *c, int n, char *out, size_t cap);
+/* --share-strings: does value v hand over a shared String as its handle
+   (a variable, a route, a conditional with such an arm)? (codegen_stmt.c) */
+int strbuf_value_carries(Compiler *c, int v);
+/* A `next` value a block's boxed answer slot takes: a shared String as its
+   handle's box under --share-strings (codegen_stmt.c) */
+void emit_boxed_next_value(Compiler *c, int v, Buf *b);
 /* The value a Struct constructor or an attribute writer stores into a String
    ivar slot (codegen_stmt.c) */
 void emit_strbuf_ivar_store(Compiler *c, int shared, int v, Buf *b);
 /* A read of a shared-mutable String slot `sref` at node `id` (codegen_expr.c) */
 void emit_strbuf_node_read(Compiler *c, int id, const char *sref, Buf *b);
 int emit_strbuf_ivar_write_handle(Compiler *c, int v, Buf *b);
+/* A write whose slot holds the --share-strings handle, where a handle is
+   taken: the write, valued as that handle (codegen_expr.c) */
+int emit_strbuf_write_handle(Compiler *c, int v, Buf *b);
 int operand_may_allocate(Compiler *c, int id);
 /* The same shim over a READER call that hands out the handle
    (`obj.name[0] = "X"`): no name to rename and no ivar node, so the call node
@@ -154,6 +176,7 @@ typedef struct { unsigned char box, demand; TyKind ty; int tok, ntok; } SbReader
 int sb_reader_shim_open(Compiler *c, int recv, char *sref, size_t cap, SbReaderSave *sv);
 void sb_reader_shim_close(Compiler *c, int recv, const SbReaderSave *sv);
 int sb_shadowed_reader(int node);
+int sb_shim_args_first(Compiler *c, int id, Buf *pre, int indent);
 int str_mut_var_recv(Compiler *c, int recv);
 void emit_str_frozen_check(Compiler *c, int recv, Buf *b);
 int strbuf_boxed_elem_read(Compiler *c, int v);
@@ -685,6 +708,9 @@ int arg_ran_first(int node, int from);
 /* The handle temp a shared String slot's argument took when it ran first
    (emit_arg_temp), -1 when there is none. */
 int ran_first_handle(int node);
+/* Bind node v to its value temp _t<t>, with th its handle's temp or -1
+   (codegen_fold.c) */
+void ran_first_bind(int v, int t, int th);
 int emit_splat_gather(Compiler *c, Scope *m, const int *argv, const ArgLayout *L);
 /* Does parameter i take the argument written at index i ahead of the first
    splat, however long the splats run? */
@@ -1005,6 +1031,7 @@ int builtin_class_id(const char *name);
 int builtin_class_parent_id(int id);   /* analyze_util.c */
 int is_builtin_class_name(const char *n);
 int is_builtin_module_name(const char *n);
+int builtin_module_at(int i, const char **name, int *id);
 int is_builtin_exception_name(const char *n);
 const char *superclass_builtin_exc_name(const NodeTable *nt, int sc);   /* analyze_util.c */
 const char *errno_canonical_name(const char *n);   /* analyze_util.c */
@@ -1044,6 +1071,7 @@ const char *nil_store_sfx(Compiler *c, const char *k, int node);
 int enum_builtin_node(Compiler *c, int node);
 const char *nomethod_head(const char *name);
 const char *enum_walk_name(Compiler *c, int id, int recv, const char *name);
+void emit_walk_arity_raise(Compiler *c, int id, int recv, const char *name, int t, int indent, Buf *b);
 int typed_array_lit_flag_free(Compiler *c, int node);
 void emit_may_nil_text(Compiler *c, int node, TyKind t, const char *arr, Buf *b);
 const char *raise_tail_value(TyKind t);
@@ -1190,6 +1218,7 @@ int eq_family(TyKind t);
 /* Compile-time `is_a?` for a concrete builtin receiver type: 1 yes, 0 no,
    -1 not determinable here. `exact` is instance_of? (no ancestor match). */
 int ty_matches_class(TyKind t, const char *cn, int exact);
+int builtin_reopen_includes_module(Compiler *c, int mod);
 void emit_method_call(Compiler *c, int id, Buf *b);
 /* A receiverless call the enclosing class's own chain answers (see
    codegen_call.c): the Kernel arms must stand down for it. */
@@ -1372,6 +1401,19 @@ int emit_args_before_binding(Compiler *c, Scope *m, const int *argv, int argc, B
    instance, global or class variable by any effect. A value built of reads
    (`[x, 2]`) asks it of each; a block reads when it runs. */
 int read_rebound_by(Compiler *c, int x, int after);
+/* Whether the key or value of `x[key] = val` may give the local or instance
+   variable `x` reads another value (read_rebound_by) and cannot mutate it,
+   so a store reads the receiver first and leaves the new binding; 0 for
+   any other receiver (codegen_call_recv.c). */
+int aset_recv_rebinds_only(Compiler *c, int recv, int key, int val);
+/* Whether the key or value of `x[key] = val` may mutate the local or
+   instance variable `x` reads, or move its String into a shared handle: it
+   reads the variable, an instance variable's makes a call, or a proc that
+   captures the local may run. */
+int aset_recv_may_mutate(Compiler *c, int recv, int key, int val);
+/* The receiver of such a store, read into a rooted temp in g_pre, ahead of
+   any prelude its key or value moves there (1); inline without g_pre (0). */
+int emit_aset_recv_read(Compiler *c, int recv, Buf *b);
 int emit_ds_hash_materialize(Compiler *c, Scope *m, int kwh, TyKind *out_type);
 /* The TypeError CRuby raises for a `**` operand that is neither a Hash, nil
    nor convertible with #to_hash, emitted into g_pre ahead of any keyword
@@ -1411,6 +1453,7 @@ int int_slot_store_needs_ck(Compiler *c, int v, TyKind slot_ty, int slot_nullabl
 const char *int_shift_fn(Compiler *c, const char *op, int v);
 int class_def_body(Compiler *c, int def_node);
 int class_body_list(Compiler *c, int **out_ci, int **out_body);
+int local_all_writes_empty_array(Compiler *c, Scope *sc, const char *name);
 TyKind an_builtin_answer(Compiler *c, int id);
 int an_yield_site_builtin_answer(Compiler *c, int id, TyKind kind, TyKind *out);
 int node_is_empty_container(const NodeTable *nt, int node);
@@ -1436,6 +1479,15 @@ void emit_array_elem_sure(TyKind at, int tmp, int elem_idx, Buf *b);
 void emit_rest_from_splat_and_argv(int tmp, TyKind at, int from_idx, Compiler *c, int argv_from, int pos_argc, const int *argv, Buf *b);
 int is_descendant(Compiler *c, int k, int anc);
 int class_builtin_superclass(Compiler *c, int i);   /* codegen.c */
+const char *arysub_array_ctype(Compiler *c, int cid);   /* codegen.c: an Array subclass's Array struct (#7449) */
+void emit_arysub_alloc(Compiler *c, ClassInfo *ci, Buf *b);
+void arysub_box_id(Compiler *c, TyKind t, Buf *b);   /* the cls_id an object's box carries */
+int program_has_arysub(Compiler *c);
+void emit_arysub_machinery(Compiler *c, Buf *b);
+/* a call Array answers on an Array subclass instance (#7449), as an
+   expression or as a statement (codegen_call_array.c) */
+int emit_arysub_call(Compiler *c, int id, Buf *b);
+int emit_arysub_call_stmt(Compiler *c, int id, Buf *b, int indent);
 const char *class_builtin_superclass_name(Compiler *c, int i);   /* codegen.c */
 int class_builtin_parent(Compiler *c, int cid);      /* codegen.c */
 int class_includes_module_named(Compiler *c, int cid, const char *mod_name);
@@ -1444,6 +1496,31 @@ int dispatch_impl_count(Compiler *c, int cid, const char *name);
 /* do a dispatch switch's arms bind the call's arguments differently (each
    arm then lays them out itself)? the plan's CP_PER_ARM */
 int dispatch_arms_disagree(Compiler *c, int cid, const char *name);
+/* Do `given` positionals not fit method `m`? Answers 1 with CRuby's
+   ArgumentError message in `msg`; 0 when they fit, or when the method's
+   arity is not judged (arity_unjudged). The one count rule of the direct
+   call and the dispatch arm. (codegen_fold.c) */
+int arity_count_error(Compiler *c, Scope *m, int given, char *msg, size_t n);
+/* The parameter of user method `m` that its one positional argument binds
+   to (not always the first: an optional may come before a required one),
+   or -1 when none does. (codegen_fold.c) */
+int arm_arg_param(Compiler *c, Scope *m);
+/* The arguments after self of a dispatch arm's call of user method `mi`,
+   each led by ", ", when the C texts argv[0..argc) are its positionals.
+   The layout of the call (arg_layout) places them. A parameter it leaves
+   empty takes its default, run with `armself` (a pointer to the arm's
+   object) as self, and a block slot takes NULL. What a default runs first
+   goes to `pre`. `builds`, when not NULL, is 1 if the arm builds anything
+   before its call (a default, a rest's Array, a `pre` statement): an arm
+   of a function with unrooted operands roots them then. Answers 0, and
+   emits no arguments, when argc arguments do not bind: `raise` then holds
+   the statement that raises CRuby's ArgumentError in place of the call.
+   An arm that cannot place the arguments (a parameter with no name, or a
+   placement the layout does not give a positional call) is refused at
+   compile time. A rest takes its arguments boxed, as a PolyArray: each
+   text in argv must be a boxed value then. (codegen_fold.c) */
+int emit_arm_args_text(Compiler *c, int mi, const char *armself, const char *const *argv, int argc,
+                       Buf *pre, Buf *out, int *builds, char *raise, size_t rn);
 /* Can running the node `id` assign self's instance variable `iv`, self an
    instance of class `cls` (-1: none known) or of one below it? `depth`
    counts the self calls followed into their methods (0 at the call site);
@@ -1507,6 +1584,15 @@ int view_push_arm(int pd_skip, int prbd_skip, int builtin_arm);
    pushed and popped like a view (view_pop) and put back by view_unwind
    (face_of, analyze.h). */
 int view_push_face(int node, TyKind kind);
+/* the statement whose prelude buffer `pre` is open (emit_with_prelude), and
+   the innermost such statement: 0 when none is open. view_push_stmt answers
+   -1 (nothing to pop) when the stack is too deep to take one. */
+int view_push_stmt(int node, const void *pre);
+int view_stmt_top(int *node, const void **pre);
+/* Whether anything in statement `stmt` can bind the local `name` that the
+   read `read` (inside it) names: 1 also when the statement is unknown (< 0),
+   binds a local the walk cannot name, or the read is not in its subtree. */
+int stmt_may_rebind_local(Compiler *c, int stmt, int read, const char *name);
 /* A node bound to the text emit_expr writes for it instead (g_argov_*):
    view_bind answers the binding's slot; view_unbind(n) drops every binding
    from slot n up. */
@@ -1593,6 +1679,7 @@ int emit_scalar_array_transpose(Compiler *c, int id, int recv, TyKind rt,
 int emit_op_float_rationalize(Compiler *c, const BopCtx *x, Buf *b);
 int emit_op_string_scan_checked(Compiler *c, const BopCtx *x, Buf *b);
 int emit_op_string_slice(Compiler *c, const BopCtx *x, Buf *b);
+int emit_op_string_scrub_block(Compiler *c, const BopCtx *x, Buf *b);
 int emit_op_array_transpose(Compiler *c, const BopCtx *x, Buf *b);
 int emit_op_array_assoc(Compiler *c, const BopCtx *x, Buf *b);
 int emit_op_array_combination(Compiler *c, const BopCtx *x, Buf *b);
@@ -1678,6 +1765,9 @@ int poly_name_user_claimed(Compiler *c, const char *name, int argc);
 /* Does CRuby take argc arguments to cls#name, by the instance arity table
    (sp_builtin_arity_spec_tbl)? 1 for a name the table has no row for. */
 int builtin_arity_admits(const char *cls, const char *name, int argc);
+/* ...and the count it expects when it does not (NULL when it admits it) */
+const char *builtin_arity_expected(const char *cls, const char *name, int with_block, int argc,
+                                   char *exp, size_t n);
 void emit_complex_coerce(Compiler *c, int node, Buf *b);
 int emit_complex_real_args(Compiler *c, const int *argv, int argc, int polar, Buf *b);
 void emit_brk_wrapped_call(Compiler *c, int id, Buf *b);
@@ -1705,7 +1795,9 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
 typedef struct BiRen BiRen;
 /* A spliced block's parameter aliases (see emit_block_binds), undone by the
    caller once the body is emitted. */
-typedef struct BlockAliases { LocalVar *lv[16]; int n, open; } BlockAliases;
+typedef struct BlockAliases { Scope *s[16]; const char *nm[16]; int n, open; } BlockAliases;
+void block_alias_hold(BlockAliases *al, Scope *s, LocalVar *lv);
+void block_aliases_release(BlockAliases *al);
 void emit_block_kw_binds(Compiler *c, int blk, int ykw, Scope *bsc, Buf *b, int indent,
                          int as_expr, BiRen *bi, BlockAliases *al);
 int block_param_wants_alias(Compiler *c, int blk, int k, int n);
@@ -1736,12 +1828,14 @@ void emit_print_one(Compiler *c, int arg, Buf *b, int indent);
 void emit_p_one(Compiler *c, int arg, Buf *b, int indent);
 int emit_output_call(Compiler *c, int id, Buf *b, int indent);
 void system_refuse_unsupported(Compiler *c, int id, const int *argv, int argc);
+int emit_system_splat(Compiler *c, const int *argv, int argc, Buf *b);
 int emit_output_spilled(Compiler *c, const char *name, int argc, const int *argv, Buf *b, int indent);
 void emit_assign(Compiler *c, int id, Buf *b, int indent);
 void emit_op_assign(Compiler *c, int id, Buf *b, int indent);
 int emit_array_op_assign(Compiler *c, const char *lval, TyKind t, const char *op, int v, Buf *b);
 int emit_scalar_op_assign(Compiler *c, const char *lval, TyKind t, const char *op,
                           int v, int capture, int lhs_nil, Buf *b);
+const char *poly_pow_fn(TyKind rt);   /* sp_poly_pow, or sp_poly_pow_recv for a receiver that may lack `**` */
 int emit_poly_op_assign(Compiler *c, const char *lval, const char *op, int v,
                         int capture, Buf *b);
 void emit_poly_unboxed(Compiler *c, int node, TyKind t, const char *conv, Buf *b);
@@ -1825,6 +1919,7 @@ void emit_str_expr_nilable(Compiler *c, int node, Buf *b);
 void emit_str_expr_sep(Compiler *c, int node, Buf *b);
 /* strict with CRuby's rb_convert_type wording ("of nil into Integer") */
 void emit_int_expr_conv(Compiler *c, int node, Buf *b);
+void emit_int_expr_offt(Compiler *c, int node, Buf *b);
 int emit_unresolved_coerced(Compiler *c, int node, TyKind target, Buf *b);
 int emit_unresolved_coerced_text(Compiler *c, int node, TyKind target, const char *txt, Buf *b);
 int call_answers_no_value(Compiler *c, int node);

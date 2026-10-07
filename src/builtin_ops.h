@@ -137,6 +137,7 @@ typedef enum {
   BOPE_FLOAT_RATIONALIZE,
   BOPE_STRING_SCAN_CHECKED,
   BOPE_STRING_SLICE,     /* String#slice!: lvalue and pattern-dependent */
+  BOPE_STRING_SCRUB_BLOCK, /* String#scrub with a block */
   BOPE__COUNT
 } BopEmit;
 
@@ -204,7 +205,7 @@ typedef struct BuiltinOp {
 /* The call combines, compares or copies its arguments of the receiver's
    builtin class as that builtin: a subclass instance among them is read
    for its elements, pairs or bytes, and none of its own methods (each,
-   to_ary, to_hash, to_str, ==, <=>, ...) runs. Array#+ - & | <=> == eql?
+   to_ary, to_hash, to_str, ==, !=, <=>, ...) runs. Array#+ - & | <=> == != eql?
    concat replace union difference intersection intersect? product zip;
    Hash#merge merge! update replace == eql? < <= > >=; String#+ concat <<
    prepend insert replace == === eql? <=> < <= > >= between?. A method that
@@ -307,6 +308,7 @@ int bop_args_as_builtin(TyKind rt, const char *name, int argc, int has_block);
 #define BOP_KERNEL   ((TyKind)-5)   /* a receiverless builtin (Kernel) */
 #define BOP_ANY_RECV ((TyKind)-6)   /* Object's methods, on any receiver */
 #define BOP_CALLABLE ((TyKind)-7)   /* a proc, a lambda or a Method */
+#define BOP_CLASS_NEW ((TyKind)-8)  /* a builtin class's `new`, by the class's name */
 
 typedef enum {
   BSH_PURE = 1,   /* keeps none of its arguments; answers no value it was handed
@@ -352,7 +354,18 @@ typedef enum {
   BSH_IVAR_SET,   /* stores its second argument in the ivar its first names */
   BSH_EXEC,       /* runs its block with its arguments (instance_exec) and
                      answers the block's value */
-  BSH_NEW         /* constructs: its arguments go to initialize */
+  BSH_NEW,        /* constructs: its arguments go to initialize */
+  BSH_FLATTEN,    /* answers a container of the receiver's elements and of
+                     its nested containers' elements, at any depth (flatten) */
+  /* the constructors (BOP_CLASS_NEW): */
+  BSH_NEW_FILL,   /* a container of its second argument and of its block's
+                     values (Array.new(n, s), Array.new(n) { }) */
+  BSH_NEW_DEFAULT, /* a container of its default argument and of its block's
+                     values; the block is handed the container and each key a
+                     lookup asks for (Hash.new) */
+  BSH_NEW_YIELDER, /* a container of what its block hands its first parameter
+                     (Enumerator.new's yielder) */
+  BSH_NEW_FIELDS  /* a container of its Hash argument's values (OpenStruct.new) */
 } BopShare;
 
 /* The BSH_* of `name` on receiver family fam (TY_STRING, BOP_ANY_ARRAY,
@@ -432,6 +445,12 @@ typedef struct IterRow {
 /* The first row of family fam for `name` that takes argc arguments (any
    count when argc < 0) and carries none of the flags in `skip`, or NULL. */
 const IterRow *iter_row(TyKind fam, const char *name, int argc, unsigned skip);
+/* Does the iterator `name` of family fam, given argc arguments, keep none of
+   the values its block answers? It answers its receiver, some of its
+   elements or the memo it was handed (each_with_object), and at most tests
+   or compares a block's value (select, sort_by), so the block's value is
+   dropped once the step has read it. 0 for a name with no row. */
+int iter_keeps_no_block_value(TyKind fam, const char *name, int argc);
 /* The kind the value at position k of a step has, on a receiver of kind rt
    (TY_POLY: a boxed receiver, whose elements are boxed). */
 TyKind iter_yield_kind(const IterRow *r, int k, TyKind rt);

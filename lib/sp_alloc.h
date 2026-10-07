@@ -377,8 +377,27 @@ static inline char *sp_str_alloc_nogc(size_t len) {
    the byte before it for one, which for some neighbouring byte looks like a
    header's marker and answers a made-up length (#7556 did, and a copied
    message gained NUL bytes in some builds). */
+/* A "counted" message: a raise message that is a Spinel String with a NUL inside it
+   (sp_exc_msg_given builds it, #7556). The one place a message's length survives the
+   const char * the exception path carries it as, and only for a message the generated
+   code gave: it starts with six bytes no C string of ours starts with (a raw buffer's
+   neighbour bytes are never read; these are compared from the pointer on, stopping
+   at the first mismatch, and a NUL ends any shorter string), then the payload's
+   length, then the payload. A bare C string, whose length is strlen's, never matches. */
+#define SP_CMSG_HDR 10
+static inline int sp_cmsg_p(const char *m) {
+  return m && (unsigned char)m[0] == 0xff && (unsigned char)m[1] == 0xfe && m[2] == 'C' &&
+         m[3] == 'M' && (unsigned char)m[4] == 0xfd && (unsigned char)m[5] == 0x01;
+}
+static inline size_t sp_cmsg_len(const char *m) { uint32_t n; memcpy(&n, m + 6, sizeof n); return n; }
 static inline const char *sp_msg_heapify(const char *m) {
   if (!m) return NULL;
+  if (sp_cmsg_p(m)) {   /* stays counted: a later stage decodes it */
+    size_t total = SP_CMSG_HDR + sp_cmsg_len(m);
+    char *c = sp_str_alloc_nogc(total);
+    memcpy(c, m, total);
+    return c;
+  }
   size_t n = strlen(m);
   char *r = sp_str_alloc_nogc(n);
   memcpy(r, m, n);
@@ -837,6 +856,12 @@ static inline void sp_PolyArray_fin(void *p) { sp_PolyArray *a = (sp_PolyArray *
 extern SP_TLS sp_gc_hdr *sp_polyarr_pool_head;
 extern SP_TLS long sp_polyarr_pool_count;
 void sp_PolyArray_pool_recycle(sp_gc_hdr *h);
+/* An Array subclass instance's embedded Array (#7449, see
+   sp_IntArray_init_embedded): its elements start inline, and the first growth
+   installs the finalizer that frees the payload, as an unpooled one's does. */
+static inline void sp_PolyArray_init_embedded(sp_PolyArray *a) {
+  a->data = a->inl; a->cap = SP_POLYARR_INLINE; a->len = 0;
+}
 static inline sp_PolyArray *sp_PolyArray_new(void) {
   if (sp_slab_on > 0) {
     sp_PolyArray *a = (sp_PolyArray *)sp_gc_alloc(sizeof(sp_PolyArray), NULL, sp_PolyArray_scan);
