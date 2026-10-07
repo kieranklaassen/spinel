@@ -1060,6 +1060,12 @@ static const char *sp_str_frozen_name(const char *s) {
   static SP_TLS const char **src = NULL, **frz = NULL;
   static SP_TLS int n = 0, cap = 0;
   if (!s || sp_str_is_frozen_val(s)) return s;
+  /* Only a static name is a key. An exception's class name is a heap copy
+     (sp_exc_class_name): the collector frees it and hands its address to
+     the next one, another class's. That name is interned by its bytes, and
+     held while the interned copy is made. */
+  { unsigned char m = ((const unsigned char *)s)[-1];
+    if (m != 0xff && m != 0xfb) { SP_GC_ROOT_STR(s); return sp_str_uminus_val(s); } }
   for (int i = 0; i < n; i++) if (src[i] == s) return frz[i];
   if (n == cap) {
     int nc = cap ? cap * 2 : 16;
