@@ -3903,7 +3903,11 @@ const char *sp_srange_to_s(sp_StrRange r) {
 }
 const char *sp_srange_inspect(sp_StrRange r) {
   const char *lo = r.first ? sp_str_inspect(r.first) : sp_str_empty;
-  const char *hi = r.last ? sp_str_inspect(r.last) : sp_str_empty;
+  if (!r.first || !r.last)   /* one bound: one String, nothing to hold */
+    return sp_sprintf("%s%s%s", lo, r.excl ? "..." : "..",
+                      r.last ? sp_str_inspect(r.last) : sp_str_empty);
+  SP_GC_ROOT_STR(lo);   /* held while the upper bound's text is made */
+  const char *hi = sp_str_inspect(r.last);
   return sp_sprintf("%s%s%s", lo, r.excl ? "..." : "..", hi);
 }
 /* A boxed String range holds its two endpoint strings: the box marks them,

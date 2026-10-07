@@ -1847,6 +1847,7 @@ GC_STRESS_TESTS := test/gc_root_frame_slots.rb \
                    test/struct_values_fresh_receiver_root.rb \
                    test/hash_splat_to_a.rb \
                    test/float_range_text_lower_bound_held.rb \
+                   test/string_range_inspect_lower_bound_held.rb \
                    test/proc_cell_capture_marked.rb \
                    test/poly_array_intersect.rb \
                    test/thread_new_args_rooted_across_fiber_alloc.rb \
