@@ -3703,7 +3703,8 @@ const char *sp_argf_gets(void) {
 const char *sp_argf_read(void) {
   sp_String *s = sp_String_new(""); SP_GC_ROOT(s);
   const char *line;
-  while ((line = sp_argf_gets())) sp_String_append(s, line);
+  /* each line by its byte length: sp_String_append takes it to end at a NUL */
+  while ((line = sp_argf_gets())) sp_String_append_bytes(s, line);
   return sp_str_dup(s->data);
 }
 sp_StrArray *sp_argf_readlines(void) {
