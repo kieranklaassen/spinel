@@ -3211,7 +3211,7 @@ int emit_poly_class_when(Compiler *c, int cond_id, const char *tmp, Buf *b) {
   else {
     int cid = comp_class_index(c, cn);
     if (cid >= 0) {
-      int exc = class_is_exc_subclass(c, cid);
+      int exc = class_takes_exc_name_arm(c, cid);
       if (exc) buf_puts(b, "(");
       buf_printf(b, "(%s.tag == SP_TAG_OBJ && (", tmp);
       int first = 1;

@@ -17890,13 +17890,24 @@ int class_isa_user(Compiler *c, int k, int cid, const char *cn) {
          class_includes_module_named(c, k, cn);
 }
 
+/* Does a class test against `cid` take the name arm below? An exception class
+   of the program's own, in a program that leaves the class predicates alone:
+   where it defines is_a?, kind_of? or instance_of? itself, or === on the
+   class, the answer is the program's to give and the test stays as it was. */
+int class_takes_exc_name_arm(Compiler *c, int cid) {
+  if (cid < 0 || !class_is_exc_subclass(c, cid)) return 0;
+  if (any_class_defines(c, "is_a?") || any_class_defines(c, "kind_of?") ||
+      any_class_defines(c, "instance_of?")) return 0;
+  return comp_cmethod_in_chain(c, cid, "===", NULL) < 0;
+}
+
 /* An exception of a class of the program's own is an sp_Exception, boxed as
    SP_BUILTIN_EXCEPTION, and its class is the name it carries: no class id
    tests it. Emits the arm that asks by name, ` || (...)`, after a class-id
    test of the boxed value `v` against class `cid`; nothing for a class that
-   is no exception. */
+   does not take it. */
 void emit_poly_exc_name_arm(Compiler *c, int cid, const char *v, int exact, Buf *b) {
-  if (cid < 0 || !class_is_exc_subclass(c, cid)) return;
+  if (!class_takes_exc_name_arm(c, cid)) return;
   const char *rn = class_ruby_name(c, cid);
   if (!rn) return;
   buf_printf(b, " || (%s.tag == SP_TAG_OBJ && %s.cls_id == SP_BUILTIN_EXCEPTION && ", v, v);
@@ -17957,7 +17968,7 @@ int emit_poly_isa_test(Compiler *c, const char *cn, const char *v, int exact, Bu
         ext = 0;
         for (int k = 0; k < c->nclasses && !ext; k++) if (comp_class_singleton_has_module(c, k, cid)) ext = 1;
       }
-      int exc = class_is_exc_subclass(c, cid);
+      int exc = class_takes_exc_name_arm(c, cid);
       if (ext || exc) buf_puts(b, "(");
       buf_printf(b, "(%s.tag == SP_TAG_OBJ && (", v);
       int first = 1;
