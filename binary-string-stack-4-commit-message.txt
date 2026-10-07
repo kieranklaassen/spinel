@@ -1,0 +1,24 @@
+The characters of a binary String are binary Strings
+
+chars cuts a BINARY (ASCII-8BIT) String into its bytes, and each piece
+was a UTF-8 String, so the pieces joined were a UTF-8 String again:
+
+    data = "caf\xC3\xA9".b            # what File.binread answers
+    data.chars[3].encoding            # UTF-8, CRuby ASCII-8BIT
+    data.chars.join.size              # 4, CRuby 5
+    data.chars.join == data           # false, CRuby true
+
+sp_str_chars and sp_str_chars_poly (the boxed receiver's) already ask
+whether the receiver is marked, to cut by bytes; they now mark each
+piece as well. join carries the mark of its elements, so chars.join,
+chars.map { }.join and chars.sort.join answer a binary String.
+each_char's block already took marked Strings.
+
+A String with no mark is cut as before and pays the branch on the flag
+the loop already holds, once a character: callgrind over a million
+calls of chars on seven characters, 1,435.8M to 1,473.8M instructions,
+38 a call.
+
+Test: test/binary_string_chars.rb. No generated C changes.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

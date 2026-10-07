@@ -1,0 +1,1 @@
+A String cut from a binary String stays binary

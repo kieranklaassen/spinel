@@ -1,0 +1,1 @@
+What a pattern cuts from a binary String stays binary

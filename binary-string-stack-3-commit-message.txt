@@ -1,0 +1,55 @@
+What a pattern cuts from a binary String stays binary
+
+sub and gsub, scan, a slice by a Regexp, partition, rpartition and
+split by a Regexp, and the Strings a match holds ($~, $1, $`, $',
+MatchData#[], pre_match, post_match, captures, a named group) answered
+UTF-8 Strings for a BINARY (ASCII-8BIT) subject:
+
+    data = "id=caf\xC3\xA9;x=1\n".b   # what File.binread answers
+    name = data[/caf../]
+    name.encoding                     # UTF-8, CRuby ASCII-8BIT
+    name.size                         # 4, CRuby 5
+    data.sub("=", ":").size           # 12, CRuby 13
+    data =~ /=(\w+)(..)/
+    $2.size                           # 1, CRuby 2
+
+Each String cut from the subject is now marked when the subject is:
+in lib/sp_re.c at the places that copy a span (sp_re_set_captures,
+which $~ and $1 read, the pre and post match, sp_re_scan and its boxed
+twin, the slices split pushes, rpartition's three pieces,
+sp_re_match_data, the named capture, and the three MatchData readers),
+and in lib/sp_str.c for sub, gsub and scan with a String pattern. An
+empty pre_match or post_match of a marked subject is the binary empty
+String, as byteslice answers it.
+
+sub and gsub write the replacement, and the result takes the encoding
++ gives the two: a character past ASCII written into ASCII-only bytes
+makes text, as in CRuby. Where nothing matched the result is binary.
+lib/sp_re.c asks through sp_str_mark_binary_with, the one function
+this adds to lib/sp_str.h.
+
+gsub("", x) and scan("") step one byte for a marked subject, where
+they stepped one character.
+
+A String with no mark takes the path it took and pays one test of the
+mark a call (sp_re_set_captures: one for the match and its groups):
+callgrind over a million calls, 8 to 33 instructions (sub 620.8M to
+639.8M, gsub(/b/, "c") 1,009.8M to 1,032.8M, scan(/b/) 1,040.6M to
+1,048.6M, `$1` after =~ 2,285.6M to 2,304.6M, split(/ /) 1,328.4M to
+1,361.4M).
+
+Not covered: sub and gsub with a block are built inline by the
+compiler, not through these functions, and gsub with a Hash goes
+through lib/sp_cold.c: both answer as before. A replacement holding a
+character past ASCII, written into a subject that holds a byte past
+ASCII, raises Encoding::CompatibilityError in CRuby and answers here,
+as before.
+
+Tests: test/binary_string_pattern_answers.rb, and
+test/binary_string_split_rpartition_regexp.rb for split and rpartition
+by a Regexp. Those two abort on master at SPINEL_GC_STRESS=2 for any
+String, before and after this change (the mark reaches a freed piece
+of their result), so their lines stand in a test of their own, which
+passes in a plain run and at level 1. No generated C changes.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

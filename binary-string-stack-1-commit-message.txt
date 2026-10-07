@@ -1,0 +1,48 @@
+A String cut from a binary String stays binary
+
+strip, lstrip, rstrip, chomp, chop, delete_prefix, delete_suffix,
+squeeze, delete, tr, tr_s, split, lines and each_line answered a UTF-8
+String for a BINARY (ASCII-8BIT) receiver, where dup, byteslice, a
+slice and + carry the mark:
+
+    data = "caf\xC3\xA9  \n".b        # what File.binread answers
+    line = data.strip
+    line.encoding                     # UTF-8, CRuby ASCII-8BIT
+    line.size                         # 4, CRuby 5
+    line == "caf\xC3\xA9"             # true, CRuby false
+
+Each now marks what it allocated when its receiver is marked:
+sp_str_bin_from, as sp_str_dup does, and sp_str_pieces_bin_from for
+the Array that split and lines answer.
+
+A binary String's characters are its bytes, and these walked UTF-8:
+chop backed over continuation bytes ("caf\xC3\xA9".b.chop cut two
+bytes), split("") cut between characters, and squeeze, delete, tr and
+tr_s decoded characters ("a\xC3\xC3\xA9".b.squeeze kept both C3 bytes;
+"\xE9aa\xE9".b.tr_s("a", "b") answered C3 A9 62 C3 A9).
+
+chop and split("") step one byte for a marked receiver. tr, delete and
+squeeze keep their one walk: where every set is plain ASCII, which
+names the same bytes read either way, a marked receiver is widened to
+Latin-1 (each byte past ASCII the two-byte character of the same
+number), walked, and narrowed back. With any other set the walk is the
+one it was.
+
+tr writes its second argument, and the result takes the encoding +
+gives the two: a character past ASCII written into ASCII-only bytes
+makes text, as in CRuby. Where nothing is written the result is
+binary.
+
+A String with no mark takes the path it took and pays one test of the
+mark a call: callgrind over a million calls, 13 to 25 instructions
+(strip 405.5M to 418.5M, split(" ") 862.9M to 878.9M, delete 1,152.7M
+to 1,174.7M, squeeze 559.8M to 575.8M). tr alone comes out lower,
+1,496.8M to 1,449.8M: gcc now inlines sp_utf8_decode into it.
+
+Not covered: a set holding a character past ASCII, given to a binary
+receiver that holds a byte past ASCII, raises
+Encoding::CompatibilityError in CRuby and answers here, as before.
+
+Test: test/binary_string_cut_keeps_tag.rb. No generated C changes.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

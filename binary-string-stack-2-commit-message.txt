@@ -1,0 +1,42 @@
+upcase, reverse, succ and center read a binary String by bytes
+
+A BINARY (ASCII-8BIT) String has one-byte characters and no letter
+past ASCII. upcase, downcase, swapcase, capitalize, reverse, succ,
+center, ljust and rjust read its bytes as UTF-8 and answered a UTF-8
+String:
+
+    data = "caf\xC3\xA9 Bar".b        # what File.binread answers
+    data.upcase.bytes[3, 2]           # [195, 137], CRuby [195, 169]
+    data.reverse.bytes[4, 2]          # [195, 169], CRuby [169, 195]
+    data.center(13).size              # 12, CRuby 13
+    data[0, 5].succ.bytes[2, 3]       # [102, 195, 170]
+                                      # CRuby [103, 195, 169]
+    "\xE9\xFFz".b.upcase.bytes        # [195, 137, 197, 184, 90]
+                                      # CRuby [233, 255, 90]
+
+The data was rewritten: the second byte of a sequence changed case,
+and a lone byte past ASCII came back as a two-byte character.
+
+For a marked receiver the four case methods now take
+sp_str_case_bytes, which maps A to Z and a to z and copies every other
+byte; reverse turns bytes; succ takes the ASCII path (a byte past
+ASCII is no letter or digit, so it is stepped over as CRuby steps over
+it, and where the String holds neither, the last byte is incremented
+with a carry: "\xFF".b.succ is "\x01\x00"). All of them, with center,
+ljust and rjust, mark what they answer. The width was already counted
+in bytes, since sp_str_length answers bytes for a marked String: the
+answer only lost the mark, so its size was a character count again.
+
+A pad is written into the result, which takes the encoding + gives
+the two: a character past ASCII padded onto ASCII-only bytes makes
+text, as in CRuby. Where no pad is written the result is binary.
+
+A String with no mark takes the path it took and pays one test of the
+mark a call: callgrind over a million calls, 13 to 21 instructions
+(upcase 629.0M to 642.0M, reverse 590.8M to 607.8M, center 433.8M to
+452.8M, succ 421.6M to 442.6M); capitalize, which tests three times,
+39.
+
+Test: test/binary_string_case_and_shape.rb. No generated C changes.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

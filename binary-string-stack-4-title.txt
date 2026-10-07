@@ -1,0 +1,1 @@
+The characters of a binary String are binary Strings

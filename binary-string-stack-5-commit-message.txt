@@ -1,0 +1,41 @@
+Bytes appended to a text String make it binary
+
+`<<` and concat append to the receiver and keep its encoding where the
+operand's is compatible. A BINARY (ASCII-8BIT) operand holding a byte
+past ASCII, appended to text that holds no character past ASCII, makes
+the receiver binary in CRuby, as + does. Here the receiver stayed
+UTF-8:
+
+    data = "caf\xC3\xA9".b            # what File.binread answers
+    buf = +""
+    data.each_char { |c| buf << c }
+    buf.encoding                      # UTF-8, CRuby ASCII-8BIT
+    buf.size                          # 4, CRuby 5
+    buf == data                       # false, CRuby true
+
+    out = +"hdr:"
+    out << data
+    out.size                          # 8, CRuby 9
+
+sp_str_append_grow and sp_String_append_bin (the shared buffer's)
+already handle the other direction, text with a character past ASCII
+appended to ASCII-only bytes. Each gets the mirror of that test: the
+operand marked, the receiver not, the operand not ASCII-only and the
+receiver ASCII-only. The receiver is then marked in place, or its
+grown copy is, so an alias sees it.
+
+Where the receiver is text holding a character past ASCII, CRuby
+raises Encoding::CompatibilityError; the receiver stays text here, as
+before.
+
+The cost is on the append path: the test of the operand's mark, for a
+receiver that is not marked. Callgrind, a million appends of a
+two-byte String to a local: 90.9M to 96.9M instructions, 6 an append;
+200,000 appends of 100 bytes: 42.9M to 43.9M, 5 an append; a shared
+buffer filled from each_char: 350.3M and 347.3M. The receiver is
+scanned for a byte past ASCII only when a marked operand that holds
+one arrives, and after that it is marked.
+
+Test: test/binary_string_appended_to_text.rb. No generated C changes.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

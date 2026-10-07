@@ -1,0 +1,1 @@
+upcase, reverse, succ and center read a binary String by bytes
