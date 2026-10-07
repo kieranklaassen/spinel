@@ -2490,14 +2490,18 @@ int desugar_reduce_proc_arg(Compiler *c) {
     int ex = nt_ref(nt, blk, "expression");
     if (ex < 0) continue;
     const char *exty = nt_type(nt, ex);
-    /* an inline `&proc { }` is rebuilt per call, as a lambda literal is */
     NodeKind exk = nt_kind(nt, ex);
+    /* a read of the name the proc is held in, which the block re-reads
+       per comparison: a constant's and a global's as well as a local's or
+       an ivar's, which left out ran `sort(&CMP)` as a plain sort. An inline
+       `&proc { }` is rebuilt per call, as a lambda literal is */
     int simple = exk == NK_LocalVariableReadNode || exk == NK_InstanceVariableReadNode ||
-                 exk == NK_LambdaNode || is_proc_create(c, ex);
+                 exk == NK_ConstantReadNode || exk == NK_ConstantPathNode ||
+                 exk == NK_GlobalVariableReadNode || exk == NK_LambdaNode || is_proc_create(c, ex);
     /* `&method(:m)` / `&Mod.method(:m)` written in place: building the
        Method has no effect, so calling it per element answers as the one
        CRuby builds once */
-    if (!simple && xform && nt_kind(nt, ex) == NK_CallNode && exty &&
+    if (!simple && xform && exk == NK_CallNode && exty &&
         sp_streq(nt_str(nt, ex, "name") ? nt_str(nt, ex, "name") : "", "method")) {
       int ea = nt_ref(nt, ex, "arguments"), en = 0;
       const int *eav = ea >= 0 ? nt_arr(nt, ea, "arguments", &en) : NULL;
@@ -4664,6 +4668,63 @@ int desugar_array_first_last(Compiler *c) {
     nt_node_set_ref(nt, id, "arguments", ia);
     nt_node_set_str(nt, id, "name", "[]");
     changed = 1;
+  }
+  return changed;
+}
+
+/* Interpolation is `to_s`, so a program that REOPENED the part's class with
+   its own to_s owns the conversion: `class Integer; def to_s(base = 10);
+   "INT"; end` makes "x#{5}y" read "xINTy" in CRuby, where the interpolation
+   planner would write the digits. Such a part becomes `<part>.to_s`, which
+   the ordinary call path answers through the reopen, and which inference
+   types like any other call. A String part is NOT one of them: CRuby's
+   interpolation uses a String value as it stands (objtostring's own fast
+   path) and never calls to_s on it, so a reopened String#to_s does not
+   change `"t=#{"ab"}"`. The rewrite cannot be taken back, so it waits for
+   settled types, as desugar_symbol_string_methods does. */
+int desugar_interp_reopened_to_s(Compiler *c) {
+  if (g_infer_optimistic) return 0;
+  const char *const names[] = { "Integer", "Float", "Symbol" };
+  const TyKind kinds[] = { TY_INT, TY_FLOAT, TY_SYMBOL };
+  int own[3], any = 0;
+  for (int k = 0; k < 3; k++) {
+    int ci = comp_class_index(c, names[k]);
+    own[k] = ci >= 0 && comp_method_in_chain(c, ci, "to_s", NULL) >= 0;
+    any |= own[k];
+  }
+  if (!any) return 0;
+  NodeTable *nt = (NodeTable *)c->nt;
+  int changed = 0;
+  NT_FOREACH_KIND(nt, NK_InterpolatedStringNode, id) {
+    int pn = 0;
+    const int *parts = nt_arr(nt, id, "parts", &pn);
+    for (int k = 0; k < pn; k++) {
+      if (nt_kind(nt, parts[k]) != NK_EmbeddedStatementsNode) continue;
+      int st = nt_ref(nt, parts[k], "statements");
+      int bn = 0;
+      const int *body = st >= 0 ? nt_arr(nt, st, "body", &bn) : NULL;
+      int expr = bn > 0 ? body[bn - 1] : -1;
+      if (expr < 0) continue;
+      TyKind t = infer_type(c, expr);
+      int hit = 0;
+      for (int j = 0; j < 3; j++) if (own[j] && t == kinds[j]) hit = 1;
+      if (!hit) continue;
+      int tsc = nt_new_node(nt, "CallNode");
+      if (tsc < 0) continue;
+      nt_node_set_str(nt, tsc, "name", "to_s");
+      nt_node_set_ref(nt, tsc, "receiver", expr);
+      nt_node_set_ref(nt, tsc, "arguments", -1);
+      nt_node_set_ref(nt, tsc, "block", -1);
+      comp_grow_node_arrays(c);
+      c->nscope[tsc] = c->nscope[expr];
+      int *nb = malloc(sizeof *nb * (size_t)bn);
+      if (!nb) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+      memcpy(nb, body, sizeof *nb * (size_t)bn);
+      nb[bn - 1] = tsc;
+      nt_node_set_arr(nt, st, "body", nb, bn);
+      free(nb);
+      changed = 1;
+    }
   }
   return changed;
 }
@@ -9134,6 +9195,11 @@ int desugar_builtin_enum_calls(Compiler *c) {
     /* ...and one the analysis already routed through a marked `to_a` hop
        (enum_each_wrap): codegen walks the Enumerator itself */
     if (nt_kind(nt, recv) == NK_CallNode && nt_str(nt, recv, "enum_each_wrap")) continue;
+    /* ...and a self-answering walk over a marked `to_a` hop (a String
+       range's members): the typed emitter answers the hop's receiver, the
+       range, where this definition's `self` is the member Array */
+    if (is_each_walk_or_with_index(name) && nt_kind(nt, recv) == NK_CallNode &&
+        nt_str(nt, recv, "enum_recv")) continue;
     /* find/detect reachable from an optional/keyword parameter's default
        value: see find_calls_in_param_defaults. */
     if (in_default && in_default[id] &&
@@ -12780,6 +12846,12 @@ int core_method_name(const char *n) {
 
 static int name_in_list(const char *const *list, const char *n) {
   return str_in(n, list);
+}
+
+/* Is `n` one of Object's public instance methods, the face every object
+   answers about itself (the generated RB_OBJECT_PUBLIC)? */
+int object_public_method_name(const char *n) {
+  return name_in_list(RB_OBJECT_PUBLIC, n);
 }
 
 static int rbself_builtin(const char *cn) {

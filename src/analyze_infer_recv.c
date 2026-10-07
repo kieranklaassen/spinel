@@ -57,6 +57,19 @@ static int call_is_chain_receiver_with_block(Compiler *c, int id) {
   return 0;
 }
 
+/* Object's face of a Float or String range (tap / then, instance_variables,
+   `!`, object_id, display, ...): the universal rules type it about the range
+   itself, as they do for an Integer range. `=~` is no longer Object's, and
+   reaches the same rules to raise NoMethodError on the range. The names
+   that hand the receiver on keep their routes: to_enum / enum_for walk the
+   members through each, instance_eval / instance_exec run their block over
+   the member face, and method / public_method bind a wrapper that has no
+   slot for a by-value range. */
+int range_object_face(const char *name) {
+  if (is_object_receiver_handoff(name)) return 0;
+  return object_public_method_name(name) || is_match_operator(name);
+}
+
 /* Range receivers: the Float and String range faces, and the Integer-range
    arms that answer without materializing. The redispatch that rewrites `rt`
    to the int array stays in infer_call: it changes the receiver kind for
@@ -79,6 +92,7 @@ int infer_range_call(Compiler *c, int id, TyKind rt, TyKind *out) {
   if (rt == TY_STR_RANGE) {
     const BuiltinOp *op = an_bop_find(c, id, rt, name, argc, nt_ref(nt, id, "block") >= 0);
     if (op && op->result != TY_UNKNOWN) { *out = op->result; return 1; }
+    if (range_object_face(name)) return 0;
     /* everything else is served by the element array (see the desugar) */
     { *out = TY_UNKNOWN; return 1; }
   }
@@ -123,6 +137,7 @@ int infer_range_call(Compiler *c, int id, TyKind rt, TyKind *out) {
       const BuiltinOp *op = an_bop_find(c, id, rt, name, argc, nt_ref(nt, id, "block") >= 0);
       if (op && op->result != TY_UNKNOWN) { *out = op->result; return 1; }
     }
+    if (range_object_face(name)) return 0;
     /* A name with no row is genuinely undefined: leave it UNKNOWN. The
        respond_to? probe reads that as "not dispatchable" (false), matching
        an ordinary int range, and a real call errors like any unknown method. */
@@ -563,7 +578,9 @@ int infer_hash_call(Compiler *c, int id, TyKind rt, TyKind *out) {
        declared r holding a PolyPoly pointer made inspect walk garbage). */
     if (sp_streq(name, "replace") && argc == 1) {
       TyKind ot = infer_type(c, argv[0]);
-      if (ty_is_hash(ot) && ot != rt) { *out = TY_POLY_POLY_HASH; return 1; }
+      /* a boxed other holds whichever variant the value really is (#3975's
+         rule for merge) */
+      if ((ty_is_hash(ot) || ot == TY_POLY) && ot != rt) { *out = TY_POLY_POLY_HASH; return 1; }
       { *out = rt; return 1; }
     }
     if (sp_streq(name, "merge")) { *out = rt; return 1; }
@@ -1941,8 +1958,10 @@ int infer_poly_call(Compiler *c, int id, TyKind rt, TyKind *out) {
   if (recv >= 0 && rt == TY_POLY && argc == 3 && nt_ref(nt, id, "block") < 0 &&
       !an_user_recv_defines_method(c, name) && sp_streq(name, "bytesplice"))
     { *out = TY_POLY; return 1; }
-  /* String#replace/prepend/concat on a poly value: self, boxed */
-  if (recv >= 0 && rt == TY_POLY && nt_ref(nt, id, "block") < 0 &&
+  /* String#replace/prepend/concat on a poly value: self, boxed. replace
+     ignores a block, as the Array and Hash ones do, and its dispatch emits
+     the call the same with one. */
+  if (recv >= 0 && rt == TY_POLY && (nt_ref(nt, id, "block") < 0 || is_replace_name(name)) &&
       !an_user_recv_defines_method(c, name) && argc >= 1 &&
       (sp_streq(name, "replace") || sp_streq(name, "prepend") ||
        sp_streq(name, "concat")))

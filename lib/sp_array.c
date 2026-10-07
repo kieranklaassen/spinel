@@ -344,10 +344,12 @@ void sp_IntArray_uniq_bang(sp_IntArray*a){SP_GC_ROOT(a);if(!a||a->frozen){if(a&&
 else i++;}}
 void sp_IntArray_shuffle_bang(sp_IntArray*a){SP_GC_ROOT(a);if(!a)return;if(a->frozen){sp_raise_frozen_array_at(a, SP_BUILTIN_INT_ARRAY);return;}for(sp_int i=a->len-1;i>0;i--){sp_int j=sp_krand_below(i+1);sp_int t=a->data[a->start+i];a->data[a->start+i]=a->data[a->start+j];a->data[a->start+j]=t;}}
 sp_IntArray*sp_IntArray_shuffle(sp_IntArray*a){SP_GC_ROOT(a);sp_IntArray*b=sp_IntArray_dup(a);sp_IntArray_shuffle_bang(b);return b;}
-/* Array#sample. CRuby returns nil for `[].sample`; in spinel's typed-array
-   slot nil collapses to 0. sp_krand_below guards the len==0 draw itself.
-   Issue #536. */
-sp_int sp_IntArray_sample(sp_IntArray*a){SP_GC_ROOT(a);if(a->len<=0)return 0;return a->data[a->start+sp_krand_below(a->len)];}
+/* Array#sample. CRuby returns nil for `[].sample`: the typed slot's nil
+   sentinel, as pop and shift answer (#4288), so the empty draw reads back
+   nil and not a 0 nothing could tell from a real element. The Float and
+   String twins answer sp_float_nil() and NULL the same way. sp_krand_below
+   guards the len==0 draw itself. Issue #536. */
+sp_int sp_IntArray_sample(sp_IntArray*a){SP_GC_ROOT(a);if(a->len<=0)return SP_INT_NIL;return a->data[a->start+sp_krand_below(a->len)];}
 /* Issue #745/#832: empty min/max return SP_INT_NIL (caller treats as
    int?); without the guard, the first read is uninitialized memory. */
 sp_int sp_IntArray_min(sp_IntArray*a){if(!a||a->len<=0)return SP_INT_NIL;sp_int m=a->data[a->start];for(sp_int i=1;i<a->len;i++)if(a->data[a->start+i]<m)m=a->data[a->start+i];return m;}
@@ -357,7 +359,7 @@ sp_bool sp_IntArray_include(sp_IntArray*a,sp_int v){if(!a)return FALSE;for(sp_in
 sp_int sp_IntArray_index(sp_IntArray*a,sp_int v){for(sp_int i=0;i<a->len;i++)if(a->data[a->start+i]==v)return i;return -1;}
 sp_int sp_IntArray_rindex(sp_IntArray*a,sp_int v){for(sp_int i=a->len-1;i>=0;i--)if(a->data[a->start+i]==v)return i;return -1;}
 sp_int sp_IntArray_delete_at(sp_IntArray*a,sp_int i){SP_GC_ROOT(a);if(a&&a->frozen){sp_raise_frozen_array_at(a, SP_BUILTIN_INT_ARRAY);return SP_INT_NIL;}if(i<0)i+=a->len;if(i<0||i>=a->len)return SP_INT_NIL;sp_int v=a->data[a->start+i];for(sp_int j=i;j<a->len-1;j++)a->data[a->start+j]=a->data[a->start+j+1];a->len--;return v;}
-sp_int sp_IntArray_delete(sp_IntArray*a,sp_int v){SP_GC_ROOT(a);if(a&&a->frozen){if(!sp_IntArray_include(a,v))return SP_INT_NIL;/* CRuby raises only for an element it would remove */sp_raise_frozen_array_at(a, SP_BUILTIN_INT_ARRAY);return 0;}sp_int w=0;for(sp_int i=0;i<a->len;i++){if(a->data[a->start+i]!=v){a->data[a->start+w]=a->data[a->start+i];w++;}}sp_int d=a->len-w;a->len=w;if(v==SP_INT_NIL)SP_MAY_NIL(a)=0;/* no nil is left */return d>0?v:SP_INT_NIL;}  /* CRuby: nil when absent */
+sp_int sp_IntArray_delete(sp_IntArray*a,sp_int v){SP_GC_ROOT(a);if(a&&a->frozen){sp_raise_frozen_array_at(a, SP_BUILTIN_INT_ARRAY);return 0;}sp_int w=0;for(sp_int i=0;i<a->len;i++){if(a->data[a->start+i]!=v){a->data[a->start+w]=a->data[a->start+i];w++;}}sp_int d=a->len-w;a->len=w;if(v==SP_INT_NIL)SP_MAY_NIL(a)=0;/* no nil is left */return d>0?v:SP_INT_NIL;}  /* CRuby: nil when absent */
 /* Issue #788: clamp i so a very-negative index doesn't underflow past
    a->start and write into the array's GC header. */
 void sp_IntArray_insert(sp_IntArray*a,sp_int i,sp_int v){SP_GC_ROOT(a);if(!a)return;if(a->frozen){sp_raise_frozen_array_at(a, SP_BUILTIN_INT_ARRAY);return;}sp_int orig=i;if(i<0)i+=a->len+1;if(i<0)sp_raise_cls("IndexError",sp_sprintf("index %lld too small for array; minimum: %lld",(long long)orig,(long long)(-(a->len+1))));if(i>a->len)SP_MAY_NIL(a)=1;while(i>a->len)sp_IntArray_push(a,SP_INT_NIL);/* CRuby pads with nils past the end */sp_IntArray_push(a,0);for(sp_int j=a->len-1;j>i;j--)a->data[a->start+j]=a->data[a->start+j-1];a->data[a->start+i]=v;}
@@ -466,7 +468,7 @@ void sp_FloatArray_shuffle_bang(sp_FloatArray*a){SP_GC_ROOT(a);if(!a)return;if(a
 sp_FloatArray*sp_FloatArray_dup(sp_FloatArray*a){SP_GC_ROOT(a);sp_FloatArray*b=sp_FloatArray_new();sp_FloatArray_replace(b,a);return b;}
 sp_FloatArray*sp_FloatArray_sort(sp_FloatArray*a){SP_GC_ROOT(a);sp_FloatArray*b=sp_FloatArray_dup(a);sp_FloatArray_sort_bang(b);return b;}
 sp_FloatArray*sp_FloatArray_shuffle(sp_FloatArray*a){SP_GC_ROOT(a);sp_FloatArray*r=sp_FloatArray_new();sp_FloatArray_replace(r,a);sp_FloatArray_shuffle_bang(r);return r;}
-sp_float sp_FloatArray_sample(sp_FloatArray*a){SP_GC_ROOT(a);if(a->len<=0)return 0.0;return a->data[sp_krand_below(a->len)];}
+sp_float sp_FloatArray_sample(sp_FloatArray*a){SP_GC_ROOT(a);if(a->len<=0)return sp_float_nil();return a->data[sp_krand_below(a->len)];}
 /* IEEE 754 == on sp_float: NaN never matches; +0.0 == -0.0 (diverges from Float#eql?). */
 /* a NaN is not == to itself, but CRuby's identity fallback still finds the
    very same NaN in a container (#3650) */
@@ -478,7 +480,7 @@ sp_bool sp_FloatArray_include(sp_FloatArray*a,sp_float v){if(!a)return FALSE;for
    shows the difference -- and nil (an e never reassigned) when absent. */
 sp_int sp_FloatArray_index(sp_FloatArray*a,sp_float v){if(!a)return -1;for(sp_int i=0;i<a->len;i++){sp_float x=a->data[i];if(x==v||(v!=v&&x!=x&&memcmp(&x,&v,sizeof v)==0))return i;}return -1;}
 sp_int sp_FloatArray_rindex(sp_FloatArray*a,sp_float v){if(!a)return -1;for(sp_int i=a->len-1;i>=0;i--){sp_float x=a->data[i];if(x==v||(v!=v&&x!=x&&memcmp(&x,&v,sizeof v)==0))return i;}return -1;}
-sp_float sp_FloatArray_delete(sp_FloatArray*a,sp_float v){SP_GC_ROOT(a);if(!a)return sp_float_nil();if(a->frozen){if(!sp_FloatArray_include(a,v))return sp_float_nil();sp_raise_frozen_array_at(a, SP_BUILTIN_FLT_ARRAY);return sp_float_nil();}sp_int w=0;sp_float e=sp_float_nil();for(sp_int i=0;i<a->len;i++){sp_float x=a->data[i];if(x==v||(v!=v&&x!=x&&memcmp(&x,&v,sizeof v)==0))e=x;else{a->data[w]=x;w++;}}a->len=w;if(sp_float_is_nil(v))SP_MAY_NIL(a)=0;return e;}
+sp_float sp_FloatArray_delete(sp_FloatArray*a,sp_float v){SP_GC_ROOT(a);if(!a)return sp_float_nil();if(a->frozen){sp_raise_frozen_array_at(a, SP_BUILTIN_FLT_ARRAY);return sp_float_nil();}sp_int w=0;sp_float e=sp_float_nil();for(sp_int i=0;i<a->len;i++){sp_float x=a->data[i];if(x==v||(v!=v&&x!=x&&memcmp(&x,&v,sizeof v)==0))e=x;else{a->data[w]=x;w++;}}a->len=w;if(sp_float_is_nil(v))SP_MAY_NIL(a)=0;return e;}
 sp_FloatArray*sp_FloatArray_intersect(sp_FloatArray*a,sp_FloatArray*b){SP_GC_ROOT(a);SP_GC_ROOT(b);sp_FloatArray*r=sp_FloatArray_new();if(!a||!b)return r;for(sp_int i=0;i<a->len;i++){sp_float v=a->data[i];if(sp_FloatArray_include(b,v)&&!sp_FloatArray_include(r,v))sp_FloatArray_push(r,v);}SP_MAY_NIL(r)=SP_MAY_NIL(a)||SP_MAY_NIL(b);return r;}
 sp_bool sp_FloatArray_intersect_p(sp_FloatArray*a,sp_FloatArray*b){SP_GC_ROOT(a);SP_GC_ROOT(b);if(!a||!b)return 0;for(sp_int i=0;i<a->len;i++)if(sp_FloatArray_include(b,a->data[i]))return 1;return 0;}
 sp_FloatArray*sp_FloatArray_union(sp_FloatArray*a,sp_FloatArray*b){SP_GC_ROOT(a);SP_GC_ROOT(b);sp_FloatArray*r=sp_FloatArray_new();if(a)for(sp_int i=0;i<a->len;i++){sp_float v=a->data[i];if(!sp_FloatArray_include(r,v))sp_FloatArray_push(r,v);}if(b){for(sp_int i=0;i<b->len;i++){sp_float v=b->data[i];if(!sp_FloatArray_include(r,v))sp_FloatArray_push(r,v);}}SP_MAY_NIL(r)=(a&&SP_MAY_NIL(a))||(b&&SP_MAY_NIL(b));return r;}
@@ -638,14 +640,14 @@ sp_int sp_FloatArray_truthy_scan(sp_FloatArray*a){sp_int n=0;for(sp_int i=0;i<a-
 sp_IntArray*sp_IntArray_nil_sum_ck(sp_IntArray*a,int float_seed){if(!a)return a;for(sp_int i=0;i<a->len;i++)if(a->data[a->start+i]==SP_INT_NIL)sp_raise_cls("TypeError",float_seed?"nil can't be coerced into Float":"nil can't be coerced into Integer");return a;}
 sp_FloatArray*sp_FloatArray_nil_sum_ck(sp_FloatArray*a,int float_seed){if(!a)return a;for(sp_int i=0;i<a->len;i++)if(sp_float_is_nil(a->data[i]))sp_raise_cls("TypeError",(i>0||float_seed)?"nil can't be coerced into Float":"nil can't be coerced into Integer");return a;}
 const char*sp_StrArray_delete_at(sp_StrArray*a,sp_int i){SP_GC_ROOT(a); sp_gc_wb((void*)a);if(!a)return NULL;if(a->frozen){sp_raise_frozen_array_at(a, SP_BUILTIN_STR_ARRAY);return NULL;}if(i<0)i+=a->len;if(i<0||i>=a->len)return NULL;const char*v=a->data[i];for(sp_int j=i;j<a->len-1;j++)a->data[j]=a->data[j+1];a->len--;return v;}
-const char*sp_StrArray_delete(sp_StrArray*a,const char*v){SP_GC_ROOT(a);SP_GC_ROOT_STR(v); sp_gc_wb((void*)a);if(!a)return NULL;if(a->frozen){if(!sp_StrArray_include(a,v))return NULL;sp_raise_frozen_array_at(a, SP_BUILTIN_STR_ARRAY);return NULL;}sp_int w=0;const char*found=NULL;for(sp_int i=0;i<a->len;i++){if(!sp_str_eq(a->data[i],v)){a->data[w]=a->data[i];w++;}
+const char*sp_StrArray_delete(sp_StrArray*a,const char*v){SP_GC_ROOT(a);SP_GC_ROOT_STR(v); sp_gc_wb((void*)a);if(!a)return NULL;if(a->frozen){sp_raise_frozen_array_at(a, SP_BUILTIN_STR_ARRAY);return NULL;}sp_int w=0;const char*found=NULL;for(sp_int i=0;i<a->len;i++){if(!sp_str_eq(a->data[i],v)){a->data[w]=a->data[i];w++;}
 else{found=a->data[i];}}a->len=w;return found;}
 void sp_StrArray_insert(sp_StrArray*a,sp_int i,const char*v){SP_GC_ROOT(a);SP_GC_ROOT_STR(v); sp_gc_wb((void*)a);if(!a)return;if(a->frozen){sp_raise_frozen_array_at(a, SP_BUILTIN_STR_ARRAY);return;}sp_int orig=i;if(i<0)i+=a->len+1;if(i<0)sp_raise_cls("IndexError",sp_sprintf("index %lld too small for array; minimum: %lld",(long long)orig,(long long)(-(a->len+1))));while(i>a->len)sp_StrArray_push(a,NULL);/* CRuby pads with nils past the end */sp_StrArray_push(a,sp_str_empty);for(sp_int j=a->len-1;j>i;j--)a->data[j]=a->data[j-1];a->data[i]=v;}
 void sp_StrArray_shuffle_bang(sp_StrArray*a){SP_GC_ROOT(a); sp_gc_wb((void*)a);if(!a)return;if(a->frozen){sp_raise_frozen_array_at(a, SP_BUILTIN_STR_ARRAY);return;}for(sp_int i=a->len-1;i>0;i--){sp_int j=sp_krand_below(i+1);const char*t=a->data[i];a->data[i]=a->data[j];a->data[j]=t;}}
 sp_StrArray*sp_StrArray_dup(sp_StrArray*a){SP_GC_ROOT(a);sp_StrArray*r=sp_StrArray_new();sp_StrArray_replace(r,a);return r;}
 sp_StrArray*sp_StrArray_sort(sp_StrArray*a){SP_GC_ROOT(a);sp_StrArray*b=sp_StrArray_dup(a);sp_StrArray_sort_bang(b);return b;}
 sp_StrArray*sp_StrArray_shuffle(sp_StrArray*a){SP_GC_ROOT(a);sp_StrArray*r=sp_StrArray_new();sp_StrArray_replace(r,a);sp_StrArray_shuffle_bang(r);return r;}
-const char *sp_StrArray_sample(sp_StrArray*a){SP_GC_ROOT(a);if(a->len<=0)return sp_str_empty;return a->data[sp_krand_below(a->len)];}
+const char *sp_StrArray_sample(sp_StrArray*a){SP_GC_ROOT(a);if(a->len<=0)return NULL;return a->data[sp_krand_below(a->len)];}
 
 /* ============ poly/inspect-dependent array ops (display, concat, to_poly) ============ */
 /* The members String#upto yields, in CRuby's rb_str_upto_each order of

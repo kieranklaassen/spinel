@@ -2848,20 +2848,31 @@ static int infer_write_container_usage(Compiler *c, const NodeTable *nt, int nfb
         /* replace(other) splices the WHOLE other container in: a hash local
            must be able to hold other's variant (transform_keys! desugars to
            replace and may change the key type). Differing variants widen the
-           local to the universally-boxed PolyPoly hash. */
+           local to the universally-boxed PolyPoly hash, and so does a boxed
+           other, which holds whichever variant the value really is. */
         TyKind ot = infer_type(c, argv[0]);
-        if (recv < 0 || !ty_is_hash(ot)) continue;
-        const char *rpty = nt_type(nt, recv);
-        if (!rpty || !sp_streq(rpty, "LocalVariableReadNode")) continue;
-        const char *rpnm = nt_str(nt, recv, "name");
-        Scope *rpsc = rpnm ? comp_scope_of(c, recv) : NULL;
-        LocalVar *rplv = rpsc ? scope_local(rpsc, rpnm) : NULL;
-        if (rplv && !rplv->is_param && !rplv->is_block_param &&
-            ty_is_hash(rplv->type) && rplv->type != ot &&
-            rplv->type != TY_POLY_POLY_HASH) {
-          rplv->type = TY_POLY_POLY_HASH;   /* a reset local: the sweep reports */
+        if (recv < 0 || (!ty_is_hash(ot) && ot != TY_POLY)) continue;
+        NodeKind rpk = nt_kind(nt, recv);
+        if (rpk == NK_LocalVariableReadNode) {
+          const char *rpnm = nt_str(nt, recv, "name");
+          Scope *rpsc = rpnm ? comp_scope_of(c, recv) : NULL;
+          LocalVar *rplv = rpsc ? scope_local(rpsc, rpnm) : NULL;
+          if (!rplv || rplv->is_block_param) continue;
+          if (!rplv->is_param) {
+            if (ty_is_hash(rplv->type) && rplv->type != ot && rplv->type != TY_POLY_POLY_HASH)
+              rplv->type = TY_POLY_POLY_HASH;   /* a reset local: the sweep reports */
+            continue;
+          }
         }
-        continue;
+        else if (rpk != NK_InstanceVariableReadNode) continue;
+        /* A parameter's or an ivar's Hash is held elsewhere too: the
+           other's keys and values are the evidence a merge! of it is, and
+           the fold below widens the Hash where it is built (a boxed other
+           is of kinds nothing here knows) */
+        if (!ty_is_hash(infer_type(c, recv))) continue;
+        is_idx_write = 1; is_merge = 1;
+        kt = ty_is_hash(ot) ? ty_hash_key(ot) : TY_POLY;
+        vt = ty_is_hash(ot) ? ty_hash_val(ot) : TY_POLY;
       }
       else if (name && sp_streq(name, "[]=") && an == 2) {
         is_idx_write = 1; kt = infer_type(c, argv[0]);
@@ -4025,6 +4036,85 @@ static int infer_write_multi_assign(Compiler *c, const NodeTable *nt) {
   return changed;
 }
 
+/* A write the pass below may type again: `dst = src` or `dst = src.m(...)`. */
+typedef struct {
+  int val;        /* the write's value node */
+  LocalVar *dst;  /* the local it writes */
+  int dst_ix;     /* dst's index among every scope's locals */
+  int next;       /* the next such write reading the same local, or -1 */
+} ReadWrite;
+
+/* A local's write is typed by its value as the pass reaches it, in node
+   order, and a read of another local answers what that local holds so far
+   this round. A read ahead of the write that widens it -- a later
+   statement of a loop body (`u = b[0]; b = "xy"`), or a multiple
+   assignment's target, which infer_write_multi_assign types after the
+   plain writes (`a, *b = t`) -- saw the narrower type, and the slot it
+   fills kept it: an Integer slot read a String's box as 0, a String
+   Array slot read a String's (a crash). Once every write of the round is
+   in, a write whose value is, or calls on, a local now held boxed is
+   typed again, and its slot widens when the value now is. Only those
+   writes: re-inferring every value would double the pass. The slot is
+   one the round resets, so no change is reported (the stash comparison
+   at the end of the pass is the detector).
+   A slot this widens is read in turn: in `d = c; c = b; b = "xy"` inside
+   a loop, `c = b` widens c only here, after `d = c` was passed, and the
+   round's reset repeats that order, so one scan in node order never
+   reached d. So a widened slot's own readers are queued: each write is
+   listed under the local it reads, and typed when that local widens (or
+   at once if it already has). A slot widens once (a boxed one is not
+   typed again), so a list is drained once and each write is typed at most
+   once: the work stays linear in the writes, whatever their order. */
+static void infer_write_reads_widened(Compiler *c, const NodeTable *nt) {
+  int nw = 0;
+  const int *ws = nt_nodes_of_kind(nt, NK_LocalVariableWriteNode, &nw);
+  if (nw == 0) return;
+  int *base = malloc(sizeof(int) * ((size_t)c->nscopes + 1));
+  if (!base) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+  base[0] = 0;
+  for (int s = 0; s < c->nscopes; s++) base[s + 1] = base[s] + c->scopes[s].nlocals;
+  int nl = base[c->nscopes];
+  int *head = malloc(sizeof(int) * (size_t)(nl > 0 ? nl : 1));
+  int *queue = malloc(sizeof(int) * (size_t)nw);
+  ReadWrite *rw = malloc(sizeof *rw * (size_t)nw);
+  if (!head || !queue || !rw) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+  for (int i = 0; i < nl; i++) head[i] = -1;
+  int nrw = 0, nq = 0;
+  for (int j = 0; j < nw; j++) {
+    int id = ws[j];
+    int v = nt_ref(nt, id, "value");
+    int r = v;
+    if (r >= 0 && nt_kind(nt, r) == NK_CallNode) r = nt_ref(nt, r, "receiver");
+    if (r < 0 || nt_kind(nt, r) != NK_LocalVariableReadNode) continue;
+    const char *rn = nt_str(nt, r, "name"), *wn = nt_str(nt, id, "name");
+    Scope *rs = comp_scope_of(c, r), *wsc = comp_scope_of(c, id);
+    LocalVar *rl = rn ? scope_local(rs, rn) : NULL;
+    LocalVar *lv = rl && wn ? scope_local(wsc, wn) : NULL;
+    if (!lv || lv == rl || lv->is_param || lv->is_block_param || lv->rbs_seeded || ty_degraded(lv->type))
+      continue;
+    ReadWrite *w = &rw[nrw];
+    w->val = v; w->dst = lv; w->dst_ix = base[wsc - c->scopes] + (int)(lv - wsc->locals);
+    w->next = -1;
+    if (ty_degraded(rl->type)) queue[nq++] = nrw;
+    else {
+      int ri = base[rs - c->scopes] + (int)(rl - rs->locals);
+      w->next = head[ri]; head[ri] = nrw;
+    }
+    nrw++;
+  }
+  for (int q = 0; q < nq; q++) {
+    ReadWrite *w = &rw[queue[q]];
+    if (ty_degraded(w->dst->type)) continue;
+    TyKind t = infer_type(c, w->val);
+    if (!ty_degraded(t)) continue;
+    slot_take(c, w->dst, t, w->val);
+    if (!ty_degraded(w->dst->type)) continue;
+    for (int k = head[w->dst_ix]; k >= 0; k = rw[k].next) queue[nq++] = k;
+    head[w->dst_ix] = -1;
+  }
+  free(base); free(head); free(queue); free(rw);
+}
+
 int infer_write_types(Compiler *c) {
   const NodeTable *nt = c->nt;
   int changed = 0;
@@ -4233,6 +4323,7 @@ int infer_write_types(Compiler *c) {
   }
 
   changed |= infer_write_multi_assign(c, nt);
+  infer_write_reads_widened(c, nt);
 
   changed |= infer_case_pattern_locals(c);
 
@@ -7108,7 +7199,25 @@ int infer_default_param_types(Compiler *c) {
     Scope *sc = &c->scopes[s];
     for (int i = 0; i < sc->nparams; i++) {
       if (sc->pdefault[i] < 0) continue;
-      TyKind dt = infer_type(c, sc->pdefault[i]);
+      /* The callers already typed the parameter as one kind of array: an
+         empty `[]` default is built as that kind. Widened to the poly array,
+         `def initialize(initial = [])` given Array[Integer] by every caller
+         boxed the ivar it went into, and each element read. When the
+         parameter later widens past that kind (a String pushed in the body),
+         the literal widens with it. */
+      int dv = sc->pdefault[i];
+      int edn = -1;
+      if (nt_kind(c->nt, dv) == NK_ArrayNode) nt_arr(c->nt, dv, "elements", &edn);
+      LocalVar *ep = edn == 0 && c->arr_want && dv < c->node_cap ? scope_local(sc, sc->pnames[i]) : NULL;
+      if (ep && !ep->rbs_seeded) {
+        TyKind w = c->arr_want[dv];
+        if (ty_is_array(ep->type) && ep->type != TY_POLY_ARRAY && (w == TY_UNKNOWN || w == ep->type)) {
+          if (w != ep->type) { c->arr_want[dv] = ep->type; changed = 1; }
+          continue;
+        }
+        if (ty_is_array(w) && w != TY_POLY_ARRAY) { c->arr_want[dv] = TY_POLY_ARRAY; changed = 1; }
+      }
+      TyKind dt = infer_type(c, dv);
       /* An empty hash `{}` default returns TY_UNKNOWN from infer_type; treat
          it as TY_SYM_POLY_HASH since it is used as a kwargs receiver. An empty
          `[]` default is likewise a poly-array accumulator (`def f(n, acc = [])`,
@@ -13852,11 +13961,14 @@ static int infer_block_params_call_arms(Compiler *c, const NodeTable *nt, int id
   return changed;
 }
 
-/* A Proc expression `recv` invoked at `site` with these arguments
+/* A Proc expression `recv` invoked with these arguments
    (pr.call(a), pr === a, `case a when pr`): type the parameters of the proc
-   literal it is -- the literal itself, or the one a local, constant or ivar
-   of that name was assigned. Answers whether a parameter type changed. */
-static int cs_type_proc_site(Compiler *c, int site, int recv, const int *argv, int argc) {
+   literal it is -- the literal itself, or the one a local, constant, ivar
+   or global of that name was assigned, or the one the name a write copies
+   (`q = pr`, the `__fwdc = $pr` an `&$pr` forward reads) was assigned in
+   turn, `depth` such copies deep. Answers whether a parameter type
+   changed. */
+static int cs_type_proc_name(Compiler *c, int recv, const int *argv, int argc, int depth) {
   const NodeTable *nt = c->nt;
   int changed = 0;
   const char *rty = nt_type(nt, recv);
@@ -13869,25 +13981,31 @@ static int cs_type_proc_site(Compiler *c, int site, int recv, const int *argv, i
   /* A proc reached through a name: type the literal that name was assigned.
      A LOCAL was the only name looked at, so the identical lambda written to a
      constant or an instance variable kept the no-evidence int default and
-     answered Integer for whatever it was really called with (#3942). A
-     constant is program-wide, so its write is matched by name alone; a local
-     and an ivar are matched within their scope and class. */
+     answered Integer for whatever it was really called with (#3942), and a
+     global still did. A constant and a global are program-wide, so their
+     writes are matched by name alone; a local and an ivar are matched within
+     their scope and class. */
   const char *varname = nt_str(nt, recv, "name");
-  if (!varname) return 0;
-  int want_kind;
-  if (sp_streq(rty, "LocalVariableReadNode")) want_kind = 0;
-  else if (sp_streq(rty, "ConstantReadNode") || sp_streq(rty, "ConstantPathNode")) want_kind = 1;
-  else if (sp_streq(rty, "InstanceVariableReadNode")) want_kind = 2;
-  else return 0;
-  Scope *call_scope = comp_scope_of(c, site);
+  if (!varname || depth > 4) return 0;
+  /* the name's kind, and the writes of that name, through the kind index
+     (every match is taken, so the kinds' order does not matter) */
+  int want_kind, nwk = 1;
+  NodeKind wks[2] = { NK_NONE, NK_NONE };
+  switch (nt_kind(nt, recv)) {
+  case NK_LocalVariableReadNode:
+    want_kind = 0; wks[0] = NK_LocalVariableWriteNode; break;
+  case NK_ConstantReadNode:
+  case NK_ConstantPathNode:
+    want_kind = 1; wks[0] = NK_ConstantWriteNode; wks[1] = NK_ConstantPathWriteNode; nwk = 2; break;
+  case NK_InstanceVariableReadNode:
+    want_kind = 2; wks[0] = NK_InstanceVariableWriteNode; break;
+  case NK_GlobalVariableReadNode:
+    want_kind = 3; wks[0] = NK_GlobalVariableWriteNode; break;
+  default:
+    return 0;
+  }
+  Scope *call_scope = comp_scope_of(c, recv);
   int call_cls = call_scope ? call_scope->class_id : -1;
-  /* the writes of that name, through the kind index (every match is
-     taken, so the kinds' order does not matter) */
-  static const NodeKind wk_local[] = { NK_LocalVariableWriteNode };
-  static const NodeKind wk_const[] = { NK_ConstantWriteNode, NK_ConstantPathWriteNode };
-  static const NodeKind wk_ivar[] = { NK_InstanceVariableWriteNode };
-  const NodeKind *wks = want_kind == 0 ? wk_local : want_kind == 1 ? wk_const : wk_ivar;
-  int nwk = want_kind == 1 ? 2 : 1;
   for (int wki = 0; wki < nwk; wki++)
   NT_FOREACH_KIND(nt, wks[wki], w) {
     if (want_kind == 0) {
@@ -13900,8 +14018,14 @@ static int cs_type_proc_site(Compiler *c, int site, int recv, const int *argv, i
     const char *wname = nt_str(nt, w, "name");
     if (!wname || !sp_streq(wname, varname)) continue;
     int val = nt_ref(nt, w, "value");
-    if (val < 0 || !is_proc_create(c, val)) continue;
-    if (cs_type_params_site(c, val, argv, argc)) changed = 1;
+    if (val < 0) continue;
+    if (is_proc_create(c, val)) {
+      if (cs_type_params_site(c, val, argv, argc)) changed = 1;
+    }
+    /* a write that copies another name's proc: the literal is that name's */
+    else if (val != recv && infer_type(c, val) == TY_PROC &&
+             cs_type_proc_name(c, val, argv, argc, depth + 1))
+      changed = 1;
   }
   return changed;
 }
@@ -14163,7 +14287,7 @@ int infer_block_params(Compiler *c) {
     int argc = 0; const int *argv = NULL;
     if (call_args >= 0) argv = nt_arr(nt, call_args, "arguments", &argc);
     if (argc == 0) continue;
-    if (cs_type_proc_site(c, id, recv, argv, argc)) changed = 1;
+    if (cs_type_proc_name(c, recv, argv, argc, 0)) changed = 1;
   }
   /* `case v when pr` is `pr === v`: a Proc condition's parameter takes the
      case subject's type. Left out, `case "seven" when ->(s) { s.length }`
@@ -14175,7 +14299,7 @@ int infer_block_params(Compiler *c) {
     for (int k = 0; k < nw; k++) {
       int wc = 0; const int *wconds = nt_arr(nt, whens[k], "conditions", &wc);
       for (int j = 0; j < wc; j++)
-        if (infer_type(c, wconds[j]) == TY_PROC && cs_type_proc_site(c, wconds[j], wconds[j], &pred, 1))
+        if (infer_type(c, wconds[j]) == TY_PROC && cs_type_proc_name(c, wconds[j], &pred, 1, 0))
           changed = 1;
     }
   }

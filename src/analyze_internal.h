@@ -109,6 +109,7 @@ int desugar_time_singleton_bare_ctor(Compiler *c);
 const char *class_ruby_name(Compiler *c, int ci); /* codegen.c */
 int builtin_object_method_known(const char *m);
 int core_method_name(const char *n);   /* analyze_desugar.c: a core class's public method */
+int object_public_method_name(const char *n); /* analyze_desugar.c: one of Object's public instance methods */
 int class_inherits_builtin_exception(Compiler *c, int ci);
 int an_user_defines_or_reads(Compiler *c, const char *name);
 /* The universal "what a receiver answers" table (analyze_infer.c) and the
@@ -322,6 +323,7 @@ int rest_packable_arm(Compiler *c, Scope *s);                    /* codegen_fold
    reads as a plain String). Shared with the receiver-face helpers. */
 TyKind ivar_value_ty(ClassInfo *ci, int iv);
 int infer_range_call(Compiler *c, int id, TyKind rt, TyKind *out);
+int range_object_face(const char *name);  /* Object's face of a Float / String range */
 int infer_poly_call(Compiler *c, int id, TyKind rt, TyKind *out);
 int infer_object_call(Compiler *c, int id, TyKind rt, TyKind *out);
 int infer_arysub_call(Compiler *c, int id, TyKind *out);
@@ -494,6 +496,7 @@ int desugar_call_op_write(Compiler *c);
 int desugar_reopened_op_write(Compiler *c);
 int desugar_array_at(Compiler *c);
 int desugar_unpack_block(Compiler *c);
+int desugar_interp_reopened_to_s(Compiler *c);
 int desugar_array_first_last(Compiler *c);
 int desugar_enum_iter_splat_args(Compiler *c);
 int desugar_builtin_iter_block_shapes(Compiler *c);

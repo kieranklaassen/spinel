@@ -145,17 +145,12 @@ int emit_call_regexp_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
     emit_expr(c, recv, b);
     buf_printf(b, "; SP_GC_ROOT(_t%d); sp_RbVal _t%d = ", tsg, tpat);
     emit_boxed(c, argv[0], b);
-    /* the Enumerator is made first and rooted, then its label: they were two
-       arguments of one call, each freed by the allocation of the other. A
-       pattern that is no String or Regexp raises before its inspect runs. */
-    int ten = ++g_tmp;
     buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); "
-                  "sp_Enumerator *_t%d = sp_Enumerator_new_from(sp_box_str_array(", tpat, ten);
+                  "sp_enum_with_src(sp_Enumerator_new_from(sp_box_str_array(", tpat);
     if (gre >= 0) buf_printf(b, "sp_re_scan(sp_re_pat_%d, _t%d)", gre, tsg);
     else buf_printf(b, "sp_scan_boxed(_t%d, _t%d)", tsg, tpat);
-    buf_printf(b, ")); SP_GC_ROOT(_t%d); "
-                  "sp_enum_with_src(_t%d, sp_box_str(_t%d), sp_sprintf(\"%s(%%s)\", sp_poly_inspect(_t%d))); })",
-               ten, ten, tsg, name, tpat);
+    buf_printf(b, ")), sp_box_str(_t%d), sp_sprintf(\"%s(%%s)\", sp_poly_inspect(_t%d))); })",
+               tsg, name, tpat);
     return 1;
   }
 no_gsub_enum:
@@ -772,11 +767,11 @@ int emit_call_regexp_class_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
       int ua = argv[0];
       int splat = nt_kind(nt, ua) == NK_SplatNode && nt_ref(nt, ua, "expression") >= 0;
       if (splat) ua = nt_ref(nt, ua, "expression");
-      TyKind uat = comp_ntype(c, ua);
-      if (uat == TY_POLY_ARRAY || uat == TY_STR_ARRAY || (splat && uat != TY_UNKNOWN)) {
+      Repr uar = repr_of(c, ua);
+      if (uar.elem == TY_POLY || uar.elem == TY_STRING || (splat && !uar.untyped)) {
         buf_puts(b, "sp_re_union_array(");
-        if (uat == TY_STR_ARRAY) { buf_puts(b, "sp_StrArray_to_poly_fmt("); emit_expr(c, ua, b); buf_puts(b, ")"); }
-        else if (uat == TY_POLY_ARRAY) emit_expr(c, ua, b);
+        if (uar.elem == TY_STRING) { buf_puts(b, "sp_StrArray_to_poly_fmt("); emit_expr(c, ua, b); buf_puts(b, ")"); }
+        else if (uar.elem == TY_POLY) emit_expr(c, ua, b);
         /* any other splatted value -- boxed, a scalar, nil, a typed array --
            is the Array its splat makes, and each element is checked at run
            time (a non-String, non-Regexp one raises TypeError) */

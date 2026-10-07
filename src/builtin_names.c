@@ -375,6 +375,15 @@ int is_match_operator(const char *n) {
   return sp_streq(n, "=~") || sp_streq(n, "!~");
 }
 
+/* Object's methods that hand their receiver on to code over its members or
+   bind it into a wrapper: to_enum / enum_for walk each, instance_eval /
+   instance_exec run a block with it as self, method / public_method bind a
+   Method to it. */
+int is_object_receiver_handoff(const char *n) {
+  return sp_streq(n, "to_enum") || sp_streq(n, "enum_for") || is_instance_eval_family(n) ||
+         sp_streq(n, "method") || sp_streq(n, "public_method");
+}
+
 int is_eq_or_ne(const char *n) {
   return sp_streq(n, "==") || sp_streq(n, "!=");
 }
@@ -538,6 +547,10 @@ int is_rewind_name(const char *n) {
   return sp_streq(n, "rewind");
 }
 
+int is_io_offset_move(const char *n) {
+  return sp_streq(n, "pos=") || sp_streq(n, "sysseek");
+}
+
 int is_byte_codepoint_each(const char *n) {
   return sp_streq(n, "each_byte") || sp_streq(n, "each_codepoint");
 }
@@ -682,6 +695,10 @@ int is_div_or_modulo(const char *n) {
   return sp_streq(n, "div") || sp_streq(n, "modulo");
 }
 
+int is_div_name(const char *n) {
+  return sp_streq(n, "div");
+}
+
 int is_initialize_family(const char *n) {
   return sp_streq(n, "initialize_copy") || sp_streq(n, "initialize");
 }
@@ -780,6 +797,10 @@ int is_string_append_or_prepend(const char *n) {
 
 int is_string_append(const char *n) {
   return sp_streq(n, "<<") || sp_streq(n, "concat");
+}
+
+int is_replace_name(const char *n) {
+  return sp_streq(n, "replace");
 }
 
 int is_string_rebind_mutator(const char *n) {

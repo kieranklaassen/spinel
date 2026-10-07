@@ -5838,6 +5838,30 @@ static void desugar_enum_chain_shapes(Compiler *c) {
       nt_node_set_str(nt, eachn, "name", "each");
       nt_node_set_ref(nt, eachn, "receiver", recv);
       nt_node_set_ref(nt, id, "receiver", eachn);
+      /* with a block the call answers the String, not the pieces the walk
+         now goes over: (s.chars.each.with_index { }; s), for a String a
+         variable names, read again rather than evaluated twice */
+      int srecv = nt_ref(nt, recv, "receiver");
+      NodeKind sk = nt_kind(nt, srecv);
+      if (nt_ref(nt, id, "block") >= 0 &&
+          (sk == NK_LocalVariableReadNode || sk == NK_InstanceVariableReadNode)) {
+        int inner = nt_new_node(nt, "CallNode");
+        int st = nt_new_node(nt, "StatementsNode");
+        int tail = nt_clone_subtree(nt, srecv);
+        if (inner >= 0 && st >= 0 && tail >= 0) {
+          nt_node_set_str(nt, inner, "name", "with_index");
+          nt_node_set_ref(nt, inner, "receiver", eachn);
+          nt_node_set_ref(nt, inner, "arguments", nt_ref(nt, id, "arguments"));
+          nt_node_set_ref(nt, inner, "block", nt_ref(nt, id, "block"));
+          int items[2] = { inner, tail };
+          nt_node_set_arr(nt, st, "body", items, 2);
+          nt_node_set_type(nt, id, "ParenthesesNode");
+          nt_node_set_ref(nt, id, "body", st);
+          nt_node_set_ref(nt, id, "receiver", -1);
+          nt_node_set_ref(nt, id, "arguments", -1);
+          nt_node_set_ref(nt, id, "block", -1);
+        }
+      }
       comp_grow_node_arrays(c);
     }
     /* str.each_char/each_line (blockless, no args) followed by an eager
@@ -6320,6 +6344,10 @@ static int desugar_str_range_methods(Compiler *c) {
     "begin", "end", "min", "max", "include?", "member?", "cover?", "===",
     "exclude_end?", "==", "!=", "eql?", "inspect", "to_s", "class",
     "frozen?", "freeze", "itself", "dup", "clone", "hash",
+    /* Range's own overlap? and bsearch answer about the RANGE: the member
+       Array has no overlap?, and its bsearch searched where CRuby raises
+       TypeError for a String range */
+    "overlap?", "bsearch",
     /* the identity predicates answer about the RANGE, not its members: routing
        them through to_a made `("a".."e").is_a?(Range)` false (#3619) */
     "is_a?", "kind_of?", "instance_of?", "nil?", "equal?", "respond_to?",
@@ -6380,11 +6408,24 @@ static int desugar_str_range_methods(Compiler *c) {
     }
     /* first/last are the endpoints bare, a prefix/suffix ARRAY with a count */
     if (!native && an == 0 && (is_endpoint_query(nm))) native = 1;
+    /* Object's own face answers about the RANGE, not its members (#3619's
+       identity predicates were the first of it): through to_a, tap and then
+       yielded the member Array, tap answered it, and on an endless range
+       instance_variables, `!` and `=~` raised RangeError where CRuby answers */
+    if (range_object_face(nm)) native = 1;
     if (native) continue;
     int toa = nt_new_node(nt, "CallNode");
     if (toa < 0) continue;
     nt_node_set_str(nt, toa, "name", "to_a");
     nt_node_set_ref(nt, toa, "receiver", recv);
+    /* each, each_entry, reverse_each, each_with_index, each_slice and
+       each_cons with a block walk the members but answer the RANGE: mark the
+       hop, as the Hash and Enumerable routes do (#3842), so inference and the
+       value emitter yield the receiver instead of the member Array */
+    { int blk = nt_ref(nt, id, "block");
+      if (blk >= 0 && nt_kind(nt, blk) == NK_BlockNode &&
+          ((an == 0 && is_each_walk_or_with_index(nm)) || (an == 1 && is_each_window(nm))))
+        nt_node_set_str(nt, toa, "enum_recv", "1"); }
     nt_node_set_ref(nt, id, "receiver", toa);
     comp_grow_node_arrays(c);
     c->nscope[toa] = c->nscope[id];
@@ -7199,6 +7240,23 @@ int scope_is_struct_synth(Compiler *c, int si) {
    ones: Enumerator and Hash chains, Struct and Set members, the finders, step
    and % (desugar_enum_method_recv's rewrites, in their order) */
 static int desugar_enum_named_call(Compiler *c, int id, NodeTable *nt, const char *nm, int *changed) {
+  /* n.times.each { } is n.times { }: the blockless times is a Range here,
+     whose each answered 0...n where the Enumerator's each answers n */
+  if (nm && sp_streq(nm, "each") && nt_kind(nt, nt_ref(nt, id, "block")) == NK_BlockNode &&
+      nt_ref(nt, id, "arguments") < 0 && !call_is_safe_nav(nt, id)) {
+    int trecv = nt_ref(nt, id, "receiver");
+    if (trecv >= 0 && nt_kind(nt, trecv) == NK_CallNode && nt_str(nt, trecv, "name") &&
+        sp_streq(nt_str(nt, trecv, "name"), "times") && nt_ref(nt, trecv, "block") < 0 &&
+        nt_ref(nt, trecv, "arguments") < 0 && !call_is_safe_nav(nt, trecv)) {
+      int n = nt_ref(nt, trecv, "receiver");
+      if (n >= 0 && infer_type(c, n) == TY_INT) {
+        nt_node_set_str(nt, id, "name", "times");
+        nt_node_set_ref(nt, id, "receiver", n);
+        *changed = 1;
+        return 1;
+      }
+    }
+  }
   /* hash.map.with_index { } / hash.each.with_index { }: interpose to_a so
      the pair-array enumerator chain (which the array machinery serves)
      carries it -- h.to_a.map.with_index. Type-aware, hence here and not in
@@ -16546,22 +16604,118 @@ static unsigned share_types_digest(Compiler *c) {
    String every name holds rather than replacing the slot's own copy. */
 /* (a read of a holder is not lifted: the rule makes that holder the
    handle, whose box is the handle already) */
+static int share_lift_value(Compiler *c, int v);
+/* An arm of a conditional value: its last statement, through parentheses
+   and an `else`. */
+static int share_lift_arms(Compiler *c, int n) {
+  const NodeTable *nt = c->nt;
+  for (int d = 0; n >= 0 && d < 16; d++) {
+    NodeKind k = nt_kind(nt, n);
+    if (k == NK_ElseNode) { n = nt_ref(nt, n, "statements"); continue; }
+    if (k == NK_ParenthesesNode) { n = nt_ref(nt, n, "body"); continue; }
+    if (k == NK_StatementsNode) {
+      int bn = 0; const int *bv = nt_arr(nt, n, "body", &bn);
+      n = bn > 0 ? bv[bn - 1] : -1;
+      continue;
+    }
+    return share_lift_value(c, n);
+  }
+  return 0;
+}
 static int share_lift_value(Compiler *c, int v) {
-  NodeKind k = nt_kind(c->nt, v);
+  const NodeTable *nt = c->nt;
+  NodeKind k = nt_kind(nt, v);
   if (k == NK_LocalVariableReadNode || k == NK_InstanceVariableReadNode || k == NK_GlobalVariableReadNode ||
       k == NK_ClassVariableReadNode || k == NK_ConstantReadNode || k == NK_ConstantPathNode)
     return 0;
-  if (infer_type(c, v) != TY_STRING || c->poly_strbuf_lift[v]) return 0;
-  c->poly_strbuf_lift[v] = 1;
-  return 1;
+  /* a String-typed value, a conditional's included, is boxed whole */
+  if (infer_type(c, v) == TY_STRING) {
+    if (c->poly_strbuf_lift[v]) return 0;
+    c->poly_strbuf_lift[v] = 1;
+    return 1;
+  }
+  /* a conditional value of mixed types: each arm that can be a String (the
+     boxed slot's value boxes each arm on its own). A `case`, `case`/`in`
+     and `begin` value is its arms' and handlers' values, as the typing
+     unifies them: an `else` replaces a `begin`'s body, `ensure` adds none. */
+  switch (k) {
+    case NK_IfNode: case NK_UnlessNode:
+      return share_lift_arms(c, nt_ref(nt, v, "statements")) |
+             share_lift_arms(c, nt_ref(nt, v, k == NK_IfNode ? "subsequent" : "else_clause"));
+    case NK_OrNode: case NK_AndNode:
+      return share_lift_arms(c, nt_ref(nt, v, "left")) | share_lift_arms(c, nt_ref(nt, v, "right"));
+    case NK_CaseNode: case NK_CaseMatchNode: {
+      int nw = 0, changed = 0;
+      const int *arms = nt_arr(nt, v, "conditions", &nw);
+      for (int i = 0; i < nw; i++) changed |= share_lift_arms(c, nt_ref(nt, arms[i], "statements"));
+      return changed | share_lift_arms(c, nt_ref(nt, v, "else_clause"));
+    }
+    case NK_BeginNode: {
+      int els = nt_ref(nt, v, "else_clause");
+      int changed = share_lift_arms(c, els >= 0 ? els : nt_ref(nt, v, "statements"));
+      for (int r = nt_ref(nt, v, "rescue_clause"); r >= 0; r = nt_ref(nt, r, "subsequent"))
+        changed |= share_lift_arms(c, nt_ref(nt, r, "statements"));
+      return changed;
+    }
+    case NK_RescueModifierNode:
+      return share_lift_arms(c, nt_ref(nt, v, "expression")) | share_lift_arms(c, nt_ref(nt, v, "rescue_expression"));
+    default: return 0;
+  }
+}
+/* The same for local `name` of scope `scope`: its `=`, `||=` and `&&=`
+   (comp_lvw_first_sc, the local write index). */
+static int share_lift_poly_local_stores(Compiler *c, int scope, const char *name) {
+  const NodeTable *nt = c->nt;
+  int changed = 0;
+  for (int w = comp_lvw_first_sc(c, scope, name); w >= 0; w = comp_lvw_next_sc(c, w)) {
+    NodeKind k = nt_kind(nt, w);
+    if ((k != NK_LocalVariableWriteNode && k != NK_LocalVariableOrWriteNode && k != NK_LocalVariableAndWriteNode) ||
+        !sp_streq(nt_str(nt, w, "name"), name) || comp_scope_of(c, w) != &c->scopes[scope]) continue;
+    int v = an_unparen(nt, nt_ref(nt, w, "value"));
+    if (v >= 0) changed |= share_lift_value(c, v);
+  }
+  return changed;
+}
+/* The same for a global's, a class variable's or a constant's writes
+   (holder kind `kind`, the share facts' name): `=`, `||=` and `&&=`. A
+   class variable is every class's of the name, as the facts key it. */
+static int share_lift_poly_static_stores(Compiler *c, int kind, const char *name) {
+  const NodeTable *nt = c->nt;
+  int changed = 0;
+  NodeKind rk = kind == SHK_GVAR ? NK_GlobalVariableReadNode : kind == SHK_CVAR ? NK_ClassVariableReadNode
+                                                                                 : NK_ConstantReadNode;
+  const char *want = kind == SHK_GVAR && name && name[0] == '$' ? comp_resolve_gvar(c, name + 1) : name;
+  if (!want) return 0;
+  for (int e = comp_vsite_first(c, VS_STORE, rk, want, -1); e >= 0; e = comp_vsite_next(c, e)) {
+    int w = comp_vsite_node(c, e);
+    const char *wn = nt_str(nt, w, "name");
+    const char *rn = kind == SHK_GVAR && wn && wn[0] == '$' ? comp_resolve_gvar(c, wn + 1) : wn;
+    NodeKind wk = nt_kind(nt, w);
+    int wkind = wk == NK_GlobalVariableWriteNode || wk == NK_GlobalVariableOrWriteNode ||
+                wk == NK_GlobalVariableAndWriteNode ? SHK_GVAR
+              : wk == NK_ClassVariableWriteNode || wk == NK_ClassVariableOrWriteNode ||
+                wk == NK_ClassVariableAndWriteNode ? SHK_CVAR
+              : wk == NK_ConstantWriteNode || wk == NK_ConstantOrWriteNode || wk == NK_ConstantAndWriteNode ? SHK_CONST
+              : -1;
+    if (!rn || !sp_streq(rn, want) || wkind != kind) continue;   /* a chain's collisions */
+    int v = an_unparen(nt, nt_ref(nt, w, "value"));
+    if (v >= 0) changed |= share_lift_value(c, v);
+  }
+  return changed;
 }
 static int share_lift_poly_ivar_stores(Compiler *c, int cid, const char *name) {
   const NodeTable *nt = c->nt;
   int changed = 0;
-  NT_FOREACH_KIND(nt, NK_InstanceVariableWriteNode, w) {
+  /* its `=`, `||=` and `&&=` (the variable-site chains) */
+  for (int e = comp_vsite_first(c, VS_STORE, NK_InstanceVariableReadNode, name, cid); e >= 0;
+       e = comp_vsite_next(c, e)) {
+    int w = comp_vsite_node(c, e);
+    NodeKind wk = nt_kind(nt, w);
     const char *wn = nt_str(nt, w, "name");
-    int v = nt_ref(nt, w, "value");
-    if (!wn || !sp_streq(wn, name) || v < 0 || comp_ivar_owner(c, w) != cid) continue;
+    int v = an_unparen(nt, nt_ref(nt, w, "value"));
+    if ((wk != NK_InstanceVariableWriteNode && wk != NK_InstanceVariableOrWriteNode &&
+         wk != NK_InstanceVariableAndWriteNode) || !wn || !sp_streq(wn, name) || v < 0 || comp_ivar_owner(c, w) != cid)
+      continue;
     changed |= share_lift_value(c, v);
   }
   size_t ln = strlen(name);
@@ -16611,7 +16765,13 @@ static int share_default_apply(Compiler *c, int in_fixpoint) {
         continue;
       }
       if (!repr_str_shares(c, h)) continue;
-      if (lv->type != TY_STRING && lv->type != TY_STRBUF) continue;   /* a box holds the handle */
+      /* a box holds the handle: each String written into it is boxed as
+         its handle, as an ivar's are (share_lift_poly_ivar_stores) */
+      if (lv->type == TY_POLY) {
+        changed |= share_lift_poly_local_stores(c, sh->scope, lv->name);
+        continue;
+      }
+      if (lv->type != TY_STRING && lv->type != TY_STRBUF) continue;
       if (repr_of_slot(c, lv).share && !lv->byref_out) continue;
       if (lv->is_param && !lv->is_block_param) {
         if (lv->rbs_seeded) continue;
@@ -16646,6 +16806,8 @@ static int share_default_apply(Compiler *c, int in_fixpoint) {
       for (int k = 0; k < c->nclasses; k++) {
         ClassInfo *ci = &c->classes[k];
         int i = sh->name ? comp_cvar_index(ci, sh->name) : -1;
+        /* a box holds the handle: its Strings are stored as the handle */
+        if (i >= 0 && ci->cvar_types[i] == TY_POLY) { changed |= share_lift_poly_static_stores(c, SHK_CVAR, sh->name); continue; }
         if (i < 0 || (ci->cvar_types[i] != TY_STRING && ci->cvar_types[i] != TY_STRBUF)) continue;
         if (repr_of_cvar(c, k, i).share) continue;
         ci->cvar_types[i] = TY_STRBUF;
@@ -16658,7 +16820,9 @@ static int share_default_apply(Compiler *c, int in_fixpoint) {
     else if ((sh->kind == SHK_GVAR || sh->kind == SHK_CONST) && repr_str_shares(c, h)) {
       LocalVar *gv = sh->kind == SHK_CONST ? comp_const(c, sh->name)
                                            : comp_gvar(c, sh->name[0] == '$' ? sh->name + 1 : sh->name);
-      if (!gv || (gv->type != TY_STRING && gv->type != TY_STRBUF)) continue;   /* a box holds the handle */
+      /* a box holds the handle: its Strings are stored as the handle */
+      if (gv && gv->type == TY_POLY) { changed |= share_lift_poly_static_stores(c, sh->kind, sh->name); continue; }
+      if (!gv || (gv->type != TY_STRING && gv->type != TY_STRBUF)) continue;
       if (repr_of_slot(c, gv).share) continue;
       gv->type = TY_STRBUF;
       gv->str_shared = 1;
@@ -17107,7 +17271,7 @@ static int strbuf_demand_elem_arg(Compiler *c, int an) {
    `@values[i]` itself would, so the element read it answers is demanded as
    an element read handed to an appender is. Answers whether anything
    changed. A result that is another such call is followed (bounded). */
-static int *uec_seen, uec_cap, uec_gen;
+static int *uec_seen, *uec_depth, uec_cap, uec_gen;
 static int strbuf_demand_user_elem_call(Compiler *c, int call, int depth) {
   const NodeTable *nt = c->nt;
   if (call < 0 || depth > 4 || nt_kind(nt, call) != NK_CallNode) return 0;
@@ -17115,14 +17279,20 @@ static int strbuf_demand_user_elem_call(Compiler *c, int call, int depth) {
      class's method of the name, and each of their results again, so a name
      many classes define (`[]`) fanned out to the power of the depth and a
      program of a few hundred classes compiled for hours. A method's results
-     are the same however it was reached, and a demand only adds. */
+     are the same however it was reached, and a demand only adds; a visit
+     from nearer the top still goes on, since it may follow results a deeper
+     one was cut off from. */
   if (depth == 0) {
     if (uec_cap < c->nscopes) {
       int nc = c->nscopes + 64;
       int *ns = (int *)realloc(uec_seen, sizeof(int) * (size_t)nc);
       if (!ns) return 0;
-      memset(ns + uec_cap, 0, sizeof(int) * (size_t)(nc - uec_cap));
-      uec_seen = ns; uec_cap = nc;
+      uec_seen = ns;
+      int *nd = (int *)realloc(uec_depth, sizeof(int) * (size_t)nc);
+      if (!nd) return 0;
+      uec_depth = nd;
+      memset(uec_seen + uec_cap, 0, sizeof(int) * (size_t)(nc - uec_cap));
+      uec_cap = nc;
     }
     uec_gen++;
   }
@@ -17148,8 +17318,9 @@ static int strbuf_demand_user_elem_call(Compiler *c, int call, int depth) {
     if (cls >= 0) { if (mi != comp_method_in_chain(c, cls, mn, NULL)) continue; }
     else if (!m->name || !sp_streq(m->name, mn) || m->class_id < 0 || m->is_cmethod) continue;
     if (mi < uec_cap) {
-      if (uec_seen[mi] == uec_gen) { if (cls >= 0) break; continue; }
+      if (uec_seen[mi] == uec_gen && uec_depth[mi] <= depth) { if (cls >= 0) break; continue; }
       uec_seen[mi] = uec_gen;
+      uec_depth[mi] = depth;
     }
     int vals[64], nv = 0;
     int last = scope_body_last(c, mi);
@@ -24949,7 +25120,7 @@ static int reassert_rbs_param_seeds(Compiler *c) {
 static int nullable_int_call_name(const char *nm) {
   if (!nm) return 0;
   static const char *const N[] = {
-    "index", "rindex", "byteindex", "byterindex", "delete_at", "pop", "shift",
+    "index", "rindex", "byteindex", "byterindex", "delete_at", "slice!", "pop", "shift",
     "delete", "nonzero?", "infinite?", "getbyte", "bsearch", "bsearch_index",
     /* `a <=> b` answers nil when the two are not comparable, and the poly
        helper spells that with the sentinel like every other nullable int */
@@ -25516,6 +25687,9 @@ static int elem_miss_call(Compiler *c, int v) {
     return argc == 0 && blk < 0;
   if (is_minmax_query(nm)) return argc == 0;
   if (is_find_alias(nm)) return blk >= 0;
+  /* a fold without an initial value answers nil on an empty receiver:
+     `inject(:+)` and `inject { |s, x| ... }`, not `inject(0) { ... }` */
+  if (is_reduce_alias(nm)) return argc == 0 || (argc == 1 && blk < 0);
   return 0;
 }
 
@@ -32810,6 +32984,7 @@ static void an_phase_infer_fixpoint(Compiler *c) {
     ch |= desugar_implicit_send(c);            /* send(:m, a) -> m(a) on self */
     ch |= desugar_public_send_recv(c);         /* r.public_send(:m, a) -> r.m(a), visibility-stamped */
     ch |= desugar_symbol_string_methods(c);    /* :sym.match(re) -> :sym.to_s.match(re) */
+    ch |= desugar_interp_reopened_to_s(c);     /* "#{5}" with Integer#to_s reopened -> "#{5.to_s}" */
     /* re-run inside the fixpoint: a key whose type comes from a PARAMETER is
        still UNKNOWN on the pre-fixpoint pass, so `h[k] ||= []` fell back to
        the StrPolyHash default and handed an Integer key to a const char *

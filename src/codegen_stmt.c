@@ -2407,7 +2407,7 @@ int emit_poly_op_assign(Compiler *c, const char *lval, const char *op, int v,
   if (!op) return 0;
   static const char *const ops[][2] = {
     { "+", "sp_poly_add" }, { "-", "sp_poly_sub" }, { "*", "sp_poly_mul" },
-    { "/", "sp_poly_div" }, { "%", "sp_poly_mod" }, { "**", "sp_poly_pow" },
+    { "/", "sp_poly_div" }, { "%", "sp_poly_mod" }, { "**", "sp_poly_pow_recv" },
     { "<<", "sp_poly_shl" }, { ">>", "sp_poly_shr" },
     { "&", "sp_poly_bitop" }, { "|", "sp_poly_bitop" }, { "^", "sp_poly_bitop" },
   };
@@ -2662,6 +2662,46 @@ void emit_op_assign(Compiler *c, int id, Buf *b, int indent) {
 
 /* ---- control flow ---- */
 
+/* `a && b` / `a || b` as a condition asks only whether its value is truthy,
+   and that value is one of the operands: truthy(a) && truthy(b), and
+   truthy(a) || truthy(b), with C's short circuit evaluating b exactly when
+   Ruby does. Each operand is tested in its own representation. The value
+   itself, when the operands' kinds differ, is a box: `if @lc && @lc.count ==
+   0` built `p ? sp_box_bool(..) : sp_box_nullable_obj(p, 0)` to hand it to
+   sp_poly_truthy, a box per test. An operand without a type the test reads
+   keeps the value's own path. A boolean value is already tested that way. */
+static int cond_operand_testable(Compiler *c, int v) {
+  TyKind vt = comp_ntype(c, v);
+  return v >= 0 && vt != TY_UNKNOWN && vt != TY_VOID;
+}
+static int emit_cond_andor(Compiler *c, int id, TyKind t, Buf *b) {
+  const NodeTable *nt = c->nt;
+  NodeKind k = nt_kind(nt, id);
+  if ((k != NK_AndNode && k != NK_OrNode) || t == TY_BOOL) return 0;
+  int l = nt_ref(nt, id, "left"), r = nt_ref(nt, id, "right");
+  if (!cond_operand_testable(c, l) || !cond_operand_testable(c, r)) return 0;
+  /* the right operand's prelude (a rooted temp it hoists) runs inside the
+     short circuit, after the left and only when Ruby evaluates the right,
+     as the value form keeps it (#1773) */
+  Buf lc; memset(&lc, 0, sizeof lc);
+  emit_cond(c, l, &lc);
+  Buf rc; memset(&rc, 0, sizeof rc);
+  Buf rpre; memset(&rpre, 0, sizeof rpre);
+  { Buf *sv = g_pre; g_pre = &rpre; emit_cond(c, r, &rc); g_pre = sv; }
+  const char *lt = lc.p ? lc.p : "0", *rt = rc.p ? rc.p : "0";
+  if (!(rpre.p && rpre.p[0]))
+    buf_printf(b, "(%s %s %s)", lt, k == NK_AndNode ? "&&" : "||", rt);
+  else {
+    int tr = ++g_tmp;
+    if (k == NK_AndNode) buf_printf(b, "({ sp_bool _t%d; if (%s) {\n%s_t%d = %s;\n}\nelse { _t%d = 0; } _t%d; })",
+                                    tr, lt, rpre.p, tr, rt, tr, tr);
+    else buf_printf(b, "({ sp_bool _t%d; if (%s) { _t%d = 1; }\nelse {\n%s_t%d = %s;\n} _t%d; })",
+                    tr, lt, tr, rpre.p, tr, rt, tr);
+  }
+  free(lc.p); free(rc.p); free(rpre.p);
+  return 1;
+}
+
 void emit_cond(Compiler *c, int id, Buf *b) {
   /* A yield whose block, at the site being inlined, ends in a call no class
      answers: the resolution gate lowers that call to its NoMethodError raise
@@ -2715,6 +2755,7 @@ void emit_cond(Compiler *c, int id, Buf *b) {
     }
   }
   TyKind t = comp_ntype(c, id);
+  if (emit_cond_andor(c, id, t, b)) return;
   if (t == TY_POLY) { buf_puts(b, "sp_poly_truthy("); emit_expr(c, id, b); buf_puts(b, ")"); return; }
   if (t == TY_NIL)  { buf_puts(b, "(("); emit_expr(c, id, b); buf_puts(b, "), 0)"); return; }
   /* Ruby truthiness: only nil and false are falsy. A nullable scalar reads
@@ -2736,10 +2777,11 @@ void emit_cond(Compiler *c, int id, Buf *b) {
      the first tic. */
   if (t == TY_SYMBOL) { buf_puts(b, "(("); emit_expr(c, id, b); buf_puts(b, ") != (sp_sym)-1)"); return; }
   if (t == TY_CLASS) { buf_puts(b, "(!sp_class_nil_p("); emit_expr(c, id, b); buf_puts(b, "))"); return; }
-  /* Always-truthy concrete value types: a Range / Complex / Rational /
-     Time value is never nil or false, so it is truthy in condition position.
-     Evaluate it for side effects and yield 1. */
-  if (t == TY_RANGE || t == TY_COMPLEX || t == TY_RATIONAL || t == TY_TIME) {
+  /* Always-truthy concrete value types: a Range (of Integers, Floats or
+     Strings) / Complex / Rational / Time value is never nil or false, so it
+     is truthy in condition position. Evaluate it for side effects and yield 1. */
+  if (t == TY_RANGE || t == TY_FLOAT_RANGE || t == TY_STR_RANGE || t == TY_COMPLEX ||
+      t == TY_RATIONAL || t == TY_TIME) {
     buf_puts(b, "(("); emit_expr(c, id, b); buf_puts(b, "), 1)"); return;
   }
   /* a yield no call site gives a block has no value type: reached, it
@@ -9173,8 +9215,11 @@ void emit_boxed_writer_arms(Compiler *c, const char *base, const char *nm,
        NoMethodError for a writer the receiver has. */
     if (at != ivt && at != TY_POLY && ivt != TY_POLY && !slot_takes_subclass(c, ivt, at)) continue;
     buf_printf(b, " case %d: ", k);
-    { char opn[64]; snprintf(opn, sizeof opn, "((sp_%s *)%s)", c->classes[k].c_name, objp);
-      emit_frozen_obj_guard(c, k, opn, b); }
+    { size_t on = strlen(c->classes[k].c_name) + strlen(objp) + 16;
+      char *opn = (char *)malloc(on);
+      snprintf(opn, on, "((sp_%s *)%s)", c->classes[k].c_name, objp);
+      emit_frozen_obj_guard(c, k, opn, b);
+      free(opn); }
     buf_printf(b, "((sp_%s *)%s)->iv_%s = ", c->classes[k].c_name, objp, iv_c(base));
     if (ivt == TY_POLY && at != TY_POLY) emit_boxed_text(c, at, src, b);
     else if (at == TY_POLY && ivt != TY_POLY) emit_unbox_text(c, ivt, src, b);
@@ -11884,7 +11929,7 @@ static int emit_ivar_cvar_write_stmt(Compiler *c, int id, Buf *b, int indent, co
                          : sp_streq(op, "%") ? "sp_poly_mod" : sp_streq(op, "|") ? "sp_poly_bor"
                          : sp_streq(op, "&") ? "sp_poly_band" : sp_streq(op, "^") ? "sp_poly_bxor"
                          : sp_streq(op, "<<") ? "sp_poly_shl" : sp_streq(op, ">>") ? "sp_poly_shr"
-                         : sp_streq(op, "**") ? "sp_poly_pow" : NULL;
+                         : sp_streq(op, "**") ? "sp_poly_pow_recv" : NULL;
         if (pnum) buf_printf(b, "%s = ((%s).tag == SP_TAG_OBJ && (%s).cls_id == %d) ? ",
                              ref, ref, ref, poly_defcls);
         else buf_printf(b, "%s = ", ref);
@@ -11968,7 +12013,7 @@ static int emit_attr_global_const_write_stmt(Compiler *c, int id, Buf *b, int in
                     : op && sp_streq(op, "*") ? "sp_poly_mul"
                     : op && sp_streq(op, "/") ? "sp_poly_div"
                     : op && sp_streq(op, "%") ? "sp_poly_mod"
-                    : op && sp_streq(op, "**") ? "sp_poly_pow"
+                    : op && sp_streq(op, "**") ? "sp_poly_pow_recv"
                     : op && sp_streq(op, "<<") ? "sp_poly_shl"
                     : op && sp_streq(op, ">>") ? "sp_poly_shr" : NULL;
     int bitop = op && is_int_bit_op(op);
@@ -13291,6 +13336,17 @@ static int str_alias_chain_base(Compiler *c, int id) {
    wanted the receiver has to be put back afterwards. Returns the receiver's
    node when this call is one AND the receiver is a plain read (it is re-read,
    not re-evaluated, so anything with a side effect is out), else -1. */
+/* `x.each.with_index { }` over an Array: the blockless each hop's receiver */
+static int each_with_index_chain(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  int r = nt_ref(nt, id, "receiver");
+  if (r < 0 || nt_kind(nt, r) != NK_CallNode || nt_ref(nt, r, "block") >= 0 ||
+      nt_ref(nt, r, "arguments") >= 0 || !nt_str(nt, r, "name") ||
+      !sp_streq(nt_str(nt, r, "name"), "each")) return 0;
+  int rr = nt_ref(nt, r, "receiver");
+  return rr >= 0 && ty_is_array(comp_ntype(c, rr));
+}
+
 int tail_iter_receiver(Compiler *c, int id) {
   const NodeTable *nt = c->nt;
   if (nt_kind(nt, id) != NK_CallNode || nt_ref(nt, id, "block") < 0) return -1;
@@ -13696,7 +13752,10 @@ void emit_stmt_tail_inner(Compiler *c, int id, Buf *b, int indent) {
                         sp_streq(tv_name, "yield_self") ||
                         sp_streq(tv_name, "select!") || sp_streq(tv_name, "filter!") ||
                         sp_streq(tv_name, "reject!") || sp_streq(tv_name, "keep_if") ||
-                        sp_streq(tv_name, "delete_if"));
+                        sp_streq(tv_name, "delete_if") ||
+                        /* `a.each.with_index { }` answers a, which only the
+                           value form reads back */
+                        (sp_streq(tv_name, "with_index") && each_with_index_chain(c, id)));
   /* An iterator whose value is its receiver, called on something that is NOT
      a plain read (`s.keys.each { }`, `s.dup.each { }`): the statement form
      below produces the tail value by RE-READING the receiver, which it cannot
@@ -14634,6 +14693,42 @@ static int str_mutate_reassign_arms(Compiler *c, Buf *b, int indent, const NodeT
   return -1;
 }
 
+/* The receiver of a String append on a handle is rendered by
+   strbuf_slot_ref and written into the C call beside each argument, and C
+   leaves the order of a call's operands open: gcc runs the argument first.
+   Ruby runs the receiver once, before its arguments. So the receiver is bound
+   to a rooted temp in a block of its own, and sref becomes that temp, when
+   that order shows, by the rules operand ordering uses:
+   - a receiver call that runs code (not subtree_is_pure_read: a reader on a
+     call, `pick(s).topic`) whose text is read `many` times would run again
+     at each read (the frozen check, a codepoint conversion, the next link of
+     a chain), and beside an argument with an effect, or one reading what the
+     call can change (read_rebound_by: `pick(b).buf << $x` with pick
+     assigning $x), it ran after it;
+   - a variable, or a plain field read (`c.buf`), beside an argument that can
+     give it another String (read_rebound_by, subtree_may_reassign_state:
+     `@s << reset_s`, `c.buf << c.swap!(t)`) appended to the new String.
+   The root keeps the String alive when the argument drops the slot's
+   reference to it. Answers 1 when the block was opened (the caller closes
+   it); otherwise the C stays as it was. */
+static int strbuf_recv_hold(Compiler *c, int recv, int argc, const int *argv, int many,
+                            char *sref, size_t cap, Buf *b, int indent) {
+  recv = unwrap_parens(c, recv);
+  int call = nt_kind(c->nt, recv) == NK_CallNode;
+  int runs = call && !subtree_is_pure_read(c, recv);
+  int hold = runs && many;
+  for (int a = 0; a < argc && !hold; a++) {
+    if (runs) hold = subtree_has_side_effect(c, argv[a]) || read_rebound_by(c, argv[a], recv);
+    else hold = read_rebound_by(c, recv, argv[a]) || (call && subtree_may_reassign_state(c, argv[a]));
+  }
+  if (!hold) return 0;
+  int t = ++g_tmp;
+  emit_indent(b, indent);
+  buf_printf(b, "{ sp_String *_t%d = %s; SP_GC_ROOT(_t%d);\n", t, sref, t);
+  snprintf(sref, cap, "_t%d", t);
+  return 1;
+}
+
 /* emit_array_mutate_stmt_body's String appends (<< and concat) and its bang
    methods, with and without arguments (answers 1 emitted, 0 declined, -1 to
    go on) */
@@ -14685,6 +14780,17 @@ static int str_mutate_append_bang_arms(Compiler *c, int id, Buf *b, int indent, 
     }
     char srefC[1024];
     if (nchain > 0 && strbuf_slot_ref(c, cur, srefC, sizeof srefC)) {
+      /* the receiver's text is read again by a second link, by an Integer's
+         or a boxed value's codepoint conversion, and by each part of an
+         interpolation of several (emit_str_append_arg, emit_interp_append) */
+      int many = nchain > 1;
+      for (int j = 0; j < nchain && !many; j++) {
+        TyKind at = comp_ntype(c, chain[j]);
+        int np = 0;
+        if (nt_kind(nt, chain[j]) == NK_InterpolatedStringNode) nt_arr(nt, chain[j], "parts", &np);
+        many = at == TY_INT || at == TY_POLY || np > 1;
+      }
+      int held = strbuf_recv_hold(c, cur, nchain, chain, many, srefC, sizeof srefC, b, indent);
       for (int j = nchain - 1; j >= 0; j--) {
         int arg = chain[j];
         TyKind at = comp_ntype(c, arg);
@@ -14694,9 +14800,9 @@ static int str_mutate_append_bang_arms(Compiler *c, int id, Buf *b, int indent, 
           char o1[1100], o2[1100];
           snprintf(o1, sizeof o1, "sp_String_append_bin(%s, ", srefC);
           snprintf(o2, sizeof o2, "sp_String_append_n(%s, ", srefC);
-          if (emit_interp_append(c, arg, o1, o2, b, indent)) continue;
+          if (emit_interp_append(c, arg, o1, o2, b, indent + held)) continue;
         }
-        emit_indent(b, indent);
+        emit_indent(b, indent + held);
         buf_printf(b, "sp_String_append_bin(%s, ", srefC);
         (void)at;
         /* One rule for what a String append does with its argument, shared with
@@ -14712,6 +14818,7 @@ static int str_mutate_append_bang_arms(Compiler *c, int id, Buf *b, int indent, 
           emit_str_append_arg(c, arg, rt, b); }
         buf_puts(b, ");\n");
       }
+      if (held) { emit_indent(b, indent); buf_puts(b, "}\n"); }
       return 1;
     }
   }
@@ -14722,7 +14829,10 @@ static int str_mutate_append_bang_arms(Compiler *c, int id, Buf *b, int indent, 
   if (sp_streq(name, "concat") && argc >= 2) {
     char srefM[1024];
     if (strbuf_slot_ref(c, recv, srefM, sizeof srefM)) {
-      emit_str_concat_handle(c, srefM, argc, argv, b, indent);
+      /* the handle is read by the frozen check and by every append */
+      int held = strbuf_recv_hold(c, recv, argc, argv, 1, srefM, sizeof srefM, b, indent);
+      emit_str_concat_handle(c, srefM, argc, argv, b, indent + held);
+      if (held) { emit_indent(b, indent); buf_puts(b, "}\n"); }
       return 1;
     }
   }
@@ -15733,7 +15843,7 @@ void emit_index_op_write(Compiler *c, int id, Buf *b, int indent) {
     const char *pf = vt == TY_POLY ?
         (sp_streq(op, "+") ? "sp_poly_add" : sp_streq(op, "-") ? "sp_poly_sub" :
          sp_streq(op, "*") ? "sp_poly_mul" : sp_streq(op, "/") ? "sp_poly_div" :
-         sp_streq(op, "%") ? "sp_poly_mod" : sp_streq(op, "**") ? "sp_poly_pow" :
+         sp_streq(op, "%") ? "sp_poly_mod" : sp_streq(op, "**") ? "sp_poly_pow_recv" :
          sp_streq(op, "<<") ? "sp_poly_shl" : sp_streq(op, ">>") ? "sp_poly_shr" :
          sp_streq(op, "&") ? "sp_poly_band" : sp_streq(op, "|") ? "sp_poly_bor" :
          sp_streq(op, "^") ? "sp_poly_bxor" : NULL) : NULL;
@@ -15763,7 +15873,7 @@ void emit_index_op_write(Compiler *c, int id, Buf *b, int indent) {
     const char *pf =
         sp_streq(op, "+") ? "sp_poly_add" : sp_streq(op, "-") ? "sp_poly_sub" :
         sp_streq(op, "*") ? "sp_poly_mul" : sp_streq(op, "/") ? "sp_poly_div" :
-        sp_streq(op, "%") ? "sp_poly_mod" : sp_streq(op, "**") ? "sp_poly_pow" :
+        sp_streq(op, "%") ? "sp_poly_mod" : sp_streq(op, "**") ? "sp_poly_pow_recv" :
         sp_streq(op, "<<") ? "sp_poly_shl" : sp_streq(op, ">>") ? "sp_poly_shr" :
         sp_streq(op, "&") ? "sp_poly_band" : sp_streq(op, "|") ? "sp_poly_bor" :
         sp_streq(op, "^") ? "sp_poly_bxor" : NULL;
@@ -15941,7 +16051,7 @@ void emit_index_op_write(Compiler *c, int id, Buf *b, int indent) {
     const char *pf =
         sp_streq(op, "+") ? "sp_poly_add" : sp_streq(op, "-") ? "sp_poly_sub" :
         sp_streq(op, "*") ? "sp_poly_mul" : sp_streq(op, "/") ? "sp_poly_div" :
-        sp_streq(op, "%") ? "sp_poly_mod" : sp_streq(op, "**") ? "sp_poly_pow" :
+        sp_streq(op, "%") ? "sp_poly_mod" : sp_streq(op, "**") ? "sp_poly_pow_recv" :
         sp_streq(op, "<<") ? "sp_poly_shl" : sp_streq(op, ">>") ? "sp_poly_shr" :
         sp_streq(op, "&") ? "sp_poly_band" : sp_streq(op, "|") ? "sp_poly_bor" :
         sp_streq(op, "^") ? "sp_poly_bxor" : NULL;

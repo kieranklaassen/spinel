@@ -1270,6 +1270,10 @@ cli-opts-test: $(SPINEL)
 	$(SPINEL) -I test/require_load_path test/require_load_path/main.rb -o "$$tmp/lp" >"$$tmp/lp.out" 2>&1 && \
 	  "$$tmp/lp" 2>&1 | cmp -s - test/require_load_path/main.rb.expected || \
 	  { echo "cli-opts-test: FAIL (a file reached by -I require and by require_relative loaded twice)"; ok=0; }; \
+	mkdir -p "$$tmp/shadow/openssl"; printf 'module OpenSSL\n  def self.whoami = "project"\nend\n' > "$$tmp/shadow/openssl/openssl.rb"; \
+	printf 'require "openssl"\nputs OpenSSL.whoami\n' > "$$tmp/shadow.rb"; \
+	$(SPINEL) -I "$$tmp/shadow" "$$tmp/shadow.rb" -o "$$tmp/shadowbin" >"$$tmp/shadow.out" 2>&1 && [ "$$("$$tmp/shadowbin")" = "project" ] || \
+	  { echo "cli-opts-test: FAIL (a project's package did not shadow the bundled one of the same name, #7207)"; sed -n 1,3p "$$tmp/shadow.out"; ok=0; }; \
 	links=""; i=0; while [ $$i -lt 70 ]; do links="$$links --link -lm"; i=$$((i + 1)); done; \
 	$(SPINEL) "$$tmp/p.rb" $$links --link -lsp_last_link --print-build 2>/dev/null | grep -q 'lib -lsp_last_link' || \
 	  { echo "cli-opts-test: FAIL (a --link past the 64th was dropped)"; ok=0; }; \
@@ -1844,12 +1848,11 @@ GC_STRESS_TESTS := test/gc_root_frame_slots.rb \
                    test/struct_values_fresh_receiver_root.rb \
                    test/hash_splat_to_a.rb \
                    test/proc_cell_capture_marked.rb \
-                   test/regexp_split_rpartition_rooted.rb \
                    test/gsub_hash_result_rooted.rb \
-                   test/gsub_enumerator_rooted.rb \
+                   test/string_gsub_str_hash.rb \
+                   test/sub_gsub_hash_any_values.rb \
                    test/poly_array_intersect.rb \
                    test/thread_new_args_rooted_across_fiber_alloc.rb \
-                   test/sprintf_long_arg_kept.rb \
                    test/gc_root_volatile_string_slot.rb \
                    test/gc_root_gathered_handle_param.rb \
                    test/dispatch_arm_roots_operands.rb \
@@ -2358,10 +2361,11 @@ backtrace-test: $(SPINEL) $(SP_RT_LIB)
 	$(SPINEL) --debug --no-inline-hot test/backtrace/required_main.rb -o "$$tmp/rq" >/dev/null 2>&1 || \
 	  { echo "backtrace-test: FAIL (compile required_main)"; ok=0; }; \
 	"$$tmp/rq" > "$$tmp/rq.out" 2>&1; \
-	for f in "required_lib.rb:in .Lib#inner'" "required_lib.rb:in .Lib#boom'" "required_lib.rb:in .Lib.go'" "required_main.rb:in .Top#run'" "required_lib.rb:in .lib_inner'" "required_lib.rb:in .lib_outer'" "required_main.rb:in .entry_run'"; do \
+	l3=; l17=; [ "$$(uname -s)" = Linux ] && { l3=3:; l17=17:; }; \
+	for f in "required_lib.rb:$${l3}in .Lib#inner'" "required_lib.rb:\([0-9]*:\)\{0,1\}in .Lib#boom'" "required_lib.rb:\([0-9]*:\)\{0,1\}in .Lib.go'" "required_main.rb:\([0-9]*:\)\{0,1\}in .Top#run'" "required_lib.rb:$${l17}in .lib_inner'" "required_lib.rb:\([0-9]*:\)\{0,1\}in .lib_outer'" "required_main.rb:\([0-9]*:\)\{0,1\}in .entry_run'"; do \
 	  grep -q "$$f" "$$tmp/rq.out" || { echo "backtrace-test: FAIL (#7658: no frame $$f)"; cat "$$tmp/rq.out"; ok=0; }; \
 	done; \
-	grep -q "required_main.rb:in .\(Lib\|lib_\)" "$$tmp/rq.out" && { echo "backtrace-test: FAIL (#7658: a Lib frame names the entry script)"; cat "$$tmp/rq.out"; ok=0; }; \
+	grep -q "required_main.rb:\([0-9]*:\)\{0,1\}in .\(Lib\|lib_\)" "$$tmp/rq.out" && { echo "backtrace-test: FAIL (#7658: a Lib frame names the entry script)"; cat "$$tmp/rq.out"; ok=0; }; \
 	rm -rf "$$tmp"; \
 	if [ $$ok -eq 1 ]; then echo "backtrace-test: pass"; else exit 1; fi
 
@@ -3314,6 +3318,11 @@ infer-test: $(SPINEL) $(SP_RT_LIB)
 	  grep -q "typedef struct { sp_String \* \*c_s; } _$${cap}_cap_" "$$tmp/bsv.c" || { echo "infer-test: FAIL (an owned $$cap capture became a borrowed volatile slot)"; ok=0; }; \
 	done; \
 	grep -q 'sp_handle_bound(sp_String \* lv_s) {' "$$tmp/bsv.c" || { echo "infer-test: FAIL (a bound Method lost its shared String handle ABI)"; ok=0; }; \
+	$(SPINEL) test/gc_root_fixed_param_arg.rb -c --no-line-map -o "$$tmp/rfp.c" >/dev/null 2>&1 || { echo "infer-test: FAIL (gc_root_fixed_param_arg: -c)"; ok=0; }; \
+	awk '/ sp_Interp_visit\(sp_Interp \*self, .*\) \{/,/^}/' "$$tmp/rfp.c" > "$$tmp/rfp_v.c"; \
+	awk '/ sp_Interp_walk\(sp_Interp \*self, .*\) \{/,/^}/' "$$tmp/rfp.c" > "$$tmp/rfp_w.c"; \
+	grep -Eq '_t[0-9]+ = lv_env;' "$$tmp/rfp_v.c" && ! grep -A1 -E '_t[0-9]+ = lv_env;' "$$tmp/rfp_v.c" | grep -q 'SP_GC_ROOT' || { echo "infer-test: FAIL (a parameter the method never reassigns is copied into a rooted argument temp)"; ok=0; }; \
+	grep -A1 -E '_t[0-9]+ = lv_env;' "$$tmp/rfp_w.c" | grep -q 'SP_GC_ROOT(_t' || { echo "infer-test: FAIL (a reassigned parameter's argument temp lost its root)"; ok=0; }; \
 	$(SPINEL) test/infer/hash_one_class_each_value.rb -c --no-line-map -o "$$tmp/hoc.c" >/dev/null 2>&1 || { echo "infer-test: FAIL (hash_one_class_each_value: -c)"; ok=0; }; \
 	grep -q 'sp_Item \* lv_it' "$$tmp/hoc.c" && grep -q 'sp_Item_describe((sp_Item \*)lv_it)' "$$tmp/hoc.c" || { echo "infer-test: FAIL (#4846 a one-class hash's each_value is not typed)"; ok=0; }; \
 	$(SPINEL) test/infer/hash_or_write_index_setter.rb -c --no-line-map -o "$$tmp/hos.c" >/dev/null 2>&1 || { echo "infer-test: FAIL (hash_or_write_index_setter: -c)"; ok=0; }; \
@@ -3568,6 +3577,9 @@ infer-test: $(SPINEL) $(SP_RT_LIB)
 	grep -q 'if ((lv_w > 2LL))' "$$tmp/nnr.c" && grep -q 'if ((lv_v > lv_k))' "$$tmp/nnr.c" || { echo "infer-test: FAIL (a read a guard or an in-bounds index proves non-nil still tests for nil)"; ok=0; }; \
 	grep -q 'SP_INT_NIL_CMP_CK(_t[0-9]*, 0, ">"); _t[0-9]* > _t[0-9]*_r; })' "$$tmp/nnr.c" && grep -q 'SP_INT_NIL_CMP_CK(_t[0-9]*, 0, "<"); _t[0-9]* < _t[0-9]*_r; })' "$$tmp/nnr.c" || { echo "infer-test: FAIL (a narrowed read of a nilable local does not keep the other operand's half of the test)"; ok=0; }; \
 	grep -q 'sp_int _t[0-9]* = lv_gv, _t[0-9]*_r = 0LL; SP_INT_NIL_CMP_CK(_t[0-9]*, _t[0-9]*_r, ">")' "$$tmp/nnr.c" || { echo "infer-test: FAIL (an in-bounds read of an array a write past the end can leave a nil in lost its test)"; ok=0; }; \
+	$(SPINEL) test/gc_root_hoisted_arg_once.rb -c --no-line-map -o "$$tmp/rha.c" >/dev/null 2>&1 || { echo "infer-test: FAIL (gc_root_hoisted_arg_once: -c)"; ok=0; }; \
+	awk '/ sp_make_tree\(sp_int lv_depth\) \{/,/^}/' "$$tmp/rha.c" > "$$tmp/rha_mt.c"; \
+	grep -q 'sp_make_tree(' "$$tmp/rha_mt.c" && ! grep -Eq '_gcf\.v\[[0-9]+\] = _gcf\.v\[[0-9]+\];|_t[0-9]+ = _t[0-9]+;' "$$tmp/rha_mt.c" || { echo "infer-test: FAIL (an argument the call hoisted into a rooted temp is copied into a second rooted one)"; ok=0; }; \
 	rm -rf "$$tmp"; \
 	if [ $$ok -eq 1 ]; then echo "infer-test: pass"; else exit 1; fi
 

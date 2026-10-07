@@ -1788,6 +1788,7 @@ void emit_op_assign(Compiler *c, int id, Buf *b, int indent);
 int emit_array_op_assign(Compiler *c, const char *lval, TyKind t, const char *op, int v, Buf *b);
 int emit_scalar_op_assign(Compiler *c, const char *lval, TyKind t, const char *op,
                           int v, int capture, int lhs_nil, Buf *b);
+const char *poly_pow_fn(TyKind rt);   /* sp_poly_pow, or sp_poly_pow_recv for a receiver that may lack `**` */
 int emit_poly_op_assign(Compiler *c, const char *lval, const char *op, int v,
                         int capture, Buf *b);
 void emit_poly_unboxed(Compiler *c, int node, TyKind t, const char *conv, Buf *b);
@@ -1871,6 +1872,7 @@ void emit_str_expr_nilable(Compiler *c, int node, Buf *b);
 void emit_str_expr_sep(Compiler *c, int node, Buf *b);
 /* strict with CRuby's rb_convert_type wording ("of nil into Integer") */
 void emit_int_expr_conv(Compiler *c, int node, Buf *b);
+void emit_int_expr_offt(Compiler *c, int node, Buf *b);
 int emit_unresolved_coerced(Compiler *c, int node, TyKind target, Buf *b);
 int emit_unresolved_coerced_text(Compiler *c, int node, TyKind target, const char *txt, Buf *b);
 int call_answers_no_value(Compiler *c, int node);
