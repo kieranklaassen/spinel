@@ -1,0 +1,46 @@
+A class's own then and yield_self run when called with no block
+
+    class Tally
+      def initialize = @n = 0
+      def then
+        @n += 1
+        self
+      end
+      def n = @n
+    end
+    t = Tally.new
+    t.then
+    p t.n
+
+printed 0 where Ruby prints 1, and `p t.then.n` did not build. With no
+block, the arm for then and yield_self made an Enumerator of the
+receiver, on a typed object and through a boxed value, without asking
+whether the receiver's class defines the name, while the call was typed
+by that method: a value that was dropped hid the miss, and a value that
+was used did not fit its slot.
+
+The arm now stands down where the receiver is the class's object and
+cannot be nil as written: `X.new`, a local every write of which is
+`X.new`, a local read behind a truthiness guard of it, and the `&.`
+form. It stands down too for a boxed value beside a class that defines
+or reads the name, where the class switch sends nil and every other
+value to the Enumerator as before. The call goes on to the class's
+method (a def, an alias, a define_method, a module's or a parent's
+method, an attr_reader, a Struct member, a singleton method), as a
+user-defined dup or clone already does.
+
+nil answers Kernel's then, so a receiver typed as the class that may
+hold nil keeps the code it had: a parameter, an ivar, a method's value,
+a block parameter, self. The nil fact is asked, but not alone: it takes
+a builtin iteration's block parameter as not nil without proof.
+
+A program with no then or yield_self of its own emits the C it did.
+
+Not covered, as on master: called with a block, an object's own then
+still runs the block; `x.then(&blk)` raises NoMethodError on a value
+with no then of its own; a then only a subclass defines, called with
+the value used on a receiver typed as the parent, does not build.
+
+test/poly_own_then.rb does not build on master.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

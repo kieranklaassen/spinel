@@ -1,0 +1,78 @@
+r1: CRuby "ok\n0\n", master "NoMethodError\n1\n", the piece "ok\n1\n", master on the twin "ok\n1\n": half 1 holds
+  half 2: 7 changed lines
+    < static inline void sp_Doc_freeze(sp_Doc *self);
+    > static inline sp_Doc * sp_Doc_freeze(sp_Doc *self);
+    < static inline void sp_Doc_freeze(sp_Doc *self) {
+    > static inline sp_Doc * sp_Doc_freeze(sp_Doc *self) {
+    <   (sp_raise_cls("NoMethodError", "super: no superclass method 'freeze' for an instance of Doc"), sp_box_nil());
+    >   return ((sp_Doc *)sp_gc_freeze((void *)self));
+    >   return NULL;
+r2: CRuby "NilClass\n0\n", master "NoMethodError\n1\n", the piece "NilClass\n1\n", master on the twin "NilClass\n1\n": half 1 holds
+  half 2: 34 changed lines
+    < static inline void sp_Doc_freeze(sp_Doc *self);
+    > static inline sp_Doc * sp_Doc_freeze(sp_Doc *self);
+    < static inline void sp_Doc_freeze(sp_Doc *self) {
+    > static inline sp_Doc * sp_Doc_freeze(sp_Doc *self) {
+    <   (sp_raise_cls("NoMethodError", "super: no superclass method 'freeze' for an instance of Doc"), sp_box_nil());
+    >   return ((sp_Doc *)sp_gc_freeze((void *)self));
+    >   return NULL;
+    <     volatile sp_RbVal lv_y = sp_box_nil();
+    <     _gcf.x[N] = SP_GC_ENTRY_RBVAL(lv_y);
+    >     sp_Doc *volatile  lv_y = NULL;
+    >     _gcf.x[N] = SP_GC_ENTRY_PTR(lv_y);
+    <     lv_y = (sp_Doc_freeze((sp_Doc *)lv_x), sp_box_nil());
+    <     { sp_Class _tN = sp_poly_class_val(lv_y); sp_puts_line(sp_class_inspect_name(_tN)); }
+    >     lv_y = sp_Doc_freeze((sp_Doc *)lv_x);
+    > sp_Doc * _tN = lv_y;
+    >     { sp_Class _tN = ((sp_Class){_tN ? _tN->cls_id : -110}); sp_puts_line(sp_class_inspect_name(_tN)); }
+    <         const char *_rcls_5 = (const char *)sp_last_exc_cls; (void)_rcls_5;
+    <         const char *_rmsg_5 = sp_exc_msg[sp_exc_top]; (void)_rmsg_5;
+    <         if (sp_exc_cls_matches(_rcls_5, "NoMethodError")) {
+    <           sp_Exception *_ce_5 = sp_exc_obj[sp_exc_top] ? (sp_Exception *)sp_exc_obj[sp_exc_top] : sp_exc_new_for_catch(_rcls_5, _rmsg_5);
+    <           sp_rescue_push((void *)_ce_5);
+    <           if (_ce_5->backtrace == NULL) { sp_StrArray *_bt = sp_backtrace_captured(); sp_gc_wb((void *)_ce_5); _ce_5->backtrace = _bt; }
+    <           if (!_ce_5->cause) { sp_gc_wb((void *)_ce_5); _ce_5->cause = (sp_Exception *)sp_pending_cause; } sp_pending_cause = NULL;
+    <           lv_e = _ce_5;
+    >         const char *_rcls_6 = (const char *)sp_last_exc_cls; (void)_rcls_6;
+    >         const char *_rmsg_6 = sp_exc_msg[sp_exc_top]; (void)_rmsg_6;
+    >         if (sp_exc_cls_matches(_rcls_6, "NoMethodError")) {
+    >           sp_Exception *_ce_6 = sp_exc_obj[sp_exc_top] ? (sp_Exception *)sp_exc_obj[sp_exc_top] : sp_exc_new_for_catch(_rcls_6, _rmsg_6);
+    >           sp_rescue_push((void *)_ce_6);
+    >           if (_ce_6->backtrace == NULL) { sp_StrArray *_bt = sp_backtrace_captured(); sp_gc_wb((void *)_ce_6); _ce_6->backtrace = _bt; }
+    >           if (!_ce_6->cause) { sp_gc_wb((void *)_ce_6); _ce_6->cause = (sp_Exception *)sp_pending_cause; } sp_pending_cause = NULL;
+    >           lv_e = _ce_6;
+    <           sp_raise_cls(_rcls_5, _rmsg_5);
+    >           sp_raise_cls(_rcls_6, _rmsg_6);
+r3: CRuby "true\ntrue\n1\n", master "super: no superclass method 'freeze' for", the piece "true\ntrue\n2\n", master on the twin "true\ntrue\n2\n": half 1 holds
+  half 2: 22 changed lines
+    < static inline void sp_Doc_freeze(sp_Doc *self);
+    > static inline sp_Doc * sp_Doc_freeze(sp_Doc *self);
+    < static inline SP_ALWAYS_INLINE void sp_Holder_go(sp_Holder *self);
+    > static inline SP_ALWAYS_INLINE sp_Doc * sp_Holder_go(sp_Holder *self);
+    < static inline void sp_Doc_freeze(sp_Doc *self) {
+    > static inline sp_Doc * sp_Doc_freeze(sp_Doc *self) {
+    <   (sp_raise_cls("NoMethodError", "super: no superclass method 'freeze' for an instance of Doc"), sp_box_nil());
+    >   return ((sp_Doc *)sp_gc_freeze((void *)self));
+    >   return NULL;
+    <   { __typeof__(self) _wb9 = self; _wb9->iv_x = lv_x; sp_gc_wb((void *)_wb9); }
+    >   { __typeof__(self) _wb7 = self; _wb7->iv_x = lv_x; sp_gc_wb((void *)_wb7); }
+    < static inline SP_ALWAYS_INLINE void sp_Holder_go(sp_Holder *self) {
+    <   sp_Doc_freeze((sp_Doc *)self->iv_x);
+    > static inline SP_ALWAYS_INLINE sp_Doc * sp_Holder_go(sp_Holder *self) {
+    >   return sp_Doc_freeze((sp_Doc *)self->iv_x);
+    >   return NULL;
+    <     struct { sp_gc_frame_hdr h; sp_RbVal v[1]; void **p[4]; } _gcf = {{1, 4}}; SP_GC_ROOT_FRAME(_gcf);
+    >     struct { sp_gc_frame_hdr h; void **p[4]; } _gcf = {{0, 4}}; SP_GC_ROOT_FRAME(_gcf);
+    <   puts(((sp_raise_cls("NoMethodError", ({ _gcf.x[N] = (sp_Holder_go((sp_Holder *)_tN), sp_box_nil()); sp_stage_recv_args_msg("undefined method 'equal?' for unknown", _gcf.x[N], 1, (sp_RbVal[]){sp_box_nullable_obj((void *)(lv_d),
+    >   puts((((void *)(sp_Holder_go((sp_Holder *)_tN)) == (void *)(lv_d))) ? "true" : "false");
+    <   puts(((sp_raise_cls("NoMethodError", ({ _gcf.x[N] = (sp_Holder_go((sp_Holder *)_tN), sp_box_nil()); sp_stage_recv_args_msg("undefined method 'nil?' for unknown", _gcf.x[N], 0, (sp_RbVal[]){sp_box_nil()}); })), 0)) ? "true" : "
+    >   puts((((sp_Holder_go((sp_Holder *)_tN)) == NULL)) ? "true" : "false");
+r4: CRuby "Sub\n10\n", master "NOBUILD", the piece "Sub\n0\n", master on the twin "Sub\n0\n": half 1 holds
+  half 2: 2 changed lines
+    <   lv_y = sp_poly_freeze(lv_x);
+    >   lv_y = (sp_Sub *)sp_poly_unbox_cls(sp_poly_freeze(lv_x), 1, (&("\xff" "Sub")[1]));
+r5: CRuby "Doc\n1\n", master "NOBUILD", the piece "Doc\n0\n", master on the twin "Doc\n0\n": half 1 holds
+  half 2: 2 changed lines
+    <   lv_y = sp_poly_freeze(lv_x);
+    >   lv_y = (sp_Doc *)sp_poly_unbox_cls(sp_poly_freeze(lv_x), 0, (&("\xff" "Doc")[1]));
+half 1: 5 of 5
