@@ -1,0 +1,35 @@
+A &. call of a method that yields runs nothing on a nil receiver
+
+    class K
+      def blk(a); $c += 1; yield(a); end
+    end
+    def mk(v) = v ? K.new : nil
+    $c = 0
+    o = mk(false)
+    r = o&.blk([1, 2]) { |q| q.size }
+    p r, $c
+
+printed 2 and 1 where CRuby prints nil and 0: the method ran on nil,
+and its block with it. A method that yields has no function of its
+own; its body is spliced in place of the call, and the splices were
+asked ahead of the `&.` guard and never look at the operator:
+emit_inline_expr for a value, emit_inline_call for a statement. As a
+statement on a receiver of several classes (`h[k]&.blk(5) { }`)
+emit_poly_recv_block_dispatch spliced one arm a class, and the nil
+raised NoMethodError.
+
+emit_inline_expr declines while the call's guard is pending
+(sn_guard_pending): emit_call_safe_nav_arms tests the receiver and
+re-enters on the guarded temp. For the statement,
+emit_iteration_stmt_sn takes the emission it goes around as a
+parameter, and emit_inline_call_sn puts the two splices inside it,
+only for a call that targets a yielding method or has a dispatch
+candidate.
+
+On a receiver that is not nil the call now pays the guard every
+other `&.` call pays, 17 instructions a call.
+
+As a statement, an Array or Hash literal among the arguments is
+still built ahead of the guard.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

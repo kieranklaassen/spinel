@@ -1,0 +1,1 @@
+A &. call of a method that yields runs nothing on a nil receiver
