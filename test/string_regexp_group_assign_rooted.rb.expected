@@ -1,0 +1,31 @@
+"abXfghijklmnop"
+"<<bXfghijklmnop"
+"<<bXfghijklmno!"
+"abXYYfghijklmnopijklmnop"
+"<<<bXYYfghijklmnopijklmnop"
+"<<<bXYYfghijklmnopijklmno!"
+"abXYYZZZfghijklmnopijklmnopijklmnop"
+"<<<<bXYYZZZfghijklmnopijklmnopijklmnop"
+"<<<<bXYYZZZfghijklmnopijklmnopijklmno!"
+"heLOLOLO world!"
+"h-eLOLOLO world!"
+"h-eLOLOLO wORld!"
+"key=vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv9"
+"abc8fgh"
+"abxxxxxxxxxxxxef"
+"héllo woerldé"
+13
+15
+IndexError: regexp not matched
+IndexError: index 10 out of regexp
+"abcdef"
+IndexError: regexp not matched
+"abcdef"
+IndexError: regexp not matched
+true
+FrozenError: can't modify frozen String: "abcdef"
+"abcdef"
+FrozenError: can't modify frozen String: "abcdef"
+"abcdef"
+"abxefghijZZ"
+0
