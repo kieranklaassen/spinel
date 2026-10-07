@@ -1,0 +1,1 @@
+A throw or a proc's return out of a rescue clause restores `$!`
