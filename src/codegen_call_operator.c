@@ -840,7 +840,14 @@ int emit_call_compare_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
       buf_printf(b, "sp_poly_is_a_dyn(_t%d, sp_box_class(_t%d), %d); })",
                  t, k, sp_streq(name, "instance_of?"));
     else if (sp_streq(name, "instance_of?"))
-      buf_printf(b, "sp_poly_get_class(_t%d).cls_id == _t%d.cls_id; })", t, k);
+      /* a boxed exception carries its class by name and has no class id of
+         its own (sp_poly_get_class answers Object for it): asked by name,
+         where the class value is one with an id and no name of its own (a
+         constant's). One read off an object carries a name on the heap that
+         nothing roots; it takes the id compare, as it did. */
+      buf_printf(b, "(_t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_EXCEPTION && !_t%d.name ? "
+                    "sp_poly_is_a_dyn(_t%d, sp_box_class(_t%d), 1) : "
+                    "sp_poly_get_class(_t%d).cls_id == _t%d.cls_id); })", t, t, k, t, k, t, k);
     else
       buf_printf(b, "sp_poly_is_a(_t%d, _t%d); })", t, k);
     return 1;
