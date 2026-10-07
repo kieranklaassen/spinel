@@ -280,6 +280,15 @@ static int poly_user_arm0_decide(Compiler *c, int id, const char *name, int argc
   return 0;
 }
 
+/* Does the C text `s` name the temp _t<n>? */
+static int text_names_temp(const char *s, int n) {
+  char w[32];
+  int wl = snprintf(w, sizeof w, "_t%d", n);
+  for (const char *q = strstr(s, w); q; q = strstr(q + wl, w))
+    if (q[wl] < '0' || q[wl] > '9') return 1;
+  return 0;
+}
+
 /* One user-class arm of a zero-argument poly dispatch, as the plan (or the
    decision above) gives it: `case k:` writing the result temp _t<tr> from
    receiver _t<tv>, the arm's value fitted to the call's type ret. */
@@ -339,6 +348,7 @@ static void emit_poly_user_arm0(Compiler *c, int id, const char *name, TyKind re
     /* Build the call; append default values for any optional params
        not provided by the (zero-arg) call site. */
     Buf cb; memset(&cb, 0, sizeof cb);
+    Buf dpre; memset(&dpre, 0, sizeof dpre);
     /* A reopened primitive (Integer/Float/String/Symbol) method takes the
        unboxed value, not a struct pointer -- read the matching union field
        instead of casting .v.p to a non-existent sp_<Prim> struct. */
@@ -416,9 +426,19 @@ static void emit_poly_user_arm0(Compiler *c, int id, const char *name, TyKind re
       /* the defaults are spelled for the proc form's own parameter
          types when that is the symbol called (#4492) */
       Scope *ds = &c->scopes[pfi9 >= 0 ? pfi9 : mi];
+      /* What a default hoists is this arm's alone. Where it reads the
+         receiver's temp, or runs something, it goes inside the arm: ahead
+         of the statement the temp is not bound yet, and every other arm
+         would run it too. A default that only builds stays ahead. */
+      Buf *sv_pre = g_pre;
+      int in_arm = 0;
+      g_pre = &dpre;
       for (int ai = 0; ai < ds->nparams; ai++) {
         buf_puts(&cb, ", "); emit_arg_or_default(c, ds, ai, -1, &cb);
+        if (ds->pdefault && ds->pdefault[ai] >= 0 && subtree_has_side_effect(c, ds->pdefault[ai])) in_arm = 1;
       }
+      g_pre = sv_pre;
+      if (dpre.p && !in_arm && !text_names_temp(dpre.p, tv)) { buf_puts(g_pre, dpre.p); dpre.p[0] = '\0'; }
       g_self = saved_self; g_self_deref = saved_deref;
     }
     /* self is always the first argument here, so a zero-param method
@@ -436,7 +456,9 @@ static void emit_poly_user_arm0(Compiler *c, int id, const char *name, TyKind re
     else emit_cmethod_block_arg(c, id, &c->scopes[mi], blk_tmp0, &cb);
     buf_puts(&cb, ")");
     const char *call = cb.p ? cb.p : "";
+    int hoisted = dpre.p && dpre.p[0];
     buf_printf(b, " case %d: ", k);
+    if (hoisted) { buf_puts(b, "{\n"); buf_puts(b, dpre.p); }
     /* A proc form is a separately inferred clone, so its own return type
        is the one to read -- not the original's, which an inlined-only
        method never needed (#3399). */
@@ -461,8 +483,8 @@ static void emit_poly_user_arm0(Compiler *c, int id, const char *name, TyKind re
       else if (slotty == TY_FLOAT && cret9 == TY_BIGINT) { buf_printf(b, "sp_bigint_to_double(%s)", call); pconv = PC_NUM; }
       else buf_puts(b, call);
     }
-    buf_puts(b, "; break;");
-    free(cb.p);
+    buf_puts(b, hoisted ? "; } break;" : "; break;");
+    free(cb.p); free(dpre.p);
     if (g_plan_check) pa_observe(pf9 ? PA_PROC_FORM : PA_USER, k, mi, cret9, pconv);
     return;
   }
