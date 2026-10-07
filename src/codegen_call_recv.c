@@ -9034,7 +9034,7 @@ static int emit_struct_recv_call(Compiler *c, int id, Buf *b, const NodeTable *n
            one step into a member, and the rest were silently dropped, which
            emitted the member itself where a dug value was wanted (#3881) */
         Buf vb = {0}; emit_boxed_text(c, mt, fld, &vb);
-        emit_rooted_key_call(c, "sp_poly_dig_n", vb.p, argv + 1, argc - 1, b); free(vb.p);
+        emit_rooted_key_call(c, "sp_poly_dig_member", vb.p, argv + 1, argc - 1, b); free(vb.p);
       }
       else buf_puts(b, fld);
       buf_puts(b, "; })");
@@ -9051,7 +9051,7 @@ static int emit_struct_recv_call(Compiler *c, int id, Buf *b, const NodeTable *n
       if (argc == 1) emit_struct_member_by_key(c, sc, rtxt, argv[0], 0, 1, b);
       else {
         Buf vb = {0}; emit_struct_member_by_key(c, sc, rtxt, argv[0], 0, 1, &vb);
-        emit_rooted_key_call(c, "sp_poly_dig_n", vb.p, argv + 1, argc - 1, b); free(vb.p);
+        emit_rooted_key_call(c, "sp_poly_dig_member", vb.p, argv + 1, argc - 1, b); free(vb.p);
       }
       buf_puts(b, "; })");
       { *out = 1; return 1; }
