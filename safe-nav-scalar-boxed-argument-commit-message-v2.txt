@@ -1,0 +1,20 @@
+A `&.` call to between? or a Float's clamp takes a boxed bound
+
+    def id(x) = x
+    id(:s)
+    def flt(v) = v ? 1.5 : nil
+    f = flt(true)
+    p f&.clamp(1.0, id(1.2))    # 1.2
+
+This raises NoMethodError ("undefined method 'clamp' for an instance of
+Float"), and `i&.between?(id(1), id(20))`, on an Integer or a Float,
+does not build. Both were right before "v&.fdiv(2) and the other
+Ruby-defined Integer methods keep the &.": that left every `&.` call on
+the typed emitter, which has no arm for these two with a boxed bound.
+
+Those two are moved onto their builtins/ definition after all, as
+`(t = recv; t.nil? ? nil : copy(t, args))`, the shape the Enumerable
+move gives a `&.` call. Every other `&.` call stays on the typed
+emitter, a Bignum receiver among them.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
