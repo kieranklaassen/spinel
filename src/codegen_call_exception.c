@@ -508,6 +508,11 @@ int emit_call_exception_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, c
     if (sp_streq(name, "class")) {  /* a Class carried by name (complete for every exception class) */
       /* a nil $! (outside any rescue) is NilClass, matching the sibling nil-guards. */
       int t = hoist_exc_recv(c, recv);
+      /* a class of the program answers by its id: its own `new` and methods */
+      if (comp_exc_class_by_id(c)) {
+        buf_printf(b, "(_t%d ? sp_exc_class_of(_t%d) : (sp_Class){(sp_int)-1, SPL(\"NilClass\")})", t, t);
+        return 1;
+      }
       buf_printf(b, "((sp_Class){(sp_int)-1, _t%d ? sp_exc_class_name(_t%d) : SPL(\"NilClass\")})", t, t);
       return 1;
     }

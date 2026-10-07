@@ -602,6 +602,7 @@ int emit_bm_flat_args(Compiler *c, const int *argv, int argc, Buf *b);
 int is_builtin_reopen(const char *name);
 int is_exc_name(const char *n);
 int class_is_exc_subclass(Compiler *c, int ci);
+int comp_exc_class_by_id(Compiler *c);
 int class_is_exc_reopen(Compiler *c, int ci);
 int class_has_exc_name(Compiler *c, int ci);
 int any_exc_reopen(Compiler *c);

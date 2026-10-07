@@ -8265,6 +8265,25 @@ int class_is_exc_subclass(Compiler *c, int ci) {
   return 0;
 }
 
+/* Does an exception's class answer by the id of a class of the program? Only
+   where the program defines a class under a builtin exception and asks for a
+   class by name somewhere (`e.class`, `&:class`, `send(:class)`): any other
+   program's C is unchanged. */
+int comp_exc_class_by_id(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  int any = 0;
+  for (int i = 0; i < c->nclasses && !any; i++)
+    if (class_is_exc_subclass(c, i)) any = 1;
+  if (!any) return 0;
+  for (int i = 0; i < nt->count; i++) {
+    int k = nt_kind(nt, i);
+    if (k != NK_CallNode && k != NK_SymbolNode) continue;
+    const char *nm = nt_str(nt, i, k == NK_CallNode ? "name" : "value");
+    if (nm && sp_streq(nm, "class")) return 1;
+  }
+  return 0;
+}
+
 /* Per-class exception facts, computed once per class table: bit 1 the class
    carries a builtin exception's name, bit 2 it is that builtin's reopening
    (no superclass of its own). The name test is a scan of the builtin table,
@@ -14971,6 +14990,22 @@ static void emit_class_machinery(const NodeTable *nt, Compiler *c, Buf *b, char 
       }
     }
     buf_puts(b, "  return 0;\n}\n");
+    /* An exception's class from the name it carries. A class of the program
+       answers by its id, so `e.class.new` and the class's own methods are
+       that class's; any other is the class by name. */
+    if (comp_exc_class_by_id(c)) {
+      buf_puts(b, "static sp_Class sp_exc_class_of(volatile sp_Exception *ve){\n"
+                  "  sp_Exception *e = (sp_Exception *)ve;\n"
+                  "  const char *n = e->cls_name;\n  if(n){\n");
+      for (int i = 0; i < c->nclasses; i++) {
+        if (!class_is_exc_subclass(c, i)) continue;
+        const char *cn = class_ruby_name(c, i);
+        if (!cn) cn = c->classes[i].name;
+        if (!cn) continue;
+        buf_printf(b, "  if(!strcmp(n,\"%s\"))return (sp_Class){%d,NULL};\n", cn, i);
+      }
+      buf_puts(b, "  }\n  return (sp_Class){(sp_int)-1, sp_exc_class_name(e)};\n}\n");
+    }
   }
   }  /* if (g_needs_class_machinery) */
 }
