@@ -78,6 +78,10 @@ extern const char *const *sp_bt_files;  /* debug main(): C symbol, .rb file pair
 static void *sp_bt_buf[256];       /* frames captured at the last raise */
 static int sp_bt_n = 0;
 #endif
+/* Counts the captures. An ensure that holds an exception reads it before its
+   body and after: the same count says the frames are still that exception's,
+   another that a raise the body made and rescued took its own. */
+static unsigned sp_bt_gen = 1;
 #include <unistd.h>
 #include <signal.h>
 #include <sys/resource.h>   /* PRIO_* selectors for Process.getpriority */
@@ -12944,7 +12948,7 @@ SP_NORETURN SP_COLD void sp_raise_cls(const char *cls, const char *msg) {
 #if SP_BT_AVAILABLE
   /* a pass-through, or a bare `raise` re-raising the handled exception, keeps
      the frames of the raise that made it, as CRuby does */
-  if (sp_bt_enabled && !sp_bt_keep && !sp_reraise_current) sp_bt_n = backtrace(sp_bt_buf, 256);
+  if (sp_bt_enabled && !sp_bt_keep && !sp_reraise_current) { sp_bt_n = backtrace(sp_bt_buf, 256); sp_bt_gen++; }
 #endif
   sp_bt_keep = 0;
   /* A real exception supersedes any non-local unwind in flight (e.g. raised from

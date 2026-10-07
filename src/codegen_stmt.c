@@ -8523,8 +8523,8 @@ void emit_rescue(Compiler *c, int id, Buf *b, int indent, int fr, int ens, const
       /* no clause matched and the begin has an ensure: it runs first, and
          raises this again after its body, as for a begin with no rescue */
       emit_indent(b, indent + 1);
-      buf_printf(b, "_excf%d = 1; _excmsg%d = _rmsg_%d; _exccls%d = _rcls_%d; _excobj%d = sp_exc_obj[sp_exc_top];\n",
-                 ens, ens, rc, ens, rc, ens);
+      buf_printf(b, "_excf%d = 1; _excmsg%d = _rmsg_%d; _exccls%d = _rcls_%d; _excobj%d = sp_exc_obj[sp_exc_top]; _excbt%d = sp_bt_gen;\n",
+                 ens, ens, rc, ens, rc, ens, ens);
     }
     else {
       /* re-stage the carried object so a pass-through keeps ivars and the
@@ -8680,6 +8680,9 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
     emit_indent(b, indent); buf_printf(b, "const char *_excmsg%d = NULL;\n", eid);
     emit_indent(b, indent); buf_printf(b, "const char *_exccls%d = NULL;\n", eid);
     emit_indent(b, indent); buf_printf(b, "void *_excobj%d = NULL;\n", eid);
+    /* the capture count read when no clause matched: the raise after the
+       ensure body keeps the frames while the count is still that one */
+    if (rescue >= 0) { emit_indent(b, indent); buf_printf(b, "unsigned _excbt%d = 0;\n", eid); }
     if (has_retval) {
       emit_indent(b, indent); emit_ctype(c, g_ret_type, b);
       /* a by-value object class is a bare struct: default_value's NULL is
@@ -8868,8 +8871,9 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
          as it did before it waited for the ensure. */
       emit_indent(b, indent);
       if (g_exc_frame_depth > outer->exc_base + 1 || rescue >= 0) {
-        buf_printf(b, "if (_excf%d) { sp_pending_exc_obj = _excobj%d; sp_raise_cls(_exccls%d, _excmsg%d); }\n",
-                   eid, eid, eid, eid);
+        buf_printf(b, "if (_excf%d) { ", eid);
+        if (rescue >= 0) buf_printf(b, "sp_bt_keep = _excbt%d == sp_bt_gen; ", eid);
+        buf_printf(b, "sp_pending_exc_obj = _excobj%d; sp_raise_cls(_exccls%d, _excmsg%d); }\n", eid, eid, eid);
       }
       else {
         buf_printf(b, "if (_excf%d) { _excf%d = 1; _excmsg%d = _excmsg%d; _exccls%d = _exccls%d; _excobj%d = _excobj%d; sp_exc_top--; goto _ensure%d; }\n",
@@ -8879,7 +8883,9 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
     else {
       /* Unhandled exception: re-raise using the saved class/message. */
       emit_indent(b, indent);
-      buf_printf(b, "if (_excf%d) { sp_pending_exc_obj = _excobj%d; sp_raise_cls(_exccls%d, _excmsg%d); }\n", eid, eid, eid, eid);
+      buf_printf(b, "if (_excf%d) { ", eid);
+      if (rescue >= 0) buf_printf(b, "sp_bt_keep = _excbt%d == sp_bt_gen; ", eid);
+      buf_printf(b, "sp_pending_exc_obj = _excobj%d; sp_raise_cls(_exccls%d, _excmsg%d); }\n", eid, eid, eid);
     }
     g_retry_label = ens_saved_retry;
     return;
