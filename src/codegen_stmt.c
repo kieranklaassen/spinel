@@ -3022,6 +3022,18 @@ int static_block_given_cond(Compiler *c, int pred) {
   return 0;
 }
 
+/* The receiver of a test answered at compile time (is_a? and its kin,
+   respond_to? with a literal name), when running it can act: the fold drops
+   the test and the dead arm, never the receiver, so `if bump.is_a?(K)` runs
+   bump. -1 when there is nothing to run. */
+int folded_pred_recv(Compiler *c, int pred) {
+  if (pred < 0 || nt_kind(c->nt, pred) != NK_CallNode) return -1;
+  const char *nm = nt_str(c->nt, pred, "name");
+  if (!nm || !(is_kind_query(nm) || sp_streq(nm, "respond_to?"))) return -1;
+  int recv = nt_ref(c->nt, pred, "receiver");
+  return recv >= 0 && subtree_has_side_effect(c, recv) ? recv : -1;
+}
+
 void emit_if(Compiler *c, int id, Buf *b, int indent, int is_unless, int tail) {
   const NodeTable *nt = c->nt;
   int pred = nt_ref(nt, id, "predicate");
@@ -3041,6 +3053,8 @@ void emit_if(Compiler *c, int id, Buf *b, int indent, int is_unless, int tail) {
        the missing constant in ways that have no C translation. */
     if (sc < 0 && comp_defined_guard_false(c, pred)) sc = 0;
     int eff = (sc < 0) ? -1 : (is_unless ? !sc : sc);
+    int lr = eff >= 0 ? folded_pred_recv(c, pred) : -1;
+    if (lr >= 0) emit_stmt(c, lr, b, indent);
     if (eff == 1) {
       /* condition always true: emit only the then-branch */
       emit_indent(b, indent); buf_puts(b, "{\n");

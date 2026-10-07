@@ -83,7 +83,10 @@ int emit_call_reflection_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, 
       /* boxed when the call is typed so ($stderr, a global, is folded here
          as the IO it holds, where the analysis typed the call poly) */
       if (ans >= 0) {
+        int lr = folded_pred_recv(c, id);
+        if (lr >= 0) { buf_puts(b, "((void)("); emit_expr(c, lr, b); buf_puts(b, "), "); }
         buf_printf(b, repr_of(c, id).kind == RK_BOXED ? "sp_box_bool(%d)" : "%d", ans);
+        if (lr >= 0) buf_puts(b, ")");
         return 1;
       }
       /* the runtime answers: a Range value's builtin surface (the probe has
