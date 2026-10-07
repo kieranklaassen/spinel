@@ -1,0 +1,75 @@
+7
+no object
+7
+bump
+5
+no object
+bump
+5
+nil
+no object
+nil
+none
+nil
+no object
+none
+nil
+seq
+nil
+no object
+seq
+nil
+9
+no object
+9
+twice 1
+twice 2
+6
+no object
+twice 1
+twice 2
+6
+bump
+bump
+2
+no object
+bump
+bump
+2
+bump
+5
+no object
+bump
+5
+pick 0
+bump
+bump
+2
+pick 1
+no object
+pick 2
+bump
+bump
+2
+bump
+5
+no object
+bump
+5
+twice 0
+0
+no object
+twice 2
+4
+bump
+1..5
+nil
+bump
+1..5
+2..7
+nil
+2..7
+["k1k1k1k1k1", "k2"]
+bump
+raised
+done
