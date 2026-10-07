@@ -980,6 +980,63 @@ int comp_builtin_name_reopened(Compiler *c, const char *name) {
   return 0;
 }
 
+/* Whether the program gives a builtin class that is no number (NilClass,
+   String, Symbol, Array, Object, Kernel, ...) arithmetic of its own: an
+   operator or a named division, in the class or in a module included at the
+   top level, or given to one object (`def nil./(o)`), or one of the hooks
+   CRuby asks before it gives up (coerce, method_missing,
+   respond_to_missing?), which count at the top level too.
+   The runtime's boxed arithmetic reaches none of these and converts such a
+   value instead (nil as 0, true as 1, a String as the number it starts
+   with), which often answers what the program's method does. A change to
+   what it answers for a value that is no number asks this first and leaves
+   such a program as it is. */
+static int name_among(const char *n, const char *const *names) {
+  for (int u = 0; n && names[u]; u++)
+    if (sp_streq(n, names[u])) return 1;
+  return 0;
+}
+
+/* A method of one of `names` given to one object: `def nil./(o)`, or a def
+   in the body of `class << nil`. It sits under no class of the table. A
+   class method (`def self.pow`, `class << self`) is given to no value. */
+static int singleton_def_among(Compiler *c, const char *const *names) {
+  const NodeTable *nt = c->nt;
+  NT_FOREACH_KIND(nt, NK_DefNode, d) {
+    int r = nt_ref(nt, d, "receiver");
+    if (r >= 0 && nt_kind(nt, r) != NK_SelfNode && name_among(nt_str(nt, d, "name"), names)) return 1;
+  }
+  NT_FOREACH_KIND(nt, NK_SingletonClassNode, s) {
+    int of = nt_ref(nt, s, "expression");
+    int body = nt_ref(nt, s, "body");
+    if (of >= 0 && nt_kind(nt, of) == NK_SelfNode) continue;
+    if (body < 0 || nt_kind(nt, body) != NK_StatementsNode) continue;
+    int bn = 0; const int *bb = nt_arr(nt, body, "body", &bn);
+    for (int i = 0; i < bn; i++)
+      if (nt_kind(nt, bb[i]) == NK_DefNode && name_among(nt_str(nt, bb[i], "name"), names)) return 1;
+  }
+  return 0;
+}
+
+int comp_nonnumber_arith_reopened(Compiler *c) {
+  static const char *const names[] = {
+    "coerce", "method_missing", "respond_to_missing?",
+    "+", "-", "*", "/", "%", "**", "div", "divmod", "fdiv", "modulo", "remainder", "quo", "pow", NULL };
+  for (int u = 0; u < 3; u++)
+    if (comp_method_index(c, names[u]) >= 0) return 1;
+  if (singleton_def_among(c, names)) return 1;
+  for (int k = 0; k < c->nclasses; k++) {
+    const char *kn = c->classes[k].name;
+    int top = 0;
+    for (int t = 0; t < c->ntoplevel_includes && !top; t++) top = c->toplevel_includes[t] == k;
+    if (!kn || sp_streq(kn, "Integer") || sp_streq(kn, "Float") || sp_streq(kn, "Numeric")) continue;
+    if (!top && !is_builtin_reopen_name(kn) && !comp_is_wellknown_const(kn) && !sp_streq(kn, "Proc")) continue;
+    for (int u = 0; names[u]; u++)
+      if (comp_method_in_chain(c, k, names[u], NULL) >= 0) return 1;
+  }
+  return 0;
+}
+
 /* Whether a call on the chain from a yield up to `call` (`yield.size + 1`)
    names a method some builtin class reopens, an alias that captured the
    builtin (builtin_only) aside: the chain's sites are then typed one by
