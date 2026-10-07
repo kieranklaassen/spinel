@@ -1,0 +1,29 @@
+else
+ensure
+passed on IOError: from else
+rescued
+ensure
+-1
+ensure
+passed on raised by the else
+ensure
+100
+ensure
+-1
+ensure
+passed on else failed
+ensure
+:from_else
+[1, -1, 2, -2]
+inner ensure
+outer ensure
+passed on inner
+ensure
+:thrown
+1002000
+[:body, [:in, 1], 1, :outer, :body, [:in, 2], :outer, :body, [:in, 3], 3, :outer]
+[:body, [:in, 1], 1, :outer, :body, [:in, 2], :outer, :body, [:in, 3], 3, :outer]
+840
+late
+ensure before exit
+at_exit

@@ -524,12 +524,13 @@ void emit_line_directive(Compiler *c, int id, Buf *b);
    yield then defers a `return` belonging to the OUTER method into it. Reading
    g_ret_type at the store site therefore asked the wrong function whether to
    box, and a String went into an sp_RbVal slot unboxed. */
-/* live: a frame of the region is armed, which it is while its body is emitted
-   and again in a rescue clause, which runs under a frame of its own; in the
-   else clause none is.
+/* live: a frame of the region is armed, which it is while its body and its
+   else clause are emitted, and again in a rescue clause, which runs under a
+   frame of its own.
    body_rescue: the region's body is being emitted and the region has rescue
    clauses, so an exception leaving that body is theirs before the ensure's.
-   clause: a rescue clause of the region is being emitted, under its frame. */
+   clause: a rescue clause or the else clause of the region is being emitted,
+   under a frame. */
 typedef struct { int lid; int has_retval; int exc_base; TyKind retv_ty; int live; int body_rescue; int clause; } EnsureCtx;
 extern EnsureCtx g_ensure_stack[MAX_ENSURE_DEPTH];
 extern int       g_ensure_depth;
