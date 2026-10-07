@@ -1,0 +1,10 @@
+literal: true false
+held: true false true
+no String: false false false
+excluded: false true
+open: true true false false
+grep: ["c"]
+grep_v: [5, "q", nil]
+select: ["c"]
+count: 1
+made by the call: 0
