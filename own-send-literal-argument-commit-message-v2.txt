@@ -1,0 +1,49 @@
+A class's own send takes a literal first argument
+
+    class Conn
+      def send(msg, flags) = "#{msg}:#{flags}"
+      def hello(k) = "Conn#hello #{k}"
+    end
+    puts Conn.new.send("hello", 0)
+
+printed `Conn#hello 0` where CRuby prints `hello:0`, and without the
+hello the program was refused (undefined method 'hello' for an instance
+of Conn). test/send_literal_and_user.rb says a class that defines its
+own send is dispatched normally and is never mistaken for Kernel#send;
+that held for a runtime argument only. desugar_public_send_recv and
+desugar_implicit_send retargeted the call to the method the literal
+names before asking whose send it was.
+
+Now the retarget stands down where the call is proved the program's own
+(send_call_owned). The receiver's class defines the name: its own def,
+an inherited or included one, a Struct block's; a class method for a
+class named by its constant; the enclosing class's or a top-level def
+for self, written or implied. And the receiver is an object of that
+class where it stands: self, `K.new(...)`, or a local every write of
+which is `K.new(...)` and which is written on every path to the read
+(recv_object_class_proved). A receiver that may be nil keeps the
+retarget: nil's send is Kernel's, and the method the literal names
+raises NoMethodError for nil where the program's method would run with
+no self. __send__ and public_send go the same way.
+
+It stands down for no call of a name when a def of that name hands the
+call on, to super, to the method object of a name or to another of the
+three names, or when the program aliases the name (own_def_takes_call):
+there the builtin is what the body reaches, and the retarget already is
+that.
+
+The call left standing is an ordinary call to the splat check as well.
+splat_appended_param took the literal for the method's name whatever
+the receiver, so a String splatted into a send that appends to it,
+`c.send(:tag, *[$g])`, would have gone over as a copy; it is refused
+as it is under any other method name.
+
+Every other receiver (a parameter, an instance variable, a method's
+value, an element, a boxed value) is retargeted as before, and a program
+that defines none of the three names takes the path it always took: the
+corpus's generated C is unchanged.
+
+Test: test/own_send_literal_argument.rb (expected from CRuby 3.3.6 with
+--enable-frozen-string-literal).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
