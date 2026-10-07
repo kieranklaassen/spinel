@@ -1,0 +1,39 @@
+A writer on a boxed receiver runs a value that answers nil
+
+An attribute writer or a Struct member on a boxed receiver (a block's
+parameter, a `for` variable, a local read from a mixed Array) stored
+nil for any value of nil type and never ran the value:
+
+    class Node
+      attr_accessor :name, :parent
+      def initialize(n) = @name = n
+    end
+    def detach(nd)
+      puts "detach #{nd.name}"
+      nil
+    end
+    items = [Node.new("a"), Node.new("b")]
+    items.each { |nd| nd.parent = detach(nd) }
+
+printed nothing; CRuby prints "detach a" and "detach b". The call was
+dropped with whatever it does. `(bump; nil)`, `begin; bump; nil; end`,
+`(bump if c)`, a `case` with a nil arm and `(raise "boom" if c; nil)`,
+which never raised, were dropped the same way, also through
+`send(:parent=, v)` and in value position (`y = (nd.parent = bump)`).
+
+Both forms of the boxed writer dispatch (the statement in
+emit_call_stmt, the value in emit_poly_index_call) wrote sp_box_nil()
+for a value typed nil, which is right for a nil literal and for
+nothing else. A value that is no literal is now emitted for its
+effects first, `((void)(value), sp_box_nil())`, as the typed receiver's
+store already does. The receiver is still read before the value. The
+statement form roots its temporary while the value runs
+(SP_GC_ROOT_RBVAL): a receiver nothing else holds would be collected by
+a value that allocates, and the store would write through the freed
+object. The value form has the root already. A nil literal's C is
+unchanged.
+
+`nd&.parent = v` on a boxed nil raises NoMethodError as before, where
+CRuby skips the call; the value now runs before the raise.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

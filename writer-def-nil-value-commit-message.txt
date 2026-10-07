@@ -1,0 +1,35 @@
+A hand-written writer takes a value that answers nil
+
+    class Node
+      def initialize(n) = @name = n
+      def parent=(x)
+        @parent = x
+      end
+    end
+    def detach(nd)
+      puts "detach"
+      nil
+    end
+    a = Node.new("a")
+    a.parent = detach(a)
+    # error: variable or field 'lv___sv2' declared void
+
+The value of `obj.x = v` is its right-hand side, not what a hand-written
+`def x=` returns, so the call binds a value that is no literal or
+variable to a temporary, hands that to the writer and reads it back. A
+value of nil type that is neither (a method that answers nil,
+`(bump; nil)`, `(bump if c)`) made the temporary a `void` local, and the
+generated C did not build.
+
+Such a value has nothing to read back. It is now handed to the writer as
+it is, so it runs once, and the assignment answers nil in the shape a nil
+literal's does. A value of any other type keeps its temporary.
+
+The call is emitted with g_setter_value_inner raised, and that switches
+this arm off for a writer assignment inside it: a block that ends in
+`b.v = 6` would answer what `def v=` returns. So the new branch is not
+taken where the receiver or the value holds a writer assignment
+(`a.v = yb { b.v = 6 }`, `a.v = b.v = f`); those keep their C and still
+do not build.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
