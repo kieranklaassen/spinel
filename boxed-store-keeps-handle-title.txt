@@ -1,0 +1,1 @@
+A boxed String stored where a handle is asked for is the handle
