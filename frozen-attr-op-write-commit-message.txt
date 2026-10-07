@@ -1,0 +1,40 @@
+An attribute's `+=` and `||=` on a frozen object raise FrozenError
+
+    class S
+      attr_accessor :n, :m
+      def initialize(n) = @n = n
+      def memo = (@m ||= 7)
+    end
+    s = S.new(0)
+    s.freeze
+    s.n += 1
+    s.m ||= 5
+    p s.n, s.m
+
+printed 1 and 5: the frozen object was changed and nothing said so.
+CRuby raises FrozenError at `s.n += 1`, as both do at `s.n = 1`.
+`s.memo` stored into the frozen object as well.
+
+The plain writer checks its receiver, and so do `@n += 1` and the
+operator-assign whose value is used, which is rewritten to the writer.
+Four stores did not: the statement `s.n op= v`, which writes the slot
+through its bound receiver; the same statement on a receiver whose
+class is known only at run time, which stores in one arm for each
+class; the conditional store every `||=` / `&&=` on a typed slot goes
+through (emit_slot_orw_value); and the statement form of `@x ||= v`.
+Each now emits the writer's guard on the object that owns the slot,
+inside the arm that stores: an or-write that stores nothing raises
+nothing, as in CRuby. A String slot that holds a shared handle has a
+conditional store of its own; the guard goes in front of it under the
+same test.
+
+emit_frozen_obj_guard emits nothing for a class the program never
+freezes, so such a program keeps its generated C. Where the class is
+frozen somewhere, `s.n += 1` on an object that is not frozen pays the
+guard's 4 instructions, what `s.n = v` pays today.
+
+The guard runs before the right side, as the plain writer's does:
+`s.n += f` on a frozen object raises without calling `f`. CRuby calls
+it first; that order is the writer's as well and is not changed here.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
