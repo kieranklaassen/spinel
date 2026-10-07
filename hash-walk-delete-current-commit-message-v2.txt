@@ -1,0 +1,48 @@
+A Hash walk whose block deletes the current entry goes on from the next
+
+    h = {"a" => 1, "b" => 2, "c" => 3}
+    h.each { |k, _v| h.delete(k) }
+    p h
+
+printed {"b" => 2} where CRuby prints {}. Deleting the entry the walk is
+at slides the next one into its slot, and the walk stepped past it.
+each and each_pair already stay on the slot for Integer and Symbol keys;
+String keys, boxed keys, and each_key and each_value with any key did
+not, and neither did the walks built on each over such a Hash:
+each_with_index, each_with_object, each_entry, cycle, count, find,
+find_index, any?, all?, none?, one?, filter_map, flat_map, group_by,
+min_by, max_by, partition, take_while and drop_while.
+
+Such a walk keeps the key of the turn in a temporary, and on a turn
+that left the Hash shorter it steps only if the slot still holds that
+entry. "Is this still that entry" is all that is asked, so the key is
+compared by identity and never read through: a String key's pointer,
+an Integer's or a Symbol's word, a boxed key's tag and word. A NaN key
+is itself that way, and a key the turn deleted needs no root. Every
+turn that does not step has made the Hash shorter, so the walk ends.
+
+Only a walk whose block can leave a Hash shorter takes the step.
+subtree_may_shrink_hash, beside subtree_may_run_proc, says it cannot
+for reads, writes of variables, conditions and loops, blockless builtin
+calls over numbers, Strings, Symbols and typed Arrays, puts and p of
+those, a lookup or a store in a Hash whose keys run no code, an append
+and a raise. A method of the program called by its bare name is asked
+through its body, and where a method being spliced yields, the caller's
+block is. Such a walk is the C it was. It is a list of what is known
+not to, so a block that calls a method defined in a class, a proc, a
+block of its own or a method on a boxed value takes the step, and pays
+the copy of the key and one compare of the length: 0 to 7
+instructions a turn in each, each_key and each_value, 4 to 15 in the
+walks built on each (callgrind).
+
+In each and each_pair a turn that deletes and a later turn that adds
+raises as CRuby does: the length an added key is measured against now
+follows the delete.
+
+Not changed: map, select, reject, sum, sort_by, to_h, transform_values
+and transform_keys, which still step past the entry; a walk over a
+Hash held in a boxed variable; a turn that deletes two entries at or
+before the one the walk is at, which skipped two and skips one; and a
+turn that deletes an entry and adds one, where CRuby raises.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
