@@ -1,0 +1,42 @@
+A class-value new holds the values it builds
+
+    class Img
+      def initialize(x, y = "c" * 2, z = "d" * 2)
+        @v = [x, y, z]
+      end
+      def ok?(i) = @v == [i, "cc", "dd"]
+    end
+    class Other
+      def initialize(x) = (@x = x)
+      def ok?(i) = @x == i
+    end
+    kl = [Img, Other][0]
+
+Of 300,000 `kl.new(i)` one answers `ok?` false, with gcc and with clang
+and no stress setting. Under SPINEL_GC_STRESS=2 a single `kl.new(1)`
+aborts, and so do `kl.new("z" * 2)` into a constructor that
+allocates, `def initialize(x) = (@v = [x])`, and upstream's own
+test/class_value_new_rest_posts.rb (`L[4].new(10)`, the empty `**kw`).
+
+`k.new(...)` on a Class value is a switch with one constructor call an
+arm. Three kinds of value stood fresh, held by nothing, inside or ahead
+of that call: a boxed receiver's argument temps (the Class-typed form
+roots its own); a default the call leaves out, spelled in the arm's
+call; and the empty Hash of a `**kw`. The next one's allocation, or the
+constructor's own allocation of the object, collected them.
+
+A fresh argument of the boxed form is now rooted as the Class-typed
+form's is. A value the arm builds is bound to a rooted local in the
+arm's prefix, as the arm's rest already is (ctor_arm_hold): in the two
+positional arms, in the arm of a class's own `self.new`, and in
+`raise k`. Only a default that may allocate, into a parameter whose
+type takes a root, is bound: an arm that builds nothing is written as
+it was, and an arm whose defaults read an earlier parameter binds
+every value already.
+
+The prefix runs ahead of the call. So where it binds one default, every
+default to its left that is not a literal is bound there too, in the
+parameters' order: `(x, y = bump(7), z = "a" * 2)` runs bump first, with
+gcc and with clang. (Written in the call, gcc ran the two right to left.)
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
