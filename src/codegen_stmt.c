@@ -5750,6 +5750,11 @@ static void emit_case_obj_eq(Compiler *c, int cond, int t, TyKind pt, Buf *b) {
   }
 }
 
+/* A `when` arm held boxed is asked `===` by what it holds at run time, as
+   the call `arm === v` on a boxed receiver is: a Proc is called, and
+   sp_poly_case_eq answers the rest (a Class its instances, a Range its
+   cover, a Regexp its match, else equality). Compared with sp_poly_eq, a
+   Range or a Class read out of an Array never matched. */
 static void emit_when_boxed_test(Compiler *c, int cond, int t, TyKind pt, Buf *b) {
   char subjp[32]; snprintf(subjp, sizeof subjp, "_t%d", t);
   int tpw = ++g_tmp;
@@ -5757,7 +5762,7 @@ static void emit_when_boxed_test(Compiler *c, int cond, int t, TyKind pt, Buf *b
   buf_printf(b, "; _t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_PROC"
                 " ? sp_poly_truthy(sp_penum_call1((sp_Proc *)_t%d.v.p, ", tpw, tpw, tpw);
   if (pt == TY_POLY) buf_puts(b, subjp); else emit_boxed_text(c, pt, subjp, b);
-  buf_printf(b, ")) : sp_poly_eq(_t%d, ", tpw);
+  buf_printf(b, ")) : sp_poly_case_eq(_t%d, ", tpw);
   if (pt == TY_POLY) buf_puts(b, subjp); else emit_boxed_text(c, pt, subjp, b);
   buf_puts(b, "); })");
 }
