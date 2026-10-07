@@ -10675,14 +10675,36 @@ static void zsuper_end(ZSuper *z) {
   if (z->gather < 0) arg_layout_free(&z->L);
 }
 
+/* What emit_zsuper_param wrote: ZS_RUNS, code that may allocate as it runs;
+   ZS_DEFAULT, the parameter's default, where that writes or may allocate. */
+enum { ZS_RUNS = 1, ZS_DEFAULT = 2 };
+
+/* operand_may_allocate, less a builtin operator over scalars whose operands
+   make nothing (call_is_scalar_op): `1 + 1` is a call and allocates nothing. */
+static int zsuper_value_allocates(Compiler *c, int id) {
+  if (!operand_may_allocate(c, id)) return 0;
+  if (nt_kind(c->nt, id) != NK_CallNode || !call_is_scalar_op(c, id)) return 1;
+  int args = nt_ref(c->nt, id, "arguments"), argc = 0;
+  const int *argv = args >= 0 ? nt_arr(c->nt, args, "arguments", &argc) : NULL;
+  for (int a = 0; a < argc; a++) if (zsuper_value_allocates(c, argv[a])) return 1;
+  return zsuper_value_allocates(c, nt_ref(c->nt, id, "receiver"));
+}
+
+static int zsuper_default_runs(Compiler *c, Scope *pm, int i) {
+  int d = pm->pdefault ? pm->pdefault[i] : -1;
+  if (d < 0) return 0;
+  if (zsuper_value_allocates(c, d)) return ZS_RUNS | ZS_DEFAULT;
+  return subtree_has_side_effect(c, d) ? ZS_DEFAULT : 0;
+}
+
 /* The parent's parameter i for a bare super: a positional by the layout, a
    keyword from this method's like-named keyword, anything else its default
    or empty. This method's names read under the renames up to own_nren, the
    parent's defaults (a parent inlined in place) under those up to
-   parent_nren. */
-static void emit_zsuper_param(Compiler *c, Scope *s, Scope *pm, const ZSuper *z, int i,
-                              int own_nren, int parent_nren, Buf *b) {
-  int sv = g_nren;
+   parent_nren. Returns what it wrote (ZS_RUNS, ZS_DEFAULT). */
+static int emit_zsuper_param(Compiler *c, Scope *s, Scope *pm, const ZSuper *z, int i,
+                             int own_nren, int parent_nren, Buf *b) {
+  int sv = g_nren, made = 0;
   LocalVar *dst = scope_local(pm, pm->pnames[i]);
   TyKind dt = dst ? dst->type : TY_UNKNOWN;
   int kw = i != pm->kwrest_idx && callee_param_is_declared_kwarg(c, pm, pm->pnames[i]);
@@ -10694,6 +10716,8 @@ static void emit_zsuper_param(Compiler *c, Scope *s, Scope *pm, const ZSuper *z,
   else if (kw && z->kwsrc >= 0) {
     g_nren = parent_nren;
     emit_ds_param_extract(c, pm, i, z->kwsrc, TY_POLY, b);
+    /* the read interns its key, which allocates the first time it runs */
+    made = ZS_RUNS | zsuper_default_runs(c, pm, i);
   }
   else if (i == pm->kwrest_idx && (z->kwrest >= 0 || s->kwrest_idx >= 0)) {
     char tn[24];
@@ -10717,6 +10741,7 @@ static void emit_zsuper_param(Compiler *c, Scope *s, Scope *pm, const ZSuper *z,
     else {
       g_nren = parent_nren;
       emit_gathered_param(c, pm, i, z->gather, b);
+      made = zsuper_default_runs(c, pm, i);
     }
   }
   else if (z->gather < 0 && z->L.from[i] == ARG_NODE) {
@@ -10750,17 +10775,89 @@ static void emit_zsuper_param(Compiler *c, Scope *s, Scope *pm, const ZSuper *z,
   else {
     g_nren = parent_nren;
     emit_zsuper_param_fill(c, pm, i, b);
+    if (i != pm->rest_idx && i != pm->kwrest_idx) made = zsuper_default_runs(c, pm, i);
   }
   g_nren = sv;
+  return made;
 }
 
-static void emit_zsuper_args(Compiler *c, Scope *s, Scope *pm, const char *sep0, Buf *b) {
+/* A value already in a temp of its own (an Array literal's, built and rooted
+   in the prelude) is not made in the call's parentheses. */
+static int zsuper_text_is_temp(const char *v) {
+  return v[0] == '_' && v[1] == 't' && v[2] && !v[2 + strspn(v + 2, "0123456789")];
+}
+
+/* The parent's parameter i of a bare super, its value `v`, made ahead of the
+   call: the statement goes to `seq`, which the call's site puts in front of
+   the call (zsuper_ahead_wrap), and the temp is the argument. A kind that
+   takes a root is held in a rooted temp declared in the prelude, as
+   emit_rooted_conversion holds a converted read. A slot's address has its
+   temp already. */
+static void emit_zsuper_ahead(Compiler *c, Scope *pm, int i, const char *v, Buf *seq, Buf *b) {
+  LocalVar *p = scope_local(pm, pm->pnames[i]);
+  if (!p || p->byref_out) { buf_puts(b, v); return; }
+  if (p->type == TY_POLY) {
+    emit_indent(g_pre, g_indent);
+    buf_printf(g_pre, "sp_RbVal _t%d = sp_box_nil(); SP_GC_ROOT_RBVAL(_t%d);\n", g_tmp + 1, g_tmp + 1);
+    buf_printf(seq, "_t%d = %s; ", ++g_tmp, v);
+  }
+  else if (needs_root(p->type)) {
+    emit_rooted_conversion(c, p->type, v, seq);
+    buf_puts(seq, "; ");
+  }
+  else {
+    emit_ctype(c, p->type, seq);
+    buf_printf(seq, " _t%d = %s; ", ++g_tmp, v);
+  }
+  buf_printf(b, "_t%d", g_tmp);
+}
+
+/* Puts the statements emit_zsuper_args made for the call written at `at`
+   in front of it: `({ <statements> <call>; })`. */
+static void zsuper_ahead_wrap(Buf *b, size_t at, Buf *seq) {
+  if (!seq->len) return;
+  Buf call; memset(&call, 0, sizeof call);
+  buf_puts(&call, b->p + at);
+  b->len = at;
+  buf_puts(b, "({ ");
+  buf_puts(b, seq->p);
+  buf_puts(b, call.p);
+  buf_puts(b, "; })");
+  free(call.p); free(seq->p);
+  memset(seq, 0, sizeof *seq);
+}
+
+/* The parent's parameters stand side by side in the call's parentheses, and
+   C runs them in any order: gcc runs the last first, so two defaults that
+   write ran backwards. A method roots its parameters before it allocates,
+   so a call may hand it one fresh value; two are one too many, since making
+   the second collects the first before the callee is entered. So where a
+   default writes or may allocate and another parameter runs code too, each
+   such default is made ahead of the call, in order, into `seq`
+   (emit_zsuper_ahead). A rooted temp lives to the end of the method, past
+   the call, so a program that defines a finalizer, the one program that can
+   tell, keeps the call as it was. */
+static void emit_zsuper_args(Compiler *c, Scope *s, Scope *pm, const char *sep0, Buf *seq, Buf *b) {
   ZSuper z;
   zsuper_begin(c, s, pm, &z);
-  for (int i = 0; i < pm->nparams; i++) {
-    buf_puts(b, i == 0 ? sep0 : ", ");
-    emit_zsuper_param(c, s, pm, &z, i, g_nren, g_nren, b);
+  int n = pm->nparams, runs = 0, dflts = 0;
+  Buf *txt = calloc(n ? (size_t)n : 1, sizeof *txt);
+  int *made = calloc(n ? (size_t)n : 1, sizeof *made);
+  for (int i = 0; i < n; i++) {
+    made[i] = emit_zsuper_param(c, s, pm, &z, i, g_nren, g_nren, &txt[i]);
+    if (!txt[i].p) buf_puts(&txt[i], "");
+    if (zsuper_text_is_temp(txt[i].p)) made[i] = 0;
+    if (made[i]) runs++;
+    if (made[i] & ZS_DEFAULT) dflts++;
   }
+  int ahead = g_pre && dflts > 0 && runs > 1 && !g_uses_finalizers;
+  for (int i = 0; i < n; i++) {
+    buf_puts(b, i == 0 ? sep0 : ", ");
+    if (ahead && (made[i] & ZS_DEFAULT)) emit_zsuper_ahead(c, pm, i, txt[i].p, seq, b);
+    else buf_puts(b, txt[i].p);
+    free(txt[i].p);
+  }
+  free(txt); free(made);
   zsuper_end(&z);
 }
 
@@ -11315,6 +11412,8 @@ void emit_super(Compiler *c, int id, Buf *b) {
   /* Prepend chain: super goes to the next shadow in the same class (a class
      method's chain is taken below, in the class-method form). */
   const char *shadow = s->is_cmethod ? NULL : comp_super_shadow(c, s);
+  size_t at = b->len;
+  Buf seq; memset(&seq, 0, sizeof seq);
   if (shadow) {
     buf_printf(b, "sp_%s_%s((sp_%s *)%s",
                c->classes[s->class_id].c_name, mc(shadow),
@@ -11341,7 +11440,7 @@ void emit_super(Compiler *c, int id, Buf *b) {
     if (ty && sp_streq(ty, "ForwardingSuperNode") && smi >= 0) {
       /* laid out over the shadow's parameters as any bare super is: passed
          slot by slot, a `**` went into the shadow's first keyword */
-      emit_zsuper_args(c, s, &c->scopes[smi], ", ", b);
+      emit_zsuper_args(c, s, &c->scopes[smi], ", ", &seq, b);
     }
     else if (ty && sp_streq(ty, "ForwardingSuperNode")) {
       for (int i = 0; i < s->nparams; i++) { buf_puts(b, ", "); emit_scope_local_ref(c, s, s->pnames[i], b); }
@@ -11351,6 +11450,7 @@ void emit_super(Compiler *c, int id, Buf *b) {
        method taking a block did not link */
     if (smi >= 0) emit_super_block_arg(c, id, s, &c->scopes[smi], 1, b);
     buf_puts(b, ")");
+    zsuper_ahead_wrap(b, at, &seq);
     return;
   }
   /* Strip __prep_N_ prefix to get the user method name for parent chain lookup. */
@@ -11403,11 +11503,12 @@ void emit_super(Compiler *c, int id, Buf *b) {
       buf_printf(b, "%s%s", cmethod_takes_self_cls(c, (int)(s - c->scopes)) ? "_sp_cls" : own,
                  c->scopes[cmi].nparams > 0 ? ", " : "");
     }
-    if (ty && sp_streq(ty, "ForwardingSuperNode")) emit_zsuper_args(c, s, &c->scopes[cmi], "", b);
+    if (ty && sp_streq(ty, "ForwardingSuperNode")) emit_zsuper_args(c, s, &c->scopes[cmi], "", &seq, b);
     else emit_args_filled(c, cmi, nt_ref(c->nt, id, "arguments"), "", b);
     emit_super_block_arg(c, id, s, &c->scopes[cmi],
                          c->scopes[cmi].nparams > 0 || cmethod_takes_self_cls(c, cmi), b);
     buf_puts(b, ")");
+    zsuper_ahead_wrap(b, at, &seq);
     return;
   }
   int defcls = -1;
@@ -11669,10 +11770,12 @@ void emit_super(Compiler *c, int id, Buf *b) {
         for (int q = 0; q < xn; q++) {
           int xm = comp_method_in_chain(c, xr[q], uname, NULL);
           if (q != xn - 1) buf_printf(b, "_xi%d == %d ? ", pk, q);
+          size_t arm = b->len;
           buf_printf(b, "sp_%s_%s((sp_Exception *)%s", mc_reopen_cls(c, xr[q], uname), mc(uname), g_self);
-          if (ty && sp_streq(ty, "ForwardingSuperNode")) emit_zsuper_args(c, s, &c->scopes[xm], ", ", b);
+          if (ty && sp_streq(ty, "ForwardingSuperNode")) emit_zsuper_args(c, s, &c->scopes[xm], ", ", &seq, b);
           else emit_args_filled(c, xm, nt_ref(c->nt, id, "arguments"), ", ", b);
           buf_puts(b, ")");
+          zsuper_ahead_wrap(b, arm, &seq);
           if (q != xn - 1) buf_puts(b, " : ");
         }
         buf_puts(b, "; })");
@@ -11758,13 +11861,14 @@ void emit_super(Compiler *c, int id, Buf *b) {
     /* The parent may declare more than this method does -- an optional,
        `*rest`, a keyword, `**` -- which a bare super leaves to their defaults
        and empties, as CRuby does (#4852). */
-    emit_zsuper_args(c, s, &c->scopes[mi], ", ", b);
+    emit_zsuper_args(c, s, &c->scopes[mi], ", ", &seq, b);
   }
   else {
     emit_args_filled(c, mi, nt_ref(c->nt, id, "arguments"), ", ", b);
   }
   emit_super_block_arg(c, id, s, &c->scopes[mi], 1, b);
   buf_puts(b, ")");
+  zsuper_ahead_wrap(b, at, &seq);
 }
 
 /* Generate sp_obj_cmp_dispatch: a cls_id switch calling each instantiated
