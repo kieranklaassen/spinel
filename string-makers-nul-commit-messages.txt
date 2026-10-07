@@ -1,0 +1,133 @@
+chomp cuts a separator that begins with a NUL byte
+
+`"PATH=/bin\0".chomp("\0")` answered the String unchanged, and
+`"a\n".chomp("\0")` answered "a": sp_str_chomp_sep took a separator
+whose first byte is NUL for the empty one, which strips trailing
+newlines. The separator is the empty one when its byte length is 0.
+chomp! rides the same function.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+----
+tr_s walks the String to its byte length
+
+`"a\0b".tr_s("a", "z").bytesize` was 1: sp_str_tr_s sized its buffer by
+strlen and walked while a byte was not NUL, so the answer ended at the
+String's first NUL byte, whatever the two sets named. It reads the byte
+length and walks to it, as sp_str_tr does. tr_s! rides the same
+function.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+----
+Array#sum with a String seed joins the whole of each String
+
+`["a\0b", "c"].sum("").bytesize` was 2: sp_StrArray_sum_str measured
+the seed and every member by strlen, so each was joined only up to its
+first NUL byte. They are measured by their byte length.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+----
+String#chr of a String that begins with a NUL byte is that byte
+
+`"\0ab".chr` answered "": sp_str_chr took a first byte of NUL for the
+empty String. It is the empty String when its byte length is 0 as
+well; otherwise the NUL is the first character.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+----
+format reads its template to the byte length
+
+`format("a\0b%s", "c").bytesize` was 1: sp_str_format_polyarr sized
+its buffer by strlen of the template and walked it while a byte was
+not NUL, so the answer ended at the template's first NUL byte and the
+arguments behind it were never read. It walks to the template's byte
+length; sprintf, String#% and a File's printf ride the same function.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+----
+scan with a String pattern finds it by bytes
+
+`"a\0b".scan("b")` answered [] and `"x,a\0b".scan("a\0b")[0].bytesize`
+was 1: sp_str_scan measured the pattern by strlen and searched with
+strstr, which ends at the subject's first NUL byte. sp_str_scan_at,
+the turn of a block that reads `$~`, did the same.
+
+Both read byte lengths and search with sp_str_find. One byte is found
+by memchr. A longer pattern without a NUL is still found by strstr;
+when strstr finds nothing, sp_str_find_rest looks behind the NUL it
+ended at, by sp_bytestr, as it does from the start for a pattern that
+holds a NUL. A pattern without one cannot lie across that NUL, so
+nothing is missed, and a subject without one is searched as before,
+with one strlen more when a pattern of two bytes or more is not found.
+The empty pattern walks to the byte length too.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+----
+gsub and sub with a Hash read their Strings by bytes
+
+`"a\0b".gsub(/[ab]/, "a" => "1", "b" => "2").bytesize` was 1: the four
+functions behind gsub and sub with a Hash measured the subject and the
+replacement by strlen, so the answer ended at the first NUL byte of
+either. The pair for a String pattern also searched with strstr, and
+answered a String whose length was never set.
+
+They read byte lengths, and the String pattern is found by
+sp_str_find. A Regexp's match that holds a NUL byte is looked up as a
+String of its own, since the transient key is read as a C string:
+`"a\0b".gsub(/\0/, "\0" => "N")` is "aNb".
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+----
+sub and gsub with a block keep the subject's tail past a NUL byte
+
+`"a\0b".gsub(/a/) { "q" }.bytesize` was 1. Once a match is behind it,
+what is left of the subject is appended from inside the String, where
+sp_String_append_bin finds no header to measure it by and takes it to
+end at its first NUL byte. The emitted loop holds the subject's byte
+length and where it stands, so the rest goes in by that count
+(sp_String_append_n). sub! and gsub! ride the same loop.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+----
+sub and gsub with a String pattern and a block find it by bytes
+
+`"a\0b".sub("b") { "zz" }` answered the String unchanged, and
+`"a\0b".sub("\0") { "::" }` answered "::a\0b": the loop emitted for a
+String pattern searched with strstr, which ends at the subject's first
+NUL byte and reads a pattern that begins with one as the empty
+pattern. It searches with sp_str_find over the subject's byte length;
+an empty pattern matches where it stands, as it did.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+----
+lines with a separator reads the String by bytes
+
+`"a\0b".lines("\0")` answered ["a"], and `"\0ab".lines("b")` answered
+[]: sp_str_lines_sep took a String that begins with a NUL byte for the
+empty one, measured the String and the separator by strlen and
+searched with strstr, so the lines ended at the String's first NUL
+byte. The chomp: form measured each line by strlen again.
+
+Both read byte lengths, and the separator is found by sp_str_find.
+each_line with a separator rides them.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+----
+split with a Regexp keeps a trailing field that begins with a NUL byte
+
+`"ab\0".split(/b/)` answered ["a"], and `"\0ab".split(/b/)` answered
+[]: sp_re_split_limit strips trailing empty fields by testing each
+one's first byte, and a field that begins with a NUL byte passed for
+empty. A field is empty when its byte length is 0.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+----
+ARGF.read keeps what follows a NUL byte on each line
+
+ARGF.read of the five lines "a\0b", "\0cd", "ef\0", "\0", "g\0h"
+answered "aefg": sp_argf_read joins the lines sp_argf_gets reads, each
+whole with its byte count, through sp_String_append, which takes its
+argument to end at a NUL byte. It joins them by their byte length
+(sp_String_append_bytes).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+----

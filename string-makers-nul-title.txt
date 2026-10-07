@@ -1,0 +1,1 @@
+tr_s, scan, format, lines and eight more read a String to its byte length
