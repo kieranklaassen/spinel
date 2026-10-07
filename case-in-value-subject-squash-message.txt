@@ -1,0 +1,22 @@
+A by-value case/in subject keeps its Strings while it is deconstructed
+
+A small class that is never written is kept by value: the struct lives
+in the C temp emit_case_match binds its subject to. For a subject made
+in place (`case mk(i)`, `mk(i) => [q, t]`) that temp is the only holder
+of the object's String fields. The match rooted its subject with
+emit_gc_root_tmp, which takes nothing for a by-value object, so the
+String was collected when #deconstruct or #deconstruct_keys allocated
+before it read it, and the pattern bound a freed String: of 3,000
+matches, 5 bind another String in a plain run.
+
+The subject is now rooted with emit_gc_root_tmp_refs, which roots a
+by-value object's String fields one by one, the way a local of that
+class is rooted, and anything else as emit_gc_root_tmp did. `=>` and
+`in` as a condition are case/in by the time they are emitted and take
+the same line.
+
+test/case_in_value_subject_string_root.rb counts the wrong matches of
+3,000 through nine forms. On master every line is wrong in a plain
+run.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

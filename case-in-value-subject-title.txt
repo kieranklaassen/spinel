@@ -1,0 +1,1 @@
+A by-value case/in subject keeps its Strings while it is deconstructed
