@@ -1816,11 +1816,37 @@ static int const_read_is_programs(Compiler *c, int id) {
   return par < 0 || (pn && comp_class_index(c, pn) >= 0);
 }
 
+/* Does `read` run only after the constant write `w` has run? It does when
+   `w` is a statement of the program, or of a class or module body that is
+   one, and `read` comes after it in the text: nothing after such a statement
+   runs before it. Walks from `node`, the program's statements; *st is 0
+   before the write, 1 after it, -1 once `read` was met before it. */
+static int runs_after_const_write(const NodeTable *nt, int node, int spine, int w, int read, int *st) {
+  if (node < 0) return 0;
+  if (node == read) { if (*st != 1) *st = -1; return *st == 1; }
+  if (node == w) { if (*st == 0 && spine) *st = 1; return 0; }
+  NodeKind k = nt_kind(nt, node);
+  if (k == NK_PreExecutionNode) return 0;   /* BEGIN { } runs first */
+  if (k == NK_ClassNode || k == NK_ModuleNode)
+    return runs_after_const_write(nt, nt_ref(nt, node, "body"), spine, w, read, st);
+  spine = spine && k == NK_StatementsNode;
+  int nr = nt_num_refs(nt, node);
+  for (int i = 0; i < nr; i++)
+    if (runs_after_const_write(nt, nt_ref_at(nt, node, i), spine, w, read, st)) return 1;
+  int na = nt_num_arrs(nt, node);
+  for (int i = 0; i < na; i++) {
+    int m = 0; const int *ids = nt_arr_at(nt, node, i, &m);
+    for (int j = 0; j < m; j++) if (runs_after_const_write(nt, ids[j], spine, w, read, st)) return 1;
+  }
+  return 0;
+}
+
 /* `x.is_a?(A)` (kind_of?, instance_of?) where `A = SomeClass`: rewrite the
    argument's name to the class the constant holds, as `A.foo` and `when A`
    read it, so every arm that names the class and the narrowing after it see
-   the class. Only for a constant whose one write is `A = <constant>`: a
-   second write may hold another class by the time the call runs. */
+   the class. Only where the constant is known to hold that class when the
+   call runs: its one write is `A = <constant>` and has run by then. A second
+   write may hold another class, and before the write CRuby raises NameError. */
 static void rewrite_const_alias_kind_arg(Compiler *c, int id) {
   const NodeTable *nt = c->nt;
   const char *name = nt_str(nt, id, "name");
@@ -1830,13 +1856,13 @@ static void rewrite_const_alias_kind_arg(Compiler *c, int id) {
   if (argc != 1 || !const_read_is_programs(c, argv[0])) return;
   const char *an = nt_str(nt, argv[0], "name");
   if (!an || comp_class_index(c, an) >= 0) return;   /* already a class name */
-  int w = const_only_write(nt, an);
-  if (nt_kind(nt, w) != NK_ConstantWriteNode || !const_read_is_programs(c, nt_ref(nt, w, "value"))) return;
   const char *real = resolve_class_alias(c, an);
-  if (real && !sp_streq(real, an)) {
-    char buf[256]; snprintf(buf, sizeof buf, "%s", real);  /* copy: set frees an */
-    nt_set_str((NodeTable *)nt, argv[0], "name", buf);
-  }
+  if (!real || sp_streq(real, an)) return;
+  int w = const_only_write(nt, an), st = 0;
+  if (nt_kind(nt, w) != NK_ConstantWriteNode || !const_read_is_programs(c, nt_ref(nt, w, "value"))) return;
+  if (!runs_after_const_write(nt, nt_ref(nt, nt->root_id, "statements"), 1, w, argv[0], &st)) return;
+  char buf[256]; snprintf(buf, sizeof buf, "%s", real);  /* copy: set frees an */
+  nt_set_str((NodeTable *)nt, argv[0], "name", buf);
 }
 
 /* `A = SomeClass` (a constant aliasing a class) then `A.foo`: rewrite the

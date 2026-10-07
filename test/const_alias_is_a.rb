@@ -13,6 +13,8 @@ PK = Pt
 MK = Mod
 EK = MyErr
 SK = S
+module Lib; class Thing; end; end
+LT = Lib::Thing
 module Cfg; F = Float; end
 class Holder
   A = Array
@@ -32,6 +34,7 @@ p Holder.array?([1]), Holder.array?(7)
 p Sub.new.is_a?(PK), Sub.new.instance_of?(PK), Pt.new.instance_of?(PK)
 p Tagged.new.is_a?(MK), Pt.new.is_a?(MK)
 p S.new(1).is_a?(SK)
+p Lib::Thing.new.is_a?(LT), Pt.new.is_a?(LT)
 begin
   raise MyErr, "m"
 rescue => e
@@ -53,3 +56,17 @@ p [1, "a", 2].count { |v| v.is_a?(K) }
 T = Integer
 T = String
 p 7.is_a?(T)
+
+# a builtin namespace's class is not the program's class of that name
+class Stat; end
+FS = File::Stat
+p Stat.new.is_a?(FS)
+
+# a call that runs before the constant is written: CRuby raises NameError
+def early(v)
+  v.is_a?(LATE)
+rescue NameError
+  false
+end
+p early(7)
+LATE = Integer
