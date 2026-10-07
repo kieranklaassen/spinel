@@ -1,0 +1,26 @@
+An operand in parentheses keeps a call's operands in order
+
+    def mk = ($o = Box.new; "t")
+    p mk.length + ($o.val > 9 ? 1 : 2)
+
+raised "undefined method 'val' for nil" where CRuby prints 3.
+
+emit_operands_in_order declines the whole rewrite when an observable
+operand is not bindable, and it asked the kind of the operand as
+written: a call or a conditional in parentheses is a ParenthesesNode.
+The operands were then left to C's order, and what the one in
+parentheses hoisted (the nil check of $o, an Array literal, the leading
+statements of an `if` arm) ran in the statement's prelude, ahead of the
+operand written before it. `mk * (late)` ran late first under gcc.
+
+The kind is asked of what the parentheses hold when that is a single
+statement (unwrap_parens), so `(call)` and `(c ? a : b)` bind as the
+call and the conditional do. A Range, a literal, a write or a sequence
+in parentheses is not bound.
+
+Not where an operand before the last may be a String in a program that
+changes a String in place: CRuby reads the String when the call runs,
+so `k.name * (k.rename)` shows the rename, which a String bound first
+misses. Those calls compile as they did.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
