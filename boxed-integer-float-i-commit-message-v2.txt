@@ -1,0 +1,38 @@
+A boxed Integer or Float answers i
+
+    row = [5, "q"]
+    x = row[0]
+    p x.i
+
+raised NoMethodError, "undefined method 'i' for an instance of Integer",
+where CRuby prints (0+5i). A boxed number answers real, imaginary, conj,
+rect, polar and to_c through the sp_poly_* helpers; i was in none of the
+boxed arms, so the call was left untyped and emitted as a missing
+method. It is typed and emitted beside conj now: sp_poly_imag_unit
+answers the imaginary number an Integer or a Float answers unboxed, and
+raises NoMethodError for any other value, as before.
+
+The call is taken only where nothing of the program's own answers an i:
+no class or module has one as a method, a reader or a class method, and
+ostruct is not required. A boxed value of such a program can be one of
+its objects, a class answering on its class tag, or an OpenStruct with
+a member i, and the dispatch that answers those is kept whole: the
+program gets the C it had. The analysis and the emitter ask the one
+question (an_program_answers_name, program_answers_name). It is not
+poly_name_user_claimed, which says no inside a dispatch's builtin arm
+and would change that program's C there.
+
+Not changed: a boxed Rational's i still raises. Unboxed it answers a
+Float part ((0+0.5i) for CRuby's (0+(1/2)*i)), and the boxed call does
+not take that answer. A boxed Integer past 2**53 and a boxed 0.0 answer
+what they answer unboxed on master, which is not what CRuby prints:
+under `# spinel: int64`, `x = [4611686018427387903, "q"][0]; p x.i`
+prints (0+4611686018427387904i), and `x = [0.0, "q"][0]; p x.i.conj`
+prints (0+-0.0*i) for (0-0.0i); `x = 4611686018427387903; p x.i` and
+`x = 0.0; p x.i.conj` print the same lines on master. An Integer past
+64 bits (2**70) still raises boxed. A boxed number's respond_to?(:i)
+still answers false, as its respond_to?(:conj) does. And beside a class
+or a module with an i of any kind, or under ostruct, a boxed number's i
+still raises.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
