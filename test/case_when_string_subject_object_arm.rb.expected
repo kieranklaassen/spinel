@@ -1,0 +1,15 @@
+prefix
+:none
+:listed
+ru: ruby
+ru: rust
+named
+:hit
+:plain
+:miss
+true
+false
+:other
+:three
+:three
+:other

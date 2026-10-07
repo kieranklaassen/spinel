@@ -5790,6 +5790,36 @@ static int emit_when_scalar_class(TyKind pt, const char *cn, int t, Buf *b) {
   return 1;
 }
 
+/* A String subject beside an object arm of a class with its own === (or
+   ==, which Object#=== calls): the arm is asked with the String as its
+   argument, as an Array or a Hash subject asks it (emit_case_container_eq).
+   The String arm of `when` answered false before the method ran. Only a
+   method of one parameter that is boxed (emit_when_user_eq) or a String
+   and answers a boolean; every other arm keeps the answer it had. A nil
+   arm matches a nil subject. Returns 1 when emitted. */
+static int emit_when_str_obj_eq(Compiler *c, int cond, int t, Buf *b) {
+  if (emit_when_user_eq(c, cond, t, TY_STRING, b)) return 1;
+  TyKind wpt = comp_ntype(c, cond);
+  int wcid = ty_is_object(wpt) ? ty_object_class(wpt) : -1;
+  if (wcid < 0 || comp_ty_value_obj(c, wpt)) return 0;
+  int wdef = -1;
+  int weq = comp_method_in_chain(c, wcid, "===", &wdef);
+  if (weq < 0) weq = comp_method_in_chain(c, wcid, "==", &wdef);
+  if (weq < 0 || wdef < 0) return 0;
+  Scope *ws = &c->scopes[weq];
+  LocalVar *wp = ws->nparams == 1 ? scope_local(ws, ws->pnames[0]) : NULL;
+  if (!wp || wp->type != TY_STRING || repr_of_slot(c, wp).kind == RK_STRBUF ||
+      ws->rest_idx >= 0 || ws->kwrest_idx >= 0 || ws->blk_param || ws->ret != TY_BOOL) return 0;
+  const char *dcn = c->classes[wdef].c_name;
+  int ta = ++g_tmp;
+  buf_printf(b, "({ sp_%s *_t%d = (sp_%s *)(", dcn, ta, dcn);
+  emit_expr(c, cond, b);
+  buf_printf(b, "); SP_GC_ROOT(_t%d); _t%d ? ", ta, ta);
+  emit_method_cname(c, ws, b);
+  buf_printf(b, "(_t%d, _t%d) : _t%d == NULL; })", ta, t, t);
+  return 1;
+}
+
 static int emit_when_typed_test(Compiler *c, int cond, int t, TyKind pt, Buf *b) {
   int reidx = re_lit_index(c, cond);
   /* `when nil` on an Integer or Float scrutinee matches its nil sentinel:
@@ -5811,6 +5841,9 @@ static int emit_when_typed_test(Compiler *c, int cond, int t, TyKind pt, Buf *b)
   }
   else if (pt == TY_STRING && emit_when_string_range(c, cond, t, b)) {
     /* emitted the lexicographic cover check */
+  }
+  else if (pt == TY_STRING && emit_when_str_obj_eq(c, cond, t, b)) {
+    /* emitted the object arm's own === or == */
   }
   /* a numeric Range never covers an Array or a Hash (nor a String):
      evaluate the arm for its effects and answer false */
