@@ -3568,8 +3568,20 @@ void emit_iter_step_body(Compiler *c, int block, Buf *b, int indent) {
 
 /* A step's body inside the iterator's own C loop, through emit_stmts (the
    locals' reset, the statements), with the body's own redo label after
-   that setup (g_redo_pending), where it had none. */
+   that setup (g_redo_pending), where it had none. A body with a `next`
+   records the loop as emit_loop_body records its own: that `next` is this
+   loop's continue, so it pops the frames and runs the ensures opened
+   inside the body and no others, an ensure's deferred `next` ends in that
+   continue, and a `next v` is not the value of an enclosing block. */
 void emit_iter_loop_stmts(Compiler *c, int body, Buf *b, int indent) {
+  int own_next = body >= 0 && fold_body_has_next(c, body);
+  int sv_lexc = g_loop_exc_base, sv_lens = g_loop_ensure_base, sv_lbody = g_loop_body;
+  const char *sv_nxv = g_ie_next_var; TyKind sv_nxt = g_ie_next_ty;
+  if (own_next) {
+    g_loop_exc_base = g_exc_frame_depth; g_loop_ensure_base = g_ensure_depth;
+    g_c_loop_depth++; g_loop_body = body;
+    g_ie_next_var = NULL; g_ie_next_ty = TY_UNKNOWN;
+  }
   int lbl = 0;
   if (body >= 0 && subtree_has_own_redo(c->nt, body) &&
       g_redo_depth < (int)(sizeof g_redo_stack / sizeof g_redo_stack[0])) {
@@ -3580,6 +3592,11 @@ void emit_iter_loop_stmts(Compiler *c, int body, Buf *b, int indent) {
   }
   emit_stmts(c, body, b, indent);
   if (lbl) g_redo_depth--;
+  if (own_next) {
+    g_ie_next_var = sv_nxv; g_ie_next_ty = sv_nxt;
+    g_c_loop_depth--;
+    g_loop_exc_base = sv_lexc; g_loop_ensure_base = sv_lens; g_loop_body = sv_lbody;
+  }
 }
 
 /* Does block `block` need the step's frame: a `next` or a `redo` of its
