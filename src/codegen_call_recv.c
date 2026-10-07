@@ -3458,11 +3458,19 @@ static int emit_typed_array_call(Compiler *c, int id, Buf *b, const NodeTable *n
    from no variable. Each link answers its receiver, or nil, which the next
    link raises on; so what a mutator computes from the chain's value is the
    variable's new value. */
+static int str_self_mutator_name(const char *n) {
+  return n && (sp_streq(n, "insert") || sp_streq(n, "prepend") || sp_streq(n, "concat") ||
+               sp_streq(n, "replace") || sp_streq(n, "<<"));
+}
 static int str_bang_chain_var(Compiler *c, int recv) {
   const NodeTable *nt = c->nt;
   int cur = unwrap_parens(c, recv), links = 0;
+  /* insert / prepend / concat / replace / << answer their receiver always,
+     so a bang on their result (`s.insert(1, "-").sub!("-", "+")`) mutates
+     the variable too; the chain passes through them as through a bang */
   while (nt_kind(nt, cur) == NK_CallNode && nt_ref(nt, cur, "receiver") >= 0 &&
-         ty_str_typed_bang_flags(nt_str(nt, cur, "name"))) {
+         (ty_str_typed_bang_flags(nt_str(nt, cur, "name")) ||
+          str_self_mutator_name(nt_str(nt, cur, "name")))) {
     cur = unwrap_parens(c, nt_ref(nt, cur, "receiver"));
     links++;
   }
@@ -7461,15 +7469,15 @@ static int int_arms_round_divide(Compiler *c, int id, Buf *b, const NodeTable *n
     buf_puts(b, ", "); emit_int_expr(c, argv[1], b); buf_puts(b, ")");
   }
   else if (sp_streq(name, "divmod") && argc == 1 && comp_ntype(c, argv[0]) == TY_FLOAT) {
-    /* a Float divisor divides as floats: [floor-quotient Integer, Float mod] */
-    int tb = ++g_tmp, tq = ++g_tmp, o = ++g_tmp;
+    /* a Float divisor divides as floats, CRuby's flodivmod (sp_flo_divmod):
+       [Integer quotient, Float mod] */
+    int tb = ++g_tmp, tq = ++g_tmp, tm = ++g_tmp, o = ++g_tmp;
     buf_printf(b, "({ double _t%d = ", tb); emit_expr(c, argv[0], b);
-    buf_printf(b, "; if (_t%d == 0.0) sp_raise_cls(\"ZeroDivisionError\", \"divided by 0\");"
-                  " sp_int _t%d = (sp_int)floor((double)(%s) / _t%d);"
+    buf_printf(b, "; double _t%d, _t%d; sp_flo_divmod((double)(%s), _t%d, &_t%d, &_t%d);"
                   " sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);"
-                  " sp_PolyArray_push(_t%d, sp_box_int(_t%d));"
-                  " sp_PolyArray_push(_t%d, sp_box_float((double)(%s) - (double)_t%d * _t%d)); _t%d; })",
-               tb, tq, r, tb, o, o, o, tq, o, r, tq, tb, o);
+                  " sp_PolyArray_push(_t%d, sp_box_int(sp_float_fit_i(_t%d)));"
+                  " sp_PolyArray_push(_t%d, sp_box_float(_t%d)); _t%d; })",
+               tq, tm, r, tb, tq, tm, o, o, o, tq, o, tm, o);
   }
   else if (sp_streq(name, "divmod") && argc == 1 &&
            comp_ntype(c, argv[0]) != TY_RATIONAL) {
@@ -7965,8 +7973,8 @@ static int emit_scalar_recv_arms(Compiler *c, int id, Buf *b, const NodeTable *n
     }
     else if (sp_streq(name, "to_i"))  buf_printf(b, repr_of(c, id).kind == RK_BOXED ? "sp_box_f_to_int(%s)" : "sp_float_to_i_checked(%s)", r);
     else if (sp_streq(name, "divmod") && argc == 1) {
-      /* Float#divmod(n) -> [floor(x/n) (Integer), x - q*n (Float)] */
-      int tx = ++g_tmp, tn = ++g_tmp, tq = ++g_tmp, o = ++g_tmp;
+      /* Float#divmod(n) -> [Integer quotient, Float mod], CRuby's flodivmod */
+      int tx = ++g_tmp, tn = ++g_tmp, tq = ++g_tmp, tm = ++g_tmp, o = ++g_tmp;
       buf_printf(b, "({ sp_float _t%d = (%s); sp_float _t%d = ", tx, r, tn);
       emit_coerce(c, argv[0], TY_FLOAT, CO_CONVERT, "a Float operand", b);
       buf_printf(b, "; if (isnan(_t%d) || isnan(_t%d)) sp_raise_cls(\"FloatDomainError\", \"NaN\");"
@@ -7980,18 +7988,19 @@ static int emit_scalar_recv_arms(Compiler *c, int id, Buf *b, const NodeTable *n
                     " sp_PolyArray_push(_t%d, sp_box_int(0)); sp_PolyArray_push(_t%d, sp_box_float(_t%d)); }"
                     "\nelse { sp_PolyArray_push(_t%d, sp_box_int(-1)); sp_PolyArray_push(_t%d, sp_box_float(_t%d)); } }"
                     "\nelse {"
-                    " sp_int _t%d = sp_float_fit_i(floor(_t%d / _t%d));"
-                    " sp_PolyArray_push(_t%d, sp_box_int(_t%d));"
-                    " sp_PolyArray_push(_t%d, sp_box_float(_t%d - (sp_float)_t%d * _t%d)); } _t%d; })",
+                    /* CRuby's flodivmod: the quotient follows the remainder */
+                    " double _t%d, _t%d; sp_flo_divmod(_t%d, _t%d, &_t%d, &_t%d);"
+                    " sp_PolyArray_push(_t%d, sp_box_int(sp_float_fit_i(_t%d)));"
+                    " sp_PolyArray_push(_t%d, sp_box_float(_t%d)); } _t%d; })",
                  tx, tn, tx, tx, tn,
                  o, o,
                  tn,
                  tx, tx, tn,
                  o, o, tx,
                  o, o, tn,
-                 tq, tx, tn,
+                 tq, tm, tx, tn, tq, tm,
                  o, tq,
-                 o, tx, tq, tn, o);
+                 o, tm, o);
     }
     else if (sp_streq(name, "to_int")) buf_printf(b, repr_of(c, id).kind == RK_BOXED ? "sp_box_f_to_int(%s)" : "sp_float_to_i_checked(%s)", r);  /* alias of to_i (#2317); raises on Inf/NaN */
     /* a nil bound is an open side: clamp one-sided (or return the receiver),
@@ -9742,7 +9751,7 @@ int emit_object_call(Compiler *c, int id, Buf *b) {
         for (int ra = 0; ra < argc; ra++) {
           const char *rat = nt_type(nt, argv[ra]);
           if (rat && (sp_streq(rat, "SplatNode") || sp_streq(rat, "KeywordHashNode") ||
-                      sp_streq(rat, "ForwardingArgumentsNode") ||
+                      nt_kind(nt, argv[ra]) == NK_ForwardingArgumentsNode ||
                       sp_streq(rat, "BlockArgumentNode")))
             { rdr_dynamic = 1; break; }
         }
@@ -13777,9 +13786,7 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
         return 1;
       }
       /* a splat beside other keys (`dig(*path, :k)`): the keys in order,
-         each splat's elements in its place, walked as plain keys are
-         (sp_poly_dig_n) on a Hash or an Array; any other receiver raises
-         the NoMethodError it raised before */
+         each splat's elements in its place, walked as plain keys are */
       {
         Buf rb; int ch = hold_recv_open(c, recv, 1, "sp_RbVal", "SP_GC_ROOT_RBVAL", b, &rb);
         int tk = ++g_tmp, tr = ++g_tmp;
@@ -13795,11 +13802,10 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
             buf_printf(b, "sp_PolyArray_push(_t%d, ", tk); emit_boxed(c, argv[a], b); buf_puts(b, "); ");
           }
         }
-        buf_printf(b, "sp_RbVal _t%d = %s; _t%d.tag == SP_TAG_OBJ &&"
-                      " (sp_poly_is_hash_kind(_t%d.cls_id) || sp_poly_is_array_kind(_t%d.cls_id))"
-                      " ? sp_poly_dig_n(_t%d, _t%d->len, _t%d->data)"
-                      " : (sp_raise_nomethod(sp_nomethod_msg(\"dig\", _t%d)), sp_box_nil()); })",
-                   tr, rb.p, tr, tr, tr, tr, tk, tk, tr);
+        /* sp_poly_dig_n walks every receiver #dig walks (a Struct and a
+           program object too) and raises the call's NoMethodError for the rest */
+        buf_printf(b, "sp_RbVal _t%d = %s; sp_poly_dig_n(_t%d, _t%d->len, _t%d->data); })",
+                   tr, rb.p, tr, tk, tk);
         free(rb.p);
         if (ch) buf_puts(b, "; })");
         return 1;
