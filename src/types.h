@@ -196,6 +196,7 @@ static inline TyKind ty_poly_face_kind(unsigned owner) {
 
 const char *ty_name(TyKind t);         /* legacy string tag, for diagnostics */
 int ty_builtin_ivar_less(TyKind t);    /* a builtin value that lays out no ivars */
+int ty_bivar_keyed(TyKind t);          /* ...whose ivars the runtime's map can hold */
 int ty_is_numeric(TyKind t);           /* INT or FLOAT */
 int ty_never_callable(TyKind t);       /* kind can never answer #call */
 TyKind ty_promote_numeric(TyKind a, TyKind b); /* fold-accumulator numeric promotion */
@@ -215,6 +216,10 @@ int fold_seed_typed(TyKind seed, TyKind elem);
    rule itself is written once and they cannot answer differently. */
 TyKind fold_seed_kind(TyKind resolved, const char *node_type);
 int ty_is_array(TyKind t);
+/* Array.new(x) copies x when x is an Array of one of these kinds, which have
+   a copy constructor of their own (sp_<K>Array_dup); any other argument is
+   the size form. Read by the inference and the emitter alike (#7449). */
+int array_new_copies(TyKind t);
 /* Set while the type fixpoint iterates; defined in analyze.c. Declared here
    because ty_array_of consults it -- see the TY_UNKNOWN case. */
 extern int g_infer_optimistic;
@@ -322,6 +327,36 @@ static inline TyKind ty_poly_handle_face(const char *nm) {
       "int", "bool", "level", "optname", "family", 0 };
     for (int i = 0; SOCKOPT[i]; i++) if (sp_streq(nm, SOCKOPT[i])) return TY_SOCKOPT;
   }
+  {
+    /* MatchData's own readers. strscan's StringScanner has these names too,
+       as native methods: the use sites stand down when a native class
+       defines the name (native_class_defines / an_native_defines_method). */
+    static const char *const MATCHDATA[] = { "pre_match", "post_match", "captures", "regexp", "string", 0 };
+    for (int i = 0; MATCHDATA[i]; i++) if (sp_streq(nm, MATCHDATA[i])) return TY_MATCHDATA;
+  }
+  {
+    /* an Enumerator's own: the external-iteration reads and the chain
+       steps no other class answers */
+    static const char *const ENUMERATOR[] = { "next_values", "peek_values", "with_index", 0 };
+    for (int i = 0; ENUMERATOR[i]; i++) if (sp_streq(nm, ENUMERATOR[i])) return TY_ENUMERATOR;
+  }
+  return TY_UNKNOWN;
+}
+/* The same, for a call passing `argc` arguments: the zero-argument names
+   above, and the handle names that take arguments, each with the counts it
+   takes. A name is exclusive at that count: Range#begin and #end take none,
+   so MatchData#begin(n) and #end(n) are MatchData's alone. */
+static inline TyKind ty_poly_handle_face_args(const char *nm, int argc) {
+  if (!nm || argc < 0) return TY_UNKNOWN;
+  if (argc == 0) return ty_poly_handle_face(nm);
+  static const struct { const char *nm; TyKind k; int lo, hi; } ARGS[] = {
+    { "begin", TY_MATCHDATA, 1, 1 }, { "end", TY_MATCHDATA, 1, 1 },
+    { "offset", TY_MATCHDATA, 1, 1 }, { "byteoffset", TY_MATCHDATA, 1, 1 },
+    { "match_length", TY_MATCHDATA, 1, 1 },
+    { "with_index", TY_ENUMERATOR, 1, 1 },
+    { 0, TY_UNKNOWN, 0, 0 } };
+  for (int i = 0; ARGS[i].nm; i++)
+    if (sp_streq(nm, ARGS[i].nm) && argc >= ARGS[i].lo && argc <= ARGS[i].hi) return ARGS[i].k;
   return TY_UNKNOWN;
 }
 

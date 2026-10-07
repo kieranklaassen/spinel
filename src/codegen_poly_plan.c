@@ -5,6 +5,7 @@
 
 #include "codegen_internal.h"
 #include "codegen_poly.h"
+#include "repr.h"
 #include "call_plan.h"
 
 /* ---- --plan-check: the arms one emitted switch wrote ----
@@ -59,7 +60,7 @@ void pa_observe_at(int id, int kind, int key, int mi, TyKind vty, int conv) {
 
 static const char *pa_kind_name(int k) {
   static const char *const nm[] = { "user", "proc-form", "reader", "native", "arity", "synth-enum",
-                                    "builtin", "trial" };
+                                    "struct-set", "builtin", "trial" };
   return k >= 0 && k < (int)(sizeof nm / sizeof nm[0]) ? nm[k] : "?";
 }
 
@@ -70,7 +71,7 @@ static void pa_arm_text(Compiler *c, const PolyArm *a, char *out, size_t n) {
                                      "len-cases", "clear", "empty-cases", "compare_by_identity?",
                                      "default enum-each", "default to_s", "default case-conv", "default numeric",
                                      "default digits", "default array-transform", "default predicate",
-                                     "default to_i/to_f", "default any?/none?", "default to_h",
+                                     "default to_i/to_f", "default any?/none?", "default to_h", "default display",
                                      "each_index", "join", "alive?", "kill", "status", "queue", "io-read",
                                      "io-flush", "io-close", "enum-to_a",
                                      "cover?", "try_convert", "gcdlcm", "unpack1", "include?", "str-delete",
@@ -560,6 +561,26 @@ void emit_poly_user_arms0(Compiler *c, int id, const char *name, int argc, TyKin
   free(arms);
 }
 
+/* Reuse the typed Struct writer with the receiver and arguments already
+   evaluated by the dispatch. The arm's views leave the original call intact. */
+static void emit_poly_struct_set(Compiler *c, int id, const PolyUserArgs *U, int k, Buf *b) {
+  int recv = nt_ref(c->nt, id, "receiver");
+  int rv = view_push(c, recv, ty_object(k));
+  int rb = view_bind(recv, "((sp_%s *)_t%d.v.p)", c->classes[k].c_name, U->tv);
+  int av[2];
+  for (int i = 0; i < 2; i++) {
+    av[i] = view_push(c, U->argv[i], U->atmp_ty[i]);
+    view_bind(U->argv[i], "_t%d", U->atmp[i]);
+  }
+  buf_printf(b, " case %d: _t%d = ", k, U->tr);
+  emit_object_call(c, id, b);
+  buf_puts(b, "; break;");
+  view_unbind(rb);
+  for (int i = 1; i >= 0; i--) view_pop(c, av[i]);
+  view_pop(c, rv);
+  if (g_plan_check) pa_observe(PA_STRUCT_SET, k, -1, U->ret, PC_SAME);
+}
+
 /* Class k's arm in a poly dispatch with arguments, decided and written as
    the dispatch did before the plan took the arms over: what a dispatch the
    plan cannot serve writes, and, into a scratch buffer, what a class with
@@ -576,6 +597,10 @@ static int poly_user_arm_n_replay(Compiler *c, int id, const char *name, const P
   const TyKind *atmp_ty = U->atmp_ty;
   const PolyKw *kw = U->kw;
   (void)nt; (void)kwall_any;
+  if (!has_splat_arg && kwh < 0 && cplan_struct_aset(c, k, name, argc)) {
+    emit_poly_struct_set(c, id, U, k, b);
+    return 1;
+  }
   /* native (C-backed) class arm: a declared method of this arity takes
      the hoisted temps in its native representation, as the zero-arg
      dispatch's arm and the typed-receiver call do. The argument
@@ -709,7 +734,7 @@ static int poly_user_arm_n_replay(Compiler *c, int id, const char *name, const P
     TyKind at0 = atmp_ty[sa0];
     /* a shared-handle parameter takes a String of either form: its
        arm passes the handle (emit_poly_shared_arg) */
-    if (pt0 == TY_STRBUF && pv0->str_shared && (at0 == TY_STRING || at0 == TY_STRBUF))
+    if (repr_of_slot(c, pv0).handle && (at0 == TY_STRING || at0 == TY_STRBUF))
       continue;
     int pc = pt0 != TY_POLY && pt0 != TY_UNKNOWN && pt0 != TY_NIL && pt0 != TY_VOID;
     int ac = at0 != TY_POLY && at0 != TY_UNKNOWN && at0 != TY_NIL && at0 != TY_VOID;
@@ -893,6 +918,7 @@ static void emit_poly_user_arm_n_plan(Compiler *c, int id, const char *name, con
   const PolyKw *kw = U->kw;
   (void)nt; (void)argc; (void)kwall; (void)kwall_any; (void)kw_pos; (void)has_splat_arg; (void)stk;
   int k = a->key;
+  if (a->kind == PA_STRUCT_SET) { emit_poly_struct_set(c, id, U, k, b); return; }
   if (c->classes[k].is_native_class) { poly_user_arm_n_replay(c, id, name, U, k, b); return; }
   int mi = a->mi;
   if (a->kind == PA_ARITY) {
@@ -1037,6 +1063,10 @@ static int poly_user_arm_n_decide(Compiler *c, const char *name, const PolyUserA
   memset(a, 0, sizeof *a);
   a->key = (short)k; a->mi = -1; a->def = -1; a->vty = TY_UNKNOWN; a->conv = PC_SAME;
   TyKind ret = U->ret;
+  if (!U->has_splat_arg && U->kwh < 0 && cplan_struct_aset(c, k, name, U->argc)) {
+    a->kind = PA_STRUCT_SET; a->vty = (unsigned char)ret;
+    return 1;
+  }
   if (c->classes[k].is_native_class) {
     TyKind mret = TY_UNKNOWN;
     if (U->kw_pos && U->has_splat_arg && U->argc == 1 && U->splat_a == 0 && U->kwh < 0 &&
@@ -1236,7 +1266,7 @@ void poly_specials0(Compiler *c, int id, const char *name, PolySpecials0 *s) {
      union of an rbs-seeded Hash and a class instance, #3278): the user-class
      switch has no builtin arm, so the hash fell through to the nil seed. */
   int is_poly_to_a = sp_streq(name, "to_a") &&
-                     (comp_ntype(c, id) == TY_POLY_ARRAY || comp_ntype(c, id) == TY_POLY);
+                     (comp_ntype(c, id) == TY_POLY_ARRAY || repr_of(c, id).kind == RK_BOXED);
   /* to_h on a poly value that is really a builtin hash (or an Array of
      pairs, or a Struct): the user-class switch carries an arm per class that
      defines to_h and none for the builtin, so a plain Hash reached the
@@ -1244,7 +1274,7 @@ void poly_specials0(Compiler *c, int id, const char *name, PolySpecials0 *s) {
      sibling (to_a, to_s, keys, length) already had its arm (#4170). */
   int is_poly_to_h = sp_streq(name, "to_h") && argc == 0 &&
                      nt_ref(nt, id, "block") < 0 &&
-                     comp_ntype(c, id) == TY_POLY;
+                     repr_of(c, id).kind == RK_BOXED;
   int ncand = 0, ncall_arm = 0;
   /* a class neither defining nor reading the name, and not native, counts
      for neither: the name's memoized candidates are the classes to ask */
@@ -1890,6 +1920,11 @@ void emit_poly_cases0(Compiler *c, int id, int recv, const char *name, const Pol
                    ? c->poly_builtin_ty[id] : TY_UNKNOWN;
     int vw = bt9 != TY_UNKNOWN ? view_push(c, id, bt9) : -1;
     Buf ib9; memset(&ib9, 0, sizeof ib9);
+    /* what the re-entered emission hoists -- a temp of the receiver, an
+       argument check on it -- reads `_t<tv>`, which this case's dispatch
+       declares: it runs inside the case, not ahead of the dispatch */
+    Buf pre9; memset(&pre9, 0, sizeof pre9);
+    Buf *sv_pre9 = g_pre; g_pre = &pre9;
     if (bt9 != TY_UNKNOWN && bt9 != TY_POLY) {
       Buf nb9; memset(&nb9, 0, sizeof nb9);
       emit_expr(c, id, &nb9);
@@ -1897,6 +1932,7 @@ void emit_poly_cases0(Compiler *c, int id, int recv, const char *name, const Pol
       free(nb9.p);
     }
     else emit_boxed(c, id, &ib9);
+    g_pre = sv_pre9;
     if (vw >= 0) view_pop(c, vw);
     view_pop(c, va);
     view_unbind(g_n_argov - 1);
@@ -1912,9 +1948,10 @@ void emit_poly_cases0(Compiler *c, int id, int recv, const char *name, const Pol
                   " case SP_BUILTIN_INT_STR_HASH: case SP_BUILTIN_INT_INT_HASH:"
                   " case SP_BUILTIN_STR_POLY_HASH: case SP_BUILTIN_SYM_POLY_HASH:"
                   " case SP_BUILTIN_POLY_POLY_HASH:");
-      buf_printf(b, " _t%d = %s; break;", tr, ib9.p);
+      if (pre9.p && pre9.len) buf_printf(b, " { %s _t%d = %s; } break;", pre9.p, tr, ib9.p);
+      else buf_printf(b, " _t%d = %s; break;", tr, ib9.p);
     }
-    free(ib9.p);
+    free(ib9.p); free(pre9.p);
   }
   /* compare_by_identity? on a poly-carried hash: every spinel hash is
      value-keyed (the mutating variant is a compile error), so any hash
@@ -2126,6 +2163,15 @@ int emit_poly_defaults0(Compiler *c, int id, int recv, const char *name, const P
     buf_printf(b, " default: _t%d = sp_poly_to_h_val(_t%d); break;", tr, tv);
     obj_default_done = 1;
   }
+  /* display, the same shape: a class that defines it has its own case, and
+     every other receiver is Kernel#display's, to_s with no newline and nil */
+  if (!obj_default_done && argc == 0 && sp_streq(name, "display") && nt_ref(nt, id, "block") < 0) {
+    if (g_plan_check) pa_observe(PA_BUILTIN, PA_KEY_BUILTIN + PB_D_DISPLAY, -1, TY_UNKNOWN, PC_SAME);
+    buf_printf(b, " default: fputs(sp_poly_to_s(_t%d), stdout);", tv);
+    if (ret == TY_POLY) buf_printf(b, " _t%d = sp_box_nil();", tr);
+    buf_puts(b, " break;");
+    obj_default_done = 1;
+  }
   /* The blockless index enumerators, same shape: an Array reaching this
      dispatch still answers them with an Enumerator. */
   if (argc == 0 && (is_indexed_each(name))) {
@@ -2282,7 +2328,7 @@ void poly_specials_n(Compiler *c, int id, const char *name, int argc, const int 
      index; in promote mode that index variable may have widened to poly, so
      accept poly too (the index is unboxed where it is used below). */
   int is_index = sp_streq(name, "[]") && argc == 1 &&
-                 (comp_ntype(c, argv[0]) == TY_INT || comp_ntype(c, argv[0]) == TY_POLY);
+                 (comp_ntype(c, argv[0]) == TY_INT || repr_of(c, argv[0]).kind == RK_BOXED);
   /* `fetch(key[, default])` on a poly value that is actually a str/sym-keyed
      hash: without a user `fetch` candidate the dispatch was skipped and the
      call collapsed to default_value (an empty string), dropping the lookup.
@@ -2345,7 +2391,7 @@ void poly_specials_n(Compiler *c, int id, const char *name, int argc, const int 
      switch needs a TAG_STR pre-arm routing to String#delete (doom's
      `data[offset, 8].delete("\x00").upcase` WAD name fields). */
   int is_strdel = sp_streq(name, "delete") && argc == 1 &&
-                  infer_type(c, argv[0]) == TY_STRING;
+                  comp_ntype(c, argv[0]) == TY_STRING;
   /* partition / rpartition on a TAG_STR receiver. They have no poly arm of
      their own ahead of the name-collision test -- which is why `split`,
      `upcase` and `strip` survived a same-named user method and these did
@@ -2354,7 +2400,7 @@ void poly_specials_n(Compiler *c, int id, const char *name, int argc, const int 
      (#4413). A class nothing instantiates no longer takes the name away;
      this is the same hole for one that IS instantiated. */
   int is_strpart = (is_partition_family(name)) &&
-                   argc == 1 && infer_type(c, argv[0]) == TY_STRING;
+                   argc == 1 && comp_ntype(c, argv[0]) == TY_STRING;
   /* The multi-set forms of count/delete/squeeze (String's alone) when a
      user class also owns the name: the switch needs a TAG_STR pre-arm or
      a genuine String receiver falls to its NoMethodError default, the
@@ -2367,7 +2413,7 @@ void poly_specials_n(Compiler *c, int id, const char *name, int argc, const int 
                       nt_ref(nt, id, "block") < 0;
   if (is_strsetop_n)
     for (int a = 0; a < argc; a++)
-      if (infer_type(c, argv[a]) != TY_STRING) { is_strsetop_n = 0; break; }
+      if (comp_ntype(c, argv[a]) != TY_STRING) { is_strsetop_n = 0; break; }
   /* Hash#store when a user class also owns the name: a boxed hash takes
      the runtime store, anything else its own arm or the default (#4195). */
   int is_pstore = sp_streq(name, "store") && argc == 2 && !has_splat_arg &&
@@ -2377,9 +2423,9 @@ void poly_specials_n(Compiler *c, int id, const char *name, int argc, const int 
      arm. Same hole #3394 closed for the zero-arg form (#3401). */
   int is_strsplit = sp_streq(name, "split") && argc == 1 &&
                     nt_ref(nt, id, "block") < 0 &&
-                    (infer_type(c, argv[0]) == TY_STRING ||
-                     infer_type(c, argv[0]) == TY_NIL ||
-                     infer_type(c, argv[0]) == TY_REGEX);
+                    (comp_ntype(c, argv[0]) == TY_STRING ||
+                     comp_ntype(c, argv[0]) == TY_NIL ||
+                     comp_ntype(c, argv[0]) == TY_REGEX);
   int is_pred = nt_ref(nt, id, "block") < 0 && poly_pred_kind(name, argc);
   /* String#encode when a user class also owns `encode`: the TAG_STR receiver
      needs a pre-arm, or a genuine String falls to the switch's raising
@@ -2423,6 +2469,7 @@ void poly_specials_n(Compiler *c, int id, const char *name, int argc, const int 
   int kw_pos = kwh < 0 || kw_ds;
   int ncand = 0;
   for (int k = 0; k < c->nclasses; k++) {
+    if (!has_splat_arg && kwh < 0 && cplan_struct_aset(c, k, name, argc)) { ncand++; continue; }
     /* a native class's methods are its declared bindings (#4504) */
     if (c->classes[k].is_native_class) {
       if (kw_pos && !has_splat_arg && c->classes[k].instantiated) {
@@ -2453,7 +2500,7 @@ void poly_specials_n(Compiler *c, int id, const char *name, int argc, const int 
      switch's own default raises (#7334): a program-defined Date left a real
      Time with no arm at all. */
   int is_strftime = sp_streq(name, "strftime") && argc == 1 &&
-                    infer_type(c, argv[0]) == TY_STRING;
+                    comp_ntype(c, argv[0]) == TY_STRING;
   /* cover? on a container-read Range; gcdlcm on a container-read int
      receiver (#3234): builtin pre-arms, no user candidates required */
   /* `merge` on a poly value that is really a builtin Hash. A user class
@@ -2503,7 +2550,7 @@ void poly_specials_n(Compiler *c, int id, const char *name, int argc, const int 
      compile. Standing down leaves the builtin case at the raise, which is the
      trade the dig / values_at arms below already make (#4319). */
   if (is_ppack || is_pjoin) {
-    TyKind pjr = comp_ntype(c, id);
+    TyKind pjr = repr_of(c, id).as_ty;
     if (!(pjr == TY_POLY || pjr == TY_STRING || pjr == TY_UNKNOWN)) {
       is_ppack = 0; is_pjoin = 0;
     }
@@ -2517,7 +2564,7 @@ void poly_specials_n(Compiler *c, int id, const char *name, int argc, const int 
      the constant's (#2325, #2585). */
   int is_ctryconv = sp_streq(name, "try_convert") && argc == 1 && !has_splat_arg && kw_pos &&
                     nt_ref(nt, id, "block") < 0 && !recv_user_defines(c, name) &&
-                    comp_ntype(c, id) == TY_POLY;
+                    repr_of(c, id).kind == RK_BOXED;
   s->index = is_index;
   s->fetch = is_fetch;
   s->pdelete = is_pdelete;
@@ -2597,16 +2644,63 @@ void emit_poly_prearms_n(Compiler *c, const char *name, const PolySpecialsN *ps,
   if (is_cover) {
     if (g_plan_check) pa_observe(PA_BUILTIN, PA_KEY_BUILTIN + PB_COVER, -1, TY_UNKNOWN, PC_SAME);
     const char *fn = atmp_ty[0] == TY_POLY ? "cover_poly" : atmp_ty[0] == TY_FLOAT ? "cover_f" : "include";
+    /* a Range argument: whether both its ends lie inside, as the typed
+       cover?(range) answers -- the Integer test took the sp_Range as a value */
+    if (atmp_ty[0] == TY_RANGE)
+      buf_printf(b, "if (_t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_RANGE)"
+                    " { _t%d = %ssp_range_cover_rng(*(sp_Range *)_t%d.v.p, _t%d)%s; }\nelse ",
+                 tv, tv, tr, ret == TY_POLY ? "sp_box_bool(" : "", tv, atmp[0],
+                 ret == TY_POLY ? ")" : "");
+    /* ...and a boxed one, which sp_range_cover_poly (include?'s too) does
+       not read as a Range */
+    else if (atmp_ty[0] == TY_POLY)
+      buf_printf(b, "if (_t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_RANGE)"
+                    " { _t%d = %s(_t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_RANGE && _t%d.v.p"
+                    " ? sp_range_cover_rng(*(sp_Range *)_t%d.v.p, *(sp_Range *)_t%d.v.p)"
+                    " : sp_range_cover_poly((sp_Range *)_t%d.v.p, _t%d))%s; }\nelse ",
+                 tv, tv, tr, ret == TY_POLY ? "sp_box_bool(" : "",
+                 atmp[0], atmp[0], atmp[0], tv, atmp[0], tv, atmp[0],
+                 ret == TY_POLY ? ")" : "");
+    /* an argument of another class (a String, an Array, nil) compares
+       boxed, as a boxed one does: it went into sp_range_include's sp_int
+       slot raw, and did not build */
+    else if (atmp_ty[0] != TY_INT && atmp_ty[0] != TY_FLOAT) {
+      char tn7[24]; snprintf(tn7, sizeof tn7, "_t%d", atmp[0]);
+      Buf ab7; memset(&ab7, 0, sizeof ab7); emit_boxed_text(c, atmp_ty[0], tn7, &ab7);
+      buf_printf(b, "if (_t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_RANGE)"
+                    " { _t%d = %ssp_range_cover_poly((sp_Range *)_t%d.v.p, %s)%s; }\nelse ",
+                 tv, tv, tr, ret == TY_POLY ? "sp_box_bool(" : "", tv, ab7.p ? ab7.p : "sp_box_nil()",
+                 ret == TY_POLY ? ")" : "");
+      /* a String Range covers by string comparison, as its === does */
+      buf_printf(b, "if (_t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_STR_RANGE)"
+                    " { _t%d = %ssp_poly_case_eq(_t%d, %s)%s; }\nelse ",
+                 tv, tv, tr, ret == TY_POLY ? "sp_box_bool(" : "", tv, ab7.p ? ab7.p : "sp_box_nil()",
+                 ret == TY_POLY ? ")" : "");
+      free(ab7.p);
+    }
+    else
     buf_printf(b, "if (_t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_RANGE)"
                   " { _t%d = %ssp_range_%s((sp_Range *)_t%d.v.p, _t%d)%s; }\nelse ",
                tv, tv, tr,
                ret == TY_POLY ? "sp_box_bool(" : "", fn, tv, atmp[0],
                ret == TY_POLY ? ")" : "");
     /* a Float range covers by value (it fell through to false) */
+    if (atmp_ty[0] == TY_RANGE)
+      buf_printf(b, "if (_t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_FLOAT_RANGE && _t%d.v.p)"
+                    " { _t%d = %ssp_frange_cover_rng(*(sp_FloatRange *)_t%d.v.p, _t%d)%s; }\nelse ",
+                 tv, tv, tv, tr, ret == TY_POLY ? "sp_box_bool(" : "", tv, atmp[0],
+                 ret == TY_POLY ? ")" : "");
     if (atmp_ty[0] == TY_POLY || atmp_ty[0] == TY_FLOAT || atmp_ty[0] == TY_INT) {
       buf_printf(b, "if (_t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_FLOAT_RANGE && _t%d.v.p)"
                     " { _t%d = %s", tv, tv, tv, tr, ret == TY_POLY ? "sp_box_bool(" : "");
-      if (atmp_ty[0] == TY_POLY) buf_printf(b, "sp_frange_cover_poly(*(sp_FloatRange *)_t%d.v.p, _t%d)", tv, atmp[0]);
+      /* a boxed Range argument is covered by its ends, not as a scalar */
+      if (atmp_ty[0] == TY_POLY)
+        buf_printf(b, "(_t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_RANGE && _t%d.v.p"
+                      " ? sp_frange_cover_rng(*(sp_FloatRange *)_t%d.v.p, *(sp_Range *)_t%d.v.p)"
+                      " : sp_frange_cover_poly(*(sp_FloatRange *)_t%d.v.p, _t%d))",
+                   atmp[0], atmp[0], atmp[0], tv, atmp[0], tv, atmp[0]);
+      /* an Integer against the Float bounds exactly (#7505) */
+      else if (atmp_ty[0] == TY_INT) buf_printf(b, "sp_frange_cover_i(*(sp_FloatRange *)_t%d.v.p, _t%d)", tv, atmp[0]);
       else buf_printf(b, "sp_frange_cover(*(sp_FloatRange *)_t%d.v.p, (sp_float)_t%d)", tv, atmp[0]);
       buf_printf(b, "%s; }\nelse ", ret == TY_POLY ? ")" : "");
     }
@@ -2672,7 +2766,7 @@ void emit_poly_prearms_n(Compiler *c, const char *name, const PolySpecialsN *ps,
   if (is_include && !sp_streq(name, "include?"))
     buf_printf(b, "if (_t%d.tag == SP_TAG_STR || sp_poly_is_strbuf(_t%d)) sp_raise_poly_nomethod(\"%s\", _t%d);\nelse ",
                tv, tv, name, tv);
-  else if (is_include && infer_type(c, argv[0]) == TY_STRING)
+  else if (is_include && comp_ntype(c, argv[0]) == TY_STRING)
     buf_printf(b, "if (_t%d.tag == SP_TAG_STR || sp_poly_is_strbuf(_t%d)) { _t%d = %ssp_str_include(sp_poly_recv_s(_t%d, \"include?\"), _t%d)%s; }\nelse ",
                tv, tv, tr, ret == TY_POLY ? "sp_box_bool(" : "", tv, atmp[0],
                ret == TY_POLY ? ")" : "");
@@ -2778,7 +2872,7 @@ void emit_poly_prearms_n(Compiler *c, const char *name, const PolySpecialsN *ps,
      whitespace, as CRuby's does. */
   if (is_strsplit && (ret == TY_STR_ARRAY || ret == TY_POLY_ARRAY || ret == TY_POLY)) {
     if (g_plan_check) pa_observe(PA_BUILTIN, PA_KEY_BUILTIN + PB_STR_SPLIT_N, -1, TY_UNKNOWN, PC_SAME);
-    TyKind sat = infer_type(c, argv[0]);
+    TyKind sat = comp_ntype(c, argv[0]);
     char call[192];
     if (sat == TY_NIL) snprintf(call, sizeof call, "sp_str_split_ws(_t%d.v.s)", tv);
     else if (sat == TY_REGEX) snprintf(call, sizeof call, "sp_re_split(_t%d, _t%d.v.s)", atmp[0], tv);
@@ -3294,12 +3388,12 @@ void emit_poly_cases_n(Compiler *c, int id, const char *name, const PolySpecials
                     " _t%d = %s_ui%d > 0%s; break; }",
                  tv, name, tv, tv, ab5.p ? ab5.p : "sp_box_nil()", tr, ibo, tv, ibc);
       free(ab5.p); }
-    TyKind at = infer_type(c, argv[0]);
+    TyKind at = comp_ntype(c, argv[0]);
     switch (at) {
     case TY_INT:
       buf_printf(b, " case SP_BUILTIN_INT_ARRAY: _t%d = %ssp_IntArray_include((sp_IntArray *)_t%d.v.p, _t%d)%s; break;", tr, ibo, tv, atmp[0], ibc);
       buf_printf(b, " case SP_BUILTIN_RANGE: _t%d = %ssp_range_include((sp_Range *)_t%d.v.p, _t%d)%s; break;", tr, ibo, tv, atmp[0], ibc);
-      buf_printf(b, " case SP_BUILTIN_FLOAT_RANGE: _t%d = %ssp_frange_cover(*(sp_FloatRange *)_t%d.v.p, (sp_float)_t%d)%s; break;", tr, ibo, tv, atmp[0], ibc);
+      buf_printf(b, " case SP_BUILTIN_FLOAT_RANGE: _t%d = %ssp_frange_cover_i(*(sp_FloatRange *)_t%d.v.p, _t%d)%s; break;", tr, ibo, tv, atmp[0], ibc);
       break;
     case TY_FLOAT:
       buf_printf(b, " case SP_BUILTIN_RANGE: _t%d = %ssp_range_cover_f((sp_Range *)_t%d.v.p, _t%d)%s; break;", tr, ibo, tv, atmp[0], ibc);
@@ -3411,9 +3505,10 @@ void emit_poly_cases_n(Compiler *c, int id, const char *name, const PolySpecials
   }
   if (is_intersect) {
     if (g_plan_check) pa_observe(PA_BUILTIN, PA_KEY_BUILTIN + PB_INTERSECT, -1, TY_UNKNOWN, PC_SAME);
-    TyKind at2 = infer_type(c, argv[0]);
+    Repr ar2 = repr_of(c, argv[0]);
+    TyKind at2 = ar2.as_ty;
     char abox[96];
-    if (at2 == TY_POLY) snprintf(abox, sizeof abox, "_t%d", atmp[0]);
+    if (ar2.kind == RK_BOXED) snprintf(abox, sizeof abox, "_t%d", atmp[0]);
     else {
       Buf ab2; memset(&ab2, 0, sizeof ab2);
       char tn2[32]; snprintf(tn2, sizeof tn2, "_t%d", atmp[0]);
@@ -3448,7 +3543,7 @@ void emit_poly_cases_n(Compiler *c, int id, const char *name, const PolySpecials
   /* the poly value may actually be a string-keyed hash: dispatch `[]` /
      `fetch` to the matching hash storage, boxing the value into the poly
      result. */
-  if ((is_aref || is_fetch) && infer_type(c, argv[0]) == TY_STRING) {
+  if ((is_aref || is_fetch) && comp_ntype(c, argv[0]) == TY_STRING) {
     if (g_plan_check) pa_observe(PA_BUILTIN, PA_KEY_BUILTIN + PB_AREF_STR, -1, TY_UNKNOWN, PC_SAME);
     TyKind trt = is_scalar_ret(ret) ? ret : TY_INT;  /* the result temp's type */
     static const struct { const char *cls, *hn; TyKind vt; } HV[] = {
@@ -3505,7 +3600,7 @@ void emit_poly_cases_n(Compiler *c, int id, const char *name, const PolySpecials
   /* a symbol-keyed hash (`{ name: ... }`) reaches here as SymPolyHash; add
      its `[]` / `fetch` arm so a Hash receiver indexed by a symbol is not
      dropped when a user class also defines an instance `[]` (#1437). */
-  if ((is_aref || is_fetch) && infer_type(c, argv[0]) == TY_SYMBOL) {
+  if ((is_aref || is_fetch) && comp_ntype(c, argv[0]) == TY_SYMBOL) {
     if (g_plan_check) pa_observe(PA_BUILTIN, PA_KEY_BUILTIN + PB_AREF_SYM, -1, TY_UNKNOWN, PC_SAME);
     TyKind trt = is_scalar_ret(ret) ? ret : TY_INT;
     char getx[200];
@@ -3551,7 +3646,7 @@ void emit_poly_cases_n(Compiler *c, int id, const char *name, const PolySpecials
      explicit poly key -- cover it here so a Hash reached by such a key is
      not dropped to nil (gemini review). */
   if ((is_aref || is_fetch) &&
-      (infer_type(c, argv[0]) == TY_POLY || infer_type(c, argv[0]) == TY_UNKNOWN)) {
+      (repr_of(c, argv[0]).kind == RK_BOXED || comp_ntype(c, argv[0]) == TY_UNKNOWN)) {
     if (g_plan_check) pa_observe(PA_BUILTIN, PA_KEY_BUILTIN + PB_AREF_POLY, -1, TY_UNKNOWN, PC_SAME);
     TyKind ptrt = is_scalar_ret(ret) ? ret : TY_INT;
     buf_puts(b, " case SP_BUILTIN_STR_POLY_HASH: case SP_BUILTIN_POLY_POLY_HASH:"

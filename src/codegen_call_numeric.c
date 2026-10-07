@@ -7,6 +7,7 @@
 #include "codegen_internal.h"
 #include "builtin_ops.h"
 #include "codegen_call_arms.h"
+#include "repr.h"
 
 /* Rational#round / #floor / #ceil / #truncate with a digit count, a
    `half:` keyword, or both. The arm reads the shape of the arguments (a
@@ -168,8 +169,22 @@ int emit_call_bigint_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
       else buf_printf(b, "((void)(%s), ((sp_Class){-100}))", r);  /* Integer */
       free(rs.p); return 1;
     }
-    /* coerce(n): [n, self], both boxed (#3129) */
+    /* coerce(n): [n, self], both boxed (#3129), for an Integer n. Any other
+       operand makes both Floats, as CRuby's Integer#coerce does through
+       Float(): sp_poly_coerce answers that for a boxed Integer (a String
+       parsed, nil's TypeError), where pushing the operand and the Bignum
+       unchanged answered [2.5, 1180591620717411303424]. */
     if (sp_streq(name, "coerce") && argc == 1) {
+      if (comp_ntype(c, argv[0]) != TY_INT && comp_ntype(c, argv[0]) != TY_BIGINT &&
+          !repr_of(c, argv[0]).big) {
+        int tcr = ++g_tmp, tco = ++g_tmp;
+        buf_printf(b, "({ sp_RbVal _t%d = sp_box_bigint(%s); SP_GC_ROOT_RBVAL(_t%d); sp_RbVal _t%d = ",
+                   tcr, r, tcr, tco);
+        emit_boxed(c, argv[0], b);
+        buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); sp_poly_to_poly_array(sp_poly_coerce(_t%d, _t%d)); })",
+                   tco, tcr, tco);
+        free(rs.p); return 1;
+      }
       int tca = ++g_tmp;
       buf_printf(b, "({ sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);"
                     " sp_PolyArray_push(_t%d, ", tca, tca, tca);
@@ -180,11 +195,13 @@ int emit_call_bigint_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
     /* clamp(lo, hi): compare in bigint; an sp_int bound promotes (#3129) */
     if (sp_streq(name, "clamp") && argc == 2) {
       int tcl = ++g_tmp, tch = ++g_tmp;
+      /* each bound is held across the other's evaluation and the
+         receiver's, which can allocate (#4049) */
       buf_printf(b, "({ sp_Bigint *_t%d = ", tcl); emit_bigint_operand(c, argv[0], b);
-      buf_printf(b, "; sp_Bigint *_t%d = ", tch); emit_bigint_operand(c, argv[1], b);
-      buf_printf(b, "; sp_bigint_cmp(%s, _t%d) < 0 ? _t%d"
+      buf_printf(b, "; SP_GC_ROOT(_t%d); sp_Bigint *_t%d = ", tcl, tch); emit_bigint_operand(c, argv[1], b);
+      buf_printf(b, "; SP_GC_ROOT(_t%d); sp_bigint_cmp(%s, _t%d) < 0 ? _t%d"
                     " : sp_bigint_cmp(%s, _t%d) > 0 ? _t%d : (%s); })",
-                 r, tcl, tcl, r, tch, tch, r);
+                 tch, r, tcl, tcl, r, tch, tch, r);
       free(rs.p); return 1;
     }
     if (sp_streq(name, "bit_length") && argc == 0) {
@@ -336,12 +353,16 @@ int emit_call_bigint_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
     }
     if (sp_streq(name, "divmod") && argc == 1) {
       int td = ++g_tmp, tb2 = ++g_tmp, to2 = ++g_tmp;
-      buf_printf(b, "({ sp_Bigint *_t%d = %s; sp_Bigint *_t%d = ", td, r, tb2);
+      /* both operands are held across the pair's allocation, which can
+         collect: a fresh one (a literal divisor's sp_bigint_new_int, a
+         computed receiver) was swept, and the division read its cleared
+         value as a zero divisor */
+      buf_printf(b, "({ sp_Bigint *_t%d = %s; SP_GC_ROOT(_t%d); sp_Bigint *_t%d = ", td, r, td, tb2);
       emit_bigint_operand(c, argv[0], b);
-      buf_printf(b, "; sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);"
+      buf_printf(b, "; SP_GC_ROOT(_t%d); sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);"
                     " sp_PolyArray_push(_t%d, sp_box_bigint(sp_bigint_div(_t%d, _t%d)));"
                     " sp_PolyArray_push(_t%d, sp_box_bigint(sp_bigint_mod(_t%d, _t%d))); _t%d; })",
-                 to2, to2, to2, td, tb2, to2, td, tb2, to2);
+                 tb2, to2, to2, to2, td, tb2, to2, td, tb2, to2);
       free(rs.p); return 1;
     }
     if (sp_streq(name, "[]") && argc == 1 && comp_ntype(c, argv[0]) == TY_RANGE) {
@@ -533,7 +554,7 @@ int emit_call_iter_expr_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, c
     if (sp_streq(name, "upto") && argc == 1) {
       /* a Float limit is not truncated: n.upto(2.5) stops at 2, i.e. floor. */
       int lf = comp_ntype(c, argv[0]) == TY_FLOAT;
-      buf_puts(b, "(sp_Range){ .first = "); emit_int_recv_named(c, recv, name, b);
+      buf_puts(b, "(sp_Range){ .first = "); emit_upto_recv(c, recv, argv[0], b);
       buf_puts(b, ", .last = ");
       if (lf) { buf_puts(b, "(sp_int)floor("); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
       else emit_int_expr(c, argv[0], b);
@@ -567,7 +588,7 @@ int emit_op_float_rationalize(Compiler *c, const BopCtx *x, Buf *b) {
   TyKind et = comp_ntype(c, arg);
   /* an epsilon that is no number: CRuby asks it for its #abs, which
      it does not answer -- NoMethodError, not a conversion's TypeError */
-  if (et != TY_RATIONAL && et != TY_INT && et != TY_FLOAT && et != TY_BIGINT && et != TY_POLY &&
+  if (et != TY_RATIONAL && et != TY_COMPLEX && et != TY_INT && et != TY_FLOAT && et != TY_BIGINT && et != TY_POLY &&
       et != TY_UNKNOWN) {
     buf_printf(b, "({ (void)(%s); sp_raise_nomethod(sp_nomethod_msg(\"abs\", ", r);
     emit_boxed(c, arg, b);
@@ -576,6 +597,12 @@ int emit_op_float_rationalize(Compiler *c, const BopCtx *x, Buf *b) {
   else {
     buf_printf(b, "sp_float_rationalize(%s, ", r);
     if (et == TY_RATIONAL) { buf_puts(b, "sp_rational_to_f("); emit_expr(c, arg, b); buf_puts(b, ")"); }
+    else if (et == TY_COMPLEX) { buf_puts(b, "sp_complex_abs("); emit_expr(c, arg, b); buf_puts(b, ")"); }
+    else if (et == TY_POLY || et == TY_UNKNOWN) {
+      int t = ++g_tmp;
+      buf_printf(b, "({ sp_RbVal _t%d = ", t); emit_boxed(c, arg, b);
+      buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); sp_poly_to_f_with_rational(sp_poly_abs(_t%d)); })", t, t);
+    }
     else emit_float_expr(c, arg, b);
     buf_puts(b, ")");
   }
@@ -603,11 +630,18 @@ int emit_op_range_clone(Compiler *c, const BopCtx *x, Buf *b) {
 
 int emit_op_range_freeze(Compiler *c, const BopCtx *x, Buf *b) {
   int t = ++g_tmp;
+  int rk = nt_kind(c->nt, x->recv);
+  if (rk == NK_ConstantReadNode || rk == NK_ConstantPathNode) {
+    buf_printf(b, "({ %s *_t%d = ", c_type_name(x->rt), t);
+    emit_constant_slot(c, x->recv, b);
+    buf_printf(b, "; _t%d->unfrozen = 0; *_t%d; })", t, t);
+    return 1;
+  }
   buf_printf(b, "({ %s _t%d = ", c_type_name(x->rt), t);
   emit_expr(c, x->recv, b);
   buf_printf(b, "; _t%d.unfrozen = 0; ", t);
-  int rk = nt_kind(c->nt, x->recv);
-  if (rk == NK_LocalVariableReadNode || rk == NK_InstanceVariableReadNode) {
+  if (rk == NK_LocalVariableReadNode || rk == NK_InstanceVariableReadNode ||
+      rk == NK_ClassVariableReadNode || rk == NK_GlobalVariableReadNode) {
     emit_expr(c, x->recv, b); buf_printf(b, " = _t%d; ", t);
   }
   buf_printf(b, "_t%d; })", t);

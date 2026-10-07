@@ -36,7 +36,7 @@ static int forwarding_call_arity(Compiler *c, const char *mname) {
     int an = 0; const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
     if (an == 0) continue;
     /* a `foo(...)` forwarding call is not a concrete arg count */
-    if (an == 1 && nt_type(nt, av[0]) && sp_streq(nt_type(nt, av[0]), "ForwardingArgumentsNode")) continue;
+    if (an == 1 && nt_kind(nt, av[0]) == NK_ForwardingArgumentsNode) continue;
     int pos = an;
     if (an > 0 && nt_type(nt, av[an - 1]) && sp_streq(nt_type(nt, av[an - 1]), "KeywordHashNode")) pos = an - 1;
     if (pos > maxarg) maxarg = pos;
@@ -213,8 +213,7 @@ static int forwarding_target_scan(Compiler *c, Scope *s, int *sole) {
       if (!sp_streq(ty, "CallNode") && !sp_streq(ty, "SuperNode")) continue;
       int a = nt_ref(nt, id, "arguments");
       int an = 0; const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
-      if (an != 1 || !nt_type(nt, av[0]) ||
-          !sp_streq(nt_type(nt, av[0]), "ForwardingArgumentsNode")) continue;
+      if (an != 1 || nt_kind(nt, av[0]) != NK_ForwardingArgumentsNode) continue;
       is_super = sp_streq(ty, "SuperNode");
     }
     int mi = -1;
@@ -280,7 +279,7 @@ static void initialize_forwarding_params(Compiler *c, int init) {
     if (!ty || !sp_streq(ty, "CallNode") || !new_site_reaches(c, id, init)) continue;
     int a = nt_ref(nt, id, "arguments");
     int an = 0; const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
-    if (an == 1 && nt_type(nt, av[0]) && sp_streq(nt_type(nt, av[0]), "ForwardingArgumentsNode")) continue;
+    if (an == 1 && nt_kind(nt, av[0]) == NK_ForwardingArgumentsNode) continue;
     int kwh = an > 0 && nt_type(nt, av[an - 1]) &&
               sp_streq(nt_type(nt, av[an - 1]), "KeywordHashNode") ? av[an - 1] : -1;
     int pos = kwh >= 0 ? an - 1 : an;
@@ -458,8 +457,7 @@ void expand_struct_forwarding_super(Compiler *c) {
     int args = nt_ref(nt, id, "arguments");
     int an = 0;
     const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
-    if (an == 0 || !nt_type(nt, av[an - 1]) ||
-        !sp_streq(nt_type(nt, av[an - 1]), "ForwardingArgumentsNode")) continue;
+    if (an == 0 || nt_kind(nt, av[an - 1]) != NK_ForwardingArgumentsNode) continue;
     int si = id < c->node_cap ? c->nscope[id] : -1;
     if (si <= 0 || si >= c->nscopes) continue;
     Scope *s = &c->scopes[si];
@@ -1029,6 +1027,49 @@ static void sclass_walk_stmt(Compiler *c, int s, int scope_idx, int target_class
   sclass_walk_stmt(c, nt_ref(nt, s, "else_clause"), scope_idx, target_class, depth + 1);
 }
 
+/* The four builtin classes that also live under Thread (`Thread::Mutex`). */
+static int is_thread_class_name(const char *n) {
+  return sp_streq(n, "Queue") || sp_streq(n, "SizedQueue") ||
+         sp_streq(n, "Mutex") || sp_streq(n, "ConditionVariable");
+}
+
+/* The name of the C-built class that `class cname` would reopen, else NULL.
+   These classes have C names of their own, so a reopening would make a second,
+   empty class (or drop the methods). A bare name reopens at the top level, in
+   `class Object`, and (for the Thread four) in `class Thread`; `::Name` always
+   does; `Thread::Name` does for the Thread four only. Any other path or
+   enclosing module names a new class in CRuby. OpenStruct is builtin only with
+   require "ostruct". */
+static const char *reopened_native_class(Compiler *c, int cp, int class_id, const char *leaf) {
+  static const char *const native[] = { "Monitor", "Mutex", "Queue", "SizedQueue",
+    "ConditionVariable", "OpenStruct", "Encoding", NULL };
+  if (cp < 0 || !str_in(leaf, native)) return NULL;
+  if (sp_streq(leaf, "OpenStruct") && !sp_feature_required("ostruct")) return NULL;
+  NodeKind k = nt_kind(c->nt, cp);
+  int only_thread = 0;
+  if (k == NK_ConstantReadNode) {
+    const char *en = class_id >= 0 ? c->classes[class_id].name : NULL;
+    if (class_id < 0 || (en && sp_streq(en, "Object"))) return leaf;
+    if (!en || !sp_streq(en, "Thread")) return NULL;
+    only_thread = 1;
+  } else if (k == NK_ConstantPathNode) {
+    int par = nt_ref(c->nt, cp, "parent");
+    if (par >= 0) {
+      const char *pn = nt_kind(c->nt, par) == NK_ConstantReadNode ? nt_str(c->nt, par, "name") : NULL;
+      if (class_id >= 0 || !pn || !sp_streq(pn, "Thread")) return NULL;
+      only_thread = 1;
+    }
+  } else return NULL;
+  return only_thread && !is_thread_class_name(leaf) ? NULL : leaf;
+}
+
+/* Builtin classes that the builtin class table lacks, so a nested class of
+   that name cannot be kept apart from the C-built one. Refused at any depth.
+   OpenStruct is builtin only with require "ostruct". */
+static int is_untabled_native_name(const char *n) {
+  return sp_streq(n, "Monitor") || (sp_streq(n, "OpenStruct") && sp_feature_required("ostruct"));
+}
+
 void walk_scope(Compiler *c, int id, int scope_idx, int class_id) {
   if (id < 0 || id >= c->nt->count) return;
   c->nscope[id] = scope_idx;
@@ -1084,6 +1125,13 @@ void walk_scope(Compiler *c, int id, int scope_idx, int class_id) {
   if (ty && (sp_streq(ty, "ClassNode") || sp_streq(ty, "ModuleNode"))) {
     int cp = nt_ref(c->nt, id, "constant_path");
     const char *cname = cp >= 0 ? nt_str(c->nt, cp, "name") : NULL;
+    int cls_toplevel = class_id < 0 && cp >= 0 && nt_type(c->nt, cp) &&
+                       sp_streq(nt_type(c->nt, cp), "ConstantReadNode");
+    /* An earlier pass mangles a nested name to `Outer__Inner`: test the leaf. */
+    const char *cls_leaf = cname;
+    if (cname && !cls_toplevel) {
+      for (const char *q = strstr(cname, "__"); q; q = strstr(q + 1, "__")) cls_leaf = q + 2;
+    }
     /* `module String` reopening a builtin CLASS is CRuby's TypeError; reject
        with that message instead of colliding with the runtime's sp_<Name> C
        type (a raw C error). A lexically nested or path-qualified
@@ -1091,12 +1139,11 @@ void walk_scope(Compiler *c, int id, int scope_idx, int class_id) {
        C type is the bare tail name and still collides -- refuse that loudly
        too, as unsupported rather than TypeError. */
     if (sp_streq(ty, "ModuleNode") && cname &&
-        is_builtin_class_name(cname) && !is_builtin_module_name(cname)) {
+        ((is_builtin_class_name(cname) && !is_builtin_module_name(cname)) ||
+         is_untabled_native_name(cls_leaf))) {
       int ln = (int)nt_int(c->nt, id, "node_line", 0);
       const char *file = c->nt->source_file ? c->nt->source_file : "source.rb";
-      int toplevel = class_id < 0 && cp >= 0 && nt_type(c->nt, cp) &&
-                     sp_streq(nt_type(c->nt, cp), "ConstantReadNode");
-      if (toplevel)
+      if (cls_toplevel)
         fprintf(stderr, "spinel: %s:%d: %s is not a module (TypeError)\n", file, ln, cname);
       else
         fprintf(stderr, "spinel: %s:%d: unsupported module name '%s': "
@@ -1107,13 +1154,6 @@ void walk_scope(Compiler *c, int id, int scope_idx, int class_id) {
        which CRuby refuses with a TypeError. A nested or path-qualified name
        is a fresh constant in CRuby, but the generated C name is the bare
        tail and collides, so refuse that as unsupported. */
-    int cls_toplevel = class_id < 0 && cp >= 0 && nt_type(c->nt, cp) &&
-                       sp_streq(nt_type(c->nt, cp), "ConstantReadNode");
-    /* An earlier pass mangles a nested name to `Outer__Inner`: test the leaf. */
-    const char *cls_leaf = cname;
-    if (cname && !cls_toplevel) {
-      for (const char *q = strstr(cname, "__"); q; q = strstr(q + 1, "__")) cls_leaf = q + 2;
-    }
     if (sp_streq(ty, "ClassNode") && cname && bc_builtin_module(cls_leaf)) {
       int ln = (int)nt_int(c->nt, id, "node_line", 0);
       const char *file = c->nt->source_file ? c->nt->source_file : "source.rb";
@@ -1138,6 +1178,24 @@ void walk_scope(Compiler *c, int id, int scope_idx, int class_id) {
         char buf[256]; snprintf(buf, sizeof buf, "%s", real);  /* copy: set frees cname */
         nt_set_str((NodeTable *)c->nt, cp, "name", buf);
         cname = nt_str(c->nt, cp, "name");
+        cls_leaf = cname;  /* the old leaf pointed into the freed name */
+      }
+    }
+    if (sp_streq(ty, "ClassNode") && cname) {
+      const char *nat = reopened_native_class(c, cp, class_id, cls_leaf);
+      if (!nat && is_untabled_native_name(cls_leaf)) {
+        int ln = (int)nt_int(c->nt, id, "node_line", 0);
+        const char *file = c->nt->source_file ? c->nt->source_file : "source.rb";
+        fprintf(stderr, "spinel: %s:%d: unsupported class name '%s': "
+                        "collides with the builtin class of that name\n", file, ln, cls_leaf);
+        exit(1);
+      }
+      if (nat) {
+        int ln = (int)nt_int(c->nt, id, "node_line", 0);
+        const char *file = c->nt->source_file ? c->nt->source_file : "source.rb";
+        fprintf(stderr, "spinel: %s:%d: reopening the builtin class %s is not supported\n",
+                file, ln, nat);
+        exit(1);
       }
     }
     if (cname && comp_class_index(c, cname) < 0) {
@@ -2007,14 +2065,16 @@ static int sg_new_class_ci(Compiler *c, int val) {
   if (recv < 0) return -1;
   /* `K.new`, or `k.new` with a local holding one class (an anonymous
      `k = Class.new { }` is such a local, of the class it became) */
-  int ci = nt_kind(nt, recv) == NK_ConstantReadNode ? comp_class_index(c, nt_str(nt, recv, "name"))
+  const char *cn = nt_kind(nt, recv) == NK_ConstantReadNode ? nt_str(nt, recv, "name") : NULL;
+  if (cn && sp_streq(cn, "Object")) return -2;
+  if (cn && sp_streq(cn, "BasicObject")) return -3;
+  int ci = nt_kind(nt, recv) == NK_ConstantReadNode ? comp_class_index(c, cn)
          : nt_kind(nt, recv) == NK_LocalVariableReadNode ? class_var_static_ci(c, recv) : -1;
   if (ci < 0) return -1;
-  /* Only a plain user class can be subclassed here: Object/BasicObject use an
-     opaque base struct with no cls_id field, and native/exception/struct
-     classes have special layouts a synthesized subclass cannot carry. */
-  const char *cn = c->classes[ci].name;
-  if (cn && (is_object_base_name(cn))) return -1;
+  /* Other object-base names and native/exception/struct classes do not have
+     layouts a synthesized subclass can carry. */
+  const char *cname = c->classes[ci].name;
+  if (cname && is_object_base_name(cname)) return -1;
   if (c->classes[ci].is_native_class || c->classes[ci].is_struct ||
       c->classes[ci].is_data || class_is_exc_subclass(c, ci)) return -1;
   return ci;
@@ -2067,7 +2127,7 @@ static int sg_single_new_write(Compiler *c, const char *name, int bk,
   if (bk == SG_CVAR && nt_kind(nt, write) != NK_ClassVariableWriteNode) return -1;
   if (bk == SG_GVAR && nt_kind(nt, write) != NK_GlobalVariableWriteNode) return -1;
   ci = sg_new_class_ci(c, nt_ref(nt, write, "value"));
-  if (ci < 0) return -1;
+  if (ci == -1) return -1;
   *out_ci = ci;
   return write;
 }
@@ -2183,6 +2243,21 @@ static void class_note_included_mod(Compiler *c, int ci, int mod_ci) {
   cif->included_mods[cif->nincluded_mods++] = mod_ci;
 }
 
+/* A copied &block has the same Proc-or-NULL ABI as the original. It is
+   outside pnames, so copying the positional/keyword locals does not register
+   it. Seed it before inference; otherwise the body walk leaves an ordinary
+   UNKNOWN local which late widening turns into POLY. Reassignments already
+   use a separate local from desugar_blk_param_writes. */
+static void scope_copy_block_param(Scope *dst, const Scope *src) {
+  if (!src->blk_param) return;
+  dst->blk_param = strdup(src->blk_param);
+  if (dst->blk_param[0]) {
+    LocalVar *lv = scope_local_intern(dst, dst->blk_param);
+    lv->is_param = 1;
+    lv->type = TY_PROC;
+  }
+}
+
 /* Copy module `mod_ci`'s instance methods onto subclass `newci` (obj.extend). */
 static void sg_transplant_module(Compiler *c, int mod_ci, int newci) {
   const NodeTable *nt = c->nt;
@@ -2223,7 +2298,7 @@ static void sg_transplant_module(Compiler *c, int mod_ci, int newci) {
     dst->kwrest_idx = src->kwrest_idx;
     src->is_transplanted_source = 1;   /* the module original is copied away */
     dst->origin_module_ci = mod_ci + 1;  /* #owner names the module (#3662) */
-    if (src->blk_param) dst->blk_param = strdup(src->blk_param);
+    scope_copy_block_param(dst, src);
     dst->nparams = src->nparams;
     if (src->nparams > 0) {
       dst->pnames = malloc(sizeof(char *) * (size_t)src->nparams);
@@ -2326,6 +2401,29 @@ void register_singleton_defs(Compiler *c) {
     if (sg_binding(c, id, recv, &bk, &rn, &owner) < 0) continue;
     int parent_ci = -1;
     int wnode = sg_single_new_write(c, rn, bk, owner, &parent_ci);
+    if (parent_ci == -2 || parent_ci == -3) {
+      const char *mn = idk == NK_DefNode ? nt_str(nt, id, "name") : NULL;
+      if (idk == NK_DefNode && mn && sp_streq(mn, "to_a")) {
+        int si = -1;
+        for (int ds = 1; ds < c->nscopes; ds++)
+          if (c->scopes[ds].def_node == id) { si = ds; break; }
+        if (si < 0 || c->scopes[si].nparams != 0 || c->scopes[si].blk_param ||
+            c->scopes[si].yields || sg_def_needs_self(c, id)) {
+          unsupported_feature(c, id, "BasicObject singleton to_a with arguments, a block, or self");
+          continue;
+        }
+        char scope_id[16]; snprintf(scope_id, sizeof scope_id, "%d", si);
+        nt_node_set_str(nt, id, "sg_basic_to_a", scope_id);
+        char symbol[64]; snprintf(symbol, sizeof symbol, "sg_basic_to_a_%d_body", si);
+        c->scopes[si].c_name = strdup(symbol);
+        continue;
+      }
+      /* Object.new and BasicObject.new have no synthesized subclass to
+         receive arbitrary singleton methods. Let the usual untraceable
+         receiver path reject methods that need a real self. */
+      parent_ci = -1;
+      wnode = -1;
+    }
     if (wnode < 0) {
       /* Not traceable to one `new` of a user class, so there is no subclass to
          synthesize. A `def <recv>.m` then fell through to the ordinary def
@@ -2894,7 +2992,38 @@ static int alias_target_defined_before(Compiler *c, ClassInfo *cls, int cid, con
   return 0;
 }
 
+/* An alias binds for the whole program, because the method tables are static.
+   Class-body code that runs between a `def a` and a later `alias a b` meets the
+   def in CRuby and would meet the alias here, silently: a call of `a` made in the
+   class body before the alias is refused (#7690). */
+static void alias_refuse_early_call(Compiler *c, ClassInfo *cls, const char *nw, int alias_node) {
+  if (!nw || alias_node < 0 || !cls->name) return;
+  const NodeTable *nt = c->nt;
+  int cid = comp_class_index(c, cls->name);
+  if (cid < 0) return;
+  int defn = -1;
+  for (int si = 1; si < c->nscopes; si++) {
+    Scope *sc = &c->scopes[si];
+    if (sc->class_id != cid || sc->is_cmethod || sc->is_proc_form || sc->def_node < 0 ||
+        nt_kind(nt, sc->def_node) != NK_DefNode) continue;
+    const char *dn = nt_str(nt, sc->def_node, "name");
+    if (dn && sp_streq(dn, nw) && sc->def_node < alias_node && sc->def_node > defn) defn = sc->def_node;
+  }
+  if (defn < 0) return;
+  for (int n = comp_kind_first(c, NK_CallNode); n >= 0; n = comp_kind_next(c, n)) {
+    if (nt_kind(nt, n) != NK_CallNode || n <= defn || n >= alias_node) continue;
+    const char *nm = nt_str(nt, n, "name");
+    if (!nm || !sp_streq(nm, nw) || c->nscope[n] != c->nscope[alias_node]) continue;
+    char msg[300];
+    snprintf(msg, sizeof msg, "`%s` is called in the class body before an alias rebinds it: an alias binds for the "
+             "whole program here, so the call would run the aliased body, not the `def %s` Ruby runs at that point. "
+             "Call it after the alias, or give the alias another name", nw, nw);
+    unsupported_feature(c, n, msg);
+  }
+}
+
 static void alias_register(Compiler *c, ClassInfo *cls, const char *nw, const char *od, int s) {
+  alias_refuse_early_call(c, cls, nw, s);
   if (alias_capture_earlier_def(c, cls, nw, od, s)) return;
   comp_add_alias_from(cls, nw, od, s);
   /* In a reopened primitive, an alias of a name the program has not defined
@@ -4657,8 +4786,10 @@ static void check_unrewritten_delegators(Compiler *c) {
    lexical lookup may well find that class instead. Object, BasicObject, the
    exceptions, Struct / Data, Numeric, and package classes written in Ruby
    (Set, Date, ...) are absent: a subclass of those works. OpenStruct is a
-   type of the runtime's own here, so it is listed with the builtins. */
-static const char *refused_builtin_superclass(Compiler *c, int sc) {
+   type of the runtime's own here, so it is listed with the builtins. Array
+   is listed too, but a subclass of it is no longer refused: its instances
+   are real Arrays (#7449, mark_array_subclasses). */
+static const char *builtin_value_superclass(Compiler *c, int sc) {
   static const char *const refused[] = {
     "Array", "Hash", "String", "Range", "Proc", "Method", "UnboundMethod",
     "Integer", "Float", "Symbol", "Rational", "Complex",
@@ -4676,8 +4807,7 @@ static const char *refused_builtin_superclass(Compiler *c, int sc) {
     if (par >= 0) {
       const char *pn = nt_kind(nt, par) == NK_ConstantReadNode ? nt_str(nt, par, "name") : NULL;
       if (!pn || !sp_streq(pn, "Thread") ||
-          !(sp_streq(nm, "Queue") || sp_streq(nm, "SizedQueue") ||
-            sp_streq(nm, "Mutex") || sp_streq(nm, "ConditionVariable")))
+          !is_thread_class_name(nm))
         return NULL;
     }
     return nm;
@@ -4690,15 +4820,20 @@ static const char *refused_builtin_superclass(Compiler *c, int sc) {
   return nm;
 }
 
+static const char *refused_builtin_superclass(Compiler *c, int sc) {
+  const char *nm = builtin_value_superclass(c, sc);
+  return nm && sp_streq(nm, "Array") ? NULL : nm;
+}
+
 /* A program class whose superclass is a builtin of that kind, or a class a
    package binds to C (StringIO), is refused where it is declared: it would
    build and then answer differently from CRuby (#7075). The fix is a real
-   subclass -- an instance that IS an Array with the subclass's methods
-   dispatched on it -- which spinel does not have yet; rewriting the class
-   into one that delegates to a wrapped value answers differently too
-   (`is_a?`, `==`, `p`), so wrapping is left to the program. `Class.new(Hash)`
-   without a block is the same class spelled as a call (the block form
-   arrives here already rewritten into a ClassNode). */
+   subclass -- an instance that IS a Hash with the subclass's methods
+   dispatched on it -- which Array has (#7449) and the others do not yet;
+   rewriting the class into one that delegates to a wrapped value answers
+   differently too (`is_a?`, `==`, `p`), so wrapping is left to the program.
+   `Class.new(Hash)` without a block is the same class spelled as a call (the
+   block form arrives here already rewritten into a ClassNode). */
 static void refuse_builtin_subclass(Compiler *c, int at, const char *what, const char *par) {
   char msg[512];
   snprintf(msg, sizeof msg,
@@ -4718,6 +4853,17 @@ static void check_builtin_subclasses(Compiler *c) {
     int cp = nt_ref(nt, id, "constant_path");
     const char *cn = cp >= 0 ? nt_str(nt, cp, "name") : NULL;
     const char *par = refused_builtin_superclass(c, sc);
+    /* a program that reopens Array has a class of its own named Array, which
+       resolve_parents would take for the superclass */
+    if (!par && (par = builtin_value_superclass(c, sc)) != NULL) {
+      if (comp_class_index(c, "Array") >= 0) {
+        char msg[400];
+        snprintf(msg, sizeof msg, "class %s < Array: subclassing Array in a program that "
+                 "also reopens Array is not supported yet", cn ? cn : "?");
+        unsupported_feature(c, sc, msg);
+      }
+      continue;
+    }
     if (!par) {
       NodeKind sk = nt_kind(nt, sc);
       if (sk != NK_ConstantReadNode && sk != NK_ConstantPathNode) continue;
@@ -4741,8 +4887,13 @@ static void check_builtin_subclasses(Compiler *c) {
     int args = nt_ref(nt, id, "arguments"), ac = 0;
     const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &ac) : NULL;
     if (!av || ac != 1) continue;
-    const char *par = refused_builtin_superclass(c, av[0]);
-    if (par) {
+    const char *par = builtin_value_superclass(c, av[0]);
+    if (par && sp_streq(par, "Array"))
+      /* no class of the program's own stands for a class made by the call */
+      unsupported_feature(c, id, "Class.new(Array) without a block is not supported yet "
+                                 "(the call makes its class at run time); declare it as "
+                                 "`class Name < Array`");
+    else if (par) {
       char what[64];
       snprintf(what, sizeof what, "Class.new(%s)", par);
       refuse_builtin_subclass(c, id, what, par);
@@ -4812,6 +4963,25 @@ static void refuse_anon_superclass_reflection(Compiler *c) {
   }
 }
 
+/* The classes whose chain reaches the builtin Array (#7449): each records the
+   root of its chain, the class right below Array, whose instances and its
+   descendants' share one embedded Array kind. A program that reopens Array
+   was refused above. */
+static void mark_array_subclasses(Compiler *c) {
+  for (int i = 0; i < c->nclasses; i++) {
+    int r = i;
+    for (int g = 0; c->classes[r].parent >= 0 && c->classes[r].parent != r && g < 256; g++)
+      r = c->classes[r].parent;
+    int dn = c->classes[r].def_node;
+    if (dn < 0 || nt_kind(c->nt, dn) != NK_ClassNode) continue;
+    const char *par = builtin_value_superclass(c, nt_ref(c->nt, dn, "superclass"));
+    if (par && sp_streq(par, "Array") && comp_class_index(c, "Array") < 0) {
+      c->classes[i].ary_root = r + 1;
+      c->has_arysub = 1;
+    }
+  }
+}
+
 void resolve_parents(Compiler *c) {
   check_class_redeclarations(c);
   check_blk_param_writes(c);
@@ -4831,6 +5001,7 @@ void resolve_parents(Compiler *c) {
       if (p >= 0 && p != i) c->classes[i].parent = p;
     }
   }
+  mark_array_subclasses(c);
   /* A `class << self; attr_accessor :x` is a method of the singleton class,
      and a subclass's singleton class inherits it: the accessor answers
      through the subclass, on the subclass's own slot (nil until assigned),
@@ -5051,7 +5222,8 @@ void process_include_body(Compiler *c, int ci, int body_node) {
     int anode = nt_ref(nt, s, "arguments");
     int an = 0;
     const int *args = anode >= 0 ? nt_arr(nt, anode, "arguments", &an) : NULL;
-    for (int j = 0; j < an; j++) {
+    /* `include A, B` includes B first, so A ends up in front (as extend) */
+    for (int j = an - 1; j >= 0; j--) {
       const char *aty = nt_type(nt, args[j]);
       const char *mname = (aty && (sp_streq(aty, "ConstantReadNode") || sp_streq(aty, "ConstantPathNode"))) ? nt_str(nt, args[j], "name") : NULL;
       int mod_id = mname ? comp_class_index(c, mname) : -1;
@@ -5238,7 +5410,7 @@ else {
         dst->nrequired = src->nrequired;
         dst->rest_idx = src->rest_idx;
         dst->kwrest_idx = src->kwrest_idx;
-        if (src->blk_param) dst->blk_param = strdup(src->blk_param);
+        scope_copy_block_param(dst, src);
         /* ...but a module_function original keeps its module-side spelling:
            `Rt.peek` is a real call whoever also includes Rt, so the source is
            not copied AWAY, only copied FROM. */
@@ -5421,9 +5593,8 @@ void rewrite_attr_supers(Compiler *c) {
       if (an != (is_write ? 1 : 0)) continue;
       if (is_write) {
         NodeKind ak = nt_kind(nt, av[0]);
-        const char *aty = nt_type(nt, av[0]);
         if (ak == NK_SplatNode || ak == NK_KeywordHashNode || ak == NK_BlockArgumentNode ||
-            (aty && sp_streq(aty, "ForwardingArgumentsNode")))
+            ak == NK_ForwardingArgumentsNode)
           continue;
         val = av[0];
       }
@@ -5646,6 +5817,106 @@ static int body_extends_module(Compiler *c, int cn, int mod_id) {
   return 0;
 }
 
+/* The modules a module prepends in its bodies, front first, as the
+   module's ancestors list them: `prepend A, B` puts A before B, and a later
+   `prepend C` goes in front of both. At most `max`; returns the count. */
+static int module_prepend_list(Compiler *c, int mod_id, int *out, int max) {
+  const NodeTable *nt = c->nt;
+  if (mod_id < 0 || !comp_class_is_module(c, &c->classes[mod_id])) return 0;
+  int n = 0;
+  int *bci, *bnode;
+  int nb = class_body_list(c, &bci, &bnode);
+  for (int b = 0; b < nb; b++) {
+    if (bci[b] != mod_id) continue;
+    int sn = 0;
+    const int *stmts = bnode[b] >= 0 ? nt_arr(nt, bnode[b], "body", &sn) : NULL;
+    for (int k = 0; k < sn; k++) {
+      int s = stmts[k];
+      const char *nm = nt_kind(nt, s) == NK_CallNode ? nt_str(nt, s, "name") : NULL;
+      if (!nm || !sp_streq(nm, "prepend") || nt_ref(nt, s, "receiver") >= 0) continue;
+      int anode = nt_ref(nt, s, "arguments");
+      int an = 0;
+      const int *args = anode >= 0 ? nt_arr(nt, anode, "arguments", &an) : NULL;
+      int add[64], na = 0;
+      for (int j = 0; j < an && na < 64; j++) {
+        NodeKind ak = nt_kind(nt, args[j]);
+        const char *mn = ak == NK_ConstantReadNode || ak == NK_ConstantPathNode ? nt_str(nt, args[j], "name") : NULL;
+        int pm = mn ? comp_class_index(c, mn) : -1;
+        if (pm >= 0 && pm != mod_id) add[na++] = pm;
+      }
+      if (n + na > max) na = max - n;
+      memmove(out + na, out, sizeof(int) * (size_t)n);
+      memcpy(out, add, sizeof(int) * (size_t)na);
+      n += na;
+    }
+  }
+  free(bci); free(bnode);
+  return n;
+}
+
+/* A module that prepends another is mixed in with the prepended one in
+   front of it: `include M` where M prepends P is `include P, M` (the same
+   ancestors, [P, M]), and so is `extend M`. Written as that, the includes
+   and extends copy P's methods ahead of M's, and P's `super` reaches M's.
+   Left to register_prepends, which runs after both, the prepend reached
+   only M's own methods, after they had been copied: an includer compiled a
+   `super` into a body it never got, and an extender, Class reopened with a
+   prepend among them, ran without the prepended method. */
+void desugar_module_prepends(Compiler *c) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  int any = 0;
+  for (int m = 0; m < c->nclasses && !any; m++) {
+    int one;
+    any = module_prepend_list(c, m, &one, 1) > 0;
+  }
+  if (!any) return;
+  int count = nt->count;
+  for (int s = 0; s < count; s++) {
+    if (nt_kind(nt, s) != NK_CallNode || nt_ref(nt, s, "receiver") >= 0) continue;
+    const char *nm = nt_str(nt, s, "name");
+    if (!nm || (!sp_streq(nm, "include") && !sp_streq(nm, "extend"))) continue;
+    int anode = nt_ref(nt, s, "arguments");
+    int an = 0;
+    const int *args = anode >= 0 ? nt_arr(nt, anode, "arguments", &an) : NULL;
+    if (an == 0) continue;
+    int cap = an + 64, nn = 0, changed = 0;
+    int *nargs = malloc(sizeof(int) * (size_t)cap);
+    if (!nargs) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+    for (int j = 0; j < an; j++) {
+      int a = args[j];
+      NodeKind ak = nt_kind(nt, a);
+      const char *mn = ak == NK_ConstantReadNode || ak == NK_ConstantPathNode ? nt_str(nt, a, "name") : NULL;
+      int pre[64];
+      int np = module_prepend_list(c, mn ? comp_class_index(c, mn) : -1, pre, 64);
+      if (nn + np + 1 > cap) {
+        cap = nn + np + 1 + an;
+        nargs = realloc(nargs, sizeof(int) * (size_t)cap);
+        if (!nargs) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+      }
+      for (int q = 0; q < np; q++) {
+        /* the prepended module, named as a constant the include's own
+           scope reads */
+        int base = nt->count;
+        int cr = nt_new_node(nt, "ConstantReadNode");
+        nt_node_set_str(nt, cr, "name", c->classes[pre[q]].name);
+        nt_node_set_int(nt, cr, "node_line", nt_int(nt, a, "node_line", 0));
+        nt_node_set_int(nt, cr, "node_file", nt_int(nt, a, "node_file", 0));
+        nt_node_set_int(nt, cr, "node_col", nt_int(nt, a, "node_col", 0));
+        comp_grow_node_arrays(c);
+        for (int x = base; x < nt->count; x++) {
+          c->nscope[x] = c->nscope[a];
+          c->node_cbody[x] = c->node_cbody[a];
+        }
+        nargs[nn++] = cr;
+        changed = 1;
+      }
+      nargs[nn++] = a;
+    }
+    if (changed) nt_node_set_arr(nt, anode, "arguments", nargs, nn);
+    free(nargs);
+  }
+}
+
 void register_extends(Compiler *c) {
   const NodeTable *nt = c->nt;
   int did_clone = 0;
@@ -5732,8 +6003,14 @@ void register_extends(Compiler *c) {
       }
     }
    }
-   if (cls_mod >= 0 && (ci == cls_mod || class_is_root(c, ci)))
+   if (cls_mod >= 0 && (ci == cls_mod || class_is_root(c, ci))) {
      did_clone |= extend_class_with(c, ci, cls_mod, 0);
+     /* `class Class; prepend P; end`: P in front of the reopening, as an
+        `extend` of it would put it (see desugar_module_prepends) */
+     int pre[64];
+     int np = module_prepend_list(c, cls_mod, pre, 64);
+     for (int q = np - 1; q >= 0; q--) did_clone |= extend_class_with(c, ci, pre[q], 0);
+   }
   }
   /* The cloned bodies introduced new local nodes, and register_locals ran
      before this pass: a local first assigned in the clone had no slot, so
@@ -5940,7 +6217,7 @@ static void specialize_cmethod_for(Compiler *c, int mi, int def_cls, int ci) {
     dst->ret = ty_object(ci);
     dst->ret_specialized = 1;
   }
-  if (src->blk_param) dst->blk_param = strdup(src->blk_param);
+  scope_copy_block_param(dst, src);
   scope_copy_params(dst, src);
   scope_own_defaults(c, dst_idx);
   src = &c->scopes[mi]; dst = &c->scopes[dst_idx];
@@ -6237,6 +6514,9 @@ void specialize_inherited_cls_new(Compiler *c) {
    diagnostic recommends (#4200). */
 static void process_prepend_body(Compiler *c, int ci, int body) {
   const NodeTable *nt = c->nt;
+  /* a module's prepend goes wherever the module is mixed in, which
+     desugar_module_prepends has written out already */
+  if (comp_class_is_module(c, &c->classes[ci])) return;
   {
     int n = 0;
     const int *stmts = body >= 0 ? nt_arr(nt, body, "body", &n) : NULL;
@@ -6319,6 +6599,7 @@ static void process_prepend_body(Compiler *c, int ci, int body) {
             dst->class_id = ci;
             dst->is_cmethod = 0;
             dst->is_include_copy = 1;
+            dst->is_prepend_copy = 1;
             dst->origin_module_ci = mod_id + 1;   /* #owner names the module */
             dst->reachable = sc->reachable;
             dst->yields = sc->yields;
@@ -6326,7 +6607,7 @@ static void process_prepend_body(Compiler *c, int ci, int body) {
             dst->rest_idx = sc->rest_idx;
             dst->kwrest_idx = sc->kwrest_idx;
             dst->ret = sc->ret;
-            if (sc->blk_param) dst->blk_param = strdup(sc->blk_param);
+            scope_copy_block_param(dst, sc);
             /* register_locals has already run, so the parameters have to be
                copied across by hand and their locals re-interned -- exactly
                what the include clone does, and the half my first attempt at
@@ -6600,7 +6881,7 @@ static int is_cvar_write_kind(NodeKind k) {
    and unifies the stored type into its slot. An op-write stores the RHS type
    unless the slot holds an object (the operator method's return) or an array
    the operator combines with its own kind. */
-static int cvar_note_write(Compiler *c, int cid, int id) {
+static int cvar_note_write(Compiler *c, int cid, int id, int nil_only) {
   const NodeTable *nt = c->nt;
   const char *nm = nt_str(nt, id, "name");
   if (!nm) return 0;
@@ -6610,6 +6891,7 @@ static int cvar_note_write(Compiler *c, int cid, int id) {
   int changed = ci->ncvars != old_n;
   int vnode = nt_ref(nt, id, "value");
   TyKind cur = ci->cvar_types[idx];
+  if (nil_only && cur != TY_BOOL && cur != TY_SYMBOL) return changed;
   TyKind vt;
   if (nt_kind(nt, id) == NK_ClassVariableOperatorWriteNode) {
     vt = infer_type(c, vnode);
@@ -6638,8 +6920,9 @@ static int cvar_note_write(Compiler *c, int cid, int id) {
 }
 
 /* Register each class variable (@@x) in its owning class and infer its type
-   from the write sites' RHS. */
-int infer_cvar_types(Compiler *c) {
+   from the write sites' RHS. The late nil_only re-run widens only Bool and
+   Symbol slots, which have no nil representation. */
+int infer_cvar_types(Compiler *c, int nil_only) {
   const NodeTable *nt = c->nt;
   int changed = 0;
   /* Pass 1: class body-level writes (comp_scope_of returns scope 0, class_id=-1,
@@ -6653,7 +6936,7 @@ int infer_cvar_types(Compiler *c) {
       const char *sty = nt_type(nt, s);
       if (!sty) continue;
       if (is_cvar_write_kind(nt_kind(nt, s))) {
-        if (cvar_note_write(c, ci, s)) changed = 1;
+        if (cvar_note_write(c, ci, s, nil_only)) changed = 1;
       }
       else if (sp_streq(sty, "MultiWriteNode")) {
         int mln = 0;
@@ -6668,6 +6951,8 @@ int infer_cvar_types(Compiler *c) {
           if (!cnm) continue;
           ClassInfo *mcl = &c->classes[comp_cvar_owner(c, ci, cnm)];
           int midx = comp_cvar_intern(mcl, cnm);
+          if (nil_only && mcl->cvar_types[midx] != TY_BOOL &&
+              mcl->cvar_types[midx] != TY_SYMBOL) continue;
           TyKind mvt2 = (mels && mi < men) ? infer_type(c, mels[mi]) : TY_UNKNOWN;
           if (mvt2 == TY_NIL || mvt2 == TY_UNKNOWN) continue;
           TyKind mmerged = ty_unify(mcl->cvar_types[midx], mvt2);
@@ -6686,7 +6971,7 @@ int infer_cvar_types(Compiler *c) {
     int wcid = s->class_id;
     if (wcid < 0 && c->node_cbody && id < c->node_cap) wcid = c->node_cbody[id];
     if (wcid < 0) continue;
-    if (cvar_note_write(c, wcid, id)) changed = 1;
+    if (cvar_note_write(c, wcid, id, nil_only)) changed = 1;
   }
   /* A multiple-assignment target (`@@a, *@@r = ...`), in a method or a class
      body and on either side of a splat, declares its cvar too; the elements'
@@ -6708,7 +6993,7 @@ int infer_cvar_types(Compiler *c) {
     if (!is_cvar_write_kind(nt_kind(nt, id))) continue;
     Scope *s = comp_scope_of(c, id);
     if (s->class_id >= 0 || id >= c->node_cap || c->node_cbody[id] < 0) continue;
-    if (cvar_note_write(c, c->node_cbody[id], id)) changed = 1;
+    if (cvar_note_write(c, c->node_cbody[id], id, nil_only)) changed = 1;
   }
   /* Pass 2.5: `Klass.class_variable_set(:@@name, v)` with a literal name
      DECLARES the cvar when the class has no such write -- CRuby creates it on
@@ -6729,6 +7014,8 @@ int infer_cvar_types(Compiler *c) {
     if (!cvn || cvn[0] != '@' || cvn[1] != '@') continue;
     ClassInfo *scl = &c->classes[comp_cvar_owner(c, cci, cvn)];
     int idx = comp_cvar_intern(scl, cvn);
+    if (nil_only && scl->cvar_types[idx] != TY_BOOL &&
+        scl->cvar_types[idx] != TY_SYMBOL) continue;
     TyKind vt = infer_type(c, av[1]);
     if (vt == TY_NIL || vt == TY_UNKNOWN) continue;
     TyKind merged = ty_unify(scl->cvar_types[idx], vt);
@@ -6743,7 +7030,7 @@ int infer_cvar_types(Compiler *c) {
     if (c->node_cbody && id < c->node_cap && c->node_cbody[id] >= 0) continue;
     int tl_idx = comp_class_index(c, "Toplevel");
     if (tl_idx < 0) { comp_class_new(c, "Toplevel", -1); tl_idx = c->nclasses - 1; }
-    if (cvar_note_write(c, tl_idx, id)) changed = 1;
+    if (cvar_note_write(c, tl_idx, id, nil_only)) changed = 1;
   }
   /* Pass 4: a subclass can have interned a name before its superclass
      declared it, when a write in the subclass was reached first (the passes
@@ -6909,6 +7196,10 @@ static int pivs_param(Compiler *c, Scope *s, const char *pn, char *set, int dept
   for (int k = 0; k < on && i < 0; k++)
     if (sp_streq(nt_str(nt, op[k], "name"), pn)) { i = rn + k; dflt = nt_ref(nt, op[k], "value"); }
   if (i < 0) return 0;
+  /* Optional arguments precede the post-required arguments only when supplied. */
+  int posts = 0;
+  if (ps >= 0) nt_arr(nt, ps, "posts", &posts);
+  if (i >= rn && posts > 0) return 0;
   int si = (int)(s - c->scopes);
   for (int w = comp_lvw_first_sc(c, si, pn); w >= 0; w = comp_lvw_next_sc(c, w))
     if (c->nscope[w] == si && sp_streq(nt_str(nt, w, "name"), pn)) return 0;
@@ -6959,8 +7250,8 @@ static int pivs_local(Compiler *c, int v, char *set, int depth, int elems) {
     const char *un = nt_str(nt, u, "name");
     int known = 0;
     for (int j = 0; IT[j] && un && !known; j++) known = sp_streq(un, IT[j]);
-    if (!known || at != 0 || elems || rn != 1 && !sp_streq(un, "each_with_index") &&
-        !sp_streq(un, "each_with_object")) return 0;
+    if (!known || at != 0 || elems ||
+        (rn != 1 && !sp_streq(un, "each_with_index") && !sp_streq(un, "each_with_object"))) return 0;
     /* reassigned, it is not only the element */
     for (int w = comp_lvw_first_sc(c, si, vn); w >= 0; w = comp_lvw_next_sc(c, w))
       if (c->nscope[w] == si && sp_streq(nt_str(nt, w, "name"), vn)) return 0;
@@ -6990,9 +7281,11 @@ static int pivs_local(Compiler *c, int v, char *set, int depth, int elems) {
           for (int k = 0; k < ac; k++) if (!pivs_elems(c, av[k], set, depth + 1)) return 0;
         }
         else if (sp_streq(un, "[]=")) {
-          if (ac < 2 || !pivs_value(c, av[ac - 1], set, depth + 1)) return 0;
+          if (ac != 2 || nt_kind(nt, av[0]) != NK_IntegerNode) return 0;
+          if (!pivs_value(c, av[1], set, depth + 1)) return 0;
         }
-        else if (array_mutator_name(un) || nt_ref(nt, u, "block") >= 0 && nt_kind(nt, nt_ref(nt, u, "block")) == NK_BlockArgumentNode)
+        else if (array_mutator_name(un) ||
+                 (nt_ref(nt, u, "block") >= 0 && nt_kind(nt, nt_ref(nt, u, "block")) == NK_BlockArgumentNode))
           return 0;
       }
       /* handed as an argument it may be kept and grown, except to the
@@ -7100,7 +7393,8 @@ static int pivs_value(Compiler *c, int v, char *set, int depth) {
       if ((sp_streq(un, "[]") && ac == 1) || ((sp_streq(un, "first") || sp_streq(un, "last") ||
            sp_streq(un, "sample") || sp_streq(un, "shift") || sp_streq(un, "pop") || sp_streq(un, "min") ||
            sp_streq(un, "max")) && ac == 0) || ((sp_streq(un, "fetch") || sp_streq(un, "at")) && ac == 1))
-        return pivs_elems(c, r, set, depth + 1);
+        return (sp_streq(un, "fetch") && nt_ref(nt, v, "block") >= 0)
+                 ? 0 : pivs_elems(c, r, set, depth + 1);
       if ((sp_streq(un, "itself") || sp_streq(un, "dup") || sp_streq(un, "clone")) && ac == 0)
         return pivs_value(c, r, set, depth + 1);
       return 0;

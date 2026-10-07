@@ -36,7 +36,8 @@ jobs:
   # Slice 1 of each lane carries the C-side test legs, the property gates,
   # the benchmarks and optcarrot.
   posix:
-    name: ${{ matrix.os }} / ${{ matrix.cc }} (${{ matrix.shard }}/${{ matrix.nshards }})
+    # The slice shows in the name only when the corpus is split.
+    name: ${{ matrix.os }} / ${{ matrix.cc }}${{ matrix.nshards > 1 && format(' ({0}/{1})', matrix.shard, matrix.nshards) || '' }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -161,8 +162,23 @@ jobs:
         run: |
           shard="${{ matrix.shard }}/${{ matrix.nshards }}"
           if [ "${{ matrix.cc }}" = gcc ]; then shard="$(( GITHUB_RUN_NUMBER % 8 + 1 ))/8"; fi
-          echo "corpus slice: $shard"
-          make -j$(getconf _NPROCESSORS_ONLN) ${{ matrix.shard == 1 && 'test' || 'test-corpus' }} TEST_SHARD=$shard ${{ matrix.cc == 'clang' && 'OPT=-O0 CC=clang' || 'OPT=-O1 CC=gcc' }}
+          # the Linux clang lane on a master push: a quarter, rotating. The maintainer's own
+          # pre-push lanes (clang, clang -m32, wasm32 on a separate machine) run the whole
+          # corpus before every push, so this lane was repeating them (2026-10-07); a pull
+          # request still runs all of it.
+          if [ "${{ matrix.cc }}" = clang ] && [ "${{ matrix.os }}" = ubuntu-latest ] && [ "${{ github.event_name }}" = push ]; then shard="$(( GITHUB_RUN_NUMBER % 4 + 1 ))/4"; fi
+          # macOS on a master push: a rotating quarter plus every test whose answer depends on the
+          # operating system (tools/os_sensitive.re: time, files, processes, signals, sockets, threads,
+          # the GC, FFI) and the packages' tests, which is where its failures have been. It was the
+          # whole corpus, 20 of the run's 21 minutes. Add a pattern to the file when a test fails here
+          # alone and the pattern would have kept it in.
+          always=""
+          if [ "${{ matrix.os }}" = macos-latest ] && [ "${{ github.event_name }}" = push ]; then
+            shard="$(( GITHUB_RUN_NUMBER % 4 + 1 ))/4"
+            always="TEST_ALWAYS=tools/os_sensitive.re"
+          fi
+          echo "corpus slice: $shard $always"
+          make -j$(getconf _NPROCESSORS_ONLN) ${{ matrix.shard == 1 && 'test' || 'test-corpus' }} TEST_SHARD=$shard $always ${{ matrix.cc == 'clang' && 'OPT=-O0 CC=clang' || 'OPT=-O1 CC=gcc' }}
 
       # spin's end-to-end check: it builds real projects, which a clean
       # checkout on another machine is worth seeing. Linux/gcc only.
@@ -289,8 +305,13 @@ jobs:
       # clang -m32 -O0 with its precompiled header takes 0.10 s; an eighth
       # of the corpus ran in 32 s against 14 s on 16 cores (2026-10-05).
       # Under gcc the lane took 26 to 28 minutes of a run.
+      # A quarter of the corpus per push, rotating by run number: the maintainer's pre-push
+      # -m32 lane runs the whole corpus (2026-10-07), so this one repeated it in 9 minutes.
       - name: Run the test corpus as 32-bit programs
-        run: make -j$(getconf _NPROCESSORS_ONLN) test-corpus OPT=-O0
+        run: |
+          shard="$(( GITHUB_RUN_NUMBER % 4 + 1 ))/4"
+          echo "corpus slice: $shard"
+          make -j$(getconf _NPROCESSORS_ONLN) test-corpus OPT=-O0 TEST_SHARD=$shard
 
       - name: sccache stats
         if: always()

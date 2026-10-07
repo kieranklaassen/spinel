@@ -119,9 +119,11 @@ static const pm_parser_t *g_parser;
 static int sym_proc_block_starts_at(size_t off);
 static const char *g_source_file = "";
 static char *g_source_file_escaped = NULL;  /* escape_str(g_source_file), set once at init */
-/* Debug builds: when SPINEL_DEBUG=1, flatten() emits a per-node
-   `node_line` field so codegen can place C `#line` directives. Off by
-   default so the AST text format (and golden tests) are unchanged. */
+/* When SPINEL_DEBUG, SPINEL_LINE_MAP or SPINEL_POSITIONS is 1, flatten()
+   emits a per-node `node_line` field, which codegen places C `#line`
+   directives by and the analysis reads. The compiler driver sets
+   SPINEL_POSITIONS for every compile; off otherwise, so the AST text format
+   (and golden tests) are unchanged. */
 static int g_emit_line = 0;
 /* The buffer-line -> (file, line) map is built for every program, not only
    under g_emit_line: `__FILE__` and `__dir__` in a required file answer
@@ -234,6 +236,12 @@ static void sp_fsl_splice(unsigned char **buf, size_t *n, size_t at,
 static int *sp_line_file = NULL;  /* buffer line (1-based) -> file id */
 static int *sp_line_orig = NULL;  /* buffer line (1-based) -> original line */
 static int *sp_line_pop = NULL;
+/* The position a `#<SPINEL_SOURCE>file:line` marker pins for the lines after
+   it (0 = none). Kept apart from the physical map above: `__FILE__`,
+   `__dir__` and `require_relative` still answer from the file the code is in,
+   only the positions handed to `#line`, debug and the reports follow it. */
+static int *sp_disp_file = NULL;
+static int *sp_disp_line = NULL;
 static pm_node_t **g_stmt_next, **g_stmt_end;
 static const uint8_t *g_owner;
 static int sp_line_map_n = 0;
@@ -365,6 +373,36 @@ static void emit_float(int id, const char *field, double val) {
 static void emit_ref(int id, const char *field, pm_node_t *child) {
   int cid = child ? flatten(child) : -1;
   out_add("R %d %s %d", id, field, cid);
+}
+
+/* A block's or lambda's own locals (params + first-assigned-inside), joined
+   with commas: Ruby scoping makes the non-param ones FRESH on every call, and
+   a name the enclosing scope assigns only after the block's text is the
+   block's own, not the enclosing one. */
+static void out_block_locals(int id, const pm_constant_id_list_t *locals) {
+  if (locals->size == 0) return;
+  /* join the names in one pass (single cstr per name, no strcat rescans) */
+  size_t total = 1;
+  char **nms = malloc(locals->size * sizeof(char *));
+  if (!nms) return;
+  for (size_t li = 0; li < locals->size; li++) {
+    nms[li] = cstr(locals->ids[li]);
+    total += strlen(nms[li]) + 1;
+  }
+  char *joined = malloc(total);
+  if (joined) {
+    char *w = joined;
+    for (size_t li = 0; li < locals->size; li++) {
+      if (li) *w++ = ',';
+      size_t nl2 = strlen(nms[li]);
+      memcpy(w, nms[li], nl2); w += nl2;
+    }
+    *w = '\0';
+    out_add("S %d locals %s", id, joined);
+    free(joined);
+  }
+  for (size_t li = 0; li < locals->size; li++) free(nms[li]);
+  free(nms);
 }
 
 static void emit_node_array(int id, const char *field, pm_node_list_t *list) {
@@ -568,6 +606,7 @@ static int flatten_node(pm_node_t *node) {
     if (sp_line_map_n > 0 && bl >= 1 && bl <= sp_line_map_n && sp_line_orig[bl] > 0) {
       orig = sp_line_orig[bl];
       fid = sp_line_file[bl];
+      if (sp_disp_line[bl] > 0) { orig = sp_disp_line[bl]; fid = sp_disp_file[bl]; }
     }
     emit_int(id, "node_line", (long long)orig);
     emit_int(id, "node_file", (long long)fid);
@@ -582,7 +621,10 @@ static int flatten_node(pm_node_t *node) {
                                                         g_parser->start_line);
       int32_t el = le.line;
       int eorig = el;
-      if (sp_line_map_n > 0 && el >= 1 && el <= sp_line_map_n && sp_line_orig[el] > 0) eorig = sp_line_orig[el];
+      if (sp_line_map_n > 0 && el >= 1 && el <= sp_line_map_n && sp_line_orig[el] > 0) {
+        eorig = sp_line_orig[el];
+        if (sp_disp_line[el] > 0) eorig = sp_disp_line[el];
+      }
       emit_int(id, "node_end_line", (long long)eorig);
       emit_int(id, "node_end_col", (long long)le.column);
     }
@@ -1332,31 +1374,7 @@ static int flatten_node(pm_node_t *node) {
     /* Block-local variables (params + first-assigned-inside): Ruby scoping
        makes non-param locals FRESH on every block invocation; codegen needs
        the list to reset them per iteration in fused loops. */
-    if (n->locals.size > 0) {
-      /* join the names in one pass (single cstr per name, no strcat rescans) */
-      size_t total = 1;
-      char **nms = malloc(n->locals.size * sizeof(char *));
-      if (nms) {
-        for (size_t li = 0; li < n->locals.size; li++) {
-          nms[li] = cstr(n->locals.ids[li]);
-          total += strlen(nms[li]) + 1;
-        }
-        char *joined = malloc(total);
-        if (joined) {
-          char *w = joined;
-          for (size_t li = 0; li < n->locals.size; li++) {
-            if (li) *w++ = ',';
-            size_t nl2 = strlen(nms[li]);
-            memcpy(w, nms[li], nl2); w += nl2;
-          }
-          *w = '\0';
-          out_add("S %d locals %s", id, joined);
-          free(joined);
-        }
-        for (size_t li = 0; li < n->locals.size; li++) free(nms[li]);
-        free(nms);
-      }
-    }
+    out_block_locals(id, &n->locals);
     /* Serialize block parameters */
     if (n->parameters) {
       if (PM_NODE_TYPE(n->parameters) == PM_BLOCK_PARAMETERS_NODE) {
@@ -1605,6 +1623,7 @@ else {
   case PM_LAMBDA_NODE: {
     pm_lambda_node_t *n = (pm_lambda_node_t *)node;
     N("LambdaNode");
+    out_block_locals(id, &n->locals);
     if (n->parameters) {
       if (PM_NODE_TYPE(n->parameters) == PM_BLOCK_PARAMETERS_NODE) {
         pm_block_parameters_node_t *bp = (pm_block_parameters_node_t *)n->parameters;
@@ -2252,6 +2271,10 @@ static void sp_includes_free(void) {
 #define SP_PUSH_PREFIX "#<SPINEL_PUSH>"
 #define SP_INSERT_PREFIX "#<SPINEL_INSERT>"
 #define SP_POP_PREFIX "#<SPINEL_POP>"
+/* A generated .rb names the source its lines came from (#7630):
+   `#<SPINEL_SOURCE>greeting.html.erb:12` pins file and line for the lines
+   after it, until the next marker or the end of the file it is in. */
+#define SP_SOURCE_PREFIX "#<SPINEL_SOURCE>"
 
 /* The byte ranges of the final buffer a builtins/ file was spliced into.
    A node inside one is stamped `node_bi`, so the names the compiler invents
@@ -2359,11 +2382,15 @@ static void sp_build_line_map(const char *src, const char *toplevel) {
   sp_line_file = (int *)calloc(nlines + 2, sizeof(int));
   sp_line_orig = (int *)calloc(nlines + 2, sizeof(int));
   sp_line_pop = (int *)calloc(nlines + 2, sizeof(int));
+  sp_disp_file = (int *)calloc(nlines + 2, sizeof(int));
+  sp_disp_line = (int *)calloc(nlines + 2, sizeof(int));
+  int *stk_dfile = (int *)calloc(nlines + 2, sizeof(int));  /* a frame's pinned file id, 0 = none */
+  int *stk_dline = (int *)calloc(nlines + 2, sizeof(int));
 
   int *stk_file = (int *)malloc(sizeof(int) * (nlines + 2));
   int *stk_next = (int *)malloc(sizeof(int) * (nlines + 2));
   int *stk_start = (int *)malloc(sizeof(int) * (nlines + 2));
-  if (!sp_line_file || !sp_line_orig || !sp_line_pop || !stk_file || !stk_next || !stk_start) {
+  if (!sp_line_file || !sp_line_orig || !sp_line_pop || !sp_disp_file || !sp_disp_line || !stk_dfile || !stk_dline || !stk_file || !stk_next || !stk_start) {
     fprintf(stderr, "spinel_parse: out of memory\n"); exit(1);
   }
   int sp = 0;
@@ -2394,6 +2421,7 @@ else if (strncmp(line, SP_INSERT_PREFIX, strlen(SP_INSERT_PREFIX)) == 0) {
       stk_file[sp] = sp_intern_file(pathbuf);
       stk_next[sp] = 1;
       stk_start[sp] = bl;
+      stk_dfile[sp] = 0;
       /* marker line maps to nothing meaningful */
     }
 else if (strncmp(line, SP_POP_PREFIX, strlen(SP_POP_PREFIX)) == 0) {
@@ -2404,6 +2432,27 @@ else if (len < 12 || strncmp(line + len - 12, "SPINEL_COND>", 12) != 0) {
       sp_line_file[bl] = stk_file[sp];
       sp_line_orig[bl] = stk_next[sp];
       stk_next[sp] += 1;
+      if (strncmp(line, SP_SOURCE_PREFIX, strlen(SP_SOURCE_PREFIX)) == 0) {
+        /* file:line, split at the last colon; anything else is a comment */
+        char pathbuf[1024];
+        size_t plen = len - strlen(SP_SOURCE_PREFIX);
+        if (plen >= sizeof(pathbuf)) plen = sizeof(pathbuf) - 1;
+        memcpy(pathbuf, line + strlen(SP_SOURCE_PREFIX), plen);
+        pathbuf[plen] = '\0';
+        while (plen > 0 && (pathbuf[plen - 1] == '\r' || pathbuf[plen - 1] == ' ')) pathbuf[--plen] = '\0';
+        char *colon = strrchr(pathbuf, ':');
+        char *end = NULL;
+        long ln = colon ? strtol(colon + 1, &end, 10) : 0;
+        if (colon && colon > pathbuf && end && end != colon + 1 && *end == '\0' && ln > 0 && ln < 1000000000) {
+          *colon = '\0';
+          stk_dfile[sp] = sp_intern_file(pathbuf);
+          stk_dline[sp] = (int)ln;
+        }
+      }
+      else if (stk_dfile[sp]) {
+        sp_disp_file[bl] = stk_dfile[sp];
+        sp_disp_line[bl] = stk_dline[sp];
+      }
     }
     bl++;
     if (!eol) break;
@@ -2413,6 +2462,8 @@ else if (len < 12 || strncmp(line + len - 12, "SPINEL_COND>", 12) != 0) {
   free(stk_file);
   free(stk_next);
   free(stk_start);
+  free(stk_dfile);
+  free(stk_dline);
 }
 
 /* Lexically collapse "." and ".." path segments, like File.expand_path,
@@ -3136,6 +3187,21 @@ static int sp_source_writes_engine(const char *source) {
   return 0;
 }
 
+/* `Kernel.require "x"` (`::Kernel.` too) is the bare require: the textual
+   resolver has treated it so since 0c0f61fff, so a dead branch must drop it
+   exactly as it drops a receiver-less `require`, or --require-gate refuses
+   a call that never runs. */
+static int sp_call_receiver_is_kernel(const pm_parser_t *parser, const pm_node_t *receiver) {
+  if (!receiver) return 0;
+  if (PM_NODE_TYPE(receiver) == PM_CONSTANT_READ_NODE)
+    return sp_pm_name_is(parser, ((const pm_constant_read_node_t *)receiver)->name, "Kernel");
+  if (PM_NODE_TYPE(receiver) == PM_CONSTANT_PATH_NODE) {
+    const pm_constant_path_node_t *cp = (const pm_constant_path_node_t *)receiver;
+    return !cp->parent && sp_pm_name_is(parser, cp->name, "Kernel");
+  }
+  return 0;
+}
+
 /* Blank a statement in a dead branch to `(nil)`, keeping every newline so
    later line numbers hold (and a multiline call stays grouped, including
    before a modifier). */
@@ -3175,7 +3241,8 @@ static bool sp_skip_dead_require(const pm_node_t *node, void *data) {
   if (ctx->dead && PM_NODE_TYPE(node) == PM_CALL_NODE) {
     const pm_call_node_t *call = (const pm_call_node_t *)node;
     const pm_constant_t *name = pm_constant_pool_id_to_constant(&ctx->parser->constant_pool, call->name);
-    if (!call->receiver && !call->block && call->arguments && call->arguments->arguments.size == 1 &&
+    if ((!call->receiver || sp_call_receiver_is_kernel(ctx->parser, call->receiver)) &&
+        !call->block && call->arguments && call->arguments->arguments.size == 1 &&
         ((name->length == 7 && memcmp(name->start, "require", 7) == 0) ||
          (name->length == 16 && memcmp(name->start, "require_relative", 16) == 0))) {
       const pm_node_t *arg = call->arguments->arguments.nodes[0];
@@ -3949,6 +4016,29 @@ else {
         if (content) snprintf(lib_path, sizeof(lib_path), "%s", alt_path);
       }
       if (!content) {
+        /* `-I <dir>` feature roots: <root>/X.rb, else <root>/X/<last>.rb. They
+           come before the pre-installed packages, so a project's package of the
+           same name as a bundled one is the one a require reaches (#7207); lib/
+           stays first. */
+        char rp[1024];
+        const char *last = strrchr(lib_name, '/');
+        last = last ? last + 1 : lib_name;
+        for (int ri = 0; ri < sp_feature_roots_n && !content; ri++) {
+          snprintf(rp, sizeof(rp), "%s/%s.rb", sp_feature_roots[ri], lib_name);
+          content = read_file(rp);
+          if (!content) {
+            snprintf(rp, sizeof(rp), "%s/%s/%s.rb", sp_feature_roots[ri], lib_name, last);
+            content = read_file(rp);
+          }
+          if (content) snprintf(lib_path, sizeof(lib_path), "%s", rp);
+        }
+        char *rc = content ? sp_canonical_path(lib_path) : NULL;
+        for (int i = sp_rr_included; rc && i < sp_included_count && !root_dup; i++) root_dup = sp_included_paths[i] && strcmp(sp_included_paths[i], rc) == 0;
+        if (root_dup) { free(content); content = strdup("# require skipped (already included)"); }
+        else if (rc) sp_mark_path_included(rc);
+        free(rc);
+      }
+      if (!content) {
         /* pre-installed packages (the carved-out stdlib): packages/ sits
            beside lib/ in both the repo and the installed tree. The package
            root is the require root, so `require "erb"` is
@@ -4006,26 +4096,6 @@ else {
           else { free(content); content = NULL; }
         }
         if (content) snprintf(lib_path, sizeof(lib_path), "%s", gp);
-      }
-      if (!content) {
-        /* `-I <dir>` feature roots: <root>/X.rb, else <root>/X/<last>.rb. */
-        char rp[1024];
-        const char *last = strrchr(lib_name, '/');
-        last = last ? last + 1 : lib_name;
-        for (int ri = 0; ri < sp_feature_roots_n && !content; ri++) {
-          snprintf(rp, sizeof(rp), "%s/%s.rb", sp_feature_roots[ri], lib_name);
-          content = read_file(rp);
-          if (!content) {
-            snprintf(rp, sizeof(rp), "%s/%s/%s.rb", sp_feature_roots[ri], lib_name, last);
-            content = read_file(rp);
-          }
-          if (content) snprintf(lib_path, sizeof(lib_path), "%s", rp);
-        }
-        char *rc = content ? sp_canonical_path(lib_path) : NULL;
-        for (int i = sp_rr_included; rc && i < sp_included_count && !root_dup; i++) root_dup = sp_included_paths[i] && strcmp(sp_included_paths[i], rc) == 0;
-        if (root_dup) { free(content); content = strdup("# require skipped (already included)"); }
-        else if (rc) sp_mark_path_included(rc);
-        free(rc);
       }
       if (!content) {
         if (sp_lib_is_native(lib_name)) {
@@ -4944,8 +5014,10 @@ static int sp_parse_emit(const char *source_file, const char *argv0, SpStrBuf *o
   {
     const char *dbg = getenv("SPINEL_DEBUG");
     const char *lm = getenv("SPINEL_LINE_MAP");
+    const char *ps = getenv("SPINEL_POSITIONS");
     int on = (dbg != NULL && dbg[0] == '1' && dbg[1] == '\0')
-          || (lm  != NULL && lm[0]  == '1' && lm[1]  == '\0');
+          || (lm  != NULL && lm[0]  == '1' && lm[1]  == '\0')
+          || (ps  != NULL && ps[0]  == '1' && ps[1]  == '\0');
     g_emit_line = on ? 1 : 0;
     const char *et = getenv("SPINEL_EMIT_TYPES");
     const char *ww = getenv("SPINEL_WARN_WIDEN");
@@ -5029,6 +5101,7 @@ else {
     sp_build_line_map(la == lb ? premap : source, source_file);
     if (la != lb) {
       memset(sp_line_orig, 0, sizeof(int) * ((size_t)sp_line_map_n + 2));
+      memset(sp_disp_line, 0, sizeof(int) * ((size_t)sp_line_map_n + 2));
       /* Multi-file line attribution unavailable for this program; #line
          falls back to buffer lines. Only worth a word under an explicit
          --debug build (faithful stepping matters there); stay silent for
