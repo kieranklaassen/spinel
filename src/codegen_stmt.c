@@ -14375,6 +14375,33 @@ void emit_str_frozen_check(Compiler *c, int recv, Buf *b) {
   buf_puts(b, "if ("); emit_expr(c, recv, b); buf_puts(b, ") sp_str_check_mutable(");
   emit_expr(c, recv, b); buf_puts(b, ");");
 }
+/* s[/re/, n] = v, once the pattern matched: the span of group _t<tn> in _b
+   and _e, in a block this opens. With `tests`, a group the pattern has not and
+   a group that took no part in the match raise CRuby's IndexError: past the
+   pattern's groups sp_re_caps holds whatever an earlier match left there, and
+   a group left out of the match holds -1. Without, the index is only held to
+   nine, as it was. `fz`, where not 0, is the receiver's temp in the arm that
+   tests frozen last: an index refused here that CRuby takes (a negative one
+   counted back from the last group, a group past the ninth; _g is the group
+   it names, and it took part in the match) keeps the frozen test ahead of
+   its IndexError. */
+static void emit_re_group_span(Buf *b, int tn, int tests, int fz) {
+  buf_printf(b, " if (_t%d < 0 || _t%d > 9", tn, tn);
+  if (tests) buf_printf(b, " || _t%d >= sp_re_last_ncap", tn);
+  buf_puts(b, ")");
+  if (fz)
+    buf_printf(b, " { sp_int _g = _t%d < 0 ? _t%d + sp_re_last_ncap : _t%d;"
+                  " if (_g > 0 && _g < sp_re_last_ncap && (_g > 15 || sp_re_caps[2 * _g] >= 0))"
+                  " sp_str_check_mutable(_t%d);", tn, tn, tn, fz);
+  buf_printf(b, " sp_raise_cls(\"IndexError\", sp_sprintf(\"index %%lld out of regexp\","
+                " (long long)_t%d));", tn);
+  if (fz) buf_puts(b, " }");
+  buf_printf(b, " { sp_int _b = sp_re_caps[2 * _t%d], _e = sp_re_caps[2 * _t%d + 1]; ", tn, tn);
+  if (tests)
+    buf_printf(b, "if (_b < 0) sp_raise_cls(\"IndexError\","
+                  " sp_sprintf(\"regexp group %%lld not matched\", (long long)_t%d)); ", tn);
+}
+
 /* emit_array_mutate_stmt_body's String mutators done by reassigning the
    receiver: replace, prepend, insert, concat, clear, delete_prefix! /
    delete_suffix! (answers 1 emitted, 0 declined, -1 to go on) */
@@ -14613,6 +14640,44 @@ static int str_mutate_reassign_arms(Compiler *c, Buf *b, int indent, const NodeT
       buf_puts(b, ", 0); }\n");
       return 1;
     }
+    /* s[/re/, n] = v with a String value: the group, then the value, then
+       the receiver, as CRuby reads its arguments before it looks at the
+       String, so a value that changes the receiver
+       (`s[/(b)(cd)/, 2] = (s << "ZZ"; "x")`) is seen. The value and the head
+       are rooted while the next piece is cut: in the nested sp_str_concat of
+       the arm below, whichever piece C built first was in flight while the
+       next allocated, and the tail was cut before or after the value as the
+       C compiler read the arguments. The receiver is tested for frozen
+       last, as CRuby tests it: a value can freeze it, and a pattern that
+       does not match is IndexError on a frozen String too. Only an index
+       this arm refuses and CRuby takes (a negative one counted back from
+       the last group, a group past the ninth) keeps the frozen test ahead
+       of its IndexError, as it was. A value of another kind converts or
+       raises where it is read, which CRuby does after the match: it keeps
+       the arm below. */
+    if (assignable && sp_streq(name, "[]=") && argc == 3 && re_lit_index(c, argv[0]) >= 0 &&
+        comp_ntype(c, argv[2]) == TY_STRING && yield_site_type(c, argv[2]) == TY_STRING) {
+      int ts = ++g_tmp, tn = ++g_tmp, tv = ++g_tmp, th = ++g_tmp;
+      emit_indent(b, indent);
+      buf_printf(b, "{ sp_int _t%d = ", tn); emit_int_expr(c, argv[1], b);
+      buf_printf(b, "; const char *_t%d = ", tv); emit_str_expr(c, argv[2], b); buf_puts(b, ";");
+      if (nt_kind(nt, argv[2]) != NK_StringNode && !subtree_is_pure_read(c, argv[2]))
+        buf_printf(b, " SP_GC_ROOT_STR(_t%d);", tv);
+      buf_printf(b, " const char *_t%d = ", ts); emit_expr(c, recv, b);
+      buf_printf(b, "; if (sp_re_match(sp_re_pat_%d, _t%d) < 0)"
+                    " sp_raise_cls(\"IndexError\", \"regexp not matched\");",
+                 re_lit_index(c, argv[0]), ts);
+      emit_re_group_span(b, tn, 1, ts);
+      if (node_may_be_null_nil(c, argv[2]))
+        buf_printf(b, "if (!_t%d) sp_raise_cls(\"TypeError\","
+                      " \"no implicit conversion of nil into String\"); ", tv);
+      buf_printf(b, "sp_str_check_mutable(_t%d); ", ts);
+      buf_printf(b, "const char *_t%d = sp_str_byteslice(_t%d, 0, _b); SP_GC_ROOT_STR(_t%d); ", th, ts, th);
+      emit_expr(c, recv, b);
+      buf_printf(b, " = sp_str_concat3(_t%d, _t%d, sp_str_byteslice(_t%d, _e, (sp_int)sp_str_byte_len(_t%d) - _e)); } }\n",
+                 th, tv, ts, ts);
+      return 1;
+    }
     /* s[/re/, n] = v: replace the nth capture group's span (#3548) */
     if (assignable && sp_streq(name, "[]=") && argc == 3 && re_lit_index(c, argv[0]) >= 0) {
       int ts = ++g_tmp, tn = ++g_tmp;
@@ -14623,10 +14688,12 @@ static int str_mutate_reassign_arms(Compiler *c, Buf *b, int indent, const NodeT
       buf_printf(b, "; if (sp_re_match(sp_re_pat_%d, _t%d) < 0)"
                     " sp_raise_cls(\"IndexError\", \"regexp not matched\");",
                  re_lit_index(c, argv[0]), ts);
-      buf_printf(b, " if (_t%d < 0 || _t%d > 9)"
-                    " sp_raise_cls(\"IndexError\", sp_sprintf(\"index %%lld out of regexp\","
-                    " (long long)_t%d));", tn, tn, tn);
-      buf_printf(b, " { sp_int _b = sp_re_caps[2 * _t%d], _e = sp_re_caps[2 * _t%d + 1]; ", tn, tn);
+      /* this arm reads its value after the tests, so the group tests go
+         ahead only of a value that has nothing to run: any other raises its
+         own error first, as in CRuby */
+      NodeKind vk = nt_kind(nt, argv[2]);
+      emit_re_group_span(b, tn, vk != NK_CallNode && vk != NK_ParenthesesNode &&
+                                vk != NK_StatementsNode && subtree_is_pure_read(c, argv[2]), 0);
       emit_expr(c, recv, b);
       buf_printf(b, " = sp_str_concat(sp_str_concat(sp_str_byteslice(_t%d, 0, _b), ", ts);
       emit_str_expr(c, argv[2], b);
