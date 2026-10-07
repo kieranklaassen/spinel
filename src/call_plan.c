@@ -1785,6 +1785,32 @@ static int cplan_nil_user_method(Compiler *c, const char *name) {
   return 0;
 }
 
+/* An attribute reader's call on a receiver that runs no code: self, a
+   local, or such a reader's call again. */
+static int cplan_plain_reader(Compiler *c, int v, int depth) {
+  const NodeTable *nt = c->nt;
+  if (v < 0 || nt_kind(nt, v) != NK_CallNode || depth > 3) return 0;
+  const char *nm = nt_str(nt, v, "name");
+  const char *op = nt_str(nt, v, "call_operator");
+  if (!nm || nt_ref(nt, v, "arguments") >= 0 || nt_ref(nt, v, "block") >= 0 || (op && sp_streq(op, "&."))) return 0;
+  int o = nt_ref(nt, v, "receiver"), cls = -1;
+  NodeKind ok = o >= 0 ? nt_kind(nt, o) : NK_SelfNode;
+  if (ok == NK_SelfNode) {
+    Scope *s = comp_scope_of(c, v);
+    cls = s && !s->is_cmethod ? s->class_id : -1;
+  }
+  else if (ty_is_object(c->ntype[o]) &&
+           (ok == NK_LocalVariableReadNode || cplan_plain_reader(c, o, depth + 1)))
+    cls = ty_object_class(c->ntype[o]);
+  return cls >= 0 && comp_method_in_chain(c, cls, nm, NULL) < 0 && comp_reader_in_chain(c, cls, nm, NULL) != 0;
+}
+
+/* Such a call that hands out its String slot's handle (`r.x` in
+   `r.x << "z"`): the slot itself, read again at no cost, as a local's is. */
+int cplan_nil_slot_reader(Compiler *c, int r) {
+  return r >= 0 && c->ntype[r] == TY_STRBUF && cplan_plain_reader(c, r, 0);
+}
+
 int cplan_nil(Compiler *c, int id) {
   const NodeTable *nt = c->nt;
   if (id < 0 || id >= nt->count || nt_kind(nt, id) != NK_CallNode) return CN_NONE;
@@ -1795,7 +1821,8 @@ int cplan_nil(Compiler *c, int id) {
   /* the receiver as settled, not as a view retypes it: a poly arm's
      unboxed String is never its box's nil */
   TyKind rt = c->ntype[r];
-  if (!cplan_nil_family(rt) || comp_ntype(c, r) != rt) return CN_NONE;
+  int slot_reader = cplan_nil_slot_reader(c, r);
+  if (!(cplan_nil_family(rt) || slot_reader) || comp_ntype(c, r) != rt) return CN_NONE;
   Repr rr = repr_of(c, r);
   if ((rr.kind != RK_PTR && rr.kind != RK_STRBUF) || !rr.may_nil || rr.nil_tested) return CN_NONE;
   /* an ivar keeps the release build's policy (ivar_nil_recv_guard, #5960);
@@ -1816,8 +1843,9 @@ int cplan_nil(Compiler *c, int id) {
     Repr sr = repr_of_slot(c, lv);
     if (!lv || !(sr.kind == RK_STRBUF || (sr.kind == RK_PTR && sr.as_ty == rt))) return CN_NONE;
   }
-  /* a shared String's handle a call renders is not bound like a value */
-  else if (rr.kind == RK_STRBUF) return CN_NONE;
+  /* a shared String's handle a call renders is not bound like a value: an
+     attribute reader's is tested in its slot, like a local's */
+  else if (rr.kind == RK_STRBUF && !slot_reader) return CN_NONE;
   /* a nil the program writes; not one the fact cannot bound (an element
      read, a global, an ivar, a caller not seen, a builtin's answer), which
      a hot loop over a receiver that is never nil would pay for */

@@ -340,5 +340,6 @@ typedef enum {
                   yet: the call's type has to join NilClass's answer */
 } CplanNil;
 int cplan_nil(Compiler *c, int id);
+int cplan_nil_slot_reader(Compiler *c, int r);
 
 #endif

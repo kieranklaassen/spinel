@@ -19054,7 +19054,8 @@ static int nil_target_operands(Compiler *c, int id, int *node, TyKind *ty, int m
   int n = 0;
   int r = nt_ref(nt, id, "receiver");
   NodeKind rk = nt_kind(nt, r);
-  if (rk != NK_LocalVariableReadNode && rk != NK_GlobalVariableReadNode && !hc_recv_cached(c, r)) {
+  if (rk != NK_LocalVariableReadNode && rk != NK_GlobalVariableReadNode && !hc_recv_cached(c, r) &&
+      !cplan_nil_slot_reader(c, r)) {
     node[n] = r; ty[n] = repr_of(c, r).as_ty; n++;
   }
   int a = nt_ref(nt, id, "arguments"), an = 0;
