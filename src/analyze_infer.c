@@ -1014,8 +1014,30 @@ int an_value_dropped(const NodeTable *nt, const int *parent, int node) {
    hash, so a table holding one is not a table of Integer Arrays, whose rows
    are read as sp_IntArray without a test. A row whose type is merely not
    settled yet stays open. */
+static int an_local_only_open_empty(Compiler *c, int rd);
 static int an_row_open_empty(Compiler *c, int row) {
-  return comp_ntype(c, row) == TY_UNKNOWN && node_is_empty_container(c->nt, row);
+  if (comp_ntype(c, row) != TY_UNKNOWN) return 0;
+  if (node_is_empty_container(c->nt, row)) return 1;
+  return nt_kind(c->nt, row) == NK_LocalVariableReadNode && an_local_only_open_empty(c, row);
+}
+
+/* A local that holds nothing but such a container, read as a row while
+   nothing has given it a kind: `e = {}; T = [[1, 2], e]`. Every write of
+   it in its scope is an empty container. */
+static int an_local_only_open_empty(Compiler *c, int rd) {
+  const NodeTable *nt = c->nt;
+  const char *vn = nt_str(nt, rd, "name");
+  Scope *vs = vn ? comp_scope_of(c, rd) : NULL;
+  if (!vs) return 0;
+  int n = 0;
+  for (int w = comp_lvw_first_sc(c, (int)(vs - c->scopes), vn); w >= 0; w = comp_lvw_next_sc(c, w)) {
+    if (nt_kind(nt, w) != NK_LocalVariableWriteNode || comp_scope_of(c, w) != vs) continue;
+    const char *wn = nt_str(nt, w, "name");
+    if (!wn || !sp_streq(wn, vn)) continue;
+    if (!node_is_empty_container(nt, nt_ref(nt, w, "value"))) return 0;
+    n++;
+  }
+  return n > 0;
 }
 
 static int an_elems_int_rows(Compiler *c, int arr, int *saw) {
