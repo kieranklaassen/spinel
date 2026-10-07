@@ -412,6 +412,19 @@ static inline const char *sp_msg_heapify(const char *m) {
   memcpy(r, m, n);
   return r;
 }
+const char *sp_exc_uncaught_msg(const char *msg, void *obj);   /* lib/sp_exc.c */
+/* The line an uncaught exception ends with, "<message> (<Class>)", on stderr, after
+   the raising frame `at` when one is known. The message comes as the raise handed it
+   over, so a counted one writes its payload, the NUL with it. */
+static inline void sp_exc_write_uncaught(const char *at, const char *cls, const char *msg) {
+  if (sp_cmsg_p(msg)) {
+    if (at) fprintf(stderr, "%s: ", at);
+    fwrite(msg + SP_CMSG_HDR, 1, sp_cmsg_len(msg), stderr);
+    fprintf(stderr, " (%s)\n", cls);
+  }
+  else if (at) fprintf(stderr, "%s: %s (%s)\n", at, (msg && *msg) ? msg : cls, cls);
+  else fprintf(stderr, "%s (%s)\n", (msg && *msg) ? msg : cls, cls);
+}
 
 /* Raw variant: the caller writes a NUL-terminated payload whose final
    length it doesn't know yet (worst-case sized transforms: dump, gsub,

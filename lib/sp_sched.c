@@ -2020,11 +2020,11 @@ static int sp_sched_ensure_workers(void) {
 static void sp_thread_report(sp_thread *t) {
   SP_GC_ROOT(t);
   const char *cls = t->exc_cls ? t->exc_cls : "Exception";
-  const char *msg = t->exc_msg ? t->exc_msg : "";
+  const char *msg = sp_exc_uncaught_msg(t->exc_msg ? t->exc_msg : "", t->exc_obj);
   SP_GC_ROOT_STR(msg);
   const char *ins = sp_Thread_inspect(t);
   fprintf(stderr, "%s terminated with exception (report_on_exception is true):\n", ins);
-  fprintf(stderr, "%s (%s)\n", (msg && *msg) ? msg : cls, cls);
+  sp_exc_write_uncaught(NULL, cls, msg);
 }
 
 /* Park/wake primitives (defined below; used by join here). */
