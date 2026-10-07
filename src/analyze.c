@@ -1816,29 +1816,30 @@ static int const_read_is_programs(Compiler *c, int id) {
   return par < 0 || (pn && comp_class_index(c, pn) >= 0);
 }
 
-/* Does `read` run only after the constant write `w` has run? It does when
-   `w` is a statement of the program, or of a class or module body that is
-   one, and `read` comes after it in the text: nothing after such a statement
-   runs before it. Walks from `node`, the program's statements; *st is 0
-   before the write, 1 after it, -1 once `read` was met before it. */
-static int runs_after_const_write(const NodeTable *nt, int node, int spine, int w, int read, int *st) {
-  if (node < 0) return 0;
-  if (node == read) { if (*st != 1) *st = -1; return *st == 1; }
-  if (node == w) { if (*st == 0 && spine) *st = 1; return 0; }
-  NodeKind k = nt_kind(nt, node);
-  if (k == NK_PreExecutionNode) return 0;   /* BEGIN { } runs first */
-  if (k == NK_ClassNode || k == NK_ModuleNode)
-    return runs_after_const_write(nt, nt_ref(nt, node, "body"), spine, w, read, st);
-  spine = spine && k == NK_StatementsNode;
+/* Number the statements of the program in the order they run. A statement's
+   seq[] is odd and grows; every node inside it carries the even number below.
+   A class or module body that is a statement is numbered through, as its
+   statements run in place. BEGIN { } runs first and anything else stays 0. */
+static void seq_stamp(const NodeTable *nt, int node, int v, int *seq) {
+  if (node < 0) return;
+  seq[node] = v;
   int nr = nt_num_refs(nt, node);
-  for (int i = 0; i < nr; i++)
-    if (runs_after_const_write(nt, nt_ref_at(nt, node, i), spine, w, read, st)) return 1;
+  for (int i = 0; i < nr; i++) seq_stamp(nt, nt_ref_at(nt, node, i), v, seq);
   int na = nt_num_arrs(nt, node);
   for (int i = 0; i < na; i++) {
     int m = 0; const int *ids = nt_arr_at(nt, node, i, &m);
-    for (int j = 0; j < m; j++) if (runs_after_const_write(nt, ids[j], spine, w, read, st)) return 1;
+    for (int j = 0; j < m; j++) seq_stamp(nt, ids[j], v, seq);
   }
-  return 0;
+}
+
+static void seq_statements(const NodeTable *nt, int stmts, int *seq, int *n) {
+  if (nt_kind(nt, stmts) != NK_StatementsNode) return;
+  int m = 0; const int *ids = nt_arr(nt, stmts, "body", &m);
+  for (int j = 0; j < m; j++) {
+    NodeKind k = nt_kind(nt, ids[j]);
+    if (k == NK_ClassNode || k == NK_ModuleNode) seq_statements(nt, nt_ref(nt, ids[j], "body"), seq, n);
+    else if (k != NK_PreExecutionNode) { *n += 2; seq_stamp(nt, ids[j], *n, seq); seq[ids[j]] = *n + 1; }
+  }
 }
 
 /* `x.is_a?(A)` (kind_of?, instance_of?) where `A = SomeClass`: rewrite the
@@ -1847,7 +1848,7 @@ static int runs_after_const_write(const NodeTable *nt, int node, int spine, int 
    the class. Only where the constant is known to hold that class when the
    call runs: its one write is `A = <constant>` and has run by then. A second
    write may hold another class, and before the write CRuby raises NameError. */
-static void rewrite_const_alias_kind_arg(Compiler *c, int id) {
+static void rewrite_const_alias_kind_arg(Compiler *c, int id, int **seq) {
   const NodeTable *nt = c->nt;
   const char *name = nt_str(nt, id, "name");
   if (!name || !is_kind_query(name)) return;
@@ -1858,9 +1859,13 @@ static void rewrite_const_alias_kind_arg(Compiler *c, int id) {
   if (!an || comp_class_index(c, an) >= 0) return;   /* already a class name */
   const char *real = resolve_class_alias(c, an);
   if (!real || sp_streq(real, an)) return;
-  int w = const_only_write(nt, an), st = 0;
+  int w = const_only_write(nt, an);
   if (nt_kind(nt, w) != NK_ConstantWriteNode || !const_read_is_programs(c, nt_ref(nt, w, "value"))) return;
-  if (!runs_after_const_write(nt, nt_ref(nt, nt->root_id, "statements"), 1, w, argv[0], &st)) return;
+  if (!*seq) {
+    if (!(*seq = calloc((size_t)nt->count, sizeof(int)))) return;
+    int n = 0; seq_statements(nt, nt_ref(nt, nt->root_id, "statements"), *seq, &n);
+  }
+  if (!((*seq)[w] & 1) || (*seq)[argv[0]] < (*seq)[w]) return;   /* not after a statement's write */
   char buf[256]; snprintf(buf, sizeof buf, "%s", real);  /* copy: set frees an */
   nt_set_str((NodeTable *)nt, argv[0], "name", buf);
 }
@@ -1871,10 +1876,11 @@ static void rewrite_const_alias_kind_arg(Compiler *c, int id) {
    reopening rewrite in walk_scope. Runs once after classes are registered. */
 void rewrite_const_alias_receivers(Compiler *c) {
   const NodeTable *nt = c->nt;
+  int *seq = NULL;   /* statement numbers, built for the first kind query that asks */
   for (int id = 0; id < nt->count; id++) {
     const char *ty = nt_type(nt, id);
     if (!ty || !sp_streq(ty, "CallNode")) continue;
-    rewrite_const_alias_kind_arg(c, id);
+    rewrite_const_alias_kind_arg(c, id, &seq);
     int recv = nt_ref(nt, id, "receiver");
     if (recv < 0 || !nt_type(nt, recv)) continue;
     const char *rvty = nt_type(nt, recv);
@@ -1890,6 +1896,7 @@ void rewrite_const_alias_receivers(Compiler *c) {
       nt_set_str((NodeTable *)nt, recv, "name", buf);
     }
   }
+  free(seq);
 }
 
 /* For a receiverless instance_eval/exec CallNode with a literal block inside
