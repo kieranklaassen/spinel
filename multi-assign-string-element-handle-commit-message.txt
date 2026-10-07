@@ -1,0 +1,28 @@
+A new String a multiple assignment stores where it is appended to is held as its handle
+
+    r = [+"q"]
+    r[0], r[1] = +"ab", +"cd"
+    r[0] << "z"
+    p r
+
+prints ["abz", "cd"] in CRuby and did not build here, with and without
+--share-strings: "initialization of 'sp_String *' from incompatible
+pointer type 'const char *'". `r[0] = +"ab"; r[1] = +"cd"` in place of
+the multiple assignment builds and is right.
+
+A String stored where an element is changed in place is wrapped in a
+handle of its own (repr_of's RS_FRESH), and a single store does that at
+the store (emit_boxed). A multiple assignment holds each value in a temp
+first. The temp was declared by the value's stored type, the handle, and
+filled with what the value renders as, the String.
+
+The temp is now the handle the store would have made:
+sp_String_new_shared over the String, rendered with the mark lifted as
+emit_boxed renders it. Only a value that renders as the String takes
+this (masgn_el_fresh_str): a literal, an interpolation or a call on a
+String. A receiverless call or one on a class renders the handle itself
+and is emitted as before. The wrap allocates, so a temp before it is
+rooted as it is before any value that builds.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+

@@ -1,0 +1,1 @@
+scrub with a block on a boxed receiver calls its block

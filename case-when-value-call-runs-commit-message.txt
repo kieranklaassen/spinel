@@ -1,0 +1,29 @@
+A `when` value of another kind than the subject still runs its call
+
+emit_when_typed_test folds a `when` value whose type can never equal
+the subject's (a String beside an Integer, a Symbol beside a String)
+to a constant 0. The value was not emitted at all, so a call written
+there never ran:
+
+    $n = 0
+    def name; $n += 1; "s"; end
+    case 5
+    when name then puts "m"
+    else puts "e"
+    end
+    puts "n=#{$n}"             # Spinel: n=0, CRuby: n=1
+
+The arm still answers 0, after the value: `((void)(name()), 0)`. Only
+a value with a side effect (subtree_has_side_effect) is emitted; a
+literal or a plain local keeps the bare 0, so the C of a program
+without such a call does not change. In `when a, b` the values run
+left to right until one matches, as before.
+
+Left alone: a Range value beside a subject that is no number (`case
+:a` with `when rng` for a method answering a Range), which is folded
+by another arm.
+
+Test: test/case_when_value_call_runs.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+

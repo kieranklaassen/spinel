@@ -1,0 +1,1 @@
+`total += v` into an Integer local holds what the operator answers

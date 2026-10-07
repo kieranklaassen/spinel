@@ -1,0 +1,33 @@
+A boxed walk's value parameter is boxed though a push typed it
+
+    def pick(n) = n > 0 ? {a: 5} : [1, 2]
+    h = pick(1)
+    x = "!"
+    h.each { |k, v| v << x }   # segfault; CRuby raises TypeError
+
+While h is still untyped the push types v an Array of Strings. Once h
+is boxed, infer_block_params binds every parameter of a boxed walk
+boxed, but it skipped a slot already typed an Array, so each boxed
+value was read as an Array of Strings: a segfault for each and
+each_pair, C that did not build for map, select and reject.
+
+The walk's one-parameter path already has the exception for a pure
+block parameter, one nothing assigns: "The push says what the element
+holds, not what the element is". The path for two or more parameters
+now has it too, and v is boxed as k is.
+
+Not here. The append to a String value is still lost: with
+`{a: +"s"}` and `p h` after the walk, the program now prints what
+master prints for it when another line types h, `{a: "s"}`. That is
+the documented limit, "A plain String in a slot that holds other
+values too is not shared by `<<`" (docs/limitations.md); this commit
+adds no sharing route. A String pushed onto an Integer Array value
+raises the TypeError a boxed push raises for it; the mistyped slot
+dropped that push in silence. Under --share-strings nothing changes
+and the crash stands: a push onto the boxed v does not build there
+yet.
+
+Test: test/poly_walk_two_params_push.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+

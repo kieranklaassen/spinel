@@ -1,0 +1,1 @@
+A new String a multiple assignment stores where it is appended to is held as its handle

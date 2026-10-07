@@ -1,0 +1,1 @@
+A case statement finds the same object before calling its ==

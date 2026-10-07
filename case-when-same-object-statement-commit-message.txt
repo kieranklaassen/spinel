@@ -1,0 +1,35 @@
+A case statement finds the same object before calling its ==
+
+`when pa` beside a subject of pa's class asks `pa === subject`, which
+for a class that defines only == is Object#===: the same object
+matches before == runs. The case value tests that (emit_case_obj_eq).
+The statement called the method directly when its parameter has the
+class's own type:
+
+    class Never
+      attr_reader :n
+      def initialize(n) = @n = n
+      def ==(o) = o.n > 1_000_000
+    end
+    na = Never.new(1)
+    p(na == Never.new(2))      # false; == takes a Never
+    case na
+    when na then puts "na"
+    else puts "none"           # Spinel: none, CRuby: na
+    end
+    p(case na when na then :na else :none end)    # :na on both
+
+An == that counts its calls was called once more than in CRuby.
+
+An arm of the subject's own class with == and no === now goes to
+emit_case_obj_eq in the statement too, so both forms emit the same
+test. Every other arm keeps the call it had.
+
+Left alone: a boxed subject (`case list[0]` with `when pa`), which
+both forms compare with sp_poly_eq and so call == on the same object;
+a value-type object, which has no identity to compare.
+
+Test: test/case_when_same_object_statement.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+
