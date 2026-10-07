@@ -1828,6 +1828,18 @@ static inline sp_File *sp_poly_to_file(sp_RbVal v); /* defined below; IO.select'
 void sp_poly_puts(sp_RbVal v);
 static sp_bool sp_poly_nil_p(sp_RbVal v) { return v.tag == SP_TAG_NIL; }
 static sp_bool sp_poly_truthy(sp_RbVal v) { return !(v.tag == SP_TAG_NIL || (v.tag == SP_TAG_BOOL && !v.v.b)); }
+/* object_id of a boxed value. An Integer, a Symbol, nil, true and false answer
+   what they answer unboxed (2n+1, twice the id, 4, 20, 0), so one value has
+   one id whichever way it is held; anything else keeps its payload's bits. */
+static SP_UNUSED sp_int sp_poly_object_id(sp_RbVal v) {
+  switch (v.tag) {
+    case SP_TAG_INT:  return 2 * v.v.i + 1;
+    case SP_TAG_SYM:  return v.v.i * 2;
+    case SP_TAG_NIL:  return 4;
+    case SP_TAG_BOOL: return v.v.b ? 20 : 0;
+    default:          return (sp_int)(uintptr_t)v.v.p;
+  }
+}
 /* Regexp.new's option argument where its type is not known until run time: an
    Integer is option bits, and anything else truthy is IGNORECASE. CRuby makes
    that choice from the VALUE, so a caller that cannot see the type statically
