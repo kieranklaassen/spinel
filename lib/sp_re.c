@@ -148,6 +148,26 @@ void sp_re_frame_pop(sp_re_frame *f) {
   /* the span $` and $' are built from lazily: the caller's, not the callee's */
   sp_re_pp_span[0] = f->pp_span[0]; sp_re_pp_span[1] = f->pp_span[1];
 }
+/* A raise, a throw, a break out of a block and a proc's return jump out of
+   methods without running a cleanup, so the frames above would never be
+   popped and the method the jump lands in would read its callee's match as
+   its own. Frames opened by sp_re_frame_enter are therefore chained, and each
+   jump pops the frames of the methods it leaves first, innermost first, which
+   walks the registers back to what the landing method had. The root stack is
+   not touched: every landing puts its own depth back. Which frames a jump
+   leaves is the jump's to say (sp_re_frames_leave, sp_re_frames_leave_to): a
+   frame entered inside the handler it lands on noted that handler stack at
+   the landing depth or deeper, and one entered before it noted less. */
+SP_TLS sp_re_frame *sp_re_frame_top = NULL;
+void sp_re_frame_leave(sp_re_frame *f) {
+  sp_re_frame_top = f->prev;
+  sp_re_frame_pop(f);
+}
+void sp_re_frames_pop_to(sp_re_frame *keep) {
+  int nroots = sp_gc_nroots;
+  while (sp_re_frame_top && sp_re_frame_top != keep) sp_re_frame_leave(sp_re_frame_top);
+  sp_gc_nroots = nroots;
+}
 void sp_re_set_captures(const char *str, int *caps, int ncaps) {SP_GC_ROOT_STR(str);
   sp_re_last_str = str;
   sp_re_last_ncap = ncaps;

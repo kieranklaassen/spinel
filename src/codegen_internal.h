@@ -555,6 +555,11 @@ extern int g_uses_program_name;/* $0 / $PROGRAM_NAME read somewhere */
    match (sp_re_track_last), which costs a copy of the match and its groups
    per call; one that never reads them keeps the plain scans. */
 extern int g_reads_match_regs;
+/* True when the match registers a method sees while it runs are provably its
+   own frame's (match_frame_closed) in a program that reads them and runs no
+   user code on a fiber. Only then is a frame put back where master put none
+   back: on a jump out of the method. Elsewhere the method is emitted as before. */
+extern int g_match_frame_closed;
 extern int g_gen_obj_hash;
 extern int g_gen_obj_to_json;  /* a package wants obj reflection + >=1 user #to_json */  /* a package wants obj reflection + >=1 struct: emit+install sp_obj_to_hash */
 extern int g_gen_obj_struct_values;  /* >=1 instantiated Struct (not Data): emit+install sp_obj_struct_values (poly member array) */
@@ -1410,6 +1415,7 @@ void emit_ds_param_extract(Compiler *c, Scope *m, int i, int ds_hash_tmp,
    analyze_scope.c; canonical declarations live in analyze_internal.h) */
 int is_arith_op(const char *op);
 int is_cmp_op(const char *op);
+void a_mark_subtree(Compiler *c, int id, char *inproc);
 int int_slot_store_needs_ck(Compiler *c, int v, TyKind slot_ty, int slot_nullable);
 const char *int_shift_fn(Compiler *c, const char *op, int v);
 int class_def_body(Compiler *c, int def_node);

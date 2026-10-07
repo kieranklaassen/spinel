@@ -131,7 +131,7 @@ sp_MatchData *sp_re_last_matchdata(void);   /* $~ from the TLS match registers *
    method that performs a match restores its caller's on the way out (#3629).
    The emitter declares one with a cleanup attribute, so every ordinary exit
    path -- including an early `return` -- puts the caller's registers back. */
-typedef struct {
+typedef struct sp_re_frame {
   const char *captures[10];
   int caps[64];
   const char *last_str, *match_str, *match_pre, *match_post;
@@ -141,9 +141,33 @@ typedef struct {
   int pp_span[2];
   struct { sp_gc_frame_hdr h; void **p[13]; } roots;   /* the strings above, as one root frame */
   int rooted;  /* whether sp_re_frame_push got it onto the root stack */
+  /* Set by sp_re_frame_enter, for a jump out of the method, which runs no
+     cleanup (sp_re_frames_leave): the frame entered before this one, the
+     depth of each handler stack at the method's entry, and the proc-return
+     home that was innermost then. */
+  struct sp_re_frame *prev;
+  int depth[3];
+  void *home;
 } sp_re_frame;
 void sp_re_frame_push(sp_re_frame *f);
 void sp_re_frame_pop(sp_re_frame *f);
+/* The handler stacks a frame notes its entry depth on (spinel_rt.h owns them). */
+enum { SP_RE_FRAME_EXC, SP_RE_FRAME_CATCH, SP_RE_FRAME_BRK };
+extern SP_TLS sp_re_frame *sp_re_frame_top;   /* the innermost entered frame; one chain a fiber */
+void sp_re_frame_leave(sp_re_frame *f);       /* the cleanup of an entered frame */
+void sp_re_frames_pop_to(sp_re_frame *keep);
+/* What a jump out of methods calls before it jumps (see sp_re_frames_pop_to):
+   leave every frame above `keep`, or every frame entered at `depth` of handler
+   stack `stack` or deeper. Nothing to leave is the common case and costs a
+   load and a compare. */
+static inline void sp_re_frames_leave_to(sp_re_frame *keep) {
+  if (sp_re_frame_top != keep) sp_re_frames_pop_to(keep);
+}
+static inline void sp_re_frames_leave(int stack, int depth) {
+  sp_re_frame *keep = sp_re_frame_top;
+  while (keep && keep->depth[stack] >= depth) keep = keep->prev;
+  sp_re_frames_leave_to(keep);
+}
 sp_MatchData *sp_re_matchdata_at(mrb_regexp_pattern *pat, const char *str, sp_int cpos);
 const char *sp_MatchData_aref(sp_MatchData *m, sp_int i);
 const char *sp_MatchData_aref_name(sp_MatchData *m, const char *name);
