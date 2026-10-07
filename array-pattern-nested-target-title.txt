@@ -1,0 +1,1 @@
+A target inside a nested pattern binds an assigned local to a value of any class
