@@ -8295,6 +8295,14 @@ int class_is_exc_subclass(Compiler *c, int ci) {
   return 0;
 }
 
+/* Does the program define a class under a builtin exception? An exception's
+   class is then asked of sp_exc_class_of, which knows those classes' ids. */
+int comp_exc_class_by_id(Compiler *c) {
+  for (int i = 0; i < c->nclasses; i++)
+    if (class_is_exc_subclass(c, i)) return 1;
+  return 0;
+}
+
 /* Per-class exception facts, computed once per class table: bit 1 the class
    carries a builtin exception's name, bit 2 it is that builtin's reopening
    (no superclass of its own). The name test is a scan of the builtin table,
@@ -14559,6 +14567,11 @@ static int calls_poly_is_a(const char *t) {
   return 0;
 }
 
+/* Does emitted text ask sp_exc_class_of for an exception's class? */
+static int calls_exc_class_of(const char *t) {
+  return t && strstr(t, "sp_exc_class_of(") != NULL;
+}
+
 /* Insert `s` into `b` at offset `at`. */
 static void buf_splice(Buf *b, size_t at, const char *s) {
   char *tail = strdup(b->p + at);
@@ -14610,7 +14623,8 @@ static void refuse_syserr_errno_const(Compiler *c) {
 }
 
 /* The class machinery a program with classes or class values needs: class tables, names, is_a and the class-value runtime (codegen_program's steps, in their order) */
-static void emit_class_machinery(const NodeTable *nt, Compiler *c, Buf *b, char **isa_ext, size_t *isa_ext_at) {
+static void emit_class_machinery(const NodeTable *nt, Compiler *c, Buf *b, char **isa_ext, size_t *isa_ext_at,
+                                 char **exc_cls, size_t *exc_cls_at) {
   if (g_needs_class_machinery) {
   /* sp_cls_is_module[i]: 1 if user class i was defined as a module, 0 if class */
   if (c->nclasses > 0) {
@@ -15220,6 +15234,26 @@ static void emit_class_machinery(const NodeTable *nt, Compiler *c, Buf *b, char 
       }
     }
     buf_puts(b, "  return 0;\n}\n");
+    /* An exception's class from the name it carries. A class of the program
+       answers by its id, so `e.class.new` and the class's own methods are
+       that class's; any other is the class by name. Spliced in here once the
+       unit is done, where it asks for an exception's class. */
+    if (any) {
+      Buf eb; memset(&eb, 0, sizeof eb);
+      buf_puts(&eb, "static sp_Class sp_exc_class_of(volatile sp_Exception *ve){\n"
+                    "  sp_Exception *e = (sp_Exception *)ve;\n"
+                    "  const char *n = e->cls_name;\n  if(n){\n");
+      for (int i = 0; i < c->nclasses; i++) {
+        if (!class_is_exc_subclass(c, i)) continue;
+        const char *cn = class_ruby_name(c, i);
+        if (!cn) cn = c->classes[i].name;
+        if (!cn) continue;
+        buf_printf(&eb, "  if(!strcmp(n,\"%s\"))return (sp_Class){%d,NULL};\n", cn, i);
+      }
+      buf_puts(&eb, "  }\n  return (sp_Class){(sp_int)-1, sp_exc_class_name(e)};\n}\n");
+      *exc_cls = eb.p;
+      *exc_cls_at = b->len;
+    }
   }
   }  /* if (g_needs_class_machinery) */
 }
@@ -15751,6 +15785,8 @@ static void emit_user_exc_dispatch(Compiler *c, Buf *b) {
 char *codegen_program(const NodeTable *nt) {
   char *isa_ext = NULL;  /* sp_poly_is_a's class-value arms, and where they go */
   size_t isa_ext_at = 0;
+  char *exc_cls = NULL;  /* sp_exc_class_of, and where it goes */
+  size_t exc_cls_at = 0;
   Compiler *c = comp_new(nt);
   analyze_program(c);
   if (g_dump_traits) { ty_traits_dump(c); exit(0); }
@@ -15883,7 +15919,7 @@ char *codegen_program(const NodeTable *nt) {
      a guard-page crash waiting for the right input, so it is worth a warning
      rather than a silent SIGSEGV (#3913). */
   if (fi_fiber_stack_risk(c)) buf_puts(&b, "/* SPINEL_FIBER_FRAME_GUARD */\n");
-  emit_class_machinery(nt, c, &b, &isa_ext, &isa_ext_at);
+  emit_class_machinery(nt, c, &b, &isa_ext, &isa_ext_at, &exc_cls, &exc_cls_at);
 
   /* class structs + GC scan functions. Forward-declare every typedef first so
      a class struct may embed a pointer to a class defined later. */
@@ -16613,6 +16649,12 @@ char *codegen_program(const NodeTable *nt) {
   emit_regex_section(c, &b);
   { const char *pdt[3] = { g_procs.p, body->p, b.p };
     pd_emit_used(pdt, 3, &g_pd_protos, &g_pd_defs); }
+  if (exc_cls) {  /* it sits after isa_ext's place, so it goes in first */
+    if (calls_exc_class_of(b.p + exc_cls_at) || calls_exc_class_of(g_procs.p) ||
+        calls_exc_class_of(body->p) || calls_exc_class_of(g_pd_defs.p))
+      buf_splice(&b, exc_cls_at, exc_cls);
+    free(exc_cls);
+  }
   if (isa_ext) {
     if (calls_poly_is_a(b.p + isa_ext_at) || calls_poly_is_a(g_procs.p) ||
         calls_poly_is_a(body->p) || calls_poly_is_a(g_pd_defs.p))
