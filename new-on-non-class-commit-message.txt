@@ -1,0 +1,33 @@
+new on a boxed value that is no class raises NoMethodError
+
+`r = c ? Box : nil; p r.new.class` printed Box where CRuby raises
+NoMethodError (undefined method 'new' for nil). The boxed `new` switch
+(the poly.new arm of emit_call_new_arms) dispatched on the value's
+cls_id without asking whether the value is a class. nil reads as id 0,
+so it built the program's first class; false, an Integer, a String and
+a Symbol did too, and an instance, which carries its class's id, built
+another object of its own class.
+
+The switch now takes cls_id only from a value tagged as a class. Any
+other value switches on SP_CLASS_NIL_ID, which no arm has, and takes
+the default, where sp_class_value_new_fallback already raises CRuby's
+NoMethodError. The arguments are evaluated before the switch, as they
+were.
+
+The opening changes only in a program where no value below a class can
+answer `new`: one whose source has no def, alias, attribute or member
+of that name, no method_missing, and no method made or reached under a
+name it does not spell (define_method or send with a computed name, a
+String given to eval, OpenStruct, a delegator).
+program_answers_new_below_class reads that from the node table, once.
+Any other program compiles to the C it did: there an instance's own
+`new` may be the right answer, and master's arm sometimes gave it.
+
+Not covered: `new` with a keyword, a splat or an argument beside a
+literal block (emit_class_value_new_kw), whose default arm raises
+before the arguments are evaluated; it is left as it was, and so are
+the programs above. docs/limitations.md gains the row.
+
+Test: test/class_value_new_on_non_class.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

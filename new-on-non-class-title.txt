@@ -1,0 +1,1 @@
+new on a boxed value that is no class raises NoMethodError
