@@ -17694,9 +17694,27 @@ static sp_RbVal sp_env_filter_bang_opt(sp_Proc *p, int keep) {
   if (sp_env_filter_core(p, keep) == 0) return sp_box_nil();
   return sp_box_obj(sp_env_to_h(), SP_BUILTIN_STR_STR_HASH);
 }
+/* sp_proc_call_spread_blk for a bound Method's proc given more than 16
+   arguments. Its trampoline takes the true count and reads that many slots,
+   so the call fills them, up to the boxed channel's; past that the
+   trampoline declines. In a function of its own, so the common call's frame
+   stays 16 slots. */
+static SP_NOINLINE void sp_proc_call_spread_wide(sp_Proc *p, sp_Proc *blk, sp_RbVal arr, sp_int n, int kwpos) {
+  sp_int fill = n > SP_PROC_ARG_SLOTS ? SP_PROC_ARG_SLOTS : n;
+  sp_int slots[SP_PROC_ARG_SLOTS];
+  for (sp_int i = 0; i < fill; i++) {
+    sp_RbVal e = sp_poly_arr_get(arr, i);
+    _sp_proc_poly_args[i] = e;
+    slots[i] = (e.tag == SP_TAG_OBJ || e.tag == SP_TAG_STR)
+             ? (sp_int)(uintptr_t)e.v.p : sp_poly_to_i(e);
+  }
+  _sp_proc_kwpos = kwpos;
+  sp_proc_call_blk(p, blk, n, slots);
+}
 static void sp_proc_call_spread_blk(sp_Proc *p, sp_Proc *blk, sp_RbVal arr, int kwpos) { SP_GC_ROOT(p);
   if (!p || !p->fn) return;
   sp_int n = sp_poly_length(arr);
+  if (n > 16 && p->cap_scan == sp_bm_cap_scan && p->lambda_p) { sp_proc_call_spread_wide(p, blk, arr, n, kwpos); return; }
   sp_int fill = n > 16 ? 16 : n;
   sp_int slots[16];
   for (sp_int i = 0; i < fill; i++) {

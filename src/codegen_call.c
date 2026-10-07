@@ -2134,7 +2134,12 @@ static TyKind proc_arg_ty(Compiler *c, int a) {
 }
 
 void emit_proc_call_args(Compiler *c, int call, int argc, const int *argv, Buf *b, int force_poly) {
-  int nargs = argc < 16 ? argc : 16;  /* proc-call ABI caps args at sp_int[16] */
+  /* The call passes its count, so it fills that many slots: the boxed side
+     channel carries SP_PROC_ARG_SLOTS, and past 16 the sp_int array is sized
+     by the count. A call wider than the channel fills 16, as it did. */
+  int nargs = argc <= SP_PROC_ARG_SLOTS ? argc : 16;
+  char slots_open[32];
+  snprintf(slots_open, sizeof slots_open, "(sp_int[%d]){", nargs > 16 ? nargs : 16);
   int any_poly = force_poly;
   /* A float arg also forces the boxed side-channel: an sp_float placed in the
      sp_int[] slot is value-truncated (0.7 -> 0), so it must be published boxed
@@ -2156,7 +2161,7 @@ void emit_proc_call_args(Compiler *c, int call, int argc, const int *argv, Buf *
        published both unboxed (the sp_int[] slot, for a concrete parameter)
        and boxed (the side-channel, for a poly parameter). A nil/unknown arg
        has no storable C type; it rides an sp_int temp and boxes to nil. */
-    int atmp[16], slot[16];
+    int atmp[SP_PROC_ARG_SLOTS], slot[SP_PROC_ARG_SLOTS];
     for (int k = 0; k < nargs; k++) {
       TyKind at = proc_arg_ty(c, argv[k]);
       int storable = ty_is_object(at) || c_type_name(at) != NULL;
@@ -2238,7 +2243,7 @@ void emit_proc_call_args(Compiler *c, int call, int argc, const int *argv, Buf *
       buf_puts(b, ", ");
     }
     if (kwpos) buf_printf(b, "_sp_proc_kwpos = %d, ", kwpos);
-    buf_puts(b, "(sp_int[16]){");
+    buf_puts(b, slots_open);
     for (int k = 0; k < nargs; k++) {
       TyKind at = proc_arg_ty(c, argv[k]);
       if (k) buf_puts(b, ", ");
@@ -2261,7 +2266,7 @@ void emit_proc_call_args(Compiler *c, int call, int argc, const int *argv, Buf *
   }
   else {
     if (kwpos) buf_printf(b, "(_sp_proc_kwpos = %d, ", kwpos);
-    buf_puts(b, "(sp_int[16]){");
+    buf_puts(b, slots_open);
     for (int k = 0; k < nargs; k++) {
       if (k) buf_puts(b, ", ");
       if (proc_slot_is_ptr(proc_arg_ty(c, argv[k]))) { buf_puts(b, "(sp_int)(uintptr_t)("); emit_expr(c, argv[k], b); buf_puts(b, ")"); }
