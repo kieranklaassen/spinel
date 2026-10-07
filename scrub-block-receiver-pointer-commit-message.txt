@@ -1,0 +1,33 @@
+scrub with a block cuts its pieces from the receiver itself
+
+    bad = "ab\xFEcd=\xFDef" * 300
+    400.times { |i| (bad + i.to_s).scrub { "?" } }    # SIGSEGV
+
+    s = ("\xC3\xA9" * 10) + "\xFE\xFDz"
+    s.scrub { |b| b.encoding.to_s }    # ...UTF-8ASCII-8BITz
+
+The first faults in sp_gc_mark; CRuby answers ...UTF-8UTF-8z for the
+second.
+
+emit_op_string_scrub_block cut each valid run and each invalid sequence
+with sp_str_substr(receiver + pos, 0, n). A pointer into a String has no
+header of its own, and sp_str_substr reads one: the byte before the
+pointer is taken for the marker. After an invalid byte that a heap
+String's marker uses (0xFE, 0xFC, 0xFD, 0xF1, 0xFB, 0xFA, 0xF8) the
+piece takes its encoding from the receiver's bytes seventeen to fourteen
+before the pointer, so the block's parameter can be a binary String; and
+sp_str_substr roots the pointer, so a collection inside the call marks a
+String that is none and faults.
+
+A valid run is now appended by its length (sp_String_append_n) and the
+block's parameter is sp_str_substr(receiver, pos, n): no header is read
+behind a pointer into the receiver.
+
+The block form is cheaper for it, one allocation fewer a run: callgrind,
+200,000 calls of s.scrub { "?" } on a 23-byte String with two invalid
+bytes 443.0M to 320.0M instructions, on a valid 25-byte String 260.0M to
+220.6M.
+
+Test: test/scrub_block_receiver_pointer.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
