@@ -6200,6 +6200,17 @@ static int emit_case_container_eq(Compiler *c, int cond, int t, TyKind pt, Buf *
     TyKind pty = eplv ? eplv->type : TY_POLY;
     int poly_ret = ems->ret == TY_POLY;
     int ta = emit_when_arm_root(c, cond, wat, b);
+    /* an arm the analysis says may be nil when the case runs is not called:
+       nil matches a nil subject alone */
+    int nilarm = !comp_ty_value_obj(c, wat) && nil_fact_node(c, cond);
+    if (nilarm) {
+      if (!ta) {
+        ta = ++g_tmp;
+        buf_puts(b, "({ "); emit_ctype(c, wat, b); buf_printf(b, " _t%d = ", ta);
+        emit_expr(c, cond, b); buf_puts(b, "; ");
+      }
+      buf_printf(b, "_t%d ? ", ta);
+    }
     buf_puts(b, poly_ret ? "sp_poly_truthy(" : "(");
     emit_method_cname(c, ems, b);
     buf_puts(b, "(");
@@ -6209,6 +6220,7 @@ static int emit_case_container_eq(Compiler *c, int cond, int t, TyKind pt, Buf *
     if (pty != pt) emit_boxed_text(c, pt, stmp, b);
     else buf_puts(b, stmp);
     buf_puts(b, "))");
+    if (nilarm) buf_printf(b, " : %s == NULL", stmp);
     if (ta) buf_puts(b, "; })");
   }
   else {
@@ -6293,6 +6305,19 @@ static int emit_when_obj_call(Compiler *c, int cond, int t, TyKind pt, Buf *b) {
   if (weq < 0 && wcid >= 0) weq = comp_method_in_chain(c, wcid, "==", &wdef);
   if (weq < 0 || wdef < 0 || comp_ty_value_obj(c, wpt)) return 0;
   int wta = emit_when_arm_root(c, cond, wpt, b);
+  char sref[24]; snprintf(sref, sizeof sref, "_t%d", t);
+  /* an arm the analysis says may be nil when the case runs (nil_fact_node):
+     the method is not called on nil, which matches a nil subject alone. An
+     arm it shows is never nil is called as before. */
+  int nilarm = nil_fact_node(c, cond);
+  if (nilarm) {
+    if (!wta) {
+      wta = ++g_tmp;
+      buf_puts(b, "({ "); emit_ctype(c, wpt, b); buf_printf(b, " _t%d = ", wta);
+      emit_expr(c, cond, b); buf_puts(b, "; ");
+    }
+    buf_printf(b, "_t%d ? ", wta);
+  }
   buf_printf(b, "sp_%s_%s(", c->classes[wdef].c_name, mc(c->scopes[weq].name));
   /* an inherited method takes the class that defines it */
   if (wdef != wcid) buf_printf(b, "(sp_%s *)(", c->classes[wdef].c_name);
@@ -6305,11 +6330,15 @@ static int emit_when_obj_call(Compiler *c, int cond, int t, TyKind pt, Buf *b) {
   { Scope *ws = &c->scopes[weq];
     LocalVar *wp = ws->nparams > 0 ? scope_local(ws, ws->pnames[0]) : NULL;
     TyKind wpt2 = wp ? wp->type : TY_POLY;
-    char sref[24]; snprintf(sref, sizeof sref, "_t%d", t);
     if (wpt2 == TY_POLY) { Buf bx; memset(&bx, 0, sizeof bx);
       emit_boxed_text(c, pt, sref, &bx); buf_puts(b, bx.p ? bx.p : sref); free(bx.p); }
     else buf_puts(b, sref); }
   buf_puts(b, ")");
+  if (nilarm) {
+    char aref[24]; snprintf(aref, sizeof aref, "_t%d", wta);
+    buf_puts(b, " : sp_poly_eq("); emit_boxed_text(c, wpt, aref, b);
+    buf_puts(b, ", "); emit_boxed_text(c, pt, sref, b); buf_puts(b, ")");
+  }
   if (wta) buf_puts(b, "; })");
   return 1;
 }
@@ -6335,6 +6364,9 @@ static void emit_case_obj_eq(Compiler *c, int cond, int t, TyKind pt, Buf *b) {
     LocalVar *eplv = ems->nparams > 0 ? scope_local(ems, ems->pnames[0]) : NULL;
     TyKind pty = eplv ? eplv->type : TY_POLY;
     int tc = ident ? ++g_tmp : 0;
+    /* an arm that may be nil when the case runs (nil_fact_node) is not
+       called: nil matches a nil subject alone */
+    int nilarm = !comp_ty_value_obj(c, pt) && nil_fact_node(c, cond);
     if (ident) {
       buf_puts(b, "({ ");
       emit_ctype(c, pt, b);
@@ -6343,6 +6375,15 @@ static void emit_case_obj_eq(Compiler *c, int cond, int t, TyKind pt, Buf *b) {
       buf_printf(b, "; SP_GC_ROOT(_t%d); _t%d == _t%d || ", tc, tc, t);
     }
     else tc = emit_when_arm_root(c, cond, pt, b);
+    if (nilarm && !tc) {
+      tc = ++g_tmp;
+      buf_puts(b, "({ ");
+      emit_ctype(c, pt, b);
+      buf_printf(b, " _t%d = ", tc);
+      emit_expr(c, cond, b);
+      buf_puts(b, "; ");
+    }
+    if (nilarm) buf_printf(b, ident ? "(_t%d && " : "(_t%d ? ", tc);
     buf_puts(b, "(");
     emit_method_cname(c, ems, b);
     buf_puts(b, "(");
@@ -6356,6 +6397,8 @@ static void emit_case_obj_eq(Compiler *c, int cond, int t, TyKind pt, Buf *b) {
       if (pty != pt && pt != TY_UNKNOWN) emit_boxed_text(c, pt, sref, b);
       else buf_puts(b, sref); }
     buf_puts(b, "))");
+    if (nilarm && ident) buf_puts(b, ")");
+    else if (nilarm) buf_printf(b, " : _t%d == NULL)", t);
     if (tc) buf_puts(b, "; })");
   }
   else {

@@ -1,0 +1,24 @@
+true
+miss
+hit
+miss
+true
+[:miss, :hit, :miss]
+miss
+hit
+[:miss, :hit, :miss]
+miss
+hit
+miss
+:miss
+hit
+true
+hit
+miss
+hit
+true
+level 3
+:miss
+nil is nil
+tag a
+:both_nil
