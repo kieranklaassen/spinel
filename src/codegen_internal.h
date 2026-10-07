@@ -1953,7 +1953,6 @@ int emit_rooted_arg_list(Compiler *c, const int *argv, int argc,
 void emit_split_pre(Compiler *c, int node, void (*emit)(Compiler *, int, Buf *), Buf *pre, Buf *val);
 void declare_local(Compiler *c, Buf *b, LocalVar *lv, int vol);
 void declare_local_named(Compiler *c, Buf *b, LocalVar *lv, const char *name, int vol);
-void emit_cell_shadow_store(Compiler *c, Scope *encl, const char *name, Buf *b, int indent);
 int scope_has_begin(Compiler *c, int si);
 void emit_scope_decls(Compiler *c, Scope *s, Buf *b);
 void emit_scope_decls_ends(Compiler *c, Scope *s, Buf *b, size_t *ends);
