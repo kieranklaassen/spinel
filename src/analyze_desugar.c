@@ -11712,6 +11712,148 @@ static void cn_neutralize(NodeTable *nt, int node) {
   nt_node_reset(nt, node, "NilNode");
 }
 
+/* ---- Name = Class.new(Base), no block ----
+ *
+ * The usual spelling of a custom error. Left as a call it defined nothing:
+ * `Name.new` raised NameError, and `raise Name` built an exception of that
+ * name with no parent, so `rescue StandardError` let it through. It is the
+ * class `class Name < Base; end` defines, and becomes it where the text
+ * alone says so:
+ *   - the assignment is a statement of the program or of a class or module
+ *     body, so it runs once and unconditionally;
+ *   - the program declares the name nowhere else and names it nowhere before
+ *     the assignment (CRuby raises NameError for a read that comes first);
+ *   - Base is a class declared before it in an enclosing body, or Object,
+ *     BasicObject or a builtin exception the program does not declare.
+ * Any other one stays the call it was. */
+typedef struct CnFrame { const struct CnFrame *outer; int body, cur; } CnFrame;
+
+/* how many nodes declare or assign the constant `name`; *classes counts the
+   `class` declarations among them */
+static int cn_count_decls(NodeTable *nt, const char *name, int *classes) {
+  int n = 0;
+  for (int id = 0; id < nt->count; id++) {
+    const char *w = engine_written(nt, id);
+    if (!w || !sp_streq(w, name)) continue;
+    n++;
+    if (classes && nt_kind(nt, id) == NK_ClassNode) (*classes)++;
+  }
+  return n;
+}
+
+/* does the subtree name the constant, as a constant or as the Symbol or
+   String a const_get would take? */
+static int cn_names_const(NodeTable *nt, int node, const char *name) {
+  if (node < 0) return 0;
+  NodeKind k = nt_kind(nt, node);
+  const char *s = k == NK_ConstantReadNode || k == NK_ConstantPathNode ? nt_str(nt, node, "name") :
+                  k == NK_SymbolNode ? nt_str(nt, node, "value") :
+                  k == NK_StringNode ? nt_str(nt, node, "content") : engine_written(nt, node);
+  if (s && sp_streq(s, name)) return 1;
+  int nr = nt_num_refs(nt, node);
+  for (int i = 0; i < nr; i++) if (cn_names_const(nt, nt_ref_at(nt, node, i), name)) return 1;
+  int na = nt_num_arrs(nt, node);
+  for (int i = 0; i < na; i++) {
+    int cnt = 0; const int *ids = nt_arr_at(nt, node, i, &cnt);
+    for (int j = 0; j < cnt; j++) if (cn_names_const(nt, ids[j], name)) return 1;
+  }
+  return 0;
+}
+
+/* a `class name` among the statements before the current one of a frame */
+static int cn_class_before(NodeTable *nt, const CnFrame *f, const char *name) {
+  int n = 0; const int *st = nt_arr(nt, f->body, "body", &n);
+  for (int i = 0; i < f->cur && i < n; i++) {
+    if (nt_kind(nt, st[i]) != NK_ClassNode) continue;
+    int cp = nt_ref(nt, st[i], "constant_path");
+    if (cp >= 0 && nt_kind(nt, cp) == NK_ConstantReadNode && sp_streq(nt_str(nt, cp, "name"), name)) return 1;
+  }
+  return 0;
+}
+
+/* The superclass node of `Name = Class.new(Base)` (-1 for a bare
+   `Class.new`) when the statement `cw` is that class definition, else -2. */
+static int cn_blockless_super(NodeTable *nt, const CnFrame *f, int cw) {
+  int call = nt_ref(nt, cw, "value");
+  const char *name = nt_str(nt, cw, "name");
+  if (!name || call < 0 || nt_kind(nt, call) != NK_CallNode || nt_ref(nt, call, "block") >= 0) return -2;
+  const char *nm = nt_str(nt, call, "name");
+  int recv = nt_ref(nt, call, "receiver");
+  if (!nm || !sp_streq(nm, "new") || recv < 0 || nt_kind(nt, recv) != NK_ConstantReadNode ||
+      !sp_streq(nt_str(nt, recv, "name"), "Class"))
+    return -2;
+  int an = nt_ref(nt, call, "arguments");
+  int ac = 0; const int *av = an >= 0 ? nt_arr(nt, an, "arguments", &ac) : NULL;
+  /* a name a builtin has is that builtin when written with `class`, and a
+     Class of the program's own makes no class */
+  if (ac > 1 || cn_count_decls(nt, name, NULL) != 1 || cn_count_decls(nt, "Class", NULL) != 0 ||
+      is_builtin_class_name(name) || is_builtin_module_name(name) || is_builtin_exception_name(name))
+    return -2;
+  for (const CnFrame *g = f; g; g = g->outer) {
+    int n = 0; const int *st = nt_arr(nt, g->body, "body", &n);
+    for (int i = 0; i < g->cur && i < n; i++) if (cn_names_const(nt, st[i], name)) return -2;
+    /* the enclosing class's own superclass is read before its body runs */
+    if (g->outer) {
+      int on = 0; const int *ost = nt_arr(nt, g->outer->body, "body", &on);
+      if (g->outer->cur < on && cn_names_const(nt, nt_ref(nt, ost[g->outer->cur], "superclass"), name)) return -2;
+    }
+  }
+  if (ac == 0) return -1;
+  int sup = av[0], rooted = 0;
+  if (nt_kind(nt, sup) == NK_ConstantPathNode) {
+    if (nt_ref(nt, sup, "parent") >= 0) return -2;
+    rooted = 1;                                    /* ::Base */
+  }
+  else if (nt_kind(nt, sup) != NK_ConstantReadNode) return -2;
+  const char *pn = nt_str(nt, sup, "name");
+  if (!pn) return -2;
+  int classes = 0, decls = cn_count_decls(nt, pn, &classes);
+  if (decls == 0)
+    return sp_streq(pn, "Object") || sp_streq(pn, "BasicObject") || is_builtin_exception_name(pn) ? sup : -2;
+  if (classes != decls) return -2;                 /* a module or a value of that name too */
+  for (const CnFrame *g = f; g; g = g->outer)
+    if ((!rooted || !g->outer) && cn_class_before(nt, g, pn)) return sup;
+  return -2;
+}
+
+static int cn_blockless_walk(NodeTable *nt, const CnFrame *outer, int body) {
+  if (body < 0 || nt_kind(nt, body) != NK_StatementsNode) return 0;
+  CnFrame f = { outer, body, 0 };
+  int changed = 0, n = 0;
+  nt_arr(nt, body, "body", &n);
+  for (f.cur = 0; f.cur < n; f.cur++) {
+    int s = nt_arr(nt, body, "body", &n)[f.cur];
+    NodeKind k = nt_kind(nt, s);
+    if (k == NK_ClassNode || k == NK_ModuleNode) {
+      changed |= cn_blockless_walk(nt, &f, nt_ref(nt, s, "body"));
+      continue;
+    }
+    if (k != NK_ConstantWriteNode) continue;
+    int sup = cn_blockless_super(nt, &f, s);
+    if (sup == -2) continue;
+    /* Name = Class.new(Base)  ->  class Name < Base; end */
+    char name[256]; snprintf(name, sizeof name, "%s", nt_str(nt, s, "name"));
+    long long line = nt_int(nt, s, "node_line", 0), file = nt_int(nt, s, "node_file", 0),
+              col = nt_int(nt, s, "node_col", 0);
+    int call = nt_ref(nt, s, "value");
+    int cp = fwd_new_node_like(nt, s, "ConstantReadNode");
+    int st = fwd_new_node_like(nt, s, "StatementsNode");
+    if (cp < 0 || st < 0) continue;
+    nt_node_set_str(nt, cp, "name", name);
+    nt_node_set_arr(nt, st, "body", NULL, 0);
+    nt_node_reset(nt, call, "NilNode");
+    nt_node_reset(nt, s, "ClassNode");
+    nt_node_set_int(nt, s, "node_line", line);
+    nt_node_set_int(nt, s, "node_file", file);
+    nt_node_set_int(nt, s, "node_col", col);
+    nt_node_set_ref(nt, s, "constant_path", cp);
+    nt_node_set_ref(nt, s, "superclass", sup);
+    nt_node_set_ref(nt, s, "body", st);
+    changed = 1;
+  }
+  return changed;
+}
+
 int desugar_class_new_blocks(Compiler *c) {
   NodeTable *nt = (NodeTable *)c->nt;
   int n0 = nt->count, changed = 0, serial = 0;
@@ -11861,6 +12003,7 @@ int desugar_class_new_blocks(Compiler *c) {
     changed = 1;
   }
   free(parent);
+  if (cn_blockless_walk(nt, NULL, nt_ref(nt, nt->root_id, "statements"))) changed = 1;
   if (changed) comp_grow_node_arrays(c);
   return changed;
 }
