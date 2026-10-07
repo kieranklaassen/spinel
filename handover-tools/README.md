@@ -23,10 +23,10 @@ from the commits its recipe lists.
   a builtin's or the program's own superclass or module, and 84 (OUT/sent)
   with const_set through send and the program's own is_a? under a definer,
   by a literal or a computed name.
-- `fam13-gen.rb OUT`: 406 programs (OUT/p) with a constant given a class by
+- `fam13-gen.rb OUT`: 486 programs (OUT/p) with a constant given a class by
   a path whose body holds the class, inherits it or lacks it, under a
-  const_missing of the program written six ways, and a bare value beside a
-  const_set of the class's name.
+  const_missing of the program written six ways, a bare value beside a
+  const_set of the class's name, and a write before the class's definition.
 - `gd-gen.rb OUT`: 831 programs (OUT/p) asking a rescued exception for its
   class where two modules name a class alike (the fourth piece).
 - `early-gen.rb OUT`: the twelve early-call shapes.
@@ -42,9 +42,9 @@ from the commits its recipe lists.
 
 `texts/` holds the upstream texts of the three pieces as they are summed in
 the hand-over: `numeric-*` for the first (a boxed number's
-`instance_of?(Numeric)`), `pr-title.txt`, `pr-body-upstream-v10.md` and
-`commit-message-v10.txt` for the second (the constant in `is_a?`; the `-v7`
-to `-v9` files are its texts before the later commits of its recipe), `bl1-*`
+`instance_of?(Numeric)`), `pr-title.txt`, `pr-body-upstream-v11.md` and
+`commit-message-v11.txt` for the second (the constant in `is_a?`; the `-v7`
+to `-v10` files are its texts before the later commits of its recipe), `bl1-*`
 for the third (the constant in `rescue` and `raise`; its refactor's message
 is in commit 69d79bf9), `gd-*` for the fourth (an exception's `is_a?` where
 two modules name a class alike).

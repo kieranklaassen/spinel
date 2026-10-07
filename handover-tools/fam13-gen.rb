@@ -5,8 +5,8 @@
 # the class itself. The hook as `def self.`, in `class << self`, by define_singleton_method,
 # from a module the body extends, on Object or on Module. The write at the program's level
 # or in another body; one read and one object a program, so a line master has right stands
-# alone. Then a bare value beside a const_set of the class's name, and the exception's
-# rescue and raise. Written to OUT/p.
+# alone. Then a bare value beside a const_set of the class's name, a write that stands
+# before the class's definition, and the exception's rescue and raise. Written to OUT/p.
 require 'fileutils'
 out = ARGV[0] or abort "usage: fam13-gen.rb OUT"
 FileUtils.mkdir_p("#{out}/p")
@@ -57,6 +57,24 @@ end
   ["const_set(:Plain, #{ret})", "self.const_set(\"Plain\", #{ret})"].each_with_index do |set, si|
     { own: "Plain.new", int: "7", another: "Another.new" }.each do |ok, obj|
       emit.("s_#{ret.downcase}_#{si}_#{ok}", "class Another; end\nclass Plain; end\nmodule M\n  #{set}\n  K = Plain\nend\np #{obj}.is_a?(M::K)\n")
+    end
+  end
+end
+# the write before the class is defined: the hook answers the name where the write stands
+{ module: "class Module\n  def const_missing(n) = RET\nend\n", object: "class Object\n  def self.const_missing(n) = RET\nend\n" }.each do |hk, hook|
+  %w[Integer Another].each do |ret|
+    shapes = {
+      bare: ["K = Plain\nclass Plain; end\n", "Plain", "K"],
+      root: ["K = ::Plain\nclass Plain; end\n", "Plain", "K"],
+      path: ["class Conn; end\nK = Conn::Plain\nclass Conn\n  class Plain; end\nend\n", "Conn::Plain", "K"],
+      held: ["module Holder\n  K = ::Plain\nend\nclass Plain; end\n", "Plain", "Holder::K"],
+      body: ["class Conn\n  K = Plain\n  class Plain; end\nend\n", "Conn::Plain", "Conn::K"],
+    }
+    shapes.each do |sk, (text, cpath, kpath)|
+      { isa_own: "p #{cpath}.new.is_a?(#{kpath})\n", isa_int: "p 7.is_a?(#{kpath})\n", iof_own: "p #{cpath}.new.instance_of?(#{kpath})\n",
+        meth_own: "def q(v) = v.kind_of?(#{kpath})\np q(#{cpath}.new)\n" }.each do |qk, line|
+        emit.("o_#{hk}_#{ret.downcase}_#{sk}_#{qk}", "class Another; end\n" + hook.gsub("RET", ret) + text + line)
+      end
     end
   end
 end
