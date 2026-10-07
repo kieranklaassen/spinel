@@ -43,14 +43,15 @@ int collect_emit_anyway(void) {
 /* What codegen decided at a node, for --emit-types (#4522): how a call was
    dispatched, whether a block was inlined. Kept only under --emit-types;
    a stamp anywhere else is a no-op, so the emitters say what they did
-   without paying for it. */
+   without paying for it. One more reader: a program that passed the match
+   frame test keeps its lifted blocks, for match_frame_check. */
 unsigned char *g_ndecide = NULL;
 int g_ndecide_cap = 0;
 int g_nd_call_id = -1;
 void nd_stamp(int id, int kind) {
   static int on = -1;
   if (on < 0) { const char *et = getenv("SPINEL_EMIT_TYPES"); on = (et && *et) ? 1 : 0; }
-  if (!on || id < 0) return;
+  if (id < 0 || !(on || (kind == ND_BLOCK_PROC && g_match_frame_closed))) return;
   if (id >= g_ndecide_cap) {
     int ncap = g_ndecide_cap ? g_ndecide_cap : 1024;
     while (ncap <= id) ncap *= 2;
@@ -1488,6 +1489,7 @@ int g_emit_class_names = 0;
 int g_emit_obj_dispatch = 0;
 int g_uses_program_name = 0;
 int g_reads_match_regs = 0;
+int g_match_frame_closed = 0;
 int g_gen_obj_hash = 0;
 int g_gen_obj_to_json = 0;
 int g_gen_obj_to_h = 0;

@@ -143,6 +143,34 @@ typedef struct {
 } sp_re_frame;
 void sp_re_frame_push(sp_re_frame *f);
 void sp_re_frame_pop(sp_re_frame *f);
+/* A frame sp_re_frame_enter opens is kept here, beside the C stack, and the
+   method keeps one byte for its cleanup: its C frame does not grow by a
+   frame, and a recursion runs as deep as one that matches nothing. With the
+   caller's registers go what a jump out of the method needs, since a jump
+   runs no cleanup (sp_re_frames_leave): the depth of each handler stack at
+   the method's entry (spinel_rt.h owns them), and the id of the proc-return
+   home that was innermost then (-1 for none). The collector marks the saved
+   strings from here (sp_re_mark_globals), so they are not rooted. */
+enum { SP_RE_FRAME_EXC, SP_RE_FRAME_CATCH, SP_RE_FRAME_BRK };
+typedef struct { sp_re_frame f; int depth[3]; sp_int home; } sp_re_frame_note;
+extern SP_TLS sp_re_frame_note *sp_re_notes;   /* the entered frames, innermost last */
+extern SP_TLS int sp_re_nnotes, sp_re_notes_cap;
+void sp_re_notes_grow(void);
+void sp_re_frame_save(sp_re_frame *f);        /* the registers into f, rooting nothing */
+void sp_re_frame_leave(char *unused);         /* the cleanup of an entered frame */
+void sp_re_frames_pop_to(int keep);
+/* What a jump out of methods calls before it jumps (see sp_re_frames_pop_to):
+   leave every frame but the first `keep`, or every frame entered at `depth`
+   of handler stack `stack` or deeper. Nothing to leave is the common case and
+   costs a load and a compare. */
+static inline void sp_re_frames_leave_to(int keep) {
+  if (sp_re_nnotes != keep) sp_re_frames_pop_to(keep);
+}
+static inline void sp_re_frames_leave(int stack, int depth) {
+  int keep = sp_re_nnotes;
+  while (keep > 0 && sp_re_notes[keep - 1].depth[stack] >= depth) keep--;
+  sp_re_frames_leave_to(keep);
+}
 sp_MatchData *sp_re_matchdata_at(mrb_regexp_pattern *pat, const char *str, sp_int cpos);
 const char *sp_MatchData_aref(sp_MatchData *m, sp_int i);
 const char *sp_MatchData_aref_name(sp_MatchData *m, const char *name);
