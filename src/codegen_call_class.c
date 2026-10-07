@@ -1453,6 +1453,43 @@ int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
   return 0;
 }
 
+/* `new` on a boxed receiver. The arms of emit_call_new_arms construct by the
+   value's cls_id and never asked whether the value is a class: nil reads as
+   id 0 and built the program's first class, an Integer and a String did too,
+   and an instance built another object of its own class. The call is emitted
+   twice over one receiver temp: for a class, the arms as they were
+   (g_new_class); for any other value, the ordinary method call (g_new_plain
+   makes the arms stand down), which finds the value's own `new` as it finds
+   any other method and raises NoMethodError where there is none. Each side
+   keeps the statements it hoists on its own side, as the safe navigation
+   guard does, so an argument is evaluated once, after the receiver. */
+static int g_new_class = -1, g_new_plain = -1;
+static int emit_poly_new_by_tag(Compiler *c, int id, int recv, Buf *b) {
+  if (repr_of(c, id).as_ty != TY_POLY || g_n_argov >= MAX_ARG_OVERRIDE) return 0;
+  int tk = ++g_tmp, tr = ++g_tmp;
+  Buf cb, cpre, pb, ppre;
+  memset(&cb, 0, sizeof cb); memset(&cpre, 0, sizeof cpre);
+  memset(&pb, 0, sizeof pb); memset(&ppre, 0, sizeof ppre);
+  Buf *sv_pre = g_pre;
+  int slot = view_bind(recv, "_t%d", tk);
+  int sv = g_new_class;
+  g_new_class = id; g_pre = &cpre; emit_expr(c, id, &cb); g_new_class = sv;
+  sv = g_new_plain;
+  g_new_plain = id; g_pre = &ppre; emit_expr(c, id, &pb); g_new_plain = sv;
+  g_pre = sv_pre;
+  view_unbind(slot);
+  buf_printf(b, "({ sp_RbVal _t%d = ", tk); emit_expr(c, recv, b);
+  /* the ordinary side roots its own copy of the receiver; statements it
+     hoists run before that, so the temp is rooted across them */
+  buf_puts(b, "; ");
+  if (ppre.p && ppre.p[0]) buf_printf(b, "SP_GC_ROOT_RBVAL(_t%d); ", tk);
+  buf_printf(b, "sp_RbVal _t%d = sp_box_nil(); if (_t%d.tag == SP_TAG_CLASS) {\n%s _t%d = %s; } else {\n%s _t%d = %s; } _t%d; })",
+             tr, tk, cpre.p ? cpre.p : "", tr, cb.p ? cb.p : "sp_box_nil()",
+             ppre.p ? ppre.p : "", tr, pb.p ? pb.p : "sp_box_nil()", tr);
+  free(cb.p); free(cpre.p); free(pb.p); free(ppre.p);
+  return 1;
+}
+
 /* new and allocate on a Class value, a poly receiver, self's class or a constant, and Cls.exception */
 int emit_call_new_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv) {
   /* .new WITH arguments on a Class value whose class is only known at run time.
@@ -1732,6 +1769,8 @@ int emit_call_new_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const c
      CRuby's ArgumentError/NoMethodError. (#2888) */
   if (recv >= 0 && sp_streq(name, "new") && repr_of(c, recv).kind == RK_BOXED &&
       ctor_block_dispatchable(c, id)) {
+    if (g_new_plain == id) return 0;
+    if (g_new_class != id && emit_poly_new_by_tag(c, id, recv, b)) return 1;
     /* keyword arguments: laid out per class by name, as in the Class-valued
        form above (#4845) -- positionally they bound `k: v` to a parameter;
        likewise a `*splat`, which bound the whole array */

@@ -2034,8 +2034,7 @@ int infer_poly_call(Compiler *c, int id, TyKind rt, TyKind *out) {
     { *out = TY_POLY; return 1; }
   /* poly.new(args): instantiating a Class value read out of a container yields
      a fresh object, boxed poly (#2888). */
-  if (recv >= 0 && rt == TY_POLY && sp_streq(name, "new") &&
-      !an_user_recv_defines_method(c, name)) {
+  if (recv >= 0 && rt == TY_POLY && sp_streq(name, "new")) {
     /* a block goes to each class's `&blk`; a yielding initialize has none,
        and takes a literal spliced into its arm -- this one, or the one a
        yielding method forwarding its own block inlines with (codegen's

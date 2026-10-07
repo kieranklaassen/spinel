@@ -8817,7 +8817,11 @@ static int infer_param_types_ex(Compiler *c, int settle) {
         if (ss && ss->is_cmethod && ss->class_id >= 0 && c->classes[ss->class_id].is_struct)
           changed |= struct_new_types_members(c, id, ss->class_id);
       }
-      if (sp_streq(name, "new")) continue;
+      /* `new` on a boxed value that is no class is an ordinary call (codegen's
+         emit_poly_new_by_tag): an instance method of that name binds its
+         parameters below as any other does */
+      if (sp_streq(name, "new") &&
+          !(infer_type(c, recv) == TY_POLY && an_user_recv_defines_method(c, name))) continue;
     }
     /* obj.method -> instance method params */
     TyKind rt = infer_type(c, recv);
