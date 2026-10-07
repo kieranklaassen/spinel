@@ -1,0 +1,1 @@
+e.class.name in a rescue names the error's own class

@@ -1,0 +1,28 @@
+A container that stores many of its own elements no longer stalls the compiler
+
+`h[:a1] = h[:a0]; h[:a2] = h[:a1]; ...` with a String of h changed in
+place cost the compiler n! walks for n such stores: eight take 8
+seconds, nine take 82, and twelve do not finish. The same in an Array's
+slots, in a Hash an instance variable holds, in one a parameter holds,
+and in two Hashes that store each other's elements.
+
+The walk that demands a container's Strings as handles follows a boxed
+stored value to the element read it is, and strbuf_demand_elem_arg
+starts the walk of that read's container. Since pull request 7369 a
+read whose walk is under way answers 0, which ended the recursion. A
+second read of the same container was still another read, so the stores
+were walked once more for it with one read fewer left to meet, and
+again inside that.
+
+The walk is of the stores into the container a local or an instance
+variable holds, whichever element is read. A read of that container met
+inside the walk now answers 0 as the same read does: the walk on the
+stack reaches every store the inner one would. Each of the n stores
+walks the others once.
+
+An element of another element (`r[0][:b] = r[0][:a]`) is keyed by its
+read as before; that walk did not grow this way.
+
+The generated C is unchanged for every other test.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

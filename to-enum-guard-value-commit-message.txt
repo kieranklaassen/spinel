@@ -1,0 +1,25 @@
+A to_enum-guarded method answers its block form's literal
+
+A method that returns `to_enum(:m) unless block_given?` has its return
+pinned to Enumerator unless its block form answers a value. Among the
+literals te_tail_is_value took a Hash, a String, a Symbol and a number
+for one, and no other. So a block form ending `[1, 2]` was pinned, and
+the Array stored through the Enumerator return did not build
+(assignment to 'sp_Enumerator *' from 'sp_IntArray *').
+
+An Array, a Range, an interpolated String, a Regexp, a Rational, a
+Complex and a lambda are now values where one is the last expression
+of the code that runs with a block: what follows the guard's return,
+or the block arm of `if block_given?`, and the same for a test of the
+`&b` parameter. The same method ending `v = [1, 2]` already was one.
+
+Such a literal is not counted where the block form does not answer it:
+returned early, ending the arm run without a block, or behind a
+statement that can leave first (another `return`, or a second test of
+`block_given?`, which is folded and drops what follows its return). A
+method that builds today, pinned, stays so. A block form that answers
+self is pinned as before.
+
+Test: test/to_enum_literal_tail.rb, test/to_enum_literal_pinned.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

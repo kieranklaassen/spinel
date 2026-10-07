@@ -1,0 +1,32 @@
+e.class.name in a rescue names the error's own class
+
+    errors = []
+    3000.times do |i|
+      begin
+        raise ArgumentError, "bad #{i}" if i % 3 == 0
+        raise KeyError, "missing #{i}" if i % 3 == 1
+      rescue => e
+        errors << "#{e.class.name}: #{e.message}"
+      end
+    end
+    wrong = errors.select { |l| l.start_with?("KeyError: bad", "ArgumentError: missing") }
+    p wrong.size, wrong.first
+
+prints 0 and nil in CRuby and printed 79 and "KeyError: bad 1398": 79 of
+the 2,000 lines carried the other class's name.
+
+The name of a rescued error's class is a fresh heap copy on each read
+(sp_exc_class_name). sp_str_frozen_name, Module#name's cache, keys a
+name by its address, on the premise that a name is a static string. A
+copy the collector had freed gave its address to the next copy, of
+another class's name, and the lookup answered the first.
+
+Only a static name is now a key. Any other is interned by its bytes,
+which is what the cache stored for it, and is held while the interned
+copy is made: under SPINEL_GC_STRESS=2 that copy was made from freed
+bytes. The cache no longer gains an entry a read.
+
+Test: test/exception_class_name_two_kinds.rb. No program's generated C
+changes.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

@@ -1,0 +1,1 @@
+A to_enum-guarded method answers its block form's literal

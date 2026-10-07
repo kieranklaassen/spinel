@@ -1,0 +1,30 @@
+A nil expression under a rescue modifier is a value unless it is a bare call
+
+    r = (twice { |x| raise "stop" if x == 2 }) rescue :rescued
+
+did not build: `incompatible types when assigning to type 'sp_sym' from
+type 'sp_RbVal'`. When the modifier's expression is always nil, its type was
+the fallback's, as it is for an expression that can only raise, and the value
+arm stored the expression into a slot of that type. A bare call is emitted
+for its effect there. The same call in parentheses was not, nor two
+statements, an `if` with no else, a begin block, or a conditional with nil in
+both arms. Four forms built and were wrong: `([1, 2].each { ... }; nil)
+rescue :rescued` answered `:x`, the first Symbol of the program, and false
+with a fallback of true; `(y = m) rescue "s"` answered "".
+
+Such an expression is a value, nil where nothing is raised, so the modifier's
+type is now the boxed join of nil and the fallback, and what reads it sees a
+nil that is one. An Integer or a Float fallback keeps its slot, whose
+sentinel holds the nil already. A bare `yield` and a bare `super` are values
+too.
+
+Left alone: a bare call keeps the fallback's type and its effect-only arm,
+the one form that built, and its C is unchanged; a fallback of nil, of an
+empty [] or {}, or of a raise still does not build; with a Float fallback
+a builtin's nil (`(puts "s") rescue 1.5`) is still NaN once it is boxed, as
+on master.
+
+No program's C changes but the new test's (`make cident`), and scale-test
+keeps master's four ratios.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
