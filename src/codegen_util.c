@@ -2439,6 +2439,22 @@ static int strbuf_box_ref_as(Compiler *c, int recv, const char *fmt, Buf *b) {
    makes (#3227). Answers 0 when the receiver is not such a slot, so the caller
    falls back to emit_expr. */
 int emit_strbuf_read_ref(Compiler *c, int recv, Buf *b) { return strbuf_box_ref_as(c, recv, "sp_String_cstr(%s)", b); }
+/* The same for a local of its own that may be nil: its handle is NULL
+   then, read as a plain String's nil is. Not a parameter, a dynamic handle
+   or a shared one, which another name writes through, nor a read whose nil
+   is past an error only CRuby raises (nil_fact_unraised): 0 for those. */
+int emit_strbuf_read_ref_nil(Compiler *c, int recv, Buf *b) {
+  if (nt_kind(c->nt, recv) != NK_LocalVariableReadNode || !repr_of(c, recv).may_nil || nil_fact_unraised(c, recv))
+    return 0;
+  Scope *sc = comp_scope_of(c, recv);
+  LocalVar *lv = sc ? scope_local(sc, nt_str(c->nt, recv, "name")) : NULL;
+  if (!lv || lv->is_param || lv->is_block_param || lv->dyn_handle || lv->str_shared) return 0;
+  Buf h; memset(&h, 0, sizeof h);
+  if (!strbuf_box_ref_as(c, recv, "%s", &h)) return 0;
+  buf_printf(b, "(%s ? sp_String_cstr(%s) : NULL)", h.p, h.p);
+  free(h.p);
+  return 1;
+}
 /* The object_id of a String held as a shared sp_String: the handle's address,
    which is what a box of it carries. 0 when `recv` is not one. */
 int strbuf_object_ref(Compiler *c, int recv, Buf *b) { return strbuf_box_ref_as(c, recv, "((sp_int)(uintptr_t)(%s))", b); }
