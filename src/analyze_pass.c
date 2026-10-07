@@ -10998,6 +10998,88 @@ static void subtree_rename_local(NodeTable *nt, int root, const char *oldn, cons
     for (int j = 0; j < nd->a[i].n; j++) subtree_rename_local(nt, nd->a[i].ids[j], oldn, newn, depth + 1);
 }
 
+/* Does the subtree hold a proc literal (`->`, `proc { }`, `lambda { }`)? */
+static int subtree_has_proc_create(Compiler *c, int root, int depth) {
+  const NodeTable *nt = c->nt;
+  if (root < 0 || root >= nt->count || depth > 200) return 0;
+  /* the wrapper this pass made for an inner block is not the program's */
+  if (is_proc_create(c, root) && !nt_int(nt, root, "cap_iife", 0)) return 1;
+  const SpNode *nd = &nt->nodes[root];
+  for (int i = 0; i < nd->nr; i++)
+    if (subtree_has_proc_create(c, nd->r[i].ref, depth + 1)) return 1;
+  for (int i = 0; i < nd->na; i++)
+    for (int j = 0; j < nd->a[i].n; j++)
+      if (subtree_has_proc_create(c, nd->a[i].ids[j], depth + 1)) return 1;
+  return 0;
+}
+
+/* Whether the value of `node` is read where it stands: written to a
+   variable, passed, called on, returned, or the answer of a method body, of a
+   conditional that is itself read, or of a block whose answer is kept. */
+static int tap_value_read(const NodeTable *nt, const int *par, int node, int depth) {
+  int p = par[node];
+  if (p < 0 || depth > 64) return 0;
+  const char *pty = nt_type(nt, p);
+  if (pty && sp_streq(pty, "ArgumentsNode")) return 1;
+  switch (nt_kind(nt, p)) {
+    case NK_LocalVariableWriteNode: case NK_InstanceVariableWriteNode:
+    case NK_GlobalVariableWriteNode: case NK_ClassVariableWriteNode:
+    case NK_ConstantWriteNode: case NK_ReturnNode:
+      return 1;
+    case NK_CallNode:
+      return nt_ref(nt, p, "receiver") == node;
+    case NK_ParenthesesNode: case NK_ElseNode:
+      return tap_value_read(nt, par, p, depth + 1);
+    case NK_IfNode: case NK_UnlessNode:
+      return nt_ref(nt, p, "predicate") != node && tap_value_read(nt, par, p, depth + 1);
+    case NK_StatementsNode: {
+      int sn = 0;
+      const int *sb = nt_arr(nt, p, "body", &sn);
+      if (sn < 1 || sb[sn - 1] != node) return 0;
+      int owner = par[p];
+      if (owner < 0) return 0;
+      NodeKind ok = nt_kind(nt, owner);
+      if (ok == NK_DefNode) return 1;
+      if (ok == NK_BlockNode) return !an_value_dropped(nt, par, node) && tap_value_read(nt, par, owner, depth + 1);
+      if (ok == NK_IfNode || ok == NK_UnlessNode || ok == NK_ElseNode || ok == NK_ParenthesesNode)
+        return tap_value_read(nt, par, p, depth + 1);
+      return 0;
+    }
+    case NK_BlockNode: {
+      /* the block's answer is its call's: `x = xs.map { [].tap { ... } }` */
+      int bc = par[p];
+      return bc >= 0 && nt_kind(nt, bc) == NK_CallNode && nt_ref(nt, bc, "block") == p;
+    }
+    default:
+      return 0;
+  }
+}
+
+/* Whether `recv.tap { |x| ... }` (or then) is emitted in place, its block
+   parameter the receiver itself, where a proc in the block captures the
+   parameter: a receiver that is a local variable, a Hash literal, or an
+   Array literal. An EMPTY Array literal has no element kind until the block
+   settles one, and the inline emitters type its cell only where the tap's
+   value is read and the program wrote no proc literal in the block. Any
+   other receiver keeps the wrapper: an instance variable's or a call's
+   String is one the emitters refuse by name when the block appends. */
+static int tap_then_unwrapped(Compiler *c, const int *par, int id, int rcv) {
+  const NodeTable *nt = c->nt;
+  switch (nt_kind(nt, rcv)) {
+    case NK_LocalVariableReadNode: case NK_HashNode:
+      return 1;
+    case NK_ArrayNode: {
+      int ne = -1;
+      nt_arr(nt, rcv, "elements", &ne);
+      if (ne != 0) return 1;
+      return par && tap_value_read(nt, par, id, 0) &&
+             !subtree_has_proc_create(c, nt_ref(nt, id, "block"), 0);
+    }
+    default:
+      return 0;
+  }
+}
+
 /* An INLINED iterator block whose param is captured by a proc it creates:
    `[1,2].map { |i| ->{ i } }`. The block's binding lives in the loop and each
    iteration must capture a FRESH cell, so wrap the body in an immediately-
@@ -11009,9 +11091,33 @@ int desugar_block_capture_wrap(Compiler *c) {
   NodeTable *nt = (NodeTable *)c->nt;
   int changed = 0;
   int n0 = nt->count;
+  int *par = NULL;
+  int owned[3] = { -1, -1, -1 };   /* tap, then, yield_self: does a class define it? */
   for (int id = 0; id < n0; id++) {
     if (nt_kind(nt, id) != NK_CallNode) continue;
     if (is_proc_create(c, id)) continue;             /* a proc literal is not an iterator */
+    /* A tap or then block is emitted in place, its parameter in a cell made
+       anew at each run (emit_block_locals_reset), so a kept closure needs no
+       wrapper there; and the wrapper's parameter is a COPY of the receiver:
+       a String changed in the body kept its old value, an empty Array
+       literal's wrapper parameter settled as an Integer, so
+       `[].tap { |a| xs.each { |x| a << x } }` answered [], and an empty Hash
+       literal's raised. A class of the program that owns the name keeps the
+       wrap, and so does every receiver but a local variable and an Array or
+       Hash literal (tap_then_unwrapped). */
+    { const char *cn = nt_str(nt, id, "name");
+      int rcv = nt_ref(nt, id, "receiver");
+      int ti = !cn || rcv < 0 ? -1 : sp_streq(cn, "tap") ? 0 : sp_streq(cn, "then") ? 1 :
+               sp_streq(cn, "yield_self") ? 2 : -1;
+      if (ti >= 0) {
+        if (owned[ti] < 0) {   /* the classes are walked once a name */
+          owned[ti] = 0;
+          for (int k = 0; k < c->nclasses && !owned[ti]; k++)
+            if (comp_method_in_chain(c, k, cn, NULL) >= 0) owned[ti] = 1;
+        }
+        if (!owned[ti] && !par) par = an_parent_map(nt);
+        if (!owned[ti] && tap_then_unwrapped(c, par, id, rcv)) continue;
+      } }
     /* A generator's block runs once on its own fiber and its parameter is the
        yielder: wrapped in a lambda, `y << v` in a block the body passes to a
        user `each` stopped being a Fiber.yield and became Integer#<< on a
@@ -11084,6 +11190,7 @@ int desugar_block_capture_wrap(Compiler *c) {
     for (int j = base; j < nt->count; j++) c->nscope[j] = encl;
     changed = 1;
   }
+  free(par);
   return changed;
 }
 
