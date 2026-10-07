@@ -1349,7 +1349,12 @@ static inline const char *sp_File_path(sp_File *f) { return f && f->path ? f->pa
 /* sp_file_join: moved to lib/sp_cold.c */
 const char *sp_file_join(const char **parts, int n);
 static inline sp_StrArray *sp_File_readlines(sp_File *f) {
+  /* Every line is a fresh String, so a long file collects while it is read:
+     the Array lives through that, and so does a handle that only this call
+     holds, as in File.open(path).readlines. */
+  SP_GC_ROOT(f);
   sp_StrArray *a = sp_StrArray_new();
+  SP_GC_ROOT(a);
   const char *line;
   while ((line = sp_File_gets(f)) != NULL) sp_StrArray_push(a, line);
   return a;
