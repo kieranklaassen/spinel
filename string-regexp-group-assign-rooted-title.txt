@@ -1,0 +1,1 @@
+String#[]= with a Regexp group keeps its pieces rooted

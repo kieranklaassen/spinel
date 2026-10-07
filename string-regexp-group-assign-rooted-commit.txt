@@ -1,0 +1,36 @@
+String#[]= with a Regexp group keeps its pieces rooted
+
+`s[/(b)(cde)/, 2] = "XYZW"` as a statement built its answer in one
+nested call, sp_str_concat(sp_str_concat(sp_str_byteslice(..), v),
+sp_str_byteslice(..)): whichever piece C made first was in flight,
+unrooted, while the next allocated. Under SPINEL_GC_STRESS=2 the
+assignment stopped with "the mark reached a freed heap string"
+(`s = +"abc"; s << "defghijklmnop"`, then the line above). In a plain
+run a collection in that window loses a piece and raises nothing: of
+300,000 rounds of `s[/(a)(bc)/, 2] = "x" * 33` on a String of some
+thirty characters, 6 leave s wrong built with gcc and 3 built with
+clang (the count moves with what else allocates).
+
+The head is cut into a rooted temp and joined with the value and the
+tail in one sp_str_concat3, three allocations for four: 3,981
+instructions a statement on an eight-character String before, 3,844
+after (callgrind, 200,000 statements). gc-stress-test runs the new
+test at level 2: on master it fails there built with gcc and with
+clang.
+
+The statement reads its group, then its value, then the receiver, as
+CRuby reads its arguments before it looks at the String, so a value
+that changes the receiver, `s[/(b)(cd)/, 2] = (s << "ZZ"; "x")`, is
+seen whichever order the C compiler reads a call's arguments in. The
+nested calls lost the append built with gcc and kept it built with
+clang. A value that is not a plain read is rooted while the String is
+matched and cut.
+
+Left as they are, wrong on master in a plain run and now at level 2
+as well, where the fault used to stop them: a group that took no part
+in the match, a group past the pattern's own and a nil value are
+stored without the IndexError or the TypeError CRuby raises. A
+negative group raises IndexError where CRuby counts from the last
+group.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
