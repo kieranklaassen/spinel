@@ -3,3 +3,9 @@ HEY!
 42
 raised ArgumentError: needs a positive number
 ok 7
+raised ArgumentError: left (4 bytes)
+raised ArgumentError: 15 bytes, the last four "rest"
+raised ArgumentError: 7 bytes
+raised ArgumentError as an object: 7 bytes
+raised ArgumentError as an object: left (4 bytes)
+raised ArgumentError again: left (4 bytes)

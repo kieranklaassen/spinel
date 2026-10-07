@@ -16491,7 +16491,7 @@ char *codegen_program(const NodeTable *nt) {
       "  sp_exc_top--;\n"
       "  sp_gc_nroots = sp_exc_rootmark[sp_exc_top]; sp_rescue_sp = sp_rescue_mark[sp_exc_top];\n"
       "  if (cls) *cls = (const char *)sp_last_exc_cls;\n"
-      "  if (msg) *msg = sp_exc_msg[sp_exc_top] ? sp_exc_msg[sp_exc_top] : \"\";\n"
+      "  if (msg) { sp_Exception *o = (sp_Exception *)sp_exc_obj[sp_exc_top]; const char *m = sp_exc_msg[sp_exc_top]; *msg = !m ? \"\" : !sp_cmsg_p(m) ? m : (o && o->msg) ? o->msg : m + SP_CMSG_HDR; }\n"
       "  return 1;\n}\n", g_ext_init_name);
     buf_printf(body, "void %s(void){\n", g_ext_init_name);
     buf_puts(body, "    SP_GC_SAVE();\n");
