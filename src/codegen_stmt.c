@@ -11940,40 +11940,52 @@ static int emit_call_stmt(Compiler *c, int id, Buf *b, int indent, const NodeTab
             /* the value runs between the receiver's read and the store, and
                would collect a receiver nothing else holds */
             if (!nil_rhs && boxed_writer_holds_recv(c, argv[0], at)) buf_printf(b, "SP_GC_ROOT_RBVAL(_t%d); ", tv);
+            /* `x&.v = value` on nil runs neither the value nor the store: all
+               that follows, and what the value hoists, goes behind the
+               receiver's tag. It ran the value and raised NoMethodError. */
+            const char *cop = nt_str(nt, id, "call_operator");
+            int safe = cop && sp_streq(cop, "&.");
+            Buf sbody; memset(&sbody, 0, sizeof sbody);
+            Buf spre; memset(&spre, 0, sizeof spre);
+            Buf *o = safe ? &sbody : b, *sv_pre = g_pre;
+            if (safe) g_pre = &spre;
             if (nil_rhs) {
               /* a nil literal has nothing to run; any other value of nil
                  type this place can emit (a method that answers nil,
                  `(bump; nil)`) runs first, with the receiver rooted: nothing
                  else may hold it, and the value may collect. What the value
                  hoists runs with it, after the receiver; under `&.` a nil
-                 receiver skips both, as it skips the call. */
-              if (!boxed_writer_nil_value_runs(nt, argv[0])) buf_printf(b, "sp_RbVal _t%d = sp_box_nil();", tval);
+                 receiver skips both (below). */
+              if (!boxed_writer_nil_value_runs(nt, argv[0])) buf_printf(o, "sp_RbVal _t%d = sp_box_nil();", tval);
               else {
-                const char *cop = nt_str(nt, id, "call_operator");
                 Buf pre; memset(&pre, 0, sizeof pre);
                 Buf val; memset(&val, 0, sizeof val);
                 { Buf *sv = g_pre; g_pre = &pre; emit_expr(c, argv[0], &val); g_pre = sv; }
-                buf_printf(b, "SP_GC_ROOT_RBVAL(_t%d); sp_RbVal _t%d = sp_box_nil(); ", tv, tval);
-                if (cop && sp_streq(cop, "&.")) buf_printf(b, "if (_t%d.tag != SP_TAG_NIL) ", tv);
-                buf_printf(b, "{\n%s(void)(%s); }", pre.p ? pre.p : "", val.p && val.p[0] ? val.p : "0");
+                buf_printf(o, "SP_GC_ROOT_RBVAL(_t%d); sp_RbVal _t%d = sp_box_nil(); ", tv, tval);
+                buf_printf(o, "{\n%s(void)(%s); }", pre.p ? pre.p : "", val.p && val.p[0] ? val.p : "0");
                 free(pre.p); free(val.p);
               }
             }
             else if (unk_rhs) {
-              buf_printf(b, "sp_RbVal _t%d = ", tval); emit_expr(c, argv[0], b); buf_puts(b, ";");
+              buf_printf(o, "sp_RbVal _t%d = ", tval); emit_expr(c, argv[0], o); buf_puts(o, ";");
             }
 else {
-              emit_ctype(c, at, b); buf_printf(b, " _t%d = ", tval); emit_expr(c, argv[0], b); buf_puts(b, ";");
+              emit_ctype(c, at, o); buf_printf(o, " _t%d = ", tval); emit_expr(c, argv[0], o); buf_puts(o, ";");
             }
             /* A boxed NIL carries cls_id 0, which is a real user class id:
                switching on the field alone let a nil receiver take class 0's
                arm and write through its NULL pointer (#4048). Ask the tag,
                as every other cls_id dispatch does. */
-            buf_printf(b, " switch (_t%d.tag == SP_TAG_OBJ ? _t%d.cls_id : 0x7fffffff) {", tv, tv);
+            buf_printf(o, " switch (_t%d.tag == SP_TAG_OBJ ? _t%d.cls_id : 0x7fffffff) {", tv, tv);
             char src[32]; snprintf(src, sizeof src, "_t%d", tval);
             char objp[32]; snprintf(objp, sizeof objp, "_t%d.v.p", tv);
-            emit_boxed_writer_arms(c, base, nm, objp, src, at_eff, argv[0], b);
-            buf_printf(b, " default: sp_raise_nomethod(sp_nomethod_msg(\"%s\", _t%d)); break;", nm, tv);
+            emit_boxed_writer_arms(c, base, nm, objp, src, at_eff, argv[0], o);
+            buf_printf(o, " default: sp_raise_nomethod(sp_nomethod_msg(\"%s\", _t%d)); break;", nm, tv);
+            if (safe) {
+              g_pre = sv_pre;
+              buf_printf(b, "if (_t%d.tag != SP_TAG_NIL) {\n%s%s }", tv, spre.p ? spre.p : "", sbody.p ? sbody.p : "");
+              free(spre.p); free(sbody.p);
+            }
             buf_puts(b, " } }\n");
             return 1;
           }
