@@ -5251,6 +5251,429 @@ static void intern_scope_ivars(Compiler *c, int ms, int ci) {
   }
 }
 
+/* CRuby's order of the modules a class includes. `include M` puts M, then
+   the modules M includes, behind the class, nearest first, but not one the
+   class or a superclass holds already: that one keeps its place, and what
+   follows it in M's list goes in behind it. So a module two includes share,
+   or one a superclass includes, is not mixed in a second time, and a method
+   the class finds in front of it still answers.
+
+   inc_own[ci] is that list for ci after every include of the program, in
+   the order they run. It is built only for a program that names a module
+   held already, and only where the statements give the order: every include
+   is a plain statement of a class or module body in the program's own file,
+   every statement before the last of them is a definition, no module is
+   given an include after it was mixed in, every def is a plain statement of
+   a body too, and nothing makes, removes or mixes in a method any other
+   way. */
+static int **inc_own = NULL;
+static int *inc_nown = NULL;
+static char *inc_dim = NULL;     /* holds a module of no body of the program */
+static char *inc_bent = NULL;    /* an include into it named a module held already */
+static int *inc_again = NULL;    /* the include statements naming a module held already */
+static int *inc_late = NULL;     /* pairs: a class, and a def of its body that comes after a statement that runs */
+static int inc_nagain = 0, inc_nclasses = 0, inc_nlate = 0, inc_clate = 0;
+
+typedef struct { int *ci, *mod, *stmt; int n, cap, nstmt, ndef; } IncRun;
+
+/* (class, name) -> an int, for the defs as written and the answers found. */
+typedef struct { char *name; int cls, val; } IncEnt;
+typedef struct { IncEnt *e; int cap, n; } IncTab;
+static IncTab inc_defs, inc_memo;
+#define INC_NOT_SAID (-2)
+
+static void inc_tab_free(IncTab *t) {
+  for (int i = 0; i < t->cap; i++) free(t->e[i].name);
+  free(t->e);
+  t->e = NULL; t->cap = t->n = 0;
+}
+static IncEnt *inc_tab_slot(const IncTab *t, int cls, const char *nm) {
+  unsigned h = 2166136261u ^ (unsigned)cls;
+  for (const char *q = nm; *q; q++) h = (h ^ (unsigned char)*q) * 16777619u;
+  unsigned i = h & (unsigned)(t->cap - 1);
+  while (t->e[i].name && (t->e[i].cls != cls || !sp_streq(t->e[i].name, nm))) i = (i + 1) & (unsigned)(t->cap - 1);
+  return &t->e[i];
+}
+static const IncEnt *inc_tab_get(const IncTab *t, int cls, const char *nm) {
+  if (!t->cap) return NULL;
+  const IncEnt *s = inc_tab_slot(t, cls, nm);
+  return s->name ? s : NULL;
+}
+static void inc_tab_put(IncTab *t, int cls, const char *nm, int val) {
+  if ((t->n + 1) * 2 > t->cap) {
+    IncTab big = { calloc(t->cap ? (size_t)t->cap * 2 : 64, sizeof(IncEnt)), t->cap ? t->cap * 2 : 64, t->n };
+    if (!big.e) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+    for (int i = 0; i < t->cap; i++) if (t->e[i].name) *inc_tab_slot(&big, t->e[i].cls, t->e[i].name) = t->e[i];
+    free(t->e);
+    *t = big;
+  }
+  IncEnt *s = inc_tab_slot(t, cls, nm);
+  if (!s->name) {
+    s->name = strdup(nm); s->cls = cls; t->n++;
+    if (!s->name) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+  }
+  s->val = val;
+}
+
+static void inc_order_free(void) {
+  for (int i = 0; inc_own && i < inc_nclasses; i++) free(inc_own[i]);
+  free(inc_own); inc_own = NULL;
+  free(inc_nown); inc_nown = NULL;
+  free(inc_dim); inc_dim = NULL;
+  free(inc_bent); inc_bent = NULL;
+  free(inc_again); inc_again = NULL;
+  free(inc_late); inc_late = NULL;
+  inc_nagain = inc_nlate = inc_clate = 0;
+  inc_tab_free(&inc_defs); inc_tab_free(&inc_memo);
+}
+static int inc_find(const int *v, int n, int x) {
+  for (int i = 0; i < n; i++) if (v[i] == x) return i;
+  return -1;
+}
+static int inc_name_in(const char *nm, const char *const *list) {
+  for (int i = 0; nm && list[i]; i++) if (sp_streq(nm, list[i])) return 1;
+  return 0;
+}
+/* A module has no superclass to look in. */
+static int inc_parent(Compiler *c, int k) {
+  return comp_class_is_module(c, &c->classes[k]) ? -1 : c->classes[k].parent;
+}
+static int inc_is_stmt(const NodeTable *nt, int s) {
+  const char *nm = nt_kind(nt, s) == NK_CallNode ? nt_str(nt, s, "name") : NULL;
+  return nm && sp_streq(nm, "include") && nt_ref(nt, s, "receiver") < 0;
+}
+/* The modules of one include statement, as process_include_body resolves
+   them and in the order it takes them; -1 for one of no body of the
+   program, or of a builtin's name. */
+static void inc_stmt_events(Compiler *c, int ci, int s, IncRun *r) {
+  const NodeTable *nt = c->nt;
+  int anode = nt_ref(nt, s, "arguments"), an = 0;
+  const int *args = anode >= 0 ? nt_arr(nt, anode, "arguments", &an) : NULL;
+  r->nstmt++;
+  for (int j = an - 1; j >= 0; j--) {
+    NodeKind ak = nt_kind(nt, args[j]);
+    const char *mname = ak == NK_ConstantReadNode || ak == NK_ConstantPathNode ? nt_str(nt, args[j], "name") : NULL;
+    int mod = mname ? comp_class_index(c, mname) : -1;
+    if (mod < 0 && mname) {
+      const char *al = resolve_class_alias(c, mname);
+      if (al) mod = comp_class_index(c, al);
+    }
+    if (mod >= 0 && is_builtin_class_name(c->classes[mod].name)) mod = -1;
+    if (r->n == r->cap) {
+      r->cap = r->cap ? r->cap * 2 : 16;
+      r->ci = realloc(r->ci, sizeof(int) * (size_t)r->cap);
+      r->mod = realloc(r->mod, sizeof(int) * (size_t)r->cap);
+      r->stmt = realloc(r->stmt, sizeof(int) * (size_t)r->cap);
+      if (!r->ci || !r->mod || !r->stmt) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+    }
+    r->ci[r->n] = ci; r->mod[r->n] = mod; r->stmt[r->n++] = s;
+  }
+}
+/* The declarations a class body makes that run no method of the program. */
+static const char *const inc_decl_names[] = {
+  "attr_reader", "attr_writer", "attr_accessor", "attr", "private", "public", "protected",
+  "module_function", "private_constant", "public_constant", "private_class_method",
+  "public_class_method", "extend", "require", "require_relative", NULL };
+/* A statement that only defines: nothing of the program runs in it. */
+static int inc_defines_only(const NodeTable *nt, int s, int depth) {
+  if (s < 0) return 1;
+  if (depth > 8) return 0;
+  int n = 0; const int *v = NULL;
+  switch (nt_kind(nt, s)) {
+  case NK_DefNode: case NK_AliasMethodNode: case NK_LambdaNode: case NK_SelfNode:
+  case NK_IntegerNode: case NK_FloatNode: case NK_StringNode: case NK_SymbolNode:
+  case NK_TrueNode: case NK_FalseNode: case NK_NilNode: case NK_ConstantReadNode:
+  case NK_RegularExpressionNode:
+    return 1;
+  case NK_ConstantPathNode:
+    return inc_defines_only(nt, nt_ref(nt, s, "parent"), depth + 1);
+  case NK_ConstantWriteNode: case NK_InstanceVariableWriteNode: case NK_ClassVariableWriteNode:
+    return inc_defines_only(nt, nt_ref(nt, s, "value"), depth + 1);
+  case NK_ArrayNode: case NK_HashNode:
+    v = nt_arr(nt, s, "elements", &n);
+    break;
+  case NK_AssocNode:
+    return inc_defines_only(nt, nt_ref(nt, s, "key"), depth + 1) &&
+           inc_defines_only(nt, nt_ref(nt, s, "value"), depth + 1);
+  case NK_RangeNode:
+    return inc_defines_only(nt, nt_ref(nt, s, "left"), depth + 1) &&
+           inc_defines_only(nt, nt_ref(nt, s, "right"), depth + 1);
+  case NK_CallNode: {
+    const char *nm = nt_str(nt, s, "name");
+    int recv = nt_ref(nt, s, "receiver"), args = nt_ref(nt, s, "arguments");
+    if (nt_ref(nt, s, "block") >= 0) return 0;
+    if (recv >= 0) {   /* a literal frozen */
+      if (!nm || !sp_streq(nm, "freeze") || args >= 0) return 0;
+      return inc_defines_only(nt, recv, depth + 1);
+    }
+    if (!inc_name_in(nm, inc_decl_names)) return 0;
+    v = args >= 0 ? nt_arr(nt, args, "arguments", &n) : NULL;
+    break;
+  }
+  default:
+    return 0;
+  }
+  for (int i = 0; i < n; i++) if (!inc_defines_only(nt, v[i], depth + 1)) return 0;
+  return 1;
+}
+/* Count the defs statement `s` of ci's body makes where a body makes them:
+   the statement itself, or the argument of a declaration (`private def`).
+   One that comes after a statement that runs (`late`) is kept by its class:
+   the class answered without it until then. */
+static void inc_note_defs(const NodeTable *nt, int s, int ci, IncRun *r, int late, int depth) {
+  NodeKind k = nt_kind(nt, s);
+  if (k == NK_DefNode) {
+    r->ndef++;
+    if (!late || ci < 0 || nt_ref(nt, s, "receiver") >= 0) return;
+    if (inc_nlate + 2 > inc_clate) {
+      inc_clate = inc_clate ? inc_clate * 2 : 16;
+      inc_late = realloc(inc_late, sizeof(int) * (size_t)inc_clate);
+      if (!inc_late) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+    }
+    inc_late[inc_nlate++] = ci; inc_late[inc_nlate++] = s;
+    return;
+  }
+  if (k != NK_CallNode || depth > 8 || nt_ref(nt, s, "receiver") >= 0 ||
+      !inc_name_in(nt_str(nt, s, "name"), inc_decl_names)) return;
+  int args = nt_ref(nt, s, "arguments"), n = 0;
+  const int *v = args >= 0 ? nt_arr(nt, args, "arguments", &n) : NULL;
+  for (int i = 0; i < n; i++) inc_note_defs(nt, v[i], ci, r, late, depth + 1);
+}
+/* The include statements of the class and module bodies in statement list
+   `list`, in the order they run, and the defs. *ran: 1 once a statement that
+   may run a method of the program has passed, 2 where an include comes
+   after one, in a required file (which may load later than it stands), or
+   in no body of a class this pass knows. */
+static void inc_walk(Compiler *c, int list, int ci, int req, IncRun *r, int *ran) {
+  const NodeTable *nt = c->nt;
+  int n = 0;
+  if (list < 0) return;
+  if (nt_kind(nt, list) != NK_StatementsNode) { if (!*ran) *ran = 1; return; }
+  const int *b = nt_arr(nt, list, "body", &n);
+  for (int i = 0; i < n && *ran < 2; i++) {
+    int s = b[i];
+    int rq = req || nt_int(nt, s, "req_pop", 0) > 0;
+    NodeKind k = nt_kind(nt, s);
+    if (k == NK_ClassNode || k == NK_ModuleNode) {
+      const char *cn = class_body_name(c, s);
+      if (!*ran && !inc_defines_only(nt, nt_ref(nt, s, "superclass"), 0)) *ran = 1;
+      inc_walk(c, nt_ref(nt, s, "body"), cn ? comp_class_index(c, cn) : -1, rq, r, ran);
+    }
+    else if (k == NK_SingletonClassNode) {   /* `class << self`: its defs are no instance's */
+      if (!*ran && nt_kind(nt, nt_ref(nt, s, "expression")) != NK_SelfNode) *ran = 1;
+      inc_walk(c, nt_ref(nt, s, "body"), -1, rq, r, ran);
+    }
+    else if (inc_is_stmt(nt, s)) {
+      if (ci < 0 || rq || *ran) *ran = 2;
+      else inc_stmt_events(c, ci, s, r);
+    }
+    else {
+      if (!*ran && !inc_defines_only(nt, s, 0)) *ran = 1;
+      inc_note_defs(nt, s, ci, r, *ran, 0);
+    }
+  }
+}
+/* Run the includes of `r` in order. The answer is how many statements named
+   a module held already, or -1 where CRuby's order is not this simple: a
+   module given an include after it was mixed in (CRuby adds it to every
+   class holding the module), a class as the argument, a cycle, a builtin
+   class reopened (its own modules are not in this list). */
+static int inc_run(Compiler *c, IncRun *r) {
+  int nc = c->nclasses, again = 0;
+  char *held = calloc((size_t)nc + 1, 1);              /* a module some include has named */
+  int *in_own = calloc((size_t)nc + 1, sizeof(int));   /* e + 1: the target's list has it */
+  int *in_own_at = calloc((size_t)nc + 1, sizeof(int));
+  int *in_sup = calloc((size_t)nc + 1, sizeof(int));   /* e + 1: a superclass of the target holds it */
+  if (!held || !in_own || !in_own_at || !in_sup) { free(held); free(in_own); free(in_own_at); free(in_sup); return -1; }
+  inc_nagain = 0;
+  for (int e = 0; e < r->n; e++) {
+    int t = r->ci[e], m = r->mod[e], rep = 0, hops = 0;
+    if (m < 0) { inc_dim[t] = 1; continue; }
+    if (held[t] || m == t || !comp_class_is_module(c, &c->classes[m]) ||
+        is_builtin_class_name(c->classes[t].name) ||
+        inc_find(inc_own[m], inc_nown[m], t) >= 0) { again = -1; break; }
+    if (inc_dim[m]) inc_dim[t] = 1;
+    for (int i = 0; i < inc_nown[t]; i++) { in_own[inc_own[t][i]] = e + 1; in_own_at[inc_own[t][i]] = i; }
+    for (int k = inc_parent(c, t); k >= 0 && hops < 1000; k = inc_parent(c, k), hops++)
+      for (int i = 0; i < inc_nown[k]; i++) in_sup[inc_own[k][i]] = e + 1;
+    /* the list after: the old one with M's new modules put in, each behind
+       the last old one M's list has passed */
+    int nm = inc_nown[m] + 1, no = inc_nown[t], at = 0, n = 0;
+    int *merged = malloc(sizeof(int) * (size_t)(no + nm));
+    if (!merged) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+    for (int i = -1; i < inc_nown[m]; i++) {
+      int x = i < 0 ? m : inc_own[m][i];
+      if (in_own[x] == e + 1) {
+        rep = 1;
+        if (in_own_at[x] >= at) { while (at <= in_own_at[x]) merged[n++] = inc_own[t][at++]; }
+        continue;
+      }
+      if (in_sup[x] == e + 1) { rep = 1; continue; }
+      merged[n++] = x;
+      held[x] = 1;
+      in_own[x] = e + 1; in_own_at[x] = -1;   /* twice in M's list (never, without a cycle): once here */
+    }
+    while (at < no) merged[n++] = inc_own[t][at++];
+    free(inc_own[t]);
+    inc_own[t] = merged; inc_nown[t] = n;
+    if (rep) inc_bent[t] = 1;
+    if (rep && (inc_nagain == 0 || inc_again[inc_nagain - 1] != r->stmt[e])) { inc_again[inc_nagain++] = r->stmt[e]; again++; }
+  }
+  free(held); free(in_own); free(in_own_at); free(in_sup);
+  return again;
+}
+/* Whether the program changes what a class answers with only by the `ndef`
+   defs and the `nstmt` include statements inc_walk has seen: no other def
+   (under a condition, in a block, in a method), no other include, no
+   prepend, no extend but `extend self`, no hook that runs when a module is
+   mixed in or a method defined, nothing that makes or removes a method by a
+   name given at run time, and no method of its own under a name the
+   declarations of a class body use. */
+static int inc_plain_program(Compiler *c, int nstmt, int ndef) {
+  static const char *const hides[] = {
+    "prepend", "define_method", "define_singleton_method", "undef_method", "remove_method",
+    "refine", "using", "class_eval", "module_eval", "class_exec", "module_exec",
+    "instance_eval", "instance_exec", "eval", "append_features", "prepend_features",
+    "extend_object", "alias_method", "include", "extend", NULL };
+  static const char *const by_name[] = {
+    "send", "public_send", "__send__", "method", "public_method", "instance_method",
+    "public_instance_method", NULL };
+  static const char *const hooks[] = {
+    "include", "extend", "prepend", "included", "extended", "prepended", "inherited",
+    "method_added", "singleton_method_added", "const_missing", "const_added", "append_features",
+    "prepend_features", "extend_object", "freeze", NULL };
+  const NodeTable *nt = c->nt;
+  int seen = 0, cnt = 0;
+  nt_nodes_of_kind(nt, NK_UndefNode, &cnt);
+  if (cnt > 0) return 0;
+  nt_nodes_of_kind(nt, NK_DefNode, &cnt);
+  if (cnt != ndef) return 0;
+  NT_FOREACH_KIND(nt, NK_DefNode, id) {
+    const char *nm = nt_str(nt, id, "name");
+    if (inc_name_in(nm, hooks) || inc_name_in(nm, inc_decl_names)) return 0;
+  }
+  NT_FOREACH_KIND(nt, NK_CallNode, id) {
+    const char *nm = nt_str(nt, id, "name");
+    int args = nt_ref(nt, id, "arguments"), an = 0;
+    const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+    if (!nm) continue;
+    if (sp_streq(nm, "include")) {
+      if (nt_ref(nt, id, "receiver") >= 0) return 0;
+      seen++;
+    }
+    else if (sp_streq(nm, "extend")) {
+      if (nt_ref(nt, id, "receiver") >= 0 || an != 1 || nt_kind(nt, av[0]) != NK_SelfNode) return 0;
+    }
+    else if (sp_streq(nm, "alias_method")) continue;   /* in the alias table, which inc_true_def asks */
+    else if (inc_name_in(nm, hides)) return 0;
+    else if (inc_name_in(nm, by_name)) {
+      NodeKind ak = an > 0 ? nt_kind(nt, av[0]) : NK_NONE;
+      const char *lit = ak == NK_SymbolNode ? nt_str(nt, av[0], "value")
+                      : ak == NK_StringNode ? nt_str(nt, av[0], "unescaped") : NULL;
+      if (!lit || inc_name_in(lit, hides)) return 0;
+    }
+  }
+  return seen == nstmt;
+}
+/* inc_defs: the def each class or module answers a name with as written,
+   before any include copies one in: the last of the name, or INC_NOT_SAID
+   where this does not follow it (a module_function, a def made after a
+   statement that runs: what was asked before it got another). And inc_bent
+   closed over the modules behind each. */
+static void inc_index_defs(Compiler *c) {
+  for (int s = 0; s < c->nscopes; s++) {
+    const Scope *sc = &c->scopes[s];
+    if (sc->class_id < 0 || !sc->name || sc->is_include_copy) continue;
+    if (sc->is_cmethod) { if (sc->is_module_function) inc_tab_put(&inc_defs, sc->class_id, sc->name, INC_NOT_SAID); continue; }
+    const IncEnt *had = inc_tab_get(&inc_defs, sc->class_id, sc->name);
+    if (had && had->val == INC_NOT_SAID) continue;
+    inc_tab_put(&inc_defs, sc->class_id, sc->name, sc->is_module_function ? INC_NOT_SAID : s);
+  }
+  for (int l = 0; l < inc_nlate; l += 2) {
+    const char *nm = nt_str(c->nt, inc_late[l + 1], "name");
+    if (nm) inc_tab_put(&inc_defs, inc_late[l], nm, INC_NOT_SAID);
+  }
+  for (int k = 0; k < inc_nclasses; k++)
+    for (int i = 0; !inc_bent[k] && i < inc_nown[k]; i++) if (inc_bent[inc_own[k][i]]) inc_bent[k] = 1;
+}
+/* Build inc_own, or leave it NULL. */
+static void inc_order(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  IncRun r = {0};
+  int ran = 0, nc = c->nclasses;
+  inc_order_free();
+  if (nt->root_id < 0 || nc <= 0) return;
+  inc_walk(c, nt_ref(nt, nt->root_id, "statements"), -1, 0, &r, &ran);
+  if (ran < 2 && r.n >= 2) {
+    inc_nclasses = nc;
+    inc_own = calloc((size_t)nc, sizeof *inc_own);
+    inc_nown = calloc((size_t)nc, sizeof *inc_nown);
+    inc_dim = calloc((size_t)nc, 1);
+    inc_bent = calloc((size_t)nc, 1);
+    inc_again = malloc(sizeof(int) * (size_t)r.n);
+    if (!inc_own || !inc_nown || !inc_dim || !inc_bent || !inc_again || inc_run(c, &r) <= 0 ||
+        !inc_plain_program(c, r.nstmt, r.ndef))
+      inc_order_free();
+    else
+      inc_index_defs(c);
+  }
+  free(r.ci); free(r.mod); free(r.stmt);
+}
+/* Whether a def calls super anywhere in it; a node that is no def, or one
+   nested too deep to follow, counts as calling it. */
+static int inc_calls_super(const NodeTable *nt, int id, int depth) {
+  if (id < 0) return depth == 0;
+  NodeKind k = nt_kind(nt, id);
+  if (k == NK_SuperNode || k == NK_ForwardingSuperNode || depth > 4000 || (depth == 0 && k != NK_DefNode)) return 1;
+  int nr = nt_num_refs(nt, id);
+  for (int i = 0; i < nr; i++) if (inc_calls_super(nt, nt_ref_at(nt, id, i), depth + 1)) return 1;
+  int na = nt_num_arrs(nt, id);
+  for (int i = 0; i < na; i++) {
+    int n = 0; const int *v = nt_arr_at(nt, id, i, &n);
+    for (int j = 0; j < n; j++) if (inc_calls_super(nt, v[j], depth + 1)) return 1;
+  }
+  return 0;
+}
+/* The def class ci, with none of `name` of its own, answers it with by
+   CRuby's order: the first among the modules behind the class, or its
+   superclass's the same way. The answer is that def's scope, or -1 where
+   the order does not say: a reader, a writer, an alias, a module_function
+   or a late def on the way, or a def that calls super (the methods behind
+   it answer too, in an order this does not check). */
+static int inc_true_def(Compiler *c, int ci, const char *name) {
+  const IncEnt *memo = inc_tab_get(&inc_memo, ci, name);
+  if (memo) return memo->val;
+  int hops = 0, found = -1;
+  char base[256];
+  size_t ln = strlen(name);
+  base[0] = 0;
+  if (ln > 1 && ln < sizeof base && name[ln - 1] == '=') { memcpy(base, name, ln - 1); base[ln - 1] = 0; }
+  for (int k = ci; k >= 0 && hops < 1000; k = inc_parent(c, k), hops++) {
+    if (inc_dim[k]) goto said;
+    for (int i = -1; i < inc_nown[k]; i++) {
+      int m = i < 0 ? k : inc_own[k][i];
+      ClassInfo *mc = &c->classes[m];
+      if (mc->naliases > 0 || comp_is_reader(mc, name) || (base[0] && comp_is_writer(mc, base))) goto said;
+      const IncEnt *d = inc_tab_get(&inc_defs, m, name);
+      if (!d) continue;
+      if (d->val != INC_NOT_SAID && !inc_calls_super(c->nt, c->scopes[d->val].def_node, 0)) found = d->val;
+      goto said;
+    }
+  }
+said:
+  inc_tab_put(&inc_memo, ci, name, found);
+  return found;
+}
+/* Whether `include mod` in ci's body may copy a method other than the one
+   CRuby's order gives ci: the statement names a module held already (`rep`),
+   or mod or a module behind it took such an include, so the copies it holds
+   are in the order of the statements. Only a class is asked: a module keeps
+   the copies it has, for what it holds is copied on into classes that may
+   hold its parts in another order, and each of those is asked here. */
+static int inc_may_differ(Compiler *c, int ci, int mod, int rep) {
+  return inc_own && !comp_class_is_module(c, &c->classes[ci]) && (rep || inc_bent[mod]);
+}
+
 /* Process include calls in a single class body, creating scope copies for each
    included module method. We copy (not mutate) so multiple classes can include
    the same module independently. */
@@ -5269,6 +5692,7 @@ void process_include_body(Compiler *c, int ci, int body_node) {
     int anode = nt_ref(nt, s, "arguments");
     int an = 0;
     const int *args = anode >= 0 ? nt_arr(nt, anode, "arguments", &an) : NULL;
+    int rep = inc_own && inc_find(inc_again, inc_nagain, s) >= 0;
     /* `include A, B` includes B first, so A ends up in front (as extend) */
     for (int j = an - 1; j >= 0; j--) {
       const char *aty = nt_type(nt, args[j]);
@@ -5335,9 +5759,11 @@ void process_include_body(Compiler *c, int ci, int body_node) {
       }
       /* record membership for `rescue M` matching (dedup across reopenings) */
       class_note_included_mod(c, ci, mod_id);
+      int again = inc_may_differ(c, ci, mod_id, rep);
       /* snapshot count before adding new scopes to avoid re-scanning them */
       int snap = c->nscopes;
-      for (int ms = 0; ms < snap; ms++) {
+      for (int mk = 0; mk < snap; mk++) {
+        int ms = mk, kept = -1;
         Scope *src = &c->scopes[ms];
         if (src->class_id != mod_id || !src->name) continue;
         /* a module_function method whose body depends on its receiver needs a
@@ -5348,6 +5774,17 @@ void process_include_body(Compiler *c, int ci, int body_node) {
         const char *dst_name = src->name;
         char inc_shadow[256];
         int own = comp_method_in_class(c, ci, src->name);
+        /* The method this module answers the name with may not be the one
+           the class does: by CRuby's order (inc_own) another stands in
+           front. Copy that one, from where it is defined. */
+        if (again && (own < 0 || c->scopes[own].is_include_copy) &&
+            (kept = inc_true_def(c, ci, src->name)) >= 0 &&
+            c->scopes[kept].def_node != src->def_node) {
+          if (!src->is_module_function) src->is_transplanted_source = 1;
+          ms = kept;
+          src = &c->scopes[ms];
+        }
+        else kept = -1;
         if (own >= 0 && c->scopes[own].is_include_copy) {
           /* An earlier include of another module put this name here. Ruby's MRO
              puts the LAST include first, so this module supersedes it: rename
@@ -5461,7 +5898,7 @@ else {
         /* ...but a module_function original keeps its module-side spelling:
            `Rt.peek` is a real call whoever also includes Rt, so the source is
            not copied AWAY, only copied FROM. */
-        if (!src->is_module_function) src->is_transplanted_source = 1;
+        if (!src->is_module_function && kept < 0) src->is_transplanted_source = 1;
         scope_copy_params(dst, src);
         if (scope_own_defaults(c, dst_idx)) g_inc_did_clone = 1;
         src = &c->scopes[ms]; dst = &c->scopes[dst_idx];
@@ -5515,6 +5952,7 @@ void register_includes(Compiler *c) {
      falls back to source order. */
   int *bci, *bnode;
   int nb = class_body_list(c, &bci, &bnode);
+  inc_order(c);
   int *remaining = calloc((size_t)c->nclasses, sizeof(int));
   char *done = calloc((size_t)nb, 1);
   for (int b = 0; b < nb; b++) remaining[bci[b]]++;
@@ -5545,6 +5983,7 @@ void register_includes(Compiler *c) {
     }
   }
   free(bci); free(bnode); free(remaining); free(done);
+  inc_order_free();
   if (g_inc_did_clone) register_locals(c);
 }
 
