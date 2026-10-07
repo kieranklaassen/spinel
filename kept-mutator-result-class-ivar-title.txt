@@ -1,0 +1,1 @@
+Refuse a plain mutator's kept result in a class's instance variable
