@@ -17588,6 +17588,8 @@ static int strbuf_demand_elem_arg(Compiler *c, int an) {
    an element read handed to an appender is. Answers whether anything
    changed. A result that is another such call is followed (bounded). */
 static int *uec_seen, *uec_depth, *uec_cut, uec_cap, uec_gen, uec_cut_now;
+static const char *uec_names[16];
+static int uec_name_depth[16], uec_name_cut[16], uec_nnames;
 static int strbuf_demand_user_elem_call(Compiler *c, int call, int depth) {
   const NodeTable *nt = c->nt;
   if (call < 0 || nt_kind(nt, call) != NK_CallNode) return 0;
@@ -17616,6 +17618,7 @@ static int strbuf_demand_user_elem_call(Compiler *c, int call, int depth) {
     }
     uec_gen++;
     uec_cut_now = 0;
+    uec_nnames = 0;
   }
   const char *mn = nt_str(nt, call, "name");
   if (!mn) return 0;
@@ -17633,11 +17636,35 @@ static int strbuf_demand_user_elem_call(Compiler *c, int call, int depth) {
     if (rt != TY_POLY && !ty_is_object(rt)) return 0;
     if (ty_is_object(rt)) cls = ty_object_class(rt);
   }
+  /* By name, the loop below takes every class's method of the name to this
+     depth or nearer the top. One begun no deeper in this demand, ended or
+     still running, does that for this call too: looking through every
+     scope again for the result of each method it walked found them all
+     walked, and a bus of N classes made N such scans a demand. What the
+     scan handed up is whether a walk it skipped was cut: that is the
+     loop's own answer once it has ended, and "cut" while it runs, which
+     at most has a method walked again. (Past sixteen names a demand scans
+     as before.) */
+  int kn = -1, entry_cut = uec_cut_now;
+  if (cls < 0) {
+    int k = 0;
+    while (k < uec_nnames && !sp_streq(uec_names[k], mn)) k++;
+    if (k < uec_nnames && uec_name_depth[k] <= depth) { uec_cut_now |= uec_name_cut[k]; return 0; }
+    if (k < 16) {
+      if (k == uec_nnames) uec_names[uec_nnames++] = mn;
+      uec_name_depth[k] = depth;
+      uec_name_cut[k] = 1;
+      kn = k;
+      uec_cut_now = 0;
+    }
+  }
+  /* a known class has one method of the name */
+  int one = cls >= 0 ? comp_method_in_chain(c, cls, mn, NULL) : 1;
+  if (one < 1) return 0;
   int changed = 0;
-  for (int mi = 1; mi < c->nscopes; mi++) {
+  for (int mi = one; mi < c->nscopes; mi++) {
     Scope *m = &c->scopes[mi];
-    if (cls >= 0) { if (mi != comp_method_in_chain(c, cls, mn, NULL)) continue; }
-    else if (!m->name || !sp_streq(m->name, mn) || m->class_id < 0 || m->is_cmethod) continue;
+    if (cls < 0 && (!m->name || !sp_streq(m->name, mn) || m->class_id < 0 || m->is_cmethod)) continue;
     if (mi < uec_cap) {
       if (uec_seen[mi] == uec_gen && (uec_depth[mi] <= depth || !uec_cut[mi])) {
         uec_cut_now |= uec_cut[mi];
@@ -17669,6 +17696,7 @@ static int strbuf_demand_user_elem_call(Compiler *c, int call, int depth) {
     uec_cut_now |= outer_cut;
     if (cls >= 0) break;
   }
+  if (kn >= 0) { uec_name_cut[kn] = uec_cut_now; uec_cut_now |= entry_cut; }
   return changed;
 }
 /* The container a program method hands its block on to, when its body
