@@ -52,6 +52,7 @@ typedef struct ShareFacts {
   int *ret_m, *ret_v, nret, cret;
   unsigned char *ret_done;
   unsigned char *unused;   /* per node: a statement whose value is dropped */
+  unsigned char *unreached;   /* per scope: a method no call reaches (sh_mark_unreached) */
   /* the mutation sites, for SPINEL_SHARE_STATS=3: node, value */
   int *mut_n, *mut_v, nmut, cmut;
   int *hcount;         /* per root, once built: holders storing a String */
@@ -1873,7 +1874,7 @@ static void sh_free(ShareFacts *F) {
   free(F->parent); free(F->elem); free(F->nhold); free(F->nmem); free(F->nelem); free(F->hidx);
   free(F->owner); free(F->hcount); free(F->anchored); free(F->mconst);
   free(F->mut_n); free(F->mut_v);
-  free(F->lsc); free(F->ret_m); free(F->ret_v); free(F->ret_done); free(F->unused);
+  free(F->lsc); free(F->ret_m); free(F->ret_v); free(F->ret_done); free(F->unused); free(F->unreached);
   free(F->kind); free(F->flags); free(F->own);
   free(F->h); free(F->helem); free(F->bucket); free(F->hnext); free(F->nval);
   free(F->lend_arg); free(F->lend_par); free(F->lend_direct); free(F->lend_done);
@@ -1943,6 +1944,36 @@ static void sh_mark_unused(ShareFacts *F, const NodeTable *nt, int n) {
 static void sh_mark_last_unused(ShareFacts *F, const NodeTable *nt, int st) {
   int bn = 0; const int *bv = st >= 0 && nt_kind(nt, st) == NK_StatementsNode ? nt_arr(nt, st, "body", &bn) : NULL;
   if (bn > 0) sh_mark_unused(F, nt, bv[bn - 1]);
+}
+
+/* a node of a method no call reaches */
+static int sh_unreached(const ShareFacts *F, const Compiler *c, int n) {
+  int sc = n < c->node_cap ? c->nscope[n] : -1;
+  return sc >= 0 && sc < c->nscopes && F->unreached[sc];
+}
+
+/* The methods no call reaches: codegen emits no C for one, and its locals are
+   never given a type. Reachability goes by name and is computed before the
+   fixpoint and again after it, so a call a pass wrote in between
+   (`e.map { break }` to enumerator.rb's __enumw_map) names a method not marked
+   yet: what a call that is read reaches is reached. */
+static void sh_mark_unreached(ShareFacts *F, Compiler *c) {
+  const NodeTable *nt = c->nt;
+  F->unreached = calloc((size_t)(c->nscopes > 0 ? c->nscopes : 1), 1);
+  int more = 0;
+  for (int mi = 0; mi < c->nscopes; mi++)
+    if (!c->scopes[mi].reachable) F->unreached[mi] = 1, more = 1;
+  while (more) {
+    more = 0;
+    for (int n = 0; n < F->nnodes; n++) {
+      NodeKind k = nt_kind(nt, n);
+      if ((k != NK_CallNode && k != NK_SuperNode && k != NK_ForwardingSuperNode) || sh_unreached(F, c, n)) continue;
+      int tg[64];
+      int ntg = sh_targets(c, n, tg, 64);
+      for (int i = 0; i < ntg; i++)
+        if (F->unreached[tg[i]]) F->unreached[tg[i]] = 0, more = 1;
+    }
+  }
 }
 
 /* ---- break and next ----
@@ -2047,7 +2078,8 @@ static void sh_jumps(ShareFacts *F, Compiler *c) {
   for (int i = 0; i < J.np; i++)
     if (J.t[i] >= 0 && F->jump[J.t[i]] < 0) F->jump[J.t[i]] = sh_new(F, SHK_VALUE);
   for (int i = 0; i < J.np; i++)
-    sh_union(F, J.t[i] >= 0 ? F->jump[J.t[i]] : F->unknown, sh_jump_val(F, c, J.n[i]));
+    if (!sh_unreached(F, c, J.n[i]))
+      sh_union(F, J.t[i] >= 0 ? F->jump[J.t[i]] : F->unknown, sh_jump_val(F, c, J.n[i]));
   free(J.t);
   free(J.n);
 }
@@ -2081,14 +2113,21 @@ static ShareFacts *sh_build(Compiler *c, int closed) {
     }
     NT_FOREACH_KIND(nt, k == 1 ? NK_ClassNode : NK_ModuleNode, pn) sh_mark_last_unused(F, nt, nt_ref(nt, pn, "body"));
   }
+  /* a method no call reaches changes nothing and hands nothing on: the walk
+     reads the methods that are emitted. Read too, the `buf << x` of a spliced
+     helper nothing calls (enumerator.rb's __enumw_each_slice), on a local
+     with no type, put an in-place change among the Strings of every call the
+     walk does not follow. */
+  sh_mark_unreached(F, c);
   sh_jumps(F, c);
-  for (int n = 0; n < F->nnodes; n++) sh_val(F, c, n);
+  for (int n = 0; n < F->nnodes; n++)
+    if (!sh_unreached(F, c, n)) sh_val(F, c, n);
   sh_settle_any_new(F, c);
   /* each method's value is its body's last, and its defaults bind its
      parameters */
   for (int mi = 0; mi < c->nscopes; mi++) {
     Scope *m = &c->scopes[mi];
-    if (m->def_node < 0) continue;
+    if (m->def_node < 0 || F->unreached[mi]) continue;
     if (m->body >= 0) sh_ret(F, mi, sh_stmts_val(F, c, m->body));
     for (int j = 0; j < m->nparams; j++) {
       if (!m->pdefault || m->pdefault[j] < 0 || !m->pnames[j]) continue;
