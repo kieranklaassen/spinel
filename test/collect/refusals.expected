@@ -1056,6 +1056,24 @@ spinel: test/reject/string_nested_masgn_deep.rb:3: a nested multiple-assignment 
 spinel: test/reject/string_nested_masgn_target.rb:3: a nested multiple-assignment target appends to a String variable from an Array literal (a String is not yet shared by reference through a nested multiple-assignment target). Append to the source String instead.
 == test/reject/string_nested_masgn_target.rb [promote] rc=1
 spinel: test/reject/string_nested_masgn_target.rb:3: a nested multiple-assignment target appends to a String variable from an Array literal (a String is not yet shared by reference through a nested multiple-assignment target). Append to the source String instead.
+== test/reject/string_pattern_bind_appended_local.rb [default] rc=1
+spinel: test/reject/string_pattern_bind_appended_local.rb:9: a String variable a pattern binds to its subject is mutated in place, or names a String that is (a String is not yet shared by reference through a pattern's binding). Assign the subject to the variable instead.
+spinel: 1 refusal, nothing written
+== test/reject/string_pattern_bind_appended_local.rb [promote] rc=1
+spinel: test/reject/string_pattern_bind_appended_local.rb:9: a String variable a pattern binds to its subject is mutated in place, or names a String that is (a String is not yet shared by reference through a pattern's binding). Assign the subject to the variable instead.
+spinel: 1 refusal, nothing written
+== test/reject/string_pattern_bind_reader_subject.rb [default] rc=1
+spinel: test/reject/string_pattern_bind_reader_subject.rb:14: a String variable a pattern binds to its subject is mutated in place, or names a String that is (a String is not yet shared by reference through a pattern's binding). Assign the subject to the variable instead.
+spinel: 1 refusal, nothing written
+== test/reject/string_pattern_bind_reader_subject.rb [promote] rc=1
+spinel: test/reject/string_pattern_bind_reader_subject.rb:14: a String variable a pattern binds to its subject is mutated in place, or names a String that is (a String is not yet shared by reference through a pattern's binding). Assign the subject to the variable instead.
+spinel: 1 refusal, nothing written
+== test/reject/string_pattern_bind_subject.rb [default] rc=1
+spinel: test/reject/string_pattern_bind_subject.rb:15: a String variable a pattern binds to its subject is mutated in place, or names a String that is (a String is not yet shared by reference through a pattern's binding). Assign the subject to the variable instead.
+spinel: 1 refusal, nothing written
+== test/reject/string_pattern_bind_subject.rb [promote] rc=1
+spinel: test/reject/string_pattern_bind_subject.rb:15: a String variable a pattern binds to its subject is mutated in place, or names a String that is (a String is not yet shared by reference through a pattern's binding). Assign the subject to the variable instead.
+spinel: 1 refusal, nothing written
 == test/reject/string_proc_param_store.rb [default] rc=1
 spinel: test/reject/string_proc_param_store.rb:5: a String held by a block parameter no element iterator binds (a proc's, a lambda's, a yielding method's block, `each_char`'s) is stored into a container and mutated in place through it (a String is not yet shared by reference through a stored block parameter). Mutate the String before storing it, or store it where the caller holds it.
 == test/reject/string_proc_param_store.rb [promote] rc=1
