@@ -10599,6 +10599,30 @@ TyKind emit_range_step_array(Compiler *c, int id, Buf *b) {
   return is_float ? TY_FLOAT_ARRAY : TY_INT_ARRAY;
 }
 
+/* `r.overlap?(o)` is sp_range_overlap_v over two boxed values. `box` names the
+   call that boxes a typed receiver (NULL for a receiver already boxed), and
+   the receiver is the node `recv`, or the temp `_t<rt>` when `recv` is none.
+   A receiver whose value is made here (a typed Range is boxed by a copy, a
+   call answers a fresh value) is bound to a temp, with a rooted copy, before
+   the argument is made: the argument's own allocation would collect it, and
+   C does not say which of two arguments it evaluates first. The call takes
+   the temp, not the copy: of a value read back from a rooted slot the C
+   compiler no longer knows the class, and keeps every test of it. Not where
+   the argument is a plain read of a boxed value, which allocates nothing. */
+static void emit_range_overlap(Compiler *c, const char *box, int recv, int rt, int arg, Buf *b) {
+  int root = (box || !subtree_is_pure_read(c, recv)) &&
+             !(comp_ntype(c, arg) == TY_POLY && subtree_is_pure_read(c, arg));
+  int t = root ? ++g_tmp : 0, tr = root ? ++g_tmp : 0;
+  if (root) buf_printf(b, "({ sp_RbVal _t%d = ", t); else buf_puts(b, "sp_range_overlap_v(");
+  if (box) buf_printf(b, "%s(", box);
+  if (recv < 0) buf_printf(b, "_t%d", rt); else if (box) emit_expr(c, recv, b); else emit_boxed(c, recv, b);
+  if (box) buf_puts(b, ")");
+  if (root) buf_printf(b, "; sp_RbVal _t%d = _t%d; SP_GC_ROOT_RBVAL(_t%d); sp_range_overlap_v(_t%d, ", tr, t, tr, t);
+  else buf_puts(b, ", ");
+  emit_boxed(c, arg, b);
+  buf_puts(b, root ? "); })" : ")");
+}
+
 int emit_range_call(Compiler *c, int id, Buf *b) {
   const NodeTable *nt = c->nt;
   const char *name = nt_str(nt, id, "name");
@@ -10661,8 +10685,7 @@ int emit_range_call(Compiler *c, int id, Buf *b) {
     }
     /* overlap?: CRuby's range_overlap at run time, as for an Integer Range */
     if (argc == 1 && sp_streq(name, "overlap?")) {
-      buf_puts(b, "sp_range_overlap_v(sp_box_frange("); emit_expr(c, recv, b);
-      buf_puts(b, "), "); emit_boxed(c, argv[0], b); buf_puts(b, ")");
+      emit_range_overlap(c, "sp_box_frange", recv, 0, argv[0], b);
       return 1;
     }
     if (argc == 0 && (is_range_end_reader(name))) {
@@ -11281,8 +11304,7 @@ int emit_range_call(Compiler *c, int id, Buf *b) {
       else if (sp_streq(name, "overlap?")) {
         /* CRuby's range_overlap at run time: an empty Range overlaps
            nothing, and the argument may be a Float Range */
-        buf_printf(b, "sp_range_overlap_v(sp_box_range(_t%d), ", t); emit_boxed(c, argv[0], b);
-        buf_puts(b, ")");
+        emit_range_overlap(c, "sp_box_range", -1, t, argv[0], b);
       }
       else if (sp_streq(name, "minmax")) {
         /* a poly pair off the endpoints, max first: an empty (backwards)
@@ -13695,8 +13717,7 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
       sp_streq(name, "overlap?") && !user_defines_or_reads(c, name)) {
     int res_boxed = repr_of(c, id).kind == RK_BOXED;
     if (res_boxed) buf_puts(b, "sp_box_bool(");
-    buf_puts(b, "sp_range_overlap_v("); emit_boxed(c, recv, b);
-    buf_puts(b, ", "); emit_boxed(c, argv[0], b); buf_puts(b, ")");
+    emit_range_overlap(c, NULL, recv, 0, argv[0], b);
     if (res_boxed) buf_puts(b, ")");
     return 1;
   }
