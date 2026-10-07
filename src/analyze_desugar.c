@@ -2849,15 +2849,67 @@ int desugar_enumerable_chain(Compiler *c) {
   return changed;
 }
 
+/* A program's own method named send, __send__ or public_send is the method
+   a call of that name reaches on its receiver, as CRuby's ancestry has it:
+   `def send(msg, flags)` on a connection is not Object#send, and its first
+   argument names no method. The call is left to it only where that is
+   proved (send_call_owned); everywhere else the literal names the method,
+   as before. */
+
+/* The method `nm` the receiver's class defines, or -1: its own def, an
+   inherited one, an included module's, for an instance or, with `cmeth`,
+   for the class. */
+static int send_name_method(Compiler *c, int cls, int cmeth, const char *nm) {
+  if (cls < 0 || cls >= c->nclasses) return -1;
+  return cmeth ? comp_cmethod_in_chain(c, cls, nm, NULL) : comp_method_in_chain(c, cls, nm, NULL);
+}
+
+/* Call `id` of `nm` reaches the program's own method. Asked of the name once
+   a pass (`taken`: send, __send__, public_send): what the program defines
+   has to keep the call (own_def_takes_call; a body that goes on to another
+   of the three names reaches the builtin again, which the retarget already
+   is). Then of the receiver, which has to be an object of the owning class
+   where it stands and never nil, whose send is Kernel's: `self`, written or
+   implied, with the enclosing class's method or a top-level def, outside
+   any block that can run on another object (self_is_scope_object); a class by
+   its constant, with a class method; recv_object_class_proved. And of the
+   text: the method's def stands before the call (own_def_stands_before). A
+   boxed receiver, a parameter, one whose class only a subclass gives the
+   name, and a call ahead of the class's reopening are retargeted as
+   before. */
+static int send_call_owned(Compiler *c, int id, const char *nm, int *taken) {
+  const NodeTable *nt = c->nt;
+  int di = sp_streq(nm, "public_send") ? 2 : sp_streq(nm, "send") ? 0 : 1;
+  if (taken[di] < 0) taken[di] = own_def_takes_call(c, nm, is_send_family);
+  if (!taken[di]) return 0;
+  int recv = unwrap_parens(c, nt_ref(nt, id, "receiver")), mi;
+  if (recv < 0 || nt_kind(nt, recv) == NK_SelfNode) {
+    Scope *ss = comp_scope_of(c, id);
+    if (!self_is_scope_object(c, id)) return 0;
+    mi = send_name_method(c, ss->class_id, ss->is_cmethod, nm);
+    if (mi < 0) mi = comp_method_index(c, nm);
+  }
+  else if (nt_kind(nt, recv) == NK_ConstantReadNode) mi = send_name_method(c, comp_class_index(c, nt_str(nt, recv, "name")), 1, nm);
+  else {
+    /* the walk for a path that leaves it unset only once the class has the name */
+    int k = recv_object_class_written(c, recv);
+    mi = send_name_method(c, k, 0, nm);
+    if (mi >= 0 && recv_object_class_proved(c, recv) != k) mi = -1;
+  }
+  return mi >= 0 && own_def_stands_before(c, mi, id);
+}
+
 int desugar_implicit_send(Compiler *c) {
   NodeTable *nt = (NodeTable *)c->nt;
   int changed = 0;
   int n0 = nt->count;
+  int taken[3] = { -1, -1, -1 };
   for (int id = 0; id < n0; id++) {
     if (!nt_type(nt, id) || !sp_streq(nt_type(nt, id), "CallNode")) continue;
     if (nt_ref(nt, id, "receiver") >= 0) continue;        /* implicit self only */
     const char *nm = nt_str(nt, id, "name");
     if (!nm || !is_send_family(nm)) continue;
+    if (send_call_owned(c, id, nm, taken)) continue;      /* the program's own method */
     int args = nt_ref(nt, id, "arguments");
     if (args < 0) continue;
     int argc = 0; const int *argv = nt_arr(nt, args, "arguments", &argc);
@@ -2902,6 +2954,7 @@ int desugar_public_send_recv(Compiler *c) {
   NodeTable *nt = (NodeTable *)c->nt;
   int changed = 0;
   int n0 = nt->count;
+  int taken[3] = { -1, -1, -1 };
   for (int id = 0; id < n0; id++) {
     if (!nt_type(nt, id) || !sp_streq(nt_type(nt, id), "CallNode")) continue;
     if (nt_ref(nt, id, "receiver") < 0) continue;          /* explicit receiver only */
@@ -2925,6 +2978,10 @@ int desugar_public_send_recv(Compiler *c) {
          otherwise retarget to a method named "ping" (#2922). */
       if (sp_streq(nm, "send") && bsrt == TY_IO && sp_feature_required("socket")) continue;
     }
+    /* A program class's own method of the name is the call's the same way:
+       `c.send("hello", 0)` with `def send(msg, flags)` looked for a method
+       named hello and raised NoMethodError. */
+    if (send_call_owned(c, id, nm, taken)) continue;
     int args = nt_ref(nt, id, "arguments");
     if (args < 0) continue;
     int argc = 0; const int *argv = nt_arr(nt, args, "arguments", &argc);
