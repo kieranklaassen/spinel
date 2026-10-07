@@ -1937,7 +1937,7 @@ int emit_call_new_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const c
           const char *cn2 = class_ruby_name(c, ci); if (!cn2) cn2 = c->classes[ci].name;
           const char *par = exc_builtin_parent(c, ci);
           if (c->classes[ci].nivars > 0)
-            buf_printf(b, "((sp_%s *)sp_exc_new_sub_sized(sizeof(sp_%s), \"%s\", ",
+            buf_printf(b, "((sp_%s *)sp_exc_new_sub_ivars(sizeof(sp_%s), \"%s\", ",
                        c->classes[ci].c_name, c->classes[ci].c_name, cn2);
           else
             buf_printf(b, "sp_exc_new_sub(\"%s\", \"%s\", ", cn2, par);
@@ -1947,7 +1947,8 @@ int emit_call_new_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const c
             emit_syserr_call(c, id, "sp_syserr_msg_a", lead, argc, argv, b);
           }
           else emit_exc_msg_arg(c, argc >= 1 ? argv[0] : -1, b);
-          buf_puts(b, c->classes[ci].nivars > 0 ? "))" : ")");
+          if (c->classes[ci].nivars > 0) { emit_exc_ivars_tail(c, ci, b); buf_puts(b, "))"); }
+          else buf_puts(b, ")");
         }
         return 1;
       }

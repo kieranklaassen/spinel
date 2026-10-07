@@ -8662,6 +8662,36 @@ int class_needs_scan(ClassInfo *ci) {
   return 0;
 }
 
+/* An exception class of the program's with ivars and no initialize is built
+   by the runtime (sp_exc_new_sub_ivars), not by a constructor: by `.new`,
+   or, raised by its name, when it is caught. */
+int class_exc_built_by_name(Compiler *c, int cid) {
+  return c->classes[cid].nivars > 0 && class_is_exc_subclass(c, cid) &&
+         comp_method_in_chain(c, cid, "initialize", NULL) < 0;
+}
+
+/* The runtime zeroes the struct. Does the class have an ivar whose nil is not
+   the zero pattern? Then sp_<Class>__ivnil seeds those slots, as a
+   constructor does. */
+int class_exc_ivnil(Compiler *c, int cid) {
+  ClassInfo *ci = &c->classes[cid];
+  if (!class_exc_built_by_name(c, cid)) return 0;
+  Buf t = {0};
+  emit_ivar_nil_inits(&t, ci, "", "", "");
+  int seeded = t.len > 0;
+  free(t.p);
+  return seeded;
+}
+
+/* The rest of a sp_exc_new_sub_ivars call for such a class: its own scan,
+   so an ivar the program stores is marked, and its nil seeds if it has any. */
+void emit_exc_ivars_tail(Compiler *c, int cid, Buf *b) {
+  const char *cn = c->classes[cid].c_name;
+  buf_printf(b, ", sp_%s__gc_scan, ", cn);
+  if (class_exc_ivnil(c, cid)) buf_printf(b, "sp_%s__ivnil", cn);
+  else buf_puts(b, "NULL");
+}
+
 /* Emit the GC scan function (marks heap ivars) for a class that needs one.
    Covers the same type set as needs_root: a heap reference reachable only
    through an unscanned ivar would be swept out from under the object
@@ -8708,6 +8738,12 @@ void emit_class_scan(Compiler *c, ClassInfo *ci, Buf *b) {
     }
   }
   buf_puts(b, "}\n");
+  if (cid >= 0 && class_exc_ivnil(c, cid)) {
+    buf_printf(b, "SP_UNUSED static void sp_%s__ivnil(void *p) {\n", ci->c_name);
+    buf_printf(b, "  sp_%s *self = (sp_%s *)p;\n", ci->c_name, ci->c_name);
+    emit_ivar_nil_inits(b, ci, "self->", "  ", ";\n");
+    buf_puts(b, "}\n");
+  }
 }
 
 /* An int ivar's nil default differs from its zero bit-pattern: its nil is
@@ -12602,9 +12638,11 @@ void emit_regex_section(Compiler *c, Buf *b) {
     buf_puts(b, "  SP_INSTALL_HOOK(sp_obj_hash_hook, sp_gen_obj_hash);\n  SP_INSTALL_HOOK(sp_obj_eql_hook, sp_gen_obj_eql);\n");
   if (g_gen_obj_valeq)
     buf_puts(b, "  SP_INSTALL_HOOK(sp_obj_eq_hook, sp_obj_eq_dispatch);\n");
+  if (exc_class_has_own_ne(c)) buf_puts(b, "  sp_exc_own_ne = TRUE;\n");
   if (exc_has_user_msg_override(c))
     buf_puts(b, "  sp_user_exc_to_s_fn = sp_user_exc_to_s;\n");
-  if (exc_class_has_own_ne(c)) buf_puts(b, "  sp_exc_own_ne = TRUE;\n");
+  for (int i = 0; i < c->nclasses; i++)
+    if (class_exc_built_by_name(c, i)) { buf_puts(b, "  sp_user_exc_new_fn = sp_user_exc_new;\n"); break; }
   if (g_needs_class_machinery)
     buf_puts(b, "  sp_user_exc_parent_fn = sp_user_exc_parent;\n"
                 "  sp_user_exc_modules_fn = sp_user_exc_modules;\n"
@@ -15638,6 +15676,27 @@ static void emit_user_exc_dispatch(Compiler *c, Buf *b) {
         buf_printf(b, "}; if (_xi%d >= 0) return _xc%d[_xi%d]; }\n", t, t, t);
       }
       buf_puts(b, "  return 0x7fffffff;\n}\n");
+    } }
+  /* That dispatch casts a boxed exception to the struct of the class it
+     names. An arm that names no class of the program has the runtime build
+     what it caught (sp_exc_new_for_catch), which asks here first: a class
+     built by its name (class_exc_built_by_name) at its own size, with its
+     own scan and nil seeds. */
+  { int any = 0;
+    for (int i = 0; i < c->nclasses && !any; i++) any = class_exc_built_by_name(c, i);
+    if (any) {
+      buf_puts(b, "static void *sp_user_exc_new(const char *cls, const char *msg){\n");
+      for (int i = 0; i < c->nclasses; i++) {
+        if (!class_exc_built_by_name(c, i)) continue;
+        const char *qn = class_ruby_name(c, i);
+        if (!qn) qn = c->classes[i].name;
+        if (!qn) continue;
+        buf_printf(b, "  if (strcmp(cls, \"%s\") == 0) return sp_exc_new_sub_ivars(sizeof(sp_%s), \"%s\", msg",
+                   qn, c->classes[i].c_name, qn);
+        emit_exc_ivars_tail(c, i, b);
+        buf_puts(b, ");\n");
+      }
+      buf_puts(b, "  return NULL;\n}\n");
     } }
 
   /* User exception #message / #to_s overrides: a cls_name-keyed dispatcher so

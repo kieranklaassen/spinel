@@ -9785,9 +9785,12 @@ int emit_exc_sub_new_arm(Compiler *c, int ci, int argc, const int *atmp, int rt2
                  atmp[0], atmp[0], atmp[0], atmp[0]);
     else buf_puts(b, "(&(\"\\xff\")[1]); ");
   }
-  if (c->classes[ci].nivars > 0)
-    buf_printf(b, "_t%d = sp_box_obj(sp_exc_new_sub_sized(sizeof(sp_%s), \"%s\", _m), %d); } break; ",
-               rt2, c->classes[ci].c_name, cn, ci);
+  if (c->classes[ci].nivars > 0) {
+    buf_printf(b, "_t%d = sp_box_obj(sp_exc_new_sub_ivars(sizeof(sp_%s), \"%s\", _m",
+               rt2, c->classes[ci].c_name, cn);
+    emit_exc_ivars_tail(c, ci, b);
+    buf_printf(b, "), %d); } break; ", ci);
+  }
   else
     buf_printf(b, "_t%d = sp_box_obj(sp_exc_new_sub(\"%s\", \"%s\", _m), %d); } break; ",
                rt2, cn, exc_builtin_parent(c, ci), ci);
@@ -11097,7 +11100,7 @@ void emit_exc_new_no_init(Compiler *c, int id, int ci, int argc, const int *argv
   const char *cn2 = class_ruby_name(c, ci); if (!cn2) cn2 = c->classes[ci].name;
   const char *par = exc_builtin_parent(c, ci);
   if (c->classes[ci].nivars > 0)
-    buf_printf(b, "((sp_%s *)sp_exc_new_sub_sized(sizeof(sp_%s), \"%s\", ",
+    buf_printf(b, "((sp_%s *)sp_exc_new_sub_ivars(sizeof(sp_%s), \"%s\", ",
                c->classes[ci].c_name, c->classes[ci].c_name, cn2);
   else
     buf_printf(b, "sp_exc_new_sub(\"%s\", \"%s\", ", cn2, par);
@@ -11119,7 +11122,8 @@ void emit_exc_new_no_init(Compiler *c, int id, int ci, int argc, const int *argv
     }
   }
   else buf_puts(b, "(&(\"\\xff\")[1])");
-  buf_puts(b, c->classes[ci].nivars > 0 ? "))" : ")");
+  if (c->classes[ci].nivars > 0) { emit_exc_ivars_tail(c, ci, b); buf_puts(b, "))"); }
+  else buf_puts(b, ")");
 }
 
 /* Array.new(x) of an Array x is a copy of it (#7449): of a typed one by its
