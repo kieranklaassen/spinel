@@ -1,0 +1,24 @@
+T[i] ||= v stores a row into a constant table as T[i] = v does
+
+`T = [[1, 2], nil, [3]]; T[1] ||= []; p T[1]` printed
+[0, 0, 0, 0, 0, 0, 0, 0]; CRuby prints []. With `||= {}` or `||= 5`
+the read ended in SIGSEGV, and so did `T[0] &&= {}; p T[0]` over the
+row that is there.
+
+The test for a constant table of Integer Arrays reads the rows
+stored after the constant is written from `T[i] = v` and
+`T.store(i, v)`. `T[i] ||= v` and `T[i] &&= v` are nodes of their
+own and were not read, so the table stayed a table of Integer Arrays
+whatever they stored. A row of another kind stored that way makes
+it a general table now.
+
+An Integer Array stored that way leaves a table of Integer Arrays
+one and does not make one: the rows of the literal and `T[i] = v`
+say that, as before. `T = [nil, nil]; T[1] ||= [7, 8]` stays a
+general table, whose `T[0]` is nil.
+
+A table such a statement may give a row of another kind is read
+boxed from then on, also in a run where the store does not happen
+(`T[1] ||= []` over a row that is there).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

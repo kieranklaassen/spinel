@@ -1,0 +1,1 @@
+T[i] ||= v stores a row into a constant table as T[i] = v does
