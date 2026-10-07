@@ -563,6 +563,7 @@ int desugar_body_ivars(Compiler *c);
 int desugar_const_ivar_access(Compiler *c);
 int desugar_literal_undef_method(Compiler *c);
 int desugar_builtin_ivars(Compiler *c);
+void desugar_exception_message_reader(Compiler *c);
 void mark_match_ranges(Compiler *c);
 int desugar_duplicate_underscore_params(Compiler *c);
 int desugar_encoding_queries(Compiler *c);

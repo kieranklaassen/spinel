@@ -7459,6 +7459,148 @@ void desugar_extended_module_attrs(Compiler *c) {
   }
 }
 
+/* ---- `attr_reader :message` in a program's own exception class ------------
+   Exception#message is read through the exception dispatchers: the rescue's
+   `e.message`, a boxed receiver's, the report of an uncaught exception. They
+   know a class's own `def message`. A reader declared by attr_reader, attr or
+   attr_accessor is no def, so they answered the stored message and never
+   @message. The declaration becomes the def it stands for:
+
+     attr_accessor :code, :message
+       -> attr_accessor :code; attr_writer :message; def message = @message
+
+   Syntactic, as it runs before the scope pass, and ahead of the alias
+   passes, which then see the def. Only in a class written with a superclass
+   that names an exception: a builtin one, or a class of the program whose
+   every definition is found so. A class that says more about the name (its
+   own def, an alias to it, an undef, a call on self that names it, a bare
+   `private` or `protected`) is left alone. */
+static int emr_exc_superclass(NodeTable *nt, int sc, int depth) {
+  NodeKind k = nt_kind(nt, sc);
+  if (depth > 16 || (k != NK_ConstantReadNode && k != NK_ConstantPathNode)) return 0;
+  if (superclass_builtin_exc_name(nt, sc)) return 1;
+  const char *leaf = nt_str(nt, sc, "name");
+  int found = 0;
+  for (int m = 0; leaf && m < nt->count; m++) {
+    NodeKind mk = nt_kind(nt, m);
+    if (mk != NK_ClassNode && mk != NK_ModuleNode) continue;
+    int cp = nt_ref(nt, m, "constant_path");
+    const char *ln = cp >= 0 ? nt_str(nt, cp, "name") : NULL;
+    if (!ln || !sp_streq(ln, leaf)) continue;
+    if (mk == NK_ModuleNode || !emr_exc_superclass(nt, nt_ref(nt, m, "superclass"), depth + 1)) return 0;
+    found = 1;
+  }
+  return found;
+}
+
+/* does the subtree say anything of `message` but declare its reader? */
+static int emr_names_message(NodeTable *nt, int node) {
+  if (node < 0) return 0;
+  NodeKind k = nt_kind(nt, node);
+  const char *nm = nt_str(nt, node, "name");
+  if (k == NK_DefNode && nm && sp_streq(nm, "message")) return 1;
+  if (k == NK_AliasMethodNode) {
+    const char *nn = nt_str(nt, nt_ref(nt, node, "new_name"), "value");
+    if (nn && sp_streq(nn, "message")) return 1;
+  }
+  if (k == NK_UndefNode) {
+    int un = 0; const int *uv = nt_arr(nt, node, "names", &un);
+    for (int i = 0; i < un; i++) {
+      const char *v = nt_str(nt, uv[i], "value");
+      if (v && sp_streq(v, "message")) return 1;
+    }
+  }
+  if (k == NK_CallNode && nm && nt_ref(nt, node, "receiver") < 0 &&
+      !is_attr_reader_family(nm) && !is_attr_writer_family(nm) && !sp_streq(nm, "attr")) {
+    int an = nt_ref(nt, node, "arguments"), ac = 0;
+    const int *av = an >= 0 ? nt_arr(nt, an, "arguments", &ac) : NULL;
+    if (ac == 0 && (sp_streq(nm, "private") || sp_streq(nm, "protected"))) return 1;
+    for (int i = 0; i < ac; i++) {
+      const char *v = nt_kind(nt, av[i]) == NK_SymbolNode || nt_kind(nt, av[i]) == NK_StringNode
+                        ? nt_str(nt, av[i], nt_kind(nt, av[i]) == NK_SymbolNode ? "value" : "content") : NULL;
+      if (v && (sp_streq(v, "message") || sp_streq(v, "message="))) return 1;
+    }
+  }
+  int nr = nt_num_refs(nt, node);
+  for (int i = 0; i < nr; i++) if (emr_names_message(nt, nt_ref_at(nt, node, i))) return 1;
+  int na = nt_num_arrs(nt, node);
+  for (int i = 0; i < na; i++) {
+    int n = 0; const int *ids = nt_arr_at(nt, node, i, &n);
+    for (int j = 0; j < n; j++) if (emr_names_message(nt, ids[j])) return 1;
+  }
+  return 0;
+}
+
+/* the position of `:message` in a plain reader declaration, or -1 */
+static int emr_reader_decl(NodeTable *nt, int s) {
+  const char *nm = nt_kind(nt, s) == NK_CallNode ? nt_str(nt, s, "name") : NULL;
+  if (!nm || nt_ref(nt, s, "receiver") >= 0 || nt_ref(nt, s, "block") >= 0 ||
+      (!is_attr_reader_family(nm) && !sp_streq(nm, "attr"))) return -1;
+  int an = nt_ref(nt, s, "arguments"), ac = 0, at = -1;
+  const int *av = an >= 0 ? nt_arr(nt, an, "arguments", &ac) : NULL;
+  for (int i = 0; i < ac; i++) {
+    const char *v = nt_kind(nt, av[i]) == NK_SymbolNode ? nt_str(nt, av[i], "value") : NULL;
+    if (!v) return -1;
+    if (sp_streq(v, "message")) at = i;
+  }
+  return at;
+}
+
+void desugar_exception_message_reader(Compiler *c) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  int n0 = nt->count;
+  for (int m = 0; m < n0; m++) {
+    if (nt_kind(nt, m) != NK_ClassNode) continue;
+    int cp = nt_ref(nt, m, "constant_path"), body = nt_ref(nt, m, "body");
+    const char *cn = cp >= 0 ? nt_str(nt, cp, "name") : NULL;
+    if (!cn || is_builtin_exception_name(cn) || body < 0 || nt_kind(nt, body) != NK_StatementsNode) continue;
+    int n = 0, decls = 0;
+    const int *st = nt_arr(nt, body, "body", &n);
+    for (int k = 0; k < n; k++) if (emr_reader_decl(nt, st[k]) >= 0) decls++;
+    if (!decls || !emr_exc_superclass(nt, nt_ref(nt, m, "superclass"), 0)) continue;
+    /* every body of the class, a reopening's too */
+    int said = 0;
+    for (int o = 0; o < n0 && !said; o++) {
+      int ocp = nt_kind(nt, o) == NK_ClassNode ? nt_ref(nt, o, "constant_path") : -1;
+      const char *on = ocp >= 0 ? nt_str(nt, ocp, "name") : NULL;
+      if (on && sp_streq(on, cn)) said = emr_names_message(nt, nt_ref(nt, o, "body"));
+    }
+    if (said) continue;
+    int *out = malloc(sizeof(int) * (size_t)(n + decls * 2));
+    if (!out) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+    int no = 0;
+    for (int k = 0; k < n; k++) {
+      int s = st[k], at = emr_reader_decl(nt, s);
+      if (at < 0) { out[no++] = s; continue; }
+      int an = nt_ref(nt, s, "arguments"), ac = 0;
+      const int *av0 = nt_arr(nt, an, "arguments", &ac);
+      int sym = av0[at], rest[64], nrest = 0;
+      if (ac > 64) { out[no++] = s; continue; }
+      for (int i = 0; i < ac; i++) if (i != at) rest[nrest++] = av0[i];
+      int def = attr_as_def(nt, s, "message", 0);
+      int wr = -1, wargs = -1;
+      if (sp_streq(nt_str(nt, s, "name"), "attr_accessor")) {
+        wr = fwd_new_node_like(nt, s, "CallNode");
+        wargs = fwd_new_node_like(nt, s, "ArgumentsNode");
+      }
+      if (def < 0 || (sp_streq(nt_str(nt, s, "name"), "attr_accessor") && (wr < 0 || wargs < 0))) { out[no++] = s; continue; }
+      if (nrest) { nt_node_set_arr(nt, an, "arguments", rest, nrest); out[no++] = s; }
+      if (wr >= 0) {
+        nt_node_set_arr(nt, wargs, "arguments", &sym, 1);
+        nt_node_set_str(nt, wr, "name", "attr_writer");
+        nt_node_set_ref(nt, wr, "receiver", -1);
+        nt_node_set_ref(nt, wr, "arguments", wargs);
+        nt_node_set_ref(nt, wr, "block", -1);
+        out[no++] = wr;
+      }
+      out[no++] = def;
+    }
+    nt_node_set_arr(nt, body, "body", out, no);
+    comp_grow_node_arrays(c);
+    free(out);
+  }
+}
+
 static const struct { NodeKind local; const char *global; } dmc_kinds[] = {
   { NK_LocalVariableReadNode, "GlobalVariableReadNode" },
   { NK_LocalVariableWriteNode, "GlobalVariableWriteNode" },

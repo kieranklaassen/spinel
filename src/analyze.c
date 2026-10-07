@@ -33003,6 +33003,7 @@ static void an_phase_desugar_register(Compiler *c) {
   mark_match_ranges(c);                  /* when 0..0.05 matches as 0.0..0.05 */
   desugar_duplicate_underscore_params(c); /* |_, _| -> |_, _dup1| */
   desugar_encoding_queries(c);          /* Encoding.default_internal -> nil, find("x") -> a constant */
+  desugar_exception_message_reader(c);  /* attr_reader :message in an exception class -> def message = @message */
   desugar_alias_method_string_names(c); /* alias_method "k", "y" -> alias_method :k, :y */
   desugar_alias_method_values(c);       /* r = alias_method :a, :b -> alias_method :a, :b; r = :a */
   desugar_inherited_aliases(c);         /* alias_method :next, :inherited_m -> a forwarding def */

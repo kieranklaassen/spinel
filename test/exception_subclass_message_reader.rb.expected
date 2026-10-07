@@ -1,0 +1,14 @@
+"unexpected end at line 3"
+3
+ParseError: bad token at line 7
+"stray at line 1"
+a at line 1
+plain
+"tagged: x"
+"set"
+Slow: timed out after 5s
+"y"
+"tagged: y"
+"own: z"
+"def wins"
+"plain"
