@@ -1,0 +1,1 @@
+A call with no block to a yielding method the inliner declines is refused

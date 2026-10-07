@@ -1,0 +1,59 @@
+A call with no block to a yielding method the inliner declines is refused
+
+  def wide(x)
+    a1 = x
+    ...                     # 127 locals in all
+    block_given? ? yield(a127) : a127
+  end
+  p wide(1)
+
+prints 1 in CRuby and did not build: the C called `sp_wide`, which
+nothing defines. A method that yields has no function of its own; each
+call is written out in place, its locals renamed through a table of 128
+names (MAX_RENAME). With 128 names to add emit_inline_call_x declines,
+and a call with no block went on to the plain call of a function that
+is never emitted. The call with a block is refused by name; this one was
+left to the linker.
+
+It is refused where the inliner declines for room, with the reason. Two
+callers are left to decline as before: an arm of the poly-receiver
+switch, whose call then goes to the method's proc-form clones and is
+compiled, and an emission under a probe.
+
+The table is not changed. A method of 128 names that yields is still
+not compiled where its call would be written out; it now says so with a
+block and without. docs/limitations.md has the row.
+
+The cost is a call that never runs. Master's C names a function that
+nothing defines, and the program links only where the C compiler drops
+the call. Of 44 never-run forms, 33 are right on master and refused
+now. 17 are written dead: `p wide(1) if false`, the statement
+`if false`, `unless true`, `while false`, `until true`, the else of
+`if true`, `elsif false`, a ternary's dead arm, a `when` that cannot
+match, `false &&`, `nil &&`, `true ||`, and the call after a `return`,
+a `break`, a `next`, a rescued `raise` or an `exit`. 16 are false by a
+value the C compiler follows, and do not look dead:
+
+  def dbg? = false
+  p wide(1) if dbg?
+
+and likewise a class method that answers false, a false or nil
+constant, a constant compared (`LEVEL > 1`, `MODE == :dev`), a false or
+nil local, `unless ok`, a false global, `n = 3; p wide(1) if n > 5`,
+`mode = :prod; ... if mode == :dev`, an instance variable set false in
+initialize, a `while` never entered and `0.times { p wide(1) }`.
+Master's rightness there is the C optimiser's: at -O 0, 19 of the 33 do
+not link on master with gcc or with clang, and 3 more not with clang.
+
+The sentence fits two programs loosely: a method that only asks
+`block_given?` and never yields is "a method that yields" to it, and a
+chain of 65 yielding methods is refused for the table's room though
+each method has two names (the table fills along the chain). Not
+covered, and still left to the linker: `super` into such a method, and
+a `send` whose name is computed.
+
+test/reject/yielding_method_blockless_past_inline_room.rb is the program
+above, in reject-test and with its two records in
+test/collect/refusals.expected.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
