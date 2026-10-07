@@ -1,0 +1,1 @@
+A boxed String or Array times a Float repeats by the truncated count
