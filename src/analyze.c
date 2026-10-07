@@ -2036,8 +2036,9 @@ static int *seq_build(const NodeTable *nt) {
     if (!set && !sp_streq(cn, "private_constant") && !sp_streq(cn, "remove_const")) continue;
     for (int i = a0; i < (set && argc > a0 ? a0 + 1 : argc); i++) {   /* const_set: the name alone */
       const char *an = literal_name(nt, argv[i]);
-      if (!an) anc |= 2;   /* any name */
       int w = an ? const_only_write(nt, an) : -1;
+      /* any name, or one set beside the class of that name */
+      if (!an || (set && w < 0)) anc |= 2;
       if (w >= 0) seq[w] &= ~1;
     }
   }
@@ -2116,15 +2117,17 @@ static void rewrite_const_alias_read(Compiler *c, int rd, int **seq) {
   if (!*seq && !(*seq = seq_build(nt))) return;
   int sw = (*seq)[w], sr = (*seq)[rd], runs = (*seq)[nt->count];
   if (!(sw & 1)) return;                                   /* the write is no statement */
-  /* the value is read where the write stands, and a constant of CRuby
-     (Math::DomainError under `include Math`) may come before the program
-     class of that name: a bare value is the program's at the program's own
-     level, a path's where the class is defined in the body the path names */
-  if ((*seq)[SEQ_LEN(nt) - 1]) {
+  /* the value is read where the write stands: it is the class where a bare
+     name finds the definition from there, or a path names the body that
+     holds it (elsewhere a const_missing of the program may answer). And a
+     constant of CRuby (Math::DomainError under `include Math`) may come
+     before a bare name in a body */
+  {
     const int *in = *seq + nt->count + 1;
-    int v = nt_ref(nt, w, "value"), ci = comp_class_index(c, real);
+    int v = nt_ref(nt, w, "value"), bare = nt_kind(nt, v) == NK_ConstantReadNode, ci = comp_class_index(c, real);
     int def = ci >= 0 ? c->classes[ci].def_node : -1;
-    if (nt_kind(nt, v) == NK_ConstantReadNode ? in[w] : def < 0 || !const_read_reaches(nt, v, in[def], in)) return;
+    if (def >= 0 ? !const_read_reaches(nt, v, in[def], in) : !bare && nt_ref(nt, v, "parent") >= 0) return;
+    if ((*seq)[SEQ_LEN(nt) - 1] && bare && in[w]) return;
   }
   if (sr & 2 ? runs && runs <= sw : (sr | 3) <= (sw | 3)) return;
   const int *own = *seq + nt->count + 1;
