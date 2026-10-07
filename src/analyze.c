@@ -20340,6 +20340,8 @@ static struct {
   ANameHash lnames;
   unsigned char *litpost; /* per node: 0 not asked, 1 no post appended, 2 a post appended (dyn_lit_post_app) */
   unsigned char *blkpost; /* per scope: the same for the blocks its call sites pass as `&blk` */
+  unsigned *lost;         /* per node: a literal's parameters whose append goes to a copy (dyn_lit_lost) */
+  unsigned *blklost;      /* per scope: the same for the blocks its call sites pass as `&blk` */
 } g_dyn;
 
 static void dyn_memo_reset(Compiler *c) {
@@ -20347,7 +20349,7 @@ static void dyn_memo_reset(Compiler *c) {
   free(g_dyn.callable); free(g_dyn.pcall); free(g_dyn.rcall);
   anh_free(&g_dyn.cnames); anh_free(&g_dyn.lnames);
   free(g_dyn.chead); free(g_dyn.cnext); free(g_dyn.rhead); free(g_dyn.rnext);
-  free(g_dyn.litpost); free(g_dyn.blkpost);
+  free(g_dyn.litpost); free(g_dyn.blkpost); free(g_dyn.lost); free(g_dyn.blklost);
   anh_free(&g_dyn.bnames);
   free(g_dyn.bhead); free(g_dyn.bnext); free(g_dyn.bnode);
   anh_free(&g_dyn.snames); free(g_dyn.shead); free(g_dyn.snext);
@@ -20363,8 +20365,10 @@ static void dyn_memo_reset(Compiler *c) {
   g_dyn.rcall = (unsigned char *)calloc((size_t)g_dyn.nscope + 1, 1);
   g_dyn.litpost = (unsigned char *)calloc((size_t)g_dyn.nlit + 1, 1);
   g_dyn.blkpost = (unsigned char *)calloc((size_t)g_dyn.nscope + 1, 1);
+  g_dyn.lost = (unsigned *)calloc((size_t)g_dyn.nlit + 1, sizeof(unsigned));
+  g_dyn.blklost = (unsigned *)calloc((size_t)g_dyn.nscope + 1, sizeof(unsigned));
   if (!g_dyn.lit || !g_dyn.meth || !g_dyn.blk || !g_dyn.ctor || !g_dyn.callable || !g_dyn.pcall || !g_dyn.rcall ||
-      !g_dyn.litpost || !g_dyn.blkpost) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+      !g_dyn.litpost || !g_dyn.blkpost || !g_dyn.lost || !g_dyn.blklost) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
   g_dyn.any = -1;
   g_dyn.ctor_any = -1;
   g_dyn.kw_any = -1;
@@ -20700,6 +20704,169 @@ static unsigned dyn_lit_bits(Compiler *c, int lit) {
   g_dyn.lit[lit] = DYN_DONE | (app & 0xffffu) | ((kept & 0x3fffu) << 16);
   return g_dyn.lit[lit];
 }
+/* Does the subtree under `node` assign local `vn`? */
+static int dyn_assigns(const NodeTable *nt, int node, const char *vn) {
+  if (node < 0) return 0;
+  NodeKind k = nt_kind(nt, node);
+  if ((k == NK_LocalVariableWriteNode || k == NK_LocalVariableOrWriteNode || k == NK_LocalVariableAndWriteNode ||
+       k == NK_LocalVariableOperatorWriteNode || k == NK_LocalVariableTargetNode) &&
+      nt_str(nt, node, "name") && sp_streq(nt_str(nt, node, "name"), vn)) return 1;
+  int nr = nt_num_refs(nt, node);
+  for (int i = 0; i < nr; i++) if (dyn_assigns(nt, nt_ref_at(nt, node, i), vn)) return 1;
+  int na = nt_num_arrs(nt, node);
+  for (int i = 0; i < na; i++) {
+    int n = 0; const int *ids = nt_arr_at(nt, node, i, &n);
+    for (int j = 0; j < n; j++) if (dyn_assigns(nt, ids[j], vn)) return 1;
+  }
+  return 0;
+}
+/* Does the subtree under `node` read local `vn`? */
+static int dyn_reads(const NodeTable *nt, int node, const char *vn) {
+  if (node < 0) return 0;
+  if (nt_kind(nt, node) == NK_LocalVariableReadNode && nt_str(nt, node, "name") &&
+      sp_streq(nt_str(nt, node, "name"), vn)) return 1;
+  int nr = nt_num_refs(nt, node);
+  for (int i = 0; i < nr; i++) if (dyn_reads(nt, nt_ref_at(nt, node, i), vn)) return 1;
+  int na = nt_num_arrs(nt, node);
+  for (int i = 0; i < na; i++) {
+    int n = 0; const int *ids = nt_arr_at(nt, node, i, &n);
+    for (int j = 0; j < n; j++) if (dyn_reads(nt, ids[j], vn)) return 1;
+  }
+  return 0;
+}
+/* Is `v` a value other than local `t` or parameter `pn` read back? */
+static int dyn_value_is_other(Compiler *c, int v, const char *t, const char *pn) {
+  int src = an_strbuf_alias_source(c, v);
+  const char *vn = src >= 0 ? nt_str(c->nt, src, "name") : NULL;
+  return !(vn && (sp_streq(vn, t) || sp_streq(vn, pn)));
+}
+/* Does statement `node` give local `t` another value on every path: a
+   write of it that is no alias of itself or of parameter `pn` and no `<<`
+   (`t = v`, `t += v`, `t &&= v`, `t, j = v, w`, `t, j = f(x)`, `j = t = v`);
+   an if, an unless or a case whose every arm, an else among them, has such
+   a statement (a case/in needs no else: a miss raises); or a begin whose
+   ensure has one, or whose body and every rescue have one? */
+static int dyn_rebinds_all_paths(Compiler *c, int node, const char *t, const char *pn) {
+  const NodeTable *nt = c->nt;
+  if (node < 0) return 0;
+  NodeKind k = nt_kind(nt, node);
+  /* `t &&= v` writes whenever t is a String at all */
+  if (k == NK_LocalVariableWriteNode || k == NK_LocalVariableOperatorWriteNode || k == NK_LocalVariableAndWriteNode) {
+    const char *wn = nt_str(nt, node, "name");
+    const char *op = k == NK_LocalVariableOperatorWriteNode ? nt_str(nt, node, "binary_operator") : NULL;
+    if (wn && sp_streq(wn, t))
+      return (k == NK_LocalVariableOperatorWriteNode || dyn_value_is_other(c, nt_ref(nt, node, "value"), t, pn)) &&
+             !(op && sp_streq(op, "<<"));
+    /* `j = t = v`: another local's value is written on the way */
+    return k == NK_LocalVariableWriteNode && dyn_rebinds_all_paths(c, nt_ref(nt, node, "value"), t, pn);
+  }
+  if (k == NK_MultiWriteNode) {
+    /* `t, j = v, w`: the Array literal's element at t's place, with no
+       splat on either side; `t, j = f(x)`: a value that reads neither t
+       nor the parameter */
+    int nl = 0; const int *lv = nt_arr(nt, node, "lefts", &nl);
+    int nr = 0; nt_arr(nt, node, "rights", &nr);
+    int val = nt_ref(nt, node, "value"), at = -1;
+    if (nt_ref(nt, node, "rest") >= 0 || nr > 0 || val < 0) return 0;
+    for (int i = 0; i < nl && at < 0; i++)
+      if (nt_kind(nt, lv[i]) == NK_LocalVariableTargetNode && nt_str(nt, lv[i], "name") &&
+          sp_streq(nt_str(nt, lv[i], "name"), t)) at = i;
+    if (at < 0) return 0;
+    if (nt_kind(nt, val) != NK_ArrayNode) return !dyn_reads(nt, val, t) && !dyn_reads(nt, val, pn);
+    int ne = 0; const int *ev = nt_arr(nt, val, "elements", &ne);
+    if (ne < nl) return 0;
+    for (int i = 0; i < ne; i++) if (nt_kind(nt, ev[i]) == NK_SplatNode) return 0;
+    return dyn_value_is_other(c, ev[at], t, pn);
+  }
+  if (k == NK_BeginNode) {
+    /* an ensure that writes it; or the body (or its else) and every rescue */
+    int ens = nt_ref(nt, node, "ensure_clause");
+    if (ens >= 0 && dyn_rebinds_all_paths(c, nt_ref(nt, ens, "statements"), t, pn)) return 1;
+    int ok = dyn_rebinds_all_paths(c, nt_ref(nt, node, "statements"), t, pn) ||
+             dyn_rebinds_all_paths(c, nt_ref(nt, node, "else_clause"), t, pn);
+    for (int r = nt_ref(nt, node, "rescue_clause"); ok && r >= 0; r = nt_ref(nt, r, "subsequent"))
+      ok = dyn_rebinds_all_paths(c, nt_ref(nt, r, "statements"), t, pn);
+    return ok;
+  }
+  if (k == NK_ParenthesesNode) return dyn_rebinds_all_paths(c, nt_ref(nt, node, "body"), t, pn);
+  if (k == NK_ElseNode) return dyn_rebinds_all_paths(c, nt_ref(nt, node, "statements"), t, pn);
+  if (k == NK_StatementsNode) {
+    int n = 0; const int *sv = nt_arr(nt, node, "body", &n);
+    for (int i = 0; i < n; i++) if (dyn_rebinds_all_paths(c, sv[i], t, pn)) return 1;
+    return 0;
+  }
+  if (k == NK_IfNode || k == NK_UnlessNode)
+    return dyn_rebinds_all_paths(c, nt_ref(nt, node, "statements"), t, pn) &&
+           dyn_rebinds_all_paths(c, nt_ref(nt, node, k == NK_IfNode ? "subsequent" : "else_clause"), t, pn);
+  if (k == NK_CaseNode || k == NK_CaseMatchNode) {
+    int n = 0; const int *wv = nt_arr(nt, node, "conditions", &n);
+    for (int i = 0; i < n; i++)
+      if (!dyn_rebinds_all_paths(c, nt_ref(nt, wv[i], "statements"), t, pn)) return 0;
+    /* a case/in with no else raises where nothing matches */
+    if (k == NK_CaseMatchNode && nt_ref(nt, node, "else_clause") < 0) return n > 0;
+    return dyn_rebinds_all_paths(c, nt_ref(nt, node, "else_clause"), t, pn);
+  }
+  return 0;
+}
+/* `(t = v) << x` reaches here as the sequence `(t = v; t << x)`: is `node`
+   a parenthesized sequence whose first statement gives `t` another value on
+   every path? What follows it is on that value. */
+static int dyn_seq_rebinds_first(Compiler *c, int node, const char *t, const char *pn) {
+  const NodeTable *nt = c->nt;
+  if (node < 0 || nt_kind(nt, node) != NK_ParenthesesNode) return 0;
+  int body = nt_ref(nt, node, "body"), n = 0;
+  const int *sv = body >= 0 && nt_kind(nt, body) == NK_StatementsNode ? nt_arr(nt, body, "body", &n) : NULL;
+  return n > 0 && dyn_rebinds_all_paths(c, sv[0], t, pn);
+}
+/* The parameters of a proc literal or a block whose String the body appends
+   to through a local that is assigned again: `t = k; t ||= d; t << x`, and
+   a block's own parameter it assigns (`|k| k ||= d; k << x` reaches here as
+   `k = k__bpin`, desugar_reassigned_block_params). Such a local is no pure
+   alias, so the entry above leaves the append out and no call pulls its
+   String variable into the handle for it: the local grows a copy. A String
+   variable handed to one is refused, unless it is the handle already
+   (DynReach.lost). The body's statements are read in order. The local
+   holds the parameter from `t = k` until a statement assigns it another
+   value (`t = t.dup`, `t += x`); a write under a condition or in a loop
+   leaves it holding, and a statement that both assigns and appends to it
+   is not counted, for which comes first is not read. */
+static unsigned dyn_lit_lost(Compiler *c, int lit) {
+  const NodeTable *nt = c->nt;
+  if (lit < 0 || lit >= g_dyn.nlit) return 0;
+  if (g_dyn.lost[lit] & DYN_DONE) return g_dyn.lost[lit] & 0xffffu;
+  unsigned app = dyn_lit_bits(c, lit), lost = 0;
+  int body = nt_kind(nt, lit) == NK_BlockNode ? nt_ref(nt, lit, "body") : a_proc_body(c, lit);
+  int sn = 0;
+  const int *sv = body >= 0 && nt_kind(nt, body) == NK_StatementsNode ? nt_arr(nt, body, "body", &sn) : NULL;
+  const char *pn;
+  for (int k = 0; k < DYN_ARGS && (pn = dyn_lit_param_name(c, lit, k)); k++) {
+    if (app & (1u << k)) continue;
+    const char *t = NULL;
+    int held = 1;
+    for (int i = 0; i < sn && !(lost & (1u << k)); i++) {
+      unsigned tapp = 0, tkept = 0;
+      /* `(t = v) << x`: the write runs first, and the append is to what it
+         wrote */
+      if (t && dyn_seq_rebinds_first(c, sv[i], t, pn)) { t = NULL; continue; }
+      if (t) dyn_body_scan(c, sv[i], &t, 1, &tapp, &tkept);
+      if (tapp && !dyn_assigns(nt, sv[i], t)) lost |= 1u << k;
+      NodeKind wk = nt_kind(nt, sv[i]);
+      const char *wn = wk == NK_LocalVariableWriteNode || wk == NK_LocalVariableOperatorWriteNode ? nt_str(nt, sv[i], "name") : NULL;
+      /* both arms of a conditional give it a String of its own */
+      if (t && !(wn && sp_streq(wn, t)) && !tapp && dyn_rebinds_all_paths(c, sv[i], t, pn)) t = NULL;
+      if (!wn) continue;
+      int src = wk == NK_LocalVariableWriteNode ? an_strbuf_alias_source(c, nt_ref(nt, sv[i], "value")) : -1;
+      const char *vn = src >= 0 ? nt_str(nt, src, "name") : NULL;
+      const char *op = wk == NK_LocalVariableOperatorWriteNode ? nt_str(nt, sv[i], "binary_operator") : NULL;
+      /* a parameter assigned here itself no longer holds what the call handed over */
+      if (sp_streq(wn, pn)) held = 0;
+      else if (held && vn && sp_streq(vn, pn)) t = wn;
+      else if (t && sp_streq(wn, t) && !(vn && sp_streq(vn, t)) && !(op && sp_streq(op, "<<"))) t = NULL;
+    }
+  }
+  g_dyn.lost[lit] = DYN_DONE | lost;
+  return lost;
+}
 /* A post parameter of a proc literal or a block (`|*q, t|`, `|n = 0, t|`)
    binds by the call's count, not by a position of its own, so the entry
    above leaves it out. The post call position k binds in a call of n plain
@@ -21019,6 +21186,7 @@ static unsigned dyn_blk_bits(Compiler *c, int mi) {
         dyn_reach_value(c, nt_ref(nt, b, "expression"), k, 1, &r);
         if (r.unknown) bits |= DYN_OPEN;
         if (r.app) bits |= 1u << k;
+        if (r.lost) g_dyn.blklost[mi] |= 1u << k;
         /* past 14 a position is kept anyway (dyn_fold) */
         if (r.keeps && k < 14) bits |= 1u << (16 + k);
       }
@@ -21028,6 +21196,7 @@ static unsigned dyn_blk_bits(Compiler *c, int mi) {
     unsigned lb = dyn_lit_bits(c, b);
     bits |= lb & 0x3fffffffu;
     if (dyn_lit_post_app(c, b)) g_dyn.blkpost[mi] = 2;
+    g_dyn.blklost[mi] |= dyn_lit_lost(c, b);
   }
   if (!any) bits |= DYN_OPEN;
   g_dyn.blk[mi] = DYN_DONE | bits;
@@ -21209,6 +21378,10 @@ static void dyn_reach_value(Compiler *c, int v, int k, int depth, DynReach *r) {
     LocalVar *q = pn && bs ? scope_local(bs, pn) : NULL;
     dyn_fold(r, dyn_lit_bits(c, vk == NK_CallNode ? nt_ref(nt, v, "block") : v), k, pn != NULL, open,
              q ? q->type : TY_UNKNOWN);
+    /* a parameter that is the handle shares it with the local, when the
+       call hands it one */
+    if (pn && k < DYN_ARGS && ((dyn_lit_lost(c, lit) >> k) & 1u))
+      r->lost |= q && q->type == TY_STRBUF && q->str_shared ? 1 : 2;
     if (pn && !r->pname) r->pname = pn;
     return;
   }
@@ -21248,6 +21421,7 @@ static void dyn_reach_value(Compiler *c, int v, int k, int depth, DynReach *r) {
       dyn_fold(r, bits, k, 1, 0, TY_UNKNOWN);
       /* a post of one of the blocks may bind position k by the count */
       if (g_dyn.blkpost[mi] == 2) r->app = 1;
+      if (k < DYN_ARGS && ((g_dyn.blklost[mi] >> k) & 1u)) r->lost |= 1;
       return;
     }
     /* every value written to it (a Method-valued local was taken above, by
@@ -21772,6 +21946,7 @@ void dyn_blk_reach(Compiler *c, int mi, int k, DynReach *r) {
   unsigned bits = dyn_blk_bits(c, mi);
   if (bits & DYN_OPEN) r->unknown = 1;
   dyn_fold(r, bits, k, 1, 0, TY_UNKNOWN);
+  if (mi >= 0 && mi < g_dyn.nscope && k >= 0 && k < DYN_ARGS && ((g_dyn.blklost[mi] >> k) & 1u)) r->lost |= 1;
   if (r->unknown && !r->app && dyn_any_appender(c)) r->app = 1;
 }
 /* What the blocks such a yield reaches do with its argument at position k. */
@@ -21785,6 +21960,7 @@ void dyn_yield_reach(Compiler *c, int y, int k, DynReach *r) {
   dyn_fold(r, bits, k, 1, 0, TY_UNKNOWN);
   /* a post of one of the blocks may bind position k by the count */
   if (mi >= 0 && g_dyn.blkpost[mi] == 2) r->app = 1;
+  if (mi >= 0 && k >= 0 && k < DYN_ARGS && ((g_dyn.blklost[mi] >> k) & 1u)) r->lost |= 1;
   if (r->unknown && !r->app && dyn_any_appender(c)) r->app = 1;
 }
 /* May a lowered method's yield at position k hand the targets the shared
@@ -21821,6 +21997,54 @@ int dyn_yield_param_appends(Compiler *c, int mi, int j) {
     }
   }
   return 0;
+}
+/* Does literal block `blk` append to its parameter k through a local that
+   is assigned again (dyn_lit_lost)? */
+int dyn_block_loses(Compiler *c, int blk, int k) {
+  if (!g_dyn.fresh) dyn_memo_reset(c);
+  if (blk < 0 || k < 0 || k >= DYN_ARGS || nt_kind(c->nt, blk) != NK_BlockNode) return 0;
+  return (dyn_lit_lost(c, blk) >> k) & 1u;
+}
+/* The position at which yield or call `y` in method `m` hands on the
+   method's parameter j, which it never assigns, among those of `lost`; -1
+   if none. */
+static int dyn_hands_on_lost(Compiler *c, Scope *m, int y, int j, unsigned lost) {
+  const NodeTable *nt = c->nt;
+  int a = nt_ref(nt, y, "arguments"), ac = 0;
+  const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+  for (int k = 0; k < ac && k < DYN_ARGS; k++) {
+    if (nt_kind(nt, av[k]) == NK_SplatNode) break;
+    if (((lost >> k) & 1u) && unassigned_param_read(c, m, av[k]) == j) return k;
+  }
+  return -1;
+}
+/* The position at which method `mi` hands its parameter j to literal block
+   `blk` where the block does that (dyn_lit_lost), or -1; *argc is the
+   count of plain arguments there. */
+int dyn_yield_block_loses(Compiler *c, int mi, int j, int blk, int *argc) {
+  const NodeTable *nt = c->nt;
+  if (!g_dyn.fresh) dyn_memo_reset(c);
+  if (mi < 0 || mi >= c->nscopes || blk < 0 || nt_kind(nt, blk) != NK_BlockNode) return -1;
+  unsigned lost = dyn_lit_lost(c, blk);
+  if (!lost) return -1;
+  Scope *m = &c->scopes[mi];
+  int k;
+  for (int y = comp_kind_first(c, NK_YieldNode); y >= 0; y = comp_kind_next(c, y))
+    if (nt_kind(nt, y) == NK_YieldNode && comp_scope_of(c, y) == m && (k = dyn_hands_on_lost(c, m, y, j, lost)) >= 0) {
+      *argc = call_plain_argc(c, y);
+      return k;
+    }
+  /* a `blk.call` of the method's own `&blk` splices as a yield does */
+  for (int y = m->blk_param ? comp_scall_first(c, mi) : -1; y >= 0; y = comp_scall_next(c, y)) {
+    int r = nt_ref(nt, y, "receiver");
+    const char *rn = r >= 0 && nt_kind(nt, r) == NK_LocalVariableReadNode ? nt_str(nt, r, "name") : NULL;
+    if (rn && sp_streq(rn, m->blk_param) && nt_str(nt, y, "name") && is_proc_invoke(nt_str(nt, y, "name")) &&
+        (k = dyn_hands_on_lost(c, m, y, j, lost)) >= 0) {
+      *argc = call_plain_argc(c, y);
+      return k;
+    }
+  }
+  return -1;
 }
 /* The emitters' memo is filled from the settled types; the analysis marks it
    stale whenever a pass may change them. */
