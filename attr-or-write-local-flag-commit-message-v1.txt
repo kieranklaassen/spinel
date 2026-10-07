@@ -1,0 +1,31 @@
+An attribute's `||=` shares the local's String under --share-strings
+
+    class Box
+      attr_accessor :x
+    end
+
+    r = Box.new
+    s = +"ab"
+    r.x ||= s
+    r.x << "z"
+    p s, r.x
+
+printed "ab" twice under --share-strings: the append went to a copy
+and nothing said so. CRuby prints "abz" twice, and so does the flag
+when the store is written `r.x = s`.
+
+The share walk has a case for `o.x ||= v` and `o.x &&= v`, and it asked
+the node for "read_name", a field the parser does not write: the
+attribute's name is in "name". So the case found no attribute, the
+value joined no instance variable, and the local and the slot each kept
+a copy.
+
+With the name read, `r.x ||= [+"a"]; r.x << +"b"; r.x.last << "!"`,
+which printed ["a", "b"], meets the flag's refusal of a typed String
+container that would hold a shared handle, as it does when written
+with `=`.
+
+The walk runs only under --share-strings; the default build's
+generated C is unchanged.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
