@@ -1,0 +1,21 @@
+IO#readlines on an open handle answers every line of a long file
+
+    File.open(path, "w") do |f|
+      5000.times { |i| f.puts "line number " + i.to_s + " of the file" }
+    end
+    lines = File.open(path) { |f| f.readlines }
+
+2,352 of the 5,000 lines held another line's text, and at 20,000 lines
+the program crashed.
+
+sp_File_readlines makes its Array and then reads the file a line at a
+time, each line a fresh String, with the Array held by a C local alone.
+The first collection freed it and the lines after that were pushed into
+freed memory. The handle was exposed the same way when the call was its
+only holder: in File.open(path).readlines the collection closed the
+file under the read, and the next line raised "closed stream (IOError)".
+
+Both are now rooted for the length of the call, as sp_File_readlines_sep
+(readlines with a separator or chomp:) roots them.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

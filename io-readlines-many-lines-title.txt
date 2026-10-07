@@ -1,0 +1,1 @@
+IO#readlines on an open handle answers every line of a long file

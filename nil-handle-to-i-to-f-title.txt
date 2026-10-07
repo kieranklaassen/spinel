@@ -1,0 +1,1 @@
+to_i and to_f on a nil String handle local answer 0 and 0.0

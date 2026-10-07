@@ -1,0 +1,1 @@
+A method hands its block on only in the block that holds its yield
