@@ -6195,17 +6195,28 @@ static inline int sp_case_splat_spreads(sp_RbVal v) {
   return v.tag == SP_TAG_INT || v.tag == SP_TAG_FLT || v.tag == SP_TAG_BIGINT || v.tag == SP_TAG_BOOL ||
          v.tag == SP_TAG_STR || v.tag == SP_TAG_SYM;
 }
+/* A Class, a Regexp and a Range are asked === alone: equal to the
+   scrutinee they are no match (`Integer === Integer` and
+   `(1..3) === (1..3)` are false). Only a scrutinee of one of those kinds
+   is equal to such an element (a program object's own == aside), so the
+   test is made of the scrutinee, once. */
+static int sp_case_eqq_alone(sp_RbVal v) {
+  return v.tag == SP_TAG_CLASS ||
+         (v.tag == SP_TAG_OBJ && (v.cls_id == SP_BUILTIN_REGEX || v.cls_id == SP_BUILTIN_RANGE ||
+                                  v.cls_id == SP_BUILTIN_FLOAT_RANGE || v.cls_id == SP_BUILTIN_STR_RANGE));
+}
 /* `when *arr` in a case value: does any element of arr match the
-   scrutinee? The scrutinee equal to the element, as before, or the element
-   matching it through sp_poly_case_eq: a Class its instances, a Regexp a
-   String, a Range its members. */
+   scrutinee? The scrutinee equal to the element, as before (sp_case_eqq_alone
+   aside), or the element matching it through sp_poly_case_eq: a Class its
+   instances, a Regexp a String, a Range its members. */
 static sp_bool sp_case_splat_match(sp_RbVal scrut, sp_RbVal arr) {
   SP_GC_ROOT_RBVAL(scrut);
   SP_GC_ROOT_RBVAL(arr);
   if (sp_case_splat_spreads(arr)) arr = sp_splat_to_array(arr);
   sp_int n = sp_poly_length(arr);
+  int alone = sp_case_eqq_alone(scrut);
   for (sp_int i = 0; i < n; i++)
-    if (sp_poly_rb_equal(scrut, sp_poly_arr_get(arr, i)) || sp_poly_case_eq(sp_poly_arr_get(arr, i), scrut))
+    if ((!alone && sp_poly_rb_equal(scrut, sp_poly_arr_get(arr, i))) || sp_poly_case_eq(sp_poly_arr_get(arr, i), scrut))
       return TRUE;
   return FALSE;
 }
