@@ -1,0 +1,28 @@
+A `&.` call whose value hoists builds, and runs in its place
+
+    class K
+      def say(s) = puts(s)
+      def bump(a) = ($c += 1; a)
+    end
+    def find(c) = c ? K.new : nil
+    $c = 0
+    x = find(true)
+    x&.say("hi")                  # hi
+    p "#{$c} #{x&.bump([1, 2])}"  # "0 [1, 2]"
+
+The first call does not build ("variable or field '_snr4' declared
+void") and the second prints "1 [1, 2]". Both were right before "A &.
+call's block emitters wait for its nil guard": where the call's value
+hoists a statement, the guard became an `if` ahead of the statement
+with the call inside it, assigned to a temp. So the call ran before
+what is written before it, and a call with no C value had a void temp.
+
+The guard now jumps over what the value hoisted and the value stays in
+the call's place, with no temp. A jump, not a block: the value names
+what the hoisted statements declare. A jump may not pass a root's
+cleanup, so a root in that text is pushed, and popped by one count
+saved ahead of the guard; at a function's top scope the frame pass
+makes it a frame entry, as it was before that change. The forward jump
+does not stop `gc_roots_take_back`.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
