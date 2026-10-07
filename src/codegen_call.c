@@ -8422,7 +8422,66 @@ static void emit_reopen_recv(Compiler *c, int recv, int boxed, const char *box_f
   else if (boxed) emit_boxed(c, recv, b);
   else emit_expr(c, recv, b);
 }
-void emit_reopen_recv_args(Compiler *c, int id, int mi, int recv, int boxed, const char *box_fn, Buf *b) {
+/* Must that receiver run ahead of the rest of its call? It is emitted in
+   place, one C argument beside the others, while emit_args_filled runs an
+   argument that allocates ahead of the statement and makes a rest, or a
+   default the call leaves out, in place. So an argument with an effect ran
+   before a receiver with one (`recv.m(arg)` ran arg first), and a receiver
+   that allocates stood beside a rest or a default no root held: C orders the
+   two as it likes, gcc made the Array first and the receiver's allocation
+   collected it, clang the receiver first and the Array's collected that.
+   `n` positionals are given. A receiver the operand order has bound is a
+   temp already. */
+static int reopen_recv_runs_first(Compiler *c, Scope *m, int recv, const int *argv, int argc, int n) {
+  for (int i = 0; i < g_n_argov; i++) if (g_argov_node[i] == recv) return 0;
+  int eff = subtree_has_side_effect(c, recv), alloc = subtree_allocates(c->nt, recv);
+  if (alloc && m->rest_idx >= 0) return 1;
+  for (int i = 0; eff && i < argc; i++) if (subtree_has_side_effect(c, argv[i])) return 1;
+  for (int i = 0; (eff || alloc) && m->pdefault && i < m->nparams; i++) {
+    int d = m->pdefault[i];
+    if (d < 0 || (!callee_param_is_declared_kwarg(c, m, m->pnames[i]) && arg_slot_for_param(c, m, i, n) >= 0)) continue;
+    if ((eff && subtree_has_side_effect(c, d)) || (alloc && subtree_allocates(c->nt, d))) return 1;
+  }
+  return 0;
+}
+/* The receiver and the arguments of a call into a builtin reopening's
+   method, whose text starts at `at` in b with the callee's name and its
+   parenthesis. When the receiver must run first the call is opened as a
+   statement expression that binds the receiver to a rooted temp, then runs
+   what the arguments hoist, then calls: nothing of it goes ahead of the
+   statement the call stands in. Answers 1 for that, and the caller closes
+   with "; })" after its own ")"; otherwise the receiver is emitted in
+   place, as it always was. */
+int emit_reopen_recv_in_order(Compiler *c, int id, int mi, int recv, int boxed, const char *box_fn, size_t at, Buf *b) {
+  const NodeTable *nt = c->nt;
+  Scope *m = &c->scopes[mi];
+  int args = nt_ref(nt, id, "arguments"), argc = 0;
+  const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &argc) : NULL;
+  int n = call_has_splat_arg(nt, argv, argc) ? 0
+        : argc - (argc > 0 && nt_kind(nt, argv[argc - 1]) == NK_KeywordHashNode);
+  if (!reopen_recv_runs_first(c, m, recv, argv, argc, n)) {
+    emit_reopen_recv(c, recv, boxed, box_fn, b);
+    emit_args_filled(c, mi, args, ", ", b);
+    return 0;
+  }
+  Buf pre, rx, ab, *sv_pre = g_pre;
+  memset(&pre, 0, sizeof pre); memset(&rx, 0, sizeof rx); memset(&ab, 0, sizeof ab);
+  g_pre = &pre;
+  TyKind rt = boxed ? TY_POLY : comp_ntype(c, recv);
+  int t = ++g_tmp;
+  emit_reopen_recv(c, recv, boxed, box_fn, &rx);
+  buf_printf(g_pre, "%s _t%d = %s; ", boxed ? "sp_RbVal" : c_type_name(rt), t, rx.p ? rx.p : "");
+  if (boxed || rt == TY_POLY) buf_printf(g_pre, "SP_GC_ROOT_RBVAL(_t%d); ", t);
+  else if (needs_root(rt)) buf_printf(g_pre, "SP_GC_ROOT(_t%d); ", t);
+  emit_args_filled(c, mi, args, ", ", &ab);
+  g_pre = sv_pre;
+  char *callee = strdup(b->p + at);
+  b->len = at; b->p[at] = '\0';
+  buf_printf(b, "({ %s%s_t%d%s", pre.p, callee, t, ab.p ? ab.p : "");
+  free(callee); free(pre.p); free(rx.p); free(ab.p);
+  return 1;
+}
+int emit_reopen_recv_args(Compiler *c, int id, int mi, int recv, int boxed, const char *box_fn, size_t at, Buf *b) {
   const NodeTable *nt = c->nt;
   Scope *m = &c->scopes[mi];
   int args = nt_ref(nt, id, "arguments"), argc = 0;
@@ -8435,11 +8494,7 @@ void emit_reopen_recv_args(Compiler *c, int id, int mi, int recv, int boxed, con
     hold = m->pdefault && m->pdefault[i] >= 0 &&
            (callee_param_is_declared_kwarg(c, m, m->pnames[i]) || arg_slot_for_param(c, m, i, n) < 0) &&
            ctor_default_reads_self(c, m, m->pdefault[i], 0);
-  if (!hold) {
-    emit_reopen_recv(c, recv, boxed, box_fn, b);
-    emit_args_filled(c, mi, args, ", ", b);
-    return;
-  }
+  if (!hold) return emit_reopen_recv_in_order(c, id, mi, recv, boxed, box_fn, at, b);
   TyKind rt = boxed ? TY_POLY : comp_ntype(c, recv);
   int t = ++g_tmp;
   char self[32]; snprintf(self, sizeof self, "_t%d", t);
@@ -8455,6 +8510,7 @@ void emit_reopen_recv_args(Compiler *c, int id, int mi, int recv, int boxed, con
   g_arm_self = self; g_arm_scope = m; g_arm_depth = g_expr_depth;
   emit_args_filled(c, mi, args, ", ", b);
   g_arm_self = sv_arm_self; g_arm_scope = sv_arm_scope; g_arm_depth = sv_arm_depth;
+  return 0;
 }
 
 /* One constructor argument of a `k.new(...)` dispatch arm, `val` its text.
@@ -24258,10 +24314,11 @@ static int emit_array_hash_reopen_call(Compiler *c, int id, int recv, TyKind rt,
   if (ami < 0 || adc != aci || !c->scopes[ami].name || !sp_streq(c->scopes[ami].name, nm)) return 0;
   if (c->scopes[ami].yields && emit_reopen_block_call(c, id, recv, ami, NULL, b)) return 1;
   if (g_plan_check) ucall_observe(c, id, ami, aci, 0);
+  size_t at = b->len;
   buf_printf(b, "sp_%s_%s(", acn, mc(c->scopes[ami].name));
-  emit_reopen_recv_args(c, id, ami, recv, 1, NULL, b);
+  int open = emit_reopen_recv_args(c, id, ami, recv, 1, NULL, at, b);
   emit_trailing_blk_arg(c, &c->scopes[ami], id, -1, b);
-  buf_puts(b, ")");
+  buf_puts(b, open ? "); })" : ")");
   return 1;
 }
 
@@ -24376,11 +24433,11 @@ void emit_call_body(Compiler *c, int id, Buf *b) {
         if (miR >= 0 && rtR == TY_IO) { emit_io_reopen_call(c, id, recvR, nmR, b); return; }
         if (miR >= 0) {
           if (g_plan_check) ucall_observe(c, id, miR, ciR, 0);
+          size_t atR = b->len;
           buf_printf(b, "sp_%s_%s(", mc_reopen_cls(c, ciR, nmR), mc(nmR));
-          emit_expr(c, recvR, b);
-          emit_args_filled(c, miR, nt_ref(ntR, id, "arguments"), ", ", b);
+          int openR = emit_reopen_recv_in_order(c, id, miR, recvR, 0, NULL, atR, b);
           emit_callee_block_arg(c, id, &c->scopes[miR], b);
-          buf_puts(b, ")");
+          buf_puts(b, openR ? "); })" : ")");
           return;
         }
       }
