@@ -12896,15 +12896,14 @@ static void sp_exc_print_uncaught(const char *cls, const char *msg) {
   if (sp_bt_enabled && sp_bt_n > 0) {
     sp_StrArray *bt = sp_bt_format(sp_bt_buf, sp_bt_n);
     if (bt && bt->len > 0) {
-      fprintf(stderr, "%s: %s (%s)\n", sp_StrArray_get(bt, 0),
-              (msg && *msg) ? msg : cls, cls);
+      sp_exc_write_uncaught(sp_StrArray_get(bt, 0), cls, msg);
       for (sp_int _i = 1; _i < bt->len; _i++)
         fprintf(stderr, "\tfrom %s\n", sp_StrArray_get(bt, _i));
       return;
     }
   }
 #endif
-  fprintf(stderr, "%s (%s)\n", (msg && *msg) ? msg : cls, cls);
+  sp_exc_write_uncaught(NULL, cls, msg);
 }
 #ifdef SPINEL_EXT_HOST
 SP_NORETURN SP_COLD void sp_raise_cls(const char *cls, const char *msg);
