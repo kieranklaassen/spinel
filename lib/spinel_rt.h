@@ -4004,6 +4004,14 @@ static const char *sp_poly_recv_s(sp_RbVal v, const char *meth) {
   sp_raise_nomethod(sp_nomethod_msg(meth, v));
   return sp_str_empty;
 }
+/* casecmp's operand when it is a String the program appends to: its text,
+   or NULL where CRuby answers nil, the two encodings differing with a byte
+   past ASCII on each side. */
+static SP_NOINLINE const char *sp_str_casecmp_strbuf(const char *recv, sp_RbVal o) {
+  const char *s = sp_poly_unbox_s(o);
+  if (!s || !recv || sp_str_is_binary(recv) == sp_str_is_binary(s)) return s;
+  return sp_str_ascii_only(recv) || sp_str_ascii_only(s) ? s : NULL;
+}
 /* casecmp / casecmp? (`q`) on a boxed receiver. A Symbol compares with a
    Symbol and a String with a String (or an operand answering #to_str), as the
    typed forms do; any other operand answers nil, and a receiver that is
