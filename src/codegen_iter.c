@@ -45,7 +45,7 @@ static int pure_forwarding_target(Compiler *c, int mi, int depth) {
   if (!cty || !sp_streq(cty, "CallNode") || nt_ref(c->nt, call, "receiver") >= 0) return -1;
   int args = nt_ref(c->nt, call, "arguments");
   int ac = 0; const int *av = args >= 0 ? nt_arr(c->nt, args, "arguments", &ac) : NULL;
-  if (ac != 1 || !nt_type(c->nt, av[0]) || !sp_streq(nt_type(c->nt, av[0]), "ForwardingArgumentsNode")) return -1;
+  if (ac != 1 || nt_kind(c->nt, av[0]) != NK_ForwardingArgumentsNode) return -1;
   const char *tn = nt_str(c->nt, call, "name");
   if (!tn) return -1;
   int t = comp_method_index(c, tn);
@@ -601,8 +601,7 @@ void emit_inline_bind_params(Compiler *c, Scope *m, int args, const int *argv, i
      params from the enclosing forwarder's synth __fwd_* params, not from a
      literal ForwardingArgumentsNode (which has no value of its own). */
   Scope *fwd_encl = NULL;
-  if (argc == 1 && argv && nt_type(nt, argv[0]) &&
-      sp_streq(nt_type(nt, argv[0]), "ForwardingArgumentsNode"))
+  if (argc == 1 && argv && nt_kind(nt, argv[0]) == NK_ForwardingArgumentsNode)
     fwd_encl = comp_scope_of(c, argv[0]);
   /* A trailing keyword-hash arg binds by param name, not positionally. */
   int kwh = -1, pos_argc = argc;
@@ -6082,6 +6081,7 @@ static int iter_ewi_zip_poly_arms(Compiler *c, int id, Buf *b, int indent, const
        the method called (enum_walk_name) */
     const char *wn = enum_walk_name(c, id, recv, name);
     emit_indent(b, indent); emit_poly_iter_obj_reject_as(c, ta, name, wn, b);
+    emit_walk_arity_raise(c, id, recv, name, ta, indent, b);
     emit_indent(b, indent); buf_printf(b, "sp_poly_iter_check(_t%d, \"%s\");\n", ta, wn);
     /* `each { |x| }` over an Enumerator yielding several values in a step
        binds x the first of them; the builtins/ walks (`each { |x| yield x }`)
