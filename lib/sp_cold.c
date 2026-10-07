@@ -4483,6 +4483,7 @@ sp_RbVal sp_io_select(sp_PolyArray *rd, sp_PolyArray *wr, sp_PolyArray *er, doub
   SP_GC_ROOT(out);
   for (int g = 0; g < 3; g++) {
     sp_PolyArray *part = sp_PolyArray_new();
+    SP_GC_ROOT(part);   /* sp_select_io_of runs the program's #to_io, which can collect */
     sp_int cnt = src[g] ? src[g]->len : 0;
     for (sp_int i = 0; i < cnt; i++) {
       sp_File *f = sp_select_io_of(src[g]->data[i]);
