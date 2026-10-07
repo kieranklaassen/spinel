@@ -837,8 +837,10 @@ const char *sp_StrArray_sample(sp_StrArray*a){SP_GC_ROOT(a);if(a->len<=0)return 
 /* ============ poly/inspect-dependent array ops (display, concat, to_poly) ============ */
 /* The members String#upto yields, in CRuby's rb_str_upto_each order of
    cases, each a fresh copy (the frozen begin is not handed out) passed to
-   fn until it answers nonzero. */
-void sp_str_upto_each(const char *s, const char *e, sp_int excl, int (*fn)(const char *, void *), void *arg) {SP_GC_ROOT_STR(s);SP_GC_ROOT_STR(e);
+   fn until it answers nonzero. Called by sp_str_upto_each
+   (lib/sp_str_walk.c), which keeps two all-digit ends of unequal width
+   past 18 digits. */
+void sp_str_upto_narrow(const char *s, const char *e, sp_int excl, int (*fn)(const char *, void *), void *arg) {SP_GC_ROOT_STR(s);SP_GC_ROOT_STR(e);
   if (!s || !e) return;
   size_t sl = sp_str_byte_len(s), el = sp_str_byte_len(e);
   int ascii = 1;
@@ -856,7 +858,8 @@ void sp_str_upto_each(const char *s, const char *e, sp_int excl, int (*fn)(const
   }
   /* two all-digit ends: the numbers between, zero-padded to the begin's
      width, so ("9".."11") holds "9", "10", "11" (#3549) and ("1".."010")
-     stops at "10". Past 18 digits the succ walk below serves. */
+     stops at "10". Past 18 digits two widths are sp_str_upto_each's, and
+     one width the succ walk below serves. */
   int digits = ascii && sl > 0 && el > 0 && sl <= 18 && el <= 18;
   for (size_t i = 0; digits && i < sl; i++) if (s[i] < '0' || s[i] > '9') digits = 0;
   for (size_t i = 0; digits && i < el; i++) if (e[i] < '0' || e[i] > '9') digits = 0;
