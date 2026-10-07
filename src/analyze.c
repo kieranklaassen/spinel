@@ -2094,6 +2094,16 @@ static void rewrite_const_alias_read(Compiler *c, int rd, int **seq) {
   if (!*seq && !(*seq = seq_build(nt))) return;
   int sw = (*seq)[w], sr = (*seq)[rd], runs = (*seq)[nt->count];
   if (!(sw & 1)) return;                                   /* the write is no statement */
+  /* the value is read where the write stands, and a constant of CRuby
+     (Math::DomainError under `include Math`) may come before the program
+     class of that name: a bare value is the program's at the program's own
+     level, a path's where the class is defined in the body the path names */
+  if ((*seq)[SEQ_LEN(nt) - 1]) {
+    const int *in = *seq + nt->count + 1;
+    int v = nt_ref(nt, w, "value"), ci = comp_class_index(c, real);
+    int def = ci >= 0 ? c->classes[ci].def_node : -1;
+    if (nt_kind(nt, v) == NK_ConstantReadNode ? in[w] : def < 0 || !const_read_reaches(nt, v, in[def], in)) return;
+  }
   if (sr & 2 ? runs && runs <= sw : (sr | 3) <= (sw | 3)) return;
   const int *own = *seq + nt->count + 1;
   if (!const_read_reaches(nt, rd, own[w], own)) return;
