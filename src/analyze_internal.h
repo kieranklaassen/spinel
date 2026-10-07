@@ -76,6 +76,17 @@ int *du_parent_map(const NodeTable *nt);
 int du_read_maybe_unset(const NodeTable *nt, const int *par, DUPos *dp, int rd, const char *nm);
 void du_memo_free(void);
 int an_value_dropped(const NodeTable *nt, const int *parent, int node);
+/* The methods the default build may lend a String parameter's slot by
+   address (elig, c->nscopes entries), and whether it passes parameter pi
+   of method mi by value: no slot and no shared handle reach it, because a
+   member of its name group may not take either. A spliced yielder's
+   parameters alias the caller's String, and are not passed by value.
+   analyze.c */
+void an_byref_eligible_scopes(Compiler *c, char *elig);
+int an_byref_param_by_value(Compiler *c, const char *elig, int mi, int pi);
+/* A runtime protocol name: the emitted program can call the method with
+   no CallNode of its own (`puts obj` calls to_s). analyze.c */
+int method_name_implicitly_invoked(const char *nm);
 int local_all_writes_empty_hash(Compiler *c, Scope *sc, const char *name);
 int local_all_writes_empty_hash_or_new(Compiler *c, Scope *sc, const char *name);
 int method_call_param_shift(Compiler *c, int mn, int mi);
@@ -91,6 +102,7 @@ typedef struct { int node; char path[QC_MAXDEPTH][64]; int depth; char name[128]
 int is_builtin_class_name(const char *n);
 void refuse_unreachable_bare_constants(Compiler *c);
 int is_builtin_module_name(const char *n);
+int builtin_module_at(int i, const char **name, int *id);
 int is_builtin_exception_name(const char *n);
 const char *superclass_builtin_exc_name(const NodeTable *nt, int sc);   /* analyze_util.c */
 int is_syserr_family_name(const char *n);           /* analyze_util.c */
@@ -108,6 +120,7 @@ int desugar_time_singleton_bare_ctor(Compiler *c);
 const char *class_ruby_name(Compiler *c, int ci); /* codegen.c */
 int builtin_object_method_known(const char *m);
 int core_method_name(const char *n);   /* analyze_desugar.c: a core class's public method */
+int object_public_method_name(const char *n); /* analyze_desugar.c: one of Object's public instance methods */
 int class_inherits_builtin_exception(Compiler *c, int ci);
 int an_user_defines_or_reads(Compiler *c, const char *name);
 /* The universal "what a receiver answers" table (analyze_infer.c) and the
@@ -127,7 +140,6 @@ int an_or_empty_hash_fallback(Compiler *c, int node);
 int an_chunk_family_to_a(Compiler *c, int id);
 const char *an_regex_lit_src(Compiler *c, int nid);
 int str_in(const char *s, const char *const *set);
-int an_unparen(const NodeTable *nt, int n);
 int blk_locals_have(const char *locals, const char *nm);
 /* The calls named `name`, ascending: for (id = an_calls_named_first(c, nm);
    id >= 0; id = an_calls_named_next(id)). Check each node as before. */
@@ -153,6 +165,10 @@ int struct_member_idx(Compiler *c, ClassInfo *sc, int keynode);
 int struct_member_idx_float(Compiler *c, ClassInfo *sc, int keynode);
 /* Last statement of a scope's body, or -1. */
 int scope_body_last(Compiler *c, int mi);
+/* The expressions whose value method scope mi answers (its body's and each
+   `return`'s; see analyze_pass.c). Answers the count, or -1. */
+int method_value_leaves(Compiler *c, int mi, int *out, int cap);
+int method_value_leaves_or_nil(Compiler *c, int mi, int *out, int cap);
 int block_given_tail_then_last(Compiler *c, int last);
 int super_forwards_caller_block(Compiler *c, int id);
 /* 1 if `node` is `<&block-param>.call(...)` / .() / [] for method mi -- the
@@ -295,6 +311,7 @@ int an_yield_site_builtin_answer(Compiler *c, int id, TyKind kind, TyKind *out);
 extern int g_scopes_settled;   /* analysis done (codegen_util.c) */
 int poly_expr_flows_container(Compiler *c, int node);
 int reconcile_locals_reading_ivars(Compiler *c);
+int widen_container_locals_from_poly_writes(Compiler *c);
 int widen_locals_from_poly_writes(Compiler *c);
 int widen_arrays_from_map_bang(Compiler *c);
 void intern_block_params(Compiler *c);
@@ -318,8 +335,10 @@ int rest_packable_arm(Compiler *c, Scope *s);                    /* codegen_fold
    reads as a plain String). Shared with the receiver-face helpers. */
 TyKind ivar_value_ty(ClassInfo *ci, int iv);
 int infer_range_call(Compiler *c, int id, TyKind rt, TyKind *out);
+int range_object_face(const char *name);  /* Object's face of a Float / String range */
 int infer_poly_call(Compiler *c, int id, TyKind rt, TyKind *out);
 int infer_object_call(Compiler *c, int id, TyKind rt, TyKind *out);
+int infer_arysub_call(Compiler *c, int id, TyKind *out);
 int infer_array_call(Compiler *c, int id, TyKind rt, TyKind *out);
 int infer_hash_call(Compiler *c, int id, TyKind rt, TyKind *out);
 /* bop_find for the call `id`, recording the row under --plan-check */
@@ -335,6 +354,8 @@ void an_user_call_record(Compiler *c, int id, int mi, int via, int owner_ci);
 int infer_numeric_call(Compiler *c, int id, TyKind rt, TyKind *out);
 /* The array a map-shaped call answers from its block's tail (analyze_infer_recv.c). */
 TyKind infer_map_block_ty(Compiler *c, int id, int block);
+/* A call written `recv&.name` (analyze_infer_recv.c). */
+int call_is_safe_nav(const NodeTable *nt, int id);
 /* A range endpoint that is the infinite Float constant (analyze_infer.c). */
 int infer_end_is_float_inf(Compiler *c, int right);
 int propagate_prep_params(Compiler *c);
@@ -484,7 +505,10 @@ int desugar_defined_method_call(Compiler *c);
 int desugar_respond_to_probe(Compiler *c);
 int desugar_symbol_to_proc_call(Compiler *c);
 int desugar_call_op_write(Compiler *c);
+int desugar_reopened_op_write(Compiler *c);
 int desugar_array_at(Compiler *c);
+int desugar_unpack_block(Compiler *c);
+int desugar_interp_reopened_to_s(Compiler *c);
 int desugar_array_first_last(Compiler *c);
 int desugar_enum_iter_splat_args(Compiler *c);
 int desugar_builtin_iter_block_shapes(Compiler *c);
@@ -502,6 +526,7 @@ int desugar_builtin_reopen_methods(Compiler *c);
 int desugar_object_method_builtin_overrides(Compiler *c);
 int desugar_body_ivars(Compiler *c);
 int desugar_const_ivar_access(Compiler *c);
+int desugar_literal_undef_method(Compiler *c);
 int desugar_builtin_ivars(Compiler *c);
 void mark_match_ranges(Compiler *c);
 int desugar_duplicate_underscore_params(Compiler *c);

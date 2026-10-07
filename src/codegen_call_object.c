@@ -235,8 +235,8 @@ int emit_call_identity_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
     else if (rt == TY_STRING && strbuf_object_ref(c, recv, b)) { }
     /* unboxed value structs have no identity: derive a stable Integer from
        the value hash (see the identity note in docs/limitations.md) */
-    else if (rt == TY_COMPLEX || rt == TY_RATIONAL || rt == TY_RANGE ||
-             rt == TY_TIME || rt == TY_FLOAT) {
+    else if (rt == TY_COMPLEX || rt == TY_RATIONAL || rt == TY_RANGE || rt == TY_FLOAT_RANGE ||
+             rt == TY_STR_RANGE || rt == TY_TIME || rt == TY_FLOAT) {
       buf_puts(b, "sp_rbval_hash_key("); emit_boxed(c, recv, b); buf_puts(b, ")");
     }
     /* a value-type user object is a by-value struct with no pointer identity;
@@ -568,8 +568,7 @@ int emit_call_instance_eval_arms(Compiler *c, int id, Buf *b, const NodeTable *n
         free(vb.p);
         ie_body_restore(c, nsnap);
         g_self = sv_self; g_self_deref = sv_deref;
-        for (int a = 0; a < nal.n; a++)
-          if (--nal.lv[a]->inline_alias == 0) nal.lv[a]->is_cell = 0;
+        block_aliases_release(&nal);
         emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
         if (nal_tr >= 0) buf_printf(b, "_t%d", nal_tr);
         else buf_puts(b, nbox ? "sp_box_nil()" : default_value_from_compiler(c, nbt));
@@ -851,8 +850,7 @@ int emit_call_instance_eval_arms(Compiler *c, int id, Buf *b, const NodeTable *n
         g_ie_discard_value = saved_discard;
       }
       /* the aliases end with the body, which the result temps outlive */
-      for (int a = 0; a < ie_al.n; a++)
-        if (--ie_al.lv[a]->inline_alias == 0) ie_al.lv[a]->is_cell = 0;
+      block_aliases_release(&ie_al);
       if (ie_al.open) { emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n"); }
       g_ie_class_id = saved_ie;
       if (ie_flip) { ie_sc->is_cmethod = ie_sv_cm; ie_sc->class_id = ie_sv_cls; comp_scope_move_end(); }
@@ -991,6 +989,39 @@ int emit_call_freeze_dup_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, 
           else if (kvt && sp_streq(kvt, "FalseNode")) { freeze_mode = 0; dkw_ok = 1; }
         }
       }
+    }
+    if (dkw_ok && comp_ty_ary_root(c, drt) >= 0) {
+      /* an Array subclass instance: its class's own copy (sp_X__dup), by the
+         class it carries when a subclass's instance can be behind it (#7449) */
+      int cid = ty_object_class(drt), t = ++g_tmp, d = ++g_tmp;
+      const char *cn = c->classes[cid].c_name;
+      int mode = sp_streq(name, "dup") ? 0 : freeze_mode < 0 ? 1 : freeze_mode ? 3 : 2;
+      buf_printf(b, "({ sp_%s *_t%d = ", cn, t);
+      emit_expr(c, recv, b);
+      buf_printf(b, "; SP_GC_ROOT(_t%d); sp_%s *_t%d = !_t%d ? NULL : ", t, cn, d, t);
+      for (int k = 0; k < c->nclasses; k++)
+        if (k != cid && is_descendant(c, k, cid) && c->classes[k].instantiated)
+          buf_printf(b, "_t%d->cls_id == %d ? (sp_%s *)sp_%s__dup(_t%d, %d) : ",
+                     t, k, cn, c->classes[k].c_name, t, mode);
+      buf_printf(b, "(sp_%s *)sp_%s__dup(_t%d, %d); SP_GC_ROOT(_t%d); ", cn, cn, t, mode, d);
+      /* the class's initialize_copy hook, as for any program object; its
+         super into Array is a replace, which the copy has already done */
+      int defcls = -1;
+      int ic = comp_method_in_chain(c, cid, "initialize_copy", &defcls);
+      LocalVar *icp = ic >= 0 && c->scopes[ic].nparams == 1 && !c->scopes[ic].yields
+        ? scope_local(&c->scopes[ic], c->scopes[ic].pnames[0]) : NULL;
+      if (ic >= 0 && (!icp || !ty_is_object(icp->type)))
+        unsupported_feature(c, id, "an initialize_copy of an Array subclass whose parameter is not "
+                                   "typed as the class is not supported yet");
+      else if (ic >= 0) {
+        const char *nb = c->scopes[ic].blk_param && c->scopes[ic].blk_param[0] ? ", NULL" : "";
+        buf_printf(b, "if (_t%d) ", d);
+        emit_method_cname(c, &c->scopes[ic], b);
+        buf_printf(b, "((sp_%s *)_t%d, (sp_%s *)_t%d%s); ", c->classes[defcls].c_name, d,
+                   c->classes[ty_object_class(icp->type)].c_name, t, nb);
+      }
+      buf_printf(b, "_t%d; })", d);
+      return 1;
     }
     if (dkw_ok && ty_is_object(drt) && drr.kind != RK_VOBJ) {
       int cid = ty_object_class(drt);
@@ -1498,15 +1529,24 @@ int emit_call_safe_nav_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
           buf_printf(g_pre, "const char *_sn%d = %s; SP_GC_ROOT_STR(_sn%d);\n",
                      tsn2, rsn.p ? rsn.p : "NULL", tsn2);
         free(rsn.p);
-        if (rrt == TY_INT)        buf_printf(b, "(_sn%d == SP_INT_NIL ? ", tsn2);
-        else if (rrt == TY_FLOAT) buf_printf(b, "(sp_float_is_nil(_sn%d) ? ", tsn2);
-        else                      buf_printf(b, "(_sn%d == NULL ? ", tsn2);
-        if (ret2 == TY_POLY) buf_puts(b, "sp_box_nil()");
-        else if (ret2 == TY_INT) buf_puts(b, "SP_INT_NIL");
-        else if (ret2 == TY_FLOAT) buf_puts(b, "sp_float_nil()");
-        else if (ret2 == TY_STRING) buf_puts(b, "((const char *)NULL)");  /* string nil, not "" */
-        else buf_puts(b, default_value_from_compiler(c, ret2) ? default_value_from_compiler(c, ret2) : "0");
-        buf_puts(b, " : (");
+        char nilt[64];
+        if (rrt == TY_INT)        snprintf(nilt, sizeof nilt, "_sn%d == SP_INT_NIL", tsn2);
+        else if (rrt == TY_FLOAT) snprintf(nilt, sizeof nilt, "sp_float_is_nil(_sn%d)", tsn2);
+        else                      snprintf(nilt, sizeof nilt, "_sn%d == NULL", tsn2);
+        const char *nilv;
+        if (ret2 == TY_POLY) nilv = "sp_box_nil()";
+        else if (ret2 == TY_INT) nilv = "SP_INT_NIL";
+        else if (ret2 == TY_FLOAT) nilv = "sp_float_nil()";
+        else if (ret2 == TY_STRING) nilv = "((const char *)NULL)";  /* string nil, not "" */
+        else nilv = default_value_from_compiler(c, ret2) ? default_value_from_compiler(c, ret2) : "0";
+        /* The value arm is emitted with g_pre redirected, as the boxed arm
+           above does: a lowering that hoists statements (`v&.then { }`
+           inlines its block) would otherwise run them ahead of the guard, on
+           the very nil it stops. When it hoists, the guard becomes an `if`. */
+        Buf vbs; memset(&vbs, 0, sizeof vbs);
+        Buf preb2; memset(&preb2, 0, sizeof preb2);
+        Buf *sv_pre2 = g_pre;
+        g_pre = &preb2;
         if (g_n_argov < MAX_ARG_OVERRIDE) {
           int slot2 = view_bind(recv, "_sn%d", tsn2);
           int sv_skip = g_sn_skip; g_sn_skip = id;
@@ -1522,12 +1562,33 @@ int emit_call_safe_nav_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
           if (vw >= 0) view_pop(c, vw);
           g_sn_skip = sv_skip;
           view_unbind(g_n_argov - 1);
-          if (sn_box) emit_boxed_text(c, nat2, vb.p ? vb.p : "", b);
-          else buf_puts(b, vb.p ? vb.p : "");
+          if (sn_box) emit_boxed_text(c, nat2, vb.p ? vb.p : "", &vbs);
+          else buf_puts(&vbs, vb.p ? vb.p : "");
           free(vb.p);
         }
-        else emit_expr(c, recv, b);  /* override table full: degrade to unguarded */
-        buf_puts(b, "))");
+        else emit_expr(c, recv, &vbs);  /* override table full: degrade to unguarded */
+        g_pre = sv_pre2;
+        if (!preb2.p || !preb2.p[0])
+          buf_printf(b, "(%s ? %s : (%s))", nilt, nilv, vbs.p ? vbs.p : "");
+        else {
+          int rsv = ++g_tmp;
+          emit_indent(g_pre, g_indent);
+          emit_ctype(c, ret2, g_pre);
+          buf_printf(g_pre, " _snr%d = %s;\n", rsv, nilv);
+          emit_indent(g_pre, g_indent);
+          if (ret2 == TY_POLY) buf_printf(g_pre, "SP_GC_ROOT_RBVAL(_snr%d);\n", rsv);
+          else if (needs_root(ret2)) buf_printf(g_pre, "SP_GC_ROOT(_snr%d);\n", rsv);
+          else buf_printf(g_pre, "(void)_snr%d;\n", rsv);
+          emit_indent(g_pre, g_indent);
+          buf_printf(g_pre, "if (!(%s)) {\n", nilt);
+          buf_puts(g_pre, preb2.p);
+          emit_indent(g_pre, g_indent);
+          buf_printf(g_pre, "  _snr%d = (%s);\n", rsv, vbs.p ? vbs.p : "");
+          emit_indent(g_pre, g_indent);
+          buf_puts(g_pre, "}\n");
+          buf_printf(b, "_snr%d", rsv);
+        }
+        free(vbs.p); free(preb2.p);
         return 1;
       }
       /* Other concrete receivers -- a by-value struct, a Symbol, an array --

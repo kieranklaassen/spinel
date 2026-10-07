@@ -1,6 +1,7 @@
 #include "codegen_internal.h"
 #include "call_plan.h"
 #include "repr.h"
+#include "holder.h"
 #include "builtin_ops.h"
 
 Buf expr_buf(Compiler *c, int node) {
@@ -2139,15 +2140,9 @@ int gvar_global_slot(Compiler *c, int node, char *out, size_t cap) {
    owns the class variable. Fills `out` and answers 1, or 0. */
 int cvar_global_slot(Compiler *c, int node, char *out, size_t cap) {
   const char *nm = nt_str(c->nt, node, "name");
-  Scope *s = comp_scope_of(c, node);
-  if (!nm || nm[0] != '@' || nm[1] != '@' || !s) return 0;
-  int cid = s->class_id;
-  if (cid < 0 && c->node_cbody && node < c->node_cap) cid = c->node_cbody[node];
-  if (cid < 0) cid = comp_class_index(c, "Toplevel");
-  if (cid < 0) return 0;
-  cid = comp_cvar_owner(c, cid, nm);
-  snprintf(out, cap, "cvar_%s_%s", c->classes[cid].name, nm + 2);
-  return 1;
+  HolderRef h;
+  if (!nm || nm[0] != '@' || nm[1] != '@' || !holder_of_node(c, node, &h) || h.kind != HK_CVAR) return 0;
+  return holder_slot_text(c, &h, out, cap);
 }
 /* The innermost block or lambda `node` is written in, within its method;
    -1 at the method's own level. */
@@ -2402,7 +2397,10 @@ int strbuf_boxed_elem_read(Compiler *c, int v) {
   int r = nt_ref(c->nt, v, "receiver");
   if (r < 0) return 0;
   Repr rr = repr_of(c, r);
-  return rr.kind == RK_BOXED || rr.elem == TY_POLY || rr.key != TY_UNKNOWN;
+  /* a Hash hands its values out boxed only when it holds them boxed: a
+     String-to-String Hash's read is the plain String */
+  return rr.kind == RK_BOXED || rr.elem == TY_POLY ||
+         (rr.key != TY_UNKNOWN && (rr.val == TY_POLY || rr.val == TY_UNKNOWN));
 }
 /* A String is a const char * value, so a String mutator (`<<`, the bang
    methods, replace/insert/...) is lowered to a reassignment of its receiver:
@@ -2447,6 +2445,25 @@ int sb_shadowed_reader(int node) {
   for (int i = 0; i < g_n_argov; i++)
     if (g_argov_node[i] == node && strncmp(g_argov_text[i], "lv__sb", 6) == 0) return 1;
   return 0;
+}
+/* The arguments of the String mutator `id` that a shim re-runs on its
+   shadow copy, run ahead of the copy into rooted temps the arm reads
+   (emit_args_run): CRuby evaluates them before the method reads the String,
+   and one that changes the String through another name (an alias, a
+   captured cell, a method) changed the handle after the shim had copied it,
+   so the shadow's write-back undid the change. The temps go to `pre`, for
+   the caller to emit between its read of the handle and the copy; answers
+   the override mark to unbind at once the arm is emitted. */
+int sb_shim_args_first(Compiler *c, int id, Buf *pre, int indent) {
+  int mark = g_n_argov;
+  int a = nt_ref(c->nt, id, "arguments"), argc = 0;
+  const int *argv = a >= 0 ? nt_arr(c->nt, a, "arguments", &argc) : NULL;
+  if (argc == 0) return mark;
+  Buf *sv_pre = g_pre; int sv_ind = g_indent;
+  g_pre = pre; g_indent = indent;
+  emit_args_run(c, argv, argc);
+  g_pre = sv_pre; g_indent = sv_ind;
+  return mark;
 }
 /* Open the shim over a reader call `recv` that hands out the shared handle:
    the handle's text goes to sref, and until sb_reader_shim_close the call node
@@ -2505,15 +2522,9 @@ int strbuf_bang_self_local(const Compiler *c, int v) {
   return r >= 0 && nt_kind(nt, r) == NK_LocalVariableReadNode && repr_of(c, r).kind == RK_STRBUF;
 }
 int strbuf_slot_ref(Compiler *c, int recv, char *out, size_t cap) {
-  const char *rn = strbuf_local_name(c, recv);
-  if (rn) {
-    /* via emit_local_ref: a celled/captured local derefs its cell */
-    Buf rb; memset(&rb, 0, sizeof rb);
-    emit_local_ref(c, recv, rn, &rb);
-    snprintf(out, cap, "%s", rb.p ? rb.p : "");
-    free(rb.p);
-    return 1;
-  }
+  HolderRef h;
+  /* via emit_local_ref: a celled/captured local derefs its cell */
+  if (strbuf_local_name(c, recv) && holder_of_node(c, recv, &h)) return holder_slot_text(c, &h, out, cap);
   /* a demand-marked reader call typed as the handle (external reader
      mutation, e.g. `subs[0].topic << x`): the emitted read IS the sp_String*
      expression. Declined when it does not fit the caller's buffer (the
@@ -2543,24 +2554,11 @@ int strbuf_slot_ref(Compiler *c, int recv, char *out, size_t cap) {
   if (repr_share_rule(c) && recv >= 0 && repr_static_read_kind(nt_kind(c->nt, recv))) {
     /* inside the shim over it, the read is its plain shadow */
     if (sb_shadowed_reader(recv)) return 0;
-    return repr_handle_static_ref(c, recv, out, cap);
+    return holder_static_handle_text(c, recv, out, cap);
   }
-  if (recv < 0 || nt_kind(c->nt, recv) != NK_InstanceVariableReadNode) return 0;
-  const char *nm = nt_str(c->nt, recv, "name");
-  if (!nm) return 0;
-  int cid = strbuf_ivar_owner(c, recv);
-  if (cid < 0) return 0;
-  int iv = comp_ivar_index(&c->classes[cid], nm);
-  if (iv < 0 || c->classes[cid].ivar_types[iv] != TY_STRBUF) return 0;
-  Scope *cs = comp_scope_of(c, recv);
-  if (cs && cs->class_id < 0)
-    snprintf(out, cap, "civ_Toplevel_%s", iv_c(nm + 1));
-  /* a class method's ivar is its class's C global */
-  else if (cs && cs->is_cmethod)
-    snprintf(out, cap, "civ_%s_%s", c->classes[cs->class_id].name, iv_c(nm + 1));
-  else
-    snprintf(out, cap, "%s%siv_%s", g_self, g_self_deref, iv_c(nm + 1));
-  return 1;
+  if (recv < 0 || nt_kind(c->nt, recv) != NK_InstanceVariableReadNode || !holder_of_node(c, recv, &h) ||
+      h.idx < 0 || c->classes[h.cid].ivar_types[h.idx] != TY_STRBUF) return 0;
+  return holder_slot_text(c, &h, out, cap);
 }
 const char *rename_local(const char *nm) {
   /* Innermost first. A nested inline pushes its own locals above the caller's,
@@ -3289,6 +3287,58 @@ const char *nomethod_head(const char *name) {
 int enum_builtin_node(Compiler *c, int node) {
   Scope *s = node >= 0 ? comp_scope_of(c, node) : NULL;
   return s && s->name && !strncmp(s->name, "__enum_", 7);
+}
+/* The walk of a builtin Enumerable definition's receiver (call `id` in a
+   per-site copy, reporting `name`'s walk name), held in _t<t>: a String,
+   Symbol, Integer or Float whose class defines that method at another
+   count (String#partition takes one argument, Enumerable's none) is
+   CRuby's ArgumentError for the count the call the copy serves passed,
+   read off the instance arity table, where the walk raised NoMethodError.
+   Tested only for a receiver that is no object, which the walk would
+   reject anyway. */
+void emit_walk_arity_raise(Compiler *c, int id, int recv, const char *name, int t, int indent, Buf *b) {
+  const NodeTable *nt = c->nt;
+  const char *wn = enum_walk_name(c, id, recv, name);
+  if (wn == name) return;
+  Scope *s = comp_scope_of(c, id);
+  int site = s && s->def_node >= 0 ? (int)nt_int(nt, s->def_node, "enum_site", -1) : -1;
+  if (site < 0 || nt_kind(nt, site) != NK_CallNode) return;
+  int a = nt_ref(nt, site, "arguments"), an = 0;
+  const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
+  /* the call rewritten onto the copy passes its receiver first */
+  const char *sn = nt_str(nt, site, "name");
+  if (sn && strncmp(sn, "__enum_", 7) == 0 && nt_ref(nt, site, "receiver") < 0) {
+    if (an < 1) return;
+    av++; an--;
+  }
+  for (int i = 0; i < an; i++) {
+    NodeKind k = nt_kind(nt, av[i]);
+    if (k == NK_SplatNode || k == NK_KeywordHashNode || k == NK_BlockArgumentNode) return;
+  }
+  int has_blk = nt_ref(nt, site, "block") >= 0;
+  const struct { const char *cls, *test; } kinds[] = {
+    { "String", "_t%d.tag == SP_TAG_STR || sp_poly_is_strbuf(_t%d)" },
+    { "Symbol", "_t%d.tag == SP_TAG_SYM" },
+    { "Integer", "_t%d.tag == SP_TAG_INT || _t%d.tag == SP_TAG_BIGINT" },
+    { "Float", "_t%d.tag == SP_TAG_FLT" },
+  };
+  Buf g; memset(&g, 0, sizeof g);
+  for (size_t i = 0; i < sizeof kinds / sizeof kinds[0]; i++) {
+    char exp[64];
+    if (!builtin_arity_expected(kinds[i].cls, wn, has_blk, an, exp, sizeof exp)) continue;
+    char test[160];
+    snprintf(test, sizeof test, kinds[i].test, t, t);   /* a test names the temp once or twice */
+    buf_printf(&g, " if (%s) sp_raise_cls(\"ArgumentError\", "
+                   "\"wrong number of arguments (given %d, expected %s)\");", test, an, exp);
+  }
+  /* behind the walk's own rejection test, once per call before the loop:
+     a receiver that walks (an object other than a String's handle) pays
+     only that test */
+  if (g.p) {
+    emit_indent(b, indent);
+    buf_printf(b, "if (SP_UNLIKELY(_t%d.tag != SP_TAG_OBJ || sp_poly_is_strbuf(_t%d))) {%s }\n", t, t, g.p);
+  }
+  free(g.p);
 }
 /* The name a walk over a value that is no collection reports. Inside one of
    builtins/enumerable.rb's definitions (`v.minmax` is `__enum_minmax(v)`),
@@ -4409,6 +4459,93 @@ int eq_family(TyKind t) {
   if (t == TY_STR_RANGE) return 7;
   return 0;
 }
+/* The program the class tests below read its reopenings from (set by
+   codegen_program): ty_matches_class takes no Compiler, and is asked in
+   emitters all through the code generator. */
+const Compiler *g_tmc_c = NULL;
+/* Does class index k include program module `mod`, directly or through a
+   module it includes? */
+/* The modules class index k includes, by the `include` statements of its
+   bodies as written (a module with no methods transplants nothing, so the
+   analysis's included_mods misses it) and by what the analysis recorded. */
+static int tmc_body_includes(const Compiler *c, int k, int mod) {
+  const NodeTable *nt = c->nt;
+  const char *kn = c->classes[k].name, *mn = c->classes[mod].name;
+  if (!kn || !mn) return 0;
+  static const NodeKind HK[] = { NK_ClassNode, NK_ModuleNode };
+  for (int h = 0; h < 2; h++)
+    for (int m = comp_kind_first((Compiler *)c, HK[h]); m >= 0; m = comp_kind_next((Compiler *)c, m)) {
+      if (nt_kind(nt, m) != HK[h]) continue;
+      int cp = nt_ref(nt, m, "constant_path");
+      const char *cn = cp >= 0 ? nt_str(nt, cp, "name") : NULL;
+      if (!cn || !sp_streq(cn, kn)) continue;
+      int body = nt_ref(nt, m, "body"), bn = 0;
+      const int *bb = body >= 0 && nt_kind(nt, body) == NK_StatementsNode ? nt_arr(nt, body, "body", &bn) : NULL;
+      for (int i = 0; i < bn; i++) {
+        if (nt_kind(nt, bb[i]) != NK_CallNode || nt_ref(nt, bb[i], "receiver") >= 0) continue;
+        const char *cl = nt_str(nt, bb[i], "name");
+        if (!cl || !sp_streq(cl, "include")) continue;
+        int args = nt_ref(nt, bb[i], "arguments"), an = 0;
+        const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+        for (int a = 0; a < an; a++) {
+          NodeKind ak = nt_kind(nt, av[a]);
+          const char *an2 = ak == NK_ConstantReadNode || ak == NK_ConstantPathNode ? nt_str(nt, av[a], "name") : NULL;
+          if (an2 && sp_streq(an2, mn)) return 1;
+        }
+      }
+    }
+  return 0;
+}
+static int tmc_includes(const Compiler *c, int k, int mod, int depth) {
+  if (k < 0 || k >= c->nclasses || depth > 16) return 0;
+  if (tmc_body_includes(c, k, mod)) return 1;
+  const ClassInfo *ci = &c->classes[k];
+  for (int m = 0; m < ci->nincluded_mods; m++) {
+    int x = ci->included_mods[m];
+    if (x == mod || tmc_includes(c, x, mod, depth + 1)) return 1;
+  }
+  /* through a module this class includes by statement */
+  for (int x = 0; x < c->nclasses; x++)
+    if (x != k && x != mod && comp_class_is_module((Compiler *)c, (ClassInfo *)&c->classes[x]) &&
+        tmc_body_includes(c, k, x) && tmc_includes(c, x, mod, depth + 1)) return 1;
+  return 0;
+}
+/* Is program module `cn` among the ancestors of the builtin class `self_cls`
+   by way of a program reopening of it or of a builtin ancestor (`class Hash;
+   include DeepMergeable; end`, `class Numeric; include M; end`, `module
+   Enumerable; include M; end`)? */
+static int tmc_prog_module_in_builtin(const char *self_cls, const char *cn) {
+  const Compiler *c = g_tmc_c;
+  if (!c || !cn) return 0;
+  int mod = comp_class_index((Compiler *)c, cn);
+  if (mod < 0 || !comp_class_is_module((Compiler *)c, &c->classes[mod])) return 0;
+  const char *chain[8]; int n = 0;
+  chain[n++] = self_cls;
+  if (sp_streq(self_cls, "Integer") || sp_streq(self_cls, "Float") ||
+      sp_streq(self_cls, "Complex") || sp_streq(self_cls, "Rational")) chain[n++] = "Numeric";
+  if (sp_streq(self_cls, "Array") || sp_streq(self_cls, "Hash") || sp_streq(self_cls, "Range") ||
+      sp_streq(self_cls, "Enumerator")) chain[n++] = "Enumerable";
+  if (sp_streq(self_cls, "String") || sp_streq(self_cls, "Symbol") || sp_streq(self_cls, "Time") ||
+      n > 1 && sp_streq(chain[1], "Numeric")) chain[n++] = "Comparable";
+  chain[n++] = "Object";
+  chain[n++] = "Kernel";
+  for (int i = 0; i < n; i++) {
+    int k = comp_class_index((Compiler *)c, chain[i]);
+    if (k >= 0 && tmc_includes(c, k, mod, 0)) return 1;
+  }
+  return 0;
+}
+/* Is program module `mod` mixed into some builtin class (or builtin
+   module) by a reopening of it, directly or through another module? */
+int builtin_reopen_includes_module(Compiler *c, int mod) {
+  if (mod < 0 || mod >= c->nclasses || !comp_class_is_module(c, &c->classes[mod])) return 0;
+  for (int k = 0; k < c->nclasses; k++) {
+    const char *n = c->classes[k].name;
+    if (!n || builtin_class_id(n) == 0) continue;
+    if (tmc_includes(c, k, mod, 0)) return 1;
+  }
+  return 0;
+}
 int ty_matches_class(TyKind t, const char *cn, int exact) {
   const char *self_cls = NULL;
   switch (t) {
@@ -4448,6 +4585,8 @@ int ty_matches_class(TyKind t, const char *cn, int exact) {
                                   t == TY_COMPLEX || t == TY_RATIONAL)) return 1;
   if (sp_streq(cn, "Enumerable") && (ty_is_array(t) || ty_is_hash(t) || t == TY_RANGE ||
                                      t == TY_ENUMERATOR)) return 1;
+  /* a program module the program mixed into this builtin by reopening it */
+  if (tmc_prog_module_in_builtin(self_cls, cn)) return 1;
   return 0;
 }
 
@@ -4460,10 +4599,12 @@ void emit_frozen_obj_guard(Compiler *c, int cid, const char *selfexpr, Buf *b) {
   if (cid < 0 || cid >= c->nclasses) return;
   if (!c->classes[cid].freeze_observed || c->classes[cid].is_value_type) return;
   const char *rn = class_ruby_name(c, cid) ? class_ruby_name(c, cid) : c->classes[cid].name;
+  /* an Array subclass instance is frozen as its Array is (#7449) */
+  if (c->classes[cid].ary_root > 0) buf_printf(b, "if ((%s)->ary.frozen) ", selfexpr);
+  else buf_printf(b, "if (sp_gc_is_frozen((void *)%s)) ", selfexpr);
   buf_printf(b,
-      "if (sp_gc_is_frozen((void *)%s)) "
       "sp_raise_frozen_obj(sp_box_obj((void *)%s, %d), (&(\"\\xff\" \"can't modify frozen %s\")[1])); ",
-      selfexpr, selfexpr, cid, rn);
+      selfexpr, cid, rn);
 }
 
 /* `_t<tmp>` when the node was already evaluated into that temp, or the
@@ -4490,6 +4631,88 @@ void emit_gc_root_var(Compiler *c, TyKind t, const char *name, Buf *b) {
   else if (t == TY_STRING) buf_printf(b, "SP_GC_ROOT_STR(%s);", name);
   else buf_printf(b, "SP_GC_ROOT(%s);", name);
 }
+/* stmt_may_rebind_local's walk over one statement: each local name the
+   subtree at `id` writes, targets or takes as a block or method parameter
+   goes into names[], each node reached is marked as the statement's, and the
+   answer is 1 when it binds a local it cannot name: a numbered parameter, or
+   a parameter-like node of a kind the node table does not list (an `it`
+   parameter) with no name. A listed node is named by its kind; an unlisted
+   one that carries a name counts as binding it. */
+static int stmt_wr_walk(Compiler *c, int stmt, int id, const char ***names, int *n, int *cap) {
+  const NodeTable *nt = c->nt;
+  if (id < 0) return 0;
+  if (id < c->stmt_wr_cap) c->stmt_wr_mark[id] = stmt;
+  NodeKind k = nt_kind(nt, id);
+  if (k == NK_NumberedParametersNode) return 1;
+  int lv_bind = k == NK_LocalVariableWriteNode || k == NK_LocalVariableOperatorWriteNode ||
+                k == NK_LocalVariableOrWriteNode || k == NK_LocalVariableAndWriteNode ||
+                k == NK_LocalVariableTargetNode;
+  int param = k == NK_RequiredParameterNode || k == NK_OptionalParameterNode ||
+              k == NK_RestParameterNode || k == NK_KeywordRestParameterNode ||
+              k == NK_OptionalKeywordParameterNode || k == NK_BlockParameterNode;
+  if (k == NK_NONE) {
+    const char *ty = nt_type(nt, id);
+    if (!ty) return 0;
+    if (nt_str(nt, id, "name")) param = 1;
+    else if (strstr(ty, "Parameter")) return 1;
+  }
+  if (lv_bind || param) {
+    const char *nm = nt_str(nt, id, "name");
+    if (!nm && lv_bind) return 1;
+    if (nm) {
+      if (*n + 1 >= *cap) {
+        *cap = *cap ? *cap * 2 : 8;
+        *names = realloc(*names, sizeof **names * (size_t)*cap);
+        if (!*names) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+      }
+      (*names)[(*n)++] = nm;
+    }
+  }
+  int opaque = 0;
+  int nr = nt_num_refs(nt, id);
+  for (int i = 0; i < nr; i++) opaque |= stmt_wr_walk(c, stmt, nt_ref_at(nt, id, i), names, n, cap);
+  int na = nt_num_arrs(nt, id);
+  for (int i = 0; i < na; i++) {
+    int k = 0;
+    const int *ids = nt_arr_at(nt, id, i, &k);
+    for (int j = 0; j < k; j++) opaque |= stmt_wr_walk(c, stmt, ids[j], names, n, cap);
+  }
+  return opaque;
+}
+
+/* See codegen_internal.h. The statement's names are collected on its first
+   question and kept, so each statement is walked once however many temps
+   ask about it. */
+int stmt_may_rebind_local(Compiler *c, int stmt, int read, const char *name) {
+  if (stmt < 0 || read < 0 || !name) return 1;
+  int need = c->nt->count;
+  if (stmt >= need || read >= need) return 1;
+  if (need > c->stmt_wr_cap) {
+    int cap = need + need / 2 + 64;
+    c->stmt_wr_state = realloc(c->stmt_wr_state, (size_t)cap);
+    c->stmt_wr_names = realloc(c->stmt_wr_names, sizeof *c->stmt_wr_names * (size_t)cap);
+    c->stmt_wr_mark = realloc(c->stmt_wr_mark, sizeof *c->stmt_wr_mark * (size_t)cap);
+    if (!c->stmt_wr_state || !c->stmt_wr_names || !c->stmt_wr_mark) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+    for (int i = c->stmt_wr_cap; i < cap; i++) { c->stmt_wr_state[i] = 0; c->stmt_wr_names[i] = NULL; c->stmt_wr_mark[i] = -1; }
+    c->stmt_wr_cap = cap;
+  }
+  if (!c->stmt_wr_state[stmt]) {
+    const char **names = NULL; int n = 0, ncap = 0;
+    int opaque = stmt_wr_walk(c, stmt, stmt, &names, &n, &ncap);
+    if (!names) names = calloc(1, sizeof *names);
+    else names[n] = NULL;
+    c->stmt_wr_names[stmt] = names;
+    c->stmt_wr_state[stmt] = opaque ? 2 : 1;
+  }
+  if (c->stmt_wr_state[stmt] == 2) return 1;
+  /* a read outside the statement (an inlined body spliced into it) is
+     bound by code the walk did not see */
+  if (c->stmt_wr_mark[read] != stmt) return 1;
+  for (const char **q = c->stmt_wr_names[stmt]; q && *q; q++)
+    if (sp_streq(*q, name)) return 1;
+  return 0;
+}
+
 void emit_gc_root_tmp(Compiler *c, TyKind t, int tmp, Buf *b) {
   char name[24]; snprintf(name, sizeof name, "_t%d", tmp);
   emit_gc_root_var(c, t, name, b);

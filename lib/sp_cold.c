@@ -657,7 +657,8 @@ sp_StrArray *sp_file_readlines(const char *path) {SP_GC_ROOT_STR(path);
   sp_StrArray *a = sp_StrArray_new();
   SP_GC_ROOT(a);
   FILE *_fp = fopen(path ? path : "", "r");
-  if (!_fp) return a;
+  /* a file that can't be opened raises, as CRuby's (Errno::ENOENT, ...) */
+  if (!_fp) sp_file_raise_errno("rb_sysopen", path);
   /* getline answers each line whole, however long, as ARGF's gets reads it */
   char *_buf = NULL;
   size_t _cap = 0;
@@ -678,7 +679,8 @@ sp_StrArray *sp_file_readlines_chomp(const char *path) {SP_GC_ROOT_STR(path);
   sp_StrArray *a = sp_StrArray_new();
   SP_GC_ROOT(a);
   FILE *_fp = fopen(path ? path : "", "r");
-  if (!_fp) return a;
+  /* a file that can't be opened raises, as CRuby's (Errno::ENOENT, ...) */
+  if (!_fp) sp_file_raise_errno("rb_sysopen", path);
   char *_buf = NULL;
   size_t _cap = 0;
   ssize_t _n;
@@ -1686,6 +1688,42 @@ else {                                        /* macOS: "<idx> <image> <addr> <s
   return strdup(out);
 }
 
+#if defined(__linux__) && defined(HAVE_EXECINFO_H)
+#include <dlfcn.h>
+#include <elf.h>
+#include <link.h>
+/* The source line of each return address, from the DWARF the debug build
+   carries: addr2line reads the program's own file, and the generated C's #line
+   directives make the line one of the .rb source. Run once per backtrace, for
+   every frame, only under --debug; a build without addr2line, or an address
+   without a line, leaves the frame without one (lines[i] stays 0). A return
+   address is one past the call, so the call's own line is asked at addr - 1. */
+static void sp_bt_lines(void **buf, int n, int *lines) {
+  char exe[1024];
+  ssize_t el = readlink("/proc/self/exe", exe, sizeof exe - 1);
+  if (el <= 0 || strchr(exe, '\'')) return;
+  exe[el] = 0;
+  Dl_info di;
+  if (!dladdr(buf[0], &di) || !di.dli_fbase) return;
+  const ElfW(Ehdr) *eh = (const ElfW(Ehdr) *)di.dli_fbase;
+  uintptr_t bias = eh->e_type == ET_DYN ? (uintptr_t)di.dli_fbase : 0;
+  char cmd[4096];
+  int o = snprintf(cmd, sizeof cmd, "addr2line -e '%s'", exe);
+  for (int i = 0; i < n && o < (int)sizeof cmd - 32; i++)
+    o += snprintf(cmd + o, sizeof cmd - (size_t)o, " 0x%lx", (unsigned long)((uintptr_t)buf[i] - 1 - bias));
+  FILE *p = popen(cmd, "r");
+  if (!p) return;
+  char line[2048];
+  for (int i = 0; i < n && fgets(line, sizeof line, p); i++) {
+    char *c = strrchr(line, ':');
+    if (c && c[1] >= '1' && c[1] <= '9') lines[i] = atoi(c + 1);
+  }
+  pclose(p);
+}
+#else
+static void sp_bt_lines(void **buf, int n, int *lines) { (void)buf; (void)n; (void)lines; }
+#endif
+
 sp_StrArray *sp_bt_format(void **buf, int n) {
   sp_StrArray *a = sp_StrArray_new();
   SP_GC_ROOT(a);
@@ -1693,6 +1731,8 @@ sp_StrArray *sp_bt_format(void **buf, int n) {
   char **syms = backtrace_symbols(buf, n);
   if (!syms) return a;
   const char *src = (sp_bt_srcfile && sp_bt_srcfile[0]) ? sp_bt_srcfile : "(spinel)";
+  int *lines = (int *)calloc((size_t)n, sizeof *lines);
+  if (lines) sp_bt_lines(buf, n, lines);
   for (int i = 0; i < n; i++) {
     char raw[256]; raw[0] = 0;
     char *name = (char *)sp_bt_symbol(syms[i], raw, sizeof raw);  /* always strdup'd; free after use */
@@ -1702,9 +1742,11 @@ sp_StrArray *sp_bt_format(void **buf, int n) {
     if (sp_bt_files)
       for (const char *const *f = sp_bt_files; f[0]; f += 2)
         if (strcmp(f[0], raw) == 0) { file = f[1]; break; }
-    sp_StrArray_push(a, sp_sprintf("%s:in `%s'", file, name));
+    if (lines && lines[i] > 0) sp_StrArray_push(a, sp_sprintf("%s:%d:in `%s'", file, lines[i], name));
+    else sp_StrArray_push(a, sp_sprintf("%s:in `%s'", file, name));
     free(name);
   }
+  free(lines);
   free(syms);
   return a;
 }
@@ -2707,6 +2749,7 @@ sp_RbVal sp_Enumerator_feed(sp_Enumerator *e, sp_RbVal v);
 sp_PolyArray *sp_Enumerator_take(sp_Enumerator *e, sp_int n);
 sp_PolyArray *sp_Enumerator_to_a(sp_Enumerator *e);
 void sp_sig_c_handler(int no);
+void sp_exc_resignal(const char *cls, const char *msg);
 void sp_sig_exit_dispatch(void);
 sp_RbVal sp_signal_trap(sp_RbVal sig, sp_RbVal handler);
 sp_int sp_process_kill1(sp_RbVal sig, sp_int pid);
@@ -3740,6 +3783,10 @@ sp_FloatRange sp_frange_new_o(sp_float f, sp_float l, sp_int e, sp_int om) {
   sp_FloatRange r; r.first = f; r.last = l; r.excl = e; r.omitted = om; r.unfrozen = 0; return r;
 }
 sp_bool sp_frange_cover(sp_FloatRange r, sp_float x) {
+  /* a NaN compares with no bound (Float#<=> answers nil), so CRuby's
+     cover? finds it in no Range, an endless or beginless one included;
+     both tests below are false for it and let it through */
+  if (isnan(x)) return 0;
   if (r.first != -HUGE_VAL && x < r.first) return 0;
   if (r.last != HUGE_VAL && (r.excl ? x >= r.last : x > r.last)) return 0;
   return 1;
@@ -4818,6 +4865,16 @@ sp_Exception *sp_signal_exc_new_m(sp_RbVal sig, const char *msg) {SP_GC_ROOT_RBV
 sp_Exception *sp_signal_exc_new(sp_RbVal sig) {SP_GC_ROOT_RBVAL(sig);
   return sp_signal_exc_new_m(sig, NULL);
 }
+/* An exception nothing rescued that is a signal's: the process ends by that
+   signal, as CRuby's does, so its parent reads 130 for an Interrupt. */
+void sp_exc_resignal(const char *cls, const char *msg) {
+  int no = !strcmp(cls, "Interrupt") ? SIGINT
+         : (!strcmp(cls, "SignalException") && msg && !strcmp(msg, "SIGTERM")) ? SIGTERM : 0;
+  if (!no) return;
+  fflush(NULL);   /* the buffered output exit() would have written */
+  signal(no, SIG_DFL);
+  raise(no);
+}
 sp_Exception *sp_interrupt_new(const char *msg) {SP_GC_ROOT_STR(msg);
   sp_Exception *e = sp_exc_new("Interrupt", (msg && msg[0]) ? msg : "Interrupt");
   SP_GC_ROOT(e);
@@ -4915,10 +4972,15 @@ SP_NORETURN void sp_raise_nil_cmp(int left_nil, const char *op, const char *cls)
 
 /* A nil that reached a strict Integer argument slot through an `Integer?`
    variable. The literal `s[nil]` already raised this from the emitter; the
-   slot's nil is the same nil, so it gets the same message (#4896). */
+   slot's nil is the same nil, so it gets the same message (#4896). CRuby
+   words it by the conversion the slot makes: 0 rb_num2long's, 1
+   rb_convert_type's (and NUM2SIZET's), 2 NUM2OFFT's, an IO offset (rb_num2long's wording where off_t is a long, rb_num2ll's
+   where it is wider: a 32-bit build, macOS). */
 SP_NORETURN void sp_raise_nil_to_int(int of_wording) {
-  sp_raise_cls("TypeError", of_wording ? "no implicit conversion of nil into Integer"
-                                       : "no implicit conversion from nil to integer");
+  sp_raise_cls("TypeError", of_wording == 2 ? (sizeof(off_t) == sizeof(long) ? "no implicit conversion from nil to integer"
+                                                                              : "no implicit conversion from nil")
+                            : of_wording ? "no implicit conversion of nil into Integer"
+                                         : "no implicit conversion from nil to integer");
 }
 
 /* A real -2^63 headed for a slot that can also hold nil: the slot's nil is
@@ -4976,7 +5038,7 @@ const char *sp_str_encode(const char *s, sp_RbVal dst, sp_RbVal src,
   const char *repl = (replace.tag == SP_TAG_STR && replace.v.s) ? replace.v.s : NULL;
   SP_GC_ROOT_STR(repl);
   if (from == to) {
-    if (from == 1 && sp_enc_kw_replace(invalid)) return sp_str_scrub(s, repl);
+    if (from == 1 && sp_enc_kw_replace(invalid)) return sp_str_scrub_utf8(s, repl);
     return sp_str_dup(s);
   }
   /* binary <-> UTF-8: the ASCII bytes carry over, nothing else does */

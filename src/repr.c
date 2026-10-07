@@ -6,6 +6,7 @@
 #include "repr.h"
 #include "codegen_internal.h"
 #include "share.h"
+#include "holder.h"
 
 static int repr_sealed_flag;
 
@@ -39,12 +40,35 @@ static ReprKind repr_kind_of_type(const Compiler *c, TyKind t) {
    holds its keys and its values as (its variant's row: ty_hash_key,
    ty_hash_val) -- decides the helpers a call on it takes and the C type
    they name; an Integer is an sp_int scalar, and one held big an
-   sp_Bigint * pointer, which takes the Bignum helpers. */
+   sp_Bigint * pointer, which takes the Bignum helpers. Every Range is a
+   by-value struct, and which one -- an sp_Range of Integer bounds, an
+   sp_FloatRange of Float ones, an sp_StrRange of Strings -- decides the
+   same. A value with no type at all is RK_NONE, as a void one is; untyped
+   tells them apart. */
 static void repr_layout(Repr *r, TyKind t) {
   r->elem = ty_is_array(t) || ty_is_obj_array(t) ? ty_array_elem(t) : TY_UNKNOWN;
   r->key = ty_hash_key(t);
   r->val = ty_hash_val(t);
+  r->range = t == TY_RANGE ? TY_INT : t == TY_FLOAT_RANGE ? TY_FLOAT
+           : t == TY_STR_RANGE ? TY_STRING : TY_UNKNOWN;
   r->big = t == TY_BIGINT;
+  r->untyped = t == TY_UNKNOWN;
+}
+
+/* What a local's slot says about where its value lives and what it holds,
+   beside its type: its cell, a String kept volatile across a setjmp, a box
+   proven to hold only a PolyArray or nil. A read of the local says the
+   same. */
+static void repr_slot_storage(Repr *r, const LocalVar *lv) {
+  r->cell = (unsigned char)(lv->byref_out ? RC_BYREF : lv->inline_alias ? RC_ALIAS
+                            : lv->is_cell ? RC_HEAP : RC_NONE);
+  r->volatile_str = lv->borrowed_volatile != 0;
+  r->arr_or_nil = lv->arr_or_nil == 1 && lv->type == TY_POLY;
+}
+
+/* An Integer or Float Array the analysis saw a nil stored into. */
+static int repr_elem_nil(TyKind elem, int marked) {
+  return (elem == TY_INT || elem == TY_FLOAT) && marked;
 }
 
 int repr_hash_is(Repr r, TyKind key, TyKind val) {
@@ -60,6 +84,8 @@ int repr_dyn_cls(const Compiler *c, TyKind t) {
   /* an exception's object starts with its class name, not a class id, so
      it is boxed with the static id (emit_boxed) */
   if (c->classes[cid].is_value_type || class_is_exc_subclass((Compiler *)c, cid)) return 0;
+  /* an Array subclass instance is boxed as its Array (arysub_box_id) */
+  if (c->classes[cid].ary_root > 0) return 0;
   for (int k = 0; k < c->nclasses; k++)
     if (k != cid && c->classes[k].parent == cid) return 1;
   return 0;
@@ -90,6 +116,30 @@ int repr_nil_scalar(const Compiler *c, int node, TyKind t) {
   return r;
 }
 
+/* repr.h: the write's slot holds the rule's handle */
+int repr_write_share(const Compiler *c, int node) {
+  if (node < 0 || !c->share_strings) return 0;
+  Compiler *mc = (Compiler *)c;
+  const NodeTable *nt = c->nt;
+  NodeKind k = nt_kind(nt, node);
+  if (k == NK_LocalVariableWriteNode || k == NK_LocalVariableOrWriteNode || k == NK_LocalVariableAndWriteNode) {
+    const char *ln = nt_str(nt, node, "name");
+    Scope *s = ln ? comp_scope_of(mc, node) : NULL;
+    return s && repr_of_slot(c, scope_local(s, ln)).share;
+  }
+  if (k == NK_InstanceVariableWriteNode || k == NK_InstanceVariableOrWriteNode ||
+      k == NK_InstanceVariableAndWriteNode) {
+    const char *nm = nt_str(nt, node, "name");
+    int cid = nm ? strbuf_ivar_owner(mc, node) : -1;
+    int iv = cid >= 0 ? comp_ivar_index(&c->classes[cid], nm) : -1;
+    return iv >= 0 && repr_of_ivar(c, cid, iv).share;
+  }
+  if (k == NK_GlobalVariableWriteNode || k == NK_GlobalVariableOrWriteNode || k == NK_GlobalVariableAndWriteNode ||
+      k == NK_ClassVariableWriteNode || k == NK_ClassVariableOrWriteNode || k == NK_ClassVariableAndWriteNode)
+    return repr_static_share(c, node);
+  return 0;
+}
+
 /* Where the boxed form of a shared-mutable String comes from, as emit_boxed
    decides it for a node stored as (or holding) the handle. */
 static int repr_strbuf_src(const Compiler *c, int node, TyKind t) {
@@ -99,6 +149,9 @@ static int repr_strbuf_src(const Compiler *c, int node, TyKind t) {
   if (t == TY_STRING) {
     /* a global holding the handle (--share-strings): its read boxes it */
     if (repr_static_read_kind(k)) return repr_static_share(c, node) ? RS_HANDLE : RS_NONE;
+    /* a write in value position whose slot holds the handle the rule
+       assigned: its value is that slot, as the slot's read is */
+    if (repr_write_share(c, node)) return RS_HANDLE;
     /* a local promoted to the handle after the node types were final */
     if (k != NK_LocalVariableReadNode) return RS_NONE;
     const char *ln = nt_str(nt, node, "name");
@@ -124,8 +177,18 @@ static int repr_strbuf_src(const Compiler *c, int node, TyKind t) {
   /* a global holding the handle (--share-strings) */
   if ((repr_static_read_kind(k) || k == NK_GlobalVariableWriteNode) && repr_static_share(c, node))
     return RS_HANDLE;
-  /* an ivar write's value is the slot */
-  if (k == NK_InstanceVariableWriteNode) return RS_HANDLE;
+  /* an ivar write's value is the slot when the slot is the handle; a
+     plain String slot's value is a String, wrapped fresh below (a raise
+     arm beside it boxed that `const char *` as the handle, and the C did
+     not build) */
+  if (k == NK_InstanceVariableWriteNode) {
+    const char *nm = nt_str(nt, node, "name");
+    int cid = nm ? strbuf_ivar_owner(mc, node) : -1;
+    int iv = cid >= 0 ? comp_ivar_index(&c->classes[cid], nm) : -1;
+    if (iv < 0 || c->classes[cid].ivar_types[iv] == TY_STRBUF) return RS_HANDLE;
+  }
+  /* so is any write's whose slot holds the rule's handle */
+  if (repr_write_share(c, node)) return RS_HANDLE;
   /* an element a boxed container hands out is a boxed handle already */
   if (strbuf_boxed_elem_read(mc, node)) return RS_ELEM;
   /* a reader call (or a call answering its receiver) that renders the
@@ -201,14 +264,29 @@ int repr_local_nullable_int(Compiler *c, int node) {
   return lv && lv->nullable_int;
 }
 
+/* Can a value held as t be nil? A user object and a builtin pointer the
+   analysis follows (nil_fact_tracked: a String, an Array, a Hash, an IO)
+   answer by their nil fact, `fact` (analyze_nil.c, #7444). Any other kind
+   whose NULL is its nil (a Bignum, a String buffer, a Proc, a Method, a
+   MatchData, ...) has no fact, so it can hold one. */
+static int repr_may_nil(TyKind t, int fact) {
+  return nil_fact_tracked(t) ? fact : ty_null_is_nil(t);
+}
+
 Repr repr_of(const Compiler *c, int node) {
   Repr r;
   memset(&r, 0, sizeof r);
-  r.ty = r.as_ty = r.narrowed = r.elem = r.key = r.val = TY_UNKNOWN;
+  r.ty = r.as_ty = r.narrowed = r.elem = r.key = r.val = r.range = TY_UNKNOWN;
   r.kind = RK_NONE;
+  r.untyped = 1;
   if (node < 0 || node >= c->nt->count) return r;
   r.ty = c->ntype[node];
   r.as_ty = comp_ntype(c, node);
+  /* the layout first, from the type it is stored as, then the flags:
+     GCC 13's store merging at -O2 drops the nil_cold store when
+     repr_layout's bitfield stores come after it; setting the layout first
+     avoids it */
+  repr_layout(&r, r.as_ty);
   r.narrowed = c->nilnarrow ? c->nilnarrow[node] : TY_UNKNOWN;
   r.handle = c->strbuf_box[node] != 0;
   r.demand = c->strbuf_handle_demand[node] != 0;
@@ -221,7 +299,6 @@ Repr repr_of(const Compiler *c, int node) {
   TyKind kt = r.as_ty;
   r.kind = (unsigned char)repr_kind_of_type(c, kt);
   r.dyn_cls = repr_dyn_cls(c, kt);
-  repr_layout(&r, kt);
   if (repr_nil_scalar(c, node, kt)) {
     r.kind = RK_SENTINEL;
     r.may_nil = r.nil_scalar = 1;
@@ -230,13 +307,25 @@ Repr repr_of(const Compiler *c, int node) {
   r.share = (unsigned)repr_static_share(c, node);
   if (r.strbuf_src == RS_SLOT_POLY) r.kind = RK_BOXED;
   else if (r.strbuf_src != RS_NONE) r.kind = RK_STRBUF;
-  /* a user object the nil fact says may be nil (analyze_nil.c, #7444); a
-     by-value one too, whose layout has no nil to hold it in; a builtin
-     pointer (a String, an Array, a Hash, an IO) whose NULL is its nil, and
-     a shared String's handle */
-  if ((r.kind == RK_PTR || r.kind == RK_VOBJ || r.kind == RK_STRBUF) && nil_fact_tracked(kt) &&
-      nil_fact_node(c, node))
+  /* a pointer that can be nil (repr_may_nil); a by-value user object the
+     nil fact says may be nil too, whose layout has no nil to hold it in */
+  if ((r.kind == RK_PTR || r.kind == RK_VOBJ || r.kind == RK_STRBUF) &&
+      repr_may_nil(kt, nil_fact_tracked(kt) && nil_fact_node(c, node)))
     r.may_nil = 1;
+  /* an Integer or Float Array the analysis marked (nullable_int_elem_array
+     asks the node's source, as a pure read) */
+  if (r.elem == TY_INT || r.elem == TY_FLOAT) {
+    an_pure_read_begin();
+    r.elem_nil_marked = (unsigned)repr_elem_nil(r.elem, nullable_int_elem_array((Compiler *)c, node));
+    an_pure_read_end();
+  }
+  /* a local read says what its slot does about where the value lives */
+  if (nt_kind(c->nt, node) == NK_LocalVariableReadNode) {
+    const char *ln = nt_str(c->nt, node, "name");
+    Scope *s = ln ? comp_scope_of((Compiler *)c, node) : NULL;
+    LocalVar *lv = s ? scope_local(s, ln) : NULL;
+    if (lv) repr_slot_storage(&r, lv);
+  }
   return r;
 }
 
@@ -422,31 +511,39 @@ void repr_check_ask(const Compiler *c, int node) {
 
 ReprKind repr_slot_kind(const Compiler *c, const LocalVar *lv) {
   if (!lv) return RK_NONE;
-  /* an Integer or Float slot some write leaves nil in: its sentinel */
+  /* an Integer or Float slot some write leaves nil in: its sentinel; under
+     --int-overflow=promote every Integer can be the sentinel, as every
+     Integer read is (repr_nil_scalar) */
   if ((lv->type == TY_INT || lv->type == TY_FLOAT) &&
-      (lv->nullable_int || lv->box_nullable || lv->maybe_unset))
+      (lv->nullable_int || lv->box_nullable || lv->maybe_unset ||
+       (lv->type == TY_INT && g_promote_mode)))
     return RK_SENTINEL;
   return repr_kind_of_type(c, lv->type);
 }
 Repr repr_of_slot(const Compiler *c, const LocalVar *lv) {
   Repr r;
   memset(&r, 0, sizeof r);
-  r.ty = r.as_ty = r.narrowed = r.elem = r.key = r.val = TY_UNKNOWN;
+  r.ty = r.as_ty = r.narrowed = r.elem = r.key = r.val = r.range = TY_UNKNOWN;
   r.kind = RK_NONE;
+  r.untyped = 1;
   if (!lv) return r;
   r.ty = r.as_ty = lv->type;
   repr_layout(&r, lv->type);
   ReprKind k = repr_slot_kind(c, lv);
-  if (k == RK_SENTINEL) r.may_nil = 1;
+  /* a sentinel slot's box tests for it, as a read of it does
+     (repr_nil_scalar) */
+  if (k == RK_SENTINEL) r.may_nil = r.nil_scalar = 1;
   /* a `||=` can read the slot before any write: nil until then */
   if (lv->or_written) r.may_nil = 1;
-  /* an object slot, or a builtin pointer's, the nil fact says may hold nil */
-  if (nil_fact_tracked(lv->type) && lv->obj_may_nil) r.may_nil = 1;
+  /* a pointer slot that can hold nil (repr_may_nil) */
+  if (repr_may_nil(lv->type, lv->obj_may_nil)) r.may_nil = 1;
   /* str_shared refines TY_STRBUF; it can outlive that storage type */
   if (lv->type == TY_STRBUF && lv->str_shared) r.handle = 1;
   /* under the rule, that handle is the one it assigned */
   r.share = r.handle && c->share_strings;
   r.elems_handle = lv->elems_shared && lv->type == TY_POLY_ARRAY;
+  r.elem_nil_marked = (unsigned)repr_elem_nil(r.elem, lv->nullable_int_elem);
+  repr_slot_storage(&r, lv);
   r.kind = (unsigned char)k;
   r.dyn_cls = repr_dyn_cls(c, lv->type);
   return r;
@@ -484,70 +581,12 @@ int repr_static_read_kind(NodeKind k) {
   return k == NK_GlobalVariableReadNode || k == NK_ConstantReadNode || k == NK_ConstantPathNode ||
          k == NK_ClassVariableReadNode;
 }
-static int repr_const_node(NodeKind k) {
-  return k == NK_ConstantReadNode || k == NK_ConstantPathNode || k == NK_ConstantWriteNode || k == NK_ConstantOrWriteNode ||
-         k == NK_ConstantAndWriteNode || k == NK_ConstantOperatorWriteNode;
-}
-static int repr_cvar_node(NodeKind k) {
-  return k == NK_ClassVariableReadNode || k == NK_ClassVariableWriteNode || k == NK_ClassVariableOrWriteNode ||
-         k == NK_ClassVariableAndWriteNode || k == NK_ClassVariableOperatorWriteNode;
-}
-/* The class variable node `node` names, by the read emitter's rule
-   (cvar_global_slot): its owning class and index, or 0. */
-static int repr_cvar_slot(const Compiler *c, int node, int *cid, int *idx) {
-  const char *nm = nt_str(c->nt, node, "name");
-  Scope *s = comp_scope_of((Compiler *)c, node);
-  if (!nm || !s) return 0;
-  int k = s->class_id;
-  if (k < 0 && c->node_cbody && node < c->node_cap) k = c->node_cbody[node];
-  if (k < 0) k = comp_class_index((Compiler *)c, "Toplevel");
-  if (k < 0) return 0;
-  k = comp_cvar_owner((Compiler *)c, k, nm);
-  int i = comp_cvar_index(&c->classes[k], nm);
-  if (i < 0) return 0;
-  *cid = k; *idx = i;
-  return 1;
-}
-static LocalVar *repr_static_var(const Compiler *c, int node) {
-  const NodeTable *nt = c->nt;
-  NodeKind k = nt_kind(nt, node);
-  if (k == NK_GlobalVariableReadNode || k == NK_GlobalVariableWriteNode || k == NK_GlobalVariableOrWriteNode ||
-      k == NK_GlobalVariableAndWriteNode || k == NK_GlobalVariableOperatorWriteNode) {
-    const char *gn = nt_str(nt, node, "name");
-    const char *rn = gn && gn[0] == '$' ? comp_resolve_gvar((Compiler *)c, gn + 1) : NULL;
-    return rn ? comp_gvar((Compiler *)c, rn) : NULL;
-  }
-  if (repr_const_node(k)) {
-    const char *cn = nt_str(nt, node, "name");
-    return cn ? comp_const((Compiler *)c, cn) : NULL;
-  }
-  return NULL;
-}
 /* repr_of's `share` for a read or write node of a global, a constant or a
-   class variable: its slot's (only the rule makes one the handle). The
-   handle is an sp_String * slot: its kind is asked first, as repr_of asks
-   this of every node and the slot's whole Repr scans the classes for an
-   object's dyn_cls. */
+   class variable: its slot's (only the rule makes one the handle) */
 int repr_static_share(const Compiler *c, int node) {
-  if (node < 0 || !c->share_strings) return 0;
-  if (repr_cvar_node(nt_kind(c->nt, node))) {
-    int cid, idx;
-    return repr_cvar_slot(c, node, &cid, &idx) && repr_cvar_kind(c, cid, idx) == RK_STRBUF &&
-           repr_of_cvar(c, cid, idx).share;
-  }
-  LocalVar *lv = repr_static_var(c, node);
-  return lv && repr_slot_kind(c, lv) == RK_STRBUF && repr_of_slot(c, lv).share;
-}
-int repr_handle_static_ref(const Compiler *c, int node, char *out, size_t cap) {
-  if (!repr_static_share(c, node)) return 0;
-  NodeKind k = nt_kind(c->nt, node);
-  if (repr_cvar_node(k)) {
-    int cid, idx;
-    repr_cvar_slot(c, node, &cid, &idx);
-    snprintf(out, cap, "cvar_%s_%s", c->classes[cid].name, c->classes[cid].cvars[idx] + 2);
-  }
-  else snprintf(out, cap, "%s_%s", repr_const_node(k) ? "cst" : "gv", repr_static_var(c, node)->name);
-  return 1;
+  HolderRef h;
+  if (node < 0 || !c->share_strings || !holder_static_node(nt_kind(c->nt, node))) return 0;
+  return holder_of_node(c, node, &h) && h.r.share;
 }
 
 int repr_str_class_shares(unsigned flags, int holders) {
@@ -572,7 +611,7 @@ int repr_str_elems_share(const Compiler *c, int holder) {
    is the caller's), and a class variable is every class's of the name (the
    facts key it by name alone): boxed if one is, and the handle only if
    every String one is. ty is TY_UNKNOWN for a holder with no slot. */
-static Repr repr_of_holder(Compiler *c, const ShareHolder *h) {
+static Repr repr_of_share_holder(Compiler *c, const ShareHolder *h) {
   Repr r;
   memset(&r, 0, sizeof r);
   r.ty = r.as_ty = TY_UNKNOWN;
@@ -662,7 +701,7 @@ static void repr_share_seal(Compiler *c) {
     }
     /* does the holder hold the shared handle (a box holds what is stored,
        the handle included)? -1 for one that holds no String */
-    Repr hr = repr_of_holder(c, sh);
+    Repr hr = repr_of_share_holder(c, sh);
     int carried = hr.kind == RK_BOXED || hr.share ? 1 : hr.ty == TY_STRING || hr.ty == TY_STRBUF ? 0 : -1;
     if (carried < 0) continue;
     n_str++;
@@ -752,8 +791,9 @@ static void repr_share_seal(Compiler *c) {
    became a shared handle or a box, or left a by-value layout, costs at run
    time without changing any output (#7482), and this is where it shows.
    Locals, parameters, globals and constants are LocalVars and read through
-   repr_of_slot. An ivar and a method's value are not: they read their own
-   flags by the same rules. The dump only reads. It is taken once the
+   repr_of_slot. An ivar, a class variable and a method's value are not:
+   repr_of_ivar, repr_of_cvar and repr_of_ret read their own flags by the
+   same rules. The dump only reads. It is taken once the
    analysis is final and printed once the compile has passed, so a program
    codegen refuses fails as a compile does; no C is written. */
 int g_dump_repr = 0;
@@ -767,37 +807,52 @@ static const char *repr_kind_name(int k) {
 
 /* an ivar's slot: every Integer ivar reads nil until written, as
    repr_nil_scalar answers for its reads; a Float one when some write can
-   leave the sentinel */
+   leave the sentinel, or when initialize does not write it (a Struct
+   member among them), which its reads box nil-aware (box_nullable_arg) */
 Repr repr_of_ivar(const Compiler *c, int cid, int iv) {
   const ClassInfo *ci = &c->classes[cid];
   Repr r;
   memset(&r, 0, sizeof r);
   r.ty = r.as_ty = ci->ivar_types[iv];
   r.narrowed = TY_UNKNOWN;
+  repr_layout(&r, r.ty);
   r.kind = (unsigned char)repr_kind_of_type(c, r.ty);
-  if (r.ty == TY_INT || (r.ty == TY_FLOAT && ci->ivar_nullable_int[iv])) {
+  if (r.ty == TY_INT ||
+      (r.ty == TY_FLOAT && (ci->ivar_nullable_int[iv] ||
+                            !ivar_assigned_in_initialize((Compiler *)c, cid, ci->ivars[iv])))) {
     r.kind = RK_SENTINEL;
-    r.may_nil = 1;
+    r.may_nil = r.nil_scalar = 1;
   }
-  if (ty_is_object(r.ty) && nil_fact_ivar(c, cid, ci->ivars[iv])) r.may_nil = 1;
+  if (repr_may_nil(r.ty, nil_fact_ivar(c, cid, ci->ivars[iv]))) r.may_nil = 1;
   if (r.ty == TY_STRBUF && ci->ivar_str_shared[iv]) r.handle = 1;
   r.share = r.handle && c->share_strings;
+  /* the element marking sits on the family's topmost class that has the
+     ivar, where every subclass reads it (nullable_elem_ivar_in) */
+  int ec = cid, ek = iv;
+  for (int p = ci->parent; p >= 0 && p < c->nclasses; p = c->classes[p].parent) {
+    int k = comp_ivar_index((ClassInfo *)&c->classes[p], ci->ivars[iv]);
+    if (k < 0) break;
+    ec = p; ek = k;
+  }
+  r.elem_nil_marked = (unsigned)repr_elem_nil(r.elem, c->classes[ec].ivar_nullable_int_elem[ek]);
   r.dyn_cls = repr_dyn_cls(c, r.ty);
   return r;
 }
 
 /* a class variable's slot, as an ivar's: an Integer or Float one some
-   write leaves nil in holds the sentinel */
+   write leaves nil in holds the sentinel, and under --int-overflow=promote
+   every Integer one, as every Integer read is (repr_nil_scalar) */
 ReprKind repr_cvar_kind(const Compiler *c, int cid, int idx) {
   const ClassInfo *ci = &c->classes[cid];
   TyKind t = ci->cvar_types[idx];
-  if ((t == TY_INT || t == TY_FLOAT) && ci->cvar_nullable_int[idx]) return RK_SENTINEL;
+  if ((t == TY_INT || t == TY_FLOAT) && (ci->cvar_nullable_int[idx] || (t == TY_INT && g_promote_mode)))
+    return RK_SENTINEL;
   return repr_kind_of_type(c, t);
 }
 /* Only the rule makes a class variable the shared handle
-   (cvar_str_shared). An object one has no nil fact (analyze_nil.c keeps
-   one per ivar): it may be nil, as nil_fact_ivar answers for an ivar it
-   has none for. */
+   (cvar_str_shared). A class variable has no nil fact (analyze_nil.c keeps
+   one per ivar): a pointer one may be nil (repr_may_nil), as nil_fact_ivar
+   answers for an ivar it has none for. */
 Repr repr_of_cvar(const Compiler *c, int cid, int idx) {
   const ClassInfo *ci = &c->classes[cid];
   Repr r;
@@ -806,25 +861,29 @@ Repr repr_of_cvar(const Compiler *c, int cid, int idx) {
   r.narrowed = r.elem = r.key = r.val = TY_UNKNOWN;
   repr_layout(&r, r.ty);
   r.kind = (unsigned char)repr_cvar_kind(c, cid, idx);
-  if (r.kind == RK_SENTINEL || ty_is_object(r.ty)) r.may_nil = 1;
+  if (r.kind == RK_SENTINEL) r.may_nil = r.nil_scalar = 1;
+  if (repr_may_nil(r.ty, 1)) r.may_nil = 1;
   if (r.ty == TY_STRBUF && ci->cvar_str_shared[idx]) r.handle = 1;
   r.share = r.handle && c->share_strings;
   r.dyn_cls = repr_dyn_cls(c, r.ty);
   return r;
 }
 
-/* a method's value: its nilable scalar is the sentinel */
-static Repr repr_of_ret(const Compiler *c, const Scope *sc) {
+/* a method's value: its nilable scalar is the sentinel, and under
+   --int-overflow=promote every Integer, as every Integer read is */
+Repr repr_of_ret(const Compiler *c, const Scope *sc) {
   Repr r;
   memset(&r, 0, sizeof r);
   r.ty = r.as_ty = sc->ret;
   r.narrowed = TY_UNKNOWN;
+  repr_layout(&r, r.ty);
   r.kind = (unsigned char)repr_kind_of_type(c, r.ty);
-  if ((r.ty == TY_INT || r.ty == TY_FLOAT) && (sc->ret_nullable_int || sc->ret_rbs_nilable)) {
+  if ((r.ty == TY_INT || r.ty == TY_FLOAT) &&
+      (sc->ret_nullable_int || sc->ret_rbs_nilable || (r.ty == TY_INT && g_promote_mode))) {
     r.kind = RK_SENTINEL;
-    r.may_nil = 1;
+    r.may_nil = r.nil_scalar = 1;
   }
-  if (ty_is_object(r.ty) && sc->ret_obj_may_nil) r.may_nil = 1;
+  if (repr_may_nil(r.ty, sc->ret_obj_may_nil)) r.may_nil = 1;
   r.dyn_cls = repr_dyn_cls(c, r.ty);
   return r;
 }
@@ -840,11 +899,24 @@ static void repr_dump_ty(const Compiler *c, TyKind t, char *out, size_t n) {
 
 typedef struct { char **v; int n, cap; } ReprLines;
 
+/* where a local lives, as the dump prints it */
+static const char *repr_cell_name(int cell) {
+  switch ((ReprCell)cell) {
+  case RC_NONE:  return "";
+  case RC_HEAP:  return " cell=heap";
+  case RC_BYREF: return " cell=byref";
+  case RC_ALIAS: return " cell=alias";
+  }
+  return " cell=?";
+}
+
 static void repr_dump_line(const Compiler *c, ReprLines *ls, const char *where, Repr r) {
   char ty[256], line[1024];
   repr_dump_ty(c, r.ty, ty, sizeof ty);
-  snprintf(line, sizeof line, "%s: %s ty=%s%s%s%s", where, repr_kind_name(r.kind), ty,
-           r.handle ? " handle" : "", r.may_nil ? " may_nil" : "", r.dyn_cls ? " dyn_cls" : "");
+  snprintf(line, sizeof line, "%s: %s ty=%s%s%s%s%s%s%s%s", where, repr_kind_name(r.kind), ty,
+           r.handle ? " handle" : "", r.may_nil ? " may_nil" : "", r.dyn_cls ? " dyn_cls" : "",
+           r.elem_nil_marked ? " elem_nil" : "", r.arr_or_nil ? " arr_or_nil" : "",
+           repr_cell_name(r.cell), r.volatile_str ? " volatile" : "");
   if (ls->n == ls->cap) {
     ls->cap = ls->cap ? ls->cap * 2 : 64;
     ls->v = realloc(ls->v, (size_t)ls->cap * sizeof *ls->v);
@@ -889,6 +961,11 @@ char *repr_dump(const Compiler *c) {
     for (int iv = 0; iv < c->classes[cid].nivars; iv++) {
       snprintf(where, sizeof where, "ivar %s %s", c->classes[cid].name, c->classes[cid].ivars[iv]);
       repr_dump_line(c, &ls, where, repr_of_ivar(c, cid, iv));
+    }
+  for (int cid = 0; cid < c->nclasses; cid++)
+    for (int cv = 0; cv < c->classes[cid].ncvars; cv++) {
+      snprintf(where, sizeof where, "cvar %s %s", c->classes[cid].name, c->classes[cid].cvars[cv]);
+      repr_dump_line(c, &ls, where, repr_of_cvar(c, cid, cv));
     }
   for (int k = 0; k < c->ngvars; k++) {
     snprintf(where, sizeof where, "gvar $%s", c->gvars[k].name);

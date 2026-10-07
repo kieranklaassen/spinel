@@ -745,8 +745,32 @@ sp_File *sp_sock_pair_end(sp_int domain, sp_int type, sp_int proto, sp_int which
 }
 
 /* Socket.getaddrinfo: one row per resolution, in CRuby's 7-element shape. */
-sp_PolyArray *sp_sock_getaddrinfo(const char *host, sp_int port) {SP_GC_ROOT_STR(host);
-  extern int sp_net_getaddrinfo_at(const char *host, int port, int socktype, int idx,
+/* A family or socktype argument of Socket.getaddrinfo: nil is 0
+   (unrestricted), an Integer as given, a String or Symbol by name with or
+   without its AF_ / SOCK_ prefix, as CRuby reads it. An unknown name is CRuby's
+   SocketError. */
+sp_int sp_sock_addrinfo_hint(sp_RbVal v, sp_int is_family) {
+  if (v.tag == SP_TAG_NIL) return 0;
+  if (v.tag == SP_TAG_INT) return v.v.i;
+  const char *name = NULL;
+  if (v.tag == SP_TAG_STR) name = v.v.s;
+  else if (v.tag == SP_TAG_SYM && sp_sym_name_fn) name = sp_sym_name_fn((sp_sym)v.v.i);
+  if (!name) sp_raise_cls("TypeError", "no implicit conversion into Integer");
+  const char *prefix = is_family ? "AF_" : "SOCK_";
+  size_t pl = strlen(prefix);
+  if (strncmp(name, prefix, pl) == 0) name += pl;
+  if (is_family && strcmp(name, "UNSPEC") == 0) return 0;
+  char full[64];
+  snprintf(full, sizeof full, "%s%s", prefix, name);
+  sp_int r = sp_sock_const(full);
+  if (r < 0) sp_raise_cls("SocketError", is_family ? "unknown socket domain" : "unknown socket type");
+  return r;
+}
+
+/* Socket.getaddrinfo(host, port [, family [, socktype]]): a family or socktype
+   of 0 (nil) leaves it unrestricted, as in CRuby. */
+sp_PolyArray *sp_sock_getaddrinfo(const char *host, sp_int port, sp_int family, sp_int socktype) {SP_GC_ROOT_STR(host);
+  extern int sp_net_getaddrinfo_at(const char *host, int port, int want_family, int socktype, int idx,
                                    int *family, int *stype, int *proto,
                                    char *ipbuf, int ipcap, int *port_out);
   sp_PolyArray *out = sp_PolyArray_new();
@@ -754,7 +778,7 @@ sp_PolyArray *sp_sock_getaddrinfo(const char *host, sp_int port) {SP_GC_ROOT_STR
   for (int i = 0; i < 64; i++) {
     int fam = 0, stype = 0, proto = 0, p = 0;
     char ip[64];
-    if (sp_net_getaddrinfo_at(host, (int)port, 0, i, &fam, &stype, &proto,
+    if (sp_net_getaddrinfo_at(host, (int)port, (int)family, (int)socktype, i, &fam, &stype, &proto,
                               ip, (int)sizeof ip, &p) != 0) break;
     const char *ips = sp_str_from_bytes(ip, strlen(ip));
     sp_PolyArray *row = sp_PolyArray_new();
@@ -939,6 +963,22 @@ sp_int sp_sock_shutdown(sp_File *f, sp_int how) {SP_GC_ROOT(f);
   if (sp_net_shutdown(fileno(f->fp), (int)how) != 0) sp_file_raise_errno("shutdown", "");
   return 0;
 }
+/* A setsockopt value as the int the option takes: an Integer, true/false as
+   1/0, or the option's packed bytes ([1].pack("i")), as CRuby accepts it. */
+sp_int sp_sock_optval(sp_RbVal v) {
+  if (v.tag == SP_TAG_INT) return v.v.i;
+  if (v.tag == SP_TAG_BOOL) return v.v.i != 0;
+  if (v.tag == SP_TAG_STR && v.v.s) {
+    int n = 0;
+    if (sp_str_byte_len(v.v.s) != sizeof n)
+      sp_raise_cls("ArgumentError", "only an int-sized packed option value is supported");
+    memcpy(&n, v.v.s, sizeof n);
+    return n;
+  }
+  sp_raise_cls("TypeError", "no implicit conversion into Integer");
+  return 0;
+}
+
 sp_int sp_sock_setsockopt(sp_File *f, sp_int level, sp_int opt, sp_int value) {SP_GC_ROOT(f);
   extern int sp_net_setsockopt_int(int fd, int level, int optname, int value);
   sp_sock_require(f, "setsockopt");
@@ -1039,7 +1079,7 @@ sp_File *sp_sock_accept_nb(sp_File *f, sp_bool exc) {SP_GC_ROOT(f);
    the OS worker, which never reaches a safepoint, so the next stop-the-world
    collection waited on it forever and one green thread idle in readpartial
    on a quiet socket froze every other thread's allocation (#4528). */
-const char *sp_File_readpartial(sp_File *f, sp_int n) {SP_GC_ROOT(f);
+const char *sp_File_readpartial_or_nil(sp_File *f, sp_int n) {SP_GC_ROOT(f);
   SP_IO_OPEN(f);
   if (n < 0) sp_raise_cls("EOFError", "end of file reached");
   if (n == 0) return sp_str_empty_binary();
@@ -1055,10 +1095,17 @@ const char *sp_File_readpartial(sp_File *f, sp_int n) {SP_GC_ROOT(f);
     do { got = read(fileno(f->fp), r, (size_t)n); } while (got < 0 && errno == EINTR);
     if (got < 0) sp_file_raise_errno("read", "");
   }
-  if (got == 0) sp_raise_cls("EOFError", "end of file reached");
+  if (got == 0) return NULL;
   r[got] = 0;
   sp_str_set_len(r, (size_t)got);
   sp_str_mark_binary(r);   /* readpartial / sysread answer ASCII-8BIT, as CRuby */
+  return r;
+}
+
+/* readpartial / sysread: EOFError at the end of the stream. */
+const char *sp_File_readpartial(sp_File *f, sp_int n) {
+  const char *r = sp_File_readpartial_or_nil(f, n);
+  if (!r) sp_raise_cls("EOFError", "end of file reached");
   return r;
 }
 
@@ -1066,7 +1113,8 @@ const char *sp_sock_read_nb(sp_File *f, sp_int len, sp_bool exc, sp_bool is_recv
   if (eof) *eof = 0;
   if (is_recv) sp_sock_nb_prepare(f, "recv_nonblock");
   else SP_IO_OPEN(f);
-  if (len <= 0) return sp_str_from_bytes("", 0);
+  /* the bytes read are BINARY, as CRuby's read_nonblock and recv answer them */
+  if (len <= 0) { char *e = (char *)sp_str_from_bytes("", 0); sp_str_mark_binary(e); return e; }
   char *buf = (char *)malloc((size_t)len);
   if (!buf) sp_raise_cls("NoMemoryError", "read_nonblock");
   ssize_t n;
@@ -1082,7 +1130,7 @@ const char *sp_sock_read_nb(sp_File *f, sp_int len, sp_bool exc, sp_bool is_recv
     sp_io_nb_end(f, saved);
     errno = e;
   }
-  if (n > 0) { const char *s = sp_str_from_bytes(buf, (size_t)n); free(buf); return s; }
+  if (n > 0) { char *s = (char *)sp_str_from_bytes(buf, (size_t)n); free(buf); sp_str_mark_binary(s); return s; }
   if (n == 0) {
     free(buf);
     if (eof) *eof = 1;

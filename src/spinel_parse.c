@@ -3208,6 +3208,21 @@ static int sp_source_writes_engine(const char *source) {
   return 0;
 }
 
+/* `Kernel.require "x"` (`::Kernel.` too) is the bare require: the textual
+   resolver has treated it so since 0c0f61fff, so a dead branch must drop it
+   exactly as it drops a receiver-less `require`, or --require-gate refuses
+   a call that never runs. */
+static int sp_call_receiver_is_kernel(const pm_parser_t *parser, const pm_node_t *receiver) {
+  if (!receiver) return 0;
+  if (PM_NODE_TYPE(receiver) == PM_CONSTANT_READ_NODE)
+    return sp_pm_name_is(parser, ((const pm_constant_read_node_t *)receiver)->name, "Kernel");
+  if (PM_NODE_TYPE(receiver) == PM_CONSTANT_PATH_NODE) {
+    const pm_constant_path_node_t *cp = (const pm_constant_path_node_t *)receiver;
+    return !cp->parent && sp_pm_name_is(parser, cp->name, "Kernel");
+  }
+  return 0;
+}
+
 /* Blank a statement in a dead branch to `(nil)`, keeping every newline so
    later line numbers hold (and a multiline call stays grouped, including
    before a modifier). */
@@ -3247,7 +3262,8 @@ static bool sp_skip_dead_require(const pm_node_t *node, void *data) {
   if (ctx->dead && PM_NODE_TYPE(node) == PM_CALL_NODE) {
     const pm_call_node_t *call = (const pm_call_node_t *)node;
     const pm_constant_t *name = pm_constant_pool_id_to_constant(&ctx->parser->constant_pool, call->name);
-    if (!call->receiver && !call->block && call->arguments && call->arguments->arguments.size == 1 &&
+    if ((!call->receiver || sp_call_receiver_is_kernel(ctx->parser, call->receiver)) &&
+        !call->block && call->arguments && call->arguments->arguments.size == 1 &&
         ((name->length == 7 && memcmp(name->start, "require", 7) == 0) ||
          (name->length == 16 && memcmp(name->start, "require_relative", 16) == 0))) {
       const pm_node_t *arg = call->arguments->arguments.nodes[0];
@@ -3766,18 +3782,42 @@ static char *sp_splice_builtins(char *source, const char *exe_path,
     if (sp_builtin_enum_names_n == 0) return source;
   }
   /* A program that reopens Enumerable gets the builtins beside it, unless
-     it may define a builtin's name itself: its own then has to answer for
-     an Array or a Hash too, which the builtin would answer instead */
+     its reopening may define a builtin's name itself: its own then has to
+     answer for an Array or a Hash too, which the builtin would answer
+     instead. Only the reopening's own body counts -- another class with a
+     method of that name (a `select` of its own) takes nothing from
+     Enumerable, and reading the whole program left the builtins out of
+     every program that had one (activesupport's) */
   if (sp_src_opens(source, "module Enumerable"))
-    for (int i = 0; i < sp_builtin_enum_names_n; i++) {
-      const char *nm = sp_builtin_enum_names[i];
-      size_t nl = strlen(nm);
-      for (const char *p = strstr(source, "def "); p; p = strstr(p + 4, "def ")) {
-        const char *q = p + 4;
-        while (*q == ' ') q++;
-        if (strncmp(q, nm, nl) == 0 && !(isalnum((unsigned char)q[nl]) || q[nl] == '_' ||
-                                         q[nl] == '?' || q[nl] == '!' || q[nl] == '='))
-          return source;
+    for (const char *mo = strstr(source, "module Enumerable"); mo; mo = strstr(mo + 1, "module Enumerable")) {
+      if (sp_req_ident_char(mo[17])) continue;
+      const char *ls = mo;
+      while (ls > source && ls[-1] != '\n') ls--;
+      int ind = (int)(mo - ls);
+      const char *body_end = strchr(mo, '\n');
+      /* a one-line `module Enumerable; ...; end` is its own body */
+      const char *semi = strchr(mo, ';');
+      if (body_end && !(semi && semi < body_end)) {
+        /* the body runs to the `end` at the module's own indentation */
+        for (const char *ln = body_end + 1; *ln; ) {
+          const char *nx = strchr(ln, '\n');
+          int li = 0; while (ln[li] == ' ' || ln[li] == '\t') li++;
+          if (li == ind && strncmp(ln + li, "end", 3) == 0 && !sp_req_ident_char(ln[li + 3])) { body_end = ln + li; break; }
+          if (!nx) { body_end = ln + strlen(ln); break; }
+          ln = nx + 1;
+        }
+      }
+      if (!body_end) body_end = mo + strlen(mo);
+      for (int i = 0; i < sp_builtin_enum_names_n; i++) {
+        const char *nm = sp_builtin_enum_names[i];
+        size_t nl = strlen(nm);
+        for (const char *p = strstr(mo, "def "); p && p < body_end; p = strstr(p + 4, "def ")) {
+          const char *q = p + 4;
+          while (*q == ' ') q++;
+          if (strncmp(q, nm, nl) == 0 && !(isalnum((unsigned char)q[nl]) || q[nl] == '_' ||
+                                           q[nl] == '?' || q[nl] == '!' || q[nl] == '='))
+            return source;
+        }
       }
     }
   int any = 0;
@@ -4021,6 +4061,29 @@ else {
         if (content) snprintf(lib_path, sizeof(lib_path), "%s", alt_path);
       }
       if (!content) {
+        /* `-I <dir>` feature roots: <root>/X.rb, else <root>/X/<last>.rb. They
+           come before the pre-installed packages, so a project's package of the
+           same name as a bundled one is the one a require reaches (#7207); lib/
+           stays first. */
+        char rp[1024];
+        const char *last = strrchr(lib_name, '/');
+        last = last ? last + 1 : lib_name;
+        for (int ri = 0; ri < sp_feature_roots_n && !content; ri++) {
+          snprintf(rp, sizeof(rp), "%s/%s.rb", sp_feature_roots[ri], lib_name);
+          content = read_file(rp);
+          if (!content) {
+            snprintf(rp, sizeof(rp), "%s/%s/%s.rb", sp_feature_roots[ri], lib_name, last);
+            content = read_file(rp);
+          }
+          if (content) snprintf(lib_path, sizeof(lib_path), "%s", rp);
+        }
+        char *rc = content ? sp_canonical_path(lib_path) : NULL;
+        for (int i = sp_rr_included; rc && i < sp_included_count && !root_dup; i++) root_dup = sp_included_paths[i] && strcmp(sp_included_paths[i], rc) == 0;
+        if (root_dup) { free(content); content = strdup("# require skipped (already included)"); }
+        else if (rc) sp_mark_path_included(rc);
+        free(rc);
+      }
+      if (!content) {
         /* pre-installed packages (the carved-out stdlib): packages/ sits
            beside lib/ in both the repo and the installed tree. The package
            root is the require root, so `require "erb"` is
@@ -4079,26 +4142,6 @@ else {
           else { free(content); content = NULL; }
         }
         if (content) snprintf(lib_path, sizeof(lib_path), "%s", gp);
-      }
-      if (!content) {
-        /* `-I <dir>` feature roots: <root>/X.rb, else <root>/X/<last>.rb. */
-        char rp[1024];
-        const char *last = strrchr(lib_name, '/');
-        last = last ? last + 1 : lib_name;
-        for (int ri = 0; ri < sp_feature_roots_n && !content; ri++) {
-          snprintf(rp, sizeof(rp), "%s/%s.rb", sp_feature_roots[ri], lib_name);
-          content = read_file(rp);
-          if (!content) {
-            snprintf(rp, sizeof(rp), "%s/%s/%s.rb", sp_feature_roots[ri], lib_name, last);
-            content = read_file(rp);
-          }
-          if (content) snprintf(lib_path, sizeof(lib_path), "%s", rp);
-        }
-        char *rc = content ? sp_canonical_path(lib_path) : NULL;
-        for (int i = sp_rr_included; rc && i < sp_included_count && !root_dup; i++) root_dup = sp_included_paths[i] && strcmp(sp_included_paths[i], rc) == 0;
-        if (root_dup) { free(content); content = strdup("# require skipped (already included)"); }
-        else if (rc) sp_mark_path_included(rc);
-        free(rc);
       }
       if (!content) {
         if (sp_lib_is_native(lib_name)) {
