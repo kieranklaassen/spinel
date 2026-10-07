@@ -4170,6 +4170,241 @@ static void infer_write_reads_widened(Compiler *c, const NodeTable *nt) {
   free(base); free(head); free(queue); free(rw);
 }
 
+static int is_fresh_hash(Compiler *c, int v);
+static int local_has_target_write(Compiler *c, Scope *sc, const char *name);
+static int want_poly_hash(Compiler *c, int v);
+
+/* What infer_hash_aliases knows of each local this pass, at `base[scope]`
+   plus the local's index. `st` is local_hash_built_in_sight's answer: 0 not
+   asked, 1 being asked, 2 no, 3 yes. `grp` is the group of names the local
+   is joined to by `g = h` writes (a union-find parent), and `flag` is kept
+   at a group's root. */
+enum { HG_DIFFER = 1, HG_WAITS = 2, HG_REFUSED = 4 };
+typedef struct { signed char *st, *flag; int *base, *grp; } HashSight;
+
+static void hash_sight_init(Compiler *c, HashSight *hs) {
+  int n = 0;
+  hs->base = (int *)malloc(sizeof(int) * (size_t)(c->nscopes > 0 ? c->nscopes : 1));
+  if (!hs->base) { fprintf(stderr, "oom\n"); exit(1); }
+  for (int s = 0; s < c->nscopes; s++) { hs->base[s] = n; n += c->scopes[s].nlocals; }
+  hs->st = (signed char *)calloc((size_t)(n > 0 ? n : 1), 2);
+  hs->grp = (int *)malloc(sizeof(int) * (size_t)(n > 0 ? n : 1));
+  if (!hs->st || !hs->grp) { fprintf(stderr, "oom\n"); exit(1); }
+  hs->flag = hs->st + (n > 0 ? n : 1);
+  for (int i = 0; i < n; i++) hs->grp[i] = i;
+}
+
+/* The index of `lv`, a local of `sc` itself; -1 for one of a scope around it. */
+static int hash_sight_ix(Compiler *c, const HashSight *hs, const Scope *sc, const LocalVar *lv) {
+  if (!lv || lv < sc->locals || lv >= sc->locals + sc->nlocals) return -1;
+  return hs->base[sc - c->scopes] + (int)(lv - sc->locals);
+}
+
+static int hash_group(HashSight *hs, int i) {
+  while (hs->grp[i] != i) i = hs->grp[i] = hs->grp[hs->grp[i]];
+  return i;
+}
+
+/* 1 when the Hash local `nm` of `sc` is written once, with a Hash built
+   there (a literal, `Hash.new`) or with another such local. Nothing else
+   holds that Hash in a narrower slot, so the local may take a wider variant
+   and the literal is built in it. A parameter, a write target, or a value
+   from a call, an ivar or a constant may be held elsewhere and answers 0.
+   Locals that name each other in a circle answer 0. */
+static int local_hash_built_in_sight(Compiler *c, const LWIndex *lw, HashSight *hs, Scope *sc, const char *nm) {
+  const NodeTable *nt = c->nt;
+  LocalVar *lv = scope_local(sc, nm);
+  int ix = hash_sight_ix(c, hs, sc, lv);
+  if (ix < 0) return 0;
+  signed char *st = &hs->st[ix];
+  if (*st) return *st == 3;
+  *st = 1;
+  int ok = !lv->is_param && !lv->is_block_param && !lv->rbs_seeded && !local_has_target_write(c, sc, nm);
+  int w = -1;
+  for (int r = lw_index_first(lw, nm, (int)(sc - c->scopes)); ok && r >= 0; r = lw->next[r]) {
+    const char *wn = nt_str(nt, lw->node[r], "name");
+    if (!wn || !sp_streq(wn, nm) || comp_scope_of(c, lw->node[r]) != sc) continue;
+    if (w >= 0) ok = 0;
+    w = lw->node[r];
+  }
+  if (ok && (w < 0 || nt_kind(nt, w) != NK_LocalVariableWriteNode)) ok = 0;
+  if (ok) {
+    int v = nt_ref(nt, w, "value");
+    if (v < 0 || nt_kind(nt, v) != NK_LocalVariableReadNode) ok = is_fresh_hash(c, v);
+    else {
+      const char *sn = nt_str(nt, v, "name");
+      ok = sn && comp_scope_of(c, v) == sc && local_hash_built_in_sight(c, lw, hs, sc, sn);
+    }
+  }
+  *st = ok ? 3 : 2;
+  return ok;
+}
+
+/* Gives the Hash local `nm`, built in sight, the general variant: the
+   literal its write builds is marked for it and the slot keeps it across
+   the recompute frame, as widen_arg_hash does for a caller's local. */
+static void widen_sighted_hash_local(Compiler *c, const LWIndex *lw, Scope *sc, const char *nm) {
+  const NodeTable *nt = c->nt;
+  LocalVar *lv = scope_local(sc, nm);
+  for (int r = lw_index_first(lw, nm, (int)(sc - c->scopes)); r >= 0; r = lw->next[r]) {
+    int w = lw->node[r];
+    const char *wn = nt_str(nt, w, "name");
+    if (!wn || !sp_streq(wn, nm) || comp_scope_of(c, w) != sc) continue;
+    want_poly_hash(c, nt_ref(nt, w, "value"));
+  }
+  lv->type = TY_POLY_POLY_HASH; lv->poly_hash_pin = 1;
+}
+
+/* One `dst = src` between two Hash locals; `settled` when each had this
+   round's kind last round too, or is pinned. */
+typedef struct { LocalVar *dst, *src; int write, settled; } HashAlias;
+
+static int hash_local_settled(const LocalVar *lv) {
+  return lv->poly_hash_pin || lv->hash_alias_seen == lv->type;
+}
+
+/* Has the program an `op=` whose operand is of another kind than the slot
+   it adds to, or a Range between two kinds? Master refuses the `op=` or
+   builds it to a raise (emit_coerce: the test here is
+   repr_coerce_text_form's refusal), boxes an Array for such an operand,
+   and raises where the Range is made. Given the same value boxed, it adds
+   whatever number or text the operand reads as and counts a String bound
+   as 0, so such a program is not one to box a value in. A Hash's element
+   is not looked at: it adds by the operator's own dispatch. */
+static int kinds_misfit(Compiler *c, TyKind vt, TyKind t) {
+  if (vt == TY_POLY || vt == TY_NIL || vt == TY_VOID || repr_store_fits(c, vt, t)) return 0;
+  return !(t == TY_BIGINT ? vt == TY_INT : t == TY_FLOAT && (vt == TY_BIGINT || vt == TY_RATIONAL));
+}
+static int value_kind_misfit(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  for (int id = 0; id < nt->count; id++) {
+    NodeKind k = nt_kind(nt, id);
+    const char *ty = nt_type(nt, id), *nm = nt_str(nt, id, "name");
+    TyKind t = TY_UNKNOWN;
+    if (k == NK_RangeNode) {
+      int l = nt_ref(nt, id, "left"), r = nt_ref(nt, id, "right");
+      TyKind lt = l >= 0 ? infer_type(c, l) : TY_NIL, rt = r >= 0 ? infer_type(c, r) : TY_NIL;
+      if (kinds_misfit(c, lt, rt) && kinds_misfit(c, rt, lt)) return 1;
+      continue;
+    }
+    if (k == NK_LocalVariableOperatorWriteNode) {
+      LocalVar *lv = nm ? scope_local(comp_scope_of(c, id), nm) : NULL;
+      if (lv) t = lv->type;
+    }
+    else if (k == NK_GlobalVariableOperatorWriteNode) {
+      const char *rn = nm ? comp_resolve_gvar(c, nm + 1) : NULL;
+      LocalVar *lv = rn ? comp_gvar(c, rn) : NULL;
+      if (lv) t = lv->type;
+    }
+    else if (k == NK_IndexOperatorWriteNode) {
+      TyKind rt = infer_type(c, nt_ref(nt, id, "receiver"));
+      if (ty_is_array(rt)) t = ty_array_elem(rt);
+    }
+    else if (ty && sp_streq(ty, "CallOperatorWriteNode")) {
+      /* an attribute's slot, as emit_stmt finds it */
+      int recv = nt_ref(nt, id, "receiver"), cls = -1;
+      TyKind rt = recv >= 0 ? infer_type(c, recv) : TY_UNKNOWN;
+      if (!nm || !ty_is_object(rt) || !comp_reader_in_chain(c, ty_object_class(rt), nm, &cls)) continue;
+      char ivn[300];
+      snprintf(ivn, sizeof ivn, "@%s", comp_resolve_alias(c, cls, nm));
+      int iv = comp_ivar_index(&c->classes[cls], ivn);
+      if (iv >= 0) t = c->classes[cls].ivar_types[iv];
+    }
+    else continue;
+    if (t == TY_POLY && k != NK_IndexOperatorWriteNode) continue;
+    if (kinds_misfit(c, infer_type(c, nt_ref(nt, id, "value")), t)) return 1;
+  }
+  return 0;
+}
+
+/* A Hash under two names is one Hash, as an Array is: a key or a value one
+   name is given that the other's variant cannot hold (`g = h; g.merge!(m)`)
+   left the write a conversion, which builds another Hash, and what went in
+   through one name never reached the other. The names take the general
+   variant, where the Hash is built in sight (local_hash_built_in_sight),
+   and keep it from one round to the next (widen_sighted_hash_local): a kind
+   re-derived each round is not there yet when the round's writes are
+   typed, and `c = h.dup` took the literal's.
+
+   The names one Hash goes by are a group, and a group is joined whole or
+   not at all. Only a write into a variant with boxed values converts; a
+   write into any other given a Hash of another kind is refused when the C
+   is written, and a group with such a write keeps that refusal: joined, it
+   would build, and run on into whatever the refusal stood before. Kept, a
+   kind must not be given early either: a second name is typed from the
+   first before the first's own stores widen it and is one round behind, on
+   its way to the same kind. So a group is joined on kinds each of its
+   names had last round too, and one that waits on that asks for the round
+   (the answer, 1). */
+static int infer_hash_aliases(Compiler *c, const LWIndex *lw) {
+  const NodeTable *nt = c->nt;
+  HashAlias *al = NULL;
+  int n = 0, cap = 0, differ = 0, wait = 0;
+  NT_FOREACH_KIND(nt, NK_LocalVariableWriteNode, id) {
+    int v = nt_ref(nt, id, "value");
+    if (v < 0 || nt_kind(nt, v) != NK_LocalVariableReadNode) continue;
+    const char *dn = nt_str(nt, id, "name"), *sn = nt_str(nt, v, "name");
+    Scope *sc = comp_scope_of(c, id);
+    LocalVar *dst = dn ? scope_local(sc, dn) : NULL;
+    if (!dst || !ty_is_hash(dst->type)) continue;
+    LocalVar *src = sn ? scope_local(sc, sn) : NULL;
+    if (!src || src == dst || !ty_is_hash(src->type)) continue;
+    if (n == cap) {
+      cap = cap ? cap * 2 : 16;
+      al = (HashAlias *)realloc(al, sizeof(HashAlias) * (size_t)cap);
+      if (!al) { fprintf(stderr, "oom\n"); exit(1); }
+    }
+    al[n++] = (HashAlias){dst, src, id, hash_local_settled(dst) && hash_local_settled(src)};
+    if (dst->type != src->type) differ = 1;
+  }
+  for (int k = 0; k < n; k++) {
+    al[k].dst->hash_alias_seen = al[k].dst->type;
+    al[k].src->hash_alias_seen = al[k].src->type;
+  }
+  if (!differ) { free(al); return 0; }
+  HashSight sight;
+  hash_sight_init(c, &sight);
+  for (int k = 0; k < n; k++) {
+    HashAlias *e = &al[k];
+    Scope *sc = comp_scope_of(c, e->write);
+    if (!local_hash_built_in_sight(c, lw, &sight, sc, nt_str(nt, e->write, "name"))) {
+      e->write = -1;
+      continue;
+    }
+    int d = hash_group(&sight, hash_sight_ix(c, &sight, sc, e->dst));
+    int s = hash_group(&sight, hash_sight_ix(c, &sight, sc, e->src));
+    int f = sight.flag[d] | sight.flag[s] | (e->dst->type != e->src->type ? HG_DIFFER : 0) |
+            (e->settled ? 0 : HG_WAITS);
+    sight.grp[d] = s;
+    sight.flag[s] = (signed char)f;
+  }
+  /* the writes master refuses: a Hash of another kind into a variant whose
+     values are not boxed, the literal's own write among them */
+  NT_FOREACH_KIND(nt, NK_LocalVariableWriteNode, id) {
+    Scope *sc = comp_scope_of(c, id);
+    const char *dn = nt_str(nt, id, "name");
+    LocalVar *dst = dn ? scope_local(sc, dn) : NULL;
+    int ix = hash_sight_ix(c, &sight, sc, dst);
+    if (ix < 0 || sight.st[ix] != 3) continue;
+    TyKind dt = dst->type, vt = infer_type(c, nt_ref(nt, id, "value"));
+    if (ty_is_hash(vt) && vt != dt && dt != TY_POLY_POLY_HASH && dt != TY_SYM_POLY_HASH && dt != TY_STR_POLY_HASH)
+      sight.flag[hash_group(&sight, ix)] |= HG_REFUSED;
+  }
+  int misfit = value_kind_misfit(c);
+  for (int k = 0; k < n && !misfit; k++) {
+    HashAlias *e = &al[k];
+    if (e->write < 0) continue;
+    Scope *sc = comp_scope_of(c, e->write);
+    int f = sight.flag[hash_group(&sight, hash_sight_ix(c, &sight, sc, e->dst))];
+    if (!(f & HG_DIFFER) || (f & HG_REFUSED)) continue;
+    if (f & HG_WAITS) { wait = 1; continue; }
+    widen_sighted_hash_local(c, lw, sc, nt_str(nt, e->write, "name"));
+    widen_sighted_hash_local(c, lw, sc, nt_str(nt, nt_ref(nt, e->write, "value"), "name"));
+  }
+  free(sight.st); free(sight.grp); free(sight.base); free(al);
+  return wait;
+}
+
 int infer_write_types(Compiler *c) {
   const NodeTable *nt = c->nt;
   int changed = 0;
@@ -4442,6 +4677,8 @@ int infer_write_types(Compiler *c) {
       }
     }
   }
+
+  if (infer_hash_aliases(c, &lw_ix)) changed = 1;
 
   /* The container-usage fold above can widen a hash's value layout after the
      main write-site scan has already typed a destination local. Reconcile the
