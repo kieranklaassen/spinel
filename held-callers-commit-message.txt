@@ -1,0 +1,64 @@
+A Range or Rational handed to a Struct, a proc or an arm is held
+
+    P = Struct.new(:a, :b)
+    P.new(7, 7)
+    keep = []
+    n = 0
+    while n < 2000
+      r = Rational(n + 1, 3)
+      q = Rational(n + 2, 5)
+      keep << P.new(r, q)
+      n += 1
+    end
+    bad = 0
+    keep.each_with_index do |s, i|
+      ok = s.a == Rational(i + 1, 3) && s.b == Rational(i + 2, 5)
+      bad += 1 unless ok
+    end
+    p bad    # 0; master prints 1: the Struct of turn 1127
+
+That is a plain run, gcc and clang, exit 0. The same loop over
+`F.call(r, q)` with `F = ->(a, b) { [a, b] }` prints 1 too (turn 1450).
+So does a call on a receiver of two classes that keeps what it is
+given: of 8,000 `o.m(r, q).first`, two answer with the other Range.
+Under SPINEL_GC_STRESS=2 one such call aborts ("the mark reached a
+freed slot").
+
+A Range, a Rational, a Complex and a Time are kept by value, and a
+boxed slot takes one copied into a new cell (sp_box_rational, ...).
+"A Range or Rational read into a boxed parameter is held for the call"
+holds that cell where a method or a constructor is called by name.
+Three callers write their own argument lists, and still handed the
+cell on held by nothing:
+
+- a Struct's or a Data's `new`: sp_<S>_new allocates the object before
+  it stores a member, and a second member's box frees the first;
+- a proc's `call`: the call's slots keep the box only until the body
+  takes it for its parameter and clears the slot; the body roots no
+  parameter, so its first allocation frees it. The publish is written
+  three times: for a Proc, for a callable in a boxed slot, and for one
+  that shares the slot with a class that has its own `call`;
+- a call on a receiver of several classes: each arm boxes the
+  argument's temp for its own method, a positional or a keyword.
+
+Each now assigns the box to a rooted temp where it stands, as that
+change does. emit_struct_new_call asks arg_read_converts and calls
+emit_rooted_conversion; the other two go through one new helper,
+emit_boxed_text_held, at the line that boxed. Nothing runs earlier
+than it did, and a value of any other kind is boxed by the line that
+boxed it.
+
+The root does not wait on what the callee does with the value.
+A call pays for it: 5 instructions for one such argument, 8 into a
+Struct for two, 9 into a proc for two, whatever the body makes of its
+parameters, since a proc is always handed boxes. A member that is
+typed and an Integer argument keep the C they had.
+
+A long switch on the receiver is moved into a helper without a frame
+(pd_hoist), and there the held temp would be a root pushed and popped
+on every call: 40 instructions. So a switch whose arm holds a box
+stays at its call site, where the temp is a slot of the frame: 6
+instructions for one argument, and for two fewer than before, the
+helper call being gone (303,552,190 to 239,574,916 for a million).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
