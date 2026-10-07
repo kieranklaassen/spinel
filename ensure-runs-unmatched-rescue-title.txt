@@ -1,0 +1,1 @@
+An ensure runs when no rescue clause of its begin matches
