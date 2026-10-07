@@ -14274,14 +14274,23 @@ void emit_stmt_tail_inner(Compiler *c, int id, Buf *b, int indent) {
   if (sp_streq(ty, "CallNode")) {
     int _srecv = nt_ref(nt, id, "receiver");
     const char *_snm = nt_str(nt, id, "name");
+    /* A chain whose inner link hands out a reader's handle (`pg.text << a
+       << b`) is left, under a String slot, to the value path below, which
+       runs the base once and answers the handle's text: the base emitted
+       again here is the handle itself, which did not compile in that slot. */
+    int _sbase = _srecv >= 0 ? str_append_chain_base(c, id) : -1;
+    int _sin = _srecv >= 0 ? unwrap_parens(c, _srecv) : -1;
+    const char *_sinm = _sin >= 0 && nt_kind(nt, _sin) == NK_CallNode ? nt_str(nt, _sin, "name") : NULL;
+    int _sreader = _sinm && is_append_concat(_sinm) && repr_of(c, _sin).handle &&
+                   !(g_result_var ? g_result_poly : (g_ret_type == TY_POLY)) &&
+                   (g_result_var ? g_result_ty : g_ret_type) == TY_STRING;
     if (_srecv >= 0 && _snm && sp_streq(_snm, "<<") &&
-        comp_ntype(c, _srecv) == TY_STRING &&
+        comp_ntype(c, _srecv) == TY_STRING && !_sreader &&
         emit_array_mutate_stmt(c, id, b, indent)) {
       /* return the chain's BASE receiver: for `buf << a << b` the immediate
          receiver is the inner `<<` call, and re-emitting it would run the
          inner links a second time (doubling the appended text -- and writing
          the doubled string back through a byref param) */
-      int _sbase = str_append_chain_base(c, id);
       emit_indent(b, indent); emit_tail_lead(b);
       int _wp = g_result_var ? g_result_poly : (g_ret_type == TY_POLY);
       if (_wp) emit_boxed(c, _sbase, b);
