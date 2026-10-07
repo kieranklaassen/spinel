@@ -1,0 +1,1 @@
+String#insert and String#[]= raise TypeError for a value that is nil

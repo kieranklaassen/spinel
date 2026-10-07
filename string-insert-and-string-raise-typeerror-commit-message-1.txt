@@ -1,0 +1,34 @@
+String#insert and String#[]= raise TypeError for a value that is nil
+
+    def none(k) = k == 1 ? +"one" : nil
+    m = +"abc"
+    m[1] = none(2)
+    p m
+
+printed "ac". CRuby raises TypeError, "no implicit conversion of nil
+into String". A String-typed value that is nil when the program runs
+was spliced in as "": insert left the String as it was, every form of
+[]= cut its span and put nothing there, and neither said a word.
+
+emit_str_splice_value now tests such a value where it emits the frozen
+check, ahead of it, which is CRuby's order: the nil is heard before an
+index outside the String and before a frozen String. The arms whose
+own tests CRuby runs first raise for it behind them: a Range behind
+its start check, a String key behind "string not matched", and
+`s[/re/] = v` only where the pattern matches. A String needs no
+converting, so that last arm takes it as a late arm does, which is the
+same C.
+
+The test is emitted only where the analysis says the value may be nil
+(the nil fact, read through repr_of's may_nil): a literal, an
+interpolation, a local that only ever holds a String store with the C
+they had. A value that may be nil pays one compare.
+
+Left as they are: a nil value on a frozen String under a String key or
+a pattern is still the FrozenError (CRuby's TypeError), and a value
+the nil fact takes as never nil without proof (`ENV["X"]`) is still
+spliced as "".
+
+Test: test/string_splice_nil_value.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

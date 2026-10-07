@@ -1,0 +1,12 @@
+String#insert in value position raises TypeError for a text that is nil
+
+`p m.insert(1, none(2))` printed "abc" where CRuby raises TypeError,
+"no implicit conversion of nil into String": the nil the statement
+took for "", in the arm that answers insert's value. That arm tests
+the text once it is in its temp, ahead of the frozen check and of the
+index as the statement does, and only where the analysis says the text
+may be nil. emit_str_splice_nil is shared for it.
+
+Test: test/string_insert_value_nil_text.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
