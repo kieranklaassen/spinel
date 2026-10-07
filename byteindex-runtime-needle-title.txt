@@ -1,0 +1,1 @@
+byteindex and byterindex answer for a needle known only at run time

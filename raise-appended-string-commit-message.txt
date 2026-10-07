@@ -1,0 +1,25 @@
+raise with an appended String raises RuntimeError
+
+    h = { "k" => +"a", "n" => 1 }
+    h["k"] << "b"
+    begin
+      raise h["k"]
+    rescue RuntimeError => e
+      puts "rescued " + e.message
+    end
+
+ended with an uncaught TypeError (exception class/object expected);
+CRuby prints "rescued ab". A boxed String the program appends to is
+kept as a shared handle, and its tag is not SP_TAG_STR. sp_raise_poly,
+which takes a raise's one argument when its kind is known only at run
+time, tested that tag alone, so the handle went the way of a value
+that is neither a String, an exception nor an exception class.
+
+sp_raise_poly now raises RuntimeError with a copy of the handle's
+text: the handle's buffer moves as the String grows. raise with a
+class and such a message, and Exception.new with one, were right
+already.
+
+Test: test/raise_appended_string.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

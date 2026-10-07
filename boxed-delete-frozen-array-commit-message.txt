@@ -1,0 +1,19 @@
+delete through a boxed receiver raises for a frozen Array
+
+    a = [1, "x", nil].freeze
+    h = { "a" => a, "n" => 1 }
+    h["a"].delete("x")
+    p a
+
+printed [1, nil]: the frozen Array lost its element. CRuby raises
+FrozenError (can't modify frozen Array: [1, "x", nil]). An Array read
+back from a Hash or another Array is deleted from by
+sp_poly_delete_key, and its loop over a boxed Array removed the
+element without a look at the frozen flag.
+
+The loop now raises at the first element it would remove, so an
+element the Array does not hold still answers nil.
+
+Test: test/boxed_frozen_array_delete.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

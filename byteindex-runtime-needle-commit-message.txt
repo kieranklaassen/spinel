@@ -1,0 +1,22 @@
+byteindex and byterindex answer for a needle known only at run time
+
+    g = { "k" => "ab", "n" => 1 }
+    p "cab".byteindex(g["k"])
+
+printed nil; CRuby prints 1. The emitter searched for a boxed needle,
+but the call was typed for a String or a Regexp needle alone, so with
+a boxed one it had no type: the search ran and its answer was dropped.
+Depending on the use the program printed nil, compared false, raised
+NoMethodError (undefined method 'nil?' for unknown), was refused (as
+a condition) or did not build (before ||).
+
+The call is now typed Integer-or-nil for a boxed needle too, and its
+arm picks the search by the needle's tag, as the arm for index and
+rindex does: a Regexp searches (it raised TypeError, no implicit
+conversion of Regexp into String), a String or an appended String is
+searched for, and anything else is the conversion's TypeError as
+before.
+
+Test: test/byteindex_boxed_needle.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

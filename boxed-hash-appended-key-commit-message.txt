@@ -1,0 +1,25 @@
+A boxed Hash finds an appended String key
+
+    h = { "k" => +"a", "n" => 1 }
+    h["k"] << "b"
+    q = { "a" => { "ab" => 1, "c" => 2 }, "n" => 1 }
+    p q["a"][h["k"]], q["a"].key?(h["k"]), q["a"].fetch(h["k"], 0)
+
+printed nil, false and 0; CRuby prints 1, true and 1. A boxed String
+the program appends to is kept as a shared handle, and its tag is not
+SP_TAG_STR. The dispatchers that read a Hash reached through a boxed
+value (sp_poly_index_poly, sp_poly_has_key, sp_poly_delete_key) tested
+that tag alone for a String-keyed storage, so the key was taken for a
+key of another kind: a miss. [], dig, fetch, key? and its three
+aliases, values_at, slice and delete all missed; fetch with no default
+raised KeyError.
+
+The three now read a handle key by its text before they dispatch. The
+text is only hashed and compared; slice hands the key on to
+sp_PolyPolyHash_set, which keeps its own copy of a handle's text. A
+Hash with keys of mixed kinds takes the box as it did, and so does a
+receiver that is no Hash.
+
+Test: test/boxed_hash_appended_key.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

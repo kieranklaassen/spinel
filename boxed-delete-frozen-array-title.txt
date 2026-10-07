@@ -1,0 +1,1 @@
+delete through a boxed receiver raises for a frozen Array
