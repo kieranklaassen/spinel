@@ -1,4 +1,5 @@
 #include "types.h"
+#include "builtin_ops.h"
 #include <stddef.h>
 #include <string.h>
 
@@ -85,9 +86,10 @@ static const PolyFace ty_poly_face_tbl[] = {
   {"slice!", PF_STRING | PF_MUT, 1, 2, 0}, {"slice!", PF_ARRAY | PF_MUT, 1, 2, 0},
   /* The Hash mutators, on a Hash at run time; a typed variant takes the
      result back from the general copy it was normalized to, and the value is
-     the box, since the copy is detached once written back. */
-  {"merge!", PF_HASH | PF_MUT | PF_VAL_SELF, 0, 0, -1}, {"merge!", PF_HASH | PF_MUT | PF_VAL_SELF, 1, -1, 0},
-  {"update", PF_HASH | PF_MUT | PF_VAL_SELF, 0, 0, -1}, {"update", PF_HASH | PF_MUT | PF_VAL_SELF, 1, -1, 0},
+     the box, since the copy is detached once written back. Their arguments
+     are Hashes. */
+  {"merge!", PF_HASH | PF_MUT | PF_VAL_SELF, 0, 0, -1}, {"merge!", PF_HASH | PF_MUT | PF_VAL_SELF | PF_ARGS_OWN, 1, -1, 0},
+  {"update", PF_HASH | PF_MUT | PF_VAL_SELF, 0, 0, -1}, {"update", PF_HASH | PF_MUT | PF_VAL_SELF | PF_ARGS_OWN, 1, -1, 0},
   /* The names Array and Hash share: the receiver's run-time kind picks the
      arm. The in-place filters take their block; of the blockless names,
      assoc, rassoc and fetch_values keep their last-resort Hash rows below, so
@@ -490,22 +492,6 @@ int fold_seed_typed(TyKind seed, TyKind elem) {
   return elem == TY_FLOAT && seed == TY_INT;
 }
 
-/* The single-element-arg array iterators: a block bound to one of these
-   receives exactly one param = the array element. Enumerated once here so the
-   knowledge is not re-encoded as scattered method-name lists. */
-static int ty_is_array_elem_iter(const char *n) {
-  return sp_streq(n, "each") || sp_streq(n, "map") || sp_streq(n, "collect") ||
-         sp_streq(n, "select") || sp_streq(n, "reject") || sp_streq(n, "filter") ||
-         sp_streq(n, "find") || sp_streq(n, "detect") || sp_streq(n, "find_all") ||
-         sp_streq(n, "sort_by") || sp_streq(n, "min_by") || sp_streq(n, "max_by") ||
-         sp_streq(n, "count") || sp_streq(n, "sum") || sp_streq(n, "flat_map") ||
-         sp_streq(n, "collect_concat") ||
-         sp_streq(n, "filter_map") || sp_streq(n, "partition") || sp_streq(n, "group_by") ||
-         sp_streq(n, "any?") || sp_streq(n, "all?") || sp_streq(n, "none?") ||
-         sp_streq(n, "one?") || sp_streq(n, "take_while") || sp_streq(n, "drop_while") ||
-         sp_streq(n, "reverse_each") || sp_streq(n, "each_entry") || sp_streq(n, "find_index");
-}
-
 TyIterShape ty_iter_shape(const char *name) {
   if (!name) return TY_ITER_NONE;
   if (is_map_alias(name)) return TY_ITER_MAP;
@@ -514,69 +500,34 @@ TyIterShape ty_iter_shape(const char *name) {
   return TY_ITER_NONE;
 }
 
+/* Read off the iterator rows (builtin_ops.c iter_rows). A Hash's pair is
+   handed on as its key and its value: reporting 0 for the Hash iterators
+   that yield it did not mean "no block". The forwarded-callable desugar
+   reads 0 as "not a context-free iterator" and declines, and declining
+   left `h.map(&f)` in its &-form with no emitter to claim it: a
+   NoMethodError at run time from a program that compiled. The 1-param and
+   2-param callable cases are separated by the wrap_pair rule at the call
+   site. The boxed-element widening (analyze_pass.c
+   widen_boxed_elem_sources) asks it too, whether an Array iterator's
+   first parameter is an element. A run (each_slice, each_cons) is left
+   untyped: the block's parameter is typed from it as a literal block's
+   is. */
 int ty_block_yield(TyKind recv, const char *name, TyKind *out, int max) {
   if (!name || max < 1) return 0;
-#define BY_PUT(i, t) do { if ((i) < max) out[i] = (t); } while (0)
-  /* each_slice(n) and each_cons(n) hand their block one Array per step, which
-     the block's parameter is typed from as a literal block's is */
-  if ((ty_is_array(recv) || ty_is_hash(recv) || recv == TY_RANGE) &&
-      (is_each_window(name))) {
-    BY_PUT(0, TY_UNKNOWN); return 1;
+  TyKind fam = ty_is_array(recv) ? BOP_ANY_ARRAY
+             : ty_is_hash(recv) ? BOP_ANY_HASH
+             : recv == TY_RANGE || recv == TY_INT || recv == TY_STRING ? recv
+             : TY_UNKNOWN;
+  const IterRow *r = fam == TY_UNKNOWN ? NULL : iter_row(fam, name, -1, IRF_GAP_FWD);
+  if (!r) return 0;
+  if (r->nyield == 1 && r->yield[0] == YS_PAIR) {
+    out[0] = ty_hash_key(recv);
+    if (max > 1) out[1] = ty_hash_val(recv);
+    return 2;
   }
-  if (ty_is_array(recv)) {
-    TyKind e = ty_array_elem(recv);
-    if (ty_is_array_elem_iter(name) || sp_streq(name, "to_h")) { BY_PUT(0, e); return 1; }
-    if (sp_streq(name, "each_with_index")) { BY_PUT(0, e); BY_PUT(1, TY_INT); return 2; }
-    return 0;
-  }
-  if (ty_is_hash(recv)) {
-    if (is_each_or_pair(name)) {
-      BY_PUT(0, ty_hash_key(recv)); BY_PUT(1, ty_hash_val(recv)); return 2;
-    }
-    if (sp_streq(name, "each_key")) { BY_PUT(0, ty_hash_key(recv)); return 1; }
-    if (sp_streq(name, "each_value")) { BY_PUT(0, ty_hash_val(recv)); return 1; }
-    /* Every other element iterator hands a Hash's block the same [k, v] pair
-       `each` does -- that is what Enumerable is, and Hash gets these names from
-       it. Reporting 0 for them did not mean "no block": this oracle's one
-       caller is the forwarded-callable desugar, which reads 0 as "not a
-       context-free iterator" and declines. Declining left `h.map(&f)` in its
-       &-form with no emitter to claim it, and the call became a NoMethodError
-       raised at run time by a program that compiled. The 1-param and 2-param
-       callable cases are then separated by the wrap_pair rule at the call site,
-       which already existed for `each` and needs nothing new. */
-    /* to_h's block takes the key and the value too, and answers the new pair
-       (an Array's or a Range's takes the element) */
-    if (ty_is_array_elem_iter(name) || sp_streq(name, "to_h")) {
-      BY_PUT(0, ty_hash_key(recv)); BY_PUT(1, ty_hash_val(recv)); return 2;
-    }
-    return 0;
-  }
-  if (recv == TY_RANGE) {
-    /* a range yields ints to its element iterators */
-    if (sp_streq(name, "each_with_index")) { BY_PUT(0, TY_INT); BY_PUT(1, TY_INT); return 2; }
-    if (ty_is_array_elem_iter(name) || sp_streq(name, "to_h")) { BY_PUT(0, TY_INT); return 1; }
-    return 0;
-  }
-  if (recv == TY_INT) {
-    if (is_int_step(name)) {
-      BY_PUT(0, TY_INT); return 1;
-    }
-    return 0;
-  }
-  if (recv == TY_STRING) {
-    if (sp_streq(name, "each_char") || sp_streq(name, "each_line") ||
-        sp_streq(name, "each_grapheme_cluster") || sp_streq(name, "upto") ||
-        sp_streq(name, "gsub") || sp_streq(name, "sub") ||
-        sp_streq(name, "gsub!") || sp_streq(name, "sub!") || sp_streq(name, "split")) {
-      BY_PUT(0, TY_STRING); return 1;
-    }
-    if (sp_streq(name, "each_byte")) {
-      BY_PUT(0, TY_INT); return 1;
-    }
-    return 0;
-  }
-  return 0;
-#undef BY_PUT
+  for (int k = 0; k < r->nyield && k < max; k++)
+    out[k] = r->yield[k] == YS_SUB ? TY_UNKNOWN : iter_yield_kind(r, k, recv);
+  return r->nyield;
 }
 
 int ty_object_protocol_kind(TyKind t) {
@@ -659,8 +610,15 @@ const TyTraits ty_traits[TY_TRAITS_N] = {
 };
 
 /* A builtin value's type, which lays out no instance variables: a String,
-   a number, true, false, nil, a Symbol, a Range, an Array or a Hash. */
+   a number, true, false, nil, a Symbol, a Range, a Random, an Array or a
+   Hash. */
 int ty_builtin_ivar_less(TyKind t) {
   return t == TY_STRING || t == TY_STRBUF || t == TY_INT || t == TY_FLOAT || t == TY_BOOL || t == TY_NIL ||
-         t == TY_SYMBOL || t == TY_BIGINT || t == TY_RANGE || ty_is_array(t) || ty_is_hash(t);
+         t == TY_SYMBOL || t == TY_BIGINT || t == TY_RANGE || t == TY_RANDOM || ty_is_array(t) || ty_is_hash(t);
+}
+
+/* Of those, the values whose identity Spinel keeps, so the runtime's map can
+   hold their ivars (sp_bivar_*): an Array, a Hash, a Random. */
+int ty_bivar_keyed(TyKind t) {
+  return t == TY_RANDOM || ty_is_array(t) || ty_is_hash(t);
 }

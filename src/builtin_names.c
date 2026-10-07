@@ -10,6 +10,18 @@ int is_zip_name(const char *n) {
   return sp_streq(n, "zip");
 }
 
+/* the match name that takes a start position (match?(pattern, pos)) */
+int is_match_p_name(const char *n) {
+  return sp_streq(n, "match?");
+}
+
+/* `Struct.new(...)` / `Data.define(...)`: the call that builds a record
+   class, by its receiver's constant name and the method */
+int is_record_class_builder(const char *recv, const char *meth) {
+  return recv && meth && ((sp_streq(recv, "Struct") && sp_streq(meth, "new")) ||
+                          (sp_streq(recv, "Data") && sp_streq(meth, "define")));
+}
+
 int is_call_alias(const char *n) {
   return sp_streq(n, "call") || sp_streq(n, "()") || sp_streq(n, "[]");
 }
@@ -20,6 +32,14 @@ int is_method_invoke(const char *n) {
 
 int is_kind_query(const char *n) {
   return sp_streq(n, "is_a?") || sp_streq(n, "kind_of?") || sp_streq(n, "instance_of?");
+}
+
+/* A call that answers about the receiver itself without reading any of
+   its instance variables: its class, its identity, nil?, frozen?. */
+int is_member_blind_query(const char *n) {
+  return is_kind_query(n) || sp_streq(n, "class") || sp_streq(n, "object_id") ||
+         sp_streq(n, "__id__") || sp_streq(n, "nil?") || sp_streq(n, "frozen?") ||
+         sp_streq(n, "equal?") || sp_streq(n, "respond_to?");
 }
 
 int is_round_family(const char *n) {
@@ -55,6 +75,20 @@ int is_opaque_reaching_call(const char *n) {
          sp_streq(n, "eval") || strncmp(n, "instance_", 9) == 0 ||
          strncmp(n, "class_", 6) == 0 || strncmp(n, "module_", 7) == 0 ||
          strstr(n, "method") != NULL;
+}
+
+/* A builtin call that hands Ruby code to the runtime to run later, at a
+   point where no call in the running method names it: a thread's or a
+   fiber's body, and a signal handler (run inside the C handler, at any
+   instruction). `recv` is the receiver's constant name, NULL for a bare
+   call. */
+int is_async_code_entry(const char *recv, const char *n) {
+  if (!n) return 0;
+  if (sp_streq(n, "trap")) return !recv || sp_streq(recv, "Signal");
+  if (!recv) return 0;
+  if (sp_streq(recv, "Thread"))
+    return sp_streq(n, "new") || sp_streq(n, "start") || sp_streq(n, "fork");
+  return sp_streq(recv, "Fiber") && sp_streq(n, "new");
 }
 
 int is_name_reader(const char *n) {
@@ -131,6 +165,14 @@ int is_key_query(const char *n) {
          sp_streq(n, "include?") || sp_streq(n, "member?");
 }
 
+int is_hash_key_lookup(const char *n) {
+  return sp_streq(n, "[]") || is_key_query(n) || sp_streq(n, "fetch") || sp_streq(n, "delete");
+}
+
+int is_receiver_conversion(const char *n) {
+  return sp_streq(n, "to_s") || sp_streq(n, "to_str") || sp_streq(n, "itself");
+}
+
 int is_range_membership(const char *n) {
   return sp_streq(n, "cover?") || sp_streq(n, "include?") ||
          sp_streq(n, "member?") || sp_streq(n, "===");
@@ -157,6 +199,12 @@ int is_quantifier_or_count(const char *n) {
 int is_push_unshift(const char *n) {
   return sp_streq(n, "<<") || sp_streq(n, "push") || sp_streq(n, "append") ||
          sp_streq(n, "unshift");
+}
+
+/* A call whose answer tells an object from a copy of it: its identity, or
+   whether it is frozen (a copy of a String later frozen is not). */
+int is_identity_query(const char *n) {
+  return sp_streq(n, "equal?") || sp_streq(n, "object_id") || sp_streq(n, "__id__") || sp_streq(n, "frozen?");
 }
 
 int is_len_alias(const char *n) {
@@ -256,12 +304,26 @@ int is_element_at_alias(const char *n) {
   return sp_streq(n, "[]") || sp_streq(n, "at");
 }
 
+int is_hash_transform(const char *n) {
+  return sp_streq(n, "transform_values") || sp_streq(n, "transform_keys");
+}
+
+/* the calls whose block is the fallback for a missing key or index: they
+   hand it the one value they could not find */
+int is_fallback_block_call(const char *n) {
+  return sp_streq(n, "fetch") || sp_streq(n, "delete") || sp_streq(n, "fetch_values");
+}
+
 int is_sort_family(const char *n) {
   return sp_streq(n, "sort") || sp_streq(n, "sort!");
 }
 
 int is_store_alias(const char *n) {
   return sp_streq(n, "[]=") || sp_streq(n, "store");
+}
+
+int is_hash_default_setter(const char *n) {
+  return sp_streq(n, "default=");
 }
 
 int is_hash_merge_bang(const char *n) {
@@ -324,6 +386,36 @@ int is_visibility_or_module_function(const char *n) {
   return sp_streq(n, "private") || sp_streq(n, "protected") || sp_streq(n, "public") || sp_streq(n, "module_function");
 }
 
+/* Kernel#dup and #clone, which copy any object with its ivars */
+int is_object_copy(const char *n) {
+  return sp_streq(n, "dup") || sp_streq(n, "clone");
+}
+
+/* The reflective ivar write */
+int is_ivar_set_name(const char *n) {
+  return sp_streq(n, "instance_variable_set");
+}
+
+/* A builtin class whose values keep their ivars in the runtime's map
+   (desugar_builtin_ivars), and one whose values are all frozen: an ivar
+   of theirs reads nil and a write raises FrozenError */
+int is_bivar_keyed_class(const char *n) {
+  return sp_streq(n, "Array") || sp_streq(n, "Hash") || sp_streq(n, "Random");
+}
+int is_string_class_name(const char *n) {
+  return sp_streq(n, "String");
+}
+int is_frozen_value_class(const char *n) {
+  return sp_streq(n, "Integer") || sp_streq(n, "Float") || sp_streq(n, "Symbol") ||
+         sp_streq(n, "NilClass") || sp_streq(n, "TrueClass") || sp_streq(n, "FalseClass") ||
+         sp_streq(n, "Range");
+}
+
+/* desugar_builtin_ivars' access to an ivar of a builtin class's self */
+int is_bivar_access(const char *n) {
+  return sp_streq(n, "__bivar_get") || sp_streq(n, "__bivar_set") || sp_streq(n, "__bivar_defined");
+}
+
 int is_attr_reader_family(const char *n) {
   return sp_streq(n, "attr_accessor") || sp_streq(n, "attr_reader");
 }
@@ -342,6 +434,10 @@ int is_hash_key_value_each(const char *n) {
 
 int is_bounded_int_step(const char *n) {
   return sp_streq(n, "upto") || sp_streq(n, "downto");
+}
+
+int is_upto_name(const char *n) {
+  return sp_streq(n, "upto");
 }
 
 int is_add_sub(const char *n) {
@@ -400,6 +496,11 @@ int is_hash_constructor(const char *n) {
   return sp_streq(n, "new") || sp_streq(n, "__hash_new_default");
 }
 
+/* A Struct or Data class's constructor calls: `S.new(...)` and `S[...]`. */
+int is_struct_constructor(const char *n) {
+  return sp_streq(n, "new") || sp_streq(n, "[]");
+}
+
 int is_exist_alias(const char *n) {
   return sp_streq(n, "exist?") || sp_streq(n, "exists?");
 }
@@ -418,6 +519,10 @@ int is_directory_entries(const char *n) {
 
 int is_io_position(const char *n) {
   return sp_streq(n, "tell") || sp_streq(n, "pos");
+}
+
+int is_rewind_name(const char *n) {
+  return sp_streq(n, "rewind");
 }
 
 int is_byte_codepoint_each(const char *n) {
@@ -560,6 +665,10 @@ int is_div_or_mod(const char *n) {
   return sp_streq(n, "/") || sp_streq(n, "%");
 }
 
+int is_div_or_modulo(const char *n) {
+  return sp_streq(n, "div") || sp_streq(n, "modulo");
+}
+
 int is_initialize_family(const char *n) {
   return sp_streq(n, "initialize_copy") || sp_streq(n, "initialize");
 }
@@ -641,7 +750,15 @@ int is_array_hash_or_object_class(const char *n) {
 }
 
 int is_ivar_access(const char *n) {
-  return sp_streq(n, "instance_variable_get") || sp_streq(n, "instance_variable_set");
+  return sp_streq(n, "instance_variable_get") || is_ivar_set(n);
+}
+
+int is_ivar_set(const char *n) {
+  return sp_streq(n, "instance_variable_set");
+}
+
+int is_plus_op(const char *n) {
+  return sp_streq(n, "+");
 }
 
 int is_string_append_or_prepend(const char *n) {
@@ -730,3 +847,57 @@ int is_builtin_reopen_name(const char *name) {
          sp_streq(name, "Thread")    || sp_streq(name, "Fiber") ||
          sp_streq(name, "Random");
 }
+
+/* CRuby's nil.public_methods: NilClass's own (to_a, to_s, inspect, &, ...)
+   and the ones every object has from Object and Kernel. A call of any other
+   name on nil raises NoMethodError. */
+int is_nil_method(const char *n) {
+  static const char *const names[] = {
+    "!", "!=", "!~", "&", "<=>", "==", "===", "=~", "^", "__id__", "__send__", "class",
+    "clone", "define_singleton_method", "display", "dup", "enum_for", "eql?", "equal?",
+    "extend", "freeze", "frozen?", "hash", "inspect", "instance_eval", "instance_exec",
+    "instance_of?", "instance_variable_defined?", "instance_variable_get",
+    "instance_variable_set", "instance_variables", "is_a?", "itself", "kind_of?", "method",
+    "methods", "nil?", "object_id", "private_methods", "protected_methods", "public_method",
+    "public_methods", "public_send", "rationalize", "remove_instance_variable", "respond_to?",
+    "send", "singleton_class", "singleton_method", "singleton_methods", "tap", "then", "to_a",
+    "to_c", "to_enum", "to_f", "to_h", "to_i", "to_r", "to_s", "yield_self", "|", NULL };
+  for (int i = 0; names[i]; i++) if (sp_streq(n, names[i])) return 1;
+  return 0;
+}
+
+int is_positional_io(const char *n) {
+  return sp_streq(n, "pread") || sp_streq(n, "pwrite");
+}
+
+/* An Array subclass instance's questions about the object itself rather
+   than its elements (#7449): the class's own answers, through the object
+   paths. dup and clone keep the class and copy the elements. */
+int is_arysub_object_name(const char *n) {
+  static const char *const names[] = {
+    "class", "singleton_class", "is_a?", "kind_of?", "instance_of?", "respond_to?",
+    "equal?", "object_id", "__id__", "dup", "clone", "itself", "tap", "then",
+    "yield_self", "instance_variable_get", "instance_variable_set",
+    "instance_variable_defined?", "instance_variables", "remove_instance_variable",
+    "send", "public_send", "__send__", "method", "public_method", "methods",
+    "public_methods", "singleton_methods", "define_singleton_method", "extend",
+    "instance_eval", "instance_exec", "nil?", "!", "display", NULL };
+  for (int i = 0; names[i]; i++) if (sp_streq(n, names[i])) return 1;
+  return 0;
+}
+
+/* The Object methods an Array subclass instance answers as its Array
+   (#7449): to_enum and enum_for walk its elements, frozen? reads the
+   Array's frozen flag, != negates Array#==. */
+int is_arysub_kernel_name(const char *n) {
+  return sp_streq(n, "to_enum") || sp_streq(n, "enum_for") || sp_streq(n, "frozen?") || sp_streq(n, "!=");
+}
+
+int array_unseen_add_kind(const char *n) {
+  if (sp_streq(n, "concat")) return ARRAY_ADD_CONCAT;
+  if (sp_streq(n, "insert")) return ARRAY_ADD_INSERT;
+  if (sp_streq(n, "prepend")) return ARRAY_ADD_PREPEND;
+  return ARRAY_ADD_NONE;
+}
+
+int is_scan_name(const char *n) { return sp_streq(n, "scan"); }

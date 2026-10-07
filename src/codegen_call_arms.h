@@ -42,6 +42,7 @@ int emit_call_kernel_flow_arms(Compiler *c, int id, Buf *b, const NodeTable *nt,
 int emit_call_append_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv);
 int emit_call_store_value_arms(Compiler *c, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, TyKind rt);
 int emit_call_array_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, TyKind rt);
+int emit_array_random_kw(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, TyKind rt);
 int emit_call_poly_io_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv);
 int emit_call_io_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv);
 int emit_call_handle_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv);
@@ -243,6 +244,7 @@ void emit_bind_call(Compiler *c, int id, int target, const int *argv, int argc, 
 void emit_bind_call_boxed(Compiler *c, int id, int target, int kn, const char *sym, const int *argv, int argc, Buf *b);
 void emit_bm_abi_args(Buf *b, const char *rb, int abi, const char *sig, int fixed, int rest, int ret, int poly, int pfixed, const char *thunk, int tmin, int tmax);
 int emit_method_obj_on_constant(Compiler *c, int id, int recv, const char *sym, Buf *b);
+int method_obj_of_native_func(Compiler *c, int recv, const char *sym);
 const char *emit_method_thunk(Compiler *c, int mi, int recv_bound, int *out_min, int *out_max);
 int emit_method_tramp_fn(Compiler *c, Scope *tm, int shift, const char *fname, int boxed_src, int self_cls, int *out_min, int *out_max);
 int method_legacy_int_abi(Compiler *c, int mi, int recv_bound, char *out_sig, size_t sigcap, int *out_fixed, int *out_rest, int *out_ret);
@@ -251,8 +253,10 @@ int method_poly_abi(Compiler *c, int mi, int recv_bound, int *out_fixed, int *ou
 int method_scope_arity(Compiler *c, int target, int *out);
 void emit_bm_legacy_ok(Buf *b, int tmp, int argc, const char *arg_sig);
 void emit_int_recv_named(Compiler *c, int recv, const char *name, Buf *b);
+void emit_upto_recv(Compiler *c, int recv, int lim, Buf *b);
 int emit_implicit_self_member(Compiler *c, int id, Buf *b);
 int emit_reopen_own_call(Compiler *c, int id, int dispatch_cid, Buf *b);
+void emit_reopen_recv_args(Compiler *c, int id, int mi, int recv, int boxed, const char *box_fn, Buf *b);
 int implicit_self_plan_mi(Compiler *c, int id, int dispatch_cid);
 
 int emit_send_blind(Compiler *c, int id, Buf *b);

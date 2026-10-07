@@ -415,15 +415,13 @@ int emit_call_reflection_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, 
     else if (cg_aty && sp_streq(cg_aty, "StringNode")) cg_qm = nt_str(nt, argv[0], "content");
     /* const_get(name, false) searches only the receiver's own constants */
     int cg_own = 0;
+    const char *cg_rnm = cg_qm ? const_get_recv_name(c, id, recv) : NULL;
     if (cg_qm && argc >= 2 && nt_type(nt, argv[1]) && sp_streq(nt_type(nt, argv[1]), "FalseNode")) {
-      const char *cg_rty = nt_type(nt, recv);
-      const char *cg_rnm = (cg_rty && (sp_streq(cg_rty, "ConstantReadNode") ||
-                                       sp_streq(cg_rty, "ConstantPathNode"))) ? nt_str(nt, recv, "name") : NULL;
       if (cg_rnm && !const_owned_by_class(c, cg_rnm, cg_qm)) cg_own = 1;
     }
     if (cg_qm && !cg_own) {
-      LocalVar *cv = comp_const(c, cg_qm);
-      if (cv && cv->type != TY_UNKNOWN) { buf_printf(b, "cst_%s", cg_qm); return 1; }
+      /* the value or the class of that leaf, as the typing chose */
+      if (const_get_takes_value(c, cg_rnm, cg_qm)) { buf_printf(b, "cst_%s", cg_qm); return 1; }
       /* A CLASS or module name: const_get answers the class object. The lookup
          above knows only VALUE constants, so `Object.const_get(:Foo)` on a
          class the program defines fell through to the NameError below (#3969). */
@@ -533,6 +531,26 @@ int emit_call_reflection_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, 
     }
   }
   return 0;
+}
+
+/* Can the String an FFI argument node hands C be collected? A String
+   literal is frozen static data and nil is NULL; anything else may be a
+   heap String only the call holds. */
+static int ffi_str_arg_collectable(Compiler *c, int node) {
+  NodeKind k = nt_kind(c->nt, node);
+  return k != NK_StringNode && k != NK_NilNode;
+}
+
+/* Move the converted FFI argument at call->p + at out to the temp _b<tb>_<ai>
+   of C type ctype, declared in pre ahead of the call, rooting it for the
+   call when it is a String (root_str) that Ruby code run by the call could
+   collect. */
+static void ffi_arg_to_temp(Buf *call, size_t at, Buf *pre, const char *ctype, int tb, int ai, int root_str) {
+  buf_printf(pre, "%s _b%d_%d = %s; ", ctype, tb, ai, call->p + at);
+  if (root_str)
+    buf_printf(pre, "SP_GC_ROOT_STR(_b%d_%d); ", tb, ai);
+  buf_erase(call, at, call->len - at);
+  buf_printf(call, "_b%d_%d", tb, ai);
 }
 
 /* a call on a module or a class: native and FFI functions, singleton accessors, a writer in an instance_eval block, class methods */
@@ -681,7 +699,32 @@ int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
           if (!c->classes[ty_object_class(pat)].is_native_class)
             unsupported(c, argv[ai], "ffi pointer argument (a Ruby object has no C address; pass an IO::Buffer, a String or a :ptr value)");
         }
-        int use_temps = blocking || iob_temps;
+        /* Two String arguments each read a shared handle as `(_sp_ret_strbuf = h,
+           copy(h))`; side by side in one C call those are unsequenced writes of
+           the same variable (clang -Wunsequenced, an error under -Werror), so
+           with two or more they go out to ordered temps like the buffers do. */
+        int nstr_args = 0;
+        for (int ai = 0; ai < fixed_argc && ai < argc; ai++) {
+          if (!sp_streq(c->ffi_funcs[fi].args[ai], "str")) continue;
+          char sref[1024];   /* the same test the read of a shared-mutable slot makes */
+          int vsm = view_push_repr(c, argv[ai], VR_STRBUF_BOX, 1);
+          if (strbuf_slot_ref(c, argv[ai], sref, sizeof sref)) nstr_args++;
+          view_pop(c, vsm);
+        }
+        /* A call that can run Ruby code -- it is handed an ffi_callback, the
+           program has one a C function may call back from an earlier call, or
+           it is a blocking call other threads run beside -- can collect a
+           String argument's copy while C reads it: nothing else holds the
+           copy. Such a call moves its String arguments out to temps rooted
+           for the call; a literal, static data, needs no root and on its own
+           asks for none. */
+        int root_strs = 0;
+        if (takes_cb || blocking || c->n_ffi_callbacks > 0)
+          for (int ai = 0; ai < argc && !root_strs; ai++)
+            root_strs = (ai < fixed_argc ? ffi_spec_is_str(c->ffi_funcs[fi].args[ai])
+                                         : is_vararg && comp_ntype(c, argv[ai]) == TY_STRING) &&
+                        ffi_str_arg_collectable(c, argv[ai]);
+        int use_temps = blocking || iob_temps || nstr_args >= 2 || root_strs;
         Buf pre_buf; memset(&pre_buf, 0, sizeof pre_buf);
         Buf base_buf; memset(&base_buf, 0, sizeof base_buf);
         /* blocking: the buffers are locked across the call (hold after every
@@ -811,9 +854,8 @@ int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
           }
           if (use_temps) {
             /* move the converted argument out to a temp ahead of the call */
-            buf_printf(&pre_buf, "%s _b%d_%d = %s; ", ffi_c_type(spec), tb, ai, call_buf.p + arg_at);
-            buf_erase(&call_buf, arg_at, call_buf.len - arg_at);
-            buf_printf(&call_buf, "_b%d_%d", tb, ai);
+            ffi_arg_to_temp(&call_buf, arg_at, &pre_buf, ffi_c_type(spec), tb, ai,
+                            root_strs && ffi_spec_is_str(spec) && ffi_str_arg_collectable(c, argv[ai]));
           }
         }
         /* Extra variadic args: promote by inferred type (int->sp_int,
@@ -827,6 +869,7 @@ int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
         if (is_vararg) {
           for (int ai = fixed_argc; ai < argc; ai++) {
             if (ai) buf_puts(&call_buf, ", ");
+            size_t arg_at = call_buf.len;
             TyKind at = comp_ntype(c, argv[ai]);
             if (at == TY_INT || at == TY_BOOL) {
               buf_puts(&call_buf, "((sp_int)("); emit_int_expr(c, argv[ai], &call_buf); buf_puts(&call_buf, "))");
@@ -845,6 +888,12 @@ int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
               unsupported(c, argv[ai], "ffi variadic argument (needs a concrete int/float/str type)");
               return 1;
             }
+            /* behind the fixed arguments' temps, in order, when a String
+               among them is rooted */
+            if (root_strs)
+              ffi_arg_to_temp(&call_buf, arg_at, &pre_buf,
+                              at == TY_STRING ? "const char *" : at == TY_FLOAT ? "double" : "sp_int",
+                              tb, ai, at == TY_STRING && ffi_str_arg_collectable(c, argv[ai]));
           }
         }
         buf_puts(&call_buf, ")");
@@ -1115,6 +1164,31 @@ int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
             else buf_printf(b, "; _t%d->iv_%s; })", _atmp, iv_c(_abase));
             return 1;
           }
+          /* a String slot that is a handle (TY_STRBUF) takes the handle the
+             value is or a fresh one (emit_strbuf_ivar_store), and the
+             assignment's value is that handle where the caller takes one; a
+             String read of it would be a copy of the one object */
+          if (argc >= 1 && _aivt == TY_STRBUF && repr_of(c, argv[0]).kind != RK_BOXED) {
+            ClassInfo *_aci = &c->classes[_adefc < 0 ? _arc : _adefc];
+            TyKind _avt = repr_of(c, id).as_ty;
+            if (_avt != TY_STRBUF && _aci->ivar_str_shared[_aiv])
+              unsupported_feature(c, id, "an attribute assignment in value position (kept, passed on, or a "
+                                  "method's last expression, which the method answers) stores into an instance "
+                                  "variable that is mutated in place through another name, and its value would "
+                                  "be a copy (a String is not yet shared by reference through an assignment's "
+                                  "value). Make the assignment a statement of its own, or read the String back "
+                                  "through the reader.");
+            buf_printf(b, "_t%d->iv_%s = ", _atmp, iv_c(_abase));
+            emit_strbuf_ivar_store(c, _aci->ivar_str_shared[_aiv], argv[0], b);
+            if (_avt == TY_STRBUF) buf_printf(b, "; _t%d->iv_%s; })", _atmp, iv_c(_abase));
+            else {
+              char _asr[300]; snprintf(_asr, sizeof _asr, "_t%d->iv_%s", _atmp, iv_c(_abase));
+              buf_puts(b, "; ");
+              emit_strbuf_node_read(c, id, _asr, b);
+              buf_puts(b, "; })");
+            }
+            return 1;
+          }
           /* a value of another C type than the slot (an Integer into a slot
              widened to Bignum) converts into it, through a temp: the
              assignment's value is still the right-hand side as it came */
@@ -1209,6 +1283,12 @@ int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
               int back[1] = { saved0 };
               nt_node_set_arr((NodeTable *)nt, argsn, "arguments", back, 1);
               buf_printf(b, "lv_%s; })", svn);
+              for (int k = esc->nlocals - 1; k >= 0; k--)
+                if (sp_streq(esc->locals[k].name, svn)) {
+                  memmove(&esc->locals[k], &esc->locals[k + 1], sizeof(LocalVar) * (size_t)(esc->nlocals - k - 1));
+                  esc->nlocals--;
+                  break;
+                }
               return 1;
             }
           }
@@ -3338,8 +3418,8 @@ int emit_call_reopen_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
         if (g_plan_check) ucall_observe(c, id, mi, ci, 0);
         emit_method_cname(c, &c->scopes[mi], b);
         buf_puts(b, "(");
-        emit_expr(c, recv, b);
-        emit_args_filled(c, mi, nt_ref(nt, id, "arguments"), ", ", b);
+        emit_reopen_recv_args(c, id, mi, recv, 0, NULL, b);
+        emit_trailing_blk_arg(c, &c->scopes[mi], id, -1, b);
         buf_puts(b, ")");
         return 1;
       }
@@ -3366,8 +3446,7 @@ int emit_call_reopen_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
         if (oc_mi >= 0) {
           if (g_plan_check) ucall_observe(c, id, oc_mi, oc_ci, 0);
           buf_printf(b, "sp_%s_%s(", mc_reopen_cls(c, oc_ci, name), mc(name));
-          emit_expr(c, recv, b);
-          emit_args_filled(c, oc_mi, nt_ref(nt, id, "arguments"), ", ", b);
+          emit_reopen_recv_args(c, id, oc_mi, recv, 0, NULL, b);
           /* a method taking `&block` takes the call's block, or NULL (#7200) */
           emit_callee_block_arg(c, id, &c->scopes[oc_mi], b);
           buf_puts(b, ")");
@@ -3427,8 +3506,8 @@ int emit_call_reopen_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
       if (hc_mi >= 0) {
         if (g_plan_check) ucall_observe(c, id, hc_mi, hc_ci, 0);
         buf_printf(b, "sp_Hash_%s(", mc(c->scopes[hc_mi].name));
-        emit_boxed(c, recv, b);
-        emit_args_filled(c, hc_mi, nt_ref(nt, id, "arguments"), ", ", b);
+        emit_reopen_recv_args(c, id, hc_mi, recv, 1, NULL, b);
+        emit_trailing_blk_arg(c, &c->scopes[hc_mi], id, -1, b);
         buf_puts(b, ")");
         return 1;
       }
@@ -3473,8 +3552,8 @@ int emit_call_reopen_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
                                (rt == TY_FLOAT_ARRAY) ? "sp_box_float_array" : "sp_box_poly_array";
           if (emit_reopen_block_call(c, id, recv, oc_mi2, box_fn, b)) return 1;
           buf_printf(b, "sp_Array_%s(", mc(c->scopes[oc_mi2].name));
-          buf_printf(b, "%s(", box_fn); emit_expr(c, recv, b); buf_puts(b, ")");
-          emit_args_filled(c, oc_mi2, nt_ref(nt, id, "arguments"), ", ", b);
+          emit_reopen_recv_args(c, id, oc_mi2, recv, 1, box_fn, b);
+          emit_trailing_blk_arg(c, &c->scopes[oc_mi2], id, -1, b);
           buf_puts(b, ")");
           return 1;
         }

@@ -1,4 +1,6 @@
 #include "compiler.h"
+#include "share.h"
+#include "builtin_names.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -81,6 +83,7 @@ Compiler *comp_new(const NodeTable *nt) {
   c->strbuf_handle_demand = calloc((size_t)n, 1);
   c->strbuf_read_raw = calloc((size_t)n, 1);
   c->poly_strbuf_lift = calloc((size_t)n, 1);
+  c->nil_tested = calloc((size_t)n, 1);
   c->nscope = calloc((size_t)n, sizeof(int));   /* default scope 0 */
   c->node_cbody = malloc((size_t)n * sizeof(int));   /* enclosing class-body, -1 = none */
   for (int i = 0; i < n; i++) c->node_cbody[i] = -1;
@@ -95,6 +98,11 @@ Compiler *comp_new(const NodeTable *nt) {
   c->bop_inf = calloc((size_t)n, sizeof *c->bop_inf);
   c->ucall_inf = calloc((size_t)n, sizeof *c->ucall_inf);
   c->node_cap = n;
+  /* On only when set to something: empty is off, as SPINEL_DEFER_REFUSALS
+     reads it, and so is "0", as SPINEL_GATE_RAISE=0 and SPINEL_INLINE_FORCE=0
+     are. An environment that exports the variable as "0" or "" means off. */
+  { const char *e = getenv("SPINEL_SHARE_STRINGS");
+    c->share_strings = e && *e && strcmp(e, "0") != 0; }
   comp_node_ord(c, 0, NULL);   /* number the parsed nodes before any rewrite */
   c->node_ord_parsed = nt->count;
   return c;
@@ -218,6 +226,7 @@ void comp_grow_node_arrays(Compiler *c) {
   c->strbuf_handle_demand = realloc(c->strbuf_handle_demand, (size_t)n);
   c->strbuf_read_raw = realloc(c->strbuf_read_raw, (size_t)n);
   c->poly_strbuf_lift = realloc(c->poly_strbuf_lift, (size_t)n);
+  c->nil_tested = realloc(c->nil_tested, (size_t)n);
   c->nscope = realloc(c->nscope, sizeof(int) * (size_t)n);
   c->node_cbody = realloc(c->node_cbody, sizeof(int) * (size_t)n);
   c->empty_arr_recv = realloc(c->empty_arr_recv, (size_t)n);
@@ -232,12 +241,14 @@ void comp_grow_node_arrays(Compiler *c) {
   for (int i = c->node_cap; i < n; i++) c->bop_inf[i] = NULL;
   c->ucall_inf = realloc(c->ucall_inf, sizeof *c->ucall_inf * (size_t)n);
   memset(c->ucall_inf + c->node_cap, 0, sizeof *c->ucall_inf * (size_t)(n - c->node_cap));
-  for (int i = c->node_cap; i < n; i++) { c->ntype[i] = TY_UNKNOWN; c->norigin[i] = -1; c->nilnarrow[i] = TY_UNKNOWN; c->nscope[i] = 0; c->node_cbody[i] = -1; c->empty_arr_recv[i] = 0; c->empty_hash_recv[i] = 0; c->empty_hash_arg[i] = 0; c->store_misfit_arg[i] = 0; c->ivar_widen_src[i] = 0; c->hash_want[i] = TY_UNKNOWN; c->arr_want[i] = TY_UNKNOWN; c->poly_builtin_ty[i] = TY_UNKNOWN; c->strbuf_box[i] = 0; c->strbuf_handle_demand[i] = 0; c->strbuf_read_raw[i] = 0; c->poly_strbuf_lift[i] = 0; }
+  for (int i = c->node_cap; i < n; i++) { c->ntype[i] = TY_UNKNOWN; c->norigin[i] = -1; c->nilnarrow[i] = TY_UNKNOWN; c->nscope[i] = 0; c->node_cbody[i] = -1; c->empty_arr_recv[i] = 0; c->empty_hash_recv[i] = 0; c->empty_hash_arg[i] = 0; c->store_misfit_arg[i] = 0; c->ivar_widen_src[i] = 0; c->hash_want[i] = TY_UNKNOWN; c->arr_want[i] = TY_UNKNOWN; c->poly_builtin_ty[i] = TY_UNKNOWN; c->strbuf_box[i] = 0; c->strbuf_handle_demand[i] = 0; c->strbuf_read_raw[i] = 0; c->poly_strbuf_lift[i] = 0; c->nil_tested[i] = 0; }
   c->node_cap = n;
 }
 
 void comp_free(Compiler *c) {
   if (!c) return;
+  share_facts_free(c);
+  share_routes_free(c);
   free(c->hash_default_arg_memo);
   c->hash_default_arg_memo = NULL;
   free(c->blk_body_map);
@@ -289,6 +300,7 @@ void comp_free(Compiler *c) {
   for (int i = 0; i < c->nconsts; i++) free(c->consts[i].name);
   free(c->consts);
   free(c->toplevel_includes);
+  free(c->ary_viewed);
   for (int i = 0; i < c->n_ffi_sources; i++) {
     free(c->ffi_sources[i].mod);
     free(c->ffi_sources[i].val);
@@ -489,6 +501,12 @@ static int sp_name_collides_runtime(const char *n) {
        rational and socket-option carriers, IO::Buffer's and Process::Status's */
     "Tms", "StrRange", "FloatRange", "BigRational", "RbValue", "SockOpt",
     "ProcessStatus", "IOBuffer",
+    /* Classes the runtime builds in C. A reopening is refused, but a NEW class
+       of that name (`App::Mutex`, or OpenStruct without require "ostruct")
+       would clash with the runtime's C names. The builtin-name checks read
+       the Ruby name, not this stem, so mangling is safe here. */
+    "Monitor", "Mutex", "Queue", "SizedQueue", "ConditionVariable", "Encoding",
+    "OpenStruct",
     NULL };
   for (int i = 0; reserved[i]; i++) if (sp_streq(n, reserved[i])) return 1;
   return 0;
@@ -651,10 +669,12 @@ int comp_cvar_intern(ClassInfo *ci, const char *name) {
     ci->cvars = realloc(ci->cvars, sizeof(char *) * (size_t)ci->ccvars);
     ci->cvar_types = realloc(ci->cvar_types, sizeof(TyKind) * (size_t)ci->ccvars);
     ci->cvar_nullable_int = realloc(ci->cvar_nullable_int, (size_t)ci->ccvars);
+    ci->cvar_str_shared = realloc(ci->cvar_str_shared, (size_t)ci->ccvars);
   }
   ci->cvars[ci->ncvars] = strdup(name);
   ci->cvar_types[ci->ncvars] = TY_UNKNOWN;
   ci->cvar_nullable_int[ci->ncvars] = 0;
+  ci->cvar_str_shared[ci->ncvars] = 0;
   return ci->ncvars++;
 }
 
@@ -824,6 +844,106 @@ int comp_method_in_chain(Compiler *c, int class_id, const char *name, int *def_c
     if (mi >= 0) { if (def_class) *def_class = cid; return mi; }
   }
   return -1;
+}
+
+int comp_ary_root(Compiler *c, int cid) {
+  return cid >= 0 && cid < c->nclasses ? c->classes[cid].ary_root - 1 : -1;
+}
+int comp_ty_ary_root(Compiler *c, TyKind t) {
+  return ty_is_object(t) ? comp_ary_root(c, ty_object_class(t)) : -1;
+}
+/* An Array subclass nothing is ever put into holds boxed values, as an empty
+   `[]` that never settles does. While the inference is still optimistic an
+   unsettled kind stays unknown, so a later push can still narrow it. */
+TyKind comp_ary_kind(Compiler *c, int cid) {
+  int r = comp_ary_root(c, cid);
+  if (r < 0) return TY_UNKNOWN;
+  TyKind k = c->classes[r].ary_kind;
+  return k == TY_UNKNOWN && !g_infer_optimistic ? TY_POLY_ARRAY : k;
+}
+
+int builtin_instance_method_known(const char *cls, const char *m);
+/* A name an Array answers: its own methods and Enumerable's, and the
+   Object methods it answers as the Array (#7449). */
+int comp_array_method_name(const char *n) {
+  return builtin_instance_method_known("Array", n) || is_arysub_kernel_name(n);
+}
+/* Whether a call named n on an instance of Array subclass cid is Array's:
+   no method, reader or writer of the class chain takes the name, it asks
+   nothing about the object itself, and Array (or Enumerable, which Array
+   includes) has it. */
+int comp_arysub_name_is_array(Compiler *c, int cid, const char *n) {
+  if (comp_ary_root(c, cid) < 0 || !n) return 0;
+  if (comp_method_in_chain(c, cid, n, NULL) >= 0 || comp_reader_in_chain(c, cid, n, NULL)) return 0;
+  size_t l = strlen(n);
+  if (l > 1 && n[l - 1] == '=' && n[l - 2] != '=' && n[l - 2] != '!' && n[l - 2] != '<' &&
+      n[l - 2] != '>' && n[l - 2] != '[') {
+    char base[256];
+    snprintf(base, sizeof base, "%.*s", (int)(l - 1), n);
+    if (comp_writer_in_chain(c, cid, base, NULL)) return 0;
+  }
+  return !is_arysub_object_name(n) && comp_array_method_name(n);
+}
+/* Whether call `id` on a receiver of type rt, an Array subclass instance, is
+   Array's (comp_arysub_name_is_array), or a `super` into Array was rewritten
+   into it (builtin_only). *kind is the embedded Array's kind to answer it as. */
+int comp_arysub_call(Compiler *c, int id, TyKind rt, TyKind *kind) {
+  int cid = ty_is_object(rt) ? ty_object_class(rt) : -1;
+  if (comp_ary_root(c, cid) < 0 || nt_kind(c->nt, id) != NK_CallNode) return 0;
+  const char *n = nt_str(c->nt, id, "name");
+  if (!n) return 0;
+  if (!nt_int(c->nt, id, "builtin_only", 0) && !comp_arysub_name_is_array(c, cid, n)) return 0;
+  *kind = comp_ary_kind(c, cid);
+  return 1;
+}
+/* The builtin-op row flags of call `id` on an Array (#7449): what it answers
+   (bop_answers_self) or, with args_builtin, whether it reads an Array
+   argument as an Array (bop_args_as_builtin). Every Array kind reads the
+   same family rows. */
+static int arysub_call_flags(Compiler *c, int id, int args_builtin) {
+  const char *n = nt_str(c->nt, id, "name");
+  int args = nt_ref(c->nt, id, "arguments"), argc = 0;
+  if (!n) return 0;
+  if (args >= 0) nt_arr(c->nt, args, "arguments", &argc);
+  int blk = nt_ref(c->nt, id, "block") >= 0;
+  return args_builtin ? bop_args_as_builtin(TY_POLY_ARRAY, n, argc, blk)
+                      : bop_answers_self(TY_POLY_ARRAY, n, argc, blk);
+}
+int comp_arysub_answer(Compiler *c, int id) { return arysub_call_flags(c, id, 0); }
+/* Array's answer to call `id` is its receiver -- always (BOPF_SELF) or when
+   it changed it (BOPF_SELF_OR_NIL) -- so on an Array subclass instance it
+   is the instance (#7449). */
+int comp_arysub_self_result(Compiler *c, int id) {
+  return (comp_arysub_answer(c, id) & (BOPF_SELF | BOPF_SELF_OR_NIL)) != 0;
+}
+
+/* Whether the arguments of call `id`, on a receiver of type rt (-1: none),
+   are read as Arrays, so an Array subclass instance among them is its Array
+   (#7449): the methods of an Array receiver that compare, combine or copy
+   another Array (BOPF_ARGS_BUILTIN) -- not the stores, which keep the
+   instance itself as an element -- and Kernel#puts, which prints an Array's
+   elements. */
+int comp_arysub_args_viewed(Compiler *c, int id, TyKind rt) {
+  const NodeTable *nt = c->nt;
+  const char *n = nt_str(nt, id, "name");
+  if (!n || nt_kind(nt, id) != NK_CallNode) return 0;
+  if (nt_ref(nt, id, "receiver") < 0)
+    return sp_streq(n, "puts") && comp_method_index(c, n) < 0;
+  return array_new_copies(rt) && arysub_call_flags(c, id, 1);
+}
+
+/* `Array(x)`: of an Array subclass instance x it is x itself (Kernel#Array
+   takes an Array as it is, #7449). x's node, else -1; the caller asks x's
+   type. */
+int comp_arysub_kernel_array(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  const char *n = nt_kind(nt, id) == NK_CallNode ? nt_str(nt, id, "name") : NULL;
+  if (!n || !sp_streq(n, "Array") || nt_ref(nt, id, "receiver") >= 0 || nt_ref(nt, id, "block") >= 0 ||
+      comp_method_index(c, n) >= 0) return -1;
+  int args = nt_ref(nt, id, "arguments"), an = 0;
+  const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+  if (an != 1 || nt_kind(nt, av[0]) == NK_SplatNode) return -1;
+  return av[0];
 }
 
 /* The method a program's reopen of a builtin kind's own class defines under
@@ -2137,7 +2257,16 @@ static int bare_gets_scan(const NodeTable *nt) {
       for (int k = 0; k < ac; k++)
         if (nt_kind(nt, av[k]) != NK_SplatNode) splats_only = 0;
       if (cn && sp_streq(cn, "print") && splats_only) return 0;
-      if (cn && sp_streq(cn, "~") && ac == 0) return 0;
+      /* `~re` is Regexp#~, a match against $_. `~5`, `~x` and `~self` are
+         Integer#~ (builtins/integer.rb spells the last in bit_length, so any
+         program that requires securerandom has one), and a bare gets beside
+         them is still ARGF's. Syntax only: a regexp literal, interpolated or
+         not, is the match; a Regexp held in a variable is not seen. */
+      if (cn && sp_streq(cn, "~") && ac == 0) {
+        int rcv = nt_ref(nt, i, "receiver");
+        if (rcv < 0 || nt_kind(nt, rcv) == NK_RegularExpressionNode ||
+            nt_kind(nt, rcv) == NK_InterpolatedRegularExpressionNode) return 0;
+      }
     }
     if (v && (sp_streq(v, "gets") || sp_streq(v, "print"))) return 0;
   }
