@@ -1,0 +1,44 @@
+A target after an Array pattern's splat binds an assigned local to an element of any class
+
+    t = "o"
+    case [:q, :r]
+    in [_, *, t]
+      p t                   # :r
+    end
+
+exited 139 with nothing printed. Over [[1], [2]] the same local
+printed six bytes of memory as a String, over [true, false] nil and
+over [{a: 1}, {b: 2}] "". `n = 0` printed 6 for the Symbol and 0 for
+the "s" of [1, "s"], and a Float local raised TypeError.
+
+An Array of Symbols, of true and false, of Arrays, of Hashes, of
+objects or of a mix is a boxed Array: its type tells no class for an
+element. The commit before this boxes an assigned local where the
+element is surely of another class, which a capture (`Integer => t`)
+or an Array of Integers, of Floats or of Strings can say. A bare
+target after the splat over a boxed Array has neither, so the local
+kept the type its assignment gave it and the element was unboxed as
+that (emit_pm_typed_assign), whatever its class.
+
+Such a target boxes the local now, under the list that commit brought
+(pm_uses, pm_local_assigned): every assignment to the local is a
+statement `x = literal`, and every other use prints it, interpolates
+it or compares it with a literal. A local with any other use is typed
+as it was and writes the same C.
+
+The element may be of the class the local already held: `t = "o"`
+taking the "s" of [1, "s"]. That program was right typed and is right
+boxed, and pays a boxed comparison for a typed one: ten million
+`t == "s"` take 0.097 s where they took 0.007.
+
+Not cured here: the same bare target inside a nested Array pattern
+(`[[t, _], _]`, `[*, [*, t]]`), which pm_seed_locals_poly leaves at
+the assignment's type and which fails the same way; and a local with
+a use off the list (`p [t]` after the pattern), which keeps its type
+and still exits 139.
+
+Test: test/array_pattern_target_after_splat.rb (expected from CRuby
+3.3.6); master exits 139 on it with nothing printed. No other program
+of the corpus changes its generated C.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

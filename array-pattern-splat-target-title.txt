@@ -1,0 +1,1 @@
+A target after an Array pattern's splat binds an assigned local to an element of any class
