@@ -864,6 +864,17 @@ int emit_call_instance_eval_arms(Compiler *c, int id, Buf *b, const NodeTable *n
   return 0;
 }
 
+/* Whether the receiver has `name` from the program: an object whose class
+   defines or reads it, or a boxed value beside a class that does. The call
+   then goes on to the class's own method, as a user-defined dup or clone
+   already does. */
+static int recv_names_own(Compiler *c, int recv, const char *name) {
+  TyKind rt = comp_ntype(c, recv);
+  if (ty_is_object(rt))
+    return comp_resolve_member(c, ty_object_class(rt), name, 0, NULL, NULL) != SP_MEMBER_NONE;
+  return repr_of(c, recv).kind == RK_BOXED && user_defines_or_reads(c, name);
+}
+
 /* freeze / frozen?, dup / clone, the identity methods that answer the receiver, and then / yield_self */
 int emit_call_freeze_dup_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc) {
   if (recv >= 0 && (comp_ntype(c, recv) == TY_RANGE || comp_ntype(c, recv) == TY_FLOAT_RANGE ||
@@ -1252,7 +1263,7 @@ int emit_call_freeze_dup_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, 
     int blk = nt_ref(nt, id, "block");
     /* with NO block, an enumerator of one element -- the receiver (#4028),
        named `then` for either name, as CRuby's yield_self is then's alias */
-    if (blk < 0 && nt_ref(nt, id, "arguments") < 0) {
+    if (blk < 0 && nt_ref(nt, id, "arguments") < 0 && !recv_names_own(c, recv, name)) {
       buf_puts(b, "sp_enum_of_one(");
       emit_boxed(c, recv, b);
       buf_puts(b, ", SPL(\"then\"))");
