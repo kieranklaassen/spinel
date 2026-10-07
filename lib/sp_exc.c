@@ -346,10 +346,28 @@ const char *sp_exc_class_name(volatile sp_Exception *ve) {
   /* cls_name points into rodata (see sp_exc_gc_scan) and it comes from the
      raise site's bare literal, so it carries no marker byte. This name reaches
      Ruby as `e.class.to_s`, where the caller roots it and the collector reads
-     that byte -- hand back a string of our own instead. Every caller is a cold
-     path (a render, a cross-thread re-raise), so the copy costs nothing that
-     matters. */
-  return e && e->cls_name ? sp_str_dup_external(e->cls_name) : SPL("RuntimeError");
+     that byte -- hand back a marked copy instead. One copy is made for a name
+     and kept, as a literal is. A Class value carries its name in a plain
+     struct that no root and no scan knows (`k = e.class` held in a local, a
+     parameter or an instance variable), so a copy on the string heap was
+     collected under it and `k.to_s` answered the String that took its place. */
+  static const char **kept = NULL;   /* guarded by the heap lock */
+  static int n = 0, cap = 0;
+  const char *r = NULL;
+  if (!e || !e->cls_name) return SPL("RuntimeError");
+  SP_HEAP_LOCK();
+  for (int i = 0; i < n && !r; i++) if (!strcmp(kept[i], e->cls_name)) r = kept[i];
+  if (!r && n == cap) {
+    const char **nk = (const char **)realloc((void *)kept, sizeof(char *) * (size_t)(cap ? cap * 2 : 16));
+    if (nk) { kept = nk; cap = cap ? cap * 2 : 16; }
+  }
+  if (!r && n < cap) {
+    size_t len = strlen(e->cls_name);
+    char *m = (char *)malloc(len + 2);
+    if (m) { m[0] = (char)0xff; memcpy(m + 1, e->cls_name, len + 1); r = kept[n++] = m + 1; }
+  }
+  SP_HEAP_UNLOCK();
+  return r ? r : sp_str_dup_external(e->cls_name);   /* out of memory */
 }
 const char *sp_exc_message(volatile sp_Exception *ve) {
   sp_Exception *e = (sp_Exception *)ve;
