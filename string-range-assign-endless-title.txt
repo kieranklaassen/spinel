@@ -1,0 +1,1 @@
+String#[]= with an endless Range from the first character replaces the String

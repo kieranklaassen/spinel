@@ -1,0 +1,27 @@
+String#[]= with an endless Range from the first character replaces the String
+
+`s = +"abc"; s[0..] = "x"; p s` printed "xabc" where CRuby prints "x".
+An endless Range carries INTPTR_MAX as its end, and the Range arm took
+only SP_INT_NIL for "no end": from a start of 0 the count of
+characters, INTPTR_MAX - 0 + 1, ran over and nothing was replaced.
+From any other start the count stays an Integer and the splice clamps
+it, which is why `s[1..] = "x"` was right. `s[-3..] = "x"` on "abc",
+`s[0..nil]`, an end that is nil at run time and an endless Range out
+of a variable answered the same; `s[-3..]` built with gcc raised
+IndexError, "negative length -9223372036854775808".
+
+The arm now takes an end of INTPTR_MAX from a start of 0 as no end.
+Where the end is written in the index as an Integer that cannot be
+nil, it is never endless and the C is what it was. No store that was
+right pays: the test joins the one for SP_INT_NIL, and callgrind
+counts no more instructions after than before for `s[5..] = "xyz"`,
+for a Range out of a variable and for an end that may be nil.
+
+One program is answered the other way. Spinel cannot tell a Range
+whose end is 9223372036854775807 from an endless one:
+`p (0..9223372036854775807)` prints "0..", and its `end` is nil. So
+`r = (0..9223372036854775807); s[r] = "x"` printed "xabc", as CRuby
+does, and now prints "x". With that end written in the index,
+`s[0..9223372036854775807] = "x"`, it prints "xabc" as before.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
