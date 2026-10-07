@@ -1,0 +1,35 @@
+A method that matches in a `when` or in any?, all?, none? or one? keeps its caller's $~
+
+$~ and the registers read out of it are a frame's own, and a method that
+matches saves its caller's on the way in (#3629). The test for "matches"
+knew the matching calls, but neither a `when` arm that holds a Regexp
+nor the four quantifiers given one, so such a method left its own match,
+or the nil of a miss, in its caller's registers:
+
+    def kind(v)
+      case v
+      when /a/ then :a
+      else :other
+      end
+    end
+    "q1" =~ /q(\d)/
+    kind("zz")
+    p $1
+
+printed nil; CRuby prints "1". So did `def any_b(a) = a.any?(/b/)`
+called with ["zz"].
+
+scope_performs_match now counts both, in a program where a method's
+registers are provably its own frame's (match_frame_closed). The test is
+put to the frames such a program gets, so a method that matches only in
+a `when` arm or a quantifier no longer fails it for saving no frame.
+Every other program is emitted as before, byte for byte: a method that
+matches this way saves no frame there, because a proc, a kept block or a
+Fiber shares the one set of registers with the method that runs it, and
+a frame would take its match away.
+
+Tests: test/regexp_when_quantifier_frame.rb.
+test/regexp_when_frame_kept_block.rb and test/regexp_when_frame_fiber.rb
+are programs the test leaves alone.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

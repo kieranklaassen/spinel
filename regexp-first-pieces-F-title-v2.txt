@@ -1,0 +1,1 @@
+A method that matches in a `when` or in any?, all?, none? or one? keeps its caller's $~

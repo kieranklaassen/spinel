@@ -1,0 +1,1 @@
+A fetch block's parameter is boxed where its type is not the key's

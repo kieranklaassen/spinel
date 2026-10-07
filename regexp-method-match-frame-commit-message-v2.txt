@@ -1,0 +1,65 @@
+A method that matches starts with no match, and a jump out of it gives its caller's back
+
+A method that matches saves its caller's match registers in a frame
+(sp_re_frame, #3629) and a cleanup attribute puts them back when the
+method returns. Two ends were open. The frame started with the caller's
+match still in the registers, so the method read it as its own. And a
+jump out of the method runs no cleanup, so the method it landed in read
+its callee's match:
+
+    def first(s)
+      was = $1
+      s =~ /a(.)/
+      was
+    end
+    def boom(s)
+      s =~ /z(.)/
+      raise ArgumentError, "x"
+    end
+    "k9" =~ /k(\d)/
+    p first("ab")
+    begin
+      boom("zq")
+    rescue ArgumentError
+    end
+    p $1
+
+printed "9" and "q"; CRuby prints nil and "9". The second held for a
+throw to a catch, a break out of the block of a method reached through
+a boxed receiver, and a proc's return through the methods it was handed
+to.
+
+The frame now starts empty, and each jump pops the frames of the
+methods it leaves before it jumps. The frames are chained, innermost
+first, and a frame notes the depth of the exception, catch and break
+stacks at its own entry, which is how sp_handler_stacks_unwind already
+tells a catch entry, a break scope or a proc-return home opened inside
+the landing frame from one opened before it. So no begin, catch or
+break arm records anything. A proc-return home has no depth to note, so
+the return pairs the two chains once, where it finds its home.
+
+Both ends and all four jumps are closed together because none stands
+alone. A frame that starts empty and is not put back by a raise hands
+the caller no match where it had one. A frame put back by a raise and
+not emptied shows the next method a match the leftover had hidden. A
+frame a throw left on the chain would be read by the next raise out of
+a C frame that had already returned.
+
+This is done only in a program where the registers a method sees are
+provably its own frame's (match_frame_closed): the program reads them,
+runs no Fiber, Enumerator or Thread, and no code of another frame reads
+them or may set them. Such code is a block that may run as a function
+of its own (every block and lambda but one given to a built-in value's
+own method, to loop or to catch), a method that takes a block, a method
+that saves no frame, and a class or module body. In such a program `$~`
+in a method is the method's own from its entry to every way out. Every
+other program is emitted as before, byte for byte: there a closure or a
+Fiber shares the registers with the method that runs it, and taking the
+frame back would take its match away.
+
+Tests: test/regexp_frame_starts_empty.rb and
+test/regexp_frame_left_by_jump.rb. The five
+test/regexp_frame_jump_*.rb are programs the test leaves alone, one
+for each condition.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

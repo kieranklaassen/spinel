@@ -1,0 +1,39 @@
+A fetch block's parameter is boxed where its type is not the key's
+
+On a local that may be a Hash or an Array, fetch with a block raised a
+false NoMethodError when the program also read the local with a Symbol:
+
+    def pick(n) = n > 0 ? {"a" => 1, :s => 2} : [1, 2]
+    x = pick(1)
+    p x[:s]
+    p(x.fetch(9) { |k| k * 2 })
+    # undefined method 'fetch' for an instance of Hash; CRuby 18
+
+The read types the still untyped local as a Hash of Symbol keys for one
+round, the Hash rule of infer_block_params_container_arms binds k to
+that key type, and k kept it when the local was boxed a round later.
+`k * 2` then multiplied a "Symbol", so the Hash arm was left out; with
+`{ |k| k }` the C did not build. On a boxed receiver, a parameter whose
+type the key's type contradicts is now boxed, as it is where nothing
+typed it: the C is what the program without the read compiles to, plus
+the read.
+
+Only where the key's type is known and can hold no String and no
+Symbol. Boxed, a String is a copy under a change in place, and a boxed
+Symbol's `[]` answers nil. And only while no fetch block of the program
+is left behind with such a key and a parameter that is neither boxed
+nor of the key's type: its failure would be reached by a program that
+builds now.
+
+Not changed. A String or Symbol key after a read with a key of the
+other kind, and a parameter whose stale type is the key's own, still
+fail as they did. So does the program above with one more line,
+
+    q = "zz"; p(@y.fetch(q) { |j| j * 2 })
+
+for an @y that is boxed from the start: j is typed only after
+inference, so while it runs nothing shows j will not be left behind.
+
+Test: test/poly_fetch_block_param_after_read.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
