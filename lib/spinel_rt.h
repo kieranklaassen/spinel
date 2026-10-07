@@ -10475,7 +10475,11 @@ static sp_RbVal sp_poly_delete_key(sp_RbVal recv, sp_RbVal key) {
     sp_PolyArray *a = sp_poly_to_poly_array(recv);
     sp_int w = 0, found = 0;
     for (sp_int i = 0; a && i < a->len; i++) {
-      if (sp_poly_rb_equal(a->data[i], key)) { found = 1; continue; }
+      if (sp_poly_rb_equal(a->data[i], key)) {
+        /* a frozen Array raises for the first element it would remove */
+        if (a->frozen) sp_raise_frozen_array_at(a, SP_BUILTIN_POLY_ARRAY);
+        found = 1; continue;
+      }
       a->data[w++] = a->data[i];
     }
     if (a) a->len = w;
