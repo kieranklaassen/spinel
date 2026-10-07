@@ -6395,6 +6395,80 @@ static int expand_literal_splat_args(Compiler *c) {
    source never terminates either), so drop the `.lazy` and let the eager
    array path serve it. An endless range keeps its lazy chain and its
    (still unsupported) reject. (#2993) */
+/* A literal block of no parameter or of one plain required parameter: the
+   block the String-range each arm binds. */
+static int str_range_each_block_plain(Compiler *c, int blk) {
+  const NodeTable *nt = c->nt;
+  if (blk < 0 || nt_kind(nt, blk) != NK_BlockNode) return 0;
+  int bp = nt_ref(nt, blk, "parameters");
+  if (bp < 0) return 1;
+  const char *bpty = nt_type(nt, bp);
+  if (bpty && sp_streq(bpty, "NumberedParametersNode")) return nt_int(nt, bp, "maximum", 0) <= 1;
+  if (!bpty || !sp_streq(bpty, "BlockParametersNode")) return 0;
+  int pn = nt_ref(nt, bp, "parameters");
+  if (pn < 0) return 1;
+  int n = 0, m = 0;
+  const int *reqs = nt_arr(nt, pn, "requireds", &n);
+  if (n > 1 || (n == 1 && nt_kind(nt, reqs[0]) != NK_RequiredParameterNode)) return 0;
+  nt_arr(nt, pn, "optionals", &m); if (m) return 0;
+  nt_arr(nt, pn, "posts", &m); if (m) return 0;
+  nt_arr(nt, pn, "keywords", &m); if (m) return 0;
+  return nt_ref(nt, pn, "rest") < 0 && nt_ref(nt, pn, "keyword_rest") < 0 && nt_ref(nt, pn, "block") < 0;
+}
+
+/* Nothing reads the value of the String Range call `v`: master's
+   an_value_dropped, less the block of a call some class of the program
+   defines (a user `each` can answer its block's value), and with the last
+   statement of the program, of a `for` body and of an `if` arm that is
+   itself dropped. Its each answers the Range; the walk is a statement. */
+static int str_range_call_value_dropped(Compiler *c, const int *par, int v) {
+  const NodeTable *nt = c->nt;
+  for (;;) {
+    int st = par[v];
+    if (an_value_dropped(nt, par, v)) {
+      int blk = st >= 0 ? par[st] : -1;
+      int sn = 0;
+      const int *sb = nt_arr(nt, st, "body", &sn);
+      if (blk < 0 || nt_kind(nt, blk) != NK_BlockNode || sn <= 0 || sb[sn - 1] != v) return 1;
+      int call = par[blk];
+      const char *bn = call >= 0 ? nt_str(nt, call, "name") : NULL;
+      for (int k = 0; bn && k < c->nclasses; k++)
+        if (comp_method_in_chain(c, k, bn, NULL) >= 0) return 0;
+      return 1;
+    }
+    if (st >= 0 && nt_kind(nt, st) == NK_IfNode && nt_ref(nt, st, "subsequent") == v) { v = st; continue; }
+    if (st < 0 || nt_kind(nt, st) != NK_StatementsNode) return 0;
+    int owner = par[st];   /* v is the last statement of st */
+    if (owner < 0) return 0;
+    NodeKind ok = nt_kind(nt, owner);
+    if (nt_type(nt, owner) && sp_streq(nt_type(nt, owner), "ProgramNode")) return 1;
+    if (ok == NK_ForNode) return nt_ref(nt, owner, "statements") == st;
+    if (ok == NK_ElseNode) { owner = par[owner]; if (owner < 0) return 0; ok = nt_kind(nt, owner); }
+    else if (nt_ref(nt, owner, "statements") != st) return 0;
+    if (ok != NK_IfNode && ok != NK_UnlessNode) return 0;
+    v = owner;
+  }
+}
+
+/* The String Range call `v` is the last statement of a method and its
+   receiver a local: the Range it answers is the method's value, and that
+   is the local, which holds its two ends. */
+static int str_range_call_ends_def_on_local(const NodeTable *nt, const int *par, int v) {
+  int recv = nt_ref(nt, v, "receiver");
+  if (recv < 0 || nt_kind(nt, recv) != NK_LocalVariableReadNode) return 0;
+  int st = par[v];
+  if (st < 0 || nt_kind(nt, st) != NK_StatementsNode) return 0;
+  int sn = 0;
+  const int *sb = nt_arr(nt, st, "body", &sn);
+  if (sn <= 0 || sb[sn - 1] != v) return 0;
+  int def = par[st];
+  return def >= 0 && nt_kind(nt, def) == NK_DefNode && nt_ref(nt, def, "body") == st;
+}
+
+/* May the block of a String Range's walk change the member it is handed?
+   Defined beside the tests it makes, promote_shared_stored_strings's own. */
+static int str_range_block_changes_member(Compiler *c, int blk);
+
 /* A string range serves only its endpoint/membership face natively; every
    other method rides the materialized element array. Type-driven, so it also
    catches a range held in a variable -- which is why it lives in the
@@ -6403,6 +6477,7 @@ static int desugar_str_range_methods(Compiler *c) {
   NodeTable *nt = (NodeTable *)c->nt;
   int changed = 0;
   int n0 = nt->count;
+  int *par = NULL;
   static const char *const range_native[] = {
     "begin", "end", "min", "max", "include?", "member?", "cover?", "===",
     "exclude_end?", "==", "!=", "eql?", "inspect", "to_s", "class",
@@ -6476,6 +6551,23 @@ static int desugar_str_range_methods(Compiler *c) {
        yielded the member Array, tap answered it, and on an endless range
        instance_variables, `!` and `=~` raised RangeError where CRuby answers */
     if (range_object_face(nm)) native = 1;
+    /* each with a block of at most one plain parameter walks the members
+       one at a time, in its own arm (the statement iteration's String-range
+       each), where nothing reads the call's value. One whose value is read
+       (`x = r.each { }`, a condition, a method's last expression) rides the
+       array as it did, and so does one whose block may change its member:
+       what refuses or shares an element changed in a block decides it
+       there, as it did. */
+    int dropped = 0;
+    if (!native && nt_ref(nt, id, "block") >= 0 && sp_streq(nm, "each")) {
+      if (!par) par = an_parent_map(nt);
+      dropped = par && (str_range_call_value_dropped(c, par, id) ||
+                        str_range_call_ends_def_on_local(nt, par, id));
+    }
+    if (!native && an == 0 && sp_streq(nm, "each") && dropped) {
+      int blk = nt_ref(nt, id, "block");
+      if (str_range_each_block_plain(c, blk) && !str_range_block_changes_member(c, blk)) native = 1;
+    }
     if (native) continue;
     int toa = nt_new_node(nt, "CallNode");
     if (toa < 0) continue;
@@ -6494,6 +6586,7 @@ static int desugar_str_range_methods(Compiler *c) {
     c->nscope[toa] = c->nscope[id];
     changed = 1;
   }
+  free(par);
   return changed;
 }
 
@@ -16824,6 +16917,27 @@ static int block_yields_param_to_lender(Compiler *c, int blk, const char *bp, AC
   if (!cb->built) an_caller_blocks_build(c, cb);
   if (mi < 0 || mi >= cb->ns) return 0;
   return a_yield_param_lent(c, body, ms, mi, bp, cb, 0);
+}
+
+/* May the block of a String Range's walk change the member it is handed:
+   the parameter is changed in place, handed to a method or on to a block
+   that appends to it, or appended to through another name. These are the
+   tests promote_shared_stored_strings makes of an element's block. Such a
+   walk rides the element array, where that pass refuses or shares it. */
+static int str_range_block_changes_member(Compiler *c, int blk) {
+  const char *bp = block_param_name(c, blk, 0);
+  Scope *bs = bp ? comp_scope_of(c, blk) : NULL;
+  if (!bs) return 0;
+  if (strbuf_mut_kind(c, bp, bs) != 0 || cap_wrap_mutates_param(c, blk, bp) ||
+      an_subtree_hands_to_appender(c, nt_ref(c->nt, blk, "body"), bp, 0)) return 1;
+  ACallerBlocks cbl; memset(&cbl, 0, sizeof cbl);
+  int lent = block_yields_param_to_lender(c, blk, bp, &cbl);
+  an_caller_blocks_free(&cbl);
+  if (lent) return 1;
+  ALocalAliases bpa; an_local_aliases_build(c, &bpa);
+  int aliased = an_block_param_alias_mutated(c, &bpa, bs, bp);
+  an_local_aliases_free(&bpa);
+  return aliased;
 }
 
 /* A digest of every type the share classes read: inside the fixpoint the
