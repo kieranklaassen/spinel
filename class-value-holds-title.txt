@@ -1,0 +1,1 @@
+A class-value new holds the values it builds
