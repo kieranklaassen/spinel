@@ -1,0 +1,30 @@
+respond_to? answers for Exception's methods on a program's exception class
+
+    class MyErr < StandardError; end
+    e = MyErr.new("q")
+    puts(e.respond_to?(:message) ? e.message : "no message")
+    # no message; CRuby: q
+
+respond_to? was false for message, full_message, detailed_message,
+backtrace, backtrace_locations, cause, exception and set_backtrace on an
+instance of a class the program puts under a builtin exception: a typed
+one (`MyErr.new`, `rescue MyErr => e`) and one boxed without having been
+raised. Those methods are the runtime's and stand in no method table.
+class_implicit_responds, the one list the typed fold and the check for a
+boxed receiver both read, had the names Comparable, Enumerable and a
+Struct bring and not Exception's. It has them now for a class under a
+builtin exception, unless the class took the name away (undef_method) or
+made it private.
+
+Not here: `respond_to?(:message, true)` for a name made private is still
+false, a bare `respond_to?(:message)` inside the class's own method too,
+and the names a builtin parent adds (KeyError's `key` and `receiver`). A
+raised exception kept as a boxed value answers as before, from the
+runtime's own list: false for detailed_message, backtrace_locations and
+set_backtrace. Where master cannot make the call itself (`full_message`
+and `backtrace_locations` on a typed value, `set_backtrace` on a boxed
+one) it still raises NoMethodError; respond_to? answers as CRuby does.
+
+Test: test/exception_class_responds_to_exception_methods.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
