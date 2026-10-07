@@ -1,0 +1,30 @@
+An append through delegating readers reaches a holder met first at the bound
+
+With four pass-through classes declared ahead of the one that holds the
+String and reads it through a helper (`def peek(i) = cell(i)`,
+`def cell(i) = @v[i]`), `bus.peek(0) << "!"; p bus.peek(0)` printed
+"leaf": the append went to a copy and nothing said so. It printed
+"leaf!" before pull request 7780 ("An append through a delegating
+reader follows each method once"), and it does under --share-strings.
+
+strbuf_demand_user_elem_call follows a reader's result through at most
+five methods, and since that change it walks each method once per
+demand. By name, the holder's `peek` is first met at depth 4, behind the
+four pass-through ones, where its own result `cell(i)` is past the bound
+and is cut. The loop at depth 1 then reaches it by the short route,
+which would follow `cell` at depth 2, and skips it as walked, so `@v[i]`
+is never demanded. A method's results are the same however it was
+reached; what is left of the bound is not. One class with a long and a
+short route to the same method (`return m4(i) if i > 5; m1(i)`) lost the
+append the same way.
+
+The table now keeps the depth each method was walked at, and a method
+is skipped only when that walk was no deeper than this one, as
+hash_literal_sources does for its nodes. A method is walked at most once
+per depth, so the fan-out that change ended stays ended: its test of 32
+classes is analysed in 0.04 seconds as on master, and the same bus at
+256 classes in 0.5 seconds on both.
+
+The generated C is unchanged for every other test.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
