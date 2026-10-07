@@ -1,0 +1,1 @@
+A rest parameter is rooted ahead of the method's first cell

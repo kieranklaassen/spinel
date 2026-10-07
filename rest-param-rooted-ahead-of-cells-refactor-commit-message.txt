@@ -1,0 +1,8 @@
+emit_scope_decls_ends roots a parameter through emit_param_root
+
+The switch that roots a parameter by the form its type takes (a boxed
+value, a String, a String Range, any other pointer) moves out of
+emit_scope_decls_ends into emit_param_root, called from where it
+stood. No generated C changes.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

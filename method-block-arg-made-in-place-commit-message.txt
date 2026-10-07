@@ -1,0 +1,36 @@
+A Method made where it is passed as a block is held while it becomes a Proc
+
+    def m1(o)
+      x = o.method(:neg)
+      yield
+    end
+    def f3(o, q) = m1(q, &o.method(:val))
+
+answered q.neg for o.val on two calls in a million (-231037 for 231030);
+CRuby answers o.val every time. `&expr` over a boxed value is written
+as sp_poly_to_block(<value>). A Method converts by allocating its Proc
+(sp_method_to_proc), and one made in the argument list is held by
+nothing else: a collection on that allocation frees it, the Proc keeps
+the freed Method, and the next Method made takes its place. Under
+SPINEL_GC_STRESS=2 the call raises NoMethodError (undefined method
+'call' for an instance of Method).
+
+emit_poly_to_block writes the conversion for both of its callers
+(emit_block_arg_proc and the block an inlined yield forwards). In a
+program that builds Method objects it binds a value that is not read
+from a variable to a rooted temporary across the conversion. A read is
+held where it lives and keeps its C, as does every program with no
+Method in it. A Method that reaches `&` out of a call or a conditional
+(`&pick(i)`, where pick answers a Method or nil) is held the same way,
+and so is any other boxed value there: what it is shows only at run
+time, so it pays the one frame slot as well.
+
+Not here: Keep.new(&o.method(:val)), where initialize takes the block:
+the constructor allocates its object after the conversion, and the
+call faults under SPINEL_GC_STRESS=2.
+
+Test: test/method_block_arg_made_in_place.rb (expected from CRuby
+3.3.6), added to GC_STRESS_TESTS. On master it raises under
+SPINEL_GC_STRESS=2.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

@@ -1,0 +1,33 @@
+A rest parameter is rooted ahead of the method's first cell
+
+    class K
+      def hold(n, *args, &block) = lambda { args << n }
+    end
+    f = k.hold(i); f.call
+
+run a million times, keeping every fourth lambda, left six of the kept
+ones sharing an Array with a later call: the one from k.hold(868)
+answered [874, 868] where CRuby answers [868, 868]. A call roots the
+rest Array it packs in its own frame, but an empty rest and a lone
+splat (hold(i), top(i, *ints)) are handed over as the bare call that
+makes them, so the method is the first to hold that Array. A captured
+local lives in a cell, and emit_scope_decls_ends allocates the cells
+in the order of the locals: a cell made before the rest is rooted can
+collect it, and a captured rest was not rooted at all before it moved
+into its own cell. Under SPINEL_GC_STRESS=2 the mark stops on the
+freed Array.
+
+The rest is now rooted before the first cell made ahead of it or for
+it. A method with no captured local keeps its C, and so does a
+captured parameter that is not the rest: the call holds every other
+argument it makes. A method that captures its rest pays one frame
+slot a call, also where the call packed and held the Array.
+
+Not here: a constructor allocates its object before initialize runs,
+with the rest still held by nothing, so Keep.new(i) with such an
+initialize stops the same way under SPINEL_GC_STRESS=2.
+
+Test: test/rest_param_held_across_cells.rb (expected from CRuby 3.3.6),
+added to GC_STRESS_TESTS. On master it stops under SPINEL_GC_STRESS=2.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

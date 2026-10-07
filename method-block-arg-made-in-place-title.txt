@@ -1,0 +1,1 @@
+A Method made where it is passed as a block is held while it becomes a Proc
