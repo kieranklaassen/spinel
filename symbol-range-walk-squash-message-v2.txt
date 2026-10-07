@@ -1,0 +1,50 @@
+A Symbol Range walks the names String#upto walks
+
+    p (:y..:ab).to_a    # [] in Ruby; [:y, :z, :aa, :ab]
+
+A Symbol Range literal is walked by name: String#succ from the begin
+until the end is met or the name grows past the end's length. That is
+the last of String#upto's cases, taken for all of them:
+
+    (:y..:ab)          four names; "y" sorts after "ab": none
+    (:Y..:b)           stops at :Z; one character each: the ten between
+    (:"10"..:"9")      :"10"; digits go by number: none
+    (:"1"..:"010")     999 names; ten
+    (:aa..:z)          :aa; the begin is the end's successor: none
+    (:"z.0"..:"z.09")  100 names; "z.9" steps past the end: ten
+
+and `include?`, `each` and `map` on such a Range answer from those
+names.
+
+Both names are literals, so emit_range_expr asks at compile time
+whether the loop is String#upto's walk for them (sym_range_plain_walk)
+and keeps the loop where that is proved. Any other Range calls
+sp_PolyArray_from_symbol_range, which walks with sp_str_upto_each, the
+walk String Ranges use, and interns each name through the unit's own
+table. Those are the Ranges the loop walked wrong and four kinds the
+test does not prove: two names of digits where the end is not its own
+number at the begin's width, a begin shorter than an end whose carry
+lands on a 0 that no letter or digit stands before (:"0z", :"a.09"), a
+begin one character longer than the end with the shape of its
+successor, and two different names where either is not ASCII. Two names
+of digits past 18 keep the loop, right or not: the runtime walks by
+number only up to 18 digits.
+
+The loop's cursor is now a root. Every name past the first is a String
+of its own, made by sp_str_succ, and nothing held it while its Symbol
+was made, which allocates when the name is new: `p (:ax..:az).to_a`
+aborts under SPINEL_GC_STRESS=2 with gcc and with clang, and so does
+test/symbol_range_enum.rb. The first cursor is the begin's own name,
+which the collector passes over where it is a literal's.
+
+Cost (callgrind, gcc): the root is 16 to 64 instructions a walk: 19 on
+a walk of one name (`(:qa..:qa)`: 202,987,017 to 221,987,021 for
+1,000,000 walks) and 64 on one of 26 (`(:qa..:qz)`: 3,209,740,876 to
+3,216,168,755 for 100,000). A Range of those four kinds that was right
+pays more on a short walk: `(:"002"...:"3")` 732 to 1,535 a walk.
+
+test/symbol_range_walk.rb has each case; 13 of its 28 lines differ
+from Ruby on master in a plain run. It and test/symbol_range_enum.rb
+are added to GC_STRESS_TESTS.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
