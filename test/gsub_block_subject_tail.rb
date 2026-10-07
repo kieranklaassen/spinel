@@ -99,3 +99,10 @@ p r.bytesize, r.bytes.last(8)
 e = []
 ["=", /=/, "=".b].each { |pt| bs.gsub(pt) { |m| e << m.encoding.to_s; "-" } }
 p e
+
+# a String pattern that holds a NUL is sought up to the NUL while its end is
+# counted by its bytes, so the end can lie past the subject's end: no tail
+x = ""
+p x.sub("\0") { "" }.bytes
+y = "a"
+p y.sub("a\0") { "a" }.bytes
