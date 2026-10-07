@@ -4420,6 +4420,69 @@ int expr_is_held_ref(Compiler *c, int node) {
   return k == NK_LocalVariableReadNode || k == NK_InstanceVariableReadNode ||
          k == NK_SelfNode || k == NK_ConstantReadNode;
 }
+/* Is `node` a read of an object that a root reaches where the read ends: a
+   variable, a constant or self; a plain field read off such a read (an
+   attr_reader's or a Struct member's slot); an element of such a typed
+   Array, by an Integer index that only reads; a conditional whose two arms
+   are such reads of its own type, or an `||` or `&&` of two? Nothing runs
+   between the read and its use, so what it reads is still held there. An
+   index that runs code ran before the element is read, so the element of a
+   variable's Array is held too unless that code can give the variable
+   another Array (read_rebound_by): C may have read the variable first. */
+static int read_is_held(Compiler *c, int node) {
+  const NodeTable *nt = c->nt;
+  node = unwrap_parens(c, node);
+  if (node < 0) return 0;
+  NodeKind k = nt_kind(nt, node);
+  if (expr_is_held_ref(c, node) || k == NK_ConstantPathNode ||
+      k == NK_GlobalVariableReadNode || k == NK_ClassVariableReadNode)
+    return 1;
+  if (k == NK_IfNode) {
+    int then_b = nt_ref(nt, node, "statements"), sub = nt_ref(nt, node, "subsequent");
+    if (then_b < 0 || sub < 0 || nt_kind(nt, sub) != NK_ElseNode) return 0;
+    int else_b = nt_ref(nt, sub, "statements"), tn = 0, en = 0;
+    const int *tb = nt_arr(nt, then_b, "body", &tn);
+    const int *eb = else_b >= 0 ? nt_arr(nt, else_b, "body", &en) : NULL;
+    TyKind t = comp_ntype(c, node);
+    return tn == 1 && en == 1 && comp_ntype(c, tb[0]) == t && comp_ntype(c, eb[0]) == t &&
+           read_is_held(c, tb[0]) && read_is_held(c, eb[0]);
+  }
+  if (k == NK_OrNode || k == NK_AndNode) {
+    int l = nt_ref(nt, node, "left"), r = nt_ref(nt, node, "right");
+    TyKind t = comp_ntype(c, node);
+    return l >= 0 && r >= 0 && comp_ntype(c, l) == t && comp_ntype(c, r) == t &&
+           read_is_held(c, l) && read_is_held(c, r);
+  }
+  if (k == NK_CallNode) {
+    int recv = nt_ref(nt, node, "receiver"), alloc = 0;
+    if (recv < 0 || !read_is_held(c, recv)) return 0;
+    if (call_is_field_read(c, node, &alloc)) return !alloc;
+    const char *nm = nt_str(nt, node, "name");
+    int a = nt_ref(nt, node, "arguments"), ac = 0;
+    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+    if (!nm || !sp_streq(nm, "[]") || ac != 1 || nt_ref(nt, node, "block") >= 0 ||
+        !(ty_is_array(comp_ntype(c, recv)) || ty_is_obj_array(comp_ntype(c, recv))) ||
+        comp_ntype(c, av[0]) != TY_INT)
+      return 0;
+    if (subtree_is_pure_read(c, av[0])) return 1;
+    recv = unwrap_parens(c, recv);
+    NodeKind rk = nt_kind(nt, recv);
+    return (rk == NK_LocalVariableReadNode || rk == NK_InstanceVariableReadNode ||
+            rk == NK_GlobalVariableReadNode || rk == NK_ClassVariableReadNode ||
+            rk == NK_ConstantReadNode) &&
+           !read_rebound_by(c, recv, av[0]);
+  }
+  return 0;
+}
+/* Is `node` a typed Array that something else holds while sp_typed_to_poly
+   boxes it? One a root reaches (read_is_held), or an Array literal, which
+   sits in a rooted temp. Any other source is boxed by
+   sp_typed_to_poly_unheld. */
+int typed_array_src_held(Compiler *c, int node) {
+  node = unwrap_parens(c, node);
+  if (node < 0) return 0;
+  return read_is_held(c, node) || nt_kind(c->nt, node) == NK_ArrayNode;
+}
 /* The proc-form clone of scope `s`, or -1. Made in analyze (make_yield_proc_forms):
    a second scope named "<name>#pf" on the same class, holding an independently
    typed copy of the body whose yields answer poly. */

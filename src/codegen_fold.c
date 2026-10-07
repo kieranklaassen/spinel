@@ -7356,7 +7356,8 @@ void emit_rest_pack_kwh(Compiler *c, int from, int pos_argc, const int *argv, in
         return;
       }
       if (ar.elem == TY_FLOAT) {
-        buf_puts(b, "sp_typed_to_poly("); emit_expr(c, inner, b); buf_puts(b, ", SP_BUILTIN_FLT_ARRAY)");
+        buf_puts(b, typed_array_src_held(c, inner) ? "sp_typed_to_poly(" : "sp_typed_to_poly_unheld(");
+        emit_expr(c, inner, b); buf_puts(b, ", SP_BUILTIN_FLT_ARRAY)");
         return;
       }
       if (ar.elem == TY_POLY) {
