@@ -16863,9 +16863,19 @@ static sp_RbVal sp_Fiber_blocking_proc(sp_Proc *blk) {
    by a jump rather than a return, and the kernel would keep the signal
    blocked for good: land here first, unblock it, then pass the raise or
    unwind on. The frame is armed before anything is rooted, so its root mark
-   is the interrupted code's. */
+   is the interrupted code's.
+
+   The signal can arrive halfway through a root push, between the store of
+   the entry and the store of the count (the C compiler orders the two, and
+   sp_gc_root_push_slow stores the entry first). This call's own roots start
+   at that same index, so the entry there is kept and put back when the proc
+   returns: the interrupted push then counts its own entry, not the address of
+   a local of this function. A proc that leaves by a jump abandons the push. */
 #ifndef SPINEL_EXT_HOST
 void sp_trap_call(sp_Proc *p, int no) {
+  int kept_at = sp_gc_nroots;
+  int keep = kept_at < SP_GC_STACK_MAX || sp_gc_roots_ext_reserve(kept_at + 1);
+  void **kept = keep ? sp_gc_root_at(kept_at) : NULL;
   sp_exc_check_depth();
   sp_exc_rootmark[sp_exc_top] = sp_gc_nroots; sp_rescue_mark[sp_exc_top] = sp_rescue_sp;
   sp_exc_msg[sp_exc_top] = 0; sp_exc_obj[sp_exc_top] = 0; sp_exc_top++;
@@ -16875,6 +16885,10 @@ void sp_trap_call(sp_Proc *p, int no) {
     _sp_proc_poly_args[0] = sp_box_int((sp_int)no);
     sp_proc_call(p, 1, &slot);
     sp_exc_top--;
+    if (keep) {
+      if (kept_at < SP_GC_STACK_MAX) sp_gc_roots[kept_at] = kept;
+      else sp_gc_roots_ext[kept_at - SP_GC_STACK_MAX] = kept;
+    }
     return;
   }
   sp_exc_top--;
