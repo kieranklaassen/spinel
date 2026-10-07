@@ -351,11 +351,15 @@ static void emit_int(int id, const char *field, long long val) {
 /* What the line map says of a statement on buffer line bl, its owner on ol:
    `req_pop`, the line its required file ends at, where that is another file
    than the owner's; `req_late`, in a file that loads when its require runs,
-   later than where it is spliced. */
-static void emit_req_marks(int id, int32_t bl, int32_t ol) {
+   later than where it is spliced. The second goes on a constant's write and
+   on a class or module alone, which no def holds: a file spliced twice, once
+   of them late, keeps equal defs (desugar_conditional_defs compares them
+   field by field). */
+static void emit_req_marks(int id, int32_t bl, int32_t ol, pm_node_type_t t) {
   if (bl < 1 || bl > sp_line_map_n) return;
   if (sp_line_pop[bl] > 0 && sp_line_pop[bl] != sp_line_pop[ol]) emit_int(id, "req_pop", sp_line_pop[bl]);
-  if (sp_line_late[bl]) emit_int(id, "req_late", 1);
+  if (sp_line_late[bl] && (t == PM_CONSTANT_WRITE_NODE || t == PM_CLASS_NODE || t == PM_MODULE_NODE))
+    emit_int(id, "req_late", 1);
 }
 
 static void emit_float(int id, const char *field, double val) {
@@ -596,7 +600,7 @@ static int flatten_node(pm_node_t *node) {
     int32_t bl = pm_newline_list_line(&g_parser->newline_list, node->location.start, g_parser->start_line);
     int32_t ol = owner ? pm_newline_list_line(&g_parser->newline_list, owner, g_parser->start_line) : 0;
     g_stmt_next++;
-    emit_req_marks(id, bl, ol);
+    emit_req_marks(id, bl, ol, t);
   }
   if (t != PM_STATEMENTS_NODE) g_owner = t == PM_PROGRAM_NODE ? NULL : node->location.start;
 
