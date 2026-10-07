@@ -6344,6 +6344,10 @@ static int desugar_str_range_methods(Compiler *c) {
     "begin", "end", "min", "max", "include?", "member?", "cover?", "===",
     "exclude_end?", "==", "!=", "eql?", "inspect", "to_s", "class",
     "frozen?", "freeze", "itself", "dup", "clone", "hash",
+    /* Range's own overlap? and bsearch answer about the RANGE: the member
+       Array has no overlap?, and its bsearch searched where CRuby raises
+       TypeError for a String range */
+    "overlap?", "bsearch",
     /* the identity predicates answer about the RANGE, not its members: routing
        them through to_a made `("a".."e").is_a?(Range)` false (#3619) */
     "is_a?", "kind_of?", "instance_of?", "nil?", "equal?", "respond_to?",
@@ -6404,11 +6408,24 @@ static int desugar_str_range_methods(Compiler *c) {
     }
     /* first/last are the endpoints bare, a prefix/suffix ARRAY with a count */
     if (!native && an == 0 && (is_endpoint_query(nm))) native = 1;
+    /* Object's own face answers about the RANGE, not its members (#3619's
+       identity predicates were the first of it): through to_a, tap and then
+       yielded the member Array, tap answered it, and on an endless range
+       instance_variables, `!` and `=~` raised RangeError where CRuby answers */
+    if (range_object_face(nm)) native = 1;
     if (native) continue;
     int toa = nt_new_node(nt, "CallNode");
     if (toa < 0) continue;
     nt_node_set_str(nt, toa, "name", "to_a");
     nt_node_set_ref(nt, toa, "receiver", recv);
+    /* each, each_entry, reverse_each, each_with_index, each_slice and
+       each_cons with a block walk the members but answer the RANGE: mark the
+       hop, as the Hash and Enumerable routes do (#3842), so inference and the
+       value emitter yield the receiver instead of the member Array */
+    { int blk = nt_ref(nt, id, "block");
+      if (blk >= 0 && nt_kind(nt, blk) == NK_BlockNode &&
+          ((an == 0 && is_each_walk_or_with_index(nm)) || (an == 1 && is_each_window(nm))))
+        nt_node_set_str(nt, toa, "enum_recv", "1"); }
     nt_node_set_ref(nt, id, "receiver", toa);
     comp_grow_node_arrays(c);
     c->nscope[toa] = c->nscope[id];
@@ -25093,7 +25110,7 @@ static int reassert_rbs_param_seeds(Compiler *c) {
 static int nullable_int_call_name(const char *nm) {
   if (!nm) return 0;
   static const char *const N[] = {
-    "index", "rindex", "byteindex", "byterindex", "delete_at", "pop", "shift",
+    "index", "rindex", "byteindex", "byterindex", "delete_at", "slice!", "pop", "shift",
     "delete", "nonzero?", "infinite?", "getbyte", "bsearch", "bsearch_index",
     /* `a <=> b` answers nil when the two are not comparable, and the poly
        helper spells that with the sentinel like every other nullable int */
@@ -25660,6 +25677,9 @@ static int elem_miss_call(Compiler *c, int v) {
     return argc == 0 && blk < 0;
   if (is_minmax_query(nm)) return argc == 0;
   if (is_find_alias(nm)) return blk >= 0;
+  /* a fold without an initial value answers nil on an empty receiver:
+     `inject(:+)` and `inject { |s, x| ... }`, not `inject(0) { ... }` */
+  if (is_reduce_alias(nm)) return argc == 0 || (argc == 1 && blk < 0);
   return 0;
 }
 
@@ -33586,6 +33606,7 @@ static void an_phase_infer_fixpoint(Compiler *c) {
     ch |= desugar_implicit_send(c);            /* send(:m, a) -> m(a) on self */
     ch |= desugar_public_send_recv(c);         /* r.public_send(:m, a) -> r.m(a), visibility-stamped */
     ch |= desugar_symbol_string_methods(c);    /* :sym.match(re) -> :sym.to_s.match(re) */
+    ch |= desugar_interp_reopened_to_s(c);     /* "#{5}" with Integer#to_s reopened -> "#{5.to_s}" */
     /* re-run inside the fixpoint: a key whose type comes from a PARAMETER is
        still UNKNOWN on the pre-fixpoint pass, so `h[k] ||= []` fell back to
        the StrPolyHash default and handed an Integer key to a const char *

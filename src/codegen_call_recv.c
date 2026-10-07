@@ -1387,10 +1387,10 @@ static int emit_kind_array_iter_call(Compiler *c, int id, Buf *b, const NodeTabl
       /* rooted, as the find(ifnone) arm above and the poly-array find
          already are: same loop, same per-turn reads, same allocating block */
       emit_gc_root_tmp(c, rt, trecv, g_pre); buf_puts(g_pre, "\n");
+      /* the no-match answer is nil: the element slot's own nil (a Float
+         one too, whose 0 read back as a found 0.0 (#4288)) */
       emit_indent(g_pre, g_indent); emit_ctype(c, et, g_pre);
-      if (et == TY_STRING) buf_printf(g_pre, " _t%d = NULL;\n", tres);
-      else if (et == TY_INT) buf_printf(g_pre, " _t%d = SP_INT_NIL;\n", tres);
-      else buf_printf(g_pre, " _t%d = 0;\n", tres);
+      { const char *nv = nil_value(et); buf_printf(g_pre, " _t%d = %s;\n", tres, nv ? nv : "0"); }
       emit_find_loop_head(c, id, k, ti, trecv);
       /* Declare the block param in the loop body (not a bare assignment) so
          the find is self-contained: when this call is a parameter default
@@ -7248,12 +7248,14 @@ static int int_arms_clamp_pow(Compiler *c, Buf *b, const NodeTable *nt, const ch
   }
   else if (sp_streq(name, "pow") && argc == 2) { buf_printf(b, "sp_powmod(%s, ", r); emit_int_expr(c, argv[0], b); buf_puts(b, ", "); emit_int_expr(c, argv[1], b); buf_puts(b, ")"); }
   /* pow with a literal negative exponent is the exact Rational
-     1 / base**|exp| (matching **'s CRuby behavior) */
+     1 / base**|exp|, computed as ** computes it (emit_complex_rational_call):
+     sp_rational_pow raises ZeroDivisionError for a zero base, where
+     sp_rational_new(1, 0) answered (1/0) */
   else if (sp_streq(name, "pow") && argc == 1 &&
            nt_type(nt, argv[0]) && sp_streq(nt_type(nt, argv[0]), "IntegerNode") &&
            nt_int(nt, argv[0], "value", 0) < 0) {
-    long long pe9 = -(long long)nt_int(nt, argv[0], "value", 0);
-    buf_printf(b, "sp_rational_new(1, sp_int_pow(%s, %lldLL))", r, pe9);
+    buf_printf(b, "sp_rational_pow(sp_rational_new((sp_int)(%s), 1), %lldLL)",
+               r, (long long)nt_int(nt, argv[0], "value", 0));
   }
   /* pow with a Float exponent is real exponentiation -> Float (#2604) */
   else if (sp_streq(name, "pow") && argc == 1 && comp_ntype(c, argv[0]) == TY_FLOAT) {

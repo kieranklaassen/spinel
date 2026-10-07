@@ -5135,9 +5135,10 @@ static int emit_poly_builtin_method(Compiler *c, int id, Buf *b) {
                tv, tv, tb, tv, tv, tb);
     return 1;
   }
-  /* Hash#merge(other): fold both hashes into a general PolyPoly hash. */
+  /* Hash#merge(other): fold both hashes into a general PolyPoly hash; a
+     receiver that is no Hash (nil included) raises NoMethodError */
   if (sp_streq(name, "merge") && argc == 1) {
-    buf_puts(b, "sp_poly_hash_merge("); emit_boxed(c, recv, b);
+    buf_puts(b, "sp_poly_hash_merge_m("); emit_boxed(c, recv, b);
     buf_puts(b, ", "); emit_boxed(c, argv[0], b); buf_puts(b, ")");
     return 1;
   }
@@ -11000,6 +11001,34 @@ static int emit_array_new_from_value(Compiler *c, int arg, Buf *b) {
 }
 
 /* A .new call (and the default-hash form): user classes, Struct and Data, the builtin constructors (emit_class_new_call's arms, in their order) */
+/* Hash.new(&pr): the block argument is the default proc, a Proc held as
+   itself (emit_block_arg_proc), which the hash's default calls through
+   sp_dyn_hash_dproc as it calls a block Hash.new lowered to a proc. A nil
+   one (a method's `&b` given no block) is no default proc. The block-literal
+   arm splices a body, and a block argument has none: its default answered
+   nil. */
+static int emit_hash_new_block_arg(Compiler *c, int id, int argc, Buf *b) {
+  const NodeTable *nt = c->nt;
+  int blk = nt_ref(nt, id, "block");
+  if (argc != 0 || blk < 0 || nt_kind(nt, blk) != NK_BlockArgumentNode) return 0;
+  /* an inlined method's `&b` forwards its caller's block, a literal the arm
+     below takes, or none */
+  int fwd = resolve_forwarded_block(c, blk);
+  if (fwd != blk) {
+    if (fwd >= 0) return 0;
+    buf_puts(b, "sp_PolyPolyHash_new()");
+    return 1;
+  }
+  int ex = nt_ref(nt, blk, "expression");
+  Buf pb; memset(&pb, 0, sizeof pb);
+  if (ex < 0 || !emit_block_arg_proc(c, ex, &pb)) { free(pb.p); return 0; }
+  int tp = ++g_tmp;
+  buf_printf(b, "({ sp_Proc *_t%d = %s; SP_GC_ROOT(_t%d); _t%d ? sp_PolyPolyHash_new_dproc(sp_dyn_hash_dproc, (void *)_t%d) : sp_PolyPolyHash_new(); })",
+             tp, pb.p, tp, tp, tp);
+  free(pb.p);
+  return 1;
+}
+
 static int emit_new_call_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, int *out) {
   if (!(recv >= 0 && (is_hash_constructor(name)))) return 0;
   const char *rty = nt_type(nt, recv);
@@ -11513,7 +11542,8 @@ static int emit_new_call_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, 
       { *out = 1; return 1; }
     }
     if (cn && sp_streq(cn, "Hash") && nt_ref(nt, id, "block") >= 0) {
-      int hblk = nt_ref(nt, id, "block");
+      if (emit_hash_new_block_arg(c, id, argc, b)) { *out = 1; return 1; }
+      int hblk = resolve_forwarded_block(c, nt_ref(nt, id, "block"));
       int hbody = nt_ref(nt, hblk, "body");
       const char *hp = block_param_name(c, hblk, 0);
       const char *kp = block_param_name(c, hblk, 1);
@@ -11534,7 +11564,15 @@ static int emit_new_call_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, 
       buf_printf(pb, "static sp_RbVal _sp_hash_dproc_%d(sp_PolyPolyHash *_self_h, sp_RbVal _key, void *_dproc_self) {\n", dn);
       if (dp_self) buf_printf(pb, "  sp_%s *self = (sp_%s *)_dproc_self; (void)self;\n", dp_cls, dp_cls);
       else buf_puts(pb, "  (void)_dproc_self;\n");
-      if (hp) buf_printf(pb, "  sp_PolyPolyHash *lv_%s = _self_h; (void)lv_%s;\n", rename_local(hp), rename_local(hp));
+      if (hp) {
+        /* a caller's block an inlined method forwards (`Hash.new(&b)`) had
+           its parameters typed as that method's yield binds them: boxed */
+        Scope *hs = comp_scope_of(c, hblk);
+        LocalVar *hlv = hs ? scope_local(hs, hp) : NULL;
+        if (hlv && hlv->type == TY_POLY)
+          buf_printf(pb, "  sp_RbVal lv_%s = sp_box_obj(_self_h, SP_BUILTIN_POLY_POLY_HASH); (void)lv_%s;\n", rename_local(hp), rename_local(hp));
+        else buf_printf(pb, "  sp_PolyPolyHash *lv_%s = _self_h; (void)lv_%s;\n", rename_local(hp), rename_local(hp));
+      }
       if (kp) buf_printf(pb, "  sp_RbVal lv_%s = _key; (void)lv_%s;\n", rename_local(kp), rename_local(kp));
       Buf *sv_pre = g_pre; int sv_ind = g_indent; const char *sv_self = g_self;
       g_pre = pb; g_indent = 1;
@@ -17347,6 +17385,9 @@ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
         g_n_argov < MAX_ARG_OVERRIDE) {
       const char *knm = nt_str(nt, id, "name");
       TyKind kt = ty_poly_handle_face_args(knm, argc);
+      /* the slot the call answers into, before the face retypes the
+         receiver: a poly dispatch's builtin arm keeps the node poly */
+      TyKind want = repr_of(c, id).as_ty;
       int tkv = ++g_tmp;
       Buf krb; memset(&krb, 0, sizeof krb); emit_boxed(c, recv, &krb);
       emit_indent(g_pre, g_indent);
@@ -17360,7 +17401,17 @@ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
       int vw = view_push(c, recv, kt);
       int fv = view_push_face(recv, kt);
       int svkn = g_handle_face_node; g_handle_face_node = id;
-      emit_call(c, id, b);
+      /* the handle's own emitter answers its own type (MatchData#string a
+         `const char *`); a poly slot gets it boxed, or the arm assigned the
+         raw pointer into an sp_RbVal */
+      TyKind got = infer_type(c, id);
+      if (want == TY_POLY && got != TY_POLY && got != TY_UNKNOWN && got != TY_VOID) {
+        Buf fb; memset(&fb, 0, sizeof fb);
+        emit_call(c, id, &fb);
+        emit_boxed_text(c, got, fb.p ? fb.p : "0", b);
+        free(fb.p);
+      }
+      else emit_call(c, id, b);
       g_handle_face_node = svkn;
       view_pop(c, fv);
       view_pop(c, vw);
@@ -17436,7 +17487,7 @@ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
     if (grt == TY_POLY || grt == TY_NIL || grt == TY_INT || grt == TY_UNKNOWN ||
         grt == TY_STRING || grt == TY_FLOAT || grt == TY_BOOL ||
         grt == TY_COMPLEX || grt == TY_RATIONAL || grt_builtin_cls ||
-        grt == TY_SYMBOL || grt == TY_RANGE || grt == TY_FLOAT_RANGE ||
+        grt == TY_SYMBOL || grt == TY_RANGE || grt == TY_FLOAT_RANGE || grt == TY_STR_RANGE ||
         ty_is_array(grt) || ty_is_hash(grt) || ty_is_object(grt)) {
       TyKind ret = repr_of(c, id).as_ty;
       /* An unresolved call raises NoMethodError by default, matching CRuby
@@ -17710,7 +17761,7 @@ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
         else if (ty_is_array(grt)) snprintf(rdesc, sizeof rdesc, "an instance of Array");
         else if (ty_is_hash(grt)) snprintf(rdesc, sizeof rdesc, "an instance of Hash");
         else if (grt == TY_SYMBOL) snprintf(rdesc, sizeof rdesc, "an instance of Symbol");
-        else if (grt == TY_RANGE || grt == TY_FLOAT_RANGE)
+        else if (grt == TY_RANGE || grt == TY_FLOAT_RANGE || grt == TY_STR_RANGE)
           snprintf(rdesc, sizeof rdesc, "an instance of Range");
         else snprintf(rdesc, sizeof rdesc, "%s", ty_name(grt));
         /* a class constant receiver names the class, as CRuby does ("undefined

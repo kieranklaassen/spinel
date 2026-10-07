@@ -230,6 +230,8 @@ SP_NORETURN SP_COLD void sp_raise_nil_to_int(int of_wording);
   if (SP_UNLIKELY((a) == SP_INT_NIL)) sp_raise_nil_to_int(0)
 #define SP_INT_NIL_ARG_CK_OF(a) \
   if (SP_UNLIKELY((a) == SP_INT_NIL)) sp_raise_nil_to_int(1)
+#define SP_INT_NIL_ARG_CK_OFFT(a) \
+  if (SP_UNLIKELY((a) == SP_INT_NIL)) sp_raise_nil_to_int(2)
 /* The same sentinel test ahead of a comparison (see sp_raise_nil_cmp): the
    left nil is NoMethodError, the right the Comparable ArgumentError. Emitted
    only for an operand that can carry the sentinel; a literal or an
@@ -1638,6 +1640,7 @@ const char *sp_bigint_to_s_base(sp_Bigint *b, sp_int base);
 int sp_bigint_even_p(sp_Bigint *b);
 sp_Bigint *sp_bigint_abs_v(sp_Bigint *b);
 sp_int sp_bigint_bit_length(sp_Bigint *b);
+sp_int sp_bigint_int_size(sp_Bigint *b);   /* Integer#size */
 int64_t sp_bigint_to_int(sp_Bigint *b);
 double sp_bigint_to_double(sp_Bigint *b);
 int sp_bigint_cmp(sp_Bigint *a, sp_Bigint *b);
@@ -3177,6 +3180,13 @@ static SP_INLINE sp_int sp_poly_arg_int_chk(sp_RbVal v) {
   if (v.tag == SP_TAG_INT && v.v.i != SP_INT_NIL) return v.v.i;
   return sp_poly_arg_int_chk_slow(v);
 }
+/* The same, for a slot whose nil CRuby words by another conversion
+   (sp_raise_nil_to_int's `of_wording`): rb_convert_type's, or an IO
+   offset's NUM2OFFT. */
+static SP_INLINE sp_int sp_poly_arg_int_chk_w(sp_RbVal v, int wording) {
+  if (v.tag == SP_TAG_NIL || (v.tag == SP_TAG_INT && v.v.i == SP_INT_NIL)) sp_raise_nil_to_int(wording);
+  return sp_poly_arg_int_chk(v);
+}
 /* Integer#div / #modulo with a divisor known only at run time, in a call
    typed Integer. A Float divisor floors the real quotient for div; for
    modulo its answer is a Float, which the Integer slot cannot hold, so that
@@ -3954,12 +3964,7 @@ static sp_int sp_poly_size(sp_RbVal v) {
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_RANGE && v.v.p)
     return sp_range_count(*(sp_Range *)v.v.p);
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_STR_RANGE) return SP_INT_NIL;
-  if (v.tag == SP_TAG_BIGINT) {
-    sp_Bigint *bg = (sp_Bigint *)v.v.p;
-    sp_int bits = bg ? (sp_int)sp_bigint_bit_length(bg) : 0;
-    sp_int bytes = (bits + 7) / 8;
-    return bytes < (sp_int)sizeof(sp_int) ? (sp_int)sizeof(sp_int) : bytes;
-  }
+  if (v.tag == SP_TAG_BIGINT) return sp_bigint_int_size((sp_Bigint *)v.v.p);
   /* an Enumerator's size is its own (#size), not a length: a boxed
      each_slice(2) enumerator answered 0. A size that is not a count (nil, an
      infinite one) reads as nil. */
@@ -4487,8 +4492,17 @@ static sp_bool sp_poly_negative_p(sp_RbVal v) { if (v.tag == SP_TAG_INT) return 
    the typed arms answer them: a Complex its atan2(im, re) and its [re, im],
    a real number 0, or pi when negative, and [self, 0]. `m` is the name
    called, for the NoMethodError anything else raises. */
+/* Float#arg (angle, phase), as CRuby's float_arg answers it: a NaN is its
+   own angle, a set sign bit is pi (so -0.0 is pi, as -0.0 lies on the
+   negative axis), and every other Float is the Integer 0. A `< 0` test
+   answered 0 for both -0.0 and NaN. */
+static sp_RbVal sp_float_arg(sp_float x) {
+  if (isnan(x)) return sp_box_float(x);
+  return signbit(x) ? sp_box_float(3.141592653589793) : sp_box_int(0);
+}
 static sp_RbVal sp_poly_arg(sp_RbVal v, const char *m) {
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_COMPLEX) { sp_Complex *c = (sp_Complex *)v.v.p; return sp_box_float(atan2(c->im, c->re)); }
+  if (v.tag == SP_TAG_FLT) return sp_float_arg(v.v.f);
   if (sp_poly_numeric_p(v) || sp_poly_is_rat_kind(v)) return sp_poly_negative_p(v) ? sp_box_float(3.141592653589793) : sp_box_int(0);
   sp_raise_poly_nomethod(m, v);
 }
@@ -8144,8 +8158,20 @@ static sp_RbVal sp_FloatArray_uniq_bangq(sp_FloatArray *a) {
 }
 /* uniq dedups with eql? (class-strict: 1 and 1.0 both survive), as CRuby. */
 static sp_bool sp_poly_eql(sp_RbVal a, sp_RbVal b);
-static void sp_PolyArray_uniq_bang(sp_PolyArray*a){sp_gc_wb((void*)a); if(!a||a->frozen){if(a&&a->frozen)sp_raise_frozen_array_at(a, SP_BUILTIN_POLY_ARRAY);return;}for(sp_int i=0;i<a->len;){int dup=0;for(sp_int j=0;j<i;j++){if(sp_poly_eql(a->data[j],a->data[i])){dup=1;break;}}if(dup){for(sp_int k2=i;k2<a->len-1;k2++)a->data[k2]=a->data[k2+1];a->len--;}
-else i++;}}
+/* Each element is compared, in order, with the ones kept before it -- the
+   same eql? calls in the same order as before -- and a kept one moves down
+   to the end of the kept prefix. Shifting the whole tail down over every
+   duplicate made a run of duplicates cost a pass of the array each. */
+static void sp_PolyArray_uniq_bang(sp_PolyArray*a){sp_gc_wb((void*)a); if(!a||a->frozen){if(a&&a->frozen)sp_raise_frozen_array_at(a, SP_BUILTIN_POLY_ARRAY);return;}
+  sp_int w=0;
+  for(sp_int i=0;i<a->len;i++){
+    sp_RbVal v=a->data[i];
+    int dup=0;
+    for(sp_int j=0;j<w&&!dup;j++)dup=sp_poly_eql(a->data[j],v);
+    if(!dup)a->data[w++]=v;
+  }
+  a->len=w;
+}
 static sp_RbVal sp_PolyArray_sample(sp_PolyArray *a) { if (a->len <= 0) return sp_box_nil(); return a->data[sp_krand_below(a->len)]; }
 
 /* An array of one user class narrowed to a pointer array (#4444): each
@@ -14655,7 +14681,49 @@ static int sp_range_empty_region(sp_range_end_t b, sp_range_end_t e, int excl) {
 /* Range#overlap? between two numeric Ranges, as CRuby's range_overlap
    decides it: some value lies in both, so neither may be empty. The receiver
    is no Range: NoMethodError; the argument is none: TypeError. */
+/* Range#overlap? for a String Range receiver, as CRuby's range_overlap. An
+   end is nil, a String or a number (sp_range_end_t); a String and a number
+   are incomparable, which CRuby reads as an empty region, and two
+   incomparable begins as no overlap. */
+typedef struct { int nil; const char *s; int num; sp_range_end_t n; } sp_srange_end_t;
+static int sp_srange_end_cmp(sp_srange_end_t a, sp_srange_end_t b) {
+  if (a.nil || b.nil) return a.nil && b.nil ? 0 : 2;
+  if (a.num != b.num) return 2;
+  if (a.num) return sp_range_end_cmp(a.n, b.n);
+  int c = strcmp(a.s, b.s);
+  return (c > 0) - (c < 0);
+}
+static int sp_srange_empty_region(sp_srange_end_t b, sp_srange_end_t e, int excl) {
+  if (b.nil || e.nil) return 0;
+  int c = sp_srange_end_cmp(b, e);
+  if (c == 2) return 1;
+  return excl ? c >= 0 : c > 0;
+}
+static SP_UNUSED sp_bool sp_srange_overlap_v(sp_StrRange a, sp_RbVal o) {
+  sp_srange_end_t ab = { !a.first, a.first, 0, {0} }, ae = { !a.last, a.last, 0, {0} };
+  sp_srange_end_t ob, oe; int ox = 0;
+  memset(&ob, 0, sizeof ob); memset(&oe, 0, sizeof oe);
+  if (o.tag == SP_TAG_OBJ && o.cls_id == SP_BUILTIN_STR_RANGE && o.v.p) {
+    sp_StrRange r = *(sp_StrRange *)o.v.p;
+    ob.nil = !r.first; ob.s = r.first; oe.nil = !r.last; oe.s = r.last; ox = r.excl;
+  }
+  else {
+    sp_range_end_t nb, ne;
+    if (!sp_range_ends(o, &nb, &ne, &ox))
+      sp_raise_cls("TypeError", sp_sprintf("wrong argument type %s (expected Range)", sp_poly_class_name(o)));
+    ob.nil = nb.nil; ob.num = 1; ob.n = nb; oe.nil = ne.nil; oe.num = 1; oe.n = ne;
+  }
+  if (sp_srange_empty_region(ab, oe, ox) || sp_srange_empty_region(ob, ae, a.excl)) return FALSE;
+  if (!ab.nil && !ob.nil) {
+    int c = sp_srange_end_cmp(ab, ob);
+    if (c == 2) return FALSE;
+    if (c == 0) return TRUE;
+  }
+  else if (ab.nil && !ae.nil && ob.nil) return sp_srange_end_cmp(ae, oe) != 2;
+  return !sp_srange_empty_region(ab, ae, a.excl) && !sp_srange_empty_region(ob, oe, ox);
+}
 static sp_bool sp_range_overlap_v(sp_RbVal a, sp_RbVal o) {
+  if (a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_STR_RANGE && a.v.p) return sp_srange_overlap_v(*(sp_StrRange *)a.v.p, o);
   sp_range_end_t ab, ae, ob, oe; int ax = 0, ox = 0;
   if (!sp_range_ends(a, &ab, &ae, &ax)) sp_raise_nomethod(sp_nomethod_msg("overlap?", a));
   if (!sp_range_ends(o, &ob, &oe, &ox)) {
@@ -14769,6 +14837,17 @@ static sp_RbVal sp_poly_hash_dproc_bridge(sp_PolyPolyHash *h, sp_RbVal key, void
   return sp_box_nil();
 }
 sp_PolyPolyHash *sp_poly_hash_merge(sp_RbVal a, sp_RbVal b);
+/* `recv.merge(other)` on a boxed receiver: only a Hash has merge, so nil or
+   any other value is CRuby's NoMethodError, with the argument staged as its
+   args. sp_poly_hash_merge itself takes nil as an empty start (the keyword
+   folds call it so). */
+static SP_UNUSED sp_PolyPolyHash *sp_poly_hash_merge_m(sp_RbVal a, sp_RbVal b) {
+  if (!(a.tag == SP_TAG_OBJ && a.v.p && sp_poly_is_hash_kind(a.cls_id))) {
+    sp_raise_nomethod(sp_nomethod_msg_args("merge", a, 1, &b));
+    return NULL;
+  }
+  return sp_poly_hash_merge(a, b);
+}
 /* A boxed hash as the concrete symbol-keyed variant: itself when it already is
    one, rebuilt when every key is a Symbol (a hash folded through the general
    merge path is a PolyPolyHash regardless of its keys), and a TypeError only
