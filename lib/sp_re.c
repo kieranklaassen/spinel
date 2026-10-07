@@ -758,7 +758,8 @@ sp_StrArray *sp_re_split_limit(mrb_regexp_pattern *pat, const char *str, sp_int 
 
   /* Default limit strips trailing empty fields. */
   if (limit == 0) {
-    while (arr->len > 0 && arr->data[arr->len - 1][0] == '\0') arr->len--;
+    /* empty by its byte length: a field that begins with a NUL byte is kept */
+    while (arr->len > 0 && arr->data[arr->len - 1][0] == '\0' && sp_str_byte_len(arr->data[arr->len - 1]) == 0) arr->len--;
   }
   return arr;
 }
