@@ -1,0 +1,17 @@
+An Array a call returns is held while its elements are boxed
+
+`take(*floats(i))` fills the rest parameter with a new Array of boxed
+values made from the Float Array, and `fmt % ints(i)` hands String#% one
+made from the Integer Array. Both come from sp_typed_to_poly, which
+allocated the new Array before it read the old one and held the old one
+nowhere. A result no variable holds was collected by that allocation and
+its elements were read out of a buffer already given back: of 1,000
+calls of `take(*floats(i))` with 2,000 elements 37 answer something else
+in a plain run, and `fmt % strs(i)` ends in a segmentation fault.
+
+sp_typed_to_poly now holds its source, as sp_IntArray_to_poly,
+sp_StrArray_to_poly_fmt and sp_FloatArray_to_poly hold theirs.
+sp_PolyArray_eq_typed held it for the call already; that root moves into
+the callee.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
