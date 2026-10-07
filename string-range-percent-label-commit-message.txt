@@ -1,0 +1,19 @@
+A String Range's % inspects under its own name
+
+    r = ("a".."e")
+    p (r % 2)   # CRuby #<Enumerator: "a".."e":%(2)>, here ...:step(2)>
+
+"A String Range's step(n) inspects as an Enumerator over the Range" gave
+`%` a row of its own in bop_rows, whose label is "%(n)". The row was never
+reached: desugar_str_range_methods renamed every `%` on a String Range to
+step before codegen, because the arithmetic emitter had no arm for a
+String Range. So `r % 2` printed step's label.
+
+The rename now applies to the block form only (`r.%(2) { }`), which
+needs step's walking arm. Without a block `%` keeps its name, and the
+arithmetic emitter hands it to its row. The Enumerator holds what
+step(n)'s holds; only the label differs.
+
+Test: test/string_range_percent_label.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
