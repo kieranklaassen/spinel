@@ -720,6 +720,7 @@ int splat_operand_is_scalar(TyKind t);
    walks parameters looking for keys and so could not see an unclaimed one
    (#4419). */
 void emit_call_arity_check(Compiler *c, Scope *m, int argc, const int *argv);
+void emit_argument_error(const char *msg);
 /* The arity ArgumentError, in CRuby's words, for every binder (codegen_util.c):
    the expected range (max < 0 for no upper bound), the whole message, the
    callee's "; required keyword(s): ..." suffix, and the run-time raise and

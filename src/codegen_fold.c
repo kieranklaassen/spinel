@@ -8972,7 +8972,6 @@ int default_refs_earlier_param(Compiler *c, Scope *m) {
   return 0;
 }
 
-static void emit_argument_error(const char *msg);
 /* See codegen_internal.h. CRuby evaluates every argument before the callee
    refuses them or judges a keyword, and converts each `**` operand where it
    stands, so its TypeError comes ahead of the values after it and of any
@@ -9013,7 +9012,7 @@ static void args_raise(Compiler *c, const int *argv, int argc, const char *fmt, 
   emit_argument_error(msg);
 }
 /* The raise of that ArgumentError, its arguments already run. */
-static void emit_argument_error(const char *msg) {
+void emit_argument_error(const char *msg) {
   emit_indent(g_pre, g_indent);
   buf_puts(g_pre, "sp_raise_cls(\"ArgumentError\", ");
   emit_c_str(g_pre, msg);
