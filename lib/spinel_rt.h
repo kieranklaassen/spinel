@@ -9541,6 +9541,12 @@ static sp_RbVal sp_poly_shift(sp_RbVal v) {
   sp_raise_nomethod(sp_nomethod_msg("shift", v));
   return sp_box_nil();
 }
+/* Symbol#["sub"]: the substring when the name holds it, a new String. Out of
+   line, so sp_poly_get_str's other receivers do not carry its calls. */
+static SP_COLD SP_NOINLINE sp_RbVal sp_poly_sym_get_str(sp_RbVal v, const char *key) {
+  if (v.tag != SP_TAG_SYM || !key || !sp_str_include(sp_sym_to_s((sp_sym)v.v.i), key)) return sp_box_nil();
+  return sp_box_str(sp_str_dup(key));
+}
 static sp_RbVal sp_poly_get_str(sp_RbVal v, const char *key) {
   /* MatchData#["name"]: the named group */
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_MATCHDATA && v.v.p) {
@@ -9557,7 +9563,8 @@ static sp_RbVal sp_poly_get_str(sp_RbVal v, const char *key) {
   }
   if (sp_poly_is_call_aref(v)) return sp_poly_call_aref(v, sp_box_str(key));
   sp_poly_coll_chk(v, "[]");
-  if (v.tag != SP_TAG_OBJ) return sp_box_nil();
+  /* a Symbol's name is searched; every other value that is no object is nil */
+  if (SP_UNLIKELY(v.tag != SP_TAG_OBJ)) return sp_poly_sym_get_str(v, key);
   switch (v.cls_id) {
     case SP_BUILTIN_CURRY: return sp_curry_call_poly((sp_Curry *)v.v.p, 1, (sp_RbVal[]){sp_box_str(key)});
     case SP_BUILTIN_STR_POLY_HASH: return sp_StrPolyHash_get((sp_StrPolyHash*)v.v.p, key);
