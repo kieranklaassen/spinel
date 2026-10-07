@@ -1,0 +1,41 @@
+Refuse the String copies of a top-level method called inside a class
+
+    def app(s, &b) = b.call(s)
+    $g = +"g"
+    class Holder
+      def go
+        pr = proc { |k| k << "!" }
+        app($g, &pr)
+        p $g            # CRuby: "g!"    Spinel: "g"
+      end
+    end
+    Holder.new.go
+
+Written at top level the call is refused: a global goes into the
+yield's box as a copy, so the append would be lost. Inside the class it
+was built, and the append was lost without a word.
+
+refuse_static_target names the method a call reaches. For a bare call
+or a call on self it took the class of the scope the call is written in
+and asked that class's chain alone; the free function was asked only
+where there is no class. A top-level method called from an instance
+method, a class method, a module's method or a block in one was never
+found, and the refusals that start from the method called returned
+before they looked at the arguments: a parameter yielded on to a block
+or a proc (refuse_yield_handle_args) and a repeated keyword. The third
+caller asked the free function by hand. The lookup now does that for
+all three: the class's chain, then the free function, for a bare call
+and for self. A call on any other object asks its class alone, as
+before.
+
+What is refused inside a class is what the same call is refused for at
+top level, in a free function, and where the class defines the method
+itself. That includes a block's parameter handed on
+(`xs.each { |h| app(h, &pr) }`), which inside a class was built and
+printed CRuby's answer, except where a second block of the method has a
+parameter of the same name: there the append was lost.
+
+Under --share-strings nothing is refused here, on master or with this:
+the three tests are in test/share/reject.list with CRuby's answers.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

@@ -1,0 +1,1 @@
+Refuse the String copies of a top-level method called inside a class
