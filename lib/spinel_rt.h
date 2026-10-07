@@ -3806,6 +3806,26 @@ static SP_INLINE sp_bool sp_poly_rb_equal(sp_RbVal a, sp_RbVal b) {
     return TRUE;
   return sp_poly_eq(a, b);
 }
+/* A Bignum the compiler has typed, == a boxed value. A boxed Integer or
+   Bignum is read as a Bignum. sp_poly_as_bigint answers 0 for what is no
+   number and drops a Float's fraction, so the rest is not read through it:
+   nil, a String, a Symbol, true and false equal no Bignum; an object of the
+   program is asked its own ==, as Bignum#== hands an operand that is no
+   number back to it; a Float or a builtin object is asked by sp_poly_eq. */
+static SP_INLINE sp_bool sp_bigint_eq_poly(sp_Bigint *a, sp_RbVal b) {
+  if (b.tag == SP_TAG_BIGINT) return sp_bigint_cmp(a, (sp_Bigint *)b.v.p) == 0;
+  if (b.tag == SP_TAG_INT) return sp_bigint_cmp(a, sp_bigint_new_int(b.v.i)) == 0;
+  if (a && b.tag != SP_TAG_FLT && b.tag != SP_TAG_OBJ) return FALSE;
+  if (a && sp_poly_is_user_obj(b)) { sp_RbVal _u; return sp_poly_user_cmp("==", b, sp_box_bigint_or_nil(a), &_u) && sp_poly_truthy(_u); }
+  return sp_poly_eq(sp_box_bigint_or_nil(a), b);
+}
+/* the same pair with the boxed value on the left, so its own == is asked */
+static SP_INLINE sp_bool sp_poly_eq_bigint(sp_RbVal a, sp_Bigint *b) {
+  if (a.tag == SP_TAG_BIGINT) return sp_bigint_cmp((sp_Bigint *)a.v.p, b) == 0;
+  if (a.tag == SP_TAG_INT) return sp_bigint_cmp(sp_bigint_new_int(a.v.i), b) == 0;
+  if (b && a.tag != SP_TAG_FLT && a.tag != SP_TAG_OBJ) return FALSE;
+  return sp_poly_eq(a, sp_box_bigint_or_nil(b));
+}
 /* `a == b` (or `!=`) answered as a value: a program object's own == gives
    whatever it returns (Ruby's == may answer any object), `!=` its
    negation; anything else the runtime equality. */
