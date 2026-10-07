@@ -209,6 +209,7 @@ void argov_reserve(void);
    so emit_object_call leaves the value temp out (see setter_value_open). */
 extern int  g_setter_stmt_id;
 extern int  g_sn_skip;   /* safe-nav re-entry marker (see codegen_util.c) */
+extern int  g_stmt_node; /* the statement emit_with_prelude is emitting */
 extern int  g_cls_tag_skip;   /* poly-dispatch builtin-arm re-entry marker */
 /* Ask subtree_may_allocate before leaving something unrooted across `id`:
    its "no" is a keyed decision (src/decide.c). subtree_allocates is the
@@ -1214,6 +1215,7 @@ int emit_iter_value_expr(Compiler *c, int id, Buf *b);
 void set_enum_walk_result(int tmp);
 int iter_value_answers_recv(Compiler *c, int id);
 int sn_guard_pending(Compiler *c, int id);
+int sn_roots_to_pushes(Buf *pre);
 int emit_takewhile_with_index(Compiler *c, int id, Buf *b);
 int emit_transform_hash_expr(Compiler *c, int id, Buf *b);
 int emit_bsearch_expr(Compiler *c, int id, Buf *b);

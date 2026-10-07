@@ -8968,18 +8968,23 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
 }
 
 /* Wrap a line-emitting statement so any expression preludes are flushed
-   before the line itself. */
+   before the line itself. g_stmt_node is that statement while it is
+   emitted. */
+int g_stmt_node = -1;
 void emit_with_prelude(Compiler *c, int id, Buf *b, int indent,
                               void (*inner)(Compiler *, int, Buf *, int)) {
   Buf *savePre = g_pre;
   int saveIndent = g_indent;
+  int saveStmt = g_stmt_node;
   Buf pre;  memset(&pre, 0, sizeof pre);
   Buf line; memset(&line, 0, sizeof line);
   g_pre = &pre;
   g_indent = indent;
+  g_stmt_node = id;
   inner(c, id, &line, indent);
   g_pre = savePre;
   g_indent = saveIndent;
+  g_stmt_node = saveStmt;
   if (pre.p)  buf_puts(b, pre.p);
   if (line.p) buf_puts(b, line.p);
   free(pre.p);
