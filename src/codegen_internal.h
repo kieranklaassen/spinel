@@ -1540,6 +1540,10 @@ extern ArmCtx g_arm;
 #define g_prbd_skip (g_arm.prbd_skip)
 #define g_poly_builtin_arm (g_arm.builtin_arm)
 int view_push_arm(int pd_skip, int prbd_skip, int builtin_arm);
+/* The `x[a, b] = v` call on a boxed receiver whose class dispatch is being
+   written beside its splice, or -1 (emit_poly_aset3_user,
+   codegen_call_recv.c): the dispatch answers v for it. */
+extern int g_poly_aset3;
 /* A node pinned to one face kind for the inference asked under it,
    pushed and popped like a view (view_pop) and put back by view_unwind
    (face_of, analyze.h). */

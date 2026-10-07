@@ -12513,12 +12513,209 @@ static int emit_poly_call0_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
   return 0;
 }
 
+/* Does a user class take `[]=` with `argc` arguments? */
+static int poly_user_aset_takes(Compiler *c, int argc) {
+  for (int k = 0; k < c->nclasses; k++) {
+    int mi = c->classes[k].is_native_class ? -1 : comp_method_in_chain(c, k, "[]=", NULL);
+    int req = 0, tot = 0;
+    if (mi < 0) continue;
+    positional_arity(c, &c->scopes[mi], &req, &tot);
+    if (argc >= req && (argc <= tot || c->scopes[mi].rest_idx >= 0)) return 1;
+  }
+  return 0;
+}
+
+/* Does the program define method_missing, or respond_to_missing? An object
+   with no `[]=` may answer the call through it in CRuby, and the class
+   dispatch raises NoMethodError for such an object. */
+static int poly_aset3_missing_hook(Compiler *c) {
+  for (int s = 0; s < c->nscopes; s++) {
+    const char *n = c->scopes[s].name;
+    if (n && (sp_streq(n, "method_missing") || sp_streq(n, "respond_to_missing?"))) return 1;
+  }
+  return 0;
+}
+
+/* A Struct's own `[]=` takes two, and CRuby raises ArgumentError for three,
+   where the class dispatch, which knows no `[]=` of it, raises
+   NoMethodError. A Struct whose class defines none keeps the splice. */
+static void poly_aset3_not_struct(Compiler *c, const char *recv, Buf *b) {
+  for (int k = 0; k < c->nclasses; k++) {
+    ClassInfo *ci = &c->classes[k];
+    if (ci->is_struct && !ci->is_data && comp_method_in_chain(c, k, "[]=", NULL) < 0)
+      buf_printf(b, " && (%s).cls_id != %d", recv, comp_class_index(c, ci->name));
+  }
+}
+
+/* The `x[a, b] = v` call emit_poly_aset3_user is writing an arm of, or -1:
+   its class dispatch (the dispatch reads this one too, and answers v) and
+   its splice. */
+int g_poly_aset3 = -1;
+static int g_poly_aset3_splice = -1;
+
+/* May reading `node` a second time run code a second time? Not a pure read,
+   a String literal, the `[]` literal (which has no type for a temp to take),
+   or a node an earlier hold already reads from a temp. Anything else may,
+   with or without a call written in it: an interpolated object's to_s, a
+   `when` object's ===. */
+static int aset3_runs(Compiler *c, int node) {
+  int en = 1;
+  if (nt_kind(c->nt, node) == NK_ArrayNode && (nt_arr(c->nt, node, "elements", &en), en == 0)) return 0;
+  return !subtree_is_pure_read(c, node) && nt_kind(c->nt, node) != NK_StringNode && !arg_ran_first(node, 0);
+}
+
+/* `node` evaluated into a rooted temp, and read from there from here on.
+   What its emission hoists is written here too, not ahead of the statement,
+   where it would run before the holds to its left (an Array literal builds
+   there). */
+static void aset3_hold(Compiler *c, int node, Buf *b) {
+  TyKind t = comp_ntype(c, node);
+  int tmp = ++g_tmp;
+  size_t pre_mark = g_pre ? g_pre->len : 0;
+  Buf eb; memset(&eb, 0, sizeof eb);
+  emit_expr(c, node, &eb);
+  if (g_pre && g_pre->len > pre_mark) {
+    buf_puts(b, g_pre->p + pre_mark);
+    g_pre->len = pre_mark; g_pre->p[pre_mark] = '\0';
+  }
+  emit_ctype(c, t, b);
+  buf_printf(b, " _t%d = %s; ", tmp, eb.p ? eb.p : default_value_from_compiler(c, t));
+  free(eb.p);
+  if (comp_ty_value_obj(c, t)) {
+    if (ty_gc_holds_refs(c, t)) { emit_gc_root_tmp_refs(c, t, tmp, b); buf_puts(b, " "); }
+  }
+  else if (t == TY_POLY) buf_printf(b, "SP_GC_ROOT_RBVAL(_t%d); ", tmp);
+  else if (needs_root(t)) buf_printf(b, "SP_GC_ROOT(_t%d); ", tmp);
+  view_bind(node, "_t%d", tmp);
+}
+
+/* One arm of emit_poly_aset3_user: the call emitted again, its value into
+   `val` and what it hoists into `pre`, under the silent probe the dispatch's
+   builtin default uses. Answers 0 when the emission refused the call. */
+static int aset3_arm(Compiler *c, int id, Buf *pre, Buf *val) {
+  Buf *sv_gpre = g_pre;
+  int sv_probe = g_unsup_probe, sv_open_defaults = g_open_defaults, sv_views = view_mark();
+  ConvHold *sv_hold = g_conv_hold;
+  jmp_buf sv_jb; memcpy(sv_jb, g_unsup_recover, sizeof(jmp_buf));
+  volatile int ok = 1;
+  EmitUnitState *sv_state = emit_state_snapshot();
+  g_pre = pre; g_unsup_probe = 1;
+  if (setjmp(g_unsup_recover) == 0) emit_call(c, id, val);
+  else { ok = 0; view_unwind(sv_views); }
+  emit_state_release(sv_state, !ok);
+  memcpy(g_unsup_recover, sv_jb, sizeof(jmp_buf));
+  g_conv_hold = sv_hold; g_open_defaults = sv_open_defaults;
+  g_unsup_probe = sv_probe; g_pre = sv_gpre;
+  return ok && val->p && strncmp(val->p, "sp_raise", 8) != 0;
+}
+
+/* `x[a, b] = v` on a boxed receiver beside a user class whose `[]=` takes
+   three arguments. The splice below knows an Array and a String and leaves
+   any other value as it was, so the assignment into an object of that class
+   was dropped and its method never ran. An object of the program's own takes
+   the class dispatch here, which calls the method (or raises, as CRuby does,
+   for a class that has none or counts otherwise) and answers v; every other
+   value takes the splice, emitted as it is without the class.
+
+   Only one arm runs, and each evaluates the operands itself, so an operand
+   that runs code is held in a temp ahead of the test, in CRuby's order: the
+   receiver, then each operand, and an operand ahead of one that runs code,
+   which may assign what it reads. A String variable there is a shared
+   handle, of which a temp would hold a copy, and a nil has no temp to be
+   held in: beside either no operand is held, and each arm runs them all
+   itself. The splice stores a String's new value where the receiver was
+   read from, so it reads a variable again, and an `outer[i]` receiver's
+   outer and index, which are held when they run code. Answers 0, writing
+   nothing, when no class takes the call, an arm refuses it, or the program
+   defines method_missing. */
+static int emit_poly_aset3_user(Compiler *c, int id, int recv, const int *argv, Buf *b) {
+  const NodeTable *nt = c->nt;
+  if (g_poly_builtin_arm || nt_ref(nt, id, "block") >= 0 || !poly_user_aset_takes(c, 3)) return 0;
+  if (poly_aset3_missing_hook(c)) return 0;
+  int hold[3], last = -1, held = 1, outer = -1, oidx = -1;
+  int slot = splice_recv_index_slot(c, recv, &outer, &oidx);
+  /* a receiver emit_operands_in_order has read into a temp ran its outer
+     and index there, and the splice would run them again for its slot:
+     declined here, that binding is taken back, and the call comes again
+     with nothing bound */
+  if (slot && arg_ran_first(recv, 0) && (aset3_runs(c, outer) || aset3_runs(c, oidx))) return 0;
+  for (int a = 0; a < 3; a++) {
+    NodeKind k = nt_kind(nt, argv[a]);
+    TyKind t = comp_ntype(c, argv[a]);
+    if (k == NK_SplatNode || k == NK_KeywordHashNode) return 0;
+    /* the dispatch declares an operand's temp by the type inferred for it
+       here, and the operand is emitted by the type recorded for it: where
+       the two differ (`(s = "lit")` for an s a callee appends to) that C
+       does not compile, and the call keeps the splice alone */
+    if (infer_type(c, argv[a]) != t) return 0;
+    hold[a] = aset3_runs(c, argv[a]);
+    if (hold[a] && (t == TY_UNKNOWN || t == TY_VOID || t == TY_NIL)) held = 0;
+    if (hold[a]) last = a;
+  }
+  for (int a = 0; a < last; a++) {
+    TyKind t = comp_ntype(c, argv[a]);
+    if (hold[a] || arg_ran_first(argv[a], 0) || nt_kind(nt, argv[a]) == NK_StringNode) continue;
+    if (t == TY_STRING || t == TY_STRBUF) held = 0;
+    else if (t != TY_UNKNOWN && t != TY_VOID && t != TY_NIL) hold[a] = 1;
+  }
+  if (!held) { hold[0] = hold[1] = hold[2] = 0; last = -1; }
+  if (slot && aset3_runs(c, outer)) {
+    TyKind ot = comp_ntype(c, outer);
+    if (ot == TY_UNKNOWN || ot == TY_VOID || ot == TY_NIL) return 0;
+  }
+  int mark = g_n_argov, tr = -1;
+  /* on the heap: a probe may longjmp back after an emitter wrote to them */
+  Buf *hb = calloc(1, sizeof *hb), *dp = calloc(1, sizeof *dp), *dv = calloc(1, sizeof *dv);
+  Buf *sp = calloc(1, sizeof *sp), *sv = calloc(1, sizeof *sv);
+  if (slot && aset3_runs(c, outer)) aset3_hold(c, outer, hb);
+  if (slot && aset3_runs(c, oidx)) aset3_hold(c, oidx, hb);
+  if (aset3_runs(c, recv)) aset3_hold(c, recv, hb);
+  else if (last >= 0) {
+    /* a receiver read before its operands run, for the test and the dispatch */
+    tr = ++g_tmp;
+    buf_printf(hb, "sp_RbVal _t%d = ", tr); emit_expr(c, recv, hb);
+    buf_printf(hb, "; SP_GC_ROOT_RBVAL(_t%d); ", tr);
+  }
+  for (int a = 0; a < 3; a++) if (hold[a]) aset3_hold(c, argv[a], hb);
+  Buf tb; memset(&tb, 0, sizeof tb);
+  if (tr >= 0) buf_printf(&tb, "_t%d", tr);
+  else emit_expr(c, recv, &tb);
+  int dmark = g_n_argov, sv_d = g_poly_aset3, sv_s = g_poly_aset3_splice;
+  if (tr >= 0) view_bind(recv, "_t%d", tr);
+  g_poly_aset3 = id;
+  int ok = aset3_arm(c, id, dp, dv);
+  g_poly_aset3 = sv_d;
+  view_unbind(dmark);
+  g_poly_aset3_splice = id;
+  ok = ok && aset3_arm(c, id, sp, sv);
+  g_poly_aset3_splice = sv_s;
+  view_unbind(mark);
+  if (ok) {
+    buf_printf(b, "({ %ssp_poly_is_user_obj(%s)", hb->p ? hb->p : "", tb.p ? tb.p : "");
+    poly_aset3_not_struct(c, tb.p ? tb.p : "", b);
+    buf_puts(b, " ? ");
+    if (dp->p) buf_printf(b, "({ %s%s; })", dp->p, dv->p);
+    else buf_puts(b, dv->p);
+    buf_puts(b, " : ");
+    if (sp->p) buf_printf(b, "({ %s%s; })", sp->p, sv->p);
+    else buf_puts(b, sv->p);
+    buf_puts(b, "; })");
+  }
+  free(tb.p);
+  free(hb->p); free(hb); free(dp->p); free(dp); free(dv->p); free(dv); free(sp->p); free(sp); free(sv->p); free(sv);
+  return ok;
+}
+
 /* Element access on a boxed receiver: an index read, []= and [] with one or two arguments (emit_poly_call's arms, in their order) */
 static int emit_poly_index_call(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, TyKind rt, int *out) {
   /* poly receiver: arr[start, len] = src -- 3-arg splice assign
      Skip Fiber/Fiber.current storage receivers (handled later). */
   if (recv >= 0 && rt == TY_POLY && sp_streq(name, "[]=") && argc == 3 &&
       !sp_is_fiber_storage_recv(nt, recv)) {
+    /* beside a user class whose `[]=` takes three, an object of the program's
+       goes to the class dispatch: this arm stands down for that one */
+    if (id == g_poly_aset3) return 0;
+    if (id != g_poly_aset3_splice && emit_poly_aset3_user(c, id, recv, argv, b)) { *out = 1; return 1; }
     int tv = ++g_tmp;
     const char *rcvty = nt_type(nt, recv);
     int recv_is_lvalue = rcvty && (sp_streq(rcvty, "LocalVariableReadNode") ||
