@@ -553,6 +553,24 @@ static void ffi_arg_to_temp(Buf *call, size_t at, Buf *pre, const char *ctype, i
   buf_printf(call, "_b%d_%d", tb, ai);
 }
 
+/* Is `target` written inside the call `root`, and not `root` itself? */
+static int setter_call_holds(const NodeTable *nt, int root, int target) {
+  if (root < 0 || root == target) return 0;
+  int nr = nt_num_refs(nt, root);
+  for (int i = 0; i < nr; i++) {
+    int r = nt_ref_at(nt, root, i);
+    if (r == target || setter_call_holds(nt, r, target)) return 1;
+  }
+  int na = nt_num_arrs(nt, root);
+  for (int i = 0; i < na; i++) {
+    int n = 0;
+    const int *ids = nt_arr_at(nt, root, i, &n);
+    for (int j = 0; j < n; j++)
+      if (ids[j] == target || setter_call_holds(nt, ids[j], target)) return 1;
+  }
+  return 0;
+}
+
 /* a call on a module or a class: native and FFI functions, singleton accessors, a writer in an instance_eval block, class methods */
 int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv) {
   /* native binding dispatch (Path B): Module.func(...) where Module declared
@@ -1219,7 +1237,8 @@ int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
            argument (a literal, a variable) is re-emitted after the call; any
            other is bound once to a temporary local that the call reads. */
         if (argc == 1 && comp_method_in_chain(c, _arc, name, NULL) >= 0 &&
-            nt_ref(nt, id, "block") < 0 && !g_setter_value_inner &&
+            nt_ref(nt, id, "block") < 0 &&
+            (!g_setter_value_inner || setter_call_holds(nt, g_setter_value_node, id)) &&
             call_is_setter_assign(nt, id) &&   /* not a send's plain call (#4921) */
             (name[0] == '_' || (name[0] >= 'a' && name[0] <= 'z') || (name[0] >= 'A' && name[0] <= 'Z'))) {   /* a setter, not ==, <=, [] = */
           const char *aty = nt_type(nt, argv[0]);
@@ -1231,7 +1250,10 @@ int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
           TyKind at = repr_of(c, argv[0]).as_ty;
           if (simple) {
             buf_puts(b, "({ (void)(");
-            g_setter_value_inner++; emit_call_body(c, id, b); g_setter_value_inner--;
+            int sv_node = g_setter_value_node;
+            g_setter_value_inner++; g_setter_value_node = id;
+            emit_call_body(c, id, b);
+            g_setter_value_inner--; g_setter_value_node = sv_node;
             buf_puts(b, "); ");
             emit_expr(c, argv[0], b);
             buf_puts(b, "; })");
@@ -1308,7 +1330,10 @@ int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
               if (g_pre) { buf_puts(g_pre, "\n"); buf_puts(b, "({ "); }
               nt_node_set_arr((NodeTable *)nt, argsn, "arguments", one, 1);
               buf_puts(b, "(void)(");
-              g_setter_value_inner++; emit_call_body(c, id, b); g_setter_value_inner--;
+              int sv_node = g_setter_value_node;
+              g_setter_value_inner++; g_setter_value_node = id;
+              emit_call_body(c, id, b);
+              g_setter_value_inner--; g_setter_value_node = sv_node;
               buf_puts(b, "); ");
               int back[1] = { saved0 };
               nt_node_set_arr((NodeTable *)nt, argsn, "arguments", back, 1);
