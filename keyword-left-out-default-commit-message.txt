@@ -1,0 +1,21 @@
+A key a site leaves out of a method with `...` takes the keyword's default
+
+    class Base
+      def opt(a, k: 7) = yield([a, k])
+    end
+    class Kept < Base
+      def opt(...) = super(...)
+    end
+    p Kept.new.opt(5, k: 2) { |x| x }    # [5, 2]
+    p Kept.new.opt(5) { |x| x }          # [5, 7]
+
+printed [5, 2] and [5, nil], with no error.
+
+A method that keeps its `...` has one parameter for each key any of its
+sites passes. A site that leaves a key out binds that parameter nil,
+and `super(...)` passed the nil on as if the site had written it. The
+expansion now notes the parameters a site gave no argument for; a
+keyword bound from one takes its own default, and a forwarder between
+the two hands the gap on.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

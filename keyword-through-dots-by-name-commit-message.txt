@@ -1,0 +1,27 @@
+A keyword through `super(...)` in a method with `...` binds by name
+
+    class Base
+      def pair(a, k:, j:) = yield([a, k, j])
+      def opt(a, k: 7) = yield([a, k])
+    end
+    class Kept < Base
+      def pair(...) = super(...)
+      def opt(...) = super(...)
+    end
+    p Kept.new.pair(5, j: 3, k: 2) { |x| x }    # [5, 2, 3]
+    p Kept.new.opt(5) { |x| x }                 # [5, 7]
+
+printed [5, 3, 2] and [5, 0], with no error.
+
+A method that keeps its `...` has one parameter for each positional
+argument and one for each key its sites pass, in the order the sites
+first name them. emit_inline_bind_params bound the parent's parameters
+from those by position, so a key written in another order went to
+another keyword, and a keyword no site passes read the parameter at its
+index, or a zero. A declared keyword now reads the forwarder's
+parameter of its own name, and with none, takes its own default.
+
+Where every site passes every key in the order the parent declares
+them, name and position agree and the C is unchanged.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
