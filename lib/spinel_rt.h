@@ -10528,14 +10528,16 @@ static void sp_poly_dig_check(sp_RbVal v) {
   sp_raise_cls("TypeError", sp_sprintf("%s does not have #dig method",
                                        sp_poly_class_name(v)));
 }
-static sp_RbVal sp_poly_dig_n(sp_RbVal recv, sp_int n, const sp_RbVal *keys) {
-  /* only a nil reached PART WAY through the walk ends it quietly; a nil
-     RECEIVER has no dig (#4485) */
-  /* nor has any other receiver that cannot be dug: the call's NoMethodError,
-     with the keys as its args (the TypeError below is a step's) */
-  if (!sp_poly_dig_recv_ok(recv)) sp_raise_nomethod(sp_nomethod_msg_args("dig", recv, n, (sp_RbVal *)keys));
-  sp_poly_coll_chk(recv, "dig");
-  sp_RbVal cur = recv;
+/* The steps of a dig from `cur`, a value the walk has landed on. It is the
+   whole walk past the receiver, and the rest of one whose first step the
+   emitter resolved itself (a Struct member read by name): that member's
+   value is a step's, not the call's receiver. */
+static sp_RbVal sp_poly_dig_rest(sp_RbVal cur, sp_int n, const sp_RbVal *keys) {
+  /* a member that is an object of one of the program's own classes: the
+     walk does not call its dig, so the call's NoMethodError stays (a
+     receiver that passed sp_poly_dig_recv_ok is never one) */
+  if (sp_poly_diggable(cur) && !sp_poly_dig_recv_ok(cur))
+    sp_raise_nomethod(sp_nomethod_msg_args("dig", cur, n, (sp_RbVal *)keys));
   for (sp_int i = 0; i < n; i++) {
     if (cur.tag == SP_TAG_NIL) return cur;
     /* a step onto something that cannot be dug is a TypeError naming the
@@ -10546,6 +10548,15 @@ static sp_RbVal sp_poly_dig_n(sp_RbVal recv, sp_int n, const sp_RbVal *keys) {
     cur = sp_poly_dig_index(cur, keys[i]);
   }
   return cur;
+}
+static sp_RbVal sp_poly_dig_n(sp_RbVal recv, sp_int n, const sp_RbVal *keys) {
+  /* only a nil reached PART WAY through the walk ends it quietly; a nil
+     RECEIVER has no dig (#4485) */
+  /* nor has any other receiver that cannot be dug: the call's NoMethodError,
+     with the keys as its args (the TypeError of sp_poly_dig_rest is a step's) */
+  if (!sp_poly_dig_recv_ok(recv)) sp_raise_nomethod(sp_nomethod_msg_args("dig", recv, n, (sp_RbVal *)keys));
+  sp_poly_coll_chk(recv, "dig");
+  return sp_poly_dig_rest(recv, n, keys);
 }
 static sp_RbVal sp_poly_arr_values_at(sp_RbVal v, sp_PolyArray *idx);
 static sp_RbVal sp_poly_values_at_n(sp_RbVal recv, sp_int n, const sp_RbVal *keys) {

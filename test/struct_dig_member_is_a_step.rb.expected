@@ -1,0 +1,16 @@
+TypeError: String does not have #dig method
+TypeError: Symbol does not have #dig method
+TypeError: String does not have #dig method
+nil
+nil
+TypeError: Integer does not have #dig method
+TypeError: Float does not have #dig method
+TypeError: TrueClass does not have #dig method
+TypeError: Range does not have #dig method
+2
+9
+nil
+TypeError: String does not have #dig method
+8
+7
+raised
