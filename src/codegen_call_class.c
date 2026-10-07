@@ -1238,6 +1238,69 @@ int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
             buf_puts(b, "; })");
             return 1;
           }
+          /* a value of nil type that is no literal (a method that answers
+             nil, `(bump; nil)`) has nothing a temporary could hold: it would
+             be declared void. It runs for its effect ahead of the call, as
+             every other value does, and the call is handed a nil literal.
+             A receiver other than self is read into a temporary of its own
+             ahead of the value, rooted while a value that may allocate runs,
+             and the call reads it there. Not under `&.`, and not a value
+             object, which a temporary would copy. */
+          const char *nop = at == TY_NIL ? nt_str(nt, id, "call_operator") : NULL;
+          Scope *nsc = at == TY_NIL ? comp_scope_of(c, id) : NULL;
+          int nself = nt_kind(nt, recv) == NK_SelfNode;
+          if (at == TY_NIL && !(nop && sp_streq(nop, "&.")) &&
+              (nself || (nsc && repr_of(c, recv).kind != RK_BOXED && repr_of(c, recv).as_ty == _art &&
+                         !comp_ty_value_obj(c, _art)))) {
+            int nl = nt_new_node((NodeTable *)nt, "NilNode");
+            comp_grow_node_arrays(c);
+            c->nscope[nl] = c->nscope[id];
+            c->ntype[nl] = TY_NIL;
+            int saved0 = argv[0];
+            int argsn = nt_ref(nt, id, "arguments");
+            int one[1] = { nl };
+            buf_puts(b, "({ ");
+            char rvn[32]; rvn[0] = 0;
+            if (!nself) {
+              snprintf(rvn, sizeof rvn, "__svr%d", ++g_tmp);
+              LocalVar *rlv = scope_local_intern(nsc, rvn);
+              rlv->type = _art;
+              int rrd = nt_new_node((NodeTable *)nt, "LocalVariableReadNode");
+              nt_node_set_str((NodeTable *)nt, rrd, "name", rvn);
+              comp_grow_node_arrays(c);
+              c->nscope[rrd] = c->nscope[id];
+              c->ntype[rrd] = _art;
+              Buf rpre; memset(&rpre, 0, sizeof rpre);
+              Buf rval; memset(&rval, 0, sizeof rval);
+              { Buf *sv_pre = g_pre; g_pre = &rpre; emit_expr(c, recv, &rval); g_pre = sv_pre; }
+              if (rpre.p) buf_puts(b, rpre.p);
+              emit_ctype(c, _art, b); buf_printf(b, " lv_%s = %s; ", rvn, rval.p ? rval.p : "0");
+              free(rpre.p); free(rval.p);
+              if (subtree_may_allocate(nt, saved0) && needs_root(_art)) buf_printf(b, "SP_GC_ROOT(lv_%s); ", rvn);
+              nt_node_set_ref((NodeTable *)nt, id, "receiver", rrd);
+            }
+            Buf apre; memset(&apre, 0, sizeof apre);
+            Buf aval; memset(&aval, 0, sizeof aval);
+            { Buf *sv_pre = g_pre; g_pre = &apre; emit_expr(c, saved0, &aval); g_pre = sv_pre; }
+            if (apre.p) buf_puts(b, apre.p);
+            buf_printf(b, "(void)(%s); (void)(", aval.p ? aval.p : "0");
+            free(apre.p); free(aval.p);
+            nt_node_set_arr((NodeTable *)nt, argsn, "arguments", one, 1);
+            g_setter_value_inner++; emit_call_body(c, id, b); g_setter_value_inner--;
+            int back[1] = { saved0 };
+            nt_node_set_arr((NodeTable *)nt, argsn, "arguments", back, 1);
+            if (!nself) {
+              nt_node_set_ref((NodeTable *)nt, id, "receiver", recv);
+              for (int k = nsc->nlocals - 1; k >= 0; k--)
+                if (sp_streq(nsc->locals[k].name, rvn)) {
+                  memmove(&nsc->locals[k], &nsc->locals[k + 1], sizeof(LocalVar) * (size_t)(nsc->nlocals - k - 1));
+                  nsc->nlocals--;
+                  break;
+                }
+            }
+            buf_puts(b, "); 0; })");
+            return 1;
+          }
           if (at != TY_UNKNOWN && at != TY_VOID) {
             Scope *esc = comp_scope_of(c, id);
             int saved0_arg = argv[0];

@@ -1,0 +1,26 @@
+detach a
+nil
+nil
+nil
+detach b
+detach c
+[nil, nil]
+4
+"stored"
+5
+note 6
+nil
+6
+nil
+nil
+6
+w A
+w A
+fresh F
+w F!
+fresh G
+w G!
+fresh H
+w H!
+nil
+7
