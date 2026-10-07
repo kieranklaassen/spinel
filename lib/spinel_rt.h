@@ -3527,11 +3527,23 @@ static SP_UNUSED sp_PolyArray *sp_range_minmax_poly(sp_Range r) {
   sp_PolyArray_push(a, hi);
   return a;
 }
+/* A boxed String or Symbol cannot bound an Integer-represented Range, and
+   converting it built a Range of numbers the program never wrote (a String
+   as its leading digits, a Symbol as its id). Beside an Integer begin it is
+   CRuby's ArgumentError; otherwise CRuby builds a String or Symbol Range,
+   which this representation cannot hold. Say so. */
+static SP_NOINLINE void sp_range_bound_chk(sp_RbVal v, const char *side, int int_begin) {
+  const char *k = v.tag == SP_TAG_SYM ? "Symbol" : (v.tag == SP_TAG_STR || sp_poly_is_strbuf(v)) ? "String" : NULL;
+  if (!k) return;
+  if (int_begin) sp_raise_cls("ArgumentError", "bad value for range");
+  sp_raise_cls("NotImplementedError", sp_sprintf("a Range with a %s %s decided at run time is not supported by spinel", k, side));
+}
 /* A Range built from a boxed end (`lo..x`): nil is the absent end, a Float
    is kept as written (sp_range_new_fend), anything else converts as an
    Integer bound does. */
 static SP_UNUSED sp_Range sp_range_new_pend(sp_int f, sp_RbVal e, sp_int x) {
   if (e.tag == SP_TAG_FLT) return sp_range_new_fend(f, e.v.f, x);
+  if (SP_UNLIKELY(e.tag != SP_TAG_INT && e.tag != SP_TAG_NIL)) sp_range_bound_chk(e, "end", f != (sp_int)INTPTR_MIN);
   return sp_range_new(f, e.tag == SP_TAG_NIL ? (sp_int)INTPTR_MAX : sp_poly_to_i(e), x);
 }
 /* A boxed begin of an Integer-represented Range: a Float there would make it
@@ -3540,6 +3552,7 @@ static SP_UNUSED sp_Range sp_range_new_pend(sp_int f, sp_RbVal e, sp_int x) {
 static SP_UNUSED sp_int sp_range_lo_bound(sp_RbVal v) {
   if (SP_UNLIKELY(v.tag == SP_TAG_FLT))
     sp_raise_cls("NotImplementedError", "a Range with a Float begin decided at run time is not supported by spinel");
+  if (SP_UNLIKELY(v.tag != SP_TAG_INT && v.tag != SP_TAG_NIL)) sp_range_bound_chk(v, "begin", 0);
   return v.tag == SP_TAG_NIL ? (sp_int)INTPTR_MIN : sp_poly_to_i(v);
 }
 /* Kernel#rand / Random#rand over a Range known only at run time (a parameter,
@@ -3691,11 +3704,16 @@ static SP_UNUSED sp_int sp_for_hi_f(sp_float f, int excl) {
   if (g <= -9.2e18) return (sp_int)INTPTR_MIN + 1;
   return (sp_int)g;
 }
-static SP_UNUSED sp_int sp_for_hi(sp_RbVal v) { if (v.tag == SP_TAG_FLT) return sp_for_hi_f(v.v.f, 0); return v.tag == SP_TAG_NIL ? (sp_int)INTPTR_MAX : sp_poly_to_i(v); }
+static SP_UNUSED sp_int sp_for_hi(sp_RbVal v) {
+  if (v.tag == SP_TAG_FLT) return sp_for_hi_f(v.v.f, 0);
+  if (SP_UNLIKELY(v.tag != SP_TAG_INT && v.tag != SP_TAG_NIL)) sp_range_bound_chk(v, "end", 0);   /* the begin is not read yet */
+  return v.tag == SP_TAG_NIL ? (sp_int)INTPTR_MAX : sp_poly_to_i(v);
+}
 static SP_UNUSED sp_int sp_for_hi_x(sp_RbVal v) { if (v.tag == SP_TAG_FLT) return sp_for_hi_f(v.v.f, 1); return sp_for_hi(v); }
 static SP_UNUSED sp_int sp_for_lo(sp_RbVal v) {
   if (SP_UNLIKELY(v.tag == SP_TAG_NIL)) sp_raise_cls("TypeError", "can't iterate from NilClass");
   if (SP_UNLIKELY(v.tag == SP_TAG_FLT)) sp_raise_cls("TypeError", "can't iterate from Float");
+  if (SP_UNLIKELY(v.tag != SP_TAG_INT)) sp_range_bound_chk(v, "begin", 0);
   return sp_poly_to_i(v);
 }
 static SP_UNUSED sp_int sp_poly_recv_i(const char *m, sp_RbVal v) { if (SP_UNLIKELY(v.tag == SP_TAG_NIL)) sp_raise_nomethod(sp_nomethod_msg(m, v)); return sp_poly_to_i(v); }
