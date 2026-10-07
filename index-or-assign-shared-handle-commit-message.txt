@@ -1,0 +1,29 @@
+An index `||=` stores the shared String handle under --share-strings
+
+Under --share-strings, `h = {}; h[:k] ||= +""; h[:k] << "v"; p h` printed
+`{k: ""}`: the append went to a copy and nothing said so, where the same
+store written `h[:k] = +""` is right. It is the usual way to gather
+Strings by key (`h[w] ||= +""` then `h[w] << x` in a loop), and it lost
+every append, in a local Hash, in an Array slot (`a[0] ||= +""`) and in a
+Hash or an Array an instance variable or a parameter holds. `&&=` did
+the same.
+
+The walks that list a container's stores (strbuf_container_store_values
+and its index, strbuf_ivar_source_walk, and the stored locals of
+promote_shared_stored_strings) knew a literal's elements, push and `[]=`,
+and not the value of an IndexOrWriteNode or an IndexAndWriteNode. That
+value went into the boxed slot as a plain String, beside handles from
+every other store. Under the flag it is now listed as the last argument
+of `[]=` is, so it is wrapped as a handle, and a local or an instance
+variable stored that way is the element: `m[:k] ||= s; s << "1";
+m[:k] << "2"` shows "s12" through both names.
+
+The default build lists nothing new and its generated C is unchanged.
+
+A boxed value is followed to what it can evaluate to as any stored value
+is, so under the flag `h[:k] ||= h[:j]` now reaches an element read of
+the Hash it is stored into. strbuf_demand_elem_arg ends that walk where
+it meets the Hash again, and since the previous commit a row of such
+stores, which compiles at once today, does not cost n! walks.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

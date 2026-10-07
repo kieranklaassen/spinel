@@ -1,0 +1,1 @@
+An index `||=` stores the shared String handle under --share-strings
