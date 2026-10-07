@@ -1,4 +1,5 @@
 global: 0 a39..z39
+global, 2000 turns: 0
 class variable: 0 b39...y39
 class ivar: 0 c39..x39
 "d4"

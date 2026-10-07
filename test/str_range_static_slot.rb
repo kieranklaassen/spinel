@@ -29,6 +29,22 @@ while i < 40
 end
 puts "global: #{bad} #{$span.first}..#{$span.last}"
 
+# a plain run loses them too: over enough turns a collection falls between
+# a store and its read
+def churn_small
+  (1..40).map { |k| "j#{k}" }.size
+end
+
+bad = 0
+i = 0
+while i < 2000
+  fill_global(i)
+  churn_small
+  bad += 1 unless $span.first == "a#{i}" && $span.last == "z#{i}"
+  i += 1
+end
+puts "global, 2000 turns: #{bad}"
+
 class Shelf
   @@span = ("a".."z")
   @span = ("a".."z")
