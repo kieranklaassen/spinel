@@ -1,0 +1,1 @@
+A block handed to new is held for the call
