@@ -1,0 +1,48 @@
+[["c", "x"], ["b", "y"], ["a", "z"]]
+[["c", "x"], ["b", "y"], ["a", "z"]]
+[["c", "x"], ["b", "y"], ["a", "z"]]
+[["c", "x"], ["b", "y"], ["a", "z"]]
+["c", "b", "a"]
+[["c", "x"], ["b", "y"]]
+[["c", "x"], ["b", "y"]]
+[["c", "x"], ["b", "y"]]
+[["c", "x"], ["b", "y"], ["a", "z"]]
+[["a", "z"], ["b", "y"], ["c", "x"]]
+[["c", "x"], ["b", "y"], ["a", "z"]]
+3
+[[3, 7], [2, 2], [1, 1]]
+[[1, 1], [2, 2], [3, 7]]
+[[:b, 0.5], [:c, 1.5], [:a, 2.5]]
+[2.5, 0.5, 1.5]
+[[3, 7], [2, 2], [1, 1]]
+[[:b, 0.5], [:c, 1.5], [:a, 2.5]]
+[["c", "x"], ["b", "y"], ["a", "z"]]
+["a", "a", "b", "b", "c"]
+["a", "a", "b", "b", "c"]
+[]
+by a padded String, six times: 0 wrong
+by an Array of two Integers, six times: 0 wrong
+1000 by an Integer: 0 out of place
+2000 by an Integer: 0 out of place
+3000 by an Integer: 0 out of place
+4000 by an Integer: 0 out of place
+5000 by an Integer: 0 out of place
+6000 by an Integer: 0 out of place
+7000 by an Integer: 0 out of place
+8000 by an Integer: 0 out of place
+1000 by a String: 0 out of place
+2000 by a String: 0 out of place
+3000 by a String: 0 out of place
+4000 by a String: 0 out of place
+5000 by a String: 0 out of place
+6000 by a String: 0 out of place
+7000 by a String: 0 out of place
+8000 by a String: 0 out of place
+1000 by an Array: 0 out of place
+2000 by an Array: 0 out of place
+3000 by an Array: 0 out of place
+4000 by an Array: 0 out of place
+5000 by an Array: 0 out of place
+6000 by an Array: 0 out of place
+7000 by an Array: 0 out of place
+8000 by an Array: 0 out of place
