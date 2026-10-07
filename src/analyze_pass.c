@@ -6687,13 +6687,20 @@ static int bind_args_params(Compiler *c, int call_id, int mi, const int *argv, i
     while (lead < encl->nparams &&
            (!encl->pnames[lead] || strncmp(encl->pnames[lead], "__fwd_", 6) != 0)) lead++;
     if (lead >= encl->nparams) lead = 0;  /* no __fwd_ slot: forward all */
-    int n = m->nparams < encl->nparams - lead ? m->nparams : encl->nparams - lead;
-    for (int k = 0; k < n; k++) {
+    for (int k = 0; k < m->nparams; k++) {
       /* a splat param gathers the rest, an Array by construction, which no
          one forwarded value types */
       if (k == m->rest_idx) break;
+      /* a declared keyword is bound by name (emit_inline_bind_params): it
+         takes the type of the forwarder's parameter of that name, and none
+         where the forwarder has no such parameter */
+      int ek = lead + k;
+      if (m->pnames[k] && callee_param_is_declared_kwarg(c, m, m->pnames[k]))
+        for (ek = lead; ek < encl->nparams; ek++)
+          if (encl->pnames[ek] && sp_streq(encl->pnames[ek], m->pnames[k])) break;
+      if (ek >= encl->nparams) continue;
       LocalVar *p = scope_local(m, m->pnames[k]);
-      LocalVar *ep = scope_local(encl, encl->pnames[lead + k]);
+      LocalVar *ep = scope_local(encl, encl->pnames[ek]);
       if (!p || p->rbs_seeded || !ep || ep->type == TY_UNKNOWN) continue;
       changed |= slot_take(c, p, ep->type, ep->why.node >= 0 ? ep->why.node : argv[0]);
     }
