@@ -31614,7 +31614,7 @@ static const HvSum hv_none = { -1, -1, 0, 0, 0 };
    A method's entry is one per class its self is of (`self`, -1 the method's
    own): a call on self goes to that class's method. `pass` is the walk of
    one value block that last worked the entry out, -1 once it is settled. */
-enum { HV_LOCAL, HV_VAR_STORE, HV_ANSWER, HV_PASSED_LOST, HV_PASSED_STORE, HV_LITERAL, HV_SELF, HV_CALLED, HV_GOES };
+enum { HV_LOCAL, HV_VAR_STORE, HV_ANSWER, HV_PASSED_LOST, HV_PASSED_STORE, HV_LITERAL, HV_SELF, HV_CALLED, HV_GOES, HV_SELF_GOES };
 enum { HV_DEPTH = 64, HV_PASSES = 6, HV_SELVES = 8 };
 typedef struct { int kind, owner; const char *name; int self, pass, busy; HvSum s; } HvMemo;
 static HvMemo *hv_memo;
@@ -31892,18 +31892,17 @@ static int hv_self_ok(Compiler *c, int mi, int k) {
 static int hv_call_target(Compiler *c, int u, int sk, int *ck) {
   const NodeTable *nt = c->nt;
   const char *un = nt_str(nt, u, "name");
-  Scope *us = comp_scope_of(c, u);
   int rc = nt_ref(nt, u, "receiver");
   int on_self = rc < 0 || nt_kind(nt, rc) == NK_SelfNode;
   if (!un) return -1;
   /* asked again by every method the call is listed under */
-  int e = hv_memo_at(HV_GOES, u, "", on_self ? sk : -1);
+  int e = on_self ? hv_memo_at(HV_SELF_GOES, u, "", sk) : hv_memo_at(HV_GOES, u, "", -1);
   if (e >= 0 && hv_memo[e].pass < 0) {
     if (hv_memo[e].s.fresh >= 0) *ck = hv_memo[e].s.pstore;
     return hv_memo[e].s.fresh;
   }
   TyKind rt = on_self ? TY_UNKNOWN : infer_type(c, rc);
-  int k = on_self ? (sk >= 0 ? sk : hv_own_class(us)) : ty_is_object(rt) ? ty_object_class(rt) : -1;
+  int k = on_self ? (sk >= 0 ? sk : hv_own_class(comp_scope_of(c, u))) : ty_is_object(rt) ? ty_object_class(rt) : -1;
   int mi = k >= 0 ? comp_method_in_chain(c, k, un, NULL) : -1;
   /* an object's class's own is always among the candidates; a call on self
      asks (a second infer_type of every receiver is the square of a scope's
@@ -31932,8 +31931,13 @@ static int hv_call_target(Compiler *c, int u, int sk, int *ck) {
    in the caller's scope, *qbound whether this call chose it. */
 static int hv_calls_as(Compiler *c, int u, Scope *vs, int k, int bound, int *qk, int *qbound) {
   const NodeTable *nt = c->nt;
+  int vi = (int)(vs - c->scopes), ck = -1;
+  /* a call on an object that goes elsewhere: a method several classes
+     define has every call of the name on its list */
+  int g = hv_memo_at(HV_GOES, u, "", -1);
+  if (g >= 0 && hv_memo[g].pass < 0 && hv_memo[g].s.fresh != vi) return 0;
   Scope *q = comp_scope_of(c, u);
-  int vi = (int)(vs - c->scopes), rc = nt_ref(nt, u, "receiver"), ck = -1;
+  int rc = nt_ref(nt, u, "receiver");
   int own = hv_own_class(vs), qown = hv_own_class(q);
   *qk = qown; *qbound = 0;
   if ((rc < 0 || nt_kind(nt, rc) == NK_SelfNode) && own >= 0 && qown >= 0) {
