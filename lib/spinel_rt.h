@@ -322,6 +322,20 @@ static inline double sp_fmod(double a, double b) {
   if (r != 0.0 && ((r < 0.0) != (b < 0.0))) r += b;
   return r;
 }
+/* Float#divmod's pair as CRuby's flodivmod computes it: the remainder from
+   fmod, and the quotient from the remainder -- round((x - mod) / y) -- not
+   floor(x / y), which disagreed with the remainder wherever x / y rounded
+   up to a whole number (1.0.divmod(0.1) answered [10, 0.0] where CRuby has
+   [9, 0.09999999999999995]); then both are moved to the divisor's sign. A
+   zero divisor raises; a NaN one answers NaN for both. */
+static inline void sp_flo_divmod(double x, double y, double *divp, double *modp) {
+  if (isnan(y)) { *divp = *modp = y; return; }
+  if (y == 0.0) sp_raise_cls("ZeroDivisionError", "divided by 0");
+  double mod = (x == 0.0 || (isinf(y) && !isinf(x))) ? x : fmod(x, y);
+  double div = (isinf(x) && !isinf(y)) ? x : round((x - mod) / y);
+  if (y * mod < 0) { mod += y; div -= 1.0; }
+  *divp = div; *modp = mod;
+}
 /* Float#remainder: plain C fmod, but a zero divisor raises the way every other
    Float division-derived operation does (#3649). */
 static inline double sp_fremainder(double a, double b) {
@@ -3882,6 +3896,7 @@ static sp_int sp_poly_struct_size(sp_RbVal v) {
   return (sv.tag == SP_TAG_OBJ && sv.v.p && sp_poly_is_array_kind(sv.cls_id)) ? sp_poly_arr_len(sv) : -1;
 }
 static sp_int sp_poly_length_m(sp_RbVal v) {
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_MATCHDATA && v.v.p) return sp_MatchData_length((sp_MatchData *)v.v.p);
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_QUEUE && v.v.p) return sp_Queue_size((sp_queue *)v.v.p);
   { sp_int n = sp_poly_struct_size(v); if (n >= 0) return n; }
   if (v.tag == SP_TAG_NIL || v.tag == SP_TAG_INT || v.tag == SP_TAG_FLT ||
@@ -3927,7 +3942,18 @@ static sp_RbVal sp_poly_io_truncate(sp_RbVal v, sp_int n) {
 }
 sp_RbVal sp_Enumerator_size_p(void *e);   /* lib/sp_cold.c; sp_Enumerator is declared further down */
 void sp_enum_index_search_each_raise(void *e);   /* lib/sp_cold.c: raise for a boxed index search's each */
+/* A boxed MatchData's group, by index or by name, boxed: a group that did
+   not take part in the match is nil. */
+static sp_RbVal sp_poly_md_group(sp_MatchData *m, sp_RbVal k) {
+  const char *g = NULL;
+  if (k.tag == SP_TAG_SYM && sp_sym_name_fn) g = sp_MatchData_aref_name(m, sp_sym_name_fn((sp_sym)k.v.i));
+  else if (k.tag == SP_TAG_STR) g = sp_MatchData_aref_name(m, k.v.s ? k.v.s : "");
+  else g = sp_MatchData_aref(m, sp_poly_to_i(k));
+  return g ? sp_box_str(g) : sp_box_nil();
+}
 static sp_int sp_poly_size(sp_RbVal v) {
+  /* MatchData#size is its group count, 0 never: it had no arm */
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_MATCHDATA && v.v.p) return sp_MatchData_length((sp_MatchData *)v.v.p);
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_FLOAT_RANGE && v.v.p) { sp_frange_iter_raise((*(sp_FloatRange *)v.v.p), 0); return 0; }  /* a Float range has no size (TypeError) */
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_QUEUE && v.v.p) return sp_Queue_size((sp_queue *)v.v.p);
   { sp_int n = sp_poly_struct_size(v); if (n >= 0) return n; }
@@ -5213,14 +5239,28 @@ static int sp_sort_key_number_p(sp_RbVal v) {
   return sp_poly_numeric_p(v) || sp_poly_is_rational(v) || sp_poly_is_brat(v);
 }
 static sp_int sp_sort_key_cmp(sp_RbVal a, sp_RbVal b) SP_UNUSED;
+/* a `<=>` answer as rb_cmpint reads it: nil is no order; any other value
+   orders by its sign, so a Float or Rational answer (0.5, 1/3) is not cut
+   to 0 as sp_poly_to_i would */
+static sp_int sp_sort_cmpint(sp_RbVal u) SP_UNUSED;
+static sp_int sp_sort_cmpint(sp_RbVal u) {
+  if (u.tag == SP_TAG_NIL) return SP_INT_NIL;
+  sp_bool ok; sp_int c = sp_poly_cmp(u, sp_box_int(0), &ok);
+  if (ok) return c < 0 ? -1 : (c > 0 ? 1 : 0);
+  return sp_poly_to_i(u);
+}
 static sp_int sp_sort_key_cmp(sp_RbVal a, sp_RbVal b) {
+  sp_RbVal u;
   if ((a.tag == SP_TAG_BIGINT && !sp_sort_key_number_p(b)) ||
       (b.tag == SP_TAG_BIGINT && !sp_sort_key_number_p(a))) {
-    sp_RbVal u;
     if (sp_poly_user_cmp("<=>", a, b, &u) || sp_poly_coerce_binop("<=>", a, b, &u))
-      return u.tag == SP_TAG_NIL ? SP_INT_NIL : sp_poly_to_i(u);
+      return sp_sort_cmpint(u);
     return SP_INT_NIL;
   }
+  /* a class's own <=> (or a coerce) first, as sp_poly_spaceship asks it,
+     but read by its sign */
+  if (sp_poly_user_cmp("<=>", a, b, &u) || sp_poly_coerce_binop("<=>", a, b, &u))
+    return sp_sort_cmpint(u);
   return sp_poly_spaceship(a, b);
 }
 /* sp_sort_idx_by_poly for keys that need not compare (sort_by over keys of
@@ -5350,11 +5390,12 @@ static sp_RbVal sp_poly_divmod(sp_RbVal a, sp_RbVal b) {
   if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) {
     sp_float fa = sp_poly_to_f(a), fb = sp_poly_to_f(b);
     if (fb == 0) sp_raise_cls("ZeroDivisionError", "divided by 0");
-    sp_float q = floor(fa / fb);
+    sp_float q, m;
+    sp_flo_divmod(fa, fb, &q, &m);
     /* CRuby answers the quotient as an Integer (7.0.divmod(3) => [2, 1.0]);
        only one that no Integer can hold stays a Float. */
     sp_PolyArray_push(out, (q >= -9.2e18 && q <= 9.2e18) ? sp_box_int((sp_int)q) : sp_box_float(q));
-    sp_PolyArray_push(out, sp_box_float(sp_fmod(fa, fb)));
+    sp_PolyArray_push(out, sp_box_float(m));
     return sp_box_poly_array(out);
   }
   /* a Bignum pair: sp_poly_to_i below truncates it to 64 bits and answered a
@@ -9037,6 +9078,7 @@ static sp_RbVal sp_poly_get_sym(sp_RbVal v, sp_sym key) {
     case SP_BUILTIN_CURRY: return sp_curry_call_poly((sp_Curry *)v.v.p, 1, (sp_RbVal[]){sp_box_sym(key)});
     case SP_BUILTIN_SYM_POLY_HASH: return sp_SymPolyHash_get((sp_SymPolyHash*)v.v.p, key);
     case SP_BUILTIN_POLY_POLY_HASH: return sp_PolyPolyHash_get((sp_PolyPolyHash*)v.v.p, sp_box_sym(key));
+    case SP_BUILTIN_MATCHDATA: return v.v.p ? sp_poly_md_group((sp_MatchData *)v.v.p, sp_box_sym(key)) : sp_box_nil();
     /* a Symbol is no key of a String- or Integer-keyed Hash: a miss */
     case SP_BUILTIN_STR_POLY_HASH: case SP_BUILTIN_STR_STR_HASH: case SP_BUILTIN_STR_INT_HASH:
     case SP_BUILTIN_INT_INT_HASH: case SP_BUILTIN_INT_STR_HASH:
@@ -9429,6 +9471,11 @@ static sp_RbVal sp_poly_shift(sp_RbVal v) {
   return sp_box_nil();
 }
 static sp_RbVal sp_poly_get_str(sp_RbVal v, const char *key) {
+  /* MatchData#["name"]: the named group */
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_MATCHDATA && v.v.p) {
+    const char *g = sp_MatchData_aref_name((sp_MatchData *)v.v.p, key ? key : "");
+    return g ? sp_box_str(g) : sp_box_nil();
+  }
   /* `s["sub"]` is String#[str]: the substring itself when present, else nil.
      Both string representations answer it, and neither did here -- an
      immediate string was rejected by the tag test on the next line and a
@@ -9953,6 +10000,11 @@ static SP_INLINE sp_RbVal sp_poly_arr_get_hash(sp_RbVal a, sp_int i) {
 }
 
 static SP_NOINLINE sp_RbVal sp_poly_arr_get_hash_cold(sp_RbVal a, sp_int i) {
+  /* MatchData#[i]: the group, nil where it did not match */
+  if (a.tag == SP_TAG_OBJ && a.v.p && a.cls_id == SP_BUILTIN_MATCHDATA) {
+    const char *g = sp_MatchData_aref((sp_MatchData *)a.v.p, i);
+    return g ? sp_box_str(g) : sp_box_nil();
+  }
   /* Proc#[] is #call: an Integer index on a callable is a one-argument call.
      The emitter's int-key read reaches this cold arm (a Proc is not an array
      kind), so a boxed Proc used to answer nil (#4395). */
@@ -10114,9 +10166,14 @@ static sp_RbVal sp_poly_dig_step_key(sp_RbVal a, sp_RbVal k) {
 /* dig(*keys): the key list is a runtime array, so walk it one step at a time.
    A nil at any step stops, as CRuby's #dig does. */
 static sp_RbVal sp_poly_index_poly(sp_RbVal recv, sp_RbVal idx);
+static int sp_poly_diggable(sp_RbVal v);   /* defined below */
+static int sp_poly_dig_recv_ok(sp_RbVal v);   /* defined below */
 static sp_RbVal sp_poly_dig_list(sp_RbVal recv, sp_PolyArray *keys) {
   if (!keys) return sp_box_nil();
   SP_GC_ROOT(keys);
+  /* a receiver that cannot be dug (nil answered nil) is the call's
+     NoMethodError, with the keys as its args */
+  if (!sp_poly_dig_recv_ok(recv)) sp_raise_nomethod(sp_nomethod_msg_args("dig", recv, keys->len, keys->data));
   sp_RbVal cur = recv;
   for (sp_int i = 0; i < keys->len; i++) {
     if (cur.tag == SP_TAG_NIL) return sp_box_nil();
@@ -10319,8 +10376,9 @@ static sp_RbVal sp_poly_delete_key(sp_RbVal recv, sp_RbVal key) {
         return r == SP_INT_NIL ? sp_box_nil() : key;
       }
       case SP_BUILTIN_STR_ARRAY: {
-        if (key.tag != SP_TAG_STR) return sp_box_nil();
-        const char *r = sp_StrArray_delete((sp_StrArray *)recv.v.p, key.v.s);
+        const char *ks;
+        if (key.tag == SP_TAG_STR) ks = key.v.s; else if (sp_poly_is_strbuf(key)) ks = sp_poly_unbox_s(key); else return sp_box_nil();
+        const char *r = sp_StrArray_delete((sp_StrArray *)recv.v.p, ks);
         return r ? sp_box_str(r) : sp_box_nil();
       }
       case SP_BUILTIN_FLT_ARRAY: {
@@ -10377,6 +10435,17 @@ static int sp_poly_diggable(sp_RbVal v) {
   return sp_poly_is_hash_kind(v.cls_id) || sp_poly_is_array_kind(v.cls_id) ||
          v.cls_id >= 0;   /* a user object: its own #dig answers, or NoMethodError does */
 }
+/* Has boxed `v` a #dig the builtin walk answers, as the receiver of the
+   call? sp_poly_diggable's answer, but a program object must be a Struct:
+   one whose class defines dig is routed to it before the walk
+   (poly_name_user_claimed), and any other has no #dig. The member-array
+   dispatch, installed wherever a Struct meets a boxed dig, tells a Struct by
+   answering one. */
+static int sp_poly_dig_recv_ok(sp_RbVal v) {
+  if (!sp_poly_diggable(v)) return 0;
+  if (v.cls_id < 0) return 1;
+  return sp_obj_struct_values_fn && sp_obj_struct_values_fn(v).tag != SP_TAG_NIL;
+}
 /* One step of a dig has landed on `v`: nil ends the walk, a container
    continues it, and anything else is the TypeError CRuby raises. */
 static void sp_poly_dig_check(sp_RbVal v) {
@@ -10387,6 +10456,9 @@ static void sp_poly_dig_check(sp_RbVal v) {
 static sp_RbVal sp_poly_dig_n(sp_RbVal recv, sp_int n, const sp_RbVal *keys) {
   /* only a nil reached PART WAY through the walk ends it quietly; a nil
      RECEIVER has no dig (#4485) */
+  /* nor has any other receiver that cannot be dug: the call's NoMethodError,
+     with the keys as its args (the TypeError below is a step's) */
+  if (!sp_poly_dig_recv_ok(recv)) sp_raise_nomethod(sp_nomethod_msg_args("dig", recv, n, (sp_RbVal *)keys));
   sp_poly_coll_chk(recv, "dig");
   sp_RbVal cur = recv;
   for (sp_int i = 0; i < n; i++) {
@@ -11969,6 +12041,14 @@ static sp_RbVal sp_poly_struct_values(sp_RbVal v) {
 }
 /* Array#values_at indexes; Hash#values_at looks the keys up. */
 static sp_RbVal sp_poly_arr_values_at(sp_RbVal v, sp_PolyArray *idx) {
+  /* MatchData#values_at: each group by index or name (it took the Array
+     path, which reads no MatchData, and answered nils) */
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_MATCHDATA && v.v.p) {
+    SP_GC_ROOT_RBVAL(v); SP_GC_ROOT(idx);
+    sp_PolyArray *out = sp_PolyArray_new(); SP_GC_ROOT(out);
+    for (sp_int i = 0; idx && i < idx->len; i++) sp_PolyArray_push(out, sp_poly_md_group((sp_MatchData *)v.v.p, idx->data[i]));
+    return sp_box_poly_array(out);
+  }
   sp_poly_coll_chk(v, "values_at");
   if (!(v.tag == SP_TAG_OBJ && sp_poly_is_hash_kind(v.cls_id))) sp_poly_ary_chk(v, "values_at", 0);
   SP_GC_ROOT_RBVAL(v); SP_GC_ROOT(idx);
@@ -12119,7 +12199,7 @@ static sp_RbVal sp_poly_first(sp_RbVal v) {
      materialize: without this it fell through to the array read and answered
      nil (a boxed 1.5..2.5 reaching a run-time-typed callable, #4804) */
   if (v.cls_id == SP_BUILTIN_FLOAT_RANGE) return sp_box_float(((sp_FloatRange *)v.v.p)->first);
-  if (v.cls_id == SP_BUILTIN_STR_RANGE) return sp_box_str(((sp_StrRange *)v.v.p)->first);
+  if (v.cls_id == SP_BUILTIN_STR_RANGE) { const char *f = ((sp_StrRange *)v.v.p)->first; if (!f) sp_srange_open_raise(0); return sp_box_str(f); }
   /* an Enumerator answers the first item it yields, running a generator
      only that far */
   if (v.cls_id == SP_BUILTIN_ENUMERATOR && v.v.p) return sp_enum_first_boxed(v);
@@ -12149,8 +12229,8 @@ static sp_RbVal sp_poly_last(sp_RbVal v) {
      Integer range above (#4804) */
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_FLOAT_RANGE)
     return sp_box_float(((sp_FloatRange *)v.v.p)->last);
-  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_STR_RANGE)
-    return sp_box_str(((sp_StrRange *)v.v.p)->last);
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_STR_RANGE) {
+    const char *l = ((sp_StrRange *)v.v.p)->last; if (!l) sp_srange_open_raise(1); return sp_box_str(l); }
   { sp_PolyArray *ue = v.tag == SP_TAG_OBJ ? sp_poly_user_elems(v) : NULL;
     if (ue) return ue->len > 0 ? ue->data[ue->len - 1] : sp_box_nil(); }
   sp_int n = sp_poly_length(v);
@@ -15543,6 +15623,7 @@ static sp_Enumerator *sp_Enumerator_new_indices(sp_RbVal arr) {
    the other callers of sp_poly_to_a_arr (a `for` loop, `deconstruct`, the
    Enumerable names) keep a Time's NoMethodError, as CRuby raises. */
 static sp_PolyArray *sp_poly_to_a_call(sp_RbVal v) {
+  if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_MATCHDATA && v.v.p) return sp_MatchData_to_a((sp_MatchData *)v.v.p);
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_FLOAT_RANGE && v.v.p) { sp_frange_iter_raise((*(sp_FloatRange *)v.v.p), 1); return NULL; }
   if (!(v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_TIME && v.v.p)) return sp_poly_to_a_arr(v);
   sp_Time t = *(sp_Time *)v.v.p;

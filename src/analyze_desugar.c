@@ -5205,6 +5205,252 @@ int desugar_to_h_block(Compiler *c) {
   return changed;
 }
 
+/* `str.unpack(fmt) { |v| body }` -> `(str.unpack(fmt).each { |v| body }; nil)`.
+   With a block, CRuby's unpack yields each value it decodes and answers nil.
+   The blockless unpack already decodes into an Array and each walks one, so
+   the call is rewritten onto that pair, as to_h's block form is onto map. A
+   receiver that may reach a program's own unpack keeps the call as written:
+   a String one where String itself is reopened with it (a String cannot be
+   subclassed), a boxed one where any class defines it.
+
+   `&e` gives no block when e is nil, and unpack then answers the Array, so
+   unless e is sure to be a block (`&:sym`, a proc or lambda literal) the
+   rewrite tests it: `e ? (str.unpack(fmt).each(&e); nil) : str.unpack(fmt)`.
+   A variable is read again for the block, an anonymous `&` asks
+   block_given?, and any other e runs once into a local. CRuby runs the
+   receiver and arguments before e, and the test runs ahead of them: where
+   they could change what it sees (unpack_needs_hoist), they run into locals
+   first. desugar_block_arg_order (#4992) leaves those cases, since it takes
+   a variable read for inert. */
+static int unpack_block_sure(const NodeTable *nt, Compiler *c, int blk) {
+  if (nt_kind(nt, blk) == NK_BlockNode) return 1;
+  int ex = nt_ref(nt, blk, "expression");
+  return ex >= 0 && (nt_kind(nt, ex) == NK_SymbolNode || is_proc_create(c, ex));
+}
+/* The test of a `&e` that may be nil (see above): *pred, evaluated once, and
+   blk's expression replaced by a re-read of its value. 0 on node-table OOM. */
+static int unpack_block_test(Compiler *c, int id, int blk, int *pred) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  int ex = nt_ref(nt, blk, "expression");
+  if (ex < 0) {
+    *pred = nt_new_node(nt, "CallNode");
+    if (*pred < 0) return 0;
+    nt_node_set_str(nt, *pred, "name", "block_given?");
+    return 1;
+  }
+  NodeKind k = nt_kind(nt, ex);
+  if (k == NK_LocalVariableReadNode || k == NK_InstanceVariableReadNode || k == NK_GlobalVariableReadNode) {
+    int re = nt_clone_subtree(nt, ex);
+    if (re < 0) return 0;
+    *pred = ex;
+    nt_node_set_ref(nt, blk, "expression", re);
+    return 1;
+  }
+  char tname[48]; snprintf(tname, sizeof tname, "__unpack_blk_%d", id);
+  int w = nt_new_node(nt, "LocalVariableWriteNode"), re = nt_new_node(nt, "LocalVariableReadNode");
+  if (w < 0 || re < 0) return 0;
+  nt_node_set_str(nt, w, "name", tname); nt_node_set_int(nt, w, "depth", 0);
+  nt_node_set_ref(nt, w, "value", ex);
+  nt_node_set_str(nt, re, "name", tname); nt_node_set_int(nt, re, "depth", 0);
+  scope_local_intern(comp_scope_of(c, id), tname);
+  *pred = w;
+  nt_node_set_ref(nt, blk, "expression", re);
+  return 1;
+}
+/* Is `v` a literal, with nothing to run (inert also allows a variable read)? */
+static int unpack_literal(const NodeTable *nt, int v, int inert) {
+  NodeKind k = nt_kind(nt, v);
+  if (k == NK_StringNode || k == NK_SymbolNode || k == NK_IntegerNode || k == NK_NilNode) return 1;
+  return inert && (k == NK_LocalVariableReadNode || k == NK_InstanceVariableReadNode ||
+                   k == NK_GlobalVariableReadNode);
+}
+/* Is every operand of the receiver and arguments (a splat's operand, a
+   keyword's key and value) a literal, or with `inert` a variable read? */
+static int unpack_operands_literal(const NodeTable *nt, int recv, int args, int inert) {
+  if (!unpack_literal(nt, recv, inert)) return 0;
+  int argc = 0;
+  const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &argc) : NULL;
+  for (int i = 0; i < argc; i++) {
+    NodeKind ak = nt_kind(nt, av[i]);
+    if (ak == NK_SplatNode) { if (!unpack_literal(nt, nt_ref(nt, av[i], "expression"), inert)) return 0; }
+    else if (ak == NK_KeywordHashNode) {
+      int ne = 0;
+      const int *ev = nt_arr(nt, av[i], "elements", &ne);
+      for (int j = 0; j < ne; j++)
+        if (nt_kind(nt, ev[j]) != NK_AssocNode || !unpack_literal(nt, nt_ref(nt, ev[j], "key"), inert) ||
+            !unpack_literal(nt, nt_ref(nt, ev[j], "value"), inert)) return 0;
+    }
+    else if (!unpack_literal(nt, av[i], inert)) return 0;
+  }
+  return 1;
+}
+/* Must the receiver and arguments run into locals ahead of the test of a
+   `&e` that may be nil? When e is a local, where they write it; an ivar or
+   global, also where they run anything (a method may write it); any other
+   e, where they read or run anything (e may write what they read). */
+static int unpack_needs_hoist(const NodeTable *nt, int recv, int args, int blk) {
+  int ex = nt_ref(nt, blk, "expression");
+  if (ex < 0) return 0;
+  NodeKind k = nt_kind(nt, ex);
+  if (k == NK_LocalVariableReadNode || k == NK_InstanceVariableReadNode || k == NK_GlobalVariableReadNode) {
+    const char *vn = nt_str(nt, ex, "name");
+    if (mrv_writes(nt, recv, vn, 0) || mrv_writes(nt, args, vn, 0)) return 1;
+    return k != NK_LocalVariableReadNode && !unpack_operands_literal(nt, recv, args, 1);
+  }
+  return !unpack_operands_literal(nt, recv, args, 0);
+}
+/* Run `v` once into the local `__unpack_<id>_<k>`: the write goes in pre[]
+   and the read is answered. A literal answers itself. -1 on node-table OOM
+   or past 64 runs. */
+static int unpack_hoist(Compiler *c, int id, int v, int k, int *pre, int *npre) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  if (v < 0 || unpack_literal(nt, v, 0)) return v;
+  if (*npre >= 64) return -1;
+  char tname[48]; snprintf(tname, sizeof tname, "__unpack_%d_%d", id, k);
+  int w = nt_new_node(nt, "LocalVariableWriteNode"), re = nt_new_node(nt, "LocalVariableReadNode");
+  if (w < 0 || re < 0) return -1;
+  nt_node_set_str(nt, w, "name", tname); nt_node_set_int(nt, w, "depth", 0);
+  nt_node_set_ref(nt, w, "value", v);
+  nt_node_set_str(nt, re, "name", tname); nt_node_set_int(nt, re, "depth", 0);
+  scope_local_intern(comp_scope_of(c, id), tname);
+  pre[(*npre)++] = w;
+  return re;
+}
+/* The receiver and each argument (a splat's operand, a keyword's key and
+   value) run into locals in CRuby's order; *recv and the arguments node
+   `args` (the caller's copy) become their reads. Nothing is relinked unless
+   every run is made: 0 on node-table OOM or past 30 arguments or keywords. */
+static int unpack_hoist_operands(Compiler *c, int id, int *recv, int args, int *pre, int *npre) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  static const char *const FIELD[] = { "expression", "key", "value" };
+  int k = 0, ne = 0, ed_node[64], ed_field[64], ed_ref[64];
+  int r0 = unpack_hoist(c, id, *recv, k++, pre, npre);
+  if (r0 < 0) return 0;
+  int argc = 0;
+  const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &argc) : NULL;
+  if (argc > 30) return 0;
+  int a[32];
+  for (int i = 0; i < argc; i++) a[i] = av[i];   /* copy before the node table grows */
+  for (int i = 0; i < argc; i++) {
+    NodeKind ak = nt_kind(nt, a[i]);
+    if (ak == NK_SplatNode) {
+      int r = unpack_hoist(c, id, nt_ref(nt, a[i], "expression"), k++, pre, npre);
+      if (r < 0 || ne >= 64) return 0;
+      ed_node[ne] = a[i]; ed_field[ne] = 0; ed_ref[ne++] = r;
+    }
+    else if (ak == NK_KeywordHashNode) {
+      int en = 0;
+      const int *ev = nt_arr(nt, a[i], "elements", &en);
+      if (en > 30) return 0;
+      int e[32];
+      for (int j = 0; j < en; j++) e[j] = ev[j];
+      for (int j = 0; j < en; j++) {
+        if (nt_kind(nt, e[j]) != NK_AssocNode) return 0;
+        for (int f = 1; f <= 2; f++) {
+          int r = unpack_hoist(c, id, nt_ref(nt, e[j], FIELD[f]), k++, pre, npre);
+          if (r < 0 || ne >= 64) return 0;
+          ed_node[ne] = e[j]; ed_field[ne] = f; ed_ref[ne++] = r;
+        }
+      }
+    }
+    else if ((a[i] = unpack_hoist(c, id, a[i], k++, pre, npre)) < 0) return 0;
+  }
+  *recv = r0;
+  for (int i = 0; i < ne; i++) nt_node_set_ref(nt, ed_node[i], FIELD[ed_field[i]], ed_ref[i]);
+  if (argc) nt_node_set_arr(nt, args, "arguments", a, argc);
+  return 1;
+}
+int desugar_unpack_block(Compiler *c) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  int user_any = 0, user_str = 0;
+  for (int k = 0; k < c->nclasses; k++)
+    if (comp_method_in_chain(c, k, "unpack", NULL) >= 0) {
+      user_any = 1;
+      if (c->classes[k].name && sp_streq(c->classes[k].name, "String")) user_str = 1;
+    }
+  int changed = 0;
+  int n0 = nt->count;
+  for (int id = 0; id < n0; id++) {
+    if (nt_kind(nt, id) != NK_CallNode) continue;
+    const char *nm = nt_str(nt, id, "name");
+    if (!nm || !is_unpack_name(nm)) continue;
+    int recv = nt_ref(nt, id, "receiver"), blk = nt_ref(nt, id, "block");
+    if (recv < 0 || (nt_kind(nt, blk) != NK_BlockNode && nt_kind(nt, blk) != NK_BlockArgumentNode)) continue;
+    /* a boxed receiver that is no String raises in unpack either way */
+    TyKind rt = infer_type(c, recv);
+    if (rt != TY_STRING && rt != TY_POLY) continue;
+    if (rt == TY_STRING ? user_str : user_any) continue;
+    int args = nt_ref(nt, id, "arguments");
+    int base = nt->count;
+    int call = nt_new_node(nt, "CallNode"), each = nt_new_node(nt, "CallNode");
+    int nil = nt_new_node(nt, "NilNode"), body = nt_new_node(nt, "StatementsNode");
+    /* the blockless call of a block that may be nil, its test, and the
+       receiver's and arguments' runs ahead of it */
+    int pred = -1, call2 = -1, s2 = -1, el = -1, sure = unpack_block_sure(nt, c, blk);
+    int iff = -1, outer = -1, npre = 0, pre[65];
+    int ok = call >= 0 && each >= 0 && nil >= 0 && body >= 0;
+    if (ok && !sure) {
+      /* the runs relink a copy of the arguments, so the call stays whole
+         when a later allocation fails */
+      if (unpack_needs_hoist(nt, recv, args, blk)) {
+        int a1 = args >= 0 ? nt_clone_subtree(nt, args) : -1;
+        ok = (args < 0 || a1 >= 0) && unpack_hoist_operands(c, id, &recv, a1, pre, &npre);
+        args = a1;
+        iff = nt_new_node(nt, "IfNode"); outer = nt_new_node(nt, "StatementsNode");
+        ok = ok && iff >= 0 && outer >= 0;
+      }
+      int r2 = ok ? nt_clone_subtree(nt, recv) : -1, a2 = ok && args >= 0 ? nt_clone_subtree(nt, args) : -1;
+      call2 = nt_new_node(nt, "CallNode"); s2 = nt_new_node(nt, "StatementsNode");
+      el = nt_new_node(nt, "ElseNode");
+      ok = ok && r2 >= 0 && (args < 0 || a2 >= 0) && call2 >= 0 && s2 >= 0 && el >= 0 &&
+           unpack_block_test(c, id, blk, &pred);
+      if (ok) {
+        nt_node_set_ref(nt, call2, "receiver", r2);
+        nt_node_set_str(nt, call2, "name", "unpack");
+        nt_node_set_ref(nt, call2, "arguments", a2);
+      }
+    }
+    /* node-table OOM: leave the call as-is, and drop the nodes made before
+       the failure -- unreferenced, but every later all-node walk would
+       visit them, past the per-node arrays comp_grow_node_arrays sizes */
+    if (!ok) { nt->count = base; continue; }
+    nt_node_set_ref(nt, call, "receiver", recv);
+    nt_node_set_str(nt, call, "name", "unpack");
+    nt_node_set_ref(nt, call, "arguments", args);
+    nt_node_set_ref(nt, each, "receiver", call);
+    nt_node_set_str(nt, each, "name", "each");
+    nt_node_set_ref(nt, each, "block", blk);
+    int stmts[2] = { each, nil };
+    nt_node_set_arr(nt, body, "body", stmts, 2);
+    if (sure) {
+      nt_node_reset(nt, id, "ParenthesesNode");
+      nt_node_set_ref(nt, id, "body", body);
+    }
+    else {
+      nt_node_set_arr(nt, s2, "body", &call2, 1);
+      nt_node_set_ref(nt, el, "statements", s2);
+      long long line = nt_int(nt, id, "node_line", 0);
+      int test = iff >= 0 ? iff : id;
+      if (iff < 0) nt_node_reset(nt, id, "IfNode");
+      nt_node_set_ref(nt, test, "predicate", pred);
+      nt_node_set_ref(nt, test, "statements", body);
+      nt_node_set_ref(nt, test, "subsequent", el);
+      if (line) nt_node_set_int(nt, test, "node_line", line);
+      if (iff >= 0) {   /* (the receiver's and arguments' runs; the test) */
+        pre[npre++] = iff;
+        nt_node_set_arr(nt, outer, "body", pre, npre);
+        nt_node_reset(nt, id, "ParenthesesNode");
+        nt_node_set_ref(nt, id, "body", outer);
+      }
+    }
+    comp_grow_node_arrays(c);
+    int encl = c->nscope[id];
+    for (int j = base; j < nt->count; j++) c->nscope[j] = encl;   /* new nodes share the scope */
+    changed = 1;
+  }
+  return changed;
+}
+
 /* Descend `root`'s subtree (bounded to scope `sc`) tracking the nearest enclosing
    StatementsNode entry (curr_st/curr_idx). On reaching `target`, report that entry
    -- the innermost same-scope top-level statement whose subtree contains target.
@@ -6839,7 +7085,7 @@ static int fwd_fixed_call_arity(const NodeTable *nt, const char *name) {
     av += skip; ac -= skip;
     for (int k = 0; k < ac; k++)
       if (fwd_node_is(nt, av[k], "SplatNode") || fwd_node_is(nt, av[k], "KeywordHashNode") ||
-          fwd_node_is(nt, av[k], "ForwardingArgumentsNode")) return -1;
+          nt_kind(nt, av[k]) == NK_ForwardingArgumentsNode) return -1;
     if (n != -2 && ac != n) return -1;
     n = ac;
   }
@@ -7660,7 +7906,7 @@ static int fwd_waits_on_forwarder(const NodeTable *nt, int def, int hi) {
     if (!fwd_node_is(nt, id, "CallNode")) continue;
     int ac = 0; const int *av = nt_arr(nt, nt_ref(nt, id, "arguments"), "arguments", &ac);
     const char *cn = nt_str(nt, id, "name");
-    if (ac < 1 || !av || !cn || !fwd_node_is(nt, av[ac - 1], "ForwardingArgumentsNode")) continue;
+    if (ac < 1 || !av || !cn || nt_kind(nt, av[ac - 1]) != NK_ForwardingArgumentsNode) continue;
     if (fwd_def_still_forwards(nt, sp_streq(cn, "new") ? "initialize" : cn, def)) return 1;
   }
   return 0;
@@ -7691,12 +7937,12 @@ static int fwd_rest_callee_pass(Compiler *c, int wait) {
     for (int id = def + 1; id < hi && id < n0; id++) {
       /* a bare `super` forwards everything, as `super(...)` does */
       int is_zsuper = fwd_node_is(nt, id, "ForwardingSuperNode");
-      if (is_zsuper || fwd_node_is(nt, id, "ForwardingArgumentsNode")) nfwd_args++;
+      if (is_zsuper || nt_kind(nt, id) == NK_ForwardingArgumentsNode) nfwd_args++;
       int is_super = is_zsuper || fwd_node_is(nt, id, "SuperNode");
       if (!is_super && !fwd_node_is(nt, id, "CallNode")) continue;
       int args = nt_ref(nt, id, "arguments");
       int ac = 0; const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &ac) : NULL;
-      if (!is_zsuper && (ac < 1 || !av || !fwd_node_is(nt, av[ac - 1], "ForwardingArgumentsNode"))) continue;
+      if (!is_zsuper && (ac < 1 || !av || nt_kind(nt, av[ac - 1]) != NK_ForwardingArgumentsNode)) continue;
       /* `super(...)` reaches the parent's method of this name, and `new(...)`
          the constructed class's initialize */
       const char *cn = is_super ? dname : nt_str(nt, id, "name");
@@ -9579,7 +9825,7 @@ static int rd_subtree_calls(const NodeTable *nt, int id, const RdDefault *from,
   if (ty) {
     if (sp_streq(ty, "YieldNode") || sp_streq(ty, "SuperNode") ||
         sp_streq(ty, "ForwardingSuperNode") || sp_streq(ty, "DefNode") ||
-        sp_streq(ty, "ForwardingArgumentsNode")) *bad = 1;
+        nt_kind(nt, id) == NK_ForwardingArgumentsNode) *bad = 1;
     if (sp_streq(ty, "CallNode")) {
       const char *nm = nt_str(nt, id, "name");
       if (nm && (sp_streq(nm, "block_given?") || sp_streq(nm, "__method__") ||
@@ -10463,9 +10709,8 @@ static int block_values_in(const NodeTable *nt, int node, const char *bpn, int n
     int an = 0; const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
     for (int j = 0; j < an; j++) {
       NodeKind ak = nt_kind(nt, av[j]);
-      const char *aty = nt_type(nt, av[j]);
       if (ak == NK_SplatNode || ak == NK_BlockArgumentNode ||
-          (aty && sp_streq(aty, "ForwardingArgumentsNode"))) return -2;
+          nt_kind(nt, av[j]) == NK_ForwardingArgumentsNode) return -2;
     }
     if (n >= 0 && n != an) return -2;
     n = an;
@@ -10809,11 +11054,24 @@ int desugar_enum_pair_lone_param(Compiler *c) {
    desugar_enum_method_recv puts in front of call `id` answers what the
    block binds, by the flag the Enumerator carries
    (sp_Enumerator_to_a_yielded), and the block is shaped to take that. */
+/* An Enumerator that yields one value per step, a chunk, whatever its
+   block takes: chunk_while, slice_when, chunk, slice_before, slice_after.
+   Its to_a is the chunks themselves, so a block over it binds each chunk
+   as the one value it is (`runs.map { |*r| r }` is [[chunk]], `&:sum`
+   sums the chunk). */
+static int one_value_enum_source(const NodeTable *nt, int hop) {
+  int src = hop >= 0 && nt_kind(nt, hop) == NK_CallNode ? nt_ref(nt, hop, "receiver") : -1;
+  const char *sn = src >= 0 && nt_kind(nt, src) == NK_CallNode ? nt_str(nt, src, "name") : NULL;
+  return sn && (sp_streq(sn, "chunk_while") || sp_streq(sn, "slice_when") || sp_streq(sn, "chunk") ||
+                sp_streq(sn, "slice_before") || sp_streq(sn, "slice_after"));
+}
+
 void enum_hop_yield_view(Compiler *c, int id, int hop) {
   NodeTable *nt = (NodeTable *)c->nt;
   int blk = nt_ref(nt, id, "block");
   const char *nm = nt_str(nt, id, "name");
   if (blk < 0 || !nm || !enum_pair_spread_iter(nm) || enum_pair_source_call(nt, hop)) return;
+  if (one_value_enum_source(nt, hop)) return;
   /* the builtins' own walks (builtins/, `each { |x| yield x }`) hand the
      packed item on as the one value their block takes */
   const char *sn = comp_scope_of(c, id)->name;

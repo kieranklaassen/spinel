@@ -802,6 +802,16 @@ SHARD_N := $(word 2,$(subst /, ,$(TEST_SHARD)))
 shard_pick = $(foreach i,$(shell seq $(SHARD_K) $(SHARD_N) $(words $(1))),$(word $(i),$(1)))
 SHARD_ALL := $(TESTS)
 TESTS := $(call shard_pick,$(TESTS))
+# TEST_ALWAYS=<file of grep -E patterns, one per line> keeps in the slice every test whose text
+# matches one of them, and every test/tools_*.rb: the tests whose answer depends on the operating
+# system (time, files, processes, signals, sockets, threads and fibers, the GC, FFI), which a
+# rotating slice would otherwise visit once in n pushes. The macOS CI lane uses it
+# (tools/os_sensitive.re). The match is the shell's: `grep -l` over the glob, not over TESTS,
+# whose names as one argument were once too long for a single `sh -c` (see above).
+ifneq ($(TEST_ALWAYS),)
+ALWAYS_PICK := $(shell grep -lEf $(TEST_ALWAYS) test/*.rb) $(wildcard test/tools_*.rb)
+TESTS := $(sort $(TESTS) $(filter $(ALWAYS_PICK),$(SHARD_ALL)))
+endif
 # A slice that comes out empty from a non-empty corpus means the pick
 # failed. Stop, rather than let a green run test nothing.
 ifneq ($(SHARD_ALL),)
@@ -831,7 +841,9 @@ ifeq ($(SPINEL_INT_BITS),32)   # the same first-line marker as test/*.rb
 PKG_TESTS := $(filter-out $(shell grep -l '^\# spinel: int64' packages/*/test/*.rb),$(PKG_TESTS))
 endif
 ifneq ($(TEST_SHARD),)
+ifeq ($(TEST_ALWAYS),)
 PKG_TESTS := $(call shard_pick,$(PKG_TESTS))
+endif
 endif
 pkg_of = $(word 2,$(subst /, ,$(1)))
 PKG_TEST_TARGETS := $(foreach t,$(PKG_TESTS),build/test-results/pkg.$(call pkg_of,$(t)).$(notdir $(t:.rb=)).ok)
@@ -1425,11 +1437,12 @@ reject-test: $(SPINEL)
 	  echo "reject-test: FAIL (an Array element splatted into a yield to an appending block compiled)"; ok=0; \
 	else grep -q "from a value that is not a String variable" "$$tmp/yse.out" || \
 	  { echo "reject-test: FAIL (an Array element splatted into a yield rejected without saying why)"; sed -n 1,5p "$$tmp/yse.out"; ok=0; }; fi; \
-	t=test/reject/string_method_object_mutator.rb; \
-	if $(SPINEL) "$$t" -c --no-line-map -o "$$tmp/smm.c" >"$$tmp/smm.out" 2>&1; then \
-	  echo "reject-test: FAIL (a Method bound to a String mutator compiled)"; ok=0; \
-	else grep -q "String#method is not supported for a method that changes the String in place" "$$tmp/smm.out" || \
-	  { echo "reject-test: FAIL (a Method bound to a String mutator rejected without saying why)"; sed -n 1,5p "$$tmp/smm.out"; ok=0; }; fi; \
+	for t in test/reject/string_method_object_mutator.rb test/reject/string_method_object_mutator_user_method.rb; do \
+	  if $(SPINEL) "$$t" -c --no-line-map -o "$$tmp/smm.c" >"$$tmp/smm.out" 2>&1; then \
+	    echo "reject-test: FAIL ($$t, a Method bound to a String mutator, compiled)"; ok=0; \
+	  else grep -q "String#method is not supported for a method that changes the String in place" "$$tmp/smm.out" || \
+	    { echo "reject-test: FAIL ($$t, a Method bound to a String mutator, rejected without saying why)"; sed -n 1,5p "$$tmp/smm.out"; ok=0; }; fi; \
+	done; \
 	t=test/reject/builtin_value_ivar_set.rb; \
 	if $(SPINEL) "$$t" -c --no-line-map -o "$$tmp/bvi.c" >"$$tmp/bvi.out" 2>&1; then \
 	  echo "reject-test: FAIL (instance_variable_set on a String compiled)"; ok=0; \
@@ -1445,11 +1458,12 @@ reject-test: $(SPINEL)
 	  echo "reject-test: FAIL (a global in a changed splatted Array compiled)"; ok=0; \
 	else grep -q "through a splat of an Array the program changes" "$$tmp/sca.out" || \
 	  { echo "reject-test: FAIL (changed splatted Array rejected without saying why)"; sed -n 1,5p "$$tmp/sca.out"; ok=0; }; fi; \
-	t=test/reject/lazy_stage_string_mutation.rb; \
-	if $(SPINEL) "$$t" -c --no-line-map -o "$$tmp/lsm.c" >"$$tmp/lsm.out" 2>&1; then \
-	  echo "reject-test: FAIL (a lazy stage changing its String element compiled)"; ok=0; \
-	else grep -q "a lazy stage's block that changes its String element in place" "$$tmp/lsm.out" || \
-	  { echo "reject-test: FAIL (a lazy stage changing its String element rejected without saying why)"; sed -n 1,5p "$$tmp/lsm.out"; ok=0; }; fi; \
+	for t in test/reject/lazy_stage_string_mutation.rb test/reject/lazy_stage_string_mutation_with_index.rb; do \
+	  if $(SPINEL) "$$t" -c --no-line-map -o "$$tmp/lsm.c" >"$$tmp/lsm.out" 2>&1; then \
+	    echo "reject-test: FAIL ($$t, a lazy stage changing its String element, compiled)"; ok=0; \
+	  else grep -q "a lazy stage's block that changes its String element in place" "$$tmp/lsm.out" || \
+	    { echo "reject-test: FAIL ($$t, a lazy stage changing its String element, rejected without saying why)"; sed -n 1,5p "$$tmp/lsm.out"; ok=0; }; fi; \
+	done; \
 	t=test/reject/string_mutator_jump_arm.rb; \
 	if $(SPINEL) "$$t" -c --no-line-map -o "$$tmp/mja.c" >"$$tmp/mja.out" 2>&1; then \
 	  echo "reject-test: FAIL (a String mutator on a conditional with a returning arm compiled)"; ok=0; \
@@ -1836,6 +1850,7 @@ GC_STRESS_TESTS := test/gc_root_frame_slots.rb \
                    test/gsub_enumerator_rooted.rb \
                    test/poly_array_intersect.rb \
                    test/thread_new_args_rooted_across_fiber_alloc.rb \
+                   test/sprintf_long_arg_kept.rb \
                    test/gc_root_volatile_string_slot.rb \
                    test/gc_root_gathered_handle_param.rb \
                    test/dispatch_arm_roots_operands.rb

@@ -1343,10 +1343,10 @@ int call_returns_nullable_int(Compiler *c, int node) {
        local -- boxing the raw SP_INT_NIL sentinel as sp_box_int gave a
        value that answered `.nil?` false and `<=>` a huge fake number
        instead of the open bound CRuby's clamp/between? treat it as. A
-       Float-bounded Range's #end/#begin instead reads back HUGE_VAL, a
-       genuine Float value that already boxes correctly, so
-       TY_FLOAT_RANGE is not part of this. */
-    if (rrt == TY_MATCHDATA || rrt == TY_RANGE) return 1;
+       Float Range's omitted #begin/#end reads back the Float nil sentinel
+       (sp_frange_begin_v / sp_frange_end_v), which boxed plainly printed
+       NaN where CRuby answers nil: `[(1.0..).end]`, `{e: (..2.5).begin}`. */
+    if (rrt == TY_MATCHDATA || rrt == TY_RANGE || rrt == TY_FLOAT_RANGE) return 1;
   }
   /* an attr-reader over an int ivar: int ivars are SP_INT_NIL-defaulted
      (ivar_scalar_nil_init), so the read can carry the sentinel -- boxing it
@@ -10992,7 +10992,7 @@ int emit_super_inline(Compiler *c, int id, Buf *b, int indent, int as_expr) {
      arity, which cannot say that a caller left an argument out: an optional
      or rest parameter would bind a zero where its default or an empty Array
      belongs. */
-  if (argc == 1 && nt_type(c->nt, argv[0]) && sp_streq(nt_type(c->nt, argv[0]), "ForwardingArgumentsNode")) {
+  if (argc == 1 && nt_kind(c->nt, argv[0]) == NK_ForwardingArgumentsNode) {
     for (int i = 0; i < m->nparams; i++) {
       if (i == m->kwrest_idx || callee_param_is_declared_kwarg(c, m, m->pnames[i])) continue;
       if (i == m->rest_idx || i >= m->nrequired || (m->pdefault && m->pdefault[i] >= 0)) {
@@ -13834,7 +13834,8 @@ static void scan_prologue_features(Compiler *c) {
   g_gen_obj_to_h = 0;
   /* and any instantiated Struct (not a Data) the member-array dispatch, so a
      Struct read out of a poly container answers values, values_at and a
-     blockless each from its members, not from a #to_a the program wrote */
+     blockless each from its members, not from a #to_a the program wrote,
+     and dig tells a Struct receiver from another program object */
   g_gen_obj_struct_values = 0;
   for (int i = 0; i < c->nclasses; i++)
     if (c->classes[i].instantiated && c->classes[i].is_struct && !c->classes[i].is_data) { g_gen_obj_struct_values = 1; break; }
@@ -13851,6 +13852,9 @@ static void scan_prologue_features(Compiler *c) {
           (sp_streq(nm, "each") || sp_streq(nm, "each_pair") ||
            sp_streq(nm, "values") || sp_streq(nm, "values_at") ||
            sp_streq(nm, "entries") || sp_streq(nm, "size") || sp_streq(nm, "length"))) reached = 1;
+      /* any dig: a Struct's, typed or not, can reach the runtime walk, whose
+         receiver check asks this dispatch (sp_poly_dig_recv_ok) */
+      if (nm && rv >= 0 && sp_streq(nm, "dig")) reached = 1;
     }
     g_gen_obj_struct_values = reached;
   }

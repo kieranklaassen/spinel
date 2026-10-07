@@ -58,8 +58,14 @@ extern int sp_gc_rem_peak;   /* lib/sp_gc.c: high-water mark of the remembered s
 
 /* printf into a fresh heap string: the error-message and interpolation
    formatter every runtime TU and the generated program call. */
-const char*sp_sprintf(const char*fmt,...){char _sp_tmp[4096];va_list ap;va_start(ap,fmt);int _sp_n=vsnprintf(_sp_tmp,sizeof(_sp_tmp),fmt,ap);va_end(ap);if(_sp_n<0)_sp_n=0;char*b=sp_str_alloc((size_t)_sp_n);if(_sp_n<(int)sizeof(_sp_tmp)){memcpy(b,_sp_tmp,(size_t)_sp_n);}
-else{/* result didn't fit the stack temp; re-render at full width (sp_str_alloc gives _sp_n bytes + NUL) so long string interpolations aren't truncated. re-arm the va_list rather than va_copy so the common fast path pays nothing */va_start(ap,fmt);vsnprintf(b,(size_t)_sp_n+1,fmt,ap);va_end(ap);}return b;}
+/* the result didn't fit sp_sprintf's stack temp: render it at full width so
+   long string interpolations aren't truncated. It is rendered into a malloc
+   buffer BEFORE the result is allocated: an argument is often a fresh String
+   nothing else holds (an inspect), and that allocation can collect it. */
+static SP_NOINLINE const char*sp_sprintf_long(const char*fmt,size_t n,va_list ap){char*m=(char*)malloc(n+1);if(!m)sp_oom_die();vsnprintf(m,n+1,fmt,ap);char*b=sp_str_alloc(n);memcpy(b,m,n);free(m);return b;}
+const char*sp_sprintf(const char*fmt,...){char _sp_tmp[4096];va_list ap;va_start(ap,fmt);int _sp_n=vsnprintf(_sp_tmp,sizeof(_sp_tmp),fmt,ap);va_end(ap);if(_sp_n<0)_sp_n=0;
+if(_sp_n>=(int)sizeof(_sp_tmp)){/* re-arm the va_list rather than va_copy so the common fast path pays nothing */va_start(ap,fmt);const char*r=sp_sprintf_long(fmt,(size_t)_sp_n,ap);va_end(ap);return r;}
+char*b=sp_str_alloc((size_t)_sp_n);memcpy(b,_sp_tmp,(size_t)_sp_n);return b;}
 
 /* Integer#% / Kernel#format "%b"/"%B"/"%o"/"%x"/"%X": non-decimal formatting
    with Ruby's flag, width, precision, and two's-complement-for-negative rules.
@@ -3759,9 +3765,10 @@ sp_bool sp_frange_eq(sp_FloatRange a, sp_FloatRange b) {
 }
 const char *sp_frange_inspect(sp_FloatRange r) {
   /* an OMITTED bound prints as nothing; an explicit infinity prints itself */
-  const char *lo = (r.omitted & SP_FRANGE_NO_BEGIN) ? ""
+  const char *lo = (r.omitted & SP_FRANGE_NO_BEGIN) ? sp_str_empty
                  : (r.omitted & SP_FRANGE_INT_BEGIN) ? sp_sprintf("%lld", (long long)r.first)
                  : sp_float_to_s(r.first);
+  SP_GC_ROOT_STR(lo);   /* the end's text allocates */
   const char *hi = (r.omitted & SP_FRANGE_NO_END) ? ""
                  : (r.omitted & SP_FRANGE_INT_END) ? sp_sprintf("%lld", (long long)r.last)
                  : sp_float_to_s(r.last);
@@ -4984,7 +4991,7 @@ const char *sp_str_encode(const char *s, sp_RbVal dst, sp_RbVal src,
   const char *repl = (replace.tag == SP_TAG_STR && replace.v.s) ? replace.v.s : NULL;
   SP_GC_ROOT_STR(repl);
   if (from == to) {
-    if (from == 1 && sp_enc_kw_replace(invalid)) return sp_str_scrub(s, repl);
+    if (from == 1 && sp_enc_kw_replace(invalid)) return sp_str_scrub_utf8(s, repl);
     return sp_str_dup(s);
   }
   /* binary <-> UTF-8: the ASCII bytes carry over, nothing else does */
