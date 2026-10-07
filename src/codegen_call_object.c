@@ -10,6 +10,17 @@
 #include "call_plan.h"
 #include "codegen_call_arms.h"
 
+/* between? on a String: a bound is boxed and each is boxed or a String,
+   and the receiver is no Symbol's #to_s */
+static int str_between_boxed_bound(Compiler *c, int recv, const int *argv) {
+  TyKind b0 = comp_ntype(c, argv[0]), b1 = comp_ntype(c, argv[1]);
+  if (!(b0 == TY_POLY || b1 == TY_POLY) || !(b0 == TY_POLY || b0 == TY_STRING) ||
+      !(b1 == TY_POLY || b1 == TY_STRING)) return 0;
+  const char *rn = nt_type(c->nt, recv) && sp_streq(nt_type(c->nt, recv), "CallNode") ? nt_str(c->nt, recv, "name") : NULL;
+  return !(rn && sp_streq(rn, "to_s") && nt_ref(c->nt, recv, "receiver") >= 0 &&
+           comp_ntype(c, nt_ref(c->nt, recv, "receiver")) == TY_SYMBOL);
+}
+
 /* between?, object_id / __id__, hash, nil? and === on a receiver whose kind decides them */
 int emit_call_identity_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, TyKind rt) {
   /* between?(lo, hi): lo <= self <= hi */
@@ -66,7 +77,13 @@ int emit_call_identity_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
       buf_puts(b, "); })");
       return 1;
     }
-    if (rt == TY_STRING) {
+    /* A String receiver with a boxed bound, which holds a String only at
+       run time, takes the boxed receiver's arm below: the bound is compared
+       as it is, and one that is no String is the comparison error. Not a
+       Symbol read as its name (desugar_symbol_string_methods), whose bounds
+       compare as Symbols. */
+    int sb = rt == TY_STRING && str_between_boxed_bound(c, recv, argv);
+    if (rt == TY_STRING && !sb) {
       int tv = ++g_tmp;
       buf_printf(b, "({ const char *_t%d = ", tv); emit_expr(c, recv, b);
       buf_printf(b, "; (sp_str_cmp_bytes(_t%d, ", tv); emit_expr(c, argv[0], b);
@@ -134,7 +151,7 @@ int emit_call_identity_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
        container / block param): compare through the boxed <=> hook, which
        raises the incomparable ArgumentError like CRuby. clamp already takes
        this path; between? was missing it (#3170). */
-    if (rt == TY_POLY) {
+    if (rt == TY_POLY || sb) {
       int ts = hoist_boxed_rooted(c, recv);
       int tlo = hoist_boxed_rooted(c, argv[0]), thi = hoist_boxed_rooted(c, argv[1]);
       /* nil has no #between?, and the checked comparison below would call it
