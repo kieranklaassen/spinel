@@ -1,0 +1,27 @@
+A boxed String's [] reads an appended String or a Float index
+
+    h = { "k" => +"a", "n" => 1 }
+    h["k"] << "b"
+    g = { "c" => "cabab", "f" => 1.5 }
+    p g["c"][h["k"]], g["c"][g["f"]]
+
+printed "c" and "c"; CRuby prints "ab" and "a". sp_poly_index_poly,
+which reads a boxed receiver by a boxed index, has an arm for a String
+receiver with an Integer, a String, an Integer Range, a Regexp and a
+nil index. An index of any other kind fell to its last line, which
+reads element 0: a String the program appends to (boxed as its shared
+handle, whose tag is not SP_TAG_STR), a Float, a Float Range, true,
+an Array. With true CRuby raises TypeError; the program printed "c".
+
+Such an index now goes the way the typed read goes. An appended String
+is searched for, and the answer is a copy of its text, since the
+handle's buffer moves as it grows. A Float Range slices by its ends
+cut to Integers, and a String Range raises CRuby's TypeError. Anything
+else is converted by sp_poly_arg_int_chk: a Float is cut, an object
+answers its to_int, and what has no conversion raises CRuby's
+TypeError. An Integer index, a Bignum index and a receiver that is no
+String take the last line as they did.
+
+Test: test/boxed_string_index_appended.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
