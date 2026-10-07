@@ -1,0 +1,20 @@
+The extension try helper hands the host a message that holds a NUL as its text
+
+    def self.refuse(s)
+      raise ArgumentError, s if s.bytesize > 0
+      s
+    end
+
+called with "left\0right" by a C host through Init_ext_kernel_try gave
+the host the message ff fe 43 4d fd 01 0a: the six bytes that mark a
+counted message and the low byte of its length. Before "An exception
+message that holds a NUL keeps its bytes" the host read "left".
+
+The helper hands out the raise's own slot, where a message with a NUL
+in it sits in the counted form: marker, length, text. The host's side
+of the contract is a C string, so the helper now hands out a counted
+message's text, and the host reads it to the NUL as it did. Any other
+message is handed out as it was. The CRuby shim re-raises with the
+same string, so the message of its exception is "left" too.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

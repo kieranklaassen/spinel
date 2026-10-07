@@ -1,0 +1,37 @@
+Hash#sort_by keeps a fresh block value alive until it is stored
+
+Sorting a Hash of 30,000 Integers six times with
+h.sort_by { |k, _v| k.to_s.rjust(40, "0") } answered four of the six
+out of order in a plain run, and some of six with
+{ |k, v| [v % 7, k] }; CRuby sorts all twelve. In the test, 6,000
+String entries sorted by { |k, v| [v.size, v] } raised "comparison of
+Array with Array failed", and under SPINEL_GC_STRESS=2 three entries
+were enough: {1 => 1, 2 => 2, 3 => 7}.sort_by { |k, _v| k.to_s } aborted
+in the mark.
+
+emit_hash_sort_by_expr evaluated the block into the plain C temporary
+of emit_hash_block_eval and only then emitted the [sort_key, pair]
+tuple's sp_PolyArray_new(), so a collection at that allocation freed
+the block's value before sp_PolyArray_push stored it.
+
+Where the block's value can hold a reference (ty_gc_holds_refs), the
+tuple is now allocated before the block runs. It is rooted and empty
+meanwhile, and the push that stores the value cannot collect: a new
+tuple has room for it, and the boxing helpers that allocate root what
+they are given. No statement is added. An Integer, a Float, a Symbol,
+true, false, nil, a Rational or a Time holds none, and a block with
+such a value keeps its C byte for byte. min_by(n), sort_by { }.to_h
+and sort_by { }.first(n) on a Hash take the same lines.
+
+Not here: (a + b).to_sym on a String nothing else holds leaves a
+Symbol with a freed name under SPINEL_GC_STRESS=2 (there
+h.map { |k, v| (v + t).to_sym } prints wrong Symbols). A sort_by with
+such a block value sorts wrong there as before, and one over a Hash
+with such keys, which aborted on master, now runs on and prints them.
+
+Test: test/hash_sort_by_fresh_key.rb (expected from CRuby 3.3.6). On
+master 7 of its 48 lines differ in a plain run.
+C: 7 programs of the corpus differ, each by the moved line;
+optcarrot's is unchanged.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

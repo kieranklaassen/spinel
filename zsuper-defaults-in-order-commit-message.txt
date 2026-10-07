@@ -1,0 +1,71 @@
+A bare super makes the parent's defaults in order and keeps them
+
+    $n = 0
+    class Base
+      def m(x = "a#{$n += 1}", y = "b#{$n += 1}") = [x, y]
+    end
+    class Kid < Base
+      def m = super
+    end
+    p Kid.new.m
+
+printed ["a2", "b1"] compiled with gcc, the default compiler; CRuby
+and a clang build print ["a1", "b2"]. And with `def two = super` into
+def two(x = "a" * 2, y = "c" * 2), 2 of 300,000 kept answers held
+another String's bytes for a default in a plain run, with gcc and
+with clang; at SPINEL_GC_STRESS=2 the mark stopped at a freed heap
+string.
+
+One cause. emit_zsuper_args writes the parent's parameters side by
+side in the call's parentheses, and its three writers of an omitted
+one (emit_zsuper_param_fill, emit_gathered_param,
+emit_ds_param_extract) write the default's code there. C runs a
+call's arguments in any order and gcc runs the last first, so
+defaults that write ran backwards. And a method roots its parameters
+before it allocates, so a call may hand it one fresh value: here two
+fresh values stood side by side, and making the second collected the
+first before the callee was entered.
+
+Where a default writes or may allocate and another parameter runs
+code too, each such default is now made ahead of the call, in order,
+in the call's own expression:
+
+    ({ (_t1 = <x's default>); (_t2 = <y's default>);
+       sp_Base_m((sp_Base *)self, _t1, _t2); })
+
+_t1 and _t2 are rooted temps declared in the prelude, as
+emit_rooted_conversion holds a converted read; a scalar default takes
+a plain temp. The statements stay in front of the call and out of the
+prelude, so "#{bump} #{super}" still runs bump first. "May allocate"
+is operand_may_allocate, less a builtin operator over scalars
+(call_is_scalar_op); "writes" is subtree_has_side_effect. Every other
+bare super keeps its C: one default that runs code, literal defaults,
+every argument given.
+
+A rooted temp holds its value to the end of the method, past the
+call. A program that defines a finalizer is the one that can tell, so
+there the call is written as it was (g_uses_finalizers).
+
+Cost (callgrind, instructions a call): two String defaults 820 to 838
+with gcc and 819 to 836 with clang; through `def two(*a) = super` 11
+more with gcc and 15 with clang; two keywords read out of `**o` 8 and
+10; 30 and 44 where the super stands in a loop; two Integer defaults
+that write, 0. super(), a plain call and a bare super with one such
+default, with literal defaults or with its arguments given: 0, the
+same C.
+
+Not here: `def initialize(*a); super; end` reached by Kid.new still
+stops the mark at SPINEL_GC_STRESS=2, with literal defaults too; an
+Array or Hash literal default is built in the prelude, ahead of the
+defaults before it; a default that reads an earlier defaulted
+parameter does not build through a bare super; a plain call still
+runs scalar defaults that write in C's order.
+
+Test: test/zsuper_defaults_in_order_and_held.rb (expected from CRuby
+3.3.6), added to GC_STRESS_TESTS. On master, compiled with gcc, 10 of
+its 17 lines differ in a plain run; compiled with clang it is right
+there and stops the mark at SPINEL_GC_STRESS=2.
+C: no program of the corpus changes but the new test; optcarrot's is
+byte-identical.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
