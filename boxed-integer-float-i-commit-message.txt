@@ -1,0 +1,22 @@
+A boxed Integer or Float answers i
+
+    row = [5, "q"]
+    x = row[0]
+    p x.i
+
+raised NoMethodError, "undefined method 'i' for an instance of Integer",
+where CRuby prints (0+5i). A boxed number answers real, imaginary, conj,
+rect, polar and to_c through the sp_poly_* helpers; i was in none of the
+boxed arms, so the call was left untyped and emitted as a missing
+method. It is typed and emitted beside conj now: sp_poly_imag_unit
+answers the imaginary number an Integer or a Float answers unboxed, and
+raises NoMethodError for any other value, as before. Beside a class of
+the program that has an i of its own (a common reader name) the call is
+typed and emitted as before: that program keeps its C.
+
+Not changed: a boxed Rational's i still raises. Unboxed it answers a
+Float part ((0+0.5i) for CRuby's (0+(1/2)*i)), and the boxed call does
+not take that answer. And beside a class with its own i a boxed
+Integer's still raises.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

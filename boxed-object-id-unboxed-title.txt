@@ -1,0 +1,1 @@
+A boxed Integer, Symbol, nil or true answers the object_id it has unboxed

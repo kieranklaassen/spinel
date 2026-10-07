@@ -1,0 +1,1 @@
+Refuse a String instance variable assigned from another and mutated in place

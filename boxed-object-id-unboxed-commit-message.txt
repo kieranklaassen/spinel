@@ -1,0 +1,21 @@
+A boxed Integer, Symbol, nil or true answers the object_id it has unboxed
+
+row = [5, "q"]; x = row[0]; x.object_id == 5.object_id answered false,
+and a registry filled by ids[x.object_id] = x had nothing under
+5.object_id. object_id on a boxed receiver answered the box's payload
+word: the Integer's value where an Integer answers 2n+1, the Symbol's id
+where a Symbol answers twice it, 0 for nil and 1 for true where they
+answer 4 and 20. One value had two ids by how it was held: an element of
+a mixed Array, a parameter or an instance variable given two kinds, a
+value picked by a condition.
+
+sp_poly_object_id reads the tag and answers what the kind answers
+unboxed; a String, an Array, a Float and every other kind keep the
+payload's bits. The call is 7 instructions more (22 against 15 a loop
+turn, callgrind), for a String too.
+
+Not changed: nil held in a slot typed String (y = c ? nil : "s") still
+answers 0, and a Symbol's id can still equal false's, nil's or true's
+(:ab.object_id == false.object_id for a program's first Symbol).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
