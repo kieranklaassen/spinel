@@ -1,0 +1,40 @@
+A String made in place is kept alive while it becomes a new Symbol
+
+sp_sym_intern_n allocates only for a name it has not seen: the copy
+the pool keeps. sp_str_from_bytes allocates before it copies, and that
+allocation could collect the String being copied when nothing else
+held it:
+
+    pad = "k" * 20000
+    syms = []
+    200.times { |i| syms << (pad + i.to_s).to_sym }
+    lost = 0
+    syms.each_with_index do |s, i|
+      lost += 1 unless s.to_s == pad + i.to_s
+    end
+    p lost
+
+prints 1 in a plain run, with gcc and with clang: the seventh name
+reads back with 3,609 of its 20,000 "k". With 8,000 names of 4,000
+bytes the plain run ends in a segmentation fault. Under
+SPINEL_GC_STRESS=2 two characters are enough:
+
+    p ("a" + "b").to_sym
+    p :"q#{1 + 1}"
+
+Both print poisoned bytes, with exit 0, and the wrong name stays in
+the pool.
+
+The name's bytes are now copied to a malloc buffer before the pool's
+String is allocated. The name is not rooted instead: sp_sym_intern is
+called with bare C literals, which have no marker byte in front, and a
+root's mark reads that byte.
+
+A name already known runs what it ran before. A new one pays for the
+malloc and the free, 166 instructions with gcc and 156 with clang.
+
+test/symbol_intern_fresh_string_root.rb joins the stress lane's tests.
+Its first lines are the program above, which a plain run of master
+gets wrong.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
