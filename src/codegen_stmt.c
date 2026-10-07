@@ -8708,6 +8708,11 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
        that ensure can re-raise it after running.  Saved immediately after
        sp_exc_top-- while the index is still valid. */
     emit_indent(b, indent); buf_printf(b, "int _excf%d = 0;\n", eid);
+    /* set once the body is done and the else clause begins: written under
+       the frame and read on its landing */
+    if (else_stmts >= 0) {
+      emit_indent(b, indent); buf_printf(b, "volatile int _elsf%d = 0;\n", eid);
+    }
     emit_indent(b, indent); buf_printf(b, "const char *_excmsg%d = NULL;\n", eid);
     emit_indent(b, indent); buf_printf(b, "const char *_exccls%d = NULL;\n", eid);
     emit_indent(b, indent); buf_printf(b, "void *_excobj%d = NULL;\n", eid);
@@ -8757,10 +8762,12 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
     else {
       emit_stmts(c, body, b, indent + 1);
     }
-    g_exc_frame_depth--;
     g_ensure_stack[g_ensure_depth - 1].body_rescue = 0;
-    emit_indent(b, indent + 1); buf_puts(b, "sp_exc_top--;\n");
     if (else_stmts >= 0) {
+      /* The else clause is past the rescue clauses and not past the ensure:
+         it runs under the begin's frame still, behind a flag that sends the
+         landing by the clauses. */
+      emit_indent(b, indent + 1); buf_printf(b, "_elsf%d = 1;\n", eid);
       if (resultvar) {
         const char *sv = g_result_var; g_result_var = resultvar;
         emit_stmts_tail(c, else_stmts, b, indent + 1);
@@ -8768,7 +8775,9 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
       }
       else emit_stmts(c, else_stmts, b, indent + 1);
     }
-    else if (else_c >= 0 && resultvar) {
+    g_exc_frame_depth--;
+    emit_indent(b, indent + 1); buf_puts(b, "sp_exc_top--;\n");
+    if (else_stmts < 0 && else_c >= 0 && resultvar) {
       /* an empty else clause is still the begin's value: nil */
       TyKind bt = repr_of(c, id).as_ty;
       emit_indent(b, indent + 1);
@@ -8792,6 +8801,14 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
          sp_str_empty) and a class name carries no NUL. */
       buf_printf(b, "if (strcmp((const char *)sp_last_exc_cls, \"FiberKillSignal\") == 0) { _excf%d = 1; _excmsg%d = sp_exc_msg[sp_exc_top]; _exccls%d = sp_exc_cls[sp_exc_top]; }\n",
                  eid, eid, eid);
+      /* what the else clause raised is not its own begin's to rescue */
+      if (else_stmts >= 0) {
+        emit_indent(b, indent + 2);
+        buf_printf(b, "else if (_elsf%d) { ", eid);
+        emit_ensure_exc_store(b, eid);
+        if (g_debug) buf_printf(b, " sp_bt_save(&_excbt%d);", eid);
+        buf_puts(b, " }\n");
+      }
       emit_indent(b, indent + 2); buf_puts(b, "else {\n");
       emit_rescue(c, rescue, b, indent + 3, fr, eid, resultvar);
       emit_indent(b, indent + 2); buf_puts(b, "}\n");
