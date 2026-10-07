@@ -1,0 +1,33 @@
+A push statement runs its receiver before the value it appends
+
+    def hs(x) = "h" + x
+    t = "z" * 3000
+    bad = 0
+    200_000.times do |i|
+      x = { hs("a") => [hs("b")] }
+      x[hs("a")] << t + i.to_s
+      bad += 1 unless x[hs("a")][1] == t + i.to_s
+    end
+    p bad
+
+prints 2676 in a plain run built with gcc, and 0 in Ruby. A push that
+is a statement handed its receiver and its value to one C call. C
+leaves the order of a call's arguments open and gcc builds the value
+first: nothing held it while the receiver ran, and the appended String
+was freed and read back as something else. In a chain the receiver is
+the chain of earlier pushes, so a value that reads what an earlier
+link pushed read it too early:
+`h[1] << "v#{h[1].size}" << "w#{h[1].size}"` appended "v1" and "w1",
+and `bump << @n` appended the @n from before bump ran. The value form
+of the same push already ran its receiver first.
+
+The three statement arms for a push onto an Array of anything, a typed
+Array and a boxed receiver now ask emit_push_recv_temp. A receiver that
+can allocate is evaluated first, as Ruby does, into a temp the pushes go
+through. The temp is rooted unless every value is a number, a boolean,
+nil or a Symbol read from where it is kept, where nothing can run
+between the receiver and its push. A receiver that is a pure read stays
+where it was, so `a << x`, `@a << x` and `obj.items << x` compile as
+before.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

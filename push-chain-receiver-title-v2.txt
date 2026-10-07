@@ -1,0 +1,1 @@
+A push statement runs its receiver before the value it appends
