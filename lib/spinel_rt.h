@@ -6183,6 +6183,18 @@ static sp_PolyArray *sp_poly_product(sp_RbVal *arrs, sp_int n) {
   return res;
 }
 static sp_bool sp_poly_case_eq(sp_RbVal pat, sp_RbVal e);   /* defined below */
+static sp_RbVal sp_splat_to_array(sp_RbVal v);              /* defined below */
+/* `when *x` with x no Array: a Range spreads to its members, a Hash to its
+   pairs, and a number, a String, a Symbol or a boolean to itself, as a
+   splat spreads them. Read as an Array, a Range had no element and the
+   others had nil ones, so `case nil when *"ab"` matched. Anything else is
+   read as before. */
+static inline int sp_case_splat_spreads(sp_RbVal v) {
+  if (v.tag == SP_TAG_OBJ)
+    return v.cls_id == SP_BUILTIN_RANGE || v.cls_id == SP_BUILTIN_STR_RANGE || sp_poly_is_hash_kind(v.cls_id);
+  return v.tag == SP_TAG_INT || v.tag == SP_TAG_FLT || v.tag == SP_TAG_BIGINT || v.tag == SP_TAG_BOOL ||
+         v.tag == SP_TAG_STR || v.tag == SP_TAG_SYM;
+}
 /* `when *arr` in a case value: does any element of arr match the
    scrutinee? The scrutinee equal to the element, as before, or the element
    matching it through sp_poly_case_eq: a Class its instances, a Regexp a
@@ -6190,6 +6202,7 @@ static sp_bool sp_poly_case_eq(sp_RbVal pat, sp_RbVal e);   /* defined below */
 static sp_bool sp_case_splat_match(sp_RbVal scrut, sp_RbVal arr) {
   SP_GC_ROOT_RBVAL(scrut);
   SP_GC_ROOT_RBVAL(arr);
+  if (sp_case_splat_spreads(arr)) arr = sp_splat_to_array(arr);
   sp_int n = sp_poly_length(arr);
   for (sp_int i = 0; i < n; i++)
     if (sp_poly_rb_equal(scrut, sp_poly_arr_get(arr, i)) || sp_poly_case_eq(sp_poly_arr_get(arr, i), scrut))
