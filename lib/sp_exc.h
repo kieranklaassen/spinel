@@ -68,6 +68,11 @@ int sp_exc_nearest_cls(const char *raised, const char *const *targets, int n);
 SP_COLD void sp_exc_acc_gate(sp_Exception *e, const char *cls, const char *acc);
 int sp_exc_is_standard_error(const char *raised);
 sp_Exception *sp_exc_new_for_catch(const char *cls, const char *msg);
+sp_Exception *sp_exc_new_for_catch_own(const char *cls, const char *msg);
+/* A class of the program's with ivars that no constructor builds: the
+   exception of that name at the class's own size, or NULL for another name
+   (set by the generated main()). */
+extern void *(*sp_user_exc_new_fn)(const char *cls, const char *msg);
 /* The message a bare `raise` carries: empty, and distinct from "no message
    given" (which falls back to the class name, as Exception.new does) (#3711). */
 extern const char *const sp_exc_no_msg;
@@ -86,6 +91,8 @@ static inline const char *sp_exc_msg_given(const char *m) {
   return memchr(m, 0, n) ? sp_exc_msg_counted(m, n) : m;
 }
 void *sp_exc_new_sub_sized(size_t sz, const char *cls_name, const char *msg);
+void *sp_exc_new_sub_ivars(size_t sz, const char *cls_name, const char *msg,
+                           void (*scan)(void *), void (*nils)(void *));
 
 void sp_exc_gc_scan(void *p);
 sp_Exception *sp_exc_new(const char *cls_name, const char *msg);
