@@ -1,0 +1,1 @@
+A String or-assigned to an attribute is the one `r.x << s` appends to
