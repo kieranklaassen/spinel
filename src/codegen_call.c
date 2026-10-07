@@ -2703,6 +2703,30 @@ static int lazy_block_mutates_param(Compiler *c, int node, const char *pn, int d
   return 0;
 }
 
+/* Bind a lazy stage's block parameters from the running value `vbuf`,
+   which is boxed (poly): the block param may infer a narrower type, so
+   unbox to match its C type. A |k, v| header destructures a pair element
+   (hash.lazy rides the pair array, #2845). */
+static void lazy_stage_bind(Compiler *c, int blk, const char *vbuf, const char *bp0, const char *bp, int ind) {
+  /* a block of any other shape than plain requireds (a rest, an optional,
+     a post, a keyword) binds the value by the proc distribution: `|*r|`
+     was never bound and read nil */
+  char gvals[256]; snprintf(gvals, sizeof gvals, "sp_yielded_args(0, %s)", vbuf);
+  if (emit_boxed_step_binds(c, blk, gvals, g_pre, ind, 0)) return;
+  if (emit_iter_autosplat(c, blk, TY_POLY_ARRAY, vbuf, ind)) return;
+  Scope *bs = comp_scope_of(c, blk);
+  LocalVar *plv = (bs && bp0) ? scope_local(bs, bp0) : NULL;
+  TyKind pt = (plv && plv->type != TY_UNKNOWN) ? plv->type : TY_POLY;
+  /* A param the body never reads has no local at all: binding it would
+     name an undeclared C variable, and there is nothing to bind (#3583) */
+  if (!plv) return;
+  emit_indent(g_pre, ind);
+  buf_printf(g_pre, "lv_%s = ", bp);
+  if (pt == TY_POLY) buf_puts(g_pre, vbuf);
+  else { Buf ub; memset(&ub, 0, sizeof ub); emit_unbox_text(c, pt, vbuf, &ub); buf_puts(g_pre, ub.p ? ub.p : vbuf); free(ub.p); }
+  buf_puts(g_pre, ";\n");
+}
+
 /* May the lazy source `src` hold a String? A String Array does; an Array
    literal (or a local whose one write is one) does when an element is a
    String or may be one; any other boxed source may. */
@@ -3147,28 +3171,7 @@ int emit_lazy_pipeline_expr(Compiler *c, int id, Buf *b) {
       emit_indent(g_pre, g_indent + 1); buf_puts(g_pre, "}\n");
       continue;
     }
-    /* The running value is boxed (poly); the block param may infer a narrower
-       type, so unbox to match its C type. A |k, v| header destructures a
-       pair element (hash.lazy rides the pair array, #2845). */
-    /* a block of any other shape than plain requireds (a rest, an optional,
-       a post, a keyword) binds the value by the proc distribution: `|*r|`
-       was never bound and read nil */
-    char gvals[256]; snprintf(gvals, sizeof gvals, "sp_yielded_args(0, %s)", vbuf);
-    if (emit_boxed_step_binds(c, blk, gvals, g_pre, g_indent + 1, 0)) {}
-    else if (!emit_iter_autosplat(c, blk, TY_POLY_ARRAY, vbuf, g_indent + 1)) {
-      Scope *bs = comp_scope_of(c, blk);
-      LocalVar *plv = (bs && bp0) ? scope_local(bs, bp0) : NULL;
-      TyKind pt = (plv && plv->type != TY_UNKNOWN) ? plv->type : TY_POLY;
-      /* A param the body never reads has no local at all: binding it would
-         name an undeclared C variable, and there is nothing to bind (#3583) */
-      if (plv) {
-        emit_indent(g_pre, g_indent + 1);
-        buf_printf(g_pre, "lv_%s = ", bp);
-        if (pt == TY_POLY) buf_puts(g_pre, vbuf);
-        else { Buf ub; memset(&ub, 0, sizeof ub); emit_unbox_text(c, pt, vbuf, &ub); buf_puts(g_pre, ub.p ? ub.p : vbuf); free(ub.p); }
-        buf_puts(g_pre, ";\n");
-      }
-    }
+    lazy_stage_bind(c, blk, vbuf, bp0, bp, g_indent + 1);
     int bbody = nt_ref(nt, blk, "body");
     int bn = 0; const int *bb = bbody >= 0 ? nt_arr(nt, bbody, "body", &bn) : NULL;
     for (int k = 0; k < bn - 1; k++) emit_stmt(c, bb[k], g_pre, g_indent + 1);
