@@ -18354,6 +18354,53 @@ static int prog_has_hash_default_block(Compiler *c) {
   }
   return memo;
 }
+/* Does the program change a String in place anywhere? It does not only
+   where this scan proves it: no call by a mutator's name (an_str_mutator_name,
+   is_string_rebind_mutator), in any position, on a receiver that is not
+   proved a non-String; no `<<=`; no index write on such a receiver; no read
+   into a buffer (`f.read(3, buf)`); no call by a computed name; no mutator's
+   name as a Symbol (`&:strip!`). Scanned once, before any code is emitted
+   (codegen_program): an emitter that reuses another renames its node for the
+   while -- the statement arm of gsub!, sub!, tr! and delete! emits the plain
+   form's call -- and a scan first asked for from inside it read `gsub`. */
+int prog_changes_string_in_place(Compiler *c) {
+  static const Compiler *memo_c; static int memo;
+  if (memo_c == c) return memo;
+  memo_c = c; memo = 0;
+  const NodeTable *nt = c->nt;
+  static const char *const INTO[] = { "read", "sysread", "readpartial", "read_nonblock", "pread", "recv",
+                                      "recv_nonblock", "recvfrom", "recvmsg", NULL };
+  static const char *const BY_NAME[] = { "send", "public_send", "__send__", "method", "public_method",
+                                         "singleton_method", "instance_method", "public_instance_method",
+                                         "to_proc", "instance_eval", "instance_exec", NULL };
+  for (int id = 0; id < nt->count && !memo; id++) {
+    const char *ty = nt_type(nt, id);
+    if (!ty) continue;
+    NodeKind k = nt_kind(nt, id);
+    const char *nm = k == NK_CallNode ? nt_str(nt, id, "name") : k == NK_SymbolNode ? nt_str(nt, id, "value") : NULL;
+    int mutator = nm && (an_str_mutator_name(nm) || is_string_rebind_mutator(nm));
+    if (k == NK_SymbolNode) { memo = mutator; continue; }
+    /* `@name <<= "z"`, `k.name <<= "z"`: the append of an operator write */
+    const char *op = strstr(ty, "OperatorWriteNode") ? nt_str(nt, id, "binary_operator") : NULL;
+    if (op && sp_streq(op, "<<")) {
+      TyKind t = comp_ntype(c, id);
+      memo = t == TY_STRING || t == TY_STRBUF || t == TY_POLY || t == TY_UNKNOWN || t == TY_VOID;
+      continue;
+    }
+    int into = 0, by_name = 0, argc = 0;
+    for (int i = 0; nm && INTO[i] && !into; i++) into = sp_streq(nm, INTO[i]);
+    for (int i = 0; nm && BY_NAME[i] && !by_name; i++) by_name = sp_streq(nm, BY_NAME[i]);
+    int args = into ? nt_ref(nt, id, "arguments") : -1;
+    if (args >= 0) nt_arr(nt, args, "arguments", &argc);
+    if (by_name || argc >= 2) memo = 1;
+    else if (mutator || strncmp(ty, "Index", 5) == 0) {
+      int r = nt_ref(nt, id, "receiver");
+      TyKind t = r >= 0 ? comp_ntype(c, r) : TY_UNKNOWN;
+      memo = t == TY_STRING || t == TY_STRBUF || t == TY_POLY || t == TY_UNKNOWN;
+    }
+  }
+  return memo;
+}
 /* Can evaluating this subtree store a new value into an ivar, a class
    variable or a global? A write to one does, and so can anything that runs
    Ruby code the subtree does not show -- a user method, a yield, a super.
@@ -18550,6 +18597,7 @@ static void render_operand(Compiler *c, int node, int fresh, Buf *out, Buf *pre)
    `node.right` stays in the prelude, where it roots into the frame. */
 static int operand_hoists_effect(Compiler *c, int node) {
   const NodeTable *nt = c->nt;
+  node = unwrap_parens(c, node);
   if (nt_kind(nt, node) != NK_CallNode) return !subtree_is_pure_read(c, node);
   int recv = nt_ref(nt, node, "receiver");
   if (recv >= 0 && !subtree_is_pure_read(c, recv)) return 1;
@@ -18557,6 +18605,24 @@ static int operand_hoists_effect(Compiler *c, int node) {
   const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
   for (int i = 0; i < ac; i++) if (!subtree_is_pure_read(c, av[i])) return 1;
   return 0;
+}
+
+/* Is the operand a literal or a variable's read: nothing that runs or
+   raises, and no more read than the one variable? A global the runtime sets
+   (`$~`, `$?`) is none: a later operand's match changes it. */
+static int operand_is_plain(Compiler *c, int node) {
+  switch (nt_kind(c->nt, node)) {
+    case NK_StringNode: case NK_RegularExpressionNode:
+      return 1;
+    case NK_GlobalVariableReadNode: {
+      const char *nm = nt_str(c->nt, node, "name");
+      return nm && nm[0] == '$' && nm[1] >= 'a' && nm[1] <= 'z';
+    }
+    case NK_CallNode: case NK_ParenthesesNode: case NK_StatementsNode:
+      return 0;
+    default:
+      return subtree_is_pure_read(c, node);
+  }
 }
 
 /* Were the computed operands of call `id` bound once (emit_operands_in_order)
@@ -18631,7 +18697,18 @@ static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
   int effects = 0;
   for (int i = 0; i < nop; i++)
     if (subtree_may_reassign_state(c, operand[i])) effects++;
-  int observable = 0, converts = 0;
+  /* A call or a conditional in parentheses is bound as it is without them:
+     `mk.length + ($o.val > 9 ? 1 : 2)` declined whole, and the nil check of
+     $o ran ahead of mk, which makes it. Not where an operand before the
+     last may be a String in a program that changes one in place: CRuby
+     reads the String when the call runs, and bound early it misses the
+     change, which `k.name * (k.rename)` shows under gcc's order. */
+  int through = 1;
+  for (int i = 0; i + 1 < nop && through; i++) {
+    TyKind t = comp_ntype(c, operand[i]);
+    if (t == TY_STRING || t == TY_STRBUF || t == TY_POLY || t == TY_UNKNOWN) through = !prog_changes_string_in_place(c);
+  }
+  int observable = 0, converts = 0, looked = 0;
   for (int i = 0; i < nop; i++) {
     /* an operand that may convert -- a user object, a boxed value -- is
        converted by the arm, in a hold that runs before the call: the
@@ -18661,9 +18738,13 @@ static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
     obs_at = i; obs[i] = 1;
     /* a conditional's value is bound as a call's is: `f(a: r.int, b: c ? r.int : 0)`
        declined whole and left every keyword to C's order */
-    int bindable = (k == NK_CallNode || k == NK_SuperNode || k == NK_IfNode || k == NK_UnlessNode ||
-                    k == NK_ForwardingSuperNode || k == NK_YieldNode || state_read || local_read);
-    if (!bindable) return emit_operands_before_unbound(c, id, operand, nop, recv >= 0, i, b);
+    NodeKind bk = through ? nt_kind(nt, unwrap_parens(c, operand[i])) : k;
+    int bindable = (bk == NK_CallNode || bk == NK_SuperNode || bk == NK_IfNode || bk == NK_UnlessNode ||
+                    bk == NK_ForwardingSuperNode || bk == NK_YieldNode || state_read || local_read);
+    if (!bindable) return looked ? 0 : emit_operands_before_unbound(c, id, operand, nop, recv >= 0, i, b);
+    /* the first one bound through its parentheses: where the call ran the
+       operands ahead of it first, it still does */
+    if (bk != k && !looked++ && emit_operands_before_unbound(c, id, operand, nop, recv >= 0, i, b)) return 1;
     int fr = operand[i] != recv && operand_fresh_str(c, operand[i]);
     TyKind t = fr ? TY_STRING : repr_of(c, operand[i]).as_ty;
     if (t == TY_UNKNOWN || t == TY_VOID || t == TY_NIL) return 0;
@@ -18716,6 +18797,17 @@ static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
     }
     node[p] = operand[i]; ty[p] = t; fresh[p] = 0; at[p] = i;
     nb++; nlate++;
+  }
+  /* ...and one left in the call that the loop above does not bind: an
+     operand in parentheses, a Symbol's conditional, a division that raises.
+     `ma.values_at(($i + 5), (bump))` read the $i bump left, and `(7 / z)`
+     raised after bump had run; left to the arm, as before the parentheses
+     were looked through, both ran first. So they are looked through only
+     where each operand left ahead of the last bound one is a literal or a
+     variable's read, which a later operand that can change it has bound. */
+  for (int i = 0, p = 0; looked && i < obs_at; i++) {
+    if (p < nb && at[p] == i) p++;
+    else if (!operand_is_plain(c, operand[i])) return 0;
   }
 
   size_t pre_mark = g_pre->len;
