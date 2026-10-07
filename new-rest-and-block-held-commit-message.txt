@@ -1,0 +1,36 @@
+A rest array or a block handed to new is held while the object is allocated
+
+A method roots its parameters before it allocates, so a call may hand
+it a fresh value with nothing else holding it. Three arguments are
+written so: the empty array for a rest no argument lands in, the copy
+a splat makes, and a block.
+
+    sp_Bag_new(sp_PolyArray_new())
+    sp_Bag_new(sp_PolyArray_dup(_t6))
+    sp_Agg_new(sp_proc_new_meta(...))
+
+The constructor is the one function that allocated first: sp_Bag_new
+made the object and then called initialize, whose roots of its
+parameters came after. A collection at that allocation freed the array
+or the proc, and the object kept whatever took its place. Of 100,000
+objects kept in a list four are wrong in a plain run, for `Bag.new`,
+for `Bag.new(*xs)` and for `Agg.new { |v| v + i }` alike; under
+SPINEL_GC_STRESS=2 one `new` is enough to abort.
+
+The constructor now roots the rest parameter and the block parameter
+ahead of the allocation, as the Struct constructor above it roots its
+reference arguments. The block's root has the condition initialize's
+own has (a real &blk; a yielding initialize is inlined at the call
+site). The rest's is that the constructor hands the rest on, to
+initialize or to the clone a proc drives; one whose initialize is
+inlined at the call is called with no rest and stays as it was. The
+`) {` each allocation arm printed moves ahead of the arms, so the
+roots come first in all four: the pooled object, the two exception
+layouts and the Array subclass.
+
+Every other argument reaches the constructor from a temp its caller
+roots: a String, an object, an Array or a Hash literal, a default, a
+keyword rest. A constructor with neither a rest nor a block parameter
+is the C it was.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
