@@ -452,6 +452,7 @@ int desugar_dynamic_const_get_arms(Compiler *c);
 int desugar_reopen_implicit_self(Compiler *c);
 int desugar_handle_attr_accessor(Compiler *c);
 int desugar_handle_reopen_self_recv(Compiler *c);
+int desugar_exception_bare_message(Compiler *c);
 int desugar_call_or_write_reopen(Compiler *c);
 int desugar_static_class_eval(Compiler *c);
 void desugar_nil_block_arg(Compiler *c);

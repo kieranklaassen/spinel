@@ -1,0 +1,16 @@
+"IS INVALID"
+"[name] is invalid"
+[[:field, :name], [:message, "is invalid"]]
+true
+10
+"is invalid/local"
+995
+"is invalid"
+"q: Quiet"
+"q: x"
+4
+"<leaf>"
+"CODED: M"
+"summary: mixed"
+"own"
+"mine"

@@ -32803,6 +32803,7 @@ static void an_phase_infer_fixpoint(Compiler *c) {
     ch |= desugar_respond_to_probe(c);         /* recv.respond_to?(:m) -> probe recv.m type */
     ch |= desugar_body_self_call(c);           /* self.m(..) in a class body -> Klass.m(..) */
     ch |= desugar_handle_reopen_self_recv(c);  /* bare m(..) in a Thread/Fiber reopen -> self.m(..) */
+    ch |= desugar_exception_bare_message(c);   /* bare message in `class E < StandardError` -> self.message */
     ch |= desugar_symbol_to_proc_call(c);      /* :sym.to_proc.call(x) -> x.sym */
     ch |= desugar_call_op_write(c);            /* r.x += 1 with a def writer -> r.x = r.x + 1 */
     ch |= desugar_call_or_write_reopen(c);     /* r.x ||= v on a reopened builtin with a def writer -> the two calls */
