@@ -22763,12 +22763,56 @@ int emit_spread_args_kw(Compiler *c, const int *argv, int argc, char *kwpos, siz
 }
 
 int emit_spread_args(Compiler *c, const int *argv, int argc) {
+  g_splat_callee = "";   /* a literal block, bound in place */
   return emit_spread_args_into(c, argv, argc, NULL);
+}
+
+/* What the spread list being built is for, set by the caller and taken by
+   emit_spread_args_into as it starts: the C text of the Proc it calls, ""
+   for a literal block, NULL for a Method or a callee not in hand. */
+const char *g_splat_callee = NULL;
+
+/* In a program with no way to a #to_a, a splatted value that is no
+   collection is the argument itself (sp_splat_arg_items), a boxed one
+   decided at run time. The kind asked is the operand's own, never what its
+   #to_a call answers. Every other kind is spread as before; so is a
+   String, which would arrive in the list as a copy. */
+static int splat_arg_is_one(Compiler *c, int sx) {
+  const NodeTable *nt = c->nt;
+  const char *sn = sx >= 0 && nt_kind(nt, sx) == NK_CallNode ? nt_str(nt, sx, "name") : NULL;
+  TyKind st = sx >= 0 && !(sn && sp_streq(sn, "to_a")) ? comp_ntype(c, sx) : TY_UNKNOWN;
+  return ty_is_object(st) ? splat_operand_is_plain_object(c, st)
+       : (st == TY_INT || st == TY_BIGINT || st == TY_FLOAT || st == TY_SYMBOL ||
+          st == TY_BOOL || st == TY_CLASS || st == TY_POLY) &&
+         !splat_program_may_make_to_a(c);
+}
+
+/* Is every argument, a splat's operand too, a plain read (subtree_is_pure_read)? */
+int spread_args_pure_reads(Compiler *c, const int *argv, int argc) {
+  const NodeTable *nt = c->nt;
+  for (int k = 0; k < argc; k++) {
+    int splat = nt_kind(nt, argv[k]) == NK_SplatNode;
+    if (!subtree_is_pure_read(c, splat ? nt_ref(nt, argv[k], "expression") : argv[k])) return 0;
+  }
+  return 1;
+}
+
+/* Does a splat among the arguments hand such a value over as itself? */
+int spread_args_take_one(Compiler *c, const int *argv, int argc) {
+  const NodeTable *nt = c->nt;
+  for (int k = 0; k < argc; k++) {
+    if (nt_kind(nt, argv[k]) != NK_SplatNode) continue;
+    if (splat_arg_is_one(c, nt_ref(nt, argv[k], "expression"))) return 1;
+  }
+  return 0;
 }
 
 /* kwflag: a C int set to 2 when a trailing keyword-splat-only hash is pushed */
 int emit_spread_args_into(Compiler *c, const int *argv, int argc, const char *kwflag) {
   const NodeTable *nt = c->nt;
+  /* taken here: an argument's own call builds its own list */
+  const char *callee = g_splat_callee;
+  g_splat_callee = NULL;
   g_needs_proc_poly_argslot = 1;
   int ta = ++g_tmp;
   emit_indent(g_pre, g_indent);
@@ -22780,22 +22824,17 @@ int emit_spread_args_into(Compiler *c, const int *argv, int argc, const char *kw
       int sx = nt_ref(nt, argv[k], "expression");
       if (sx >= 0) emit_boxed(c, sx, &ab);
       int ts = ++g_tmp, ti = ++g_tmp;
-      /* In a program with no way to a #to_a, a value that is no collection is
-         the argument itself (sp_splat_arg_items), a boxed one decided at run
-         time. The kind asked is the operand's own, never what its #to_a call
-         answers. Every other kind is spread as before; so is a String, which
-         would arrive here as a copy. */
-      const char *sn = sx >= 0 && nt_kind(nt, sx) == NK_CallNode ? nt_str(nt, sx, "name") : NULL;
-      TyKind st = sx >= 0 && !(sn && sp_streq(sn, "to_a")) ? comp_ntype(c, sx) : TY_UNKNOWN;
-      int one = ty_is_object(st) ? splat_operand_is_plain_object(c, st)
-              : (st == TY_INT || st == TY_BIGINT || st == TY_FLOAT || st == TY_SYMBOL ||
-                 st == TY_BOOL || st == TY_CLASS || st == TY_POLY) &&
-                !splat_program_may_make_to_a(c);
+      /* one value that is no collection (splat_arg_is_one) is the argument
+         itself for a block or a proc; a lambda's call and a Method's keep
+         the list they had, a Proc asked at run time which it is */
+      int one = callee && splat_arg_is_one(c, sx);
+      const char *items = !one ? "sp_enum_items_from"
+                        : callee[0] ? "sp_splat_arg_items_of" : "sp_splat_arg_items";
       emit_indent(g_pre, g_indent);
-      buf_printf(g_pre, "{ sp_PolyArray *_t%d = %s(%s); SP_GC_ROOT(_t%d);"
+      buf_printf(g_pre, "{ sp_PolyArray *_t%d = %s(%s%s%s); SP_GC_ROOT(_t%d);"
                         " for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++)"
                         " sp_PolyArray_push(_t%d, _t%d->data[_t%d]); }\n",
-                 ts, one ? "sp_splat_arg_items" : "sp_enum_items_from",
+                 ts, items, one ? callee : "", one && callee[0] ? ", " : "",
                  ab.p ? ab.p : "sp_box_nil()", ts, ti, ti, ts, ti, ta, ts, ti);
     }
     else {

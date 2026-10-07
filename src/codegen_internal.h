@@ -862,6 +862,9 @@ int call_args_need_spread(const NodeTable *nt, const int *argv, int argc);
 int emit_spread_args(Compiler *c, const int *argv, int argc);
 int emit_spread_args_kw(Compiler *c, const int *argv, int argc, char *kwpos, size_t kwsz);
 int emit_spread_args_into(Compiler *c, const int *argv, int argc, const char *kwflag);
+extern const char *g_splat_callee;
+int spread_args_take_one(Compiler *c, const int *argv, int argc);
+int spread_args_pure_reads(Compiler *c, const int *argv, int argc);
 void emit_proc_yield(Compiler *c, const char *ref, int yargc, const int *yargv, Buf *b);
 /* Unbox the boxed proc result (_sp_proc_poly_ret) to a call's inferred type. */
 void emit_proc_ret_unbox(Compiler *c, TyKind rty, Buf *b);

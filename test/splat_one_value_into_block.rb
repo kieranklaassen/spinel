@@ -1,8 +1,9 @@
 # A splat of one value that has no to_a is that value, as one argument, in the
-# argument list built for a yield, a proc or a lambda. It spread to nothing
-# there: the block bound nil and a lambda raised ArgumentError. This holds in
-# a program that gives nothing a to_a of its own: one `def to_a` anywhere,
-# and a splatted value keeps the form it had.
+# argument list built for a yield or a proc. It spread to nothing there: the
+# block bound nil. This holds in a program that gives nothing a to_a of its
+# own: one `def to_a` anywhere, and a splatted value keeps the form it had.
+# A lambda's call and a Method's count their arguments and are left as they
+# were.
 class Foo
   def initialize(n) = @n = n
   def inspect = "#<Foo #{@n}>"
@@ -28,24 +29,23 @@ p(one(5) { |a, b = 7| [a, b] })
 p(blk(:k) { |a| a })
 one(Foo.new(3)) { |a| p a }
 
-# into a proc and a lambda
+# into a proc
 pr = proc { |a| a }
-la = lambda { |a| a }
 rest = proc { |*r| r }
 x = Foo.new(4)
 n = 6
 p pr.call(*n)
 p pr.(*x)
-p la.call(*n)
-p la.call(*x)
-p la.call(*mk(5))
+p pr.yield(*n)
+p pr.yield(*x)
+p pr.call(*mk(5))
 p rest.call(*:k)
 p rest.call(*1.5)
 
 # a boxed value is decided when it runs
 vals = [7, :c, 2.5, true, false, Foo.new(8), Foo]
 vals.each { |v| p(one(v) { |a| a }) }
-vals.each { |v| p la.call(*v) }
+vals.each { |v| p pr.call(*v) }
 p rest.call(*vals[1])
 
 # an Array, a Hash, a Range, a Struct and nil spread as before

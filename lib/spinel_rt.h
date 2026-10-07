@@ -14357,6 +14357,12 @@ static SP_NOINLINE sp_PolyArray *sp_splat_arg_items(sp_RbVal v) {
             v.tag == SP_TAG_SYM || v.tag == SP_TAG_BOOL || v.tag == SP_TAG_CLASS;
   return one ? sp_splat_arg_one(v) : sp_enum_items_from(v);
 }
+/* ... for the call of the Proc `p`. A lambda, and a Method's proc, counts
+   its arguments: with the value dropped it raised ArgumentError, and it
+   still does, the list being sp_enum_items_from's as before. */
+static inline sp_PolyArray *sp_splat_arg_items_of(sp_Proc *p, sp_RbVal v) {
+  return p && !p->lambda_p ? sp_splat_arg_items(v) : sp_enum_items_from(v);
+}
 /* The items each_with_index walks on a boxed receiver: an Array's elements,
    and a Hash's [key, value] pairs, a Range's members or an Enumerator's
    values (sp_enum_items_from); anything else, as before, none. */
