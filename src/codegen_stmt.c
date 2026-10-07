@@ -5073,7 +5073,7 @@ static const char *pm_target_name(const NodeTable *nt, int pat) {
 static void emit_pattern_bind_handle(Compiler *c, int subj, int t, Buf *b) {
   NodeKind sk = subj >= 0 ? nt_kind(c->nt, subj) : NK_NONE;
   int var = sk == NK_LocalVariableReadNode || sk == NK_InstanceVariableReadNode ||
-            sk == NK_GlobalVariableReadNode;
+            repr_static_read_kind(sk);
   if (var && emit_handle_var_ref(c, subj, b)) return;
   buf_printf(b, "sp_String_new_shared(_t%d)", t);
 }
