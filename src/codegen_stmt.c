@@ -13909,20 +13909,26 @@ static int stmt_is_folded_return(Compiler *c, int id) {
 
 /* The BlockNode whose body is statement list `body`, or -1 (the map is built
    lazily on the compiler, so it dies with it -- no static state to go stale
-   across node tables). */
+   across node tables). Nodes codegen appends after the map is made extend it:
+   a refused method's raising body (deferred_raise_body) is a statement list
+   above every node the map had, and was read past its end. */
 int block_of_body(Compiler *c, int body) {
-  if (!c->blk_body_map) {
-    c->blk_body_map = malloc(sizeof(int) * (size_t)c->nt->count);
-    for (int i2 = 0; i2 < c->nt->count; i2++) c->blk_body_map[i2] = -1;
-    for (int i2 = 0; i2 < c->nt->count; i2++) {
-      const char *t2 = nt_type(c->nt, i2);
+  const NodeTable *nt = c->nt;
+  if (c->blk_body_n < nt->count) {
+    int *g = realloc(c->blk_body_map, sizeof(int) * (size_t)nt->count);
+    if (!g) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+    c->blk_body_map = g;
+    for (int i2 = c->blk_body_n; i2 < nt->count; i2++) g[i2] = -1;
+    for (int i2 = c->blk_body_n; i2 < nt->count; i2++) {
+      const char *t2 = nt_type(nt, i2);
       if (t2 && sp_streq(t2, "BlockNode")) {
-        int b2 = nt_ref(c->nt, i2, "body");
-        if (b2 >= 0 && b2 < c->nt->count) c->blk_body_map[b2] = i2;
+        int b2 = nt_ref(nt, i2, "body");
+        if (b2 >= 0 && b2 < nt->count) g[b2] = i2;
       }
     }
+    c->blk_body_n = nt->count;
   }
-  return body >= 0 && body < c->nt->count ? c->blk_body_map[body] : -1;
+  return body >= 0 && body < c->blk_body_n ? c->blk_body_map[body] : -1;
 }
 
 /* How many statements open block body `body` by rebinding a parameter the
