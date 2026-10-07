@@ -1,0 +1,21 @@
+String#between? builds with a bound known only at run time
+
+    g = { "lo" => "b", "hi" => "d", "n" => 1 }
+    p "c".between?(g["lo"], g["hi"])
+
+did not build: the C compiler refused the generated C (incompatible
+type for argument 2 of sp_str_cmp_bytes). CRuby prints true. The
+String arm of between? emits each bound as a C string, and a boxed
+bound is a boxed value.
+
+A String receiver with a boxed bound now takes the arm a boxed
+receiver takes: the receiver is boxed and sp_poly_cmp_ck compares it
+with each bound as it is, so a bound the program appends to is read,
+and an Integer or a nil bound raises CRuby's comparison error. Two
+typed bounds emit what they did. A Symbol read as its name
+(desugar_symbol_string_methods) keeps its arm, since its bounds
+compare as Symbols.
+
+Test: test/string_between_boxed_bound.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
