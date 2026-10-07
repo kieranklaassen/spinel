@@ -1857,6 +1857,7 @@ GC_STRESS_TESTS := test/gc_root_frame_slots.rb \
                    test/gc_root_volatile_string_slot.rb \
                    test/gc_root_gathered_handle_param.rb \
                    test/dispatch_arm_roots_operands.rb \
+                   test/safe_nav_call_stays_in_place.rb \
                    test/exception_message_nul.rb \
                    test/string_aset_value_runs_first.rb \
                    test/yielding_initialize_new_own_class.rb

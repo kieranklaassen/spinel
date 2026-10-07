@@ -1274,6 +1274,7 @@ int emit_iter_value_expr(Compiler *c, int id, Buf *b);
 void set_enum_walk_result(int tmp);
 int iter_value_answers_recv(Compiler *c, int id);
 int sn_guard_pending(Compiler *c, int id);
+int sn_roots_to_pushes(Buf *pre);
 int emit_takewhile_with_index(Compiler *c, int id, Buf *b);
 int emit_transform_hash_expr(Compiler *c, int id, Buf *b);
 int emit_bsearch_expr(Compiler *c, int id, Buf *b);
