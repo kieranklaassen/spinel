@@ -17860,6 +17860,7 @@ static int promote_shared_stored_strings(Compiler *c) {
     const char *wty = nt_type(nt, w);
     if (!wty) continue;
     int cand3[64]; int nc3 = 0;
+    int unmarked3 = 0;   /* the candidates' reads stay String-typed */
     if (sp_streq(wty, "ArrayNode")) {
       int en3 = 0; const int *el3 = nt_arr(nt, w, "elements", &en3);
       for (int e3 = 0; e3 < en3 && nc3 < 64; e3++) cand3[nc3++] = el3[e3];
@@ -17898,6 +17899,27 @@ static int promote_shared_stored_strings(Compiler *c) {
         int an3 = 0; const int *av3 = a3 >= 0 ? nt_arr(nt, a3, "arguments", &an3) : NULL;
         if (an3 >= 2) cand3[nc3++] = av3[an3 - 1];
       }
+      else if (cn3 && recv3 >= 0 && sp_streq(cn3, "clamp") && rt3 == TY_STRING && !g_infer_optimistic &&
+               !an_user_defines_or_reads(c, cn3)) {
+        /* String#clamp with a bound known only at run time answers one of
+           its three operands in a box (infer_string_recv_call), as a
+           container answers what was stored into it: an operand that is a
+           String variable mutated in place is the shared handle there, or
+           an append through the answer would land in a copy. The reads are
+           left unmarked -- a marked receiver would leave the String surface
+           that answers the call -- and the emitter boxes the slot's handle
+           (str_arms_slice_encode). */
+        int a3 = nt_ref(nt, w, "arguments");
+        int an3 = 0; const int *av3 = a3 >= 0 ? nt_arr(nt, a3, "arguments", &an3) : NULL;
+        if (an3 == 2) {
+          TyKind lo3 = c->ntype[av3[0]], hi3 = c->ntype[av3[1]];
+          if ((lo3 == TY_POLY || hi3 == TY_POLY) && (lo3 == TY_POLY || lo3 == TY_STRING) &&
+              (hi3 == TY_POLY || hi3 == TY_STRING)) {
+            cand3[nc3++] = recv3; cand3[nc3++] = av3[0]; cand3[nc3++] = av3[1];
+            unmarked3 = 1;
+          }
+        }
+      }
       else if (cn3 && recv3 >= 0 && sp_streq(cn3, "equal?")) {
         /* identity test against the shared handle */
         int a3 = nt_ref(nt, w, "arguments");
@@ -17927,7 +17949,7 @@ static int promote_shared_stored_strings(Compiler *c) {
         int icid3 = ivn3 ? comp_ivar_owner(c, vnode) : -1;
         if (icid3 >= 0 && strbuf_ivar_mut_kind(c, icid3, ivn3) == 1) {
           if (strbuf_promote_ivar(c, icid3, ivn3)) changed = 1;
-          if (c->classes[icid3].ivar_str_shared[comp_ivar_index(&c->classes[icid3], ivn3)]) {
+          if (!unmarked3 && c->classes[icid3].ivar_str_shared[comp_ivar_index(&c->classes[icid3], ivn3)]) {
             c->strbuf_box[vnode] = 1; changed = 1;
           }
         }
@@ -17950,6 +17972,13 @@ static int promote_shared_stored_strings(Compiler *c) {
         int is_eq = wty && sp_streq(wty, "CallNode") && wn2 &&
                     (is_eql_or_equal(wn2));
         if (is_eq && !vlv->str_shared) continue; }
+      if (unmarked3) {
+        if (vlv->type == TY_STRBUF && vlv->str_shared) continue;
+        vlv->type = TY_STRBUF;
+        vlv->str_shared = 1;
+        changed = 1;
+        continue;
+      }
       vlv->type = TY_STRBUF;
       vlv->str_shared = 1;
       c->strbuf_box[vnode] = 1;
