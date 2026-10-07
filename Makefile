@@ -1842,6 +1842,7 @@ gc-phases-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
 GC_STRESS_TESTS := test/gc_root_frame_slots.rb \
                    test/gc_minor_byref_lent_slot.rb \
                    test/poly_dispatch_empty_kwrest.rb \
+                   test/poly_dispatch_omitted_default_alloc.rb \
                    test/struct_values_fresh_receiver_root.rb \
                    test/hash_splat_to_a.rb \
                    test/proc_cell_capture_marked.rb \

@@ -7121,15 +7121,39 @@ static void emit_poly_arm_param(Compiler *c, Scope *ms, int a, const ArgLayout *
   g_self = saved_self;
 }
 
+/* Is parameter `a` of an arm given no argument, so that the arm spells its
+   default? A keyword the call names is its temp; one a `**` may bring is
+   read out of the hash, and one a splat may bring out of the gather, each
+   with the default beside it. */
+static int poly_arm_param_omitted(Compiler *c, Scope *ms, int a, const ArgLayout *L,
+                                  const PolyKw *kw) {
+  if (L->from[a] == ARG_DEFAULT || L->from[a] == ARG_ELEM || L->from[a] == ARG_GATHERED) return 1;
+  if (L->from[a] != ARG_BY_NAME || a == ms->kwrest_idx) return 0;
+  if (kw && kw->kwall >= 0) return 1;
+  const char *pnm = ms->pnames ? ms->pnames[a] : NULL;
+  for (int e = 0; kw && pnm && e < kw->kwn; e++) {
+    int key = nt_ref(c->nt, kw->kwels[e], "key");
+    const char *kn = key >= 0 ? nt_str(c->nt, key, "value") : NULL;
+    if (kn && sp_streq(kn, pnm)) return 0;
+  }
+  return 1;
+}
+
 /* Does an arm's argument, spelled `text`, build an object that another
    argument's allocation can collect? One built in a statement expression is
-   rooted only to that expression's end, and the empty Array of an omitted
-   rest or the empty Hash of an omitted **kwrest is not rooted at all. */
-int poly_arm_arg_fresh(Scope *ms, int a, int omitted, const char *text) {
-  if (!text) return 0;
+   rooted only to that expression's end. An omitted parameter's value is not
+   rooted at all: the empty Array of a rest, the empty Hash of a **kwrest, a
+   default that allocates and that its emitter has not bound to a temp. */
+int poly_arm_arg_fresh(Compiler *c, Scope *ms, int a, int omitted, const char *text) {
+  if (!text || !text[0]) return 0;
   if (strstr(text, "SP_GC_ROOT(")) return 1;
-  return omitted && (a == ms->rest_idx || a == ms->kwrest_idx) &&
-         (strstr(text, "Array_new()") || strstr(text, "Hash_new()"));
+  const char *pnm = ms->pnames ? ms->pnames[a] : NULL;
+  LocalVar *pv = pnm ? scope_local(ms, pnm) : NULL;
+  if (!omitted || (pv && pv->byref_out)) return 0;
+  if (a == ms->rest_idx || a == ms->kwrest_idx)
+    return strstr(text, "Array_new()") || strstr(text, "Hash_new()");
+  if (!ms->pdefault || ms->pdefault[a] < 0 || !operand_may_allocate(c, ms->pdefault[a])) return 0;
+  return !(text[0] == '_' && text[1] == 't' && text[2 + strspn(text + 2, "0123456789")] == 0);
 }
 
 /* Binds such an argument to a local of the parameter's type in `pre`, rooted
@@ -7169,16 +7193,17 @@ void emit_poly_arm_args(Compiler *c, Scope *m, Scope *ms, const ArgLayout *L,
   int pd_uid = pd_arm ? ++g_tmp : 0, ren_base = g_nren;
   /* Two arguments that each build a fresh object in a statement expression
      (a rest's slice, a **kwrest's hash) root it only to the end of that
-     expression, and C runs a call's arguments in no set order: the second
-     one's allocation collected the first. Each such argument binds to a
-     rooted local ahead of the call instead, as a default reading an earlier
-     parameter already has them do. */
+     expression, an omitted parameter's default is not rooted at all, and C
+     runs a call's arguments in no set order: the second one's allocation
+     collected the first. Each such argument binds to a rooted local ahead
+     of the call instead, as a default reading an earlier parameter already
+     has them do. */
   Buf *pav = NULL; int nfresh = 0;
   if (!pd_arm && ms->nparams > 1) {
     pav = calloc((size_t)ms->nparams, sizeof *pav);
     for (int a = 0; pav && a < ms->nparams; a++) {
       emit_poly_arm_param(c, ms, a, L, A, ct, selfd, &pav[a]);
-      if (poly_arm_arg_fresh(ms, a, 0, pav[a].p)) nfresh++;
+      if (poly_arm_arg_fresh(c, ms, a, poly_arm_param_omitted(c, ms, a, L, A->kw), pav[a].p)) nfresh++;
     }
   }
   for (int a = 0; a < ms->nparams; a++) {
@@ -7186,7 +7211,8 @@ void emit_poly_arm_args(Compiler *c, Scope *m, Scope *ms, const ArgLayout *L,
     Buf pa; memset(&pa, 0, sizeof pa);
     if (pav) {
       pa = pav[a];
-      if (nfresh > 1 && poly_arm_arg_fresh(ms, a, 0, pa.p)) {
+      if (nfresh > 1 &&
+          poly_arm_arg_fresh(c, ms, a, poly_arm_param_omitted(c, ms, a, L, A->kw), pa.p)) {
         emit_poly_arm_arg_held(c, ms, a, pa.p, pre, cb);
         free(pa.p);
         continue;

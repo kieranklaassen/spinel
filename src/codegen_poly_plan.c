@@ -416,20 +416,20 @@ static void emit_poly_user_arm0(Compiler *c, int id, const char *name, TyKind re
       /* the defaults are spelled for the proc form's own parameter
          types when that is the symbol called (#4492) */
       Scope *ds = &c->scopes[pfi9 >= 0 ? pfi9 : mi];
-      /* an omitted rest and an omitted **kwrest each build an empty
-         object: bare in the call, the second one's allocation collected
-         the first. They are bound to rooted locals ahead of the call, as
-         an arm given arguments binds them (emit_poly_arm_args). */
+      /* an omitted rest, an omitted **kwrest and a default that allocates
+         each build an object: bare in the call, the second one's allocation
+         collected the first. They are bound to rooted locals ahead of the
+         call, as an arm given arguments binds them (emit_poly_arm_args). */
       Buf *dv = ds->nparams > 1 ? calloc((size_t)ds->nparams, sizeof *dv) : NULL;
       int nfresh = 0;
       for (int ai = 0; dv && ai < ds->nparams; ai++) {
         emit_arg_or_default(c, ds, ai, -1, &dv[ai]);
-        if (poly_arm_arg_fresh(ds, ai, 1, dv[ai].p)) nfresh++;
+        if (poly_arm_arg_fresh(c, ds, ai, 1, dv[ai].p)) nfresh++;
       }
       for (int ai = 0; ai < ds->nparams; ai++) {
         buf_puts(&cb, ", ");
         if (!dv) emit_arg_or_default(c, ds, ai, -1, &cb);
-        else if (nfresh > 1 && poly_arm_arg_fresh(ds, ai, 1, dv[ai].p))
+        else if (nfresh > 1 && poly_arm_arg_fresh(c, ds, ai, 1, dv[ai].p))
           emit_poly_arm_arg_held(c, ds, ai, dv[ai].p, &hold, &cb);
         else buf_puts(&cb, dv[ai].p ? dv[ai].p : "");
         if (dv) free(dv[ai].p);

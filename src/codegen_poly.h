@@ -39,7 +39,7 @@ typedef struct {
 void poly_arm_layout(Compiler *c, Scope *ms, const PolyArgs *A, ArgLayout *L);
 /* an arm's argument that builds an object another argument's allocation
    can collect, and its binding to a rooted local ahead of the call */
-int  poly_arm_arg_fresh(Scope *ms, int a, int omitted, const char *text);
+int  poly_arm_arg_fresh(Compiler *c, Scope *ms, int a, int omitted, const char *text);
 void emit_poly_arm_arg_held(Compiler *c, Scope *ms, int a, const char *text, Buf *pre, Buf *cb);
 /* can user arm ks take the argument temps' types (call_plan.c)? */
 int  cplan_arm_args_fit(Compiler *c, Scope *ks, const ArgLayout *L, int pos_argc, const TyKind *atmp_ty,
