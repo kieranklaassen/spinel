@@ -1,0 +1,28 @@
+Too few or too many arguments through a `...` forward raise ArgumentError
+
+    class Base
+      def two(a, b) = yield([a, b])
+    end
+    class Kept < Base
+      def two(...) = super(...)
+    end
+    Kept.new.two(1) { |x| p x }    # wrong number of arguments (given 1, expected 2)
+
+printed [1, 0], with no error, and a third argument was dropped.
+
+A call judges its count before it binds (emit_call_arity_check), but
+the binder skips that for a `...` forward: its arguments are the
+forwarder's parameters, one slot for each positional of the longest
+site. The binder now counts the slots this site filled and hands that
+count to arity_count_error, the rule of the direct call paths, ahead of
+the missing-keyword check as CRuby orders them.
+
+It judges only where the site is known to have written its positionals
+out: no `*` at the call, and the keys proven as the missing-keyword
+check needs them. The proof is a second mark beside that check's. A key
+passed to a parent that declares no keyword is one more positional, a
+Hash, which no slot holds; and a second forwarder that names a parameter
+of its own (`def m(x, ...)`) is bound slot for slot, so what it forwards
+is not counted. Those calls keep their C.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
