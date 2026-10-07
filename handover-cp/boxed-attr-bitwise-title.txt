@@ -1,0 +1,1 @@
+A boxed attribute's &=, |= and ^= use the operator of the value held

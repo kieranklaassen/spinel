@@ -1,0 +1,1 @@
+A boxed value's odd?, even?, ~ and chr raise for a receiver without them

@@ -1,0 +1,469 @@
+From 1439e838f92557a5db4d4fefd25916aa2390023a Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 7 Oct 2026 05:08:59 +0000
+Subject: [PATCH] A boxed value's odd?, even?, ~ and chr raise for a receiver
+ without them
+
+A boxed receiver's odd?, even?, ~ and chr with an encoding read a
+String, a Float, a Symbol, an Array or true as an Integer:
+
+    v = [1, "s"][1]
+    p v.odd?                     # false
+    p ~v                         # -1
+    p v.chr(Encoding::UTF_8)     # "\u0000"
+
+(2.5.odd? false, ~2.5 -3). CRuby raises NoMethodError, and
+ArgumentError for a String, whose chr takes no argument. The three arms
+read the receiver through sp_poly_recv_i, which raises for nil and
+converts a value of any other builtin class.
+
+odd? and even? now dispatch on the tag as zero?, positive? and
+negative? do (sp_poly_odd_p, sp_poly_even_p; a Bignum answers its own
+parity), and an object of a class of the program's own that defines
+the name has its method called. Where the program defines the name in
+Integer, Numeric, Comparable, Object, Kernel or BasicObject, or at the
+top level, the call is compiled as before: an Integer in the box
+answers Integer's own, not the inherited definition. ~ reads its
+receiver through sp_poly_recv_integer_i, which raises for a value that
+is no Integer. chr with an encoding tests the tag as the bare chr
+beside it does: a String raises ArgumentError with the count the
+arity table gives its own chr (builtin_arity_expected), a Bignum,
+which answered a character, RangeError, and the rest NoMethodError
+(sp_poly_chr_enc_raise).
+
+Not covered: ~ on a boxed Bignum still answers from its low 64 bits;
+beside a class that defines ~ the receiver is read as before (the
+class's own ~ is not called); a boxed Regexp's ~ raises where it
+answered -1 (Ruby matches $_); with odd? defined in Numeric or Object,
+a Float or a String in the box is still read as an Integer.
+
+Tests: test/boxed_integer_only_receiver.rb,
+test/boxed_integer_only_own_method.rb and
+test/boxed_integer_only_bignum.rb fail on master;
+test/boxed_integer_only_inherited.rb passes there and pins the
+inherited definitions.
+The generated C of 76 corpus programs changes, at these calls only;
+optcarrot's is unchanged.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ lib/spinel_rt.h                               | 14 ++++
+ src/codegen_call.c                            | 17 ++++-
+ src/codegen_call_operator.c                   | 43 ++++++++---
+ src/codegen_call_recv.c                       |  2 +
+ test/boxed_integer_only_bignum.rb             | 18 +++++
+ test/boxed_integer_only_bignum.rb.expected    | 12 ++++
+ test/boxed_integer_only_inherited.rb          | 21 ++++++
+ test/boxed_integer_only_inherited.rb.expected |  6 ++
+ test/boxed_integer_only_own_method.rb         | 21 ++++++
+ .../boxed_integer_only_own_method.rb.expected | 12 ++++
+ test/boxed_integer_only_receiver.rb           | 37 ++++++++++
+ test/boxed_integer_only_receiver.rb.expected  | 71 +++++++++++++++++++
+ 12 files changed, 264 insertions(+), 10 deletions(-)
+ create mode 100644 test/boxed_integer_only_bignum.rb
+ create mode 100644 test/boxed_integer_only_bignum.rb.expected
+ create mode 100644 test/boxed_integer_only_inherited.rb
+ create mode 100644 test/boxed_integer_only_inherited.rb.expected
+ create mode 100644 test/boxed_integer_only_own_method.rb
+ create mode 100644 test/boxed_integer_only_own_method.rb.expected
+ create mode 100644 test/boxed_integer_only_receiver.rb
+ create mode 100644 test/boxed_integer_only_receiver.rb.expected
+
+diff --git a/lib/spinel_rt.h b/lib/spinel_rt.h
+index 8997e06f..153d174c 100644
+--- a/lib/spinel_rt.h
++++ b/lib/spinel_rt.h
+@@ -3713,6 +3713,16 @@ static SP_UNUSED sp_int sp_for_lo(sp_RbVal v) {
+   return sp_poly_to_i(v);
+ }
+ static SP_UNUSED sp_int sp_poly_recv_i(const char *m, sp_RbVal v) { if (SP_UNLIKELY(v.tag == SP_TAG_NIL)) sp_raise_nomethod(sp_nomethod_msg(m, v)); return sp_poly_to_i(v); }
++/* sp_poly_recv_i for a method only Integer has: a value of any other class
++   raises NoMethodError as nil does, where it was read as an Integer. */
++static SP_UNUSED sp_int sp_poly_recv_integer_i(const char *m, sp_RbVal v) { if (SP_LIKELY(v.tag == SP_TAG_INT)) return v.v.i; if (v.tag != SP_TAG_BIGINT) sp_raise_nomethod(sp_nomethod_msg(m, v)); return sp_poly_to_i(v); }
++/* chr with an encoding on a boxed value that is no Integer (a String has
++   raised for its own chr's count): a Bignum is past any character, and no
++   other value has the method. */
++SP_NORETURN SP_COLD static SP_UNUSED void sp_poly_chr_enc_raise(sp_RbVal v) {
++  if (v.tag == SP_TAG_BIGINT) sp_raise_cls("RangeError", "bignum out of char range");
++  sp_raise_cls("NoMethodError", sp_nomethod_msg("chr", v));
++}
+ /* Time.new / Time.utc / Time.local field `i` read out of a box: a nil month
+    or day is 1 and a nil hour, minute or second 0, as CRuby defaults them; a
+    nil year is the conversion TypeError. */
+@@ -4474,6 +4484,10 @@ static sp_bool sp_poly_range_exclude_end_p(sp_RbVal v) {
+ }
+ static sp_bool sp_poly_positive_p(sp_RbVal v) { if (v.tag == SP_TAG_INT) return v.v.i > 0; if (v.tag == SP_TAG_FLT) return v.v.f > 0.0; if (v.tag == SP_TAG_BIGINT) return sp_bigint_sign((sp_Bigint *)v.v.p) > 0; if (sp_poly_is_rat_kind(v)) return sp_poly_rat_sign(v) > 0; sp_raise_poly_nomethod("positive?", v); }
+ static sp_bool sp_poly_negative_p(sp_RbVal v) { if (v.tag == SP_TAG_INT) return v.v.i < 0; if (v.tag == SP_TAG_FLT) return v.v.f < 0.0; if (v.tag == SP_TAG_BIGINT) return sp_bigint_sign((sp_Bigint *)v.v.p) < 0; if (sp_poly_is_rat_kind(v)) return sp_poly_rat_sign(v) < 0; sp_raise_poly_nomethod("negative?", v); }
++/* Integer#even? and #odd? on a boxed value: an Integer answers its parity
++   and a Bignum its own; no other class of Ruby's own has the methods. */
++static SP_UNUSED sp_bool sp_poly_even_p(sp_RbVal v) { if (SP_LIKELY(v.tag == SP_TAG_INT)) return v.v.i % 2 == 0; if (v.tag == SP_TAG_BIGINT) return sp_bigint_even_p((sp_Bigint *)v.v.p) != 0; sp_raise_poly_nomethod("even?", v); }
++static SP_UNUSED sp_bool sp_poly_odd_p(sp_RbVal v) { if (SP_LIKELY(v.tag == SP_TAG_INT)) return v.v.i % 2 != 0; if (v.tag == SP_TAG_BIGINT) return !sp_bigint_even_p((sp_Bigint *)v.v.p); sp_raise_poly_nomethod("odd?", v); }
+ /* Numeric#arg (angle, phase) and #rect (rectangular) on a boxed number, as
+    the typed arms answer them: a Complex its atan2(im, re) and its [re, im],
+    a real number 0, or pi when negative, and [self, 0]. `m` is the name
+diff --git a/src/codegen_call.c b/src/codegen_call.c
+index d3601da7..9867a845 100644
+--- a/src/codegen_call.c
++++ b/src/codegen_call.c
+@@ -4619,6 +4619,8 @@ int poly_pred_kind(const char *name, int argc) {
+   if (argc == 0) return (sp_streq(name, "frozen?") || sp_streq(name, "nil?") ||
+                          sp_streq(name, "zero?") || sp_streq(name, "positive?") ||
+                          sp_streq(name, "negative?") ||
++                         /* Integer's parity, the same way */
++                         sp_streq(name, "even?") || sp_streq(name, "odd?") ||
+                          /* the rest of the numeric predicates: a class merely
+                             defining `finite?` took this switch for every
+                             union-typed number in the program, and the Float
+@@ -4674,6 +4676,8 @@ int emit_poly_pred_value(Compiler *c, int id, const char *tvref,
+   if (argc == 0 && sp_streq(name, "zero?"))     { buf_printf(b, "sp_poly_zero_p(%s)", tvref); return 1; }
+   if (argc == 0 && sp_streq(name, "positive?")) { buf_printf(b, "sp_poly_positive_p(%s)", tvref); return 1; }
+   if (argc == 0 && sp_streq(name, "negative?")) { buf_printf(b, "sp_poly_negative_p(%s)", tvref); return 1; }
++  if (argc == 0 && sp_streq(name, "even?"))     { buf_printf(b, "sp_poly_even_p(%s)", tvref); return 1; }
++  if (argc == 0 && sp_streq(name, "odd?"))      { buf_printf(b, "sp_poly_odd_p(%s)", tvref); return 1; }
+   if (argc == 0 && sp_streq(name, "finite?"))   { buf_printf(b, "sp_poly_finite_p(%s)", tvref); return 1; }
+   if (argc == 0 && sp_streq(name, "nan?"))      { buf_printf(b, "sp_poly_nan_p(%s)", tvref); return 1; }
+   if (argc == 0 && sp_streq(name, "real?"))     { buf_printf(b, "sp_poly_real_p(%s)", tvref); return 1; }
+@@ -17145,7 +17149,18 @@ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
+     if (utf8 || bytes) {
+       int tvC = ++g_tmp;
+       buf_printf(b, "({ sp_RbVal _t%d = ", tvC); emit_boxed(c, recv, b);
+-      buf_printf(b, "; sp_box_str(%s(sp_poly_recv_i(\"chr\", _t%d))); })", utf8 ? "sp_int_chr_utf8" : "sp_int_chr", tvC);
++      /* as the bare chr beside it: only an Integer has chr with an
++         encoding. Any other value was read as an Integer and answered a
++         character; it raises now: a String the ArgumentError of its own
++         chr's count, read off the instance arity table, the rest by
++         sp_poly_chr_enc_raise. */
++      char exp[64];
++      buf_printf(b, "; if (SP_UNLIKELY(_t%d.tag != SP_TAG_INT)) {", tvC);
++      if (builtin_arity_expected("String", "chr", 0, argc, exp, sizeof exp))
++        buf_printf(b, " if (_t%d.tag == SP_TAG_STR || sp_poly_is_strbuf(_t%d)) sp_raise_cls(\"ArgumentError\", "
++                      "\"wrong number of arguments (given %d, expected %s)\");", tvC, tvC, argc, exp);
++      buf_printf(b, " sp_poly_chr_enc_raise(_t%d); } sp_box_str(%s(_t%d.v.i)); })",
++                 tvC, utf8 ? "sp_int_chr_utf8" : "sp_int_chr", tvC);
+       return 1;
+     }
+   }
+diff --git a/src/codegen_call_operator.c b/src/codegen_call_operator.c
+index b86b0e52..993b9328 100644
+--- a/src/codegen_call_operator.c
++++ b/src/codegen_call_operator.c
+@@ -984,6 +984,26 @@ int emit_call_compare_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
+ }
+ 
+ /* String concatenation, unary -@ +@ ~ !, element stores and the arithmetic on a poly operand */
++/* Whether the program defines `name` where an Integer would find it after
++   its own methods: in Integer, Numeric, Comparable, Object, Kernel or
++   BasicObject (a module included in one of them is copied into it), or at
++   the top level. A definition in any other class cannot answer an Integer. */
++static int parity_def_above_integer(Compiler *c, const char *name) {
++  static const char *const above[] = {
++    "Integer", "Numeric", "Comparable", "Object", "Kernel", "BasicObject", "Toplevel", NULL };
++  for (int mi = 0; mi < c->nscopes; mi++) {
++    Scope *s = &c->scopes[mi];
++    if (!s->name || !sp_streq(s->name, name)) continue;
++    if (s->class_id < 0) return 1;
++    for (int i = 0; above[i]; i++)
++      if (sp_streq(c->classes[s->class_id].name, above[i])) return 1;
++  }
++  for (int k = 0; k < c->nclasses; k++)
++    for (int i = 0; i < c->classes[k].naliases; i++)
++      if (sp_streq(c->classes[k].alias_new[i], name)) return 1;
++  return 0;
++}
++
+ int emit_call_operator_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, TyKind rt, TyKind a0) {
+   /* String#concat with no arguments returns the receiver unchanged (#2309):
+      a stage-1 builtin-op row (builtin_ops.c); the shared handle's arm stays */
+@@ -1190,19 +1210,24 @@ int emit_call_operator_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
+   }
+   /* unary bitwise complement: ~int -> (~x); ~poly -> coerce to int first */
+   if (sp_streq(name, "~") && recv >= 0 && argc == 0 && (rt == TY_INT || rt == TY_POLY)) {
+-    if (rt == TY_POLY) { buf_puts(b, "(~sp_poly_recv_i(\"~\", "); emit_expr(c, recv, b); buf_puts(b, "))"); }
++    /* `~` here is Integer's: read as an Integer whatever it held, a
++       String answered -1 and a Float -3. They raise now (so does a Regexp,
++       whose own `~` is not served). Beside a class that defines `~` the
++       read stays as it was. */
++    if (rt == TY_POLY) {
++      buf_printf(b, "(~%s(\"~\", ", poly_name_user_claimed(c, name, argc) ? "sp_poly_recv_i" : "sp_poly_recv_integer_i");
++      emit_expr(c, recv, b); buf_puts(b, "))");
++    }
+     else { buf_puts(b, "(~"); emit_expr(c, recv, b); buf_puts(b, ")"); }
+     return 1;
+   }
+-  /* poly parity predicates: Integer-only in Ruby, so truncation cannot lose a
+-     value that legally reaches them and the int coercion stays correct.
+-     zero?/positive?/negative? are NOT handled here: this arm ran ahead of
+-     emit_poly_call and shadowed sp_poly_zero_p and friends, which dispatch on
+-     the runtime tag. Truncating first answered every |v| < 1 as zero (0.004
+-     came back zero? -> true, positive? -> false), read a bigint through a
+-     wrapped int64, and hid a user class's own zero?. */
++  /* poly parity predicates beside a definition of the name that an Integer
++     inherits (parity_def_above_integer): the receiver is read as an Integer,
++     as it always was, so an Integer in the box answers Integer's own odd?
++     and not Object's or Numeric's. Everywhere else the call goes on to the
++     tag dispatch (sp_poly_odd_p, sp_poly_even_p). */
+   if (recv >= 0 && rt == TY_POLY && argc == 0 &&
+-      (sp_streq(name, "even?") || sp_streq(name, "odd?"))) {
++      (sp_streq(name, "even?") || sp_streq(name, "odd?")) && parity_def_above_integer(c, name)) {
+     int t = ++g_tmp;
+     buf_printf(b, "({ sp_int _t%d = sp_poly_recv_i(\"%s\", ", t, name); emit_expr(c, recv, b); buf_puts(b, "); ");
+     if (sp_streq(name, "even?")) buf_printf(b, "(_t%d %% 2 == 0); })", t);
+diff --git a/src/codegen_call_recv.c b/src/codegen_call_recv.c
+index 225bfa86..d5e0bd63 100644
+--- a/src/codegen_call_recv.c
++++ b/src/codegen_call_recv.c
+@@ -12267,6 +12267,8 @@ static int emit_poly_call0_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
+       sp_streq(name, "nonzero?")  ? "sp_poly_nonzero" :
+       sp_streq(name, "positive?") ? "sp_poly_positive_p" :
+       sp_streq(name, "negative?") ? "sp_poly_negative_p" :
++      sp_streq(name, "even?")     ? "sp_poly_even_p" :
++      sp_streq(name, "odd?")      ? "sp_poly_odd_p" :
+       sp_streq(name, "real?")     ? "sp_poly_real_p" :
+       sp_streq(name, "integer?")  ? "sp_poly_integer_p" :
+       sp_streq(name, "abs") || sp_streq(name, "magnitude") ? "sp_poly_abs" :
+diff --git a/test/boxed_integer_only_bignum.rb b/test/boxed_integer_only_bignum.rb
+new file mode 100644
+index 00000000..2878eb71
+--- /dev/null
++++ b/test/boxed_integer_only_bignum.rb
+@@ -0,0 +1,18 @@
++# spinel: int64
++# A boxed Bignum is an Integer: odd? and even? answer its own parity, and
++# chr with an encoding raises RangeError, as before the receiver's class
++# was tested.
++
++def t
++  p yield
++rescue NoMethodError, ArgumentError, RangeError => e
++  p e.class
++end
++
++k = ARGV.size
++[2**70 + 1, 2**70, -(2**70) - 1, "s"].each do |v|
++  n = [v, 0][k]
++  t { n.odd? }
++  t { n.even? }
++  t { n.chr(Encoding::UTF_8) }
++end
+diff --git a/test/boxed_integer_only_bignum.rb.expected b/test/boxed_integer_only_bignum.rb.expected
+new file mode 100644
+index 00000000..9f802054
+--- /dev/null
++++ b/test/boxed_integer_only_bignum.rb.expected
+@@ -0,0 +1,12 @@
++true
++false
++RangeError
++false
++true
++RangeError
++true
++false
++RangeError
++NoMethodError
++NoMethodError
++ArgumentError
+diff --git a/test/boxed_integer_only_inherited.rb b/test/boxed_integer_only_inherited.rb
+new file mode 100644
+index 00000000..5199487a
+--- /dev/null
++++ b/test/boxed_integer_only_inherited.rb
+@@ -0,0 +1,21 @@
++# odd? and even? defined where an Integer inherits them: an Integer in the
++# box still answers Integer's own, and a Float reaches Numeric's.
++class Object
++  def odd? = false
++end
++module Kernel
++  def even? = true
++end
++class Numeric
++  def odd? = to_i.odd?
++end
++
++v = [7, "s"][ARGV.size]
++p v.odd?
++p v.even?
++w = [8, "s"][ARGV.size]
++p w.odd?
++p w.even?
++f = [3.5, "s"][ARGV.size]
++p f.odd?
++p [1, 2, 3].map { |e| [e, "s"][ARGV.size].odd? }
+diff --git a/test/boxed_integer_only_inherited.rb.expected b/test/boxed_integer_only_inherited.rb.expected
+new file mode 100644
+index 00000000..387a14f0
+--- /dev/null
++++ b/test/boxed_integer_only_inherited.rb.expected
+@@ -0,0 +1,6 @@
++true
++false
++false
++true
++true
++[true, false, true]
+diff --git a/test/boxed_integer_only_own_method.rb b/test/boxed_integer_only_own_method.rb
+new file mode 100644
+index 00000000..2951d525
+--- /dev/null
++++ b/test/boxed_integer_only_own_method.rb
+@@ -0,0 +1,21 @@
++# A class's own odd? and even? are called on a boxed receiver, where the
++# Integer arm claimed every boxed odd? and the program did not build. An
++# Integer beside it answers its parity, and a value with neither raises.
++
++class Parity
++  def odd? = :mine
++  def even? = :mine_too
++end
++
++def t
++  p yield
++rescue NoMethodError => e
++  p e.class
++end
++
++k = ARGV.size
++[Parity.new, 7, 10, "s", 2.5, nil].each do |v|
++  n = [v, 0][k]
++  t { n.odd? }
++  t { n.even? }
++end
+diff --git a/test/boxed_integer_only_own_method.rb.expected b/test/boxed_integer_only_own_method.rb.expected
+new file mode 100644
+index 00000000..033ca47a
+--- /dev/null
++++ b/test/boxed_integer_only_own_method.rb.expected
+@@ -0,0 +1,12 @@
++:mine
++:mine_too
++true
++false
++false
++true
++NoMethodError
++NoMethodError
++NoMethodError
++NoMethodError
++NoMethodError
++NoMethodError
+diff --git a/test/boxed_integer_only_receiver.rb b/test/boxed_integer_only_receiver.rb
+new file mode 100644
+index 00000000..2c14c805
+--- /dev/null
++++ b/test/boxed_integer_only_receiver.rb
+@@ -0,0 +1,37 @@
++# odd?, even?, ~ and chr with an encoding on a boxed receiver that is no
++# Integer: CRuby raises NoMethodError (ArgumentError for a String, whose
++# chr takes no argument), where the value was read as an Integer and
++# answered: "s".odd? false, ~2.5 -3, :sy.chr(Encoding::UTF_8) a character.
++# An Integer answers as before.
++
++def t
++  p yield
++rescue NoMethodError, ArgumentError, RangeError => e
++  p e.class
++end
++
++k = ARGV.size
++[7, 10, -3, 0, "s", "12", 2.5, :sy, [3], {a: 1}, true, nil, 955].each do |v|
++  n = [v, 0][k]
++  t { n.odd? }
++  t { n.even? }
++  t { ~n }
++  t { n.chr(Encoding::UTF_8).bytes }
++  t { n.chr(Encoding::US_ASCII).bytes }
++end
++
++# the same through a parameter, an instance variable and safe navigation
++def parity(v) = v.odd?
++t { parity(3) }
++t { parity("s") }
++
++class Holder
++  def initialize(v) = @v = v
++  def flip = ~@v
++end
++t { Holder.new(5).flip }
++t { Holder.new(2.5).flip }
++
++s = [1, "s"][1 - k]
++t { s&.even? }
++t { [1, 2, "s"].count(&:odd?) }
+diff --git a/test/boxed_integer_only_receiver.rb.expected b/test/boxed_integer_only_receiver.rb.expected
+new file mode 100644
+index 00000000..ca14f6d0
+--- /dev/null
++++ b/test/boxed_integer_only_receiver.rb.expected
+@@ -0,0 +1,71 @@
++true
++false
++-8
++[7]
++[7]
++false
++true
++-11
++[10]
++[10]
++true
++false
++2
++RangeError
++RangeError
++false
++true
++-1
++[0]
++[0]
++NoMethodError
++NoMethodError
++NoMethodError
++ArgumentError
++ArgumentError
++NoMethodError
++NoMethodError
++NoMethodError
++ArgumentError
++ArgumentError
++NoMethodError
++NoMethodError
++NoMethodError
++NoMethodError
++NoMethodError
++NoMethodError
++NoMethodError
++NoMethodError
++NoMethodError
++NoMethodError
++NoMethodError
++NoMethodError
++NoMethodError
++NoMethodError
++NoMethodError
++NoMethodError
++NoMethodError
++NoMethodError
++NoMethodError
++NoMethodError
++NoMethodError
++NoMethodError
++NoMethodError
++NoMethodError
++NoMethodError
++NoMethodError
++NoMethodError
++NoMethodError
++NoMethodError
++NoMethodError
++true
++false
++-956
++[206, 187]
++RangeError
++true
++NoMethodError
++-6
++NoMethodError
++NoMethodError
++NoMethodError

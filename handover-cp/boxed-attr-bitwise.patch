@@ -1,0 +1,456 @@
+From 15911319b19cd642776404e137865e88ffd4a682 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 7 Oct 2026 05:09:13 +0000
+Subject: [PATCH] A boxed attribute's &=, |= and ^= use the operator of the
+ value held
+
+    class Box
+      attr_accessor :v
+      def initialize(v) = @v = v
+    end
+    b = Box.new(["s", 1][0])
+    b.v &= 1
+    p b.v
+
+printed 0 where Ruby raises NoMethodError. The three bitwise forms read
+the slot through sp_poly_recv_i, as an Integer whatever it held: a
+String answered 0 or 1, a Float from its integer part, true from 1, an
+Array from 0, and a right operand of true or an Array was read the same
+way. They now go through sp_poly_bitop, as `+=` to `>>=` on the same
+slot go through their sp_poly_ helpers and as a boxed local's `x &= 1`
+does. Two Integers answer in line first (sp_poly_bitop_int_first, new
+beside sp_poly_bitop), so an Integer in the slot with a plain operand
+costs no more than it did.
+
+The slot is still read before the right operand runs. Where the operand
+is more than a plain read (`o.v ^= o.bump`, and bump writes v), the
+slot's value is bound to a rooted temp first: the operand may write the
+slot, and may drop the value it held.
+
+A boxed attribute holding nil raised NoMethodError; it now answers
+false or true, as Ruby does and as a boxed local holding nil already
+did.
+
+An Integer attribute, with or without nil, keeps its own slot and its
+own code. A native class's boxed attribute takes the same path; no
+test in the tree has one.
+
+Not covered, as on master: `+=` to `>>=` on a boxed attribute read the
+slot after an operand that writes it, and so do the three forms through
+a boxed receiver when the operand carries a block.
+
+test/boxed_attr_bitwise_op_assign.rb fails on master.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ lib/spinel_rt.h                               |   8 ++
+ src/codegen_stmt.c                            |  84 +++++++------
+ test/boxed_attr_bitwise_op_assign.rb          |  93 ++++++++++++++
+ test/boxed_attr_bitwise_op_assign.rb.expected | 118 ++++++++++++++++++
+ 4 files changed, 264 insertions(+), 39 deletions(-)
+ create mode 100644 test/boxed_attr_bitwise_op_assign.rb
+ create mode 100644 test/boxed_attr_bitwise_op_assign.rb.expected
+
+diff --git a/lib/spinel_rt.h b/lib/spinel_rt.h
+index 8997e06f..b396de3b 100644
+--- a/lib/spinel_rt.h
++++ b/lib/spinel_rt.h
+@@ -1931,6 +1931,14 @@ static sp_RbVal sp_poly_bitop(sp_RbVal a, sp_RbVal b, int op) {  /* 0:& 1:| 2:^
+   sp_int ai = sp_poly_to_i(a), bi = sp_poly_to_i(b);
+   return sp_box_int(op == 0 ? (ai & bi) : op == 1 ? (ai | bi) : (ai ^ bi));
+ }
++/* sp_poly_bitop with the Integer arm first and in line, for an attribute's
++   `&=`, `|=` and `^=`: two Integers are what a boxed flag word holds, and
++   they answer without the call. */
++static inline sp_RbVal sp_poly_bitop_int_first(sp_RbVal a, sp_RbVal b, int op) {
++  if (SP_LIKELY(a.tag == SP_TAG_INT && b.tag == SP_TAG_INT))
++    return sp_box_int(op == 0 ? (a.v.i & b.v.i) : op == 1 ? (a.v.i | b.v.i) : (a.v.i ^ b.v.i));
++  return sp_poly_bitop(a, b, op);
++}
+ /* forward-declare the program-emitted class
+    name lookup so sp_poly_to_s's SP_TAG_CLASS arm resolves.
+    The codegen emits a 1-line stub when no class const is used,
+diff --git a/src/codegen_stmt.c b/src/codegen_stmt.c
+index f2fe7ad6..074d7613 100644
+--- a/src/codegen_stmt.c
++++ b/src/codegen_stmt.c
+@@ -11940,6 +11940,17 @@ static int emit_ivar_cvar_write_stmt(Compiler *c, int id, Buf *b, int indent, co
+ }
+ 
+ /* Call-operator, global-variable and constant writes: o.x += v, $g = v and its operator and or/and forms, C = v, A::B = v and their operator and or/and forms (emit_stmt_inner's arms, in their order) */
++/* The slot of a boxed attribute's `&=`, `|=` or `^=`, read ahead of a right
++   operand that is more than a plain read: Ruby reads the slot first, and the
++   operand may write it (`o.v ^= o.bump`). The value goes to a rooted temp,
++   since the operand may also drop it from the slot and allocate. Answers the
++   temp, or 0 when the operand is a plain read and the slot is read in place. */
++static int emit_boxed_slot_read_first(Compiler *c, int val, const char *slot, const char *lead, Buf *b) {
++  if (subtree_is_pure_read(c, val)) return 0;
++  int t = ++g_tmp;
++  buf_printf(b, "%ssp_RbVal _t%d = %s; SP_GC_ROOT_RBVAL(_t%d);", lead, t, slot, t);
++  return t;
++}
+ static int emit_attr_global_const_write_stmt(Compiler *c, int id, Buf *b, int indent, const NodeTable *nt, const char *ty) {
+   if (sp_streq(ty, "CallOperatorWriteNode")) {
+     /* `recv.attr op= value` (e.g. doom's `sector.ceiling_height -=
+@@ -11957,12 +11968,15 @@ static int emit_attr_global_const_write_stmt(Compiler *c, int id, Buf *b, int in
+     int val = nt_ref(nt, id, "value");
+     TyKind rt = recv >= 0 ? comp_ntype(c, recv) : TY_UNKNOWN;
+     TyKind rhst = val >= 0 ? comp_ntype(c, val) : TY_UNKNOWN;
+-    /* the dynamic operator for a boxed (poly) slot, and the bitwise set the
+-       boxed slot handles via unbox-op-rebox (both mirror the ivar op-assign
+-       poly arms above). The shifts take the dynamic operator too, as a boxed
+-       local's `x <<= n` does (emit_poly_op_assign): it promotes past the word
+-       and shifts the other way for a negative count, where unbox-op-rebox
+-       wrapped (`obj.v <<= 70` was 64, `obj.v <<= -1` was 0). */
++    /* the dynamic operator for a boxed (poly) slot (it mirrors the ivar
++       op-assign poly arms above). The shifts take the dynamic operator too,
++       as a boxed local's `x <<= n` does (emit_poly_op_assign): it promotes
++       past the word and shifts the other way for a negative count, where
++       unbox-op-rebox wrapped (`obj.v <<= 70` was 64, `obj.v <<= -1` was 0).
++       So do `&`, `|` and `^`, with sp_poly_bitop's operator number in
++       `cpx`: unbox-op-rebox read whatever the slot held as an Integer
++       (`obj.v &= 1` on "s" was 0, on true 1). They go through
++       sp_poly_bitop_int_first, which answers two Integers in line. */
+     const char *cpf = op && sp_streq(op, "+") ? "sp_poly_add"
+                     : op && sp_streq(op, "-") ? "sp_poly_sub"
+                     : op && sp_streq(op, "*") ? "sp_poly_mul"
+@@ -11970,7 +11984,9 @@ static int emit_attr_global_const_write_stmt(Compiler *c, int id, Buf *b, int in
+                     : op && sp_streq(op, "%") ? "sp_poly_mod"
+                     : op && sp_streq(op, "**") ? "sp_poly_pow"
+                     : op && sp_streq(op, "<<") ? "sp_poly_shl"
+-                    : op && sp_streq(op, ">>") ? "sp_poly_shr" : NULL;
++                    : op && sp_streq(op, ">>") ? "sp_poly_shr"
++                    : op && is_bit_op(op) ? "sp_poly_bitop_int_first" : NULL;
++    const char *cpx = !(op && is_bit_op(op)) ? "" : sp_streq(op, "&") ? ", 0" : sp_streq(op, "|") ? ", 1" : ", 2";
+     int bitop = op && is_int_bit_op(op);
+     int rdcls = -1;
+     /* Ruby desugars `recv.attr op= v` into a reader call AND a writer call;
+@@ -11990,7 +12006,7 @@ static int emit_attr_global_const_write_stmt(Compiler *c, int id, Buf *b, int in
+          type error) */
+       if (ivt == TY_STRING && !(op && sp_streq(op, "+")))
+         unsupported(c, id, "call operator write (operator on a string attribute)");
+-      if (ivt == TY_POLY && !cpf && !bitop)
++      if (ivt == TY_POLY && !cpf)
+         unsupported(c, id, "call operator write (operator on a boxed attribute)");
+       /* the receiver is bound in g_pre, ahead of any prelude the rhs leaves
+          there: Ruby evaluates it first, and an array slot's op-assign reads
+@@ -12004,9 +12020,14 @@ static int emit_attr_global_const_write_stmt(Compiler *c, int id, Buf *b, int in
+       emit_ctype(c, rt, rb);
+       buf_printf(rb, " _t%d = ", trecv); buf_puts(rb, rx.p ? rx.p : ""); buf_puts(rb, ";");
+       if (ty_is_array(ivt) || ivt == TY_POLY_ARRAY) { buf_puts(rb, " "); emit_gc_root_tmp(c, rt, trecv, rb); }
++      const char *acc = comp_ty_value_obj(c, rt) ? "." : "->";
++      int tslot = 0;
++      if (ivt == TY_POLY && cpx[0]) {
++        char slot[400]; snprintf(slot, sizeof slot, "_t%d%siv_%s", trecv, acc, iv_c(rn));
++        tslot = emit_boxed_slot_read_first(c, val, slot, " ", rb);
++      }
+       buf_puts(rb, "\n");
+       free(rx.p);
+-      const char *acc = comp_ty_value_obj(c, rt) ? "." : "->";
+       emit_indent(b, indent);
+       if (ivt == TY_STRING) {
+         buf_printf(b, "_t%d%siv_%s = sp_str_concat(_t%d%siv_%s, ", trecv, acc, iv_c(rn), trecv, acc, iv_c(rn));
+@@ -12016,15 +12037,9 @@ static int emit_attr_global_const_write_stmt(Compiler *c, int id, Buf *b, int in
+       else if (ivt == TY_POLY && cpf) {
+         /* boxed slot: dynamic operator on boxed operands (same as the
+            poly-receiver dispatch arms below). */
+-        buf_printf(b, "_t%d%siv_%s = %s(_t%d%siv_%s, ", trecv, acc, iv_c(rn), cpf, trecv, acc, iv_c(rn));
+-        emit_boxed(c, val, b); buf_puts(b, ");\n");
+-      }
+-      else if (ivt == TY_POLY) {
+-        /* bitwise op-assign on a boxed slot: coerce to int, re-box */
+-        buf_printf(b, "_t%d%siv_%s = sp_box_int((sp_poly_recv_i(\"%s\", _t%d%siv_%s) %s (",
+-                   trecv, acc, iv_c(rn), op, trecv, acc, iv_c(rn), op);
+-        emit_poly_unboxed(c, val, rhst, op_assign_int_conv(TY_INT, op), b);
+-        buf_puts(b, ")));\n");
++        if (tslot) buf_printf(b, "_t%d%siv_%s = %s(_t%d, ", trecv, acc, iv_c(rn), cpf, tslot);
++        else buf_printf(b, "_t%d%siv_%s = %s(_t%d%siv_%s, ", trecv, acc, iv_c(rn), cpf, trecv, acc, iv_c(rn));
++        emit_boxed(c, val, b); buf_printf(b, "%s);\n", cpx);
+       }
+       else if (ty_is_array(ivt) || ivt == TY_POLY_ARRAY) {
+         char aref[400]; snprintf(aref, sizeof aref, "_t%d%siv_%s", trecv, acc, iv_c(rn));
+@@ -12073,7 +12088,7 @@ static int emit_attr_global_const_write_stmt(Compiler *c, int id, Buf *b, int in
+           unsupported(c, id, "call operator write (bitwise operator on a float attribute)");
+         if (nstr && !(op && sp_streq(op, "+")))
+           unsupported(c, id, "call operator write (operator other than + on a string attribute)");
+-        if (nany && !cpf && !bitop)
++        if (nany && !cpf)
+           unsupported(c, id, "call operator write (operator on a boxed attribute)");
+         int trecv = ++g_tmp;
+         emit_indent(b, indent);
+@@ -12091,15 +12106,11 @@ static int emit_attr_global_const_write_stmt(Compiler *c, int id, Buf *b, int in
+           buf_puts(b, "));\n");
+         }
+         else if (nany && cpf) {
+-          buf_printf(b, "%s(_t%d, %s(%s(_t%d), ", nwm->csym, trecv, cpf, nrm->csym, trecv);
+-          emit_boxed(c, val, b); buf_puts(b, "));\n");
+-        }
+-        else if (nany) {
+-          /* bitwise on a boxed attribute: coerce to int, re-box */
+-          buf_printf(b, "%s(_t%d, sp_box_int(sp_poly_recv_i(\"%s\", %s(_t%d)) %s (",
+-                     nwm->csym, trecv, op, nrm->csym, trecv, op);
+-          emit_poly_unboxed(c, val, rhst, op_assign_int_conv(TY_INT, op), b);
+-          buf_puts(b, ")));\n");
++          char slot[300]; snprintf(slot, sizeof slot, "%s(_t%d)", nrm->csym, trecv);
++          int tslot = cpx[0] ? emit_boxed_slot_read_first(c, val, slot, "", b) : 0;
++          if (tslot) { buf_puts(b, "\n"); emit_indent(b, indent); buf_printf(b, "%s(_t%d, %s(_t%d, ", nwm->csym, trecv, cpf, tslot); }
++          else buf_printf(b, "%s(_t%d, %s(%s, ", nwm->csym, trecv, cpf, slot);
++          emit_boxed(c, val, b); buf_printf(b, "%s));\n", cpx);
+         }
+         else if (rhst != TY_POLY && !bitop) {
+           char slot[300]; snprintf(slot, sizeof slot, "%s(_t%d)", nrm->csym, trecv);
+@@ -12159,7 +12170,7 @@ static int emit_attr_global_const_write_stmt(Compiler *c, int id, Buf *b, int in
+            the default raise instead -- same skip-on-static-mismatch shape
+            as the poly attr-write dispatch above. */
+         if (ivt == TY_STRING && !(op && sp_streq(op, "+"))) continue;
+-        if (ivt == TY_POLY && !cpf && !bitop) continue;
++        if (ivt == TY_POLY && !cpf) continue;
+         const char *cn = c->classes[pdcls].name;
+         any = 1;
+         emit_indent(b, indent + 1);
+@@ -12174,17 +12185,12 @@ static int emit_attr_global_const_write_stmt(Compiler *c, int id, Buf *b, int in
+           /* the slot itself is boxed (a whole-program-widened numeric like
+              Sector#ceiling_height): fold via the dynamic operator on boxed
+              operands rather than raw C arithmetic on an sp_RbVal. */
+-          buf_puts(b, "_o->iv_"); buf_puts(b, iv_c(rn));
+-          buf_printf(b, " = %s(_o->iv_", cpf); buf_puts(b, iv_c(rn)); buf_puts(b, ", ");
++          char slot[320]; snprintf(slot, sizeof slot, "_o->iv_%s", iv_c(rn));
++          int tslot = cpx[0] ? emit_boxed_slot_read_first(c, val, slot, "", b) : 0;
++          if (tslot) buf_printf(b, " %s = %s(_t%d, ", slot, cpf, tslot);
++          else buf_printf(b, "%s = %s(%s, ", slot, cpf, slot);
+           emit_boxed(c, val, b);
+-          buf_puts(b, "); break; }\n");
+-        }
+-        else if (ivt == TY_POLY) {
+-          /* bitwise op-assign on a boxed slot: coerce to int, re-box */
+-          buf_puts(b, "_o->iv_"); buf_puts(b, iv_c(rn));
+-          buf_printf(b, " = sp_box_int((sp_poly_recv_i(\"%s\", _o->iv_%s) %s (", op, iv_c(rn), op);
+-          emit_poly_unboxed(c, val, rhst, op_assign_int_conv(TY_INT, op), b);
+-          buf_puts(b, "))); break; }\n");
++          buf_printf(b, "%s); break; }\n", cpx);
+         }
+         else {
+           char lval[320]; snprintf(lval, sizeof lval, "_o->iv_%s", iv_c(rn));
+diff --git a/test/boxed_attr_bitwise_op_assign.rb b/test/boxed_attr_bitwise_op_assign.rb
+new file mode 100644
+index 00000000..b8da592b
+--- /dev/null
++++ b/test/boxed_attr_bitwise_op_assign.rb
+@@ -0,0 +1,93 @@
++# `obj.v &= x`, `|=` and `^=` on an attribute whose slot is boxed: the slot
++# was read as an Integer whatever it held, so "s" answered 0 or 1, 2.5
++# answered from 2, true from 1, and nil raised where Ruby answers false or
++# true. The slot now takes the operator of the value it holds, as a boxed
++# local does.
++
++def t(s)
++  r = yield
++  puts "#{s}: #{r.inspect}"
++rescue NoMethodError, TypeError => e
++  puts "#{s}: #{e.class}"
++end
++
++class Box
++  attr_accessor :v
++  def initialize(v) = @v = v
++  def and_self(x)
++    self.v &= x
++    v
++  end
++  def or_self(x)
++    self.v |= x
++    v
++  end
++  def xor_self(x)
++    self.v ^= x
++    v
++  end
++end
++
++vals = [6, nil, false, true, "s", 2.5, :sy, [3, 1]]
++vals.each do |v|
++  t("#{v.inspect} &= 1") { b = Box.new(v); b.v &= 1; b.v }
++  t("#{v.inspect} |= 1") { b = Box.new(v); b.v |= 1; b.v }
++  t("#{v.inspect} ^= 1") { b = Box.new(v); b.v ^= 1; b.v }
++end
++
++# the right operand boxed too, and a truth value on the right
++ops = [3, true, nil, [1, 9]]
++[6, nil, false, true, [3, 1]].each do |v|
++  ops.each do |x|
++    t("#{v.inspect} &= #{x.inspect}") { b = Box.new(v); b.v &= x; b.v }
++    t("#{v.inspect} |= #{x.inspect}") { b = Box.new(v); b.v |= x; b.v }
++    t("#{v.inspect} ^= #{x.inspect}") { b = Box.new(v); b.v ^= x; b.v }
++  end
++end
++
++# through self, and through a receiver that is boxed itself
++[6, nil, true, "s"].each do |v|
++  t("self #{v.inspect} &=") { Box.new(v).and_self(3) }
++  t("self #{v.inspect} |=") { Box.new(v).or_self(3) }
++  t("self #{v.inspect} ^=") { Box.new(v).xor_self(3) }
++  r = [Box.new(v), 0][ARGV.size]
++  t("boxed #{v.inspect} &=") { r.v &= 3; r.v }
++  t("boxed #{v.inspect} |=") { r.v |= 3; r.v }
++  t("boxed #{v.inspect} ^=") { r.v ^= 3; r.v }
++end
++
++# the value of the statement, and the slot after a raise
++b = Box.new(nil)
++t("value") { (b.v |= 1) }
++b = Box.new("s")
++t("kept") { begin; b.v &= 1; rescue NoMethodError; end; b.v }
++
++# the slot is read before the right operand runs, which may write it
++class Box
++  def bump
++    @v = 12
++    5
++  end
++  def swap
++    @v = [9]
++    20.times { |i| [i, i.to_s] }
++    [[1, 9], 0][ARGV.size]
++  end
++end
++t("read first ^=") { b = Box.new(6); b.v ^= b.bump; b.v }
++t("read first |=") { b = Box.new(6); b.v |= b.bump; b.v }
++t("read first &=") { b = Box.new(6); b.v &= (b.v = 9; 3); b.v }
++t("read first nil") { b = Box.new(nil); b.v &= (b.v = 6; 3); b.v }
++t("read first String") { b = Box.new("s"); b.v |= (b.v = 6; 3); b.v }
++t("read first Array") { b = Box.new([3, 1]); b.v &= b.swap; b.v }
++r = [Box.new(6), 0][ARGV.size]
++t("read first boxed") { r.v ^= r.bump; r.v }
++
++# an Integer attribute that may be nil keeps its own slot
++class Count
++  attr_accessor :n
++  def initialize(n) = @n = n
++end
++c = Count.new(6)
++Count.new(1).n = nil
++t("Integer slot") { c.n &= 3; c.n |= 8; c.n ^= 1; c.n }
+diff --git a/test/boxed_attr_bitwise_op_assign.rb.expected b/test/boxed_attr_bitwise_op_assign.rb.expected
+new file mode 100644
+index 00000000..e9033a03
+--- /dev/null
++++ b/test/boxed_attr_bitwise_op_assign.rb.expected
+@@ -0,0 +1,118 @@
++6 &= 1: 0
++6 |= 1: 7
++6 ^= 1: 7
++nil &= 1: false
++nil |= 1: true
++nil ^= 1: true
++false &= 1: false
++false |= 1: true
++false ^= 1: true
++true &= 1: true
++true |= 1: true
++true ^= 1: false
++"s" &= 1: NoMethodError
++"s" |= 1: NoMethodError
++"s" ^= 1: NoMethodError
++2.5 &= 1: NoMethodError
++2.5 |= 1: NoMethodError
++2.5 ^= 1: NoMethodError
++:sy &= 1: NoMethodError
++:sy |= 1: NoMethodError
++:sy ^= 1: NoMethodError
++[3, 1] &= 1: TypeError
++[3, 1] |= 1: TypeError
++[3, 1] ^= 1: NoMethodError
++6 &= 3: 2
++6 |= 3: 7
++6 ^= 3: 5
++6 &= true: TypeError
++6 |= true: TypeError
++6 ^= true: TypeError
++6 &= nil: TypeError
++6 |= nil: TypeError
++6 ^= nil: TypeError
++6 &= [1, 9]: TypeError
++6 |= [1, 9]: TypeError
++6 ^= [1, 9]: TypeError
++nil &= 3: false
++nil |= 3: true
++nil ^= 3: true
++nil &= true: false
++nil |= true: true
++nil ^= true: true
++nil &= nil: false
++nil |= nil: false
++nil ^= nil: false
++nil &= [1, 9]: false
++nil |= [1, 9]: true
++nil ^= [1, 9]: true
++false &= 3: false
++false |= 3: true
++false ^= 3: true
++false &= true: false
++false |= true: true
++false ^= true: true
++false &= nil: false
++false |= nil: false
++false ^= nil: false
++false &= [1, 9]: false
++false |= [1, 9]: true
++false ^= [1, 9]: true
++true &= 3: true
++true |= 3: true
++true ^= 3: false
++true &= true: true
++true |= true: true
++true ^= true: false
++true &= nil: false
++true |= nil: true
++true ^= nil: true
++true &= [1, 9]: true
++true |= [1, 9]: true
++true ^= [1, 9]: false
++[3, 1] &= 3: TypeError
++[3, 1] |= 3: TypeError
++[3, 1] ^= 3: NoMethodError
++[3, 1] &= true: TypeError
++[3, 1] |= true: TypeError
++[3, 1] ^= true: NoMethodError
++[3, 1] &= nil: TypeError
++[3, 1] |= nil: TypeError
++[3, 1] ^= nil: NoMethodError
++[3, 1] &= [1, 9]: [1]
++[3, 1] |= [1, 9]: [3, 1, 9]
++[3, 1] ^= [1, 9]: NoMethodError
++self 6 &=: 2
++self 6 |=: 7
++self 6 ^=: 5
++boxed 6 &=: 2
++boxed 6 |=: 3
++boxed 6 ^=: 0
++self nil &=: false
++self nil |=: true
++self nil ^=: true
++boxed nil &=: false
++boxed nil |=: true
++boxed nil ^=: false
++self true &=: true
++self true |=: true
++self true ^=: false
++boxed true &=: true
++boxed true |=: true
++boxed true ^=: false
++self "s" &=: NoMethodError
++self "s" |=: NoMethodError
++self "s" ^=: NoMethodError
++boxed "s" &=: NoMethodError
++boxed "s" |=: NoMethodError
++boxed "s" ^=: NoMethodError
++value: true
++kept: "s"
++read first ^=: 3
++read first |=: 7
++read first &=: 2
++read first nil: false
++read first String: NoMethodError
++read first Array: [1]
++read first boxed: 3
++Integer slot: 11
