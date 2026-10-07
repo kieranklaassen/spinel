@@ -1715,6 +1715,167 @@ static int name_is_comparable_module_method(const char *m) {
   return 0;
 }
 
+/* Exception's own public instance methods, for respond_to? on an instance of
+   a class the program puts under a builtin exception: they are the runtime's
+   and stand in no method table. Only the ones such an instance can be called
+   with both typed and boxed: backtrace_locations, exception and
+   set_backtrace are not there yet on one or the other, and a true would
+   lead a guarded call into NoMethodError. */
+const char *const exception_names[] = {
+    "message", "full_message", "detailed_message", "backtrace", "cause", NULL };
+static int name_is_exception_own_method(const char *m) {
+  for (int i = 0; m && exception_names[i]; i++) if (sp_streq(m, exception_names[i])) return 1;
+  return 0;
+}
+
+/* A name that, written as a def, a Symbol or a String, can change what
+   respond_to? answers: respond_to? itself, a hook, or a method that hides,
+   removes or calls a method by a name it is given. */
+static int name_reshapes_respond(const char *s) {
+  static const char *const w[] = {
+    "respond_to?", "respond_to_missing?", "method_missing", "inherited", "included", "extended",
+    "prepended", "method_added", "private", "protected", "module_function", "undef_method",
+    "remove_method", "send", "__send__", "public_send", "instance_eval", "class_eval",
+    "module_eval", "instance_exec", "class_exec", "module_exec", NULL };
+  for (int i = 0; s && w[i]; i++) if (sp_streq(s, w[i])) return 1;
+  return 0;
+}
+
+/* A literal method name, or a def, that is none of Exception's own, nor
+   `new`: a class's own `new` may answer what is no instance of it. */
+static int names_another_method(const NodeTable *nt, int n) {
+  NodeKind k = n >= 0 ? nt_kind(nt, n) : NK_NilNode;
+  const char *s = k == NK_SymbolNode ? nt_str(nt, n, "value") : k == NK_StringNode ? nt_str(nt, n, "content") :
+                  k == NK_DefNode ? nt_str(nt, n, "name") : NULL;
+  return s && !name_is_exception_own_method(s) && !sp_streq(s, "new");
+}
+
+/* Is `n` the name a class or module of the program is written under? */
+static int names_a_class(const NodeTable *nt, const char *n) {
+  static const NodeKind kinds[] = { NK_ClassNode, NK_ModuleNode };
+  for (int q = 0; q < 2; q++)
+    NT_FOREACH_KIND(nt, kinds[q], id) {
+      int cp = nt_ref(nt, id, "constant_path");
+      const char *cn = cp >= 0 ? nt_str(nt, cp, "name") : NULL;
+      if (cn && sp_streq(cn, n)) return 1;
+    }
+  return 0;
+}
+static int node_is_path(const NodeTable *nt, int n) {
+  return n >= 0 && nt_kind(nt, n) == NK_ConstantPathNode;
+}
+
+/* A value that may be a Symbol made at run time: a method name the scan
+   below cannot read. */
+static int names_by_value(Compiler *c, int n) {
+  TyKind t = comp_ntype(c, n);
+  return t == TY_SYMBOL || t == TY_POLY;
+}
+
+/* Is this a program where an instance of any exception class answers
+   respond_to? for Exception's own names as Exception does, and where a call
+   the answer guards has an arm? Only there is the answer folded to true;
+   every other program keeps the answer it had. One scan a compile:
+   - nothing defines or names respond_to?, respond_to_missing?,
+     method_missing, a hook, or a method that hides or sends by name
+     (name_reshapes_respond), and nothing evaluates a block as another object;
+   - a method that takes a method name (private, undef_method, alias_method,
+     define_method, attr_reader, send, method, ...) is given only literal
+     names, none of them Exception's own, `undef` and `alias` name none, and
+     no Symbol held in a variable is passed as a block or to inject;
+   - no def of one of the names in a program with a bare `private`,
+     `protected` or `module_function`, and no def of `new`;
+   - every class and module is written by its bare name, which no builtin
+     and no other class of the program carries, and under a superclass that
+     is no path; no constant is written through a path, under the name of
+     a builtin exception or of a class, or as another name for a class;
+     nothing calls const_set or remove_const: only there do the name tables
+     tell which class is an exception;
+   - each of the names is called on a receiver other than self, with no
+     block, and with no argument but the keywords a rendering takes. */
+static int prog_exception_names_plain(Compiler *c) {
+  static const Compiler *memo_c; static int memo;
+  if (memo_c == c) return memo;
+  memo_c = c; memo = 0;
+  const NodeTable *nt = c->nt;
+  int own_def = 0, bare_vis = 0;
+  for (int id = 0; id < nt->count; id++) {
+    NodeKind kd = nt_kind(nt, id);
+    if (kd == NK_SymbolNode) { if (name_reshapes_respond(nt_str(nt, id, "value"))) return 0; }
+    else if (kd == NK_StringNode) { if (name_reshapes_respond(nt_str(nt, id, "content"))) return 0; }
+    else if (kd == NK_DefNode) {
+      const char *n = nt_str(nt, id, "name");
+      if (!n || name_reshapes_respond(n) || sp_streq(n, "new")) return 0;
+      if (name_is_exception_own_method(n)) own_def = 1;
+    }
+    else if (kd == NK_UndefNode) {
+      int un = 0; const int *uv = nt_arr(nt, id, "names", &un);
+      for (int q = 0; q < un; q++) if (!names_another_method(nt, uv[q])) return 0;
+    }
+    else if (kd == NK_AliasMethodNode) { if (!names_another_method(nt, nt_ref(nt, id, "new_name"))) return 0; }
+    else if (kd == NK_SingletonClassNode) {
+      int x = nt_ref(nt, id, "expression");
+      if (x < 0 || nt_kind(nt, x) != NK_SelfNode) return 0;
+    }
+    else if (kd == NK_ClassNode || kd == NK_ModuleNode) {
+      /* written as a path it is registered by its leaf, unqualified; a leaf
+         a builtin or another class carries has its path in the name */
+      int cp = nt_ref(nt, id, "constant_path");
+      const char *n = cp >= 0 ? nt_str(nt, cp, "name") : NULL;
+      if (!n || strstr(n, "__") || node_is_path(nt, cp) ||
+          (kd == NK_ClassNode && node_is_path(nt, nt_ref(nt, id, "superclass")))) return 0;
+    }
+    else if (kd == NK_ConstantWriteNode || kd == NK_ConstantOrWriteNode || kd == NK_ConstantAndWriteNode ||
+             kd == NK_ConstantOperatorWriteNode || kd == NK_ConstantTargetNode) {
+      /* a constant that takes the name of a builtin exception or of a
+         class, or is another name for a class: `class CONST` reopens that */
+      const char *n = nt_str(nt, id, "name");
+      if (!n || strstr(n, "__") || is_builtin_exception_name(n) || names_a_class(nt, n) ||
+          resolve_class_alias(c, n)) return 0;
+    }
+    else if (kd == NK_ConstantPathWriteNode || kd == NK_ConstantPathOrWriteNode || kd == NK_ConstantPathAndWriteNode ||
+             kd == NK_ConstantPathOperatorWriteNode || kd == NK_ConstantPathTargetNode) return 0;
+    else if (kd == NK_BlockArgumentNode) {
+      /* `&:name` calls the name; `&sym` calls whatever the Symbol says */
+      int x = nt_ref(nt, id, "expression");
+      if (x >= 0 && (nt_kind(nt, x) == NK_SymbolNode ? !names_another_method(nt, x) : names_by_value(c, x))) return 0;
+    }
+    else if (kd == NK_CallNode) {
+      const char *m = nt_str(nt, id, "name");
+      if (!m) return 0;
+      if (nt_int(nt, id, "rt_probe", 0)) continue;   /* a respond_to? probe is never run */
+      int args = nt_ref(nt, id, "arguments"), an = 0;
+      const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+      if (sp_streq(m, "private") || sp_streq(m, "protected") || sp_streq(m, "module_function") ||
+          sp_streq(m, "undef_method") || sp_streq(m, "remove_method") || sp_streq(m, "alias_method") ||
+          sp_streq(m, "define_method") || sp_streq(m, "define_singleton_method") ||
+          sp_streq(m, "attr") || sp_streq(m, "attr_reader") || sp_streq(m, "attr_accessor")) {
+        if (an == 0) bare_vis = 1;
+        for (int a = 0; a < an; a++) if (!names_another_method(nt, av[a])) return 0;
+      }
+      else if (sp_streq(m, "send") || sp_streq(m, "__send__") || sp_streq(m, "public_send") ||
+               sp_streq(m, "method") || sp_streq(m, "public_method") || sp_streq(m, "instance_method") ||
+               sp_streq(m, "public_instance_method") || sp_streq(m, "singleton_method")) {
+        if (an > 0 && (nt_kind(nt, av[0]) == NK_DefNode || !names_another_method(nt, av[0]))) return 0;
+      }
+      else if (sp_streq(m, "inject") || sp_streq(m, "reduce")) {
+        if (an > 0 && nt_kind(nt, av[an - 1]) != NK_SymbolNode && names_by_value(c, av[an - 1])) return 0;
+      }
+      else if (sp_streq(m, "instance_eval") || sp_streq(m, "class_eval") || sp_streq(m, "module_eval") ||
+               sp_streq(m, "instance_exec") || sp_streq(m, "class_exec") || sp_streq(m, "module_exec") ||
+               sp_streq(m, "eval") || sp_streq(m, "to_proc") ||
+               sp_streq(m, "const_set") || sp_streq(m, "remove_const")) return 0;
+      else if (name_is_exception_own_method(m)) {
+        int recv = nt_ref(nt, id, "receiver");
+        if (recv < 0 || nt_kind(nt, recv) == NK_SelfNode || nt_ref(nt, id, "block") >= 0 ||
+            (an > 0 && !exc_rendering_kwargs(nt, m, an, av))) return 0;
+      }
+    }
+  }
+  if (own_def && bare_vis) return 0;
+  return memo = 1;
+}
+
 /* Method#arity reads the introspection column of the shared facts. */
 #define BAI(c,m,a,...) {c,m,a},
 #define BAM(c,m,a) {c,m,a},
@@ -14189,6 +14350,10 @@ int class_implicit_responds(Compiler *c, int cid, const char *qm) {
   if (comp_method_in_chain(c, cid, "<=>", NULL) >= 0 &&
       name_is_comparable_module_method(qm) &&
       class_mixes_in(c, cid, "Comparable", 0)) return 1;
+  /* a class under a builtin exception has Exception's own methods, in a
+     program where nothing can take one away */
+  if (class_is_exc_subclass(c, cid) && name_is_exception_own_method(qm) &&
+      prog_exception_names_plain(c)) return 1;
   int sk = class_struct_kind(c, cid);
   if (!sk) return 0;
   if (sp_streq(qm, "members") || sp_streq(qm, "to_h") ||
