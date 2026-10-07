@@ -642,8 +642,12 @@ static int nf_call(NF *f, int v) {
   const NodeTable *nt = f->nt;
   const char *nm = nt_str(nt, v, "name");
   const char *op = nt_str(nt, v, "call_operator");
-  /* only a tracked value's nil: the slots it can reach are tracked */
-  if (!nil_fact_tracked(c->ntype[v])) return NFW_NONE;
+  /* only a tracked value's nil: the slots it can reach are tracked; an
+     attribute reader's call that hands out its String slot's handle
+     (TY_STRBUF) is that ivar too, and nothing else of that type is */
+  int handle = c->ntype[v] == TY_STRBUF;
+  if (!handle && !nil_fact_tracked(c->ntype[v])) return NFW_NONE;
+  if (handle && !cplan_nil_slot_reader(c, v)) return NFW_NONE;
   if (op && sp_streq(op, "&.")) return NFW_SAFE_NAV;
   if (!nm) return NFW_OPAQUE;
   int r = nt_ref(nt, v, "receiver");
