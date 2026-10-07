@@ -172,6 +172,8 @@ static inline void sp_re_frames_leave(int stack, int depth) {
   sp_re_frames_leave_to(keep);
 }
 sp_MatchData *sp_re_matchdata_at(mrb_regexp_pattern *pat, const char *str, sp_int cpos);
+sp_MatchData *sp_re_matchdata_last(mrb_regexp_pattern *pat, const char *str);
+sp_MatchData *sp_re_matchdata_last_at(mrb_regexp_pattern *pat, const char *str, sp_int cpos);
 const char *sp_MatchData_aref(sp_MatchData *m, sp_int i);
 const char *sp_MatchData_aref_name(sp_MatchData *m, const char *name);
 sp_StrArray *sp_MatchData_names(sp_MatchData *m);

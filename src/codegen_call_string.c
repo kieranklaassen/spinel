@@ -12,6 +12,8 @@
 
 /* a Regexp literal's match / match? / ===, the match family on a String, gsub, and String#% */
 int emit_call_regexp_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, TyKind rt, TyKind a0) {
+  /* `match` leaves `$~` at its own match where the registers are its frame's own */
+  const char *md = match_sets_last(id) ? "sp_re_matchdata_last" : "sp_re_matchdata";
   /* regex literal match predicates (bool-returning, no MatchData/globals):
      /re/.match?(str[, pos])  and  str.match?(/re/[, pos]) */
   {
@@ -269,7 +271,7 @@ no_gsub_enum:
       int mbody = nt_ref(nt, mblk, "body");
       int mbn = 0; const int *mbb = mbody >= 0 ? nt_arr(nt, mbody, "body", &mbn) : NULL;
       int tm = ++g_tmp, tr2 = ++g_tmp;
-      buf_printf(b, "({ sp_MatchData *_t%d = sp_re_matchdata(sp_re_pat_%d, ", tm, are);
+      buf_printf(b, "({ sp_MatchData *_t%d = %s(sp_re_pat_%d, ", tm, md, are);
       emit_str_expr(c, recv, b);
       buf_printf(b, "); sp_RbVal _t%d = sp_box_nil(); SP_GC_ROOT_RBVAL(_t%d); if (_t%d) { ",
                  tr2, tr2, tm);
@@ -287,10 +289,10 @@ no_gsub_enum:
       if (argc == 1) {
         /* recv is the subject string; emit_str_expr coerces a poly/nilable
            receiver (`@message.subject.match(/re/)`) to the const char* slot */
-        buf_printf(b, "sp_re_matchdata(sp_re_pat_%d, ", are); emit_str_expr(c, recv, b); buf_puts(b, ")");
+        buf_printf(b, "%s(sp_re_pat_%d, ", md, are); emit_str_expr(c, recv, b); buf_puts(b, ")");
       }
       else {
-        buf_printf(b, "sp_re_matchdata_at(sp_re_pat_%d, ", are); emit_str_expr(c, recv, b);
+        buf_printf(b, "%s_at(sp_re_pat_%d, ", md, are); emit_str_expr(c, recv, b);
         buf_puts(b, ", "); emit_int_expr(c, argv[1], b); buf_puts(b, ")");
       }
       return 1;
@@ -302,7 +304,7 @@ no_gsub_enum:
         comp_ntype(c, argv[0]) == TY_STRING &&
         (sp_streq(name, "match?") || sp_streq(name, "match"))) {
       int ts = ++g_tmp;
-      const char *fn = sp_streq(name, "match?") ? "sp_re_match_p" : "sp_re_matchdata";
+      const char *fn = sp_streq(name, "match?") ? "sp_re_match_p" : md;
       buf_printf(b, "({ const char *_t%d = ", ts); emit_str_expr(c, argv[0], b);
       buf_printf(b, "; mrb_regexp_pattern *_t%dp = re_compile(_t%d, (int64_t)(_t%d ? sp_str_byte_len(_t%d) : 0), 0); ",
                  ts, ts, ts, ts);
@@ -327,7 +329,7 @@ no_gsub_enum:
       /* match(str, pos) { |m| ... } starts the scan at pos, as without a
          block: its MatchData was the value, where the call is typed by the
          block's */
-      buf_printf(b, "({ sp_MatchData *_t%d = sp_re_matchdata%s(sp_re_pat_%d, ", tm, argc == 2 ? "_at" : "", rre);
+      buf_printf(b, "({ sp_MatchData *_t%d = %s%s(sp_re_pat_%d, ", tm, md, argc == 2 ? "_at" : "", rre);
       /* a nil subject answers nil without running the block, as the
          blockless form's does: the matchers return NULL for it */
       emit_str_expr_nilable(c, argv[0], b);
@@ -349,10 +351,10 @@ no_gsub_enum:
          value (e.g. a `string?` attr read) to const char*, which emit_expr would
          leave as an sp_RbVal into sp_re_matchdata's const char* slot (#3219). */
       if (argc == 1) {
-        buf_printf(b, "sp_re_matchdata(sp_re_pat_%d, ", rre); emit_str_expr_nilable(c, argv[0], b); buf_puts(b, ")");
+        buf_printf(b, "%s(sp_re_pat_%d, ", md, rre); emit_str_expr_nilable(c, argv[0], b); buf_puts(b, ")");
       }
       else {
-        buf_printf(b, "sp_re_matchdata_at(sp_re_pat_%d, ", rre); emit_str_expr_nilable(c, argv[0], b);
+        buf_printf(b, "%s_at(sp_re_pat_%d, ", md, rre); emit_str_expr_nilable(c, argv[0], b);
         buf_puts(b, ", "); emit_int_expr(c, argv[1], b); buf_puts(b, ")");
       }
       return 1;
@@ -465,9 +467,9 @@ no_gsub_enum:
           if (sp_streq(name, "match") && (argc == 1 || argc == 2)) {
             /* emit_str_expr, not emit_expr: a poly receiver needs coercing into
                the const char* slot, as the precompiled-literal arms do (#3389) */
-            if (argc == 1) { buf_printf(b, "sp_re_matchdata(%s, ", rp.p); emit_str_expr(c, recv, b); buf_puts(b, ")"); }
+            if (argc == 1) { buf_printf(b, "%s(%s, ", md, rp.p); emit_str_expr(c, recv, b); buf_puts(b, ")"); }
             else {
-              buf_printf(b, "sp_re_matchdata_at(%s, ", rp.p); emit_str_expr(c, recv, b);
+              buf_printf(b, "%s_at(%s, ", md, rp.p); emit_str_expr(c, recv, b);
               buf_puts(b, ", "); emit_int_expr(c, argv[1], b); buf_puts(b, ")");
             }
             free(rp.p); return 1;
@@ -544,7 +546,7 @@ no_gsub_enum:
             int mbody = nt_ref(nt, mblk, "body");
             int mbn = 0; const int *mbb = mbody >= 0 ? nt_arr(nt, mbody, "body", &mbn) : NULL;
             int tm = ++g_tmp, tr2 = ++g_tmp;
-            buf_printf(b, "({ sp_MatchData *_t%d = sp_re_matchdata(%s, ", tm, rp.p);
+            buf_printf(b, "({ sp_MatchData *_t%d = %s(%s, ", tm, md, rp.p);
             emit_str_expr(c, argv[0], b);
             buf_printf(b, "); sp_RbVal _t%d = sp_box_nil(); SP_GC_ROOT_RBVAL(_t%d); if (_t%d) { ",
                        tr2, tr2, tm);
@@ -558,8 +560,8 @@ no_gsub_enum:
             /* the subject can arrive boxed -- one call site passing an
                untyped block param is enough -- so unbox it into the const
                char * slot the way match? and =~ already do */
-            if (argc == 1) { buf_printf(b, "sp_re_matchdata(%s, ", rp.p); emit_str_expr_nilable(c, argv[0], b); buf_puts(b, ")"); }
-            else { buf_printf(b, "sp_re_matchdata_at(%s, ", rp.p); emit_str_expr_nilable(c, argv[0], b); buf_puts(b, ", "); emit_int_expr(c, argv[1], b); buf_puts(b, ")"); }
+            if (argc == 1) { buf_printf(b, "%s(%s, ", md, rp.p); emit_str_expr_nilable(c, argv[0], b); buf_puts(b, ")"); }
+            else { buf_printf(b, "%s_at(%s, ", md, rp.p); emit_str_expr_nilable(c, argv[0], b); buf_puts(b, ", "); emit_int_expr(c, argv[1], b); buf_puts(b, ")"); }
             free(rp.p); return 1;
           }
           free(rp.p);
