@@ -38,7 +38,13 @@ from the commits its recipe lists.
 - `csum.sh TREE DIR OUT` sums the C a tree emits for a directory (tree path
   masked); `sum3.rb` makes the two-rule table from the runs and the sums,
   `tab2.rb` the table from two runs alone, and `cmp4.rb` counts by the sums
-  what a later head of a piece gives up against an earlier one.
+  what a later head of a piece gives up against an earlier one; `final.rb`
+  makes the table of a head whose runs were made on an earlier head (a
+  program keeps a run only where its C is the C that was run).
+- `qc-gen.rb OUT` and `diamond-gen.rb LEVELS`: the fifth piece's programs,
+  random graphs of include, prepend and superclass around a constant several
+  bodies define, and the diamond of includes its table times; `csumt.sh`
+  sums the C under a time limit and `utime.rb` prints a compile's user time.
 
 `texts/` holds the upstream texts of the three pieces as they are summed in
 the hand-over: `numeric-*` for the first (a boxed number's
@@ -47,4 +53,5 @@ the hand-over: `numeric-*` for the first (a boxed number's
 to `-v11` files are its earlier texts), `bl1-*`
 for the third (the constant in `rescue` and `raise`; its refactor's message
 is in commit 69d79bf9), `gd-*` for the fourth (an exception's `is_a?` where
-two modules name a class alike).
+two modules name a class alike), `qc-*` for the fifth (the compile time of a
+constant's lookup through a diamond of includes).

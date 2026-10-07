@@ -1,0 +1,26 @@
+A constant's lookup walks each included module once
+
+    module Lib;  class X; end; end
+    module Lib2; class X; end; end
+    class X; def hi = "hi"; end
+    module A3; end; module B3; end
+    module A2; include A3, B3; end; module B2; include A3, B3; end
+    module A1; include A2, B2; end; module B1; include A2, B2; end
+    class User; include A1; def go = X.new.hi; end
+
+A name several bodies define is looked up through the ancestors of the
+body that reads it (qc_ancestor_lookup), and the walk took every path
+through the includes. Two modules a level, each including both of the
+level below, is 2**levels walks: 22 levels compiled in 2.5 s, 26 in
+43 s. CRuby runs the 30-level program in 0.08 s.
+
+A module the walk leaves without a match is marked with the walk's
+number and the depth it stood at, and is not walked again from as deep
+or deeper. The bound of 32 cuts the second walk no later than the
+first, so it finds nothing the first did not. The body the read sits
+in is asked without its own write and keeps no mark. No answer
+changes: the C of every test is the same.
+
+Test: test/const_read_include_diamond.rb, 30 levels.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
