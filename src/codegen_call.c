@@ -9510,6 +9510,8 @@ int emit_user_new_arm(Compiler *c, int id, int ci, int argc, const int *atmp,
   if (hoisted) {
     ArgLayout L;
     arg_layout(c, ks, NULL, pos_argc, -1, 0, &L);
+    /* what a default hoists is this arm's, as in the laid-out form below */
+    Buf *sv_pre = g_pre; g_pre = &apre;
     for (int a = 0; a < ks->nparams; a++) {
       buf_puts(&cb, a ? ", " : lead);
       LocalVar *pp = ks->pnames && ks->pnames[a] ? scope_local(ks, ks->pnames[a]) : NULL;
@@ -9540,6 +9542,7 @@ int emit_user_new_arm(Compiler *c, int id, int ci, int argc, const int *atmp,
          the tail */
       emit_ctor_arm_param(c, ks, a, &L, atmp, &apre, &cb);
     }
+    g_pre = sv_pre;
     arg_layout_free(&L);
   }
   else {

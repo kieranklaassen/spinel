@@ -1575,8 +1575,10 @@ int emit_call_new_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const c
         g_ctor_self = selftxt;
         g_ctor_self_deref = comp_ty_value_obj(c, ty_object(ci)) ? "." : "->";
       }
+      /* what a default hoists is this arm's: ahead of the switch it ran for
+         every class */
       Buf *sv_pre = g_pre;
-      if (pd_uid || self_t >= 0) g_pre = &pdpre;
+      g_pre = &pdpre;
       for (int j = 0; j < np; j++) {
         if (j) buf_puts(&ab, ", ");
         if (is2) {
@@ -1702,19 +1704,27 @@ int emit_call_new_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const c
         continue;
       }
       Buf ab9; memset(&ab9, 0, sizeof ab9);
+      /* a default's hoisted statement is this arm's: ahead of the switch it
+         ran for every class, whichever one the value held */
+      Buf pre9; memset(&pre9, 0, sizeof pre9);
+      Buf *sv_pre9 = g_pre; g_pre = &pre9;
       if (initm >= 0 && c->scopes[initm].nparams > 0)
         emit_args_filled(c, initm, -1, "", &ab9);
+      g_pre = sv_pre9;
       emit_ctor_block_slot(c, id, initm, ab9.p && ab9.p[0] ? ", " : "", &ab9);
       const char *args9 = ab9.p ? ab9.p : "";
+      buf_printf(b, "case %d: ", ci);
+      if (pre9.p) buf_printf(b, "{ %s", pre9.p);
       /* a value-type object returns by value: box via its vobj boxer, not
          sp_box_obj which expects a heap pointer (#2450) */
       if (c->classes[ci].is_value_type)
-        buf_printf(b, "case %d: _t%d=sp_box_vobj_%s(sp_%s_new(%s));break;",
-                   ci, rt2, c->classes[ci].c_name, c->classes[ci].c_name, args9);
+        buf_printf(b, "_t%d=sp_box_vobj_%s(sp_%s_new(%s));",
+                   rt2, c->classes[ci].c_name, c->classes[ci].c_name, args9);
       else
-        buf_printf(b, "case %d: _t%d=sp_box_obj(sp_%s_new(%s),%d);break;",
-                   ci, rt2, c->classes[ci].c_name, args9, ci);
-      free(ab9.p);
+        buf_printf(b, "_t%d=sp_box_obj(sp_%s_new(%s),%d);",
+                   rt2, c->classes[ci].c_name, args9, ci);
+      buf_puts(b, pre9.p ? " } break;" : "break;");
+      free(ab9.p); free(pre9.p);
     }
     ctor_arity_emit(&aerr, b);
     emit_builtin_new_arms(c, 0, NULL, rt2, kt, 0, b);
@@ -1779,8 +1789,9 @@ int emit_call_new_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const c
          optional: the arm fills each with its default, exactly as the
          statically-known `Klass.new` does. */
       if (argc == 0 && nreq == 0 && np > 0) {
-        buf_printf(b, "case %d: _t%d=", ci, rt2);
+        buf_printf(b, "case %d: ", ci);
         if (ctor_needs_self_defaults(c, initm, 0)) {
+          buf_printf(b, "_t%d=", rt2);
           buf_printf(b, c->classes[ci].is_value_type ? "sp_box_vobj_%s(" : "sp_box_obj(",
                      c->classes[ci].c_name);
           emit_ctor_alloc_init(c, ci, initm, -1, id, b);
@@ -1789,15 +1800,22 @@ int emit_call_new_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const c
           continue;
         }
         Buf ad; memset(&ad, 0, sizeof ad);
+        /* as in the Class-valued form above: the arm's own prefix */
+        Buf pre0; memset(&pre0, 0, sizeof pre0);
+        Buf *sv_pre0 = g_pre; g_pre = &pre0;
         emit_args_filled(c, initm, -1, "", &ad);
+        g_pre = sv_pre0;
         emit_ctor_block_slot(c, id, initm, ad.p && ad.p[0] ? ", " : "", &ad);
+        if (pre0.p) buf_printf(b, "{ %s", pre0.p);
+        buf_printf(b, "_t%d=", rt2);
         if (c->classes[ci].is_value_type)
-          buf_printf(b, "sp_box_vobj_%s(sp_%s_new(%s)); break;",
+          buf_printf(b, "sp_box_vobj_%s(sp_%s_new(%s));",
                      c->classes[ci].c_name, c->classes[ci].c_name, ad.p ? ad.p : "");
         else
-          buf_printf(b, "sp_box_obj(sp_%s_new(%s),%d); break;",
+          buf_printf(b, "sp_box_obj(sp_%s_new(%s),%d);",
                      c->classes[ci].c_name, ad.p ? ad.p : "", ci);
-        free(ad.p);
+        buf_puts(b, pre0.p ? " } break;" : " break;");
+        free(ad.p); free(pre0.p);
         continue;
       }
       /* Same rule as the class-value emitter above: optional parameters are
@@ -1831,8 +1849,10 @@ int emit_call_new_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const c
         g_ctor_self = selftxt;
         g_ctor_self_deref = comp_ty_value_obj(c, ty_object(ci)) ? "." : "->";
       }
+      /* what a default hoists is this arm's: ahead of the switch it ran for
+         every class */
       Buf *sv_pre = g_pre;
-      if (pd_uid || self_t >= 0) g_pre = &pdpre;
+      g_pre = &pdpre;
       for (int j = 0; j < np; j++) {
         if (j) buf_puts(&ab, ", ");
         if (is) {
