@@ -1,0 +1,1 @@
+A pattern binding that would copy its subject onto a String handle is refused
