@@ -1853,6 +1853,7 @@ GC_STRESS_TESTS := test/gc_root_frame_slots.rb \
                    test/gc_root_gathered_handle_param.rb \
                    test/dispatch_arm_roots_operands.rb \
                    test/exception_message_nul.rb \
+                   test/exception_keeps_value_made_after_it.rb \
                    test/string_aset_value_runs_first.rb
 gc-stress-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
 	@tmp=$$(mktemp -d /tmp/spinel-gcstress.XXXXXX); ok=1; \
