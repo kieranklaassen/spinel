@@ -2057,6 +2057,278 @@ static int method_block_presence(Compiler *c, int mi) {
   return with ? 1 : 0;
 }
 
+/* Whether a value arm of `v` is a parenthesized sequence: parentheses that
+   hold more than one statement. */
+int value_arm_has_sequence(const NodeTable *nt, int v) {
+  if (v < 0) return 0;
+  switch (nt_kind(nt, v)) {
+  case NK_StatementsNode: {
+    int n = 0; const int *s = nt_arr(nt, v, "body", &n);
+    return n > 0 && value_arm_has_sequence(nt, s[n - 1]);
+  }
+  case NK_ParenthesesNode: {
+    int b = nt_ref(nt, v, "body"), n = 0;
+    if (b >= 0 && nt_kind(nt, b) == NK_StatementsNode) nt_arr(nt, b, "body", &n);
+    return n > 1 || value_arm_has_sequence(nt, b);
+  }
+  case NK_ElseNode: return value_arm_has_sequence(nt, nt_ref(nt, v, "statements"));
+  case NK_IfNode:
+    return value_arm_has_sequence(nt, nt_ref(nt, v, "statements")) ||
+           value_arm_has_sequence(nt, nt_ref(nt, v, "subsequent"));
+  case NK_UnlessNode:
+    return value_arm_has_sequence(nt, nt_ref(nt, v, "statements")) ||
+           value_arm_has_sequence(nt, nt_ref(nt, v, "else_clause"));
+  case NK_AndNode: case NK_OrNode:
+    return value_arm_has_sequence(nt, nt_ref(nt, v, "left")) ||
+           value_arm_has_sequence(nt, nt_ref(nt, v, "right"));
+  case NK_RescueModifierNode:
+    return value_arm_has_sequence(nt, nt_ref(nt, v, "expression")) ||
+           value_arm_has_sequence(nt, nt_ref(nt, v, "rescue_expression"));
+  case NK_CaseNode: {
+    int nw = 0; const int *wh = nt_arr(nt, v, "conditions", &nw);
+    for (int i = 0; i < nw; i++)
+      if (value_arm_has_sequence(nt, nt_ref(nt, wh[i], "statements"))) return 1;
+    return value_arm_has_sequence(nt, nt_ref(nt, v, "else_clause"));
+  }
+  default: return 0;
+  }
+}
+
+/* The last statement of method `mi` where it joins values and so types the
+   method by itself: -1 where method_call_ret types the call from each site's
+   block (a `yield` tail, a call of the block parameter, the block arm of an
+   `if block_given?`), and where one of its value arms is a parenthesized
+   sequence, whose last statement's value is not boxed for a nil block. */
+int scope_joined_tail(Compiler *c, int mi) {
+  const NodeTable *nt = c->nt;
+  int last = scope_body_last(c, mi);
+  if (last < 0 || block_given_tail_then_last(c, last) >= 0) return -1;
+  int u = an_unparen(nt, last);
+  if (u < 0 || nt_kind(nt, u) == NK_YieldNode || is_blk_param_call(c, u, mi)) return -1;
+  if (value_arm_has_sequence(nt, last)) return -1;
+  return last;
+}
+
+/* ty_unify, a nil joined to any type whose slot holds a nil of its own (and
+   to a Symbol, whose slot's nil is its -1) leaving that type. */
+static TyKind slot_join(TyKind a, TyKind b) {
+  TyKind u = ty_unify(a, b);
+  if (u != TY_POLY || (a != TY_NIL && b != TY_NIL)) return u;
+  TyKind t = a == TY_NIL ? b : a;
+  return t != TY_POLY && (t == TY_SYMBOL || an_ty_holds_nil(t)) ? t : TY_POLY;
+}
+
+/* Joins into `u` the values the arms of `v` answer, a yield aside: its
+   value is the sites' own. An arm left out answers nil. */
+static TyKind value_arms_join(Compiler *c, int v, TyKind u) {
+  const NodeTable *nt = c->nt;
+  if (u == TY_POLY) return u;
+  if (v < 0) return slot_join(u, TY_NIL);
+  switch (nt_kind(nt, v)) {
+  case NK_StatementsNode: {
+    int n = 0; const int *s = nt_arr(nt, v, "body", &n);
+    return n > 0 ? value_arms_join(c, s[n - 1], u) : slot_join(u, TY_NIL);
+  }
+  case NK_ParenthesesNode: return value_arms_join(c, nt_ref(nt, v, "body"), u);
+  case NK_ElseNode: return value_arms_join(c, nt_ref(nt, v, "statements"), u);
+  case NK_IfNode:
+    u = value_arms_join(c, nt_ref(nt, v, "statements"), u);
+    return value_arms_join(c, nt_ref(nt, v, "subsequent"), u);
+  case NK_UnlessNode:
+    u = value_arms_join(c, nt_ref(nt, v, "statements"), u);
+    return value_arms_join(c, nt_ref(nt, v, "else_clause"), u);
+  case NK_AndNode: case NK_OrNode:
+    u = value_arms_join(c, nt_ref(nt, v, "left"), u);
+    return value_arms_join(c, nt_ref(nt, v, "right"), u);
+  case NK_RescueModifierNode:
+    u = value_arms_join(c, nt_ref(nt, v, "expression"), u);
+    return value_arms_join(c, nt_ref(nt, v, "rescue_expression"), u);
+  case NK_CaseNode: {
+    int nw = 0; const int *wh = nt_arr(nt, v, "conditions", &nw);
+    for (int i = 0; i < nw; i++) u = value_arms_join(c, nt_ref(nt, wh[i], "statements"), u);
+    return value_arms_join(c, nt_ref(nt, v, "else_clause"), u);
+  }
+  case NK_ReturnNode: {
+    int an = nt_ref(nt, v, "arguments"), ac = 0;
+    const int *av = an >= 0 ? nt_arr(nt, an, "arguments", &ac) : NULL;
+    if (ac == 0) return slot_join(u, TY_NIL);
+    return ac == 1 ? value_arms_join(c, av[0], u) : TY_POLY;
+  }
+  case NK_YieldNode: return u;
+  default: {
+    TyKind t = infer_type(c, v);
+    if (t == TY_VOID) t = TY_NIL;
+    return t == TY_UNKNOWN ? u : slot_join(u, t);
+  }
+  }
+}
+
+/* How the yields that are value arms of `v` stand in it, as bits: 1 in
+   parentheses of its own (`(yield)`), 2 under a rescue modifier, 4 in a
+   `case`, 8 where its value is an expression's (in parentheses, a `case`, a
+   rescue modifier, beside `&&` or `||`, in a `return`'s value) and not a
+   statement's own, 16 on the left of an `||`. `*any` gathers the bits some
+   yield shows and `*all` those every yield shows. Answers whether `id` is
+   among them. */
+static int yield_arm_carriers(const NodeTable *nt, int v, int id, int f, int *any, int *all) {
+  if (v < 0) return 0;
+  int r;
+  switch (nt_kind(nt, v)) {
+  case NK_YieldNode: *any |= f; *all &= f; return v == id;
+  case NK_StatementsNode: {
+    int n = 0; const int *s = nt_arr(nt, v, "body", &n);
+    return n > 0 ? yield_arm_carriers(nt, s[n - 1], id, f, any, all) : 0;
+  }
+  case NK_ParenthesesNode: {
+    int b = nt_ref(nt, v, "body"), n = 0;
+    const int *s = b >= 0 && nt_kind(nt, b) == NK_StatementsNode ? nt_arr(nt, b, "body", &n) : NULL;
+    int own = s && n == 1 && nt_kind(nt, s[0]) == NK_YieldNode;
+    return yield_arm_carriers(nt, b, id, f | (own ? 1 : 8), any, all);
+  }
+  case NK_ElseNode: return yield_arm_carriers(nt, nt_ref(nt, v, "statements"), id, f, any, all);
+  case NK_IfNode:
+    r = yield_arm_carriers(nt, nt_ref(nt, v, "statements"), id, f, any, all);
+    return yield_arm_carriers(nt, nt_ref(nt, v, "subsequent"), id, f, any, all) | r;
+  case NK_UnlessNode:
+    r = yield_arm_carriers(nt, nt_ref(nt, v, "statements"), id, f, any, all);
+    return yield_arm_carriers(nt, nt_ref(nt, v, "else_clause"), id, f, any, all) | r;
+  case NK_AndNode:
+    r = yield_arm_carriers(nt, nt_ref(nt, v, "left"), id, f | 8, any, all);
+    return yield_arm_carriers(nt, nt_ref(nt, v, "right"), id, f | 8, any, all) | r;
+  case NK_OrNode:
+    r = yield_arm_carriers(nt, nt_ref(nt, v, "left"), id, f | 24, any, all);
+    return yield_arm_carriers(nt, nt_ref(nt, v, "right"), id, f | 8, any, all) | r;
+  case NK_RescueModifierNode:
+    r = yield_arm_carriers(nt, nt_ref(nt, v, "expression"), id, f | 10, any, all);
+    return yield_arm_carriers(nt, nt_ref(nt, v, "rescue_expression"), id, f | 10, any, all) | r;
+  case NK_CaseNode: {
+    int nw = 0; const int *wh = nt_arr(nt, v, "conditions", &nw);
+    r = 0;
+    for (int i = 0; i < nw; i++)
+      r |= yield_arm_carriers(nt, nt_ref(nt, wh[i], "statements"), id, f | 12, any, all);
+    return yield_arm_carriers(nt, nt_ref(nt, v, "else_clause"), id, f | 12, any, all) | r;
+  }
+  case NK_ReturnNode: {
+    int an = nt_ref(nt, v, "arguments"), ac = 0;
+    const int *av = an >= 0 ? nt_arr(nt, an, "arguments", &ac) : NULL;
+    if (ac != 1) return 0;
+    return yield_arm_carriers(nt, av[0], id, nt_kind(nt, av[0]) == NK_YieldNode ? f : f | 8, any, all);
+  }
+  default: return 0;
+  }
+}
+
+/* Whether `node` is under an `ensure` in `v`: in a `begin` that has one, and
+   not in the `ensure` itself. */
+static int node_under_ensure(const NodeTable *nt, int v, int node, int in) {
+  if (v < 0) return 0;
+  if (v == node) return in;
+  int ens = nt_kind(nt, v) == NK_BeginNode ? nt_ref(nt, v, "ensure_clause") : -1;
+  int nr = nt_num_refs(nt, v);
+  for (int i = 0; i < nr; i++) {
+    int ch = nt_ref_at(nt, v, i);
+    if (ch >= 0 && node_under_ensure(nt, ch, node, ens >= 0 ? ch != ens : in)) return 1;
+  }
+  int na = nt_num_arrs(nt, v);
+  for (int i = 0; i < na; i++) {
+    int n = 0; const int *ch = nt_arr_at(nt, v, i, &n);
+    for (int k = 0; k < n; k++)
+      if (ch[k] >= 0 && node_under_ensure(nt, ch[k], node, ens >= 0 ? 1 : in)) return 1;
+  }
+  return 0;
+}
+
+/* The join of the values in `root`, the yields typed `u`; with no `root`,
+   of what method `mi` answers: its last statement's arms and each
+   `return`'s. */
+static TyKind yield_values_join(Compiler *c, int mi, int root, TyKind u) {
+  if (root >= 0) return value_arms_join(c, root, u);
+  u = value_arms_join(c, scope_body_last(c, mi), u);
+  if (comp_scope_index_is_frozen()) {
+    for (int r = comp_sret_first(c, mi); r >= 0; r = comp_sret_next(c, r)) u = value_arms_join(c, r, u);
+  }
+  else {
+    NT_FOREACH_KIND(c->nt, NK_ReturnNode, r) {
+      if (comp_scope_of(c, r) == &c->scopes[mi]) u = value_arms_join(c, r, u);
+    }
+  }
+  return u;
+}
+
+/* Whether yield `id` of yielding method `mi` is held right as it is where
+   it is a value arm of `root` (a write's value, an element, an argument)
+   or, with no `root`, of what the method answers: the block values of
+   every site and the other values there join to one type, a nil among them
+   carried by that type's own nil (an Integer's or a Float's sentinel, a
+   String's or an object's NULL, a Symbol's -1) or, on the left of an
+   `||`, never coming out, and that type is the one the first site's block
+   gives. Such a program runs unboxed and right, and a place that would box
+   the yield leaves it so.
+
+   Three forms are not held right and are never left: a yield in
+   parentheses of its own, where a nil block's value comes out as a bare 0;
+   under a rescue modifier any slot but a scalar's; and a Symbol's slot
+   where the yield is a statement's own value (an arm of an `if` that is
+   the last statement, `return yield` not under an `ensure`), where a nil
+   block's value comes out as the Symbol numbered 0. In a `root` the question is asked only
+   through a rescue modifier or a `case`: by any other way there the yield
+   was boxed already. The yields of one value are left together or not at
+   all. */
+int yield_values_fit_one_slot(Compiler *c, int mi, int root, int id) {
+  static int busy = 0;
+  if (busy) return 1;
+  const NodeTable *nt = c->nt;
+  int any = 0, every = ~0, found = 0;
+  if (root >= 0) {
+    found = yield_arm_carriers(nt, root, id, 0, &any, &every);
+    if (!(every & 6)) return 0;
+  }
+  else {
+    found = yield_arm_carriers(nt, scope_body_last(c, mi), id, 0, &any, &every);
+    /* a `return` under an `ensure` keeps its value in a slot of the
+       method's type, as an expression's is kept */
+    int body = c->scopes[mi].body;
+    if (comp_scope_index_is_frozen()) {
+      for (int r = comp_sret_first(c, mi); r >= 0; r = comp_sret_next(c, r))
+        found |= yield_arm_carriers(nt, r, id, node_under_ensure(nt, body, r, 0) ? 8 : 0, &any, &every);
+    }
+    else {
+      NT_FOREACH_KIND(nt, NK_ReturnNode, r) {
+        if (comp_scope_of(c, r) == &c->scopes[mi])
+          found |= yield_arm_carriers(nt, r, id, node_under_ensure(nt, body, r, 0) ? 8 : 0, &any, &every);
+      }
+    }
+  }
+  if (!found || (any & 1)) return 0;
+  busy = 1;
+  int sv = g_yvt_unify_all; g_yvt_unify_all = 1;
+  TyKind all = yield_value_type(c, mi);
+  g_yvt_unify_all = sv;
+  TyKind first = yield_value_type(c, mi);
+  if (all == TY_POLY) {
+    /* the sites again, a nil joined as the slot holds it; on the left of
+       an `||` a nil never comes out, and any slot the first site gives
+       holds it there */
+    int tails[32];
+    int nsite = yield_block_tails(c, mi, tails, 32);
+    int left = (every & 16) && first != TY_NIL && first != TY_UNKNOWN;
+    all = nsite < 32 ? TY_UNKNOWN : TY_POLY;
+    for (int i = 0; i < nsite && all != TY_POLY; i++) {
+      TyKind bt = infer_type(c, tails[i]);
+      if (bt == TY_VOID) bt = TY_NIL;
+      if (left && bt == TY_NIL) continue;
+      if (bt != TY_UNKNOWN) all = slot_join(all, bt);
+    }
+    if (left && all != first) all = TY_POLY;
+  }
+  TyKind u = yield_values_join(c, mi, root, all);
+  int fits = u != TY_POLY && u == yield_values_join(c, mi, root, first);
+  busy = 0;
+  if ((any & 2) && u != TY_INT && u != TY_FLOAT) return 0;
+  if (u == TY_SYMBOL && !(every & 8)) return 0;
+  return fits;
+}
+
 TyKind dispatch_ret_over(Compiler *c, int cid, const char *name, int cmeth, int base_mi, TyKind r,
                          int call_id) {
   int nd = 0;
