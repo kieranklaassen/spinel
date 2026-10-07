@@ -12609,6 +12609,11 @@ void emit_regex_section(Compiler *c, Buf *b) {
     buf_puts(b, "  SP_INSTALL_HOOK(sp_user_binop_hook, sp_user_binop_dispatch);\n");
   if (g_has_user_aset)
     buf_puts(b, "  sp_user_aset_hook = sp_user_aset_dispatch;\n");
+  /* String's own `[]=`, or a module's it includes or prepends, takes the
+     keys the boxed stores refuse (sp_poly_str_key_refuse) */
+  int str_ci = comp_class_index(c, "String");
+  if (str_ci >= 0 && comp_method_in_chain(c, str_ci, "[]=", NULL) >= 0)
+    buf_puts(b, "  sp_str_own_aset = TRUE;\n");
   if (g_has_user_coerce)
     buf_puts(b, "  sp_user_coerce_hook = sp_user_coerce_dispatch;\n");
   if (g_has_user_to_io)
