@@ -687,6 +687,15 @@ void emit_args_filled(Compiler *c, int callee_idx, int argsNode, const char *lea
    is the node a refusal names, -1 for none. */
 void emit_args_filled_argv(Compiler *c, int callee_idx, const int *argv, int argc, int argsNode,
                            const char *lead, Buf *out);
+/* emit_args_filled for a site that can put statements in front of its call:
+   the defaults whose order a program can tell are made into `ahead`, in
+   order (defaults_run_ahead), and the site hands `ahead` to emit_call_ahead
+   once the call is written. */
+void emit_args_filled_ahead(Compiler *c, int callee_idx, int argsNode, const char *lead, Buf *out,
+                            Buf *ahead);
+/* Puts `ahead` in front of the call written at `at`, in the call's own
+   expression: `({ <statements> <call>; })`. */
+void emit_call_ahead(Buf *b, size_t at, Buf *ahead);
 void kw_plan(Compiler *c, Scope *m, int kwh, KwPlan *P);
 /* The keyword error a plan finds statically, in CRuby's order, into `msg`;
    0 when it finds none. */

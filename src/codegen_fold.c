@@ -156,8 +156,10 @@ void emit_method_call(Compiler *c, int id, Buf *b) {
   /* a top-level alias resolves to the target's scope: emit ITS symbol, since
      the alias has no function of its own (#3730) */
   if (m) nd_callee(c, id, mi, -1, 0);
+  size_t at = b->len;
+  Buf ahead; memset(&ahead, 0, sizeof ahead);
   buf_printf(b, "sp_%s(", mc_top(c, m && m->name ? m->name : name));
-  emit_args_filled(c, mi, nt_ref(nt, id, "arguments"), "", b);
+  emit_args_filled_ahead(c, mi, nt_ref(nt, id, "arguments"), "", b, &ahead);
   /* pass &block as sp_Proc * when the callee has a blk_param and isn't inlined */
   if (m && m->blk_param && m->blk_param[0] && !m->yields) {
     /* A forwarded `&blk` can't be materialized directly by emit_proc_literal;
@@ -180,6 +182,7 @@ void emit_method_call(Compiler *c, int id, Buf *b) {
     }
   }
   buf_puts(b, ")");
+  emit_call_ahead(b, at, &ahead);
 }
 
 /* Emit, into g_pre after the caller's `<lhs> = `, the rest of the statement
@@ -10251,15 +10254,107 @@ static void emit_elem_param(Compiler *c, Scope *m, int i, int off, int tmp, TyKi
   free(eb.p);
 }
 
+/* Can a program tell which of two defaults a call fills ran first? Both
+   write, or one writes what the other reads. */
+static int defaults_order_tells(Compiler *c, int a, int b) {
+  int ea = subtree_has_side_effect(c, a), eb = subtree_has_side_effect(c, b);
+  return (ea && eb) || (ea && default_rebound_by(c, b, a)) || (eb && default_rebound_by(c, a, b));
+}
+
+/* The defaults a call into `m` fills that are made ahead of it, in order,
+   in the call's own expression: a flag a parameter (the caller frees it), or
+   NULL for none. The binding writes a default in its parameter's slot of the
+   call's parentheses, and C runs a call's arguments in any order, gcc the
+   last first: `def m(x = ($n += 1), y = ($n += 1))` called `m` answered
+   [2, 1]. A default of a kind that takes a root is made in the prelude
+   instead, ahead of a scalar one written before it. So from the first
+   default that stays in the parentheses while a later one can tell the
+   order (defaults_order_tells), each default whose order can be told runs
+   ahead. Any other call keeps its C. */
+static char *defaults_run_ahead(Compiler *c, Scope *m, const ArgLayout *L, int kwh, int kw_merged) {
+  int n = m->nparams, first = -1;
+  if (!m->pdefault || n < 2) return NULL;
+  int *d = malloc(sizeof(int) * (size_t)n);
+  char *ahead = NULL;
+  for (int i = 0; i < n; i++) {
+    int given = L->from[i] != ARG_DEFAULT;
+    if (L->from[i] == ARG_BY_NAME && i != m->kwrest_idx)
+      given = kwh >= 0 && !kw_merged && m->pnames[i] && callee_has_kwarg(c, m, m->pnames[i]) &&
+              kwh_lookup(c->nt, kwh, m->pnames[i]) >= 0;
+    d[i] = given ? -1 : m->pdefault[i];
+  }
+  for (int i = 0; i < n && first < 0; i++) {
+    LocalVar *p = d[i] >= 0 && m->pnames[i] ? scope_local(m, m->pnames[i]) : NULL;
+    if (!p || p->byref_out || arg_wants_root(c, p->type, -1)) continue;
+    for (int j = i + 1; j < n && first < 0; j++)
+      if (d[j] >= 0 && defaults_order_tells(c, d[i], d[j])) first = i;
+  }
+  if (first >= 0) ahead = calloc((size_t)n, 1);
+  for (int i = first; ahead && i < n; i++) {
+    for (int j = first; j < n && d[i] >= 0 && !ahead[i]; j++)
+      ahead[i] = j != i && d[j] >= 0 && defaults_order_tells(c, d[i], d[j]);
+    /* one a temp cannot hold (a lent slot, a kind with no C type) leaves
+       the whole call as it was */
+    LocalVar *p = ahead[i] && m->pnames[i] ? scope_local(m, m->pnames[i]) : NULL;
+    if (ahead[i] && (!p || p->byref_out ||
+                     !(p->type == TY_POLY || ty_is_object(p->type) || c_type_name(p->type)))) {
+      free(ahead);
+      ahead = NULL;
+    }
+  }
+  free(d);
+  return ahead;
+}
+
+/* The default of parameter `idx`, made ahead of the call (defaults_run_ahead):
+   its statement goes to `ahead`, which the call's site puts in front of the
+   call (emit_call_ahead), and its temp is the argument. A kind that takes a
+   root is held in a rooted temp declared in the prelude and assigned in
+   `ahead`, as emit_rooted_conversion holds a converted read. */
+static void emit_default_ahead(Compiler *c, Scope *m, int idx, Buf *ahead, Buf *out) {
+  TyKind pt = scope_local(m, m->pnames[idx])->type;
+  Buf v; memset(&v, 0, sizeof v);
+  emit_arg_or_default(c, m, idx, -1, &v);
+  int t = ++g_tmp;
+  if (arg_wants_root(c, pt, -1)) {
+    emit_indent(g_pre, g_indent);
+    emit_ctype(c, pt, g_pre);
+    buf_printf(g_pre, " _t%d = %s; ", t, pt == TY_POLY ? "sp_box_nil()" : default_value_from_compiler(c, pt));
+    buf_printf(g_pre, pt == TY_POLY ? "SP_GC_ROOT_RBVAL(_t%d);\n" : "SP_GC_ROOT(_t%d);\n", t);
+  }
+  else {
+    emit_ctype(c, pt, ahead);
+    buf_puts(ahead, " ");
+  }
+  buf_printf(ahead, "_t%d = %s; ", t, v.p ? v.p : default_value_from_compiler(c, pt));
+  buf_printf(out, "_t%d", t);
+  free(v.p);
+}
+
+/* See codegen_internal.h. */
+void emit_call_ahead(Buf *b, size_t at, Buf *ahead) {
+  if (!ahead->len) return;
+  Buf call; memset(&call, 0, sizeof call);
+  buf_puts(&call, b->p + at);
+  b->len = at;
+  buf_puts(b, "({ ");
+  buf_puts(b, ahead->p);
+  buf_puts(b, call.p);
+  buf_puts(b, "; })");
+  free(call.p); free(ahead->p);
+  memset(ahead, 0, sizeof *ahead);
+}
+
 void emit_args_filled(Compiler *c, int callee_idx, int argsNode, const char *lead, Buf *out) {
   int argc = 0;
   const int *argv = argsNode >= 0 ? nt_arr(c->nt, argsNode, "arguments", &argc) : NULL;
   emit_args_filled_argv(c, callee_idx, argv, argc, argsNode, lead, out);
 }
 
-/* See codegen_internal.h. */
-void emit_args_filled_argv(Compiler *c, int callee_idx, const int *argv, int argc, int argsNode,
-                           const char *lead, Buf *out) {
+/* emit_args_filled_argv; with `ahead`, a site that can put statements in
+   front of its call (emit_args_filled_ahead). */
+static void emit_args_filled_argv_ahead(Compiler *c, int callee_idx, const int *argv, int argc,
+                                        int argsNode, const char *lead, Buf *out, Buf *ahead) {
   Scope *m = &c->scopes[callee_idx];
   const NodeTable *nt = c->nt;
   /* `bar(...)`: the ArgumentsNode holds a single ForwardingArgumentsNode.
@@ -10575,6 +10670,7 @@ else {
       if (held && root) held[k] = ht;
     }
   }
+  char *run_ahead = ahead && splat_idx < 0 && ds_hash_tmp < 0 ? defaults_run_ahead(c, m, &L, kwh, kw_merged) : NULL;
   for (int i = 0; i < m->nparams; i++) {
     buf_puts(out, i == 0 ? lead : ", ");
     if (L.gather && emit_gather_lead_lent(c, m, i, argv, argc, out)) {}
@@ -10654,13 +10750,29 @@ else {
         /* ...and only into the FIRST unfilled positional slot. Every later
            one hit this same fallback, so `def f(a = nil, b = nil); f(k: 1)`
            handed the hash to both (found while fixing #4030). */
-        emit_arg_rooted(c, m, i, L.from[i] == ARG_KWH ? kwh : -1, 0, out);
+        if (run_ahead && run_ahead[i]) emit_default_ahead(c, m, i, ahead, out);
+        else emit_arg_rooted(c, m, i, L.from[i] == ARG_KWH ? kwh : -1, 0, out);
       }
     }
   }
+  free(run_ahead);
   view_unbind(argov_saved);  /* drop this call's hoisted-arg overrides */
   free(held);
   arg_layout_free(&L);
+}
+
+/* See codegen_internal.h. */
+void emit_args_filled_argv(Compiler *c, int callee_idx, const int *argv, int argc, int argsNode,
+                           const char *lead, Buf *out) {
+  emit_args_filled_argv_ahead(c, callee_idx, argv, argc, argsNode, lead, out, NULL);
+}
+
+/* See codegen_internal.h. */
+void emit_args_filled_ahead(Compiler *c, int callee_idx, int argsNode, const char *lead, Buf *out,
+                            Buf *ahead) {
+  int argc = 0;
+  const int *argv = argsNode >= 0 ? nt_arr(c->nt, argsNode, "arguments", &argc) : NULL;
+  emit_args_filled_argv_ahead(c, callee_idx, argv, argc, argsNode, lead, out, ahead);
 }
 
 int is_descendant(Compiler *c, int k, int anc) {

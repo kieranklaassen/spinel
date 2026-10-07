@@ -11279,13 +11279,16 @@ static int emit_new_call_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, 
           { *out = 1; return 1; }
         }
       }
+      size_t at = b->len;
+      Buf ahead; memset(&ahead, 0, sizeof ahead);
       buf_printf(b, "sp_%s_new(", c->classes[ci].c_name);
       int initm = comp_method_in_chain(c, ci, "initialize", NULL);
-      if (initm >= 0) emit_args_filled(c, initm, nt_ref(nt, id, "arguments"), "", b);
+      if (initm >= 0) emit_args_filled_ahead(c, initm, nt_ref(nt, id, "arguments"), "", b, &ahead);
       /* An explicit `&blk` on a non-yielding initialize is threaded as a
          trailing sp_Proc* (the constructor accepts + forwards it). */
       if (initm >= 0) emit_ctor_block_slot(c, id, initm, c->scopes[initm].nparams > 0 ? ", " : "", b);
       buf_puts(b, ")");
+      emit_call_ahead(b, at, &ahead);
       { *out = 1; return 1; }
     }
     /* a builtin exception by its whole path: Errno::ENOENT, not "ENOENT" */
