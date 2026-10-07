@@ -15139,13 +15139,15 @@ static int str_mutate_reassign_arms(Compiler *c, Buf *b, int indent, const NodeT
       emit_indent(b, indent); buf_puts(b, "{");
       for (int a = 0; a < argc; a++) {
         TyKind at = comp_ntype(c, argv[a]);
-        if (at == TY_INT) {
-          buf_printf(b, " const char *_t%d = sp_int_codepoint_to_str_in(", base + a); emit_expr(c, recv, b);
-          buf_puts(b, ", "); emit_expr(c, argv[a], b); buf_puts(b, ");");
+        /* an Integer is a code point whether it is typed or boxed: the one
+           rule of emit_str_append_arg, which this copy had the typed half of */
+        if (at == TY_INT || at == TY_POLY) {
+          Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
+          buf_printf(b, " const char *_t%d = ", base + a);
+          emit_str_append_arg(c, argv[a], rb.p, b); buf_puts(b, ";"); free(rb.p);
         }
         else {
-          buf_printf(b, " const char *_t%d = ", base + a);
-          emit_poly_unboxed(c, argv[a], at, "sp_poly_to_s(", b); buf_puts(b, ";");
+          buf_printf(b, " const char *_t%d = ", base + a); emit_expr(c, argv[a], b); buf_puts(b, ";");
         }
         buf_printf(b, " SP_GC_ROOT_STR(_t%d);", base + a);
       }
@@ -15477,16 +15479,15 @@ static int str_mutate_append_bang_arms(Compiler *c, int id, Buf *b, int indent, 
         emit_indent(b, indent);
         emit_expr(c, cur, b); buf_puts(b, " = sp_str_append_grow(");
         emit_expr(c, cur, b); buf_puts(b, ", ");
-        if (at == TY_INT) {
-          buf_puts(b, "sp_int_codepoint_to_str_in("); emit_expr(c, cur, b); buf_puts(b, ", ");
-          emit_expr(c, arg, b); buf_puts(b, ")");
-        }
-        else if (at == TY_POLY) { buf_puts(b, "sp_poly_to_s("); emit_expr(c, arg, b); buf_puts(b, ")"); }
-        /* a string-typed arg whose value is really the unresolved-call gate's
+        /* the one rule of emit_str_append_arg, as in the value position: this
+           copy had the typed-Integer half and appended a BOXED Integer's
+           digits. The helper keeps what the last arm here did for a
+           string-typed arg whose value is really the unresolved-call gate's
            sp_raise_nomethod(...) poly (`s << time_or_nil.strftime(...)`, the
            receiver being nilable): emit_str_expr coerces it to the string slot,
            keeping the raise, instead of passing the sp_RbVal through raw. */
-        else emit_str_expr(c, arg, b);
+        { Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, cur, &rb);
+          emit_str_append_arg(c, arg, rb.p, b); free(rb.p); }
         buf_puts(b, ");\n");
       }
       return 1;
