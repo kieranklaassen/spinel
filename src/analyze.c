@@ -1835,6 +1835,7 @@ static const char *const quiet_decls[] = { "attr_reader", "attr_writer", "attr_a
 static const char *const def_hooks[] = { "inherited", "included", "extended", "prepended", "method_added",
   "singleton_method_added", "const_added", "const_missing", "append_features", "prepend_features",
   "extend_object", NULL };
+static const char *const method_definers[] = { "define_method", "define_singleton_method", "alias_method", NULL };
 /* CRuby's own classes and modules that hold constants: a bare name in a body
    of theirs, or of a class that inherits or mixes one in, reads theirs first. */
 static const char *const const_holders[] = { "Complex", "DidYouMean", "Encoding", "Enumerator", "Errno",
@@ -2021,8 +2022,12 @@ static int *seq_build(const NodeTable *nt) {
     const char *cn = nt_str(nt, id, "name");
     int args = nt_ref(nt, id, "arguments"), argc = 0, a0 = 0, recv = nt_ref(nt, id, "receiver");
     const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &argc) : NULL;
-    if (cn && is_send_family(cn) && argc && nt_kind(nt, argv[0]) == NK_SymbolNode) { cn = nt_str(nt, argv[0], "value"); a0 = 1; }
+    /* send(:include, M) names the method it calls; one that no literal
+       spells may be any (const_set, the definer of an is_a?), and so may
+       the method a definer names by no literal */
+    while (cn && is_send_family(cn)) { cn = a0 < argc ? literal_name(nt, argv[a0]) : NULL; a0++; if (!cn) anc |= 2; }
     if (!cn) continue;
+    if (name_listed(method_definers, cn) && !(a0 < argc && literal_name(nt, argv[a0]))) anc |= 2;
     NodeKind rk = nt_kind(nt, recv);
     const char *rn = rk == NK_ConstantReadNode || rk == NK_ConstantPathNode ? nt_str(nt, recv, "name") : NULL;
     if (sp_streq(cn, "include") || sp_streq(cn, "extend") || sp_streq(cn, "prepend") ||
