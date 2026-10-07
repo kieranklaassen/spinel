@@ -20827,6 +20827,121 @@ static void refuse_nonlocal_param_args(Compiler *c, int id, const char *name) {
   }
 }
 
+static int subtree_holds(const NodeTable *nt, int root, int target);
+static int thread_arg_runs_again(Compiler *c, int arg, int blk);
+/* Is call `target` the last thing node n does: the tail of its statements,
+   of an `if`'s or an `unless`'s arms, a `return`'s value? Nothing of the
+   method runs once such a call has come back. */
+static int refuse_tail_holds(Compiler *c, int n, int target) {
+  const NodeTable *nt = c->nt;
+  if (n < 0) return 0;
+  if (n == target) return 1;
+  switch (nt_kind(nt, n)) {
+  case NK_StatementsNode: {
+    int sn = 0; const int *sv = nt_arr(nt, n, "body", &sn);
+    return sn > 0 && refuse_tail_holds(c, sv[sn - 1], target);
+  }
+  case NK_IfNode:
+    return refuse_tail_holds(c, nt_ref(nt, n, "statements"), target) ||
+           refuse_tail_holds(c, nt_ref(nt, n, "subsequent"), target);
+  case NK_UnlessNode:
+    return refuse_tail_holds(c, nt_ref(nt, n, "statements"), target) ||
+           refuse_tail_holds(c, nt_ref(nt, n, "else_clause"), target);
+  case NK_ElseNode: return refuse_tail_holds(c, nt_ref(nt, n, "statements"), target);
+  case NK_ParenthesesNode: return refuse_tail_holds(c, nt_ref(nt, n, "body"), target);
+  case NK_ReturnNode: {
+    int a = nt_ref(nt, n, "arguments"), an = 0;
+    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
+    return an == 1 && refuse_tail_holds(c, av[0], target);
+  }
+  default: return 0;
+  }
+}
+/* The yielding method compiled as a function that a static call names: an
+   object's, the enclosing class's, a class's own (`K.walk`, or a bare call
+   in a class method), the free function. -1 for any other call. */
+static int refuse_lowered_target(Compiler *c, int id, const char *name) {
+  const NodeTable *nt = c->nt;
+  int recv = nt_ref(nt, id, "receiver");
+  int mi = -1;
+  if (recv < 0 || nt_kind(nt, recv) == NK_SelfNode) {
+    Scope *encl = comp_scope_of(c, id);
+    if (encl && encl->class_id >= 0)
+      mi = encl->is_cmethod ? comp_cmethod_in_chain(c, encl->class_id, name, NULL)
+                            : comp_method_in_chain(c, encl->class_id, name, NULL);
+    if (mi < 0) mi = comp_method_index(c, name);
+  }
+  else if (ty_is_object(comp_ntype(c, recv)))
+    mi = comp_method_in_chain(c, ty_object_class(comp_ntype(c, recv)), name, NULL);
+  else {
+    int ci = class_recv_static_ci(c, recv);
+    if (ci >= 0) mi = comp_cmethod_in_chain(c, ci, name, NULL);
+  }
+  return mi >= 0 && c->scopes[mi].is_lowered_yield ? mi : -1;
+}
+/* A String variable handed to a parameter that a yielding method compiled
+   as a function appends to. A yielding method is spliced into its call,
+   where its parameters name the caller's Strings (inline_alias_params);
+   one that calls itself with a block that yields, keeps its block as a
+   value or yields inside a Thread's body is a function instead (the yield
+   lowering), and no yielding method takes a lent slot
+   (an_byref_eligible_scopes). So its String parameter is a copy.
+   Two calls cannot observe that and are let through: a plain local read
+   nowhere else and not in a loop or a block, and such a method's own
+   appended parameter handed on by its last call, with a block that does
+   not read it (its callers are asked at their own calls). */
+static void refuse_lowered_yielder_args(Compiler *c, int id, const char *name) {
+  const NodeTable *nt = c->nt;
+  int mi = refuse_lowered_target(c, id, name);
+  if (mi < 0) return;
+  Scope *m = &c->scopes[mi];
+  if (!refuse_call_binds(c, refuse_scope_params(c, m), id, 0, 0)) return;
+  for (int j = 0; j < m->nparams && j < 16; j++) {
+    LocalVar *q = m->pnames[j] ? scope_local(m, m->pnames[j]) : NULL;
+    if (!q || q->type != TY_STRING || q->byref_out || repr_of_slot(c, q).handle) continue;
+    if (!dyn_method_appends(c, mi, j)) continue;
+    /* a parameter the method assigns again may append to its new String */
+    int written = 0;
+    for (int w = comp_lvw_first_sc(c, mi, m->pnames[j]); w >= 0 && !written; w = comp_lvw_next_sc(c, w))
+      written = comp_scope_of(c, w) == m && nt_str(nt, w, "name") && sp_streq(nt_str(nt, w, "name"), m->pnames[j]);
+    if (written) continue;
+    int arg = arg_layout_param_node(c, m, id, j, NULL);
+    int shared;
+    if (!strvar_arg(c, arg, &shared)) continue;
+    if (nt_kind(nt, arg) == NK_LocalVariableReadNode) {
+      const char *vn = nt_str(nt, arg, "name");
+      Scope *vs = comp_scope_of(c, arg);
+      LocalVar *lv = vs ? scope_local(vs, vn) : NULL;
+      int blk = nt_ref(nt, id, "block");
+      if (lv && lv->is_param && !lv->is_block_param && !lv->is_cell && vs->is_lowered_yield) {
+        int pi = -1;
+        for (int k = 0; k < vs->nparams && pi < 0; k++)
+          if (vs->pnames[k] && sp_streq(vs->pnames[k], vn)) pi = k;
+        int rd = 0;
+        for (int n = 0; blk >= 0 && n < nt->count && !rd; n++)
+          rd = nt_kind(nt, n) == NK_LocalVariableReadNode && sp_streq(nt_str(nt, n, "name"), vn) &&
+               subtree_holds(nt, blk, n);
+        if (pi >= 0 && !rd && dyn_method_appends(c, (int)(vs - c->scopes), pi) &&
+            refuse_tail_holds(c, vs->body, id))
+          continue;
+      }
+      if (lv && !lv->is_param && !lv->is_block_param && !lv->is_cell) {
+        int reads = 0;
+        for (int n = 0; n < nt->count && reads < 2; n++) {
+          NodeKind rk = nt_kind(nt, n);
+          if (rk != NK_LocalVariableReadNode && rk != NK_LocalVariableOperatorWriteNode &&
+              rk != NK_LocalVariableOrWriteNode && rk != NK_LocalVariableAndWriteNode) continue;
+          if (comp_scope_of(c, n) == vs && sp_streq(nt_str(nt, n, "name"), vn)) reads++;
+        }
+        if (reads == 1 && !thread_arg_runs_again(c, arg, -1)) continue;
+      }
+    }
+    char mt[96]; snprintf(mt, sizeof mt, "`%s`", m->name ? m->name : name);
+    refuse_string_copy(c, arg, mt, m->pnames[j], "the call",
+                       "into a yielding method that is compiled as a function");
+  }
+}
+
 /* Does `root`'s subtree hold node `target`? A def is its own scope. */
 static int subtree_holds(const NodeTable *nt, int root, int target) {
   if (root < 0) return 0;
@@ -21140,6 +21255,7 @@ static void refuse_string_copies(Compiler *c, int id) {
     return;
   }
   if (!dyn) refuse_yield_handle_args(c, id);
+  if (!dyn) refuse_lowered_yielder_args(c, id, name);
   if (!dyn) refuse_forwarded_args(c, id, name);
   if (!dyn) refuse_nonlocal_param_args(c, id, name);
   /* a method `define_method` defines takes an appended String as the handle

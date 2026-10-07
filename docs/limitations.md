@@ -709,6 +709,8 @@ Not yet shared:
 
 - a String variable in a splatted Hash literal (`**{ k: v }`) at a dynamic call or yield whose key binds an appending keyword parameter;
 
+- a String variable handed to a parameter that a yielding method compiled as a function appends to: a method that calls itself with a block that yields, keeps its `&blk` as a value beside a `yield`, or yields inside a `Thread`'s body. A local that is read nowhere else is let through;
+
 - a String variable in an Array literal feeding an appended nested multiple-assignment target;
 
 - a bare instance-variable argument written from a local, handed to an appending parameter through a call or `super`, unless the instance variable is already a shared handle;
