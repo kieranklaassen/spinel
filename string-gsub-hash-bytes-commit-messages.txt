@@ -1,0 +1,37 @@
+=====
+gsub and sub with a Hash read their Strings by bytes
+
+`"a\0b".gsub(/[ab]/, "a" => "1", "b" => "2").bytesize` was 1: the four
+functions behind gsub and sub with a Hash measured the subject and the
+replacement by strlen, so the answer ended at the first NUL byte of
+either. The pair for a String pattern also searched with strstr, and
+answered a String whose length was never set.
+
+They read byte lengths, and the String pattern is found by
+sp_str_find. A Regexp's match that holds a NUL byte is looked up as a
+String of its own, since the transient key is read as a C string:
+`"a\0b".gsub(/\0/, "\0" => "N")` is "aNb".
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+
+=====
+sub and gsub with a String pattern read the Hash's default
+
+`h = Hash.new("?"); h["q"] = "1"; "abq".gsub("b", h)` answered "aq"
+where CRuby answers "a?q": the pair behind sub and gsub with a String
+pattern and a Hash asked has_key first and took "" for a pattern the
+Hash has no key for. CRuby reads hash[match], which answers the Hash's
+default, and the pair for a Regexp reads it so already.
+
+Both read sp_StrStrHash_get, which answers the default on a miss. A
+Hash of other values is converted with its default as its to_s, so
+`Hash.new(0)` substitutes "0". A pattern that is a key is looked up
+once where there were two lookups.
+
+This stands above the commit that reads these Strings by bytes. While
+a pattern that begins with a NUL byte was read as the empty pattern it
+matched at every character, and the default would have been put at
+each: `"ab".gsub("\0", h)` answers "ab", as it did.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+

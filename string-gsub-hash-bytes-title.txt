@@ -1,0 +1,1 @@
+gsub and sub with a Hash read their Strings by bytes, and the Hash's default
