@@ -1,0 +1,39 @@
+A fetch block's Symbol or String-literal key is unboxed into its slot
+
+    def pick(n) = n > 0 ? {"a" => 1, :s => 2} : [1, 2]
+    x = pick(1)
+    p x.fetch(:zz) { |k| k }      # C did not build; CRuby :zz
+
+The fetch itself types the still untyped local as a Hash of Symbol keys
+for one round, so k is a Symbol's slot, and rightly: the key is one.
+But the local is boxed a round later, the Hash arm holds its key boxed,
+and emit_fetch_blk_param assigned that boxed key to the typed slot.
+
+It now unboxes the key where fetch_blk_param_is_key shows the slot is
+the key's own. Nothing in inference changes; the list is read once the
+types have settled:
+
+- the key is a Symbol or a String literal, and the slot has that type
+  and is no shared handle (--share-strings);
+- the block takes one required parameter and nothing assigns it;
+- every read of it is the receiver of a call that takes no block, an
+  interpolation or the block's value, and no proc captures it;
+- the block answers a number, true, false, nil, a Symbol or a String;
+- no fetch block of the program is left with a slot of another type
+  than its key: that one's failure stays the program's.
+
+The last line is the whole program's answer, so it is asked once and
+kept, and the parameter's writes and reads come off the indexes that
+already list them: a walk of the program for each fetch block is
+quadratic in them.
+
+Not changed, and still failing in C: `[k]`, `f(k)` and `y = k` in the
+block, a block that answers an Array or a Hash, `|k, j|`, `it` and
+`_1`, a String key that is no literal. An Integer, Float or nil key
+keeps the boxed parameter it has. A method a Symbol lacks, called on k,
+raises its own NoMethodError where the C builds: `k.even?` does,
+`k.strip` does not build and `k + 1` blames fetch, both as before.
+
+Test: test/poly_fetch_block_key_param.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
