@@ -5699,11 +5699,12 @@ static void emit_case_obj_eq(Compiler *c, int cond, int t, TyKind pt, Buf *b) {
        not compile for a value-type object and compared addresses for a
        heap one (#3820). */
     int ecid = ty_object_class(pt);
-    int emi = comp_method_in_chain(c, ecid, "===", NULL);
+    int edef = ecid;
+    int emi = comp_method_in_chain(c, ecid, "===", &edef);
     /* Object#=== is rb_equal: the same heap object matches before its ==
        runs (a value-type object has no identity to compare) */
     int ident = emi < 0 && !comp_ty_value_obj(c, pt);
-    if (emi < 0) emi = comp_method_in_chain(c, ecid, "==", NULL);
+    if (emi < 0) emi = comp_method_in_chain(c, ecid, "==", &edef);
     Scope *ems = &c->scopes[emi];
     LocalVar *eplv = ems->nparams > 0 ? scope_local(ems, ems->pnames[0]) : NULL;
     TyKind pty = eplv ? eplv->type : TY_POLY;
@@ -5719,8 +5720,11 @@ static void emit_case_obj_eq(Compiler *c, int cond, int t, TyKind pt, Buf *b) {
     buf_puts(b, "(");
     emit_method_cname(c, ems, b);
     buf_puts(b, "(");
+    /* an inherited method takes the class that defines it */
+    if (edef != ecid) buf_printf(b, "(sp_%s *)(", c->classes[edef].c_name);
     if (tc) buf_printf(b, "_t%d", tc);
     else emit_expr(c, cond, b);
+    if (edef != ecid) buf_puts(b, ")");
     buf_puts(b, ", ");
     { char sref[32]; snprintf(sref, sizeof sref, "_t%d", t);
       if (pty != pt && pt != TY_UNKNOWN) emit_boxed_text(c, pt, sref, b);
@@ -6233,8 +6237,11 @@ void emit_case(Compiler *c, int id, Buf *b, int indent) {
             else if (weq >= 0 && wdef >= 0 && !comp_ty_value_obj(c, wpt)) {
               int wta = emit_when_arm_root(c, conds[j], wpt, b);
               buf_printf(b, "sp_%s_%s(", c->classes[wdef].c_name, mc(c->scopes[weq].name));
+              /* an inherited method takes the class that defines it */
+              if (wdef != wcid) buf_printf(b, "(sp_%s *)(", c->classes[wdef].c_name);
               if (wta) buf_printf(b, "_t%d", wta);
               else emit_expr(c, conds[j], b);
+              if (wdef != wcid) buf_puts(b, ")");
               buf_printf(b, ", ");
               /* the user method takes its argument boxed when its parameter is
                  poly, which is the shape these comparison methods settle on */
