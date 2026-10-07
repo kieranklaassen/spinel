@@ -4574,11 +4574,10 @@ static int emit_array_call_arms(Compiler *c, int id, Buf *b) {
     const char *ebp = block_param_name(c, eblk, 0);
     const char *ebpn = ebp ? rename_local(ebp) : NULL;
     int ebody = nt_ref(nt, eblk, "body");
-    int ebn = 0; const int *ebb = ebody >= 0 ? nt_arr(nt, ebody, "body", &ebn) : NULL;
     int ti = ++g_tmp;
     buf_printf(b, " for (sp_int _t%d = 0; _t%d < sp_StrArray_length(_t%d); _t%d++) {", ti, ti, ta, ti);
     if (ebpn) emit_str_elem_param(c, eblk, ebp, ebpn, ta, ti, b);
-    for (int k2 = 0; k2 < ebn; k2++) emit_stmt(c, ebb[k2], b, 0);
+    emit_iter_loop_stmts(c, ebody, b, 0);
     buf_printf(b, " } _t%d; })", tl);
     return 1;
   }
@@ -12584,7 +12583,6 @@ static int emit_poly_call0_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
     const char *ebp = block_param_name(c, eblk, 0);
     const char *ebpn = ebp ? rename_local(ebp) : NULL;
     int ebody = nt_ref(nt, eblk, "body");
-    int ebn = 0; const int *ebb = ebody >= 0 ? nt_arr(nt, ebody, "body", &ebn) : NULL;
     int ts = ++g_tmp, ta = ++g_tmp, ti = ++g_tmp;
     buf_printf(b, "({ const char *_t%d = sp_poly_recv_s(", ts); emit_expr(c, recv, b);
     buf_printf(b, ", \"%s\"); SP_GC_ROOT(_t%d);", name, ts);
@@ -12592,7 +12590,7 @@ static int emit_poly_call0_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
                ta, sp_streq(name, "each_char") ? "sp_str_chars" : "sp_str_lines", ts, ta);
     buf_printf(b, " for (sp_int _t%d = 0; _t%d < sp_StrArray_length(_t%d); _t%d++) {", ti, ti, ta, ti);
     if (ebpn) emit_str_elem_param(c, eblk, ebp, ebpn, ta, ti, b);
-    for (int k2 = 0; k2 < ebn; k2++) emit_stmt(c, ebb[k2], b, 0);
+    emit_iter_loop_stmts(c, ebody, b, 0);
     buf_printf(b, " } _t%d; })", ts);
     { *out = 1; return 1; }
   }
@@ -12604,7 +12602,6 @@ static int emit_poly_call0_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
     const char *ebp = block_param_name(c, eblk, 0);
     const char *ebpn = ebp ? rename_local(ebp) : NULL;
     int ebody = nt_ref(nt, eblk, "body");
-    int ebn = 0; const int *ebb = ebody >= 0 ? nt_arr(nt, ebody, "body", &ebn) : NULL;
     const char *fn = sp_streq(name, "each_byte") ? "sp_str_bytes" : "sp_str_codepoints";
     int ts = ++g_tmp, ta = ++g_tmp, ti = ++g_tmp;
     buf_printf(b, "({ const char *_t%d = sp_poly_recv_s(", ts); emit_expr(c, recv, b);
@@ -12619,7 +12616,7 @@ static int emit_poly_call0_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
       else
         buf_printf(b, " sp_int lv_%s = sp_IntArray_get(_t%d, _t%d);", ebpn, ta, ti);
     }
-    for (int k2 = 0; k2 < ebn; k2++) emit_stmt(c, ebb[k2], b, 0);
+    emit_iter_loop_stmts(c, ebody, b, 0);
     buf_printf(b, " } _t%d; })", ts);
     { *out = 1; return 1; }
   }
@@ -14024,7 +14021,6 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
     const char *sp0 = block_param_name(c, sblk, 0);
     const char *sp0r = sp0 ? rename_local(sp0) : NULL;
     int sbody = nt_ref(nt, sblk, "body");
-    int sbn = 0; const int *sbb = sbody >= 0 ? nt_arr(nt, sbody, "body", &sbn) : NULL;
     int re_i = re_lit_index(c, argv[0]);
     TyKind pat_t = comp_ntype(c, argv[0]);
     int ts = ++g_tmp, tm = ++g_tmp, ti = ++g_tmp;
@@ -14066,7 +14062,7 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
       else
         buf_printf(b, " const char *lv_%s = sp_StrArray_get(_t%d, _t%d);", sp0r, tm, ti);
     }
-    for (int k2 = 0; k2 < sbn; k2++) emit_stmt(c, sbb[k2], b, 0);
+    emit_iter_loop_stmts(c, sbody, b, 0);
     buf_printf(b, " } _t%d; })", ts);
     return 1;
   }
