@@ -1,0 +1,17 @@
+"ab"
+"ab \x01"
+"ab\x00"
+"YWI=\n"
+"ab=\n"
+"\"86(`\n"
+"\xAB"
+"\x01"
+"\x01abzz"
+"Jo"
+"4a4a6f"
+4
+"YWIAYw==\n"
+""
+"\x00\x00"
+""
+no implicit conversion of String into Integer

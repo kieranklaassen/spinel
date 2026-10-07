@@ -3541,23 +3541,11 @@ static SP_UNUSED sp_PolyArray *sp_range_minmax_poly(sp_Range r) {
   sp_PolyArray_push(a, hi);
   return a;
 }
-/* A boxed String or Symbol cannot bound an Integer-represented Range, and
-   converting it built a Range of numbers the program never wrote (a String
-   as its leading digits, a Symbol as its id). Beside an Integer begin it is
-   CRuby's ArgumentError; otherwise CRuby builds a String or Symbol Range,
-   which this representation cannot hold. Say so. */
-static SP_NOINLINE void sp_range_bound_chk(sp_RbVal v, const char *side, int int_begin) {
-  const char *k = v.tag == SP_TAG_SYM ? "Symbol" : (v.tag == SP_TAG_STR || sp_poly_is_strbuf(v)) ? "String" : NULL;
-  if (!k) return;
-  if (int_begin) sp_raise_cls("ArgumentError", "bad value for range");
-  sp_raise_cls("NotImplementedError", sp_sprintf("a Range with a %s %s decided at run time is not supported by spinel", k, side));
-}
 /* A Range built from a boxed end (`lo..x`): nil is the absent end, a Float
    is kept as written (sp_range_new_fend), anything else converts as an
    Integer bound does. */
 static SP_UNUSED sp_Range sp_range_new_pend(sp_int f, sp_RbVal e, sp_int x) {
   if (e.tag == SP_TAG_FLT) return sp_range_new_fend(f, e.v.f, x);
-  if (SP_UNLIKELY(e.tag != SP_TAG_INT && e.tag != SP_TAG_NIL)) sp_range_bound_chk(e, "end", f != (sp_int)INTPTR_MIN);
   return sp_range_new(f, e.tag == SP_TAG_NIL ? (sp_int)INTPTR_MAX : sp_poly_to_i(e), x);
 }
 /* A boxed begin of an Integer-represented Range: a Float there would make it
@@ -3566,7 +3554,6 @@ static SP_UNUSED sp_Range sp_range_new_pend(sp_int f, sp_RbVal e, sp_int x) {
 static SP_UNUSED sp_int sp_range_lo_bound(sp_RbVal v) {
   if (SP_UNLIKELY(v.tag == SP_TAG_FLT))
     sp_raise_cls("NotImplementedError", "a Range with a Float begin decided at run time is not supported by spinel");
-  if (SP_UNLIKELY(v.tag != SP_TAG_INT && v.tag != SP_TAG_NIL)) sp_range_bound_chk(v, "begin", 0);
   return v.tag == SP_TAG_NIL ? (sp_int)INTPTR_MIN : sp_poly_to_i(v);
 }
 /* Kernel#rand / Random#rand over a Range known only at run time (a parameter,
@@ -3718,16 +3705,11 @@ static SP_UNUSED sp_int sp_for_hi_f(sp_float f, int excl) {
   if (g <= -9.2e18) return (sp_int)INTPTR_MIN + 1;
   return (sp_int)g;
 }
-static SP_UNUSED sp_int sp_for_hi(sp_RbVal v) {
-  if (v.tag == SP_TAG_FLT) return sp_for_hi_f(v.v.f, 0);
-  if (SP_UNLIKELY(v.tag != SP_TAG_INT && v.tag != SP_TAG_NIL)) sp_range_bound_chk(v, "end", 0);   /* the begin is not read yet */
-  return v.tag == SP_TAG_NIL ? (sp_int)INTPTR_MAX : sp_poly_to_i(v);
-}
+static SP_UNUSED sp_int sp_for_hi(sp_RbVal v) { if (v.tag == SP_TAG_FLT) return sp_for_hi_f(v.v.f, 0); return v.tag == SP_TAG_NIL ? (sp_int)INTPTR_MAX : sp_poly_to_i(v); }
 static SP_UNUSED sp_int sp_for_hi_x(sp_RbVal v) { if (v.tag == SP_TAG_FLT) return sp_for_hi_f(v.v.f, 1); return sp_for_hi(v); }
 static SP_UNUSED sp_int sp_for_lo(sp_RbVal v) {
   if (SP_UNLIKELY(v.tag == SP_TAG_NIL)) sp_raise_cls("TypeError", "can't iterate from NilClass");
   if (SP_UNLIKELY(v.tag == SP_TAG_FLT)) sp_raise_cls("TypeError", "can't iterate from Float");
-  if (SP_UNLIKELY(v.tag != SP_TAG_INT)) sp_range_bound_chk(v, "begin", 0);
   return sp_poly_to_i(v);
 }
 static SP_UNUSED sp_int sp_poly_recv_i(const char *m, sp_RbVal v) { if (SP_UNLIKELY(v.tag == SP_TAG_NIL)) sp_raise_nomethod(sp_nomethod_msg(m, v)); return sp_poly_to_i(v); }
@@ -5817,7 +5799,13 @@ static void sp_PolyArray_insert(sp_PolyArray *a, sp_int i, sp_RbVal v) {sp_gc_wb
    sp_poly_eq, which is inline-per-TU in this file, not linkable from the
    separately-compiled cold array library. */
 static sp_RbVal sp_PolyArray_delete(sp_PolyArray *a, sp_RbVal v) {sp_gc_wb((void*)a); 
-  if (a && a->frozen) { sp_raise_frozen_array_at(a, SP_BUILTIN_POLY_ARRAY); return sp_box_nil(); }
+  if (a && a->frozen) {
+    /* CRuby raises only for an element it would remove */
+    SP_GC_ROOT(a); SP_GC_ROOT_RBVAL(v);
+    for (sp_int i = 0; i < a->len; i++)
+      if (sp_poly_rb_equal(a->data[i], v)) sp_raise_frozen_array_at(a, SP_BUILTIN_POLY_ARRAY);
+    return sp_box_nil();
+  }
   if (!a) return sp_box_nil();
   /* sp_poly_eq can allocate (bigint promotion) and so trigger a collection
      mid-loop; a and v may be reachable only through the call expression. */
@@ -10211,6 +10199,11 @@ static sp_RbVal sp_poly_index_poly(sp_RbVal recv, sp_RbVal idx) {
     sp_RbVal _u;
     if (sp_poly_user_cmp("[]", recv, idx, &_u)) return _u;
   }
+  /* a String key the program appends to is boxed as its shared handle, not
+     as SP_TAG_STR: a Hash is read by its text, where the key matched no arm
+     below and missed */
+  if (sp_poly_is_strbuf(idx) && recv.tag == SP_TAG_OBJ && sp_poly_is_hash_kind(recv.cls_id))
+    idx = sp_poly_strbuf_deref(idx);
   if (idx.tag == SP_TAG_STR) return sp_poly_get_str(recv, idx.v.s);
   if (idx.tag == SP_TAG_SYM) return sp_poly_get_sym(recv, (sp_sym)idx.v.i);
   /* a Range index on a poly STRING is a substring (String#[Range]); without
@@ -10318,6 +10311,10 @@ static sp_RbVal sp_poly_index_poly(sp_RbVal recv, sp_RbVal idx) {
    kind can never be present, so it reports FALSE. */
 static sp_bool sp_poly_has_key(sp_RbVal recv, sp_RbVal key) {
   if (recv.tag != SP_TAG_OBJ) return FALSE;
+  /* a String key the program appends to is boxed as its shared handle, not
+     as SP_TAG_STR: a String-keyed Hash is asked by its text (a PolyPolyHash
+     takes the box as it is) */
+  if (sp_poly_is_strbuf(key) && recv.cls_id != SP_BUILTIN_POLY_POLY_HASH) key = sp_poly_strbuf_deref(key);
   switch (recv.cls_id) {
     case SP_BUILTIN_POLY_POLY_HASH: return sp_PolyPolyHash_has_key((sp_PolyPolyHash *)recv.v.p, key);
     case SP_BUILTIN_STR_POLY_HASH:  return key.tag == SP_TAG_STR && sp_StrPolyHash_has_key((sp_StrPolyHash *)recv.v.p, key.v.s);
@@ -10344,6 +10341,8 @@ static sp_RbVal sp_fmt_hash_fetch(sp_RbVal h, sp_sym k, const char *nm) {
    answers for itself here instead. */
 static sp_RbVal sp_poly_delete_key(sp_RbVal recv, sp_RbVal key) {
   if (recv.tag == SP_TAG_OBJ && sp_poly_is_hash_kind(recv.cls_id)) {
+    /* an appended String key, as sp_poly_has_key reads it */
+    if (sp_poly_is_strbuf(key) && recv.cls_id != SP_BUILTIN_POLY_POLY_HASH) key = sp_poly_strbuf_deref(key);
     if (!sp_poly_has_key(recv, key)) return sp_box_nil();
     sp_RbVal was = sp_poly_index_poly(recv, key);
     switch (recv.cls_id) {
@@ -10410,7 +10409,11 @@ static sp_RbVal sp_poly_delete_key(sp_RbVal recv, sp_RbVal key) {
     sp_PolyArray *a = sp_poly_to_poly_array(recv);
     sp_int w = 0, found = 0;
     for (sp_int i = 0; a && i < a->len; i++) {
-      if (sp_poly_rb_equal(a->data[i], key)) { found = 1; continue; }
+      if (sp_poly_rb_equal(a->data[i], key)) {
+        /* a frozen Array raises for the first element it would remove */
+        if (a->frozen) sp_raise_frozen_array_at(a, SP_BUILTIN_POLY_ARRAY);
+        found = 1; continue;
+      }
       a->data[w++] = a->data[i];
     }
     if (a) a->len = w;
@@ -12895,6 +12898,7 @@ void sp_fin_run_exit(void);   /* lib/sp_gc.c: finalizers still registered at exi
    places print it now: the end of sp_raise_cls, and a hook whose own exception
    reached the drain's protect frame. */
 static void sp_exc_print_uncaught(const char *cls, const char *msg);
+void sp_exc_resignal(const char *cls, const char *msg);   /* lib/sp_cold.c */
 /* CRuby's tail format "<message> (<ClassName>)", prefixed by the raising frame
    and followed by its callers when the backtrace substrate is live (a --debug
    build). Without it there is no location to print, and an uncaught raise in a
@@ -13073,6 +13077,7 @@ SP_NORETURN SP_COLD void sp_raise_cls(const char *cls, const char *msg) {
     if (_bt_keep_n > 0) { memcpy(sp_bt_buf, _bt_keep, sizeof(void *) * (size_t)_bt_keep_n); sp_bt_n = _bt_keep_n; }
 #endif
     sp_exc_print_uncaught(cls, msg);
+    sp_exc_resignal(cls, msg);
     exit(status); } }
 #endif
 static void sp_raise(const char *msg) { sp_raise_cls("RuntimeError", msg); }
@@ -13546,6 +13551,9 @@ static sp_Exception *sp_syserr_build(const char *cls, sp_int argc, const sp_RbVa
    anything else is CRuby's TypeError. */
 SP_NORETURN SP_COLD static void sp_raise_poly(sp_RbVal v) {
   if (v.tag == SP_TAG_STR && v.v.s) sp_raise(v.v.s);
+  /* a String the program appends to is boxed as its shared handle. The
+     message is a copy of its text: the handle's buffer moves as it grows */
+  if (sp_poly_is_strbuf(v) && v.v.p) sp_raise(sp_str_dup(sp_String_cstr((sp_String *)v.v.p)));
   if (v.tag == SP_TAG_OBJ && v.v.p) {
     /* A carried exception object re-raises as itself. The base
      * sp_Exception uses cls_id SP_BUILTIN_EXCEPTION; a user subclass
@@ -16539,6 +16547,31 @@ void sp_trap_call(sp_Proc *p, int no) {
   sp_unwind_kind = uk; sp_unwind_target = ut; sp_unwind_exc_top = ue; sp_unwind_home = uh;
   if (sp_unwind_kind != SP_UNWIND_NONE) sp_unwind_resume();
   sp_pending_exc_obj = eobj; sp_raise_cls(ecls, emsg);
+}
+#endif
+/* The default of SIGINT and SIGTERM, as CRuby's: an Interrupt (a SignalException
+   "SIGTERM", #signo 15) raised where the signal arrived, so rescue and ensure
+   run. The handler is left by a jump, so its signal is unblocked first (as
+   sp_trap_call does). A trap the program sets replaces it (sp_signal_trap). Armed
+   by a program that starts no thread: the signal may arrive on any OS thread of a
+   scheduler, and the raise has to land in the main Ruby thread (#7202). */
+#ifndef SPINEL_EXT_HOST
+static SP_UNUSED void sp_sig_default_handler(int no) {
+  sp_sig_unblock(no, 0);
+  if (no == SIGINT) sp_raise_cls("Interrupt", sp_exc_no_msg);   /* the message is empty, as the interrupt CRuby raises for the signal */
+  sp_pending_exc_obj = sp_signal_exc_new(sp_box_int((sp_int)no));
+  sp_raise_cls("SignalException", "SIGTERM");
+}
+static SP_UNUSED void sp_sig_install_defaults(void) {
+  static const int sigs[] = { SIGINT, SIGTERM };
+  for (int i = 0; i < 2; i++) {
+    int no = sigs[i];
+    if (sp_trap_proc[no] || sp_trap_state[no]) continue;
+    struct sigaction sa; memset(&sa, 0, sizeof sa);
+    sa.sa_handler = sp_sig_default_handler;
+    sigemptyset(&sa.sa_mask);
+    sigaction(no, &sa, NULL);
+  }
 }
 #endif
 typedef struct { sp_RbVal obj; int which; int had; sp_RbVal ans; } sp_obj_conv_probe;

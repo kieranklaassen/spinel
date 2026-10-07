@@ -32,3 +32,16 @@ e = { "k" => +"", "n" => 1 }
 e["k"] << ""
 p ["x", ""].include?(e["k"]), ["x", ""].index(e["k"])
 p a.include?(h["n"]), a.index(h["n"]), a.include?(h["zz"]), a.delete(h["n"])
+# a frozen Array answers nil for a needle it does not hold, and raises
+# for one it holds
+f = ["x", "y"].freeze
+p f.delete(h["k"]), f.delete(h["k"]) { "none" }
+q = { "a" => ["x"].freeze, "n" => 1 }
+p q["a"].delete(h["k"])
+w = ["ab!", "y"].freeze
+begin
+  w.delete(h["k"])
+rescue FrozenError
+  puts "frozen"
+end
+p f, w
