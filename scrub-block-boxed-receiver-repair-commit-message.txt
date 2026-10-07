@@ -1,0 +1,35 @@
+scrub with a block on a boxed receiver calls its block
+
+    a = ["ab\xFEcd", 1]
+    n = 0
+    p a[0].scrub { |b| n += 1; "?" }, n    # "ab<U+FFFD>cd", 0
+
+CRuby prints "ab?cd" and 1.
+
+The two boxed arms of scrub, emit_poly_call0_arms for no argument and
+emit_poly_call for one, never looked at the call's block. The block was
+dropped: each invalid sequence became U+FFFD, what the block does never
+happened, and a replacement given beside the block did not raise
+CRuby's ArgumentError. A String read out of an Array or a Hash of mixed
+values, a method's boxed value and a boxed parameter all took this arm.
+
+Both arms now go through one helper, emit_poly_scrub. With a block it
+runs the String arm's loop, emit_op_string_scrub_block, over the String
+sp_poly_recv_s unboxes; any other value raises NoMethodError there as
+it did.
+
+The block is taken by one test, poly_scrub_takes_block: a literal block
+with no break or return of its own, that names no parameter or whose
+first is a required one. The block-parameter pass types that parameter a
+String by the same test, as it does for a String receiver, so a lambda
+that captures the parameter and a lambda or a method it is handed to
+read a String; and the helper takes the block only where the
+parameter's local did come out a String. Any other call keeps the arm
+it had, and its C.
+
+emit_poly_call is past the size limit: its five-line arm is now one
+line, so it shrinks by four.
+
+Test: test/scrub_block_boxed_receiver.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

@@ -1,0 +1,49 @@
+String#[]= with a Regexp group keeps its pieces rooted
+
+`s[/(b)(cde)/, 2] = "XYZW"` as a statement built its answer in one
+nested call, sp_str_concat(sp_str_concat(sp_str_byteslice(..), v),
+sp_str_byteslice(..)): whichever piece C made first was in flight,
+unrooted, while the next allocated. Under SPINEL_GC_STRESS=2 the
+assignment stopped with "the mark reached a freed heap string"
+(`s = +"abc"; s << "defghijklmnop"`, then the line above). In a plain
+run a collection in that window loses a piece and raises nothing: of
+300,000 rounds of `s[/(a)(bc)/, 2] = "x" * 33` on a String of some
+thirty characters, 6 leave s wrong built with gcc and 3 built with
+clang (the count moves with what else allocates).
+
+For a value that is a String by its type, an arm above the old one
+cuts the head into a rooted temp and joins it with the value and the
+tail in one sp_str_concat3, three allocations for four: 3,981
+instructions a statement on an eight-character String before, 3,841
+after (callgrind, 200,000 statements). gc-stress-test runs the new
+test at level 2: on master it fails there built with gcc and with
+clang.
+
+That arm reads its group, then its value, then the receiver, as CRuby
+reads its arguments before it looks at the String, so a value that
+changes the receiver, `s[/(b)(cd)/, 2] = (s << "ZZ"; "x")`, is seen
+whichever order the C compiler reads a call's arguments in. The
+nested calls lost the append built with gcc and kept it built with
+clang. A value that is not a plain read is rooted while the String is
+matched and cut. The receiver is tested for frozen last, as CRuby
+tests it: a value can freeze it, and a pattern that does not match is
+IndexError on a frozen String too. Only an index the arm refuses and
+CRuby takes (a negative one counted back from the last group, a group
+past the ninth) keeps the frozen test ahead of its IndexError, as it
+was: that test reads sp_re_last_ncap, the group count sp_re_match
+records, now declared in sp_re.h for the generated code.
+
+A value of another kind (nil, an Integer, a boxed value) converts or
+raises where it is read, and CRuby does that after it has looked for
+the match: `s[/(q)r/, 1] = nil` is IndexError "regexp not matched",
+not TypeError. Those keep the old arm, its C unchanged, and a boxed
+String value keeps its window with it.
+
+Left as they are, wrong on master in a plain run and now at level 2
+as well, where the fault used to stop them: a group that took no part
+in the match and a group past the pattern's own are stored without
+the IndexError CRuby raises, and a nil String value without its
+TypeError. A negative group raises IndexError where CRuby counts from
+the last group.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
