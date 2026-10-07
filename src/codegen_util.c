@@ -1200,13 +1200,33 @@ int rescues_crossed(int pop_base) {
     if (g_rescue_save_stack[i].exc_base >= pop_base) k++;
   return k;
 }
+void rescue_save_push(void) {
+  g_rescue_save_stack[g_rescue_save_depth++] =
+    (RescueSave){ g_exc_frame_depth, g_c_loop_depth, g_ensure_depth, g_method_pr_label };
+}
+int rescues_in_loop(void) {
+  int k = 0;
+  for (int i = 0; i < g_rescue_save_depth; i++)
+    if (g_rescue_save_stack[i].loops >= g_c_loop_depth) k++;
+  return k;
+}
+int rescues_in_ensure(void) {
+  int k = 0;
+  for (int i = 0; i < g_rescue_save_depth; i++)
+    if (g_rescue_save_stack[i].ensures >= g_ensure_depth) k++;
+  return k;
+}
+/* A block spliced at a yield site returns through the function's own funnel
+   (g_fn_pr_label), and so leaves every body, an inlined method's too. */
+int rescues_in_method(void) {
+  if (g_method_pr_label == g_fn_pr_label) return g_rescue_save_depth;
+  int k = 0;
+  for (int i = 0; i < g_rescue_save_depth; i++)
+    if (g_rescue_save_stack[i].funnel == g_method_pr_label) k++;
+  return k;
+}
 void emit_rescue_pops(Buf *b, int k) {
   if (k > 0) buf_printf(b, "sp_rescue_sp -= %d; ", k);
-}
-/* Pop the k crossed rescue-body handlers (no frame pop). Used at sites whose
-   frame-pop text is special (the begin..ensure deferred-return). */
-void emit_cur_exc_restore(Buf *b, int pop_base) {
-  emit_rescue_pops(b, rescues_crossed(pop_base));
 }
 int emit_unwind(Buf *b, int pops, int k, const char *guard) {
   if (pops <= 0 && k == 0) return 0;

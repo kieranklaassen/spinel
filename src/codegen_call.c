@@ -13995,6 +13995,16 @@ void emit_brk_wrapped_call(Compiler *c, int id, Buf *b) {
     free(body.p); body = rw;
     light = 0;
   }
+  /* A break out of a rescue body leaves that body's handled exception
+     pushed, and a thrown one passes frames that put sp_rescue_sp back to
+     their own entry, so no count at the break can pop it: the landing
+     restores the depth of the wrapper's entry, as it does the other depths.
+     Only a body that pushes one takes the snapshot. */
+  int handles = body.p && strstr(body.p, "sp_rescue_push(") != NULL;
+  if (handles) {
+    emit_indent(g_pre, g_indent);
+    buf_printf(g_pre, "int _brkrs%d = sp_rescue_sp;\n", tS);
+  }
   if (light) {
     emit_indent(g_pre, g_indent);
     buf_printf(g_pre, "sp_RbVal _brkv%d = sp_box_nil(); (void)_brkv%d; sp_int _brklt%d = 0; (void)_brklt%d;\n", tS, tS, tS, tS);
@@ -14005,6 +14015,7 @@ void emit_brk_wrapped_call(Compiler *c, int id, Buf *b) {
     emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
     emit_indent(g_pre, g_indent); buf_printf(g_pre, "_brklbl%d: SP_UNUSED;\n", tS);
     emit_indent(g_pre, g_indent); buf_printf(g_pre, "sp_gc_nroots = _t%d;\n", tG);
+    if (handles) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "sp_rescue_sp = _brkrs%d;\n", tS); }
     emit_indent(g_pre, g_indent); buf_printf(g_pre, "_t%d = _brkv%d;\n", tR, tS);
     emit_indent(g_pre, g_indent); buf_printf(g_pre, "_brkend%d: SP_UNUSED;\n", tS);
   }
@@ -14027,6 +14038,7 @@ void emit_brk_wrapped_call(Compiler *c, int id, Buf *b) {
     emit_indent(g_pre, g_indent + 1);
     buf_printf(g_pre, "sp_exc_top = _brkexc%d; sp_catch_top = _brkcat%d; sp_brk_top = _brkslot%d;\n",
                tS, tS, tS);
+    if (handles) { emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "sp_rescue_sp = _brkrs%d;\n", tS); }
     emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "_t%d = sp_brk_val[sp_brk_top - 1];\n", tR);
     emit_indent(g_pre, g_indent + 1); buf_puts(g_pre, "sp_brk_top--;\n");
     emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");

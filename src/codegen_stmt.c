@@ -7920,7 +7920,7 @@ static void emit_return_deferred(Compiler *c, const int *a, int n, Buf *b, int i
      0 is a valid count; popping one anyway takes a caller's handler */
   int pops = g_exc_frame_depth - ctx->exc_base;
   if (pops < 0) pops = 0;
-  emit_cur_exc_restore(b, ctx->exc_base);
+  emit_rescue_pops(b, rescues_in_ensure());
   buf_printf(b, "_retf%d = 1; sp_exc_top -= %d; goto _ensure%d; }\n",
              ctx->lid, pops, ctx->lid);
 }
@@ -7995,7 +7995,7 @@ void emit_return(Compiler *c, int id, Buf *b, int indent) {
         if (!node_is_pure_literal(c->nt, vn)) { buf_puts(b, "(void)("); emit_expr(c, vn, b); buf_puts(b, "); "); }
       }
     }
-    emit_frame_unwind(b, g_method_pr_exc_depth, NULL);
+    emit_unwind(b, g_exc_frame_depth - g_method_pr_exc_depth, rescues_in_method(), NULL);
     buf_printf(b, "goto %s; }\n", g_method_pr_label);
     return;
   }
@@ -8471,7 +8471,7 @@ void emit_rescue(Compiler *c, int id, Buf *b, int indent, int fr, const char *re
   emit_indent(b, indent);
   /* an exception never loses a cause it already carries (#3745) */
   buf_printf(b, "if (!_ce_%d->cause) { sp_gc_wb((void *)_ce_%d); _ce_%d->cause = (sp_Exception *)sp_pending_cause; } sp_pending_cause = NULL;\n", rc, rc, rc);
-  g_rescue_save_stack[g_rescue_save_depth++] = (RescueSave){ g_exc_frame_depth };
+  rescue_save_push();
   if (has_bind) {
     emit_indent(b, indent);
     /* rename_local: inside a yield-inlined method body the binding local was
@@ -8544,9 +8544,9 @@ static void emit_ensure_return(Compiler *c, int eid, int has_retval, Buf *b, int
     buf_printf(b, "_retf%d = 1; ", outer->lid);
     /* A rescue between the ensures also leaves scope. Keep the ordinary
        one-frame spelling when there are no other handlers to unwind. */
-    if (g_exc_frame_depth == outer->exc_base + 1 && rescues_crossed(outer->exc_base) == 0)
+    if (g_exc_frame_depth == outer->exc_base + 1 && rescues_in_ensure() == 0)
       buf_puts(b, "sp_exc_top--; ");
-    else emit_frame_unwind(b, outer->exc_base, NULL);
+    else emit_unwind(b, g_exc_frame_depth - outer->exc_base, rescues_in_ensure(), NULL);
     buf_printf(b, "goto _ensure%d; }\n", outer->lid);
     return;
   }
@@ -8555,7 +8555,7 @@ static void emit_ensure_return(Compiler *c, int eid, int has_retval, Buf *b, int
   {
     char g[24]; snprintf(g, sizeof g, "_retf%d", eid);
     int base = g_method_pr_label ? g_method_pr_exc_depth : 0;
-    if (emit_frame_unwind(b, base, g)) { buf_puts(b, "\n"); emit_indent(b, indent); }
+    if (emit_unwind(b, g_exc_frame_depth - base, rescues_in_method(), g)) { buf_puts(b, "\n"); emit_indent(b, indent); }
   }
   /* Inside an INLINED method the enclosing C function belongs to the
      CALLER, so a raw `return` here returns from that one -- `return
@@ -8780,12 +8780,18 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
     if (g_ensure_depth > g_loop_ensure_base) {
       EnsureCtx *outer2 = &g_ensure_stack[g_ensure_depth - 1];
       emit_indent(b, indent);
-      buf_printf(b, "if (_nxtf%d) { _nxtf%d = 1; sp_exc_top--; goto _ensure%d; }\n",
-                 eid, outer2->lid, outer2->lid);
+      buf_printf(b, "if (_nxtf%d) { _nxtf%d = 1; ", eid, outer2->lid);
+      emit_rescue_pops(b, rescues_in_ensure());
+      buf_printf(b, "sp_exc_top--; goto _ensure%d; }\n", outer2->lid);
     }
     else if (g_c_loop_depth > 0) {
       emit_indent(b, indent);
-      buf_printf(b, "if (_nxtf%d) continue;\n", eid);
+      if (rescues_in_loop() > 0) {
+        buf_printf(b, "if (_nxtf%d) { ", eid);
+        emit_rescue_pops(b, rescues_in_loop());
+        buf_puts(b, "continue; }\n");
+      }
+      else buf_printf(b, "if (_nxtf%d) continue;\n", eid);
     }
     /* a deferred `break`, the same way, popping the frames it leaves: down
        to the enclosing ensure's, or down to the loop's for the C break, which
@@ -9750,7 +9756,7 @@ static int emit_next_leaving_body(Compiler *c, int id, Buf *b, int indent) {
       EnsureCtx *ctx = &g_ensure_stack[g_ensure_depth - 1];
       int pops = g_exc_frame_depth - ctx->exc_base;
       if (pops < 0) pops = 0;   /* see emit_return */
-      emit_cur_exc_restore(b, ctx->exc_base);
+      emit_rescue_pops(b, rescues_in_ensure());
       buf_printf(b, "_retf%d = 1; sp_exc_top -= %d; goto _ensure%d; }\n", ctx->lid, pops, ctx->lid);
       return 1;
     }
@@ -12992,9 +12998,6 @@ void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
                      (strncmp(g_brk_ser_var, "_brkser", 7) == 0 || light);
       const char *sfx = brk_goto ? g_brk_ser_var + (light ? 6 : 7) : NULL;   /* wrapper temp id */
       emit_indent(b, indent);
-      /* leaving the block pops the handler for every rescue body opened inside
-         it; the throw longjmps, so pop before it (the value persists). */
-      if (!brk_goto) emit_cur_exc_restore(b, g_brk_exc_base);
       /* a light wrapper (no serial-addressed scope) takes the value in its
          own temp; a throw has no scope to address there, which is what the
          wrapper's gate guarantees cannot be needed */
@@ -13002,7 +13005,7 @@ void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
       else if (brk_goto) buf_printf(b, "sp_brk_val[_brkslot%s - 1] = ", sfx);
       else buf_printf(b, "sp_brk_throw(%s, ", g_brk_ser_var);
       emit_break_value(c, id, b);
-      if (brk_goto) { buf_puts(b, "; "); emit_cur_exc_restore(b, g_brk_exc_base); buf_printf(b, "goto _brklbl%s;\n", sfx); }
+      if (brk_goto) buf_printf(b, "; goto _brklbl%s;\n", sfx);
       else buf_puts(b, ");\n");
       return;
     }
@@ -13066,11 +13069,11 @@ void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
       if (bpops < 0) bpops = 0;
       /* the rescue handlers between here and the innermost ensure pop now,
          as next's do; the flag carries the ones left for the loop exit */
-      int bleft = rescues_crossed(g_loop_exc_base) - rescues_crossed(bctx->exc_base);
+      int bleft = rescues_in_loop() - rescues_in_ensure();
       if (bleft < 0) bleft = 0;
       emit_indent(b, indent);
       buf_puts(b, "{ ");
-      emit_cur_exc_restore(b, bctx->exc_base);
+      emit_rescue_pops(b, rescues_in_ensure());
       buf_printf(b, "_brkf%d = %d; sp_exc_top -= %d; goto _ensure%d; }\n",
                  bctx->lid, 1 + bleft, bpops, bctx->lid);
       return;
@@ -13078,7 +13081,7 @@ void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
     emit_indent(b, indent);
     /* leaving through live begin/rescue frames opened inside the loop body:
        pop them, or their jmp_bufs dangle (same accounting as emit_return) */
-    emit_frame_unwind(b, g_loop_exc_base, NULL);
+    emit_unwind(b, g_exc_frame_depth - g_loop_exc_base, rescues_in_loop(), NULL);
     buf_puts(b, "break;\n"); return;
   }
   if (sp_streq(ty, "NextNode")) {
@@ -13152,13 +13155,13 @@ void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
       if (npops < 0) npops = 0;   /* see emit_return */
       emit_indent(b, indent);
       buf_puts(b, "{ ");
-      emit_cur_exc_restore(b, nctx->exc_base);
+      emit_rescue_pops(b, rescues_in_ensure());
       buf_printf(b, "_nxtf%d = 1; sp_exc_top -= %d; goto _ensure%d; }\n",
                  nctx->lid, npops, nctx->lid);
       return;
     }
     emit_indent(b, indent);
-    emit_frame_unwind(b, g_loop_exc_base, NULL);
+    emit_unwind(b, g_exc_frame_depth - g_loop_exc_base, rescues_in_loop(), NULL);
     buf_puts(b, "continue;\n"); return;
   }
   if (sp_streq(ty, "RedoNode"))   {
@@ -13224,7 +13227,10 @@ void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
       emit_indent(b, indent + 1);
       buf_printf(b, "sp_rescue_push((void *)_t%d);\n", tce);
     }
+    /* the fallback is a rescue body too: `x rescue next` leaves it */
+    rescue_save_push();
     if (r >= 0) emit_stmt(c, r, b, indent + 1);
+    g_rescue_save_depth--;
     emit_indent(b, indent + 1); buf_puts(b, "sp_rescue_sp--;\n");
     emit_indent(b, indent); buf_puts(b, "}\n");
     return;

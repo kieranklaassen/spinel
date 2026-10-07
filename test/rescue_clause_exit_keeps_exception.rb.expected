@@ -1,0 +1,50 @@
+in 0 ArgumentError:a0
+  cause ArgumentError:a0
+left TypeError:outer
+in 1 ArgumentError:a1
+  cause ArgumentError:a1
+left TypeError:outer
+in 2 ArgumentError:a2
+  cause ArgumentError:a2
+left TypeError:outer
+in 3 ArgumentError:a3
+  cause ArgumentError:a3
+left TypeError:outer
+6
+in 4 ArgumentError:a4
+  cause ArgumentError:a4
+left TypeError:outer
+2
+in 5 ArgumentError:a5
+  cause ArgumentError:a5
+left TypeError:outer
+7
+in 6 ArgumentError:a6
+  cause ArgumentError:a6
+left TypeError:outer
+  ensure ArgumentError:a7
+  ensure ArgumentError:a7
+in 7 ArgumentError:a7
+  cause ArgumentError:a7
+left TypeError:outer
+  ensure ArgumentError:a8
+in 8 ArgumentError:a8
+  cause ArgumentError:a8
+left TypeError:outer
+in 9 ArgumentError:a9
+  cause ArgumentError:a9
+left TypeError:outer
+in 10 ArgumentError:a10
+  cause ArgumentError:a10
+left TypeError:outer
+in 11 ArgumentError:a11
+  cause ArgumentError:a11
+left TypeError:outer
+  ensure ArgumentError:r
+  ensure ArgumentError:w1
+  ensure ArgumentError:w2
+around TypeError:outer
+fallback TypeError:outer
+caller TypeError:outer
+fallback nil
+top nil

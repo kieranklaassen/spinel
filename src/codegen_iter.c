@@ -4779,11 +4779,11 @@ int emit_array_filter_loop(Compiler *c, int recv, int block, TyKind rt, const ch
   emit_indent(b, indent);
   if (g_ensure_depth > 0) {
     EnsureCtx *outer = &g_ensure_stack[g_ensure_depth - 1];
-    if (has_retval && outer->has_retval)
-      buf_printf(b, "if (_retf%d) { _retv%d = _retv%d; _retf%d = 1; sp_exc_top--; goto _ensure%d; }\n",
-                 eid, outer->lid, eid, outer->lid, outer->lid);
-    else
-      buf_printf(b, "if (_retf%d) { _retf%d = 1; sp_exc_top--; goto _ensure%d; }\n", eid, outer->lid, outer->lid);
+    buf_printf(b, "if (_retf%d) { ", eid);
+    if (has_retval && outer->has_retval) buf_printf(b, "_retv%d = _retv%d; ", outer->lid, eid);
+    buf_printf(b, "_retf%d = 1; ", outer->lid);
+    emit_rescue_pops(b, rescues_in_ensure());
+    buf_printf(b, "sp_exc_top--; goto _ensure%d; }\n", outer->lid);
     emit_indent(b, indent);
     buf_printf(b, "if (_excf%d) { _excf%d = 1; _excmsg%d = _excmsg%d; _exccls%d = _exccls%d; _excobj%d = _excobj%d; sp_exc_top--; goto _ensure%d; }\n",
                eid, outer->lid, outer->lid, eid, outer->lid, eid, outer->lid, eid, outer->lid);

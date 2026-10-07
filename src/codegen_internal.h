@@ -468,10 +468,18 @@ extern int       g_ensure_depth;
 /* One entry per rescue body currently being emitted. exc_base records
    g_exc_frame_depth at that body's entry so a non-local exit can tell which
    rescue bodies it crosses (those with exc_base >= the exit's frame base) and
-   pop their sp_exc_handling entries (sp_rescue_sp). */
-typedef struct { int exc_base; } RescueSave;
+   pop their sp_exc_handling entries (sp_rescue_sp). That serves an exit from
+   the function. A loop, an ensure region, an inlined method or a break
+   wrapper opened INSIDE a body stands at the body's own frame depth, so the
+   depth cannot say the body began first: for an exit to one of those the
+   body records what was open at its entry, g_c_loop_depth, g_ensure_depth
+   and the return funnel (g_method_pr_label). A break wrapper restores
+   sp_rescue_sp at its landing, as it restores the other depths. */
+typedef struct { int exc_base; int loops; int ensures; const char *funnel; } RescueSave;
 extern RescueSave g_rescue_save_stack[MAX_ENSURE_DEPTH];
 extern int        g_rescue_save_depth;
+/* Enter a rescue body (a clause's, or a rescue modifier's fallback). */
+void rescue_save_push(void);
 /* Emit the pop that leaves the exception frames above pop_base AND pops the
    sp_rescue_sp handler for each rescue body crossed. Replaces the bare
    `sp_exc_top -= N;` emission at every non-local-exit site. When guard != NULL
@@ -482,9 +490,12 @@ int emit_frame_unwind(Buf *b, int pop_base, const char *guard);
 int emit_unwind(Buf *b, int pops, int k, const char *guard);
 void emit_rescue_pops(Buf *b, int k);
 int rescues_crossed(int pop_base);
-/* Pop the sp_rescue_sp handlers crossed (no frame pop), for the begin..ensure
-   deferred return whose frame-pop text is special. */
-void emit_cur_exc_restore(Buf *b, int pop_base);
+/* The rescue bodies an exit leaves, by its target: the innermost C loop, the
+   innermost open ensure region, the method returned from (the function, or
+   the inlined method whose funnel is in force). */
+int rescues_in_loop(void);
+int rescues_in_ensure(void);
+int rescues_in_method(void);
 
 /* First-class Proc support: each `proc {}` / `lambda {}` / `->{}` literal
    lowers to a standalone `static sp_int _proc_N(void *cap, sp_int *args)`
