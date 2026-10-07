@@ -148,6 +148,9 @@ int emit_strbuf_ivar_write_handle(Compiler *c, int v, Buf *b);
    taken: the write, valued as that handle (codegen_expr.c) */
 int emit_strbuf_write_handle(Compiler *c, int v, Buf *b);
 int operand_may_allocate(Compiler *c, int id);
+/* The String fields of a by-value object to root while its initialize runs,
+   a bit per instance variable (src/codegen_call.c). */
+unsigned value_ctor_fields_to_root(Compiler *c, ClassInfo *ci, int init);
 /* The same shim over a READER call that hands out the handle
    (`obj.name[0] = "X"`): no name to rename and no ivar node, so the call node
    itself reads as the shadow through the argument-override table. */
