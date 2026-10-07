@@ -1,0 +1,1 @@
+A `when *x` spreads what x holds before it is searched

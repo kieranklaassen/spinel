@@ -1,0 +1,1 @@
+A Class, a Range or a Regexp in `when *list` is asked === alone

@@ -1,0 +1,1 @@
+A `when *list` in a case statement matches as it does in a case value

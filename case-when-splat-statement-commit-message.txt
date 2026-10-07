@@ -1,0 +1,28 @@
+A `when *list` in a case statement matches as it does in a case value
+
+The statement form of `when *list` searched an Integer, String or Float
+Array with the include of the list's kind whatever the subject, compared
+the elements of a mixed list with ==, and answered no match for any
+other list:
+
+    list = [1..3, String, :q]
+    case 2
+    when *list then puts "in"
+    else puts "out"
+    end
+
+printed out, where the same case as a value says in. A Float subject was
+truncated into an Integer list (`case 2.5 when *[1, 2]` matched), a
+String subject beside an Integer list did not build, and the subject of
+a mixed list was evaluated a second time.
+
+emit_case keeps the typed search where the list is of the subject's own
+kind (an Integer subject in an Integer or Float Array, a String in a
+String Array, a Float in a Float Array) and sends every other list
+to sp_case_splat_match, as emit_case_expr does. One operand stays as
+it was, no match: an object of the program (a Struct, an Enumerable),
+which the case value does not spread yet.
+
+Test: test/case_when_splat_statement.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
