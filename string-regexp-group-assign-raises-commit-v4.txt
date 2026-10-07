@@ -1,0 +1,42 @@
+String#[]= with a Regexp group raises for a missing group or nil
+
+`s[/re/, n] = v` as a statement stored in three cases where CRuby
+raises. Each after `s = +"abc"; s << "defghijklmnop"`:
+
+    s[/(x)?bc/, 1] = "XYZW"  # s became "XYZWp"
+    s[/(b)c/, 3] = "XYZW"    # s became "XYZWabcdefghijklmnop"
+    s[/(b)(cd)/, 2] = v      # v nil: s became "abefghijklmnop"
+
+CRuby raises IndexError "regexp group 1 not matched", IndexError
+"index 3 out of regexp" and TypeError. A group that took no part in
+the match has -1 for its span, and the String was cut there. The
+index was tested against 9, not against the pattern: past the
+pattern's groups sp_re_caps holds whatever an earlier match left, so
+the answer moved with what the program had matched before. A nil
+String value joined as "".
+
+The arm now tests the index against sp_re_last_ncap, the group count
+sp_re_match records, then the group's start, then a nil value, then
+frozen. The order and the messages are CRuby's: no match, index out of
+regexp, group not matched, nil, frozen. emit_str_splice_value leaves
+the frozen check to the arm for that (a `recv` of -1), so a frozen
+String whose pattern does not match is the IndexError too. Four
+instructions a statement more with a literal value built with gcc
+(3,576 to 3,580, callgrind) and five with clang; six or seven with a
+variable.
+
+The tests wait for the value to have run. A value of another type
+that runs code (`s[/(x)?bc/, 1] = Integer("q")`) is read at the
+splice, and what it raises has to be heard first, as in CRuby: for it
+the arm emits the C it did.
+
+Left as they are: a negative group raises IndexError where CRuby
+counts from the last group, and a group past the ninth of a longer
+pattern raises where CRuby stores; on a frozen String both are
+FrozenError where the group took part in the match, as before. A
+boxed value that is no String raises FrozenError on a frozen String
+ahead of its TypeError, as before.
+
+Test: test/string_regexp_group_assign_raises.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

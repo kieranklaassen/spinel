@@ -1,0 +1,31 @@
+A boxed Array converts an index that is no Integer as Array#[] does
+
+    g = { "e" => [], "a" => [10, "s", :z], "r" => Rational(3, 2),
+          "nan" => 0.0 / 0.0, "big" => 2**70 }
+    p g["e"][g["r"]]
+    p g["a"][g["nan"]]
+    p g["a"][g["big"]]
+
+raised TypeError, then printed nil and 10, where CRuby prints nil and
+raises RangeError twice. The arm sp_poly_index_poly has for a boxed
+Array's index that is no Integer raises TypeError for every kind but a
+Float, so a Rational, a Complex and an object with to_int, which
+Array#[] converts, stopped reading: the first line answered nil until
+that arm came. It casts a Float without a range test, which is
+undefined for a NaN or 1e30, and it leaves a Bignum to the last line,
+which reads element 0.
+
+The index is now converted as Array#fill's offset is
+(sp_array_fill_offset_arg): what has to_int answers the element, a
+Float or a Bignum past a word is CRuby's RangeError, and true and false
+are named as CRuby names them. The one Bignum that fits a word, the
+smallest Integer, is an offset past every Array and answers nil. A
+Float that fits is still cut in line; the rest is out of line
+(sp_poly_ary_index_other, sp_poly_ary_big_offset), so an Integer index
+pays nothing.
+
+A Float Range is still a TypeError, where CRuby slices.
+
+Test: test/boxed_array_index_converts.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
