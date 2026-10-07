@@ -31294,7 +31294,10 @@ static void refuse_string_alias_copies(Compiler *c) {
       int b = sa_bang_receiver(c, bv);
       if (b < 0 || !sa_name(c, b, &from) || (str_self_call(nt, bv) && sa_handle(c, &to, 0) && sa_handle(c, &from, 0)))
         continue;
-      if (sa_mutated(c, &to) && sa_read_elsewhere(c, &from, b)) {
+      /* a local that shares its handle is read through the other name
+         (`t = s; r = t.strip!; r << x; p s`) */
+      int read = sa_read_elsewhere(c, &from, b) || (from.kind == NK_LocalVariableReadNode && sa_handle(c, &from, 0));
+      if (sa_mutated(c, &to) && read) {
         ShareRoute q = share_route(w, v, 0);
         q.to = w;
         q.carry = v;
