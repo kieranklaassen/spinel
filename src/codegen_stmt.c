@@ -3043,6 +3043,100 @@ int static_block_given_cond(Compiler *c, int pred) {
   return 0;
 }
 
+/* Is `n` one of the statements a body runs in turn: of a method, a block,
+   a class or the program, or of an if, a loop or a begin that is itself
+   such a statement? */
+int *du_parent_map(const NodeTable *nt);
+static int stmt_in_turn(const NodeTable *nt, const int *par, int n) {
+  for (;;) {
+    while (par[n] >= 0 && nt_kind(nt, par[n]) == NK_IfNode && nt_ref(nt, par[n], "subsequent") == n) n = par[n];
+    int p = par[n];
+    if (p < 0 || nt_kind(nt, p) != NK_StatementsNode) return 0;
+    int q = par[p];
+    if (q >= 0 && nt_kind(nt, q) == NK_ElseNode) q = par[q];
+    if (q < 0) return 0;
+    NodeKind qk = nt_kind(nt, q);
+    const char *qt = nt_type(nt, q);
+    if (qk == NK_DefNode || qk == NK_BlockNode || qk == NK_LambdaNode || qk == NK_ClassNode || qk == NK_ModuleNode ||
+        (qt && sp_streq(qt, "ProgramNode")))
+      return 1;
+    if (qk != NK_IfNode && qk != NK_UnlessNode && qk != NK_WhileNode && qk != NK_UntilNode && qk != NK_BeginNode)
+      return 0;
+    n = q;
+  }
+}
+
+/* Is the call `id` the first thing its statement runs? It is when it is the
+   statement, the value the statement writes or returns, the test of such an
+   `if`, the only operand of such a call, or the receiver of one whose
+   arguments are literals. There a receiver kept only for its effect runs
+   where Ruby runs it. Among other operands its place is the C compiler's,
+   or the prelude's ahead of them all, and a receiver that master drops
+   would run before an operand written first. */
+int call_runs_first(Compiler *c, int id) {
+  static const NodeTable *map_nt;
+  static int *par;
+  const NodeTable *nt = c->nt;
+  if (map_nt != nt) {
+    free(par);
+    par = du_parent_map(nt);
+    map_nt = par ? nt : NULL;
+  }
+  if (!par || id < 0) return 0;
+  for (int n = id;;) {
+    int p = par[n];
+    if (p < 0) return 0;
+    NodeKind pk = nt_kind(nt, p);
+    const char *pt = nt_type(nt, p);
+    int cnt = 0;
+    if (pk == NK_StatementsNode) {
+      if (par[p] < 0 || nt_kind(nt, par[p]) != NK_ParenthesesNode) return stmt_in_turn(nt, par, n);
+      nt_arr(nt, p, "body", &cnt);
+      if (cnt != 1) return 0;
+      n = par[p];
+    }
+    else if (pk == NK_LocalVariableWriteNode || pk == NK_InstanceVariableWriteNode ||
+             pk == NK_GlobalVariableWriteNode || pk == NK_ClassVariableWriteNode || pk == NK_ConstantWriteNode ||
+             pk == NK_ReturnNode ||
+             ((pk == NK_IfNode || pk == NK_UnlessNode) && nt_ref(nt, p, "predicate") == n))
+      n = p;
+    else if (pt && sp_streq(pt, "ArgumentsNode")) {
+      /* the only operand: `p x.size`, `return x.size` */
+      int q = par[p];
+      nt_arr(nt, p, "arguments", &cnt);
+      if (cnt != 1 || q < 0) return 0;
+      if (nt_kind(nt, q) == NK_CallNode && (nt_ref(nt, q, "receiver") >= 0 || nt_ref(nt, q, "block") >= 0)) return 0;
+      if (nt_kind(nt, q) != NK_CallNode && nt_kind(nt, q) != NK_ReturnNode) return 0;
+      n = q;
+    }
+    else if (pk == NK_CallNode && nt_ref(nt, p, "receiver") == n && nt_ref(nt, p, "block") < 0) {
+      int args = nt_ref(nt, p, "arguments");
+      const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &cnt) : NULL;
+      for (int i = 0; i < cnt; i++) {
+        NodeKind ak = nt_kind(nt, av[i]);
+        if (ak != NK_IntegerNode && ak != NK_FloatNode && ak != NK_StringNode && ak != NK_SymbolNode &&
+            ak != NK_NilNode && ak != NK_TrueNode && ak != NK_FalseNode)
+          return 0;
+      }
+      n = p;
+    }
+    else return 0;
+  }
+}
+
+/* The receiver of a test answered at compile time (is_a? and its kin,
+   respond_to? with a literal name), when running it can act and the test
+   is the first thing its statement runs (call_runs_first): the fold drops
+   the test and the dead arm, not the receiver, so `if bump.is_a?(K)` runs
+   bump. -1 when there is nothing to run, or no knowing where it would. */
+int folded_pred_recv(Compiler *c, int pred) {
+  if (pred < 0 || nt_kind(c->nt, pred) != NK_CallNode) return -1;
+  const char *nm = nt_str(c->nt, pred, "name");
+  if (!nm || !(is_kind_query(nm) || sp_streq(nm, "respond_to?"))) return -1;
+  int recv = nt_ref(c->nt, pred, "receiver");
+  return recv >= 0 && subtree_has_side_effect(c, recv) && call_runs_first(c, pred) ? recv : -1;
+}
+
 void emit_if(Compiler *c, int id, Buf *b, int indent, int is_unless, int tail) {
   const NodeTable *nt = c->nt;
   int pred = nt_ref(nt, id, "predicate");
@@ -3062,6 +3156,8 @@ void emit_if(Compiler *c, int id, Buf *b, int indent, int is_unless, int tail) {
        the missing constant in ways that have no C translation. */
     if (sc < 0 && comp_defined_guard_false(c, pred)) sc = 0;
     int eff = (sc < 0) ? -1 : (is_unless ? !sc : sc);
+    int lr = eff >= 0 ? folded_pred_recv(c, pred) : -1;
+    if (lr >= 0) emit_stmt(c, lr, b, indent);
     if (eff == 1) {
       /* condition always true: emit only the then-branch */
       emit_indent(b, indent); buf_puts(b, "{\n");
