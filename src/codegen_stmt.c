@@ -9214,7 +9214,7 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
       }
       buf_puts(b, "\n");
     }
-    g_ensure_stack[g_ensure_depth++] = (EnsureCtx){ eid, has_retval, g_exc_frame_depth, g_ret_type, 1 };
+    g_ensure_stack[g_ensure_depth++] = (EnsureCtx){ eid, has_retval, g_exc_frame_depth, g_ret_type, 1, rescue >= 0 };
 
     /* retry in the rescue restarts the body; the ensure runs only when the
        begin finally exits (matching CRuby, where an aborted attempt does not
@@ -9241,7 +9241,7 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
       emit_stmts(c, body, b, indent + 1);
     }
     g_exc_frame_depth--;
-    g_ensure_stack[g_ensure_depth - 1].live = 0;
+    g_ensure_stack[g_ensure_depth - 1].live = 0; g_ensure_stack[g_ensure_depth - 1].body_rescue = 0;
     emit_indent(b, indent + 1); buf_puts(b, "sp_exc_top--;\n");
     if (else_stmts >= 0) {
       if (resultvar) {
@@ -9384,9 +9384,12 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
          and the outer ensure's own, so re-raise there and let that handler
          match; with no such frame, propagate to the outer ensure as before.
          What this begin's own clauses let through leaves by the re-raise too,
-         as it did before it waited for the ensure. */
+         as it did before it waited for the ensure. And the rescue clauses of
+         the enclosing begin itself are handlers: they share the ensure's
+         frame, so while its body is what is being left the re-raise is what
+         brings the exception to them. */
       emit_indent(b, indent);
-      if (g_exc_frame_depth > outer->exc_base + 1 || rescue >= 0) {
+      if (g_exc_frame_depth > outer->exc_base + 1 || rescue >= 0 || outer->body_rescue) {
         buf_printf(b, "if (_excf%d) { ", eid);
         if (rescue >= 0 && g_debug) buf_printf(b, "sp_bt_restore(&_excbt%d); ", eid);
         buf_printf(b, "sp_pending_exc_obj = _excobj%d; sp_raise_cls(_exccls%d, _excmsg%d); }\n", eid, eid, eid);

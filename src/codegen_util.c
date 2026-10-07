@@ -4892,12 +4892,13 @@ void emit_ensure_exc_hand_on(Buf *b, int eid, int outer) {
 /* A synchronize block or a filter loop, its unlock or its cleanup done, sends
    on the exception it waits with. A begin's frame between it and the ensure
    region around it is a handler of its own, as it is for a begin's ensure:
-   the exception is raised again and that begin's clauses see it. In the
+   the exception is raised again and that begin's clauses see it. So are the
+   region's own rescue clauses while its body is what is being left. In the
    region's rescue or else clause no frame of the region is armed to bring a
    re-raise back to its ensure body, so there the exception is handed over
    as before. */
 void emit_ensure_exc_block_out(Buf *b, int eid, const EnsureCtx *outer) {
-  if (outer->live && g_exc_frame_depth > outer->exc_base + 1)
+  if (outer->live && (g_exc_frame_depth > outer->exc_base + 1 || outer->body_rescue))
     buf_printf(b, "if (_excf%d) { sp_pending_exc_obj = _excobj%d; sp_raise_cls(_exccls%d, _excmsg%d); }", eid, eid, eid, eid);
   else emit_ensure_exc_hand_on(b, eid, outer->lid);
 }

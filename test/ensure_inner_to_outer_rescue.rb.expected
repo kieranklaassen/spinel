@@ -1,0 +1,26 @@
+inner ensure
+rescued t
+outer ensure
+inner ensure
+rescued m
+outer ensure
+:rescued
+inner ensure
+outer ensure
+-1
+inner ensure
+outer ensure
+outside io
+ensure 1
+rescued deep
+ensure 2
+after
+ensure 3
+rescued held
+outer ensure
+false
+rescued at 3
+outer ensure
+[2, 3, 4]
+3000
+late
