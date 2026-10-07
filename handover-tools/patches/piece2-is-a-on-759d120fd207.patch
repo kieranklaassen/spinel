@@ -1,0 +1,903 @@
+diff --git a/src/analyze.c b/src/analyze.c
+index d1eac002..5ff80615 100644
+--- a/src/analyze.c
++++ b/src/analyze.c
+@@ -1783,15 +1783,364 @@ static void reject_dynamic_mixin_args(Compiler *c) {
+   }
+ }
+ 
++/* The write of constant `name` when the program writes it exactly once, by
++   any form (`A = v`, `A ||= v`, `Mod::A = v`, a multiple-assignment target);
++   -1 when there is none or more than one. */
++static int const_only_write(const NodeTable *nt, const char *name) {
++  static const NodeKind wk[] = {
++    NK_ConstantWriteNode, NK_ConstantOrWriteNode, NK_ConstantAndWriteNode,
++    NK_ConstantOperatorWriteNode, NK_ConstantTargetNode, NK_ConstantPathWriteNode,
++    NK_ConstantPathOrWriteNode, NK_ConstantPathAndWriteNode,
++    NK_ConstantPathOperatorWriteNode, NK_ConstantPathTargetNode };
++  int only = -1, writes = 0;
++  for (size_t q = 0; q < sizeof wk / sizeof wk[0]; q++)
++    NT_FOREACH_KIND(nt, wk[q], w) {
++      int t = nt_ref(nt, w, "target");
++      const char *wn = nt_str(nt, t >= 0 ? t : w, "name");
++      if (wn && sp_streq(wn, name)) { only = w; writes++; }
++    }
++  return writes == 1 ? only : -1;
++}
++
++/* A constant read that can name a constant the program wrote: a bare name,
++   `::A`, or `Mod::A` under a class or module of the program's own. A path
++   under anything else (`IO::Buffer`, `Errno::ENOENT`) names that namespace's
++   constant, whatever `A` the program has. */
++static int const_read_is_programs(Compiler *c, int id) {
++  const NodeTable *nt = c->nt;
++  NodeKind k = nt_kind(nt, id);
++  if (k != NK_ConstantPathNode) return k == NK_ConstantReadNode;
++  int par = nt_ref(nt, id, "parent");
++  NodeKind pk = nt_kind(nt, par);
++  const char *pn = (pk == NK_ConstantReadNode || pk == NK_ConstantPathNode) ? nt_str(nt, par, "name") : NULL;
++  return par < 0 || (pn && comp_class_index(c, pn) >= 0);
++}
++
++/* A value that runs no method: a constant or a plain literal (or a def, as
++   the argument of `private def m`). */
++static int node_runs_nothing(const NodeTable *nt, int id) {
++  switch (nt_kind(nt, id)) {
++  case NK_ConstantPathNode: { int par = nt_ref(nt, id, "parent"); return par < 0 || node_runs_nothing(nt, par); }
++  case NK_ConstantReadNode: case NK_SymbolNode: case NK_StringNode: case NK_IntegerNode: case NK_FloatNode:
++  case NK_TrueNode: case NK_FalseNode: case NK_NilNode: case NK_DefNode:
++    return 1;
++  default: return 0;
++  }
++}
++
++/* Declarations that run none of the program's methods, and the hooks a
++   definition runs when the program defines them. */
++static const char *const quiet_decls[] = { "attr_reader", "attr_writer", "attr_accessor", "private", "public",
++  "protected", "module_function", "include", "extend", "prepend", "require", "require_relative", NULL };
++static const char *const def_hooks[] = { "inherited", "included", "extended", "prepended", "method_added",
++  "singleton_method_added", "const_added", "const_missing", "append_features", "prepend_features",
++  "extend_object", NULL };
++static const char *const method_definers[] = { "define_method", "define_singleton_method", "alias_method", NULL };
++/* CRuby's own classes and modules that hold constants: a bare name in a body
++   of theirs, or of a class that inherits or mixes one in, reads theirs first. */
++static const char *const const_holders[] = { "Complex", "DidYouMean", "Encoding", "Enumerator", "Errno",
++  "ErrorHighlight", "File", "Float", "GC", "Gem", "IO", "Marshal", "Math", "ObjectSpace", "Pathname", "Process",
++  "Ractor", "Random", "RbConfig", "Regexp", "Ruby", "RubyVM", "Set", "SyntaxSuggest", "Thread", "ThreadGroup",
++  NULL };
++static int name_listed(const char *const *list, const char *n) {
++  for (int i = 0; n && list[i]; i++) if (sp_streq(list[i], n)) return 1;
++  return 0;
++}
++
++/* The name a Symbol or String literal spells. */
++static const char *literal_name(const NodeTable *nt, int id) {
++  NodeKind k = nt_kind(nt, id);
++  const char *u = k == NK_StringNode ? nt_str(nt, id, "unescaped") : NULL;
++  return k == NK_SymbolNode ? nt_str(nt, id, "value") : u ? u : k == NK_StringNode ? nt_str(nt, id, "content") : NULL;
++}
++
++/* Whether the program has a class or module body of that last name. */
++static int program_opens(const NodeTable *nt, const char *n) {
++  static const NodeKind bk[] = { NK_ClassNode, NK_ModuleNode };
++  for (int q = 0; q < 2; q++)
++    NT_FOREACH_KIND(nt, bk[q], b) {
++      const char *bn = nt_str(nt, nt_ref(nt, b, "constant_path"), "name");
++      if (bn && sp_streq(bn, n)) return 1;
++    }
++  return 0;
++}
++
++/* What the name of a body (`body` set), a superclass or a mixed-in module
++   says: 0 where no constant of CRuby's or a library's can come with it, 1
++   where one may, 2 for BasicObject, whose instances answer no is_a? and
++   whose bodies read no constant of the program's own level. A body's name
++   brings none unless it reopens a namespace that holds some. A superclass
++   or a module mixed in brings none where it is a builtin with no constants
++   (bc_builtin_constless) or a class or module the program defines and no
++   library has; a name the program does not define may hold anything. */
++static int ancestry_kind(const NodeTable *nt, int id, int body) {
++  int bare = nt_kind(nt, id) == NK_ConstantReadNode;
++  for (; id >= 0; id = nt_ref(nt, id, "parent")) {
++    NodeKind k = nt_kind(nt, id);
++    const char *n = nt_str(nt, id, "name");
++    if ((k != NK_ConstantReadNode && k != NK_ConstantPathNode) || !n) return 1;
++    if (sp_streq(n, "BasicObject")) return 2;
++    int constless = bc_builtin_constless(n);
++    if (name_listed(const_holders, n) || (bc_toplevel_known(n) && !constless)) return 1;
++    if (!body && !(bare && constless) && !program_opens(nt, n)) return 1;
++    if (k == NK_ConstantReadNode) break;
++  }
++  return 0;
++}
++
++/* `Struct.new(...)` or `Data.define(...)`: a new class with no constants. */
++static int is_struct_new(const NodeTable *nt, int s) {
++  int recv = nt_kind(nt, s) == NK_CallNode ? nt_ref(nt, s, "receiver") : -1;
++  const char *n = nt_str(nt, s, "name"), *rn = nt_kind(nt, recv) == NK_ConstantReadNode ? nt_str(nt, recv, "name") : NULL;
++  return n && rn && ((sp_streq(rn, "Struct") && sp_streq(n, "new")) || (sp_streq(rn, "Data") && sp_streq(n, "define")));
++}
++
++/* A statement that runs none of the program's methods: a def, an alias, a
++   constant given a constant, a literal or a new Struct or Data class, or a
++   declaration of such (`attr_reader :a`, `private`, `include M`). */
++static int stmt_runs_nothing(const NodeTable *nt, int s) {
++  if (nt_kind(nt, s) == NK_ConstantWriteNode) {
++    s = nt_ref(nt, s, "value");
++    if (nt_kind(nt, s) != NK_CallNode) return node_runs_nothing(nt, s);
++  }
++  if (nt_kind(nt, s) != NK_CallNode) return nt_kind(nt, s) == NK_DefNode || nt_kind(nt, s) == NK_AliasMethodNode;
++  int recv = nt_ref(nt, s, "receiver");
++  const char *n = nt_str(nt, s, "name");
++  if (nt_ref(nt, s, "block") >= 0 || !n) return 0;
++  if (recv < 0 ? !name_listed(quiet_decls, n) : !is_struct_new(nt, s)) return 0;
++  int args = nt_ref(nt, s, "arguments"), argc = 0;
++  const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &argc) : NULL;
++  for (int i = 0; i < argc; i++) if (!node_runs_nothing(nt, argv[i])) return 0;
++  return 1;
++}
++
++/* Number the statements of the program in the order they run, by fours. A
++   statement's seq[] has bit 0 set; every node inside it carries the number,
++   with bit 1 set inside a method body (a def, a define_method block). A class
++   or module body that is a statement is numbered through, as its statements
++   run in place. seq[nt->count] is the number of the first statement that may
++   run a method of the program (0: none does); BEGIN { } runs before all.
++   After it, one more entry a node: the class or module whose body the node's
++   statement is in (its node id + 1; 0 at the program's own level). */
++static void seq_stamp(const NodeTable *nt, int node, int v, int own, int *seq) {
++  if (node < 0) return;
++  NodeKind k = nt_kind(nt, node);
++  const char *n = k == NK_CallNode ? nt_str(nt, node, "name") : NULL;
++  if (k == NK_DefNode || (n && (sp_streq(n, "define_method") || sp_streq(n, "define_singleton_method")))) v |= 2;
++  seq[node] = v; seq[nt->count + 1 + node] = own;
++  int nr = nt_num_refs(nt, node);
++  for (int i = 0; i < nr; i++) seq_stamp(nt, nt_ref_at(nt, node, i), v, own, seq);
++  int na = nt_num_arrs(nt, node);
++  for (int i = 0; i < na; i++) {
++    int m = 0; const int *ids = nt_arr_at(nt, node, i, &m);
++    for (int j = 0; j < m; j++) seq_stamp(nt, ids[j], v, own, seq);
++  }
++}
++
++static void seq_statements(const NodeTable *nt, int stmts, int own, int *seq, int *n) {
++  int *runs = &seq[nt->count];
++  if (stmts < 0) return;
++  if (nt_kind(nt, stmts) != NK_StatementsNode) { if (!*runs) *runs = *n + 4; return; }
++  int m = 0; const int *ids = nt_arr(nt, stmts, "body", &m);
++  for (int j = 0; j < m; j++) {
++    NodeKind k = nt_kind(nt, ids[j]);
++    if (k == NK_PreExecutionNode) { *runs = 1; continue; }
++    if (k == NK_ClassNode || k == NK_ModuleNode) {
++      int sup = k == NK_ClassNode ? nt_ref(nt, ids[j], "superclass") : -1;
++      *n += 4; seq[ids[j]] = *n | 1;   /* the definition's place among the statements */
++      if (!*runs && sup >= 0 && !node_runs_nothing(nt, sup)) *runs = *n;
++      seq[nt->count + 1 + ids[j]] = own;
++      seq_statements(nt, nt_ref(nt, ids[j], "body"), ids[j] + 1, seq, n);
++      continue;
++    }
++    *n += 4; seq_stamp(nt, ids[j], *n, own, seq); seq[ids[j]] |= 1;
++    if (!*runs && !stmt_runs_nothing(nt, ids[j])) *runs = *n;
++  }
++}
++
++/* The numbering of the whole program. A program that defines a hook, or a
++   declaration's own name, runs it at a definition: nothing is quiet then. A
++   program that names is_a?, kind_of? or instance_of? as a method of its own
++   (a def, or its symbol or string: alias, define_method) is not numbered at
++   all: its method answers its own question. Neither is one with a class
++   under BasicObject. A constant written again, hidden or taken away by its
++   name (const_set, private_constant, remove_const) loses its write's mark:
++   no write node shows what it holds, or who may read it. The last entry is
++   set when a body may read a constant of CRuby's before the program's: the
++   program opens, inherits or mixes in one of const_holders, or something no
++   constant names; it is SEQ_LEFT for a program that is not numbered, where
++   no query is rewritten. */
++#define SEQ_LEN(nt) (2 * (size_t)(nt)->count + 2)
++#define SEQ_LEFT 4
++static int *seq_build(const NodeTable *nt) {
++  int *seq = calloc(SEQ_LEN(nt), sizeof(int));
++  if (!seq) return NULL;
++  static const NodeKind lk[] = { NK_SymbolNode, NK_StringNode };
++  for (int q = 0; q < 2; q++)
++    NT_FOREACH_KIND(nt, lk[q], s) {
++      const char *sv = literal_name(nt, s);
++      if (sv && is_kind_query(sv)) { seq[SEQ_LEN(nt) - 1] = SEQ_LEFT; return seq; }
++    }
++  NT_FOREACH_KIND(nt, NK_DefNode, d) {
++    const char *dn = nt_str(nt, d, "name");
++    if (dn && is_kind_query(dn)) { seq[SEQ_LEN(nt) - 1] = SEQ_LEFT; return seq; }
++    if (name_listed(def_hooks, dn) || name_listed(quiet_decls, dn)) seq[nt->count] = 1;
++  }
++  int n = 0, anc = 0; seq_statements(nt, nt_ref(nt, nt->root_id, "statements"), 0, seq, &n);
++  static const NodeKind bk[] = { NK_ClassNode, NK_ModuleNode };
++  for (int q = 0; q < 2; q++)
++    NT_FOREACH_KIND(nt, bk[q], b) {
++      int sup = q ? -1 : nt_ref(nt, b, "superclass");
++      anc |= ancestry_kind(nt, nt_ref(nt, b, "constant_path"), 1) | (sup < 0 || is_struct_new(nt, sup) ? 0 : ancestry_kind(nt, sup, 0));
++    }
++  NT_FOREACH_KIND(nt, NK_SingletonClassNode, sc)
++    if (nt_kind(nt, nt_ref(nt, sc, "expression")) != NK_SelfNode) anc |= 1;
++  NT_FOREACH_KIND(nt, NK_CallNode, id) {
++    const char *cn = nt_str(nt, id, "name");
++    int args = nt_ref(nt, id, "arguments"), argc = 0, a0 = 0, recv = nt_ref(nt, id, "receiver");
++    const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &argc) : NULL;
++    /* send(:include, M) names the method it calls; one that no literal
++       spells may be any (const_set, the definer of an is_a?), and so may
++       the method a definer names by no literal */
++    while (cn && is_send_family(cn)) { cn = a0 < argc ? literal_name(nt, argv[a0]) : NULL; a0++; if (!cn) anc |= 2; }
++    if (!cn) continue;
++    if (name_listed(method_definers, cn) && !(a0 < argc && literal_name(nt, argv[a0]))) anc |= 2;
++    NodeKind rk = nt_kind(nt, recv);
++    const char *rn = rk == NK_ConstantReadNode || rk == NK_ConstantPathNode ? nt_str(nt, recv, "name") : NULL;
++    if (sp_streq(cn, "include") || sp_streq(cn, "extend") || sp_streq(cn, "prepend") ||
++        (sp_streq(cn, "new") && rn && sp_streq(rn, "Class")))
++      for (int i = a0; i < argc; i++) anc |= ancestry_kind(nt, argv[i], 0);
++    int set = sp_streq(cn, "const_set");
++    if (!set && !sp_streq(cn, "private_constant") && !sp_streq(cn, "remove_const")) continue;
++    for (int i = a0; i < (set && argc > a0 ? a0 + 1 : argc); i++) {   /* const_set: the name alone */
++      const char *an = literal_name(nt, argv[i]);
++      int w = an ? const_only_write(nt, an) : -1;
++      /* any name, or one set beside the class of that name */
++      if (!an || (set && w < 0)) anc |= 2;
++      if (w >= 0) seq[w] &= ~1;
++    }
++  }
++  /* a file required inside a statement (a def, a block) is spliced ahead of
++     that statement and loads when the require runs: its writes stand in the
++     program earlier than they run */
++  NT_FOREACH_KIND(nt, NK_ConstantWriteNode, w) if (nt_int(nt, w, "req_late", 0) > 0) seq[w] &= ~1;
++  if (anc & 2) memset(seq, 0, SEQ_LEN(nt) * sizeof(int));
++  seq[SEQ_LEN(nt) - 1] = anc & 2 ? SEQ_LEFT : anc;
++  return seq;
++}
++
++/* Whether a read names the constant written in the body `ow` (as seq_build
++   records it): `::A` reads the program's own level, `Mod::A` the body of a
++   top-level Mod, and a bare `A` the program's own level or a body the read
++   sits in. Another body's constant of that name is not the one read, and a
++   Mod that a nested class or module shares its name with may be that one. */
++static int const_read_reaches(const NodeTable *nt, int rd, int ow, const int *own) {
++  if (nt_kind(nt, rd) != NK_ConstantPathNode) {
++    int o = own[rd];
++    while (o && o != ow) o = own[o - 1];
++    return o == ow;
++  }
++  int par = nt_ref(nt, rd, "parent");
++  if (par < 0 || !ow) return par < 0 && !ow;
++  int cp = nt_ref(nt, ow - 1, "constant_path");
++  const char *pn = nt_str(nt, par, "name"), *on = nt_str(nt, cp, "name");
++  if (nt_kind(nt, par) != NK_ConstantReadNode || nt_kind(nt, cp) != NK_ConstantReadNode ||
++      own[ow - 1] || !pn || !on || !sp_streq(pn, on)) return 0;
++  static const NodeKind bk[] = { NK_ClassNode, NK_ModuleNode };
++  for (int q = 0; q < 2; q++)
++    NT_FOREACH_KIND(nt, bk[q], b) {
++      const char *bn = own[b] ? nt_str(nt, nt_ref(nt, b, "constant_path"), "name") : NULL;
++      for (const char *u = bn ? strstr(bn, "__") : NULL; u; u = strstr(u + 2, "__")) bn = u + 2;
++      if (bn && sp_streq(bn, pn)) return 0;
++    }
++  return 1;
++}
++
++/* Whether the class is opened by its own definition alone (a builtin: by no
++   body). `class A` under a module reopens the class a constant `A` of
++   another body holds (walk_scope), so a second body of the class may be one
++   written with the constant's name, which then names two things. */
++static int class_opened_once(Compiler *c, const char *cn) {
++  const NodeTable *nt = c->nt;
++  int ci = is_builtin_class_name(cn) ? -1 : comp_class_index(c, cn);
++  int def = ci >= 0 ? c->classes[ci].def_node : -1;
++  static const NodeKind bk[] = { NK_ClassNode, NK_ModuleNode };
++  for (int q = 0; q < 2; q++)
++    NT_FOREACH_KIND(nt, bk[q], b) {
++      const char *bn = nt_str(nt, nt_ref(nt, b, "constant_path"), "name");
++      if (b != def && bn && sp_streq(bn, cn)) return 0;
++    }
++  return 1;
++}
++
++/* `x.is_a?(A)` (kind_of?, instance_of?) where `A = SomeClass`: rewrite the
++   argument's name to the class the constant holds, as `A.foo` and `when A`
++   read it, so every arm that names the class and the narrowing after it see
++   the class. Only where the constant is known to hold that class when the
++   call runs: its one write is `A = <constant>`, a statement, and has run by
++   then. A read at the program's or a class body's own level sits in a later
++   statement. A method body runs whenever something calls it, and a call
++   before the write may reach a body written after it: there, nothing that
++   runs a method of the program comes before the write. A second write may
++   hold another class, and before the write CRuby raises NameError.
++
++   What leaves the whole program alone is asked first and once (*left): a
++   program with no constant given a constant, or one seq_build does not
++   number, pays no scan of its constant writes for any query. */
++static void rewrite_const_alias_kind_arg(Compiler *c, int id, int **seq, int *left) {
++  const NodeTable *nt = c->nt;
++  const char *name = nt_str(nt, id, "name");
++  if (!name || !is_kind_query(name)) return;
++  int args = nt_ref(nt, id, "arguments"), argc = 0;
++  const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &argc) : NULL;
++  if (argc != 1 || !const_read_is_programs(c, argv[0])) return;
++  const char *an = nt_str(nt, argv[0], "name");
++  if (!an || comp_class_index(c, an) >= 0 || is_builtin_class_name(an)) return;   /* a class's name already */
++  if (*left < 0) {
++    int aliases = 0;
++    NT_FOREACH_KIND(nt, NK_ConstantWriteNode, cw)
++      if (const_read_is_programs(c, nt_ref(nt, cw, "value"))) { aliases = 1; break; }
++    *left = !aliases || !(*seq = seq_build(nt)) || (*seq)[SEQ_LEN(nt) - 1] == SEQ_LEFT;
++  }
++  if (*left) return;
++  const char *real = resolve_class_alias(c, an);
++  if (!real || sp_streq(real, an) || !class_opened_once(c, real)) return;
++  int w = const_only_write(nt, an);
++  if (nt_kind(nt, w) != NK_ConstantWriteNode || !const_read_is_programs(c, nt_ref(nt, w, "value"))) return;
++  int sw = (*seq)[w], sr = (*seq)[argv[0]], runs = (*seq)[nt->count];
++  if (!(sw & 1)) return;                                   /* the write is no statement */
++  /* the value is read where and when the write stands: it is the class
++     where its definition is a statement before the write, one a bare name
++     finds from there or in the body a path names (elsewhere a const_missing
++     of the program may answer). And a constant of CRuby (Math::DomainError
++     under `include Math`) may come before a bare name in a body */
++  {
++    const int *in = *seq + nt->count + 1;
++    int v = nt_ref(nt, w, "value"), bare = nt_kind(nt, v) == NK_ConstantReadNode, ci = comp_class_index(c, real);
++    int def = ci >= 0 ? c->classes[ci].def_node : -1, sd = def >= 0 ? (*seq)[def] : 1;
++    if (!(sd & 1) || sd > sw || (def >= 0 && nt_int(nt, def, "req_late", 0) > 0)) return;
++    if (def >= 0 ? !const_read_reaches(nt, v, in[def], in) : !bare && nt_ref(nt, v, "parent") >= 0) return;
++    if ((*seq)[SEQ_LEN(nt) - 1] && bare && in[w]) return;
++  }
++  if (sr & 2 ? runs && runs <= sw : (sr | 3) <= (sw | 3)) return;
++  const int *own = *seq + nt->count + 1;
++  if (!const_read_reaches(nt, argv[0], own[w], own)) return;
++  if ((*seq)[SEQ_LEN(nt) - 1] && nt_kind(nt, argv[0]) == NK_ConstantReadNode && own[argv[0]] != own[w]) return;
++  char buf[256]; snprintf(buf, sizeof buf, "%s", real);  /* copy: set frees an */
++  nt_set_str((NodeTable *)nt, argv[0], "name", buf);
++}
++
+ /* `A = SomeClass` (a constant aliasing a class) then `A.foo`: rewrite the
+    ConstantRead receiver's name to the underlying class so class-method dispatch
+    resolves it exactly like the direct `SomeClass.foo`. Mirrors the `class CONST`
+    reopening rewrite in walk_scope. Runs once after classes are registered. */
+ void rewrite_const_alias_receivers(Compiler *c) {
+   const NodeTable *nt = c->nt;
++  int *seq = NULL, left = -1;   /* statement numbers, built for the first kind query that asks */
+   for (int id = 0; id < nt->count; id++) {
+     const char *ty = nt_type(nt, id);
+     if (!ty || !sp_streq(ty, "CallNode")) continue;
++    rewrite_const_alias_kind_arg(c, id, &seq, &left);
+     int recv = nt_ref(nt, id, "receiver");
+     if (recv < 0 || !nt_type(nt, recv)) continue;
+     const char *rvty = nt_type(nt, recv);
+@@ -1807,6 +2156,7 @@ void rewrite_const_alias_receivers(Compiler *c) {
+       nt_set_str((NodeTable *)nt, recv, "name", buf);
+     }
+   }
++  free(seq);
+ }
+ 
+ /* For a receiverless instance_eval/exec CallNode with a literal block inside
+diff --git a/src/analyze_internal.h b/src/analyze_internal.h
+index e9d1223b..644984d8 100644
+--- a/src/analyze_internal.h
++++ b/src/analyze_internal.h
+@@ -104,6 +104,8 @@ void refuse_unreachable_bare_constants(Compiler *c);
+ int is_builtin_module_name(const char *n);
+ int builtin_module_at(int i, const char **name, int *id);
+ int is_builtin_exception_name(const char *n);
++int bc_toplevel_known(const char *n);      /* analyze_scope.c: a name CRuby or a library answers */
++int bc_builtin_constless(const char *n);   /* analyze_scope.c: a builtin ancestor with no constants */
+ const char *superclass_builtin_exc_name(const NodeTable *nt, int sc);   /* analyze_util.c */
+ int is_syserr_family_name(const char *n);           /* analyze_util.c */
+ int builtin_method_known(const char *cls, const char *m);
+diff --git a/src/analyze_scope.c b/src/analyze_scope.c
+index 44da6387..acada950 100644
+--- a/src/analyze_scope.c
++++ b/src/analyze_scope.c
+@@ -8077,7 +8077,7 @@ static char *bc_join(const char *p, const char *leaf) {
+ }
+ 
+ /* A name CRuby (or a library spinel provides) answers at the top level. */
+-static int bc_toplevel_known(const char *n) {
++int bc_toplevel_known(const char *n) {
+   static const char *const names[] = {
+     "ARGF", "ARGV", "ArgumentError", "Array", "BasicObject", "Binding", "Class", "ClosedQueueError",
+     "Comparable", "Complex", "ConditionVariable", "Data", "Dir", "ENV", "EOFError", "Encoding",
+@@ -8114,7 +8114,7 @@ static int bc_toplevel_known(const char *n) {
+ /* A builtin ancestor with no constants of its own (CRuby 4.0's
+    `K.constants - Object.constants` is empty): the user's reopenings are all
+    it can contribute. Any other builtin ancestor may answer the name itself. */
+-static int bc_builtin_constless(const char *n) {
++int bc_builtin_constless(const char *n) {
+   static const char *const names[] = {
+     "Object", "BasicObject", "Kernel", "Comparable", "Enumerable", "Array", "Hash", "String",
+     "Integer", "Numeric", "Struct", "Data", "Symbol", "Proc", "Range", "Module", "Class", "Time",
+diff --git a/src/spinel_parse.c b/src/spinel_parse.c
+index 85711ec4..357beac9 100644
+--- a/src/spinel_parse.c
++++ b/src/spinel_parse.c
+@@ -236,6 +236,7 @@ static void sp_fsl_splice(unsigned char **buf, size_t *n, size_t at,
+ static int *sp_line_file = NULL;  /* buffer line (1-based) -> file id */
+ static int *sp_line_orig = NULL;  /* buffer line (1-based) -> original line */
+ static int *sp_line_pop = NULL;
++static unsigned char *sp_line_late = NULL;  /* buffer line -> in a file spliced ahead of its require */
+ /* The position a `#<SPINEL_SOURCE>file:line` marker pins for the lines after
+    it (0 = none). Kept apart from the physical map above: `__FILE__`,
+    `__dir__` and `require_relative` still answer from the file the code is in,
+@@ -347,6 +348,20 @@ static void emit_int(int id, const char *field, long long val) {
+   out_add("I %d %s %lld", id, field, val);
+ }
+ 
++/* What the line map says of a statement on buffer line bl, its owner on ol:
++   `req_pop`, the line its required file ends at, where that is another file
++   than the owner's; `req_late`, in a file that loads when its require runs,
++   later than where it is spliced. The second goes on a constant's write and
++   on a class or module alone, which no def holds: a file spliced twice, once
++   of them late, keeps equal defs (desugar_conditional_defs compares them
++   field by field). */
++static void emit_req_marks(int id, int32_t bl, int32_t ol, pm_node_type_t t) {
++  if (bl < 1 || bl > sp_line_map_n) return;
++  if (sp_line_pop[bl] > 0 && sp_line_pop[bl] != sp_line_pop[ol]) emit_int(id, "req_pop", sp_line_pop[bl]);
++  if (sp_line_late[bl] && (t == PM_CONSTANT_WRITE_NODE || t == PM_CLASS_NODE || t == PM_MODULE_NODE))
++    emit_int(id, "req_late", 1);
++}
++
+ static void emit_float(int id, const char *field, double val) {
+   /* Issue #766: 64-byte buf; "%.17g" produces at most 24 chars, plus
+      ".0" trailer = 26. Safe by margin.
+@@ -585,8 +600,7 @@ static int flatten_node(pm_node_t *node) {
+     int32_t bl = pm_newline_list_line(&g_parser->newline_list, node->location.start, g_parser->start_line);
+     int32_t ol = owner ? pm_newline_list_line(&g_parser->newline_list, owner, g_parser->start_line) : 0;
+     g_stmt_next++;
+-    if (bl >= 1 && bl <= sp_line_map_n && sp_line_pop[bl] > 0 && sp_line_pop[bl] != sp_line_pop[ol])
+-      emit_int(id, "req_pop", sp_line_pop[bl]);
++    emit_req_marks(id, bl, ol, t);
+   }
+   if (t != PM_STATEMENTS_NODE) g_owner = t == PM_PROGRAM_NODE ? NULL : node->location.start;
+ 
+@@ -2382,6 +2396,7 @@ static void sp_build_line_map(const char *src, const char *toplevel) {
+   sp_line_file = (int *)calloc(nlines + 2, sizeof(int));
+   sp_line_orig = (int *)calloc(nlines + 2, sizeof(int));
+   sp_line_pop = (int *)calloc(nlines + 2, sizeof(int));
++  sp_line_late = (unsigned char *)calloc(nlines + 2, 1);
+   sp_disp_file = (int *)calloc(nlines + 2, sizeof(int));
+   sp_disp_line = (int *)calloc(nlines + 2, sizeof(int));
+   int *stk_dfile = (int *)calloc(nlines + 2, sizeof(int));  /* a frame's pinned file id, 0 = none */
+@@ -2390,10 +2405,10 @@ static void sp_build_line_map(const char *src, const char *toplevel) {
+   int *stk_file = (int *)malloc(sizeof(int) * (nlines + 2));
+   int *stk_next = (int *)malloc(sizeof(int) * (nlines + 2));
+   int *stk_start = (int *)malloc(sizeof(int) * (nlines + 2));
+-  if (!sp_line_file || !sp_line_orig || !sp_line_pop || !sp_disp_file || !sp_disp_line || !stk_dfile || !stk_dline || !stk_file || !stk_next || !stk_start) {
++  if (!sp_line_file || !sp_line_orig || !sp_line_pop || !sp_line_late || !sp_disp_file || !sp_disp_line || !stk_dfile || !stk_dline || !stk_file || !stk_next || !stk_start) {
+     fprintf(stderr, "spinel_parse: out of memory\n"); exit(1);
+   }
+-  int sp = 0;
++  int sp = 0, late = 0;   /* late: the depth of the outermost file spliced ahead of its require */
+   stk_file[sp] = sp_intern_file(toplevel);
+   stk_next[sp] = 1;
+ 
+@@ -2410,6 +2425,7 @@ static void sp_build_line_map(const char *src, const char *toplevel) {
+     }
+ else if (strncmp(line, SP_INSERT_PREFIX, strlen(SP_INSERT_PREFIX)) == 0) {
+       prefix_len = strlen(SP_INSERT_PREFIX);
++      if (!late) late = sp + 1;
+     }
+     if (prefix_len) {
+       char pathbuf[1024];
+@@ -2426,11 +2442,13 @@ else if (strncmp(line, SP_INSERT_PREFIX, strlen(SP_INSERT_PREFIX)) == 0) {
+     }
+ else if (strncmp(line, SP_POP_PREFIX, strlen(SP_POP_PREFIX)) == 0) {
+       for (int j = sp > 0 ? stk_start[sp] : bl; j < bl; j++) if (!sp_line_pop[j]) sp_line_pop[j] = bl;
++      if (sp == late) late = 0;
+       if (sp > 0) sp--;
+     }
+ else if (len < 12 || strncmp(line + len - 12, "SPINEL_COND>", 12) != 0) {
+       sp_line_file[bl] = stk_file[sp];
+       sp_line_orig[bl] = stk_next[sp];
++      sp_line_late[bl] = late != 0;
+       stk_next[sp] += 1;
+       if (strncmp(line, SP_SOURCE_PREFIX, strlen(SP_SOURCE_PREFIX)) == 0) {
+         /* file:line, split at the last colon; anything else is a comment */
+diff --git a/test/const_alias_is_a.rb b/test/const_alias_is_a.rb
+new file mode 100644
+index 00000000..1bd65066
+--- /dev/null
++++ b/test/const_alias_is_a.rb
+@@ -0,0 +1,123 @@
++# A constant that holds a class (`K = Integer`) names that class as the
++# argument of is_a?, kind_of? and instance_of?, as it does in `when K`
++# and as a receiver (`K === v`).
++class Pt; end
++class Sub < Pt; end
++module Mod; end
++class Tagged; include Mod; end
++class MyErr < StandardError; end
++S = Struct.new(:x)
++def int?(v) = v.is_a?(K)   # defined before K is written, called after
++
++K = Integer
++PK = Pt
++MK = Mod
++EK = MyErr
++SK = S
++module Lib; class Thing; end; end
++LT = Lib::Thing
++module Cfg; F = Float; end
++class Holder
++  A = Array
++  def self.array?(v) = v.is_a?(A)
++end
++
++# a typed receiver
++p 7.is_a?(K), 7.kind_of?(K), 7.instance_of?(K), "s".is_a?(K)
++p 1.5.is_a?(Cfg::F), 1.is_a?(Cfg::F)
++p Holder.array?([1]), Holder.array?(7)
++p int?(7), int?("s")
++
++# a boxed receiver
++[7, "s", nil].each { |v| p v.is_a?(K) }
++[Sub.new, Tagged.new, 7].each { |v| p [v.is_a?(PK), v.instance_of?(PK), v.is_a?(MK)] }
++
++# a user class, its subclass, an included module, a Struct, an exception
++p Sub.new.is_a?(PK), Sub.new.instance_of?(PK), Pt.new.instance_of?(PK)
++p Tagged.new.is_a?(MK), Pt.new.is_a?(MK)
++p S.new(1).is_a?(SK)
++p Lib::Thing.new.is_a?(LT), Pt.new.is_a?(LT)
++begin
++  raise MyErr, "m"
++rescue => e
++  p e.is_a?(EK)
++end
++
++# the answer steers a guard, a narrowed read and a block
++def need(v)
++  raise TypeError, "want Integer" unless v.is_a?(K)
++  v + 1
++end
++p need(2)
++def bump(v) = v.is_a?(K) ? v + 1 : v.to_s
++p bump(2), bump("a")
++p [1, "a", 2].select { |v| v.is_a?(K) }
++p [1, "a", 2].count { |v| v.is_a?(K) }
++
++# a constant written twice holds what was written last
++T = Integer
++T = String
++p 7.is_a?(T)
++
++# a builtin namespace's class is not the program's class of that name
++class Stat; end
++FS = File::Stat
++p Stat.new.is_a?(FS)
++
++# a call that runs before the constant is written: CRuby raises NameError
++def early(v)
++  v.is_a?(LATE)
++rescue NameError
++  false
++end
++p early(7)
++LATE = Integer
++
++# a call made before the write, to a method a later body replaces
++class Gate
++  def ok?(v) = false
++end
++p Gate.new.ok?(7)
++AFTER = Integer
++class Gate
++  def ok?(v) = v.is_a?(AFTER)
++end
++
++# a class under a module is not another body's constant of its name
++class Crate; end
++module Dock
++  class Bin; end
++end
++class Yard
++  Bin = Crate
++end
++p Crate.new.is_a?(Dock::Bin)
++
++# a constant written again by its name holds what was written last
++RS = Integer
++Object.const_set(:RS, String)
++p 7.is_a?(RS)
++
++# a hidden constant is not read from outside its body
++module Vault
++  HK = Integer
++  private_constant :HK
++end
++begin
++  p 7.is_a?(Vault::HK)
++rescue NameError
++  p false
++end
++
++# a constant taken away by its name is not read again (Spinel has no
++# remove_const and raises there)
++GONE = Integer
++begin
++  Object.send(:remove_const, :GONE)
++rescue NoMethodError
++end
++begin
++  p 7.is_a?(GONE)
++rescue NameError
++  p false
++end
+diff --git a/test/const_alias_is_a.rb.expected b/test/const_alias_is_a.rb.expected
+new file mode 100644
+index 00000000..c7db0a37
+--- /dev/null
++++ b/test/const_alias_is_a.rb.expected
+@@ -0,0 +1,38 @@
++true
++true
++true
++false
++true
++false
++true
++false
++true
++false
++true
++false
++false
++[true, false, false]
++[false, false, true]
++[false, false, false]
++true
++false
++true
++true
++false
++true
++true
++false
++true
++3
++3
++"a"
++[1, 2]
++2
++false
++false
++false
++false
++false
++false
++false
++false
+diff --git a/test/const_alias_is_a_basic.rb b/test/const_alias_is_a_basic.rb
+new file mode 100644
+index 00000000..2b4b68a3
+--- /dev/null
++++ b/test/const_alias_is_a_basic.rb
+@@ -0,0 +1,18 @@
++# An instance of a BasicObject subclass answers no is_a?, and the class's
++# body reads no constant of the program's own level: CRuby raises for both.
++class Blank < BasicObject
++  def blank?(v) = v.is_a?(K)
++end
++K = Blank
++[Blank.new].each do |b|
++  begin
++    p b.is_a?(K)
++  rescue NoMethodError
++    p false
++  end
++end
++begin
++  p Blank.new.blank?(Blank.new)
++rescue NameError
++  p false
++end
+diff --git a/test/const_alias_is_a_basic.rb.expected b/test/const_alias_is_a_basic.rb.expected
+new file mode 100644
+index 00000000..4b095fd0
+--- /dev/null
++++ b/test/const_alias_is_a_basic.rb.expected
+@@ -0,0 +1,2 @@
++false
++false
+diff --git a/test/const_alias_is_a_computed.rb b/test/const_alias_is_a_computed.rb
+new file mode 100644
+index 00000000..27743cd5
+--- /dev/null
++++ b/test/const_alias_is_a_computed.rb
+@@ -0,0 +1,9 @@
++# A method defined under a name no literal spells may be the program's own
++# is_a?: a constant's class is not read into the call.
++class Proxy
++  def initialize(o) = @o = o
++  define_method(("is_" + "a?").to_sym) { |k| false }
++end
++K = Proxy
++p Proxy.new(1).is_a?(K)
++p [Proxy.new(1), 7].map { |v| v.is_a?(K) }
+diff --git a/test/const_alias_is_a_computed.rb.expected b/test/const_alias_is_a_computed.rb.expected
+new file mode 100644
+index 00000000..0dd9eb15
+--- /dev/null
++++ b/test/const_alias_is_a_computed.rb.expected
+@@ -0,0 +1,2 @@
++false
++[false, false]
+diff --git a/test/const_alias_is_a_late.rb b/test/const_alias_is_a_late.rb
+new file mode 100644
+index 00000000..01fc068d
+--- /dev/null
++++ b/test/const_alias_is_a_late.rb
+@@ -0,0 +1,7 @@
++# A file required inside a method is loaded when the method runs: a constant
++# it writes is not there before that, wherever the file's text stands.
++require_relative "const_alias_is_a_late/top"
++def load_late = require_relative("const_alias_is_a_late/late")
++def late?(v) = defined?(LateKind) ? v.is_a?(LateKind) : false
++p late?(7)
++p 7.is_a?(TopKind)
+diff --git a/test/const_alias_is_a_late.rb.expected b/test/const_alias_is_a_late.rb.expected
+new file mode 100644
+index 00000000..1d474d52
+--- /dev/null
++++ b/test/const_alias_is_a_late.rb.expected
+@@ -0,0 +1,2 @@
++false
++true
+diff --git a/test/const_alias_is_a_late/late.rb b/test/const_alias_is_a_late/late.rb
+new file mode 100644
+index 00000000..b752ec3e
+--- /dev/null
++++ b/test/const_alias_is_a_late/late.rb
+@@ -0,0 +1 @@
++LateKind = Integer
+diff --git a/test/const_alias_is_a_late/top.rb b/test/const_alias_is_a_late/top.rb
+new file mode 100644
+index 00000000..3b80116d
+--- /dev/null
++++ b/test/const_alias_is_a_late/top.rb
+@@ -0,0 +1 @@
++TopKind = Integer
+diff --git a/test/const_alias_is_a_library.rb b/test/const_alias_is_a_library.rb
+new file mode 100644
+index 00000000..ba9f2664
+--- /dev/null
++++ b/test/const_alias_is_a_library.rb
+@@ -0,0 +1,9 @@
++# A class under a library's class reads the library's constants before the
++# program's own level: Socket::Option here, not the program's Option.
++require "socket"
++Option = String
++class Conn < Socket
++  def self.opt?(v) = v.is_a?(Option)
++end
++p Conn.opt?("s")
++p "s".is_a?(Option)
+diff --git a/test/const_alias_is_a_library.rb.expected b/test/const_alias_is_a_library.rb.expected
+new file mode 100644
+index 00000000..1d474d52
+--- /dev/null
++++ b/test/const_alias_is_a_library.rb.expected
+@@ -0,0 +1,2 @@
++false
++true
+diff --git a/test/const_alias_is_a_missing.rb b/test/const_alias_is_a_missing.rb
+new file mode 100644
+index 00000000..56af4fcd
+--- /dev/null
++++ b/test/const_alias_is_a_missing.rb
+@@ -0,0 +1,26 @@
++# A constant given a class by a path holds the program's class where the
++# body the path names defines it. Elsewhere a const_missing of the program
++# answers the path, with whatever it returns.
++class Plain; end
++
++class Conn
++  class Inner; end
++  def self.const_missing(name) = Integer
++end
++
++Missing = Conn::Plain
++Held = Conn::Inner
++
++p Plain.new.is_a?(Missing)
++p Conn::Inner.new.is_a?(Held)
++p 7.instance_of?(Held)
++
++# Written before its class is defined, a constant holds what const_missing
++# answered then.
++Early = Conn::Later
++
++class Conn
++  class Later; end
++end
++
++p Conn::Later.new.is_a?(Early)
+diff --git a/test/const_alias_is_a_missing.rb.expected b/test/const_alias_is_a_missing.rb.expected
+new file mode 100644
+index 00000000..9eb68b1e
+--- /dev/null
++++ b/test/const_alias_is_a_missing.rb.expected
+@@ -0,0 +1,4 @@
++false
++true
++false
++false
+diff --git a/test/const_alias_is_a_own.rb b/test/const_alias_is_a_own.rb
+new file mode 100644
+index 00000000..1c1d1e8c
+--- /dev/null
++++ b/test/const_alias_is_a_own.rb
+@@ -0,0 +1,9 @@
++# A program's own is_a? answers for itself: a constant's class is not read
++# into the call.
++class Proxy
++  def initialize(o) = @o = o
++  def is_a?(k) = false
++end
++K = Proxy
++p Proxy.new(1).is_a?(K)
++p [Proxy.new(1), 7].map { |v| v.is_a?(K) }
+diff --git a/test/const_alias_is_a_own.rb.expected b/test/const_alias_is_a_own.rb.expected
+new file mode 100644
+index 00000000..0dd9eb15
+--- /dev/null
++++ b/test/const_alias_is_a_own.rb.expected
+@@ -0,0 +1,2 @@
++false
++[false, false]
+diff --git a/test/const_alias_is_a_scope.rb b/test/const_alias_is_a_scope.rb
+new file mode 100644
+index 00000000..63cc3be8
+--- /dev/null
++++ b/test/const_alias_is_a_scope.rb
+@@ -0,0 +1,35 @@
++# A bare constant inside a class or module is looked up in that body, then in
++# what the class inherits or mixes in, before the program's own level: a name
++# one of CRuby's own namespaces holds is not the program's constant there.
++Status = Integer
++module Process
++  def self.status?(v) = v.is_a?(Status)   # Process::Status
++end
++p Process.status?(7)
++
++E = Integer
++class Calc
++  include Math
++  def e?(v) = v.is_a?(E)                  # Math::E, a Float
++end
++begin
++  p Calc.new.e?(7)
++rescue TypeError
++  p false
++end
++
++# the program's own level reads the program's constant
++p 7.is_a?(Status), 7.is_a?(E)
++
++# the value of a write is read where the write stands: under `include Math`
++# a bare DomainError is Math's, and so is Gauge::DomainError; neither
++# constant holds the program's class
++class DomainError < StandardError; end
++module Gauge
++  include Math
++  ERR = DomainError                       # Math::DomainError
++  def self.dom?(e) = e.is_a?(ERR)
++end
++p Gauge.dom?(DomainError.new("x")), DomainError.new("x").is_a?(Gauge::ERR)
++J = Gauge::DomainError                    # Math's too, through Gauge
++p DomainError.new("x").is_a?(J)
+diff --git a/test/const_alias_is_a_scope.rb.expected b/test/const_alias_is_a_scope.rb.expected
+new file mode 100644
+index 00000000..b031a141
+--- /dev/null
++++ b/test/const_alias_is_a_scope.rb.expected
+@@ -0,0 +1,7 @@
++false
++false
++true
++true
++false
++false
++false

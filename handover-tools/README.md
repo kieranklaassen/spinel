@@ -62,9 +62,9 @@ from the commits its recipe lists.
 
 `texts/` holds the upstream texts of the three pieces as they are summed in
 the hand-over: `numeric-*` for the first (a boxed number's
-`instance_of?(Numeric)`), `pr-title.txt`, `pr-body-upstream-v12.md` and
-`commit-message-v12.txt` for the second (the constant in `is_a?`; the `-v7`
-to `-v11` files are its earlier texts), `bl1-*`
+`instance_of?(Numeric)`), `pr-title.txt`, `pr-body-upstream-v14.md` and
+`commit-message-v14.txt` for the second (the constant in `is_a?`; the `-v7`
+to `-v13` files are its earlier texts), `bl1-*`
 for the third (the constant in `rescue` and `raise`; its refactor's message
 is in commit 69d79bf9), `gd-*` for the fourth (an exception's `is_a?` where
 two modules name a class alike), `qc-*` for the fifth (the compile time of a
@@ -75,3 +75,14 @@ module a class includes twice).
 (the file's name ends in that master's id): `git apply --index` on that
 master gives the tree the hand-over names, and the piece's commit message
 is the text beside it in `texts/`.
+
+The second piece asks what leaves a whole program alone before it scans the
+constant writes (`-v14`): `patches/piece2-ask-first-delta.patch` is that
+change on the piece as it was (it applies above the piece on 4f8b737c1402
+and on 759d120fd207), `piece3-ask-first-delta.patch` the same on the third
+piece's head, and the `-on-759d120fd207` patches are the second piece above
+the first, the third's refactor above the second, and the third above its
+refactor. The emitted C is the same before and after (`tools/cident.sh`, and
+the sums of `csum.sh` over the earlier sets); the two programs counted with
+callgrind are 2,000 lines `K<i> = Integer`, `x = 5`, 4,000 lines
+`p x.is_a?(K<i>)`, alone and with `class Bo < BasicObject; end` ahead.
