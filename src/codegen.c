@@ -14074,7 +14074,7 @@ typedef struct EmitUnitState {
   int indent, nren, block_nren, block_id, c_loop_depth, ensure_depth;
   int emitting_class_id, inline_recv_class, ie_class_id, dm_subst_node, exc_frame_depth;
   int open_defaults;
-  int loop_exc_base, loop_ensure_base, redo_depth;
+  int loop_exc_base, loop_ensure_base, redo_depth, loop_body;
   /* whether the unit's block is a lowered method's proc parameter */
   int current_scope_is_lowered, yield_lowered_fallback;
   TyKind ie_next_ty;
@@ -14093,6 +14093,7 @@ void emit_unit_state_save(EmitUnitState *s) {
   s->emitting_class_id = g_emitting_class_id; s->inline_recv_class = g_inline_recv_class;
   s->ie_class_id = g_ie_class_id; s->dm_subst_node = g_dm_subst_node; s->exc_frame_depth = g_exc_frame_depth;
   s->loop_exc_base = g_loop_exc_base; s->loop_ensure_base = g_loop_ensure_base; s->redo_depth = g_redo_depth;
+  s->loop_body = g_loop_body;
   s->ie_next_ty = g_ie_next_ty;
   s->open_defaults = g_open_defaults;
   s->pre = g_pre;
@@ -14146,6 +14147,7 @@ void emit_unit_state_restore(const EmitUnitState *s) {
   g_emitting_class_id = s->emitting_class_id; g_inline_recv_class = s->inline_recv_class;
   g_ie_class_id = s->ie_class_id; g_dm_subst_node = s->dm_subst_node; g_exc_frame_depth = s->exc_frame_depth;
   g_loop_exc_base = s->loop_exc_base; g_loop_ensure_base = s->loop_ensure_base; g_redo_depth = s->redo_depth;
+  g_loop_body = s->loop_body;
   g_ie_next_ty = s->ie_next_ty;
   g_open_defaults = s->open_defaults;
   g_pre = s->pre;

@@ -9289,16 +9289,27 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
     buf_puts(b, "if (sp_unwind_kind != SP_UNWIND_NONE) sp_unwind_resume();\n");
 
     /* a deferred `next`: chain to the enclosing ensure when that region is
-       still inside the loop, else run the C continue here */
+       still inside the loop, else run the C continue here. Either way it
+       pops the begin/rescue frames it leaves, as the deferred `break`
+       below does: down to the enclosing ensure's, or down to the loop's.
+       Only where the loop's body owns this begin: a block whose emitter
+       records no loop of its own stands under an enclosing loop's base,
+       and keeps the lines it had, as a begin with no `next` in it does. */
+    int nx_own = subtree_has_own_next(c->nt, id) && subtree_owns_next(c->nt, g_loop_body, id);
     if (g_ensure_depth > g_loop_ensure_base) {
       EnsureCtx *outer2 = &g_ensure_stack[g_ensure_depth - 1];
+      int fp2 = nx_own ? g_exc_frame_depth - outer2->exc_base : 1;
       emit_indent(b, indent);
-      buf_printf(b, "if (_nxtf%d) { _nxtf%d = 1; sp_exc_top--; goto _ensure%d; }\n",
-                 eid, outer2->lid, outer2->lid);
+      buf_printf(b, "if (_nxtf%d) { _nxtf%d = 1; ", eid, outer2->lid);
+      if (fp2 > 1) buf_printf(b, "sp_exc_top -= %d; ", fp2);
+      else buf_puts(b, "sp_exc_top--; ");
+      buf_printf(b, "goto _ensure%d; }\n", outer2->lid);
     }
     else if (g_c_loop_depth > 0) {
+      int fpl2 = nx_own ? g_exc_frame_depth - g_loop_exc_base : 0;
       emit_indent(b, indent);
-      buf_printf(b, "if (_nxtf%d) continue;\n", eid);
+      if (fpl2 > 0) buf_printf(b, "if (_nxtf%d) { sp_exc_top -= %d; continue; }\n", eid, fpl2);
+      else buf_printf(b, "if (_nxtf%d) continue;\n", eid);
     }
     /* a deferred `break`, the same way, popping the frames it leaves: down
        to the enclosing ensure's, or down to the loop's for the C break, which
