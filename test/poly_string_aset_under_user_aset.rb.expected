@@ -1,0 +1,60 @@
+"Name"
+"NamE"
+"NAAmE"
+"NamE"
+"NE"
+["qbc", 1]
+["qbr", 1]
+[["asc", 1], 2]
+["tbc", 1]
+"Draft"
+"Shared"
+"Shared"
+"Memo"
+"Param"
+"Block"
+"V"
+"Value"
+"oNce"
+11
+index 9 out of string
+frozen
+"abc"
+"abc"
+[[1, 2]]
+[[0, "Z"]]
+"Zbc"
+["Z", 2]
+[[1, "b"], [0, "Z"]]
+"other"
+"other"
+"xyz"
+1
+"abc"
+"abcdef"
+1
+"a<[i]>cdef"
+2
+"a<ai]>cdef"
+3
+"a<aw]>cdef"
+4
+"a<awd>cdef"
+5
+"a<awdkcdef"
+6
+"a1awdkcdef"
+7
+8
+9
+11
+"uvwxyz"
+"uvwxyz"
+["uvwxyz", 1]
+"uvwxyz"
+"uvwxyz"
+"uvwxyz"
+"q5raft"
+"Draft"
+["aXYdef", 1]
+"abcdYZ"
