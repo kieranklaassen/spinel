@@ -4305,6 +4305,13 @@ static sp_int sp_poly_to_i_meth(sp_RbVal v) {
   /* a shared String handle converts as the String it holds (#7263) */
   if (SP_UNLIKELY(sp_poly_is_strbuf(v))) v = sp_poly_strbuf_deref(v);
   if (v.tag == SP_TAG_OBJ && v.cls_id >= 0) sp_raise_nomethod(sp_nomethod_msg("to_i", v));
+  /* true, false, a Symbol, an Array, a Hash and a Range have no #to_i: the
+     conversion below answered 1, 0 or the Symbol's id where CRuby raises */
+  if (v.tag == SP_TAG_BOOL || v.tag == SP_TAG_SYM ||
+      (v.tag == SP_TAG_OBJ && (sp_poly_is_array_kind(v.cls_id) || sp_poly_is_hash_kind(v.cls_id) ||
+                               v.cls_id == SP_BUILTIN_RANGE || v.cls_id == SP_BUILTIN_FLOAT_RANGE ||
+                               v.cls_id == SP_BUILTIN_STR_RANGE)))
+    sp_raise_nomethod(sp_nomethod_msg("to_i", v));
   /* The call answers an sp_int, and a Bignum is one Integer that does not
      fit it: say so rather than hand back its low word (#4665). Promoting
      the slot is the wider question of #2024. */
@@ -10170,6 +10177,30 @@ static sp_RbVal sp_poly_dig_list(sp_RbVal recv, sp_PolyArray *keys) {
   return cur;
 }
 /* poly[poly_key]: dispatch on key tag at runtime. */
+/* String#[] by one index that is no Integer, String, Integer Range or
+   Regexp. A String the program appends to is boxed as its shared handle: it
+   is searched for, and the answer is a copy of its text, since the handle's
+   buffer moves as it grows. A Float Range slices by its ends cut to
+   Integers; a String Range has no Integer ends. Anything else is the
+   Integer the typed read converts it to (a Float is cut), or that
+   conversion's TypeError. */
+static SP_NOINLINE sp_RbVal sp_poly_str_aref_other(const char *s, sp_RbVal idx) {
+  if (!s) s = sp_str_empty;
+  if (sp_poly_is_strbuf(idx)) {
+    const char *k = sp_poly_strbuf_deref(idx).v.s;
+    return sp_str_include(s, k) ? sp_box_str(sp_str_dup(k)) : sp_box_nil();
+  }
+  if (idx.tag == SP_TAG_OBJ && idx.cls_id == SP_BUILTIN_FLOAT_RANGE && idx.v.p) {
+    sp_FloatRange fr = *(sp_FloatRange *)idx.v.p;
+    int noend = (fr.omitted & SP_FRANGE_NO_END) != 0;
+    sp_int lo = (fr.omitted & SP_FRANGE_NO_BEGIN) ? 0 : sp_poly_arg_int_chk(sp_box_float(fr.first));
+    sp_int hi = noend ? INTPTR_MAX : sp_poly_arg_int_chk(sp_box_float(fr.last));
+    return sp_box_str(sp_str_sub_range_r(s, lo, hi, noend ? 0 : (int)fr.excl));
+  }
+  if (idx.tag == SP_TAG_OBJ && idx.cls_id == SP_BUILTIN_STR_RANGE)
+    sp_raise_cls("TypeError", "no implicit conversion of String into Integer");
+  return sp_box_nullable_str(sp_str_char_at_or_nil(s, sp_poly_arg_int_chk(idx)));
+}
 static sp_RbVal sp_poly_index_poly(sp_RbVal recv, sp_RbVal idx) {
   /* a curried Proc applies its [] argument whatever the key kind -- claimed
      here, before the key-typed dispatch below coerces it to an index */
@@ -10300,7 +10331,36 @@ static sp_RbVal sp_poly_index_poly(sp_RbVal recv, sp_RbVal idx) {
   if (recv.tag == SP_TAG_OBJ && sp_poly_is_hash_kind(recv.cls_id) &&
       recv.cls_id != SP_BUILTIN_POLY_POLY_HASH)
     return sp_poly_hash_foreign_miss(recv, idx);
+  /* a String read by an index of another kind (an appended String, a Float,
+     nil, an Array, ...) matched no arm above and answered its first
+     character */
+  if (SP_UNLIKELY(idx.tag != SP_TAG_INT) && idx.tag != SP_TAG_BIGINT && recv.tag == SP_TAG_STR)
+    return sp_poly_str_aref_other(recv.v.s, idx);
   return sp_poly_arr_get_hash(recv, i);
+}
+
+/* String#[] and #slice by one index whose kind is known only at run time.
+   An Integer is the character read. A String is searched for, and the
+   answer is a copy of it, a new String as CRuby's is: one the program
+   appends to is boxed as its shared handle, whose buffer moves as it
+   grows. A Range or a Regexp slices as each does through a boxed
+   receiver. Anything else is the Integer conversion (a Float is cut), or
+   that conversion's TypeError. */
+static SP_NOINLINE const char *sp_str_aref_poly_other(const char *s, sp_RbVal idx) {
+  if (!s) sp_nil_recv("[]");
+  if (idx.tag == SP_TAG_STR || sp_poly_is_strbuf(idx)) {
+    const char *k = sp_poly_strbuf_deref(idx).v.s;
+    return (k && sp_str_include(s, k)) ? sp_str_dup(k) : NULL;
+  }
+  if (idx.tag == SP_TAG_OBJ && (idx.cls_id == SP_BUILTIN_RANGE || idx.cls_id == SP_BUILTIN_REGEX)) {
+    sp_RbVal r = sp_poly_index_poly(sp_box_str(s), idx);
+    return r.tag == SP_TAG_STR ? r.v.s : NULL;
+  }
+  return sp_str_char_at_or_nil(s, sp_poly_arg_int_chk(idx));
+}
+static SP_INLINE const char *sp_str_aref_poly(const char *s, sp_RbVal idx) {
+  if (idx.tag == SP_TAG_INT && idx.v.i != SP_INT_NIL) return sp_str_char_at_or_nil(s, idx.v.i);
+  return sp_str_aref_poly_other(s, idx);
 }
 
 /* Presence check for a Hash reached through a poly value, keyed by a poly key.
@@ -11539,7 +11599,7 @@ static sp_RbVal sp_poly_to_a_m(sp_RbVal v) {
     return sp_box_poly_array(sp_poly_to_poly_array(v));
   { sp_PolyArray *ue = sp_poly_user_elems(v);
     if (ue) return sp_box_poly_array(ue); }
-  sp_raise_cls("NoMethodError", sp_sprintf("undefined method 'to_a' for %s", sp_poly_class_name(v)));
+  sp_raise_nomethod(sp_nomethod_msg("to_a", v));  /* CRuby's wording, as for to_r */
 }
 /* Time.at(*args): the splatted list is Time.at's argument list -- the
    seconds (a Time, Integer, Float or Rational), then a subsecond part in
@@ -11631,7 +11691,7 @@ static sp_RbVal sp_poly_with_m(sp_RbVal v, sp_RbVal ov) {
     sp_RbVal r = sp_obj_with_fn(v, ov);
     if (r.tag == SP_TAG_OBJ) return r;
   }
-  sp_raise_cls("NoMethodError", sp_sprintf("undefined method 'with' for %s", sp_poly_class_name(v)));
+  sp_raise_nomethod(sp_nomethod_msg("with", v));  /* CRuby's wording, as for to_r */
 }
 static sp_RbVal sp_poly_to_r_m(sp_RbVal v) {
   v = sp_poly_strbuf_deref(v);   /* a shared String handle reads as its String (#7263) */
@@ -11652,7 +11712,7 @@ static sp_RbVal sp_poly_to_r_m(sp_RbVal v) {
      poly, and `v&.to_r` is exactly that shape. */
   if (v.tag == SP_TAG_STR) return sp_box_rational(sp_str_to_r(v.v.s ? v.v.s : sp_str_empty));
   if (sp_poly_is_strbuf(v)) return sp_poly_to_r_m(sp_poly_strbuf_deref(v));
-  sp_raise_cls("NoMethodError", sp_sprintf("undefined method 'to_r' for %s", sp_poly_class_name(v)));
+  sp_raise_nomethod(sp_nomethod_msg("to_r", v));  /* "for true", "for an instance of Array", as CRuby words it */
 }
 /* #rationalize on a boxed value, with `argc` epsilons (0 or 1): nil and an
    Integer ignore it and answer (0/1) and (n/1); a Float answers the simplest
@@ -11669,7 +11729,7 @@ static sp_RbVal sp_poly_rationalize_m(sp_RbVal v, int argc, sp_RbVal eps) {
     if (!argc) return v;
     return sp_box_rational(sp_float_rationalize(sp_rational_to_f(*(sp_Rational *)v.v.p), sp_poly_to_f(eps)));
   }
-  sp_raise_cls("NoMethodError", sp_sprintf("undefined method 'rationalize' for %s", sp_poly_class_name(v)));
+  sp_raise_nomethod(sp_nomethod_msg("rationalize", v));  /* CRuby's wording, as for to_r */
 }
 static sp_RbVal sp_poly_to_c_m(sp_RbVal v) {
   v = sp_poly_strbuf_deref(v);   /* a shared String handle reads as its String (#7263) */
@@ -11685,7 +11745,7 @@ static sp_RbVal sp_poly_to_c_m(sp_RbVal v) {
   if (v.tag == SP_TAG_STR) return sp_box_complex(sp_str_to_c(v.v.s ? v.v.s : sp_str_empty));
   if (sp_poly_is_strbuf(v)) return sp_poly_to_c_m(sp_poly_strbuf_deref(v));
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_COMPLEX) return v;
-  sp_raise_cls("NoMethodError", sp_sprintf("undefined method 'to_c' for %s", sp_poly_class_name(v)));
+  sp_raise_nomethod(sp_nomethod_msg("to_c", v));  /* "for true", "for an instance of Array", as CRuby words it */
 }
 /* Array-reduction methods on a boxed array value -- an element of a poly array,
    e.g. a run produced by chunk_while / slice_when. Each switches on the boxed
@@ -13664,9 +13724,9 @@ static sp_RbVal sp_poly_exc_acc(sp_RbVal v, const char *which) {
   if (!strcmp(which, "cause"))
     return e->cause ? sp_box_obj(e->cause, SP_BUILTIN_EXCEPTION) : sp_box_nil();
   if (!strcmp(which, "full_message"))
-    return sp_box_str(sp_sprintf("%s: %s", sp_exc_class_name(e), sp_exc_message(e)));
+    return sp_box_str(sp_exc_full_text(e, sp_exc_message(e)));
   if (!strcmp(which, "detailed_message"))
-    return sp_box_str(sp_sprintf("%s (%s)", sp_exc_message(e), sp_exc_class_name(e)));
+    return sp_box_str(sp_exc_detailed_text(e, sp_exc_message(e)));
   /* nil for an exception never raised, the frames once it was -- the
      logger gem's Formatter asks `if msg.backtrace` of a poly message */
   if (!strcmp(which, "backtrace")) return e->backtrace ? sp_box_str_array(e->backtrace) : sp_box_nil();
