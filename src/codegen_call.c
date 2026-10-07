@@ -20711,6 +20711,120 @@ static int thread_arg_runs_again(Compiler *c, int arg, int blk) {
   }
   return 0;
 }
+/* A plain local read only as this argument, in a statement that runs once,
+   cannot observe the copy (#7002); a parameter can still belong to the
+   caller. `blk` is the block the read may stand in, or -1. */
+static int local_read_only_as_arg(Compiler *c, int arg, int blk) {
+  const NodeTable *nt = c->nt;
+  if (nt_kind(nt, arg) != NK_LocalVariableReadNode) return 0;
+  const char *vn = nt_str(nt, arg, "name");
+  Scope *vs = comp_scope_of(c, arg);
+  LocalVar *lv = vs ? scope_local(vs, vn) : NULL;
+  int reads = 0;
+  for (int rd = 0; rd < nt->count && reads < 2; rd++) {
+    NodeKind rk = nt_kind(nt, rd);
+    if (rk != NK_LocalVariableReadNode && rk != NK_LocalVariableOperatorWriteNode &&
+        rk != NK_LocalVariableOrWriteNode && rk != NK_LocalVariableAndWriteNode) continue;
+    if (comp_scope_of(c, rd) == vs && sp_streq(nt_str(nt, rd, "name"), vn)) reads++;
+  }
+  return reads == 1 && lv && !lv->is_param && !lv->is_block_param && !thread_arg_runs_again(c, arg, blk);
+}
+
+/* Is the argument a local that only ever holds a frozen literal (every
+   write of it is one, under `# frozen_string_literal: true`)? An append to
+   it raises FrozenError in the callee, copy or not. */
+static int refuse_local_frozen_literal(Compiler *c, int arg) {
+  const NodeTable *nt = c->nt;
+  if (nt_kind(nt, arg) != NK_LocalVariableReadNode) return 0;
+  const char *vn = nt_str(nt, arg, "name");
+  Scope *vs = vn ? comp_scope_of(c, arg) : NULL;
+  LocalVar *lv = vs ? scope_local(vs, vn) : NULL;
+  if (!lv || lv->is_param || lv->is_block_param) return 0;
+  int nw = 0;
+  for (int w = comp_lvw_first_sc(c, (int)(vs - c->scopes), vn); w >= 0; w = comp_lvw_next_sc(c, w)) {
+    if (comp_scope_of(c, w) != vs || !nt_str(nt, w, "name") || !sp_streq(nt_str(nt, w, "name"), vn)) continue;
+    int v = nt_kind(nt, w) == NK_LocalVariableWriteNode ? nt_ref(nt, w, "value") : -1;
+    if (v < 0 || nt_kind(nt, v) != NK_StringNode || !nt_int(nt, v, "fzl", 0)) return 0;
+    nw++;
+  }
+  return nw > 0;
+}
+
+/* Is the instance variable or global read anywhere but as this argument:
+   by name, by an operator write, or through a reader some class has for
+   the instance variable? The refusals of a copy ask for a mutation through
+   one name and a read of the other; a variable nothing else reads cannot
+   show the copy. An instance variable is asked for by name in every class,
+   since a subclass reads the same slot. */
+static int ivar_or_global_read_elsewhere(Compiler *c, int arg) {
+  static const NodeKind ivar_reads[] = { NK_InstanceVariableReadNode, NK_InstanceVariableOperatorWriteNode,
+                                         NK_InstanceVariableOrWriteNode, NK_InstanceVariableAndWriteNode };
+  static const NodeKind gvar_reads[] = { NK_GlobalVariableReadNode, NK_GlobalVariableOperatorWriteNode,
+                                         NK_GlobalVariableOrWriteNode, NK_GlobalVariableAndWriteNode };
+  const NodeTable *nt = c->nt;
+  int iv = nt_kind(nt, arg) == NK_InstanceVariableReadNode;
+  if (!iv && nt_kind(nt, arg) != NK_GlobalVariableReadNode) return 1;
+  const char *vn = nt_str(nt, arg, "name");
+  if (vn && !iv) vn = comp_resolve_gvar(c, vn + 1);
+  if (!vn || thread_arg_runs_again(c, arg, -1)) return 1;
+  for (int k = 0; iv && k < c->nclasses; k++)
+    if (comp_is_reader(&c->classes[k], vn + 1)) return 1;
+  for (int i = 0; i < 4; i++)
+    NT_FOREACH_KIND(nt, iv ? ivar_reads[i] : gvar_reads[i], rd) {
+      const char *rn = nt_str(nt, rd, "name");
+      if (rd == arg) continue;
+      if (rn && !iv) rn = comp_resolve_gvar(c, rn + 1);
+      if (!rn || sp_streq(rn, vn)) return 1;
+    }
+  return 0;
+}
+
+/* A String variable handed to a parameter a method appends to, where an
+   alias uses the method's name. Such a method keeps the value ABI, since
+   the alias's call sites hand over values (compute_byref_out_params), so the
+   call hands it a copy and the append is lost: without the alias the same
+   method is lent the caller's slot. A method written in place of the alias,
+   calling the other, is lent it too, which the diagnostic says. A parameter
+   the method assigns again is left alone (the append may be to its new
+   String), and so is a local nothing else reads. Under --share-strings
+   the route is the rule's, and what it shares is not refused here. */
+static void refuse_aliased_param_args(Compiler *c, int id, const char *name) {
+  const NodeTable *nt = c->nt;
+  if (repr_share_rule(c)) return;
+  int mi = refuse_static_target(c, id, name);
+  int recv = nt_ref(nt, id, "receiver");
+  if (mi < 0 && (recv < 0 || nt_kind(nt, recv) == NK_SelfNode)) mi = comp_method_index(c, name);
+  if (mi < 0 || !c->scopes[mi].alias_plain_abi) return;
+  Scope *m = &c->scopes[mi];
+  if (!refuse_call_binds(c, refuse_scope_params(c, m), id, 0, 0)) return;
+  for (int j = 0; j < m->nparams && j < 16; j++) {
+    LocalVar *q = m->pnames[j] ? scope_local(m, m->pnames[j]) : NULL;
+    if (!q || !q->is_param || q->type != TY_STRING || q->byref_out || q->is_cell) continue;
+    if (!dyn_method_appends(c, mi, j)) continue;
+    int written = 0;
+    for (int w = comp_lvw_first_sc(c, mi, m->pnames[j]); w >= 0 && !written; w = comp_lvw_next_sc(c, w))
+      written = comp_scope_of(c, w) == m && nt_str(nt, w, "name") && sp_streq(nt_str(nt, w, "name"), m->pnames[j]);
+    if (written) continue;
+    int arg = arg_layout_param_node(c, m, id, j, NULL);
+    int shared;
+    const char *kind = strvar_arg(c, arg, &shared);
+    if (!kind || refuse_local_frozen_literal(c, arg) || local_read_only_as_arg(c, arg, -1) ||
+        !ivar_or_global_read_elsewhere(c, arg)) continue;
+    const char *an = NULL, *ao = NULL;
+    for (int k = 0; k < c->nclasses && !an; k++)
+      for (int a = 0; a < c->classes[k].naliases && !an; a++) {
+        const char *nw = c->classes[k].alias_new[a], *od = c->classes[k].alias_old[a];
+        if (nw && od && m->name && (sp_streq(nw, m->name) || sp_streq(od, m->name))) { an = nw; ao = od; }
+      }
+    if (!an) continue;
+    char mt[96]; snprintf(mt, sizeof mt, "`%s`", m->name);
+    char why[256];
+    snprintf(why, sizeof why, "from %s into a method whose name an alias uses: a method `%s` that calls `%s`, "
+             "written in place of the alias, shares it", kind, an, ao);
+    refuse_string_copy_to(c, arg, m->body, mt, m->pnames[j], "the call", why);
+  }
+}
+
 static void refuse_string_copies(Compiler *c, int id) {
   const NodeTable *nt = c->nt;
   const char *name = nt_str(nt, id, "name");
@@ -20916,22 +21030,7 @@ static void refuse_string_copies(Compiler *c, int id) {
       int shared;
       if (!strvar_arg(c, args[k], &shared) || !dyn_block_appends(c, blk, k) ||
           repr_of(c, args[k]).handle || local_is_handle(c, args[k])) continue;
-      /* A plain local read only here cannot observe the copy; a parameter
-         can still belong to the caller. */
-      if (nt_kind(nt, args[k]) == NK_LocalVariableReadNode) {
-        const char *vn = nt_str(nt, args[k], "name");
-        Scope *vs = comp_scope_of(c, args[k]);
-        LocalVar *lv = vs ? scope_local(vs, vn) : NULL;
-        int reads = 0;
-        for (int rd = 0; rd < nt->count && reads < 2; rd++) {
-          NodeKind rk = nt_kind(nt, rd);
-          if (rk != NK_LocalVariableReadNode && rk != NK_LocalVariableOperatorWriteNode &&
-              rk != NK_LocalVariableOrWriteNode && rk != NK_LocalVariableAndWriteNode) continue;
-          if (comp_scope_of(c, rd) == vs && sp_streq(nt_str(nt, rd, "name"), vn)) reads++;
-        }
-        if (reads == 1 && lv && !lv->is_param && !lv->is_block_param &&
-            !thread_arg_runs_again(c, args[k], blk)) continue;
-      }
+      if (local_read_only_as_arg(c, args[k], blk)) continue;
       const char *through = sp_streq(name, "new") ? "`Thread.new`" : "`Fiber#resume`";
       refuse_string_copy_to(c, args[k], blk, "a block", proc_param_name(c, blk, k), through,
                             sp_streq(name, "new") ? "through `Thread.new`" : "through `Fiber#resume`");
@@ -20999,6 +21098,7 @@ static void refuse_string_copies(Compiler *c, int id) {
   if (!dyn) refuse_yield_handle_args(c, id);
   if (!dyn) refuse_forwarded_args(c, id, name);
   if (!dyn) refuse_nonlocal_param_args(c, id, name);
+  if (!dyn) refuse_aliased_param_args(c, id, name);
   /* a method `define_method` defines takes an appended String as the handle
      (dyn_convert_params), and its callers are pulled in as a handle
      method's are, but for a variable that cannot be */
