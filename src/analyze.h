@@ -70,6 +70,15 @@ enum {
   NFW_GUARDED    /* (nil_fact_why only) not nil: a guard narrowed the read */
 };
 int nil_fact_why(const Compiler *c, int node);
+/* A read of a String handle local that may be nil, where the nil would be
+   past a NoMethodError this build does not raise: the receiver of a call
+   nil does not answer, or any read of a local an in-place write (`t << x`,
+   a bang method) can reach while it may be nil -- the write does nothing on
+   a NULL handle. The call plan guards neither for a nil it cannot bound (a
+   slice or a pick that missed), so the read stays untested: answering nil
+   there would hide the error CRuby raises. */
+#define NF_UNRAISED 0x80
+int nil_fact_unraised(const Compiler *c, int node);
 const char *nil_fact_why_name(int why);
 /* Does the fact track a value of type t: an object, or a builtin held as a
    pointer that is NULL for nil (a String, an Array, a Hash, an IO)? */

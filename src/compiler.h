@@ -115,6 +115,9 @@ typedef struct {
                        can run before any write, a call site binds nil. Read
                        through repr_of_slot's may_nil. Nonzero: where the
                        nil comes from (NFW_*, analyze.h). */
+  int nil_past_write; /* (TY_STRBUF locals) an in-place write can run on
+                       the local while it may be nil, with no raise from the
+                       call plan (analyze_nil.c, nil_fact_unraised) */
   int box_nullable; /* an int parameter bound from an ivar that can be read
                        before anything assigned it: only BOXING it has to
                        yield nil. Kept apart from nullable_int, which also

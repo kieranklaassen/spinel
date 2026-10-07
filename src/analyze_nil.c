@@ -1295,7 +1295,7 @@ void an_nil_facts(Compiler *c) {
     int unseen = mi > 0 && m->def_node >= 0 && nf_unseen_callers(&f, m);
     /* a block from a caller not seen: a dynamic call, a proc-form clone's */
     if (unseen || m->is_proc_form || m->is_lowered_yield) nf_set(&f, &f.yield_nil[mi], NFW_CALLER);
-    for (int k = 0; k < m->nlocals; k++) m->locals[k].obj_may_nil = 0;
+    for (int k = 0; k < m->nlocals; k++) m->locals[k].obj_may_nil = m->locals[k].nil_past_write = 0;
     for (int k = 0; k < m->nlocals; k++) {
       LocalVar *lv = &m->locals[k];
       if (!nil_fact_tracked(lv->type)) continue;
@@ -1318,7 +1318,10 @@ void an_nil_facts(Compiler *c) {
       NT_FOREACH_KIND(nt, rk[q], r) {
         const char *nm = nt_str(nt, r, "name");
         LocalVar *lv = nf_local_of(&f, r, nm);
-        if (!lv || lv->is_param || lv->is_block_param || !nf_open(lv->obj_may_nil) || !nil_fact_tracked(lv->type)) continue;
+        /* a String local held as a handle (TY_STRBUF) is a pointer whose
+           NULL is nil too */
+        if (!lv || lv->is_param || lv->is_block_param || !nf_open(lv->obj_may_nil) ||
+            !(nil_fact_tracked(lv->type) || lv->type == TY_STRBUF)) continue;
         if (du_read_maybe_unset(nt, f.par, &f.dp, r, nm)) nf_set(&f, &lv->obj_may_nil, NFW_UNSET);
       }
     du_memo_free();
@@ -1354,6 +1357,24 @@ void an_nil_facts(Compiler *c) {
   free(c->nil_fact);
   c->nil_fact = f.memo;
   c->nil_fact_n = nt->count;
+  /* the reads of a String handle local where a nil would be past a
+     NoMethodError the call plan does not raise (nil_fact_unraised) */
+  NT_FOREACH_KIND(nt, NK_CallNode, u) {
+    int ur = nt_ref(nt, u, "receiver");
+    const char *un = nt_str(nt, u, "name");
+    const char *op = nt_str(nt, u, "call_operator");
+    if (ur < 0 || !un || nt_kind(nt, ur) != NK_LocalVariableReadNode || (op && sp_streq(op, "&."))) continue;
+    LocalVar *lv = nf_local_of(&f, ur, nt_str(nt, ur, "name"));
+    if (!lv || lv->type != TY_STRBUF || !nil_fact_node(c, ur) || is_nil_method(un) || cplan_nil(c, u) == CN_RAISE)
+      continue;
+    size_t ul = strlen(un);
+    if (sp_str_mutator(un, SP_MUT_LOCAL) || (ul > 1 && un[ul - 1] == '!')) lv->nil_past_write = 1;
+    else c->nil_fact[ur] |= NF_UNRAISED;
+  }
+  NT_FOREACH_KIND(nt, NK_LocalVariableReadNode, r) {
+    LocalVar *lv = nf_local_of(&f, r, nt_str(nt, r, "name"));
+    if (lv && lv->nil_past_write && nil_fact_node(c, r)) c->nil_fact[r] |= NF_UNRAISED;
+  }
   /* the ivars, by class */
   for (int k = 0; k < c->nclasses; k++) {
     ClassInfo *ci = &c->classes[k];
@@ -1385,7 +1406,11 @@ int nil_fact_node(const Compiler *c, int node) {
 int nil_fact_why(const Compiler *c, int node) {
   if (node < 0 || !c->nil_fact || node >= c->nil_fact_n) return NFW_OPAQUE;
   unsigned char m = c->nil_fact[node];
-  return (m & 3) == NF_MAY_NIL ? m >> 2 : (m & 3) == NF_GUARDED ? NFW_GUARDED : NFW_NONE;
+  return (m & 3) == NF_MAY_NIL ? (m >> 2) & 15 : (m & 3) == NF_GUARDED ? NFW_GUARDED : NFW_NONE;
+}
+
+int nil_fact_unraised(const Compiler *c, int node) {
+  return node >= 0 && c->nil_fact && node < c->nil_fact_n && (c->nil_fact[node] & NF_UNRAISED) != 0;
 }
 
 const char *nil_fact_why_name(int why) {
