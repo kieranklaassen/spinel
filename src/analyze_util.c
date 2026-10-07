@@ -1529,6 +1529,32 @@ TyKind block_next_value_ty(Compiler *c, int node) {
   return r;
 }
 
+/* Whether a `super` lands on method `mi` and every one that does hands on
+   the block its own method was given (a bare `super`, `super(...)`,
+   `super(a, &b)`), as do the supers that land on those methods in turn. */
+static int supers_into_forward_block(Compiler *c, int mi, int depth) {
+  const NodeTable *nt = c->nt;
+  if (depth > 8) return 0;
+  if (yvt_nt != nt || yvt_ntc != nt->count) yvt_build(c);
+  int any = 0;
+  for (int ii = 0; ii < yvt_sup_n; ii++) {
+    Scope *cs = comp_scope_of(c, yvt_sup_ids[ii]);
+    if (!cs || cs->class_id < 0 || !cs->name) continue;
+    int cmi = (int)(cs - c->scopes);
+    if (cmi == mi || a_super_target(c, cs) != mi) continue;
+    if (!super_forwards_caller_block(c, yvt_sup_ids[ii])) return 0;
+    for (int jj = 0; jj < yvt_sup_n; jj++) {
+      Scope *gs = comp_scope_of(c, yvt_sup_ids[jj]);
+      if (gs && gs->class_id >= 0 && gs->name && gs != cs && a_super_target(c, gs) == cmi) {
+        if (!supers_into_forward_block(c, cmi, depth + 1)) return 0;
+        break;
+      }
+    }
+    any = 1;
+  }
+  return any;
+}
+
 /* The value a block forwarded out of method `emi` (`callee(&)`,
    `callee(&b)`, `callee(...)`) answers inside it. The forwarding call is one
    node in emi's body, shared by every site emi is spliced into, so the first
@@ -1539,6 +1565,9 @@ TyKind block_next_value_ty(Compiler *c, int node) {
    `const char *` and the C did not build. */
 static TyKind yvt_forwarded_value(Compiler *c, int emi) {
   TyKind first = yield_value_type(c, emi);
+  /* A method reached only through a child's `super` has no site of its own:
+     the block it forwards is the one the child was called with. */
+  if (first == TY_UNKNOWN && supers_into_forward_block(c, emi, 0)) first = yield_value_type_via_super(c, emi);
   if (g_yvt_unify_all || first == TY_UNKNOWN || first == TY_VOID) return first;
   g_yvt_unify_all = 1;
   TyKind all = yield_value_type(c, emi);
