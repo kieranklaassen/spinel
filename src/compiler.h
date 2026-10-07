@@ -1478,6 +1478,7 @@ const char *comp_prep_user_name(const char *name);
 const char *comp_super_name(Compiler *c, int parent, const char *name, int is_cmethod);
 int comp_super_is_class_new(Compiler *c, int id);
 int comp_super_parent(Compiler *c, int class_id, int is_cmethod); /* super in `self.new` is Class#new */
+int comp_super_object_freeze(Compiler *c, int id, const Scope *s); /* 1 freeze, 2 frozen?: Object's, where no ancestor defines it */
 /* Resolve `name` through the class's (chain-aware) alias table to the
    underlying method/attr name. Returns `name` unchanged if not aliased. */
 /* What a name means on a class: nothing, an attribute (attr_reader/writer,

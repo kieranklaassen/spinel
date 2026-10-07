@@ -2819,6 +2819,29 @@ int comp_super_parent(Compiler *c, int class_id, int is_cmethod) {
   return obj;
 }
 
+/* Is this `super` Object's freeze or frozen?: in an instance method of that
+   name no ancestor defines, handing nothing on (a bare super in a method with
+   no parameters, or `super()`) and carrying no block? 1 for freeze, 2 for
+   frozen?, 0 otherwise. */
+int comp_super_object_freeze(Compiler *c, int id, const Scope *s) {
+  if (!s || s->is_cmethod || s->class_id < 0 || !s->name) return 0;
+  const char *u = comp_prep_user_name(s->name);
+  if (!u || !is_freeze_family(u)) return 0;
+  if (comp_super_shadow(c, s)) return 0;
+  int p = comp_super_parent(c, s->class_id, 0);
+  if (p >= 0 && comp_method_in_chain(c, p, u, NULL) >= 0) return 0;
+  if (nt_ref(c->nt, id, "block") >= 0) return 0;
+  if (nt_kind(c->nt, id) == NK_ForwardingSuperNode) {
+    if (s->nparams != 0 || s->blk_param) return 0;
+  }
+  else {
+    int args = nt_ref(c->nt, id, "arguments"), an = 0;
+    if (args >= 0) (void)nt_arr(c->nt, args, "arguments", &an);
+    if (an != 0) return 0;
+  }
+  return sp_streq(u, "freeze") ? 1 : 2;
+}
+
 int comp_super_is_class_new(Compiler *c, int id) {
   NodeKind k = nt_kind(c->nt, id);
   if (k != NK_SuperNode && k != NK_ForwardingSuperNode) return 0;

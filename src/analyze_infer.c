@@ -9229,12 +9229,19 @@ TyKind infer_uncached(Compiler *c, int id) {
                      /* and is_a? / kind_of? / instance_of? (codegen's twin) */
                      sp_streq(uname, "is_a?") || sp_streq(uname, "kind_of?") ||
                      sp_streq(uname, "instance_of?"));
-    if (p < 0) return rto_super ? TY_BOOL : TY_UNKNOWN;
+    /* `super` in a freeze or frozen? override no ancestor defines is Object's
+       too: the object itself, frozen, or its frozen flag (emit_super's twin).
+       A reopened builtin's self is the value, not an object: left as it was. */
+    TyKind obj_super = rto_super ? TY_BOOL : TY_UNKNOWN;
+    { int fz = comp_super_object_freeze(c, id, s);
+      TyKind st = fz ? infer_builtin_self(c, s->class_id) : TY_UNKNOWN;
+      if (fz && ty_is_object(st)) obj_super = fz == 1 ? st : TY_BOOL; }
+    if (p < 0) return obj_super;
     /* super inside a class method resolves through the parent's CLASS-method
        chain (the instance chain would miss `def self.x` entirely). */
     int mi = s->is_cmethod ? comp_cmethod_in_chain(c, p, uname, NULL)
                            : comp_method_in_chain(c, p, uname, NULL);
-    if (mi < 0) return rto_super ? TY_BOOL : TY_UNKNOWN;
+    if (mi < 0) return obj_super;
     an_user_call_record(c, id, mi, UC_SUPER, p);
     return super_target_ret(c, s, mi, id);
   }

@@ -36887,6 +36887,16 @@ static void an_phase_value_types(Compiler *c) {
         }
       }
     }
+    /* `super` that is Object's freeze (emit_super, which asks the same), in
+       a method the program can reach, freezes this class's instances as a
+       bare `freeze` in the method does: its ivar stores take the guard. A
+       by-value class keeps its layout; the super raises there. */
+    if (sp_streq(ty, "SuperNode") || sp_streq(ty, "ForwardingSuperNode")) {
+      Scope *zs = comp_scope_of(c, id);
+      if (zs && zs->reachable && comp_super_object_freeze(c, id, zs) == 1 &&
+          comp_ntype(c, id) == ty_object(zs->class_id))
+        c->classes[zs->class_id].freeze_observed = 1;
+    }
     /* nil-witness (#1686): a slot holding `nil | W` cannot hold W by value */
     { int q = vt_nil_witness(c, id, ty);
       if (q >= 0 && q < c->nclasses) {
