@@ -6681,7 +6681,16 @@ static void emit_poly_arg_temp(Compiler *c, int node, TyKind ty, int boxed, int 
   Buf val; memset(&val, 0, sizeof val);
   Buf *sv_pre = g_pre;
   if (ran && subtree_has_side_effect(c, node)) g_pre = &pre;
+  /* a handle parameter filled by a node marked to hand out the handle whose
+     own emitter may answer the plain String (`+""`, `"".dup`, an interpolation:
+     the mark only asks for it, #7833): the value is taken as the handle, or
+     wrapped in a fresh one */
+  int as_handle = !boxed && ty == TY_STRBUF && c->strbuf_box[node] &&
+                  nt_kind(c->nt, node) != NK_LocalVariableReadNode &&
+                  nt_kind(c->nt, node) != NK_InstanceVariableReadNode;
+  if (as_handle) buf_puts(&val, "SP_AS_STRING_HANDLE(");
   if (boxed) emit_boxed(c, node, &val); else emit_expr(c, node, &val);
+  if (as_handle) buf_puts(&val, ")");
   g_pre = sv_pre;
   if (pre.p) buf_puts(b, pre.p);
   if (boxed) buf_puts(b, "sp_RbVal"); else emit_ctype(c, ty, b);
@@ -11729,6 +11738,12 @@ static int emit_new_call_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, 
       int an_next = bn > 0 && bb && subtree_has_own_next(nt, bbody);
       const char *sv_anx = g_ie_next_var; int sv_anp = g_ie_res_poly; TyKind sv_ant = g_ie_next_ty;
       char anbuf[32]; int anv = 0;
+      /* that `next` is this loop's continue: it pops the frames and runs
+         the ensures opened inside the block and no others, as
+         emit_loop_body records for its own loop */
+      int sv_anlx = g_loop_exc_base, sv_anle = g_loop_ensure_base;
+      g_loop_exc_base = g_exc_frame_depth; g_loop_ensure_base = g_ensure_depth;
+      g_c_loop_depth++;
       if (an_next) {
         anv = ++g_tmp;
         snprintf(anbuf, sizeof anbuf, "_t%d", anv);
@@ -11794,6 +11809,8 @@ static int emit_new_call_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, 
         else { buf_printf(g_pre, "sp_%sArray_push%s(_t%d, %s);\n", k, nil_store_sfx(c, k, bb[bn - 1]), tr, vb.p ? vb.p : ""); }
         free(vb.p);
       }
+      g_c_loop_depth--;
+      g_loop_exc_base = sv_anlx; g_loop_ensure_base = sv_anle;
       g_indent--;
       emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
       buf_printf(b, "_t%d", tr);
@@ -14609,9 +14626,13 @@ int class_value_responds(Compiler *c, int tv, const char *qm, Buf *b) {
    otherwise the call's literal block (if any) is lowered here. */
 void emit_cmethod_block_arg(Compiler *c, int id, Scope *cm, int blk_tmp, Buf *b) {
   if (!cm->blk_param || !cm->blk_param[0] || cm->yields) return;
-  int blk_node = resolve_forwarded_block(c, nt_ref(c->nt, id, "block"));
+  int blk0 = nt_ref(c->nt, id, "block");
+  int blk_node = resolve_forwarded_block(c, blk0);
   if (cm->nparams > 0 || cmethod_takes_self_cls(c, (int)(cm - c->scopes))) buf_puts(b, ", ");
-  if (blk_node < 0) { buf_puts(b, "NULL"); return; }
+  /* a forwarded block inside a body inlined for a caller that handed it a
+     real proc (`fw(&pr)`) is that proc (forwarded_real_proc) */
+  const char *fwd = forwarded_real_proc(blk0, blk_node);
+  if (blk_node < 0) { buf_puts(b, fwd ? fwd : "NULL"); return; }
   /* `inner(child, &block)` from a REAL function (not a yield-inline splice):
      the caller's &blk is a live sp_Proc* local -- pass it through instead of
      lowering (a BlockArgumentNode is not a proc literal). An anonymous `&`

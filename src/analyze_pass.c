@@ -1385,22 +1385,21 @@ int reconcile_locals_reading_ivars(Compiler *c) {
     const char *cnm = nt_str(nt, cid, "name");
     int rcv = nt_ref(nt, cid, "receiver");
     if (!cnm || (rcv >= 0 && nt_kind(nt, rcv) != NK_SelfNode)) continue;
-    int ca = nt_ref(nt, cid, "arguments"); int can = 0;
-    const int *cav = ca >= 0 ? nt_arr(nt, ca, "arguments", &can) : NULL;
-    if (!cav) continue;
+    if (nt_ref(nt, cid, "arguments") < 0) continue;
     int mi = comp_self_call_mi(c, cid, cnm);
     if (mi < 0) continue;
     Scope *m = &c->scopes[mi];
     Scope *cs = comp_scope_of(c, cid);
-    for (int k = 0; k < can && k < m->nparams; k++) {
-      int a = cav[k];
-      if (nt_kind(nt, a) != NK_LocalVariableReadNode) continue;
+    for (int k = 0; k < m->nparams; k++) {
+      int spread = -1;
+      int a = arg_layout_param_node(c, m, cid, k, &spread);
+      if (a < 0 || spread >= 0 || nt_kind(nt, a) != NK_LocalVariableReadNode) continue;
       const char *anm = nt_str(nt, a, "name");
       LocalVar *alv = anm && cs ? scope_local(comp_scope_of(c, a), anm) : NULL;
       int was_widened = 0;
       for (int w = 0; w < nwidened && !was_widened; w++) was_widened = widened[w] == alv;
       if (!alv || !was_widened || alv->type != TY_POLY) continue;
-      if (m->rest_idx >= 0 && k >= m->rest_idx) break;
+      if (m->rest_idx >= 0 && k == m->rest_idx) continue;
       LocalVar *plv = m->pnames[k] ? scope_local(m, m->pnames[k]) : NULL;
       if (!plv || plv->rbs_seeded || plv->is_block_param) continue;
       if (!(plv->type == TY_INT || plv->type == TY_FLOAT || plv->type == TY_BOOL || plv->type == TY_SYMBOL)) continue;
@@ -2292,6 +2291,28 @@ static void widen_ivar_hash_literals(Compiler *c, const LWIndex *ivw, int cls, c
     else if (unassigned_param_read(c, ws, wv) >= 0)
       widen_arg_hash(c, wv);
   }
+}
+
+/* The empty hash literals class `cls` assigns to `inm` take the variant the
+   ivar's slot settled on (a write of a shared String widens String values to
+   the poly-valued variant): left as the String-valued default, the literal
+   builds a hash the slot's boxed store cannot fill. 1 when one changed. */
+static int retype_ivar_empty_hash_literals(Compiler *c, const LWIndex *ivw, int cls, const char *inm, TyKind want) {
+  const NodeTable *nt = c->nt;
+  int changed = 0;
+  if (!c->hash_want) return 0;
+  for (int r = ivw_index_first(ivw, inm); r >= 0; r = ivw->next[r]) {
+    int wi = ivw->node[r];
+    const char *wnm = nt_str(nt, wi, "name");
+    if (!wnm || !sp_streq(wnm, inm)) continue;
+    Scope *ws = comp_scope_of(c, wi);
+    if (!ws || ws->class_id != cls) continue;
+    int wv = nt_ref(nt, wi, "value");
+    if (wv < 0 || wv >= c->node_cap || nt_kind(nt, wv) != NK_HashNode) continue;
+    int hen = 0; nt_arr(nt, wv, "elements", &hen);
+    if (hen == 0 && c->hash_want[wv] != want) { c->hash_want[wv] = want; changed = 1; }
+  }
+  return changed;
 }
 
 int a_proc_params_node(Compiler *c, int create);
@@ -3604,6 +3625,8 @@ static int infer_write_container_usage(Compiler *c, const NodeTable *nt, int nfb
     if (*slot != before && !slot_reset) changed = 1;
     if (watch_nm && before != TY_POLY_ARRAY && *slot == TY_POLY_ARRAY)
       changed |= widen_ivar_array_params(c, &ivw_ix, watch_cls, watch_nm);
+    if (watch_nm && !is_push && !is_splice && ty_is_hash(before) && ty_is_hash(*slot) && *slot != before)
+      changed |= retype_ivar_empty_hash_literals(c, &ivw_ix, watch_cls, watch_nm, *slot);
     /* A LOCAL that widened to the poly array under a push and whose writes
        read ivar arrays (directly, or through a conditional's arms) is an
        ALIAS of those arrays: widen the sources too, or the local's read

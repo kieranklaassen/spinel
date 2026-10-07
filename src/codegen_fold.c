@@ -112,8 +112,13 @@ static int emit_blk_proc_tmp(Compiler *c, int blk_node) {
    NULL. A callee that yields takes none. */
 void emit_callee_block_arg(Compiler *c, int id, const Scope *m, Buf *b) {
   if (!m || !m->blk_param || !m->blk_param[0] || m->yields) return;
-  int blk_node = resolve_forwarded_block(c, nt_ref(c->nt, id, "block"));
+  int blk0 = nt_ref(c->nt, id, "block");
+  int blk_node = resolve_forwarded_block(c, blk0);
+  /* a `&blk` / `&` forwarding the block of an inlined body that was handed
+     a real proc (`fw(&pr)`) passes that proc; it passed NULL */
+  const char *fwd = forwarded_real_proc(blk0, blk_node);
   if (blk_node >= 0) buf_printf(b, ", _t%d", emit_blk_proc_tmp(c, blk_node));
+  else if (fwd) buf_printf(b, ", %s", fwd);
   else buf_puts(b, ", NULL");
 }
 
@@ -159,12 +164,17 @@ void emit_method_call(Compiler *c, int id, Buf *b) {
        resolve it to the caller's inlined block. Without this, forwarding `&blk`
        into a callee that keeps a real proc param (e.g. one that nil-checks the
        block) is rejected as "proc literal without a block". */
-    int blk_node = resolve_forwarded_block(c, nt_ref(nt, id, "block"));
+    int blk0 = nt_ref(nt, id, "block");
+    int blk_node = resolve_forwarded_block(c, blk0);
+    /* ...or, inside a body inlined for a caller that handed it a real
+       proc (`fw(&pr)`), to that proc: it passed NULL */
+    const char *fwd = forwarded_real_proc(blk0, blk_node);
     int wrote_args = m->nparams > 0;
     if (wrote_args) buf_puts(b, ", ");
     if (blk_node >= 0) {
       buf_printf(b, "_t%d", emit_blk_proc_tmp(c, blk_node));
     }
+    else if (fwd) buf_puts(b, fwd);
     else {
       buf_puts(b, "NULL");
     }
@@ -3529,8 +3539,17 @@ void emit_iter_step_body(Compiler *c, int block, Buf *b, int indent) {
 
 /* A step's body inside the iterator's own C loop, through emit_stmts (the
    locals' reset, the statements), with the body's own redo label after
-   that setup (g_redo_pending), where it had none. */
+   that setup (g_redo_pending), where it had none. The loop is recorded as
+   emit_loop_body records its own: a `next` here is this loop's continue,
+   so it pops the frames and runs the ensures opened inside the body and
+   no others, an ensure's deferred `next` ends in that continue, and a
+   `next v` is not the value of an enclosing block. */
 void emit_iter_loop_stmts(Compiler *c, int body, Buf *b, int indent) {
+  int sv_lexc = g_loop_exc_base, sv_lens = g_loop_ensure_base;
+  const char *sv_nxv = g_ie_next_var; TyKind sv_nxt = g_ie_next_ty;
+  g_loop_exc_base = g_exc_frame_depth; g_loop_ensure_base = g_ensure_depth;
+  g_c_loop_depth++;
+  g_ie_next_var = NULL; g_ie_next_ty = TY_UNKNOWN;
   int lbl = 0;
   if (body >= 0 && subtree_has_own_redo(c->nt, body) &&
       g_redo_depth < (int)(sizeof g_redo_stack / sizeof g_redo_stack[0])) {
@@ -3541,6 +3560,9 @@ void emit_iter_loop_stmts(Compiler *c, int body, Buf *b, int indent) {
   }
   emit_stmts(c, body, b, indent);
   if (lbl) g_redo_depth--;
+  g_ie_next_var = sv_nxv; g_ie_next_ty = sv_nxt;
+  g_c_loop_depth--;
+  g_loop_exc_base = sv_lexc; g_loop_ensure_base = sv_lens;
 }
 
 /* Does block `block` need the step's frame: a `next` or a `redo` of its
@@ -11352,7 +11374,9 @@ else {
            parameter nothing reassigns is held by the parameter's own root:
            Interp#visit passed its env on through a pushed and popped root at
            every recursive call. */
-        int held = provided >= 0 && repr_of(c, provided).as_ty == att && read_of_fixed_param(c, provided);
+        int held = (att == TY_POLY || needs_root(att)) &&
+                   provided >= 0 && repr_of(c, provided).as_ty == att &&
+                   read_of_fixed_param(c, provided);
         if (held) {}
         else if (att == TY_POLY) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT_RBVAL(_t%d);\n", atmp[k]); }
         else if (needs_root(att)) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", atmp[k]); }

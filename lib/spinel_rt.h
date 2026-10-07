@@ -4618,7 +4618,11 @@ static sp_Bigint *sp_poly_int_operand(sp_RbVal v, const char *m) {
    exponent as its args, where sp_poly_pow took it for a number to raise */
 static sp_RbVal sp_poly_pow(sp_RbVal a, sp_RbVal b);   /* defined below */
 static SP_UNUSED sp_RbVal sp_poly_int_pow(sp_RbVal v, sp_RbVal e) {
-  if (v.tag != SP_TAG_INT && v.tag != SP_TAG_BIGINT) sp_raise_nomethod(sp_nomethod_msg_args("pow", v, 1, &e));
+  if (v.tag != SP_TAG_INT && v.tag != SP_TAG_BIGINT) {
+    /* the args array allocates: keep both values alive across it */
+    SP_GC_ROOT_RBVAL(v); SP_GC_ROOT_RBVAL(e);
+    sp_raise_nomethod(sp_nomethod_msg_args("pow", v, 1, &e));
+  }
   return sp_poly_pow(v, e);
 }
 static sp_RbVal sp_poly_int_powmod(sp_RbVal v, sp_RbVal e, sp_RbVal m) {
@@ -4635,6 +4639,7 @@ static sp_RbVal sp_poly_int_powmod(sp_RbVal v, sp_RbVal e, sp_RbVal m) {
    NoMethodError with both arguments as its args */
 static SP_UNUSED sp_RbVal sp_poly_int_powmod_recv(sp_RbVal v, sp_RbVal e, sp_RbVal m) {
   if (v.tag != SP_TAG_INT && v.tag != SP_TAG_BIGINT) {
+    SP_GC_ROOT_RBVAL(v); SP_GC_ROOT_RBVAL(e); SP_GC_ROOT_RBVAL(m);   /* across the args array */
     sp_RbVal pa[2] = { e, m };   /* the call's arguments, as NoMethodError#args */
     sp_raise_nomethod(sp_nomethod_msg_args("pow", v, 2, pa));
   }
@@ -10338,6 +10343,11 @@ static sp_RbVal sp_poly_index_poly(sp_RbVal recv, sp_RbVal idx) {
   /* nil is no array index: CRuby's TypeError, not element 0 */
   if (idx.tag == SP_TAG_NIL && recv.tag == SP_TAG_OBJ && sp_poly_is_array_kind(recv.cls_id))
     sp_raise_cls("TypeError", "no implicit conversion from nil to integer");
+  if (recv.tag == SP_TAG_OBJ && sp_poly_is_array_kind(recv.cls_id) && idx.tag != SP_TAG_BIGINT &&
+      !(idx.tag == SP_TAG_OBJ && idx.cls_id == SP_BUILTIN_RANGE)) {
+    if (idx.tag == SP_TAG_FLT) return sp_poly_arr_get_hash(recv, (sp_int)idx.v.f);
+    sp_raise_cls("TypeError", sp_sprintf("no implicit conversion of %s into Integer", sp_poly_class_name(idx)));
+  }
   /* heterogeneous-key hash: any key kind (incl. Method) looks up directly. */
   if (recv.tag == SP_TAG_OBJ && recv.cls_id == SP_BUILTIN_POLY_POLY_HASH)
     return sp_PolyPolyHash_get((sp_PolyPolyHash *)recv.v.p, idx);
