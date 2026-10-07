@@ -19236,9 +19236,9 @@ static int param_borrow_targets(Compiler *c, int n, int *out, int cap) {
 /* Could node n, run inside a callee, change a String, drop the last name of
    one, or run code this cannot see? A user call, a yield, a super, a proc, a
    reflective call, a builtin on or handed a value that can reach user code
-   (an object's to_s, ==, hash), an in-place String change, a write of a
-   variable that can hold a String. Deliberately coarse: a callee that does
-   any of it keeps the copy. */
+   (an object's to_s, ==, hash), a `Fiber.yield`, an in-place String change,
+   a write of a variable that can hold a String. Deliberately coarse: a
+   callee that does any of it keeps the copy. */
 static int param_borrow_loud(Compiler *c, int n) {
   const NodeTable *nt = c->nt;
   switch (nt_kind(nt, n)) {
@@ -19277,6 +19277,11 @@ static int param_borrow_loud(Compiler *c, int n) {
     int recv = nt_ref(nt, n, "receiver");
     TyKind rt = recv >= 0 ? c->ntype[recv] : TY_VOID;
     if (recv >= 0 && !param_borrow_plain_ty(rt) && rt != TY_CLASS) return 1;
+    /* `Fiber.yield` hands control to the code that resumed the fiber, which
+       can grow the String before it resumes this method. The fiber needs no
+       `Fiber.new` in the program: an Enumerator's `next` runs its block on
+       one. */
+    if (rt == TY_CLASS && sp_streq(name, "yield")) return 1;
     if ((rt == TY_STRING || rt == TY_STRBUF) && sp_str_mutator(name, 0)) return 1;
     int blk = nt_ref(nt, n, "block");
     if (blk >= 0 && nt_kind(nt, blk) == NK_BlockArgumentNode) return 1;
