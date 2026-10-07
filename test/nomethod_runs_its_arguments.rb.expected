@@ -1,0 +1,66 @@
+tick 1
+NoMethodError: undefined method 'zork' for an instance of Integer
+tick 2
+NoMethodError: undefined method 'zork' for an instance of Integer
+tick 3
+NoMethodError: undefined method 'zork' for an instance of Integer
+tick 4
+NoMethodError: undefined method 'zork' for an instance of Integer
+tick 5
+NoMethodError: undefined method 'zork' for an instance of Integer
+tick 6
+tick 7
+NoMethodError: undefined method 'zork' for an instance of Integer
+tick 8
+NoMethodError: undefined method 'zork' for an instance of Integer
+tick 9
+NoMethodError: undefined method 'zork' for an instance of Integer
+tick 10
+NoMethodError: undefined method 'zork' for nil
+tick 11
+NoMethodError: undefined method 'zork' for an instance of String
+tick 12
+NoMethodError: undefined method 'zork' for an instance of Array
+tick 13
+NoMethodError: undefined method 'zork' for an instance of Symbol
+tick 14
+NoMethodError: undefined method 'zork' for an instance of Float
+recv 15
+tick 15
+NoMethodError: undefined method 'zork' for an instance of Integer
+recv 16
+tick 16
+tick 17
+NoMethodError: undefined method 'zork' for an instance of Integer
+tick 18
+blk 18
+NoMethodError: undefined method 'zork' for an instance of Integer
+blk 19
+NoMethodError: undefined method 'zork' for an instance of Integer
+tick 20
+boom 20
+IOError: io 20
+boom 21
+IOError: io 21
+boom 22
+IOError: io 22
+tick 31
+NoMethodError: undefined method 'zork' for an instance of Integer
+tick 32
+NoMethodError: undefined method 'zork' for an instance of Integer
+tick 23
+NoMethodError: undefined method 'zork' for an instance of Integer
+tick 24
+NoMethodError: undefined method 'zork' for an instance of Integer
+tick 25
+NoMethodError: undefined method 'zork' for an instance of Integer
+tick 26
+NoMethodError: undefined method 'zork' for an instance of Integer
+tick 27
+NoMethodError: undefined method 'zork' for an instance of Integer
+tick 28
+NoMethodError: undefined method 'zork' for an instance of Integer
+tick 29
+NoMethodError: undefined method 'zork' for an instance of Integer
+tick 30
+NoMethodError: undefined method 'zork' for an instance of Integer
