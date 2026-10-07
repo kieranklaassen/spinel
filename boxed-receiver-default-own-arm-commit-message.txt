@@ -1,0 +1,26 @@
+A default left out of a call on a boxed receiver runs in its own arm
+
+    class Symbol
+      def note(k = [self]) = "n #{k.inspect}"
+    end
+    [:abc].each { |x| puts x.note }
+
+printed "n [:note]". emit_poly_user_arm0 writes the defaults a
+zero-argument call leaves out, and what a default hoists (an Array
+literal's construction, a call's temp) went to the statement's prelude:
+ahead of the statement the dispatch stands in, where the receiver's
+temp is not assigned yet, and outside the switch, where a receiver of
+any class ran it. So the default read a receiver that was not there (a
+zero Symbol; a null object for `k = [@iv]`, a crash), a default that
+runs something ran for every receiver, whatever its class, and where
+the temp is declared inside the dispatch's own expression the C did not
+build (`k = first` in Range).
+
+The arm now collects what its defaults hoist. Where that text names the
+receiver's temp, or a left-out default has an effect, it is written
+inside the arm's case, in a block. A default that only builds
+(`k = [1, 2]`) stays ahead of the statement, as it was.
+
+Test: test/boxed_dispatch_default_in_arm.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
