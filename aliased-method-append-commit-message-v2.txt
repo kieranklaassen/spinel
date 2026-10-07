@@ -1,0 +1,65 @@
+Refuse a String variable handed to an aliased method that appends to it
+
+A method that appends to its String parameter is lent the caller's slot,
+so the append reaches the caller. A method whose name an alias uses is
+not: the alias's call sites keep the plain ABI, so the method does too
+(an_byref_eligible_scopes), and the call hands it a copy. The append was
+lost with no word:
+
+    class Html
+      def render(out)
+        out << "<p>"
+        out << "hi"
+        out << "</p>"
+      end
+      alias to_html render
+    end
+    buf = +""
+    Html.new.render(buf)
+    p buf        # CRuby "<p>hi</p>", spinel ""
+
+Without the alias line the same program prints "<p>hi</p>", and so does
+--share-strings.
+
+an_byref_eligible_scopes now marks each method an alias takes the slot
+from (Scope.alias_plain_abi, set where byref_name_ineligible clears the
+name), and refuse_aliased_param_args refuses a String variable handed
+to a parameter such a method appends to, called by either name, in the
+call route's own sentence (refuse_string_copy_to).
+The message names the rewrite that is shared today: a method written in
+place of the alias that calls the other, `def to_html(out) = render(out)`.
+Under --share-strings nothing is refused here: the rule shares the
+parameter where the method answers it, and where it answers something
+else the flag's own loss is not this refusal's to name. The five tests
+are in test/share/reject.list.
+
+Left to build as before: an argument that is not a variable, a local that
+only holds a frozen literal (the append raises FrozenError there as in
+CRuby), a parameter the method assigns (the append may be to its new
+String), and a variable read nowhere else, which cannot show the copy.
+For a local that is the Thread and Fiber site's test, moved into
+local_read_only_as_arg for both. For an instance variable or a global it
+is ivar_or_global_read_elsewhere: a read by name, an operator write, or a
+reader some class has for the instance variable. It asks by name in every
+class, since a subclass reads the same slot; the variable-site chains key
+an instance variable by the class of the node.
+
+The cost: right programs are refused, as the settled alias and read
+routes refuse theirs. The rule does not follow the value, the order of
+the reads, or whether a method that reads is ever called. So these are
+refused though right on master: a variable read before the call and
+never after; a parameter, a block parameter, a local used in a block, a
+class variable, a local with a second name and an instance variable
+with a reader, though nothing reads them; a mutation that changes
+nothing for the value at hand (`v << x if v.size > 99`, a `gsub!` with
+no match) while the variable is read after; a mutation that keeps the
+size where only the size is read.
+
+Still silent: a parameter assigned after the append, a constant, a
+keyword parameter, an Array element, a Hash value or a Struct member
+handed by the alias's name, the caller's parameter handed on through a
+method written over the old name, an alias in `class << self`, a
+receiver of more than one class, and an instance variable or a global
+read nowhere else whose method runs twice.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

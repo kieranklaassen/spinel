@@ -1,0 +1,42 @@
+A boxed writer statement holds its receiver while its value runs
+
+An attribute writer on a boxed receiver, as a statement, reads the
+receiver into a temporary, runs the value and then stores. The
+temporary was not rooted, so a value that allocates collected a
+receiver nothing else holds and the store wrote through the freed
+object:
+
+    class Node
+      attr_accessor :name, :parent
+      def initialize(n) = @name = n
+    end
+    def churn
+      a = []
+      40.times { |i| a << ("s" + i.to_s) * 3 }
+      a
+    end
+    def mk(n) = [Node.new(n), 1][0]
+    mk("a").parent = churn.last
+
+right at SPINEL_GC_STRESS=0, a segmentation fault at 2, for a value
+that is a String, an object, a boxed or nilable value, a Float, an
+Array, a Hash, a Symbol or a boolean, also through `&.`,
+`send(:parent=, v)` and a chained writer.
+
+The temporary is now rooted (SP_GC_ROOT_RBVAL), as the value form of
+the same writer roots it, unless nothing can allocate between the read
+and the store: the value is a literal, a variable or self, no String
+buffer, and of a type the store boxes without allocating. The list is
+of what cannot allocate, not of what can: an operator write
+(`s += t`) and a Range stored into a boxed local allocate with no call
+written in them.
+
+A value that is a by-value struct (a Range, a Time, a Rational, a
+value object) keeps its C. The store boxes it behind a heap copy after
+taking the write barrier on the receiver, so a receiver that lives on
+would hold a copy the collector has not seen: `mk("a").name = (1..n)`
+is right today and would stop under stress.
+
+The test is in GC_STRESS_TESTS.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

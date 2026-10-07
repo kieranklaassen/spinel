@@ -1,0 +1,50 @@
+A writer on a boxed receiver runs a value that answers nil
+
+An attribute writer or a Struct member on a boxed receiver (a block's
+parameter, a `for` variable, a local read from a mixed Array) stored
+nil for any value of nil type and never ran the value:
+
+    class Node
+      attr_accessor :name, :parent
+      def initialize(n) = @name = n
+    end
+    def detach(nd)
+      puts "detach #{nd.name}"
+      nil
+    end
+    items = [Node.new("a"), Node.new("b")]
+    items.each { |nd| nd.parent = detach(nd) }
+
+printed nothing; CRuby prints "detach a" and "detach b". The call was
+dropped with whatever it does. `(bump; nil)`, `begin; bump; nil; end`,
+`(bump if c)`, a `case` with a nil arm and `(raise "boom" if c; nil)`,
+which never raised, were dropped the same way, also through
+`send(:parent=, v)` and in value position (`y = (nd.parent = bump)`).
+
+Both forms of the boxed writer dispatch (the statement in
+emit_call_stmt, the value in emit_poly_index_call) wrote sp_box_nil()
+for a value typed nil, which is right for a nil literal and for
+nothing else. A value that is no literal is now emitted for its
+effects first, `((void)(value), sp_box_nil())`, where this place is
+known to emit it (boxed_writer_nil_value_runs): every node of the
+value is a literal, a variable read, a write to a local or a global, a
+call with its arguments and its block, a sequence, begin with ensure,
+if, unless, case, `&&`, `||`, while or until. The list is of what
+emits. A rescue modifier over a call of nil type, an instance-variable
+write at top level and a yield whose block holds a boxed writer do not
+build when emitted here; those and every kind not listed keep the
+plain nil.
+
+Where the value runs, the statement form roots the receiver's
+temporary (SP_GC_ROOT_RBVAL): a receiver nothing else holds would be
+collected by a value that allocates, and the store would write through
+the freed object. The value form has the root already. What the value
+hoists into g_pre (a block's loop, an argument of nil type) is taken
+with it and emitted after the receiver's read, so `mk.v = show(bump)`
+runs mk first; in a `&.` statement both wait for the receiver's tag.
+A nil literal's C is unchanged.
+
+`nd&.parent = v` as a statement on a boxed nil raises NoMethodError as
+before, where CRuby skips the call; the value does not run.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
