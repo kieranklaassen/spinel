@@ -1,0 +1,51 @@
+An exception keeps the message, key or receiver made after it
+
+    class ParseError < StandardError
+      def initialize(line, what) = super("line #{line}: #{what}")
+    end
+    errs = []
+    300000.times { |i| errs << ParseError.new(i, "unexpected token") }
+    bad = 0
+    errs.each_with_index do |e, i|
+      bad += 1 if e.message != "line #{i}: unexpected token"
+    end
+    p bad
+
+printed 1 in a plain run; CRuby prints 0. One exception answered
+another String's bytes for its message, and at SPINEL_GC_STRESS=2 the
+mark stopped at a freed heap string.
+
+emit_super writes the message handed to `super` in an exception's
+initialize as `self->msg = <value>`, and emit_new_call_arms writes the
+key and the receiver given to KeyError.new, NameError.new or
+FrozenError.new into the exception it has just made. Making the value
+can collect, and the collection promotes the rooted exception: the
+store then puts a young value into an old holder and nothing recorded
+it. The barrier pass finds a store by `->iv_`; these fields are msg,
+xkey and xrecv.
+
+Each of these stores is now followed by sp_gc_wb, after the store as
+in sp_exc_new_sub_sized. A bare `super` takes it too: its parameter
+may have been assigned in the method (3 messages of 400,000 wrong on
+master). The key and the receiver take one each, since making the
+receiver can collect a second time. A literal message takes none, by
+the pass's own test for a value that is never young.
+
+Cost: 16 instructions for each exception made through such an
+initialize (callgrind, gcc; 21 with clang) and 29 for KeyError.new
+with both keywords. A literal message, a class with no initialize and
+a raise of a builtin exception emit the C they did.
+
+Not here: a class that defines its own `message` still prints an empty
+line for `to_s`, and a value stored into an exception's own attribute
+after it is made (`e.ctx = "k" + i.to_s`) is still not recorded: 55 of
+1,500 are wrong in a plain run, on master and here.
+
+Test: test/exception_keeps_value_made_after_it.rb, added to
+GC_STRESS_TESTS (expected from CRuby 3.3.6). On master each of its
+five loops stops the mark. Six tests already in the tree stop there on
+master too and pass with this commit.
+C: 33 programs of the corpus differ, each by the barrier call alone;
+optcarrot's is unchanged.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
