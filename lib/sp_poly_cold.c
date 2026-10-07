@@ -925,7 +925,7 @@ sp_RbVal sp_poly_to_h_m(sp_RbVal v)
   }
   /* a String Range likewise, its elements Strings */
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_STR_RANGE && v.v.p) {
-    if (!sp_srange_min_v(*(sp_StrRange *)v.v.p)) return sp_box_obj(sp_SymPolyHash_new(), SP_BUILTIN_SYM_POLY_HASH);
+    if (!sp_srange_least_v(*(sp_StrRange *)v.v.p)) return sp_box_obj(sp_SymPolyHash_new(), SP_BUILTIN_SYM_POLY_HASH);
     sp_raise_cls("TypeError", "wrong element type String (expected array)");
   }
   sp_raise_nomethod(sp_nomethod_msg("to_h", v));  /* "for true", "for an instance of String", as CRuby words it */
