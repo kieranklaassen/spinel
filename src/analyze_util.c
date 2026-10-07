@@ -578,11 +578,12 @@ static int send_owned_at_or_below(Compiler *c, int k, int cmeth, const char *nm)
    the program's own under that name rather than Object's. It can unless the
    program defines no such method, or the receiver is proved to be of a
    class that neither has one nor has a class under it that does: a typed
-   object, a builtin value with no reopened builtin defining the name, a
-   class named at compile time, or self in a class's own method. A boxed
-   receiver, one with no type yet, self in a module's method or in an
-   instance_eval block can be anything, and any call can reach a top-level
-   def of the name. */
+   object, a builtin value, a class named at compile time, or self in a
+   class's own method. A boxed receiver, one with no type yet, self in a
+   module's method or in an instance_eval block can be anything, and any
+   call can reach a top-level def of the name or one a builtin was reopened
+   for: `class Object; def send` is every receiver's, and the chains asked
+   below do not place a builtin among a class's ancestors. */
 int an_send_may_be_own(Compiler *c, int id) {
   const NodeTable *nt = c->nt;
   const char *nm = nt_str(nt, id, "name");
@@ -592,11 +593,18 @@ int an_send_may_be_own(Compiler *c, int id) {
     any = c->scopes[s].name && sp_streq(c->scopes[s].name, nm);
   if (!any) return 0;
   if (comp_method_index(c, nm) >= 0) return 1;
+  for (int k = 0; k < c->nclasses; k++) {
+    const char *kn = c->classes[k].name;
+    if (kn && (is_builtin_reopen(kn) || is_builtin_class_name(kn) || is_builtin_module_name(kn)) &&
+        (comp_method_in_chain(c, k, nm, NULL) >= 0 || comp_cmethod_in_chain(c, k, nm, NULL) >= 0)) return 1;
+  }
   int recv = nt_ref(nt, id, "receiver");
   if (recv < 0 || nt_kind(nt, recv) == NK_SelfNode) {
     if (ie_class_of(c, id) >= 0) return 1;
     Scope *ss = comp_scope_of(c, id);
-    if (!ss || ss->class_id < 0 || ss->class_id >= c->nclasses) return 0;   /* main */
+    /* main: a top-level def is private, which public_send does not call, and
+       the lowering keeps no list of them: that one stays as written */
+    if (!ss || ss->class_id < 0 || ss->class_id >= c->nclasses) return sp_streq(nm, "public_send");
     if (comp_class_is_module(c, &c->classes[ss->class_id])) return 1;
     return send_owned_at_or_below(c, ss->class_id, ss->is_cmethod, nm);
   }
@@ -607,9 +615,6 @@ int an_send_may_be_own(Compiler *c, int id) {
     int ci = class_recv_static_ci(c, recv);
     return ci < 0 || send_owned_at_or_below(c, ci, 1, nm);
   }
-  for (int k = 0; k < c->nclasses; k++)
-    if (c->classes[k].name && is_builtin_reopen(c->classes[k].name) &&
-        comp_method_in_chain(c, k, nm, NULL) >= 0) return 1;
   return 0;
 }
 
