@@ -11984,6 +11984,59 @@ static int emit_ivar_cvar_write_stmt(Compiler *c, int id, Buf *b, int indent, co
   return 0;
 }
 
+/* Whether a call in the subtree may run the program's code.
+   subtree_is_pure_read passes a scalar operator and a typed Array's index on
+   their static types alone. Either is the program's own method once a class
+   of the program defines the name (a reopened Float's `+`, a reopened
+   Array's `[]`), and an operator with an argument that is no Integer or
+   Float (`5 <=> o.w`) reaches the runtime's comparison, which may call the
+   program's coerce. */
+static int program_defines_method(Compiler *c, const char *nm) {
+  for (int k = 0; k < c->nclasses; k++)
+    if (comp_method_in_class(c, k, nm) >= 0) return 1;
+  return 0;
+}
+static int subtree_call_may_run_program(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  if (id < 0) return 0;
+  if (nt_kind(nt, id) == NK_CallNode) {
+    const char *nm = nt_str(nt, id, "name");
+    /* `!=` is the answer of `==` turned */
+    if (nm && (program_defines_method(c, nm) ||
+               (sp_streq(nm, "!=") && program_defines_method(c, "==")))) return 1;
+    int a = nt_ref(nt, id, "arguments"); int ac = 0;
+    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+    for (int i = 0; i < ac; i++) {
+      TyKind at = comp_ntype(c, av[i]);
+      if (at != TY_INT && at != TY_FLOAT) return 1;
+    }
+  }
+  int nr = nt_num_refs(nt, id);
+  for (int i = 0; i < nr; i++)
+    if (subtree_call_may_run_program(c, nt_ref_at(nt, id, i))) return 1;
+  int na = nt_num_arrs(nt, id);
+  for (int i = 0; i < na; i++) {
+    int n = 0;
+    const int *ids = nt_arr_at(nt, id, i, &n);
+    for (int j = 0; j < n; j++)
+      if (subtree_call_may_run_program(c, ids[j])) return 1;
+  }
+  return 0;
+}
+/* The slot of a boxed attribute's `&=`, `|=` or `^=`, read ahead of a right
+   operand that can run the program's code: Ruby reads the slot first, and
+   the operand may write it (`o.v ^= o.bump`, a coerce reached from
+   `o.v ^= (5 <=> o.w)`, a reopened Float's `+`). The value goes to a rooted
+   temp, since the operand may also drop it from the slot and allocate.
+   Answers the temp, or 0 when the operand is a plain read that can run none
+   of the program's code and the slot is read in place. */
+static int emit_boxed_slot_read_first(Compiler *c, int val, const char *slot, const char *lead, Buf *b) {
+  if (subtree_is_pure_read(c, val) && !subtree_call_may_run_program(c, val)) return 0;
+  int t = ++g_tmp;
+  buf_printf(b, "%ssp_RbVal _t%d = %s; SP_GC_ROOT_RBVAL(_t%d);", lead, t, slot, t);
+  return t;
+}
+
 /* Call-operator, global-variable and constant writes: o.x += v, $g = v and its operator and or/and forms, C = v, A::B = v and their operator and or/and forms (emit_stmt_inner's arms, in their order) */
 static int emit_attr_global_const_write_stmt(Compiler *c, int id, Buf *b, int indent, const NodeTable *nt, const char *ty) {
   if (sp_streq(ty, "CallOperatorWriteNode")) {
@@ -12002,12 +12055,15 @@ static int emit_attr_global_const_write_stmt(Compiler *c, int id, Buf *b, int in
     int val = nt_ref(nt, id, "value");
     TyKind rt = recv >= 0 ? comp_ntype(c, recv) : TY_UNKNOWN;
     TyKind rhst = val >= 0 ? comp_ntype(c, val) : TY_UNKNOWN;
-    /* the dynamic operator for a boxed (poly) slot, and the bitwise set the
-       boxed slot handles via unbox-op-rebox (both mirror the ivar op-assign
-       poly arms above). The shifts take the dynamic operator too, as a boxed
-       local's `x <<= n` does (emit_poly_op_assign): it promotes past the word
-       and shifts the other way for a negative count, where unbox-op-rebox
-       wrapped (`obj.v <<= 70` was 64, `obj.v <<= -1` was 0). */
+    /* the dynamic operator for a boxed (poly) slot (it mirrors the ivar
+       op-assign poly arms above). The shifts take the dynamic operator too,
+       as a boxed local's `x <<= n` does (emit_poly_op_assign): it promotes
+       past the word and shifts the other way for a negative count, where
+       unbox-op-rebox wrapped (`obj.v <<= 70` was 64, `obj.v <<= -1` was 0).
+       So do `&`, `|` and `^`, with sp_poly_bitop's operator number in
+       `cpx`: unbox-op-rebox read whatever the slot held as an Integer
+       (`obj.v &= 1` on "s" was 0, on true 1). They go through
+       sp_poly_bitop_int_first, which answers two Integers in line. */
     const char *cpf = op && sp_streq(op, "+") ? "sp_poly_add"
                     : op && sp_streq(op, "-") ? "sp_poly_sub"
                     : op && sp_streq(op, "*") ? "sp_poly_mul"
@@ -12015,7 +12071,9 @@ static int emit_attr_global_const_write_stmt(Compiler *c, int id, Buf *b, int in
                     : op && sp_streq(op, "%") ? "sp_poly_mod"
                     : op && sp_streq(op, "**") ? "sp_poly_pow_recv"
                     : op && sp_streq(op, "<<") ? "sp_poly_shl"
-                    : op && sp_streq(op, ">>") ? "sp_poly_shr" : NULL;
+                    : op && sp_streq(op, ">>") ? "sp_poly_shr"
+                    : op && is_bit_op(op) ? "sp_poly_bitop_int_first" : NULL;
+    const char *cpx = !(op && is_bit_op(op)) ? "" : sp_streq(op, "&") ? ", 0" : sp_streq(op, "|") ? ", 1" : ", 2";
     int bitop = op && is_int_bit_op(op);
     int rdcls = -1;
     /* Ruby desugars `recv.attr op= v` into a reader call AND a writer call;
@@ -12035,7 +12093,7 @@ static int emit_attr_global_const_write_stmt(Compiler *c, int id, Buf *b, int in
          type error) */
       if (ivt == TY_STRING && !(op && sp_streq(op, "+")))
         unsupported(c, id, "call operator write (operator on a string attribute)");
-      if (ivt == TY_POLY && !cpf && !bitop)
+      if (ivt == TY_POLY && !cpf)
         unsupported(c, id, "call operator write (operator on a boxed attribute)");
       /* the receiver is bound in g_pre, ahead of any prelude the rhs leaves
          there: Ruby evaluates it first, and an array slot's op-assign reads
@@ -12049,9 +12107,14 @@ static int emit_attr_global_const_write_stmt(Compiler *c, int id, Buf *b, int in
       emit_ctype(c, rt, rb);
       buf_printf(rb, " _t%d = ", trecv); buf_puts(rb, rx.p ? rx.p : ""); buf_puts(rb, ";");
       if (ty_is_array(ivt) || ivt == TY_POLY_ARRAY) { buf_puts(rb, " "); emit_gc_root_tmp(c, rt, trecv, rb); }
+      const char *acc = comp_ty_value_obj(c, rt) ? "." : "->";
+      int tslot = 0;
+      if (ivt == TY_POLY && cpx[0]) {
+        char slot[400]; snprintf(slot, sizeof slot, "_t%d%siv_%s", trecv, acc, iv_c(rn));
+        tslot = emit_boxed_slot_read_first(c, val, slot, " ", rb);
+      }
       buf_puts(rb, "\n");
       free(rx.p);
-      const char *acc = comp_ty_value_obj(c, rt) ? "." : "->";
       emit_indent(b, indent);
       if (ivt == TY_STRING) {
         buf_printf(b, "_t%d%siv_%s = sp_str_concat(_t%d%siv_%s, ", trecv, acc, iv_c(rn), trecv, acc, iv_c(rn));
@@ -12061,15 +12124,9 @@ static int emit_attr_global_const_write_stmt(Compiler *c, int id, Buf *b, int in
       else if (ivt == TY_POLY && cpf) {
         /* boxed slot: dynamic operator on boxed operands (same as the
            poly-receiver dispatch arms below). */
-        buf_printf(b, "_t%d%siv_%s = %s(_t%d%siv_%s, ", trecv, acc, iv_c(rn), cpf, trecv, acc, iv_c(rn));
-        emit_boxed(c, val, b); buf_puts(b, ");\n");
-      }
-      else if (ivt == TY_POLY) {
-        /* bitwise op-assign on a boxed slot: coerce to int, re-box */
-        buf_printf(b, "_t%d%siv_%s = sp_box_int((sp_poly_recv_i(\"%s\", _t%d%siv_%s) %s (",
-                   trecv, acc, iv_c(rn), op, trecv, acc, iv_c(rn), op);
-        emit_poly_unboxed(c, val, rhst, op_assign_int_conv(TY_INT, op), b);
-        buf_puts(b, ")));\n");
+        if (tslot) buf_printf(b, "_t%d%siv_%s = %s(_t%d, ", trecv, acc, iv_c(rn), cpf, tslot);
+        else buf_printf(b, "_t%d%siv_%s = %s(_t%d%siv_%s, ", trecv, acc, iv_c(rn), cpf, trecv, acc, iv_c(rn));
+        emit_boxed(c, val, b); buf_printf(b, "%s);\n", cpx);
       }
       else if (ty_is_array(ivt) || ivt == TY_POLY_ARRAY) {
         char aref[400]; snprintf(aref, sizeof aref, "_t%d%siv_%s", trecv, acc, iv_c(rn));
@@ -12118,7 +12175,7 @@ static int emit_attr_global_const_write_stmt(Compiler *c, int id, Buf *b, int in
           unsupported(c, id, "call operator write (bitwise operator on a float attribute)");
         if (nstr && !(op && sp_streq(op, "+")))
           unsupported(c, id, "call operator write (operator other than + on a string attribute)");
-        if (nany && !cpf && !bitop)
+        if (nany && !cpf)
           unsupported(c, id, "call operator write (operator on a boxed attribute)");
         int trecv = ++g_tmp;
         emit_indent(b, indent);
@@ -12136,15 +12193,11 @@ static int emit_attr_global_const_write_stmt(Compiler *c, int id, Buf *b, int in
           buf_puts(b, "));\n");
         }
         else if (nany && cpf) {
-          buf_printf(b, "%s(_t%d, %s(%s(_t%d), ", nwm->csym, trecv, cpf, nrm->csym, trecv);
-          emit_boxed(c, val, b); buf_puts(b, "));\n");
-        }
-        else if (nany) {
-          /* bitwise on a boxed attribute: coerce to int, re-box */
-          buf_printf(b, "%s(_t%d, sp_box_int(sp_poly_recv_i(\"%s\", %s(_t%d)) %s (",
-                     nwm->csym, trecv, op, nrm->csym, trecv, op);
-          emit_poly_unboxed(c, val, rhst, op_assign_int_conv(TY_INT, op), b);
-          buf_puts(b, ")));\n");
+          char slot[300]; snprintf(slot, sizeof slot, "%s(_t%d)", nrm->csym, trecv);
+          int tslot = cpx[0] ? emit_boxed_slot_read_first(c, val, slot, "", b) : 0;
+          if (tslot) { buf_puts(b, "\n"); emit_indent(b, indent); buf_printf(b, "%s(_t%d, %s(_t%d, ", nwm->csym, trecv, cpf, tslot); }
+          else buf_printf(b, "%s(_t%d, %s(%s, ", nwm->csym, trecv, cpf, slot);
+          emit_boxed(c, val, b); buf_printf(b, "%s));\n", cpx);
         }
         else if (rhst != TY_POLY && !bitop) {
           char slot[300]; snprintf(slot, sizeof slot, "%s(_t%d)", nrm->csym, trecv);
@@ -12204,7 +12257,7 @@ static int emit_attr_global_const_write_stmt(Compiler *c, int id, Buf *b, int in
            the default raise instead -- same skip-on-static-mismatch shape
            as the poly attr-write dispatch above. */
         if (ivt == TY_STRING && !(op && sp_streq(op, "+"))) continue;
-        if (ivt == TY_POLY && !cpf && !bitop) continue;
+        if (ivt == TY_POLY && !cpf) continue;
         const char *cn = c->classes[pdcls].name;
         any = 1;
         emit_indent(b, indent + 1);
@@ -12219,17 +12272,12 @@ static int emit_attr_global_const_write_stmt(Compiler *c, int id, Buf *b, int in
           /* the slot itself is boxed (a whole-program-widened numeric like
              Sector#ceiling_height): fold via the dynamic operator on boxed
              operands rather than raw C arithmetic on an sp_RbVal. */
-          buf_puts(b, "_o->iv_"); buf_puts(b, iv_c(rn));
-          buf_printf(b, " = %s(_o->iv_", cpf); buf_puts(b, iv_c(rn)); buf_puts(b, ", ");
+          char slot[320]; snprintf(slot, sizeof slot, "_o->iv_%s", iv_c(rn));
+          int tslot = cpx[0] ? emit_boxed_slot_read_first(c, val, slot, "", b) : 0;
+          if (tslot) buf_printf(b, " %s = %s(_t%d, ", slot, cpf, tslot);
+          else buf_printf(b, "%s = %s(%s, ", slot, cpf, slot);
           emit_boxed(c, val, b);
-          buf_puts(b, "); break; }\n");
-        }
-        else if (ivt == TY_POLY) {
-          /* bitwise op-assign on a boxed slot: coerce to int, re-box */
-          buf_puts(b, "_o->iv_"); buf_puts(b, iv_c(rn));
-          buf_printf(b, " = sp_box_int((sp_poly_recv_i(\"%s\", _o->iv_%s) %s (", op, iv_c(rn), op);
-          emit_poly_unboxed(c, val, rhst, op_assign_int_conv(TY_INT, op), b);
-          buf_puts(b, "))); break; }\n");
+          buf_printf(b, "%s); break; }\n", cpx);
         }
         else {
           char lval[320]; snprintf(lval, sizeof lval, "_o->iv_%s", iv_c(rn));
