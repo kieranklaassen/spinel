@@ -3109,9 +3109,16 @@ int desugar_public_send_recv(Compiler *c) {
     int encl = c->nscope[id];
     for (int j = base; j < nt->count; j++) c->nscope[j] = encl;
     expand_static_splat_args(c, id, id + 1);
-    if (unsettled) {
-      nt_node_set_str(nt, id, "send_was", di == 2 ? "public_send" : di == 1 ? "__send__" : "send");
-      nt_node_set_ref(nt, id, "send_args", args);
+    if (defd[di]) {
+      /* a send of a send is retargeted twice, and the call left is not
+         the one written: it carries no mark and stays as it is */
+      int again = nt_int(nt, id, "send_hop", 0);
+      nt_node_set_int(nt, id, "send_hop", 1);
+      if (again) nt_node_set_str(nt, id, "send_was", "");
+      else if (unsettled) {
+        nt_node_set_str(nt, id, "send_was", di == 2 ? "public_send" : di == 1 ? "__send__" : "send");
+        nt_node_set_ref(nt, id, "send_args", args);
+      }
     }
     changed = 1;
   }
