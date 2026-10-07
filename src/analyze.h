@@ -15,6 +15,8 @@
 /* Whether a boxed ivar setter's receiver can hold class k; an unproved
    receiver conservatively reaches every class. Shared by layout/emission. */
 int poly_ivar_set_reaches(Compiler *c, int call, int k);
+/* Frees the facts poly_ivar_set_reaches keeps on the compiler (c->pivs). */
+void pivs_facts_free(Compiler *c);
 
 /* Set by main.c from --int-overflow=promote. In promote mode the analyzer is
    free to widen accumulating int locals to bigint more aggressively (e.g. block
@@ -57,6 +59,9 @@ enum {
   NFW_SAFE_NAV,  /* a `&.` call */
   NFW_UNSET,     /* a local's read that can run before any write (the
                     definite-assignment walk, a `||=` slot) */
+  NFW_ELEM_NIL,  /* an element of an Array the program stores nil into or
+                    leaves a gap in (a block parameter an iteration over it
+                    binds, an element read or pick out of it) */
   NFW_ELEM,      /* an element read or a pick that can miss (Array, Hash,
                     String, a MatchData, an IO at its end) */
   NFW_GLOBAL,    /* a global, or the main object's ivar, read where no write
@@ -70,6 +75,10 @@ enum {
   NFW_GUARDED    /* (nil_fact_why only) not nil: a guard narrowed the read */
 };
 int nil_fact_why(const Compiler *c, int node);
+/* Can an element of Array node `node`'s value be nil: one whose elements
+   are pointers that the program stores nil into or leaves a gap in
+   (NFW_ELEM_NIL's Arrays)? */
+int nil_elem_fact_node(const Compiler *c, int node);
 /* A read of a String handle local that may be nil, where the nil would be
    past a NoMethodError this build does not raise: the receiver of a call
    nil does not answer, or any read of a local an in-place write (`t << x`,
@@ -80,7 +89,8 @@ int nil_fact_why(const Compiler *c, int node);
    local behind a guard that does not hold, which lets the same write run:
    a write inside the guard's condition, a loop that tests after its body,
    a program that defines what a guard is made of (its own fail, a String's
-   nil?). */
+   nil?). And of a local appended to under another link of a chain (`t << a
+   << b`), which the statement emitter appends with no nil arm. */
 #define NF_UNRAISED 0x80
 int nil_fact_unraised(const Compiler *c, int node);
 const char *nil_fact_why_name(int why);
@@ -105,10 +115,20 @@ void analyze_program(Compiler *c);
    isn't the start of a non-capturing/extension group '(?...'. scan returns
    nested arrays for capturing patterns, which the str_array path can't model. */
 int an_re_has_captures(const char *src);
+/* --share-strings: can method mi's last statement answer nil (a nil, or
+   a conditional with an arm that is nil or missing)? The deep-return
+   pickup of a call to it then answers the call's nil as nil
+   (an_tail_is_shared_handle). */
+int an_tail_answers_nil(Compiler *c, int mi);
 int an_send_name_is_computed(Compiler *c, int arg);
 /* Is scope si an iterator synth_struct_each generated, not a def? */
 int scope_is_struct_synth(Compiler *c, int si);
 int an_str_mutator_name(const char *nm);
+/* Does inlined yielding method mi lend its parameter j at a call whose
+   literal block is blk: append to it, hand it to a lent parameter, or yield
+   it to a block parameter the block lends? The splice then binds it as an
+   alias of the caller's variable. */
+int an_inline_param_lent(Compiler *c, int mi, int j, int blk);
 /* A String handed to a proc, a lambda or a Method (#6179): what the targets
    a `.call` / `.()` / `[]` / `.yield` / `===` on a Proc or Method value can
    reach do with its argument at one position. Filled by dyn_call_reach, for

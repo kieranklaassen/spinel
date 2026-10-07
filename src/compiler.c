@@ -1,5 +1,6 @@
 #include "compiler.h"
 #include "share.h"
+#include "analyze.h"
 #include "builtin_names.h"
 
 #include <stdio.h>
@@ -95,6 +96,8 @@ Compiler *comp_new(const NodeTable *nt) {
   c->hash_want = calloc((size_t)n, sizeof(TyKind));
   c->arr_want = calloc((size_t)n, sizeof(TyKind));
   c->poly_builtin_ty = calloc((size_t)n, sizeof(TyKind));
+  c->lw_joined = calloc((size_t)n, sizeof(TyKind));
+  if (!c->lw_joined) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
   c->bop_inf = calloc((size_t)n, sizeof *c->bop_inf);
   c->ucall_inf = calloc((size_t)n, sizeof *c->ucall_inf);
   c->node_cap = n;
@@ -237,11 +240,13 @@ void comp_grow_node_arrays(Compiler *c) {
   c->hash_want = realloc(c->hash_want, sizeof(TyKind) * (size_t)n);
   c->arr_want = realloc(c->arr_want, sizeof(TyKind) * (size_t)n);
   c->poly_builtin_ty = realloc(c->poly_builtin_ty, sizeof(TyKind) * (size_t)n);
+  c->lw_joined = realloc(c->lw_joined, sizeof(TyKind) * (size_t)n);
+  if (!c->lw_joined) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
   c->bop_inf = realloc(c->bop_inf, sizeof *c->bop_inf * (size_t)n);
   for (int i = c->node_cap; i < n; i++) c->bop_inf[i] = NULL;
   c->ucall_inf = realloc(c->ucall_inf, sizeof *c->ucall_inf * (size_t)n);
   memset(c->ucall_inf + c->node_cap, 0, sizeof *c->ucall_inf * (size_t)(n - c->node_cap));
-  for (int i = c->node_cap; i < n; i++) { c->ntype[i] = TY_UNKNOWN; c->norigin[i] = -1; c->nilnarrow[i] = TY_UNKNOWN; c->nscope[i] = 0; c->node_cbody[i] = -1; c->empty_arr_recv[i] = 0; c->empty_hash_recv[i] = 0; c->empty_hash_arg[i] = 0; c->store_misfit_arg[i] = 0; c->ivar_widen_src[i] = 0; c->hash_want[i] = TY_UNKNOWN; c->arr_want[i] = TY_UNKNOWN; c->poly_builtin_ty[i] = TY_UNKNOWN; c->strbuf_box[i] = 0; c->strbuf_handle_demand[i] = 0; c->strbuf_read_raw[i] = 0; c->poly_strbuf_lift[i] = 0; c->nil_tested[i] = 0; }
+  for (int i = c->node_cap; i < n; i++) { c->ntype[i] = TY_UNKNOWN; c->norigin[i] = -1; c->nilnarrow[i] = TY_UNKNOWN; c->nscope[i] = 0; c->node_cbody[i] = -1; c->empty_arr_recv[i] = 0; c->empty_hash_recv[i] = 0; c->empty_hash_arg[i] = 0; c->store_misfit_arg[i] = 0; c->ivar_widen_src[i] = 0; c->hash_want[i] = TY_UNKNOWN; c->arr_want[i] = TY_UNKNOWN; c->poly_builtin_ty[i] = TY_UNKNOWN; c->lw_joined[i] = TY_UNKNOWN; c->strbuf_box[i] = 0; c->strbuf_handle_demand[i] = 0; c->strbuf_read_raw[i] = 0; c->poly_strbuf_lift[i] = 0; c->nil_tested[i] = 0; }
   c->node_cap = n;
 }
 
@@ -249,6 +254,10 @@ void comp_free(Compiler *c) {
   if (!c) return;
   share_facts_free(c);
   share_routes_free(c);
+  free(c->byref_elig);
+  c->byref_elig = NULL;
+  c->nbyref_elig = 0;
+  pivs_facts_free(c);
   free(c->vs_head); free(c->vs_site); free(c->vs_var); free(c->vs_next); free(c->vs_kind);
   free(c->vs_rparent); free(c->vs_dropped);
   c->vs_head = c->vs_site = c->vs_var = c->vs_next = c->vs_rparent = NULL;
@@ -259,6 +268,7 @@ void comp_free(Compiler *c) {
   c->hash_default_arg_memo = NULL;
   free(c->blk_body_map);
   free(c->nil_fact);
+  free(c->nil_elem_fact);
   free(c->node_ord); free(c->node_base);
   for (int k = 0; k < c->bi_base_cap; k++) free(c->bi_base_key[k]);
   free(c->bi_base_key); free(c->bi_base_cnt);
@@ -281,6 +291,7 @@ void comp_free(Compiler *c) {
     free(c->classes[i].ivars);
     free(c->classes[i].ivar_types);
     free(c->classes[i].ivar_obj_may_nil);
+    free(c->classes[i].ivar_elem_may_nil);
     for (int j = 0; j < c->classes[i].n_rbs_pin_ivars; j++) free(c->classes[i].rbs_pin_ivars[j]);
     free(c->classes[i].rbs_pin_ivars);
     for (int j = 0; j < c->classes[i].nreaders; j++) free(c->classes[i].readers[j]);
@@ -313,6 +324,9 @@ void comp_free(Compiler *c) {
   }
   free(c->ffi_sources);
   free(c->nscope);
+  if (c->stmt_wr_names)
+    for (int i = 0; i < c->stmt_wr_cap; i++) free(c->stmt_wr_names[i]);
+  free(c->stmt_wr_names); free(c->stmt_wr_state); free(c->stmt_wr_mark);
   free(c->ntype);
   free(c->norigin);
   free(c->node_cbody);
@@ -322,6 +336,7 @@ void comp_free(Compiler *c) {
   free(c->ivar_widen_src);
   free(c->hash_want);
   free(c->arr_want);
+  free(c->lw_joined);
   free(c->poly_builtin_ty);
   free(c->bop_inf);
   free(c->ucall_inf);
@@ -1977,6 +1992,42 @@ int comp_is_local_write(NodeKind k) {
          k == NK_LocalVariableOrWriteNode || k == NK_LocalVariableAndWriteNode ||
          k == NK_LocalVariableOperatorWriteNode;
 }
+/* Does the subtree under n assign the variable read node `arg` reads: a
+   local of the same scope, or an instance variable, by any write kind
+   (plain, operator, `||=`, `&&=`, a multiple-assignment target)? */
+static int comp_subtree_writes_var(Compiler *c, int n, int arg, const char *name, int depth) {
+  const NodeTable *nt = c->nt;
+  if (n < 0 || depth > 300) return 0;
+  NodeKind k = nt_kind(nt, n);
+  int ivar = nt_kind(nt, arg) == NK_InstanceVariableReadNode;
+  int w = ivar ? k == NK_InstanceVariableWriteNode || k == NK_InstanceVariableOrWriteNode ||
+                 k == NK_InstanceVariableAndWriteNode || k == NK_InstanceVariableOperatorWriteNode ||
+                 k == NK_InstanceVariableTargetNode
+               : comp_is_local_write(k);
+  if (w && nt_str(nt, n, "name") && sp_streq(nt_str(nt, n, "name"), name) &&
+      (ivar || comp_scope_of(c, n) == comp_scope_of(c, arg))) return 1;
+  int nr = nt_num_refs(nt, n);
+  for (int i = 0; i < nr; i++)
+    if (comp_subtree_writes_var(c, nt_ref_at(nt, n, i), arg, name, depth + 1)) return 1;
+  int na = nt_num_arrs(nt, n);
+  for (int i = 0; i < na; i++) {
+    int an = 0; const int *av = nt_arr_at(nt, n, i, &an);
+    for (int j = 0; j < an; j++)
+      if (comp_subtree_writes_var(c, av[j], arg, name, depth + 1)) return 1;
+  }
+  return 0;
+}
+int comp_block_rebinds_arg(Compiler *c, int blk, int arg) {
+  const NodeTable *nt = c->nt;
+  NodeKind ak = arg >= 0 ? nt_kind(nt, arg) : NK__COUNT;
+  const char *name = arg >= 0 ? nt_str(nt, arg, "name") : NULL;
+  if (blk < 0 || !name || (ak != NK_LocalVariableReadNode && ak != NK_InstanceVariableReadNode)) return 0;
+  if (ak == NK_LocalVariableReadNode) {
+    LocalVar *lv = scope_local(comp_scope_of(c, arg), name);
+    if (lv && lv->proc_rebinds) return 1;
+  }
+  return nt_kind(nt, blk) == NK_BlockNode && comp_subtree_writes_var(c, blk, arg, name, 0);
+}
 static int comp_chain_alloc(int **head, int **next, int nb, int n, int *built) {
   *head = malloc((size_t)nb * sizeof(int));
   *next = malloc((size_t)(n > 0 ? n : 1) * sizeof(int));
@@ -2084,6 +2135,42 @@ int comp_scall_first(Compiler *c, int scope_idx) {
 }
 int comp_scall_next(const Compiler *c, int u) {
   return (u >= 0 && u < c->scall_count) ? c->scall_next[u] : -1;
+}
+
+/* Every CallNode with a literal block, chained by the scope its block's
+   parameters live in (comp_scope_of of the block). A block parameter's
+   source walk looked at every CallNode of the program per parameter; this
+   walks them once. */
+static void bcall_build(Compiler *c) {
+  free(c->bcall_head); free(c->bcall_next);
+  const NodeTable *nt = c->nt;
+  int n = nt->count;
+  int ns = c->nscopes > 0 ? c->nscopes : 1;
+  if (!comp_chain_alloc(&c->bcall_head, &c->bcall_next, ns, n, &c->bcall_built)) return;
+  c->bcall_nscopes = ns;
+  c->bcall_count = n;
+  for (int s = 0; s < ns; s++) c->bcall_head[s] = -1;
+  for (int u = n - 1; u >= 0; u--) {   /* reverse: chains run in node order */
+    c->bcall_next[u] = -1;
+    if (nt_kind(nt, u) != NK_CallNode) continue;
+    int blk = nt_ref(nt, u, "block");
+    if (blk < 0 || nt_kind(nt, blk) != NK_BlockNode) continue;
+    int si = (int)(comp_scope_of(c, blk) - c->scopes);
+    if (si < 0 || si >= ns) continue;
+    c->bcall_next[u] = c->bcall_head[si];
+    c->bcall_head[si] = u;
+  }
+  c->bcall_version = nt->version;
+  c->bcall_built = 1;
+}
+int comp_bcall_first(Compiler *c, int scope_idx) {
+  if (!c->bcall_built || c->bcall_version != c->nt->version || c->bcall_count != c->nt->count ||
+      c->bcall_nscopes < c->nscopes) bcall_build(c);
+  if (!c->bcall_built || scope_idx < 0 || scope_idx >= c->bcall_nscopes) return -1;
+  return c->bcall_head[scope_idx];
+}
+int comp_bcall_next(const Compiler *c, int u) {
+  return (u >= 0 && u < c->bcall_count) ? c->bcall_next[u] : -1;
 }
 
 /* Every ivar read handed to a call as an argument, chained by the ivar's
@@ -2623,10 +2710,28 @@ void comp_prep_chain_add(ClassInfo *ci, const char *from, const char *to) {
 
 const char *comp_super_shadow(Compiler *c, const Scope *s) {
   if (!s || !s->name) return NULL;
-  if (!s->is_cmethod) return comp_prep_chain_target(c, s->class_id, s->name);
   char key[320];
-  snprintf(key, sizeof key, "self.%s", s->name);
-  return comp_prep_chain_target(c, s->class_id, key);
+  snprintf(key, sizeof key, "%s%s", s->is_cmethod ? "self." : "", s->name);
+  const char *t = comp_prep_chain_target(c, s->class_id, key);
+  /* A proc-form clone ("<m>#pf", make_yield_proc_forms) has no chain entry
+     of its own: its super reaches the shadow the method's does -- the
+     shadow's own clone when it has one, as the clone of a class's
+     initialize does that calls super into an included module's on a cycle
+     of constructors, or the shadow itself when it does not yield. Sent up
+     the parent chain instead, it raised "no superclass method". A yielding
+     shadow with no clone has no function to call and is left so. */
+  size_t n = strlen(key);
+  if (t || n <= 3 || n >= sizeof key || strcmp(key + n - 3, "#pf") != 0) return t;
+  key[n - 3] = '\0';
+  t = comp_prep_chain_target(c, s->class_id, key);
+  if (!t) return NULL;
+  char pf[320];
+  snprintf(pf, sizeof pf, "%s#pf", t);
+  int (*in_class)(Compiler *, int, const char *) = s->is_cmethod ? comp_cmethod_in_class : comp_method_in_class;
+  int k = in_class(c, s->class_id, pf);
+  if (k >= 0) return c->scopes[k].name;
+  k = in_class(c, s->class_id, t);
+  return k >= 0 && !c->scopes[k].yields ? t : NULL;
 }
 
 void comp_cprep_chain_add(ClassInfo *ci, const char *from, const char *to) {

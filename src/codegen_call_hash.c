@@ -130,14 +130,21 @@ int emit_op_hash_to_proc(Compiler *c, const BopCtx *x, Buf *b) {
   const char *hn = ty_hash_cname(rt);
   TyKind kt = ty_hash_key(rt), vt = ty_hash_val(rt);
   int pn = ++g_proc_counter;
-  /* a PolyPolyHash key is an sp_RbVal, delivered on the proc's poly
-     side-channel (args[] carries only scalar bits); the get() takes it
-     directly. Scalar-keyed variants read the sp_int slot. */
-  const char *keyexpr = (kt == TY_SYMBOL) ? "(sp_sym)args[0]"
-                      : (kt == TY_STRING) ? "(const char *)(uintptr_t)args[0]"
-                      : (rt == TY_POLY_POLY_HASH) ? "_sp_proc_poly_args[0]"
-                      : "args[0]";
-  if (rt == TY_POLY_POLY_HASH) g_needs_proc_poly_argslot = 1;
+  /* The key is read from the proc's boxed side-channel, which every caller
+     publishes, not from the sp_int slot: the proc can be called with a key
+     of any class, and the slot's bits read as a `const char *` for a
+     String-keyed Hash called with an Integer crashed. A key of a class the
+     storage cannot hold (an Integer or a Symbol on a String-keyed Hash, a
+     Float 1.0 on an Integer-keyed one, which is not eql? to 1) is a miss
+     answering the Hash's default, as `h[key]` answers it. */
+  const char *keyexpr = (kt == TY_SYMBOL) ? "(sp_sym)_k.v.i"
+                      : (kt == TY_STRING) ? "_k.v.s"
+                      : (kt == TY_INT) ? "_k.v.i"
+                      : "_k";
+  const char *keytag = (kt == TY_SYMBOL) ? "SP_TAG_SYM"
+                     : (kt == TY_STRING) ? "SP_TAG_STR"
+                     : (kt == TY_INT) ? "SP_TAG_INT" : NULL;
+  g_needs_proc_poly_argslot = 1;
   buf_printf(&g_proc_protos, "static sp_int _hashproc_%d(void *cap, sp_int argc, sp_int *args);\n", pn);
   buf_printf(&g_procs, "static sp_int _hashproc_%d(void *cap, sp_int argc, sp_int *args) {\n", pn);
   /* the hash proc is a lambda: exactly one key, as CRuby's raises --
@@ -145,7 +152,16 @@ int emit_op_hash_to_proc(Compiler *c, const BopCtx *x, Buf *b) {
      previous call's value */
   buf_printf(&g_procs, "  if (argc != 1) sp_raise_cls(\"ArgumentError\","
              " sp_sprintf(\"wrong number of arguments (given %%lld, expected 1)\", (long long)argc));\n");
-  buf_printf(&g_procs, "  sp_%sHash *_h = (sp_%sHash *)cap;\n", hn, hn);
+  buf_printf(&g_procs, "  sp_%sHash *_h = (sp_%sHash *)cap; (void)args;\n", hn, hn);
+  buf_puts(&g_procs, "  sp_RbVal _k = _sp_proc_poly_args[0];\n");
+  /* a mutable String key looks its contents up */
+  if (kt == TY_STRING)
+    buf_puts(&g_procs, "  if (sp_poly_is_strbuf(_k)) _k = sp_poly_strbuf_deref(_k);\n");
+  if (keytag) {
+    buf_printf(&g_procs, "  if (_k.tag != %s) { _sp_proc_poly_ret = sp_poly_hash_foreign_miss(", keytag);
+    emit_boxed_text(c, rt, "_h", &g_procs);
+    buf_puts(&g_procs, ", _k); return 0; }\n");
+  }
   /* Universal return ABI: publish the boxed value into _sp_proc_poly_ret
      for every value type; the .call site reads the slot back. */
   buf_puts(&g_procs, "  _sp_proc_poly_ret = ");
@@ -432,11 +448,17 @@ int emit_op_hash_replace(Compiler *c, const BopCtx *x, Buf *b) {
   int keep_default = nt_str(c->nt, x->id, "bang_splice") != NULL;
   int argc;
   const int *argv = call_args(c->nt, x->id, &argc);
-  if (repr_hash_is(repr_of(c, argv[0]), ty_hash_key(rt), ty_hash_val(rt))) {
+  /* an empty `{}` has no variant of its own: it is read as the receiver's */
+  Buf eb; memset(&eb, 0, sizeof eb);
+  int same = repr_hash_is(repr_of(c, argv[0]), ty_hash_key(rt), ty_hash_val(rt));
+  int empty = !same && emit_empty_literal_as(c, argv[0], rt, &eb);
+  if (same || empty) {
     int trp = ++g_tmp, to = ++g_tmp;
     buf_printf(b, "({ %s _t%d = ", c_type_name(rt), trp); emit_expr(c, recv, b);
     buf_printf(b, "; if (sp_gc_is_frozen(_t%d)) sp_raise_frozen_hash_at(_t%d, %s);", trp, trp, hash_box_cls(rt));   /* (#3001) */
-    buf_printf(b, " SP_GC_ROOT(_t%d); %s _t%d = ", trp, c_type_name(rt), to); emit_expr(c, argv[0], b);
+    buf_printf(b, " SP_GC_ROOT(_t%d); %s _t%d = ", trp, c_type_name(rt), to);
+    if (empty) buf_puts(b, eb.p); else emit_expr(c, argv[0], b);
+    free(eb.p);
     buf_printf(b, "; SP_GC_ROOT(_t%d); sp_%sHash_replace(_t%d, _t%d);", to, hn, trp, to);
     if (!keep_default) {
       buf_printf(b, " if (_t%d && _t%d) { sp_gc_wb((void *)_t%d); _t%d->default_v = _t%d->default_v;",
@@ -448,7 +470,9 @@ int emit_op_hash_replace(Compiler *c, const BopCtx *x, Buf *b) {
     buf_printf(b, " _t%d; })", trp);
     return 1;
   }
-  if (rt == TY_POLY_POLY_HASH && ty_is_hash(comp_ntype(c, argv[0]))) {
+  /* any Hash, or a boxed value, which sp_poly_hash_replace checks is one */
+  TyKind ot = comp_ntype(c, argv[0]);
+  if (rt == TY_POLY_POLY_HASH && (ty_is_hash(ot) || ot == TY_POLY)) {
     int th = ++g_tmp;
     buf_printf(b, "({ sp_PolyPolyHash *_t%d = ", th); emit_expr(c, recv, b);
     buf_printf(b, "; SP_GC_ROOT(_t%d); (void)sp_poly_hash_replace(sp_box_obj(_t%d, SP_BUILTIN_POLY_POLY_HASH), ", th, th);
@@ -481,9 +505,15 @@ int emit_op_hash_set_default(Compiler *c, const BopCtx *x, Buf *b) {
   else if (is_nil) { buf_puts(b, " (void)("); emit_expr(c, argv[0], b); buf_puts(b, ");"); }
   buf_printf(b, " if (_t%d && sp_gc_is_frozen(_t%d)) sp_raise_frozen_hash_at(_t%d, %s);",
              t, t, t, hash_box_cls(rt));
+  /* --share-strings: a String the rule shares is the default itself (`h.default
+     << x`, `h[:missing] << x` change it): its handle, boxed */
+  char dref[1024];
+  int dhandle = held && (at == TY_STRING || at == TY_STRBUF) && strbuf_var_handle(c, argv[0], dref, sizeof dref);
   if (rt == TY_SYM_POLY_HASH || rt == TY_STR_POLY_HASH || rt == TY_POLY_POLY_HASH) {
     buf_printf(b, " if (_t%d) _t%d->default_v = ", t, t);
-    if (is_nil) buf_puts(b, "sp_box_nil()"); else if (held) emit_boxed_text(c, at, av, b); else emit_boxed(c, argv[0], b);
+    if (is_nil) buf_puts(b, "sp_box_nil()");
+    else if (dhandle) buf_printf(b, "sp_box_nullable_obj(%s, SP_BUILTIN_STRBUF)", dref);
+    else if (held) emit_boxed_text(c, at, av, b); else emit_boxed(c, argv[0], b);
     buf_puts(b, ";");
   }
   /* The typed variants keep the default in the values' slot: a value that

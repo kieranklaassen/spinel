@@ -535,6 +535,22 @@ no_gsub_enum:
             buf_printf(b, "(sp_re_match(%s, ", rp.p); emit_expr(c, argv[0], b); buf_puts(b, ") < 0)");
             free(rp.p); return 1;
           }
+          /* `re !~ x` is !(re =~ x): nil does not match, and a poly operand
+             is checked as =~ checks it -- a String is matched, nil answers
+             true, anything else raises =~'s TypeError */
+          if (sp_streq(name, "!~") && argc == 1 && a0 == TY_NIL) {
+            buf_puts(b, "((void)("); emit_expr(c, argv[0], b); buf_puts(b, "), (sp_bool)1)");
+            free(rp.p); return 1;
+          }
+          if (sp_streq(name, "!~") && argc == 1 && a0 == TY_POLY) {
+            int tv = ++g_tmp;
+            /* a shared-string handle is a String (#4279) */
+            buf_printf(b, "({ sp_RbVal _t%d = sp_poly_strbuf_deref(", tv); emit_expr(c, argv[0], b);
+            buf_printf(b, "); if (_t%d.tag != SP_TAG_STR && _t%d.tag != SP_TAG_NIL) sp_raise_no_str_conversion(_t%d);"
+                          " (sp_bool)(_t%d.tag == SP_TAG_NIL || sp_re_match(%s, _t%d.v.s) < 0); })",
+                       tv, tv, tv, tv, rp.p, tv);
+            free(rp.p); return 1;
+          }
           if (sp_streq(name, "match") && argc == 1 && nt_ref(nt, id, "block") >= 0) {
             /* the block form: yield the MatchData on a hit, evaluate to the
                block's value, nil on a miss (#3642) */
@@ -767,11 +783,11 @@ int emit_call_regexp_class_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
       int ua = argv[0];
       int splat = nt_kind(nt, ua) == NK_SplatNode && nt_ref(nt, ua, "expression") >= 0;
       if (splat) ua = nt_ref(nt, ua, "expression");
-      TyKind uat = comp_ntype(c, ua);
-      if (uat == TY_POLY_ARRAY || uat == TY_STR_ARRAY || (splat && uat != TY_UNKNOWN)) {
+      Repr uar = repr_of(c, ua);
+      if (uar.elem == TY_POLY || uar.elem == TY_STRING || (splat && !uar.untyped)) {
         buf_puts(b, "sp_re_union_array(");
-        if (uat == TY_STR_ARRAY) { buf_puts(b, "sp_StrArray_to_poly_fmt("); emit_expr(c, ua, b); buf_puts(b, ")"); }
-        else if (uat == TY_POLY_ARRAY) emit_expr(c, ua, b);
+        if (uar.elem == TY_STRING) { buf_puts(b, "sp_StrArray_to_poly_fmt("); emit_expr(c, ua, b); buf_puts(b, ")"); }
+        else if (uar.elem == TY_POLY) emit_expr(c, ua, b);
         /* any other splatted value -- boxed, a scalar, nil, a typed array --
            is the Array its splat makes, and each element is checked at run
            time (a non-String, non-Regexp one raises TypeError) */
@@ -1226,7 +1242,9 @@ int emit_string_handle_append(Compiler *c, int id, Buf *b, const char *name, int
       const char *sn = nt_kind(nt, sr) == NK_CallNode ? nt_str(nt, sr, "name") : NULL;
       Repr rp = repr_of(c, sr);
       int chain_handle = sn && is_append_concat(sn) && rp.handle && rp.kind == RK_STRBUF;
-      if (chain_handle || strbuf_slot_ref(c, sr, sref0, sizeof sref0)) {
+      /* or a route over a handle (`(+s) << x`, --share-strings), which
+         appends to the String it hands on */
+      if (chain_handle || strbuf_recv_handle(c, id, sr, sref0, sizeof sref0)) {
         int tb2 = ++g_tmp;
         buf_printf(b, "({ sp_String *_t%d = ", tb2);
         if (chain_handle) emit_expr(c, sr, b);
@@ -1345,11 +1363,72 @@ static int emit_string_slice_poly(Compiler *c, int id, int arg, Buf *b) {
   return 1;
 }
 
+/* The variable at the bottom of a chain of String calls that each answer
+   their receiver itself (BOPF_SELF on the builtin row: `s.insert(0, x)`,
+   `s << x`), or -1: a mutator called on the chain's answer changes that
+   variable's String. */
+static int str_self_chain_root(Compiler *c, int n) {
+  const NodeTable *nt = c->nt;
+  n = an_unparen(nt, n);
+  while (n >= 0 && nt_kind(nt, n) == NK_CallNode) {
+    int r = nt_ref(nt, n, "receiver");
+    const char *nm = nt_str(nt, n, "name");
+    TyKind rt = r >= 0 ? comp_ntype(c, r) : TY_UNKNOWN;
+    if (!nm || (rt != TY_STRING && rt != TY_STRBUF) || comp_builtin_kind_reopen_mi(c, TY_STRING, nm) >= 0 ||
+        !(bop_answers_self(TY_STRING, nm, call_plain_argc(c, n), nt_ref(nt, n, "block") >= 0) & BOPF_SELF))
+      return -1;
+    n = an_unparen(nt, r);
+    if (str_mut_var_recv(c, n) || sb_shadowed_reader(n)) return n;
+  }
+  return -1;
+}
+
+/* Is node n's value a String no other name can hold: an interpolation, a
+   copy of a frozen literal (`+"abc"`, BOPF_SELF_CLASS), or a builtin String
+   method that answers a String of its own (no SELF-like flag on its row,
+   the String family's BSH_PURE share)? A mutator's change of it is seen by
+   nobody. */
+static int str_fresh_value(Compiler *c, int n) {
+  const NodeTable *nt = c->nt;
+  n = an_unparen(nt, n);
+  if (nt_kind(nt, n) == NK_InterpolatedStringNode) return 1;
+  if (nt_kind(nt, n) != NK_CallNode || nt_ref(nt, n, "block") >= 0 || comp_ntype(c, n) != TY_STRING) return 0;
+  int r = nt_ref(nt, n, "receiver");
+  const char *nm = nt_str(nt, n, "name");
+  if (r < 0 || !nm || comp_ntype(c, r) != TY_STRING || comp_builtin_kind_reopen_mi(c, TY_STRING, nm) >= 0)
+    return 0;
+  int self = bop_answers_self(TY_STRING, nm, call_plain_argc(c, n), 0);
+  if (self & BOPF_SELF_CLASS) return nt_kind(nt, an_unparen(nt, r)) == NK_StringNode;
+  return (self == 0 || self == BOPF_COPY_CLASS) && !str_self_call(nt, n) && bop_share(TY_STRING, nm) == BSH_PURE;
+}
+
 int emit_op_string_slice(Compiler *c, const BopCtx *x, Buf *b) {
   int id = x->id, recv = x->recv, argc;
   const int *argv = call_args(c->nt, id, &argc);
   if (argc == 1 && emit_string_slice_poly(c, id, argv[0], b)) return 1;
   int sb_asgn = str_mut_var_recv(c, recv) || sb_shadowed_reader(recv);
+  /* `s.insert(0, "<").slice!(0, 2)` cuts s's String: the chain runs, in
+     Ruby's order, then the slice! is the variable's own, which every arm
+     below serves (reassigning it, or through a handle's shim). The answer
+     of the chain is the same String, so the slice is the call's value. */
+  if (!sb_asgn) {
+    int root = str_self_chain_root(c, recv);
+    if (root >= 0) {
+      NodeTable *ntw = (NodeTable *)c->nt;
+      int orig = nt_ref(ntw, id, "receiver");
+      buf_puts(b, "({ (void)("); emit_expr(c, recv, b); buf_puts(b, "); ");
+      nt_node_set_ref(ntw, id, "receiver", root);
+      emit_expr(c, id, b);
+      nt_node_set_ref(ntw, id, "receiver", orig);
+      buf_puts(b, "; })");
+      return 1;
+    }
+  }
+  /* slice!(start, len) on a String no other name holds answers the part
+     it cuts, as slice!(i) does on any receiver below; the change is seen
+     by nobody. Any other receiver that is no variable is left to the
+     unresolved-call gate. */
+  int span2 = argc == 2 && !sb_asgn && re_lit_index(c, argv[0]) < 0 && str_fresh_value(c, recv);
   if (argc == 1 && comp_ntype(c, argv[0]) == TY_STRING) {
     int tp2 = ++g_tmp;
     buf_puts(b, "({ "); emit_str_frozen_check(c, recv, b);
@@ -1394,7 +1473,7 @@ int emit_op_string_slice(Compiler *c, const BopCtx *x, Buf *b) {
     buf_printf(b, " _hit%d; })", tm3);
     return 1;
   }
-  if (argc == 1 && (comp_ntype(c, argv[0]) == TY_INT || comp_ntype(c, argv[0]) == TY_RANGE)) {
+  if (span2 || (argc == 1 && (comp_ntype(c, argv[0]) == TY_INT || comp_ntype(c, argv[0]) == TY_RANGE))) {
     /* slice!(i) / slice!(range): the removed part (or nil), reassigning an
        lvalue receiver; a literal receiver just yields the removed part. */
     int to = ++g_tmp, tb2 = ++g_tmp, tl2 = ++g_tmp, tn2 = ++g_tmp, tr2 = ++g_tmp;
@@ -1417,7 +1496,9 @@ int emit_op_string_slice(Compiler *c, const BopCtx *x, Buf *b) {
     }
     else {
       buf_printf(b, " _t%d = ", tb2); emit_int_expr(c, argv[0], b);
-      buf_printf(b, "; _t%d = 1; if (_t%d < 0) _t%d += _t%d;", tl2, tb2, tb2, tn2);
+      if (span2) { buf_printf(b, "; _t%d = ", tl2); emit_int_expr(c, argv[1], b); }
+      else buf_printf(b, "; _t%d = 1", tl2);
+      buf_printf(b, "; if (_t%d < 0) _t%d += _t%d;", tb2, tb2, tn2);
     }
     /* a Range may be empty at any position up to the end (`s.slice!(3..)`
        is ""); one index removes a character, so it must be inside */
@@ -1427,14 +1508,15 @@ int emit_op_string_slice(Compiler *c, const BopCtx *x, Buf *b) {
                   " _t%d = sp_str_sub_range(_t%d, _t%d, _t%d);"
                   " SP_GC_ROOT_STR(_t%d);",
                tr2,
-               tb2, tb2, comp_ntype(c, argv[0]) == TY_RANGE ? "<=" : "<", tn2, tl2,
+               tb2, tb2, span2 || comp_ntype(c, argv[0]) == TY_RANGE ? "<=" : "<", tn2, tl2,
                tl2, tn2, tb2, tl2, tn2, tb2,
                tr2, to, tb2, tl2, tr2);
     if (sb_asgn) {
-      buf_puts(b, " ");
+      /* the head is rooted while the tail allocates */
+      buf_printf(b, " { const char *_h = sp_str_sub_range(_t%d, 0, _t%d); SP_GC_ROOT_STR(_h); ", to, tb2);
       emit_expr(c, recv, b);
-      buf_printf(b, " = sp_str_concat(sp_str_sub_range(_t%d, 0, _t%d), sp_str_sub_range(_t%d, _t%d + _t%d, _t%d - _t%d - _t%d));",
-                 to, tb2, to, tb2, tl2, tn2, tb2, tl2);
+      buf_printf(b, " = sp_str_concat(_h, sp_str_sub_range(_t%d, _t%d + _t%d, _t%d - _t%d - _t%d)); }",
+                 to, tb2, tl2, tn2, tb2, tl2);
     }
     buf_printf(b, " } _t%d; })", tr2);
     return 1;
@@ -1454,12 +1536,12 @@ int emit_op_string_slice(Compiler *c, const BopCtx *x, Buf *b) {
                th, re_lit_index(c, argv[0]), ts, tn, tn, tn, tn);
     if (sb_asgn) {
       buf_printf(b, " if (_t%d && _t%d >= 0 && _t%d <= 9) {"
-                    " sp_int _b = sp_re_caps[2 * _t%d], _e = sp_re_caps[2 * _t%d + 1]; ",
-                 th, tn, tn, tn, tn);
+                    " sp_int _b = sp_re_caps[2 * _t%d], _e = sp_re_caps[2 * _t%d + 1];"
+                    " const char *_h = sp_str_byteslice(_t%d, 0, _b); SP_GC_ROOT_STR(_h); ",
+                 th, tn, tn, tn, tn, ts);
       emit_expr(c, recv, b);
-      buf_printf(b, " = sp_str_concat(sp_str_byteslice(_t%d, 0, _b),"
-                    " sp_str_byteslice(_t%d, _e, (sp_int)sp_str_byte_len(_t%d) - _e)); }",
-                 ts, ts, ts);
+      buf_printf(b, " = sp_str_concat(_h, sp_str_byteslice(_t%d, _e, (sp_int)sp_str_byte_len(_t%d) - _e)); }",
+                 ts, ts);
     }
     buf_printf(b, " _t%d; })", th);
     return 1;
@@ -1486,10 +1568,11 @@ int emit_op_string_slice(Compiler *c, const BopCtx *x, Buf *b) {
     buf_printf(b, ", _t%d, _t%d); ", ti2, tl2);
     /* the removed part must outlive the three allocations that rebuild the receiver */
     buf_printf(b, "SP_GC_ROOT_STR(_t%d); ", tr2);
+    /* and the head while the tail allocates */
+    buf_puts(b, "const char *_h = sp_str_sub_range("); emit_expr(c, recv, b);
+    buf_printf(b, ", 0, _t%d); SP_GC_ROOT_STR(_h); ", ti2);
     emit_expr(c, recv, b);
-    buf_puts(b, " = sp_str_concat(sp_str_sub_range(");
-    emit_expr(c, recv, b);
-    buf_printf(b, ", 0, _t%d), sp_str_sub_range(", ti2);
+    buf_puts(b, " = sp_str_concat(_h, sp_str_sub_range(");
     emit_expr(c, recv, b);
     buf_printf(b, ", _t%d + _t%d, _t%d - _t%d - _t%d)); } _t%d; })",
                ti2, tl2, tn2, ti2, tl2, tr2);

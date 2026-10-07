@@ -19,6 +19,7 @@ int is_round_family(const char *n);   /* round ceil floor truncate */
 int is_push_alias(const char *n);     /* push << append */
 int is_bit_op(const char *n);         /* & | ^ */
 int is_basic_arith(const char *n);    /* + - * / (is_arith_op adds % and **) */
+int is_int_arith_op(const char *n);   /* + - * / %: an Integer's arithmetic that answers an Integer */
 int is_add_sub_mul(const char *n);    /* + - * */
 int is_int_bit_op(const char *n);     /* & | ^ << >>: Integer's bitwise operators */
 int is_object_root(const char *n);    /* Object Kernel BasicObject: the classes every object has */
@@ -118,11 +119,14 @@ int is_nonblock_io(const char *n); /* read_nonblock write_nonblock */
 
 int is_mul_or_pow(const char *n); /* * ** */
 int is_unary_sign(const char *n); /* +@ -@ */
+int is_unary_minus(const char *n); /* -@ */
 int is_casecmp_family(const char *n); /* casecmp casecmp? */
 int is_hash_key_value_each(const char *n); /* each_key each_value */
 int is_encoding_mutator(const char *n); /* encode! force_encoding */
 int is_range_end_reader(const char *n); /* end last */
 int is_raise_alias(const char *n); /* fail raise */
+int is_unary_plus(const char *n); /* +@ */
+int is_loop_name(const char *n); /* loop */
 int is_first_or_take(const char *n); /* first take */
 int is_lazy_force(const char *n); /* force to_a */
 int is_local_time(const char *n); /* getlocal localtime */
@@ -133,18 +137,25 @@ int is_succ_alias(const char *n); /* next succ */
 int is_path_reader(const char *n); /* path to_path */
 int is_io_position(const char *n); /* pos tell */
 int is_rewind_name(const char *n); /* rewind: an Enumerator's restart, or a stream's seek to its start */
+int is_io_offset_move(const char *n); /* pos= sysseek: the descriptor-control calls (boxed_desc_control_arity) whose first argument is an offset, NUM2OFFT-converted */
 int is_sort_family(const char *n); /* sort sort! */
 int is_hash_transform(const char *n); /* transform_values transform_keys */
 int is_fallback_block_call(const char *n); /* fetch delete fetch_values: the block is the fallback */
 int is_io_write(const char *n); /* syswrite write */
 int is_to_integer(const char *n); /* to_i to_int */
 int is_match_operator(const char *n); /* !~ =~ */
+int is_object_receiver_handoff(const char *n); /* to_enum enum_for instance_eval instance_exec method public_method */
 int is_div_or_mod(const char *n); /* % / */
 int is_div_or_modulo(const char *n); /* div modulo: the named floored quotient and remainder */
+int is_div_name(const char *n); /* div: the named floored quotient */
+int is_divmod_name(const char *n); /* divmod: the [quotient, modulo] pair */
+int is_modulo_name(const char *n); /* modulo: the named method, not the % operator */
+int is_mod_operator(const char *n); /* %: the operator */
 int is_add_or_mul(const char *n); /* * + */
 int is_push_operator(const char *n); /* << push */
 int is_eq_or_eql(const char *n); /* == eql? */
 int is_element_access(const char *n); /* [] []= */
+int is_index_assign(const char *n); /* []= */
 
 int is_current_method(const char *n); /* __callee__ __method__ */
 int is_hash_constructor(const char *n); /* __hash_new_default new */
@@ -205,6 +216,7 @@ int is_ivar_set(const char *n);      /* instance_variable_set */
 int is_string_append_or_prepend(const char *n); /* << concat prepend */
 
 int is_string_append(const char *n); /* << concat: appends answering the receiver */
+int is_replace_name(const char *n); /* replace: a String's, Array's or Hash's contents swapped for another's, which ignores a block */
 
 int is_string_rebind_mutator(const char *n); /* mutators needing argument-rebind snapshots */
 
@@ -228,5 +240,9 @@ enum { ARRAY_ADD_NONE, ARRAY_ADD_CONCAT, ARRAY_ADD_INSERT, ARRAY_ADD_PREPEND };
 int array_unseen_add_kind(const char *n);
 
 int is_scan_name(const char *n); /* scan: a String's match iterator */
+int is_enumerator_with(const char *n); /* with_index with_object: an enumerator link */
+int is_lazy_name(const char *n);       /* lazy */
+int is_concat_name(const char *n);     /* concat */
+int is_array_constructor(const char *recv, const char *meth); /* Array.new */
 
 #endif

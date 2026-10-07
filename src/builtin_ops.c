@@ -637,7 +637,7 @@ static const BuiltinOp bop_rows[] = {
   { TY_RATIONAL, "fdiv",        1,   1, BF_ANY, TY_FLOAT,      BOPE_TEMPLATE, "(sp_rational_to_f($r) / sp_rational_to_f($e0))", BOP_K(TY_RATIONAL) },
   { TY_RATIONAL, "fdiv",        1,   1, BF_ANY, TY_FLOAT,      BOPE_TEMPLATE, "(sp_rational_to_f($r) / $f0)", BOP_K(TY_INT) | BOP_K(TY_FLOAT) },
   { TY_RATIONAL, "fdiv",        0, 127, BF_ANY, TY_FLOAT,      BOPE_NONE },
-  { TY_RATIONAL, "div",         1,   1, BF_ANY, TY_INT,        BOPE_TEMPLATE, "((sp_int)floor(sp_rational_to_f($r) / ($e0)))", BOP_K(TY_FLOAT) },
+  { TY_RATIONAL, "div",         1,   1, BF_ANY, TY_INT,        BOPE_TEMPLATE, "sp_float_div_i(sp_rational_to_f($r), $e0)", BOP_K(TY_FLOAT) },
   { TY_RATIONAL, "div",         1,   1, BF_ANY, TY_INT,        BOPE_TEMPLATE, "sp_rational_idiv($r, $q0)", RAT_IR },
   { TY_RATIONAL, "div",         0, 127, BF_ANY, TY_INT,        BOPE_NONE },
   /* comparisons: against a Float by float value (coercing the Float to a
@@ -719,6 +719,8 @@ static const BuiltinOp bop_rows[] = {
   { TY_STR_RANGE, "min",          1,   1, BF_NONE, TY_STR_ARRAY,   BOPE_TEMPLATE, "({ sp_StrRange _t$T = $r; sp_StrArray *_t$t = sp_srange_to_a(_t$T); SP_GC_ROOT(_t$t); sp_int _t$u = $i0; if (_t$u < 0) sp_raise_cls(\"ArgumentError\", \"negative array size\"); sp_StrArray_slice(_t$t, 0, _t$u); })", 0 },  /* the n smallest or largest members (#3665) */
   { TY_STR_RANGE, "max",          1,   1, BF_NONE, TY_STR_ARRAY,   BOPE_TEMPLATE, "({ sp_StrRange _t$T = $r; sp_StrArray *_t$t = sp_srange_to_a(_t$T); SP_GC_ROOT(_t$t); sp_int _t$u = $i0; if (_t$u < 0) sp_raise_cls(\"ArgumentError\", \"negative array size\"); sp_StrArray_reverse_bang(_t$t); sp_StrArray_slice(_t$t, 0, _t$u); })", 0 },
   { TY_STR_RANGE, "exclude_end?", 0,   0, BF_ANY,  TY_BOOL,        BOPE_TEMPLATE, "({ sp_StrRange _t$T = $r; (sp_bool)_t$T.excl; })", 0 },
+  { TY_STR_RANGE, "overlap?",     1,   1, BF_NONE, TY_BOOL,        BOPE_TEMPLATE, "({ sp_StrRange _t$T = $r; sp_RbVal _a$T = $b0; sp_srange_overlap_v(_t$T, _a$T); })", 0 },  /* CRuby's range_overlap over String ends */
+  { TY_STR_RANGE, "bsearch",      0,   0, BF_REQUIRED, TY_POLY,    BOPE_TEMPLATE, "({ sp_StrRange _t$T = $r; sp_raise_cls(\"TypeError\", _t$T.first ? \"can't do binary search for String\" : \"can't do binary search for NilClass\"); sp_box_nil(); })", 0 },  /* only a numeric Range searches; CRuby names the begin's class */
   { TY_STR_RANGE, "class",        0,   0, BF_ANY,  TY_CLASS,       BOPE_TEMPLATE, "((void)($r), ((sp_Class){0, SPL(\"Range\")}))", 0 },
   { TY_STR_RANGE, "frozen?",      0,   0, BF_ANY,  TY_BOOL,        BOPE_TEMPLATE, "!($r).unfrozen", 0, 0, 0, 1 },
   { TY_STR_RANGE, "freeze",       0,   0, BF_ANY,  TY_STR_RANGE,   BOPE_RANGE_FREEZE, NULL, 0, 0, 0, 1 },
@@ -1168,8 +1170,8 @@ static const BuiltinOp bop_rows[] = {
   { TY_IO, "pread",          0, 127, BF_ANY, TY_STRING,   BOPE_NONE },
   { TY_IO, "write",          0, 127, BF_ANY, TY_INT,      BOPE_NONE },
   { TY_IO, "syswrite",       0, 127, BF_ANY, TY_INT,      BOPE_NONE },
-  { TY_IO, "seek",           1,   1, BF_ANY, TY_INT,      BOPE_TEMPLATE, "sp_File_seek($r, $i0, 0)", TY_UNKNOWN },
-  { TY_IO, "seek",           2, 127, BF_ANY, TY_INT,      BOPE_TEMPLATE, "sp_File_seek($r, $i0, $i1)", TY_UNKNOWN },
+  { TY_IO, "seek",           1,   1, BF_ANY, TY_INT,      BOPE_TEMPLATE, "sp_File_seek($r, $o0, 0)", TY_UNKNOWN },
+  { TY_IO, "seek",           2, 127, BF_ANY, TY_INT,      BOPE_TEMPLATE, "sp_File_seek($r, $o0, $i1)", TY_UNKNOWN },
   { TY_IO, "seek",           0, 127, BF_ANY, TY_INT,      BOPE_NONE },
   { TY_IO, "rewind",         0, 127, BF_ANY, TY_INT,      BOPE_TEMPLATE, "sp_File_rewind($r)", TY_UNKNOWN },
   { TY_IO, "to_i",           0,   0, BF_ANY, TY_INT,      BOPE_TEMPLATE, "sp_File_fileno($r)", TY_UNKNOWN },
@@ -1177,17 +1179,17 @@ static const BuiltinOp bop_rows[] = {
   { TY_IO, "lineno",         0, 127, BF_ANY, TY_INT,      BOPE_NONE },
   { TY_IO, "lineno=",        1,   1, BF_ANY, TY_INT,      BOPE_TEMPLATE, "sp_File_set_lineno($r, $i0)", TY_UNKNOWN },
   { TY_IO, "lineno=",        0, 127, BF_ANY, TY_INT,      BOPE_NONE },
-  { TY_IO, "pos=",           1,   1, BF_ANY, TY_INT,      BOPE_TEMPLATE, "({ sp_int _t$t = $i0; sp_File_seek($r, _t$t, 0); _t$t; })", TY_UNKNOWN },
+  { TY_IO, "pos=",           1,   1, BF_ANY, TY_INT,      BOPE_TEMPLATE, "({ sp_int _t$t = $o0; sp_File_seek($r, _t$t, 0); _t$t; })", TY_UNKNOWN },
   { TY_IO, "pos=",           0, 127, BF_ANY, TY_INT,      BOPE_NONE },
-  { TY_IO, "truncate",       1,   1, BF_ANY, TY_INT,      BOPE_TEMPLATE, "sp_File_truncate($r, $i0)", TY_UNKNOWN },
+  { TY_IO, "truncate",       1,   1, BF_ANY, TY_INT,      BOPE_TEMPLATE, "sp_File_truncate($r, $o0)", TY_UNKNOWN },
   { TY_IO, "truncate",       0, 127, BF_ANY, TY_INT,      BOPE_NONE },
   { TY_IO, "fsync",          0,   0, BF_ANY, TY_INT,      BOPE_TEMPLATE, "sp_File_fsync($r)", TY_UNKNOWN },
   { TY_IO, "fsync",          0, 127, BF_ANY, TY_INT,      BOPE_NONE },
   { TY_IO, "fdatasync",      0,   0, BF_ANY, TY_INT,      BOPE_TEMPLATE, "sp_File_fsync($r)", TY_UNKNOWN },
   { TY_IO, "fdatasync",      0, 127, BF_ANY, TY_INT,      BOPE_NONE },
   { TY_IO, "getbyte",        0, 127, BF_ANY, TY_INT,      BOPE_NONE },
-  { TY_IO, "sysseek",        1,   1, BF_ANY, TY_INT,      BOPE_TEMPLATE, "sp_File_sysseek($r, $i0, 0)", TY_UNKNOWN },
-  { TY_IO, "sysseek",        2, 127, BF_ANY, TY_INT,      BOPE_TEMPLATE, "sp_File_sysseek($r, $i0, $i1)", TY_UNKNOWN },
+  { TY_IO, "sysseek",        1,   1, BF_ANY, TY_INT,      BOPE_TEMPLATE, "sp_File_sysseek($r, $o0, 0)", TY_UNKNOWN },
+  { TY_IO, "sysseek",        2, 127, BF_ANY, TY_INT,      BOPE_TEMPLATE, "sp_File_sysseek($r, $o0, $i1)", TY_UNKNOWN },
   { TY_IO, "sysseek",        0, 127, BF_ANY, TY_INT,      BOPE_NONE },
   { TY_IO, "size",           0,   0, BF_ANY, TY_INT,      BOPE_TEMPLATE, "sp_stat_size($r)", TY_UNKNOWN },
   { TY_IO, "size",           0, 127, BF_ANY, TY_INT,      BOPE_NONE },
@@ -1530,12 +1532,12 @@ static const BuiltinOp bop_rows[] = {
   /* Float: arms with no inference row of their own */
   { TY_FLOAT, "to_s",        0, 127, BF_ANY,      TY_STRING,      BOPE_TEMPLATE, "sp_float_opt_to_s($r)" },
   { TY_FLOAT, "inspect",     0, 127, BF_ANY,      TY_STRING,      BOPE_TEMPLATE, "sp_float_opt_inspect($r)" },
-  { TY_FLOAT, "arg",         1, 127, BF_ANY,      TY_UNKNOWN,     BOPE_TEMPLATE, "(($r) < 0 ? sp_box_float(3.141592653589793) : sp_box_int(0))" },
-  { TY_FLOAT, "angle",       1, 127, BF_ANY,      TY_UNKNOWN,     BOPE_TEMPLATE, "(($r) < 0 ? sp_box_float(3.141592653589793) : sp_box_int(0))" },
-  { TY_FLOAT, "phase",       1, 127, BF_ANY,      TY_UNKNOWN,     BOPE_TEMPLATE, "(($r) < 0 ? sp_box_float(3.141592653589793) : sp_box_int(0))" },
-  { TY_FLOAT, "arg",         0,   0, BF_ANY,      TY_POLY,        BOPE_TEMPLATE, "(($r) < 0 ? sp_box_float(3.141592653589793) : sp_box_int(0))" },  /* Integer 0 or Float PI (#2316) */
-  { TY_FLOAT, "angle",       0,   0, BF_ANY,      TY_POLY,        BOPE_TEMPLATE, "(($r) < 0 ? sp_box_float(3.141592653589793) : sp_box_int(0))" },
-  { TY_FLOAT, "phase",       0,   0, BF_ANY,      TY_POLY,        BOPE_TEMPLATE, "(($r) < 0 ? sp_box_float(3.141592653589793) : sp_box_int(0))" },
+  { TY_FLOAT, "arg",         1, 127, BF_ANY,      TY_UNKNOWN,     BOPE_TEMPLATE, "sp_float_arg($r)" },
+  { TY_FLOAT, "angle",       1, 127, BF_ANY,      TY_UNKNOWN,     BOPE_TEMPLATE, "sp_float_arg($r)" },
+  { TY_FLOAT, "phase",       1, 127, BF_ANY,      TY_UNKNOWN,     BOPE_TEMPLATE, "sp_float_arg($r)" },
+  { TY_FLOAT, "arg",         0,   0, BF_ANY,      TY_POLY,        BOPE_TEMPLATE, "sp_float_arg($r)" },  /* Integer 0, Float PI or NaN (#2316) */
+  { TY_FLOAT, "angle",       0,   0, BF_ANY,      TY_POLY,        BOPE_TEMPLATE, "sp_float_arg($r)" },
+  { TY_FLOAT, "phase",       0,   0, BF_ANY,      TY_POLY,        BOPE_TEMPLATE, "sp_float_arg($r)" },
   { TY_FLOAT, "to_c",        0,   0, BF_ANY,      TY_COMPLEX,     BOPE_NONE },
   { TY_FLOAT, "i",           0, 127, BF_ANY,      TY_COMPLEX,     BOPE_TEMPLATE, "((sp_Complex){0.0, ($r), 2})" },
   { TY_FLOAT, "coerce",      1,   1, BF_ANY,      TY_FLOAT_ARRAY, BOPE_NONE },  /* [Float(other), self] */
@@ -1549,7 +1551,7 @@ static const BuiltinOp bop_rows[] = {
   { TY_FLOAT, "integer?",    0, 127, BF_ANY,      TY_BOOL,        BOPE_TEMPLATE, "((void)($r), FALSE)" },
   { TY_FLOAT, "real?",       0, 127, BF_ANY,      TY_BOOL,        BOPE_TEMPLATE, "((void)($r), TRUE)" },
   { TY_FLOAT, "nonzero?",    0, 127, BF_ANY,      TY_POLY,        BOPE_TEMPLATE, "(($r) != 0.0 ? sp_box_float($r) : sp_box_nil())" },  /* self or nil */
-  { TY_FLOAT, "div",         1,   1, BF_ANY,      TY_INT,         BOPE_TEMPLATE, "({ sp_float _t$t = ($r); sp_float _t$u = $f0; if (_t$u == 0.0) sp_raise_cls(\"ZeroDivisionError\", \"divided by 0\"); if (isinf(_t$t)) sp_raise_cls(\"FloatDomainError\", _t$t > 0 ? \"Infinity\" : \"-Infinity\"); if (isnan(_t$t)) sp_raise_cls(\"FloatDomainError\", \"NaN\"); sp_float_fit_i(floor(_t$t / _t$u)); })" },
+  { TY_FLOAT, "div",         1,   1, BF_ANY,      TY_INT,         BOPE_TEMPLATE, "sp_float_div_i($r, $f0)" },
   { TY_FLOAT, "abs2",        0, 127, BF_ANY,      TY_FLOAT,       BOPE_TEMPLATE, "(($r) * ($r))" },
   { TY_FLOAT, "real",        0, 127, BF_ANY,      TY_FLOAT,       BOPE_TEMPLATE, "($r)" },
   { TY_FLOAT, "conj",        0, 127, BF_ANY,      TY_FLOAT,       BOPE_TEMPLATE, "($r)" },
@@ -1567,7 +1569,7 @@ static const BuiltinOp bop_rows[] = {
   { TY_FLOAT, "imaginary",   0, 127, BF_ANY,      TY_INT,         BOPE_TEMPLATE, "((void)($r), (sp_int)0)" },
   { TY_FLOAT, "rect",        0, 127, BF_ANY,      TY_POLY_ARRAY,  BOPE_TEMPLATE, "({ sp_PolyArray *_t$t = sp_PolyArray_new(); SP_GC_ROOT(_t$t); sp_PolyArray_push(_t$t, sp_box_float($r)); sp_PolyArray_push(_t$t, sp_box_int(0)); _t$t; })" },
   { TY_FLOAT, "rectangular", 0, 127, BF_ANY,      TY_POLY_ARRAY,  BOPE_TEMPLATE, "({ sp_PolyArray *_t$t = sp_PolyArray_new(); SP_GC_ROOT(_t$t); sp_PolyArray_push(_t$t, sp_box_float($r)); sp_PolyArray_push(_t$t, sp_box_int(0)); _t$t; })" },
-  { TY_FLOAT, "polar",       0, 127, BF_ANY,      TY_POLY_ARRAY,  BOPE_TEMPLATE, "({ sp_PolyArray *_t$t = sp_PolyArray_new(); SP_GC_ROOT(_t$t); sp_PolyArray_push(_t$t, sp_box_float(fabs($r))); sp_PolyArray_push(_t$t, ($r) < 0 ? sp_box_float(3.141592653589793) : sp_box_int(0)); _t$t; })" },
+  { TY_FLOAT, "polar",       0, 127, BF_ANY,      TY_POLY_ARRAY,  BOPE_TEMPLATE, "({ sp_PolyArray *_t$t = sp_PolyArray_new(); SP_GC_ROOT(_t$t); sp_PolyArray_push(_t$t, sp_box_float(fabs($r))); sp_PolyArray_push(_t$t, sp_float_arg($r)); _t$t; })" },
   { TY_FLOAT, "numerator",   0,   0, BF_ANY,      TY_POLY,        BOPE_TEMPLATE, "sp_float_to_rational($r).num" },  /* an Integer, or the non-finite Float (#3011) */
   { TY_FLOAT, "denominator", 0,   0, BF_ANY,      TY_INT,         BOPE_TEMPLATE, "sp_float_to_rational($r).den" },
   { TY_FLOAT, "to_r",        0,   0, BF_ANY,      TY_RATIONAL,    BOPE_TEMPLATE, "sp_float_to_rational($r)" },
@@ -2629,8 +2631,8 @@ static const BopShareRow bop_share_rows[] = {
   { BOP_ANY_ARRAY, "*",         BSH_SUB },
   { BOP_ANY_ARRAY, "compact",   BSH_SUB },
   { BOP_ANY_ARRAY, "compact!",  BSH_SUB },
-  { BOP_ANY_ARRAY, "flatten",   BSH_SUB },
-  { BOP_ANY_ARRAY, "flatten!",  BSH_SUB },
+  { BOP_ANY_ARRAY, "flatten",   BSH_FLATTEN },
+  { BOP_ANY_ARRAY, "flatten!",  BSH_FLATTEN },
   { BOP_ANY_ARRAY, "reverse",   BSH_SUB },
   { BOP_ANY_ARRAY, "reverse!",  BSH_SUB },
   { BOP_ANY_ARRAY, "rotate",    BSH_SUB },
@@ -2675,6 +2677,8 @@ static const BopShareRow bop_share_rows[] = {
      values are elements; keys and key queries answer fresh Strings. */
   { BOP_ANY_HASH, "[]",         BSH_ELEM },
   { BOP_ANY_HASH, "dig",        BSH_ELEM },
+  /* the default value, or what the default proc answers for the key */
+  { BOP_ANY_HASH, "default",    BSH_ELEM },
   { BOP_ANY_HASH, "fetch",      BSH_FETCH },
   { BOP_ANY_HASH, "delete",     BSH_ELEM },
   { BOP_ANY_HASH, "shift",      BSH_SUB },
@@ -2745,6 +2749,15 @@ static const BopShareRow bop_share_rows[] = {
   { TY_REGEX,       "*", BSH_PURE },
   { TY_MATCHDATA,   "*", BSH_PURE },
   { TY_RANDOM,      "*", BSH_PURE },
+
+  /* An OpenStruct's fields are its elements; a field's reader and writer
+     (`os.name`, `os.name = s`) are read as `[]` and `[]=` (analyze_share.c
+     sh_ostruct_call). each_pair has no row: codegen refuses it. */
+  { TY_OPENSTRUCT, "[]",          BSH_ELEM },
+  { TY_OPENSTRUCT, "dig",         BSH_ELEM },
+  { TY_OPENSTRUCT, "delete_field", BSH_ELEM },
+  { TY_OPENSTRUCT, "[]=",         BSH_STORE_LAST },
+  { TY_OPENSTRUCT, "to_h",        BSH_SUB },
 
   /* Kernel's functions. A name with no row (raise, throw, define_method,
      lambda, ...) is not followed. */
@@ -2829,6 +2842,14 @@ static const BopShareRow bop_share_rows[] = {
   { BOP_ANY_RECV, "module_exec", BSH_EXEC },
   { BOP_ANY_RECV, "module_eval", BSH_EXEC },
   { BOP_ANY_RECV, "new",         BSH_NEW },
+
+  /* A builtin class's constructor keeps what it is handed in the container
+     it answers. (An exception keeps its message, which #message hands back
+     as what the analysis does not follow, as for a user exception class.) */
+  { BOP_CLASS_NEW, "Array",      BSH_NEW_FILL },
+  { BOP_CLASS_NEW, "Hash",       BSH_NEW_DEFAULT },
+  { BOP_CLASS_NEW, "Enumerator", BSH_NEW_YIELDER },
+  { BOP_CLASS_NEW, "OpenStruct", BSH_NEW_FIELDS },
 
   /* a proc's, a lambda's or a Method's invocations */
   { BOP_CALLABLE, "call",        BSH_CALL },
@@ -2965,7 +2986,7 @@ static const IterRow iter_rows[] = {
   { BOP_ANY_ARRAY, "reduce",          0, 0, 2, { YS_MEMO, YS_ELEM }, IA_MEMO, IRF_GAP_SHAPE | IRF_GAP_FWD },
   { BOP_ANY_ARRAY, "each_with_object", 1, 1, 2, { YS_ELEM, YS_MEMO }, IA_MEMO, IRF_GAP_FWD },
   { BOP_ANY_ARRAY, "each_index",      0, 0, 1, { YS_INDEX }, IA_RECV, IRF_GAP_FWD | IRF_SHAPE_BOXED },
-  { BOP_ANY_ARRAY, "fill",            0, 2, 1, { YS_INDEX }, IA_RECV, IRF_GAP_FWD | IRF_SHAPE_BOXED },
+  { BOP_ANY_ARRAY, "fill",            0, 2, 1, { YS_INDEX }, IA_BLOCKVALS_INPLACE, IRF_GAP_FWD | IRF_SHAPE_BOXED },
   { BOP_ANY_ARRAY, "cycle",           0, 1, 1, { YS_ELEM }, IA_OTHER, IRF_GAP_SHAPE | IRF_GAP_FWD },
   { BOP_ANY_ARRAY, "min",             0, 0, 2, { YS_ELEM, YS_ELEM }, IA_ONE, IRF_GAP_SHAPE | IRF_GAP_FWD },
   { BOP_ANY_ARRAY, "min",             1, 1, 2, { YS_ELEM, YS_ELEM }, IA_SOME, IRF_GAP_SHAPE | IRF_GAP_FWD },
@@ -3166,6 +3187,20 @@ static int iter_row_share(const IterRow *r) {
   case IA_ONE:   return BSH_ITER_FIND;
   case IA_OTHER: return BSH_PURE;
   default:       return 0;
+  }
+}
+
+int iter_keeps_no_block_value(TyKind fam, const char *name, int argc) {
+  const IterRow *r = name ? iter_row(fam, name, argc, 0) : NULL;
+  if (!r) return 0;
+  switch (r->answer) {
+  case IA_RECV: case IA_SOME: case IA_ONE: case IA_PARTS:
+    return 1;
+  case IA_MEMO:
+    /* each_with_object's memo is its argument; inject's is the block's value */
+    return r->nyield >= 1 && r->yield[0] != YS_MEMO;
+  default:
+    return 0;
   }
 }
 

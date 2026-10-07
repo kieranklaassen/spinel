@@ -2992,6 +2992,46 @@ static int alias_target_defined_before(Compiler *c, ClassInfo *cls, int cid, con
   return 0;
 }
 
+/* The last node id under `n`: node ids number the tree depth first, so a
+   class body is the contiguous range (n, last]. Cached per node table. */
+static const NodeTable *are_nt = NULL;
+static int *are_last = NULL;
+static int are_n = 0;
+static int are_subtree_last(const NodeTable *nt, int n) {
+  if (n < 0) return n;
+  if (are_nt != nt || are_n != nt->count) {
+    free(are_last);
+    are_last = malloc(sizeof(int) * (size_t)(nt->count > 0 ? nt->count : 1));
+    if (!are_last) { are_nt = NULL; are_n = 0; return n; }
+    for (int i = 0; i < nt->count; i++) are_last[i] = -1;
+    are_nt = nt; are_n = nt->count;
+  }
+  if (n < are_n && are_last[n] >= 0) return are_last[n];
+  int last = n;
+  int nr = nt_num_refs(nt, n);
+  for (int i = 0; i < nr; i++) { int k = are_subtree_last(nt, nt_ref_at(nt, n, i)); if (k > last) last = k; }
+  int na = nt_num_arrs(nt, n);
+  for (int i = 0; i < na; i++) {
+    int m = 0; const int *ids = nt_arr_at(nt, n, i, &m);
+    for (int j = 0; j < m; j++) { int k = are_subtree_last(nt, ids[j]); if (k > last) last = k; }
+  }
+  if (n < are_n) are_last[n] = last;
+  return last;
+}
+/* The class or module body node `n` stands in, innermost first, or -1 at the
+   top level. */
+static int are_enclosing_class(Compiler *c, int n) {
+  const NodeTable *nt = c->nt;
+  int best = -1;
+  static const NodeKind HK[] = { NK_ClassNode, NK_ModuleNode };
+  for (int h = 0; h < 2; h++)
+    for (int m = comp_kind_first(c, HK[h]); m >= 0; m = comp_kind_next(c, m)) {
+      if (nt_kind(nt, m) != HK[h] || m >= n || m <= best) continue;
+      if (n <= are_subtree_last(nt, m)) best = m;
+    }
+  return best;
+}
+
 /* An alias binds for the whole program, because the method tables are static.
    Class-body code that runs between a `def a` and a later `alias a b` meets the
    def in CRuby and would meet the alias here, silently: a call of `a` made in the
@@ -3014,6 +3054,13 @@ static void alias_refuse_early_call(Compiler *c, ClassInfo *cls, const char *nw,
     if (nt_kind(nt, n) != NK_CallNode || n <= defn || n >= alias_node) continue;
     const char *nm = nt_str(nt, n, "name");
     if (!nm || !sp_streq(nm, nw) || c->nscope[n] != c->nscope[alias_node]) continue;
+    /* class-body code of this class (any reopening of it): a call of the
+       same name in another class's body, or at the top level of a flattened
+       program, is no call of this class's method */
+    int ec = are_enclosing_class(c, n);
+    int ecp = ec >= 0 ? nt_ref(nt, ec, "constant_path") : -1;
+    const char *ecn = ecp >= 0 ? nt_str(nt, ecp, "name") : NULL;
+    if (!ecn || comp_class_index(c, ecn) != cid) continue;
     char msg[300];
     snprintf(msg, sizeof msg, "`%s` is called in the class body before an alias rebinds it: an alias binds for the "
              "whole program here, so the call would run the aliased body, not the `def %s` Ruby runs at that point. "
@@ -7118,6 +7165,120 @@ int poly_ivar_set_class(Compiler *c, int k) {
    builtin value (a literal, `Object.new`) adds no class. Only the classes
    marked can receive the ivar, so only they lay its slot out; for an
    unbounded receiver every class that can take it does. */
+/* poly_ivar_set_reaches' facts (c->pivs): its answers per call (found
+   through a node-indexed slot), kept until the tree or the class table
+   grows, and the name indexes its walk
+   reads, rebuilt when the tree changes. The walk asked each question by
+   scanning every node of a kind (every call with a block for a block
+   parameter, every Symbol and String for a method's name, every write at
+   block depth for a local), once per boxed receiver it traced. Each index
+   lists, by name, in node order, the nodes of one question:
+   PX_BLOCK_PARAM a literal block's required parameter (aux: the call it
+   is the block of), PX_SYMBOL a Symbol or String literal by its text,
+   PX_BLOCK_WRITE a local write inside a block, PX_SUPER a `super` by its
+   method's name. A node is in one list at most, once, so one `next`
+   serves. */
+enum { PX_BLOCK_PARAM, PX_SYMBOL, PX_BLOCK_WRITE, PX_SUPER, PX_N };
+typedef struct PivsFacts {
+  struct { int ok; char *set; int *cls, ncls; } *memo;
+  int *memo_at;             /* per node: its call's memo entry + 1, or 0 */
+  int nmemo, cmemo, memo_n, memo_count;
+  unsigned memo_ver;
+  const NodeTable *ix_nt;
+  unsigned ix_ver;
+  int ix_count;
+  ANameHash names[PX_N];
+  int *first[PX_N], *last[PX_N], cap[PX_N];
+  int *next, *aux;
+} PivsFacts;
+static void pivs_ix_clear(PivsFacts *f) {
+  for (int q = 0; q < PX_N; q++) {
+    anh_free(&f->names[q]); memset(&f->names[q], 0, sizeof f->names[q]);
+    free(f->first[q]); free(f->last[q]);
+    f->first[q] = f->last[q] = NULL; f->cap[q] = 0;
+  }
+  free(f->next); free(f->aux);
+  f->next = f->aux = NULL;
+}
+void pivs_facts_free(Compiler *c) {
+  PivsFacts *f = c->pivs;
+  if (!f) return;
+  for (int i = 0; i < f->nmemo; i++) { free(f->memo[i].set); free(f->memo[i].cls); }
+  free(f->memo); free(f->memo_at);
+  pivs_ix_clear(f);
+  free(f);
+  c->pivs = NULL;
+}
+static PivsFacts *pivs_facts(Compiler *c) {
+  if (!c->pivs) {
+    c->pivs = calloc(1, sizeof *c->pivs);
+    if (!c->pivs) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+    c->pivs->memo_n = c->pivs->memo_count = c->pivs->ix_count = -1;
+  }
+  return c->pivs;
+}
+static void pivs_ix_add(PivsFacts *f, int q, const char *nm, int node, int aux) {
+  /* a node is listed once, with the first call that lists it: one block
+     can be several calls' (a computed `send`'s arms share the send's), and
+     the scan met the first of them in node order */
+  if (!nm || f->next[node] != -2) return;
+  int k = anh_find(&f->names[q], nm);
+  if (k < 0) {
+    anh_add(&f->names[q], nm); k = f->names[q].n - 1;
+    if (k >= f->cap[q]) {
+      f->cap[q] = f->cap[q] ? f->cap[q] * 2 : 64;
+      f->first[q] = realloc(f->first[q], sizeof(int) * (size_t)f->cap[q]);
+      f->last[q] = realloc(f->last[q], sizeof(int) * (size_t)f->cap[q]);
+      if (!f->first[q] || !f->last[q]) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+    }
+    f->first[q][k] = -1;
+  }
+  f->next[node] = -1; f->aux[node] = aux;
+  if (f->first[q][k] < 0) f->first[q][k] = node;
+  else f->next[f->last[q][k]] = node;
+  f->last[q][k] = node;
+}
+/* The first node of list q named nm (then f->next), in node order */
+static int pivs_ix_first(Compiler *c, int q, const char *nm) {
+  const NodeTable *nt = c->nt;
+  PivsFacts *f = pivs_facts(c);
+  if (f->ix_nt != nt || f->ix_ver != nt->version || f->ix_count != nt->count) {
+    pivs_ix_clear(f);
+    f->ix_nt = nt; f->ix_ver = nt->version; f->ix_count = nt->count;
+    f->next = malloc(sizeof(int) * (size_t)(nt->count > 0 ? nt->count : 1));
+    f->aux = malloc(sizeof(int) * (size_t)(nt->count > 0 ? nt->count : 1));
+    if (!f->next || !f->aux) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+    for (int n = 0; n < nt->count; n++) f->next[n] = -2;   /* not listed */
+    for (int n = 0; n < nt->count; n++) {
+      switch (nt_kind(nt, n)) {
+        case NK_CallNode: {
+          int b = nt_ref(nt, n, "block");
+          int bp = b >= 0 && nt_kind(nt, b) == NK_BlockNode ? nt_ref(nt, b, "parameters") : -1;
+          int pn = bp >= 0 ? nt_ref(nt, bp, "parameters") : -1;
+          int rn = 0; const int *rq = pn >= 0 ? nt_arr(nt, pn, "requireds", &rn) : NULL;
+          for (int i = 0; i < rn; i++)
+            if (nt_kind(nt, rq[i]) == NK_RequiredParameterNode)
+              pivs_ix_add(f, PX_BLOCK_PARAM, nt_str(nt, rq[i], "name"), rq[i], n);
+          break;
+        }
+        case NK_SymbolNode: pivs_ix_add(f, PX_SYMBOL, nt_str(nt, n, "value"), n, -1); break;
+        case NK_StringNode: pivs_ix_add(f, PX_SYMBOL, nt_str(nt, n, "content"), n, -1); break;
+        case NK_LocalVariableWriteNode: case NK_LocalVariableTargetNode: case NK_LocalVariableOrWriteNode:
+        case NK_LocalVariableAndWriteNode: case NK_LocalVariableOperatorWriteNode:
+          if (nt_int(nt, n, "depth", 0) > 0) pivs_ix_add(f, PX_BLOCK_WRITE, nt_str(nt, n, "name"), n, -1);
+          break;
+        case NK_SuperNode: case NK_ForwardingSuperNode: {
+          Scope *us = comp_scope_of(c, n);
+          if (us) pivs_ix_add(f, PX_SUPER, us->name, n, -1);
+          break;
+        }
+        default: break;
+      }
+    }
+  }
+  int k = nm ? anh_find(&f->names[q], nm) : -1;
+  return k >= 0 ? f->first[q][k] : -1;
+}
 static int pivs_value(Compiler *c, int v, char *set, int depth);
 static int pivs_elems(Compiler *c, int arr, char *set, int depth);
 /* Does `n` read local `vn`, or call one of the methods answering their
@@ -7150,12 +7311,8 @@ static int pivs_local_writes_ok(Compiler *c, int si, const char *vn) {
   }
   if (nw == 0) return 0;
   /* a block's write of it sits in the block's scope */
-  for (int k = 0; k < 5; k++) {
-    static const NodeKind K[] = { NK_LocalVariableWriteNode, NK_LocalVariableTargetNode, NK_LocalVariableOrWriteNode,
-                                  NK_LocalVariableAndWriteNode, NK_LocalVariableOperatorWriteNode };
-    NT_FOREACH_KIND(nt, K[k], w)
-      if (nt_int(nt, w, "depth", 0) > 0 && sp_streq(nt_str(nt, w, "name"), vn)) return 0;
-  }
+  for (int w = pivs_ix_first(c, PX_BLOCK_WRITE, vn); w >= 0; w = c->pivs->next[w])
+    if (nt_int(nt, w, "depth", 0) > 0 && sp_streq(nt_str(nt, w, "name"), vn)) return 0;
   return 1;
 }
 /* Positional parameter `pn` of method scope `s` (a required one or an
@@ -7181,11 +7338,10 @@ static int pivs_param(Compiler *c, Scope *s, const char *pn, char *set, int dept
   for (const char *q = mn; *q; q++)
     if (!(isalnum((unsigned char)*q) || *q == '_' || ((*q == '?' || *q == '!') && !q[1]))) return 0;
   /* `super` in a method of this name passes its own arguments on */
-  for (int k = 0; k < 2; k++)
-    NT_FOREACH_KIND(nt, k ? NK_ForwardingSuperNode : NK_SuperNode, u) {
-      Scope *us = comp_scope_of(c, u);
-      if (us && us->name && sp_streq(us->name, mn)) return 0;
-    }
+  for (int u = pivs_ix_first(c, PX_SUPER, mn); u >= 0; u = c->pivs->next[u]) {
+    Scope *us = comp_scope_of(c, u);
+    if (us && us->name && sp_streq(us->name, mn)) return 0;
+  }
   int ps = nt_ref(nt, s->def_node, "parameters");
   int rn = 0, on = 0;
   const int *rq = ps >= 0 ? nt_arr(nt, ps, "requireds", &rn) : NULL;
@@ -7203,13 +7359,11 @@ static int pivs_param(Compiler *c, Scope *s, const char *pn, char *set, int dept
   int si = (int)(s - c->scopes);
   for (int w = comp_lvw_first_sc(c, si, pn); w >= 0; w = comp_lvw_next_sc(c, w))
     if (c->nscope[w] == si && sp_streq(nt_str(nt, w, "name"), pn)) return 0;
-  NT_FOREACH_KIND(nt, NK_SymbolNode, y)
-    if (sp_streq(nt_str(nt, y, "value"), mn)) return 0;
-  NT_FOREACH_KIND(nt, NK_StringNode, y)
-    if (sp_streq(nt_str(nt, y, "content"), mn)) return 0;
+  for (int y = pivs_ix_first(c, PX_SYMBOL, mn); y >= 0; y = c->pivs->next[y])
+    if (sp_streq(nt_str(nt, y, nt_kind(nt, y) == NK_SymbolNode ? "value" : "content"), mn)) return 0;
   int ncalls = 0;
-  NT_FOREACH_KIND(nt, NK_CallNode, u) {
-    if (!sp_streq(nt_str(nt, u, "name"), mn)) continue;
+  for (int u = an_calls_named_first(c, mn); u >= 0; u = an_calls_named_next(u)) {
+    if (nt_kind(nt, u) != NK_CallNode || !sp_streq(nt_str(nt, u, "name"), mn)) continue;
     int a = nt_ref(nt, u, "arguments"), ac = 0;
     const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
     for (int k = 0; k < ac && k <= i; k++) {
@@ -7236,7 +7390,11 @@ static int pivs_local(Compiler *c, int v, char *set, int depth, int elems) {
                                     "each_with_object", "find", "detect", "flat_map", "filter_map", "any?",
                                     "all?", "none?", "sort_by", "min_by", "max_by", "group_by", "count",
                                     "sum", "find_index", NULL };
-  NT_FOREACH_KIND(nt, NK_CallNode, u) {
+  int lastu = -1;
+  for (int q = pivs_ix_first(c, PX_BLOCK_PARAM, vn); q >= 0; q = c->pivs->next[q]) {
+    int u = c->pivs->aux[q];
+    if (u == lastu) continue;   /* the call's first parameter of the name decides */
+    lastu = u;
     int b = nt_ref(nt, u, "block");
     if (b < 0 || nt_kind(nt, b) != NK_BlockNode) continue;
     int bp = nt_ref(nt, b, "parameters");
@@ -7406,6 +7564,13 @@ static int pivs_value(Compiler *c, int v, char *set, int depth) {
 static int pivs_elems(Compiler *c, int arr, char *set, int depth) {
   const NodeTable *nt = c->nt;
   if (arr < 0 || depth > 32) return 0;
+  /* a Hash literal's `[]` answers one of its values (or nil) */
+  if (nt_kind(nt, arr) == NK_HashNode) {
+    int n = 0; const int *el = nt_arr(nt, arr, "elements", &n);
+    for (int i = 0; i < n; i++)
+      if (nt_kind(nt, el[i]) != NK_AssocNode || !pivs_value(c, nt_ref(nt, el[i], "value"), set, depth + 1)) return 0;
+    return 1;
+  }
   if (nt_kind(nt, arr) == NK_ArrayNode) {
     int n = 0; const int *el = nt_arr(nt, arr, "elements", &n);
     for (int i = 0; i < n; i++)
@@ -7416,33 +7581,62 @@ static int pivs_elems(Compiler *c, int arr, char *set, int depth) {
   int br = pivs_branches(c, arr, set, depth, 1);
   return br > 0;
 }
-/* Can the boxed receiver of instance_variable_set call `call` be an
-   instance of class k (one poly_ivar_set_class takes)? Memoized per call,
-   until the tree or the class table grows. */
-int poly_ivar_set_reaches(Compiler *c, int call, int k) {
-  static struct { int call; int ok; char *set; } *memo = NULL;
-  static int nmemo = 0, cmemo = 0, memo_n = -1, memo_count = -1;
-  if (memo_n != c->nclasses || memo_count != c->nt->count) {
-    for (int i = 0; i < nmemo; i++) free(memo[i].set);
-    nmemo = 0; memo_n = c->nclasses; memo_count = c->nt->count;
+/* The classes the boxed receiver of call `call` can be an instance of
+   (pivs_value): marked in a set, and listed (*cls, *n). NULL when the
+   analysis cannot bound them. Memoized per call, found through a
+   node-indexed slot, until the tree or the class table changes. */
+static const char *pivs_call_set(Compiler *c, int call, const int **cls, int *n) {
+  PivsFacts *f = pivs_facts(c);
+  if (f->memo_n != c->nclasses || f->memo_count != c->nt->count ||
+      f->memo_ver != c->nt->version) {
+    for (int i = 0; i < f->nmemo; i++) { free(f->memo[i].set); free(f->memo[i].cls); }
+    free(f->memo_at);
+    f->nmemo = 0; f->memo_n = c->nclasses; f->memo_count = c->nt->count;
+    f->memo_ver = c->nt->version;
+    f->memo_at = calloc((size_t)(f->memo_count > 0 ? f->memo_count : 1), sizeof *f->memo_at);
+    if (!f->memo_at) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
   }
-  int m = -1;
-  for (int i = 0; i < nmemo && m < 0; i++) if (memo[i].call == call) m = i;
+  if (cls) { *cls = NULL; *n = 0; }
+  if (call < 0 || call >= f->memo_count) return NULL;
+  int m = f->memo_at[call] - 1;
   if (m < 0) {
-    if (nmemo == cmemo) {
-      cmemo = cmemo ? cmemo * 2 : 16;
-      void *nm = realloc(memo, sizeof *memo * (size_t)cmemo);
+    if (f->nmemo == f->cmemo) {
+      f->cmemo = f->cmemo ? f->cmemo * 2 : 16;
+      void *nm = realloc(f->memo, sizeof *f->memo * (size_t)f->cmemo);
       if (!nm) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
-      memo = nm;
+      f->memo = nm;
     }
-    m = nmemo++;
-    memo[m].call = call;
-    memo[m].set = (char *)calloc((size_t)(c->nclasses > 0 ? c->nclasses : 1), 1);
-    if (!memo[m].set) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
-    memo[m].ok = pivs_value(c, nt_ref(c->nt, call, "receiver"), memo[m].set, 0);
+    m = f->nmemo++;
+    f->memo_at[call] = m + 1;
+    f->memo[m].set = (char *)calloc((size_t)(c->nclasses > 0 ? c->nclasses : 1), 1);
+    if (!f->memo[m].set) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+    f->memo[m].ok = pivs_value(c, nt_ref(c->nt, call, "receiver"), f->memo[m].set, 0);
+    f->memo[m].cls = NULL; f->memo[m].ncls = 0;
+    if (f->memo[m].ok) {
+      int nk = 0;
+      for (int k = 0; k < c->nclasses; k++) nk += f->memo[m].set[k] != 0;
+      f->memo[m].cls = malloc(sizeof(int) * (size_t)(nk > 0 ? nk : 1));
+      if (!f->memo[m].cls) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+      for (int k = 0; k < c->nclasses; k++) if (f->memo[m].set[k]) f->memo[m].cls[f->memo[m].ncls++] = k;
+    }
   }
+  if (!f->memo[m].ok) return NULL;
+  if (cls) { *cls = f->memo[m].cls; *n = f->memo[m].ncls; }
+  return f->memo[m].set;
+}
+/* Can the boxed receiver of instance_variable_set call `call` be an
+   instance of class k (one poly_ivar_set_class takes)? Every class can
+   when the analysis cannot bound them. */
+int poly_ivar_set_reaches(Compiler *c, int call, int k) {
+  if (call < 0 || call >= c->nt->count) return 0;   /* no receiver: no class */
+  const char *set = pivs_call_set(c, call, NULL, NULL);
   if (k < 0 || k >= c->nclasses) return 0;
-  return memo[m].ok ? memo[m].set[k] : 1;
+  return set ? set[k] : 1;
+}
+/* See analyze_internal.h. */
+const int *poly_recv_classes(Compiler *c, int call, int *n) {
+  const int *cls;
+  return pivs_call_set(c, call, &cls, n) ? cls : NULL;
 }
 static void nil_write_note(NilWrites *w, int cls, const char *nm) {
   if (cls < 0 || !nm) return;
@@ -7667,10 +7861,168 @@ static int infer_ivar_set_call(Compiler *c, int id, NilWrites *writes) {
   return changed;
 }
 
+/* See analyze_internal.h. */
+int struct_aset_receiver(Compiler *c, int id, int *cls) {
+  const NodeTable *nt = c->nt;
+  int recv = nt_ref(nt, id, "receiver"), args = nt_ref(nt, id, "arguments"), an = 0;
+  *cls = -1;
+  if (args >= 0) nt_arr(nt, args, "arguments", &an);
+  if (recv < 0 || an != 2 || nt_ref(nt, id, "block") >= 0 || !sp_streq(nt_str(nt, id, "name"), "[]=")) return 0;
+  TyKind rt = infer_type(c, recv);
+  if (ty_is_object(rt)) { *cls = ty_object_class(rt); return 1; }
+  return rt == TY_POLY ? 2 : 0;
+}
+/* Is class k's `[]=` the Struct's own: a Struct, not a Data, with no `[]=`
+   of the program's (cplan_struct_aset's)? */
+static int struct_aset_class(Compiler *c, int k) {
+  ClassInfo *ci = &c->classes[k];
+  return ci->is_struct && !ci->is_data && !ci->is_native_class && ci->nmembers > 0 &&
+         comp_resolve_member(c, k, "[]=", 0, NULL, NULL) == SP_MEMBER_NONE;
+}
+/* See analyze_internal.h. */
+int struct_aset_may_reach(Compiler *c, int id) {
+  int recv = nt_ref(c->nt, id, "receiver");
+  if (recv < 0) return 0;
+  TyKind rt = infer_type(c, recv);
+  if (ty_is_object(rt)) return struct_aset_class(c, ty_object_class(rt));
+  if (rt != TY_POLY) return 0;
+  int n = 0;
+  const int *ks = poly_recv_classes(c, id, &n);
+  for (int i = 0; i < (ks ? n : c->nclasses); i++)
+    if (struct_aset_class(c, ks ? ks[i] : i)) return 1;
+  return 0;
+}
+int struct_aset_members(Compiler *c, int id, int k, int *lo, int *hi) {
+  const NodeTable *nt = c->nt;
+  ClassInfo *ci = &c->classes[k];
+  if (!struct_aset_class(c, k)) return 0;
+  int args = nt_ref(nt, id, "arguments"), an = 0;
+  const int *av = nt_arr(nt, args, "arguments", &an);
+  NodeKind kk = nt_kind(nt, av[0]);
+  if (kk == NK_SymbolNode || kk == NK_StringNode || kk == NK_IntegerNode) {
+    *lo = struct_member_idx(c, ci, av[0]);
+    *hi = *lo + 1;
+    return *lo >= 0;
+  }
+  *lo = 0; *hi = ci->nmembers;
+  return ci->nmembers > 0;
+}
+
+/* infer_ivar_types' facts for the Struct `[]=` stores of one sweep, built on
+   the first: the Structs, and the member types they have, so a store that
+   types none of them is passed over without asking which classes its box
+   can hold. */
+typedef struct { int built; TyKind *mty; int nmty, cmty; int *structs, ns; } StructAsetIx;
+static void struct_aset_ix_build(Compiler *c, StructAsetIx *x) {
+  x->built = 1;
+  x->structs = malloc(sizeof(int) * (size_t)(c->nclasses > 0 ? c->nclasses : 1));
+  if (!x->structs) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+  for (int k = 0; k < c->nclasses; k++) {
+    ClassInfo *ci = &c->classes[k];
+    if (!ci->is_struct || ci->is_data) continue;
+    x->structs[x->ns++] = k;
+    for (int m = 0; m < ci->nmembers; m++) {
+      int seen = 0;
+      for (int i = 0; i < x->nmty && !seen; i++) seen = x->mty[i] == ci->ivar_types[m];
+      if (seen) continue;
+      if (x->nmty == x->cmty) {
+        x->cmty = x->cmty ? x->cmty * 2 : 16;
+        TyKind *g = realloc(x->mty, sizeof *g * (size_t)x->cmty);
+        if (!g) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+        x->mty = g;
+      }
+      x->mty[x->nmty++] = ci->ivar_types[m];
+    }
+  }
+}
+
+/* `o[k] = v` on a Struct: the member k names takes v, as `o.x = v` types it.
+   A literal member name or offset on a receiver typed as the Struct was
+   rewritten to the member's writer, which the attribute-writer merge below
+   types; the other shapes came here untyped, and the store unboxed v as the
+   member's construction type (an Integer read as a String pointer, a String's
+   address printed as the Integer): a key no literal names, which may be any
+   member, and a boxed receiver, which may be any Struct its box can hold
+   (poly_recv_classes), or any Struct at all when the analysis cannot tell.
+   A String member is not typed by these stores (see below). Under
+   --share-strings a String the rule holds as a handle is stored as the
+   handle (share_struct_aset_handles): a member of another type is boxed to
+   hold it. */
+static int infer_struct_aset_call(Compiler *c, int id, NilWrites *writes, StructAsetIx *x) {
+  const NodeTable *nt = c->nt;
+  int one, how = struct_aset_receiver(c, id, &one);
+  if (!how) return 0;
+  int v = nt_arr(nt, nt_ref(nt, id, "arguments"), "arguments", NULL)[1];
+  TyKind vt = infer_type(c, v);
+  int handle = c->share_strings && an_arg_is_shared_handle(c, an_unparen(nt, v));
+  if (handle) vt = TY_POLY;
+  if (vt == TY_UNKNOWN) return 0;
+  /* Without --share-strings a boxed member holds a copy of the String
+     stored, and a String another name holds (anything but a fresh literal)
+     would then lose the changes either name makes: such a store types no
+     member, and a member it does not fit refuses it where it runs (a
+     TypeError, emit_struct_member_value). A fresh String has no other name. */
+  if (!c->share_strings && (vt == TY_STRING || vt == TY_STRBUF)) {
+    int u = an_unparen(nt, v);
+    NodeKind uk = nt_kind(nt, u);
+    int fresh = uk == NK_StringNode || uk == NK_InterpolatedStringNode || uk == NK_XStringNode ||
+                (uk == NK_CallNode && sp_streq(nt_str(nt, u, "name"), "+@") &&
+                 nt_kind(nt, nt_ref(nt, u, "receiver")) == NK_StringNode);
+    if (!fresh) return 0;
+  }
+  const int *ks = &one;
+  int nk = 1, unknown = 0;
+  if (how == 2) {
+    /* a store that would type no member asks nothing more */
+    if (!x->built) struct_aset_ix_build(c, x);
+    int any = 0;
+    for (int i = 0; i < x->nmty && !any; i++)
+      any = vt == TY_NIL || ty_unify(x->mty[i], empty_container_write(c, v, vt, x->mty[i])) != x->mty[i];
+    if (!any) return 0;
+    /* a box whose classes are unknown may be any Struct */
+    if (!(ks = poly_recv_classes(c, id, &nk))) { ks = x->structs; nk = x->ns; unknown = 1; }
+  }
+  int changed = 0;
+  for (int i = 0; i < nk; i++) {
+    int k = ks[i], lo, hi;
+    if (!struct_aset_members(c, id, k, &lo, &hi)) continue;
+    ClassInfo *ci = &c->classes[k];
+    for (int m = lo; m < hi; m++) {
+      if (class_ivar_pinned(ci, ci->ivars[m])) continue;
+      /* Without --share-strings a boxed String member holds a copy of what
+         its construction and writers store, which loses the changes the
+         String's other names make (`S.new(s)` beside `s << x`, `m.x << y`),
+         and none of these stores is proven to reach it: a box may hold
+         another value, a key no literal names another member, and either
+         may never run. So a String member keeps its type there: a value
+         that does not fit it is refused where the store runs, a TypeError
+         (emit_struct_member_value). Under the flag a boxed member the rule
+         shares holds each String stored into it as its handle
+         (share_lift_poly_ivar_stores), so it boxes. Any other member
+         carries no identity a box loses, so it takes what the store may
+         put there. */
+      TyKind mt = ci->ivar_types[m];
+      if ((mt == TY_STRING || mt == TY_STRBUF) && !c->share_strings) continue;
+      /* Through a box the analysis cannot bound, the store may be no
+         Struct's at all (an Array's, a Hash's): it types only a member of
+         an immediate kind, which a box holds as it is, or under the flag a
+         String one, whose box holds the handle; the reads of a member
+         holding a container keep their type. */
+      if (unknown && mt != TY_INT && mt != TY_FLOAT && mt != TY_BOOL && mt != TY_SYMBOL && mt != TY_NIL &&
+          !(c->share_strings && (mt == TY_STRING || mt == TY_STRBUF))) continue;
+      if (vt == TY_NIL) { nil_write_note(writes, k, ci->ivars[m]); continue; }
+      TyKind merged = ty_unify(ci->ivar_types[m], empty_container_write(c, v, vt, ci->ivar_types[m]));
+      if (merged != ci->ivar_types[m]) { ci->ivar_types[m] = merged; changed = 1; }
+    }
+  }
+  return changed;
+}
+
 int infer_ivar_types(Compiler *c) {
   const NodeTable *nt = c->nt;
   int changed = 0;
   NilWrites nilw = {0};
+  StructAsetIx aset = {0};
   if (dn_nscopes != c->nscopes || dn_count != nt->count) dn_build(c);
   for (int id = 0; id < nt->count; id++) {
     const char *ty = nt_type(nt, id);
@@ -7853,6 +8205,10 @@ int infer_ivar_types(Compiler *c) {
         if (infer_ivar_set_call(c, id, &nilw)) changed = 1;
         continue;
       }
+      if (sp_streq(nt_str(nt, id, "name"), "[]=")) {
+        if (infer_struct_aset_call(c, id, &nilw, &aset)) changed = 1;
+        continue;
+      }
       /* attr-writer assignment: obj.x = v  (CallNode "x=") */
       const char *nm = nt_str(nt, id, "name");
       int recv = nt_ref(nt, id, "receiver");
@@ -7925,6 +8281,7 @@ int infer_ivar_types(Compiler *c) {
       }
     }
   }
+  free(aset.mty); free(aset.structs);
   implicit_nil_writes_note(c, &nilw);
   changed |= nil_writes_apply(c, &nilw);
   return changed;

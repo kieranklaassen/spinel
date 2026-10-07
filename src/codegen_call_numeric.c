@@ -137,8 +137,8 @@ int emit_call_bigint_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
         nt_ref(nt, id, "block") < 0) {
       int up = sp_streq(name, "upto");
       buf_printf(b, "sp_bigint_range_array(%s, ", r);
-      TyKind at = comp_ntype(c, argv[0]);
-      if (at == TY_BIGINT) emit_expr(c, argv[0], b);
+      Repr ar = repr_of(c, argv[0]);
+      if (ar.big) emit_expr(c, argv[0], b);
       else { buf_puts(b, "sp_bigint_new_int("); emit_int_expr(c, argv[0], b); buf_puts(b, ")"); }
       buf_printf(b, ", %d)", up);
       free(rs.p); return 1;
@@ -273,9 +273,11 @@ int emit_call_bigint_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
       buf_printf(b, "((void)(%s), (sp_int)1)", r); free(rs.p); return 1;
     }
     if (sp_streq(name, "size") && argc == 0) {
-      /* Integer#size is ceil(bit_length / 8); sp_bigint_byte_len rounds up to
-         whole limbs, which overcounts (2**100 -> 16 not 13). */
-      buf_printf(b, "((sp_bigint_bit_length(%s) + 7) / 8)", r); free(rs.p); return 1;
+      /* Integer#size is the magnitude's byte count, at least an sp_int's
+         (sp_bigint_int_size); sp_bigint_byte_len rounds up to whole limbs,
+         which overcounts (2**100 -> 16 not 13), and ceil(bit_length / 8)
+         answered 1 for a small value in a Bignum slot and 8 for -(2**64) */
+      buf_printf(b, "sp_bigint_int_size(%s)", r); free(rs.p); return 1;
     }
     if (sp_streq(name, "nonzero?") && argc == 0) {
       int t = ++g_tmp;
@@ -283,9 +285,10 @@ int emit_call_bigint_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
       free(rs.p); return 1;
     }
     if (sp_streq(name, "fdiv") && argc == 1) {
-      TyKind at = comp_ntype(c, argv[0]);
+      Repr ar = repr_of(c, argv[0]);
+      TyKind at = ar.as_ty;
       buf_printf(b, "(sp_bigint_to_double(%s) / ", r);
-      if (at == TY_BIGINT) { buf_puts(b, "sp_bigint_to_double("); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
+      if (ar.big) { buf_puts(b, "sp_bigint_to_double("); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
       else if (at == TY_FLOAT) { buf_puts(b, "("); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
       else { buf_puts(b, "(double)("); emit_int_expr(c, argv[0], b); buf_puts(b, ")"); }
       buf_puts(b, ")"); free(rs.p); return 1;
@@ -342,6 +345,20 @@ int emit_call_bigint_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
       }
       free(rs.p); return 1;
     }
+    /* a divisor known only at run time: divmod and modulo answer what its
+       kind makes them (a Rational's exactly, sp_rat_mod_v); the Bignum
+       operand form read a Rational as 0 */
+    if ((is_divmod_name(name) || is_modulo_alias(name)) && argc == 1 &&
+        repr_of(c, argv[0]).kind == RK_BOXED &&
+        (is_divmod_name(name) ? comp_ntype(c, id) == TY_POLY_ARRAY : repr_of(c, id).kind == RK_BOXED)) {
+      int tr = ++g_tmp;
+      buf_printf(b, "({ sp_Bigint *_t%d = %s; SP_GC_ROOT(_t%d); %s(sp_box_bigint(_t%d), ", tr, r, tr,
+                 is_divmod_name(name) ? "sp_poly_to_poly_array(sp_poly_divmod"
+                 : is_mod_operator(name) ? "sp_poly_mod" : "sp_poly_modulo", tr);
+      emit_expr(c, argv[0], b);
+      buf_puts(b, is_divmod_name(name) ? ")); })" : "); })");
+      free(rs.p); return 1;
+    }
     /* Bignum modulo/%/remainder/divmod/#[]/modular-pow (#2594) */
     if ((is_modulo_alias(name)) && argc == 1) {
       buf_printf(b, "sp_bigint_mod(%s, ", r); emit_bigint_operand(c, argv[0], b); buf_puts(b, ")");
@@ -365,7 +382,7 @@ int emit_call_bigint_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
                  tb2, to2, to2, to2, td, tb2, to2, td, tb2, to2);
       free(rs.p); return 1;
     }
-    if (sp_streq(name, "[]") && argc == 1 && comp_ntype(c, argv[0]) == TY_RANGE) {
+    if (sp_streq(name, "[]") && argc == 1 && repr_of(c, argv[0]).range == TY_INT) {
       /* Bignum bit-slice n[lo..hi]: shift down by lo, mask hi-lo+1 bits (or
          keep everything above lo for an endless range). Mirrors the int-
          receiver Range arm but over bigint ops (#3156). The slice may not fit
@@ -415,6 +432,27 @@ int emit_call_bigint_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
     if (sp_streq(name, "pow") && argc == 2) {
       buf_printf(b, "sp_bigint_powmod(%s, ", r); emit_int_expr(c, argv[0], b); buf_puts(b, ", ");
       emit_bigint_operand(c, argv[1], b); buf_puts(b, ")");
+      free(rs.p); return 1;
+    }
+    /* Bignum#div(Rational): the floor of the exact quotient. The Bignum
+       operand form below has no conversion for a Rational and refused it,
+       and Integer#ceildiv(Rational) divides with it (builtins/integer.rb). */
+    if (is_div_name(name) && argc == 1 && comp_ntype(c, argv[0]) == TY_RATIONAL) {
+      int tr = ++g_tmp, ta = ++g_tmp;
+      buf_printf(b, "({ sp_Bigint *_t%d = %s; SP_GC_ROOT(_t%d); sp_Rational _t%d = ", tr, r, tr, ta);
+      emit_expr(c, argv[0], b);
+      buf_printf(b, "; sp_bigint_div_rat(_t%d, _t%d); })", tr, ta);
+      free(rs.p); return 1;
+    }
+    /* a divisor known only at run time: a Float or a Rational divides as
+       Numeric#div does; the Bignum operand form read one truncated, the
+       other as 0 (sp_bigint_div_poly) */
+    if (is_div_name(name) && argc == 1 && repr_of(c, argv[0]).kind == RK_BOXED) {
+      /* the receiver is held across the divisor's evaluation, which can
+         allocate */
+      int tr = ++g_tmp;
+      buf_printf(b, "({ sp_Bigint *_t%d = %s; SP_GC_ROOT(_t%d); sp_bigint_div_poly(_t%d, ", tr, r, tr, tr);
+      emit_expr(c, argv[0], b); buf_puts(b, "); })");
       free(rs.p); return 1;
     }
     if ((sp_streq(name, "div") || sp_streq(name, "gcd") || sp_streq(name, "lcm")) && argc == 1) {
@@ -546,7 +584,7 @@ int emit_call_iter_expr_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, c
      with the argument conversion, which is what the block forms do. */
   if (recv >= 0 && nt_ref(nt, id, "block") < 0 &&
       (comp_ntype(c, recv) == TY_INT || comp_ntype(c, recv) == TY_POLY) &&
-      comp_ntype(c, id) == TY_RANGE) {
+      repr_of(c, id).range == TY_INT) {
     if (sp_streq(name, "times")) {
       buf_puts(b, "(sp_Range){ .first = 0, .last = "); emit_int_recv_named(c, recv, name, b); buf_puts(b, ", .excl = 1 }");
       return 1;

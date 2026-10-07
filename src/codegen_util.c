@@ -1548,7 +1548,61 @@ void emit_poly_lift_ref(const char *ref, Buf *b) {
 void emit_local_ref(Compiler *c, int scope_node, const char *name, Buf *b) {
   emit_scope_local_ref(c, scope_node >= 0 ? comp_scope_of(c, scope_node) : NULL, name, b);
 }
+/* Is `rn`, what rename_local answers for local `name`, the shadow a
+   shared-handle shim reads and writes that local through (`_sbN`, the
+   shim's `lv__sbN`)? Only as a rename: a local the program itself names
+   `_sb1` is its own. */
+int sb_shim_shadow(const char *name, const char *rn) {
+  return rn != name && !strncmp(rn, "_sb", 3) && isdigit((unsigned char)rn[3]);
+}
+/* A shim types its receiver local String for the arm it re-runs, though the
+   slot is the handle (sb_shim_enter); it answers the local's shim state as
+   it was, which sb_shim_leave puts back whole. A shim inside a proc made in
+   another shim's arm enters a local the outer one lifted: putting back only
+   the type cleared the outer shim's shim_ty, so its drop skipped the local,
+   which kept the handle type for the rest of the outer arm. */
+SbShimSave sb_shim_enter(LocalVar *lv) {
+  SbShimSave sv = { lv->type, lv->shim_ty, lv->shim_lift };
+  lv->shim_ty = lv->type;
+  lv->type = TY_STRING;
+  lv->shim_lift = 0;
+  return sv;
+}
+void sb_shim_leave(LocalVar *lv, SbShimSave sv) {
+  lv->type = sv.type;
+  lv->shim_ty = sv.shim_ty;
+  lv->shim_lift = sv.shim_lift;
+}
+/* A proc or a fiber made inside the arm shares the real slot, and types its
+   capture struct and its body from the local: put the handle type back on
+   the locals a live shim lowered, for it (sb_shim_drop sets them back). Only
+   the shim's own local carries shim_ty, so a same-named local of an inlined
+   method is left alone. */
+static void sb_shim_lifted(Compiler *c, int node, int delta) {
+  Scope *sc = node >= 0 ? comp_scope_of(c, node) : NULL;
+  if (!sc) return;
+  for (int i = 0; i < g_nren; i++) {
+    if (!sb_shim_shadow(g_ren_from[i], g_ren_to[i])) continue;
+    LocalVar *lv = scope_local(sc, g_ren_from[i]);
+    if (!lv || lv->shim_ty == TY_UNKNOWN) continue;
+    if (delta > 0) { if (lv->shim_lift++ == 0) lv->type = lv->shim_ty; }
+    else if (--lv->shim_lift == 0) lv->type = TY_STRING;
+  }
+}
+void sb_shim_lift(Compiler *c, int node) { sb_shim_lifted(c, node, 1); }
+void sb_shim_drop(Compiler *c, int node) { sb_shim_lifted(c, node, -1); }
 void emit_scope_local_ref(Compiler *c, Scope *s, const char *name, Buf *b) {
+  /* Inside a shared-handle shim the local reads as the shim's shadow, a
+     plain C local the shim declares, even when the local itself lives in a
+     cell or a capture field: that slot holds the handle, which the shim
+     reads before and writes back after. The cell form spelled the shadow
+     `(*_cell__sbN)`, and the capture form handed the arm the handle slot,
+     neither of which compiles. */
+  const char *rn = rename_local(name);
+  if (sb_shim_shadow(name, rn)) {
+    buf_printf(b, "lv_%s", rn);
+    return;
+  }
   if (g_cap_struct && g_cap_names && nameset_has(g_cap_names, name)) {
     /* A TY_PROC capture is stored as (sp_int)(uintptr_t)sp_Proc* in the cell.
        Cast it back to sp_Proc* so call sites work. A heap-object cell is a real
@@ -1567,12 +1621,11 @@ void emit_scope_local_ref(Compiler *c, Scope *s, const char *name, Buf *b) {
        follow -- the prologue declared `lv__y1_n` while the body read
        `(*_cell_n)`, which nothing declared (#4088). Outside an inline the map
        is empty and this is the name itself. */
-    const char *crn = rename_local(name);
-    if (lv->type == TY_PROC) buf_printf(b, "(sp_Proc *)(uintptr_t)(*_cell_%s)", crn);
-    else buf_printf(b, "(*_cell_%s)", crn);
+    if (lv->type == TY_PROC) buf_printf(b, "(sp_Proc *)(uintptr_t)(*_cell_%s)", rn);
+    else buf_printf(b, "(*_cell_%s)", rn);
     return;
   }
-  buf_printf(b, "lv_%s", rename_local(name));
+  buf_printf(b, "lv_%s", rn);
 }
 void emit_yblk_ref(Buf *b) {
   /* The lowered method's block param: the declared &block name when the def
@@ -2413,7 +2466,10 @@ int strbuf_boxed_elem_read(Compiler *c, int v) {
   int r = nt_ref(c->nt, v, "receiver");
   if (r < 0) return 0;
   Repr rr = repr_of(c, r);
-  return rr.kind == RK_BOXED || rr.elem == TY_POLY || rr.key != TY_UNKNOWN;
+  /* a Hash hands its values out boxed only when it holds them boxed: a
+     String-to-String Hash's read is the plain String */
+  return rr.kind == RK_BOXED || rr.elem == TY_POLY ||
+         (rr.key != TY_UNKNOWN && (rr.val == TY_POLY || rr.val == TY_UNKNOWN));
 }
 /* A String is a const char * value, so a String mutator (`<<`, the bang
    methods, replace/insert/...) is lowered to a reassignment of its receiver:
@@ -2458,6 +2514,25 @@ int sb_shadowed_reader(int node) {
   for (int i = 0; i < g_n_argov; i++)
     if (g_argov_node[i] == node && strncmp(g_argov_text[i], "lv__sb", 6) == 0) return 1;
   return 0;
+}
+/* The arguments of the String mutator `id` that a shim re-runs on its
+   shadow copy, run ahead of the copy into rooted temps the arm reads
+   (emit_args_run): CRuby evaluates them before the method reads the String,
+   and one that changes the String through another name (an alias, a
+   captured cell, a method) changed the handle after the shim had copied it,
+   so the shadow's write-back undid the change. The temps go to `pre`, for
+   the caller to emit between its read of the handle and the copy; answers
+   the override mark to unbind at once the arm is emitted. */
+int sb_shim_args_first(Compiler *c, int id, Buf *pre, int indent) {
+  int mark = g_n_argov;
+  int a = nt_ref(c->nt, id, "arguments"), argc = 0;
+  const int *argv = a >= 0 ? nt_arr(c->nt, a, "arguments", &argc) : NULL;
+  if (argc == 0) return mark;
+  Buf *sv_pre = g_pre; int sv_ind = g_indent;
+  g_pre = pre; g_indent = indent;
+  emit_args_run(c, argv, argc);
+  g_pre = sv_pre; g_indent = sv_ind;
+  return mark;
 }
 /* Open the shim over a reader call `recv` that hands out the shared handle:
    the handle's text goes to sref, and until sb_reader_shim_close the call node
@@ -2553,6 +2628,14 @@ int strbuf_slot_ref(Compiler *c, int recv, char *out, size_t cap) {
   if (recv < 0 || nt_kind(c->nt, recv) != NK_InstanceVariableReadNode || !holder_of_node(c, recv, &h) ||
       h.idx < 0 || c->classes[h.cid].ivar_types[h.idx] != TY_STRBUF) return 0;
   return holder_slot_text(c, &h, out, cap);
+}
+/* rename_local for a name whose CELL is wanted: the shim's shadow rename is
+   skipped, since the shadow is a plain C local and the cell the local lives
+   in keeps the name an enclosing inline gave it (or the source name). */
+const char *rename_local_cell(const char *nm) {
+  for (int i = g_nren - 1; i >= 0; i--)
+    if (sp_streq(g_ren_from[i], nm) && !sb_shim_shadow(nm, g_ren_to[i])) return g_ren_to[i];
+  return nm;
 }
 const char *rename_local(const char *nm) {
   /* Innermost first. A nested inline pushes its own locals above the caller's,
@@ -4364,6 +4447,15 @@ int proc_form_source(Compiler *c, int s) {
   if (pf->class_id < 0) return comp_method_index(c, src);
   return (pf->is_cmethod ? comp_cmethod_in_class : comp_method_in_class)(c, pf->class_id, src);
 }
+/* Is `new` call `id`, which runs yielding initialize `initm`, a step of a
+   cycle of constructors (mark_ctor_cycles)? Its own scope, or the method a
+   clone holding it was made from, is on the same cycle as initm. */
+int ctor_site_on_cycle(Compiler *c, int id, int initm) {
+  if (initm < 0 || initm >= c->nscopes || !c->scopes[initm].ctor_cycle) return 0;
+  int s = id >= 0 && id < c->nt->count ? c->nscope[id] : -1;
+  if (s >= 0 && s < c->nscopes && c->scopes[s].is_proc_form) s = proc_form_source(c, s);
+  return s >= 0 && s < c->nscopes && c->scopes[s].ctor_cycle == c->scopes[initm].ctor_cycle;
+}
 int scope_needs_proc_form(Compiler *c, int s) {
   return scope_proc_form_of(c, s) >= 0;
 }
@@ -4453,6 +4545,93 @@ int eq_family(TyKind t) {
   if (t == TY_STR_RANGE) return 7;
   return 0;
 }
+/* The program the class tests below read its reopenings from (set by
+   codegen_program): ty_matches_class takes no Compiler, and is asked in
+   emitters all through the code generator. */
+const Compiler *g_tmc_c = NULL;
+/* Does class index k include program module `mod`, directly or through a
+   module it includes? */
+/* The modules class index k includes, by the `include` statements of its
+   bodies as written (a module with no methods transplants nothing, so the
+   analysis's included_mods misses it) and by what the analysis recorded. */
+static int tmc_body_includes(const Compiler *c, int k, int mod) {
+  const NodeTable *nt = c->nt;
+  const char *kn = c->classes[k].name, *mn = c->classes[mod].name;
+  if (!kn || !mn) return 0;
+  static const NodeKind HK[] = { NK_ClassNode, NK_ModuleNode };
+  for (int h = 0; h < 2; h++)
+    for (int m = comp_kind_first((Compiler *)c, HK[h]); m >= 0; m = comp_kind_next((Compiler *)c, m)) {
+      if (nt_kind(nt, m) != HK[h]) continue;
+      int cp = nt_ref(nt, m, "constant_path");
+      const char *cn = cp >= 0 ? nt_str(nt, cp, "name") : NULL;
+      if (!cn || !sp_streq(cn, kn)) continue;
+      int body = nt_ref(nt, m, "body"), bn = 0;
+      const int *bb = body >= 0 && nt_kind(nt, body) == NK_StatementsNode ? nt_arr(nt, body, "body", &bn) : NULL;
+      for (int i = 0; i < bn; i++) {
+        if (nt_kind(nt, bb[i]) != NK_CallNode || nt_ref(nt, bb[i], "receiver") >= 0) continue;
+        const char *cl = nt_str(nt, bb[i], "name");
+        if (!cl || !sp_streq(cl, "include")) continue;
+        int args = nt_ref(nt, bb[i], "arguments"), an = 0;
+        const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+        for (int a = 0; a < an; a++) {
+          NodeKind ak = nt_kind(nt, av[a]);
+          const char *an2 = ak == NK_ConstantReadNode || ak == NK_ConstantPathNode ? nt_str(nt, av[a], "name") : NULL;
+          if (an2 && sp_streq(an2, mn)) return 1;
+        }
+      }
+    }
+  return 0;
+}
+static int tmc_includes(const Compiler *c, int k, int mod, int depth) {
+  if (k < 0 || k >= c->nclasses || depth > 16) return 0;
+  if (tmc_body_includes(c, k, mod)) return 1;
+  const ClassInfo *ci = &c->classes[k];
+  for (int m = 0; m < ci->nincluded_mods; m++) {
+    int x = ci->included_mods[m];
+    if (x == mod || tmc_includes(c, x, mod, depth + 1)) return 1;
+  }
+  /* through a module this class includes by statement */
+  for (int x = 0; x < c->nclasses; x++)
+    if (x != k && x != mod && comp_class_is_module((Compiler *)c, (ClassInfo *)&c->classes[x]) &&
+        tmc_body_includes(c, k, x) && tmc_includes(c, x, mod, depth + 1)) return 1;
+  return 0;
+}
+/* Is program module `cn` among the ancestors of the builtin class `self_cls`
+   by way of a program reopening of it or of a builtin ancestor (`class Hash;
+   include DeepMergeable; end`, `class Numeric; include M; end`, `module
+   Enumerable; include M; end`)? */
+static int tmc_prog_module_in_builtin(const char *self_cls, const char *cn) {
+  const Compiler *c = g_tmc_c;
+  if (!c || !cn) return 0;
+  int mod = comp_class_index((Compiler *)c, cn);
+  if (mod < 0 || !comp_class_is_module((Compiler *)c, &c->classes[mod])) return 0;
+  const char *chain[8]; int n = 0;
+  chain[n++] = self_cls;
+  if (sp_streq(self_cls, "Integer") || sp_streq(self_cls, "Float") ||
+      sp_streq(self_cls, "Complex") || sp_streq(self_cls, "Rational")) chain[n++] = "Numeric";
+  if (sp_streq(self_cls, "Array") || sp_streq(self_cls, "Hash") || sp_streq(self_cls, "Range") ||
+      sp_streq(self_cls, "Enumerator")) chain[n++] = "Enumerable";
+  if (sp_streq(self_cls, "String") || sp_streq(self_cls, "Symbol") || sp_streq(self_cls, "Time") ||
+      n > 1 && sp_streq(chain[1], "Numeric")) chain[n++] = "Comparable";
+  chain[n++] = "Object";
+  chain[n++] = "Kernel";
+  for (int i = 0; i < n; i++) {
+    int k = comp_class_index((Compiler *)c, chain[i]);
+    if (k >= 0 && tmc_includes(c, k, mod, 0)) return 1;
+  }
+  return 0;
+}
+/* Is program module `mod` mixed into some builtin class (or builtin
+   module) by a reopening of it, directly or through another module? */
+int builtin_reopen_includes_module(Compiler *c, int mod) {
+  if (mod < 0 || mod >= c->nclasses || !comp_class_is_module(c, &c->classes[mod])) return 0;
+  for (int k = 0; k < c->nclasses; k++) {
+    const char *n = c->classes[k].name;
+    if (!n || builtin_class_id(n) == 0) continue;
+    if (tmc_includes(c, k, mod, 0)) return 1;
+  }
+  return 0;
+}
 int ty_matches_class(TyKind t, const char *cn, int exact) {
   const char *self_cls = NULL;
   switch (t) {
@@ -4492,6 +4671,8 @@ int ty_matches_class(TyKind t, const char *cn, int exact) {
                                   t == TY_COMPLEX || t == TY_RATIONAL)) return 1;
   if (sp_streq(cn, "Enumerable") && (ty_is_array(t) || ty_is_hash(t) || t == TY_RANGE ||
                                      t == TY_ENUMERATOR)) return 1;
+  /* a program module the program mixed into this builtin by reopening it */
+  if (tmc_prog_module_in_builtin(self_cls, cn)) return 1;
   return 0;
 }
 
@@ -4536,6 +4717,88 @@ void emit_gc_root_var(Compiler *c, TyKind t, const char *name, Buf *b) {
   else if (t == TY_STRING) buf_printf(b, "SP_GC_ROOT_STR(%s);", name);
   else buf_printf(b, "SP_GC_ROOT(%s);", name);
 }
+/* stmt_may_rebind_local's walk over one statement: each local name the
+   subtree at `id` writes, targets or takes as a block or method parameter
+   goes into names[], each node reached is marked as the statement's, and the
+   answer is 1 when it binds a local it cannot name: a numbered parameter, or
+   a parameter-like node of a kind the node table does not list (an `it`
+   parameter) with no name. A listed node is named by its kind; an unlisted
+   one that carries a name counts as binding it. */
+static int stmt_wr_walk(Compiler *c, int stmt, int id, const char ***names, int *n, int *cap) {
+  const NodeTable *nt = c->nt;
+  if (id < 0) return 0;
+  if (id < c->stmt_wr_cap) c->stmt_wr_mark[id] = stmt;
+  NodeKind k = nt_kind(nt, id);
+  if (k == NK_NumberedParametersNode) return 1;
+  int lv_bind = k == NK_LocalVariableWriteNode || k == NK_LocalVariableOperatorWriteNode ||
+                k == NK_LocalVariableOrWriteNode || k == NK_LocalVariableAndWriteNode ||
+                k == NK_LocalVariableTargetNode;
+  int param = k == NK_RequiredParameterNode || k == NK_OptionalParameterNode ||
+              k == NK_RestParameterNode || k == NK_KeywordRestParameterNode ||
+              k == NK_OptionalKeywordParameterNode || k == NK_BlockParameterNode;
+  if (k == NK_NONE) {
+    const char *ty = nt_type(nt, id);
+    if (!ty) return 0;
+    if (nt_str(nt, id, "name")) param = 1;
+    else if (strstr(ty, "Parameter")) return 1;
+  }
+  if (lv_bind || param) {
+    const char *nm = nt_str(nt, id, "name");
+    if (!nm && lv_bind) return 1;
+    if (nm) {
+      if (*n + 1 >= *cap) {
+        *cap = *cap ? *cap * 2 : 8;
+        *names = realloc(*names, sizeof **names * (size_t)*cap);
+        if (!*names) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+      }
+      (*names)[(*n)++] = nm;
+    }
+  }
+  int opaque = 0;
+  int nr = nt_num_refs(nt, id);
+  for (int i = 0; i < nr; i++) opaque |= stmt_wr_walk(c, stmt, nt_ref_at(nt, id, i), names, n, cap);
+  int na = nt_num_arrs(nt, id);
+  for (int i = 0; i < na; i++) {
+    int k = 0;
+    const int *ids = nt_arr_at(nt, id, i, &k);
+    for (int j = 0; j < k; j++) opaque |= stmt_wr_walk(c, stmt, ids[j], names, n, cap);
+  }
+  return opaque;
+}
+
+/* See codegen_internal.h. The statement's names are collected on its first
+   question and kept, so each statement is walked once however many temps
+   ask about it. */
+int stmt_may_rebind_local(Compiler *c, int stmt, int read, const char *name) {
+  if (stmt < 0 || read < 0 || !name) return 1;
+  int need = c->nt->count;
+  if (stmt >= need || read >= need) return 1;
+  if (need > c->stmt_wr_cap) {
+    int cap = need + need / 2 + 64;
+    c->stmt_wr_state = realloc(c->stmt_wr_state, (size_t)cap);
+    c->stmt_wr_names = realloc(c->stmt_wr_names, sizeof *c->stmt_wr_names * (size_t)cap);
+    c->stmt_wr_mark = realloc(c->stmt_wr_mark, sizeof *c->stmt_wr_mark * (size_t)cap);
+    if (!c->stmt_wr_state || !c->stmt_wr_names || !c->stmt_wr_mark) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+    for (int i = c->stmt_wr_cap; i < cap; i++) { c->stmt_wr_state[i] = 0; c->stmt_wr_names[i] = NULL; c->stmt_wr_mark[i] = -1; }
+    c->stmt_wr_cap = cap;
+  }
+  if (!c->stmt_wr_state[stmt]) {
+    const char **names = NULL; int n = 0, ncap = 0;
+    int opaque = stmt_wr_walk(c, stmt, stmt, &names, &n, &ncap);
+    if (!names) names = calloc(1, sizeof *names);
+    else names[n] = NULL;
+    c->stmt_wr_names[stmt] = names;
+    c->stmt_wr_state[stmt] = opaque ? 2 : 1;
+  }
+  if (c->stmt_wr_state[stmt] == 2) return 1;
+  /* a read outside the statement (an inlined body spliced into it) is
+     bound by code the walk did not see */
+  if (c->stmt_wr_mark[read] != stmt) return 1;
+  for (const char **q = c->stmt_wr_names[stmt]; q && *q; q++)
+    if (sp_streq(*q, name)) return 1;
+  return 0;
+}
+
 void emit_gc_root_tmp(Compiler *c, TyKind t, int tmp, Buf *b) {
   char name[24]; snprintf(name, sizeof name, "_t%d", tmp);
   emit_gc_root_var(c, t, name, b);

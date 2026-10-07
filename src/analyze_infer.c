@@ -1053,6 +1053,89 @@ static int an_elems_int_rows(Compiler *c, int arr, int *saw) {
   return 1;
 }
 
+static int an_settled_int(Compiler *c, int n, int depth);
+
+/* Whether every write of constant `name` is a plain `NAME = v` whose value
+   is a settled Integer (an_settled_int). */
+static int an_settled_int_const(Compiler *c, const char *name, int depth) {
+  const NodeTable *nt = c->nt;
+  int seen = 0;
+  NT_FOREACH_KIND(nt, NK_ConstantWriteNode, w) {
+    const char *wn = nt_str(nt, w, "name");
+    if (!wn || !sp_streq(wn, name)) continue;
+    if (!an_settled_int(c, nt_ref(nt, w, "value"), depth + 1)) return 0;
+    seen = 1;
+  }
+  /* any other form of write may assign a value of another kind */
+  const NodeKind other[] = { NK_ConstantTargetNode, NK_ConstantOperatorWriteNode,
+                             NK_ConstantOrWriteNode, NK_ConstantAndWriteNode };
+  for (size_t k = 0; k < sizeof other / sizeof other[0]; k++)
+    NT_FOREACH_KIND(nt, other[k], w) {
+      const char *wn = nt_str(nt, w, "name");
+      if (wn && sp_streq(wn, name)) return 0;
+    }
+  NT_FOREACH_KIND(nt, NK_ConstantPathWriteNode, w) {
+    int tg = nt_ref(nt, w, "target");
+    const char *wn = tg >= 0 ? nt_str(nt, tg, "name") : NULL;
+    if (wn && sp_streq(wn, name)) return 0;
+  }
+  return seen;
+}
+
+/* Whether `n` is an Integer no later inference can widen: an Integer
+   literal, unary minus on one, an Integer constant whose value is one, or
+   arithmetic (+ - * / %) over those, parenthesized or not. */
+static int an_settled_int(Compiler *c, int n, int depth) {
+  const NodeTable *nt = c->nt;
+  if (n < 0 || depth > 8) return 0;
+  switch (nt_kind(nt, n)) {
+    case NK_IntegerNode: return 1;
+    case NK_ParenthesesNode: {
+      int body = nt_ref(nt, n, "body");
+      int bn = 0; const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
+      return bn == 1 && an_settled_int(c, bb[0], depth + 1);
+    }
+    case NK_ConstantReadNode: {
+      const char *cn = nt_str(nt, n, "name");
+      return cn && an_settled_int_const(c, cn, depth);
+    }
+    case NK_CallNode: {
+      const char *op = nt_str(nt, n, "name");
+      int rcv = nt_ref(nt, n, "receiver");
+      if (!op || rcv < 0 || nt_ref(nt, n, "block") >= 0) return 0;
+      int a = nt_ref(nt, n, "arguments"); int an = 0;
+      const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
+      if (is_unary_minus(op)) return an == 0 && an_settled_int(c, rcv, depth + 1);
+      if (!is_int_arith_op(op)) return 0;
+      return an == 1 && an_settled_int(c, rcv, depth + 1) && an_settled_int(c, av[0], depth + 1);
+    }
+    default: return 0;
+  }
+}
+
+/* Whether array literal `arr` is a table of Integer rows: built as the
+   general Array of boxed rows, each row it holds is an Integer array. Each
+   row is a literal of settled Integers (an_settled_int): a row whose type
+   is decided before the late widening (a call's answer, a global, a
+   method's Integer answer) can still turn into an Array of boxed values
+   after the table was bound as rows of Integers. A nil or not yet typed
+   row does not count, unlike an_elems_int_rows: a parameter bound from the
+   row reads it, rather than an index that already answers nil for it. */
+int an_literal_int_rows(Compiler *c, int arr) {
+  const NodeTable *nt = c->nt;
+  int en = 0;
+  const int *els = nt_arr(nt, arr, "elements", &en);
+  for (int e = 0; e < en; e++) {
+    if (nt_kind(nt, els[e]) != NK_ArrayNode || comp_ntype(c, els[e]) != TY_INT_ARRAY) return 0;
+    int rn = 0;
+    const int *rv = nt_arr(nt, els[e], "elements", &rn);
+    if (rn == 0) return 0;
+    for (int r = 0; r < rn; r++)
+      if (!an_settled_int(c, rv[r], 0)) return 0;
+  }
+  return en > 0;
+}
+
 /* Whether every element stored into poly-array ivar `@<ivname>` is an int
    array (a nested array of int arrays, e.g. @chr_banks / @nmt_mem). Element
    reads then yield an int array rather than a boxed poly. */
@@ -2802,6 +2885,14 @@ static int infer_poly_operand_call(Compiler *c, int id, const NodeTable *nt, con
          `size[0]` that follows reads it as an untyped value. */
       if (sp_streq(name, "winsize") && sp_feature_enabled("io/console"))
         { *out = an_poly_concrete(c, name, TY_INT_ARRAY); return 1; }
+      /* a boxed socket's non-blocking connect and options, as the TY_IO arms
+         type them */
+      if (sp_feature_required("socket")) {
+        if (sp_streq(name, "connect_nonblock") && argc >= 1)
+          { *out = an_poly_concrete(c, name, an_nonblock_no_exception(c, id) ? TY_POLY : TY_INT); return 1; }
+        if (sp_streq(name, "getsockopt") && argc == 2) { *out = an_poly_concrete(c, name, TY_SOCKOPT); return 1; }
+        if (sp_streq(name, "setsockopt") && argc == 3) { *out = an_poly_concrete(c, name, TY_INT); return 1; }
+      }
       /* a boxed socket's addresses, as the TY_IO arm types them */
       if ((is_socket_address(name)) && argc == 0 &&
           sp_feature_required("socket"))
@@ -3971,6 +4062,21 @@ static int infer_int_float_recv_call(Compiler *c, int id, const NodeTable *nt, c
       { *out = TY_BIGINT; return 1; }
     if (sp_streq(name, "lcm") && argc == 1 && infer_type(c, argv[0]) == TY_BIGINT)
       { *out = TY_BIGINT; return 1; }
+    /* div by a Float floors the real quotient into an Integer, which promote
+       lets be a Bignum (sp_float_div_v), as Float#div below (#4688) */
+    if (g_promote_mode && is_div_name(name) && argc == 1 && infer_type(c, argv[0]) == TY_FLOAT)
+      { *out = TY_POLY; return 1; }
+    /* and by a divisor known only at run time, whose exact floor (a
+       Rational's) can pass the word too */
+    if (g_promote_mode && is_div_name(name) && argc == 1 && infer_type(c, argv[0]) == TY_POLY)
+      { *out = TY_POLY; return 1; }
+    /* divmod and modulo by a divisor known only at run time answer what its
+       kind makes them, as `%` does: a Rational's modulo is a Rational and a
+       Float's a Float, which an Integer slot cannot hold */
+    if (argc == 1 && infer_type(c, argv[0]) == TY_POLY) {
+      if (is_divmod_name(name)) { *out = TY_POLY_ARRAY; return 1; }
+      if (is_modulo_name(name)) { *out = TY_POLY; return 1; }
+    }
     {
       const BuiltinOp *op = an_bop_find(c, id, rt, name, argc, nt_ref(nt, id, "block") >= 0);
       if (op && op->result != TY_UNKNOWN) { *out = op->result; return 1; }
@@ -4031,6 +4137,8 @@ static int infer_int_float_recv_call(Compiler *c, int id, const NodeTable *nt, c
            (2.0**70).floor(-1) came out ...424 where CRuby says ...420.
            Widening that would trade a RangeError for a wrong answer, so it
            keeps raising until the rounding itself is done in Bignum. */
+        /* Float#div is (self / other).floor, the same Integer */
+        if (is_div_name(name) && pv_argc == 1) { *out = TY_POLY; return 1; }
         if (is_round_family(name)) {
           if (pv_argc == 0) { *out = TY_POLY; return 1; }
           if (pv_argc == 1) {
@@ -4257,6 +4365,10 @@ static int infer_operator_call(Compiler *c, int id, const NodeTable *nt, const c
     if ((is_remainder_family(name)) &&
         argc == 1 && infer_type(c, argv[0]) == TY_FLOAT) { *out = TY_FLOAT; return 1; }
     if (sp_streq(name, "div") && argc == 1 && infer_type(c, argv[0]) == TY_FLOAT) { *out = TY_POLY; return 1; }
+    /* modulo by a divisor known only at run time answers what its kind
+       makes it, as `%` does (a Rational's is a Rational) */
+    if (is_modulo_name(name) && argc == 1 && infer_type(c, argv[0]) == TY_POLY)
+      { *out = TY_POLY; return 1; }
     /* modulo/%/remainder/modular-pow stay Bignum; divmod is a [q, r] pair;
        #[] is a single bit (0/1) (#2594) */
     if ((is_remainder_family(name)) &&
@@ -5024,7 +5136,15 @@ static int infer_user_method_call(Compiler *c, int id, const NodeTable *nt, cons
       }
       { *out = TY_POLY; return 1; }
     }
-    if (sp_streq(name, "[]=") && argc == 2) { *out = sc->nmembers > 0 ? sc->ivar_types[0] : TY_POLY; return 1; }
+    /* `s[k] = v` answers v (a literal member name was rewritten to the
+       member's writer); a nil, which has no C value of its own, boxed. The
+       first member's type answered it, and a nil or a value of another
+       type did not fit the C the call's value was read into. */
+    if (is_index_assign(name) && argc == 2) {
+      TyKind vt = infer_type(c, argv[1]);
+      *out = vt == TY_NIL || vt == TY_UNKNOWN || vt == TY_VOID ? TY_POLY : vt;
+      return 1;
+    }
   }
 
   /* built-in class reopening: look up user-defined methods on scalar built-in
@@ -6250,8 +6370,9 @@ static int infer_block_iter_call(Compiler *c, int id, const NodeTable *nt, const
           was handed a hash where an array was declared (#3895). It is
           renamed to each before this point. reverse_each over an Enumerator
           or a Hash reaches the array machinery through the same marked hop,
-          and answers that receiver, not the array it walked (#4325). */
-       (argc == 0 && is_each_walk(name))) &&
+          and answers that receiver, not the array it walked (#4325).
+          each_with_index answers it the same way over a String range's hop. */
+       (argc == 0 && is_each_walk_or_with_index(name))) &&
       nt_kind(nt, recv) == NK_CallNode && nt_str(nt, recv, "enum_recv")) {
     int orecv = nt_ref(nt, recv, "receiver");
     if (orecv >= 0) { *out = infer_type(c, orecv); return 1; }
@@ -7106,6 +7227,8 @@ static TyKind infer_call_inner(Compiler *c, int id) {
     if (sp_streq(name, "**") && a0 == TY_COMPLEX) return TY_COMPLEX;
     if (sp_streq(name, "**") && a0 == TY_RATIONAL) return TY_FLOAT;
     if (sp_streq(name, "fdiv") && (a0 == TY_RATIONAL || a0 == TY_COMPLEX)) return TY_FLOAT;
+    /* promote lets the exact floor of a Rational quotient pass the word */
+    if (is_div_name(name) && a0 == TY_RATIONAL && g_promote_mode) return TY_POLY;
     if (sp_streq(name, "div") && (a0 == TY_RATIONAL || a0 == TY_COMPLEX)) return TY_INT;
   }
   /* A literal left shift whose result exceeds int64 (`1 << 64`, the 2**64 mask)
@@ -8553,7 +8676,9 @@ TyKind infer_uncached(Compiler *c, int id) {
     LocalVar *lv2 = nm2 ? scope_local(s2, nm2) : NULL;
     TyKind ct2 = lv2 ? lv2->type : TY_UNKNOWN;
     TyKind vt2 = infer_type(c, nt_ref(nt, id, "value"));
-    if (ct2 == TY_STRING) return TY_STRING;
+    /* a handle local's (TY_STRBUF) value is its String face, as its read
+       is: the operator answers a new String (`s += x`) */
+    if (ct2 == TY_STRING || ct2 == TY_STRBUF) return TY_STRING;
     if (ty_is_numeric(ct2) && ty_is_numeric(vt2))
       return (ct2 == TY_FLOAT || vt2 == TY_FLOAT) ? TY_FLOAT : TY_INT;
     return ct2 != TY_UNKNOWN ? ct2 : vt2;
@@ -8613,6 +8738,7 @@ TyKind infer_uncached(Compiler *c, int id) {
     /* the Process::Status of the last child waited for, NULL (nil) before
        any; it was an Integer, and `$?.exitstatus` raised NoMethodError */
     if (nm && sp_streq(nm, "$?")) return TY_PROCESS_STATUS;
+    if (nm && sp_streq(nm, "$$")) return TY_INT;   /* the process id, Process.pid */
     if (nm && (is_program_name_global(nm))) return TY_STRING;
     if (nm && sp_streq(nm, "$!")) return TY_EXCEPTION;  /* the exception being handled, or nil (NULL) outside a rescue */
     if (nm && (sp_streq(nm, "$;") || sp_streq(nm, "$,"))) return TY_NIL;
@@ -8889,8 +9015,8 @@ TyKind infer_uncached(Compiler *c, int id) {
     }
     /* A callee stores elements of another kind into the literal it is
        passed (widen_arg_array). */
-    if (c->arr_want && id < c->node_cap && c->arr_want[id] == TY_POLY_ARRAY)
-      return TY_POLY_ARRAY;
+    if (c->arr_want && id < c->node_cap && (c->arr_want[id] == TY_POLY_ARRAY || c->arr_want[id] == TY_INT_ARRAY_ARRAY))
+      return c->arr_want[id];
     TyKind e = TY_UNKNOWN;
     for (int k = 0; k < n; k++) {
       TyKind et = infer_type(c, els[k]);

@@ -112,8 +112,13 @@ static int emit_blk_proc_tmp(Compiler *c, int blk_node) {
    NULL. A callee that yields takes none. */
 void emit_callee_block_arg(Compiler *c, int id, const Scope *m, Buf *b) {
   if (!m || !m->blk_param || !m->blk_param[0] || m->yields) return;
-  int blk_node = resolve_forwarded_block(c, nt_ref(c->nt, id, "block"));
+  int blk0 = nt_ref(c->nt, id, "block");
+  int blk_node = resolve_forwarded_block(c, blk0);
+  /* a `&blk` / `&` forwarding the block of an inlined body that was handed
+     a real proc (`fw(&pr)`) passes that proc; it passed NULL */
+  const char *fwd = forwarded_real_proc(blk0, blk_node);
   if (blk_node >= 0) buf_printf(b, ", _t%d", emit_blk_proc_tmp(c, blk_node));
+  else if (fwd) buf_printf(b, ", %s", fwd);
   else buf_puts(b, ", NULL");
 }
 
@@ -159,12 +164,17 @@ void emit_method_call(Compiler *c, int id, Buf *b) {
        resolve it to the caller's inlined block. Without this, forwarding `&blk`
        into a callee that keeps a real proc param (e.g. one that nil-checks the
        block) is rejected as "proc literal without a block". */
-    int blk_node = resolve_forwarded_block(c, nt_ref(nt, id, "block"));
+    int blk0 = nt_ref(nt, id, "block");
+    int blk_node = resolve_forwarded_block(c, blk0);
+    /* ...or, inside a body inlined for a caller that handed it a real
+       proc (`fw(&pr)`), to that proc: it passed NULL */
+    const char *fwd = forwarded_real_proc(blk0, blk_node);
     int wrote_args = m->nparams > 0;
     if (wrote_args) buf_puts(b, ", ");
     if (blk_node >= 0) {
       buf_printf(b, "_t%d", emit_blk_proc_tmp(c, blk_node));
     }
+    else if (fwd) buf_puts(b, fwd);
     else {
       buf_puts(b, "NULL");
     }
@@ -211,6 +221,11 @@ static void emit_hash_p0_rhs(Compiler *c, Repr hr, const char *hn,
   }
 }
 
+/* --share-strings: does a hash block's parameter slot lv hold a String
+   handle where the Hash hands it a String (`actual`)? */
+static int hash_param_handle(Compiler *c, LocalVar *lv, TyKind actual) {
+  return repr_share_rule(c) && lv && actual == TY_STRING && repr_of_slot(c, lv).kind == RK_STRBUF;
+}
 /* Bind a hash-iteration block's parameters to C locals for entry `ti` of the
    materialized hash temp `_t<trecv>` (held as hr, runtime cname hn), emit the
    block's leading statements into g_pre at g_indent+1, evaluate its final
@@ -243,8 +258,14 @@ static char *emit_hash_block_eval(Compiler *c, int block, Repr hr, const char *h
   LocalVar *p1_lv = p1_orig ? scope_local(pscope, p1_orig) : NULL;
   TyKind p0_decl = p0_lv ? p0_lv->type : TY_UNKNOWN;
   TyKind p1_decl = p1_lv ? p1_lv->type : TY_UNKNOWN;
-  int ns0 = p0_orig && p0_actual != TY_UNKNOWN && p0_decl != TY_UNKNOWN && p0_decl != p0_actual;
-  int ns1 = p1_orig && p1_actual != TY_UNKNOWN && p1_decl != TY_UNKNOWN && p1_decl != p1_actual;
+  /* --share-strings: a parameter whose slot is a String handle binds a
+     fresh handle over the key or value it is handed (each key is the
+     Hash's own frozen copy), not a String shadow the handle's reads cannot
+     take */
+  int hb0 = hash_param_handle(c, p0_lv, p0_actual) && !(!p1_orig && p0_solo_is_value == 2);
+  int hb1 = hash_param_handle(c, p1_lv, p1_actual);
+  int ns0 = !hb0 && p0_orig && p0_actual != TY_UNKNOWN && p0_decl != TY_UNKNOWN && p0_decl != p0_actual;
+  int ns1 = !hb1 && p1_orig && p1_actual != TY_UNKNOWN && p1_decl != TY_UNKNOWN && p1_decl != p1_actual;
   int st0 = -1, sri0 = -1, srn0 = 0; char sro0[112]; sro0[0] = '\0';
   int st1 = -1, sri1 = -1, srn1 = 0; char sro1[112]; sro1[0] = '\0';
   /* p0 reads the key for a 2-param block, or for select-style solo binding. */
@@ -266,6 +287,14 @@ static char *emit_hash_block_eval(Compiler *c, int block, Repr hr, const char *h
         snprintf(g_ren_from[g_nren], sizeof g_ren_from[0], "%s", p0_orig);
         snprintf(g_ren_to[g_nren++], sizeof g_ren_to[0], "_bp%d", st0);
       }
+    }
+    else if (hb0) {
+      char src[160];
+      if (p0_is_key) snprintf(src, sizeof src, "_t%d->order[_t%d]", trecv, ti);
+      else snprintf(src, sizeof src, "sp_%sHash_get(_t%d, _t%d->order[_t%d])", hn, trecv, trecv, ti);
+      buf_printf(g_pre, "lv_%s = ", p0);
+      emit_strbuf_param_bind(c, p0_lv, TY_STRING, src, g_pre);
+      buf_puts(g_pre, ";\n");
     }
     else {
       buf_printf(g_pre, "lv_%s = ", p0);
@@ -290,6 +319,13 @@ static char *emit_hash_block_eval(Compiler *c, int block, Repr hr, const char *h
         snprintf(g_ren_from[g_nren], sizeof g_ren_from[0], "%s", p1_orig);
         snprintf(g_ren_to[g_nren++], sizeof g_ren_to[0], "_bp%d", st1);
       }
+    }
+    else if (hb1) {
+      char src[160];
+      snprintf(src, sizeof src, "sp_%sHash_get(_t%d, _t%d->order[_t%d])", hn, trecv, trecv, ti);
+      buf_printf(g_pre, "lv_%s = ", p1);
+      emit_strbuf_param_bind(c, p1_lv, TY_STRING, src, g_pre);
+      buf_puts(g_pre, ";\n");
     }
     else {
       if (repr_hash_is(hr, TY_POLY, TY_POLY))
@@ -391,8 +427,13 @@ int emit_hash_collect_expr(Compiler *c, int id, Buf *b) {
         buf_printf(g_pre, "if (((void)(%s), %d)) { ", vb ? vb : "0", is_rej ? 1 : 0);
       else if (bvt2 == TY_POLY || bvt2 == TY_UNKNOWN)
         buf_printf(g_pre, "if (%ssp_poly_truthy(%s)) { ", is_rej ? "!" : "", vb ? vb : "sp_box_nil()");
-      else
-        buf_printf(g_pre, "if (%s(%s)) { ", is_rej ? "!" : "", vb ? vb : "0");
+      else {
+        /* a scalar holds nil as its sentinel and 0 is truthy: Ruby's
+           truthiness, not C's */
+        buf_printf(g_pre, "if (%s", is_rej ? "!" : "");
+        emit_slot_truthy(bvt2, vb ? vb : "0", g_pre);
+        buf_puts(g_pre, ") { ");
+      }
     }
     free(vb);
     if (repr_hash_is(rr, TY_POLY, TY_POLY)) {
@@ -4525,6 +4566,8 @@ void emit_block_value_into(Compiler *c, int block, const char *dest,
       /* a typed-array tail into the poly-array slot a `next` arm widened */
       const char *apf = (g_ie_next_ty == TY_POLY_ARRAY && tr.elem != TY_POLY) ? array_to_poly_fn(tt) : NULL;
       if (want_poly && tr.kind != RK_BOXED) emit_boxed(c, tail, &vb);
+      /* a `then` read as the shared handle (emit_tap_then_expr): the tail's */
+      else if (dest_ty == TY_STRBUF && repr_share_rule(c)) emit_strbuf_handle_of(c, tail, &vb);
       else if (apf) { buf_printf(&vb, "%s(", apf); emit_expr(c, tail, &vb); buf_puts(&vb, ")"); }
       else emit_expr(c, tail, &vb);
       emit_indent(g_pre, bi);
@@ -5434,8 +5477,11 @@ int emit_with_index_expr(Compiler *c, int id, Buf *b) {
     int saveInd = g_indent; g_indent = innerIndent;
     Buf vb; memset(&vb, 0, sizeof vb);
     TyKind body_ty = TY_UNKNOWN;
+    /* select/reject test the block's value by Ruby's truthiness: an Integer
+       0 keeps its element, and a boxed value is no C scalar (read raw, 0 was
+       dropped and a boxed value did not build) */
     if (is_map) body_ty = emit_iter_step_tail(c, &st, &vb);
-    else emit_iter_step_cond(c, &st, 1, &vb);
+    else emit_iter_step_cond(c, &st, 0, &vb);
     g_indent = saveInd;
     if (is_map) {
       emit_indent(g_pre, innerIndent); buf_printf(g_pre, "sp_%sArray_push%s(_t%d, ", rk, nil_store_sfx(c, rk, bb[bn - 1]), tres);
@@ -6372,6 +6418,15 @@ int emit_lent_local(LocalVar *lv, const char *vn, Buf *out) {
      sp_gc_pin_remembered, which reads a header off it -- the fault
      #4391's first half was. */
   int fwd = lv && (lv->byref_out || lv->inline_alias);   /* an inline alias is a forward too: it points at whatever the caller lent */
+  /* Inside a shared-handle shim the local is the shim's shadow, a plain C
+     local the shim declares: its address is the slot, whether the local
+     itself lives in a cell or a capture field, and nothing is pinned (the
+     cell form spelled `_cell__sbN`, which nothing declares). */
+  const char *srn = rename_local(vn);
+  if (sb_shim_shadow(vn, srn) && (!lv || lv->type == TY_STRING)) {
+    buf_printf(out, "&lv_%s", srn);
+    return 1;
+  }
   if (g_cap_struct && g_cap_names && nameset_has(g_cap_names, vn)) {
     /* a capture of another type has a cell of that type, no String slot */
     if (lv && lv->type != TY_STRING) return 0;
@@ -7568,8 +7623,14 @@ void emit_rooted_conversion(Compiler *c, TyKind pt, const char *expr, Buf *out) 
    (the .new / super arg path) emitted args inline; normal method calls already
    hoist+root via emit_dispatch. Rooting in the caller's frame keeps the value
    alive across the whole call. A scalar (int/float/...) arg needs no root and is
-   emitted inline. */
-static void emit_arg_rooted(Compiler *c, Scope *m, int idx, int provided, Buf *out) {
+   emitted inline.
+
+   `held` is the temp the call's hoist (emit_args_filled_argv) already
+   evaluated the argument into and rooted, or 0. An argument that renders as
+   that temp unconverted is passed as it is: copying it into a second rooted
+   temp only rooted the same pointer twice, a frame slot and a store on every
+   call (`Node.new(make_tree(d), make_tree(d))` held each subtree in two). */
+static void emit_arg_rooted(Compiler *c, Scope *m, int idx, int provided, int held, Buf *out) {
   LocalVar *p = scope_local(m, m->pnames[idx]);
   TyKind pt = p ? p->type : TY_UNKNOWN;
   /* a byref out-param arg is a slot address, not a heap value: it hoists its
@@ -7585,7 +7646,13 @@ static void emit_arg_rooted(Compiler *c, Scope *m, int idx, int provided, Buf *o
   }
   Buf ab; memset(&ab, 0, sizeof ab);
   emit_arg_or_default(c, m, idx, provided, &ab);
-  emit_rooted_operand(c, pt, provided, ab.p ? ab.p : default_value_from_compiler(c, pt), out);
+  char ht[24] = "";
+  if (held > 0) snprintf(ht, sizeof ht, "_t%d", held);
+  if (held > 0 && provided >= 0 && ab.p && sp_streq(ab.p, ht)) {
+    emit_obj_upcast_prefix(c, pt, comp_ntype(c, provided), out);
+    buf_puts(out, ht);
+  }
+  else emit_rooted_operand(c, pt, provided, ab.p ? ab.p : default_value_from_compiler(c, pt), out);
   free(ab.p);
 }
 
@@ -7935,6 +8002,30 @@ int kwh_out_of_order(Compiler *c, Scope *m, int kwh) {
   return 0;
 }
 
+/* Bind node v to its value temp _t<t> (its uses read the temp), with th
+   the temp holding its shared handle, or -1 (ran_first_handle answers it).
+   A handle that is itself the value is t == th. */
+void ran_first_bind(int v, int t, int th) {
+  /* every argument, however many: past the table's first MAX_ARG_OVERRIDE
+     entries the rest never ran where a static check refuses the call, or ran
+     at their slots, after the ones that follow them */
+  argov_reserve();
+  int k = 0;
+  for (int j = 0; j < g_n_ran_hnd; j++)
+    if (g_ran_hnd[j].idx < g_n_argov) g_ran_hnd[k++] = g_ran_hnd[j];
+  g_n_ran_hnd = k;
+  if (th >= 0) {
+    if (g_n_ran_hnd == g_cap_ran_hnd) {
+      g_cap_ran_hnd = g_cap_ran_hnd ? g_cap_ran_hnd * 2 : 16;
+      RanHandle *nr = realloc(g_ran_hnd, sizeof *g_ran_hnd * (size_t)g_cap_ran_hnd);
+      if (!nr) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+      g_ran_hnd = nr;
+    }
+    g_ran_hnd[g_n_ran_hnd++] = (RanHandle){ g_n_argov, v, t, th };
+  }
+  view_bind(v, "_t%d", t);
+}
+
 /* The value `v` evaluated into a rooted temp in g_pre, pushed onto the
    g_argov overrides so its uses read the temp. */
 static void emit_arg_temp(Compiler *c, int v) {
@@ -7976,24 +8067,7 @@ static void emit_arg_temp(Compiler *c, int v) {
   else if (needs_root(at)) buf_printf(g_pre, " SP_GC_ROOT(_t%d);", t);
   buf_puts(g_pre, "\n");
   free(hb.p);
-  /* every argument, however many: past the table's first MAX_ARG_OVERRIDE
-     entries the rest never ran where a static check refuses the call, or ran
-     at their slots, after the ones that follow them */
-  argov_reserve();
-  int k = 0;
-  for (int j = 0; j < g_n_ran_hnd; j++)
-    if (g_ran_hnd[j].idx < g_n_argov) g_ran_hnd[k++] = g_ran_hnd[j];
-  g_n_ran_hnd = k;
-  if (th >= 0) {
-    if (g_n_ran_hnd == g_cap_ran_hnd) {
-      g_cap_ran_hnd = g_cap_ran_hnd ? g_cap_ran_hnd * 2 : 16;
-      RanHandle *nr = realloc(g_ran_hnd, sizeof *g_ran_hnd * (size_t)g_cap_ran_hnd);
-      if (!nr) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
-      g_ran_hnd = nr;
-    }
-    g_ran_hnd[g_n_ran_hnd++] = (RanHandle){ g_n_argov, v, t, th };
-  }
-  view_bind(v, "_t%d", t);
+  ran_first_bind(v, t, th);
 }
 
 /* See codegen_internal.h. */
@@ -10151,7 +10225,7 @@ void emit_args_filled_argv(Compiler *c, int callee_idx, const int *argv, int arg
         if (mt == TY_POLY && et != TY_POLY) emit_boxed_text(c, et, txt, out);
         else buf_puts(out, txt);
       }
-      else emit_arg_rooted(c, m, i, -1, out);
+      else emit_arg_rooted(c, m, i, -1, 0, out);
     }
     return;
   }
@@ -10328,6 +10402,9 @@ void emit_args_filled_argv(Compiler *c, int callee_idx, const int *argv, int arg
     return;
   }
 
+  /* the rooted temp each positional argument was hoisted into, or 0
+     (emit_arg_rooted passes such a temp as it is) */
+  int *held = splat_idx < 0 && kwh < 0 && argv && pos_argc > 0 ? calloc((size_t)pos_argc, sizeof *held) : NULL;
   if (splat_idx < 0 && kwh < 0 && argv) {
     /* Ruby evaluates arguments left to right; C leaves a call's operand order
        unspecified (gcc walks it right to left). Once two arguments can observe
@@ -10389,6 +10466,7 @@ void emit_args_filled_argv(Compiler *c, int callee_idx, const int *argv, int arg
         buf_printf(g_pre, "sp_String *_t%d = %s; SP_GC_ROOT(_t%d);\n", ht, hb.p, ht);
         free(hb.p);
         view_bind(argv[k], "_t%d", ht);
+        if (held) held[k] = ht;
         continue;
       }
       /* any other write whose slot holds the --share-strings handle runs
@@ -10410,6 +10488,7 @@ else {
       }
       free(hb.p);
       view_bind(argv[k], "_t%d", ht);
+      if (held && root) held[k] = ht;
     }
   }
   for (int i = 0; i < m->nparams; i++) {
@@ -10440,7 +10519,7 @@ else {
       int is_kwparam = m->pnames[i] && callee_has_kwarg(c, m, m->pnames[i]);
       int kv = (kwh >= 0 && is_kwparam && !kw_merged) ? kwh_lookup(nt, kwh, m->pnames[i]) : -1;
       if (kv >= 0) {
-        emit_arg_rooted(c, m, i, kv, out);
+        emit_arg_rooted(c, m, i, kv, 0, out);
       }
       else if (ds_hash_tmp >= 0 && is_kwparam && i != m->kwrest_idx) {
         /* Double-splat: extract param by name from the pre-eval'd hash. */
@@ -10467,7 +10546,7 @@ else {
            keywords, so they still bind here.) A post takes its argument from
            the end of the call's, and a positional after a mid-list splat the
            layout could not gather (`g(1, *m, 4)`) a tail parameter. */
-        emit_arg_rooted(c, m, i, argv[L.arg[i]], out);
+        emit_arg_rooted(c, m, i, argv[L.arg[i]], held ? held[L.arg[i]] : 0, out);
       }
       else {
         /* No positional arg and no keyword match. If the param is hash-typed
@@ -10491,11 +10570,12 @@ else {
         /* ...and only into the FIRST unfilled positional slot. Every later
            one hit this same fallback, so `def f(a = nil, b = nil); f(k: 1)`
            handed the hash to both (found while fixing #4030). */
-        emit_arg_rooted(c, m, i, L.from[i] == ARG_KWH ? kwh : -1, out);
+        emit_arg_rooted(c, m, i, L.from[i] == ARG_KWH ? kwh : -1, 0, out);
       }
     }
   }
   view_unbind(argov_saved);  /* drop this call's hoisted-arg overrides */
+  free(held);
   arg_layout_free(&L);
 }
 
@@ -10863,6 +10943,50 @@ int emit_reader_override_dispatch(Compiler *c, int id, int cid, const char *name
 /* An Object, Array, Hash or Numeric reopening: its instance methods take
    `sp_RbVal self` (emit_method_signature), any value, with no struct of the
    class's own to cast it to. */
+/* The local a LocalVariableReadNode reads, when the local's own slot is
+   rooted for as long as it is in scope (emit_scope_decls, declare_local):
+   not a captured one (its cell is the slot), a lent String (a slot's
+   address), a block parameter (a yielding method's is not rooted) or a poly
+   array-or-nil one (gc_roots_take_back may drop its root). NULL otherwise. */
+static LocalVar *read_of_rooted_local(Compiler *c, int node, Scope **sp) {
+  if (node < 0 || nt_kind(c->nt, node) != NK_LocalVariableReadNode) return NULL;
+  const char *nm = nt_str(c->nt, node, "name");
+  Scope *s = nm ? comp_scope_of(c, node) : NULL;
+  LocalVar *lv = s ? scope_local(s, nm) : NULL;
+  if (!lv || lv->is_cell || lv->byref_out || lv->arr_or_nil ||
+      lv->type == TY_PROC || (s->blk_param && sp_streq(s->blk_param, nm)))
+    return NULL;
+  *sp = s;
+  return lv;
+}
+
+/* A read of a parameter its method never assigns. The parameter's own slot
+   holds that value for the whole call and is rooted on entry
+   (emit_scope_decls), so an argument temp copied from it is reachable without
+   a root of its own however much the later arguments allocate. */
+static int read_of_fixed_param(Compiler *c, int node) {
+  Scope *s = NULL;
+  LocalVar *lv = read_of_rooted_local(c, node, &s);
+  return lv && lv->is_param && s->def_node >= 0 &&
+         !subtree_writes_local(c, s->def_node, nt_str(c->nt, node, "name"));
+}
+
+/* A read of a local nothing in the statement around it can rebind, when the
+   argument temp copying it is written into that statement's own prelude:
+   everything that runs between the temp's assignment and the callee's
+   entry is that statement's code or a callee's, and a callee cannot assign
+   a non-captured local of this frame. The local's own root holds the value
+   meanwhile. A temp written into any other buffer -- a private one spliced
+   elsewhere, or with no statement open -- is not judged. */
+static int read_unbound_in_stmt(Compiler *c, int node) {
+  Scope *s = NULL;
+  if (!read_of_rooted_local(c, node, &s)) return 0;
+  int st = -1;
+  const void *pre = NULL;
+  if (!view_stmt_top(&st, &pre) || pre != (const void *)g_pre) return 0;
+  return !stmt_may_rebind_local(c, st, node, nt_str(c->nt, node, "name"));
+}
+
 static int reopen_takes_boxed_self(Compiler *c, int cid) {
   const char *cn = cid >= 0 ? c->classes[cid].c_name : NULL;
   return cn && (sp_streq(cn, "Object") || sp_streq(cn, "Array") ||
@@ -11312,8 +11436,17 @@ else {
         buf_printf(g_pre, " _t%d = ", atmp[k]);
         buf_puts(g_pre, ab.p ? ab.p : ""); buf_puts(g_pre, ";\n");
         /* Root heap-typed arg temps: evaluating a later argument may allocate
-           and collect an earlier one still sitting in its temp. */
-        if (att == TY_POLY) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT_RBVAL(_t%d);\n", atmp[k]); }
+           and collect an earlier one still sitting in its temp. A copy of a
+           parameter nothing reassigns, or of a local nothing in this
+           statement can rebind, is held by the local's own root: Interp#visit
+           passed its env on through a pushed and popped root at every
+           recursive call, and ao_render's sampling loop its ray and isect at
+           each of four intersect calls. */
+        int held = (att == TY_POLY || needs_root(att)) &&
+                   provided >= 0 && repr_of(c, provided).as_ty == att &&
+                   (read_of_fixed_param(c, provided) || read_unbound_in_stmt(c, provided));
+        if (held) {}
+        else if (att == TY_POLY) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT_RBVAL(_t%d);\n", atmp[k]); }
         else if (needs_root(att)) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", atmp[k]); }
       }
       if (pd_active && pm->pnames[k] && g_nren < MAX_RENAME) {

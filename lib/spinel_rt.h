@@ -230,6 +230,8 @@ SP_NORETURN SP_COLD void sp_raise_nil_to_int(int of_wording);
   if (SP_UNLIKELY((a) == SP_INT_NIL)) sp_raise_nil_to_int(0)
 #define SP_INT_NIL_ARG_CK_OF(a) \
   if (SP_UNLIKELY((a) == SP_INT_NIL)) sp_raise_nil_to_int(1)
+#define SP_INT_NIL_ARG_CK_OFFT(a) \
+  if (SP_UNLIKELY((a) == SP_INT_NIL)) sp_raise_nil_to_int(2)
 /* The same sentinel test ahead of a comparison (see sp_raise_nil_cmp): the
    left nil is NoMethodError, the right the Comparable ArgumentError. Emitted
    only for an operand that can carry the sentinel; a literal or an
@@ -1269,6 +1271,9 @@ sp_int sp_File_getbyte(sp_File *f);
 sp_RbVal sp_File_ungetc(sp_File *f, sp_RbVal v);
 /* IO#readpartial / #sysread: up to n bytes, EOFError at EOF (#2812) */
 const char *sp_File_readpartial(sp_File *f, sp_int n);
+/* The same read answering NULL at EOF instead of raising: a boxed output
+   buffer is emptied before the EOFError (the codegen's output-buffer path). */
+const char *sp_File_readpartial_or_nil(sp_File *f, sp_int n);
 /* IO#pread(len, offset): read without moving the file position. Inline
    because it allocates from this TU's string heap (#3038). */
 static inline const char *sp_File_pread(sp_File *f, sp_int len, sp_int off) {
@@ -1281,6 +1286,20 @@ static inline const char *sp_File_pread(sp_File *f, sp_int len, sp_int off) {
   buf[got] = '\0';
   sp_str_set_len(buf, (size_t)got);
   sp_str_mark_binary(buf);   /* pread answers ASCII-8BIT, as CRuby */
+  return buf;
+}
+/* IO#pread answering NULL at EOF instead of raising, for the same reason as
+   sp_File_readpartial_or_nil. */
+static inline const char *sp_File_pread_or_nil(sp_File *f, sp_int len, sp_int off) {
+  SP_IO_OPEN(f);
+  if (len < 0) len = 0;
+  char *buf = (char *)sp_str_alloc((size_t)len);
+  ssize_t got = pread(fileno(f->fp), buf, (size_t)len, (off_t)off);
+  if (got < 0) sp_raise_cls("IOError", "pread failed");
+  if (got == 0 && len > 0) return NULL;
+  buf[got] = '\0';
+  sp_str_set_len(buf, (size_t)got);
+  sp_str_mark_binary(buf);
   return buf;
 }
 sp_int sp_File_sysseek(sp_File *f, sp_int off, sp_int whence);
@@ -1638,6 +1657,7 @@ const char *sp_bigint_to_s_base(sp_Bigint *b, sp_int base);
 int sp_bigint_even_p(sp_Bigint *b);
 sp_Bigint *sp_bigint_abs_v(sp_Bigint *b);
 sp_int sp_bigint_bit_length(sp_Bigint *b);
+sp_int sp_bigint_int_size(sp_Bigint *b);   /* Integer#size */
 int64_t sp_bigint_to_int(sp_Bigint *b);
 double sp_bigint_to_double(sp_Bigint *b);
 int sp_bigint_cmp(sp_Bigint *a, sp_Bigint *b);
@@ -3177,6 +3197,13 @@ static SP_INLINE sp_int sp_poly_arg_int_chk(sp_RbVal v) {
   if (v.tag == SP_TAG_INT && v.v.i != SP_INT_NIL) return v.v.i;
   return sp_poly_arg_int_chk_slow(v);
 }
+/* The same, for a slot whose nil CRuby words by another conversion
+   (sp_raise_nil_to_int's `of_wording`): rb_convert_type's, or an IO
+   offset's NUM2OFFT. */
+static SP_INLINE sp_int sp_poly_arg_int_chk_w(sp_RbVal v, int wording) {
+  if (v.tag == SP_TAG_NIL || (v.tag == SP_TAG_INT && v.v.i == SP_INT_NIL)) sp_raise_nil_to_int(wording);
+  return sp_poly_arg_int_chk(v);
+}
 /* Integer#div / #modulo with a divisor known only at run time, in a call
    typed Integer. A Float divisor floors the real quotient for div; for
    modulo its answer is a Float, which the Integer slot cannot hold, so that
@@ -3954,12 +3981,7 @@ static sp_int sp_poly_size(sp_RbVal v) {
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_RANGE && v.v.p)
     return sp_range_count(*(sp_Range *)v.v.p);
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_STR_RANGE) return SP_INT_NIL;
-  if (v.tag == SP_TAG_BIGINT) {
-    sp_Bigint *bg = (sp_Bigint *)v.v.p;
-    sp_int bits = bg ? (sp_int)sp_bigint_bit_length(bg) : 0;
-    sp_int bytes = (bits + 7) / 8;
-    return bytes < (sp_int)sizeof(sp_int) ? (sp_int)sizeof(sp_int) : bytes;
-  }
+  if (v.tag == SP_TAG_BIGINT) return sp_bigint_int_size((sp_Bigint *)v.v.p);
   /* an Enumerator's size is its own (#size), not a length: a boxed
      each_slice(2) enumerator answered 0. A size that is not a count (nil, an
      infinite one) reads as nil. */
@@ -4375,6 +4397,16 @@ static sp_RbVal sp_box_f_to_int(sp_float v) {
   if (v < -(sp_float)INTPTR_MIN && v >= (sp_float)INTPTR_MIN) return sp_box_int((sp_int)v);
   return sp_box_bigint(sp_bigint_new_double(v));
 }
+/* Numeric#div by a Float, and Integer#div(Float): the floor of the real
+   quotient, an Integer. A zero divisor is ZeroDivisionError and a NaN or
+   infinite quotient FloatDomainError; a quotient past sp_int is the Bignum
+   CRuby's dbl2ival makes, which a boxed slot holds -- the boxed path answered
+   it as a Float (1e20.div(3) printed 3.333333333333333e+19) and a NaN one as
+   NaN. The typed raise-mode paths keep sp_float_fit_i's RangeError. */
+static inline sp_RbVal sp_float_div_v(sp_float x, sp_float y) {
+  if (y == 0.0) sp_raise_cls("ZeroDivisionError", "divided by 0");
+  return sp_box_f_to_int(floor(x / y));
+}
 /* The same method into a BOXED slot, which promote mode gives it: an Integer
    too wide for sp_int is the answer rather than an error, and a Bignum
    receiver is already one (#4688). */
@@ -4394,6 +4426,16 @@ static inline sp_int sp_float_fit_i(sp_float v) {
   if (v >= -(sp_float)INTPTR_MIN || v < (sp_float)INTPTR_MIN)
     sp_raise_cls("RangeError", "float out of Integer range (Bignum promotion pending)");
   return (sp_int)v;
+}
+/* sp_float_div_v's quotient in an sp_int slot (a typed call in the raise and
+   wrap modes): one past the word is sp_float_fit_i's RangeError. The NaN a
+   NaN divisor makes was cast to sp_int, which is undefined: 2.5.div(NaN)
+   answered 0 and a Rational's crashed. */
+static inline sp_int sp_float_div_i(sp_float x, sp_float y) {
+  if (y == 0.0) sp_raise_cls("ZeroDivisionError", "divided by 0");
+  sp_float q = floor(x / y);
+  if (!isfinite(q)) sp_raise_cls("FloatDomainError", isnan(q) ? "NaN" : q > 0 ? "Infinity" : "-Infinity");
+  return sp_float_fit_i(q);
 }
 static sp_bool sp_poly_nan_p(sp_RbVal v) { if (v.tag == SP_TAG_FLT) return isnan(v.v.f) != 0; sp_raise_poly_nomethod("nan?", v); }
 /* Float#next_float / #prev_float: only a Float has them (nextafter, as the
@@ -4487,8 +4529,17 @@ static sp_bool sp_poly_negative_p(sp_RbVal v) { if (v.tag == SP_TAG_INT) return 
    the typed arms answer them: a Complex its atan2(im, re) and its [re, im],
    a real number 0, or pi when negative, and [self, 0]. `m` is the name
    called, for the NoMethodError anything else raises. */
+/* Float#arg (angle, phase), as CRuby's float_arg answers it: a NaN is its
+   own angle, a set sign bit is pi (so -0.0 is pi, as -0.0 lies on the
+   negative axis), and every other Float is the Integer 0. A `< 0` test
+   answered 0 for both -0.0 and NaN. */
+static sp_RbVal sp_float_arg(sp_float x) {
+  if (isnan(x)) return sp_box_float(x);
+  return signbit(x) ? sp_box_float(3.141592653589793) : sp_box_int(0);
+}
 static sp_RbVal sp_poly_arg(sp_RbVal v, const char *m) {
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_COMPLEX) { sp_Complex *c = (sp_Complex *)v.v.p; return sp_box_float(atan2(c->im, c->re)); }
+  if (v.tag == SP_TAG_FLT) return sp_float_arg(v.v.f);
   if (sp_poly_numeric_p(v) || sp_poly_is_rat_kind(v)) return sp_poly_negative_p(v) ? sp_box_float(3.141592653589793) : sp_box_int(0);
   sp_raise_poly_nomethod(m, v);
 }
@@ -4544,6 +4595,7 @@ static sp_int sp_poly_ord(sp_RbVal v) { v = sp_poly_strbuf_deref(v); if (v.tag =
    answered where the answer can itself be a Bignum; sp_box_bigint hands a
    result that fits back as a plain Integer. */
 static sp_RbVal sp_poly_div(sp_RbVal a, sp_RbVal b);   /* fwd: defined with the arithmetic below */
+static sp_RbVal sp_poly_div_m(sp_RbVal a, sp_RbVal b);   /* fwd: Integer#div, defined below */
 static sp_RbVal sp_poly_neg(sp_RbVal a);
 sp_Bigint *sp_bigint_powmod(sp_Bigint *base, sp_int exp, sp_Bigint *mod);
 sp_Bigint *sp_bigint_shr(sp_Bigint *a, int64_t n);
@@ -4559,6 +4611,18 @@ static sp_Bigint *sp_poly_int_operand(sp_RbVal v, const char *m) {
   sp_raise_cls("TypeError", sp_sprintf("%s can't be coerced into Integer", sp_convert_src_name(v)));
   (void)m; return NULL;
 }
+/* Integer#pow(e) on a boxed receiver: only an Integer has pow (a Float
+   has `**` alone), so any other value is CRuby's NoMethodError, with the
+   exponent as its args, where sp_poly_pow took it for a number to raise */
+static sp_RbVal sp_poly_pow(sp_RbVal a, sp_RbVal b);   /* defined below */
+static SP_UNUSED sp_RbVal sp_poly_int_pow(sp_RbVal v, sp_RbVal e) {
+  if (v.tag != SP_TAG_INT && v.tag != SP_TAG_BIGINT) {
+    /* the args array allocates: keep both values alive across it */
+    SP_GC_ROOT_RBVAL(v); SP_GC_ROOT_RBVAL(e);
+    sp_raise_nomethod(sp_nomethod_msg_args("pow", v, 1, &e));
+  }
+  return sp_poly_pow(v, e);
+}
 static sp_RbVal sp_poly_int_powmod(sp_RbVal v, sp_RbVal e, sp_RbVal m) {
   if (v.tag != SP_TAG_INT && v.tag != SP_TAG_BIGINT) sp_raise_poly_nomethod("pow", v);
   if (v.tag == SP_TAG_INT && e.tag == SP_TAG_INT && m.tag == SP_TAG_INT) return sp_box_int(sp_powmod(v.v.i, e.v.i, m.v.i));
@@ -4569,13 +4633,25 @@ static sp_RbVal sp_poly_int_powmod(sp_RbVal v, sp_RbVal e, sp_RbVal m) {
   if (sp_bigint_sign(mod) == 0) sp_raise_cls("ZeroDivisionError", "divided by 0");
   return sp_box_bigint(sp_bigint_powmod(base, ei, mod));
 }
+/* Integer#pow(e, m) on a boxed receiver: any other value is CRuby's
+   NoMethodError with both arguments as its args */
+static SP_UNUSED sp_RbVal sp_poly_int_powmod_recv(sp_RbVal v, sp_RbVal e, sp_RbVal m) {
+  if (v.tag != SP_TAG_INT && v.tag != SP_TAG_BIGINT) {
+    SP_GC_ROOT_RBVAL(v); SP_GC_ROOT_RBVAL(e); SP_GC_ROOT_RBVAL(m);   /* across the args array */
+    sp_RbVal pa[2] = { e, m };   /* the call's arguments, as NoMethodError#args */
+    sp_raise_nomethod(sp_nomethod_msg_args("pow", v, 2, pa));
+  }
+  return sp_poly_int_powmod(v, e, m);
+}
 static sp_RbVal sp_poly_int_ceildiv(sp_RbVal v, sp_RbVal d) {
   if (v.tag != SP_TAG_INT && v.tag != SP_TAG_BIGINT) sp_raise_poly_nomethod("ceildiv", v);
   if (v.tag == SP_TAG_INT && d.tag == SP_TAG_INT) return sp_box_int(sp_ceildiv(v.v.i, d.v.i));
-  /* CRuby: -div(-other) */
+  /* CRuby: -div(-other). Integer#div, not `/`: over a Float divisor `/` is
+     the real quotient, so 7.ceildiv(2.5) answered 2.8 (CRuby: 3) and a NaN
+     divisor NaN (CRuby FloatDomainError) */
   SP_GC_ROOT_RBVAL(v); SP_GC_ROOT_RBVAL(d);
   sp_RbVal nd = sp_poly_neg(d); SP_GC_ROOT_RBVAL(nd);
-  sp_RbVal q = sp_poly_div(v, nd); SP_GC_ROOT_RBVAL(q);
+  sp_RbVal q = sp_poly_div_m(v, nd); SP_GC_ROOT_RBVAL(q);
   return sp_poly_neg(q);
 }
 /* allbits? / anybits? / nobits? on a boxed receiver: an Integer pair tests
@@ -5326,7 +5402,42 @@ static sp_RbVal sp_poly_range_pct(sp_RbVal a, sp_RbVal b) {
     return sp_range_endless_step_v(sp_box_float(f.first), b);
   return sp_box_nullable_obj((void *)sp_FloatArray_from_step(f.first, f.last, sp_poly_to_f(b), f.excl), SP_BUILTIN_FLT_ARRAY);
 }
-static sp_RbVal sp_poly_mod(sp_RbVal a, sp_RbVal b) { if (a.tag == SP_TAG_OBJ && a.v.p && (a.cls_id == SP_BUILTIN_RANGE || a.cls_id == SP_BUILTIN_FLOAT_RANGE)) return sp_poly_range_pct(a, b); /* Two plain numbers first, as add/sub/mul already do (#3984). */ if (a.tag == SP_TAG_INT && b.tag == SP_TAG_INT) return sp_box_int(sp_imod(a.v.i, b.v.i)); if (a.tag == SP_TAG_FLT && b.tag == SP_TAG_FLT) return sp_box_float(sp_fmod(a.v.f, b.v.f)); if (a.tag == SP_TAG_STR || sp_poly_is_strbuf(a)) return sp_poly_str_mod(sp_poly_strbuf_deref(a), b); /* the user-object arm has to come before the float one: a Float on either side otherwise converted the object to a number (0.0) and answered a division by zero where CRuby coerces. */ if (sp_poly_is_user_obj(a) || sp_poly_is_user_obj(b)) return sp_poly_binop_bad("%", a, b); /* a strbuf RECEIVER already returned through sp_poly_str_mod above */ if (SP_UNLIKELY(sp_poly_is_strbuf(b))) return sp_poly_mod(a, sp_poly_strbuf_deref(b)); if (SP_UNLIKELY(sp_poly_tower_mismatch(a, b))) return sp_poly_binop_bad("%", a, b); if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) return sp_box_float(sp_fmod(sp_poly_to_f(a), sp_poly_to_f(b))); if (sp_poly_is_rational(a) || sp_poly_is_rational(b)) return sp_box_rational(sp_rational_mod(sp_poly_as_rational(a), sp_poly_as_rational(b))); if ((a.tag == SP_TAG_BIGINT || b.tag == SP_TAG_BIGINT)) return sp_box_bigint(sp_bigint_mod(sp_poly_as_bigint(a), sp_poly_as_bigint(b))); /* the sibling helpers (div_m, remainder, fdiv, divmod) all refuse a non-numeric RECEIVER; `%` did not, so nil/Array/Hash/Symbol/true/false reaching here (a poly-dispatch collision default, or plain `nil % 1`) fell through to sp_poly_to_i below and answered 0 instead of raising the method they lack (#4816). */ if (!sp_poly_numeric_p(a) && !sp_poly_is_rational(a) && !sp_poly_is_brat(a)) sp_raise_poly_nomethod("%", a); return sp_box_int(sp_imod(sp_poly_to_i(a), sp_poly_to_i(b))); }  /* sp_fmod: CRuby divisor-sign result + zero-divisor raise */
+static inline int sp_poly_is_exact_num(sp_RbVal v) {
+  return v.tag == SP_TAG_INT || v.tag == SP_TAG_BIGINT || sp_poly_is_rat_kind(v);
+}
+/* An exact n/d (d > 0) reduced, as a Rational: the small one when both
+   parts fit a word, else the big one. */
+static sp_RbVal sp_box_rat_exact(sp_Bigint *n, sp_Bigint *d) {
+  SP_GC_ROOT(n); SP_GC_ROOT(d);
+  sp_Bigint *g = sp_bigint_gcd(n, d); SP_GC_ROOT(g);
+  if (sp_bigint_sign(g) != 0) { n = sp_bigint_div(n, g); d = sp_bigint_div(d, g); }
+  if (sp_bigint_fits_int(n) && sp_bigint_fits_int(d))
+    return sp_box_rational(sp_rational_new((sp_int)sp_bigint_to_int(n), (sp_int)sp_bigint_to_int(d)));
+  return sp_box_brat(n, d);
+}
+/* Numeric#% / #divmod / #remainder of two exact numbers, one of them a
+   Rational of either size, in Bignums: over the common denominator D,
+   a = x/D and b = y/D, so the floor quotient is x div y and the modulo
+   (x mod y)/D; the remainder takes the receiver's sign instead (trunc).
+   The quotient, when asked for, goes to *qout. The paths read a Rational
+   through sp_Rational, so a Bignum operand was 0 and a big Rational raised,
+   or through sp_poly_to_i, which read the Rational as an Integer
+   (7.divmod(Rational(-3, 2)) answered [-7, 0]; CRuby: [-5, (-1/2)]). */
+static sp_RbVal sp_rat_mod_v(sp_RbVal a, sp_RbVal b, int trunc, sp_RbVal *qout) {
+  SP_GC_ROOT_RBVAL(a); SP_GC_ROOT_RBVAL(b);
+  sp_Bigint *an, *ad, *bn, *bd;
+  sp_poly_to_brat(a, &an, &ad); SP_GC_ROOT(an); SP_GC_ROOT(ad);
+  sp_poly_to_brat(b, &bn, &bd); SP_GC_ROOT(bn); SP_GC_ROOT(bd);
+  if (sp_bigint_sign(bn) == 0) sp_raise_cls("ZeroDivisionError", "divided by 0");
+  sp_Bigint *x = sp_bigint_mul(an, bd); SP_GC_ROOT(x);
+  sp_Bigint *y = sp_bigint_mul(bn, ad); SP_GC_ROOT(y);
+  sp_Bigint *m = sp_bigint_mod(x, y); SP_GC_ROOT(m);
+  if (trunc && sp_bigint_sign(m) != 0 && sp_bigint_sign(m) != sp_bigint_sign(x)) m = sp_bigint_sub(m, y);
+  sp_RbVal r = sp_box_rat_exact(m, sp_bigint_mul(ad, bd)); SP_GC_ROOT_RBVAL(r);
+  if (qout) *qout = sp_box_bigint(sp_bigint_div(x, y));
+  return r;
+}
+static sp_RbVal sp_poly_mod(sp_RbVal a, sp_RbVal b) { if (a.tag == SP_TAG_OBJ && a.v.p && (a.cls_id == SP_BUILTIN_RANGE || a.cls_id == SP_BUILTIN_FLOAT_RANGE)) return sp_poly_range_pct(a, b); /* Two plain numbers first, as add/sub/mul already do (#3984). */ if (a.tag == SP_TAG_INT && b.tag == SP_TAG_INT) return sp_box_int(sp_imod(a.v.i, b.v.i)); if (a.tag == SP_TAG_FLT && b.tag == SP_TAG_FLT) return sp_box_float(sp_fmod(a.v.f, b.v.f)); if (a.tag == SP_TAG_STR || sp_poly_is_strbuf(a)) return sp_poly_str_mod(sp_poly_strbuf_deref(a), b); /* the user-object arm has to come before the float one: a Float on either side otherwise converted the object to a number (0.0) and answered a division by zero where CRuby coerces. */ if (sp_poly_is_user_obj(a) || sp_poly_is_user_obj(b)) return sp_poly_binop_bad("%", a, b); /* a strbuf RECEIVER already returned through sp_poly_str_mod above */ if (SP_UNLIKELY(sp_poly_is_strbuf(b))) return sp_poly_mod(a, sp_poly_strbuf_deref(b)); if (SP_UNLIKELY(sp_poly_tower_mismatch(a, b))) return sp_poly_binop_bad("%", a, b); if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) return sp_box_float(sp_fmod(sp_poly_to_f(a), sp_poly_to_f(b))); /* two exact numbers with a Rational: sp_rat_mod_v */ if ((sp_poly_is_rat_kind(a) || sp_poly_is_rat_kind(b)) && sp_poly_is_exact_num(a) && sp_poly_is_exact_num(b)) return sp_rat_mod_v(a, b, 0, NULL); if (sp_poly_is_rational(a) || sp_poly_is_rational(b)) return sp_box_rational(sp_rational_mod(sp_poly_as_rational(a), sp_poly_as_rational(b))); if ((a.tag == SP_TAG_BIGINT || b.tag == SP_TAG_BIGINT)) return sp_box_bigint(sp_bigint_mod(sp_poly_as_bigint(a), sp_poly_as_bigint(b))); /* the sibling helpers (div_m, remainder, fdiv, divmod) all refuse a non-numeric RECEIVER; `%` did not, so nil/Array/Hash/Symbol/true/false reaching here (a poly-dispatch collision default, or plain `nil % 1`) fell through to sp_poly_to_i below and answered 0 instead of raising the method they lack (#4816). */ if (!sp_poly_numeric_p(a) && !sp_poly_is_rational(a) && !sp_poly_is_brat(a)) sp_raise_poly_nomethod("%", a); return sp_box_int(sp_imod(sp_poly_to_i(a), sp_poly_to_i(b))); }  /* sp_fmod: CRuby divisor-sign result + zero-divisor raise */
 /* Numeric#modulo: same computation as `%`, but a receiver with no such
    method spells the message with "modulo" (CRuby distinguishes the two
    call syntaxes) and, unlike `%`, a String has no modulo method at all
@@ -5362,6 +5473,9 @@ static sp_RbVal sp_poly_divmod(sp_RbVal a, sp_RbVal b) {
      below instead of raising the method it lacks. */
   if (!sp_poly_numeric_p(a) && !sp_poly_is_rational(a) && !sp_poly_is_brat(a))
     sp_raise_poly_nomethod("divmod", a);
+  /* the operands are read after the pair's allocation, which can collect a
+     fresh one (a Bignum or a big Rational built for this call) */
+  SP_GC_ROOT_RBVAL(a); SP_GC_ROOT_RBVAL(b);
   sp_PolyArray *out = sp_PolyArray_new();
   SP_GC_ROOT(out);
   /* A Float operand is answered by the Float arm below, not read as a
@@ -5369,6 +5483,15 @@ static sp_RbVal sp_poly_divmod(sp_RbVal a, sp_RbVal b) {
      and `Rational(3,4).divmod(0.5)` raised ZeroDivisionError on a divisor
      that is not zero. The sibling helpers (mod, div_m, remainder) all test
      for a Float ahead of their Rational arm; this one did not. */
+  /* two exact numbers with a Rational divide exactly (sp_rat_mod_v) */
+  if ((sp_poly_is_rat_kind(a) || sp_poly_is_rat_kind(b)) &&
+      sp_poly_is_exact_num(a) && sp_poly_is_exact_num(b)) {
+    sp_RbVal q;
+    sp_RbVal m = sp_rat_mod_v(a, b, 0, &q); SP_GC_ROOT_RBVAL(m); SP_GC_ROOT_RBVAL(q);
+    sp_PolyArray_push(out, q);
+    sp_PolyArray_push(out, m);
+    return sp_box_poly_array(out);
+  }
   if (!(a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) &&
       (sp_poly_is_rational(a) || sp_poly_is_rational(b))) {
     sp_Rational ra = sp_poly_as_rational(a), rb = sp_poly_as_rational(b);
@@ -5383,9 +5506,10 @@ static sp_RbVal sp_poly_divmod(sp_RbVal a, sp_RbVal b) {
     if (fb == 0) sp_raise_cls("ZeroDivisionError", "divided by 0");
     sp_float q, m;
     sp_flo_divmod(fa, fb, &q, &m);
-    /* CRuby answers the quotient as an Integer (7.0.divmod(3) => [2, 1.0]);
-       only one that no Integer can hold stays a Float. */
-    sp_PolyArray_push(out, (q >= -9.2e18 && q <= 9.2e18) ? sp_box_int((sp_int)q) : sp_box_float(q));
+    /* CRuby answers the quotient as an Integer (7.0.divmod(3) => [2, 1.0]),
+       a Bignum past the word ((2**70).divmod(2.5) answered a Float), and a
+       NaN one is FloatDomainError (sp_box_f_to_int) */
+    { sp_RbVal qi = sp_box_f_to_int(q); SP_GC_ROOT_RBVAL(qi); sp_PolyArray_push(out, qi); }
     sp_PolyArray_push(out, sp_box_float(m));
     return sp_box_poly_array(out);
   }
@@ -5404,6 +5528,31 @@ static sp_RbVal sp_poly_divmod(sp_RbVal a, sp_RbVal b) {
     return sp_box_poly_array(out);
   }
 }
+/* Numeric#div of two exact numbers, one of them a Rational of either size:
+   the floor of the exact quotient, a/b = (an*bd)/(ad*bn), in Bignums.
+   sp_bigint_div floors toward -inf whatever the signs. Read through a
+   double, Rational(2**60 - 1, 2**60) is 1.0, so 1.ceildiv of it answered 1
+   (CRuby: 2), and a Bignum operand lost its low digits. */
+static sp_RbVal sp_rat_floor_div_v(sp_RbVal a, sp_RbVal b) {
+  SP_GC_ROOT_RBVAL(a); SP_GC_ROOT_RBVAL(b);   /* a's conversion allocates before b is read */
+  sp_Bigint *an, *ad, *bn, *bd;
+  sp_poly_to_brat(a, &an, &ad); SP_GC_ROOT(an); SP_GC_ROOT(ad);
+  sp_poly_to_brat(b, &bn, &bd); SP_GC_ROOT(bn); SP_GC_ROOT(bd);
+  if (sp_bigint_sign(bn) == 0) sp_raise_cls("ZeroDivisionError", "divided by 0");
+  sp_Bigint *num = sp_bigint_mul(an, bd); SP_GC_ROOT(num);
+  sp_Bigint *den = sp_bigint_mul(ad, bn); SP_GC_ROOT(den);
+  return sp_box_bigint(sp_bigint_div(num, den));
+}
+/* The same for a typed Bignum receiver and a typed Rational divisor, which
+   the Bignum#div arm had no operand form for (a compile-time refusal):
+   floor(a * den / num), with den > 0. */
+static sp_Bigint *sp_bigint_div_rat(sp_Bigint *a, sp_Rational b) {
+  if (b.num == 0) sp_raise_cls("ZeroDivisionError", "divided by 0");
+  SP_GC_ROOT(a);
+  sp_Bigint *d = sp_bigint_new_int(b.den); SP_GC_ROOT(d);
+  sp_Bigint *n = sp_bigint_mul(a, d); SP_GC_ROOT(n);
+  return sp_bigint_div(n, sp_bigint_new_int(b.num));
+}
 /* Numeric#div: the floor of the quotient, always an Integer, whatever the
    operands are (7.0.div(3) => 2). Distinct from `/`, which keeps the operand
    kind, and from #fdiv, which is always a Float (#3800). */
@@ -5411,18 +5560,87 @@ static sp_RbVal sp_poly_div_m(sp_RbVal a, sp_RbVal b) {
   SP_POLY_COERCE_NUM("div");
   if (!sp_poly_numeric_p(a) && !sp_poly_is_rational(a) && !sp_poly_is_brat(a))
     sp_raise_poly_nomethod("div", a);
+  /* a Rational with no Float beside it divides exactly (sp_rat_floor_div_v);
+     a big Rational fell to the Integer arms below, which raised RangeError,
+     or ZeroDivisionError beside a Bignum */
+  if ((sp_poly_is_rat_kind(a) || sp_poly_is_rat_kind(b)) &&
+      sp_poly_is_exact_num(a) && sp_poly_is_exact_num(b))
+    return sp_rat_floor_div_v(a, b);
   if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT ||
-      sp_poly_is_rational(a) || sp_poly_is_rational(b)) {
-    sp_float fb = sp_poly_to_f_with_rational(b);
-    if (fb == 0) sp_raise_cls("ZeroDivisionError", "divided by 0");
-    sp_float q = floor(sp_poly_to_f_with_rational(a) / fb);
-    return (q >= -9.2e18 && q <= 9.2e18) ? sp_box_int((sp_int)q) : sp_box_float(q);
-  }
+      sp_poly_is_rational(a) || sp_poly_is_rational(b))
+    return sp_float_div_v(sp_poly_to_f_with_rational(a), sp_poly_to_f_with_rational(b));
   /* a Bignum operand: sp_poly_to_i truncates it to 64 bits, so this answered a
      number seven orders of magnitude out. sp_bigint_div floors toward -inf,
      which is what Integer#div does. */
   if ((a.tag == SP_TAG_BIGINT || b.tag == SP_TAG_BIGINT)) return sp_box_bigint(sp_bigint_div(sp_poly_as_bigint(a), sp_poly_as_bigint(b)));
   return sp_box_int(sp_idiv(sp_poly_to_i(a), sp_poly_to_i(b)));
+}
+/* Integer#div with a divisor known only at run time, in a call typed
+   Integer. sp_int_div_boxed read a Bignum or a Rational divisor as an
+   Integer argument, so 7.div(2**65) raised ZeroDivisionError (CRuby: 0) and
+   7.div(Rational(3, 2)) answered 7 (CRuby: 4); those divide as Numeric#div
+   does, and a quotient past the word is the RangeError an Integer overflow
+   raises (promote types the call boxed instead). A Float divides as the
+   typed Integer#div(Float) arm does; an Integer as before. */
+static sp_int sp_int_div_poly(sp_int a, sp_RbVal v) {
+  if (v.tag == SP_TAG_INT) return sp_int_div_boxed(a, v);
+  if (v.tag == SP_TAG_FLT) return sp_float_div_i((sp_float)a, v.v.f);
+  if (v.tag == SP_TAG_BIGINT || sp_poly_is_rat_kind(v)) {
+    sp_RbVal q = sp_poly_div_m(sp_box_int(a), v);
+    if (q.tag != SP_TAG_INT) sp_raise_cls("RangeError", "integer overflow in div");
+    return q.v.i;
+  }
+  return sp_int_div_boxed(a, v);
+}
+/* Bignum#div with a divisor known only at run time: sp_poly_as_bigint read
+   a Float divisor truncated and a Rational one as 0, so (2**70).div(2.5)
+   answered 2**69 (CRuby: 472236648286964547584) and
+   (2**70).div(Rational(3, 2)) raised ZeroDivisionError. Those divide as
+   Numeric#div does. */
+static sp_Bigint *sp_bigint_div_poly(sp_Bigint *a, sp_RbVal v) {
+  SP_GC_ROOT(a); SP_GC_ROOT_RBVAL(v);
+  if (v.tag == SP_TAG_FLT || sp_poly_is_rat_kind(v))
+    return sp_poly_as_bigint(sp_poly_div_m(sp_box_bigint(a), v));
+  return sp_bigint_div(a, sp_poly_as_bigint(v));
+}
+/* An Integer's div, divmod, % and remainder by a typed Rational. The
+   word-sized forms (sp_rational_div and its siblings) hold a/b's numerator
+   a * b.den in an sp_Rational, which raised "Rational out of sp_int range"
+   where the answer fits: 7 % Rational(1, 2**62) is (0/1), and
+   (2**62).div(Rational(2**62 - 1, 3)) is 3. While a * b.den stays within
+   half a word every step of theirs fits, and they answer; past it the exact
+   Bignum forms do (sp_rat_floor_div_v, sp_rat_mod_v). */
+static inline sp_bool sp_int_rat_word_p(sp_int a, sp_Rational b) {
+  sp_int x;
+  return !sp_int_mul_overflow_p(a, b.den, &x) && x < INTPTR_MAX / 2 && x > -(INTPTR_MAX / 2);
+}
+/* the floor, which the Integer slot holds or raises for as an overflow */
+static sp_int sp_int_rat_div(sp_int a, sp_Rational b) {
+  if (sp_int_rat_word_p(a, b)) return sp_rational_floor_i(sp_rational_div(sp_rational_new(a, 1), b));
+  sp_RbVal q = sp_rat_floor_div_v(sp_box_int(a), sp_box_rational(b));
+  if (q.tag != SP_TAG_INT) sp_raise_cls("RangeError", "integer overflow in div");
+  return q.v.i;
+}
+/* the modulo and the remainder are smaller than b, so an sp_Rational holds them */
+static sp_Rational sp_int_rat_mod(sp_int a, sp_Rational b) {
+  if (sp_int_rat_word_p(a, b)) return sp_rational_mod(sp_rational_new(a, 1), b);
+  return sp_poly_as_rational(sp_rat_mod_v(sp_box_int(a), sp_box_rational(b), 0, NULL));
+}
+static sp_Rational sp_int_rat_rem(sp_int a, sp_Rational b) {
+  if (sp_int_rat_word_p(a, b)) return sp_rational_rem(sp_rational_new(a, 1), b);
+  return sp_poly_as_rational(sp_rat_mod_v(sp_box_int(a), sp_box_rational(b), 1, NULL));
+}
+/* [floor quotient, modulo]: the quotient may be a Bignum */
+static sp_PolyArray *sp_int_rat_divmod(sp_int a, sp_Rational b) {
+  if (!sp_int_rat_word_p(a, b))
+    return sp_poly_to_poly_array(sp_poly_divmod(sp_box_int(a), sp_box_rational(b)));
+  sp_Rational ra = sp_rational_new(a, 1);
+  sp_int q = sp_rational_floor_i(sp_rational_div(ra, b));
+  sp_Rational m = sp_rational_sub(ra, sp_rational_mul(sp_rational_new(q, 1), b));
+  sp_PolyArray *out = sp_PolyArray_new(); SP_GC_ROOT(out);
+  sp_PolyArray_push(out, sp_box_int(q));
+  sp_PolyArray_push(out, sp_box_rational(m));
+  return out;
 }
 /* Numeric#remainder: the remainder with the sign of the RECEIVER, which is
    what distinguishes it from #modulo ((-7).remainder(3) is -1, not 2). */
@@ -5430,6 +5648,11 @@ static sp_RbVal sp_poly_remainder(sp_RbVal a, sp_RbVal b) {
   SP_POLY_COERCE_NUM("remainder");
   if (!sp_poly_numeric_p(a) && !sp_poly_is_rational(a) && !sp_poly_is_brat(a))
     sp_raise_poly_nomethod("remainder", a);
+  /* two exact numbers with a Rational, a Bignum or a big Rational among
+     them, in Bignums (sp_rat_mod_v) */
+  if ((sp_poly_is_rat_kind(a) || sp_poly_is_rat_kind(b)) &&
+      sp_poly_is_exact_num(a) && sp_poly_is_exact_num(b))
+    return sp_rat_mod_v(a, b, 1, NULL);
   /* Two exact operands answer exactly, as the typed path does: reading a
      Rational through a double turned `Rational(3,4).remainder(2)` into 0.75
      where CRuby (and spinel's own typed arm) answer (3/4). */
@@ -5443,7 +5666,9 @@ static sp_RbVal sp_poly_remainder(sp_RbVal a, sp_RbVal b) {
       sp_poly_is_rational(a) || sp_poly_is_rational(b)) {
     sp_float fa = sp_poly_to_f_with_rational(a), fb = sp_poly_to_f_with_rational(b);
     if (fb == 0) sp_raise_cls("ZeroDivisionError", "divided by 0");
-    return sp_box_float(fa - fb * trunc(fa / fb));
+    /* fmod is exact: a - b * trunc(a / b) rounded the quotient, so a
+       Bignum's (2**70).remainder(2.5) answered 0.0 (CRuby: 1.5) */
+    return sp_box_float(fmod(fa, fb));
   }
   if ((a.tag == SP_TAG_BIGINT || b.tag == SP_TAG_BIGINT)) return sp_box_bigint(sp_bigint_remainder(sp_poly_as_bigint(a), sp_poly_as_bigint(b)));
   { sp_int ia = sp_poly_to_i(a), ib = sp_poly_to_i(b);
@@ -5667,6 +5892,19 @@ static sp_RbVal sp_poly_pow(sp_RbVal a, sp_RbVal b) {
   }
   double r = pow((double)sp_poly_to_f(a), (double)sp_poly_to_f(b));
   return sp_box_float((sp_float)r);
+}
+/* `**` on a boxed receiver that may hold a value with no `**` (the emitter
+   calls sp_poly_pow itself for a receiver typed a number): nil, a String or
+   a Symbol is CRuby's NoMethodError, where sp_poly_pow converted it to a
+   Float and raised TypeError or ArgumentError. A number takes one tag
+   compare to reach sp_poly_pow; a user object and a shared-string handle
+   keep sp_poly_pow's own order. */
+static SP_UNUSED sp_RbVal sp_poly_pow_recv(sp_RbVal a, sp_RbVal b) {
+  if (SP_LIKELY(sp_poly_tower_p(a)) || sp_poly_is_user_obj(a) || sp_poly_is_user_obj(b))
+    return sp_poly_pow(a, b);
+  if (SP_UNLIKELY(sp_poly_is_strbuf(a) || sp_poly_is_strbuf(b)))
+    return sp_poly_pow_recv(sp_poly_strbuf_deref(a), sp_poly_strbuf_deref(b));
+  return sp_poly_binop_bad("**", a, b);
 }
 /* sp_poly_shl is defined after sp_PolyArray_push (below) so the
    push-dispatch path can call it directly. The Integer-bit-shift
@@ -8144,8 +8382,20 @@ static sp_RbVal sp_FloatArray_uniq_bangq(sp_FloatArray *a) {
 }
 /* uniq dedups with eql? (class-strict: 1 and 1.0 both survive), as CRuby. */
 static sp_bool sp_poly_eql(sp_RbVal a, sp_RbVal b);
-static void sp_PolyArray_uniq_bang(sp_PolyArray*a){sp_gc_wb((void*)a); if(!a||a->frozen){if(a&&a->frozen)sp_raise_frozen_array_at(a, SP_BUILTIN_POLY_ARRAY);return;}for(sp_int i=0;i<a->len;){int dup=0;for(sp_int j=0;j<i;j++){if(sp_poly_eql(a->data[j],a->data[i])){dup=1;break;}}if(dup){for(sp_int k2=i;k2<a->len-1;k2++)a->data[k2]=a->data[k2+1];a->len--;}
-else i++;}}
+/* Each element is compared, in order, with the ones kept before it -- the
+   same eql? calls in the same order as before -- and a kept one moves down
+   to the end of the kept prefix. Shifting the whole tail down over every
+   duplicate made a run of duplicates cost a pass of the array each. */
+static void sp_PolyArray_uniq_bang(sp_PolyArray*a){sp_gc_wb((void*)a); if(!a||a->frozen){if(a&&a->frozen)sp_raise_frozen_array_at(a, SP_BUILTIN_POLY_ARRAY);return;}
+  sp_int w=0;
+  for(sp_int i=0;i<a->len;i++){
+    sp_RbVal v=a->data[i];
+    int dup=0;
+    for(sp_int j=0;j<w&&!dup;j++)dup=sp_poly_eql(a->data[j],v);
+    if(!dup)a->data[w++]=v;
+  }
+  a->len=w;
+}
 static sp_RbVal sp_PolyArray_sample(sp_PolyArray *a) { if (a->len <= 0) return sp_box_nil(); return a->data[sp_krand_below(a->len)]; }
 
 /* An array of one user class narrowed to a pointer array (#4444): each
@@ -10194,6 +10444,11 @@ static sp_RbVal sp_poly_index_poly(sp_RbVal recv, sp_RbVal idx) {
   /* nil is no array index: CRuby's TypeError, not element 0 */
   if (idx.tag == SP_TAG_NIL && recv.tag == SP_TAG_OBJ && sp_poly_is_array_kind(recv.cls_id))
     sp_raise_cls("TypeError", "no implicit conversion from nil to integer");
+  if (recv.tag == SP_TAG_OBJ && sp_poly_is_array_kind(recv.cls_id) && idx.tag != SP_TAG_BIGINT &&
+      !(idx.tag == SP_TAG_OBJ && idx.cls_id == SP_BUILTIN_RANGE)) {
+    if (idx.tag == SP_TAG_FLT) return sp_poly_arr_get_hash(recv, (sp_int)idx.v.f);
+    sp_raise_cls("TypeError", sp_sprintf("no implicit conversion of %s into Integer", sp_poly_class_name(idx)));
+  }
   /* heterogeneous-key hash: any key kind (incl. Method) looks up directly. */
   if (recv.tag == SP_TAG_OBJ && recv.cls_id == SP_BUILTIN_POLY_POLY_HASH)
     return sp_PolyPolyHash_get((sp_PolyPolyHash *)recv.v.p, idx);
@@ -10956,6 +11211,7 @@ static sp_RbVal sp_poly_arr_set_hash(sp_RbVal v, sp_int idx, sp_RbVal val) {
 /* poly_val[str_key] = val: runtime dispatch for poly recv `[]=` with string key. */
 static sp_RbVal sp_poly_set_str(sp_RbVal v, const char *key, sp_RbVal val) {
   sp_poly_coll_chk(v, "[]=");
+  if (v.tag == SP_TAG_SYM) sp_raise_poly_nomethod("[]=", v);   /* as sp_poly_arr_set */
   if (v.tag != SP_TAG_OBJ) return val;
   /* An Array indexed by a String is a TypeError, not a write to be dropped:
      the static path raises it, and a boxed receiver reaching the same call
@@ -10983,6 +11239,7 @@ void sp_poly_hash_merge_into(sp_RbVal dst, sp_RbVal src);
 /* poly_val[sym_key] = val: runtime dispatch for poly recv `[]=` with symbol key. */
 static sp_RbVal sp_poly_set_sym(sp_RbVal v, sp_sym key, sp_RbVal val) {
   sp_poly_coll_chk(v, "[]=");
+  if (v.tag == SP_TAG_SYM) sp_raise_poly_nomethod("[]=", v);   /* as sp_poly_arr_set */
   if (v.tag != SP_TAG_OBJ) return val;
   if (sp_poly_is_array_kind(v.cls_id))
     sp_raise_cls("TypeError", SPL("no implicit conversion of Symbol into Integer"));
@@ -11004,6 +11261,8 @@ static sp_RbVal sp_poly_set_sym(sp_RbVal v, sp_sym key, sp_RbVal val) {
 /* poly_val[int_idx] = val: runtime dispatch for poly recv `[]=` with int index. */
 static sp_RbVal sp_poly_arr_set(sp_RbVal v, sp_int idx, sp_RbVal val) {
   sp_poly_coll_chk(v, "[]=");
+  /* a Symbol has `[]` but no `[]=`: the store was a silent no-op */
+  if (v.tag == SP_TAG_SYM) sp_raise_poly_nomethod("[]=", v);
   if (v.tag != SP_TAG_OBJ) return val;
   switch (v.cls_id) {
     case SP_BUILTIN_INT_ARRAY:  sp_IntArray_set((sp_IntArray*)v.v.p, idx,
@@ -11123,9 +11382,60 @@ static sp_RbVal sp_poly_arr_widen_and_set(sp_RbVal v, sp_int idx, sp_RbVal val) 
   sp_poly_arr_set(v, idx, val);
   return v;
 }
+/* `s[key] = v` on a boxed receiver, as String#[]= takes its key: an
+   Integer index (one character), a Range, a String (its first match;
+   IndexError when there is none) or a Regexp. sp_poly_set_str and
+   sp_poly_set_poly have no String arm, so the store was dropped. A plain
+   String splices to a fresh buffer, which is answered for the caller to
+   store back; a shared one absorbs the splice and is answered itself. Any
+   other receiver, or key, stores as before and is answered unchanged. */
+static sp_RbVal sp_poly_str_aset_key(sp_RbVal v, sp_RbVal key, sp_RbVal val) {
+  int re = key.tag == SP_TAG_OBJ && key.cls_id == SP_BUILTIN_REGEX && key.v.p;
+  int rng = key.tag == SP_TAG_OBJ && key.cls_id == SP_BUILTIN_RANGE && key.v.p;
+  if (!(v.tag == SP_TAG_STR || sp_poly_is_strbuf(v)) || !(key.tag == SP_TAG_STR || key.tag == SP_TAG_INT || re || rng)) {
+    if (key.tag == SP_TAG_STR) sp_poly_set_str(v, key.v.s ? key.v.s : sp_str_empty, val);
+    else sp_poly_set_poly(v, key, val);
+    return v;
+  }
+  if (v.tag == SP_TAG_STR && v.v.s && sp_str_is_frozen_val(v.v.s)) sp_raise_frozen_str(v.v.s);
+  SP_GC_ROOT_RBVAL(v); SP_GC_ROOT_RBVAL(key); SP_GC_ROOT_RBVAL(val);
+  const char *cur = v.tag == SP_TAG_STR ? (v.v.s ? v.v.s : sp_str_empty) : sp_String_cstr((sp_String *)v.v.p);
+  const char *rep = val.tag == SP_TAG_STR ? (val.v.s ? val.v.s : sp_str_empty) : sp_poly_to_s(val);
+  SP_GC_ROOT(cur); SP_GC_ROOT(rep);
+  const char *out;
+  if (re) out = sp_str_splice_re((mrb_regexp_pattern *)key.v.p, cur, rep);
+  else if (key.tag == SP_TAG_INT) out = sp_str_splice_at(cur, key.v.i, 1, rep, 0);
+  else if (rng) {
+    /* the span as CRuby's rb_range_beg_len reads it: a Float end through
+       to_int, a beginless one from 0, an endless one (INTPTR_MAX) to the
+       end without the e - a + 1 that overflows, and a begin outside the
+       String a RangeError naming the Range */
+    sp_Range r0 = *(sp_Range *)key.v.p, r = sp_range_ix(r0);
+    sp_int len = (sp_int)sp_str_length(cur);
+    sp_int a = r.first == INTPTR_MIN ? 0 : (r.first < 0 ? r.first + len : r.first);
+    if (a < 0 || a > len) sp_raise_cls("RangeError", sp_sprintf("%s out of range", sp_range_str(r0)));
+    sp_int n;
+    if (r.last == INTPTR_MAX) n = len - a;
+    else {
+      sp_int e = r.last < 0 ? r.last + len : r.last;
+      n = e - a + (r.excl ? 0 : 1);
+    }
+    out = sp_str_splice_at(cur, a, n < 0 ? 0 : n, rep, 1);
+  }
+  else {
+    const char *k = key.v.s ? key.v.s : sp_str_empty;
+    sp_int at = sp_str_index_opt(cur, k);
+    if (at == SP_INT_NIL) sp_raise_cls("IndexError", "string not matched");
+    out = sp_str_splice_at(cur, at, (sp_int)sp_str_length(k), rep, 0);
+  }
+  if (v.tag == SP_TAG_STR) return sp_box_str(out);
+  sp_String_set_bin((sp_String *)v.v.p, out);
+  return v;
+}
 /* poly_val[poly_key] = val: fully dynamic dispatch for poly recv + poly key. */
 static sp_RbVal sp_poly_set_poly(sp_RbVal v, sp_RbVal key, sp_RbVal val) {
   sp_poly_coll_chk(v, "[]=");
+  if (v.tag == SP_TAG_SYM) sp_raise_poly_nomethod("[]=", v);   /* as sp_poly_arr_set */
   if (v.tag != SP_TAG_OBJ) return val;
   /* a user object's own []= */
   if (SP_UNLIKELY(sp_poly_is_user_obj(v) && sp_user_aset_hook)) {
@@ -14655,7 +14965,49 @@ static int sp_range_empty_region(sp_range_end_t b, sp_range_end_t e, int excl) {
 /* Range#overlap? between two numeric Ranges, as CRuby's range_overlap
    decides it: some value lies in both, so neither may be empty. The receiver
    is no Range: NoMethodError; the argument is none: TypeError. */
+/* Range#overlap? for a String Range receiver, as CRuby's range_overlap. An
+   end is nil, a String or a number (sp_range_end_t); a String and a number
+   are incomparable, which CRuby reads as an empty region, and two
+   incomparable begins as no overlap. */
+typedef struct { int nil; const char *s; int num; sp_range_end_t n; } sp_srange_end_t;
+static int sp_srange_end_cmp(sp_srange_end_t a, sp_srange_end_t b) {
+  if (a.nil || b.nil) return a.nil && b.nil ? 0 : 2;
+  if (a.num != b.num) return 2;
+  if (a.num) return sp_range_end_cmp(a.n, b.n);
+  int c = strcmp(a.s, b.s);
+  return (c > 0) - (c < 0);
+}
+static int sp_srange_empty_region(sp_srange_end_t b, sp_srange_end_t e, int excl) {
+  if (b.nil || e.nil) return 0;
+  int c = sp_srange_end_cmp(b, e);
+  if (c == 2) return 1;
+  return excl ? c >= 0 : c > 0;
+}
+static SP_UNUSED sp_bool sp_srange_overlap_v(sp_StrRange a, sp_RbVal o) {
+  sp_srange_end_t ab = { !a.first, a.first, 0, {0} }, ae = { !a.last, a.last, 0, {0} };
+  sp_srange_end_t ob, oe; int ox = 0;
+  memset(&ob, 0, sizeof ob); memset(&oe, 0, sizeof oe);
+  if (o.tag == SP_TAG_OBJ && o.cls_id == SP_BUILTIN_STR_RANGE && o.v.p) {
+    sp_StrRange r = *(sp_StrRange *)o.v.p;
+    ob.nil = !r.first; ob.s = r.first; oe.nil = !r.last; oe.s = r.last; ox = r.excl;
+  }
+  else {
+    sp_range_end_t nb, ne;
+    if (!sp_range_ends(o, &nb, &ne, &ox))
+      sp_raise_cls("TypeError", sp_sprintf("wrong argument type %s (expected Range)", sp_poly_class_name(o)));
+    ob.nil = nb.nil; ob.num = 1; ob.n = nb; oe.nil = ne.nil; oe.num = 1; oe.n = ne;
+  }
+  if (sp_srange_empty_region(ab, oe, ox) || sp_srange_empty_region(ob, ae, a.excl)) return FALSE;
+  if (!ab.nil && !ob.nil) {
+    int c = sp_srange_end_cmp(ab, ob);
+    if (c == 2) return FALSE;
+    if (c == 0) return TRUE;
+  }
+  else if (ab.nil && !ae.nil && ob.nil) return sp_srange_end_cmp(ae, oe) != 2;
+  return !sp_srange_empty_region(ab, ae, a.excl) && !sp_srange_empty_region(ob, oe, ox);
+}
 static sp_bool sp_range_overlap_v(sp_RbVal a, sp_RbVal o) {
+  if (a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_STR_RANGE && a.v.p) return sp_srange_overlap_v(*(sp_StrRange *)a.v.p, o);
   sp_range_end_t ab, ae, ob, oe; int ax = 0, ox = 0;
   if (!sp_range_ends(a, &ab, &ae, &ax)) sp_raise_nomethod(sp_nomethod_msg("overlap?", a));
   if (!sp_range_ends(o, &ob, &oe, &ox)) {
@@ -14769,6 +15121,17 @@ static sp_RbVal sp_poly_hash_dproc_bridge(sp_PolyPolyHash *h, sp_RbVal key, void
   return sp_box_nil();
 }
 sp_PolyPolyHash *sp_poly_hash_merge(sp_RbVal a, sp_RbVal b);
+/* `recv.merge(other)` on a boxed receiver: only a Hash has merge, so nil or
+   any other value is CRuby's NoMethodError, with the argument staged as its
+   args. sp_poly_hash_merge itself takes nil as an empty start (the keyword
+   folds call it so). */
+static SP_UNUSED sp_PolyPolyHash *sp_poly_hash_merge_m(sp_RbVal a, sp_RbVal b) {
+  if (!(a.tag == SP_TAG_OBJ && a.v.p && sp_poly_is_hash_kind(a.cls_id))) {
+    sp_raise_nomethod(sp_nomethod_msg_args("merge", a, 1, &b));
+    return NULL;
+  }
+  return sp_poly_hash_merge(a, b);
+}
 /* A boxed hash as the concrete symbol-keyed variant: itself when it already is
    one, rebuilt when every key is a Symbol (a hash folded through the general
    merge path is a PolyPolyHash regardless of its keys), and a TypeError only

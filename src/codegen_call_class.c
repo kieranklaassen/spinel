@@ -9,6 +9,7 @@
 #include "builtin_ops.h"
 #include "call_plan.h"
 #include "codegen_call_arms.h"
+#include "share.h"
 
 static void emit_attr_writer_converted(Compiler *c, int arg, TyKind ivt, int tmp,
                                        const char *name, Buf *b) {
@@ -748,7 +749,8 @@ int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
         for (int ai = 0; ai < fixed_argc && ai < argc; ai++) {
           if (ai) buf_puts(&call_buf, ", ");
           const char *spec = c->ffi_funcs[fi].args[ai];
-          TyKind at = comp_ntype(c, argv[ai]);
+          Repr ar = repr_of(c, argv[ai]);
+          TyKind at = ar.as_ty;
           int cbidx = ffi_find_callback(c, rcmod, spec);
           if (cbidx >= 0) { emit_ffi_callback_arg(c, cbidx, argv[ai], &call_buf); continue; }
           size_t arg_at = call_buf.len;   /* the converted argument, for the temp form */
@@ -827,21 +829,21 @@ int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
           else if (sp_streq(spec, "int_array")) {
             /* Hand off element data, never the array struct pointer (which
                would pun the header / read boxed sp_RbVal tags as ints). */
-            if (at == TY_INT_ARRAY)        { buf_puts(&call_buf, "sp_IntArray_ffi_data(");   emit_expr(c, argv[ai], &call_buf); buf_puts(&call_buf, ")"); }
-            else if (at == TY_POLY_ARRAY)  { buf_puts(&call_buf, "sp_PolyArray_ffi_int_data("); emit_expr(c, argv[ai], &call_buf); buf_puts(&call_buf, ")"); }
+            if (ar.elem == TY_INT)        { buf_puts(&call_buf, "sp_IntArray_ffi_data(");   emit_expr(c, argv[ai], &call_buf); buf_puts(&call_buf, ")"); }
+            else if (ar.elem == TY_POLY)  { buf_puts(&call_buf, "sp_PolyArray_ffi_int_data("); emit_expr(c, argv[ai], &call_buf); buf_puts(&call_buf, ")"); }
             else if (at == TY_POLY)        { buf_puts(&call_buf, "sp_ffi_int_array_data("); emit_expr(c, argv[ai], &call_buf); buf_puts(&call_buf, ")"); }
             else                           { buf_puts(&call_buf, "((const int64_t *)("); emit_expr(c, argv[ai], &call_buf); buf_puts(&call_buf, "))"); }
           }
           else if (sp_streq(spec, "float_array")) {
-            if (at == TY_FLOAT_ARRAY)      { buf_puts(&call_buf, "sp_FloatArray_ffi_data(");  emit_expr(c, argv[ai], &call_buf); buf_puts(&call_buf, ")"); }
-            else if (at == TY_POLY_ARRAY)  { buf_puts(&call_buf, "sp_PolyArray_ffi_float_data("); emit_expr(c, argv[ai], &call_buf); buf_puts(&call_buf, ")"); }
+            if (ar.elem == TY_FLOAT)      { buf_puts(&call_buf, "sp_FloatArray_ffi_data(");  emit_expr(c, argv[ai], &call_buf); buf_puts(&call_buf, ")"); }
+            else if (ar.elem == TY_POLY)  { buf_puts(&call_buf, "sp_PolyArray_ffi_float_data("); emit_expr(c, argv[ai], &call_buf); buf_puts(&call_buf, ")"); }
             else if (at == TY_POLY)        { buf_puts(&call_buf, "sp_ffi_float_array_data("); emit_expr(c, argv[ai], &call_buf); buf_puts(&call_buf, ")"); }
             else                           { buf_puts(&call_buf, "((const double *)("); emit_expr(c, argv[ai], &call_buf); buf_puts(&call_buf, "))"); }
           }
           else {
             /* integer-like: int, uint32, size_t, long, etc. A nil raises
                TypeError, as the ffi gem's NUM2INT does. */
-            if (at != TY_BIGINT) {
+            if (!ar.big) {
               emit_ffi_num_arg(c, argv[ai], at, spec, 0, &call_buf);
             }
             else {
@@ -1171,13 +1173,18 @@ int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
           if (argc >= 1 && _aivt == TY_STRBUF && repr_of(c, argv[0]).kind != RK_BOXED) {
             ClassInfo *_aci = &c->classes[_adefc < 0 ? _arc : _adefc];
             TyKind _avt = repr_of(c, id).as_ty;
-            if (_avt != TY_STRBUF && _aci->ivar_str_shared[_aiv])
-              unsupported_feature(c, id, "an attribute assignment in value position (kept, passed on, or a "
-                                  "method's last expression, which the method answers) stores into an instance "
-                                  "variable that is mutated in place through another name, and its value would "
-                                  "be a copy (a String is not yet shared by reference through an assignment's "
-                                  "value). Make the assignment a statement of its own, or read the String back "
-                                  "through the reader.");
+            static const char _amsg[] =
+              "an attribute assignment in value position (kept, passed on, or a method's last expression, "
+              "which the method answers) stores into an instance variable that is mutated in place through "
+              "another name, and its value would be a copy (a String is not yet shared by reference through "
+              "an assignment's value). Make the assignment a statement of its own, or read the String back "
+              "through the reader.";
+            /* --share-strings: the copy is right where the rule does not
+               share the String (share_route_defer) */
+            ShareRoute _aq = share_route(id, argv[0], 0);
+            _aq.carry = SHARE_CARRY_COPY;
+            if (_avt != TY_STRBUF && _aci->ivar_str_shared[_aiv] && !share_route_defer(c, &_aq, _amsg))
+              unsupported_feature(c, id, _amsg);
             buf_printf(b, "_t%d->iv_%s = ", _atmp, iv_c(_abase));
             emit_strbuf_ivar_store(c, _aci->ivar_str_shared[_aiv], argv[0], b);
             if (_avt == TY_STRBUF) buf_printf(b, "; _t%d->iv_%s; })", _atmp, iv_c(_abase));
@@ -1193,7 +1200,7 @@ int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
              widened to Bignum) converts into it, through a temp: the
              assignment's value is still the right-hand side as it came */
           if (argc >= 1 && _aivt != TY_POLY && _aivt != TY_UNKNOWN &&
-              comp_ntype(c, argv[0]) != TY_UNKNOWN &&
+              !repr_of(c, argv[0]).untyped &&
               !store_fits(c, store_value_kind(c, argv[0]), _aivt)) {
             emit_attr_writer_converted(c, argv[0], _aivt, _atmp, _abase, b);
             return 1;

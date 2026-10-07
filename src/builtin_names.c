@@ -58,6 +58,10 @@ int is_basic_arith(const char *n) {
   return sp_streq(n, "+") || sp_streq(n, "-") || sp_streq(n, "*") || sp_streq(n, "/");
 }
 
+int is_int_arith_op(const char *n) {
+  return is_basic_arith(n) || sp_streq(n, "%");
+}
+
 int is_object_root(const char *n) {
   return sp_streq(n, "Object") || sp_streq(n, "BasicObject") || sp_streq(n, "Kernel");
 }
@@ -375,6 +379,15 @@ int is_match_operator(const char *n) {
   return sp_streq(n, "=~") || sp_streq(n, "!~");
 }
 
+/* Object's methods that hand their receiver on to code over its members or
+   bind it into a wrapper: to_enum / enum_for walk each, instance_eval /
+   instance_exec run a block with it as self, method / public_method bind a
+   Method to it. */
+int is_object_receiver_handoff(const char *n) {
+  return sp_streq(n, "to_enum") || sp_streq(n, "enum_for") || is_instance_eval_family(n) ||
+         sp_streq(n, "method") || sp_streq(n, "public_method");
+}
+
 int is_eq_or_ne(const char *n) {
   return sp_streq(n, "==") || sp_streq(n, "!=");
 }
@@ -473,6 +486,10 @@ int is_unary_sign(const char *n) {
   return sp_streq(n, "-@") || sp_streq(n, "+@");
 }
 
+int is_unary_minus(const char *n) {
+  return sp_streq(n, "-@");
+}
+
 int is_text_conversion(const char *n) {
   return sp_streq(n, "to_s") || sp_streq(n, "inspect");
 }
@@ -536,6 +553,10 @@ int is_io_position(const char *n) {
 
 int is_rewind_name(const char *n) {
   return sp_streq(n, "rewind");
+}
+
+int is_io_offset_move(const char *n) {
+  return sp_streq(n, "pos=") || sp_streq(n, "sysseek");
 }
 
 int is_byte_codepoint_each(const char *n) {
@@ -602,6 +623,10 @@ int is_element_access(const char *n) {
   return sp_streq(n, "[]") || sp_streq(n, "[]=");
 }
 
+int is_index_assign(const char *n) {
+  return sp_streq(n, "[]=");
+}
+
 int is_first_or_take(const char *n) {
   return sp_streq(n, "first") || sp_streq(n, "take");
 }
@@ -624,6 +649,15 @@ int is_select_reject_bang(const char *n) {
 
 int is_raise_alias(const char *n) {
   return sp_streq(n, "raise") || sp_streq(n, "fail");
+}
+/* +s alone: a route that answers its String operand unless frozen
+   (--share-strings, emit_strbuf_route) */
+int is_unary_plus(const char *n) {
+  return sp_streq(n, "+@");
+}
+/* Kernel#loop, whose value is what a break gives it */
+int is_loop_name(const char *n) {
+  return sp_streq(n, "loop");
 }
 
 int is_size_or_count(const char *n) {
@@ -680,6 +714,22 @@ int is_div_or_mod(const char *n) {
 
 int is_div_or_modulo(const char *n) {
   return sp_streq(n, "div") || sp_streq(n, "modulo");
+}
+
+int is_div_name(const char *n) {
+  return sp_streq(n, "div");
+}
+
+int is_divmod_name(const char *n) {
+  return sp_streq(n, "divmod");
+}
+
+int is_modulo_name(const char *n) {
+  return sp_streq(n, "modulo");
+}
+
+int is_mod_operator(const char *n) {
+  return sp_streq(n, "%");
 }
 
 int is_initialize_family(const char *n) {
@@ -780,6 +830,10 @@ int is_string_append_or_prepend(const char *n) {
 
 int is_string_append(const char *n) {
   return sp_streq(n, "<<") || sp_streq(n, "concat");
+}
+
+int is_replace_name(const char *n) {
+  return sp_streq(n, "replace");
 }
 
 int is_string_rebind_mutator(const char *n) {
@@ -914,3 +968,16 @@ int array_unseen_add_kind(const char *n) {
 }
 
 int is_scan_name(const char *n) { return sp_streq(n, "scan"); }
+
+/* with_index / with_object: an enumerator link that hands on its source's
+   elements first */
+int is_enumerator_with(const char *n) {
+  return sp_streq(n, "with_index") || sp_streq(n, "with_object");
+}
+int is_lazy_name(const char *n) { return sp_streq(n, "lazy"); }
+int is_concat_name(const char *n) { return sp_streq(n, "concat"); }
+
+/* `Array.new(...)`, by its receiver's constant name and the method */
+int is_array_constructor(const char *recv, const char *meth) {
+  return recv && meth && sp_streq(meth, "new") && sp_streq(recv, "Array");
+}

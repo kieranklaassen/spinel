@@ -657,7 +657,8 @@ sp_StrArray *sp_file_readlines(const char *path) {SP_GC_ROOT_STR(path);
   sp_StrArray *a = sp_StrArray_new();
   SP_GC_ROOT(a);
   FILE *_fp = fopen(path ? path : "", "r");
-  if (!_fp) return a;
+  /* a file that can't be opened raises, as CRuby's (Errno::ENOENT, ...) */
+  if (!_fp) sp_file_raise_errno("rb_sysopen", path);
   /* getline answers each line whole, however long, as ARGF's gets reads it */
   char *_buf = NULL;
   size_t _cap = 0;
@@ -678,7 +679,8 @@ sp_StrArray *sp_file_readlines_chomp(const char *path) {SP_GC_ROOT_STR(path);
   sp_StrArray *a = sp_StrArray_new();
   SP_GC_ROOT(a);
   FILE *_fp = fopen(path ? path : "", "r");
-  if (!_fp) return a;
+  /* a file that can't be opened raises, as CRuby's (Errno::ENOENT, ...) */
+  if (!_fp) sp_file_raise_errno("rb_sysopen", path);
   char *_buf = NULL;
   size_t _cap = 0;
   ssize_t _n;
@@ -3781,6 +3783,10 @@ sp_FloatRange sp_frange_new_o(sp_float f, sp_float l, sp_int e, sp_int om) {
   sp_FloatRange r; r.first = f; r.last = l; r.excl = e; r.omitted = om; r.unfrozen = 0; return r;
 }
 sp_bool sp_frange_cover(sp_FloatRange r, sp_float x) {
+  /* a NaN compares with no bound (Float#<=> answers nil), so CRuby's
+     cover? finds it in no Range, an endless or beginless one included;
+     both tests below are false for it and let it through */
+  if (isnan(x)) return 0;
   if (r.first != -HUGE_VAL && x < r.first) return 0;
   if (r.last != HUGE_VAL && (r.excl ? x >= r.last : x > r.last)) return 0;
   return 1;
@@ -4966,10 +4972,15 @@ SP_NORETURN void sp_raise_nil_cmp(int left_nil, const char *op, const char *cls)
 
 /* A nil that reached a strict Integer argument slot through an `Integer?`
    variable. The literal `s[nil]` already raised this from the emitter; the
-   slot's nil is the same nil, so it gets the same message (#4896). */
+   slot's nil is the same nil, so it gets the same message (#4896). CRuby
+   words it by the conversion the slot makes: 0 rb_num2long's, 1
+   rb_convert_type's (and NUM2SIZET's), 2 NUM2OFFT's, an IO offset (rb_num2long's wording where off_t is a long, rb_num2ll's
+   where it is wider: a 32-bit build, macOS). */
 SP_NORETURN void sp_raise_nil_to_int(int of_wording) {
-  sp_raise_cls("TypeError", of_wording ? "no implicit conversion of nil into Integer"
-                                       : "no implicit conversion from nil to integer");
+  sp_raise_cls("TypeError", of_wording == 2 ? (sizeof(off_t) == sizeof(long) ? "no implicit conversion from nil to integer"
+                                                                              : "no implicit conversion from nil")
+                            : of_wording ? "no implicit conversion of nil into Integer"
+                                         : "no implicit conversion from nil to integer");
 }
 
 /* A real -2^63 headed for a slot that can also hold nil: the slot's nil is

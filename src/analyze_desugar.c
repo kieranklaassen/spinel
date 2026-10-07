@@ -415,6 +415,8 @@ static int masgn_ev_store(Compiler *c, int id, int tgt, int val) {
   nt_node_set_ref(nt, call, "block", -1);
   int line = (int)nt_int(nt, id, "node_line", 0);
   if (line) nt_node_set_int(nt, call, "node_line", line);
+  /* the store a Struct's `[]=` makes is this call (masgn_struct_store) */
+  if (k == NK_IndexTargetNode) nt_node_set_int(nt, tgt, "aset_ev", call + 1);
   return 1;
 }
 int desugar_masgn_store_evidence(Compiler *c) {
@@ -2490,14 +2492,18 @@ int desugar_reduce_proc_arg(Compiler *c) {
     int ex = nt_ref(nt, blk, "expression");
     if (ex < 0) continue;
     const char *exty = nt_type(nt, ex);
-    /* an inline `&proc { }` is rebuilt per call, as a lambda literal is */
     NodeKind exk = nt_kind(nt, ex);
+    /* a read of the name the proc is held in, which the block re-reads
+       per comparison: a constant's and a global's as well as a local's or
+       an ivar's, which left out ran `sort(&CMP)` as a plain sort. An inline
+       `&proc { }` is rebuilt per call, as a lambda literal is */
     int simple = exk == NK_LocalVariableReadNode || exk == NK_InstanceVariableReadNode ||
-                 exk == NK_LambdaNode || is_proc_create(c, ex);
+                 exk == NK_ConstantReadNode || exk == NK_ConstantPathNode ||
+                 exk == NK_GlobalVariableReadNode || exk == NK_LambdaNode || is_proc_create(c, ex);
     /* `&method(:m)` / `&Mod.method(:m)` written in place: building the
        Method has no effect, so calling it per element answers as the one
        CRuby builds once */
-    if (!simple && xform && nt_kind(nt, ex) == NK_CallNode && exty &&
+    if (!simple && xform && exk == NK_CallNode && exty &&
         sp_streq(nt_str(nt, ex, "name") ? nt_str(nt, ex, "name") : "", "method")) {
       int ea = nt_ref(nt, ex, "arguments"), en = 0;
       const int *eav = ea >= 0 ? nt_arr(nt, ea, "arguments", &en) : NULL;
@@ -4668,6 +4674,63 @@ int desugar_array_first_last(Compiler *c) {
   return changed;
 }
 
+/* Interpolation is `to_s`, so a program that REOPENED the part's class with
+   its own to_s owns the conversion: `class Integer; def to_s(base = 10);
+   "INT"; end` makes "x#{5}y" read "xINTy" in CRuby, where the interpolation
+   planner would write the digits. Such a part becomes `<part>.to_s`, which
+   the ordinary call path answers through the reopen, and which inference
+   types like any other call. A String part is NOT one of them: CRuby's
+   interpolation uses a String value as it stands (objtostring's own fast
+   path) and never calls to_s on it, so a reopened String#to_s does not
+   change `"t=#{"ab"}"`. The rewrite cannot be taken back, so it waits for
+   settled types, as desugar_symbol_string_methods does. */
+int desugar_interp_reopened_to_s(Compiler *c) {
+  if (g_infer_optimistic) return 0;
+  const char *const names[] = { "Integer", "Float", "Symbol" };
+  const TyKind kinds[] = { TY_INT, TY_FLOAT, TY_SYMBOL };
+  int own[3], any = 0;
+  for (int k = 0; k < 3; k++) {
+    int ci = comp_class_index(c, names[k]);
+    own[k] = ci >= 0 && comp_method_in_chain(c, ci, "to_s", NULL) >= 0;
+    any |= own[k];
+  }
+  if (!any) return 0;
+  NodeTable *nt = (NodeTable *)c->nt;
+  int changed = 0;
+  NT_FOREACH_KIND(nt, NK_InterpolatedStringNode, id) {
+    int pn = 0;
+    const int *parts = nt_arr(nt, id, "parts", &pn);
+    for (int k = 0; k < pn; k++) {
+      if (nt_kind(nt, parts[k]) != NK_EmbeddedStatementsNode) continue;
+      int st = nt_ref(nt, parts[k], "statements");
+      int bn = 0;
+      const int *body = st >= 0 ? nt_arr(nt, st, "body", &bn) : NULL;
+      int expr = bn > 0 ? body[bn - 1] : -1;
+      if (expr < 0) continue;
+      TyKind t = infer_type(c, expr);
+      int hit = 0;
+      for (int j = 0; j < 3; j++) if (own[j] && t == kinds[j]) hit = 1;
+      if (!hit) continue;
+      int tsc = nt_new_node(nt, "CallNode");
+      if (tsc < 0) continue;
+      nt_node_set_str(nt, tsc, "name", "to_s");
+      nt_node_set_ref(nt, tsc, "receiver", expr);
+      nt_node_set_ref(nt, tsc, "arguments", -1);
+      nt_node_set_ref(nt, tsc, "block", -1);
+      comp_grow_node_arrays(c);
+      c->nscope[tsc] = c->nscope[expr];
+      int *nb = malloc(sizeof *nb * (size_t)bn);
+      if (!nb) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+      memcpy(nb, body, sizeof *nb * (size_t)bn);
+      nb[bn - 1] = tsc;
+      nt_node_set_arr(nt, st, "body", nb, bn);
+      free(nb);
+      changed = 1;
+    }
+  }
+  return changed;
+}
+
 int desugar_array_at(Compiler *c) {
   NodeTable *nt = (NodeTable *)c->nt;
   int changed = 0;
@@ -5050,7 +5113,25 @@ int desugar_index_op_write_user(Compiler *c) {
     if (ak == NK_SplatNode || ak == NK_BlockArgumentNode || ak == NK_KeywordHashNode) continue;
     TyKind rt = infer_type(c, recv);
     int ci = ty_is_object(rt) ? ty_object_class(rt) : -1;
-    if (rt != TY_THREAD && (ci < 0 || comp_method_in_chain(c, ci, "[]", NULL) < 0 || comp_method_in_chain(c, ci, "[]=", NULL) < 0)) continue;
+    /* so does one a Struct's own `[]=` can take (a key no literal names on a
+       receiver typed as the Struct, or a box that can hold one): written as
+       the calls, it stores what the single `[]=` stores, where the op-write
+       on a box set an Array's element only and dropped a member's store */
+    int user = rt == TY_THREAD || (ci >= 0 && comp_method_in_chain(c, ci, "[]", NULL) >= 0 &&
+                                   comp_method_in_chain(c, ci, "[]=", NULL) >= 0);
+    if (!user && !struct_aset_may_reach(c, id)) continue;
+    /* a literal key stays one, so the member it names is the one typed and
+       stored (a receiver typed as the Struct then takes the member's writer) */
+    int lit = !user && (ak == NK_SymbolNode || ak == NK_StringNode || ak == NK_IntegerNode);
+    /* A String member keeps its type, so a key no literal names on a
+       receiver typed as a Struct with one could store a value that does
+       not fit it, a TypeError where it runs: master's refusal stays. */
+    if (!user && !lit && ci >= 0) {
+      int str = 0;
+      for (int m = 0; m < c->classes[ci].nmembers; m++)
+        str |= c->classes[ci].ivar_types[m] == TY_STRING || c->classes[ci].ivar_types[m] == TY_STRBUF;
+      if (str) continue;
+    }
     const char *op = k == NK_IndexOperatorWriteNode ? nt_str(nt, id, "binary_operator") : NULL;
     if (k == NK_IndexOperatorWriteNode && !op) continue;
     char opname[64]; if (op) snprintf(opname, sizeof opname, "%s", op);
@@ -5060,20 +5141,22 @@ int desugar_index_op_write_user(Compiler *c) {
     snprintf(kname, sizeof kname, "__ixk_%s", comp_node_tag(c, id));
     int first = nt->count;
     int rw = nt_new_node(nt, "LocalVariableWriteNode");
-    int kw = nt_new_node(nt, "LocalVariableWriteNode");
-    if (rw < 0 || kw < 0) continue;
+    int kw = lit ? -1 : nt_new_node(nt, "LocalVariableWriteNode");
+    if (rw < 0 || (!lit && kw < 0)) continue;
     nt_node_set_str(nt, rw, "name", rname); nt_node_set_int(nt, rw, "depth", 0);
     nt_node_set_ref(nt, rw, "value", recv);
-    nt_node_set_str(nt, kw, "name", kname); nt_node_set_int(nt, kw, "depth", 0);
-    nt_node_set_ref(nt, kw, "value", key);
-    int k1 = ixw_read(nt, kname);
+    if (!lit) {
+      nt_node_set_str(nt, kw, "name", kname); nt_node_set_int(nt, kw, "depth", 0);
+      nt_node_set_ref(nt, kw, "value", key);
+    }
+    int k1 = lit ? nt_clone_subtree(nt, key) : ixw_read(nt, kname);
     int get = k1 >= 0 ? ixw_call(nt, -1, rname, "[]", &k1, 1) : -1;
     if (get < 0) continue;
     int last = -1;
     if (k == NK_IndexOperatorWriteNode) {
       int bin = nt_new_node(nt, "CallNode");
       int ba = nt_new_node(nt, "ArgumentsNode");
-      int k2 = ixw_read(nt, kname);
+      int k2 = lit ? nt_clone_subtree(nt, key) : ixw_read(nt, kname);
       if (bin < 0 || ba < 0 || k2 < 0) continue;
       nt_node_set_arr(nt, ba, "arguments", &val, 1);
       nt_node_set_ref(nt, bin, "receiver", get);
@@ -5083,7 +5166,7 @@ int desugar_index_op_write_user(Compiler *c) {
       last = ixw_call(nt, -1, rname, "[]=", wa, 2);
     }
     else {
-      int k2 = ixw_read(nt, kname);
+      int k2 = lit ? nt_clone_subtree(nt, key) : ixw_read(nt, kname);
       if (k2 < 0) continue;
       int wa[2] = { k2, val };
       int set = ixw_call(nt, -1, rname, "[]=", wa, 2);
@@ -5095,8 +5178,8 @@ int desugar_index_op_write_user(Compiler *c) {
     }
     int stmts = nt_new_node(nt, "StatementsNode");
     if (last < 0 || stmts < 0) continue;
-    int body[3] = { rw, kw, last };
-    nt_node_set_arr(nt, stmts, "body", body, 3);
+    int body[3] = { rw, lit ? last : kw, last };
+    nt_node_set_arr(nt, stmts, "body", body, lit ? 2 : 3);
     nt_node_set_type(nt, id, "ParenthesesNode");
     nt_node_set_ref(nt, id, "body", stmts);
     nt_node_set_ref(nt, id, "receiver", -1);
@@ -5108,7 +5191,7 @@ int desugar_index_op_write_user(Compiler *c) {
     /* locals were collected before the fixpoint; these are new */
     Scope *sc = comp_scope_of(c, rw);
     scope_local_intern(sc, rname);
-    scope_local_intern(sc, kname);
+    if (!lit) scope_local_intern(sc, kname);
     changed = 1;
   }
   return changed;
@@ -9134,6 +9217,11 @@ int desugar_builtin_enum_calls(Compiler *c) {
     /* ...and one the analysis already routed through a marked `to_a` hop
        (enum_each_wrap): codegen walks the Enumerator itself */
     if (nt_kind(nt, recv) == NK_CallNode && nt_str(nt, recv, "enum_each_wrap")) continue;
+    /* ...and a self-answering walk over a marked `to_a` hop (a String
+       range's members): the typed emitter answers the hop's receiver, the
+       range, where this definition's `self` is the member Array */
+    if (is_each_walk_or_with_index(name) && nt_kind(nt, recv) == NK_CallNode &&
+        nt_str(nt, recv, "enum_recv")) continue;
     /* find/detect reachable from an optional/keyword parameter's default
        value: see find_calls_in_param_defaults. */
     if (in_default && in_default[id] &&
@@ -12780,6 +12868,12 @@ int core_method_name(const char *n) {
 
 static int name_in_list(const char *const *list, const char *n) {
   return str_in(n, list);
+}
+
+/* Is `n` one of Object's public instance methods, the face every object
+   answers about itself (the generated RB_OBJECT_PUBLIC)? */
+int object_public_method_name(const char *n) {
+  return name_in_list(RB_OBJECT_PUBLIC, n);
 }
 
 static int rbself_builtin(const char *cn) {

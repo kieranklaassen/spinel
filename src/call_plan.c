@@ -1126,6 +1126,9 @@ static void cpoly_cases_n(Compiler *c, int id, const char *name, int argc, const
   if (sp_streq(name, "read_nonblock") && ps->pos_argc == 1 && splat_a < 0) cpoly_family(p, cap, PB_IO_READ_NB);
   if ((sp_streq(name, "readpartial") || sp_streq(name, "sysread")) && argc == 1 && plain)
     cpoly_family(p, cap, PB_IO_READPARTIAL);
+  if ((sp_streq(name, "readpartial") || sp_streq(name, "sysread")) && argc == 2 && plain)
+    cpoly_family(p, cap, PB_IO_READPARTIAL_BUF);
+  if (sp_streq(name, "setsockopt") && argc == 3 && plain) cpoly_family(p, cap, PB_IO_SETSOCKOPT);
   if (sp_streq(name, "write") && argc == 1 && plain) cpoly_family(p, cap, PB_IO_WRITE);
   if (sp_streq(name, "syswrite") && argc == 1 && plain) cpoly_family(p, cap, PB_IO_SYSWRITE);
   if ((is_text_print(name)) && plain) cpoly_family(p, cap, PB_IO_PRINT);
@@ -1227,6 +1230,7 @@ static void cpoly_prearms_n(Compiler *c, int id, const char *name, int argc, con
        : kwh >= 0 && !ps.has_splat_arg ? argc <= SP_PROC_ARG_SLOTS
        : splat_last))
     cpoly_family(p, cap, PB_CALLABLE);
+  if (ps.kw_pos && ps.straset) cpoly_family(p, cap, PB_STR_ASET);
   if (ps.kw_pos && !ps.has_splat_arg && cpoly_str_trial(c, id, name, argc, argv, atmp_ty, ret, p))
     cpoly_trial(p, cap, PT_STR);
   cpoly_cases_n(c, id, name, argc, argv, ret, atmp_ty, &ps, splat_a, p, cap);
@@ -1845,11 +1849,13 @@ int cplan_nil(Compiler *c, int id) {
   /* a shared String's handle a call renders is not bound like a value: an
      attribute reader's is tested in its slot, like a local's */
   else if (rr.kind == RK_STRBUF && !slot_reader) return CN_NONE;
-  /* a nil the program writes; not one the fact cannot bound (an element
+  /* a nil the program writes (an element of an Array it stores one into
+     or leaves a gap in, too); not one the fact cannot bound (an element
      read, a global, an ivar, a caller not seen, a builtin's answer), which
      a hot loop over a receiver that is never nil would pay for */
   int why = nil_fact_why(c, r);
-  if (why != NFW_NIL && why != NFW_NO_ELSE && why != NFW_SAFE_NAV && why != NFW_UNSET) return CN_NONE;
+  if (why != NFW_NIL && why != NFW_NO_ELSE && why != NFW_SAFE_NAV && why != NFW_UNSET && why != NFW_ELEM_NIL)
+    return CN_NONE;
   /* the definite-assignment walk over a temp the compiler wrote itself (a
      desugared splat's receiver) is not the program's nil */
   if (why == NFW_UNSET && nt_int(nt, r, "node_line", 0) <= 0) return CN_NONE;

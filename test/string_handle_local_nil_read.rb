@@ -111,3 +111,19 @@ p u
 # `&:nil?` only calls nil?; it defines nothing, and the reads above stay
 # tested.
 p ["a", nil].map(&:nil?)
+
+# A nil a method answers, with the appends behind a test that holds: the
+# loop's test and the method's value both read the handle.
+def hit_or_nil(k) = k > 5 ? +"hit" : nil
+
+def banged(k)
+  s = hit_or_nil(k)
+  i = 0
+  while s && i < 2
+    s << "!"
+    i += 1
+  end
+  s
+end
+p banged(9)
+p banged(1)

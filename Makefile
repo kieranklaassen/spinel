@@ -1270,6 +1270,10 @@ cli-opts-test: $(SPINEL)
 	$(SPINEL) -I test/require_load_path test/require_load_path/main.rb -o "$$tmp/lp" >"$$tmp/lp.out" 2>&1 && \
 	  "$$tmp/lp" 2>&1 | cmp -s - test/require_load_path/main.rb.expected || \
 	  { echo "cli-opts-test: FAIL (a file reached by -I require and by require_relative loaded twice)"; ok=0; }; \
+	mkdir -p "$$tmp/shadow/openssl"; printf 'module OpenSSL\n  def self.whoami = "project"\nend\n' > "$$tmp/shadow/openssl/openssl.rb"; \
+	printf 'require "openssl"\nputs OpenSSL.whoami\n' > "$$tmp/shadow.rb"; \
+	$(SPINEL) -I "$$tmp/shadow" "$$tmp/shadow.rb" -o "$$tmp/shadowbin" >"$$tmp/shadow.out" 2>&1 && [ "$$("$$tmp/shadowbin")" = "project" ] || \
+	  { echo "cli-opts-test: FAIL (a project's package did not shadow the bundled one of the same name, #7207)"; sed -n 1,3p "$$tmp/shadow.out"; ok=0; }; \
 	links=""; i=0; while [ $$i -lt 70 ]; do links="$$links --link -lm"; i=$$((i + 1)); done; \
 	$(SPINEL) "$$tmp/p.rb" $$links --link -lsp_last_link --print-build 2>/dev/null | grep -q 'lib -lsp_last_link' || \
 	  { echo "cli-opts-test: FAIL (a --link past the 64th was dropped)"; ok=0; }; \
@@ -1325,7 +1329,7 @@ link-names-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB)
 
 reject-test: $(SPINEL)
 	@ok=1; tmp=$$(mktemp -d /tmp/spinel-reject.XXXXXX); \
-	for t in test/reject/string_thread_arg.rb test/reject/string_fiber_arg.rb test/reject/string_thread_global_arg.rb test/reject/string_thread_ivar_arg.rb test/reject/string_thread_method_param_arg.rb test/reject/string_fiber_method_param_arg.rb test/reject/string_thread_block_param_arg.rb test/reject/string_thread_arg_in_loop.rb; do \
+	for t in test/reject/string_thread_arg.rb test/reject/string_fiber_arg.rb test/reject/string_thread_global_arg.rb test/reject/string_global_hash_element_mutation.rb test/reject/string_thread_ivar_arg.rb test/reject/string_thread_method_param_arg.rb test/reject/string_fiber_method_param_arg.rb test/reject/string_thread_block_param_arg.rb test/reject/string_thread_arg_in_loop.rb; do \
 	  if $(SPINEL) "$$t" -c --no-line-map -o "$$tmp/sk.c" >"$$tmp/sk.out" 2>&1; then \
 	    echo "reject-test: FAIL ($$t compiled)"; ok=0; \
 	  else grep -q "is not yet shared by reference" "$$tmp/sk.out" || \
@@ -1763,7 +1767,6 @@ reject-test: $(SPINEL)
 	  echo "reject-test: FAIL (a refusal after a dynamic send's probed arms did not report cleanly, exit $$st)"; sed -n 1,5p "$$tmp/ds.out"; ok=0; fi; \
 	for spec in "complex_bignum_component:a Complex component given an Integer past 64 bits" \
 	            "rational_pow_bignum:the receiver of a Float \`**\` given a Rational" \
-	            "bignum_div_rational:an Integer operand of a Bignum operation given a Rational" \
 	            "array_push_other_class_temporary:an Array push given a String"; do \
 	  t=test/reject/$${spec%%:*}.rb; why=$${spec#*:}; \
 	  if $(SPINEL) "$$t" -c --no-line-map -o "$$tmp/co.c" >"$$tmp/co.out" 2>&1; then \
@@ -1849,7 +1852,9 @@ GC_STRESS_TESTS := test/gc_root_frame_slots.rb \
                    test/gc_root_volatile_string_slot.rb \
                    test/gc_root_gathered_handle_param.rb \
                    test/dispatch_arm_roots_operands.rb \
-                   test/exception_message_nul.rb
+                   test/exception_message_nul.rb \
+                   test/string_aset_value_runs_first.rb \
+                   test/yielding_initialize_new_own_class.rb
 gc-stress-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
 	@tmp=$$(mktemp -d /tmp/spinel-gcstress.XXXXXX); ok=1; \
 	if $(CC) -O1 -w -Ilib test/gc-stress/lost.c $(SP_RT_LIB) $(LDFLAGS) -lm -o "$$tmp/lost" 2>"$$tmp/cc.err"; then \
@@ -3307,12 +3312,23 @@ infer-test: $(SPINEL) $(SP_RT_LIB)
 	done; \
 	grep -q 'sp_rb_kw_leaf(const char \* volatile \*_cell_s, const char \* lv_suffix) {' "$$tmp/bsv.c" && \
 	grep -q 'sp_two_slots(const char \* \*_cell_plain, const char \* volatile \*_cell_guarded) {' "$$tmp/bsv.c" || { echo "infer-test: FAIL (borrowed volatility is not selective per parameter or through keywords)"; ok=0; }; \
+	$(SPINEL) test/gc_root_stmt_local_arg.rb -c --no-line-map -o "$$tmp/rsl.c" >/dev/null 2>&1 || { echo "infer-test: FAIL (gc_root_stmt_local_arg: -c)"; ok=0; }; \
+	grep -A1 -E 'sp_Vec \* _t[0-9]+ = lv_ray;' "$$tmp/rsl.c" | head -2 | grep -q 'lv_isect;' || { echo "infer-test: FAIL (a local nothing in its statement rebinds is copied into a rooted argument temp)"; ok=0; }; \
+	grep -A1 -E 'sp_Vec \* _t[0-9]+ = lv_isect;' "$$tmp/rsl.c" | grep -q 'SP_GC_ROOT(_t' || { echo "infer-test: FAIL (a local its statement rebinds lost its argument temp's root)"; ok=0; }; \
 	for cap in fib proc; do \
 	  grep -q "typedef struct { sp_String \* \*c_s; } _$${cap}_cap_" "$$tmp/bsv.c" || { echo "infer-test: FAIL (an owned $$cap capture became a borrowed volatile slot)"; ok=0; }; \
 	done; \
 	grep -q 'sp_handle_bound(sp_String \* lv_s) {' "$$tmp/bsv.c" || { echo "infer-test: FAIL (a bound Method lost its shared String handle ABI)"; ok=0; }; \
+	$(SPINEL) test/gc_root_fixed_param_arg.rb -c --no-line-map -o "$$tmp/rfp.c" >/dev/null 2>&1 || { echo "infer-test: FAIL (gc_root_fixed_param_arg: -c)"; ok=0; }; \
+	awk '/ sp_Interp_visit\(sp_Interp \*self, .*\) \{/,/^}/' "$$tmp/rfp.c" > "$$tmp/rfp_v.c"; \
+	awk '/ sp_Interp_walk\(sp_Interp \*self, .*\) \{/,/^}/' "$$tmp/rfp.c" > "$$tmp/rfp_w.c"; \
+	grep -Eq '_t[0-9]+ = lv_env;' "$$tmp/rfp_v.c" && ! grep -A1 -E '_t[0-9]+ = lv_env;' "$$tmp/rfp_v.c" | grep -q 'SP_GC_ROOT' || { echo "infer-test: FAIL (a parameter the method never reassigns is copied into a rooted argument temp)"; ok=0; }; \
+	grep -A1 -E '_t[0-9]+ = lv_env;' "$$tmp/rfp_w.c" | grep -q 'SP_GC_ROOT(_t' || { echo "infer-test: FAIL (a reassigned parameter's argument temp lost its root)"; ok=0; }; \
 	$(SPINEL) test/infer/hash_one_class_each_value.rb -c --no-line-map -o "$$tmp/hoc.c" >/dev/null 2>&1 || { echo "infer-test: FAIL (hash_one_class_each_value: -c)"; ok=0; }; \
 	grep -q 'sp_Item \* lv_it' "$$tmp/hoc.c" && grep -q 'sp_Item_describe((sp_Item \*)lv_it)' "$$tmp/hoc.c" || { echo "infer-test: FAIL (#4846 a one-class hash's each_value is not typed)"; ok=0; }; \
+	$(SPINEL) test/class_ancestor_tests_dynamic.rb -c --no-line-map -o "$$tmp/cat.c" >/dev/null 2>&1 || { echo "infer-test: FAIL (class_ancestor_tests_dynamic: -c)"; ok=0; }; \
+	awk '/^static int sp_class_le_mod\(/,/^}/' "$$tmp/cat.c" > "$$tmp/cat_le.c"; \
+	grep -q 'sp_class_anc_walk(a,b,NULL)' "$$tmp/cat_le.c" && ! grep -q 'sp_class_ancestors(' "$$tmp/cat_le.c" || { echo "infer-test: FAIL (a module-aware class test builds the ancestors array)"; ok=0; }; \
 	$(SPINEL) test/infer/hash_or_write_index_setter.rb -c --no-line-map -o "$$tmp/hos.c" >/dev/null 2>&1 || { echo "infer-test: FAIL (hash_or_write_index_setter: -c)"; ok=0; }; \
 	grep -q 'sp_PolyPolyHash \* iv_traps;' "$$tmp/hos.c" && grep -q 'sp_PolyPolyHash \* iv_hooks;' "$$tmp/hos.c" || { echo "infer-test: FAIL (#4889 an index write into (@h ||= {}) left @h boxed)"; ok=0; }; \
 	grep -q 'sp_OrwMem_poke(sp_OrwMem \*self, sp_int lv_addr, sp_int lv_value)' "$$tmp/hos.c" || { echo "infer-test: FAIL (#4889 a Hash index write widened an unrelated user []=)"; ok=0; }; \
@@ -3320,6 +3336,8 @@ infer-test: $(SPINEL) $(SP_RT_LIB)
 	grep -q '`text` only ever holds frozen string literals' "$$tmp/flw.err" && ! grep -Eq '`(s|m)` only ever holds frozen string literals' "$$tmp/flw.err" || { echo "infer-test: FAIL (the frozen-literal << warning is wrong about a local an op-write or and-write assigns)"; ok=0; }; \
 	$(SPINEL) test/infer/define_method_runtime_name_next.rb -c --no-line-map -o "$$tmp/dmr.c" >/dev/null 2>&1 || { echo "infer-test: FAIL (define_method_runtime_name_next: -c)"; ok=0; }; \
 	grep -q 'sp_sym sp_Maker_s_make(' "$$tmp/dmr.c" && grep -q 'sp_int sp_Maker_s_count(' "$$tmp/dmr.c" && grep -q 'sp_sym sp_Maker_s_mixed(' "$$tmp/dmr.c" || { echo "infer-test: FAIL (a next in a define_method block with a run-time name is read as the enclosing method's return)"; ok=0; }; \
+	$(SPINEL) test/string_append_interp_int.rb -c --no-line-map -o "$$tmp/sai.c" >/dev/null 2>&1 || { echo "infer-test: FAIL (string_append_interp_int: -c)"; ok=0; }; \
+	grep -q 'sp_String_append_n(lv_out, _d[0-9]* + 1, (size_t)(sp_w_int(_d[0-9]* + 1, _t[0-9]*)' "$$tmp/sai.c" && ! grep -q 'sp_int_to_s(' "$$tmp/sai.c" || { echo "infer-test: FAIL (an appended interpolation builds a String for each Integer part)"; ok=0; }; \
 	SPINEL_SPLIT_STRICT=1 $(SPINEL) --jobs=3 test/dispatch_override_param_list.rb -o "$$tmp/split" >/dev/null 2>&1 && "$$tmp/split" | cmp -s - test/dispatch_override_param_list.rb.expected || { echo "infer-test: FAIL (#4847 --jobs=3 split build)"; ok=0; }; \
 	SPINEL_SPLIT_STRICT=1 $(SPINEL) --int-overflow=promote --jobs=3 test/infer/split_build_overflow_mode.rb -o "$$tmp/splitov" >/dev/null 2>&1 && [ "$$("$$tmp/splitov" 2>&1 | tr '\n' ' ')" = "18446744073709551623 36893488147419103232 " ] || { echo "infer-test: FAIL (a split build's parts are not compiled in --int-overflow=promote)"; ok=0; }; \
 	SPINEL_SPLIT_STRICT=1 $(SPINEL) --int-overflow=wrap --jobs=3 test/infer/split_build_overflow_mode.rb -o "$$tmp/splitov" >/dev/null 2>&1 && [ "$$("$$tmp/splitov" 2>&1 | tr '\n' ' ')" = "7 0 " ] || { echo "infer-test: FAIL (a split build's parts are not compiled in --int-overflow=wrap)"; ok=0; }; \
@@ -3565,6 +3583,9 @@ infer-test: $(SPINEL) $(SP_RT_LIB)
 	grep -q 'if ((lv_w > 2LL))' "$$tmp/nnr.c" && grep -q 'if ((lv_v > lv_k))' "$$tmp/nnr.c" || { echo "infer-test: FAIL (a read a guard or an in-bounds index proves non-nil still tests for nil)"; ok=0; }; \
 	grep -q 'SP_INT_NIL_CMP_CK(_t[0-9]*, 0, ">"); _t[0-9]* > _t[0-9]*_r; })' "$$tmp/nnr.c" && grep -q 'SP_INT_NIL_CMP_CK(_t[0-9]*, 0, "<"); _t[0-9]* < _t[0-9]*_r; })' "$$tmp/nnr.c" || { echo "infer-test: FAIL (a narrowed read of a nilable local does not keep the other operand's half of the test)"; ok=0; }; \
 	grep -q 'sp_int _t[0-9]* = lv_gv, _t[0-9]*_r = 0LL; SP_INT_NIL_CMP_CK(_t[0-9]*, _t[0-9]*_r, ">")' "$$tmp/nnr.c" || { echo "infer-test: FAIL (an in-bounds read of an array a write past the end can leave a nil in lost its test)"; ok=0; }; \
+	$(SPINEL) test/gc_root_hoisted_arg_once.rb -c --no-line-map -o "$$tmp/rha.c" >/dev/null 2>&1 || { echo "infer-test: FAIL (gc_root_hoisted_arg_once: -c)"; ok=0; }; \
+	awk '/ sp_make_tree\(sp_int lv_depth\) \{/,/^}/' "$$tmp/rha.c" > "$$tmp/rha_mt.c"; \
+	grep -q 'sp_make_tree(' "$$tmp/rha_mt.c" && ! grep -Eq '_gcf\.v\[[0-9]+\] = _gcf\.v\[[0-9]+\];|_t[0-9]+ = _t[0-9]+;' "$$tmp/rha_mt.c" || { echo "infer-test: FAIL (an argument the call hoisted into a rooted temp is copied into a second rooted one)"; ok=0; }; \
 	rm -rf "$$tmp"; \
 	if [ $$ok -eq 1 ]; then echo "infer-test: pass"; else exit 1; fi
 

@@ -22,6 +22,11 @@ class Note
   rescue NoMethodError => e
     e.message.end_with?("<<' for nil")
   end
+
+  def swap
+    @text = +"q"
+    "z"
+  end
 end
 
 class Folder
@@ -80,6 +85,17 @@ rescue NoMethodError => e
   e.class
 end
 
+# An argument that runs code can rebind the attribute before the call
+# runs. Such a call is compiled as it was: the mutator changes the String
+# the reader gave before the argument ran, whatever the attribute holds
+# after it.
+
+def swapped(n)
+  old = n.text
+  n.text << n.swap
+  [n.text, old]
+end
+
 live = Note.new
 p appended(live)
 p joined(live)
@@ -112,3 +128,6 @@ p appended(set)
 p set.text
 set.text = +"x"
 p appended(set)
+
+kept = Note.new
+p swapped(kept)

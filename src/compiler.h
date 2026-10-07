@@ -115,6 +115,15 @@ typedef struct {
                        can run before any write, a call site binds nil. Read
                        through repr_of_slot's may_nil. Nonzero: where the
                        nil comes from (NFW_*, analyze.h). */
+  int obj_elem_may_nil; /* (Array slots whose elements are pointers: an
+                       object's, a String's, an Array's) the nil fact one
+                       level in (analyze_nil.c): an element read out of it,
+                       or a block parameter an iteration over it binds, may
+                       be nil -- a write stored one, or left a gap a write
+                       past the end fills with nil. Nonzero when so; its
+                       NF_EL_STORED bit says a nil was stored through this
+                       name, which reaches the slots the Array came from.
+                       Read through repr_of_slot's elem_nil_marked. */
   int nil_past_write; /* (TY_STRBUF locals) an in-place write can run on
                        the local while it may be nil, with no raise from the
                        call plan (analyze_nil.c, nil_fact_unraised) */
@@ -265,6 +274,11 @@ typedef struct {
                        stripped the builtin answer from the dispatch (#3459),
                        and widening unconditionally instead poisoned classes
                        whose poly slots never hold a container (Set's @data). */
+  TyKind shim_ty;   /* while a shared-handle shim emits its arm, the type this
+                       local had before the shim typed it String for the arm
+                       (the handle's); TY_UNKNOWN otherwise. A proc or fiber
+                       made inside the arm sees the handle (sb_shim_lift). */
+  int shim_lift;    /* how many sb_shim_lift calls hold the local at shim_ty */
 } LocalVar;
 #define POLY_LIFT_APPENDED 1
 #define POLY_LIFT_ZSUPER   2
@@ -302,6 +316,10 @@ typedef struct {
                         yield answers poly, so everything it feeds widens with
                         it and one body serves every call site (#3399). */
   int is_lowered_yield; /* self-recursive yield method lowered to &block (sp_Proc) form */
+  int ctor_cycle;       /* a yielding initialize on a cycle of `new` sites that
+                           splice it, or a yielding method on such a cycle
+                           (mark_ctor_cycles): its strongly connected
+                           component, numbered from 1; 0 on none */
   int lowered_lifted_yield; /* lowered because a yield sits in a Thread/Fiber
                                body: the method's value is its own tail, not
                                the block's, unlike the self-recursive form */
@@ -470,6 +488,10 @@ typedef struct {
                                      (nil_fact_ivar); n_ivar_obj_may_nil
                                      entries */
   int n_ivar_obj_may_nil;
+  unsigned char *ivar_elem_may_nil; /* the same one level in, per ivar (an
+                                     Array whose elements may be nil,
+                                     LocalVar.obj_elem_may_nil), as many
+                                     entries, indexed the same way */
   char **rbs_pin_ivars; /* ivar names (incl '@') pinned by an --rbs seed: the
                            fixpoint must not widen their type */
   int n_rbs_pin_ivars, c_rbs_pin_ivars;
@@ -754,9 +776,26 @@ typedef struct {
   TyKind *nilnarrow; /* [node_cap] param-read narrowed by a `return .. if p.nil?`
                         guard: the read's non-nil type (codegen unboxes the poly
                         slot at the read site); TY_UNKNOWN = not narrowed */
+  /* What a statement binds, for codegen's question whether anything in the
+     statement around an argument temp can rebind the local the temp copies
+     (stmt_may_rebind_local, codegen_util.c). Filled per statement on its first
+     query and kept: stmt_wr_state[stmt] is 0 (not yet), 1 (computed) or 2
+     (opaque: a binding the walk cannot name); stmt_wr_names[stmt] the
+     NULL-terminated local names its subtree writes, targets or takes as
+     block parameters; stmt_wr_mark[node] the last statement whose walk
+     reached the node. [stmt_wr_cap] each, grown with the node table, NULL
+     until a program asks. */
+  unsigned char *stmt_wr_state;
+  const char ***stmt_wr_names;
+  int *stmt_wr_mark;
+  int stmt_wr_cap;
   unsigned char *nil_fact; /* [nil_fact_n] the nil fact per node (analyze_nil.c,
                         #7444): NF_MAY_NIL when the node's value may be nil,
                         NF_NOT_NIL when it cannot; read through nil_fact_node */
+  unsigned char *nil_elem_fact; /* [nil_fact_n] per node: an Array value whose
+                        elements are pointers some of which may be nil
+                        (LocalVar.obj_elem_may_nil); read through repr_of's
+                        elem_nil_marked */
   int nil_fact_n;
   int *nscope;      /* [node_cap] node id -> owning scope index */
   int *node_cbody;  /* [node_cap] node id -> enclosing class/module-body class id, or -1 */
@@ -778,6 +817,10 @@ typedef struct {
                         rather than from its own contents: an empty `[]`
                         literal, or a `map` that narrow_object_arrays decided
                         builds a table of rows */
+  TyKind *lw_joined; /* [node_cap] for a local write: the type its value had when
+                        the slot was last joined with it (infer_write_types,
+                        rejoin_local_writes). A write whose value reads
+                        differently since is what a late re-join follows. */
   TyKind *poly_builtin_ty; /* [node_cap] for a container read on a poly receiver a
                               user class also owns: the type the builtin surface
                               alone would give, so codegen can shape its arm (#3459) */
@@ -833,6 +876,13 @@ typedef struct {
   int scall_nscopes, scall_count;
   unsigned scall_version;
   int scall_built;
+  /* CallNode-with-a-literal-block chain, by the block's scope; see
+     comp_bcall_first */
+  int *bcall_head;      /* [bcall_nscopes] first such CallNode id per scope */
+  int *bcall_next;      /* [bcall_count] next one whose block is in the same scope */
+  int bcall_nscopes, bcall_count;
+  unsigned bcall_version;
+  int bcall_built;
 
   /* (CallNode, ivar-read argument)-by-ivar-name index; see comp_ivarg_first */
   int *ivarg_head;      /* [ivarg_nbuckets] first entry in each name bucket */
@@ -977,6 +1027,15 @@ typedef struct {
   int share_strings;
   struct ShareFacts *share;
   unsigned share_sig;   /* the types the facts were last applied over */
+  /* the methods compute_byref_out_params let take a lent slot
+     (an_byref_eligible_scopes), kept for the share facts built after it
+     (nbyref_elig scopes; NULL before it runs) */
+  char *byref_elig;
+  int nbyref_elig;
+  /* the classes a boxed receiver can be an instance of, per call, and the
+     name indexes the walk that answers it reads (analyze_scope.c's
+     poly_ivar_set_reaches), built on first use and freed with the compiler */
+  struct PivsFacts *pivs;
   /* an ivar of a builtin value can be written (desugar_builtin_ivars): a
      reflective read, list or copy of an Array, a Hash or a Random asks the
      runtime's map (sp_bivar_*), and the boxed set gains its builtin arm */
@@ -1017,6 +1076,12 @@ Scope *comp_scope_of(Compiler *c, int node_id);        /* owning scope */
    keyed on name alone and revalidated against nt->version, so the scope of
    each write is still read fresh at every visit. */
 int comp_is_local_write(NodeKind k);
+/* Can a call's block `blk` (a literal or a `&blk` argument) assign the
+   variable argument node `arg` reads while the call runs: the literal's
+   body writes it (a local of the same scope, or an instance variable, by
+   any write kind, at any depth), or, for a local, a proc that captures it
+   assigns it? 0 for any other argument, or a call with no block. */
+int comp_block_rebinds_arg(Compiler *c, int blk, int arg);
 int comp_lvw_first(Compiler *c, const char *name);
 int comp_class_singleton_has_module(Compiler *c, int ci, int mod);
 int comp_class_extends_any(Compiler *c, int ci);
@@ -1025,6 +1090,8 @@ int comp_lvw_first_sc(Compiler *c, int scope_idx, const char *name);
 int comp_lvw_next_sc(const Compiler *c, int w);
 int comp_scall_first(Compiler *c, int scope_idx);
 int comp_scall_next(const Compiler *c, int u);
+int comp_bcall_first(Compiler *c, int scope_idx);
+int comp_bcall_next(const Compiler *c, int u);
 int comp_ivarg_first(Compiler *c, const char *name);
 void comp_ivarg_invalidate(Compiler *c);
 int comp_ivarg_next(const Compiler *c, int e);
