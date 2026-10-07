@@ -986,6 +986,27 @@ int emit_call_compare_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
 }
 
 /* String concatenation, unary -@ +@ ~ !, element stores and the arithmetic on a poly operand */
+/* Whether the program defines `name` where an Integer would find it after
+   its own methods: in Integer, Numeric, Comparable, Object, Kernel or
+   BasicObject (a module included in one of them is copied into it), at the
+   top level, or by an alias in any class. A plain definition in any other
+   class cannot answer an Integer. */
+static int parity_def_above_integer(Compiler *c, const char *name) {
+  static const char *const above[] = {
+    "Integer", "Numeric", "Comparable", "Object", "Kernel", "BasicObject", "Toplevel", NULL };
+  for (int mi = 0; mi < c->nscopes; mi++) {
+    Scope *s = &c->scopes[mi];
+    if (!s->name || !sp_streq(s->name, name)) continue;
+    if (s->class_id < 0) return 1;
+    for (int i = 0; above[i]; i++)
+      if (sp_streq(c->classes[s->class_id].name, above[i])) return 1;
+  }
+  for (int k = 0; k < c->nclasses; k++)
+    for (int i = 0; i < c->classes[k].naliases; i++)
+      if (sp_streq(c->classes[k].alias_new[i], name)) return 1;
+  return 0;
+}
+
 int emit_call_operator_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, TyKind rt, TyKind a0) {
   /* String#concat with no arguments returns the receiver unchanged (#2309):
      a stage-1 builtin-op row (builtin_ops.c); the shared handle's arm stays */
@@ -1193,19 +1214,24 @@ int emit_call_operator_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
   }
   /* unary bitwise complement: ~int -> (~x); ~poly -> coerce to int first */
   if (sp_streq(name, "~") && recv >= 0 && argc == 0 && (rt == TY_INT || rt == TY_POLY)) {
-    if (rt == TY_POLY) { buf_puts(b, "(~sp_poly_recv_i(\"~\", "); emit_expr(c, recv, b); buf_puts(b, "))"); }
+    /* `~` here is Integer's: read as an Integer whatever it held, a
+       String answered -1 and a Float -3. They raise now (so does a Regexp,
+       whose own `~` is not served). Beside a class that defines `~` the
+       read stays as it was. */
+    if (rt == TY_POLY) {
+      buf_printf(b, "(~%s(\"~\", ", poly_name_user_claimed(c, name, argc) ? "sp_poly_recv_i" : "sp_poly_recv_integer_i");
+      emit_expr(c, recv, b); buf_puts(b, "))");
+    }
     else { buf_puts(b, "(~"); emit_expr(c, recv, b); buf_puts(b, ")"); }
     return 1;
   }
-  /* poly parity predicates: Integer-only in Ruby, so truncation cannot lose a
-     value that legally reaches them and the int coercion stays correct.
-     zero?/positive?/negative? are NOT handled here: this arm ran ahead of
-     emit_poly_call and shadowed sp_poly_zero_p and friends, which dispatch on
-     the runtime tag. Truncating first answered every |v| < 1 as zero (0.004
-     came back zero? -> true, positive? -> false), read a bigint through a
-     wrapped int64, and hid a user class's own zero?. */
+  /* poly parity predicates beside a definition of the name that an Integer
+     inherits (parity_def_above_integer): the receiver is read as an Integer,
+     as it always was, so an Integer in the box answers the builtin odd? and
+     not Object's or Numeric's. Everywhere else the call goes on to the tag
+     dispatch (sp_poly_odd_p, sp_poly_even_p). */
   if (recv >= 0 && rt == TY_POLY && argc == 0 &&
-      (sp_streq(name, "even?") || sp_streq(name, "odd?"))) {
+      (sp_streq(name, "even?") || sp_streq(name, "odd?")) && parity_def_above_integer(c, name)) {
     int t = ++g_tmp;
     buf_printf(b, "({ sp_int _t%d = sp_poly_recv_i(\"%s\", ", t, name); emit_expr(c, recv, b); buf_puts(b, "); ");
     if (sp_streq(name, "even?")) buf_printf(b, "(_t%d %% 2 == 0); })", t);

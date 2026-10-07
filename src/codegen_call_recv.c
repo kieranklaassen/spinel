@@ -12281,6 +12281,8 @@ static int emit_poly_call0_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
       sp_streq(name, "nonzero?")  ? "sp_poly_nonzero" :
       sp_streq(name, "positive?") ? "sp_poly_positive_p" :
       sp_streq(name, "negative?") ? "sp_poly_negative_p" :
+      sp_streq(name, "even?")     ? "sp_poly_even_p" :
+      sp_streq(name, "odd?")      ? "sp_poly_odd_p" :
       sp_streq(name, "real?")     ? "sp_poly_real_p" :
       sp_streq(name, "integer?")  ? "sp_poly_integer_p" :
       sp_streq(name, "abs") || sp_streq(name, "magnitude") ? "sp_poly_abs" :
