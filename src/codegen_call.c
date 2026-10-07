@@ -18229,6 +18229,39 @@ int subtree_is_pure_read(Compiler *c, int id) {
   return 1;
 }
 
+/* Does this subtree hold what cannot be emitted for a value that is always
+   nil: a rescue modifier (`x rescue y`), or a `&.` call with a block on a
+   receiver that is always nil (`nil&.then { }`)? */
+static int subtree_has_no_nil_value_c(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  if (id < 0) return 0;
+  if (nt_kind(nt, id) == NK_RescueModifierNode) return 1;
+  if (nt_kind(nt, id) == NK_CallNode && call_is_safe_nav(nt, id) && nt_ref(nt, id, "block") >= 0 &&
+      comp_ntype(c, nt_ref(nt, id, "receiver")) == TY_NIL)
+    return 1;
+  int nr = nt_num_refs(nt, id);
+  for (int i = 0; i < nr; i++)
+    if (subtree_has_no_nil_value_c(c, nt_ref_at(nt, id, i))) return 1;
+  int na = nt_num_arrs(nt, id);
+  for (int i = 0; i < na; i++) {
+    int n = 0; const int *ids = nt_arr_at(nt, id, i, &n);
+    for (int k = 0; k < n; k++)
+      if (subtree_has_no_nil_value_c(c, ids[k])) return 1;
+  }
+  return 0;
+}
+
+/* Do the `!` and `&.` arms of a receiver whose type is nil alone leave it
+   unemitted? One that is only a read has nothing to run. Two more are left
+   out as they always were. A rescue modifier whose value is typed nil has
+   no C of its own yet (its temporary is declared void), so emitting it
+   would stop a build that passes. And a `&.` call with a block on a
+   receiver that is always nil, emitted for its value, runs the block: the
+   block's emitter comes ahead of the nil test (`x = nil&.then { }`). */
+int nil_recv_stays_unemitted(Compiler *c, int recv) {
+  return subtree_is_pure_read(c, recv) || subtree_has_no_nil_value_c(c, recv);
+}
+
 /* Does the program give a Hash a default block anywhere (`Hash.new { }`,
    `default_proc=`)? Only such a Hash runs code on a missing key. */
 static int prog_has_hash_default_block(Compiler *c) {

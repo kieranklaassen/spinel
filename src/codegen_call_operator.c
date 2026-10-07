@@ -1229,7 +1229,12 @@ int emit_call_operator_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
        per-type truthiness emit_cond uses -- a poly / nullable scalar / nullable
        pointer can be falsy, so the result is not unconditionally false. */
     if (rt == TY_BOOL) { buf_puts(b, "(!"); emit_expr(c, recv, b); buf_puts(b, ")"); }
-    else if (rt == TY_NIL) { buf_puts(b, "1"); }
+    else if (rt == TY_NIL) {
+      /* a receiver that is always nil is true under `!`; one that is more
+         than a read is evaluated first, as the nil receiver's arms are */
+      if (nil_recv_stays_unemitted(c, recv)) buf_puts(b, "1");
+      else { buf_puts(b, "((void)("); emit_expr(c, recv, b); buf_puts(b, "), 1)"); }
+    }
     else if (rt == TY_POLY) { buf_puts(b, "(!sp_poly_truthy("); emit_expr(c, recv, b); buf_puts(b, "))"); }
     else if (rt == TY_INT) { buf_puts(b, "(("); emit_expr(c, recv, b); buf_puts(b, ") == SP_INT_NIL)"); }
     else if (rt == TY_FLOAT) { buf_puts(b, "sp_float_is_nil("); emit_expr(c, recv, b); buf_puts(b, ")"); }
