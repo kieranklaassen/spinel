@@ -7622,10 +7622,7 @@ static int emit_scalar_recv_arms(Compiler *c, int id, Buf *b, const NodeTable *n
   if (rt == TY_STRING && name && str_recv_reads_only(name)) {
     /* a local that may be nil has no buffer where nil answers the name
        itself (to_i, to_f) */
-    if (is_nil_method(name) && nt_kind(nt, recv) == NK_LocalVariableReadNode && repr_of(c, recv).may_nil &&
-        !nil_fact_unraised(c, recv))
-      emit_strbuf_read_ref_nil(c, recv, &rs);
-    else emit_strbuf_read_ref(c, recv, &rs);
+    if (!(is_nil_method(name) && emit_strbuf_read_ref_nil(c, recv, &rs))) emit_strbuf_read_ref(c, recv, &rs);
   }
   if (!rs.p) emit_expr(c, recv, &rs);
   const char *r = rs.p ? rs.p : "";
