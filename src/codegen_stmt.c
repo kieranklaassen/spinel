@@ -4725,16 +4725,52 @@ static const char *pm_target_name(const NodeTable *nt, int pat) {
   return NULL;
 }
 
+/* Does the subject of a whole-subject binding name a String that someone
+   else holds: a variable, a reader's field, an Array's or a Hash's element?
+   Any other subject is taken for a new String. */
+static int pattern_subject_held(Compiler *c, int subj) {
+  const NodeTable *nt = c->nt;
+  subj = subj >= 0 ? unwrap_parens(c, subj) : -1;
+  if (subj < 0) return 0;
+  NodeKind sk = nt_kind(nt, subj);
+  if (sk == NK_LocalVariableReadNode || sk == NK_InstanceVariableReadNode ||
+      sk == NK_GlobalVariableReadNode) return 1;
+  if (sk != NK_CallNode) return 0;
+  int copies = 0;
+  if (call_is_field_read(c, subj, &copies)) return 1;
+  const char *nm = nt_str(nt, subj, "name");
+  int recv = nt_ref(nt, subj, "receiver");
+  TyKind rt = recv >= 0 ? comp_ntype(c, recv) : TY_UNKNOWN;
+  return nm && (ty_is_array(rt) || ty_is_hash(rt)) &&
+         (sp_streq(nm, "[]") || sp_streq(nm, "at") || sp_streq(nm, "first") || sp_streq(nm, "last") ||
+          sp_streq(nm, "fetch"));
+}
+
+/* Without --share-strings no rule joins a pattern's local with its subject.
+   A local that holds a String handle, or is appended to in place, bound to
+   a subject someone else holds would take a copy of it (or, appended to in
+   place, text its sp_String * slot does not fit), and a change through
+   either name would not show through the other. Refused, as the other
+   routes that would copy are. */
+static void pattern_bind_refuse_copy(Compiler *c, int id, int subj) {
+  if (repr_share_rule(c) || !pattern_subject_held(c, subj)) return;
+  unsupported_feature(c, id,
+    "a String variable a pattern binds to its subject is mutated in place, or names a String "
+    "that is (a String is not yet shared by reference through a pattern's binding). "
+    "Assign the subject to the variable instead.");
+}
+
 /* A local bound to the whole subject (`in t`, `in String => t`) that is
    the shared String handle (--share-strings: the share facts join it with
    the subject) takes the subject's own handle when the subject is a
    variable that holds it, so a change through the local is the subject's;
    any other String subject is a new one, which a fresh handle wraps. */
-static void emit_pattern_bind_handle(Compiler *c, int subj, int t, Buf *b) {
+static void emit_pattern_bind_handle(Compiler *c, int id, int subj, int t, Buf *b) {
   NodeKind sk = subj >= 0 ? nt_kind(c->nt, subj) : NK_NONE;
   int var = sk == NK_LocalVariableReadNode || sk == NK_InstanceVariableReadNode ||
             sk == NK_GlobalVariableReadNode;
   if (var && emit_handle_var_ref(c, subj, b)) return;
+  pattern_bind_refuse_copy(c, id, subj);
   buf_printf(b, "sp_String_new_shared(_t%d)", t);
 }
 
@@ -4744,8 +4780,11 @@ static void emit_pattern_bind(Compiler *c, int id, int subj, const char *lnm, Ty
   buf_printf(b, "lv_%s = ", rename_local(lnm));
   LocalVar *plv = scope_local(comp_scope_of(c, id), lnm);
   if (plv && plv->type == TY_POLY && pt != TY_POLY && pt != TY_UNKNOWN) emit_boxed_tmp(c, pt, t, b);
-  else if (plv && pt == TY_STRING && repr_of_slot(c, plv).handle) emit_pattern_bind_handle(c, subj, t, b);
-  else buf_printf(b, "_t%d", t);
+  else if (plv && pt == TY_STRING && repr_of_slot(c, plv).handle) emit_pattern_bind_handle(c, id, subj, t, b);
+  else {
+    if (plv && plv->type == TY_STRBUF && pt == TY_STRING) pattern_bind_refuse_copy(c, id, subj);
+    buf_printf(b, "_t%d", t);
+  }
   buf_puts(b, ";\n");
 }
 

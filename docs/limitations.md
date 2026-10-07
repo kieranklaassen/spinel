@@ -711,6 +711,8 @@ Not yet shared:
 
 - a String variable in an Array literal feeding an appended nested multiple-assignment target;
 
+- through a pattern that binds its whole subject (`case line in String => t`, `in t`) to a variable that holds a String mutated in place, when the subject is a variable, a reader's field or an Array's or Hash's element that cannot hand over the same String; assign the subject (`t = line`) instead;
+
 - a bare instance-variable argument written from a local, handed to an appending parameter through a call or `super`, unless the instance variable is already a shared handle;
 
 - a repeated keyword whose later value is a String variable bound to an appending parameter, unless the value is already passed as a shared handle;
