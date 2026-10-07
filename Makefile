@@ -1850,6 +1850,7 @@ GC_STRESS_TESTS := test/gc_root_frame_slots.rb \
                    test/proc_cell_capture_marked.rb \
                    test/poly_array_intersect.rb \
                    test/array_new_fill_value_rooted.rb \
+                   test/array_new_size_before_value.rb \
                    test/thread_new_args_rooted_across_fiber_alloc.rb \
                    test/gc_root_volatile_string_slot.rb \
                    test/gc_root_gathered_handle_param.rb \
