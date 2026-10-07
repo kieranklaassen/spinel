@@ -1,0 +1,28 @@
+A pattern binding that would copy its subject onto a String handle is refused
+
+`case line in String => s` binds s to the subject itself. A local that
+holds a String handle took a fresh handle over the subject's text where
+the subject had none to give (emit_pattern_bind_handle). Under
+--share-strings the share facts join the two, so the subject has one.
+Without the flag nothing joins them, and a local that holds a reader's
+String took a copy:
+
+    s = page.text << "a"
+    case line
+    in String => s
+      s << "!"
+    end
+    p line        # "zz!" in CRuby, "zz" compiled
+
+A local that is appended to in place and holds no shared handle did not
+build there: the subject's `const char *` went into its `sp_String *`
+slot.
+
+Without --share-strings both are refused by name where the subject names
+a String someone else holds: a variable, a reader's field, an Array's or
+a Hash's element. A variable that holds the handle still hands it over,
+and any other subject is still a new String. Under the flag nothing
+changes: the two reject tests compile there and are in
+test/share/reject.list.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
