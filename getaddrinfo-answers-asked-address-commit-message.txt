@@ -1,0 +1,16 @@
+Socket.getaddrinfo answers the address it was asked for
+
+    hosts = ["127.0.0.1", "127.0.0.2", "127.0.0.3", "127.0.0.4",
+             "127.0.0.5", "127.0.0.6", "127.0.0.7"]
+    ring << Socket.getaddrinfo(hosts[i % 7], 80)   # 100,000 times
+
+14 of the rows read back 500 calls later held another host's address,
+"127.0.0.4" for "127.0.0.3".
+
+sp_sock_getaddrinfo makes the address String of a row and then the
+row's Array, with the String held by a C local alone. When making the
+Array collected, the String was freed, and the row kept a pointer to
+memory the next address String took. The String is now rooted until the
+row holds it.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

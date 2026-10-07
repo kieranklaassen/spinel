@@ -1,0 +1,1 @@
+An exception handed from an inner ensure to the outer one stays alive

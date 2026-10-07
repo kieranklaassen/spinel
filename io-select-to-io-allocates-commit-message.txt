@@ -1,0 +1,21 @@
+IO.select with an error set answers the ready handles when #to_io allocates
+
+    class Wrap
+      def to_io
+        @log = [1, 2, 3, 4]
+        @io
+      end
+    end
+    IO.select([wrap], nil, [wrap], 0)   # 100,000 times, a byte to read
+
+32 of the calls answered [[], [], []].
+
+With an error set sp_io_select waits in select(2) and then asks every
+element for its handle again to read the sets back. Each of the three
+answer Arrays was held by a C local alone while sp_select_io_of ran the
+program's own #to_io. When that collected, the Array was freed and the
+ready handle was pushed into freed memory. The Array is now rooted
+while it is filled. The poll path, taken with no error set, reads back
+by descriptor and calls nothing.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
