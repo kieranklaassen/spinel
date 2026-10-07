@@ -1,0 +1,15 @@
+5: NoMethodError
+nil: NoMethodError
+1.5: NoMethodError
+true: NoMethodError
+#<struct Pt m=7, n=2>
+[7, 2]
+NoMethodError
+5
+#<struct Pt m=9, n=8>
+#<struct Pt m=9, n=8>
+IndexError
+"raftdraftdraftdraft"
+20
+"ftdraftdraftdraft"
+0

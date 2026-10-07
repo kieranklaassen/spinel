@@ -1427,6 +1427,8 @@ int poly_key_cls0(Compiler *c, const char *name, int argc, int kwh, int pos_argc
            c->nclasses > 0 &&
            (c->classes[0].instantiated || class_is_prim_reopen(c, 0));
   }
+  /* a Struct's builtin `[]=` has no method scope and is a `case 0:` all the same */
+  if (c->nclasses > 0 && cplan_struct_aset(c, 0, name, argc)) return 1;
   int cls0_mi2 = c->nclasses > 0 ? comp_method_in_chain(c, 0, name, NULL) : -1;
   int cls0_cand2 = cls0_mi2 >= 0 &&
                    (c->classes[0].instantiated || class_is_prim_reopen(c, 0));
