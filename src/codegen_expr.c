@@ -3839,16 +3839,17 @@ static int emit_and_or_begin_expr(Compiler *c, int id, Buf *b, const NodeTable *
 
 /* Is the walk String#upto takes from the name `s` to the name `e` the one
    the loop below makes: String#succ from the begin until the end is met or
-   the name grows past the end's length? String#upto's cases, in its order:
-   two names of one character walk every character between, and #succ
-   steps one character except from 9, Z and z; two names of digits walk
-   the numbers between at the begin's width, and the loop meets the end
-   only where the end is its own number at that width; any other pair
-   walks nothing when the begin sorts after the end or is the end's
-   successor (a begin longer than the end may be). Names of ASCII with no
-   NUL only. */
-static int sym_range_plain_walk(const char *s, size_t sl, const char *e, size_t el) {
+   the name grows past the end's length? One name is its own walk. Of two,
+   String#upto's cases in its order: names of one character walk every
+   character between, and #succ steps one character except from 9, Z and
+   z; names of digits walk the numbers between at the begin's width, and
+   the loop meets the end only where the end is its own number at that
+   width; any other pair walks nothing when the begin sorts after the end
+   or is the end's successor, and stops at the end's successor. Two names
+   of ASCII with no NUL only. */
+static int sym_range_plain_walk(const char *s, size_t sl, const char *e, size_t el, int excl) {
   if (!s || !e || sl < 1 || el < 1) return 0;
+  if (sl == el && memcmp(s, e, sl) == 0) return 1;
   int digits = 1;
   for (size_t i = 0; i < sl; i++) {
     if (!s[i] || (unsigned char)s[i] >= 0x80) return 0;
@@ -3860,12 +3861,15 @@ static int sym_range_plain_walk(const char *s, size_t sl, const char *e, size_t 
   }
   if (sl == 1 && el == 1) {
     if (s[0] > e[0]) return 0;
-    for (int ch = s[0]; ch < e[0]; ch++)
+    /* the step onto an excluded end only has to end the loop */
+    for (int ch = s[0]; ch < e[0] - excl; ch++)
       if (ch == '9' || ch == 'Z' || ch == 'z') return 0;
     return 1;
   }
   if (digits) {
-    if (sl > 18 || el > 18) return 0;
+    /* past 18 digits the walk the runtime makes is not by number either:
+       the loop stays */
+    if (sl > 18 || el > 18) return 1;
     long long from = 0, to = 0;
     for (size_t i = 0; i < sl; i++) from = from * 10 + (s[i] - '0');
     for (size_t i = 0; i < el; i++) to = to * 10 + (e[i] - '0');
@@ -3874,12 +3878,25 @@ static int sym_range_plain_walk(const char *s, size_t sl, const char *e, size_t 
     int n = snprintf(last, sizeof last, "%.*lld", (int)sl, to);
     return n == (int)el && memcmp(last, e, el) == 0;
   }
-  if (sl > el || memcmp(s, e, sl) > 0) return 0;
+  if (sl > el) {
+    /* the begin alone, unless it sorts after the end or is the end's
+       successor: a name that grows puts a 1, a or A before its 9s, zs or
+       Zs and rolls those over */
+    if (memcmp(s, e, el) >= 0) return 0;
+    for (size_t k = 0; sl == el + 1 && k < el && memcmp(s, e, k) == 0; k++) {
+      if (s[k] != (e[k] == '9' ? '1' : e[k] == 'z' ? 'a' : e[k] == 'Z' ? 'A' : 0)) continue;
+      size_t i = k;
+      while (i < el && s[i + 1] == (e[i] == '9' ? '0' : e[i] == 'z' ? 'a' : e[i] == 'Z' ? 'A' : e[i])) i++;
+      if (i == el) return 0;
+    }
+    return 1;
+  }
+  if (memcmp(s, e, sl) > 0) return 0;
   /* `09` and `9` both step to `10`, and `z.09` and `z.9` to `z.10`: where
      the end's carry lands on a 0 that no letter or digit stands before, a
      shorter name may step to the end's successor too, and String#upto
      stops at the successor. */
-  for (size_t i = el; i-- > 0; ) {
+  for (size_t i = el; sl < el && i-- > 0; ) {
     if (!isalnum((unsigned char)e[i]) || e[i] == '9' || e[i] == 'z' || e[i] == 'Z') continue;
     if (e[i] == '0' && (i == 0 || !isalnum((unsigned char)e[i - 1]))) return 0;
     break;
@@ -3899,7 +3916,7 @@ static int emit_range_expr(Compiler *c, int id, Buf *b, const NodeTable *nt, con
       nt_type(nt, left) && sp_streq(nt_type(nt, left), "SymbolNode") &&
       nt_type(nt, right) && sp_streq(nt_type(nt, right), "SymbolNode")) {
     if (!sym_range_plain_walk(nt_str(nt, left, "value"), nt_str_len(nt, left, "value"),
-                              nt_str(nt, right, "value"), nt_str_len(nt, right, "value"))) {
+                              nt_str(nt, right, "value"), nt_str_len(nt, right, "value"), excl)) {
       buf_puts(b, "sp_PolyArray_from_symbol_range(sp_sym_to_s(");
       emit_expr(c, left, b);
       buf_puts(b, "), sp_sym_to_s(");

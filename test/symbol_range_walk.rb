@@ -41,5 +41,8 @@ p (:a..:bb).to_a.size
 p (:"a-"..:"b+").to_a.size
 p (:ab..:ab).to_a
 p (:ab...:ab).to_a
+p (:aa..:b).to_a             # a begin longer than the end: the begin alone
+p (:"/"...:":").to_a.size    # one character each, up to an excluded end
+p (:"9999999999999999999"..:"10000000000000000001").to_a   # digits past 18
 puts (:"aα"..:"aε").map(&:to_s).join(" ")   # not ASCII
 puts (:"ε"..:"α").to_a.size                 # "ε" sorts after "α"
