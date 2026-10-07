@@ -1,0 +1,36 @@
+str * 2.5: "abab"
+str * 3.999: "ababab"
+str * 0.5: ""
+str * -0.5: ""
+str * 0.0: ""
+empty * 2.5: ""
+str * 2: "abab"
+ints * 2.5: [1, 2, 1, 2]
+strs * 2.5: ["a", "b", "a", "b"]
+mixed * 2.5: [1.5, nil, "x", 1.5, nil, "x"]
+none * 2.5: []
+ints * 0.5: []
+ints * -0.5: []
+ints * 2: [1, 2, 1, 2]
+str * typed: "abab"
+ints * typed: [1, 2, 1, 2]
+str * literal: "abab"
+ints * literal: [1, 2]
+str * -1.5: ArgumentError: negative argument
+ints * -1.5: ArgumentError: negative argument
+str * NaN: RangeError: float NaN out of range of integer
+str * Inf: RangeError: float Inf out of range of integer
+str * -Inf: RangeError: float -Inf out of range of integer
+str * 1e30: RangeError: float 1e+30 out of range of integer
+ints * NaN: RangeError: float NaN out of range of integer
+ints * 1e30: RangeError: float 1e+30 out of range of integer
+local *=: "abab"
+attribute *=: "abab"
+ivar *=: [1, 2, 1, 2]
+element *=: "abab"
+send: "abab"
+public_send: [1, 2, 1, 2]
+inject: "abab"
+in a block: ["abab", "ababab"]
+int * float: 4.5
+float * int: 4.5
