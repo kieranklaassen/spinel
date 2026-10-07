@@ -1,0 +1,1 @@
+Array.new(n, value) holds a value made in place while the Array is made

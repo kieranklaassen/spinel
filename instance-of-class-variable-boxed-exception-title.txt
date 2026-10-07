@@ -1,0 +1,1 @@
+instance_of? with the class in a variable answers for a boxed exception
