@@ -1,0 +1,33 @@
+A call no method answers runs its arguments before it raises
+
+    def tick = (puts "tick"; 1)
+    xs = [1]
+    r = ARGV.size > 5 ? "s" : 5
+    begin
+      r.zork(tick, *xs)
+    rescue NoMethodError => e
+      puts e.message
+    end
+
+printed the message alone where CRuby prints "tick" first. The same
+for a keyword argument, a double splat and a String key, on a boxed
+receiver, a typed one and nil; and an argument that raises lost its
+own error to the NoMethodError.
+
+emit_unresolved_call stages a call's arguments into the error
+(NoMethodError#args) only when all of them are plain: "a
+splat/block/kwarg shape keeps the plain message". The arguments of
+such a call were then not emitted at all. They are now emitted for
+their effect after the receiver, in CRuby's order: each argument, a
+splat's and a double splat's operand, a keyword's value, then the
+block argument's expression.
+
+An argument with nothing to run, a literal or a read of a variable,
+is not emitted: a call whose arguments are all such compiles to the
+C it did, as does a call with plain arguments and every call that is
+answered. NoMethodError#args of a call with a splat or a keyword
+argument is nil as before.
+
+Test: test/nomethod_runs_its_arguments.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
