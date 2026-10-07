@@ -1,0 +1,1 @@
+A call's result is held while the String or empty Hash beside it is made
