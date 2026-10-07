@@ -1,0 +1,26 @@
+The program's own chunk, slice_when and kin are not read as the builtin's
+
+`def chunk = [5, 6].each_with_index` and then `chunk.map { |x| x }`
+printed [[5, 0], [6, 1]] for [5, 6], `chunk.map { |*r| r }` wrapped each
+pair once more, and `chunk.any? { |x| x == 5 }` answered false. The same
+for a class's method, an attr_reader or a Struct member named chunk,
+chunk_while, slice_when, slice_before or slice_after.
+
+"A block chained onto chunk_while and its kin binds each chunk as one
+value" leaves a block as written when the Enumerator it walks comes from
+a call of one of those five names (one_value_enum_source), and asked only
+the name. A method of the program's own by that name answers what it
+likes: an each_with_index Enumerator yields two values a step, and its
+lone |x| was bound to the packed pair.
+
+one_value_enum_source now asks whose method the call reaches. Where the
+program owns it (a top-level def or the caller's class for a bare call,
+the receiver's class or its reader, a class method on a constant, the
+receiver's builtin class or Enumerable reopened with the name) the block
+is bound by the Enumerator's flag, as every other source's is. Where the
+receiver's class is not settled and some class of the program has the
+name, a lone |x| is bound by the flag, which reads the builtin's chunks
+and the program's Enumerator alike; the other block forms stay as that
+change wrote them. Every other call is the builtin's and keeps its C.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
