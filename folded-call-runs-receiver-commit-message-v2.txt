@@ -1,0 +1,28 @@
+A call answered at compile time still runs its receiver
+
+    class Shape; end
+    $n = 0
+    def bump = ($n += 1; 7)
+    p bump.size                          # 8
+    p bump.respond_to?(:abs)             # true
+    puts "no" unless bump.is_a?(Shape)   # no
+    p $n                                 # CRuby 3, spinel 0
+
+Integer#size and six Float Range rows of builtin_ops.c answer from a
+template that names the receiver nowhere; respond_to? with a literal
+name is answered from the receiver's type; and an if, unless or ternary
+on it, or on is_a?, kind_of? or instance_of? of a class the type rules
+out, keeps only the live arm. None emitted the receiver: bump was not
+called, and `(7 / z).size` answered 8 with z zero.
+
+The receiver is now emitted ahead of the answer where the call is the
+first thing its statement runs (call_runs_first): the statement itself,
+the value it writes or returns, the test of its if, the one argument of
+`p bump.size`. A receiver that is a variable or a literal emits the C
+it did.
+
+Anywhere else the call compiles as it did. A receiver that was dropped
+has no place among the operands written before it: kept where it
+stands, `mk < (b.is_a?(Shape) ? 1 : 2)` runs b before mk under gcc.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
