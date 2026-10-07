@@ -20081,7 +20081,8 @@ static int refuse_scope_params(Compiler *c, Scope *m) {
 }
 
 /* The method a static call names: by the receiver's class, or the
-   enclosing class for self, or the free function. */
+   enclosing class for self, or the free function, which a bare call
+   inside a class reaches too when the class has no method of the name. */
 static int refuse_static_target(Compiler *c, int id, const char *name) {
   const NodeTable *nt = c->nt;
   int recv = nt_ref(nt, id, "receiver");
@@ -20095,7 +20096,9 @@ static int refuse_static_target(Compiler *c, int id, const char *name) {
     if (!ty_is_object(rt)) return -1;
     cls = ty_object_class(rt);
   }
-  return cls >= 0 ? comp_method_in_chain(c, cls, name, NULL) : comp_method_index(c, name);
+  int mi = cls >= 0 ? comp_method_in_chain(c, cls, name, NULL) : -1;
+  if (mi < 0 && (recv < 0 || nt_kind(nt, recv) == NK_SelfNode)) mi = comp_method_index(c, name);
+  return mi;
 }
 
 /* The method scope a static call names, when it is a define_method body. */
@@ -20887,8 +20890,6 @@ static void refuse_nonlocal_param_args(Compiler *c, int id, const char *name) {
   }
   else {
     int mi = refuse_static_target(c, id, name);
-    /* a class method's bare call reaches a top-level method too */
-    if (mi < 0 && (recv < 0 || nt_kind(nt, recv) == NK_SelfNode)) mi = comp_method_index(c, name);
     if (mi >= 0) tg[n++] = mi;
   }
   for (int t = 0; t < n; t++) {
