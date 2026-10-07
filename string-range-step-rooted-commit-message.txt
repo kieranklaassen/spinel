@@ -1,0 +1,23 @@
+A String Range's step(n) and % keep their Enumerator while its label is made
+
+    x = 3.to_s
+    y = 8.to_s
+    n = 0
+    3000.times { n += (x..y).step(2).to_a.size + ((x..y) % 2).map(&:size).sum }
+    p n   # 18000; 17994 with clang in a plain run, an abort under SPINEL_GC_STRESS=2
+
+"A String Range's step(n) inspects as an Enumerator over the Range" made
+the two rows of bop_rows end in one call whose three arguments each
+allocate: the new Enumerator, the boxed Range and the label's String.
+Nothing held the one made first while the others were made, so a
+collection in between freed the Enumerator or the box.
+
+The Enumerator and the boxed Range now go into rooted temps, and the label
+is made last.
+
+Not here: `p` of such an Enumerator can still print a freed begin under
+SPINEL_GC_STRESS=2, as `p` of the Range itself does, so
+test/srange_step_inspect.rb is not added to GC_STRESS_TESTS. `r % 2`
+inspects as step(2): the call is renamed before it reaches its row.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
