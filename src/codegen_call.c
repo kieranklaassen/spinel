@@ -1694,10 +1694,12 @@ static int name_is_comparable_module_method(const char *m) {
 
 /* Exception's own public instance methods, for respond_to? on an instance of
    a class the program puts under a builtin exception: they are the runtime's
-   and stand in no method table. to_s, inspect and == are every object's. */
+   and stand in no method table. Only the ones such an instance can be called
+   with both typed and boxed: full_message, backtrace_locations, exception
+   and set_backtrace are not there yet on one or the other, and a true would
+   lead a guarded call into NoMethodError. */
 const char *const exception_names[] = {
-    "message", "full_message", "detailed_message", "backtrace",
-    "backtrace_locations", "cause", "exception", "set_backtrace", NULL };
+    "message", "detailed_message", "backtrace", "cause", NULL };
 static int name_is_exception_own_method(const char *m) {
   for (int i = 0; exception_names[i]; i++) if (sp_streq(m, exception_names[i])) return 1;
   return 0;

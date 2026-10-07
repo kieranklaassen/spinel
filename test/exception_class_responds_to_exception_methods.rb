@@ -16,10 +16,11 @@ module App
 end
 
 e = MyErr.new("never raised")
-p [e.respond_to?(:message), e.respond_to?(:full_message), e.respond_to?(:detailed_message), e.respond_to?(:backtrace)]
-p [e.respond_to?(:backtrace_locations), e.respond_to?(:cause), e.respond_to?(:exception), e.respond_to?(:set_backtrace)]
+p [e.respond_to?(:message), e.respond_to?(:detailed_message), e.respond_to?(:backtrace), e.respond_to?(:cause)]
 p e.respond_to?(:nope), e.respond_to?(:hint), e.respond_to?("message")
 puts(e.respond_to?(:message) ? e.message : "no message")
+p e.backtrace if e.respond_to?(:backtrace)
+p e.cause if e.respond_to?(:cause)
 
 d = Deeper.new("d")
 p d.respond_to?(:cause), d.respond_to?(:hint)
