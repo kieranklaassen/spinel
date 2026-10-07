@@ -567,7 +567,7 @@ build/sp_cold.o: lib/sp_cold.c $(RT_HDRS)
 
 SP_RT_LIB = lib/libspinel_rt.a
 
-RT_MEMBERS = sp_bigint sp_crypto sp_pack sp_time sp_core sp_net sp_system sp_gc sp_slab sp_alloc sp_dtoa sp_marshal sp_format sp_string sp_inspect sp_poly_cold sp_array sp_str sp_str_crypt sp_hash sp_proc sp_exc sp_re sp_random sp_fiber sp_sched sp_io sp_iobuffer sp_cold sp_process sp_process_status
+RT_MEMBERS = sp_bigint sp_crypto sp_pack sp_time sp_core sp_net sp_system sp_gc sp_slab sp_alloc sp_dtoa sp_marshal sp_format sp_string sp_inspect sp_poly_cold sp_poly_cold2 sp_array sp_str sp_str_crypt sp_hash sp_proc sp_exc sp_re sp_random sp_fiber sp_sched sp_io sp_iobuffer sp_cold sp_process sp_process_status
 
 $(SP_RT_LIB): $(RE_OBJ) $(addprefix build/,$(addsuffix .o,$(RT_MEMBERS)))
 	ar rcs $@ $^
@@ -3806,7 +3806,9 @@ arity-spec-check:
 	@$(ARITY_RUBY) tools/gen_builtin_arity_spec.rb --check
 
 # lib/sp_poly_cold.c holds functions spinel_rt.h used to define static in every
-# generated unit. Compiled once, its object must not depend on the integer
+# generated unit, and lib/sp_poly_cold2.c one of them that had to change (the
+# first file is at gcc's inline unit limit). Compiled once, each object must
+# not depend on the integer
 # overflow mode and must not reach a writable static of its own (a private copy
 # of a hook the generated unit sets stays NULL, and the optimizer folds the test
 # away); tools/poly_cold_check.rb states both and checks them. It reads the
@@ -3815,7 +3817,7 @@ arity-spec-check:
 poly-cold-test:
 	@case "$$(uname -s)" in \
 	  Darwin|CYGWIN*|MINGW*|MSYS*) echo "poly-cold-test: skipped (needs an ELF host: objdump and readelf)" ;; \
-	  *) ruby tools/poly_cold_check.rb $(CC) ;; \
+	  *) ruby tools/poly_cold_check.rb $(CC) && POLY_COLD_SRC=lib/sp_poly_cold2.c ruby tools/poly_cold_check.rb $(CC) ;; \
 	esac
 
 traits-check-test: $(SPINEL)

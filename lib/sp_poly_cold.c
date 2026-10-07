@@ -581,7 +581,14 @@ sp_PolyPolyHash*sp_PolyPolyHash_merge(sp_PolyPolyHash*a,sp_PolyPolyHash*b)
 void sp_PolyPolyHash_clear(sp_PolyPolyHash*h)
 {if(!h)return;for(sp_int i=0;i<h->cap;i++)h->occ[i]=0;h->len=0;}
 
-sp_RbVal sp_poly_clear(sp_RbVal v)
+/* Not called. `clear` on a boxed receiver is sp_poly_clear in
+   lib/sp_poly_cold2.c, which raises for a frozen Array or Hash; this is that
+   function as it was before. It stays because this unit is at gcc's inline
+   unit limit: with these lines taken out, or with the frozen tests put in,
+   gcc emits other code for functions here that have nothing to do with clear
+   (sp_enum_items_from, sp_rbval_hash_key, sp_poly_dup among them). It can go
+   with the next change that re-lays this unit anyway. */
+sp_RbVal sp_poly_clear_unchecked(sp_RbVal v)
 {
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_QUEUE && v.v.p) { sp_Queue_clear((sp_queue *)v.v.p); return v; }
   /* String#clear on a plain string box: a fresh empty string the receiver

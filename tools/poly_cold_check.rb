@@ -1,9 +1,10 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 #
-# lib/sp_poly_cold.c includes spinel_rt.h as a host and holds functions the
-# header used to define `static` in every generated unit. Compiled once, it must
-# behave as the generated unit's own copy would, which holds only while:
+# lib/sp_poly_cold.c and lib/sp_poly_cold2.c include spinel_rt.h as a host and
+# hold functions the header used to define `static` in every generated unit.
+# Compiled once, each must behave as the generated unit's own copy would, which
+# holds only while:
 #
 #   1. its code does not depend on the integer-overflow mode. The generated unit
 #      is built with -DSP_INT_OVERFLOW_MODE_{RAISE,WRAP,PROMOTE}, the library
@@ -16,6 +17,7 @@
 #      exported function is followed.
 #
 # usage: ruby tools/poly_cold_check.rb [CC...]   (CC may be several words, e.g. `ccache cc`)
+#        POLY_COLD_SRC names the unit to check (lib/sp_poly_cold.c when unset)
 
 require "open3"
 require "tmpdir"
@@ -23,7 +25,7 @@ require "digest"
 
 cc = (ARGV.empty? ? [ENV["CC"] || "cc"] : ARGV).join(" ").split
 inc = %w[-Ilib -Ilib/regexp -Ilib/regexp/shim]
-src = "lib/sp_poly_cold.c"
+src = ENV["POLY_COLD_SRC"] || "lib/sp_poly_cold.c"
 env = { "LC_ALL" => "C" }
 
 def run(env, *cmd)
@@ -93,6 +95,6 @@ Dir.mktmpdir("poly-cold") do |dir|
     puts "poly-cold-test: FAIL (a writable static is reachable; the generated unit owns it, so declare it extern for SPINEL_EXT_HOST)"
     reached.each { |s, f| puts "  #{s} (first used by #{f})" }
   end
-  puts "poly-cold-test: #{roots.size} exported functions, #{seen.size} reachable, writable statics reached: #{reached.size}" if ok
+  puts "poly-cold-test: #{src}: #{roots.size} exported functions, #{seen.size} reachable, writable statics reached: #{reached.size}" if ok
 end
 exit(ok ? 0 : 1)
