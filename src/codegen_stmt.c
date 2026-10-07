@@ -6287,16 +6287,32 @@ static void emit_case_obj_eq(Compiler *c, int cond, int t, TyKind pt, Buf *b) {
   }
 }
 
+/* A `when` arm held boxed is asked `===` by what it holds at run time, as
+   the call `arm === v` on a boxed receiver is. The arm's tag is read once:
+   two Integers compare in line, a Proc is called, any other object and a
+   Class go to sp_poly_case_eq (a Class its instances, a Range its cover, a
+   Regexp its match, else equality), and what is left (a number, a String,
+   a Symbol, nil, a boolean) matches by equality, the sp_poly_eq_slow that
+   sp_poly_eq ends in. Compared with sp_poly_eq alone, a Range or a Class
+   read out of an Array never matched. */
 static void emit_when_boxed_test(Compiler *c, int cond, int t, TyKind pt, Buf *b) {
   char subjp[32]; snprintf(subjp, sizeof subjp, "_t%d", t);
+  Buf sb; memset(&sb, 0, sizeof sb);
+  if (pt != TY_POLY) emit_boxed_text(c, pt, subjp, &sb);
+  const char *s = sb.p ? sb.p : subjp;
   int tpw = ++g_tmp;
-  buf_printf(b, "({ sp_RbVal _t%d = ", tpw); emit_boxed(c, cond, b);
-  buf_printf(b, "; _t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_PROC"
-                " ? sp_poly_truthy(sp_penum_call1((sp_Proc *)_t%d.v.p, ", tpw, tpw, tpw);
-  if (pt == TY_POLY) buf_puts(b, subjp); else emit_boxed_text(c, pt, subjp, b);
-  buf_printf(b, ")) : sp_poly_eq(_t%d, ", tpw);
-  if (pt == TY_POLY) buf_puts(b, subjp); else emit_boxed_text(c, pt, subjp, b);
-  buf_puts(b, "); })");
+  buf_printf(b, "({ sp_RbVal _t%d = ", tpw); emit_boxed(c, cond, b); buf_puts(b, "; ");
+  /* the subject's type says whether it can be an Integer at all; a typed
+     Integer that holds the nil sentinel is nil, which equals no Integer */
+  if (pt == TY_INT)
+    buf_printf(b, "_t%d.tag == SP_TAG_INT ? _t%d.v.i == %s && %s != SP_INT_NIL : ", tpw, tpw, subjp, subjp);
+  else if (pt == TY_POLY)
+    buf_printf(b, "_t%d.tag == SP_TAG_INT && %s.tag == SP_TAG_INT ? _t%d.v.i == %s.v.i : ", tpw, s, tpw, s);
+  buf_printf(b, "_t%d.tag == SP_TAG_OBJ ? (_t%d.cls_id == SP_BUILTIN_PROC"
+                " ? sp_poly_truthy(sp_penum_call1((sp_Proc *)_t%d.v.p, %s)) : sp_poly_case_eq(_t%d, %s))"
+                " : _t%d.tag == SP_TAG_CLASS ? sp_poly_case_eq(_t%d, %s) : sp_poly_eq_slow(_t%d, %s); })",
+             tpw, tpw, tpw, s, tpw, s, tpw, tpw, s, tpw, s);
+  free(sb.p);
 }
 
 static void emit_when_splat_test(Compiler *c, int cond, int t, TyKind pt, Buf *b) {
