@@ -236,6 +236,7 @@ static void sp_fsl_splice(unsigned char **buf, size_t *n, size_t at,
 static int *sp_line_file = NULL;  /* buffer line (1-based) -> file id */
 static int *sp_line_orig = NULL;  /* buffer line (1-based) -> original line */
 static int *sp_line_pop = NULL;
+static unsigned char *sp_line_late = NULL;  /* buffer line -> in a file spliced ahead of its require */
 /* The position a `#<SPINEL_SOURCE>file:line` marker pins for the lines after
    it (0 = none). Kept apart from the physical map above: `__FILE__`,
    `__dir__` and `require_relative` still answer from the file the code is in,
@@ -345,6 +346,20 @@ static void emit_str(int id, const char *field, const char *val) {
 
 static void emit_int(int id, const char *field, long long val) {
   out_add("I %d %s %lld", id, field, val);
+}
+
+/* What the line map says of a statement on buffer line bl, its owner on ol:
+   `req_pop`, the line its required file ends at, where that is another file
+   than the owner's; `req_late`, in a file that loads when its require runs,
+   later than where it is spliced. The second goes on a constant's write and
+   on a class or module alone, which no def holds: a file spliced twice, once
+   of them late, keeps equal defs (desugar_conditional_defs compares them
+   field by field). */
+static void emit_req_marks(int id, int32_t bl, int32_t ol, pm_node_type_t t) {
+  if (bl < 1 || bl > sp_line_map_n) return;
+  if (sp_line_pop[bl] > 0 && sp_line_pop[bl] != sp_line_pop[ol]) emit_int(id, "req_pop", sp_line_pop[bl]);
+  if (sp_line_late[bl] && (t == PM_CONSTANT_WRITE_NODE || t == PM_CLASS_NODE || t == PM_MODULE_NODE))
+    emit_int(id, "req_late", 1);
 }
 
 static void emit_float(int id, const char *field, double val) {
@@ -585,8 +600,7 @@ static int flatten_node(pm_node_t *node) {
     int32_t bl = pm_newline_list_line(&g_parser->newline_list, node->location.start, g_parser->start_line);
     int32_t ol = owner ? pm_newline_list_line(&g_parser->newline_list, owner, g_parser->start_line) : 0;
     g_stmt_next++;
-    if (bl >= 1 && bl <= sp_line_map_n && sp_line_pop[bl] > 0 && sp_line_pop[bl] != sp_line_pop[ol])
-      emit_int(id, "req_pop", sp_line_pop[bl]);
+    emit_req_marks(id, bl, ol, t);
   }
   if (t != PM_STATEMENTS_NODE) g_owner = t == PM_PROGRAM_NODE ? NULL : node->location.start;
 
@@ -2382,6 +2396,7 @@ static void sp_build_line_map(const char *src, const char *toplevel) {
   sp_line_file = (int *)calloc(nlines + 2, sizeof(int));
   sp_line_orig = (int *)calloc(nlines + 2, sizeof(int));
   sp_line_pop = (int *)calloc(nlines + 2, sizeof(int));
+  sp_line_late = (unsigned char *)calloc(nlines + 2, 1);
   sp_disp_file = (int *)calloc(nlines + 2, sizeof(int));
   sp_disp_line = (int *)calloc(nlines + 2, sizeof(int));
   int *stk_dfile = (int *)calloc(nlines + 2, sizeof(int));  /* a frame's pinned file id, 0 = none */
@@ -2390,10 +2405,10 @@ static void sp_build_line_map(const char *src, const char *toplevel) {
   int *stk_file = (int *)malloc(sizeof(int) * (nlines + 2));
   int *stk_next = (int *)malloc(sizeof(int) * (nlines + 2));
   int *stk_start = (int *)malloc(sizeof(int) * (nlines + 2));
-  if (!sp_line_file || !sp_line_orig || !sp_line_pop || !sp_disp_file || !sp_disp_line || !stk_dfile || !stk_dline || !stk_file || !stk_next || !stk_start) {
+  if (!sp_line_file || !sp_line_orig || !sp_line_pop || !sp_line_late || !sp_disp_file || !sp_disp_line || !stk_dfile || !stk_dline || !stk_file || !stk_next || !stk_start) {
     fprintf(stderr, "spinel_parse: out of memory\n"); exit(1);
   }
-  int sp = 0;
+  int sp = 0, late = 0;   /* late: the depth of the outermost file spliced ahead of its require */
   stk_file[sp] = sp_intern_file(toplevel);
   stk_next[sp] = 1;
 
@@ -2410,6 +2425,7 @@ static void sp_build_line_map(const char *src, const char *toplevel) {
     }
 else if (strncmp(line, SP_INSERT_PREFIX, strlen(SP_INSERT_PREFIX)) == 0) {
       prefix_len = strlen(SP_INSERT_PREFIX);
+      if (!late) late = sp + 1;
     }
     if (prefix_len) {
       char pathbuf[1024];
@@ -2426,11 +2442,13 @@ else if (strncmp(line, SP_INSERT_PREFIX, strlen(SP_INSERT_PREFIX)) == 0) {
     }
 else if (strncmp(line, SP_POP_PREFIX, strlen(SP_POP_PREFIX)) == 0) {
       for (int j = sp > 0 ? stk_start[sp] : bl; j < bl; j++) if (!sp_line_pop[j]) sp_line_pop[j] = bl;
+      if (sp == late) late = 0;
       if (sp > 0) sp--;
     }
 else if (len < 12 || strncmp(line + len - 12, "SPINEL_COND>", 12) != 0) {
       sp_line_file[bl] = stk_file[sp];
       sp_line_orig[bl] = stk_next[sp];
+      sp_line_late[bl] = late != 0;
       stk_next[sp] += 1;
       if (strncmp(line, SP_SOURCE_PREFIX, strlen(SP_SOURCE_PREFIX)) == 0) {
         /* file:line, split at the last colon; anything else is a comment */
