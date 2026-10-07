@@ -24,3 +24,10 @@ from the commits its recipe lists.
   clang at collector stress unset, 1 and 2, against CRuby.
 - `csum.sh TREE DIR OUT` sums the C a tree emits for a directory (tree path
   masked); `sum3.rb` makes the two-rule table from the runs and the sums.
+
+`texts/` holds the upstream texts of the three pieces as they are summed in
+the hand-over: `numeric-*` for the first (a boxed number's
+`instance_of?(Numeric)`), `pr-title.txt`, `pr-body-upstream-v7.md` and
+`commit-message-v7.txt` for the second (the constant in `is_a?`), `bl1-*` for
+the third (the constant in `rescue` and `raise`; its refactor's message is in
+commit 69d79bf9).
