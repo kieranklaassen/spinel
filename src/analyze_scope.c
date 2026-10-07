@@ -6675,14 +6675,17 @@ void inherit_members(Compiler *c) {
        the C did not build (#4642, a controller under a superclass). */
     unsigned char *old_ss = ci->ivar_str_shared, *old_it = ci->ivar_int_table,
                   *old_oc = ci->ivar_oa_conflict, *old_ni = ci->ivar_nullable_int,
-                  *old_ne = ci->ivar_nullable_int_elem, *old_ae = ci->ivar_arr_elem_arr_or_nil;
+                  *old_ne = ci->ivar_nullable_int_elem, *old_ae = ci->ivar_arr_elem_arr_or_nil,
+                  *old_hu = ci->ivar_handle_unset;
     TyKind *old_oa = ci->ivar_oa_type; int *old_os = ci->ivar_oa_seed;
     ci->ivars = NULL; ci->ivar_types = NULL; ci->ivar_str_shared = NULL; ci->ivar_int_table = NULL;
     ci->ivar_oa_type = NULL; ci->ivar_oa_seed = NULL; ci->ivar_oa_conflict = NULL;
     ci->ivar_nullable_int = NULL; ci->ivar_nullable_int_elem = NULL; ci->ivar_arr_elem_arr_or_nil = NULL;
+    ci->ivar_handle_unset = NULL;
     ci->nivars = ci->civars = 0;
     #define IV_SIDE_COPY(dst, di, src, si) do { \
       (dst)->ivar_str_shared[di] = (src)->ivar_str_shared[si]; \
+      (dst)->ivar_handle_unset[di] = (src)->ivar_handle_unset[si]; \
       (dst)->ivar_int_table[di] = (src)->ivar_int_table[si]; \
       (dst)->ivar_oa_type[di] = (src)->ivar_oa_type[si]; \
       (dst)->ivar_oa_seed[di] = (src)->ivar_oa_seed[si]; \
@@ -6732,6 +6735,7 @@ void inherit_members(Compiler *c) {
         ci->ivar_oa_type[idx] = old_oa[k]; ci->ivar_oa_seed[idx] = old_os[k];
         ci->ivar_oa_conflict[idx] = old_oc[k]; ci->ivar_nullable_int[idx] = old_ni[k];
         ci->ivar_nullable_int_elem[idx] = old_ne[k]; ci->ivar_arr_elem_arr_or_nil[idx] = old_ae[k];
+        ci->ivar_handle_unset[idx] = old_hu[k];
       }
       free(old[k]);
     }
@@ -6739,7 +6743,7 @@ void inherit_members(Compiler *c) {
     /* the parent's ivars lead the rebuilt layout, so its members lead them */
     if (pc->is_struct && ci->nmembers < pc->nmembers) ci->nmembers = pc->nmembers;
     free(old); free(oldt); free(old_ss); free(old_it); free(old_oa); free(old_os);
-    free(old_oc); free(old_ni); free(old_ne); free(old_ae);
+    free(old_oc); free(old_ni); free(old_ne); free(old_ae); free(old_hu);
 
     /* An inherited attribute the child overrides with a `def` stops there: the
        def answers the name for the child and everything below it, so copying

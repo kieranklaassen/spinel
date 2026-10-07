@@ -411,6 +411,10 @@ typedef struct {
   unsigned char *ivar_str_shared; /* (#3227) the slot is a shared-mutable
                                      string handle (sp_String *): survives
                                      re-clears; post-fixpoint reasserts it */
+  unsigned char *ivar_handle_unset; /* a Struct member that is that handle
+                                     and that some `new` leaves nil
+                                     (struct_new_types_members): its NULL
+                                     is a nil the program left there */
   unsigned char *ivar_nullable_int; /* the slot holds a nilable scalar: some
                                      write to it can leave the nil sentinel, so
                                      a read of it (or of its attr_reader) has to

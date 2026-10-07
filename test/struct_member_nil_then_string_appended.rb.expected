@@ -1,0 +1,18 @@
+"012"
+nil
+true
+#<struct S buf="a1z!", n=1>
+"kvw"
+"kvw"
+nil
+#<struct K x=nil, n=3>
+none
+undefined method '<<' for nil
+undefined method 'concat' for nil
+undefined method 'upcase!' for nil
+undefined method '<<' for nil
+undefined method 'to_sym' for nil
+undefined method 'size' for nil
+"abc"
+undefined method '<<' for nil
+#<struct S buf=nil, n=nil>

@@ -596,6 +596,7 @@ int comp_ivar_intern(ClassInfo *ci, const char *name) {
     ci->ivars = realloc(ci->ivars, sizeof(char *) * (size_t)ci->civars);
     ci->ivar_types = realloc(ci->ivar_types, sizeof(TyKind) * (size_t)ci->civars);
     ci->ivar_str_shared = realloc(ci->ivar_str_shared, (size_t)ci->civars);
+    ci->ivar_handle_unset = realloc(ci->ivar_handle_unset, (size_t)ci->civars);
     ci->ivar_int_table = realloc(ci->ivar_int_table, (size_t)ci->civars);
     ci->ivar_oa_type = realloc(ci->ivar_oa_type, sizeof(TyKind) * (size_t)ci->civars);
     ci->ivar_oa_seed = realloc(ci->ivar_oa_seed, sizeof(int) * (size_t)ci->civars);
@@ -607,6 +608,7 @@ int comp_ivar_intern(ClassInfo *ci, const char *name) {
   ci->ivars[ci->nivars] = strdup(name);
   ci->ivar_types[ci->nivars] = TY_UNKNOWN;
   ci->ivar_str_shared[ci->nivars] = 0;
+  ci->ivar_handle_unset[ci->nivars] = 0;
   ci->ivar_int_table[ci->nivars] = 0;
   ci->ivar_oa_type[ci->nivars] = TY_UNKNOWN;
   ci->ivar_oa_seed[ci->nivars] = 0;
@@ -629,6 +631,7 @@ int comp_member_intern(ClassInfo *ci, const char *name) {
     IV_SWAP(ivars, char *);
     IV_SWAP(ivar_types, TyKind);
     IV_SWAP(ivar_str_shared, unsigned char);
+    IV_SWAP(ivar_handle_unset, unsigned char);
     IV_SWAP(ivar_int_table, unsigned char);
     IV_SWAP(ivar_oa_type, TyKind);
     IV_SWAP(ivar_oa_seed, int);

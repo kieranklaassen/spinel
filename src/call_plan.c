@@ -1794,6 +1794,12 @@ int cplan_nil(Compiler *c, int id) {
   /* the receiver as settled, not as a view retypes it: a poly arm's
      unboxed String is never its box's nil */
   TyKind rt = c->ntype[r];
+  /* the handle a reader reads of a Struct member some `new` leaves nil
+     (an_nil_facts: NFW_UNSET) is tested where it is read: a mutator's
+     target, which no slot of the caller holds */
+  if (rt == TY_STRBUF && comp_ntype(c, r) == rt && nt_kind(nt, r) == NK_CallNode &&
+      nil_fact_why(c, r) == NFW_UNSET && !repr_of(c, r).nil_tested)
+    return cplan_nil_user_method(c, nm) || is_nil_method(nm) ? CN_NONE : CN_RAISE;
   if (!cplan_nil_family(rt) || comp_ntype(c, r) != rt) return CN_NONE;
   Repr rr = repr_of(c, r);
   if ((rr.kind != RK_PTR && rr.kind != RK_STRBUF) || !rr.may_nil || rr.nil_tested) return CN_NONE;

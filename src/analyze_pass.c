@@ -7798,6 +7798,12 @@ static int struct_new_types_members(Compiler *c, int id, int ci) {
     }
     TyKind at = vnode >= 0 ? struct_member_arg_type(c, vnode) : TY_NIL;
     TyKind m = ty_unify(cls->ivar_types[a], at);
+    /* a member that is the shared handle and is left nil here stays the
+       handle, whose NULL is nil, as a String member's is */
+    if (at == TY_NIL && cls->ivar_types[a] == TY_STRBUF && !c->share_strings) {
+      m = TY_STRBUF;
+      cls->ivar_handle_unset[a] = 1;
+    }
     /* Any other literal key may bind the member too: its name written
        again, whose last value CRuby binds, or a key that is not a Symbol,
        which names a member only at run time, a String by name and a

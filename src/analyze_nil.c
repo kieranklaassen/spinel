@@ -340,6 +340,13 @@ static int nf_chain_writes(NF *f, int k, const char *ivn) {
   return NFW_NONE;
 }
 
+/* A Struct member that is the shared handle and that some `new` leaves nil
+   (struct_new_types_members): its NULL is the program's own nil */
+static int nf_handle_unset(Compiler *c, int cls, const char *ivn) {
+  int iv = comp_ivar_index(&c->classes[cls], ivn);
+  return iv >= 0 && c->classes[cls].ivar_types[iv] == TY_STRBUF && c->classes[cls].ivar_handle_unset[iv];
+}
+
 /* The ivar `ivn` read in a method of class cls, whose self is an instance
    of cls or of a class below it (or including it, for a module): nil until
    a write, unless that class's initialize writes it first; or a write the
@@ -362,7 +369,10 @@ static int nf_ivar(NF *f, int cls, const char *ivn) {
       int kid = f->kid_to[ed];
       if (f->seen[kid] != f->stamp) { f->seen[kid] = f->stamp; f->dfs[sp++] = kid; }
     }
-    if (c->classes[k].is_struct) { r = NFW_OPAQUE; break; }   /* a member `new` was not handed */
+    if (c->classes[k].is_struct) {   /* a member `new` was not handed */
+      r = nf_handle_unset(c, k, ivn) ? NFW_UNSET : NFW_OPAQUE;
+      break;
+    }
     NFIvar *ek = nf_ivar_slot(f, k, ivn);
     if (!ek->init) ek->init = nf_init_sets(f, k, ivn) ? 2 : 1;
     ek = nf_ivar_slot(f, k, ivn);
@@ -640,8 +650,18 @@ static int nf_call(NF *f, int v) {
   const NodeTable *nt = f->nt;
   const char *nm = nt_str(nt, v, "name");
   const char *op = nt_str(nt, v, "call_operator");
-  /* only a tracked value's nil: the slots it can reach are tracked */
-  if (!nil_fact_tracked(c->ntype[v])) return NFW_NONE;
+  /* only a tracked value's nil: the slots it can reach are tracked; and the
+     handle a reader reads of a member some `new` leaves nil */
+  if (!nil_fact_tracked(c->ntype[v])) {
+    int o = nt_ref(nt, v, "receiver");
+    TyKind ot = o >= 0 ? c->ntype[o] : TY_UNKNOWN;
+    char ivn[256];
+    if (c->ntype[v] != TY_STRBUF || !nm || !ty_is_object(ot) ||
+        !comp_reader_in_chain(c, ty_object_class(ot), nm, NULL))
+      return NFW_NONE;
+    snprintf(ivn, sizeof ivn, "@%s", nm);
+    return nf_handle_unset(c, ty_object_class(ot), ivn) ? NFW_UNSET : NFW_NONE;
+  }
   if (op && sp_streq(op, "&.")) return NFW_SAFE_NAV;
   if (!nm) return NFW_OPAQUE;
   int r = nt_ref(nt, v, "receiver");
