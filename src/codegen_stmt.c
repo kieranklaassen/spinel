@@ -9105,6 +9105,55 @@ static void emit_ensure_return(Compiler *c, int eid, int has_retval, Buf *b, int
 /* begin/body/rescue (ensure/else deferred) via the setjmp exception model.
    When resultvar != NULL, the body's and rescue handlers' values are
    assigned to it (begin/rescue as an expression). */
+/* Does this ensure body run no code of the program and hold no ensure of
+   its own: reads and writes of variables, literals, operators over scalars?
+   Then nothing in it can end by resuming an unwind. A whitelist, so anything
+   it does not name may. */
+static int ensure_body_runs_no_code(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  if (id < 0) return 1;
+  switch (nt_kind(nt, id)) {
+    case NK_LocalVariableReadNode: case NK_InstanceVariableReadNode:
+    case NK_GlobalVariableReadNode: case NK_SelfNode: case NK_IntegerNode:
+    case NK_FloatNode: case NK_NilNode: case NK_TrueNode: case NK_FalseNode:
+    case NK_SymbolNode: case NK_StringNode:
+      return 1;
+    case NK_LocalVariableOperatorWriteNode: case NK_InstanceVariableOperatorWriteNode:
+    case NK_GlobalVariableOperatorWriteNode: {
+      TyKind t = comp_ntype(c, id);
+      if (t != TY_INT && t != TY_FLOAT) return 0;   /* an object's own operator */
+      break;
+    }
+    case NK_CallNode: {
+      if (!call_is_scalar_op(c, id)) return 0;
+      /* an object for an operand runs its coerce */
+      int a = nt_ref(nt, id, "arguments"); int ac = 0;
+      const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+      for (int i = 0; i < ac; i++) {
+        TyKind t = comp_ntype(c, av[i]);
+        if (t != TY_INT && t != TY_FLOAT && t != TY_BOOL) return 0;
+      }
+      break;
+    }
+    case NK_StatementsNode: case NK_ParenthesesNode: case NK_LocalVariableWriteNode:
+    case NK_InstanceVariableWriteNode: case NK_GlobalVariableWriteNode:
+      break;
+    default: {
+      /* a call's argument list has no kind of its own */
+      const char *ty = nt_type(nt, id);
+      if (!ty || !sp_streq(ty, "ArgumentsNode")) return 0;
+      break;
+    }
+  }
+  for (int i = 0; i < nt_num_refs(nt, id); i++)
+    if (!ensure_body_runs_no_code(c, nt_ref_at(nt, id, i))) return 0;
+  for (int i = 0; i < nt_num_arrs(nt, id); i++) {
+    int n = 0; const int *ids = nt_arr_at(nt, id, i, &n);
+    for (int j = 0; j < n; j++) if (!ensure_body_runs_no_code(c, ids[j])) return 0;
+  }
+  return 1;
+}
+
 void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) {
   const NodeTable *nt = c->nt;
   int body = nt_ref(nt, id, "statements");
@@ -9113,6 +9162,7 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
   int ensure_c = nt_ref(nt, id, "ensure_clause");
   int else_stmts = else_c >= 0 ? nt_ref(nt, else_c, "statements") : -1;
   int ensure_stmts = ensure_c >= 0 ? nt_ref(nt, ensure_c, "statements") : -1;
+  int ens_resumes = ensure_stmts >= 0 && !ensure_body_runs_no_code(c, ensure_stmts);
   /* A `begin ... end` with no rescue, else or ensure protects nothing -- the
      `begin ... end while cond` do-while idiom is the common shape -- so it
      needs no handler frame at all. Emitting one put a setjmp on APU's
@@ -9264,10 +9314,15 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
        catch / proc-return that completes *inside* this ensure resets the globals
        to SP_UNWIND_NONE, which would otherwise drop an outer unwind passing
        through. An ensure that starts its own escaping unwind longjmps out before
-       the restore, so that new unwind correctly supersedes. */
+       the restore, so that new unwind correctly supersedes.
+
+       The body is ordinary code and runs with no unwind in flight. An ensure
+       inside it, its own or one of a method it calls, ends by resuming
+       whatever unwind it finds: left set, the outer one was resumed from
+       there, and the rest of this body never ran. */
     emit_indent(b, indent);
-    buf_printf(b, "int _uk%d = sp_unwind_kind, _ut%d = sp_unwind_target, _ue%d = sp_unwind_exc_top; sp_proc_home *_uh%d = sp_unwind_home;\n",
-               eid, eid, eid, eid);
+    buf_printf(b, "int _uk%d = sp_unwind_kind, _ut%d = sp_unwind_target, _ue%d = sp_unwind_exc_top; sp_proc_home *_uh%d = sp_unwind_home;%s\n",
+               eid, eid, eid, eid, ens_resumes ? " sp_unwind_kind = SP_UNWIND_NONE;" : "");
     /* an exception raised from inside this ensure takes the one unwinding
        through it as its cause (#3745) */
     emit_indent(b, indent);
@@ -9417,8 +9472,8 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
     /* preserve an outer unwind across a nested one completing inside the ensure */
     int uid = ++g_tmp;
     emit_indent(b, indent + 1);
-    buf_printf(b, "int _uk%d = sp_unwind_kind, _ut%d = sp_unwind_target, _ue%d = sp_unwind_exc_top; sp_proc_home *_uh%d = sp_unwind_home;\n",
-               uid, uid, uid, uid);
+    buf_printf(b, "int _uk%d = sp_unwind_kind, _ut%d = sp_unwind_target, _ue%d = sp_unwind_exc_top; sp_proc_home *_uh%d = sp_unwind_home;%s\n",
+               uid, uid, uid, uid, ens_resumes ? " sp_unwind_kind = SP_UNWIND_NONE;" : "");
     emit_stmts(c, ensure_stmts, b, indent + 1);
     emit_indent(b, indent + 1);
     buf_printf(b, "sp_unwind_kind = _uk%d; sp_unwind_target = _ut%d; sp_unwind_exc_top = _ue%d; sp_unwind_home = _uh%d;\n",

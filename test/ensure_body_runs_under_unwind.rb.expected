@@ -1,0 +1,26 @@
+a b c 7
+a b c :after
+a b c 5
+a.b. c 8
+in. c1 out. c2 10
+i.c1 o.c2 4
+d.c 5
+b.c 6
+y g c 7
+.1
+"noisy"
+1
+=2
+true
+2
+a.5
+a."over"
+a.9
+k.y c [1, "two"]
+a.c "boom"
+w.c w.c 2
+n.c n.c [2, 4]
+l.c 11
+f.g.12 c 8
+3
+2
