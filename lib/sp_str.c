@@ -550,7 +550,7 @@ const char *sp_str_chomp_sep(const char *s, const char *sep) {SP_GC_ROOT_STR(s);
   size_t l = sp_str_byte_len(s);   /* byte-exact (#4527) */
   /* "\n" is the record separator's own case: it also takes a trailing "\r\n" or "\r" */
   if (sep && sep[0] == '\n' && sp_str_byte_len(sep) == 1) return sp_str_chomp(s);
-  if (!sep || !*sep) {
+  if (!sep || sp_str_byte_len(sep) == 0) {
     /* Empty sep = paragraph mode: strip trailing \r\n pairs and
        standalone \n's, but NOT standalone \r's. A trailing \r that
        is not part of a \r\n pair stops the stripping. */
