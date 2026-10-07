@@ -11066,11 +11066,25 @@ static sp_RbVal sp_poly_set_str(sp_RbVal v, const char *key, sp_RbVal val) {
    it cannot represent is skipped rather than mistyped. Backs the splatted
    `h.merge!(*hs)`, where the sources are only known at run time (#3848). */
 void sp_poly_hash_merge_into(sp_RbVal dst, sp_RbVal src);
+/* A key String#[]= does not take, stored on a boxed String: the TypeError of
+   its conversion to an index, as a boxed Array raises it (#3926). The boxed
+   stores have no String arm, so the store was dropped and the String read
+   back as it was. An Integer, a Float, a String, a Regexp and a Range are
+   String#[]='s own keys and pass. */
+static void sp_poly_str_key_refuse(sp_RbVal key) {
+  if (key.tag == SP_TAG_NIL) sp_raise_cls("TypeError", SPL("no implicit conversion from nil to integer"));
+  if (key.tag == SP_TAG_SYM || key.tag == SP_TAG_BOOL ||
+      (key.tag == SP_TAG_OBJ && (sp_poly_is_array_kind(key.cls_id) || sp_poly_is_hash_kind(key.cls_id))))
+    sp_raise_cls("TypeError", sp_sprintf("no implicit conversion of %s into Integer", sp_convert_src_name(key)));
+}
 /* poly_val[sym_key] = val: runtime dispatch for poly recv `[]=` with symbol key. */
 static sp_RbVal sp_poly_set_sym(sp_RbVal v, sp_sym key, sp_RbVal val) {
   sp_poly_coll_chk(v, "[]=");
   if (v.tag == SP_TAG_SYM) sp_raise_poly_nomethod("[]=", v);   /* as sp_poly_arr_set */
-  if (v.tag != SP_TAG_OBJ) return val;
+  if (v.tag != SP_TAG_OBJ) {
+    if (v.tag == SP_TAG_STR) sp_poly_str_key_refuse(sp_box_sym(key));
+    return val;
+  }
   if (sp_poly_is_array_kind(v.cls_id))
     sp_raise_cls("TypeError", SPL("no implicit conversion of Symbol into Integer"));
   switch (v.cls_id) {
@@ -11084,6 +11098,7 @@ static sp_RbVal sp_poly_set_sym(sp_RbVal v, sp_sym key, sp_RbVal val) {
        sp_OpenStruct_get reader (without this the poly-dispatch write was dropped
        and the reader kept the old value) (#3201). */
     case SP_BUILTIN_OPENSTRUCT:     sp_OpenStruct_set((sp_OpenStruct*)v.v.p, key, val); break;
+    case SP_BUILTIN_STRBUF: sp_poly_str_key_refuse(sp_box_sym(key)); break;   /* a shared String */
     default: break;
   }
   return val;
@@ -11260,7 +11275,10 @@ static sp_RbVal sp_poly_str_aset_key(sp_RbVal v, sp_RbVal key, sp_RbVal val) {
 static sp_RbVal sp_poly_set_poly(sp_RbVal v, sp_RbVal key, sp_RbVal val) {
   sp_poly_coll_chk(v, "[]=");
   if (v.tag == SP_TAG_SYM) sp_raise_poly_nomethod("[]=", v);   /* as sp_poly_arr_set */
-  if (v.tag != SP_TAG_OBJ) return val;
+  if (v.tag != SP_TAG_OBJ) {
+    if (v.tag == SP_TAG_STR) sp_poly_str_key_refuse(key);
+    return val;
+  }
   /* a user object's own []= */
   if (SP_UNLIKELY(sp_poly_is_user_obj(v) && sp_user_aset_hook)) {
     sp_bool h = FALSE;
@@ -11341,6 +11359,7 @@ static sp_RbVal sp_poly_set_poly(sp_RbVal v, sp_RbVal key, sp_RbVal val) {
       else sp_raise_cls("NoMethodError", sp_sprintf("undefined method 'to_sym' for an instance of %s",
                                                     sp_poly_class_name(key)));
       break;
+    case SP_BUILTIN_STRBUF: sp_poly_str_key_refuse(key); break;   /* a shared String */
     default: break;
   }
   return val;
