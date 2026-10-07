@@ -1,0 +1,20 @@
+A parenthesized yield tail keeps each site's block type
+
+    def handed
+      (yield)
+    end
+    p handed { :s }
+    p handed { 9 }
+
+printed :s and :"", where CRuby prints :s and 9; with a String among
+the blocks the program did not build.
+
+Where a method's last statement is a `yield`, method_call_ret types
+each call from its own block, and scope_joined_tail leaves the method
+to it. scope_joined_tail looked through parentheses to decide that,
+and method_call_ret does not, so `(yield)` got neither. In parentheses
+the yield is now the method's joined tail like any other arm, typed
+poly when the blocks diverge.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+

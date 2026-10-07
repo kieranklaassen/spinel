@@ -1,0 +1,1 @@
+A parenthesized yield tail keeps each site's block type
