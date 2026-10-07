@@ -1,0 +1,1 @@
+`return r` up a chain of 16 methods answers the Array, not nil
