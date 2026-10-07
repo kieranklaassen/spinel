@@ -1,0 +1,24 @@
+A String handle local that may be nil reads as nil
+
+    t = +""
+    t << "a"
+    t << "b"
+    t = nil
+    p t
+
+died with SIGSEGV; CRuby prints nil. Two appends in a row, or one in a
+loop, make t an sp_String handle (TY_STRBUF), and nil is a NULL handle.
+The local read in emit_local_ivar_write_expr copies sp_String_cstr(t),
+and tested the handle only for a parameter, a dynamic handle and a
+shared one. It now tests it wherever the nil fact says the local may be
+nil (Repr.may_nil); a local the fact proves not nil keeps its C.
+
+The same handle read before its first write (assigned only in a branch
+not taken) had no fact: the definite-assignment seed in an_nil_facts
+skipped a TY_STRBUF local, so `t.size` there had no nil target and died
+too. The seed now covers it, and the call raises NoMethodError as it
+does for a handle assigned nil.
+
+Test: test/string_handle_local_nil_read.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
