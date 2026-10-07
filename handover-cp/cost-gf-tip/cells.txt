@@ -1,0 +1,16 @@
+m26 gcc frz_own 111065995 3000000 
+m26 gcc frz_is 98170396 true 3000000 
+m26 gcc fz_own 102665934 0 
+m26 gcc fz_is 98165815 1 
+ge gcc frz_own 120065996 3000000 
+ge gcc frz_is 110170380 true 3000000 
+ge gcc fz_own 115265907 0 
+ge gcc fz_is 107165822 1 
+m26 clang frz_own 126027388 3000000 
+m26 clang frz_is 107128382 true 3000000 
+m26 clang fz_own 116427435 0 
+m26 clang fz_is 89127342 1 
+ge clang frz_own 135027531 3000000 
+ge clang frz_is 128128536 true 3000000 
+ge clang fz_own 113427579 0 
+ge clang fz_is 110127490 1 
