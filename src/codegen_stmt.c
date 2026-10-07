@@ -10352,6 +10352,20 @@ static int emit_multi_write_scalar(Compiler *c, int id, Buf *b, int indent, cons
   return 0;
 }
 
+/* Is tuple element `el` a new String its target wraps in a handle of its
+   own (repr_of's RS_FRESH) that renders as the String: a literal, an
+   interpolation, a call on a String (`+"a"`, `s.dup`)? A receiverless call
+   or one on a class renders the handle itself (emit_call's deep-return
+   pickup). */
+static int masgn_el_fresh_str(Compiler *c, int el) {
+  const NodeTable *nt = c->nt;
+  Repr er = repr_of(c, el);
+  if (er.as_ty != TY_STRBUF || er.strbuf_src != RS_FRESH) return 0;
+  if (nt_kind(nt, el) != NK_CallNode) return 1;
+  int r = nt_ref(nt, el, "receiver");
+  return r >= 0 && comp_ntype(c, r) != TY_CLASS;
+}
+
 /* A MultiWriteNode statement (a, b = ...) (emit_stmt_inner's arms, in their order) */
 static int emit_multi_write_stmt(Compiler *c, int id, Buf *b, int indent, const NodeTable *nt, const char *ty) {
   if (!(sp_streq(ty, "MultiWriteNode"))) return 0;
@@ -10572,7 +10586,8 @@ static int emit_multi_write_stmt(Compiler *c, int id, Buf *b, int indent, const 
       free(hw.p);
       if (tmpts) tmpts[i] = TY_STRBUF;
       int later_alloc_h = store_alloc;
-      for (int j = i + 1; j < en && !later_alloc_h; j++) later_alloc_h = masgn_part_allocates(c, els[j]);
+      for (int j = i + 1; j < en && !later_alloc_h; j++)
+        later_alloc_h = masgn_part_allocates(c, els[j]) || masgn_el_fresh_str(c, els[j]);
       if (later_alloc_h) masgn_root(c, TY_STRBUF, tmps[i], b);
       buf_puts(b, "\n");
       continue;
@@ -10580,6 +10595,7 @@ static int emit_multi_write_stmt(Compiler *c, int id, Buf *b, int indent, const 
     /* an element with no C type of its own (an unresolved call, which
        raises) is held boxed: `void _tN` is no declaration */
     int boxed_el = !nilish && !c_type_name(elt) && !ty_is_object(elt);
+    int fresh_str = elt == TY_STRBUF && masgn_el_fresh_str(c, els[i]);
     emit_ctype(c, nilish || boxed_el ? TY_POLY : elt, b);
     buf_printf(b, " _t%d = ", tmps[i]);
     if (nilish) {
@@ -10607,6 +10623,15 @@ static int emit_multi_write_stmt(Compiler *c, int id, Buf *b, int indent, const 
     else if (poly_empty_hash)
       buf_puts(b, "sp_box_obj(sp_PolyPolyHash_new(), SP_BUILTIN_POLY_POLY_HASH)");
     else if (boxed_el) emit_coerce(c, els[i], TY_POLY, CO_HOLD, "a multiple assignment's value", b);
+    /* held as the handle its target wraps it in, as a store wraps one
+       (emit_boxed); handed over bare, the C did not build */
+    else if (fresh_str) {
+      int sv = view_push_repr(c, els[i], VR_STRBUF_BOX, 0);
+      buf_puts(b, "sp_String_new_shared(");
+      emit_str_expr(c, els[i], b);
+      buf_puts(b, ")");
+      view_pop(c, sv);
+    }
     else {
       Buf vb; memset(&vb, 0, sizeof vb); emit_expr(c, els[i], &vb);
       buf_puts(b, vb.p ? vb.p : ""); free(vb.p);
@@ -10617,8 +10642,9 @@ static int emit_multi_write_stmt(Compiler *c, int id, Buf *b, int indent, const 
        allocate after it can run user code that drops its other holder, so
        it is rooted while a later value or a store can collect. */
     int later_alloc = store_alloc;
-    for (int j = i + 1; j < en && !later_alloc; j++) later_alloc = masgn_part_allocates(c, els[j]);
-    if (!nilish && !masgn_rodata(c, els[i]) && later_alloc) masgn_root(c, elt, tmps[i], b);
+    for (int j = i + 1; j < en && !later_alloc; j++)
+      later_alloc = masgn_part_allocates(c, els[j]) || masgn_el_fresh_str(c, els[j]);
+    if (!nilish && (!masgn_rodata(c, els[i]) || fresh_str) && later_alloc) masgn_root(c, elt, tmps[i], b);
     buf_puts(b, "\n");
   }
   /* assign lefts */
