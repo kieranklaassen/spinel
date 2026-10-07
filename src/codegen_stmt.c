@@ -2879,9 +2879,9 @@ static void emit_op_assign_lv(Compiler *c, int id, Buf *b, int indent,
     buf_printf(b, "%s = sp_str_concat(%s, ", lval, lv_op_assign_src(c, lval, t, cap, rtn, sizeof rtn));
     /* a poly RHS (a destructured `[Int, String]` element bound poly) is an
        sp_RbVal; coerce it to const char* for sp_str_concat (#2875). CRuby's
-       String#+ raises TypeError on a non-string, so this only reaches a value
-       that is a String at run time. */
-    if (repr_of(c, v).kind == RK_BOXED) { buf_puts(b, "sp_poly_to_s("); emit_expr(c, v, b); buf_puts(b, ")"); }
+       String#+ raises TypeError on a non-string and asks an object for
+       to_str: the strict conversion, as `s = s + v` takes. */
+    if (repr_of(c, v).kind == RK_BOXED) { buf_puts(b, "sp_poly_arg_str_chk("); emit_expr(c, v, b); buf_puts(b, ")"); }
     else if (comp_ntype(c, v) == TY_UNKNOWN) emit_unresolved_coerced(c, v, TY_STRING, b);   /* the raise token */
     else emit_expr(c, v, b);
     buf_puts(b, ");\n");
@@ -12497,7 +12497,7 @@ static int emit_attr_global_const_write_stmt(Compiler *c, int id, Buf *b, int in
       emit_indent(b, indent);
       if (ivt == TY_STRING) {
         buf_printf(b, "_t%d%siv_%s = sp_str_concat(_t%d%siv_%s, ", trecv, acc, iv_c(rn), trecv, acc, iv_c(rn));
-        emit_poly_unboxed(c, val, rhst, "sp_poly_to_s(", b);
+        emit_poly_unboxed(c, val, rhst, "sp_poly_arg_str_chk(", b);
         buf_puts(b, ");\n");
       }
       else if (ivt == TY_POLY && cpf) {
@@ -12574,7 +12574,7 @@ static int emit_attr_global_const_write_stmt(Compiler *c, int id, Buf *b, int in
           /* the reader answers a value, so the concat builds a new string and
              the writer stores it -- the same shape the string ivar slot takes */
           buf_printf(b, "%s(_t%d, sp_str_concat(%s(_t%d), ", nwm->csym, trecv, nrm->csym, trecv);
-          emit_poly_unboxed(c, val, rhst, "sp_poly_to_s(", b);
+          emit_poly_unboxed(c, val, rhst, "sp_poly_arg_str_chk(", b);
           buf_puts(b, "));\n");
         }
         else if (nany && cpf) {
@@ -12654,7 +12654,7 @@ static int emit_attr_global_const_write_stmt(Compiler *c, int id, Buf *b, int in
         if (ivt == TY_STRING) {
           buf_puts(b, "_o->iv_"); buf_puts(b, iv_c(rn)); buf_puts(b, " = sp_str_concat(_o->iv_"); buf_puts(b, iv_c(rn));
           buf_puts(b, ", ");
-          emit_poly_unboxed(c, val, rhst, "sp_poly_to_s(", b);
+          emit_poly_unboxed(c, val, rhst, "sp_poly_arg_str_chk(", b);
           buf_puts(b, "); break; }\n");
         }
         else if (ivt == TY_POLY && cpf) {
@@ -16441,7 +16441,9 @@ void emit_index_op_write(Compiler *c, int id, Buf *b, int indent) {
       buf_printf(b, "sp_StrArray_set(_t%d, _t%d, ({ const char *_t%d = %s; SP_GC_ROOT(_t%d); ",
                  ta, tb, tc, slot, tc);
       char *rhs = iow_rhs(c, v, IOW_RHS_EXPR, eff ? b : NULL);
-      if (vt == TY_POLY) buf_printf(b, "const char *_t%d = sp_poly_to_s(%s)", td, rhs);
+      /* String#+ takes the strict conversion (TypeError for an Integer, to_str
+         for an object), as `a[i] = a[i] + v` does */
+      if (vt == TY_POLY) buf_printf(b, "const char *_t%d = %s(%s)", td, sp_streq(op, "+") ? "sp_poly_arg_str_chk" : "sp_poly_to_s", rhs);
       else buf_printf(b, "const char *_t%d = %s", td, rhs);
       free(rhs);
       buf_printf(b, "; SP_GC_ROOT(_t%d); sp_str_plus(_t%d, _t%d); })); }\n", td, tc, td);
