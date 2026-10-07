@@ -7579,6 +7579,90 @@ void emit_rooted_conversion(Compiler *c, TyKind pt, const char *expr, Buf *out) 
   buf_printf(out, "(_t%d = %s)", t, expr);
 }
 
+/* True when the default `d` of a parameter of type `pt` leaves a heap value
+   made where it stands: it can allocate (operand_may_allocate: any call) and
+   what it leaves is no scalar -- `1 + 1` and a method that answers an
+   Integer are calls too, with nothing to hold -- or it is kept by value and
+   boxed for a boxed parameter into a new cell (arg_read_converts). */
+static int spread_default_fresh(Compiler *c, TyKind pt, int d) {
+  if (d < 0) return 0;
+  if (pt == TY_POLY && arg_read_converts(c, pt, d)) return 1;
+  TyKind dt = comp_ntype(c, d);
+  if (dt == TY_INT || dt == TY_FLOAT || dt == TY_BOOL || dt == TY_NIL || dt == TY_SYMBOL) return 0;
+  return operand_may_allocate(c, d);
+}
+
+/* True when slot j of the list emit_args_filled_argv writes can allocate
+   where it stands, inside the call's parentheses, asked the way that list
+   is written. A slot hoisted ahead of the call has run by then; one this
+   cannot show quiet counts as allocating. */
+static int spread_slot_allocates(Compiler *c, Scope *m, const ArgLayout *L, int j, const int *argv,
+                                 int kwh, int kw_merged, int ds, int argov) {
+  LocalVar *p = m->pnames[j] ? scope_local(m, m->pnames[j]) : NULL;
+  if (!p || p->byref_out || repr_of_slot(c, p).handle) return 1;
+  TyKind pt = p->type;
+  int d = m->pdefault ? m->pdefault[j] : -1;
+  int d_allocs = d >= 0 && ((pt == TY_POLY && arg_read_converts(c, pt, d)) ||
+                            (operand_may_allocate(c, d) && !subtree_is_pure_read(c, d)));
+  if (L->from[j] == ARG_REST) return 1;   /* packs its Array in place */
+  int kw = callee_has_kwarg(c, m, m->pnames[j]);
+  int kv = kwh >= 0 && kw && !kw_merged ? kwh_lookup(c->nt, kwh, m->pnames[j]) : -1;
+  if (L->from[j] == ARG_GATHERED || L->from[j] == ARG_ELEM ||
+      (kv < 0 && ds >= 0 && kw && j != m->kwrest_idx))
+    /* an element or a key read; a typed container parameter converts it */
+    return d_allocs || (pt != TY_POLY && pt != TY_STRING && needs_root(pt));
+  if (kv < 0 && j == m->kwrest_idx) return 0;   /* collected ahead of the call */
+  int provided = kv >= 0 ? kv : L->from[j] == ARG_NODE ? argv[L->arg[j]] : L->from[j] == ARG_KWH ? kwh : -1;
+  /* ran into its temp ahead of the call, or is hoisted (emit_arg_rooted) */
+  if ((provided >= 0 && arg_ran_first(provided, argov)) || arg_wants_root(c, pt, provided)) return 0;
+  if (provided < 0) return d_allocs;
+  return arg_read_converts(c, pt, provided) || operand_may_allocate(c, provided);
+}
+
+/* True when a spread call's fresh default has to be held: something can
+   allocate between the default and the callee's root of its parameter.
+   That is the callee itself where it is an `initialize` (sp_<C>_new
+   allocates the object first) or has a captured parameter (its cell is
+   allocated on entry, ahead of the parameters' roots), and otherwise a
+   second slot of the list that allocates where it stands: C leaves the
+   order between two arguments open. One fresh default into a method that
+   roots its parameters first is safe as it is and keeps its C. A program
+   with a finalizer keeps its C too: the held value would outlive the call,
+   and its finalizer run late. */
+static int spread_default_exposed(Compiler *c, Scope *m, const ArgLayout *L, const int *argv,
+                                  int kwh, int kw_merged, int ds, int argov) {
+  if (g_uses_finalizers) return 0;
+  if (m->name && sp_streq(m->name, "initialize")) return 1;
+  for (int j = 0; j < m->nlocals; j++)
+    if (m->locals[j].is_cell && (m->locals[j].is_param || (m->blk_param && m->locals[j].name &&
+                                                           sp_streq(m->locals[j].name, m->blk_param))))
+      return 1;
+  int n = 0;
+  for (int j = 0; j < m->nparams && n < 2; j++)
+    n += spread_slot_allocates(c, m, L, j, argv, kwh, kw_merged, ds, argov);
+  return n >= 2;
+}
+
+/* Write `vb`, the text of parameter i read out of a spread (a splat's
+   element, the gathered positionals, a `**`'s key), as the call's argument.
+   Where the spread does not reach the parameter the text falls back to its
+   default, written where the argument stands: a fresh one sits inside the
+   call's parentheses, and the next argument's allocation, or the callee's
+   own before it roots the parameter, collects it. Where that can happen
+   (`exposed`: spread_default_exposed) the value is assigned to a rooted temp
+   where it stands (emit_rooted_conversion), so nothing is evaluated earlier
+   than it was. */
+static void emit_spread_param_held(Compiler *c, Scope *m, int i, int exposed, Buf *vb, Buf *out) {
+  LocalVar *p = m->pnames[i] ? scope_local(m, m->pnames[i]) : NULL;
+  const char *v = vb->p ? vb->p : "";
+  int bound = v[0] == '_' && v[1] == 't' && !v[2 + strspn(v + 2, "0123456789")];
+  if (exposed && !bound && g_pre && p && !p->byref_out && (p->type == TY_POLY || needs_root(p->type)) &&
+      spread_default_fresh(c, p->type, m->pdefault ? m->pdefault[i] : -1))
+    emit_rooted_conversion(c, p->type, v, out);
+  else buf_puts(out, v);
+  free(vb->p);
+}
+
 /* Like emit_arg_or_default, but hoists a pointer-backed / poly argument into a
    g_pre temp and roots it before the call. A fresh allocation passed straight
    into a callee that allocates before it roots the parameter -- the canonical
@@ -10450,11 +10534,17 @@ else {
       if (held && root) held[k] = ht;
     }
   }
+  /* asked only where a spread is read: every other call leaves here as it was */
+  int exposed = (splat_tmp >= 0 || ds_hash_tmp >= 0) &&
+                spread_default_exposed(c, m, &L, argv, kwh, kw_merged, ds_hash_tmp, argov_saved);
   for (int i = 0; i < m->nparams; i++) {
     buf_puts(out, i == 0 ? lead : ", ");
     if (L.gather && emit_gather_lead_lent(c, m, i, argv, argc, out)) {}
-    else if (L.from[i] == ARG_GATHERED)
-      emit_gathered_param(c, m, i, splat_tmp, out);
+    else if (L.from[i] == ARG_GATHERED) {
+      Buf vb; memset(&vb, 0, sizeof vb);
+      emit_gathered_param(c, m, i, splat_tmp, &vb);
+      emit_spread_param_held(c, m, i, exposed, &vb, out);
+    }
     else if (L.from[i] == ARG_REST) {
       /* rest collects middle args; stop before post-splat params */
       int rest_end = rest_argc - m->npost_rest;
@@ -10466,8 +10556,11 @@ else {
         emit_rest_pack_kwh(c, i, rest_end, argv, L.rest_kwh, out);
       }
     }
-else if (L.from[i] == ARG_ELEM)
-      emit_elem_param(c, m, i, L.arg[i], splat_tmp, splat_at, splat_all, out);
+else if (L.from[i] == ARG_ELEM) {
+      Buf vb; memset(&vb, 0, sizeof vb);
+      emit_elem_param(c, m, i, L.arg[i], splat_tmp, splat_at, splat_all, &vb);
+      emit_spread_param_held(c, m, i, exposed, &vb, out);
+    }
 else {
       /* Check if this param has a keyword match (lookup by param name in kwh).
          Only a true KEYWORD param consumes a key -- a positional param whose
@@ -10482,7 +10575,9 @@ else {
       }
       else if (ds_hash_tmp >= 0 && is_kwparam && i != m->kwrest_idx) {
         /* Double-splat: extract param by name from the pre-eval'd hash. */
-        emit_ds_param_extract(c, m, i, ds_hash_tmp, ds_hash_type, out);
+        Buf vb; memset(&vb, 0, sizeof vb);
+        emit_ds_param_extract(c, m, i, ds_hash_tmp, ds_hash_type, &vb);
+        emit_spread_param_held(c, m, i, exposed, &vb, out);
       }
       else if (m->kwrest_idx >= 0 && i == m->kwrest_idx) {
         /* Collect remaining (unbound) keyword args into a sp_SymPolyHash. When
