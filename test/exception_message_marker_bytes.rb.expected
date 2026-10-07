@@ -1,0 +1,44 @@
+long: raised 15 true
+long: raised as a class 15 true
+long: made, then raised 15 true 15 true
+long: raised again 15 true
+long: as a cause 15 true second
+long: from a callee 15 true
+bare: raised 6 true
+bare: raised as a class 6 true
+bare: made, then raised 6 true 6 true
+bare: raised again 6 true
+bare: as a cause 6 true second
+bare: from a callee 6 true
+short: raised 8 true
+short: raised as a class 8 true
+short: made, then raised 8 true 8 true
+short: raised again 8 true
+short: as a cause 8 true second
+short: from a callee 8 true
+whole: raised 15 true
+whole: raised as a class 15 true
+whole: made, then raised 15 true 15 true
+whole: raised again 15 true
+whole: as a cause 15 true second
+whole: from a callee 15 true
+whole, a NUL inside: raised 15 true
+whole, a NUL inside: raised as a class 15 true
+whole, a NUL inside: made, then raised 15 true 15 true
+whole, a NUL inside: raised again 15 true
+whole, a NUL inside: as a cause 15 true second
+whole, a NUL inside: from a callee 15 true
+nul: raised 9 true
+nul: raised as a class 9 true
+nul: made, then raised 9 true 9 true
+nul: raised again 9 true
+nul: as a cause 9 true second
+nul: from a callee 9 true
+large: raised 16843019 true
+large: raised as a class 16843019 true
+large: made, then raised 16843019 true 16843019 true
+large: raised again 16843019 true
+large: as a cause 16843019 true second
+large: from a callee 16843019 true
+4500
+nil
