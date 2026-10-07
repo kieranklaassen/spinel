@@ -1,0 +1,32 @@
+0
+true
+true
+1
+["s", "t"]
+"szt"
+"111s1t111"
+true
+1
+"a1-1-1"
+["x1", "a1", 1]
+[{}, "a1", 1]
+[[], "a1", 1]
+[["a1", 1]]
+[["a1", 1]]
+[["a1", 1]]
+[["a1", 1], ["b", 2]]
+[["a1", 1], ["k", "v"]]
+true
+true
+"a1s1t"
+true
+"1s2t"
+"ab-abx"
+"abx-abxx"
+"<abxx>zz"
+false
+"ZZ"
+"[1, 2]3"
+"tag-s1t"
+["to_s", "call"]
+["to_s", "call"]
