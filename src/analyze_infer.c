@@ -5332,7 +5332,7 @@ static int infer_universal_call(Compiler *c, int id, const NodeTable *nt, const 
      Integer here split the two halves and the build stopped (#4190). */
   if ((sp_streq(name, "object_id") || sp_streq(name, "__id__")) && recv >= 0 && argc == 0) {
     if (ty_is_object(rt) &&
-        comp_resolve_member(c, ty_object_class(rt), name, 0, NULL, NULL) == SP_MEMBER_ATTR)
+        comp_resolve_member(c, ty_object_class(rt), name, 0, NULL, NULL) != SP_MEMBER_NONE)
       { /* fall through to the member-read rule below */ }
     else { *out = TY_INT; return 1; }
   }

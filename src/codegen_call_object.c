@@ -213,7 +213,7 @@ int emit_call_identity_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
          CRuby (which warns and defines it): fall through to the member read,
          which the inference already typed (#4190) */
       !(ty_is_object(rt) &&
-        comp_resolve_member(c, ty_object_class(rt), name, 0, NULL, NULL) == SP_MEMBER_ATTR)) {
+        comp_resolve_member(c, ty_object_class(rt), name, 0, NULL, NULL) != SP_MEMBER_NONE)) {
     /* a nullable Integer or Float holding its sentinel is nil, whose id
        is nil's */
     if ((rt == TY_INT || rt == TY_FLOAT) && call_returns_nullable_int(c, recv)) {
