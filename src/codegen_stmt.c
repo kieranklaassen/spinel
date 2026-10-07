@@ -14967,6 +14967,16 @@ static int str_mutate_reassign_arms(Compiler *c, Buf *b, int indent, const NodeT
       emit_indent(b, indent); buf_puts(b, "sp_str_check_mutable("); emit_expr(c, recv, b); buf_puts(b, ");\n");
       /* a boxed argument reads as its string, TypeError for anything else,
          as replace's does */
+      if (subtree_has_side_effect(c, argv[0])) {
+        /* an argument that runs code is read ahead of the receiver, which it
+           may change (`s.prepend((s << "y"; "z"))`): two arguments of one
+           call are read in the order the C compiler picks */
+        int ta = ++g_tmp;
+        emit_indent(b, indent);
+        buf_printf(b, "{ const char *_t%d = ", ta); emit_str_expr(c, argv[0], b); buf_puts(b, "; ");
+        emit_expr(c, recv, b); buf_printf(b, " = sp_str_concat(_t%d, ", ta); emit_expr(c, recv, b); buf_puts(b, "); }\n");
+        return 1;
+      }
       emit_indent(b, indent); emit_expr(c, recv, b); buf_puts(b, " = sp_str_concat("); emit_str_expr(c, argv[0], b); buf_puts(b, ", "); emit_expr(c, recv, b); buf_puts(b, ");\n");
       return 1;
     }

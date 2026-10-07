@@ -3512,6 +3512,27 @@ static void emit_str_mut_writeback(Compiler *c, int recv, int lvw, int tn, Buf *
   }
 }
 
+/* A prepend argument that needs no holding: a literal, or a String variable,
+   which its variable holds. */
+static int prepend_arg_is_held(Compiler *c, int a) {
+  NodeKind k = nt_kind(c->nt, a);
+  if (k == NK_StringNode) return 1;
+  return (k == NK_LocalVariableReadNode || k == NK_InstanceVariableReadNode) &&
+         comp_ntype(c, a) == TY_STRING;
+}
+
+/* prepend takes its arguments into temporaries first where two of them are
+   built, or where one runs code and the receiver is a variable. */
+static int prepend_takes_args_first(Compiler *c, int recv, int argc, const int *argv) {
+  int built = 0, code = 0;
+  for (int j = 0; j < argc; j++) {
+    if (nt_kind(c->nt, argv[j]) == NK_SplatNode) return 0;
+    if (!prepend_arg_is_held(c, argv[j])) built++;
+    if (subtree_has_side_effect(c, argv[j])) code = 1;
+  }
+  return built > 1 || (code && str_mut_var_recv(c, recv));
+}
+
 /* A String mutator: the value-form bangs, the in-place mutators, append_as_bytes, bytesplice (emit_array_call's arms, in their order) */
 static int emit_str_mutator_call(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, TyKind rt, int *out) {
   /* String value-form mutators: the expression yields the post-mutation
@@ -3706,6 +3727,35 @@ static int emit_str_mutator_call(Compiler *c, int id, Buf *b, const NodeTable *n
          sp_streq(name, "prepend")) && argc >= 1) {
       int lvw = str_mut_var_recv(c, recv) || sb_shadowed_reader(recv);
       int tn2 = ++g_tmp, trc = ++g_tmp;
+      if (sp_streq(name, "prepend") && prepend_takes_args_first(c, recv, argc, argv)) {
+        /* Every argument is taken, in order, before anything is prepended.
+           A receiver that is a variable is read after them: an argument
+           that runs code may change it (`s.prepend((s << "y"; "z"), "q")`). */
+        int var = str_mut_var_recv(c, recv);
+        int base = g_tmp + 1; g_tmp += argc;
+        buf_puts(b, "({ ");
+        if (!var) { buf_printf(b, "const char *_t%d = ", trc); emit_recv_rooted(c, recv, trc, "SP_GC_ROOT_STR", b); }
+        for (int j = 0; j < argc; j++) {
+          /* held across a later argument that is built, or that runs code
+             and so may rebind the variable this one was read from */
+          int hold = 0;
+          for (int k = j + 1; k < argc && !hold; k++)
+            hold = prepend_arg_is_held(c, argv[j]) ? nt_kind(nt, argv[j]) != NK_StringNode && subtree_has_side_effect(c, argv[k])
+                                                   : !prepend_arg_is_held(c, argv[k]);
+          buf_printf(b, "const char *_t%d = ", base + j); emit_str_expr(c, argv[j], b);
+          if (hold) buf_printf(b, "; SP_GC_ROOT_STR(_t%d); ", base + j);
+          else buf_puts(b, "; ");
+        }
+        if (var) { buf_printf(b, "const char *_t%d = ", trc); emit_expr(c, recv, b); buf_puts(b, "; "); }
+        buf_printf(b, "const char *_t%d = ", tn2);
+        for (int j = 0; j < argc; j++) buf_puts(b, "sp_str_concat(");
+        buf_printf(b, "_t%d", base);
+        for (int j = 1; j < argc; j++) buf_printf(b, ", _t%d)", base + j);
+        buf_printf(b, ", _t%d); sp_str_check_mutable(_t%d); ", trc, trc);
+        emit_str_mut_writeback(c, recv, lvw, tn2, b);
+        buf_printf(b, "_t%d; })", tn2);
+        { *out = 1; return 1; }
+      }
       /* Evaluate the receiver once into a temp: it feeds both the frozen-mutability
          check and the concatenation, and a chained `s << a << b` receiver has a
          side effect that must not run twice. */
