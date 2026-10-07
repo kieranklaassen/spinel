@@ -1,0 +1,23 @@
+A String Range answered by its walk keeps its ends across the walk
+
+each, each_with_index, reverse_each, each_entry, each_slice, each_cons
+and step with a block answer their receiver, and emit_iter_value_expr
+holds it across the walk in a temporary: the receiver itself for step,
+and for the others the binding iter_recv_bind_once makes ahead of the
+statement when the receiver acts. Both root the temporary where
+needs_root says so. A String Range is held by value and needs_root is
+false for it, so the Strings of a Range with an end made on the spot,
+("10"..(lo + "5")), were held by nothing while the block ran: after a
+collection the answer's first and last read freed slots. In a plain
+run ((lo + "0")..(lo + "49999")).each { |s| s + "!" } answered a Range
+whose first printed "75560!".
+
+Both temporaries now root the two ends of a String Range, by
+emit_gc_root_tmp_refs, as a local of that kind is rooted.
+
+step with a block lost its ends before. The others came to it when
+"Answer Object's methods on a String or Float Range about the Range
+itself" made their value the Range, where it had been the member
+Array.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
