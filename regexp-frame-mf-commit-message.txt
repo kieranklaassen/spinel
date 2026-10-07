@@ -1,0 +1,21 @@
+A method that matches a String pattern keeps its caller's match
+
+A method saves its caller's match registers where it performs a match
+(scope_performs_match). `match` counted only with a Regexp in sight, so
+a method whose `match` took a String pattern, or a pattern that is a
+Regexp or a String only as the program runs, left its own match to its
+caller:
+
+    def zero(s) = s.match("(0)")
+    "ab" =~ /(a)/
+    zero("x0")
+    p $1
+
+printed "0"; CRuby prints "a". gsub, sub and scan already count for
+those kinds of pattern. match now does too, in a program where a
+method's registers are provably its own (match_frame_closed); every
+other program is emitted as before, byte for byte.
+
+Test: test/match_string_pattern_keeps_caller.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

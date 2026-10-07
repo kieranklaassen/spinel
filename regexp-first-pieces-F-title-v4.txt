@@ -1,0 +1,1 @@
+A method matching in a `when` arm or a quantifier keeps its caller's $~

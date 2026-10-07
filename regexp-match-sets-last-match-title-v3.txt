@@ -1,0 +1,1 @@
+String#match and Regexp#match leave $~ at their match

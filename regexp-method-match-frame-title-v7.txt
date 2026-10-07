@@ -1,0 +1,1 @@
+A matching method starts with no match; a jump out restores its caller's

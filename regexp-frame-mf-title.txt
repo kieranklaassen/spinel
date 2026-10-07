@@ -1,0 +1,1 @@
+A method that matches a String pattern keeps its caller's match

@@ -1,0 +1,1 @@
+A method matching by slice!, `s[re, n] = v` or `in` keeps its caller's $~

@@ -1,0 +1,26 @@
+A method matching by slice!, `s[re, n] = v` or `in` keeps its caller's $~
+
+A method that matches saves its caller's $~ on the way in. The test for
+"matches" knew neither slice! with a Regexp, nor an index assignment
+that names a group, nor a pattern of `in` or `=>` that holds a Regexp,
+so such a method left its own match in its caller's registers:
+
+    def cut(s) = s.slice!(/(b)/)
+    "q1" =~ /q(\d)/
+    cut(+"abc")
+    p $1
+
+printed "b"; CRuby prints "1". So did `s[/(b)(c)/, 2] = "v"` and
+`case s in /a(b)/`.
+
+scope_performs_match now counts the three, in a program where a method's
+registers are provably its own frame's (match_frame_closed). A pattern
+is searched whole: the Regexp may sit in an array, a hash, an
+alternative or behind a pin. `s[re] = v` sets no register and is not
+counted. Every other program is emitted as before, byte for byte.
+
+Tests: test/regexp_frame_slice_and_pattern.rb.
+test/regexp_frame_slice_kept_block.rb is a program the test leaves
+alone.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

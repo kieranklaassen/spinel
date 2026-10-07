@@ -1,0 +1,44 @@
+String#match and Regexp#match leave $~ at their match
+
+sp_re_matchdata and sp_re_matchdata_at run the engine into a caps array
+of their own and hand the registers the Strings alone. The positions
+(sp_re_caps) and the pattern (sp_re_last_pat) stay those of the match
+before, and $~ is built from them:
+
+    line = "2026-10-05 x"
+    line.match(/(\d+)-(\d+)/)
+    p $~.to_a, $~.begin(2)
+
+printed ["", "", ""] and 0; CRuby prints ["2026-10", "2026", "10"] and
+5. After a match on another String it printed pieces of the new subject
+cut at the old positions, and a named group of the new pattern raised
+IndexError. $1 and $~[2] were right: they read the Strings.
+
+The two functions stay as they are. A `match` is given a variant that
+hands over the positions and the pattern too (sp_re_matchdata_last,
+sp_re_matchdata_last_at) only where the match is provably its frame's
+own to leave: in a program where a method's registers are its own
+(match_frame_closed), and outside the block of a call that itself
+matches (gsub, scan, grep, a quantifier), which puts its own match back
+when the block is done. Everywhere else a program can be right today
+because the positions stay behind:
+
+    def around
+      "ab" =~ /b/
+      yield
+      $~.begin(0)
+    end
+    p around { "xxxk".match(/k/) }
+
+prints 1, as CRuby does: the block's match is the block's frame's, and
+there is one set of registers. With the positions handed over it would
+print 3. Such a program is emitted as before, byte for byte.
+
+A `match` whose receiver and pattern are both boxed is emitted by
+emit_poly_call and is left as it is.
+
+Tests: test/match_last_match_positions.rb. The three
+test/match_last_match_kept_*.rb are programs left alone, one for a
+condition.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
