@@ -4913,8 +4913,8 @@ int emit_array_filter_loop(Compiler *c, int recv, int block, TyKind rt, const ch
   emit_indent(b, indent + 1); buf_puts(b, "sp_gc_nroots = sp_exc_rootmark[sp_exc_top]; sp_rescue_sp = sp_rescue_mark[sp_exc_top];\n");
   emit_indent(b, indent + 1); buf_puts(b, "if (sp_unwind_kind == SP_UNWIND_NONE) {\n");
   emit_indent(b, indent + 2);
-  buf_printf(b, "_excf%d = 1; _excmsg%d = sp_exc_msg[sp_exc_top]; _exccls%d = sp_exc_cls[sp_exc_top]; _excobj%d = sp_exc_obj[sp_exc_top];\n",
-             eid, eid, eid, eid);
+  emit_ensure_exc_store(b, eid);
+  buf_puts(b, "\n");
   emit_indent(b, indent + 1); buf_puts(b, "}\n");
   emit_indent(b, indent); buf_puts(b, "}\n");
   g_ensure_depth--;
@@ -4947,7 +4947,7 @@ int emit_array_filter_loop(Compiler *c, int recv, int block, TyKind rt, const ch
       buf_printf(b, "if (_retf%d) { %s = _retv%d; return 0; }\n", eid, proc_ret_slot(), eid);
     else emit_retf_return(eid, has_retval, b);
     emit_indent(b, indent);
-    buf_printf(b, "if (_excf%d) { sp_pending_exc_obj = _excobj%d; sp_raise_cls(_exccls%d, _excmsg%d); }\n", eid, eid, eid, eid);
+    buf_printf(b, "if (_excf%d) { ", eid); emit_ensure_exc_raise(b, eid); buf_puts(b, " }\n");
   }
   if (flv) flv->type = fsaved;
   *tr = t; *torig = to; *twp = tw;

@@ -1196,6 +1196,16 @@ EnsureCtx g_ensure_stack[MAX_ENSURE_DEPTH];
 int       g_ensure_depth = 0;
 RescueSave g_rescue_save_stack[MAX_ENSURE_DEPTH];
 int        g_rescue_save_depth = 0;
+/* The exception an ensure region `eid` waits with while its ensure body
+   runs: read from the frame just landed, sp_exc_top being its index. */
+void emit_ensure_exc_store(Buf *b, int eid) {
+  buf_printf(b, "_excf%d = 1; _excmsg%d = sp_exc_msg[sp_exc_top]; _exccls%d = sp_exc_cls[sp_exc_top]; _excobj%d = sp_exc_obj[sp_exc_top];",
+             eid, eid, eid, eid);
+}
+/* The same exception raised again, the ensure body done. */
+void emit_ensure_exc_raise(Buf *b, int eid) {
+  buf_printf(b, "sp_pending_exc_obj = _excobj%d; sp_raise_cls(_exccls%d, _excmsg%d);", eid, eid, eid);
+}
 
 /* rescue bodies crossed by an exit to frame-depth pop_base: those entered at or
    deeper than pop_base (their exc_base >= pop_base). */
@@ -5173,8 +5183,9 @@ void emit_ensure_exc_hand_on(Buf *b, int eid, int outer) {
    re-raise back to its ensure body, so there the exception is handed over
    as before. */
 void emit_ensure_exc_block_out(Buf *b, int eid, const EnsureCtx *outer) {
-  if (outer->live && (g_exc_frame_depth > outer->exc_base + 1 || outer->body_rescue))
-    buf_printf(b, "if (_excf%d) { sp_pending_exc_obj = _excobj%d; sp_raise_cls(_exccls%d, _excmsg%d); }", eid, eid, eid, eid);
+  if (outer->live && (g_exc_frame_depth > outer->exc_base + 1 || outer->body_rescue)) {
+    buf_printf(b, "if (_excf%d) { ", eid); emit_ensure_exc_raise(b, eid); buf_puts(b, " }");
+  }
   else emit_ensure_exc_hand_on(b, eid, outer->lid);
 }
 

@@ -9720,8 +9720,8 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
       /* No rescue: save exception info for re-raise after ensure runs.
          sp_exc_top has just been decremented so sp_exc_top is the right index. */
       emit_indent(b, indent + 2);
-      buf_printf(b, "_excf%d = 1; _excmsg%d = sp_exc_msg[sp_exc_top]; _exccls%d = sp_exc_cls[sp_exc_top]; _excobj%d = sp_exc_obj[sp_exc_top];\n",
-                 eid, eid, eid, eid);
+      emit_ensure_exc_store(b, eid);
+      buf_puts(b, "\n");
     }
     emit_indent(b, indent + 1); buf_puts(b, "}\n");
     emit_indent(b, indent); buf_puts(b, "}\n");
@@ -9835,7 +9835,7 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
       if (g_exc_frame_depth > outer->exc_base + 1 || rescue >= 0 || outer->body_rescue) {
         buf_printf(b, "if (_excf%d) { ", eid);
         if (rescue >= 0 && g_debug) buf_printf(b, "sp_bt_restore(&_excbt%d); ", eid);
-        buf_printf(b, "sp_pending_exc_obj = _excobj%d; sp_raise_cls(_exccls%d, _excmsg%d); }\n", eid, eid, eid);
+        emit_ensure_exc_raise(b, eid); buf_puts(b, " }\n");
       }
       else {
         emit_ensure_exc_hand_on(b, eid, outer->lid);
@@ -9847,7 +9847,7 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
       emit_indent(b, indent);
       buf_printf(b, "if (_excf%d) { ", eid);
       if (rescue >= 0 && g_debug) buf_printf(b, "sp_bt_restore(&_excbt%d); ", eid);
-      buf_printf(b, "sp_pending_exc_obj = _excobj%d; sp_raise_cls(_exccls%d, _excmsg%d); }\n", eid, eid, eid);
+      emit_ensure_exc_raise(b, eid); buf_puts(b, " }\n");
     }
     g_retry_label = ens_saved_retry;
     return;
