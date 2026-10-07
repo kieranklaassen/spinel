@@ -6129,6 +6129,21 @@ static int infer_block_kernel_call(Compiler *c, int id, const NodeTable *nt, con
   return 0;
 }
 
+/* A boxed HANDLE answering one of its own exclusive names: type the call as
+   if the receiver were that handle. Codegen unboxes it back to exactly that
+   before re-dispatching, and checks the runtime cls_id first, so a value of
+   any other kind still raises NoMethodError (#4158 follow-up). TY_UNKNOWN
+   when the call is not one. */
+static TyKind infer_boxed_handle_call(Compiler *c, int id, const char *name, int recv, int argc, TyKind rt) {
+  if (recv < 0 || rt != TY_POLY || face_active() ||
+      ty_poly_handle_face_args(name, argc) == TY_UNKNOWN ||
+      an_user_defines_or_reads(c, name) || an_native_defines_method(c, name)) return TY_UNKNOWN;
+  an_face_push(recv, ty_poly_handle_face_args(name, argc));
+  TyKind kt = infer_call(c, id);
+  an_face_pop();
+  return kt;
+}
+
 /* The last resorts: a safe-navigation call, a reopened Array, Numeric or Object's own methods, a boxed receiver's face (infer_call_inner's rules, in their order) */
 static int infer_last_resort_call(Compiler *c, int id, const NodeTable *nt, const char *name, int recv, int argc, TyKind rt, TyKind *out) {
   /* safe navigation &. with unresolved type: return poly (receiver may be nil at runtime) */
@@ -6187,16 +6202,8 @@ static int infer_last_resort_call(Compiler *c, int id, const NodeTable *nt, cons
     }
   }
 
-  /* A boxed HANDLE answering one of its own exclusive names: type the call as
-     if the receiver were that handle. Codegen unboxes it back to exactly that
-     before re-dispatching, and checks the runtime cls_id first, so a value of
-     any other kind still raises NoMethodError (#4158 follow-up). */
-  if (recv >= 0 && rt == TY_POLY && !face_active() &&
-      ty_poly_handle_face_args(name, argc) != TY_UNKNOWN &&
-      !an_user_defines_or_reads(c, name) && !an_native_defines_method(c, name)) {
-    an_face_push(recv, ty_poly_handle_face_args(name, argc));
-    TyKind kt = infer_call(c, id);
-    an_face_pop();
+  {
+    TyKind kt = infer_boxed_handle_call(c, id, name, recv, argc, rt);
     if (kt != TY_UNKNOWN) { *out = kt; return 1; }
   }
   /* Last resort for a boxed receiver: the face table. Answer as the typed
