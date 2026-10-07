@@ -7,7 +7,7 @@ class K
   def name(a) = 7
   def keep(a) = a
 end
-def two(a, b) = a
+def two(a, b) = "#{a}|#{b}"
 def two2(a, b) = [a, b]
 def app(x) = (x << "x"; 1)
 def go(s) = two(s, $last&.name((s << "x"; 1)))
@@ -46,6 +46,6 @@ bad = 0
 3000.times do |i|
   s = "ab#{i}"
   r = two(s, $last&.name((s << "x" * 40; [K.new, "q#{i}" * 4])))
-  bad += 1 unless r == "ab#{i}" + "x" * 40
+  bad += 1 unless r == "ab#{i}" + "x" * 40 + "|7"
 end
 p bad
