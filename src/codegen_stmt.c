@@ -16144,6 +16144,16 @@ void emit_index_op_write(Compiler *c, int id, Buf *b, int indent) {
   unsupported(c, id, "index operator assignment");
 }
 
+/* The store of `h[k] ||= v` / `h[k] &&= v` into the Hash in _t<ta>: the value,
+   then the frozen check `h[k] = v` makes, then the write. The value comes
+   first, as in the op-assign form above: Ruby runs it before []= raises. */
+static void iow_hash_store(TyKind rt, int ta, int tb, const char *rhs, Buf *b) {
+  int tv = ++g_tmp;
+  buf_printf(b, "{ %s _t%d = %s; if (sp_gc_is_frozen(_t%d)) sp_raise_frozen_hash_at(_t%d, %s); ",
+             c_type_name(ty_hash_val(rt)), tv, rhs, ta, ta, hash_box_cls(rt));
+  buf_printf(b, "sp_%sHash_set(_t%d, _t%d, _t%d); }", ty_hash_cname(rt), ta, tb, tv);
+}
+
 /* h[k] &&= v  /  h[k] ||= v  /  a[i] &&= v  /  a[i] ||= v.
    IndexAndWriteNode / IndexOrWriteNode. Receiver and key evaluated once. */
 void emit_index_and_or_write(Compiler *c, int id, Buf *b, int indent, int is_or) {
@@ -16179,7 +16189,7 @@ void emit_index_and_or_write(Compiler *c, int id, Buf *b, int indent, int is_or)
       buf_printf(b, "if (%ssp_poly_truthy(sp_%sHash_get(_t%d, _t%d))) ", is_or ? "!" : "", hn, ta, tb);
       int open = 0;
       char *rhs = iow_guarded_rhs(c, v, IOW_RHS_BOXED, b, &open);
-      buf_printf(b, "sp_%sHash_set(_t%d, _t%d, %s)", hn, ta, tb, rhs);
+      iow_hash_store(rt, ta, tb, rhs, b);
       iow_guard_close(rhs, open, b);
     }
     else {
@@ -16195,7 +16205,7 @@ void emit_index_and_or_write(Compiler *c, int id, Buf *b, int indent, int is_or)
       buf_puts(b, ") ");
       int open = 0;
       char *rhs = iow_guarded_rhs(c, v, IOW_RHS_EXPR, b, &open);
-      buf_printf(b, "sp_%sHash_set(_t%d, _t%d, %s)", hn, ta, tb, rhs);
+      iow_hash_store(rt, ta, tb, rhs, b);
       iow_guard_close(rhs, open, b);
     }
     buf_puts(b, "; }\n");
