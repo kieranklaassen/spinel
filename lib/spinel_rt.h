@@ -2763,6 +2763,12 @@ static sp_RbVal sp_poly_binop_bad(const char *op, sp_RbVal recv, sp_RbVal arg) {
 static inline int sp_poly_is_user_obj(sp_RbVal v) {
   return v.tag == SP_TAG_OBJ && v.cls_id >= 0;
 }
+/* A number on the left of a program object. Only == hands that pair to the
+   object (sp_poly_eq_slow); eql? and <=> answer for the number alone. The
+   two object tests come first: they are the ones most pairs fail. */
+static inline int sp_poly_num_obj_p(sp_RbVal a, sp_RbVal b) {
+  return sp_poly_is_user_obj(b) && !sp_poly_is_user_obj(a) && sp_poly_tower_p(a);
+}
 /* The operand of an Array operator (+ - | & concat) converted implicitly,
    as CRuby's to_ary: a program object answering #to_ary becomes that
    Array, and one whose #to_ary answers a non-Array is CRuby's TypeError.
@@ -3834,6 +3840,7 @@ static sp_RbVal sp_poly_hash_get_pair_val(sp_RbVal h, sp_RbVal key, sp_bool *fou
   for (sp_int i = 0; i < n; i++) {
     sp_RbVal k, v;
     sp_poly_hash_pair(h, i, &k, &v);
+    if (sp_poly_num_obj_p(k, key)) continue;   /* a number is no object's key, whatever its == says */
     if (sp_poly_eq(k, key)) { *found = TRUE; return v; }
   }
   *found = FALSE;
@@ -4812,6 +4819,10 @@ static SP_NOINLINE sp_bool sp_poly_eq_slow(sp_RbVal a, sp_RbVal b) {
      other operators now do; the field-wise hook below stays the default for
      a class that does not define one (#3501) */
   { sp_RbVal _u; if (sp_poly_user_cmp("==", a, b, &_u)) return sp_poly_truthy(_u); }
+  /* Integer#== and Float#== hand an operand that is no number back to it
+     (`5 == obj` is `obj == 5`), as the Process::Status arm below does for
+     `0 == $?`: a program object's own == answers */
+  { sp_RbVal _u; if (sp_poly_num_obj_p(a, b) && sp_poly_user_cmp("==", b, a, &_u)) return sp_poly_truthy(_u); }
   if (a.tag == SP_TAG_OBJ && b.tag == SP_TAG_OBJ && a.v.p && b.v.p) {
     if (a.cls_id == SP_BUILTIN_RANGE && b.cls_id == SP_BUILTIN_FLOAT_RANGE)
       return sp_range_frange_eq(*(sp_Range *)a.v.p, *(sp_FloatRange *)b.v.p);
@@ -4994,6 +5005,8 @@ static sp_int sp_poly_spaceship(sp_RbVal a, sp_RbVal b) {
   if (a.tag == b.tag &&
       (a.tag == SP_TAG_NIL || (a.tag == SP_TAG_BOOL && a.v.b == b.v.b)))
     return 0;
+  /* Integer#<=> and Float#<=> ask no object's ==: `5 <=> obj` is nil */
+  if (sp_poly_num_obj_p(a, b)) return SP_INT_NIL;
   /* the default Object#<=> answers 0 when the operands are ==, nil otherwise
      -- so an object compared with itself is 0, not nil (#3017) */
   if (sp_poly_rb_equal(a, b)) return 0;
@@ -10718,6 +10731,9 @@ static sp_bool sp_poly_eql(sp_RbVal a, sp_RbVal b) {
   int a_int = (a.tag == SP_TAG_INT || a.tag == SP_TAG_BIGINT);
   int b_int = (b.tag == SP_TAG_INT || b.tag == SP_TAG_BIGINT);
   if ((a_int && b.tag == SP_TAG_FLT) || (a.tag == SP_TAG_FLT && b_int)) return FALSE;
+  /* nor is a number eql? to a program object, whatever the object's == says:
+     the sp_poly_eq this ends in would ask it */
+  if (sp_poly_num_obj_p(a, b)) return FALSE;
   /* Array#eql? answers false for anything that is not an Array: unlike ==, it
      does not defer to an operand that answers to_ary */
   if (a.tag == SP_TAG_OBJ && sp_poly_is_array_kind(a.cls_id) &&
