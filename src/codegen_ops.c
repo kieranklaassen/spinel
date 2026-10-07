@@ -150,6 +150,36 @@ static int emit_op_pstatus_eq(Compiler *c, const BopCtx *x, Buf *b) {
   return 1;
 }
 
+/* Process::Status#== / #!= with another status. A read of `$?` builds its
+   status (sp_last_process_status allocates) and is not bound ahead of the
+   call as a call's result is: where the second operand is such a read and
+   the first is held by nothing (it is no variable's read), the first is
+   rooted while the second is made, the row's `$r; ` as `$g`. Every other
+   pair is the row's template as it stands. */
+static int pstatus_last_read(Compiler *c, int n) {
+  const char *nm = n >= 0 && nt_kind(c->nt, n) == NK_GlobalVariableReadNode ? nt_str(c->nt, n, "name") : NULL;
+  return nm && sp_streq(nm, "$?");
+}
+static int emit_op_pstatus_cmp(Compiler *c, const BopCtx *x, Buf *b) {
+  int argc;
+  const int *argv = call_args(c->nt, x->id, &argc);
+  int r = unwrap_parens(c, x->recv);
+  NodeKind rk = r >= 0 ? nt_kind(c->nt, r) : NK_NilNode;
+  int held = rk == NK_LocalVariableReadNode || rk == NK_InstanceVariableReadNode || rk == NK_ClassVariableReadNode ||
+             rk == NK_ConstantReadNode || (rk == NK_GlobalVariableReadNode && !pstatus_last_read(c, r));
+  const char *at = strstr(x->op->arg, "$r; ");
+  char text[320];
+  if (held || argc != 1 || !pstatus_last_read(c, unwrap_parens(c, argv[0])) || x->rtext || !at ||
+      strlen(x->op->arg) >= sizeof text)
+    return emit_op_template(c, x, b);
+  snprintf(text, sizeof text, "%.*s$g%s", (int)(at - x->op->arg), x->op->arg, at + 4);
+  BuiltinOp op = *x->op;
+  op.arg = text;
+  BopCtx y = *x;
+  y.op = &op;
+  return emit_op_template(c, &y, b);
+}
+
 /* --plan-check: the row codegen emitted the call with should be the row
    inference answered it with (the same receiver kind, name and result; a
    row guarded on its first argument stands for its unguarded sibling).
@@ -192,6 +222,7 @@ static int (*const bop_emitters[BOPE__COUNT])(Compiler *, const BopCtx *, Buf *)
   [BOPE_TEMPLATE] = emit_op_template,
   [BOPE_PSTATUS_SUCCESS] = emit_op_pstatus_success,
   [BOPE_PSTATUS_EQ] = emit_op_pstatus_eq,
+  [BOPE_PSTATUS_CMP] = emit_op_pstatus_cmp,
   [BOPE_THREAD_SET_REPORT] = emit_op_thread_set_report,
   [BOPE_FLOAT_RATIONALIZE] = emit_op_float_rationalize,
   [BOPE_STRING_SCAN_CHECKED] = emit_op_string_scan_checked,

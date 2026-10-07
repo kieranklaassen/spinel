@@ -54,6 +54,7 @@ typedef enum {
   BOPE_TEMPLATE,          /* arg, its placeholders filled (codegen_ops.c) */
   BOPE_PSTATUS_SUCCESS,   /* Process::Status#success?: true, false or nil */
   BOPE_PSTATUS_EQ,        /* Process::Status#== / #eql? with no operand */
+  BOPE_PSTATUS_CMP,       /* Process::Status#== / #!= with another status */
   /* the concurrency handles (codegen_call_concurrency.c) */
   BOPE_THREAD_SET_REPORT, /* Thread#report_on_exception= */
   BOPE_THREAD_RAISE,      /* Thread#raise */
