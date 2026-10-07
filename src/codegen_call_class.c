@@ -2181,6 +2181,10 @@ int emit_call_class_value_arms(Compiler *c, int id, Buf *b, const NodeTable *nt,
         Buf _eb = expr_buf(c, recv);
         emit_ctype(c, rt, g_pre); buf_printf(g_pre, " _t%d = ", _texc);
         buf_puts(g_pre, _eb.p ? _eb.p : ""); buf_puts(g_pre, ";\n"); free(_eb.p);
+        if (comp_exc_class_by_id(c)) {  /* a class of the program answers by its id */
+          buf_printf(b, "(_t%d ? sp_exc_class_of((sp_Exception *)_t%d) : (sp_Class){(sp_int)-1, SPL(\"NilClass\")})", _texc, _texc);
+          return 1;
+        }
         buf_printf(b, "((sp_Class){(sp_int)-1, _t%d ? sp_exc_class_name((sp_Exception *)_t%d) : SPL(\"NilClass\")})", _texc, _texc);
         return 1;
       }
