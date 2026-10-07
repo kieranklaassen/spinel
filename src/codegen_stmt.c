@@ -9731,7 +9731,16 @@ void emit_boxed_writer_arms(Compiler *c, const char *base, const char *nm,
        stored through `obj.left = col` lost every arm and raised
        NoMethodError for a writer the receiver has. */
     if (at != ivt && at != TY_POLY && ivt != TY_POLY && !slot_takes_subclass(c, ivt, at)) continue;
-    buf_printf(b, " case %d: ", k);
+    /* A by-value struct is boxed behind a heap copy, and a shared String
+       behind its handle: the store's own right-hand side allocates. The
+       barrier (gc_wb_insert) follows a store that is a statement and
+       precedes one that is not, and after `case N:` it is not: the
+       allocation collected, the collection cleared the record the barrier
+       had just made, and the copy was freed while in the slot. A block
+       makes the store a statement. */
+    int box_allocs = ivt == TY_POLY && at != TY_POLY &&
+                     (lift || ty_is_struct_valued(at) || comp_ty_value_obj(c, at));
+    buf_printf(b, " case %d: %s", k, box_allocs ? "{ " : "");
     { size_t on = strlen(c->classes[k].c_name) + strlen(objp) + 16;
       char *opn = (char *)malloc(on);
       snprintf(opn, on, "((sp_%s *)%s)", c->classes[k].c_name, objp);
@@ -9745,7 +9754,7 @@ void emit_boxed_writer_arms(Compiler *c, const char *base, const char *nm,
     }
     else if (at == TY_POLY && ivt != TY_POLY) emit_unbox_text(c, ivt, src, b);
     else { emit_obj_upcast_prefix(c, ivt, at, b); buf_puts(b, src); }
-    buf_puts(b, "; break;");
+    buf_puts(b, box_allocs ? "; } break;" : "; break;");
   }
   /* a real IO in the slot keeps its own writer beside the program's: a Log
      with `attr_accessor :sync` and $stdout in one slot, `x.sync = v` on the
