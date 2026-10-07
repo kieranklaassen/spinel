@@ -1,0 +1,25 @@
+A closure kept from a then or tap block keeps its own run's parameter
+
+    def keep(&b) = b
+    fs = [7, 8, 9].map { |e| x = e; x.then { |v| keep { v + 1 } } }
+    p fs.map(&:call)
+
+printed [9, 10, 10] where CRuby prints [8, 9, 10]: each kept closure
+read the parameter of the run after its own, and the last one its own.
+
+A then or tap block is spliced into the frame, and a parameter that a
+closure captures lives in a cell. The body's prologue makes that cell
+anew at each run and stores the parameter in it
+(emit_block_locals_reset), so a closure keeps the cell of its run. The
+binding stored the parameter into the cell too, ahead of the prologue,
+where the cell is still the one the previous run's closure holds.
+
+The binding now fills the plain slot only. Both ways the body is
+emitted (emit_block_value_into for then, emit_iter_step_body for tap)
+run the prologue before the first statement, so nothing read the cell
+between the two stores. emit_cell_shadow_store has no caller left and
+is removed.
+
+Test: test/then_block_param_kept_closure.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

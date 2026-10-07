@@ -1,0 +1,1 @@
+A closure kept from a then or tap block keeps its own run's parameter
