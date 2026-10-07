@@ -1,0 +1,17 @@
+"c"
+"b"
+"d"
+"c"
+"b"
+"bb"
+"c"
+true
+true
+"cc!"
+"cc!"
+"c"
+"e"
+"c"
+["b", "c", "d"]
+ArgumentError: comparison of Integer with String failed
+ArgumentError: min argument must be less than or equal to max argument

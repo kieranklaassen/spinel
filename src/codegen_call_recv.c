@@ -6599,6 +6599,15 @@ static int str_arms_slice_encode(Compiler *c, int id, Buf *b, const char *name, 
   else if (sp_streq(name, "split") && argc == 2) {
     buf_printf(b, "sp_str_split_limit(%s, ", r); emit_str_pattern_expr(c, argv[0], b); buf_puts(b, ", "); emit_int_expr(c, argv[1], b); buf_puts(b, ")");
   }
+  /* a boxed bound holds a String only at run time: the boxed clamp decides,
+     and its answer is read back as the String it is */
+  else if (sp_streq(name, "clamp") && argc == 2 &&
+           (comp_ntype(c, argv[0]) == TY_POLY || comp_ntype(c, argv[1]) == TY_POLY) &&
+           (comp_ntype(c, argv[0]) == TY_POLY || comp_ntype(c, argv[0]) == TY_STRING) &&
+           (comp_ntype(c, argv[1]) == TY_POLY || comp_ntype(c, argv[1]) == TY_STRING)) {
+    buf_printf(b, "sp_str_clamp_poly(%s, ", r); emit_boxed(c, argv[0], b);
+    buf_puts(b, ", "); emit_boxed(c, argv[1], b); buf_puts(b, ")");
+  }
   else if (sp_streq(name, "clamp") && (argc == 2 ||
            (argc == 1 && nt_type(c->nt, argv[0]) && sp_streq(nt_type(c->nt, argv[0]), "RangeNode")))) {
     int lo_n, hi_n;

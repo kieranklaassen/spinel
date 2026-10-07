@@ -5638,6 +5638,17 @@ static sp_RbVal sp_poly_clamp(sp_RbVal v, sp_RbVal lo, sp_RbVal hi) {
     return sp_obj_clamp(v, lo, hi);
   return sp_num_clamp(v, lo, hi);
 }
+/* String#clamp with a bound whose class is known only at run time: the boxed
+   clamp decides, and its answer, the receiver or a bound, is read back as
+   the String it is. A bound the program appends to answers a copy of its
+   text, since its buffer moves as it grows. */
+static SP_NOINLINE const char *sp_str_clamp_poly(const char *s, sp_RbVal lo, sp_RbVal hi) {
+  sp_RbVal r = sp_poly_clamp(sp_box_nullable_str(s), lo, hi);
+  if (r.tag == SP_TAG_STR) return r.v.s;
+  if (sp_poly_is_strbuf(r)) return sp_str_dup(sp_poly_strbuf_deref(r).v.s);
+  sp_raise_cls("ArgumentError", sp_sprintf("comparison of String with %s failed", sp_poly_cmp_err_repr(r)));
+  return NULL;
+}
 /* clamp(range) on a boxed value: an exclusive range with a real end cannot
    clamp (CRuby); the INTPTR_MIN/MAX beginless/endless sentinels act as
    unbounded sides for numerics and nil bounds for user objects. */
