@@ -1,0 +1,1 @@
+sub and gsub with a block copy the subject's tail by its own length
