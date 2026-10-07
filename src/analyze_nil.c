@@ -635,13 +635,49 @@ static int nf_container(TyKind t) {
   return ty_is_array(t) || ty_is_obj_array(t) || ty_is_hash(t) || t == TY_POLY;
 }
 
+/* a call none of whose arguments can run code (each a literal or a plain
+   read), and that has no block */
+static int nf_inert_args(NF *f, int id) {
+  const NodeTable *nt = f->nt;
+  if (id < 0) return 0;
+  int a = nt_ref(nt, id, "arguments"), an = 0;
+  const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
+  if (nt_ref(nt, id, "block") >= 0) return 0;
+  for (int i = 0; i < an; i++)
+    switch (nt_kind(nt, av[i])) {
+    case NK_StringNode: case NK_SymbolNode: case NK_IntegerNode: case NK_FloatNode:
+    case NK_NilNode: case NK_TrueNode: case NK_FalseNode: case NK_SelfNode:
+    case NK_LocalVariableReadNode: case NK_InstanceVariableReadNode:
+      break;
+    /* a constant the program has set: one read during its own Class.new
+       init raises */
+    case NK_ConstantReadNode: {
+      const char *cn = nt_str(nt, av[i], "name");
+      LocalVar *cv = cn ? comp_const(f->c, cn) : NULL;
+      if (!cv || cv->type == TY_UNKNOWN || cv->init_guarded) return 0;
+      break;
+    }
+    default:
+      return 0;
+    }
+  return 1;
+}
+
 static int nf_call(NF *f, int v) {
   Compiler *c = f->c;
   const NodeTable *nt = f->nt;
   const char *nm = nt_str(nt, v, "name");
   const char *op = nt_str(nt, v, "call_operator");
-  /* only a tracked value's nil: the slots it can reach are tracked */
-  if (!nil_fact_tracked(c->ntype[v])) return NFW_NONE;
+  /* only a tracked value's nil: the slots it can reach are tracked; an
+     attribute reader's call that hands out its String slot's handle
+     (TY_STRBUF) is that ivar too, and nothing else of that type is */
+  int handle = c->ntype[v] == TY_STRBUF;
+  if (!handle && !nil_fact_tracked(c->ntype[v])) return NFW_NONE;
+  if (handle && !cplan_nil_slot_reader(c, v)) return NFW_NONE;
+  /* and only as the receiver of a call no argument of which can run code:
+     the slot is read again behind the arguments, where one that rebinds
+     the attribute has run, and CRuby takes the receiver ahead of it */
+  if (handle && !nf_inert_args(f, comp_recv_parent(c, v))) return NFW_NONE;
   if (op && sp_streq(op, "&.")) return NFW_SAFE_NAV;
   if (!nm) return NFW_OPAQUE;
   int r = nt_ref(nt, v, "receiver");
