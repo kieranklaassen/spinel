@@ -16216,6 +16216,14 @@ static int sbd_param_appends(Compiler *c, int mi, int j) {
   if (k >= 0) { sbd_pa_gen[k] = sbd_gen; sbd_pa_ans[k] = (signed char)ans; }
   return ans;
 }
+/* Does method m change its parameter idx in place (`p << x`, `p.gsub!`),
+   in its own body or through a method it hands the parameter on to? The
+   by-reference slot (comp_byref_param) says so only once a caller has
+   passed the method a String. */
+int comp_param_changed_in_place(Compiler *c, Scope *m, int idx) {
+  int mi = m ? (int)(m - c->scopes) : -1;
+  return an_param_mutated_in_place(c, mi, idx) || an_param_appended_deep(c, mi, idx);
+}
 
 /* The writes of a poly local, ivar or global, each demanded in turn: the
    variable is another name for whatever was written to it. */

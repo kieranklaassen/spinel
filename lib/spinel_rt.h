@@ -15777,6 +15777,22 @@ static SP_INLINE sp_bool sp_poly_when_eq(sp_RbVal pat, sp_RbVal e) {
   if (pat.tag == SP_TAG_OBJ || pat.tag == SP_TAG_CLASS) return sp_poly_case_eq(pat, e);
   return sp_poly_eq(pat, e);
 }
+/* The same test in a program that has a class with its own ===: an object
+   of such a class is asked it, through the operator table the program
+   carries (sp_user_binop_dispatch has an arm for === for this); any other
+   pattern, and an operand the method's parameter cannot take, is answered
+   as above. The pattern may be a temporary of the `when` (a method's value)
+   and the method may allocate, so both operands are held across the call. */
+static sp_bool sp_poly_when_obj_eq(sp_RbVal pat, sp_RbVal e) {
+  SP_GC_ROOT_RBVAL(pat); SP_GC_ROOT_RBVAL(e);
+  sp_bool h = FALSE;
+  sp_RbVal r = sp_user_binop_hook("===", pat, e, &h);
+  return h ? sp_poly_truthy(r) : sp_poly_case_eq(pat, e);
+}
+static SP_INLINE sp_bool sp_poly_when_user_eq(sp_RbVal pat, sp_RbVal e) {
+  if (sp_poly_is_user_obj(pat) && sp_user_binop_hook) return sp_poly_when_obj_eq(pat, e);
+  return sp_poly_when_eq(pat, e);
+}
 static sp_PolyArray *sp_poly_slice_groups(sp_RbVal arr, sp_RbVal pat, int after) {
   /* The pattern is read on every element while the loop below allocates a
      group per boundary, and it is a temporary at the call site

@@ -5756,15 +5756,19 @@ static void emit_case_obj_eq(Compiler *c, int cond, int t, TyKind pt, Buf *b) {
    sp_poly_eq, as before, and any other by sp_poly_case_eq (a Class its
    instances, a Range its cover, a Regexp its match, else equality).
    Compared with sp_poly_eq alone, a Range or a Class read out of an Array
-   never matched. */
+   never matched. In a program with a class that has its own ===,
+   sp_poly_when_user_eq asks an object of such a class first. */
 static void emit_when_boxed_test(Compiler *c, int cond, int t, TyKind pt, Buf *b) {
   char subjp[32]; snprintf(subjp, sizeof subjp, "_t%d", t);
+  int user_eqq = 0;
+  for (int k = 0; k < c->nclasses && !user_eqq; k++)
+    user_eqq = c->classes[k].instantiated && comp_method_in_chain(c, k, "===", NULL) >= 0;
   int tpw = ++g_tmp;
   buf_printf(b, "({ sp_RbVal _t%d = ", tpw); emit_boxed(c, cond, b);
   buf_printf(b, "; _t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_PROC"
                 " ? sp_poly_truthy(sp_penum_call1((sp_Proc *)_t%d.v.p, ", tpw, tpw, tpw);
   if (pt == TY_POLY) buf_puts(b, subjp); else emit_boxed_text(c, pt, subjp, b);
-  buf_printf(b, ")) : sp_poly_when_eq(_t%d, ", tpw);
+  buf_printf(b, ")) : %s(_t%d, ", user_eqq ? "sp_poly_when_user_eq" : "sp_poly_when_eq", tpw);
   if (pt == TY_POLY) buf_puts(b, subjp); else emit_boxed_text(c, pt, subjp, b);
   buf_puts(b, "); })");
 }

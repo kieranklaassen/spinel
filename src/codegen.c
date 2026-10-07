@@ -12033,7 +12033,10 @@ static void emit_user_binop_dispatch(Compiler *c, Buf *b) {
     "<", ">", "<=", ">=", "<=>", "==",
     /* and the element read, which a boxed `r[k] ||= v` / `r[k] += v` reads
        through sp_poly_index_poly */
-    "[]", NULL };
+    "[]",
+    /* a `when` whose pattern is held boxed asks the pattern's own ===
+       (sp_poly_when_user_eq) */
+    "===", NULL };
   buf_puts(b, "static sp_RbVal sp_user_binop_dispatch(const char *op, sp_RbVal a, sp_RbVal b, sp_bool *handled) {\n");
   buf_puts(b, "  *handled = FALSE;\n  switch (a.cls_id) {\n");
   for (int k = 0; k < c->nclasses; k++) {
@@ -12070,6 +12073,12 @@ static void emit_user_binop_dispatch(Compiler *c, Buf *b) {
       int self_vt = c->classes[defcls].is_value_type;
       char argbuf[160], gb[96];
       int api = arm_arg_param(c, m);
+      /* === is asked through this table by a `when` alone, which has no
+         String slot to lend and whose subject no call has widened for an
+         append: a method that changes its parameter in place leaves the
+         arm out, and the `when` answers as it did */
+      if (api >= 0 && sp_streq(uops[u], "===") &&
+          (comp_byref_param(c, m, api) || comp_param_changed_in_place(c, m, api))) continue;
       /* no parameter takes the argument: the arm raises, whatever it holds */
       if (api < 0) { gb[0] = 0; snprintf(argbuf, sizeof argbuf, "b"); }
       else if (!user_dispatch_arg(c, m, api, "b", gb, sizeof gb, argbuf, sizeof argbuf)) continue;
@@ -16269,7 +16278,7 @@ char *codegen_program(const NodeTable *nt) {
   g_has_user_binop = 0;
   {
     static const char *const uops[] = {
-      "+", "-", "*", "/", "%", "**", "<<", ">>", "&", "|", "^", "==", "[]", NULL };
+      "+", "-", "*", "/", "%", "**", "<<", ">>", "&", "|", "^", "==", "[]", "===", NULL };
     /* A class that defines a #coerce needs the table for its COMPARISONS too:
        the protocol routes `5 < obj` to the boxed entry, which reaches the
        class through this hook. Only for such a class, though -- an ordinary

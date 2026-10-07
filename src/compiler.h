@@ -1212,6 +1212,9 @@ int        comp_cvar_owner(const Compiler *c, int cid, const char *name); /* the
 /* 1 iff method m's param idx is a byref string out-param (LocalVar.byref_out):
    passed as const char** so callee mutation lands in the caller's variable. */
 int        comp_byref_param(Compiler *c, Scope *m, int idx);
+/* 1 iff method m changes its param idx in place, itself or through a method
+   it hands the param on to, whether or not the param is a byref slot yet. */
+int        comp_param_changed_in_place(Compiler *c, Scope *m, int idx);
 /* Propagate codegen's setjmp-slot qualifiers through borrowed String calls. */
 void       propagate_borrowed_volatile(Compiler *c);
 /* Find the instance-method scope index for class_id + method name, or -1. */
