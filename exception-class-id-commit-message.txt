@@ -1,0 +1,25 @@
+An exception's class is not the program's first class
+
+`S = Struct.new(:x, keyword_init: true)` then `rescue => e; p e.class`
+printed `S(keyword_init: true)` for an ArgumentError, and
+`e.class.new("z")` raised "wrong number of arguments (given 1,
+expected 0)". An exception carries its class as a name, and the class
+value built from it wrote 0 as its id: 0 is the id of the program's
+first class. Inspect, `new` and a class method all go by the id before
+the name.
+
+The value now carries -1, the id of a class known only by name. Where
+the program defines a class under a builtin exception, the value is that
+class's own: sp_exc_class_of, generated beside sp_user_exc_parent,
+answers a class of the program by its id and any other by its name. So
+`e.class.build` and `e.class.new("z").extra` answer wherever the class
+sits among the program's classes; on master they answered for the
+program's first class and raised NoMethodError for any other. Both
+`class` arms use it: the rescued exception's, and the one for a receiver
+typed as a user exception class. Its text is spliced in once the unit
+is done, and only where the unit asks for an exception's class, as the
+class arms of sp_poly_is_a are. A program with no class under a builtin
+exception keeps master's C, with `{0, ` written `{-1,` where an
+exception's class is read.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
