@@ -2111,7 +2111,7 @@ static void rewrite_const_alias_read(Compiler *c, int rd, int **seq) {
   if (!const_read_is_programs(c, rd)) return;
   const char *an = nt_str(nt, rd, "name");
   if (!an || comp_class_index(c, an) >= 0) return;   /* already a class name */
-  const char *real = resolve_class_alias(c, an);
+  const char *real = is_builtin_class_name(an) ? NULL : resolve_class_alias(c, an);   /* a builtin: no scan */
   if (!real || sp_streq(real, an) || !class_opened_once(c, real)) return;
   int w = const_only_write(nt, an);
   if (nt_kind(nt, w) != NK_ConstantWriteNode || !const_read_is_programs(c, nt_ref(nt, w, "value"))) return;
