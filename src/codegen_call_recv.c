@@ -2213,15 +2213,17 @@ else {
           buf_printf(b, "); !sp_float_is_nil(_t%d) ? sp_box_float(_t%d) : ", tdr, tdr);
         }
         else if (a0 == TY_POLY || held[0]) {
-          /* a boxed needle: a String compares, anything else is not
-             there, as include? and index read it (#4458) */
+          /* a boxed needle: a String compares, a shared String handle
+             by its text, anything else is not there, as include? and
+             index read it (#4458) */
           int tv = ++g_tmp;
           char tvn[32]; snprintf(tvn, sizeof tvn, "_t%d", tv);
           const char *nd = held[0] ? held : tvn;
           buf_puts(b, "({ ");
           if (!held[0]) { buf_printf(b, "sp_RbVal %s = ", tvn); emit_boxed(c, argv[0], b); buf_puts(b, "; "); }
           buf_printf(b, "const char *_t%d = %s.tag == SP_TAG_STR ? sp_StrArray_delete(%s, %s.v.s)"
-                        " : (const char *)0; _t%d ? sp_box_str(_t%d) : ", tdr, nd, rdb.p, nd, tdr, tdr);
+                        " : sp_poly_is_strbuf(%s) ? sp_StrArray_delete(%s, sp_poly_strbuf_deref(%s).v.s)"
+                        " : (const char *)0; _t%d ? sp_box_str(_t%d) : ", tdr, nd, rdb.p, nd, nd, rdb.p, nd, tdr, tdr);
         }
         else {
           buf_printf(b, "({ const char *_t%d = sp_StrArray_delete(%s, ", tdr, rdb.p);
@@ -2256,8 +2258,10 @@ else {
       int tv = ++g_tmp;
       buf_printf(b, "({ sp_RbVal _t%d = ", tv); emit_boxed(c, argv[0], b);
       buf_printf(b, "; _t%d.tag == SP_TAG_STR ? sp_StrArray_delete(%s, _t%d.v.s)"
-                    " : _t%d.tag == SP_TAG_NIL ? sp_StrArray_delete(%s, NULL) : (const char *)0; })",
-                 tv, rdl.p, tv, tv, rdl.p);
+                    " : _t%d.tag == SP_TAG_NIL ? sp_StrArray_delete(%s, NULL)"
+                    " : sp_poly_is_strbuf(_t%d) ? sp_StrArray_delete(%s, sp_poly_strbuf_deref(_t%d).v.s)"
+                    " : (const char *)0; })",
+                 tv, rdl.p, tv, tv, rdl.p, tv, rdl.p, tv);
     }
     else {
       buf_printf(b, "sp_%sArray_delete%s(%s, ", k, df_boxed ? "_key" : "", rdl.p);
