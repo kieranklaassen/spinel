@@ -1174,7 +1174,6 @@ int emit_call_io_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const ch
       const char *bp2 = block_param_name(c, blk2, 0);
       const char *bpn2 = bp2 ? rename_local(bp2) : NULL;
       int bdy2 = nt_ref(nt, blk2, "body");
-      int bbn2 = 0; const int *bbb2 = bdy2 >= 0 ? nt_arr(nt, bdy2, "body", &bbn2) : NULL;
       int is_byte = sp_streq(name, "each_byte");
       int is_cp = sp_streq(name, "each_codepoint");
       int rf2 = ++g_tmp, lt2 = ++g_tmp;
@@ -1201,7 +1200,7 @@ int emit_call_io_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const ch
         buf_printf(b, " %s lv_%s = _t%d;", (is_byte || is_cp) ? "sp_int" : "const char *", bpn2, lt2);
         if (!is_byte && !is_cp) buf_printf(b, " SP_GC_ROOT_STR(lv_%s);", bpn2);
       }
-      for (int k = 0; k < bbn2; k++) emit_stmt(c, bbb2[k], b, 0);
+      emit_iter_loop_stmts(c, bdy2, b, 0);
       buf_printf(b, " } (sp_File *)_t%d; })", rf2);
       free(rb.p); return 1;
     }
@@ -1480,7 +1479,6 @@ int emit_call_io_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const ch
       const char *bp = block_param_name(c, blk, 0);
       const char *bpn = bp ? rename_local(bp) : NULL;
       int bdy = nt_ref(nt, blk, "body");
-      int bbn = 0; const int *bbb = bdy >= 0 ? nt_arr(nt, bdy, "body", &bbn) : NULL;
       int lt = ++g_tmp, rf = ++g_tmp;
       buf_puts(b, "({ ");
       /* rooted as the File.open block form roots its handle (below): a
@@ -1547,7 +1545,7 @@ int emit_call_io_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const ch
       if (bpn && file_block_param_poly(c, id, bpn))
         buf_printf(b, " sp_RbVal lv_%s = sp_box_str(_t%d); SP_GC_ROOT_RBVAL(lv_%s);", bpn, lt, bpn);
       else if (bpn) emit_line_param_decl(c, id, bpn, lt, b);
-      for (int k = 0; k < bbn; k++) emit_stmt(c, bbb[k], b, 0);
+      emit_iter_loop_stmts(c, bdy, b, 0);
       buf_printf(b, " } (sp_File *)_t%d; })", rf);
       return 1;
     }
@@ -1586,7 +1584,6 @@ int emit_call_handle_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
       const char *bp = block_param_name(c, blk, 0);
       const char *bpn = bp ? rename_local(bp) : NULL;
       int bdy = nt_ref(nt, blk, "body");
-      int bbn = 0; const int *bbb = bdy >= 0 ? nt_arr(nt, bdy, "body", &bbn) : NULL;
       int lt = ++g_tmp;
       buf_puts(b, "({ ");
       /* the line ARGF yields is a fresh string held in this C temporary and
@@ -1595,7 +1592,7 @@ int emit_call_handle_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
       buf_printf(b, "const char *_t%d = NULL; SP_GC_ROOT_STR(_t%d);"
                     " while ((_t%d = sp_argf_gets()) != NULL) {", lt, lt, lt);
       if (bpn) emit_line_param_decl(c, id, bpn, lt, b);
-      for (int k = 0; k < bbn; k++) emit_stmt(c, bbb[k], b, 0);
+      emit_iter_loop_stmts(c, bdy, b, 0);
       buf_puts(b, " } (&sp_argf_obj); })");
       return 1;
     }
@@ -1649,7 +1646,6 @@ int emit_call_handle_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
       const char *dbp = block_param_name(c, dblk2, 0);
       const char *dbpn = dbp ? rename_local(dbp) : NULL;
       int dbdy = nt_ref(nt, dblk2, "body");
-      int dbbn = 0; const int *dbbb = dbdy >= 0 ? nt_arr(nt, dbdy, "body", &dbbn) : NULL;
       int tdh = ++g_tmp, tdn = ++g_tmp;
       int skip_dots = sp_streq(name, "each_child");
       buf_puts(b, "({ ");
@@ -1666,7 +1662,7 @@ int emit_call_handle_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
         buf_printf(b, " if (sp_str_eq(_t%d, (&(\"\\xff\" \".\")[1])) ||"
                       " sp_str_eq(_t%d, (&(\"\\xff\" \"..\")[1]))) continue;", tdn, tdn);
       if (dbpn) emit_line_param_decl(c, id, dbpn, tdn, b);
-      for (int k = 0; k < dbbn; k++) emit_stmt(c, dbbb[k], b, 0);
+      emit_iter_loop_stmts(c, dbdy, b, 0);
       buf_printf(b, " } (sp_Dir *)_t%d; })", tdh);
       return 1;
     }

@@ -3531,10 +3531,12 @@ void emit_iter_step_body(Compiler *c, int block, Buf *b, int indent) {
   const NodeTable *nt = c->nt;
   int body = nt_ref(nt, block, "body");
   int bn = 0; const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
+  CLoop loop = c_loop_enter();
   emit_block_locals_reset(c, block, b, indent);
   int rd_lbl = emit_iter_step_stmts(c, body, b, indent, NULL);
   if (bn > 0) emit_stmt(c, bb[bn - 1], b, indent);
   if (rd_lbl) g_redo_depth--;
+  c_loop_leave(loop);
 }
 
 /* A step's body inside the iterator's own C loop, through emit_stmts (the
@@ -3964,7 +3966,9 @@ int emit_each_with_index_terminal(Compiler *c, int id, Buf *b) {
      instead of going through emit_stmts, so reset explicitly) */
   if (block >= 0) emit_block_locals_reset(c, block, g_pre, din);
   if (is_each) {
+    CLoop loop = c_loop_enter();
     for (int j = 0; j < bn; j++) emit_stmt(c, bb[j], g_pre, din);
+    c_loop_leave(loop);
   }
   else if (collect_pair && block < 0) {   /* to_a / entries */
     emit_indent(g_pre, din); buf_printf(g_pre, "sp_PolyArray_push(_t%d, ", tres);

@@ -1,0 +1,99 @@
+"a\n" "bbb\n" "c\n" File#each_line
+"a\n" "bbb\n" "c\n" File#each
+"a" "bbb" "c" File#each_line chomp
+"a" "\n" "b" "b" "b" "\n" "c" "\n" File#each_char
+97 10 98 98 98 10 99 10 File#each_byte
+97 10 98 98 98 10 99 10 File#each_codepoint
+Dir#each: 6
+Dir#each_child: 3
+Dir#each_entry: 6
+"1" "22" "3" scan as a value
+ARGF.each_line: 2 late
+File#each_line: 2 late
+File#each: 2 late
+File#each_line chomp: 2 late
+File#each_char: 5 late
+File#each_byte: 5 late
+File#each_codepoint: 5 late
+Dir#each: 3 late
+Dir#each_child: 1 late
+Dir#each_entry: 3 late
+scan as a value: 2 late "a1b22c3"
+product: 2 late
+product of three: 2 late
+boxed product: 3 late
+each.with_index as a value: 2 late [1, 2, 3]
+each.with_index.each as a value: 2 late [1, 2, 3]
+File#each_line ensure: 2
+2
+File#each ensure: 2
+2
+File#each_line chomp ensure: 2
+2
+File#each_char ensure: 5
+5
+File#each_byte ensure: 5
+5
+File#each_codepoint ensure: 5
+5
+Dir#each ensure: 3
+3
+Dir#each_child ensure: 1
+1
+Dir#each_entry ensure: 3
+3
+scan as a value ensure: 2
+2
+product ensure: 2
+2
+product of three ensure: 2
+2
+boxed product ensure: 3
+3
+each.with_index as a value ensure: 2
+2
+each.with_index.each as a value ensure: 2
+2
+File#each_line proc: 102
+File#each proc: 102
+File#each_line chomp proc: 102
+File#each_char proc: 105
+File#each_byte proc: 105
+File#each_codepoint proc: 105
+Dir#each proc: 103
+Dir#each_child proc: 101
+Dir#each_entry proc: 103
+scan as a value proc: 102
+product proc: 102
+product of three proc: 102
+boxed product proc: 103
+each.with_index as a value proc: 102
+each.with_index.each as a value proc: 102
+File#each_line inner ensure: 232
+File#each inner ensure: 232
+File#each_line chomp inner ensure: 232
+File#each_char inner ensure: 585
+File#each_byte inner ensure: 585
+File#each_codepoint inner ensure: 585
+Dir#each inner ensure: 343
+Dir#each_child inner ensure: 121
+Dir#each_entry inner ensure: 343
+scan as a value inner ensure: 232
+product inner ensure: 242
+product of three inner ensure: 242
+boxed product inner ensure: 363
+each.with_index as a value inner ensure: 232
+each.with_index.each as a value inner ensure: 232
+File#each_line break: 1 late
+File#each break: 1 late
+File#each_line chomp break: 1 late
+File#each_char break: 2 late
+File#each_byte break: 2 late
+File#each_codepoint break: 2 late
+Dir#each_child break: 1 late
+scan as a value break: 1 late
+product break: 0 late
+product of three break: 0 late
+boxed product break: 0 late
+each.with_index as a value break: 1 late
+each.with_index.each as a value break: 1 late

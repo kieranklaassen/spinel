@@ -4157,13 +4157,11 @@ int emit_tap_then_expr(Compiler *c, int id, Buf *b) {
   else {
     /* tap discards the block's value, but a `next` still leaves the block --
        same wrapper, no destination. */
-    CLoop loop = c_loop_enter();
     emit_indent(g_pre, din); buf_puts(g_pre, "do {\n");
     int bi = din + 1; g_indent = bi;
     emit_iter_step_body(c, block, g_pre, bi);
     g_indent = din;
     emit_indent(g_pre, din); buf_puts(g_pre, "} while (0);\n");
-    c_loop_leave(loop);
   }
   g_indent = sv;
   if (use_shadow) { emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n"); }

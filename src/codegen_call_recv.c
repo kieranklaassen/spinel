@@ -6992,7 +6992,6 @@ static int str_arms_pattern(Compiler *c, int id, Buf *b, const NodeTable *nt, co
     int has_cap = re_idx >= 0 && an_re_has_captures(re_lit_src(c, argv[0]));
     int np = 0; while (block_param_name(c, blk, np)) np++;
     int body = nt_ref(nt, blk, "body");
-    int bn = 0; const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
     int tr = ++g_tmp, tm = ++g_tmp, ti = ++g_tmp, tpat = -1;
     emit_indent(g_pre, g_indent);
     buf_printf(g_pre, "const char *_t%d = %s;\n", tr, r);
@@ -7086,7 +7085,7 @@ static int str_arms_pattern(Compiler *c, int id, Buf *b, const NodeTable *nt, co
         buf_printf(g_pre, "lv_%s = _t%d->data[_t%d];\n", p0r, tm, ti);
     }
     int svind = g_indent; g_indent++;
-    for (int j = 0; j < bn; j++) emit_stmt(c, bb[j], g_pre, g_indent);
+    emit_iter_loop_stmts(c, body, g_pre, g_indent);
     g_indent = svind;
     emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
     buf_printf(b, "_t%d", tr);
