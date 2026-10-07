@@ -1,0 +1,26 @@
+A Hash literal stores the object of a small immutable class, not a copy
+
+    class Tag
+      attr_reader :n
+      def initialize(n) = @n = n
+    end
+    tag = Tag.new(1)
+    p({ tag => :a } == { tag => :a })       # true
+
+printed false, and `{ tag => 1 }.merge({ tag => 2 }).size` was 2.
+an_phase_value_types takes the by-value layout back from a class
+whose object an Array or Hash literal stores, but it asked each
+element for its type, and a Hash literal's element is the pair, which
+has none. The class stayed by value and each literal boxed a copy of
+the struct, so two literals held two objects.
+
+The pair's key and its value are asked now, in a Hash literal and in
+keywords alike. Such a class is a heap object for the whole program,
+as one written into an Array literal or passed as a positional
+argument already is.
+
+Test: test/hash_literal_value_object.rb (expected from CRuby 3.3.6);
+master prints 10 of its 13 lines wrong. Six programs of the corpus
+write such an object into a Hash literal and change their C.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

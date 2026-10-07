@@ -1,0 +1,1 @@
+A Hash literal stores the object of a small immutable class, not a copy
