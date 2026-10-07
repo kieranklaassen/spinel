@@ -156,8 +156,10 @@ static inline const char *sp_str_or_empty(const char *s) { return s ? s : sp_str
 #define SP_STR_LCACHE_SIZE ((1u << SP_STR_LCACHE_BITS) * SP_STR_LCACHE_WAYS)
 struct sp_str_lcache_entry {
   const char *s;
-  size_t byte_len;
-  sp_int char_len;
+  size_t byte_len;   /* the bytes that were counted */
+  sp_int char_len;   /* the characters in them; ~count, so below zero, once
+                        appends have added bytes nobody has counted yet */
+  size_t now_len;    /* byte_len plus those bytes: the string's length now */
 };
 /* Per-worker (SP_TLS) in the threaded build: this string-length cache is keyed
    by string pointer and written without the heap lock (sp_str_byte_len is on the
@@ -206,6 +208,40 @@ static inline void sp_str_lcache_drop(const char *s) {
   unsigned h = sp_str_lcache_slot(s);
   for (unsigned w = 0; w < SP_STR_LCACHE_WAYS; w++)
     if (sp_str_lcache[h + w].s == s) sp_str_lcache[h + w].s = NULL;
+}
+/* `s`, a string with a header, has just grown in place: `lb` bytes now follow
+   the `la` it held, and those `la` are as they were. An append is how a buffer
+   is built, and forgetting its length here made the next #size count every
+   byte again: `buf << x; buf.size` in a loop was quadratic. So what is known
+   stays, where the append can show it still holds:
+   - the 7-bit hint, while every new byte is below 0x80;
+   - a counted entry, whose now_len follows the string and whose count is
+     marked as short of it. Nothing is counted here: the next reader counts
+     the bytes past byte_len (sp_str_length_grown, lib/sp_str.c).
+   An entry whose now_len is not the length this append started from was
+   taken before some other change of length, and goes as every entry used to. */
+static inline void sp_str_lcache_grown(const char *s, size_t la, size_t lb) {
+  sp_str_hdr *hd = ((sp_str_hdr *)(s - 1)) - 1;
+  if (hd->size & SP_STR_SIZE_ASCII7) {
+    const unsigned char *p = (const unsigned char *)s + la, *end = p + lb;
+    unsigned char any = 0;
+    while (p + 8 <= end) {
+      uint64_t w;
+      memcpy(&w, p, sizeof(w));
+      if (w & 0x8080808080808080ULL) { any = 0x80; break; }
+      p += 8;
+    }
+    if (!any) while (p < end) any |= *p++;
+    if (any & 0x80) hd->size &= ~SP_STR_SIZE_ASCII7;
+  }
+  unsigned h = sp_str_lcache_slot(s);
+  for (unsigned w = 0; w < SP_STR_LCACHE_WAYS; w++) {
+    struct sp_str_lcache_entry *e = &sp_str_lcache[h + w];
+    if (e->s != s) continue;
+    if (e->now_len != la) { e->s = NULL; continue; }
+    e->now_len = la + lb;
+    if (e->char_len >= 0) e->char_len = ~e->char_len;
+  }
 }
 /* Deep-return side channel (#3227): a method whose every return path yields
    a shared-mutable string publishes the sp_String* handle here as the copy
@@ -371,9 +407,33 @@ static inline char *sp_str_alloc_nogc(size_t len) {
 /* Copy a message onto the string heap so it can be held by a string root.
    The source is a bare literal (every raise the runtime and the generated
    code issue passes one) or an unrooted heap string; neither can be rooted
-   across an allocation, so the copy runs with no collection in between. */
+   across an allocation, so the copy runs with no collection in between.
+   The length is strlen's, not sp_str_byte_len's: a bare literal or a static
+   buffer (Process.spawn's sp_err_buf) has no header, and sp_str_byte_len reads
+   the byte before it for one, which for some neighbouring byte looks like a
+   header's marker and answers a made-up length (#7556 did, and a copied
+   message gained NUL bytes in some builds). */
+/* A "counted" message: a raise message that is a Spinel String with a NUL inside it
+   (sp_exc_msg_given builds it, #7556). The one place a message's length survives the
+   const char * the exception path carries it as, and only for a message the generated
+   code gave: it starts with six bytes no C string of ours starts with (a raw buffer's
+   neighbour bytes are never read; these are compared from the pointer on, stopping
+   at the first mismatch, and a NUL ends any shorter string), then the payload's
+   length, then the payload. A bare C string, whose length is strlen's, never matches. */
+#define SP_CMSG_HDR 10
+static inline int sp_cmsg_p(const char *m) {
+  return m && (unsigned char)m[0] == 0xff && (unsigned char)m[1] == 0xfe && m[2] == 'C' &&
+         m[3] == 'M' && (unsigned char)m[4] == 0xfd && (unsigned char)m[5] == 0x01;
+}
+static inline size_t sp_cmsg_len(const char *m) { uint32_t n; memcpy(&n, m + 6, sizeof n); return n; }
 static inline const char *sp_msg_heapify(const char *m) {
   if (!m) return NULL;
+  if (sp_cmsg_p(m)) {   /* stays counted: a later stage decodes it */
+    size_t total = SP_CMSG_HDR + sp_cmsg_len(m);
+    char *c = sp_str_alloc_nogc(total);
+    memcpy(c, m, total);
+    return c;
+  }
   size_t n = strlen(m);
   char *r = sp_str_alloc_nogc(n);
   memcpy(r, m, n);
@@ -425,6 +485,17 @@ static inline const char *sp_str_as_binary(const char *s) {
 /* The inverse, for force_encoding back to the text side. */
 static inline const char *sp_str_as_text(const char *s) {
   if (s && sp_str_has_hdr(s)) (((sp_str_hdr *)(s - 1)) - 1)->size &= ~SP_STR_SIZE_BINARY;
+  return s;
+}
+/* force_encoding itself. A length remembered before the bytes were binary may
+   be of other bytes by now (setbyte forgets nothing on a binary String,
+   lib/sp_cold.c), so it goes with the tag. An append that makes a binary
+   String text has forgotten already, as every append does. */
+static inline const char *sp_str_force_text(const char *s) {
+  if (s && sp_str_is_binary(s)) {
+    (((sp_str_hdr *)(s - 1)) - 1)->size &= ~SP_STR_SIZE_BINARY;
+    sp_str_lcache_drop(s);
+  }
   return s;
 }
 static inline int sp_str_is_ascii7(const char *s) {
@@ -679,6 +750,10 @@ void *sp_pl_realloc(void *p, size_t newn);   /* lib/sp_slab.c: a slab block know
                                            that asserts every id is distinct will
                                            flag any future collision at compile
                                            time. */
+#define SP_BUILTIN_RANDOM        (-50)  /* Random (sp_Random *): boxed so a
+                                           generator in an Array or a poly slot
+                                           keeps its identity; it read as nil */
+/* SP_BUILTIN_ARGF (-51) is in sp_gc.h: the collector must not trace it */
 #define SP_BUILTIN_YIELDER       (-49)  /* Enumerator::Yielder: the generator's
                                           block parameter as a VALUE, for a
                                           proc inside the body that captures
@@ -737,6 +812,45 @@ extern size_t sp_gc_threshold;
 extern size_t sp_gc_threshold_init;
 extern int sp_gc_stress_checked;
 void *sp_gc_alloc(size_t sz, void (*fin)(void *), void (*scn)(void *));
+/* sp_gc_alloc(sz, NULL, scn) for a size that is a constant where it is
+   called: the switch folds to one call, of the front lib/sp_slab.c keeps for
+   that size class (16 bytes apart from 32 to 256, the header included). */
+void *sp_gc_alloc_32(size_t need, void (*scn)(void *));
+void *sp_gc_alloc_48(size_t need, void (*scn)(void *));
+void *sp_gc_alloc_64(size_t need, void (*scn)(void *));
+void *sp_gc_alloc_80(size_t need, void (*scn)(void *));
+void *sp_gc_alloc_96(size_t need, void (*scn)(void *));
+void *sp_gc_alloc_112(size_t need, void (*scn)(void *));
+void *sp_gc_alloc_128(size_t need, void (*scn)(void *));
+void *sp_gc_alloc_144(size_t need, void (*scn)(void *));
+void *sp_gc_alloc_160(size_t need, void (*scn)(void *));
+void *sp_gc_alloc_176(size_t need, void (*scn)(void *));
+void *sp_gc_alloc_192(size_t need, void (*scn)(void *));
+void *sp_gc_alloc_208(size_t need, void (*scn)(void *));
+void *sp_gc_alloc_224(size_t need, void (*scn)(void *));
+void *sp_gc_alloc_240(size_t need, void (*scn)(void *));
+void *sp_gc_alloc_256(size_t need, void (*scn)(void *));
+static inline void *sp_gc_alloc_sized(size_t sz, void (*scn)(void *)) {
+  size_t need = sizeof(sp_gc_hdr) + sz;
+  switch (need <= 32 ? 0 : need > 256 ? -1 : (int)((need + 15) >> 4) - 2) {
+  case 0: return sp_gc_alloc_32(need, scn);
+  case 1: return sp_gc_alloc_48(need, scn);
+  case 2: return sp_gc_alloc_64(need, scn);
+  case 3: return sp_gc_alloc_80(need, scn);
+  case 4: return sp_gc_alloc_96(need, scn);
+  case 5: return sp_gc_alloc_112(need, scn);
+  case 6: return sp_gc_alloc_128(need, scn);
+  case 7: return sp_gc_alloc_144(need, scn);
+  case 8: return sp_gc_alloc_160(need, scn);
+  case 9: return sp_gc_alloc_176(need, scn);
+  case 10: return sp_gc_alloc_192(need, scn);
+  case 11: return sp_gc_alloc_208(need, scn);
+  case 12: return sp_gc_alloc_224(need, scn);
+  case 13: return sp_gc_alloc_240(need, scn);
+  case 14: return sp_gc_alloc_256(need, scn);
+  default: return sp_gc_alloc(sz, NULL, scn);
+  }
+}
 void *sp_gc_alloc_nogc(size_t sz, void (*fin)(void *), void (*scn)(void *));
 
 SP_NORETURN void sp_raise_cls(const char *cls, const char *msg);  /* lib/sp_core.c */
@@ -789,6 +903,12 @@ static inline void sp_PolyArray_fin(void *p) { sp_PolyArray *a = (sp_PolyArray *
 extern SP_TLS sp_gc_hdr *sp_polyarr_pool_head;
 extern SP_TLS long sp_polyarr_pool_count;
 void sp_PolyArray_pool_recycle(sp_gc_hdr *h);
+/* An Array subclass instance's embedded Array (#7449, see
+   sp_IntArray_init_embedded): its elements start inline, and the first growth
+   installs the finalizer that frees the payload, as an unpooled one's does. */
+static inline void sp_PolyArray_init_embedded(sp_PolyArray *a) {
+  a->data = a->inl; a->cap = SP_POLYARR_INLINE; a->len = 0;
+}
 static inline sp_PolyArray *sp_PolyArray_new(void) {
   if (sp_slab_on > 0) {
     sp_PolyArray *a = (sp_PolyArray *)sp_gc_alloc(sizeof(sp_PolyArray), NULL, sp_PolyArray_scan);
@@ -974,7 +1094,9 @@ static inline sp_RbVal sp_box_range(sp_Range v) {
   return sp_box_obj(p, SP_BUILTIN_RANGE);
 }
 static inline const char*sp_encoding_name(sp_Encoding e){return e.name?e.name:sp_str_empty;}
-static inline const char*sp_encoding_inspect(sp_Encoding e){return sp_sprintf("#<Encoding:%s>",sp_encoding_name(e));}
+/* Encoding#inspect: the binary encoding reads "BINARY (ASCII-8BIT)" since Ruby 3.4 */
+static inline const char*sp_encoding_inspect_name(const char*n){return !strcmp(n,"ASCII-8BIT")?sp_sprintf("#<Encoding:BINARY (ASCII-8BIT)>"):sp_sprintf("#<Encoding:%s>",n);}
+static inline const char*sp_encoding_inspect(sp_Encoding e){return sp_encoding_inspect_name(sp_encoding_name(e));}
 static inline sp_bool sp_encoding_eq(sp_Encoding a,sp_Encoding b){const char*an=sp_encoding_name(a);const char*bn=sp_encoding_name(b);return strcmp(an,bn)==0;}
 
 /* ---- Box helper prototypes (0 optcarrot uses; bodies in lib/sp_cold.c). ---- */

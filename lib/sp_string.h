@@ -11,6 +11,8 @@
 #include "sp_alloc.h"   /* sp_gc_alloc, sp_gc_bytes/hdr, sp_str_hdr, sp_str_byte_len, sp_raise_cls */
 #include <string.h>
 
+int sp_str_ascii_only(const char *s);
+
 /* `binary` is the ASCII-8BIT tag, kept on the HANDLE: sp_fd_setup zeroes the
    payload header on every grow, so the tag has to be re-stamped after each
    mutation rather than living only in the bytes. `chilled` is nonzero for a
@@ -54,10 +56,10 @@ static inline char *sp_fd_setup(char *raw){
 static inline void sp_fd_own(sp_String *s){
   ((sp_str_hdr *)sp_fd_base(s->data))->next = (sp_str_hdr *)(void *)s;
 }
-static inline void sp_fd_publish(sp_String *s){
+/* The handle's length and tags, written to the payload header. */
+static inline void sp_fd_publish_len(sp_String *s){
   sp_str_hdr *h = (sp_str_hdr *)sp_fd_base(s->data);
   h->len = (uint32_t)s->len; h->hash = 0;
-  h->size &= ~SP_STR_SIZE_ASCII7;   /* the bytes just changed */
   /* Both flags are rare and read as one word, so a plain handle pays the one
      load and branch the binary tag alone did. A mutation makes a chilled
      handle plain for good, as CRuby's str_modify does, even one that leaves
@@ -67,8 +69,16 @@ static inline void sp_fd_publish(sp_String *s){
     if (s->binary) h->size |= SP_STR_SIZE_BINARY;
     s->chilled = 0;
   }
-  sp_str_lcache_drop(s->data);
 }
+static inline void sp_fd_publish(sp_String *s){
+  sp_fd_publish_len(s);
+  sp_str_lcache_drop(s->data);   /* the bytes just changed: the 7-bit hint and the cached count go */
+}
+/* After an append of `tl` bytes: the bytes ahead of them did not change, so
+   what is known of the length is carried forward (sp_str_lcache_grown). Out of
+   line (lib/sp_string.c): the append around it is inlined into generated code
+   and stays no larger than it was. */
+void sp_fd_publish_grown(sp_String *s, int64_t tl);
 /* A handle whose payload sits inside its own GC object, right after the
    struct (sp_String_new_fresh): no malloc and no finalizer, which are most of
    what a handle costs to make and to collect. Its first growth moves the
@@ -127,7 +137,7 @@ static inline sp_String*sp_String_new_inline_len(const char*s,int64_t len){
 }
 /* Shared append core: `tl` is the operand byte length (strlen for the
    bare-literal-safe entry, sp_str_byte_len for the binary one). */
-static inline void sp_fd_append_len(sp_String*s,const char*t,int64_t tl){if(!sp_fd_grow(s,s->len+tl))return;memcpy(s->data+s->len,t,tl);s->len+=tl;s->data[s->len]=0;sp_fd_publish(s);}
+static inline void sp_fd_append_len(sp_String*s,const char*t,int64_t tl){if(!sp_fd_grow(s,s->len+tl))return;memcpy(s->data+s->len,t,tl);s->len+=tl;s->data[s->len]=0;sp_fd_publish_grown(s,tl);}
 static inline void sp_String_append(sp_String*s,const char*t){if(!s||!t)return;if(sp_String_is_frozen(s)){sp_raise_frozen_str(s->data);return;}sp_fd_append_len(s,t,(int64_t)strlen(t));}
 /* Binary-safe append: sizes the operand with the header length so an embedded
    NUL is preserved (Ruby String#<< / concat on a marked spinel string). */
@@ -136,7 +146,18 @@ static inline void sp_String_append(sp_String*s,const char*t){if(!s||!t)return;i
 static inline void sp_String_set_bin(sp_String*s,const char*t){if(!s||!t)return;if(sp_String_is_frozen(s)){sp_raise_frozen_str(s->data);return;}s->len=0;sp_fd_append_len(s,t,(int64_t)sp_str_byte_len(t));}
 /* the first tl bytes of t: the append form of an interpolation (emit_interp_append) */
 static inline void sp_String_append_n(sp_String*s,const char*t,size_t tl){if(!s||!t)return;if(sp_String_is_frozen(s)){sp_raise_frozen_str(s->data);return;}sp_fd_append_len(s,t,(int64_t)tl);}
-static inline void sp_String_append_bin(sp_String*s,const char*t){if(!s||!t)return;if(sp_String_is_frozen(s)){sp_raise_frozen_str(s->data);return;}sp_fd_append_len(s,t,(int64_t)sp_str_byte_len(t));}
+/* append_as_bytes preserves the handle's encoding as well as embedded NULs. */
+static inline void sp_String_append_bytes(sp_String*s,const char*t){if(!s||!t)return;if(sp_String_is_frozen(s)){sp_raise_frozen_str(s->data);return;}sp_fd_append_len(s,t,(int64_t)sp_str_byte_len(t));}
+static inline void sp_String_append_bin(sp_String*s,const char*t){
+  if(!s||!t)return;
+  if(sp_String_is_frozen(s)){sp_raise_frozen_str(s->data);return;}
+  if (s->binary && !sp_str_is_binary(t) &&
+      !sp_str_ascii_only(t) && sp_str_ascii_only(s->data)) {
+    s->binary=0;
+    sp_str_as_text(s->data);
+  }
+  sp_fd_append_len(s,t,(int64_t)sp_str_byte_len(t));
+}
 /* Handle wrap for CODEGEN-emitted sources only: every spinel-emitted string
    carries a marker byte at s[-1], so the frozen state (0xf1: an explicit
    .freeze / frozen_string_literal) can be inherited safely. Runtime-internal
