@@ -138,3 +138,9 @@ bad = 0
   bad += 1 unless y == "w#{i}?k#{i}!t#{i}"
 end
 p bad
+
+# a first argument whose code appends to the receiver, before literals: the
+# append is read
+s = +"r"
+x = s.concat((s.concat("q"); "a"), "Z")
+p x
