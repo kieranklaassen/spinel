@@ -2356,6 +2356,14 @@ void emit_scope_decls_ends(Compiler *c, Scope *s, Buf *b, size_t *ends) {
     buf_printf(b, "    SP_GC_ROOT(lv_%s);\n", s->blk_param);
   char **volnames = NULL; int nvol = 0, all_vol = 0;
   if (has_begin) begin_volatile_names(c, si, &volnames, &nvol, &all_vol);
+  /* A call holds each argument it makes in its own frame, but for a rest
+     Array made whole in the argument list (emit_rest_pack_kwh: an empty rest,
+     a lone splat): that one is this method's to root before it allocates. A
+     captured local's cell is an allocation, so the rest is rooted ahead of
+     the first cell, a captured rest before it moves into its own. */
+  LocalVar *rest = s->rest_idx >= 0 ? scope_local(s, s->pnames[s->rest_idx]) : NULL;
+  if (rest && !rest->is_cell && has_begin && (all_vol || name_list_has(volnames, nvol, rest->name))) rest = NULL;
+  int rest_held = 0;
   for (int i = 0; i < s->nlocals; i++) {
     if (ends && i > 0) ends[i - 1] = b->len;
     LocalVar *lv = &s->locals[i];
@@ -2372,7 +2380,11 @@ void emit_scope_decls_ends(Compiler *c, Scope *s, Buf *b, size_t *ends) {
     /* Captured-by-closure local: lives in a heap cell so the proc and this
        scope share storage. A param's incoming value is copied into the cell;
        a body local starts at 0. Int and proc cells supported. */
-    if (lv->is_cell) { emit_cell_decl(c, s, lv, b); continue; }
+    if (lv->is_cell) {
+      if (rest && rest >= lv && !rest_held) { emit_param_root(c, rest, b); rest_held = 1; }
+      emit_cell_decl(c, s, lv, b);
+      continue;
+    }
     if (lv->is_param && has_begin && (all_vol || name_list_has(volnames, nvol, lv->name))) {
       /* a parameter the body reassigns inside a begin and reads after the
          rescue or a retry's longjmp: a volatile local copy of the incoming
@@ -2389,7 +2401,7 @@ void emit_scope_decls_ends(Compiler *c, Scope *s, Buf *b, size_t *ends) {
       free(d.p);
       continue;
     }
-    if (lv->is_param) emit_param_root(c, lv, b);
+    if (lv->is_param) { if (lv != rest || !rest_held) emit_param_root(c, lv, b); }
     else {
       /* A BLOCK parameter the analyzer never typed still needs storage: the
          loop emitter binds it, and an empty literal receiver leaves no element
