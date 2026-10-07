@@ -1114,8 +1114,10 @@ static void emit_strbuf_orw_share_value(Compiler *c, int id, const char *ref, in
    guard tests the slot kind's own nil (NULL for a pointer-backed slot, a
    sentinel for Integer and Symbol) and the RHS converts to the slot's kind.
    Shared by an ivar and by a generated attribute read through a typed
-   receiver, which had its own partial copy and lost the write (#5428). */
-void emit_slot_orw_value(Compiler *c, TyKind t, const char *ref, int v, int is_or, Buf *b) {
+   receiver, which had its own partial copy and lost the write (#5428).
+   `fz` is the frozen-object guard of the object that owns the slot, or
+   NULL: it runs where the store is taken, as a plain write's does. */
+void emit_slot_orw_value(Compiler *c, TyKind t, const char *ref, int v, int is_or, const char *fz, Buf *b) {
   /* The RHS is rendered with its setup captured: the statements a composite
      RHS spills to g_pre (a hash literal's fills, a block-taking call's loop)
      would otherwise run unconditionally, ahead of the guard, so
@@ -1134,6 +1136,7 @@ void emit_slot_orw_value(Compiler *c, TyKind t, const char *ref, int v, int is_o
      the slot's read face with the handle published, as a plain write's is. */
   if (t == TY_STRBUF) {
     buf_puts(b, "({ ");
+    if (fz) buf_printf(b, "if (%s%s) { %s} ", is_or ? "!" : "", ref, fz);
     emit_strbuf_orw_guard(c, ref, v, is_or, b);
     buf_printf(b, " (_sp_ret_strbuf = (void *)%s, %s ? sp_str_concat(sp_String_cstr(%s), (&(\"\\xff\")[1])) : NULL); })",
                ref, ref, ref);
@@ -1200,11 +1203,13 @@ void emit_slot_orw_value(Compiler *c, TyKind t, const char *ref, int v, int is_o
   }
   if (unconditional) {
     buf_puts(b, "({ ");
+    if (fz) buf_puts(b, fz);
     if (vpre.p) buf_puts(b, vpre.p);
     buf_printf(b, "%s = %s; %s; })", ref, vval.p ? vval.p : "", ref);
   }
   else {
     buf_printf(b, "({ if (%s) { ", cond);
+    if (fz) buf_puts(b, fz);
     if (vpre.p) buf_puts(b, vpre.p);
     buf_printf(b, "%s = %s; } %s; })", ref, vval.p ? vval.p : "", ref);
   }
@@ -1929,9 +1934,17 @@ static int emit_local_ivar_write_expr(Compiler *c, int id, Buf *b, const NodeTab
       snprintf(ref3, sizeof ref3, "%s%siv_%s", g_self, g_self_deref, iv_c(nm + 1));
     /* boxed where the slot holds the rule's handle (the handle mark): the
        handle itself */
-    if (repr_of(c, id).handle && repr_write_share(c, id))
+    /* an instance method's own ivar: a frozen self raises where it stores */
+    Buf fz; memset(&fz, 0, sizeof fz);
+    if (cws3 && !cws3->is_cmethod && cws3->class_id >= 0)
+      emit_frozen_obj_guard(c, cws3->class_id, g_self ? g_self : "self", &fz);
+    if (repr_of(c, id).handle && repr_write_share(c, id)) {
+      if (fz.p) buf_printf(b, "({ if (%s%s) { %s} ", is_or ? "!" : "", ref3, fz.p);
       emit_strbuf_orw_share_value(c, id, ref3, v, is_or, -1, NULL, b);
-    else emit_slot_orw_value(c, ivt3, ref3, v, is_or, b);
+      if (fz.p) buf_puts(b, "; })");
+    }
+    else emit_slot_orw_value(c, ivt3, ref3, v, is_or, fz.p, b);
+    free(fz.p);
     return 1;
   }
   if (sp_streq(ty, "LocalVariableOrWriteNode") || sp_streq(ty, "LocalVariableAndWriteNode")) {
@@ -2227,7 +2240,7 @@ static int emit_ivar_cvar_gvar_expr(Compiler *c, int id, Buf *b, const NodeTable
     /* the handle under the mark, as an ivar's */
     if (repr_of(c, id).handle && repr_write_share(c, id))
       emit_strbuf_orw_share_value(c, id, gref, nt_ref(nt, id, "value"), is_or, -1, NULL, b);
-    else emit_slot_orw_value(c, lv->type, gref, nt_ref(nt, id, "value"), is_or, b);
+    else emit_slot_orw_value(c, lv->type, gref, nt_ref(nt, id, "value"), is_or, NULL, b);
     return 1;
   }
   if (sp_streq(ty, "ClassVariableOperatorWriteNode")) {
@@ -4771,7 +4784,11 @@ static void emit_expr_node(Compiler *c, int id, Buf *b) {
       buf_puts(b, "({ ");
       emit_ctype(c, rt, b); buf_printf(b, " _t%d = ", tr); emit_expr(c, recv, b); buf_puts(b, "; ");
       char lhs[300]; snprintf(lhs, sizeof lhs, "_t%d->iv_%s", tr, iv_c(attr));
-      emit_slot_orw_value(c, ivt, lhs, v, is_or, b);
+      char rtmp[32]; snprintf(rtmp, sizeof rtmp, "_t%d", tr);
+      Buf fz; memset(&fz, 0, sizeof fz);
+      emit_frozen_obj_guard(c, class_id, rtmp, &fz);
+      emit_slot_orw_value(c, ivt, lhs, v, is_or, fz.p, b);
+      free(fz.p);
       buf_puts(b, "; })");
       return;
     }
