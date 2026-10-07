@@ -1,0 +1,34 @@
+A String mutator chain keeps a variable its argument assigned
+
+    t = +"abc"
+    t.insert(0, "a").concat((t = +"q"; "x"))
+    p t   # "q"; printed "aabcx"
+
+Since pull request 7778 ("A mutator on a self-returning String
+mutator's result reaches the variable") a link after the first writes
+its result back to the variable the chain starts from. An argument of
+that link can assign the variable: it then names the String it was
+given, the chain goes on changing the one it ran on, and the write-back
+replaced the new String with the chain's result. Before that pull
+request the variable kept "q". `t.upcase!.sub!((t = +"q"; "A"), "z")`
+is older: a bang chain has written back that way since it first did.
+
+The write-back is now left out where the assignment is certain
+(str_chain_var_given_new): the variable is a plain String slot, every
+link is String's own, an argument of a link after the first is the
+assignment or a sequence with it as a statement, and nothing else in
+the chain can rebind the variable (read_rebound_by). A later link that
+may rebind it writes its result back as it did, so the links before it
+do too: all of them leave the write-back out, or none. The assignment
+is `t = v`, `t += x` or `t, n = v, 1`, with v a String no
+variable names yet: a literal, an interpolation, `+"..."`, a dup or a
+`+`. The links after it leave the variable alone too, and a bang there
+roots its receiver, which the variable holds no longer.
+
+Every other chain writes back as it did. An assignment under a
+condition, in a block, or made by a method or a proc the argument calls
+is not certain; and an argument that changes the variable in place
+moves its pointer as an assignment does, so comparing the pointer
+cannot tell the two apart.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

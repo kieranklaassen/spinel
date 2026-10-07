@@ -1,0 +1,1 @@
+A String mutator chain keeps a variable its argument assigned

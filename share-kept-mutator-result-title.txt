@@ -1,0 +1,1 @@
+Under --share-strings a kept mutator result is its receiver's String
