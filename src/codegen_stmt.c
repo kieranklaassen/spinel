@@ -3211,6 +3211,8 @@ int emit_poly_class_when(Compiler *c, int cond_id, const char *tmp, Buf *b) {
   else {
     int cid = comp_class_index(c, cn);
     if (cid >= 0) {
+      int exc = class_is_exc_subclass(c, cid);
+      if (exc) buf_puts(b, "(");
       buf_printf(b, "(%s.tag == SP_TAG_OBJ && (", tmp);
       int first = 1;
       for (int k = 0; k < c->nclasses; k++) {
@@ -3224,6 +3226,7 @@ int emit_poly_class_when(Compiler *c, int cond_id, const char *tmp, Buf *b) {
       }
       if (first) buf_puts(b, "0");
       buf_puts(b, "))");
+      if (exc) { emit_poly_exc_name_arm(c, cid, tmp, 0, b); buf_puts(b, ")"); }
     }
     /* A known builtin class with no arm above -- an exception class most of
        all: a boxed exception walks its hierarchy at run time, so `when
