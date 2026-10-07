@@ -9156,6 +9156,46 @@ int splat_operand_is_scalar(TyKind t) {
          t == TY_STRBUF || t == TY_SYMBOL || t == TY_BOOL;
 }
 
+/* Does class `ci` answer #to_a by a method, a reader or an Enumerable's each
+   in its chain, by being a Struct, a Data or a native class, or by a
+   method_missing that could? */
+static int splat_class_may_answer_to_a(Compiler *c, int ci, const char *const *names) {
+  for (int k = ci; k >= 0; k = c->classes[k].parent)
+    if (c->classes[k].is_struct || c->classes[k].is_data || c->classes[k].is_native_class) return 1;
+  if (comp_reader_in_chain(c, ci, "to_a", NULL)) return 1;
+  for (int i = 0; names[i]; i++)
+    if (comp_method_in_chain(c, ci, names[i], NULL) >= 0) return 1;
+  return 0;
+}
+
+/* Is `t` an object that certainly answers no #to_a, so that splatted it is
+   the one value, itself? Its class and every class below it (the value may
+   be any of them) must have none, and so must the top level, a module
+   included there, and a reopened Object, Kernel or BasicObject, which answer
+   for every object. Any other object keeps the form it had. */
+static int splat_operand_is_plain_object(Compiler *c, TyKind t) {
+  static const char *const names[] = { "to_a", "__enum_to_a", "method_missing",
+                                       "respond_to_missing?", NULL };
+  static const char *const roots[] = { "Object", "Kernel", "BasicObject", NULL };
+  if (!ty_is_object(t)) return 0;
+  int cid = ty_object_class(t);
+  if (cid < 0 || cid >= c->nclasses) return 0;
+  for (int k = 0; k < c->nclasses; k++) {
+    int below = 0;
+    for (int u = k; u >= 0 && !below; u = c->classes[u].parent) below = u == cid;
+    if (below && splat_class_may_answer_to_a(c, k, names)) return 0;
+  }
+  for (int i = 0; names[i]; i++)
+    if (comp_method_index(c, names[i]) >= 0) return 0;
+  for (int i = 0; roots[i]; i++) {
+    int ci = comp_class_index(c, roots[i]);
+    if (ci >= 0 && splat_class_may_answer_to_a(c, ci, names)) return 0;
+  }
+  for (int i = 0; i < c->ntoplevel_includes; i++)
+    if (splat_class_may_answer_to_a(c, c->toplevel_includes[i], names)) return 0;
+  return 1;
+}
+
 /* The positional count of a call with a splat among its positionals, as
    the run time measures it, into `b`: each splat's length, one for each
    other positional, and the one a keyword hash adds that is a positional
@@ -9386,7 +9426,7 @@ static int splat_spreads_in_place(Compiler *c, int splat) {
   }
   TyKind at = comp_ntype(c, inner);
   return at == TY_POLY || at == TY_UNKNOWN || splat_operand_is_scalar(at) || ty_is_array(at) ||
-         at == TY_POLY_ARRAY;
+         at == TY_POLY_ARRAY || splat_operand_is_plain_object(c, at);
 }
 
 /* `argv` may be NULL for `pos_argc` plain arguments that are no nodes (a
@@ -9907,7 +9947,9 @@ static int emit_splat_in_place(Compiler *c, int splat, TyKind *at) {
   TyKind t = inner >= 0 ? repr_of(c, inner).as_ty : TY_UNKNOWN;
   Buf anon; memset(&anon, 0, sizeof anon);
   int is_anon = inner < 0 && emit_anon_rest_ref(c, splat, &anon);
-  int boxed = !is_anon && inner >= 0 && (t == TY_POLY || t == TY_UNKNOWN || splat_operand_is_scalar(t));
+  int boxed = !is_anon && inner >= 0 &&
+              (t == TY_POLY || t == TY_UNKNOWN || splat_operand_is_scalar(t) ||
+               splat_operand_is_plain_object(c, t));
   if (is_anon || boxed) t = TY_POLY_ARRAY;
   *at = t;
   int tmp = ++g_tmp;
