@@ -3148,14 +3148,9 @@ int emit_lazy_pipeline_expr(Compiler *c, int id, Buf *b) {
          false clears the flag and lets everything through untouched */
       emit_indent(g_pre, g_indent + 1);
       buf_printf(g_pre, "if (_t%d) {\n", ops[oi].cnt);
-      Scope *dws = comp_scope_of(c, blk);
-      LocalVar *dwl = (dws && bp0) ? scope_local(dws, bp0) : NULL;
-      TyKind dwt = (dwl && dwl->type != TY_UNKNOWN) ? dwl->type : TY_POLY;
-      emit_indent(g_pre, g_indent + 2);
-      buf_printf(g_pre, "lv_%s = ", bp);
-      if (dwt == TY_POLY) buf_puts(g_pre, vbuf);
-      else { Buf ub; memset(&ub, 0, sizeof ub); emit_unbox_text(c, dwt, vbuf, &ub); buf_puts(g_pre, ub.p ? ub.p : vbuf); free(ub.p); }
-      buf_puts(g_pre, ";\n");
+      /* the predicate's block binds as every other stage's does: a second
+         parameter, a rest or a default read nil or did not build */
+      lazy_stage_bind(c, blk, vbuf, bp0, bp, g_indent + 2);
       int dwb = nt_ref(nt, blk, "body");
       int dwn = 0; const int *dwv = dwb >= 0 ? nt_arr(nt, dwb, "body", &dwn) : NULL;
       for (int k = 0; k < dwn - 1; k++) emit_stmt(c, dwv[k], g_pre, g_indent + 2);
