@@ -16129,6 +16129,17 @@ static sp_bool sp_poly_case_eq(sp_RbVal pat, sp_RbVal e) {
     return sp_re_case_eq((mrb_regexp_pattern *)pat.v.p, e);
   return sp_poly_rb_equal(pat, e);
 }
+/* `when pat` with the pattern held boxed is `pat === e`. Only a pattern that
+   is an object or a Class has a === of its own, and sp_poly_case_eq answers
+   it. Any other pattern (a number, a String, a Symbol, nil, a boolean)
+   matches by equality, which sp_poly_case_eq would reach after its own
+   tests: sp_poly_eq is called here as it was before, two Integers first so
+   that the test a loop makes most stays what it was. */
+static SP_INLINE sp_bool sp_poly_when_eq(sp_RbVal pat, sp_RbVal e) {
+  if (pat.tag == SP_TAG_INT && e.tag == SP_TAG_INT) return pat.v.i == e.v.i;
+  if (pat.tag == SP_TAG_OBJ || pat.tag == SP_TAG_CLASS) return sp_poly_case_eq(pat, e);
+  return sp_poly_eq(pat, e);
+}
 static sp_PolyArray *sp_poly_slice_groups(sp_RbVal arr, sp_RbVal pat, int after) {
   /* The pattern is read on every element while the loop below allocates a
      group per boundary, and it is a temporary at the call site
