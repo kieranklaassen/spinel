@@ -1,0 +1,14 @@
+[true, true, false, false, false, true, false]
+[false, true, false, false, false, false, false]
+[true, false, false, false, false, true, false]
+[false, false, false, false, true, false, false]
+[false, false, true, false, false, false, false]
+false
+[:plain, :deeper, :app, :other, :coded, :plain, :other]
+tagged r
+tagged n
+nil
+nil
+3
+"t-r"
+"t-n"

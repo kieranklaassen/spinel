@@ -4112,6 +4112,8 @@ int emit_poly_class_when(Compiler *c, int cond_id, const char *tmp, Buf *b) {
   else {
     int cid = comp_class_index(c, cn);
     if (cid >= 0) {
+      int exc = class_takes_exc_name_arm(c, cid, 0);
+      if (exc) buf_puts(b, "(");
       buf_printf(b, "(%s.tag == SP_TAG_OBJ && (", tmp);
       int first = 1;
       for (int k = 0; k < c->nclasses; k++) {
@@ -4125,6 +4127,7 @@ int emit_poly_class_when(Compiler *c, int cond_id, const char *tmp, Buf *b) {
       }
       if (first) buf_puts(b, "0");
       buf_puts(b, "))");
+      if (exc) { emit_poly_exc_name_arm(c, cid, tmp, 0, b); buf_puts(b, ")"); }
       /* a module a builtin's reopening includes (`class Hash; include M;
          end`): a builtin value carries no program class id, so ask the
          ancestor walk, which reads those reopenings */

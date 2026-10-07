@@ -18214,6 +18214,338 @@ int class_isa_user(Compiler *c, int k, int cid, const char *cn) {
          class_includes_module_named(c, k, cn);
 }
 
+/* A method a class test goes through, or `exception`, which chooses what a
+   raise raises. */
+static int class_test_method_name(const char *s) {
+  return s && (sp_streq(s, "is_a?") || sp_streq(s, "kind_of?") || sp_streq(s, "instance_of?") ||
+               sp_streq(s, "===") || sp_streq(s, "exception"));
+}
+
+/* A call that defines, renames or removes a method or a constant under a
+   name it is given, or runs text as code. */
+static int class_shaping_call_name(const char *s) {
+  return s && (sp_streq(s, "define_method") || sp_streq(s, "define_singleton_method") ||
+               sp_streq(s, "alias_method") || sp_streq(s, "undef_method") || sp_streq(s, "remove_method") ||
+               sp_streq(s, "const_set") || sp_streq(s, "remove_const") ||
+               sp_streq(s, "eval") || sp_streq(s, "instance_eval") || sp_streq(s, "class_eval") ||
+               sp_streq(s, "module_eval"));
+}
+
+/* What master answers otherwise than CRuby when the receiver is a raised
+   exception of the program's: a call on the boxed value (XM_BOXED: no arm
+   for it), the same call given a block, which CRuby ignores and the boxed
+   arm does not take (XM_BLOCK), a call with no receiver inside a method of
+   the class (XM_BARE: NameError), the same on self (XM_SELF). Measured name
+   by name; a branch a class test guards, or a method it calls, may hold
+   one. */
+enum { XM_BOXED = 1, XM_BARE = 2, XM_SELF = 4, XM_BLOCK = 8 };
+static int exc_call_misanswered(const char *s, int how) {
+  static const struct { const char *name; int how; } names[] = {
+    { "__id__", XM_BARE }, { "backtrace", XM_BARE | XM_BLOCK },
+    { "backtrace_locations", XM_BOXED | XM_BARE | XM_SELF }, { "cause", XM_BARE | XM_BLOCK },
+    { "define_singleton_method", XM_BOXED }, { "detailed_message", XM_BARE | XM_BLOCK },
+    { "enum_for", XM_BOXED }, { "exception", XM_BOXED | XM_BARE }, { "extend", XM_BOXED },
+    { "full_message", XM_BARE | XM_BLOCK }, { "instance_exec", XM_BOXED },
+    { "instance_variables", XM_BLOCK }, { "message", XM_BARE | XM_BLOCK },
+    { "methods", XM_BOXED | XM_BARE },
+    { "private_methods", XM_BOXED | XM_BARE }, { "protected_methods", XM_BOXED | XM_BARE },
+    { "public_methods", XM_BOXED | XM_BARE }, { "remove_instance_variable", XM_BOXED },
+    { "set_backtrace", XM_BOXED }, { "singleton_class", XM_BOXED }, { "singleton_method", XM_BOXED },
+    { "singleton_methods", XM_BOXED | XM_BARE }, { "to_enum", XM_BOXED },
+  };
+  if (!s) return 0;
+  for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
+    if ((names[i].how & how) && sp_streq(s, names[i].name)) return 1;
+  return 0;
+}
+
+/* A method CRuby calls on a value by itself, to convert it or to use it:
+   `"a" + v` asks to_str, `1 + v` coerce, `*v` to_a. No boxed exception is
+   asked, so an exception class that has one keeps the answers it had. */
+static int exc_method_called_implicitly(const char *s) {
+  return (strncmp(s, "to_", 3) == 0 && !sp_streq(s, "to_s")) || sp_streq(s, "coerce") ||
+         sp_streq(s, "each") || sp_streq(s, "call") || sp_streq(s, "hash") || sp_streq(s, "eql?");
+}
+
+/* A call that stores its argument in the receiver. */
+static int array_store_name(const char *s) {
+  return sp_streq(s, "<<") || sp_streq(s, "push") || sp_streq(s, "append") || sp_streq(s, "unshift") ||
+         sp_streq(s, "prepend") || sp_streq(s, "insert") || sp_streq(s, "[]=") || sp_streq(s, "fill");
+}
+
+/* Is node `id` inside a method of an exception class of the program's? */
+static int node_in_exc_method(Compiler *c, int id, const char **mname) {
+  int si = c->nscope[id];
+  if (si < 0 || si >= c->nscopes) return 0;
+  Scope *m = &c->scopes[si];
+  if (m->class_id < 0 || !m->name || !class_is_exc_subclass(c, m->class_id)) return 0;
+  if (mname) *mname = m->name;
+  return 1;
+}
+
+/* A builtin exception with no method of its own beyond Exception's: a
+   class of the program directly under one answers what Exception answers.
+   One under KeyError, NameError or LocalJumpError has more (key, name,
+   reason), and a boxed raised one has no arm for those. */
+static int exc_parent_is_plain(const char *n) {
+  static const char *const plain[] = {
+    "StandardError", "RuntimeError", "ArgumentError", "TypeError", "IOError", "EOFError",
+    "RangeError", "IndexError", "ZeroDivisionError", "NotImplementedError", "FloatDomainError",
+    "RegexpError", "ThreadError", "FiberError", "SecurityError", "EncodingError" };
+  for (size_t i = 0; i < sizeof plain / sizeof plain[0]; i++) if (sp_streq(n, plain[i])) return 1;
+  return 0;
+}
+
+/* One literal Symbol or String: a name the scan below reads. */
+static int node_is_literal_name(const NodeTable *nt, int n) {
+  NodeKind k = n >= 0 ? nt_kind(nt, n) : NK_NilNode;
+  return k == NK_SymbolNode || k == NK_StringNode;
+}
+
+/* Does a call of `m` with these arguments name every method it defines,
+   renames or removes by a literal? */
+static int call_names_are_literal(const NodeTable *nt, const char *m, const int *av, int an) {
+  if (sp_streq(m, "define_method") || sp_streq(m, "define_singleton_method"))
+    return an > 0 && node_is_literal_name(nt, av[0]);
+  if (sp_streq(m, "alias_method") || sp_streq(m, "undef_method") || sp_streq(m, "remove_method")) {
+    for (int a = 0; a < an; a++) if (!node_is_literal_name(nt, av[a])) return 0;
+    return 1;
+  }
+  return !class_shaping_call_name(m);
+}
+
+/* Does an exception class of the program have the attribute writer `set`
+   (`x=`) in its chain? */
+static int exc_class_has_attr_writer(Compiler *c, const char *set) {
+  char base[256];
+  if (!set || !name_is_plain_setter(set) || !setter_base_name(set, base, sizeof base)) return 0;
+  for (int k = 0; k < c->nclasses; k++)
+    if (class_is_exc_subclass(c, k) && comp_writer_in_chain(c, k, base, NULL)) return 1;
+  return 0;
+}
+
+/* Does an exception class of the program have a class method `name`? */
+static int exc_class_has_cmethod(Compiler *c, const char *name) {
+  for (int s = 0; s < c->nscopes; s++) {
+    Scope *m = &c->scopes[s];
+    if (m->is_cmethod && m->class_id >= 0 && m->name && sp_streq(m->name, name) &&
+        class_is_exc_subclass(c, m->class_id)) return 1;
+  }
+  return 0;
+}
+
+/* The leaf of a class's or constant's stored name: one defined under two
+   namespaces is kept as `Mod__Leaf` (qualify_colliding_classes,
+   qualify_colliding_consts). */
+static const char *const_stored_leaf(const char *n) {
+  const char *leaf = n;
+  for (const char *p = n; p && (p = strstr(p, "__")) != NULL; p += 2) leaf = p + 2;
+  return leaf;
+}
+
+/* Is this a program where the name a boxed exception carries says what a
+   class test of it answers? The name arm below is right only where the test
+   is the builtin one and a class's name means one class wherever it is
+   written, so it is emitted for these programs alone and every other keeps
+   the test it had:
+   - none that defines, aliases or undefines is_a?, kind_of?, instance_of?,
+     === or exception: a def of that name anywhere, on either side, or the
+     name as a Symbol or a String (alias, undef, alias_method, define_method);
+   - none that could do so under a name this scan cannot read: a
+     define_method, alias_method, undef_method or remove_method given
+     anything but literal names, a send whose name is not a literal, an
+     eval, or one of those calls named as a Symbol or a String;
+   - none with a constant bound twice: two classes of one leaf name, a
+     class or module written as a path (it is kept under its leaf), a
+     constant written under a class's name, a class alias written twice, a
+     constant written any way but `NAME = value`, or a const_set or a
+     remove_const. A bare name there means a class by where it is read, and
+     a Class.new block reads as a class body does;
+   - none that reads a path which is no class of the program and ends in
+     the name of one: `raise Timeout::Error` raises the name "Error", and a
+     `class Error` of the program is not what was raised;
+   - none that raises through a value (`raise k, "m"`) and has an exception
+     class with ivars and an initialize: the runtime builds what is raised
+     so by its name at the base size, with no constructor, and a method of
+     the class would read past it;
+   - none that writes an attribute of an exception class through a boxed
+     receiver (`v.seen = true`), and none where an exception class has an
+     operator of its own or a method that yields: those dispatches have no
+     arm for a boxed exception, and the test turning true would reach them. */
+static int prog_class_test_by_name(Compiler *c) {
+  static const Compiler *memo_c; static int memo;
+  if (memo_c == c) return memo;
+  memo_c = c; memo = 0;
+  const NodeTable *nt = c->nt;
+  int raised_by_value = 0;
+  for (int k = 0; k < c->nclasses; k++) {
+    if (c->classes[k].name && strstr(c->classes[k].name, "__")) return 0;
+    const char *bp = class_is_exc_subclass(c, k) && c->classes[k].def_node >= 0
+      ? superclass_builtin_exc_name(nt, nt_ref(nt, c->classes[k].def_node, "superclass")) : NULL;
+    if (bp && !exc_parent_is_plain(bp)) return 0;
+  }
+  for (int s = 0; s < c->nscopes; s++) {
+    Scope *m = &c->scopes[s];
+    if (m->class_id < 0 || !m->name || m->is_cmethod || !class_is_exc_subclass(c, m->class_id)) continue;
+    if (m->yields || !(isalpha((unsigned char)m->name[0]) || m->name[0] == '_') ||
+        sp_streq(m->name, "method_missing") || sp_streq(m->name, "respond_to_missing?") ||
+        exc_method_called_implicitly(m->name)) return 0;
+  }
+  for (int id = 0; id < nt->count; id++) {
+    NodeKind kd = nt_kind(nt, id);
+    if (kd == NK_DefNode) { if (class_test_method_name(nt_str(nt, id, "name"))) return 0; }
+    else if (kd == NK_SymbolNode || kd == NK_StringNode) {
+      const char *n = nt_str(nt, id, kd == NK_SymbolNode ? "value" : "content");
+      if (class_test_method_name(n) || class_shaping_call_name(n)) return 0;
+    }
+    else if (kd == NK_ClassNode || kd == NK_ModuleNode) {
+      int cp = nt_ref(nt, id, "constant_path");
+      if (cp < 0 || nt_kind(nt, cp) == NK_ConstantPathNode) return 0;
+    }
+    else if (kd == NK_UndefNode) {
+      int un = 0; const int *uv = nt_arr(nt, id, "names", &un);
+      for (int q = 0; q < un; q++) if (!node_is_literal_name(nt, uv[q])) return 0;
+    }
+    else if (kd == NK_AliasMethodNode) {
+      if (!node_is_literal_name(nt, nt_ref(nt, id, "new_name")) ||
+          !node_is_literal_name(nt, nt_ref(nt, id, "old_name"))) return 0;
+    }
+    else if (kd == NK_CallNode) {
+      const char *m = nt_str(nt, id, "name");
+      if (!m) return 0;
+      int args = nt_ref(nt, id, "arguments"), an = 0;
+      const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+      if (sp_streq(m, "send") || sp_streq(m, "__send__") || sp_streq(m, "public_send")) {
+        /* the literal name of a shaping call is refused above, as a Symbol */
+        if (an > 0 && !node_is_literal_name(nt, av[0])) return 0;
+        if (an > 0 && exc_call_misanswered(nt_str(nt, av[0], nt_kind(nt, av[0]) == NK_SymbolNode ? "value" : "content"),
+                                           XM_BOXED)) return 0;
+      }
+      else if (sp_streq(m, "raise") || sp_streq(m, "fail")) {
+        if (an > 0 && nt_kind(nt, av[0]) != NK_ConstantReadNode && nt_kind(nt, av[0]) != NK_ConstantPathNode) {
+          TyKind t = comp_ntype(c, av[0]);
+          if (t == TY_CLASS || t == TY_POLY || t == TY_UNKNOWN) raised_by_value = 1;
+        }
+      }
+      else if (!call_names_are_literal(nt, m, av, an)) return 0;
+    }
+    if (kd == NK_CallNode || kd == NK_CallTargetNode || kd == NK_CallOrWriteNode || kd == NK_CallAndWriteNode ||
+        (nt_type(nt, id) && sp_streq(nt_type(nt, id), "CallOperatorWriteNode"))) {
+      const char *set = nt_str(nt, id, kd == NK_CallNode || kd == NK_CallTargetNode ? "name" : "write_name");
+      int recv = nt_ref(nt, id, "receiver");
+      TyKind rt = recv >= 0 ? comp_ntype(c, recv) : TY_VOID;
+      if ((rt == TY_POLY || rt == TY_UNKNOWN) &&
+          (exc_class_has_attr_writer(c, set) || exc_call_misanswered(set, XM_BOXED))) return 0;
+      if ((recv < 0 || nt_kind(nt, recv) == NK_SelfNode) && node_in_exc_method(c, id, NULL) &&
+          exc_call_misanswered(set, recv < 0 ? XM_BARE : XM_SELF)) return 0;
+      /* a class read off a boxed exception builds nothing and has none of
+         the class's own methods: `new`, or a class method of an exception
+         class, on a class that is no constant */
+      if (recv >= 0 && nt_kind(nt, recv) != NK_ConstantReadNode && nt_kind(nt, recv) != NK_ConstantPathNode &&
+          nt_kind(nt, recv) != NK_SelfNode && set &&
+          (sp_streq(set, "new") || sp_streq(set, "allocate") || exc_class_has_cmethod(c, set))) return 0;
+      int blk = kd == NK_CallNode ? nt_ref(nt, id, "block") : -1;
+      if (blk >= 0 && (rt == TY_POLY || rt == TY_UNKNOWN) && exc_call_misanswered(set, XM_BLOCK)) return 0;
+      /* an Array of one kind takes no boxed value: the store is a TypeError
+         when it runs, and the test turning true would run it */
+      if (kd == NK_CallNode && set && array_store_name(set) &&
+          ((ty_is_array(rt) && rt != TY_POLY_ARRAY) || ty_is_obj_array(rt))) {
+        int sargs = nt_ref(nt, id, "arguments"), sn = 0;
+        const int *sv = sargs >= 0 ? nt_arr(nt, sargs, "arguments", &sn) : NULL;
+        for (int q = 0; q < sn; q++) {
+          TyKind at = comp_ntype(c, sv[q]);
+          if (at == TY_POLY || at == TY_UNKNOWN) return 0;
+        }
+      }
+      /* `&:name` calls the name on each value */
+      int be = blk >= 0 && nt_kind(nt, blk) == NK_BlockArgumentNode ? nt_ref(nt, blk, "expression") : -1;
+      if (be >= 0 && nt_kind(nt, be) == NK_SymbolNode &&
+          exc_call_misanswered(nt_str(nt, be, "value"), XM_BOXED)) return 0;
+    }
+    else if (kd == NK_SuperNode || kd == NK_ForwardingSuperNode) {
+      /* Exception's own method reached by `super` has no arm for a boxed
+         receiver; a constructor is not run through one */
+      const char *mn = NULL;
+      if (node_in_exc_method(c, id, &mn) && !sp_streq(mn, "initialize")) return 0;
+    }
+    else if (kd == NK_ConstantWriteNode) {
+      const char *leaf = const_stored_leaf(nt_str(nt, id, "name"));
+      if (!leaf) return 0;
+      int ci = comp_class_index(c, leaf), dn = ci >= 0 ? c->classes[ci].def_node : -1;
+      if (dn >= 0 && (nt_kind(nt, dn) == NK_ClassNode || nt_kind(nt, dn) == NK_ModuleNode)) return 0;
+      int v = nt_ref(nt, id, "value");
+      if (v < 0 || (nt_kind(nt, v) != NK_ConstantReadNode && nt_kind(nt, v) != NK_ConstantPathNode)) continue;
+      for (int w = 0; w < nt->count; w++)
+        if (w != id && nt_kind(nt, w) == NK_ConstantWriteNode &&
+            sp_streq(const_stored_leaf(nt_str(nt, w, "name")), leaf)) return 0;
+    }
+    else if (kd == NK_ConstantPathNode) {
+      /* a path that is no class of the program is kept by its last name
+         (`raise Timeout::Error` raises "Error") */
+      char qb[256];
+      int ci = comp_class_index(c, nt_str(nt, id, "name"));
+      const char *q = ci >= 0 ? isa_const_qualname(nt, id, qb, sizeof qb) : NULL;
+      const char *rn = ci >= 0 ? class_ruby_name(c, ci) : NULL;
+      if (ci >= 0 && !(q && rn && sp_streq(q, rn))) return 0;
+    }
+    else if (kd != NK_ConstantReadNode &&
+             nt_type(nt, id) && strncmp(nt_type(nt, id), "Constant", 8) == 0) return 0;
+  }
+  for (int k = 0; raised_by_value && k < c->nclasses; k++)
+    if (c->classes[k].nivars > 0 && class_is_exc_subclass(c, k) && !class_exc_built_by_name(c, k)) return 0;
+  return memo = 1;
+}
+
+/* Does a class test against `cid` (exact: that class alone) take the name arm
+   below? An exception class of the program's own that the program
+   instantiates, or has such a class under it, in a program where the name
+   says the answer. */
+int class_takes_exc_name_arm(Compiler *c, int cid, int exact) {
+  if (cid < 0 || !class_is_exc_subclass(c, cid) || !prog_class_test_by_name(c)) return 0;
+  /* as a dispatch has an arm only for a class the program instantiates */
+  for (int k = 0; k < c->nclasses; k++)
+    if ((k == cid || (!exact && is_descendant(c, k, cid))) && c->classes[k].instantiated) return 1;
+  return 0;
+}
+
+/* An exception of a class of the program's own is an sp_Exception, boxed as
+   SP_BUILTIN_EXCEPTION, and its class is the name it carries: no class id
+   tests it. Emits the arm that asks by name, ` || (...)`, after a class-id
+   test of the boxed value `v` against class `cid`; nothing for a class that
+   does not take it. The classes that answer yes are `cid` and those under
+   it, all the program's own, so the test is that name against theirs: a
+   function written once a program for each class asked (sp_xn_<cid>, or
+   sp_xnx_<cid> for the exact test), beside the out-of-line dispatches. An
+   exception of the runtime's own has no parent name and leaves before the
+   call; a miss costs the comparisons, no walk up the hierarchy and no copy
+   of the name. */
+void emit_poly_exc_name_arm(Compiler *c, int cid, const char *v, int exact, Buf *b) {
+  if (!class_takes_exc_name_arm(c, cid, exact)) return;
+  int names = 0, one = -1;
+  for (int k = 0; k < c->nclasses; k++)
+    if ((k == cid || (!exact && is_descendant(c, k, cid))) && c->classes[k].instantiated) { names++; one = k; }
+  buf_printf(b, " || (%s.tag == SP_TAG_OBJ && %s.cls_id == SP_BUILTIN_EXCEPTION && %s.v.p && "
+                "((sp_Exception *)%s.v.p)->parent_cls_name && ", v, v, v, v);
+  if (names == 1) {
+    buf_printf(b, "strcmp(((sp_Exception *)%s.v.p)->cls_name, \"%s\") == 0)", v, class_ruby_name(c, one));
+    return;
+  }
+  /* several names: one function a class, however often it is asked */
+  char fn[48];
+  snprintf(fn, sizeof fn, "sp_xn%s_%d(", exact ? "x" : "", cid);
+  if (!g_pd_protos.p || !strstr(g_pd_protos.p, fn)) {
+    buf_printf(&g_pd_protos, "static SP_UNUSED int %sconst char *n);\n", fn);
+    buf_printf(&g_pd_defs, "static int %sconst char *n) {\n  return ", fn);
+    for (int k = 0, first = 1; k < c->nclasses; k++) {
+      if ((k != cid && (exact || !is_descendant(c, k, cid))) || !c->classes[k].instantiated) continue;
+      buf_printf(&g_pd_defs, "%sstrcmp(n, \"%s\") == 0", first ? "" : " ||\n         ", class_ruby_name(c, k));
+      first = 0;
+    }
+    buf_puts(&g_pd_defs, ";\n}\n");
+  }
+  buf_printf(b, "%s((sp_Exception *)%s.v.p)->cls_name))", fn, v);
+}
+
 /* The runtime test for `<poly value v> is_a? <class named cn>` (exact: the
    instance_of? form, no ancestry). Shared by is_a?/kind_of?/instance_of? and by
    `Klass === poly`, which used to carry its own shorter copy of the table and
@@ -18267,7 +18599,8 @@ int emit_poly_isa_test(Compiler *c, const char *cn, const char *v, int exact, Bu
         ext = 0;
         for (int k = 0; k < c->nclasses && !ext; k++) if (comp_class_singleton_has_module(c, k, cid)) ext = 1;
       }
-      if (ext) buf_puts(b, "(");
+      int exc = class_takes_exc_name_arm(c, cid, exact);
+      if (ext || exc) buf_puts(b, "(");
       buf_printf(b, "(%s.tag == SP_TAG_OBJ && (", v);
       int first = 1;
       /* a module is an ancestor of every class that includes it: an
@@ -18283,6 +18616,7 @@ int emit_poly_isa_test(Compiler *c, const char *cn, const char *v, int exact, Bu
         }
       if (first) buf_puts(b, "0");
       buf_puts(b, "))");
+      if (exc) { emit_poly_exc_name_arm(c, cid, v, exact, b); buf_puts(b, ")"); }
       if (ext) {
         buf_printf(b, " || (%s.tag == SP_TAG_CLASS && (", v);
         int any = 0;
