@@ -12282,6 +12282,25 @@ Buf emit_cmp_self(Compiler *c, int recv, TyKind rt) {
   return out;
 }
 
+/* A Bignum == or != a boxed value. sp_bigint_cmp over sp_poly_as_bigint read
+   the box as 0 unless it held a number, and a Float without its fraction, so
+   a zero Bignum was == nil. The runtime's pair reads a boxed Integer or
+   Bignum as that did and asks anything else what it holds. Returns 0 when
+   neither side is boxed, and for a boxed receiver's != where a class of the
+   program defines a != of its own, which the pair does not call. */
+static int emit_bigint_poly_eq(Compiler *c, int recv, int arg, TyKind rt, TyKind at, int eq, Buf *b) {
+  if (!((rt == TY_BIGINT && at == TY_POLY) || (rt == TY_POLY && at == TY_BIGINT))) return 0;
+  if (!eq && rt == TY_POLY)
+    for (int k = 0; k < c->nclasses; k++)
+      if (c->classes[k].instantiated && comp_method_in_chain(c, k, "!=", NULL) >= 0) return 0;
+  buf_printf(b, "(%s%s(", eq ? "" : "!", rt == TY_POLY ? "sp_poly_eq_bigint" : "sp_bigint_eq_poly");
+  emit_expr(c, recv, b);
+  buf_puts(b, ", ");
+  emit_expr(c, arg, b);
+  buf_puts(b, "))");
+  return 1;
+}
+
 /* the `[]` literal, an ArrayNode with no elements (its element type is unknown) */
 static int eq_empty_array_literal(Compiler *c, int n) {
   int cnt = 0;
@@ -12724,6 +12743,7 @@ static int emit_case_eq_call(Compiler *c, int id, Buf *b) {
     /* bigint == / != */
     if ((rt == TY_BIGINT || a0 == TY_BIGINT) &&
         emit_float_bigint_cmp(c, recv, argv[0], eq ? "==" : "!=", b)) return 1;
+    if (emit_bigint_poly_eq(c, recv, argv[0], rt, a0, eq, b)) return 1;
     if ((rt == TY_BIGINT || a0 == TY_BIGINT) &&
         bigint_cmp_operand_ok(rt) && bigint_cmp_operand_ok(a0)) {
       buf_printf(b, "(sp_bigint_cmp(");
