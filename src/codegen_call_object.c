@@ -1306,6 +1306,39 @@ int emit_call_freeze_dup_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, 
   return 0;
 }
 
+/* A String mutator is lowered to a reassignment of its receiver. Under a `&.`
+   guard the receiver is bound to the guard's temp, so the new String went
+   there and the variable kept the old one. The statement that stores the temp
+   back, when the receiver is a variable whose read is its plain slot (a
+   shared String's handle reads through a conversion, and has its own way
+   back) and the guarded call's text (`val`, `pre`) assigns the temp; NULL
+   otherwise. The caller frees it. */
+static char *sn_store_back(Compiler *c, int recv, int tsn, const char *val, const char *pre) {
+  if (!str_mut_var_recv(c, recv)) return NULL;
+  char pat[32];
+  int n = snprintf(pat, sizeof pat, "_sn%d = ", tsn);
+  int hit = 0;
+  const char *txt[2] = { val, pre };
+  for (int i = 0; i < 2 && !hit; i++)
+    for (const char *q = txt[i] ? strstr(txt[i], pat) : NULL; q && !hit; q = strstr(q + n, pat))
+      if (q == txt[i] || !(isalnum((unsigned char)q[-1]) || q[-1] == '_')) hit = 1;
+  if (!hit) return NULL;
+  int save = g_tmp;
+  Buf rb = expr_buf(c, recv);
+  g_tmp = save;
+  /* a slot: its name, or a captured variable's cell (`(*_cell_s)`,
+     `(*((_proc_cap_1 *)_cap)->c_s)`). A shared String reads through a call
+     or a comma expression, which nothing can be assigned to. */
+  int slot = rb.p && rb.p[0];
+  for (const char *q = rb.p; slot && *q; q++)
+    if (strchr(",?=\"", *q) || (*q == '(' && q > rb.p && (isalnum((unsigned char)q[-1]) || q[-1] == '_')))
+      slot = 0;
+  Buf sb; memset(&sb, 0, sizeof sb);
+  if (slot) buf_printf(&sb, "%s = _sn%d;", rb.p, tsn);
+  free(rb.p);
+  return sb.p;
+}
+
 /* safe navigation (&.): a nil receiver answers nil, any other the call, guarded by a nil test */
 int emit_call_safe_nav_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv) {
   /* Safe navigation &. : nil receiver -> return nil/0; non-nil -> emit conditional */
@@ -1457,7 +1490,15 @@ int emit_call_safe_nav_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
         else emit_expr(c, recv, b);  /* override table full: degrade to unguarded */
         g_pre = sv_pre;
         b = b_sv;
-        if (!preb.p || !preb.p[0]) {
+        char *back = sn_store_back(c, recv, tsn, vb2.p, preb.p);
+        if ((!preb.p || !preb.p[0]) && back) {
+          int tv = ++g_tmp;
+          buf_printf(b, "(_sn%d.tag == SP_TAG_NIL ? %s : ({ ", tsn, nb.p ? nb.p : "sp_box_nil()");
+          if (sn_ptr) emit_ctype(c, ret2, b);
+          else buf_puts(b, "sp_RbVal");
+          buf_printf(b, " _snv%d = (%s); %s _snv%d; }))", tv, vb2.p ? vb2.p : "", back, tv);
+        }
+        else if (!preb.p || !preb.p[0]) {
           buf_printf(b, "(_sn%d.tag == SP_TAG_NIL ? %s : (%s))",
                      tsn, nb.p ? nb.p : "sp_box_nil()", vb2.p ? vb2.p : "");
         }
@@ -1480,11 +1521,12 @@ int emit_call_safe_nav_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
           buf_puts(g_pre, preb.p);
           emit_indent(g_pre, g_indent);
           buf_printf(g_pre, "  _snr%d = (%s);\n", rsv, vb2.p ? vb2.p : "");
+          if (back) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "  %s\n", back); }
           emit_indent(g_pre, g_indent);
           buf_puts(g_pre, "}\n");
           buf_printf(b, "_snr%d", rsv);
         }
-        free(nb.p); free(vb2.p); free(preb.p);
+        free(nb.p); free(vb2.p); free(preb.p); free(back);
         return 1;
       }
       /* A concretely-typed OBJECT receiver is still a nullable C pointer
@@ -1568,7 +1610,14 @@ int emit_call_safe_nav_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
         }
         else emit_expr(c, recv, &vbs);  /* override table full: degrade to unguarded */
         g_pre = sv_pre2;
-        if (!preb2.p || !preb2.p[0])
+        char *back2 = sn_store_back(c, recv, tsn2, vbs.p, preb2.p);
+        if ((!preb2.p || !preb2.p[0]) && back2) {
+          int tv = ++g_tmp;
+          buf_printf(b, "(%s ? %s : ({ ", nilt, nilv);
+          emit_ctype(c, ret2, b);
+          buf_printf(b, " _snv%d = (%s); %s _snv%d; }))", tv, vbs.p ? vbs.p : "", back2, tv);
+        }
+        else if (!preb2.p || !preb2.p[0])
           buf_printf(b, "(%s ? %s : (%s))", nilt, nilv, vbs.p ? vbs.p : "");
         else {
           int rsv = ++g_tmp;
@@ -1584,11 +1633,12 @@ int emit_call_safe_nav_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
           buf_puts(g_pre, preb2.p);
           emit_indent(g_pre, g_indent);
           buf_printf(g_pre, "  _snr%d = (%s);\n", rsv, vbs.p ? vbs.p : "");
+          if (back2) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "  %s\n", back2); }
           emit_indent(g_pre, g_indent);
           buf_puts(g_pre, "}\n");
           buf_printf(b, "_snr%d", rsv);
         }
-        free(vbs.p); free(preb2.p);
+        free(vbs.p); free(preb2.p); free(back2);
         return 1;
       }
       /* Other concrete receivers -- a by-value struct, a Symbol, an array --
