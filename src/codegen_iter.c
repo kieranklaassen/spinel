@@ -589,6 +589,16 @@ void emit_inline_alias_arg(Compiler *c, int av, Buf *b) {
     buf_printf(b, "; sp_gc_pin_remembered((void *)_cell_%s)", rename_local(avn));
 }
 
+/* The parameters a call site gave no argument for, by the name this
+   expansion gives them: a method that keeps its `...` has one parameter for
+   each key any of its sites passes, and a site that leaves one out binds it
+   nil, which is not the keyword the site did not write. */
+static NameSet g_fwd_left_out;
+static void fwd_left_out_add(int tag, const char *pname) {
+  char rn[128]; snprintf(rn, sizeof rn, "_y%d_%s", tag, pname);
+  nameset_add(&g_fwd_left_out, strdup(rn));
+}
+
 /* Bind an inlined yielding method's parameters from a call's arguments:
    a splat spread at run time, a keyword hash by name, a rest and its posts
    packed, as the ordinary call paths bind them. The expansion's renames
@@ -668,11 +678,17 @@ void emit_inline_bind_params(Compiler *c, Scope *m, int args, const int *argv, i
     /* a declared keyword binds by name, as at a call that spells it out:
        from the forwarder's parameter of that name (it has one for each key
        its sites pass), and where it has none, to the keyword's own default */
-    int fi = i;
-    if (fwd_encl && callee_param_is_declared_kwarg(c, m, m->pnames[i]))
+    int fi = i, is_kw = fwd_encl && callee_param_is_declared_kwarg(c, m, m->pnames[i]);
+    if (is_kw)
       for (fi = 0; fi < fwd_encl->nparams; fi++)
         if (fwd_encl->pnames[fi] && sp_streq(fwd_encl->pnames[fi], m->pnames[i])) break;
-    if (fwd_encl && fi < fwd_encl->nparams) {
+    /* and a key the site left out of the forwarder's own call is not passed
+       on: the keyword takes its default, and a forwarder between the two
+       hands the gap on */
+    int left_out = fwd_encl && fi < fwd_encl->nparams &&
+                   nameset_has(&g_fwd_left_out, rename_local(fwd_encl->pnames[fi]));
+    if (left_out && is_kw) emit_arg_or_default(c, m, i, -1, b);
+    else if (fwd_encl && fi < fwd_encl->nparams) {
       LocalVar *ep = scope_local(fwd_encl, fwd_encl->pnames[fi]);
       LocalVar *mp = scope_local(m, m->pnames[i]);
       TyKind et = ep ? ep->type : TY_POLY;
@@ -680,6 +696,7 @@ void emit_inline_bind_params(Compiler *c, Scope *m, int args, const int *argv, i
       char txt[128]; snprintf(txt, sizeof txt, "lv_%s", rename_local(fwd_encl->pnames[fi]));
       if (mt == TY_POLY && et != TY_POLY) emit_boxed_text(c, et, txt, b);
       else buf_puts(b, txt);
+      if (left_out) fwd_left_out_add(tag, m->pnames[i]);
     }
     else if (gather_tmp >= 0 && L->from[i] == ARG_GATHERED)
       emit_gathered_param(c, m, i, gather_tmp, b);
@@ -718,8 +735,10 @@ void emit_inline_bind_params(Compiler *c, Scope *m, int args, const int *argv, i
          param default when the key is absent). */
       if (kv < 0 && ds_tmp >= 0 && callee_has_kwarg(c, m, m->pnames[i]))
         emit_ds_param_extract(c, m, i, ds_tmp, ds_type, b);
-      else
+      else {
         emit_arg_or_default(c, m, i, kv, b);
+        if (kv < 0 && m->pdefault[i] < 0) fwd_left_out_add(tag, m->pnames[i]);
+      }
     }
     ren_unpark(&park);
     buf_puts(b, ";\n");
