@@ -14361,6 +14361,12 @@ void emit_str_frozen_check(Compiler *c, int recv, Buf *b) {
   buf_puts(b, "if ("); emit_expr(c, recv, b); buf_puts(b, ") sp_str_check_mutable(");
   emit_expr(c, recv, b); buf_puts(b, ");");
 }
+/* Is the group of `s[re, n] = v` named by an Integer literal from 0 to 9? */
+static int re_group_small(Compiler *c, int id) {
+  return nt_kind(c->nt, id) == NK_IntegerNode && !nt_str(c->nt, id, "bigval") &&
+         nt_int(c->nt, id, "value", -1) >= 0 && nt_int(c->nt, id, "value", -1) <= 9;
+}
+
 /* s[/re/, n] = v, once the pattern matched: the span of group _t<tn> in _b
    and _e, in a block this opens. With `tests`, a group the pattern has not and
    a group that took no part in the match raise CRuby's IndexError: past the
@@ -14371,7 +14377,27 @@ void emit_str_frozen_check(Compiler *c, int recv, Buf *b) {
    counted back from the last group, a group past the ninth; _g is the group
    it names, and it took part in the match) keeps the frozen test ahead of
    its IndexError. */
-static void emit_re_group_span(Buf *b, int tn, int tests, int fz) {
+static void emit_re_group_span(Buf *b, int tn, int tests, int fz, int small) {
+  if (!small) {
+    /* any number but a literal from 0 to 9: a negative one counts back from
+       the last group, as CRuby counts it, and names the group in the
+       "not matched" message by the number it came to */
+    buf_printf(b, " sp_int _g = _t%d < 0 ? _t%d + sp_re_last_ncap : _t%d;", tn, tn, tn);
+    buf_printf(b, " if (_g < 0 || _g > 9 || (_t%d < 0 && _g == 0)", tn);
+    if (tests) buf_puts(b, " || _g >= sp_re_last_ncap");
+    buf_puts(b, ")");
+    if (fz)
+      buf_printf(b, " { if (_g > 0 && _g < sp_re_last_ncap && (_g > 15 || sp_re_caps[2 * _g] >= 0))"
+                    " sp_str_check_mutable(_t%d);", fz);
+    buf_printf(b, " sp_raise_cls(\"IndexError\", sp_sprintf(\"index %%lld out of regexp\","
+                  " (long long)_t%d));", tn);
+    if (fz) buf_puts(b, " }");
+    buf_puts(b, " { sp_int _b = sp_re_caps[2 * _g], _e = sp_re_caps[2 * _g + 1]; ");
+    if (tests)
+      buf_puts(b, "if (_b < 0) sp_raise_cls(\"IndexError\","
+                  " sp_sprintf(\"regexp group %lld not matched\", (long long)_g)); ");
+    return;
+  }
   buf_printf(b, " if (_t%d < 0 || _t%d > 9", tn, tn);
   if (tests) buf_printf(b, " || _t%d >= sp_re_last_ncap", tn);
   buf_puts(b, ")");
@@ -14653,7 +14679,7 @@ static int str_mutate_reassign_arms(Compiler *c, Buf *b, int indent, const NodeT
       buf_printf(b, "; if (sp_re_match(sp_re_pat_%d, _t%d) < 0)"
                     " sp_raise_cls(\"IndexError\", \"regexp not matched\");",
                  re_lit_index(c, argv[0]), ts);
-      emit_re_group_span(b, tn, 1, ts);
+      emit_re_group_span(b, tn, 1, ts, re_group_small(c, argv[1]));
       if (node_may_be_null_nil(c, argv[2]))
         buf_printf(b, "if (!_t%d) sp_raise_cls(\"TypeError\","
                       " \"no implicit conversion of nil into String\"); ", tv);
@@ -14678,8 +14704,11 @@ static int str_mutate_reassign_arms(Compiler *c, Buf *b, int indent, const NodeT
          ahead only of a value that has nothing to run: any other raises its
          own error first, as in CRuby */
       NodeKind vk = nt_kind(nt, argv[2]);
-      emit_re_group_span(b, tn, vk != NK_CallNode && vk != NK_ParenthesesNode &&
-                                vk != NK_StatementsNode && subtree_is_pure_read(c, argv[2]), 0);
+      int tests = vk != NK_CallNode && vk != NK_ParenthesesNode &&
+                  vk != NK_StatementsNode && subtree_is_pure_read(c, argv[2]);
+      /* untested, the number stays held to nine as it was: a negative one
+         may come to a group that took no part */
+      emit_re_group_span(b, tn, tests, 0, !tests || re_group_small(c, argv[1]));
       /* the head and the value are held while the tail is cut: the joined
          head and value were in flight when the tail allocated, and a
          collection there freed them */
