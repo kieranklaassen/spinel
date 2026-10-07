@@ -1844,6 +1844,7 @@ gc-phases-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
 # other half of the contract: programs that root what they use answer the same
 # at level 2, alone and beside the full verifier, on both runtimes.
 GC_STRESS_TESTS := test/gc_root_frame_slots.rb \
+                   test/method_block_arg_made_in_place.rb \
                    test/gc_minor_byref_lent_slot.rb \
                    test/struct_values_fresh_receiver_root.rb \
                    test/hash_splat_to_a.rb \

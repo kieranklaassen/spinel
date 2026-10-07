@@ -31,6 +31,23 @@ int resolve_forwarded_block(Compiler *c, int block) {
   return forwards_param ? g_block_id : block;
 }
 
+/* sp_poly_to_block over the boxed value of `fe`. A Method converts by
+   allocating its Proc, and one made where it is handed over
+   (`&o.method(:val)`) is held by nothing else meanwhile: in a program that
+   builds Method objects, a value that is not read from a variable is rooted
+   across the conversion, as the Method arm below roots its own. A read is
+   held where it lives. */
+void emit_poly_to_block(Compiler *c, int fe, Buf *b) {
+  if (!an_program_builds_methods(c) || !arg_wants_root(c, TY_POLY, fe)) {
+    buf_puts(b, "sp_poly_to_block("); emit_boxed(c, fe, b); buf_puts(b, ")");
+    return;
+  }
+  int tv = ++g_tmp;
+  buf_printf(b, "({ sp_RbVal _t%d = ", tv);
+  emit_boxed(c, fe, b);
+  buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); sp_poly_to_block(_t%d); })", tv, tv);
+}
+
 /* The value of a `&expr` block argument as the sp_Proc * a `&blk`
    parameter takes: a Proc as itself, a boxed value through
    sp_poly_to_block (nil is no block), a Method through its trampoline
@@ -42,10 +59,7 @@ int emit_block_arg_proc(Compiler *c, int fe, Buf *b) {
   Repr fr = repr_of(c, fe);
   TyKind t = fr.as_ty;
   if (t == TY_PROC) { emit_expr(c, fe, b); return 1; }
-  if (fr.kind == RK_BOXED) {
-    buf_puts(b, "sp_poly_to_block("); emit_boxed(c, fe, b); buf_puts(b, ")");
-    return 1;
-  }
+  if (fr.kind == RK_BOXED) { emit_poly_to_block(c, fe, b); return 1; }
   if (t == TY_METHOD) {
     /* rooted across the proc's allocation, as Method#to_proc roots it */
     int tp = ++g_tmp;
