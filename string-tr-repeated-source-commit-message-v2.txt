@@ -1,0 +1,57 @@
+String#tr translates a repeated source character by its last position
+
+p "hello".tr("ll", "xy") printed "hexxo"; CRuby prints "heyyo". CRuby
+fills its translation table left to right, so a character the source set
+names more than once (twice in the text, or in a range and beside it:
+"hello".tr("a-yl", "b-zX") is "ifXXp") is translated by its last
+position. sp_str_tr and sp_str_tr_s stop at the first match.
+
+Scanning the set from its end would cost the calls that are right today
+(tr("a-z", "A-Z") on English text: 30% more instructions), so the scan
+stays and the sets are looked at instead. A literal set is read at
+compile time, as the runtime reads it (str_tr_sets: escapes, ranges,
+characters of more than one byte):
+
+- No character twice, a negated set, or a repeat whose positions have
+  the same replacement ("ll" to "xx", "a-za-z" to "A-ZA-Z", any set
+  with an empty replacement): the first position answers as the last
+  would, and the call and its C are what they were.
+- A repeat that matters, beside a literal replacement: the replacement
+  is written out with each position of a repeated character given the
+  replacement of its last. "hello".tr("ll", "xy") compiles to
+  sp_str_tr(s, "ll", "y"); nothing is added at run time.
+- Every other call (a set the program computes, or a literal set that
+  repeats beside a computed replacement) goes through sp_str_tr_any /
+  sp_str_tr_s_any: they read the set once, in place, and only when a
+  character does repeat they hand sp_str_tr the two sets rewritten
+  without its earlier positions.
+
+tr! and tr_s! answer nil when the text comes out the same, which their
+callers ask by comparing the texts. s.tr!("hh", "Hh") answered the
+receiver, as CRuby does once a character was in the set, only because
+the first match changed the text. So where a call is rewritten the test
+asks as well whether such a character was there: for literal sets the
+members that are their own replacement are looked for in the receiver
+(none: nothing is added), and sp_str_tr_any says it in
+sp_str_tr_matched.
+
+Cost: only a call of the third kind pays, for the reading of its set,
+once a call and nothing a character: 136 instructions for a set of one
+member to 586 for "a-zA-Z" with gcc, 131 to 580 with clang. A set of
+characters past ASCII that do not ascend has its runs compared as well:
+630 for the full-width "０-９ａ-ｚＡ-Ｚ". A computed set that does repeat
+is rewritten: 1,630 more for "ll" with gcc, 1,557 with clang. A tr!
+with a literal set like "hh" to "Hh" pays for the look in the receiver
+when the text comes out the same: 149 with gcc, 150 with clang.
+
+The functions are in lib/sp_string.c because lib/sp_str.c sits at gcc's
+inline limit, where one more call changes how sp_str_concat3 is
+compiled; lib/sp_str.c is untouched.
+
+Not changed: where the call is what it was, tr! answers nil when the
+text comes out the same (s.tr!("a", "a")), where CRuby answers the
+receiver once a character was in the set.
+
+Test: test/string_tr_repeated_source.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
