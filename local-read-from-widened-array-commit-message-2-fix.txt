@@ -1,0 +1,44 @@
+A local read out of a widened Array holds the element itself
+
+A local Array that a later store gives another kind of element is
+made the general Array by the container fold, which runs after the
+scan that types each local from its writes. The scan typed a local
+read out of the Array from the Array as first written, every round,
+so the boxed element was narrowed into that local:
+
+    t = [1, 2]
+    t << "s"
+    r = t.last
+    p r          # 0; CRuby "s"
+
+An Integer read out of what began as a String array came out as "1",
+a String out of a Float array raised ArgumentError (invalid value
+for Float(): "s"), and `a, b, c = t` printed a pointer for c.
+
+infer_write_types now marks the plain locals that hold a typed Array
+before the fold and looks at them after it. If the fold widened any,
+the other plain locals go back to UNKNOWN and the scan runs again in
+the same round with those locals held as the general Array, so what
+is read out of them, and what is made of that, is typed from the
+Array as it is. A local that a parameter's store widened
+(poly_array_pin) is written as the general Array by the scan too.
+Nothing is kept across rounds: each round's first scan and fold are
+the ones they were, with all the fold does where it widens a local
+(an ivar the local stands for is widened there).
+
+infer_write_reads_widened does not reach this: it runs before the
+fold, when the Array is still typed. Running it after the fold is
+not enough either: it types `k = t[0]` again but not `h = { k => 1 }`,
+which then held a boxed key in a String-keyed slot and was refused.
+Its list is used for what it does carry. As the fold widens a local
+Array, the writes that read that local are typed again at once
+(reads_widened_carry), so a read stored into another Array further
+on (`r = t.last; t2 << r`) widens that one in the same pass. Without
+it a chain of such Arrays took one scan a link, every round.
+
+A program in which the fold widens no typed local Array runs the
+scan once and compiles to the same C.
+
+Test: test/local_read_from_widened_array.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

@@ -1,0 +1,14 @@
+infer_write_reads_widened builds its list and drains it in two steps
+
+The pass lists each write under the local it reads and types again
+the ones whose local is held boxed. The two are now separate
+(reads_widened_build, reads_widened_drain, reads_widened_free), with
+the list in a struct, so that the commit above can keep one list for
+the length of the container fold and queue the reads of a local as
+the fold widens it.
+
+infer_write_reads_widened calls the three in order: the same work in
+the same order. The generated C of every program of the corpus is
+unchanged (tools/cident.sh).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
