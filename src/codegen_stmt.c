@@ -7207,6 +7207,30 @@ static void emit_for_multi_scalar(Compiler *c, int idx, TyKind et, const char *e
   emit_for_poly_lefts(c, idx, tv, indent, b);
 }
 
+/* Does the Array a `for` walks need its temp rooted? The Array a call
+   answers (`for w in words(n)`, `for l in text.lines`, `for w in a + b`) is
+   held by that temp alone while the body allocates. A variable holds its
+   Array itself, unless the body can give it another (read_rebound_by:
+   `for w in ws; ws = [w]`, `for w in @ws; @ws = nil`). */
+static int for_walk_wants_root(Compiler *c, int coll, int body) {
+  switch (nt_kind(c->nt, coll)) {
+    case NK_ConstantReadNode: case NK_ConstantPathNode: return 0;
+    case NK_LocalVariableReadNode: case NK_InstanceVariableReadNode:
+    case NK_GlobalVariableReadNode: case NK_ClassVariableReadNode:
+      return read_rebound_by(c, coll, body);
+    default: return 1;
+  }
+}
+
+/* The root is a second slot. SP_GC_ROOT takes its slot's address, and C
+   reloads a temp whose address is out after every call in the body; the walk
+   keeps reading _t<ta>, which stays in a register. */
+static void emit_for_walk_root(const char *k, int ta, int want, int indent, Buf *b) {
+  if (!want) return;
+  emit_indent(b, indent);
+  buf_printf(b, "sp_%sArray *_fr%d = _t%d; SP_GC_ROOT(_fr%d);\n", k ? k : "Poly", ta, ta, ta);
+}
+
 void emit_for(Compiler *c, int id, Buf *b, int indent) {
   const NodeTable *nt = c->nt;
   int idx = nt_ref(nt, id, "index");
@@ -7353,12 +7377,14 @@ void emit_for(Compiler *c, int id, Buf *b, int indent) {
   if (ty_is_array(ct) || ct == TY_POLY_ARRAY) {
     const char *k = array_kind(ct);
     int ta = ++g_tmp, ti = ++g_tmp;
+    int walk_root = for_walk_wants_root(c, coll, body);
     /* Multi-variable for: `for a, b in coll` -- each element is an inner array. */
     const char *idx_ty = nt_type(nt, idx);
     if (idx_ty && sp_streq(idx_ty, "MultiTargetNode")) {
       int tv = ++g_tmp;
       emit_indent(b, indent);
       buf_printf(b, "{ sp_%sArray *_t%d = ", k ? k : "Poly", ta); emit_expr(c, coll, b); buf_puts(b, ";\n");
+      emit_for_walk_root(k, ta, walk_root, indent + 1, b);
       emit_indent(b, indent + 1);
       buf_printf(b, "for (sp_int _t%d = 0; _t%d < sp_%sArray_length(_t%d); _t%d++) {\n",
                  ti, ti, k ? k : "Poly", ta, ti);
@@ -7377,6 +7403,7 @@ void emit_for(Compiler *c, int id, Buf *b, int indent) {
     }
     emit_indent(b, indent);
     buf_printf(b, "{ sp_%sArray *_t%d = ", k ? k : "Poly", ta); emit_expr(c, coll, b); buf_puts(b, ";\n");
+    emit_for_walk_root(k, ta, walk_root, indent + 1, b);
     emit_indent(b, indent + 1);
     buf_printf(b, "for (sp_int _t%d = 0; _t%d < sp_%sArray_length(_t%d); _t%d++) {\n",
                ti, ti, k ? k : "Poly", ta, ti);
