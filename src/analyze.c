@@ -17022,11 +17022,29 @@ static int promote_local_alias_pair(Compiler *c, Scope *ws, const char *srcn, co
   return changed;
 }
 
-/* Does the block of `itn` over `recv` bind the VALUE of a Hash local or a
-   Hash literal? It does for
+/* Has the block of `itn` over `recv` the shape that binds a Hash's VALUE?
+   It has for
    `h.each_value { |v| }`, `h.each { |k, v| }` / `each_pair`, and an element
    iterator over `h.values`. Answers the Hash's read in *hrecv and the
    value's parameter position in *vi. */
+static int an_value_block_shape(const NodeTable *nt, const char *itn, int recv, int *hrecv, int *vi) {
+  if (recv < 0) return 0;
+  /* `h.values.each { |v| }`: the Array `values` answers holds those Strings,
+     as do `values_at` and `fetch_values` */
+  const char *rn = nt_kind(nt, recv) == NK_CallNode ? nt_str(nt, recv, "name") : NULL;
+  if (rn && ((sp_streq(rn, "values") && nt_ref(nt, recv, "arguments") < 0) ||
+             sp_streq(rn, "values_at") || sp_streq(rn, "fetch_values")) &&
+      nt_ref(nt, recv, "block") < 0) {
+    if (!strbuf_elem_first_iterator(itn)) return 0;
+    recv = nt_ref(nt, recv, "receiver");
+    *vi = 0;
+  }
+  else if (sp_streq(itn, "each_value")) *vi = 0;
+  else if (is_each_or_pair(itn)) *vi = 1;
+  else return 0;
+  *hrecv = recv;
+  return recv >= 0;
+}
 /* Each String stored into container hr (a Hash or Array literal, or a
    local's stores) that an appending block reaches: refused with msg at the
    store (at `site` when one is given), unless --share-strings leaves the
@@ -17079,28 +17097,25 @@ static void an_hash_store_routes(Compiler *c, int hr, int site, int blk, const c
   free(stores);
 }
 
+/* Does it bind the value of a Hash local or a Hash literal, whose stores the
+   block's own scope lists? */
 static int an_hash_value_block(Compiler *c, const char *itn, int recv, int *hrecv, int *vi) {
   const NodeTable *nt = c->nt;
-  if (recv < 0) return 0;
-  /* `h.values.each { |v| }`: the Array `values` answers holds those Strings,
-     as do `values_at` and `fetch_values` */
-  const char *rn = nt_kind(nt, recv) == NK_CallNode ? nt_str(nt, recv, "name") : NULL;
-  if (rn && ((sp_streq(rn, "values") && nt_ref(nt, recv, "arguments") < 0) ||
-             sp_streq(rn, "values_at") || sp_streq(rn, "fetch_values")) &&
-      nt_ref(nt, recv, "block") < 0) {
-    if (!strbuf_elem_first_iterator(itn)) return 0;
-    recv = nt_ref(nt, recv, "receiver");
-    *vi = 0;
-  }
-  else if (sp_streq(itn, "each_value")) *vi = 0;
-  else if (is_each_or_pair(itn)) *vi = 1;
-  else return 0;
-  if (recv < 0 || (nt_kind(nt, recv) != NK_LocalVariableReadNode && nt_kind(nt, recv) != NK_HashNode) ||
-      !ty_is_hash(infer_type(c, recv)))
-    return 0;
-  *hrecv = recv;
-  return 1;
+  if (!an_value_block_shape(nt, itn, recv, hrecv, vi)) return 0;
+  recv = *hrecv;
+  return (nt_kind(nt, recv) == NK_LocalVariableReadNode || nt_kind(nt, recv) == NK_HashNode) &&
+         ty_is_hash(infer_type(c, recv));
 }
+/* Does the block append to its parameter `vp`, in place or through a method
+   it hands it to? */
+static int an_value_block_appends(Compiler *c, int blk, const char *vp) {
+  return strbuf_mut_kind(c, vp, comp_scope_of(c, blk)) == 1 || cap_wrap_mutates_param(c, blk, vp) ||
+         an_subtree_hands_to_appender(c, nt_ref(c->nt, blk, "body"), vp, 0);
+}
+static const char an_hash_value_block_refusal[] =
+    "a String stored in a Hash is passed to an appending value block: "
+    "a String is not yet shared by reference through a Hash's values. "
+    "Append to the String before storing it in the Hash.";
 
 /* A chained value iterator over a fresh Hash literal is harmless when its
    only Hash read is the iterator receiver itself: no code can observe the
@@ -18093,13 +18108,8 @@ static int promote_shared_stored_strings(Compiler *c) {
       int hr, vi;
       if (an_hash_value_block(c, itn, recv4, &hr, &vi)) {
         const char *vp = block_param_name(c, blk4, vi);
-        Scope *vs = vp ? comp_scope_of(c, blk4) : NULL;
-        if (!vp || (strbuf_mut_kind(c, vp, vs) != 1 && !cap_wrap_mutates_param(c, blk4, vp) &&
-            !an_subtree_hands_to_appender(c, nt_ref(nt, blk4, "body"), vp, 0))) continue;
-        an_hash_store_routes(c, hr, -1, blk4, vp,
-            "a String stored in a Hash is passed to an appending value block: "
-            "a String is not yet shared by reference through a Hash's values. "
-            "Append to the String before storing it in the Hash.");
+        if (!vp || !an_value_block_appends(c, blk4, vp)) continue;
+        an_hash_store_routes(c, hr, -1, blk4, vp, an_hash_value_block_refusal);
         continue;
       }
       if (!strbuf_elem_first_iterator(itn)) continue;
@@ -31662,6 +31672,651 @@ static void refuse_string_alias_copies(Compiler *c) {
   free(order.after_all);
 }
 
+/* The stores an appending Hash value block cannot see from its own scope.
+   The refusal of #7004 and #7034 (promote_shared_stored_strings) lists what
+   the block's scope stores into a Hash local. A Hash a method it was handed
+   to fills, a parameter, a method's answer, an instance variable's or a
+   global's, a default block's or `to_h`'s has its stores somewhere else, and
+   the block appended to a copy with nothing said. The walk below follows the
+   Hash to those stores, and the same refusal covers them. */
+
+/* What is stored into one Hash, in the words of the scope that holds it: a
+   store of a String that is no literal, the parameters a store stores, and
+   the parameters that are the Hash itself. A call turns the parameters into
+   its own arguments, so `fill(h, :a, "lit")` stores a literal, and a holder
+   is listed once however many calls and value blocks reach it. */
+typedef struct {
+  int fresh;                  /* such a store, or -1 */
+  int pstore;                 /* a store of a parameter, or -1 */
+  unsigned long long vals;    /* the parameters stored, by position */
+  unsigned long long typed;   /* those of them read as a String */
+  unsigned long long hashes;  /* the parameters that are the Hash */
+} HvSum;
+static const HvSum hv_none = { -1, -1, 0, 0, 0 };
+/* What has been worked out, by holder: a local's stores, an instance
+   variable's or a global's, a method's answer, what the callers pass a
+   parameter, a local that holds a literal, a class self is of in a method,
+   a name a class's methods call on self, the method a call goes to.
+   A method's entry is one per class its self is of (`self`, -1 the method's
+   own): a call on self goes to that class's method. `pass` is the walk of
+   one value block that last worked the entry out, -1 once it is settled. */
+enum { HV_LOCAL, HV_VAR_STORE, HV_ANSWER, HV_PASSED_LOST, HV_PASSED_STORE, HV_LITERAL, HV_SELF, HV_CALLED, HV_GOES, HV_SELF_GOES };
+enum { HV_DEPTH = 64, HV_PASSES = 6, HV_SELVES = 64 };
+typedef struct { int kind, owner; const char *name; int self, pass, busy; HvSum s; } HvMemo;
+static HvMemo *hv_memo;
+static int *hv_slot, *hv_open;
+static int hv_nmemo, hv_slot_cap, hv_nopen, hv_open_cap;
+static int hv_pass, hv_cut, hv_grew;
+static unsigned hv_hash(int kind, int owner, const char *name, int self) {
+  unsigned h = (2166136261u ^ (unsigned)kind) * 16777619u;
+  h = (h ^ (unsigned)owner) * 16777619u;
+  h = (h ^ (unsigned)self) * 16777619u;
+  for (const char *p = name; *p; p++) h = (h ^ (unsigned char)*p) * 16777619u;
+  return h;
+}
+/* The entry of (kind, owner, name, self), made if it is new; -1 out of
+   memory. */
+static int hv_memo_at(int kind, int owner, const char *name, int self) {
+  if (!name) name = "";
+  if ((hv_nmemo + 1) * 2 > hv_slot_cap) {
+    int ncap = hv_slot_cap ? hv_slot_cap * 2 : 256;
+    HvMemo *nm = (HvMemo *)realloc(hv_memo, sizeof *nm * (size_t)(ncap / 2));
+    if (!nm) return -1;
+    hv_memo = nm;
+    int *ns = (int *)realloc(hv_slot, sizeof *ns * (size_t)ncap);
+    if (!ns) return -1;
+    hv_slot = ns; hv_slot_cap = ncap;
+    for (int i = 0; i < ncap; i++) hv_slot[i] = -1;
+    for (int k = 0; k < hv_nmemo; k++) {
+      unsigned i = hv_hash(hv_memo[k].kind, hv_memo[k].owner, hv_memo[k].name, hv_memo[k].self) & (unsigned)(ncap - 1);
+      while (hv_slot[i] >= 0) i = (i + 1) & (unsigned)(ncap - 1);
+      hv_slot[i] = k;
+    }
+  }
+  unsigned i = hv_hash(kind, owner, name, self) & (unsigned)(hv_slot_cap - 1);
+  for (; hv_slot[i] >= 0; i = (i + 1) & (unsigned)(hv_slot_cap - 1)) {
+    const HvMemo *m = &hv_memo[hv_slot[i]];
+    if (m->kind == kind && m->owner == owner && m->self == self && strcmp(m->name, name) == 0) return hv_slot[i];
+  }
+  hv_slot[i] = hv_nmemo;
+  hv_memo[hv_nmemo] = (HvMemo){ kind, owner, name, self, 0, 0, hv_none };
+  return hv_nmemo++;
+}
+/* Is entry `e` to be worked out now? One met while it is being worked out
+   closes a cycle of methods: what it holds so far is taken, and the block's
+   walk runs once more. */
+static int hv_begin(int e, int depth) {
+  HvMemo *m = &hv_memo[e];
+  if (m->busy) { hv_cut = 1; return 0; }
+  if (m->pass < 0 || m->pass == hv_pass || depth > HV_DEPTH) return 0;
+  if (m->pass == 0) {
+    if (hv_nopen == hv_open_cap) {
+      int ncap = hv_open_cap ? hv_open_cap * 2 : 64;
+      int *nv = (int *)realloc(hv_open, sizeof *nv * (size_t)ncap);
+      if (!nv) return 0;
+      hv_open = nv; hv_open_cap = ncap;
+    }
+    hv_open[hv_nopen++] = e;
+  }
+  m->pass = hv_pass; m->busy = 1;
+  return 1;
+}
+static void hv_put(int e, const HvSum *s) {
+  HvSum *o = &hv_memo[e].s;
+  if (o->fresh != s->fresh || o->pstore != s->pstore || o->vals != s->vals || o->typed != s->typed ||
+      o->hashes != s->hashes) hv_grew = 1;
+  *o = *s;
+}
+static void hv_end(int e, const HvSum *s) { hv_put(e, s); hv_memo[e].busy = 0; }
+/* The value `h[k] = v` or `h.store(k, v)` stores, or -1. */
+static int hv_call_stored(const NodeTable *nt, int call) {
+  const char *nm = nt_str(nt, call, "name");
+  int a = nt_ref(nt, call, "arguments"), an = 0;
+  const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
+  if (nm && sp_streq(nm, "[]=") && an >= 2) return av[an - 1];
+  return nm && sp_streq(nm, "store") && an == 2 ? av[1] : -1;
+}
+/* What the walk asks for by holder, listed once and sorted: the writes and
+   stores of an instance variable (owner its class) or a global (owner -1),
+   the calls a scope hands a local to, a scope's returns, a local assigned
+   as a target. Asking every call for each value block would grow with the
+   square of the program. */
+enum { HV_VAR, HV_HANDED, HV_RETURN, HV_TARGET };
+typedef struct { int grp, owner; const char *name; int node; } HvSite;
+static HvSite *hv_sites;
+static int hv_nsites, hv_sites_cap;
+static HandleArgTab hv_callers;   /* a method's call sites, made when first asked for */
+static int hv_callers_made;
+static int *hv_answers;           /* by class: it defines a method an ancestor calls on self */
+static int *hv_nselves;           /* by method: the classes its self has been of */
+/* The class self is of in method `m` when nothing says more: the method's
+   own. -1 in a class method and outside a class. */
+static int hv_own_class(const Scope *m) { return m && m->class_id >= 0 && !m->is_cmethod ? m->class_id : -1; }
+static void hv_site_add(int grp, int owner, const char *name, int node) {
+  if (!name) return;
+  if (hv_nsites == hv_sites_cap) {
+    int ncap = hv_sites_cap ? hv_sites_cap * 2 : 64;
+    HvSite *nv = (HvSite *)realloc(hv_sites, sizeof *nv * (size_t)ncap);
+    if (!nv) return;
+    hv_sites = nv; hv_sites_cap = ncap;
+  }
+  hv_sites[hv_nsites++] = (HvSite){ grp, owner, name, node };
+}
+static int hv_site_cmp(const void *a, const void *b) {
+  const HvSite *x = (const HvSite *)a, *y = (const HvSite *)b;
+  if (x->grp != y->grp) return x->grp - y->grp;
+  if (x->owner != y->owner) return x->owner < y->owner ? -1 : 1;
+  int d = strcmp(x->name, y->name);
+  return d ? d : x->node - y->node;
+}
+/* The first site of (grp, owner, name) and whether site `i` is one of them. */
+static int hv_site_first(int grp, int owner, const char *name) {
+  HvSite key = { grp, owner, name, -1 };
+  int lo = 0, hi = hv_nsites;
+  while (lo < hi) {
+    int mid = lo + (hi - lo) / 2;
+    if (hv_site_cmp(&hv_sites[mid], &key) < 0) lo = mid + 1; else hi = mid;
+  }
+  return lo;
+}
+static int hv_site_is(int i, int grp, int owner, const char *name) {
+  return i < hv_nsites && hv_sites[i].grp == grp && hv_sites[i].owner == owner &&
+         strcmp(hv_sites[i].name, name) == 0;
+}
+/* Variable read or write `at` as a site of `node`. */
+static void hv_site_var(Compiler *c, int at, int node) {
+  NodeKind k = nt_kind(c->nt, at);
+  const char *vn = nt_str(c->nt, at, "name");
+  if (!vn) return;
+  if (k == NK_GlobalVariableReadNode || k == NK_GlobalVariableWriteNode)
+    hv_site_add(HV_VAR, -1, comp_resolve_gvar(c, vn + 1), node);
+  else if (comp_ivar_owner(c, at) >= 0)
+    hv_site_add(HV_VAR, comp_ivar_owner(c, at), vn, node);
+}
+static void hv_list_sites(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  hv_answers = (int *)calloc((size_t)c->nclasses + 1, sizeof *hv_answers);
+  hv_nselves = (int *)calloc((size_t)c->nscopes + 1, sizeof *hv_nselves);
+  for (int u = 0; u < nt->count; u++) {
+    NodeKind k = nt_kind(nt, u);
+    Scope *us;
+    if (k == NK_InstanceVariableWriteNode || k == NK_GlobalVariableWriteNode) hv_site_var(c, u, u);
+    else if (k == NK_ReturnNode && (us = comp_scope_of(c, u)) != NULL)
+      hv_site_add(HV_RETURN, (int)(us - c->scopes), "", u);
+    else if (k == NK_LocalVariableTargetNode && (us = comp_scope_of(c, u)) != NULL)
+      hv_site_add(HV_TARGET, (int)(us - c->scopes), nt_str(nt, u, "name"), u);
+    if (k != NK_CallNode) continue;
+    int r = nt_ref(nt, u, "receiver"), a = nt_ref(nt, u, "arguments"), an = 0;
+    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
+    /* a name called on self, by the class of the method that calls it */
+    int uc = r < 0 || nt_kind(nt, r) == NK_SelfNode ? hv_own_class(comp_scope_of(c, u)) : -1;
+    int ue = uc >= 0 && nt_str(nt, u, "name") ? hv_memo_at(HV_CALLED, uc, nt_str(nt, u, "name"), -1) : -1;
+    if (ue >= 0) hv_memo[ue].pass = -1;
+    if (r >= 0 && hv_call_stored(nt, u) >= 0 &&
+        (nt_kind(nt, r) == NK_InstanceVariableReadNode || nt_kind(nt, r) == NK_GlobalVariableReadNode))
+      hv_site_var(c, r, u);
+    for (int j = 0; j < an; j++)
+      if (nt_kind(nt, av[j]) == NK_LocalVariableReadNode && (us = comp_scope_of(c, av[j])) != NULL)
+        hv_site_add(HV_HANDED, (int)(us - c->scopes), nt_str(nt, av[j], "name"), u);
+  }
+  if (hv_nsites > 1) qsort(hv_sites, (size_t)hv_nsites, sizeof *hv_sites, hv_site_cmp);
+  /* a call that hands one local twice is one site */
+  int n = 0;
+  for (int i = 0; i < hv_nsites; i++)
+    if (n == 0 || hv_site_cmp(&hv_sites[n - 1], &hv_sites[i]) != 0) hv_sites[n++] = hv_sites[i];
+  hv_nsites = n;
+  for (int m = 0; hv_answers && m < c->nscopes; m++) {
+    const Scope *ms = &c->scopes[m];
+    int cid = hv_own_class(ms), e;
+    if (cid < 0 || !ms->name) continue;
+    for (int up = c->classes[cid].parent; up >= 0 && !hv_answers[cid]; up = c->classes[up].parent)
+      if ((e = hv_memo_at(HV_CALLED, up, ms->name, -1)) >= 0 && hv_memo[e].pass < 0) hv_answers[cid] = 1;
+  }
+}
+static int hv_caller_first(Compiler *c, Scope *m) {
+  if (!hv_callers_made) { handle_arg_tab_init(c, &hv_callers); hv_callers_made = 1; }
+  return hv_callers.ok ? hv_callers.head[m - c->scopes] : -1;
+}
+/* Is local `vn` assigned in its scope `vs`? A parameter that is holds what
+   was assigned, not what was passed. `h ||= {}` (unless `or_too`) keeps a
+   Hash that was passed. */
+static int hv_assigned(Compiler *c, Scope *vs, const char *vn, int or_too) {
+  int si = (int)(vs - c->scopes);
+  for (int w = comp_lvw_first_sc(c, si, vn); w >= 0; w = comp_lvw_next_sc(c, w)) {
+    const char *wn = nt_str(c->nt, w, "name");
+    if (wn && sp_streq(wn, vn) && comp_scope_of(c, w) == vs &&
+        (or_too || nt_kind(c->nt, w) != NK_LocalVariableOrWriteNode)) return 1;
+  }
+  return hv_site_is(hv_site_first(HV_TARGET, si, vn), HV_TARGET, si, vn);
+}
+/* The position of local `vn` among its method's parameters when nothing in
+   the method assigns it, else -1. */
+static int hv_param_as_passed(Compiler *c, Scope *vs, const char *vn, int or_too) {
+  LocalVar *lv = scope_local(vs, vn);
+  if (!lv || !lv->is_param || lv->is_block_param || hv_assigned(c, vs, vn, or_too)) return -1;
+  return an_param_idx(vs, vn);
+}
+/* Is every write of local `vn` a String literal? It then holds a frozen
+   one, as the literal itself does. */
+static int hv_local_holds_literal(Compiler *c, Scope *vs, const char *vn) {
+  const NodeTable *nt = c->nt;
+  LocalVar *lv = scope_local(vs, vn);
+  int n = 0, e;
+  if (!lv || lv->is_param || lv->is_block_param) return 0;
+  e = hv_memo_at(HV_LITERAL, (int)(vs - c->scopes), vn, -1);
+  if (e >= 0 && hv_memo[e].pass < 0) return hv_memo[e].s.fresh;
+  for (int w = comp_lvw_first_sc(c, (int)(vs - c->scopes), vn); w >= 0; w = comp_lvw_next_sc(c, w)) {
+    const char *wn = nt_str(nt, w, "name");
+    if (!wn || !sp_streq(wn, vn) || comp_scope_of(c, w) != vs) continue;
+    int wv = nt_kind(nt, w) == NK_LocalVariableWriteNode ? an_unparen(nt, nt_ref(nt, w, "value")) : -1;
+    if (wv < 0 || nt_kind(nt, wv) != NK_StringNode) { n = 0; break; }
+    n++;
+  }
+  if (e >= 0) { hv_memo[e].s.fresh = n > 0; hv_memo[e].pass = -1; }
+  return n > 0;
+}
+/* Stored value `v`, added to what store `at` stores. As in view: a String
+   that is no literal (a frozen literal raises FrozenError on this route).
+   A parameter nothing assigns stands for what is passed. */
+static void hv_value(Compiler *c, int v, int at, HvSum *s) {
+  const NodeTable *nt = c->nt;
+  int j = -1;
+  if (v < 0) return;
+  if (nt_kind(nt, v) == NK_LocalVariableReadNode) {
+    const char *vn = nt_str(nt, v, "name");
+    Scope *vs = vn ? comp_scope_of(c, v) : NULL;
+    if (vs && hv_local_holds_literal(c, vs, vn)) return;
+    if (vs && (j = hv_param_as_passed(c, vs, vn, 1)) >= 64) return;
+  }
+  TyKind t = infer_type(c, v);
+  int str = t == TY_STRING || t == TY_STRBUF;
+  if (j >= 0) {
+    s->vals |= 1ULL << j;
+    if (str) s->typed |= 1ULL << j;
+    if (s->pstore < 0) s->pstore = at;
+  }
+  else if (str && nt_kind(nt, v) != NK_StringNode && s->fresh < 0) s->fresh = at;
+}
+/* Can call `u` reach a method of the program: a bare call, or one on self,
+   on a class or on an object? Any other receiver answers a builtin of the
+   name, whatever method the program defines under it. */
+static int hv_user_call(Compiler *c, int u) {
+  int r = nt_ref(c->nt, u, "receiver");
+  NodeKind rk = r >= 0 ? nt_kind(c->nt, r) : NK_SelfNode;
+  return rk == NK_SelfNode || rk == NK_ConstantReadNode || rk == NK_ConstantPathNode ||
+         ty_is_object(infer_type(c, r));
+}
+/* Self in method `m` run on an object of class `k`. A class that defines
+   nothing its ancestors call on self answers those calls as its parent does,
+   and is walked as its parent. */
+static int hv_self_class(Compiler *c, int k, const Scope *m) {
+  int own = hv_own_class(m);
+  if (own < 0 || k < 0 || k == own || !hv_answers || !cr_class_is_ancestor(c, own, k)) return own;
+  while (k != own && !hv_answers[k]) k = c->classes[k].parent;
+  return k;
+}
+/* May method `mi` be walked with self of class `k`? Its own class and
+   HV_SELVES more: the walk stays in line with the program. */
+static int hv_self_ok(Compiler *c, int mi, int k) {
+  if (k < 0 || k == hv_own_class(&c->scopes[mi])) return 1;
+  int e = hv_memo_at(HV_SELF, mi, "", k);
+  if (e < 0 || !hv_nselves) return 0;
+  if (hv_memo[e].pass == 0) {
+    hv_memo[e].pass = -1;
+    hv_memo[e].s.fresh = hv_nselves[mi] < HV_SELVES;
+    if (hv_memo[e].s.fresh) hv_nselves[mi]++;
+  }
+  return hv_memo[e].s.fresh;
+}
+/* The method call `u` goes to, or -1, and in *ck the class self is of
+   there; `sk` is the class self is of in the call's scope. A method a
+   subclass overrides has several candidates (an_call_targets_of lists the
+   overrides): the call goes to the one the receiver's class answers with,
+   for a call on self the class self is of. The candidates are listed only
+   where that one is not asked for by itself: a list per call is the square
+   of a method's overrides. */
+static int hv_call_target(Compiler *c, int u, int sk, int *ck) {
+  const NodeTable *nt = c->nt;
+  const char *un = nt_str(nt, u, "name");
+  int rc = nt_ref(nt, u, "receiver");
+  int on_self = rc < 0 || nt_kind(nt, rc) == NK_SelfNode;
+  if (!un) return -1;
+  /* asked again by every method the call is listed under */
+  int e = on_self ? hv_memo_at(HV_SELF_GOES, u, "", sk) : hv_memo_at(HV_GOES, u, "", -1);
+  if (e >= 0 && hv_memo[e].pass < 0) {
+    if (hv_memo[e].s.fresh >= 0) *ck = hv_memo[e].s.pstore;
+    return hv_memo[e].s.fresh;
+  }
+  TyKind rt = on_self ? TY_UNKNOWN : infer_type(c, rc);
+  int k = on_self ? (sk >= 0 ? sk : hv_own_class(comp_scope_of(c, u))) : ty_is_object(rt) ? ty_object_class(rt) : -1;
+  int mi = k >= 0 ? comp_method_in_chain(c, k, un, NULL) : -1;
+  /* an object's class's own is always among the candidates; a call on self
+     asks (a second infer_type of every receiver is the square of a scope's
+     locals) */
+  if (mi < 0 || sp_streq(un, "new") || (on_self && !an_call_targets_scope(c, u, mi, &c->scopes[mi]))) {
+    /* a receiver of no one class under a name several methods define
+       reaches all of them or none */
+    int open = !on_self && k < 0 && nt_kind(nt, rc) != NK_ConstantReadNode && nt_kind(nt, rc) != NK_ConstantPathNode &&
+               !sp_streq(un, "new") && an_unique_scope_by_name(c, un) < 0 && !an_alias_name(c, un);
+    ACallTargets tg = { NULL, 0, 0, -1, 0 };
+    if (!open) an_call_targets_of(c, u, &tg);
+    mi = tg.n == 1 ? tg.v[0] : -1;
+    if (tg.n > 1 && k < 0 && on_self) {
+      int pick = comp_self_call_mi(c, u, un);
+      for (int t = 0; t < tg.n; t++) if (tg.v[t] == pick) mi = pick;
+    }
+    free(tg.v);
+  }
+  if (mi >= 0) *ck = hv_self_class(c, k, &c->scopes[mi]);
+  if (e >= 0) { hv_memo[e].pass = -1; hv_memo[e].s.fresh = mi; hv_memo[e].s.pstore = mi >= 0 ? *ck : -1; }
+  return mi;
+}
+/* Does call `u` reach method `vs` when self there is of class `k`? `bound`
+   says a call on self chose that class; else it is the method's own, and
+   any receiver that answers with `vs` will do. *qk is the class self is of
+   in the caller's scope, *qbound whether this call chose it. */
+static int hv_calls_as(Compiler *c, int u, Scope *vs, int k, int bound, int *qk, int *qbound) {
+  const NodeTable *nt = c->nt;
+  int vi = (int)(vs - c->scopes), ck = -1;
+  /* a call on an object that goes elsewhere: a method several classes
+     define has every call of the name on its list */
+  int g = hv_memo_at(HV_GOES, u, "", -1);
+  if (g >= 0 && hv_memo[g].pass < 0 && hv_memo[g].s.fresh != vi) return 0;
+  Scope *q = comp_scope_of(c, u);
+  int rc = nt_ref(nt, u, "receiver");
+  int own = hv_own_class(vs), qown = hv_own_class(q);
+  *qk = qown; *qbound = 0;
+  if ((rc < 0 || nt_kind(nt, rc) == NK_SelfNode) && own >= 0 && qown >= 0) {
+    /* self is one object in both: of the caller's class when the method is
+       its own or one it inherits, else of the method's class, which then
+       inherits the caller */
+    const char *un = nt_str(nt, u, "name");
+    if (!bound) k = cr_class_is_ancestor(c, own, qown) ? qown : own;
+    if (!un || comp_method_in_chain(c, k, un, NULL) != vi) return 0;
+    if (k != qown && (!q->name || comp_method_in_chain(c, k, q->name, NULL) != (int)(q - c->scopes))) return 0;
+    *qk = hv_self_class(c, k, q);
+    *qbound = bound || *qk != qown;
+    return hv_self_ok(c, (int)(q - c->scopes), *qk);
+  }
+  if (hv_call_target(c, u, qown, &ck) != vi) return 0;
+  return !bound || ck == k;
+}
+static void hv_node_sum(Compiler *c, int node, int sk, HvSum *out, int depth);
+static int hv_settle(Compiler *c, Scope *sc, const HvSum *s, int k, int bound, int depth);
+/* What method `m` said of its parameters, said of call `u`'s arguments,
+   where self is of class `sk`. `self` is the parameter the Hash was handed
+   as, or -1. */
+static void hv_through_call(Compiler *c, HvSum cs, Scope *m, int u, int self, int sk, HvSum *out, int depth) {
+  if (out->fresh < 0) out->fresh = cs.fresh;
+  for (int j = 0; j < m->nparams && j < 64; j++) {
+    if (cs.vals >> j & 1) hv_value(c, arg_layout_param_node(c, m, u, j, NULL), cs.pstore, out);
+    if (j != self && (cs.hashes >> j & 1))
+      hv_node_sum(c, arg_layout_param_node(c, m, u, j, NULL), sk, out, depth + 1);
+  }
+}
+/* The entry of Hash local (hn, hs): what its scope stores and writes it
+   from, the parameter it is, and what a method it is handed to stores into
+   its own parameter. A parameter the method assigns is another Hash by the
+   time it is stored into. Self in the scope is of class `sk`. */
+static int hv_local_sum(Compiler *c, const char *hn, Scope *hs, int sk, int depth) {
+  const NodeTable *nt = c->nt;
+  int mi = hn && hs && scope_local(hs, hn) ? (int)(hs - c->scopes) : -1;
+  int e = mi >= 0 ? hv_memo_at(HV_LOCAL, mi, hn, sk) : -1;
+  if (e < 0 || !hv_begin(e, depth)) return e;
+  HvSum s = hv_memo[e].s;
+  int n = 0;
+  const int *ids = sb_store_nodes(c, hn, hs, &n);
+  for (int i = 0; i < n; i++) {
+    int w = ids[i], stores[64];
+    int ns = strbuf_container_store_values(c, w, hn, hs, 0, stores);
+    /* A store with a block is not rewritten to []=. */
+    if (ns == 0 && nt_kind(nt, w) == NK_CallNode && hv_call_stored(nt, w) >= 0)
+      stores[ns++] = hv_call_stored(nt, w);
+    for (int k = 0; k < ns; k++) hv_value(c, stores[k], w, &s);
+    if (ns == 0 && nt_kind(nt, w) == NK_LocalVariableWriteNode)
+      hv_node_sum(c, nt_ref(nt, w, "value"), sk, &s, depth + 1);
+  }
+  int pj = hv_param_as_passed(c, hs, hn, 0);
+  if (pj >= 0 && pj < 64) s.hashes |= 1ULL << pj;
+  hv_put(e, &s);
+  for (int i = hv_site_first(HV_HANDED, mi, hn); hv_site_is(i, HV_HANDED, mi, hn); i++) {
+    int u = hv_sites[i].node, ck = -1;
+    int ti = hv_user_call(c, u) ? hv_call_target(c, u, sk, &ck) : -1;
+    Scope *m = ti >= 0 && hv_self_ok(c, ti, ck) ? &c->scopes[ti] : NULL;
+    for (int j = 0; m && m->body >= 0 && j < m->nparams; j++) {
+      int p = arg_layout_param_node(c, m, u, j, NULL), pe;
+      if (p < 0 || nt_kind(nt, p) != NK_LocalVariableReadNode || !m->pnames[j] ||
+          !sp_streq(nt_str(nt, p, "name"), hn) || comp_scope_of(c, p) != hs ||
+          hv_param_as_passed(c, m, m->pnames[j], 0) != j) continue;
+      if ((pe = hv_local_sum(c, m->pnames[j], m, ck, depth + 1)) >= 0)
+        hv_through_call(c, hv_memo[pe].s, m, u, j, sk, &s, depth);
+    }
+  }
+  hv_end(e, &s);
+  return e;
+}
+/* The first store of such a String into the Hash an instance variable of
+   class `cid` holds, or a global (`cid` -1, `vn` its resolved name), or -1:
+   what is written to the variable, and what its own []= stores. */
+static int hv_var_store(Compiler *c, int cid, const char *vn, int depth) {
+  const NodeTable *nt = c->nt;
+  int e = hv_memo_at(HV_VAR_STORE, cid, vn, -1);
+  if (e < 0) return -1;
+  if (!hv_begin(e, depth)) return hv_memo[e].s.fresh;
+  HvSum s = hv_memo[e].s;
+  for (int i = hv_site_first(HV_VAR, cid, vn); s.fresh < 0 && hv_site_is(i, HV_VAR, cid, vn); i++) {
+    int w = hv_sites[i].node;
+    Scope *ws = comp_scope_of(c, w);
+    HvSum t = hv_none;
+    if (nt_kind(nt, w) == NK_CallNode) hv_value(c, hv_call_stored(nt, w), w, &t);
+    else hv_node_sum(c, nt_ref(nt, w, "value"), hv_own_class(ws), &t, depth + 1);
+    s.fresh = hv_settle(c, ws, &t, hv_own_class(ws), 0, depth + 1);
+  }
+  hv_end(e, &s);
+  return s.fresh;
+}
+/* The entry of what method `ti` answers, self of class `sk`: its last
+   expression and what it returns. */
+static int hv_answer_sum(Compiler *c, int ti, int sk, int depth) {
+  const NodeTable *nt = c->nt;
+  int e = hv_memo_at(HV_ANSWER, ti, "", sk);
+  if (e < 0 || !hv_begin(e, depth)) return e;
+  HvSum s = hv_memo[e].s;
+  hv_node_sum(c, scope_body_last(c, ti), sk, &s, depth + 1);
+  for (int i = hv_site_first(HV_RETURN, ti, ""); hv_site_is(i, HV_RETURN, ti, ""); i++) {
+    int ra = nt_ref(nt, hv_sites[i].node, "arguments"), rn = 0;
+    const int *rv = ra >= 0 ? nt_arr(nt, ra, "arguments", &rn) : NULL;
+    if (rn == 1) hv_node_sum(c, rv[0], sk, &s, depth + 1);
+  }
+  hv_end(e, &s);
+  return e;
+}
+/* What is stored into the Hash `node` evaluates to, added to `out`. Self in
+   the node's scope is of class `sk`. */
+static void hv_node_sum(Compiler *c, int node, int sk, HvSum *out, int depth) {
+  const NodeTable *nt = c->nt;
+  int e, r = -1;
+  node = an_unparen(nt, node);
+  if (node < 0 || depth > HV_DEPTH) return;
+  switch (nt_kind(nt, node)) {
+    case NK_HashNode: case NK_KeywordHashNode: {
+      int en = 0; const int *el = nt_arr(nt, node, "elements", &en);
+      for (int k = 0; k < en; k++)
+        if (nt_kind(nt, el[k]) == NK_AssocNode) hv_value(c, nt_ref(nt, el[k], "value"), node, out);
+      return;
+    }
+    case NK_LocalVariableReadNode:
+      e = hv_local_sum(c, nt_str(nt, node, "name"), comp_scope_of(c, node), sk, depth + 1);
+      break;
+    case NK_InstanceVariableReadNode: {
+      const char *ivn = nt_str(nt, node, "name");
+      int cid = ivn ? comp_ivar_owner(c, node) : -1;
+      r = cid < 0 ? -1 : hv_var_store(c, cid, ivn, depth + 1);
+      e = -1;
+      break;
+    }
+    case NK_GlobalVariableReadNode: {
+      const char *gn = nt_str(nt, node, "name");
+      const char *grn = gn ? comp_resolve_gvar(c, gn + 1) : NULL;
+      r = grn ? hv_var_store(c, -1, grn, depth + 1) : -1;
+      e = -1;
+      break;
+    }
+    case NK_CallNode: {
+      const char *mn = nt_str(nt, node, "name");
+      int recv = nt_ref(nt, node, "receiver"), blk = nt_ref(nt, node, "block");
+      e = -1;
+      if (!mn) return;
+      if (blk >= 0 && nt_kind(nt, blk) != NK_BlockNode) blk = -1;
+      /* `Hash.new { |hh, k| hh[k] = v }`: the block's first parameter is the Hash */
+      if (blk >= 0 && sp_streq(mn, "new") && recv >= 0 && nt_kind(nt, recv) == NK_ConstantReadNode &&
+          nt_str(nt, recv, "name") && sp_streq(nt_str(nt, recv, "name"), "Hash")) {
+        e = hv_local_sum(c, block_param_name(c, blk, 0), comp_scope_of(c, blk), sk, depth + 1);
+        break;
+      }
+      /* `to_h { |x| [k, v] }` is `map { |x| [k, v] }.to_h` by now: the value
+         of the pair the block answers */
+      if (sp_streq(mn, "to_h") && recv >= 0) {
+        int pair = an_unparen(nt, strbuf_map_block_tail(c, recv)), pn = 0;
+        const int *pe = pair >= 0 && nt_kind(nt, pair) == NK_ArrayNode ? nt_arr(nt, pair, "elements", &pn) : NULL;
+        if (pn == 2) { hv_value(c, pe[1], node, out); return; }
+      }
+      /* a reader's instance variable */
+      { char ivb[300]; int defc = -1;
+        const char *riv = an_reader_ivar_of(c, node, &defc, ivb, sizeof ivb);
+        if (riv && defc >= 0) {
+          int iv = comp_ivar_index(&c->classes[defc], riv);
+          r = iv < 0 ? -1 : hv_var_store(c, defc, c->classes[defc].ivars[iv], depth + 1);
+          break; } }
+      /* a method's answer */
+      int ck = -1, ae;
+      int ti = hv_user_call(c, node) ? hv_call_target(c, node, sk, &ck) : -1;
+      Scope *m = ti >= 0 && hv_self_ok(c, ti, ck) ? &c->scopes[ti] : NULL;
+      if (m && m->body >= 0 && !(m->name && sp_streq(m->name, "initialize")) &&
+          (ae = hv_answer_sum(c, ti, ck, depth + 1)) >= 0)
+        hv_through_call(c, hv_memo[ae].s, m, node, -1, sk, out, depth);
+      return;
+    }
+    default:
+      return;
+  }
+  if (e >= 0) {
+    const HvSum *s = &hv_memo[e].s;
+    if (out->fresh < 0) out->fresh = s->fresh;
+    if (out->pstore < 0) out->pstore = s->pstore;
+    out->vals |= s->vals; out->typed |= s->typed; out->hashes |= s->hashes;
+  }
+  else if (out->fresh < 0) out->fresh = r;
+}
+/* Does a caller of `vs` pass its parameter `j` such a String? Self in `vs`
+   is of class `k` (hv_calls_as). */
+static int hv_passed_lost(Compiler *c, Scope *vs, int j, int k, int bound, int depth) {
+  int e = hv_memo_at(HV_PASSED_LOST, (int)(vs - c->scopes), vs->pnames[j], bound ? k : -1);
+  if (e < 0) return 0;
+  if (!hv_begin(e, depth)) return hv_memo[e].s.fresh >= 0;
+  HvSum s = hv_memo[e].s;
+  for (int i = hv_caller_first(c, vs); i >= 0 && s.fresh < 0; i = hv_callers.enext[i]) {
+    int u = hv_callers.enode[i], qk, qbound;
+    HvSum t = hv_none;
+    if (!hv_calls_as(c, u, vs, k, bound, &qk, &qbound)) continue;
+    hv_value(c, arg_layout_param_node(c, vs, u, j, NULL), u, &t);
+    s.fresh = hv_settle(c, comp_scope_of(c, u), &t, qk, qbound, depth + 1);
+  }
+  hv_end(e, &s);
+  return s.fresh >= 0;
+}
+/* The first such store into a Hash a caller of `hs` passes as parameter
+   `j`, or -1. Self in `hs` is of class `k` (hv_calls_as). */
+static int hv_passed_store(Compiler *c, Scope *hs, int j, int k, int bound, int depth) {
+  int e = hv_memo_at(HV_PASSED_STORE, (int)(hs - c->scopes), hs->pnames[j], bound ? k : -1);
+  if (e < 0) return -1;
+  if (!hv_begin(e, depth)) return hv_memo[e].s.fresh;
+  HvSum s = hv_memo[e].s;
+  for (int i = hv_caller_first(c, hs); i >= 0 && s.fresh < 0; i = hv_callers.enext[i]) {
+    int u = hv_callers.enode[i], qk, qbound;
+    HvSum t = hv_none;
+    if (!hv_calls_as(c, u, hs, k, bound, &qk, &qbound)) continue;
+    hv_node_sum(c, arg_layout_param_node(c, hs, u, j, NULL), qk, &t, depth + 1);
+    s.fresh = hv_settle(c, comp_scope_of(c, u), &t, qk, qbound, depth + 1);
+  }
+  hv_end(e, &s);
+  return s.fresh;
+}
+/* The store `s`, said in scope `sc`, comes to when no call says what the
+   scope's parameters are: a parameter that is stored is such a String when
+   it is read as a String, as a value stored in view is, and a caller passes
+   one; a parameter that is the Hash has the stores of what the callers
+   pass. -1 when there is none. Self in `sc` is of class `k` (hv_calls_as). */
+static int hv_settle(Compiler *c, Scope *sc, const HvSum *s, int k, int bound, int depth) {
+  if (s->fresh >= 0 || !sc) return s->fresh;
+  for (int j = 0; j < sc->nparams && j < 64; j++)
+    if ((s->vals & s->typed) >> j & 1 && hv_passed_lost(c, sc, j, k, bound, depth + 1)) return s->pstore;
+  for (int j = 0; j < sc->nparams && j < 64; j++) {
+    int r = s->hashes >> j & 1 ? hv_passed_store(c, sc, j, k, bound, depth + 1) : -1;
+    if (r >= 0) return r;
+  }
+  return -1;
+}
+/* The first store of such a String into the Hash `hr` of an appending value
+   block evaluates to, or -1. A cycle of methods is walked again until
+   nothing more is found; what a walk worked out is then kept for the next
+   value block. */
+static int hv_far_store(Compiler *c, int hr) {
+  Scope *sc = comp_scope_of(c, hr);
+  int st = -1;
+  for (hv_pass = 1; hv_pass <= HV_PASSES; hv_pass++) {
+    HvSum s = hv_none;
+    hv_cut = hv_grew = 0;
+    hv_node_sum(c, hr, hv_own_class(sc), &s, 0);
+    st = hv_settle(c, sc, &s, hv_own_class(sc), 0, 0);
+    if (!hv_cut || !hv_grew) break;
+  }
+  for (int i = 0; i < hv_nopen; i++) {
+    HvMemo *m = &hv_memo[hv_open[i]];
+    m->pass = hv_pass > HV_PASSES || m->pass == hv_pass ? -1 : 0;
+  }
+  hv_nopen = 0;
+  return st;
+}
+static void refuse_far_hash_value_stores(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  int listed = 0;
+  NT_FOREACH_KIND(nt, NK_CallNode, it) {
+    char nb[64]; int recv, an;
+    const char *itn = hp_call(nt, it, &recv, &an, nb, sizeof nb);
+    int blk = nt_ref(nt, it, "block"), hr, vi;
+    /* the shape and the parameter first: they ask the node table alone */
+    if (!itn || blk < 0 || !an_value_block_shape(nt, itn, recv, &hr, &vi)) continue;
+    const char *vp = block_param_name(c, blk, vi);
+    if (!vp || !an_value_block_appends(c, blk, vp)) continue;
+    /* the store index is the fixpoint's: list again on the settled tree */
+    if (!listed) { sb_store_valid = 0; hv_list_sites(c); listed = 1; }
+    /* the receiver's type last: only a block with such a store asks it */
+    int st = hv_far_store(c, hr);
+    if (st < 0 || !ty_is_hash(infer_type(c, hr))) continue;
+    /* (under --share-strings the route is the rule's, as in the block's own
+       scope: an_hash_store_routes) */
+    ShareRoute q = share_route(st, hr, 1);
+    q.to = blk;
+    q.to_name = vp;
+    q.carry = nt_kind(nt, st) == NK_CallNode ? hv_call_stored(nt, st) : -1;
+    /* the rule answers for a stored value typed a String; a parameter two
+       classes are handed is a box, which under the flag holds the handle */
+    if (c->share_strings && q.carry >= 0) {
+      TyKind ct = infer_type(c, q.carry);
+      if (ct != TY_STRING && ct != TY_STRBUF) continue;
+    }
+    if (!share_route_defer(c, &q, an_hash_value_block_refusal)) unsupported_feature(c, st, an_hash_value_block_refusal);
+  }
+  if (listed) {
+    if (hv_callers_made) { handle_arg_tab_free(&hv_callers); hv_callers_made = 0; }
+    free(hv_sites); hv_sites = NULL; hv_nsites = hv_sites_cap = 0;
+    free(hv_answers); hv_answers = NULL; free(hv_nselves); hv_nselves = NULL;
+    free(hv_memo); hv_memo = NULL; free(hv_slot); hv_slot = NULL; free(hv_open); hv_open = NULL;
+    hv_nmemo = hv_slot_cap = hv_nopen = hv_open_cap = 0;
+  }
+}
+
 /* A bare `@ivar` argument whose ivar is written from a local, handed to a
    parameter the callee appends to: the callee would append to a copy, so
    the program is refused (#6998). Runs once sharing analysis settles. */
@@ -36492,6 +37147,7 @@ static void an_phase_reconcile_check(Compiler *c) {
   refuse_hash_pair_string_mutations(c);
   refuse_literal_element_aliases(c);
   refuse_string_alias_copies(c);
+  refuse_far_hash_value_stores(c);
 
   /* Last: the capture pass again, on the settled types. a_block_is_lifted asks
      whether the receiver is poly, and a receiver that widened after the
