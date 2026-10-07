@@ -11939,14 +11939,26 @@ static int emit_ivar_cvar_write_stmt(Compiler *c, int id, Buf *b, int indent, co
   return 0;
 }
 
-/* Whether a call in the subtree has an argument that is no Integer or Float.
-   subtree_is_pure_read passes a scalar operator on its receiver and result
-   alone, and one with a boxed argument (`5 <=> o.w`) reaches the runtime's
-   comparison, which may call the program's coerce. */
-static int subtree_call_arg_not_number(Compiler *c, int id) {
+/* Whether a call in the subtree may run the program's code.
+   subtree_is_pure_read passes a scalar operator and a typed Array's index on
+   their static types alone. Either is the program's own method once a class
+   of the program defines the name (a reopened Float's `+`, a reopened
+   Array's `[]`), and an operator with an argument that is no Integer or
+   Float (`5 <=> o.w`) reaches the runtime's comparison, which may call the
+   program's coerce. */
+static int program_defines_method(Compiler *c, const char *nm) {
+  for (int k = 0; k < c->nclasses; k++)
+    if (comp_method_in_class(c, k, nm) >= 0) return 1;
+  return 0;
+}
+static int subtree_call_may_run_program(Compiler *c, int id) {
   const NodeTable *nt = c->nt;
   if (id < 0) return 0;
   if (nt_kind(nt, id) == NK_CallNode) {
+    const char *nm = nt_str(nt, id, "name");
+    /* `!=` is the answer of `==` turned */
+    if (nm && (program_defines_method(c, nm) ||
+               (sp_streq(nm, "!=") && program_defines_method(c, "==")))) return 1;
     int a = nt_ref(nt, id, "arguments"); int ac = 0;
     const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
     for (int i = 0; i < ac; i++) {
@@ -11956,24 +11968,25 @@ static int subtree_call_arg_not_number(Compiler *c, int id) {
   }
   int nr = nt_num_refs(nt, id);
   for (int i = 0; i < nr; i++)
-    if (subtree_call_arg_not_number(c, nt_ref_at(nt, id, i))) return 1;
+    if (subtree_call_may_run_program(c, nt_ref_at(nt, id, i))) return 1;
   int na = nt_num_arrs(nt, id);
   for (int i = 0; i < na; i++) {
     int n = 0;
     const int *ids = nt_arr_at(nt, id, i, &n);
     for (int j = 0; j < n; j++)
-      if (subtree_call_arg_not_number(c, ids[j])) return 1;
+      if (subtree_call_may_run_program(c, ids[j])) return 1;
   }
   return 0;
 }
 /* The slot of a boxed attribute's `&=`, `|=` or `^=`, read ahead of a right
-   operand that is more than a plain read: Ruby reads the slot first, and the
-   operand may write it (`o.v ^= o.bump`, or a coerce reached from
-   `o.v ^= (5 <=> o.w)`). The value goes to a rooted temp, since the operand
-   may also drop it from the slot and allocate. Answers the temp, or 0 when
-   the operand is a plain read and the slot is read in place. */
+   operand that can run the program's code: Ruby reads the slot first, and
+   the operand may write it (`o.v ^= o.bump`, a coerce reached from
+   `o.v ^= (5 <=> o.w)`, a reopened Float's `+`). The value goes to a rooted
+   temp, since the operand may also drop it from the slot and allocate.
+   Answers the temp, or 0 when the operand is a plain read that can run none
+   of the program's code and the slot is read in place. */
 static int emit_boxed_slot_read_first(Compiler *c, int val, const char *slot, const char *lead, Buf *b) {
-  if (subtree_is_pure_read(c, val) && !subtree_call_arg_not_number(c, val)) return 0;
+  if (subtree_is_pure_read(c, val) && !subtree_call_may_run_program(c, val)) return 0;
   int t = ++g_tmp;
   buf_printf(b, "%ssp_RbVal _t%d = %s; SP_GC_ROOT_RBVAL(_t%d);", lead, t, slot, t);
   return t;
