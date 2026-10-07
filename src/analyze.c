@@ -32702,19 +32702,31 @@ static int an_return_awaits_type(Compiler *c) {
 
 /* Is a method waiting for the type of one of its values in a way the
    backstops do not mend? A method none of whose values has a type is boxed
-   whole there, and is right. A `return` of a local that has no type is not:
-   the late lift boxes the local and reads a method's tail, not its `return`. */
+   whole there, and is right. Two kinds are not. A `return` of a local that
+   has no type: the late lift boxes the local and reads a method's tail, not
+   its `return`. And a method that has its return type from one value while
+   another has none: its callers take that type for the value, and
+   `return 1 if c; f2(x)` answered 0 for the Array f2 hands back. A nil
+   return type is lifted late with the rest and does not count. */
 static int an_method_awaits_value(Compiler *c) {
   const NodeTable *nt = c->nt;
   NT_FOREACH_KIND(nt, NK_ReturnNode, rid) {
     Scope *rs = comp_scope_of(c, rid);
     if (!rs || !rs->reachable || return_node_type(c, rid) != TY_UNKNOWN) continue;
+    if (rs->ret != TY_UNKNOWN && rs->ret != TY_VOID && rs->ret != TY_NIL) return 1;
     int an = 0;
     const int *av = nt_arr(nt, nt_ref(nt, rid, "arguments"), "arguments", &an);
     int v = an == 1 ? unwrap_parens(c, av[0]) : -1;
     if (v < 0 || nt_kind(nt, v) != NK_LocalVariableReadNode) continue;
     LocalVar *lv = scope_local(rs, nt_str(nt, v, "name"));
     if (lv && !lv->is_param) return 1;
+  }
+  for (int s = 1; s < c->nscopes; s++) {
+    Scope *sc = &c->scopes[s];
+    if (!sc->reachable || sc->body < 0 || sc->ret == TY_UNKNOWN || sc->ret == TY_VOID || sc->ret == TY_NIL) continue;
+    int bn = 0;
+    const int *bb = nt_kind(nt, sc->body) == NK_StatementsNode ? nt_arr(nt, sc->body, "body", &bn) : NULL;
+    if (bn > 0 && nt_kind(nt, bb[bn - 1]) != NK_ReturnNode && infer_type(c, bb[bn - 1]) == TY_UNKNOWN) return 1;
   }
   return 0;
 }
