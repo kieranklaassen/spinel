@@ -1635,6 +1635,15 @@ int emit_call_safe_nav_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
           buf_printf(b, "(_sn%d.tag == SP_TAG_NIL ? %s : (%s))",
                      tsn, nb.p ? nb.p : "sp_box_nil()", vb2.p ? vb2.p : "");
         }
+        else if (sn_stays_in_place(c, id)) {
+          /* Held in a temp ahead of the statement, the call ran before what
+             is written before it (`"#{$c} #{b&.bump([1, 2])}"`), as in the
+             typed arm below. */
+          char nilt[64];
+          snprintf(nilt, sizeof nilt, "_sn%d.tag == SP_TAG_NIL", tsn);
+          sn_guard_over_hoists(nilt, &preb);
+          buf_printf(b, "(%s ? %s : (%s))", nilt, nb.p ? nb.p : "sp_box_nil()", vb2.p ? vb2.p : "");
+        }
         else {
           int rsv = ++g_tmp;
           emit_indent(g_pre, g_indent);
