@@ -371,7 +371,12 @@ static inline char *sp_str_alloc_nogc(size_t len) {
 /* Copy a message onto the string heap so it can be held by a string root.
    The source is a bare literal (every raise the runtime and the generated
    code issue passes one) or an unrooted heap string; neither can be rooted
-   across an allocation, so the copy runs with no collection in between. */
+   across an allocation, so the copy runs with no collection in between.
+   The length is strlen's, not sp_str_byte_len's: a bare literal or a static
+   buffer (Process.spawn's sp_err_buf) has no header, and sp_str_byte_len reads
+   the byte before it for one, which for some neighbouring byte looks like a
+   header's marker and answers a made-up length (#7556 did, and a copied
+   message gained NUL bytes in some builds). */
 static inline const char *sp_msg_heapify(const char *m) {
   if (!m) return NULL;
   size_t n = strlen(m);
@@ -832,6 +837,12 @@ static inline void sp_PolyArray_fin(void *p) { sp_PolyArray *a = (sp_PolyArray *
 extern SP_TLS sp_gc_hdr *sp_polyarr_pool_head;
 extern SP_TLS long sp_polyarr_pool_count;
 void sp_PolyArray_pool_recycle(sp_gc_hdr *h);
+/* An Array subclass instance's embedded Array (#7449, see
+   sp_IntArray_init_embedded): its elements start inline, and the first growth
+   installs the finalizer that frees the payload, as an unpooled one's does. */
+static inline void sp_PolyArray_init_embedded(sp_PolyArray *a) {
+  a->data = a->inl; a->cap = SP_POLYARR_INLINE; a->len = 0;
+}
 static inline sp_PolyArray *sp_PolyArray_new(void) {
   if (sp_slab_on > 0) {
     sp_PolyArray *a = (sp_PolyArray *)sp_gc_alloc(sizeof(sp_PolyArray), NULL, sp_PolyArray_scan);

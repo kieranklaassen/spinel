@@ -545,6 +545,15 @@ void sp_fin_run_pending(void);
 #define SP_FIN_POLL() \
   do { if (SP_UNLIKELY(SP_ATOMIC_LOAD(&sp_fin_pending_flag, __ATOMIC_RELAXED))) sp_fin_run_pending(); } while (0)
 void sp_oom_die(void);
+/* The instance variables of a builtin value (an Array, a Hash, a Random):
+   a map from the object to its ivar table, a GC object the TU makes
+   (sp_bivar_set in spinel_rt.h). The map does not keep the object alive;
+   the collector marks a table only while its object lives, and drops the
+   entry of an object it frees (lib/sp_gc.c). */
+void *sp_ivtbl_get(const void *obj);
+void sp_ivtbl_put(const void *obj, void *tbl);
+/* the TU's rendering of an ivar table, for Random#inspect (set with the first table) */
+extern const char *(*sp_ivtbl_inspect_fn)(void *tbl);
 
 /* ---- Embedder callbacks supplied by the generated TU ----
  * The collector cannot own the program's roots or string heap (they are
@@ -637,6 +646,11 @@ extern int (*sp_obj_conv_fn)(int cls_id, void *p, int which, sp_RbVal *out);
 /* Ruby class name for a user cls_id (the generated id->name table), so a
    runtime TU can word a TypeError the way CRuby does. */
 extern const char *(*sp_obj_cls_name_fn)(int cls_id);
+/* The user class of a builtin subclass instance boxed as its builtin (an
+   Array subclass instance boxed as its Array, #7449): the program's own
+   scan-function table names it, -1 for a plain one. NULL in a program with
+   no such class. */
+extern int (*sp_bsub_cls_fn)(sp_RbVal v);
 /* Is user class `sub` the class `super` or a descendant of it? The generated
    class bank installs it; NULL means only an exact id can be trusted. A
    pointer array of one class checks a stored object against it (#4486). */

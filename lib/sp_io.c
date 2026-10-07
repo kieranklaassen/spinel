@@ -351,8 +351,13 @@ static sp_int sp_io_write_raw(sp_File *f, const char *s, size_t n) {
      the descriptor past where stdio thinks it is, and a zero-length write
      is still a valid sync point. Without this, a subsequent ftello,
      buffered read, or buffered write on the same stream would use the
-     stale stdio offset. */
-  if (fseeko(f->fp, 0, SEEK_CUR) != 0) sp_file_raise_errno("write", "file");
+     stale stdio offset. The stream is set to the descriptor's own offset:
+     a relative seek (SEEK_CUR) counts from stdio's cached offset, which the
+     raw write did not move, and moved the descriptor back to it, so the
+     next syswrite overwrote this one. A descriptor with no offset (a pipe,
+     a terminal) has none to share, where the relative seek raised ESPIPE. */
+  off_t pos = lseek(fd, 0, SEEK_CUR);
+  if (pos >= 0 && fseeko(f->fp, pos, SEEK_SET) != 0) sp_file_raise_errno("write", "file");
   return (sp_int)n;
 }
 
@@ -891,6 +896,11 @@ const char *sp_sock_recv(sp_File *f, sp_int len) {SP_GC_ROOT(f);
     sp_str_set_len(r, got);
     return r;
   }
+  /* park until the peer writes, as readpartial does: a close from another
+     thread then wakes this one with CRuby's IOError, where a recv(2) already
+     blocked in the kernel answered EBADF, or read a descriptor that was by
+     then someone else's (#7555) */
+  sp_io_wait_readable(f);
   char *buf = (char *)malloc((size_t)len);
   if (!buf) sp_raise_cls("NoMemoryError", "recv");
   int n = sp_net_udp_recv_from(fileno(f->fp), buf, (int)len, NULL, 0, NULL);
@@ -912,6 +922,7 @@ const char *sp_sock_recvfrom(sp_File *f, sp_int len, const char **ip_out, sp_int
   char ipbuf[64];
   int port = 0;
   if (len <= 0) { *ip_out = sp_str_from_bytes("", 0); *port_out = 0; return sp_str_from_bytes("", 0); }
+  sp_io_wait_readable(f);   /* as sp_sock_recv (#7555) */
   char *buf = (char *)malloc((size_t)len);
   if (!buf) sp_raise_cls("NoMemoryError", "recvfrom");
   int n = sp_net_udp_recv_from(fileno(f->fp), buf, (int)len, ipbuf, (int)sizeof ipbuf, &port);

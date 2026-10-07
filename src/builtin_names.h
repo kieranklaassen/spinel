@@ -14,6 +14,7 @@ int is_zip_name(const char *n);       /* zip: tuple-yielding iteration */
 int is_call_alias(const char *n);     /* call () []: a Proc/Method's invocation */
 int is_method_invoke(const char *n);  /* call () [] ===: Method invocation */
 int is_kind_query(const char *n);     /* is_a? kind_of? instance_of? */
+int is_member_blind_query(const char *n); /* class object_id __id__ nil? frozen? equal? respond_to? is_a? ... */
 int is_round_family(const char *n);   /* round ceil floor truncate */
 int is_push_alias(const char *n);     /* push << append */
 int is_bit_op(const char *n);         /* & | ^ */
@@ -22,6 +23,8 @@ int is_add_sub_mul(const char *n);    /* + - * */
 int is_int_bit_op(const char *n);     /* & | ^ << >>: Integer's bitwise operators */
 int is_object_root(const char *n);    /* Object Kernel BasicObject: the classes every object has */
 int is_send_family(const char *n);    /* send __send__ public_send */
+int is_opaque_reaching_call(const char *n); /* send family, call, new, lambda/proc, freeze, eval, instance_/class_/module_*, *method* */
+int is_async_code_entry(const char *recv, const char *n); /* Thread.new/start/fork, Fiber.new, trap, Signal.trap */
 int is_name_reader(const char *n);    /* name to_s inspect: a Class's or Module's name */
 int is_tap_alias(const char *n);      /* tap then yield_self */
 int is_quantifier(const char *n);     /* all? any? none? one? */
@@ -39,14 +42,18 @@ int is_count_alias(const char *n);    /* length size count */
 int is_class_eval_family(const char *n);  /* class_eval module_eval class_exec module_exec */
 int is_eval_exec_family(const char *n);   /* class/module/instance eval and exec */
 int is_key_query(const char *n);      /* key? has_key? include? member?: Hash/ENV membership aliases */
+int is_hash_key_lookup(const char *n); /* [] fetch delete and is_key_query: a Hash call that only compares its key */
+int is_receiver_conversion(const char *n); /* to_s to_str itself: conversions a String answers with itself */
 int is_range_membership(const char *n); /* cover? include? member? ===: Range membership predicates */
 int is_each_walk_or_with_index(const char *n); /* each each_entry reverse_each each_with_index */
 int is_call_or_yield(const char *n);  /* call () [] yield: is_call_alias's names and yield */
 int is_proc_invoke(const char *n);    /* call () [] yield ===: every name that invokes a Proc */
 int is_quantifier_or_count(const char *n);  /* all? any? none? one? count: is_quantifier's names and count */
 int is_push_unshift(const char *n);   /* << push append unshift: is_push_alias's names and unshift */
+int is_identity_query(const char *n); /* equal? object_id __id__ frozen?: tells an object from its copy */
 int is_len_alias(const char *n);      /* length size */
 int is_str_each_iter(const char *n);  /* each_char each_line each_byte each_codepoint: String's element iterators */
+int is_str_string_yield(const char *n); /* each_char each_line upto chars lines split scrub: String methods whose block takes a String */
 int is_diverging_call(const char *n); /* raise fail throw exit exit! abort: a Kernel call that never returns */
 int is_block_loop_method(const char *n); /* times each upto downto step loop each_with_index: a block run an unbounded number of times */
 
@@ -76,16 +83,21 @@ int is_then_alias(const char *n); /* then yield_self */
 int is_intersection_alias(const char *n); /* & intersection */
 int is_add_sub(const char *n); /* + - */
 int is_store_alias(const char *n); /* []= store */
+int is_hash_default_setter(const char *n); /* default= */
 int is_pop_shift(const char *n); /* pop shift */
 int is_prepend_alias(const char *n); /* prepend unshift */
 int is_text_print(const char *n); /* print puts */
+int is_printf_name(const char *n); /* printf: formats its operands, then writes them */
 int is_union_alias(const char *n); /* union | */
 int is_eq_or_ne(const char *n); /* != == */
 int is_size_or_count(const char *n); /* count size */
 int is_bounded_int_step(const char *n); /* downto upto */
+int is_upto_name(const char *n);      /* upto */
 
 int is_indexed_each(const char *n); /* each_index each_with_index */
 int is_to_array_alias(const char *n); /* entries to_a */
+int is_match_p_name(const char *n);   /* match? */
+int is_record_class_builder(const char *recv, const char *meth); /* Struct.new, Data.define */
 int is_string_index(const char *n); /* index rindex */
 int is_modulo_alias(const char *n); /* % modulo */
 int is_append_concat(const char *n); /* << concat */
@@ -95,6 +107,12 @@ int is_take_drop(const char *n); /* drop take */
 int is_byte_codepoint_each(const char *n); /* each_byte each_codepoint */
 int is_with_index_alias(const char *n); /* each_with_index with_index */
 int is_freeze_family(const char *n); /* freeze frozen? */
+int is_bivar_access(const char *n);  /* __bivar_get __bivar_set __bivar_defined */
+int is_object_copy(const char *n);   /* dup clone */
+int is_ivar_set_name(const char *n); /* instance_variable_set */
+int is_bivar_keyed_class(const char *n);  /* Array Hash Random */
+int is_string_class_name(const char *n);   /* String */
+int is_frozen_value_class(const char *n); /* Integer Float Symbol NilClass TrueClass FalseClass Range */
 int is_nonblock_io(const char *n); /* read_nonblock write_nonblock */
 
 int is_mul_or_pow(const char *n); /* * ** */
@@ -113,11 +131,15 @@ int is_open_constructor(const char *n); /* new open */
 int is_succ_alias(const char *n); /* next succ */
 int is_path_reader(const char *n); /* path to_path */
 int is_io_position(const char *n); /* pos tell */
+int is_rewind_name(const char *n); /* rewind: an Enumerator's restart, or a stream's seek to its start */
 int is_sort_family(const char *n); /* sort sort! */
+int is_hash_transform(const char *n); /* transform_values transform_keys */
+int is_fallback_block_call(const char *n); /* fetch delete fetch_values: the block is the fallback */
 int is_io_write(const char *n); /* syswrite write */
 int is_to_integer(const char *n); /* to_i to_int */
 int is_match_operator(const char *n); /* !~ =~ */
 int is_div_or_mod(const char *n); /* % / */
+int is_div_or_modulo(const char *n); /* div modulo: the named floored quotient and remainder */
 int is_add_or_mul(const char *n); /* * + */
 int is_push_operator(const char *n); /* << push */
 int is_eq_or_eql(const char *n); /* == eql? */
@@ -125,6 +147,7 @@ int is_element_access(const char *n); /* [] []= */
 
 int is_current_method(const char *n); /* __callee__ __method__ */
 int is_hash_constructor(const char *n); /* __hash_new_default new */
+int is_struct_constructor(const char *n); /* new [] */
 int is_attr_reader_family(const char *n); /* attr_accessor attr_reader */
 int is_range_bound_reader(const char *n); /* begin end */
 int is_directory_entries(const char *n); /* children entries */
@@ -175,6 +198,8 @@ int is_array_hash_or_object_class(const char *n); /* Array Hash Object */
 int is_integer_class_name(const char *n); /* Fixnum Integer */
 
 int is_ivar_access(const char *n);   /* instance_variable_get instance_variable_set */
+int is_plus_op(const char *n);       /* +: the operator `+=` writes through */
+int is_ivar_set(const char *n);      /* instance_variable_set */
 
 int is_string_append_or_prepend(const char *n); /* << concat prepend */
 
@@ -188,5 +213,19 @@ int is_gated_exception_accessor(const char *n); /* accessors owned by specific e
 int is_symbol_exception_accessor(const char *n); /* exception accessors that can return a Symbol */
 
 int is_builtin_reopen_name(const char *name);
+
+int is_nil_method(const char *n); /* NilClass's public methods, its own and Object's: what nil answers */
+int is_positional_io(const char *n); /* pread / pwrite: IO at an offset */
+
+/* Array subclasses (#7449) */
+int is_arysub_object_name(const char *n);        /* class is_a? dup ...: the object, not its elements */
+int is_arysub_kernel_name(const char *n);        /* to_enum frozen? != ...: answered as the Array */
+
+/* The Array adders the element store (strbuf_container_store_values) does
+   not take: concat (of a literal), insert and prepend. */
+enum { ARRAY_ADD_NONE, ARRAY_ADD_CONCAT, ARRAY_ADD_INSERT, ARRAY_ADD_PREPEND };
+int array_unseen_add_kind(const char *n);
+
+int is_scan_name(const char *n); /* scan: a String's match iterator */
 
 #endif

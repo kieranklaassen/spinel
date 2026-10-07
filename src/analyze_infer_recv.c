@@ -83,6 +83,9 @@ int infer_range_call(Compiler *c, int id, TyKind rt, TyKind *out) {
     { *out = TY_UNKNOWN; return 1; }
   }
   if (rt == TY_FLOAT_RANGE) {
+    /* a blockless step over an endless one is walked as it is read */
+    if (sp_streq(name, "step") && argc == 1 && nt_ref(nt, id, "block") < 0 &&
+        range_lit_endless(c, nt_ref(nt, id, "receiver"))) { *out = TY_ENUMERATOR; return 1; }
     /* overlap? answers through sp_range_overlap_v, as an Integer Range's does */
     if (sp_streq(name, "overlap?") && argc == 1) { *out = TY_BOOL; return 1; }
     /* #size counts the integers the range enumerates: a Float answer, since an
@@ -631,6 +634,12 @@ int infer_array_call(Compiler *c, int id, TyKind rt, TyKind *out) {
   (void)a0;
   if (recv >= 0 && ty_is_array(rt)) {
     int block = nt_ref(nt, id, "block");
+    /* Array#bsearch without a block is enum_for(:bsearch), whose size is
+       unknown until the caller supplies a predicate. */
+    if (sp_streq(name, "bsearch") && block < 0 && argc == 0) {
+      *out = TY_ENUMERATOR;
+      return 1;
+    }
     /* builtin-op rows (builtin_ops.c) */
     {
       const BuiltinOp *op = an_bop_find(c, id, BOP_ANY_ARRAY, name, argc, block >= 0);
@@ -1005,21 +1014,23 @@ int infer_array_call(Compiler *c, int id, TyKind rt, TyKind *out) {
                     nt_type(nt, argv[0]) && sp_streq(nt_type(nt, argv[0]), "KeywordHashNode");
     if (sp_streq(name, "sample") && argc == 1 && !sample_kw)
       { *out = rt; return 1; }  /* n-arg form -> subarray */
+    if (sp_streq(name, "sample") && argc == 2)
+      { *out = rt; return 1; }  /* sample(n, random: g) -> subarray */
     /* a countless blockless cycle is an Enumerator too (#3758) */
     if (sp_streq(name, "cycle") && argc == 0 && nt_ref(nt, id, "block") < 0 &&
         !call_is_chain_receiver_with_block(c, id))
       { *out = TY_ENUMERATOR; return 1; }
     if (sp_streq(name, "sample")) { *out = ty_array_elem(rt); return 1; }
     if ((is_map_bang_alias(name)) && block >= 0) {
-      /* Typed arrays (int/str/float): in-place mutation preserves element type.
-         The block param may be widened to TY_POLY when shared with other blocks,
-         but the array type is determined by the receiver, not the block body. */
-      if (ty_array_elem(rt) != TY_POLY)
-        { *out = rt; return 1; }
-      int body = nt_ref(nt, block, "body");
-      int bn = 0; const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
-      TyKind bt = bn > 0 ? infer_type(c, bb[bn - 1]) : TY_UNKNOWN;
-      { *out = bt != TY_UNKNOWN ? ty_array_of(bt) : rt; return 1; }
+      /* map! answers its receiver, rewritten in place: the receiver's own
+         array type, whatever the block answers. The block param may be
+         widened to TY_POLY when shared with other blocks, but the array type
+         is determined by the receiver, not the block body. A general Array
+         was typed as an Array of the block's kind, so a typed one that
+         widened for a foreign tail (widen_arrays_from_map_bang) handed its
+         sp_PolyArray to the typed Array's readers, and the C did not
+         build. */
+      *out = rt; return 1;
     }
     if (sp_streq(name, "rindex")) { *out = TY_INT; return 1; }  /* int or nil */
     if ((is_array_push_family(name)) &&
@@ -1106,6 +1117,52 @@ int infer_array_call(Compiler *c, int id, TyKind rt, TyKind *out) {
   return 0;
 }
 
+/* An Array method given an Array subclass instance as the Array it compares,
+   combines or copies (comp_arysub_args_viewed): answered with the argument
+   pinned to the instance's Array, as the emitter views it (#7449). The face
+   pins one node, so it is the first such argument. */
+static int infer_arysub_arg_call(Compiler *c, int id, TyKind rt, TyKind *out) {
+  int args = nt_ref(c->nt, id, "arguments"), an = 0;
+  const int *av = args >= 0 ? nt_arr(c->nt, args, "arguments", &an) : NULL;
+  for (int i = 0; i < an; i++) {
+    TyKind at = infer_type(c, av[i]);
+    if (comp_ty_ary_root(c, at) < 0) continue;
+    if (!comp_arysub_args_viewed(c, id, rt)) return 0;
+    TyKind k = comp_ary_kind(c, ty_object_class(at));
+    if (k == TY_UNKNOWN) { *out = TY_UNKNOWN; return 1; }
+    an_face_push(av[i], k);
+    *out = infer_call(c, id);
+    an_face_pop();
+    return 1;
+  }
+  return 0;
+}
+
+/* A call on an Array subclass instance that Array answers (#7449): the call
+   re-inferred with its receiver pinned to the embedded Array's kind, as a
+   boxed receiver's face is, and the emitter re-enters the Array emitters under
+   the same pin. A method whose answer is its receiver answers the instance. */
+int infer_arysub_call(Compiler *c, int id, TyKind *out) {
+  if (!c->has_arysub) return 0;
+  int recv = nt_ref(c->nt, id, "receiver");
+  /* Kernel#Array hands an Array back as it is, an Array subclass instance
+     included */
+  int an = comp_arysub_kernel_array(c, id);
+  if (an >= 0 && comp_ty_ary_root(c, infer_type(c, an)) >= 0) { *out = infer_type(c, an); return 1; }
+  if (recv < 0 || face_of(recv) != TY_UNKNOWN) return 0;
+  TyKind rt = infer_type(c, recv), k = TY_UNKNOWN;
+  if (!comp_arysub_call(c, id, rt, &k)) return infer_arysub_arg_call(c, id, rt, out);
+  int self = comp_arysub_self_result(c, id);
+  TyKind r = TY_UNKNOWN;
+  if (k != TY_UNKNOWN) {
+    an_face_push(recv, k);
+    r = infer_call(c, id);
+    an_face_pop();
+  }
+  *out = self ? rt : r;
+  return 1;
+}
+
 /* Object receivers: the user-object face of infer_call */
 /* The type an attr reader `name` answers on class `cid`, when a reader (not an
    explicit `def` at an equal-or-more-derived class, #3909) wins the member
@@ -1175,13 +1232,22 @@ int infer_object_call(Compiler *c, int id, TyKind rt, TyKind *out) {
          be boxed (the fold unboxes it), which is what every int local is
          under --int-overflow=promote. The conditions mirror the fold's
          exactly (a literal the fold declines keeps the generic binding's
-         boxed type). */
+         boxed type).
+
+         An offset not typed YET is no answer: it is a parameter no call
+         site has bound so far, and answering the generic binding's boxed
+         type for that round hands the poly to the callers, where a call
+         cycle holds it after the offset settles to Integer (the re-narrow
+         does not reset an ordinary return). While inference is optimistic,
+         wait for it; the pessimistic stage still falls through to the
+         generic binding. */
       if (cls->c_struct && sp_streq(cls->c_struct, "sp_IOBuffer") &&
           sp_streq(name, "get_value") && argc == 2 &&
-          nt_type(c->nt, argv[0]) && sp_streq(nt_type(c->nt, argv[0]), "SymbolNode") &&
-          (infer_type(c, argv[1]) == TY_INT || infer_type(c, argv[1]) == TY_POLY)) {
+          nt_type(c->nt, argv[0]) && sp_streq(nt_type(c->nt, argv[0]), "SymbolNode")) {
+        TyKind ot = infer_type(c, argv[1]);
         int it = comp_iob_sym_type(nt_str(c->nt, argv[0], "value"));
-        if (it >= 0) {
+        if (it >= 0 && ot == TY_UNKNOWN && g_infer_optimistic) { *out = TY_UNKNOWN; return 1; }
+        if (it >= 0 && (ot == TY_INT || ot == TY_POLY)) {
           *out = comp_iob_ty_is_float(it) ? TY_FLOAT
                : comp_iob_ty_is_64(it) ? TY_POLY : TY_INT;
           return 1;
@@ -1319,7 +1385,7 @@ int poly_blockless_enum_name(const char *name) {
 }
 
 /* A call written `recv&.name`. */
-static int call_is_safe_nav(const NodeTable *nt, int id) {
+int call_is_safe_nav(const NodeTable *nt, int id) {
   const char *op = nt_str(nt, id, "call_operator");
   return op && sp_streq(op, "&.");
 }
@@ -1447,6 +1513,11 @@ int infer_poly_call(Compiler *c, int id, TyKind rt, TyKind *out) {
     if (fmt_t == TY_STRING || fmt_t == TY_POLY || fmt_t == TY_UNKNOWN)
       { *out = TY_STRING; return 1; }
   }
+  /* casecmp / casecmp? ignore a block, as CRuby does, and the emitter's
+     sp_poly_casecmp arm takes the call with one as without: its answer is
+     the same boxed value (typed bool under a block, it did not build) */
+  if (recv >= 0 && rt == TY_POLY && argc == 1 && nt_ref(nt, id, "block") >= 0 &&
+      is_casecmp_family(name) && !an_user_defines_or_reads(c, name)) { *out = TY_POLY; return 1; }
   /* The String-only surface on a boxed receiver: the names no other class
      answers, so the result type is the one the typed String path gives. Names
      Array or Enumerable share (index, count, sum) stay untyped here and go
@@ -1808,7 +1879,7 @@ int infer_poly_call(Compiler *c, int id, TyKind rt, TyKind *out) {
           sp_streq(name, "rfc2822") || sp_streq(name, "rfc822")) &&
          sp_feature_enabled("time")))
       { *out = TY_STRING; return 1; }
-    if (sp_streq(name, "asctime")) { *out = TY_STRING; return 1; }
+    if (sp_streq(name, "asctime") || sp_streq(name, "ctime")) { *out = TY_STRING; return 1; }
     if (sp_streq(name, "subsec")) { *out = TY_POLY; return 1; }
   }
   /* iso8601(n) / xmlschema(n) on a boxed Time: the fraction-digits form the

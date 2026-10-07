@@ -14,15 +14,34 @@ make gate 2>&1 | tee gate.log
 grep -E 'Tests:|scale-test|gate:' gate.log
 ```
 
-**If `make gate` fails on our side, the pull request goes back to you**
-with a comment naming the failing leg. Please fix it and push again; we do
-not fix a failing gate for you.
+**If `make gate` fails on our side, we fix it where the fix is mechanical** (a
+recorded list such as `test/collect/refusals.expected`, a test whose output
+depends on an order the implementation chooses) and say what we changed in the
+pull request. A failure that needs a design decision goes back to you with a
+comment naming the failing leg.
 
-**If your branch no longer merges cleanly with `master`, it goes back to
-you too.** We do not resolve merge conflicts on a contributor's behalf:
-please rebase onto the current `master`, run `make gate` again and push.
-Many pull requests touch the same functions, so keep a branch small and
-rebase it early rather than late.
+**If your branch conflicts with `master` or with other open pull requests, we
+resolve it** and say how in the pull request. Many pull requests touch the same
+functions, so keep a branch small; a smaller one conflicts less and is quicker
+to take.
+
+## Issues and pull requests
+
+**A pull request needs no issue.** A bug fix with its reproducer as a test,
+and the `spinel diff` report if the answer differs from CRuby's, goes in as
+one self-contained pull request. Do not open an issue first and then a pull
+request for it a few minutes later: it costs the same review twice.
+
+**An open issue means "I will not work on this", or "let us talk".** If you
+mean to fix something, open a draft pull request straight away; that is also
+how others see it is taken. If you only want to report it, or will not get to
+it, open an issue and someone else may pick it up. Issues are also the place
+for discussion: a direction to decide, a proposal, a question.
+
+**Describe the why, not the history.** A pull request that fixes a bug needs
+a few lines: what was wrong, and the reproducer. Write more when the change is
+a design decision (what you chose and what you rejected); do not retell how
+the implementation got there or link every related issue.
 
 ## The gate in the commit
 
