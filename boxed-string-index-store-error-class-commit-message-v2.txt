@@ -1,0 +1,36 @@
+An index store outside a boxed String raises CRuby's error class
+
+`s[k] = v` on a String read out of a mixed container goes to the
+runtime's stores for a boxed receiver (sp_poly_arr_widen_and_set,
+sp_poly_splice, sp_poly_splice_range, sp_poly_str_aset_key). Two of
+their errors were of another class than CRuby's, so a `rescue
+IndexError` or a `rescue RangeError` written for CRuby let them
+through:
+
+- A frozen String raised FrozenError whatever the index or the key.
+  CRuby looks at it first: `fz[9] = "X"`, `fz[-9, 1] = "X"`,
+  `fz[1, -1] = "X"`, a String or a Regexp with no match
+  (`fz["q"] = "X"`) are IndexError, a Range outside the String is
+  RangeError, and only a store that would be made is FrozenError.
+  sp_str_frozen_store_index raises what the store into a String that
+  is not frozen raises (sp_str_splice_at) ahead of the frozen test.
+  The keyed store splices a plain String to a fresh buffer, so it
+  runs as it does for a String that is not frozen, raising for the
+  key, and raises FrozenError where it would have answered.
+- A Range that starts outside the String raised IndexError
+  (`s[9..10] = "X"`), or stored at the front where it started below
+  it (`s[-9..1] = "X"`), in sp_poly_splice_range. Both are
+  RangeError, naming the Range, as sp_poly_str_aset_key raises it.
+
+A value that holds no String is CRuby's TypeError, raised after a
+negative length and before the index or the start is looked at. That
+TypeError is not raised here yet. So for such a value a negative
+length is the IndexError, and every other frozen store keeps the
+FrozenError it had: a program that rescues TypeError and FrozenError
+runs on as before.
+
+A store that was made is made as before. The helper is cold and does
+not return, and the keyed store tests frozen once, as it did. The
+generated C does not change.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
