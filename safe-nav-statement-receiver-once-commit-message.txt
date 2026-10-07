@@ -1,0 +1,26 @@
+A &. statement evaluates its receiver once
+
+    $n = 0
+    nil.tap { $n += 10 }&.size
+    p $n
+
+prints 20: the block runs twice. CRuby prints 10, and so did master
+before "v&.upto(n) { } in statement or tail position skips a nil
+receiver".
+
+For a &. call whose nil guard is pending, emit_iteration_stmt_sn emits
+the receiver and then asks the loop emitters for the call. When they
+decline, because the call is no loop (`&.size`, `&.then { }`), its own
+text is dropped, but the statements the receiver hoisted are already
+written, and the plain emission that follows emits the receiver again.
+A receiver whose block is inlined ahead of the statement (tap, then,
+each, map) ran twice.
+
+On a decline the hoisted statements are now taken back as well, so
+nothing is written, as the function's comment says. A call the loop
+emitters take is emitted as it was.
+
+Test: test/safe_nav_stmt_receiver_once.rb (expected from CRuby 3.3.6)
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+
