@@ -1,0 +1,34 @@
+A boxed value's odd?, even?, ~ and chr raise for a receiver without them
+
+A boxed receiver's odd?, even?, ~ and chr with an encoding read any
+value that is not nil as an Integer:
+
+    v = [1, "s"][1]
+    p v.odd?                     # false
+    p ~v                         # -1
+    p v.chr(Encoding::UTF_8)     # "\u0000"
+
+A Float, a Symbol, an Array and true answered likewise (2.5.odd? false,
+~2.5 -3). CRuby raises NoMethodError, and ArgumentError for a String,
+whose chr takes no argument. The three arms read the receiver through
+sp_poly_recv_i, which raises for nil and converts every other value.
+
+odd? and even? now dispatch on the tag as zero?, positive? and
+negative? do (sp_poly_odd_p, sp_poly_even_p; a Bignum answers its own
+parity) and take the class switch's default arm, so a class's own odd?
+is called: beside one, a boxed odd? did not build. ~ reads its receiver
+through sp_poly_recv_integer_i, which raises for a value that is no
+Integer. chr with an encoding tests the tag as the bare chr beside it
+does; a Bignum, which answered a character, raises RangeError.
+
+Not covered: ~ on a boxed Bignum still answers from its low 64 bits,
+and beside a class that defines ~ the receiver is read as before (the
+class's own ~ is not called).
+
+Tests: test/boxed_integer_only_receiver.rb,
+test/boxed_integer_only_own_method.rb and
+test/boxed_integer_only_bignum.rb.
+The generated C of 75 corpus programs changes, at these calls only;
+optcarrot's is unchanged.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

@@ -1,0 +1,29 @@
+A boxed attribute's &=, |= and ^= use the operator of the value held
+
+    class Box
+      attr_accessor :v
+      def initialize(v) = @v = v
+    end
+    b = Box.new(["s", 1][0])
+    b.v &= 1
+    p b.v
+
+printed 0 where Ruby raises NoMethodError. The three bitwise forms read
+the slot through sp_poly_recv_i, as an Integer whatever it held: a
+String answered 0 or 1, a Float from its integer part, true from 1, an
+Array from 0, and a right operand of true or an Array was read the same
+way. They now go through sp_poly_bitop, as `+=` to `>>=` on the same
+slot go through their sp_poly_ helpers and as a boxed local's `x &= 1`
+does.
+
+A boxed attribute holding nil raised NoMethodError; it now answers
+false or true, as Ruby does and as a boxed local holding nil already
+did.
+
+An Integer attribute, with or without nil, keeps its own slot and its
+own code. A native class's boxed attribute takes the same path; no
+test in the tree has one.
+
+test/boxed_attr_bitwise_op_assign.rb fails on master.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
