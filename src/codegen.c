@@ -12593,6 +12593,11 @@ void emit_regex_section(Compiler *c, Buf *b) {
     buf_puts(b, "  sp_obj_cmp_hook = sp_obj_cmp_dispatch;\n");
   if (g_has_user_binop)
     buf_puts(b, "  SP_INSTALL_HOOK(sp_user_binop_hook, sp_user_binop_dispatch);\n");
+  /* a boxed `/` or `%` does not reach a builtin class's own operator: where
+     the program gives one that is no number its own arithmetic, the runtime
+     keeps its conversion of such a value (sp_poly_divmod_converts) */
+  if (comp_nonnumber_arith_reopened(c))
+    buf_puts(b, "  sp_poly_divmod_converts = 1;\n");
   if (g_has_user_aset)
     buf_puts(b, "  sp_user_aset_hook = sp_user_aset_dispatch;\n");
   if (g_has_user_coerce)

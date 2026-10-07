@@ -980,6 +980,34 @@ int comp_builtin_name_reopened(Compiler *c, const char *name) {
   return 0;
 }
 
+/* Whether the program gives a builtin class that is no number (NilClass,
+   String, Symbol, Array, Object, Kernel, ...) arithmetic of its own: an
+   operator or a named division, in the class or in a module included at the
+   top level, or one of the hooks CRuby asks before it gives up (coerce,
+   method_missing, respond_to_missing?), which count at the top level too.
+   The runtime's boxed arithmetic reaches none of these and converts such a
+   value instead (nil as 0, true as 1, a String as the number it starts
+   with), which often answers what the program's method does. A change to
+   what it answers for a value that is no number asks this first and leaves
+   such a program as it is. */
+int comp_nonnumber_arith_reopened(Compiler *c) {
+  static const char *const names[] = {
+    "coerce", "method_missing", "respond_to_missing?",
+    "+", "-", "*", "/", "%", "**", "div", "divmod", "fdiv", "modulo", "remainder", "quo", "pow", NULL };
+  for (int u = 0; u < 3; u++)
+    if (comp_method_index(c, names[u]) >= 0) return 1;
+  for (int k = 0; k < c->nclasses; k++) {
+    const char *kn = c->classes[k].name;
+    int top = 0;
+    for (int t = 0; t < c->ntoplevel_includes && !top; t++) top = c->toplevel_includes[t] == k;
+    if (!kn || sp_streq(kn, "Integer") || sp_streq(kn, "Float") || sp_streq(kn, "Numeric")) continue;
+    if (!top && !is_builtin_reopen_name(kn) && !comp_is_wellknown_const(kn) && !sp_streq(kn, "Proc")) continue;
+    for (int u = 0; names[u]; u++)
+      if (comp_method_in_chain(c, k, names[u], NULL) >= 0) return 1;
+  }
+  return 0;
+}
+
 /* Whether a call on the chain from a yield up to `call` (`yield.size + 1`)
    names a method some builtin class reopens, an alias that captured the
    builtin (builtin_only) aside: the chain's sites are then typed one by
