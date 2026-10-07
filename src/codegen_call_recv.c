@@ -3645,8 +3645,20 @@ static int emit_str_mutator_call(Compiler *c, int id, Buf *b, const NodeTable *n
       nt_node_set_str((NodeTable *)nt, id, "name", sb_bang);
       buf_printf(b, "const char *_t%d = %s; ", tn2, nb.p ? nb.p : "");
       free(nb.p);
+      /* A chain's write-back may write INTO the buffer _to points at (the
+         base variable holds a handle, or a box that becomes the value), so
+         the "did it change?" test runs before it, as in the handle arm
+         above: after it the new content was compared with itself and
+         `s.concat("x").upcase!` answered nil. */
+      int tchg2 = 0;
+      if (sb_nil_nc && !lvw && str_bang_chain_var(c, recv) >= 0) {
+        tchg2 = ++g_tmp;
+        buf_printf(b, "int _t%d = !sp_str_eq(_t%d, _t%d)%s; ", tchg2, to, tn2, subm2 ? " || sp_re_sub_matched" : "");
+      }
       emit_str_mut_writeback(c, recv, lvw, tn2, b);
-      if (sb_nil_nc)
+      if (tchg2)
+        buf_printf(b, "_t%d ? _t%d : NULL; })", tchg2, tn2);
+      else if (sb_nil_nc)
         buf_printf(b, "(sp_str_eq(_t%d, _t%d)%s) ? NULL : _t%d; })", to, tn2, subm2 ? " && !sp_re_sub_matched" : "", tn2);
       else
         buf_printf(b, "_t%d; })", tn2);
