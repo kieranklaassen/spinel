@@ -1,0 +1,21 @@
+freeze as a statement reaches a String a proc captures
+
+    s = "qr".dup
+    t = s
+    t.freeze
+    l = -> { t << "x" }
+    l.call                  # FrozenError
+
+did not build: 'lv_t' undeclared. The statement arm of freeze froze a
+shared String local through `lv_<name>`. A local a proc captures is in
+its cell, so that C local is not there, outside the proc (above) or
+inside it (`l = -> { t.freeze; 1 }`).
+
+The arm now takes the handle through emit_local_ref, which reads the
+cell or the capture. freeze in value position already went through
+strbuf_slot_ref and is unchanged.
+
+Test: test/captured_string_freeze.rb (expected from CRuby 3.3.6). No
+other program of the corpus changes its generated C.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

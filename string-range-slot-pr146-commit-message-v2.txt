@@ -1,0 +1,58 @@
+A String Range stored into an instance variable or a Struct member keeps its ends
+
+    S = Struct.new(:r)
+    def fill(c, i)
+      a = "a#{i}"
+      z = "z#{i}"
+      c.r = (a..z)
+    end
+    c = S.new(("a".."z"))
+    warm = (1..5000).map { |k| "warm-#{k}" }
+    i = 0
+    while i < 200
+      fill(c, i)
+      junk = (1..3000).map { |k| "j#{k}" }
+      r = c.r
+      puts "#{i}: #{r.first}..#{r.last}" unless r.first == "a#{i}" && r.last == "z#{i}" && junk.size == 3000
+      i += 1
+    end
+    puts "done"
+
+printed `59: j319..j320` and `110: j240..j241` before `done`; CRuby
+prints `done` alone. With SPINEL_GC_STRESS=1 197 of the 200 turns read
+another String's bytes, and level 2 stopped at "the mark reached a freed
+heap string".
+
+A String Range sits in its slot by value and carries two GC strings.
+class_needs_scan counts such a slot (upstream 4353), so the object marks
+both ends, but wb_field_is_ref_in asked needs_root alone, which says no
+for a slot that is not itself a reference. The store took no write
+barrier, a minor mark did not walk the old object, and the sweep freed
+both ends while the slot still named them. With SPINEL_GC_MINOR=0 the
+program was right.
+
+The scan and the barrier now ask one predicate, ivar_holds_ref, so the
+store is followed by sp_gc_wb as a String's is. That is 11 instructions
+a store, what a String member's store pays (callgrind, 2,000,000 stores:
+172,668,600 to 194,668,623). A program with no such store gets the C it
+had.
+
+An instance variable written in a method lost its ends the same way once
+the caller's frame was gone. While the caller still held them
+(`h.put(a, z)` and the read in one loop body) it was right before: the
+caller's rooted argument temps kept them for the turn.
+
+Not here, and as before: ends made in the store itself
+(`s.r = ("a#{i}".."z#{i}")`) still stop at level 2; a String Range in a
+global, a constant or a class variable is marked by nothing; inspect of
+a String Range does not hold the text of its first end while it makes
+the second, so under stress a slot that now keeps its ends prints the
+wrong line the same Range prints from an Array element.
+
+Test: test/str_range_slot_barrier.rb (expected from CRuby 3.3.6), in
+GC_MINOR_TESTS, where without the change the leg reports "a holder the
+barrier did not record". The C of two corpus programs changes
+(range_dup_unfrozen, str_range_endpoints_root), by the barrier on each
+such store; optcarrot's does not.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
