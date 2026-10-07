@@ -1851,6 +1851,10 @@ GC_STRESS_TESTS := test/gc_root_frame_slots.rb \
                    test/poly_array_intersect.rb \
                    test/thread_new_args_rooted_across_fiber_alloc.rb \
                    test/gc_root_volatile_string_slot.rb \
+                   test/new_block_held_for_call.rb \
+                   test/ctor_ivar_default_keywords.rb \
+                   test/forward_all_block_reaches_callee.rb \
+                   test/zsuper_in_proc_captures_params.rb \
                    test/gc_root_gathered_handle_param.rb \
                    test/dispatch_arm_roots_operands.rb \
                    test/exception_message_nul.rb
