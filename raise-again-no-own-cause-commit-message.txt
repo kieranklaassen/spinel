@@ -1,0 +1,28 @@
+An exception raised again never takes its own effect as its cause
+
+    def work
+      raise ArgumentError, "work failed"
+    rescue ArgumentError => orig
+      begin
+        cleanup
+      rescue IOError
+        raise orig
+      end
+    end
+
+where cleanup raises an IOError, left the ArgumentError with the
+IOError as its cause and the IOError with the ArgumentError as its
+own: a ring, and `e = e.cause while e.cause` never ended. CRuby leaves
+the ArgumentError's cause nil.
+
+A raise that names no cause takes the exception being handled, or the
+one an ensure body has in flight. sp_raise_cls made one exception to
+that: the very object being handled, raised again, keeps the cause it
+had. The same now holds a step further out. Where the cause chain of
+the handled exception leads back to the object raised, that object
+keeps the cause it had (sp_exc_implicit_cause, which asks
+sp_exc_cause_chain_reaches as the check of `cause:` does). The one in
+flight through an ensure is read the same way, so an object raised
+from its own ensure is no longer its own cause.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
