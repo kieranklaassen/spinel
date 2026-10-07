@@ -12104,6 +12104,8 @@ static void emit_user_binop_dispatch(Compiler *c, Buf *b) {
     /* the comparisons too: a boxed receiver reached sp_poly_cmp, which knows
        nothing of a user `<`, and answered ArgumentError (#3501) */
     "<", ">", "<=", ">=", "<=>", "==",
+    /* a != of the class's own, which a boxed != asks (sp_poly_ne_own) */
+    "!=",
     /* and the element read, which a boxed `r[k] ||= v` / `r[k] += v` reads
        through sp_poly_index_poly */
     "[]", NULL };
@@ -12679,7 +12681,7 @@ void emit_regex_section(Compiler *c, Buf *b) {
     buf_puts(b, "  SP_INSTALL_HOOK(sp_obj_hash_hook, sp_gen_obj_hash);\n  SP_INSTALL_HOOK(sp_obj_eql_hook, sp_gen_obj_eql);\n");
   if (g_gen_obj_valeq)
     buf_puts(b, "  SP_INSTALL_HOOK(sp_obj_eq_hook, sp_obj_eq_dispatch);\n");
-  if (exc_class_has_own_ne(c)) buf_puts(b, "  sp_exc_own_ne = TRUE;\n");
+  if (exc_class_ne_unasked(c)) buf_puts(b, "  sp_exc_own_ne = TRUE;\n");
   if (exc_has_user_msg_override(c))
     buf_puts(b, "  sp_user_exc_to_s_fn = sp_user_exc_to_s;\n");
   if (g_needs_class_machinery)
@@ -16365,7 +16367,7 @@ char *codegen_program(const NodeTable *nt) {
   g_has_user_binop = 0;
   {
     static const char *const uops[] = {
-      "+", "-", "*", "/", "%", "**", "<<", ">>", "&", "|", "^", "==", "[]", NULL };
+      "+", "-", "*", "/", "%", "**", "<<", ">>", "&", "|", "^", "==", "!=", "[]", NULL };
     /* A class that defines a #coerce needs the table for its COMPARISONS too:
        the protocol routes `5 < obj` to the boxed entry, which reaches the
        class through this hook. Only for such a class, though -- an ordinary

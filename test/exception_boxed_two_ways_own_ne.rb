@@ -1,7 +1,6 @@
-# An exception class with a != of its own, or one from its base class. A
-# boxed != does not ask that method: it negates ==. So in such a program the
-# two boxes of one exception stay unequal, and each != here answers what the
-# class's own != answers.
+# An exception class with a != of its own, or one from its base class: each
+# != here answers what the class's own != answers, whichever way the
+# exception is boxed.
 class MyErr < StandardError
   def !=(o) = true
 end

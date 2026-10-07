@@ -4879,8 +4879,9 @@ static sp_bool sp_range_frange_eq(sp_Range r, sp_FloatRange f) {
   return sp_range_excl_end(r) == (f.excl != 0);
 }
 /* Set by the generated main() where an exception class of the program has a
-   != of its own. `!=` is `!sp_poly_eq` and never asks that method, so there
-   the arm below for one exception boxed two ways stands aside. */
+   != of its own that a boxed != cannot ask (one with ivars, or a != that
+   takes one kind of value). There `!=` is `!sp_poly_eq`, so the arm below
+   for one exception boxed two ways stands aside. */
 #ifdef SPINEL_EXT_HOST
 extern sp_bool sp_exc_own_ne;
 #else

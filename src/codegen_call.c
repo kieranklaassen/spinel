@@ -2488,6 +2488,51 @@ void emit_poly_cmp_ordered(Compiler *c, const char *fn, int recv, int arg, Buf *
   buf_printf(b, "%s(", fn); emit_boxed(c, recv, b); buf_puts(b, ", ");
   emit_boxed(c, arg, b); buf_puts(b, ")");
 }
+/* A class's own != on a boxed receiver. `x != y` there was `!sp_poly_eq`,
+   which asks the class's == and never its !=. In a program where a class
+   has a != of its own the boxed != asks it first, through the operator
+   table (sp_user_binop_dispatch), and is `!sp_poly_eq` for every other
+   receiver and for an operand the method's parameter does not take. A
+   raised exception is boxed as an Exception: one of a class whose != can
+   be asked (exc_class_ne_askable) takes that class's id first. */
+static int prog_has_own_ne(Compiler *c) {
+  for (int k = 0; k < c->nclasses; k++)
+    if (comp_method_in_chain(c, k, "!=", NULL) >= 0) return 1;
+  return 0;
+}
+static int exc_any_ne_askable(Compiler *c) {
+  for (int k = 0; k < c->nclasses; k++)
+    if (exc_class_ne_askable(c, k)) return 1;
+  return 0;
+}
+static void emit_poly_ne_own(Compiler *c, int recv, int arg, Buf *b) {
+  if (!g_pd_protos.p || !strstr(g_pd_protos.p, "sp_poly_ne_own(")) {
+    buf_puts(&g_pd_protos, "static sp_bool sp_poly_ne_own(sp_RbVal a, sp_RbVal b);\n");
+    Buf *d = &g_pd_defs;
+    buf_puts(d, "static sp_bool sp_poly_ne_own(sp_RbVal a, sp_RbVal b) {\n"
+                "  if (a.tag == SP_TAG_OBJ && a.v.p) {\n    sp_RbVal r = a, u;\n    switch (a.cls_id) {\n");
+    if (exc_any_ne_askable(c)) {
+      buf_puts(d, "      case SP_BUILTIN_EXCEPTION:\n        switch (sp_exc_user_cls_id(r)) {\n");
+      for (int k = 0; k < c->nclasses; k++)
+        if (exc_class_ne_askable(c, k))
+          buf_printf(d, "          case %d: r.cls_id = %d; break;\n", k, comp_class_index(c, c->classes[k].name));
+      buf_puts(d, "          default: return !sp_poly_eq(a, b);\n        }\n        break;\n");
+    }
+    /* the classes the table has a != arm for */
+    int any = 0;
+    for (int k = 0; k < c->nclasses; k++) {
+      if (!c->classes[k].instantiated || is_builtin_reopen(c->classes[k].name) ||
+          comp_method_in_chain(c, k, "!=", NULL) < 0) continue;
+      buf_printf(d, "%scase %d:", any ? " " : "      ", comp_class_index(c, c->classes[k].name));
+      any = 1;
+    }
+    if (any) buf_puts(d, " break;\n");
+    buf_puts(d, "      default: return !sp_poly_eq(a, b);\n    }\n"
+                "    if (sp_poly_user_cmp(\"!=\", r, b, &u)) return sp_poly_truthy(u);\n  }\n"
+                "  return !sp_poly_eq(a, b);\n}\n");
+  }
+  emit_poly_cmp_ordered(c, "sp_poly_ne_own", recv, arg, b);
+}
 static void emit_poly_eq_ordered(Compiler *c, int recv, int arg, int eq, Buf *b) {
   buf_puts(b, eq ? "" : "(!");
   emit_poly_cmp_ordered(c, "sp_poly_eq", recv, arg, b);
@@ -12466,6 +12511,12 @@ static int emit_case_eq_call(Compiler *c, int id, Buf *b) {
        (1 is not eql? to 1.0): box both sides through the strict poly
        comparator. Scalar eql? is handled by the per-type emitters. */
     int eq = !sp_streq(name, "!=");
+    /* a class's own != answers for a boxed receiver */
+    if (sp_streq(name, "!=") && prog_has_own_ne(c) &&
+        (rt == TY_POLY || rt == TY_UNKNOWN || (rt == TY_EXCEPTION && exc_any_ne_askable(c)))) {
+      emit_poly_ne_own(c, recv, argv[0], b);
+      return 1;
+    }
     /* a Process::Status against an Integer compares its status word (its
        builtin-op rows) */
     if (rt == TY_PROCESS_STATUS && (a0 == TY_INT || a0 == TY_FLOAT || a0 == TY_PROCESS_STATUS) &&

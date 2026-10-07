@@ -14485,10 +14485,25 @@ static int exc_boxed_by_class_id(Compiler *c, const char *name) {
   }
   return any;
 }
-/* Whether an exception class of the program has a != of its own. */
-int exc_class_has_own_ne(Compiler *c) {
+/* An exception class of the program's whose own != a boxed != can ask,
+   whatever the box and the operand (sp_poly_ne_own): no ivars, so a raised
+   one the runtime built is the class's whole struct, and a != that takes
+   any value. */
+int exc_class_ne_askable(Compiler *c, int k) {
+  int mi = comp_method_in_chain(c, k, "!=", NULL);
+  if (mi < 0 || !class_is_exc_subclass(c, k)) return 0;
+  Scope *m = &c->scopes[mi];
+  if (c->classes[k].nivars > 0 || !c->classes[k].instantiated || !m->reachable || m->yields ||
+      scope_is_shadowed(c, mi) || m->is_transplanted_source || m->nparams != 1 || m->rest_idx >= 0) return 0;
+  LocalVar *p = scope_local(m, m->pnames[0]);
+  return !p || p->type == TY_POLY || p->type == TY_UNKNOWN;
+}
+/* Whether an exception class of the program has a != of its own that a
+   boxed != cannot ask. */
+int exc_class_ne_unasked(Compiler *c) {
   for (int k = 0; k < c->nclasses; k++)
-    if (class_is_exc_subclass(c, k) && comp_method_in_chain(c, k, "!=", NULL) >= 0) return 1;
+    if (class_is_exc_subclass(c, k) && comp_method_in_chain(c, k, "!=", NULL) >= 0 &&
+        !exc_class_ne_askable(c, k)) return 1;
   return 0;
 }
 /* Object's universal protocol -- ===, ==, !=, equal?, eql?, frozen?, freeze,
@@ -14630,7 +14645,7 @@ static void emit_native_object_protocol_text(Compiler *c, const char *name, TyKi
       /* one exception can be boxed two ways (sp_poly_eq): the operand may
          be the receiver itself under the id of the program's class */
       int two = rt == TY_EXCEPTION && exc_boxed_by_class_id(c, is_ne ? "==" : name) &&
-                !exc_class_has_own_ne(c);
+                !exc_class_ne_unasked(c);
       buf_printf(&test, "(_u%d.tag == SP_TAG_OBJ && %s_u%d.cls_id == %s && ", t, two ? "((" : "", t, bid);
       if (fn) buf_printf(&test, "%s(_t%d, (%s)_u%d.v.p))", fn, t, cty, t);
       else buf_printf(&test, "_u%d.v.p == (void *)_t%d)", t, t);
