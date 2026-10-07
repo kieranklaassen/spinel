@@ -33173,7 +33173,12 @@ static void an_phase_infer_fixpoint(Compiler *c) {
         ch = infer_param_types(c);
         g_final_bind_pass = 0;
       }
-      if (!ch && !desugar_mutator_recv_rebind(c)) break;
+      if (!ch && !desugar_mutator_recv_rebind(c)) {
+        /* Settled. A callback in a local that held nil first takes its
+           parameters from its calls only now, where they all hand the same
+           kinds (proc_locals_open), and never this near the cap. */
+        if (iter + 8 >= rc.cap || !proc_locals_open(c)) break;
+      }
     }
     an_round_cap_step(c, &rc, iter);
     if (iter + 1 == rc.cap) g_fixpoint_capped = 1;
