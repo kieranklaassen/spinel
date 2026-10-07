@@ -1,0 +1,1 @@
+A rescue modifier whose value is always nil builds

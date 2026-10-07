@@ -1,0 +1,7 @@
+A rescue modifier whose value is always nil builds
+
+`x = (none rescue nil)`, where `none` answers nil, did not build: the
+modifier's temporary was declared with the C type of nil, `void`. It is
+held boxed, as the temporary of `begin ... rescue ... end` is.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
