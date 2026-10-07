@@ -15125,8 +15125,9 @@ void emit_str_frozen_check(Compiler *c, int recv, Buf *b) {
    after its "not matched" IndexError: a boxed v is held boxed and converted
    at the splice, and a v of another type that is not a String stays there.
    Emits the temp (numbered `tv`, or a fresh number when `tv` is -1) and the
-   frozen check, and answers the text the splice passes for v (the caller
-   frees it). */
+   frozen check (not for a `recv` of -1: that arm checks after its own
+   tests), and answers the text the splice passes for v (the caller frees
+   it). */
 static char *emit_str_splice_value(Compiler *c, int recv, int v, int late, int tv, Buf *b) {
   int is_str = comp_ntype(c, v) == TY_STRING;
   int inert = nt_kind(c->nt, v) == NK_StringNode || subtree_is_pure_read(c, v) || arg_ran_first(v, 0);
@@ -15145,7 +15146,7 @@ static char *emit_str_splice_value(Compiler *c, int recv, int v, int late, int t
     buf_printf(&vb, "_v%d", tv);
   }
   else emit_str_insert_text(c, v, &vb);
-  buf_puts(b, " sp_str_check_mutable("); emit_expr(c, recv, b); buf_puts(b, ");");
+  if (recv >= 0) { buf_puts(b, " sp_str_check_mutable("); emit_expr(c, recv, b); buf_puts(b, ");"); }
   return vb.p;
 }
 /* emit_array_mutate_stmt_body's String mutators done by reassigning the
@@ -15332,13 +15333,19 @@ static int str_mutate_reassign_arms(Compiler *c, Buf *b, int indent, const NodeT
       int ti = ++g_tmp;
       emit_indent(b, indent);
       buf_printf(b, "{ sp_Range _t%d = sp_range_ix(", ti); emit_expr(c, argv[0], b); buf_puts(b, ");");
-      char *v = emit_str_splice_value(c, recv, argv[1], 0, ti, b);
+      char *v = emit_str_splice_value(c, -1, argv[1], 0, ti, b);
       buf_printf(b, " sp_int _len%d = (sp_int)sp_str_length(", ti); emit_expr(c, recv, b); buf_puts(b, ");");
       /* a beginless bound is 0 and an endless one is the last index, rather
          than the SP_INT_NIL sentinel a negative-index fixup would fold into a
          wild offset (`s[..1] = x` raised RangeError) */
       buf_printf(b, " sp_int _a%d = _t%d.first == SP_INT_NIL ? 0 :"
                     " (_t%d.first < 0 ? _t%d.first + _len%d : _t%d.first);", ti, ti, ti, ti, ti, ti);
+      /* A start outside the String is the RangeError, naming the Range, and
+         ahead of a frozen receiver's FrozenError as in CRuby. A start still
+         negative went on to sp_str_splice_at, which counted it from the end
+         once more: `s[-5..1] = "x"` on "abc" answered "ax". */
+      buf_printf(b, " if (_a%d < 0 || _a%d > _len%d) sp_raise_range_start(_t%d.first, _t%d.last, _t%d.excl);", ti, ti, ti, ti, ti, ti);
+      buf_puts(b, " sp_str_check_mutable("); emit_expr(c, recv, b); buf_puts(b, ");");
       buf_printf(b, " int _oe%d = _t%d.last == SP_INT_NIL;", ti, ti);
       buf_printf(b, " sp_int _e%d = _oe%d ? _len%d - 1 :"
                     " (_t%d.last < 0 ? _t%d.last + _len%d : _t%d.last);", ti, ti, ti, ti, ti, ti, ti);
