@@ -24,10 +24,10 @@
    (`boxes.each { |b| }` over an Array that holds nil); a container call
    other than the element reads and picks that can miss (an Array's or a
    Hash's own methods); and a builtin value a builtin call answers other
-   than those picks, a String's slice or bang method, and the reads of ENV,
-   a MatchData and an IO that can miss (a block's value through then or a
-   Proc's call, a Struct's member read by index, an empty String Range's
-   min).
+   than those picks, a String's slice or bang method, and the reads of a
+   MatchData and an IO that can miss (ENV's read of a name that is not set,
+   a block's value through then or a Proc's call, a Struct's member read by
+   index, an empty String Range's min).
 
    Flow: the slots are flow-insensitive (a slot one write leaves nil may be
    nil at every read), except that a read of a local inside a truthiness
@@ -692,14 +692,11 @@ static int nf_call(NF *f, int v) {
   if (r >= 0 && (rt == TY_STRING || rt == TY_STRBUF) &&
       (bop_answers_self(rt, nm, an, nt_ref(nt, v, "block") >= 0) & BOPF_SELF_OR_NIL))
     return NFW_OPAQUE;
-  /* a read that finds nothing: ENV's, a MatchData's group that took no
-     part, an IO at the end of its input */
-  if (r >= 0 && nt_kind(nt, r) == NK_ConstantReadNode && nt_str(nt, r, "name")) {
-    const char *cn = nt_str(nt, r, "name");
-    if (sp_streq(cn, "ENV") && (sp_streq(nm, "[]") || sp_streq(nm, "fetch") || sp_streq(nm, "delete")))
-      return NFW_ELEM;
-    if (sp_streq(cn, "Regexp") && sp_streq(nm, "last_match") && an >= 1) return NFW_ELEM;
-  }
+  /* a read that finds nothing: a MatchData's group that took no part, an
+     IO at the end of its input */
+  if (r >= 0 && nt_kind(nt, r) == NK_ConstantReadNode && nt_str(nt, r, "name") &&
+      sp_streq(nt_str(nt, r, "name"), "Regexp") && sp_streq(nm, "last_match") && an >= 1)
+    return NFW_ELEM;
   if (r >= 0 && rt == TY_MATCHDATA && sp_streq(nm, "[]")) return NFW_ELEM;
   int io = r >= 0 && (rt == TY_IO || rt == TY_ARGF);
   if ((io || r < 0) && sp_streq(nm, "gets")) return NFW_ELEM;

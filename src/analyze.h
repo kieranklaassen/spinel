@@ -58,7 +58,7 @@ enum {
   NFW_UNSET,     /* a local's read that can run before any write (the
                     definite-assignment walk, a `||=` slot) */
   NFW_ELEM,      /* an element read or a pick that can miss (Array, Hash,
-                    String, ENV, a MatchData, an IO at its end) */
+                    String, a MatchData, an IO at its end) */
   NFW_GLOBAL,    /* a global, or the main object's ivar, read where no write
                     can be shown to run first (a method's read of one) */
   NFW_IVAR,      /* an ivar some class's initialize does not set first, or one
