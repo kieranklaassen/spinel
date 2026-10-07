@@ -1,0 +1,14 @@
+String#codepoints without a block walks the String to its byte length
+
+    p "a\0b".codepoints   # [97], CRuby [97, 0, 98]
+    p "é".b.codepoints    # [233], CRuby [195, 169]
+
+codepoints with a block walked the String to its recorded byte length.
+Without one, and each_codepoint without a block, it walked an older
+loop that stopped at the first NUL and decoded a binary String as
+UTF-8. One walk serves both now, shaped as sp_str_bytes is: a NUL is a
+character like any other, and a binary String's codepoints are its
+bytes.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+

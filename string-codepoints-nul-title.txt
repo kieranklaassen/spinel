@@ -1,0 +1,1 @@
+String#codepoints without a block walks the String to its byte length
