@@ -33244,15 +33244,18 @@ static void an_phase_infer_fixpoint(Compiler *c) {
         if (iter + 1 == rc.cap) rc.cap++;
         continue;
       }
-      /* Converged: one backstop bind pass lets an empty array-literal arg
-         fill a still-UNKNOWN parameter as an (empty) poly array. If it fills
-         anything, keep iterating so dependent return types resolve. */
+      /* Converged: one backstop bind pass lets an empty-literal arg fill a
+         still-UNKNOWN parameter: a positional `[]` as an (empty) poly array,
+         a `{}` or a keyword's empty literal boxed, where nothing else
+         reaches the parameter. If it fills anything, keep iterating so
+         dependent return types resolve. */
       static int backstop_ran;
       if (!backstop_ran) {
         backstop_ran = 1;
         g_final_bind_pass = 1;
         ch = infer_param_types(c);
         g_final_bind_pass = 0;
+        ch |= bind_empty_literal_params(c);
       }
       if (!ch && !desugar_mutator_recv_rebind(c)) break;
     }

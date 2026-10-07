@@ -140,6 +140,11 @@ typedef struct {
                        conversion would take it apart as whatever another call
                        site pinned. It must stay POLY -- and survive the
                        re-narrow reset, which clears poly params (#4294) */
+  int untyped_arg;  /* (params) the backstop bind pass saw an argument of no
+                       type reach it that is no empty literal: a step after
+                       the fixpoint may type that argument, and the parameter
+                       from it, so an empty literal at another call site does
+                       not box it (bind_note_untyped) */
   int push_widened; /* (params) a push through this parameter carried an element
                        its bound type could not hold, so it must stay the POLY
                        ARRAY: the call-site unification would otherwise collapse

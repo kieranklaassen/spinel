@@ -6684,6 +6684,52 @@ static TyKind bound_source_type(Compiler *c, int src, const LocalVar *p) {
   return t;
 }
 
+/* The backstop bind pass: an argument of no type reaches a parameter that
+   has none either. An empty `{}`, or a keyword's empty `[]`, is noted, and
+   types the parameter once the pass has read every call site
+   (bind_empty_literal_params); any other argument marks it instead: a step
+   after the fixpoint may still type that one (`e = []` is the untyped array
+   by then), and the parameter from it. A positional `[]` never comes here:
+   the pass types it where it reads it. */
+typedef struct { int mi; const char *name; int lit; } EmptyLitBind;
+static EmptyLitBind *empty_lit_binds;
+static int n_empty_lit_binds, cap_empty_lit_binds;
+static void bind_note_untyped(Compiler *c, int mi, LocalVar *p, TyKind at, int node, int kw) {
+  if (!g_final_bind_pass || p->type != TY_UNKNOWN || at != TY_UNKNOWN) return;
+  NodeKind k = nt_kind(c->nt, node);
+  int en = 1;
+  if (k == NK_HashNode || (kw && k == NK_ArrayNode)) nt_arr(c->nt, node, "elements", &en);
+  if (en != 0) { p->untyped_arg = 1; return; }
+  if (n_empty_lit_binds == cap_empty_lit_binds) {
+    cap_empty_lit_binds = cap_empty_lit_binds ? cap_empty_lit_binds * 2 : 16;
+    empty_lit_binds = (EmptyLitBind *)realloc(empty_lit_binds, sizeof(EmptyLitBind) * (size_t)cap_empty_lit_binds);
+    if (!empty_lit_binds) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+  }
+  empty_lit_binds[n_empty_lit_binds++] = (EmptyLitBind){ mi, p->name, node };
+}
+
+/* After the backstop bind pass: a parameter only empty literals reached is
+   the boxed value, the type it ends with when no call site types it (never
+   bound). Decided here instead, what read the parameter while it had no
+   type -- `-> { [n, k] }`, a proc the method returns, as an Integer Array --
+   is read again before the fixpoint ends, and whoever took the proc calls
+   it by that type. Boxed for a keyword's `[]` as well: the untyped array
+   would meet a `{}` from another call site with no rule to widen under
+   among the keywords, and the two would not build. */
+int bind_empty_literal_params(Compiler *c) {
+  int changed = 0;
+  for (int i = 0; i < n_empty_lit_binds; i++) {
+    LocalVar *p = scope_local(&c->scopes[empty_lit_binds[i].mi], empty_lit_binds[i].name);
+    if (!p || p->type != TY_UNKNOWN || p->untyped_arg) continue;
+    slot_rule(c, p, TY_POLY, empty_lit_binds[i].lit, "only an empty literal reaches it, which has no type of its own: the parameter is boxed");
+    changed = 1;
+  }
+  free(empty_lit_binds);
+  empty_lit_binds = NULL;
+  n_empty_lit_binds = cap_empty_lit_binds = 0;
+  return changed;
+}
+
 /* Type method mi's parameters from the arguments `argv` of call_id. */
 static int bind_args_params(Compiler *c, int call_id, int mi, const int *argv, int argc) {
   if (mi < 0) return 0;
@@ -6755,14 +6801,18 @@ static int bind_args_params(Compiler *c, int call_id, int mi, const int *argv, i
     int anode = layout_plain_arg(c, m, argv, &L, i);
     if (anode < 0 && !L.gather) {
       int src = from == ARG_KWH ? kwh : from == ARG_ELEM ? argv[L.splat] : argv[L.arg[i]];
-      changed |= slot_take(c, p, bound_source_type(c, src, p), src);
+      TyKind st = bound_source_type(c, src, p);
+      if (st == TY_UNKNOWN && g_final_bind_pass && p->type == TY_UNKNOWN) p->untyped_arg = 1;
+      changed |= slot_take(c, p, st, src);
       continue;
     }
     if (anode < 0) {
       for (int s = 0; s < pos_argc + (L.gather_kwh ? 1 : 0); s++) {
         int src = s < pos_argc ? argv[s] : kwh;
         if (nt_kind(nt, src) == NK_BlockArgumentNode || !gather_reaches(c, m, argv, pos_argc, L.gather_kwh, s, i)) continue;
-        changed |= slot_take(c, p, bound_source_type(c, src, p), src);
+        TyKind st = bound_source_type(c, src, p);
+        if (st == TY_UNKNOWN && g_final_bind_pass && p->type == TY_UNKNOWN) p->untyped_arg = 1;
+        changed |= slot_take(c, p, st, src);
       }
       continue;
     }
@@ -6777,6 +6827,7 @@ static int bind_args_params(Compiler *c, int call_id, int mi, const int *argv, i
       int en0 = 0; nt_arr(nt, anode, "elements", &en0);
       if (en0 == 0) { slot_rule(c, p, TY_POLY_ARRAY, anode, "an empty `[]` argument and no other call site typing it: the parameter is the untyped array"); changed = 1; continue; }
     }
+    bind_note_untyped(c, mi, p, at, anode, 0);
     /* An empty `{}` / `[]` literal carries no type of its own, so it is skipped
        by the unification below. When ANOTHER call site typed the parameter as
        the other container, though, the two cannot share one slot: the empty
@@ -7036,6 +7087,7 @@ static int bind_args_params(Compiler *c, int call_id, int mi, const int *argv, i
         LocalVar *p = scope_local(m, kname);
         if (!p || p->rbs_seeded) continue;
         TyKind at = infer_type(c, val);
+        bind_note_untyped(c, mi, p, at, val, 1);
         changed |= slot_take(c, p, at, val);
       }
     }
