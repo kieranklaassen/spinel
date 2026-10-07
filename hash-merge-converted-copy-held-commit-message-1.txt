@@ -1,0 +1,10 @@
+The merge of two String-keyed Hashes of different value kinds is one helper
+
+emit_hash_call made it at two sites: a concrete receiver (str_int,
+str_str) is copied to the boxed kind beside the argument's copy, and
+a str_poly receiver takes the argument's copy alone. Both are now
+emit_str_keyed_merge, above it; emit_hash_call goes from 983 lines to
+964. No generated C changes: tools/cident.sh, 6,356 programs
+identical.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

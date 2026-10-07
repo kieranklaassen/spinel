@@ -1,0 +1,43 @@
+A String-keyed Hash's converted copy is held across its merge argument
+
+    counts = {"a" => 1, "b" => 2, "c" => 3}
+    labels = {"x" => "p", "y" => "q", "z" => "r"}
+    total = 0
+    20_000.times { total += counts.merge(labels).size }
+    p total
+
+prints 120000 in CRuby and died by SIGSEGV, built with gcc or clang;
+with 200 keys a side, 3,000 turns raised "no implicit conversion of
+nil into String (TypeError)". A String-keyed Hash merged with one of
+another value kind is copied to the boxed kind, and so is the
+argument: sp_StrPolyHash_merge(sp_StrPolyHash_from_str_int_hash(counts),
+sp_StrPolyHash_from_str_str_hash(labels)). The two copies were
+arguments of one C call, so the one made first had no root while the
+second allocated its own, and a collection there freed it.
+
+The argument's copy is now bound to a rooted temp and the receiver's
+copy is made after it, inside the merge call. That is Ruby's order
+too: the receiver is read first and merged as the argument left it.
+A receiver that is not a local's or an instance variable's read, or
+one beside an argument that runs code, is itself bound to a rooted
+temp ahead of the argument (hold_recv_open), so
+`counts.merge((counts["b"] = 2; labels))` has "b", which clang's
+order lost, and `counts.merge((counts = other; labels))` merges the
+Hash counts named, which gcc's order lost. A receiver already of the
+boxed kind takes only the argument's copy and is held the same way
+(`pair(i).merge(few)`: the same TypeError after 4,000 turns); two
+locals there keep master's C. The two copies also root the Hash they
+copy: each allocated its result before it read its argument, and
+`tally(5).merge(labels)` lost the method's result there. Only this
+merge makes them.
+
+Of the 6,357 programs tools/cident.sh compiles, three change their C:
+the new test, test/bundle_hash_b1.rb and test/env_update_hash_kinds.rb;
+all three pass. The cost is 48 instructions of about 4,445 a merge of
+two locals: 4,000 turns of `counts.merge(labels)` go from 17,863,477
+to 18,054,176 (master does not run 20,000 to the end).
+
+Test: test/hash_merge_converted_copy_held.rb, also in the
+SPINEL_GC_STRESS=2 list.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
