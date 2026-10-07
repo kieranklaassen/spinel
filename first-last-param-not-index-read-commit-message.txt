@@ -1,0 +1,27 @@
+first and last on a parameter that stops being an Array are not an index read
+
+    def show(v) = v.is_a?(Array) ? v.map { |x| show(x) } : (v.is_a?(Range) ? [v.first, v.last] : v)
+    p show([(1..2), 1])
+
+printed [[nil, nil], 1]; CRuby prints [[1, 2], 1]. A Hash in the
+Range's place answered nil for its first, and a String or an Integer
+answered its first character or its lowest bit where CRuby raises
+NoMethodError.
+
+desugar_array_first_last rewrites first and last on an Array receiver
+to [0] and [-1]. It runs inside the analysis fixpoint, so a receiver
+can be an Array when it runs and boxed a round later: here `v` is the
+Array of the outer call until the call in the block hands it that
+Array's elements. The rewrite stayed, and [0] on a boxed Range is not
+its first.
+
+The rewrite marks its call, and a marked call whose receiver has
+become boxed takes its name back, once. It is then the first or last a
+receiver boxed from the start already gets.
+
+That costs 25 instructions for each `last` on such a receiver while it
+holds an Array, and nothing for `first`: 200,000 turns of three such
+`last` calls run 335,420,760 instructions where they ran 320,620,773
+(callgrind).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

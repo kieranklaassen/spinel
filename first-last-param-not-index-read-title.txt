@@ -1,0 +1,1 @@
+first and last on a parameter that stops being an Array are not an index read

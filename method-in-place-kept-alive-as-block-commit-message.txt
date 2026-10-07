@@ -1,0 +1,31 @@
+A Method made in place is kept alive while it becomes a block
+
+    def g(t) = t + 1
+    def run(x) = yield(x)
+    p run(1, &method(:g))
+
+raised "undefined method 'call' for an instance of Method
+(NoMethodError)" under SPINEL_GC_STRESS=2 and exited 1; CRuby prints 2.
+Six tests of the tree fail under that switch for this and pass now:
+cmethod_yield_method_object_block, method_obj_bare_resolves_like_call,
+method_to_proc_keywords, string_handle_yield_boxed_nil,
+string_handle_yield_nil and yield_proc_arg_in_blocked_method.
+
+Where the called method is spliced into its call site, the `&callable`
+argument becomes a proc through sp_poly_to_block, and a Method becomes
+one in sp_method_to_proc, which allocates the proc before the proc
+holds the Method. A Method made in the argument itself has no root, so
+that allocation could collect it. emit_block_arg_proc roots it for a
+`&blk` parameter and Method#to_proc roots it at its own site; this site
+did not.
+
+The site roots a Method that is not a bare read across the conversion,
+and nil is still no block. A Method read from a local, an instance
+variable or a constant is reachable where it lives and emits the C it
+did.
+
+The root is 12 instructions for each such argument: 200,000 turns of
+`s += run(i, &method(:g))` run 72,993,939 instructions where they ran
+70,665,470 (callgrind).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

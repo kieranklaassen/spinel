@@ -1,0 +1,1 @@
+A Method made in place is kept alive while it becomes a block

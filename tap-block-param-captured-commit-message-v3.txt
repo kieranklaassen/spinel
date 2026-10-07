@@ -1,0 +1,53 @@
+A tap or then block's parameter captured by a closure is the receiver
+
+    class Bag
+      def initialize(a) = @a = a
+      def each = @a.each { |v| yield v }
+    end
+    bag = Bag.new([1, 2])
+    p [].tap { |acc| bag.each { |v| acc << v } }
+    s = "q".dup
+    s.tap { |b| bag.each { |v| b << v.to_s } }
+    p s
+
+printed [] and "q" where CRuby prints [1, 2] and "q12", and
+{}.tap { |m| bag.each { |v| m[v] = v * 10 } } raised "no implicit
+conversion of nil into String".
+
+A block whose parameter is captured by a proc made inside it (a lambda,
+or a block handed to a method the program defines with yield) has its
+body wrapped in an immediately-called lambda, so that each iteration
+captures a fresh cell. A tap or then block is emitted in place and
+makes its parameter's cell anew at each run, so it needs no wrapper;
+and the wrapper's parameter was a copy of the receiver: a String
+changed through it kept its old value, an empty Array literal's
+parameter settled as an Integer and `acc << v` became a shift, an empty
+Hash literal's had no type.
+
+The block of a tap, then or yield_self is left unwrapped when the
+receiver is a local variable, a Hash literal or an Array literal. Two
+cases keep the wrapper. An empty Array literal, unless the tap is the
+right side of an assignment, an argument, a receiver, a returned
+value, a method's last expression or a branch of a conditional that is
+one of those, and the block holds no proc literal of the program's
+own: that is where the inline emitters type its cell; read anywhere
+else it is wrapped as before. And a local not known to be an Array or
+a Hash whose block holds a proc literal that changes the parameter by
+position ([]=, insert, setbyte, slice!, clear): in place the parameter
+would be a shared String a proc captures, and such a statement does
+not build over one.
+
+A captured parameter lives in a cell of its declared type, so where
+that is boxed over a typed receiver the receiver is boxed into it
+instead of shadowed.
+
+A program that defines tap, then or yield_self anywhere, in a class or
+a module, keeps the wrap for that name (the classes are asked once a
+name, not at each call), and so does every other receiver: a String
+out of a call or an instance variable is still a copy there
+(`"a".dup.tap { |b| bag.each { b << "x" } }` answers "a"). A local
+that holds its String boxed (`s = [+"q", 1][0]`) still keeps its old
+value, and so does a String changed by position inside a proc literal.
+None of these is part of this change.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
