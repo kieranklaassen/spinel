@@ -1,0 +1,1 @@
+The text of a Float or String range holds its lower bound while the upper one is made

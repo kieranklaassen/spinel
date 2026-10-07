@@ -1,0 +1,20 @@
+Range#inspect of a String range holds its lower bound the same way
+
+    r = ("a".."b")
+    a = []
+    200000.times { a << r.inspect }
+    p a.reject { |s| s == "\"a\"..\"b\"" }
+
+printed ["\"b\"..\"b\""]; CRuby prints []. sp_srange_inspect quotes the
+lower bound and then the upper one, two new Strings, and nothing held
+the first while the second was made.
+
+The lower text is rooted across the second allocation when both bounds
+are written; a range with one bound makes one String and keeps its
+path. to_s quotes nothing and is not touched.
+
+Test: test/string_range_inspect_lower_bound_held.rb, also in
+GC_STRESS_TESTS (expected from CRuby 3.3.6). On master it prints freed
+bytes under SPINEL_GC_STRESS=2.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

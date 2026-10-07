@@ -1,0 +1,22 @@
+The text of a Float range holds its lower bound while the upper is made
+
+    a = []
+    200000.times { |i| a << ((i + 0.5)..(i + 1.5)).to_s }
+    p a[4925]
+
+printed "4926.5..4926.5"; CRuby prints "4925.5..4926.5".
+sp_frange_inspect (lib/sp_cold.c), which is to_s, inspect and
+interpolation for a Float range, makes the lower bound's text and then
+the upper bound's, a second allocation, with nothing holding the first.
+A collection there frees it and the second String takes its slot, so
+both bounds read as the upper one. Under SPINEL_GC_STRESS=2 every such
+text begins with freed bytes.
+
+The lower text is rooted across the second allocation. A range with no
+end makes no second String and returns before the root.
+
+Test: test/float_range_text_lower_bound_held.rb, also in
+GC_STRESS_TESTS (expected from CRuby 3.3.6). On master its first line
+is wrong in a plain run.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

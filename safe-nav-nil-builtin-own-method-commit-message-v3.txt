@@ -1,0 +1,40 @@
+A method added to a builtin is not called on nil after &.
+
+`class String; def pair(a) = "#{self}-#{a}"; end` and then `s&.pair(1)`
+with a nil `s` printed "-1": the method ran on the nil, and its
+arguments ran too. The same for a method added to Integer or Float, and
+for a builtin's name the program redefines on one of the three
+(`s&.upcase`, `v&.numerator`).
+
+emit_call_body takes a call of a method the program added to a builtin
+class ahead of every builtin arm. That site never looked at the
+operator, so for a String, an Integer or a Float, which hold nil in
+their own C type, it took the call before the nil guard
+(emit_call_safe_nav_arms) saw it. Where it is about to take the call
+and the guard is pending (sn_guard_pending), it now calls the guard
+itself: the guard re-enters with the receiver in its temp, and the site
+takes the call then. The call is the one the site made before; only the
+nil test stands around it.
+
+The guard boxes the value by the type read for the call, so the site
+asks it only where that type is the method's own. A redefined
+`Float#eql?` that answers a Symbol is read as a boolean with or without
+the `&.`, and with it the C does not build; such a call keeps the C it
+had.
+
+Leaving the call to reach the guard on its own would not do: the numeric
+arms between this site and the guard (coerce, Rational and Complex, the
+operators, the predicates) answer a name the program redefined,
+`v&.numerator` or `v&.<=>(o)`, with the builtin.
+
+"v&.fdiv(2) and the other Ruby-defined Integer methods keep the &." left
+such a call on its typed emitter; for a method the program defines, that
+emitter is this site.
+
+The call pays for the guard from here on, as `s&.upcase` does: on a
+String the receiver's rooted temp and the nil test, on an Integer or a
+Float the test.
+
+Test: test/safe_nav_reopened_builtin.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
