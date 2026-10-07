@@ -1,0 +1,15 @@
+literal RuntimeError 15 [65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 0, 116, 97, 105, 108]
+built RuntimeError 5 [97, 98, 0, 99, 100]
+leading RuntimeError 4 [0, 97, 98, 99]
+trailing RuntimeError 4 [97, 98, 99, 0]
+two RuntimeError 5 [97, 0, 98, 0, 99]
+plain RuntimeError 5 [112, 108, 97, 105, 110]
+receiver RuntimeError 5 [102, 105, 114, 115, 116]
+subclass Mine 3 [120, 0, 121]
+7
+its receiver Mine 4 [109, 105, 110, 101]
+mixed RuntimeError 3 [112, 0, 113]
+raised RuntimeError 8 [105, 110, 0, 114, 97, 105, 115, 101]
+[35, 60, 82, 117, 110, 116, 105, 109, 101, 69, 114, 114, 111, 114, 58, 32, 105, 110, 0, 114, 97, 105, 115, 101, 62]
+twice RuntimeError 11 [97, 103, 97, 105, 110, 0, 97, 103, 97, 105, 110]
+1690

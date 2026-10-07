@@ -23607,7 +23607,7 @@ void emit_exc_exception(Compiler *c, int recv, int arg, Buf *b) {
   TyKind xrt = comp_ntype(c, recv);
   if (ty_is_object(xrt))
     buf_printf(b, "(sp_%s *)", c->classes[ty_object_class(xrt)].c_name);
-  buf_puts(b, "sp_exc_exception((sp_Exception *)(");
+  buf_puts(b, "sp_exc_exception_given((sp_Exception *)(");
   emit_expr(c, recv, b); buf_puts(b, "), ");
   if (comp_ntype(c, arg) == TY_STRING) emit_expr(c, arg, b);
   else { buf_puts(b, "sp_poly_to_s("); emit_boxed(c, arg, b); buf_puts(b, ")"); }
