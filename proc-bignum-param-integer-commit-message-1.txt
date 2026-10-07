@@ -1,0 +1,16 @@
+emit_proc_literal_here's String handle parameter arm moves into a helper
+
+emit_proc_literal_here is 1,293 lines, past the size at which a
+function may not grow, and the next commit gives it a second kind of
+parameter that reads the boxed channel. The arm that reads it today,
+for a String parameter the body appends to, moves into
+emit_proc_param_from_box with its comments and its two emitted lines
+unchanged. The function calls the helper where the arm stood, under
+the same test of the parameter's index.
+
+No generated C changes: make cident against the parent is 0 differ,
+in the default mode and with CIDENT_FLAGS=--int-overflow=promote.
+
+emit_proc_literal_here: 1,293 -> 1,283 lines.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

@@ -1,0 +1,1 @@
+A Bignum parameter of a proc or a block takes another call's Integer

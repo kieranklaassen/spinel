@@ -1,0 +1,61 @@
+A boxed `/` or `%` beside a value that is no number raises
+
+sp_poly_div and sp_poly_mod convert both sides to an Integer on their
+last line, and their Float branch tests either side's tag, so a value
+that is no number was computed with: nil as 0, a String as the number
+it starts with, a Symbol as its index in the symbol table, true as 1.
+
+    row = [nil, 2]
+    p row[0] / row[1]          # Spinel: 0, CRuby: NoMethodError
+
+    row = [7, nil]
+    p row[0] / row[1]          # Spinel: ZeroDivisionError, CRuby: TypeError
+
+`7 % true` answered 0, and `2.5 / "s"` raised ArgumentError for the
+String's conversion.
+
++ - and * end in sp_poly_binop_bad for such a pair, which is why
+sp_poly_tower_mismatch asks only of a pair with a Bignum, Rational or
+Complex side. / and % have no such ending, so each now asks it of
+every pair, after the mismatch check and before the first branch that
+converts. sp_poly_binop_bad raises as it does for the other three:
+NoMethodError for a receiver without the operator, TypeError ("nil
+can't be coerced into Integer") for an operand. A String receiver of
+% and a Range receiver answer above the check, and a program object is
+sent to its own method above it, as before.
+
+An Integer beside a Float now answers on the first lines of both
+functions, as it does in sp_poly_add, sub and mul, with the value the
+Float branch computed. No pair of plain numbers reaches the check: a
+million boxed operations under callgrind run, on master and here, 68.7
+and 68.7 million instructions for Integer / Integer, 57.7 and 54.7 for
+Float / Float, 125.7 and 55.7 for Integer / Float, 129.7 and 83.7 for
+Integer % Float.
+
+A program that gives a builtin class that is no number arithmetic of
+its own is left as it is. A boxed operator does not reach a reopened
+NilClass#/ or a String#coerce, and the conversion often answers what
+such a method does:
+
+    class NilClass
+      def /(o) = 0
+    end
+    row = [nil, 2]
+    p row[0] / row[1]          # 0 on CRuby, and 0 here by the conversion
+
+comp_nonnumber_arith_reopened asks the class table once: an operator,
+a named division, coerce or method_missing on NilClass, String,
+Symbol, Array, Object and the like, or in a module included at the top
+level, or given to one object (`def nil./(o) = 0`; a class method,
+`def self.pow`, is given to no value and does not count). The unit of
+such a program sets sp_poly_divmod_converts, which
+the two checks read only after an operand has failed them. Reaching
+the program's own method from a boxed operator is a change of its own.
+
+Left alone: div, divmod, fdiv, remainder and ** convert the same way
+in functions of their own.
+
+Tests: test/poly_div_mod_operand.rb, test/poly_div_reopened_builtin.rb,
+test/poly_div_singleton_def.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
