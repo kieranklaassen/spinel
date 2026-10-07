@@ -1,0 +1,38 @@
+A class's own send takes a literal first argument
+
+    class Conn
+      def send(msg, flags) = "#{msg}:#{flags}"
+      def hello(k) = "Conn#hello #{k}"
+    end
+    puts Conn.new.send("hello", 0)
+
+printed `Conn#hello 0` where CRuby prints `hello:0`, and without the
+hello the program was refused (undefined method 'hello' for an instance
+of Conn). test/send_literal_and_user.rb says a class that defines its
+own send is dispatched normally and is never mistaken for Kernel#send;
+that held for a runtime argument only. desugar_public_send_recv and
+desugar_implicit_send retargeted the call to the method the literal
+names before asking whose send it was.
+
+Now the retarget stands down where the receiver's class defines the
+name: its own def, an inherited or included one, a Struct block's, a
+class method for a class receiver, the enclosing class's or a top-level
+def for a bare call. __send__ and public_send go the same way. The class
+has to be in hand, so in a program that defines the name a receiver with
+no type yet waits for it, as to_set's rewrite does (g_infer_optimistic).
+
+The call left standing is an ordinary call to the splat check as well.
+splat_appended_param took the literal for the method's name whatever
+the receiver, so a String splatted into a send that appends to it,
+`c.send(:tag, *[$g])`, would have gone over as a copy; it is refused
+as it is under any other method name.
+
+A boxed receiver, and one whose class only a subclass gives the name,
+are retargeted as before. A program that defines none of the three
+names takes the path it always took: the corpus's generated C is
+unchanged.
+
+Test: test/own_send_literal_argument.rb (expected from CRuby 3.3.6 with
+--enable-frozen-string-literal).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
