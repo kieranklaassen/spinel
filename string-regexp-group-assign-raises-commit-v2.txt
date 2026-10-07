@@ -1,0 +1,38 @@
+String#[]= with a Regexp group raises for a missing group or nil
+
+`s[/re/, n] = v` as a statement stored in three cases where CRuby
+raises. Each after `s = +"abc"; s << "defghijklmnop"`:
+
+    s[/(x)?bc/, 1] = "XYZW"  # s became "XYZWp"
+    s[/(b)c/, 3] = "XYZW"    # s became "XYZWabcdefghijklmnop"
+    s[/(b)(cd)/, 2] = v      # v nil: s became "abefghijklmnop"
+
+CRuby raises IndexError "regexp group 1 not matched", IndexError
+"index 3 out of regexp" and TypeError. A group that took no part in
+the match has -1 for its span, and the String was cut there. The
+index was tested against 9, not against the pattern: past the
+pattern's groups sp_re_caps holds whatever an earlier match left, so
+the answer moved with what the program had matched before. A nil
+String value joined as "".
+
+The String-value arm now tests the index against sp_re_last_ncap,
+the group count sp_re_match records (declared in sp_re.h for the
+generated code), then the group's start, then the value unless it
+cannot be nil, then frozen. The order and the messages are CRuby's:
+no match, index out of regexp, group not matched, nil, frozen. Four
+instructions a statement more with a literal value (3,841 to 3,845,
+callgrind), six or seven with any other.
+
+The other arm reads its value after its tests, and CRuby reads the
+value before it looks at the String: a value that raises is heard
+first. So that arm takes the two group tests only ahead of a value
+that has nothing to run (a literal, a plain variable read); for any
+other value its C is as it was.
+
+Left as they are: a negative group raises IndexError where CRuby
+counts from the last group, and a group past the ninth of a longer
+pattern raises where CRuby stores. In the other arm a frozen receiver
+raises FrozenError first, and a boxed value that comes from a call is
+still stored into a missing group.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
