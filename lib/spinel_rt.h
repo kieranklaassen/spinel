@@ -9079,6 +9079,10 @@ static sp_RbVal sp_poly_get_sym(sp_RbVal v, sp_sym key) {
     case SP_BUILTIN_OPENSTRUCT: return sp_OpenStruct_get((sp_OpenStruct*)v.v.p, key);
     default: break;
   }
+  /* An Array indexed by a Symbol is a TypeError, as the store raises it
+     (sp_poly_set_sym): the read answered nil. */
+  if (sp_poly_is_array_kind(v.cls_id))
+    sp_raise_cls("TypeError", SPL("no implicit conversion of Symbol into Integer"));
   /* A Struct / Data read out of a poly container still answers `o[:member]`:
      the member table is the same one #to_h walks, so go through that rather
      than returning nil for every subscript (#3369). */
@@ -9491,6 +9495,9 @@ static sp_RbVal sp_poly_get_str(sp_RbVal v, const char *key) {
       return sp_poly_hash_foreign_miss(v, sp_box_str(key));
     default: break;
   }
+  /* nor is a String an Array's index (sp_poly_set_str) */
+  if (sp_poly_is_array_kind(v.cls_id))
+    sp_raise_cls("TypeError", SPL("no implicit conversion of String into Integer"));
   /* Struct#["member"] names the member, like the symbol form (#3369) */
   if (v.cls_id >= 0 && sp_obj_to_h_fn && key)
     return sp_poly_get_sym(v, sp_sym_intern(key));
