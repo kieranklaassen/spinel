@@ -1727,6 +1727,21 @@ static int names_another_method(const NodeTable *nt, int n) {
   return s && !name_is_exception_own_method(s) && !sp_streq(s, "new");
 }
 
+/* Is `n` the name a class or module of the program is written under? */
+static int names_a_class(const NodeTable *nt, const char *n) {
+  static const NodeKind kinds[] = { NK_ClassNode, NK_ModuleNode };
+  for (int q = 0; q < 2; q++)
+    NT_FOREACH_KIND(nt, kinds[q], id) {
+      int cp = nt_ref(nt, id, "constant_path");
+      const char *cn = cp >= 0 ? nt_str(nt, cp, "name") : NULL;
+      if (cn && sp_streq(cn, n)) return 1;
+    }
+  return 0;
+}
+static int node_is_path(const NodeTable *nt, int n) {
+  return n >= 0 && nt_kind(nt, n) == NK_ConstantPathNode;
+}
+
 /* A value that may be a Symbol made at run time: a method name the scan
    below cannot read. */
 static int names_by_value(Compiler *c, int n) {
@@ -1747,6 +1762,12 @@ static int names_by_value(Compiler *c, int n) {
      no Symbol held in a variable is passed as a block or to inject;
    - no def of one of the names in a program with a bare `private`,
      `protected` or `module_function`, and no def of `new`;
+   - every class and module is written by its bare name, which no builtin
+     and no other class of the program carries, and under a superclass that
+     is no path; no constant is written through a path, under the name of
+     a builtin exception or of a class, or as another name for a class;
+     nothing calls const_set or remove_const: only there do the name tables
+     tell which class is an exception;
    - each of the names is called on a receiver other than self, with no
      block, and with no argument but the keywords a rendering takes. */
 static int prog_exception_names_plain(Compiler *c) {
@@ -1773,6 +1794,24 @@ static int prog_exception_names_plain(Compiler *c) {
       int x = nt_ref(nt, id, "expression");
       if (x < 0 || nt_kind(nt, x) != NK_SelfNode) return 0;
     }
+    else if (kd == NK_ClassNode || kd == NK_ModuleNode) {
+      /* written as a path it is registered by its leaf, unqualified; a leaf
+         a builtin or another class carries has its path in the name */
+      int cp = nt_ref(nt, id, "constant_path");
+      const char *n = cp >= 0 ? nt_str(nt, cp, "name") : NULL;
+      if (!n || strstr(n, "__") || node_is_path(nt, cp) ||
+          (kd == NK_ClassNode && node_is_path(nt, nt_ref(nt, id, "superclass")))) return 0;
+    }
+    else if (kd == NK_ConstantWriteNode || kd == NK_ConstantOrWriteNode || kd == NK_ConstantAndWriteNode ||
+             kd == NK_ConstantOperatorWriteNode || kd == NK_ConstantTargetNode) {
+      /* a constant that takes the name of a builtin exception or of a
+         class, or is another name for a class: `class CONST` reopens that */
+      const char *n = nt_str(nt, id, "name");
+      if (!n || strstr(n, "__") || is_builtin_exception_name(n) || names_a_class(nt, n) ||
+          resolve_class_alias(c, n)) return 0;
+    }
+    else if (kd == NK_ConstantPathWriteNode || kd == NK_ConstantPathOrWriteNode || kd == NK_ConstantPathAndWriteNode ||
+             kd == NK_ConstantPathOperatorWriteNode || kd == NK_ConstantPathTargetNode) return 0;
     else if (kd == NK_BlockArgumentNode) {
       /* `&:name` calls the name; `&sym` calls whatever the Symbol says */
       int x = nt_ref(nt, id, "expression");
@@ -1801,7 +1840,8 @@ static int prog_exception_names_plain(Compiler *c) {
       }
       else if (sp_streq(m, "instance_eval") || sp_streq(m, "class_eval") || sp_streq(m, "module_eval") ||
                sp_streq(m, "instance_exec") || sp_streq(m, "class_exec") || sp_streq(m, "module_exec") ||
-               sp_streq(m, "eval") || sp_streq(m, "to_proc")) return 0;
+               sp_streq(m, "eval") || sp_streq(m, "to_proc") ||
+               sp_streq(m, "const_set") || sp_streq(m, "remove_const")) return 0;
       else if (name_is_exception_own_method(m)) {
         int recv = nt_ref(nt, id, "receiver");
         if (recv < 0 || nt_kind(nt, recv) == NK_SelfNode || nt_ref(nt, id, "block") >= 0 ||
