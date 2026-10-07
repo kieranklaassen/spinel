@@ -12682,6 +12682,11 @@ void emit_regex_section(Compiler *c, Buf *b) {
     buf_puts(b, "  sp_obj_cmp_hook = sp_obj_cmp_dispatch;\n");
   if (g_has_user_binop)
     buf_puts(b, "  SP_INSTALL_HOOK(sp_user_binop_hook, sp_user_binop_dispatch);\n");
+  /* a boxed `*` reaches no String's or Array's own `*`: in a program that
+     has a method of that name the runtime keeps its TypeError for a Float
+     count (sp_poly_times_own) */
+  if (comp_program_defines_name(c, "*"))
+    buf_puts(b, "  sp_poly_times_own = 1;\n");
   if (g_has_user_aset)
     buf_puts(b, "  sp_user_aset_hook = sp_user_aset_dispatch;\n");
   if (g_has_user_coerce)

@@ -995,6 +995,20 @@ int comp_builtin_name_reopened(Compiler *c, const char *name) {
   return 0;
 }
 
+/* Whether the program has a method named `name` of its own anywhere: in a
+   class or a module (a def, an alias, define_method), or given to one object
+   (`def s.*(o)`, which sits under no class of the table). */
+int comp_program_defines_name(Compiler *c, const char *name) {
+  const NodeTable *nt = c->nt;
+  for (int k = 0; k < c->nclasses; k++)
+    if (comp_method_in_chain(c, k, name, NULL) >= 0) return 1;
+  NT_FOREACH_KIND(nt, NK_DefNode, d) {
+    const char *dn = nt_str(nt, d, "name");
+    if (dn && sp_streq(dn, name)) return 1;
+  }
+  return 0;
+}
+
 /* Whether a call on the chain from a yield up to `call` (`yield.size + 1`)
    names a method some builtin class reopens, an alias that captured the
    builtin (builtin_only) aside: the chain's sites are then typed one by
