@@ -1,0 +1,17 @@
+hash cover?: true
+hash include?: true
+hash member?: true
+array cover?: true
+array include?: true
+array member?: true
+local cover?: true
+local include?: true
+local member?: true
+beside cover?: true
+beside include?: true
+excluded cover?: false
+excluded include?: false
+integer cover?: false
+integer include?: false
+longer: abz true false
+made by the call: 0
