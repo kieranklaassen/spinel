@@ -1,0 +1,41 @@
+A case subject is an argument of its object arm's ===
+
+`case v when obj` is `obj === v`, but the parameter pass did not count
+the case as a call. One call written out typed the parameter, and a
+case whose subject is of another kind was then never passed to the
+method: codegen compared a boxed subject with the arm as a value.
+
+    class Above
+      def initialize(n) = @n = n
+      def ===(o) = o.is_a?(Integer) && o > @n
+    end
+    big = Above.new(3)
+    p(big === 1)                  # types the parameter an Integer
+    [1, 5, "x"].each do |x|
+      case x
+      when big then puts "big"    # Spinel: other, other, other
+      else puts "other"           # CRuby:  other, big, other
+      end
+    end
+
+Without the `p(big === 1)` line the parameter is boxed and the case is
+right. A Float subject beside a parameter an Integer call typed was
+converted into it and took the else arm too.
+
+infer_param_types now binds the case subject to the one parameter of
+an arm object's own === (its == where it has none, which Object#===
+calls), through bind_args_params, as it does for the call written out
+and as infer_block_params does for a Proc arm. Only a parameter
+another call has typed is widened; one no call types, or that only a
+nil reaches, keeps the boxed default it has, so a case that is right
+today keeps its C. A subject of the parameter's own type changes
+nothing.
+
+The method of a program this cures takes its argument boxed where it
+took it typed. Left alone: an arm of a small read-only class kept by
+value, and a String subject, which are turned away before the arm is
+asked.
+
+Test: test/case_when_subject_types_param.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

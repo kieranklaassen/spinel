@@ -1,0 +1,1 @@
+A case subject is an argument of its object arm's ===

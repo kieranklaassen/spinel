@@ -1,0 +1,53 @@
+A boxed value's odd?, even?, ~ and chr raise for a receiver without them
+
+A boxed receiver's odd?, even?, ~ and chr with an encoding read a
+String, a Float, a Symbol, an Array or true as an Integer:
+
+    v = [1, "s"][1]
+    p v.odd?                     # false
+    p ~v                         # -1
+    p v.chr(Encoding::UTF_8)     # "\u0000"
+
+(2.5.odd? false, ~2.5 -3). CRuby raises NoMethodError, and
+ArgumentError for a String, whose chr takes no argument. The three arms
+read the receiver through sp_poly_recv_i, which raises for nil and
+converts a value of any other builtin class.
+
+odd? and even? now dispatch on the tag as zero?, positive? and
+negative? do (sp_poly_odd_p, sp_poly_even_p; a Bignum answers its own
+parity), and an object of a class of the program's own that defines
+the name has its method called. Where the program defines the name in
+Integer, Numeric, Comparable, Object, Kernel or BasicObject, at the
+top level, on a singleton of an Object, or by an alias in any class,
+every such call is compiled as before: an Integer in the box answers
+the builtin, not the inherited definition. ~ reads its receiver
+through sp_poly_recv_integer_i, which raises for a value that is no
+Integer. chr with an encoding tests the tag as the bare chr beside it
+does: a String raises ArgumentError with the count the arity table
+gives its own chr (builtin_arity_expected), a Bignum, which answered a
+character, RangeError, and the rest NoMethodError
+(sp_poly_chr_enc_raise).
+
+Not covered, as before: ~ on a boxed Bignum answers from its low 64
+bits; beside a class that defines ~ the receiver is read as before
+(the class's own ~ is not called); with odd? defined in Integer a
+boxed Integer answers the builtin one, and with it defined in Numeric
+or Object a Float or a String in the box is read as an Integer;
+chr(Encoding::US_ASCII) of a boxed 128 answers a byte.
+
+Wrong before and still wrong, now by a raise: a boxed Regexp's ~
+(it answered -1; Ruby matches $_); a receiver that is no Integer and
+has chr from Numeric, Comparable or BasicObject, ~ from an alias in
+Kernel, or odd? from method_missing (it was read as an Integer, now
+NoMethodError); a boxed nil sent to `def odd? = to_i.odd?` in NilClass
+(NameError for the bare to_i, as nil.odd? has; it was NoMethodError).
+
+Tests: test/boxed_integer_only_receiver.rb,
+test/boxed_integer_only_own_method.rb and
+test/boxed_integer_only_bignum.rb fail on master;
+test/boxed_integer_only_inherited.rb passes there and pins the
+inherited definitions.
+The generated C of 76 corpus programs changes, at these calls only;
+optcarrot's is unchanged.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
