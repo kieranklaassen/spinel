@@ -17733,9 +17733,12 @@ static int promote_shared_stored_strings(Compiler *c) {
      argument) still answers the String read. */
   for (int w = 0; w < nt->count; w++) {
     if (nt_kind(nt, w) != NK_LocalVariableWriteNode) continue;
-    int links[16]; int nl = 0;
-    int cur = nt_ref(nt, w, "value");
-    while (cur >= 0 && nl < 16 && nt_kind(nt, cur) == NK_CallNode &&
+    /* The links are counted, then walked again to be marked: a chain has no
+       longest length. */
+    int nl = 0, slow = 0;
+    int top = nt_ref(nt, w, "value");
+    int cur = top;
+    while (cur >= 0 && nt_kind(nt, cur) == NK_CallNode &&
            nt_ref(nt, cur, "block") < 0) {
       const char *an = nt_str(nt, cur, "name");
       int aa = nt_ref(nt, cur, "arguments"); int aac = 0;
@@ -17743,8 +17746,17 @@ static int promote_shared_stored_strings(Compiler *c) {
       if (!an || !((aac == 1 && (sp_streq(an, "<<") || sp_streq(an, "concat") ||
                                  sp_streq(an, "prepend") || sp_streq(an, "replace"))) ||
                    (aac == 0 && sp_streq(an, "clear")))) break;
-      links[nl++] = cur;
+      if (!sp_streq(an, "<<") && !sp_streq(an, "concat")) slow = 1;
+      nl++;
       cur = nt_ref(nt, cur, "receiver");
+    }
+    /* Only a chain of `<<` and concat links is marked at any length. One
+       holding a prepend, a replace or a clear keeps a walk of 16: a marked
+       prepend or replace emits its receiver more than once, so each such
+       link doubles the compile. */
+    if (slow && nl > 16) {
+      nl = 16; cur = top;
+      for (int k = 0; k < 16; k++) cur = nt_ref(nt, cur, "receiver");
     }
     if (nl == 0 || cur < 0 || nt_kind(nt, cur) != NK_CallNode || !c->strbuf_box[cur]) continue;
     const char *lname3 = nt_str(nt, w, "name");
@@ -17752,8 +17764,8 @@ static int promote_shared_stored_strings(Compiler *c) {
     LocalVar *llv3 = (lname3 && ls3) ? scope_local(ls3, lname3) : NULL;
     if (!llv3 || !strbuf_slot_eligible_shape(c, lname3, ls3, llv3)) continue;
     if (llv3->type != TY_UNKNOWN && llv3->type != TY_STRING && llv3->type != TY_STRBUF) continue;
-    for (int k = 0; k < nl; k++)
-      if (!c->strbuf_box[links[k]]) { c->strbuf_box[links[k]] = 1; changed = 1; }
+    for (int k = 0, l = top; k < nl; k++, l = nt_ref(nt, l, "receiver"))
+      if (!c->strbuf_box[l]) { c->strbuf_box[l] = 1; changed = 1; }
     if (llv3->type != TY_STRBUF || !llv3->str_shared)
       {  llv3->type = TY_STRBUF; llv3->str_shared = 1; changed = 1;  }
   }
