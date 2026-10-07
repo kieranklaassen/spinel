@@ -6374,6 +6374,18 @@ static int emit_poly_builtin_default_spread(Compiler *c, int id, int recv, const
   free(arms.p);
   return 1;
 }
+/* Whether the dispatch keeps the builtin for call `id`, one with no
+   argument, in its default arm: emit_poly_builtin_default_at's own tests.
+   Where they fail (a block on the call, a slot typed for another answer of
+   the class) the arm declines, and the default raises NoMethodError for nil
+   and every other value. */
+int poly_dispatch_keeps_builtin(Compiler *c, int id) {
+  if (nt_ref(c->nt, id, "block") >= 0) return 0;
+  TyKind ret = comp_ntype(c, id);
+  TyKind bt = (c->poly_builtin_ty && id < c->node_cap) ? c->poly_builtin_ty[id] : TY_UNKNOWN;
+  if (bt == TY_UNKNOWN) bt = an_builtin_answer(c, id);
+  return bt != TY_UNKNOWN && (ret == TY_POLY || bt == ret);
+}
 int emit_poly_builtin_default(Compiler *c, int id, int recv, const char *name,
                                      int argc, const int *argv, const int *atmp,
                                      const TyKind *atmp_ty, TyKind ret, int tv, int tr,
