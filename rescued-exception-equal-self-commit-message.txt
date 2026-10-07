@@ -1,0 +1,29 @@
+A rescued exception is equal? to itself typed as the program's class
+
+    class MyErr < StandardError; end
+    k = MyErr.new("n")
+    begin
+      raise k
+    rescue => e
+      p e.equal?(k), k.equal?(e), e == k   # false false false; CRuby: true true true
+    end
+
+`rescue MyErr => f; p f.equal?(f)` printed false too. A value typed as a
+class the program puts under an exception and a rescued exception
+(TY_EXCEPTION) are both the same sp_Exception pointer, but each arm knew
+one of the two: Object#equal? answered false for any argument that is not
+a plain object, and the exception receiver's ==, eql? and equal? answered
+false for an argument typed as the class. Both arms compare the two
+addresses now.
+
+By address only: `e == o` for another exception of the same class and
+message stays false, as it was. CRuby compares the backtraces too, and a
+rescued exception has one the other object does not share.
+
+Not here: `k != e` with the typed value on the left is still refused
+("unsupported equality"), and an exception never raised, kept as a boxed
+value, is asked as before.
+
+Test: test/rescued_own_exception_equal.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

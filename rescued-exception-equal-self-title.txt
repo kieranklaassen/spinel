@@ -1,0 +1,1 @@
+A rescued exception is equal? to itself typed as the program's class
