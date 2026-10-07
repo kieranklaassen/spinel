@@ -1524,7 +1524,10 @@ int emit_gsub_block_expr(Compiler *c, int id, Buf *b) {
   else {
     emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "sp_int _t%d = %s(sp_re_pat_%d, _t%d, _t%d);\n", tm, re_next, reidx, ts, tpos);
   }
-  emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "if (_t%d < 0) { sp_String_append_bin(_t%d, _t%d + _t%d); break; }\n", tm, tout, ts, tpos);
+  /* what is left of the subject goes in by its length: it is read from
+     inside the String, where there is no header to measure it by, and it was
+     taken to end at its first NUL byte */
+  emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "if (_t%d < 0) { sp_String_append_n(_t%d, _t%d + _t%d, (size_t)(_t%d - _t%d)); break; }\n", tm, tout, ts, tpos, tslen, tpos);
   emit_indent(g_pre, g_indent + 1); buf_puts(g_pre, "sp_re_sub_matched = 1;\n");   /* the bang forms' nil contract */
   if (polypat) {
     emit_indent(g_pre, g_indent + 1);
@@ -1577,7 +1580,7 @@ int emit_gsub_block_expr(Compiler *c, int id, Buf *b) {
   g_indent = save;
   emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "sp_String_append_bin(_t%d, %s);\n", tout, vb.p ? vb.p : "\"\""); free(vb.p);
   if (once) {
-    emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "sp_String_append_bin(_t%d, _t%d + _t%d + _t%d); break;\n", tout, ts, tpos, tme);
+    emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "sp_String_append_n(_t%d, _t%d + _t%d + _t%d, (size_t)(_t%d - _t%d - _t%d)); break;\n", tout, ts, tpos, tme, tslen, tpos, tme);
   }
   else {
     emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "if (_t%d == _t%d) { if (_t%d + _t%d < _t%d) sp_String_append_bin(_t%d, sp_str_substr(_t%d + _t%d, _t%d, 1)); _t%d += _t%d + 1; }\n",
