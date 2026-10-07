@@ -23705,7 +23705,12 @@ void emit_exc_exception(Compiler *c, int recv, int arg, Buf *b) {
   TyKind xrt = comp_ntype(c, recv);
   if (ty_is_object(xrt))
     buf_printf(b, "(sp_%s *)", c->classes[ty_object_class(xrt)].c_name);
-  buf_puts(b, "sp_exc_exception((sp_Exception *)(");
+  /* A literal with no NUL is the C string it always was. Any other String
+     may hold one and is given as a raise gives its message. */
+  const char *aty = nt_type(c->nt, arg);
+  const char *lit = aty && sp_streq(aty, "StringNode") ? nt_str(c->nt, arg, "content") : NULL;
+  int plain = lit && nt_str_len(c->nt, arg, "content") == strlen(lit);
+  buf_printf(b, "sp_exc_exception%s((sp_Exception *)(", plain ? "" : "_given");
   emit_expr(c, recv, b); buf_puts(b, "), ");
   if (comp_ntype(c, arg) == TY_STRING) emit_expr(c, arg, b);
   else { buf_puts(b, "sp_poly_to_s("); emit_boxed(c, arg, b); buf_puts(b, ")"); }

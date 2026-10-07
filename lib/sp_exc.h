@@ -100,6 +100,7 @@ sp_Exception *sp_exc_dup(sp_Exception *e);
 void *sp_exc_apply_staged(const char *cls, const char *msg, void *obj);
 int sp_exc_exit_status(void *obj);
 sp_Exception *sp_exc_exception(sp_Exception *e, const char *msg);
+sp_Exception *sp_exc_exception_given(sp_Exception *e, const char *m);
 const char *sp_exc_class_name(volatile sp_Exception *ve);
 const char *sp_exc_message(volatile sp_Exception *ve);
 /* #to_s as #inspect renders it: a user override (the generated program's

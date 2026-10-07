@@ -354,6 +354,14 @@ sp_Exception *sp_exc_exception(sp_Exception *e, const char *msg) {SP_GC_ROOT(e);
   sp_gc_wb((void *)n);   /* same reason as sp_exc_new_sub_sized */
   return n;
 }
+/* The call as the program writes it: m is a Spinel String. One that holds a NUL
+   is given as a raise's message is; the counted message is built here, with
+   the receiver rooted. Any other goes on as it came. */
+sp_Exception *sp_exc_exception_given(sp_Exception *e, const char *m) {
+  if (!m || !memchr(m, 0, sp_str_byte_len(m))) return sp_exc_exception(e, m);
+  SP_GC_ROOT(e);
+  return sp_exc_exception(e, sp_exc_msg_given(m));
+}
 /* Accept `volatile` pointers: LV slots holding sp_Exception * are
    declared volatile when they live across setjmp, so callers may
    pass volatile-qualified pointers in. The pointee itself isn't
