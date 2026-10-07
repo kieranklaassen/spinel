@@ -618,6 +618,415 @@ int class_recv_static_ci(Compiler *c, int node) {
   return class_var_static_ci(c, node);
 }
 
+/* The program class a receiver is an instance of, proved by its shape where
+   it stands, or -1. A user method compiled for an object runs with a NULL
+   self on nil, so a rule that gives a builtin's name to the program's own
+   method asks this first: `K.new(...)` of a class with no `new` of its own,
+   and a local every write of which is `K.new(...)` of one class, read where
+   a write has run on every path (du_read_maybe_unset). A parameter, an
+   ivar, a method's value or an element may be nil: not answered. */
+static int new_call_class(Compiler *c, int v) {
+  const NodeTable *nt = c->nt;
+  v = unwrap_parens(c, v);
+  int k = v >= 0 && nt_kind(nt, v) == NK_CallNode ? nt_ref(nt, v, "receiver") : -1;
+  const char *n = k >= 0 ? nt_str(nt, v, "name") : NULL;
+  if (!n || !sp_streq(n, "new") || nt_kind(nt, k) != NK_ConstantReadNode) return -1;
+  int ci = comp_class_index(c, nt_str(nt, k, "name"));
+  return ci >= 0 && comp_cmethod_in_chain(c, ci, "new", NULL) < 0 ? ci : -1;
+}
+/* the def, class or module whose locals node n's are, or -1 for the program's */
+static int local_owner(const NodeTable *nt, const int *par, int n) {
+  for (int g = 0; n >= 0 && g < 4096; n = par[n], g++) {
+    NodeKind k = nt_kind(nt, n);
+    if (k == NK_DefNode || k == NK_ClassNode || k == NK_ModuleNode || k == NK_SingletonClassNode) return n;
+  }
+  return -1;
+}
+/* The proofs below are asked of each call of a builtin's name, in every
+   desugar pass and again by the emitter, so what they walk is kept: the
+   parent map while the tree has the nodes it had; and for the compile, as
+   matters of the program's text, each node's owner, the class a local's
+   writes give it, and a read's answer. */
+static struct { const NodeTable *nt; int count; int *par; } g_proof_par;
+static const int *proof_parent_map(const NodeTable *nt) {
+  if (g_proof_par.nt != nt || g_proof_par.count != nt->count) {
+    free(g_proof_par.par);
+    g_proof_par.par = du_parent_map(nt);
+    g_proof_par.nt = nt; g_proof_par.count = nt->count;
+  }
+  return g_proof_par.par;
+}
+static struct { const NodeTable *nt; int count; int *own; } g_proof_own;
+/* local_owner of every node the table holds now */
+static const int *proof_owners(const NodeTable *nt, int upto) {
+  if (g_proof_own.nt != nt || upto >= g_proof_own.count) {
+    const int *par = proof_parent_map(nt);
+    int *own = par ? malloc(sizeof(int) * ((size_t)nt->count + 1)) : NULL;
+    free(g_proof_own.own);
+    g_proof_own.own = own; g_proof_own.nt = nt; g_proof_own.count = own ? nt->count : 0;
+    for (int n = 0; own && n < nt->count; n++) own[n] = local_owner(nt, par, n);
+  }
+  return g_proof_own.own;
+}
+typedef struct { int owner; char *name; int ci; } ProofLocal;
+static struct { const NodeTable *nt; ProofLocal *v; int n, cap; int *read; int rcap; } g_proof_loc;
+static void proof_locals_for(const NodeTable *nt) {
+  if (g_proof_loc.nt == nt) return;
+  for (int i = 0; i < g_proof_loc.n; i++) free(g_proof_loc.v[i].name);
+  free(g_proof_loc.v); free(g_proof_loc.read);
+  memset(&g_proof_loc, 0, sizeof g_proof_loc);
+  g_proof_loc.nt = nt;
+}
+/* The class every write of the local read at `recv` gives it, `K.new(...)`
+   of one class with no `new` of its own, or -1. A parameter of the name, a
+   method's or a block's, is bound by a call: -1. */
+static int local_class_written(Compiler *c, int recv) {
+  const NodeTable *nt = c->nt;
+  const char *ln = nt_str(nt, recv, "name");
+  const int *own = ln ? proof_owners(nt, recv) : NULL;
+  if (!own) return -1;
+  proof_locals_for(nt);
+  int owner = own[recv];
+  for (int i = 0; i < g_proof_loc.n; i++)
+    if (g_proof_loc.v[i].owner == owner && sp_streq(g_proof_loc.v[i].name, ln)) return g_proof_loc.v[i].ci;
+  own = proof_owners(nt, nt->count - 1);
+  if (!own) return -1;
+  int ci = -1;
+  for (int n = 0; n < nt->count && ci != -2; n++) {
+    const char *ty = nt_type(nt, n);
+    size_t tl = ty ? strlen(ty) : 0;
+    int w = ty && comp_is_local_write(nt_kind(nt, n));
+    if (!w && !(tl > 13 && sp_streq(ty + tl - 13, "ParameterNode")) && !(ty && sp_streq(ty, "BlockLocalVariableNode"))) continue;
+    const char *nn = nt_str(nt, n, "name");
+    if (!nn || !sp_streq(nn, ln) || own[n] != owner) continue;
+    int wc = nt_kind(nt, n) == NK_LocalVariableWriteNode ? new_call_class(c, nt_ref(nt, n, "value")) : -1;
+    ci = wc < 0 || (ci >= 0 && wc != ci) ? -2 : wc;
+  }
+  if (ci < 0) ci = -1;
+  if (g_proof_loc.n >= g_proof_loc.cap) {
+    int ncap = g_proof_loc.cap ? g_proof_loc.cap * 2 : 64;
+    ProofLocal *nv = realloc(g_proof_loc.v, sizeof(ProofLocal) * (size_t)ncap);
+    if (!nv) return ci;
+    g_proof_loc.v = nv; g_proof_loc.cap = ncap;
+  }
+  char *kept = strdup(ln);
+  if (kept) g_proof_loc.v[g_proof_loc.n++] = (ProofLocal){ owner, kept, ci };
+  return ci;
+}
+int recv_object_class_written(Compiler *c, int recv) {
+  recv = unwrap_parens(c, recv);
+  if (recv < 0 || nt_kind(c->nt, recv) != NK_LocalVariableReadNode) return new_call_class(c, recv);
+  return local_class_written(c, recv);
+}
+int recv_object_class_proved(Compiler *c, int recv) {
+  const NodeTable *nt = c->nt;
+  recv = unwrap_parens(c, recv);
+  if (recv < 0 || nt_kind(nt, recv) != NK_LocalVariableReadNode) return new_call_class(c, recv);
+  int ci = local_class_written(c, recv);
+  if (ci < 0) return -1;
+  /* written on every path to this read: asked once a read */
+  if (recv >= g_proof_loc.rcap) {
+    int ncap = g_proof_loc.rcap ? g_proof_loc.rcap : 1024;
+    while (ncap <= recv) ncap *= 2;
+    int *nr = realloc(g_proof_loc.read, sizeof(int) * (size_t)ncap);
+    if (!nr) return -1;
+    memset(nr + g_proof_loc.rcap, 0, sizeof(int) * (size_t)(ncap - g_proof_loc.rcap));
+    g_proof_loc.read = nr; g_proof_loc.rcap = ncap;
+  }
+  if (!g_proof_loc.read[recv]) {
+    const int *par = proof_parent_map(nt);
+    DUPos dp = { malloc(sizeof(int) * ((size_t)nt->count + 1)), calloc((size_t)nt->count + 1, 1) };
+    int unset = 1;
+    if (par && dp.pos && dp.done) {
+      for (int k = 0; k < nt->count; k++) dp.pos[k] = -1;
+      unset = du_read_maybe_unset(nt, par, &dp, recv, nt_str(nt, recv, "name"));
+    }
+    free(dp.pos); free(dp.done);
+    du_memo_free();
+    g_proof_loc.read[recv] = unset ? 1 : 2;
+  }
+  return g_proof_loc.read[recv] == 2 ? ci : -1;
+}
+
+/* Whether `self` at node `id` is the object its def or class body runs on.
+   A block or a lambda around the node can be run on another object by
+   instance_eval, instance_exec, the class_ and module_ forms or
+   define_method, straight away or handed on as `&blk`; and the block of
+   Struct.new, Class.new, Module.new or Data.define is a class body. So a
+   node in a block answers 1 only in a program that calls none of the
+   former, and never in a block given to `new` or `define`. */
+int self_is_scope_object(Compiler *c, int id) {
+  static const char *const RESELF[] = { "instance_eval", "instance_exec", "class_eval", "class_exec", "module_eval",
+                                        "module_exec", "define_method", "define_singleton_method", NULL };
+  static struct { const NodeTable *nt; int count, any; } memo;
+  const NodeTable *nt = c->nt;
+  const int *par = proof_parent_map(nt);
+  if (!par || id < 0 || id >= nt->count) return 0;
+  int blk = 0;
+  for (int n = id, g = 0; n >= 0 && g < 4096; n = par[n], g++) {
+    NodeKind k = nt_kind(nt, n);
+    if (k == NK_DefNode || k == NK_ClassNode || k == NK_ModuleNode || k == NK_SingletonClassNode) break;
+    if (k == NK_LambdaNode) blk = 1;
+    if (k != NK_BlockNode) continue;
+    blk = 1;
+    int p = par[n];
+    const char *cn = p >= 0 && nt_kind(nt, p) == NK_CallNode ? nt_str(nt, p, "name") : NULL;
+    if (!cn || sp_streq(cn, "new") || sp_streq(cn, "define")) return 0;
+  }
+  if (!blk) return 1;
+  if (memo.nt != nt || memo.count != nt->count) {
+    memo.nt = nt; memo.count = nt->count; memo.any = 0;
+    NT_FOREACH_KIND(nt, NK_CallNode, k) {
+      const char *kn = nt_str(nt, k, "name");
+      for (int j = 0; kn && RESELF[j] && !memo.any; j++) memo.any = sp_streq(kn, RESELF[j]);
+      if (memo.any) break;
+    }
+  }
+  return !memo.any;
+}
+
+/* Whether node `id`, in a def, hands the def's call on to the builtin of its
+   name: `super`, the method object of a name, or a call `kin` names (the
+   builtin under another of its names). */
+static int def_hands_call_on(const NodeTable *nt, int id, int (*kin)(const char *)) {
+  if (id < 0) return 0;
+  NodeKind k = nt_kind(nt, id);
+  if (k == NK_SuperNode || k == NK_ForwardingSuperNode) return 1;
+  const char *n = k == NK_CallNode ? nt_str(nt, id, "name") : NULL;
+  if (n && ((kin && kin(n)) || sp_streq(n, "method") || sp_streq(n, "public_method") || sp_streq(n, "instance_method")))
+    return 1;
+  for (int i = 0; i < nt_num_refs(nt, id); i++)
+    if (def_hands_call_on(nt, nt_ref_at(nt, id, i), kin)) return 1;
+  for (int i = 0; i < nt_num_arrs(nt, id); i++) {
+    int an = 0; const int *av = nt_arr_at(nt, id, i, &an);
+    for (int j = 0; j < an; j++) if (def_hands_call_on(nt, av[j], kin)) return 1;
+  }
+  return 0;
+}
+/* Whether the program defines a method `nm`, a builtin's name, that takes a
+   call of the name in the builtin's place: every def of it keeps the call
+   (def_hands_call_on: a body that hands it on reaches the builtin again),
+   and no alias names it (an alias of the builtin binds another name to it,
+   and a def that calls that name hands the call on). A program with no def
+   of the name answers 0. */
+int own_def_takes_call(Compiler *c, const char *nm, int (*kin)(const char *)) {
+  const NodeTable *nt = c->nt;
+  int defd = 0;
+  for (int s = 0; s < c->nscopes; s++) {
+    const Scope *sc = &c->scopes[s];
+    if (!sc->name || !sp_streq(sc->name, nm)) continue;
+    if (sc->def_node < 0 || nt_kind(nt, sc->def_node) != NK_DefNode || def_hands_call_on(nt, sc->def_node, kin)) return 0;
+    defd = 1;
+  }
+  if (!defd) return 0;
+  NT_FOREACH_KIND(nt, NK_AliasMethodNode, a)
+    for (int k = 0; k < 2; k++) {
+      int sy = nt_ref(nt, a, k ? "old_name" : "new_name");
+      const char *v = sy >= 0 ? nt_str(nt, sy, "value") : NULL;
+      if (!v || sp_streq(v, nm)) return 0;
+    }
+  NT_FOREACH_KIND(nt, NK_CallNode, a) {
+    const char *cn = nt_str(nt, a, "name");
+    if (!cn || !sp_streq(cn, "alias_method")) continue;
+    int args = nt_ref(nt, a, "arguments"), an = 0;
+    const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+    for (int k = 0; k < an; k++) {
+      NodeKind ak = nt_kind(nt, av[k]);
+      const char *v = ak == NK_SymbolNode ? nt_str(nt, av[k], "value") : ak == NK_StringNode ? nt_str(nt, av[k], "content") : NULL;
+      if (!v || sp_streq(v, nm)) return 0;
+    }
+  }
+  return 1;
+}
+
+/* Where node `n` stands among the program's top-level statements: the
+   index of the one it is in, or -1 when the tree does not reach it. *in_def
+   is set when a def encloses it. */
+static int top_statement_index(const NodeTable *nt, const int *par, int n, int *in_def) {
+  int top = -1, stmts = -1;
+  for (int g = 0; n >= 0 && g < 4096; g++) {
+    int p = par[n];
+    const char *pty = p >= 0 ? nt_type(nt, p) : NULL;
+    if (pty && sp_streq(pty, "ProgramNode")) { stmts = n; break; }
+    if (nt_kind(nt, n) == NK_DefNode) *in_def = 1;
+    top = n; n = p;
+  }
+  if (stmts < 0 || top < 0) return -1;
+  int bn = 0; const int *bd = nt_arr(nt, stmts, "body", &bn);
+  for (int i = 0; i < bn; i++) if (bd[i] == top) return i;
+  return -1;
+}
+static int name_among(const char *n, const char *const *list) {
+  for (int k = 0; n && list[k]; k++) if (sp_streq(n, list[k])) return 1;
+  return 0;
+}
+static const char *const DECL_CALLS[] = { "private", "public", "protected", "module_function", "private_class_method",
+                                          "public_class_method", "private_constant", "attr_reader", "attr_writer",
+                                          "attr_accessor", "include", "extend", "prepend", NULL };
+/* Whether node `n` runs for sure once the top-level statement it stands in
+   has: every node between the two is a class or module body, a visibility
+   call the def is an argument of, or the block of Struct.new, Data.define or
+   Class.new and the constant that takes it. An `if`, a loop, a rescue, a def
+   or any other block can leave it not run. */
+static int runs_with_statement(const NodeTable *nt, const int *par, int n) {
+  static const char *const VIS[] = { "private", "public", "protected", "module_function", "private_class_method",
+                                     "public_class_method", NULL };
+  for (int g = 0; g < 4096; g++) {
+    int p = par[n];
+    const char *pty = p >= 0 ? nt_type(nt, p) : NULL;
+    if (!pty) return 0;
+    if (sp_streq(pty, "ProgramNode")) return 1;
+    NodeKind pk = nt_kind(nt, p);
+    if (pk == NK_CallNode) {
+      int r = nt_ref(nt, p, "receiver");
+      const char *cn = nt_str(nt, p, "name");
+      if (nt_ref(nt, p, "block") == n) {
+        const char *rn = r >= 0 && nt_kind(nt, r) == NK_ConstantReadNode ? nt_str(nt, r, "name") : NULL;
+        if (!rn || !cn || !((sp_streq(cn, "new") && (sp_streq(rn, "Struct") || sp_streq(rn, "Class"))) ||
+                            (sp_streq(cn, "define") && sp_streq(rn, "Data")))) return 0;
+      }
+      else if (r >= 0 || nt_ref(nt, p, "block") >= 0 || !name_among(cn, VIS)) return 0;
+    }
+    else if (!(pk == NK_StatementsNode || pk == NK_ClassNode || pk == NK_ModuleNode || pk == NK_SingletonClassNode ||
+               pk == NK_BlockNode || pk == NK_ConstantWriteNode || sp_streq(pty, "ArgumentsNode"))) return 0;
+    n = p;
+  }
+  return 0;
+}
+/* A value that calls nothing: a literal, an Array of them, either frozen. */
+static int value_is_literal(const NodeTable *nt, int v, int depth) {
+  if (v < 0 || depth > 4) return 0;
+  switch (nt_kind(nt, v)) {
+  case NK_IntegerNode: case NK_FloatNode: case NK_StringNode: case NK_SymbolNode:
+  case NK_TrueNode: case NK_FalseNode: case NK_NilNode: return 1;
+  case NK_ArrayNode: {
+    int en = 0; const int *ev = nt_arr(nt, v, "elements", &en);
+    for (int i = 0; i < en; i++) if (!value_is_literal(nt, ev[i], depth + 1)) return 0;
+    return 1;
+  }
+  case NK_CallNode: {
+    const char *cn = nt_str(nt, v, "name");
+    return cn && sp_streq(cn, "freeze") && nt_ref(nt, v, "arguments") < 0 && nt_ref(nt, v, "block") < 0 &&
+           value_is_literal(nt, nt_ref(nt, v, "receiver"), depth + 1);
+  }
+  default: return 0;
+  }
+}
+/* Whether statement `s` only declares, and so calls no method of the
+   program: a def; a class or module of such statements; a visibility, attr
+   or include call on the implied self with names for arguments; a constant
+   given a literal. */
+static int stmt_only_declares(const NodeTable *nt, int s, int depth) {
+  if (s < 0 || depth > 8) return 0;
+  switch (nt_kind(nt, s)) {
+  case NK_DefNode: return 1;
+  case NK_ClassNode: case NK_ModuleNode: case NK_SingletonClassNode: {
+    int body = nt_ref(nt, s, "body");
+    if (body < 0) return 1;
+    if (nt_kind(nt, body) != NK_StatementsNode) return 0;
+    int bn = 0; const int *bd = nt_arr(nt, body, "body", &bn);
+    for (int i = 0; i < bn; i++) if (!stmt_only_declares(nt, bd[i], depth + 1)) return 0;
+    return 1;
+  }
+  case NK_ConstantWriteNode: return value_is_literal(nt, nt_ref(nt, s, "value"), 0);
+  case NK_CallNode: {
+    if (nt_ref(nt, s, "receiver") >= 0 || nt_ref(nt, s, "block") >= 0 || !name_among(nt_str(nt, s, "name"), DECL_CALLS)) return 0;
+    int args = nt_ref(nt, s, "arguments"), an = 0;
+    const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+    for (int j = 0; j < an; j++) {
+      NodeKind ak = nt_kind(nt, av[j]);
+      if (!(ak == NK_SymbolNode || ak == NK_StringNode || ak == NK_ConstantReadNode || ak == NK_ConstantPathNode || ak == NK_DefNode)) return 0;
+    }
+    return 1;
+  }
+  default: return 0;
+  }
+}
+/* Node `id`, inside a def, and the defining node `d` stand in one top-level
+   statement: whether nothing can run the def around `id` before `d` has run.
+   It holds where that def stands after `d`'s statement, and where every
+   statement from the def's to `d` only declares (stmt_only_declares), with
+   no hook of the program's own that a declaration calls. */
+static int nothing_runs_between(Compiler *c, const int *par, int d, int id) {
+  static const char *const HOOKS[] = { "method_added", "singleton_method_added", "inherited", "included", "extended",
+                                       "prepended", "const_added", "const_missing", NULL };
+  const NodeTable *nt = c->nt;
+  for (int s = 0; s < c->nscopes; s++) if (name_among(c->scopes[s].name, HOOKS)) return 0;
+  int ds[64], dc[64], dn = 0;
+  for (int n = d, p = par[d], g = 0; p >= 0 && g < 4096; n = p, p = par[p], g++)
+    if (nt_kind(nt, p) == NK_StatementsNode) {
+      if (dn >= 64) return 0;
+      ds[dn] = p; dc[dn] = n; dn++;
+    }
+  /* the innermost statement list around `id` that `d` stands in too */
+  int j = -1, cn = -1;
+  for (int n = id, p = par[id], g = 0; p >= 0 && g < 4096 && j < 0; n = p, p = par[p], g++) {
+    if (nt_kind(nt, p) != NK_StatementsNode) continue;
+    for (int k = 0; k < dn; k++) if (ds[k] == p) { j = k; cn = n; break; }
+  }
+  if (j < 0) return 0;
+  if (cn == dc[j]) return j == 0;                         /* the def's own body */
+  int bn = 0, ic = -1, idc = -1;
+  const int *bd = nt_arr(nt, ds[j], "body", &bn);
+  for (int i = 0; i < bn; i++) { if (bd[i] == cn) ic = i; if (bd[i] == dc[j]) idc = i; }
+  if (ic < 0 || idc < 0) return 0;
+  if (ic > idc) return 1;
+  for (int i = ic; i < idc; i++) if (!stmt_only_declares(nt, bd[i], 0)) return 0;
+  for (int k = j - 1; k >= 0; k--) {
+    bd = nt_arr(nt, ds[k], "body", &bn);
+    for (int i = 0; i < bn && bd[i] != dc[k]; i++) if (!stmt_only_declares(nt, bd[i], 0)) return 0;
+  }
+  return 1;
+}
+/* Whether the defining node `d`, a def or an include, has run by the time
+   node `id` does, as far as the text tells: it runs with its top-level
+   statement (runs_with_statement), and that statement stands ahead of the
+   node's, or is the node's own with the node inside a def that nothing can
+   run first (nothing_runs_between). */
+static int defining_node_before(Compiler *c, const int *par, int d, int id) {
+  const NodeTable *nt = c->nt;
+  if (d < 0 || d >= nt->count) return 0;
+  int in_def = 0, dd = 0;
+  int at = top_statement_index(nt, par, id, &in_def), da = top_statement_index(nt, par, d, &dd);
+  if (at < 0 || da < 0 || da > at || !runs_with_statement(nt, par, d)) return 0;
+  return da < at || (in_def && nothing_runs_between(c, par, d, id));
+}
+/* Whether the def of method `mi` has run by the time node `id` does
+   (defining_node_before). A class reopened further down has not given its
+   instances the method yet, and the builtin is still the name's there; so
+   it is under an `if` not taken, or when the class body calls the method
+   around `id` ahead of the def. A method an include copied in is placed by
+   its module's def and by the includes of that module. */
+int own_def_stands_before(Compiler *c, int mi, int id) {
+  const NodeTable *nt = c->nt;
+  const int *par = proof_parent_map(nt);
+  if (!par || mi < 0 || mi >= c->nscopes || id < 0 || id >= nt->count) return 0;
+  const Scope *sc = &c->scopes[mi];
+  int dn = sc->def_node;
+  if ((dn < 0 || dn >= nt->count || nt_kind(nt, dn) != NK_DefNode) && sc->origin_module_ci > 0 && sc->name) {
+    int om = comp_method_in_class(c, sc->origin_module_ci - 1, sc->name);
+    dn = om >= 0 ? c->scopes[om].def_node : -1;
+  }
+  if (!defining_node_before(c, par, dn, id)) return 0;
+  if (sc->origin_module_ci > 0) {
+    /* and so has every include of that module: the class has the method
+       from there on */
+    const char *mn = c->classes[sc->origin_module_ci - 1].name;
+    NT_FOREACH_KIND(nt, NK_CallNode, k) {
+      const char *kn = nt_str(nt, k, "name");
+      if (!kn || !(sp_streq(kn, "include") || sp_streq(kn, "prepend") || sp_streq(kn, "extend"))) continue;
+      int args = nt_ref(nt, k, "arguments"), an = 0, names = 0;
+      const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+      for (int j = 0; j < an; j++) {
+        const char *cn = nt_kind(nt, av[j]) == NK_ConstantReadNode ? nt_str(nt, av[j], "name") : NULL;
+        if (!cn || (mn && sp_streq(cn, mn))) names = 1;
+      }
+      if (names && !defining_node_before(c, par, k, id)) return 0;
+    }
+  }
+  return 1;
+}
+
 /* The literal symbol behind a symbol-typed expression: a SymbolNode itself,
    or a local variable whose only write (in its scope, plain write) is one.
    Lets inject(:op)-style operator selection see through `s = :+; a.inject(s)`.
