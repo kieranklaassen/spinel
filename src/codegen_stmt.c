@@ -5637,6 +5637,16 @@ static int emit_case_container_eq(Compiler *c, int cond, int t, TyKind pt, Buf *
   return 1;
 }
 
+/* A `when` arm of a class kept by value can be handed to its own method
+   as it stands: one that holds no String has nothing to root, and one the
+   arm does not make is held where it was read from. */
+static int when_vobj_arm_plain(Compiler *c, int cond, int cid) {
+  const ClassInfo *k = &c->classes[cid];
+  int strs = 0;
+  for (int i = 0; i < k->nivars; i++) if (k->ivar_types[i] == TY_STRING) strs = 1;
+  return !strs || !subtree_allocates(c->nt, cond);
+}
+
 /* `when <obj>`: call an object's own === (or ==) with the boxed case subject
    when it takes one plain boxed parameter. What it answers is read for its
    Ruby truth. The arm and subject stay rooted across the call. A nil arm
@@ -5645,13 +5655,17 @@ static int emit_case_container_eq(Compiler *c, int cond, int t, TyKind pt, Buf *
 static int emit_when_user_eq(Compiler *c, int cond, int t, TyKind pt, Buf *b) {
   TyKind wpt = comp_ntype(c, cond);
   int wcid = ty_is_object(wpt) ? ty_object_class(wpt) : -1;
-  if (wcid < 0 || comp_ty_value_obj(c, wpt)) return 0;
+  if (wcid < 0) return 0;
+  /* a small read-only class kept by value is asked too, where its own
+     method can be called on the arm as it stands */
+  int byval = comp_ty_value_obj(c, wpt);
   int wdef = -1;
   int weq = comp_method_in_chain(c, wcid, "===", &wdef);
   /* Object#=== is rb_equal: the arm itself matches before its == runs */
   int via_eq = weq < 0;
   if (weq < 0) weq = comp_method_in_chain(c, wcid, "==", &wdef);
   if (weq < 0) return 0;
+  if (byval && (wdef != wcid || !when_vobj_arm_plain(c, cond, wcid))) return 0;
   Scope *ws = &c->scopes[weq];
   LocalVar *wp = ws->nparams == 1 ? scope_local(ws, ws->pnames[0]) : NULL;
   /* an Integer, a Float or a Symbol answer is nil at its sentinel, a String,
@@ -5663,6 +5677,28 @@ static int emit_when_user_eq(Compiler *c, int cond, int t, TyKind pt, Buf *b) {
   if (!wp || wp->type != TY_POLY || ws->rest_idx >= 0 || ws->kwrest_idx >= 0 || ws->blk_param ||
       (wr != TY_BOOL && wr != TY_POLY && wr != TY_INT && wr != TY_FLOAT && wr != TY_SYMBOL && wr != TY_NIL &&
        wr != TY_VOID && !ptr_ret)) return 0;
+  if (byval) {
+    /* no pointer to test for nil, to root or to compare as the same
+       object: the subject is boxed and rooted, then the method is called */
+    int ts = ++g_tmp;
+    Buf call; memset(&call, 0, sizeof call);
+    buf_printf(b, "({ sp_RbVal _t%d = ", ts);
+    { char sref[24]; snprintf(sref, sizeof sref, "_t%d", t);
+      emit_boxed_text(c, pt, sref, b); }
+    buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); ", ts);
+    emit_method_cname(c, ws, &call);
+    buf_puts(&call, "(");
+    emit_expr(c, cond, &call);
+    buf_printf(&call, ", _t%d)", ts);
+    if (wr == TY_POLY) buf_printf(b, "sp_poly_truthy(%s)", call.p);
+    else if (wr == TY_BOOL) buf_printf(b, "(%s)", call.p);
+    else if (ptr_ret) buf_printf(b, "(%s != NULL)", call.p);
+    else if (wr == TY_NIL || wr == TY_VOID) buf_printf(b, "(%s, 0)", call.p);
+    else emit_slot_truthy(wr, call.p, b);
+    free(call.p);
+    buf_puts(b, "; })");
+    return 1;
+  }
   const char *dcn = c->classes[wdef].c_name;
   int ta = ++g_tmp;
   buf_printf(b, "({ sp_%s *_t%d = (sp_%s *)(", dcn, ta, dcn);
