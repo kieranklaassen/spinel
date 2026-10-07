@@ -1,0 +1,33 @@
+true
+true
+0
+0
+2
+y
+false
+false
+1
+true
+0
+2
+"ab"
+["c", "abc", ""]
+"ab?"
+"ab"
+["c", "abc"]
+nil
+"ab"
+"ab!"
+false
+nil
+true
+0
+2
+"ab!"
+["c"]
+true
+1
+false
+nil
+false
+nil
