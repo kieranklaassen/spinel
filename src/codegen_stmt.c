@@ -4305,6 +4305,7 @@ static void emit_pm_deconstruct_keys_arg(Compiler *c, int pat, Buf *b) {
   buf_printf(b, " sp_box_poly_array(_t%d); })", tk);
 }
 
+static int emit_when_class_own_eqq(Compiler *c, int cond, int t, TyKind pt, Buf *b);
 int emit_pm_cond(Compiler *c, int pat, int t, TyKind pt, Buf *b) {
   const NodeTable *nt = c->nt;
   const char *pty = nt_type(nt, pat);
@@ -4369,6 +4370,12 @@ int emit_pm_cond(Compiler *c, int pat, int t, TyKind pt, Buf *b) {
   if (sp_streq(pty, "ConstantReadNode")) {
     const char *cn2 = nt_str(nt, pat, "name");
     if (!cn2) return 0;
+    /* a class of the program that defines === itself is asked, as `when`
+       asks it. A builtin class's name keeps the class test (a capture
+       `Integer => t` is read as binding a value of that class), and so does
+       a subject held with its nil sentinel. */
+    if (t != g_pm_sentinel_t && !is_builtin_reopen_name(cn2) && !comp_is_wellknown_const(cn2) &&
+        emit_when_class_own_eqq(c, pat, t, pt, b)) return 1;
     if (pt == TY_POLY) {
       char tmp[32]; snprintf(tmp, sizeof tmp, "_t%d", t);
       if (!emit_poly_class_when(c, pat, tmp, b)) buf_puts(b, "0");

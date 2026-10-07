@@ -1,0 +1,47 @@
+:even
+:other
+:other
+:other
+:other
+:plain
+9
+true
+false
+first
+k even 6
+alt
+pt 3
+not pt
+s int
+5
+0
+0
+"4"
+"\"s\""
+"nil"
+"[1, 2]"
+"Any"
+true
+true
+:no
+"str"
+2
+:no
+[2, "z"]
+:none
+true
+:none
+8
+"w"
+:none
+5
+12
+"STR"
+:big
+:small
+:same
+true
+true
+false
+true
+2

@@ -247,6 +247,30 @@ static int cn_live(const ANameHash *cn_set, const char *nm) {
   return anh_has(cn_set, nm) || anh_has(cn_set, ib);
 }
 
+/* The === methods an `in` pattern asks: each constant the pattern tests a
+   value against (itself, an alternative, a captured value, an element or the
+   class of an Array or Hash pattern) that names a class of the program
+   defining === itself (class_recv_own_eqq_def). A builtin class's name is
+   not asked. */
+static int a_pattern_own_eqq(Compiler *c, int id, int depth, int *out, int n, int cap) {
+  const NodeTable *nt = c->nt;
+  if (id < 0 || id >= nt->count || depth > 300) return n;
+  NodeKind k = nt_kind(nt, id);
+  if (k == NK_ConstantReadNode) {
+    const char *cn = nt_str(nt, id, "name");
+    int mi = cn && !is_builtin_reopen_name(cn) && !comp_is_wellknown_const(cn) ? class_recv_own_eqq_def(c, id) : -1;
+    if (mi >= 0 && n < cap) out[n++] = mi;
+    return n;
+  }
+  if (k != NK_AlternationPatternNode && k != NK_CapturePatternNode && k != NK_ArrayPatternNode &&
+      k != NK_HashPatternNode && k != NK_AssocNode) return n;
+  const SpNode *nd = &nt->nodes[id];
+  for (int i = 0; i < nd->nr; i++) n = a_pattern_own_eqq(c, nd->r[i].ref, depth + 1, out, n, cap);
+  for (int i = 0; i < nd->na; i++)
+    for (int j = 0; j < nd->a[i].n; j++) n = a_pattern_own_eqq(c, nd->a[i].ids[j], depth + 1, out, n, cap);
+  return n;
+}
+
 void compute_reachable(Compiler *c) {
   /* Build per-scope call sets (CallNode names, not entering nested DefNodes). */
   char ***scope_calls = calloc((size_t)c->nscopes, sizeof(char **));
@@ -417,6 +441,16 @@ void compute_reachable(Compiler *c) {
       MARK_NAME("==="); MARK_NAME("==");
       while (qhead < qtail) { int s = queue[qhead++]; for (int ni = 0; ni < sc_n[s]; ni++) MARK_NAME(scope_calls[s][ni]); }
     }
+  }
+
+  /* An `in Klass` arm calls the class's own === where it defines one, and
+     that call has no CallNode either. */
+  NT_FOREACH_KIND(c->nt, NK_InNode, id) {
+    int own[16];
+    int on = a_pattern_own_eqq(c, nt_ref(c->nt, id, "pattern"), 0, own, 0, 16);
+    for (int i = 0; i < on; i++) { char mk[24]; snprintf(mk, sizeof mk, "\x01%d", own[i]); MARK_NAME(mk); }
+    if (on)
+      while (qhead < qtail) { int s = queue[qhead++]; for (int ni = 0; ni < sc_n[s]; ni++) MARK_NAME(scope_calls[s][ni]); }
   }
 
   /* `reduce(:sym)` / `inject(seed, :sym)` names the method by Symbol, which is

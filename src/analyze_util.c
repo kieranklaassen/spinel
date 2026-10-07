@@ -618,14 +618,13 @@ int class_recv_static_ci(Compiler *c, int node) {
   return class_var_static_ci(c, node);
 }
 
-/* The class method `Klass === x` calls: the receiver names one class at
-   compile time, that class defines === itself (`def self.===`) and the
-   method's one parameter is boxed. -1 for any other receiver; for a ===
-   whose `super` has no === of the program above it (that super is
-   Module#===, which the is_a? fold answers); and for a parameter the written
-   calls have given one type: the body compiled for that type can stop where
-   CRuby answers (`o.equal?(self)` for a Symbol), so the fold stays. */
-int class_recv_own_eqq(Compiler *c, int node) {
+/* The class method a class-valued receiver's === names: the receiver names
+   one class at compile time and that class defines === itself
+   (`def self.===`). -1 for any other receiver, and for a === whose `super`
+   has no === of the program above it: that super is Module#===, which the
+   is_a? fold answers. The parameter's type is not asked, so the answer holds
+   before inference. */
+int class_recv_own_eqq_def(Compiler *c, int node) {
   int def = -1;
   int ci = class_recv_static_ci(c, node);
   int own = ci >= 0 ? comp_cmethod_in_chain(c, ci, "===", &def) : -1;
@@ -634,6 +633,15 @@ int class_recv_own_eqq(Compiler *c, int node) {
     mi = up >= 0 ? comp_cmethod_in_chain(c, up, "===", &def) : -1;
     if (mi < 0) return -1;
   }
+  return own;
+}
+
+/* The class method `Klass === x` calls: class_recv_own_eqq_def's, where the
+   method's one parameter is boxed. -1 for a parameter the written calls have
+   given one type: the body compiled for that type can stop where CRuby
+   answers (`o.equal?(self)` for a Symbol), so the fold stays. */
+int class_recv_own_eqq(Compiler *c, int node) {
+  int own = class_recv_own_eqq_def(c, node);
   if (own < 0) return -1;
   Scope *ws = &c->scopes[own];
   LocalVar *wp = ws->nparams == 1 ? scope_local(ws, ws->pnames[0]) : NULL;
