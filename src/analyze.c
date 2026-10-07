@@ -1783,6 +1783,62 @@ static void reject_dynamic_mixin_args(Compiler *c) {
   }
 }
 
+/* The write of constant `name` when the program writes it exactly once, by
+   any form (`A = v`, `A ||= v`, `Mod::A = v`, a multiple-assignment target);
+   -1 when there is none or more than one. */
+static int const_only_write(const NodeTable *nt, const char *name) {
+  static const NodeKind wk[] = {
+    NK_ConstantWriteNode, NK_ConstantOrWriteNode, NK_ConstantAndWriteNode,
+    NK_ConstantOperatorWriteNode, NK_ConstantTargetNode, NK_ConstantPathWriteNode,
+    NK_ConstantPathOrWriteNode, NK_ConstantPathAndWriteNode,
+    NK_ConstantPathOperatorWriteNode, NK_ConstantPathTargetNode };
+  int only = -1, writes = 0;
+  for (size_t q = 0; q < sizeof wk / sizeof wk[0]; q++)
+    NT_FOREACH_KIND(nt, wk[q], w) {
+      int t = nt_ref(nt, w, "target");
+      const char *wn = nt_str(nt, t >= 0 ? t : w, "name");
+      if (wn && sp_streq(wn, name)) { only = w; writes++; }
+    }
+  return writes == 1 ? only : -1;
+}
+
+/* A constant read that can name a constant the program wrote: a bare name,
+   `::A`, or `Mod::A` under a class or module of the program's own. A path
+   under anything else (`IO::Buffer`, `Errno::ENOENT`) names that namespace's
+   constant, whatever `A` the program has. */
+static int const_read_is_programs(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  NodeKind k = nt_kind(nt, id);
+  if (k != NK_ConstantPathNode) return k == NK_ConstantReadNode;
+  int par = nt_ref(nt, id, "parent");
+  NodeKind pk = nt_kind(nt, par);
+  const char *pn = (pk == NK_ConstantReadNode || pk == NK_ConstantPathNode) ? nt_str(nt, par, "name") : NULL;
+  return par < 0 || (pn && comp_class_index(c, pn) >= 0);
+}
+
+/* `x.is_a?(A)` (kind_of?, instance_of?) where `A = SomeClass`: rewrite the
+   argument's name to the class the constant holds, as `A.foo` and `when A`
+   read it, so every arm that names the class and the narrowing after it see
+   the class. Only for a constant whose one write is `A = <constant>`: a
+   second write may hold another class by the time the call runs. */
+static void rewrite_const_alias_kind_arg(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  const char *name = nt_str(nt, id, "name");
+  if (!name || !is_kind_query(name)) return;
+  int args = nt_ref(nt, id, "arguments"), argc = 0;
+  const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &argc) : NULL;
+  if (argc != 1 || !const_read_is_programs(c, argv[0])) return;
+  const char *an = nt_str(nt, argv[0], "name");
+  if (!an || comp_class_index(c, an) >= 0) return;   /* already a class name */
+  int w = const_only_write(nt, an);
+  if (nt_kind(nt, w) != NK_ConstantWriteNode || !const_read_is_programs(c, nt_ref(nt, w, "value"))) return;
+  const char *real = resolve_class_alias(c, an);
+  if (real && !sp_streq(real, an)) {
+    char buf[256]; snprintf(buf, sizeof buf, "%s", real);  /* copy: set frees an */
+    nt_set_str((NodeTable *)nt, argv[0], "name", buf);
+  }
+}
+
 /* `A = SomeClass` (a constant aliasing a class) then `A.foo`: rewrite the
    ConstantRead receiver's name to the underlying class so class-method dispatch
    resolves it exactly like the direct `SomeClass.foo`. Mirrors the `class CONST`
@@ -1792,6 +1848,7 @@ void rewrite_const_alias_receivers(Compiler *c) {
   for (int id = 0; id < nt->count; id++) {
     const char *ty = nt_type(nt, id);
     if (!ty || !sp_streq(ty, "CallNode")) continue;
+    rewrite_const_alias_kind_arg(c, id);
     int recv = nt_ref(nt, id, "receiver");
     if (recv < 0 || !nt_type(nt, recv)) continue;
     const char *rvty = nt_type(nt, recv);
