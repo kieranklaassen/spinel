@@ -1,0 +1,33 @@
+"l"
+"helo"
+"e"
+"hllo"
+nil
+"hello"
+[-5, nil, "key=val;", "key=val"]
+[-4, nil, "key=val;", "key=val"]
+[-3, "key", "=val;", "key=val"]
+[-2, "=", "keyval;", "key=val"]
+[-1, "val", "key=;", "key=val"]
+[0, "key=val", ";", "key=val"]
+[1, "key", "=val;", "key=val"]
+[2, "=", "keyval;", "key=val"]
+[3, "val", "key=;", "key=val"]
+[4, nil, "key=val;", "key=val"]
+"j"
+"abcdefghiklm"
+"l"
+"abcdefghikm"
+nil
+"abcdefghijklm"
+"l"
+"abcdefghijkm"
+"a"
+"bcdefghijkm"
+"i"
+"abcdefgh-"
+"x"
+"äöü-ÄÖÜ-ßé-"
+"é"
+"äöü-ÄÖÜ-ß-"
+FrozenError

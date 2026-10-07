@@ -1445,17 +1445,44 @@ int emit_op_string_slice(Compiler *c, const BopCtx *x, Buf *b) {
        is the group's own occurrence rather than the first textual one, which
        is a different character when the group repeats (#3543). */
     int ts = ++g_tmp, tn = ++g_tmp, th = ++g_tmp;
+    /* a group named by a literal from 0 to 9 is one of the kept Strings; any
+       other number is settled at run time: a negative one counts back from
+       the last group, and the tenth and beyond are cut out of the receiver
+       by their span, as far as spans are kept (the fifteenth) */
+    int small = nt_kind(c->nt, argv[1]) == NK_IntegerNode && !nt_str(c->nt, argv[1], "bigval") &&
+                nt_int(c->nt, argv[1], "value", -1) >= 0 && nt_int(c->nt, argv[1], "value", -1) <= 9;
+    int tg = small ? tn : ++g_tmp;
     buf_printf(b, "({ const char *_t%d = ", ts); emit_expr(c, recv, b);
     buf_printf(b, "; if (_t%d) sp_str_check_mutable(_t%d);", ts, ts);
     buf_printf(b, " sp_int _t%d = ", tn); emit_int_expr(c, argv[1], b);
-    buf_printf(b, "; const char *_t%d = sp_re_match(sp_re_pat_%d, _t%d) >= 0"
-                  " ? (_t%d == 0 ? sp_re_match_str"
-                  "    : (_t%d >= 1 && _t%d <= 9 ? sp_re_captures[_t%d] : NULL)) : NULL;",
-               th, re_lit_index(c, argv[0]), ts, tn, tn, tn, tn);
+    if (small)
+      buf_printf(b, "; const char *_t%d = sp_re_match(sp_re_pat_%d, _t%d) >= 0"
+                    " ? (_t%d == 0 ? sp_re_match_str"
+                    "    : (_t%d >= 1 && _t%d <= 9 ? sp_re_captures[_t%d] : NULL)) : NULL;",
+                 th, re_lit_index(c, argv[0]), ts, tn, tn, tn, tn);
+    else
+      buf_printf(b, "; sp_int _t%d = -1; const char *_t%d = NULL; SP_GC_ROOT_STR(_t%d);"
+                    " if (sp_re_match(sp_re_pat_%d, _t%d) >= 0) {"
+                    " _t%d = _t%d < 0 ? _t%d + sp_re_last_ncap : _t%d;"
+                    " if (_t%d < 0 && _t%d <= 0) _t%d = -1;"
+                    " if (_t%d == 0) _t%d = sp_re_match_str;"
+                    " else if (_t%d >= 1 && _t%d <= 9) _t%d = sp_re_captures[_t%d];"
+                    " else if (_t%d >= 10 && _t%d <= 15 && _t%d < sp_re_last_ncap && sp_re_caps[2 * _t%d] >= 0)"
+                    " _t%d = sp_str_byteslice(_t%d, sp_re_caps[2 * _t%d],"
+                    " sp_re_caps[2 * _t%d + 1] - sp_re_caps[2 * _t%d]); }",
+                 tg, th, th, re_lit_index(c, argv[0]), ts,
+                 tg, tn, tn, tn,
+                 tn, tg, tg,
+                 tg, th,
+                 tg, tg, th, tg,
+                 tg, tg, tg, tg,
+                 th, ts, tg, tg, tg);
     if (sb_asgn) {
-      buf_printf(b, " if (_t%d && _t%d >= 0 && _t%d <= 9) {"
-                    " sp_int _b = sp_re_caps[2 * _t%d], _e = sp_re_caps[2 * _t%d + 1]; ",
-                 th, tn, tn, tn, tn);
+      if (small)
+        buf_printf(b, " if (_t%d && _t%d >= 0 && _t%d <= 9) {", th, tn, tn);
+      else
+        buf_printf(b, " if (_t%d) {", th);
+      buf_printf(b, " sp_int _b = sp_re_caps[2 * _t%d], _e = sp_re_caps[2 * _t%d + 1]; ", tg, tg);
       /* the head is held while the tail is cut: as two arguments of one
          call, whichever C built first was in flight while the other
          allocated, and a collection there freed it */
