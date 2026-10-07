@@ -149,9 +149,11 @@ static const BuiltinOp bop_rows[] = {
   { TY_PROCESS_STATUS, "==",         1, 1, BF_ANY, TY_BOOL,   BOPE_TEMPLATE, "({ sp_ProcessStatus *_t$t = $r; sp_int _t$u = $i0; _t$t && _t$t->status == _t$u; })", BOP_K(TY_INT) },
   { TY_PROCESS_STATUS, "!=",         1, 1, BF_ANY, TY_BOOL,   BOPE_TEMPLATE, "({ sp_ProcessStatus *_t$t = $r; sp_int _t$u = $i0; !_t$t || _t$t->status != _t$u; })", BOP_K(TY_INT) },
   /* two statuses: CRuby's #== compares to_i with the other, whose own ==
-     answers through it; nil (NULL, before any child) equals only nil */
-  { TY_PROCESS_STATUS, "==",         1, 1, BF_ANY, TY_BOOL,   BOPE_TEMPLATE, "({ sp_ProcessStatus *_t$t = $r; sp_ProcessStatus *_t$u = $e0; (_t$t && _t$u) ? _t$t->status == _t$u->status : _t$t == _t$u; })", BOP_K(TY_PROCESS_STATUS) },
-  { TY_PROCESS_STATUS, "!=",         1, 1, BF_ANY, TY_BOOL,   BOPE_TEMPLATE, "({ sp_ProcessStatus *_t$t = $r; sp_ProcessStatus *_t$u = $e0; (_t$t && _t$u) ? _t$t->status != _t$u->status : _t$t != _t$u; })", BOP_K(TY_PROCESS_STATUS) },
+     answers through it; nil (NULL, before any child) equals only nil. The
+     template as it stands, but for a first operand whose value is a read
+     of `$?` beside a second read of it (emit_op_pstatus_cmp) */
+  { TY_PROCESS_STATUS, "==",         1, 1, BF_ANY, TY_BOOL,   BOPE_PSTATUS_CMP, "({ sp_ProcessStatus *_t$t = $r; sp_ProcessStatus *_t$u = $e0; (_t$t && _t$u) ? _t$t->status == _t$u->status : _t$t == _t$u; })", BOP_K(TY_PROCESS_STATUS) },
+  { TY_PROCESS_STATUS, "!=",         1, 1, BF_ANY, TY_BOOL,   BOPE_PSTATUS_CMP, "({ sp_ProcessStatus *_t$t = $r; sp_ProcessStatus *_t$u = $e0; (_t$t && _t$u) ? _t$t->status != _t$u->status : _t$t != _t$u; })", BOP_K(TY_PROCESS_STATUS) },
   { TY_PROCESS_STATUS, "==",         1, 1, BF_ANY, TY_BOOL,   BOPE_TEMPLATE, "({ sp_ProcessStatus *_t$t = $r; sp_float _t$u = $f0; _t$t && (sp_float)_t$t->status == _t$u; })", BOP_K(TY_FLOAT) },
   { TY_PROCESS_STATUS, "!=",         1, 1, BF_ANY, TY_BOOL,   BOPE_TEMPLATE, "({ sp_ProcessStatus *_t$t = $r; sp_float _t$u = $f0; !_t$t || (sp_float)_t$t->status != _t$u; })", BOP_K(TY_FLOAT) },
   { TY_PROCESS_STATUS, "equal?",     1, 1, BF_ANY, TY_BOOL,   BOPE_TEMPLATE, "({ sp_ProcessStatus *_t$t = $r; sp_ProcessStatus *_t$u = $e0; _t$t == _t$u; })", BOP_K(TY_PROCESS_STATUS) },

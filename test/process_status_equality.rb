@@ -12,3 +12,6 @@ p a == $?, a.equal?($?), a.equal?(a)
 system("true")
 p a == $?, a != $?
 p a == 768, a == 768.0, a != 768, a == "x", a != "x", a == 2.5
+# The first operand's value is a read of `$?` through `&&`, `||` or a
+# begin: nothing holds that status while the second read builds its own.
+p((a && $?) == $?, (begin; $?; end) == $?, ($? || a) == $?, (a && $?) != $?)
