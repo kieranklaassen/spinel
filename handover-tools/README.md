@@ -107,3 +107,31 @@ on this branch). On 759d120fd207 against CRuby 3.3.6: `gd-gen.rb`, 315 of
 cells wrong to right (the piece as it was: 903 change, 114 cells right to
 wrong); `gd3-gen.rb`, 414 of 648 change, 414 cells wrong to right (as it
 was: 534 change, 12 cells right to wrong); no line or cell right to wrong.
+
+On master 8dc5522541bb the patches are format-patch mails (`git am` on the
+commit named gives the commit, with its message and both dates): the fourth
+piece `patches/piece4-exception-is-a-on-8dc5522541bb.patch` on the bare
+tip, the fifth `piece5-constant-lookup-on-8dc5522541bb.patch` on the bare
+tip, and above the fifth `piece7-constant-read-order-on-8dc5522541bb.patch`.
+
+`cr-*` in `texts/` is the seventh piece (a constant read through included
+modules follows the order of ancestors; it stands above the fifth), and
+`const-read/` holds its tools:
+- `cr-gen.rb OUT`, `cr2-gen.rb OUT`, `cr3-gen.rb OUT`: 4,774, 2,967 and
+  1,560 one-answer programs (include graphs with diamonds, repeats,
+  superclasses, reopenings, namespaces, nested classes, `Struct.new`, and
+  what leaves a program to the walk: a statement that runs, a hook, a
+  `prepend`, a required file).
+- `order-dump.patch` makes the compiler print the list it built for each
+  body under `SPINEL_QC_DUMP`; `own-check3.rb DIR` compares those lists
+  with CRuby's `ancestors` (the dump compiler's path in `DUMP_SPINEL`).
+- `hand/`: 33 hand attacks (`h14` a read in `class << self`, `h27` a
+  `BasicObject` subclass: both left to the walk) and the four programs of
+  "a constant read through an ancestor when another class writes the name"
+  (`m1` to `m4`, right on master, on the fifth piece and here).
+The sums are taken with `include-order/csum4.sh`, the runs with
+`include-order/quick.rb`, the table with `include-order/cmp2.rb`. On
+8dc5522541bb against CRuby 3.3.6: 1,949 of 9,301 change, 689 wrong to
+right, 1,232 right on both, 28 wrong with master's output, none right to
+wrong; the lists equal `ancestors` in 153 of 153 programs.
+
