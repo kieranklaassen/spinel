@@ -1,0 +1,47 @@
+A Symbol Range walks the names String#upto walks
+
+    p (:y..:ab).to_a    # [] in Ruby; [:y, :z, :aa, :ab]
+
+A Symbol Range literal is walked by name: String#succ from the begin
+until the end is met or the name grows past the end's length. That is
+the last of String#upto's cases, taken for all of them:
+
+    (:y..:ab)          four names; "y" sorts after "ab": none
+    (:Y..:b)           stops at :Z; one character each: the ten between
+    (:"10"..:"9")      :"10"; digits go by number: none
+    (:"1"..:"010")     999 names; ten
+    (:aa..:z)          :aa; the begin is the end's successor: none
+    (:"z.0"..:"z.09")  100 names; "z.9" steps past the end: ten
+
+and `include?`, `each` and `map` on such a Range answer from those
+names.
+
+Both names are literals, so emit_range_expr asks at compile time
+whether the loop is String#upto's walk for them (sym_range_plain_walk)
+and keeps the loop where that is proved. Any other Range calls
+sp_PolyArray_from_symbol_range, which walks with sp_str_upto_each, the
+walk String Ranges use, and interns each name through the unit's own
+table. Those are the Ranges that were wrong and three kinds the test
+does not try to prove: names that are not ASCII, a begin longer than
+the end, and an end whose carry lands on a 0 that no letter or digit
+stands before (:"0z", :"a.09").
+
+The loop's cursor is now a root. Every name past the first is a String
+of its own, made by sp_str_succ, and nothing held it while its Symbol
+was made, which allocates when the name is new: `p (:ax..:az).to_a`
+aborts under SPINEL_GC_STRESS=2 with gcc and with clang, and so does
+test/symbol_range_enum.rb. sp_sym_to_s hands back a marked String on
+every arm, so the root may name the first cursor too.
+
+Cost (callgrind): the root is 16 to 64 instructions a walk: 19 on a
+walk of one name (`(:qa..:qa)`: 202,987,017 to 221,987,021 for
+1,000,000 walks) and 64 on one of 26 (`(:qa..:qz)`: 3,209,740,876 to
+3,216,168,755 for 100,000). A Range of those three kinds that was
+right pays more on a short walk: `(:"é"..:"é")` 203 to 1,099 a walk,
+`(:aa..:b)` 725 to 1,390.
+
+test/symbol_range_walk.rb has each case; 13 of its 25 lines differ
+from Ruby on master in a plain run. It and test/symbol_range_enum.rb
+are added to GC_STRESS_TESTS.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
