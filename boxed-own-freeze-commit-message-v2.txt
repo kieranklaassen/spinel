@@ -1,0 +1,50 @@
+A class's own freeze and frozen? run through a boxed value
+
+    class Doc
+      def initialize = @sealed = false
+      def freeze
+        @sealed = true
+        self
+      end
+      def sealed = @sealed
+    end
+    d = Doc.new
+    row = [d, 5]
+    row[0].freeze
+    p d.sealed
+
+printed false where Ruby prints true. Through a boxed value the builtin
+freeze ran whatever class the value had: the class's method was never
+called, and the object was frozen for real instead. frozen? was the
+same: `row[0].frozen?` read the header's bit and never asked the class.
+
+Both arms now stand down in a program where a class defines the name,
+as the nil? arm above the freeze line and the dup and clone arm below
+the frozen? line do (user_defines_or_reads). The call goes on to the
+dispatch on the value's class: the class's method runs for its objects,
+and every other value comes back to the same builtin arm.
+
+They stand down only where that dispatch keeps the builtin in its
+default arm (poly_dispatch_keeps_builtin, the tests
+emit_poly_builtin_default_at makes: no block on the call, and a builtin
+answer that fits the call's slot). A call that carries a block has no
+such arm, and the default would raise NoMethodError for nil and every
+other value: there the builtin line answers as before, and the class's
+own method is still not called.
+
+The cost is the dispatch, in a program where a class has a freeze or
+frozen? of its own: a builtin value in the box pays 3 to 7 instructions
+a call, by the loop around it and the compiler (callgrind, master
+42557a3c; over five kinds of value a frozen? call costs 3.0 more with
+gcc and with clang, a freeze call 4.2 more with gcc and 1.0 fewer with
+clang). It is what master charges dup, to_s and nil? in such a program
+today. A program with no freeze or frozen? of its own emits the C it
+did.
+
+This stands on `super` in such an override being Object's: a freeze
+that ends in `super`, called through the box, raised at the super
+before that change, where the builtin had answered.
+
+Tests: test/poly_own_freeze.rb, test/poly_own_freeze_or_nil.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
