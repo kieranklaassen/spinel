@@ -1,0 +1,22 @@
+A boxed String the program appends to is still a String to include?, casecmp and pack
+
+    h = { "k" => +"ab", "n" => 1 }
+    h["k"] << "c"
+    p %w[abc cd].include?(h["k"]), "ABC".casecmp?(h["k"]), [h["k"]].pack("a4")
+
+prints true, true and "abc\x00" in CRuby and false, nil and
+"\x00\x00\x00\x00" here. Without the append all three are right.
+
+The append makes the Hash's String a shared handle, and the box around
+it then carries the handle where it carried the bytes. A String Array's
+include?, member?, index, find_index, rindex and delete, a String Range's
+include? and cover?, casecmp and casecmp?, and the string directives of
+Array#pack each ask the box whether its tag is a String's, and the
+handle's is not: the search missed, casecmp answered nil and pack wrote
+an empty String.
+
+The emitters now read the argument through sp_poly_strbuf_deref, as
+String#== does for a boxed argument, and pack's element reader takes the
+handle's bytes and length. A box that holds no String answers as before.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
