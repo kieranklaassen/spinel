@@ -1,0 +1,26 @@
+A method added to a builtin runs its receiver before its arguments
+
+    class String
+      def pair(a) = "#{size} #{a.size}"
+    end
+    puts recv.pair(arg)
+
+ran arg before recv, with gcc and with clang, for a method the program
+adds to Object, Kernel, String, Symbol, Integer, Float, Range, Array,
+Hash or Numeric; a class's own method runs recv first, as CRuby does.
+Those arms wrote the receiver in place, one C argument beside the
+others, while emit_args_filled runs an argument that allocates ahead
+of the statement. A rest or a default it makes in place stood beside
+that receiver with no root, so for `Door.new.note(m)` against
+`def note(m, *r)` gcc made the Array first and Door.new collected it
+(r.size answered 3 in a plain run), and clang made the Door first and
+the Array's allocation collected that.
+
+emit_reopen_recv_in_order opens such a call as a statement expression,
+in place: the receiver bound to a rooted temp, then what the arguments
+hoist, then the call. It does so when the receiver and an argument (or
+a default the call leaves out) both have an effect, or when the
+receiver allocates and the method has a rest or leaves out a default
+that allocates. Any other call is emitted as it was.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
