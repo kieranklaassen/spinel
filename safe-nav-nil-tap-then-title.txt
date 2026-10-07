@@ -1,0 +1,1 @@
+A &. tap or then on a receiver that is nil alone runs no block

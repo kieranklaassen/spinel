@@ -1,0 +1,23 @@
+A &. tap or then on a receiver that is nil alone runs no block
+
+    $n = 0
+    nil&.then { $n += 10 }
+    p $n
+
+printed 10, and `def t; nil&.tap { $n += 10 }; end` did not build
+(variable or field '_t1' declared void). The tap and then emitters
+carry a nil receiver boxed, for `nil.tap { }`, and never look at the
+operator, so with `&.` they bound the receiver and ran the block.
+
+sn_nil_tap_then names the call: `&.` tap, then or yield_self with a
+block on a receiver whose type is nil alone. sn_guard_pending stands
+the emitters down for it and the nil arm of emit_call_safe_nav_arms
+answers nil. A receiver that is more than a read was evaluated by
+those emitters and still is, once: by that arm, or by
+emit_iteration_stmt where the call is a statement.
+
+A receiver that is itself a `&.` call no guard takes is left as it
+was: in `none&.size&.tap { }` the receiver of `size` is dropped when
+it is nil alone, which is not this change's.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
