@@ -1,0 +1,12 @@
+true
+false
+RangeError
+false
+true
+RangeError
+true
+false
+RangeError
+NoMethodError
+NoMethodError
+ArgumentError
