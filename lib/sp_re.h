@@ -52,6 +52,7 @@ extern SP_TLS const char *sp_re_captures[10];
 extern SP_TLS int sp_re_caps[64];
 extern SP_TLS const char *sp_re_last_str;
 extern SP_TLS const mrb_regexp_pattern *sp_re_last_pat;
+extern SP_TLS int sp_re_last_ncap;   /* groups of the last match, the whole match counted */
 extern SP_TLS const char *sp_re_match_str;
 extern SP_TLS const char *sp_re_match_pre;
 extern SP_TLS const char *sp_re_match_post;

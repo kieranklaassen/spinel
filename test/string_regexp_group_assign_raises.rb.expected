@@ -1,0 +1,41 @@
+IndexError: regexp group 1 not matched
+IndexError: regexp group 2 not matched
+IndexError: regexp group 2 not matched
+"abcdefghijklmnop"
+IndexError: index 2 out of regexp
+IndexError: index 1 out of regexp
+IndexError: index 3 out of regexp
+IndexError: index 4 out of regexp
+"abcdefghijklmnop"
+TypeError: no implicit conversion of nil into String
+IndexError: regexp group 1 not matched
+IndexError: index 2 out of regexp
+"abcdefghijklmnop"
+IndexError: regexp group 1 not matched
+IndexError: index 2 out of regexp
+IndexError: regexp group 1 not matched
+"abcdefghijklmnop"
+IndexError: regexp group 1 not matched
+"abcdefghijklmnop!"
+ArgumentError: invalid value for Integer(): "q"
+ArgumentError: invalid value for Integer(): "q"
+ArgumentError: invalid value for Integer(): "q"
+"abcdefghijklmnop!"
+IndexError: regexp group 1 not matched
+IndexError: index 2 out of regexp
+IndexError: regexp not matched
+true
+FrozenError: can't modify frozen String: "abcdef"
+"abcdef"
+"abcDefghijklmnop!"
+"ab-cDefghijklmnop!"
+"aB-cDefghijklmnop!"
+"aBcdefghijklmnop!"
+"aVcdefghijklmnop!"
+IndexError: regexp group 2 not matched
+IndexError: index 4 out of regexp
+TypeError: no implicit conversion of nil into String
+"key=v"
+IndexError: regexp group 2 not matched
+IndexError: index 3 out of regexp
+"a-cdef"
