@@ -1,0 +1,1 @@
+A String mutator called with `&.` changes its receiver

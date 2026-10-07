@@ -1,0 +1,23 @@
+A String mutator called with `&.` changes its receiver
+
+    def str(v) = v ? +"ab" : nil
+    s = str(true)
+    p s&.concat("x")   # "abx"
+    p s                # "abx"
+
+printed "abx" and "ab". A String mutator is lowered to a reassignment of
+its receiver, and under a `&.` guard the receiver is bound to the guard's
+temp: the new String was written there and the variable kept the old
+one. So did `<<`, replace, insert, upcase! and the rest where the call
+was used for its value or another call followed it, and every one of
+them on a boxed receiver, as a statement too.
+
+The guard's arms now store the temp back (sn_store_back) where the
+receiver is a variable read as its plain slot and the guarded call's
+text assigns the temp. A call that assigns nothing keeps its C.
+
+Test: test/safe_nav_string_mutator_keeps_change.rb; 17 of its 33 lines
+were wrong. Expected output from CRuby 3.3.6.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+
