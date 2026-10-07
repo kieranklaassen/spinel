@@ -33,6 +33,7 @@
    directly onto the one shared heap, so no sp_ext_str_* shim is needed. */
 #include "sp_alloc.h"   /* string + object allocation, sp_box_*, sp_PolyArray */
 #include "sp_str.h"     /* sp_nil_recv for the nil-receiver unpack raise */
+#include "sp_string.h"  /* sp_String: a String element the program appends to is a handle */
 
 /* ---------- Helpers ---------- */
 
@@ -284,6 +285,7 @@ static const char *pk_val_name(sp_RbVal v) {
     case SP_TAG_SYM:  return "Symbol";
     case SP_TAG_OBJ:
       if (v.cls_id >= 0 && sp_obj_cls_name_fn) return sp_obj_cls_name_fn((int)v.cls_id);
+      if (v.cls_id == SP_BUILTIN_STRBUF) return "String";
       return "Object";
     default:          return "Object";
   }
@@ -341,8 +343,20 @@ static double pk_poly_to_flt(sp_RbVal v) {
    NUL (packed bytes, a binary key) keeps every byte; strlen stopped at the
    first one. Only a String has the header sp_str_byte_len reads, so anything
    else answers the empty literal with length 0. */
+/* A String the program appends to is boxed as its shared handle, not as
+   SP_TAG_STR, and is read through it, as sp_poly_subject reads a match's
+   subject. Out of line: the plain String keeps the path it had. */
+static SP_NOINLINE const char *pk_handle_to_str(sp_RbVal v, size_t *n) {
+  if (v.cls_id == SP_BUILTIN_STRBUF && v.v.p) {
+    const char *s = sp_String_cstr((sp_String *)v.v.p);
+    *n = sp_str_byte_len(s); return s;
+  }
+  *n = 0;
+  return "";
+}
 static const char *pk_poly_to_str(sp_RbVal v, size_t *n) {
   if (v.tag == SP_TAG_STR && v.v.s) { *n = sp_str_byte_len(v.v.s); return v.v.s; }
+  if (v.tag == SP_TAG_OBJ) return pk_handle_to_str(v, n);
   *n = 0;
   return "";
 }
@@ -677,6 +691,7 @@ const char *sp_PolyArray_pack(sp_PolyArray *arr, const char *fmt) {SP_GC_ROOT(ar
       if (idx < arr->len) {
         sp_RbVal e = arr->data[idx];
         if (e.tag == SP_TAG_STR && e.v.s) { s = e.v.s; sl = sp_str_byte_len(s); }
+        else if (e.tag == SP_TAG_OBJ) s = pk_handle_to_str(e, &sl);
       }
       idx++;
       pk_str_directive(spec, count, s, sl, &buf, &len, &cap);
