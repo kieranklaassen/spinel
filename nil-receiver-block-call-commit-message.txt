@@ -1,0 +1,26 @@
+! and &. evaluate a receiver that is always nil
+
+    def none
+      puts "called"
+      nil
+    end
+    p !none
+
+printed true and never called none: CRuby prints called, then true.
+Where the receiver's type is nil alone, ! answered true and &. answered
+nil without emitting the receiver, so a method that always answers nil
+was not called at all. `if !none`, `unless !none`, `!!none`,
+`until !none` and `none&.size` all lost the call.
+
+Both arms now evaluate such a receiver and then answer as before, as
+the other arms for a nil receiver (nil?, to_s, inspect) already do. A
+receiver that is only a read is emitted as it was. The arguments of a
+&. call on nil stay unevaluated, as in CRuby.
+
+One corpus program's C changes: in test/empty_block_body_iterators.rb
+drop_while's `!yield` over an empty block now emits the empty block.
+
+Test: test/nil_receiver_evaluated.rb (expected from CRuby 3.3.6)
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+

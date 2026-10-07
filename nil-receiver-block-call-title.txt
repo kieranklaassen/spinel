@@ -1,0 +1,1 @@
+! and &. evaluate a receiver that is always nil
