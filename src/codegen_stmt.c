@@ -14631,6 +14631,28 @@ static int str_mutate_reassign_arms(Compiler *c, Buf *b, int indent, const NodeT
   return -1;
 }
 
+/* How many links of an append chain the statement arm walks
+   (str_mutate_append_bang_arms): 64, and a longer chain is left to the later
+   arms, which write each link back to the variable the chain stands on. A
+   chain that stands on a call (a reader's String, `h.text << a << ...`) has
+   no variable: its first link reached the String and the rest went to a
+   copy. Such a chain is walked whole. */
+static int str_append_chain_room(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  int n = 0;
+  for (;;) {
+    id = unwrap_parens(c, id);
+    if (nt_kind(nt, id) != NK_CallNode) break;
+    const char *nm = nt_str(nt, id, "name");
+    int r = nt_ref(nt, id, "receiver"), a = nt_ref(nt, id, "arguments"), ac = 0;
+    if (!nm || (!sp_streq(nm, "<<") && !sp_streq(nm, "concat")) || r < 0) break;
+    if (a >= 0) nt_arr(nt, a, "arguments", &ac);
+    if (ac != 1) break;
+    n++; id = r;
+  }
+  return n > 64 && nt_kind(nt, id) == NK_CallNode ? n + 1 : 64;
+}
+
 /* emit_array_mutate_stmt_body's String appends (<< and concat) and its bang
    methods, with and without arguments (answers 1 emitted, 0 declined, -1 to
    go on) */
@@ -14666,8 +14688,9 @@ static int str_mutate_append_bang_arms(Compiler *c, int id, Buf *b, int indent, 
      buffer. recv is emitted raw (the sp_String*), not via emit_expr (which
      would hand out a copy). */
   if ((is_append_concat(name)) && argc == 1) {
-    int chain[64]; int nchain = 0; int cur = id;
-    while (nchain < 64) {
+    int room = str_append_chain_room(c, id);
+    int chain[room]; int nchain = 0; int cur = id;
+    while (nchain < room) {
       cur = unwrap_parens(c, cur);
       const char *cty = nt_type(nt, cur);
       if (!cty || !sp_streq(cty, "CallNode")) break;
