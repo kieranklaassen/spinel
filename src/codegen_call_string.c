@@ -1011,10 +1011,10 @@ int emit_call_symbol_bool_string_arms(Compiler *c, int id, Buf *b, const NodeTab
       }
     }
     /* codepoints yields each character's codepoint, not each byte: the String
-       walked to its byte length as #chars walks it (sp_str_codepoints_all) */
+       walked to its byte length as #chars walks it */
     else if (is_cp) {
       int tc = ++g_tmp;
-      buf_printf(b, "sp_IntArray *_t%d = sp_str_codepoints_all(_t%d); SP_GC_ROOT(_t%d); ", tc, ts, tc);
+      buf_printf(b, "sp_IntArray *_t%d = sp_str_codepoints(_t%d); SP_GC_ROOT(_t%d); ", tc, ts, tc);
       buf_printf(b, "for (sp_int _t%d = 0; _t%d < sp_IntArray_length(_t%d); _t%d++) { ", ti, ti, tc, ti);
       if (p0) {
         if (p0_box_poly_ech) buf_printf(b, "lv_%s = sp_box_int(sp_IntArray_get(_t%d, _t%d)); ", p0, tc, ti);
