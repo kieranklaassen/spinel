@@ -15096,7 +15096,6 @@ static void sp_poly_hash_dproc_ctx_scan(void *p) {
 static sp_RbVal sp_poly_hash_dproc_bridge(sp_PolyPolyHash *h, sp_RbVal key, void *self) {
   sp_poly_hash_dproc_ctx *ctx = (sp_poly_hash_dproc_ctx *)self;
   sp_RbVal source = ctx->source;
-  (void)h;
   if (source.tag != SP_TAG_OBJ || !source.v.p) return sp_box_nil();
   if (source.cls_id == SP_BUILTIN_STR_POLY_HASH && key.tag == SP_TAG_STR) {
     sp_StrPolyHash *sh = (sp_StrPolyHash *)source.v.p;
@@ -15116,7 +15115,9 @@ static sp_RbVal sp_poly_hash_dproc_bridge(sp_PolyPolyHash *h, sp_RbVal key, void
   }
   if (source.cls_id == SP_BUILTIN_POLY_POLY_HASH) {
     sp_PolyPolyHash *ph = (sp_PolyPolyHash *)source.v.p;
-    return ph->dproc(ph, key, ph->dproc_self);
+    /* the block's hash is the merged result, as above: one that stores
+       stores into the Hash that was read */
+    return ph->dproc(h, key, ph->dproc_self);
   }
   return sp_box_nil();
 }
