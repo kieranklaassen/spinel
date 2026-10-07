@@ -14472,6 +14472,25 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
   return 0;
 }
 
+
+/* Whether a boxed value can be an exception that carries the id of a class
+   of the program's own (the other box of sp_poly_eq's pair), in a program
+   whose exception classes leave method `name` alone. */
+static int exc_boxed_by_class_id(Compiler *c, const char *name) {
+  int any = 0;
+  for (int k = 0; k < c->nclasses; k++) {
+    if (!class_is_exc_subclass(c, k)) continue;
+    if (comp_method_in_chain(c, k, name, NULL) >= 0) return 0;
+    any = 1;
+  }
+  return any;
+}
+/* Whether an exception class of the program has a != of its own. */
+int exc_class_has_own_ne(Compiler *c) {
+  for (int k = 0; k < c->nclasses; k++)
+    if (class_is_exc_subclass(c, k) && comp_method_in_chain(c, k, "!=", NULL) >= 0) return 1;
+  return 0;
+}
 /* Object's universal protocol -- ===, ==, !=, equal?, eql?, frozen?, freeze,
    and on the IO family (a File/IO/File::Stat handle, a Dir handle) to_s and
    <=> as well -- on the native handle and value kinds that have no arm of
@@ -14608,9 +14627,14 @@ static void emit_native_object_protocol_text(Compiler *c, const char *name, TyKi
     buf_printf(b, "sp_RbVal _u%d = %s; ", t, a);
     if (!bid) buf_printf(&test, "((void)_u%d, 0)", t);
     else {
-      buf_printf(&test, "(_u%d.tag == SP_TAG_OBJ && _u%d.cls_id == %s && ", t, t, bid);
+      /* one exception can be boxed two ways (sp_poly_eq): the operand may
+         be the receiver itself under the id of the program's class */
+      int two = rt == TY_EXCEPTION && exc_boxed_by_class_id(c, is_ne ? "==" : name) &&
+                !exc_class_has_own_ne(c);
+      buf_printf(&test, "(_u%d.tag == SP_TAG_OBJ && %s_u%d.cls_id == %s && ", t, two ? "((" : "", t, bid);
       if (fn) buf_printf(&test, "%s(_t%d, (%s)_u%d.v.p))", fn, t, cty, t);
       else buf_printf(&test, "_u%d.v.p == (void *)_t%d)", t, t);
+      if (two) buf_printf(&test, " || (_t%d && _u%d.v.p == (void *)_t%d)))", t, t, t);
     }
   }
   else if (at == TY_NIL && kind == 1) {
