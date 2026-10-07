@@ -6114,12 +6114,42 @@ static int emit_when_lambda_inline(Compiler *c, int cond, int t, TyKind pt, int 
    the integer switch fast path generate what they did. The subject is
    rooted even when it was read from a local: a `when` operand can reassign
    that local, and the temporary is then the only reference left. */
+/* `when Klass` for a class that defines === itself: the scope of the method
+   the arm calls, as `Klass === x` written out calls it, or -1. The method's
+   parameter is boxed (class_recv_own_eqq), so a subject of any type is
+   handed over boxed. A === whose answer is neither a boolean nor boxed
+   keeps the class test. */
+static int when_class_own_eqq(Compiler *c, int cond) {
+  int mi = class_recv_own_eqq(c, cond);
+  if (mi < 0) return -1;
+  Scope *ws = &c->scopes[mi];
+  if (!ws->is_cmethod || ws->rest_idx >= 0 || ws->kwrest_idx >= 0 || ws->blk_param ||
+      (ws->ret != TY_BOOL && ws->ret != TY_POLY)) return -1;
+  return mi;
+}
+
+static int emit_when_class_own_eqq(Compiler *c, int cond, int t, TyKind pt, Buf *b) {
+  int mi = when_class_own_eqq(c, cond);
+  if (mi < 0) return 0;
+  Scope *ws = &c->scopes[mi];
+  char sref[24]; snprintf(sref, sizeof sref, "_t%d", t);
+  buf_puts(b, ws->ret == TY_POLY ? "sp_poly_truthy(" : "(");
+  emit_method_cname(c, ws, b);
+  buf_puts(b, "(");
+  buf_puts(b, emit_cmethod_self_cls_arg(c, mi, class_recv_static_ci(c, cond), b));
+  if (pt != TY_POLY) emit_boxed_text(c, pt, sref, b);
+  else buf_puts(b, sref);
+  buf_puts(b, "))");
+  return 1;
+}
+
 static int case_subject_needs_root(Compiler *c, TyKind pt, const int *whens, int nw) {
   const NodeTable *nt = c->nt;
   if (!needs_root(pt) || comp_ty_value_obj(c, pt)) return 0;
   for (int w = 0; w < nw; w++) {
     int wc = 0; const int *conds = nt_arr(nt, whens[w], "conditions", &wc);
-    for (int k = 0; k < wc; k++) if (subtree_allocates(nt, conds[k])) return 1;
+    for (int k = 0; k < wc; k++)
+      if (subtree_allocates(nt, conds[k]) || when_class_own_eqq(c, conds[k]) >= 0) return 1;
   }
   /* no operand allocates: the unrooted subject is a decision, keyed at the
      first `when` */
@@ -6698,7 +6728,8 @@ void emit_case(Compiler *c, int id, Buf *b, int indent) {
            rather than the constant one: read as a class name the arm folded
            to a constant false and the branch was never taken. */
         if (cn2 && comp_ffi_const_at(c, conds[j], NULL)) cn2 = NULL;
-          if (cn2 && pt == TY_POLY) {
+          if (cn2 && emit_when_class_own_eqq(c, conds[j], t, pt, b)) { }
+          else if (cn2 && pt == TY_POLY) {
             char tmp[32]; snprintf(tmp, sizeof tmp, "_t%d", t);
             if (!emit_poly_class_when(c, conds[j], tmp, b))
               buf_puts(b, "0");
@@ -7043,7 +7074,8 @@ void emit_case_expr(Compiler *c, int id, Buf *b) {
            rather than the constant one: read as a class name the arm folded
            to a constant false and the branch was never taken. */
         if (cn2 && comp_ffi_const_at(c, conds[j], NULL)) cn2 = NULL;
-        if (cn2 && pt == TY_POLY) {
+        if (cn2 && emit_when_class_own_eqq(c, conds[j], t, pt, b)) { }
+        else if (cn2 && pt == TY_POLY) {
           char tmp[32]; snprintf(tmp, sizeof tmp, "_t%d", t);
           if (!emit_poly_class_when(c, conds[j], tmp, b)) buf_puts(b, "0");
         }
