@@ -1,0 +1,1 @@
+String#[] takes a String, Range or Regexp index known only at run time
