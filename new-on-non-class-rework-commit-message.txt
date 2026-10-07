@@ -1,0 +1,46 @@
+new on a boxed value that is no class is an ordinary method call
+
+`r = c ? Box : nil; p r.new.class` printed Box where CRuby raises
+NoMethodError (undefined method 'new' for nil). The boxed `new` arms of
+emit_call_new_arms construct by the value's cls_id and never asked
+whether the value is a class. nil reads as id 0, so it built the
+program's first class; false, an Integer, a String and a Symbol did
+too, and an instance, which carries its class's id, built another
+object of its own class or raised ArgumentError for that class's
+arity:
+
+    class Maker
+      def new(x) = x * 2
+    end
+    r = c ? 5 : Maker.new
+    p r.new(3)        # ArgumentError (given 1, expected 0); CRuby 6
+
+emit_poly_new_by_tag now emits the call twice over one receiver temp.
+A value tagged as a class takes the arms as they were. Any other value
+takes the ordinary method call, which finds the value's own `new` as it
+finds any other method and raises NoMethodError where there is none.
+Each side keeps the statements it hoists on its own side, as the safe
+navigation guard does, so an argument is evaluated once, after the
+receiver, on the side taken. The keyword, splat and block forms are
+behind the same split.
+
+Two lines of the analysis follow, both only for a boxed receiver: the
+call is typed boxed whether or not a class defines a method `new`, and
+where one does, its parameters are bound from this call's arguments as
+any method's are (a call named new was skipped there, as a
+constructor's).
+
+What it costs: an instance whose `new` is given where Spinel does not
+see it now raises NoMethodError. Master built an object from the
+instance's class id there, and for some programs that was by accident
+what the unseen `new` answers: 66 of 912 generated programs (a `new`
+from define_method or delegate with a computed name, from
+method_missing, from a class_eval block on a class held in a variable,
+from an inherited hook). The same program with any other name in place
+of `new` raises NoMethodError on master already. No list of givers
+keeps master's answer for them: the name is put together at run time
+or the method comes from code Spinel does not run.
+
+Test: test/class_value_new_on_non_class.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
