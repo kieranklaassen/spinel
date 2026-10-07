@@ -1,0 +1,14 @@
+first of two: 0
+between two: 0
+in a block: 0
+from a method: 0
+two objects: 0
+a keyword value: 0
+a keyword value, written second: 0
+a keyword value beside an interpolated String: 0
+the same, written second: 0
+a keyword value and a default that reads another: 0
+a keyword value after a positional argument: 0
+an Integer and a String: 0
+no String: 0
+no String, a keyword value: 0

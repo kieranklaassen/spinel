@@ -7523,6 +7523,14 @@ void emit_rooted_operand(Compiler *c, TyKind pt, int provided, const char *expr,
   buf_printf(g_pre, " _t%d = ", t);
   if (provided >= 0) emit_obj_upcast_prefix(c, pt, comp_ntype(c, provided), g_pre);
   buf_printf(g_pre, "%s;\n", expr);
+  /* a value object is the temp itself: its Strings (emit_arg_temp) */
+  if (comp_ty_value_obj(c, pt)) {
+    if (ty_gc_holds_refs(c, pt)) {
+      emit_indent(g_pre, g_indent); emit_gc_root_tmp_refs(c, pt, t, g_pre); buf_puts(g_pre, "\n");
+    }
+    buf_printf(out, "_t%d", t);
+    return;
+  }
   emit_indent(g_pre, g_indent);
   if (pt == TY_POLY) buf_printf(g_pre, "SP_GC_ROOT_RBVAL(_t%d);\n", t);
   else buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", t);
@@ -7973,6 +7981,12 @@ static void emit_arg_temp(Compiler *c, int v) {
   else emit_ctype(c, at, g_pre);
   buf_printf(g_pre, " _t%d = %s;", t, hb.p ? hb.p : default_value_from_compiler(c, at));
   if (at == TY_POLY) buf_printf(g_pre, " SP_GC_ROOT_RBVAL(_t%d);", t);
+  /* A value object lives in the temp itself: a root on the temp hands the
+     collector the struct's first word, its class id, as a pointer, and
+     leaves its Strings unheld. Root those, as a local of the kind does. */
+  else if (comp_ty_value_obj(c, at)) {
+    if (ty_gc_holds_refs(c, at)) { buf_puts(g_pre, " "); emit_gc_root_tmp_refs(c, at, t, g_pre); }
+  }
   else if (needs_root(at)) buf_printf(g_pre, " SP_GC_ROOT(_t%d);", t);
   buf_puts(g_pre, "\n");
   free(hb.p);
@@ -10302,7 +10316,16 @@ void emit_args_filled_argv(Compiler *c, int callee_idx, const int *argv, int arg
       else {
         emit_ctype(c, pt, g_pre);
         buf_printf(g_pre, " lv_%s = %s;\n", uniq, vb.p ? vb.p : default_value_from_compiler(c, pt));
-        if (needs_root(pt)) {
+        /* a value object is the hoist itself: its Strings (emit_arg_temp) */
+        if (comp_ty_value_obj(c, pt)) {
+          ClassInfo *vc = &c->classes[ty_object_class(pt)];
+          for (int f = 0; f < vc->nivars; f++)
+            if (vc->ivar_types[f] == TY_STRING) {
+              emit_indent(g_pre, g_indent);
+              buf_printf(g_pre, "SP_GC_ROOT(lv_%s.iv_%s);\n", uniq, iv_c(vc->ivars[f] + 1));
+            }
+        }
+        else if (needs_root(pt)) {
           emit_indent(g_pre, g_indent);
           buf_printf(g_pre, pt == TY_POLY ? "SP_GC_ROOT_RBVAL(lv_%s);\n" : "SP_GC_ROOT(lv_%s);\n", uniq);
         }
@@ -11314,6 +11337,12 @@ else {
         /* Root heap-typed arg temps: evaluating a later argument may allocate
            and collect an earlier one still sitting in its temp. */
         if (att == TY_POLY) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT_RBVAL(_t%d);\n", atmp[k]); }
+        /* a value object is the temp itself: its Strings (emit_arg_temp) */
+        else if (comp_ty_value_obj(c, att)) {
+          if (ty_gc_holds_refs(c, att)) {
+            emit_indent(g_pre, g_indent); emit_gc_root_tmp_refs(c, att, atmp[k], g_pre); buf_puts(g_pre, "\n");
+          }
+        }
         else if (needs_root(att)) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", atmp[k]); }
       }
       if (pd_active && pm->pnames[k] && g_nren < MAX_RENAME) {
