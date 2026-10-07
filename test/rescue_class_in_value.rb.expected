@@ -1,0 +1,30 @@
+caught ArgumentError
+caught MyErr
+passed on TypeError
+caught TypeError
+caught TaggedErr
+passed on TypeError
+passed on TypeError
+caught
+caught
+passed on TypeError
+caught
+caught
+passed on TypeError
+caught by K
+passed on TypeError
+caught by klass
+passed on TypeError
+caught by $k
+passed on TypeError
+caught by @k
+passed on TypeError
+caught by seen.class
+passed on TypeError
+caught by ks[0]
+passed on IOError
+ok after 3
+gave up
+TypeError reached the caller
+caught
+class or module required for rescue clause

@@ -8270,10 +8270,24 @@ void emit_rescue(Compiler *c, int id, Buf *b, int indent, int fr, const char *re
           continue;
         }
       }
-      if (!en || (!sp_streq(en, "ConstantReadNode") && !sp_streq(en, "ConstantPathNode"))) continue;
+      if (!en) continue;
+      const char *ename = nt_str(nt, exc[i], "name");
+      /* a class held in a local, an instance variable, a call's answer or a
+         constant with a value of its own (`K = ArgumentError`) is matched at
+         run time, as a splat's members are */
+      LocalVar *kv = sp_streq(en, "ConstantReadNode") && ename && !is_exc_name(ename) &&
+                     comp_class_index(c, ename) < 0 ? comp_const(c, ename) : NULL;
+      if ((!sp_streq(en, "ConstantReadNode") && !sp_streq(en, "ConstantPathNode")) ||
+          (kv && kv->type != TY_UNKNOWN)) {
+        if (!first) buf_puts(b, " || ");
+        first = 0;
+        buf_printf(b, "sp_exc_matches_splat(_rcls_%d, ", rc);
+        emit_boxed(c, exc[i], b);
+        buf_puts(b, ")");
+        continue;
+      }
       if (!first) buf_puts(b, " || ");
       first = 0;
-      const char *ename = nt_str(nt, exc[i], "name");
       /* A builtin namespaced exception (e.g. StringScanner::Error) is raised
          under its flattened runtime name "StringScanner_Error". Map the path
          to that form only when it names a known builtin exception, so user
