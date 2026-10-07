@@ -1,0 +1,33 @@
+A call on a bare Array.new that answers a plain value answers as on []
+
+A method called straight on `Array.new` answered nil with nothing
+said, or raised NoMethodError at run time, where `[]` was right:
+
+    p Array.new.join          # nil; CRuby ""
+    p Array.new.sum           # nil; CRuby 0
+    p Array.new.include?(1)   # undefined method 'include?' for unknown
+
+A bare `Array.new` infers no type, like `[]`, so that a later push can
+settle its element kind. As a receiver it has no later use, and only
+the empty literal had the arms for that. desugar_class_literal_ctors,
+which already builds the literal for `Array[a, b]`, now builds it for
+an `Array.new` with no argument and no block (bare_array_new) under a
+call that answers a plain value and reads nothing but literals
+(array_call_answers_plain_value): size, length, empty?, nil?, frozen?,
+inspect, to_s, first, last, min and max with no argument; count, any?,
+all?, none? and one? with none or one literal; include?, member?, ==,
+!=, index, find_index and rindex with one literal; at and [] with one
+Integer and dig with Integers; join with none or a String; sum with
+none, an Integer or a Float; fetch with an Integer and no default or
+a literal one that is no String.
+
+Every other call on a bare Array.new is compiled as before: one with a
+block or an operand that has to be run, one that stores into the
+Array, and one that answers an Array or a container, whose later use
+would meet the literal's own arms. So is every call where the program
+gives Array a `new` or an `initialize` of its own.
+
+Test: test/array_new_receiver_is_empty_literal.rb. Master does not
+build it.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

@@ -1,0 +1,1 @@
+A call on a bare Array.new that answers a plain value answers as on []
