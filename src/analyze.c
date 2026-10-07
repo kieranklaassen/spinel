@@ -18351,6 +18351,24 @@ static int promote_shared_stored_strings(Compiler *c) {
     if (llv3->type != TY_STRBUF || !llv3->str_shared)
       {  llv3->type = TY_STRBUF; llv3->str_shared = 1; changed = 1;  }
   }
+  /* The same chain wherever its value is read (`p(obj.buf << x << y)`, a
+     `return`, an argument, a method's last expression): a link that is the
+     receiver of the next append hands out the handle too. Left answering
+     the String read, the next link appended to that copy, and obj.buf lost
+     it. The last link still answers the String read. */
+  for (int w = comp_kind_first(c, NK_CallNode); w >= 0; w = comp_kind_next(c, w)) {
+    const char *on = nt_str(nt, w, "name");
+    int in = an_unparen(nt, nt_ref(nt, w, "receiver"));
+    if (!on || !is_string_append_or_prepend(on) || nt_ref(nt, w, "arguments") < 0 ||
+        in < 0 || c->strbuf_box[in]) continue;
+    int cur = in;
+    while (cur >= 0 && nt_kind(nt, cur) == NK_CallNode && nt_ref(nt, cur, "block") < 0 &&
+           nt_str(nt, cur, "name") && is_append_concat(nt_str(nt, cur, "name")) &&
+           nt_ref(nt, cur, "arguments") >= 0)
+      cur = an_unparen(nt, nt_ref(nt, cur, "receiver"));
+    if (cur == in || cur < 0 || nt_kind(nt, cur) != NK_CallNode || !c->strbuf_box[cur]) continue;
+    c->strbuf_box[in] = 1; changed = 1;
+  }
   /* iteration-variable mutation: `arr.each { |x| x << "!" }` mutates the
      ELEMENT through the block binding, so the container's stored strings
      become handles and the block param binds the handle (#3227 P6). Every
