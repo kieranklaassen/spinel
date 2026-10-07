@@ -304,7 +304,18 @@ static void interp_plan(Compiler *c, int id, InterpPlan *pl) {
         if (ret_poly) buf_puts(&conv, "sp_poly_to_s(");
         /* a value-type object (single-ivar) has a by-VALUE to_s signature;
            casting its receiver to a pointer is a C type error (#2357) */
-        if (comp_ty_value_obj(c, t) || (!vexpr[0] && !iv_pre && expr_is_held_ref(c, expr))) {
+        int held = !vexpr[0] && !iv_pre && expr_is_held_ref(c, expr);
+        if (comp_ty_value_obj(c, t) && !held && ty_gc_holds_refs(c, t)) {
+          /* a by-value part made in place: nothing else holds its Strings
+             while its #to_s allocates */
+          int to = ++g_tmp;
+          buf_puts(&conv, "({ "); emit_ctype(c, t, &conv);
+          buf_printf(&conv, " _t%d = ", to);
+          EMIT_IV();
+          buf_puts(&conv, "; "); emit_gc_root_tmp_refs(c, t, to, &conv);
+          buf_printf(&conv, " sp_%s_to_s(_t%d); })", cn, to);
+        }
+        else if (comp_ty_value_obj(c, t) || held) {
           if (comp_ty_value_obj(c, t)) buf_printf(&conv, "sp_%s_to_s(", cn);
           else buf_printf(&conv, "sp_%s_to_s((sp_%s *)", cn, cn);
           EMIT_IV(); buf_puts(&conv, ")");

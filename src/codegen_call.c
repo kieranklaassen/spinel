@@ -12078,11 +12078,12 @@ int hoist_boxed_rooted(Compiler *c, int node) {
 }
 
 /* Root a g_pre temp on a line of its own, when its type has anything to
-   root: a heap pointer or a box that may carry one. */
+   root: a heap pointer, a box that may carry one, or the Strings a
+   by-value object carries in the temp itself. */
 void emit_pre_root(Compiler *c, TyKind t, int tmp) {
-  if (!needs_root(t) || comp_ty_value_obj(c, t)) return;
+  if (comp_ty_value_obj(c, t) ? !ty_gc_holds_refs(c, t) : !needs_root(t)) return;
   emit_indent(g_pre, g_indent);
-  emit_gc_root_tmp(c, t, tmp, g_pre);
+  emit_gc_root_tmp_refs(c, t, tmp, g_pre);
   buf_puts(g_pre, "\n");
 }
 

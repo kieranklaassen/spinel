@@ -9864,6 +9864,12 @@ int emit_object_call(Compiler *c, int id, Buf *b) {
           Buf rb = expr_buf(c, recv);
           emit_indent(g_pre, g_indent); emit_ctype(c, rt, g_pre);
           buf_printf(g_pre, " _t%d = ", t); buf_puts(g_pre, rb.p ? rb.p : ""); buf_puts(g_pre, ";\n"); free(rb.p);
+          /* The struct lives in the temp, but a String field of it is a
+             pointer like any other: nothing else holds the String of an
+             object made in place while the arguments and the call allocate. */
+          if (ty_gc_holds_refs(c, rt)) {
+            emit_indent(g_pre, g_indent); emit_gc_root_tmp_refs(c, rt, t, g_pre); buf_puts(g_pre, "\n");
+          }
           buf_printf(&selfv, "_t%d", t);
         }
         TyKind svt = TY_UNKNOWN;

@@ -1251,10 +1251,15 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
        early: 25 of 200 turns on a plain release build, 1 of 200 under
        SPINEL_GC_STRESS=1, with no error either way.
        A value-type receiver is a struct copy that lives in the temp itself
-       rather than behind it, so it must not be rooted; emit_gc_root_tmp
-       declines it on its own account, and the test here is only so that the
-       separating space is not emitted when it does. */
+       rather than behind it, so the temp must not be rooted as a pointer
+       (emit_gc_root_tmp declines it on its own account). Its String fields
+       are pointers the copy holds and nothing else does when the receiver
+       was made in place, so each of those is rooted then, the way a local
+       of that class is. */
     if (!self_is_val) { buf_puts(b, " "); emit_gc_root_tmp(c, ty_object(recv_class), st, b); }
+    else if (!expr_is_held_ref(c, recv) && ty_gc_holds_refs(c, ty_object(recv_class))) {
+      buf_puts(b, " "); emit_gc_root_tmp_refs(c, ty_object(recv_class), st, b);
+    }
     buf_puts(b, "\n");
     snprintf(selfbuf, sizeof selfbuf, "_t%d", st);
     recv_self_deref = self_is_val ? "." : "->";
