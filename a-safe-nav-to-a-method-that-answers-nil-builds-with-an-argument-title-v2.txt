@@ -1,0 +1,1 @@
+A &. to a method that answers nil builds wherever its value is read
