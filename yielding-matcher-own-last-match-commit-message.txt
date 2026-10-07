@@ -1,0 +1,48 @@
+A method that matches and yields has its own $~, and so has its block
+
+A method that yields has no function: its body is spliced where it is
+called, and the block where it yields. So the method, its block and its
+caller shared one set of match registers:
+
+    def each_b(s)
+      s =~ /(b+)/
+      yield $1
+      $1
+    end
+    "k9" =~ /k(\d)/
+    each_b("abbc") { |w| p [w, $1] }
+    p $1
+
+printed ["bb", "bb"] and "bb"; CRuby prints ["bb", "9"] and "9". And a
+block that matches took the method's match away: a tokenizer that reads
+$' after its yield stopped after one token.
+
+The splice now opens the method's frame in the scope of its body, so
+every way out of the body puts the caller's registers back. Around a
+block the method yields to, once the yielded values are bound, the
+registers are exchanged with the ones that frame holds: the block runs
+with its writer's match and leaves it its own, and the method goes on
+with the match it had (sp_re_frame_swap_enter, sp_re_frame_swap_leave).
+The exchange is a note like a frame's, so a jump out of the block undoes
+it on its way. It is emitted only around a block that touches the
+registers or runs its writer's block in turn.
+
+This holds in a program where a method's registers are provably its own
+frame's (match_frame_closed), which until now a method taking a block
+put outside. A method that takes its block only by yielding counts as a
+frame of its own where it matches, and a block given to a name every
+method of which is spliced so runs where it is written. Not counted: a
+method that names its block as a parameter, a constructor, a method of a
+name that calls super (other emitters splice those), a method that
+yields from a block that may run as a function, and a name that is also
+a reader. Such a program is emitted as before, byte for byte. After
+emission a block that became a function and yields for a spliced frame
+stops the compile.
+
+Tests: test/regexp_frame_yield.rb, test/regexp_frame_yield_nested.rb,
+test/regexp_frame_yield_jumps.rb. test/regexp_frame_yield_kept.rb and
+test/regexp_frame_yield_kept_block_param.rb are programs right before,
+the second one the test leaves alone.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+

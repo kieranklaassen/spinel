@@ -1,0 +1,1 @@
+A method that matches and yields has its own $~, and so has its block

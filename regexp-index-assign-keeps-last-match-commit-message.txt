@@ -1,0 +1,31 @@
+`s[re] = v` leaves $~ at the match it replaced
+
+An index assignment by a Regexp is a match, and CRuby leaves $~ at what
+it replaced, or nil before the IndexError where nothing matched. Here it
+searched with registers of its own and left $~ as it was:
+
+    s = +"hello world"
+    s[/o (w)/] = "0 W"
+    p $~[0], $1
+
+printed nil twice; CRuby prints "o w" and "w". A method read the match
+of the statement before, or its caller's.
+
+The two-argument arm now calls sp_str_splice_re_last, which matches as
+sp_re_match does and then splices. The frozen test stays ahead of it and
+the value is still read before the match, so `s[/(\d)/] = $1` reads the
+match before.
+
+The method must then keep its caller's $~, so scope_performs_match
+counts the assignment where the receiver is a String, in a program where
+a method's registers are provably its own frame's (match_frame_closed).
+Every other program is emitted as before, byte for byte, and so is an
+assignment inside the block of a call that matches and puts its own
+match back (gsub, scan). A Regexp as a Hash key is not counted.
+
+Tests: test/string_regexp_assign_sets_match.rb.
+test/string_regexp_assign_kept_proc.rb is a program the test leaves
+alone.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+
