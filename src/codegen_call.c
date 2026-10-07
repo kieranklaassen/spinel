@@ -24435,7 +24435,7 @@ void emit_call_body(Compiler *c, int id, Buf *b) {
           if (g_plan_check) ucall_observe(c, id, miR, ciR, 0);
           size_t atR = b->len;
           buf_printf(b, "sp_%s_%s(", mc_reopen_cls(c, ciR, nmR), mc(nmR));
-          int openR = emit_reopen_recv_in_order(c, id, miR, recvR, 0, NULL, atR, b);
+          int openR = (c->scopes[miR].class_id == ciR ? emit_reopen_recv_args : emit_reopen_recv_in_order)(c, id, miR, recvR, 0, NULL, atR, b);
           emit_callee_block_arg(c, id, &c->scopes[miR], b);
           buf_puts(b, openR ? "); })" : ")");
           return;

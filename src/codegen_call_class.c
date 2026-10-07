@@ -2052,7 +2052,11 @@ int emit_call_class_value_arms(Compiler *c, int id, Buf *b, const NodeTable *nt,
         is_builtin_reopen(c->classes[g_emitting_class_id].name)) {
       const char *ecn = c->classes[g_emitting_class_id].name;
       /* an IO reopening's self is the sp_File handle, typed so */
-      if (!sp_streq(ecn, "TrueClass") && !sp_streq(ecn, "FalseClass") && !io_family_class(c, g_emitting_class_id))
+      /* a String, Symbol, Float, Range or Time reopening's is the value itself */
+      int own = (rt == TY_STRING && sp_streq(ecn, "String")) || (rt == TY_SYMBOL && sp_streq(ecn, "Symbol")) ||
+                (rt == TY_FLOAT && sp_streq(ecn, "Float")) || (rt == TY_RANGE && sp_streq(ecn, "Range")) ||
+                (rt == TY_TIME && sp_streq(ecn, "Time"));
+      if (!sp_streq(ecn, "TrueClass") && !sp_streq(ecn, "FalseClass") && !io_family_class(c, g_emitting_class_id) && !own)
         rt = TY_POLY;
     }
     /* MatchData is nullable (nil on no-match): .class checks at run time so a
