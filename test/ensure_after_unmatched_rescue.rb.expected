@@ -1,0 +1,30 @@
+ensure
+passed on TypeError t
+ensure
+passed on TypeError
+ensure
+passed on TypeError
+ensure
+passed on Exception
+ensure
+-2
+bad number
+false
+io
+bad argument
+io
+0
+ensure
+7
+ensure 3
+passed on TypeError
+ensure 1
+ensure 2
+outer
+ensure 3
+ensure
+-1
+ensure
+12
+ensure before exit
+at_exit
