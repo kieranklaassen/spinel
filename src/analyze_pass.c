@@ -4091,6 +4091,15 @@ typedef struct {
   int next;       /* the next such write reading the same local, or -1 */
 } ReadWrite;
 
+/* The round's such writes: each listed under the local it reads (head, by
+   that local's index among every scope's locals), or queued to be typed
+   again where that local is held boxed. q is how far the queue is drained. */
+typedef struct ReadsWidened {
+  ReadWrite *rw;
+  int *base, *head, *queue;
+  int nq, q;
+} ReadsWidened;
+
 /* A local's write is typed by its value as the pass reaches it, in node
    order, and a read of another local answers what that local holds so far
    this round. A read ahead of the write that widens it -- a later
@@ -4112,10 +4121,10 @@ typedef struct {
    at once if it already has). A slot widens once (a boxed one is not
    typed again), so a list is drained once and each write is typed at most
    once: the work stays linear in the writes, whatever their order. */
-static void infer_write_reads_widened(Compiler *c, const NodeTable *nt) {
+static int reads_widened_build(Compiler *c, const NodeTable *nt, ReadsWidened *x) {
   int nw = 0;
   const int *ws = nt_nodes_of_kind(nt, NK_LocalVariableWriteNode, &nw);
-  if (nw == 0) return;
+  if (nw == 0) return 0;
   int *base = malloc(sizeof(int) * ((size_t)c->nscopes + 1));
   if (!base) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
   base[0] = 0;
@@ -4149,17 +4158,30 @@ static void infer_write_reads_widened(Compiler *c, const NodeTable *nt) {
     }
     nrw++;
   }
-  for (int q = 0; q < nq; q++) {
-    ReadWrite *w = &rw[queue[q]];
+  x->rw = rw; x->base = base; x->head = head; x->queue = queue; x->nq = nq; x->q = 0;
+  return 1;
+}
+static void reads_widened_drain(Compiler *c, ReadsWidened *x) {
+  ReadWrite *rw = x->rw;
+  for (; x->q < x->nq; x->q++) {
+    ReadWrite *w = &rw[x->queue[x->q]];
     if (ty_degraded(w->dst->type)) continue;
     TyKind t = infer_type(c, w->val);
     if (!ty_degraded(t)) continue;
     slot_take(c, w->dst, t, w->val);
     if (!ty_degraded(w->dst->type)) continue;
-    for (int k = head[w->dst_ix]; k >= 0; k = rw[k].next) queue[nq++] = k;
-    head[w->dst_ix] = -1;
+    for (int k = x->head[w->dst_ix]; k >= 0; k = rw[k].next) x->queue[x->nq++] = k;
+    x->head[w->dst_ix] = -1;
   }
-  free(base); free(head); free(queue); free(rw);
+}
+static void reads_widened_free(ReadsWidened *x) {
+  free(x->base); free(x->head); free(x->queue); free(x->rw);
+}
+static void infer_write_reads_widened(Compiler *c, const NodeTable *nt) {
+  ReadsWidened x;
+  if (!reads_widened_build(c, nt, &x)) return;
+  reads_widened_drain(c, &x);
+  reads_widened_free(&x);
 }
 
 int infer_write_types(Compiler *c) {
