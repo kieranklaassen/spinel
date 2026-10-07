@@ -3400,8 +3400,11 @@ int emit_poly_recv_block_dispatch(Compiler *c, int id, Buf *b, int indent) {
      declines, discard the lot and return 0 so the ordinary poly dispatch
      emits the call and threads the block, the way it already does for a
      typed receiver. Same policy as the |x| gate above: hand it to a path
-     that emits something, never leave a silent empty body. */
+     that emits something, never leave a silent empty body. The statements
+     the receiver and the arms hoisted are taken back with it, or that path
+     would run them a second time. */
   Buf sw; memset(&sw, 0, sizeof sw);
+  size_t pre0 = g_pre ? g_pre->len : 0;
   emit_indent(&sw, indent);
   buf_printf(&sw, "sp_RbVal _t%d = ", trecv); emit_boxed(c, recv, &sw); buf_puts(&sw, ";\n");
   emit_indent(&sw, indent);
@@ -3429,7 +3432,12 @@ int emit_poly_recv_block_dispatch(Compiler *c, int id, Buf *b, int indent) {
     g_inline_recv_expr = sv_expr;
     g_inline_recv_class = sv_class;
     view_pop(c, v);
-    if (empty) { free(sw.p); if (g_plan_check) pa_drop(pa_frame); return 0; }
+    if (empty) {
+      free(sw.p);
+      if (g_pre && g_pre->len > pre0) { g_pre->len = pre0; g_pre->p[pre0] = 0; }
+      if (g_plan_check) pa_drop(pa_frame);
+      return 0;
+    }
     emit_indent(&sw, indent + 1); buf_puts(&sw, "break;\n");
     emit_indent(&sw, indent); buf_puts(&sw, "}\n");
     if (g_plan_check) {
