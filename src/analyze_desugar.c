@@ -1767,6 +1767,7 @@ int desugar_array_op_to_ary(Compiler *c) {
      (@v ||= e).m(x)    ->  ((@v ||= e; @v.m(x)))
      (a || b).m(x)      ->  ((a ? a.m(x) : b.m(x)))     a variable's read
      s.to_s.m(x)        ->  s.m(x)                      s a String
+     (c ? a : b).m(x).n(y)  ->  ((c ? a.m(x).n(y) : b.m(x).n(y)))
 
    The receiver still runs first and the arguments after it, once on each
    path. Only a receiver that may be a String is rewritten, so other
@@ -1774,7 +1775,17 @@ int desugar_array_op_to_ary(Compiler *c) {
    path a boxed one, which a String mutator's boxed dispatch reassigns only
    through a variable (it raised NoMethodError on the paren); a conditional
    missing an arm (whose value is nil), a call with a block and an argument
-   holding one are left alone. */
+   holding one are left alone.
+
+   A chain of such calls on a conditional moves into its arms as one.
+   Moved a call a round, each left a paren the next link had to cross, at
+   twice the rounds of the link before: the eighth was still outside when
+   the fixpoint's rounds ran out, and its change was lost. It moves as one
+   only where every link's change is then kept and nothing reads its
+   value: a chain as a statement, of `<<` alone or of the links codegen's
+   chain walk passes (insert, prepend, concat, replace, `<<`), on a
+   receiver every path of which ends in a local. Any other chain moves a
+   call a round. */
 static int mrv_no_scope(const NodeTable *nt, int root, int depth) {
   if (root < 0 || root >= nt->count) return 1;
   if (depth > 200) return 0;
@@ -1934,9 +1945,134 @@ static int mrv_then_self(Compiler *c, int r) {
     if (c->nscope[w] == si && sp_streq(nt_str(nt, w, "name"), zn)) return 0;
   return 1;
 }
+/* Is the value of `v` read by nothing? A statement that is not its
+   sequence's last is, and the last of a sequence whose own value is
+   dropped: the program's, a loop's, a paren's, a begin's, an arm's of a
+   conditional, the block's of a builtin loop method no class defines.
+   `par` may be older than the tree, so its answer is asked of the node. */
+static int mrv_dropped(Compiler *c, const int *par, int pn, int v) {
+  const NodeTable *nt = c->nt;
+  for (int depth = 0; depth < 200; depth++) {
+    int st = v >= 0 && v < pn ? par[v] : -1, sn = 0, at = -1;
+    /* an elsif is its if's value */
+    if (st >= 0 && nt_kind(nt, st) == NK_IfNode && nt_ref(nt, st, "subsequent") == v) { v = st; continue; }
+    if (st < 0 || st >= pn || nt_kind(nt, st) != NK_StatementsNode) return 0;
+    const int *sb = nt_arr(nt, st, "body", &sn);
+    while (++at < sn && sb[at] != v) ;
+    if (at >= sn) return 0;
+    if (at < sn - 1) return 1;
+    int o = par[st];
+    if (o < 0 || o >= pn) return 0;
+    NodeKind ok = nt_kind(nt, o);
+    if (ok == NK_BlockNode) {
+      int call = par[o];
+      const char *bn = call >= 0 && nt_kind(nt, call) == NK_CallNode && nt_ref(nt, call, "block") == o ? nt_str(nt, call, "name") : NULL;
+      if (nt_ref(nt, o, "body") != st || !bn || !is_block_loop_method(bn)) return 0;
+      for (int k = 0; k < c->nclasses; k++)
+        if (comp_method_in_chain(c, k, bn, NULL) >= 0) return 0;
+      NT_FOREACH_KIND(nt, NK_DefNode, d) if (sp_streq(nt_str(nt, d, "name"), bn)) return 0;
+      return 1;
+    }
+    if (ok == NK_ParenthesesNode) { if (nt_ref(nt, o, "body") != st) return 0; v = o; continue; }
+    if (nt_ref(nt, o, "statements") != st) return 0;
+    const char *ot = nt_type(nt, o);
+    if (ok == NK_WhileNode || ok == NK_UntilNode || (ot && sp_streq(ot, "ProgramNode"))) return 1;
+    if (ok == NK_IfNode || ok == NK_UnlessNode || ok == NK_BeginNode) { v = o; continue; }
+    /* an else's or a when's is its conditional's */
+    int up = par[o];
+    if (up < 0 || up >= pn) return 0;
+    NodeKind uk = nt_kind(nt, up);
+    if (ok == NK_ElseNode && nt_ref(nt, up, uk == NK_IfNode ? "subsequent" : "else_clause") == o &&
+        (uk == NK_IfNode || uk == NK_UnlessNode || uk == NK_CaseNode || uk == NK_BeginNode)) { v = up; continue; }
+    if (ot && sp_streq(ot, "WhenNode") && uk == NK_CaseNode) { v = up; continue; }
+    return 0;
+  }
+  return 0;
+}
+/* Does a closure write the local `name` of a scope outside itself? */
+static int mrv_closure_writes(const NodeTable *nt, const char *name) {
+  for (int w = 0; w < nt->count; w++)
+    if (comp_is_local_write(nt_kind(nt, w)) && nt_int(nt, w, "depth", 0) > 0 && sp_streq(nt_str(nt, w, "name"), name)) return 1;
+  return 0;
+}
+/* A link codegen's chain walk (str_bang_chain_var) passes on its way to
+   the variable: insert, prepend, concat, replace or `<<`, and as the
+   chain's last call a bang; with no block, no `&.` and no argument that
+   writes a variable. An insert only at an index every String has, the
+   literal 0 or -1: any other may raise. */
+static int mrv_chain_link(const NodeTable *nt, int v, int last) {
+  const char *nm = nt_str(nt, v, "name"), *op = nt_str(nt, v, "call_operator");
+  int a = nt_ref(nt, v, "arguments"), an = 0;
+  const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
+  if (!nm || nt_ref(nt, v, "block") >= 0 || (op && sp_streq(op, "&.")) || mrv_writes(nt, a, NULL, 0)) return 0;
+  for (int i = 0; i < an; i++)
+    if (nt_kind(nt, av[i]) == NK_SplatNode || nt_kind(nt, av[i]) == NK_KeywordHashNode) return 0;
+  if (sp_streq(nm, "insert")) {
+    long long at = an == 2 && nt_kind(nt, av[0]) == NK_IntegerNode ? nt_int(nt, av[0], "value", 0) : 1;
+    return at == 0 || at == -1;
+  }
+  /* a bang ends the chain: its nil is no receiver */
+  if (ty_str_typed_bang_flags(nm)) return last;
+  if (an != 1) return 0;
+  /* the chain's last call is its value: a replace there leaves the local
+     naming its argument's String, a frozen one when that is a literal */
+  return is_append_concat(nm) || sp_streq(nm, "prepend") || (!last && sp_streq(nm, "replace"));
+}
+/* Would the calls from `first` up to `last`, once `first` is sent to a
+   local, keep every change: 2 for a chain of `<<` alone, 1 for any other
+   chain of those links, 0 for the rest? A chain of `<<` alone is written
+   by emit_str_append_chain_handle, which carries 65 calls and drops the
+   rest: a longer one is not kept. */
+static int mrv_chain_kept(const NodeTable *nt, int first, int last) {
+  int only_shl = 1, calls = 0;
+  for (int v = last; ; v = nt_ref(nt, v, "receiver")) {
+    if (!mrv_chain_link(nt, v, v == last)) return 0;
+    only_shl = only_shl && sp_streq(nt_str(nt, v, "name"), "<<");
+    calls++;
+    if (v == first) return !only_shl ? 1 : calls <= 65 ? 2 : 0;
+  }
+}
+/* Is the value `v` a String local no closure writes on every path: its
+   read, or a write of it, at the end of each arm of a conditional or a
+   paren? With `ivars` any local is one, and an instance variable's read. */
+static int mrv_leaves_named(Compiler *c, int v, int ivars, int depth) {
+  const NodeTable *nt = c->nt;
+  NodeKind k = nt_kind(nt, v);
+  const char *ty = nt_type(nt, v);
+  size_t tl = ty ? strlen(ty) : 0;
+  if (depth > 60 || v < 0) return 0;
+  if (k == NK_LocalVariableReadNode || (ivars && k == NK_InstanceVariableReadNode) ||
+      (tl >= 22 && strncmp(ty, "LocalVariable", 13) == 0 && strcmp(ty + tl - 9, "WriteNode") == 0))
+    return mrv_is_string(infer_type(c, v)) && (ivars || !mrv_closure_writes(nt, nt_str(nt, v, "name")));
+  if (k == NK_OrNode) {
+    int l = nt_ref(nt, v, "left");
+    return (nt_kind(nt, l) == NK_LocalVariableReadNode || (ivars && nt_kind(nt, l) == NK_InstanceVariableReadNode)) &&
+           mrv_leaves_named(c, nt_ref(nt, v, "right"), ivars, depth + 1);
+  }
+  int arms[64], na = mrv_arms(nt, v, arms, 64);
+  for (int i = 0; i < na; i++) {
+    int bn = 0; const int *bb = nt_arr(nt, arms[i], "body", &bn);
+    if (!mrv_leaves_named(c, bb[bn - 1], ivars, depth + 1)) return 0;
+  }
+  return na > 0;
+}
+/* The call `x` is sent to, when it is one that can move along with `x`:
+   a String mutator with no block, no argument writing a variable or
+   holding a scope -- the rules a call moves by on its own. -1 for none.
+   `par` may be older than the tree, so its answer is asked of the node. */
+static int mrv_link_over(Compiler *c, const int *par, int pn, int x) {
+  const NodeTable *nt = c->nt;
+  int p = x < pn ? par[x] : -1;
+  if (p < 0 || nt_kind(nt, p) != NK_CallNode || nt_ref(nt, p, "receiver") != x || nt_ref(nt, p, "block") >= 0) return -1;
+  const char *nm = nt_str(nt, p, "name");
+  int args = nt_ref(nt, p, "arguments");
+  if (!nm || !sp_str_mutator(nm, SP_MUT_LOCAL) || mrv_writes(nt, args, NULL, 0) || !mrv_no_scope(nt, args, 0)) return -1;
+  return mrv_is_string(infer_type(c, x)) ? p : -1;
+}
 int desugar_mutator_receiver_value(Compiler *c) {
   NodeTable *nt = (NodeTable *)c->nt;
   int n0 = nt->count, changed = 0;
+  int *par = NULL, pn = 0;
   for (int id = 0; id < n0; id++) {
     if (nt_kind(nt, id) != NK_CallNode) continue;
     const char *nm = nt_str(nt, id, "name");
@@ -2035,16 +2171,37 @@ int desugar_mutator_receiver_value(Compiler *c) {
         if (!mrv_paren_value(nt, bb[bn - 1])) continue;
       }
     }
+    /* the links of a chain over this call go with it, up to the first
+       that cannot: `head` is the outermost that does */
+    if (!par) { par = du_parent_map(nt); pn = nt->count; }
+    int head = id;
+    for (int p; par && (p = mrv_link_over(c, par, pn, head)) >= 0; ) head = p;
+    /* as one only where every link's change is then kept and nothing reads
+       the chain's value, which as a conditional's is a copy where a write
+       takes it; any other chain moves this call alone, as it did */
+    if (head != id) {
+      int kept = mrv_chain_kept(nt, id, head);
+      if (!kept || !mrv_dropped(c, par, pn, head) || !mrv_leaves_named(c, r, kept > 1, 0)) head = id;
+    }
     int base = nt->count;
-    long long line = nt_int(nt, id, "node_line", 0), file = nt_int(nt, id, "node_file", 0);
-    /* the call without its receiver and arguments, copied once per path */
+    long long line = nt_int(nt, head, "node_line", 0), file = nt_int(nt, head, "node_file", 0);
+    /* the outermost call without its receiver and arguments, copied once
+       per path, and the links under it down to this one */
+    int rest = head == id ? -1 : nt_ref(nt, head, "receiver");
+    args = nt_ref(nt, head, "arguments");
     nt_node_set_ref(nt, id, "receiver", -1);
-    nt_node_set_ref(nt, id, "arguments", -1);
-    int paths = rk == NK_OrNode ? 2 : na, shells[64];
+    nt_node_set_ref(nt, head, "receiver", -1);
+    nt_node_set_ref(nt, head, "arguments", -1);
+    int paths = rk == NK_OrNode ? 2 : na, shells[64], ends[64];
     for (int k = 0; k < paths; k++) {
-      shells[k] = nt_clone_subtree(nt, id);
+      shells[k] = nt_clone_subtree(nt, head);
       int ak = k == 0 ? args : (args >= 0 ? nt_clone_subtree(nt, args) : -1);
       nt_node_set_ref(nt, shells[k], "arguments", ak);
+      /* the innermost link of each copy takes the path's receiver */
+      ends[k] = shells[k];
+      if (rest < 0) continue;
+      nt_node_set_ref(nt, shells[k], "receiver", k == 0 ? rest : nt_clone_subtree(nt, rest));
+      while (nt_ref(nt, ends[k], "receiver") >= 0) ends[k] = nt_ref(nt, ends[k], "receiver");
     }
     int top = r;
     if (rk == NK_OrNode) {
@@ -2065,10 +2222,10 @@ int desugar_mutator_receiver_value(Compiler *c) {
         scope_local_intern(comp_scope_of(c, id), tname);
       }
       nt_node_set_ref(nt, iff, "predicate", pred);
-      nt_node_set_ref(nt, shells[0], "receiver", re);
+      nt_node_set_ref(nt, ends[0], "receiver", re);
       nt_node_set_arr(nt, s1, "body", &shells[0], 1);
       nt_node_set_ref(nt, iff, "statements", s1);
-      nt_node_set_ref(nt, shells[1], "receiver", nt_ref(nt, r, "right"));
+      nt_node_set_ref(nt, ends[1], "receiver", nt_ref(nt, r, "right"));
       nt_node_set_arr(nt, s2, "body", &shells[1], 1);
       nt_node_set_ref(nt, el, "statements", s2);
       nt_node_set_ref(nt, iff, "subsequent", el);
@@ -2083,11 +2240,11 @@ int desugar_mutator_receiver_value(Compiler *c) {
         memcpy(body, bb, sizeof(int) * (size_t)bn);
         int last = body[bn - 1], tr = mrv_target_read(nt, last);
         if (tr >= 0) {
-          nt_node_set_ref(nt, shells[k], "receiver", tr);
+          nt_node_set_ref(nt, ends[k], "receiver", tr);
           body[bn++] = shells[k];
         }
         else {
-          nt_node_set_ref(nt, shells[k], "receiver", last);
+          nt_node_set_ref(nt, ends[k], "receiver", last);
           body[bn - 1] = shells[k];
         }
         nt_node_set_arr(nt, arms[k], "body", body, bn);
@@ -2095,14 +2252,15 @@ int desugar_mutator_receiver_value(Compiler *c) {
     /* the call's node is the value now: a paren around it */
     int st = nt_new_node(nt, "StatementsNode");
     nt_node_set_arr(nt, st, "body", &top, 1);
-    nt_node_reset(nt, id, "ParenthesesNode");
-    nt_node_set_ref(nt, id, "body", st);
-    if (line > 0) { nt_node_set_int(nt, id, "node_line", line); nt_node_set_int(nt, id, "node_file", file); }
+    nt_node_reset(nt, head, "ParenthesesNode");
+    nt_node_set_ref(nt, head, "body", st);
+    if (line > 0) { nt_node_set_int(nt, head, "node_line", line); nt_node_set_int(nt, head, "node_file", file); }
     comp_grow_node_arrays(c);
-    int encl = c->nscope[id];
+    int encl = c->nscope[head];
     for (int j = base; j < nt->count; j++) c->nscope[j] = encl;
     changed = 1;
   }
+  free(par);
   return changed;
 }
 
