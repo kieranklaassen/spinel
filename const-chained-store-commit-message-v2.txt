@@ -1,0 +1,23 @@
+A store chained on another's answer stores a row into a constant table too
+
+`D = [[1, 2], [3, 4]]; D.push([5]).push(["a"]); p D[3]` printed
+[0, 0, 0, 0]; CRuby prints ["a"]. The same with `D << [5] << r`,
+`D.concat([[5]]).push(r)`, `D.fill([7, 8]).push(r)`,
+`D.each { }.push(r)` and `D.sort!.push(r)`, and a Hash stored that way
+crashed the read.
+
+The test for a constant table of Integer Arrays reads the rows a call
+stores where the call's receiver is the constant. In a chain the
+receiver is the call ahead. It is looked through now where that call
+answers its receiver: the push family, insert, concat, fill, replace,
+clear, map!, collect!, sort!, sort_by!, reverse!, rotate!, shuffle!,
+keep_if, delete_if, each, each_index, reverse_each, tap and itself, and
+select!, reject!, uniq! and compact!, which answer it or nil.
+
+A chained store only ever turns a table of Integer Arrays into a
+general one. An Integer Array stored at the end of a chain leaves the
+table as it was, and `T[i] = r` there (`T.push(nil)[0] = [7, 8]`),
+unlike `T[i] = r` written on the constant itself, does not make a
+table a table of Integer Arrays.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

@@ -1,0 +1,1 @@
+A store chained on another's answer stores a row into a constant table too
