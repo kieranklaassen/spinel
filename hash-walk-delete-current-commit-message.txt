@@ -1,0 +1,26 @@
+A Hash walk whose block deletes the current entry goes on from the next
+
+    h = {"a" => 1, "b" => 2, "c" => 3}
+    h.each { |k, _v| h.delete(k) }
+    p h
+
+printed {"b" => 2} where CRuby prints {}. Deleting the entry the walk is
+at slides the next one into its slot, and the walk stepped past it.
+each and each_pair already stay on the slot for Integer and Symbol keys;
+String keys, boxed keys, and each_key and each_value with any key did
+not.
+
+They keep the key of the turn in a temporary now, and on a turn that
+left the Hash shorter they step only if the slot still holds that key.
+A turn that deleted nothing steps as before, so a walk that never
+deletes pays the copy of the key and one length compare a turn (5 to 7
+instructions). Every turn that does not step has made the Hash shorter,
+so the walk ends. The Integer and Symbol each is the C it was.
+
+Not changed: map, select and the other walks that build a result; a
+walk over a Hash held in a boxed variable; a turn that deletes two
+entries at or before the one the walk is at, which skipped two and
+skips one; and a turn that deletes an entry and adds one, where CRuby
+raises.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

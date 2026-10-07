@@ -1,0 +1,1 @@
+A Hash walk whose block deletes the current entry goes on from the next
