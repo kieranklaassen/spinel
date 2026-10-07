@@ -1,0 +1,1 @@
+A new Symbol is added to the pool under a lock

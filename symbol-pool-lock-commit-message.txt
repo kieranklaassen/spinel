@@ -1,0 +1,26 @@
+A new Symbol is added to the pool under a lock
+
+Threads run on several OS workers. Two that missed in the pool of
+Symbols made at run time both stored their name in the slot at its
+end and both counted it: the slot after it stayed empty and the next
+lookup read through it, and one of the two names was lost to the
+other's Symbol.
+
+    same = (0...4).map do
+      Thread.new { (0...3_000).map { |i| ("n" + i.to_s).to_sym } }
+    end.map(&:value)
+    p same.all? { |syms| syms == same[0] }
+
+segfaults with gcc; with clang it prints false or segfaults.
+
+In a program that uses Threads a miss now takes a lock to add its
+entry, and first compares the entries added since its lookup: the
+same name made by another Thread meanwhile is the same Symbol. The
+pool's String is made before the lock is taken, so nothing allocates
+and no safepoint is polled while it is held: a worker that holds it
+never stops for a collection while another waits for it. A lookup
+that finds its name takes no lock: it reads the count and then the
+pool's address, and an entry is stored before the count that covers
+it. A program without Threads is emitted as before.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
