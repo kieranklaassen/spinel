@@ -4308,6 +4308,17 @@ int expr_is_held_ref(Compiler *c, int node) {
   return k == NK_LocalVariableReadNode || k == NK_InstanceVariableReadNode ||
          k == NK_SelfNode || k == NK_ConstantReadNode;
 }
+/* Is `node` a typed Array that something else holds while sp_typed_to_poly
+   boxes it? A variable, a constant or self holds its Array, and an Array
+   literal sits in a rooted temp. Any other source, a call's result, is boxed
+   by sp_typed_to_poly_unheld. */
+int typed_array_src_held(Compiler *c, int node) {
+  node = unwrap_parens(c, node);
+  if (node < 0) return 0;
+  NodeKind k = nt_kind(c->nt, node);
+  return expr_is_held_ref(c, node) || k == NK_ArrayNode || k == NK_ConstantPathNode ||
+         k == NK_GlobalVariableReadNode || k == NK_ClassVariableReadNode;
+}
 /* The proc-form clone of scope `s`, or -1. Made in analyze (make_yield_proc_forms):
    a second scope named "<name>#pf" on the same class, holding an independently
    typed copy of the body whose yields answer poly. */
