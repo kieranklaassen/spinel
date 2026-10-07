@@ -1,0 +1,18 @@
+String#split with a limit measures the String and its separator by bytes
+
+    p "x,a\0b".split(",", 2)     # ["x", "a"], CRuby ["x", "a\u0000b"]
+    p "a\0b\0c".split("\0", 2)   # ["a"], CRuby ["a", "b\u0000c"]
+
+sp_str_split_limit's arm for a positive limit read the String with
+strlen and sought the separator with strstr, where the unlimited split
+(sp_str_split_into) reads byte lengths and searches by bytes. A field
+after a NUL was lost, and a separator that starts with a NUL was taken
+for the empty one.
+
+The arm reads byte lengths now and finds the separator with
+sp_str_find: by strstr as before, and by sp_bytestr behind the NUL
+strstr ended at only when it finds nothing, so a String of many NUL
+bytes is searched once, as the unlimited split searches it.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+
