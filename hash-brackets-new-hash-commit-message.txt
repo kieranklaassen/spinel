@@ -1,0 +1,35 @@
+Hash[h] answers a new Hash
+
+    g = {"a" => 1}
+    c = Hash[g]
+    c["b"] = 2
+    p g.size
+
+printed 2 where CRuby prints 1: c was g itself, and every write
+through the copy landed in the original. Hash[x] is rewritten to
+x.to_h before x has a type, and a Hash's to_h answers the Hash.
+
+The to_h that rewrite made is now emitted as a new Hash filled from
+the old one: for a typed Hash in emit_builtin_op_ex, and for a boxed
+value in sp_hash_brackets_one, which copies a Hash and hands anything
+else to sp_poly_to_h_m as before. The default is not copied, as in
+CRuby. A to_h the program wrote still answers the Hash itself.
+
+Three forms keep the C they had, because no program can tell the copy
+from the Hash there:
+
+- Hash[] of a literal (`Hash[a: 1]`), which is new already.
+- One written straight into a local of another kind of Hash, where
+  the conversion builds the new Hash (g_hash_conv_value names that
+  value while emit_assign converts it).
+- One that is only the receiver of a call that reads it and has no
+  block (`Hash[h].size`, `Hash[h].merge(x)`, `Hash[h]["a"]`): size,
+  length, empty?, count, keys, values, to_a, first, key?, has_key?,
+  include?, member?, [], fetch, dig, merge, ==, inspect and to_s
+  (hash_brackets_only_read).
+
+Everywhere else the copy is made, as CRuby makes it: about 310
+instructions an entry where the result is kept, changed, walked with a
+block or handed on.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
