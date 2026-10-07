@@ -997,6 +997,8 @@ int emit_call_operator_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
     buf_printf(b, "; sp_str_check_mutable(_t%d); _t%d; })", tcc, tcc);
     return 1;
   }
+  if (recv >= 0 && (rt == TY_STRING || rt == TY_STRBUF) && sp_streq(name, "clear") && argc == 0 &&
+      emit_str_chain_own_call(c, id, b)) return 1;
   /* String#clear consumed as a value: empty the assignable receiver in place
      and yield the now-empty string (#2332) */
   /* TY_STRBUF too: a reader handing out the shared handle is still a String

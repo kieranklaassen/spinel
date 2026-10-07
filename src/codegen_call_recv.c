@@ -3462,6 +3462,20 @@ static int str_self_mutator_name(const char *n) {
   return n && (sp_streq(n, "insert") || sp_streq(n, "prepend") || sp_streq(n, "concat") ||
                sp_streq(n, "replace") || sp_streq(n, "<<"));
 }
+/* Is the call `cur` one of a method the program gives String under its
+   name (emit_call's reopen dispatch)? */
+static int str_link_reopened(Compiler *c, int cur) {
+  int ci = comp_class_index(c, "String");
+  return ci >= 0 && !nt_int(c->nt, cur, "builtin_only", 0) &&
+         comp_method_in_chain(c, ci, nt_str(c->nt, cur, "name"), NULL) >= 0;
+}
+/* clear, force_encoding, bytesplice and append_as_bytes answer their
+   receiver as those five do, where they are String's own */
+static int str_self_builtin_link(Compiler *c, int cur) {
+  const char *n = nt_str(c->nt, cur, "name");
+  return n && (sp_streq(n, "clear") || sp_streq(n, "force_encoding") ||
+               sp_streq(n, "bytesplice") || sp_streq(n, "append_as_bytes")) && !str_link_reopened(c, cur);
+}
 static int str_bang_chain_var(Compiler *c, int recv) {
   const NodeTable *nt = c->nt;
   int cur = unwrap_parens(c, recv), links = 0;
@@ -3470,7 +3484,8 @@ static int str_bang_chain_var(Compiler *c, int recv) {
      the variable too; the chain passes through them as through a bang */
   while (nt_kind(nt, cur) == NK_CallNode && nt_ref(nt, cur, "receiver") >= 0 &&
          (ty_str_typed_bang_flags(nt_str(nt, cur, "name")) ||
-          str_self_mutator_name(nt_str(nt, cur, "name")))) {
+          str_self_mutator_name(nt_str(nt, cur, "name")) ||
+          str_self_builtin_link(c, cur))) {
     cur = unwrap_parens(c, nt_ref(nt, cur, "receiver"));
     links++;
   }
@@ -3479,13 +3494,6 @@ static int str_bang_chain_var(Compiler *c, int recv) {
   if (bt == TY_POLY)
     return nt_kind(nt, cur) == NK_LocalVariableReadNode || nt_kind(nt, cur) == NK_InstanceVariableReadNode ? cur : -1;
   return (bt == TY_STRING || bt == TY_STRBUF) && str_mut_var_recv(c, cur) ? cur : -1;
-}
-/* Is the call `cur` one of a method the program gives String under its
-   name (emit_call's reopen dispatch)? */
-static int str_link_reopened(Compiler *c, int cur) {
-  int ci = comp_class_index(c, "String");
-  return ci >= 0 && !nt_int(c->nt, cur, "builtin_only", 0) &&
-         comp_method_in_chain(c, ci, nt_str(c->nt, cur, "name"), NULL) >= 0;
 }
 /* Has the chain `recv`, down to the variable `base`, such a link? */
 static int str_chain_reopened(Compiler *c, int recv, int base) {
@@ -3518,6 +3526,27 @@ static int str_mut_writeback_tested(Compiler *c, int id, int lvw) {
   return base >= 0 && comp_ntype(c, base) == TY_STRING && !strbuf_slot_ref(c, base, sref, sizeof sref) &&
          !str_chain_reopened(c, recv, base) && str_chain_rebinds(c, id, base);
 }
+/* Is `base` a local read as a String out of a boxed slot
+   (`if x.is_a?(String)`)? Its read is no lvalue. */
+static int str_chain_var_narrowed(Compiler *c, int base) {
+  if (nt_kind(c->nt, base) != NK_LocalVariableReadNode) return 0;
+  LocalVar *lv = scope_local(comp_scope_of(c, base), nt_str(c->nt, base, "name"));
+  return lv && lv->type == TY_POLY && comp_ntype(c, base) != TY_POLY;
+}
+/* Through a link of str_self_builtin_link the chain of the mutator `id`
+   reaches `base` only where the write-back is sure of it; elsewhere the
+   chain ends at that link, as it did. Not sure: a link the program gives
+   String beside it, which need not answer its receiver; a call of the
+   chain that can rebind `base`, unless the write-back is tested for it;
+   a `base` whose read is not its slot. */
+static int str_chain_own_link_ends(Compiler *c, int id, int base) {
+  int recv = nt_ref(c->nt, id, "receiver"), own = 0;
+  for (int cur = unwrap_parens(c, recv); cur >= 0 && cur != base && !own; cur = unwrap_parens(c, nt_ref(c->nt, cur, "receiver")))
+    own = str_self_builtin_link(c, cur);
+  if (!own) return 0;
+  return str_chain_reopened(c, recv, base) || str_chain_var_narrowed(c, base) ||
+         (str_chain_rebinds(c, id, base) && !str_mut_writeback_tested(c, id, 0));
+}
 /* A value-form mutator's write-back of its result _t<tn>: to the receiver
    when it is a variable (lvw), else to the variable a bang chain receiver
    starts from, whose links the mutation reaches in CRuby (one object).
@@ -3529,7 +3558,7 @@ static void emit_str_mut_writeback(Compiler *c, int id, int lvw, int trv, int tn
   int recv = nt_ref(c->nt, id, "receiver");
   if (lvw) { emit_expr(c, recv, b); buf_printf(b, " = _t%d; ", tn); return; }
   int base = str_bang_chain_var(c, recv);
-  if (base < 0) return;
+  if (base < 0 || str_chain_own_link_ends(c, id, base)) return;
   char sref[1024];
   if (strbuf_slot_ref(c, base, sref, sizeof sref))
     buf_printf(b, "sp_String_set_bin(%s, _t%d); ", sref, tn);
@@ -3541,6 +3570,36 @@ static void emit_str_mut_writeback(Compiler *c, int id, int lvw, int trv, int tn
     emit_expr(c, base, b); buf_puts(b, " = sp_poly_str_become(");
     emit_expr(c, base, b); buf_printf(b, ", _t%d); ", tn);
   }
+}
+
+/* clear, slice! and bytesplice change their receiver where it is a variable
+   and write nothing back through a chain. On a chain from a String variable
+   the chain runs for what it does, its own write-back leaving the variable
+   as CRuby has it, and the call is then the variable's own.
+   str_chain_base_var answers that variable for a call `name` on the chain
+   `recv`, or -1: the chain's value is the variable's String only where
+   every link and the call are String's own and no call of the chain can
+   rebind the variable. */
+int str_chain_base_var(Compiler *c, int recv, const char *name) {
+  int base = recv >= 0 ? str_bang_chain_var(c, recv) : -1, ci = comp_class_index(c, "String");
+  TyKind bt = base >= 0 ? comp_ntype(c, base) : TY_UNKNOWN;
+  if ((bt != TY_STRING && bt != TY_STRBUF) || (ci >= 0 && comp_method_in_chain(c, ci, name, NULL) >= 0)) return -1;
+  return str_chain_reopened(c, recv, base) || str_chain_rebinds(c, recv, base) ? -1 : base;
+}
+int emit_str_chain_own_call(Compiler *c, int id, Buf *b) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  int recv = nt_ref(nt, id, "receiver");
+  int base = str_chain_base_var(c, recv, nt_str(nt, id, "name"));
+  if (base < 0 || read_rebound_by(c, base, nt_ref(nt, id, "arguments"))) return 0;
+  int to = ++g_tmp;
+  buf_printf(b, "({ const char *_t%d = ", to); emit_expr(c, recv, b);
+  /* a bang link that changed nothing answered nil */
+  buf_printf(b, "; if (!_t%d) sp_nil_recv(\"%s\"); ", to, nt_str(nt, id, "name"));
+  nt_node_set_ref(nt, id, "receiver", base);
+  emit_expr(c, id, b);
+  nt_node_set_ref(nt, id, "receiver", recv);
+  buf_puts(b, "; })");
+  return 1;
 }
 
 /* A String mutator: the value-form bangs, the in-place mutators, append_as_bytes, bytesplice (emit_array_call's arms, in their order) */
@@ -3556,6 +3615,7 @@ static int emit_str_mutator_call(Compiler *c, int id, Buf *b, const NodeTable *n
      while the statement form -- which asks strbuf_slot_ref directly, not the
      node type -- compiled. */
   if ((rt == TY_STRING || rt == TY_STRBUF) && recv >= 0) {
+    if ((sp_streq(name, "slice!") || sp_streq(name, "bytesplice")) && emit_str_chain_own_call(c, id, b)) { *out = 1; return 1; }
     /* a String value-form bang (ty_str_typed_bang_flags), which answers nil
        when nothing changed unless it answers self (PF_STR_SELF). The names
        are copied: the node's name is rewritten to the plain form and back

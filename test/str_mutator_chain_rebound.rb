@@ -45,3 +45,15 @@ p x.s
 y = Box.new
 y.keep
 p y.s
+
+# through a clear, and at a last slice!, the same
+v = +"abc"
+v.clear.concat((v = +"q"; "x"))
+p v
+w = +"abc"
+w.concat("x").slice!((w = +"zzz"; 0))
+p w
+$h = +"abc"
+def tail = "x"
+$h.clear.concat(tail)
+p $h

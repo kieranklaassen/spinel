@@ -14422,6 +14422,9 @@ static int str_mutate_reassign_arms(Compiler *c, Buf *b, int indent, const NodeT
       emit_indent(b, indent); emit_expr(c, recv, b); buf_puts(b, " = sp_str_concat("); emit_str_expr(c, argv[0], b); buf_puts(b, ", "); emit_expr(c, recv, b); buf_puts(b, ");\n");
       return 1;
     }
+    /* a clear on a chain from a variable takes the value form, which
+       reaches the variable (emit_str_chain_own_call) */
+    if (!assignable && sp_streq(name, "clear") && argc == 0 && str_chain_base_var(c, recv, name) >= 0) return 0;
     if (!assignable && sp_streq(name, "clear") && argc == 0 &&
         nt_type(nt, recv) && sp_streq(nt_type(nt, recv), "CallNode")) {
       /* clear on an unnamed mutable receiver ((+"abc").clear): the temp's
