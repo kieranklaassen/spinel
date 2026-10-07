@@ -1,0 +1,24 @@
+A mutator on a nil String attribute raises NoMethodError
+
+    class Note
+      attr_accessor :text
+      def initialize; @text = +"ab"; end
+    end
+    n = Note.new
+    n.text = nil
+    n.text.upcase!
+
+died with SIGSEGV, and `n.text << "c"` did nothing; CRuby raises
+NoMethodError, as an Array attribute does here. A String slot a mutator
+reaches through its reader is an sp_String handle and the reader's call
+is typed TY_STRBUF: nf_call (analyze_nil.c) kept no nil fact for it,
+and cplan_nil gave a handle a call renders no nil target, since the
+target binds its receiver as a value. An attribute reader's call on
+self, a local or another such reader now carries its ivar's fact, and
+its nil target tests the handle in the slot, as a local's handle is
+tested. The source rule is unchanged: a nil the program writes into a
+slot initialize sets.
+
+Test: test/string_attr_handle_nil_mutator.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
