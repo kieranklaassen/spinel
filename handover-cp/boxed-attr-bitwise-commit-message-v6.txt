@@ -1,0 +1,58 @@
+A boxed attribute's &=, |= and ^= use the operator of the value held
+
+    class Box
+      attr_accessor :v
+      def initialize(v) = @v = v
+    end
+    b = Box.new(["s", 1][0])
+    b.v &= 1
+    p b.v
+
+printed 0 where Ruby raises NoMethodError. The three bitwise forms read
+the slot through sp_poly_recv_i, as an Integer whatever it held: a
+String answered 0 or 1, a Float from its integer part, true from 1, an
+Array from 0, and a right operand of true or an Array was read the same
+way. They now go through sp_poly_bitop, as `+=` to `>>=` on the same
+slot go through their sp_poly_ helpers and as a boxed local's `x &= 1`
+does. Two Integers answer in line first (sp_poly_bitop_int_first, new
+beside sp_poly_bitop), so an Integer in the slot with a literal operand
+costs no more than it did.
+
+The slot is still read before the right operand runs (but for the
+boxed-receiver case below). Where the operand can run the program's
+code, the slot's value is bound to a rooted temp first: the operand may
+write the slot, and may drop the value it held.
+That is a call (`o.v ^= o.bump`, and bump writes v), and also what
+subtree_is_pure_read passes on its static types: a comparison with a
+boxed argument reaches the argument's coerce (`o.v ^= (5 <=> o.w)`),
+and `1.5 + 2` or `a[i]` is the program's own method once it reopens
+Float or Array. So the slot is read in place only where the operand is
+a plain read and no call in it has a name a class of the program
+defines, or an argument that is no Integer or Float.
+
+A boxed attribute holding nil raised NoMethodError; it now answers
+false or true, as Ruby does and as a boxed local holding nil already
+did.
+
+Where a program reopens TrueClass, FalseClass or NilClass, its own `&`,
+`|`, `^`, `!`, `==` and `!=` are not called on master, op-assign or not
+(`x = (t & true)` runs the builtin). With nil in the slot the
+NoMethodError came first: at `|=` and `^=` with such an operand, and at
+`&=` under NilClass's own `&`. These now answer from the builtin's
+value, as `o.v = o.v | (t & true)` does on master.
+
+An Integer attribute, with or without nil, keeps its own slot and its
+own code. A native class's boxed attribute takes the same path; no
+test in the tree has one.
+
+Not covered, as on master: `+=` to `>>=` on a boxed attribute read the
+slot after an operand that writes it, and so do the three forms through
+a boxed receiver when the operand's own statements are set down ahead
+of the dispatch: a block, an Array literal holding a call, a
+`begin ... end`, a sequence in a rescue body.
+
+test/boxed_attr_bitwise_op_assign.rb and
+test/boxed_attr_bitwise_reopened_operator.rb fail on master.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+
