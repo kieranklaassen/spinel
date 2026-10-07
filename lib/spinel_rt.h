@@ -10517,13 +10517,15 @@ static sp_RbVal sp_poly_fetch(sp_RbVal recv, sp_RbVal key, int has_dflt, sp_RbVa
     sp_raise_key_not_found(key);
   }
   if (recv.tag == SP_TAG_OBJ && sp_poly_is_array_kind(recv.cls_id)) {
-    sp_int n = sp_poly_length(recv), i = sp_poly_to_i(key);
+    /* any Integer-convertible index, as fetch with a block takes it
+       (sp_poly_fetch_blk): a Symbol or true read element 0 */
+    sp_int n = sp_poly_length(recv), i0 = sp_poly_arg_int_chk(key), i = i0;
     if (i < 0) i += n;
-    if (i >= 0 && i < n) return sp_poly_index_poly(recv, key);
+    if (i >= 0 && i < n) return sp_poly_arr_get(recv, i);
     if (has_dflt) return dflt;
     sp_raise_cls("IndexError",
                  sp_sprintf("index %lld outside of array bounds: %lld...%lld",
-                            (long long)sp_poly_to_i(key), (long long)-n, (long long)n));
+                            (long long)i0, (long long)-n, (long long)n));
   }
   sp_raise_nomethod(sp_nomethod_msg("fetch", recv));
   return sp_box_nil();
@@ -12088,7 +12090,10 @@ static sp_RbVal sp_poly_arr_values_at(sp_RbVal v, sp_PolyArray *idx) {
       for (sp_int k = f; k <= l; k++) sp_PolyArray_push(out, k < alen ? sp_poly_arr_get(v, k) : sp_box_nil());
       continue;
     }
-    sp_int k = sp_poly_to_i(idx->data[i]);
+    /* a Symbol or true is no offset: it read 0, as a Float Range still does */
+    sp_int k = idx->data[i].tag == SP_TAG_INT ? idx->data[i].v.i
+             : (idx->data[i].tag == SP_TAG_OBJ && idx->data[i].cls_id == SP_BUILTIN_FLOAT_RANGE)
+               ? sp_poly_to_i(idx->data[i]) : sp_poly_arg_int_chk(idx->data[i]);
     if (k < 0) k += alen;
     sp_PolyArray_push(out, (k < 0 || k >= alen) ? sp_box_nil() : sp_poly_arr_get(v, k));
   }
