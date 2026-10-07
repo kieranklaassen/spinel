@@ -3401,8 +3401,8 @@ int emit_poly_recv_block_dispatch(Compiler *c, int id, Buf *b, int indent) {
      emits the call and threads the block, the way it already does for a
      typed receiver. Same policy as the |x| gate above: hand it to a path
      that emits something, never leave a silent empty body. The statements
-     the receiver and the arms hoisted are taken back with it, or that path
-     would run them a second time. */
+     the receiver hoisted are taken back with it, or that path would run
+     them a second time. */
   Buf sw; memset(&sw, 0, sizeof sw);
   size_t pre0 = g_pre ? g_pre->len : 0;
   emit_indent(&sw, indent);
@@ -3426,9 +3426,18 @@ int emit_poly_recv_block_dispatch(Compiler *c, int id, Buf *b, int indent) {
     g_inline_recv_expr = castbuf;
     g_inline_recv_class = k;
     int v = view_push(c, recv, ty_object(k));  /* so the inline entry classifies the receiver */
-    size_t before = sw.len;
-    int armed = emit_inline_call(c, id, &sw, indent + 1);
-    int empty = !armed || sw.len == before;
+    /* The statements an arm's arguments hoist belong to the arm. In the
+       statement's prelude they ran ahead of the switch, once an arm, whatever
+       class the receiver had. */
+    Buf apre; memset(&apre, 0, sizeof apre);
+    Buf arm; memset(&arm, 0, sizeof arm);
+    Buf *sv_pre = g_pre; int sv_ind = g_indent;
+    if (g_pre) { g_pre = &apre; g_indent = indent + 1; }
+    int armed = emit_inline_call(c, id, &arm, indent + 1);
+    g_pre = sv_pre; g_indent = sv_ind;
+    int empty = !armed || !arm.len;
+    if (!empty) { if (apre.p) buf_puts(&sw, apre.p); buf_puts(&sw, arm.p); }
+    free(apre.p); free(arm.p);
     g_inline_recv_expr = sv_expr;
     g_inline_recv_class = sv_class;
     view_pop(c, v);
