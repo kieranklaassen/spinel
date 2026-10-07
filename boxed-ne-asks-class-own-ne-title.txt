@@ -1,0 +1,1 @@
+A boxed != asks the class's own !=
