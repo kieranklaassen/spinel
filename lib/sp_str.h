@@ -163,6 +163,33 @@ sp_StrArray*sp_str_split_drop_trailing(const char*s,const char*sep);
 sp_StrArray*sp_str_split_limit(const char*s,const char*sep,sp_int n);
 sp_StrArray*sp_str_split_ws(const char*s);
 sp_StrArray*sp_str_split_ws_limit(const char*s,sp_int n);
+/* The first occurrence in hay..end of a String pattern of nn bytes (nn > 0),
+   found by bytes. One byte is found by memchr. A longer pattern is sought by
+   strstr, as it was while the search ended at the subject's first NUL. Where
+   strstr finds nothing it ended at a NUL byte of the subject and no
+   occurrence begins before that byte, so one strlen says whether it is the
+   String's end, with nothing more to find, or lies inside it, and
+   sp_str_find_rest looks behind it by bytes. strstr reads the pattern to its
+   first NUL byte too, so at a call's first hit one strlen of the pattern says
+   whether it holds one (*nul, -1 until then): if not, every hit is the
+   pattern; if so, this search and the later ones go by bytes. */
+const char*sp_str_find_rest(const char*hay,const char*end,const char*need,size_t nn);
+static inline const char*sp_str_find(const char*hay,const char*end,const char*need,size_t nn,int*nul){
+  if(nn==1)return (const char*)memchr(hay,need[0],(size_t)(end-hay));
+  if(*nul<=0){
+    const char*f=strstr(hay,need);
+    if(f){
+      if(*nul<0)*nul=strlen(need)!=nn;
+      if(!*nul)return f;
+      hay=f;
+    }
+    else{
+      hay+=strlen(hay)+1;
+      if(hay>=end)return NULL;
+    }
+  }
+  return sp_str_find_rest(hay,end,need,nn);
+}
 sp_StrArray*sp_str_scan(const char*s,const char*pat);
 sp_int sp_str_scan_at(const char*s,const char*pat,sp_int pos);
 const char*sp_str_gsub(const char*s,const char*pat,const char*rep);
