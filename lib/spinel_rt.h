@@ -4329,6 +4329,11 @@ static sp_int sp_poly_to_i_meth(sp_RbVal v) {
 /* Like sp_nomethod_msg, but also stages the failed call's argument list for
    NoMethodError#args (#2837). */
 SP_COLD static const char *sp_nomethod_msg_args(const char *m, sp_RbVal v, sp_int n, sp_RbVal *args) {
+  /* a receiver or an argument made for this call (a Range boxed, a String
+     built) is held by nothing else while the list is allocated */
+  SP_GC_SAVE();
+  SP_GC_ROOT_RBVAL(v);
+  for (sp_int i = 0; i < n; i++) (void)_sp_gc_root_push(SP_GC_ENTRY_RBVAL(args[i]));
   sp_PolyArray *a = sp_PolyArray_new();
   SP_GC_ROOT(a);
   for (sp_int i = 0; i < n; i++) sp_PolyArray_push(a, args[i]);
@@ -4338,6 +4343,8 @@ SP_COLD static const char *sp_nomethod_msg_args(const char *m, sp_RbVal v, sp_in
 /* The statically-typed gate arms keep their literal message; this stages the
    argument list beside it. */
 SP_COLD static const char *sp_stage_args_msg(const char *msg, sp_int n, sp_RbVal *args) {
+  SP_GC_SAVE();   /* as above: the arguments are held by nothing else */
+  for (sp_int i = 0; i < n; i++) (void)_sp_gc_root_push(SP_GC_ENTRY_RBVAL(args[i]));
   sp_PolyArray *a = sp_PolyArray_new();
   SP_GC_ROOT(a);
   for (sp_int i = 0; i < n; i++) sp_PolyArray_push(a, args[i]);
