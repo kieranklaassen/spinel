@@ -4647,6 +4647,20 @@ int desugar_array_first_last(Compiler *c) {
   if (user_fl) return 0;
   NT_FOREACH_KIND(nt, NK_CallNode, id) {
     const char *nm = nt_str(nt, id, "name");
+    /* a receiver that was an Array when this ran and is boxed now (a
+       parameter a later call fills with a Range or a Hash) has a #first of
+       its own: the call takes its name back, once */
+    int fl = nt_int(nt, id, "was_first_last", 0);
+    if (fl == 1 || fl == 2) {
+      int r0 = nt_ref(nt, id, "receiver");
+      if (r0 < 0 || infer_type(c, r0) != TY_POLY) continue;
+      nt_node_set_str(nt, id, "name", fl == 1 ? "first" : "last");
+      nt_node_set_ref(nt, id, "arguments", -1);
+      nt_node_set_int(nt, id, "was_first_last", 3);
+      changed = 1;
+      continue;
+    }
+    if (fl) continue;
     if (!nm || (!sp_streq(nm, "first") && !sp_streq(nm, "last"))) continue;
     int recv = nt_ref(nt, id, "receiver");
     if (recv < 0 || nt_ref(nt, id, "block") >= 0) continue;
@@ -4666,6 +4680,7 @@ int desugar_array_first_last(Compiler *c) {
     c->nscope[idx] = c->nscope[id];
     c->nscope[ia] = c->nscope[id];
     nt_node_set_ref(nt, id, "arguments", ia);
+    nt_node_set_int(nt, id, "was_first_last", sp_streq(nm, "first") ? 1 : 2);
     nt_node_set_str(nt, id, "name", "[]");
     changed = 1;
   }
