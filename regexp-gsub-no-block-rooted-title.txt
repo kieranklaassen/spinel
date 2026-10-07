@@ -1,0 +1,1 @@
+gsub with no block roots its Enumerator while its label is made

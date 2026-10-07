@@ -1,0 +1,32 @@
+partition with a Regexp evaluates its receiver once
+
+    $calls = 0
+    def line
+      $calls += 1
+      "row" + $calls.to_s
+    end
+    p line.partition(/z/)
+    p $calls
+
+prints ["row2", "", ""] and 2 where CRuby prints ["row1", "", ""] and
+1. (s = s + "c").partition(/z/) assigns twice and
+(s << "c").partition(/z/) appends twice in the same way.
+
+The emitter builds the Array in the emitted C and wrote the
+receiver's C text twice: once for the match, and once more for the
+first piece when nothing matches.
+
+The receiver now goes into a C temporary and both places read that.
+Nothing else in the emitted C moves: the Array, the match and the
+pieces are made in the order they were. The temporary needs no root:
+nothing allocates between a match that fails and the copy, and
+sp_str_dup roots what it copies.
+
+"key=value".partition(/=/) goes from 1,139 to 1,140 instructions a
+call and a subject with no match from 1,141 to 1,142 (callgrind,
+100,000 calls).
+
+Test: test/regexp_partition_receiver_once.rb. Without the change it
+prints 9 wrong lines.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

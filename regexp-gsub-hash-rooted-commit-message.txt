@@ -1,0 +1,29 @@
+gsub with a String and a Hash keeps its result while the match is set
+
+    h = {" " => "_"}
+    s = ("abcdefghij" * 40 + " ") * 2000
+    n = 0
+    8.times do
+      t = s.gsub(" ", h)
+      n += t.size if t[400] == "_" && $~[0] == " "
+    end
+    p n
+
+exits 139 in a plain run where CRuby prints 6416000, and on a 6 KB
+String 20,000 rounds of s.gsub("l", h) followed by $~[0] answer a
+freed String 197 times. A program that never reads $~ is right.
+
+sp_str_gsub_str_str_hash built its result and then set the match,
+which allocates, while the result sat in a C local with no root.
+
+The result is now rooted across that one call, inside the branch a
+program that reads $~ takes. The match is set where it was set before
+and nowhere else. "hello".gsub("l", h) goes from 1,405 to 1,425
+instructions a call where $~ is read and from 1,204 to 1,206 where it
+is not (callgrind, 100,000 calls).
+
+Test: test/gsub_hash_result_rooted.rb, in GC_STRESS_TESTS. Without
+the change it prints a wrong line in a plain run and aborts at
+level 2. The generated C does not change.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

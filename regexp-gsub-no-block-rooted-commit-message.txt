@@ -1,0 +1,27 @@
+gsub with no block roots its Enumerator while its label is made
+
+    p "a1b2".gsub(/\d/).to_a
+
+aborts under SPINEL_GC_STRESS=2 where CRuby prints ["1", "2"]. Built
+with clang, a loop over it prints a wrong line at level 1 too.
+
+The emitted C made the Enumerator and its label, "gsub(/\d/)", as two
+arguments of one call to sp_enum_with_src. Each is a fresh allocation
+held in no root while the other is made, in whichever order the C
+compiler evaluates the arguments.
+
+The Enumerator is now made first, into a rooted temporary, so the
+label is the only allocation among the call's arguments. That also
+settles the order for a pattern that is neither a String nor a Regexp:
+it raises TypeError before its inspect is asked for the label, as it
+did when built with clang; built with gcc, inspect ran first.
+
+The root costs 13 instructions for each Enumerator made (callgrind,
+100,000 calls: "a1b2".gsub(/\d/).to_a goes from 5,183 to 5,196 a
+call). The match is not touched: nothing sets $~ that did not set it
+before.
+
+Test: test/gsub_enumerator_rooted.rb, in GC_STRESS_TESTS. Without the
+change it aborts at level 2.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
