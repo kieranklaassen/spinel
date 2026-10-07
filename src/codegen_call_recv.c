@@ -8191,14 +8191,17 @@ static int emit_scalar_call_arms(Compiler *c, int id, Buf *b) {
         int tH = ++g_tmp;
         buf_printf(b, "({ sp_String *_t%d = %s;"
                       " if (sp_String_is_frozen(_t%d)) sp_raise_frozen_str(_t%d->data);"
-                      " const char *_p%d = sp_String_cstr(_t%d); sp_int _v%d = ",
-                   tH, srefB, tH, tH, tH, tH, tH);
+                      " sp_int _v%d = ",
+                   tH, srefB, tH, tH, tH);
         emit_int_expr(c, avS[1], b);
-        buf_printf(b, "; const char *_q%d = sp_str_setbyte_cow(_p%d, ", tH, tH);
+        buf_printf(b, "; sp_int _i%d = ", tH);
         emit_int_expr(c, avS[0], b);
-        buf_printf(b, ", _v%d);"
+        /* the buffer is read once both arguments have run: either may
+           append to this handle, which frees the buffer it had */
+        buf_printf(b, "; const char *_p%d = sp_String_cstr(_t%d);"
+                      " const char *_q%d = sp_str_setbyte_cow(_p%d, _i%d, _v%d);"
                       " if (_q%d != _p%d) sp_String_set_bin(_t%d, _q%d); _v%d; })",
-                   tH, tH, tH, tH, tH, tH);
+                   tH, tH, tH, tH, tH, tH, tH, tH, tH, tH, tH);
         return 1;
       }
     }
