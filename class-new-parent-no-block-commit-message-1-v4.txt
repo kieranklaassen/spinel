@@ -1,0 +1,39 @@
+A boxed exception of a program's own class answers is_a?, instance_of? and when
+
+    class MyErr < StandardError; end
+    kept = []
+    begin; raise MyErr, "a"; rescue StandardError => e; kept << e; end
+    p kept.map { |x| x.is_a?(MyErr) }    # [false]; CRuby: [true]
+
+instance_of?(MyErr) answered false too, and `case x when MyErr` took its
+else arm. emit_poly_isa_test and the `when` class test compare the boxed
+value's class id with the ids of the class and of those under it. A raised
+exception is an sp_Exception boxed as SP_BUILTIN_EXCEPTION, and it carries
+its class by name, so no id matched. For an exception class of the
+program's own the test now has a second arm that compares the name a boxed
+exception carries with the names of that class and of those under it.
+
+The names are the program's own classes: a miss costs those comparisons,
+no walk up the builtin hierarchy, and nothing is allocated (about 40
+instructions a test of a boxed raised exception, 5 for a value that is no
+exception).
+
+The arm is right only where the test is the builtin one and a class's name
+means one class wherever it is written, so it is emitted for such a
+program alone (prog_class_test_by_name, one scan a compile):
+
+- none that defines, aliases or undefines is_a?, kind_of?, instance_of?,
+  === or exception: a def of that name anywhere, or the name as a Symbol or
+  a String;
+- none with a constant bound twice: two classes of one leaf name, a
+  constant written under a class's name, a class alias written twice.
+
+Every other program emits the C it did. So does the class-id arm: an
+exception never raised (`MyErr.new` kept in the Array) is boxed as an
+object of its class and answers as before.
+
+Test: test/rescued_own_exception_boxed_class.rb,
+test/rescued_own_exception_own_predicate.rb,
+test/rescued_own_exception_shadowed_constant.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
