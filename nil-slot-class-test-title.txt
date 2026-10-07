@@ -1,0 +1,1 @@
+is_a? on a nil in an Array or a Hash slot answers for nil

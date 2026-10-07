@@ -1,0 +1,23 @@
+is_a? on a nil in an Array or a Hash slot answers for nil
+
+    class Shelf
+      def list = (@list ||= [1])
+      def none? = @list.is_a?(NilClass)
+    end
+    p Shelf.new.none?
+
+prints true in CRuby and printed false: is_a?, kind_of? and
+instance_of? of an Array or a Hash receiver were folded from the
+slot's type, so a nil in it was an Array and no NilClass. A String
+slot reads its NULL (emit_scalar_class_test); an Array or a Hash slot
+holds nil as the same NULL and now takes the same test in
+emit_call_compare_arms, where the nil fact says the receiver may be
+nil (repr_of's may_nil). A receiver that is not nil keeps the
+constant, as do Object, Kernel and BasicObject, which hold for nil
+too. `Array === x` and `when Array` are answered for the slot's type,
+as before.
+
+Test: test/nil_array_hash_slot_class_test.rb. The generated C of three
+other programs gains the test.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
