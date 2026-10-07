@@ -1203,24 +1203,21 @@ int *g_yvt_mi = NULL;
 int g_yvt_depth = 0;
 static int g_yvt_cap = 0;
 /* Put method `mi` on the stack of methods being answered; 0 when it is on it
-   already (a method that forwards its block to itself), or when its answer
-   would be of no use. The walk keeps no memory of what it has asked, so each
-   method of a chain asks the whole chain above it, and two kinds of method
-   are asked no further:
-   - one nothing calls, past MAX_YVT_DEPTH: its yield has no block to answer
-     for it;
-   - one the inliner writes out (it yields), once MAX_YVT_INLINED of them are
-     being answered: a call written out that deep inside others is refused
-     (SP_INLINE_DEPTH_MAX in codegen_iter.c).
-   A method with a function of its own is asked at any depth. */
+   already (a method that forwards its block to itself), or when it is asked
+   no further. The walk keeps no memory of what it has asked, so each method
+   of a chain asks the whole chain above it. Past MAX_YVT_DEPTH only a method
+   that yields and that something calls is asked: its call is written out in
+   place and typed from the block handed down to it. Of those no more than
+   MAX_YVT_INLINED are answered at once: a call written out that deep inside
+   others is refused (SP_INLINE_DEPTH_MAX in codegen_iter.c). */
 static int yvt_enter(Compiler *c, int mi) {
   int inl = 0;
   for (int i = 0; i < g_yvt_depth; i++) {
     if (g_yvt_mi[i] == mi) return 0;
     if (c->scopes[g_yvt_mi[i]].yields) inl++;
   }
-  if (g_yvt_depth >= MAX_YVT_DEPTH && !c->scopes[mi].reachable) return 0;
-  if (inl >= MAX_YVT_INLINED && c->scopes[mi].yields) return 0;
+  if (g_yvt_depth >= MAX_YVT_DEPTH && !(c->scopes[mi].yields && c->scopes[mi].reachable)) return 0;
+  if (inl >= MAX_YVT_INLINED) return 0;
   if (g_yvt_depth == g_yvt_cap) {
     g_yvt_cap = g_yvt_cap ? g_yvt_cap * 2 : 32;
     g_yvt_mi = realloc(g_yvt_mi, (size_t)g_yvt_cap * sizeof *g_yvt_mi);
