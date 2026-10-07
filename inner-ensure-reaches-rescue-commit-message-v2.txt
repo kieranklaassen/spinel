@@ -1,0 +1,30 @@
+An exception leaving an inner ensure reaches the rescue around it
+
+    begin
+      begin
+        raise TypeError, "t"
+      ensure
+        puts "inner ensure"
+      end
+    rescue TypeError
+      puts "rescued"
+    ensure
+      puts "outer ensure"
+    end
+
+printed both ensures and died with the TypeError uncaught, where CRuby
+prints "inner ensure", "rescued", "outer ensure".
+
+After its ensure body a region hands the exception it deferred straight
+to the enclosing ensure, unless a begin's frame lies between the two. The
+rescue clauses of the enclosing begin itself share that ensure's frame:
+no frame lies between, and they were passed. A synchronize block and the
+loop of select! directly under such a begin passed them the same way.
+
+EnsureCtx gains body_rescue: the region has rescue clauses and its body
+is what is being emitted. Where it is set the exception is raised again,
+and the enclosing begin's frame brings it to those clauses. Where none of
+them matches, the arm for no match runs the ensure, as it does for what
+the body itself raises. Everywhere else the C is what it was.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
