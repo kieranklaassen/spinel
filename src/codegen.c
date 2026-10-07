@@ -5154,7 +5154,7 @@ void emit_method(Compiler *c, Scope *s, Buf *b) {
        walk (a user #inspect that returns through a proc) drops the frames the
        longjmp jumps over; the exception and catch stacks record theirs inside
        the runtime calls that open their arms, but this node is built here. */
-    buf_puts(b, "    _h.exc_top = sp_exc_top; _h.catch_top = sp_catch_top;\n");
+    buf_puts(b, "    _h.exc_top = sp_exc_top; _h.catch_top = sp_catch_top; _h.rescue_sp = sp_rescue_sp;\n");
     buf_puts(b, "    _h.recur_mark = sp_poly_recur_save();\n");
     buf_puts(b, "    _h.prev = sp_proc_ret_head; sp_proc_ret_head = &_h;\n");
     if (!is_void) {
@@ -5163,13 +5163,15 @@ void emit_method(Compiler *c, Scope *s, Buf *b) {
       else buf_puts(b, default_value_from_compiler(c, s->ret));
       buf_puts(b, ";\n");
       /* the longjmp-home delivery also restores sp_catch_top: a return out of a
-         catch block inside the home (or a callee) must not leak its catch slot. */
-      buf_puts(b, "    if (setjmp(_h.jb)) { sp_proc_ret_head = _h.prev; sp_catch_top = _h.catch_top; return ");
+         catch block inside the home (or a callee) must not leak its catch slot.
+         And sp_rescue_sp: a return out of a rescue body, the home's or a
+         callee's, must not leave that body's exception handled. */
+      buf_puts(b, "    if (setjmp(_h.jb)) { sp_proc_ret_head = _h.prev; sp_catch_top = _h.catch_top; sp_rescue_sp = _h.rescue_sp; return ");
       emit_unbox_text(c, s->ret, "_h.val", b);
       buf_puts(b, "; }\n");
     }
     else {
-      buf_puts(b, "    if (setjmp(_h.jb)) { sp_proc_ret_head = _h.prev; sp_catch_top = _h.catch_top; return; }\n");
+      buf_puts(b, "    if (setjmp(_h.jb)) { sp_proc_ret_head = _h.prev; sp_catch_top = _h.catch_top; sp_rescue_sp = _h.rescue_sp; return; }\n");
     }
     buf_puts(b, "    {\n");
     g_method_pr_label = "_pr_done"; g_method_pr_var = is_void ? NULL : "_prret";
