@@ -343,6 +343,11 @@ static void emit_str(int id, const char *field, const char *val) {
   out_add("S %d %s %s", id, field, val);
 }
 
+/* Set once a file's text went ahead of the statement its require stood in
+   (sp_req_hoist_splice) or an autoload became a require: the tree no longer
+   tells where the load was written, and the program node says so
+   (`req_hoisted`), for a proof that places a def by where it stands. */
+static int sp_req_hoisted = 0;
 static void emit_int(int id, const char *field, long long val) {
   out_add("I %d %s %lld", id, field, val);
 }
@@ -2752,6 +2757,7 @@ static void sp_req_hoist_splice(char **result, unsigned char **fsl, size_t *fsl_
                                 const SpReqHit *h, const char *content,
                                 unsigned char *cfsl, size_t cfsl_n,
                                 const char *value) {
+  sp_req_hoisted = 1;
   size_t kw_off = (size_t)(h->kw - *result), end_off = (size_t)(h->expr_end - *result);
   size_t rlen = strlen(*result), clen = strlen(content), vlen = strlen(value);
   size_t ins = sp_toplevel_stmt_start(*result, kw_off);
@@ -3085,6 +3091,7 @@ static char *sp_rewrite_autoloads(const char *source, const char *dir) {
                 if (!paren || *q == ')') {
                   if (paren) q++;
                   const char *kw = sp_autoload_beside(dir, fs, flen) ? "require_relative" : "require";
+                  sp_req_hoisted = 1;
                   if (sp_autoload_is_main) {
                     o += (size_t)sprintf(out + o, "%s \"%.*s\"", kw, (int)flen, fs);
                   }
@@ -5210,6 +5217,7 @@ else {
   node_counter = 0;
 
   int root_id = flatten(root);
+  if (sp_req_hoisted) emit_int(root_id, "req_hoisted", 1);
 
   /* Output */
   sb_printf(out, "ROOT %d\n", root_id);

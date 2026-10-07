@@ -1182,6 +1182,11 @@ static inline int singleton_visible_ci(Compiler *c, int ci) {
 }
 int        class_var_static_ci(Compiler *c, int node);  /* local holding one class const */
 int        class_recv_static_ci(Compiler *c, int node); /* constant or local naming one class */
+int        recv_object_class_written(Compiler *c, int recv); /* `K.new`, or a local every write gives one class */
+int        recv_object_class_proved(Compiler *c, int recv); /* `K.new`, or a local only ever one: never nil */
+int        own_def_takes_call(Compiler *c, const char *nm, int (*kin)(const char *)); /* a def of a builtin's name that keeps its call */
+int        own_def_stands_before(Compiler *c, int mi, int id); /* method mi's def has run by the time node id does */
+int        self_is_scope_object(Compiler *c, int id); /* no block around id can run it on another self */
 int        dynamic_new_may_reach(Compiler *c, int call_id, int cid);  /* k.new can build cid */
 int        anon_struct_ci_for_value(Compiler *c, int val);  /* k = Struct.new(...) value node */
 const char *struct_call_dup_member(Compiler *c, int callnode);  /* first duplicate member sym name, or NULL */
