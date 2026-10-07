@@ -1,0 +1,47 @@
+One value with no to_a splatted into a yield or a proc arrives as itself
+
+A splat in the argument list built for a yield, a proc's call or a
+lambda's call was spread with sp_enum_items_from, which has no items
+for a value that is no collection. So one value splatted there was
+dropped:
+
+    def g(v) = yield(*v)
+    p(g(5) { |a| a })              # nil; CRuby 5
+    f = proc { |a| a }
+    x = :k
+    p f.call(*x)                   # nil; CRuby :k
+    p lambda { |a| a }.call(*x)    # ArgumentError (given 0, expected 1)
+
+CRuby asks to_a only of a value that has one; any other value is the
+one argument, itself. emit_spread_args_into now spreads such a splat
+with sp_splat_arg_items, a new helper beside sp_enum_items_from: an
+Integer (a big one too), a Float, a Symbol, true, false, a class and
+an object of the program are the value itself. Everything else (nil,
+an Array, a Hash, a Range, a Struct, an Enumerator, any other
+builtin's object) goes to sp_enum_items_from as before.
+
+The helper is chosen only in a program with no way to a to_a of its
+own, the walk the commits beneath make
+(splat_program_may_make_to_a): an Integer has a to_a where the
+program reopens Integer, a class where it defines self.to_a. In any
+other program, and for a splat known to be an Array, a Hash, a Range
+or nil, the C is the same as before. A boxed splat is decided at run
+time: 200,000 calls of a proc with a boxed Array splatted ran
+152,468,363 instructions before and 153,868,363 after (callgrind,
+gcc), 7 a call.
+
+Not changed: a String. It is dropped there as before. The list is
+built of boxed values and a boxed String is a copy, so a block that
+appends to its parameter would write to the copy and the caller's
+String would stay as it was, where passing the String without the
+splat changes it. That wants the String handed over shared, which is
+not this change's to decide.
+
+Not changed either: a typed Proc, Regexp, Rational or Encoding and a
+builtin exception are still dropped there. `f[*x]`, a splat after or
+before another argument and a splat into a method take other paths.
+
+Tests: test/splat_one_value_into_block.rb, and
+test/splat_one_value_into_block_bigint.rb for a big Integer.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
