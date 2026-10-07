@@ -1,0 +1,29 @@
+A String or-assigned into a boxed slot is shared under --share-strings
+
+    class Box; attr_accessor :x; end
+    r = Box.new
+    r.x ||= +"ab"
+    r.x << "z"
+    p r.x
+
+printed "ab" under --share-strings: the append went to a copy and
+nothing said so. CRuby prints "abz", and so does the flag when the
+store is written `r.x = +"ab"`.
+
+A slot that also holds nil is a box, and under the flag each String
+written into a box the rule shares is boxed as its handle
+(share_lift_poly_ivar_stores). The writes listed there were `@x = v`,
+the attribute writer `o.x = v` and instance_variable_set. `o.x ||= v`,
+`o.x &&= v`, `@x ||= v` and `@x &&= v` store through the same
+emit_boxed and were not listed, so they stored a copy. A Struct
+member's `||=` lost the append the same way.
+
+The share walk also asked a CallOrWriteNode for "read_name", a field
+the parser does not write (the reader's name is "name"), so the value
+of an attribute's conditional write joined no instance variable and
+`(r.x ||= +"ab") << "z"` did not make the slot shared.
+
+Both places are read only under --share-strings; the default build's
+generated C is unchanged.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
