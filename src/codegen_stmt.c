@@ -9116,6 +9116,78 @@ static int slot_takes_subclass(Compiler *c, TyKind slot, TyKind val) {
   return is_descendant(c, vc, sc);
 }
 
+/* Does running the subtree assign the variable `var` -- an instance, class
+   or global variable; `kind` is the first word of its node names -- or call
+   the writer of the attribute `attr` (NULL: none is asked about)? An
+   assignment written in the subtree, or in a method it calls, found by the
+   method's name, three calls deep. */
+static int subtree_shows_assign(Compiler *c, int id, const char *kind, const char *var, const char *attr, int depth) {
+  const NodeTable *nt = c->nt;
+  if (id < 0) return 0;
+  const char *ty = nt_type(nt, id);
+  if (!ty) return 0;
+  const char *nm = nt_str(nt, id, "name");
+  int write = strstr(ty, "WriteNode") || strstr(ty, "TargetNode");
+  if (nm && write && !strncmp(ty, kind, strlen(kind)) && sp_streq(nm, var)) return 1;
+  if (nm && !strncmp(ty, "Call", 4)) {
+    /* `o.x = v` and a target name the writer; `o.x += v` names the reader */
+    size_t n = attr ? strlen(attr) : 0;
+    if (attr && !strncmp(nm, attr, n) && (sp_streq(nm + n, "=") || (write && !nm[n]))) return 1;
+    for (int mi = 0; depth < 3 && mi < c->nscopes; mi++) {
+      Scope *m = &c->scopes[mi];
+      if (m->def_node >= 0 && m->name && sp_streq(m->name, nm) &&
+          subtree_shows_assign(c, nt_ref(nt, m->def_node, "body"), kind, var, attr, depth + 1))
+        return 1;
+    }
+  }
+  for (int i = 0; i < nt_num_refs(nt, id); i++)
+    if (subtree_shows_assign(c, nt_ref_at(nt, id, i), kind, var, attr, depth)) return 1;
+  for (int i = 0; i < nt_num_arrs(nt, id); i++) {
+    int n = 0; const int *ids = nt_arr_at(nt, id, i, &n);
+    for (int j = 0; j < n; j++)
+      if (subtree_shows_assign(c, ids[j], kind, var, attr, depth)) return 1;
+  }
+  return 0;
+}
+
+/* The receiver of `recv.x = value` is read before the value runs. Does the
+   value assign what the receiver reads? A local it assigns, or one a proc
+   it may call assigns (read_rebound_by: `c.x = (c = d; 1)`); an instance,
+   class or global variable (`@o.x = (@o = d; 1)`, `@o.x = swap`); the
+   field a reader receiver reads (`self.o.x = (@o = d; 1)`, `h.o.x =
+   (h.o = d; 1)`). Only an assignment subtree_shows_assign finds counts:
+   every other statement keeps its receiver read in place. */
+static int writer_recv_let_go(Compiler *c, int recv, int value) {
+  const NodeTable *nt = c->nt;
+  if (recv < 0) return 0;
+  const char *nm = nt_str(nt, recv, "name");
+  switch (nt_kind(nt, recv)) {
+    case NK_LocalVariableReadNode: return read_rebound_by(c, recv, value);
+    case NK_InstanceVariableReadNode: return nm && subtree_shows_assign(c, value, "InstanceVariable", nm, nm + 1, 0);
+    case NK_ClassVariableReadNode: return nm && subtree_shows_assign(c, value, "ClassVariable", nm, NULL, 0);
+    case NK_GlobalVariableReadNode: return nm && subtree_shows_assign(c, value, "GlobalVariable", nm, NULL, 0);
+    case NK_CallNode: {
+      int alloc = 0;
+      char ivn[300];
+      if (!nm || !call_is_field_read(c, recv, &alloc)) return 0;
+      snprintf(ivn, sizeof ivn, "@%s", nm);
+      return subtree_shows_assign(c, value, "InstanceVariable", ivn, nm, 0) ||
+             writer_recv_let_go(c, nt_ref(nt, recv, "receiver"), value);
+    }
+    case NK_ParenthesesNode: case NK_StatementsNode: {
+      for (int i = 0; i < nt_num_refs(nt, recv); i++)
+        if (writer_recv_let_go(c, nt_ref_at(nt, recv, i), value)) return 1;
+      for (int i = 0; i < nt_num_arrs(nt, recv); i++) {
+        int n = 0; const int *ids = nt_arr_at(nt, recv, i, &n);
+        for (int j = 0; j < n; j++)
+          if (writer_recv_let_go(c, ids[j], value)) return 1;
+      }
+      return 0;
+    }
+    default: return 0;
+  }
+}
+
 void emit_boxed_writer_arms(Compiler *c, const char *base, const char *nm,
                             const char *objp, const char *src, TyKind at, Buf *b) {
   for (int k = 0; k < c->nclasses; k++) {
@@ -11222,6 +11294,15 @@ static int emit_call_stmt(Compiler *c, int id, Buf *b, int indent, const NodeTab
                          nt_kind(nt, recv) != NK_GlobalVariableReadNode &&
                          !subtree_is_pure_read(c, recv) && !subtree_is_pure_read(c, argv[0]);
               int hroot = hold && subtree_may_allocate(nt, argv[0]);
+              /* A receiver that is a plain read is read in place, kept by
+                 what it reads, unless the value gives that another value:
+                 the store goes into the receiver read first, which only
+                 the temporary may hold by then. */
+              if (!hold && rc >= 0 && rc < c->nclasses && !c->classes[rc].is_value_type &&
+                  writer_recv_let_go(c, recv, argv[0])) {
+                hold = 1;
+                hroot = subtree_may_allocate(nt, argv[0]);
+              }
               int braces = fo || (hold && !g_pre);
               int tw = fo || hold ? ++g_tmp : -1;
               if (fo || hold) {
@@ -11325,6 +11406,7 @@ static int emit_call_stmt(Compiler *c, int id, Buf *b, int indent, const NodeTab
             int tv = ++g_tmp, tval = ++g_tmp;
             emit_indent(b, indent);
             buf_printf(b, "{ sp_RbVal _t%d = ", tv); emit_expr(c, recv, b); buf_puts(b, "; ");
+            if (subtree_may_allocate(nt, argv[0]) && writer_recv_let_go(c, recv, argv[0])) buf_printf(b, "SP_GC_ROOT_RBVAL(_t%d); ", tv);
             if (nil_rhs) {
               buf_printf(b, "sp_RbVal _t%d = sp_box_nil();", tval);
             }
