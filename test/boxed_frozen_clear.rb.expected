@@ -1,0 +1,35 @@
+FrozenError
+FrozenError
+FrozenError
+FrozenError
+FrozenError
+FrozenError
+FrozenError
+FrozenError
+FrozenError
+FrozenError
+[1, 2]
+[1.5]
+["x"]
+[1, "x", nil]
+2
+[:a, :b]
+1
+1
+1
+2
+can't modify frozen Array: [1, "x", nil]
+FrozenError
+FrozenError
+[1, "x", nil]
+2
+FrozenError
+cleared
+cleared
+cleared
+[]
+0
+NoMethodError
+NoMethodError
+2
+3

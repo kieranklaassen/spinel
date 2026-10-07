@@ -590,27 +590,38 @@ sp_RbVal sp_poly_clear(sp_RbVal v)
   if (v.tag == SP_TAG_STR) { sp_str_check_mutable(v.v.s); return sp_box_str(sp_str_from_bytes("", 0)); }
   sp_poly_coll_chk(v, "clear");
   if (v.tag != SP_TAG_OBJ || !v.v.p) return v;
+  /* a frozen Array or Hash is not emptied: CRuby raises before it removes
+     anything, for an empty one too. An Array's flag is in its struct, a
+     Hash's in its collector header, and each arm reads its own: the box may
+     hold a pointer with no such header in front of it (a Regexp's pattern). */
   switch (v.cls_id) {
-    case SP_BUILTIN_INT_ARRAY:      ((sp_IntArray *)v.v.p)->len = 0; break;
-    case SP_BUILTIN_FLT_ARRAY:      ((sp_FloatArray *)v.v.p)->len = 0; break;
-    case SP_BUILTIN_STR_ARRAY:      ((sp_StrArray *)v.v.p)->len = 0; break;
-    case SP_BUILTIN_POLY_ARRAY:     ((sp_PolyArray *)v.v.p)->len = 0; break;
-    case SP_BUILTIN_PTR_ARRAY:      ((sp_PtrArray *)v.v.p)->len = 0; break;
+    case SP_BUILTIN_INT_ARRAY:      if (((sp_IntArray *)v.v.p)->frozen) goto frozen_array; ((sp_IntArray *)v.v.p)->len = 0; break;
+    case SP_BUILTIN_FLT_ARRAY:      if (((sp_FloatArray *)v.v.p)->frozen) goto frozen_array; ((sp_FloatArray *)v.v.p)->len = 0; break;
+    case SP_BUILTIN_STR_ARRAY:      if (((sp_StrArray *)v.v.p)->frozen) goto frozen_array; ((sp_StrArray *)v.v.p)->len = 0; break;
+    case SP_BUILTIN_POLY_ARRAY:     if (((sp_PolyArray *)v.v.p)->frozen) goto frozen_array; ((sp_PolyArray *)v.v.p)->len = 0; break;
+    case SP_BUILTIN_PTR_ARRAY:      if (((sp_PtrArray *)v.v.p)->frozen) goto frozen_array; ((sp_PtrArray *)v.v.p)->len = 0; break;
     case SP_BUILTIN_STRBUF: {
       sp_String *_m = (sp_String *)v.v.p;
       if (sp_String_is_frozen(_m)) { sp_raise_frozen_str(_m->data); break; }
       _m->len = 0; _m->data[0] = 0; sp_fd_publish(_m);
       break;
     }
-    case SP_BUILTIN_STR_INT_HASH:   sp_StrIntHash_clear((sp_StrIntHash *)v.v.p); break;
-    case SP_BUILTIN_STR_STR_HASH:   sp_StrStrHash_clear((sp_StrStrHash *)v.v.p); break;
-    case SP_BUILTIN_INT_STR_HASH:   sp_IntStrHash_clear((sp_IntStrHash *)v.v.p); break;
-    case SP_BUILTIN_INT_INT_HASH:   sp_IntIntHash_clear((sp_IntIntHash *)v.v.p); break;
-    case SP_BUILTIN_STR_POLY_HASH:  sp_StrPolyHash_clear((sp_StrPolyHash *)v.v.p); break;
-    case SP_BUILTIN_SYM_POLY_HASH:  sp_SymPolyHash_clear((sp_SymPolyHash *)v.v.p); break;
-    case SP_BUILTIN_POLY_POLY_HASH: sp_PolyPolyHash_clear((sp_PolyPolyHash *)v.v.p); break;
+    case SP_BUILTIN_STR_INT_HASH:   if (sp_gc_is_frozen(v.v.p)) goto frozen_hash; sp_StrIntHash_clear((sp_StrIntHash *)v.v.p); break;
+    case SP_BUILTIN_STR_STR_HASH:   if (sp_gc_is_frozen(v.v.p)) goto frozen_hash; sp_StrStrHash_clear((sp_StrStrHash *)v.v.p); break;
+    case SP_BUILTIN_INT_STR_HASH:   if (sp_gc_is_frozen(v.v.p)) goto frozen_hash; sp_IntStrHash_clear((sp_IntStrHash *)v.v.p); break;
+    case SP_BUILTIN_INT_INT_HASH:   if (sp_gc_is_frozen(v.v.p)) goto frozen_hash; sp_IntIntHash_clear((sp_IntIntHash *)v.v.p); break;
+    case SP_BUILTIN_STR_POLY_HASH:  if (sp_gc_is_frozen(v.v.p)) goto frozen_hash; sp_StrPolyHash_clear((sp_StrPolyHash *)v.v.p); break;
+    case SP_BUILTIN_SYM_POLY_HASH:  if (sp_gc_is_frozen(v.v.p)) goto frozen_hash; sp_SymPolyHash_clear((sp_SymPolyHash *)v.v.p); break;
+    case SP_BUILTIN_POLY_POLY_HASH: if (sp_gc_is_frozen(v.v.p)) goto frozen_hash; sp_PolyPolyHash_clear((sp_PolyPolyHash *)v.v.p); break;
     default: sp_raise_nomethod(sp_nomethod_msg("clear", v)); break;
   }
+  return v;
+  /* the raise takes the box as it came, so an arm carries the test alone */
+frozen_array:
+  sp_raise_frozen_array_v(v);
+  return v;
+frozen_hash:
+  sp_raise_frozen_obj(v, SPL("can't modify frozen Hash"));
   return v;
 }
 
