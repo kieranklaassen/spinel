@@ -1,0 +1,1 @@
+A Struct's super takes each write barrier after its argument is built
