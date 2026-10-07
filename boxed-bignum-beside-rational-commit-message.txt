@@ -1,0 +1,24 @@
+A boxed Bignum beside a boxed Rational is a Rational of Bignums
+
+    b = [2**70, :a][0]
+    q = [Rational(2, 5), :a][0]
+    p b + q, q - b, b * q, b / q
+
+printed (2/5), (2/5), (0/1) and (0/1), and q / b raised
+ZeroDivisionError; CRuby answers (5902958103587056517122/5) and so on.
+The Rational arm of sp_poly_add, sub, mul and div reads each operand
+through sp_poly_as_rational, which reads anything that is not a
+Rational as an Integer of one word, and a Bignum read that way is 0.
+Only an operand that was already a Rational of Bignums took the arm
+that handles a Bignum (sp_brat_add_poly and its three sisters).
+
+The arm now reads its operands itself (SP_POLY_RAT_OPERAND) and hands
+a Bignum to that arm. A Rational beside a Rational, an Integer or a
+Float keeps its path: 200,000 sums of two boxed Rationals measure 7
+instructions a sum less than before.
+
+Test: test/boxed_bignum_beside_rational.rb (expected from CRuby 3.3.6).
+On master its first eight answers are wrong in a plain run and the
+ninth raises ZeroDivisionError.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
