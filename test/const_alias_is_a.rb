@@ -108,3 +108,16 @@ begin
 rescue NameError
   p false
 end
+
+# a constant taken away by its name is not read again (Spinel has no
+# remove_const and raises there)
+GONE = Integer
+begin
+  Object.send(:remove_const, :GONE)
+rescue NoMethodError
+end
+begin
+  p 7.is_a?(GONE)
+rescue NameError
+  p false
+end

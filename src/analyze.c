@@ -1835,9 +1835,45 @@ static const char *const quiet_decls[] = { "attr_reader", "attr_writer", "attr_a
 static const char *const def_hooks[] = { "inherited", "included", "extended", "prepended", "method_added",
   "singleton_method_added", "const_added", "const_missing", "append_features", "prepend_features",
   "extend_object", NULL };
+/* CRuby's own classes and modules that hold constants: a bare name in a body
+   of theirs, or of a class that inherits or mixes one in, reads theirs first. */
+static const char *const const_holders[] = { "Complex", "DidYouMean", "Encoding", "Enumerator", "Errno",
+  "ErrorHighlight", "File", "Float", "GC", "Gem", "IO", "Marshal", "Math", "ObjectSpace", "Pathname", "Process",
+  "Ractor", "Random", "RbConfig", "Regexp", "Ruby", "RubyVM", "Set", "SyntaxSuggest", "Thread", "ThreadGroup",
+  NULL };
 static int name_listed(const char *const *list, const char *n) {
   for (int i = 0; n && list[i]; i++) if (sp_streq(list[i], n)) return 1;
   return 0;
+}
+
+/* The name a Symbol or String literal spells. */
+static const char *literal_name(const NodeTable *nt, int id) {
+  NodeKind k = nt_kind(nt, id);
+  const char *u = k == NK_StringNode ? nt_str(nt, id, "unescaped") : NULL;
+  return k == NK_SymbolNode ? nt_str(nt, id, "value") : u ? u : k == NK_StringNode ? nt_str(nt, id, "content") : NULL;
+}
+
+/* What the name of a body, a superclass or a mixed-in module says: 0 for a
+   constant outside const_holders, 1 for one of them or for no constant at
+   all, 2 for BasicObject, whose instances answer no is_a? and whose bodies
+   read no constant of the program's own level. */
+static int ancestry_kind(const NodeTable *nt, int id) {
+  for (; id >= 0; id = nt_ref(nt, id, "parent")) {
+    NodeKind k = nt_kind(nt, id);
+    const char *n = nt_str(nt, id, "name");
+    if ((k != NK_ConstantReadNode && k != NK_ConstantPathNode) || !n) return 1;
+    if (sp_streq(n, "BasicObject")) return 2;
+    if (name_listed(const_holders, n)) return 1;
+    if (k == NK_ConstantReadNode) break;
+  }
+  return 0;
+}
+
+/* `Struct.new(...)` or `Data.define(...)`: a new class with no constants. */
+static int is_struct_new(const NodeTable *nt, int s) {
+  int recv = nt_kind(nt, s) == NK_CallNode ? nt_ref(nt, s, "receiver") : -1;
+  const char *n = nt_str(nt, s, "name"), *rn = nt_kind(nt, recv) == NK_ConstantReadNode ? nt_str(nt, recv, "name") : NULL;
+  return n && rn && ((sp_streq(rn, "Struct") && sp_streq(n, "new")) || (sp_streq(rn, "Data") && sp_streq(n, "define")));
 }
 
 /* A statement that runs none of the program's methods: a def, an alias, a
@@ -1850,10 +1886,9 @@ static int stmt_runs_nothing(const NodeTable *nt, int s) {
   }
   if (nt_kind(nt, s) != NK_CallNode) return nt_kind(nt, s) == NK_DefNode || nt_kind(nt, s) == NK_AliasMethodNode;
   int recv = nt_ref(nt, s, "receiver");
-  const char *n = nt_str(nt, s, "name"), *rn = nt_kind(nt, recv) == NK_ConstantReadNode ? nt_str(nt, recv, "name") : NULL;
+  const char *n = nt_str(nt, s, "name");
   if (nt_ref(nt, s, "block") >= 0 || !n) return 0;
-  if (recv < 0 ? !name_listed(quiet_decls, n)
-               : !(rn && ((sp_streq(rn, "Struct") && sp_streq(n, "new")) || (sp_streq(rn, "Data") && sp_streq(n, "define"))))) return 0;
+  if (recv < 0 ? !name_listed(quiet_decls, n) : !is_struct_new(nt, s)) return 0;
   int args = nt_ref(nt, s, "arguments"), argc = 0;
   const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &argc) : NULL;
   for (int i = 0; i < argc; i++) if (!node_runs_nothing(nt, argv[i])) return 0;
@@ -1906,38 +1941,60 @@ static void seq_statements(const NodeTable *nt, int stmts, int own, int *seq, in
 /* The numbering of the whole program. A program that defines a hook, or a
    declaration's own name, runs it at a definition: nothing is quiet then. A
    program that names is_a?, kind_of? or instance_of? as a method of its own
-   (a def, or the symbol: alias, define_method) is not numbered at all: its
-   method answers its own question. A constant written again or hidden by its
-   name (const_set, private_constant) loses its write's mark: no write node
-   shows what it holds, or who may read it. */
+   (a def, or its symbol or string: alias, define_method) is not numbered at
+   all: its method answers its own question. Neither is one with a class
+   under BasicObject. A constant written again, hidden or taken away by its
+   name (const_set, private_constant, remove_const) loses its write's mark:
+   no write node shows what it holds, or who may read it. The last entry is
+   set when a body may read a constant of CRuby's before the program's: the
+   program opens, inherits or mixes in one of const_holders, or something no
+   constant names. */
+#define SEQ_LEN(nt) (2 * (size_t)(nt)->count + 2)
 static int *seq_build(const NodeTable *nt) {
-  int *seq = calloc(2 * (size_t)nt->count + 1, sizeof(int));
+  int *seq = calloc(SEQ_LEN(nt), sizeof(int));
   if (!seq) return NULL;
-  NT_FOREACH_KIND(nt, NK_SymbolNode, s) {
-    const char *sv = nt_str(nt, s, "value");
-    if (sv && is_kind_query(sv)) return seq;
-  }
+  static const NodeKind lk[] = { NK_SymbolNode, NK_StringNode };
+  for (int q = 0; q < 2; q++)
+    NT_FOREACH_KIND(nt, lk[q], s) {
+      const char *sv = literal_name(nt, s);
+      if (sv && is_kind_query(sv)) return seq;
+    }
   NT_FOREACH_KIND(nt, NK_DefNode, d) {
     const char *dn = nt_str(nt, d, "name");
     if (dn && is_kind_query(dn)) return seq;
     if (name_listed(def_hooks, dn) || name_listed(quiet_decls, dn)) seq[nt->count] = 1;
   }
-  int n = 0; seq_statements(nt, nt_ref(nt, nt->root_id, "statements"), 0, seq, &n);
+  int n = 0, anc = 0; seq_statements(nt, nt_ref(nt, nt->root_id, "statements"), 0, seq, &n);
+  static const NodeKind bk[] = { NK_ClassNode, NK_ModuleNode };
+  for (int q = 0; q < 2; q++)
+    NT_FOREACH_KIND(nt, bk[q], b) {
+      int sup = q ? -1 : nt_ref(nt, b, "superclass");
+      anc |= ancestry_kind(nt, nt_ref(nt, b, "constant_path")) | (is_struct_new(nt, sup) ? 0 : ancestry_kind(nt, sup));
+    }
+  NT_FOREACH_KIND(nt, NK_SingletonClassNode, sc)
+    if (nt_kind(nt, nt_ref(nt, sc, "expression")) != NK_SelfNode) anc |= 1;
   NT_FOREACH_KIND(nt, NK_CallNode, id) {
     const char *cn = nt_str(nt, id, "name");
-    int args = nt_ref(nt, id, "arguments"), argc = 0, a0 = 0;
+    int args = nt_ref(nt, id, "arguments"), argc = 0, a0 = 0, recv = nt_ref(nt, id, "receiver");
     const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &argc) : NULL;
     if (cn && is_send_family(cn) && argc && nt_kind(nt, argv[0]) == NK_SymbolNode) { cn = nt_str(nt, argv[0], "value"); a0 = 1; }
-    int set = cn && sp_streq(cn, "const_set");
-    if (!set && !(cn && sp_streq(cn, "private_constant"))) continue;
+    if (!cn) continue;
+    NodeKind rk = nt_kind(nt, recv);
+    const char *rn = rk == NK_ConstantReadNode || rk == NK_ConstantPathNode ? nt_str(nt, recv, "name") : NULL;
+    if (sp_streq(cn, "include") || sp_streq(cn, "extend") || sp_streq(cn, "prepend") ||
+        (sp_streq(cn, "new") && rn && sp_streq(rn, "Class")))
+      for (int i = a0; i < argc; i++) anc |= ancestry_kind(nt, argv[i]);
+    int set = sp_streq(cn, "const_set");
+    if (!set && !sp_streq(cn, "private_constant") && !sp_streq(cn, "remove_const")) continue;
     for (int i = a0; i < (set && argc > a0 ? a0 + 1 : argc); i++) {   /* const_set: the name alone */
-      NodeKind ak = nt_kind(nt, argv[i]);
-      const char *an = ak == NK_SymbolNode ? nt_str(nt, argv[i], "value") : ak == NK_StringNode ? nt_str(nt, argv[i], "content") : NULL;
-      if (!an) { memset(seq, 0, (2 * (size_t)nt->count + 1) * sizeof(int)); return seq; }   /* any name */
-      int w = const_only_write(nt, an);
+      const char *an = literal_name(nt, argv[i]);
+      if (!an) anc |= 2;   /* any name */
+      int w = an ? const_only_write(nt, an) : -1;
       if (w >= 0) seq[w] &= ~1;
     }
   }
+  if (anc & 2) memset(seq, 0, SEQ_LEN(nt) * sizeof(int));
+  else seq[SEQ_LEN(nt) - 1] = anc;
   return seq;
 }
 
@@ -2014,6 +2071,7 @@ static void rewrite_const_alias_kind_arg(Compiler *c, int id, int **seq) {
   if (sr & 2 ? runs && runs <= sw : (sr | 3) <= (sw | 3)) return;
   const int *own = *seq + nt->count + 1;
   if (!const_read_reaches(nt, argv[0], own[w], own)) return;
+  if ((*seq)[SEQ_LEN(nt) - 1] && nt_kind(nt, argv[0]) == NK_ConstantReadNode && own[argv[0]] != own[w]) return;
   char buf[256]; snprintf(buf, sizeof buf, "%s", real);  /* copy: set frees an */
   nt_set_str((NodeTable *)nt, argv[0], "name", buf);
 }
