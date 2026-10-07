@@ -17923,29 +17923,47 @@ int class_isa_user(Compiler *c, int k, int cid, const char *cn) {
          class_includes_module_named(c, k, cn);
 }
 
+/* Whether a boxed exception of class k answers yes to a test against `cid`
+   (named `cn`): k is an exception class of the program's own and is cid,
+   under it, or includes it. The name arm below lists these. */
+static int exc_name_arm_lists(Compiler *c, int k, int cid, const char *cn, int exact) {
+  return class_is_exc_subclass(c, k) && (k == cid || (!exact && class_isa_user(c, k, cid, cn)));
+}
+
 /* Does a class test against `cid` take the name arm below? An exception class
-   of the program's own, in a program that leaves the class predicates alone:
-   where it defines is_a?, kind_of? or instance_of? itself, or === on the
-   class, the answer is the program's to give and the test stays as it was. */
-int class_takes_exc_name_arm(Compiler *c, int cid) {
-  if (cid < 0 || !class_is_exc_subclass(c, cid)) return 0;
+   of the program's own, or a module one of them includes, in a program that
+   leaves the class predicates alone: where it defines is_a?, kind_of? or
+   instance_of? itself, or === on the class, the answer is the program's to
+   give and the test stays as it was. */
+int class_takes_exc_name_arm(Compiler *c, int cid, const char *cn, int exact) {
+  if (cid < 0 || (!class_is_exc_subclass(c, cid) && !class_is_module_def(c, cid))) return 0;
   if (any_class_defines(c, "is_a?") || any_class_defines(c, "kind_of?") ||
       any_class_defines(c, "instance_of?")) return 0;
-  return comp_cmethod_in_chain(c, cid, "===", NULL) < 0;
+  if (comp_cmethod_in_chain(c, cid, "===", NULL) >= 0) return 0;
+  for (int k = 0; k < c->nclasses; k++) if (exc_name_arm_lists(c, k, cid, cn, exact)) return 1;
+  return 0;
 }
 
 /* An exception of a class of the program's own is an sp_Exception, boxed as
    SP_BUILTIN_EXCEPTION, and its class is the name it carries: no class id
    tests it. Emits the arm that asks by name, ` || (...)`, after a class-id
    test of the boxed value `v` against class `cid`; nothing for a class that
-   does not take it. */
-void emit_poly_exc_name_arm(Compiler *c, int cid, const char *v, int exact, Buf *b) {
-  if (!class_takes_exc_name_arm(c, cid)) return;
-  const char *rn = class_ruby_name(c, cid);
-  if (!rn) return;
-  buf_printf(b, " || (%s.tag == SP_TAG_OBJ && %s.cls_id == SP_BUILTIN_EXCEPTION && ", v, v);
-  if (exact) buf_printf(b, "strcmp(sp_poly_class_name(%s), \"%s\") == 0)", v, rn);
-  else buf_printf(b, "sp_poly_kind_of_builtin(%s, \"%s\"))", v, rn);
+   does not take it. Every class that answers yes is the program's own, so
+   the test is that name against theirs, read where the exception keeps it:
+   a miss costs those comparisons, no walk up the hierarchy and no copy of
+   the name. */
+void emit_poly_exc_name_arm(Compiler *c, int cid, const char *cn, const char *v, int exact, Buf *b) {
+  if (!class_takes_exc_name_arm(c, cid, cn, exact)) return;
+  int t = ++g_tmp, first = 1;
+  buf_printf(b, " || (%s.tag == SP_TAG_OBJ && %s.cls_id == SP_BUILTIN_EXCEPTION && %s.v.p && "
+                "({ const char *_xn%d = ((sp_Exception *)%s.v.p)->cls_name; _xn%d && (", v, v, v, t, v, t);
+  for (int k = 0; k < c->nclasses; k++) {
+    const char *kn = exc_name_arm_lists(c, k, cid, cn, exact) ? class_ruby_name(c, k) : NULL;
+    if (!kn) continue;
+    buf_printf(b, "%sstrcmp(_xn%d, \"%s\") == 0", first ? "" : " || ", t, kn);
+    first = 0;
+  }
+  buf_puts(b, first ? "0); }))" : "); }))");
 }
 
 /* The runtime test for `<poly value v> is_a? <class named cn>` (exact: the
@@ -18001,7 +18019,7 @@ int emit_poly_isa_test(Compiler *c, const char *cn, const char *v, int exact, Bu
         ext = 0;
         for (int k = 0; k < c->nclasses && !ext; k++) if (comp_class_singleton_has_module(c, k, cid)) ext = 1;
       }
-      int exc = class_takes_exc_name_arm(c, cid);
+      int exc = class_takes_exc_name_arm(c, cid, cn, exact);
       if (ext || exc) buf_puts(b, "(");
       buf_printf(b, "(%s.tag == SP_TAG_OBJ && (", v);
       int first = 1;
@@ -18018,7 +18036,7 @@ int emit_poly_isa_test(Compiler *c, const char *cn, const char *v, int exact, Bu
         }
       if (first) buf_puts(b, "0");
       buf_puts(b, "))");
-      if (exc) { emit_poly_exc_name_arm(c, cid, v, exact, b); buf_puts(b, ")"); }
+      if (exc) { emit_poly_exc_name_arm(c, cid, cn, v, exact, b); if (!ext) buf_puts(b, ")"); }
       if (ext) {
         buf_printf(b, " || (%s.tag == SP_TAG_CLASS && (", v);
         int any = 0;
