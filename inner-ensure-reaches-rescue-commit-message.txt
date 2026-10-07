@@ -1,0 +1,43 @@
+An exception leaving an inner ensure reaches the rescue around it
+
+    begin
+      begin
+        raise TypeError, "t"
+      ensure
+        puts "inner ensure"
+      end
+    rescue TypeError
+      puts "rescued"
+    ensure
+      puts "outer ensure"
+    end
+
+printed both ensures and died with the TypeError uncaught. After its ensure
+body a region hands the exception it deferred straight to the enclosing
+ensure unless a begin's frame lies between the two. The rescue clauses of
+the enclosing begin itself share the ensure's frame, so they were passed.
+The regions of Mutex#synchronize and of select!'s loop made no such check
+at all. And inside the enclosing begin's rescue clause, where that frame is
+gone already, the hand-on popped one more, the caller's:
+
+    def go
+      raise ArgumentError, "first"
+    rescue ArgumentError
+      begin
+        raise IOError, "second"
+      ensure
+        puts "inner ensure"
+      end
+    ensure
+      puts "outer ensure"
+    end
+
+died uncaught under a caller's `rescue IOError`.
+
+The three epilogues now ask one helper. The exception is raised again when a
+begin's frame lies between, or when the enclosing region has rescue clauses
+and its body is what is being left; else it goes to the enclosing ensure,
+popping that region's frame only if it is still live. Where neither case
+holds the C is what it was.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
