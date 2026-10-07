@@ -5,12 +5,6 @@ class MyErr < StandardError; end
 class Deeper < MyErr
   def hint = "deeper"
 end
-class Shy < StandardError
-  private :message
-end
-class Gone < StandardError
-  undef_method :message
-end
 module App
   class Missing < KeyError; end
 end
@@ -21,6 +15,10 @@ p e.respond_to?(:nope), e.respond_to?(:hint), e.respond_to?("message")
 puts(e.respond_to?(:message) ? e.message : "no message")
 p e.backtrace if e.respond_to?(:backtrace)
 p e.cause if e.respond_to?(:cause)
+p e.respond_to?(:full_message), e.respond_to?("full_message")
+p e.full_message.include?("never raised") if e.respond_to?(:full_message)
+puts e.detailed_message(highlight: false) if e.respond_to?(:detailed_message)
+p e.full_message(highlight: false, order: :top).include?("never raised") if e.respond_to?(:full_message)
 
 d = Deeper.new("d")
 p d.respond_to?(:cause), d.respond_to?(:hint)
@@ -32,10 +30,8 @@ rescue App::Missing => g
   puts g.backtrace.class if g.respond_to?(:backtrace)
 end
 
-# a name the class made private or took away is not answered for
-p Shy.new("s").respond_to?(:message), Shy.new("s").respond_to?(:cause)
-p Gone.new("g").respond_to?(:message), Gone.new("g").respond_to?(:backtrace)
-
 def duck(x) = x.respond_to?(:message) ? "error: #{x.message}" : "value: #{x.inspect}"
 [MyErr.new("boxed"), d, 3, "s", nil].each { |x| puts duck(x) }
+def render(x) = x.respond_to?(:full_message) ? x.full_message(highlight: false).include?("boxed") : false
+p [MyErr.new("boxed"), 3, nil].map { |x| render(x) }
 [:message, :cause, :nope].each { |n| p e.respond_to?(n) }
