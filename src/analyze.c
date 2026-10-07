@@ -1853,17 +1853,35 @@ static const char *literal_name(const NodeTable *nt, int id) {
   return k == NK_SymbolNode ? nt_str(nt, id, "value") : u ? u : k == NK_StringNode ? nt_str(nt, id, "content") : NULL;
 }
 
-/* What the name of a body, a superclass or a mixed-in module says: 0 for a
-   constant outside const_holders, 1 for one of them or for no constant at
-   all, 2 for BasicObject, whose instances answer no is_a? and whose bodies
-   read no constant of the program's own level. */
-static int ancestry_kind(const NodeTable *nt, int id) {
+/* Whether the program has a class or module body of that last name. */
+static int program_opens(const NodeTable *nt, const char *n) {
+  static const NodeKind bk[] = { NK_ClassNode, NK_ModuleNode };
+  for (int q = 0; q < 2; q++)
+    NT_FOREACH_KIND(nt, bk[q], b) {
+      const char *bn = nt_str(nt, nt_ref(nt, b, "constant_path"), "name");
+      if (bn && sp_streq(bn, n)) return 1;
+    }
+  return 0;
+}
+
+/* What the name of a body (`body` set), a superclass or a mixed-in module
+   says: 0 where no constant of CRuby's or a library's can come with it, 1
+   where one may, 2 for BasicObject, whose instances answer no is_a? and
+   whose bodies read no constant of the program's own level. A body's name
+   brings none unless it reopens a namespace that holds some. A superclass
+   or a module mixed in brings none where it is a builtin with no constants
+   (bc_builtin_constless) or a class or module the program defines and no
+   library has; a name the program does not define may hold anything. */
+static int ancestry_kind(const NodeTable *nt, int id, int body) {
+  int bare = nt_kind(nt, id) == NK_ConstantReadNode;
   for (; id >= 0; id = nt_ref(nt, id, "parent")) {
     NodeKind k = nt_kind(nt, id);
     const char *n = nt_str(nt, id, "name");
     if ((k != NK_ConstantReadNode && k != NK_ConstantPathNode) || !n) return 1;
     if (sp_streq(n, "BasicObject")) return 2;
-    if (name_listed(const_holders, n)) return 1;
+    int constless = bc_builtin_constless(n);
+    if (name_listed(const_holders, n) || (bc_toplevel_known(n) && !constless)) return 1;
+    if (!body && !(bare && constless) && !program_opens(nt, n)) return 1;
     if (k == NK_ConstantReadNode) break;
   }
   return 0;
@@ -1995,7 +2013,7 @@ static int *seq_build(const NodeTable *nt) {
   for (int q = 0; q < 2; q++)
     NT_FOREACH_KIND(nt, bk[q], b) {
       int sup = q ? -1 : nt_ref(nt, b, "superclass");
-      anc |= ancestry_kind(nt, nt_ref(nt, b, "constant_path")) | (is_struct_new(nt, sup) ? 0 : ancestry_kind(nt, sup));
+      anc |= ancestry_kind(nt, nt_ref(nt, b, "constant_path"), 1) | (sup < 0 || is_struct_new(nt, sup) ? 0 : ancestry_kind(nt, sup, 0));
     }
   NT_FOREACH_KIND(nt, NK_SingletonClassNode, sc)
     if (nt_kind(nt, nt_ref(nt, sc, "expression")) != NK_SelfNode) anc |= 1;
@@ -2009,7 +2027,7 @@ static int *seq_build(const NodeTable *nt) {
     const char *rn = rk == NK_ConstantReadNode || rk == NK_ConstantPathNode ? nt_str(nt, recv, "name") : NULL;
     if (sp_streq(cn, "include") || sp_streq(cn, "extend") || sp_streq(cn, "prepend") ||
         (sp_streq(cn, "new") && rn && sp_streq(rn, "Class")))
-      for (int i = a0; i < argc; i++) anc |= ancestry_kind(nt, argv[i]);
+      for (int i = a0; i < argc; i++) anc |= ancestry_kind(nt, argv[i], 0);
     int set = sp_streq(cn, "const_set");
     if (!set && !sp_streq(cn, "private_constant") && !sp_streq(cn, "remove_const")) continue;
     for (int i = a0; i < (set && argc > a0 ? a0 + 1 : argc); i++) {   /* const_set: the name alone */

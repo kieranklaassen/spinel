@@ -7931,7 +7931,7 @@ static char *bc_join(const char *p, const char *leaf) {
 }
 
 /* A name CRuby (or a library spinel provides) answers at the top level. */
-static int bc_toplevel_known(const char *n) {
+int bc_toplevel_known(const char *n) {
   static const char *const names[] = {
     "ARGF", "ARGV", "ArgumentError", "Array", "BasicObject", "Binding", "Class", "ClosedQueueError",
     "Comparable", "Complex", "ConditionVariable", "Data", "Dir", "ENV", "EOFError", "Encoding",
@@ -7968,7 +7968,7 @@ static int bc_toplevel_known(const char *n) {
 /* A builtin ancestor with no constants of its own (CRuby 4.0's
    `K.constants - Object.constants` is empty): the user's reopenings are all
    it can contribute. Any other builtin ancestor may answer the name itself. */
-static int bc_builtin_constless(const char *n) {
+int bc_builtin_constless(const char *n) {
   static const char *const names[] = {
     "Object", "BasicObject", "Kernel", "Comparable", "Enumerable", "Array", "Hash", "String",
     "Integer", "Numeric", "Struct", "Data", "Symbol", "Proc", "Range", "Module", "Class", "Time",
