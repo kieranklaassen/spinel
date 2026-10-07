@@ -1,0 +1,28 @@
+logged
+ensure
+passed on ArgumentError: y
+ensure
+passed on RuntimeError: wrapped y (cause ArgumentError)
+ensure
+passed on IOError: handler failed: y (cause ArgumentError)
+ensure
+15
+ensure 1
+ensure 2
+ensure 3
+passed on IOError: i (cause TypeError)
+rescued
+ensure
+ensure
+:returned
+ensure at 4
+4
+[-1, 2, -2, -3]
+ensure
+:thrown
+1002000
+inner rescued inner
+ensure
+passed on IOError: after (cause ArgumentError)
+ensure before exit
+at_exit

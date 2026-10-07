@@ -8472,7 +8472,7 @@ void emit_rescue(Compiler *c, int id, Buf *b, int indent, int fr, int ens, const
   emit_indent(b, indent);
   /* an exception never loses a cause it already carries (#3745) */
   buf_printf(b, "if (!_ce_%d->cause) { sp_gc_wb((void *)_ce_%d); _ce_%d->cause = (sp_Exception *)sp_pending_cause; } sp_pending_cause = NULL;\n", rc, rc, rc);
-  g_rescue_save_stack[g_rescue_save_depth++] = (RescueSave){ g_exc_frame_depth };
+  g_rescue_save_stack[g_rescue_save_depth++] = (RescueSave){ g_exc_frame_depth, ens >= 0 };
   if (has_bind) {
     emit_indent(b, indent);
     /* rename_local: inside a yield-inlined method body the binding local was
@@ -8499,6 +8499,18 @@ void emit_rescue(Compiler *c, int id, Buf *b, int indent, int fr, int ens, const
          sp_exc_handling top this arm just pushed. */
       buf_printf(b, "_ce_%d;\n", rc);
   }
+  /* The begin has an ensure, and its frame is popped by now: an exception
+     raised by this clause's body would go to the enclosing frame, past the
+     ensure. The body runs under a frame of its own, pushed here on the
+     landing path only, whose landing stores the exception for the ensure. */
+  if (ens >= 0) {
+    emit_indent(b, indent); buf_puts(b, "sp_exc_check_depth();\n");
+    emit_indent(b, indent); buf_puts(b, "sp_exc_rootmark[sp_exc_top] = sp_gc_nroots; sp_rescue_mark[sp_exc_top] = sp_rescue_sp;\n");
+    emit_indent(b, indent); buf_puts(b, "sp_exc_msg[sp_exc_top] = 0; sp_exc_obj[sp_exc_top] = 0; sp_exc_top++;\n");
+    emit_indent(b, indent); buf_puts(b, "if (setjmp(sp_exc_stack[sp_exc_top-1]) == 0) {\n");
+    g_exc_frame_depth++;
+    indent++;
+  }
   if (resultvar) {
     const char *sv = g_result_var; g_result_var = resultvar;
     emit_stmts_tail(c, stmts, b, indent);
@@ -8506,6 +8518,23 @@ void emit_rescue(Compiler *c, int id, Buf *b, int indent, int fr, int ens, const
   }
   else {
     emit_stmts(c, stmts, b, indent);
+  }
+  if (ens >= 0) {
+    g_exc_frame_depth--;
+    emit_indent(b, indent); buf_puts(b, "sp_exc_top--;\n");
+    indent--;
+    emit_indent(b, indent); buf_puts(b, "}\n");
+    emit_indent(b, indent); buf_puts(b, "else {\n");
+    emit_indent(b, indent + 1); buf_puts(b, "sp_exc_top--;\n");
+    emit_indent(b, indent + 1); buf_puts(b, "sp_gc_nroots = sp_exc_rootmark[sp_exc_top]; sp_rescue_sp = sp_rescue_mark[sp_exc_top];\n");
+    /* a throw or a proc's return only passes through: the ensure runs and
+       sends it on */
+    emit_indent(b, indent + 1);
+    buf_puts(b, "if (sp_unwind_kind == SP_UNWIND_NONE) { ");
+    emit_ensure_exc_store(b, ens);
+    if (g_debug) buf_printf(b, " sp_bt_save(&_excbt%d);", ens);
+    buf_puts(b, " }\n");
+    emit_indent(b, indent); buf_puts(b, "}\n");
   }
   g_rescue_save_depth--;
   emit_indent(b, indent);
@@ -13203,9 +13232,13 @@ void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
     if (g_retry_label) {
       emit_indent(b, indent);
       /* leaving this rescue body back to its begin: pop its handler (exactly the
-         innermost rescue save). */
-      if (g_rescue_save_depth > 0)
+         innermost rescue save), and the frames above its begin when the body
+         runs under one of its own */
+      if (g_rescue_save_depth > 0) {
+        RescueSave *rs = &g_rescue_save_stack[g_rescue_save_depth - 1];
+        if (rs->framed) buf_printf(b, "sp_exc_top -= %d; ", g_exc_frame_depth - rs->exc_base);
         buf_puts(b, "sp_rescue_sp--; ");
+      }
       buf_printf(b, "goto %s;\n", g_retry_label);
     }
     else unsupported(c, id, "retry (outside rescue)");

@@ -471,8 +471,9 @@ void emit_ensure_exc_store(Buf *b, int eid);
 /* One entry per rescue body currently being emitted. exc_base records
    g_exc_frame_depth at that body's entry so a non-local exit can tell which
    rescue bodies it crosses (those with exc_base >= the exit's frame base) and
-   pop their sp_exc_handling entries (sp_rescue_sp). */
-typedef struct { int exc_base; } RescueSave;
+   pop their sp_exc_handling entries (sp_rescue_sp). framed: the body runs
+   under a frame of its own, one above exc_base, which a retry pops. */
+typedef struct { int exc_base; int framed; } RescueSave;
 extern RescueSave g_rescue_save_stack[MAX_ENSURE_DEPTH];
 extern int        g_rescue_save_depth;
 /* Emit the pop that leaves the exception frames above pop_base AND pops the
