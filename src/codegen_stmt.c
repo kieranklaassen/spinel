@@ -11298,7 +11298,11 @@ static int emit_call_stmt(Compiler *c, int id, Buf *b, int indent, const NodeTab
             emit_indent(b, indent);
             buf_printf(b, "{ sp_RbVal _t%d = ", tv); emit_expr(c, recv, b); buf_puts(b, "; ");
             if (nil_rhs) {
-              buf_printf(b, "sp_RbVal _t%d = sp_box_nil();", tval);
+              /* a nil literal has nothing to run; any other value of nil
+                 type (a method that answers nil, `(bump; nil)`) runs first */
+              buf_printf(b, "sp_RbVal _t%d = ", tval);
+              if (nt_kind(nt, argv[0]) == NK_NilNode) buf_puts(b, "sp_box_nil();");
+              else { buf_puts(b, "((void)("); emit_expr(c, argv[0], b); buf_puts(b, "), sp_box_nil());"); }
             }
             else if (unk_rhs) {
               buf_printf(b, "sp_RbVal _t%d = ", tval); emit_expr(c, argv[0], b); buf_puts(b, ";");
