@@ -1,0 +1,38 @@
+A retry out of a begin nested in its rescue clause pops that frame
+
+    def fetch
+      tries = 0
+      begin
+        raise IOError, "again" if tries < 2
+        tries
+      rescue IOError
+        tries += 1
+        begin
+          retry if tries < 3
+        rescue ArgumentError
+          0
+        end
+        1
+      end
+    end
+
+    200.times { fetch }
+
+stopped with "stack level too deep (SystemStackError)", where CRuby
+runs it.
+
+A retry is a goto back to the label before its begin. It popped the
+rescue clause's own entry and nothing else, so a begin written in the
+clause around the retry kept its setjmp frame on the handler stack,
+one more at every retry: 64 of them end the program.
+
+The label now keeps the frame depth it stands at, and a retry pops
+the frames above it, as a next does for its loop. A retry with no
+frame between it and its clause is the goto it was. So is one with an
+ensure in between: that ensure has to run first, which this does not
+take on. So is one written in the body of the begin whose label it
+takes: Ruby sends that retry to a begin further out, the goto sends it
+to the nearer one, and with the frame popped that wrong loop would
+not end where it now stops.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
