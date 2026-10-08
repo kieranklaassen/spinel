@@ -165,6 +165,17 @@ const char *sp_exc_msg_counted_frozen(const char *m, size_t n) {
   r[5] = 0x02;
   return r;
 }
+const char *sp_exc_msg_text(volatile sp_Exception *ve);
+/* The message the line of an uncaught exception is written from. A raised
+   exception object leaves its message in the slot as a C string, which stops at
+   a NUL: its own message stands in, counted, when it holds one, or is a counted
+   message byte for byte, which the slot's readers take for its payload. With no
+   object, or any other message, the slot's. */
+const char *sp_exc_uncaught_msg(const char *msg, void *obj) {
+  const char *m = obj ? sp_exc_msg_text((sp_Exception *)obj) : NULL;
+  size_t n = m ? sp_str_byte_len(m) : 0;
+  return (n && (memchr(m, 0, n) || sp_cmsg_p(m))) ? sp_exc_msg_counted(m, n) : msg;
+}
 static const char *sp_exc_msg_copy(const char *m) {
   if (sp_cmsg_p(m)) {   /* the counted message decodes to its payload, a NUL kept */
     size_t cn = sp_cmsg_len(m);

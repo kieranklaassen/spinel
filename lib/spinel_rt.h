@@ -13717,15 +13717,14 @@ static void sp_exc_print_uncaught(const char *cls, const char *msg) {
   if (sp_bt_enabled && sp_bt_n > 0) {
     sp_StrArray *bt = sp_bt_format(sp_bt_buf, sp_bt_n);
     if (bt && bt->len > 0) {
-      fprintf(stderr, "%s: %s (%s)\n", sp_StrArray_get(bt, 0),
-              (msg && *msg) ? msg : cls, cls);
+      sp_exc_write_uncaught(sp_StrArray_get(bt, 0), cls, msg);
       for (sp_int _i = 1; _i < bt->len; _i++)
         fprintf(stderr, "\tfrom %s\n", sp_StrArray_get(bt, _i));
       return;
     }
   }
 #endif
-  fprintf(stderr, "%s (%s)\n", (msg && *msg) ? msg : cls, cls);
+  sp_exc_write_uncaught(NULL, cls, msg);
 }
 #ifdef SPINEL_EXT_HOST
 SP_NORETURN SP_COLD void sp_raise_cls(const char *cls, const char *msg);
@@ -13869,6 +13868,7 @@ SP_NORETURN SP_COLD void sp_raise_cls(const char *cls, const char *msg) {
   /* A killed main fiber (Fiber#kill, lib/sp_fiber.c) ends the program with
      status 1 after the at_exit hooks, as CRuby does. */
   if (strcmp(cls, "FiberKillSignal") == 0) exit(sp_at_exit_run(1));
+  msg = sp_exc_uncaught_msg(msg, sp_pending_exc_obj);   /* before the hooks, as the status is */
   /* An uncaught exception prints its text AFTER the hooks have run, which is
      the order CRuby prints them in, and the status is theirs to change (a hook
      that calls `exit 5` makes an uncaught raise exit 5, still printing the
@@ -17271,6 +17271,7 @@ static int sp_at_exit_run(int status) {
       SP_GC_ROOT(eobj);
       if (ecls && strcmp(ecls, "SystemExit") == 0) st = sp_exc_exit_status(eobj);
       else {
+        emsg = sp_exc_uncaught_msg(emsg, eobj);
         sp_exc_print_uncaught(ecls ? ecls : "RuntimeError", emsg);
         st = 1;
       }
