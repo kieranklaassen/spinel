@@ -1,0 +1,244 @@
+Delta of the Struct and splat piece: git range-diff eb458e472e71..567477cc1458 74fa6d7c2457..d8a85e2a1111
+(the read head 567477cc1458, which stood above the parenthesized-sequence fix on 9922a2c74ee1, against this cut, one commit on master 74fa6d7c2457; context lines are master's source, quoted as it stands)
+
+1:  567477cc1 ! 1:  d8a85e2a1 A shared String argument stays rooted in a Struct's new and out of a splat
+    @@ Metadata
+     Author: Claude <noreply@anthropic.com>
+     
+      ## Commit message ##
+    -    A shared String argument stays rooted in a Struct's new and out of a splat
+    +    A shared String stays rooted in a Struct's new and out of a splat
+     
+         A member some code changes in place (`e.a << "z"`) holds its String
+         through a handle, and a String that is not one already is wrapped in a
+    @@ Commit message
+         conversions stay rooted across calls" holds that handle for the
+         argument of an ordinary call (arg_read_converts in emit_arg_rooted).
+         Two binders write their values themselves and still left the handle
+    -    held by nothing while the value beside it, or the object, was
+    -    allocated:
+    +    held by nothing while another value of the same list, or a class's
+    +    object, was allocated:
+     
+         - a Struct's constructor (emit_struct_new_call): 3,000 of
+           `Entry.new("alpha", "beta")` left two holding another String in a
+           plain run, and 2,995 with SPINEL_GC_STRESS=1;
+    -    - a String element of a splatted Array bound to such a parameter
+    -      (emit_elem_param), with the default a short splat leaves to fill:
+    -      20,000 of `Pair.new("q", *ra)` left four in a plain run, and 19,996
+    -      with SPINEL_GC_STRESS=1.
+    +    - a String element of a splatted Array bound to such a parameter of a
+    +      class's `new` (emit_elem_param), with the default a short splat
+    +      leaves to fill: 20,000 of `Pair.new("q", *ra)` left four in a plain
+    +      run built with gcc (none built with clang), and 19,998 with
+    +      SPINEL_GC_STRESS=1.
+     
+         Both now take the form the ordinary call has. emit_rooted_conversion
+         declares the temp ahead of the statement, rooted, and the handle is
+         made and assigned where the value stands, so a variable the statement
+    -    writes before it is read at its own position. The Struct's member asks
+    -    arg_read_converts, as an argument does; a value that is a handle
+    -    already, or nil, gets no temp.
+    +    writes before it is read at its own position.
+     
+    -    A temp exists only where the binder allocates a handle: 15 to 17
+    -    instructions for each such member, 15 to 27 for a splat's element. A
+    -    Struct handed handles or Integers costs what it did.
+    +    The temp is taken only where the handle can be lost. A Struct's
+    +    generated constructor roots its parameters before it allocates the
+    +    object, and a method's frame takes its parameters at entry, so one
+    +    handle made in the list is held by then: what collects it is a second
+    +    value made in the same list. A class's `new` allocates the object
+    +    before initialize takes the parameters, so there one is enough.
+    +
+    +    - A Struct's member is held where two or more of the member values
+    +      are made in the list by something that allocates.
+    +    - A splat's element is held for a class's `new`, and for another
+    +      callee only where a second value of the list is made in place. The
+    +      dispatch binds each argument to a rooted temp of its own and holds
+    +      nothing more.
+    +
+    +    `One.new("alpha")`, `Mixed.new("alpha", i)`, `mk(*qa)` and
+    +    `U.new.set(*qa)` compile as they did. A construction that holds costs
+    +    10 to 37 instructions built with gcc and 20 to 46 with clang for a
+    +    Struct, 15 to 43 and 20 to 47 for a splat (callgrind). One kind pays
+    +    and can be right without it: a literal beside a call that answers an
+    +    Integer (`Mixed.new("alpha", sz(i))`, 10 and 20) is lost only where
+    +    the call allocates and the C compiler runs it second, and neither is
+    +    known where the call is emitted.
+     
+         Co-Authored-By: Claude Code <noreply@anthropic.com>
+     
+      ## Makefile ##
+     @@ Makefile: GC_STRESS_TESTS := test/gc_root_frame_slots.rb \
+    -                    test/proc_cell_capture_marked.rb \
+    -                    test/poly_array_intersect.rb \
+    -                    test/thread_new_args_rooted_across_fiber_alloc.rb \
+    -+                   test/string_handle_struct_splat_root.rb \
+    -                    test/gc_root_volatile_string_slot.rb \
+    -                    test/gc_root_gathered_handle_param.rb \
+    +                    test/ffi_str_arg_beside_alloc.rb \
+                         test/dispatch_arm_roots_operands.rb \
+    +                    test/exception_message_nul.rb \
+    ++                   test/string_handle_struct_splat_root.rb \
+    +                    test/string_aset_value_runs_first.rb \
+    +                    test/yielding_initialize_new_own_class.rb
+    + gc-stress-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
+     
+      ## src/codegen_call.c ##
+    +@@ src/codegen_call.c: static int emit_struct_new_call(Compiler *c, int id, int ci, int argc, const int
+    +        and too many arguments when they hold a key */
+    +     int spread_over = spread_tail && argc - 1 == cls->nmembers ? ++g_tmp : -1;
+    +     if (spread_over >= 0) buf_printf(b, "({ sp_%s *_t%d = ", cls->c_name, spread_over);
+    ++    /* How many member values are made in the constructor's own argument
+    ++       list by something that allocates: a converted literal or read, the
+    ++       spread hash, a member read out of a keyword splat, or a value that
+    ++       is neither hoisted into a rooted temp nor a plain read (a call that
+    ++       answers a scalar)? The constructor roots its parameters before it
+    ++       allocates the object, so one such value is held by then; with two,
+    ++       the second can collect the first. */
+    ++    int made = 0;
+    ++    for (int a = 0; a < cls->nmembers && made < 2; a++) {
+    ++      int vnode = -1;
+    ++      TyKind mt = cls->ivar_types[a];
+    ++      if (kwh >= 0) vnode = merged ? -1 : struct_kwarg_value(c, kwh, cls->ivars[a] + 1);
+    ++      else if (a < argc) vnode = argv[a];
+    ++      if (lit_tmp && lit_tmp[a] >= 0) continue;
+    ++      if (spread_tail && a == argc - 1) made += !arg_wants_root(c, mt, -1);
+    ++      else if (vnode < 0) made += splat_tmp >= 0;
+    ++      else if (!arg_ran_first(vnode, argov_saved) && !arg_wants_root(c, mt, vnode))
+    ++        made += arg_read_converts(c, mt, vnode) ||
+    ++                (operand_may_allocate(c, vnode) && !subtree_is_pure_read(c, vnode));
+    ++    }
+    +     buf_printf(b, "sp_%s_new(", cls->c_name);
+    +     for (int a = 0; a < cls->nmembers; a++) {
+    +       if (a) buf_puts(b, ", ");
+     @@ src/codegen_call.c: static int emit_struct_new_call(Compiler *c, int id, int ci, int argc, const int
+                 dangling and the next mark reads freed memory (#4049). */
+              Buf mv; memset(&mv, 0, sizeof mv);
+    @@ src/codegen_call.c: static int emit_struct_new_call(Compiler *c, int id, int ci,
+     +        if (!first && arg_wants_root(c, cls->ivar_types[a], vnode))
+                emit_rooted_operand(c, cls->ivar_types[a], -1, mv.p ? mv.p : "", b);
+     +        /* a literal or a bare read wrapped in a handle of its own: as fresh
+    -+           as a call's answer, and held where it stands (arg_read_converts) */
+    -+        else if (!first && mv.p && cls->ivar_types[a] == TY_STRBUF &&
+    ++           as a call's answer, and held where it stands (arg_read_converts)
+    ++           when another value of the list can collect it */
+    ++        else if (!first && made >= 2 && mv.p && cls->ivar_types[a] == TY_STRBUF &&
+     +                 arg_read_converts(c, TY_STRBUF, vnode))
+     +          emit_rooted_conversion(c, TY_STRBUF, mv.p, b);
+              else buf_puts(b, mv.p ? mv.p : "");
+    @@ src/codegen_call.c: static int emit_struct_new_call(Compiler *c, int id, int ci,
+            }
+     
+      ## src/codegen_fold.c ##
+    -@@ src/codegen_fold.c: static void emit_elem_param(Compiler *c, Scope *m, int i, int off, int tmp, TyKi
+    +@@ src/codegen_fold.c: static int emit_splat_given_count(Compiler *c, Scope *m, const ArgLayout *L, int
+    + 
+    + /* Parameter i from element `off` of the splat temp `tmp` (of array type
+    +    `at`), boxed from a gather (`gathered`) or typed from a splat spread in
+    +-   place (ArgLayout's ARG_ELEM). */
+    ++   place (ArgLayout's ARG_ELEM). `hold`: a String element wrapped in a handle
+    ++   of its own is rooted where it is made (elems_want_hold). */
+    + static void emit_elem_param(Compiler *c, Scope *m, int i, int off, int tmp, TyKind at, int gathered,
+    +-                            Buf *out) {
+    ++                            int hold, Buf *out) {
+    +   LocalVar *sp = m->pnames[i] ? scope_local(m, m->pnames[i]) : NULL;
+    +   if (sp && sp->byref_out) {
+    +     /* an element (or the default it falls back to) has no caller variable
+    +        to write back to: bind the value, then lend a temp */
+    +     Buf vb; memset(&vb, 0, sizeof vb);
+    +     sp->byref_out = 0;
+    +-    emit_elem_param(c, m, i, off, tmp, at, gathered, &vb);
+    ++    emit_elem_param(c, m, i, off, tmp, at, gathered, hold, &vb);
+    +     sp->byref_out = 1;
+    +     emit_lent_temp(vb.p, out);
+    +     free(vb.p);
+          return;
+        }
+        TyKind set = ty_array_elem(at);
+     +  /* a String element into a shared-handle parameter: a handle of its own, as
+    -+     any value that is not a caller's variable gets, and held as a bare read's
+    -+     is (arg_read_converts), with the default it may fall back to */
+    ++     any value that is not a caller's variable gets */
+     +  int handle = repr_of_slot(c, sp).handle && set == TY_STRING;
+        Buf eb; memset(&eb, 0, sizeof eb);
+        if (sp && sp->type == TY_POLY && set != TY_POLY && set != TY_UNKNOWN) {
+    @@ src/codegen_fold.c: static void emit_elem_param(Compiler *c, Scope *m, int i, in
+     -    free(db.p);
+     +    free(db.p); free(eb.p); eb = cb;
+        }
+    -+  if (handle && eb.p) emit_rooted_conversion(c, TY_STRBUF, eb.p, out);
+    ++  /* held as a converted read is (arg_read_converts), with the default it
+    ++     may fall back to */
+    ++  if (handle && hold && eb.p) emit_rooted_conversion(c, TY_STRBUF, eb.p, out);
+        else buf_puts(out, eb.p ? eb.p : "");
+        free(eb.p);
+      }
+    + 
+    ++/* Is the value parameter `i` of `m` takes made in the call's own argument
+    ++   list by something that allocates: a splat's element or a gathered value
+    ++   wrapped in a handle, the rest Array, a converted read or literal, an
+    ++   argument or a default that is neither hoisted into a rooted temp nor a
+    ++   plain read? */
+    ++static int param_made_in_place(Compiler *c, Scope *m, const ArgLayout *L, int i, const int *argv,
+    ++                               TyKind splat_at, int argov_from) {
+    ++  LocalVar *sp = m->pnames[i] ? scope_local(m, m->pnames[i]) : NULL;
+    ++  TyKind pt = sp ? sp->type : TY_UNKNOWN;
+    ++  int dflt = m->pdefault ? m->pdefault[i] : -1;
+    ++  int dflt_made = dflt >= 0 && operand_may_allocate(c, dflt) && !subtree_is_pure_read(c, dflt);
+    ++  switch (L->from[i]) {
+    ++    case ARG_REST: case ARG_GATHERED: return 1;
+    ++    case ARG_ELEM:
+    ++      return (repr_of_slot(c, sp).handle && ty_array_elem(splat_at) == TY_STRING) || dflt_made;
+    ++    case ARG_NODE: {
+    ++      int n = argv[L->arg[i]];
+    ++      if (arg_ran_first(n, argov_from) || arg_wants_root(c, pt, n)) return 0;
+    ++      return arg_read_converts(c, pt, n) || (operand_may_allocate(c, n) && !subtree_is_pure_read(c, n));
+    ++    }
+    ++    default: return !arg_wants_root(c, pt, -1) && dflt_made;
+    ++  }
+    ++}
+    ++/* Does a String element this call's splat spreads into a shared-handle
+    ++   parameter want its handle rooted where it is made? A callee's frame takes
+    ++   its parameters at entry, so one handle made in the list is held by then.
+    ++   It is lost only where something allocates between its making and that
+    ++   entry: a class's `new`, which pools the object before initialize takes
+    ++   the parameters (the list leads with nothing there; a method's or a
+    ++   super's leads with self), or a second value of the list made in place. */
+    ++static int elems_want_hold(Compiler *c, Scope *m, const ArgLayout *L, const int *argv,
+    ++                           const char *lead, TyKind splat_at, int argov_from) {
+    ++  if (m->name && sp_streq(m->name, "initialize") && !lead[0]) return 1;
+    ++  int made = 0;
+    ++  for (int i = 0; i < m->nparams && made < 2; i++)
+    ++    made += param_made_in_place(c, m, L, i, argv, splat_at, argov_from);
+    ++  return made >= 2;
+    ++}
+    ++
+    + void emit_args_filled(Compiler *c, int callee_idx, int argsNode, const char *lead, Buf *out) {
+    +   int argc = 0;
+    +   const int *argv = argsNode >= 0 ? nt_arr(c->nt, argsNode, "arguments", &argc) : NULL;
+    +@@ src/codegen_fold.c: else {
+    +       }
+    +     }
+    + else if (L.from[i] == ARG_ELEM)
+    +-      emit_elem_param(c, m, i, L.arg[i], splat_tmp, splat_at, splat_all, out);
+    ++      emit_elem_param(c, m, i, L.arg[i], splat_tmp, splat_at, splat_all,
+    ++                      elems_want_hold(c, m, &L, argv, lead, splat_at, argov_saved), out);
+    + else {
+    +       /* Check if this param has a keyword match (lookup by param name in kwh).
+    +          Only a true KEYWORD param consumes a key -- a positional param whose
+    +@@ src/codegen_fold.c: else {
+    +         g_emitting_class_id = pm->class_id;
+    +         if (lent) {}
+    +         else if (from == ARG_GATHERED) emit_gathered_param(c, pm, k, splat_tmp_d, &ab);
+    +-        else emit_elem_param(c, pm, k, L.arg[k], splat_tmp_d, splat_at_d, L.gather, &ab);
+    ++        /* the dispatch binds each argument to a rooted temp of its own:
+    ++           an element's handle is held there, with no second root */
+    ++        else emit_elem_param(c, pm, k, L.arg[k], splat_tmp_d, splat_at_d, L.gather, 0, &ab);
+    +         g_self = saved_self;
+    +         g_self_deref = saved_deref4;
+    +         g_emitting_class_id = saved_emcls4;
+     
+      ## test/string_handle_struct_splat_root.rb (new) ##
+     @@
