@@ -1,0 +1,45 @@
+range-diff of fa1fea864306 (the head read) against ffe9ee3158a3 (this cut); the issue numbers in it are master's own source comments, quoted as they stand
+
+1:  fa1fea864 ! 1:  ffe9ee315 The box of a Range handed to a Proc is held while the Proc runs
+    @@ Commit message
+         Proc#[] on a boxed receiver is a runtime call, sp_poly_index_poly. A
+         new sp_poly_call_aref_held roots the argument and calls
+         sp_poly_call_aref, and sp_poly_index_poly calls it for a Proc; a
+    -    Method, and the Symbol and String keys, keep sp_poly_call_aref.
+    +    Method, and the Symbol and String keys, keep sp_poly_call_aref. The
+    +    test for a Proc sits inside the arm a callable already takes
+    +    (sp_poly_is_call_aref), so a boxed Hash, Array or String indexed
+    +    there runs the instructions it ran.
+     
+         A Method is not held for: the method roots its parameter. A Class is
+         passed the same way as a Range, but its box allocates nothing: it gets
+    @@ Commit message
+         Rooting the parameter inside the Proc fixes every form in one line and
+         costs 25 instructions on every call of a small Proc. Held at the call
+         site, a call with any other argument costs what it did; a Range costs
+    -    3 to 5 instructions a call, and 10 through Proc#[] built with gcc.
+    +    3 to 5 instructions a call, and 14 through Proc#[] built with gcc, 18
+    +    with clang. A boxed Method pays too and needed no holder: 3 to 4
+    +    through `.call`, whose site it shares with a Proc, and 2 through `[]`
+    +    built with gcc for the test that tells it from a Proc.
+     
+         Co-Authored-By: Claude Code <noreply@anthropic.com>
+     
+    @@ lib/spinel_rt.h: static sp_RbVal sp_poly_index_poly(sp_RbVal recv, sp_RbVal idx)
+        /* a Proc's or a Method's [] is a call, and its argument of any kind (a
+           shared String handle, nil, an Integer) is the one argument: the
+     -     key-typed arms below would take it for an index (#6179) */
+    +-  if (sp_poly_is_call_aref(recv)) return sp_poly_call_aref(recv, idx);
+     +     key-typed arms below would take it for an index (#6179). A Proc keeps
+     +     the argument in a parameter nothing roots, so it is held for the Proc. */
+    -+  if (recv.tag == SP_TAG_OBJ && recv.cls_id == SP_BUILTIN_PROC && recv.v.p) return sp_poly_call_aref_held(recv, idx);
+    -   if (sp_poly_is_call_aref(recv)) return sp_poly_call_aref(recv, idx);
+    ++  if (sp_poly_is_call_aref(recv))
+    ++    return recv.cls_id == SP_BUILTIN_PROC ? sp_poly_call_aref_held(recv, idx)
+    ++                                          : sp_poly_call_aref(recv, idx);
+        /* Reading through a shared-string handle is non-mutating, so it answers as
+           its live value: the String arms below all test SP_TAG_STR, and a handle
+    +      fell past every one of them to the trailing nil (#4279). */
+     
+      ## src/codegen_call.c ##
+     @@ src/codegen_call.c: void emit_proc_ret_unbox(Compiler *c, TyKind rty, Buf *b) {
