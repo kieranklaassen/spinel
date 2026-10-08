@@ -1,0 +1,30 @@
+instance_of?(k) answers for a boxed exception of a program's own class
+
+    class MyErr < StandardError; end
+    kept = []
+    begin; raise MyErr, "a"; rescue StandardError => e; kept << e; end
+    k = MyErr
+    p kept.map { |x| x.instance_of?(k) }    # [false]; CRuby: [true]
+
+With the class written as a constant the test compares the name a raised
+exception carries. With the class a value it compared two class ids, and
+a raised exception is boxed as SP_BUILTIN_EXCEPTION, so none matched.
+
+The id compare has a second arm now, for a boxed exception of the
+program's own (parent_cls_name) and a class value that is an id with no
+name, which is what a class of the program's own is: the id gives its
+name (sp_class_to_s), and that is compared with the name the exception
+carries. A class read off a value (`x.class`) carries a name and keeps
+the answer it had; so does a builtin exception, which has no
+parent_cls_name.
+
+Only in a program that passes the scan of the class test with a constant
+(prog_class_test_by_name) and has an exception class of its own for the
+exact test. Every other program emits the C it did. There a test costs
+4 instructions more on an Integer or an object that is no exception, 8
+on a builtin exception, and 54 on a raised exception of another class
+of the program's.
+
+Test: test/rescued_own_exception_instance_of_class_value.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

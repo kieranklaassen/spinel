@@ -1,0 +1,109 @@
+A boxed exception of a program's own class answers is_a?, instance_of? and when
+
+    class MyErr < StandardError; end
+    kept = []
+    begin; raise MyErr, "a"; rescue StandardError => e; kept << e; end
+    p kept.map { |x| x.is_a?(MyErr) }    # [false]; CRuby: [true]
+
+instance_of?(MyErr) answered false too, and `case x when MyErr` took its
+else arm. emit_poly_isa_test and the `when` class test compare the boxed
+value's class id with the ids of the class and of those under it. A
+raised exception is an sp_Exception boxed as SP_BUILTIN_EXCEPTION, and
+it carries its class by name, so no id matched. For an exception class
+of the program's own the test now has a second arm that compares the
+name a boxed exception carries with the names of that class and of those
+under it that the program instantiates, as a dispatch has an arm only
+for those.
+
+One name is compared in place; several are one function a class
+(sp_xn_<id>), however often the class is asked, so 300 tests of a class
+with 300 under it add 2% to the C. The arm asks first whether the
+exception's class is the program's own (parent_cls_name): a builtin
+exception costs 17 instructions more a test, a value that is no
+exception 14, an Integer none, and a raised exception of the program's
+35 to 77 by the number of names.
+
+The branch the test guards then runs on the value, which master never
+reached for a raised exception, and a boxed exception has no arm for
+much of what a branch can ask of it. So the arm is emitted only in a
+program where the name says the answer and nothing asks the value what
+master answers otherwise than CRuby (prog_class_test_by_name, one scan a
+compile):
+
+- none that defines, aliases or undefines is_a?, kind_of?, instance_of?,
+  === or exception, or could under a name the scan cannot read: a def of
+  that name anywhere, the name as a Symbol or a String, a define_method,
+  alias_method, undef_method, remove_method or send given anything but
+  literal names, an eval;
+- none where a class's name may mean two classes: two classes of one
+  leaf name, a class or module written as a path (`class A::MyErr`), a
+  constant written under a class's name, a class alias written twice, a
+  const_set or remove_const; nor one that reads a path which is no
+  class of the program and ends in the name of one (`raise
+  Timeout::Error` raises the name "Error", and a `class Error` of the
+  program is not what was raised);
+- none with an exception class whose builtin parent is not one of the
+  sixteen exc_parent_is_plain lists (StandardError, RuntimeError,
+  ArgumentError, TypeError, IOError and the like): KeyError, NameError
+  and SystemCallError keep fields of their own;
+- none that raises through a value (`raise k, "m"`) and has an exception
+  class with ivars and an initialize: the runtime builds what is raised
+  so at the base size, with no constructor;
+- none that writes an attribute of an exception class through a boxed
+  receiver (`v.seen = true`): that dispatch has no arm for a boxed
+  exception;
+- none whose exception classes have a method a boxed value is not asked:
+  an operator, a method that yields, method_missing,
+  respond_to_missing?, one CRuby calls by itself (to_str and the other
+  to_ conversions but to_s, coerce, each, call, hash, eql?), or a
+  `super` outside initialize;
+- none that calls on a boxed or untyped receiver, by a call, a literal
+  send or `&:name`, a method of Exception the boxed arm lacks
+  (exc_call_misanswered lists them: backtrace_locations, exception,
+  set_backtrace, methods and the other method lists, enum_for, to_enum,
+  extend, instance_exec, the singleton calls,
+  remove_instance_variable), or message, full_message,
+  detailed_message, backtrace, cause or instance_variables with a
+  block; nor, in a method of an exception class, one of those with no
+  receiver or on self where that raises NameError;
+- none that calls new, allocate or a class method of an exception class
+  on a class that is no constant: a class read off a boxed exception
+  builds nothing;
+- none that stores a boxed value into an Array of one kind (<<, push,
+  append, unshift, prepend, insert, []=, fill): that store is a
+  TypeError when it runs.
+
+The lists cover what is asked of the boxed value and what an exception
+class's method asks of itself. They do not cover what else a branch does
+with the value: `v < 1` under such a test now reaches the comparison,
+which raises as it does for an exception that was never raised.
+
+Every other program emits the C it did. The scan reads every file the
+program compiles, a required library's too: `require "set"`,
+"benchmark", "net/http" or "openssl", or a use of Gem::Version,
+withholds the cure. The class-id arm is as it was: an exception never
+raised (`MyErr.new` kept in the Array) is boxed as an object of its
+class and answers as before.
+
+Stands above the change that builds an exception class with attributes
+and no initialize at its own size: the branch reads those attributes
+through the boxed value, and beneath that change it would read past the
+object.
+
+Tests: test/rescued_own_exception_boxed_class.rb,
+test/rescued_own_exception_raised_by_value.rb, and twelve programs the
+scan holds back, right before and kept so:
+test/rescued_own_exception_own_predicate.rb,
+test/rescued_own_exception_shadowed_constant.rb,
+test/rescued_own_exception_path_class.rb,
+test/rescued_own_exception_const_set.rb,
+test/rescued_own_exception_built_method_name.rb,
+test/rescued_own_exception_raised_by_value_initialize.rb,
+test/rescued_own_exception_attribute_written.rb,
+test/rescued_own_exception_foreign_path.rb,
+test/rescued_own_exception_operator_or_block.rb,
+test/rescued_own_exception_implicit_conversion.rb,
+test/rescued_own_exception_typed_array_store.rb,
+test/rescued_own_exception_block_on_message.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
