@@ -1,0 +1,31 @@
+A next in a chunk_while or slice_when block answers the block with its value
+
+    p [1, 2, 4, 9].slice_when { |a, b| next true if b == a + 1; false }.to_a
+
+printed [[1, 2, 4, 9]] where CRuby prints [[1], [2, 4, 9]]. Over an
+Integer Array or Range, emit_chunk_while_expr and the slice_when arm of
+emit_slice_when_chunk_inspect_expr write the block into the walk's own
+C loop, so a `next` was that loop's `continue`. The element is in the
+run before the block is asked, and the run went on whatever the value
+was. Under a `begin` that `continue` also popped the rescue's frame, as
+a `next` that leaves the `begin` does, and a raise after the walk went
+uncaught.
+
+Both now read the block through emit_block_cond_next, as
+emit_chunk_family_runs does for the other receivers, where a `next` of
+the block's own can answer otherwise (chunk_next_keeps_run). Where
+every such `next` is one the `continue` already answers, the C is what
+it was: a `next` with a literal that is true in chunk_while; `next
+false`, `next nil` or a bare `next` in slice_when; and a `next` that is
+the block's value. Under a `begin` or an `ensure` only the last of
+these is left as it was.
+
+The cost: a block with any other `next` that master ran right pays the
+boxed slot its answer is read through, 7 instructions a pair.
+
+Test: test/chunk_while_next_value.rb (expected from CRuby 3.3.6 with
+--enable-frozen-string-literal). master is wrong on the first 20 of its
+27 lines and stops before the last, at the raise a `next` left
+uncaught.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
