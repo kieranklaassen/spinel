@@ -698,8 +698,11 @@ void emit_args_filled_ahead(Compiler *c, int callee_idx, int argsNode, const cha
 void emit_call_ahead(Buf *b, size_t at, Buf *ahead);
 /* The rule of emit_args_filled_ahead over `d`, the default each of m's
    parameters takes at a site (-1 for one that is given): a flag a parameter
-   whose default is made ahead (the caller frees it), or NULL for none. */
-char *defaults_ahead_of(Compiler *c, Scope *m, const int *d);
+   whose default is made ahead (the caller frees it), or NULL for none.
+   `rooted_in_prelude`: the site makes a default of a kind that takes a root
+   in the prelude, as a call does; a bare super writes every default in the
+   call's parentheses. */
+char *defaults_ahead_of(Compiler *c, Scope *m, const int *d, int rooted_in_prelude);
 /* Parameter `idx`'s value `v`, flagged by defaults_ahead_of, made ahead of
    the call: its statement goes to `ahead` and its temp, which is answered,
    is the argument. `rooted` declares the temp rooted in the prelude. */

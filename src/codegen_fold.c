@@ -10282,18 +10282,18 @@ static char *defaults_run_ahead(Compiler *c, Scope *m, const ArgLayout *L, int k
               kwh_lookup(c->nt, kwh, m->pnames[i]) >= 0;
     d[i] = given ? -1 : m->pdefault[i];
   }
-  char *ahead = defaults_ahead_of(c, m, d);
+  char *ahead = defaults_ahead_of(c, m, d, 1);
   free(d);
   return ahead;
 }
 
 /* See codegen_internal.h. */
-char *defaults_ahead_of(Compiler *c, Scope *m, const int *d) {
+char *defaults_ahead_of(Compiler *c, Scope *m, const int *d, int rooted_in_prelude) {
   int n = m->nparams, first = -1;
   char *ahead = NULL;
   for (int i = 0; i < n && first < 0; i++) {
     LocalVar *p = d[i] >= 0 && m->pnames[i] ? scope_local(m, m->pnames[i]) : NULL;
-    if (!p || p->byref_out || arg_wants_root(c, p->type, -1)) continue;
+    if (!p || p->byref_out || (rooted_in_prelude && arg_wants_root(c, p->type, -1))) continue;
     for (int j = i + 1; j < n && first < 0; j++)
       if (d[j] >= 0 && defaults_order_tells(c, d[i], d[j])) first = i;
   }
