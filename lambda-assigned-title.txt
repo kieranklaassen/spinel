@@ -1,0 +1,1 @@
+A stabby lambda's parameter the body assigns is rooted

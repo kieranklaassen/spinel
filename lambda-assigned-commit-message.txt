@@ -1,0 +1,42 @@
+A stabby lambda's parameter the body assigns is rooted
+
+    B = ->(a) { a = a.to_s * 2; b = [1, 2]; [a, b] }
+    B.call("s")
+    keep = []
+    n = 0
+    while n < 2000
+      keep << B.call(n)
+      n += 1
+    end
+    bad = 0
+    keep.each_with_index { |v, i| bad += 1 unless v[0] == i.to_s * 2 }
+    p bad    # 0; master prints 2
+
+That is a plain run, gcc and clang, exit 0. Under SPINEL_GC_STRESS=2 a
+single call aborts ("the mark reached a freed slot").
+
+A proc reads its parameters out of the call's slots and clears the
+slots. An optional and a keyword are rooted where they bind, and a
+block's required parameter the body assigns (`lambda { |a| ... }`,
+`proc`, `Proc.new`) is copied into a rooted local. A stabby lambda's
+required parameter is neither, and neither is the post of any proc
+(`lambda { |*x, a| ... }`), so once the body assigns one a new value
+nothing holds that value, and the body's next allocation can collect
+it. A typed parameter (a String, an Array, a Hash, an object) is lost
+the same way as a boxed one.
+
+The parameter is rooted where it binds, only where the body assigns it
+a value nothing else holds and something can allocate after that
+(proc_param_wants_root). A read, a scalar and a literal with elements
+(its temp holds it) need none; neither does an assignment that is one
+of the body's own statements with only reads after it, so
+`->(a) { a = a.to_s * 2; a }` is written as it was, and so is every
+lambda that only reads its parameter.
+
+Where it roots, a call costs six to seven instructions. A parameter
+assigned from an iterator whose answer a temp already holds
+(`a = a.map { ... }`) is rooted too, four instructions a call: the node
+table does not say which iterators hold their answer, and `filter_map`,
+`flat_map` and a method of the program's own with a block do not.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
