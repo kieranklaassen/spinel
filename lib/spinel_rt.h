@@ -3592,6 +3592,35 @@ static SP_UNUSED sp_bool sp_range_cover_rng(sp_Range a, sp_Range b) {
   if (b.fe) return 0;
   return a.fe ? sp_int_flt_cmp(b.last - 1, a.fend) <= 0 : b.last - 1 <= a.last;
 }
+/* Range#cover?(range) for two String Ranges, as CRuby's r_cover_range_p: an
+   open side of b needs that side of a open, an empty b holds nothing, b's
+   begin lies within a, and b's end is weighed against a's. Where a includes
+   its end and b excludes one past it, b's greatest member decides, which
+   only the walk gives. The ends are compared as whole Strings: strcmp
+   stops at a NUL, and would cover a Range that only shares the bytes up to
+   one. */
+static SP_UNUSED sp_bool sp_srange_cover_rng(sp_StrRange a, sp_StrRange b) {
+  if ((a.last && !b.last) || (a.first && !b.first)) return 0;
+  if (b.first && b.last) {
+    int d = sp_str_cmp_bytes(b.first, b.last);
+    if (b.excl ? d >= 0 : d > 0) return 0;
+  }
+  if (b.first) {
+    if (a.first && sp_str_cmp_bytes(b.first, a.first) < 0) return 0;
+    if (a.last) {
+      int d = sp_str_cmp_bytes(b.first, a.last);
+      if (a.excl ? d >= 0 : d > 0) return 0;
+    }
+  }
+  if (!a.last) return b.last || !a.excl || b.excl;
+  int c = sp_str_cmp_bytes(a.last, b.last);
+  if (!a.excl == !b.excl) return c >= 0;
+  if (a.excl) return c > 0;
+  if (c >= 0) return 1;
+  const char *al = a.last; SP_GC_ROOT_STR(al);
+  const char *m = sp_srange_max_v(b);
+  return m && sp_str_cmp_bytes(al, m) >= 0;
+}
 /* Range#cover?(range) for a Float Range a and an Integer Range b, as
    sp_range_cover_rng decides it for an Integer a (CRuby's
    r_cover_range_p): b is not empty, its begin is not below a's, and its end

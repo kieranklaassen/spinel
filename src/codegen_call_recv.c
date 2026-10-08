@@ -10699,6 +10699,15 @@ int emit_range_call(Compiler *c, int id, Buf *b) {
                       " %s(_t%d, _a%d.v.s)); })", tr, fn, tr, tr);
         return 1;
       }
+      /* cover?(range) asks whether the argument's members all lie within */
+      if (a0 == TY_STR_RANGE && sp_streq(name, "cover?")) {
+        int tr2 = ++g_tmp;
+        buf_printf(b, "({ sp_StrRange _t%d = ", tr); emit_expr(c, recv, b);
+        buf_puts(b, "; ");
+        if (hold) { emit_gc_root_tmp_refs(c, rt, tr, b); buf_puts(b, " "); }
+        buf_printf(b, "sp_StrRange _t%d = ", tr2); emit_expr(c, argv[0], b);
+        buf_printf(b, "; sp_srange_cover_rng(_t%d, _t%d); })", tr, tr2); return 1;
+      }
       buf_puts(b, "((void)("); emit_expr(c, argv[0], b); buf_puts(b, "), 0)"); return 1;
     }
     if ((is_eq_or_eql(name)) && argc == 1) {
