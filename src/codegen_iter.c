@@ -5,6 +5,7 @@
 #include "share.h"
 #include "repr.h"
 #include "call_plan.h"
+#include "codegen_call_arms.h"
 
 /* A fused loop names the receiver expression twice: once in the bound check
    (re-run on every iteration) and once in each element read. That is only
@@ -496,6 +497,7 @@ int emit_handle_var_ref(Compiler *c, int a, Buf *b) {
    variable in the block moves the alias onto the splice's private slot
    holding that String (splice_store_open/close). */
 static int splice_alias_detachable(Compiler *c, int blk, int an, const int *argv, int pargc);
+static int splice_alias_proven(Compiler *c, int mi, int blk, int an, const int *argv, int pargc);
 unsigned inline_alias_params(Compiler *c, int mi, const int *argv, int pargc, const ArgLayout *L, int blk,
                              int tag, int *splice_tok) {
   const NodeTable *nt = c->nt;
@@ -540,7 +542,8 @@ unsigned inline_alias_params(Compiler *c, int mi, const int *argv, int pargc, co
         (!inline_param_mutated(c, mi, m->pnames[i]) &&
          !inline_param_yielded_mutated(c, mi, m->pnames[i], blk))) continue;
     if (!lv->inline_alias && !an_inline_param_lent(c, mi, i, blk) &&
-        (gslot ? lent_global_slot_rebound(c, an, gref) >= 0 : comp_block_rebinds_arg(c, blk, an))) continue;
+        (gslot ? lent_global_slot_rebound(c, an, gref) >= 0
+               : comp_block_rebinds_arg(c, blk, an) && !splice_alias_proven(c, mi, blk, an, argv, pargc))) continue;
     if (gslot) refuse_lent_global_rebound(c, an, gref, m->name, m->pnames[i]);
     alias_mask |= 1u << i;
     lv->inline_alias++;
@@ -564,6 +567,287 @@ static int splice_alias_detachable(Compiler *c, int blk, int an, const int *argv
   for (int k = 0; k < pargc; k++)
     if (comp_node_writes_var(c, argv[k], an)) return 0;
   return 1;
+}
+/* Is `r` a read of the variable argument node `arg` reads: that scope's
+   local, or the instance variable of that name? */
+static int splice_reads_arg(Compiler *c, int r, int arg) {
+  const NodeTable *nt = c->nt;
+  if (r < 0 || nt_kind(nt, r) != nt_kind(nt, arg)) return 0;
+  const char *rn = nt_str(nt, r, "name"), *an = nt_str(nt, arg, "name");
+  if (!rn || !an || !sp_streq(rn, an)) return 0;
+  return nt_kind(nt, arg) != NK_LocalVariableReadNode || comp_scope_of(c, r) == comp_scope_of(c, arg);
+}
+/* Is `w` a node that names the local `arg` reads, in that scope? */
+static int splice_reads_arg_name(Compiler *c, int w, int arg) {
+  const NodeTable *nt = c->nt;
+  const char *wn = nt_str(nt, w, "name"), *an = nt_str(nt, arg, "name");
+  return wn && an && sp_streq(wn, an) && comp_scope_of(c, w) == comp_scope_of(c, arg);
+}
+/* Does the code under `id` change in place the String the variable `arg`
+   reads holds, where the text shows it: a mutator on a read of it, or the
+   read handed to a method the program defines; for an instance variable,
+   in a method of self the text calls as well? */
+static int splice_changes_in_place(Compiler *c, int id, int arg, int depth) {
+  const NodeTable *nt = c->nt;
+  if (id < 0) return 0;
+  if (nt_kind(nt, id) == NK_CallNode) {
+    const char *nm = nt_str(nt, id, "name");
+    int recv = nt_ref(nt, id, "receiver");
+    if (splice_reads_arg(c, recv, arg) && an_str_mutator_name(nm)) return 1;
+    int a = nt_ref(nt, id, "arguments"), ac = 0;
+    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+    if (nm && (comp_method_index(c, nm) >= 0 || any_class_defines(c, nm)))
+      for (int i = 0; i < ac; i++)
+        if (splice_reads_arg(c, av[i], arg)) return 1;
+    if (nm && depth < 3 && nt_kind(nt, arg) == NK_InstanceVariableReadNode &&
+        (recv < 0 || nt_kind(nt, recv) == NK_SelfNode)) {
+      int mi = comp_self_call_mi(c, id, nm);
+      if (mi >= 0 && c->scopes[mi].def_node >= 0 &&
+          splice_changes_in_place(c, c->scopes[mi].body, arg, depth + 1)) return 1;
+    }
+  }
+  int nr = nt_num_refs(nt, id);
+  for (int i = 0; i < nr; i++)
+    if (splice_changes_in_place(c, nt_ref_at(nt, id, i), arg, depth)) return 1;
+  int na = nt_num_arrs(nt, id);
+  for (int i = 0; i < na; i++) {
+    int n = 0; const int *ids = nt_arr_at(nt, id, i, &n);
+    for (int j = 0; j < n; j++)
+      if (splice_changes_in_place(c, ids[j], arg, depth)) return 1;
+  }
+  return 0;
+}
+/* Can the code under `id` assign the variable `arg` reads where an open
+   splice does not see the store, or run code the walk cannot name? Only a
+   list of forms cannot: reads, literals, conditionals and loops; a store
+   to another variable; a store to the instance variable in the text of the
+   call's block itself (`top`), which an open alias moves off first; a
+   builtin method or operator over numbers, Strings, Symbols and typed
+   Arrays (ty_runs_no_code), with a literal block or none; `p`, `puts` and
+   `print` of such values; the spliced method's own yield (`yields`); and a
+   method of self with one body, three calls deep, made of the same.
+   Anything else may: a call on an object or a boxed value, a super, a
+   block passed as a value, an interpolated object's to_s. */
+static int splice_runs_unseen(Compiler *c, int id, int arg, int top, int yields, int depth) {
+  const NodeTable *nt = c->nt;
+  if (id < 0) return 0;
+  NodeKind k = nt_kind(nt, id);
+  switch (k) {
+    case NK_StatementsNode: case NK_ParenthesesNode: case NK_IfNode: case NK_UnlessNode: case NK_ElseNode:
+    case NK_AndNode: case NK_OrNode: case NK_WhileNode: case NK_UntilNode: case NK_BreakNode: case NK_NextNode:
+    case NK_ReturnNode: case NK_BlockParametersNode: case NK_ParametersNode:
+    case NK_RequiredParameterNode: case NK_LocalVariableReadNode: case NK_InstanceVariableReadNode:
+    case NK_GlobalVariableReadNode: case NK_SelfNode: case NK_NilNode: case NK_TrueNode: case NK_FalseNode:
+    case NK_IntegerNode: case NK_FloatNode: case NK_StringNode: case NK_SymbolNode:
+    case NK_InterpolatedStringNode: case NK_RangeNode:
+    case NK_LocalVariableWriteNode: case NK_LocalVariableOrWriteNode: case NK_LocalVariableAndWriteNode:
+    case NK_GlobalVariableWriteNode: case NK_GlobalVariableOrWriteNode: case NK_GlobalVariableAndWriteNode:
+      break;
+    case NK_InstanceVariableWriteNode: case NK_InstanceVariableOrWriteNode: case NK_InstanceVariableAndWriteNode:
+    case NK_InstanceVariableOperatorWriteNode: {
+      const char *wn = nt_str(nt, id, "name"), *an = nt_str(nt, arg, "name");
+      if (nt_kind(nt, arg) == NK_InstanceVariableReadNode && (!wn || !an || sp_streq(wn, an)) && !top) return 1;
+      if (k == NK_InstanceVariableOperatorWriteNode && !ty_runs_no_code(comp_ntype(c, id))) return 1;
+      break;
+    }
+    /* `x += v` calls x's operator */
+    case NK_LocalVariableOperatorWriteNode: case NK_GlobalVariableOperatorWriteNode:
+      if (!ty_runs_no_code(comp_ntype(c, id))) return 1;
+      break;
+    /* `#{v}` calls v's to_s */
+    case NK_EmbeddedStatementsNode: {
+      int st = nt_ref(nt, id, "statements"), n = 0;
+      const int *body = st >= 0 ? nt_arr(nt, st, "body", &n) : NULL;
+      if (n > 0 && !ty_runs_no_code(comp_ntype(c, body[n - 1]))) return 1;
+      break;
+    }
+    case NK_YieldNode:
+      if (!yields) return 1;
+      break;
+    case NK_BlockNode:
+      top = 0;
+      break;
+    case NK_CallNode: {
+      if (call_is_scalar_op(c, id)) break;
+      const char *nm = nt_str(nt, id, "name");
+      int recv = nt_ref(nt, id, "receiver"), blk = nt_ref(nt, id, "block");
+      if (!nm || (blk >= 0 && nt_kind(nt, blk) != NK_BlockNode)) return 1;
+      int a = nt_ref(nt, id, "arguments"), ac = 0, plain = 1;
+      const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+      for (int i = 0; i < ac; i++)
+        if (!ty_runs_no_code(comp_ntype(c, av[i]))) plain = 0;
+      if (recv >= 0 && nt_kind(nt, recv) != NK_SelfNode) {
+        if (!plain || !ty_runs_no_code(comp_ntype(c, recv)) || comp_method_index(c, nm) >= 0 ||
+            any_class_defines(c, nm)) return 1;
+        break;
+      }
+      int mi = comp_self_call_mi(c, id, nm);
+      if (mi < 0) {
+        if (!plain || blk >= 0 || any_class_defines(c, nm) ||
+            !(sp_streq(nm, "p") || sp_streq(nm, "puts") || sp_streq(nm, "print"))) return 1;
+        break;
+      }
+      Scope *m = &c->scopes[mi], *self = comp_scope_of(c, id);
+      /* one body: a top-level def no class defines too, or the one
+         method of that name in self's classes */
+      int one = m->class_id < 0 ? !any_class_defines(c, nm)
+                                : self && self->class_id >= 0 && dispatch_impl_count(c, self->class_id, nm) == 1;
+      if (blk >= 0 || depth >= 3 || m->def_node < 0 || !one ||
+          splice_runs_unseen(c, nt_ref(nt, m->def_node, "parameters"), arg, 0, 0, depth + 1) ||
+          splice_runs_unseen(c, m->body, arg, 0, 0, depth + 1)) return 1;
+      break;
+    }
+    default: {
+      /* a call's arguments node has no kind of its own */
+      const char *ty = nt_type(nt, id);
+      if (!ty || !sp_streq(ty, "ArgumentsNode")) return 1;
+      break;
+    }
+  }
+  int nr = nt_num_refs(nt, id);
+  for (int i = 0; i < nr; i++)
+    if (splice_runs_unseen(c, nt_ref_at(nt, id, i), arg, top, yields, depth)) return 1;
+  int na = nt_num_arrs(nt, id);
+  for (int i = 0; i < na; i++) {
+    int n = 0; const int *ids = nt_arr_at(nt, id, i, &n);
+    for (int j = 0; j < n; j++)
+      if (splice_runs_unseen(c, ids[j], arg, top, yields, depth)) return 1;
+  }
+  return 0;
+}
+/* A block of a builtin iterator: the call's receiver is a value whose
+   methods run no code of the program's and no method of the program has
+   the name (`[1, 2].each { }`, `3.times { }`). Such a call opens no
+   exception frame; `loop`, `catch` and a method of the program may. */
+static int splice_plain_iterator(Compiler *c, int call) {
+  const NodeTable *nt = c->nt;
+  const char *nm = nt_str(nt, call, "name");
+  int recv = nt_ref(nt, call, "receiver");
+  return nm && recv >= 0 && ty_runs_no_code(comp_ntype(c, recv)) && comp_method_index(c, nm) < 0 &&
+         !any_class_defines(c, nm);
+}
+/* Does the block's text under `id` store to the local `arg` reads where
+   the open splice does not move the alias off the variable, or cannot keep
+   it moved: a pattern's binding, a `for` index, a `rescue => v`; a store
+   under a frame an exception or a throw unwinds to (a `begin` with a
+   rescue or an ensure, a rescue modifier, the block of a call that is no
+   builtin iterator), where the unwinding takes the move back? `tgt` is
+   set in a multiple assignment's targets, `under` below such a frame. */
+static int splice_store_unseen(Compiler *c, int id, int arg, int tgt, int under) {
+  const NodeTable *nt = c->nt;
+  if (id < 0) return 0;
+  NodeKind k = nt_kind(nt, id);
+  if (comp_is_local_write(k) && splice_reads_arg_name(c, id, arg) &&
+      (under || (k == NK_LocalVariableTargetNode && !tgt))) return 1;
+  int t = k == NK_MultiWriteNode || (tgt && (k == NK_MultiTargetNode || k == NK_SplatNode));
+  int u = under || k == NK_LambdaNode || k == NK_RescueModifierNode ||
+          (k == NK_BeginNode && (nt_ref(nt, id, "rescue_clause") >= 0 || nt_ref(nt, id, "ensure_clause") >= 0));
+  int nr = nt_num_refs(nt, id);
+  for (int i = 0; i < nr; i++) {
+    int ch = nt_ref_at(nt, id, i);
+    int cu = u || (k == NK_CallNode && ch >= 0 && nt_kind(nt, ch) == NK_BlockNode && !splice_plain_iterator(c, id));
+    /* a multiple assignment's value is no target */
+    int ct = t && !(k == NK_MultiWriteNode && ch == nt_ref(nt, id, "value"));
+    if (splice_store_unseen(c, ch, arg, ct, cu)) return 1;
+  }
+  int na = nt_num_arrs(nt, id);
+  for (int i = 0; i < na; i++) {
+    int n = 0; const int *ids = nt_arr_at(nt, id, i, &n);
+    for (int j = 0; j < n; j++)
+      if (splice_store_unseen(c, ids[j], arg, t, u)) return 1;
+  }
+  return 0;
+}
+/* Does the spliced method's body under `id` open a frame around its
+   yield: a rescue, an ensure, or a yield inside the block of a call that
+   is no builtin iterator? */
+static int splice_body_frames(Compiler *c, int id, int under) {
+  const NodeTable *nt = c->nt;
+  if (id < 0) return 0;
+  NodeKind k = nt_kind(nt, id);
+  if (k == NK_RescueModifierNode || k == NK_RescueNode || (k == NK_YieldNode && under) ||
+      (k == NK_BeginNode && (nt_ref(nt, id, "rescue_clause") >= 0 || nt_ref(nt, id, "ensure_clause") >= 0)))
+    return 1;
+  int nr = nt_num_refs(nt, id);
+  for (int i = 0; i < nr; i++) {
+    int ch = nt_ref_at(nt, id, i);
+    int cu = under || k == NK_LambdaNode ||
+             (k == NK_CallNode && ch >= 0 && nt_kind(nt, ch) == NK_BlockNode && !splice_plain_iterator(c, id));
+    if (splice_body_frames(c, ch, cu)) return 1;
+  }
+  int na = nt_num_arrs(nt, id);
+  for (int i = 0; i < na; i++) {
+    int n = 0; const int *ids = nt_arr_at(nt, id, i, &n);
+    for (int j = 0; j < n; j++)
+      if (splice_body_frames(c, ids[j], under)) return 1;
+  }
+  return 0;
+}
+/* Does the code under `id` hand the local `pn` to a call with a block, or
+   yield it? */
+static int splice_param_handed_down(Compiler *c, int id, const char *pn) {
+  const NodeTable *nt = c->nt;
+  if (id < 0) return 0;
+  NodeKind k = nt_kind(nt, id);
+  if (k == NK_YieldNode || (k == NK_CallNode && nt_ref(nt, id, "block") >= 0)) {
+    int a = nt_ref(nt, id, "arguments"), ac = 0;
+    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+    for (int i = 0; i < ac; i++)
+      if (subtree_reads_local(nt, av[i], pn)) return 1;
+  }
+  int nr = nt_num_refs(nt, id);
+  for (int i = 0; i < nr; i++)
+    if (splice_param_handed_down(c, nt_ref_at(nt, id, i), pn)) return 1;
+  int na = nt_num_arrs(nt, id);
+  for (int i = 0; i < na; i++) {
+    int n = 0; const int *ids = nt_arr_at(nt, id, i, &n);
+    for (int j = 0; j < n; j++)
+      if (splice_param_handed_down(c, ids[j], pn)) return 1;
+  }
+  return 0;
+}
+/* A parameter bound by value misses what the call's block does to the
+   argument's String in place: `def show(w) = (yield; p w)` called as
+   `show(u) { u << "x"; u = +"k" if done }` printed "u", and so did
+   `show(@s) { @s << "x" }`, whose block assigns nothing. Where the block
+   changes the String in place, is an alias right instead? It is where
+   every store to the variable that can run during the call is one in the
+   block's own text, which moves an open alias off the variable first
+   (splice_alias_detachable), and where none can run at all. A local is
+   assigned by the block's text or, through its cell, by a proc; an
+   instance variable by any code of the program's that runs meanwhile
+   (splice_runs_unseen). */
+static int splice_alias_proven(Compiler *c, int mi, int blk, int an, const int *argv, int pargc) {
+  const NodeTable *nt = c->nt;
+  Scope *m = &c->scopes[mi];
+  if (blk < 0 || nt_kind(nt, blk) != NK_BlockNode) return 0;
+  int body = nt_ref(nt, blk, "body");
+  if (!splice_changes_in_place(c, body, an, 0)) return 0;
+  /* a parameter handed on to another spliced method takes the alias with
+     it, and a store's detach moves only this splice's own */
+  for (int j = 0; j < m->nparams && j < pargc; j++)
+    if (m->pnames[j] && splice_reads_arg(c, argv[j], an) &&
+        splice_param_handed_down(c, m->body, m->pnames[j])) return 0;
+  for (int k = 0; k < pargc; k++)
+    if (comp_node_writes_var(c, argv[k], an)) return 0;
+  if (nt_kind(nt, an) == NK_LocalVariableReadNode) {
+    /* one appended to in a loop is a buffer (TY_STRBUF), whose slot is not
+       a `const char *` an alias can point at; so for an instance variable */
+    LocalVar *v = scope_local(comp_scope_of(c, an), nt_str(nt, an, "name"));
+    if (!v || v->type != TY_STRING) return 0;
+    if (splice_store_unseen(c, body, an, 0, 0) || splice_body_frames(c, m->body, 0)) return 0;
+    if (!v->proc_rebinds) return 1;
+    if (comp_node_writes_var(c, blk, an)) return 0;
+  }
+  else {
+    const char *nm = nt_str(nt, an, "name");
+    int cid = nm ? strbuf_ivar_owner(c, an) : -1;
+    int iv = cid >= 0 ? comp_ivar_index(&c->classes[cid], nm) : -1;
+    if (iv < 0 || c->classes[cid].ivar_types[iv] != TY_STRING) return 0;
+  }
+  return !splice_runs_unseen(c, body, an, 1, 0, 0) &&
+         !splice_runs_unseen(c, m->def_node >= 0 ? nt_ref(nt, m->def_node, "parameters") : -1, an, 0, 0, 0) &&
+         !splice_runs_unseen(c, m->body, an, 0, 1, 0);
 }
 /* Does write or target node w assign the variable argument node `arg`
    reads: a local of the same scope, or an instance variable of the same
