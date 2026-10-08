@@ -1958,6 +1958,7 @@ GC_STRESS_TESTS := test/gc_root_frame_slots.rb \
                    test/string_range_walk_answer.rb \
                    test/struct_values_fresh_receiver_root.rb \
                    test/hash_splat_to_a.rb \
+                   test/string_replace_fresh_source_root.rb \
                    test/proc_cell_capture_marked.rb \
                    test/poly_array_intersect.rb \
                    test/exception_class_raised_again.rb \

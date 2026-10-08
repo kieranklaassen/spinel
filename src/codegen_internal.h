@@ -302,6 +302,8 @@ int operand_is_held_read(Compiler *c, int id);
 /* Is the call a reader the emitter lowers to a plain field read? *allocates is
    set when the read builds a copy (a shared String slot). codegen_call.c */
 int call_is_field_read(Compiler *c, int id, int *allocates);
+/* Does the program give a Hash a default block anywhere? codegen_call.c */
+int prog_has_hash_default_block(Compiler *c);
 /* Typed-array headers cached across an innermost loop (codegen_stmt.c, see
    emit_while). hc_array / hc_string answer 1 and the names of the cached
    header locals when the receiver is cached in the loop being emitted;
