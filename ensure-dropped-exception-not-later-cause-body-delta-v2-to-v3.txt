@@ -1,0 +1,4 @@
+Delta of body -v3 against body -v2 (block n==609): the tail of line 25, nothing else moved.
+
+OLD: Each landing of a `longjmp` that is no raise pays for the value it keeps:
+NEW: Each landing of a `longjmp` that is no raise pays for the value it keeps, at most:
