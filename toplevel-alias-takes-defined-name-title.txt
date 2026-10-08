@@ -1,0 +1,1 @@
+A top-level alias takes the name from an earlier top-level def
