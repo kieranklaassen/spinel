@@ -1,0 +1,55 @@
+nil
+nil
+nil
+nil
+-1
+-1
+1
+0
+true
+true
+true
+nil
+nil
+nil
+nil
+-1
+1
+1
+-1
+"ArgumentError: comparison of Float with nil failed"
+"ArgumentError: comparison of Float with nil failed"
+"ArgumentError: comparison of Float with nil failed"
+"ArgumentError: comparison of Float with nil failed"
+"ArgumentError: comparison of Integer with nil failed"
+"ArgumentError: comparison of Integer with nil failed"
+"ArgumentError: comparison of Integer with nil failed"
+false
+true
+true
+false
+2.5
+2.5
+3
+2.5
+false
+false
+false
+false
+false
+false
+false
+false
+false
+false
+false
+false
+true
+true
+false
+"ArgumentError: comparison of Integer with String failed"
+"ArgumentError: comparison of Integer with nil failed"
+"ArgumentError: comparison of Integer with String failed"
+"ArgumentError: comparison of Integer with String failed"
+"ArgumentError: comparison of Float with NaN failed"
+"ArgumentError: comparison of Float with nil failed"

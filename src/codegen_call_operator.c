@@ -287,13 +287,28 @@ int emit_call_compare_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
     if ((lrt == TY_BIGINT || latr.big) &&
         (lrt == TY_INT || lrt == TY_BIGINT) && (lat == TY_INT || latr.big)) {
       int tc = ++g_tmp;
-      buf_printf(b, "({ int _t%d = sp_bigint_cmp(", tc);
+      /* the Integer side's nil sentinel answers nil: kept in _tn as it is
+         read, and tested once both sides have run */
+      int tn = cmp_operand_may_be_nil(c, lrt == TY_BIGINT ? argv[0] : recv) ? ++g_tmp : 0;
+      buf_puts(b, "({ ");
+      if (tn) buf_printf(b, "sp_int _t%d; ", tn);
+      buf_printf(b, "int _t%d = sp_bigint_cmp(", tc);
       if (lrt == TY_BIGINT) emit_expr(c, recv, b);
-      else { buf_puts(b, "sp_bigint_new_int("); emit_expr(c, recv, b); buf_puts(b, ")"); }
+      else {
+        buf_puts(b, "sp_bigint_new_int(");
+        if (tn) buf_printf(b, "_t%d = ", tn);
+        emit_expr(c, recv, b); buf_puts(b, ")");
+      }
       buf_puts(b, ", ");
       if (latr.big) emit_expr(c, argv[0], b);
-      else { buf_puts(b, "sp_bigint_new_int("); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
-      buf_printf(b, "); (sp_int)((_t%d > 0) - (_t%d < 0)); })", tc, tc);
+      else {
+        buf_puts(b, "sp_bigint_new_int(");
+        if (tn) buf_printf(b, "_t%d = ", tn);
+        emit_expr(c, argv[0], b); buf_puts(b, ")");
+      }
+      buf_puts(b, "); ");
+      if (tn) buf_printf(b, "_t%d == SP_INT_NIL ? SP_INT_NIL : ", tn);
+      buf_printf(b, "(sp_int)((_t%d > 0) - (_t%d < 0)); })", tc, tc);
       return 1;
     }
     if (ty_is_numeric(lrt) && ty_is_numeric(lat)) {
@@ -302,9 +317,12 @@ int emit_call_compare_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
       buf_puts(b, "; "); emit_ctype(c, lat, b); buf_printf(b, " _t%d = ", tb); emit_expr(c, argv[0], b);
       /* an Integer against a Float compares exactly (#7505); a NaN answers 2 */
       if ((lrt == TY_INT && lat == TY_FLOAT) || (lrt == TY_FLOAT && lat == TY_INT)) {
-        int tc = ++g_tmp;
-        buf_printf(b, "; int _t%d = sp_int_flt_cmp(_t%d, _t%d); _t%d == 2 ? SP_INT_NIL : (sp_int)%s_t%d; })",
-                   tc, lrt == TY_INT ? ta : tb, lrt == TY_INT ? tb : ta, tc, lrt == TY_INT ? "" : "-", tc);
+        int tc = ++g_tmp, ti = lrt == TY_INT ? ta : tb;
+        buf_printf(b, "; int _t%d = ", tc);
+        /* the Integer side's nil sentinel answers nil, as a NaN does */
+        if (cmp_operand_may_be_nil(c, lrt == TY_INT ? recv : argv[0])) buf_printf(b, "_t%d == SP_INT_NIL ? 2 : ", ti);
+        buf_printf(b, "sp_int_flt_cmp(_t%d, _t%d); _t%d == 2 ? SP_INT_NIL : (sp_int)%s_t%d; })",
+                   ti, lrt == TY_INT ? tb : ta, tc, lrt == TY_INT ? "" : "-", tc);
       }
       /* a NaN operand makes <=> nil, not 0 (#2315); only floats can be NaN */
       else if (lrt == TY_FLOAT || lat == TY_FLOAT)
