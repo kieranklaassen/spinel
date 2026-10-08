@@ -1607,6 +1607,22 @@ static TyKind yvt_proc_arg_value(Compiler *c, int blk) {
   return pt == TY_UNKNOWN ? TY_POLY : pt;
 }
 
+/* The value a literal block at a call site answers, as yield_value_type
+   reads it: its tail joined with its `next`s. */
+static TyKind yvt_literal_block_value(Compiler *c, int blk) {
+  const NodeTable *nt = c->nt;
+  int bb = nt_ref(nt, blk, "body");
+  int bn = 0; const int *bd = bb >= 0 ? nt_arr(nt, bb, "body", &bn) : NULL;
+  TyKind bt;
+  if (bn == 0) bt = TY_NIL;
+  else if (nt_type(nt, bd[bn - 1]) && sp_streq(nt_type(nt, bd[bn - 1]), "ReturnNode"))
+    bt = return_node_type(c, bd[bn - 1]);
+  else bt = infer_type(c, bd[bn - 1]);
+  if (bt == TY_VOID) bt = TY_NIL;
+  TyKind nx = block_next_value_ty(c, bb);
+  if (nx != TY_UNKNOWN) bt = (bt == TY_UNKNOWN) ? nx : ty_unify(bt, nx);
+  return bt;
+}
 TyKind yield_value_type(Compiler *c, int mi) {
   for (int i = 0; i < g_yvt_depth; i++)
     if (g_yvt_mi[i] == mi) return TY_UNKNOWN;
@@ -1778,6 +1794,152 @@ TyKind yield_value_type_via_super(Compiler *c, int mi) {
   g_yvt_depth--;
   return result;
 }
+/* Where each `super` of the program is and where it lands, found once and
+   kept while the tables it is read from stand. Per yvt_sup_ids entry the
+   method it is in and the method it lands on; per method whether a `super`
+   lands on it: 1 handing on the block its own method was called with, 3 a
+   block it writes or another proc, there or at a link below. */
+static int *ysl_from = NULL, *ysl_to = NULL;
+static signed char *ysl_lands = NULL;
+static const NodeTable *ysl_nt = NULL;
+static int ysl_ntc = -1, ysl_nsc = -1, ysl_ncl = -1;
+static unsigned ysl_sgen = 0, ysl_tgen = 0;
+static int yvt_supers_landing(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  if (yvt_nt != nt || yvt_ntc != nt->count) yvt_build(c);
+  if (ysl_nt == nt && ysl_ntc == nt->count && ysl_nsc == c->nscopes && ysl_ncl == c->nclasses &&
+      ysl_sgen == comp_scope_index_gen() && ysl_tgen == comp_table_gen) return 1;
+  free(ysl_from); free(ysl_to); free(ysl_lands);
+  ysl_nt = NULL;
+  ysl_from = malloc((size_t)(yvt_sup_n > 0 ? yvt_sup_n : 1) * sizeof(int));
+  ysl_to = malloc((size_t)(yvt_sup_n > 0 ? yvt_sup_n : 1) * sizeof(int));
+  ysl_lands = calloc((size_t)(c->nscopes > 0 ? c->nscopes : 1), 1);
+  if (!ysl_from || !ysl_to || !ysl_lands) return 0;
+  for (int ii = 0; ii < yvt_sup_n; ii++) {
+    ysl_from[ii] = ysl_to[ii] = -1;
+    Scope *cs = comp_scope_of(c, yvt_sup_ids[ii]);
+    if (!cs || cs->class_id < 0 || !cs->name) continue;
+    int t = a_super_target(c, cs);
+    if (t < 0 || t >= c->nscopes || t == (int)(cs - c->scopes)) continue;
+    ysl_from[ii] = (int)(cs - c->scopes); ysl_to[ii] = t;
+    ysl_lands[t] |= super_forwards_caller_block(c, yvt_sup_ids[ii]) ? 1 : 3;
+  }
+  for (int more = 1; more; ) {
+    more = 0;
+    for (int ii = 0; ii < yvt_sup_n; ii++)
+      if (ysl_to[ii] >= 0 && !(ysl_lands[ysl_to[ii]] & 2) && (ysl_lands[ysl_from[ii]] & 2)) {
+        ysl_lands[ysl_to[ii]] |= 2; more = 1;
+      }
+  }
+  ysl_nt = nt; ysl_ntc = nt->count; ysl_nsc = c->nscopes; ysl_ncl = c->nclasses;
+  ysl_sgen = comp_scope_index_gen(); ysl_tgen = comp_table_gen;
+  return 1;
+}
+/* What the methods whose `super` lands on m hand it, as
+   yield_value_type_via_super answers: each one's own sites' value, or where
+   it has none its children's. The sites' values are those the pass in
+   yvt_sites_below_diverge left (ysb_ask): the first site's block, or with
+   `all` the join of every site's. A method named otherwise is called at
+   sites that pass did not read: *named is cleared. */
+static int *ysb_stamp = NULL, ysb_cap = 0, ysb_ask = 0;
+static TyKind *ysb_first = NULL, *ysb_all = NULL;
+static int *ysb_site_k = NULL, ysb_site_n = 0, ysb_site_cap = 0;   /* the sites read, a stack */
+static TyKind *ysb_site_t = NULL;
+static TyKind yvt_below_value(Compiler *c, int m, int all, int depth, int *named) {
+  TyKind result = TY_UNKNOWN;
+  if (depth + 1 + g_yvt_depth >= MAX_YVT_DEPTH) return result;
+  for (int ii = 0; ii < yvt_sup_n; ii++) {
+    if (ysl_to[ii] != m) continue;
+    int k = ysl_from[ii];
+    if (!sp_streq(c->scopes[k].name, c->scopes[m].name)) { *named = 0; return TY_UNKNOWN; }
+    TyKind ft = ysb_stamp[k] == ysb_ask ? (all ? ysb_all[k] : ysb_first[k]) : TY_UNKNOWN;
+    if (ft == TY_UNKNOWN) ft = yvt_below_value(c, k, all, depth + 1, named);
+    if (ft == TY_UNKNOWN) continue;
+    result = (result == TY_UNKNOWN) ? ft : ty_unify(result, ft);
+  }
+  return result;
+}
+/* Do the sites of the methods beneath mi, whose `super` hands it the block
+   they were called with, give blocks of different types? The two answers
+   yield_value_diverges compares for a method's own sites, here for the
+   sites that reach mi from below, read in one pass over the calls named
+   like mi: per callee its first site's block, and the join of all of them.
+   A call is placed in the two shapes of a block written at a site whose
+   callee one lookup names: a receiver of one class, and `new` on a
+   constant. Any other call named like mi may reach one of those methods by
+   a way this does not follow, and nothing is said then: no. */
+static int yvt_sites_below_diverge(Compiler *c, int mi) {
+  const NodeTable *nt = c->nt;
+  const char *mn = c->scopes[mi].name;
+  if (!mn || strncmp(mn, "__prep_", 7) == 0) return 0;
+  if (!yvt_supers_landing(c) || ysl_lands[mi] != 1) return 0;
+  for (int i = 0; i < g_yvt_depth; i++)
+    if (g_yvt_mi[i] == mi) return 0;
+  if (g_yvt_depth >= MAX_YVT_DEPTH) return 0;
+  /* Reading a block's value can ask this of another method, so each site's
+     callee and value go on a stack first and into the shared table after. */
+  int base = ysb_site_n, placed = 1;
+  g_yvt_mi[g_yvt_depth++] = mi;
+  YvtIt yit; yvt_it_init(c, &yit, mi);
+  for (int ii; placed && (ii = yvt_it_next(&yit)) >= 0; ) {
+    int cid = yvt_ids[ii];
+    if (!yvt_may_reach(c, ii, mi)) continue;
+    int blk = nt_ref(nt, cid, "block");
+    const char *cn = nt_str(nt, cid, "name");
+    int crecv = nt_ref(nt, cid, "receiver");
+    placed = 0;
+    if ((yvt_fwd ? yvt_fwd[ii] : yvt_call_forwards_block(nt, cid)) ||
+        blk < 0 || nt_kind(nt, blk) != NK_BlockNode || !cn || crecv < 0) break;
+    TyKind rt = infer_type(c, crecv);
+    NodeKind rk = nt_kind(nt, crecv);
+    int k = -1;
+    if (ty_is_object(rt)) k = comp_method_in_chain(c, ty_object_class(rt), cn, NULL);
+    else if (sp_streq(cn, "new") && (rk == NK_ConstantReadNode || rk == NK_ConstantPathNode)) {
+      int nci = comp_class_index(c, nt_str(nt, crecv, "name"));
+      if (nci >= 0) k = comp_method_in_chain(c, nci, "initialize", NULL);
+    }
+    else break;
+    placed = 1;
+    if (k < 0 || k >= c->nscopes || (int)(comp_scope_of(c, cid) - c->scopes) == k) continue;
+    if (c->scopes[k].ctor_cycle) { placed = 0; break; }
+    TyKind bt = yvt_literal_block_value(c, blk);
+    if (ysb_site_n == ysb_site_cap) {
+      int cap = ysb_site_cap ? ysb_site_cap * 2 : 64;
+      int *sk = realloc(ysb_site_k, (size_t)cap * sizeof(int));
+      if (sk) ysb_site_k = sk;
+      TyKind *st = realloc(ysb_site_t, (size_t)cap * sizeof(TyKind));
+      if (st) ysb_site_t = st;
+      if (!sk || !st) { placed = 0; break; }
+      ysb_site_cap = cap;
+    }
+    ysb_site_k[ysb_site_n] = k; ysb_site_t[ysb_site_n++] = bt;
+  }
+  g_yvt_depth--;
+  if (placed && (ysb_cap < c->nscopes || ++ysb_ask <= 0)) {
+    free(ysb_stamp); free(ysb_first); free(ysb_all);
+    ysb_cap = c->nscopes; ysb_ask = 1;
+    ysb_stamp = calloc((size_t)(ysb_cap > 0 ? ysb_cap : 1), sizeof(int));
+    ysb_first = malloc((size_t)(ysb_cap > 0 ? ysb_cap : 1) * sizeof(TyKind));
+    ysb_all = malloc((size_t)(ysb_cap > 0 ? ysb_cap : 1) * sizeof(TyKind));
+    if (!ysb_stamp || !ysb_first || !ysb_all) { ysb_cap = 0; placed = 0; }
+  }
+  int diverge = 0;
+  if (placed) {
+    for (int i = base; i < ysb_site_n; i++) {
+      int k = ysb_site_k[i];
+      TyKind bt = ysb_site_t[i];
+      if (ysb_stamp[k] != ysb_ask) { ysb_stamp[k] = ysb_ask; ysb_first[k] = bt; ysb_all[k] = bt; continue; }
+      ysb_all[k] = ty_unify(ysb_all[k], bt);
+      if (!c->scopes[k].yields && !c->scopes[k].is_lowered_yield) ysb_first[k] = ysb_all[k];
+    }
+    int named = 1;
+    TyKind first = yvt_below_value(c, mi, 0, 0, &named);
+    TyKind all = first == TY_UNKNOWN ? first : yvt_below_value(c, mi, 1, 0, &named);
+    diverge = named && all != first && all != TY_UNKNOWN;
+  }
+  ysb_site_n = base;
+  return diverge;
+}
 /* Whether a yield-inlined method's block value type DIVERGES across its call
    sites (one caller's block returns int, another's an object): the shared
    accumulator that receives yield results must then hold a poly element (an
@@ -1789,6 +1951,9 @@ int yield_value_diverges(Compiler *c, int mi) {
   TyKind t = yield_value_type(c, mi);
   g_yvt_unify_all = sv;
   if (t == TY_POLY) return 1;
+  /* A method no call names is reached through a child's `super`, and where
+     that hands on the child's own block the child's sites are its sites. */
+  if (t == TY_UNKNOWN && yvt_sites_below_diverge(c, mi)) return 1;
   /* Asking whether the UNION is poly misses the disagreements ty_unify can
      absorb, and a nil one it always can: `nil` joined to a String is a
      nullable String, to an Integer a nullable Integer. So a method yielded to
