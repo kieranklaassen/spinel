@@ -1,0 +1,43 @@
+A `when` arm that a call makes is rooted across its compare
+
+`when levels(1)` beside an Array subject compares the two through
+sp_poly_eq, which calls an element's own ==. The arm was the call's
+value, in no root. The method collected, the Array and its element
+were freed, and the next object of that size took the element's place:
+
+    class Level
+      attr_reader :n
+      def initialize(n) = @n = n
+      def ==(o)
+        i = 0
+        while i < 20000
+          [Level.new(i + 100)]
+          i += 1
+        end
+        o > @n
+      end
+    end
+    def levels(i) = [Level.new(i)]
+    p(case [5] when levels(1) then :hit else :miss end)
+                                  # Spinel: :miss, CRuby: :hit
+
+The arm is now held in a rooted temporary at the three places that
+left it out: an Array or Hash arm beside an Array or Hash subject, and
+an object arm beside one (emit_case_container_eq); an object arm that
+falls to the boxed compare (emit_case_obj_eq). The two that pass the
+object itself take emit_when_arm_root; the one that passes it boxed
+roots the boxed value.
+
+Left as it was, with the C unchanged: an arm that allocates nothing, a
+literal Array or Hash (its own temporary holds it), an Array or Hash of
+Integers, Floats or Strings (the compare calls nothing of the program),
+an element read of an Array or Hash that a variable holds (`rows[i]`),
+and an object arm of a class with no == or <=> that is no Struct (it
+compares by identity).
+
+Not here: an arm that arrives boxed (`when level_or_nil(i)`), which
+emit_when_boxed_test holds in a temporary of its own with no root.
+
+Test: test/case_when_call_arm_rooted.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

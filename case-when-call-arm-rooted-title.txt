@@ -1,0 +1,1 @@
+A `when` arm that a call makes is rooted across its compare
