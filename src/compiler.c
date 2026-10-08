@@ -1003,6 +1003,45 @@ int comp_builtin_name_reopened(Compiler *c, const char *name) {
   return 0;
 }
 
+/* Whether node `n` may name `name`: a Symbol or String literal that is the
+   name, or anything that is no literal. */
+static int node_may_name(const NodeTable *nt, int n, const char *name) {
+  NodeKind k = n >= 0 ? nt_kind(nt, n) : NK_NilNode;
+  const char *s = k == NK_SymbolNode ? nt_str(nt, n, "value") : k == NK_StringNode ? nt_str(nt, n, "content") : NULL;
+  return !s || sp_streq(s, name);
+}
+
+/* Whether the program has a method named `name` of its own anywhere: in a
+   class or a module (a def, an alias, define_method), or given to one object
+   (`def s.*(o)`, which sits under no class of the table); or changes what
+   the name means in a builtin class, which no table holds either: an alias
+   under the name (`class String; alias * +; end`), an undef of it. */
+int comp_program_defines_name(Compiler *c, const char *name) {
+  const NodeTable *nt = c->nt;
+  for (int k = 0; k < c->nclasses; k++)
+    if (comp_method_in_chain(c, k, name, NULL) >= 0) return 1;
+  NT_FOREACH_KIND(nt, NK_DefNode, d) {
+    const char *dn = nt_str(nt, d, "name");
+    if (dn && sp_streq(dn, name)) return 1;
+  }
+  NT_FOREACH_KIND(nt, NK_AliasMethodNode, a)
+    if (node_may_name(nt, nt_ref(nt, a, "new_name"), name)) return 1;
+  NT_FOREACH_KIND(nt, NK_UndefNode, u) {
+    int un = 0; const int *uv = nt_arr(nt, u, "names", &un);
+    for (int q = 0; q < un; q++)
+      if (node_may_name(nt, uv[q], name)) return 1;
+  }
+  NT_FOREACH_KIND(nt, NK_CallNode, cl) {
+    const char *cn = nt_str(nt, cl, "name");
+    if (!cn || !(sp_streq(cn, "alias_method") || sp_streq(cn, "undef_method") ||
+                 sp_streq(cn, "define_method") || sp_streq(cn, "define_singleton_method"))) continue;
+    int args = nt_ref(nt, cl, "arguments"), ac = 0;
+    const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &ac) : NULL;
+    if (ac >= 1 && node_may_name(nt, av[0], name)) return 1;
+  }
+  return 0;
+}
+
 /* Whether a call on the chain from a yield up to `call` (`yield.size + 1`)
    names a method some builtin class reopens, an alias that captured the
    builtin (builtin_only) aside: the chain's sites are then typed one by
