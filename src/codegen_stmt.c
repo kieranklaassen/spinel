@@ -9688,6 +9688,141 @@ static void emit_ensure_return(Compiler *c, int eid, int has_retval, Buf *b, int
   else emit_retf_return(eid, has_retval, b);
 }
 
+/* The builtin classes and modules a number or a boolean belongs to. */
+static int names_scalar_builtin(const char *cn) {
+  static const char *const B[] = { "Integer", "Float", "Numeric", "Comparable", "Object", "Kernel",
+                                   "BasicObject", "TrueClass", "FalseClass", "NilClass", NULL };
+  for (int i = 0; cn && B[i]; i++) if (sp_streq(cn, B[i])) return 1;
+  return 0;
+}
+
+/* Is `ci` a class of the program's own that no number and no boolean is an
+   instance of: written as a class, and neither it nor an ancestor named
+   for one of those builtins? */
+static int class_holds_no_scalar(Compiler *c, int ci) {
+  if (ci < 0 || comp_class_is_module(c, &c->classes[ci])) return 0;
+  for (int hops = 0; ci >= 0; ci = c->classes[ci].parent)
+    if (!c->classes[ci].name || ++hops > 64 || names_scalar_builtin(c->classes[ci].name)) return 0;
+  return 1;
+}
+
+/* Is the operator `name` the builtin one wherever this program applies it
+   to a number or a boolean? call_is_scalar_op answers by the types and the
+   name alone, and a program can put a method of its own behind the name.
+   Proved by absence, and no at the first doubt. The program has no def of
+   that name (nor of `==` for `!=` and `<=>`) but in a class of its own
+   that no scalar is an instance of; and it has none of
+   the words that define a method where no def shows: alias, alias_method,
+   define_method, prepend, a send, an eval, a constant that names a builtin
+   class. Asked once a program. */
+static int ensure_op_is_builtin(Compiler *c, const char *name) {
+  static const char *const OPS[] = {
+    "+","-","*","/","%","**","<",">","<=",">=","==","!=","<=>","&","|","^","<<",">>", NULL };
+  static const char *const WORDS[] = {
+    "alias_method","define_method","prepend","send","__send__","public_send","eval","instance_eval",
+    "class_eval","module_eval","instance_exec","class_exec","module_exec","refine","using",
+    "undef_method","remove_method","const_set","const_get", NULL };
+  enum { EQ = 10, NE = 11, CMP = 12, NOPS = 18, DOUBT = 31, NFAR = 64 };
+  static const NodeTable *seen; static int seen_n = -1; static unsigned own;
+  const NodeTable *nt = c->nt;
+  if (seen != nt || seen_n != nt->count) {
+    int far[NFAR], nfar = 0, n = 0;   /* defs of these names in a class no scalar belongs to */
+    own = 0;
+    for (int pass = 0; pass < 2; pass++)
+      for (int s = 0; s < c->nscopes; s++) {
+        const Scope *sc = &c->scopes[s];
+        int hit = 0, at = -1;
+        for (int i = 0; sc->name && OPS[i] && !hit; i++) hit = sp_streq(sc->name, OPS[i]);
+        if (!hit || sc->def_node < 0) continue;
+        for (int k = 0; k < nfar; k++) if (far[k] == sc->def_node) at = k;
+        if (class_holds_no_scalar(c, sc->class_id)) { if (!pass && at < 0 && nfar < NFAR) far[nfar++] = sc->def_node; }
+        else if (at >= 0) far[at] = -1;   /* the same def serves another class too */
+      }
+    NT_FOREACH_KIND(nt, NK_DefNode, d) {
+      const char *dn = nt_str(nt, d, "name");
+      int at = -1;
+      for (int k = 0; k < nfar; k++) if (far[k] == d) at = k;
+      for (int i = 0; dn && at < 0 && OPS[i]; i++) if (sp_streq(dn, OPS[i])) own |= 1u << i;
+    }
+    nt_nodes_of_kind(nt, NK_AliasMethodNode, &n);
+    if (n > 0) own |= 1u << DOUBT;
+    NT_FOREACH_KIND(nt, NK_ConstantWriteNode, w) {
+      int wv = nt_ref(nt, w, "value");
+      if (wv >= 0 && nt_kind(nt, wv) == NK_ConstantReadNode && names_scalar_builtin(nt_str(nt, wv, "name")))
+        own |= 1u << DOUBT;
+    }
+    if (!(own >> DOUBT)) NT_FOREACH_KIND(nt, NK_CallNode, u) {
+      const char *un = nt_str(nt, u, "name");
+      for (int i = 0; un && WORDS[i]; i++) if (sp_streq(un, WORDS[i])) own |= 1u << DOUBT;
+    }
+    seen = nt; seen_n = nt->count;
+  }
+  if (!name || (own >> DOUBT)) return 0;
+  for (int i = 0; i < NOPS; i++)
+    if (sp_streq(name, OPS[i]))
+      return !(own & 1u << i) && !((i == NE || i == CMP) && (own & 1u << EQ));
+  return 0;
+}
+
+/* Is `v` a value an ensure body names with no call: nil, true, false, an
+   Integer, Float or Symbol literal, a read of a local, an instance
+   variable, a class variable or a global, or a builtin operator over
+   scalars (call_is_scalar_op, and ensure_op_is_builtin above) whose
+   operands are such values, every one of them a scalar itself? */
+static int ensure_names_plain_value(Compiler *c, int v) {
+  const NodeTable *nt = c->nt;
+  if (v < 0) return 0;
+  switch (nt_kind(nt, v)) {
+  case NK_NilNode: case NK_TrueNode: case NK_FalseNode: case NK_FloatNode: case NK_SymbolNode:
+  case NK_LocalVariableReadNode: case NK_InstanceVariableReadNode: case NK_GlobalVariableReadNode:
+  case NK_ClassVariableReadNode:
+    return 1;
+  case NK_IntegerNode:
+    return comp_ntype(c, v) == TY_INT;
+  case NK_CallNode: {
+    if (!call_is_scalar_op(c, v) || !ensure_op_is_builtin(c, nt_str(nt, v, "name")) ||
+        !ensure_names_plain_value(c, nt_ref(nt, v, "receiver"))) return 0;
+    int args = nt_ref(nt, v, "arguments"), n = 0;
+    const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &n) : NULL;
+    for (int i = 0; i < n; i++) {
+      TyKind at = comp_ntype(c, av[i]);   /* `n == obj` calls the object's `==` */
+      if ((at != TY_INT && at != TY_FLOAT && at != TY_BOOL) || !ensure_names_plain_value(c, av[i])) return 0;
+    }
+    return 1;
+  }
+  default:
+    return 0;
+  }
+}
+
+/* Does the ensure body `stmts` only name plain values (above), each alone
+   or stored in a local, an instance variable, a class variable or a
+   global, by `=` or by an `op=` on an Integer or Float slot whose operator
+   is the builtin one? Nothing it runs enters a begin or rescues a raise
+   then, so the exception that waits stays as the begin left it. */
+static int ensure_body_only_stores(Compiler *c, int stmts) {
+  const NodeTable *nt = c->nt;
+  int n = 0; const int *bb = nt_arr(nt, stmts, "body", &n);
+  for (int i = 0; i < n; i++) {
+    int v = bb[i];
+    switch (nt_kind(nt, v)) {
+    case NK_LocalVariableOperatorWriteNode: case NK_InstanceVariableOperatorWriteNode:
+    case NK_GlobalVariableOperatorWriteNode: case NK_ClassVariableOperatorWriteNode:
+      if (!ty_is_numeric(comp_ntype(c, v)) || !ty_is_numeric(comp_ntype(c, nt_ref(nt, v, "value"))) ||
+          !ensure_op_is_builtin(c, nt_str(nt, v, "binary_operator"))) return 0;
+      /* fall through */
+    case NK_LocalVariableWriteNode: case NK_InstanceVariableWriteNode: case NK_GlobalVariableWriteNode:
+    case NK_ClassVariableWriteNode:
+      v = nt_ref(nt, v, "value");
+      break;
+    default:
+      break;
+    }
+    if (!ensure_names_plain_value(c, v)) return 0;
+  }
+  return 1;
+}
+
 /* begin/body/rescue (ensure/else deferred) via the setjmp exception model.
    When resultvar != NULL, the body's and rescue handlers' values are
    assigned to it (begin/rescue as an expression). */
@@ -9867,8 +10002,25 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
        as its cause. */
     emit_indent(b, indent);
     buf_printf(b, "{ void *_icr%d SP_CLEANUP(sp_inflight_restore) = _ic%d; (void)_icr%d;\n", eid, eid, eid);
+    /* The deferred exception waits in _excmsg and _excobj while the ensure
+       body runs, and nothing else holds it there: a begin entered by that
+       body takes the slot the message was read from, and a raise it rescues
+       takes sp_inflight_cause. Both are rooted for the body, and only when
+       an exception waits, so the path with none pays a saved count. */
+    int holds = !ensure_body_only_stores(c, ensure_stmts);
+    if (holds) {
+      emit_indent(b, indent);
+      buf_printf(b, "{ int _exr%d SP_CLEANUP(sp_gc_cleanup) = sp_gc_nroots;"
+                    " if (_excf%d) { _sp_gc_root_push((void **)((uintptr_t)&_excmsg%d | (uintptr_t)2));"
+                    " _sp_gc_root_push((void **)&_excobj%d); }\n",
+                 eid, eid, eid, eid);
+    }
     emit_stmts(c, ensure_stmts, b, indent);
     emit_indent(b, indent);
+    if (holds) {
+      buf_puts(b, "}\n");
+      emit_indent(b, indent);
+    }
     buf_puts(b, "}\n");
     emit_indent(b, indent);
     buf_printf(b, "sp_unwind_kind = _uk%d; sp_unwind_target = _ut%d; sp_unwind_exc_top = _ue%d; sp_unwind_home = _uh%d;\n",
