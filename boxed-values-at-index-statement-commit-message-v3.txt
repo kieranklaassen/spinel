@@ -1,0 +1,21 @@
+A boxed values_at builds when an index needs a statement of its own
+
+    a = [[1, 2, 3], nil][ARGV.size]
+    p a.values_at(0..[1].size)
+    p a.values_at(*[*[0], 1])
+
+did not build: "expected expression before 'sp_IntArray'". values_at on
+a boxed receiver collects its indexes into an Array one statement each.
+It wrote the head of that statement, `sp_PolyArray_push(_tN, `, and
+only then emitted the index, so whatever the index hoisted (here the
+literal Array in the Range's bound) landed inside the call. A splatted
+list did the same with its `sp_poly_to_poly_array(`. An index with an
+effect of its own runs ahead of the call and is read from its temp; a
+Range, a literal Array and a list that holds a splat are built where
+they stand. Each is now emitted first and its statement written whole
+after it. Where an index hoists nothing the C is the same.
+
+Test: test/boxed_values_at_hoisted_index.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+
