@@ -1,0 +1,11 @@
+--- boxed-push-statement-raises-body-v5.md
++++ boxed-push-statement-raises-body-v6.md
+@@ -14,7 +14,7 @@
+ 
+ A push statement on a boxed Array is cheaper than before: its Array arms stand in front, where through `sp_poly_shl` they stood behind the Proc, user class and yielder tests. By callgrind a loop pass of `row[0].push(1)` on an Integer Array runs 42 instructions on master and 29 here with gcc, 46 and 37 with clang; `<<` runs master's count. The arms are `sp_poly_shl`'s, repeated in `sp_poly_ary_append`: called from `sp_poly_shl` they made a loop pass of two `<<` statements dearer with gcc, 168 instructions for 158.
+ 
+-Only such statements change: 29 programs of the corpus, the new test among them (22 with `--share-strings`), optcarrot not among them.
++Only such statements change: 29 programs of the corpus, the new test among them, optcarrot not among them; with `--share-strings` it is the same change in fewer programs, as some of the 29 do not compile with the flag, on master or here.
+ 
+ Not here: `x&.push(6)` as a statement on a boxed nil raises NoMethodError, as on master, where CRuby does nothing; a class with `method_missing` and no `push` raises where CRuby runs `method_missing`, as on master.
+ 
