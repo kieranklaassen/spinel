@@ -9480,6 +9480,25 @@ static sp_int sp_rbval_hash_key(sp_RbVal v) {
   }
   return 0;
 }
+/* Two Rationals as one Hash key where either is a Rational of Bignums: by
+   value, as the hash above takes them. The answer of an operation stays a
+   Rational of Bignums when its parts fit a word again, and it is the key the
+   word-sized Rational of the same value is. Both are in lowest terms with a
+   positive denominator. Allocates nothing: a lookup compares keys with
+   values in hand that nothing else holds. */
+static SP_NOINLINE sp_bool sp_brat_eql_key(sp_RbVal a, sp_RbVal b) {
+  if (a.cls_id != SP_BUILTIN_BIG_RATIONAL) { sp_RbVal t = a; a = b; b = t; }
+  if (a.cls_id != SP_BUILTIN_BIG_RATIONAL || !a.v.p || !b.v.p) return FALSE;
+  sp_BigRational *x = (sp_BigRational *)a.v.p;
+  if (b.cls_id == SP_BUILTIN_BIG_RATIONAL) {
+    sp_BigRational *y = (sp_BigRational *)b.v.p;
+    return sp_bigint_cmp(x->num, y->num) == 0 && sp_bigint_cmp(x->den, y->den) == 0;
+  }
+  if (b.cls_id != SP_BUILTIN_RATIONAL) return FALSE;
+  sp_Rational *y = (sp_Rational *)b.v.p;
+  return sp_bigint_fits_int(x->num) && sp_bigint_fits_int(x->den) &&
+         (sp_int)sp_bigint_to_int(x->num) == y->num && (sp_int)sp_bigint_to_int(x->den) == y->den;
+}
 static sp_bool sp_rbval_eql_key(sp_RbVal a, sp_RbVal b) {
   /* a mutable String's handle is eql? to the String it holds, as it hashes */
   a = sp_poly_strbuf_deref(a); b = sp_poly_strbuf_deref(b);
@@ -9534,7 +9553,7 @@ static sp_bool sp_rbval_eql_key(sp_RbVal a, sp_RbVal b) {
       /* Hashes likewise, across variants and value by value with eql?: paired
          with the content hash above, so a Hash key is found by an equal one. */
       if (sp_poly_is_hash_kind(a.cls_id) && sp_poly_is_hash_kind(b.cls_id)) return sp_poly_eql(a, b);
-      if (a.cls_id != b.cls_id) return FALSE;
+      if (a.cls_id != b.cls_id) return sp_brat_eql_key(a, b);   /* a Rational of either size */
       if (a.v.p == b.v.p) return TRUE;
       if (a.cls_id == SP_BUILTIN_REGEX)
         return sp_re_eq(a.v.p, b.v.p);   /* same source, same pattern (#3681) */
@@ -9551,6 +9570,7 @@ static sp_bool sp_rbval_eql_key(sp_RbVal a, sp_RbVal b) {
         sp_Rational *ra = (sp_Rational *)a.v.p, *rb = (sp_Rational *)b.v.p;
         return (ra && rb) ? (ra->num == rb->num && ra->den == rb->den) : (ra == rb);
       }
+      if (a.cls_id == SP_BUILTIN_BIG_RATIONAL) return sp_brat_eql_key(a, b);
       if (a.cls_id == SP_BUILTIN_TIME) {
         /* instant equality, paired with the value-based hash above */
         sp_Time *ta = (sp_Time *)a.v.p, *tb = (sp_Time *)b.v.p;
