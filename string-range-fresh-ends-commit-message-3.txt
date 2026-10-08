@@ -1,0 +1,18 @@
+A local as one end of a String Range takes no slot when the other end cannot reach it
+
+    lo = "100000"
+    n = 0
+    200000.times { |i| n += 1 if (lo..(i + 3).to_s).cover?((i + 1).to_s) }
+    p n
+
+The slot keeps a String that the other end may let go while it runs. A
+local's String is let go only by code that names the local, to write it or
+to change its String in place, or by a Proc that captured it. So a local
+the other end does not name, beside an end that can run no Proc, is left
+where it stands and the Range reads it as master did.
+
+The loop above: 90.49M instructions to 86.54M (80.55M on master, where the
+Range is not held at all).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+

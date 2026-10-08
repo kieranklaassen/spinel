@@ -1,0 +1,48 @@
+A String Range that no name holds is kept until it is read
+
+    def made(a, b)
+      (a.to_s.."#{b}")
+    end
+
+    ins = 0
+    120.times { |i| ins += 1 if made(100 + i, 102 + i).cover?((101 + i).to_s) }
+    p ins   # 120; 0 under SPINEL_GC_STRESS=2
+
+    n = 0
+    3000000.times { |i| n += 1 if (i.to_s..(i + 3).to_s) == (i.to_s..(i + 3).to_s) }
+    p n     # 3000000 in CRuby, 2999672 here in a plain run
+
+    $g = (i.to_s..(i + 5).to_s)
+    bad += 1 if $g.cover?(rebind(i)) != want   # rebind binds $g to another Range
+    # 1,000 rounds, and 1,000 with ===: 2 and 3 wrong in a plain run
+
+A String Range is two Strings by value. A local's two ends are rooted and
+an instance variable's are marked, but a temp's were not. So a Range that
+was a method's value, an argument on its way to a callee, the receiver of
+cover? or one side of == lost its ends to the next allocation: the
+membership argument, the callee's first String, the other side. A
+global's Range read as a receiver is such a temp too, and the argument
+that binds the global to another Range let its ends go.
+
+The two ends of a String Range temp are now rooted where the temp is
+bound, with emit_gc_root_tmp_refs as the poly dispatch does: the operand
+temps, an argument's temp, the local of an inlined method, the receiver of
+include?, member?, cover?, === and eql? when the argument may allocate,
+and each side of == and != beside a side that may allocate.
+
+Rooting a Range takes it whole, and one written with a read beside an end
+that runs something (`(s..(s = t; j.to_s))`), or with two ends each read
+from a String that was appended to, could already carry a freed end. Such
+an end now goes into a rooted slot where the C compiler makes it, in the
+order the C compiler picks. A Range whose ends are literals or plain reads
+compiles to the C it did.
+
+The test joins GC_STRESS_TESTS: without this it aborts at level 2 ahead of
+its last five lines.
+
+Not here: a String Range passed to a Proc, taken apart by a multiple
+assignment, read by inspect or out of a Struct member still loses an end
+at level 2.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+

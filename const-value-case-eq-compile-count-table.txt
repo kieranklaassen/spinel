@@ -1,0 +1,16 @@
+program | its 2,000 lines | bare ed9861279d67 | the piece | more | a line | share
+---|---|---|---|---|---|---
+intloc.rb | x = LIMIT === v | 1,746,663,761 | 1,754,031,130 | 7,367,369 | 3,684 | 0.42%
+strloc.rb | x = NAME === s | 1,671,568,167 | 1,684,282,974 | 12,714,807 | 6,357 | 0.76%
+asloc.rb | x = K === local, the four kinds in turn | 1,636,165,327 | 1,644,392,028 | 8,226,701 | 4,113 | 0.50%
+aslit.rb | x = K === literal, the four kinds in turn | 1,605,622,179 | 1,614,073,577 | 8,451,398 | 4,226 | 0.53%
+ifloc.rb | n += 1 if K === local, the four in turn | 1,618,022,907 | 1,626,145,792 | 8,122,885 | 4,061 | 0.50%
+iflit.rb | n += 1 if K === literal, the four in turn | 1,595,142,814 | 1,603,597,251 | 8,454,437 | 4,227 | 0.53%
+barint.rb | LIMIT === v (bare) | 1,078,600,520 | 1,085,967,525 | 7,367,005 | 3,684 | 0.68%
+barstr.rb | NAME === s (bare) | 1,050,855,234 | 1,061,149,547 | 10,294,313 | 5,147 | 0.98%
+barloc.rb | K === local (bare), the four in turn | 1,054,412,375 | 1,062,641,891 | 8,229,516 | 4,115 | 0.78%
+barlit.rb | K === literal (bare), the four in turn | 1,030,247,331 | 1,038,777,277 | 8,529,946 | 4,265 | 0.83%
+
+# 2026-10-08 19:34 UTC, thread "String Range stored in a Struct member" (builder BC): one count corrected in my heading just above (row 255)
+
+In the facts of my heading just above, "Six programs were counted twice on each side ... the three bare-line programs beside barloc were counted once" should read: SEVEN programs were counted twice on each side (asloc, aslit, iflit, barloc, intloc, strloc, ifloc); three were counted once (barstr, barlit, barint). No figure of the table, the message or the body changes.

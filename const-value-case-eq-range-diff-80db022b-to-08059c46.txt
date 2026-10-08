@@ -1,0 +1,16 @@
+1:  80db022be ! 1:  08059c468 === on a constant that holds a value is the value's own ===
+    @@ Commit message
+         cannot be equal, and less than the class test did where x is a Symbol.
+         Against the same value in a local it is within 2 instructions, but for
+         an object with a === of its own, which costs 16 (gcc) and 20 (clang)
+    -    more than through a local. Compiling 2,000 such lines runs 0.5% more
+    -    instructions.
+    +    more than through a local. Compiling such a line runs about 3,700 more
+    +    instructions where K holds an Integer and 5,100 to 6,400 where it holds
+    +    a String (callgrind over `spinel -c`): behind ten lines that set the
+    +    constants and the locals, 2,000 lines `x = LIMIT === v` compile with
+    +    0.42% more instructions, 2,000 lines `x = NAME === s` with 0.76%, and
+    +    2,000 bare lines `NAME === s` with 0.98%.
+     
+         Tests: test/const_value_case_eq.rb, and
+         test/const_value_case_eq_bignum.rb for the Bignum pairs.

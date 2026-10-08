@@ -1,0 +1,16 @@
+# ct-gen-mz.rb : writes the ten programs of the compile-time count into the current directory.
+# Each: the ten header lines, 2,000 lines, one `p`. Counted with
+#   valgrind --tool=callgrind --callgrind-out-file=/dev/null bin/spinel PROG.rb -c --no-line-map -o PROG.c
+hdr = "LIMIT = 9\nNAME = \"abc\"\nTAG = :ok\nRATE = 2.5\nv = 3\ns = \"abd\"\nt = :no\nf = 1.5\nn = 0\nx = false\n"
+loc = ["LIMIT === v", "NAME === s", "TAG === t", "RATE === f"]
+lit = ["LIMIT === 3", "NAME === \"abd\"", "TAG === :no", "RATE === 1.5"]
+File.write("intloc.rb", hdr + (0...2000).map { |i| "x = LIMIT === v\n" }.join + "p x\n")
+File.write("strloc.rb", hdr + (0...2000).map { |i| "x = NAME === s\n" }.join + "p x\n")
+File.write("asloc.rb", hdr + (0...2000).map { |i| "x = #{loc[i % 4]}\n" }.join + "p x\n")
+File.write("aslit.rb", hdr + (0...2000).map { |i| "x = #{lit[i % 4]}\n" }.join + "p x\n")
+File.write("ifloc.rb", hdr + (0...2000).map { |i| "n += 1 if #{loc[i % 4]}\n" }.join + "p n\n")
+File.write("iflit.rb", hdr + (0...2000).map { |i| "n += 1 if #{lit[i % 4]}\n" }.join + "p n\n")
+File.write("barint.rb", hdr + (0...2000).map { |i| "LIMIT === v\n" }.join + "p n\n")
+File.write("barstr.rb", hdr + (0...2000).map { |i| "NAME === s\n" }.join + "p n\n")
+File.write("barloc.rb", hdr + (0...2000).map { |i| "#{loc[i % 4]}\n" }.join + "p n\n")
+File.write("barlit.rb", hdr + (0...2000).map { |i| "#{lit[i % 4]}\n" }.join + "p n\n")

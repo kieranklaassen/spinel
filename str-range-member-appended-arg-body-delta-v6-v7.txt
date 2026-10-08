@@ -1,0 +1,11 @@
+--- body -v6
++++ body -v7
+@@ -40,7 +40,7 @@
+ gate: run on the Mac at opening
+ ```
+ 
+-Run here before that (Linux x86-64, gcc 13.3 and clang 18.1, CRuby 3.3.6). On this commit over master `74fa6d7c2457` with the pull request it depends on beneath it: the build from nothing, the tests at five collector settings with both compilers, with and without `--share-strings`, and `tools/gate.rb check`. On the same commit over master `2810a235d119`: the same, `make share-strings-test`, `make cident` against its parent, and the cost and compile figures above.
++Run here before that (Linux x86-64, gcc 13.3 and clang 18.1, CRuby 3.3.6). On this commit over master `84f5b5020ef8` with the pull request it depends on beneath it: the build from nothing, the tests at five collector settings with both compilers, with and without `--share-strings`, `tools/gate.rb check` and `make gc-stress-test`. On the same commit over master `2810a235d119`: all of that but `make gc-stress-test`, then `make share-strings-test`, `make cident` against its parent, and the cost and compile figures above.
+ 
+ - [ ] New tests have `.expected` files that match CRuby 4.0 run with `--enable-frozen-string-literal` (made with CRuby 3.3.6)
+ - [x] Values past 2^31 are marked `# spinel: int64` (none)
