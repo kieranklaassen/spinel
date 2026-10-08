@@ -1,0 +1,24 @@
+A mapped table's row holding promote-mode arithmetic stays boxed
+
+    BASE = 3
+    ROWS = [[1, 2], [BASE + 1, 2]].map { |a| a.map { |n| n * 2 } }
+    p ROWS[1][0]
+
+printed 0 under --int-overflow=promote, where CRuby prints 8. It was
+right before a constant mapped from a literal table of Integer rows
+held its rows as Integer arrays.
+
+In that mode an Integer `+`, `-` or `*` whose operands are not both
+literals is a boxed value, since it can leave the word, and the row
+literal that holds one is built as an Array of boxed values.
+an_settled_int took any arithmetic over settled Integers as an
+Integer no inference widens, so the constant read that row as an
+Integer array. With the flag such arithmetic now counts as settled
+only where infer_operator_call keeps it an Integer
+(infer_promote_op_in_word): two literals whose result fits the word.
+`/`, `%` and unary minus cannot leave the word and count as before
+over settled operands. Without the flag nothing changes.
+
+Test: test/const_rows_arith_under_promote.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

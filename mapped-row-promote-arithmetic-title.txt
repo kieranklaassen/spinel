@@ -1,0 +1,1 @@
+A mapped table's row holding promote-mode arithmetic stays boxed

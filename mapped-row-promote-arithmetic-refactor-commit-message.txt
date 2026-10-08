@@ -1,0 +1,9 @@
+Whether promote-mode arithmetic stays in the word is one function
+
+infer_operator_call decided in place whether an Integer `+`, `-` or `*`
+under --int-overflow=promote stays in the word: both operands literals
+and a result that fits. The test moves to infer_promote_op_in_word, so
+that the row check of the next commit can ask the same question. No
+generated C changes, with the flag or without.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
