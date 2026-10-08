@@ -1409,6 +1409,22 @@ static int infer_int_shl_overflows(long long base, long long amount) {
   return 0;
 }
 
+/* --int-overflow=promote: whether the Integer `recv op arg` (`+`, `-` or
+   `*`) stays in the word. One whose operands are not both known constants
+   can escape it at run time and promote to a Bignum. Two constants escape
+   the word too when their result does: `max + 1` was typed sp_int and took
+   the raising helper (#4968). Judged in intptr_t, sp_int's own type in the
+   compiler that emits for it. */
+static int infer_promote_op_in_word(const NodeTable *nt, const char *name, int recv, int arg) {
+  long long pa, pb;
+  if (!(infer_const_int_node(nt, recv, &pa) && infer_const_int_node(nt, arg, &pb))) return 0;
+  intptr_t ia = (intptr_t)pa, ib = (intptr_t)pb, ir;
+  if ((long long)ia != pa || (long long)ib != pb) return 0;
+  return !(sp_streq(name, "+") ? __builtin_add_overflow(ia, ib, &ir)
+         : sp_streq(name, "-") ? __builtin_sub_overflow(ia, ib, &ir)
+         : __builtin_mul_overflow(ia, ib, &ir));
+}
+
 /* A blockless `range.each` is an external Enumerator only when used standalone
    or consumed by an enumerator method (#next/#peek/#rewind/#size). When it is
    the receiver of a collection method (.to_a/.map/.select/...), it materializes
@@ -4224,29 +4240,17 @@ static int infer_operator_call(Compiler *c, int id, const NodeTable *nt, const c
     if (ty_is_numeric(rt) && ty_is_numeric(a0)) {
       if (rt == TY_FLOAT || a0 == TY_FLOAT) { *out = TY_FLOAT; return 1; }
       if (rt == TY_BIGINT || a0 == TY_BIGINT) { *out = TY_BIGINT; return 1; }
-      /* --int-overflow=promote: an int `+`, `-` or `*` whose operands are
-         not both known constants can escape the word at run time and
-         promote to a Bignum (codegen lowers it to sp_poly_add / sub / mul),
-         the `<<` and `**` rule. Promotion is otherwise decided per SLOT,
-         and a value that never passes through one -- a block parameter, an
-         element read, a size -- was typed sp_int at the expression and took
-         the raising int helper in the mode whose contract is to promote
-         (#4681). `/` and `%` cannot leave the word. */
-      if (g_promote_mode && rt == TY_INT && a0 == TY_INT &&
-          is_add_sub_mul(name)) {
-        long long pa, pb;
-        if (!(infer_const_int_node(nt, recv, &pa) && infer_const_int_node(nt, argv[0], &pb)))
-          { *out = TY_POLY; return 1; }
-        /* Two constants escape the word too when their result does: `max + 1`
-           was typed sp_int and took the raising helper (#4968). Judged in
-           intptr_t, sp_int's own type in the compiler that emits for it. */
-        intptr_t ia = (intptr_t)pa, ib = (intptr_t)pb, ir;
-        if ((long long)ia != pa || (long long)ib != pb) { *out = TY_POLY; return 1; }
-        int ovf = sp_streq(name, "+") ? __builtin_add_overflow(ia, ib, &ir)
-                : sp_streq(name, "-") ? __builtin_sub_overflow(ia, ib, &ir)
-                : __builtin_mul_overflow(ia, ib, &ir);
-        if (ovf) { *out = TY_POLY; return 1; }
-      }
+      /* --int-overflow=promote: an int `+`, `-` or `*` that can leave the
+         word (infer_promote_op_in_word) promotes to a Bignum (codegen lowers
+         it to sp_poly_add / sub / mul), the `<<` and `**` rule. Promotion is
+         otherwise decided per SLOT, and a value that never passes through
+         one -- a block parameter, an element read, a size -- was typed
+         sp_int at the expression and took the raising int helper in the
+         mode whose contract is to promote (#4681). `/` and `%` cannot leave
+         the word. */
+      if (g_promote_mode && rt == TY_INT && a0 == TY_INT && is_add_sub_mul(name) &&
+          !infer_promote_op_in_word(nt, name, recv, argv[0]))
+        { *out = TY_POLY; return 1; }
       { *out = TY_INT; return 1; }
     }
     /* numeric receiver <op> a coercing user object: the result is what the
