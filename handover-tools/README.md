@@ -203,3 +203,24 @@ the old cut paid +1.60%, +1.62% and +0.86%.
 Next body versions: `texts/lj-pr-body-upstream-v2.md` puts the compile cost
 in its first lines; `texts/qc-pr-body-upstream-v2.md` (the fifth piece)
 states the cost reader 1 measured and its corpus line on 5d762fb16716.
+
+The seventh piece, second cost cut (the coordinator's question): the lists
+are built by the first read through the ancestors that has a write of its
+name behind its body (`qc_ancestor_write` asks the walk first; where the
+walk met its bound of 32 the lists are built all the same). The read pass
+renames reads as it goes and the lists are read off the names as written,
+so what the pass changed before that read is put back while they are
+built (`qc_read_change`). No answer changes: the C of the 9,301 programs,
+the 33 hand attacks and the 12 of `const-read/on-demand/` is the carried
+cut's, on 5d762fb16716 and on 9c7ea3ce06f3 (h6 there prints 1 without the
+put-back; w3, 37 includes deep, is the bound). The test has a fourth line
+for the put-back. On master 9c7ea3ce06f3:
+`patches/piece5-constant-lookup-on-9c7ea3ce06f3.patch` on the bare tip,
+above it `piece7-constant-read-order-v3-on-9c7ea3ce06f3.patch` (message
+`texts/cr-commit-message-v2.txt`), and `piece7-on-demand-delta.patch`, a
+plain diff from the carried cut to this one (it applies on 5d762fb16716
+and on 9c7ea3ce06f3). Body: `texts/cr-pr-body-upstream-v3.md`. Cost over
+the fifth piece: the 22-level diamond whose read has no write behind it
++0.08% (was +1.74%), `const-read/cost-d22-read-at-top.rb` +0.11% (was
++1.79%); with a write behind the read (`cost-d22-write-behind.rb`) +1.76%
+(was +1.54%: the walk is asked once more).

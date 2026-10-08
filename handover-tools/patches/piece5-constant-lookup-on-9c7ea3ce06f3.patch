@@ -1,0 +1,156 @@
+From 2d9e2dda564b10fad46121e557706f40dd5e9267 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 8 Oct 2026 01:40:00 +0000
+Subject: [PATCH] A constant's lookup walks each included module once
+
+    module Lib;  class X; end; end
+    module Lib2; class X; end; end
+    class X; def hi = "hi"; end
+    module A3; end; module B3; end
+    module A2; include A3, B3; end; module B2; include A3, B3; end
+    module A1; include A2, B2; end; module B1; include A2, B2; end
+    class User; include A1; def go = X.new.hi; end
+
+A name several bodies define is looked up through the ancestors of the
+body that reads it (qc_ancestor_lookup), and the walk took every path
+through the includes. Two modules a level, each including both of the
+level below, is 2**levels walks: 22 levels compiled in 2.5 s, 26 in
+43 s. CRuby runs the 30-level program in 0.08 s.
+
+A module the walk leaves without a match is marked with the walk's
+number and the depth it stood at, and is not walked again from as deep
+or deeper. The bound of 32 cuts the second walk no later than the
+first, so it finds nothing the first did not. The body the read sits
+in is asked without its own write and keeps no mark. No answer
+changes: the C of every test is the same.
+
+Test: test/const_read_include_diamond.rb, 30 levels.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/analyze.c                               | 24 +++++++++++-
+ test/const_read_include_diamond.rb          | 41 +++++++++++++++++++++
+ test/const_read_include_diamond.rb.expected |  3 ++
+ 3 files changed, 66 insertions(+), 2 deletions(-)
+ create mode 100644 test/const_read_include_diamond.rb
+ create mode 100644 test/const_read_include_diamond.rb.expected
+
+diff --git a/src/analyze.c b/src/analyze.c
+index 9e5c0ea7..c3e11862 100644
+--- a/src/analyze.c
++++ b/src/analyze.c
+@@ -2900,6 +2900,10 @@ static void qc_free_reverse_flags(void) {
+ typedef struct { int node; int depth; char path[QC_MAXDEPTH][64]; } QCDef;
+ static QCDef *qc_defs = NULL;
+ static int qc_ndefs = 0, qc_cdefs = 0;
++/* The bodies one read's ancestor walk has left without a match, by the
++   first definition of each: the walk's number and the depth it stood at. */
++static unsigned *qc_walked = NULL;
++static unsigned qc_walk_no = 0;
+ static void qc_collect_defs(const NodeTable *nt, int node, char (*path)[64], int depth) {
+   if (node < 0) return;
+   NodeKind k = nt_kind(nt, node);
+@@ -2927,9 +2931,13 @@ static void qc_collect_defs(const NodeTable *nt, int node, char (*path)[64], int
+ static void qc_build_defs(Compiler *c) {
+   char path[QC_MAXDEPTH][64];
+   qc_ndefs = 0;
++  free(qc_walked); qc_walked = NULL;
+   qc_collect_defs(c->nt, c->nt->root_id, path, 0);
+ }
+-static void qc_free_defs(void) { free(qc_defs); qc_defs = NULL; qc_ndefs = qc_cdefs = 0; }
++static void qc_free_defs(void) {
++  free(qc_defs); qc_defs = NULL; qc_ndefs = qc_cdefs = 0;
++  free(qc_walked); qc_walked = NULL;
++}
+ 
+ static int qc_path_eq(char (*a)[64], int an, char (*b)[64], int bn) {
+   if (an != bn) return 0;
+@@ -3002,6 +3010,14 @@ static int qc_mixin_lookup(const NodeTable *nt, char (*path)[64], int n, const c
+ static int qc_ancestor_lookup(const NodeTable *nt, char (*path)[64], int n, const char *nm,
+                               QCWrite *ws, int wn, int own, int depth) {
+   if (n <= 0 || depth > 32) return -1;
++  /* A diamond of includes reaches a module by every path through it. One
++     this walk has left without a match holds none from as deep or deeper
++     either: the bound cuts such a walk no later. The body the read sits in
++     is asked without its own write, so it keeps no mark. */
++  int first = -1;
++  for (int d = 0; !own && qc_walked && d < qc_ndefs && first < 0; d++)
++    if (qc_path_eq(qc_defs[d].path, qc_defs[d].depth, path, n)) first = d;
++  if (first >= 0 && qc_walked[first] / 64 == qc_walk_no && qc_walked[first] % 64 <= (unsigned)depth) return -1;
+   int m = qc_mixin_lookup(nt, path, n, "prepend", nm, ws, wn, depth);
+   if (m >= 0) return m;
+   if (!own && (m = qc_write_in(path, n, nm, ws, wn)) >= 0) return m;
+@@ -3014,9 +3030,13 @@ static int qc_ancestor_lookup(const NodeTable *nt, char (*path)[64], int n, cons
+     if (nt_kind(nt, dn) == NK_ClassNode)
+       supn = qc_resolve_ref(nt, nt_ref(nt, dn, "superclass"), path, n - 1, sup);
+   }
+-  return supn > 0 ? qc_ancestor_lookup(nt, sup, supn, nm, ws, wn, 0, depth + 1) : -1;
++  m = supn > 0 ? qc_ancestor_lookup(nt, sup, supn, nm, ws, wn, 0, depth + 1) : -1;
++  if (m < 0 && first >= 0) qc_walked[first] = qc_walk_no * 64 + (unsigned)depth;
++  return m;
+ }
+ static int qc_ancestor_write(Compiler *c, char (*path)[64], int n, const char *nm, QCWrite *ws, int wn) {
++  if (!qc_walked) { qc_walked = calloc((size_t)qc_ndefs + 1, sizeof *qc_walked); qc_walk_no = 0; }
++  qc_walk_no++;
+   return qc_ancestor_lookup(c->nt, path, n, nm, ws, wn, 1, 0);
+ }
+ 
+diff --git a/test/const_read_include_diamond.rb b/test/const_read_include_diamond.rb
+new file mode 100644
+index 00000000..1bb15424
+--- /dev/null
++++ b/test/const_read_include_diamond.rb
+@@ -0,0 +1,41 @@
++# A class includes a diamond of modules thirty levels deep: two modules a
++# level, each including both of the level below. A constant three bodies
++# define (X, Lib::X, Lib2::X) is read inside the class, so its lookup goes
++# through the class's ancestors. Walking every path through the diamond is
++# 2**30 walks; each module is walked once.
++module Lib; class X; def foo = "foo"; end; end
++module Lib2; class X; def bar = "bar"; end; end
++class X; def hi = "hi"; end
++module A30; end; module B30; end
++module A29; include A30, B30; end; module B29; include A30, B30; end
++module A28; include A29, B29; end; module B28; include A29, B29; end
++module A27; include A28, B28; end; module B27; include A28, B28; end
++module A26; include A27, B27; end; module B26; include A27, B27; end
++module A25; include A26, B26; end; module B25; include A26, B26; end
++module A24; include A25, B25; end; module B24; include A25, B25; end
++module A23; include A24, B24; end; module B23; include A24, B24; end
++module A22; include A23, B23; end; module B22; include A23, B23; end
++module A21; include A22, B22; end; module B21; include A22, B22; end
++module A20; include A21, B21; end; module B20; include A21, B21; end
++module A19; include A20, B20; end; module B19; include A20, B20; end
++module A18; include A19, B19; end; module B18; include A19, B19; end
++module A17; include A18, B18; end; module B17; include A18, B18; end
++module A16; include A17, B17; end; module B16; include A17, B17; end
++module A15; include A16, B16; end; module B15; include A16, B16; end
++module A14; include A15, B15; end; module B14; include A15, B15; end
++module A13; include A14, B14; end; module B13; include A14, B14; end
++module A12; include A13, B13; end; module B12; include A13, B13; end
++module A11; include A12, B12; end; module B11; include A12, B12; end
++module A10; include A11, B11; end; module B10; include A11, B11; end
++module A9; include A10, B10; end; module B9; include A10, B10; end
++module A8; include A9, B9; end; module B8; include A9, B9; end
++module A7; include A8, B8; end; module B7; include A8, B8; end
++module A6; include A7, B7; end; module B6; include A7, B7; end
++module A5; include A6, B6; end; module B5; include A6, B6; end
++module A4; include A5, B5; end; module B4; include A5, B5; end
++module A3; include A4, B4; end; module B3; include A4, B4; end
++module A2; include A3, B3; end; module B2; include A3, B3; end
++module A1; include A2, B2; end; module B1; include A2, B2; end
++class User; include A1; def go = X.new.hi; end
++p User.new.go
++p Lib::X.new.foo, Lib2::X.new.bar
+diff --git a/test/const_read_include_diamond.rb.expected b/test/const_read_include_diamond.rb.expected
+new file mode 100644
+index 00000000..8703795f
+--- /dev/null
++++ b/test/const_read_include_diamond.rb.expected
+@@ -0,0 +1,3 @@
++"hi"
++"foo"
++"bar"
+-- 
+2.43.0
+

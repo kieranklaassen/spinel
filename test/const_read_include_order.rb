@@ -57,6 +57,34 @@ class Shelf
   def box = Box.new.v
 end
 
+# A superclass named by a name two modules both use: the name is read as it
+# is written, whenever the order is asked for.
+module Shop
+  module Spares
+    class Crate
+      def v = 1
+    end
+  end
+  class Stock
+    include Spares
+    class Crate
+      def v = 2
+    end
+  end
+  class Counter < Stock
+    include Spares
+    def crate = Crate.new.v
+  end
+end
+module Depot
+  class Stock
+    class Crate
+      def v = 5
+    end
+  end
+end
+
 p Job.new.limit
 p Worker.new.retries
 p Shelf.new.box
+p Shop::Counter.new.crate

@@ -3226,6 +3226,7 @@ static int qc_ndefs = 0, qc_cdefs = 0;
    first definition of each: the walk's number and the depth it stood at. */
 static unsigned *qc_walked = NULL;
 static unsigned qc_walk_no = 0;
+static int qc_walk_cut = 0;       /* the walk met its bound: a write may stand behind it */
 /* CRuby's order of the modules behind each body (qc_order_build), by the
    first definition of each. */
 static int *qc_ord_tab = NULL;    /* a path's first definition + 1, open addressing */
@@ -3235,10 +3236,18 @@ static int *qc_ord_cls = NULL;    /* per definition: the first one of its path *
 static int *qc_ord_sup = NULL;    /* its superclass; -1 none; -2 one this pass cannot name */
 static int **qc_own = NULL;       /* the modules behind its body, the front one first */
 static int *qc_nown = NULL;
-static int qc_ord_state = 0;      /* 1 built; -1 the walk below answers */
+static int qc_ord_state = 0;      /* 1 built; 2 built at the first read that asks; -1 the walk below answers */
 static char *qc_ord_sing = NULL;  /* per node: it stands in a `class << self` body, where the walk answers */
 static int qc_ord_sing_n = 0;
+/* What the read pass changed while the lists wait: they are read off the
+   names as written, so each change is put back while they are built. */
+typedef struct { int node; char *was; char *now; } QCChange;   /* was NULL: a `::X` path made a read */
+static QCChange *qc_chg = NULL;
+static int qc_nchg = 0, qc_chg_cap = 0;
+static int qc_ord_nincl = 0;
 static void qc_order_free(void) {
+  for (int i = 0; i < qc_nchg; i++) { free(qc_chg[i].was); free(qc_chg[i].now); }
+  free(qc_chg); qc_chg = NULL; qc_nchg = qc_chg_cap = 0;
   for (int i = 0; qc_own && i < qc_ndefs; i++) free(qc_own[i]);
   free(qc_own); qc_own = NULL;
   free(qc_nown); qc_nown = NULL;
@@ -3356,6 +3365,7 @@ static int qc_mixin_lookup(const NodeTable *nt, char (*path)[64], int n, const c
 }
 static int qc_ancestor_lookup(const NodeTable *nt, char (*path)[64], int n, const char *nm,
                               QCWrite *ws, int wn, int own, int depth) {
+  if (depth > 32) qc_walk_cut = 1;
   if (n <= 0 || depth > 32) return -1;
   /* A diamond of includes reaches a module by every path through it. One
      this walk has left without a match holds none from as deep or deeper
@@ -3724,16 +3734,49 @@ static int qc_order_twice(const NodeTable *nt) {
   free(v);
   return answer;
 }
-/* Build the lists, or leave the program to the walk: where no include
-   names a module held already the two orders are one. */
-static void qc_order_build(Compiler *c, QCWrite *ws, int wn) {
+/* Ask whether the lists can differ from the walk: where no include names a
+   module held already the two orders are one. */
+static void qc_order_ask(Compiler *c) {
   const NodeTable *nt = c->nt;
-  QCOrder o = {0};
-  int nd = qc_ndefs;
   qc_ord_state = -1;
-  if (nd <= 0 || nt->root_id < 0 || !qc_order_twice(nt)) return;
-  int nincl = qc_order_plain(nt);
-  if (nincl < 0) return;
+  if (qc_ndefs <= 0 || nt->root_id < 0 || !qc_order_twice(nt)) return;
+  qc_ord_nincl = qc_order_plain(nt);
+  if (qc_ord_nincl >= 0) qc_ord_state = 2;
+}
+/* The read pass's change of a node: a new name, or (no name) a `::X` path
+   made a read. */
+static void qc_read_change(const NodeTable *nt, int node, const char *qn) {
+  const char *was = qn ? nt_str(nt, node, "name") : NULL;
+  if (qc_ord_state == 2 && (!qn || was)) {
+    if (qc_nchg >= qc_chg_cap) {
+      int cap = qc_chg_cap ? qc_chg_cap * 2 : 16;
+      QCChange *g = realloc(qc_chg, (size_t)cap * sizeof *g);
+      if (g) { qc_chg = g; qc_chg_cap = cap; } else qc_ord_state = -1;
+    }
+    if (qc_ord_state == 2) {
+      QCChange *g = &qc_chg[qc_nchg];
+      g->node = node;
+      g->was = qn ? strdup(was) : NULL;
+      g->now = qn ? strdup(qn) : NULL;
+      if (qn && (!g->was || !g->now)) { free(g->was); free(g->now); qc_ord_state = -1; }
+      else qc_nchg++;
+    }
+  }
+  if (qn) nt_set_str((NodeTable *)nt, node, "name", qn);
+  else nt_node_set_type((NodeTable *)nt, node, "ConstantReadNode");
+}
+/* Build the lists, or leave the program to the walk. The first read with a
+   write behind its body asks for them (qc_ancestor_write); what the read
+   pass changed before it is put back for as long as they are built. */
+static void qc_order_build(Compiler *c, QCWrite *ws, int wn) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  QCOrder o = {0};
+  int nd = qc_ndefs, nincl = qc_ord_nincl;
+  qc_ord_state = -1;
+  for (int i = qc_nchg - 1; i >= 0; i--) {
+    if (qc_chg[i].was) nt_set_str(nt, qc_chg[i].node, "name", qc_chg[i].was);
+    else nt_node_set_type(nt, qc_chg[i].node, "ConstantPathNode");
+  }
   o.def_of = calloc((size_t)nt->count + 1, sizeof(int));
   o.ws = ws; o.wn = wn;
   if (o.def_of) {
@@ -3757,6 +3800,10 @@ static void qc_order_build(Compiler *c, QCWrite *ws, int wn) {
     }
   }
   free(o.held); free(o.in_own); free(o.own_at); free(o.in_sup); free(o.def_of);
+  for (int i = 0; i < qc_nchg; i++) {
+    if (qc_chg[i].now) nt_set_str(nt, qc_chg[i].node, "name", qc_chg[i].now);
+    else nt_node_set_type(nt, qc_chg[i].node, "ConstantReadNode");
+  }
 }
 /* The colliding write of `nm` CRuby's order finds for a read in the body at
    `path`, or -1. */
@@ -3772,14 +3819,26 @@ static int qc_order_lookup(char (*path)[64], int n, const char *nm, QCWrite *ws,
   }
   return -1;
 }
+static int qc_walk_write(Compiler *c, char (*path)[64], int n, const char *nm, QCWrite *ws, int wn) {
+  if (!qc_walked) { qc_walked = calloc((size_t)qc_ndefs + 1, sizeof *qc_walked); qc_walk_no = 0; }
+  qc_walk_no++;
+  return qc_ancestor_lookup(c->nt, path, n, nm, ws, wn, 1, 0);
+}
 static int qc_ancestor_write(Compiler *c, int node, char (*path)[64], int n, const char *nm, QCWrite *ws, int wn) {
+  int walk = -2;
+  if (qc_ord_state == 2) {
+    /* the lists wait for a read that has a write behind its body: with none
+       there is nothing for them to order */
+    qc_walk_cut = 0;
+    walk = qc_walk_write(c, path, n, nm, ws, wn);
+    if (walk < 0 && !qc_walk_cut) return -1;
+    qc_order_build(c, ws, wn);
+  }
   if (qc_ord_state > 0 && node < qc_ord_sing_n && !qc_ord_sing[node]) {
     int m = qc_order_lookup(path, n, nm, ws, wn);
     if (m >= 0) return m;
   }
-  if (!qc_walked) { qc_walked = calloc((size_t)qc_ndefs + 1, sizeof *qc_walked); qc_walk_no = 0; }
-  qc_walk_no++;
-  return qc_ancestor_lookup(c->nt, path, n, nm, ws, wn, 1, 0);
+  return walk > -2 ? walk : qc_walk_write(c, path, n, nm, ws, wn);
 }
 
 void qc_rewrite_reads(Compiler *c, int node, char (*mods)[64], int mdepth,
@@ -3822,7 +3881,7 @@ void qc_rewrite_reads(Compiler *c, int node, char (*mods)[64], int mdepth,
           if (sp_streq(ws[i].name, nm) && ws[i].depth == 0) matched = i;
         if (matched >= 0 && ws[matched].depth > 0) {
           char qn[512]; qc_qualified_name(qn, sizeof qn, &ws[matched]);
-          nt_set_str((NodeTable *)nt, node, "name", qn);
+          qc_read_change(nt, node, qn);
         }
       }
     }
@@ -3842,7 +3901,7 @@ void qc_rewrite_reads(Compiler *c, int node, char (*mods)[64], int mdepth,
       if (cl == 1 && abs_anchor && !(qc_def_cpath && qc_def_cpath[node])) {
         for (int i = 0; i < wn; i++) {
           if (!sp_streq(ws[i].name, chain[0])) continue;
-          nt_node_set_type((NodeTable *)nt, node, "ConstantReadNode");
+          qc_read_change(nt, node, NULL);
           break;
         }
       }
@@ -3868,7 +3927,7 @@ void qc_rewrite_reads(Compiler *c, int node, char (*mods)[64], int mdepth,
             if (matched >= 0) {
               if (ws[matched].depth > 0) {
                 char qn[512]; qc_qualified_name(qn, sizeof qn, &ws[matched]);
-                nt_set_str((NodeTable *)nt, node, "name", qn);
+                qc_read_change(nt, node, qn);
               }
               break;
             }
@@ -3906,7 +3965,7 @@ void qualify_colliding_consts(Compiler *c) {
     char mods[QC_MAXDEPTH][64];
     qc_build_reverse_flags(c);
     qc_build_defs(c);
-    qc_order_build(c, ws, wn);   /* before a read is renamed: the lists are read off the names as written */
+    qc_order_ask(c);   /* before a read is renamed */
     qc_rewrite_reads(c, nt->root_id, mods, 0, ws, wn);
     qc_free_defs();
     qc_free_reverse_flags();
@@ -4069,7 +4128,7 @@ void qualify_colliding_classes(Compiler *c) {
     char mods[QC_MAXDEPTH][64];
     qc_build_reverse_flags(c);
     qc_build_defs(c);
-    qc_order_build(c, ws, wn);   /* before a read is renamed: the lists are read off the names as written */
+    qc_order_ask(c);   /* before a read is renamed */
     qc_rewrite_reads(c, nt->root_id, mods, 0, ws, wn);
     qc_free_defs();
     qc_free_reverse_flags();
