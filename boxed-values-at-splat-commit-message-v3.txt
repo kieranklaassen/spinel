@@ -1,0 +1,36 @@
+A splatted Range in a boxed values_at answers its elements
+
+    a = [[10, 20, 30], nil][ARGV.size]
+    p a.values_at(*(0..1))   # []; CRuby: [10, 20]
+
+values_at on a boxed receiver reads a splatted list with
+sp_poly_to_poly_array, which copies an Array and so answers none for
+what is no Array. A Range gave none of its members and an Integer was
+dropped, and the call answered from the other indexes alone. An
+operand typed as an Integer Range now has its members walked onto the
+list of indexes where it has both its ends (sp_poly_values_at_range,
+with no array between); without one it gives none, as before. One
+typed as a scalar is pushed as the index it is unless it is nil when
+the call runs (sp_poly_values_at_scalar): a slot typed Integer, Float
+or String can hold nil, and nil splats to none. An operand that is an
+Array, nil or a box is read as before, in the same C.
+
+A splat asks its operand to_a, and a Range's to_a walks its each. Both
+arms answer for the built-in ones, so neither is taken in a program
+that may have given a class its own: one with a def, a Symbol or a
+String named to_a (each too, for the Range arm), a method_missing or a
+respond_to? of its own, or a define_method, define_singleton_method
+or alias_method whose name is not written out.
+
+A later argument held in a temp runs before an earlier splat's operand
+is read. Where one did and the operand is not held in its place too,
+the splat is read as before: what that argument left in the operand
+is not what CRuby splats.
+
+Tests: test/boxed_values_at_splat.rb, test/boxed_values_at_splat_min.rb,
+test/boxed_values_at_splat_own_to_a.rb,
+test/boxed_values_at_splat_own_each.rb,
+test/boxed_values_at_splat_named_to_a.rb,
+test/boxed_values_at_splat_method_missing.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
