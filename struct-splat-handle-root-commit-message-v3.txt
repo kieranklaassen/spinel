@@ -1,0 +1,53 @@
+A shared String stays rooted in a Struct's new and out of a splat
+
+A member some code changes in place (`e.a << "z"`) holds its String
+through a handle, and a String that is not one already is wrapped in a
+handle of its own where it is handed over. "Shared String argument
+conversions stay rooted across calls" holds that handle for the
+argument of an ordinary call (arg_read_converts in emit_arg_rooted).
+Two binders write their values themselves and still left the handle
+held by nothing while another value of the same list, or a class's
+object, was allocated:
+
+- a Struct's constructor (emit_struct_new_call): 3,000 of
+  `Entry.new("alpha", "beta")` left two holding another String in a
+  plain run, and 2,995 with SPINEL_GC_STRESS=1;
+- a String element of a splatted Array bound to such a parameter of a
+  class's `new` (emit_elem_param), with the default a short splat
+  leaves to fill: 20,000 of `Pair.new("q", *ra)` left four in a plain
+  run built with gcc (none built with clang), and 19,998 with
+  SPINEL_GC_STRESS=1.
+
+Both now take the form the ordinary call has. emit_rooted_conversion
+declares the temp ahead of the statement, rooted, and the handle is
+made and assigned where the value stands, so a variable the statement
+writes before it is read at its own position.
+
+The temp is taken only where the handle can be lost. A Struct's
+generated constructor roots its parameters before it allocates the
+object, and a method's frame takes its parameters at entry, so one
+handle made in the list is held by then: what collects it is a second
+value made in the same list. A class's `new` allocates the object
+before initialize takes the parameters, so there one is enough.
+
+- A Struct's member is held where two or more of the member values
+  are made in the list by something that allocates.
+- A splat's element is held for a class's `new`, and for another
+  callee only where a second value of the list is made in place. The
+  dispatch binds each argument to a rooted temp of its own and holds
+  nothing more.
+
+`One.new("alpha")`, `Mixed.new("alpha", i)`, `mk(*qa)` and
+`U.new.set(*qa)` compile as they did, and so does a member beside a
+unary minus on a number or a conditional of plain reads
+(subtree_is_plain_value). A construction that holds costs 9 to 37
+instructions built with gcc and 16 to 48 with clang for a Struct, 16
+to 41 and 13 to 46 for a splat (callgrind, `k = X` in a block run
+200,000 times at the top level; another loop moves the figures by
+about ten). One kind pays and can be right without it: a literal
+beside a call that answers a number, a builtin's too
+(`Mixed.new("alpha", sz(i))`, 9 and 19; `s.size`, 10 and 16), is lost
+only where the call allocates and the C compiler runs it second, and
+neither is known where the call is emitted.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

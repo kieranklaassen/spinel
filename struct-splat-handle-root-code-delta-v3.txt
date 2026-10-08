@@ -1,0 +1,120 @@
+Delta of the Struct and splat piece: git range-diff 74fa6d7c2457..d8a85e2a1111 84f5b5020ef8..517572e6f2d1
+(the head read, d8a85e2a1111 on 74fa6d7c2457, against this re-cut on 84f5b5020ef8; context lines are master's source, quoted as it stands)
+
+1:  d8a85e2a1 ! 1:  517572e6f A shared String stays rooted in a Struct's new and out of a splat
+    @@ Commit message
+           nothing more.
+     
+         `One.new("alpha")`, `Mixed.new("alpha", i)`, `mk(*qa)` and
+    -    `U.new.set(*qa)` compile as they did. A construction that holds costs
+    -    10 to 37 instructions built with gcc and 20 to 46 with clang for a
+    -    Struct, 15 to 43 and 20 to 47 for a splat (callgrind). One kind pays
+    -    and can be right without it: a literal beside a call that answers an
+    -    Integer (`Mixed.new("alpha", sz(i))`, 10 and 20) is lost only where
+    -    the call allocates and the C compiler runs it second, and neither is
+    -    known where the call is emitted.
+    +    `U.new.set(*qa)` compile as they did, and so does a member beside a
+    +    unary minus on a number or a conditional of plain reads
+    +    (subtree_is_plain_value). A construction that holds costs 9 to 37
+    +    instructions built with gcc and 16 to 48 with clang for a Struct, 16
+    +    to 41 and 13 to 46 for a splat (callgrind, `k = X` in a block run
+    +    200,000 times at the top level; another loop moves the figures by
+    +    about ten). One kind pays and can be right without it: a literal
+    +    beside a call that answers a number, a builtin's too
+    +    (`Mixed.new("alpha", sz(i))`, 9 and 19; `s.size`, 10 and 16), is lost
+    +    only where the call allocates and the C compiler runs it second, and
+    +    neither is known where the call is emitted.
+     
+         Co-Authored-By: Claude Code <noreply@anthropic.com>
+     
+    @@ src/codegen_call.c: static int emit_struct_new_call(Compiler *c, int id, int ci,
+     +      else if (vnode < 0) made += splat_tmp >= 0;
+     +      else if (!arg_ran_first(vnode, argov_saved) && !arg_wants_root(c, mt, vnode))
+     +        made += arg_read_converts(c, mt, vnode) ||
+    -+                (operand_may_allocate(c, vnode) && !subtree_is_pure_read(c, vnode));
+    ++                (operand_may_allocate(c, vnode) && !subtree_is_plain_value(c, vnode));
+     +    }
+          buf_printf(b, "sp_%s_new(", cls->c_name);
+          for (int a = 0; a < cls->nmembers; a++) {
+    @@ src/codegen_call.c: static int emit_struct_new_call(Compiler *c, int id, int ci,
+              else buf_puts(b, mv.p ? mv.p : "");
+              free(mv.p);
+            }
+    +@@ src/codegen_call.c: int subtree_is_pure_read(Compiler *c, int id) {
+    +   }
+    +   return 1;
+    + }
+    ++/* See codegen_internal.h. */
+    ++int subtree_is_plain_value(Compiler *c, int id) {
+    ++  const NodeTable *nt = c->nt;
+    ++  id = unwrap_parens(c, id);
+    ++  if (id < 0 || subtree_is_pure_read(c, id)) return 1;
+    ++  if (nt_kind(nt, id) == NK_IfNode) {
+    ++    int parts[2] = { nt_ref(nt, id, "statements"), nt_ref(nt, id, "subsequent") };
+    ++    if (!subtree_is_plain_value(c, nt_ref(nt, id, "predicate"))) return 0;
+    ++    for (int i = 0; i < 2; i++) {
+    ++      int st = parts[i], n = 0;
+    ++      if (st >= 0 && nt_kind(nt, st) == NK_IfNode) {
+    ++        if (!subtree_is_plain_value(c, st)) return 0;
+    ++        continue;
+    ++      }
+    ++      if (st >= 0 && nt_kind(nt, st) == NK_ElseNode) st = nt_ref(nt, st, "statements");
+    ++      const int *bd = st >= 0 ? nt_arr(nt, st, "body", &n) : NULL;
+    ++      if (n != 1 || !subtree_is_plain_value(c, bd[0])) return 0;
+    ++    }
+    ++    return 1;
+    ++  }
+    ++  if (nt_kind(nt, id) == NK_CallNode) {
+    ++    const char *nm = nt_str(nt, id, "name");
+    ++    int recv = nt_ref(nt, id, "receiver");
+    ++    TyKind rt = recv >= 0 ? comp_ntype(c, recv) : TY_UNKNOWN, vt = comp_ntype(c, id);
+    ++    return nm && sp_streq(nm, "-@") && nt_ref(nt, id, "arguments") < 0 && nt_ref(nt, id, "block") < 0 &&
+    ++           (rt == TY_INT || rt == TY_FLOAT) && (vt == TY_INT || vt == TY_FLOAT) &&
+    ++           subtree_is_plain_value(c, recv);
+    ++  }
+    ++  return 0;
+    ++}
+    + 
+    + /* Does the program give a Hash a default block anywhere (`Hash.new { }`,
+    +    `default_proc=`)? Only such a Hash runs code on a missing key. */
+     
+      ## src/codegen_fold.c ##
+     @@ src/codegen_fold.c: static int emit_splat_given_count(Compiler *c, Scope *m, const ArgLayout *L, int
+    @@ src/codegen_fold.c: static void emit_elem_param(Compiler *c, Scope *m, int i, in
+     +  LocalVar *sp = m->pnames[i] ? scope_local(m, m->pnames[i]) : NULL;
+     +  TyKind pt = sp ? sp->type : TY_UNKNOWN;
+     +  int dflt = m->pdefault ? m->pdefault[i] : -1;
+    -+  int dflt_made = dflt >= 0 && operand_may_allocate(c, dflt) && !subtree_is_pure_read(c, dflt);
+    ++  int dflt_made = dflt >= 0 && operand_may_allocate(c, dflt) && !subtree_is_plain_value(c, dflt);
+     +  switch (L->from[i]) {
+     +    case ARG_REST: case ARG_GATHERED: return 1;
+     +    case ARG_ELEM:
+    @@ src/codegen_fold.c: static void emit_elem_param(Compiler *c, Scope *m, int i, in
+     +    case ARG_NODE: {
+     +      int n = argv[L->arg[i]];
+     +      if (arg_ran_first(n, argov_from) || arg_wants_root(c, pt, n)) return 0;
+    -+      return arg_read_converts(c, pt, n) || (operand_may_allocate(c, n) && !subtree_is_pure_read(c, n));
+    ++      return arg_read_converts(c, pt, n) || (operand_may_allocate(c, n) && !subtree_is_plain_value(c, n));
+     +    }
+     +    default: return !arg_wants_root(c, pt, -1) && dflt_made;
+     +  }
+    @@ src/codegen_fold.c: else {
+              g_self_deref = saved_deref4;
+              g_emitting_class_id = saved_emcls4;
+     
+    + ## src/codegen_internal.h ##
+    +@@ src/codegen_internal.h: int subtree_may_run_proc(Compiler *c, int id);
+    +    -- variable and literal reads, scalar arithmetic, typed-array reads and
+    +    plain field reads, all the way down (codegen_call.c)? */
+    + int subtree_is_pure_read(Compiler *c, int id);
+    ++/* A pure read, or one of two forms beside that list which run no call of the
+    ++   program's and make nothing either: a unary minus on an Integer or a Float,
+    ++   and a conditional whose test and branches are such values (codegen_call.c). */
+    ++int subtree_is_plain_value(Compiler *c, int id);
+    + int operand_is_held_read(Compiler *c, int id);
+    + /* Is the call a reader the emitter lowers to a plain field read? *allocates is
+    +    set when the read builds a copy (a shared String slot). codegen_call.c */
+    +
+      ## test/string_handle_struct_splat_root.rb (new) ##
+     @@
+     +# A String handed to a member or a parameter that is changed in place gets
