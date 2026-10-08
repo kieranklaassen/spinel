@@ -2900,6 +2900,10 @@ static void qc_free_reverse_flags(void) {
 typedef struct { int node; int depth; char path[QC_MAXDEPTH][64]; } QCDef;
 static QCDef *qc_defs = NULL;
 static int qc_ndefs = 0, qc_cdefs = 0;
+/* The bodies one read's ancestor walk has left without a match, by the
+   first definition of each: the walk's number and the depth it stood at. */
+static unsigned *qc_walked = NULL;
+static unsigned qc_walk_no = 0;
 static void qc_collect_defs(const NodeTable *nt, int node, char (*path)[64], int depth) {
   if (node < 0) return;
   NodeKind k = nt_kind(nt, node);
@@ -2927,9 +2931,13 @@ static void qc_collect_defs(const NodeTable *nt, int node, char (*path)[64], int
 static void qc_build_defs(Compiler *c) {
   char path[QC_MAXDEPTH][64];
   qc_ndefs = 0;
+  free(qc_walked); qc_walked = NULL;
   qc_collect_defs(c->nt, c->nt->root_id, path, 0);
 }
-static void qc_free_defs(void) { free(qc_defs); qc_defs = NULL; qc_ndefs = qc_cdefs = 0; }
+static void qc_free_defs(void) {
+  free(qc_defs); qc_defs = NULL; qc_ndefs = qc_cdefs = 0;
+  free(qc_walked); qc_walked = NULL;
+}
 
 static int qc_path_eq(char (*a)[64], int an, char (*b)[64], int bn) {
   if (an != bn) return 0;
@@ -3002,6 +3010,14 @@ static int qc_mixin_lookup(const NodeTable *nt, char (*path)[64], int n, const c
 static int qc_ancestor_lookup(const NodeTable *nt, char (*path)[64], int n, const char *nm,
                               QCWrite *ws, int wn, int own, int depth) {
   if (n <= 0 || depth > 32) return -1;
+  /* A diamond of includes reaches a module by every path through it. One
+     this walk has left without a match holds none from as deep or deeper
+     either: the bound cuts such a walk no later. The body the read sits in
+     is asked without its own write, so it keeps no mark. */
+  int first = -1;
+  for (int d = 0; !own && qc_walked && d < qc_ndefs && first < 0; d++)
+    if (qc_path_eq(qc_defs[d].path, qc_defs[d].depth, path, n)) first = d;
+  if (first >= 0 && qc_walked[first] / 64 == qc_walk_no && qc_walked[first] % 64 <= (unsigned)depth) return -1;
   int m = qc_mixin_lookup(nt, path, n, "prepend", nm, ws, wn, depth);
   if (m >= 0) return m;
   if (!own && (m = qc_write_in(path, n, nm, ws, wn)) >= 0) return m;
@@ -3014,9 +3030,13 @@ static int qc_ancestor_lookup(const NodeTable *nt, char (*path)[64], int n, cons
     if (nt_kind(nt, dn) == NK_ClassNode)
       supn = qc_resolve_ref(nt, nt_ref(nt, dn, "superclass"), path, n - 1, sup);
   }
-  return supn > 0 ? qc_ancestor_lookup(nt, sup, supn, nm, ws, wn, 0, depth + 1) : -1;
+  m = supn > 0 ? qc_ancestor_lookup(nt, sup, supn, nm, ws, wn, 0, depth + 1) : -1;
+  if (m < 0 && first >= 0) qc_walked[first] = qc_walk_no * 64 + (unsigned)depth;
+  return m;
 }
 static int qc_ancestor_write(Compiler *c, char (*path)[64], int n, const char *nm, QCWrite *ws, int wn) {
+  if (!qc_walked) { qc_walked = calloc((size_t)qc_ndefs + 1, sizeof *qc_walked); qc_walk_no = 0; }
+  qc_walk_no++;
   return qc_ancestor_lookup(c->nt, path, n, nm, ws, wn, 1, 0);
 }
 
