@@ -1,0 +1,159 @@
+Delta of the format piece: git range-diff 4c3360a52fd6..09fc6ab24804 4c3360a52fd6..0ab54d95aaab
+(the head read, 09fc6ab24804, against this re-cut; both are one commit above the boxed-Array piece's head 4c3360a52fd6 on 74fa6d7c2457; context lines are the source as it stands)
+
+1:  09fc6ab24 ! 1:  0ab54d95a A format made in place is held while its arguments are built
+    @@ Commit message
+     
+         A call's or a yield's answer is held the same way only beside
+         arguments that run none of the program's code (format_arg_is_inert:
+    -    a read, a literal, arithmetic on numbers, an Array literal of
+    -    those). The call may have answered a String an argument appends to,
+    +    a read, a literal, arithmetic on numbers, an Array literal of those;
+    +    an index or an operator only while it is the builtin's). The call
+    +    may have answered a String an argument appends to,
+     
+             $fmt = +"%d"
+             def held = $fmt
+    @@ Commit message
+         the two: gcc prints the line above, clang prints "2". A format the
+         statement has already run into a temporary of its own is left there.
+     
+    +    An index, an operator or a reader in the argument is the builtin's
+    +    only where that can be shown (format_name_is_builtin): the program
+    +    has no def and no attr of that name anywhere, in any class, and none
+    +    of the ways to define a method that leave no def behind, an alias,
+    +    alias_method, define_method, a delegator, a send or an eval of a
+    +    class. Otherwise the argument may run the program's code, as
+    +    `ar[0] + 1` does under `class Array; def [](i) = ($fmt << "|x"; 7);
+    +    end`, and the statement keeps the C it had. A concatenation is the
+    +    statement's own only while `+` passes the same test.
+    +
+         A format something else holds is read where it stands, with the C it
+         had (format_is_held): a literal, a variable or a constant, a
+         reader's or a Struct member's field (`o.fmt`), an Array's element by
+    @@ src/codegen_call.c: static void emit_utime_arg_bad(Compiler *c, int node, TyKind
+     +static int format_ran_first(int recv, int r) {
+     +  return arg_ran_first(recv, 0) || arg_ran_first(r, 0);
+     +}
+    ++static int format_is_attr_call(const char *nm) {
+    ++  return sp_streq(nm, "attr") || sp_streq(nm, "attr_reader") || sp_streq(nm, "attr_writer") ||
+    ++         sp_streq(nm, "attr_accessor");
+    ++}
+    ++/* Can the program define a method that leaves neither a def nor an attr of
+    ++   that name in the node table: an alias, a name handed to alias_method,
+    ++   define_method or a delegator, a send, an eval of a class, an attr whose
+    ++   name is not a Symbol literal? */
+    ++static int format_prog_defines_unseen(Compiler *c) {
+    ++  static const char *const WORDS[] = {
+    ++    "alias_method", "define_method", "define_singleton_method", "send", "__send__", "public_send",
+    ++    "class_eval", "module_eval", "class_exec", "module_exec", "instance_eval", "instance_exec", "eval",
+    ++    "def_delegator", "def_delegators", "delegate", NULL };
+    ++  static const Compiler *memo_c; static int memo;
+    ++  if (memo_c == c) return memo;
+    ++  const NodeTable *nt = c->nt;
+    ++  int n = 0;
+    ++  memo_c = c; memo = 0;
+    ++  nt_nodes_of_kind(nt, NK_AliasMethodNode, &n);
+    ++  if (n > 0) return memo = 1;
+    ++  const int *calls = nt_nodes_of_kind(nt, NK_CallNode, &n);
+    ++  for (int i = 0; i < n && !memo; i++) {
+    ++    const char *nm = nt_str(nt, calls[i], "name");
+    ++    if (!nm) continue;
+    ++    for (int w = 0; WORDS[w] && !memo; w++) if (sp_streq(nm, WORDS[w])) memo = 1;
+    ++    if (memo || !format_is_attr_call(nm)) continue;
+    ++    int a = nt_ref(nt, calls[i], "arguments"), ac = 0;
+    ++    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+    ++    for (int j = 0; j < ac; j++) if (nt_kind(nt, av[j]) != NK_SymbolNode) memo = 1;
+    ++  }
+    ++  return memo;
+    ++}
+    ++/* Is a call of `nm` on a builtin's value provably the builtin's own: the
+    ++   program has no def of that name anywhere, no attr of that name, and no
+    ++   way to define one that the node table does not show? Asked by the name
+    ++   alone, whatever the class: a def in a subclass, a module or a singleton
+    ++   counts. `!=` runs `==`. */
+    ++static int format_name_is_builtin(Compiler *c, const char *nm) {
+    ++  const NodeTable *nt = c->nt;
+    ++  if (!nm || format_prog_defines_unseen(c)) return 0;
+    ++  const char *also = sp_streq(nm, "!=") ? "==" : nm;
+    ++  int n = 0;
+    ++  const int *defs = nt_nodes_of_kind(nt, NK_DefNode, &n);
+    ++  for (int i = 0; i < n; i++) {
+    ++    const char *dn = nt_str(nt, defs[i], "name");
+    ++    if (!dn || sp_streq(dn, nm) || sp_streq(dn, also)) return 0;
+    ++  }
+    ++  const int *calls = nt_nodes_of_kind(nt, NK_CallNode, &n);
+    ++  for (int i = 0; i < n; i++) {
+    ++    const char *cn = nt_str(nt, calls[i], "name");
+    ++    if (!cn || !format_is_attr_call(cn)) continue;
+    ++    int a = nt_ref(nt, calls[i], "arguments"), ac = 0;
+    ++    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+    ++    for (int j = 0; j < ac; j++) {
+    ++      const char *sv = nt_kind(nt, av[j]) == NK_SymbolNode ? nt_str(nt, av[j], "value") : NULL;
+    ++      if (!sv || sp_streq(sv, nm) || sp_streq(sv, also)) return 0;
+    ++    }
+    ++  }
+    ++  return 1;
+    ++}
+    ++/* Does the argument, a pure read by master's list, hold a call that is not
+    ++   provably the builtin's? That list takes an index into a typed Array, an
+    ++   operator on numbers or booleans and a reader's field read by the type of
+    ++   the receiver; the program's own `[]` or `+` runs its code. A reader is
+    ++   asked for a def of its name only: its attr is what makes it a read. */
+    ++static int format_arg_calls_own(Compiler *c, int a) {
+    ++  const NodeTable *nt = c->nt;
+    ++  if (a < 0) return 0;
+    ++  if (nt_kind(nt, a) == NK_CallNode) {
+    ++    const char *nm = nt_str(nt, a, "name");
+    ++    int alloc = 0;
+    ++    if (!nm) return 1;
+    ++    if (call_is_field_read(c, a, &alloc)) {
+    ++      int n = 0;
+    ++      const int *defs = nt_nodes_of_kind(nt, NK_DefNode, &n);
+    ++      if (format_prog_defines_unseen(c)) return 1;
+    ++      for (int i = 0; i < n; i++) {
+    ++        const char *dn = nt_str(nt, defs[i], "name");
+    ++        if (!dn || sp_streq(dn, nm)) return 1;
+    ++      }
+    ++    } else if (!format_name_is_builtin(c, nm)) return 1;
+    ++  }
+    ++  int nr = nt_num_refs(nt, a);
+    ++  for (int i = 0; i < nr; i++)
+    ++    if (format_arg_calls_own(c, nt_ref_at(nt, a, i))) return 1;
+    ++  int na = nt_num_arrs(nt, a);
+    ++  for (int i = 0; i < na; i++) {
+    ++    int n = 0;
+    ++    const int *ids = nt_arr_at(nt, a, i, &n);
+    ++    for (int j = 0; j < n; j++)
+    ++      if (format_arg_calls_own(c, ids[j])) return 1;
+    ++  }
+    ++  return 0;
+    ++}
+     +/* Is the format a String the statement makes itself, which nothing else can
+     +   name: an interpolation, or a concatenation by String's own `+`? */
+     +static int format_is_own_made(Compiler *c, int v) {
+    @@ src/codegen_call.c: static void emit_utime_arg_bad(Compiler *c, int node, TyKind
+     +  int recv = nt_ref(nt, v, "receiver");
+     +  return nm && sp_streq(nm, "+") && recv >= 0 && nt_ref(nt, v, "block") < 0 &&
+     +         comp_ntype(c, recv) == TY_STRING && comp_ntype(c, v) == TY_STRING &&
+    -+         !format_method_is_own(c, "String", "+");
+    ++         format_name_is_builtin(c, "+");
+     +}
+     +/* Does building the argument run nothing that could change, in place, the
+     +   String a call answered as the format: a read, a literal or arithmetic on
+     +   numbers (subtree_is_pure_read), a global's read, or an Array literal of
+    -+   those? */
+    ++   those? An index, an operator or a reader in it counts only while it is
+    ++   provably the builtin's (format_arg_calls_own). */
+     +static int format_arg_is_inert(Compiler *c, int a, int depth) {
+     +  const NodeTable *nt = c->nt;
+     +  a = unwrap_parens(c, a);
+    @@ src/codegen_call.c: static void emit_utime_arg_bad(Compiler *c, int node, TyKind
+     +    for (int i = 0; i < n; i++) if (!format_arg_is_inert(c, el[i], depth + 1)) return 0;
+     +    return 1;
+     +  }
+    -+  return subtree_is_pure_read(c, a);
+    ++  return subtree_is_pure_read(c, a) && !format_arg_calls_own(c, a);
+     +}
+     +/* See codegen_call_arms.h. */
+     +int str_format_left_alone(Compiler *c, int recv, int arg) {

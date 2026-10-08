@@ -1,0 +1,80 @@
+A format made in place is held while its arguments are built
+
+`fmt % args` builds two things, the format and the list of arguments,
+as the two arguments of one C call. A format made where it is written
+(an interpolation, a call's result) was held by nothing while the
+list was built, and C does not say which of the two is built first:
+
+    w = 5
+    ints = [3, 4]
+    p "%#{w}d %d|" % ints
+
+At SPINEL_GC_STRESS=2 clang builds the format first, the copy of
+`ints` into a boxed list collects it, and the line prints seven 0xDB
+bytes and exits 0. The one-element list a single argument goes into
+was held by nothing while that argument was built:
+`p("%.2f" % (1r/3))` in test/string_format_scalar_operands.rb raises
+"can't modify frozen Array" there with gcc and with clang, the freed
+list's poisoned header read as frozen.
+
+A format the statement makes itself, an interpolation or a
+concatenation, now goes into a rooted temporary ahead of the
+arguments (emit_str_format_held). It is a String nothing else can
+name, so it is held beside any argument, and it reads its parts
+before an argument writes them: `"%#{w}d|" % (w += 1)` printed the
+width the argument wrote where gcc built the list first.
+
+A call's or a yield's answer is held the same way only beside
+arguments that run none of the program's code (format_arg_is_inert:
+a read, a literal, arithmetic on numbers, an Array literal of those;
+an index or an operator only while it is the builtin's). The call
+may have answered a String an argument appends to,
+
+    $fmt = +"%d"
+    def held = $fmt
+    def grow = ($fmt << "|x"; 1)
+    p held % (grow + 1)          # "2|x"
+
+and a temporary read ahead of that argument would miss the append.
+Beside any other argument the statement keeps the C it had
+(str_format_left_alone), and with it the order the C compiler gives
+the two: gcc prints the line above, clang prints "2". A format the
+statement has already run into a temporary of its own is left there.
+
+An index, an operator or a reader in the argument is the builtin's
+only where that can be shown (format_name_is_builtin): the program
+has no def and no attr of that name anywhere, in any class, and none
+of the ways to define a method that leave no def behind, an alias,
+alias_method, define_method, a delegator, a send or an eval of a
+class. Otherwise the argument may run the program's code, as
+`ar[0] + 1` does under `class Array; def [](i) = ($fmt << "|x"; 7);
+end`, and the statement keeps the C it had. A concatenation is the
+statement's own only while `+` passes the same test.
+
+A format something else holds is read where it stands, with the C it
+had (format_is_held): a literal, a variable or a constant, a
+reader's or a Struct member's field (`o.fmt`), an Array's element by
+an Integer index, its first or its last, a Hash's value, and a choice
+between two of those (`c ? f : g`, `f || g`). A slot read counts
+only while the method is the builtin: where the program gives Array
+or Hash its own `[]`, `first` or `last`, or writes the reader by
+hand, the answer is a call's, and so is a Hash's value where a Hash
+of the program has a default block.
+
+The one-element list is rooted where its argument is made by
+something that allocates. A single argument that is a read, or
+arithmetic on reads (`i + 1`), leaves its list as it was, and so
+does one the statement already ran into a temporary. An Integer or a
+Float that runs code (`"%5d|" % sq(i)`) is taken into a C temporary
+ahead of the list instead, boxed there by the call emit_boxed wrote
+for it, and nothing is rooted.
+
+Where it is held, a call's or a yield's answer is held whether or
+not the call made the String, which is not known where the format is
+emitted (`def fl = "%5d %d|"`): 16 to 21 instructions a statement
+built with gcc and 18 with clang, 13 and 9 for a yield, on formats
+that were right before. So is the list of a single String a call
+answers (`"%5s|" % lbl(i)`, 19 and 18). A Float taken ahead of its
+list costs 2 and 1, an Integer a call answers nothing.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

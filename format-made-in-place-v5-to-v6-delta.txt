@@ -1,0 +1,30 @@
+Delta of the format piece's body, -v5 to -v6 (diff of the two files; a line is a paragraph)
+
+25c25
+< A call's or a `yield`'s answer is held the same way only beside arguments that run none of the program's code: a read, a literal, arithmetic on numbers, an Array literal of those (`format_arg_is_inert`). The call may have answered a String the argument appends to:
+---
+> A call's or a `yield`'s answer is held the same way only beside arguments that run none of the program's code: a read, a literal, arithmetic on numbers, an Array literal of those; an index or an operator only while it is the builtin's (`format_arg_is_inert`). The call may have answered a String the argument appends to:
+35a36,49
+> An index, an operator or a reader in the argument counts as the builtin's only where that can be shown (`format_name_is_builtin`): the program has no `def` and no `attr` of that name anywhere, in any class, and none of the ways to define a method that leave no `def` behind (an `alias`, `alias_method`, `define_method`, a delegator, a `send`, an `eval` of a class). Otherwise the argument may run the program's code:
+> 
+> ```ruby
+> $fmt = +"%d"
+> class Array
+>   def [](i) = ($fmt << "|x"; 7)
+> end
+> def held = $fmt
+> ar = [1, 2]
+> p held % (ar[0] + 1)         # "8|x"
+> ```
+> 
+> Master's list of plain reads takes `ar[0] + 1` for one by the types alone. Here the statement keeps master's C, and its answer: Ruby's line with gcc, `"8"` with clang. A concatenation is the statement's own only while `+` passes the same test.
+> 
+67a82,83
+> Thirty programs put the program's own method under such an argument, by each way of defining one: a `def` of `[]` on Array (under Integer and Float arithmetic, with a `yield` as the format, and alone), of `+`, `-`, `*` and `/` on Float, of `+` on Integer, of `&` on `true`, and of `==` on Integer under `!=`; an `alias` and an `alias_method` on Array and on Float; `define_method` with a literal name and with a computed one; a module prepended in the class's body; a singleton `def`; a subclass of Array; a module the Array is extended with; a reader given another body by a `def` and by `alias_method`; String's `+` by a `def` and by `alias_method`; and `Array.define_method`, `Array.prepend`, `Array.send(:define_method, ...)`, `Array.class_eval` and `Array.alias_method`, each rescued. Twenty-nine are master's C byte for byte and answer as on master in every cell, gcc and clang; the extended one does not build, on master or here. Four more look from the other side: the builtin's index, a reader, and `t + i` in a program that says `inject(:+)` are held and right; a `def` of `+` in a class of the program's own, far from the argument, leaves `v.x + i` with master's C, the name being asked and not the class.
+> 
+72a89
+> - The index alone as the argument, under the program's own `Array#[]` above: `held % ar[0]` prints `"7"` for `"7|x"` with gcc and with clang, on master and here (the same C).
+86c103
+< Run here, built from nothing, on 74fa6d7c2 with the pull request below beneath: the test in the seven collector lanes with gcc and clang, with and without `--share-strings` (right in every one); `ruby tools/gate.rb check`; the generated C of the 6,598 other programs, changed in 7, the five of them under `test/` run in the seven lanes and the two under `packages/` too; optcarrot, checksum 59662; `make share-strings-test` and `make int-min-test`, both pass; the cost table; the 112 statements and the probes above with gcc and clang at levels 0, 1 and 2. Its merge with master 84f5b5020 is clean, with the pull request below in it, and was built from nothing too: the test, the test of the pull request below and the two tests under `test/` named at the top are right there in the seven lanes with gcc and clang, with and without `--share-strings`.
+---
+> Run here, built from nothing, on 74fa6d7c2 with the pull request below beneath: the test in the seven collector lanes with gcc and clang, with and without `--share-strings` (right in every one); `ruby tools/gate.rb check`; the generated C of the 6,598 other programs, changed in 7, the five of them under `test/` run in the seven lanes and the two under `packages/` too; optcarrot, checksum 59662; `make share-strings-test` and `make int-min-test`, both pass; the cost table; the 112 statements and the probes above with gcc and clang at levels 0, 1 and 2; the compiler's own instructions on the test, 83,022,175 on the base and 83,281,721 here. Its merge with master 84f5b5020 is clean, with the pull request below in it, and was built from nothing too: the test, the test of the pull request below and the two tests under `test/` named at the top are right there in the seven lanes with gcc and clang, with and without `--share-strings`.
