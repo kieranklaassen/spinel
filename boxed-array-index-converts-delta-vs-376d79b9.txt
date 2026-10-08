@@ -1,0 +1,61 @@
+diff --git a/lib/spinel_rt.h b/lib/spinel_rt.h
+index a4b9c459a..790e46789 100644
+--- a/lib/spinel_rt.h
++++ b/lib/spinel_rt.h
+@@ -10642,6 +10642,14 @@ static SP_COLD SP_NOINLINE sp_int sp_poly_ary_big_offset(sp_RbVal v) {
+    went on to the function's last line, which read element 0. */
+ static SP_NOINLINE sp_RbVal sp_poly_ary_index_other(sp_RbVal a, sp_RbVal idx) {
+   if (idx.tag == SP_TAG_BIGINT) return sp_poly_arr_get_hash(a, sp_poly_ary_big_offset(idx));
++  /* a Complex whose real part is past a word converts to a Bignum, CRuby's
++     RangeError; sp_complex_to_int casts it, and the cast is no offset */
++  if (idx.tag == SP_TAG_OBJ && idx.cls_id == SP_BUILTIN_COMPLEX && idx.v.p) {
++    sp_Complex *c = (sp_Complex *)idx.v.p;
++    if (c->im == 0.0 && !(c->fl & SP_CPLX_IM_F) && isfinite(c->re) &&
++        (c->re >= -(sp_float)INTPTR_MIN || c->re < (sp_float)INTPTR_MIN))
++      sp_raise_cls("RangeError", "bignum too big to convert into 'long'");
++  }
+   return sp_poly_arr_get_hash(a, sp_array_fill_offset_arg(idx, 0));
+ }
+ 
+diff --git a/test/boxed_array_index_converts.rb b/test/boxed_array_index_converts.rb
+index ee419d3ef..9ac384548 100644
+--- a/test/boxed_array_index_converts.rb
++++ b/test/boxed_array_index_converts.rb
+@@ -19,7 +19,8 @@ end
+ h = pick(0)
+ g = { "nan" => 0.0 / 0.0, "inf" => 1.0 / 0.0, "ninf" => -1.0 / 0.0, "far" => 1e30,
+       "big" => 2**70, "nbig" => -(2**70), "r" => Rational(3, 2), "c" => Complex(1, 0),
+-      "o" => Ix.new, "t" => true, "f" => false, "fl" => 1.9, "a" => [0] }
++      "o" => Ix.new, "t" => true, "f" => false, "fl" => 1.9, "a" => [0],
++      "cf" => Complex(1e30, 0), "ncf" => Complex(-1e30, 0), "rf" => Rational(10**30, 1) }
+ 
+ # what converts reads an empty Array too
+ e = [[], 5][0]
+@@ -37,6 +38,12 @@ report { h[g["nbig"]] }
+ report { h[2**70] }
+ report { h.at(g["nan"]) }
+ 
++# what converts to an Integer past a word: the Bignum's RangeError
++report { h[g["cf"]] }
++report { h[g["ncf"]] }
++report { h[g["rf"]] }
++report { e[g["cf"]] }
++
+ # the smallest Integer fits a word: as a Bignum too it is past the Array
+ m = { "min" => -(2**63), "s" => "x" }
+ report { h[m["min"]] }
+diff --git a/test/boxed_array_index_converts.rb.expected b/test/boxed_array_index_converts.rb.expected
+index 4ae8923b2..8b474cf14 100644
+--- a/test/boxed_array_index_converts.rb.expected
++++ b/test/boxed_array_index_converts.rb.expected
+@@ -9,6 +9,10 @@ RangeError: bignum too big to convert into 'long'
+ RangeError: bignum too big to convert into 'long'
+ RangeError: bignum too big to convert into 'long'
+ RangeError: float NaN out of range of integer
++RangeError: bignum too big to convert into 'long'
++RangeError: bignum too big to convert into 'long'
++RangeError: bignum too big to convert into 'long'
++RangeError: bignum too big to convert into 'long'
+ nil
+ nil
+ nil

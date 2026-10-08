@@ -1,0 +1,36 @@
+<!-- See CONTRIBUTING.md. A pull request needs no issue. If its gate fails here on a mechanical point, or it conflicts, we fix it and say so; a failure that needs a design decision goes back to its author. -->
+
+## What this changes
+
+A String as the index of a boxed Symbol answered nil where CRuby answers the substring:
+
+```ruby
+def pick(n) = n > 0 ? {a: 1} : :stone
+s = pick(0)
+p s["ton"]   # nil; CRuby: "ton"
+```
+
+The fix costs a read that is right on master: a boxed Symbol read by a String its name does not hold. It answered nil without looking at the name, 23 instructions a loop pass with gcc and 31 with clang; it now looks, 98 and 105 (105 and 113 when the index starts as the name does, 133 and 137 when it is longer than the name). The look goes through the name, so it grows with it: 371 and 379 for a name of 43 letters, 714 and 722 where every letter of the name is a false start (`"aac"` in thirty-one a's and a b). The same three misses on a boxed String cost 94, 314 and 1,124 on master with gcc (99, 318 and 1,099 with clang) and one instruction more here with both: the String's arm is not touched, the compilers lay the function out anew around it.
+
+`Symbol#[]` is `String#[]` on the Symbol's name. `sp_poly_get_str` answers the substring for a String and for a shared String, and answered nil for a Symbol with every other value that is no object. A Symbol now answers the substring its name holds, for a String the program appends to as well, with a copy of the index: CRuby's answer is a new String, never the index itself. An index that is not whole characters is nil though the name holds its bytes (`"\xC3"` into `:"héllo"`): CRuby's search refuses one.
+
+The work is out of line, behind the test for a value that is no object which the function already makes, so a Hash's read meets no new test. An index the name does not hold is the read a value that is a Hash elsewhere makes, so it is answered before the search and the copy. By callgrind a loop reading `h[:a]` and `g["a"]` from boxed Hashes runs 222 instructions a pass on master and 225 here with gcc, three more by the same new layout, and 214 and 214 with clang; one String read of a String-keyed boxed Hash 139 and 139, 149 and 149; two of them 325 and 323, 304 and 302. Of forty loops through the boxed read, none but the Symbol's, the three String misses and that loop with gcc costs more with either compiler.
+
+Of 4,496 programs that read a boxed receiver by an index of every kind, 83 reach the new arm: 43 are cured and 40 are right on master and here. Of 992 more reads, a boxed Symbol of eight names, six of them with characters of two to four bytes, read by 31 Strings in four forms, 17 of the Strings not whole characters, 84 answered nil and print CRuby's line here; the other 908 are right on master and here.
+
+Not here: a Symbol index on the boxed Symbol (`s[:a]`) still answers nil, where CRuby raises TypeError; `a = [s[k], s[k]]; a[0] << "1"` prints `["ton", "ton"]`, as an Array of two boxed Strings does on master (CRuby: `["ton1", "ton"]`). A binary index with a byte past ASCII that the name holds (`s["é".b]`) is nil as it was, where CRuby raises Encoding::CompatibilityError. A String, boxed or not, answers an index that is not whole characters when it holds the bytes (`"héllo"["\xC3"]` is `"\xC3"`; CRuby: nil), on master and here: the Symbol does not follow its name there.
+
+No generated C changes: the function is in `lib/spinel_rt.h`.
+
+## `make gate` (on this branch merged with current master)
+
+```
+gate: run on the Mac at opening
+```
+
+Run here on Linux (x86_64, gcc 13.3.0, ruby 3.3.6), on master 16bca0896 merged with this branch's commit (865797e16): the build; `tools/gate.rb check`; the new test in eighteen cells (gcc and clang; the default mode, `--int-overflow=promote` and `--share-strings`; `SPINEL_GC_STRESS` unset, 1 and 2); `tools/cident.sh` against master (all 6,541 corpus programs, optcarrot among them, compile to the same C); and the legs `share-strings-test` and `int-min-test` alone, which pass.
+
+- [ ] New tests have `.expected` files that match CRuby 4.0 run with `--enable-frozen-string-literal` (not run under CRuby 4.0 here; ruby 3.3.6 with that flag prints `test/boxed_symbol_index_string.rb.expected` exactly)
+- [x] Values past 2^31 are marked `# spinel: int64` (none)
+- [ ] If optcarrot's generated C changed: callgrind numbers, checksum 59662 (it did not change: `tools/cident.sh` finds it byte-identical to master's at 16bca0896)
+- [ ] Depends on: # (nothing)

@@ -1,0 +1,11 @@
+--- boxed-values-at-index-statement-body-v5.md
++++ boxed-values-at-index-statement-body-v6.md
+@@ -18,7 +18,7 @@
+ 
+ In the corpus only the new test's C differs.
+ 
+-Not in this change: a receiver that changes a variable a Range index reads, `(i += 1; a).values_at(i..[1].size)`, did not build; it now builds, has its index read first and prints `[1, 2]`, as `(i += 1; a).values_at(i..1)` does on master (CRuby: `[2]`).
++Not in this change: a receiver that changes a variable an index built in place reads (a Range, a splatted list, a literal Array or Hash key), `(i += 1; a).values_at(i..[1].size)`, did not build; it now builds, has its index read first and prints `[1, 2]`, as `(i += 1; a).values_at(i..1)` does on master (CRuby: `[2]`).
+ 
+ ## `make gate` (on this branch merged with current master)
+ 
