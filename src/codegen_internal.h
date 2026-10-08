@@ -1353,6 +1353,10 @@ int emit_nilfree_operand(Compiler *c, int v, const char *op, int left, const cha
 void emit_rooted_operand(Compiler *c, TyKind pt, int provided, const char *expr, Buf *out);
 int arg_read_converts(Compiler *c, TyKind pt, int provided);
 void emit_rooted_conversion(Compiler *c, TyKind pt, const char *expr, Buf *out);
+int box_is_new_cell(TyKind at);
+int arg_value_builds(Compiler *c, int x);
+int default_built_in_place(Compiler *c, TyKind pt, int d, const char *v, size_t n, int spread);
+int scope_param_captured(const Scope *m);
 int arg_slot_for_param(Compiler *c, Scope *m, int idx, int argc);
 /* 1 when a parameter default reads an earlier parameter: it must be evaluated
    with that parameter bound (see emit_args_filled). */

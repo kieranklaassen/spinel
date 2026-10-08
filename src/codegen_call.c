@@ -1400,7 +1400,7 @@ void emit_poly_arm_args(Compiler *c, Scope *m, Scope *ms, const ArgLayout *L,
 void emit_kwh_sym_hash(Compiler *c, const PolyKw *kw, Scope *skip_kw, Buf *out);
 void emit_kwh_pos_hash(Compiler *c, const PolyKw *kw, int boxed, Buf *out);
 static int emit_poly_kw_param(Compiler *c, Scope *ms, int a, const PolyKw *kw,
-                              const char *selfp, Buf *pa);
+                              const char *selfp, int *fresh, Buf *pa);
 static void emit_poly_kw_arm_checks(Compiler *c, Scope *m, Scope *ms, const PolyKw *kw,
                                     int pos_argc, int gathered, Buf *b);
 int hoist_block_proc(Compiler *c, int cblk) {
@@ -5516,8 +5516,23 @@ void emit_kwh_pos_hash(Compiler *c, const PolyKw *kw, int boxed, Buf *out) {
   if (boxed) buf_puts(out, ", SP_BUILTIN_SYM_POLY_HASH)");
 }
 
+/* Parameter `a` of an arm where the call gives it nothing: its default,
+   or the read of its key out of the `**` spreads' hash `kwall` (of type
+   `kwt`), which falls back to the default. `*fresh` is 2 where that
+   default is built where it stands (default_built_in_place). */
+static void emit_poly_default(Compiler *c, Scope *ms, int a, int kwall, TyKind kwt, int *fresh, Buf *pa) {
+  LocalVar *pv = ms->pnames && ms->pnames[a] ? scope_local(ms, ms->pnames[a]) : NULL;
+  TyKind pt = pv && pv->type != TY_UNKNOWN ? pv->type : TY_POLY;
+  size_t at = pa->len;
+  if (kwall >= 0) emit_ds_param_extract(c, ms, a, kwall, kwt, pa);
+  else emit_arg_or_default(c, ms, a, -1, pa);
+  if (fresh && default_built_in_place(c, pt, ms->pdefault ? ms->pdefault[a] : -1,
+                                      pa->p ? pa->p + at : NULL, pa->len - at, kwall >= 0))
+    *fresh = 2;
+}
+
 static int emit_poly_kw_param(Compiler *c, Scope *ms, int a, const PolyKw *kw,
-                              const char *selfp, Buf *pa) {
+                              const char *selfp, int *fresh, Buf *pa) {
   const NodeTable *nt = c->nt;
   const char *pnm = ms->pnames ? ms->pnames[a] : NULL;
   /* ... and is an empty hash when the call passed none: the default
@@ -5551,19 +5566,22 @@ static int emit_poly_kw_param(Compiler *c, Scope *ms, int a, const PolyKw *kw,
     if (kn && sp_streq(kn, pnm)) e_found = e;
   }
   if (kw && kw->kwall >= 0)
-    emit_ds_param_extract(c, ms, a, kw->kwall, kw->kwall_any ? TY_POLY_POLY_HASH : TY_SYM_POLY_HASH, pa);
+    emit_poly_default(c, ms, a, kw->kwall, kw->kwall_any ? TY_POLY_POLY_HASH : TY_SYM_POLY_HASH, fresh, pa);
   else if (e_found >= 0) {
     LocalVar *kpv = scope_local(ms, pnm);
     TyKind kpt = kpv ? kpv->type : TY_UNKNOWN;
     TyKind at = kw->kwty[e_found];
     char tn[32]; snprintf(tn, sizeof tn, "_t%d", kw->kwtmp[e_found]);
-    if (kpt == TY_POLY && at != TY_POLY) emit_boxed_text(c, at, tn, pa);
+    if (kpt == TY_POLY && at != TY_POLY) {
+      emit_boxed_text(c, at, tn, pa);
+      if (fresh) *fresh = box_is_new_cell(at);
+    }
     /* a boxed value may be nil, which an Integer or Float keyword takes as
        its own nil: the plain unbox read the zero under the nil tag */
     else if (at == TY_POLY && kpt != TY_POLY && kpt != TY_UNKNOWN) emit_unbox_nilable_text(c, kpt, tn, pa);
     else { emit_obj_upcast_prefix(c, kpt, at, pa); buf_puts(pa, tn); }
   }
-  else emit_arg_or_default(c, ms, a, -1, pa);
+  else emit_poly_default(c, ms, a, -1, TY_UNKNOWN, fresh, pa);
   g_self = saved_self;
   return 1;
 }
@@ -6896,10 +6914,14 @@ void poly_arm_layout(Compiler *c, Scope *ms, const PolyArgs *A, ArgLayout *L) {
   L->kw = P;
 }
 
-/* Temp `tmp` of type `at` as a parameter of type `pt`. */
-static void emit_poly_temp_as(Compiler *c, TyKind pt, int tmp, TyKind at, Buf *pa) {
+/* Temp `tmp` of type `at` as a parameter of type `pt`. A box that is a new
+   cell (box_is_new_cell) is reported in `*fresh`. */
+static void emit_poly_temp_as(Compiler *c, TyKind pt, int tmp, TyKind at, int *fresh, Buf *pa) {
   char tn[32]; snprintf(tn, sizeof tn, "_t%d", tmp);
-  if (pt == TY_POLY && at != TY_POLY) emit_boxed_text(c, at, tn, pa);
+  if (pt == TY_POLY && at != TY_POLY) {
+    emit_boxed_text(c, at, tn, pa);
+    if (fresh) *fresh = box_is_new_cell(at);
+  }
   /* a boxed argument may be nil, which an Integer or Float parameter takes
      as its own nil: the plain unbox read the zero under the nil tag */
   else if (at == TY_POLY && pt != TY_POLY && pt != TY_UNKNOWN) emit_unbox_nilable_text(c, pt, tn, pa);
@@ -7214,9 +7236,11 @@ static int emit_poly_boxed_shared_arg(Compiler *c, const PolyArgs *A, int k, Buf
 /* Parameter `a` of an arm, from where the layout says: a keyword by name
    from the split-off hash (emit_poly_kw_param), an argument's temp, the
    keyword hash as one more positional, the rest, the gather, or the
-   default. `ct` is the gather's temp. */
+   default. `ct` is the gather's temp. `*fresh` is 1 where the text is a
+   by-value kind's box, a new cell nothing holds, and 2 where it is a
+   default that can allocate where it stands. */
 static void emit_poly_arm_param(Compiler *c, Scope *ms, int a, const ArgLayout *L,
-                                const PolyArgs *A, int ct, const char *selfd, Buf *pa) {
+                                const PolyArgs *A, int ct, const char *selfd, int *fresh, Buf *pa) {
   const char *pnm = ms->pnames ? ms->pnames[a] : NULL;
   LocalVar *pv = pnm ? scope_local(ms, pnm) : NULL;
   /* a parameter inference left unknown is spelled sp_RbVal in the signature
@@ -7226,7 +7250,7 @@ static void emit_poly_arm_param(Compiler *c, Scope *ms, int a, const ArgLayout *
   const char *saved_self = g_self;
   switch (L->from[a]) {
   case ARG_BY_NAME:
-    if (emit_poly_kw_param(c, ms, a, A->kw, selfd, pa)) return;
+    if (emit_poly_kw_param(c, ms, a, A->kw, selfd, fresh, pa)) return;
     break;
   case ARG_NODE:
     /* the argument past the positionals is the keyword hash, where it binds
@@ -7235,7 +7259,7 @@ static void emit_poly_arm_param(Compiler *c, Scope *ms, int a, const ArgLayout *
       if (repr_of_slot(c, pv).handle && emit_poly_shared_arg(c, A, L->arg[a], pa)) return;
       if (pt == TY_POLY && pv && (pv->poly_lift & POLY_LIFT_APPENDED) &&
           emit_poly_boxed_shared_arg(c, A, L->arg[a], pa)) return;
-      emit_poly_temp_as(c, pt, A->atmp[L->arg[a]], A->atmp_ty[L->arg[a]], pa);
+      emit_poly_temp_as(c, pt, A->atmp[L->arg[a]], A->atmp_ty[L->arg[a]], fresh, pa);
       return;
     }
     /* fall through */
@@ -7255,7 +7279,7 @@ static void emit_poly_arm_param(Compiler *c, Scope *ms, int a, const ArgLayout *
     break;
   }
   if (selfd) g_self = selfd;
-  emit_arg_or_default(c, ms, a, -1, pa);
+  emit_poly_default(c, ms, a, -1, TY_UNKNOWN, fresh, pa);
   g_self = saved_self;
 }
 
@@ -7284,13 +7308,22 @@ void emit_poly_arm_args(Compiler *c, Scope *m, Scope *ms, const ArgLayout *L,
      expression, and C runs a call's arguments in no set order: the second
      one's allocation collected the first. Each such argument binds to a
      rooted local ahead of the call instead, as a default reading an earlier
-     parameter already has them do. */
-  Buf *pav = NULL; int nfresh = 0;
-  if (!pd_arm && ms->nparams > 1) {
+     parameter already has them do. The box of a kind kept by value is such
+     an object too, a new cell nothing holds (arg_read_converts): it counts
+     among them, and one alone binds where something else allocates before
+     the callee roots it: a default built beside it, or the cell the callee
+     keeps a parameter in, allocated ahead of its roots. */
+  Buf *pav = NULL; char *box = NULL; int nfresh = 0;
+  int alone = !pd_arm && scope_param_captured(ms);
+  if (!pd_arm && (ms->nparams > 1 || alone)) {
     pav = calloc((size_t)ms->nparams, sizeof *pav);
+    box = pav ? calloc((size_t)ms->nparams, 1) : NULL;
     for (int a = 0; pav && a < ms->nparams; a++) {
-      emit_poly_arm_param(c, ms, a, L, A, ct, selfd, &pav[a]);
-      if (pav[a].p && strstr(pav[a].p, "SP_GC_ROOT(")) nfresh++;
+      int fr = 0;
+      emit_poly_arm_param(c, ms, a, L, A, ct, selfd, &fr, &pav[a]);
+      if (box) box[a] = fr == 1;
+      if (fr == 2) alone = 1;
+      if ((box && fr == 1) || (pav[a].p && strstr(pav[a].p, "SP_GC_ROOT("))) nfresh++;
     }
   }
   for (int a = 0; a < ms->nparams; a++) {
@@ -7298,7 +7331,8 @@ void emit_poly_arm_args(Compiler *c, Scope *m, Scope *ms, const ArgLayout *L,
     Buf pa; memset(&pa, 0, sizeof pa);
     if (pav) {
       pa = pav[a];
-      if (nfresh > 1 && pa.p && strstr(pa.p, "SP_GC_ROOT(")) {
+      int bx = box && box[a];
+      if (pa.p && ((nfresh > 1 && (bx || strstr(pa.p, "SP_GC_ROOT("))) || (alone && bx))) {
         const char *pnm = ms->pnames ? ms->pnames[a] : NULL;
         LocalVar *pv = pnm ? scope_local(ms, pnm) : NULL;
         TyKind pt = pv ? pv->type : TY_POLY;
@@ -7313,7 +7347,7 @@ void emit_poly_arm_args(Compiler *c, Scope *m, Scope *ms, const ArgLayout *L,
         continue;
       }
     }
-    else emit_poly_arm_param(c, ms, a, L, A, ct, selfd, &pa);
+    else emit_poly_arm_param(c, ms, a, L, A, ct, selfd, NULL, &pa);
     const char *pnm = ms->pnames ? ms->pnames[a] : NULL;
     if (pd_arm && pnm && g_nren < MAX_RENAME) {
       LocalVar *pv = scope_local(ms, pnm);
@@ -7341,7 +7375,7 @@ void emit_poly_arm_args(Compiler *c, Scope *m, Scope *ms, const ArgLayout *L,
     else buf_puts(cb, pa.p ? pa.p : "");
     free(pa.p);
   }
-  free(pav);
+  free(pav); free(box);
   g_nren = ren_base;
   g_pre = sv_pre;
 }
@@ -10825,6 +10859,28 @@ static int struct_kwh_out_of_order(Compiler *c, const ClassInfo *cls, int kwh) {
   return 0;
 }
 
+/* How many members of the list emit_struct_new_call writes are built where
+   they stand, inside the call's parentheses: a by-value read boxed for a
+   boxed member, the spread past the positionals, or a value that can
+   allocate (arg_value_builds) and is neither hoisted ahead of the call nor
+   run into a temp.
+   `kwh` is the keyword hash the members read by name, or < 0. */
+static int struct_members_built(Compiler *c, ClassInfo *cls, int kwh, int argc, const int *argv,
+                                const int *lit_tmp, int spread_tail, int argov) {
+  int n = 0;
+  for (int a = 0; a < cls->nmembers; a++) {
+    int vnode = kwh >= 0 ? struct_kwarg_value(c, kwh, cls->ivars[a] + 1) : a < argc ? argv[a] : -1;
+    TyKind mt = cls->ivar_types[a];
+    if (vnode < 0 || (lit_tmp && lit_tmp[a] >= 0)) continue;
+    int ran = arg_ran_first(vnode, argov);
+    if (spread_tail && a == argc - 1) n += !arg_wants_root(c, mt, -1);
+    else if (!ran && arg_wants_root(c, mt, vnode)) continue;
+    else if (mt == TY_POLY && arg_read_converts(c, mt, vnode)) n++;
+    else n += !ran && arg_value_builds(c, vnode);
+  }
+  return n;
+}
+
 static int emit_struct_new_call(Compiler *c, int id, int ci, int argc, const int *argv, Buf *b) {
   const NodeTable *nt = c->nt;
     /* Struct.new members: positional args, or keyword args mapping each
@@ -10936,6 +10992,7 @@ static int emit_struct_new_call(Compiler *c, int id, int ci, int argc, const int
     /* the spreads past the last member: evaluated after the members,
        and too many arguments when they hold a key */
     int spread_over = spread_tail && argc - 1 == cls->nmembers ? ++g_tmp : -1;
+    int nbuilt = struct_members_built(c, cls, merged ? -1 : kwh, argc, argv, lit_tmp, spread_tail, argov_saved);
     if (spread_over >= 0) buf_printf(b, "({ sp_%s *_t%d = ", cls->c_name, spread_over);
     buf_printf(b, "sp_%s_new(", cls->c_name);
     for (int a = 0; a < cls->nmembers; a++) {
@@ -10973,6 +11030,12 @@ static int emit_struct_new_call(Compiler *c, int id, int ci, int argc, const int
         emit_struct_member_value(c, cls, a, vnode, &mv);
         if (arg_wants_root(c, cls->ivar_types[a], vnode) && !arg_ran_first(vnode, argov_saved))
           emit_rooted_operand(c, cls->ivar_types[a], -1, mv.p ? mv.p : "", b);
+        /* a by-value read boxed for a boxed member: the box is a new cell
+           (arg_read_converts). sp_<S>_new roots what it is given before
+           it allocates, so one is safe as it is; beside a second member
+           built in the list, either collects the other */
+        else if (g_pre && nbuilt > 1 && cls->ivar_types[a] == TY_POLY && arg_read_converts(c, TY_POLY, vnode))
+          emit_rooted_conversion(c, TY_POLY, mv.p ? mv.p : "", b);
         else buf_puts(b, mv.p ? mv.p : "");
         free(mv.p);
       }

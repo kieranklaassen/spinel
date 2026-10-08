@@ -7646,6 +7646,10 @@ int arg_read_converts(Compiler *c, TyKind pt, int provided) {
   return !same && st != TY_NIL && st != TY_UNKNOWN && st != TY_VOID;
 }
 
+/* True for a kind kept by value whose box copies it into a new cell
+   (arg_read_converts); a Class is boxed by its tag. */
+int box_is_new_cell(TyKind at) { return ty_is_struct_valued(at) && at != TY_CLASS; }
+
 /* Root a converted bare read across the call without moving its evaluation:
    the temp is declared NULL and rooted in g_pre, and assigned where the
    argument stands, so the read sees the value at its own position (the stale
@@ -7669,23 +7673,13 @@ typedef struct {
   int kwh, kw_merged, ds, argov;
 } ArgList;
 
-/* True when the default a spread slot falls back to, the tail of its text
-   `(n < len ? element : DEFAULT)`, stands as a temp the prelude has built
+/* True when a default written as `d` stands as a temp the prelude has built
    and rooted, bare or boxed (a pointer's box allocates nothing): a Hash or
    an Array literal is written so, ahead of the call. The written text is
    asked, not the node: only it says where the value was built. */
-static int spread_default_held(const char *v, size_t n) {
-  if (n < 2 || v[n - 1] != ')' || !g_pre || !g_pre->p) return 0;
-  size_t k = n - 1;
-  for (int depth = 0; k > 1; k--) {
-    char ch = v[k - 1];
-    if (ch == ')') depth++;
-    else if (ch == '(' && depth-- == 0) return 0;
-    else if (ch == ':' && depth == 0 && v[k - 2] == ' ' && v[k] == ' ') break;
-  }
-  if (k <= 1) return 0;
-  const char *d = v + k + 1;
-  size_t dn = n - 1 - (k + 1), q = 0;
+static int default_temp_held(const char *d, size_t dn) {
+  size_t q = 0;
+  if (!g_pre || !g_pre->p) return 0;
   if (dn > 7 && memcmp(d, "sp_box_", 7) == 0) {
     while (q < dn && d[q] != '(') q++;
     if (q++ >= dn) return 0;
@@ -7700,12 +7694,27 @@ static int spread_default_held(const char *v, size_t n) {
   return strstr(g_pre->p, root) != NULL;
 }
 
+/* The same of the default a spread slot falls back to, the tail of its
+   text `(n < len ? element : DEFAULT)`. */
+static int spread_default_held(const char *v, size_t n) {
+  if (n < 2 || v[n - 1] != ')') return 0;
+  size_t k = n - 1;
+  for (int depth = 0; k > 1; k--) {
+    char ch = v[k - 1];
+    if (ch == ')') depth++;
+    else if (ch == '(' && depth-- == 0) return 0;
+    else if (ch == ':' && depth == 0 && v[k - 2] == ' ' && v[k] == ' ') break;
+  }
+  if (k <= 1) return 0;
+  return default_temp_held(v + k + 1, n - 1 - (k + 1));
+}
+
 /* True when the value at `x` can allocate where it stands. A pure read
    (scalar arithmetic, a typed index read) answers the node table's reason,
    any call. It does not answer operand_may_allocate's own: the read of a
    String a block appends to copies the live buffer, and is a read by its
    node. */
-static int arg_value_builds(Compiler *c, int x) {
+int arg_value_builds(Compiler *c, int x) {
   return subtree_may_allocate(c->nt, x) ? !subtree_is_pure_read(c, x) : operand_may_allocate(c, x);
 }
 
@@ -7738,6 +7747,24 @@ static int arg_slot_allocates(Compiler *c, Scope *m, const ArgList *al, int j) {
   return arg_read_converts(c, pt, provided) || arg_value_builds(c, provided);
 }
 
+/* True when default `d` of a parameter of type `pt`, written as `v`, is
+   built where it stands: it can allocate, and no temp of the prelude
+   holds it. `spread` when `v` is a spread slot's text. */
+int default_built_in_place(Compiler *c, TyKind pt, int d, const char *v, size_t n, int spread) {
+  if (d < 0 || !v || !((pt == TY_POLY && arg_read_converts(c, pt, d)) || arg_value_builds(c, d))) return 0;
+  return !(spread ? spread_default_held(v, n) : default_temp_held(v, n));
+}
+
+/* True when the callee keeps a parameter, or its block parameter, in a
+   cell: the cell is allocated on entry, ahead of the parameters' roots. */
+int scope_param_captured(const Scope *m) {
+  for (int j = 0; j < m->nlocals; j++)
+    if (m->locals[j].is_cell && (m->locals[j].is_param || (m->blk_param && m->locals[j].name &&
+                                                           sp_streq(m->locals[j].name, m->blk_param))))
+      return 1;
+  return 0;
+}
+
 /* True when a value built where an argument stands can be collected before
    the callee roots the parameter it is for: something allocates in between.
    That is the callee itself where the list is a constructor's (an
@@ -7750,10 +7777,7 @@ static int arg_slot_allocates(Compiler *c, Scope *m, const ArgList *al, int j) {
    it is. */
 static int arg_built_exposed(Compiler *c, Scope *m, const ArgList *al) {
   if (m->name && sp_streq(m->name, "initialize") && !(al->lead && al->lead[0])) return 1;
-  for (int j = 0; j < m->nlocals; j++)
-    if (m->locals[j].is_cell && (m->locals[j].is_param || (m->blk_param && m->locals[j].name &&
-                                                           sp_streq(m->locals[j].name, m->blk_param))))
-      return 1;
+  if (scope_param_captured(m)) return 1;
   int n = 0;
   for (int j = 0; j < m->nparams && n < 2; j++) n += arg_slot_allocates(c, m, al, j);
   return n >= 2;
