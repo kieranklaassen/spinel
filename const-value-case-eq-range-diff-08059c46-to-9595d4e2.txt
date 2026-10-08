@@ -1,0 +1,70 @@
+1:  08059c468 ! 1:  9595d4e22 === on a constant that holds a value is the value's own ===
+    @@ Commit message
+         more than through a local. Compiling such a line runs about 3,700 more
+         instructions where K holds an Integer and 5,100 to 6,400 where it holds
+         a String (callgrind over `spinel -c`): behind ten lines that set the
+    -    constants and the locals, 2,000 lines `x = LIMIT === v` compile with
+    -    0.42% more instructions, 2,000 lines `x = NAME === s` with 0.76%, and
+    -    2,000 bare lines `NAME === s` with 0.98%.
+    +    constants (LIMIT = 9 there) and the locals, 2,000 lines
+    +    `x = LIMIT === v` compile with 0.42% more instructions, 2,000 lines
+    +    `x = NAME === s` with 0.76%, and 2,000 bare lines `NAME === s` with
+    +    0.98%. A Range or an object with a === of its own costs more: a line
+    +    runs 18,200 more instructions for an Integer Range against a literal
+    +    Integer (2.3% over 2,000 such lines), 18,300 to 21,300 for a String
+    +    Range (2.4% to 2.7%), 31,000 to 33,200 for a Float Range (4.0% to
+    +    4.3%) and 65,700 to 70,500 for the object (7.4% to 8.0%). That is the
+    +    comparison being written where master wrote `false`: asked by name on
+    +    the same constant (`K.cover?(x)` of a Range, a method of the object's
+    +    own), master pays the like today. One line that asks such an object,
+    +    in a program where no local holds one of its class, adds 0.6% to the
+    +    whole compile: the call roots its receiver, and master lays out the
+    +    function's frame of roots once, as it does for any call on that
+    +    constant. A line left in the class arm costs about 400:
+    +    const_value_eqq looks at the operand and the two kinds before it walks
+    +    the table of builtin class names.
+     
+         Tests: test/const_value_case_eq.rb, and
+         test/const_value_case_eq_bignum.rb for the Bignum pairs.
+    @@ src/codegen_call_object.c
+     +}
+     +static int const_value_eqq(Compiler *c, const NodeTable *nt, int recv, TyKind rt, int arg) {
+     +  const char *kn = nt_kind(nt, recv) == NK_ConstantReadNode ? nt_str(nt, recv, "name") : NULL;
+    -+  if (!kn || !comp_const(c, kn) || comp_class_index(c, kn) >= 0 ||
+    -+      is_builtin_class_name(kn) || builtin_class_id(kn) != 0) return 0;
+    ++  if (!kn || !comp_const(c, kn) || comp_class_index(c, kn) >= 0) return 0;
+     +  if (!eqq_operand_runs_nothing(c, nt, arg)) return 0;
+     +  TyKind at = comp_ntype(c, arg);
+     +  int scalar = at == TY_INT || at == TY_FLOAT || at == TY_STRING || at == TY_SYMBOL || at == TY_BOOL || at == TY_POLY;
+     +  int listed = scalar || at == TY_BIGINT || at == TY_RANGE || at == TY_STR_RANGE || at == TY_INT_ARRAY ||
+     +               at == TY_STR_ARRAY || at == TY_SYM_POLY_HASH;
+     +  int int_lit = nt_kind(nt, arg) == NK_IntegerNode;
+    ++  int kinds;
+     +  switch ((int)rt) {
+    -+  case TY_INT: case TY_SYMBOL: return scalar || at == TY_BIGINT;
+    -+  case TY_BIGINT:              return listed && at != TY_FLOAT;
+    -+  case TY_FLOAT:               return listed && at != TY_BIGINT;
+    -+  case TY_STRING:              return listed && at != TY_INT_ARRAY && at != TY_STR_ARRAY;
+    -+  case TY_RANGE:               return (at == TY_INT && int_lit) || at == TY_BIGINT || at == TY_FLOAT;
+    -+  case TY_FLOAT_RANGE:         return listed && (at != TY_INT || int_lit);
+    ++  case TY_INT: case TY_SYMBOL: kinds = scalar || at == TY_BIGINT; break;
+    ++  case TY_BIGINT:              kinds = listed && at != TY_FLOAT; break;
+    ++  case TY_FLOAT:               kinds = listed && at != TY_BIGINT; break;
+    ++  case TY_STRING:              kinds = listed && at != TY_INT_ARRAY && at != TY_STR_ARRAY; break;
+    ++  case TY_RANGE:               kinds = (at == TY_INT && int_lit) || at == TY_BIGINT || at == TY_FLOAT; break;
+    ++  case TY_FLOAT_RANGE:         kinds = listed && (at != TY_INT || int_lit); break;
+     +  case TY_STR_RANGE:
+     +  case TY_INT_ARRAY: case TY_FLOAT_ARRAY: case TY_STR_ARRAY: case TY_POLY_ARRAY:
+     +  case TY_STR_INT_HASH: case TY_SYM_POLY_HASH:
+    -+    return listed;
+    ++    kinds = listed; break;
+     +  default:
+    -+    return ty_is_object(rt) && listed;
+    ++    kinds = ty_is_object(rt) && listed;
+     +  }
+    ++  /* the two walks of the builtin class table last: only a call about to
+    ++     leave the class arm pays for them */
+    ++  return kinds && !is_builtin_class_name(kn) && builtin_class_id(kn) == 0;
+     +}
+     +
+      /* between?, object_id / __id__, hash, nil? and === on a receiver whose kind decides them */

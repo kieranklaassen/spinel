@@ -1,0 +1,90 @@
+=== on a constant that holds a value is the value's own ===
+
+    LIMIT = 1..5
+    NAME = "abc"
+    p(LIMIT === 3, NAME === "abc")
+    p(["x", "abc"].select { |v| NAME === v })
+
+printed false, false and []. CRuby prints true, true and ["abc"].
+
+emit_call_identity_arms reads every `K === x` with a bare constant for
+its receiver as `Class === x`, the test whether x is an instance of the
+class K names. A constant the program gave a value names no class: no x
+passed, and the call was written as false. The same value in a local
+was asked its own ===, and so were `when LIMIT`, `grep(LIMIT)` and
+`M::LIMIT === x`.
+
+const_value_eqq takes such a call out of the class arm, and the === a
+local reaches answers: a Range covers, a number, a String, a Symbol, an
+Array and a Hash compare by ==, an object with a === of its own is
+asked.
+
+It takes the call only where x is one node that runs nothing: a number,
+a String or a Symbol written out, nil, true, false, self, a local, an
+instance or a class variable, a constant of the program. The value's
+=== reads the constant in one C expression with x, in the order the C
+compiler picks. An x that changes the constant's String in place or
+binds the constant anew would be read before the constant by one
+compiler and after it by the other, where master's false is CRuby's
+answer with both. So `K === f(n)`, `K === h["k"]`, `K === n + 1`,
+`K === [1, 2]` and a literal in parentheses stay in the class arm.
+
+It answers for the kinds of K and x it lists, the ones where that ===
+answers as CRuby does on master. Every other pair stays in the class
+arm with its false, right or wrong as before: an Integer or a Symbol
+against an Array, a Hash or a Range (there that === raises
+NoMethodError), a String against an Array, a Bignum against a Float and
+a Float against a Bignum (they do not build), an object of the program
+as x (the value asks it nothing, where CRuby asks its ==), and the
+kinds the list does not name, a Complex or a Rational among them.
+
+A Range or a Float Range takes an Integer only where it is written as
+a literal. The nil of an Integer is a sentinel in its slot: in a local
+a beginless Range covers it and a Float Range can raise TypeError,
+where the class arm's false is CRuby's answer. Nothing says for sure
+that a slot cannot hold it: nullable_int_value does not mark an ivar
+never assigned or a fetch with a nil default. So `LIMIT === n` for an
+Integer in a variable is false still.
+
+A name that a class or a module of the program bears too stays there
+as well. A constant's read is typed by its name alone, so `Foo === x`
+outside the class that holds `Foo = 3` would be read as the 3.
+
+Checked on 1,296 programs, every pair of 24 values of K and 27 of x in
+the constant form and in the local form, x held in a local: 28 of the
+648 constant forms go from false to CRuby's answer, no answer that was
+right changes with gcc or with clang, and the local forms compile to
+the same C.
+
+A call that answered false and was right now runs the comparison it
+names, where master wrote the constant false: 11 to 81 instructions a
+call by the kind (callgrind, gcc 13.3 and clang 18.1), the dearest an
+Integer Range against a literal Integer. Nothing where the two kinds
+cannot be equal, and less than the class test did where x is a Symbol.
+Against the same value in a local it is within 2 instructions, but for
+an object with a === of its own, which costs 16 (gcc) and 20 (clang)
+more than through a local. Compiling such a line runs about 3,700 more
+instructions where K holds an Integer and 5,100 to 6,400 where it holds
+a String (callgrind over `spinel -c`): behind ten lines that set the
+constants (LIMIT = 9 there) and the locals, 2,000 lines
+`x = LIMIT === v` compile with 0.42% more instructions, 2,000 lines
+`x = NAME === s` with 0.76%, and 2,000 bare lines `NAME === s` with
+0.98%. A Range or an object with a === of its own costs more: a line
+runs 18,200 more instructions for an Integer Range against a literal
+Integer (2.3% over 2,000 such lines), 18,300 to 21,300 for a String
+Range (2.4% to 2.7%), 31,000 to 33,200 for a Float Range (4.0% to
+4.3%) and 65,700 to 70,500 for the object (7.4% to 8.0%). That is the
+comparison being written where master wrote `false`: asked by name on
+the same constant (`K.cover?(x)` of a Range, a method of the object's
+own), master pays the like today. One line that asks such an object,
+in a program where no local holds one of its class, adds 0.6% to the
+whole compile: the call roots its receiver, and master lays out the
+function's frame of roots once, as it does for any call on that
+constant. A line left in the class arm costs about 400:
+const_value_eqq looks at the operand and the two kinds before it walks
+the table of builtin class names.
+
+Tests: test/const_value_case_eq.rb, and
+test/const_value_case_eq_bignum.rb for the Bignum pairs.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
