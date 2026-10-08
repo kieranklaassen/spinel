@@ -1702,6 +1702,35 @@ static int emit_kind_array_iter_call(Compiler *c, int id, Buf *b, const NodeTabl
 }
 
 /* A typed Array receiver with a kind of its own (Int, Float, String, a pointer array): array_kind names it (emit_typed_array_call's arms, in their order) */
+/* An Integer Array searched for a boxed needle, or a typed nil: sp_IntArray_<fn>
+   with the needle's word, else `miss`. An Integer is its own word, and nil the
+   nil slot's where the array can hold one. Any other needle is a well-defined
+   "not there", where unboxing it raised the conversion TypeError (#4835);
+   but a boxed number of another kind can be there (1.0 == 1), and
+   sp_poly_int_needle hands back the Integer it equals: it is asked for a
+   Float and a Rational only, an object of any other class is not there.
+   The word is chosen first and the search called once: the Integer and nil
+   needles run the code they ran. */
+static void emit_int_array_boxed_search(Compiler *c, int recv, int needle, TyKind rt, const char *fn, const char *miss, int boxed, Buf *b) {
+  int ta = ++g_tmp, tv = ++g_tmp;
+  buf_printf(b, "({ sp_IntArray *_t%d = ", ta); emit_recv_rooted(c, recv, ta, "SP_GC_ROOT", b);
+  buf_printf(b, "sp_RbVal _t%d = ", tv); emit_boxed(c, needle, b);
+  if (!boxed) {
+    buf_printf(b, "; _t%d.tag == SP_TAG_INT ? sp_IntArray_%s(_t%d, _t%d.v.i) : ", tv, fn, ta, tv);
+    if (elem_nil_sentinel(c, recv, rt))
+      buf_printf(b, "_t%d.tag == SP_TAG_NIL ? sp_IntArray_%s(_t%d, SP_INT_NIL) : ", tv, fn, ta);
+    buf_printf(b, "%s; })", miss);
+    return;
+  }
+  int tk = ++g_tmp;
+  buf_printf(b, "; sp_int _t%d; (_t%d.tag == SP_TAG_INT ? (_t%d = _t%d.v.i, 1) : ", tk, tv, tk, tv);
+  if (elem_nil_sentinel(c, recv, rt))
+    buf_printf(b, "_t%d.tag == SP_TAG_NIL ? (_t%d = SP_INT_NIL, 1) : ", tv, tk);
+  buf_printf(b, "(((1 << SP_TAG_FLT | 1 << SP_TAG_OBJ) >> _t%d.tag) & 1) && (_t%d.tag != SP_TAG_OBJ || _t%d.cls_id == SP_BUILTIN_RATIONAL)"
+                " && (_t%d = sp_poly_int_needle(_t%d), _t%d = _t%d.v.i, _t%d.tag == SP_TAG_INT))"
+                " ? sp_IntArray_%s(_t%d, _t%d) : %s; })", tv, tv, tv, tv, tv, tk, tv, tv, fn, ta, tk, miss);
+}
+
 static int emit_kind_array_call(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, TyKind rt, TyKind a0, const char *k, int *out) {
   if (!(k)) return 0;
   if (sp_streq(name, "[]") && argc == 1 && nt_type(nt, argv[0]) && sp_streq(nt_type(nt, argv[0]), "RangeNode")) {
@@ -2367,16 +2396,8 @@ else {
       { *out = 1; return 1; }
     }
     if (rt == TY_INT_ARRAY && (a0 == TY_POLY || (a0 == TY_NIL && !nil_needle))) {
-      /* the Integer twin of the String arm below: only an Integer can be
-         there, where unboxing the needle raised TypeError (#4835) */
-      int ta = ++g_tmp, tv = ++g_tmp;
-      buf_printf(b, "({ sp_IntArray *_t%d = ", ta); emit_recv_rooted(c, recv, ta, "SP_GC_ROOT", b);
-      buf_printf(b, "sp_RbVal _t%d = ", tv); emit_boxed(c, argv[0], b);
-      buf_printf(b, "; _t%d.tag == SP_TAG_INT ? sp_IntArray_%s(_t%d, _t%d.v.i) : ", tv, fn, ta, tv);
-      /* a boxed nil is the sentinel where the array can hold one */
-      if (elem_nil_sentinel(c, recv, rt))
-        buf_printf(b, "_t%d.tag == SP_TAG_NIL ? sp_IntArray_%s(_t%d, SP_INT_NIL) : ", tv, fn, ta);
-      buf_puts(b, "sp_box_nil(); })");
+      /* the Integer twin of the String arm below */
+      emit_int_array_boxed_search(c, recv, argv[0], rt, fn, "sp_box_nil()", a0 == TY_POLY, b);
       { *out = 1; return 1; }
     }
     if (rt == TY_STR_ARRAY && (a0 == TY_POLY || a0 == TY_NIL)) {
@@ -2471,17 +2492,10 @@ else {
                  tv, fn, ta, tv, tv, fn, ta);
       { *out = 1; return 1; }
     }
-    /* The same for an Integer array: a search for a value of another kind
-       is a well-defined "not there" (false / no index), where unboxing the
-       needle raised the conversion TypeError (#4835). */
+    /* The same for an Integer array, as the index arm above: false, or no
+       index. */
     if (rt == TY_INT_ARRAY && (sat == TY_POLY || (sat == TY_NIL && !nil_needle))) {
-      int ta = ++g_tmp, tv = ++g_tmp;
-      buf_printf(b, "({ sp_IntArray *_t%d = ", ta); emit_recv_rooted(c, recv, ta, "SP_GC_ROOT", b);
-      buf_printf(b, "sp_RbVal _t%d = ", tv); emit_boxed(c, argv[0], b);
-      buf_printf(b, "; _t%d.tag == SP_TAG_INT ? sp_IntArray_%s(_t%d, _t%d.v.i) : ", tv, fn, ta, tv);
-      if (elem_nil_sentinel(c, recv, rt))   /* as the index arm above */
-        buf_printf(b, "_t%d.tag == SP_TAG_NIL ? sp_IntArray_%s(_t%d, SP_INT_NIL) : ", tv, fn, ta);
-      buf_printf(b, "%s; })", sp_streq(fn, "include") ? "FALSE" : "(sp_int)-1");
+      emit_int_array_boxed_search(c, recv, argv[0], rt, fn, sp_streq(fn, "include") ? "FALSE" : "(sp_int)-1", sat == TY_POLY, b);
       { *out = 1; return 1; }
     }
     /* held across the needle, which may allocate */

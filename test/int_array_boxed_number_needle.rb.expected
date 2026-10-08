@@ -1,0 +1,33 @@
+[true, true, 0, 0, 3, 2]
+[true, true, 1, 1, 1, 1]
+[true, true, 2, 2, 2, 1]
+[true, true, 4, 4, 4, 1]
+[true, true, 1, 1, 1, 1]
+[false, false, nil, nil, nil, 0]
+[false, false, nil, nil, nil, 0]
+[false, false, nil, nil, nil, 0]
+[false, false, nil, nil, nil, 0]
+[false, false, nil, nil, nil, 0]
+[true, true, 0, 0, 3, 2]
+[false, false, nil, nil, nil, 0]
+[false, false, nil, nil, nil, 0]
+[false, false, nil, nil, nil, 0]
+[false, false, nil, nil, nil, 0]
+[false, false, nil, nil, nil, 0]
+listed
+not listed
+1
+[1, 3, true]
+[nil, nil, false]
+[nil, nil, false]
+1
+true
+2
+true
+1
+nil
+[true, 2, 2]
+[false, nil, nil]
+[true, 1, 1]
+[true, 2, 2]
+[false, nil, nil]
