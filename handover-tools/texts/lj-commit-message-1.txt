@@ -1,0 +1,12 @@
+Move the copy of one module method out of process_include_body
+
+process_include_body copies a module's method into the includer in the
+tail of its loop, under the name the loop chose for it. A method whose
+super goes on to another method of the module has to be copied with
+that one, each under a name of its own, so the copy becomes
+include_copy_scope(c, ci, ms, dst_name) and the loop calls it.
+
+The lines are moved as they stand. No generated C changes
+(tools/cident.sh: 0 differ).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

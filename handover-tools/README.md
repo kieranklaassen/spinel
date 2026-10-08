@@ -153,3 +153,27 @@ The sums are taken with `include-order/csum4.sh`, the runs with
 right, 1,232 right on both, 28 wrong with master's output, none right to
 wrong; the lists equal `ancestors` in 153 of 153 programs.
 
+
+`lj-*` in `texts/` is "super in a module reaches the module it includes,
+from every includer": two commits, the move of one method's copy out of
+`process_include_body` and the fix. It stands above "A class held by value
+builds a super into an included module's method", which is held and not on
+this branch yet, so this branch's own `src/` does not carry either. The two
+mails are `patches/lj-super-chain-on-42557a3c0e7c.patch`: `git am` above
+that fix's commit on 42557a3c0e7c. Its tools:
+- `lj-gen.rb OUT`: 18,474 one-answer programs (four module graphs, each
+  module and the class with no method, a plain one or one calling `super`,
+  nine kinds of method, 21 class shapes, among them a module reached twice
+  in five ways and a `prepend` in two).
+- `lj-attacks/`: 29 hand attacks. `h10` (`extend` on a class), `h23`
+  (`defined?(super)`), `h24` (`extend` on an object) and `h28` (an exception
+  class) are wrong before and after with one output; `h07` and `h26` are
+  right before and after; the other 23 go from wrong to right.
+- `lj-cost-gen.rb`, run in an empty directory: the compile-time programs.
+On 42557a3c0e7c above that fix, against CRuby 3.3.6: the C changes in 3,960
+of the 18,474; 786 wrong answers, 472 raises and 7 build failures become
+right, 2,685 stay right, 5 do not build before or after and 5 go from a
+raise to no build (all ten: two module methods chained by a bare `super`
+under a block into a superclass method that yields, which does not build on
+master either as `include T; include L`); none right to wrong, no failure
+to a wrong answer.
