@@ -1,0 +1,1 @@
+An operator that asks an object's == or divides by zero runs in its place among a call's operands
