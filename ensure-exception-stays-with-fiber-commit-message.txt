@@ -1,0 +1,29 @@
+An ensure body's exception stays with its fiber
+
+    f = Fiber.new do
+      begin
+        raise "in the fiber"
+      ensure
+        Fiber.yield 1
+      end
+    end
+    f.resume
+    begin
+      raise "main"
+    rescue => e
+      p e.cause
+    end
+
+printed `#<RuntimeError: in the fiber>`. CRuby prints nil: the fiber is
+suspended in its ensure body, and main is handling nothing. The other
+way round, a fiber resumed from an ensure body of main raised with
+main's exception as its cause, and the body lost its own exception to
+any raise made while its fiber was away.
+
+sp_inflight_cause, the exception an ensure body runs for, is one
+variable for all fibers. The per-fiber context carried the exception
+being handled and the pending cause across a switch, and not this one.
+It is now saved and loaded with them, and marked while its fiber is
+suspended.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

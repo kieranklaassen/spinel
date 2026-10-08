@@ -1,0 +1,34 @@
+An exception an ensure body dropped is not a later raise's cause
+
+    def by_return
+      begin
+        raise "dropped"
+      ensure
+        return 1
+      end
+    end
+    by_return
+    begin
+      raise "later"
+    rescue => e
+      p e.cause
+    end
+
+printed `#<RuntimeError: dropped>`. CRuby prints nil: the return in the
+ensure body dropped that exception, and nothing is being handled when
+"later" is raised. A `break`, a `next`, a `throw` and a proc's return
+in the ensure body left the same exception behind.
+
+An ensure body that runs for an exception sets sp_inflight_cause to it,
+so that a raise in the body takes it as its cause, and gave the outer
+value back in a line after the body. A return, a break or a next jumps
+past that line; a throw, a proc's return and a break out of a block's
+caller leave by longjmp.
+
+The body now gives the outer value back by a cleanup on its scope,
+which runs however the body is left inside its function. The three
+landings of a longjmp that is no raise, a catch, the method a proc
+returns from and the call a block's break leaves, read the value when
+they are entered and restore it when they land.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

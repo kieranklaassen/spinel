@@ -1,0 +1,1 @@
+An exception an ensure body dropped is not a later raise's cause
