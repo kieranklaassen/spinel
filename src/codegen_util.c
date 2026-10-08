@@ -5216,10 +5216,14 @@ void emit_main_exit(Buf *b) {
 
 /* The ensure region `eid`, its body done, hands the exception it waits with
    to the ensure region around it: `outer`'s locals take it, its frame is
-   popped, and its ensure body runs next. */
+   popped, and its ensure body runs next. That frame never lands, so the
+   exception is put in its slot as a landing would have left it: the
+   collector keeps what the slots hold up to sp_exc_top, and the slot the
+   exception was read from lies above that once the frame is popped. */
 void emit_ensure_exc_hand_on(Buf *b, int eid, int outer) {
-  buf_printf(b, "if (_excf%d) { _excf%d = 1; _excmsg%d = _excmsg%d; _exccls%d = _exccls%d; _excobj%d = _excobj%d; sp_exc_top--; goto _ensure%d; }",
-             eid, outer, outer, eid, outer, eid, outer, eid, outer);
+  buf_printf(b, "if (_excf%d) { _excf%d = 1; _excmsg%d = _excmsg%d; _exccls%d = _exccls%d; _excobj%d = _excobj%d; sp_exc_top--;"
+                " sp_exc_msg[sp_exc_top] = _excmsg%d; sp_exc_obj[sp_exc_top] = _excobj%d; goto _ensure%d; }",
+             eid, outer, outer, eid, outer, eid, outer, eid, outer, outer, outer);
 }
 
 void emit_retf_return(int eid, int has_retval, Buf *b) {
