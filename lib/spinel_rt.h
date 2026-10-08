@@ -13492,6 +13492,13 @@ static SP_TLS volatile const char *sp_last_exc_cls = sp_str_empty;
    consumed into the per-frame slot by sp_raise_cls. */
 static SP_TLS void *sp_exc_obj[SP_EXC_STACK_MAX];
 static SP_TLS void *sp_pending_exc_obj = NULL;
+/* One past the highest slot above that may hold what a raise on this worker
+   stored; 0 until the first raise, and again once sp_publish_worker_roots
+   finds the slots empty. Every slot from here up is NULL or a literal (an arm
+   zeroes its slot, a context is saved and loaded with its frames armed, and
+   sp_raise_stack_overflow stores a literal), so a parked worker has nothing
+   to publish or clear from here up. */
+static SP_TLS int sp_exc_slots_hw = 0;
 /* The exception currently being handled (set by a rescue body), and the cause
    captured for the next raised exception -- Exception#cause threads the former
    into a newly raised exception's `cause` field. */
@@ -13820,7 +13827,7 @@ SP_NORETURN SP_COLD void sp_raise_cls(const char *cls, const char *msg) {
      `raise e`, or through an ensure), it keeps the cause it had instead of
      becoming its own -- the pending cause is that cause, so a rescue that
      stores the pending cause outright (a modifier rescue) keeps it too. */
-  if (sp_exc_top > 0) { sp_exc_msg[sp_exc_top-1] = msg; sp_exc_cls[sp_exc_top-1] = cls; sp_exc_obj[sp_exc_top-1] = sp_pending_exc_obj; sp_pending_exc_obj = NULL; sp_pending_cause = sp_explicit_cause_set ? sp_explicit_cause : sp_cur_handled() ? (sp_cur_handled() == sp_exc_obj[sp_exc_top-1] ? (void *)((sp_Exception *)sp_cur_handled())->cause : sp_cur_handled()) : sp_inflight_cause; sp_inflight_cause = NULL; sp_explicit_cause = NULL; sp_explicit_cause_set = 0; sp_last_exc_cls = cls; sp_handler_stacks_unwind(); sp_poly_recur_unwind(); longjmp(sp_exc_stack[sp_exc_top-1], 1); }
+  if (sp_exc_top > 0) { if (sp_exc_slots_hw < sp_exc_top) sp_exc_slots_hw = sp_exc_top; sp_exc_msg[sp_exc_top-1] = msg; sp_exc_cls[sp_exc_top-1] = cls; sp_exc_obj[sp_exc_top-1] = sp_pending_exc_obj; sp_pending_exc_obj = NULL; sp_pending_cause = sp_explicit_cause_set ? sp_explicit_cause : sp_cur_handled() ? (sp_cur_handled() == sp_exc_obj[sp_exc_top-1] ? (void *)((sp_Exception *)sp_cur_handled())->cause : sp_cur_handled()) : sp_inflight_cause; sp_inflight_cause = NULL; sp_explicit_cause = NULL; sp_explicit_cause_set = 0; sp_last_exc_cls = cls; sp_handler_stacks_unwind(); sp_poly_recur_unwind(); longjmp(sp_exc_stack[sp_exc_top-1], 1); }
   /* Uncaught SystemExit terminates silently with its status (Kernel#exit).
      Read the status BEFORE the hooks run: it lives in the pending exception
      object, which nothing roots once the hooks start allocating. */
@@ -14781,6 +14788,36 @@ static void sp_mark_proc_homes(void) {
    globals. Only in the threaded build (the single-threaded one never parks). */
 static void sp_publish_worker_roots(void) {
   for (int i = 0; i < sp_exc_top; i++) if (sp_exc_obj[i]) _sp_gc_root_push((void **)&sp_exc_obj[i]);
+  /* The rest of what sp_mark_in_flight_exceptions does when this worker is the
+     one collecting. It marks each frame's message, and the slot one past the
+     top, which a rescue arm has popped and still reads: sp_raise_cls stores a
+     heap copy of every message, so after any rescue that slot names a heap
+     string until the next handler or the next raise replaces it. And it
+     clears every slot above that window, so that a later push cannot bring a
+     pointer the collection freed back inside it (#3404). A worker that is
+     parked while another one collects needs both. Without the first, the
+     other worker's collection freed the message of the exception this one had
+     just rescued; without the second, it freed what a slot above the window
+     still named, and the next `begin` here put that slot back in the window.
+     Either way this worker's own next collection marked a freed string.
+     Only the slots below sp_exc_slots_hw can hold any of it, so a worker that
+     has raised nothing pays one test here; one that has pays for the slots
+     its raises reached, until a park finds them empty. */
+  int hw = sp_exc_slots_hw;
+  if (hw) {
+    int top = sp_exc_top, live = 0;
+    for (int i = 0; i <= top && i < hw; i++) {
+      if (sp_exc_msg[i]) { _sp_gc_root_push((void **)((uintptr_t)&sp_exc_msg[i] | (uintptr_t)2)); live = 1; }   /* a string root */
+      if (sp_exc_obj[i]) live = 1;
+    }
+    if (top < hw && sp_exc_obj[top]) _sp_gc_root_push((void **)&sp_exc_obj[top]);
+    for (int i = top + 1; i < hw; i++) {
+      sp_exc_obj[i] = NULL;
+      sp_exc_msg[i] = NULL;
+    }
+    sp_exc_slots_hw = !live ? 0 : hw > top + 1 ? top + 1 : hw;
+  }
+  if (sp_inflight_cause) _sp_gc_root_push((void **)&sp_inflight_cause);
   if (sp_pending_exc_obj) _sp_gc_root_push((void **)&sp_pending_exc_obj);
   if (sp_pending_cause) _sp_gc_root_push((void **)&sp_pending_cause);
   for (int i = 0; i < sp_rescue_sp; i++)
