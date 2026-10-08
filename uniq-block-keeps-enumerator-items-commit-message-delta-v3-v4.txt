@@ -1,0 +1,12 @@
+--- message-v3
++++ message-v4
+@@ -35,3 +35,6 @@
+-5 fewer and 1 more, over each_char 0 and 1, over each_slice(2) 0 and
+-4, and 7 and 5 with the slice's first value for the key. A block with
+-two parameters, a bare block and no block keep their C.
++up to 1 and 1, over each_char up to 1 and 1, over each_slice(2) up to
++5.5 and 4, and 7 and 5 with the slice's first value for the key. It
++is stated and not cut: whether a step packs is known only when the
++program runs, so a loop free of the question would be the loop and
++the block's body written twice. A block with two parameters, a bare
++block and no block keep their C.

@@ -1,0 +1,23 @@
+# gen_cost.rb: the cost loops of uniq with a block over an Enumerator: one uniq over N steps, 8 keys,
+# N = 100,000 and 200,000; an instruction count a step is the difference of the two runs over 100,000.
+#   c1: a lone |x| over a.each (right on master)
+#   c6: a lone |x| over each_char (right on master)
+#   c7: a lone |x| over each_slice(2), the slice for the key (right on master)
+#   c5: the same with the slice's first value for the key
+#   c4: a lone |*r| over each_with_index (right on master)
+#   c2: |x, j| over each_with_index (right on master; the C must be the same)
+#   c3: &:abs over a.each (wrong on master)
+P = {
+  "c1" => ["a.each", "{ |x| x }", 1, "i % 8"],
+  "c2" => ["a.each_with_index", "{ |x, j| x }", 1, "i % 8"],
+  "c3" => ["a.each", "(&:abs)", 1, "i % 8"],
+  "c4" => ["a.each_with_index", "{ |*r| r[0] }", 1, "i % 8"],
+  "c5" => ["a.each_slice(2)", "{ |x| x[0] }", 2, "i / 2 % 8"],
+  "c7" => ["a.each_slice(2)", "{ |x| x }", 2, "i / 2 % 8"],
+}
+[100_000, 200_000].each do |n|
+  P.each do |name, (src, blk, per, item)|
+    File.write("#{name}_#{n}.rb", "a = []\ni = 0\nwhile i < #{n * per}\n  a << #{item}\n  i += 1\nend\ne = #{src}\np e.uniq #{blk}.size\n".sub("uniq (", "uniq("))
+  end
+  File.write("c6_#{n}.rb", "s = +\"\"\ni = 0\nwhile i < #{n}\n  s << (\"a\".ord + i % 8).chr\n  i += 1\nend\ne = s.each_char\np e.uniq { |x| x }.size\n")
+end
