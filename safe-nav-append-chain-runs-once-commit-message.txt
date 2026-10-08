@@ -1,0 +1,27 @@
+An append chained on a safe-navigation append runs that link once
+
+    def f
+      t = +"4"
+      t << "2"
+      t&.<<("a") << "b"
+      t
+    end
+    p f
+
+printed "42aab"; it is "42ab". A statement whose receiver is a `&.`
+call tests that call's answer for nil, so emit_nil_target_stmt runs the
+link into a temp ahead of the statement. str_mutate_append_bang_arms
+then walked the chain of appends down to the local, through that link
+again, and appended its operand a second time. An operand that is a
+call ran twice: `t&.<<((n += 1).to_s) << "b"` left n at 2.
+
+The walk now gathers no link the statement's head ran already
+(head_held), nor a link under it: those appended there, and the walk
+only goes on to the receiver. A chain with no `&.` link keeps its C,
+and so does a chain on a String local that is not a handle, where the
+link's first run goes to its temp and the walk's is the one that
+counts.
+
+Test: test/string_append_safe_nav_chain.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

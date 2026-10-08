@@ -1,0 +1,27 @@
+A chained append raises on a String local the program set to nil
+
+    def f(c)
+      t = +"4"
+      t << "2"
+      t = nil if c
+      t << "a" << "b"
+      t
+    end
+    p f(true)
+
+printed nil; CRuby raises NoMethodError at the first append. The
+statement plans its nil test for its own receiver, and in a chain that
+is the link under it, not the local: str_mutate_append_bang_arms walked
+down to the local and appended every link with no test, and
+sp_String_append_bin does nothing on a NULL handle. One append
+(`t << "a"`) raised already.
+
+The walk now asks cplan_nil about the chain's first link, and where it
+would raise there the link goes through sp_String_append_recv, whose
+NULL arm raises once the operand has run. A chain on a local that is
+never nil keeps its C, and so does a program that gives nil an answer
+of its own (cplan_nil_program_answers).
+
+Test: test/string_append_chain_nil_handle.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

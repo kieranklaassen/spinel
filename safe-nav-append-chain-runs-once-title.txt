@@ -1,0 +1,1 @@
+An append chained on a safe-navigation append runs that link once
