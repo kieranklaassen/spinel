@@ -175,6 +175,16 @@ int emit_struct_new_early(Compiler *c, int ci, int argc, const int *argv, int kw
 void emit_io_reopen_call(Compiler *c, int id, int recv, const char *name, Buf *b);
 int emit_reopen_block_call(Compiler *c, int id, int recv, int mi, const char *box_fn, Buf *b);
 void emit_reopen_pf_call(Compiler *c, int id, int pf, int cblk, const char *recv_text, Buf *b);
+/* `fmt % args` where the format is a String made where it is written (an
+   interpolation, a call's result) and the arguments allocate: nothing holds
+   the format while they are built, and C does not say which of the two is
+   built first. Opens the call with the format in a rooted temp ahead of the
+   arguments, `({ const char *_tN = fmt; SP_GC_ROOT_STR(_tN);
+   sp_str_format_polyarr(_tN`, with the nil check where `fck` names the
+   temp, and answers the text that closes it after the arguments. NULL, with
+   nothing written, for a literal format or one whose read cannot allocate:
+   the caller emits the call as before. */
+const char *emit_str_format_held(Compiler *c, int recv, int fck, Buf *b);
 int emit_str_format_untyped_array(Compiler *c, int recv, int a0n, int fck, Buf *b);
 void emit_voided_operands(Compiler *c, int recv, int arg, int v, Buf *b);
 int parse_named_format(const char *fmt, Buf *rew, const char **names, int *name_len, int maxn);

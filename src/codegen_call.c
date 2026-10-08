@@ -18970,6 +18970,17 @@ static void emit_utime_arg_bad(Compiler *c, int node, TyKind t, Buf *b) {
   buf_printf(b, "); sp_raise_cls(\"TypeError\", \"can't convert %s into time\");", cn ? cn : "Object");
 }
 
+/* See codegen_call_arms.h. */
+const char *emit_str_format_held(Compiler *c, int recv, int fck, Buf *b) {
+  int r = unwrap_parens(c, recv);
+  if (r < 0 || nt_kind(c->nt, r) == NK_StringNode || !operand_may_allocate(c, r)) return NULL;
+  int t = fck >= 0 ? fck : ++g_tmp;
+  buf_printf(b, "({ const char *_t%d = ", t);
+  emit_expr(c, recv, b);
+  if (fck >= 0) buf_printf(b, "; if (!_t%d) sp_nil_recv(\"%%\")", t);
+  buf_printf(b, "; SP_GC_ROOT_STR(_t%d); sp_str_format_polyarr(_t%d", t, t);
+  return "); })";
+}
 /* String#% whose operand has no type yet: `[]` and a bare `Array.new`. Only
    these literal shapes are taken: emit_boxed answers nil for any other untyped
    node, which would format silently wrong, and `{}` would answer "" for `%c`.
@@ -18987,13 +18998,15 @@ int emit_str_format_untyped_array(Compiler *c, int recv, int a0n, int fck, Buf *
           sp_streq(nt_str(nt, nr, "name"), "Array") && nac == 0;
   }
   if (!lit) return 0;
-  if (fck >= 0) {
+  const char *fend = emit_str_format_held(c, recv, fck, b);
+  if (fend) {}
+  else if (fck >= 0) {
     buf_printf(b, "sp_str_format_polyarr(({ const char *_t%d = ", fck);
     emit_expr(c, recv, b);
     buf_printf(b, "; if (!_t%d) sp_nil_recv(\"%%\"); _t%d; })", fck, fck);
   }
   else { buf_puts(b, "sp_str_format_polyarr("); emit_expr(c, recv, b); }
-  buf_puts(b, ", sp_format_args("); emit_boxed(c, a0n, b); buf_puts(b, "))");
+  buf_puts(b, ", sp_format_args("); emit_boxed(c, a0n, b); buf_printf(b, ")%s", fend ? fend : ")");
   return 1;
 }
 void emit_call_body(Compiler *c, int id, Buf *b);
