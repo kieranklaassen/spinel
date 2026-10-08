@@ -10272,10 +10272,9 @@ static int defaults_order_tells(Compiler *c, int a, int b) {
    order (defaults_order_tells), each default whose order can be told runs
    ahead. Any other call keeps its C. */
 static char *defaults_run_ahead(Compiler *c, Scope *m, const ArgLayout *L, int kwh, int kw_merged) {
-  int n = m->nparams, first = -1;
+  int n = m->nparams;
   if (!m->pdefault || n < 2) return NULL;
   int *d = malloc(sizeof(int) * (size_t)n);
-  char *ahead = NULL;
   for (int i = 0; i < n; i++) {
     int given = L->from[i] != ARG_DEFAULT;
     if (L->from[i] == ARG_BY_NAME && i != m->kwrest_idx)
@@ -10283,6 +10282,15 @@ static char *defaults_run_ahead(Compiler *c, Scope *m, const ArgLayout *L, int k
               kwh_lookup(c->nt, kwh, m->pnames[i]) >= 0;
     d[i] = given ? -1 : m->pdefault[i];
   }
+  char *ahead = defaults_ahead_of(c, m, d);
+  free(d);
+  return ahead;
+}
+
+/* See codegen_internal.h. */
+char *defaults_ahead_of(Compiler *c, Scope *m, const int *d) {
+  int n = m->nparams, first = -1;
+  char *ahead = NULL;
   for (int i = 0; i < n && first < 0; i++) {
     LocalVar *p = d[i] >= 0 && m->pnames[i] ? scope_local(m, m->pnames[i]) : NULL;
     if (!p || p->byref_out || arg_wants_root(c, p->type, -1)) continue;
@@ -10302,7 +10310,6 @@ static char *defaults_run_ahead(Compiler *c, Scope *m, const ArgLayout *L, int k
       ahead = NULL;
     }
   }
-  free(d);
   return ahead;
 }
 
@@ -10315,8 +10322,15 @@ static void emit_default_ahead(Compiler *c, Scope *m, int idx, Buf *ahead, Buf *
   TyKind pt = scope_local(m, m->pnames[idx])->type;
   Buf v; memset(&v, 0, sizeof v);
   emit_arg_or_default(c, m, idx, -1, &v);
+  emit_value_ahead(c, m, idx, v.p, arg_wants_root(c, pt, -1), ahead, out);
+  free(v.p);
+}
+
+/* See codegen_internal.h. */
+int emit_value_ahead(Compiler *c, Scope *m, int idx, const char *v, int rooted, Buf *ahead, Buf *out) {
+  TyKind pt = scope_local(m, m->pnames[idx])->type;
   int t = ++g_tmp;
-  if (arg_wants_root(c, pt, -1)) {
+  if (rooted) {
     emit_indent(g_pre, g_indent);
     emit_ctype(c, pt, g_pre);
     buf_printf(g_pre, " _t%d = %s; ", t, pt == TY_POLY ? "sp_box_nil()" : default_value_from_compiler(c, pt));
@@ -10326,9 +10340,9 @@ static void emit_default_ahead(Compiler *c, Scope *m, int idx, Buf *ahead, Buf *
     emit_ctype(c, pt, ahead);
     buf_puts(ahead, " ");
   }
-  buf_printf(ahead, "_t%d = %s; ", t, v.p ? v.p : default_value_from_compiler(c, pt));
+  buf_printf(ahead, "_t%d = %s; ", t, v ? v : default_value_from_compiler(c, pt));
   buf_printf(out, "_t%d", t);
-  free(v.p);
+  return t;
 }
 
 /* See codegen_internal.h. */

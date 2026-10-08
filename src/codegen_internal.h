@@ -696,6 +696,14 @@ void emit_args_filled_ahead(Compiler *c, int callee_idx, int argsNode, const cha
 /* Puts `ahead` in front of the call written at `at`, in the call's own
    expression: `({ <statements> <call>; })`. */
 void emit_call_ahead(Buf *b, size_t at, Buf *ahead);
+/* The rule of emit_args_filled_ahead over `d`, the default each of m's
+   parameters takes at a site (-1 for one that is given): a flag a parameter
+   whose default is made ahead (the caller frees it), or NULL for none. */
+char *defaults_ahead_of(Compiler *c, Scope *m, const int *d);
+/* Parameter `idx`'s value `v`, flagged by defaults_ahead_of, made ahead of
+   the call: its statement goes to `ahead` and its temp, which is answered,
+   is the argument. `rooted` declares the temp rooted in the prelude. */
+int emit_value_ahead(Compiler *c, Scope *m, int idx, const char *v, int rooted, Buf *ahead, Buf *out);
 void kw_plan(Compiler *c, Scope *m, int kwh, KwPlan *P);
 /* The keyword error a plan finds statically, in CRuby's order, into `msg`;
    0 when it finds none. */
