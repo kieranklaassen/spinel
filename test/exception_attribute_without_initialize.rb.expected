@@ -1,0 +1,32 @@
+5
+"set"
+"made"
+[1, "m"]
+7
+"deep"
+[[0, "r0"], [1, "r1"], [2, "r2"]]
+3
+"too many"
+108890
+["s1a0", "s2a0", "s3a0"]
+["s1a1", "s2a1", "s3a1"]
+["s1a2", "s2a2", "s3a2"]
+["s1a3", "s2a3", "s3a3"]
+["s1a4", "s2a4", "s3a4"]
+true
+FrozenError
+"lit"
+true
+true
+[ParseError, "lit", true]
+FrozenError
+[DeepError, "lit", true]
+FrozenError
+[ParseError, "", true]
+FrozenError
+[ParseError, "x1", false]
+[ParseError, "ParseError", false]
+true
+true
+"kept"
+true
