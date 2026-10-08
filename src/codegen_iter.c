@@ -5018,7 +5018,11 @@ static int emit_iteration_stmt_body(Compiler *c, int id, Buf *b, int indent);
    skips a nil, re-entering with g_sn_skip set so the guard is not asked
    again. Answers what the inner emission answers; when it declines, nothing
    is written: the statements the receiver hoisted are taken back too, or the
-   plain emission that follows would run them a second time. */
+   plain emission that follows would run them a second time. g_sn_stmt_probe
+   is set while the receiver is emitted here: a boxed handle's answer is
+   recorded on its call as it was, and the statement emitted after a decline
+   is typed by that record. */
+int g_sn_stmt_probe = 0;
 static int emit_iteration_stmt_sn(Compiler *c, int id, Buf *b, int indent) {
   const NodeTable *nt = c->nt;
   int recv = nt_ref(nt, id, "receiver");
@@ -5030,7 +5034,9 @@ static int emit_iteration_stmt_sn(Compiler *c, int id, Buf *b, int indent) {
   Buf gb; memset(&gb, 0, sizeof gb);
   Buf rb; memset(&rb, 0, sizeof rb);
   size_t pre0 = g_pre ? g_pre->len : 0;
+  int svp = g_sn_stmt_probe; g_sn_stmt_probe = 1;
   if (boxed) emit_boxed(c, recv, &rb); else emit_expr(c, recv, &rb);
+  g_sn_stmt_probe = svp;
   emit_indent(&gb, indent);
   buf_puts(&gb, "{ ");
   if (boxed) buf_puts(&gb, "sp_RbVal"); else emit_ctype(c, rt, &gb);

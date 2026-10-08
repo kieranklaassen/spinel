@@ -17366,6 +17366,30 @@ static int unresolved_name_chain(Compiler *c, int node) {
   }
   return 0;
 }
+/* Call `id`, a boxed handle's, answers kind `got` and is an operand of an
+   == or != whose other operand is of another kind and never nil (true or
+   false, an Integer or a Float with no nil sentinel). The typed comparison
+   folds that to a constant and reads no value from the call (emit_call's
+   "two different concrete types" arm), which is right for a nil receiver
+   too: the call keeps its typed record there. */
+static int handle_answer_folds(Compiler *c, int id, TyKind got) {
+  const NodeTable *nt = c->nt;
+  int par = node_parent(c, id);
+  if (par >= 0 && nt_type(nt, par) && sp_streq(nt_type(nt, par), "ArgumentsNode")) par = node_parent(c, par);
+  if (par < 0 || nt_kind(nt, par) != NK_CallNode) return 0;
+  const char *pn = nt_str(nt, par, "name");
+  if (!pn || (!sp_streq(pn, "==") && !sp_streq(pn, "!="))) return 0;
+  int args = nt_ref(nt, par, "arguments"), an = 0;
+  const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+  int recv = nt_ref(nt, par, "receiver");
+  if (an != 1 || recv < 0 || (recv == id) == (av[0] == id)) return 0;
+  int other = recv == id ? av[0] : recv;
+  TyKind to = infer_type(c, other);
+  if (to != TY_BOOL && ((to != TY_INT && to != TY_FLOAT) || cmp_operand_may_be_nil(c, other))) return 0;
+  int fo = eq_family(to), fg = eq_family(got);
+  return fg && fo != fg;
+}
+
 int emit_unresolved_call(Compiler *c, int id, Buf *b) {
   const NodeTable *nt = c->nt;
   const char *name = nt_str(nt, id, "name");
@@ -17598,8 +17622,22 @@ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
       int svkn = g_handle_face_node; g_handle_face_node = id;
       /* the handle's own emitter answers its own type (MatchData#string a
          `const char *`); a poly slot gets it boxed, or the arm assigned the
-         raw pointer into an sp_RbVal */
-      TyKind got = infer_type(c, id);
+         raw pointer into an sp_RbVal. For a `&.` call a pure read: its C
+         value is the box, the answer under the face is not the node's
+         type, and a later `&.` on this call reads that to pick its arm.
+         A `.` call's value is the handle's own, and the statement probe
+         (g_sn_stmt_probe) is typed by the record: both keep the recorded
+         question */
+      const char *cop = nt_str(nt, id, "call_operator");
+      int rec = g_sn_stmt_probe || !cop || !sp_streq(cop, "&.");
+      TyKind got = TY_UNKNOWN;
+      if (!rec) {
+        an_pure_read_begin();
+        got = infer_type(c, id);
+        an_pure_read_end();
+        rec = handle_answer_folds(c, id, got);
+      }
+      if (rec) got = infer_type(c, id);
       if (want == TY_POLY && got != TY_POLY && got != TY_UNKNOWN && got != TY_VOID) {
         Buf fb; memset(&fb, 0, sizeof fb);
         emit_call(c, id, &fb);
