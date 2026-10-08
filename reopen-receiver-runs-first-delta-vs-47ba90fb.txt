@@ -1,0 +1,522 @@
+===== 1. range-diff f6b2744b27d8..47ba90fb3da9 against 84f5b5020ef8..26d78e37aea1 (trailing blanks stripped from its lines) =====
+1:  47ba90fb3 ! 1:  26d78e37a A method added to a builtin runs its receiver before its arguments
+    @@ Commit message
+         that is no String, Symbol or Integer are such code: arg_runs_nothing)
+         the receiver is held only where the held value is what the call would
+         read after it (recv_held_as_read): a scalar, a Range, the pointer of
+    -    an Array, a Hash or an object, or a String no other name holds (an
+    -    interpolation, a builtin's own new String, an Integer's or a Float's
+    -    to_s, or the value of a method that ends in one and has no return).
+    -    Any other call is emitted as it was.
+    +    an Array, a Hash or an object, an interpolation, or a String from a
+    +    call proved to make its own (recv_new_string). The proof is by what
+    +    the program does not hold: the call is one of 30 String builtins that
+    +    always answer a new String and that str_fresh_value takes for one too
+    +    (not clamp, which answers its receiver), an Integer's or a Float's
+    +    to_s or inspect, or it reaches the one def of that name, whose body
+    +    ends in such a String and has no return; and the program as written
+    +    holds no other def of that name, no Symbol of that name, no alias, no
+    +    undef, and nowhere the name of a call that names a method by a value,
+    +    evaluates text or makes a Symbol (an_prog_never_gives). analyze_program
+    +    notes those names ahead of every rewrite, since a desugar erases such
+    +    a call. Any other call is emitted as it was.
+
+         Test: test/reopen_receiver_runs_first.rb.
+
+    @@ Commit message
+
+      ## Makefile ##
+     @@ Makefile: GC_STRESS_TESTS := test/gc_root_frame_slots.rb \
+    -                    test/gc_minor_byref_lent_slot.rb \
+    +                    test/string_range_walk_answer.rb \
+                         test/struct_values_fresh_receiver_root.rb \
+                         test/hash_splat_to_a.rb \
+     +                   test/reopen_receiver_runs_first.rb \
+                         test/proc_cell_capture_marked.rb \
+                         test/poly_array_intersect.rb \
+    -                    test/thread_new_args_rooted_across_fiber_alloc.rb \
+    +                    test/exception_class_raised_again.rb \
+    +
+    + ## src/analyze.c ##
+    +@@ src/analyze.c: void anh_add(ANameHash *st, const char *nm) {
+    + }
+    + void anh_free(ANameHash *st) { free(st->key); free(st->next); free(st->head); }
+    +
+    ++/* The program as written, read ahead of every desugar (analyze_program's
+    ++   first step): each name it gives a method by a def or may give one by a
+    ++   Symbol (an attr, a Struct member, a name handed to another call), and
+    ++   whether it holds an alias, an undef, an attr whose name is no Symbol, a
+    ++   Symbol made of parts, or the name of a call that names a method by a
+    ++   value, evaluates text or makes a Symbol the program does not write: as
+    ++   a call, a def, a Symbol or a String, for `:alias_method.to_proc` and
+    ++   `k.method(:alias_method)` call it too. The desugars rewrite such a call
+    ++   away, so the table cannot be asked later. A key is a copy: a node's
+    ++   strings do not outlive its rewrite. */
+    ++static ANameHash g_written, g_written_twice, g_by_value_names;
+    ++static int g_written_by_value;
+    ++static void an_written_add(ANameHash *st, const char *nm) {
+    ++  if (nm && !anh_has(st, nm)) anh_add(st, strdup(nm));
+    ++}
+    ++static int an_names_by_value(const char *nm) { return nm && anh_has(&g_by_value_names, nm); }
+    ++static void an_note_written_names(const NodeTable *nt) {
+    ++  static const char *const by_value[] = {
+    ++    "alias_method", "define_method", "define_singleton_method", "send", "__send__", "public_send",
+    ++    "class_eval", "module_eval", "class_exec", "module_exec", "instance_eval", "instance_exec", "eval",
+    ++    "undef_method", "remove_method", "delegate", "instance_delegate", "single_delegate", "def_delegator",
+    ++    "def_delegators", "def_instance_delegator", "def_instance_delegators", "def_single_delegator",
+    ++    "def_single_delegators", "to_sym", "intern", NULL };
+    ++  for (int k = 0; by_value[k]; k++) if (!anh_has(&g_by_value_names, by_value[k])) anh_add(&g_by_value_names, by_value[k]);
+    ++  for (int id = 0; id < nt->count; id++) {
+    ++    switch (nt_kind(nt, id)) {
+    ++      case NK_AliasMethodNode: case NK_UndefNode: case NK_InterpolatedSymbolNode: g_written_by_value = 1; break;
+    ++      case NK_StringNode:
+    ++        if (an_names_by_value(nt_str(nt, id, "content"))) g_written_by_value = 1;
+    ++        break;
+    ++      case NK_SymbolNode: {
+    ++        const char *nm = nt_str(nt, id, "value");
+    ++        if (an_names_by_value(nm)) g_written_by_value = 1;
+    ++        an_written_add(&g_written, nm);
+    ++        an_written_add(&g_written_twice, nm);
+    ++        break;
+    ++      }
+    ++      case NK_DefNode: {
+    ++        const char *nm = nt_str(nt, id, "name");
+    ++        if (an_names_by_value(nm)) g_written_by_value = 1;
+    ++        if (nm && anh_has(&g_written, nm)) an_written_add(&g_written_twice, nm);
+    ++        an_written_add(&g_written, nm);
+    ++        break;
+    ++      }
+    ++      case NK_CallNode: {
+    ++        const char *nm = nt_str(nt, id, "name");
+    ++        if (!nm) break;
+    ++        if (an_names_by_value(nm)) g_written_by_value = 1;
+    ++        if (sp_streq(nm, "attr") || sp_streq(nm, "attr_reader") || sp_streq(nm, "attr_writer") ||
+    ++            sp_streq(nm, "attr_accessor")) {
+    ++          int an = 0;
+    ++          const int *av = nt_arr(nt, nt_ref(nt, id, "arguments"), "arguments", &an);
+    ++          for (int i = 0; i < an; i++) if (nt_kind(nt, av[i]) != NK_SymbolNode) g_written_by_value = 1;
+    ++        }
+    ++        break;
+    ++      }
+    ++      default: break;
+    ++    }
+    ++  }
+    ++}
+    ++/* Does the program, as written, give no class or module a method named
+    ++   `nm`, beyond `defs` (0 or 1) defs of that name? Proved by what it does not
+    ++   hold and by nothing cleverer: no other def of that name, no Symbol of that
+    ++   name, and nowhere a route that names a method by a value. */
+    ++int an_prog_never_gives(const char *nm, int defs) {
+    ++  return !g_written_by_value && !anh_has(defs ? &g_written_twice : &g_written, nm);
+    ++}
+    ++
+    + static int cr_class_is_ancestor(Compiler *c, int sup, int cls) {
+    +   for (int k = cls, hops = 0; k >= 0 && k < c->nclasses && hops < c->nclasses; k = c->classes[k].parent, hops++)
+    +     if (k == sup) return 1;
+    +@@ src/analyze.c: static void an_phase_reconcile_check(Compiler *c) {
+    +
+    + void analyze_program(Compiler *c) {
+    +   double tm_an = sp_timing_now();
+    ++  an_note_written_names(c->nt);
+    +   an_phase_desugar_register(c);
+    +   an_phase_class_structure(c);
+    +   an_phase_block_inline(c);
+    +
+    + ## src/analyze.h ##
+    +@@ src/analyze.h: TyKind local_aset_key_type(Compiler *c, Scope *sc, const char *name, int *nwrite
+    + /* Run inference over the whole program: register locals, reach a fixpoint
+    +    on their types, and fill the node type cache. */
+    + void analyze_program(Compiler *c);
+    ++/* The program as written gives no class a method named `nm`, beyond `defs`
+    ++   (0 or 1) defs of that name: read ahead of the desugars, by absence. */
+    ++int an_prog_never_gives(const char *nm, int defs);
+    + /* True if a regex source contains a capturing group: an unescaped '(' that
+    +    isn't the start of a non-capturing/extension group '(?...'. scan returns
+    +    nested arrays for capturing patterns, which the str_array path can't model. */
+
+      ## src/codegen_call.c ##
+     @@ src/codegen_call.c: static void emit_reopen_recv(Compiler *c, int mi, int recv, int boxed, const cha
+    @@ src/codegen_call.c: static void emit_reopen_recv(Compiler *c, int mi, int recv,
+     +  }
+     +  return 0;
+     +}
+    -+/* Is the String `n` answers one no other name holds: an interpolation or a
+    -+   builtin's own new String (str_fresh_value), an Integer's or a Float's
+    -+   to_s, or the value of the one method a call reaches, where its body ends
+    -+   in such a String and has no `return`? */
+    ++/* Is the String `n` answers one no other name holds? An interpolation is.
+    ++   A call's is where the program gives no class a method of that name
+    ++   (an_prog_never_gives) and the call is a String builtin that always makes
+    ++   its own String (a name of the list below that str_fresh_value agrees
+    ++   with: `clamp` answers its receiver, and so may a name neither knows) or
+    ++   an Integer's or a Float's to_s or inspect; or where it reaches the one
+    ++   def of that name, whose body ends in such a String and has no `return`. */
+     +static int recv_new_string(Compiler *c, int n, int depth) {
+    ++  static const char *const makes[] = {
+    ++    "+", "*", "%", "upcase", "downcase", "capitalize", "swapcase", "reverse", "strip", "lstrip", "rstrip",
+    ++    "chomp", "chop", "chr", "succ", "next", "center", "ljust", "rjust", "tr", "tr_s", "delete", "squeeze",
+    ++    "sub", "gsub", "delete_prefix", "delete_suffix", "dup", "inspect", "dump", NULL };
+     +  const NodeTable *nt = c->nt;
+     +  n = unwrap_parens(c, n);
+     +  if (n < 0 || comp_ntype(c, n) != TY_STRING) return 0;
+    -+  if (str_fresh_value(c, n)) return 1;
+    ++  if (nt_kind(nt, n) == NK_InterpolatedStringNode) return 1;
+     +  if (nt_kind(nt, n) != NK_CallNode || nt_ref(nt, n, "block") >= 0) return 0;
+     +  const char *nm = nt_str(nt, n, "name");
+     +  int r = nt_ref(nt, n, "receiver");
+     +  TyKind rt = r >= 0 ? comp_ntype(c, r) : TY_UNKNOWN;
+     +  const CallPlan *pl = cplan_user(c, n);
+    -+  if (pl->mi < 0)
+    -+    return nm && (rt == TY_INT || rt == TY_FLOAT) && (sp_streq(nm, "to_s") || sp_streq(nm, "inspect")) &&
+    -+           comp_builtin_kind_reopen_mi(c, rt, nm) < 0;
+    -+  if (depth >= 3 || pl->dispatch != CP_DIRECT) return 0;
+    -+  return !body_has_return(nt, c->scopes[pl->mi].body) &&
+    -+         recv_new_string(c, scope_body_last(c, pl->mi), depth + 1);
+    ++  if (!nm) return 0;
+    ++  if (pl->mi < 0) {
+    ++    int made = 0;
+    ++    if (rt == TY_INT || rt == TY_FLOAT)
+    ++      made = (sp_streq(nm, "to_s") || sp_streq(nm, "inspect")) && comp_builtin_kind_reopen_mi(c, rt, nm) < 0;
+    ++    else
+    ++      for (int k = 0; !made && makes[k]; k++) made = sp_streq(nm, makes[k]) && str_fresh_value(c, n);
+    ++    return made && an_prog_never_gives(nm, 0);
+    ++  }
+    ++  if (depth >= 3 || pl->dispatch != CP_DIRECT || body_has_return(nt, c->scopes[pl->mi].body)) return 0;
+    ++  return recv_new_string(c, scope_body_last(c, pl->mi), depth + 1) && an_prog_never_gives(nm, 1);
+     +}
+     +/* Does evaluating `n` run none of the program's code and store nothing? A
+     +   pure read, a global, a String literal, and an Array, a Hash, a Range or an
+    @@ src/codegen_call.c: static void emit_reopen_recv(Compiler *c, int mi, int recv,
+     +static int reopen_recv_runs_first(Compiler *c, Scope *m, int recv, const int *argv, int argc, int n) {
+     +  for (int i = 0; i < g_n_argov; i++) if (g_argov_node[i] == recv) return 0;
+     +  int eff = subtree_has_side_effect(c, recv), alloc = subtree_allocates(c->nt, recv);
+    -+  if (!recv_held_as_read(c, recv)) {
+    -+    for (int i = 0; i < argc; i++) if (!arg_runs_nothing(c, argv[i])) return 0;
+    -+    for (int i = 0; m->pdefault && i < m->nparams; i++) {
+    -+      int d = m->pdefault[i];
+    -+      if (d < 0 || (!callee_param_is_declared_kwarg(c, m, m->pnames[i]) && arg_slot_for_param(c, m, i, n) >= 0)) continue;
+    -+      if (!arg_runs_nothing(c, d)) return 0;
+    -+    }
+    ++  int quiet = 1;
+    ++  for (int i = 0; quiet && i < argc; i++) quiet = arg_runs_nothing(c, argv[i]);
+    ++  for (int i = 0; quiet && m->pdefault && i < m->nparams; i++) {
+    ++    int d = m->pdefault[i];
+    ++    if (d < 0 || (!callee_param_is_declared_kwarg(c, m, m->pnames[i]) && arg_slot_for_param(c, m, i, n) >= 0)) continue;
+    ++    quiet = arg_runs_nothing(c, d);
+     +  }
+    ++  if (!quiet && !recv_held_as_read(c, recv)) return 0;
+     +  if (alloc && m->rest_idx >= 0) return 1;
+     +  for (int i = 0; i < argc; i++)
+     +    if ((eff && subtree_has_side_effect(c, argv[i])) || read_rebound_by(c, argv[i], recv)) return 1;
+    @@ src/codegen_call_class.c: int emit_call_reopen_arms(Compiler *c, int id, Buf *b,
+          }
+     @@ src/codegen_call_class.c: int emit_call_reopen_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
+              if (oc_mi >= 0) {
+    -           if (rt == TY_STRING && emit_reopen_block_call(c, id, recv, oc_mi, NULL, b)) return 1;
+    +           if ((rt == TY_STRING || rt == TY_STRBUF) && emit_reopen_block_call(c, id, recv, oc_mi, NULL, b)) return 1;
+                if (g_plan_check) ucall_observe(c, id, oc_mi, oc_ci, 0);
+     +          size_t at = b->len;
+                buf_printf(b, "sp_%s_%s(", mc_reopen_cls(c, oc_ci, name), mc(name));
+    @@ test/reopen_receiver_runs_first.rb (new)
+     +def held = $k
+     +key = Key.new
+     +puts held.many({ key => 1 })
+    ++
+    ++# a String from a call is held ahead of such an argument only where the call
+    ++# makes its own: clamp answers its receiver, and a method the program gives
+    ++# Object may answer a String another name holds
+    ++$c = +"ab"
+    ++def addc
+    ++  $c << "c"
+    ++  [1, 2]
+    ++end
+    ++class Object
+    ++  def kept = $c
+    ++end
+    ++puts $c.clamp("a", "zz").pair(addc)
+    ++puts "x".kept.pair(addc)
+
+      ## test/reopen_receiver_runs_first.rb.expected (new) ##
+     @@
+    @@ test/reopen_receiver_runs_first.rb.expected (new)
+     +3 2
+     +5 1
+     +3 1
+    ++3 2
+    ++4 2
+===== 2. the family's generator (gen.rb, the 148 programs) =====
+# gen.rb: the re-cut's family: a String receiver that is a call, beside an argument that appends to the String a global holds.
+HEAD = "class String\n  def pair(a) = \"\#{self}|\#{a.size}\"\nend\n$s = +\"ab\"\ndef add = ($s << \"c\"; [1, 2])\n"
+def w(n, pre, recv) = File.write("#{n}.rb", "#{HEAD}#{pre}puts #{recv}.pair(add)\n")
+# F: the receiver answers a String another name holds
+F = {
+  "f1" => ["", '$s.clamp("a", "zz")'],
+  "f2" => ["class Object\n  def held = $s\nend\n", '"x".held'],
+  "f3" => ["", '$s.to_s'], "f4" => ["", '$s.to_str'], "f5" => ["", '$s.itself'], "f6" => ["", '(+$s)'],
+  "f7" => ["", '$s.then { |x| x }'], "f8" => ["", '$s.tap { }'], "f9" => ["", '[$s][0]'], "f10" => ["", '[$s].first'],
+  "f11" => ["", '[$s, "a"].max'], "f12" => ["", %q[({ 1 => $s })[1]]], "f13" => ["", '$s.concat("")'], "f14" => ["", '($s << "")'],
+  "f15" => ["", '$s.force_encoding("UTF-8")'], "f16" => ["", '$s.insert(0, "")'],
+  "f17" => ["module Kernel\n  def held = $s\nend\n", '"x".held'],
+  "f18" => ["module Comparable\n  def held = $s\nend\n", '"x".held'],
+  "f19" => ["class Object\n  def held(q) = $s\nend\n", '"x".held("q")'],
+  "f20" => ["def held = $s\n", 'held'],
+  "f21" => ["def held = $s.clamp(\"a\", \"zz\")\n", 'held'],
+  "f22" => ["def held = $s.to_s\n", 'held'],
+  "f23" => ["def held = $s\ndef held2 = held\n", 'held2'],
+  "f24" => ["", '($s || "x")'], "f25" => ["", '(ARGV.size > 5 ? "x" : $s)'], "f26" => ["", '[$s].min'],
+  "f27" => ["", '$s.prepend("")'], "f28" => ["", '[$s].last'], "f29" => ["", '$s.freeze.itself'],
+  "f30" => ["class String\n  def held = self\nend\n", '$s.held'],
+  "f31" => ["class Object\n  def held = self\nend\n", '$s.held'],
+  "f32" => ["def held(x) = x\n", 'held($s)'],
+}
+F.each { |n, (pre, r)| w(n, pre, r) }
+# P: the receiver makes a new String in CRuby
+P = %w[dup upcase downcase capitalize swapcase reverse strip lstrip rstrip chomp chop chr succ next squeeze inspect dump
+       clone b scrub unicode_normalize to_sym.to_s size.to_s length.inspect]
+P.each_with_index { |m, i| w("p#{i + 1}", "", "$s.#{m}") }
+PA = ['$s + ""', '$s * 1', '$s % []', '"#{$s}"', '$s.center(1)', '$s.ljust(1)', '$s.rjust(1)', '$s.tr("z", "y")', '$s.tr_s("z", "y")',
+      '$s.delete("z")', '$s.sub("zz", "")', '$s.gsub("zz", "")', '$s.delete_prefix("zz")', '$s.delete_suffix("zz")', '$s[0, 5]',
+      '$s.slice(0, 5)', '$s.encode("UTF-8")', '"%s" % $s', '$s.upcase.downcase', '("x" + $s)', '$s.dup.itself', '$s.upcase.to_s']
+PA.each_with_index { |r, i| w("q#{i + 1}", "", "(#{r})") }
+w("q30", "def fresh = \"a\#{$s}\"\n", "fresh")
+w("q31", "def fresh = $s.upcase\n", "fresh")
+w("q32", "def fresh = \"a\" + $s\n", "fresh")
+w("q33", "def fresh = $s.size.to_s\n", "fresh")
+w("q34", "def fresh2 = \"a\#{$s}\"\ndef fresh = fresh2\n", "fresh")
+# D: the program gives String an upcase that answers self, by every route
+SELF = "self"
+D = {
+  "d1" => "class String\n  def upcase = self\nend\n",
+  "d2" => "class String\n  alias upcase itself\nend\n",
+  "d3" => "class String\n  alias_method :upcase, :itself\nend\n",
+  "d4" => "class String\n  define_method(:upcase) { self }\nend\n",
+  "d5" => "String.send(:define_method, :upcase) { self }\n",
+  "d6" => "String.class_eval { def upcase = self }\n",
+  "d7" => "module M\n  def upcase = self\nend\nclass String\n  prepend M\nend\n",
+  "d8" => "module M\n  def upcase = self\nend\nString.prepend(M)\n",
+  "d9" => "def $s.upcase = self\n",
+  "d10" => "$s.define_singleton_method(:upcase) { self }\n",
+  "d11" => "$s.instance_eval { def upcase = self }\n",
+  "d12" => "K = String\nclass K\n  def upcase = self\nend\n",
+  "d13" => "k = String\nk.class_eval { def upcase = self }\n",
+  "d14" => "module R\n  refine String do\n    def upcase = self\n  end\nend\nusing R\n",
+  "d15" => "eval(\"class String; def upcase = self; end\")\n",
+  "d16" => "module M\n  def self.prepended(b) = b.send(:define_method, :upcase) { self }\nend\nString.prepend(M)\n",
+  "d17" => "String.send(:alias_method, :upcase, :itself)\n",
+  "d21" => "$s.singleton_class.class_eval { def upcase = self }\n",
+  "d22" => "module M\n  def upcase = self\nend\n$s.extend(M)\n",
+  "d23" => "class << $s\n  def upcase = self\nend\n",
+  "d24" => "String.define_method(:upcase) { self }\n",
+  "d25" => "class String\n  attr_reader :upcase\nend\n$s.instance_variable_set(:@upcase, $s)\n",
+  "d26" => "class String\n  attr_reader \"upcase\"\nend\n$s.instance_variable_set(:@upcase, $s)\n",
+  "d36" => "String.module_eval(\"def upcase = self\")\n",
+  "d37" => "String.public_send(:define_method, :upcase) { self }\n",
+  "d38" => "String.__send__(:define_method, :upcase) { self }\n",
+  "d39" => "m = :upcase\nString.define_method(m) { self }\n",
+  "d40" => "String.class_exec { def upcase = self }\n",
+}
+D.each { |n, pre| w(n, pre, "$s.upcase") }
+File.write("d18.rb", "#{HEAD}class String\n  undef upcase\nend\nbegin\n  puts $s.upcase.pair(add)\nrescue NoMethodError\n  puts \"none\"\nend\n")
+File.write("d19.rb", "#{HEAD}class String\n  remove_method :upcase\nend\nbegin\n  puts $s.upcase.pair(add)\nrescue NoMethodError\n  puts \"none\"\nend\n")
+File.write("d20.rb", "#{HEAD}String.undef_method(:upcase)\nbegin\n  puts $s.upcase.pair(add)\nrescue NoMethodError\n  puts \"none\"\nend\n")
+# the one def a call reaches, given another body by another route
+w("d27", "def fresh = \"a\#{ARGV.size}\"\ndef other = $s\nalias fresh other\n", "fresh")
+w("d28", "def fresh = \"a\#{ARGV.size}\"\ndef fresh = $s\n", "fresh")
+w("d29", "def fresh = \"a\#{ARGV.size}\"\nself.class.send(:define_method, :fresh) { $s }\n", "fresh")
+w("d30", "def fresh = \"a\#{ARGV.size}\"\nif ARGV.size < 5\n  def fresh = $s\nend\n", "fresh")
+w("d31", "def fresh = \"a\#{ARGV.size}\"\ndef other = $s\nObject.send(:alias_method, :fresh, :other)\n", "fresh")
+w("d41", "def fresh = \"a\#{ARGV.size}\"\nclass Object\n  def fresh = $s\nend\n", "fresh")
+w("d42", "def fresh = \"a\#{ARGV.size}\"\nmodule Kernel\n  def fresh = $s\nend\n", "fresh")
+# an Integer's to_s and inspect
+w("d32", "class Integer\n  def to_s = $s\nend\n", "5.to_s")
+w("d33", "module M\n  def to_s = $s\nend\nInteger.prepend(M)\n", "5.to_s")
+w("d34", "class Integer\n  def gs = $s\n  alias to_s gs\nend\n", "5.to_s")
+w("d35", "class Integer\n  def inspect = $s\nend\n", "5.inspect")
+w("d43", "class Integer\n  define_method(:to_s) { $s }\nend\n", "5.to_s")
+w("d44", "module M\n  def inspect = $s\nend\nclass Float\n  prepend M\nend\n", "2.5.inspect")
+# H: a definer reached without its name written as a call
+UP = '"up" + "case"'
+H = {
+  "h1" => "String.method(:define_method).call(#{UP}) { self }\n",
+  "h2" => ":define_method.to_proc.call(String, #{UP}) { self }\n",
+  "h3" => "String.method(\"define_\" + \"method\").call(#{UP}) { self }\n",
+  "h4" => ":alias_method.to_proc.call(String, #{UP}, \"itself\")\n",
+  "h5" => "[[String, #{UP}, \"itself\"]].each { |k, a, b| k.method(:alias_method).call(a, b) }\n",
+  "h6" => "w = (\"alias_\" + \"method\").to_sym\nString.method(w).call(#{UP}, \"itself\")\n",
+  "h8" => "String.method(:alias_method).unbind.bind(String).call(#{UP}, \"itself\")\n",
+  "h13" => "(\"alias_\" + \"method\").to_sym.to_proc.call(String, #{UP}, \"itself\")\n",
+  "h14" => "w = :\"alias_\#{\"method\"}\"\nw.to_proc.call(String, #{UP}, \"itself\")\n",
+  "h15" => "String.method(\"alias_method\").call(#{UP}, \"itself\")\n",
+  "h17" => "begin\n  :alias_method.to_proc.call(String, #{UP}, \"itself\")\nrescue NoMethodError\n  $s << \"\"\nend\n",
+  "h18" => "%i[alias_method].each { |w| w.to_proc.call(String, #{UP}, \"itself\") }\n",
+  "h19" => "begin\n  [[String, #{UP}, \"itself\"]].each { |k, a, b| k.method(:alias_method).call(a, b) }\nrescue NoMethodError\n  $s << \"\"\nend\n",
+  "h20" => "class Foo\n  def define_method(*) = nil\nend\n",
+  "h21" => "$w = \"send\"\n",
+}
+H.each { |n, pre| w(n, pre, "$s.upcase") }
+# the same with the definer's name made at run time; CRuby then has no upcase to call
+TAIL = "begin\n  puts $s.upcase.pair(add)\nrescue NoMethodError\n  puts \"none\"\nend\n"
+UNDEF = '"undef_" + "method"'
+{
+  "h22" => "w = (#{UNDEF}).to_sym\n[String, #{UP}].inject(&w)\n",
+  "h23" => "[String, #{UP}].inject((#{UNDEF}).to_sym)\n",
+  "h24" => "[String, #{UP}].inject(#{UNDEF})\n",
+  "h25" => "w = (#{UNDEF}).to_sym\n[String, #{UP}].reduce(w)\n",
+  "h26" => "w = (#{UNDEF}).to_sym\nString.then { |k| [k].each_with_object(#{UP}, &w) }\n",
+}.each { |n, pre| File.write("#{n}.rb", "#{HEAD}#{pre}#{TAIL}") }
+w("h27", "begin\n  (\"alias_\" + \"method\").to_sym.to_proc.call(String, #{UP}, \"itself\")\nrescue NoMethodError\n  $s << \"\"\nend\n", "$s.upcase")
+===== 3. the family's cells (one line a program) =====
+d1    sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+d2    sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+d3    sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+d4    sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+d5    sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+d6    sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+d7    sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+d8    sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+d9    sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+d10   sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+d11   sameC            ruby[abc|2~rc 0~     ] tip xxxxx  head xxxxx
+d12   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+d13   sameC            ruby[abc|2~rc 0~     ] tip xxxxx  head xxxxx
+d14   sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+d15   sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+d16   sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+d17   sameC            ruby[abc|2~rc 0~     ] tip xxxxx  head xxxxx
+d18   sameC            ruby[none~rc 0~      ] tip xxxxx  head xxxxx
+d19   sameC(refused)   ruby[none~rc 0~      ] tip nnn    head nnn
+d20   sameC(refused)   ruby[none~rc 0~      ] tip nnn    head nnn
+d21   sameC            ruby[abc|2~rc 0~     ] tip xxxxx  head xxxxx
+d22   sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+d23   sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+d24   sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+d25   sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+d26   sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+d27   sameC            ruby[abc|2~rc 0~     ] tip xxxxx  head xxxxx
+d28   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+d29   sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+d30   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+d31   sameC            ruby[abc|2~rc 0~     ] tip xxxxx  head xxxxx
+d32   sameC            ruby[abc|abc~rc 0~   ] tip ooooo  head ooooo
+d33   sameC            ruby[abc|abc~rc 0~   ] tip xxxxx  head xxxxx
+d34   sameC            ruby[abc|abc~rc 0~   ] tip ooooo  head ooooo
+d35   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+d36   sameC            ruby[abc|2~rc 0~     ] tip xxxxx  head xxxxx
+d37   sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+d38   sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+d39   sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+d40   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+d41   sameC            ruby[abc|2~rc 0~     ] tip xxxxx  head xxxxx
+d42   sameC            ruby[a0|2~rc 0~      ] tip xxxxx  head xxxxx
+d43   sameC            ruby[abc|abc~rc 0~   ] tip ooooo  head ooooo
+d44   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+f1    sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+f2    sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+f3    sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+f4    sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+f5    sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+f6    sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+f7    sameC            ruby[abc|2~rc 0~     ] tip xxxxx  head xxxxx
+f8    sameC            ruby[abc|2~rc 0~     ] tip xxxxx  head xxxxx
+f9    sameC            ruby[abc|2~rc 0~     ] tip xxxxo  head xxxxo
+f10   sameC            ruby[abc|2~rc 0~     ] tip xxxxo  head xxxxo
+f11   sameC            ruby[abc|2~rc 0~     ] tip xxxxn  head xxxxn
+f12   sameC            ruby[abc|2~rc 0~     ] tip xxxxo  head xxxxo
+f13   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+f14   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+f15   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+f16   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+f17   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+f18   sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+f19   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+f20   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+f21   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+f22   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+f23   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+f24   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+f25   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+f26   sameC            ruby[abc|2~rc 0~     ] tip xxxxn  head xxxxn
+f27   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+f28   sameC            ruby[abc|2~rc 0~     ] tip xxxxo  head xxxxo
+f29   sameC            ruby[rc 1~           ] tip xxxxx  head xxxxx
+f30   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+f31   sameC            ruby[abc|2~rc 0~     ] tip xxxxx  head xxxxx
+f32   sameC            ruby[abc|2~rc 0~     ] tip xxxxo  head xxxxo
+h1    sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+h2    sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+h3    sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+h4    sameC            ruby[abc|2~rc 0~     ] tip xxxxx  head xxxxx
+h5    sameC            ruby[abc|2~rc 0~     ] tip xxxxx  head xxxxx
+h6    sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+h8    sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+h13   sameC            ruby[abc|2~rc 0~     ] tip xxxxx  head xxxxx
+h14   sameC            ruby[abc|2~rc 0~     ] tip nnn    head nnn
+h15   sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+h17   sameC            ruby[abc|2~rc 0~     ] tip xxxxx  head xxxxx
+h18   sameC            ruby[abc|2~rc 0~     ] tip xxxxx  head xxxxx
+h19   sameC            ruby[abc|2~rc 0~     ] tip xxxxx  head xxxxx
+h20   sameC            ruby[AB|2~rc 0~      ] tip xxxxx  head xxxxx
+h21   sameC            ruby[AB|2~rc 0~      ] tip xxxxx  head xxxxx
+h22   sameC            ruby[none~rc 0~      ] tip xxxxx  head xxxxx
+h23   sameC            ruby[none~rc 0~      ] tip xxxxx  head xxxxx
+h24   otherC           ruby[none~rc 0~      ] tip xxxxx  head xxxxx
+h25   sameC            ruby[none~rc 0~      ] tip xxxxx  head xxxxx
+h26   sameC            ruby[none~rc 0~      ] tip xxxxx  head xxxxx
+h27   sameC            ruby[abc|2~rc 0~     ] tip xxxxx  head xxxxx
+p1    otherC           ruby[ab|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+p2    otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+p3    otherC           ruby[ab|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+p4    otherC           ruby[Ab|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+p5    otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+p6    otherC           ruby[ba|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+p7    otherC           ruby[ab|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+p8    otherC           ruby[ab|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+p9    otherC           ruby[ab|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+p10   otherC           ruby[ab|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+p11   otherC           ruby[a|2~rc 0~       ] tip xxxxx  head ooooo   won 5
+p12   otherC           ruby[a|2~rc 0~       ] tip ooooo  head ooooo
+p13   otherC           ruby[ac|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+p14   otherC           ruby[ac|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+p15   otherC           ruby[ab|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+p16   otherC           ruby["ab"|2~rc 0~    ] tip xxxxx  head ooooo   won 5
+p17   otherC           ruby["ab"|2~rc 0~    ] tip xxxxx  head ooooo   won 5
+p18   sameC            ruby[ab|2~rc 0~      ] tip xxxxx  head xxxxx
+p19   sameC            ruby[ab|2~rc 0~      ] tip xxxxx  head xxxxx
+p20   sameC            ruby[ab|2~rc 0~      ] tip xxxxx  head xxxxx
+p21   sameC(refused)   ruby[ab|2~rc 0~      ] tip nnn    head nnn
+p22   sameC            ruby[ab|2~rc 0~      ] tip xxxxx  head xxxxx
+p23   otherC           ruby[2|2~rc 0~       ] tip xxxxx  head ooooo   won 5
+p24   otherC           ruby[2|2~rc 0~       ] tip xxxxx  head ooooo   won 5
+q1    otherC           ruby[ab|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+q2    otherC           ruby[ab|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+q3    otherC           ruby[ab|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+q4    sameC            ruby[ab|2~rc 0~      ] tip xxxxx  head xxxxx
+q5    otherC           ruby[ab|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+q6    otherC           ruby[ab|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+q7    otherC           ruby[ab|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+q8    otherC           ruby[ab|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+q9    otherC           ruby[ab|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+q10   otherC           ruby[ab|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+q11   sameC            ruby[ab|2~rc 0~      ] tip xxxxx  head xxxxx
+q12   sameC            ruby[ab|2~rc 0~      ] tip xxxxx  head xxxxx
+q13   otherC           ruby[ab|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+q14   otherC           ruby[ab|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+q15   sameC            ruby[ab|2~rc 0~      ] tip xxxxx  head xxxxx
+q16   sameC            ruby[ab|2~rc 0~      ] tip xxxxx  head xxxxx
+q17   sameC            ruby[ab|2~rc 0~      ] tip xxxxx  head xxxxx
+q18   otherC           ruby[ab|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+q19   otherC           ruby[ab|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+q20   otherC           ruby[xab|2~rc 0~     ] tip xxxxx  head ooooo   won 5
+q21   sameC            ruby[ab|2~rc 0~      ] tip xxxxx  head xxxxx
+q22   sameC            ruby[AB|2~rc 0~      ] tip xxxxx  head xxxxx
+q30   otherC           ruby[aab|2~rc 0~     ] tip xxxxx  head ooooo   won 5
+q31   otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+q32   otherC           ruby[aab|2~rc 0~     ] tip xxxxx  head ooooo   won 5
+q33   otherC           ruby[2|2~rc 0~       ] tip xxxxx  head ooooo   won 5
+q34   otherC           ruby[aab|2~rc 0~     ] tip xxxxx  head ooooo   won 5
+===== 4. the two probes (the delta comment's section 3, as written) =====
+**3. The two probes.**
+
+*A receiver or operand held in a temp ahead of arguments that change it in place.* That is the block itself, and groups f, d and h are that probe: every program whose `R` answers `$s` (or may, by a route the program holds) keeps the tip's C, so nothing is held. For the programs that ARE held (groups p and q) the question turns round: is the held String new? The `--share-strings` cell answers it, since there `$s << "c"` changes the one String in place: all 37 are right there on the head (and wrong on the bare tip, which reads `$s` after `add` ran). Each `R` of those was written to be the hard case for its builtin (`strip` with nothing to strip, `chomp` with no newline, `delete_prefix("zz")` that does not match, `center(1)` that pads nothing, `tr("z", "y")` that changes nothing, `$s * 1`, `$s + ""`), where a runtime could answer the receiver itself. The receiver kinds of the earlier hand-over (one program a kind, 18 programs) ran again: the nine kinds held first (Float, Symbol, Range, Array, Hash, an interpolation, `$s.upcase`, an Integer's `to_s`, a method that ends in an interpolation) differ in C and are right with gcc and clang where the bare tip is wrong with gcc; the three listed but unchanged (Integer, object, `true`) and the six left as master's (a global, a method that answers its parameter, a reader's instance variable, a method with a `return` of the global, a local changed in place, a boxed receiver) have the tip's C. The same cells as under `47ba90fb3da9`.
+
+*A receiver read after arguments a piece newly runs.* This piece moves no argument ahead of a receiver: a call it takes binds the receiver to its temp first and then runs what the arguments hoist, and a call it leaves is the tip's C. What it can change is what a held receiver shows after the arguments ran, which is the first probe. The 23 doors of the earlier hand-over (an argument that can run the program's code by a door the whitelist must not admit) ran again: no cell differs between the bare tip and the head in any of them; 17 have the tip's C and the six admitted ones (d8, d8b, d9, e4, e5, d12) differ in C with the same answers on both, as before. The loss programs of the earlier rounds ran again: 20 programs (the reader's six and u1b, the Door program, the moved-buffer program and the rest). 18 have the tip's C and so the tip's cells. Two differ in C: w3, right on both, and the small Door program, right here in the four cells where the bare tip prints a garbage size with gcc at stress 2 and faults with clang at stress 2.
