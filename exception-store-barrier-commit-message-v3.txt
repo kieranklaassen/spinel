@@ -1,0 +1,46 @@
+An exception keeps the key or receiver made after it
+
+    errs = []
+    300000.times { |i| errs << KeyError.new("missing", key: "k#{i}") }
+    bad = 0
+    errs.each_with_index { |e, i| bad += 1 if e.key != "k#{i}" }
+    p bad
+
+printed 1 in a plain run; CRuby prints 0. One exception answered
+"missing", its message, for its key, and at SPINEL_GC_STRESS=2 the
+mark reached a freed heap string.
+
+emit_new_call_arms writes the key and the receiver given to
+KeyError.new, NameError.new or FrozenError.new into the exception it
+has just made. Making the value can collect, and the collection
+promotes the rooted exception: the store then puts a young value into
+an old holder and nothing recorded it, so the next minor collection
+freed the value while the exception held it.
+
+Each of the two stores is now followed by sp_gc_wb, as the message's
+store in emit_super is. The key and the receiver take one each, since
+making the receiver can collect a second time. A value that is never
+a young object takes none and keeps the C it had: nil, true or false,
+an Integer, a Float, a Symbol, and a frozen String literal, which is
+static storage.
+
+Cost: 11 instructions for each recorded store (callgrind, gcc; 14
+with clang). KeyError.new("missing", key: "k#{i}") goes from 962 to
+973, and from 1,265 to 1,286 with receiver: [i] as well. A key or a
+receiver read from a variable is recorded too (963 to 980 for the
+key) though master ran it right: emit_super records the parameter
+of a bare `super` the same way.
+
+Not here: an attribute of an exception class that has no initialize
+of its own (`e.ctx = "k" + i.to_s`) still loses its value: 693 of
+1,500 are wrong in a plain run, on master and here.
+
+Test: test/exception_keeps_key_made_after_it.rb, added to
+GC_STRESS_TESTS (expected from CRuby 3.3.6). On master its
+FrozenError loop is wrong at SPINEL_GC_STRESS=1 and the mark reaches
+a freed slot at 2.
+C: 2 programs of the corpus differ, each by one barrier call
+(test/exception_introspection_accessors.rb, test/issue_3030.rb);
+optcarrot's is unchanged.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

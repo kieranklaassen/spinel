@@ -1,0 +1,1 @@
+An exception keeps the key or receiver made after it
