@@ -254,12 +254,13 @@ void *sp_exc_ensure_obj(void **obj, const char **msg, const char *cls) {
   return e;
 }
 /* Allocate a zeroed exception-subclass struct of `sz` bytes with the base
-   {cls_name, parent_cls_name, msg} prefix set, for the degenerate catch path
-   where a user subclass with ivars was raised without a carried object
-   (#1415). Its ivar fields stay zero (nil/0). msg is the only heap field, so
-   the base scan suffices. */
-void *sp_exc_new_sub_sized(size_t sz, const char *cls_name, const char *msg) {if (!sp_exc_msg_empty_given(msg)) msg = sp_msg_heapify(msg); SP_GC_ROOT_STR(msg);
-  sp_Exception *e = (sp_Exception *)sp_gc_alloc(sz, NULL, sp_exc_gc_scan);
+   {cls_name, parent_cls_name, msg} prefix set, for a user subclass with
+   ivars that no constructor of its own builds. `scan` marks the struct; a
+   class whose instances are built here and then written to passes its own,
+   so an ivar the program stores is marked with the object. */
+static SP_INLINE void *sp_exc_sub_build(size_t sz, const char *cls_name, const char *msg,
+                                         void (*scan)(void *)) {if (!sp_exc_msg_empty_given(msg)) msg = sp_msg_heapify(msg); SP_GC_ROOT_STR(msg);
+  sp_Exception *e = (sp_Exception *)sp_gc_alloc(sz, NULL, scan);
   memset(e, 0, sz);
   e->cls_name = cls_name ? cls_name : "RuntimeError";
   e->result = sp_box_nil();   /* memset left tag 0 (int 0); StopIteration#result wants nil */
@@ -281,6 +282,30 @@ void *sp_exc_new_sub_sized(size_t sz, const char *cls_name, const char *msg) {if
      is filling: an old holder then receives a young string. Recorded after
      the store, since the allocation would clear a record made before it. */
   sp_gc_wb((void *)e);
+  return e;
+}
+/* With the base scan, for the degenerate catch path where a user subclass
+   with ivars and an initialize of its own was raised without a carried
+   object: the body is inlined, so this entry is what it was. */
+void *sp_exc_new_sub_sized(size_t sz, const char *cls_name, const char *msg) {
+  return sp_exc_sub_build(sz, cls_name, msg, sp_exc_gc_scan);
+}
+void *sp_exc_new_sub_ivars(size_t sz, const char *cls_name, const char *msg, void (*scan)(void *)) {
+  return sp_exc_sub_build(sz, cls_name, msg, scan);
+}
+/* The same, where sp_exc_new_for_catch built the exception before its class
+   was built at its own size: a frozen message stays frozen there, by that
+   function's own test of the message it is handed, and the caller's
+   message is rooted before it is copied, as that function roots it. It
+   calls the entry above and holds no third copy of the body: with three,
+   gcc 13 at the Makefile's flags stops inlining sp_msg_heapify into
+   sp_exc_new in the threaded runtime. */
+void *sp_exc_new_sub_caught(size_t sz, const char *cls_name, const char *msg, void (*scan)(void *)) {
+  int fz = msg && msg != sp_exc_no_msg && !sp_cmsg_p(msg) &&
+           (((const unsigned char *)msg)[-1] == 0xfa || ((const unsigned char *)msg)[-1] == 0xf8);
+  const char *msg0 = msg; SP_GC_ROOT_STR(msg0);
+  sp_Exception *e = (sp_Exception *)sp_exc_new_sub_ivars(sz, cls_name, msg, scan);
+  if (fz && e->msg) ((unsigned char *)e->msg)[-1] = 0xfa;
   return e;
 }
 void sp_exc_gc_scan(void *p) {
