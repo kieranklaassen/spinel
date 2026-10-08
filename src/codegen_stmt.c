@@ -2802,7 +2802,12 @@ int emit_scalar_op_assign(Compiler *c, const char *lval, TyKind t, const char *o
     emit_expr(c, v, &rb); buf_puts(&rb, ")");
   }
   else if (t == TY_BIGINT && vt == TY_INT) {
-    buf_puts(&rb, "sp_bigint_new_int("); emit_expr(c, v, &rb); buf_puts(&rb, ")");
+    /* a nil operand raises as the operator does: converted raw it was the
+       number -2**63, and `x += n` answered x - 2**63 */
+    int tn = bigint_nil_open(c, -1, v, "sp_Bigint *", &rb);
+    if (tn) emit_bigint_opnd(c, v, tn, 1, &rb);
+    else { buf_puts(&rb, "sp_bigint_new_int("); emit_expr(c, v, &rb); buf_puts(&rb, ")"); }
+    bigint_nil_close(tn, "SP_INT_NIL_CK", op, &rb);
   }
   /* an unresolved call (`t += f.weight` with no such method) lowers to the
      gate's raise token, an sp_RbVal; coerce it as a plain write does */
