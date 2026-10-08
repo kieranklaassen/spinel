@@ -1429,11 +1429,12 @@ reject-test: $(SPINEL)
 	  echo "reject-test: FAIL (a called class-side super chain's provable NoMethodError compiled)"; ok=0; \
 	else grep -q "undefined method '\[\]=' for a Class" "$$tmp/ncc.out" || \
 	  { echo "reject-test: FAIL (a called class-side super chain's NoMethodError rejected without saying why)"; sed -n 1,5p "$$tmp/ncc.out"; ok=0; }; fi; \
-	t=test/reject/redo_unlabeled_iterator.rb; \
+	for t in test/reject/redo_unlabeled_iterator.rb test/reject/redo_lazy_unread_keyword.rb; do \
 	if $(SPINEL) "$$t" -c --no-line-map -o "$$tmp/rui.c" >"$$tmp/rui.out" 2>&1; then \
-	  echo "reject-test: FAIL (a redo with no label for it compiled)"; ok=0; \
+	  echo "reject-test: FAIL (a redo with no label for it compiled: $$t)"; ok=0; \
 	else grep -q "redo in this block" "$$tmp/rui.out" || \
-	  { echo "reject-test: FAIL (a redo with no label rejected without saying why)"; sed -n 1,5p "$$tmp/rui.out"; ok=0; }; fi; \
+	  { echo "reject-test: FAIL (a redo with no label rejected without saying why: $$t)"; sed -n 1,5p "$$tmp/rui.out"; ok=0; }; fi; \
+	done; \
 	t=test/reject/instance_exec_untraced_proc_param.rb; \
 	if $(SPINEL) "$$t" -c --no-line-map -o "$$tmp/iup.c" >"$$tmp/iup.out" 2>&1; then \
 	  echo "reject-test: FAIL (instance_exec of an untraceable proc parameter compiled)"; ok=0; \

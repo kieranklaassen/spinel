@@ -708,6 +708,12 @@ spinel: 1 refusal, nothing written
 == test/reject/recursive_default_reads_block.rb [promote] rc=1
 spinel: test/reject/recursive_default_reads_block.rb:5: unsupported default of `m`'s parameter `y` that calls `m` again with that argument omitted (one reading the caller's block or `super` cannot be moved into a method of its own): node N (ParenthesesNode)
 spinel: 1 refusal, nothing written
+== test/reject/redo_lazy_unread_keyword.rb [default] rc=1
+spinel: test/reject/redo_lazy_unread_keyword.rb:7: redo in this block (its iterator cannot re-run the body)
+spinel: 1 refusal, nothing written
+== test/reject/redo_lazy_unread_keyword.rb [promote] rc=1
+spinel: test/reject/redo_lazy_unread_keyword.rb:7: redo in this block (its iterator cannot re-run the body)
+spinel: 1 refusal, nothing written
 == test/reject/redo_unlabeled_iterator.rb [default] rc=1
 spinel: test/reject/redo_unlabeled_iterator.rb:9: redo in this block (its iterator cannot re-run the body)
 spinel: 1 refusal, nothing written
