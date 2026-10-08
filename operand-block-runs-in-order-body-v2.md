@@ -1,0 +1,34 @@
+<!-- See CONTRIBUTING.md. A pull request needs no issue. If its gate fails here on a mechanical point, or it conflicts, we fix it and say so; a failure that needs a design decision goes back to its author. -->
+
+## What this changes
+
+```ruby
+def tick(n) = (puts "tick #{n}"; n)
+def arr(n) = (puts "arr #{n}"; [n, 1])
+xs = [1, 2]
+p arr(8) + xs.map { |i| tick(i) }
+```
+
+printed `tick 1`, `tick 2`, `arr 8`, `[8, 1, 1, 2]`: the block of the second operand ran before the first operand. CRuby runs `arr(8)` first. The same with `-`, `|`, `concat`, `zip`, `==`, `fetch` and a program's own methods, wherever an operand written before the block's call runs code.
+
+It costs a right program 4 to 10 instructions a call with gcc (callgrind, 200,000 calls of `arr(i) + xs.map { |x| mag(x) + i }` with `def mag(x) = x.abs`: 238,978,935 to 239,757,986; `k.rest(one(i), *xs.map { |x| mag(x) + i })`: 136,943,245 to 138,916,554) and -2 to 4 with clang, where an operand runs code and a later one runs a block that calls something. A block of reads and arithmetic is emitted as before; so is one whose calls are all to methods of the program that only read (`def inc(x) = x + 1`), and so is every call with nothing but variables and literals written before the block.
+
+A call like `xs.map { ... }` is written as a loop ahead of the statement that uses its value. Two places keep such statements behind the operands written before them, and each missed a case:
+
+- `emit_operands_in_order` holds what an operand hoists in its place when that runs code of its own (`operand_hoists_effect`). The test looked at the operand call's receiver and arguments and not at its block. A block that runs code is held too (`operand_block_runs`).
+- The Array a rest parameter receives is built inside the call's expression (`emit_rest_pack_kwh`) while what its elements hoist went ahead of the statement: `k.rest(tick(8), *xs.map { |i| tick(i) })`. An element after one that has run code holds what it hoists in its place.
+
+Neither holds a block behind an operand whose temporary is a copy: a String, a boxed value, a by-value object (`temp_reads_through`). With `def get = $buf`, `k.rest(get, *xs.map { |i| $buf << "x"; i })` shows the appended String only because `get` is read after the block; bound ahead of it, the temporary would keep the bytes of before. Such a call is emitted as before.
+
+Left as before, each still running the block first: an operand before the block that is a String, a boxed value or a by-value object, which takes in a receiver of several classes read from an element or an attribute (`rs[0].two(tick(8), xs.map { ... })`) and a splat on any receiver of several classes (`r.rest(tick(8), *xs.map { ... })`); a Hash literal's key before such a value (`{ tick(8) => xs.map { ... } }`); the parts of an interpolation; `[tick(8), xs.map { ... }.size].max`; `arr(8).push(*xs.map { ... })`; `arr(8).values_at(*xs.map { ... })`; `+` over two Arrays of different element kinds; `arr(8) + xs.each_with_index.map { ... }`; `arr(8) + [xs.inject(0) { ... }]`. A block whose body can raise without calling anything (`xs.map { |x| 10 / x }`) is still taken for one that runs nothing.
+
+## `make gate` (on this branch merged with current master)
+
+```
+paste the Tests:, scale-test and gate: lines here
+```
+
+- [ ] New tests have `.expected` files that match CRuby 4.0 run with `--enable-frozen-string-literal`
+- [x] Values past 2^31 are marked `# spinel: int64` (none)
+- [ ] If optcarrot's generated C changed: callgrind numbers, checksum 59662
+- [ ] Depends on: #
