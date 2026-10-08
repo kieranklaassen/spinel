@@ -1,0 +1,33 @@
+A conditional a method ends in that folds to a raise is run, not unboxed
+
+    def pick(x)
+      return 5 if x == 0
+      (x.respond_to?(:zork) ? x.zork : raise(ArgumentError))
+    end
+    p pick(0)                # 5
+    p((pick(1) rescue 7))    # 7
+
+This built until "An untyped conditional a method ends in is unboxed
+into its return type". Since then the C does not compile: "invalid use
+of void expression".
+
+That change unboxes an untyped conditional in tail position into the
+method's return type, since emit_if_expr holds such a conditional
+boxed. It holds it boxed while both arms are emitted. A condition
+answered at compile time (respond_to?, is_a?, block_given?) leaves
+the live arm alone, in that arm's own C, and a raise there is a void
+call: there is no box to open.
+
+emit_tail_value_1 tells such a text already, a few lines below, where
+it runs the raise and gives the slot its default. That test is now
+made before the unboxing, and a text that raises takes that path.
+Every other tail keeps its C.
+
+Not here, each as it was before that change: a live arm that is
+`raise("m")` with the message alone or a constant defined nowhere,
+and a conditional in doubled parentheses, whose texts that test does
+not tell; and a method one of whose arms yields.
+
+Test: test/folded_conditional_tail_raise.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
