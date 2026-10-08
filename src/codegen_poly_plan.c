@@ -3586,7 +3586,16 @@ void emit_poly_cases_n(Compiler *c, int id, const char *name, const PolySpecials
       buf_printf(b, " case SP_BUILTIN_FLT_ARRAY: _t%d = %s(_t%d.tag == SP_TAG_FLT || _t%d.tag == SP_TAG_NIL) &&"
                     " sp_FloatArray_include((sp_FloatArray *)_t%d.v.p, _t%d.tag == SP_TAG_NIL ? sp_float_nil() : _t%d.v.f)%s; break;",
                  tr, ibo, atmp[0], atmp[0], tv, atmp[0], atmp[0], ibc);
-      buf_printf(b, " case SP_BUILTIN_STR_ARRAY: _t%d = %s_t%d.tag == SP_TAG_STR && sp_StrArray_include((sp_StrArray *)_t%d.v.p, _t%d.v.s)%s; break;", tr, ibo, atmp[0], tv, atmp[0], ibc);
+      /* a shared String handle is a String too, asked after the plain
+         one. The pointer's test is in parentheses so that the argument
+         keeps its slot in the root frame: a bare `&& _tN` reads to
+         frame_collect as the temporary's address. */
+      if (g_strbuf_boxes == SB_BOXES_HANDLES && !builtin_reopened(c, "String", "=="))
+        buf_printf(b, " case SP_BUILTIN_STR_ARRAY: _t%d = %s(_t%d.tag == SP_TAG_STR ? sp_StrArray_include((sp_StrArray *)_t%d.v.p, _t%d.v.s)"
+                      " : sp_poly_is_strbuf(_t%d) && (_t%d.v.p != NULL) && sp_StrArray_include((sp_StrArray *)_t%d.v.p, sp_String_cstr((sp_String *)_t%d.v.p)))%s; break;",
+                   tr, ibo, atmp[0], tv, atmp[0], atmp[0], atmp[0], tv, atmp[0], ibc);
+      else
+        buf_printf(b, " case SP_BUILTIN_STR_ARRAY: _t%d = %s_t%d.tag == SP_TAG_STR && sp_StrArray_include((sp_StrArray *)_t%d.v.p, _t%d.v.s)%s; break;", tr, ibo, atmp[0], tv, atmp[0], ibc);
       break;
     case TY_NIL:
       /* an Integer or Float array holds nil as its sentinel */
