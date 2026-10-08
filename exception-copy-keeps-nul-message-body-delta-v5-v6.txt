@@ -1,0 +1,11 @@
+--- exception-copy-keeps-nul-message-body-v5.md
++++ exception-copy-keeps-nul-message-body-v6.md
+@@ -26,7 +26,7 @@
+ 
+ prints `"again"` in a plain run; under `SPINEL_GC_STRESS=2` it prints fifteen 0xDB bytes built with gcc and aborts with "the mark reached a freed slot" built with clang. After: `"again"` in both.
+ 
+-Cost (callgrind, gcc -O2, 200,000 copies): a receiver that is a variable is the C it was (171,709,765 instructions before and after). A receiver that is a call pays 6 instructions a copy for the rooted temp (173,909,764 to 175,122,101, 0.7%), and a copy of a copy 11 (302,817,688 to 305,042,049, 0.7%).
++Cost (callgrind, instructions a copy, gcc and clang): a receiver that is a variable is the C it was. A receiver that may allocate pays for the rooted temp, 6 to 15 instructions a copy with gcc and clang, the more where the receiver builds its exception: 6 with both where a call hands an exception back (873 to 879 with gcc, 868 to 874 with clang), 13 and 15 where the call builds one or the receiver is `RuntimeError.new("first")` (1,546 to 1,559 and 1,552 to 1,567), 13 and 15 for a copy of a copy (1,514 to 1,527 and 1,504 to 1,519). The temp is taken wherever the receiver may allocate, also where the message turns out to need none (nil, an empty literal).
+ 
+ A frozen String given as a message, a literal's too, travels as a counted copy that `sp_exc_msg_given` allocates. `emit_exc_exception` wrote that call and the receiver as the two operands of one C call. C leaves the two unsequenced, and a literal counts as an operand that cannot allocate (`subtree_allocates`), so the operand rule that orders and roots two allocating operands did not apply. gcc ran the receiver after the copy was built, and a collection in the receiver swept the copy: in the first program its slot was taken by the next message allocated, the receiver's own. clang ran the receiver first, and the copy's allocation swept the receiver.
+ 
