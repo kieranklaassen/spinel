@@ -5378,6 +5378,169 @@ else {
   intern_scope_ivars(c, ms, ci);
 }
 
+/* The program's class bodies while register_includes runs, and what one
+   reading of them found (-1: not read yet): whether a body prepends, and
+   whether some class reaches a module by two ways. */
+static int *g_inc_bci, *g_inc_bnode, g_inc_nb, g_inc_prepends, g_inc_twice;
+/* The module inc_chains_travel answered for last, its links then, and the
+   answer. */
+static int g_inc_tmod, g_inc_tn, g_inc_tok;
+
+/* Mark the modules class k includes, and the ones those include. 0 when one
+   is reached a second time: Ruby keeps a module once, and where it then
+   stands is not where a copy of it would. */
+static int inc_reach_once(int k, const int *head, const int *next, const int *emod, char *seen, int depth) {
+  if (depth > 64) return 0;
+  for (int e = head[k]; e >= 0; e = next[e]) {
+    if (seen[emod[e]]) return 0;
+    seen[emod[e]] = 1;
+    if (!inc_reach_once(emod[e], head, next, emod, seen, depth + 1)) return 0;
+  }
+  return 1;
+}
+
+/* Read the class bodies once: does one prepend, and does some class or module
+   reach a module by two ways, through its own includes or a superclass's.
+   `include` statements are kept as one entry per module named, chained from
+   the class that names it. Out of memory answers yes. */
+static void inc_program_read(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  int ne = 0, cap = 0, *next = NULL, *emod = NULL;
+  int *head = malloc(sizeof(int) * ((size_t)c->nclasses + 1));
+  char *seen = malloc((size_t)c->nclasses + 1);
+  g_inc_prepends = 0;
+  g_inc_twice = !head || !seen;
+  for (int k = 0; head && k < c->nclasses; k++) head[k] = -1;
+  for (int b = 0; b < g_inc_nb && !g_inc_twice; b++) {
+    int n = 0;
+    const int *stmts = g_inc_bnode[b] >= 0 ? nt_arr(nt, g_inc_bnode[b], "body", &n) : NULL;
+    for (int i = 0; i < n && !g_inc_twice; i++) {
+      if (nt_kind(nt, stmts[i]) != NK_CallNode) continue;
+      const char *nm = nt_str(nt, stmts[i], "name");
+      if (nm && sp_streq(nm, "prepend")) g_inc_prepends = 1;
+      if (!nm || !sp_streq(nm, "include") || nt_ref(nt, stmts[i], "receiver") >= 0) continue;
+      int anode = nt_ref(nt, stmts[i], "arguments");
+      int an = 0;
+      const int *args = anode >= 0 ? nt_arr(nt, anode, "arguments", &an) : NULL;
+      for (int j = 0; j < an && !g_inc_twice; j++) {
+        NodeKind ak = nt_kind(nt, args[j]);
+        const char *mname = ak == NK_ConstantReadNode || ak == NK_ConstantPathNode ? nt_str(nt, args[j], "name") : NULL;
+        int m = mname ? comp_class_index(c, mname) : -1;
+        if (m < 0 && mname) {
+          const char *al = resolve_class_alias(c, mname);
+          if (al) m = comp_class_index(c, al);
+        }
+        if (m < 0) continue;
+        if (ne == cap) {
+          cap = cap ? cap * 2 : 64;
+          int *n2 = realloc(next, sizeof(int) * (size_t)cap);
+          if (n2) next = n2;
+          int *m2 = n2 ? realloc(emod, sizeof(int) * (size_t)cap) : NULL;
+          if (m2) emod = m2;
+          if (!m2) { g_inc_twice = 1; break; }
+        }
+        emod[ne] = m;
+        next[ne] = head[g_inc_bci[b]];
+        head[g_inc_bci[b]] = ne++;
+      }
+    }
+  }
+  for (int k = 0; k < c->nclasses && !g_inc_twice; k++) {
+    memset(seen, 0, (size_t)c->nclasses);
+    for (int q = k; q >= 0 && !g_inc_twice; q = c->classes[q].parent)
+      g_inc_twice = !inc_reach_once(q, head, next, emod, seen, 0);
+  }
+  free(head); free(seen); free(next); free(emod);
+}
+
+/* Module mod's chains of `super` can go into an includer as they stand: each
+   link is between two of the module's instance methods, neither taking a
+   block, and the program prepends nothing and includes no module where it is
+   held already. */
+static int inc_chains_travel(Compiler *c, int mod_id) {
+  ClassInfo *mod = &c->classes[mod_id];
+  if (!g_inc_nb || mod->nprep_chain > 60) return 0;
+  if (g_inc_prepends < 0) inc_program_read(c);
+  if (g_inc_prepends || g_inc_twice) return 0;
+  if (g_inc_tmod == mod_id && g_inc_tn == mod->nprep_chain) return g_inc_tok;
+  g_inc_tmod = mod_id;
+  g_inc_tn = mod->nprep_chain;
+  g_inc_tok = 0;
+  for (int k = 0; k < mod->nprep_chain; k++) {
+    int f = comp_method_in_class(c, mod_id, mod->prep_from[k]);
+    int t = comp_method_in_class(c, mod_id, mod->prep_to[k]);
+    if (f < 0 || t < 0 || strncmp(mod->prep_to[k], "__inc ", 6) != 0) return 0;
+    if (c->scopes[f].is_module_function || c->scopes[t].is_module_function) return 0;
+    if (c->scopes[f].blk_param || c->scopes[t].blk_param) return 0;
+    const char *at = mod->prep_to[k];
+    for (int steps = 0; at; steps++) {
+      if (steps > mod->nprep_chain) return 0;
+      at = comp_prep_chain_target(c, mod_id, at);
+    }
+  }
+  return g_inc_tok = 1;
+}
+
+/* Copy module method `ms` and the methods its `super` goes on to within the
+   module, as one run: where the class holds the name already they stand as
+   a single copy would, and what was there before follows the last of them. */
+static void include_copy_chain(Compiler *c, int ci, int mod_id, int ms) {
+  ClassInfo *cif = &c->classes[ci];
+  int el[64], n = 0;
+  for (int k = ms; k >= 0 && n < 64; ) {
+    el[n++] = k;
+    const char *t = comp_prep_chain_target(c, mod_id, c->scopes[k].name);
+    k = t ? comp_method_in_class(c, mod_id, t) : -1;
+  }
+  char name[256], cur[256], after[256];
+  snprintf(name, sizeof name, "%s", c->scopes[ms].name);
+  snprintf(cur, sizeof cur, "%s", name);
+  after[0] = 0;
+  int own = comp_method_in_class(c, ci, name);
+  if (own >= 0 && c->scopes[own].is_include_copy) {
+    /* an earlier include's copy: it steps behind the run */
+    char shadow[256];
+    snprintf(shadow, sizeof shadow, "__inc %d %s", cif->prep_shadow_count++, name);
+    for (int kk = 0; kk < cif->nprep_chain; kk++)
+      if (sp_streq(cif->prep_from[kk], name)) {
+        free(cif->prep_from[kk]); cif->prep_from[kk] = strdup(shadow);
+        break;
+      }
+    free(c->scopes[own].name);
+    c->scopes[own].name = strdup(shadow);
+    if (scope_body_has_super(c, el[n - 1])) snprintf(after, sizeof after, "%s", shadow);
+    else c->scopes[own].reachable = 0;
+  }
+  else if (own >= 0) {
+    /* the class's own method: the run is what its super reaches */
+    if (!scope_body_has_super(c, own)) {
+      for (int i = 0; i < n; i++) c->scopes[el[i]].is_transplanted_source = 1;
+      return;
+    }
+    snprintf(cur, sizeof cur, "__inc %d %s", cif->prep_shadow_count++, name);
+    const char *existing = comp_prep_chain_target(c, ci, name);
+    if (existing) {
+      if (scope_body_has_super(c, el[n - 1])) snprintf(after, sizeof after, "%s", existing);
+      for (int kk = 0; kk < cif->nprep_chain; kk++)
+        if (sp_streq(cif->prep_from[kk], name)) {
+          free(cif->prep_to[kk]);
+          cif->prep_to[kk] = strdup(cur);
+          break;
+        }
+    }
+    else comp_prep_chain_add(cif, name, cur);
+  }
+  for (int i = 0; i < n; i++) {
+    include_copy_scope(c, ci, el[i], cur);
+    if (i + 1 == n) break;
+    char next[256];
+    snprintf(next, sizeof next, "__inc %d %s", cif->prep_shadow_count++, name);
+    comp_prep_chain_add(cif, cur, next);
+    snprintf(cur, sizeof cur, "%s", next);
+  }
+  if (after[0]) comp_prep_chain_add(cif, cur, after);
+}
+
 void process_include_body(Compiler *c, int ci, int body_node) {
   const NodeTable *nt = c->nt;
   int n = 0;
@@ -5460,6 +5623,11 @@ void process_include_body(Compiler *c, int ci, int body_node) {
       class_note_included_mod(c, ci, mod_id);
       /* snapshot count before adding new scopes to avoid re-scanning them */
       int snap = c->nscopes;
+      /* A module that includes another holds the other's methods as copies of
+         its own, and a `super` between them as a chain of its own. Copied one
+         by one under their names, the chain stayed behind: the includer's
+         `super` found no method, or one the class had under that name. */
+      int chains = c->classes[mod_id].nprep_chain > 0 && inc_chains_travel(c, mod_id);
       for (int ms = 0; ms < snap; ms++) {
         Scope *src = &c->scopes[ms];
         if (src->class_id != mod_id || !src->name) continue;
@@ -5468,6 +5636,15 @@ void process_include_body(Compiler *c, int ci, int body_node) {
         if (src->is_cmethod &&
             !(src->is_module_function && module_function_self_dependent(c, ms)))
           continue;
+        if (chains && strncmp(src->name, "__inc ", 6) == 0) {
+          /* goes with the method that reaches it */
+          if (!src->is_module_function) src->is_transplanted_source = 1;
+          continue;
+        }
+        if (chains && comp_prep_chain_target(c, mod_id, src->name)) {
+          include_copy_chain(c, ci, mod_id, ms);
+          continue;
+        }
         const char *dst_name = src->name;
         char inc_shadow[256];
         int own = comp_method_in_class(c, ci, src->name);
@@ -5573,6 +5750,7 @@ void register_includes(Compiler *c) {
      falls back to source order. */
   int *bci, *bnode;
   int nb = class_body_list(c, &bci, &bnode);
+  g_inc_bci = bci; g_inc_bnode = bnode; g_inc_nb = nb; g_inc_prepends = g_inc_twice = g_inc_tmod = -1;
   int *remaining = calloc((size_t)c->nclasses, sizeof(int));
   char *done = calloc((size_t)nb, 1);
   for (int b = 0; b < nb; b++) remaining[bci[b]]++;
@@ -5602,6 +5780,7 @@ void register_includes(Compiler *c) {
       }
     }
   }
+  g_inc_nb = 0;
   free(bci); free(bnode); free(remaining); free(done);
   if (g_inc_did_clone) register_locals(c);
 }
