@@ -12885,35 +12885,34 @@ static int emit_attr_global_const_write_stmt(Compiler *c, int id, Buf *b, int in
       buf_puts(rb, "\n");
       free(rx.p);
       const char *acc = comp_ty_value_obj(c, rt) ? "." : "->";
+      /* the slot, and what the arms below read and write as it */
+      char slot[400]; snprintf(slot, sizeof slot, "_t%d%siv_%s", trecv, acc, iv_c(rn));
+      const char *lv = slot;
       emit_indent(b, indent);
       if (ivt == TY_STRING) {
-        buf_printf(b, "_t%d%siv_%s = sp_str_concat(_t%d%siv_%s, ", trecv, acc, iv_c(rn), trecv, acc, iv_c(rn));
+        buf_printf(b, "%s = sp_str_concat(%s, ", lv, lv);
         emit_poly_unboxed(c, val, rhst, "sp_poly_to_s(", b);
         buf_puts(b, ");\n");
       }
       else if (ivt == TY_POLY && cpf) {
         /* boxed slot: dynamic operator on boxed operands (same as the
            poly-receiver dispatch arms below). */
-        buf_printf(b, "_t%d%siv_%s = %s(_t%d%siv_%s, ", trecv, acc, iv_c(rn), cpf, trecv, acc, iv_c(rn));
+        buf_printf(b, "%s = %s(%s, ", lv, cpf, lv);
         emit_boxed(c, val, b); buf_puts(b, ");\n");
       }
       else if (ivt == TY_POLY) {
         /* bitwise op-assign on a boxed slot: coerce to int, re-box */
-        buf_printf(b, "_t%d%siv_%s = sp_box_int((sp_poly_recv_i(\"%s\", _t%d%siv_%s) %s (",
-                   trecv, acc, iv_c(rn), op, trecv, acc, iv_c(rn), op);
+        buf_printf(b, "%s = sp_box_int((sp_poly_recv_i(\"%s\", %s) %s (", lv, op, lv, op);
         emit_poly_unboxed(c, val, rhst, op_assign_int_conv(TY_INT, op), b);
         buf_puts(b, ")));\n");
       }
       else if (ty_is_array(ivt) || ivt == TY_POLY_ARRAY) {
-        char aref[400]; snprintf(aref, sizeof aref, "_t%d%siv_%s", trecv, acc, iv_c(rn));
-        if (!emit_array_op_assign(c, aref, ivt, op, val, b))
+        if (!emit_array_op_assign(c, lv, ivt, op, val, b))
           unsupported(c, id, "call operator write (operator on an array attribute)");
       }
-      else {
-        char lval[400]; snprintf(lval, sizeof lval, "_t%d%siv_%s", trecv, acc, iv_c(rn));
-        /* the backing ivar's nil, as `@x op= v` takes it */
-        if (emit_scalar_op_assign(c, lval, ivt, op, val, 1, c->classes[rdcls].ivar_nullable_int[ivx], b)) return 1;
-        buf_printf(b, "_t%d%siv_%s = _t%d%siv_%s %s ", trecv, acc, iv_c(rn), trecv, acc, iv_c(rn), op ? op : "+");
+      /* the backing ivar's nil, as `@x op= v` takes it */
+      else if (!emit_scalar_op_assign(c, lv, ivt, op, val, 1, c->classes[rdcls].ivar_nullable_int[ivx], b)) {
+        buf_printf(b, "%s = %s %s ", lv, lv, op ? op : "+");
         if (rhst == TY_POLY && (ivt == TY_INT || ivt == TY_BOOL)) {
           buf_puts(b, op_assign_int_conv(ivt, op)); emit_expr(c, val, b); buf_puts(b, ")");
         }
@@ -13042,36 +13041,33 @@ static int emit_attr_global_const_write_stmt(Compiler *c, int id, Buf *b, int in
         any = 1;
         emit_indent(b, indent + 1);
         buf_printf(b, "case %d: { sp_%s *_o = (sp_%s *)_t%d.v.p; ", k, cn, cn, trecv);
+        /* the slot, and what the arms below read and write as it */
+        char slot[320]; snprintf(slot, sizeof slot, "_o->iv_%s", iv_c(rn));
+        const char *lv = slot;
+        int own_line = 0;   /* the arm ended its line */
         if (ivt == TY_STRING) {
-          buf_puts(b, "_o->iv_"); buf_puts(b, iv_c(rn)); buf_puts(b, " = sp_str_concat(_o->iv_"); buf_puts(b, iv_c(rn));
-          buf_puts(b, ", ");
+          buf_printf(b, "%s = sp_str_concat(%s, ", lv, lv);
           emit_poly_unboxed(c, val, rhst, "sp_poly_to_s(", b);
-          buf_puts(b, "); break; }\n");
+          buf_puts(b, ");");
         }
         else if (ivt == TY_POLY && cpf) {
           /* the slot itself is boxed (a whole-program-widened numeric like
              Sector#ceiling_height): fold via the dynamic operator on boxed
              operands rather than raw C arithmetic on an sp_RbVal. */
-          buf_puts(b, "_o->iv_"); buf_puts(b, iv_c(rn));
-          buf_printf(b, " = %s(_o->iv_", cpf); buf_puts(b, iv_c(rn)); buf_puts(b, ", ");
+          buf_printf(b, "%s = %s(%s, ", lv, cpf, lv);
           emit_boxed(c, val, b);
-          buf_puts(b, "); break; }\n");
+          buf_puts(b, ");");
         }
         else if (ivt == TY_POLY) {
           /* bitwise op-assign on a boxed slot: coerce to int, re-box */
-          buf_puts(b, "_o->iv_"); buf_puts(b, iv_c(rn));
-          buf_printf(b, " = sp_box_int((sp_poly_recv_i(\"%s\", _o->iv_%s) %s (", op, iv_c(rn), op);
+          buf_printf(b, "%s = sp_box_int((sp_poly_recv_i(\"%s\", %s) %s (", lv, op, lv, op);
           emit_poly_unboxed(c, val, rhst, op_assign_int_conv(TY_INT, op), b);
-          buf_puts(b, "))); break; }\n");
+          buf_puts(b, ")));");
         }
+        else if (emit_scalar_op_assign(c, lv, ivt, op, val, 0, c->classes[pdcls].ivar_nullable_int[ivx], b))
+          own_line = 1;
         else {
-          char lval[320]; snprintf(lval, sizeof lval, "_o->iv_%s", iv_c(rn));
-          if (emit_scalar_op_assign(c, lval, ivt, op, val, 0, c->classes[pdcls].ivar_nullable_int[ivx], b)) {
-            emit_indent(b, indent + 1); buf_puts(b, "break; }\n");
-            continue;
-          }
-          buf_puts(b, "_o->iv_"); buf_puts(b, iv_c(rn)); buf_puts(b, " = _o->iv_"); buf_puts(b, iv_c(rn));
-          buf_printf(b, " %s ", op ? op : "+");
+          buf_printf(b, "%s = %s %s ", lv, lv, op ? op : "+");
           if (rhst == TY_POLY && (ivt == TY_INT || ivt == TY_BOOL)) {
             buf_puts(b, op_assign_int_conv(ivt, op)); emit_expr(c, val, b); buf_puts(b, ")");
           }
@@ -13079,8 +13075,11 @@ static int emit_attr_global_const_write_stmt(Compiler *c, int id, Buf *b, int in
             buf_puts(b, "sp_poly_opnd_f("); emit_expr(c, val, b); buf_puts(b, ")");
           }
           else emit_expr(c, val, b);
-          buf_puts(b, "; break; }\n");
+          buf_puts(b, ";");
         }
+        if (own_line) emit_indent(b, indent + 1);
+        else buf_puts(b, " ");
+        buf_puts(b, "break; }\n");
       }
       /* a receiver whose runtime class has no such accessor pair (or a boxed
          scalar) is CRuby's NoMethodError, not a silent no-op */
