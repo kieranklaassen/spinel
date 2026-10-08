@@ -1103,6 +1103,7 @@ int g_proc_toplevel_return = 0;
    funnel gotos pop only the frames they actually exit. */
 int g_exc_frame_depth = 0;
 int g_loop_exc_base = 0;        /* frame depth at the innermost C-loop entry */
+int g_loop_body = -1;           /* the body emit_loop_body runs in that loop, or the last one it ran */
 int g_loop_ensure_base = 0;     /* ensure depth at the innermost C-loop entry */
 int g_brk_exc_base = 0;         /* frame depth at the valued-break wrapper */
 int g_block_brk_exc_base = 0;   /* ... for yield-block re-entry (mirrors g_block_brk_ebase) */

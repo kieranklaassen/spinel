@@ -416,6 +416,7 @@ extern int g_exc_frame_depth;      /* live begin/rescue setjmp frames (see codeg
 extern int g_method_pr_exc_depth;
 extern int g_method_pr_ensure_depth;  /* g_ensure_depth at the return-funnel target (see codegen_util.c) */
 extern int g_loop_exc_base;
+extern int g_loop_body;
 extern int g_loop_ensure_base;  /* g_ensure_depth at the innermost C-loop entry:
    a `next` crossing ensure regions opened INSIDE the loop defers through them
    (runs their bodies) before the C continue */

@@ -3966,7 +3966,8 @@ static int subtree_has_own_next_ex(const NodeTable *nt, int id, int next) {
   if (id < 0) return 0;
   const char *ty = nt_type(nt, id);
   if (!ty) return 0;
-  if (sp_streq(ty, "NextNode")) return next < 0 || id == next;
+  if (id == next) return 1;
+  if (sp_streq(ty, "NextNode")) return next < 0;
   if (sp_streq(ty, "DefNode") || sp_streq(ty, "ClassNode") || sp_streq(ty, "ModuleNode") ||
       sp_streq(ty, "WhileNode") || sp_streq(ty, "UntilNode") || sp_streq(ty, "LambdaNode"))
     return 0;
@@ -4079,6 +4080,10 @@ void emit_loop_body(Compiler *c, int body, Buf *b, int indent) {
   int sv_lens = g_loop_ensure_base;
   g_loop_ensure_base = g_ensure_depth;
   g_c_loop_depth++;
+  /* and whose loop it is: an ensure's deferred `next` pops those frames
+     only where this body owns the ensure (emit_begin) */
+  int sv_lbody = g_loop_body;
+  g_loop_body = body;
   /* A `next <v>` in this body leaves THIS loop's iteration, so the value slot
      an enclosing collecting block opened (g_ie_next_var, a `then` / `map` /
      inject body's destination) is not its target: left set, the inner next
@@ -4124,6 +4129,7 @@ void emit_loop_body(Compiler *c, int body, Buf *b, int indent) {
   g_ie_next_var = sv_nxv; g_ie_next_ty = sv_nxt;
   g_loop_exc_base = sv_lexc;
   g_loop_ensure_base = sv_lens;
+  g_loop_body = sv_lbody;
 }
 
 /* `recv.tap { |x| body }` / `recv.then { |x| body }` (alias yield_self) in
