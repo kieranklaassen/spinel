@@ -1,0 +1,23 @@
+Refuse a kept result of the String mutators that answer self without a bang
+
+`r = s.concat("x", "y"); r << "!"; p s` printed "abxy" where CRuby prints
+"abxy!". bytesplice, append_as_bytes, and concat or prepend with other
+than one argument answer their receiver, but no alias walk follows them,
+so the name that keeps the result holds a copy, and the bang-result
+route of refuse_string_alias_copies asked only names ending in `!`.
+
+sa_bang_receiver now takes those four calls. The route refuses the kept
+result when it is mutated in place through a local, a global or a
+top-level instance variable and the receiver is read, in a sentence of
+its own, and the returned-parameter route refuses a method that answers
+its parameter through one of them
+(`def patch(x) = x.bytesplice(0, 1, "Z")`). A class's instance variable
+that keeps the result is left as on master, and nothing there is
+refused yet: an append through it reaches an instance-variable receiver
+in some programs (`@r = @s.concat(a, b)` where a parameter set @s) and
+does not build in others, and most other changes through either name
+are lost.
+Under --share-strings the four calls are the rule's and nothing is
+asked.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

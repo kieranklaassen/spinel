@@ -1,0 +1,41 @@
+1:  1c4f3dad1 ! 1:  aaf6ddc67 Refuse a plain mutator's kept result in a class's instance variable
+    @@ docs/limitations.md: Not yet shared:
+      - through a global variable: a String variable assigned from a global (`t = $g`, `t = $g.to_s`) or to one (`$g = s`, `$h = $g`), when one name is mutated in place and the other is read;
+      - through a method that returns its String parameter (`def id(x) = x`, also `x.itself` or a bang method on it), when the result or the variable passed in is mutated in place and the other is read;
+      - through a bang method's result, which is its receiver (`r = s.strip!`, `r = s.strip! || s`), when the result is mutated in place through a variable and the receiver is read; a mutator straight on the result (`s.sub!(a, b) << x`) reaches the receiver;
+    --- through the result of `bytesplice`, `append_as_bytes`, or `concat` or `prepend` with other than one argument, which is its receiver too (`r = s.concat(a, b)`), when the result is mutated in place through a local, a global or an instance variable of the top level and the receiver is read, or when a method returns its parameter through one of them. A class's instance variable that keeps the result is left alone: an append through it reaches an instance-variable receiver in some programs (`@r = @s.concat(a, b)` where a parameter set `@s`) and does not build in others, and most other changes through either name are lost. A mutator straight on the result of `bytesplice` or `append_as_bytes` (`s.bytesplice(0, 1, "Z") << x`) does not reach the receiver, and with `--share-strings` the kept result is still a copy. None of these is refused yet;
+    -+- through the result of `bytesplice`, `append_as_bytes`, or `concat` or `prepend` with other than one argument, which is its receiver too (`r = s.concat(a, b)`), when the result is mutated in place through a variable and the receiver is read, or when a method returns its parameter through one of them. A class's instance variable that keeps `concat` with arguments on another one is not refused where both already hold a shared String (`def initialize(s) = @s = s`, then `@r = @s.concat(a, b)`): it takes that String itself. A mutator straight on the result of `bytesplice` or `append_as_bytes` (`s.bytesplice(0, 1, "Z") << x`) does not reach the receiver, and with `--share-strings` the kept result is still a copy. Neither of these is refused yet;
+    +-- through the result of `bytesplice`, `append_as_bytes`, or `concat` or `prepend` with other than one argument, which is its receiver too (`r = s.concat(a, b)`), when the result is mutated in place through a local, a global or an instance variable of the top level and the receiver is read, or when a method returns its parameter through one of them. A class's instance variable that keeps the result is left alone: an append through it reaches an instance-variable receiver in some programs (`@r = @s.concat(a, b)` where a parameter set `@s`) and does not build in others, and most other changes through either name are lost. A mutator straight on the result of `bytesplice` or `append_as_bytes` (`s.bytesplice(0, 1, "Z") << x`) does not reach the receiver. Neither of these is refused yet;
+    ++- through the result of `bytesplice`, `append_as_bytes`, or `concat` or `prepend` with other than one argument, which is its receiver too (`r = s.concat(a, b)`), when the result is mutated in place through a variable and the receiver is read, or when a method returns its parameter through one of them. A class's instance variable that keeps `concat` with arguments on another one is not refused where both already hold a shared String (`def initialize(s) = @s = s`, then `@r = @s.concat(a, b)`): it takes that String itself. A mutator straight on the result of `bytesplice` or `append_as_bytes` (`s.bytesplice(0, 1, "Z") << x`) does not reach the receiver and is not refused yet;
+      - through `to_s` (or another call answering its String receiver) under a mutator whose argument reassigns the variable, when the variable is a String handle (`e.to_s << (e = +"b")`);
+      - into an Array, a String variable added by `insert`, `prepend`, a `concat` of a literal, the later push of a chain (`a << t << s`) or a push into a global Array, or as the value of `s << x`, of `+s` (s itself unless s is frozen; a parameter is refused even when every caller passes a frozen literal) or of a reader method (`a << sb` with `def sb = @s`), when the variable or the element is then mutated in place;
+    - - through a reader on a boxed receiver (a Struct or Data member, an `attr_reader`, `def m = @iv`), a String read into a local that is mutated in place while the receiver is read again;
+    + - through a reader on a boxed receiver (a Struct or Data member, an `attr_reader`, `def m = @iv`), a String read into a local that is mutated in place while the receiver is read again (a local only queried and then rebound to a copy, `s = s.dup`, before the change compiles: the change is the copy's);
+     
+      ## src/analyze.c ##
+     @@ src/analyze.c: static int sa_bang_receiver(Compiler *c, int call, int *plain) {
+    @@ src/analyze.c: static void refuse_string_alias_copies(Compiler *c) {
+     -         some programs (`@r = @s.concat(a, b)` where a parameter set @s)
+     -         and does not build in others, and most other changes through
+     -         either name are lost. One of the top level takes a copy, as a
+    --         global does. Under --share-strings the rule names every such
+    --         result a shared handle, a read-only one too, so the calls are left
+    --         to it */
+    --      if (plain && ((to.kind == NK_InstanceVariableReadNode && to.cid != comp_class_index(c, "Toplevel")) ||
+    +-         global does */
+    +-      if (plain && to.kind == NK_InstanceVariableReadNode && to.cid != comp_class_index(c, "Toplevel"))
+     +         without a bang holds a copy too, but for the one write that hands
+     +         over the handle (sa_ivar_keeps_handle). One of the top level takes
+    -+         a copy, as a global does. Under --share-strings the rule names
+    -+         every such result a shared handle, a read-only one too, so the
+    -+         calls are left to it */
+    -+      if (plain && (sa_ivar_keeps_handle(c, v, &to, &from) ||
+    -                     c->share_strings))
+    ++         a copy, as a global does */
+    ++      if (plain && sa_ivar_keeps_handle(c, v, &to, &from))
+              continue;
+            if (sa_mutated(c, &to) && sa_read_elsewhere(c, &from, b)) {
+    +         int route = plain ? 4 : 2;
+     
+      ## test/collect/refusals.expected ##
+     @@ test/collect/refusals.expected: spinel: test/reject/string_nested_masgn_deep.rb:3: a nested multiple-assignment
