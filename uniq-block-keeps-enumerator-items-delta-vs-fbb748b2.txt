@@ -1,0 +1,82 @@
+1:  fbb748b21 ! 1:  583be5e41 uniq with a block keeps an Enumerator's items, not what the block binds
+    @@ Commit message
+         An Enumerator whose steps yield one value or several comes out right
+         by the same road, and so does a block that changes its |*r|.
+
+    -    Whether a step yields one value or two is known when the program
+    -    runs, so the loop is told ahead of its first item and reads the
+    -    survivor from the to_a's own Array: an instruction an item with clang
+    -    and none with gcc over a one-value Enumerator with a lone |x|, which
+    -    master ran right. A block with two parameters, a bare block and no
+    -    block keep their C.
+    +    A step that yields one value has the parameter for its item, and a
+    +    block may change that String in place: `x.chomp!` rebinds the
+    +    parameter, and uniq kept the changed one. So for a lone |x| the
+    +    survivor of such a step is the parameter as it is after the block
+    +    ran, as it was; only a step that packs several values
+    +    (sp_yielded_packed) is read from the to_a's own Array, which no name
+    +    of the program reaches.
+    +
+    +    Whether a step yields one value or several is known when the program
+    +    runs, so the loop is told ahead of its first item and asks it of each
+    +    survivor. A lone |x| over a one-value Enumerator, which master ran
+    +    right, pays by callgrind, a step with gcc and with clang: over a.each
+    +    5 fewer and 1 more, over each_char 0 and 1, over each_slice(2) 0 and
+    +    4, and 7 and 5 with the slice's first value for the key. A block with
+    +    two parameters, a bare block and no block keep their C.
+
+         Test: test/enum_uniq_block_keeps_item.rb.
+
+    @@ src/codegen_fold.c: int emit_poly_uniq_block(Compiler *c, int id, Buf *b) {
+            else if (bare) snprintf(es, sizeof es, "%s", sel);
+     +      else if (tpair) {
+     +        /* the item stays in the to_a's own Array, which nothing else holds:
+    -+           beside a first value it is read there, where it is kept */
+    ++           beside a first value it is read there, where it is kept. A step
+    ++           that yields one value has the parameter for its item, pushed as
+    ++           it is after the block ran: `x.chomp!` rebinds it. */
+     +        emit_indent(g_pre, din);
+     +        if (titem) {
+     +          buf_printf(g_pre, "lv_%s = %s;\n", p0, es);
+    @@ src/codegen_fold.c: int emit_poly_uniq_block(Compiler *c, int id, Buf *b) {
+            else if (!splat || !emit_iter_autosplat(c, block, rt, sel, din)) {
+              splat = 0;
+              emit_indent(g_pre, din); buf_printf(g_pre, "lv_%s = %s;\n", p0, es);
+    +@@ src/codegen_fold.c: int emit_poly_uniq_block(Compiler *c, int id, Buf *b) {
+    +     buf_printf(g_pre, "int _t%d = 0; for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++) if (sp_poly_eq(_t%d->data[_t%d], _t%d)) { _t%d = 1; break; }\n",
+    +                tdup, tj, tj, tseen, tj, tseen, tj, tkey, tdup);
+    +     emit_indent(g_pre, din);
+    +-    if (splat) buf_printf(g_pre, "if (!_t%d) { sp_PolyArray_push(_t%d, _t%d); sp_%sArray_push(_t%d, %s); }\n", tdup, tseen, tkey, rk, tres, es);
+    ++    if (titem)
+    ++      buf_printf(g_pre, "if (!_t%d) { sp_PolyArray_push(_t%d, _t%d); sp_%sArray_push(_t%d, sp_yielded_packed(_t%d, %s) ? %s : lv_%s); }\n",
+    ++                 tdup, tseen, tkey, rk, tres, tpair, es, es, p0);
+    ++    else if (splat) buf_printf(g_pre, "if (!_t%d) { sp_PolyArray_push(_t%d, _t%d); sp_%sArray_push(_t%d, %s); }\n", tdup, tseen, tkey, rk, tres, es);
+    +     else buf_printf(g_pre, "if (!_t%d) { sp_PolyArray_push(_t%d, _t%d); sp_%sArray_push(_t%d, lv_%s); }\n", tdup, tseen, tkey, rk, tres, p0);
+    +     if (use_shadow) { din--; emit_indent(g_pre, din); buf_puts(g_pre, "}\n"); }
+    +     if (clv0) clv0->type = csaved0;
+
+      ## test/enum_uniq_block_keeps_item.rb (new) ##
+     @@
+    @@ test/enum_uniq_block_keeps_item.rb (new)
+     +p en.uniq { |x| x }
+     +p en.uniq { |*r| r }
+     +p e.uniq { |*r| r << 1; r[0] }
+    ++
+    ++# a block that changes its String parameter in place: a step that yields one
+    ++# value has the parameter for its item, so the String kept is the changed one
+    ++l = "a\nb\na\n".each_line
+    ++p l.uniq { |x| x.chomp!; x }
+    ++s = [+"a", +"b", +"a"]
+    ++p s.each.uniq { |x| x << "!"; x[0] }
+    ++g = Enumerator.new { |y| y.yield(+"a\n"); y.yield(+"a\n", 1); y.yield(+"b\n") }
+    ++p g.uniq { |x| x.chomp!; x }
+
+      ## test/enum_uniq_block_keeps_item.rb.expected (new) ##
+     @@
+    @@ test/enum_uniq_block_keeps_item.rb.expected (new)
+     +[1, [2, 3]]
+     +[1, [2, 3], [2, 4]]
+     +[[5, 0], [6, 1]]
+    ++["a", "b"]
+    ++["a!", "b!"]
+    ++["a", "b"]
