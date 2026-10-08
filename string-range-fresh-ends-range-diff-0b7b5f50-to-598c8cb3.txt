@@ -1,0 +1,12 @@
+1:  4004f41f2 = 1:  348fe6e11 The two ends of a String Range made on the spot are both kept, and made in order
+2:  612144529 ! 2:  2b364a5eb A String Range that no name holds is kept until it is read
+    @@ Makefile: GC_STRESS_TESTS := test/gc_root_frame_slots.rb \
+     +                   test/string_range_fresh_ends.rb \
+                         test/gc_root_volatile_string_slot.rb \
+                         test/gc_root_gathered_handle_param.rb \
+    -                    test/dispatch_arm_roots_operands.rb \
+    +                    test/ffi_str_borrow.rb \
+     
+      ## src/codegen.c ##
+     @@ src/codegen.c: void emit_inlined_local_decl(Compiler *c, LocalVar *lv, const char *rn, Buf *b,
+3:  0b7b5f508 = 3:  598c8cb3d A local as one end of a String Range takes no slot when the other end cannot reach it

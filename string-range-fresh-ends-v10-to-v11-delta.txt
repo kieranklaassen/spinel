@@ -1,0 +1,11 @@
+--- body-fresh-v10.txt	2026-10-08 15:13:34.752098218 +0000
++++ body-fresh-v11.txt	2026-10-08 15:55:22.428045069 +0000
+@@ -101,7 +101,7 @@
+ gate: run on the Mac at opening
+ ```
+ 
+-Run here before that (Linux x86-64, gcc 13.3 and clang 18.1, CRuby 3.3.6). On these three commits over master `2810a235d119`: the build from nothing, the test and the walk's test at five collector settings with both compilers, with and without `--share-strings`, and `tools/gate.rb check` for each commit. On the same three over master `9855f1f61ff8`, with the walks' pull request beneath them before it merged: the same, `make share-strings-test`, `make cident` against their parent, and every program and cost figure this text gives.
++Run here before that (Linux x86-64, gcc 13.3 and clang 18.1, CRuby 3.3.6). On these three commits over master `74fa6d7c2457`: the build from nothing, the test and the walk's test at five collector settings with both compilers, with and without `--share-strings`, and `tools/gate.rb check` for each commit. On the same three over master `9855f1f61ff8`, with the walks' pull request beneath them before it merged: the same, `make share-strings-test`, `make cident` against their parent, and every program and cost figure this text gives.
+ 
+ - [ ] New tests have `.expected` files that match CRuby 4.0 run with `--enable-frozen-string-literal` (written with 3.3.6)
+ - [x] Values past 2^31 are marked `# spinel: int64` (none)

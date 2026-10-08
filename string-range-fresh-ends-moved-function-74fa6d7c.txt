@@ -1,0 +1,68 @@
+U's three on master 74fa6d7c2457 against the same three on master 2810a235d119: the functions of the piece that the move touched. My function test named two, emit_args_filled_argv and emit_inlined_local_decl. Read by their text, ONE moved: emit_inlined_local_decl. emit_args_filled_argv's file, src/codegen_fold.c, is not in the move at all (the test took its name from a line of a changed file that mentions it).
+
+==== emit_args_filled_argv (src/codegen_fold.c)
+---- what upstream changed in it, master 2810a235d119 to master 74fa6d7c2457:
+(no difference)
+---- the piece's own lines in it, on 2810a235d119 and on 74fa6d7c2457: THE SAME added and removed lines
+---- the piece's change in it on master 74fa6d7c2457 (598c8cb3d896 against its base):
+--- master 74fa6d7c2457
++++ the piece 598c8cb3d896
+@@ -240,7 +240,8 @@
+       int has_storage = ty_is_object(at) || c_type_name(at) != NULL;
+       int seq = (has_storage && n_se >= 2 && k < last_se &&
+                  subtree_has_side_effect(c, argv[k]));
+-      int root = (at == TY_POLY || needs_root(at));
++      /* a String Range is two Strings by value, each rooted as a local's are */
++      int root = (at == TY_POLY || needs_root(at) || at == TY_STR_RANGE);
+       if (!root && !seq) continue;
+       const char *aty = nt_type(nt, argv[k]);
+       /* a splat at/after the rest slot (splat_idx only marks splats needing
+@@ -315,7 +316,8 @@
+ else {
+         emit_ctype(c, at, g_pre);
+         buf_printf(g_pre, " _t%d = %s;", ht, hb.p ? hb.p : "0");
+-        if (root) buf_printf(g_pre, " SP_GC_ROOT(_t%d);", ht);
++        if (root && at == TY_STR_RANGE) { buf_puts(g_pre, " "); emit_gc_root_tmp_refs(c, at, ht, g_pre); }
++        else if (root) buf_printf(g_pre, " SP_GC_ROOT(_t%d);", ht);
+         buf_puts(g_pre, "\n");
+       }
+       free(hb.p);
+==== emit_inlined_local_decl (src/codegen.c)
+---- what upstream changed in it, master 2810a235d119 to master 74fa6d7c2457:
+--- master 2810a235d119
++++ master 74fa6d7c2457
+@@ -1,18 +1,7 @@
+ void emit_inlined_local_decl(Compiler *c, LocalVar *lv, const char *rn, Buf *b, int din) {
+   if (!lv->is_cell) {
+     emit_indent(b, din);
+-    if (inlined_local_needs_volatile(c, lv)) {
+-      Buf ct; memset(&ct, 0, sizeof ct);
+-      emit_ctype(c, lv->type, &ct);
+-      const char *t = ct.p ? ct.p : "";
+-      size_t tl = strlen(t);
+-      while (tl > 0 && t[tl - 1] == ' ') tl--;
+-      /* a pointer takes the qualifier on itself, as declare_local's does */
+-      if (tl > 0 && t[tl - 1] == '*') buf_printf(b, "%.*s volatile", (int)tl, t);
+-      else buf_printf(b, "volatile %s", t);
+-      free(ct.p);
+-    }
+-    else emit_ctype(c, lv->type, b);
++    emit_local_ctype(c, lv->type, inlined_local_needs_volatile(c, lv), b);
+     buf_printf(b, " lv_%s = %s;\n", rn, local_init_value(c, lv));
+     if (lv->type == TY_POLY) { emit_indent(b, din); buf_printf(b, "SP_GC_ROOT_RBVAL(lv_%s);\n", rn); }
+     else if (needs_root(lv->type) && !comp_ty_value_obj(c, lv->type)) {
+---- the piece's own lines in it, on 2810a235d119 and on 74fa6d7c2457: THE SAME added and removed lines
+---- the piece's change in it on master 74fa6d7c2457 (598c8cb3d896 against its base):
+--- master 74fa6d7c2457
++++ the piece 598c8cb3d896
+@@ -7,6 +7,10 @@
+     else if (needs_root(lv->type) && !comp_ty_value_obj(c, lv->type)) {
+       emit_indent(b, din); buf_printf(b, "SP_GC_ROOT(lv_%s);\n", rn);
+     }
++    /* two GC strings by value; see emit_local_decl */
++    else if (lv->type == TY_STR_RANGE) {
++      emit_indent(b, din); buf_printf(b, "SP_GC_ROOT_STR(lv_%s.first); SP_GC_ROOT_STR(lv_%s.last);\n", rn, rn);
++    }
+     return;
+   }
+   emit_indent(b, din);
