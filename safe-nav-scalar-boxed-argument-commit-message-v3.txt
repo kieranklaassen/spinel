@@ -1,0 +1,25 @@
+A `&.` call to between? or a Float's clamp takes a boxed bound
+
+    def id(x) = x
+    id(:s)
+    def flt(v) = v ? 1.5 : nil
+    f = flt(true)
+    p f&.clamp(1.0, id(1.2))    # 1.2
+
+This raises NoMethodError ("undefined method 'clamp' for an instance of
+Float"), and `i&.between?(id(1), id(20))`, on an Integer or a Float,
+does not build. Both were right before "v&.fdiv(2) and the other
+Ruby-defined Integer methods keep the &.": that left every `&.` call on
+the typed emitter, which has no arm for these two with a boxed bound.
+
+The arm each has for a Rational bound boxes both sides and compares at
+run time (sp_poly_cmp_ck, sp_num_clamp), as an Integer's clamp does for
+a boxed bound already. It takes a boxed bound too now, in a program
+with no between? or clamp of its own: there the receiver may answer to
+that one, and the call keeps its C.
+
+Tests: test/safe_nav_scalar_boxed_argument.rb, which did not build, and
+test/safe_nav_scalar_own_clamp.rb, which passes on master and keeps its
+C. Expected output from CRuby 3.3.6.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

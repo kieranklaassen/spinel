@@ -1,0 +1,233 @@
+From f76fdcf2e2b25c02c844a7236324f746c2b644b9 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 7 Oct 2026 21:26:03 +0000
+Subject: [PATCH] A `&.` call to between? or a Float's clamp takes a boxed
+ bound
+
+    def id(x) = x
+    id(:s)
+    def flt(v) = v ? 1.5 : nil
+    f = flt(true)
+    p f&.clamp(1.0, id(1.2))    # 1.2
+
+This raises NoMethodError ("undefined method 'clamp' for an instance of
+Float"), and `i&.between?(id(1), id(20))`, on an Integer or a Float,
+does not build. Both were right before "v&.fdiv(2) and the other
+Ruby-defined Integer methods keep the &.": that left every `&.` call on
+the typed emitter, which has no arm for these two with a boxed bound.
+
+The arm each has for a Rational bound boxes both sides and compares at
+run time (sp_poly_cmp_ck, sp_num_clamp), as an Integer's clamp does for
+a boxed bound already. It takes a boxed bound too now, in a program
+with no between? or clamp of its own: there the receiver may answer to
+that one, and the call keeps its C.
+
+Tests: test/safe_nav_scalar_boxed_argument.rb, which did not build, and
+test/safe_nav_scalar_own_clamp.rb, which passes on master and keeps its
+C. Expected output from CRuby 3.3.6.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/codegen_call_object.c                     |  9 ++-
+ src/codegen_call_recv.c                       |  9 ++-
+ test/safe_nav_scalar_boxed_argument.rb        | 64 +++++++++++++++++++
+ ...safe_nav_scalar_boxed_argument.rb.expected | 43 +++++++++++++
+ test/safe_nav_scalar_own_clamp.rb             | 11 ++++
+ test/safe_nav_scalar_own_clamp.rb.expected    |  4 ++
+ 6 files changed, 136 insertions(+), 4 deletions(-)
+ create mode 100644 test/safe_nav_scalar_boxed_argument.rb
+ create mode 100644 test/safe_nav_scalar_boxed_argument.rb.expected
+ create mode 100644 test/safe_nav_scalar_own_clamp.rb
+ create mode 100644 test/safe_nav_scalar_own_clamp.rb.expected
+
+diff --git a/src/codegen_call_object.c b/src/codegen_call_object.c
+index 90a232256..fcdb818aa 100644
+--- a/src/codegen_call_object.c
++++ b/src/codegen_call_object.c
+@@ -109,9 +109,14 @@ int emit_call_identity_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
+     }
+     /* An Integer/Float receiver with a Rational bound: `>=`/`<=` against an
+        sp_Rational struct will not compile. Box both sides and compare through
+-       sp_poly_cmp_ck, which orders Rational against Integer/Float exactly (#3232). */
++       sp_poly_cmp_ck, which orders Rational against Integer/Float exactly (#3232).
++       A boxed bound too: it reaches here under `&.` (a `.` call was moved
++       onto builtins/comparable.rb's definition). Not in a program with a
++       between? of its own, which the receiver may answer to. */
+     if ((rt == TY_INT || rt == TY_FLOAT) &&
+-        (comp_ntype(c, argv[0]) == TY_RATIONAL || comp_ntype(c, argv[1]) == TY_RATIONAL)) {
++        (comp_ntype(c, argv[0]) == TY_RATIONAL || comp_ntype(c, argv[1]) == TY_RATIONAL ||
++         ((comp_ntype(c, argv[0]) == TY_POLY || comp_ntype(c, argv[1]) == TY_POLY) &&
++          !any_class_defines(c, name)))) {
+       int ts = hoist_boxed_rooted(c, recv);
+       int tlo = hoist_boxed_rooted(c, argv[0]), thi = hoist_boxed_rooted(c, argv[1]);
+       buf_printf(b, "(sp_poly_cmp_ck(_t%d, _t%d) >= 0 && sp_poly_cmp_ck(_t%d, _t%d) <= 0)",
+diff --git a/src/codegen_call_recv.c b/src/codegen_call_recv.c
+index a5a7d4439..bfb4af83d 100644
+--- a/src/codegen_call_recv.c
++++ b/src/codegen_call_recv.c
+@@ -8054,9 +8054,14 @@ static int emit_scalar_recv_arms(Compiler *c, int id, Buf *b, const NodeTable *n
+       buf_printf(b, "sp_num_clamp_open(sp_box_float(%s), ", r); emit_boxed(c, argv[0], b); buf_puts(b, ", "); emit_boxed(c, argv[1], b); buf_puts(b, ")");
+     }
+     /* a Rational bound: box the operands and clamp through sp_num_clamp, which
+-       understands Rational and returns the applied operand unchanged (#3232) */
++       understands Rational and returns the applied operand unchanged (#3232).
++       A boxed bound too, as in the Integer chain: it reaches here under `&.`
++       (a `.` call was moved onto builtins/comparable.rb's definition). Not
++       in a program with a clamp of its own, which the receiver may answer to */
+     else if (sp_streq(name, "clamp") && argc == 2 &&
+-             (comp_ntype(c, argv[0]) == TY_RATIONAL || comp_ntype(c, argv[1]) == TY_RATIONAL)) {
++             (comp_ntype(c, argv[0]) == TY_RATIONAL || comp_ntype(c, argv[1]) == TY_RATIONAL ||
++              ((comp_ntype(c, argv[0]) == TY_POLY || comp_ntype(c, argv[1]) == TY_POLY) &&
++               !any_class_defines(c, name)))) {
+       buf_printf(b, "sp_num_clamp(sp_box_float(%s), ", r); emit_boxed(c, argv[0], b); buf_puts(b, ", "); emit_boxed(c, argv[1], b); buf_puts(b, ")");
+     }
+     /* Float#clamp with float bounds always yields a float (the returned bound
+diff --git a/test/safe_nav_scalar_boxed_argument.rb b/test/safe_nav_scalar_boxed_argument.rb
+new file mode 100644
+index 000000000..a373e2e3c
+--- /dev/null
++++ b/test/safe_nav_scalar_boxed_argument.rb
+@@ -0,0 +1,64 @@
++# spinel: int64
++# A `&.` call to between? on an Integer or a Float, or to clamp on a Float,
++# with a boxed bound. The typed emitter had no arm for them: the first did
++# not build, the second raised NoMethodError.
++$log = []
++def lg(x) = ($log << x; x)
++def id(x) = x
++id(:s)
++def int(v) = v ? 12 : nil
++def flt(v) = v ? 1.5 : nil
++class Src
++  attr_reader :n
++  def initialize(v) = (@v = v; @n = 0)
++  def nxt = (@n += 1; @v)
++end
++i = int(true); z = int(false); f = flt(true); g = flt(false)
++
++p i&.between?(id(1), id(20)), z&.between?(id(1), id(20))
++p i&.between?(1, id(5)), i&.between?(id(13), 20), i&.between?(id(1.5), id(12.5))
++p f&.between?(id(1.0), id(2.0)), g&.between?(id(1.0), id(2.0)), f&.between?(id(1), 2)
++p f&.clamp(id(1.0), id(1.2)), g&.clamp(id(1.0), id(1.2))
++p f&.clamp(1.0, id(1.2)), f&.clamp(id(2), 3.0), f&.clamp(id(nil), id(1.0))
++p i&.between?(id(1), id(2**70)), f&.between?(id(-(2**70)), id(1.5)), f&.clamp(id(2), id(2**70))
++
++# each argument runs once, in order
++p i&.between?(id(lg(1)), id(lg(5))), $log
++p f&.clamp(id(lg(1.0)), id(lg(5.0))), $log
++
++# the receiver runs once
++s = Src.new(12); t = Src.new(nil)
++p s.nxt&.between?(id(1), id(20)), s.n, t.nxt&.between?(id(1), id(20)), t.n
++
++# as a receiver, in a block, with a parameter another call boxes
++p f&.clamp(id(1.0), id(1.2))&.round(1), g&.clamp(id(1.0), id(1.2)).to_s
++[1, 2].each { |k| p i&.between?(id(k), id(5)), z&.between?(id(k), id(5)) }
++def h(v, a) = v&.between?(a, 20)
++p h(i, 8), h(i, id(18)), h(z, id(18))
++x = f&.clamp(id(1), id(1.2))
++p x, (i&.between?(id(1), id(20)) ? "in" : "out")
++
++# between? stops at the first bound that fails; a bound that does not
++# compare raises, as it does behind a `.`
++p i&.between?(id(20), id("a"))
++def err
++  yield
++rescue ArgumentError => e
++  e.message
++end
++p err { i&.between?(id(1), id("a")) }
++p err { f&.between?(id(1), id(nil)) }
++p err { f&.clamp(id(3), id(1)) }
++p err { f&.clamp(id("a"), id(1)) }
++p err { (0.0 / 0.0)&.clamp(id(1.0), id(2.0)) }
++
++# a receiver that a later call boxes goes the boxed way, as before
++def big = 2**70
++def w(a) = a
++def w2(a) = a
++bx = w(big)
++p((bx&.between?(id(1), id(nil)) rescue "raised"))
++w(12)
++fx = w2(1.5)
++p err { fx&.clamp(id("a"), id("b")) }
++w2("str")
+diff --git a/test/safe_nav_scalar_boxed_argument.rb.expected b/test/safe_nav_scalar_boxed_argument.rb.expected
+new file mode 100644
+index 000000000..dc8fd99e1
+--- /dev/null
++++ b/test/safe_nav_scalar_boxed_argument.rb.expected
+@@ -0,0 +1,43 @@
++true
++nil
++false
++false
++true
++true
++nil
++true
++1.2
++nil
++1.2
++2
++1.0
++true
++true
++2
++false
++[1, 5]
++1.5
++[1, 5, 1.0, 5.0]
++true
++1
++nil
++1
++1.2
++""
++false
++nil
++false
++nil
++true
++false
++nil
++1.2
++"in"
++false
++"comparison of Integer with String failed"
++"comparison of Float with nil failed"
++"min argument must be less than or equal to max argument"
++"comparison of String with 1 failed"
++"comparison of Float with 1.0 failed"
++"raised"
++"comparison of Float with String failed"
+diff --git a/test/safe_nav_scalar_own_clamp.rb b/test/safe_nav_scalar_own_clamp.rb
+new file mode 100644
+index 000000000..f430f8c0a
+--- /dev/null
++++ b/test/safe_nav_scalar_own_clamp.rb
+@@ -0,0 +1,11 @@
++# A program with a clamp of its own on Numeric: a Float's `&.` call with a
++# boxed bound still reaches it.
++def id(x) = x
++id(:s)
++class Numeric
++  def clamp(a, b) = "num"
++end
++def flt(v) = v ? 1.5 : nil
++f = flt(true); g = flt(false)
++p f&.clamp(id(1.0), id(1.2)), g&.clamp(id(1.0), id(1.2))
++p f&.clamp(1.0, id(1.2)), f&.clamp(id(1), 2)
+diff --git a/test/safe_nav_scalar_own_clamp.rb.expected b/test/safe_nav_scalar_own_clamp.rb.expected
+new file mode 100644
+index 000000000..26b627e4f
+--- /dev/null
++++ b/test/safe_nav_scalar_own_clamp.rb.expected
+@@ -0,0 +1,4 @@
++"num"
++nil
++"num"
++"num"
+-- 
+2.43.0
+
