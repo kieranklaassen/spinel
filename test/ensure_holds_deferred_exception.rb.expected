@@ -1,0 +1,33 @@
+the message of error number 0
+the message of error number 1
+the message of error number 2
+the message of error number 3
+7
+tag 7
+[7, 8]
+coded
+8
+tag 8
+[8, 9]
+coded
+9
+tag 9
+[9, 10]
+coded
+10
+tag 10
+[10, 11]
+coded
+tag 3
+[3, 4]
+KeyError
+boom 1 zzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
+flagged 6
+tallied 1
+stored 2
+2
+:taken
+6
+8
+10
+4000

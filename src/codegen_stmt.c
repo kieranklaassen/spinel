@@ -9688,6 +9688,57 @@ static void emit_ensure_return(Compiler *c, int eid, int has_retval, Buf *b, int
   else emit_retf_return(eid, has_retval, b);
 }
 
+/* Is `v` a value an ensure body names with no call: nil, true, false, an
+   Integer, Float or Symbol literal, a read of a local, an instance variable
+   or a global, or a builtin operator over scalars (call_is_scalar_op) whose
+   operands are such values? */
+static int ensure_names_plain_value(Compiler *c, int v) {
+  const NodeTable *nt = c->nt;
+  if (v < 0) return 0;
+  switch (nt_kind(nt, v)) {
+  case NK_NilNode: case NK_TrueNode: case NK_FalseNode: case NK_FloatNode: case NK_SymbolNode:
+  case NK_LocalVariableReadNode: case NK_InstanceVariableReadNode: case NK_GlobalVariableReadNode:
+    return 1;
+  case NK_IntegerNode:
+    return comp_ntype(c, v) == TY_INT;
+  case NK_CallNode: {
+    if (!call_is_scalar_op(c, v) || !ensure_names_plain_value(c, nt_ref(nt, v, "receiver"))) return 0;
+    int args = nt_ref(nt, v, "arguments"), n = 0;
+    const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &n) : NULL;
+    for (int i = 0; i < n; i++) if (!ensure_names_plain_value(c, av[i])) return 0;
+    return 1;
+  }
+  default:
+    return 0;
+  }
+}
+
+/* Does the ensure body `stmts` only name plain values (above), each alone
+   or stored in a local, an instance variable or a global, by `=` or by an
+   `op=` on an Integer or Float slot? Nothing it runs enters a begin or
+   rescues a raise then, so the exception that waits stays as the begin
+   left it. */
+static int ensure_body_only_stores(Compiler *c, int stmts) {
+  const NodeTable *nt = c->nt;
+  int n = 0; const int *bb = nt_arr(nt, stmts, "body", &n);
+  for (int i = 0; i < n; i++) {
+    int v = bb[i];
+    switch (nt_kind(nt, v)) {
+    case NK_LocalVariableOperatorWriteNode: case NK_InstanceVariableOperatorWriteNode:
+    case NK_GlobalVariableOperatorWriteNode:
+      if (!ty_is_numeric(comp_ntype(c, v)) || !ty_is_numeric(comp_ntype(c, nt_ref(nt, v, "value")))) return 0;
+      /* fall through */
+    case NK_LocalVariableWriteNode: case NK_InstanceVariableWriteNode: case NK_GlobalVariableWriteNode:
+      v = nt_ref(nt, v, "value");
+      break;
+    default:
+      break;
+    }
+    if (!ensure_names_plain_value(c, v)) return 0;
+  }
+  return 1;
+}
+
 /* begin/body/rescue (ensure/else deferred) via the setjmp exception model.
    When resultvar != NULL, the body's and rescue handlers' values are
    assigned to it (begin/rescue as an expression). */
@@ -9867,8 +9918,25 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
        as its cause. */
     emit_indent(b, indent);
     buf_printf(b, "{ void *_icr%d SP_CLEANUP(sp_inflight_restore) = _ic%d; (void)_icr%d;\n", eid, eid, eid);
+    /* The deferred exception waits in _excmsg and _excobj while the ensure
+       body runs, and nothing else holds it there: a begin entered by that
+       body takes the slot the message was read from, and a raise it rescues
+       takes sp_inflight_cause. Both are rooted for the body, and only when
+       an exception waits, so the path with none pays a saved count. */
+    int holds = !ensure_body_only_stores(c, ensure_stmts);
+    if (holds) {
+      emit_indent(b, indent);
+      buf_printf(b, "{ int _exr%d SP_CLEANUP(sp_gc_cleanup) = sp_gc_nroots;"
+                    " if (_excf%d) { _sp_gc_root_push((void **)((uintptr_t)&_excmsg%d | (uintptr_t)2));"
+                    " _sp_gc_root_push((void **)&_excobj%d); }\n",
+                 eid, eid, eid, eid);
+    }
     emit_stmts(c, ensure_stmts, b, indent);
     emit_indent(b, indent);
+    if (holds) {
+      buf_puts(b, "}\n");
+      emit_indent(b, indent);
+    }
     buf_puts(b, "}\n");
     emit_indent(b, indent);
     buf_printf(b, "sp_unwind_kind = _uk%d; sp_unwind_target = _ut%d; sp_unwind_exc_top = _ue%d; sp_unwind_home = _uh%d;\n",
