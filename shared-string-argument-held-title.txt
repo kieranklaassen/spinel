@@ -1,0 +1,1 @@
+A shared String's copy is held while its call's other arguments are made
