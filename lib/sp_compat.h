@@ -102,6 +102,18 @@
 # define SP_UNUSED
 #endif
 
+/* A struct whose objects are read and written through another struct type
+   too: an instance of a class is also its ancestors' (an inherited method
+   takes `(sp_Parent *)self`), an exception subclass's is an sp_Exception.
+   The types share a layout and are unrelated to the C compiler, which may
+   otherwise keep a field's old value across a store made through the other
+   type. Empty where the compiler has no such attribute. */
+#if SP_HAS_ATTRIBUTE(may_alias) || (!defined(SP_PORTABLE) && SP_GNUC_PREREQ(3, 3))
+# define SP_MAY_ALIAS __attribute__((may_alias))
+#else
+# define SP_MAY_ALIAS
+#endif
+
 #if SP_HAS_ATTRIBUTE(format) || (!defined(SP_PORTABLE) && SP_GNUC_PREREQ(3, 0))
 # define SP_PRINTF_FORMAT(fmt, first) __attribute__((format(printf, fmt, first)))
 #else

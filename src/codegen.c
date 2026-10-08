@@ -8681,6 +8681,17 @@ void emit_arysub_alloc(Compiler *c, ClassInfo *ci, Buf *b) {
   buf_puts(b, "  return d;\n}\n");
 }
 
+/* Is an instance of the class reached through another class's struct type
+   too? One with a parent or a child: an inherited method runs on the
+   child's instance through a cast. */
+static int class_struct_is_shared(Compiler *c, int cid) {
+  if (cid < 0) return 0;
+  if (c->classes[cid].parent >= 0) return 1;
+  for (int i = 0; i < c->nclasses; i++)
+    if (c->classes[i].parent == cid) return 1;
+  return 0;
+}
+
 void emit_class_struct(Compiler *c, ClassInfo *ci, Buf *b) {
   /* Native (C-backed) class: the package owns the struct; the generated TU has
      only its forward-decl (`typedef struct sp_X_s sp_X;`) and holds pointers. */
@@ -8699,7 +8710,7 @@ void emit_class_struct(Compiler *c, ClassInfo *ci, Buf *b) {
        write/read through the base cast, so omitting one would alias
        (and overrun into) the first ivar. */
     if (ci->nivars == 0) return;
-    buf_printf(b, "struct sp_%s_s {\n", ci->c_name);
+    buf_printf(b, "struct SP_MAY_ALIAS sp_%s_s {\n", ci->c_name);
     buf_puts(b, "  const char *cls_name;\n");
     buf_puts(b, "  const char *parent_cls_name;\n");
     buf_puts(b, "  const char *msg;\n");
@@ -8729,7 +8740,7 @@ void emit_class_struct(Compiler *c, ClassInfo *ci, Buf *b) {
   }
   /* the typedef is forward-declared for every class first (see codegen_program)
      so a class can embed a pointer to a class defined later in the file */
-  buf_printf(b, "struct sp_%s_s {\n", ci->c_name);
+  buf_printf(b, "struct %ssp_%s_s {\n", class_struct_is_shared(c, cid) ? "SP_MAY_ALIAS " : "", ci->c_name);
   /* An Array subclass instance IS its Array (#7449): the Array comes first,
      so a pointer to the instance is a pointer to the Array every Array
      emitter and the runtime take, and cls_id follows it. */
