@@ -1,0 +1,27 @@
+A pattern's whole-subject binding takes a constant's or a class variable's handle
+
+Under --share-strings a local that a pattern binds to its whole subject
+(`in String => s`, `in s`) takes the subject's own handle when the
+subject is a variable that holds one. emit_pattern_bind_handle asked
+that of a local, an instance variable and a global. A constant, a
+constant under a module and a class variable hold the shared handle in
+their slot as well, and for those the local took a fresh handle over
+the subject's text, a copy:
+
+    LINE = +"zz"
+    case LINE
+    in String => s
+      s << "!"
+    end
+    p LINE        # "zz!" in CRuby, "zz" compiled with the flag
+
+The test of the subject is repr_static_read_kind. The slot is read where
+the arm binds, after the arms before it were tried, so it is taken only
+where none of those runs code in its pattern or its guard
+(subtree_has_side_effect): `in String => t if (@@c = +"other"; false)`
+assigns the class variable after the case read its subject, and the next
+arm binds the String the case read, a copy as before. Without the flag
+no such slot is a handle, so emit_handle_var_ref answers no and the
+generated C is the same.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
