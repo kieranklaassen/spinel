@@ -1,0 +1,1 @@
+String#insert on a boxed String raises for an index below the start

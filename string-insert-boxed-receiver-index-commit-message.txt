@@ -1,0 +1,21 @@
+String#insert on a boxed String raises for an index below the start
+
+`box = [+"ab", 1][0]; box.insert(-4, "x"); p box` printed "axb" where
+CRuby raises IndexError, "index -3 out of string": sp_poly_insert
+counted a negative index from the end once, and sp_str_splice_at
+counted the index, still negative, from the end again. Further below
+the start it did raise, but named the index counted twice:
+`box.insert(-9, "x")` said "index -6 out of string" for CRuby's
+"index -8 out of string". A String variable's insert checks its index
+itself; a receiver whose kind is known at run time comes here.
+
+The String arm now raises with CRuby's message before the splice, and
+so ahead of a frozen receiver's FrozenError, as CRuby has it. An
+insert at an index that is not negative runs the same instructions as
+before (callgrind, gcc and clang).
+
+Left as it is: a value that is no String is inserted as its text
+(`box.insert(1, 5)` answers "a5b" where CRuby raises TypeError),
+another cause.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

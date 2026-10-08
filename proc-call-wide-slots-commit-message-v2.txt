@@ -1,0 +1,35 @@
+A Proc call of more than 16 arguments fills the slots it passes
+
+    def ends(a, *r, z) = [a, r.size, z]
+    pr = method(:ends).to_proc
+    p pr.call(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17)
+
+printed [1, 15, 0] built with gcc and an address in the 17's place
+built with clang. CRuby prints [1, 15, 17].
+
+A Proc call passes its true count and packs sixteen slots. A Method's
+proc binds its parameters by that count, up to the boxed channel's
+SP_PROC_ARG_SLOTS, so from the seventeenth argument on it read past
+the array: an Integer that was never passed, a String taken from a
+stray pointer, and for an Array of Strings spread into the call a
+segmentation fault.
+
+The call now fills the slots it passes. emit_proc_call_args sizes the
+sp_int array by the count once it is past sixteen and publishes that
+many boxed values, up to the channel's 64. sp_proc_call_spread_blk
+hands a bound Method's proc given more than sixteen elements to
+sp_proc_call_spread_wide, a function of its own, so the common call's
+frame stays sixteen slots. A call of sixteen arguments or fewer emits
+the C it did, and a seventeenth argument that runs code now runs. One
+with no value an sp_int temp can take (a call answering nil is void in
+C, `()` a box) was never emitted there: past the sixteenth it runs for
+its effect and arrives as nil.
+
+An ordinary proc still reads sixteen: its prologue is bounded there in
+every proc body, and raising that is another change. A call wider than
+the channel is as before: a Method's proc declines it, an ordinary proc
+reads sixteen, and the arguments past the sixteenth never run.
+
+Test: test/proc_call_wide_slots.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
