@@ -1,0 +1,37 @@
+A default that reads self runs on a String, Symbol, Float, Range or Time
+
+    class String
+      def note(k = self + "!") = "n #{k}"
+      def ask(s) = s.note
+    end
+    puts "x".ask("abc")
+
+printed "n x!" for "n abc!": the default ran on the caller's self.
+From another class's method, or from the top level where there is no
+self, the C did not build.
+
+"A builtin method's default that reads an ivar runs on its receiver"
+lets such a default read a held receiver (g_arm_self), in the arms for
+Random, Array, Hash and a call with a block. The site at the top of
+emit_call_body that takes a String, Symbol, Float, Range or Time
+receiver without a block still wrote the default where the call
+stands. It now holds the receiver for it in the statement expression
+reopen_recv_in_order opens where the call stands, so what the statement
+runs before the call still runs before the receiver. It does so where
+the method is the receiver class's own (a def in the class, or in a
+module it includes), the call leaves out a default that reads self (a
+positional it does not reach, a keyword it does not write), and the
+receiver is not self. Any other call is emitted as it was. The temp is
+rooted where such a default reads the value; one that reads self only
+as `self.class` leaves it bare, so a call master ran right from its
+type costs what it did. The site takes self in a method added to
+Integer too, so `def me = note` there no longer fails to build.
+
+A held String, Symbol, Integer, Float, Range or Time is the value
+itself, not a boxed one: `self.class` in such a default is answered
+from its type, where it was handed to sp_poly_class_val and did not
+build.
+
+Test: test/reopen_default_reads_receiver.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
