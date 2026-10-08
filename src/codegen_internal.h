@@ -299,6 +299,10 @@ int subtree_may_run_proc(Compiler *c, int id);
    -- variable and literal reads, scalar arithmetic, typed-array reads and
    plain field reads, all the way down (codegen_call.c)? */
 int subtree_is_pure_read(Compiler *c, int id);
+/* A pure read, or one of two forms beside that list which run no call of the
+   program's and make nothing either: a unary minus on an Integer or a Float,
+   and a conditional whose test and branches are such values (codegen_call.c). */
+int subtree_is_plain_value(Compiler *c, int id);
 int operand_is_held_read(Compiler *c, int id);
 /* Is the call a reader the emitter lowers to a plain field read? *allocates is
    set when the read builds a copy (a shared String slot). codegen_call.c */

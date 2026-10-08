@@ -11097,6 +11097,26 @@ static int emit_struct_new_call(Compiler *c, int id, int ci, int argc, const int
        and too many arguments when they hold a key */
     int spread_over = spread_tail && argc - 1 == cls->nmembers ? ++g_tmp : -1;
     if (spread_over >= 0) buf_printf(b, "({ sp_%s *_t%d = ", cls->c_name, spread_over);
+    /* How many member values are made in the constructor's own argument
+       list by something that allocates: a converted literal or read, the
+       spread hash, a member read out of a keyword splat, or a value that
+       is neither hoisted into a rooted temp nor a plain read (a call that
+       answers a scalar)? The constructor roots its parameters before it
+       allocates the object, so one such value is held by then; with two,
+       the second can collect the first. */
+    int made = 0;
+    for (int a = 0; a < cls->nmembers && made < 2; a++) {
+      int vnode = -1;
+      TyKind mt = cls->ivar_types[a];
+      if (kwh >= 0) vnode = merged ? -1 : struct_kwarg_value(c, kwh, cls->ivars[a] + 1);
+      else if (a < argc) vnode = argv[a];
+      if (lit_tmp && lit_tmp[a] >= 0) continue;
+      if (spread_tail && a == argc - 1) made += !arg_wants_root(c, mt, -1);
+      else if (vnode < 0) made += splat_tmp >= 0;
+      else if (!arg_ran_first(vnode, argov_saved) && !arg_wants_root(c, mt, vnode))
+        made += arg_read_converts(c, mt, vnode) ||
+                (operand_may_allocate(c, vnode) && !subtree_is_plain_value(c, vnode));
+    }
     buf_printf(b, "sp_%s_new(", cls->c_name);
     for (int a = 0; a < cls->nmembers; a++) {
       if (a) buf_puts(b, ", ");
@@ -11131,8 +11151,15 @@ static int emit_struct_new_call(Compiler *c, int id, int ci, int argc, const int
            dangling and the next mark reads freed memory (#4049). */
         Buf mv; memset(&mv, 0, sizeof mv);
         emit_struct_member_value(c, cls, a, vnode, &mv);
-        if (arg_wants_root(c, cls->ivar_types[a], vnode) && !arg_ran_first(vnode, argov_saved))
+        int first = arg_ran_first(vnode, argov_saved);
+        if (!first && arg_wants_root(c, cls->ivar_types[a], vnode))
           emit_rooted_operand(c, cls->ivar_types[a], -1, mv.p ? mv.p : "", b);
+        /* a literal or a bare read wrapped in a handle of its own: as fresh
+           as a call's answer, and held where it stands (arg_read_converts)
+           when another value of the list can collect it */
+        else if (!first && made >= 2 && mv.p && cls->ivar_types[a] == TY_STRBUF &&
+                 arg_read_converts(c, TY_STRBUF, vnode))
+          emit_rooted_conversion(c, TY_STRBUF, mv.p, b);
         else buf_puts(b, mv.p ? mv.p : "");
         free(mv.p);
       }
@@ -18658,6 +18685,36 @@ int subtree_is_pure_read(Compiler *c, int id) {
       if (!subtree_is_pure_read(c, ids[j])) return 0;
   }
   return 1;
+}
+/* See codegen_internal.h. */
+int subtree_is_plain_value(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  id = unwrap_parens(c, id);
+  if (id < 0 || subtree_is_pure_read(c, id)) return 1;
+  if (nt_kind(nt, id) == NK_IfNode) {
+    int parts[2] = { nt_ref(nt, id, "statements"), nt_ref(nt, id, "subsequent") };
+    if (!subtree_is_plain_value(c, nt_ref(nt, id, "predicate"))) return 0;
+    for (int i = 0; i < 2; i++) {
+      int st = parts[i], n = 0;
+      if (st >= 0 && nt_kind(nt, st) == NK_IfNode) {
+        if (!subtree_is_plain_value(c, st)) return 0;
+        continue;
+      }
+      if (st >= 0 && nt_kind(nt, st) == NK_ElseNode) st = nt_ref(nt, st, "statements");
+      const int *bd = st >= 0 ? nt_arr(nt, st, "body", &n) : NULL;
+      if (n != 1 || !subtree_is_plain_value(c, bd[0])) return 0;
+    }
+    return 1;
+  }
+  if (nt_kind(nt, id) == NK_CallNode) {
+    const char *nm = nt_str(nt, id, "name");
+    int recv = nt_ref(nt, id, "receiver");
+    TyKind rt = recv >= 0 ? comp_ntype(c, recv) : TY_UNKNOWN, vt = comp_ntype(c, id);
+    return nm && sp_streq(nm, "-@") && nt_ref(nt, id, "arguments") < 0 && nt_ref(nt, id, "block") < 0 &&
+           (rt == TY_INT || rt == TY_FLOAT) && (vt == TY_INT || vt == TY_FLOAT) &&
+           subtree_is_plain_value(c, recv);
+  }
+  return 0;
 }
 
 /* Does the program give a Hash a default block anywhere (`Hash.new { }`,
