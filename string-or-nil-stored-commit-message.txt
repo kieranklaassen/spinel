@@ -1,0 +1,33 @@
+A nil stored where Strings are changed in place stays nil
+
+    def pick(i) = i == 0 ? "pa".dup : nil
+    z = [pick(0), pick(1)]
+    z[0] << "!"
+    p z                 # ["pa!", nil]
+
+died with a segmentation fault. `z[1].nil?` answered false, `z.compact`
+kept the element, and `z.each { |e| e << "?" if e }` raised
+NoMethodError.
+
+An element that is changed in place is stored as a String handle, and a
+value that is not a handle yet is wrapped in a fresh one where it is
+stored. sp_String_new_shared hands a nil back as NULL, and the store
+boxed that NULL with sp_box_obj: a String handle around nothing, which
+no reader takes for nil.
+
+The store now tests the value before it wraps it and boxes a nil as
+nil. The other arms of emit_boxed_strbuf and emit_str_array_handles
+make that test after the wrap, with sp_box_nullable_obj; made before
+it, the C compiler drops the test sp_String_new_shared makes itself.
+A String literal and an interpolated String cannot be nil
+(node_may_be_null_nil) and keep the C they had.
+
+That covers every value the fresh arm takes: a call that answers a
+String or nil, a slice past the end, an element or a Hash value that is
+not there, `find`, `&.`, a bang method that changed nothing, a call
+found at run time.
+
+Test: test/string_or_nil_stored_then_appended.rb (expected from
+CRuby 3.3.6)
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
