@@ -167,8 +167,10 @@ int emit_call_poly_builtin_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
     if (sp_streq(name, "sum")) pm = "sp_poly_sum";
     else if (sp_streq(name, "min")) pm = "sp_poly_min";
     else if (sp_streq(name, "max")) pm = "sp_poly_max";
-    else if (sp_streq(name, "first")) pm = "sp_poly_first";
-    else if (sp_streq(name, "last")) pm = "sp_poly_last";
+    /* a call desugar_array_first_last took back from an index read: the
+       receiver was an Array then and mostly still is one */
+    else if (sp_streq(name, "first")) pm = nt_int(nt, id, "was_first_last", 0) == 3 ? "sp_poly_first_was_index" : "sp_poly_first";
+    else if (sp_streq(name, "last")) pm = nt_int(nt, id, "was_first_last", 0) == 3 ? "sp_poly_last_was_index" : "sp_poly_last";
     else if (sp_streq(name, "sample")) pm = "sp_poly_sample";
     /* a Thread (Fiber-modelled) carried through a poly slot: #value/#resume/#join
        dispatch on the boxed Fiber when no user class defines the name (#1261). */

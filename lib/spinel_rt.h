@@ -13006,6 +13006,28 @@ static sp_RbVal sp_poly_last(sp_RbVal v) {
   sp_int n = sp_poly_length(v);
   return n > 0 ? sp_poly_arr_get(v, n - 1) : sp_box_nil();
 }
+/* first and last of a receiver that was an Array when its call was written
+   as an index read and is boxed now (desugar_array_first_last takes the
+   rewrite back). An Array is read as that index read reads it: the poly
+   array inline, as in sp_poly_arr_get_hash, and a typed one by the read its
+   cold half ends in. Any other value answers its own first or last. `i` is
+   0 or -1. */
+static SP_NOINLINE sp_RbVal sp_poly_was_index_cold(sp_RbVal a, sp_int i) {
+  if (a.tag == SP_TAG_OBJ && sp_poly_is_array_kind(a.cls_id)) return sp_poly_arr_get(a, i);
+  return i == 0 ? sp_poly_first(a) : sp_poly_last(a);
+}
+static SP_INLINE sp_RbVal sp_poly_was_index(sp_RbVal a, sp_int i) {
+  if (a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_POLY_ARRAY) {
+    sp_PolyArray *ar = (sp_PolyArray *)a.v.p;
+    if (!ar) return sp_box_nil();
+    sp_int k = i < 0 ? ar->len + i : i;
+    if (k < 0 || k >= ar->len) return sp_box_nil();
+    return ar->data[k];
+  }
+  return sp_poly_was_index_cold(a, i);
+}
+static SP_INLINE sp_RbVal sp_poly_first_was_index(sp_RbVal v) { return sp_poly_was_index(v, 0); }
+static SP_INLINE sp_RbVal sp_poly_last_was_index(sp_RbVal v) { return sp_poly_was_index(v, -1); }
 /* Array#first(n) / #last(n) on a value only known at run time: the n-element
    prefix or suffix, as a fresh array. A Hash walks its [k, v] pairs, the way
    every other Enumerable name here does. */
