@@ -31,7 +31,39 @@ module Timeout
 end
 
 module Net
-  class HTTPError < StandardError
+  # The part of CRuby's protocol error tree the HTTP errors sit under, so a
+  # `rescue Net::ProtocolError` catches what it catches there.
+  class ProtocolError < StandardError; end
+  class ProtoFatalError < ProtocolError; end
+  class ProtoServerError < ProtocolError; end
+  class ProtoRetriableError < ProtocolError; end
+
+  # The response an HTTP error came from, as CRuby carries it. The package
+  # also raises HTTPError itself with a message alone (no status line at
+  # all), so the response is optional here.
+  module HTTPExceptions
+    def initialize(msg, res = nil)
+      super(msg)
+      @response = res
+    end
+
+    attr_reader :response
+  end
+
+  class HTTPError < ProtocolError
+    include HTTPExceptions
+  end
+
+  class HTTPRetriableError < ProtoRetriableError
+    include HTTPExceptions
+  end
+
+  class HTTPClientException < ProtoServerError
+    include HTTPExceptions
+  end
+
+  class HTTPFatalError < ProtoFatalError
+    include HTTPExceptions
   end
 
   # Raised when the peer accepts the connection and then says nothing for
@@ -71,8 +103,38 @@ module Net
       nil
     end
 
+    # The media type alone, as CRuby answers it: `text/html; charset=utf-8`
+    # reads `text/html`. The whole header made a type check written against
+    # CRuby (`res.content_type == "text/html"`) fail for nearly every real
+    # server, which sends the charset. Case is kept, as CRuby keeps it, and
+    # so is CRuby's main_type/sub_type split: a third `/` part is dropped and
+    # an empty subtype leaves the main type alone (`text/` reads `text`).
     def content_type
-      @headers["content-type"]
+      v = @headers["content-type"]
+      return nil if v.nil?
+      parts = v.split(";", 2)[0].to_s.split("/")
+      main = parts[0].to_s.strip
+      return main if parts.length < 2
+      main + "/" + parts[1].to_s.strip
+    end
+
+    # Raises unless the response is a 2xx, as CRuby's does. The message is the
+    # code and the quoted reason (`404 "Not Found"`), the class comes from the
+    # family (error_type below) and the exception carries the response.
+    def value
+      error! unless is_a?(HTTPSuccess)
+    end
+
+    def error!
+      message = @code
+      message = "#{message} #{@message.dump}" unless @message.nil?
+      raise error_type.new(message, self)
+    end
+
+    # CRuby's EXCEPTION_TYPE of the family: a 3xx is retriable, a 4xx the
+    # client's error, a 5xx fatal, and anything else a plain HTTPError.
+    def error_type
+      HTTPError
     end
   end
 
@@ -82,9 +144,18 @@ module Net
   # the ones a client actually names are, which is the usual subset rule.
   class HTTPInformation < HTTPResponse; end
   class HTTPSuccess < HTTPResponse; end
-  class HTTPRedirection < HTTPResponse; end
-  class HTTPClientError < HTTPResponse; end
-  class HTTPServerError < HTTPResponse; end
+
+  class HTTPRedirection < HTTPResponse
+    def error_type = HTTPRetriableError
+  end
+
+  class HTTPClientError < HTTPResponse
+    def error_type = HTTPClientException
+  end
+
+  class HTTPServerError < HTTPResponse
+    def error_type = HTTPFatalError
+  end
 
   class HTTPOK < HTTPSuccess; end
   class HTTPCreated < HTTPSuccess; end
@@ -190,6 +261,13 @@ module Net
 
     def key?(name)
       @headers.key?(name.to_s.downcase)
+    end
+
+    # Whether this kind of request carries a body, CRuby's REQUEST_HAS_BODY.
+    # Decided by the method rather than per class, since `Net::HTTP#post` and
+    # `Net::HTTP.post_form` build a plain HTTPRequest with the method name.
+    def request_body_permitted?
+      @method == "POST" || @method == "PUT"
     end
 
     # Yields the spelling the caller wrote, not the downcased key: for a
@@ -359,10 +437,23 @@ module Net
       end
     end
 
+    # With a block, the session lasts for the block: CRuby opens it, yields
+    # self, closes it in an ensure and answers the block's value. Without
+    # one, the session stays open until `finish`.
     def start
-      open_connection
-      @started = true
-      self
+      if block_given?
+        begin
+          open_connection
+          @started = true
+          yield self
+        ensure
+          finish
+        end
+      else
+        open_connection
+        @started = true
+        self
+      end
     end
 
     def open_connection
@@ -546,7 +637,9 @@ module Net
         out << "#{k}: #{v}\r\n"
       end
       body = req.body.to_s
-      out << "Content-Length: #{body.bytesize}\r\n" if !have_len && !body.empty?
+      # A request that carries a body states its length even when it is
+      # zero, as CRuby's does; some servers answer 411 without it.
+      out << "Content-Length: #{body.bytesize}\r\n" if !have_len && (req.request_body_permitted? || !body.empty?)
       out << "Connection: close\r\n"
       out << "\r\n"
       out << body

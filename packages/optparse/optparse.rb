@@ -3,17 +3,26 @@
 # A statically typable subset of CRuby's OptionParser:
 #   - OptionParser.new(banner, width, indent) { |opts| ... }
 #   - on / on_tail with any number of switch names ("-nNAME" declares -n with
-#     a value), any number of description lines and an optional Array type,
-#     in any order
+#     a value), any number of description lines and an optional value type
+#     (String, Array, Integer or Float), in any order
 #   - separator, banner=, summary_width, summary_indent, to_s (help text)
 #   - parse! with --long=VALUE, --long VALUE, -s VALUE, -sVALUE, clustered
 #     short switches (-vq, -vuNAME) and "--"
-#   - OptionParser::InvalidOption, OptionParser::MissingArgument and
-#     OptionParser::NeedlessArgument, all subclasses of
-#     OptionParser::ParseError
+#   - --[no-]name switches: --name passes true, --no-name passes false;
+#     with a required value, only the positive form reads that value
+#   - optional values: "--name[=VALUE]" and "-n[VALUE]" take only an attached
+#     value; "--name [VALUE]" also takes the next word unless it looks like a
+#     switch. Without a value the block gets nil
+#   - abbreviated long switches: "--verb" is "--verbose", each word may be
+#     shortened ("--d-r" is "--dry-run") and case is ignored; a name two
+#     switches share raises AmbiguousOption
+#   - Integer reads 12, -3, 0x1f, 0b11, 010 and 1_000, and Float reads 1.5,
+#     -.5 and 1e3; any other word raises OptionParser::InvalidArgument
+#   - OptionParser::InvalidOption, OptionParser::AmbiguousOption,
+#     OptionParser::MissingArgument, OptionParser::NeedlessArgument and
+#     OptionParser::InvalidArgument, all subclasses of OptionParser::ParseError
 #
-# Not supported: abbreviated long switches, optional values, --[no-] forms,
-# other value types than String and Array.
+# Not supported: other value types than String, Array, Integer and Float.
 
 class OptionParser
   class ParseError < StandardError
@@ -22,27 +31,51 @@ class OptionParser
   class InvalidOption < ParseError
   end
 
+  class AmbiguousOption < ParseError
+  end
+
   class MissingArgument < ParseError
   end
 
   class NeedlessArgument < ParseError
   end
 
+  class InvalidArgument < ParseError
+  end
+
+  # The words an Integer or a Float switch accepts. radix is a leading 0
+  # with an octal, binary (0b) or hexadecimal (0x) number.
+  digits = '\d+(?:_\d+)*'
+  radix = '0(?:[0-7]+(?:_[0-7]+)*|b[01]+(?:_[01]+)*|x[\da-f]+(?:_[\da-f]+)*)?'
+  INTEGER_VALUE = /\A[-+]?(?:#{radix}|#{digits})\z/io
+  FLOAT_VALUE = /\A[-+]?(?:#{digits}(?:\.(?:#{digits})?)?|\.#{digits})
+                 (?:E[-+]?#{digits})?\z/iox
+
   # One entry of the help text: a switch, or a separator line (no names).
   class Switch
-    attr_reader :shorts, :longs, :arg, :descriptions, :handler, :is_array
+    attr_reader :shorts, :longs, :arg, :descriptions, :handler, :type
 
-    def initialize(shorts, longs, arg, descriptions, handler, is_array)
+    def initialize(shorts, longs, arg, descriptions, handler, type)
       @shorts = shorts
       @longs = longs
       @arg = arg
       @descriptions = descriptions
       @handler = handler
-      @is_array = is_array
+      @type = type
     end
 
     def takes_value
       @arg != ""
+    end
+
+    # "[=VALUE]", "=[VALUE]" or "[VALUE]": only an attached value.
+    def optional_value?
+      @arg.start_with?("[") || @arg.start_with?("=[")
+    end
+
+    # " [VALUE]": an attached value, or else the next word.
+    def placed_value?
+      @arg.start_with?(" ") && @arg.lstrip.start_with?("[")
     end
 
     def separator?
@@ -50,7 +83,23 @@ class OptionParser
     end
 
     def matches?(name)
-      @shorts.include?(name) || @longs.include?(name)
+      @shorts.include?(name) || @longs.any? { |long| accepts?(long, name) }
+    end
+
+    # A --[no-]name declaration accepts --name and --no-name; any other long
+    # declaration accepts only itself.
+    def accepts?(long, name)
+      return long == name unless long.start_with?("--[no-]")
+
+      base = long.delete_prefix("--[no-]")
+      name == "--" + base || name == "--no-" + base
+    end
+
+    def negated?(name)
+      @longs.any? do |long|
+        long.start_with?("--[no-]") &&
+          "--no-" + long.delete_prefix("--[no-]") == name
+      end
     end
   end
 
@@ -66,7 +115,7 @@ class OptionParser
   end
 
   def separator(text)
-    @entries.push(Switch.new([], [], "", [text], nil, false))
+    @entries.push(Switch.new([], [], "", [text], nil, String))
   end
 
   def on(*args, &block)
@@ -78,12 +127,13 @@ class OptionParser
   end
 
   # When a switch raises an error, argv keeps only the words after the
-  # switch that failed, as in CRuby.
+  # switch that failed and the value it read, as in CRuby.
   def parse!(argv = ARGV)
     rest = []
     i = 0
     begin
       while i < argv.length
+        @used = i
         arg = argv[i]
         if arg == "--"
           rest.concat(argv[(i + 1)..])
@@ -99,7 +149,7 @@ class OptionParser
         i += 1
       end
     rescue ParseError
-      rest = argv[(i + 1)..]
+      rest = argv[(@used + 1)..]
       argv.clear
       argv.concat(rest)
       raise
@@ -128,20 +178,23 @@ class OptionParser
     longs = []
     arg_text = ""
     descriptions = []
-    is_array = false
+    type = String
     args.each do |a|
       if a.is_a?(String) && a.length > 1 && a[0] == "-"
-        cut = a.index(/[= ]/) || (a[1] == "-" ? a.length : 2)
+        # a "[" opens an optional value ("--name[=VALUE]"), but the "[no-]" of
+        # a negatable long switch is part of its name
+        from = a.start_with?("--[no-]") ? 7 : 1
+        cut = a.index(/[=\[ ]/, from) || (a[1] == "-" ? a.length : 2)
         text = a[cut..]
         arg_text = text unless text.empty?
         (a[1] == "-" ? longs : shorts).push(a[0, cut])
       elsif a.is_a?(String)
         descriptions.push(a)
-      elsif a == Array
-        is_array = true
+      elsif a == Array || a == Integer || a == Float
+        type = a
       end
     end
-    Switch.new(shorts, longs, arg_text, descriptions, block, is_array)
+    Switch.new(shorts, longs, arg_text, descriptions, block, type)
   end
 
   def help_line(sw)
@@ -162,27 +215,89 @@ class OptionParser
     (@entries + @tail).find { |e| e.matches?(name) }
   end
 
-  def invoke(sw, value)
+  # Passes the value to the block in the switch's type. A word that is not
+  # an Integer or a Float raises InvalidArgument naming it as given (shown).
+  def invoke(sw, value, shown)
     handler = sw.handler
-    return if handler.nil?
-    if sw.is_array
-      handler.call(value.split(","))
+    type = sw.type
+    if value.nil? || type == String
+      handler.call(value) if handler
+    elsif type == Array
+      handler.call(value.split(",")) if handler
+    elsif type == Integer
+      raise invalid_argument(shown) unless value.match?(INTEGER_VALUE)
+      begin
+        number = Integer(value)
+      rescue ArgumentError
+        raise invalid_argument(shown)
+      end
+      handler.call(number) if handler
     else
-      handler.call(value)
+      raise invalid_argument(shown) unless value.match?(FLOAT_VALUE)
+      handler.call(value.to_f) if handler
     end
   end
 
-  def invoke_flag(sw)
-    handler = sw.handler
-    handler.call(true) if handler
+  def invalid_argument(shown)
+    InvalidArgument.new("invalid argument: " + shown)
   end
 
-  # Returns the attached value if there is one, otherwise the next word.
-  # Raises MissingArgument when neither exists.
-  def read_value(argv, index, attached, name)
-    return attached if attached
-    raise MissingArgument.new("missing argument: " + name) if index + 1 >= argv.length
-    argv[index + 1]
+  def invoke_flag(sw, value)
+    handler = sw.handler
+    handler.call(value) if handler
+  end
+
+  # Returns the next word as the value of a switch with no attached value.
+  # An optional value is nil instead: "[=VALUE]" never takes the next word,
+  # and " [VALUE]" leaves it when it looks like a switch, as in CRuby.
+  # Raises MissingArgument when a required value has no next word.
+  def next_value(sw, argv, index, name)
+    return nil if sw.optional_value?
+    word = index + 1 < argv.length ? argv[index + 1] : nil
+    if sw.placed_value?
+      return nil if word.nil? || word.match?(/\A-./)
+      return word
+    end
+    raise MissingArgument.new("missing argument: " + name) if word.nil?
+    word
+  end
+
+  # Returns the full name of a long switch from a shortened one. Each word
+  # may be cut ("--d-r" is "--dry-run") and case is ignored; an exact name
+  # wins. When names of several switches match, the shortest wins if it
+  # starts all the others ("--lis" is "--list" beside "--listen"), else
+  # raises AmbiguousOption. Switches from on come before on_tail ones, and
+  # a bare "--" matches nothing.
+  def complete_long(name)
+    return name if find_switch(name)
+    return nil if name == "--"
+    words = Regexp.quote(name[2..]).gsub(/\w+\b/, "\\&\\w*")
+    pattern = Regexp.new("\\A" + words, Regexp::IGNORECASE)
+    complete_in(@entries, name, pattern) || complete_in(@tail, name, pattern)
+  end
+
+  # complete_long within one list; nil when nothing matches.
+  def complete_in(entries, name, pattern)
+    found = []
+    entries.each do |sw|
+      sw.longs.each do |long|
+        if long.start_with?("--[no-]")
+          base = long.delete_prefix("--[no-]")
+          found.push(["--" + base, sw]) if base.match?(pattern)
+          found.push(["--no-" + base, sw]) if ("no-" + base).match?(pattern)
+        elsif long[2..].match?(pattern)
+          found.push([long, sw])
+        end
+      end
+    end
+    return nil if found.empty?
+    found = found.sort_by { |pair| pair[0].length }
+    best, best_sw = found[0]
+    found.each do |full, sw|
+      next if sw == best_sw || full.start_with?(best)
+      raise AmbiguousOption.new("ambiguous option: " + name)
+    end
+    best
   end
 
   # Returns the index of the last word used, so parse! skips a value word.
@@ -190,15 +305,19 @@ class OptionParser
     arg = argv[index]
     eq = arg.index("=")
     name = eq ? arg[0, eq] : arg
-    sw = find_switch(name)
-    raise InvalidOption.new("invalid option: " + name) if sw.nil?
-    if sw.takes_value
+    full = complete_long(name)
+    raise InvalidOption.new("invalid option: " + name) if full.nil?
+    sw = find_switch(full)
+    is_enabled = !sw.negated?(full)
+    if sw.takes_value && is_enabled
       attached = eq ? arg[(eq + 1)..] : nil
-      invoke(sw, read_value(argv, index, attached, name))
-      index += 1 if attached.nil?
+      value = attached || next_value(sw, argv, index, name)
+      index += 1 if attached.nil? && value
+      @used = index
+      invoke(sw, value, attached ? arg : name + " " + value.to_s)
     else
       raise NeedlessArgument.new("needless argument: " + arg) if eq
-      invoke_flag(sw)
+      invoke_flag(sw, is_enabled)
     end
     index
   end
@@ -217,12 +336,14 @@ class OptionParser
       raise InvalidOption.new("invalid option: " + from_here) if sw.nil?
       if sw.takes_value
         attached = pos + 1 < arg.length ? arg[(pos + 1)..] : nil
-        invoke(sw, read_value(argv, index, attached, name))
-        index += 1 if attached.nil?
+        value = attached || next_value(sw, argv, index, name)
+        index += 1 if attached.nil? && value
+        @used = index
+        invoke(sw, value, attached ? from_here : name + " " + value.to_s)
         break
       end
       raise NeedlessArgument.new("needless argument: " + from_here) if arg[pos + 1] == "="
-      invoke_flag(sw)
+      invoke_flag(sw, true)
       pos += 1
     end
     index
