@@ -1,0 +1,31 @@
+A return in a Hash.new default block leaves the method
+
+    def first_big(a)
+      n = 0
+      h = Hash.new { |hs, k| return k if k > 2; n += 1; k * 2 }
+      a.each { |x| h[x] }
+      n
+    end
+    p first_big([1, 2, 3, 4])
+
+printed 2, where CRuby prints 3.
+
+The default block ran as a function of its own, or as a proc, and a
+`return` in it was a C return from that: it ended the block, and the
+read of the missing key answered the returned value. In Ruby the
+block's return is the method's, as a proc's is.
+
+A default block lowered to a proc is now a returning proc
+(proc_does_nonlocal_return): its return goes to the home frame of the
+method through sp_proc_return, as that of `proc { return }` does. The
+ensures on the way run, and a hash read after its method has returned
+raises LocalJumpError. A block that reads only its two parameters is
+a bare function; with a return of its own, in a hash made in a def's
+own statements, it is lowered to a proc as well
+(hash_new_block_is_proc).
+
+Left as it was: a default block made in a lambda, a proc, a Thread or
+a Fiber body, where the frame that makes the hash is not a method's,
+and a bare one made inside a block of the method.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
