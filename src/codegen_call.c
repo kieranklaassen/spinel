@@ -10999,8 +10999,14 @@ static int emit_struct_new_call(Compiler *c, int id, int ci, int argc, const int
            dangling and the next mark reads freed memory (#4049). */
         Buf mv; memset(&mv, 0, sizeof mv);
         emit_struct_member_value(c, cls, a, vnode, &mv);
-        if (arg_wants_root(c, cls->ivar_types[a], vnode) && !arg_ran_first(vnode, argov_saved))
+        int first = arg_ran_first(vnode, argov_saved);
+        if (!first && arg_wants_root(c, cls->ivar_types[a], vnode))
           emit_rooted_operand(c, cls->ivar_types[a], -1, mv.p ? mv.p : "", b);
+        /* a literal or a bare read wrapped in a handle of its own: as fresh
+           as a call's answer, and held where it stands (arg_read_converts) */
+        else if (!first && mv.p && cls->ivar_types[a] == TY_STRBUF &&
+                 arg_read_converts(c, TY_STRBUF, vnode))
+          emit_rooted_conversion(c, TY_STRBUF, mv.p, b);
         else buf_puts(b, mv.p ? mv.p : "");
         free(mv.p);
       }

@@ -10307,6 +10307,10 @@ static void emit_elem_param(Compiler *c, Scope *m, int i, int off, int tmp, TyKi
     return;
   }
   TyKind set = ty_array_elem(at);
+  /* a String element into a shared-handle parameter: a handle of its own, as
+     any value that is not a caller's variable gets, and held as a bare read's
+     is (arg_read_converts), with the default it may fall back to */
+  int handle = repr_of_slot(c, sp).handle && set == TY_STRING;
   Buf eb; memset(&eb, 0, sizeof eb);
   if (sp && sp->type == TY_POLY && set != TY_POLY && set != TY_UNKNOWN) {
     /* a scalar splat element into a poly-widened param: box it */
@@ -10314,9 +10318,7 @@ static void emit_elem_param(Compiler *c, Scope *m, int i, int off, int tmp, TyKi
     emit_array_elem_at(at, tmp, off, &raw);
     emit_boxed_text(c, set, raw.p ? raw.p : "0", &eb); free(raw.p);
   }
-  else if (repr_of_slot(c, sp).handle && set == TY_STRING) {
-    /* a String element into a shared-handle parameter: a handle of its own,
-       as any value that is not a caller's variable gets */
+  else if (handle) {
     Buf raw; memset(&raw, 0, sizeof raw);
     emit_array_elem_at(at, tmp, off, &raw);
     buf_printf(&eb, "sp_String_new_shared(%s)", raw.p ? raw.p : "NULL"); free(raw.p);
@@ -10345,10 +10347,12 @@ static void emit_elem_param(Compiler *c, Scope *m, int i, int off, int tmp, TyKi
     Buf db; memset(&db, 0, sizeof db);
     emit_arg_or_default(c, m, i, -1, &db);
     TyKind pt = sp ? sp->type : TY_INT;
-    buf_printf(out, "(%d < (_t%d ? _t%d->len : 0) ? %s : %s)", off, tmp, tmp,
+    Buf cb; memset(&cb, 0, sizeof cb);
+    buf_printf(&cb, "(%d < (_t%d ? _t%d->len : 0) ? %s : %s)", off, tmp, tmp,
                eb.p ? eb.p : "", db.p ? db.p : default_value_from_compiler(c, pt));
-    free(db.p);
+    free(db.p); free(eb.p); eb = cb;
   }
+  if (handle && eb.p) emit_rooted_conversion(c, TY_STRBUF, eb.p, out);
   else buf_puts(out, eb.p ? eb.p : "");
   free(eb.p);
 }
