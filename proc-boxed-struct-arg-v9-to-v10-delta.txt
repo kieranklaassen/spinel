@@ -1,0 +1,2 @@
+62a63
+> - An argument that rebinds the receiver: `pat.call((pat = (i.odd? ? f : g); i..i + 2))`, where `pat` takes turns between two lambdas, answers `"g[0]"` for `"g[1..3]"` on the turns that rebind, in a plain run on master, which aborts on it at level 2; here level 2 prints that same line.
