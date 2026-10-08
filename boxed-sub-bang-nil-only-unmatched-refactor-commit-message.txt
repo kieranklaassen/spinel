@@ -1,0 +1,12 @@
+emit_stmt marks every call it lowers as a statement
+
+g_setter_stmt_id named the setter call (`obj.x = v`) that emit_stmt is
+lowering, so that setter_value_open leaves the value temp out where
+nothing reads the value. The marker is now g_stmt_call_id and is set
+for any call that is a statement, so that another emitter can ask the
+same question.
+
+setter_value_open answers as before: it already leaves alone a call
+that is not a setter assignment. No generated C changes.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

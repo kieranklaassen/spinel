@@ -1,0 +1,24 @@
+sub! and gsub! on a boxed String answer nil only when nothing matched
+
+sub! and gsub! answer nil when no substitution was made. For a boxed
+receiver (a String read out of a mixed Array or Hash, a method's boxed
+value) the answer came from comparing the text before and after, so a
+substitution that wrote the bytes it found answered nil:
+
+    a = [+"ab=", 1]
+    p a[0].sub!("=") { "=" }   # nil, CRuby: "ab="
+
+The boxed arm (emit_face_str_bang) now names its call as a String
+receiver's arm does. The plain form it lowers then enters the runtime
+through the wrapper that clears the matched flag after the operands
+have run, or answers from its block form's local, and "changed" is
+the comparison or that. g_sub_bang_own says which call an emitter took
+the wrapper for: a form none did (a Hash of replacements) keeps the
+comparison alone.
+
+Only where the answer is read: a call that is a statement
+(g_stmt_call_id) keeps its C as it was.
+
+Test: test/boxed_sub_bang_same_bytes.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

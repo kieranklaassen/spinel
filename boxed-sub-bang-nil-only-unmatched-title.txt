@@ -1,0 +1,1 @@
+sub! and gsub! on a boxed String answer nil only when nothing matched
