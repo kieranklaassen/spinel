@@ -1,0 +1,52 @@
+[false, true, false, true]
+false
+true
+false
+1180591620717411303427
+1180591620717411303421
+3541774862152233910272
+393530540239137101141
+1
+1180591620717411303427
+3541774862152233910272
+1
+393530540239137101141
+[393530540239137101141, 1]
+1
+false
+false
+true
+1180591620717411303427
+1180591620717411303427
+1180591620717411303427
+true
+[393530540239137101141, 1]
+[1, 2, 3, 4, 5, 6]
+[false, true, false, true]
+ArgumentError: comparison of Integer with nil failed
+ArgumentError: comparison of Integer with nil failed
+NoMethodError
+TypeError: nil can't be coerced into Integer
+TypeError: nil can't be coerced into Integer
+TypeError: nil can't be coerced into Integer
+TypeError: nil can't be coerced into Integer
+TypeError: nil can't be coerced into Integer
+NoMethodError
+NoMethodError
+TypeError: nil can't be coerced into Integer
+TypeError: nil can't be coerced into Integer
+TypeError: nil can't be coerced into Integer
+TypeError: Integer#pow() 2nd argument not allowed unless all arguments are integers
+TypeError: no implicit conversion of nil into Integer
+TypeError: no implicit conversion of nil into Integer
+TypeError: no implicit conversion of nil into Integer
+TypeError: nil can't be coerced into Integer
+TypeError: nil can't be coerced into Integer
+TypeError: nil can't be coerced into Integer
+NoMethodError
+TypeError: nil can't be coerced into Integer
+[1, 2, 3, 4, 5, 6]
+TypeError: nil can't be coerced into Integer
+false
+ArgumentError: comparison of Integer with nil failed
+NoMethodError
