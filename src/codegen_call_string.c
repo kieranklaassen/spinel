@@ -1052,7 +1052,7 @@ int emit_call_symbol_bool_string_arms(Compiler *c, int id, Buf *b, const NodeTab
         else buf_printf(b, "lv_%s = sp_str_char_at_or_nil(_t%d, _t%d); ", p0, ts, ti);
       }
     }
-    emit_iter_loop_stmts(c, body, b, 0);
+    emit_iter_loop_stmts(c, body, b, 0, 1);
     if (p0 && tsv_ech > 0) buf_printf(b, " lv_%s = _t%d;", p0, tsv_ech);
     buf_printf(b, " } _t%d; })", ts);
     return 1;

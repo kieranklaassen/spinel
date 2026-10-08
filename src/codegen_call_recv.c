@@ -2078,7 +2078,7 @@ else {
     if (emit_tuple_block_params(c, id, blk, tsrc, b)) { }
     else if (fp0) buf_printf(b, " lv_%s = %s;", rename_local(fp0), tsrc);
     buf_puts(b, " {");
-    emit_iter_step_body(c, blk, b, 0);
+    emit_iter_step_body(c, blk, b, 0, 1);
     buf_printf(b, " } } } _t%d; })", ta);
     if (pv >= 0) view_pop(c, pv);
     { *out = 1; return 1; }
@@ -2665,7 +2665,7 @@ static int emit_typed_array_call(Compiler *c, int id, Buf *b, const NodeTable *n
     if (emit_tuple_block_params(c, id, blk, tsrc, b)) { }
     else if (fp0) buf_printf(b, " lv_%s = %s;", rename_local(fp0), tsrc);
     buf_puts(b, " {");
-    emit_iter_step_body(c, blk, b, 0);
+    emit_iter_step_body(c, blk, b, 0, 1);
     buf_puts(b, " } } ");
     /* the receiver, in the C type this call is inferred to have */
     TyKind pres = repr_of(c, id).as_ty;
@@ -3121,7 +3121,7 @@ static int emit_typed_array_call(Compiler *c, int id, Buf *b, const NodeTable *n
           else
             buf_printf(g_pre, "lv_%s = _t%d;\n", ip, ti);
         }
-        emit_iter_loop_stmts(c, body, g_pre, g_indent + 1);
+        emit_iter_loop_stmts(c, body, g_pre, g_indent + 1, 1);
         emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
         buf_printf(b, "_t%d", trecv); { *out = 1; return 1; }
       }
@@ -4717,7 +4717,7 @@ static int emit_array_call_arms(Compiler *c, int id, Buf *b) {
       if (eilv->type == TY_POLY) buf_printf(g_pre, "lv_%s = sp_box_int(_t%d);\n", ip, ti);
       else buf_printf(g_pre, "lv_%s = _t%d;\n", ip, ti);
     }
-    emit_iter_loop_stmts(c, body, g_pre, g_indent + 1);
+    emit_iter_loop_stmts(c, body, g_pre, g_indent + 1, 1);
     emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
     buf_printf(b, "_t%d", tself);
     return 1;
@@ -7079,7 +7079,6 @@ static int str_arms_pattern(Compiler *c, int id, Buf *b, const NodeTable *nt, co
     int has_cap = re_idx >= 0 && an_re_has_captures(re_lit_src(c, argv[0]));
     int np = 0; while (block_param_name(c, blk, np)) np++;
     int body = nt_ref(nt, blk, "body");
-    int bn = 0; const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
     int tr = ++g_tmp, tm = ++g_tmp, ti = ++g_tmp, tpat = -1;
     emit_indent(g_pre, g_indent);
     buf_printf(g_pre, "const char *_t%d = %s;\n", tr, r);
@@ -7173,7 +7172,7 @@ static int str_arms_pattern(Compiler *c, int id, Buf *b, const NodeTable *nt, co
         buf_printf(g_pre, "lv_%s = _t%d->data[_t%d];\n", p0r, tm, ti);
     }
     int svind = g_indent; g_indent++;
-    for (int j = 0; j < bn; j++) emit_stmt(c, bb[j], g_pre, g_indent);
+    emit_iter_loop_stmts(c, body, g_pre, g_indent, 0);
     g_indent = svind;
     emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
     buf_printf(b, "_t%d", tr);
