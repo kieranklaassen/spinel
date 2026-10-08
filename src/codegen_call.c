@@ -17517,6 +17517,156 @@ static int unresolved_name_chain(Compiler *c, int node) {
   }
   return 0;
 }
+/* The arguments of a call that no method answers, emitted for their effect
+   alone, each followed by `sep`, in the order CRuby evaluates them before it
+   raises NoMethodError. A call with a splat or a keyword argument is not
+   staged into NoMethodError#args, and its arguments were not evaluated at
+   all: `r.zork(tick, *xs)` raised without calling tick. An argument with
+   nothing to run is left out, so a call whose arguments are all such keeps
+   the C it had: a literal, a pure read, an Array or Hash literal of those,
+   and one a dispatch already holds in a temporary (its text is then a name
+   or a frame slot). */
+static int gate_arg_is_inert(Compiler *c, int n) {
+  const NodeTable *nt = c->nt;
+  if (n < 0) return 1;
+  switch (nt_kind(nt, n)) {
+    case NK_StringNode: return 1;
+    case NK_ArrayNode: case NK_HashNode: {
+      int en = 0; const int *el = nt_arr(nt, n, "elements", &en);
+      for (int e = 0; e < en; e++) if (!gate_arg_is_inert(c, el[e])) return 0;
+      return 1;
+    }
+    case NK_AssocNode:
+      return gate_arg_is_inert(c, nt_ref(nt, n, "key")) && gate_arg_is_inert(c, nt_ref(nt, n, "value"));
+    default: return subtree_is_pure_read(c, n);
+  }
+}
+static int gate_text_is_value(const char *t) {
+  for (; *t; t++)
+    if (!((*t >= 'a' && *t <= 'z') || (*t >= 'A' && *t <= 'Z') || (*t >= '0' && *t <= '9') ||
+          *t == '_' || *t == '.' || *t == '[' || *t == ']')) return 0;
+  return 1;
+}
+/* What an argument hoists (a block-taking call's loop, the calls inside an
+   Array or Hash literal, an `if` in value position) is taken into a buffer
+   of its own and written here, where the argument's text goes: in the
+   statement's prelude it would run ahead of the receiver and of the
+   arguments before it. */
+static void emit_gate_arg_effect(Compiler *c, int n, const char *sep, Buf *b) {
+  if (gate_arg_is_inert(c, n)) return;
+  Buf x; memset(&x, 0, sizeof x);
+  Buf apre; memset(&apre, 0, sizeof apre);
+  Buf *sv_pre = g_pre; g_pre = &apre;
+  emit_expr(c, n, &x);
+  g_pre = sv_pre;
+  int run = x.p && *x.p && !gate_text_is_value(x.p);
+  if (apre.p && apre.p[0]) {
+    buf_printf(b, "({ %s", apre.p);
+    if (run) buf_printf(b, "(void)(%s); ", x.p);
+    buf_printf(b, "})%s", sep);
+  }
+  else if (run) buf_printf(b, "(void)(%s)%s", x.p, sep);
+  free(x.p); free(apre.p);
+}
+static void emit_gate_args_effect(Compiler *c, int id, const char *sep, Buf *b) {
+  const NodeTable *nt = c->nt;
+  int ac = 0; const int *av = call_args(nt, id, &ac);
+  for (int k = 0; k < ac; k++) {
+    int held = 0;   /* a dispatch has run it into a temporary */
+    for (int i = 0; i < g_n_argov && !held; i++) held = g_argov_node[i] == av[k];
+    if (held) continue;
+    if (nt_kind(nt, av[k]) == NK_SplatNode) emit_gate_arg_effect(c, nt_ref(nt, av[k], "expression"), sep, b);
+    else if (nt_kind(nt, av[k]) == NK_KeywordHashNode) {
+      int en = 0; const int *el = nt_arr(nt, av[k], "elements", &en);
+      for (int e = 0; e < en; e++) {
+        if (nt_kind(nt, el[e]) != NK_AssocSplatNode) {
+          int key = nt_ref(nt, el[e], "key");
+          if (key >= 0 && nt_kind(nt, key) != NK_SymbolNode) emit_gate_arg_effect(c, key, sep, b);
+        }
+        emit_gate_arg_effect(c, nt_ref(nt, el[e], "value"), sep, b);
+      }
+    }
+    else emit_gate_arg_effect(c, av[k], sep, b);
+  }
+  int blk = nt_ref(nt, id, "block");
+  if (blk >= 0 && nt_kind(nt, blk) == NK_BlockArgumentNode)
+    emit_gate_arg_effect(c, nt_ref(nt, blk, "expression"), sep, b);
+}
+/* Whether all that `n` runs changes the String in the variable `rv` in
+   place: a builtin mutator called on a read of that variable with literal
+   arguments (`@s << "x"`). */
+static int gate_arg_mutates_own(Compiler *c, int n, int rv) {
+  static const char *const own[] = {
+    "<<", "concat", "prepend", "insert", "replace", "clear", "upcase!", "downcase!",
+    "capitalize!", "swapcase!", "reverse!", "strip!", "lstrip!", "rstrip!", "chomp!",
+    "chop!", "squeeze!", "succ!", "next!", "sub!", "gsub!", "tr!", "delete!", NULL };
+  const NodeTable *nt = c->nt;
+  if (n < 0 || gate_arg_is_inert(c, n)) return 1;
+  switch (nt_kind(nt, n)) {
+    case NK_IntegerNode: case NK_FloatNode: case NK_SymbolNode:
+    case NK_NilNode: case NK_TrueNode: case NK_FalseNode:
+      return 1;
+    case NK_ParenthesesNode: return gate_arg_mutates_own(c, nt_ref(nt, n, "body"), rv);
+    case NK_SplatNode: case NK_BlockArgumentNode:
+      return gate_arg_mutates_own(c, nt_ref(nt, n, "expression"), rv);
+    case NK_AssocSplatNode: return gate_arg_mutates_own(c, nt_ref(nt, n, "value"), rv);
+    case NK_AssocNode:
+      return gate_arg_mutates_own(c, nt_ref(nt, n, "key"), rv) &&
+             gate_arg_mutates_own(c, nt_ref(nt, n, "value"), rv);
+    case NK_StatementsNode: case NK_KeywordHashNode: {
+      int en = 0;
+      const int *el = nt_arr(nt, n, nt_kind(nt, n) == NK_StatementsNode ? "body" : "elements", &en);
+      for (int e = 0; e < en; e++) if (!gate_arg_mutates_own(c, el[e], rv)) return 0;
+      return 1;
+    }
+    case NK_CallNode: {
+      int r = nt_ref(nt, n, "receiver");
+      const char *mn = nt_str(nt, n, "name"), *rn = r >= 0 ? nt_str(nt, r, "name") : NULL;
+      const char *vn = nt_str(nt, rv, "name");
+      if (!mn || !rn || !vn || nt_kind(nt, r) != nt_kind(nt, rv) || !sp_streq(rn, vn)) return 0;
+      if (nt_ref(nt, n, "block") >= 0 || an_user_defines_method(c, mn)) return 0;
+      int k = 0;
+      while (own[k] && !sp_streq(own[k], mn)) k++;
+      if (!own[k]) return 0;
+      int ac = 0; const int *av = call_args(nt, n, &ac);
+      for (int a = 0; a < ac; a++) {
+        NodeKind ak = nt_kind(nt, av[a]);
+        if (ak != NK_StringNode && ak != NK_IntegerNode && ak != NK_SymbolNode) return 0;
+      }
+      return 1;
+    }
+    default: return 0;
+  }
+}
+/* Whether an argument of the call `id` can leave another object in the
+   variable its receiver reads (`rv`), so that the receiver has to be taken
+   ahead of the arguments: `t = 5; t.zork(k: (t = 7))` raises for 5. A local
+   is assigned only by a write inside the call, unless a proc that holds it
+   assigns it (LocalVar.proc_rebinds): a callee cannot reach it otherwise.
+   Any other variable, and such a local, is assigned by whatever the
+   arguments call. A String is left to be read after them where all they do
+   is change it in place (`@s.zork(k: (@s << "x"))` raises for the changed
+   String): a String the gate holds is a value, which would not show the
+   change. */
+static int gate_recv_rebindable(Compiler *c, int id, int rv, TyKind grt) {
+  const NodeTable *nt = c->nt;
+  if (rv < 0) return 0;
+  NodeKind k = nt_kind(nt, rv);
+  const char *nm = nt_str(nt, rv, "name");
+  if (k == NK_LocalVariableReadNode) {
+    Scope *s = nm ? comp_scope_of(c, rv) : NULL;
+    LocalVar *lv = s ? scope_local(s, nm) : NULL;
+    if (subtree_writes_local(c, id, nm)) return 1;
+    if (lv && !lv->proc_rebinds) return 0;
+  }
+  else if (k != NK_InstanceVariableReadNode && k != NK_GlobalVariableReadNode &&
+           k != NK_ClassVariableReadNode && k != NK_ConstantReadNode) return 0;
+  if (grt != TY_STRING) return 1;
+  int ac = 0; const int *av = call_args(nt, id, &ac);
+  for (int a = 0; a < ac; a++) if (!gate_arg_mutates_own(c, av[a], rv)) return 1;
+  int blk = nt_ref(nt, id, "block");
+  return blk >= 0 && !gate_arg_mutates_own(c, blk, rv);
+}
 int emit_unresolved_call(Compiler *c, int id, Buf *b) {
   const NodeTable *nt = c->nt;
   const char *name = nt_str(nt, id, "name");
@@ -18142,17 +18292,32 @@ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
             if (gac == 0) buf_puts(b, "sp_box_nil()"); \
             buf_puts(b, "}"); \
           } while (0)
+          /* arguments that are not staged still run, after the receiver */
+          #define EMIT_GATE_POLY_RECV() do { \
+            if (gstage) emit_boxed(c, recv, b); \
+            else { \
+              Buf grb; memset(&grb, 0, sizeof grb); emit_boxed(c, recv, &grb); \
+              Buf gfx; memset(&gfx, 0, sizeof gfx); emit_gate_args_effect(c, id, "; ", &gfx); \
+              if (gfx.p && *gfx.p) { \
+                int grv = ++g_tmp; \
+                buf_printf(b, "({ sp_RbVal _t%d = %s; SP_GC_ROOT_RBVAL(_t%d); %s_t%d; })", \
+                           grv, grb.p ? grb.p : "sp_box_nil()", grv, gfx.p, grv); \
+              } \
+              else buf_puts(b, grb.p ? grb.p : ""); \
+              free(grb.p); free(gfx.p); \
+            } \
+          } while (0)
           if (sp_streq(dflt, "sp_box_nil()") && !ret_scalar) {
             buf_printf(b, "sp_raise_nomethod(sp_nomethod_msg%s(\"%s\", ",
                        gstage ? "_args" : "", nm ? nm : "?");
-            emit_boxed(c, recv, b);
+            EMIT_GATE_POLY_RECV();
             if (gstage) EMIT_GATE_ARGS();
             buf_puts(b, "))");
           }
           else {
             buf_printf(b, "(sp_raise_cls(\"NoMethodError\", sp_nomethod_msg%s(\"%s\", ",
                        gstage ? "_args" : "", nm ? nm : "?");
-            emit_boxed(c, recv, b);
+            EMIT_GATE_POLY_RECV();
             if (gstage) EMIT_GATE_ARGS();
             buf_printf(b, ")), %s)", ret_scalar ? default_value_from_compiler(c, ret) : dflt);
           }
@@ -18188,6 +18353,9 @@ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
              Integer or a Float that also sees nil) names nil or its class at
              run time: the slot's kind alone cannot say which the value is */
           char gmsg[400];
+          /* the nil test and the head of a nullable receiver's message: a
+             receiver held ahead of the arguments is tested there too */
+          char gnil[200] = "", ghd[96] = "";
           int recv_evaluated = 0;
           {
             int nullable_recv = recv >= 0 && (grt == TY_STRING ||
@@ -18208,13 +18376,11 @@ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
               }
               recv_evaluated = 1;
               const char *rv = rvb.p ? rvb.p : "0";
-              char hd[96], hd2[96];
-              snprintf(hd, sizeof hd, nomethod_head(nm), nm ? nm : "?");
-              snprintf(hd2, sizeof hd2, nomethod_head(nm), nm ? nm : "?");
-              snprintf(gmsg, sizeof gmsg, "(%s%s%s ? \"%s nil\" : \"%s %s\")",
+              snprintf(ghd, sizeof ghd, nomethod_head(nm), nm ? nm : "?");
+              snprintf(gnil, sizeof gnil, "%s%s%s",
                        grt == TY_FLOAT ? "sp_float_is_nil(" : "(", rv,
-                       grt == TY_FLOAT ? ")" : grt == TY_INT ? ") == SP_INT_NIL" : ") == NULL",
-                       hd, hd2, rdesc);
+                       grt == TY_FLOAT ? ")" : grt == TY_INT ? ") == SP_INT_NIL" : ") == NULL");
+              snprintf(gmsg, sizeof gmsg, "(%s ? \"%s nil\" : \"%s %s\")", gnil, ghd, ghd, rdesc);
               free(rvb.p);
             }
             else {
@@ -18232,16 +18398,41 @@ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
              receiver already evaluated for its message must not run again. */
           int recv_run = recv >= 0 && !recv_stageable && !recv_evaluated;
           int rrt = recv_run ? ++g_tmp : -1;
+          /* A variable the arguments can assign is read ahead of them, as
+             CRuby reads it: into a boxed temp, with its nil test, when the
+             arguments have anything to run. */
+          int ghold = !gstage && recv_stageable && gate_recv_rebindable(c, id, _rvnode, grt);
+          int ght = -1;
           if (recv_run) recv_stageable = 1;
           #define EMIT_GATE_MSG() do { \
+            int gparen = 0; \
             if (recv_run) { \
               buf_printf(b, "({ sp_RbVal _t%d = ", rrt); emit_boxed(c, recv, b); \
               buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); ", rrt); \
+              if (!gstage) emit_gate_args_effect(c, id, "; ", b); \
+            } \
+            else if (!gstage) { \
+              Buf gfx; memset(&gfx, 0, sizeof gfx); \
+              emit_gate_args_effect(c, id, ghold ? "; " : ", ", &gfx); \
+              if (gfx.p && *gfx.p && ghold) { \
+                ght = ++g_tmp; \
+                buf_printf(b, "({ sp_RbVal _t%d = ", ght); emit_boxed(c, recv, b); \
+                buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); ", ght); \
+                if (gnil[0]) { \
+                  int gzt = ++g_tmp; \
+                  buf_printf(b, "int _t%d = %s; ", gzt, gnil); \
+                  snprintf(gmsg, sizeof gmsg, "(_t%d ? \"%s nil\" : \"%s %s\")", gzt, ghd, ghd, rdesc); \
+                } \
+                buf_puts(b, gfx.p); \
+              } \
+              else if (gfx.p && *gfx.p) { buf_puts(b, "("); buf_puts(b, gfx.p); gparen = 1; } \
+              free(gfx.p); \
             } \
             const char *_stagefn = gstage ? "sp_stage_recv_args_msg" : "sp_stage_recv_msg"; \
             if (recv_stageable) { \
               buf_printf(b, "%s(%s, ", _stagefn, gmsg); \
-              if (recv_run) buf_printf(b, "_t%d", rrt); else emit_boxed(c, recv, b); \
+              if (recv_run || ght >= 0) buf_printf(b, "_t%d", recv_run ? rrt : ght); \
+              else emit_boxed(c, recv, b); \
               if (gstage) { \
                 buf_printf(b, ", %d, (sp_RbVal[]){", gac); \
                 for (int gk = 0; gk < gac; gk++) { if (gk) buf_puts(b, ", "); emit_boxed(c, gav[gk], b); } \
@@ -18257,7 +18448,8 @@ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
               buf_puts(b, "})"); \
             } \
             else buf_puts(b, gmsg); \
-            if (recv_run) buf_puts(b, "; })"); \
+            if (recv_run || ght >= 0) buf_puts(b, "; })"); \
+            else if (gparen) buf_puts(b, ")"); \
           } while (0)
           /* A receiver the message could not stage is still evaluated, once,
              ahead of the raise, as CRuby evaluates it before the method is
@@ -18287,6 +18479,7 @@ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
           #undef EMIT_GATE_RECV_MSG
           #undef EMIT_GATE_MSG
           #undef EMIT_GATE_ARGS
+          #undef EMIT_GATE_POLY_RECV
         }
         return 1;
       }
