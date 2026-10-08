@@ -11833,6 +11833,24 @@ void emit_super(Compiler *c, int id, Buf *b) {
         return;
       }
     }
+    /* `super` in a freeze or frozen? override no ancestor defines is Object's:
+       the frozen bit of the object's GC header, set and the object answered,
+       or read -- what the call does on a class with no freeze of its own
+       (emit_object_call). The analysis typed the call so only where self is
+       an object of the class; a by-value object has no header and is left to
+       the raise below. */
+    { int fz = comp_super_object_freeze(c, id, s);
+      TyKind st = ty_object(s->class_id);
+      if (fz && !comp_ty_value_obj(c, st) && comp_ntype(c, id) == (fz == 1 ? st : TY_BOOL)) {
+        Buf vb; memset(&vb, 0, sizeof vb);
+        if (fz == 1) { buf_puts(&vb, "(("); emit_ctype(c, st, &vb); buf_printf(&vb, ")sp_gc_freeze((void *)%s))", g_self); }
+        else buf_printf(&vb, "sp_gc_is_frozen((void *)%s)", g_self);
+        if (repr_of(c, id).kind == RK_BOXED) emit_boxed_text(c, fz == 1 ? st : TY_BOOL, vb.p, b);
+        else buf_puts(b, vb.p);
+        free(vb.p);
+        return;
+      }
+    }
     /* No superclass method anywhere (parent chain, included-module shadow, and
        the exception-initialize special case all missed). CRuby raises
        NoMethodError at runtime, so emit that rather than rejecting at compile
