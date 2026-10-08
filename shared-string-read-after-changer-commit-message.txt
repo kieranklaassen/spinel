@@ -1,0 +1,54 @@
+A call reads a shared String after the argument that changes it
+
+A String two names share is read where the read stands in the C call:
+as a copy of the bytes it holds then, or as a pointer into its buffer.
+C leaves the order of a call's operands open, so beside an argument
+that changes a shared String in place the read ran first wherever the
+compiler put it first:
+
+    s = +"hello"
+    t = s
+    p s.sub(s << "l", "L")          # "L"; "hello" built with clang
+    p(s == t << "l")                # true; false with gcc and clang
+    u = +"ab"
+    v = u
+    p u.end_with?(v << "c" * 4000)  # true; a segfault built with clang
+
+The copy held the old bytes, and the pointer was left behind when the
+append grew the buffer. Ruby reads the receiver when the method runs,
+after its arguments.
+
+emit_operands_in_order binds a call's one running operand ahead of an
+operand made where it stands. The read of a shared String slot now
+counts as such an operand when an operand of the call holds a String
+mutator whose receiver is a shared String slot (two slots can hold one
+String, so any of them counts): that operand is bound first and the
+read comes after it. A slot in an instance variable is taken the same
+way when the operand is the mutator alone, over values whose builtins
+run no code of the program's: it can assign no variable.
+
+Every other call keeps its C: one with no such mutator among its
+operands, and one whose arm takes the String by its handle and so
+reads it when it runs (`s.concat(t << "l")`).
+
+A bound call pays one root, ten to eighteen instructions: 200,000
+turns of `s.start_with?(t.replace("hello"))` go from 31,063,933 to
+33,263,919, of `s.center(12, t.replace("hello"))` from 249,496,317 to
+251,498,775. Those ran right for as long as the mutator left the
+buffer where it was.
+
+Not here, each as on master: the mutator in parentheses
+(`s.sub((s << "l"), "L")`), under `||`, in a call with a block or a
+`&.`, or inside a method the operand calls; an operand that assigns
+the variable (`s.sub(s = u.concat("l"), "L")`); and two shared
+Strings read in one call (`s.sub(t << "l", s)`: neither copy is held
+while the other is made, under stress only). On an instance variable
+also: a mutator in a conditional, or with an argument that runs code
+of the program's; `+`, `==`, `eql?` and `<=>`, whose receiver
+recv_read_before_args reads ahead of the arguments, as a copy; and a
+call with no receiver (`format("%s", @s, @s << "l")`).
+
+Test: test/string_shared_read_after_operand.rb, also in the
+SPINEL_GC_STRESS=2 list.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
