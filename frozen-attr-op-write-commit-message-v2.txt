@@ -1,0 +1,49 @@
+An attribute's `+=` and `||=` on a frozen object raise FrozenError
+
+    class S
+      attr_accessor :n, :m
+      def initialize(n) = @n = n
+      def memo = (@m ||= 7)
+    end
+    s = S.new(0)
+    s.freeze
+    s.n += 1
+    s.m ||= 5
+    p s.n, s.m
+
+printed 1 and 5: the frozen object was changed and nothing said so.
+CRuby raises FrozenError at `s.n += 1`, as both do at `s.n = 1`.
+`s.memo` stored into the frozen object as well.
+
+The plain writer checks its receiver, and so do `@n += 1` and the
+operator-assign whose value is used, which is rewritten to the writer.
+Four stores did not: the statement `s.n op= v`, which writes the slot
+through its bound receiver; the same statement on a receiver whose
+class is known only at run time, which stores in one arm for each
+class; the conditional store every `||=` / `&&=` on a typed slot goes
+through (emit_slot_orw_value, and emit_strbuf_orw_guard for a String
+slot that holds a shared handle); and the statement form of `@x ||= v`.
+Each now has the writer's guard on the object that owns the slot.
+
+The guard sits where CRuby calls the writer: after the right side and
+after the operator. On a frozen `s`, a right side that raises, throws,
+exits or leaves its block does so, as it does today; `s.n += f` calls
+`f` and then raises FrozenError; `s.n /= z` raises ZeroDivisionError
+for a zero `z`; and a right side that freezes `s` is followed by
+FrozenError. For `op=` the slot's value is read into a temporary
+beside the receiver, the arms compute into the temporary, and the
+guard and the store follow them. For `||=` and `&&=` the stored value
+is `({ T _fvN = VALUE; <guard> _fvN; })` inside the arm that stores,
+so an or-write that stores nothing raises nothing, as in CRuby.
+
+emit_frozen_obj_guard goes by the one class flag the plain writer's
+guard goes by: it emits nothing for a class whose objects the program
+neither freezes nor asks `frozen?`, and such a program keeps its
+generated C. Under the flag, `s.n += 1` on an object that is not
+frozen pays 3 instructions more.
+
+Not changed here: the plain writer, `@n += v` and the operator-assign
+whose value is used raise before they run their right side, as on
+master.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

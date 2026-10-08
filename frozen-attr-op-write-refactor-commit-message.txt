@@ -1,0 +1,14 @@
+The attribute op-assign arms name their slot once
+
+`recv.attr op= v` as a statement has an arm for each kind of slot, once
+for a receiver of a known class and once in each case of the dispatch
+on a receiver whose class is known at run time. The String and boxed
+arms spelled the slot out in every format string, while the Array and
+scalar arms built its name to hand to their helpers. Each group now
+builds the name once and every arm takes it from there, and the
+dispatch arms end their statement and leave the case's `break` to one
+line after them.
+
+No generated C changes.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
