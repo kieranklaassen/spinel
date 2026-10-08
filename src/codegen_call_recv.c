@@ -3853,6 +3853,16 @@ static int emit_str_mutator_call(Compiler *c, int id, Buf *b, const NodeTable *n
     if (comp_ntype(c, argv[0]) == TY_INT) { buf_puts(b, "sp_int_chr("); emit_int_expr(c, argv[0], b); buf_puts(b, ")"); }
     else emit_str_expr(c, argv[0], b);
     buf_puts(b, ")");
+    /* the String so far is held by nothing else while a later argument is
+       made: rooted where one of them can allocate. An argument that
+       allocates nothing collects nothing (an Integer's byte is static
+       data, and arithmetic with no effect builds nothing), and
+       sp_str_append_bytes roots its own operands. */
+    int root9 = 0;
+    for (int a9 = 1; a9 < argc && !root9; a9++)
+      root9 = operand_may_allocate(c, argv[a9]) &&
+              (comp_ntype(c, argv[a9]) != TY_INT || subtree_has_side_effect(c, argv[a9]));
+    if (root9) buf_printf(b, "; SP_GC_ROOT_STR(_t%d)", tn9);
     for (int a9 = 1; a9 < argc; a9++) {
       buf_printf(b, "; _t%d = sp_str_append_bytes(_t%d, ", tn9, tn9);
       if (comp_ntype(c, argv[a9]) == TY_INT) { buf_puts(b, "sp_int_chr("); emit_int_expr(c, argv[a9], b); buf_puts(b, ")"); }
