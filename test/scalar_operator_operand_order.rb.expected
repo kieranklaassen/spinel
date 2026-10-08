@@ -1,0 +1,53 @@
+lg1
+eq
+[1, true]
+eq
+lg2
+[false, 2]
+lg3
+eq
+[3, true]
+lg4
+eq
+[4, true]
+lg5
+eq
+5
+true
+lg6
+eq
+[6, true]
+lg7
+eq
+2
+lg8
+eq
+[8, [1, true]]
+lg9
+eq
+[9, 1]
+lg10
+divided by 0
+divided by 0
+lg12
+divided by 0
+lg13
+divided by 0
+lg14
+divided by 0
+lg15
+divided by 0
+lg16
+divided by 0
+lg20
+lg21
+lg22
+[20, 2]
+[21, 2]
+[22, Infinity]
+lg23
+lg24
+lg25
+[23, false]
+[24, false]
+[25, 10]

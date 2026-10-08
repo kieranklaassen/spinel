@@ -602,8 +602,9 @@ static int fold_int_node(Compiler *c, int id, long long *out, int depth) {
   return 0;
 }
 
-static int fold_int_const_name(Compiler *c, const char *name, long long *out, int depth) {
-  if (!name || depth > 16) return 0;
+/* The one ConstantWriteNode that gives `name` its value, or -1: none, more
+   than one, or a compound write. */
+static int const_single_write_scan(Compiler *c, const char *name) {
   int wnode = -1;
   for (int i = 0; i < c->nt->count; i++) {
     const char *t = nt_type(c->nt, i);
@@ -613,18 +614,38 @@ static int fold_int_const_name(Compiler *c, const char *name, long long *out, in
     if (sp_streq(t, "ConstantOperatorWriteNode") || sp_streq(t, "ConstantOrWriteNode") ||
         sp_streq(t, "ConstantAndWriteNode")) {
       const char *n = nt_str(c->nt, i, "name");
-      if (n && sp_streq(n, name)) return 0;
+      if (n && sp_streq(n, name)) return -1;
       continue;
     }
     if (!sp_streq(t, "ConstantWriteNode")) continue;
     const char *n = nt_str(c->nt, i, "name");
     if (!n || !sp_streq(n, name)) continue;
-    if (wnode >= 0) return 0;   /* reassigned -> not a stable constant */
+    if (wnode >= 0) return -1;   /* reassigned -> not a stable constant */
     wnode = i;
+  }
+  return wnode;
+}
+/* an appended node changes the answer only when it writes a constant */
+static int const_write_touch(Compiler *c, int id) {
+  const char *t = nt_type(c->nt, id);
+  return t && strncmp(t, "Constant", 8) == 0 && strstr(t, "Write") != NULL;
+}
+/* The scan reads the whole node table, and the order of a call's operands
+   asks it of every constant divisor among them (scalar_op_may_raise), so
+   the write is kept per name. */
+static int fold_int_const_name(Compiler *c, const char *name, long long *out, int depth) {
+  if (!name || depth > 16) return 0;
+  static CgMemo memo = { .touches = const_write_touch };
+  int wnode;
+  if (!cg_memo_get(c, &memo, name, 0, &wnode)) {
+    wnode = const_single_write_scan(c, name);
+    cg_memo_put(&memo, name, 0, wnode);
   }
   if (wnode < 0) return 0;
   return fold_int_node(c, nt_ref(c->nt, wnode, "value"), out, depth);
 }
+/* See codegen_internal.h. */
+int fold_int_const(Compiler *c, int id, long long *out) { return fold_int_node(c, id, out, 0); }
 
 /* Emit an integer divisor operand, substituting a compile-time-constant
    value with its literal so the C compiler can strength-reduce `/`/`%` by

@@ -642,7 +642,8 @@ int operand_may_allocate(Compiler *c, int id) {
    `cell_get(cells, x + ix, y + iy)` into temps for an ordering nobody can
    see -- 12% on the life benchmark. Gated on both the result and the
    receiver being scalar, so a user class's own `+` and `Array#<<` are
-   effects as before. */
+   effects as before, and on an argument of a kind that runs no code:
+   `3 == obj` asks obj. */
 int call_is_scalar_op(Compiler *c, int id) {
   static const char *const OPS[] = {
     "+","-","*","/","%","**","<",">","<=",">=","==","!=","<=>","&","|","^","<<",">>", NULL };
@@ -657,7 +658,33 @@ int call_is_scalar_op(Compiler *c, int id) {
   TyKind rt = comp_ntype(c, recv), vt = comp_ntype(c, id);
   int scalar_r = (rt == TY_INT || rt == TY_FLOAT || rt == TY_BOOL);
   int scalar_v = (vt == TY_INT || vt == TY_FLOAT || vt == TY_BOOL);
-  return scalar_r && scalar_v;
+  if (!scalar_r || !scalar_v) return 0;
+  int an = 0;
+  const int *av = call_args(c->nt, id, &an);
+  for (int i = 0; i < an; i++)
+    if (!ty_runs_no_code(comp_ntype(c, av[i]))) return 0;
+  return 1;
+}
+/* A scalar operator that divides raises on a zero divisor: `/` unless one
+   side is a Float, `%` always. It touches nothing, but beside an operand
+   that prints, which of the two ran first is seen. A divisor that folds to
+   a number other than zero cannot raise. */
+static int scalar_op_may_raise(Compiler *c, int id) {
+  const char *nm = nt_str(c->nt, id, "name");
+  int mod = nm && sp_streq(nm, "%");
+  if (!mod && !(nm && sp_streq(nm, "/"))) return 0;
+  int an = 0;
+  const int *av = call_args(c->nt, id, &an);
+  if (an != 1) return 1;
+  if (!mod && (comp_ntype(c, nt_ref(c->nt, id, "receiver")) == TY_FLOAT || comp_ntype(c, av[0]) == TY_FLOAT)) return 0;
+  long long dv = 0;
+  if (fold_int_const(c, av[0], &dv)) return dv == 0;
+  int d = unwrap_parens(c, av[0]);
+  if (d >= 0 && nt_kind(c->nt, d) == NK_FloatNode) {
+    const char *v = nt_content(c->nt, d);
+    return !v || strchr(v, '_') || strtod(v, NULL) == 0.0;
+  }
+  return 1;
 }
 
 int subtree_has_side_effect(Compiler *c, int id) {
@@ -668,7 +695,7 @@ int subtree_has_side_effect(Compiler *c, int id) {
   if (sp_streq(ty, "SuperNode") || sp_streq(ty, "ForwardingSuperNode") ||
       sp_streq(ty, "YieldNode") || strstr(ty, "WriteNode"))
     return 1;
-  if (sp_streq(ty, "CallNode") && !call_is_scalar_op(c, id)) return 1;
+  if (sp_streq(ty, "CallNode") && (!call_is_scalar_op(c, id) || scalar_op_may_raise(c, id))) return 1;
   int nr = nt_num_refs(nt, id);
   for (int i = 0; i < nr; i++)
     if (subtree_has_side_effect(c, nt_ref_at(nt, id, i))) return 1;
