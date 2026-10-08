@@ -7370,8 +7370,10 @@ static int kwh_consumed_by_kwparam(Compiler *c, Scope *m, int kwh) {
 
 /* Pack argv[from..pos_argc) into a rest Array, with `kwh` (an unconsumed
    keyword hash that degrades to one positional hash argument) as the
-   trailing element; a negative `kwh` appends none. */
-void emit_rest_pack_kwh(Compiler *c, int from, int pos_argc, const int *argv, int kwh, Buf *b) {
+   trailing element; a negative `kwh` appends none. Answers 1 when what it
+   wrote is bare: a fresh Array no root holds (an empty rest, a lone typed
+   splat converted whole). */
+int emit_rest_pack_kwh(Compiler *c, int from, int pos_argc, const int *argv, int kwh, Buf *b) {
   const NodeTable *nt = c->nt;
   /* Optimize: single pure-splat → direct conversion */
   if (kwh < 0 && pos_argc == from + 1) {
@@ -7381,26 +7383,26 @@ void emit_rest_pack_kwh(Compiler *c, int from, int pos_argc, const int *argv, in
       Repr ar = repr_of(c, inner);
       if (ar.elem == TY_INT) {
         buf_puts(b, "sp_IntArray_to_poly("); emit_expr(c, inner, b); buf_puts(b, ")");
-        return;
+        return 1;
       }
       if (ar.elem == TY_STRING) {
         buf_puts(b, "sp_StrArray_to_poly_fmt("); emit_expr(c, inner, b); buf_puts(b, ")");
-        return;
+        return 1;
       }
       if (ar.elem == TY_FLOAT) {
         buf_puts(b, "sp_typed_to_poly("); emit_expr(c, inner, b); buf_puts(b, ", SP_BUILTIN_FLT_ARRAY)");
-        return;
+        return 1;
       }
       if (ar.elem == TY_POLY) {
         buf_puts(b, "sp_PolyArray_dup("); emit_expr(c, inner, b); buf_puts(b, ")");
-        return;
+        return 1;
       }
     }
   }
   /* Empty rest */
   if (kwh < 0 && (!argv || pos_argc <= from)) {
     buf_puts(b, "sp_PolyArray_new()");
-    return;
+    return 1;
   }
   /* General case: build PolyArray as statement expression. The temp is
      DECLARED and rooted in the enclosing frame rather than inside the
@@ -7505,6 +7507,7 @@ else {
   }
   free(kel.p);
   buf_printf(b, " _t%d; })", t);
+  return 0;
 }
 
 /* Emit the element at index `elem_idx` from a typed array temp `tmp`. */
@@ -10283,6 +10286,172 @@ static void emit_elem_param(Compiler *c, Scope *m, int i, int off, int tmp, TyKi
   free(eb.p);
 }
 
+/* A read that is no pure read (subtree_is_pure_read) and still allocates
+   nothing and runs nothing of the program's: a global the program assigns,
+   read as its static; `size` or `length` of a String, an Array or a Hash
+   that reads so, where no class of the program has a method or a reader of
+   the name; an attribute read through a generated reader; and an operator
+   over scalars on such reads. A read that raises (a nil receiver, an
+   overflow) leaves the call. */
+static int read_runs_nothing(Compiler *c, int node) {
+  const NodeTable *nt = c->nt;
+  node = unwrap_parens(c, node);
+  if (subtree_is_pure_read(c, node)) return 1;
+  if (nt_kind(nt, node) == NK_GlobalVariableReadNode) {
+    const char *gn = nt_str(nt, node, "name");
+    if (!gn || gn[0] != '$' || !(gn[1] == '_' || (gn[1] >= 'a' && gn[1] <= 'z') || (gn[1] >= 'A' && gn[1] <= 'Z')) ||
+        sp_streq(gn, "$stdin") || is_standard_output_global(gn) || is_program_name_global(gn)) return 0;
+    LocalVar *gv = comp_gvar(c, comp_resolve_gvar(c, gn + 1));
+    return gv && repr_of_slot(c, gv).kind != RK_STRBUF;
+  }
+  if (nt_kind(nt, node) != NK_CallNode || nt_ref(nt, node, "block") >= 0) return 0;
+  const char *nm = nt_str(nt, node, "name");
+  int recv = nt_ref(nt, node, "receiver"), an = nt_ref(nt, node, "arguments"), ac = 0;
+  const int *av = an >= 0 ? nt_arr(nt, an, "arguments", &ac) : NULL;
+  if (!nm || recv < 0 || !read_runs_nothing(c, recv)) return 0;
+  if (ac == 1) return call_is_scalar_op(c, node) && read_runs_nothing(c, av[0]);
+  if (ac != 0) return 0;
+  int alloc = 0;
+  if (call_is_field_read(c, node, &alloc)) return !alloc;
+  if (!sp_streq(nm, "size") && !sp_streq(nm, "length")) return 0;
+  TyKind rt = comp_ntype(c, recv);
+  if (rt != TY_STRING && !ty_is_array(rt) && !ty_is_hash(rt)) return 0;
+  for (int k = 0; k < c->nclasses; k++)
+    if (comp_method_in_chain(c, k, nm, NULL) >= 0 || comp_is_reader(&c->classes[k], nm)) return 0;
+  return 1;
+}
+
+/* Does parameter `i` run something where it is written, bound to `node`
+   (its own default when the call leaves it out, `given` 0)? A pure read
+   runs nothing, unless the parameter is a container of another kind and
+   the read is converted in place (arg_read_converts). A parameter that
+   takes a root has what it is given run ahead of the call, into a rooted
+   temp (emit_arg_rooted). A read that runs nothing (read_runs_nothing)
+   into a parameter that takes no root is a value. A String literal with
+   no NUL in it is a static where the parameter holds the plain String or
+   its box: a handle parameter makes an object of it, a lent one a temp,
+   and under --share-strings a boxed slot may lift it (emit_boxed). A
+   Range of pure reads into a Range parameter is the value itself.
+   Anything else is a call C orders against its siblings as it likes. */
+static int binding_runs_in_place(Compiler *c, const Scope *m, int i, int node, int given) {
+  const NodeTable *nt = c->nt;
+  LocalVar *p = i >= 0 && i < m->nparams ? scope_local((Scope *)m, m->pnames[i]) : NULL;
+  if (subtree_is_pure_read(c, node)) return given && p && !p->byref_out && arg_read_converts(c, p->type, node);
+  if (!p || p->byref_out) return 1;
+  if (arg_wants_root(c, p->type, given ? node : -1)) return 0;
+  if (read_runs_nothing(c, node)) return 0;
+  int rn = unwrap_parens(c, node);
+  if (p->type == TY_RANGE && nt_kind(nt, rn) == NK_RangeNode && comp_ntype(c, rn) == TY_RANGE)
+    return !(subtree_is_pure_read(c, nt_ref(nt, rn, "left")) && subtree_is_pure_read(c, nt_ref(nt, rn, "right")));
+  if (nt_kind(nt, node) != NK_StringNode) return 1;
+  const char *sc = nt_str(nt, node, "content");
+  if (sc && nt_str_len(nt, node, "content") != strlen(sc)) return 1;
+  return !(p->type == TY_STRING ||
+           (p->type == TY_POLY && !(repr_share_rule(c) && c->poly_strbuf_lift[node])));
+}
+
+/* A lone `**h` among the keywords is read into a temp ahead of the call
+   (emit_ds_hash_materialize), and each keyword parameter the call does not
+   name is read out of it where it stands (emit_ds_param_extract). Out of a
+   Hash of Symbol keys that is a pure read, into a parameter of the value's
+   own type, or of a boxed value into a boxed or a scalar one, with a
+   default that runs nothing (read_runs_nothing), that read allocates
+   nothing and runs nothing of the program's. */
+static int ds_read_runs_nothing(Compiler *c, const Scope *m, const ArgLayout *L, int splat) {
+  const NodeTable *nt = c->nt;
+  int v = nt_ref(nt, splat, "value"), en = 0, nds = 0;
+  const int *els = nt_arr(nt, L->kwh, "elements", &en);
+  for (int e = 0; e < en; e++) nds += nt_kind(nt, els[e]) == NK_AssocSplatNode;
+  if (v < 0 || nds != 1 || !subtree_is_pure_read(c, v) || kwh_merged(c, (Scope *)m, L->kwh) || L->rest_kwh >= 0)
+    return 0;
+  TyKind ht = repr_of(c, v).as_ty;
+  if (!ty_is_hash(ht) || ty_hash_key(ht) != TY_SYMBOL) return 0;
+  TyKind hv = ty_hash_val(ht);
+  for (int i = 0; i < m->nparams; i++) {
+    if (L->from[i] == ARG_KWH) return 0;
+    if (i == m->kwrest_idx || !m->pnames[i] || !callee_has_kwarg(c, (Scope *)m, m->pnames[i]) ||
+        kwh_lookup(nt, L->kwh, m->pnames[i]) >= 0) continue;
+    LocalVar *p = scope_local((Scope *)m, m->pnames[i]);
+    if (!p || p->byref_out) return 0;
+    if (p->type != hv && !(hv == TY_POLY && (p->type == TY_INT || p->type == TY_FLOAT ||
+                                             p->type == TY_BOOL || p->type == TY_SYMBOL))) return 0;
+    /* the default stands beside the read, for a key the Hash lacks */
+    if (m->pdefault && m->pdefault[i] >= 0 && !read_runs_nothing(c, m->pdefault[i])) return 0;
+  }
+  return 1;
+}
+
+/* Does something of this call run where it is written, beside the rest
+   packed from argv[from..end)? An argument or a keyword's value the call
+   ran first reads its temp; the others are asked one by one, a keyword's
+   value with the parameter that takes it by name, a `**h` with every
+   keyword parameter it may fill. */
+static int call_runs_in_place(Compiler *c, const Scope *m, const ArgLayout *L, const int *argv, int argc,
+                              int from, int end) {
+  const NodeTable *nt = c->nt;
+  for (int k = 0; k < argc; k++) {
+    if ((k >= from && k < end) || arg_ran_first(argv[k], 0)) continue;
+    if (nt_kind(nt, argv[k]) != NK_KeywordHashNode) {
+      int i = 0;
+      while (i < L->n && !(L->from[i] == ARG_NODE && L->arg[i] == k)) i++;
+      if (binding_runs_in_place(c, m, i, argv[k], 1)) return 1;
+      continue;
+    }
+    /* what a keyword rest takes is collected ahead of the call
+       (emit_kwrest_collect): all of it where no keyword is declared */
+    int to_rest = m->kwrest_idx >= 0 && argv[k] == L->kwh;
+    if (to_rest && !callee_declares_kwargs(c, (Scope *)m)) continue;
+    to_rest = to_rest && !kwh_merged(c, (Scope *)m, L->kwh);
+    int en = 0;
+    const int *els = nt_arr(nt, argv[k], "elements", &en);
+    for (int e = 0; e < en; e++) {
+      if (nt_kind(nt, els[e]) == NK_AssocSplatNode && argv[k] == L->kwh &&
+          ds_read_runs_nothing(c, m, L, els[e])) continue;
+      if (nt_kind(nt, els[e]) != NK_AssocNode) return 1;
+      int key = nt_ref(nt, els[e], "key"), val = nt_ref(nt, els[e], "value");
+      if (!subtree_is_pure_read(c, key)) return 1;
+      if (arg_ran_first(val, 0)) continue;
+      const char *kn = nt_kind(nt, key) == NK_SymbolNode ? nt_str(nt, key, "value") : NULL;
+      int i = 0;
+      while (kn && i < L->n && !(m->pnames[i] && sp_streq(m->pnames[i], kn))) i++;
+      if (subtree_is_pure_read(c, val)) {
+        /* a read the keyword parameter converts where it stands */
+        if (kn && i < L->n && callee_has_kwarg(c, (Scope *)m, kn) && binding_runs_in_place(c, m, i, val, 1)) return 1;
+        continue;
+      }
+      if (kn && to_rest && !callee_has_kwarg(c, (Scope *)m, kn)) continue;
+      if (!kn || i == L->n || i == m->kwrest_idx || L->from[i] != ARG_BY_NAME || argv[k] != L->kwh ||
+          !callee_has_kwarg(c, (Scope *)m, kn) || kwh_merged(c, (Scope *)m, L->kwh) ||
+          kwh_lookup(nt, L->kwh, kn) != val || binding_runs_in_place(c, m, i, val, 1)) return 1;
+    }
+  }
+  for (int i = 0; m->pdefault && i < m->nparams; i++) {
+    if (m->pdefault[i] < 0 || !binding_runs_in_place(c, m, i, m->pdefault[i], 0)) continue;
+    if (L->from[i] == ARG_DEFAULT) return 1;
+    if (L->from[i] == ARG_BY_NAME && (L->kwh < 0 || kwh_lookup(nt, L->kwh, m->pnames[i]) < 0)) return 1;
+  }
+  return 0;
+}
+
+/* A rest the packing wrote bare (emit_rest_pack_kwh answered 1) from `at` in
+   out is a fresh Array in a plain C temporary. Beside a call that runs in
+   place it is collected where C makes it first: `def note(a, b, *r)` called
+   `note(x, count)` answered r.size 3 in a plain run of gcc's build,
+   `def note(a, *r, b)` in clang's. It takes the general packing's form: a
+   temp declared and rooted in the enclosing frame, assigned where the rest
+   stands. */
+static void hold_bare_rest(Buf *out, size_t at) {
+  int t = ++g_tmp;
+  char *pack = strdup(out->p + at);
+  out->len = at; out->p[at] = '\0';
+  emit_indent(g_pre, g_indent);
+  buf_printf(g_pre, "sp_PolyArray *_t%d = NULL;\n", t);
+  emit_indent(g_pre, g_indent);
+  buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", t);
+  buf_printf(out, "(_t%d = %s)", t, pack);
+  free(pack);
+}
+
 void emit_args_filled(Compiler *c, int callee_idx, int argsNode, const char *lead, Buf *out) {
   int argc = 0;
   const int *argv = argsNode >= 0 ? nt_arr(c->nt, argsNode, "arguments", &argc) : NULL;
@@ -10620,7 +10789,9 @@ else {
                                       c, splat_idx + 1, rest_end, argv, out);
       }
 else {
-        emit_rest_pack_kwh(c, i, rest_end, argv, L.rest_kwh, out);
+        size_t at = out->len;
+        if (emit_rest_pack_kwh(c, i, rest_end, argv, L.rest_kwh, out) &&
+            call_runs_in_place(c, m, &L, argv, argc, i, rest_end)) hold_bare_rest(out, at);
       }
     }
 else if (L.from[i] == ARG_ELEM)
