@@ -1321,11 +1321,38 @@ int emit_poly_uniq_block(Compiler *c, int id, Buf *b) {
     int np = 0; while (block_param_name(c, block, np)) np++;
     int splat = gather || bare || (rr.elem == TY_POLY && np >= 2 && !block_param_is_multi(c, block, 0));
     int use_shadow = !splat && clv0 && clv0->type != et && et != TY_UNKNOWN;
-    Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
+    /* Over the to_a an Enumerator's block reads through (enum_hop_yield_view)
+       the block binds what a step yields, a lone `|x|` its first value, and
+       the survivor is the step's item: `e.uniq { |x| x }` over
+       each_with_index keeps [5, 0], not 5. */
+    const char *view = nt_kind(nt, recv) == NK_CallNode ? nt_str(nt, recv, "enum_yield_view") : NULL;
+    int esrc = view ? nt_ref(nt, recv, "receiver") : -1;
+    int tpair = esrc >= 0 && comp_ntype(c, esrc) == TY_ENUMERATOR && !splat && !use_shadow &&
+                clv0 && clv0->type == TY_POLY ? ++g_tmp : 0;
+    Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, tpair ? esrc : recv, &rb);
+    if (tpair) {
+      int te = ++g_tmp;
+      emit_indent(g_pre, g_indent);
+      buf_printf(g_pre, "sp_Enumerator *_t%d = %s; int _t%d = _t%d ? _t%d->yields_pair : 0;\n",
+                 te, rb.p ? rb.p : "NULL", tpair, te, te);
+      free(rb.p); memset(&rb, 0, sizeof rb);
+      buf_printf(&rb, "sp_Enumerator_to_a(_t%d)", te);
+    }
     emit_indent(g_pre, g_indent);
     emit_ctype(c, rt, g_pre);
     buf_printf(g_pre, " _t%d = %s;\n", trecv, rb.p ? rb.p : "NULL"); free(rb.p);
     emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", trecv);
+    /* the items are kept apart from the first values, in an Array of their
+       own only where a step yields two */
+    int titem = tpair && sp_streq(view, "first") ? ++g_tmp : 0;
+    if (titem) {
+      int tk = ++g_tmp;
+      emit_indent(g_pre, g_indent); buf_printf(g_pre, "sp_PolyArray *_t%d = _t%d; SP_GC_ROOT(_t%d);\n", titem, trecv, titem);
+      emit_indent(g_pre, g_indent);
+      buf_printf(g_pre, "if (_t%d) { _t%d = sp_PolyArray_new(); for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++) "
+                        "sp_PolyArray_push(_t%d, sp_yielded_first(_t%d, _t%d->data[_t%d])); }\n",
+                 tpair, trecv, tk, tk, titem, tk, trecv, tpair, titem, tk);
+    }
     emit_indent(g_pre, g_indent); buf_printf(g_pre, "sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);\n", tseen, tseen);
     emit_indent(g_pre, g_indent); buf_printf(g_pre, "sp_%sArray *_t%d = sp_%sArray_new(); SP_GC_ROOT(_t%d);\n", rk, tres, rk, tres);
     emit_indent(g_pre, g_indent); buf_printf(g_pre, "for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++) {\n", ti, ti, trecv, ti);
@@ -1351,6 +1378,17 @@ int emit_poly_uniq_block(Compiler *c, int id, Buf *b) {
         snprintf(es, sizeof es, "%s", sel);
       }
       else if (bare) snprintf(es, sizeof es, "%s", sel);
+      else if (tpair) {
+        /* the item stays in the to_a's own Array, which nothing else holds */
+        int tel = ++g_tmp;
+        emit_indent(g_pre, din);
+        buf_printf(g_pre, "sp_RbVal _t%d = _t%d->data[_t%d];\n", tel, titem ? titem : trecv, ti);
+        emit_indent(g_pre, din);
+        if (titem) buf_printf(g_pre, "lv_%s = %s;\n", p0, es);
+        else buf_printf(g_pre, "lv_%s = sp_box_poly_array(sp_yielded_args(_t%d, _t%d));\n", p0, tpair, tel);
+        snprintf(es, sizeof es, "_t%d", tel);
+        splat = 1;
+      }
       else if (!splat || !emit_iter_autosplat(c, block, rt, sel, din)) {
         splat = 0;
         emit_indent(g_pre, din); buf_printf(g_pre, "lv_%s = %s;\n", p0, es);
