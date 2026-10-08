@@ -1,0 +1,11 @@
+--- string-or-nil-stored-body-v2.md
++++ string-or-nil-stored-body-v3.md
+@@ -38,7 +38,7 @@
+ 
+ With `--share-strings` master refuses one store of the test, a call found at run time (`v = [n[0].plus, n[1].plus]`), before and after this; the test is not in `SHARE_TESTS`, and the rest of it is right under the flag.
+ 
+-Not here: a program that died at this store now runs on, so a wrong line master already prints further down shows. `src = ["xy".dup]; u = [src[0], pick(1)]; u[0] << "!"; p u, src` prints `["xy"]` for `src`, as master does today for `u = [src[0]]` with no nil in the program: an element read out of one Array and stored in another is a copy there (not with `--share-strings`). This does not touch it. And the list does not look at an operator the program defines anew: with a `String#*` of its own that answers nil, `[s * 1, s * 2]` dies at the store as it does on master.
++Not here: a program that died at this store now runs on, so a wrong line master already prints further down shows. `src = ["xy".dup]; u = [src[0], pick(1)]; u[0] << "!"; p u, src` prints `["xy"]` for `src`, as master does today for `u = [src[0]]` with no nil in the program: an element read out of one Array and stored in another is a copy there (not with `--share-strings`). This does not touch it. And the list does not look at an operator, `dup` or `to_s` the program defines anew: with a `String#*` of its own that answers nil, `[s * 1, s * 2]` dies at the store as it does on master.
+ 
+ ## `make gate` (on this branch merged with current master)
+ 
