@@ -1,0 +1,67 @@
+A lazy stage's block answers with its next, has fresh locals and runs a redo
+
+[1, 5, 2, 8, 3].lazy.map { |x| next 0 if x > 3; x * 2 }.to_a answered
+[2, 4, 6] where CRuby has [2, 0, 4, 0, 6], [1, 2, 3].lazy.map { |x|
+y ||= x; y }.to_a answered [1, 1, 1], and a redo in the block was
+refused. emit_lazy_pipeline_expr wrote the block's leading statements
+straight into the pipeline's one C loop and read the last one as the
+answer: a next was the loop's own continue and dropped the element,
+nothing reset the block's locals, and a redo had no label to go to.
+Under a begin that next also popped the rescue's frame, as a next that
+leaves the begin does, and a raise after the pipeline went uncaught.
+
+A stage now opens its block as the other builtin iterators do, with
+emit_iter_step_open, and reads the answer through emit_iter_step_tail or
+emit_iter_step_cond, where the step has work for them
+(lazy_block_wants_step): a next or a redo of the block's own, or a
+local that has to be fresh, which is one a closure holds or one the
+block does not assign at its top level before anything names it. Any
+other block emits the C it did.
+
+So does a block whose every next only drops the element, which the
+continue did (lazy_next_drops): in a select, a filter or a filter_map a
+next with no value, nil or false, and in a reject next true. That holds
+where the block has no redo and no local to reset, no such next stands
+under a begin of the block's own that has a rescue or an ensure, and no
+begin or ensure stands between the pipeline and the loop or method it
+is written in, whose frame the continue would leave.
+
+A block with a break anywhere in it, a nested block's or loop's own
+included, is read as it was (lazy_block_plain). In the step's frame the
+break would leave only the frame, and the stage would go on with nil
+where the block raises LocalJumpError; the break of a pipeline written
+inside the block has no loop of its own to leave and went the same way.
+So in such a block a next still drops the element, the locals are not
+reset and a redo is still refused. A redo is also still refused where
+the stage would answer wrongly with it or would not build: in find_all,
+which answers nil here with or without it; in a drop_while block of
+more than one parameter, whose branch binds the first alone; beside a
+destructured parameter, which the redo would bind again; and beside a
+post, a keyword or a ** parameter the block never reads, which has no
+local for the step to bind (lazy_bind_lacks_local).
+
+The cost falls on a block with a next or a redo that master ran right
+and that is not one of the above: it pays the step's frame. Over
+200,000 Integers, ten times, an element costs, with gcc 13 and with
+clang 18: 3 and 5 instructions in map { |x| next 0 if x < 0; x * 2 }
+(214,399,399 to 220,399,256 with gcc), 9 and 7 in a select with next
+true, 10 and 7 in a reject with next false, 7 and 9 in a filter_map
+with next x, 13 and 6 in a take_while, 24 and 3 in a flat_map. A local
+first assigned under a condition pays its reset, 4 and 3.
+
+docs/limitations.md says where a redo in a lazy stage is still refused.
+The refusal test takes a stage's block that holds a break, and
+test/reject/redo_lazy_unread_keyword.rb is a keyword the block never
+reads.
+
+Test: test/lazy_stage_step_frame.rb (expected from CRuby 3.3.6 with
+--enable-frozen-string-literal). master refuses it at its first redo
+line and, with the three redo lines out, has 18 of the other 33 wrong
+and stops before the last 8. test/lazy_stage_break_beside_next.rb,
+test/lazy_drop_while_break_beside_next.rb and the four
+test/lazy_stage_break_in_*_beside_next.rb hold a break beside a next,
+written in the block, in the receiver and an argument of a call that
+takes a block, in a for's collection and in a pipeline inside; they
+pass on master too.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
