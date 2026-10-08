@@ -13165,6 +13165,126 @@ static int emit_poly_call0_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
 }
 
 /* Element access on a boxed receiver: an index read, []= and [] with one or two arguments (emit_poly_call's arms, in their order) */
+/* Can the program have given a class a method of one of these names? A def
+   of the name, the compiler's own tables, or any alias, alias_method,
+   define_method or define_singleton_method, which may name it. Asked for
+   two lists, `which` of them, and answered once for each. */
+static int program_may_define(Compiler *c, const char *const *names, int which) {
+  static const Compiler *memo_c; static int memo[2];
+  if (memo_c != c) { memo_c = c; memo[0] = memo[1] = -1; }
+  if (memo[which] >= 0) return memo[which];
+  const NodeTable *nt = c->nt;
+  int may = comp_kind_first(c, NK_AliasMethodNode) >= 0;
+  for (int i = 0; names[i] && !may; i++)
+    may = comp_method_index(c, names[i]) >= 0 || any_class_defines(c, names[i]);
+  for (int d = comp_kind_first(c, NK_DefNode); d >= 0 && !may; d = comp_kind_next(c, d)) {
+    const char *dn = nt_str(nt, d, "name");
+    for (int i = 0; dn && names[i] && !may; i++) may = sp_streq(dn, names[i]);
+  }
+  for (int k = comp_kind_first(c, NK_CallNode); k >= 0 && !may; k = comp_kind_next(c, k)) {
+    const char *kn = nt_str(nt, k, "name");
+    may = kn && (sp_streq(kn, "define_method") || sp_streq(kn, "define_singleton_method") ||
+                 sp_streq(kn, "alias_method"));
+  }
+  return memo[which] = may;
+}
+/* Is this index proved to leave the variable `vn` as it is: to run none of
+   the program's code, and to write no variable that can be `vn`, which a
+   write of kind `wk` names? Only what is listed is: a number, a Symbol or a
+   String literal; a read of a variable, or of a constant the program
+   defines that reads its static; a plain write of a local, or of an
+   instance or class variable of another name; and two calls. One is a typed
+   Array read by a typed Integer, in a program with no `[]` of its own. The
+   other is an arithmetic, comparison or bit operator of an Integer or a
+   Float with an Integer, a Float or a boolean, in a program that gives no
+   class an operator of its own: an operator reaches the program only
+   through one (`3 == k` asks k's `==`, `3 < k` its coerce, and a reopened
+   Float answers `f * 2`). Not listed, so taken to write the variable: a
+   write of a global, which can be the same one by another name (`alias $y
+   $x`; `$-d` is `$DEBUG`); `nil`, `true` and `false`, which is what a
+   `require` inside a statement is replaced by while its file runs ahead of
+   the statement; a `[]` on a boxed value, which calls a Proc; and every
+   other call, for a method, a block or a required file can write it. */
+static int index_leaves_slot(Compiler *c, int id, NodeKind wk, const char *vn) {
+  static const char *const OPS[] = {
+    "+", "-", "*", "/", "%", "**", "<", ">", "<=", ">=", "==", "!=", "<=>", "&", "|", "^", "<<", ">>",
+    /* eighteen operators, then what one of them may call that is none */
+    "coerce", "eql?", "hash", "method_missing", "respond_to_missing?", NULL };
+  static const char *const AREF[] = { "[]", NULL };
+  const NodeTable *nt = c->nt;
+  if (id < 0) return 1;
+  NodeKind k = nt_kind(nt, id);
+  switch (k) {
+    case NK_ParenthesesNode: case NK_StatementsNode: case NK_SelfNode:
+    case NK_IntegerNode: case NK_FloatNode: case NK_SymbolNode: case NK_StringNode:
+    case NK_LocalVariableReadNode: case NK_InstanceVariableReadNode:
+    case NK_GlobalVariableReadNode: case NK_ClassVariableReadNode:
+    case NK_LocalVariableWriteNode:
+      break;
+    case NK_ConstantReadNode: {
+      const char *cn = nt_str(nt, id, "name");
+      LocalVar *cv = cn ? comp_const(c, cn) : NULL;
+      if (!cv || cv->type == TY_UNKNOWN || cv->init_guarded) return 0;
+      break;
+    }
+    case NK_InstanceVariableWriteNode: case NK_ClassVariableWriteNode: {
+      const char *wn = nt_str(nt, id, "name");
+      if (k == wk && (!wn || sp_streq(wn, vn))) return 0;
+      break;
+    }
+    case NK_CallNode: {
+      const char *nm = nt_str(nt, id, "name");
+      int recv = nt_ref(nt, id, "receiver"), a = nt_ref(nt, id, "arguments"), ac = 0;
+      const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+      if (!nm || recv < 0 || ac != 1 || nt_ref(nt, id, "block") >= 0) return 0;
+      TyKind at = comp_ntype(c, av[0]), rt = comp_ntype(c, recv);
+      if (sp_streq(nm, "[]")) {
+        if (!ty_is_array(rt) || at != TY_INT || program_may_define(c, AREF, 1)) return 0;
+        break;
+      }
+      int op = 0;
+      for (int i = 0; i < 18 && !op; i++) op = sp_streq(nm, OPS[i]);
+      NodeKind ak = nt_kind(nt, av[0]), rk = nt_kind(nt, recv);
+      if (!op || !(rk == NK_IntegerNode || rk == NK_FloatNode || rt == TY_INT || rt == TY_FLOAT) ||
+          !(ak == NK_IntegerNode || ak == NK_FloatNode || at == TY_INT || at == TY_FLOAT || at == TY_BOOL) ||
+          program_may_define(c, OPS, 0)) return 0;
+      break;
+    }
+    default: {
+      const char *ty = nt_type(nt, id);
+      if (!ty || !sp_streq(ty, "ArgumentsNode")) return 0;
+    }
+  }
+  for (int i = 0; i < nt_num_refs(nt, id); i++)
+    if (!index_leaves_slot(c, nt_ref_at(nt, id, i), wk, vn)) return 0;
+  for (int i = 0; i < nt_num_arrs(nt, id); i++) {
+    int n = 0;
+    const int *ids = nt_arr_at(nt, id, i, &n);
+    for (int j = 0; j < n; j++)
+      if (!index_leaves_slot(c, ids[j], wk, vn)) return 0;
+  }
+  return 1;
+}
+/* `$x[($x = v; k)]`: a boxed value read from a bare global, instance
+   variable or class variable is left to C's order with its index, so where
+   the index assigns that variable the read answers from the value just
+   assigned. An Integer there answered bit 0 for an index that is no Integer,
+   and that can be CRuby's bit of the value before; such a read keeps that
+   answer (sp_poly_index_poly_asis). It is every read whose index is not
+   proved to leave the variable as it is (index_leaves_slot). A receiver
+   already held in a temp was read first, and is read as any other. */
+static int index_reads_assigned_slot(Compiler *c, int recv, int index) {
+  const NodeTable *nt = c->nt;
+  NodeKind rk = nt_kind(nt, recv);
+  if (rk != NK_GlobalVariableReadNode && rk != NK_InstanceVariableReadNode &&
+      rk != NK_ClassVariableReadNode) return 0;
+  for (int i = 0; i < g_n_argov; i++) if (g_argov_node[i] == recv) return 0;
+  const char *vn = nt_str(nt, recv, "name");
+  if (!vn) return 1;
+  return !index_leaves_slot(c, index, rk == NK_GlobalVariableReadNode ? NK_GlobalVariableWriteNode :
+                                      rk == NK_InstanceVariableReadNode ? NK_InstanceVariableWriteNode :
+                                                                          NK_ClassVariableWriteNode, vn);
+}
 static int emit_poly_index_call(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, TyKind rt, int *out) {
   /* poly receiver: arr[start, len] = src -- 3-arg splice assign
      Skip Fiber/Fiber.current storage receivers (handled later). */
@@ -13451,7 +13571,8 @@ static int emit_poly_index_call(Compiler *c, int id, Buf *b, const NodeTable *nt
            the hash, string or Struct arms, so the cls_id test and the cold
            call behind it are dead code on this read. analyze established the
            proof for the GC root elision; this is the same fact paying twice. */
-        buf_puts(b, at != TY_INT ? "sp_poly_index_poly("
+        buf_puts(b, at != TY_INT ? index_reads_assigned_slot(c, recv, argv[0]) ? "sp_poly_index_poly_asis("
+                                                                               : "sp_poly_index_poly("
                     : expr_is_arr_or_nil(c, recv) && decide_node(c->nt, recv, "aon-get", NULL) ? "sp_poly_arr_get_aon("
                                                   : "sp_poly_arr_get_hash(");
         emit_expr(c, recv, b);
@@ -13461,7 +13582,8 @@ static int emit_poly_index_call(Compiler *c, int id, Buf *b, const NodeTable *nt
       }
       /* a non-poly key (e.g. a Method): box it, then index polymorphically */
       if (!ar.untyped) {
-        buf_puts(b, "sp_poly_index_poly("); emit_expr(c, recv, b);
+        buf_puts(b, index_reads_assigned_slot(c, recv, argv[0]) ? "sp_poly_index_poly_asis(" : "sp_poly_index_poly(");
+        emit_expr(c, recv, b);
         buf_puts(b, ", "); emit_boxed(c, argv[0], b); buf_puts(b, ")");
         { *out = 1; return 1; }
       }
