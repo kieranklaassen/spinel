@@ -1,0 +1,80 @@
+Delta of the statement-replace piece's body, -v9 to -v10 (diff of the two files; a line is a paragraph)
+
+5c5
+< **A fix with a cost.** A String replaced from a source made in place came out as freed memory, in a plain run when the Strings are large. The cost is on `replace` as a statement whose source is a call the list below does not look into: 7 to 17 instructions a statement with gcc and 5 to 13 with clang (the numbers are below). Master ran some of those right, and they pay it. That is any call's answer the list does not look into while something does hold it: an element under an index a call computes (`ar[idx(i)]`), an element of an element (`nn[0][0]`), an element of a block's result (`[1].map { |k| y }[0]`), a reader off an object made in place (`Item.new(y).name`), and an element, a first, a last or a reader that the program defines itself and that answers a String something holds. It is also an assignment written as the source (`s.replace(q = "a" + i.to_s)`), which the local holds once it is made. A literal, a variable, a constant, a field, an element and a Hash value run master's C, and so does any of them answered by its own `to_s`, `to_str`, `itself` or `freeze`.
+---
+> **A fix with a cost.** A String replaced from a source made in place came out as freed memory, in a plain run when the Strings are large. The cost is on `replace` as a statement whose source is a call the list below does not look into: 7 to 20 instructions a statement with gcc and 5 to 15 with clang (the numbers are below). Master ran some of those right, and they pay it. That is any call's answer the list does not look into while something does hold it: an element under an index a call computes (`ar[idx(i)]`), an element of an element (`nn[0][0]`), an element of a block's result (`[1].map { |k| y }[0]`), a reader off an object made in place (`Item.new(y).name`), and an element, a first, a last or a reader that the program defines itself and that answers a String something holds. It is also an assignment written as the source (`s.replace(q = "a" + i.to_s)`), which the local holds once it is made, and a boxed value answered by `to_s`, `itself` or `freeze` (`h[:k].to_s`, the value of a Hash with Symbol keys): a dispatch, which makes a String for anything but a String. A literal, a variable, a constant, a field, an element and a Hash value run master's C, and so does any of them typed String and answered by its own `to_s`, `to_str`, `itself` or `freeze`.
+57,58c57,58
+< - a read out of a slot that a variable, a constant or `self` holds: an `attr_reader`'s or a Struct member's field (`o.name`, `st.name`), an Array's element by an Integer index (`ar[0]`, `ar[i % 2]`), its `first` or its `last`, and a Hash's value (`h[:k]`, `hs["k"]`, `h.fetch(:k)`), the index or the key a literal or a read;
+< - one of those answered by its own `to_s`, `to_str`, `itself` or `freeze` with no argument (`y.to_s`, `ar[0].to_s`): a String answers itself there and nothing is made (`freeze` seals it in place, or answers an immortal copy of a literal);
+---
+> - a read out of a slot that a variable, a constant or `self` holds: an `attr_reader`'s or a Struct member's field (`o.name`, `st.name`), an Array's element by an Integer index (`ar[0]`, `ar[i % 2]`, `ar.fetch(0)`), its `first` or its `last`, and a Hash's value (`h[:k]`, `hs["k"]`, `h.fetch(:k)`), the index or the key a literal or a read;
+> - one of those, typed String, answered by its own `to_s`, `to_str`, `itself` or `freeze` with no argument (`y.to_s`, `ar[0].to_s`, `hs["k"].to_s`): a String answers itself there and nothing is made (`freeze` seals it in place, or answers an immortal copy of a literal); a boxed value is not one of them, its `to_s` is a dispatch and stays rooted (`h[:k].to_s`);
+61c61
+< For those the generated C is master's. A slot read is on the list only while the method is the builtin. Where the program gives Array or Hash its own `[]`, `first`, `last` or `fetch`, gives String its own `to_s`, `to_str`, `itself` or `freeze`, or writes the reader by hand, the answer is a call's result, and so is `h[:k]` in a program that gives any Hash a default block (`fetch` with one key runs none: a missing key raises); a boxed value (`h[:k]` out of a Hash of mixed values) is on it only where no class defines `to_str`. Each of these is rooted, and master was wrong on them at `SPINEL_GC_STRESS=2` where the method makes its String: with `class Array; def first = "f" + size.to_s; end`, `s.replace(ar.first)` was wrong there.
+---
+> For those the generated C is master's. A slot read is on the list only while the method is the builtin. Where the program gives Array or Hash its own `[]`, `first`, `last` or `fetch`, gives String its own `to_s`, `to_str`, `itself` or `freeze`, or writes the reader by hand, the answer is a call's result, and so is `h[:k]` in a program that gives any Hash a default block (`fetch` with one key or one index runs none: a missing one raises); a boxed value (`h[:k]` out of a Hash with Symbol keys or of mixed values) is on it only where no class defines `to_str`. Each of these is rooted, and master was wrong on them at `SPINEL_GC_STRESS=2` where the method makes its String: with `class Array; def first = "f" + size.to_s; end`, `s.replace(ar.first)` was wrong there.
+65c65
+< Cost, callgrind on ed9861279, 200,000 statements each, before and after:
+---
+> Cost, callgrind on 84f5b5020, 200,000 statements each, before and after:
+69,88c69,90
+< | `"lit"` | 56,912,026, the same | 57,492,502, the same |
+< | `y` (a local) | 58,712,023, the same | 58,292,556, the same |
+< | `$g` | 62,509,808, the same | 62,091,032, the same |
+< | `i.odd? ? y : K` | 61,201,281, the same | 60,881,814, the same |
+< | `y \|\| K` | 58,712,024, the same | 58,292,502, the same |
+< | `ar[0]` | 59,512,024, the same | 59,892,502, the same |
+< | `ar.first` | 59,512,024, the same | 59,892,556, the same |
+< | `ar.last` | 55,305,608, the same | 55,283,180, the same |
+< | `h[:k]` | 63,512,023, the same | 62,892,586, the same |
+< | `hs["k"]` | 75,538,758, the same | 75,117,697, the same |
+< | `h.fetch(:k)` | 68,138,773, the same | 66,317,692, the same |
+< | `hs.fetch("k")` | 92,138,758, the same | 92,917,687, the same |
+< | `o.name` | 58,712,023, the same | 58,292,556, the same |
+< | `st.name` | 58,938,772, the same | 58,517,723, the same |
+< | `y.to_s` | 58,738,758, the same | 58,717,711, the same |
+< | `y.to_str` | 57,538,773, the same | 58,117,723, the same |
+< | `y.itself` | 58,738,772, the same | 58,317,723, the same |
+< | `y.freeze` | 60,737,139, the same | 61,116,110, the same |
+< | `ar[idx(i)]` | 58,132,520 to 61,533,987 (17) | 58,110,783 to 60,712,250 (13) |
+< | `Item.new(y).name` | 60,938,779 to 62,341,002 (7) | 60,517,720 to 61,519,935 (5) |
+---
+> | `"lit"` | 56,912,012, the same | 57,492,620, the same |
+> | `y` (a local) | 58,712,023, the same | 58,292,688, the same |
+> | `$g` | 62,509,822, the same | 62,091,184, the same |
+> | `i.odd? ? y : K` | 61,201,295, the same | 60,881,960, the same |
+> | `y \|\| K` | 58,712,024, the same | 58,292,634, the same |
+> | `ar[0]` | 59,512,010, the same | 59,892,620, the same |
+> | `ar.fetch(0)` | 62,712,012, the same | 62,692,712, the same |
+> | `ar.first` | 59,512,024, the same | 59,892,688, the same |
+> | `ar.last` | 55,305,622, the same | 55,283,314, the same |
+> | `h[:k]` | 63,512,023, the same | 62,892,718, the same |
+> | `hs["k"]` | 75,538,772, the same | 75,117,843, the same |
+> | `h.fetch(:k)` | 68,138,773, the same | 66,317,824, the same |
+> | `hs.fetch("k")` | 92,138,772, the same | 92,917,833, the same |
+> | `o.name` | 58,712,023, the same | 58,292,688, the same |
+> | `st.name` | 58,938,772, the same | 58,517,855, the same |
+> | `y.to_s` | 58,738,772, the same | 58,717,857, the same |
+> | `y.to_str` | 57,538,773, the same | 58,117,855, the same |
+> | `y.itself` | 58,738,772, the same | 58,317,855, the same |
+> | `y.freeze` | 60,737,139, the same | 61,116,242, the same |
+> | `ar[idx(i)]` | 58,132,506 to 61,533,973 (17) | 58,110,895 to 60,712,362 (13) |
+> | `Item.new(y).name` | 60,938,765 to 62,340,988 (7) | 60,517,838 to 61,520,053 (5) |
+> | `h[:k].to_s` | 67,312,009 to 70,114,410 (14) | 67,092,677 to 69,895,061 (14) |
+90c92
+< The last two keep the root and are right on master: an index that a call computes is not a read, and an object made in place holds its field only as long as something holds the object. The other sources named at the top take the same root; they are not in the table. Where a row says "the same", the two counts are within 1,200 instructions of each other over the whole run: the generated C is equal.
+---
+> The last three keep the root and are right on master: an index that a call computes is not a read, an object made in place holds its field only as long as something holds the object, and a boxed value's `to_s` is a dispatch, which makes a String for anything but a String. The other sources named at the top take the same root; they are not in the table, but for the dearest of them, `h[:k].freeze` (20 and 15), and `h.fetch(:k).to_s` (16 and 13). `ar.fetch(i & 1)`, `ar[0].to_s` and `hs["k"].to_s` are the same too. Where a row says "the same", the two counts are equal: the generated C is.
+92c94
+< On master ed9861279 the generated C of two of the 6,603 programs under `test/`, `benchmark/` and `packages/*/test/` gains the root, `string_replace_boxed_argument` and `string_replace_prepend_insert_clear`; both print their `.expected` in the seven lanes below (on master the second prints poison bytes at level 2). Every other program's C is unchanged, optcarrot's among them (three print the path of the build's own directory and differ in that alone).
+---
+> On master 84f5b5020 the generated C of two of the 6,608 programs under `test/`, `benchmark/` and `packages/*/test/` gains the root, `string_replace_boxed_argument` and `string_replace_prepend_insert_clear`; both print their `.expected` in the seven lanes below (on master the second prints poison bytes at level 2). Every other program's C is unchanged, optcarrot's among them (three print the path of the build's own directory and differ in that alone).
+94c96
+< `test/string_replace_fresh_source_root.rb` replaces through thirteen forms and counts the Strings that came out wrong; three of the forms are the program's own `Array#first`, an element the Array holds (`ar[1]`, which must stay master's C and be right) and a reader written by hand. On master (ed9861279, gcc and clang) it is right in a plain run and at level 1, and counts 3,450 of its 3,900 wrong at level 2 with exit 0 (150 take the literal side of a choice and 300 read the held element). With this change it prints its `.expected` in the seven lanes run here (plain, level 1, level 1 with the verifier, level 2, `SPINEL_GC_MINOR=0`, `=1`, and `=1` with `SPINEL_GC_VERIFY_GEN=1` at level 1), gcc and clang, and the same with `--share-strings`. It is added to `GC_STRESS_TESTS`.
+---
+> `test/string_replace_fresh_source_root.rb` replaces through thirteen forms and counts the Strings that came out wrong; three of the forms are the program's own `Array#first`, an element the Array holds (`ar[1]`, which must stay master's C and be right) and a reader written by hand. On master (84f5b5020, gcc and clang) it is right in a plain run and at level 1, and counts 3,450 of its 3,900 wrong at level 2 with exit 0 (150 take the literal side of a choice and 300 read the held element). With this change it prints its `.expected` in the seven lanes run here (plain, level 1, level 1 with the verifier, level 2, `SPINEL_GC_MINOR=0`, `=1`, and `=1` with `SPINEL_GC_VERIFY_GEN=1` at level 1), gcc and clang, and the same with `--share-strings`. It is added to `GC_STRESS_TESTS`.
+104c106
+< Run here on this commit on master ed9861279, built from nothing: the test in the seven collector lanes with gcc and clang, with and without `--share-strings` (master is wrong at `SPINEL_GC_STRESS=2` with exit 0; this change is right in every one); `ruby tools/gate.rb check`; the generated C of the 6,603 programs, changed in the two named above, which print their `.expected` in the seven lanes; optcarrot, checksum 59662; `make share-strings-test` and `make int-min-test`, both pass.
+---
+> Run here on this commit on master 84f5b5020, built from nothing: the test in the seven collector lanes with gcc and clang, with and without `--share-strings` (master is wrong at `SPINEL_GC_STRESS=2` with exit 0; this change is right in every one); `ruby tools/gate.rb check`; the generated C of the 6,608 programs, changed in the two named above, which print their `.expected` in the seven lanes; optcarrot, checksum 59662; `make share-strings-test` and `make int-min-test`, both pass; the cost table.
