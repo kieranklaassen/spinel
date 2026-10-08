@@ -1,0 +1,21 @@
+An exception that was raised is not == to one that never was
+
+    begin
+      raise "ab"
+    rescue => e
+      p e == RuntimeError.new("ab")
+    end
+
+printed true where CRuby prints false, and so did
+`[e].include?(RuntimeError.new("ab"))`.
+
+Exception#== is class, message and backtrace. sp_exc_eq compared the
+first two and took the backtraces for equal. The backtrace is nil until
+a rescue takes the exception or #set_backtrace attaches one, so one
+that was raised and one that never was now differ, and two that have a
+backtrace compare by its lines. In a release build those lines are none
+(docs/limitations.md), so two raised exceptions of one class and
+message still compare equal wherever they were raised; a --debug build
+has their frames and tells them apart as CRuby does.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

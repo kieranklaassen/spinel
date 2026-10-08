@@ -1,0 +1,1 @@
+A frozen exception takes no backtrace when it is rescued

@@ -1,0 +1,20 @@
+A frozen exception takes no backtrace when it is rescued
+
+    e = IOError.new("ab").freeze
+    begin
+      raise e
+    rescue => r
+      p r.backtrace
+    end
+
+printed [] where CRuby prints nil, and `e.backtrace` after it was []
+too.
+
+A rescue gives the exception it takes the frames of the raise as its
+backtrace, unless it has one already. CRuby does that at the raise and
+leaves a frozen exception as it is, so an error kept as a frozen
+constant and raised many times answers nil every time. The rescue now
+leaves a frozen exception alone as well. One that had a backtrace
+attached before it was frozen keeps that one, as before.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
