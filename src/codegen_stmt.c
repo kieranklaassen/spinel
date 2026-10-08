@@ -12067,12 +12067,17 @@ static int emit_call_stmt(Compiler *c, int id, Buf *b, int indent, const NodeTab
               int fo = rc >= 0 && rc < c->nclasses &&
                        c->classes[rc].freeze_observed && !c->classes[rc].is_value_type;
               int tw = fo ? ++g_tmp : -1;
+              char twn[32]; snprintf(twn, sizeof twn, "_t%d", tw);
+              int fk = -1;   /* the frozen check follows the value (emit_frozen_obj_guard_for) */
               if (fo) {
-                char twn[32]; snprintf(twn, sizeof twn, "_t%d", tw);
                 buf_printf(b, "{ sp_%s *_t%d = ", c->classes[rc].c_name, tw);
                 emit_expr(c, recv, b); buf_puts(b, "; ");
-                emit_frozen_obj_guard(c, rc, twn, b);
+                int fzl = emit_frozen_obj_guard_for(c, rc, twn, argv[0], b);
                 buf_printf(b, "_t%d->iv_%s = ", tw, iv_c(base));
+                if (fzl) {
+                  char fref[300]; snprintf(fref, sizeof fref, "_t%d->iv_%s", tw, iv_c(base));
+                  fk = frozen_value_open(fref, argv[0], b);
+                }
               }
               else {
                 buf_puts(b, "("); emit_expr(c, recv, b); buf_printf(b, ")->iv_%s = ", iv_c(base));
@@ -12104,6 +12109,7 @@ static int emit_call_stmt(Compiler *c, int id, Buf *b, int indent, const NodeTab
               else if (ivt != TY_POLY && ivt != TY_UNKNOWN)
                 emit_coerce(c, argv[0], ivt, CO_HOLD, "an attribute writer", b);
               else emit_expr(c, argv[0], b);
+              frozen_value_close(c, rc, twn, fk, b);
               buf_puts(b, fo ? "; }\n" : ";\n");
               return 1;
             }
@@ -12283,6 +12289,7 @@ static int emit_ivar_cvar_write_stmt(Compiler *c, int id, Buf *b, int indent, co
       if (ncb >= 0) { emit_stmt_inner(c, v, b, indent); v = ncb; }
     }
     Scope *cws = comp_scope_of(c, id);
+    int fzl = 0;   /* the frozen check follows the value (emit_frozen_obj_guard_for) */
     /* Ivar write inside instance_eval block: access ivar via receiver pointer. */
     if (cws && cws->class_id < 0 && !cws->is_cmethod && g_ie_class_id >= 0) {
       emit_indent(b, indent);
@@ -12308,7 +12315,7 @@ static int emit_ivar_cvar_write_stmt(Compiler *c, int id, Buf *b, int indent, co
         buf_printf(b, "civ_%s_%s = ", c->classes[cws->class_id].name, iv_c(nm + 1));
       else {
         if (cws && cws->class_id >= 0)
-          emit_frozen_obj_guard(c, cws->class_id, g_self ? g_self : "self", b);
+          fzl = emit_frozen_obj_guard_for(c, cws->class_id, g_self ? g_self : "self", v, b);
         buf_printf(b, "%s%siv_%s = ", g_self, g_self_deref, iv_c(nm + 1));
       }
     }
@@ -12327,6 +12334,11 @@ static int emit_ivar_cvar_write_stmt(Compiler *c, int id, Buf *b, int indent, co
     }
     /* an open splice alias of the ivar (a plain String slot's) */
     int sk = ivt == TY_STRING ? splice_store_open(c, id, b) : -1;
+    int fk = -1;
+    if (fzl) {
+      char fref[300]; snprintf(fref, sizeof fref, "%s%siv_%s", g_self, g_self_deref, iv_c(nm + 1));
+      fk = frozen_value_open(fref, v, b);
+    }
     int ven = 0;
     int v_empty_array = vty && sp_streq(vty, "ArrayNode") && (nt_arr(nt, v, "elements", &ven), ven == 0);
     int v_empty_hash = 0;
@@ -12468,6 +12480,7 @@ static int emit_ivar_cvar_write_stmt(Compiler *c, int id, Buf *b, int indent, co
       emit_obj_upcast_prefix(c, ivt, comp_ntype(c, v), b);
       emit_coerce(c, v, ivt, CO_HOLD, "an instance variable write", b);
     }
+    if (fk >= 0) frozen_value_close(c, cws->class_id, g_self ? g_self : "self", fk, b);
     splice_store_close(c, id, sk, b);
     buf_puts(b, ";\n");
     return 1;

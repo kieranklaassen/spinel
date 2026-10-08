@@ -2371,12 +2371,19 @@ int emit_object_ivar_call(Compiler *c, int id, const char *name, int recv, TyKin
                      rbf.p ? rbf.p : "NULL");
           free(rbf.p);
           char selft[32]; snprintf(selft, sizeof selft, "_t%d", tf9);
-          emit_frozen_obj_guard(c, cid, selft, b);
+          /* the check follows a value that can be seen to run */
+          int fzl = emit_frozen_obj_guard_for(c, cid, selft, argv[1], b);
           buf_printf(b, "_t%d->iv_%s = ", tf9, iv_c(sym + 1));
+          int fk = -1;
+          if (fzl) {
+            char fref[300]; snprintf(fref, sizeof fref, "_t%d->iv_%s", tf9, iv_c(sym + 1));
+            fk = frozen_value_open(fref, argv[1], b);
+          }
           if (mt == TY_POLY) emit_boxed(c, argv[1], b);
           else if (nt_kind(nt, argv[1]) == NK_NilNode && nil_value(mt)) buf_puts(b, nil_value(mt));
           else if (emit_array_into_poly_slot(c, mt, argv[1], b)) { }
           else emit_coerce(c, argv[1], mt, CO_HOLD, "an instance variable write", b);
+          frozen_value_close(c, cid, selft, fk, b);
           buf_puts(b, "; })");
           return 1;
         }

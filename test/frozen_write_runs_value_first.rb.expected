@@ -1,0 +1,74 @@
+num 1
+FrozenError
+str 2
+FrozenError
+arr 3
+FrozenError
+num 4
+FrozenError
+str 5
+FrozenError
+yes 6
+num 7
+FrozenError
+num 9
+num 10
+FrozenError
+num 11
+FrozenError
+str 12
+FrozenError
+num 13
+FrozenError
+arr 14
+FrozenError
+num 15
+FrozenError
+num 16
+FrozenError
+0
+"a"
+[0]
+num 1
+stored
+str 2
+stored
+arr 3
+stored
+num 4
+4
+stored
+str 5
+"s5"
+stored
+yes 6
+num 7
+stored
+num 9
+num 10
+stored
+num 11
+stored
+str 12
+stored
+num 13
+13
+stored
+arr 14
+[14]
+stored
+num 15
+stored
+num 16
+stored
+16
+"s12"
+[14]
+ArgumentError
+7
+num 2
+2 FrozenError
+FrozenError
+0
+0
+bye

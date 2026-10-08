@@ -841,6 +841,9 @@ int hold_recv_open(Compiler *c, int recv, int boxed, const char *ctype, const ch
 void emit_yielder_yield(Compiler *c, int id, const char *cn, Buf *b);
 int emit_iter_bind_rest(Compiler *c, int block, int np, TyKind elem_t, const char *elem_src, Buf *b, int indent);
 void emit_frozen_obj_guard(Compiler *c, int cid, const char *selfexpr, Buf *b);
+int emit_frozen_obj_guard_for(Compiler *c, int cid, const char *selfexpr, int v, Buf *b);
+int frozen_value_open(const char *lhs, int v, Buf *b);
+void frozen_value_close(Compiler *c, int cid, const char *selfexpr, int n, Buf *b);
 /* For a reference-backed builtin type (a genuinely nilable C pointer that can
    be NULL), return the name of its SP_BUILTIN_* class-id constant; else NULL.
    Such a value must box via sp_box_nullable_obj so a NULL becomes SP_TAG_NIL. */

@@ -1825,10 +1825,12 @@ static int emit_local_ivar_write_expr(Compiler *c, int id, Buf *b, const NodeTab
       }
     }
     buf_puts(b, "({ ");
-    if (fz_cid >= 0) emit_frozen_obj_guard(c, fz_cid, g_self ? g_self : "self", b);
+    /* the frozen check follows a value that can be seen to run */
+    int fzl = fz_cid >= 0 && emit_frozen_obj_guard_for(c, fz_cid, g_self ? g_self : "self", v, b);
     buf_printf(b, "%s = ", ref2e);
     /* an open splice alias of the ivar (a plain String slot's) */
     int sk = ivt2 == TY_STRING ? splice_store_open(c, id, b) : -1;
+    int fk = fzl ? frozen_value_open(ref2e, v, b) : -1;
     Repr rp = repr_of(c, v);
     if (v_empty_array2 && ty_is_ptr_array(ivt2)) buf_puts(b, "sp_PtrArray_new()");
     else if (v_empty_array2 && ivt2 == TY_POLY_ARRAY) buf_puts(b, "sp_PolyArray_new()");
@@ -1854,6 +1856,7 @@ static int emit_local_ivar_write_expr(Compiler *c, int id, Buf *b, const NodeTab
         emit_str_expr(c, v, b);
         buf_puts(b, ")");
       }
+      frozen_value_close(c, fz_cid, g_self ? g_self : "self", fk, b);
       /* under the handle mark, the handle itself, as the local's twin; and
          where the write is typed as the handle (a value a handle is asked
          of, as #3993's box asks it), whose read face did not build */
@@ -1898,6 +1901,7 @@ static int emit_local_ivar_write_expr(Compiler *c, int id, Buf *b, const NodeTab
       emit_obj_upcast_prefix(c, ivt2, comp_ntype(c, v), b);
       emit_coerce(c, v, ivt2, CO_HOLD, "an instance variable write", b);
     }
+    frozen_value_close(c, fz_cid, g_self ? g_self : "self", fk, b);
     splice_store_close(c, id, sk, b);
     emit_ivar_write_result(c, id, v, ivt2, ref2e, b);
     return 1;

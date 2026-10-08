@@ -4759,6 +4759,34 @@ void emit_frozen_obj_guard(Compiler *c, int cid, const char *selfexpr, Buf *b) {
       "sp_raise_frozen_obj(sp_box_obj((void *)%s, %d), (&(\"\\xff\" \"can't modify frozen %s\")[1])); ",
       selfexpr, cid, rn);
 }
+/* A store of node v's value into a slot of an instance of class cid: Ruby
+   runs the right-hand side before the writer finds the object frozen. Where
+   that can be seen (the value calls, yields or writes; a scalar operator and
+   a plain field read are no such call) and the class has the guard, the
+   value goes into a temporary of the slot's type, the guard follows it and
+   the store takes the temporary:
+   `lhs = ({ __typeof__(lhs) _fvN = <value>; <guard> _fvN; })`, N the value's
+   node, so no other temporary is renumbered. Any other value keeps the guard
+   in front. A store site calls emit_frozen_obj_guard_for in place of
+   emit_frozen_obj_guard and, where it answers 1, brackets the value with
+   frozen_value_open/close. */
+int emit_frozen_obj_guard_for(Compiler *c, int cid, const char *selfexpr, int v, Buf *b) {
+  if (cid < 0 || cid >= c->nclasses) return 0;
+  if (!c->classes[cid].freeze_observed || c->classes[cid].is_value_type) return 0;
+  if (subtree_has_side_effect(c, v) && !subtree_is_pure_read(c, v)) return 1;
+  emit_frozen_obj_guard(c, cid, selfexpr, b);
+  return 0;
+}
+int frozen_value_open(const char *lhs, int v, Buf *b) {
+  buf_printf(b, "({ __typeof__(%s) _fv%d = ", lhs, v);
+  return v;
+}
+void frozen_value_close(Compiler *c, int cid, const char *selfexpr, int n, Buf *b) {
+  if (n < 0) return;
+  buf_puts(b, "; ");
+  emit_frozen_obj_guard(c, cid, selfexpr, b);
+  buf_printf(b, "_fv%d; })", n);
+}
 
 /* `_t<tmp>` when the node was already evaluated into that temp, or the
    node itself when tmp is -1. */

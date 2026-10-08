@@ -11,22 +11,30 @@
 #include "codegen_call_arms.h"
 #include "share.h"
 
+/* `fzc` is the receiver's class where its frozen check follows the value
+   (emit_frozen_obj_guard_for), else -1 */
 static void emit_attr_writer_converted(Compiler *c, int arg, TyKind ivt, int tmp,
-                                       const char *name, Buf *b) {
+                                       const char *name, int fzc, Buf *b) {
   TyKind avk = store_value_kind(c, arg);
+  char self[32]; snprintf(self, sizeof self, "_t%d", tmp);
   /* A nil-valued argument has no C type for a temporary. Keep its
      effects, store the slot's nil, and answer nil as the writer
      does rather than reading the slot as an ordinary number. */
   if (avk == TY_NIL || avk == TY_VOID) {
-    buf_printf(b, "_t%d->iv_%s = ", tmp, iv_c(name));
+    char slot[300]; snprintf(slot, sizeof slot, "_t%d->iv_%s", tmp, iv_c(name));
+    buf_printf(b, "%s = ", slot);
+    int fk = fzc >= 0 ? frozen_value_open(slot, arg, b) : -1;
     emit_coerce(c, arg, ivt, CO_HOLD, "an attribute writer", b);
+    frozen_value_close(c, fzc, self, fk, b);
     buf_puts(b, "; 0; })");
     return;
   }
   int tv = ++g_tmp;
   char tn[32]; snprintf(tn, sizeof tn, "_t%d", tv);
   emit_ctype(c, avk, b); buf_printf(b, " %s = ", tn); emit_expr(c, arg, b);
-  buf_printf(b, "; _t%d->iv_%s = ", tmp, iv_c(name));
+  buf_puts(b, "; ");
+  if (fzc >= 0) emit_frozen_obj_guard(c, fzc, self, b);
+  buf_printf(b, "_t%d->iv_%s = ", tmp, iv_c(name));
   emit_coerce_text(c, arg, avk, ivt, CO_HOLD, tn, "an attribute writer", b);
   buf_printf(b, "; %s; })", tn);
   return;
@@ -1154,7 +1162,10 @@ int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
           int _atmp = ++g_tmp;
           char _aself[32]; snprintf(_aself, sizeof _aself, "_t%d", _atmp);
           buf_printf(b, "({ sp_%s *_t%d = ", c->classes[_arc].c_name, _atmp); emit_expr(c, recv, b); buf_puts(b, "; ");
-          emit_frozen_obj_guard(c, _arc, _aself, b);
+          /* the check follows a value that can be seen to run */
+          int _afzl = argc >= 1 ? emit_frozen_obj_guard_for(c, _arc, _aself, argv[0], b)
+                                : (emit_frozen_obj_guard(c, _arc, _aself, b), 0);
+          char _aslot[300]; snprintf(_aslot, sizeof _aslot, "_t%d->iv_%s", _atmp, iv_c(_abase));
           /* a typed slot (an --rbs seed pins one) given a boxed value: the
              slot takes it unboxed, and the assignment's value is still the
              right-hand side, boxed as it came. Stored raw, an sp_RbVal went
@@ -1164,7 +1175,9 @@ int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
             int _tvv = ++g_tmp;
             char _tvn[32]; snprintf(_tvn, sizeof _tvn, "_t%d", _tvv);
             buf_printf(b, "sp_RbVal %s = ", _tvn); emit_one_arg(c, argv[0], 0, b);
-            buf_printf(b, "; SP_GC_ROOT_RBVAL(%s); _t%d->iv_%s = ", _tvn, _atmp, iv_c(_abase));
+            buf_printf(b, "; SP_GC_ROOT_RBVAL(%s); ", _tvn);
+            if (_afzl) emit_frozen_obj_guard(c, _arc, _aself, b);
+            buf_printf(b, "_t%d->iv_%s = ", _atmp, iv_c(_abase));
             emit_unbox_text(c, _aivt, _tvn, b);
             TyKind _nt = repr_of(c, id).as_ty;
             if (_nt == TY_POLY || _nt == TY_UNKNOWN) buf_printf(b, "; %s; })", _tvn);
@@ -1191,7 +1204,9 @@ int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
             if (_avt != TY_STRBUF && _aci->ivar_str_shared[_aiv] && !share_route_defer(c, &_aq, _amsg))
               unsupported_feature(c, id, _amsg);
             buf_printf(b, "_t%d->iv_%s = ", _atmp, iv_c(_abase));
+            int _afk = _afzl ? frozen_value_open(_aslot, argv[0], b) : -1;
             emit_strbuf_ivar_store(c, _aci->ivar_str_shared[_aiv], argv[0], b);
+            frozen_value_close(c, _arc, _aself, _afk, b);
             if (_avt == TY_STRBUF) buf_printf(b, "; _t%d->iv_%s; })", _atmp, iv_c(_abase));
             else {
               char _asr[300]; snprintf(_asr, sizeof _asr, "_t%d->iv_%s", _atmp, iv_c(_abase));
@@ -1207,10 +1222,11 @@ int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
           if (argc >= 1 && _aivt != TY_POLY && _aivt != TY_UNKNOWN &&
               !repr_of(c, argv[0]).untyped &&
               !store_fits(c, store_value_kind(c, argv[0]), _aivt)) {
-            emit_attr_writer_converted(c, argv[0], _aivt, _atmp, _abase, b);
+            emit_attr_writer_converted(c, argv[0], _aivt, _atmp, _abase, _afzl ? _arc : -1, b);
             return 1;
           }
           buf_printf(b, "_t%d->iv_%s = ", _atmp, iv_c(_abase));
+          int _afk = _afzl ? frozen_value_open(_aslot, argv[0], b) : -1;
           if (argc >= 1) {
             if (_aivt == TY_POLY && repr_of(c, argv[0]).kind != RK_BOXED) emit_one_arg(c, argv[0], 1, b);
             /* the other way: a typed slot (an --rbs seed pins it) given a
@@ -1219,6 +1235,7 @@ int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
             else emit_one_arg(c, argv[0], 0, b);
           }
           else buf_puts(b, "0");
+          frozen_value_close(c, _arc, _aself, _afk, b);
           buf_puts(b, "; })");
           return 1;
         }
