@@ -395,6 +395,9 @@ sp_StrArray *sp_StrArray_shuffle(sp_StrArray *a);
 const char *sp_StrArray_sample(sp_StrArray *a);
 
 /* ---- poly/inspect-dependent ops (lib/sp_array.c; need sp_inspect.h/sp_str.h) ---- */
+typedef struct { const char *cur, *end, *stop; long long at, lim; sp_int excl; int width, kind; } sp_StrWalk;
+const char *sp_str_walk_first(sp_StrWalk *w, const char *s, const char *e, sp_int excl);
+const char *sp_str_walk_next(sp_StrWalk *w);
 void sp_str_upto_each(const char *s, const char *e, sp_int excl, int (*fn)(const char *, void *), void *arg);
 sp_StrArray *sp_StrArray_from_string_range(const char *s, const char *e, sp_int excl);
 const char*sp_IntArray_inspect(sp_IntArray*a);

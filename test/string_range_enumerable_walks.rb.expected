@@ -1,0 +1,44 @@
+"c"
+"aa"
+4
+true
+false
+false
+false
+["a", "b", "c", "d"]
+a0b1c2
+["a", "b", "c"]
+"abcd"
+7
+2
+"cc"
+["b"]
+"d"
+"aa"
+"aaa"
+"10"
+27
+nil
+nil
+false
+true
+true
+true
+["a", "b", "c", "d", "e"]
+["c", "d", "e"]
+[["a", "b"], ["c", "d", "e"]]
+[[1, ["a", "c", "e"]], [0, ["b", "d"]]]
+"e"
+"a"
+["e", "a"]
+["cc", "dd", "ee"]
+["a", "A", "b", "B", "c", "C", "d", "D", "e", "E"]
+3
+["e", "d", "c", "b", "a"]
+"abcde"
+"-abcde"
+a0b1c2d3e4Range
+nil
+nil
+true
+["08", "09", "10"]
