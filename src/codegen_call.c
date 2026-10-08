@@ -11097,6 +11097,26 @@ static int emit_struct_new_call(Compiler *c, int id, int ci, int argc, const int
        and too many arguments when they hold a key */
     int spread_over = spread_tail && argc - 1 == cls->nmembers ? ++g_tmp : -1;
     if (spread_over >= 0) buf_printf(b, "({ sp_%s *_t%d = ", cls->c_name, spread_over);
+    /* How many member values are made in the constructor's own argument
+       list by something that allocates: a converted literal or read, the
+       spread hash, a member read out of a keyword splat, or a value that
+       is neither hoisted into a rooted temp nor a plain read (a call that
+       answers a scalar)? The constructor roots its parameters before it
+       allocates the object, so one such value is held by then; with two,
+       the second can collect the first. */
+    int made = 0;
+    for (int a = 0; a < cls->nmembers && made < 2; a++) {
+      int vnode = -1;
+      TyKind mt = cls->ivar_types[a];
+      if (kwh >= 0) vnode = merged ? -1 : struct_kwarg_value(c, kwh, cls->ivars[a] + 1);
+      else if (a < argc) vnode = argv[a];
+      if (lit_tmp && lit_tmp[a] >= 0) continue;
+      if (spread_tail && a == argc - 1) made += !arg_wants_root(c, mt, -1);
+      else if (vnode < 0) made += splat_tmp >= 0;
+      else if (!arg_ran_first(vnode, argov_saved) && !arg_wants_root(c, mt, vnode))
+        made += arg_read_converts(c, mt, vnode) ||
+                (operand_may_allocate(c, vnode) && !subtree_is_plain_value(c, vnode));
+    }
     buf_printf(b, "sp_%s_new(", cls->c_name);
     for (int a = 0; a < cls->nmembers; a++) {
       if (a) buf_puts(b, ", ");
@@ -11131,8 +11151,15 @@ static int emit_struct_new_call(Compiler *c, int id, int ci, int argc, const int
            dangling and the next mark reads freed memory (#4049). */
         Buf mv; memset(&mv, 0, sizeof mv);
         emit_struct_member_value(c, cls, a, vnode, &mv);
-        if (arg_wants_root(c, cls->ivar_types[a], vnode) && !arg_ran_first(vnode, argov_saved))
+        int first = arg_ran_first(vnode, argov_saved);
+        if (!first && arg_wants_root(c, cls->ivar_types[a], vnode))
           emit_rooted_operand(c, cls->ivar_types[a], -1, mv.p ? mv.p : "", b);
+        /* a literal or a bare read wrapped in a handle of its own: as fresh
+           as a call's answer, and held where it stands (arg_read_converts)
+           when another value of the list can collect it */
+        else if (!first && made >= 2 && mv.p && cls->ivar_types[a] == TY_STRBUF &&
+                 arg_read_converts(c, TY_STRBUF, vnode))
+          emit_rooted_conversion(c, TY_STRBUF, mv.p, b);
         else buf_puts(b, mv.p ? mv.p : "");
         free(mv.p);
       }
@@ -18658,6 +18685,179 @@ int subtree_is_pure_read(Compiler *c, int id) {
       if (!subtree_is_pure_read(c, ids[j])) return 0;
   }
   return 1;
+}
+static int plain_is_attr_call(const char *nm) {
+  return sp_streq(nm, "attr") || sp_streq(nm, "attr_reader") || sp_streq(nm, "attr_writer") ||
+         sp_streq(nm, "attr_accessor");
+}
+/* A number that changes when the node table does (its `version`: the
+   emitter adds a node here and there). The answers below walk the whole
+   program, so each is kept while the table stands. */
+static int plain_table_gen(Compiler *c) {
+  static const Compiler *mc; static const NodeTable *mnt; static unsigned mver; static int gen;
+  if (mc != c || mnt != c->nt || mver != c->nt->version) {
+    mc = c; mnt = c->nt; mver = c->nt->version; gen++;
+  }
+  return gen;
+}
+/* Can the program define a method that leaves neither a def nor an attr of
+   that name in the node table: an alias, a name handed to alias_method,
+   define_method or a delegator, a send, an eval of a class, an attr whose
+   name is not a Symbol literal? */
+static int plain_prog_defines_unseen(Compiler *c) {
+  static const char *const WORDS[] = {
+    "alias_method", "define_method", "define_singleton_method", "send", "__send__", "public_send",
+    "class_eval", "module_eval", "class_exec", "module_exec", "instance_eval", "instance_exec", "eval",
+    "def_delegator", "def_delegators", "delegate", NULL };
+  static int memo_gen, memo;
+  int g = plain_table_gen(c);
+  if (memo_gen == g) return memo;
+  const NodeTable *nt = c->nt;
+  int n = 0;
+  memo_gen = g; memo = 0;
+  nt_nodes_of_kind(nt, NK_AliasMethodNode, &n);
+  if (n > 0) return memo = 1;
+  const int *calls = nt_nodes_of_kind(nt, NK_CallNode, &n);
+  for (int i = 0; i < n && !memo; i++) {
+    const char *nm = nt_str(nt, calls[i], "name");
+    if (!nm) continue;
+    for (int w = 0; WORDS[w] && !memo; w++) if (sp_streq(nm, WORDS[w])) memo = 1;
+    if (memo || !plain_is_attr_call(nm)) continue;
+    int a = nt_ref(nt, calls[i], "arguments"), ac = 0;
+    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+    for (int j = 0; j < ac; j++) if (nt_kind(nt, av[j]) != NK_SymbolNode) memo = 1;
+  }
+  return memo;
+}
+/* Is a call of `nm` on a builtin's value provably the builtin's own: the
+   program has no def of that name anywhere, no attr of that name, and no
+   way to define one that the node table does not show? Asked by the name
+   alone, whatever the class: a def in a subclass, a module or a singleton
+   counts. `!=` runs `==`. A reader (`reader`) is asked for a def of its name
+   only: its attr is what makes it a read. */
+static int plain_name_scan(Compiler *c, const char *nm, int reader) {
+  const NodeTable *nt = c->nt;
+  if (plain_prog_defines_unseen(c)) return 0;
+  const char *also = sp_streq(nm, "!=") ? "==" : nm;
+  int n = 0;
+  const int *defs = nt_nodes_of_kind(nt, NK_DefNode, &n);
+  for (int i = 0; i < n; i++) {
+    const char *dn = nt_str(nt, defs[i], "name");
+    if (!dn || sp_streq(dn, nm) || sp_streq(dn, also)) return 0;
+  }
+  if (reader) return 1;
+  const int *calls = nt_nodes_of_kind(nt, NK_CallNode, &n);
+  for (int i = 0; i < n; i++) {
+    const char *cn = nt_str(nt, calls[i], "name");
+    if (!cn || !plain_is_attr_call(cn)) continue;
+    int a = nt_ref(nt, calls[i], "arguments"), ac = 0;
+    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+    for (int j = 0; j < ac; j++) {
+      const char *sv = nt_kind(nt, av[j]) == NK_SymbolNode ? nt_str(nt, av[j], "value") : NULL;
+      if (!sv || sp_streq(sv, nm) || sp_streq(sv, also)) return 0;
+    }
+  }
+  return 1;
+}
+/* The scan's answer, kept by name while the table stands (the name is
+   copied: nothing is assumed of where it lives). */
+static int plain_name_answer(Compiler *c, const char *nm, int reader) {
+  static char names[32][16]; static char kinds[32], answers[32]; static int used, memo_gen;
+  if (!nm) return 0;
+  int g = plain_table_gen(c);
+  if (memo_gen != g) { memo_gen = g; used = 0; }
+  for (int i = 0; i < used; i++)
+    if (kinds[i] == reader && sp_streq(names[i], nm)) return answers[i];
+  int ans = plain_name_scan(c, nm, reader);
+  if (used < 32 && strlen(nm) < sizeof names[0]) {
+    strcpy(names[used], nm); kinds[used] = (char)reader; answers[used++] = (char)ans;
+  }
+  return ans;
+}
+static int plain_name_is_builtin(Compiler *c, const char *nm) {
+  return plain_name_answer(c, nm, 0);
+}
+/* Does the subtree, a pure read by the list above, hold a call that is not
+   provably the builtin's? That list takes an index into a typed Array, an
+   operator on numbers or booleans and a reader's field read by the type of
+   the receiver; the program's own `[]` or `+` runs its code, and may
+   allocate. A reader is asked for a def of its name only: its attr is what
+   makes it a read. */
+static int plain_calls_own(Compiler *c, int a) {
+  const NodeTable *nt = c->nt;
+  if (a < 0) return 0;
+  if (nt_kind(nt, a) == NK_CallNode) {
+    const char *nm = nt_str(nt, a, "name");
+    int alloc = 0;
+    if (!nm) return 1;
+    if (!plain_name_answer(c, nm, call_is_field_read(c, a, &alloc))) return 1;
+  }
+  int nr = nt_num_refs(nt, a);
+  for (int i = 0; i < nr; i++)
+    if (plain_calls_own(c, nt_ref_at(nt, a, i))) return 1;
+  int na = nt_num_arrs(nt, a);
+  for (int i = 0; i < na; i++) {
+    int n = 0;
+    const int *ids = nt_arr_at(nt, a, i, &n);
+    for (int j = 0; j < n; j++)
+      if (plain_calls_own(c, ids[j])) return 1;
+  }
+  return 0;
+}
+/* See codegen_internal.h. */
+int subtree_is_plain_value(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  id = unwrap_parens(c, id);
+  if (id < 0) return 1;
+  if (subtree_is_pure_read(c, id)) return !plain_calls_own(c, id);
+  switch (nt_kind(nt, id)) {
+    /* a global's read is off the list above, which also answers for
+       reordering; the match globals build their value */
+    case NK_GlobalVariableReadNode:
+      return !operand_may_allocate(c, id);
+    case NK_AndNode: case NK_OrNode:
+      return subtree_is_plain_value(c, nt_ref(nt, id, "left")) &&
+             subtree_is_plain_value(c, nt_ref(nt, id, "right"));
+    case NK_IfNode: case NK_UnlessNode: {
+      int unless = nt_kind(nt, id) == NK_UnlessNode;
+      int parts[2] = { nt_ref(nt, id, "statements"), nt_ref(nt, id, unless ? "else_clause" : "subsequent") };
+      if (!subtree_is_plain_value(c, nt_ref(nt, id, "predicate"))) return 0;
+      for (int i = 0; i < 2; i++) {
+        int st = parts[i], n = 0;
+        if (st >= 0 && nt_kind(nt, st) == NK_IfNode) {
+          if (!subtree_is_plain_value(c, st)) return 0;
+          continue;
+        }
+        if (st >= 0 && nt_kind(nt, st) == NK_ElseNode) st = nt_ref(nt, st, "statements");
+        const int *bd = st >= 0 ? nt_arr(nt, st, "body", &n) : NULL;
+        if (n != 1 || !subtree_is_plain_value(c, bd[0])) return 0;
+      }
+      return 1;
+    }
+    case NK_CallNode: {
+      const char *nm = nt_str(nt, id, "name");
+      int recv = nt_ref(nt, id, "receiver");
+      int a = nt_ref(nt, id, "arguments"), ac = 0;
+      const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+      if (!nm || recv < 0 || nt_ref(nt, id, "block") >= 0 || !subtree_is_plain_value(c, recv)) return 0;
+      TyKind rt = comp_ntype(c, recv), vt = comp_ntype(c, id);
+      int num = (rt == TY_INT || rt == TY_FLOAT) && (vt == TY_INT || vt == TY_FLOAT);
+      int ok = 0;
+      /* `size`, `length` and `abs` as master's own lists of calls with
+         nothing to run take them: hash_new_capacity_pure and nn_pure_call
+         (analyze.c) */
+      if (ac == 0 && (sp_streq(nm, "-@") || sp_streq(nm, "abs"))) ok = num;
+      else if (ac == 0 && sp_streq(nm, "!")) ok = rt == TY_BOOL;
+      else if (ac == 0 && (sp_streq(nm, "size") || sp_streq(nm, "length")))
+        ok = (ty_is_array(rt) || ty_is_hash(rt) || rt == TY_STRING) && vt == TY_INT &&
+             !operand_may_allocate(c, recv);
+      /* an operator on scalars whose operand is one of the forms here */
+      else if (ac == 1) ok = call_is_scalar_op(c, id) && subtree_is_plain_value(c, av[0]);
+      return ok && plain_name_is_builtin(c, nm);
+    }
+    default:
+      return 0;
+  }
 }
 
 /* Does the program give a Hash a default block anywhere (`Hash.new { }`,
