@@ -1,0 +1,8 @@
+- DELTA since reader 7's NOT READY on ML (22:57 UTC 10-07) and the rulings of 23:10, for the reader:
+  - C1 (right by chance is right): `srange_eqq_covers_boxed` keeps master's C for a program with its own Range#=== or String#<=>, #==, #succ; the nine reopen programs above.
+  - C2 (the cost on a right program is cut first): the `when` arm makes its Range only when reached and does not box it; a plain String is compared inline, an object's box goes out of line (sp_srange_when_obj). What stays is the +1/0 row; it is in the body's first cost sentence.
+  - the equal boxed String Range is false (ruled: kept, one sentence in the body and both messages, one test line in each test).
+  - the program fact's walk looks only at call nodes typed as a handle: the compile cost fell from 0.54% to 0.003%.
+  - NEW in the Array piece: `&& _tN.v.p` in emitted C is read by the root-frame pass (frame_collect, src/codegen.c) as the temporary's address and takes its frame slot away (11 to 15 instructions a call); every arm writes `(_tN.v.p != NULL)`. delete's arm is `_t.tag == SP_TAG_OBJ ? sp_StrArray_delete_handle(arr, _t)`, a cold helper out of line (the best of four forms measured by hand on the emitted C). The fifth commit of the first cut (delete on a boxed receiver in the runtime) is WITHDRAWN to "Not here".
+  - T1 to T7: subjects at most 65 characters; the cost programs are in the texts; the limit for an object with its own `<=>` is stated; no "nothing is allocated" claim; the gate block is the placeholder.
+git patch-id --stable: 1243697e3d81 (this head) e987a6e35d982d88863ea1c63b19cd74347f66c5; 221ea46d69a1 385d4bbf4d9ac2a27b786217ccbda3c6308fa939

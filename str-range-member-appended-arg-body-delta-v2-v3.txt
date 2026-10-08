@@ -1,0 +1,23 @@
+--- str-range-member-appended-arg-body-v2.md
++++ str-range-member-appended-arg-body-v3.md
+@@ -32,15 +32,17 @@
+ 
+ The walk looks at the call nodes stored as a handle: compiling optcarrot runs 8,338,283,807 instructions for 8,338,025,724, and its C is unchanged. In the corpus one program's C changes beside the new test, `test/codegen_settled_operand_types.rb`, which prints what it printed.
+ 
+-Not here: the program whose box may hold a plain String under the handle's tag crashes when it reads that box (gcc) or does not build (clang), as on master; `cover?` of a plain String still compares up to its first NUL; a String Range the call does not see as typed (read out of an Array or a Hash, or a "Range or nil" local called with `&.`) and `r.method(:cover?).call(x)` still answer false for the handle; `===` and `case`/`when` of a String Range with a boxed value, and `include?`, `index` and `delete` of a String Array, are their own changes.
++Not here: the program whose box may hold a plain String under the handle's tag crashes when it reads that box (gcc) or does not build (clang), as on master; `cover?` of a plain String still compares up to its first NUL; a String Range the call does not see as typed (read out of an Array or a Hash, or a "Range or nil" local called with `&.`) and `r.method(:cover?).call(x)` still answer false for the handle; `===` and `case`/`when` of a String Range with a boxed value are their own change.
+ 
+ ## `make gate` (on this branch merged with current master)
+ 
+ ```
+-not run yet
++gate: run on the Mac at opening
+ ```
+ 
++Run here before that, on this commit over master `fb0de073421a` with the two pull requests it depends on beneath it (Linux x86-64, gcc 13.3 and clang 18.1, CRuby 3.3.6): the build from nothing, the tests at five collector settings with both compilers, with and without `--share-strings`, `tools/gate.rb check`, `make share-strings-test` and `make cident` against its parent.
++
+ - [ ] New tests have `.expected` files that match CRuby 4.0 run with `--enable-frozen-string-literal` (made with CRuby 3.3.6)
+ - [x] Values past 2^31 are marked `# spinel: int64` (none)
+ - [x] If optcarrot's generated C changed: callgrind numbers, checksum 59662 (its C is unchanged)
+-- [x] Depends on: "The two ends of a String Range made on the spot are both kept, and made in order" and "A String Range that no name holds is kept until it is read" (a Range whose two ends are made where it is written loses an end while a boxed argument is made; master's false for every handle hid that, and with this arm alone such a call answers true for a String outside the Range)
++- [x] Depends on: "A String Range made on the spot keeps its ends, made in order, until it is read" (a Range whose two ends are made where it is written loses an end while a boxed argument is made; master's false for every handle hid that, and with this arm alone such a call answers true for a String outside the Range), and through it "A String Range answered by its walk keeps its ends across the walk"
