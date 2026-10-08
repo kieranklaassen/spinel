@@ -1439,6 +1439,39 @@ static int strbuf_stmts_tail_plain(Compiler *c, int st) {
          repr_static_read_kind(k) || strbuf_cond_has_handle_leaf(c, b[n - 1], 0) ||
          repr_call_returns_handle(c, b[n - 1]) || strbuf_route_exc_message(c, b[n - 1]);
 }
+/* A begin's arm: strbuf_stmts_tail_plain's, or one that ends in a write of
+   a local whose slot holds the rule's handle (`begin; t = s; end`), which
+   the arm leaves in the result slot as its read would (emit_stmt_tail_inner). */
+static int strbuf_begin_arm_plain(Compiler *c, int st) {
+  int n = 0;
+  const int *b = st >= 0 && nt_kind(c->nt, st) == NK_StatementsNode ? nt_arr(c->nt, st, "body", &n) : NULL;
+  NodeKind k = n > 0 ? nt_kind(c->nt, b[n - 1]) : NK_NONE;
+  if ((k == NK_LocalVariableWriteNode || k == NK_LocalVariableOrWriteNode || k == NK_LocalVariableAndWriteNode) &&
+      repr_write_share(c, b[n - 1]))
+    return 1;
+  return strbuf_stmts_tail_plain(c, st);
+}
+/* Is `id` the last statement of an arm whose value is begin `bg`'s: its
+   body's when no else follows it, a rescue's, its else's? */
+static int strbuf_begin_arm_last(Compiler *c, int bg, int id) {
+  const NodeTable *nt = c->nt;
+  if (bg < 0 || nt_kind(nt, bg) != NK_BeginNode) return 0;
+  int el = nt_ref(nt, bg, "else_clause");
+  int arm = nt_ref(nt, el >= 0 ? el : bg, "statements");
+  for (int rc = nt_ref(nt, bg, "rescue_clause"); ; rc = nt_ref(nt, rc, "subsequent")) {
+    int n = 0;
+    const int *b = arm >= 0 && nt_kind(nt, arm) == NK_StatementsNode ? nt_arr(nt, arm, "body", &n) : NULL;
+    if (n > 0 && b[n - 1] == id) return 1;
+    if (rc < 0) return 0;
+    arm = nt_ref(nt, rc, "statements");
+  }
+}
+/* Does begin `bg` run nothing once its value is taken: no ensure, or an
+   empty one? */
+static int strbuf_begin_no_ensure(Compiler *c, int bg) {
+  int ec = nt_ref(c->nt, bg, "ensure_clause");
+  return ec < 0 || nt_ref(c->nt, ec, "statements") < 0;
+}
 /* --share-strings: a begin whose value is a variable's String or nil in
    each of its arms (its body's, each rescue's, its else's; an ensure's is
    dropped): the arms keep the handle in its result slot
@@ -1449,10 +1482,10 @@ static int strbuf_route_begin(Compiler *c, int v) {
   if (!repr_share_rule(c) || v < 0 || nt_kind(nt, v) != NK_BeginNode) return 0;
   /* the body's value is the begin's only when no else follows it */
   int el = nt_ref(nt, v, "else_clause");
-  int ok = el >= 0 || strbuf_stmts_tail_plain(c, nt_ref(nt, v, "statements"));
+  int ok = el >= 0 || strbuf_begin_arm_plain(c, nt_ref(nt, v, "statements"));
   for (int rc = nt_ref(nt, v, "rescue_clause"); ok && rc >= 0; rc = nt_ref(nt, rc, "subsequent"))
-    ok = strbuf_stmts_tail_plain(c, nt_ref(nt, rc, "statements"));
-  return ok && (el < 0 || strbuf_stmts_tail_plain(c, nt_ref(nt, el, "statements")));
+    ok = strbuf_begin_arm_plain(c, nt_ref(nt, rc, "statements"));
+  return ok && (el < 0 || strbuf_begin_arm_plain(c, nt_ref(nt, el, "statements")));
 }
 /* --share-strings: a `yield` to a literal block spliced in here whose
    value is a variable's String (`yield` under `o.set { s }`): the splice
@@ -1649,9 +1682,13 @@ int emit_strbuf_route(Compiler *c, int v, Buf *b) {
   if (strbuf_route_begin(c, v) || strbuf_route_ivar_get(c, v)) {
     /* its result slot is the handle under the demand */
     v = unwrap_parens(c, v);
+    /* a begin that ends in a local's write is typed as that local's slot,
+       which is stored as the handle only under the mark (repr_stored_type) */
+    int sx = repr_of(c, v).ty == TY_STRBUF ? view_push_repr(c, v, VR_STRBUF_BOX, 1) : -1;
     int sv = view_push_repr(c, v, VR_HANDLE_DEMAND, 1);
     emit_expr(c, v, b);
     view_pop(c, sv);
+    if (sx >= 0) view_pop(c, sx);
     return 1;
   }
   int x = strbuf_route_operand(c, v);
@@ -9480,7 +9517,17 @@ static void emit_ensure_return(Compiler *c, int eid, int has_retval, Buf *b, int
 /* begin/body/rescue (ensure/else deferred) via the setjmp exception model.
    When resultvar != NULL, the body's and rescue handlers' values are
    assigned to it (begin/rescue as an expression). */
+static void emit_begin_arms(Compiler *c, int id, Buf *b, int indent, const char *resultvar);
+/* The begin whose value its arms' last statements are assigning
+   (emit_stmt_tail_inner), -1 outside one. */
+static int g_value_begin = -1;
 void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) {
+  int sv = g_value_begin;
+  g_value_begin = resultvar ? id : -1;
+  emit_begin_arms(c, id, b, indent, resultvar);
+  g_value_begin = sv;
+}
+static void emit_begin_arms(Compiler *c, int id, Buf *b, int indent, const char *resultvar) {
   const NodeTable *nt = c->nt;
   int body = nt_ref(nt, id, "statements");
   int rescue = nt_ref(nt, id, "rescue_clause");
@@ -14607,8 +14654,17 @@ void emit_stmt_tail_inner(Compiler *c, int id, Buf *b, int indent) {
     LocalVar *lv9 = holder_of_node(c, id, &h9) ? h9.lv : NULL;
     TyKind lt9 = lv9 ? lv9->type : TY_UNKNOWN;
     int want_poly9 = g_result_var ? g_result_poly : (g_ret_type == TY_POLY);
-    int slot_ok = lv9 && lt9 != TY_UNKNOWN && lt9 != TY_VOID &&
-                  (want_poly9 || lt9 == (g_result_var ? g_result_ty : g_ret_type));
+    /* --share-strings: the last statement of a begin that hands on the
+       handle where one is asked for (strbuf_route_begin). Here none was: the
+       value is only read, so the local answers its String, read out as a
+       read of the local is (the global's arm below). An ensure's body runs
+       after that read and can change the String, so such a begin keeps the
+       statement form. */
+    int sb9 = lv9 && lt9 == TY_STRBUF && h9.r.kind == RK_STRBUF && !want_poly9 && g_result_var &&
+              g_result_ty == TY_STRING && strbuf_begin_arm_last(c, g_value_begin, id) &&
+              strbuf_route_begin(c, g_value_begin) && strbuf_begin_no_ensure(c, g_value_begin);
+    int slot_ok = sb9 || (lv9 && lt9 != TY_UNKNOWN && lt9 != TY_VOID &&
+                  (want_poly9 || lt9 == (g_result_var ? g_result_ty : g_ret_type)));
     emit_stmt(c, id, b, indent);
     if (!slot_ok) return;
     char lref9[1024];
@@ -14620,6 +14676,7 @@ void emit_stmt_tail_inner(Compiler *c, int id, Buf *b, int indent) {
       buf_printf(b, "%s;\n", bx9.p ? bx9.p : "sp_box_nil()");
       free(bx9.p);
     }
+    else if (sb9) buf_printf(b, "sp_strbuf_read_pub(%s);\n", lref9);
     else buf_printf(b, "%s;\n", lref9);
     return;
   }
