@@ -1,0 +1,42 @@
+1:  72cc98e7c ! 1:  bd3e77336 Refuse a String instance variable assigned from another and mutated in place
+    @@ Commit message
+         handle hands the handle over and is left alone; through a call the
+         write copies even then. `@t = s`, `t = @s` and `t = @s.to_s` have alias
+         walks of their own and are left as they are, and so is a source that is
+    -    no String (`@t = @n.to_s`). Under --share-strings the plain assignment
+    -    and a bang's kept result are the rule's, as a global's are; through
+    -    another call the rule names the two one shared class and the write
+    -    still copies, so that stays refused.
+    +    no String (`@t = @n.to_s`). Under --share-strings nothing is asked: the
+    +    write is the rule's in every form.
+     
+         Co-Authored-By: Claude Code <noreply@anthropic.com>
+     
+    @@ docs/limitations.md
+     @@ docs/limitations.md: Not yet shared:
+      - through `to_s` (or another call answering its String receiver) under a mutator whose argument reassigns the variable, when the variable is a String handle (`e.to_s << (e = +"b")`);
+      - into an Array, a String variable added by `insert`, `prepend`, a `concat` of a literal, the later push of a chain (`a << t << s`) or a push into a global Array, or as the value of `s << x`, of `+s` (s itself unless s is frozen; a parameter is refused even when every caller passes a frozen literal) or of a reader method (`a << sb` with `def sb = @s`), when the variable or the element is then mutated in place;
+    - - through a reader on a boxed receiver (a Struct or Data member, an `attr_reader`, `def m = @iv`), a String read into a local that is mutated in place while the receiver is read again;
+    + - through a reader on a boxed receiver (a Struct or Data member, an `attr_reader`, `def m = @iv`), a String read into a local that is mutated in place while the receiver is read again (a local only queried and then rebound to a copy, `s = s.dup`, before the change compiles: the change is the copy's);
+     +- through an instance variable assigned from another instance variable (`@t = @s`, unless both already hold the one shared handle), or from an instance variable or a local through a call answering its receiver (`@t = @s.to_s`, `@t = s.itself`), when one name is mutated in place and the other is read, unless that call is the program's only mutation or the script body's last, or the script body only prints the other name, ahead of the assignment;
+      - into a container, a String held by a block parameter no element iterator binds (a proc's, a lambda's, a yielding method's block, `each_char`'s, `scan`'s), when an element is then mutated in place;
+      - through `scan`'s block parameter, a match the block keeps and mutates in place (it did not build);
+    @@ src/analyze.c: static void refuse_string_alias_copies(Compiler *c) {
+     +         a call, so it holds a copy as a global does. A plain `@t = @s`
+     +         between two shared handles hands the handle over; through a call
+     +         the write copies even then. `@t = s` and `t = @s.to_s` have walks
+    -+         of their own and are left alone. Under --share-strings the plain
+    -+         write and a bang's result are the rule's, as a global's are */
+    ++         of their own and are left alone. Under --share-strings the write
+    ++         is the rule's in every form, and nothing is asked here */
+     +      else if (to.kind == NK_InstanceVariableReadNode && sa_name(c, g, &from) &&
+     +               (from.kind == NK_InstanceVariableReadNode || (from.kind == NK_LocalVariableReadNode && g != v)) &&
+     +               (comp_ntype(c, g) == TY_STRING || comp_ntype(c, g) == TY_STRBUF) &&
+     +               !(from.kind == to.kind && from.cid == to.cid && sp_streq(to.name, from.name)) &&
+    -+               (g != v ? !(c->share_strings && strchr(nt_str(nt, v, "name"), '!'))
+    -+                       : !c->share_strings && !(sa_handle(c, &to, 0) && sa_handle(c, &from, 0))) &&
+    ++               !c->share_strings &&
+    ++               (g != v || !(sa_handle(c, &to, 0) && sa_handle(c, &from, 0))) &&
+     +               !sa_after_all_mutations(c, &order, w) &&
+     +               sa_copy_observable(c, &to, &from, g) && !sa_value_mutates_last(c, &order, w, v, g) &&
+     +               !(!sa_mutated(c, &from) && sa_read_only_before(c, &order, &from, g, w)))

@@ -1,0 +1,52 @@
+1:  33b62fe08 ! 1:  efeebfb5b The returned-argument route asks a call stored into an Array or a Hash
+    @@ Commit message
+         variable is read (strbuf_demand_store_leaf, beside the refusal of
+         `a << (s << "y")`).
+     
+    -    Not here: a constructor argument, `insert`, `concat`, a literal that is
+    -    not assigned to a variable, and --share-strings, where a local that
+    -    shares its handle through the method's parameter counts as mutated and
+    -    the form with a local between compiles. Those still hold a copy.
+    +    Not here: a constructor argument, `insert`, `concat` and a literal that
+    +    is not assigned to a variable still hold a copy. Under --share-strings
+    +    nothing is asked: the stored call is the rule's there.
+     
+         Co-Authored-By: Claude Code <noreply@anthropic.com>
+     
+    @@ docs/limitations.md: Not yet shared:
+      - through a bang method's result, which is its receiver (`r = s.strip!`, `r = s.strip! || s`), when the result is mutated in place through a variable and the receiver is read; a mutator straight on the result (`s.sub!(a, b) << x`) reaches the receiver;
+      - through `to_s` (or another call answering its String receiver) under a mutator whose argument reassigns the variable, when the variable is a String handle (`e.to_s << (e = +"b")`);
+      - into an Array, a String variable added by `insert`, `prepend`, a `concat` of a literal, the later push of a chain (`a << t << s`) or a push into a global Array, or as the value of `s << x`, of `+s` (s itself unless s is frozen; a parameter is refused even when every caller passes a frozen literal) or of a reader method (`a << sb` with `def sb = @s`), when the variable or the element is then mutated in place;
+    -+- into an Array or a Hash, the result of a method that returns its String parameter, stored straight (`a << id(s)`, `a[0] = id(s)`, `a = [id(s)]`, `h = { k: id(s) }`), when the variable is mutated in place and the container is read, or an element is mutated in place and the variable is read. A constructor argument (`Box.new(id(s))`), a literal that is not assigned to a variable, and every stored call under `--share-strings` are still copies and are not refused;
+    - - through a reader on a boxed receiver (a Struct or Data member, an `attr_reader`, `def m = @iv`), a String read into a local that is mutated in place while the receiver is read again;
+    ++- into an Array or a Hash, the result of a method that returns its String parameter, stored straight (`a << id(s)`, `a[0] = id(s)`, `a = [id(s)]`, `h = { k: id(s) }`), when the variable is mutated in place and the container is read, or an element is mutated in place and the variable is read. A constructor argument (`Box.new(id(s))`) and a literal that is not assigned to a variable are still copies and are not refused;
+    + - through a reader on a boxed receiver (a Struct or Data member, an `attr_reader`, `def m = @iv`), a String read into a local that is mutated in place while the receiver is read again (a local only queried and then rebound to a copy, `s = s.dup`, before the change compiles: the change is the copy's);
+      - into a container, a String held by a block parameter no element iterator binds (a proc's, a lambda's, a yielding method's block, `each_char`'s, `scan`'s), when an element is then mutated in place;
+      - through `scan`'s block parameter, a match the block keeps and mutates in place (it did not build);
+     
+      ## src/analyze.c ##
+    -@@ src/analyze.c: static int poly_local_shows_string(Compiler *c, const char *vn, Scope *vs) {
+    - static int sa_unseen_element(Compiler *c, int u, int k);
+    - static __attribute__((noreturn)) void sa_refuse(Compiler *c, int id, int route);
+    - static void sa_refuse_element(Compiler *c, int e, int u);
+    +@@ src/analyze.c: static int sa_copy_defer(Compiler *c, int site, int v, int reader, const char *m
+    +   return share_route_defer(c, &q, msg);
+    + }
+    + static const char *sa_msg(int route);
+     +static void sa_refuse_stored_call(Compiler *c, int call);
+      /* A String a block parameter holds that no element iterator binds (a
+         proc's, a lambda's, the block of a method that yields, `each_char`'s):
+    @@ src/analyze.c: static int strbuf_demand_store_leaf(Compiler *c, int sn, int dept
+        int snu = an_unparen(nt, sn);
+        TyKind snt = snu >= 0 && nt_kind(nt, snu) == NK_CallNode ? infer_type(c, snu) : TY_UNKNOWN;
+        if (snt == TY_STRING || snt == TY_STRBUF) {
+    -     char rb[256]; int rdefc = -1;
+    -     int as = an_strbuf_alias_source(c, snu);
+    -     if ((as >= 0 && as != snu) || an_reader_ivar_of(c, snu, &rdefc, rb, sizeof rb)) sa_refuse(c, snu, 3);
+    +@@ src/analyze.c: static int strbuf_demand_store_leaf(Compiler *c, int sn, int depth) {
+    +     if (((as >= 0 && as != snu) || reader) &&
+    +         !sa_copy_defer(c, snu, snu, reader, sa_msg(3)))
+    +       sa_refuse(c, snu, 3);
+     +    if (!c->share_strings) sa_refuse_stored_call(c, snu);
+        }
+        if (nt_kind(nt, sn) == NK_LocalVariableReadNode) {

@@ -1,0 +1,26 @@
+Refuse a String instance variable assigned from another and mutated in place
+
+`@t = @s; @t << "!"; p @s` printed "a" where CRuby prints "a!". No alias
+walk follows an instance variable written from another instance
+variable, or from a local through a call that answers its receiver
+(`@t = s.to_s`, `@t = s.itself`), so the instance variable holds a copy,
+as a variable assigned from a global does, and a mutation in place
+through one name is lost to the other.
+
+refuse_string_alias_copies now asks the global route's question of that
+assignment: it refuses when one name is mutated in place and the other
+is read, unless the assignment runs after the program's last mutation
+or its own call is that last mutation (`@t = @s.replace(x)` as the
+program's only mutation, or as the last one of the script body).
+It stands aside too where the script body only prints the other name,
+ahead of the assignment (`p @s; @t = @s.to_s; @t << "!"; p @t`): nothing
+reads the change through that name, and it was not written from another
+variable that would.
+A plain `@t = @s` between two names that already hold the one shared
+handle hands the handle over and is left alone; through a call the
+write copies even then. `@t = s`, `t = @s` and `t = @s.to_s` have alias
+walks of their own and are left as they are, and so is a source that is
+no String (`@t = @n.to_s`). Under --share-strings nothing is asked: the
+write is the rule's in every form.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
