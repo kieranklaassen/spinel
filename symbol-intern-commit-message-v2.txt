@@ -1,0 +1,53 @@
+A String made in place is kept alive while it becomes a new Symbol
+
+    words = []
+    300.times { |i| words << "w#{i}" * 200 }
+    key = words.join("_").to_sym
+    p key.to_s == words.join("_")
+    p key == words.join("_").to_sym
+    p key.size
+
+prints true, true and 218299 in CRuby. In a plain run it printed
+false, false and 218299, with gcc and with clang: 215,736 bytes of
+the name read back as NUL.
+
+sp_sym_intern_n allocates only for a name it has not seen: the copy
+the pool keeps. It made the copy with sp_str_from_bytes, which
+allocates before it copies, and that allocation could collect the
+String being copied when nothing else held it. The wrong name then
+stayed in the pool. With many names the plain run loses one of them:
+
+    pad = "k" * 20000
+    syms = []
+    200.times { |i| syms << (pad + i.to_s).to_sym }
+    lost = 0
+    syms.each_with_index do |s, i|
+      lost += 1 unless s.to_s == pad + i.to_s
+    end
+    p lost
+
+prints 1. Under SPINEL_GC_STRESS=2 two characters are enough:
+
+    p ("a" + "b").to_sym
+    p :"q#{1 + 1}"
+
+Both print poisoned bytes, with exit 0.
+
+The pool's String is now allocated by sp_str_alloc_nogc, which does
+not collect: it is the allocator for a pointer that cannot be rooted,
+and the name cannot be. sp_sym_intern is called with bare C literals,
+which have no marker byte in front, and a root's mark reads that byte.
+
+A name already known runs what it ran before, and a new one costs no
+more than it did: 8,000 new names take 1,356,747,945 instructions
+where they took 1,356,873,798 (callgrind, gcc).
+
+The walk of a Symbol Range, (:ax..:az).to_a, makes each Symbol from
+a String nothing else holds. It aborted under SPINEL_GC_STRESS=2 and
+is right now.
+
+test/symbol_intern_fresh_string_root.rb joins GC_STRESS_TESTS. It
+starts with the first program above, which a plain run of master
+gets wrong.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
