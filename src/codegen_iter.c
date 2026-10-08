@@ -3962,11 +3962,15 @@ int subtree_owns_redo(const NodeTable *nt, int body, int redo) {
    does not look there: its callers pick by the answer how a block spliced
    in place is written, and emit_fallback_block_value leaves the leading
    statements out of a block that has one. */
+static const NodeTable *g_own_nt;   /* loop_body_owns: the nodes each walked body owns */
+static int *g_own_of, g_own_n, g_own_mark = -1;
 static int subtree_has_own_next_ex(const NodeTable *nt, int id, int next) {
   if (id < 0) return 0;
   const char *ty = nt_type(nt, id);
   if (!ty) return 0;
-  if (sp_streq(ty, "NextNode")) return next < 0 || id == next;
+  if (g_own_mark >= 0 && id < g_own_n) g_own_of[id] = g_own_mark;
+  if (id == next) return 1;
+  if (sp_streq(ty, "NextNode")) return next < 0;
   if (sp_streq(ty, "DefNode") || sp_streq(ty, "ClassNode") || sp_streq(ty, "ModuleNode") ||
       sp_streq(ty, "WhileNode") || sp_streq(ty, "UntilNode") || sp_streq(ty, "LambdaNode"))
     return 0;
@@ -3992,6 +3996,23 @@ static int subtree_has_own_next_ex(const NodeTable *nt, int id, int next) {
 int subtree_has_own_next(const NodeTable *nt, int id) { return subtree_has_own_next_ex(nt, id, -1); }
 int subtree_owns_next(const NodeTable *nt, int body, int next) {
   return next >= 0 && subtree_has_own_next_ex(nt, body, next);
+}
+/* subtree_owns_next for the many nodes of one body: emit_begin asks it for
+   every begin with an ensure and a `next`, and a walk from the body's top
+   for each of N such begins is N walks. Here the first question walks the
+   body once, to no match, and marks the nodes it owns; the rest read. */
+int loop_body_owns(const NodeTable *nt, int body, int node) {
+  if (body < 0 || node < 0 || body >= nt->count || node >= nt->count) return 0;
+  if (g_own_nt != nt || g_own_n < nt->count) {
+    int keep = g_own_nt == nt ? g_own_n : 0;
+    g_own_of = realloc(g_own_of, (size_t)nt->count * sizeof *g_own_of);
+    for (int i = keep; i < nt->count; i++) g_own_of[i] = -1;
+    g_own_nt = nt; g_own_n = nt->count;
+  }
+  if (g_own_of[body] != body) {
+    g_own_mark = body; subtree_has_own_next_ex(nt, body, nt->count); g_own_mark = -1;
+  }
+  return g_own_of[node] == body;
 }
 
 /* Mark every `next` written where the value of `id` is: `id` itself, the
@@ -4079,6 +4100,10 @@ void emit_loop_body(Compiler *c, int body, Buf *b, int indent) {
   int sv_lens = g_loop_ensure_base;
   g_loop_ensure_base = g_ensure_depth;
   g_c_loop_depth++;
+  /* and whose loop it is: an ensure's deferred `next` pops those frames
+     only where this body owns the ensure (emit_begin) */
+  int sv_lbody = g_loop_body;
+  g_loop_body = body;
   /* A `next <v>` in this body leaves THIS loop's iteration, so the value slot
      an enclosing collecting block opened (g_ie_next_var, a `then` / `map` /
      inject body's destination) is not its target: left set, the inner next
@@ -4124,6 +4149,7 @@ void emit_loop_body(Compiler *c, int body, Buf *b, int indent) {
   g_ie_next_var = sv_nxv; g_ie_next_ty = sv_nxt;
   g_loop_exc_base = sv_lexc;
   g_loop_ensure_base = sv_lens;
+  g_loop_body = sv_lbody;
 }
 
 /* `recv.tap { |x| body }` / `recv.then { |x| body }` (alias yield_self) in
