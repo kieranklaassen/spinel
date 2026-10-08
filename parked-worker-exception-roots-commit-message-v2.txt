@@ -1,0 +1,90 @@
+A rescued exception survives a collection run by another thread
+
+    def churn(n)
+      a = []
+      n.times { |i| a << ("x" * (i % 50)) }
+      a.size
+    end
+    def fail_with(i)
+      raise ArgumentError, "bad " + i.to_s
+    ensure
+      churn(40)
+    end
+    t = Thread.new do
+      s = 0
+      300.times { s += churn(20000) }
+      s
+    end
+    bad = 0
+    first = nil
+    100000.times do |i|
+      begin
+        fail_with(i)
+      rescue => e
+        unless e.message == "bad " + i.to_s
+          bad += 1
+          first ||= [i, e.message]
+        end
+      end
+    end
+    p t.value
+    p bad
+    p first
+
+CRuby prints 6000000, 0 and nil. Built with gcc, five plain runs
+counted 15, 6, 5, 12 and 2 wrong messages, and the first of one was
+[11727, "xxxxxxxx"], a String the other thread made.
+
+The error's message waits in the exception stack while the ensure
+body runs. The body allocates; when the other thread collects just
+then, this one waits for it, and nothing it handed over named the
+message. Without the ensure the window is too short for a plain run:
+a program that rescues once and then starts a thread stops under
+SPINEL_GC_STRESS=2, "the mark reached a freed heap string", phase
+globals:exceptions.
+
+The exception stack is thread-local. The worker that collects marks
+its own in sp_mark_in_flight_exceptions: each frame's message and
+object, the slot one past the top that a rescue arm has popped and
+still reads, and it clears every slot above that. A worker that waits
+while another one collects hands its roots over in
+sp_publish_worker_roots, and that published only the objects of the
+open frames. sp_raise_cls stores a heap copy of every message, so
+after any rescue the slot one past the top names a heap string that
+nothing published. An exception object nothing had bound went the
+same way, and so did whatever a slot above the window still named
+once the next begin put that slot back inside it.
+
+sp_publish_worker_roots now does for a waiting worker what
+sp_mark_in_flight_exceptions does for the collecting one. It
+publishes each frame's message, the message and the object one past
+the top and the cause an ensure holds, and it clears the slots above.
+
+It runs every time a worker goes idle or enters a blocking call, so
+all of that but the cause's one test is behind a mark the worker
+keeps, sp_exc_slots_hw: one past the highest slot that may hold what
+a raise stored. sp_raise_cls raises the mark at its store, the only
+place a heap message or an object is written into a slot
+(sp_raise_stack_overflow stores a literal). The hook publishes and
+clears below the mark only, and puts it back to 0 when it finds no
+message and no object there. A context switch needs no mark: a thread
+stays on the worker that started it, and its context is saved with
+the frames below the top, which are armed and empty.
+
+A call of the hook runs 262 instructions where it ran 253 with gcc,
+and 232 where it ran 226 with clang, for a worker that has raised
+nothing; 278 and 260 while a rescued exception's message is still in
+its slot (callgrind, a queue handed back and forth between two
+threads 300,000 times). The compiler is untouched.
+
+test/thread_parked_rescue_rooted.rb prints its .expected on master in
+a plain run and aborts there at SPINEL_GC_STRESS=2, so it joins
+GC_STRESS_TESTS. The mark's set, the message roots, the object's root
+and the cause's root, each taken out in turn, make it abort again at
+level 2 in every run; the clearing of the slots above shows at level
+1 only, with SPINEL_GC_VERIFY=1 in every run.
+test/fiber_cross_thread.rb, test/ffi_io_buffer_arg.rb and
+test/io_close_wakes_parked_reader.rb abort the same way on master at
+level 2 and pass with this.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
