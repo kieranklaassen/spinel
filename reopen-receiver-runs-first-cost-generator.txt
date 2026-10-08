@@ -1,0 +1,33 @@
+# gen.rb: the cost loops. 200,000 calls of a method the program adds to a builtin, through `one`,
+# by the owner; e: the receiver and the argument both run something; g: the argument reads a global.
+OWN = {
+  "str" => ["String",  "i.to_s",            "size"],
+  "ary" => ["Array",   "[i, i]",            "size"],
+  "hsh" => ["Hash",    "{ i => i }",        "size"],
+  "sym" => ["Symbol",  "i > 5 ? :ab : :c",  "size"],
+  "int" => ["Integer", "i + 1",             "self"],
+  "flt" => ["Float",   "i + 0.5",           "to_i"],
+  "num" => ["Numeric", "i + 1",             "to_i"],
+  "rng" => ["Range",   "(i..i + 2)",        "first"],
+  "obj" => ["Object",  "$door",             "object_id.size"],
+}
+OWN.each do |n, (cls, mk, rd)|
+  { "e" => "cnt(i)", "g" => "$n" }.each do |k, arg|
+    src = +""
+    src << "class Door; end\n$door = Door.new\n" if n == "obj"
+    src << "class #{cls}\n  def pair(a, b = 1) = #{rd} + a + b\nend\n"
+    src << "$n = 0\ndef mk(i) = #{mk}\ndef cnt(i) = ($n += 1)\ndef one(i) = mk(i).pair(#{arg})\n"
+    src << "t = 0\ni = 0\nwhile i < 200000\n  t += one(i)\n  i += 1\nend\np t\n"
+    File.write("#{n}_#{k}.rb", src)
+  end
+end
+# Object's method beside a String global (o_str, o_val: the receiver a String, an object passed by value;
+# o_int: the argument interpolates the global), and ct: 2,000 such calls in one program, for `spinel -c`.
+{ "o_str" => ["i.to_s", "$g", ""], "o_val" => ["Pt.new(i)", "$g", "class Pt\n  def initialize(x) = @x = x\nend\n"],
+  "o_int" => ["i.to_s", "\"\#{$g}!\"", ""] }.each do |n, (mk, arg, extra)|
+  File.write("#{n}.rb", "class Object\n  def pair(a, b = 1) = a.size + b\nend\n#{extra}$g = \"g0\"\ndef mk(i) = #{mk}\ndef one(i) = mk(i).pair(#{arg})\n" \
+    "t = 0\ni = 0\nwhile i < 200000\n  t += one(i)\n  i += 1\nend\np t\n")
+end
+src = +"class String\n  def pair(a, b = 1) = size + a + b\nend\n$n = 0\ndef mk(i) = i.to_s\ndef cnt(i) = ($n += 1)\nt = 0\n"
+2000.times { |i| src << "t += mk(#{i}).pair(cnt(#{i}))\n" }
+File.write("ct.rb", src + "p t\n")

@@ -1,0 +1,474 @@
+===== 1. range-diff 957df0eba5ea..ca385b78c482 against f6b2744b27d8..47ba90fb3da9 (trailing blanks stripped from its lines) =====
+1:  ca385b78c ! 1:  47ba90fb3 A method added to a builtin runs its receiver before its arguments
+    @@ Commit message
+         call read it after them: `cur.pair(add)`, where cur answers $s and add
+         appends to $s, passed the longer one, as CRuby's one object shows it.
+         So beside an argument, or such a default, that can run the program's
+    -    code (anything but reads, literals and what is made of them:
+    -    arg_runs_nothing) the receiver is held only where the held value is
+    -    what the call would read after it (recv_held_as_read): a scalar, a
+    -    Range, the pointer of an Array, a Hash or an object, or a String no
+    -    other name holds (an interpolation, a builtin's own new String, an
+    -    Integer's or a Float's to_s, or the value of a method that ends in one
+    -    and has no return). Any other call is emitted as it was.
+    +    code (anything but reads, literals and what is made of them; a name
+    +    the program gave the builtin, `[]` on an Array, an operator on an
+    +    operand that is no Integer or Float, `5 == o`, and the hash of a key
+    +    that is no String, Symbol or Integer are such code: arg_runs_nothing)
+    +    the receiver is held only where the held value is what the call would
+    +    read after it (recv_held_as_read): a scalar, a Range, the pointer of
+    +    an Array, a Hash or an object, or a String no other name holds (an
+    +    interpolation, a builtin's own new String, an Integer's or a Float's
+    +    to_s, or the value of a method that ends in one and has no return).
+    +    Any other call is emitted as it was.
+
+         Test: test/reopen_receiver_runs_first.rb.
+
+    @@ src/codegen_call.c: static void emit_reopen_recv(Compiler *c, int mi, int recv,
+     +}
+     +/* Does evaluating `n` run none of the program's code and store nothing? A
+     +   pure read, a global, a String literal, and an Array, a Hash, a Range or an
+    -+   interpolation made of those: what an interpolation embeds is a String or
+    -+   a scalar with the builtin's to_s, for any other value's to_s may be the
+    ++   interpolation made of those. A call among them is a pure read whose name
+    ++   the program has not given the builtin (`[]` on an Array may be its own),
+    ++   and an operator is one of Integers and Floats, for `5 == o` runs o's ==;
+    ++   a Hash key is a String, a Symbol or an Integer, for any other key's hash
+    ++   may be the program's; what an interpolation embeds is a String or a
+    ++   scalar with the builtin's to_s, for any other value's to_s may be the
+     +   program's. A whitelist, as subtree_is_pure_read is. */
+     +static int arg_runs_nothing(Compiler *c, int n) {
+     +  const NodeTable *nt = c->nt;
+    -+  if (n < 0 || subtree_is_pure_read(c, n)) return 1;
+    ++  if (n < 0) return 1;
+     +  switch (nt_kind(nt, n)) {
+     +    case NK_GlobalVariableReadNode: case NK_StringNode: return 1;
+    ++    case NK_CallNode: {
+    ++      int r = nt_ref(nt, n, "receiver");
+    ++      const char *nm = nt_str(nt, n, "name");
+    ++      if (!subtree_is_pure_read(c, n) ||
+    ++          (r >= 0 && nm && comp_builtin_kind_reopen_mi(c, comp_ntype(c, r), nm) >= 0)) return 0;
+    ++      if (call_is_scalar_op(c, n)) {
+    ++        int a = nt_ref(nt, n, "arguments"), ac = 0;
+    ++        const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+    ++        if (comp_ntype(c, r) == TY_BOOL) return 0;
+    ++        for (int i = 0; i < ac; i++)
+    ++          if (comp_ntype(c, av[i]) != TY_INT && comp_ntype(c, av[i]) != TY_FLOAT) return 0;
+    ++      }
+    ++      break;
+    ++    }
+    ++    case NK_AssocNode: {
+    ++      TyKind kt = comp_ntype(c, nt_ref(nt, n, "key"));
+    ++      if (kt != TY_STRING && kt != TY_SYMBOL && kt != TY_INT) return 0;
+    ++      break;
+    ++    }
+     +    case NK_EmbeddedStatementsNode: {
+     +      int st = nt_ref(nt, n, "statements"), bn = 0;
+     +      const int *bv = st >= 0 ? nt_arr(nt, st, "body", &bn) : NULL;
+    @@ src/codegen_call.c: static void emit_reopen_recv(Compiler *c, int mi, int recv,
+     +      break;
+     +    }
+     +    case NK_ParenthesesNode: case NK_StatementsNode: case NK_ArrayNode: case NK_HashNode:
+    -+    case NK_KeywordHashNode: case NK_AssocNode: case NK_RangeNode: case NK_InterpolatedStringNode:
+    ++    case NK_KeywordHashNode: case NK_RangeNode: case NK_InterpolatedStringNode:
+    ++      break;
+    ++    default: {
+    ++      /* a call's argument list has no kind of its own */
+    ++      const char *ty = nt_type(nt, n);
+    ++      if (!ty || !sp_streq(ty, "ArgumentsNode")) return subtree_is_pure_read(c, n);
+     +      break;
+    -+    default: return 0;
+    ++    }
+     +  }
+     +  int nr = nt_num_refs(nt, n), na = nt_num_arrs(nt, n);
+     +  for (int i = 0; i < nr; i++) if (!arg_runs_nothing(c, nt_ref_at(nt, n, i))) return 0;
+    @@ src/codegen_call.c: void emit_reopen_recv_args(Compiler *c, int id, int mi, int
+
+      static void emit_reopen_primitive_call(Compiler *c, int id, int ci, int mi, int recv, const char *name, Buf *b) {
+        if (repr_self_handle(c, mi) && c->scopes[mi].yields && emit_inline_expr(c, id, b)) return;
+    -   if (repr_self_handle(c, mi) && emit_reopen_block_call(c, id, recv, mi, NULL, b)) return;
+    +   if (ci == comp_class_index(c, "String") && emit_reopen_block_call(c, id, recv, mi, NULL, b)) return;
+        if (g_plan_check) ucall_observe(c, id, mi, ci, 0);
+     +  size_t at = b->len;
+     +  int open = 0;
+    @@ src/codegen_call_class.c: int emit_call_reopen_arms(Compiler *c, int id, Buf *b,
+          }
+     @@ src/codegen_call_class.c: int emit_call_reopen_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
+              if (oc_mi >= 0) {
+    -           if (repr_self_handle(c, oc_mi) && emit_reopen_block_call(c, id, recv, oc_mi, NULL, b)) return 1;
+    +           if (rt == TY_STRING && emit_reopen_block_call(c, id, recv, oc_mi, NULL, b)) return 1;
+                if (g_plan_check) ucall_observe(c, id, oc_mi, oc_ci, 0);
+     +          size_t at = b->len;
+                buf_printf(b, "sp_%s_%s(", mc_reopen_cls(c, oc_ci, name), mc(name));
+    @@ test/reopen_receiver_runs_first.rb (new)
+     +end
+     +t = +"t"
+     +puts (t << "1").pair(app(t))
+    ++
+    ++# an argument that runs the program's own code keeps its place: the hash of
+    ++# a key the program defines runs before the String another name holds is read
+    ++$k = +"ab"
+    ++class Key
+    ++  def hash
+    ++    $k << "d"
+    ++    1
+    ++  end
+    ++  def eql?(o) = true
+    ++end
+    ++class String
+    ++  def many(*r) = "#{size} #{r.size}"
+    ++end
+    ++def held = $k
+    ++key = Key.new
+    ++puts held.many({ key => 1 })
+
+      ## test/reopen_receiver_runs_first.rb.expected (new) ##
+     @@
+    @@ test/reopen_receiver_runs_first.rb.expected (new)
+     +2 3
+     +3 2
+     +5 1
+    ++3 1
+===== 2. the doors (doors.rb, the 23 programs) =====
+# == e1.rb
+$s = +"ab"
+class V
+  def hash = ($s << "c"; 1)
+  def eql?(o) = true
+end
+class String
+  def pair(*r) = "#{self}|#{r.size}"
+end
+def cur = $s
+v = V.new
+puts cur.pair({ v => 1 })
+# == e2.rb
+$s = +"ab"
+$g = 1
+class V
+  def hash = ($s << "c"; 1)
+  def eql?(o) = true
+end
+class String
+  def pair(a) = "#{self}|#{a.size}"
+end
+def setg = ($g = 2; $s)
+v = V.new
+puts setg.pair({ v => $g })
+# == e3.rb
+$s = +"ab"
+class Array
+  def [](i) = ($s << "c"; 7)
+end
+class String
+  def pair(*r) = "#{self}|#{r.size}"
+end
+def cur = $s
+a = [1, 2]
+puts cur.pair(a[0])
+# == d1.rb
+$s = +"ab"
+class String
+  def pair(*r) = "#{self}|#{r.size}"
+end
+def cur = $s
+class V
+  def ==(x) = ($s << "c"; true)
+end
+o = V.new
+puts cur.pair(5 == o)
+# == d2.rb
+$s = +"ab"
+class String
+  def pair(*r) = "#{self}|#{r.size}"
+end
+def cur = $s
+class V
+  def coerce(x) = ($s << "c"; [x, 1])
+end
+o = V.new
+puts cur.pair(5 + o)
+# == d3.rb
+$s = +"ab"
+class String
+  def pair(*r) = "#{self}|#{r.size}"
+end
+def cur = $s
+class TrueClass
+  def &(o) = ($s << "c"; true)
+end
+t = ARGV.size == 0
+puts cur.pair(t & true)
+# == d4.rb
+$s = +"ab"
+class String
+  def pair(*r) = "#{self}|#{r.size}"
+end
+def cur = $s
+class V
+  def method_missing(n, *a) = ($s << "c"; 1)
+  def respond_to_missing?(n, p = false) = true
+end
+o = V.new
+puts cur.pair(o.name)
+# == d5.rb
+$s = +"ab"
+class String
+  def pair(*r) = "#{self}|#{r.size}"
+end
+def cur = $s
+class V
+  def inspect = ($s << "c"; "v")
+  def to_s = ($s << "c"; "v")
+end
+o = V.new
+puts cur.pair("#{[o]}")
+# == d5b.rb
+$s = +"ab"
+class String
+  def pair(*r) = "#{self}|#{r.size}"
+end
+def cur = $s
+class V
+  def to_s = ($s << "c"; "v")
+end
+o = V.new
+puts cur.pair("#{o}")
+# == d6.rb
+$s = +"ab"
+class String
+  def pair(*r) = "#{self}|#{r.size}"
+end
+def cur = $s
+def bump = ($s << "c"; 1)
+class String
+  def two(a, b = bump) = "#{self}|#{a}"
+end
+puts cur.two(1)
+# == d7.rb
+$s = +"ab"
+class String
+  def pair(*r) = "#{self}|#{r.size}"
+end
+def cur = $s
+h = Hash.new { |hh, k| $s << "c"; 1 }
+puts cur.pair(h[:k])
+# == d8.rb
+$s = +"ab"
+class String
+  def pair(*r) = "#{self}|#{r.size}"
+end
+def cur = $s
+class String
+  def eql?(o) = ($s << "c"; true)
+  def hash = ($s << "c"; 1)
+end
+puts cur.pair({ "a" => 1, "a" => 2 })
+# == d8b.rb
+$s = +"ab"
+class String
+  def pair(*r) = "#{self}|#{r.size}"
+end
+def cur = $s
+class Symbol
+  def eql?(o) = ($s << "c"; true)
+  def hash = ($s << "c"; 1)
+end
+class Integer
+  def eql?(o) = ($s << "c"; true)
+  def hash = ($s << "c"; 1)
+end
+puts cur.pair({ a: 1, a: 2 }, { 1 => 1, 1 => 2 })
+# == d9.rb
+$s = +"ab"
+class String
+  def pair(*r) = "#{self}|#{r.size}"
+end
+def cur = $s
+class String
+  def succ = ($s << "c"; "z")
+  def <=>(o) = ($s << "c"; 0)
+end
+puts cur.pair("a".."c")
+# == e4.rb
+$s = +"ab"
+class Float
+  def <=>(o) = ($s << "c"; 0)
+end
+class String
+  def pair(*r) = "#{self}|#{r.size}"
+end
+def cur = $s
+puts cur.pair(1.5..2.5)
+# == e5.rb
+$s = +"ab"
+class Integer
+  def <=>(o) = ($s << "c"; 0)
+end
+class String
+  def pair(*r) = "#{self}|#{r.size}"
+end
+def cur = $s
+x = 1
+puts cur.pair(x..3)
+# == d10.rb
+$s = +"ab"
+class String
+  def pair(*r) = "#{self}|#{r.size}"
+end
+def cur = $s
+class V
+  def ==(x) = ($s << "c"; true)
+  def coerce(x) = ($s << "c"; [x, 1])
+end
+o = V.new
+x = 1.5
+puts cur.pair(x == o)
+puts cur.pair(1 <=> o)
+# == d11.rb
+$s = +"ab"
+class String
+  def pair(*r) = "#{self}|#{r.size}"
+end
+def cur = $s
+class B
+  attr_reader :name
+  def initialize = @name = 1
+end
+class C < B
+  def name = ($s << "c"; 2)
+end
+o = ARGV.size > 5 ? B.new : C.new
+puts cur.pair(o.name)
+# == d12.rb
+$s = +"ab"
+class String
+  def pair(*r) = "#{self}|#{r.size}"
+end
+def cur = $s
+class TrueClass
+  def to_s = ($s << "c"; "T")
+end
+t = ARGV.size == 0
+puts cur.pair("#{t}")
+# == d13.rb
+$s = +"ab"
+class String
+  def pair(*r) = "#{self}|#{r.size}"
+end
+def cur = $s
+class Mine < Array
+  def [](i) = ($s << "c"; 7)
+end
+m = Mine.new
+m << 1
+puts cur.pair(m[0])
+# == d14.rb
+$s = +"ab"
+class String
+  def pair(*r) = "#{self}|#{r.size}"
+end
+def cur = $s
+class Object
+  def ==(x) = ($s << "c"; true)
+end
+t = ARGV.size == 0
+puts cur.pair(t == 1)
+puts cur.pair(1 == t)
+# == d15.rb
+$s = +"ab"
+class String
+  def pair(*r) = "#{self}|#{r.size}"
+end
+def cur = $s
+class Integer
+  def +(o) = ($s << "c"; 1)
+end
+x = ARGV.size
+puts cur.pair(x + 1)
+# == d16.rb
+$s = +"ab"
+class String
+  def pair(*r) = "#{self}|#{r.size}"
+end
+def cur = $s
+class Symbol
+  def to_s = ($s << "c"; "S")
+end
+class Integer
+  def to_s = ($s << "c"; "I")
+end
+y = :y
+puts cur.pair("#{y}")
+puts cur.pair("#{ARGV.size}")
+===== 3. the per-kind generator (gen_kinds.rb) =====
+# gen.rb: one program per kind of receiver of a method added to a builtin, beside an argument
+# that runs the program's code: `recv.pair(arg)`, both logging. h_*: recv_held_as_read holds the
+# receiver first; m_*: a String another name may hold, or a boxed value, keeps master's C.
+K = {
+  "h_int"    => ["Integer", "5"],
+  "h_flt"    => ["Float", "2.5"],
+  "h_sym"    => ["Symbol", ":s"],
+  "h_bool"   => ["TrueClass", "true"],
+  "h_rng"    => ["Range", "(1..3)"],
+  "h_ary"    => ["Array", "[1, 2]"],
+  "h_hsh"    => ["Hash", "{ 1 => 2 }"],
+  "h_obj"    => ["Object", "Foo.new"],
+  "h_interp" => ["String", "\"a\#{ARGV.size}\""],
+  "h_built"  => ["String", "$s.upcase"],
+  "h_tos"    => ["String", "ARGV.size.to_s"],
+  "h_meth"   => ["String", "fresh"],
+  "m_glob"   => ["String", "$s"],
+  "m_param"  => ["String", "same($s)"],
+  "m_ivar"   => ["String", "$box.s"],
+  "m_ret"    => ["String", "early"],
+}
+K.each do |n, (cls, val)|
+  File.write("#{n}.rb", <<~RB)
+    $log = []
+    $s = +"ab"
+    class Foo; end
+    class Box
+      attr_reader :s
+      def initialize = @s = $s
+    end
+    $box = Box.new
+    def fresh = "f\#{ARGV.size}"
+    def same(x) = x
+    def early
+      return $s if ARGV.size == 0
+      "e\#{ARGV.size}"
+    end
+    class #{cls}
+      def pair(a) = "\#{self.class}|\#{self.size rescue 0}|\#{a}"
+    end
+    def recv = ($log << "recv"; #{val})
+    def arg = ($log << "arg"; $s << "c"; 1)
+    puts recv.pair(arg)
+    p $log
+  RB
+end
+File.write("m_local.rb", <<~RB)
+  $log = []
+  class String
+    def pair(a) = "\#{self}|\#{a}"
+  end
+  def add(s) = ($log << "arg"; s << "c"; 1)
+  t = +"ab"
+  puts (t << "1").pair(add(t))
+  p $log
+RB
+File.write("m_boxed.rb", <<~RB)
+  $log = []
+  $s = +"ab"
+  class String
+    def pair(a) = "\#{self}|\#{a}"
+  end
+  class Integer
+    def pair(a) = "\#{self}|\#{a}"
+  end
+  def recv(k) = ($log << "recv"; k > 5 ? 7 : $s)
+  def arg = ($log << "arg"; $s << "c"; 1)
+  puts recv(ARGV.size).pair(arg)
+  p $log
+RB
