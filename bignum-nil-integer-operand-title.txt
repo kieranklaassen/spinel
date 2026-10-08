@@ -1,0 +1,1 @@
+A Bignum operation whose Integer operand is nil answers as CRuby does

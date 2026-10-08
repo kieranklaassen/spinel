@@ -1,0 +1,19 @@
+A Bignum operation whose Integer operand is nil answers as CRuby does
+
+An Integer local, instance variable or method result that can be nil
+holds the nil as a sentinel. Where a Bignum operation takes such an
+operand, emit_bigint_operand makes the nil the NULL a Bignum slot
+holds, and the operation read through it: `2**70 + n`, `2**70 == n`,
+`2**70 < n`, `n * 2**70`, `(2**70).div(n)` and `@big += n` died with
+signal 11 for an `n` that was nil.
+
+Now the operand is kept as it is read and converted as the number it
+holds, so the operation runs with its operands in the order they ran
+in, and the nil is answered after it by the runtime's own tests
+(SP_INT_NIL_CK, SP_INT_NIL_CMP_CK): `==` false and `!=` true, an
+ordering compare ArgumentError, arithmetic TypeError, and
+NoMethodError where the nil is the receiver. modulo, div, divmod,
+pow(a, m), quo, allbits?, anybits? and nobits? raise their TypeError.
+Where neither operand can hold nil the C is unchanged.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

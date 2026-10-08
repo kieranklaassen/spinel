@@ -1,0 +1,381 @@
+From 5d6ef8fd688360edf94915f834a9843ca0b03e44 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 8 Oct 2026 00:59:00 +0000
+Subject: [PATCH] A Bignum operation whose Integer operand is nil answers as
+ CRuby does
+
+An Integer local, instance variable or method result that can be nil
+holds the nil as a sentinel. Where a Bignum operation takes such an
+operand, emit_bigint_operand makes the nil the NULL a Bignum slot
+holds, and the operation read through it: `2**70 + n`, `2**70 == n`,
+`2**70 < n`, `n * 2**70`, `(2**70).div(n)` and `@big += n` died with
+signal 11 for an `n` that was nil.
+
+Now the operand is kept as it is read and converted as the number it
+holds, so the operation runs with its operands in the order they ran
+in, and the nil is answered after it by the runtime's own tests
+(SP_INT_NIL_CK, SP_INT_NIL_CMP_CK): `==` false and `!=` true, an
+ordering compare ArgumentError, arithmetic TypeError, and
+NoMethodError where the nil is the receiver. modulo, div, divmod,
+pow(a, m), quo, allbits?, anybits? and nobits? raise their TypeError.
+Where neither operand can hold nil the C is unchanged.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/codegen_call.c                            | 50 ++++++++++++++--
+ src/codegen_call_arms.h                       |  3 +
+ src/codegen_call_numeric.c                    | 25 +++++---
+ src/codegen_call_operator.c                   |  6 +-
+ src/codegen_stmt.c                            | 10 +++-
+ test/bignum_integer_or_nil_operand.rb         | 58 +++++++++++++++++++
+ .../bignum_integer_or_nil_operand.rb.expected | 52 +++++++++++++++++
+ 7 files changed, 188 insertions(+), 16 deletions(-)
+ create mode 100644 test/bignum_integer_or_nil_operand.rb
+ create mode 100644 test/bignum_integer_or_nil_operand.rb.expected
+
+diff --git a/src/codegen_call.c b/src/codegen_call.c
+index cf051c36e..7670e861a 100644
+--- a/src/codegen_call.c
++++ b/src/codegen_call.c
+@@ -608,6 +608,42 @@ void emit_bigint_operand(Compiler *c, int node, Buf *b) {
+ /* Same, reachable from the other emitters (the ivar op-assign). */
+ void emit_bigint_operand_ext(Compiler *c, int node, Buf *b) { emit_bigint_operand(c, node, b); }
+ 
++/* The Integer operand of a Bignum operation, where it can hold its slot's
++   nil. emit_bigint_operand makes that nil the NULL a Bignum slot holds, and
++   an operation reads through NULL: `2**70 + n`, `2**70 == n`, `2**70 < n`
++   and `(2**70).div(n)` died with signal 11 for an `n` that was nil. Here the
++   operand is kept in a temp as it is read and converted as the number it
++   holds (emit_bigint_opnd), so the operation runs, with its operands in the
++   order they ran in; what a nil answers comes after it (bigint_nil_close).
++   bigint_nil_open declares the temps, _tN for the receiver and the next for
++   the argument, and the operation's value, and answers N: 0 where neither
++   operand can hold nil, and there the C is unchanged. */
++static int bigint_opnd_holds_nil(Compiler *c, int node) {
++  if (node < 0) return 0;
++  Repr r = repr_of(c, node);
++  return !r.big && r.as_ty == TY_INT && call_returns_nullable_int(c, node);
++}
++int bigint_nil_open(Compiler *c, int recv, int arg, const char *cty, Buf *b) {
++  if (!bigint_opnd_holds_nil(c, recv) && !bigint_opnd_holds_nil(c, arg)) return 0;
++  int tn = ++g_tmp; ++g_tmp;
++  buf_printf(b, "({ sp_int _t%d = 0, _t%d = 0; %s _t%dv = ", tn, tn + 1, cty, tn);
++  return tn;
++}
++void emit_bigint_opnd(Compiler *c, int node, int tn, int at, Buf *b) {
++  if (!tn || !bigint_opnd_holds_nil(c, node)) { emit_bigint_operand(c, node, b); return; }
++  buf_printf(b, "sp_bigint_new_int(_t%d = ", tn + at);
++  emit_expr(c, node, b);
++  buf_puts(b, ")");
++}
++/* `ck` is the runtime's test of two Integer operands (SP_INT_NIL_CK and its
++   kin) and `op` their operator; with no `ck`, `op` is the C a nil runs. */
++void bigint_nil_close(int tn, const char *ck, const char *op, Buf *b) {
++  if (!tn) return;
++  if (ck) buf_printf(b, "; %s(_t%d, _t%d, \"%s\")", ck, tn, tn + 1, op);
++  else buf_printf(b, "; if (SP_UNLIKELY(_t%d == SP_INT_NIL || _t%d == SP_INT_NIL)) %s", tn, tn + 1, op);
++  buf_printf(b, "; _t%dv; })", tn);
++}
++
+ /* Emit re_compile's internal-flag argument from Regexp.new/compile's optional
+    second argument: an Integer of public option bits (translated), a truthy
+    value meaning IGNORECASE, or absent meaning no flags (#3055). */
+@@ -12853,11 +12889,15 @@ static int emit_case_eq_call(Compiler *c, int id, Buf *b) {
+         emit_float_bigint_cmp(c, recv, argv[0], eq ? "==" : "!=", b)) return 1;
+     if ((rt == TY_BIGINT || a0 == TY_BIGINT) &&
+         bigint_cmp_operand_ok(rt) && bigint_cmp_operand_ok(a0)) {
++      /* a nil is equal to no Bignum */
++      int tn = bigint_nil_open(c, recv, argv[0], "int", b);
++      char ans[32]; snprintf(ans, sizeof ans, "_t%dv = %d", tn, eq ? 0 : 1);
+       buf_printf(b, "(sp_bigint_cmp(");
+-      emit_bigint_operand(c, recv, b);
++      emit_bigint_opnd(c, recv, tn, 0, b);
+       buf_puts(b, ", ");
+-      emit_bigint_operand(c, argv[0], b);
++      emit_bigint_opnd(c, argv[0], tn, 1, b);
+       buf_printf(b, ") %s 0)", eq ? "==" : "!=");
++      bigint_nil_close(tn, NULL, ans, b);
+       c->args_in_call = recv;
+       return 1;
+     }
+@@ -13736,11 +13776,13 @@ static int emit_array_arith_call(Compiler *c, int id, Buf *b) {
+       }
+       const char *bfn = bigint_arith_fn(name);
+       if (bfn) {
++        int tn = bigint_nil_open(c, recv, argv[0], "sp_Bigint *", b);
+         buf_printf(b, "%s(", bfn);
+-        emit_bigint_operand(c, recv, b);
++        emit_bigint_opnd(c, recv, tn, 0, b);
+         buf_puts(b, ", ");
+-        emit_bigint_operand(c, argv[0], b);
++        emit_bigint_opnd(c, argv[0], tn, 1, b);
+         buf_puts(b, ")");
++        bigint_nil_close(tn, "SP_INT_NIL_CK", name, b);
+         return 1;
+       }
+     }
+diff --git a/src/codegen_call_arms.h b/src/codegen_call_arms.h
+index 66e400583..cdc5b711f 100644
+--- a/src/codegen_call_arms.h
++++ b/src/codegen_call_arms.h
+@@ -72,6 +72,9 @@ typedef struct { char **v; unsigned char *show; int n, cap; } ReflNames;
+ typedef struct { char msg[256]; int *cis; int ncis; } CtorArityArm;
+ typedef struct { CtorArityArm *arms; int narms; } CtorArityArms;
+ void emit_bigint_operand(Compiler *c, int node, Buf *b);
++int bigint_nil_open(Compiler *c, int recv, int arg, const char *cty, Buf *b);
++void emit_bigint_opnd(Compiler *c, int node, int tn, int at, Buf *b);
++void bigint_nil_close(int tn, const char *ck, const char *op, Buf *b);
+ int cmp_operand_may_be_nil(Compiler *c, int id);
+ int emit_poly_isa_test(Compiler *c, const char *cn, const char *v, int exact, Buf *b);
+ void emit_pre_root(Compiler *c, TyKind t, int tmp);
+diff --git a/src/codegen_call_numeric.c b/src/codegen_call_numeric.c
+index dca7162d4..dbba11f55 100644
+--- a/src/codegen_call_numeric.c
++++ b/src/codegen_call_numeric.c
+@@ -361,7 +361,9 @@ int emit_call_bigint_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
+     }
+     /* Bignum modulo/%/remainder/divmod/#[]/modular-pow (#2594) */
+     if ((is_modulo_alias(name)) && argc == 1) {
+-      buf_printf(b, "sp_bigint_mod(%s, ", r); emit_bigint_operand(c, argv[0], b); buf_puts(b, ")");
++      int tn = bigint_nil_open(c, -1, argv[0], "sp_Bigint *", b);
++      buf_printf(b, "sp_bigint_mod(%s, ", r); emit_bigint_opnd(c, argv[0], tn, 1, b); buf_puts(b, ")");
++      bigint_nil_close(tn, "SP_INT_NIL_CK", name, b);
+       free(rs.p); return 1;
+     }
+     if (sp_streq(name, "remainder") && argc == 1) {
+@@ -374,12 +376,14 @@ int emit_call_bigint_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
+          collect: a fresh one (a literal divisor's sp_bigint_new_int, a
+          computed receiver) was swept, and the division read its cleared
+          value as a zero divisor */
++      int tn = bigint_nil_open(c, -1, argv[0], "sp_PolyArray *", b);
+       buf_printf(b, "({ sp_Bigint *_t%d = %s; SP_GC_ROOT(_t%d); sp_Bigint *_t%d = ", td, r, td, tb2);
+-      emit_bigint_operand(c, argv[0], b);
++      emit_bigint_opnd(c, argv[0], tn, 1, b);
+       buf_printf(b, "; SP_GC_ROOT(_t%d); sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);"
+                     " sp_PolyArray_push(_t%d, sp_box_bigint(sp_bigint_div(_t%d, _t%d)));"
+                     " sp_PolyArray_push(_t%d, sp_box_bigint(sp_bigint_mod(_t%d, _t%d))); _t%d; })",
+                  tb2, to2, to2, to2, td, tb2, to2, td, tb2, to2);
++      bigint_nil_close(tn, "SP_INT_NIL_CK", name, b);
+       free(rs.p); return 1;
+     }
+     if (sp_streq(name, "[]") && argc == 1 && repr_of(c, argv[0]).range == TY_INT) {
+@@ -430,8 +434,10 @@ int emit_call_bigint_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
+       free(rs.p); return 1;
+     }
+     if (sp_streq(name, "pow") && argc == 2) {
++      int tn = bigint_nil_open(c, -1, argv[1], "sp_Bigint *", b);
+       buf_printf(b, "sp_bigint_powmod(%s, ", r); emit_int_expr(c, argv[0], b); buf_puts(b, ", ");
+-      emit_bigint_operand(c, argv[1], b); buf_puts(b, ")");
++      emit_bigint_opnd(c, argv[1], tn, 1, b); buf_puts(b, ")");
++      bigint_nil_close(tn, NULL, "sp_raise_cls(\"TypeError\", \"Integer#pow() 2nd argument not allowed unless all arguments are integers\")", b);
+       free(rs.p); return 1;
+     }
+     /* Bignum#div(Rational): the floor of the exact quotient. The Bignum
+@@ -457,8 +463,10 @@ int emit_call_bigint_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
+     }
+     if ((sp_streq(name, "div") || sp_streq(name, "gcd") || sp_streq(name, "lcm")) && argc == 1) {
+       const char *fn = sp_streq(name, "div") ? "div" : name;
++      int tn = sp_streq(name, "div") ? bigint_nil_open(c, -1, argv[0], "sp_Bigint *", b) : 0;
+       buf_printf(b, "sp_bigint_%s(%s, ", fn, r);
+-      emit_bigint_operand(c, argv[0], b); buf_puts(b, ")");
++      emit_bigint_opnd(c, argv[0], tn, 1, b); buf_puts(b, ")");
++      bigint_nil_close(tn, "SP_INT_NIL_CK", name, b);
+       free(rs.p); return 1;
+     }
+     if (sp_streq(name, "ceildiv") && argc == 1) {
+@@ -468,8 +476,8 @@ int emit_call_bigint_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
+       free(rs.p); return 1;
+     }
+     if (is_bits_query(name) && argc == 1) {
+-      int t = ++g_tmp;
+-      buf_printf(b, "({ sp_Bigint *_t%d = ", t); emit_bigint_operand(c, argv[0], b);
++      int t = ++g_tmp, tn = bigint_nil_open(c, -1, argv[0], "int", b);
++      buf_printf(b, "({ sp_Bigint *_t%d = ", t); emit_bigint_opnd(c, argv[0], tn, 1, b);
+       /* the receiver expression below is unsequenced with this operand and can
+          allocate; no reproducer, the rule (#4049) is the reason */
+       buf_printf(b, "; SP_GC_ROOT(_t%d); ", t);
+@@ -479,6 +487,7 @@ int emit_call_bigint_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
+         buf_printf(b, "(sp_bigint_sign(sp_bigint_and(%s, _t%d)) != 0); })", r, t);
+       else
+         buf_printf(b, "(sp_bigint_sign(sp_bigint_and(%s, _t%d)) == 0); })", r, t);
++      bigint_nil_close(tn, NULL, "sp_raise_nil_to_int(1)", b);
+       free(rs.p); return 1;
+     }
+     if (sp_streq(name, "gcdlcm") && argc == 1) {
+@@ -501,7 +510,9 @@ int emit_call_bigint_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
+       buf_printf(b, "sp_brat_from_bigint(%s)", r); free(rs.p); return 1;
+     }
+     if (sp_streq(name, "quo") && argc == 1) {
+-      buf_printf(b, "sp_box_brat(%s, ", r); emit_bigint_operand(c, argv[0], b); buf_puts(b, ")");
++      int tn = bigint_nil_open(c, -1, argv[0], "sp_RbVal", b);
++      buf_printf(b, "sp_box_brat(%s, ", r); emit_bigint_opnd(c, argv[0], tn, 1, b); buf_puts(b, ")");
++      bigint_nil_close(tn, NULL, "sp_raise_cls(\"TypeError\", \"nil can't be coerced into Rational\")", b);
+       free(rs.p); return 1;
+     }
+     free(rs.p);
+diff --git a/src/codegen_call_operator.c b/src/codegen_call_operator.c
+index 617f1715a..eac5bc70c 100644
+--- a/src/codegen_call_operator.c
++++ b/src/codegen_call_operator.c
+@@ -538,11 +538,13 @@ int emit_call_compare_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
+         emit_float_bigint_cmp(c, recv, argv[0], name, b)) return 1;
+     if ((rt == TY_BIGINT || repr_of(c, argv[0]).big) &&
+         bigint_cmp_operand_ok(rt) && bigint_cmp_operand_ok(comp_ntype(c, argv[0]))) {
++      int tn = bigint_nil_open(c, recv, argv[0], "int", b);
+       buf_printf(b, "(sp_bigint_cmp(");
+-      emit_bigint_operand(c, recv, b);
++      emit_bigint_opnd(c, recv, tn, 0, b);
+       buf_puts(b, ", ");
+-      emit_bigint_operand(c, argv[0], b);
++      emit_bigint_opnd(c, argv[0], tn, 1, b);
+       buf_printf(b, ") %s 0)", name);
++      bigint_nil_close(tn, "SP_INT_NIL_CMP_CK", name, b);
+       return 1;
+     }
+     if (ty_is_numeric(rt)) {
+diff --git a/src/codegen_stmt.c b/src/codegen_stmt.c
+index 2e9f52c90..11f669cf7 100644
+--- a/src/codegen_stmt.c
++++ b/src/codegen_stmt.c
+@@ -12492,9 +12492,13 @@ static int emit_ivar_cvar_write_stmt(Compiler *c, int id, Buf *b, int indent, co
+     if (vt == TY_BIGINT && op && is_add_sub_mul(op)) {
+       const char *fn = sp_streq(op, "+") ? "sp_bigint_add"
+                      : sp_streq(op, "-") ? "sp_bigint_sub" : "sp_bigint_mul";
+-      buf_printf(b, "%s = %s(%s, ", ref, fn, ref);
+-      emit_bigint_operand_ext(c, nt_ref(nt, id, "value"), b);
+-      buf_puts(b, ");\n");
++      buf_printf(b, "%s = ", ref);
++      int tn = bigint_nil_open(c, -1, nt_ref(nt, id, "value"), "sp_Bigint *", b);
++      buf_printf(b, "%s(%s, ", fn, ref);
++      emit_bigint_opnd(c, nt_ref(nt, id, "value"), tn, 1, b);
++      buf_puts(b, ")");
++      bigint_nil_close(tn, "SP_INT_NIL_CK", op, b);
++      buf_puts(b, ";\n");
+     }
+     /* `@t += n` / `@t -= n` on a Time slot: the same arm the local form
+        takes (a Time is a struct; the raw C operator below cannot add to it) */
+diff --git a/test/bignum_integer_or_nil_operand.rb b/test/bignum_integer_or_nil_operand.rb
+new file mode 100644
+index 000000000..caf14ecd6
+--- /dev/null
++++ b/test/bignum_integer_or_nil_operand.rb
+@@ -0,0 +1,58 @@
++# spinel: int64
++# A Bignum operation with an Integer operand that is nil. The operand's slot
++# holds the nil as a sentinel; made a Bignum for the operation it was the
++# NULL a Bignum slot holds, and the operation read through it.
++$log = []
++def lg(x) = ($log << x; x)
++def sm(k, on) = on ? k : nil
++def big(t) = (lg(t); 2**70)
++def nn(t, on) = (lg(t); sm(3, on))
++def show
++  r = yield
++  puts r.inspect
++rescue NoMethodError
++  puts "NoMethodError"
++rescue => e
++  puts "#{e.class}: #{e.message}"
++end
++class Acc
++  attr_reader :v
++  def initialize(v) = (@v = v; @b = 2**70)
++  def add(n) = (@b += n; @b)
++end
++h = 2**70
++[true, false].each do |on|
++  n = sm(3, on)
++  show { [h == n, h != n, n == h, n != h] }
++  show { h < n }
++  show { h >= n }
++  show { n > h }
++  show { h + n }
++  show { h - n }
++  show { h * n }
++  show { h / n }
++  show { h % n }
++  show { n + h }
++  show { n * h }
++  show { h.modulo(n) }
++  show { h.div(n) }
++  show { h.divmod(n) }
++  show { h.pow(2, n) }
++  show { h.allbits?(n) }
++  show { h.anybits?(n) }
++  show { h.nobits?(n) }
++  a = Acc.new(n)
++  show { a.add(n) }
++  show { h + a.v }
++  show { big(1) + nn(2, on) }
++  show { nn(3, on) < big(4) }
++  show { big(5).divmod(nn(6, on)) }
++  p $log
++  $log = []
++end
++ia = [1, 3, 5]
++hi = { "a" => 3 }
++show { h + ia[9] }
++show { h == hi["zz"] }
++show { h <= "abcd".index("z") }
++show { ia.find { |v| v > 9 } * h }
+diff --git a/test/bignum_integer_or_nil_operand.rb.expected b/test/bignum_integer_or_nil_operand.rb.expected
+new file mode 100644
+index 000000000..6a9355c7e
+--- /dev/null
++++ b/test/bignum_integer_or_nil_operand.rb.expected
+@@ -0,0 +1,52 @@
++[false, true, false, true]
++false
++true
++false
++1180591620717411303427
++1180591620717411303421
++3541774862152233910272
++393530540239137101141
++1
++1180591620717411303427
++3541774862152233910272
++1
++393530540239137101141
++[393530540239137101141, 1]
++1
++false
++false
++true
++1180591620717411303427
++1180591620717411303427
++1180591620717411303427
++true
++[393530540239137101141, 1]
++[1, 2, 3, 4, 5, 6]
++[false, true, false, true]
++ArgumentError: comparison of Integer with nil failed
++ArgumentError: comparison of Integer with nil failed
++NoMethodError
++TypeError: nil can't be coerced into Integer
++TypeError: nil can't be coerced into Integer
++TypeError: nil can't be coerced into Integer
++TypeError: nil can't be coerced into Integer
++TypeError: nil can't be coerced into Integer
++NoMethodError
++NoMethodError
++TypeError: nil can't be coerced into Integer
++TypeError: nil can't be coerced into Integer
++TypeError: nil can't be coerced into Integer
++TypeError: Integer#pow() 2nd argument not allowed unless all arguments are integers
++TypeError: no implicit conversion of nil into Integer
++TypeError: no implicit conversion of nil into Integer
++TypeError: no implicit conversion of nil into Integer
++TypeError: nil can't be coerced into Integer
++TypeError: nil can't be coerced into Integer
++TypeError: nil can't be coerced into Integer
++NoMethodError
++TypeError: nil can't be coerced into Integer
++[1, 2, 3, 4, 5, 6]
++TypeError: nil can't be coerced into Integer
++false
++ArgumentError: comparison of Integer with nil failed
++NoMethodError
+-- 
+2.43.0
+
