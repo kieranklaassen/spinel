@@ -1,0 +1,23 @@
+--- body-b4-v1.txt	2026-10-08 14:34:58.408147312 +0000
++++ body-b4-v2.txt	2026-10-08 16:25:02.492007341 +0000
+@@ -2,7 +2,7 @@
+ 
+ ## What this changes
+ 
+-Fix with a cost in a program that holds an appended String: up to 4 instructions a turn of two `include?` calls on a boxed String Array with a boxed argument (the table below). A program that holds none compiles to the same C.
++Fix with a cost in a program that holds an appended String: up to 4 instructions a turn of two `include?` calls on a boxed String Array with a boxed argument (the table below). A program that holds none compiles to the same C, with `--share-strings` and without.
+ 
+ ```ruby
+ h = {"k" => "a".dup, "n" => 1}
+@@ -39,9 +39,9 @@
+ gate: run on the Mac at opening
+ ```
+ 
+-Run here before that, on this commit over master `0e8befeb3691` with the three pull requests it depends on beneath it (Linux x86-64, gcc 13.3 and clang 18.1, CRuby 3.3.6): the build from nothing, the test at five collector settings with both compilers, with and without `--share-strings`, `tools/gate.rb check`, `make share-strings-test` and `make cident` against its parent. On master `9855f1f61ff8`, where this branch now stands, the build from nothing, the test at the same settings and `tools/gate.rb check` were run again.
++Run here before that (Linux x86-64, gcc 13.3 and clang 18.1, CRuby 3.3.6). On this commit over master `74fa6d7c2457` with the two pull requests it depends on beneath it: the build from nothing, the test at five collector settings with both compilers, with and without `--share-strings`, and `tools/gate.rb check`. On the same commit over master `2810a235d119`: the same, `make share-strings-test` and `make cident` against its parent. The cost table is of the same commit over master `0e8befeb3691`.
+ 
+ - [ ] New tests have `.expected` files that match CRuby 4.0 run with `--enable-frozen-string-literal` (made with CRuby 3.3.6)
+ - [x] Values past 2^31 are marked `# spinel: int64` (none)
+ - [x] If optcarrot's generated C changed: callgrind numbers, checksum 59662 (its C is unchanged)
+-- [x] Depends on: "A String Range's cover? and include? read a boxed appended String" (its answer for the program, whether a box tagged as a handle holds one, is asked by the case here), and through it "A String Range made on the spot keeps its ends, made in order, until it is read" and "A String Range answered by its walk keeps its ends across the walk"
++- [x] Depends on: "A String Range's cover? and include? read a boxed appended String" (its answer for the program, whether a box tagged as a handle holds one, is asked by the case here), and through it "A String Range made on the spot keeps its ends, made in order, until it is read"

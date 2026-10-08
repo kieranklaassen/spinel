@@ -1,0 +1,137 @@
+# gen.rb : the Array piece's family. One program a (receiver, argument) pair; each prints every form.
+# ruby gen.rb DIR
+dir = ARGV[0]
+RECV = {
+  "r1_lit"    => ['bw = [["ab", "cd", "ef", ""], 1][0]', nil],
+  "r2_hashv"  => ['hh = {"l" => ["ab", "cd", "ef", ""], "n" => 1}', 'bw = hh["l"]'],
+  "r3_method" => ["def pick(i)\n  i > 0 ? [\"ab\", \"cd\", \"ef\", \"\"] : 1\nend", 'bw = pick(1)'],
+  "r4_ivar"   => ["class Box\n  attr_accessor :v\n  def initialize(v)\n    @v = v\n  end\nend\nbx = Box.new(1)\nbx.v = [\"ab\", \"cd\", \"ef\", \"\"]", 'bw = bx.v'],
+  "r5_empty"  => ['bw = [["ab"].take(0), 1][0]', nil],
+  "r6_frozen" => ['bw = [["ab", "cd", "ef", ""].freeze, 1][0]', nil],
+}
+ARG = {
+  "a1_hash_appended"  => ["h = {\"k\" => \"a\".dup, \"n\" => 1}\nh[\"k\"] << \"b\"", 'h["k"]'],
+  "a2_array_appended" => ["a = [\"a\".dup, 2]\na[0] << \"b\"", 'a[0]'],
+  "a3_plain_beside"   => ["h = {\"k\" => \"a\".dup, \"p\" => \"cd\", \"n\" => 1}\nh[\"k\"] << \"b\"", 'h["p"]'],
+  "a4_integer"        => ["h = {\"k\" => \"a\".dup, \"n\" => 1}\nh[\"k\"] << \"b\"", 'h["n"]'],
+  "a5_nil"            => ["h = {\"k\" => \"a\".dup, \"n\" => 1}\nh[\"k\"] << \"b\"", 'h["none"]'],
+  "a6_cleared"        => ["h = {\"k\" => \"a\".dup, \"n\" => 1}\nh[\"k\"] << \"b\"\nh[\"k\"].clear", 'h["k"]'],
+  "a7_miss_appended"  => ["h = {\"k\" => \"a\".dup, \"n\" => 1}\nh[\"k\"] << \"q\"", 'h["k"]'],
+  "a8_symbol"         => ["h = {\"k\" => \"a\".dup, \"s\" => :ab, \"n\" => 1}\nh[\"k\"] << \"b\"", 'h["s"]'],
+  "a9_nul_inside"     => ["h = {\"k\" => \"ab\".dup, \"n\" => 1}\nh[\"k\"] << \"\\0x\"", 'h["k"]'],
+  "a10_nil_among"     => ["def some(i)\n  i > 0 ? \"ab\" : nil\nend\nn = [\"a\".dup, 2, some(0)]\nn[0] << \"b\"", 'n[2]'],
+  "a11_made_by_call"  => ["def tail_of(i)\n  s = \"a\".dup\n  s << (i > 0 ? \"b\" : \"q\")\n  [s, i][0]\nend", 'tail_of(1)'],
+  "a12_frozen_copy"   => ["h = {\"k\" => \"a\".dup, \"n\" => 1}\nh[\"k\"] << \"b\"\nh[\"f\"] = h[\"k\"].dup.freeze", 'h["f"]'],
+  "a13_ivar_appended" => ["class Hold\n  attr_accessor :w\n  def initialize\n    @w = 1\n  end\nend\nho = Hold.new\nho.w = \"a\".dup\nho.w << \"b\"", 'ho.w'],
+  "a14_no_handle"     => ["h = {\"k\" => \"ab\", \"n\" => 1}", 'h["k"]'],
+}
+RECV.each do |rn, (rdef, rbind)|
+  ARG.each do |an, (adef, aexp)|
+    src = +""
+    src << rdef << "\n" << (rbind ? rbind + "\n" : "") << adef << "\n"
+    src << <<~B
+      p bw.include?(#{aexp})
+      p bw.member?(#{aexp})
+      p !bw.include?(#{aexp})
+      puts(bw.include?(#{aexp}) ? "t" : "f")
+      puts "in" if bw.include?(#{aexp})
+      puts "out" unless bw.member?(#{aexp})
+      x = bw.include?(#{aexp}) && bw.member?(#{aexp})
+      p x
+      c = 0
+      i = 0
+      while i < 50
+        c += 1 if bw.include?(#{aexp})
+        i += 1
+      end
+      p c
+      p [1, 2].map { |_| bw.include?(#{aexp}) }
+      p bw.size
+    B
+    File.write(File.join(dir, "#{rn}__#{an}.rb"), src)
+  end
+end
+# specials
+sp = {
+"s1_arg_grows_receiver" => <<~S,
+  h = {"k" => "a".dup, "n" => 1}
+  h["k"] << "b"
+  bw = [["cd", "ef"], 1][0]
+  p bw.include?((bw.push("ab"); h["k"]))
+  p bw.size
+S
+"s2_arg_appends_itself" => <<~S,
+  h = {"k" => "a".dup, "n" => 1}
+  bw = [["ab", "cd"], 1][0]
+  p bw.include?((h["k"] << "b"; h["k"]))
+  p bw.include?((h["k"] << "b"; h["k"]))
+  p h["k"]
+S
+"s3_arg_shrinks_receiver" => <<~S,
+  h = {"k" => "a".dup, "n" => 1}
+  h["k"] << "b"
+  bw = [["ab", "cd"], 1][0]
+  p bw.include?((bw.delete("ab"); h["k"]))
+  p bw
+S
+"s4_own_string_eq" => <<~S,
+  class String
+    def ==(o)
+      false
+    end
+  end
+  h = {"k" => "a".dup, "n" => 1}
+  h["k"] << "b"
+  bw = [["ab", "cd"], 1][0]
+  p bw.include?(h["k"])
+  p bw.include?(h["n"])
+S
+"s5_many_turns_alloc" => <<~S,
+  def tail_of(i)
+    s = "n".dup
+    s << (i % 4).to_s
+    [s, i][0]
+  end
+  names = [["n0", "n1", "n2", "n3"], 1][0]
+  bad = 0
+  i = 0
+  while i < 3000
+    bad += 1 unless names.include?(tail_of(i))
+    bad += 1 if names.member?(tail_of(i + 4) << "x")
+    i += 1
+  end
+  p bad
+S
+"s6_two_boxed_kinds" => <<~S,
+  h = {"k" => "a".dup, "n" => 1}
+  h["k"] << "b"
+  def recv(i)
+    return ["ab", "cd"] if i == 0
+    return {"ab" => 1} if i == 1
+    return [1, 2] if i == 2
+    "xaby"
+  end
+  4.times { |i| p recv(i).include?(h["k"]) }
+  3.times { |i| p recv(i).member?(h["k"]) }
+S
+"s7_safe_nav" => <<~S,
+  h = {"k" => "a".dup, "n" => 1}
+  h["k"] << "b"
+  def recv(i)
+    i > 0 ? ["ab", "cd"] : nil
+  end
+  p recv(1)&.include?(h["k"])
+  p recv(0)&.include?(h["k"])
+S
+"s8_block_param_arg" => <<~S,
+  h = {"k" => "a".dup, "m" => "c".dup, "n" => 1}
+  h["k"] << "b"
+  h["m"] << "q"
+  bw = [["ab", "cd"], 1][0]
+  h.each { |k, v| p bw.include?(v) }
+  p h.values.map { |v| bw.member?(v) }
+  p h.values.select { |v| bw.include?(v) }
+S
+}
+sp.each { |n, s| File.write(File.join(dir, "#{n}.rb"), s) }
+puts Dir[File.join(dir, "*.rb")].size

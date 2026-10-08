@@ -1,0 +1,1 @@
+include? of a boxed String Array finds a boxed appended String
