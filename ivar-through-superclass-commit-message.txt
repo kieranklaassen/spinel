@@ -1,0 +1,37 @@
+An ivar an inherited method stores is read through the subclass
+
+    class Pair
+      attr_reader :left, :right
+      def initialize(n)
+        @left = n
+        r = n
+        r = "s" if n > 1000
+        @right = r ? 1 : 2
+      end
+    end
+    class Twin < Pair
+      def tag = :twin
+    end
+    twin = Twin.new(7)
+    p twin.right
+
+printed nil, built with gcc or with clang at -O2, the default; 1 at
+-O1 or with -fno-strict-aliasing. With gcc a Struct's subclass printed
+the member's value from before an inherited method set it.
+
+An inherited method is called with `(sp_Pair *)self`. sp_Pair and
+sp_Twin share a layout and are unrelated struct types to the C
+compiler, and by C's aliasing rule a store through one cannot change
+what is read through the other: with `new`, `initialize` and the
+reader inlined into one function, the compiler kept the unset value
+sp_Twin_new had put in the field.
+
+The struct of a class with a parent or a child is now defined with
+SP_MAY_ALIAS, `__attribute__((may_alias))` through sp_compat.h, and so
+is that of an exception subclass with instance variables, which is
+read as an sp_Exception. A class alone keeps its struct; a compiler
+without the attribute gets the C it got.
+
+Test: test/ivar_stored_through_superclass.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

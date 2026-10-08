@@ -1,0 +1,1 @@
+An ivar an inherited method stores is read through the subclass
