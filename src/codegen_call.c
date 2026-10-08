@@ -19144,6 +19144,230 @@ static void emit_utime_arg_bad(Compiler *c, int node, TyKind t, Buf *b) {
   buf_printf(b, "); sp_raise_cls(\"TypeError\", \"can't convert %s into time\");", cn ? cn : "Object");
 }
 
+static int format_method_is_own(Compiler *c, const char *cls, const char *nm) {
+  int ci = comp_class_index(c, cls);
+  return ci >= 0 && (comp_method_in_chain(c, ci, nm, NULL) >= 0 || comp_reader_in_chain(c, ci, nm, NULL));
+}
+/* Is the format read out of a slot that a variable, a constant or self
+   holds: an attr_reader's or a Struct member's field, an Array's element by
+   an Integer index, its first or its last, or a Hash's value, the index or
+   the key a literal or a read? None of them is the program's own method, and
+   a Hash with a default block may run it. */
+static int format_is_slot_read(Compiler *c, int v) {
+  const NodeTable *nt = c->nt;
+  int recv = unwrap_parens(c, nt_ref(nt, v, "receiver")), alloc = 0;
+  if (recv < 0 || nt_ref(nt, v, "block") >= 0 || comp_ntype(c, v) != TY_STRING ||
+      !(expr_is_held_ref(c, recv) || nt_kind(nt, recv) == NK_GlobalVariableReadNode))
+    return 0;
+  if (call_is_field_read(c, v, &alloc)) return !alloc;
+  const char *nm = nt_str(nt, v, "name");
+  TyKind rt = comp_ntype(c, recv);
+  int a = nt_ref(nt, v, "arguments"), ac = 0;
+  const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+  int ary = ty_is_array(rt), hash = ty_is_hash(rt);
+  if (!nm || !(ary || hash) || format_method_is_own(c, ary ? "Array" : "Hash", nm)) return 0;
+  if (ary && ac == 0) return sp_streq(nm, "first") || sp_streq(nm, "last");
+  if (!sp_streq(nm, "[]") || ac != 1 ||
+      !(nt_kind(nt, av[0]) == NK_StringNode || subtree_is_pure_read(c, av[0]))) return 0;
+  return ary ? comp_ntype(c, av[0]) == TY_INT : !prog_has_hash_default_block(c);
+}
+/* Does something else hold the format while the arguments are built? A
+   literal and a read that cannot allocate do, so does a read out of a slot
+   (format_is_slot_read), and so does a choice between two of those
+   (`c ? F : rows[0]`, `t || F`). Anything else is a String made where it is
+   written: an interpolation, a copy of a shared String, a call's answer. */
+static int format_is_held(Compiler *c, int v, int depth) {
+  const NodeTable *nt = c->nt;
+  v = unwrap_parens(c, v);
+  if (v < 0 || depth > 8) return 0;
+  NodeKind k = nt_kind(nt, v);
+  if (k == NK_StringNode || !operand_may_allocate(c, v)) return 1;
+  if (k == NK_IfNode) {
+    int arm[2] = { nt_ref(nt, v, "statements"), nt_ref(nt, v, "subsequent") };
+    if (arm[1] < 0 || nt_kind(nt, arm[1]) != NK_ElseNode) return 0;
+    arm[1] = nt_ref(nt, arm[1], "statements");
+    for (int i = 0; i < 2; i++) {
+      int n = 0; const int *bb = arm[i] >= 0 ? nt_arr(nt, arm[i], "body", &n) : NULL;
+      if (n != 1 || !format_is_held(c, bb[0], depth + 1)) return 0;
+    }
+    return 1;
+  }
+  if (k == NK_OrNode)
+    return format_is_held(c, nt_ref(nt, v, "left"), depth + 1) &&
+           format_is_held(c, nt_ref(nt, v, "right"), depth + 1);
+  return k == NK_CallNode && format_is_slot_read(c, v);
+}
+/* Did the statement already run the format into a temp of its own, which
+   it roots (a call beside an argument that can see when it ran)? */
+static int format_ran_first(int recv, int r) {
+  return arg_ran_first(recv, 0) || arg_ran_first(r, 0);
+}
+static int format_is_attr_call(const char *nm) {
+  return sp_streq(nm, "attr") || sp_streq(nm, "attr_reader") || sp_streq(nm, "attr_writer") ||
+         sp_streq(nm, "attr_accessor");
+}
+/* A number that changes when the node table does (its `version`: the
+   emitter adds a node here and there). The answers below walk the whole
+   program, so each is kept while the table stands. */
+static int format_table_gen(Compiler *c) {
+  static const Compiler *mc; static const NodeTable *mnt; static unsigned mver; static int gen;
+  if (mc != c || mnt != c->nt || mver != c->nt->version) {
+    mc = c; mnt = c->nt; mver = c->nt->version; gen++;
+  }
+  return gen;
+}
+/* Can the program define a method that leaves neither a def nor an attr of
+   that name in the node table: an alias, a name handed to alias_method,
+   define_method or a delegator, a send, an eval of a class, an attr whose
+   name is not a Symbol literal? */
+static int format_prog_defines_unseen(Compiler *c) {
+  static const char *const WORDS[] = {
+    "alias_method", "define_method", "define_singleton_method", "send", "__send__", "public_send",
+    "class_eval", "module_eval", "class_exec", "module_exec", "instance_eval", "instance_exec", "eval",
+    "def_delegator", "def_delegators", "delegate", NULL };
+  static int memo_gen, memo;
+  int g = format_table_gen(c);
+  if (memo_gen == g) return memo;
+  const NodeTable *nt = c->nt;
+  int n = 0;
+  memo_gen = g; memo = 0;
+  nt_nodes_of_kind(nt, NK_AliasMethodNode, &n);
+  if (n > 0) return memo = 1;
+  const int *calls = nt_nodes_of_kind(nt, NK_CallNode, &n);
+  for (int i = 0; i < n && !memo; i++) {
+    const char *nm = nt_str(nt, calls[i], "name");
+    if (!nm) continue;
+    for (int w = 0; WORDS[w] && !memo; w++) if (sp_streq(nm, WORDS[w])) memo = 1;
+    if (memo || !format_is_attr_call(nm)) continue;
+    int a = nt_ref(nt, calls[i], "arguments"), ac = 0;
+    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+    for (int j = 0; j < ac; j++) if (nt_kind(nt, av[j]) != NK_SymbolNode) memo = 1;
+  }
+  return memo;
+}
+/* Is a call of `nm` on a builtin's value provably the builtin's own: the
+   program has no def of that name anywhere, no attr of that name, and no
+   way to define one that the node table does not show? Asked by the name
+   alone, whatever the class: a def in a subclass, a module or a singleton
+   counts. `!=` runs `==`. A reader (`reader`) is asked for a def of its name
+   only: its attr is what makes it a read. */
+static int format_name_scan(Compiler *c, const char *nm, int reader) {
+  const NodeTable *nt = c->nt;
+  if (format_prog_defines_unseen(c)) return 0;
+  const char *also = sp_streq(nm, "!=") ? "==" : nm;
+  int n = 0;
+  const int *defs = nt_nodes_of_kind(nt, NK_DefNode, &n);
+  for (int i = 0; i < n; i++) {
+    const char *dn = nt_str(nt, defs[i], "name");
+    if (!dn || sp_streq(dn, nm) || sp_streq(dn, also)) return 0;
+  }
+  if (reader) return 1;
+  const int *calls = nt_nodes_of_kind(nt, NK_CallNode, &n);
+  for (int i = 0; i < n; i++) {
+    const char *cn = nt_str(nt, calls[i], "name");
+    if (!cn || !format_is_attr_call(cn)) continue;
+    int a = nt_ref(nt, calls[i], "arguments"), ac = 0;
+    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+    for (int j = 0; j < ac; j++) {
+      const char *sv = nt_kind(nt, av[j]) == NK_SymbolNode ? nt_str(nt, av[j], "value") : NULL;
+      if (!sv || sp_streq(sv, nm) || sp_streq(sv, also)) return 0;
+    }
+  }
+  return 1;
+}
+/* The scan's answer, kept by name while the table stands (the name is
+   copied: nothing is assumed of where it lives). */
+static int format_name_answer(Compiler *c, const char *nm, int reader) {
+  static char names[32][16]; static char kinds[32], answers[32]; static int used, memo_gen;
+  if (!nm) return 0;
+  int g = format_table_gen(c);
+  if (memo_gen != g) { memo_gen = g; used = 0; }
+  for (int i = 0; i < used; i++)
+    if (kinds[i] == reader && sp_streq(names[i], nm)) return answers[i];
+  int ans = format_name_scan(c, nm, reader);
+  if (used < 32 && strlen(nm) < sizeof names[0]) {
+    strcpy(names[used], nm); kinds[used] = (char)reader; answers[used++] = (char)ans;
+  }
+  return ans;
+}
+static int format_name_is_builtin(Compiler *c, const char *nm) {
+  return format_name_answer(c, nm, 0);
+}
+/* Does the argument, a pure read by master's list, hold a call that is not
+   provably the builtin's? That list takes an index into a typed Array, an
+   operator on numbers or booleans and a reader's field read by the type of
+   the receiver; the program's own `[]` or `+` runs its code. A reader is
+   asked for a def of its name only: its attr is what makes it a read. */
+static int format_arg_calls_own(Compiler *c, int a) {
+  const NodeTable *nt = c->nt;
+  if (a < 0) return 0;
+  if (nt_kind(nt, a) == NK_CallNode) {
+    const char *nm = nt_str(nt, a, "name");
+    int alloc = 0;
+    if (!nm) return 1;
+    if (!format_name_answer(c, nm, call_is_field_read(c, a, &alloc))) return 1;
+  }
+  int nr = nt_num_refs(nt, a);
+  for (int i = 0; i < nr; i++)
+    if (format_arg_calls_own(c, nt_ref_at(nt, a, i))) return 1;
+  int na = nt_num_arrs(nt, a);
+  for (int i = 0; i < na; i++) {
+    int n = 0;
+    const int *ids = nt_arr_at(nt, a, i, &n);
+    for (int j = 0; j < n; j++)
+      if (format_arg_calls_own(c, ids[j])) return 1;
+  }
+  return 0;
+}
+/* Is the format a String the statement makes itself, which nothing else can
+   name: an interpolation, or a concatenation by String's own `+`? */
+static int format_is_own_made(Compiler *c, int v) {
+  const NodeTable *nt = c->nt;
+  const char *ty = nt_type(nt, v);
+  if (ty && sp_streq(ty, "InterpolatedStringNode")) return 1;
+  if (nt_kind(nt, v) != NK_CallNode) return 0;
+  const char *nm = nt_str(nt, v, "name");
+  int recv = nt_ref(nt, v, "receiver");
+  return nm && sp_streq(nm, "+") && recv >= 0 && nt_ref(nt, v, "block") < 0 &&
+         comp_ntype(c, recv) == TY_STRING && comp_ntype(c, v) == TY_STRING &&
+         format_name_is_builtin(c, "+");
+}
+/* Does building the argument run nothing that could change, in place, the
+   String a call answered as the format: a read, a literal or arithmetic on
+   numbers (subtree_is_pure_read), a global's read, or an Array literal of
+   those? An index, an operator or a reader in it counts only while it is
+   provably the builtin's (format_arg_calls_own). */
+static int format_arg_is_inert(Compiler *c, int a, int depth) {
+  const NodeTable *nt = c->nt;
+  a = unwrap_parens(c, a);
+  if (a < 0 || depth > 8) return 0;
+  const char *ty = nt_type(nt, a);
+  if (!ty) return 0;
+  if (sp_streq(ty, "StringNode") || sp_streq(ty, "GlobalVariableReadNode")) return 1;
+  if (sp_streq(ty, "ArrayNode")) {
+    int n = 0; const int *el = nt_arr(nt, a, "elements", &n);
+    for (int i = 0; i < n; i++) if (!format_arg_is_inert(c, el[i], depth + 1)) return 0;
+    return 1;
+  }
+  return subtree_is_pure_read(c, a) && !format_arg_calls_own(c, a);
+}
+/* See codegen_call_arms.h. */
+int str_format_left_alone(Compiler *c, int recv, int arg) {
+  int r = unwrap_parens(c, recv);
+  return r >= 0 && !format_ran_first(recv, r) && !format_is_held(c, r, 0) && !format_is_own_made(c, r) &&
+         !format_arg_is_inert(c, arg, 0);
+}
+/* See codegen_call_arms.h. */
+const char *emit_str_format_held(Compiler *c, int recv, int arg, int fck, Buf *b) {
+  int r = unwrap_parens(c, recv);
+  if (r < 0 || format_ran_first(recv, r) || format_is_held(c, r, 0) || str_format_left_alone(c, recv, arg)) return NULL;
+  int t = fck >= 0 ? fck : ++g_tmp;
+  buf_printf(b, "({ const char *_t%d = ", t);
+  emit_expr(c, recv, b);
+  if (fck >= 0) buf_printf(b, "; if (!_t%d) sp_nil_recv(\"%%\")", t);
+  buf_printf(b, "; SP_GC_ROOT_STR(_t%d); sp_str_format_polyarr(_t%d", t, t);
+  return "); })";
+}
 /* String#% whose operand has no type yet: `[]` and a bare `Array.new`. Only
    these literal shapes are taken: emit_boxed answers nil for any other untyped
    node, which would format silently wrong, and `{}` would answer "" for `%c`.
@@ -19161,13 +19385,15 @@ int emit_str_format_untyped_array(Compiler *c, int recv, int a0n, int fck, Buf *
           sp_streq(nt_str(nt, nr, "name"), "Array") && nac == 0;
   }
   if (!lit) return 0;
-  if (fck >= 0) {
+  const char *fend = emit_str_format_held(c, recv, a0n, fck, b);
+  if (fend) {}
+  else if (fck >= 0) {
     buf_printf(b, "sp_str_format_polyarr(({ const char *_t%d = ", fck);
     emit_expr(c, recv, b);
     buf_printf(b, "; if (!_t%d) sp_nil_recv(\"%%\"); _t%d; })", fck, fck);
   }
   else { buf_puts(b, "sp_str_format_polyarr("); emit_expr(c, recv, b); }
-  buf_puts(b, ", sp_format_args("); emit_boxed(c, a0n, b); buf_puts(b, "))");
+  buf_puts(b, ", sp_format_args("); emit_boxed(c, a0n, b); buf_printf(b, ")%s", fend ? fend : ")");
   return 1;
 }
 void emit_call_body(Compiler *c, int id, Buf *b);
