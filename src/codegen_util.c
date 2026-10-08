@@ -2610,6 +2610,51 @@ int strbuf_marked_yields_handle(Compiler *c, int v) {
   const char *nm = nt_str(nt, v, "name");
   return nm && (is_append_concat(nm) || str_self_call(nt, v));
 }
+/* What a box of this program tagged as a shared String handle holds, for a
+   reader that takes the handle out of a box it did not make
+   (g_strbuf_boxes). SB_BOXES_NONE: the program holds no String as a
+   handle, so no box is tagged so and the reader leaves the test out.
+   SB_BOXES_UNSURE: a call on an object, stored where a handle is wanted, is
+   boxed as it renders (emit_boxed_strbuf), and only a reader of a handle's
+   slot renders the handle; any other leaves its String's bytes under the
+   handle's tag, the box does not say which it holds, and the reader keeps
+   to the plain String. SB_BOXES_HANDLES: each is a handle, or NULL for a
+   nil stored among handles. */
+int g_strbuf_boxes = SB_BOXES_UNSURE;
+int program_strbuf_boxes(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  NT_FOREACH_KIND(nt, NK_CallNode, v) {
+    int al = 0;
+    if (comp_ntype(c, v) != TY_STRBUF) continue;   /* no other is boxed as a handle */
+    if (repr_of(c, v).strbuf_src == RS_DEMANDED && !call_is_field_read(c, v, &al)) return SB_BOXES_UNSURE;
+  }
+  int held = 0;
+  for (int n = 0; n < nt->count && !held; n++)
+    held = c->ntype[n] == TY_STRBUF || c->strbuf_box[n] || c->strbuf_handle_demand[n] || c->poly_strbuf_lift[n];
+  for (int si = 0; si < c->nscopes && !held; si++) {
+    const Scope *s = &c->scopes[si];
+    held = s->ret == TY_STRBUF;
+    for (int k = 0; k < s->nlocals && !held; k++) held = s->locals[k].type == TY_STRBUF;
+  }
+  for (int k = 0; k < c->nclasses && !held; k++)
+    for (int i = 0; i < c->classes[k].nivars && !held; i++) held = c->classes[k].ivar_types[i] == TY_STRBUF;
+  return held ? SB_BOXES_HANDLES : SB_BOXES_NONE;
+}
+/* Does the program reopen the builtin class `cls` with a method `name` of
+   its own, in it or above it? */
+int builtin_reopened(Compiler *c, const char *cls, const char *name) {
+  int ci = comp_class_index(c, cls);
+  return ci >= 0 && comp_method_in_chain(c, ci, name, NULL) >= 0;
+}
+/* Is a String Range's membership `name` (cover?, include?, member?, ===)
+   the runtime's own, with the String methods it stands on? A program's own
+   is not asked on any road. Where the road of a boxed value answered false
+   it agreed with a method of the program that says "no member", so there
+   it stays as it was. */
+int srange_member_builtin(Compiler *c, const char *name) {
+  return !builtin_reopened(c, "Range", name) && !builtin_reopened(c, "String", "<=>") &&
+         !builtin_reopened(c, "String", "==") && !builtin_reopened(c, "String", "succ");
+}
 /* A String method answering its receiver or nil (bop_share_self_answer:
    a bang method, an iterator given a block) called on a local that holds
    the shared handle (--share-strings: or an ivar, a global, a class
