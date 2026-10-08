@@ -1,0 +1,40 @@
+A String a run-time dispatch builds keeps its change where it is stored
+
+    class K
+      def initialize(x) = @x = x
+      def plus = @x + "a"
+    end
+    class L < K
+      def plus = @x + "b"
+    end
+    class Q                      # nothing makes one
+      def initialize(x) = @x = x
+      def plus = @x + "a"
+    end
+    b = [K.new("p".dup), L.new("q".dup)]
+    z = [b[0].plus, b[1].plus]
+    z.each { |e| e << "!" }
+    p z                          # ["pa!", "qb!"]
+
+printed ["pa", "qb"], with no error. Without class Q it was right.
+
+An element that is changed in place is stored as a String handle, and a
+call that answers a String is wrapped as a fresh handle where it is
+stored. `b[0].plus` finds its method by the class of the element. With
+Q's untyped `plus` among the methods of that name, or beside a class
+whose `plus` answers an Integer, the call's answer is boxed: each
+class's arm boxes its `const char *` as a value (sp_box_str), the store
+keeps that box, and `e << "!"` on a value box answers a new String the
+element never takes.
+
+The arm of a class whose method builds its String now answers the fresh
+handle a typed call's store makes, where the store's handle demand has
+marked the call. strbuf_demand_store_leaf marks it where the call still
+reads as a String there; strbuf_demand_value_leaves now marks a call on
+a boxed receiver that reads as boxed. Only an arm whose method is seen
+to build its String takes it (method_builds_string, as for a call on an
+object of a known class). An arm that answers a String something holds
+(`def held = @x`), a reader's, a native class's and a builtin value's
+box as before, so no String gets a second handle.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
