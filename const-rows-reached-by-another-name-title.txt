@@ -1,0 +1,1 @@
+A constant's rows are read unboxed only if no other name reaches them

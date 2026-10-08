@@ -1,0 +1,38 @@
+A constant's rows are read unboxed only if no other name reaches them
+
+    module Tables
+      ROWS = [[1, 2], [3, 4]].map { |a| a.map { |n| n * 2 } }
+      def self.cell(i, j) = ROWS[i][j]
+    end
+    row = Tables::ROWS[0]
+    row[0] = 2.5
+    p Tables.cell(0, 0)
+
+printed 2 where CRuby prints 2.5, and a row handed out by
+`attr_reader :row` lost the String pushed into it. Both were right
+before a constant mapped from a literal table of Integer rows held
+its rows as Integer arrays.
+
+That is sound only where nothing reaches a row but an index, and the
+check went by names: reads of the constant's bare name, reads of an
+instance variable, calls of a method. A row is reached with none of
+those through a path (`Tables::ROWS`), const_get, an attr_reader,
+instance_variable_get, an alias, a Method object, `super`,
+Kernel#Array calling to_a, `x.row ||= v`, and a method of the
+program's own named like an iterator (`def each = yield`), whose
+block's value was taken as dropped.
+
+A path is now examined as the bare name is, so `Tables::ROWS[i][j]`
+keeps the Integer rows, and `super` counts as a call of the method it
+is written in. For the rest the check goes by spelling: a constant,
+an instance variable or a method whose name is written as a Symbol or
+a String anywhere may be reached through it, and its table is built
+as it was before the rule. optcarrot's generated C is unchanged.
+
+Not here: a row past the end of the table (`ROWS[5][0]` prints nil
+where CRuby raises NoMethodError), and under --int-overflow=promote
+a row computed by arithmetic.
+
+Test: test/const_rows_reached_by_another_name.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

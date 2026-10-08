@@ -1,0 +1,10 @@
+rows_value_dropped finds a method's calls through the name index
+
+Whether a method's value is thrown away is asked of every call of its
+name, and the walk visited every CallNode of the program for each
+such method, in every round of inference that asks whether a
+constant's rows are only read by an index. an_calls_named_first hands
+out the calls of one name. No generated C changes; compiling optcarrot
+takes 11 million instructions fewer of 8,352 million.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
