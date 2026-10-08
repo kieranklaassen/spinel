@@ -280,6 +280,45 @@ static TyKind bop_arg_ntype(const void *ud, int i) {
   return comp_ntype(a->c, a->argv[i]);
 }
 
+/* Is Hash[h], node `id`, only read by the call it is the receiver of? One
+   of these with no block neither keeps nor changes its receiver, so h itself
+   serves there, as it did. */
+int hash_brackets_only_read(Compiler *c, int id) {
+  static const char *const readers[] = {
+    "size", "length", "empty?", "count", "keys", "values", "to_a", "first", "key?", "has_key?",
+    "include?", "member?", "[]", "fetch", "dig", "merge", "==", "inspect", "to_s", NULL };
+  const NodeTable *nt = c->nt;
+  int seen = 0;
+  NT_FOREACH_KIND(nt, NK_CallNode, call) {
+    if (nt_ref(nt, call, "receiver") != id) continue;
+    const char *nm = nt_str(nt, call, "name");
+    int k = 0;
+    while (nm && readers[k] && !sp_streq(nm, readers[k])) k++;
+    if (!nm || !readers[k] || nt_ref(nt, call, "block") >= 0) return 0;
+    seen = 1;
+  }
+  return seen;
+}
+
+/* Opens to_h on a boxed value into `_t<t>`: `({ sp_RbVal _t = sp_poly_to_h_m(`.
+   Hash[v] reaches the emitter as v.to_h, and there a Hash is copied, not
+   passed through. The copy is held for the whole statement, not only to the
+   end of this statement expression: a call it is the receiver of, or the
+   conversion into a local of another kind, allocates before it holds it. So
+   its slot is declared and rooted in the statement's prelude and assigned
+   here, where the expression runs. */
+void emit_boxed_to_h_open(Compiler *c, int id, int t, Buf *b) {
+  if (!nt_int(c->nt, id, "hash_brackets", 0) || hash_brackets_only_read(c, id)) {
+    buf_printf(b, "({ sp_RbVal _t%d = sp_poly_to_h_m(", t);
+    return;
+  }
+  if (g_pre) {
+    emit_indent(g_pre, g_indent);
+    buf_printf(g_pre, "sp_RbVal _t%d = sp_box_nil(); SP_GC_ROOT_RBVAL(_t%d);\n", t, t);
+  }
+  buf_printf(b, "({ %s_t%d = sp_hash_brackets_one(", g_pre ? "" : "sp_RbVal ", t);
+}
+
 static int emit_builtin_op_ex(Compiler *c, int id, int recv, TyKind rt, const char *name,
                               const char *rtext, int t0, int stage, Buf *b) {
   if (recv < 0) return 0;
@@ -292,6 +331,34 @@ static int emit_builtin_op_ex(Compiler *c, int id, int recv, TyKind rt, const ch
   }
   int argc;
   const int *argv = call_args(c->nt, id, &argc);
+  /* Hash[h] reaches here as h.to_h (its desugar runs before h has a type),
+     and to_h answers h itself. Hash[h] is a new Hash of h's entries, without
+     its default. Three forms keep the C they had: a literal is new already,
+     one written straight into a local of another kind of Hash is converted,
+     which builds the new Hash, and one a call only reads is not kept. */
+  if (ty_is_hash(rt) && ty_hash_cname(rt) && argc == 0 && sp_streq(name, "to_h") &&
+      nt_int(c->nt, id, "hash_brackets", 0) && nt_ref(c->nt, id, "block") < 0 &&
+      nt_kind(c->nt, recv) != NK_HashNode && nt_kind(c->nt, recv) != NK_KeywordHashNode &&
+      id != g_hash_conv_value && !hash_brackets_only_read(c, id)) {
+    const char *hn = ty_hash_cname(rt);
+    int ts = ++g_tmp, tc = ++g_tmp;
+    /* the copy's slot is the statement's, as emit_boxed_to_h_open says */
+    if (g_pre) {
+      emit_indent(g_pre, g_indent);
+      buf_printf(g_pre, "sp_%sHash *_t%d = NULL; SP_GC_ROOT(_t%d);\n", hn, tc, tc);
+    }
+    buf_printf(b, "({ sp_%sHash *_t%d = ", hn, ts);
+    if (rtext) buf_puts(b, rtext); else emit_expr(c, recv, b);
+    buf_printf(b, "; SP_GC_ROOT(_t%d); if (!_t%d) sp_raise_cls(\"ArgumentError\","
+                  " \"odd number of arguments for Hash\"); ", ts, ts);
+    if (!g_pre) buf_printf(b, "sp_%sHash *_t%d = NULL; SP_GC_ROOT(_t%d); ", hn, tc, tc);
+    /* a boxed Hash's keys can change after they went in: its table is copied
+       as it stands; the other kinds' keys cannot, and they are set again */
+    if (rt == TY_POLY_POLY_HASH) buf_printf(b, "_t%d = sp_PolyPolyHash_copy_table(_t%d);", tc, ts);
+    else buf_printf(b, "_t%d = sp_%sHash_new(); sp_%sHash_update(_t%d, _t%d);", tc, hn, hn, tc, ts);
+    buf_printf(b, " _t%d; })", tc);
+    return 1;
+  }
   BopArgs a = { c, argv };
   const BuiltinOp *op = bop_find_stage(lk, name, argc, nt_ref(c->nt, id, "block") >= 0,
                                        bop_arg_ntype, &a, stage);

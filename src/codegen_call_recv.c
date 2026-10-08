@@ -13862,7 +13862,7 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
            result feeds a poly dispatch), yield the boxed value instead of
            the concrete pointer -- the consumer switches on cls_id (#3282). */
         int th2 = ++g_tmp;
-        buf_printf(b, "({ sp_RbVal _t%d = sp_poly_to_h_m(", th2);
+        emit_boxed_to_h_open(c, id, th2, b);
         emit_expr(c, recv, b);
         buf_puts(b, ");");
         /* A boxed slot takes any hash variant as-is. Only the concrete
