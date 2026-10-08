@@ -1,0 +1,62 @@
+A begin or catch read as a value is held until its expression reads it
+
+    def churn(n)
+      i = 0
+      x = nil
+      while i < n
+        x = ["c#{i}", "d#{i}"]
+        i += 1
+      end
+      x
+    end
+    def tags_of(i)
+      churn(200)
+      ["t" + i.to_s, "x"]
+    end
+
+    rows = []
+    300.times do |i|
+      rows << (begin; tags_of(i); rescue; ["q"]; end) +
+              (begin; tags_of(i); ensure; churn(10); end)
+    end
+    churn(2000)
+    bad = 0
+    rows.each_with_index do |r, i|
+      bad += 1 unless r == ["t#{i}", "x", "t#{i}", "x"]
+    end
+    p bad
+    p rows.find { |r| r.size != 4 || r[0][0] != "t" }
+
+CRuby prints 0 and nil. A plain run printed 38 and
+["c192", "d192", "t6", "x"]: the first Array of a row was freed, and
+one that churn made took its place.
+
+A begin read as a value runs ahead of its statement, into a temp the
+expression then reads. The temp was rooted only when the begin had an
+ensure body, for the time that body runs. But the value also waits in
+it while whatever an operand after it puts ahead of the statement
+runs: here the second begin, with the first one's Array in a temp
+nothing else knows. A Struct's super with two such arguments, two
+Strings added, an interpolation and a method called on the first
+value went the same way. A plain call and an Array literal hold their
+arguments themselves and were right. catch as a value has the same
+temp and the same window.
+
+Both temps are now rooted where they run ahead of the statement, for
+every kind that holds a reference, the two Strings of a String Range
+among them. A begin emitted as a statement expression is read where
+it stands and keeps the root it had.
+
+The root costs 10 to 16 instructions a value built with gcc and 18 to
+25 with clang (callgrind): a loop that evaluates one begin or catch
+value 300,000 times and does nothing else runs 1.3% to 3.2% more. The
+generated C of 144 of the suite's 6,254 programs changes.
+
+test/hoisted_begin_value_held.rb counts the wrong values for a
+Struct's super with and without keywords, Strings and Arrays added,
+an interpolation, a String Range, a receiver, and a catch on either
+side. On master a plain run prints 30, 37, 1, 37, 0, 19, 3, 1 and 0
+where CRuby prints nine zeros, and it aborts at SPINEL_GC_STRESS=2,
+so it joins GC_STRESS_TESTS.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
