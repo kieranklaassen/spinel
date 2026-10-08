@@ -18685,6 +18685,83 @@ static int operand_is_interp_str(Compiler *c, int id) {
          comp_ntype(c, id) == TY_STRING && repr_of(c, id).as_ty == TY_STRING;
 }
 
+/* Is operand `node` the ordinary read of a shared String slot, a local or
+   an instance variable held as a String handle? Its arm renders it where it
+   stands in the C call, as a copy of the String or a pointer into it (the
+   one allocation operand_may_allocate adds to what the node table shows).
+   Not one an enclosing emitter has read into a temp already (arg_ran_first). */
+static int operand_reads_shared_str(Compiler *c, int node) {
+  NodeKind k = nt_kind(c->nt, unwrap_parens(c, node));
+  return (k == NK_LocalVariableReadNode || k == NK_InstanceVariableReadNode) &&
+         operand_may_allocate(c, node) && !subtree_may_allocate(c->nt, node) &&
+         !arg_ran_first(node, 0);
+}
+/* Is `id` a call that changes a shared String in place: a String mutator
+   (an_str_mutator_name) whose receiver is a shared String slot? */
+static int call_changes_shared_str(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  if (id < 0 || nt_kind(nt, id) != NK_CallNode) return 0;
+  int r = nt_ref(nt, id, "receiver");
+  char sref[192];
+  return r >= 0 && an_str_mutator_name(nt_str(nt, id, "name")) &&
+         strbuf_slot_ref(c, unwrap_parens(c, r), sref, sizeof sref);
+}
+/* Does operand `id` run no code of the program's and assign nothing? One
+   that cannot reassign state (subtree_may_reassign_state: a literal, a read,
+   a plain field read), or a builtin over values whose builtins run none, by
+   the test subtree_may_run_proc makes of a call, its receiver and arguments
+   such operands themselves. */
+static int operand_runs_no_code(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  if (id < 0 || !subtree_may_reassign_state(c, id)) return 1;
+  const char *nm = nt_kind(nt, id) == NK_CallNode ? nt_str(nt, id, "name") : NULL;
+  int r = nt_ref(nt, id, "receiver");
+  if (!nm || r < 0 || nt_ref(nt, id, "block") >= 0 || !ty_runs_no_code(comp_ntype(c, r)) ||
+      comp_method_index(c, nm) >= 0 || any_class_defines(c, nm) || !operand_runs_no_code(c, r))
+    return 0;
+  int a = nt_ref(nt, id, "arguments"), ac = 0;
+  const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+  for (int i = 0; i < ac; i++) {
+    NodeKind ak = nt_kind(nt, av[i]);
+    if (ak == NK_SplatNode || ak == NK_KeywordHashNode || !ty_runs_no_code(comp_ntype(c, av[i])) ||
+        !operand_runs_no_code(c, av[i])) return 0;
+  }
+  return 1;
+}
+/* Does subtree `id` hold such a call? Two slots can hold one String, so a
+   change through any of them counts. */
+static int subtree_changes_shared_str(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  if (id < 0) return 0;
+  if (call_changes_shared_str(c, id)) return 1;
+  int nr = nt_num_refs(nt, id);
+  for (int i = 0; i < nr; i++)
+    if (subtree_changes_shared_str(c, nt_ref_at(nt, id, i))) return 1;
+  int na = nt_num_arrs(nt, id);
+  for (int i = 0; i < na; i++) {
+    int n = 0;
+    const int *ids = nt_arr_at(nt, id, i, &n);
+    for (int j = 0; j < n; j++)
+      if (subtree_changes_shared_str(c, ids[j])) return 1;
+  }
+  return 0;
+}
+
+/* Does the emitted call `txt` read the bytes of a shared String slot among
+   the operands flagged in `later`, as a copy or in place? Both reach them
+   through sp_String_cstr on the slot. An arm that takes the handle alone
+   reads the String when it runs. */
+static int call_reads_shared_str(Compiler *c, const int *operand, const unsigned char *later,
+                                 int nop, const char *txt) {
+  for (int i = 0; i < nop && txt; i++) {
+    char sref[192], pat[224];
+    if (!later[i] || !strbuf_slot_ref(c, unwrap_parens(c, operand[i]), sref, sizeof sref)) continue;
+    snprintf(pat, sizeof pat, "sp_String_cstr(%s)", sref);
+    if (strstr(txt, pat)) return 1;
+  }
+  return 0;
+}
+
 /* An operand emit_operands_in_order cannot bind, the `u`th, renders where
    its arm puts it. An Array or Hash literal builds into g_pre, ahead of the
    whole call, so a local read anywhere in an operand to its left read what
@@ -18861,6 +18938,21 @@ static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
   int effects = 0;
   for (int i = 0; i < nop; i++)
     if (subtree_may_reassign_state(c, operand[i])) effects++;
+  /* A shared String slot is read where it stands in the C call: as a copy of
+     the bytes it holds then, or as a pointer into its buffer. Beside an
+     operand that changes a shared String in place the read ran first
+     wherever C ran it first. The copy held the old bytes:
+     `s.sub(s << "l", "L")` matched "hello" under clang, and `s == t << "l"`
+     was false for one String under gcc too. The pointer was left behind when
+     the append grew the buffer: `s.end_with?(t << big)`. Ruby reads the
+     String when the method runs, after its arguments. So beside such an
+     operand the read counts as made here (`later`), and the operand is bound
+     ahead of it. */
+  int reads = 0, changer = 0;
+  unsigned char later[9] = {0};
+  for (int i = 0; i < nop; i++) reads += later[i] = operand_reads_shared_str(c, operand[i]);
+  for (int i = 0; i < nop && reads && !changer; i++) changer = subtree_changes_shared_str(c, operand[i]);
+  if (!changer) { memset(later, 0, sizeof later); reads = 0; }
   int observable = 0, converts = 0, runs = 0;
   int made[9], nmade = 0, made_bare = 1;
   /* An interpolated String is bound, in the order written, where the arm
@@ -18894,7 +18986,7 @@ static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
     if ((state_read || local_read) && strbuf_slot_ref(c, operand[i], sref, sizeof sref))
       state_read = local_read = 0;
     if (!local_read && (state_read ? effects < 1 : !subtree_has_side_effect(c, operand[i]))) {
-      if (operand_made_here(nt, operand[i])) {
+      if (later[i] || operand_made_here(nt, operand[i])) {
         made[nmade++] = i;
         if (k != NK_HashNode && k != NK_ArrayNode) made_bare = 0;
       }
@@ -18968,7 +19060,11 @@ static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
       if (!obs[j]) continue;
       if (k == NK_LocalVariableReadNode) moved = operand_local_rebound_by(c, operand[i], operand[j]);
       else if (k == NK_InstanceVariableReadNode || k == NK_ClassVariableReadNode || k == NK_GlobalVariableReadNode)
-        moved = subtree_may_reassign_state(c, operand[j]);
+        /* a String mutator that runs no code assigns no variable: the slot
+           read beside it holds the same String after it */
+        moved = subtree_may_reassign_state(c, operand[j]) &&
+                !(later[i] && call_changes_shared_str(c, operand[j]) &&
+                  operand_runs_no_code(c, operand[j]));
       else moved = subtree_reads_moved_by(c, operand[i], operand[j]);
     }
     if (!moved) continue;
@@ -19085,6 +19181,10 @@ static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
        is a length test, `h.merge({})` a copy */
     if (!lone && observable < 2 && g_conv_emitted == conv_mark && made_bare && ob.p &&
         !strstr(ob.p, "Hash_new(") && !strstr(ob.p, "Array_new(")) ok = 0;
+    /* ...and a shared String the arm takes by its handle is read when the
+       call runs, wherever the operand ran */
+    if (!lone && observable < 2 && g_conv_emitted == conv_mark && reads > 0 && reads == nmade &&
+        !call_reads_shared_str(c, operand, later, nop, ob.p)) ok = 0;
     /* An arm that stores back into its receiver -- a poly `[]=` splice
        answering a new String, `@bytes = sp_poly_splice(@bytes, ...)` -- treats
        the operand as its slot; bound, the store lands in the temp and the
