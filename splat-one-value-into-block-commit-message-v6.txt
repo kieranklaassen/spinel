@@ -1,0 +1,49 @@
+One value with no to_a splatted into a yield or a proc arrives as itself
+
+A splat in the argument list built for a yield or a proc's call was
+spread with sp_enum_items_from, which has no items for a value that
+is no collection. So one value splatted there was dropped:
+
+    def g(v) = yield(*v)
+    p(g(5) { |a| a })              # nil; CRuby 5
+    f = proc { |a| a }
+    x = :k
+    p f.call(*x)                   # nil; CRuby :k
+
+CRuby asks to_a only of a value that has one; any other value is the
+one argument, itself. emit_spread_args_into now spreads such a splat
+with sp_splat_arg_items, a new helper beside sp_enum_items_from: an
+Integer, a Float, a Symbol, true, false, a class and an object of a
+class the program wrote are the value itself. Everything else goes
+to sp_enum_items_from as before, and a splat known to be an Array, a
+Hash or a Range compiles to the C it had.
+
+The value is handed over only where that cannot turn a raise into an
+answer. A program with a way to a to_a of its own, an object whose
+class writes a comparison or a unary operator (a boxed receiver does
+not reach those) and a program that reopens a value's builtin class
+keep the list they had. So do a lambda's call and a Method's: they
+count their arguments, and the ArgumentError they raise is CRuby's
+where a to_a the compiler cannot see answers two values.
+
+Which of the two a Proc is, only the run time knows, so
+sp_splat_arg_items_of asks it there. The Proc that is asked is the
+Proc that is called: a splatted value that runs code is taken in a
+statement of its own before the Proc is read, and where an argument
+after the splat runs code, or one can give the Proc's variable
+another value, the receiver is read once into a rooted temp. A yield
+into `&blk` with such an argument keeps the list it had.
+
+A boxed Array or Hash splatted there ran right before and now pays
+the test of what the value is. The pull request has the figures.
+
+Not changed: a String is dropped there as before. The list would
+hold a copy, and a block that appends to its parameter would write
+to the copy.
+
+Tests: test/splat_one_value_into_block.rb,
+test/splat_one_value_into_block_bigint.rb,
+test/splat_package_object_into_block.rb,
+test/splat_proc_receiver_read_once.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
