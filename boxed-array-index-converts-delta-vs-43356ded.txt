@@ -1,0 +1,35 @@
+Odd index piece ("A boxed Array converts an index that is no Integer as Array#[] does"), cut again on upstream
+16bca08960d1 (fork draft 438 holds the older head 43356deda849). A NEW CUT, the whole commit.
+
+- head 376d79b9bcaaae9f81f75aa6731d3a5d0dd31a94, tree 9a6a83c6fa351afd573458697c6f5080916b2e6e: ONE commit on matz master
+  16bca08960d154b861cb96c38bf9f4cf1209059a. LOCAL only; block boxedarrayindexconverts-v4.patch (`git format-patch -1`;
+  applied to 16bca08960d1's index it gives the tree above, checked with read-tree, apply --cached, write-tree).
+  Suggested branch claude/boxed-array-index-converts-v3-on-16bca089.
+- Texts: title boxed-array-index-converts-title.txt (unchanged), body boxed-array-index-converts-body-v4.md (NEW),
+  message boxed-array-index-converts-commit-message-v2.txt (the text of 43356deda849's message, unchanged; the
+  commit's message equals it).
+- 3 files: lib/spinel_rt.h +22 -3, test/boxed_array_index_converts.rb and its .expected (the blobs of 43356deda849).
+
+Why a new cut. On upstream's tip of 09:42 the head 43356deda849 cost two reads by a boxed Float with BOTH compilers
+(an Array by a Float 207 to 212 with clang, 219 to 227 with gcc; a Symbol-keyed Hash missed by a Float key 157 to
+160, 150 to 152), because its test for a Bignum sat on the line that reads the index for every receiver.
+
+What changed against 43356deda849 (the answers are the same: the test, its .expected and the 1,056 programs of the
+family print what they printed):
+- That line is master's again: `sp_int i = (idx.tag == SP_TAG_INT) ? idx.v.i : 0;`.
+- The Array arm no longer leaves a Bignum out (`idx.tag != SP_TAG_BIGINT &&` is gone from its condition); the
+  Bignum goes with every other index that is no Integer to sp_poly_ary_index_other, which asks for it first.
+- sp_poly_ary_index_other is SP_NOINLINE without SP_COLD: with the cold mark gcc laid the Integer read out one
+  instruction longer.
+
+The body states the cost that is left: with gcc the Array read by a Float that fits, 219 to 223 (the range test
+that makes a NaN a RangeError); with clang one instruction on a boxed String read by a boxed Integer, 437 to 438,
+a read the arm does not touch. Of forty loops no other costs more with either compiler. Four forms were measured
+on this tip (tables cost-od3v-*, cost-zo6-*, cost-r-od3-* in the builder's container).
+
+Run on 16bca08960d1 (the commit's parent): build; `tools/gate.rb check`; the test in eighteen cells; `tools/cident.sh`
+(6,541 identical, 0 differ); share-strings-test and int-min-test pass; forty loops with both compilers; the 1,056
+programs of the family: 651 right on master and here, 327 cured, 78 the same wrong bytes, 0 lost. The loops and the
+family ran on a build whose compiler binary and lib/spinel_rt.h are byte for byte this head's own.
+Clean into 47225b489a3c (tree ee2a465aacd8) and into fb0de073421a (tree 14decde456b5) by exit status; neither move
+names a function of the piece nor a helper it calls.

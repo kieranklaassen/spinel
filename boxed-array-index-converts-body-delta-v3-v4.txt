@@ -1,0 +1,34 @@
+--- boxed-array-index-converts-body-v3.md
++++ boxed-array-index-converts-body-v4.md
+@@ -11,11 +11,11 @@
+ p g["a"][g["big"]]   # 10; CRuby: bignum too big to convert into 'long' (RangeError)
+ ```
+ 
+-The fix costs one read that is right on master: a boxed Array read by a boxed Float that fits a word runs 209 instructions a loop pass there and 213 here with clang, 223 and 220 with gcc. That is the range test in front of the cast, which makes a NaN or 1e30 a RangeError where it is a silent nil.
++The fix costs two reads that are right on master, one with each compiler. With gcc a boxed Array read by a boxed Float that fits a word runs 219 instructions a loop pass there and 223 here (207 and 205 with clang): that is the range test in front of the cast, which makes a NaN or 1e30 a RangeError where it is a silent nil. With clang a boxed String read by a boxed Integer runs 437 and 438 (431 and 431 with gcc): that read is not this arm's, the function is laid out anew around it.
+ 
+ The first line printed nil until the commit "A keyword splat sent to a method without keywords arrives as its last positional, and a boxed array index of another kind raises TypeError". Its arm in `sp_poly_index_poly` is right for a String, a Symbol, an Array or a Hash index, and for a Float that fits a word. It raises TypeError for every other kind too, and a Rational, a Complex and an object with `to_int` are kinds `Array#[]` converts. It casts a Float without a range test, which is undefined for a NaN, an infinity or 1e30: each answers nil. And it leaves a Bignum to the function's last line, which reads element 0.
+ 
+-The index is now converted as `Array#fill`'s offset is (`sp_array_fill_offset_arg`): what has `to_int` answers the element, a Float or a Bignum past a word is CRuby's RangeError, and `true` and `false` are named as CRuby names them. The one Bignum that fits a word, the smallest Integer, is an offset past every Array and answers nil, where master answers the first element. A Float that fits is still cut in line; the rest is out of line, so the reads beside it pay nothing: by callgrind a loop pass of `a[k]` with a boxed Integer `k` runs 205 instructions on master and 202 here with gcc, 191 and 189 with clang, and an Integer-keyed boxed Hash read by one 148 and 145, 158 and 152.
++The index is now converted as `Array#fill`'s offset is (`sp_array_fill_offset_arg`): what has `to_int` answers the element, a Float or a Bignum past a word is CRuby's RangeError, and `true` and `false` are named as CRuby names them. The one Bignum that fits a word, the smallest Integer, is an offset past every Array and answers nil, where master answers the first element. A Float that fits is still cut in line; the rest is out of line, so an Integer index pays nothing: by callgrind a loop pass of `a[k]` with a boxed Integer `k` runs 203 instructions on master and 203 here with gcc, 189 and 188 with clang, and an Integer-keyed boxed Hash read by one 149 and 149, 153 and 147. Of forty loops through the function no other costs more with either compiler.
+ 
+ Of 1,056 programs that read a boxed Array of every kind through an index of every kind, 327 are cured and none that was right is lost: 651 are right on master and here, and the other 78 print the same wrong bytes on both.
+ 
+@@ -26,10 +26,12 @@
+ ## `make gate` (on this branch merged with current master)
+ 
+ ```
+-paste the Tests:, scale-test and gate: lines here
++gate: run on the Mac at opening
+ ```
+ 
+-- [ ] New tests have `.expected` files that match CRuby 4.0 run with `--enable-frozen-string-literal`
+-- [ ] Values past 2^31 are marked `# spinel: int64`
+-- [ ] If optcarrot's generated C changed: callgrind numbers, checksum 59662
+-- [ ] Depends on: #
++Run here on Linux (x86_64, gcc 13.3.0, ruby 3.3.6), on master 16bca0896 merged with this branch's commit (376d79b9b): the build; `tools/gate.rb check`; the new test in eighteen cells (gcc and clang; the default mode, `--int-overflow=promote` and `--share-strings`; `SPINEL_GC_STRESS` unset, 1 and 2); `tools/cident.sh` against master (all 6,541 corpus programs, optcarrot among them, compile to the same C); and the legs `share-strings-test` and `int-min-test` alone, which pass.
++
++- [ ] New tests have `.expected` files that match CRuby 4.0 run with `--enable-frozen-string-literal` (not run under CRuby 4.0 here; ruby 3.3.6 with that flag prints `test/boxed_array_index_converts.rb.expected` but for 3 lines whose message quotes a name: 3.3 opens the quote with a backquote, 3.4 and later with an apostrophe, as the file has)
++- [x] Values past 2^31 are marked `# spinel: int64` (`test/boxed_array_index_converts.rb` is)
++- [ ] If optcarrot's generated C changed: callgrind numbers, checksum 59662 (it did not change: `tools/cident.sh` finds it byte-identical to master's at 16bca0896)
++- [ ] Depends on: # (nothing)
