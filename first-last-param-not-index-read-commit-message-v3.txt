@@ -1,0 +1,34 @@
+first and last on a parameter that stops being an Array are not an index read
+
+    def show(v) = v.is_a?(Array) ? v.map { |x| show(x) } : (v.is_a?(Range) ? [v.first, v.last] : v)
+    p show([(1..2), 1])
+
+printed [[nil, nil], 1]; CRuby prints [[1, 2], 1]. A Hash in the
+Range's place answered nil for its first, and a String or an Integer
+answered its first character or its lowest bit where CRuby raises
+NoMethodError.
+
+desugar_array_first_last rewrites first and last on an Array receiver
+to [0] and [-1]. It runs inside the analysis fixpoint, so a receiver
+can be an Array when it runs and boxed a round later: here `v` is the
+Array of the outer call until the call in the block hands it that
+Array's elements. The rewrite stayed, and [0] on a boxed Range is not
+its first.
+
+The rewrite marks its call, and a marked call whose receiver has
+become boxed takes its name back, once. Such a receiver still holds an
+Array most of the time, and sp_poly_first asks for a Range, a String,
+a Hash and an Enumerator before it reads one. So the call taken back
+goes to sp_poly_first_was_index or sp_poly_last_was_index: an Array is
+read as the index read read it, and any other value answers its own
+first or last.
+
+A call taken back costs what the index read cost on an Array of
+Symbols, of mixed values or of Arrays (one instruction more with gcc,
+none with clang) and less on an Array of Integers, Floats or Strings
+(37 to 53 fewer with gcc, 66 fewer with clang: the index read asks
+for a MatchData, a Proc, a Struct, an Integer and a String before it
+reads a typed Array). 600,000 such calls of first on [3, 4] run
+270,867,853 instructions where they ran 296,667,840 (callgrind, gcc).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
