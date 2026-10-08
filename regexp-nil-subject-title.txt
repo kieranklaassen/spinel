@@ -1,0 +1,1 @@
+A Regexp matched against nil clears $~ and its named captures

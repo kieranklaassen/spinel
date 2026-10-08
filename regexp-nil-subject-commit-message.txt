@@ -1,0 +1,42 @@
+A Regexp matched against nil clears $~ and its named captures
+
+    def line(i) = i == 0 ? "k=v" : nil
+
+    2.times do |i|
+      if /(?<key>\w+)=/ =~ line(i)
+        puts "set #{key}"
+      else
+        p key               # nil
+      end
+    end
+
+printed "k" for the line that is nil: the capture of the match before.
+A nil subject of a Regexp's own =~, !~, ===, match and of the
+named-capture =~ went to the matcher as NULL, and the matchers return
+for NULL before they touch the registers, so $~, $1 and the capture
+locals kept the earlier match. CRuby reads $~ as nil after such a
+call; only `nil =~ re`, which is NilClass#=~, leaves it.
+
+A boxed nil did not get that far. The String slot's conversion made it
+"", so `Regexp.new("^ *$").match?(v)` answered true for nil, `match`
+gave a MatchData of "", and the block form of a Regexp that is no
+literal raised a TypeError.
+
+Now nil reaches the matcher as NULL at each of these sites, boxed or
+not, and sp_re_subj clears the registers for it. Every other value
+converts as its site converted it before. The clearing is emitted only
+where it can be seen: in a program that reads $~, $1 or
+Regexp.last_match, for a subject that is no String literal; at a named
+capture always. Elsewhere the C is unchanged.
+
+Of 486 lines that 54 generated programs print (the Regexp written six
+ways, nine operations, nil six ways and a String three), 230 were
+wrong. 11 still are, all from `when /re/`, which is left as it is: a
+`case` in a method has no frame of its own for $~ yet.
+
+Test: test/regexp_nil_subject.rb (expected from CRuby 3.3.6); master
+stops it at a TypeError. 13 other programs of the corpus change their
+generated C, each one reading $~ or a capture; they print their
+.expected as before.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
