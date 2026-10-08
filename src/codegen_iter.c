@@ -1019,6 +1019,295 @@ static int inline_target_same(const InlineTarget *a, const InlineTarget *b) {
          a->cm_self_id == b->cm_self_id && a->implicit_self == b->implicit_self;
 }
 
+/* Does this subtree read the value of a `yield`: one that is not a statement
+   on its own? The last statement of a list is read when the list's value is
+   (`tail_read`); a nested list is taken as read. */
+static int subtree_reads_yield(const NodeTable *nt, int node, int tail_read) {
+  if (node < 0) return 0;
+  NodeKind k = nt_kind(nt, node);
+  if (k == NK_YieldNode) return 1;
+  if (k == NK_DefNode || k == NK_ClassNode || k == NK_ModuleNode) return 0;
+  if (k == NK_StatementsNode) {
+    int n = 0; const int *bb = nt_arr(nt, node, "body", &n);
+    for (int i = 0; i < n; i++) {
+      if (nt_kind(nt, bb[i]) == NK_YieldNode && (i < n - 1 || !tail_read)) {
+        if (subtree_reads_yield(nt, nt_ref(nt, bb[i], "arguments"), 1)) return 1;
+        continue;
+      }
+      if (subtree_reads_yield(nt, bb[i], 1)) return 1;
+    }
+    return 0;
+  }
+  int nr = nt_num_refs(nt, node);
+  for (int i = 0; i < nr; i++) if (subtree_reads_yield(nt, nt_ref_at(nt, node, i), 1)) return 1;
+  int na = nt_num_arrs(nt, node);
+  for (int i = 0; i < na; i++) {
+    int n = 0; const int *el = nt_arr_at(nt, node, i, &n);
+    for (int j = 0; j < n; j++) if (subtree_reads_yield(nt, el[j], 1)) return 1;
+  }
+  return 0;
+}
+
+/* Is a node of one of these kinds in the subtree, outside a nested `def`,
+   `class` or `module`? */
+static int subtree_holds_kind(const NodeTable *nt, int node, const NodeKind *ks, int nk) {
+  if (node < 0) return 0;
+  NodeKind k = nt_kind(nt, node);
+  if (k == NK_DefNode || k == NK_ClassNode || k == NK_ModuleNode) return 0;
+  for (int i = 0; i < nk; i++) if (k == ks[i]) return 1;
+  int nr = nt_num_refs(nt, node);
+  for (int i = 0; i < nr; i++) if (subtree_holds_kind(nt, nt_ref_at(nt, node, i), ks, nk)) return 1;
+  int na = nt_num_arrs(nt, node);
+  for (int i = 0; i < na; i++) {
+    int n = 0; const int *el = nt_arr_at(nt, node, i, &n);
+    for (int j = 0; j < n; j++) if (subtree_holds_kind(nt, el[j], ks, nk)) return 1;
+  }
+  return 0;
+}
+
+/* Is a `yield` of the subtree under a block or a lambda of the method's
+   own? Such a block can be a C function of its own (a Hash's default
+   block), where the block a splice would write is not in scope. */
+static int subtree_yields_in_block(const NodeTable *nt, int node, int in_blk) {
+  if (node < 0) return 0;
+  NodeKind k = nt_kind(nt, node);
+  if (k == NK_DefNode || k == NK_ClassNode || k == NK_ModuleNode) return 0;
+  if (k == NK_YieldNode && in_blk) return 1;
+  if (k == NK_BlockNode || k == NK_LambdaNode) in_blk = 1;
+  int nr = nt_num_refs(nt, node);
+  for (int i = 0; i < nr; i++) if (subtree_yields_in_block(nt, nt_ref_at(nt, node, i), in_blk)) return 1;
+  int na = nt_num_arrs(nt, node);
+  for (int i = 0; i < na; i++) {
+    int n = 0; const int *el = nt_arr_at(nt, node, i, &n);
+    for (int j = 0; j < n; j++) if (subtree_yields_in_block(nt, el[j], in_blk)) return 1;
+  }
+  return 0;
+}
+
+/* Does the method run its block by a `yield` that stands in its own body,
+   and hand it on nowhere? `block_given?` beside the yield asks about the
+   block and hands it nowhere. A block parameter, a block or `...` argument
+   and a `super` hand the block on by roads the splice of a forwarded block
+   does not follow; a parameter default that reaches the block (`def seen(n,
+   k = yield(n))`) reads the yield where the body is not asked whether it
+   does; and a `yield` under a block or lambda of the method's own may not
+   be in its C function. */
+static int yields_alone(const NodeTable *nt, int def) {
+  static const NodeKind yld[] = { NK_YieldNode };
+  static const NodeKind any[] = { NK_BlockArgumentNode, NK_ForwardingArgumentsNode, NK_SuperNode,
+                                  NK_ForwardingSuperNode, NK_YieldNode };
+  int pn = nt_ref(nt, def, "parameters"), body = nt_ref(nt, def, "body");
+  return (pn < 0 || nt_ref(nt, pn, "block") < 0) && subtree_holds_kind(nt, body, yld, 1) &&
+         !subtree_holds_kind(nt, body, any, 4) && !subtree_holds_kind(nt, pn, any, 5) &&
+         !subtree_yields_in_block(nt, body, 0);
+}
+
+/* Is this last statement of a block one of the short list the splice of a
+   block as a value (emit_block_invoke) is seen to build? A literal, a
+   local or instance variable, an array of these, and the arithmetic and
+   comparison of two of them that are Integer, Float or boxed. Every other
+   ending is not judged: it is not one of these. */
+static int tail_has_value(Compiler *c, int tail) {
+  static const char *const ops[] = { "+", "-", "*", "<", ">", "<=", ">=", "==", NULL };
+  const NodeTable *nt = c->nt;
+  tail = unwrap_parens(c, tail);
+  TyKind t = comp_ntype(c, tail);
+  if (t == TY_UNKNOWN || t == TY_VOID) return 0;
+  switch (nt_kind(nt, tail)) {
+  case NK_IntegerNode: case NK_FloatNode: case NK_StringNode: case NK_SymbolNode:
+  case NK_TrueNode: case NK_FalseNode: case NK_NilNode:
+  case NK_LocalVariableReadNode: case NK_InstanceVariableReadNode:
+    return 1;
+  case NK_ArrayNode: {
+    int n = 0; const int *el = nt_arr(nt, tail, "elements", &n);
+    for (int i = 0; i < n; i++) if (!tail_has_value(c, el[i])) return 0;
+    return 1;
+  }
+  case NK_CallNode: {
+    const char *nm = nt_str(nt, tail, "name");
+    int recv = nt_ref(nt, tail, "receiver"), a = nt_ref(nt, tail, "arguments"), an = 0, op = 0;
+    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
+    for (int i = 0; nm && ops[i]; i++) op |= sp_streq(nm, ops[i]);
+    if (!op || recv < 0 || an != 1 || nt_ref(nt, tail, "block") >= 0) return 0;
+    TyKind rt = comp_ntype(c, recv), at = comp_ntype(c, av[0]);
+    /* a boxed operand goes to the builtin's boxed helper unless the program
+       has an operator of that name of its own */
+    if ((rt == TY_POLY || at == TY_POLY) && user_defines_or_reads(c, nm)) return 0;
+    return (rt == TY_INT || rt == TY_FLOAT || rt == TY_POLY) && (at == TY_INT || at == TY_FLOAT || at == TY_POLY) &&
+           (t == TY_INT || t == TY_FLOAT || t == TY_BOOL || t == TY_POLY) &&
+           tail_has_value(c, recv) && tail_has_value(c, av[0]);
+  }
+  default:
+    return 0;
+  }
+}
+
+/* May `inner(...)` hand this literal block on to the callee `mi`? Only to a
+   method yields_alone takes; not a block that holds a `break`, its own
+   loop's included; and, where the callee reads the value of a yield, only a
+   block whose last statement is one tail_has_value takes. */
+static int fwd_block_splices(Compiler *c, int blk, int mi, int as_expr) {
+  static const NodeKind brk[] = { NK_BreakNode };
+  const NodeTable *nt = c->nt;
+  int body = nt_ref(nt, blk, "body"), def = c->scopes[mi].def_node;
+  if (def < 0 || !yields_alone(nt, def) || subtree_holds_kind(nt, body, brk, 1)) return 0;
+  if (!subtree_reads_yield(nt, nt_ref(nt, def, "body"), as_expr)) return 1;
+  int n = 0; const int *bb = body >= 0 && nt_kind(nt, body) == NK_StatementsNode ? nt_arr(nt, body, "body", &n) : NULL;
+  return bb && n > 0 && tail_has_value(c, bb[n - 1]);
+}
+
+/* Does the method take exactly `n` required positional parameters and no
+   other parameter? */
+static int def_takes_exactly(const NodeTable *nt, int def, int n) {
+  static const char *const none[] = { "optionals", "posts", "keywords", NULL };
+  int pn = def >= 0 ? nt_ref(nt, def, "parameters") : -1, nreq = 0;
+  if (pn < 0) return n == 0;
+  for (int i = 0; none[i]; i++) {
+    int k = 0; nt_arr(nt, pn, none[i], &k);
+    if (k) return 0;
+  }
+  nt_arr(nt, pn, "requireds", &nreq);
+  return nreq == n && nt_ref(nt, pn, "rest") < 0 && nt_ref(nt, pn, "keyword_rest") < 0 &&
+         nt_ref(nt, pn, "block") < 0;
+}
+
+/* Does the method keep a `...`? */
+static int def_keeps_dots(const NodeTable *nt, int def) {
+  int pn = nt_ref(nt, def, "parameters"), kr = pn >= 0 ? nt_ref(nt, pn, "keyword_rest") : -1;
+  return kr >= 0 && nt_type(nt, kr) && sp_streq(nt_type(nt, kr), "ForwardingParameterNode");
+}
+
+/* What the program says of one method name, read once a name. A forward asks
+   it at every expansion, and a walk of the program for each one made the
+   compile time a product of forwards and call sites. */
+typedef struct {
+  const NodeTable *nt;
+  char *name;
+  int count;      /* the positionals every call of the name, and every `super` in
+                     a method of the name, writes out: FWD_NO_SITE with none, or
+                     FWD_NO_COUNT where they differ or one cannot be counted */
+  int no_break;   /* no literal block handed to a call of the name holds a `break` */
+  int valued;     /* and the last statement of each is one tail_has_value takes */
+} FwdNameFacts;
+enum { FWD_NO_SITE = -2, FWD_NO_COUNT = -1 };
+static FwdNameFacts *g_fwd_facts;
+static int g_n_fwd_facts;
+
+/* One more site of the name, which writes out `k` positionals (FWD_NO_COUNT:
+   a `*`, a key or a `...` at it). */
+static void fwd_facts_count(FwdNameFacts *f, int k) {
+  if (f->count == FWD_NO_SITE) f->count = k;
+  else if (f->count != k) f->count = FWD_NO_COUNT;
+}
+
+/* The positional arguments this call, or this `super` with arguments of its
+   own, writes out. */
+static int site_written_count(const NodeTable *nt, int call) {
+  int a = nt_ref(nt, call, "arguments"), an = 0;
+  const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
+  for (int i = 0; i < an; i++) {
+    NodeKind k = nt_kind(nt, av[i]);
+    if (k == NK_SplatNode || k == NK_KeywordHashNode || k == NK_ForwardingArgumentsNode) return FWD_NO_COUNT;
+  }
+  return an;
+}
+
+/* The `super`s under `node`, in the method `def` of the name. A `super(...)`
+   hands on what the method was handed and is no site of its own; a bare
+   `super` hands on the method's own parameters. */
+static void fwd_facts_supers(const NodeTable *nt, int node, int def, FwdNameFacts *f) {
+  if (node < 0) return;
+  NodeKind k = nt_kind(nt, node);
+  if (k == NK_DefNode || k == NK_ClassNode || k == NK_ModuleNode) return;
+  if (k == NK_SuperNode) {
+    int a = nt_ref(nt, node, "arguments"), an = 0;
+    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
+    if (!(an == 1 && nt_kind(nt, av[0]) == NK_ForwardingArgumentsNode)) fwd_facts_count(f, site_written_count(nt, node));
+  }
+  if (k == NK_ForwardingSuperNode && !def_keeps_dots(nt, def)) {
+    int pn = nt_ref(nt, def, "parameters"), nreq = 0;
+    if (pn >= 0) nt_arr(nt, pn, "requireds", &nreq);
+    fwd_facts_count(f, def_takes_exactly(nt, def, nreq) ? nreq : FWD_NO_COUNT);
+  }
+  int nr = nt_num_refs(nt, node);
+  for (int i = 0; i < nr; i++) fwd_facts_supers(nt, nt_ref_at(nt, node, i), def, f);
+  int na = nt_num_arrs(nt, node);
+  for (int i = 0; i < na; i++) {
+    int m = 0; const int *el = nt_arr_at(nt, node, i, &m);
+    for (int j = 0; j < m; j++) fwd_facts_supers(nt, el[j], def, f);
+  }
+}
+
+static FwdNameFacts *fwd_name_facts(Compiler *c, const char *name, size_t nl) {
+  static const NodeKind brk[] = { NK_BreakNode };
+  const NodeTable *nt = c->nt;
+  for (int i = 0; i < g_n_fwd_facts; i++)
+    if (g_fwd_facts[i].nt == nt && strlen(g_fwd_facts[i].name) == nl && strncmp(g_fwd_facts[i].name, name, nl) == 0)
+      return &g_fwd_facts[i];
+  if (g_n_fwd_facts % 8 == 0) g_fwd_facts = realloc(g_fwd_facts, sizeof *g_fwd_facts * (size_t)(g_n_fwd_facts + 8));
+  FwdNameFacts *f = &g_fwd_facts[g_n_fwd_facts++];
+  *f = (FwdNameFacts){ nt, strndup(name, nl), FWD_NO_SITE, 1, 1 };
+  for (int id = 0; id < nt->count; id++) {
+    NodeKind k = nt_kind(nt, id);
+    if (k != NK_CallNode && k != NK_DefNode && k != NK_SymbolNode) continue;
+    const char *nm = nt_str(nt, id, k == NK_SymbolNode ? "value" : "name");
+    if (!nm || strlen(nm) != nl || strncmp(nm, name, nl) != 0) continue;
+    if (k == NK_SymbolNode) f->count = FWD_NO_COUNT;   /* `send`, `alias_method`: a call no walk counts */
+    else if (k == NK_DefNode) {
+      /* a parameter named before a `...` is forwarded with it (`def m(x, ...)`):
+         what such a method hands on is not what it was handed */
+      int pn = nt_ref(nt, id, "parameters"), nreq = 0, nopt = 0;
+      if (pn >= 0) { nt_arr(nt, pn, "requireds", &nreq); nt_arr(nt, pn, "optionals", &nopt); }
+      if (def_keeps_dots(nt, id) && nreq + nopt) f->count = FWD_NO_COUNT;
+      fwd_facts_supers(nt, nt_ref(nt, id, "body"), id, f);
+    }
+    else {
+      fwd_facts_count(f, site_written_count(nt, id));
+      int blk = nt_ref(nt, id, "block"), recv = nt_ref(nt, id, "receiver");
+      if (blk < 0 || nt_kind(nt, blk) != NK_BlockNode) continue;
+      TyKind rt = recv >= 0 ? comp_ntype(c, recv) : TY_UNKNOWN;
+      if (!ty_is_object(rt) && rt != TY_POLY && rt != TY_UNKNOWN) continue;   /* a builtin's own */
+      int body = nt_ref(nt, blk, "body"), n = 0;
+      const int *bb = body >= 0 && nt_kind(nt, body) == NK_StatementsNode ? nt_arr(nt, body, "body", &n) : NULL;
+      if (subtree_holds_kind(nt, body, brk, 1)) f->no_break = 0;
+      if (!(bb && n > 0 && tail_has_value(c, bb[n - 1]))) f->valued = 0;
+    }
+  }
+  return f;
+}
+
+/* May the proc form of a method named `name` forward its proc to `mi`, a
+   method yields_alone takes? Only where every literal block the program
+   hands a method of that name would splice into `mi` too (fwd_block_splices):
+   the proc form serves every site, and a program whose sites are left as
+   they were is not built by it into their LocalJumpError. */
+static int fwd_sites_splice(Compiler *c, const char *name, int mi) {
+  size_t nl = name ? strcspn(name, "#") : 0;
+  if (nl == 0 || (nl == 10 && strncmp(name, "initialize", nl) == 0)) return 0;
+  FwdNameFacts *f = fwd_name_facts(c, name, nl);
+  return f->no_break && (f->valued || !subtree_reads_yield(c->nt, nt_ref(c->nt, c->scopes[mi].def_node, "body"), 1));
+}
+
+/* Is the callee `m` handed exactly what the kept `...` of `fwd` carries? The
+   forward binds the forwarder's slots to the callee's parameters by position
+   and judges no count, so a callee CRuby would refuse runs on, and handed
+   the block it would run the block too. The block is handed on only where
+   no count can be off: every parameter of the forwarder is a slot of its
+   `...` (it names none, and no call hands it a key); `m` takes that many
+   required positionals and nothing else; and every site of the forwarder's
+   name writes out that many (fwd_name_facts). `initialize` is called by
+   `new`, not by its name: not judged. */
+static int fwd_fills_exactly(Compiler *c, const Scope *fwd, const Scope *m) {
+  size_t nl = fwd->name ? strcspn(fwd->name, "#") : 0;
+  int n = fwd->nparams;
+  if (nl == 0 || (nl == 10 && strncmp(fwd->name, "initialize", nl) == 0)) return 0;
+  for (int i = 0; i < n; i++)
+    if (!fwd->pnames[i] || strncmp(fwd->pnames[i], "__fwd_", 6) != 0) return 0;
+  if (!def_takes_exactly(c->nt, m->def_node, n)) return 0;
+  int count = fwd_name_facts(c, fwd->name, nl)->count;
+  return count == n || count == FWD_NO_SITE;
+}
+
 int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
   if (g_plan_check) ucall_emitted(id);
   const NodeTable *nt = c->nt;
@@ -1154,6 +1443,26 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
     }
     /* a proc value drives the yields; the site's own block is not this one */
     block = (fwd_yield_proc && !fwd_encl) ? -1 : g_block_id;
+  }
+  /* `inner(...)` in a method that kept its `...` (one whose `super(...)`
+     reaches a method that yields) hands on the block this site runs under,
+     as `inner(&)` does and as the `super(...)` beside it does */
+  else if (block < 0) {
+    int fa = nt_ref(nt, id, "arguments"), fac = 0;
+    const int *fav = fa >= 0 ? nt_arr(nt, fa, "arguments", &fac) : NULL;
+    Scope *fe = fac >= 1 && fav && nt_kind(nt, fav[fac - 1]) == NK_ForwardingArgumentsNode
+                    ? comp_scope_of(c, fav[fac - 1]) : NULL;
+    if (fe && fac == 1 && fwd_fills_exactly(c, fe, m)) {
+      if (g_block_id >= 0) {
+        if (fwd_block_splices(c, g_block_id, mi, as_expr)) block = g_block_id;
+      }
+      else if (g_yield_proc_ref && m->def_node >= 0 && yields_alone(nt, m->def_node) &&
+               (!fe->is_proc_form || fwd_sites_splice(c, fe->name, mi))) {
+        snprintf(yprocbuf, sizeof yprocbuf, "%s", g_yield_proc_ref);
+        fwd_yield_proc = yprocbuf;
+        if (g_yield_proc_expr_ref == g_yield_proc_ref) fwd_value = g_yield_proc_expr;
+      }
+    }
   }
   if (g_nren + m->nlocals >= MAX_RENAME) return 0;
   /* Pre-check: every body local must have an emittable type. Bail BEFORE
