@@ -10628,6 +10628,22 @@ static SP_INLINE sp_RbVal sp_poly_arr_get_hash(sp_RbVal a, sp_int i) {
   }
   return sp_poly_arr_get_hash_cold(a, i);
 }
+/* A Bignum as an Array's index: the smallest Integer still fits a word and
+   is past every Array; any other is CRuby's RangeError. */
+static SP_COLD SP_NOINLINE sp_int sp_poly_ary_big_offset(sp_RbVal v) {
+  sp_Bigint *b = (sp_Bigint *)v.v.p;
+  if (sp_bigint_bit_length(b) < (sp_int)(sizeof(sp_int) * 8)) return (sp_int)sp_bigint_to_int(b);
+  sp_raise_cls("RangeError", "bignum too big to convert into 'long'");
+}
+/* An Array's index that is no Integer, off the hot read: it converts as
+   Array#fill's offset does. An object answers to_int, a Float or a Bignum
+   past a word is CRuby's RangeError, and what has no conversion is its
+   TypeError. A Bignum comes here with the rest: left out of the arm, it
+   went on to the function's last line, which read element 0. */
+static SP_NOINLINE sp_RbVal sp_poly_ary_index_other(sp_RbVal a, sp_RbVal idx) {
+  if (idx.tag == SP_TAG_BIGINT) return sp_poly_arr_get_hash(a, sp_poly_ary_big_offset(idx));
+  return sp_poly_arr_get_hash(a, sp_array_fill_offset_arg(idx, 0));
+}
 
 static SP_NOINLINE sp_RbVal sp_poly_arr_get_hash_cold(sp_RbVal a, sp_int i) {
   /* MatchData#[i]: the group, nil where it did not match */
@@ -10836,10 +10852,13 @@ static sp_RbVal sp_poly_index_poly(sp_RbVal recv, sp_RbVal idx) {
   /* ...nor a String's or a Symbol's: the index arms below read it as 0 */
   if (idx.tag == SP_TAG_NIL && (recv.tag == SP_TAG_STR || recv.tag == SP_TAG_SYM))
     sp_raise_cls("TypeError", "no implicit conversion from nil to integer");
-  if (recv.tag == SP_TAG_OBJ && sp_poly_is_array_kind(recv.cls_id) && idx.tag != SP_TAG_BIGINT &&
+  if (recv.tag == SP_TAG_OBJ && sp_poly_is_array_kind(recv.cls_id) &&
       !(idx.tag == SP_TAG_OBJ && idx.cls_id == SP_BUILTIN_RANGE)) {
-    if (idx.tag == SP_TAG_FLT) return sp_poly_arr_get_hash(recv, (sp_int)idx.v.f);
-    sp_raise_cls("TypeError", sp_sprintf("no implicit conversion of %s into Integer", sp_poly_class_name(idx)));
+    /* a Float is cut where it fits a word: the cast alone is undefined for
+       a NaN or 1e30, and answered nil */
+    if (idx.tag == SP_TAG_FLT && idx.v.f < -(sp_float)INTPTR_MIN && idx.v.f >= (sp_float)INTPTR_MIN)
+      return sp_poly_arr_get_hash(recv, (sp_int)idx.v.f);
+    return sp_poly_ary_index_other(recv, idx);
   }
   /* heterogeneous-key hash: any key kind (incl. Method) looks up directly. */
   if (recv.tag == SP_TAG_OBJ && recv.cls_id == SP_BUILTIN_POLY_POLY_HASH)

@@ -1,0 +1,32 @@
+nil
+nil
+nil
+RangeError: float NaN out of range of integer
+RangeError: float Inf out of range of integer
+RangeError: float -Inf out of range of integer
+RangeError: float 1e+30 out of range of integer
+RangeError: bignum too big to convert into 'long'
+RangeError: bignum too big to convert into 'long'
+RangeError: bignum too big to convert into 'long'
+RangeError: float NaN out of range of integer
+nil
+nil
+nil
+"s"
+"s"
+:z
+"s"
+:z
+TypeError: no implicit conversion of true into Integer
+TypeError: no implicit conversion of false into Integer
+TypeError: no implicit conversion of true into Integer
+TypeError: no implicit conversion of true into Integer
+TypeError: no implicit conversion of true into Integer
+"s"
+:z
+TypeError: no implicit conversion of Array into Integer
+10
+:z
+[10, "s"]
+TypeError: no implicit conversion from nil to integer
+[10, "s", :z]
