@@ -1,0 +1,35 @@
+A Symbol's equal? or eql? beside another kind of value answers false
+
+`:a.equal?(3)` raised NoMethodError (undefined method 'equal?' for an
+instance of Symbol), and so did eql?, where the argument is no Symbol
+by its type: an Integer, a String, nil, an object, and a boxed value
+even where it holds the same Symbol:
+
+    s = :a
+    p s.equal?(3)        # CRuby: false   Spinel: NoMethodError
+    x = [3, :a][1]
+    p s.eql?(x)          # CRuby: true    Spinel: NoMethodError
+
+The Symbol rows of the builtin table (src/builtin_ops.c) had none for
+equal? or eql?. The one arm was the compare of two Symbols by type,
+their ids; an Integer, a Float and a boolean receiver each answer the
+rest. Two rows now ask the boxed pair's identity, sp_poly_equal, for
+both names: a Symbol is itself alone. A Symbol slot that holds nil is
+boxed as nil there and equals nil. Two Symbols by type keep the compare
+they had.
+
+symbol_identity_builtin (analyze_util.c) says which calls the rows
+answer; every other call compiles as before. They answer the call with
+one argument and no block, in a program that defines no equal? or eql?
+above a Symbol (on Symbol, Object, BasicObject or NilClass, or in a
+module) and names neither in an undef, a private, an alias or a
+define_method. The argument is made of reads (a variable, a constant,
+self), calls that take no block, and number, String, Symbol, nil and
+boolean literals. Any other argument (an `if`, a `begin`, a block, a
+Range or Regexp literal, a literal Array or Hash that holds a call) is
+left as it was: some of these master evaluates ahead of the receiver.
+
+Tests: test/symbol_equal_other_kind.rb,
+test/symbol_equal_program_method.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
