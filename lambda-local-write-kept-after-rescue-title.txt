@@ -1,0 +1,1 @@
+A lambda's local written inside a begin keeps the write after the rescue
