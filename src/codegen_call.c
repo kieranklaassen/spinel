@@ -24842,6 +24842,80 @@ static int emit_deep_return_pickup(Compiler *c, int id, Buf *b) {
   return 1;
 }
 
+/* The program's own method `mi` on a builtin class takes call `id` ahead of
+   the builtin arms. What stands ahead of the plain call there: an IO
+   reopening has an emitter of its own, and a `&.` on a String, an Integer
+   or a Float never met its nil guard, so the method ran on the nil, and
+   its arguments ran too. The guard is written where the call stands: the
+   receiver runs in its place, and what the call hoists (its arguments'
+   temps) runs inside the arm that is not nil, so nothing the statement runs
+   before the call falls behind it. The value is boxed by the type inference
+   read for the call, so the guard is written only where that is the
+   method's own answer. A String receiver is rooted in its temp, unless
+   nothing can run between the temp and the call (no hoist, and each
+   parameter given a pure read of its own type), or the receiver is a local
+   or an instance variable, read as its slot, that no argument or default
+   can assign (read_rebound_by): the unguarded call held it no longer.
+   Answers 1 when it emitted the call. */
+static int emit_reopen_call_first(Compiler *c, int id, int recv, TyKind rt, const char *name, int mi, Buf *b) {
+  if (rt == TY_IO) { emit_io_reopen_call(c, id, recv, name, b); return 1; }
+  if ((rt != TY_STRING && rt != TY_INT && rt != TY_FLOAT) || !sn_guard_pending(c, id)) return 0;
+  TyKind ret = repr_of(c, id).as_ty, nat = ret == TY_POLY ? infer_uncached(c, id) : ret;
+  if (nat != c->scopes[mi].ret || repr_of(c, recv).kind == RK_BOXED || g_n_argov >= MAX_ARG_OVERRIDE) return 0;
+  int t = ++g_tmp, box = ret == TY_POLY && nat != TY_POLY && nat != TY_UNKNOWN && nat != TY_VOID;
+  int novalue = !ty_is_object(ret) && (!c_type_name(ret) || sp_streq(c_type_name(ret), "void"));
+  Buf rpre, pre, vb, val;
+  memset(&rpre, 0, sizeof rpre); memset(&pre, 0, sizeof pre); memset(&vb, 0, sizeof vb); memset(&val, 0, sizeof val);
+  Buf *sv_pre = g_pre;
+  g_pre = &rpre;
+  Buf rx = expr_buf(c, recv);
+  g_pre = &pre;
+  view_bind(recv, "_t%d", t);
+  int sv_skip = g_sn_skip; g_sn_skip = id;
+  int vw = box ? view_push(c, id, nat) : -1;
+  emit_expr(c, id, &vb);
+  if (vw >= 0) view_pop(c, vw);
+  g_sn_skip = sv_skip;
+  view_unbind(g_n_argov - 1);
+  g_pre = sv_pre;
+  if (box) emit_boxed_text(c, nat, vb.p ? vb.p : "", &val);
+  else buf_puts(&val, vb.p ? vb.p : "");
+  buf_puts(b, "({ ");
+  if (rpre.p) buf_puts(b, rpre.p);
+  int an = nt_ref(c->nt, id, "arguments"), argc = 0;
+  const int *argv = an >= 0 ? nt_arr(c->nt, an, "arguments", &argc) : NULL;
+  Scope *m = &c->scopes[mi];
+  const char *slot = !rx.p ? NULL : !strncmp(rx.p, "lv_", 3) ? rx.p + 3 : !strncmp(rx.p, "self->iv_", 9) ? rx.p + 9
+                   : !strncmp(rx.p, "self.iv_", 8) ? rx.p + 8 : NULL;
+  int rk = nt_kind(c->nt, recv);
+  int held = (rk == NK_LocalVariableReadNode || rk == NK_InstanceVariableReadNode) && slot &&
+             !slot[strspn(slot, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")] &&
+             !read_rebound_by(c, recv, an);
+  for (int i = 0; held && m->pdefault && i < m->nparams; i++) held = !read_rebound_by(c, recv, m->pdefault[i]);
+  int still = !(rpre.p && rpre.p[0]) && !(pre.p && pre.p[0]) && argc == m->nparams;
+  for (int i = 0; still && i < argc; i++) {
+    LocalVar *p = scope_local(m, m->pnames[i]);
+    still = p && !p->byref_out && p->type == comp_ntype(c, argv[i]) && subtree_is_pure_read(c, argv[i]);
+  }
+  held = held || still;
+  if (rt == TY_STRING && held) buf_printf(b, "const char *_t%d = %s; ", t, rx.p);
+  else if (rt == TY_STRING) buf_printf(b, "const char *_t%d = %s; SP_GC_ROOT_STR(_t%d); ", t, rx.p ? rx.p : "NULL", t);
+  else buf_printf(b, "%s _t%d = %s; ", rt == TY_INT ? "sp_int" : "sp_float", t, rx.p ? rx.p : "0");
+  if (!novalue) {
+    emit_ctype(c, ret, b);
+    buf_printf(b, " _r%d = %s; ", t, ret == TY_POLY ? "sp_box_nil()" : ret == TY_INT ? "SP_INT_NIL"
+               : ret == TY_FLOAT ? "sp_float_nil()" : ret == TY_STRING ? "((const char *)NULL)"
+               : default_value_from_compiler(c, ret) ? default_value_from_compiler(c, ret) : "0");
+  }
+  if (rt == TY_STRING) buf_printf(b, "if (_t%d != NULL) { ", t);
+  else if (rt == TY_INT) buf_printf(b, "if (_t%d != SP_INT_NIL) { ", t);
+  else buf_printf(b, "if (!sp_float_is_nil(_t%d)) { ", t);
+  if (pre.p) buf_puts(b, pre.p);
+  if (novalue) buf_printf(b, "%s; } })", val.p ? val.p : "");
+  else buf_printf(b, "_r%d = (%s); } _r%d; })", t, val.p ? val.p : "", t);
+  free(rpre.p); free(pre.p); free(vb.p); free(val.p); free(rx.p);
+  return 1;
+}
 void emit_call_body(Compiler *c, int id, Buf *b) {
   /* the class's own method in a builtin's receiver test (`__r.is_a?(K) ?
      __r.m { } : __enum_m(__r) { }`): the test has decided the receiver is
@@ -24914,7 +24988,7 @@ void emit_call_body(Compiler *c, int id, Buf *b) {
       if (ocR) {
         int ciR = rtR == TY_IO ? io_reopen_class(c, nmR) : comp_class_index(c, ocR);
         int miR = ciR >= 0 ? comp_method_in_chain(c, ciR, nmR, NULL) : -1;
-        if (miR >= 0 && rtR == TY_IO) { emit_io_reopen_call(c, id, recvR, nmR, b); return; }
+        if (miR >= 0 && emit_reopen_call_first(c, id, recvR, rtR, nmR, miR, b)) return;
         if (miR >= 0) {
           if (g_plan_check) ucall_observe(c, id, miR, ciR, 0);
           buf_printf(b, "sp_%s_%s(", mc_reopen_cls(c, ciR, nmR), mc(nmR));
