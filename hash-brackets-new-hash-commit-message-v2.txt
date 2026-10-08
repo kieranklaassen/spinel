@@ -1,0 +1,55 @@
+Hash[h] answers a new Hash
+
+    g = {"a" => 1}
+    c = Hash[g]
+    c["b"] = 2
+    p g.size
+
+printed 2 where CRuby prints 1: c was g itself, and every write
+through the copy landed in the original. Hash[x] is rewritten to
+x.to_h before x has a type, and a Hash's to_h answers the Hash.
+
+The to_h that rewrite made is emitted as a new Hash of the old one's
+entries: for a typed Hash in emit_builtin_op_ex, and for a boxed value
+in sp_hash_brackets_one, which copies a Hash and hands anything else
+to sp_poly_to_h_m as before. A boxed table is copied as it stands
+(sp_PolyPolyHash_copy_table), so a key changed after it went in stays
+where it was put, as in CRuby; a Hash of another kind is read entry by
+entry, once. The copy takes neither the default nor the frozen state.
+nil is no Hash: ArgumentError, "odd number of arguments for Hash".
+
+The copy is held for the whole statement: a call it is the receiver
+of (`Hash[h].invert`, `Hash[h].dup`) allocates before anything else
+holds it. Its slot is declared and rooted in the statement's prelude
+and assigned where the expression runs. A to_h the program wrote
+still answers the Hash itself.
+
+Three forms keep the C they had:
+
+- Hash[] of a literal (`Hash[a: 1]`), which is new already.
+- One written straight into a local of another kind of Hash, where
+  the conversion builds the new Hash (g_hash_conv_value names that
+  value while emit_assign converts it).
+- One that is only the receiver of a call that reads it and has no
+  block (`Hash[h].size`, `Hash[h].merge(x)`, `Hash[h]["a"]`): size,
+  length, empty?, count, keys, values, to_a, first, key?, has_key?,
+  include?, member?, [], fetch, dig, merge, ==, inspect and to_s
+  (hash_brackets_only_read).
+
+A program can tell the Hash from its copy there in four ways, and
+those print what they printed: a default read through the copy
+(`Hash[h]["zz"]` where h has one), a default or a frozen h written
+into the local of another kind, and an argument that changes h
+(`Hash[h].fetch((h.delete("a"); "a"), 0)`). A boxed value is not
+copied either where a class of the program defines to_h.
+
+Everywhere else the copy is made, as CRuby makes it. For a typed Hash
+it costs what dup costs (176 instructions an entry against 171 for
+Integer keys, 308 against 303 for String keys). For a Hash held in a
+boxed variable it costs 1.4 to 2 times dup where the keys are typed
+(341 against 181; 449 against 313), because the copy there is a Hash of
+boxed keys: a later store of another kind into dup's same-kind copy
+raises TypeError, and the new Hash takes it as CRuby's does. Where the
+keys are boxed already it is under half of dup (139 against 327).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
