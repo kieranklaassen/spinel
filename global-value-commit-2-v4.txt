@@ -1,0 +1,22 @@
+The value arm on a global takes `dup`, `+` and `*` only on proven Strings
+
+`$g = +"abc"; s = "q"; s = nil; r = ($g[0] = s.dup); p r, $g` printed
+nil and "bc" where it raised NoMethodError before the arm took a
+global, and where CRuby raises TypeError. `s&.dup`, `s&.to_s` and
+`s&.+("Y")` answered nil the same way, and so did `"a".dup` under a
+String reopened with its own `dup`. str_aset_value_never_nil named
+`dup` on a String as never nil; a String local can hold nil, `dup`
+answers nil for it, and a `&.` call answers nil for a nil receiver.
+
+The list now reads what can be nil. A literal and an interpolation
+cannot. `to_s` on a String or a number cannot: it answers "" for nil.
+`dup`, `+` and `*` by an Integer literal are taken where every String
+operand is on the list itself. A `&.` call is never on it, and neither
+is a name the program defines a method of: a reopened String or number
+can make it answer nil.
+
+A value off the list keeps the NoMethodError gate, as before the arm
+took a global: `s.dup`, `s + "x"` and `"ab" * n` with `s` and `n` out
+of variables among them.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
