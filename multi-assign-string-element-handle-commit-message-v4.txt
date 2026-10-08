@@ -1,0 +1,45 @@
+A multiple assignment's new String element is held as its handle
+
+    r = [+"q"]
+    r[0], r[1] = +"ab", +"cd"
+    r[0] << "z"
+    p r
+
+prints ["abz", "cd"] in CRuby and does not build here, with and without
+--share-strings: "initialization of 'sp_String *' from incompatible
+pointer type 'const char *'". `r[0] = +"ab"; r[1] = +"cd"` in place of
+the multiple assignment builds and is right.
+
+A String stored where an element is changed in place is wrapped in a
+handle of its own (repr_of's RS_FRESH), and a single store does that at
+the store (emit_boxed). A multiple assignment holds each value in a temp
+first. The temp was declared by the value's stored type, the handle, and
+filled with what the value renders as, the String.
+
+The temp is now the handle the store would have made,
+sp_String_new_shared over the String, where a list proves it
+(masgn_fresh_stmt): the value is a new String written as one, an
+interpolation, `+"lit"` or `"lit".dup` (masgn_el_fresh_str); its target
+is an element of a local typed an Array or a Hash and not nil there,
+the key a literal or a local; and the statement has as many values as
+targets, every other target such an element or a local, every other
+value a number, a Symbol, nil, true, false or a local, or a String
+literal bound for a local.
+
+Every other statement is emitted as before, and still does not build:
+a value in parentheses, a bang method's result or a lambda's call, which
+names a String that lives elsewhere, so that a second handle around it
+would be a copy; a new String bound for a local, or a String literal
+bound for an element, beside; a nested or a rest target; a computed
+key; an element of a local that is boxed or can be nil there (a block's
+parameter, a `for` variable, a local a pattern binds, a parameter with
+a default, a local of two kinds), whose store goes by another road or
+is not this statement's to make; and any such statement in a program
+that defines Array#[]=, Hash#[]=, String#+@ or String#dup itself, where
+the store or the value is the program's own.
+
+A String of adjacent literals (`"a" "b"`) is on the list as an
+interpolation is. The literal needed no root; its handle is rooted
+while a later value can allocate, as any other temp is.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
