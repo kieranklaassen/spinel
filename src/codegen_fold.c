@@ -1975,6 +1975,42 @@ int emit_sum_block_expr(Compiler *c, int id, Buf *b) {
   return 1;
 }
 
+/* Is every `next` of the body's own (fold_body_has_next) one the Integer
+   walks below already answer? A next that is the block's value is read as
+   that value (next_is_block_value). Any other is the walk's `continue`,
+   and the element is in the run before the block is asked, so the
+   `continue` keeps the run going: that is a next with a true literal in
+   chunk_while, and `next false`, `next nil` or a bare `next` in slice_when.
+   Under a `begin` that `continue` also pops the rescue's frame, as a next
+   that leaves the `begin` does, so there no next is one of these. The rest
+   are answered through emit_block_cond_next. */
+static int chunk_next_keeps_run(Compiler *c, int node, int is_sw) {
+  const NodeTable *nt = c->nt;
+  if (node < 0) return 1;
+  NodeKind k = nt_kind(nt, node);
+  if (k == NK_BlockNode || k == NK_LambdaNode || k == NK_DefNode) return 1;
+  if (k == NK_NextNode) {
+    if (next_is_block_value(c, node)) return 1;
+    if (g_exc_frame_depth != g_loop_exc_base || g_ensure_depth != g_loop_ensure_base) return 0;
+    int args = nt_ref(nt, node, "arguments"), n = 0;
+    const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &n) : NULL;
+    if (n == 0) return is_sw;
+    NodeKind vk = nt_kind(nt, av[0]);
+    if (n != 1) return 0;
+    if (is_sw) return vk == NK_FalseNode || vk == NK_NilNode;
+    return vk == NK_TrueNode || vk == NK_IntegerNode || vk == NK_FloatNode ||
+           vk == NK_StringNode || vk == NK_SymbolNode;
+  }
+  int nr = nt_num_refs(nt, node);
+  for (int i = 0; i < nr; i++) if (!chunk_next_keeps_run(c, nt_ref_at(nt, node, i), is_sw)) return 0;
+  int na = nt_num_arrs(nt, node);
+  for (int i = 0; i < na; i++) {
+    int m = 0; const int *ids = nt_arr_at(nt, node, i, &m);
+    for (int j = 0; j < m; j++) if (!chunk_next_keeps_run(c, ids[j], is_sw)) return 0;
+  }
+  return 1;
+}
+
 /* int_array.slice_when { |a, b| cond }[.to_a].inspect  or
    int_array.chunk { |x| key }[.to_a].inspect  ->  inspect string.
    Emits setup to g_pre and the result variable to b. Returns 1 if handled. */
@@ -2046,10 +2082,13 @@ int emit_slice_when_chunk_inspect_expr(Compiler *c, int id, Buf *b) {
     TyKind pta = lva ? lva->type : TY_UNKNOWN, ptb = lvb ? lvb->type : TY_UNKNOWN;
     if (lva) lva->type = TY_INT;
     if (lvb) lvb->type = TY_INT;
-    for (int j = 0; j < bn - 1; j++) emit_stmt(c, bb[j], g_pre, g_indent + 2);
-    int save = g_indent; g_indent += 2;
-    /* the block's value by Ruby's truth, as emit_chunk_while_expr reads it */
-    Buf cb; memset(&cb, 0, sizeof cb); emit_cond(c, bb[bn - 1], &cb); g_indent = save;
+    Buf cb; memset(&cb, 0, sizeof cb);
+    if (chunk_next_keeps_run(c, body, 1) || !emit_block_cond_next(c, block, g_indent + 2, &cb)) {
+      for (int j = 0; j < bn - 1; j++) emit_stmt(c, bb[j], g_pre, g_indent + 2);
+      int save = g_indent; g_indent += 2;
+      /* the block's value by Ruby's truth, as emit_chunk_while_expr reads it */
+      emit_cond(c, bb[bn - 1], &cb); g_indent = save;
+    }
     if (lva) lva->type = pta;
     if (lvb) lvb->type = ptb;
     emit_indent(g_pre, g_indent + 2);
@@ -2457,11 +2496,14 @@ int emit_chunk_while_expr(Compiler *c, int id, Buf *b) {
   TyKind pta = lva ? lva->type : TY_UNKNOWN, ptb = lvb ? lvb->type : TY_UNKNOWN;
   if (lva) lva->type = TY_INT;
   if (lvb) lvb->type = TY_INT;
-  for (int j = 0; j < bn - 1; j++) emit_stmt(c, bb[j], g_pre, g_indent + 2);
-  int save = g_indent; g_indent += 2;
-  /* the block's value by Ruby's truth: a boxed one (`a.send(s, b)`) is no C
-     scalar, and an Integer one is true even at 0 */
-  Buf cb; memset(&cb, 0, sizeof cb); emit_cond(c, bb[bn - 1], &cb); g_indent = save;
+  Buf cb; memset(&cb, 0, sizeof cb);
+  if (chunk_next_keeps_run(c, body, is_sw) || !emit_block_cond_next(c, block, g_indent + 2, &cb)) {
+    for (int j = 0; j < bn - 1; j++) emit_stmt(c, bb[j], g_pre, g_indent + 2);
+    int save = g_indent; g_indent += 2;
+    /* the block's value by Ruby's truth: a boxed one (`a.send(s, b)`) is no C
+       scalar, and an Integer one is true even at 0 */
+    emit_cond(c, bb[bn - 1], &cb); g_indent = save;
+  }
   if (lva) lva->type = pta;
   if (lvb) lvb->type = ptb;
   emit_indent(g_pre, g_indent + 2);
