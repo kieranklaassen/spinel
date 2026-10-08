@@ -248,6 +248,7 @@ int subtree_may_reassign_state(Compiler *c, int id);
    Strings, Symbols, their ranges and typed Arrays can; a builtin over those
    alone, with no block, cannot: `total + i.to_s` (codegen_call.c). */
 int subtree_may_run_proc(Compiler *c, int id);
+int ty_runs_no_code(TyKind t);   /* a kind whose builtin methods run no code of the program's */
 /* Does evaluating the subtree run no code, store nothing and allocate nothing
    -- variable and literal reads, scalar arithmetic, typed-array reads and
    plain field reads, all the way down (codegen_call.c)? */
