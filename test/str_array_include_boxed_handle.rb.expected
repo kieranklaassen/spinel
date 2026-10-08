@@ -1,0 +1,12 @@
+hash include?: true
+hash member?: true
+array include?: true
+local include?: true
+condition: in
+beside: true true
+integer: false
+nil: false true
+empty: true false
+longer: abz false true
+made by the call: 0
+nil beside a handle: false false true
