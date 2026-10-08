@@ -1,0 +1,1 @@
+attr_reader :message in an exception class is the exception's message

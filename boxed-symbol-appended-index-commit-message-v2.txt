@@ -1,0 +1,19 @@
+A boxed Symbol's [] reads a Float or appended String index
+
+    g = { "s" => :stone, "f" => 1.5 }
+    p g["s"][g["f"]]
+
+printed "s"; CRuby prints "t". Symbol#[] is String#[] on the Symbol's
+name. sp_poly_index_poly has an arm for a Symbol receiver with an
+Integer, an Integer Range, a Regexp and a nil index; an index of any
+other kind that no earlier arm takes fell to its last line, which
+reads offset 0. The arm a boxed String now has for such an index
+(sp_poly_str_aref_other) takes a Symbol's name too: a Float is cut, a
+Float Range slices, an appended String is searched for, and true or
+an Array is CRuby's TypeError. The call is in a function of its own
+(sp_poly_sym_aref_other): written out in sp_poly_index_poly it made
+gcc lay the reads above it out longer.
+
+Test: test/boxed_symbol_index_not_integer.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

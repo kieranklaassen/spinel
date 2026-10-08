@@ -1,0 +1,42 @@
+attr_reader :message in an exception class is the exception's message
+
+class ParseError < StandardError
+  attr_reader :message
+  def initialize(text, line)
+    super("parse error")
+    @message = "#{text} at line #{line}"
+  end
+end
+begin
+  raise ParseError.new("unexpected end", 3)
+rescue ParseError => e
+  p e.message
+end
+
+printed "parse error"; CRuby prints "unexpected end at line 3". With
+`def message = @message` in place of the declaration it was right.
+
+Exception#message is answered through dispatchers that know a class's
+own `def message`. A reader declared by attr_reader, attr or
+attr_accessor is no def, so a rescue's e.message answered the stored
+message and never @message.
+
+The declaration becomes the def it stands for, before the scope pass
+(desugar_exception_message_reader):
+
+  attr_accessor :code, :message
+    -> attr_accessor :code; attr_writer :message; def message = @message
+
+Only in a class written with a superclass that names an exception: a
+builtin one, or a class of the program whose every definition is found
+so. A class that says more about the name is left as it was: its own
+def, an alias to it, an undef, a call on self that names it, a bare
+private or protected. The C of a program the pass rewrites is the C of
+the same program with the def written out.
+
+Not changed: a reader declared in a reopening that names no superclass,
+or in a Class.new(StandardError) block, is still not the message.
+
+Test: test/exception_subclass_message_reader.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
