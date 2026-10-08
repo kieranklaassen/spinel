@@ -9924,13 +9924,12 @@ void emit_stmt(Compiler *c, int id, Buf *b, int indent) {
       return;
   }
   /* saved and restored like the other re-entry markers: a block body inlined
-     at two sites shares its node ids, so a setter that is a statement at one
+     at two sites shares its node ids, so a call that is a statement at one
      site must still yield its value at a value-position site */
-  int saved_setter = g_setter_stmt_id;
-  if (nt_kind(c->nt, id) == NK_CallNode && name_is_plain_setter(nt_str(c->nt, id, "name")))
-    g_setter_stmt_id = id;
+  int saved_stmt_call = g_stmt_call_id;
+  if (nt_kind(c->nt, id) == NK_CallNode) g_stmt_call_id = id;
   emit_with_prelude(c, id, b, indent, emit_stmt_inner);
-  g_setter_stmt_id = saved_setter;
+  g_stmt_call_id = saved_stmt_call;
   /* a call the statement emitters placed themselves (puts, an iterator with
      its block) never reached emit_call's stamp: the same default (#4522) */
   if (nt_kind(c->nt, id) == NK_CallNode && !(g_ndecide_cap > id && g_ndecide[id])) {

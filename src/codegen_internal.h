@@ -265,9 +265,9 @@ extern int  g_n_argov;
    (emit_args_run and its kin): the table grows, keeping
    MAX_ARG_OVERRIDE entries free past the fill for the sites that check. */
 void argov_reserve(void);
-/* The setter call (`obj.x = v`) emit_stmt is lowering: nothing reads its value,
-   so emit_object_call leaves the value temp out (see setter_value_open). */
-extern int  g_setter_stmt_id;
+/* The call emit_stmt is lowering: nothing reads its value, so a setter call
+   (`obj.x = v`) leaves its value temp out (see setter_value_open). */
+extern int  g_stmt_call_id;
 extern int  g_sn_skip;   /* safe-nav re-entry marker (see codegen_util.c) */
 extern int  g_cls_tag_skip;   /* poly-dispatch builtin-arm re-entry marker */
 /* Ask subtree_may_allocate before leaving something unrooted across `id`:

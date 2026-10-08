@@ -8521,13 +8521,13 @@ static void emit_isa_self_class(Compiler *c, int recv, int cid, Buf *b) {
    the writer's body returns (`def x=(v); @x = v.to_s; end` still yields v). The
    argument is evaluated once, after the receiver, into a rooted temp; the
    dispatch reads the temp through g_argov, and the temp is the result. A call
-   emit_stmt is lowering (g_setter_stmt_id) has no reader for the value and
+   emit_stmt is lowering (g_stmt_call_id) has no reader for the value and
    emits as before. Returns the temp, or -1 when the call is left alone, and
    the temp's type in *vt_out. */
 static int setter_value_open(Compiler *c, int id, Buf *b, TyKind *vt_out) {
   const NodeTable *nt = c->nt;
   int argc; const int *argv = call_args(nt, id, &argc);
-  if (id == g_setter_stmt_id || argc != 1 || nt_ref(nt, id, "block") >= 0 ||
+  if (id == g_stmt_call_id || argc != 1 || nt_ref(nt, id, "block") >= 0 ||
       !call_is_setter_assign(nt, id) || g_n_argov >= MAX_ARG_OVERRIDE)
     return -1;
   TyKind vt = repr_of(c, argv[0]).as_ty;
