@@ -1814,6 +1814,7 @@ int cplan_nil(Compiler *c, int id) {
   /* a local or a global is tested in its slot, where a mutator writes
      back: a slot that holds the pointer, or a shared String's handle; one
      held another way (a box a read unboxes) is left as it is */
+  int handle_local = 0;
   if (rk == NK_LocalVariableReadNode || rk == NK_GlobalVariableReadNode) {
     const char *sn = nt_str(nt, r, "name");
     LocalVar *lv = NULL;
@@ -1824,6 +1825,7 @@ int cplan_nil(Compiler *c, int id) {
     else if (sn && sn[0] == '$') lv = comp_gvar(c, comp_resolve_gvar(c, sn + 1));
     Repr sr = repr_of_slot(c, lv);
     if (!lv || !(sr.kind == RK_STRBUF || (sr.kind == RK_PTR && sr.as_ty == rt))) return CN_NONE;
+    handle_local = rk == NK_LocalVariableReadNode && sr.kind == RK_STRBUF;
   }
   /* a shared String's handle a call renders is not bound like a value */
   else if (rr.kind == RK_STRBUF) return CN_NONE;
@@ -1832,7 +1834,18 @@ int cplan_nil(Compiler *c, int id) {
      read, a global, an ivar, a caller not seen, a builtin's answer), which
      a hot loop over a receiver that is never nil would pay for */
   int why = nil_fact_why(c, r);
-  if (!cplan_nil_written(why)) return CN_NONE;
+  /* an append to a local's shared String tests the handle itself
+     (sp_String_append_bin), so there a nil the fact cannot bound raises
+     inside the call, and a receiver that is never nil pays nothing */
+  int in_call = 0;
+  if (!cplan_nil_written(why)) {
+    int argc = 0;
+    (void)call_args(nt, id, &argc);
+    if (why == NFW_NONE || why == NFW_GUARDED || !handle_local || !is_append_concat(nm) || argc != 1) return CN_NONE;
+    /* a method_missing the program gives nil answers the append */
+    if (cplan_nil_user_method(c, "method_missing")) return CN_NONE;
+    in_call = 1;
+  }
   /* the definite-assignment walk over a temp the compiler wrote itself (a
      desugared splat's receiver) is not the program's nil */
   if (why == NFW_UNSET && nt_int(nt, r, "node_line", 0) <= 0) return CN_NONE;
@@ -1843,6 +1856,7 @@ int cplan_nil(Compiler *c, int id) {
     if (!rn || !sp_streq(rn, "__self")) return CN_NONE;
   }
   if (cplan_nil_user_method(c, nm)) return CN_NONE;
+  if (in_call) return CN_RAISE_IN_CALL;
   return is_nil_method(nm) ? CN_ANSWER : CN_RAISE;
 }
 

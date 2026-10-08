@@ -3419,6 +3419,18 @@ static const char *sp_poly_sym_id2name(sp_RbVal v) {
   return sp_sym_to_s_chilled((sp_sym)v.v.i);
 }
 static SP_UNUSED sp_RbVal sp_poly_nil_no_method(const char *m, sp_RbVal v) { sp_raise_nomethod(sp_nomethod_msg(m, v)); return sp_box_nil(); }
+/* String#<< and String#concat to a shared String's handle that can be nil
+   with no test ahead of the call (cplan_nil: CN_RAISE_IN_CALL): the test
+   the append makes of its handle is the NoMethodError, after the operand
+   has run, where sp_String_append_bin does nothing. */
+static inline SP_UNUSED void sp_String_append_recv(sp_String *s, const char *m, const char *t) {
+  if (SP_UNLIKELY(!s)) { sp_raise_nomethod(sp_nomethod_msg(m, sp_box_nil())); return; }
+  sp_String_append_bin(s, t);
+}
+static inline SP_UNUSED void sp_String_append_recv_n(sp_String *s, const char *m, const char *t, size_t tl) {
+  if (SP_UNLIKELY(!s)) { sp_raise_nomethod(sp_nomethod_msg(m, sp_box_nil())); return; }
+  sp_String_append_n(s, t, tl);
+}
 /* The bounds of `for i in lo..hi` read out of a box or an Integer slot that
    may hold nil: a nil end is an endless range (the loop runs until a break),
    and a nil beginning cannot be iterated (TypeError, as CRuby). */
