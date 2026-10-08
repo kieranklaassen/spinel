@@ -1,0 +1,31 @@
+index and rindex of a String Array find a boxed appended String
+
+    h = {"k" => "a".dup, "n" => 1}
+    h["k"] << "b"
+    w = ["ab", "cd", "ab"]
+    p w.index(h["k"])
+    p w.find_index(h["k"])
+    p w.rindex(h["k"])
+
+printed `nil` three times, with and without --share-strings; CRuby
+prints 0, 0 and 2.
+
+The boxed read of a String something appends to carries its shared
+handle (SP_BUILTIN_STRBUF). index, find_index and rindex of a String
+Array with a boxed argument have an arm for a plain String and one for
+nil, and the handle met neither.
+
+The handle gets its own arm, after those two, and is searched for by
+its text, in a program whose boxes tagged as handles are handles
+(g_strbuf_boxes) and that has no String#== of its own; any other keeps
+master's C.
+
+Cost: none where the C stays. In a program that holds a handle
+(callgrind, 300,000 turns of index and rindex, gcc 13.3 and clang
+18.1), a turn runs the same instructions with gcc and 2 fewer with
+clang when the two boxed arguments are plain Strings, and 4 and 6 more
+when they are an Integer and nil.
+
+Test: test/str_array_index_boxed_handle.rb (expected from CRuby 3.3.6).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

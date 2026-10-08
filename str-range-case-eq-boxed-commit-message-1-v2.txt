@@ -1,0 +1,48 @@
+=== of a String Range covers a boxed String
+
+    h = {"k" => "ab", "n" => 5}
+    r = ("aa".."az")
+    p r === h["k"]
+    p ["c", 5, "q", nil].grep("a".."m")
+
+printed `false` and `[]`; CRuby prints `true` and `["c"]`.
+
+`===` of a receiver that compares by value (a number, a String, a
+boolean, a Symbol) with a boxed argument is written as sp_poly_eq of
+the two. That arm leaves out an Integer Range and a Float Range, which
+cover, by their families 5 and 6 of eq_family; a String Range is family
+7 and was not left out, so `("aa".."az") === x` asked whether the Range
+equals x. No String does.
+
+The arm leaves 7 out as well, and emit_range_call answers: a plain
+String is covered by its bytes and length, and so is the text of a
+shared String handle (an appended String). grep and grep_v with a
+String Range, and a block that asks `===` of each element, are right
+with it.
+
+A value that holds no String is not covered. That includes an object
+with a <=> of its own, which CRuby asks and this call does not, before
+or after. One answer changes beside the String's: a boxed String Range
+equal to the receiver was `true` and is `false`, as in CRuby, where a
+Range is no member of itself.
+
+Master's C stays in a program with a Range#=== of its own, or its own
+String#<=>, #== or #succ (this call does not ask them, before or
+after), and in one whose box may hold a plain String under the handle's
+tag (program_strbuf_boxes, the commit beneath).
+
+Cost: none on a program master answered right. The Range is no longer
+boxed for the question: 300,000 turns of `n += 1 if r === x` run
+238 and 207 instructions a turn fewer for an Integer x, and 63 and 55
+fewer for a String outside the Range (callgrind, gcc 13.3 and clang
+18.1).
+
+Not here: case/when with a boxed subject (the next commit). `K === x`
+for a constant K that holds a String Range answers false. all?, any?
+and none? of a String Array with a String Range answer as if no element
+matched.
+
+Test: test/str_range_case_eq_boxed.rb (expected from CRuby 3.3.6),
+added to GC_STRESS_TESTS.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

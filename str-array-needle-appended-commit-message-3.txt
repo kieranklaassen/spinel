@@ -1,0 +1,41 @@
+delete on a String Array removes a boxed appended String
+
+    h = {"k" => "a".dup, "n" => 1}
+    h["k"] << "b"
+    d = ["ab", "cd", "ab"]
+    p d.delete(h["k"])
+    p d
+    p d.delete(h["k"]) { "none" }
+
+printed `nil`, `["ab", "cd", "ab"]` and `"none"`, with and without
+--share-strings; CRuby prints `"ab"`, `["cd"]` and `"none"`.
+
+The boxed read of a String something appends to carries its shared
+handle (SP_BUILTIN_STRBUF). delete on a String Array with a boxed
+argument compares a plain String, in the form with a block and in the
+form without, and the handle was not one: nothing was deleted.
+
+Each form gets an arm for a boxed object, after the plain String (and
+nil, where the form has that arm): sp_StrArray_delete_handle, out of
+line, deletes by a handle's text and deletes nothing for any other
+object or for a box with no handle. The answer is the Array's own
+element, as before. The arm is written in a program
+whose boxes tagged as handles are handles (g_strbuf_boxes) and that has
+no String#== of its own; any other keeps master's C.
+
+Cost: none where the C stays. In a program that holds a handle
+(callgrind, 300,000 turns of two calls, gcc 13.3 and clang 18.1), a
+turn of two deletes without a block runs the same instructions with gcc
+and 6 fewer with clang when the boxed arguments are plain Strings, and
+2 and 4 more when they are an Integer and nil; with a block, 3 and 2
+fewer, and 10 and 4 more.
+
+Not here: delete on a boxed String Array or a boxed Hash by an appended
+String deletes nothing and answers nil. That road is the runtime's
+sp_poly_delete_key, which does not know what a box of the program
+holds.
+
+Test: test/str_array_delete_boxed_handle.rb (expected from CRuby
+3.3.6).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

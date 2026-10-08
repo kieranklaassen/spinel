@@ -1,0 +1,31 @@
+include? of a boxed String Array finds a boxed appended String
+
+    h = {"k" => "a".dup, "n" => 1}
+    h["k"] << "b"
+    bw = [["ab", "cd"], 1][0]
+    p bw.include?(h["k"])
+
+printed `false`, with and without --share-strings; CRuby prints `true`.
+
+include? of a boxed receiver is a switch over what the box holds. Its
+String Array case compared a plain boxed String (SP_TAG_STR), and the
+shared handle a boxed read of an appended String carries was not one.
+
+The case asks the handle after the plain String and searches by its
+text, in a program whose boxes tagged as handles are handles
+(g_strbuf_boxes) and that has no String#== of its own; any other keeps
+master's C. The switch is written wherever include? has a boxed
+receiver, so in a program that holds a handle the C of such a call
+changes whatever the receiver holds; a Set, a Hash or a Range does not
+run the case.
+
+Cost: none where the C stays. In a program that holds a handle
+(callgrind, 300,000 turns of two calls on a boxed String Array, gcc
+13.3 and clang 18.1), a turn runs 2 instructions more when the two
+boxed arguments are plain Strings, and 5 and 4 more when they are an
+Integer and nil.
+
+Test: test/boxed_str_array_include_boxed_handle.rb (expected from CRuby
+3.3.6).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

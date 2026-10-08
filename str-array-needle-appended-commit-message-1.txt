@@ -1,0 +1,38 @@
+include? of a String Array finds a boxed appended String
+
+    h = {"k" => "a".dup, "n" => 1}
+    h["k"] << "b"
+    w = ["ab", "cd"]
+    p w.include?(h["k"])
+    p w.member?(h["k"])
+
+printed `false` twice, with and without --share-strings; CRuby prints
+`true` twice.
+
+A String something appends to is held as its shared handle, and a boxed
+read of it carries the handle (SP_BUILTIN_STRBUF), not a plain boxed
+String. The search of a String Array for a boxed argument is written
+with an arm for a plain String (SP_TAG_STR) and one for nil; the handle
+met neither and was not found. A Hash with one element the program
+appends to holds every String it was built with as a handle, so the
+"cd" of `"p" => "cd"` beside it was not found either.
+
+The handle gets its own arm, after the plain String and nil, and is
+searched for by its text. An appended String that is empty is the empty
+String, not nil. A box with no handle (a nil stored among handles)
+takes no arm, as before.
+
+The arm is written only in a program whose boxes tagged as handles are
+handles (g_strbuf_boxes, the commit beneath). A program that holds no
+handle, one whose box may hold a plain String under the handle's tag,
+and one with a String#== of its own keep master's C.
+
+Cost: none where the C stays. In a program that holds a handle
+(callgrind, 300,000 turns of two calls, gcc 13.3 and clang 18.1), a
+turn runs the same instructions when the two boxed arguments are plain
+Strings and 4 more when they are an Integer and nil.
+
+Test: test/str_array_include_boxed_handle.rb (expected from CRuby
+3.3.6).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

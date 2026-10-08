@@ -1,0 +1,1 @@
+A String Range's cover? and include? read a boxed appended String

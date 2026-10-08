@@ -1,0 +1,61 @@
+A String Range's cover? and include? read a boxed appended String
+
+    h = {"k" => "a".dup, "n" => 1}
+    h["k"] << "b"
+    r = ("aa".."az")
+    p r.cover?(h["k"])
+    p r.include?(h["k"])
+    p r.member?(h["k"])
+
+printed `false` three times, with and without --share-strings; CRuby
+prints `true` three times.
+
+A String something appends to is held as its shared handle, and a boxed
+read of it carries the handle (SP_BUILTIN_STRBUF), not a plain boxed
+String. emit_range_call wrote the membership of a typed String Range
+with a boxed argument as `_a.tag == SP_TAG_STR && sp_srange_cover(...)`:
+the handle carries another tag and was no member. A Hash with one
+element the program appends to holds every String it was built with as
+a handle, so the "ab" of `"p" => "ab"` beside it was no member either.
+
+The handle is asked after the plain String. include? walks to its text
+as it does to a plain String's; cover? compares it by its bytes, out of
+line (sp_srange_cover_handle). A nil stored among handles is a box with
+no handle and is no member.
+
+The arm is written only where a box tagged as a handle is known to hold
+one, which program_strbuf_boxes answers once for the program, before
+any C is written. Master's C stays, byte for byte:
+
+- in a program that holds no String as a handle;
+- in one that stores a call on an object where a handle is wanted (a
+  method's own String, StringIO#string, StringScanner#rest):
+  emit_boxed_strbuf tags the plain String's bytes as a handle there,
+  and the box does not say which it holds;
+- in one with its own Range#cover?, #include? or #member?, or its own
+  String#<=>, #== or #succ, which this call does not ask, before or
+  after.
+
+Cost: none where the C stays. In a program that holds a handle, a
+membership call with a boxed argument runs more instructions (callgrind,
+300,000 turns of `n += 1 if r.cover?(x)`, gcc 13.3 and clang 18.1):
+4 and 2 a call for a plain String held in a local, 6 and 2 for one
+read from an Array each turn, 6 and 4 for an Integer, 3 and 1 for
+include? of a plain String. The walk looks at the call
+nodes stored as a handle: compiling optcarrot runs 8,338,283,807
+instructions for 8,338,025,724, and its C is byte for byte the same.
+
+Not here. The program whose box may hold a plain String under the
+handle's tag crashes when it reads that box (gcc) or does not build
+(clang), as on master. cover? of a plain String still compares up to
+its first NUL. A String Range the call does not see as typed (read out
+of an Array or a Hash, or a "Range or nil" local called with `&.`) and
+`r.method(:cover?).call(x)` still answer false for the handle. `===`
+and case/when of a String Range with a boxed value, and include?, index
+and delete of a String Array, are their own changes.
+
+Test: test/str_range_member_boxed_handle.rb (expected from CRuby
+3.3.6), added to GC_STRESS_TESTS: its last block makes both ends of its
+Range where it is written, which the two commits beneath keep.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
