@@ -1,0 +1,27 @@
+A yield in a return's value keeps each site's block type
+
+    def fetched(c)
+      return yield if c
+      :none
+    end
+    p fetched(true) { :s }
+    p fetched(true) { 9 }
+
+printed :s and :"", where CRuby prints :s and 9. The same for
+`return (c ? yield : :none)`, `return yield || :none` and
+`return (yield rescue :none)`; with a String among the blocks the
+program did not build, or built and crashed.
+
+The value of a `return` is one more place where a yield settles a type
+from the first call site alone: the return joins it into the method's
+type, and the per-site coercion reaches only a bare `yield` tail. It
+is now on the list yield_uses keeps, so the yield there is typed poly
+when the blocks diverge, and each spliced site boxes its own block's
+value.
+
+As in the method's last statement, a program whose values one slot
+holds is left as it was (`return (c ? yield : 5)` with Integer blocks
+and a nil one), and so is a return whose value holds a parenthesized
+sequence (`return (note; yield) || 5`).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

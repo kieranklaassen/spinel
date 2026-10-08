@@ -1,0 +1,49 @@
+A yield in an arm of a method's value keeps each site's block type
+
+    def guarded
+      yield rescue :rescued
+    end
+    p guarded { :s }
+    p guarded { 9 }
+
+printed :s and :"", where CRuby prints :s and 9. The same with the
+yield in one arm of an if or a ternary, beside `||` or `&&`, and in a
+`case`; with a String among the blocks the program did not build, or
+built and crashed.
+
+When a yielding method's blocks answer different types at different
+call sites, a yield whose value goes into a local, an Array literal, an
+argument, a receiver or a rescue frame is typed poly, so that each
+spliced site boxes its own block's value. One arm of the method's own
+last statement was not in that list: the other arm and the first
+site's block settled the method's return, and a later site's value was
+converted to it.
+
+The method's last statement is now one of those places, unless
+method_call_ret types the call from each site's block already (a bare
+`yield` tail, a call of the block parameter, the block arm of an
+`if block_given?`). The walk through value arms also learns the rescue
+modifier and `case`, so `v = (yield rescue :none)` and a `case` arm on
+the way into a local, an element or an argument keep their site's type
+too.
+
+A program whose values one slot holds is left as it was, with the C it
+had. yield_values_fit_one_slot answers that where the block values of
+every site and the other values of the statement join to one type, the
+one the first site's block gives, a nil among them carried by that
+type's own nil or, on the left of an `||`, never coming out:
+`c ? yield : 5` with Integer blocks and a nil one stays an Integer
+method. Three forms are not left, since a nil block's value came out
+wrong in them: a yield in parentheses of its own, a rescue modifier
+over any slot but an Integer's or a Float's, and a Symbol's slot where
+the yield is a statement's own value (`c ? yield : :none` as the last
+statement answered a Symbol for nil). The yields of one statement are
+left together or not at all.
+
+Where a value arm of that statement is a parenthesized sequence
+(`(note; yield) || 5`) the statement is left as it was, and so are a
+rescue modifier and a `case` over one: the sequence's last value is
+not boxed for a nil block, and such a program is right today where
+its blocks fit one slot.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
