@@ -1,0 +1,1 @@
+uniq with a block keeps an Enumerator's items, not what the block binds
