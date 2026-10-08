@@ -1964,6 +1964,7 @@ GC_STRESS_TESTS := test/gc_root_frame_slots.rb \
                    test/thread_new_args_rooted_across_fiber_alloc.rb \
                    test/nomethod_holds_receiver_and_args.rb \
                    test/gc_root_volatile_string_slot.rb \
+                   test/proc_boxed_struct_arg_root.rb \
                    test/gc_root_gathered_handle_param.rb \
                    test/ffi_str_borrow.rb \
                    test/ffi_str_arg_beside_alloc.rb \
