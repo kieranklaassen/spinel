@@ -1,0 +1,32 @@
+uniq with a block keeps an Enumerator's items, not what the block binds
+
+    e = [5, 6, 5].each_with_index
+    p e.uniq { |x| x }
+
+printed [5, 6] for [[5, 0], [6, 1]]. The other way round, over
+o = [5, 6, 5, 7].each, o.uniq { |*r| r } printed [[5], [6], [7]] for
+[5, 6, 7] and o.uniq(&:odd?) printed [[5], [6]] for [5, 6].
+
+The to_a that stands in front of a block iterator over an Enumerator
+hands each item as the block binds it (enum_hop_yield_view): the first
+value a step yields for a lone |x|, all of them for a lone |*r| or
+&:m. That is right for map or count, whose answer is the block's. uniq
+answers the items, and got what the block binds in their place.
+
+emit_poly_uniq_block now takes the Enumerator's plain to_a under such
+a view and binds the parameter itself, an item at a time, so the
+survivor is the item. For a lone |x| over steps that yield two values
+the first values are kept in an Array of their own, made only then.
+An Enumerator whose steps yield one value or several comes out right
+by the same road, and so does a block that changes its |*r|.
+
+Whether a step yields one value or two is known when the program
+runs, so the loop is told ahead of its first item and reads the
+survivor from the to_a's own Array: an instruction an item with clang
+and none with gcc over a one-value Enumerator with a lone |x|, which
+master ran right. A block with two parameters, a bare block and no
+block keep their C.
+
+Test: test/enum_uniq_block_keeps_item.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

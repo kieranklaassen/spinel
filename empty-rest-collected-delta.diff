@@ -1,0 +1,132 @@
+diff --git a/src/codegen_fold.c b/src/codegen_fold.c
+index 68e7339a6..7f2bab370 100644
+--- a/src/codegen_fold.c
++++ b/src/codegen_fold.c
+@@ -10287,4 +10287,39 @@ static void emit_elem_param(Compiler *c, Scope *m, int i, int off, int tmp, TyKi
+ }
+ 
++/* A read that is no pure read (subtree_is_pure_read) and still allocates
++   nothing and runs nothing of the program's: a global the program assigns,
++   read as its static; `size` or `length` of a String, an Array or a Hash
++   that reads so, where no class of the program has a method or a reader of
++   the name; an attribute read through a generated reader; and an operator
++   over scalars on such reads. A read that raises (a nil receiver, an
++   overflow) leaves the call. */
++static int read_runs_nothing(Compiler *c, int node) {
++  const NodeTable *nt = c->nt;
++  node = unwrap_parens(c, node);
++  if (subtree_is_pure_read(c, node)) return 1;
++  if (nt_kind(nt, node) == NK_GlobalVariableReadNode) {
++    const char *gn = nt_str(nt, node, "name");
++    if (!gn || gn[0] != '$' || !(gn[1] == '_' || (gn[1] >= 'a' && gn[1] <= 'z') || (gn[1] >= 'A' && gn[1] <= 'Z')) ||
++        sp_streq(gn, "$stdin") || is_standard_output_global(gn) || is_program_name_global(gn)) return 0;
++    LocalVar *gv = comp_gvar(c, comp_resolve_gvar(c, gn + 1));
++    return gv && repr_of_slot(c, gv).kind != RK_STRBUF;
++  }
++  if (nt_kind(nt, node) != NK_CallNode || nt_ref(nt, node, "block") >= 0) return 0;
++  const char *nm = nt_str(nt, node, "name");
++  int recv = nt_ref(nt, node, "receiver"), an = nt_ref(nt, node, "arguments"), ac = 0;
++  const int *av = an >= 0 ? nt_arr(nt, an, "arguments", &ac) : NULL;
++  if (!nm || recv < 0 || !read_runs_nothing(c, recv)) return 0;
++  if (ac == 1) return call_is_scalar_op(c, node) && read_runs_nothing(c, av[0]);
++  if (ac != 0) return 0;
++  int alloc = 0;
++  if (call_is_field_read(c, node, &alloc)) return !alloc;
++  if (!sp_streq(nm, "size") && !sp_streq(nm, "length")) return 0;
++  TyKind rt = comp_ntype(c, recv);
++  if (rt != TY_STRING && !ty_is_array(rt) && !ty_is_hash(rt)) return 0;
++  for (int k = 0; k < c->nclasses; k++)
++    if (comp_method_in_chain(c, k, nm, NULL) >= 0 || comp_is_reader(&c->classes[k], nm)) return 0;
++  return 1;
++}
++
+ /* Does parameter `i` run something where it is written, bound to `node`
+    (its own default when the call leaves it out, `given` 0)? A pure read
+@@ -10292,10 +10327,11 @@ static void emit_elem_param(Compiler *c, Scope *m, int i, int off, int tmp, TyKi
+    the read is converted in place (arg_read_converts). A parameter that
+    takes a root has what it is given run ahead of the call, into a rooted
+-   temp (emit_arg_rooted). A String literal with no NUL in it is a static
+-   where the parameter holds the plain String or its box: a handle
+-   parameter makes an object of it, a lent one a temp, and under
+-   --share-strings a boxed slot may lift it (emit_boxed). A Range of pure
+-   reads into a Range parameter is the value itself. Anything else is a
+-   call C orders against its siblings as it likes. */
++   temp (emit_arg_rooted). A read that runs nothing (read_runs_nothing)
++   into a parameter that takes no root is a value. A String literal with
++   no NUL in it is a static where the parameter holds the plain String or
++   its box: a handle parameter makes an object of it, a lent one a temp,
++   and under --share-strings a boxed slot may lift it (emit_boxed). A
++   Range of pure reads into a Range parameter is the value itself.
++   Anything else is a call C orders against its siblings as it likes. */
+ static int binding_runs_in_place(Compiler *c, const Scope *m, int i, int node, int given) {
+   const NodeTable *nt = c->nt;
+@@ -10304,4 +10340,5 @@ static int binding_runs_in_place(Compiler *c, const Scope *m, int i, int node, i
+   if (!p || p->byref_out) return 1;
+   if (arg_wants_root(c, p->type, given ? node : -1)) return 0;
++  if (read_runs_nothing(c, node)) return 0;
+   int rn = unwrap_parens(c, node);
+   if (p->type == TY_RANGE && nt_kind(nt, rn) == NK_RangeNode && comp_ntype(c, rn) == TY_RANGE)
+@@ -10314,8 +10351,40 @@ static int binding_runs_in_place(Compiler *c, const Scope *m, int i, int node, i
+ }
+ 
++/* A lone `**h` among the keywords is read into a temp ahead of the call
++   (emit_ds_hash_materialize), and each keyword parameter the call does not
++   name is read out of it where it stands (emit_ds_param_extract). Out of a
++   Hash of Symbol keys that is a pure read, into a parameter of the value's
++   own type, or of a boxed value into a boxed or a scalar one, with a
++   default that runs nothing (read_runs_nothing), that read allocates
++   nothing and runs nothing of the program's. */
++static int ds_read_runs_nothing(Compiler *c, const Scope *m, const ArgLayout *L, int splat) {
++  const NodeTable *nt = c->nt;
++  int v = nt_ref(nt, splat, "value"), en = 0, nds = 0;
++  const int *els = nt_arr(nt, L->kwh, "elements", &en);
++  for (int e = 0; e < en; e++) nds += nt_kind(nt, els[e]) == NK_AssocSplatNode;
++  if (v < 0 || nds != 1 || !subtree_is_pure_read(c, v) || kwh_merged(c, (Scope *)m, L->kwh) || L->rest_kwh >= 0)
++    return 0;
++  TyKind ht = repr_of(c, v).as_ty;
++  if (!ty_is_hash(ht) || ty_hash_key(ht) != TY_SYMBOL) return 0;
++  TyKind hv = ty_hash_val(ht);
++  for (int i = 0; i < m->nparams; i++) {
++    if (L->from[i] == ARG_KWH) return 0;
++    if (i == m->kwrest_idx || !m->pnames[i] || !callee_has_kwarg(c, (Scope *)m, m->pnames[i]) ||
++        kwh_lookup(nt, L->kwh, m->pnames[i]) >= 0) continue;
++    LocalVar *p = scope_local((Scope *)m, m->pnames[i]);
++    if (!p || p->byref_out) return 0;
++    if (p->type != hv && !(hv == TY_POLY && (p->type == TY_INT || p->type == TY_FLOAT ||
++                                             p->type == TY_BOOL || p->type == TY_SYMBOL))) return 0;
++    /* the default stands beside the read, for a key the Hash lacks */
++    if (m->pdefault && m->pdefault[i] >= 0 && !read_runs_nothing(c, m->pdefault[i])) return 0;
++  }
++  return 1;
++}
++
+ /* Does something of this call run where it is written, beside the rest
+    packed from argv[from..end)? An argument or a keyword's value the call
+    ran first reads its temp; the others are asked one by one, a keyword's
+-   value with the parameter that takes it by name. */
++   value with the parameter that takes it by name, a `**h` with every
++   keyword parameter it may fill. */
+ static int call_runs_in_place(Compiler *c, const Scope *m, const ArgLayout *L, const int *argv, int argc,
+                               int from, int end) {
+@@ -10337,12 +10406,19 @@ static int call_runs_in_place(Compiler *c, const Scope *m, const ArgLayout *L, c
+     const int *els = nt_arr(nt, argv[k], "elements", &en);
+     for (int e = 0; e < en; e++) {
++      if (nt_kind(nt, els[e]) == NK_AssocSplatNode && argv[k] == L->kwh &&
++          ds_read_runs_nothing(c, m, L, els[e])) continue;
+       if (nt_kind(nt, els[e]) != NK_AssocNode) return 1;
+       int key = nt_ref(nt, els[e], "key"), val = nt_ref(nt, els[e], "value");
+       if (!subtree_is_pure_read(c, key)) return 1;
+-      if (subtree_is_pure_read(c, val) || arg_ran_first(val, 0)) continue;
++      if (arg_ran_first(val, 0)) continue;
+       const char *kn = nt_kind(nt, key) == NK_SymbolNode ? nt_str(nt, key, "value") : NULL;
+-      if (kn && to_rest && !callee_has_kwarg(c, (Scope *)m, kn)) continue;
+       int i = 0;
+       while (kn && i < L->n && !(m->pnames[i] && sp_streq(m->pnames[i], kn))) i++;
++      if (subtree_is_pure_read(c, val)) {
++        /* a read the keyword parameter converts where it stands */
++        if (kn && i < L->n && callee_has_kwarg(c, (Scope *)m, kn) && binding_runs_in_place(c, m, i, val, 1)) return 1;
++        continue;
++      }
++      if (kn && to_rest && !callee_has_kwarg(c, (Scope *)m, kn)) continue;
+       if (!kn || i == L->n || i == m->kwrest_idx || L->from[i] != ARG_BY_NAME || argv[k] != L->kwh ||
+           !callee_has_kwarg(c, (Scope *)m, kn) || kwh_merged(c, (Scope *)m, L->kwh) ||

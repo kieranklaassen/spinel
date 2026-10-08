@@ -1,0 +1,48 @@
+A method added to a builtin is not called on nil after &.
+
+`class String; def pair(a) = "#{self}-#{a}"; end` and then `s&.pair(1)`
+with a nil `s` printed "-1": the method ran on the nil, and its
+arguments ran too. The same for a method added to Integer or Float, and
+for a builtin's name the program redefines on one of the three
+(`s&.upcase`, `v&.numerator`).
+
+emit_call_body takes a call of a method the program added to a builtin
+class ahead of every builtin arm. That site never looked at the
+operator, so for a String, an Integer or a Float, which hold nil in
+their own C type, it took the call before the nil guard
+(emit_call_safe_nav_arms) saw it.
+
+The site now writes the guard where the call stands, as one expression
+(emit_reopen_call_first): the receiver into a temp, the nil test, and
+in the arm that is not nil what the call hoists (its arguments' temps)
+and then the call the site made before. Nothing leaves the call's
+place, so what the statement runs ahead of the call still runs ahead of
+it, and an argument runs only for a receiver that is not nil. It is the
+form a boxed receiver's `&.` has, with an `if` for the `?:` so that the
+hoisted statements stand inside the arm.
+
+A String receiver is rooted in its temp only where something can run
+between the temp and the call and may leave the temp the only holder:
+not where the call hoists nothing and each argument is a plain read of
+its parameter's type, and not for a local or an instance variable that
+no argument or default can assign (read_rebound_by).
+
+The value is boxed by the type read for the call, so the guard is
+written only where that type is the method's own. A redefined
+`Float#eql?` that answers a Symbol is read as a boolean with or without
+the `&.`, and with it the C does not build; such a call keeps the C it
+had, and so does a boxed receiver.
+
+Leaving the call to reach the guard on its own would not do: the numeric
+arms between this site and the guard (coerce, Rational and Complex, the
+operators, the predicates) answer a name the program redefined,
+`v&.numerator` or `v&.<=>(o)`, with the builtin.
+
+A call on a receiver that is not nil pays the test: 2 instructions on a
+String local, 0 to 5 on an Integer or a Float, and 13 to 21 where the
+receiver is itself a call and an argument is made in place, which roots
+it.
+
+Test: test/safe_nav_reopened_builtin.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
