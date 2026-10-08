@@ -1,0 +1,11 @@
+A lazy stage's block parameters are bound by lazy_stage_bind
+
+The three steps that bind the block parameters of a lazy stage
+(emit_boxed_step_binds, emit_iter_autosplat, then the one name) move out
+of emit_lazy_pipeline_expr into one function, so that drop_while's
+branch, which has a copy of the last step alone, can call it.
+
+No change in generated C: tools/cident.sh against the commit below this
+one answers `6453 identical, 0 differ`.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

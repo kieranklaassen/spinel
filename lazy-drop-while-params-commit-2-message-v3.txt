@@ -1,0 +1,47 @@
+A lazy drop_while's block binds all its parameters, as the other stages do
+
+[[1, 2], [3, 9], [5, 1]].lazy.drop_while { |x, y| y < 4 }.to_a raised
+NoMethodError (undefined method '<' for nil) where CRuby has
+[[3, 9], [5, 1]]; { |x, y = 9| y == 9 } over [1, [3, 4], 5] dropped
+nothing; { |*r| ... } did not build. drop_while's branch of
+emit_lazy_pipeline_expr bound the block's first parameter alone, to the
+whole element, where every other stage tries emit_boxed_step_binds and
+emit_iter_autosplat first.
+
+It now calls lazy_stage_bind, as they do, where that one name left the
+block wrong (lazy_dw_binds_all): the block has no first parameter; or
+its body names an optional, a rest, a post or a keyword; or the element
+can be an Array and the body names a parameter of a block with more to
+take. Every other block keeps its lines and emits the C it did: one
+plain parameter; more than one over an Integer Range or an Integer,
+Float or String Array, where the second reads nil; a block that names
+none of its parameters; a block with a keyword, a `**` or a post that
+the body never reads, which has no local for the bind to write; and,
+over an Enumerator, a block that takes one value whole ({ |x, k: 1| },
+{ |x = 7| }, { |*r| }): its step can be more than one value, which
+every stage reads as one Array, so the first reads nil for `k` as it
+did and the other two still do not build.
+
+A block that holds a break is bound as it was, as the commit below
+reads it as it was: bound whole it would reach what master does with a
+break in a one-parameter block, which is no LocalJumpError in a method.
+
+Bound whole, the block runs a redo, which stayed refused in a drop_while
+block of more than one parameter; docs/limitations.md narrows that case.
+
+The cost: over a boxed Array a block of more than one parameter pays the
+bind the other stages pay, 9 instructions an element, also where no
+element turns out to be an Array.
+
+Not covered, a fault the other stages have on master and that a
+drop_while which raised or did not build now reaches: over
+each_with_index a stage is handed the pair where CRuby hands it the
+first value, so the block of a map, filter_map, flat_map or take_while
+after the stage is, and so is the drop_while's own block after a map.
+
+Test: test/lazy_drop_while_block_params.rb (expected from CRuby 3.3.6
+with --enable-frozen-string-literal). master does not build it; line by
+line it differs on 14 of the 29: 9 raise, 2 are wrong, 2 do not build
+and 1 is refused.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
