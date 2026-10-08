@@ -1,0 +1,1 @@
+sp_str_dedup copies its String before a collection can free it
