@@ -618,6 +618,90 @@ int class_recv_static_ci(Compiler *c, int node) {
   return class_var_static_ci(c, node);
 }
 
+/* Whether an argument is made of reads, calls with no block, and number,
+   String, Symbol, nil and boolean literals: the call's own expression holds
+   all of it. Any other (an `if`, a `begin`, a block, a literal Array or
+   Hash that holds a call) is not passed: some of them are evaluated in
+   statements hoisted in front of the call, the receiver included. */
+static int arg_is_plain(const NodeTable *nt, int id, int in_lit, int depth) {
+  if (id < 0) return 1;
+  if (id >= nt->count || depth > 200) return 0;
+  const char *ty = nt_type(nt, id);
+  if (ty && sp_streq(ty, "ArgumentsNode")) { if (in_lit) return 0; }
+  else switch (nt_kind(nt, id)) {
+    case NK_LocalVariableReadNode: case NK_InstanceVariableReadNode: case NK_IntegerNode: case NK_FloatNode:
+    case NK_NilNode: case NK_TrueNode: case NK_FalseNode: case NK_SymbolNode: case NK_StringNode:
+      return 1;
+    case NK_GlobalVariableReadNode: case NK_ConstantReadNode: case NK_SelfNode:
+      return !in_lit;
+    case NK_ArrayNode: case NK_HashNode: in_lit = 1; break;
+    case NK_AssocNode: if (!in_lit) return 0; break;
+    case NK_CallNode: if (in_lit || nt_ref(nt, id, "block") >= 0) return 0; break;
+    case NK_ParenthesesNode: case NK_StatementsNode: if (in_lit) return 0; break;
+    default: return 0;
+  }
+  const SpNode *nd = &nt->nodes[id];
+  for (int i = 0; i < nd->nr; i++) if (!arg_is_plain(nt, nd->r[i].ref, in_lit, depth + 1)) return 0;
+  for (int i = 0; i < nd->na; i++)
+    for (int j = 0; j < nd->a[i].n; j++) if (!arg_is_plain(nt, nd->a[i].ids[j], in_lit, depth + 1)) return 0;
+  return 1;
+}
+
+/* Whether the program names NAME where a method is taken away, hidden or
+   made: `undef`, `alias`, and the calls that take the name as a literal. */
+static int program_rebinds_method_name(const NodeTable *nt, const char *name) {
+  NT_FOREACH_KIND(nt, NK_UndefNode, u) {
+    int n = 0; const int *v = nt_arr(nt, u, "names", &n);
+    for (int i = 0; i < n; i++) { const char *m = nt_str(nt, v[i], "value"); if (m && sp_streq(m, name)) return 1; }
+  }
+  NT_FOREACH_KIND(nt, NK_AliasMethodNode, al) {
+    int nn = nt_ref(nt, al, "new_name");
+    const char *m = nn >= 0 ? nt_str(nt, nn, "value") : NULL;
+    if (m && sp_streq(m, name)) return 1;
+  }
+  NT_FOREACH_KIND(nt, NK_CallNode, cl) {
+    const char *m = nt_str(nt, cl, "name");
+    if (!m || !(sp_streq(m, "private") || sp_streq(m, "protected") || sp_streq(m, "public") ||
+                sp_streq(m, "undef_method") || sp_streq(m, "remove_method") || sp_streq(m, "alias_method") ||
+                sp_streq(m, "define_method")))
+      continue;
+    int args = nt_ref(nt, cl, "arguments"), an = 0;
+    const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+    for (int i = 0; i < an; i++) {
+      NodeKind k = nt_kind(nt, av[i]);
+      const char *v = k == NK_SymbolNode ? nt_str(nt, av[i], "value") : k == NK_StringNode ? nt_str(nt, av[i], "content") : NULL;
+      if (!v && k == NK_StringNode) v = nt_str(nt, av[i], "unescaped");
+      if (v && sp_streq(v, name)) return 1;
+    }
+  }
+  return 0;
+}
+
+/* Whether the builtin rows answer `sym.equal?(x)` or `sym.eql?(x)`. The two
+   come to a Symbol from above it: a method of the program under the name on
+   Symbol, Object, BasicObject or NilClass (a Symbol slot can hold nil), or in
+   a module (Kernel, Comparable, one included or prepended), is the one a
+   Symbol answers with, so the rows are for a program that defines none, and
+   that names neither in an `undef`, a `private`, an alias or a
+   `define_method`. And they are for the call with one argument that
+   arg_is_plain passes: a splat, keywords, a block argument, or an
+   argument that can be evaluated ahead of the receiver, is compiled as
+   before. */
+int symbol_identity_builtin(Compiler *c, int call, const char *name) {
+  const NodeTable *nt = c->nt;
+  if (call_plain_argc(c, call) != 1 || nt_ref(nt, call, "block") >= 0) return 0;
+  int args = nt_ref(nt, call, "arguments"), an = 0;
+  const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+  if (an != 1 || !arg_is_plain(nt, av[0], 0, 0)) return 0;
+  for (int k = 0; k < c->nclasses; k++) {
+    ClassInfo *ci = &c->classes[k];
+    if (!comp_class_is_module(c, ci) && !sp_streq(ci->name, "Symbol") && !sp_streq(ci->name, "NilClass") &&
+        !sp_streq(ci->name, "Object") && !sp_streq(ci->name, "BasicObject")) continue;
+    if (comp_method_in_class(c, k, name) >= 0) return 0;
+  }
+  return !program_rebinds_method_name(nt, name);
+}
+
 /* The literal symbol behind a symbol-typed expression: a SymbolNode itself,
    or a local variable whose only write (in its scope, plain write) is one.
    Lets inject(:op)-style operator selection see through `s = :+; a.inject(s)`.

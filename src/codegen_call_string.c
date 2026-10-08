@@ -904,8 +904,11 @@ int emit_call_symbol_bool_string_arms(Compiler *c, int id, Buf *b, const NodeTab
   /* symbol receiver methods */
   if (recv >= 0 && rt == TY_SYMBOL) {
     /* the arms that read only the receiver and the arguments: builtin-op
-       rows (builtin_ops.c) */
-    if (emit_builtin_op(c, id, recv, TY_SYMBOL, name, b)) return 1;
+       rows (builtin_ops.c); the equal? and eql? rows stand aside for a
+       method of the program's own and for a call that is not one plain
+       argument (symbol_identity_builtin) */
+    if ((!is_eql_or_equal(name) || symbol_identity_builtin(c, id, name)) &&
+        emit_builtin_op(c, id, recv, TY_SYMBOL, name, b)) return 1;
     /* string-surface methods over the symbol's name; succ re-interns a symbol,
        index/slice yield a substring (or nil), the predicates yield a bool. */
     if ((is_slice_alias(name)) && argc == 1 &&

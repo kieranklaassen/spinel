@@ -6710,7 +6710,7 @@ static int infer_send_blind(Compiler *c, int id, int recv, const char *name, TyK
    TY_UNKNOWN when none answers. */
 static TyKind infer_symbol_call(Compiler *c, int id, const NodeTable *nt, const char *name, int argc, const int *argv) {
   TyKind rt = TY_SYMBOL;
-  {
+  if (!is_eql_or_equal(name) || symbol_identity_builtin(c, id, name)) {
     const BuiltinOp *op = an_bop_find(c, id, rt, name, argc, nt_ref(nt, id, "block") >= 0);
     if (op && op->result != TY_UNKNOWN) return op->result;
   }
