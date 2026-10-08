@@ -12930,6 +12930,30 @@ static sp_RbVal sp_poly_struct_values(sp_RbVal v) {
   if (v.tag != SP_TAG_OBJ || v.cls_id < 0 || !sp_obj_struct_values_fn) return sp_box_nil();
   return sp_obj_struct_values_fn(v);
 }
+/* A splatted Integer Range among values_at's indexes: its members onto the
+   list. With both ends, one that steps by one is walked as it stands and any
+   other goes through the array sp_range_to_ia makes of it. Without one it
+   gives none, as before: an end that is nil in a slot typed Integer reads as
+   no end, and so does the largest Integer. */
+static void sp_poly_values_at_range(sp_PolyArray *idx, sp_Range r) {
+  if (r.last == INTPTR_MAX || r.first == INTPTR_MIN) return;
+  if (sp_range_step(r) == 1) {
+    /* the end is compared as it stands: one less than the smallest Integer wraps */
+    for (sp_int i = r.first; r.excl ? i < r.last : i <= r.last; i++) sp_PolyArray_push(idx, sp_box_int(i));
+    return;
+  }
+  sp_IntArray *ia = sp_range_to_ia(r); SP_GC_ROOT(ia);
+  for (sp_int i = 0; i < sp_IntArray_length(ia); i++)
+    sp_PolyArray_push(idx, sp_box_int(sp_IntArray_get(ia, i)));
+}
+/* A splatted scalar among values_at's indexes is the index itself, and nil
+   is none. What is typed an Integer or a Float holds nil as its sentinel,
+   boxed or not as a number, so the sentinel is asked for here. */
+static void sp_poly_values_at_scalar(sp_PolyArray *idx, sp_RbVal v) {
+  if (v.tag == SP_TAG_NIL || (v.tag == SP_TAG_INT && v.v.i == SP_INT_NIL) ||
+      (v.tag == SP_TAG_FLT && sp_float_is_nil(v.v.f))) return;
+  sp_PolyArray_push(idx, v);
+}
 /* Array#values_at indexes; Hash#values_at looks the keys up. */
 static sp_RbVal sp_poly_arr_values_at(sp_RbVal v, sp_PolyArray *idx) {
   /* MatchData#values_at: each group by index or name (it took the Array

@@ -10,6 +10,73 @@
 #include "codegen_call_arms.h"
 #include "repr.h"
 
+/* A splat asks its operand to_a, and a Range's to_a walks its each. The
+   splat arms of values_at below answer for the built-in ones, so they are
+   taken only in a program that cannot have given a class its own: one with
+   no def, Symbol or String of the name (to_a; each too for a Range), no
+   method_missing or respond_to? of its own, which a splat asks where there
+   is no to_a, and no define_method, define_singleton_method or alias_method
+   whose name is not written out, or that is itself named by a Symbol or a
+   String. Answered once for each arm. */
+static int splat_asks_builtin_scan(Compiler *c, int range);
+static int splat_asks_builtin(Compiler *c, int range) {
+  static const Compiler *memo_c; static int memo[2];
+  if (memo_c != c) { memo_c = c; memo[0] = memo[1] = -1; }
+  if (memo[range] < 0) memo[range] = splat_asks_builtin_scan(c, range);
+  return memo[range];
+}
+static int splat_asks_builtin_scan(Compiler *c, int range) {
+  static const NodeKind kinds[] = { NK_DefNode, NK_SymbolNode, NK_StringNode };
+  static const char *const fields[] = { "name", "value", "content" };
+  const NodeTable *nt = c->nt;
+  for (int j = 0; j < 3; j++)
+    for (int n = comp_kind_first(c, kinds[j]); n >= 0; n = comp_kind_next(c, n)) {
+      const char *nm = nt_str(nt, n, fields[j]);
+      if (!nm) continue;
+      if (sp_streq(nm, "to_a") || (range && sp_streq(nm, "each"))) return 0;
+      if (j == 0 ? sp_streq(nm, "method_missing") || sp_streq(nm, "respond_to_missing?") ||
+                   sp_streq(nm, "respond_to?")
+                 : sp_streq(nm, "define_method") || sp_streq(nm, "define_singleton_method") ||
+                   sp_streq(nm, "alias_method")) return 0;
+    }
+  for (int k = comp_kind_first(c, NK_CallNode); k >= 0; k = comp_kind_next(c, k)) {
+    const char *kn = nt_str(nt, k, "name");
+    if (!kn || (!sp_streq(kn, "define_method") && !sp_streq(kn, "define_singleton_method") &&
+                !sp_streq(kn, "alias_method"))) continue;
+    int a = nt_ref(nt, k, "arguments"), ac = 0;
+    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+    for (int i = 0; i < ac || i == 0; i++) {
+      NodeKind ak = i < ac ? nt_kind(nt, av[i]) : NK_NilNode;
+      if (ak != NK_SymbolNode && ak != NK_StringNode) return 0;
+      if (!sp_streq(kn, "alias_method")) break;
+    }
+  }
+  return 1;
+}
+/* Is a node held in a temp (g_argov) at `id` or under it? */
+static int holds_a_temp_under(const NodeTable *nt, int id) {
+  if (id < 0) return 0;
+  for (int i = 0; i < g_n_argov; i++) if (g_argov_node[i] == id) return 1;
+  for (int i = 0; i < nt_num_refs(nt, id); i++)
+    if (holds_a_temp_under(nt, nt_ref_at(nt, id, i))) return 1;
+  for (int i = 0; i < nt_num_arrs(nt, id); i++) {
+    int n = 0;
+    const int *ids = nt_arr_at(nt, id, i, &n);
+    for (int j = 0; j < n; j++) if (holds_a_temp_under(nt, ids[j])) return 1;
+  }
+  return 0;
+}
+/* Did an argument after the splat at argv[k] run before the splat's operand
+   is read? What is held in a temp ran ahead of the statement, so any of a
+   later argument did; the operand `op` did too, in its place, where the
+   whole of it is held. */
+static int later_arg_ran_ahead(const NodeTable *nt, int k, int op, int argc, const int *argv) {
+  for (int i = 0; i < g_n_argov; i++)
+    if (g_argov_node[i] == op || g_argov_node[i] == argv[k]) return 0;
+  for (int j = k + 1; j < argc; j++) if (holds_a_temp_under(nt, argv[j])) return 1;
+  return 0;
+}
+
 /* builtin methods on a poly receiver the runtime answers by the value it holds: inject / reduce(:op), the Array reductions and slices, values_at, Fiber's resume / transfer / raise, Queue's enq / deq */
 int emit_call_poly_builtin_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, TyKind rt) {
   /* Array-reduction methods on a boxed array element of a poly array (e.g.
@@ -89,6 +156,29 @@ int emit_call_poly_builtin_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
            one alone (#4164) */
         if (nt_type(nt, argv[k]) && sp_streq(nt_type(nt, argv[k]), "SplatNode")) {
           int sx9 = nt_ref(nt, argv[k], "expression");
+          TyKind st9 = sx9 >= 0 ? comp_ntype(c, sx9) : TY_POLY;
+          /* a splatted Range gives its members and a splatted scalar is the
+             index itself, unless it is nil when the call runs: read as an
+             Array below, either was empty and the call answered from its
+             other indexes alone. Where a later argument ran before this
+             operand is read, what it left there is not what CRuby splats:
+             such a splat is read as it was */
+          int ahead9 = later_arg_ran_ahead(nt, k, sx9, argc, argv);
+          if (st9 == TY_RANGE && !ahead9 && splat_asks_builtin(c, 1)) {
+            Buf rb9; memset(&rb9, 0, sizeof rb9); emit_expr(c, sx9, &rb9);
+            emit_indent(g_pre, g_indent);
+            buf_printf(g_pre, "sp_poly_values_at_range(_t%d, %s);\n", ti9, rb9.p ? rb9.p : "");
+            free(rb9.p);
+            continue;
+          }
+          if (splat_operand_is_scalar(st9) && st9 != TY_NIL && !ahead9 && splat_asks_builtin(c, 0)) {
+            Buf vb9; memset(&vb9, 0, sizeof vb9);
+            emit_boxed(c, sx9, &vb9);
+            emit_indent(g_pre, g_indent);
+            buf_printf(g_pre, "sp_poly_values_at_scalar(_t%d, %s);\n", ti9, vb9.p ? vb9.p : "sp_box_nil()");
+            free(vb9.p);
+            continue;
+          }
           int ts9 = ++g_tmp, tj9 = ++g_tmp;
           emit_indent(g_pre, g_indent);
           buf_printf(g_pre, "sp_PolyArray *_t%d = sp_poly_to_poly_array(", ts9);
