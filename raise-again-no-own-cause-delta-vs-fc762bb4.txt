@@ -1,0 +1,25 @@
+Delta of 9db114a68e33 (on 84f5b5020ef8) against the read fc762bb47466 (on ed9861279d67): lib/spinel_rt.h only, the helper's test order (reader 5's line) and two lines of its comment; the test and its .expected are the same blobs (a7499479e46a, 1c4db5074217). The move of the base from ed9861279d67 to 84f5b5020ef8 touches lib/spinel_rt.h only in sp_exc_ctx_save and sp_exc_ctx_load.
+
+By diff of the two commits' added and removed lines in lib/spinel_rt.h, the read head's first (<), this head's after (>):
+6,7c6,7
+< +   object comes in as a local and is tested first: a raise of a class and a
+< +   message goes on at that test. */
+---
+> +   object comes in as a local and `c` is tested first: a raise made with
+> +   nothing handled and nothing in flight goes on at that test. */
+9c9
+< +  if (obj && c && sp_exc_cause_chain_reaches((sp_Exception *)c, obj)) return ((sp_Exception *)obj)->cause;
+---
+> +  if (c && obj && sp_exc_cause_chain_reaches((sp_Exception *)c, obj)) return ((sp_Exception *)obj)->cause;
+
+The commit message's last paragraph, read head:
+A raise of a class and a message has no object to lead back to: it
+tests that once and goes on, one instruction more than before with
+nothing handled and one less in a rescue clause (callgrind, gcc -O2).
+
+This head:
+With nothing handled and nothing in flight there is nothing to lead
+back from: a raise tests that once and goes on, one instruction more
+than before, of a class and a message or of an object. A raise of a
+class and a message in a rescue clause is one less (callgrind, gcc
+-O2).
