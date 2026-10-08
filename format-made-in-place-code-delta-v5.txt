@@ -1,0 +1,316 @@
+Delta of the format piece: git range-diff 4c3360a52fd6..62c6f38ddefe 4c3360a52fd6..09fc6ab24804
+(the head read, 62c6f38ddefe, against this re-cut; both are one commit above the boxed-Array piece's head 4c3360a52fd6 on 74fa6d7c2457; context lines are the source as it stands)
+
+1:  62c6f38dd ! 1:  09fc6ab24 A format made in place is held while its arguments are built
+    @@ Commit message
+         "can't modify frozen Array" there with gcc and with clang, the freed
+         list's poisoned header read as frozen.
+     
+    -    Such a format now goes into a rooted temporary ahead of the
+    -    arguments (emit_str_format_held), and the one-element list is rooted
+    -    where its argument is made by something that allocates. A single
+    -    argument that is a read, or arithmetic on reads (`i + 1`), leaves
+    -    its list as it was.
+    +    A format the statement makes itself, an interpolation or a
+    +    concatenation, now goes into a rooted temporary ahead of the
+    +    arguments (emit_str_format_held). It is a String nothing else can
+    +    name, so it is held beside any argument, and it reads its parts
+    +    before an argument writes them: `"%#{w}d|" % (w += 1)` printed the
+    +    width the argument wrote where gcc built the list first.
+    +
+    +    A call's or a yield's answer is held the same way only beside
+    +    arguments that run none of the program's code (format_arg_is_inert:
+    +    a read, a literal, arithmetic on numbers, an Array literal of
+    +    those). The call may have answered a String an argument appends to,
+    +
+    +        $fmt = +"%d"
+    +        def held = $fmt
+    +        def grow = ($fmt << "|x"; 1)
+    +        p held % (grow + 1)          # "2|x"
+    +
+    +    and a temporary read ahead of that argument would miss the append.
+    +    Beside any other argument the statement keeps the C it had
+    +    (str_format_left_alone), and with it the order the C compiler gives
+    +    the two: gcc prints the line above, clang prints "2". A format the
+    +    statement has already run into a temporary of its own is left there.
+     
+         A format something else holds is read where it stands, with the C it
+         had (format_is_held): a literal, a variable or a constant, a
+    @@ Commit message
+         between two of those (`c ? f : g`, `f || g`). A slot read counts
+         only while the method is the builtin: where the program gives Array
+         or Hash its own `[]`, `first` or `last`, or writes the reader by
+    -    hand, the answer is a call's and is held, and so is a Hash's value
+    -    where a Hash of the program has a default block.
+    +    hand, the answer is a call's, and so is a Hash's value where a Hash
+    +    of the program has a default block.
+     
+    -    A call's or a yield's answer is held whether or not the call made
+    -    the String, which is not known where the format is emitted
+    -    (`def fl = "%5d %d|"`): 16 to 21 instructions a statement built with
+    -    gcc and 18 with clang, 13 and 9 for a yield, on formats that were
+    -    right before. So is the list of a single argument a call answers
+    -    (`"%5d|" % sq(i)`, 13 and 27).
+    +    The one-element list is rooted where its argument is made by
+    +    something that allocates. A single argument that is a read, or
+    +    arithmetic on reads (`i + 1`), leaves its list as it was, and so
+    +    does one the statement already ran into a temporary. An Integer or a
+    +    Float that runs code (`"%5d|" % sq(i)`) is taken into a C temporary
+    +    ahead of the list instead, boxed there by the call emit_boxed wrote
+    +    for it, and nothing is rooted.
+    +
+    +    Where it is held, a call's or a yield's answer is held whether or
+    +    not the call made the String, which is not known where the format is
+    +    emitted (`def fl = "%5d %d|"`): 16 to 21 instructions a statement
+    +    built with gcc and 18 with clang, 13 and 9 for a yield, on formats
+    +    that were right before. So is the list of a single String a call
+    +    answers (`"%5s|" % lbl(i)`, 19 and 18). A Float taken ahead of its
+    +    list costs 2 and 1, an Integer a call answers nothing.
+     
+         Co-Authored-By: Claude Code <noreply@anthropic.com>
+     
+    @@ src/codegen_call.c: static void emit_utime_arg_bad(Compiler *c, int node, TyKind
+     +           format_is_held(c, nt_ref(nt, v, "right"), depth + 1);
+     +  return k == NK_CallNode && format_is_slot_read(c, v);
+     +}
+    ++/* Did the statement already run the format into a temp of its own, which
+    ++   it roots (a call beside an argument that can see when it ran)? */
+    ++static int format_ran_first(int recv, int r) {
+    ++  return arg_ran_first(recv, 0) || arg_ran_first(r, 0);
+    ++}
+    ++/* Is the format a String the statement makes itself, which nothing else can
+    ++   name: an interpolation, or a concatenation by String's own `+`? */
+    ++static int format_is_own_made(Compiler *c, int v) {
+    ++  const NodeTable *nt = c->nt;
+    ++  const char *ty = nt_type(nt, v);
+    ++  if (ty && sp_streq(ty, "InterpolatedStringNode")) return 1;
+    ++  if (nt_kind(nt, v) != NK_CallNode) return 0;
+    ++  const char *nm = nt_str(nt, v, "name");
+    ++  int recv = nt_ref(nt, v, "receiver");
+    ++  return nm && sp_streq(nm, "+") && recv >= 0 && nt_ref(nt, v, "block") < 0 &&
+    ++         comp_ntype(c, recv) == TY_STRING && comp_ntype(c, v) == TY_STRING &&
+    ++         !format_method_is_own(c, "String", "+");
+    ++}
+    ++/* Does building the argument run nothing that could change, in place, the
+    ++   String a call answered as the format: a read, a literal or arithmetic on
+    ++   numbers (subtree_is_pure_read), a global's read, or an Array literal of
+    ++   those? */
+    ++static int format_arg_is_inert(Compiler *c, int a, int depth) {
+    ++  const NodeTable *nt = c->nt;
+    ++  a = unwrap_parens(c, a);
+    ++  if (a < 0 || depth > 8) return 0;
+    ++  const char *ty = nt_type(nt, a);
+    ++  if (!ty) return 0;
+    ++  if (sp_streq(ty, "StringNode") || sp_streq(ty, "GlobalVariableReadNode")) return 1;
+    ++  if (sp_streq(ty, "ArrayNode")) {
+    ++    int n = 0; const int *el = nt_arr(nt, a, "elements", &n);
+    ++    for (int i = 0; i < n; i++) if (!format_arg_is_inert(c, el[i], depth + 1)) return 0;
+    ++    return 1;
+    ++  }
+    ++  return subtree_is_pure_read(c, a);
+    ++}
+     +/* See codegen_call_arms.h. */
+    -+const char *emit_str_format_held(Compiler *c, int recv, int fck, Buf *b) {
+    ++int str_format_left_alone(Compiler *c, int recv, int arg) {
+     +  int r = unwrap_parens(c, recv);
+    -+  if (r < 0 || format_is_held(c, r, 0)) return NULL;
+    ++  return r >= 0 && !format_ran_first(recv, r) && !format_is_held(c, r, 0) && !format_is_own_made(c, r) &&
+    ++         !format_arg_is_inert(c, arg, 0);
+    ++}
+    ++/* See codegen_call_arms.h. */
+    ++const char *emit_str_format_held(Compiler *c, int recv, int arg, int fck, Buf *b) {
+    ++  int r = unwrap_parens(c, recv);
+    ++  if (r < 0 || format_ran_first(recv, r) || format_is_held(c, r, 0) || str_format_left_alone(c, recv, arg)) return NULL;
+     +  int t = fck >= 0 ? fck : ++g_tmp;
+     +  buf_printf(b, "({ const char *_t%d = ", t);
+     +  emit_expr(c, recv, b);
+    @@ src/codegen_call.c: int emit_str_format_untyped_array(Compiler *c, int recv, int
+        }
+        if (!lit) return 0;
+     -  if (fck >= 0) {
+    -+  const char *fend = emit_str_format_held(c, recv, fck, b);
+    ++  const char *fend = emit_str_format_held(c, recv, a0n, fck, b);
+     +  if (fend) {}
+     +  else if (fck >= 0) {
+          buf_printf(b, "sp_str_format_polyarr(({ const char *_t%d = ", fck);
+    @@ src/codegen_call_arms.h: int emit_struct_new_early(Compiler *c, int ci, int argc
+     +   sp_str_format_polyarr(_tN`, with the nil check where `fck` names the
+     +   temp, and answers the text that closes it after the arguments. NULL, with
+     +   nothing written, for a format something else holds while the arguments
+    -+   are built (a literal, a read that cannot allocate, a read out of a slot):
+    -+   the caller emits the call as before. */
+    -+const char *emit_str_format_held(Compiler *c, int recv, int fck, Buf *b);
+    ++   are built (a literal, a read that cannot allocate, a read out of a slot),
+    ++   and for a call's answer beside an argument `arg` that runs code: that
+    ++   code may append to the String the call answered, which a temp read
+    ++   ahead of it would miss. The caller then emits the call as before. */
+    ++const char *emit_str_format_held(Compiler *c, int recv, int arg, int fck, Buf *b);
+    ++/* That last case: the format is a call's answer and `arg` runs code, so the
+    ++   whole `recv % arg` is emitted as it was before the format was held. */
+    ++int str_format_left_alone(Compiler *c, int recv, int arg);
+      int emit_str_format_untyped_array(Compiler *c, int recv, int a0n, int fck, Buf *b);
+      void emit_voided_operands(Compiler *c, int recv, int arg, int v, Buf *b);
+      int parse_named_format(const char *fmt, Buf *rew, const char **names, int *name_len, int maxn);
+     
+      ## src/codegen_call_string.c ##
+    +@@
+    + #include "codegen_call_arms.h"
+    + 
+    + /* a Regexp literal's match / match? / ===, the match family on a String, gsub, and String#% */
+    ++/* The text emit_boxed gives an Integer or a Float is most often one box
+    ++   call around the value, `FN(X)`. Where `text` has that shape its X is cut
+    ++   out in place and FN is answered; NULL for any other shape. */
+    ++static const char *boxed_number_value(char *text, TyKind at, char **val) {
+    ++  const char *fns[2] = { ty_box_fn(at), ty_box_nil_fn(at) };
+    ++  size_t len = text ? strlen(text) : 0;
+    ++  for (int i = 0; i < 2; i++) {
+    ++    size_t n = fns[i] ? strlen(fns[i]) : 0, k = n;
+    ++    int depth = 0;
+    ++    if (!n || len < n + 2 || strncmp(text, fns[i], n) || text[n] != '(' || text[len - 1] != ')') continue;
+    ++    /* the call's own parenthesis has to be the one the text ends on */
+    ++    for (; k < len; k++) {
+    ++      char ch = text[k];
+    ++      if (ch == '"' || ch == '\'') { for (k++; k < len && text[k] != ch; k++) if (text[k] == '\\') k++; }
+    ++      else if (ch == '(') depth++;
+    ++      else if (ch == ')' && --depth == 0) break;
+    ++    }
+    ++    if (k != len - 1) continue;
+    ++    text[len - 1] = 0;
+    ++    *val = text + n + 1;
+    ++    return fns[i];
+    ++  }
+    ++  return NULL;
+    ++}
+    ++
+    + int emit_call_regexp_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, TyKind rt, TyKind a0) {
+    +   /* regex literal match predicates (bool-returning, no MatchData/globals):
+    +      /re/.match?(str[, pos])  and  str.match?(/re/[, pos]) */
+     @@ src/codegen_call_string.c: no_gsub_enum:
+          int fck = (frty && (sp_streq(frty, "StringNode") || sp_streq(frty, "InterpolatedStringNode")))
+                    ? -1 : ++g_tmp;
+          if (at == TY_POLY_ARRAY) {
+     -      if (fck >= 0) {
+    -+      const char *fend = (operand_may_allocate(c, argv[0]) && !subtree_is_pure_read(c, argv[0])) ? emit_str_format_held(c, recv, fck, b) : NULL;
+    ++      const char *fend = (operand_may_allocate(c, argv[0]) && !subtree_is_pure_read(c, argv[0])) ? emit_str_format_held(c, recv, argv[0], fck, b) : NULL;
+     +      if (fend) buf_puts(b, ", ");
+     +      else if (fck >= 0) {
+              buf_printf(b, "sp_str_format_polyarr(({ const char *_t%d = ", fck);
+    @@ src/codegen_call_string.c: no_gsub_enum:
+            const char *kind = at == TY_STR_ARRAY ? "SP_BUILTIN_STR_ARRAY"
+                             : at == TY_FLOAT_ARRAY ? "SP_BUILTIN_FLT_ARRAY" : "SP_BUILTIN_INT_ARRAY";
+     -      if (fck >= 0) {
+    -+      const char *fend = emit_str_format_held(c, recv, fck, b);
+    ++      const char *fend = emit_str_format_held(c, recv, argv[0], fck, b);
+     +      if (fend) {}
+     +      else if (fck >= 0) {
+              buf_printf(b, "sp_str_format_polyarr(({ const char *_t%d = ", fck);
+    @@ src/codegen_call_string.c: no_gsub_enum:
+          if (at == TY_POLY) {
+     -      buf_puts(b, "sp_str_format_polyarr("); emit_expr(c, recv, b);
+     -      buf_puts(b, ", sp_format_args("); emit_boxed(c, argv[0], b); buf_puts(b, "))");
+    -+      const char *fend = emit_str_format_held(c, recv, -1, b);
+    ++      const char *fend = emit_str_format_held(c, recv, argv[0], -1, b);
+     +      if (!fend) { buf_puts(b, "sp_str_format_polyarr("); emit_expr(c, recv, b); }
+     +      buf_puts(b, ", sp_format_args("); emit_boxed(c, argv[0], b); buf_printf(b, ")%s", fend ? fend : ")");
+            return 1;
+    @@ src/codegen_call_string.c: no_gsub_enum:
+     -      buf_puts(b, "sp_str_format_polyarr("); emit_expr(c, recv, b);
+     -      buf_puts(b, ", ({ sp_PolyArray *_fa = sp_PolyArray_new(); sp_PolyArray_push(_fa, ");
+     -      emit_boxed(c, argv[0], b); buf_puts(b, "); _fa; }))");
+    -+      const char *fend = emit_str_format_held(c, recv, -1, b);
+    ++      const char *fend = emit_str_format_held(c, recv, argv[0], -1, b);
+     +      if (!fend) { buf_puts(b, "sp_str_format_polyarr("); emit_expr(c, recv, b); }
+     +      /* the one-element list is held by `_fa` alone while an argument that
+    -+         allocates is built (`"%5s|" % ("q" + i.to_s)`) */
+    -+      buf_printf(b, ", ({ sp_PolyArray *_fa = sp_PolyArray_new(); %ssp_PolyArray_push(_fa, ",
+    -+                 (operand_may_allocate(c, argv[0]) && !subtree_is_pure_read(c, argv[0])) ? "SP_GC_ROOT(_fa); " : "");
+    ++         allocates is built (`"%5s|" % ("q" + i.to_s)`); one that already
+    ++         ran into a temp was built before the list */
+    ++      int an = arg_ran_first(argv[0], 0) ? argv[0] : unwrap_parens(c, argv[0]);
+    ++      int runs = operand_may_allocate(c, argv[0]) && !subtree_is_pure_read(c, argv[0]) && !arg_ran_first(an, 0);
+    ++      if (!fend && str_format_left_alone(c, recv, argv[0])) runs = 0;
+    ++      /* a number needs no holding: its value is taken ahead of the list
+    ++         (`"%5d|" % sq(i)`) and boxed there by the call emit_boxed wrote */
+    ++      else if (runs && (at == TY_INT || at == TY_FLOAT)) {
+    ++        Buf vb; memset(&vb, 0, sizeof vb);
+    ++        emit_boxed(c, argv[0], &vb);
+    ++        char *val = NULL;
+    ++        const char *fn = vb.p ? boxed_number_value(vb.p, at, &val) : NULL;
+    ++        if (fn)
+    ++          buf_printf(b, ", ({ %s _fv = %s; sp_PolyArray *_fa = sp_PolyArray_new(); sp_PolyArray_push(_fa, %s(_fv)); _fa; })%s",
+    ++                     at == TY_INT ? "sp_int" : "sp_float", val, fn, fend ? fend : ")");
+    ++        else
+    ++          buf_printf(b, ", ({ sp_PolyArray *_fa = sp_PolyArray_new(); SP_GC_ROOT(_fa); sp_PolyArray_push(_fa, %s); _fa; })%s",
+    ++                     vb.p ? vb.p : "sp_box_nil()", fend ? fend : ")");
+    ++        free(vb.p);
+    ++        return 1;
+    ++      }
+    ++      buf_printf(b, ", ({ sp_PolyArray *_fa = sp_PolyArray_new(); %ssp_PolyArray_push(_fa, ", runs ? "SP_GC_ROOT(_fa); " : "");
+     +      emit_boxed(c, argv[0], b); buf_printf(b, "); _fa; })%s", fend ? fend : ")");
+            return 1;
+          }
+    @@ test/format_made_in_place_held.rb (new)
+     +either = [1, "two"][i & 1]
+     +p "%#{w}s|" % either
+     +
+    ++# a number a call answers is taken before the list is made
+    ++def sq(i) = i * i
+    ++def half(i) = i / 2.0
+    ++def label(i) = "s" + i.to_s
+    ++p "%5d|" % sq(i)
+    ++p "%5.2f|" % half(i)
+    ++p "%#{w}d|" % (sq(i) + i)
+    ++p "%5d|" % (i > 3 ? sq(i) : 0)
+    ++p "%5.1f|" % (h = half(i))
+    ++def cell(i) = "%5d|" % yield(i)
+    ++p cell(i) { |v| v * v }
+    ++p "%5s|" % label(i)
+    ++
+     +# a call's result as the format
+     +def fmt(w) = "%" + w.to_s + "d|"
+     +p fmt(4) % 12
+    @@ test/format_made_in_place_held.rb (new)
+     +def grow = ($fmt << "|%d"; 1)
+     +p held % [grow, 2]
+     +p "%#{w}d|%d" % [(w += 1), 2]
+    ++p "%#{w}d|" % (w += 1)
+    ++p "%#{w}d|%d" % (w += 1; ints)
+    ++
+    ++# a format the statement makes is a String of its own: what an argument
+    ++# appends to the one it was made from comes after
+    ++def grow_s(s) = (s << "|x"; 1)
+    ++sb = +"%d"
+    ++p "#{sb}" % (grow_s(sb) + 1)
+    ++p (sb + "") % (grow_s(sb) + 1)
+    ++p sb
+    ++
+    ++# a call that answers the format ahead of a global's read runs once
+    ++$n = 0
+    ++def counted = ($n += 1; "%d|")
+    ++p counted % $n
+     
+      ## test/format_made_in_place_held.rb.expected (new) ##
+     @@
+    @@ test/format_made_in_place_held.rb.expected (new)
+     +"   q7|"
+     +"SYM  |"
+     +"  two|"
+    ++"   49|"
+    ++" 3.50|"
+    ++"   56|"
+    ++"   49|"
+    ++"  3.5|"
+    ++"   49|"
+    ++"   s7|"
+     +"  12|"
+     +"   3|"
+     +"  7|zzz|"
+     +NoMethodError
+     +"1|2"
+     +"    6|2"
+    ++"     7|"
+    ++"      3|4"
+    ++"2"
+    ++"2|x"
+    ++"%d|x|x"
+    ++"1|"
