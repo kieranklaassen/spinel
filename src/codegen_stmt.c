@@ -7927,6 +7927,20 @@ int hc_recv_cached(Compiler *c, int recv) {
    for a loop that needs to see what ran just ahead of it (hc_bounded_index). */
 int g_stmt_cur = -1, g_stmt_prev = -1;
 
+/* Is `id`, a begin or a catch whose value goes ahead into a temp, the statement
+   being emitted, or all that its local, ivar or global write stores? Then the
+   temp is read as soon as it is written, with nothing run in between. A
+   `return` is not counted: an ensure body around it runs before the read. */
+int hoisted_value_is_stmt(Compiler *c, int id) {
+  int s = g_stmt_cur;
+  if (s < 0) return 0;
+  if (unwrap_parens(c, s) == id) return 1;
+  NodeKind k = nt_kind(c->nt, s);
+  return (k == NK_LocalVariableWriteNode || k == NK_InstanceVariableWriteNode ||
+          k == NK_GlobalVariableWriteNode) &&
+         unwrap_parens(c, nt_ref(c->nt, s, "value")) == id;
+}
+
 /* A loop of the shape
      i = <a literal >= 0>
      while i < a.length      # or a.size
