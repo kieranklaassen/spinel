@@ -1,0 +1,1 @@
+A Rational of Bignums raised to an Integer is a Rational

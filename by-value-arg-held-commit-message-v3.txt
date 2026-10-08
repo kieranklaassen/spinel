@@ -1,0 +1,56 @@
+A Range or Rational read into a boxed parameter is held for the call
+
+    class Slot; def initialize(v) = @v = v; def v = @v; end
+    Slot.new(7)
+    keep = []
+    n = 0
+    while n < 2000
+      r = Rational(n, 7)
+      keep << Slot.new(r)
+      n += 1
+    end
+    bad = 0
+    keep.each_with_index { |o, i| bad += 1 if o.v != Rational(i, 7) }
+    p bad    # 0; master prints 1: the Slot at 1798 holds (257/1)
+
+That is a plain run, gcc and clang, exit 0. Under SPINEL_GC_STRESS=2 a
+single `Slot.new(r)` aborts ("the mark reached a freed slot").
+
+A Range, a Rational, a Complex and a Time are kept by value. Where the
+parameter is boxed (`Slot.new(7)` makes it so), a read of one is boxed
+where the argument stands, `sp_Slot_new(sp_box_rational(lv_r))`, and
+the box copies it into a new cell. Nothing holds that cell. sp_Slot_new
+allocates the object before initialize stores the argument; in
+`pair(r, q)` the second box's allocation collects the first; and a
+parameter a lambda captures lives in a cell the method allocates before
+it stores the argument.
+
+"A converted bare-read argument is rooted across the constructor" roots
+a bare read that reaches a container parameter through a converter, and
+answers no for a boxed parameter. arg_read_converts now answers yes
+there for a read kept by value (a Class aside: its box is its tag, with
+no cell), and emit_rooted_conversion learns the boxed parameter's
+declaration.
+
+The box is written as it was and held only where something can
+allocate between it and the callee's root of its parameter
+(arg_built_exposed): the list is a constructor's, the callee has a
+captured parameter, or a second slot of the list allocates where it
+stands. Scalar arithmetic and a typed index read build nothing; the
+read of a String a block appends to does, though its node is a read:
+it copies the live buffer (arg_value_builds). That is asked once the
+list is written, because a spread slot is judged by its text: an
+unreached default that is a Hash or an Array literal stands there as
+a temp the prelude built and rooted, and allocates nothing in the
+call. Where the list is exposed the slot's text becomes
+`(_tN = sp_box_rational(lv_r))` where it stood, so nothing runs
+earlier than it did. `one(r)` into a method that roots its parameter
+first, a `send`, and a `super` into an initialize (the object exists)
+are written as they were.
+
+Where it holds it costs seven instructions a `new`, eight for two
+boxes, five into a method with a captured parameter, and ten to
+thirteen where the calling method had no GC frame, beside the
+allocation the box already makes.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

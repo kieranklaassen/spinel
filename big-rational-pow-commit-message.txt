@@ -1,0 +1,30 @@
+A Rational of Bignums raised to an Integer is a Rational
+
+    x = [Rational(2**70, 3), :a][0]
+    p x ** 2, x ** -1, x ** 0
+
+printed 1.548662861009071e+41, 2.541098841762901e-21 and 1.0; CRuby
+prints (1393796574908163946345982392040522594123776/9),
+(3/1180591620717411303424) and (1/1). sp_poly_pow keeps an exact
+receiver exact, but its Rational arm asked for the word-sized Rational
+alone, so a Rational whose numerator or denominator is a Bignum fell to
+pow(double, double): a Float, and past 2**53 a rounded one.
+
+sp_brat_pow (lib/sp_format.c) raises each part in Bignums, swaps them
+for a negative exponent, and raises ZeroDivisionError for zero to a
+negative one, as sp_rational_pow does in words. A Rational exponent
+that is an Integer (2r) is taken the same way; a Float exponent and a
+Rational one that is no Integer answer a Float as before.
+
+The new arm sits beside the Complex one under one test of the tag, so an
+Integer, a Float and a Bignum base do not pass it, nor a word-sized
+Rational raised to an Integer. Cost (callgrind, 200,000 powers): with
+gcc those four are on master's count or one below it, and a Complex base
+pays 2 instructions a power (0.5%). With clang an Integer, a Float and a
+Bignum base pay 1 and a Complex base 8; a word-sized Rational takes 3
+less.
+
+Test: test/big_rational_pow.rb (expected from CRuby 3.3.6). On master
+36 of its 43 lines are wrong, in every build.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

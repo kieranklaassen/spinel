@@ -1,0 +1,64 @@
+A Range or Rational handed to a Struct or an arm is held
+
+    P = Struct.new(:a, :b)
+    P.new(7, 7)
+    keep = []
+    n = 0
+    while n < 2000
+      r = Rational(n + 1, 3)
+      q = Rational(n + 2, 5)
+      keep << P.new(r, q)
+      n += 1
+    end
+    bad = 0
+    keep.each_with_index do |s, i|
+      ok = s.a == Rational(i + 1, 3) && s.b == Rational(i + 2, 5)
+      bad += 1 unless ok
+    end
+    p bad    # 0; master prints 1: the Struct of turn 1127
+
+That is a plain run, gcc and clang, exit 0. So is a call on a receiver
+of two classes whose methods keep what they are given: of 8,000
+`o.m(r, q).first`, two answer with the other Range. Under
+SPINEL_GC_STRESS=2 one such call aborts ("the mark reached a freed
+slot").
+
+A Range, a Rational, a Complex and a Time are kept by value, and a
+boxed slot takes one copied into a new cell (sp_box_rational, ...).
+"A Range or Rational read into a boxed parameter is held for the call"
+holds that cell where a method or a constructor is called by name.
+Two callers write their own argument lists and still handed the cell
+on with nothing holding it:
+
+- a Struct's or a Data's `new`. sp_<S>_new roots what it is given
+  before it allocates, so one such member is safe as it is. Beside a
+  second member built in the list, either allocation collects the
+  other: struct_members_built counts the members built where they
+  stand, and where there are two the box is assigned to a rooted temp
+  (emit_rooted_conversion), as that change does.
+- a call on a receiver of several classes. Each arm boxes the
+  argument's temp for its own method, a positional or a keyword. Two
+  arguments an arm makes new already bind to rooted locals ahead of
+  its call (emit_poly_arm_args); such a box now counts among them.
+  One alone binds where something else allocates before the callee
+  roots it: a default the arm builds beside it, or the cell a method
+  keeps a captured parameter in. default_built_in_place asks the
+  written text, as that change does for a spread slot (its test is
+  split in two for it), so a literal the prelude holds does not
+  count.
+
+Nothing runs earlier than it did. One such member alone, one such
+argument to a method that captures none, and either beside an
+Integer, scalar arithmetic, a typed index read or a literal default
+compile to the C they did.
+
+A call pays 8 instructions into a Struct for two, 6 for one beside a
+call of the program's own. As in that change, a builtin call no list
+names (`P.new(r, n.abs)`) counts as building and is held though
+master ran it right. The arm's locals are roots pushed and popped
+where the switch sits in its helper without a frame (pd_hoist): 30
+to 33 for two arguments, 39 for one beside a rest, 15 for one beside
+a default, 53 for one a method captures, whose switch the longer arm
+moves there.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
