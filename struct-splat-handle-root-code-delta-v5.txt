@@ -1,0 +1,313 @@
+Delta of the Struct and splat piece: git range-diff 84f5b5020ef8..517572e6f2d1 84f5b5020ef8..cee5d9a271a4
+(the head read, 517572e6f2d1, against this re-cut; both are one commit on master 84f5b5020ef8; context lines are the source as it stands. c636d715a6ee on the -b branch, the same cut without the kept answers, was pushed and never sent as a row)
+
+1:  517572e6f ! 1:  cee5d9a27 A shared String stays rooted in a Struct's new and out of a splat
+    @@ Commit message
+     
+         `One.new("alpha")`, `Mixed.new("alpha", i)`, `mk(*qa)` and
+         `U.new.set(*qa)` compile as they did, and so does a member beside a
+    -    unary minus on a number or a conditional of plain reads
+    -    (subtree_is_plain_value). A construction that holds costs 9 to 37
+    -    instructions built with gcc and 16 to 48 with clang for a Struct, 16
+    -    to 41 and 13 to 46 for a splat (callgrind, `k = X` in a block run
+    -    200,000 times at the top level; another loop moves the figures by
+    +    value that runs none of the program's code and makes nothing
+    +    (subtree_is_plain_value), at an argument's place or a default's: a
+    +    plain read or a global's; a unary minus, `abs` or an operator on
+    +    numbers; `size` or `length` of a String, an Array or a Hash; `!`,
+    +    `&&`, `||` and a conditional of such values. An index, an operator,
+    +    a reader or one of those calls counts only while it is provably the
+    +    builtin's (plain_name_is_builtin): the program has no def and no
+    +    attr of that name anywhere and none of the ways to define a method
+    +    that leave no def behind, an alias, alias_method, define_method, a
+    +    delegator, a send with a computed name or an eval of a class. A `-f`
+    +    under `class Float; def -@` runs the program's code and may
+    +    allocate: master built with clang ends in SIGSEGV on
+    +    `MixF.new("alpha", -f)` there, and the member is now held as beside
+    +    any call.
+    +
+    +    A construction that holds costs 9 to 37 instructions built with gcc
+    +    and 16 to 48 with clang for a Struct, 14 to 43 and 12 to 50 for a
+    +    splat (callgrind, `k = X` in a block run 200,000 times at the top
+    +    level; another loop or another program moves the figures by up to
+         about ten). One kind pays and can be right without it: a literal
+         beside a call that answers a number, a builtin's too
+    -    (`Mixed.new("alpha", sz(i))`, 9 and 19; `s.size`, 10 and 16), is lost
+    -    only where the call allocates and the C compiler runs it second, and
+    -    neither is known where the call is emitted.
+    +    (`Mixed.new("alpha", sz(i))`, 9 to 10 and 19 to 21; `s.bytesize`, 11
+    +    and 16), is lost only where the call allocates and the C compiler
+    +    runs it second, and neither is known where the call is emitted. A
+    +    program with a method of such a name in any class, or one of those
+    +    words, pays the same beside that call.
+     
+         Co-Authored-By: Claude Code <noreply@anthropic.com>
+     
+    @@ src/codegen_call.c: int subtree_is_pure_read(Compiler *c, int id) {
+        }
+        return 1;
+      }
+    ++static int plain_is_attr_call(const char *nm) {
+    ++  return sp_streq(nm, "attr") || sp_streq(nm, "attr_reader") || sp_streq(nm, "attr_writer") ||
+    ++         sp_streq(nm, "attr_accessor");
+    ++}
+    ++/* A number that changes when the node table does (its `version`: the
+    ++   emitter adds a node here and there). The answers below walk the whole
+    ++   program, so each is kept while the table stands. */
+    ++static int plain_table_gen(Compiler *c) {
+    ++  static const Compiler *mc; static const NodeTable *mnt; static unsigned mver; static int gen;
+    ++  if (mc != c || mnt != c->nt || mver != c->nt->version) {
+    ++    mc = c; mnt = c->nt; mver = c->nt->version; gen++;
+    ++  }
+    ++  return gen;
+    ++}
+    ++/* Can the program define a method that leaves neither a def nor an attr of
+    ++   that name in the node table: an alias, a name handed to alias_method,
+    ++   define_method or a delegator, a send, an eval of a class, an attr whose
+    ++   name is not a Symbol literal? */
+    ++static int plain_prog_defines_unseen(Compiler *c) {
+    ++  static const char *const WORDS[] = {
+    ++    "alias_method", "define_method", "define_singleton_method", "send", "__send__", "public_send",
+    ++    "class_eval", "module_eval", "class_exec", "module_exec", "instance_eval", "instance_exec", "eval",
+    ++    "def_delegator", "def_delegators", "delegate", NULL };
+    ++  static int memo_gen, memo;
+    ++  int g = plain_table_gen(c);
+    ++  if (memo_gen == g) return memo;
+    ++  const NodeTable *nt = c->nt;
+    ++  int n = 0;
+    ++  memo_gen = g; memo = 0;
+    ++  nt_nodes_of_kind(nt, NK_AliasMethodNode, &n);
+    ++  if (n > 0) return memo = 1;
+    ++  const int *calls = nt_nodes_of_kind(nt, NK_CallNode, &n);
+    ++  for (int i = 0; i < n && !memo; i++) {
+    ++    const char *nm = nt_str(nt, calls[i], "name");
+    ++    if (!nm) continue;
+    ++    for (int w = 0; WORDS[w] && !memo; w++) if (sp_streq(nm, WORDS[w])) memo = 1;
+    ++    if (memo || !plain_is_attr_call(nm)) continue;
+    ++    int a = nt_ref(nt, calls[i], "arguments"), ac = 0;
+    ++    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+    ++    for (int j = 0; j < ac; j++) if (nt_kind(nt, av[j]) != NK_SymbolNode) memo = 1;
+    ++  }
+    ++  return memo;
+    ++}
+    ++/* Is a call of `nm` on a builtin's value provably the builtin's own: the
+    ++   program has no def of that name anywhere, no attr of that name, and no
+    ++   way to define one that the node table does not show? Asked by the name
+    ++   alone, whatever the class: a def in a subclass, a module or a singleton
+    ++   counts. `!=` runs `==`. A reader (`reader`) is asked for a def of its name
+    ++   only: its attr is what makes it a read. */
+    ++static int plain_name_scan(Compiler *c, const char *nm, int reader) {
+    ++  const NodeTable *nt = c->nt;
+    ++  if (plain_prog_defines_unseen(c)) return 0;
+    ++  const char *also = sp_streq(nm, "!=") ? "==" : nm;
+    ++  int n = 0;
+    ++  const int *defs = nt_nodes_of_kind(nt, NK_DefNode, &n);
+    ++  for (int i = 0; i < n; i++) {
+    ++    const char *dn = nt_str(nt, defs[i], "name");
+    ++    if (!dn || sp_streq(dn, nm) || sp_streq(dn, also)) return 0;
+    ++  }
+    ++  if (reader) return 1;
+    ++  const int *calls = nt_nodes_of_kind(nt, NK_CallNode, &n);
+    ++  for (int i = 0; i < n; i++) {
+    ++    const char *cn = nt_str(nt, calls[i], "name");
+    ++    if (!cn || !plain_is_attr_call(cn)) continue;
+    ++    int a = nt_ref(nt, calls[i], "arguments"), ac = 0;
+    ++    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+    ++    for (int j = 0; j < ac; j++) {
+    ++      const char *sv = nt_kind(nt, av[j]) == NK_SymbolNode ? nt_str(nt, av[j], "value") : NULL;
+    ++      if (!sv || sp_streq(sv, nm) || sp_streq(sv, also)) return 0;
+    ++    }
+    ++  }
+    ++  return 1;
+    ++}
+    ++/* The scan's answer, kept by name while the table stands (the name is
+    ++   copied: nothing is assumed of where it lives). */
+    ++static int plain_name_answer(Compiler *c, const char *nm, int reader) {
+    ++  static char names[32][16]; static char kinds[32], answers[32]; static int used, memo_gen;
+    ++  if (!nm) return 0;
+    ++  int g = plain_table_gen(c);
+    ++  if (memo_gen != g) { memo_gen = g; used = 0; }
+    ++  for (int i = 0; i < used; i++)
+    ++    if (kinds[i] == reader && sp_streq(names[i], nm)) return answers[i];
+    ++  int ans = plain_name_scan(c, nm, reader);
+    ++  if (used < 32 && strlen(nm) < sizeof names[0]) {
+    ++    strcpy(names[used], nm); kinds[used] = (char)reader; answers[used++] = (char)ans;
+    ++  }
+    ++  return ans;
+    ++}
+    ++static int plain_name_is_builtin(Compiler *c, const char *nm) {
+    ++  return plain_name_answer(c, nm, 0);
+    ++}
+    ++/* Does the subtree, a pure read by the list above, hold a call that is not
+    ++   provably the builtin's? That list takes an index into a typed Array, an
+    ++   operator on numbers or booleans and a reader's field read by the type of
+    ++   the receiver; the program's own `[]` or `+` runs its code, and may
+    ++   allocate. A reader is asked for a def of its name only: its attr is what
+    ++   makes it a read. */
+    ++static int plain_calls_own(Compiler *c, int a) {
+    ++  const NodeTable *nt = c->nt;
+    ++  if (a < 0) return 0;
+    ++  if (nt_kind(nt, a) == NK_CallNode) {
+    ++    const char *nm = nt_str(nt, a, "name");
+    ++    int alloc = 0;
+    ++    if (!nm) return 1;
+    ++    if (!plain_name_answer(c, nm, call_is_field_read(c, a, &alloc))) return 1;
+    ++  }
+    ++  int nr = nt_num_refs(nt, a);
+    ++  for (int i = 0; i < nr; i++)
+    ++    if (plain_calls_own(c, nt_ref_at(nt, a, i))) return 1;
+    ++  int na = nt_num_arrs(nt, a);
+    ++  for (int i = 0; i < na; i++) {
+    ++    int n = 0;
+    ++    const int *ids = nt_arr_at(nt, a, i, &n);
+    ++    for (int j = 0; j < n; j++)
+    ++      if (plain_calls_own(c, ids[j])) return 1;
+    ++  }
+    ++  return 0;
+    ++}
+     +/* See codegen_internal.h. */
+     +int subtree_is_plain_value(Compiler *c, int id) {
+     +  const NodeTable *nt = c->nt;
+     +  id = unwrap_parens(c, id);
+    -+  if (id < 0 || subtree_is_pure_read(c, id)) return 1;
+    -+  if (nt_kind(nt, id) == NK_IfNode) {
+    -+    int parts[2] = { nt_ref(nt, id, "statements"), nt_ref(nt, id, "subsequent") };
+    -+    if (!subtree_is_plain_value(c, nt_ref(nt, id, "predicate"))) return 0;
+    -+    for (int i = 0; i < 2; i++) {
+    -+      int st = parts[i], n = 0;
+    -+      if (st >= 0 && nt_kind(nt, st) == NK_IfNode) {
+    -+        if (!subtree_is_plain_value(c, st)) return 0;
+    -+        continue;
+    ++  if (id < 0) return 1;
+    ++  if (subtree_is_pure_read(c, id)) return !plain_calls_own(c, id);
+    ++  switch (nt_kind(nt, id)) {
+    ++    /* a global's read is off the list above, which also answers for
+    ++       reordering; the match globals build their value */
+    ++    case NK_GlobalVariableReadNode:
+    ++      return !operand_may_allocate(c, id);
+    ++    case NK_AndNode: case NK_OrNode:
+    ++      return subtree_is_plain_value(c, nt_ref(nt, id, "left")) &&
+    ++             subtree_is_plain_value(c, nt_ref(nt, id, "right"));
+    ++    case NK_IfNode: case NK_UnlessNode: {
+    ++      int unless = nt_kind(nt, id) == NK_UnlessNode;
+    ++      int parts[2] = { nt_ref(nt, id, "statements"), nt_ref(nt, id, unless ? "else_clause" : "subsequent") };
+    ++      if (!subtree_is_plain_value(c, nt_ref(nt, id, "predicate"))) return 0;
+    ++      for (int i = 0; i < 2; i++) {
+    ++        int st = parts[i], n = 0;
+    ++        if (st >= 0 && nt_kind(nt, st) == NK_IfNode) {
+    ++          if (!subtree_is_plain_value(c, st)) return 0;
+    ++          continue;
+    ++        }
+    ++        if (st >= 0 && nt_kind(nt, st) == NK_ElseNode) st = nt_ref(nt, st, "statements");
+    ++        const int *bd = st >= 0 ? nt_arr(nt, st, "body", &n) : NULL;
+    ++        if (n != 1 || !subtree_is_plain_value(c, bd[0])) return 0;
+     +      }
+    -+      if (st >= 0 && nt_kind(nt, st) == NK_ElseNode) st = nt_ref(nt, st, "statements");
+    -+      const int *bd = st >= 0 ? nt_arr(nt, st, "body", &n) : NULL;
+    -+      if (n != 1 || !subtree_is_plain_value(c, bd[0])) return 0;
+    ++      return 1;
+     +    }
+    -+    return 1;
+    -+  }
+    -+  if (nt_kind(nt, id) == NK_CallNode) {
+    -+    const char *nm = nt_str(nt, id, "name");
+    -+    int recv = nt_ref(nt, id, "receiver");
+    -+    TyKind rt = recv >= 0 ? comp_ntype(c, recv) : TY_UNKNOWN, vt = comp_ntype(c, id);
+    -+    return nm && sp_streq(nm, "-@") && nt_ref(nt, id, "arguments") < 0 && nt_ref(nt, id, "block") < 0 &&
+    -+           (rt == TY_INT || rt == TY_FLOAT) && (vt == TY_INT || vt == TY_FLOAT) &&
+    -+           subtree_is_plain_value(c, recv);
+    ++    case NK_CallNode: {
+    ++      const char *nm = nt_str(nt, id, "name");
+    ++      int recv = nt_ref(nt, id, "receiver");
+    ++      int a = nt_ref(nt, id, "arguments"), ac = 0;
+    ++      const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+    ++      if (!nm || recv < 0 || nt_ref(nt, id, "block") >= 0 || !subtree_is_plain_value(c, recv)) return 0;
+    ++      TyKind rt = comp_ntype(c, recv), vt = comp_ntype(c, id);
+    ++      int num = (rt == TY_INT || rt == TY_FLOAT) && (vt == TY_INT || vt == TY_FLOAT);
+    ++      int ok = 0;
+    ++      /* `size`, `length` and `abs` as master's own lists of calls with
+    ++         nothing to run take them: hash_new_capacity_pure and nn_pure_call
+    ++         (analyze.c) */
+    ++      if (ac == 0 && (sp_streq(nm, "-@") || sp_streq(nm, "abs"))) ok = num;
+    ++      else if (ac == 0 && sp_streq(nm, "!")) ok = rt == TY_BOOL;
+    ++      else if (ac == 0 && (sp_streq(nm, "size") || sp_streq(nm, "length")))
+    ++        ok = (ty_is_array(rt) || ty_is_hash(rt) || rt == TY_STRING) && vt == TY_INT &&
+    ++             !operand_may_allocate(c, recv);
+    ++      /* an operator on scalars whose operand is one of the forms here */
+    ++      else if (ac == 1) ok = call_is_scalar_op(c, id) && subtree_is_plain_value(c, av[0]);
+    ++      return ok && plain_name_is_builtin(c, nm);
+    ++    }
+    ++    default:
+    ++      return 0;
+     +  }
+    -+  return 0;
+     +}
+      
+      /* Does the program give a Hash a default block anywhere (`Hash.new { }`,
+    @@ src/codegen_internal.h: int subtree_may_run_proc(Compiler *c, int id);
+         -- variable and literal reads, scalar arithmetic, typed-array reads and
+         plain field reads, all the way down (codegen_call.c)? */
+      int subtree_is_pure_read(Compiler *c, int id);
+    -+/* A pure read, or one of two forms beside that list which run no call of the
+    -+   program's and make nothing either: a unary minus on an Integer or a Float,
+    -+   and a conditional whose test and branches are such values (codegen_call.c). */
+    ++/* A pure read, or one of the forms beside that list which run no call of the
+    ++   program's and make nothing either: a global's read; a unary minus, `abs`
+    ++   or an operator on numbers; `!` on a boolean; `size` or `length` of a
+    ++   String, an Array or a Hash; `&&`, `||` and a conditional of such values.
+    ++   An index, an operator, a reader or one of those calls counts only while it
+    ++   is provably the builtin's (plain_name_is_builtin, codegen_call.c). */
+     +int subtree_is_plain_value(Compiler *c, int id);
+      int operand_is_held_read(Compiler *c, int id);
+      /* Is the call a reader the emitter lowers to a plain field read? *allocates is
+    @@ test/string_handle_struct_splat_root.rb (new)
+     +p wrong(N) { |odd| odd ? Tail.new(*sa) : Tail.new(*qa) }                      # a splat that leaves a default to fill
+     +p wrong_entries(N) { |odd| odd ? Entry.new("s", "t") : Entry.new("q", "r") }  # literals to a Struct
+     +p [d.x, d.y, g.x, g.y, e.a, e.b, w, v]
+    ++
+    ++# A number's operator the program defines itself runs the program's code,
+    ++# and allocates: its answer beside a literal is held as a call's answer
+    ++# is. clang is where it showed; gcc builds the list in the other order.
+    ++class Float
+    ++  def -@
+    ++    ["a" + to_s, "b"].size.to_f
+    ++  end
+    ++end
+    ++
+    ++MixF = Struct.new(:a, :x)
+    ++wf = +"w"
+    ++mf = MixF.new(wf, 1.5)
+    ++mf.a << "z"
+    ++f = 2.5
+    ++mixed = []
+    ++3000.times { mixed << MixF.new("alpha", -f) }
+    ++p mixed.count { |k| k.a != "alpha" || k.x != 2.0 }
+    ++
+    ++# A default that reads a global and adds to it runs nothing.
+    ++class Num
+    ++  attr_reader :s, :n
+    ++  def putn(s, n)
+    ++    @s = s
+    ++    @n = n
+    ++    self
+    ++  end
+    ++end
+    ++
+    ++nu = Num.new.putn(+"w", 1)
+    ++nu.s << "z"
+    ++$k = 5
+    ++def mkd(x, n = $k + 1) = Num.new.putn(x, n)
+    ++nums = []
+    ++3000.times { nums << mkd(*qa) }
+    ++p nums.count { |k| k.s != "q" || k.n != 6 }
+    ++p [mf.a, wf, nu.s]
+     
+      ## test/string_handle_struct_splat_root.rb.expected (new) ##
+     @@
+    @@ test/string_handle_struct_splat_root.rb.expected (new)
+     +0
+     +0
+     +["wz", "vz", "wz", "vz", "wz", "vz", "wz", "vz"]
+    ++0
+    ++0
+    ++["wz", "wz", "wz"]
