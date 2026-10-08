@@ -1,0 +1,32 @@
+a01_alias_str             | TypeError: no implicit convers | TypeError: no implicit convers | "abab"                         | TypeError: no implicit convers
+a02_alias_method_str      | TypeError: no implicit convers | TypeError: no implicit convers | "abab"                         | TypeError: no implicit convers
+a03_alias_ary             | TypeError: no implicit convers | TypeError: no implicit convers | [1, 2, 1, 2]                   | TypeError: no implicit convers
+a04_recv_alias_method     | TypeError: no implicit convers | undefined method 'alias_method | undefined method 'alias_method | undefined method 'alias_method
+a05_send_alias_method     | TypeError: no implicit convers | undefined method 'alias_method | undefined method 'alias_method | undefined method 'alias_method
+a06_class_eval_alias      | TypeError: no implicit convers | undefined method 'class_eval'  | undefined method 'class_eval'  | undefined method 'class_eval' 
+a07_alias_method_strings  | TypeError: no implicit convers | TypeError: no implicit convers | "abab"                         | TypeError: no implicit convers
+a08_alias_from_star       | "abab"                         | TypeError: no implicit convers | =ruby                          | =ruby
+a09_other_alias           | "abab"                         | TypeError: no implicit convers | =ruby                          | =ruby
+a10_undef                 | NoMethodError: undefined metho | TypeError: no implicit convers | "abab"                         | TypeError: no implicit convers
+a11_undef_method          | NoMethodError: undefined metho | TypeError: no implicit convers | "abab"                         | TypeError: no implicit convers
+a12_remove_method         | NoMethodError: undefined metho | nobuild                        | nobuild                        | nobuild
+a13_alias_int             | "abab"                         | TypeError: no implicit convers | "abab"                         | TypeError: no implicit convers
+a14_nonliteral_name       | TypeError: no implicit convers | undefined method 'alias_method | undefined method 'alias_method | undefined method 'alias_method
+a15_refine                | "r"                            | nobuild                        | nobuild                        | nobuild
+a16_alias_syms            | TypeError: no implicit convers | TypeError: no implicit convers | "abab"                         | TypeError: no implicit convers
+a17_subclass_alias        | TypeError: no implicit convers | nobuild                        | nobuild                        | nobuild
+a18_define_method_im      | TypeError: no implicit convers | TypeError: no implicit convers | "abab"                         | TypeError: no implicit convers
+a19_alias_upcase          | ArgumentError: invalid option  | TypeError: no implicit convers | "abab"                         | TypeError: no implicit convers
+a20_alias_ary_method      | TypeError: no implicit convers | TypeError: no implicit convers | [1, 2, 1, 2]                   | TypeError: no implicit convers
+a21_module_alias          | "abab"                         | TypeError: no implicit convers | TypeError: no implicit convers | TypeError: no implicit convers
+a22_alias_in_object       | "abab"                         | TypeError: no implicit convers | =ruby                          | TypeError: no implicit convers
+a23_alias_both            | TypeError: no implicit convers | TypeError: no implicit convers | "abab"                         | TypeError: no implicit convers
+a24_alias_method_ary_send | TypeError: no implicit convers | undefined method 'alias_method | undefined method 'alias_method | undefined method 'alias_method
+a25_define_singleton      | "single"                       | nobuild                        | nobuild                        | nobuild
+a26_define_method_blk     | "dm"                           | TypeError: no implicit convers | TypeError: no implicit convers | TypeError: no implicit convers
+a27_send_define_dyn       | "dyn"                          | TypeError: no implicit convers | "abab"                         | TypeError: no implicit convers
+a28_alias_then_undef      | NoMethodError: undefined metho | TypeError: no implicit convers | "abab"                         | TypeError: no implicit convers
+a29_undef_ary             | NoMethodError: undefined metho | TypeError: no implicit convers | [1, 2, 1, 2]                   | TypeError: no implicit convers
+a30_undef_other           | "abab"                         | TypeError: no implicit convers | =ruby                          | =ruby
+a31_alias_dyn_name        | TypeError: no implicit convers | TypeError: no implicit convers | "abab"                         | TypeError: no implicit convers
+a32_undef_method_str      | NoMethodError: undefined metho | TypeError: no implicit convers | "abab"                         | TypeError: no implicit convers

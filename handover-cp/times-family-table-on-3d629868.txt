@@ -1,0 +1,8 @@
+programs: master 3132, piece 3132, in both 3132
+nobuild -> nobuild        32  tiary__lf25__opas tiary__tf25__opas tiary__tfm15__opas tstr__bary__opas
+right -> right           630  buf__bi0__attr buf__bi0__block buf__bi0__idx buf__bi0__inject
+wrong -> right          1400  buf__bf05__attr buf__bf05__block buf__bf05__idx buf__bf05__inject
+wrong -> wrong          1070  buf__bary__attr buf__bary__block buf__bary__idx buf__bary__inject
+right on master 630, right with the piece 2030
+verdict differs between stress levels: master 0 , piece 0 
+wrong or not building on both: 1102 print the same bytes, 0 differ 

@@ -1,0 +1,261 @@
+From 3699f7ccbe886b61586fd41edbf652d36511f87d Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 8 Oct 2026 02:02:42 +0000
+Subject: [PATCH] An Integer Array finds a boxed Float or Rational equal to an
+ element
+
+    xs = [1, 2, 3]
+    price = { list: 2.0, note: "each" }
+    p xs.include?(price[:list])
+    p xs.index(price[:list])
+
+printed false and nil where Ruby prints true and 1. Array#include? and
+#index ask `element == needle`, and 2 == 2.0. For a boxed needle the
+typed Integer Array's arms search the slots for an Integer's word, or
+for the nil slot's, and answer "not there" for a needle of any other
+kind, where unboxing it raised TypeError before: a Float or a Rational
+that equals an Integer was never looked for.
+
+Such a number equals at most one Integer, and sp_poly_int_needle hands
+that Integer back boxed: a Float that is whole and inside the word, a
+Rational whose denominator is 1; any other value comes back as it is.
+It is asked for a Float and a Rational only: the emitted line reads an
+object's class id first, and one of any other class is not there
+without the call. The line picks the needle's word first (an Integer's
+own, the nil slot's, or the one the helper found) and calls the search
+once, so index, find_index, rindex, include? and member? answer alike.
+NaN, an infinity, a Float with a fraction or past the word, and -2**63
+(the nil slot's word, which is no element) are not there, as before.
+The two arms emitted the same lines; they now share one function,
+emit_int_array_boxed_search, and a typed nil needle keeps the C it had.
+
+The cost is a needle that is not there for what it is, which is asked
+what it is first. Instructions a lookup more than master's 34 to 47
+(callgrind, master 5d762fb1, an Array of eight, the needle read out of
+a mixed Array each turn):
+
+    a String, a Symbol, true, a Bignum    gcc  4 to  6  clang  5 to 10
+    an Array, a Hash, a program's object  gcc 12 to 14  clang 13 to 17
+    a Float with a fraction, NaN, 1.0e19  gcc 27 to 39  clang 20 to 30
+    a Rational with a fraction            gcc 30 to 33  clang 31 to 33
+
+The last two rows go through the function, which is not inlined. An
+Integer needle runs the same count with gcc on include? and 3 to 7
+fewer on index and rindex; with clang 1 more, and where the Array can
+hold nil 2 more on include? and 2 fewer on index. A nil needle runs 1
+more with gcc on include? and 4 to 6 fewer on index; with clang 3 to 6
+more. The word is chosen first and the search called once for that
+reason: the tag test written as a last arm with a call of its own cost
+an Integer needle 5 with gcc.
+
+Not covered: `delete` with such a needle; a Complex whose imaginary
+part is 0, a Rational made of Bignums, and an object whose class has
+a `==` of its own (Ruby asks it); an Integer Array that is itself in a
+box; a typed Rational needle (another arm); a Float Array searched for
+a Rational.
+
+Test: test/int_array_boxed_number_needle.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ lib/spinel_rt.h                               | 17 ++++++
+ src/codegen_call_recv.c                       | 54 ++++++++++++-------
+ test/int_array_boxed_number_needle.rb         | 40 ++++++++++++++
+ .../int_array_boxed_number_needle.rb.expected | 33 ++++++++++++
+ 4 files changed, 124 insertions(+), 20 deletions(-)
+ create mode 100644 test/int_array_boxed_number_needle.rb
+ create mode 100644 test/int_array_boxed_number_needle.rb.expected
+
+diff --git a/lib/spinel_rt.h b/lib/spinel_rt.h
+index e0d3fa18f..996b352b1 100644
+--- a/lib/spinel_rt.h
++++ b/lib/spinel_rt.h
+@@ -3882,6 +3882,23 @@ static SP_INLINE sp_bool sp_poly_rb_equal(sp_RbVal a, sp_RbVal b) {
+     return TRUE;
+   return sp_poly_eq(a, b);
+ }
++/* A boxed needle of an Integer Array's search that is a number of another
++   kind. Array#index and #include? ask `element == needle`, and such a number
++   can equal an Integer: 1.0, -0.0, Rational(2, 1). It equals at most one, and
++   that Integer comes back boxed, to be searched for as an Integer needle is;
++   any other value comes back as it is, and is not there. The nil slot's word
++   (-2**63) is no element. */
++static SP_NOINLINE sp_RbVal sp_poly_int_needle(sp_RbVal v) {
++  if (v.tag == SP_TAG_FLT) {
++    sp_float f = v.v.f;
++    if (f > (sp_float)INTPTR_MIN && f < -(sp_float)INTPTR_MIN && f == (sp_float)(sp_int)f)
++      return sp_box_int((sp_int)f);
++  } else if (sp_poly_is_rational(v) && v.v.p) {
++    sp_Rational *r = (sp_Rational *)v.v.p;
++    if (r->den == 1 && r->num != SP_INT_NIL) return sp_box_int(r->num);
++  }
++  return v;
++}
+ /* `a == b` (or `!=`) answered as a value: a program object's own == gives
+    whatever it returns (Ruby's == may answer any object), `!=` its
+    negation; anything else the runtime equality. */
+diff --git a/src/codegen_call_recv.c b/src/codegen_call_recv.c
+index 764fb9b23..551ff3671 100644
+--- a/src/codegen_call_recv.c
++++ b/src/codegen_call_recv.c
+@@ -1702,6 +1702,35 @@ static int emit_kind_array_iter_call(Compiler *c, int id, Buf *b, const NodeTabl
+ }
+ 
+ /* A typed Array receiver with a kind of its own (Int, Float, String, a pointer array): array_kind names it (emit_typed_array_call's arms, in their order) */
++/* An Integer Array searched for a boxed needle, or a typed nil: sp_IntArray_<fn>
++   with the needle's word, else `miss`. An Integer is its own word, and nil the
++   nil slot's where the array can hold one. Any other needle is a well-defined
++   "not there", where unboxing it raised the conversion TypeError (#4835);
++   but a boxed number of another kind can be there (1.0 == 1), and
++   sp_poly_int_needle hands back the Integer it equals: it is asked for a
++   Float and a Rational only, an object of any other class is not there.
++   The word is chosen first and the search called once: the Integer and nil
++   needles run the code they ran. */
++static void emit_int_array_boxed_search(Compiler *c, int recv, int needle, TyKind rt, const char *fn, const char *miss, int boxed, Buf *b) {
++  int ta = ++g_tmp, tv = ++g_tmp;
++  buf_printf(b, "({ sp_IntArray *_t%d = ", ta); emit_recv_rooted(c, recv, ta, "SP_GC_ROOT", b);
++  buf_printf(b, "sp_RbVal _t%d = ", tv); emit_boxed(c, needle, b);
++  if (!boxed) {
++    buf_printf(b, "; _t%d.tag == SP_TAG_INT ? sp_IntArray_%s(_t%d, _t%d.v.i) : ", tv, fn, ta, tv);
++    if (elem_nil_sentinel(c, recv, rt))
++      buf_printf(b, "_t%d.tag == SP_TAG_NIL ? sp_IntArray_%s(_t%d, SP_INT_NIL) : ", tv, fn, ta);
++    buf_printf(b, "%s; })", miss);
++    return;
++  }
++  int tk = ++g_tmp;
++  buf_printf(b, "; sp_int _t%d; (_t%d.tag == SP_TAG_INT ? (_t%d = _t%d.v.i, 1) : ", tk, tv, tk, tv);
++  if (elem_nil_sentinel(c, recv, rt))
++    buf_printf(b, "_t%d.tag == SP_TAG_NIL ? (_t%d = SP_INT_NIL, 1) : ", tv, tk);
++  buf_printf(b, "(((1 << SP_TAG_FLT | 1 << SP_TAG_OBJ) >> _t%d.tag) & 1) && (_t%d.tag != SP_TAG_OBJ || _t%d.cls_id == SP_BUILTIN_RATIONAL)"
++                " && (_t%d = sp_poly_int_needle(_t%d), _t%d = _t%d.v.i, _t%d.tag == SP_TAG_INT))"
++                " ? sp_IntArray_%s(_t%d, _t%d) : %s; })", tv, tv, tv, tv, tv, tk, tv, tv, fn, ta, tk, miss);
++}
++
+ static int emit_kind_array_call(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, TyKind rt, TyKind a0, const char *k, int *out) {
+   if (!(k)) return 0;
+   if (sp_streq(name, "[]") && argc == 1 && nt_type(nt, argv[0]) && sp_streq(nt_type(nt, argv[0]), "RangeNode")) {
+@@ -2367,16 +2396,8 @@ else {
+       { *out = 1; return 1; }
+     }
+     if (rt == TY_INT_ARRAY && (a0 == TY_POLY || (a0 == TY_NIL && !nil_needle))) {
+-      /* the Integer twin of the String arm below: only an Integer can be
+-         there, where unboxing the needle raised TypeError (#4835) */
+-      int ta = ++g_tmp, tv = ++g_tmp;
+-      buf_printf(b, "({ sp_IntArray *_t%d = ", ta); emit_recv_rooted(c, recv, ta, "SP_GC_ROOT", b);
+-      buf_printf(b, "sp_RbVal _t%d = ", tv); emit_boxed(c, argv[0], b);
+-      buf_printf(b, "; _t%d.tag == SP_TAG_INT ? sp_IntArray_%s(_t%d, _t%d.v.i) : ", tv, fn, ta, tv);
+-      /* a boxed nil is the sentinel where the array can hold one */
+-      if (elem_nil_sentinel(c, recv, rt))
+-        buf_printf(b, "_t%d.tag == SP_TAG_NIL ? sp_IntArray_%s(_t%d, SP_INT_NIL) : ", tv, fn, ta);
+-      buf_puts(b, "sp_box_nil(); })");
++      /* the Integer twin of the String arm below */
++      emit_int_array_boxed_search(c, recv, argv[0], rt, fn, "sp_box_nil()", a0 == TY_POLY, b);
+       { *out = 1; return 1; }
+     }
+     if (rt == TY_STR_ARRAY && (a0 == TY_POLY || a0 == TY_NIL)) {
+@@ -2471,17 +2492,10 @@ else {
+                  tv, fn, ta, tv, tv, fn, ta);
+       { *out = 1; return 1; }
+     }
+-    /* The same for an Integer array: a search for a value of another kind
+-       is a well-defined "not there" (false / no index), where unboxing the
+-       needle raised the conversion TypeError (#4835). */
++    /* The same for an Integer array, as the index arm above: false, or no
++       index. */
+     if (rt == TY_INT_ARRAY && (sat == TY_POLY || (sat == TY_NIL && !nil_needle))) {
+-      int ta = ++g_tmp, tv = ++g_tmp;
+-      buf_printf(b, "({ sp_IntArray *_t%d = ", ta); emit_recv_rooted(c, recv, ta, "SP_GC_ROOT", b);
+-      buf_printf(b, "sp_RbVal _t%d = ", tv); emit_boxed(c, argv[0], b);
+-      buf_printf(b, "; _t%d.tag == SP_TAG_INT ? sp_IntArray_%s(_t%d, _t%d.v.i) : ", tv, fn, ta, tv);
+-      if (elem_nil_sentinel(c, recv, rt))   /* as the index arm above */
+-        buf_printf(b, "_t%d.tag == SP_TAG_NIL ? sp_IntArray_%s(_t%d, SP_INT_NIL) : ", tv, fn, ta);
+-      buf_printf(b, "%s; })", sp_streq(fn, "include") ? "FALSE" : "(sp_int)-1");
++      emit_int_array_boxed_search(c, recv, argv[0], rt, fn, sp_streq(fn, "include") ? "FALSE" : "(sp_int)-1", sat == TY_POLY, b);
+       { *out = 1; return 1; }
+     }
+     /* held across the needle, which may allocate */
+diff --git a/test/int_array_boxed_number_needle.rb b/test/int_array_boxed_number_needle.rb
+new file mode 100644
+index 000000000..f9f499883
+--- /dev/null
++++ b/test/int_array_boxed_number_needle.rb
+@@ -0,0 +1,40 @@
++# spinel: int64
++# include? / member? / index / find_index / rindex on an Integer array given a
++# boxed number that is no Integer. Array asks `element == needle`, and a
++# Float or a Rational can equal an Integer (1.0 == 1): the search answered
++# "not there" without looking.
++
++xs = [1, 2, 0, 1, 4611686018427387904, 9007199254740993]
++row = [1.0, 2.0, -0.0, 4611686018427387904.0, Rational(2, 1), 1.5, 0.0 / 0.0,
++       9007199254740992.0, Rational(3, 2), 2**70, 1, 9, "1", :s, nil, true]
++row.each do |v|
++  n = [v, :pad][0]
++  p [xs.include?(n), xs.member?(n), xs.index(n), xs.find_index(n), xs.rindex(n), xs.count(n)]
++end
++
++# the needle out of a Hash, the answer as a condition
++price = { list: 2.0, note: "each" }
++puts "listed" if xs.include?(price[:list])
++puts "not listed" unless xs.member?(price[:note])
++p xs.index(price[:list])
++
++# an Array in an instance variable, one built by <<, one that holds nil
++class Stock
++  def initialize = @ids = [10, 20, 30, 20]
++  def at(id) = @ids.index(id)
++  def last_at(id) = @ids.rindex(id)
++  def has?(id) = @ids.include?(id)
++end
++s = Stock.new
++order = [20.0, "20", 25.0]
++order.each { |id| p [s.at(id), s.last_at(id), s.has?(id)] }
++built = []
++[3, 4, 5].each { |e| built << e }
++p built.index(order[0] / 5), built.include?(order[2] / 5)
++gaps = [1, nil, 0]
++p gaps.index(row[2]), gaps.include?(row[0]), gaps.index(row[14]), gaps.rindex(row[1])
++
++# an Integer Array with nil in a slot: -2**63 is that slot's word, no element
++holes = [1, 2, 3].map { |e| e == 2 ? nil : e }
++edge = [3.0, -(2.0**63), nil, Rational(6, 2), 2.0]
++edge.each { |n| p [holes.include?(n), holes.index(n), holes.rindex(n)] }
+diff --git a/test/int_array_boxed_number_needle.rb.expected b/test/int_array_boxed_number_needle.rb.expected
+new file mode 100644
+index 000000000..36a269787
+--- /dev/null
++++ b/test/int_array_boxed_number_needle.rb.expected
+@@ -0,0 +1,33 @@
++[true, true, 0, 0, 3, 2]
++[true, true, 1, 1, 1, 1]
++[true, true, 2, 2, 2, 1]
++[true, true, 4, 4, 4, 1]
++[true, true, 1, 1, 1, 1]
++[false, false, nil, nil, nil, 0]
++[false, false, nil, nil, nil, 0]
++[false, false, nil, nil, nil, 0]
++[false, false, nil, nil, nil, 0]
++[false, false, nil, nil, nil, 0]
++[true, true, 0, 0, 3, 2]
++[false, false, nil, nil, nil, 0]
++[false, false, nil, nil, nil, 0]
++[false, false, nil, nil, nil, 0]
++[false, false, nil, nil, nil, 0]
++[false, false, nil, nil, nil, 0]
++listed
++not listed
++1
++[1, 3, true]
++[nil, nil, false]
++[nil, nil, false]
++1
++true
++2
++true
++1
++nil
++[true, 2, 2]
++[false, nil, nil]
++[true, 1, 1]
++[true, 2, 2]
++[false, nil, nil]

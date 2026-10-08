@@ -1,0 +1,330 @@
+From cb7251d9a20e826aedec67258763e882bb4d15dd Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 8 Oct 2026 02:02:42 +0000
+Subject: [PATCH] A class's own freeze and frozen? run through a boxed value
+
+    class Doc
+      def initialize = @sealed = false
+      def freeze
+        @sealed = true
+        self
+      end
+      def sealed = @sealed
+    end
+    d = Doc.new
+    row = [d, 5]
+    row[0].freeze
+    p d.sealed
+
+printed false where Ruby prints true. Through a boxed value the builtin
+freeze ran whatever class the value had: the class's method was never
+called, and the object was frozen for real instead. frozen? was the
+same: `row[0].frozen?` read the header's bit and never asked the class.
+
+Both arms now stand down in a program where a class defines the name,
+as the nil? arm above the freeze line and the dup and clone arm below
+the frozen? line do (user_defines_or_reads). The call goes on to the
+dispatch on the value's class: the class's method runs for its objects,
+and every other value comes back to the same builtin arm.
+
+They stand down only where that dispatch keeps the builtin in its
+default arm (poly_dispatch_keeps_builtin, the tests
+emit_poly_builtin_default_at makes: no block on the call, and a builtin
+answer that fits the call's slot). A call that carries a block has no
+such arm, and the default would raise NoMethodError for nil and every
+other value: there the builtin line answers as before, and the class's
+own method is still not called.
+
+The cost is the dispatch, in a program where a class has a freeze or
+frozen? of its own: a builtin value in the box pays 3 to 7 instructions
+a call, by the loop around it and the compiler (callgrind, master
+5d762fb1: a frozen? call 3.0 to 4.0 more with gcc and 3.0 to 7.0 with
+clang; a freeze call 3.0 to 4.2 more with gcc, and with clang from 1.0
+fewer over five kinds of value to 7.0 more over two). It is what master
+charges dup, to_s and nil? in such a program today. A program with no
+freeze or frozen? of its own emits the C it did.
+
+This stands on `super` in such an override being Object's: a freeze
+that ends in `super`, called through the box, raised at the super
+before that change, where the builtin had answered.
+
+Tests: test/poly_own_freeze.rb, test/poly_own_freeze_or_nil.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/codegen_call.c                      | 12 ++++
+ src/codegen_call_object.c               |  5 +-
+ src/codegen_call_recv.c                 |  4 +-
+ src/codegen_internal.h                  |  1 +
+ test/poly_own_freeze.rb                 | 85 +++++++++++++++++++++++++
+ test/poly_own_freeze.rb.expected        | 47 ++++++++++++++
+ test/poly_own_freeze_or_nil.rb          | 32 ++++++++++
+ test/poly_own_freeze_or_nil.rb.expected |  8 +++
+ 8 files changed, 192 insertions(+), 2 deletions(-)
+ create mode 100644 test/poly_own_freeze.rb
+ create mode 100644 test/poly_own_freeze.rb.expected
+ create mode 100644 test/poly_own_freeze_or_nil.rb
+ create mode 100644 test/poly_own_freeze_or_nil.rb.expected
+
+diff --git a/src/codegen_call.c b/src/codegen_call.c
+index fd63b0e9f..c56256cad 100644
+--- a/src/codegen_call.c
++++ b/src/codegen_call.c
+@@ -6379,6 +6379,18 @@ static int emit_poly_builtin_default_spread(Compiler *c, int id, int recv, const
+   free(arms.p);
+   return 1;
+ }
++/* Whether the dispatch keeps the builtin for call `id`, one with no
++   argument, in its default arm: emit_poly_builtin_default_at's own tests.
++   Where they fail (a block on the call, a slot typed for another answer of
++   the class) the arm declines, and the default raises NoMethodError for nil
++   and every other value. */
++int poly_dispatch_keeps_builtin(Compiler *c, int id) {
++  if (nt_ref(c->nt, id, "block") >= 0) return 0;
++  TyKind ret = comp_ntype(c, id);
++  TyKind bt = (c->poly_builtin_ty && id < c->node_cap) ? c->poly_builtin_ty[id] : TY_UNKNOWN;
++  if (bt == TY_UNKNOWN) bt = an_builtin_answer(c, id);
++  return bt != TY_UNKNOWN && (ret == TY_POLY || bt == ret);
++}
+ int emit_poly_builtin_default(Compiler *c, int id, int recv, const char *name,
+                                      int argc, const int *argv, const int *atmp,
+                                      const TyKind *atmp_ty, TyKind ret, int tv, int tr,
+diff --git a/src/codegen_call_object.c b/src/codegen_call_object.c
+index 78401f591..6f7579e78 100644
+--- a/src/codegen_call_object.c
++++ b/src/codegen_call_object.c
+@@ -934,7 +934,10 @@ int emit_call_freeze_dup_arms(Compiler *c, int id, Buf *b, const NodeTable *nt,
+       buf_puts(b, "sp_str_is_frozen_val("); emit_expr(c, recv, b); buf_puts(b, ")");
+       return 1;
+     }
+-    if (frr.kind == RK_BOXED) {
++    /* a boxed value beside a class with a frozen? of its own goes on to the
++       dispatch: the class's method answers for its objects, and every other
++       value comes back here from the builtin arm, where the dispatch has one */
++    if (frr.kind == RK_BOXED && !(user_defines_or_reads(c, name) && poly_dispatch_keeps_builtin(c, id))) {
+       buf_puts(b, "sp_poly_frozen("); emit_expr(c, recv, b); buf_puts(b, ")");
+       return 1;
+     }
+diff --git a/src/codegen_call_recv.c b/src/codegen_call_recv.c
+index 764fb9b23..360f025ca 100644
+--- a/src/codegen_call_recv.c
++++ b/src/codegen_call_recv.c
+@@ -12814,7 +12814,9 @@ static int emit_poly_call0_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
+     buf_printf(b, "%s(sp_poly_recv_s(", fn); emit_expr(c, recv, b); buf_printf(b, ", \"%s\"))", name);
+     { *out = 1; return 1; }
+   }
+-  if (sp_streq(name, "freeze"))     { buf_puts(b, "sp_poly_freeze("); emit_expr(c, recv, b); buf_puts(b, ")"); { *out = 1; return 1; } }
++  /* a class's own freeze wins the dispatch, as its nil? does above, where
++     the dispatch keeps this line for every other value */
++  if (sp_streq(name, "freeze") && !(user_defines_or_reads(c, name) && poly_dispatch_keeps_builtin(c, id))) { buf_puts(b, "sp_poly_freeze("); emit_expr(c, recv, b); buf_puts(b, ")"); { *out = 1; return 1; } }
+   /* the receiver of a boxed to_h { } rewritten onto map (analyze.c) */
+   if (sp_streq(name, "__to_h_subject")) { buf_puts(b, "sp_poly_to_h_subject("); emit_boxed(c, recv, b); buf_puts(b, ")"); { *out = 1; return 1; } }
+   return 0;
+diff --git a/src/codegen_internal.h b/src/codegen_internal.h
+index 64a42df31..49db4c20c 100644
+--- a/src/codegen_internal.h
++++ b/src/codegen_internal.h
+@@ -1820,6 +1820,7 @@ int emit_object_ivar_call(Compiler *c, int id, const char *name, int recv, TyKin
+ const char *case_map_suffix(Compiler *c, int argc, const int *argv);
+ int emit_op_poly_case_options(Compiler *c, const BopCtx *x, Buf *b);
+ int user_defines_or_reads(Compiler *c, const char *name);
++int poly_dispatch_keeps_builtin(Compiler *c, int id);
+ int native_class_defines(Compiler *c, const char *name);
+ const char *array_index_bad_class(Compiler *c, int id);
+ /* the poly dispatch helpers other files read; the rest of its helpers
+diff --git a/test/poly_own_freeze.rb b/test/poly_own_freeze.rb
+new file mode 100644
+index 000000000..eb773886c
+--- /dev/null
++++ b/test/poly_own_freeze.rb
+@@ -0,0 +1,85 @@
++# A class's own freeze and frozen? run when the object is read out of a mixed
++# Array, as they do on a typed local, and every other value in the Array keeps
++# the builtin.
++class Doc
++  def initialize = @sealed = false
++  def freeze
++    @sealed = true
++    self
++  end
++  def frozen? = @sealed
++  def sealed = @sealed
++end
++# the deep-freeze idiom: the parts, then Object's freeze through super
++class Cart
++  def initialize = @items = [1, 2]
++  def items = @items
++  def add(x) = @last = x
++  def freeze
++    @items.freeze
++    super
++  end
++  def frozen? = super && @items.frozen?
++end
++module Sealed
++  def frozen? = true
++end
++class Box
++  include Sealed
++end
++class Plain
++  def set(x) = @x = x
++end
++
++d = Doc.new
++c = Cart.new
++row = [d, 5, "s", nil, :sym, 2.5, [1], Plain.new, c, Box.new]
++
++# the class's own frozen? before anything is frozen
++row.each { |x| p x.frozen? }
++
++# the class's own freeze through the box: Doc's sets its flag and freezes
++# nothing, Cart's freezes its items and then itself
++row[0].freeze
++p d.sealed
++p d.frozen?
++p row[0].frozen?
++r = row[8].freeze
++p r.equal?(c)
++p c.items.frozen?
++p c.frozen?
++p row[8].frozen?
++p(((c.add(3); :ok) rescue $!.class))
++
++# every other value keeps the builtin freeze
++row.each { |x| x.freeze }
++row.each { |x| p x.frozen? }
++p(((row[6] << 2; :ok) rescue $!.class))
++p(((row[7].set(1); :ok) rescue $!.class))
++p row[1].freeze
++p row[2].freeze
++p row[4].freeze
++
++# the value used, safe navigation, a condition
++p row[0].freeze.equal?(d)
++p row[3]&.frozen?
++p row[0]&.frozen?
++p(row[9].frozen? ? :closed : :open)
++v = row[7].frozen?
++p v
++
++# a box of a Doc or nil: nil keeps the builtin
++none = nil
++maybe = ARGV.size > 5 ? d : none
++maybe.freeze
++p maybe.frozen?
++p maybe.nil?
++
++# the same box with the value used: nil stays nil
++kept = maybe.freeze
++p kept.nil?
++
++# a block on the call: the dispatch has no arm for the other values, and
++# the builtin answers them as before
++[5, "s", nil, :k].each { |v| p v.freeze { 1 } }
++[5, nil].each { |v| p v.frozen? { 1 } }
+diff --git a/test/poly_own_freeze.rb.expected b/test/poly_own_freeze.rb.expected
+new file mode 100644
+index 000000000..53f9407dd
+--- /dev/null
++++ b/test/poly_own_freeze.rb.expected
+@@ -0,0 +1,47 @@
++false
++true
++true
++true
++true
++true
++false
++false
++false
++true
++true
++true
++true
++true
++true
++true
++true
++FrozenError
++true
++true
++true
++true
++true
++true
++true
++true
++true
++true
++FrozenError
++FrozenError
++5
++"s"
++:sym
++true
++nil
++true
++:closed
++true
++true
++true
++true
++5
++"s"
++nil
++:k
++true
++true
+diff --git a/test/poly_own_freeze_or_nil.rb b/test/poly_own_freeze_or_nil.rb
+new file mode 100644
+index 000000000..906954fbc
+--- /dev/null
++++ b/test/poly_own_freeze_or_nil.rb
+@@ -0,0 +1,32 @@
++# A box of an object or nil, where the class has its own freeze: the object
++# is frozen by its own method and comes back, and nil stays nil.
++class Doc
++  def initialize = @sealed = false
++  def freeze
++    @sealed = true
++    super
++  end
++  def sealed = @sealed
++  def set(x) = @x = x
++end
++none = nil
++d = Doc.new
++some = ARGV.size < 5 ? d : none
++back = some.freeze
++p back.equal?(d)
++p d.sealed
++p d.frozen?
++p(((d.set(1); :ok) rescue $!.class))
++
++gone = ARGV.size > 5 ? d : none
++kept = gone.freeze
++p kept.nil?
++gone.freeze
++p gone.nil?
++
++# the value dropped
++e = Doc.new
++late = ARGV.size < 5 ? e : none
++late.freeze
++p e.sealed
++p e.frozen?
+diff --git a/test/poly_own_freeze_or_nil.rb.expected b/test/poly_own_freeze_or_nil.rb.expected
+new file mode 100644
+index 000000000..24be93a13
+--- /dev/null
++++ b/test/poly_own_freeze_or_nil.rb.expected
+@@ -0,0 +1,8 @@
++true
++true
++true
++FrozenError
++true
++true
++true
++true

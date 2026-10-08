@@ -1,0 +1,338 @@
+From 905cd940d4a5604ea7c0666c08702d957814447b Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 8 Oct 2026 02:02:42 +0000
+Subject: [PATCH] super in a freeze or frozen? override is Object's
+
+    class Cart
+      def initialize = @items = [1, 2]
+      def freeze
+        @items.freeze
+        super
+      end
+      def frozen? = super && @items.frozen?
+    end
+    c = Cart.new
+    c.freeze
+    p c.frozen?
+
+raised NoMethodError for a missing superclass method at `c.freeze`
+where Ruby prints true. `super` in a freeze or frozen? override that no
+ancestor defines had no method to reach, and was typed unknown, so
+`def frozen? = super` did not compile.
+
+It is now Object's, for an object of the class: freeze sets the frozen
+bit of the object's header and answers the object, frozen? reads the
+bit, as the call does on a class with no freeze of its own. It is taken
+only where the super hands nothing on (a bare super in a method with no
+parameters, or `super()`) and carries no block.
+
+A class whose freeze reaches Object's this way is marked as one whose
+instances are frozen, as a bare `freeze` in one of its methods marks
+it: a write to an instance variable of the frozen object raises
+FrozenError however the override was called (by name, an alias, send).
+A program that never names the override emits the C it did.
+
+Not covered, as before: the same super in a reopened builtin class
+(String, Object), whose self is the value; one that passes arguments
+or a block; an object laid out by value.
+
+Test: test/super_freeze_builtin.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/analyze.c                         |  10 +++
+ src/analyze_infer.c                   |  11 ++-
+ src/codegen.c                         |  18 ++++
+ src/compiler.c                        |  23 +++++
+ src/compiler.h                        |   1 +
+ test/super_freeze_builtin.rb          | 124 ++++++++++++++++++++++++++
+ test/super_freeze_builtin.rb.expected |  27 ++++++
+ 7 files changed, 212 insertions(+), 2 deletions(-)
+ create mode 100644 test/super_freeze_builtin.rb
+ create mode 100644 test/super_freeze_builtin.rb.expected
+
+diff --git a/src/analyze.c b/src/analyze.c
+index b464f59d1..8a000cfab 100644
+--- a/src/analyze.c
++++ b/src/analyze.c
+@@ -37205,6 +37205,16 @@ static void an_phase_value_types(Compiler *c) {
+         }
+       }
+     }
++    /* `super` that is Object's freeze (emit_super, which asks the same), in
++       a method the program can reach, freezes this class's instances as a
++       bare `freeze` in the method does: its ivar stores take the guard. A
++       by-value class keeps its layout; the super raises there. */
++    if (sp_streq(ty, "SuperNode") || sp_streq(ty, "ForwardingSuperNode")) {
++      Scope *zs = comp_scope_of(c, id);
++      if (zs && zs->reachable && comp_super_object_freeze(c, id, zs) == 1 &&
++          comp_ntype(c, id) == ty_object(zs->class_id))
++        c->classes[zs->class_id].freeze_observed = 1;
++    }
+     /* nil-witness (#1686): a slot holding `nil | W` cannot hold W by value */
+     { int q = vt_nil_witness(c, id, ty);
+       if (q >= 0 && q < c->nclasses) {
+diff --git a/src/analyze_infer.c b/src/analyze_infer.c
+index e348702c2..de3511e04 100644
+--- a/src/analyze_infer.c
++++ b/src/analyze_infer.c
+@@ -9257,12 +9257,19 @@ TyKind infer_uncached(Compiler *c, int id) {
+                      /* and is_a? / kind_of? / instance_of? (codegen's twin) */
+                      sp_streq(uname, "is_a?") || sp_streq(uname, "kind_of?") ||
+                      sp_streq(uname, "instance_of?"));
+-    if (p < 0) return rto_super ? TY_BOOL : TY_UNKNOWN;
++    /* `super` in a freeze or frozen? override no ancestor defines is Object's
++       too: the object itself, frozen, or its frozen flag (emit_super's twin).
++       A reopened builtin's self is the value, not an object: left as it was. */
++    TyKind obj_super = rto_super ? TY_BOOL : TY_UNKNOWN;
++    { int fz = comp_super_object_freeze(c, id, s);
++      TyKind st = fz ? infer_builtin_self(c, s->class_id) : TY_UNKNOWN;
++      if (fz && ty_is_object(st)) obj_super = fz == 1 ? st : TY_BOOL; }
++    if (p < 0) return obj_super;
+     /* super inside a class method resolves through the parent's CLASS-method
+        chain (the instance chain would miss `def self.x` entirely). */
+     int mi = s->is_cmethod ? comp_cmethod_in_chain(c, p, uname, NULL)
+                            : comp_method_in_chain(c, p, uname, NULL);
+-    if (mi < 0) return rto_super ? TY_BOOL : TY_UNKNOWN;
++    if (mi < 0) return obj_super;
+     an_user_call_record(c, id, mi, UC_SUPER, p);
+     return super_target_ret(c, s, mi, id);
+   }
+diff --git a/src/codegen.c b/src/codegen.c
+index f2233cd77..9df2fcfb3 100644
+--- a/src/codegen.c
++++ b/src/codegen.c
+@@ -11833,6 +11833,24 @@ void emit_super(Compiler *c, int id, Buf *b) {
+         return;
+       }
+     }
++    /* `super` in a freeze or frozen? override no ancestor defines is Object's:
++       the frozen bit of the object's GC header, set and the object answered,
++       or read -- what the call does on a class with no freeze of its own
++       (emit_object_call). The analysis typed the call so only where self is
++       an object of the class; a by-value object has no header and is left to
++       the raise below. */
++    { int fz = comp_super_object_freeze(c, id, s);
++      TyKind st = ty_object(s->class_id);
++      if (fz && !comp_ty_value_obj(c, st) && comp_ntype(c, id) == (fz == 1 ? st : TY_BOOL)) {
++        Buf vb; memset(&vb, 0, sizeof vb);
++        if (fz == 1) { buf_puts(&vb, "(("); emit_ctype(c, st, &vb); buf_printf(&vb, ")sp_gc_freeze((void *)%s))", g_self); }
++        else buf_printf(&vb, "sp_gc_is_frozen((void *)%s)", g_self);
++        if (repr_of(c, id).kind == RK_BOXED) emit_boxed_text(c, fz == 1 ? st : TY_BOOL, vb.p, b);
++        else buf_puts(b, vb.p);
++        free(vb.p);
++        return;
++      }
++    }
+     /* No superclass method anywhere (parent chain, included-module shadow, and
+        the exception-initialize special case all missed). CRuby raises
+        NoMethodError at runtime, so emit that rather than rejecting at compile
+diff --git a/src/compiler.c b/src/compiler.c
+index 91da74d7d..db350e75f 100644
+--- a/src/compiler.c
++++ b/src/compiler.c
+@@ -2828,6 +2828,29 @@ int comp_super_parent(Compiler *c, int class_id, int is_cmethod) {
+   return obj;
+ }
+ 
++/* Is this `super` Object's freeze or frozen?: in an instance method of that
++   name no ancestor defines, handing nothing on (a bare super in a method with
++   no parameters, or `super()`) and carrying no block? 1 for freeze, 2 for
++   frozen?, 0 otherwise. */
++int comp_super_object_freeze(Compiler *c, int id, const Scope *s) {
++  if (!s || s->is_cmethod || s->class_id < 0 || !s->name) return 0;
++  const char *u = comp_prep_user_name(s->name);
++  if (!u || !is_freeze_family(u)) return 0;
++  if (comp_super_shadow(c, s)) return 0;
++  int p = comp_super_parent(c, s->class_id, 0);
++  if (p >= 0 && comp_method_in_chain(c, p, u, NULL) >= 0) return 0;
++  if (nt_ref(c->nt, id, "block") >= 0) return 0;
++  if (nt_kind(c->nt, id) == NK_ForwardingSuperNode) {
++    if (s->nparams != 0 || s->blk_param) return 0;
++  }
++  else {
++    int args = nt_ref(c->nt, id, "arguments"), an = 0;
++    if (args >= 0) (void)nt_arr(c->nt, args, "arguments", &an);
++    if (an != 0) return 0;
++  }
++  return sp_streq(u, "freeze") ? 1 : 2;
++}
++
+ int comp_super_is_class_new(Compiler *c, int id) {
+   NodeKind k = nt_kind(c->nt, id);
+   if (k != NK_SuperNode && k != NK_ForwardingSuperNode) return 0;
+diff --git a/src/compiler.h b/src/compiler.h
+index 81b489ebb..ad94fd389 100644
+--- a/src/compiler.h
++++ b/src/compiler.h
+@@ -1497,6 +1497,7 @@ const char *comp_prep_user_name(const char *name);
+ const char *comp_super_name(Compiler *c, int parent, const char *name, int is_cmethod);
+ int comp_super_is_class_new(Compiler *c, int id);
+ int comp_super_parent(Compiler *c, int class_id, int is_cmethod); /* super in `self.new` is Class#new */
++int comp_super_object_freeze(Compiler *c, int id, const Scope *s); /* 1 freeze, 2 frozen?: Object's, where no ancestor defines it */
+ /* Resolve `name` through the class's (chain-aware) alias table to the
+    underlying method/attr name. Returns `name` unchanged if not aliased. */
+ /* What a name means on a class: nothing, an attribute (attr_reader/writer,
+diff --git a/test/super_freeze_builtin.rb b/test/super_freeze_builtin.rb
+new file mode 100644
+index 000000000..ac6a7ae9c
+--- /dev/null
++++ b/test/super_freeze_builtin.rb
+@@ -0,0 +1,124 @@
++# `super` in a freeze or frozen? override that no ancestor defines is Object's:
++# the object is frozen and answered, or its frozen flag read. The deep-freeze
++# idiom (`@items.freeze; super`) raised NoMethodError for a missing superclass
++# method, and a frozen? that asks super did not compile.
++class Cart
++  def initialize = @items = [1, 2]
++  def items = @items
++  def add(x) = @count = x
++  def freeze
++    @items.freeze
++    super
++  end
++  def frozen? = super && @items.frozen?
++end
++c = Cart.new
++p c.frozen?
++r = c.freeze
++p r.equal?(c)
++p c.frozen?
++p c.items.frozen?
++p((c.add(3) rescue $!.class))
++
++# through a parent, an included module and a prepended one
++class Base
++  def initialize = @n = 0
++  def n = @n
++  def freeze
++    @n += 1
++    super
++  end
++end
++class Leaf < Base
++  def freeze
++    @n += 10
++    super()
++  end
++end
++l = Leaf.new
++l.freeze
++p l.n, l.frozen?
++b = Base.new
++p b.frozen?
++b.freeze
++p b.n, b.frozen?
++
++module Sealing
++  def freeze
++    @sealed = true
++    super
++  end
++  def sealed = @sealed
++end
++class Box
++  include Sealing
++end
++class Crate
++  prepend Sealing
++  def freeze
++    @inner = :done
++    super
++  end
++  def inner = @inner
++end
++x = Box.new
++x.freeze
++p x.sealed, x.frozen?
++y = Crate.new
++p y.freeze.equal?(y)
++p y.sealed, y.inner, y.frozen?
++
++# a Struct and an exception
++Pair = Struct.new(:a, :b) do
++  def freeze
++    self.b = a
++    super
++  end
++  def frozen? = super
++end
++q = Pair.new(1, 2)
++p q.frozen?
++q.freeze
++p q.b, q.frozen?
++class Halt < StandardError
++  def freeze
++    @why = :frozen
++    super
++  end
++  def why = @why
++end
++h = Halt.new("stop")
++h.freeze
++p h.why, h.frozen?, h.message
++
++# the value of super kept, and a frozen? of its own beside the builtin freeze
++class Flag
++  def freeze
++    r = super
++    r
++  end
++  def frozen?
++    f = super
++    f
++  end
++end
++f = Flag.new
++p f.frozen?
++p f.freeze.frozen?
++
++# reached through an alias: the frozen object's own writes still raise
++class Vault
++  def initialize = @n = 0
++  def n = @n
++  def store(x) = @n = x
++  def freeze
++    @n += 1
++    super
++  end
++  alias seal freeze
++end
++v = Vault.new
++v.seal
++p v.n
++p((v.store(3) rescue $!.class))
++p v.n
+diff --git a/test/super_freeze_builtin.rb.expected b/test/super_freeze_builtin.rb.expected
+new file mode 100644
+index 000000000..42182f7d4
+--- /dev/null
++++ b/test/super_freeze_builtin.rb.expected
+@@ -0,0 +1,27 @@
++false
++true
++true
++true
++FrozenError
++11
++true
++false
++1
++true
++true
++true
++true
++true
++:done
++true
++false
++1
++true
++:frozen
++true
++"stop"
++false
++true
++1
++FrozenError
++1

@@ -1,0 +1,56 @@
+A boxed String or Array times a Float repeats by the truncated count
+
+    row = ["ab", [1, 2]]
+    n = [2.5, :k][0]
+    p row[0] * n
+    p row[1] * n
+
+raised TypeError, "no implicit conversion of Float into String" and
+"into Array", where Ruby prints "abab" and [1, 2, 1, 2]. The count of
+String#* and Array#* is an Integer argument, and a Float there is
+truncated. A typed String already answered so (sp_str_repeat with the
+checked Integer conversion of a boxed count); sp_poly_mul has arms for
+an Integer count alone, and a Float fell to sp_poly_binop_bad, which
+words it as an operand String#+ cannot convert.
+
+sp_poly_mul's last line, where no arm has an answer, now calls
+sp_poly_times_tail in place of the bad-operand report. There a String
+or an Array with a Float count is truncated toward zero and goes back
+into sp_poly_mul with the Integer count: the Integer arms do the work,
+so a negative count is ArgumentError as a negative Integer is. Every
+other pair is the report it was. NaN, an infinity or a Float past the
+word is RangeError in Ruby's words ("float NaN out of range of
+integer"), checked before the cast, which is undefined for those; a
+count past the length an Array can have is ArgumentError ("argument too
+big"), where the Integer count's arm would fill memory first.
+
+A boxed `*` reaches no String's or Array's own `*`: with an Integer
+count the builtin answers whatever the program defines. So a Float
+count keeps its TypeError (the generated unit sets sp_poly_times_own)
+in a program that has a method named `*` of its own, in any class or
+module or on one object, or that makes `*` another method of a builtin
+class or none: an alias or alias_method under the name, an undef or
+undef_method of it, and any of those, or a define_method, whose name
+is no literal. The builtin's repeat must not stand where another
+method was meant.
+
+No pair that had an answer pays. sp_poly_mul gains no test, only
+another callee on its failing last line, and the new function is not
+inlined, so the arms that answer are the code they were: 0 instructions
+a call with gcc and with clang on Integer, Float and mixed pairs, a
+String or an Array times an Integer, the Array join, a Bignum, a
+Rational, an object's own `*`, and on loops that mix the boxed
+operators (callgrind, master 3d629868). A test ahead of that line,
+in each of the three places tried, moved gcc's layout of the function
+by an instruction or more on some pair.
+
+Not covered: a typed Array times a typed Float (NoMethodError); through
+a boxed receiver, a count that is a Rational, a Complex or an object
+with to_int (TypeError, as before), and the words of the TypeError for
+nil, a Symbol or true ("into String" where Ruby says "into Integer").
+
+Tests: test/poly_times_float_count.rb, test/poly_times_own_star.rb,
+test/poly_times_float_count_big.rb, test/poly_times_alias_star.rb,
+test/poly_times_alias_method_star.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
