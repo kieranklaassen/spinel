@@ -1,0 +1,21 @@
+1:  53592a517 ! 1:  6a23c01e8 Refuse a plain mutator's kept result in a class's instance variable
+    @@ docs/limitations.md
+     @@ docs/limitations.md: Not yet shared:
+      - through a global variable: a String variable assigned from a global (`t = $g`, `t = $g.to_s`) or to one (`$g = s`, `$h = $g`), when one name is mutated in place and the other is read;
+      - through a method that returns its String parameter (`def id(x) = x`, also `x.itself` or a bang method on it), when the result or the variable passed in is mutated in place and the other is read (a variable passed in through the caller's own parameter counts: the caller reads it again);
+    - - through a bang method's result, which is its receiver (`r = s.strip!`, `r = s.strip! || s`), when the result is mutated in place through a variable and the receiver is read; a mutator straight on the result (`s.sub!(a, b) << x`) reaches the receiver;
+    + - through a bang method's result, which is its receiver (`r = s.strip!`, `r = s.strip! || s`), when the result is mutated in place through a variable and the receiver is read, by its own name or, for a local that shares its String, through the other one (`t = s; r = t.strip!`); a mutator straight on the result (`s.sub!(a, b) << x`) reaches the receiver;
+     -- through the result of `bytesplice`, `append_as_bytes`, or `concat` or `prepend` with other than one argument, which is its receiver too (`r = s.concat(a, b)`), when the result is mutated in place through a local, a global or an instance variable of the top level and the receiver is read, or when a method returns its parameter through one of them. A class's instance variable that keeps the result is left alone: an append through it reaches an instance-variable receiver in some programs (`@r = @s.concat(a, b)` where a parameter set `@s`) and does not build in others, and most other changes through either name are lost. A mutator straight on the result of `bytesplice` or `append_as_bytes` (`s.bytesplice(0, 1, "Z") << x`) does not reach the receiver. Neither of these is refused yet;
+     +- through the result of `bytesplice`, `append_as_bytes`, or `concat` or `prepend` with other than one argument, which is its receiver too (`r = s.concat(a, b)`), when the result is mutated in place through a variable and the receiver is read, or when a method returns its parameter through one of them. A class's instance variable that keeps `concat` with arguments on another one is not refused where both already hold a shared String (`def initialize(s) = @s = s`, then `@r = @s.concat(a, b)`): it takes that String itself. A mutator straight on the result of `bytesplice` or `append_as_bytes` (`s.bytesplice(0, 1, "Z") << x`) does not reach the receiver and is not refused yet;
+      - through `to_s` (or another call answering its String receiver) under a mutator whose argument reassigns the variable, when the variable is a String handle (`e.to_s << (e = +"b")`);
+    @@ src/analyze.c: static void refuse_string_alias_copies(Compiler *c) {
+     +         a copy, as a global does */
+     +      if (plain && sa_ivar_keeps_handle(c, v, &to, &from))
+              continue;
+    -       if (sa_mutated(c, &to) && sa_read_elsewhere(c, &from, b)) {
+    -         int route = plain ? 4 : 2;
+    +       /* a local that shares its handle is read through the other name
+    +          (`t = s; r = t.strip!; r << x; p s`) */
+     
+      ## test/collect/refusals.expected ##
+     @@ test/collect/refusals.expected: spinel: test/reject/string_nested_masgn_deep.rb:3: a nested multiple-assignment
