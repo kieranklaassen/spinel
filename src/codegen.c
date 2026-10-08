@@ -9431,6 +9431,131 @@ int class_needs_scan(ClassInfo *ci) {
   return 0;
 }
 
+/* An exception class of the program's with ivars and no initialize is built
+   by the runtime (sp_exc_new_sub_ivars), not by a constructor: by `.new`,
+   or, raised by its name, when it is caught. */
+int class_exc_built_by_name(Compiler *c, int cid) {
+  return c->classes[cid].nivars > 0 && class_is_exc_subclass(c, cid) &&
+         comp_method_in_chain(c, cid, "initialize", NULL) < 0 &&
+         !is_builtin_reopen(c->classes[cid].name);
+}
+
+/* The names of the classes built by name stand in one table of the generated
+   code (sp_xbn_name), and that code passes a class's row wherever it raises
+   or builds the class: the rescue that builds what was raised then knows the
+   class from the pointer, by one range test, whatever the number of classes
+   and the length of their names. A name that reaches the rescue some other
+   way is no row, and is built as it was. */
+static const Compiler *g_xbn_c;
+static int *g_xbn_row;
+static int g_xbn_nc, g_xbn_n;
+
+static void exc_by_name_rows(Compiler *c) {
+  if (g_xbn_c == c) return;
+  g_xbn_c = c; g_xbn_n = 0; g_xbn_nc = c->nclasses;
+  free(g_xbn_row);
+  g_xbn_row = malloc(sizeof *g_xbn_row * (size_t)(g_xbn_nc + 1));
+  if (!g_xbn_row) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+  for (int i = 0; i < g_xbn_nc; i++) g_xbn_row[i] = class_exc_built_by_name(c, i) ? g_xbn_n++ : -1;
+}
+
+/* The row of class `cid` in that table, or -1. */
+int class_exc_by_name_row(Compiler *c, int cid) {
+  exc_by_name_rows(c);
+  return cid >= 0 && cid < g_xbn_nc ? g_xbn_row[cid] : -1;
+}
+
+static const char *exc_by_name_row_name(Compiler *c, int cid) {
+  const char *qn = class_ruby_name(c, cid);
+  return qn ? qn : c->classes[cid].name;
+}
+
+/* The C text of exception class `cid`'s name where the generated code
+   raises or builds it as `name`: its row, or the literal. */
+void emit_exc_cls_name(Compiler *c, int cid, const char *name, Buf *b) {
+  int q = class_exc_by_name_row(c, cid);
+  if (q >= 0 && sp_streq(exc_by_name_row_name(c, cid), name)) buf_printf(b, "(&sp_xbn_name[%d][1])", q);
+  else buf_printf(b, "\"%s\"", name);
+}
+
+/* Does a class built by name descend from `cid`? A rescue arm typed to
+   `cid` builds such a subclass at the subclass's size. */
+int class_exc_has_by_name_sub(Compiler *c, int cid) {
+  exc_by_name_rows(c);
+  for (int k = 0; k < g_xbn_nc; k++) {
+    if (g_xbn_row[k] < 0) continue;
+    for (int p = c->classes[k].parent, hops = 0; p >= 0 && hops < c->nclasses; p = c->classes[p].parent, hops++)
+      if (p == cid) return 1;
+  }
+  return 0;
+}
+
+/* What a rescue calls to build the exception it caught where the raise
+   carried no object: the entry that asks for such a class first, in a
+   program that has one, and the runtime's own everywhere else. */
+const char *exc_catch_builder(Compiler *c) {
+  exc_by_name_rows(c);
+  return g_xbn_n ? "sp_exc_catch_own" : "sp_exc_new_for_catch";
+}
+
+/* What an ensure calls to hold the exception that passes through it
+   (sp_exc_ensure_obj): the entry that makes such a class as itself first,
+   in a program that has one. */
+const char *exc_ensure_builder(Compiler *c) {
+  exc_by_name_rows(c);
+  return g_xbn_n ? "sp_exc_ensure_own" : "sp_exc_ensure_obj";
+}
+
+/* What an ensure with no rescue clause, and the frame of an else clause
+   under an ensure, call for the exception they catch to raise again
+   (sp_exc_caught_obj): that function builds one raised without an object,
+   when a cause waits for it, at the base size, so a program that has such
+   a class calls the entry that builds one as itself. */
+const char *exc_caught_builder(Compiler *c) {
+  exc_by_name_rows(c);
+  return g_xbn_n ? "sp_exc_caught_own" : "sp_exc_caught_obj";
+}
+
+/* The table, each name behind the byte a literal String carries (SPL), so a
+   row serves wherever the literal did, and the entries that read it. */
+static void emit_exc_by_name_table(Compiler *c, Buf *b) {
+  exc_by_name_rows(c);
+  if (!g_xbn_n) return;
+  size_t w = 0;
+  for (int i = 0; i < g_xbn_nc; i++)
+    if (g_xbn_row[i] >= 0 && strlen(exc_by_name_row_name(c, i)) + 2 > w) w = strlen(exc_by_name_row_name(c, i)) + 2;
+  buf_printf(b, "static const char sp_xbn_name[%d][%d] = {", g_xbn_n, (int)w);
+  for (int i = 0; i < g_xbn_nc; i++)
+    if (g_xbn_row[i] >= 0) buf_printf(b, "%s\"\\xff\" \"%s\"", g_xbn_row[i] ? ", " : "", exc_by_name_row_name(c, i));
+  buf_puts(b, "};\nSP_UNUSED static inline int sp_exc_own_row(const char *cls){\n"
+              "  return (size_t)((uintptr_t)cls - (uintptr_t)sp_xbn_name) < sizeof sp_xbn_name;\n}\n"
+              "static void *sp_exc_own_by_name(const char *cls, const char *msg, int caught);\n"
+              "static sp_Exception *sp_exc_catch_own(const char *cls, const char *msg);\n"
+              "static void *sp_exc_caught_own_make(void);\n"
+              /* sp_exc_caught_obj's lines, with this program's maker */
+              "SP_UNUSED static inline void *sp_exc_caught_own(void){\n"
+              "  void *o = sp_exc_obj[sp_exc_top];\n"
+              "  return o || !sp_pending_cause ? o : sp_exc_caught_own_make();\n}\n"
+              "static void *sp_exc_ensure_own(void **obj, const char **msg, const char *cls);\n");
+}
+
+/* The rest of a sp_exc_new_sub_ivars call for such a class: its own scan,
+   so an ivar the program stores is marked. */
+void emit_exc_ivars_tail(Compiler *c, int cid, Buf *b) {
+  buf_printf(b, ", sp_%s__gc_scan", c->classes[cid].c_name);
+}
+
+/* What builds such a class where its size is written, `.new` and the arm
+   that names it, and the rest of that call. A class whose ivars are all
+   unboxed has nothing for a scan of its own to mark (class_needs_scan), and
+   is built there as it was: sp_exc_new_sub_sized, with the base scan. */
+const char *exc_sized_builder(Compiler *c, int cid) {
+  return class_needs_scan(&c->classes[cid]) ? "sp_exc_new_sub_ivars" : "sp_exc_new_sub_sized";
+}
+void emit_exc_sized_tail(Compiler *c, int cid, Buf *b) {
+  if (class_needs_scan(&c->classes[cid])) emit_exc_ivars_tail(c, cid, b);
+}
+
 /* Emit the GC scan function (marks heap ivars) for a class that needs one.
    Covers the same type set as needs_root: a heap reference reachable only
    through an unscanned ivar would be swept out from under the object
@@ -16679,6 +16804,7 @@ static void emit_sym_class_name_rt(Compiler *c, Buf *b) {
      / sp_poly_to_s / sp_poly_inspect). Emitted whenever anything in the
      program could reach those (user classes, class values, any poly-capable
      slot -- see the render-reach scan); a purely-scalar program skips it. */
+  emit_exc_by_name_table(c, b);
   if (g_emit_class_names) {
     for (int i = 0; i < c->nclasses; i++)
       if (comp_class_anonymous(c, i))
@@ -16705,7 +16831,8 @@ static void emit_sym_class_name_rt(Compiler *c, Buf *b) {
         }
         const char *qname = class_ruby_name(c, i);
         if (!qname) qname = c->classes[i].name;
-        buf_printf(b, "case %d:return SPL(\"%s\");", i, qname);
+        if (class_exc_by_name_row(c, i) >= 0) buf_printf(b, "case %d:return &sp_xbn_name[%d][1];", i, class_exc_by_name_row(c, i));
+        else buf_printf(b, "case %d:return SPL(\"%s\");", i, qname);
       }
     }
     /* builtin class name cases (negative cls_ids) */
@@ -16968,6 +17095,55 @@ static void emit_user_exc_dispatch(Compiler *c, Buf *b) {
       }
       buf_puts(b, "  return 0x7fffffff;\n}\n");
     } }
+  /* That dispatch casts a boxed exception to the struct of the class it
+     names. Where the raise carried no object the rescue builds what it
+     caught from the name: a row of sp_xbn_name is a class built by its name
+     (class_exc_by_name_row), built at its own size, with its own scan; any
+     other name is the runtime's to build, as it was. `caught` is set where
+     sp_exc_new_for_catch built the exception before, and a frozen message
+     stays frozen there as it did (sp_exc_new_sub_caught); a rescue arm typed
+     to a parent class passes 0, as its own builder never kept it. */
+  exc_by_name_rows(c);
+  if (g_xbn_n) {
+    buf_puts(b, "SP_UNUSED static void *sp_exc_own_by_name(const char *cls, const char *msg, int caught){\n"
+                "  size_t d = (size_t)((uintptr_t)cls - (uintptr_t)sp_xbn_name);\n"
+                "  if (d >= sizeof sp_xbn_name) return NULL;\n"
+                "  switch (d / sizeof sp_xbn_name[0]) {\n");
+    for (int i = 0; i < c->nclasses; i++) {
+      int q = class_exc_by_name_row(c, i);
+      if (q < 0) continue;
+      buf_printf(b, "  case %d: return (caught ? sp_exc_new_sub_caught : sp_exc_new_sub_ivars)(sizeof(sp_%s), &sp_xbn_name[%d][1], msg", q, c->classes[i].c_name, q);
+      emit_exc_ivars_tail(c, i, b);
+      buf_puts(b, ");\n");
+    }
+    buf_puts(b, "  }\n  return NULL;\n}\n"
+                /* What is called where the runtime's own function was is a test
+                   that hands on, a row to this program's maker and anything else
+                   to that function, so the code around the call stays what it
+                   was where nothing is raised. The makers are out of line and
+                   cold. */
+                "SP_UNUSED static SP_NOINLINE SP_COLD sp_Exception *sp_exc_catch_own_make(const char *cls, const char *msg){\n"
+                "  void *u = sp_exc_own_by_name(cls, msg, 1);\n"
+                "  return u ? (sp_Exception *)u : sp_exc_new_for_catch(cls, msg);\n}\n"
+                "SP_UNUSED static SP_NOINLINE sp_Exception *sp_exc_catch_own(const char *cls, const char *msg){\n"
+                "  return sp_exc_own_row(cls) ? sp_exc_catch_own_make(cls, msg) : sp_exc_new_for_catch(cls, msg);\n}\n"
+                /* sp_exc_caught_obj_make's lines, for a row only */
+                "SP_UNUSED static SP_NOINLINE SP_COLD void *sp_exc_caught_own_make(void){\n"
+                "  if (!sp_exc_own_row(sp_exc_cls[sp_exc_top])) return sp_exc_caught_obj_make();\n"
+                "  sp_Exception *u = (sp_Exception *)sp_exc_own_by_name(sp_exc_cls[sp_exc_top], sp_exc_msg[sp_exc_top], 1);\n"
+                "  if (!u) return sp_exc_caught_obj_make();\n"
+                "  sp_gc_wb((void *)u); u->cause = (sp_Exception *)sp_pending_cause;\n"
+                "  sp_exc_obj[sp_exc_top] = u;\n"
+                "  return u;\n}\n"
+                /* sp_exc_ensure_obj's lines, for a row only */
+                "SP_UNUSED static SP_NOINLINE SP_COLD void *sp_exc_ensure_own_make(void **obj, const char **msg, const char *cls){\n"
+                "  sp_Exception *u = (sp_Exception *)sp_exc_own_by_name(cls, *msg, 1);\n"
+                "  if (!u) return sp_exc_ensure_obj(obj, msg, cls);\n"
+                "  *obj = u; if (*msg && !sp_exc_msg_empty_given(*msg) && u->msg) *msg = u->msg;\n"
+                "  return u;\n}\n"
+                "SP_UNUSED static SP_NOINLINE void *sp_exc_ensure_own(void **obj, const char **msg, const char *cls){\n"
+                "  return !*obj && sp_exc_own_row(cls) ? sp_exc_ensure_own_make(obj, msg, cls) : sp_exc_ensure_obj(obj, msg, cls);\n}\n");
+  }
 
   /* User exception #message / #to_s overrides: a cls_name-keyed dispatcher so
      the default message path yields the user-overridden text. Ruby's #message
@@ -17158,6 +17334,7 @@ char *codegen_program(const NodeTable *nt) {
   g_proc_counter = 0;
   g_needs_at_exit = 0;
   g_re_count = 0;
+  g_xbn_c = NULL;
   buf_puts(&b, "/* Generated by Spinel AOT compiler */\n");
   /* ext mode: the program-hook family (sp_sym_to_s, sp_class_to_s, ...) gets
      external linkage so a host TU including the emitted header resolves to
