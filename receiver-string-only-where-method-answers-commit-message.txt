@@ -1,0 +1,36 @@
+A receiver a call hands back is a String only where the method can answer one
+
+Pair = Struct.new(:a)
+def pick(i) = [["a"], { 0 => "a" }][i]
+y = pick(ARGV.size)
+y[0] += "b"
+p y
+
+was refused under --share-strings ("the Strings this literal holds are
+shared with another name and changed in place"). Without the flag it
+prints ["ab"], as CRuby does.
+
+With a Struct in the program `y[0] += "b"` is written out as `y[0]` and
+`y[0] = ...`, since a Struct's `[]=` may be its target, and `[]=` is a
+String mutator's name. On a boxed receiver that name counts where the
+receiver may be a String, and an_recv_may_be_string read a variable's
+values by their form only as far as literals and conditionals: what a
+call hands back was "may be one".
+
+A call is read where its form proves it (poly_call_no_string). An index
+into an Array literal is one of its elements. A call on self from the
+top level, or from a method defined there, is the value of the methods
+of that name: each one's last statement and each `return`. Everything
+else answers as before: a call that carries a block (a `break` in it is
+the call's value), a method with a rescue or an ensure clause, and a
+name the program reaches some other way, which dyn_callable_index
+already knows (a Symbol or a String argument spells it, an alias, a
+name it computes).
+
+No sharing rule is added: the answer only goes from "may be a String"
+to "is none", and no route changes. A program built without the flag
+keeps its C.
+
+Test: test/share_strings_op_write_boxed_call.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

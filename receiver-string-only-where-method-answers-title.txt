@@ -1,0 +1,1 @@
+A receiver a call hands back is a String only where the method can answer one
