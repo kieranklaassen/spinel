@@ -1,0 +1,73 @@
+1:  25920073b ! 1:  2c7f65dee Refuse a kept result of the String mutators that answer self without a bang
+    @@ Commit message
+      ## docs/limitations.md ##
+     @@ docs/limitations.md: Not yet shared:
+      - through a global variable: a String variable assigned from a global (`t = $g`, `t = $g.to_s`) or to one (`$g = s`, `$h = $g`), when one name is mutated in place and the other is read;
+    - - through a method that returns its String parameter (`def id(x) = x`, also `x.itself` or a bang method on it), when the result or the variable passed in is mutated in place and the other is read;
+    + - through a method that returns its String parameter (`def id(x) = x`, also `x.itself` or a bang method on it), when the result or the variable passed in is mutated in place and the other is read (a variable passed in through the caller's own parameter counts: the caller reads it again);
+      - through a bang method's result, which is its receiver (`r = s.strip!`, `r = s.strip! || s`), when the result is mutated in place through a variable and the receiver is read; a mutator straight on the result (`s.sub!(a, b) << x`) reaches the receiver;
+     +- through the result of `bytesplice`, `append_as_bytes`, or `concat` or `prepend` with other than one argument, which is its receiver too (`r = s.concat(a, b)`), when the result is mutated in place through a local, a global or an instance variable of the top level and the receiver is read, or when a method returns its parameter through one of them. A class's instance variable that keeps the result is left alone: an append through it reaches an instance-variable receiver in some programs (`@r = @s.concat(a, b)` where a parameter set `@s`) and does not build in others, and most other changes through either name are lost. A mutator straight on the result of `bytesplice` or `append_as_bytes` (`s.bytesplice(0, 1, "Z") << x`) does not reach the receiver. Neither of these is refused yet;
+      - through `to_s` (or another call answering its String receiver) under a mutator whose argument reassigns the variable, when the variable is a String handle (`e.to_s << (e = +"b")`);
+      - into an Array, a String variable added by `insert`, `prepend`, a `concat` of a literal, the later push of a chain (`a << t << s`) or a push into a global Array, or as the value of `s << x`, of `+s` (s itself unless s is frozen; a parameter is refused even when every caller passes a frozen literal) or of a reader method (`a << sb` with `def sb = @s`), when the variable or the element is then mutated in place;
+    - - through a reader on a boxed receiver (a Struct or Data member, an `attr_reader`, `def m = @iv`), a String read into a local that is mutated in place while the receiver is read again (a local only queried and then rebound to a copy, `s = s.dup`, before the change compiles: the change is the copy's);
+    + - through a reader on a boxed receiver (a Struct or Data member, an `attr_reader`, `def m = @iv`), a String read into a local that is mutated in place while the receiver is read again (a local only queried with String's own methods and then rebound to a copy with String's own `dup`, `s = s.dup`, before the change compiles: the change is the copy's);
+     
+      ## src/analyze.c ##
+    -@@ src/analyze.c: static int sa_copy_observable(Compiler *c, const SaName *to, const SaName *from,
+    -          (sa_mutated(c, from) && sa_read_elsewhere(c, to, -1));
+    +@@ src/analyze.c: static int sa_param_caller_sees(Compiler *c, const SaName *from) {
+    +   return 0;
+      }
+      /* A String bang method that answers its receiver (`strip!`, `sub!`): the
+     -   receiver, or -1. */
+    @@ src/analyze.c: static int sa_copy_observable(Compiler *c, const SaName *to, cons
+        return r;
+      }
+      /* The String arguments a call's method answers as they are (`def id(x) =
+    -@@ src/analyze.c: static int sa_returned_args(Compiler *c, int call, int *out, int cap) {
+    +@@ src/analyze.c: static int sa_returned_args_t(Compiler *c, int call, int *out, int cap, int poly
+        for (int i = 0; i < n; i++) {
+          int l = an_unparen(nt, lv[i]);
+          for (int d = 0; d < 8; d++) {
+    @@ src/analyze.c: static int sa_returned_args(Compiler *c, int call, int *out, int
+            if (b < 0) break;
+            l = an_unparen(nt, b);
+          }
+    -@@ src/analyze.c: static int sa_returned_args(Compiler *c, int call, int *out, int cap) {
+    +@@ src/analyze.c: static int sa_returned_args_t(Compiler *c, int call, int *out, int cap, int poly
+        return got;
+      }
+      /* The refusal's message for each route: 0 a global, 1 a method returning
+    @@ test/collect/refusals.expected: spinel: 1 refusal, nothing written
+     +spinel: test/reject/string_returned_arg_plain_mutator.rb:7: a String a method returns as its parameter is mutated in place, or the variable passed in is (a String is not yet shared by reference through a method returning its parameter). Mutate and read the String through the variable passed in.
+     +== test/reject/string_returned_arg_plain_mutator.rb [promote] rc=1
+     +spinel: test/reject/string_returned_arg_plain_mutator.rb:7: a String a method returns as its parameter is mutated in place, or the variable passed in is (a String is not yet shared by reference through a method returning its parameter). Mutate and read the String through the variable passed in.
+    ++== test/reject/string_returned_arg_plain_mutator_caller.rb [default] rc=1
+    ++spinel: test/reject/string_returned_arg_plain_mutator_caller.rb:7: a String a method returns as its parameter is mutated in place, or the variable passed in is (a String is not yet shared by reference through a method returning its parameter). Mutate and read the String through the variable passed in.
+    ++== test/reject/string_returned_arg_plain_mutator_caller.rb [promote] rc=1
+    ++spinel: test/reject/string_returned_arg_plain_mutator_caller.rb:7: a String a method returns as its parameter is mutated in place, or the variable passed in is (a String is not yet shared by reference through a method returning its parameter). Mutate and read the String through the variable passed in.
+      == test/reject/string_returned_arg_second.rb [default] rc=1
+      spinel: test/reject/string_returned_arg_second.rb:6: a String a method returns as its parameter is mutated in place, or the variable passed in is (a String is not yet shared by reference through a method returning its parameter). Mutate and read the String through the variable passed in.
+      == test/reject/string_returned_arg_second.rb [promote] rc=1
+    @@ test/reject/string_returned_arg_plain_mutator.rb (new)
+     +s = +"abc"
+     +t = patch(s)
+     +t << "!"
+    ++p s
+    +
+    + ## test/reject/string_returned_arg_plain_mutator_caller.rb (new) ##
+    +@@
+    ++# patch answers its parameter through bytesplice, so w is data itself, and
+    ++# data is the String the caller passed in and reads again. The result is a
+    ++# copy today, so an append through w would not reach s (CRuby "Zbc!", Spinel
+    ++# "Zbc"): refused, as a method returning `x.strip!` is.
+    ++def patch(x) = x.bytesplice(0, 1, "Z")
+    ++def entry(data)
+    ++  w = patch(data)
+    ++  w << "!"
+    ++end
+    ++s = +"abc"
+    ++entry(s)
+     +p s
+     
+      ## test/string_plain_mutator_result_kept.rb (new) ##
