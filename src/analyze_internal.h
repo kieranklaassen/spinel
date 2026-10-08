@@ -408,6 +408,7 @@ int infer_hash_params(Compiler *c);
 int infer_array_params(Compiler *c);
 int infer_string_params(Compiler *c);
 int infer_param_types(Compiler *c);
+int bind_empty_literal_params(Compiler *c);
 int infer_param_types_settle(Compiler *c);
 int infer_for_index(Compiler *c);
 int infer_catch_block_params(Compiler *c);
