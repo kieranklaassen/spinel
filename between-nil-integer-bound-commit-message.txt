@@ -1,0 +1,28 @@
+<=> and between? on a Float or a Bignum take a nil Integer for nil
+
+    def sm(k, on) = on ? k : nil
+    n = sm(0, false)
+    p 2.5 <=> n                   # nil
+    p 2.5.between?(n, 3.0)        # ArgumentError
+    p 12.between?(20, "a")        # false
+
+printed 1 and true, and raised ArgumentError for the third. An Integer
+slot holds nil as its sentinel, and the compare with a Float
+(sp_int_flt_cmp) or with a Bignum (sp_bigint_new_int) read the
+sentinel as the Integer -2**63. Integer <=> Integer tests for it
+already. These two arms now do, where the Integer operand can hold it
+(cmp_operand_may_be_nil); elsewhere the C is unchanged.
+
+between? in builtins/comparable.rb is written on <=> and compared
+with both bounds before it answered. With a nil bound now nil, a
+receiver below min would raise on a max that is nil where it answered
+false. CRuby's Comparable#between? answers false as soon as the
+receiver is below min and does not compare with max, so between? now
+does too: the test for "below min" sits in the branch taken when the
+compare with max fails, and a call whose bounds compare runs the code
+it ran. A max that answers coerce still has it called below min.
+
+Test: test/between_integer_or_nil_bound.rb; 24 of its 55 lines were
+wrong. Expected output from CRuby 3.3.6.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

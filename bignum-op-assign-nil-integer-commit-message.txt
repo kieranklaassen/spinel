@@ -1,0 +1,17 @@
+`x += n` on a Bignum raises for an Integer `n` that is nil
+
+`x += n` on a Bignum local, global or class variable made a Bignum of
+its Integer operand raw. An Integer slot that can be nil holds the nil
+as the Integer -2**63, so for an `n` that was nil `x += n` answered
+x - 2**63, `x *= n` a negative product and `x /= n` -128.
+
+Now the operand goes the way the binary operator's does: it is kept
+as it is read, and a nil raises TypeError (SP_INT_NIL_CK). `+=`, `-=`,
+`*=`, `/=`, `%=`, `&=`, `|=` and `^=` take it. Where the operand
+cannot hold nil the C is unchanged.
+
+A slot that holds -2**63 itself reads as nil, here as in the binary
+operators and in `+=` on an Integer: `x += n` for such an `n` was
+right and now raises.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

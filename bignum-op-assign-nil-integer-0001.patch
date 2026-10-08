@@ -1,0 +1,122 @@
+From 98171e1c9fe03e41ce817f50f58a694f3989d3e7 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 8 Oct 2026 01:00:00 +0000
+Subject: [PATCH] `x += n` on a Bignum raises for an Integer `n` that is nil
+
+`x += n` on a Bignum local, global or class variable made a Bignum of
+its Integer operand raw. An Integer slot that can be nil holds the nil
+as the Integer -2**63, so for an `n` that was nil `x += n` answered
+x - 2**63, `x *= n` a negative product and `x /= n` -128.
+
+Now the operand goes the way the binary operator's does: it is kept
+as it is read, and a nil raises TypeError (SP_INT_NIL_CK). `+=`, `-=`,
+`*=`, `/=`, `%=`, `&=`, `|=` and `^=` take it. Where the operand
+cannot hold nil the C is unchanged.
+
+A slot that holds -2**63 itself reads as nil, here as in the binary
+operators and in `+=` on an Integer: `x += n` for such an `n` was
+right and now raises.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/codegen_stmt.c                            |  7 +++-
+ test/bignum_op_assign_integer_or_nil.rb       | 36 +++++++++++++++++++
+ ...ignum_op_assign_integer_or_nil.rb.expected | 25 +++++++++++++
+ 3 files changed, 67 insertions(+), 1 deletion(-)
+ create mode 100644 test/bignum_op_assign_integer_or_nil.rb
+ create mode 100644 test/bignum_op_assign_integer_or_nil.rb.expected
+
+diff --git a/src/codegen_stmt.c b/src/codegen_stmt.c
+index 11f669cf7..9df465e7e 100644
+--- a/src/codegen_stmt.c
++++ b/src/codegen_stmt.c
+@@ -2802,7 +2802,12 @@ int emit_scalar_op_assign(Compiler *c, const char *lval, TyKind t, const char *o
+     emit_expr(c, v, &rb); buf_puts(&rb, ")");
+   }
+   else if (t == TY_BIGINT && vt == TY_INT) {
+-    buf_puts(&rb, "sp_bigint_new_int("); emit_expr(c, v, &rb); buf_puts(&rb, ")");
++    /* a nil operand raises as the operator does: converted raw it was the
++       number -2**63, and `x += n` answered x - 2**63 */
++    int tn = bigint_nil_open(c, -1, v, "sp_Bigint *", &rb);
++    if (tn) emit_bigint_opnd(c, v, tn, 1, &rb);
++    else { buf_puts(&rb, "sp_bigint_new_int("); emit_expr(c, v, &rb); buf_puts(&rb, ")"); }
++    bigint_nil_close(tn, "SP_INT_NIL_CK", op, &rb);
+   }
+   /* an unresolved call (`t += f.weight` with no such method) lowers to the
+      gate's raise token, an sp_RbVal; coerce it as a plain write does */
+diff --git a/test/bignum_op_assign_integer_or_nil.rb b/test/bignum_op_assign_integer_or_nil.rb
+new file mode 100644
+index 000000000..67ed5b35d
+--- /dev/null
++++ b/test/bignum_op_assign_integer_or_nil.rb
+@@ -0,0 +1,36 @@
++# spinel: int64
++# `x += n` on a Bignum local, global or class variable, with an Integer `n`
++# that is nil. The operand's slot holds the nil as the Integer -2**63, and
++# the write made a Bignum of that number: `x += n` answered x - 2**63.
++def sm(k, on) = on ? k : nil
++def show
++  r = yield
++  puts r.inspect
++rescue => e
++  puts "#{e.class}: #{e.message}"
++end
++class Acc
++  @@c = 2**70
++  def add(n) = (@@c += n; @@c)
++end
++$g = 2**70
++[true, false].each do |on|
++  n = sm(3, on)
++  x = 2**70
++  show { x += n; x }
++  show { x -= n; x }
++  show { x *= n; x }
++  show { x /= n; x }
++  show { x %= n; x }
++  y = 2**70 + 5
++  show { y &= n; y }
++  y = 2**70
++  show { y |= n; y }
++  y = 2**70
++  show { y ^= n; y }
++  show { [x, y] }
++  show { $g += n; $g }
++  show { $g -= sm(3, on); $g }
++  show { Acc.new.add(n) }
++end
++p $g
+diff --git a/test/bignum_op_assign_integer_or_nil.rb.expected b/test/bignum_op_assign_integer_or_nil.rb.expected
+new file mode 100644
+index 000000000..c4e7598a9
+--- /dev/null
++++ b/test/bignum_op_assign_integer_or_nil.rb.expected
+@@ -0,0 +1,25 @@
++1180591620717411303427
++1180591620717411303424
++3541774862152233910272
++1180591620717411303424
++1
++1
++1180591620717411303427
++1180591620717411303427
++[1, 1180591620717411303427]
++1180591620717411303427
++1180591620717411303424
++1180591620717411303427
++TypeError: nil can't be coerced into Integer
++TypeError: nil can't be coerced into Integer
++TypeError: nil can't be coerced into Integer
++TypeError: nil can't be coerced into Integer
++TypeError: nil can't be coerced into Integer
++TypeError: nil can't be coerced into Integer
++TypeError: nil can't be coerced into Integer
++TypeError: nil can't be coerced into Integer
++[1180591620717411303424, 1180591620717411303424]
++TypeError: nil can't be coerced into Integer
++TypeError: nil can't be coerced into Integer
++TypeError: nil can't be coerced into Integer
++1180591620717411303424
+-- 
+2.43.0
+

@@ -1,0 +1,243 @@
+From 0301cd7a258e0d588d5a3e657fd464d421ffbf7d Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 8 Oct 2026 01:19:00 +0000
+Subject: [PATCH] <=> and between? on a Float or a Bignum take a nil Integer
+ for nil
+
+    def sm(k, on) = on ? k : nil
+    n = sm(0, false)
+    p 2.5 <=> n                   # nil
+    p 2.5.between?(n, 3.0)        # ArgumentError
+    p 12.between?(20, "a")        # false
+
+printed 1 and true, and raised ArgumentError for the third. An Integer
+slot holds nil as its sentinel, and the compare with a Float
+(sp_int_flt_cmp) or with a Bignum (sp_bigint_new_int) read the
+sentinel as the Integer -2**63. Integer <=> Integer tests for it
+already. These two arms now do, where the Integer operand can hold it
+(cmp_operand_may_be_nil); elsewhere the C is unchanged.
+
+between? in builtins/comparable.rb is written on <=> and compared
+with both bounds before it answered. With a nil bound now nil, a
+receiver below min would raise on a max that is nil where it answered
+false. CRuby's Comparable#between? answers false as soon as the
+receiver is below min and does not compare with max, so between? now
+does too: the test for "below min" sits in the branch taken when the
+compare with max fails, and a call whose bounds compare runs the code
+it ran. A max that answers coerce still has it called below min.
+
+Test: test/between_integer_or_nil_bound.rb; 24 of its 55 lines were
+wrong. Expected output from CRuby 3.3.6.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ builtins/comparable.rb                        |  4 ++
+ src/codegen_call_operator.c                   | 32 ++++++++--
+ test/between_integer_or_nil_bound.rb          | 64 +++++++++++++++++++
+ test/between_integer_or_nil_bound.rb.expected | 55 ++++++++++++++++
+ 4 files changed, 148 insertions(+), 7 deletions(-)
+ create mode 100644 test/between_integer_or_nil_bound.rb
+ create mode 100644 test/between_integer_or_nil_bound.rb.expected
+
+diff --git a/builtins/comparable.rb b/builtins/comparable.rb
+index 65e2ec91f..42973ec54 100644
+--- a/builtins/comparable.rb
++++ b/builtins/comparable.rb
+@@ -89,6 +89,10 @@ module Comparable
+     end
+     c2 = self <=> max
+     if c2.nil?
++      # below min CRuby answers false and never compares with max, so a
++      # max that cannot be compared is no error there. The test sits in
++      # this branch to leave a call whose bounds compare as it was.
++      return false if c1 < 0
+       raise ArgumentError, "comparison of #{self.class} with #{__cmp_repr(max)} failed"
+     end
+     c1 >= 0 && c2 <= 0
+diff --git a/src/codegen_call_operator.c b/src/codegen_call_operator.c
+index 617f1715a..17fb02354 100644
+--- a/src/codegen_call_operator.c
++++ b/src/codegen_call_operator.c
+@@ -287,13 +287,28 @@ int emit_call_compare_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
+     if ((lrt == TY_BIGINT || latr.big) &&
+         (lrt == TY_INT || lrt == TY_BIGINT) && (lat == TY_INT || latr.big)) {
+       int tc = ++g_tmp;
+-      buf_printf(b, "({ int _t%d = sp_bigint_cmp(", tc);
++      /* the Integer side's nil sentinel answers nil: kept in _tn as it is
++         read, and tested once both sides have run */
++      int tn = cmp_operand_may_be_nil(c, lrt == TY_BIGINT ? argv[0] : recv) ? ++g_tmp : 0;
++      buf_puts(b, "({ ");
++      if (tn) buf_printf(b, "sp_int _t%d; ", tn);
++      buf_printf(b, "int _t%d = sp_bigint_cmp(", tc);
+       if (lrt == TY_BIGINT) emit_expr(c, recv, b);
+-      else { buf_puts(b, "sp_bigint_new_int("); emit_expr(c, recv, b); buf_puts(b, ")"); }
++      else {
++        buf_puts(b, "sp_bigint_new_int(");
++        if (tn) buf_printf(b, "_t%d = ", tn);
++        emit_expr(c, recv, b); buf_puts(b, ")");
++      }
+       buf_puts(b, ", ");
+       if (latr.big) emit_expr(c, argv[0], b);
+-      else { buf_puts(b, "sp_bigint_new_int("); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
+-      buf_printf(b, "); (sp_int)((_t%d > 0) - (_t%d < 0)); })", tc, tc);
++      else {
++        buf_puts(b, "sp_bigint_new_int(");
++        if (tn) buf_printf(b, "_t%d = ", tn);
++        emit_expr(c, argv[0], b); buf_puts(b, ")");
++      }
++      buf_puts(b, "); ");
++      if (tn) buf_printf(b, "_t%d == SP_INT_NIL ? SP_INT_NIL : ", tn);
++      buf_printf(b, "(sp_int)((_t%d > 0) - (_t%d < 0)); })", tc, tc);
+       return 1;
+     }
+     if (ty_is_numeric(lrt) && ty_is_numeric(lat)) {
+@@ -302,9 +317,12 @@ int emit_call_compare_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
+       buf_puts(b, "; "); emit_ctype(c, lat, b); buf_printf(b, " _t%d = ", tb); emit_expr(c, argv[0], b);
+       /* an Integer against a Float compares exactly (#7505); a NaN answers 2 */
+       if ((lrt == TY_INT && lat == TY_FLOAT) || (lrt == TY_FLOAT && lat == TY_INT)) {
+-        int tc = ++g_tmp;
+-        buf_printf(b, "; int _t%d = sp_int_flt_cmp(_t%d, _t%d); _t%d == 2 ? SP_INT_NIL : (sp_int)%s_t%d; })",
+-                   tc, lrt == TY_INT ? ta : tb, lrt == TY_INT ? tb : ta, tc, lrt == TY_INT ? "" : "-", tc);
++        int tc = ++g_tmp, ti = lrt == TY_INT ? ta : tb;
++        buf_printf(b, "; int _t%d = ", tc);
++        /* the Integer side's nil sentinel answers nil, as a NaN does */
++        if (cmp_operand_may_be_nil(c, lrt == TY_INT ? recv : argv[0])) buf_printf(b, "_t%d == SP_INT_NIL ? 2 : ", ti);
++        buf_printf(b, "sp_int_flt_cmp(_t%d, _t%d); _t%d == 2 ? SP_INT_NIL : (sp_int)%s_t%d; })",
++                   ti, lrt == TY_INT ? tb : ta, tc, lrt == TY_INT ? "" : "-", tc);
+       }
+       /* a NaN operand makes <=> nil, not 0 (#2315); only floats can be NaN */
+       else if (lrt == TY_FLOAT || lat == TY_FLOAT)
+diff --git a/test/between_integer_or_nil_bound.rb b/test/between_integer_or_nil_bound.rb
+new file mode 100644
+index 000000000..c6288cb54
+--- /dev/null
++++ b/test/between_integer_or_nil_bound.rb
+@@ -0,0 +1,64 @@
++# spinel: int64
++# `<=>` between a Float or a Bignum and an Integer that may be nil, and
++# between? on it. The nil was read as the Integer -2**63, so the compare
++# answered -1 or 1 and between? took a nil bound for a number.
++def sm(k, on) = on ? k : nil
++def id(x) = x
++def t
++  yield
++rescue => e
++  "#{e.class}: #{e.message}"
++end
++n = sm(0, false)
++m = sm(3, true)
++
++f = 2.5
++low = -1.0e19
++p f <=> n, low <=> n, n <=> f, n <=> low
++p f <=> m, low <=> m, m <=> f, 3.0 <=> m
++p (f <=> n).nil?, (Float::NAN <=> m).nil?, (Float::NAN <=> n).nil?
++
++g = -(2**70)
++h = 2**70
++p g <=> n, h <=> n, n <=> g, n <=> h
++p g <=> m, h <=> m, m <=> g, m <=> h
++
++# a nil bound raises, whichever side the receiver is on
++p t { f.between?(1.0, n) }
++p t { f.between?(n, 3.0) }
++p t { low.between?(n, nil) }
++p t { (-Float::INFINITY).between?(n, nil) }
++p t { g.between?(n, 5) }
++p t { h.between?(n, 2**72) }
++p t { h.between?(1, n) }
++p f.between?(m, 9.0), f.between?(1.0, m), h.between?(m, 2**72), g.between?(m, 5)
++p f.clamp(n, 3.0), f.clamp(1.0, n), f.clamp(m, 9.0), f.clamp(1.0, m)
++
++# Comparable#between? answers false as soon as the receiver is below min:
++# CRuby does not compare with max then, so a max that cannot be compared
++# is no error, and neither is a max that is nil.
++p t { f.between?(5.0, n) }
++p t { g.between?(5, n) }
++p t { 12.between?(20, n) }
++i = 12
++e = 1.5
++p t { i.between?(20, "a") }
++p t { i.between?(20, nil) }
++p t { i.between?(20, :s) }
++p t { i.between?(id(20), id("a")) }
++p t { i.between?(id(20.5), id([1])) }
++p t { e.between?(2.0, nil) }
++p t { e.between?(2.0, Float::NAN) }
++p t { e.between?(id(2), id("a")) }
++p t { e.between?(id(2.0), id(Float::NAN)) }
++
++# at or above min, max is compared as before
++p t { i.between?(5, 30) }
++p t { i.between?(12, 12) }
++p t { i.between?(id(5), id(7)) }
++p t { i.between?(12, "a") }
++p t { i.between?(5, n) }
++p t { i.between?(id(5), id("a")) }
++p t { i.between?(id("a"), id(20)) }
++p t { e.between?(1.5, Float::NAN) }
++p t { e.between?(id(1.5), id(nil)) }
+diff --git a/test/between_integer_or_nil_bound.rb.expected b/test/between_integer_or_nil_bound.rb.expected
+new file mode 100644
+index 000000000..c63d59d5b
+--- /dev/null
++++ b/test/between_integer_or_nil_bound.rb.expected
+@@ -0,0 +1,55 @@
++nil
++nil
++nil
++nil
++-1
++-1
++1
++0
++true
++true
++true
++nil
++nil
++nil
++nil
++-1
++1
++1
++-1
++"ArgumentError: comparison of Float with nil failed"
++"ArgumentError: comparison of Float with nil failed"
++"ArgumentError: comparison of Float with nil failed"
++"ArgumentError: comparison of Float with nil failed"
++"ArgumentError: comparison of Integer with nil failed"
++"ArgumentError: comparison of Integer with nil failed"
++"ArgumentError: comparison of Integer with nil failed"
++false
++true
++true
++false
++2.5
++2.5
++3
++2.5
++false
++false
++false
++false
++false
++false
++false
++false
++false
++false
++false
++false
++true
++true
++false
++"ArgumentError: comparison of Integer with String failed"
++"ArgumentError: comparison of Integer with nil failed"
++"ArgumentError: comparison of Integer with String failed"
++"ArgumentError: comparison of Integer with String failed"
++"ArgumentError: comparison of Float with NaN failed"
++"ArgumentError: comparison of Float with nil failed"
+-- 
+2.43.0
+
