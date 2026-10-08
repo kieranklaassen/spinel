@@ -1,0 +1,56 @@
+A `...` forward beside a yielding `super(...)` is given the block
+
+    class Reader
+      def each_row(n) = yield(n)
+    end
+    class Logged < Reader
+      def each_row(...) = [super(...), note(...)]
+      def note(n) = block_given? ? yield(n) : -1
+    end
+    p Logged.new.each_row(2) { |x| x * 3 }    # [6, 6]
+
+answered [6, -1], and with a bare `yield` in `note` it raised "no block
+given (yield)".
+
+A method whose `super(...)` reaches a parent that yields keeps its `...`
+and is inlined at the call, so that the site's block is spliced at the
+parent's yield. emit_inline_call_x chooses the block an inlined callee's
+yields run from the call's own block node, and takes the block the site
+runs under only for `inner(&)` and `inner(&b)`. `note(...)` has no block
+node, so it was inlined as a call with no block, beside a `super(...)`
+that was given it.
+
+The forward takes that block only where each of these holds; every
+other forward keeps its C.
+
+The callee runs its block by a `yield` in its own body and hands it on
+nowhere: no block parameter, no `&` or `...` argument, no `super`, no
+parameter default that reaches the block (`def note(n, k = yield(n))`),
+and no `yield` under a block or lambda of its own (`Hash.new { |h, k|
+yield(k) }`), which can be a C function of its own.
+
+The block holds no `break`, a loop's inside it included. Where the
+callee reads what a yield answers, the block's last statement is one of
+a short list: a literal, a local or instance variable, an Array literal
+of these, and `+ - * < > <= >= ==` between two of these that are
+Integer, Float or boxed (with a boxed operand, only in a program with
+no operator of that name of its own). The method's proc form, which
+serves every call that finds the method at run time, forwards its proc
+only where every literal block the program hands a method of that name
+passes the same tests.
+
+The forward binds the forwarder's slots to the callee by position and
+judges no count, so a callee CRuby would refuse runs on; with the block
+it would run the block too. The block is handed on only where no count
+can be off: the callee takes as many required parameters as the `...`
+has slots and no other parameter, the forwarder names no parameter and
+no call hands it a key, every call of its name and every `super` in a
+method of that name writes out that many arguments, and the program
+names the method by no Symbol (`send`, `alias_method`). `initialize`,
+which `new` calls, is left as it was.
+
+What the program's calls of a name say is read once a name
+(fwd_name_facts), so these tests walk the program once for each
+forwarded name, not once for each forward at each site.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
