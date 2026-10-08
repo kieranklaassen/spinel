@@ -1125,4 +1125,5 @@ void sp_exc_ctx_mark(void *p) {            /* GC: mark a suspended fiber's carri
   for (sp_proc_home *h = x->prhead; h; h = h->prev) sp_mark_rbval(h->val);
   for (int i = 0; i < x->bn; i++) sp_mark_rbval(x->bv[i]);   /* carried break scopes */
   for (int i = 0; i < x->rn; i++) if (x->shand[i]) sp_gc_mark(x->shand[i]);  /* handled excs */
+  sp_trap_chan_mark(x->tchan);   /* a parked worker's: what its trap blocks set aside */
 }

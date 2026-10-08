@@ -11,6 +11,7 @@
 #include "sp_types.h"   /* sp_int */
 #include "sp_gc.h"      /* sp_RbVal */
 #include "sp_inspect.h" /* sp_poly_recur_frame */
+#include "sp_proc.h"    /* struct sp_trap_chan */
 
 /* A non-lambda proc's home method: a node on that method's C stack, linked
    onto the per-fiber chain sp_proc_ret_head (see the proc-return machinery in
@@ -46,6 +47,10 @@ typedef struct {
                                         restored the OTHER fiber's watermark: a raise's dead root
                                         stayed on the list and the next collection read a stack
                                         slot that was no longer a string (#4546) */
+  struct sp_trap_chan *tchan;        /* what trap blocks have set aside of the proc channel
+                                        (sp_trap_call), as a worker that parks with this fiber
+                                        running tells the collector: null in a suspended fiber,
+                                        a switch having emptied the list */
 } sp_exc_ctx_t;
 
 void *sp_exc_ctx_new(void);

@@ -1569,6 +1569,7 @@ static void sp_re_mark_globals(void) {
   SP_GLB_PHASE("globals:proc-channel");
   sp_mark_rbval_scratch(_sp_proc_poly_ret);
   for (int i = 0; i < SP_PROC_ARG_SLOTS; i++) sp_mark_rbval_scratch(_sp_proc_poly_args[i]);
+  sp_trap_chan_mark(sp_trap_chan_top);   /* and what a trap block set aside of it */
   SP_GLB_PHASE("globals");
 #undef SP_GLB_PHASE
 }
@@ -14799,6 +14800,14 @@ static void sp_publish_worker_roots(void) {
   _sp_gc_root_push((void **)((uintptr_t)&_sp_proc_poly_ret | (uintptr_t)1));
   for (int i = 0; i < 16; i++)
     _sp_gc_root_push((void **)((uintptr_t)&_sp_proc_poly_args[i] | (uintptr_t)1));
+  /* What a trap block has set aside of that channel (sp_trap_call) is this
+     worker's too. The collector marks the running fiber's context with the
+     fibers it marks for a parked worker (sp_exc_ctx_mark), so that context
+     is told the list as it stands. */
+  if (sp_fiber_current && (sp_fiber_current->exc_ctx || sp_trap_chan_top)) {
+    if (!sp_fiber_current->exc_ctx) sp_fiber_current->exc_ctx = sp_exc_ctx_new();
+    ((sp_exc_ctx_t *)sp_fiber_current->exc_ctx)->tchan = sp_trap_chan_top;
+  }
 }
 SP_CONSTRUCTOR static void sp_install_safepoint_publish(void) {
   sp_safepoint_publish_hook = sp_publish_worker_roots;
@@ -14896,6 +14905,10 @@ void sp_exc_ctx_save(void *p) {            /* current globals -> ctx */
     if (!x->shand) sp_oom_die(); }
   for (int i = 0; i < rn; i++) x->shand[i] = sp_exc_handling[i];
   x->rn = rn; x->pcause = sp_pending_cause;
+  /* The proc channel is the worker's, so nothing a trap block set aside of
+     it (sp_trap_call) outlives a switch: the list is emptied, and with it
+     what a parked worker told this context. */
+  sp_trap_chan_top = 0; x->tchan = 0;
   /* The container-walk path travels with the green thread, like the handler
      stack above it: a fiber suspended in the middle of an #inspect resumes
      still knowing what it was inside, and the fiber that runs meanwhile starts
@@ -17375,9 +17388,23 @@ static sp_RbVal sp_Fiber_blocking_proc(sp_Proc *blk) {
    blocked for good: land here first, unblock it, then pass the raise or
    unwind on. The frame is armed before anything is rooted, so its root mark
    is the interrupted code's. */
+/* The signal can arrive while a proc is being called: the caller has left
+   the arguments, the block and the keyword flag in the calling convention's
+   side channel, or the proc its answer, and the other side has not read them
+   yet. This call and the block's own calls write the same slots, so the
+   channel is set aside and put back when the proc returns. A proc that
+   raises or throws abandons the interrupted call. One whose run switched
+   fibers puts nothing back: the list no longer ends in its record, and the
+   channel may hold another fiber's call by then (sp_proc.h). */
 #ifndef SPINEL_EXT_HOST
+SP_TLS struct sp_trap_chan *sp_trap_chan_top;
 void sp_trap_call(sp_Proc *p, int no) {
   sp_exc_check_depth();
+  struct sp_trap_chan chan;
+  chan.ret = _sp_proc_poly_ret; memcpy(chan.args, _sp_proc_poly_args, sizeof chan.args);
+  chan.blk = _sp_proc_blk; chan.kwpos = _sp_proc_kwpos;
+  chan.up = sp_trap_chan_top;
+  sp_trap_chan_set(&chan);
   sp_exc_rootmark[sp_exc_top] = sp_gc_nroots; sp_rescue_mark[sp_exc_top] = sp_rescue_sp;
   sp_exc_msg[sp_exc_top] = 0; sp_exc_obj[sp_exc_top] = 0; sp_exc_top++;
   if (setjmp(sp_exc_stack[sp_exc_top - 1]) == 0) {
@@ -17386,9 +17413,15 @@ void sp_trap_call(sp_Proc *p, int no) {
     _sp_proc_poly_args[0] = sp_box_int((sp_int)no);
     sp_proc_call(p, 1, &slot);
     sp_exc_top--;
+    if (sp_trap_chan_top == &chan) {
+      _sp_proc_poly_ret = chan.ret; memcpy(_sp_proc_poly_args, chan.args, sizeof chan.args);
+      _sp_proc_blk = chan.blk; _sp_proc_kwpos = chan.kwpos;
+      sp_trap_chan_set(chan.up);
+    }
     return;
   }
   sp_exc_top--;
+  if (sp_trap_chan_top == &chan) sp_trap_chan_set(chan.up);   /* the interrupted call is abandoned */
   sp_gc_nroots = sp_exc_rootmark[sp_exc_top]; sp_rescue_sp = sp_rescue_mark[sp_exc_top];
   /* Take the exit before unblocking: a delivery that was pending runs its
      proc right there, reusing this slot, and must not see (or clear) an

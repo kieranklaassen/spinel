@@ -39,6 +39,33 @@ sp_int sp_proc_call(sp_Proc *p, sp_int argc, sp_int *args);   /* defined in the 
 #define SP_PROC_ARG_SLOTS 64
 extern SP_TLS sp_RbVal _sp_proc_poly_args[SP_PROC_ARG_SLOTS];    /* defined in the generated TU */
 extern SP_TLS sp_RbVal _sp_proc_poly_ret;                        /* defined in the generated TU */
+/* What a Signal.trap block's run sets aside of that channel (sp_trap_call):
+   the values of the call it interrupted, which its own call writes over,
+   to be put back when the block returns. A record sits in sp_trap_call's
+   frame, and the records of the blocks in flight form a list,
+   sp_trap_chan_top. The channel is the worker's, not a fiber's: once a
+   block's run has switched fibers, what the channel holds when the block
+   returns may be another fiber's call in flight. So a switch empties the
+   list (sp_exc_ctx_save), and a block puts its record back only while the
+   list still ends in it. */
+struct sp_trap_chan {
+  sp_RbVal ret, args[SP_PROC_ARG_SLOTS]; sp_Proc *blk; int kwpos;
+  struct sp_trap_chan *up;
+};
+extern SP_TLS struct sp_trap_chan *sp_trap_chan_top;             /* defined in the generated TU */
+/* sp_trap_call puts a record on the list and takes it off through this
+   call, so that the order it writes in is the order another signal's block
+   finds: a record is whole before it is on the list, and the channel has
+   its values back before the record is off it. */
+void sp_trap_chan_set(struct sp_trap_chan *t);
+/* The values are marked as the channel's are: nothing else points at them,
+   and one the interrupted code had done with may be stale. */
+static inline void sp_trap_chan_mark(const struct sp_trap_chan *t) {
+  for (; t; t = t->up) {
+    sp_mark_rbval_scratch(t->ret);
+    for (int i = 0; i < SP_PROC_ARG_SLOTS; i++) sp_mark_rbval_scratch(t->args[i]);
+  }
+}
 
 /* The lineage root of a proc: dups/clones of one proc share it, so Proc#== /
    #eql? compare roots (a dup == its original) while distinct literals differ. */

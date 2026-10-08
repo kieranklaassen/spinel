@@ -1,0 +1,18 @@
+[1, 10, 3, 4]
+["apt", 10, "cpt", "dpt"]
+[1, 10, 11, 4]
+[1, 10, 3]
+[1, 2, 3, 10, 5]
+[1, 10, [], 9]
+true
+"from the block"
+[1, 10, 3, 4]
+:part_out
+["gpt", 7, "hpt"]
+:left
+["ipt", :done, "kpt"]
+:out
+[:one_in, :two_in, :one_back, :fiber_end, :two_out]
+150
+:left
+450
