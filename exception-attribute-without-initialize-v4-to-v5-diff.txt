@@ -1,0 +1,39 @@
+diff exception-attribute-without-initialize-body-v4.md exception-attribute-without-initialize-body-v5.md
+15c15
+< | the class, raised by name, caught by `rescue StandardError => e` | 6073.7 | -173.5 | -133.8 | -39.7 |
+---
+> | the class, raised by name, caught by `rescue StandardError => e` | 6073.7 | -173.5 | -132.6 | -40.9 |
+28c28,30
+< so it is shown beside the cost. A program with no such class emits the C it
+---
+> so it is shown beside the cost: built with clang 18.1 that column reads
+> -66.0, -33.0 and +11.3 in the three rows that cost, and their totals are
+> -47.9, -15.0 and +55.5. A program with no such class emits the C it
+30c32,38
+< instruction.
+---
+> instruction. Master ran right, and so gains nothing for what it pays: a
+> program that has such a class and catches a builtin (the 5, whether or not
+> the class is ever raised), and one that never reads an attribute of the
+> class it builds (the 20; the 45 where the subclass's are never touched).
+> Compiling a program of 300 such classes runs 3.1% more instructions
+> (callgrind of `spinel -c`), a program of one 1.5%, and a program with none
+> under 0.06%.
+136c144
+< literal stays the frozen literal it was there (`e.message.frozen?` is true
+---
+> literal stays frozen as it was there (`e.message.frozen?` is true
+diff exception-attribute-without-initialize-commit-message-v4.txt exception-attribute-without-initialize-commit-message-v5.txt
+73c73
+< as a frozen literal stays that frozen literal (`e.message.frozen?`,
+---
+> as a frozen literal stays frozen (`e.message.frozen?`,
+83c83
+< that names no class of the program builds such a class in 134 fewer.
+---
+> that names no class of the program builds such a class in 133 fewer.
+88c88,89
+< of a turn's 116 compares where master's build has 13.
+---
+> of a turn's 116 compares where master's build has 13. Compiling a
+> program of 300 such classes runs 3.1% more instructions, one 1.5%.
