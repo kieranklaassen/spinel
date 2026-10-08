@@ -13009,6 +13009,109 @@ static int emit_poly_call0_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
 }
 
 /* Element access on a boxed receiver: an index read, []= and [] with one or two arguments (emit_poly_call's arms, in their order) */
+/* Is the variable `nm` written under `id`, by any write kind? `kind` is the
+   node name's head: GlobalVariable, InstanceVariable or ClassVariable. With
+   `body`, only inside a method, block or lambda body: the writes a call can
+   run. A global alias or a class_variable_set may name it. */
+static int slot_written_under(Compiler *c, int id, const char *kind, const char *nm, int body) {
+  const NodeTable *nt = c->nt;
+  const char *ty = id < 0 ? NULL : nt_type(nt, id);
+  if (!ty) return 0;
+  if (sp_streq(ty, "DefNode") || sp_streq(ty, "BlockNode") || sp_streq(ty, "LambdaNode")) body = 0;
+  if (!body && !strncmp(ty, kind, strlen(kind)) && (strstr(ty, "WriteNode") || strstr(ty, "TargetNode"))) {
+    const char *wn = nt_str(nt, id, "name");
+    if (!wn || sp_streq(wn, nm)) return 1;
+  }
+  if (sp_streq(ty, "AliasGlobalVariableNode") && kind[0] == 'G') return 1;
+  if (sp_streq(ty, "CallNode") && kind[0] == 'C') {
+    const char *cn = nt_str(nt, id, "name");
+    if (cn && sp_streq(cn, "class_variable_set")) return 1;
+  }
+  for (int i = 0; i < nt_num_refs(nt, id); i++)
+    if (slot_written_under(c, nt_ref_at(nt, id, i), kind, nm, body)) return 1;
+  for (int i = 0; i < nt_num_arrs(nt, id); i++) {
+    int n = 0;
+    const int *ids = nt_arr_at(nt, id, i, &n);
+    for (int j = 0; j < n; j++)
+      if (slot_written_under(c, ids[j], kind, nm, body)) return 1;
+  }
+  return 0;
+}
+/* Does this index run nothing but built-in code? Reads, literals, writes
+   and the arithmetic, comparison and bit operators over them do, where the
+   program gives no class an operator or a coerce of its own (a def, an
+   alias, a define_method): what such an index assigns, it names. */
+static int index_runs_builtins_only(Compiler *c, int id) {
+  static const char *const OPS[] = {
+    "+", "-", "*", "/", "%", "**", "<", ">", "<=", ">=", "==", "!=", "<=>", "&", "|", "^", "<<", ">>",
+    "coerce" /* the last: what an operator may call, no operator itself */, NULL };
+  const NodeTable *nt = c->nt;
+  if (id < 0) return 1;
+  switch (nt_kind(nt, id)) {
+    case NK_ParenthesesNode: case NK_StatementsNode: case NK_SelfNode:
+    case NK_IntegerNode: case NK_FloatNode: case NK_NilNode: case NK_TrueNode: case NK_FalseNode:
+    case NK_SymbolNode: case NK_StringNode:
+    case NK_LocalVariableReadNode: case NK_InstanceVariableReadNode:
+    case NK_GlobalVariableReadNode: case NK_ClassVariableReadNode:
+    case NK_LocalVariableWriteNode: case NK_InstanceVariableWriteNode:
+    case NK_GlobalVariableWriteNode: case NK_ClassVariableWriteNode:
+      break;
+    case NK_CallNode: {
+      const char *nm = nt_str(nt, id, "name");
+      int op = 0;
+      for (int i = 0; nm && OPS[i + 1] && !op; i++) op = sp_streq(nm, OPS[i]);
+      if (!op || nt_ref(nt, id, "block") >= 0 || nt_ref(nt, id, "receiver") < 0) return 0;
+      if (call_is_scalar_op(c, id)) break;
+      if (comp_kind_first(c, NK_AliasMethodNode) >= 0) return 0;
+      for (int d = comp_kind_first(c, NK_DefNode); d >= 0; d = comp_kind_next(c, d)) {
+        const char *dn = nt_str(nt, d, "name");
+        for (int i = 0; dn && OPS[i]; i++) if (sp_streq(dn, OPS[i])) return 0;
+      }
+      for (int k = comp_kind_first(c, NK_CallNode); k >= 0; k = comp_kind_next(c, k)) {
+        const char *kn = nt_str(nt, k, "name");
+        if (kn && (sp_streq(kn, "define_method") || sp_streq(kn, "alias_method"))) return 0;
+      }
+      break;
+    }
+    default: {
+      const char *ty = nt_type(nt, id);
+      if (!ty || !sp_streq(ty, "ArgumentsNode")) return 0;
+    }
+  }
+  for (int i = 0; i < nt_num_refs(nt, id); i++)
+    if (!index_runs_builtins_only(c, nt_ref_at(nt, id, i))) return 0;
+  for (int i = 0; i < nt_num_arrs(nt, id); i++) {
+    int n = 0;
+    const int *ids = nt_arr_at(nt, id, i, &n);
+    for (int j = 0; j < n; j++)
+      if (!index_runs_builtins_only(c, ids[j])) return 0;
+  }
+  return 1;
+}
+/* `$x[($x = v; k)]`: a boxed value read from a global, an instance variable
+   or a class variable, and indexed by what can assign that same variable.
+   Where the index is no call the pair is left to C's order and the slot is
+   read after the index ran, so the read answers from the value just
+   assigned. An Integer there answered bit 0 for an index that is no Integer,
+   and that can be CRuby's bit of the value before; such a read keeps that
+   answer (sp_poly_index_poly_asis). The index names the write, or it runs
+   code of the program's (read_rebound_by, and not index_runs_builtins_only)
+   and a body of the program's names it. A receiver already held in a temp
+   was read first, and is read as any other. */
+static int index_reads_assigned_slot(Compiler *c, int recv, int index) {
+  const NodeTable *nt = c->nt;
+  NodeKind rk = nt_kind(nt, recv);
+  if (rk != NK_GlobalVariableReadNode && rk != NK_InstanceVariableReadNode &&
+      rk != NK_ClassVariableReadNode) return 0;
+  for (int i = 0; i < g_n_argov; i++) if (g_argov_node[i] == recv) return 0;
+  const char *vn = nt_str(nt, recv, "name");
+  if (!vn || !read_rebound_by(c, recv, index)) return 0;
+  const char *kind = rk == NK_GlobalVariableReadNode ? "GlobalVariable" :
+                     rk == NK_InstanceVariableReadNode ? "InstanceVariable" : "ClassVariable";
+  if (slot_written_under(c, index, kind, vn, 0)) return 1;
+  if (index_runs_builtins_only(c, index)) return 0;
+  return rk == NK_InstanceVariableReadNode || slot_written_under(c, nt->root_id, kind, vn, 1);
+}
 static int emit_poly_index_call(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, TyKind rt, int *out) {
   /* poly receiver: arr[start, len] = src -- 3-arg splice assign
      Skip Fiber/Fiber.current storage receivers (handled later). */
@@ -13295,7 +13398,8 @@ static int emit_poly_index_call(Compiler *c, int id, Buf *b, const NodeTable *nt
            the hash, string or Struct arms, so the cls_id test and the cold
            call behind it are dead code on this read. analyze established the
            proof for the GC root elision; this is the same fact paying twice. */
-        buf_puts(b, at != TY_INT ? "sp_poly_index_poly("
+        buf_puts(b, at != TY_INT ? index_reads_assigned_slot(c, recv, argv[0]) ? "sp_poly_index_poly_asis("
+                                                                               : "sp_poly_index_poly("
                     : expr_is_arr_or_nil(c, recv) && decide_node(c->nt, recv, "aon-get", NULL) ? "sp_poly_arr_get_aon("
                                                   : "sp_poly_arr_get_hash(");
         emit_expr(c, recv, b);
@@ -13305,7 +13409,8 @@ static int emit_poly_index_call(Compiler *c, int id, Buf *b, const NodeTable *nt
       }
       /* a non-poly key (e.g. a Method): box it, then index polymorphically */
       if (!ar.untyped) {
-        buf_puts(b, "sp_poly_index_poly("); emit_expr(c, recv, b);
+        buf_puts(b, index_reads_assigned_slot(c, recv, argv[0]) ? "sp_poly_index_poly_asis(" : "sp_poly_index_poly(");
+        emit_expr(c, recv, b);
         buf_puts(b, ", "); emit_boxed(c, argv[0], b); buf_puts(b, ")");
         { *out = 1; return 1; }
       }
