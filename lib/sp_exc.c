@@ -1,5 +1,8 @@
 /* sp_exc.c -- cold sp_Exception ops (see sp_exc.h). 0 optcarrot uses. */
 #include "sp_exc.h"
+#include "sp_string.h"
+#include <stdarg.h>
+#include "sp_exc_ctx.h"
 #include <errno.h>
 
 /* Check if exception class name `raised` is the same as or a subclass of
@@ -127,8 +130,11 @@ int sp_exc_is_standard_error(const char *raised) {
 }
 /* the 0xff byte is the frozen-literal marker sp_exc_gc_scan reads at msg[-1];
    the string itself is the empty one that follows it */
-static const char sp_exc_no_msg_storage[] = "\xff";
+static const char sp_exc_no_msg_storage[] = "\xff" "\0" "\xff";
 const char *const sp_exc_no_msg = sp_exc_no_msg_storage + 1;
+/* the frozen empty sentinel: the second "" of the same storage, behind a
+   marker byte of its own (sp_exc_no_msg's NUL, then 0xff) */
+const char *const sp_exc_no_msg_frozen = sp_exc_no_msg_storage + 3;
 
 /* SystemCallError#errno reads what SystemCallError#initialize stored: the
    number of the Errno class the exception descends from. An exception built
@@ -143,8 +149,63 @@ void sp_exc_syserr_init(sp_Exception *e) {
 }
 /* Create an exception for a `rescue => e` binding: like sp_exc_new but
    also looks up the parent class via the user hierarchy callback. */
-sp_Exception *sp_exc_new_for_catch(const char *cls, const char *msg) {if (msg != sp_exc_no_msg) msg = sp_msg_heapify(msg); SP_GC_ROOT_STR(msg);
+/* The exception's own copy of its message. The length is strlen's: what arrives
+   is a bare C string as often as a String (see sp_msg_heapify). */
+const char *sp_exc_msg_counted(const char *m, size_t n) {
+  SP_GC_ROOT_STR(m);
+  char *r = sp_str_alloc(SP_CMSG_HDR + n);
+  memcpy(r, "\xff\xfe" "CM" "\xfd\x01", 6);
+  uint32_t n32 = (uint32_t)n;
+  memcpy(r + 6, &n32, sizeof n32);
+  memcpy(r + SP_CMSG_HDR, m, n);
+  return r;
+}
+const char *sp_exc_msg_counted_frozen(const char *m, size_t n) {
+  char *r = (char *)sp_exc_msg_counted(m, n);
+  r[5] = 0x02;
+  return r;
+}
+static const char *sp_exc_msg_copy(const char *m) {
+  if (sp_cmsg_p(m)) {   /* the counted message decodes to its payload, a NUL kept */
+    size_t cn = sp_cmsg_len(m);
+    char *r = sp_str_alloc(cn);
+    memcpy(r, m + SP_CMSG_HDR, cn);
+    /* a frozen String's message is frozen (0xfa: a frozen heap String that
+       is collected) */
+    if (sp_cmsg_frozen(m)) ((unsigned char *)r)[-1] = 0xfa;
+    return r;
+  }
+  size_t n = strlen(m);
+  char *r = sp_str_alloc(n);
+  memcpy(r, m, n);
+  return r;
+}
+/* A raise's frozen message, counted (sp_exc_msg_given) and with no NUL in
+   it, as plain text that is frozen (0xfa): what sp_raise_cls carries in
+   the handler stack, so every reader of the raw message (the uncaught
+   report, a thread's or fiber's re-raise, the name recovery) reads its
+   text, and the rescue's exception keeps the mark (sp_exc_new_for_catch).
+   Allocated without a collection's turn, as sp_msg_heapify's copy is. */
+const char *sp_exc_msg_plain(const char *m) {
+  if (!sp_cmsg_p(m) || !sp_cmsg_frozen(m)) return m;
+  size_t n = sp_cmsg_len(m);
+  /* an empty message is the explicit-empty sentinel, as sp_exc_msg_given
+     makes it for an unfrozen "" */
+  if (n == 0) return sp_exc_no_msg_frozen;
+  if (memchr(m + SP_CMSG_HDR, 0, n)) return m;
+  char *r = sp_str_alloc_nogc(n);
+  memcpy(r, m + SP_CMSG_HDR, n);
+  ((unsigned char *)r)[-1] = 0xfa;
+  return r;
+}
+sp_Exception *sp_exc_new_for_catch(const char *cls, const char *msg) {
+  /* every caller hands a message with a marker byte (a raise's, from the
+     handler stack, or sp_exc_msg_given's): a frozen one stays frozen */
+  int fz = msg && msg != sp_exc_no_msg && !sp_cmsg_p(msg) &&
+           (((const unsigned char *)msg)[-1] == 0xfa || ((const unsigned char *)msg)[-1] == 0xf8);
+  if (!sp_exc_msg_empty_given(msg)) msg = sp_msg_heapify(msg); SP_GC_ROOT_STR(msg);
   sp_Exception *e = sp_exc_new(cls, msg);
+  if (fz && e->msg) ((unsigned char *)e->msg)[-1] = 0xfa;
   if (sp_user_exc_parent_fn) {
     const char *par = sp_user_exc_parent_fn(cls);
     if (par) {
@@ -162,7 +223,7 @@ sp_Exception *sp_exc_new_for_catch(const char *cls, const char *msg) {if (msg !=
    where a user subclass with ivars was raised without a carried object
    (#1415). Its ivar fields stay zero (nil/0). msg is the only heap field, so
    the base scan suffices. */
-void *sp_exc_new_sub_sized(size_t sz, const char *cls_name, const char *msg) {if (msg != sp_exc_no_msg) msg = sp_msg_heapify(msg); SP_GC_ROOT_STR(msg);
+void *sp_exc_new_sub_sized(size_t sz, const char *cls_name, const char *msg) {if (!sp_exc_msg_empty_given(msg)) msg = sp_msg_heapify(msg); SP_GC_ROOT_STR(msg);
   sp_Exception *e = (sp_Exception *)sp_gc_alloc(sz, NULL, sp_exc_gc_scan);
   memset(e, 0, sz);
   e->cls_name = cls_name ? cls_name : "RuntimeError";
@@ -176,9 +237,10 @@ void *sp_exc_new_sub_sized(size_t sz, const char *cls_name, const char *msg) {if
      during the copy scans a consistent struct */
   SP_GC_ROOT(e);
   /* an explicitly given message stays, even empty (#3713) */
-  e->msg = sp_sprintf("%s", (msg && msg[0]) ? msg
-                            : (msg == sp_exc_no_msg ? "" : e->cls_name));
-  /* The sprintf can collect, and a collection promotes the rooted object it
+  e->msg = sp_exc_msg_copy((msg && msg[0]) ? msg
+                            : (sp_exc_msg_empty_given(msg) ? "" : e->cls_name));
+  if (msg == sp_exc_no_msg_frozen) ((unsigned char *)e->msg)[-1] = 0xfa;   /* `raise C, ""` */
+  /* The copy can collect, and a collection promotes the rooted object it
      is filling: an old holder then receives a young string. Recorded after
      the store, since the allocation would clear a record made before it. */
   sp_gc_wb((void *)e);
@@ -187,6 +249,7 @@ void *sp_exc_new_sub_sized(size_t sz, const char *cls_name, const char *msg) {if
 void sp_exc_gc_scan(void *p) {
   sp_Exception *e = (sp_Exception *)p;
   if (e->msg) sp_mark_string(e->msg);
+  if (e->msg_h) sp_gc_mark(e->msg_h);
   if (e->cause) sp_gc_mark(e->cause);
   sp_mark_rbval(e->result);
   sp_mark_rbval(e->xname);
@@ -237,7 +300,7 @@ sp_RbVal sp_Exception_set_backtrace(sp_Exception *e, sp_StrArray *bt) {
    collection in between (sp_msg_heapify), so an unrooted heap message cannot
    be swept out from under it either. The no-message sentinel keeps its
    identity: it is what tells an empty message apart from none at all. */
-sp_Exception *sp_exc_new(const char *cls_name, const char *msg) {if (msg != sp_exc_no_msg) msg = sp_msg_heapify(msg); SP_GC_ROOT_STR(msg);
+sp_Exception *sp_exc_new(const char *cls_name, const char *msg) {if (!sp_exc_msg_empty_given(msg)) msg = sp_msg_heapify(msg); SP_GC_ROOT_STR(msg);
   sp_Exception *e = (sp_Exception *)sp_gc_alloc(sizeof(sp_Exception), NULL, sp_exc_gc_scan);
   e->cls_name = cls_name ? cls_name : "RuntimeError";
   e->parent_cls_name = NULL;
@@ -260,9 +323,10 @@ sp_Exception *sp_exc_new(const char *cls_name, const char *msg) {if (msg != sp_e
      the tag byte at msg[-1], which only heap strings carry -- keeping a
      raise site's rodata literal would under-read one byte before it. */
   SP_GC_ROOT(e);
-  e->msg = sp_sprintf("%s", (msg && msg[0]) ? msg
-                            : (msg == sp_exc_no_msg ? ""
+  e->msg = sp_exc_msg_copy((msg && msg[0]) ? msg
+                            : (sp_exc_msg_empty_given(msg) ? ""
                                                     : (cls_name ? cls_name : "RuntimeError")));
+  if (msg == sp_exc_no_msg_frozen) ((unsigned char *)e->msg)[-1] = 0xfa;   /* `raise C, ""` */
   sp_gc_wb((void *)e);   /* same reason as sp_exc_new_sub_sized */
   return e;
 }
@@ -278,9 +342,13 @@ sp_bool sp_exc_eq(sp_Exception *a, sp_Exception *b) {
      the tag. We keep the rendered text in ->msg, so skip it for that class
      (#3098). Backtraces are empty here by design, see docs/limitations.md. */
   if (a->cls_name && strcmp(a->cls_name, "UncaughtThrowError") == 0) return 1;
-  return strcmp(a->msg ? a->msg : "", b->msg ? b->msg : "") == 0;
+  { const char *am = sp_exc_msg_text(a), *bm = sp_exc_msg_text(b);
+    size_t al = am ? sp_str_byte_len(am) : 0, bl = bm ? sp_str_byte_len(bm) : 0;
+    if (!am) am = "";
+    if (!bm) bm = "";
+    return al == bl && memcmp(am, bm, al) == 0; }
 }
-sp_Exception *sp_exc_new_sub(const char *cls_name, const char *parent_cls, const char *msg) {if (msg != sp_exc_no_msg) msg = sp_msg_heapify(msg); SP_GC_ROOT_STR(msg);
+sp_Exception *sp_exc_new_sub(const char *cls_name, const char *parent_cls, const char *msg) {if (!sp_exc_msg_empty_given(msg)) msg = sp_msg_heapify(msg); SP_GC_ROOT_STR(msg);
   sp_Exception *e = sp_exc_new(cls_name, msg);   /* empty msg already fell back to cls_name */
   e->parent_cls_name = parent_cls;
   sp_exc_syserr_init(e);
@@ -302,7 +370,7 @@ sp_Exception *sp_exc_dup(sp_Exception *e) {
 }
 /* Write the staged introspection values (receiver/key/value) into the carried
    exception, creating one when the raise had none (see sp_raise_cls). */
-void *sp_exc_apply_staged(const char *cls, const char *msg, void *obj) {if (msg != sp_exc_no_msg) msg = sp_msg_heapify(msg); SP_GC_ROOT_STR(msg);
+void *sp_exc_apply_staged(const char *cls, const char *msg, void *obj) {if (!sp_exc_msg_empty_given(msg)) msg = sp_msg_heapify(msg); SP_GC_ROOT_STR(msg);
   sp_Exception *e = (sp_Exception *)obj;
   if (!e) e = sp_exc_new(cls, msg);
   /* `obj` is a caller-supplied exception that may have been promoted long ago
@@ -320,10 +388,15 @@ int sp_exc_exit_status(void *obj) {
   return (e && e->result.tag == SP_TAG_INT) ? (int)e->result.v.i : 0;
 }
 /* Exception#exception(msg): a copy of the receiver carrying the new message. */
-sp_Exception *sp_exc_exception(sp_Exception *e, const char *msg) {SP_GC_ROOT(e);if (msg != sp_exc_no_msg) msg = sp_msg_heapify(msg); SP_GC_ROOT_STR(msg);
+sp_Exception *sp_exc_exception(sp_Exception *e, const char *msg) {SP_GC_ROOT(e);if (!sp_exc_msg_empty_given(msg)) msg = sp_msg_heapify(msg); SP_GC_ROOT_STR(msg);
   sp_Exception *n = sp_exc_dup(e);
   SP_GC_ROOT(n);
-  n->msg = sp_sprintf("%s", (msg && msg[0]) ? msg : (n->cls_name ? n->cls_name : "RuntimeError"));
+  /* an explicitly given empty message stays empty, frozen for a literal's,
+     as sp_exc_new keeps it */
+  n->msg = sp_exc_msg_copy((msg && msg[0]) ? msg
+                           : (sp_exc_msg_empty_given(msg) ? "" : (n->cls_name ? n->cls_name : "RuntimeError")));
+  if (msg == sp_exc_no_msg_frozen) ((unsigned char *)n->msg)[-1] = 0xfa;
+  n->msg_h = NULL;   /* the new message, not the receiver's handle */
   sp_gc_wb((void *)n);   /* same reason as sp_exc_new_sub_sized */
   return n;
 }
@@ -342,11 +415,31 @@ const char *sp_exc_class_name(volatile sp_Exception *ve) {
      matters. */
   return e && e->cls_name ? sp_str_dup_external(e->cls_name) : SPL("RuntimeError");
 }
+/* A copy of a message handle's String as it is now: #message answers a
+   String a caller keeps, and the handle's buffer moves as it grows. Sized
+   by the handle's length, so a NUL inside stays. */
+static const char *sp_exc_msg_handle_copy(sp_String *h) {
+  int64_t n = sp_String_length(h);
+  char *r = sp_str_alloc((size_t)n);
+  memcpy(r, sp_String_cstr(h), (size_t)n);
+  return r;
+}
+const char *sp_exc_msg_text(volatile sp_Exception *ve) {
+  sp_Exception *e = (sp_Exception *)ve;
+  if (!e) return NULL;
+  return e->msg_h ? sp_String_cstr((sp_String *)e->msg_h) : e->msg;
+}
+void *sp_exc_attach_msg(void *p, void *h) {
+  sp_Exception *e = (sp_Exception *)p;
+  if (e && h) { e->msg_h = h; sp_gc_wb((void *)e); }
+  return p;
+}
 const char *sp_exc_message(volatile sp_Exception *ve) {
   sp_Exception *e = (sp_Exception *)ve;
   /* a message never set (super(nil), Exception.new) defaults to the class
      name, as CRuby's Exception#message does */
   if (!e) return sp_str_empty;
+  if (e->msg_h) return sp_exc_msg_handle_copy((sp_String *)e->msg_h);
   if (e->msg) return e->msg;
   return e->cls_name ? sp_str_dup_external(e->cls_name) : sp_str_empty;
 }
@@ -753,8 +846,12 @@ const char *sp_exc_parent_of_name(const char *cls) {
        too deep to serialize raises, and `rescue JSON::ParserError` catches it
        in CRuby because it is a ParserError */
     {"JSON::NestingError",    "JSON::ParserError"},
+    /* the json package's errors descend from StandardError through JSONError, as
+       CRuby's do: an explicit `rescue StandardError` and `is_a?(StandardError)` say so (#7797) */
+    {"JSON::JSONError",       "StandardError"},
+    {"JSON::ParserError",     "JSON::JSONError"},
     /* a Float JSON has no spelling for (Infinity, NaN) is refused with it */
-    {"JSON::GeneratorError",  "StandardError"},
+    {"JSON::GeneratorError",  "JSON::JSONError"},
     /* IO::Buffer's errors (lib/sp_iobuffer.c raises them by name): all
        RuntimeError subclasses in CRuby, except MaskError < ArgumentError */
     {"IO::Buffer::AccessError",      "RuntimeError"},
@@ -798,6 +895,28 @@ const char *sp_exc_parent_of_name(const char *cls) {
      the whole family. */
   if (!strncmp(cls, "Errno::", 7)) return SPL("SystemCallError");
   return NULL;
+}
+/* Does the exception's class have the class-gated accessor `acc` at all?
+   The same classes the accessors' own gates admit. A program that adds a
+   method of that name to Object reaches it on every other exception, as
+   CRuby's lookup does. */
+sp_bool sp_exc_has_acc(sp_Exception *e, const char *acc) {
+  if (!e || !acc) return 0;
+  const char *c = e->cls_name;
+  if (!strcmp(acc, "receiver"))
+    return sp_exc_cls_matches(c, "NameError") || sp_exc_cls_matches(c, "KeyError") ||
+           sp_exc_cls_matches(c, "FrozenError");
+  static const char *const OWN[][2] = {
+    {"key", "KeyError"}, {"args", "NoMethodError"}, {"private_call?", "NoMethodError"},
+    {"reason", "LocalJumpError"}, {"exit_value", "LocalJumpError"},
+    {"tag", "UncaughtThrowError"}, {"value", "UncaughtThrowError"},
+    {"status", "SystemExit"}, {"success?", "SystemExit"},
+    {"signo", "SignalException"}, {"signm", "SignalException"},
+    {"name", "NameError"}, {"errno", "SystemCallError"}, {"result", "StopIteration"},
+  };
+  for (size_t i = 0; i < sizeof OWN / sizeof OWN[0]; i++)
+    if (!strcmp(acc, OWN[i][0])) return sp_exc_cls_matches(c, OWN[i][1]);
+  return 0;
 }
 /* NameError#name (NoMethodError inherits it): the carried missing name.
    Any other exception class raises CRuby's NoMethodError -- the receiver
@@ -869,6 +988,37 @@ const char *sp_exc_signm_acc(sp_Exception *e) {SP_GC_ROOT(e);
 
 /* `p e` on an exception instance: the same string #inspect answers, for the
    dispatch a container read or a `p` of a user subclass goes through (#3813). */
+/* The parts joined by their byte lengths, a NUL in one kept: the message of an exception
+   can hold one (#7556), which a %s would cut. Each part is a Spinel String. The copy is
+   made with no collection, so the parts need no root (as sp_msg_heapify). */
+const char *sp_exc_cat(int n, ...) {
+  const char *parts[8]; size_t lens[8]; size_t total = 0;
+  va_list ap; va_start(ap, n);
+  for (int i = 0; i < n && i < 8; i++) { parts[i] = va_arg(ap, const char *); lens[i] = sp_str_byte_len(parts[i]); total += lens[i]; }
+  va_end(ap);
+  char *r = sp_str_alloc_nogc(total), *w = r;
+  for (int i = 0; i < n && i < 8; i++) { memcpy(w, parts[i], lens[i]); w += lens[i]; }
+  return r;
+}
+/* "<Class>: <msg>" and "<msg> (<Class>)": the class name is read from the exception
+   itself (no allocation), msg is the Spinel String the caller computed first, and the
+   copy runs with no collection, so no argument needs a root. */
+const char *sp_exc_full_text(volatile sp_Exception *ve, const char *msg) {
+  sp_Exception *e = (sp_Exception *)ve;
+  const char *cn = e && e->cls_name ? e->cls_name : "RuntimeError";
+  size_t lc = strlen(cn), lm = sp_str_byte_len(msg);
+  char *r = sp_str_alloc_nogc(lc + 2 + lm);
+  memcpy(r, cn, lc); memcpy(r + lc, ": ", 2); memcpy(r + lc + 2, msg, lm);
+  return r;
+}
+const char *sp_exc_detailed_text(volatile sp_Exception *ve, const char *msg) {
+  sp_Exception *e = (sp_Exception *)ve;
+  const char *cn = e && e->cls_name ? e->cls_name : "RuntimeError";
+  size_t lc = strlen(cn), lm = sp_str_byte_len(msg);
+  char *r = sp_str_alloc_nogc(lm + 2 + lc + 1);
+  memcpy(r, msg, lm); memcpy(r + lm, " (", 2); memcpy(r + lm + 2, cn, lc); r[lm + 2 + lc] = ')';
+  return r;
+}
 const char *sp_exc_inspect(void *p) {
   sp_Exception *e = (sp_Exception *)p;
   if (!e) return SPL("nil");
@@ -877,7 +1027,7 @@ const char *sp_exc_inspect(void *p) {
   SP_GC_ROOT(msg);
   const char *cn = sp_exc_class_name(e);
   SP_GC_ROOT(cn);
-  return (!msg || !*msg) ? cn : sp_sprintf("#<%s: %s>", cn, msg);
+  return (!msg || !sp_str_byte_len(msg)) ? cn : sp_exc_cat(5, SPL("#<"), cn, SPL(": "), msg, SPL(">"));
 }
 
 const char *(*sp_user_exc_to_s_fn)(sp_Exception *) = NULL;
@@ -910,4 +1060,69 @@ SP_NORETURN void sp_raise_kw_error(const char *kind, sp_int count, const char *n
   const char *msg = sp_sprintf("%s keyword%s: %s", kind, count > 1 ? "s" : "", names);
   SP_GC_ROOT_STR(msg);
   sp_raise_cls("ArgumentError", msg);
+}
+
+/* Exception#is_a?(ClassName): checks class name and known hierarchy. */
+sp_int sp_exc_is_a(volatile sp_Exception *ve, const char *cn) {
+  sp_Exception *e = (sp_Exception *)ve;
+  if (!e || !cn) return 0;
+  /* one authority for "does this level answer to cn", modules included: the
+     matcher rescue arms use. Without it #is_a?(SomeModule) said false where
+     `rescue SomeModule` said yes (#3366 follow-up). */
+  cn = sp_exc_canonical_name(cn);
+  if (sp_exc_cls_matches(e->cls_name, cn)) return 1;
+  /* find the exception's class chain and check if cn appears in it */
+  const char *cls = e->cls_name;
+  int used_parent = 0;
+  for (int depth = 0; depth < 20 && cls; depth++) {
+    if (!strcmp(cls, cn)) return 1;
+    const char *parent = sp_exc_parent_of_name(cls);
+    if (!parent) {
+      /* unknown (user) class: try user hierarchy first */
+      if (sp_user_exc_parent_fn) { parent = sp_user_exc_parent_fn(cls); }
+      if (!parent) {
+        if (!used_parent && e->parent_cls_name) {
+          cls = e->parent_cls_name;
+          used_parent = 1;
+          continue;
+        }
+        if (!strcmp(cn, "Exception")) return 1;
+        if (!strcmp(cn, "Object") || !strcmp(cn, "BasicObject")) return 1;
+        break;
+      }
+    }
+    cls = parent;
+  }
+  if (!strcmp(cn, "Object") || !strcmp(cn, "BasicObject") || !strcmp(cn, "Kernel")) return 1;
+  return 0;
+}
+
+/* Each of the fixed-depth handler stacks in spinel_rt.h fails the same way when
+   a program nests deeper than its array holds; see the comment there. */
+SP_NORETURN SP_COLD void sp_stack_too_deep(void) {
+  fputs("stack level too deep (SystemStackError)\n", stderr);
+  exit(1);
+}
+
+/* The per-fiber handler context (lib/sp_exc_ctx.h): the operations that touch
+   only the context itself. */
+void *sp_exc_ctx_new(void) { return calloc(1, sizeof(sp_exc_ctx_t)); }
+void sp_exc_ctx_free(void *p) {
+  sp_exc_ctx_t *x = (sp_exc_ctx_t *)p;
+  if (!x) return;
+  free(x->es); free(x->em); free(x->ec); free(x->eo);
+  free(x->cs); free(x->ct); free(x->ctk); free(x->cv); free(x->cet);
+  free(x->bs); free(x->bv); free(x->bser); free(x->bet); free(x->shand);
+  free(x->rrf); free(x->rrem); free(x->rrcm); free(x->rrbm);
+  free(x->erm); free(x->ersm); free(x->crm); free(x);
+}
+void sp_exc_ctx_mark(void *p) {            /* GC: mark a suspended fiber's carried exc objects */
+  sp_exc_ctx_t *x = (sp_exc_ctx_t *)p;
+  if (!x) return;
+  for (int i = 0; i < x->en; i++) if (x->eo[i]) sp_gc_mark(x->eo[i]);
+  /* a suspended fiber's proc-return chain (nodes on its preserved C stack) may
+     carry an in-flight return value; mark each so it survives a GC during yield. */
+  for (sp_proc_home *h = x->prhead; h; h = h->prev) sp_mark_rbval(h->val);
+  for (int i = 0; i < x->bn; i++) sp_mark_rbval(x->bv[i]);   /* carried break scopes */
+  for (int i = 0; i < x->rn; i++) if (x->shand[i]) sp_gc_mark(x->shand[i]);  /* handled excs */
 }
