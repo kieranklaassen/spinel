@@ -1,0 +1,35 @@
+An append raises on a String local a slice or element read left nil
+
+    def tail(s)
+      t = s[10, 2]
+      t << "a"
+      t << "b"
+      t
+    end
+    p tail("abc")
+
+printed nil; CRuby raises NoMethodError at the first append. Two
+appends make t an sp_String handle, and the slice past the end left it
+NULL. cplan_nil plans a nil test ahead of a call only for a nil the
+program writes, so that a receiver that is never nil does not pay for
+one: the append ran on the NULL handle, sp_String_append_bin did
+nothing there, and the read after it answered nil. An element read
+(`a[5]`), a match that fails (`s[/x+/]`), concat, an interpolation and
+an append that is its method's value went the same way.
+
+For an append to a local's handle that may be nil from a nil the fact
+knows and cannot bound, cplan_nil now answers CN_RAISE_IN_CALL, and
+str_mutate_append_bang_arms emits the statement's first link through
+sp_String_append_recv (sp_String_append_recv_n for an interpolation's
+parts): a wrapper that tests the handle once the operand has run,
+raises for NULL, and calls sp_String_append_bin. `&.` and a guarded
+append keep their C. So does a program that gives nil an answer of its
+own: a method of the name or a method_missing, or either name as a
+Symbol anywhere (an alias, alias_method, define_method, send), which
+cplan_nil_program_answers asks once a name. A miss whose answer
+carries no nil fact (strip!, ENV, gets at the end of input) keeps its
+C too, and stays silent.
+
+Test: test/string_handle_append_miss_nil.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

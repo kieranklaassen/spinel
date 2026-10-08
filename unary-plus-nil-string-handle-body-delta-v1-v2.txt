@@ -1,0 +1,26 @@
+--- unary-plus-nil-string-handle-body.md
++++ unary-plus-nil-string-handle-body-v2.md
+@@ -2,6 +2,8 @@
+ 
+ ## What this changes
+ 
++Held with the pull request under it, not for opening while upstream's issue on the codegen nil helpers (issue 7444) is open: this change writes a nil test ahead of a call at two emitters.
++
+ `+t` on a String local the program set to nil answers nil where its value is written to another local, and CRuby raises NoMethodError. The fix adds nothing to the codegen nil helpers (`emit_nil_target_stmt`, `emit_nil_target_call`): the test is written at the two places that emit the call, as the statement expression the `--share-strings` route already writes there. A `+t` on a local that is never nil compiles to the same C, and one that may be nil pays nothing a call by callgrind.
+ 
+ ```ruby
+@@ -21,7 +23,7 @@
+ 
+ Both now go through `emit_strbuf_uplus`, which tests the handle first where the nil fact says the operand may be nil, as `emit_strbuf_route` does under `--share-strings`, and keeps the bare call for one that is never nil. A program that gives nil an answer to `+@` itself keeps its C too: a method of that name or a `method_missing`, or either name spelled as a Symbol anywhere (an alias, `alias_method`, `define_method`, `send`), which `cplan_nil_program_answers` (`src/call_plan.c`) asks.
+ 
+-Depends on the pull request "An append raises on a String local that a builtin's miss left nil": `cplan_nil_program_answers` comes from it, and this is one commit on top of it.
++Depends on the pull request "An append raises on a String local a slice or element read left nil": `cplan_nil_program_answers` comes from it, and this is one commit on top of it.
+ 
+ Cost, by callgrind, the commit under this one and this one. 5,000,000 `x = +t` on a local that may be nil: 30,666,679 and 30,666,680 instructions with gcc, 50,626,611 and 50,626,641 with clang, 1 and 30 more for the whole run; under `--share-strings` the C is identical. 5,000,000 `x, n = +t, 1`: 1 more with gcc and 12 with clang for the run, in both builds. On a local that is never nil the C is identical. `tools/cident.sh` against the commit under this one: 6,513 identical, 1 differ (this test), 0 refusal changes, 0 refused by both, of 6,514.
+ 
+@@ -38,4 +40,4 @@
+ - [ ] New tests have `.expected` files that match CRuby 4.0 run with `--enable-frozen-string-literal`
+ - [x] Values past 2^31 are marked `# spinel: int64` (the tests have none)
+ - [ ] If optcarrot's generated C changed: callgrind numbers, checksum 59662
+-- [x] Depends on: the pull request "An append raises on a String local that a builtin's miss left nil"
++- [x] Depends on: the pull request "An append raises on a String local a slice or element read left nil"

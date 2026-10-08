@@ -1,0 +1,35 @@
+diff --git a/src/call_plan.c b/src/call_plan.c
+index d59898a33..df521b6c5 100644
+--- a/src/call_plan.c
++++ b/src/call_plan.c
+@@ -1793,7 +1793,7 @@ static int cplan_nil_user_method(Compiler *c, const char *name) {
+    name spelled as a Symbol anywhere (an alias, alias_method, define_method,
+    send)? Coarse, and safe: for such a program a call site adds no
+    NoMethodError of its own for a nil receiver. */
+-int cplan_nil_program_answers(Compiler *c, const char *name) {
++static int cplan_nil_program_answers_walk(Compiler *c, const char *name) {
+   const NodeTable *nt = c->nt;
+   if (cplan_nil_user_method(c, name) || cplan_nil_user_method(c, "method_missing")) return 1;
+   NT_FOREACH_KIND(nt, NK_SymbolNode, s) {
+@@ -1803,6 +1803,21 @@ int cplan_nil_program_answers(Compiler *c, const char *name) {
+   return 0;
+ }
+ 
++/* The walk is over every Symbol of the program, so its answer for a name is
++   kept: asked at each such call site, it is made once. */
++int cplan_nil_program_answers(Compiler *c, const char *name) {
++  static const Compiler *memo_c; static char memo_name[4][16]; static int memo[4], nmemo;
++  if (memo_c != c) { memo_c = c; nmemo = 0; }
++  for (int i = 0; i < nmemo; i++)
++    if (sp_streq(memo_name[i], name)) return memo[i];
++  int yes = cplan_nil_program_answers_walk(c, name);
++  if (nmemo < 4 && strlen(name) < sizeof memo_name[0]) {
++    strcpy(memo_name[nmemo], name);
++    memo[nmemo++] = yes;
++  }
++  return yes;
++}
++
+ int cplan_nil_written(int why) {
+   return why == NFW_NIL || why == NFW_NO_ELSE || why == NFW_SAFE_NAV || why == NFW_UNSET || why == NFW_ELEM_NIL;
+ }
