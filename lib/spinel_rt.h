@@ -1162,8 +1162,14 @@ static const char *sp_str_dedup(const char *s) {
   SP_HEAP_UNLOCK();
   if (hit) return hit;
   /* byte_len-aware copy so an embedded NUL is preserved (sp_str_dup_external
-     would truncate at the first NUL), then freeze it to the immortal 0xf1. */
-  const char *f = sp_str_freeze_val(sp_str_from_bytes(s, sp_str_byte_len(s)));
+     would truncate at the first NUL), then freeze it to the immortal 0xf1.
+     A String just built is held by nothing else, so the copy is allocated
+     with no collection first (sp_str_alloc_nogc): one here freed the bytes
+     being copied. */
+  size_t n = sp_str_byte_len(s);
+  char *c = sp_str_alloc_nogc(n);
+  if (n) memcpy(c, s, n);
+  const char *f = sp_str_freeze_val(c);
   SP_HEAP_LOCK();
   const char *hit2 = sp_fstr_lookup(f);  /* another thread may have won the race */
   if (hit2) { SP_HEAP_UNLOCK(); return hit2; }
