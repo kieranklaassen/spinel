@@ -4307,7 +4307,7 @@ int emit_tap_then_expr(Compiler *c, int id, Buf *b) {
     CLoop loop = c_loop_enter(-1);
     emit_indent(g_pre, din); buf_puts(g_pre, "do {\n");
     int bi = din + 1; g_indent = bi;
-    emit_iter_step_body(c, block, g_pre, bi);
+    emit_iter_step_body(c, block, g_pre, bi, 0);
     g_indent = din;
     emit_indent(g_pre, din); buf_puts(g_pre, "} while (0);\n");
     c_loop_leave(loop);

@@ -1,0 +1,16 @@
+2.44.2. File#each_line
+2.44.2. File#each
+a.bbbbbb.c. File#each_line chomp
+"a"."\n"."b""b"."b"."b"."\n"."c"."\n". File#each_char
+97.10.9898.98.98.10.99.10. File#each_byte
+97.10.9898.98.98.10.99.10. File#each_codepoint
+8 Dir#each
+5 Dir#each_child
+8 Dir#each_entry
+1.2222.3. scan
+1.2222.3. scan as a value
+121 File#each_line, a local
+3 Dir#each_child, a local
+121 scan, a local
+242 late: File#each_line under a begin
+tt late: Dir#each_child under a begin

@@ -3590,15 +3590,21 @@ int emit_iter_step_stmts(Compiler *c, int body, Buf *b, int indent, const char *
 
 /* A step's whole body as statements, its answer dropped, inside the
    iterator's own C loop (a `next` is its `continue`): the block's locals
-   reset, then the body, with its own redo label after that setup. */
-void emit_iter_step_body(Compiler *c, int block, Buf *b, int indent) {
+   reset, then the body, with its own redo label after that setup. With
+   `own_loop` the caller wrote that loop and has not recorded it: a body
+   with a `next` records it here, as emit_iter_loop_stmts does. */
+void emit_iter_step_body(Compiler *c, int block, Buf *b, int indent, int own_loop) {
   const NodeTable *nt = c->nt;
   int body = nt_ref(nt, block, "body");
   int bn = 0; const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
+  int own_next = own_loop && iter_body_records_loop(c, body);
+  CLoop loop = { 0 };
+  if (own_next) loop = c_loop_enter(body);
   emit_block_locals_reset(c, block, b, indent);
   int rd_lbl = emit_iter_step_stmts(c, body, b, indent, NULL);
   if (bn > 0) emit_stmt(c, bb[bn - 1], b, indent);
   if (rd_lbl) g_redo_depth--;
+  if (own_next) c_loop_leave(loop);
 }
 
 /* A step's body inside the iterator's own C loop, through emit_stmts (the
@@ -3607,13 +3613,17 @@ void emit_iter_step_body(Compiler *c, int block, Buf *b, int indent) {
    records the loop as emit_loop_body records its own: that `next` is this
    loop's continue, so it pops the frames and runs the ensures opened
    inside the body and no others, an ensure's deferred `next` ends in that
-   continue, and a `next v` is not the value of an enclosing block. */
-void emit_iter_loop_stmts(Compiler *c, int body, Buf *b, int indent) {
+   continue, and a `next v` is not the value of an enclosing block.
+   A `redo` under a rescue modifier would leave the modifier's frame as
+   such a `next` does; with `mod_redo` 0 a body with a jump under a rescue
+   modifier gets no label, and its redo is refused. */
+void emit_iter_loop_stmts(Compiler *c, int body, Buf *b, int indent, int mod_redo) {
   int own_next = iter_body_records_loop(c, body);
   CLoop loop = { 0 };
   if (own_next) loop = c_loop_enter(body);
   int lbl = 0;
   if (body >= 0 && subtree_has_own_redo(c->nt, body) &&
+      (mod_redo || !jump_under_rescue_mod(c->nt, body, 0)) &&
       g_redo_depth < (int)(sizeof g_redo_stack / sizeof g_redo_stack[0])) {
     lbl = ++g_tmp;
     g_redo_owner[g_redo_depth] = body;
@@ -4035,7 +4045,12 @@ int emit_each_with_index_terminal(Compiler *c, int id, Buf *b) {
      instead of going through emit_stmts, so reset explicitly) */
   if (block >= 0) emit_block_locals_reset(c, block, g_pre, din);
   if (is_each) {
+    /* a body with a `next` records this loop, as emit_iter_loop_stmts does */
+    int own_next = iter_body_records_loop(c, body);
+    CLoop loop = { 0 };
+    if (own_next) loop = c_loop_enter(body);
     for (int j = 0; j < bn; j++) emit_stmt(c, bb[j], g_pre, din);
+    if (own_next) c_loop_leave(loop);
   }
   else if (collect_pair && block < 0) {   /* to_a / entries */
     emit_indent(g_pre, din); buf_printf(g_pre, "sp_PolyArray_push(_t%d, ", tres);
@@ -5518,7 +5533,7 @@ int emit_with_index_expr(Compiler *c, int id, Buf *b) {
     if (clv1 && clv1->type == TY_POLY) buf_printf(g_pre, "lv_%s = sp_box_int(_t%d);\n", p1, tidx);
     else buf_printf(g_pre, "lv_%s = _t%d;\n", p1, tidx);
   }
-  if (is_each) emit_iter_step_body(c, block, g_pre, innerIndent);
+  if (is_each) emit_iter_step_body(c, block, g_pre, innerIndent, 1);
   else {
     IterStep st; emit_iter_step_open(c, block, !is_map, innerIndent, &st);
     int saveInd = g_indent; g_indent = innerIndent;

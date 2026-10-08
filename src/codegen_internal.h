@@ -1312,8 +1312,8 @@ int fold_body_has_next(Compiler *c, int node);  /* a `next` of the body's own, n
 int iter_body_records_loop(Compiler *c, int body);  /* such a `next`, and no jump under a rescue modifier */
 int iter_step_needs_frame(Compiler *c, int block);
 int emit_iter_step_stmts(Compiler *c, int body, Buf *b, int indent, const char *sep);
-void emit_iter_step_body(Compiler *c, int block, Buf *b, int indent);
-void emit_iter_loop_stmts(Compiler *c, int body, Buf *b, int indent);
+void emit_iter_step_body(Compiler *c, int block, Buf *b, int indent, int own_loop);
+void emit_iter_loop_stmts(Compiler *c, int body, Buf *b, int indent, int mod_redo);
 /* One step of a builtin iterator's block (emit_iter_step_open). */
 typedef struct { int block, want_poly, slot; TyKind slot_ty; } IterStep;
 void emit_iter_step_open(Compiler *c, int block, int want_poly, int indent, IterStep *st);
