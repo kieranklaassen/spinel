@@ -1,0 +1,26 @@
+A String handle local reads as nil after a builtin answers nil
+
+    def next_line
+      line = gets
+      return "end of input" if line.nil?
+      line << "!"
+      line << "?"
+      line
+    end
+    puts next_line
+
+died with SIGSEGV at the end of the input; CRuby prints end of input.
+The two appends make line an sp_String handle, gets leaves it NULL, and
+its read tests the handle only where the nil fact says the local may be
+nil. nf_call (analyze_nil.c) took every String a builtin call answers
+as not nil, except a container's picks and a String's slice. It now
+answers may-be-nil for a String's bang method that changed nothing (the
+table's BOPF_SELF_OR_NIL), a MatchData's [] and Regexp.last_match(n),
+gets, and an IO's getc and read(n); bsearch joins the picks. None is a
+nil the program writes, so no call gains a guard: only the handle's
+read changes, and only where the program tests the local before it
+writes through it (nil_fact_unraised keeps every other read as it was).
+
+Test: test/string_handle_local_builtin_nil.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
