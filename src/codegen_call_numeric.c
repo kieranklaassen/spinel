@@ -361,7 +361,9 @@ int emit_call_bigint_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
     }
     /* Bignum modulo/%/remainder/divmod/#[]/modular-pow (#2594) */
     if ((is_modulo_alias(name)) && argc == 1) {
-      buf_printf(b, "sp_bigint_mod(%s, ", r); emit_bigint_operand(c, argv[0], b); buf_puts(b, ")");
+      int tn = bigint_nil_open(c, -1, argv[0], "sp_Bigint *", b);
+      buf_printf(b, "sp_bigint_mod(%s, ", r); emit_bigint_opnd(c, argv[0], tn, 1, b); buf_puts(b, ")");
+      bigint_nil_close(tn, "SP_INT_NIL_CK", name, b);
       free(rs.p); return 1;
     }
     if (sp_streq(name, "remainder") && argc == 1) {
@@ -374,12 +376,14 @@ int emit_call_bigint_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
          collect: a fresh one (a literal divisor's sp_bigint_new_int, a
          computed receiver) was swept, and the division read its cleared
          value as a zero divisor */
+      int tn = bigint_nil_open(c, -1, argv[0], "sp_PolyArray *", b);
       buf_printf(b, "({ sp_Bigint *_t%d = %s; SP_GC_ROOT(_t%d); sp_Bigint *_t%d = ", td, r, td, tb2);
-      emit_bigint_operand(c, argv[0], b);
+      emit_bigint_opnd(c, argv[0], tn, 1, b);
       buf_printf(b, "; SP_GC_ROOT(_t%d); sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);"
                     " sp_PolyArray_push(_t%d, sp_box_bigint(sp_bigint_div(_t%d, _t%d)));"
                     " sp_PolyArray_push(_t%d, sp_box_bigint(sp_bigint_mod(_t%d, _t%d))); _t%d; })",
                  tb2, to2, to2, to2, td, tb2, to2, td, tb2, to2);
+      bigint_nil_close(tn, "SP_INT_NIL_CK", name, b);
       free(rs.p); return 1;
     }
     if (sp_streq(name, "[]") && argc == 1 && repr_of(c, argv[0]).range == TY_INT) {
@@ -430,8 +434,10 @@ int emit_call_bigint_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
       free(rs.p); return 1;
     }
     if (sp_streq(name, "pow") && argc == 2) {
+      int tn = bigint_nil_open(c, -1, argv[1], "sp_Bigint *", b);
       buf_printf(b, "sp_bigint_powmod(%s, ", r); emit_int_expr(c, argv[0], b); buf_puts(b, ", ");
-      emit_bigint_operand(c, argv[1], b); buf_puts(b, ")");
+      emit_bigint_opnd(c, argv[1], tn, 1, b); buf_puts(b, ")");
+      bigint_nil_close(tn, NULL, "sp_raise_cls(\"TypeError\", \"Integer#pow() 2nd argument not allowed unless all arguments are integers\")", b);
       free(rs.p); return 1;
     }
     /* Bignum#div(Rational): the floor of the exact quotient. The Bignum
@@ -457,8 +463,10 @@ int emit_call_bigint_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
     }
     if ((sp_streq(name, "div") || sp_streq(name, "gcd") || sp_streq(name, "lcm")) && argc == 1) {
       const char *fn = sp_streq(name, "div") ? "div" : name;
+      int tn = sp_streq(name, "div") ? bigint_nil_open(c, -1, argv[0], "sp_Bigint *", b) : 0;
       buf_printf(b, "sp_bigint_%s(%s, ", fn, r);
-      emit_bigint_operand(c, argv[0], b); buf_puts(b, ")");
+      emit_bigint_opnd(c, argv[0], tn, 1, b); buf_puts(b, ")");
+      bigint_nil_close(tn, "SP_INT_NIL_CK", name, b);
       free(rs.p); return 1;
     }
     if (sp_streq(name, "ceildiv") && argc == 1) {
@@ -468,8 +476,8 @@ int emit_call_bigint_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
       free(rs.p); return 1;
     }
     if (is_bits_query(name) && argc == 1) {
-      int t = ++g_tmp;
-      buf_printf(b, "({ sp_Bigint *_t%d = ", t); emit_bigint_operand(c, argv[0], b);
+      int t = ++g_tmp, tn = bigint_nil_open(c, -1, argv[0], "int", b);
+      buf_printf(b, "({ sp_Bigint *_t%d = ", t); emit_bigint_opnd(c, argv[0], tn, 1, b);
       /* the receiver expression below is unsequenced with this operand and can
          allocate; no reproducer, the rule (#4049) is the reason */
       buf_printf(b, "; SP_GC_ROOT(_t%d); ", t);
@@ -479,6 +487,7 @@ int emit_call_bigint_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
         buf_printf(b, "(sp_bigint_sign(sp_bigint_and(%s, _t%d)) != 0); })", r, t);
       else
         buf_printf(b, "(sp_bigint_sign(sp_bigint_and(%s, _t%d)) == 0); })", r, t);
+      bigint_nil_close(tn, NULL, "sp_raise_nil_to_int(1)", b);
       free(rs.p); return 1;
     }
     if (sp_streq(name, "gcdlcm") && argc == 1) {
@@ -501,7 +510,9 @@ int emit_call_bigint_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
       buf_printf(b, "sp_brat_from_bigint(%s)", r); free(rs.p); return 1;
     }
     if (sp_streq(name, "quo") && argc == 1) {
-      buf_printf(b, "sp_box_brat(%s, ", r); emit_bigint_operand(c, argv[0], b); buf_puts(b, ")");
+      int tn = bigint_nil_open(c, -1, argv[0], "sp_RbVal", b);
+      buf_printf(b, "sp_box_brat(%s, ", r); emit_bigint_opnd(c, argv[0], tn, 1, b); buf_puts(b, ")");
+      bigint_nil_close(tn, NULL, "sp_raise_cls(\"TypeError\", \"nil can't be coerced into Rational\")", b);
       free(rs.p); return 1;
     }
     free(rs.p);

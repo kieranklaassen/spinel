@@ -12492,9 +12492,13 @@ static int emit_ivar_cvar_write_stmt(Compiler *c, int id, Buf *b, int indent, co
     if (vt == TY_BIGINT && op && is_add_sub_mul(op)) {
       const char *fn = sp_streq(op, "+") ? "sp_bigint_add"
                      : sp_streq(op, "-") ? "sp_bigint_sub" : "sp_bigint_mul";
-      buf_printf(b, "%s = %s(%s, ", ref, fn, ref);
-      emit_bigint_operand_ext(c, nt_ref(nt, id, "value"), b);
-      buf_puts(b, ");\n");
+      buf_printf(b, "%s = ", ref);
+      int tn = bigint_nil_open(c, -1, nt_ref(nt, id, "value"), "sp_Bigint *", b);
+      buf_printf(b, "%s(%s, ", fn, ref);
+      emit_bigint_opnd(c, nt_ref(nt, id, "value"), tn, 1, b);
+      buf_puts(b, ")");
+      bigint_nil_close(tn, "SP_INT_NIL_CK", op, b);
+      buf_puts(b, ";\n");
     }
     /* `@t += n` / `@t -= n` on a Time slot: the same arm the local form
        takes (a Time is a struct; the raw C operator below cannot add to it) */

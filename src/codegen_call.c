@@ -608,6 +608,42 @@ void emit_bigint_operand(Compiler *c, int node, Buf *b) {
 /* Same, reachable from the other emitters (the ivar op-assign). */
 void emit_bigint_operand_ext(Compiler *c, int node, Buf *b) { emit_bigint_operand(c, node, b); }
 
+/* The Integer operand of a Bignum operation, where it can hold its slot's
+   nil. emit_bigint_operand makes that nil the NULL a Bignum slot holds, and
+   an operation reads through NULL: `2**70 + n`, `2**70 == n`, `2**70 < n`
+   and `(2**70).div(n)` died with signal 11 for an `n` that was nil. Here the
+   operand is kept in a temp as it is read and converted as the number it
+   holds (emit_bigint_opnd), so the operation runs, with its operands in the
+   order they ran in; what a nil answers comes after it (bigint_nil_close).
+   bigint_nil_open declares the temps, _tN for the receiver and the next for
+   the argument, and the operation's value, and answers N: 0 where neither
+   operand can hold nil, and there the C is unchanged. */
+static int bigint_opnd_holds_nil(Compiler *c, int node) {
+  if (node < 0) return 0;
+  Repr r = repr_of(c, node);
+  return !r.big && r.as_ty == TY_INT && call_returns_nullable_int(c, node);
+}
+int bigint_nil_open(Compiler *c, int recv, int arg, const char *cty, Buf *b) {
+  if (!bigint_opnd_holds_nil(c, recv) && !bigint_opnd_holds_nil(c, arg)) return 0;
+  int tn = ++g_tmp; ++g_tmp;
+  buf_printf(b, "({ sp_int _t%d = 0, _t%d = 0; %s _t%dv = ", tn, tn + 1, cty, tn);
+  return tn;
+}
+void emit_bigint_opnd(Compiler *c, int node, int tn, int at, Buf *b) {
+  if (!tn || !bigint_opnd_holds_nil(c, node)) { emit_bigint_operand(c, node, b); return; }
+  buf_printf(b, "sp_bigint_new_int(_t%d = ", tn + at);
+  emit_expr(c, node, b);
+  buf_puts(b, ")");
+}
+/* `ck` is the runtime's test of two Integer operands (SP_INT_NIL_CK and its
+   kin) and `op` their operator; with no `ck`, `op` is the C a nil runs. */
+void bigint_nil_close(int tn, const char *ck, const char *op, Buf *b) {
+  if (!tn) return;
+  if (ck) buf_printf(b, "; %s(_t%d, _t%d, \"%s\")", ck, tn, tn + 1, op);
+  else buf_printf(b, "; if (SP_UNLIKELY(_t%d == SP_INT_NIL || _t%d == SP_INT_NIL)) %s", tn, tn + 1, op);
+  buf_printf(b, "; _t%dv; })", tn);
+}
+
 /* Emit re_compile's internal-flag argument from Regexp.new/compile's optional
    second argument: an Integer of public option bits (translated), a truthy
    value meaning IGNORECASE, or absent meaning no flags (#3055). */
@@ -12853,11 +12889,15 @@ static int emit_case_eq_call(Compiler *c, int id, Buf *b) {
         emit_float_bigint_cmp(c, recv, argv[0], eq ? "==" : "!=", b)) return 1;
     if ((rt == TY_BIGINT || a0 == TY_BIGINT) &&
         bigint_cmp_operand_ok(rt) && bigint_cmp_operand_ok(a0)) {
+      /* a nil is equal to no Bignum */
+      int tn = bigint_nil_open(c, recv, argv[0], "int", b);
+      char ans[32]; snprintf(ans, sizeof ans, "_t%dv = %d", tn, eq ? 0 : 1);
       buf_printf(b, "(sp_bigint_cmp(");
-      emit_bigint_operand(c, recv, b);
+      emit_bigint_opnd(c, recv, tn, 0, b);
       buf_puts(b, ", ");
-      emit_bigint_operand(c, argv[0], b);
+      emit_bigint_opnd(c, argv[0], tn, 1, b);
       buf_printf(b, ") %s 0)", eq ? "==" : "!=");
+      bigint_nil_close(tn, NULL, ans, b);
       c->args_in_call = recv;
       return 1;
     }
@@ -13736,11 +13776,13 @@ static int emit_array_arith_call(Compiler *c, int id, Buf *b) {
       }
       const char *bfn = bigint_arith_fn(name);
       if (bfn) {
+        int tn = bigint_nil_open(c, recv, argv[0], "sp_Bigint *", b);
         buf_printf(b, "%s(", bfn);
-        emit_bigint_operand(c, recv, b);
+        emit_bigint_opnd(c, recv, tn, 0, b);
         buf_puts(b, ", ");
-        emit_bigint_operand(c, argv[0], b);
+        emit_bigint_opnd(c, argv[0], tn, 1, b);
         buf_puts(b, ")");
+        bigint_nil_close(tn, "SP_INT_NIL_CK", name, b);
         return 1;
       }
     }

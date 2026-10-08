@@ -538,11 +538,13 @@ int emit_call_compare_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
         emit_float_bigint_cmp(c, recv, argv[0], name, b)) return 1;
     if ((rt == TY_BIGINT || repr_of(c, argv[0]).big) &&
         bigint_cmp_operand_ok(rt) && bigint_cmp_operand_ok(comp_ntype(c, argv[0]))) {
+      int tn = bigint_nil_open(c, recv, argv[0], "int", b);
       buf_printf(b, "(sp_bigint_cmp(");
-      emit_bigint_operand(c, recv, b);
+      emit_bigint_opnd(c, recv, tn, 0, b);
       buf_puts(b, ", ");
-      emit_bigint_operand(c, argv[0], b);
+      emit_bigint_opnd(c, argv[0], tn, 1, b);
       buf_printf(b, ") %s 0)", name);
+      bigint_nil_close(tn, "SP_INT_NIL_CMP_CK", name, b);
       return 1;
     }
     if (ty_is_numeric(rt)) {
