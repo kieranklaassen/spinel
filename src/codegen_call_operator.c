@@ -1275,6 +1275,13 @@ int emit_call_operator_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
      (#3767). Ahead of the poly arithmetic below, whose ops all answer boxed. */
   if (recv >= 0 && argc == 1 && rt == TY_POLY && sp_streq(name, "fdiv") &&
       repr_of(c, id).as_ty == TY_FLOAT) {
+    if (boxed_operand_unholds_recv(c, recv, argv[0])) {
+      int se = 0;
+      int th = poly_binop_recv_temp(c, recv, argv[0], b, &se);
+      buf_printf(b, "sp_poly_fdiv(_t%d, ", th); emit_boxed(c, argv[0], b);
+      buf_puts(b, se ? "); })" : ")");
+      return 1;
+    }
     buf_puts(b, "sp_poly_fdiv("); emit_boxed(c, recv, b); buf_puts(b, ", ");
     emit_boxed(c, argv[0], b); buf_puts(b, ")");
     return 1;
@@ -1344,6 +1351,14 @@ int emit_call_operator_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
         int th = hold_operand_pre(c, recv, TY_POLY, 1, ++g_tmp, 1);
         buf_printf(&pcall, "%s(_t%d, ", pfn, th); emit_boxed(c, argv[0], &pcall); buf_puts(&pcall, ")");
       }
+      else if (boxed_operand_unholds_recv(c, recv, argv[0])) {
+        /* the operand's box is the allocation: the receiver goes ahead of
+           it into a rooted temp all the same */
+        int se = 0;
+        int th = poly_binop_recv_temp(c, recv, argv[0], &pcall, &se);
+        buf_printf(&pcall, "%s(_t%d, ", pfn, th); emit_boxed(c, argv[0], &pcall);
+        buf_puts(&pcall, se ? "); })" : ")");
+      }
       else {
         buf_printf(&pcall, "%s(", pfn); emit_boxed(c, recv, &pcall);
         buf_puts(&pcall, ", "); emit_boxed(c, argv[0], &pcall); buf_puts(&pcall, ")");
@@ -1381,6 +1396,13 @@ int emit_call_operator_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
     if (cfn && repr_of(c, id).kind == RK_BOXED && user_defines_or_reads(c, name)) {
       buf_printf(b, "sp_poly_relop_v(\"%s\", ", name); emit_boxed(c, recv, b); buf_puts(b, ", ");
       emit_boxed(c, argv[0], b); buf_puts(b, ")");
+      return 1;
+    }
+    if (cfn && boxed_operand_unholds_recv(c, recv, argv[0])) {
+      int se = 0;
+      int th = poly_binop_recv_temp(c, recv, argv[0], b, &se);
+      buf_printf(b, "%s(_t%d, ", cfn, th); emit_boxed(c, argv[0], b);
+      buf_puts(b, se ? "); })" : ")");
       return 1;
     }
     if (cfn) {

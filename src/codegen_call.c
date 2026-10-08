@@ -2529,7 +2529,7 @@ int poly_binop_recv_temp(Compiler *c, int recv, int arg, Buf *b, int *stmt_expr)
    expression: under promote, boxing an argument spills its writes into the
    pre-statement buffer, which lands in front of the whole expression. */
 void emit_poly_cmp_ordered(Compiler *c, const char *fn, int recv, int arg, Buf *b) {
-  if (node_may_run_ruby(c->nt, arg)) {
+  if (node_may_run_ruby(c->nt, arg) || boxed_operand_unholds_recv(c, recv, arg)) {
     int se = 0;
     int t = poly_binop_recv_temp(c, recv, arg, b, &se);
     buf_printf(b, "%s(_t%d, ", fn, t);
@@ -18486,6 +18486,49 @@ static int prog_has_hash_default_block(Compiler *c) {
     if (!rn || sp_streq(rn, "Hash")) memo = 1;   /* a computed class may be Hash */
   }
   return memo;
+}
+/* True when `n` reads an element of a variable's Hash by a key that runs no
+   code, in a program with no Hash default block: the Hash holds the element. */
+static int elem_of_held_hash(Compiler *c, int n) {
+  const NodeTable *nt = c->nt;
+  if (n < 0 || nt_kind(nt, n) != NK_CallNode) return 0;
+  const char *nm = nt_str(nt, n, "name");
+  int r = nt_ref(nt, n, "receiver"), a = nt_ref(nt, n, "arguments"), ac = 0;
+  const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+  if (!nm || !sp_streq(nm, "[]") || r < 0 || ac != 1 || nt_ref(nt, n, "block") >= 0) return 0;
+  TyKind kt = comp_ntype(c, av[0]);
+  return ty_is_hash(comp_ntype(c, r)) && subtree_is_pure_read(c, r) &&
+         (kt == TY_INT || kt == TY_SYMBOL) && subtree_is_pure_read(c, av[0]) &&
+         !prog_has_hash_default_block(c);
+}
+/* True when `n` reads, by an Integer index that runs no code, an element of
+   an Array of boxed values written in place: the literal is built into a
+   rooted temporary ahead of the statement (emit_array_hash_literal_expr), and
+   that holds the element. */
+static int elem_of_array_literal(Compiler *c, int n) {
+  const NodeTable *nt = c->nt;
+  if (n < 0 || nt_kind(nt, n) != NK_CallNode) return 0;
+  const char *nm = nt_str(nt, n, "name");
+  int r = nt_ref(nt, n, "receiver"), a = nt_ref(nt, n, "arguments"), ac = 0, en = 0;
+  const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+  if (!nm || !sp_streq(nm, "[]") || r < 0 || ac != 1 || nt_ref(nt, n, "block") >= 0) return 0;
+  if (nt_kind(nt, r) != NK_ArrayNode || repr_of(c, r).as_ty != TY_POLY_ARRAY) return 0;
+  nt_arr(nt, r, "elements", &en);
+  return en > 0 && comp_ntype(c, av[0]) == TY_INT && subtree_is_pure_read(c, av[0]);
+}
+/* True when boxing the operand `arg` allocates while nothing holds the boxed
+   receiver `recv`: another allocation the node table cannot show. A value
+   whose C form is a struct (a Rational, a Complex, a Range, a Time) is boxed
+   to a cell where it is handed over, so a literal `2r` or a typed local says
+   "no" to subtree_may_allocate and still allocates between the receiver and
+   the call, or ahead of a receiver that allocates. A Class value is a struct
+   that boxes to no cell. A receiver that is a read is held where it lives,
+   an element of a Hash by the Hash, and one of an Array written in place by
+   the literal's temporary. */
+int boxed_operand_unholds_recv(Compiler *c, int recv, int arg) {
+  TyKind at = repr_of(c, arg).as_ty;
+  return ty_is_struct_valued(at) && at != TY_CLASS && !subtree_is_pure_read(c, recv) &&
+         !elem_of_held_hash(c, recv) && !elem_of_array_literal(c, recv);
 }
 /* Can evaluating this subtree store a new value into an ivar, a class
    variable or a global? A write to one does, and so can anything that runs
