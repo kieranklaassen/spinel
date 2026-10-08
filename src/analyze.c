@@ -9460,8 +9460,9 @@ static int oa_obj_class_of(Compiler *c, int node) {
      the pointer array cannot hold (`a[0] = "x"` was joined as "nothing seen"
      and the store then initialised an sp_Vec * from a string, #4444). A type
      not known yet, nil (a NULL element) and a boxed poly value stay neutral:
-     the poly may well be the class (a widened return, #4293), and the push
-     emitter unboxes it with the class check at run time. */
+     the poly may well be the class (a widened return, #4293). A push or a
+     `[]=` unboxes it as an object of the class, so those two answer for the
+     boxed values they store (oa_note_boxed_store). */
   if (t == TY_UNKNOWN || t == TY_NIL || t == TY_POLY) return -1;
   return -2;
 }
@@ -9531,6 +9532,147 @@ static void oa_note_empty(Compiler *c, int S, int node) {
 static int oa_elem_evidence(Compiler *c, OAS *sl, int S, int node) {
   oa_note_empty(c, S, node);
   if (node >= 0 && infer_type(c, node) == TY_POLY) sl[S].poly_elem = 1;
+  return oa_obj_class_of(c, node);
+}
+/* The class a value is proved to hold: its type's where it is an object's,
+   -1 for nil and for a type not known yet, -2 where nothing proves one. A
+   boxed value is proved three ways. It is a call of a method of the program
+   whose whole body is a read of one of its parameters (`def echo(x) = x`),
+   and the argument there is proved. It is a call of a method that answers
+   one class, on a proved receiver. Or it is a local every write of which is
+   proved, to one class. An element of a slot (`t.last`, the receiver in
+   `t << t.last.meld(x)`; the parameter of `t.each { |e| u << e }`) is typed
+   only once the slot narrows, so it is read as its component's class:
+   whatever was stored there was proved that class. */
+static int oa_read_class(OAS *sl, const int *read_slot, int node) {
+  if (node < 0 || read_slot[node] < 0) return -2;
+  int r = oa_uf_find(sl, read_slot[node]);
+  return sl[r].alive && sl[r].cls >= 0 ? sl[r].cls : -2;
+}
+/* the class of the elements a block's parameter is handed: every block that
+   binds it is the block of a walk of a slot (the walks an Array of a class
+   has: each and its kin, map) and takes the element first */
+static int oa_block_elem_class(Compiler *c, OAS *sl, const int *read_slot, LocalVar *lv) {
+  const NodeTable *nt = c->nt;
+  int cls = -2;
+  NT_FOREACH_KIND(nt, NK_LambdaNode, lam) {
+    Scope *ls = comp_scope_of(c, lam);
+    const char *pn;
+    for (int k = 0; ls && (pn = block_param_name(c, lam, k)); k++)
+      if (scope_local(ls, pn) == lv) return -2;
+  }
+  NT_FOREACH_KIND(nt, NK_CallNode, call) {
+    int blk = nt_ref(nt, call, "block");
+    Scope *bs = blk >= 0 ? comp_scope_of(c, blk) : NULL;
+    const char *pn, *cn = nt_str(nt, call, "name");
+    for (int k = 0; bs && (pn = block_param_name(c, blk, k)); k++) {
+      if (scope_local(bs, pn) != lv) continue;
+      int walk = k == 0 && cn && nt_kind(nt, blk) == NK_BlockNode &&
+                 nt_ref(nt, call, "arguments") < 0 && !block_param_is_multi(c, blk, 0) &&
+                 (is_each_walk_or_with_index(cn) || is_map_alias(cn));
+      int p = walk ? oa_read_class(sl, read_slot, nt_ref(nt, call, "receiver")) : -2;
+      if (p < 0 || (cls >= 0 && p != cls)) return -2;
+      cls = p;
+    }
+  }
+  return cls;
+}
+static int oa_value_class_proved(Compiler *c, OAS *sl, const int *read_slot, int node, int depth) {
+  const NodeTable *nt = c->nt;
+  TyKind t = infer_type(c, node);
+  if (t == TY_UNKNOWN || t == TY_NIL) return -1;
+  if (ty_is_object(t)) return comp_ty_ary_root(c, t) >= 0 ? -2 : ty_object_class(t);
+  if (t != TY_POLY || depth > 4) return -2;
+  const char *nm = nt_str(nt, node, "name");
+  if (!nm) return -2;
+  int recv = nt_kind(nt, node) == NK_CallNode ? nt_ref(nt, node, "receiver") : -1;
+  if (recv >= 0 && read_slot[recv] >= 0 && nt_ref(nt, node, "block") < 0) {
+    int argc = 0, args = nt_ref(nt, node, "arguments");
+    if (args >= 0) nt_arr(nt, args, "arguments", &argc);
+    if ((is_element_at_alias(nm) && argc == 1) ||
+        ((is_endpoint_query(nm) || is_minmax_query(nm)) && argc == 0))
+      return oa_read_class(sl, read_slot, recv);
+  }
+  if (nt_kind(nt, node) == NK_LocalVariableReadNode) {
+    Scope *sc = comp_scope_of(c, node);
+    LocalVar *lv = sc ? scope_local(sc, nm) : NULL;
+    if (!lv || lv->is_param) return -2;
+    /* a target of a multiple assignment, a `for` or a rescue is a write
+       with no value to read */
+    NT_FOREACH_KIND(nt, NK_LocalVariableTargetNode, w) {
+      const char *wn = nt_str(nt, w, "name");
+      if (wn && sp_streq(wn, nm) && comp_scope_of(c, w) == sc) return -2;
+    }
+    /* a block's parameter is proved where nothing writes it */
+    int cls = -1, bp = lv->is_block_param;
+    for (int r = lw_shared_first(c, nm, (int)(sc - c->scopes)); r >= 0; r = lw_shared_next(r)) {
+      int w = lw_shared_node(r);
+      const char *wn = nt_str(nt, w, "name");
+      if (!wn || !sp_streq(wn, nm) || comp_scope_of(c, w) != sc) continue;
+      int v = nt_ref(nt, w, "value");
+      int p = !bp && nt_kind(nt, w) == NK_LocalVariableWriteNode && v >= 0
+              ? oa_value_class_proved(c, sl, read_slot, v, depth + 1) : -2;
+      if (p == -2 || (p >= 0 && cls >= 0 && p != cls)) return -2;
+      if (p >= 0) cls = p;
+    }
+    return bp ? oa_block_elem_class(c, sl, read_slot, lv) : cls;
+  }
+  if (nt_kind(nt, node) != NK_CallNode || nt_ref(nt, node, "block") >= 0) return -2;
+  int mi;
+  if (recv < 0) {
+    /* at the top level self is main; in a method of a class it may be an
+       object of a class beneath, with a method of this name of its own */
+    Scope *at = comp_scope_of(c, node);
+    if (!at || at->class_id >= 0) return -2;
+    mi = comp_self_call_mi(c, node, nm);
+  }
+  else {
+    int rc = oa_value_class_proved(c, sl, read_slot, recv, depth + 1);
+    if (rc < 0 || dispatch_impl_count(c, rc, nm) != 1) return -2;
+    mi = comp_method_in_chain(c, rc, nm, NULL);
+  }
+  if (mi < 0) return -2;
+  Scope *m = &c->scopes[mi];
+  /* the receiver was boxed until its slot narrows, the method answers a class */
+  if (ty_is_object(m->ret)) return comp_ty_ary_root(c, m->ret) >= 0 ? -2 : ty_object_class(m->ret);
+  int bn = 0, argc = 0, args = nt_ref(nt, node, "arguments");
+  const int *body = m->body >= 0 ? nt_arr(nt, m->body, "body", &bn) : NULL;
+  const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &argc) : NULL;
+  if (bn != 1 || nt_kind(nt, body[0]) != NK_LocalVariableReadNode || m->dm_subst_name) return -2;
+  if (m->rest_idx >= 0 || m->kwrest_idx >= 0 || argc != m->nparams) return -2;
+  const char *pn = nt_str(nt, body[0], "name");
+  int at = -1;
+  for (int j = 0; j < argc; j++) {
+    NodeKind ak = nt_kind(nt, argv[j]);
+    if (m->pdefault[j] >= 0 || ak == NK_SplatNode || ak == NK_KeywordHashNode ||
+        ak == NK_BlockArgumentNode) return -2;
+    if (pn && m->pnames[j] && sp_streq(m->pnames[j], pn)) at = j;
+  }
+  return at >= 0 ? oa_value_class_proved(c, sl, read_slot, argv[at], depth + 1) : -2;
+}
+/* The boxed values a push or a `[]=` stored into a slot this round. The
+   emitter unboxes such a value as an object of the component's class
+   (emit_array_call_arms), whatever it holds: a String pushed that way read
+   back nil, and an object of another class was read through this class's
+   layout. So a component narrows only where each of them is proved that
+   class or a class beneath it; elsewhere the value is the foreign element
+   a String is, and the array stays boxed. */
+static int *g_oa_box_slot, *g_oa_box_node, g_oa_box_n, g_oa_box_cap;
+static void oa_note_boxed_store(int S, int node) {
+  if (g_oa_box_n >= g_oa_box_cap) {
+    g_oa_box_cap = g_oa_box_cap ? g_oa_box_cap * 2 : 64;
+    g_oa_box_slot = (int *)realloc(g_oa_box_slot, sizeof(int) * (size_t)g_oa_box_cap);
+    g_oa_box_node = (int *)realloc(g_oa_box_node, sizeof(int) * (size_t)g_oa_box_cap);
+    if (!g_oa_box_slot || !g_oa_box_node) { fprintf(stderr, "oom\n"); exit(1); }
+  }
+  g_oa_box_slot[g_oa_box_n] = S; g_oa_box_node[g_oa_box_n] = node; g_oa_box_n++;
+}
+/* oa_elem_evidence for a value a push or a `[]=` stores, noting a boxed one */
+static int oa_store_evidence(Compiler *c, OAS *sl, int S, int node) {
+  oa_note_empty(c, S, node);
+  if (node >= 0 && infer_type(c, node) == TY_POLY) {
+    sl[S].poly_elem = 1; oa_note_boxed_store(S, node);
+  }
   return oa_obj_class_of(c, node);
 }
 static int oa_recv_op_ok(const char *nm, int argc, int has_block) {
@@ -10282,6 +10424,7 @@ static int narrow_object_arrays(Compiler *c) {
   oa_index_reset();
   g_oa_empt_n = 0;
   g_oa_src_n = 0;
+  g_oa_box_n = 0;
   /* Drop every want this pass stamped on a map source in an earlier round,
      before the round re-derives them. OA_DROP_SRC_STAMP below only reaches the
      sources RECORDED this round, and a node stops being recorded for reasons
@@ -10653,7 +10796,8 @@ static int narrow_object_arrays(Compiler *c) {
       if (oa_recv_op_ok(name, argc, has_block)) {
         claimed[recv] = 1;
         if (name && is_push_alias(name)) {
-          for (int a = 0; a < argc; a++) sl[S].cls = oa_cls_join(sl[S].cls, oa_elem_evidence(c, sl, S, argv[a]));
+          for (int a = 0; a < argc; a++)
+            sl[S].cls = oa_cls_join(sl[S].cls, oa_store_evidence(c, sl, S, argv[a]));
           /* an append answers the array: like a sort result it must land
              in a modeled consumer, or a chained `a.push(x).push(y)` pushes
              an element no slot sees */
@@ -10663,7 +10807,7 @@ static int narrow_object_arrays(Compiler *c) {
           /* a range-keyed []= is a splice, which the obj-array representation
              has no emitter for: keep the slot on the poly path */
           if (infer_type(c, argv[0]) == TY_RANGE) sl[S].alive = 0;
-          else sl[S].cls = oa_cls_join(sl[S].cls, oa_elem_evidence(c, sl, S, argv[1]));
+          else sl[S].cls = oa_cls_join(sl[S].cls, oa_store_evidence(c, sl, S, argv[1]));
         }
         else if (name && (sp_streq(name, "min") || sp_streq(name, "max") ||
                           sp_streq(name, "sort") || sp_streq(name, "sort!"))) {
@@ -10967,6 +11111,18 @@ static int narrow_object_arrays(Compiler *c) {
     if (sl[i].poly_elem) sl[r].poly_elem = 1;
     sl[r].row_iter |= sl[i].row_iter;
     if (!sl[i].alive) sl[r].alive = 0;
+  }
+  /* a boxed value stored into a component of one class and not proved an
+     object of it is a foreign element (oa_note_boxed_store). A proof may
+     read the class of a component, so one that falls is asked again. */
+  for (int again = 1; again;) {
+    again = 0;
+    for (int e = 0; e < g_oa_box_n; e++) {
+      int r = oa_uf_find(sl, g_oa_box_slot[e]);
+      if (sl[r].cls < 0) continue;
+      int p = oa_value_class_proved(c, sl, read_slot, g_oa_box_node[e], 0);
+      if (p != -1 && (p < 0 || !is_descendant(c, p, sl[r].cls))) { sl[r].cls = -2; again = 1; }
+    }
   }
   for (int i = 0; i < n; i++) {
     int r = oa_uf_find(sl, i);
