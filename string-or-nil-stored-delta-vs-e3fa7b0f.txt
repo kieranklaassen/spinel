@@ -1,0 +1,91 @@
+diff --git a/src/codegen.c b/src/codegen.c
+index ea69826a2..d0c4cbee6 100644
+--- a/src/codegen.c
++++ b/src/codegen.c
+@@ -1583,8 +1583,9 @@ static void emit_boxed_strbuf(Compiler *c, int node, TyKind t, const Repr *rp, B
+      container element is mutable in place (#3227 P3). A value that can be
+      nil (a String-or-nil call, a slice past the end, a pick that misses) is
+      tested before it is wrapped and boxed as nil: sp_String_new_shared
+-     hands a nil back as NULL, and sp_box_obj boxed that NULL as a String. */
+-  int tn = node_may_be_null_nil(c, node) ? ++g_tmp : 0;
++     hands a nil back as NULL, and sp_box_obj boxed that NULL as a String.
++     One the never-nil list proves is wrapped as it was. */
++  int tn = stored_value_may_be_nil(c, node) ? ++g_tmp : 0;
+   if (tn) buf_printf(b, "({ const char *_t%d = ", tn);
+   else buf_puts(b, "sp_box_obj(sp_String_new_shared(");
+   { Buf eb0; memset(&eb0, 0, sizeof eb0);
+diff --git a/src/codegen_internal.h b/src/codegen_internal.h
+index 47dc00d5e..e2bccc193 100644
+--- a/src/codegen_internal.h
++++ b/src/codegen_internal.h
+@@ -885,6 +885,9 @@ const char *poly_sink_unbox_fn(TyKind slot);
+ const char *token_unbox_fmt(TyKind target);
+ /* A node of such a type may hold NULL: not a literal, not self. */
+ int node_may_be_null_nil(Compiler *c, int node);
++/* A value stored where a String handle is wanted may be nil: one the
++   never-nil list (ivs_never_nil) does not prove. */
++int stored_value_may_be_nil(Compiler *c, int v);
+ /* `fn(recv)` with recv evaluated once, answering nil_c for a NULL recv. */
+ void emit_null_guarded_call(Compiler *c, int recv, TyKind rt, const char *fn, const char *nil_c, Buf *b);
+ void emit_unbox_text(Compiler *c, TyKind t, const char *expr, Buf *b);
+diff --git a/src/codegen_util.c b/src/codegen_util.c
+index 2cc900341..e092d549d 100644
+--- a/src/codegen_util.c
++++ b/src/codegen_util.c
+@@ -2017,6 +2017,17 @@ static int ivs_never_nil(Compiler *c, int v) {
+       return 0;
+   }
+ }
++/* May a value stored where a String handle is wanted be nil? Not one the list
++   above proves never is. nil.dup is nil, so a dup is proven only with its
++   receiver. */
++int stored_value_may_be_nil(Compiler *c, int v) {
++  v = unwrap_parens(c, v);
++  if (!node_may_be_null_nil(c, v)) return 0;
++  if (nt_kind(c->nt, v) == NK_ParenthesesNode || !ivs_never_nil(c, v)) return 1;
++  if (nt_kind(c->nt, v) == NK_CallNode && sp_streq(nt_str(c->nt, v, "name"), "dup"))
++    return stored_value_may_be_nil(c, nt_ref(c->nt, v, "receiver"));
++  return 0;
++}
+ /* Does the subtree under `n` write ivar `ivn`? Past the depth it follows,
+    it answers that it may. */
+ static int ivs_subtree_writes(const NodeTable *nt, int n, const char *ivn, int depth) {
+diff --git a/test/string_or_nil_stored_then_appended.rb b/test/string_or_nil_stored_then_appended.rb
+index 305341078..fbaeaaec1 100644
+--- a/test/string_or_nil_stored_then_appended.rb
++++ b/test/string_or_nil_stored_then_appended.rb
+@@ -100,3 +100,18 @@ k = [pick(0), "lit", "a#{1}", tail(s, 0)]
+ k[0] << "!"
+ k[3] << "?"
+ p k
++
++# a nil read back as the needle of a search: a handle around nothing was
++# read through there
++w2 = ["ab", "cd", "ef"]
++n2 = ["a".dup, 2, pick(1)]
++n2[0] << "b"
++p w2.include?(n2[2]), w2.member?(n2[2]), w2.include?(n2[0]), w2.index(n2[2])
++
++# a value that is never nil is stored as it was; a dup of one that can be
++# nil is not such a value
++s2 = pick(1)
++c = [+"ab", "cd".dup, "e" + "f", 5.to_s, s2.dup, pick(1).dup, (pick(1)).dup, pick(0).dup]
++c[0] << "!"
++c[7] << "?"
++p c, c[4].nil?, c[5].nil?
+diff --git a/test/string_or_nil_stored_then_appended.rb.expected b/test/string_or_nil_stored_then_appended.rb.expected
+index 1ddec31ed..0d5eaf67f 100644
+--- a/test/string_or_nil_stored_then_appended.rb.expected
++++ b/test/string_or_nil_stored_then_appended.rb.expected
+@@ -62,3 +62,10 @@ true
+ [["pa!", nil], [nil]]
+ true
+ ["pa!", "lit", "a1", "he?"]
++false
++false
++true
++nil
++["ab!", "cd", "ef", "5", nil, nil, nil, "pa?"]
++true
++true
+git patch-id --stable: e3fa7b0fe8da (the read head) a53c365baa53d8ad5051fc357371b6a048864a12; 9c46c5647ca9 (this head) 1ec1fb281cc4a0e5f2d60babcbb9625dc61774e2
