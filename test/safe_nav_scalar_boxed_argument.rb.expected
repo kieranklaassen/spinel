@@ -1,0 +1,43 @@
+true
+nil
+false
+false
+true
+true
+nil
+true
+1.2
+nil
+1.2
+2
+1.0
+true
+true
+2
+false
+[1, 5]
+1.5
+[1, 5, 1.0, 5.0]
+true
+1
+nil
+1
+1.2
+""
+false
+nil
+false
+nil
+true
+false
+nil
+1.2
+"in"
+false
+"comparison of Integer with String failed"
+"comparison of Float with nil failed"
+"min argument must be less than or equal to max argument"
+"comparison of String with 1 failed"
+"comparison of Float with 1.0 failed"
+"raised"
+"comparison of Float with String failed"
