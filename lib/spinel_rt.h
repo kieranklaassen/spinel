@@ -2752,6 +2752,22 @@ static inline const char *sp_poly_unbox_s(sp_RbVal v) {
   if (sp_poly_is_strbuf(v) && v.v.p) return sp_String_cstr((sp_String *)v.v.p);
   return v.v.s;
 }
+/* Range#cover? of a String Range, given by its ends, for a String read off
+   a box: by its bytes as String#<=> orders them (sp_str_cmp_bytes), so a
+   NUL is a byte like any other and a binary String is not the UTF-8 one of
+   the same bytes. */
+static inline sp_bool sp_srange_cover_bytes(const char *first, const char *last, int excl, const char *x) {
+  if (!x) return 0;
+  if (first && sp_str_cmp_bytes(x, first) < 0) return 0;
+  if (last) { int d = sp_str_cmp_bytes(x, last); if (excl ? d >= 0 : d > 0) return 0; }
+  return 1;
+}
+/* The same for the String a shared handle holds; NULL, a nil stored among
+   handles, holds none. Out of line: only a handle's box comes here, and
+   the call beside it for a plain String stays as it was. */
+static SP_NOINLINE SP_COLD sp_bool sp_srange_cover_handle(const char *first, const char *last, int excl, void *h) {
+  return h && sp_srange_cover_bytes(first, last, excl, sp_String_cstr((sp_String *)h));
+}
 /* The object pointer a boxed value carries, for a slot that holds pointers
    rather than sp_RbVal (a PtrArray of one user class). nil is a NULL element,
    which is how that slot spells nil already. */
