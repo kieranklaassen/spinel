@@ -1,0 +1,43 @@
+A call no method answers runs its arguments on a typed receiver too
+
+    def tick = (puts "tick"; 1)
+    begin
+      5.zork(k: tick)
+    rescue NoMethodError => e
+      puts e.message
+    end
+
+printed the message alone where CRuby prints "tick" first. A boxed
+receiver binds such a call's arguments ahead of the raise, so they
+run. A receiver of one known class (an Integer, a String, a Symbol,
+an Array, an object, nil) raised without running them when one was a
+splat, a keyword argument, a double splat or a String key; and so did
+a boxed receiver for an argument that binding leaves to the call,
+such as a splat of a method that always raises, which lost its own
+error to the NoMethodError.
+
+emit_unresolved_call stages a call's arguments into the error
+(NoMethodError#args) only when all of them are plain: "a
+splat/block/kwarg shape keeps the plain message". The arguments of
+any other call were not emitted at all. They are now emitted for
+their effect after the receiver, in CRuby's order: each argument, a
+splat's and a double splat's operand, a keyword's value, then the
+block argument's expression.
+
+What an argument hoists ahead of its statement (the loop of a call
+with a block, the calls inside an Array or Hash literal, an `if` used
+as a value) is written where the argument itself goes, so it too runs
+after the receiver and after the arguments before it.
+
+An argument with nothing to run, a literal or a read of a variable,
+is not emitted: a call whose arguments are all such compiles to the
+C it did, as does a call with plain arguments and every call that is
+answered. One a dispatch has bound already is not run a second time.
+
+Not here: NoMethodError#args of a call with a splat or a keyword
+argument is nil as before, and a block argument that is a call's only
+argument (`5.zork(&mk)`) is still not run.
+
+Test: test/nomethod_runs_its_arguments.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
