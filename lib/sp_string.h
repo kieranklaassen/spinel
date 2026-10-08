@@ -56,7 +56,8 @@ static inline char *sp_fd_setup(char *raw){
 static inline void sp_fd_own(sp_String *s){
   ((sp_str_hdr *)sp_fd_base(s->data))->next = (sp_str_hdr *)(void *)s;
 }
-static inline void sp_fd_publish(sp_String *s){
+/* The handle's length and tags, written to the payload header. */
+static inline void sp_fd_publish_len(sp_String *s){
   sp_str_hdr *h = (sp_str_hdr *)sp_fd_base(s->data);
   h->len = (uint32_t)s->len; h->hash = 0;
   h->size &= ~SP_STR_SIZE_ASCII7;   /* the bytes just changed */
@@ -69,6 +70,9 @@ static inline void sp_fd_publish(sp_String *s){
     if (s->binary) h->size |= SP_STR_SIZE_BINARY;
     s->chilled = 0;
   }
+}
+static inline void sp_fd_publish(sp_String *s){
+  sp_fd_publish_len(s);
   sp_str_lcache_drop(s->data);
 }
 /* A handle whose payload sits inside its own GC object, right after the
@@ -129,7 +133,7 @@ static inline sp_String*sp_String_new_inline_len(const char*s,int64_t len){
 }
 /* Shared append core: `tl` is the operand byte length (strlen for the
    bare-literal-safe entry, sp_str_byte_len for the binary one). */
-static inline void sp_fd_append_len(sp_String*s,const char*t,int64_t tl){if(!sp_fd_grow(s,s->len+tl))return;memcpy(s->data+s->len,t,tl);s->len+=tl;s->data[s->len]=0;sp_fd_publish(s);}
+static inline void sp_fd_append_len(sp_String*s,const char*t,int64_t tl){if(!sp_fd_grow(s,s->len+tl))return;memcpy(s->data+s->len,t,tl);s->len+=tl;s->data[s->len]=0;sp_fd_publish_len(s);sp_str_lcache_grown(s->data,(size_t)(s->len-tl),(size_t)tl);}
 static inline void sp_String_append(sp_String*s,const char*t){if(!s||!t)return;if(sp_String_is_frozen(s)){sp_raise_frozen_str(s->data);return;}sp_fd_append_len(s,t,(int64_t)strlen(t));}
 /* Binary-safe append: sizes the operand with the header length so an embedded
    NUL is preserved (Ruby String#<< / concat on a marked spinel string). */

@@ -673,6 +673,7 @@ void *sp_gc_alloc_nogc(size_t sz, void (*fin)(void *), void (*scn)(void *)) {
 }
 
 SP_TLS struct sp_str_lcache_entry sp_str_lcache[SP_STR_LCACHE_SIZE];
+SP_TLS size_t sp_str_byte_writes;
 SP_TLS void *_sp_ret_strbuf;
 
 void sp_str_lcache_clear(void) {

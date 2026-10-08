@@ -482,7 +482,10 @@ const char *sp_str_append_grow(const char *s, const char *t) {SP_GC_ROOT_STR(s);
     if (la + lb <= cap) {
       memcpy((char *)s + la, t, lb);
       ((char *)s)[la + lb] = 0;
-      sp_str_lcache_drop(s);
+      /* a text append that makes a 7-bit binary string text again forgets,
+         as every append did */
+      if (text_append) sp_str_lcache_drop(s);
+      else sp_str_lcache_grown(s, la, lb);
       sp_str_set_len((char *)s, la + lb);
       if (text_append) sp_str_as_text((char *)s);
       return s;
@@ -516,7 +519,7 @@ const char *sp_str_append_grow_n(const char *s, const char *t, size_t lb) {SP_GC
     if (la + lb <= cap) {
       memmove((char *)s + la, t, lb);   /* t may point into s (a self-append) */
       ((char *)s)[la + lb] = 0;
-      sp_str_lcache_drop(s);
+      sp_str_lcache_grown(s, la, lb);
       sp_str_set_len((char *)s, la + lb);
       return s;
     }
@@ -795,6 +798,76 @@ static sp_int sp_str_count_units(const char *s, size_t bl) {
   }
   return n;
 }
+/* A count, fresh from the walk, goes into the cache. Inline in its two
+   callers, so that a first #size pays no call for it. */
+static SP_INLINE sp_int sp_str_lcache_put(const char *s, unsigned h, size_t bl, sp_int n) {
+  /* the walk just told us: char count == byte count means every byte is
+     below 0x80, so remember it in the header and never walk (or probe) again */
+  if ((size_t)n == bl) sp_str_mark_ascii7(s);
+  /* Evict the cheapest entry to recompute, not the oldest: a scan over one long
+     subject allocates a stream of short strings, and measuring those pushed the
+     subject out of its bucket over and over -- each miss another walk of the
+     whole thing. A short newcomer never displaces a much longer incumbent.
+     An entry an append has carried on (its count below zero) stands where the
+     append used to leave a dropped one, and is a free way here as that was:
+     among its counted entries the cache holds what it held when every append
+     forgot, so a count a setbyte has made stale is answered, or evicted, when
+     it was before. */
+  unsigned victim = h;
+  for (unsigned w = 1; w < SP_STR_LCACHE_WAYS; w++) {
+    if (!sp_str_lcache[h + w].s || sp_str_lcache[h + w].char_len < 0) { victim = h + w; break; }
+    if (sp_str_lcache[h + w].byte_len < sp_str_lcache[victim].byte_len) victim = h + w;
+  }
+  if (sp_str_lcache[victim].s && sp_str_lcache[victim].char_len >= 0 && sp_str_lcache[victim].byte_len > bl * 8) return n;
+  sp_str_lcache[victim].s = s;
+  sp_str_lcache[victim].byte_len = bl;
+  sp_str_lcache[victim].char_len = n;
+  sp_str_lcache[victim].writes = sp_str_byte_writes;
+  return n;
+}
+/* `e` counted the first byte_len bytes of `s`, and appends in place have
+   added to it since (sp_str_lcache_grown, which left the count as ~count):
+   count what they added, not the whole of it again. sp_str_count_units
+   answers the byte count for bytes that are not valid UTF-8, so the two
+   counts add only where both halves are known to be valid, or the answer is
+   the byte count either way:
+   - new bytes all below 0x80: a count equal to the byte length stays equal,
+     and a valid string stays valid, one character a byte;
+   - the old count below its byte length (valid, with a multi-byte character)
+     and the new bytes valid by themselves: the counts add; new bytes that are
+     not valid make the whole invalid, which is its byte count;
+   - the old count equal to its byte length and a new byte of 0x80 or more:
+     the old bytes were 7-bit or were invalid, and the entry cannot say which,
+     so the whole is counted.
+   A length that is not the one the appends led to is counted whole as well,
+   and so is a string setbyte may have written to since the count: setbyte
+   leaves an entry where it is, an append used to drop it, and the count
+   after the two was a fresh one.
+   The entry goes, and the count is stored as a fresh one is. */
+static SP_NOINLINE sp_int sp_str_length_grown(const char *s, unsigned h, struct sp_str_lcache_entry *e) {
+  size_t la = e->byte_len, bl = sp_str_byte_len(s);
+  sp_int c = ~e->char_len, n;
+  if (bl != e->now_len || bl < la || e->writes != sp_str_byte_writes) n = sp_str_count_units(s, bl);
+  else {
+    const unsigned char *t = (const unsigned char *)s + la, *p = t, *end = (const unsigned char *)s + bl;
+    size_t lb = bl - la;
+    while (p + 8 <= end) {
+      uint64_t w;
+      memcpy(&w, p, sizeof(w));
+      if (w & 0x8080808080808080ULL) break;
+      p += 8;
+    }
+    while (p < end && *p < 0x80) p++;
+    if (p == end) n = c + (sp_int)lb;
+    else if ((size_t)c == la) n = sp_str_count_units(s, bl);
+    else {
+      sp_int k = sp_str_count_units((const char *)t, lb);
+      n = (size_t)k < lb ? c + k : (sp_int)bl;
+    }
+  }
+  e->s = NULL;
+  return sp_str_lcache_put(s, h, bl, n);
+}
 sp_int sp_str_length(const char*s){
   if (!s) return 0;
   /* binary bytes are one unit each, whatever they happen to spell in UTF-8;
@@ -805,26 +878,12 @@ sp_int sp_str_length(const char*s){
   if (!sp_str_cacheable(s)) return sp_str_count_units(s, sp_str_byte_len(s));
   unsigned h = sp_str_lcache_hash(s);
   for (unsigned w = 0; w < SP_STR_LCACHE_WAYS; w++)
-    if (sp_str_lcache[h + w].s == s) return sp_str_lcache[h + w].char_len;
+    if (sp_str_lcache[h + w].s == s) {
+      sp_int c = sp_str_lcache[h + w].char_len;
+      return c < 0 ? sp_str_length_grown(s, h, &sp_str_lcache[h + w]) : c;
+    }
   size_t bl = sp_str_byte_len(s);
-  sp_int n = sp_str_count_units(s, bl);
-  /* the walk just told us: char count == byte count means every byte is
-     below 0x80, so remember it in the header and never walk (or probe) again */
-  if ((size_t)n == bl) sp_str_mark_ascii7(s);
-  /* Evict the cheapest entry to recompute, not the oldest: a scan over one long
-     subject allocates a stream of short strings, and measuring those pushed the
-     subject out of its bucket over and over -- each miss another walk of the
-     whole thing. A short newcomer never displaces a much longer incumbent. */
-  unsigned victim = h;
-  for (unsigned w = 1; w < SP_STR_LCACHE_WAYS; w++) {
-    if (!sp_str_lcache[h + w].s) { victim = h + w; break; }
-    if (sp_str_lcache[h + w].byte_len < sp_str_lcache[victim].byte_len) victim = h + w;
-  }
-  if (sp_str_lcache[victim].s && sp_str_lcache[victim].byte_len > bl * 8) return n;
-  sp_str_lcache[victim].s = s;
-  sp_str_lcache[victim].byte_len = bl;
-  sp_str_lcache[victim].char_len = n;
-  return n;
+  return sp_str_lcache_put(s, h, bl, sp_str_count_units(s, bl));
 }
 /* The byte length comes from sp_str_byte_len, which knows every marker: this
    spelled out 0xfe/0xfc itself and fell to strlen for the rest, so a

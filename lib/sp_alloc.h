@@ -156,8 +156,12 @@ static inline const char *sp_str_or_empty(const char *s) { return s ? s : sp_str
 #define SP_STR_LCACHE_SIZE ((1u << SP_STR_LCACHE_BITS) * SP_STR_LCACHE_WAYS)
 struct sp_str_lcache_entry {
   const char *s;
-  size_t byte_len;
-  sp_int char_len;
+  size_t byte_len;   /* the bytes that were counted */
+  sp_int char_len;   /* the characters in them; ~count, so below zero, once
+                        appends have added bytes nobody has counted yet */
+  size_t now_len;    /* with such a count: byte_len plus those bytes, the
+                        string's length now */
+  size_t writes;     /* sp_str_byte_writes when the bytes were counted */
 };
 /* Per-worker (SP_TLS) in the threaded build: this string-length cache is keyed
    by string pointer and written without the heap lock (sp_str_byte_len is on the
@@ -166,6 +170,11 @@ struct sp_str_lcache_entry {
    its own; it is cleared at every safepoint park (before a sweep can recycle a
    cached string's address) and by the string sweep on the collector. */
 extern SP_TLS struct sp_str_lcache_entry sp_str_lcache[SP_STR_LCACHE_SIZE];
+/* How many bytes setbyte has written in place. setbyte leaves a counted entry
+   where it is, and an append used to drop it; an entry an append carries on
+   (sp_str_lcache_grown) is trusted only while this still reads what it read
+   when the bytes were counted. */
+extern SP_TLS size_t sp_str_byte_writes;
 static inline unsigned sp_str_lcache_slot(const char *s) {
   uintptr_t k = (uintptr_t)s;
   return (unsigned)((k ^ (k >> 4) ^ (k >> 12)) & ((1u << SP_STR_LCACHE_BITS) - 1))
@@ -206,6 +215,39 @@ static inline void sp_str_lcache_drop(const char *s) {
   unsigned h = sp_str_lcache_slot(s);
   for (unsigned w = 0; w < SP_STR_LCACHE_WAYS; w++)
     if (sp_str_lcache[h + w].s == s) sp_str_lcache[h + w].s = NULL;
+}
+/* `s`, a string with a header, has just grown in place: `lb` bytes now follow
+   the `la` it held, and those `la` are as they were. An append is how a buffer
+   is built, and forgetting its length here made the next #size count every
+   byte again: `buf << x; buf.size` in a loop was quadratic. So a counted
+   entry stays: its now_len follows the string and its count is marked as
+   short of it. Nothing is counted here: the next sp_str_length counts the
+   bytes past byte_len (sp_str_length_grown, lib/sp_str.c), or all of them
+   if setbyte has written since the entry was counted. The 7-bit hint goes
+   as it always did (the caller clears it), so that next sp_str_length is
+   asked and leaves what it left before.
+   An entry whose length (now_len once it is carried, byte_len before) is
+   not the one this append started from was taken before some other change
+   of length, and goes as every entry used to.
+   The threaded build forgets as before: another worker may have written the
+   bytes this worker counted, and only its own entry would have heard of it. */
+static inline void sp_str_lcache_grown(const char *s, size_t la, size_t lb) {
+#ifdef SP_THREADS
+  (void)la; (void)lb;
+  sp_str_lcache_drop(s);
+#else
+  unsigned h = sp_str_lcache_slot(s);
+  for (unsigned w = 0; w < SP_STR_LCACHE_WAYS; w++) {
+    struct sp_str_lcache_entry *e = &sp_str_lcache[h + w];
+    if (e->s != s) continue;
+    if ((e->char_len < 0 ? e->now_len : e->byte_len) != la) e->s = NULL;
+    else {
+      e->now_len = la + lb;
+      if (e->char_len >= 0) e->char_len = ~e->char_len;
+    }
+    break;   /* a string has one entry: sp_str_length stores only on a miss */
+  }
+#endif
 }
 /* Deep-return side channel (#3227): a method whose every return path yields
    a shared-mutable string publishes the sp_String* handle here as the copy
