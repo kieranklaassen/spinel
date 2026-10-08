@@ -11,6 +11,8 @@
 #include "sp_alloc.h"   /* sp_gc_alloc, sp_gc_bytes/hdr, sp_str_hdr, sp_str_byte_len, sp_raise_cls */
 #include <string.h>
 
+int sp_str_ascii_only(const char *s);
+
 /* `binary` is the ASCII-8BIT tag, kept on the HANDLE: sp_fd_setup zeroes the
    payload header on every grow, so the tag has to be re-stamped after each
    mutation rather than living only in the bytes. `chilled` is nonzero for a
@@ -134,9 +136,24 @@ static inline void sp_String_append(sp_String*s,const char*t){if(!s||!t)return;i
 /* Replace the buffer contents in place (the handle stays stable, so every
    alias and container holding it observes the new value; #3227). */
 static inline void sp_String_set_bin(sp_String*s,const char*t){if(!s||!t)return;if(sp_String_is_frozen(s)){sp_raise_frozen_str(s->data);return;}s->len=0;sp_fd_append_len(s,t,(int64_t)sp_str_byte_len(t));}
+/* The bytes a read put into its (len, outbuf) buffer: binary-safe, and the
+   buffer becomes ASCII-8BIT, as CRuby's readpartial/sysread/read_nonblock
+   leave it. */
+static inline void sp_String_set_read_bytes(sp_String*s,const char*t){if(!s||!t)return;sp_String_set_bin(s,t);s->binary=1;sp_fd_publish(s);}
 /* the first tl bytes of t: the append form of an interpolation (emit_interp_append) */
 static inline void sp_String_append_n(sp_String*s,const char*t,size_t tl){if(!s||!t)return;if(sp_String_is_frozen(s)){sp_raise_frozen_str(s->data);return;}sp_fd_append_len(s,t,(int64_t)tl);}
-static inline void sp_String_append_bin(sp_String*s,const char*t){if(!s||!t)return;if(sp_String_is_frozen(s)){sp_raise_frozen_str(s->data);return;}sp_fd_append_len(s,t,(int64_t)sp_str_byte_len(t));}
+/* append_as_bytes preserves the handle's encoding as well as embedded NULs. */
+static inline void sp_String_append_bytes(sp_String*s,const char*t){if(!s||!t)return;if(sp_String_is_frozen(s)){sp_raise_frozen_str(s->data);return;}sp_fd_append_len(s,t,(int64_t)sp_str_byte_len(t));}
+static inline void sp_String_append_bin(sp_String*s,const char*t){
+  if(!s||!t)return;
+  if(sp_String_is_frozen(s)){sp_raise_frozen_str(s->data);return;}
+  if (s->binary && !sp_str_is_binary(t) &&
+      !sp_str_ascii_only(t) && sp_str_ascii_only(s->data)) {
+    s->binary=0;
+    sp_str_as_text(s->data);
+  }
+  sp_fd_append_len(s,t,(int64_t)sp_str_byte_len(t));
+}
 /* Handle wrap for CODEGEN-emitted sources only: every spinel-emitted string
    carries a marker byte at s[-1], so the frozen state (0xf1: an explicit
    .freeze / frozen_string_literal) can be inherited safely. Runtime-internal
@@ -183,13 +200,19 @@ static inline sp_String*sp_String_new_shared(const char*s){
   if(SP_UNLIKELY(mk==0xfb))sp_String_chill(r,s);   /* a static: still there after the allocation */
   return r;
 }
+/* An expression of either String face as the shared handle: a handle is
+   itself, a plain String is wrapped in a fresh one. The emitter writes it where
+   a typed handle parameter is filled from an expression whose own emitter
+   answers either (`+""`, a fresh String's builtin), and does not know which. */
+static inline sp_String*sp_string_handle_id(sp_String*h){return h;}
+#define SP_AS_STRING_HANDLE(x) _Generic((x), sp_String *: sp_string_handle_id, default: sp_String_new_shared)(x)
 /* sp_String_new_shared for a String no one else holds (a literal's copy, a
    temporary, a plain String a handle parameter reads off the boxed channel):
    the same length and marks, over a payload inside the object. */
 static inline sp_String*sp_String_new_fresh(const char*s){
   if(!s)return NULL;
   int bin=sp_str_is_binary(s);
-  int frozen=(((const unsigned char*)s)[-1]==0xf1);
+  int frozen=sp_str_is_frozen_val(s);
   int mk=((const unsigned char*)s)[-1];
   int64_t len=(int64_t)sp_str_byte_len(s);
   sp_String*r=sp_String_new_inline_len(s,len);

@@ -27,6 +27,17 @@ const char *ffi_arg_str(const NodeTable *nt, int nid);
 int ffi_arg_int(const NodeTable *nt, int nid);
 TyKind ffi_spec_to_ty(const char *spec);
 int ffi_find_func(Compiler *c, const char *mod, const char *name);
+/* `Fiber.new { }`'s block, or -1 */
+int an_fiber_new_block(Compiler *c, int v);
+/* --share-strings: can boxed or untyped receiver r be a String
+   (analyze.c)? `lits` is the asker's: bound() says how a literal block or
+   a lambda of scope `scope` binds variable `name`: 0 not at all, 1 only as
+   Enumerator.new's yielder, 2 another way (analyze_share.c keeps it). */
+typedef struct PolyLits {
+  int (*bound)(void *ctx, Compiler *c, int scope, const char *name);
+  void *ctx;
+} PolyLits;
+int an_recv_may_be_string(Compiler *c, int r, const PolyLits *lits);
 int ffi_find_buf(Compiler *c, const char *mod, const char *name);
 int ffi_find_reader(Compiler *c, const char *mod, const char *name);
 int ffi_find_writer(Compiler *c, const char *mod, const char *name);
@@ -64,7 +75,27 @@ int proc_to_proc_method_nodes(Compiler *c, int recv, int **out);
 int local_sole_range_node(Compiler *c, int recv);
 int const_array_elems_all_int_array(Compiler *c, const char *cname);
 int *an_parent_map(const NodeTable *nt);
+/* The definite-assignment walk (analyze.c), shared with the nil facts
+   (analyze_nil.c): the program's parent map, each statement's place in its
+   list (filled one list at a time, -1 for a node not in its parent's list),
+   whether a read of local `nm` can run before any write of it, and the
+   per-list memo the walk keeps, freed once a pass is done with it. */
+typedef struct { int *pos; char *done; } DUPos;
+int *du_parent_map(const NodeTable *nt);
+int du_read_maybe_unset(const NodeTable *nt, const int *par, DUPos *dp, int rd, const char *nm);
+void du_memo_free(void);
 int an_value_dropped(const NodeTable *nt, const int *parent, int node);
+/* The methods the default build may lend a String parameter's slot by
+   address (elig, c->nscopes entries), and whether it passes parameter pi
+   of method mi by value: no slot and no shared handle reach it, because a
+   member of its name group may not take either. A spliced yielder's
+   parameters alias the caller's String, and are not passed by value.
+   analyze.c */
+void an_byref_eligible_scopes(Compiler *c, char *elig);
+int an_byref_param_by_value(Compiler *c, const char *elig, int mi, int pi);
+/* A runtime protocol name: the emitted program can call the method with
+   no CallNode of its own (`puts obj` calls to_s). analyze.c */
+int method_name_implicitly_invoked(const char *nm);
 int local_all_writes_empty_hash(Compiler *c, Scope *sc, const char *name);
 int local_all_writes_empty_hash_or_new(Compiler *c, Scope *sc, const char *name);
 int method_call_param_shift(Compiler *c, int mn, int mi);
@@ -80,19 +111,25 @@ typedef struct { int node; char path[QC_MAXDEPTH][64]; int depth; char name[128]
 int is_builtin_class_name(const char *n);
 void refuse_unreachable_bare_constants(Compiler *c);
 int is_builtin_module_name(const char *n);
+int builtin_module_at(int i, const char **name, int *id);
 int is_builtin_exception_name(const char *n);
 const char *superclass_builtin_exc_name(const NodeTable *nt, int sc);   /* analyze_util.c */
 int is_syserr_family_name(const char *n);           /* analyze_util.c */
 int builtin_method_known(const char *cls, const char *m);
 int builtin_method_names(const char *cls, const char **out, int cap);
+int builtin_name_arity_span(const char *name, int with_block, int *lo, int *hi);
+int builtin_kernel_fn_span(const char *name, int with_block, int *lo, int *hi);
 int builtin_arity_violation(Compiler *c, int id);
 int is_handler_proc_block(Compiler *c, int id);
 int builtin_class_id(const char *name);
 int builtin_class_parent_id(int id);
 int desugar_builtin_reopen_named_superclass(Compiler *c);
+int desugar_builtin_reopen_self_class(Compiler *c);
+int desugar_time_singleton_bare_ctor(Compiler *c);
 const char *class_ruby_name(Compiler *c, int ci); /* codegen.c */
 int builtin_object_method_known(const char *m);
 int core_method_name(const char *n);   /* analyze_desugar.c: a core class's public method */
+int object_public_method_name(const char *n); /* analyze_desugar.c: one of Object's public instance methods */
 int class_inherits_builtin_exception(Compiler *c, int ci);
 int an_user_defines_or_reads(Compiler *c, const char *name);
 /* The universal "what a receiver answers" table (analyze_infer.c) and the
@@ -107,12 +144,20 @@ int an_user_ret_disagrees(Compiler *c, const char *name, TyKind want);
 int an_ty_holds_nil(TyKind t);
 int gvar_seeded_before_read(Compiler *c, const char *gname);
 int an_empty_container_kind(Compiler *c, int b);
+int an_literal_int_rows(Compiler *c, int arr);
 int an_empty_container_disagrees(int kind, TyKind other);
 int an_or_empty_hash_fallback(Compiler *c, int node);
 int an_chunk_family_to_a(Compiler *c, int id);
 const char *an_regex_lit_src(Compiler *c, int nid);
 int str_in(const char *s, const char *const *set);
-int an_unparen(const NodeTable *nt, int n);
+/* array element facts analyze.c's Integer/Float Array marks and the nil
+   fact's pointer Array marks (analyze_nil.c) share */
+int elem_preserving_call(const char *nm);
+int slice_read_call(Compiler *c, int call);
+int mutated_array(Compiler *c, int recv);
+int array_mutation_stores(Compiler *c, int call, int strict, int *from, int *to, int *elems);
+int elem_block_params(Compiler *c, int call, int *recv_out);
+int nullable_elem_ivar_in(Compiler *c, int cid, const char *nm, ClassInfo **out);
 int blk_locals_have(const char *locals, const char *nm);
 /* The calls named `name`, ascending: for (id = an_calls_named_first(c, nm);
    id >= 0; id = an_calls_named_next(id)). Check each node as before. */
@@ -136,8 +181,34 @@ int an_bare_call_class_owned(Compiler *c, int id);
    (0-based, matching ivar order) or -1. */
 int struct_member_idx(Compiler *c, ClassInfo *sc, int keynode);
 int struct_member_idx_float(Compiler *c, ClassInfo *sc, int keynode);
+/* A Struct `[]=` (analyze_scope.c): 1 for call id on a receiver typed as
+   a class (*cls; only a key no literal names is left a `[]=` there), 2 on
+   a boxed one, which reaches the classes poly_recv_classes lists, 0 for no
+   such call. struct_aset_members: 1 when class k's `[]=` is the Struct's
+   own (no `[]=` of the program's; cplan_struct_aset's), with the members
+   [*lo, *hi) the key can name (none for a literal naming no member: it
+   raises). */
+int struct_aset_receiver(Compiler *c, int id, int *cls);
+int struct_aset_members(Compiler *c, int id, int k, int *lo, int *hi);
+/* Can the `[]=` that node id makes on its receiver (a call, an index
+   op-write, an index target) store into a Struct's member: a receiver typed
+   as such a Struct, or a box that can hold one (every box whose classes the
+   analysis cannot bound, when the program has one)? */
+int struct_aset_may_reach(Compiler *c, int id);
+/* The classes the boxed receiver of call `call` can be an instance of, *n
+   of them, or NULL when the analysis cannot bound them (analyze_scope.c) */
+/* Kernel#String uses its argument as the conversion's implicit receiver. */
+const int *poly_recv_classes(Compiler *c, int call, int *n);
+/* A read of a String slot the share rule holds as the handle (analyze.c) */
+int an_arg_is_shared_handle(Compiler *c, int node);
 /* Last statement of a scope's body, or -1. */
 int scope_body_last(Compiler *c, int mi);
+/* The expressions whose value method scope mi answers (its body's and each
+   `return`'s; see analyze_pass.c). Answers the count, or -1. */
+int method_value_leaves(Compiler *c, int mi, int *out, int cap);
+int method_value_leaves_or_nil(Compiler *c, int mi, int *out, int cap);
+int block_given_tail_then_last(Compiler *c, int last);
+int super_forwards_caller_block(Compiler *c, int id);
 /* 1 if `node` is `<&block-param>.call(...)` / .() / [] for method mi -- the
    explicit-call equivalent of `yield`, inlined the same way. */
 int is_blk_param_call(Compiler *c, int node, int mi);
@@ -155,6 +226,9 @@ TyKind yield_value_type(Compiler *c, int mi);
 int yield_block_tails(Compiler *c, int mi, int *out, int max);
 /* The block value reaching `mi` from a child's `super` (see analyze_util.c). */
 TyKind yield_value_type_via_super(Compiler *c, int mi);
+/* Whether a block-passing call hands on its enclosing method's own block
+   (`...`, `&` of the block parameter) rather than a proc value of its own. */
+int call_forwards_own_block(Compiler *c, int cid);
 int yield_value_diverges(Compiler *c, int mi);
 TyKind yield_aware_elem_ty(Compiler *c, int node);
 int an_user_defines_method(Compiler *c, const char *name);
@@ -171,6 +245,13 @@ int object_reopen_answers(Compiler *c, const char *cls, int call_id, TyKind *out
 /* 1 if `id` is any proc-creating literal: a proc/lambda/Proc.new call (above)
    or a `->(){}` LambdaNode. */
 int is_proc_create(Compiler *c, int id);
+int local_proc_literal_param_of(Compiler *c, Scope *sc, const char *nm);
+int proc_literal_calls_in_sight(Compiler *c, int lit);
+int proc_lit_carrier(Compiler *c, int v, int lit);
+int widen_hash_arg_for_store(Compiler *c, int arg, TyKind hk, TyKind hv);
+int pivs_settle_hash_stores(Compiler *c);
+int pivs_hash_stores_widened(Compiler *c);
+int subtree_has_side_effect(Compiler *c, int id);   /* codegen_util.c */
 
 /* Shared cached local-write index (analyze_pass.c): bucket walk over
    (scope, name) for "every write of local X in scope S" queries, instead of
@@ -245,19 +326,19 @@ int multi_return_elem_types(Compiler *c, int value, TyKind *out, int max);
 void resolve_parents(Compiler *c);
 void resolve_inherited_aliases(Compiler *c);
 void process_include_body(Compiler *c, int ci, int body_node);
+void desugar_module_prepends(Compiler *c);
 void register_includes(Compiler *c);
 void register_include_attrs(Compiler *c);
 void rewrite_attr_supers(Compiler *c);
 void unmark_referenced_module_sources(Compiler *c);
 void register_extends(Compiler *c);
-int cmethod_has_bare_new(Compiler *c, int mi);
 int cmethod_needs_specialization(Compiler *c, int mi, int ci, int def_cls, int *has_new);
 int class_value_escapes(Compiler *c, int cid);
 void specialize_inherited_cls_new(Compiler *c);
 void register_prepends(Compiler *c);
 void inherit_members(Compiler *c);
 int infer_inherited_ivars(Compiler *c);
-int infer_cvar_types(Compiler *c);
+int infer_cvar_types(Compiler *c, int nil_only);
 int infer_ivar_types(Compiler *c);
 /* 1 if `name` (incl '@') is an ivar pinned by an --rbs seed in class `ci`;
    the ivar inference write sites consult this to avoid widening a pinned slot. */
@@ -270,9 +351,10 @@ void seed_unsupplied_nil_defaults(Compiler *c);
 int infer_container_flow(Compiler *c);
 int an_builtin_only_p(void);
 TyKind an_builtin_answer(Compiler *c, int id);
+int an_yield_site_builtin_answer(Compiler *c, int id, TyKind kind, TyKind *out);
+extern int g_scopes_settled;   /* analysis done (codegen_util.c) */
 int poly_expr_flows_container(Compiler *c, int node);
-int reconcile_locals_reading_ivars(Compiler *c);
-int widen_object_locals_from_poly_writes(Compiler *c);
+int rejoin_local_writes(Compiler *c);
 int widen_arrays_from_map_bang(Compiler *c);
 void intern_block_params(Compiler *c);
 int local_all_writes_empty_array(Compiler *c, Scope *sc, const char *name);
@@ -295,13 +377,27 @@ int rest_packable_arm(Compiler *c, Scope *s);                    /* codegen_fold
    reads as a plain String). Shared with the receiver-face helpers. */
 TyKind ivar_value_ty(ClassInfo *ci, int iv);
 int infer_range_call(Compiler *c, int id, TyKind rt, TyKind *out);
+int range_object_face(const char *name);  /* Object's face of a Float / String range */
 int infer_poly_call(Compiler *c, int id, TyKind rt, TyKind *out);
 int infer_object_call(Compiler *c, int id, TyKind rt, TyKind *out);
+int infer_arysub_call(Compiler *c, int id, TyKind *out);
 int infer_array_call(Compiler *c, int id, TyKind rt, TyKind *out);
 int infer_hash_call(Compiler *c, int id, TyKind rt, TyKind *out);
+/* bop_find for the call `id`, recording the row under --plan-check */
+struct BuiltinOp;
+const struct BuiltinOp *an_bop_find(Compiler *c, int id, TyKind rt, const char *name,
+                                    int argc, int has_block);
+/* method_call_ret(c, mi, id) for a call an arm of infer_call bound to the
+   user method mi, recording the binding (via UC_*, the class owner_ci whose
+   chain was searched) under --plan-check */
+TyKind an_user_call(Compiler *c, int id, int mi, int via, int owner_ci);
+/* the record alone, for an arm that answers the bound call another way */
+void an_user_call_record(Compiler *c, int id, int mi, int via, int owner_ci);
 int infer_numeric_call(Compiler *c, int id, TyKind rt, TyKind *out);
 /* The array a map-shaped call answers from its block's tail (analyze_infer_recv.c). */
 TyKind infer_map_block_ty(Compiler *c, int id, int block);
+/* A call written `recv&.name` (analyze_infer_recv.c). */
+int call_is_safe_nav(const NodeTable *nt, int id);
 /* A range endpoint that is the infinite Float constant (analyze_infer.c). */
 int infer_end_is_float_inf(Compiler *c, int right);
 int propagate_prep_params(Compiler *c);
@@ -313,6 +409,7 @@ int infer_hash_params(Compiler *c);
 int infer_array_params(Compiler *c);
 int infer_string_params(Compiler *c);
 int infer_param_types(Compiler *c);
+int infer_param_types_settle(Compiler *c);
 int infer_for_index(Compiler *c);
 int infer_catch_block_params(Compiler *c);
 void infer_bigint_loop_locals(Compiler *c);
@@ -375,6 +472,7 @@ int desugar_forwarding_to_rest_callee(Compiler *c);
 int desugar_anon_block_param(Compiler *c);
 int desugar_singleton_class_define_method(Compiler *c);
 int desugar_define_method_proc_arg(Compiler *c);
+int method_body_next_to_return(NodeTable *nt, int id);
 int desugar_define_method_captures(Compiler *c);
 int desugar_define_method_keywords(Compiler *c);
 void desugar_extended_module_attrs(Compiler *c);
@@ -387,6 +485,7 @@ int desugar_class_eval_value(Compiler *c);
 int desugar_instance_eval_builtin(Compiler *c);
 int desugar_builtin_class_var_recv(Compiler *c);
 int desugar_class_body_bare_new(Compiler *c);
+int desugar_bare_spawn(Compiler *c);
 int desugar_bare_class_self_calls(Compiler *c);
 int desugar_ie_bare_object_calls(Compiler *c);
 int desugar_bare_object_reopen_calls(Compiler *c);
@@ -412,18 +511,20 @@ int desugar_handle_attr_accessor(Compiler *c);
 int desugar_handle_reopen_self_recv(Compiler *c);
 int desugar_call_or_write_reopen(Compiler *c);
 int desugar_static_class_eval(Compiler *c);
+void desugar_nil_block_arg(Compiler *c);
 int desugar_compose_method_operand(Compiler *c);
 int desugar_mutator_receiver_value(Compiler *c);
 int desugar_method_curry(Compiler *c);
 int desugar_curry_arity_to_int(Compiler *c);
 int desugar_int_enum_with_index(Compiler *c);
+int desugar_hash_iter_with_index(Compiler *c);
+int desugar_array_op_to_ary(Compiler *c);
 int widen_shared_cmp_params(Compiler *c);
 int desugar_reduce_proc_arg(Compiler *c);
 int desugar_block_capture_wrap(Compiler *c);
 int desugar_user_not_match(Compiler *c);
 int desugar_env_enum(Compiler *c);
 int desugar_dir_surface(Compiler *c);
-const char *builtin_class_var_static_name(Compiler *c, int node);
 int local_write_binds_value(NodeKind k);
 int desugar_enumerable_chain(Compiler *c);
 int desugar_implicit_send(Compiler *c);
@@ -435,6 +536,7 @@ void expand_static_splat_args(Compiler *c, int from, int count);
 int desugar_dynamic_method(Compiler *c);
 int desugar_method_call_runtime_name(Compiler *c);
 int desugar_engine_branches(Compiler *c);
+int desugar_paren_def_body(Compiler *c);
 int desugar_conditional_defs(Compiler *c);
 int desugar_dynamic_respond_to(Compiler *c);
 int desugar_toplevel_instance_exec(Compiler *c);
@@ -445,7 +547,10 @@ int desugar_defined_method_call(Compiler *c);
 int desugar_respond_to_probe(Compiler *c);
 int desugar_symbol_to_proc_call(Compiler *c);
 int desugar_call_op_write(Compiler *c);
+int desugar_reopened_op_write(Compiler *c);
 int desugar_array_at(Compiler *c);
+int desugar_unpack_block(Compiler *c);
+int desugar_interp_reopened_to_s(Compiler *c);
 int desugar_array_first_last(Compiler *c);
 int desugar_enum_iter_splat_args(Compiler *c);
 int desugar_builtin_iter_block_shapes(Compiler *c);
@@ -462,6 +567,9 @@ int desugar_builtin_reopen_self_calls(Compiler *c);
 int desugar_builtin_reopen_methods(Compiler *c);
 int desugar_object_method_builtin_overrides(Compiler *c);
 int desugar_body_ivars(Compiler *c);
+int desugar_const_ivar_access(Compiler *c);
+int desugar_literal_undef_method(Compiler *c);
+int desugar_builtin_ivars(Compiler *c);
 void mark_match_ranges(Compiler *c);
 int desugar_duplicate_underscore_params(Compiler *c);
 int desugar_encoding_queries(Compiler *c);
@@ -512,7 +620,6 @@ int blkp_binds_param(Compiler *c, int create, const char *name);
 void blkp_rewrite_refs(Compiler *c, int node, const char *oldn, const char *newn);
 void numbered_rename_locals_str(NodeTable *nt, int L, const char *from, const char *to);
 void blkp_mark_subtree(const NodeTable *nt, int node, char *marks);
-int blkp_needs_rename(Compiler *c, int L);
 void qc_collect_writes(Compiler *c, int node, char (*path)[64], int depth, QCWrite **ws, int *n, int *cap);
 int qc_read_chain(const NodeTable *nt, int node, char (*chain)[64], int *abs_anchor);
 void qc_qualified_name(char *out, size_t cap, const QCWrite *w);
@@ -536,6 +643,7 @@ int is_descendant(Compiler *c, int k, int anc);
 int dispatch_impl_count(Compiler *c, int cid, const char *name);
 /* Defined in codegen_util.c; the proc-form clone of scope `s`, or -1. */
 int scope_proc_form_of(Compiler *c, int s);
+int ctor_site_on_cycle(Compiler *c, int id, int initm);
 /* Defined in codegen_fold.c; the parameter a keyword hash binds as one more
    positional argument after `pos_argc` others, or -1. */
 int kwh_arg_param(Compiler *c, Scope *m, int pos_argc);
@@ -546,9 +654,9 @@ extern const char *g_ext_entries;
 /* the class every value of a boxed-value hash slot holds, or -1 (#4846) */
 int hv_value_class(Compiler *c, int recv);
 int comp_class_is_module(Compiler *c, ClassInfo *ci);
+int poly_ivar_set_class(Compiler *c, int k);
 int is_builtin_reopen(const char *name);
 char **dsend_candidates(Compiler *c, int *out_n);
 int exc_reopen_definers(Compiler *c, const char *mname, int *out, int max);
 
 #endif
-
