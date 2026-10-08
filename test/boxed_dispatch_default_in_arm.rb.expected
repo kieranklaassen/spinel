@@ -1,0 +1,15 @@
+sym [:abc]
+rng 1
+tk ["tk", 1]
+other
+other
+1
+sym [:loc]
+rng 4
+other
+tk ["tk", 2]
+2
+pair [3] [2] [3]
+other pair
+3
+rng 7
