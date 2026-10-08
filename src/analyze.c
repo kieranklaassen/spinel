@@ -9462,6 +9462,15 @@ static int oa_obj_class_of(Compiler *c, int node) {
      not known yet, nil (a NULL element) and a boxed poly value stay neutral:
      the poly may well be the class (a widened return, #4293), and the push
      emitter unboxes it with the class check at run time. */
+  /* An empty `{}` and a bare `Array.new` have no type yet either, but each
+     is built as the container it is, a Hash and a boxed Array: no row of a
+     table and no object. Only the empty `[]` literal is built at the row's
+     kind (oa_note_empty). Neutral, the table narrowed around them and read
+     them back as rows: `t = [[1, 2]]; t << {}; p t[1]` did not come back. */
+  if (t == TY_UNKNOWN && node >= 0) {
+    int ek = an_empty_container_kind(c, node);
+    if (ek == 2 || (ek == 1 && nt_kind(c->nt, node) == NK_CallNode)) return -2;
+  }
   if (t == TY_UNKNOWN || t == TY_NIL || t == TY_POLY) return -1;
   return -2;
 }
