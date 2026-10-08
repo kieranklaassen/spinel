@@ -9307,6 +9307,164 @@ static int rescue_chain_can_miss(const NodeTable *nt, int rescue) {
 /* Emit one rescue clause (and its `subsequent` chain) inside the handler
    branch. Frame counter `fr` makes the saved cls/msg vars unique. `ens` is
    the id of the begin's ensure region, -1 for a begin that has none. */
+/* The test a rescue clause `id` makes of the class in flight, the C
+   string `clsv`: an expression, true where the clause takes the exception.
+   A clause that names a catch-all class makes none and is not asked. */
+static void emit_rescue_cls_cond(Compiler *c, int id, const char *clsv, Buf *b) {
+  const NodeTable *nt = c->nt;
+  int nexc = 0;
+  const int *exc = nt_arr(nt, id, "exceptions", &nexc);
+  if (nexc == 0) {
+    /* bare rescue: match StandardError and its subclasses only */
+    buf_printf(b, "sp_exc_is_standard_error(%s)", clsv);
+    return;
+  }
+  int first = 1;
+  for (int i = 0; i < nexc; i++) {
+    const char *en = nt_type(nt, exc[i]);
+    /* `rescue *list`: decide against the list's members at run time, so an
+       empty list matches nothing and a non-class member is a TypeError */
+    if (en && sp_streq(en, "SplatNode")) {
+      int sx = nt_ref(nt, exc[i], "expression");
+      if (sx >= 0) {
+        if (!first) buf_puts(b, " || ");
+        first = 0;
+        buf_printf(b, "sp_exc_matches_splat(%s, ", clsv);
+        emit_boxed(c, sx, b);
+        buf_puts(b, ")");
+        continue;
+      }
+    }
+    /* an operand that is plainly not a class or module is a TypeError in
+       CRuby, not a clause that matches everything (#3712) */
+    if (en && !sp_streq(en, "ConstantReadNode") && !sp_streq(en, "ConstantPathNode")) {
+      TyKind ot = comp_ntype(c, exc[i]);
+      if (ot == TY_INT || ot == TY_FLOAT || ot == TY_STRING || ot == TY_SYMBOL ||
+          ot == TY_BOOL || ot == TY_NIL || ty_is_array(ot) || ty_is_hash(ot)) {
+        if (!first) buf_puts(b, " || ");
+        first = 0;
+        buf_puts(b, "((void)("); emit_expr(c, exc[i], b);
+        buf_puts(b, "), sp_raise_cls(\"TypeError\", \"class or module required for rescue clause\"), 0)");
+        continue;
+      }
+    }
+    if (!en || (!sp_streq(en, "ConstantReadNode") && !sp_streq(en, "ConstantPathNode"))) continue;
+    if (!first) buf_puts(b, " || ");
+    first = 0;
+    const char *ename = nt_str(nt, exc[i], "name");
+    /* A builtin namespaced exception (e.g. StringScanner::Error) is raised
+       under its flattened runtime name "StringScanner_Error". Map the path
+       to that form only when it names a known builtin exception, so user
+       classes like M::Err keep matching on their leaf name. */
+    char enbuf[128];
+    if (sp_streq(en, "ConstantPathNode")) {
+      int par = nt_ref(nt, exc[i], "parent");
+      const char *pnm = (par >= 0 && nt_type(nt, par) &&
+                         sp_streq(nt_type(nt, par), "ConstantReadNode"))
+                        ? nt_str(nt, par, "name") : NULL;
+      if (pnm && ename) {
+        /* qualified form first (Math::DomainError), then the legacy
+           flattened form some package raisers still use */
+        snprintf(enbuf, sizeof enbuf, "%s::%s", pnm, ename);
+        if (is_exc_name(enbuf)) ename = enbuf;
+        else {
+          snprintf(enbuf, sizeof enbuf, "%s_%s", pnm, ename);
+          if (is_exc_name(enbuf)) ename = enbuf;
+        }
+      }
+    }
+    /* A user exception class is raised under its QUALIFIED Ruby name
+       (self->cls_name = "App::Error" -- the exception-subclass constructor
+       emission uses class_ruby_name). Canonicalize the rescue target
+       through the (leaf-keyed) class table so both a namespaced arm
+       (`rescue App::Error`, whose AST name is the leaf) and a
+       leaf-referenced arm inside the module match the raised name. Resolve
+       the index BEFORE swapping in the qualified name. */
+    int uci = (ename && !is_exc_name(ename)) ? comp_class_index(c, ename) : -1;
+    if (uci >= 0) {
+      const char *qn = class_ruby_name(c, uci);
+      if (qn) ename = qn;
+    }
+    /* use hierarchy-aware check for exception classes */
+    int is_exc_cls = (ename && is_exc_name(ename)) ||
+                     (uci >= 0 && class_is_exc_subclass(c, uci));
+    /* A namespaced rescue target with NO user class behind it (a package's
+       C-raised exception like JSON::ParserError) also matches the raised
+       name in its `Parent::Leaf` form: the raiser uses the qualified
+       string (so e.class displays like CRuby), while this arm's AST leaf
+       alone would only ever match the bare name. */
+    char qbuf[160]; qbuf[0] = 0;
+    if (sp_streq(en, "ConstantPathNode") && uci < 0 && ename && !is_exc_name(ename)) {
+      /* Rebuild the qualified name by walking the parent chain: a plain
+         `JSON::ParserError` has a ConstantReadNode parent; a root-anchored
+         `::JSON::ParserError` nests a parent-less ConstantPathNode (the
+         leading `::`), which must resolve to the same qualified string. */
+      char segs[8][64]; int nseg = 0;
+      int qpar = nt_ref(nt, exc[i], "parent");
+      int ok = 1;
+      while (qpar >= 0 && nseg < 8) {
+        const char *pty = nt_type(nt, qpar);
+        const char *pn = nt_str(nt, qpar, "name");
+        if (!pty || !pn) { ok = 0; break; }
+        if (sp_streq(pty, "ConstantReadNode")) {
+          snprintf(segs[nseg++], sizeof segs[0], "%s", pn);
+          break;
+        }
+        if (sp_streq(pty, "ConstantPathNode")) {
+          snprintf(segs[nseg++], sizeof segs[0], "%s", pn);
+          qpar = nt_ref(nt, qpar, "parent");   /* -1 = root anchor: done */
+          continue;
+        }
+        ok = 0; break;
+      }
+      if (ok && nseg > 0) {
+        size_t o = 0;
+        for (int si = nseg - 1; si >= 0; si--) {
+          int w = snprintf(qbuf + o, sizeof qbuf - o, "%s::", segs[si]);
+          if (w < 0 || (size_t)w >= sizeof qbuf - o) { qbuf[0] = 0; break; }
+          o += (size_t)w;
+        }
+        if (qbuf[0]) snprintf(qbuf + o, sizeof qbuf - o, "%s", ename);
+      }
+    }
+    /* strcmp rather than sp_str_eq for the name compares: sp_str_eq confirms
+       a strcmp hit by comparing byte lengths, and taking the length of a bare
+       C literal reads its s[-1] marker -- out of bounds, and whatever byte
+       precedes it in rodata. Land on a marker value there and it reads the
+       bytes BEFORE the literal as an sp_str_hdr and answers false for two
+       equal names, with the rodata layout (so the optimizer) deciding. A
+       class or module name carries no NUL, and _rcls_N is never NULL, so
+       strcmp is the right comparison here anyway. */
+    if (is_exc_cls)
+      buf_printf(b, "sp_exc_cls_matches(%s, \"%s\")", clsv, ename);
+    else if (qbuf[0])
+      buf_printf(b, "(strcmp(%s, \"%s\") == 0 || strcmp(%s, \"%s\") == 0)",
+                 clsv, ename, clsv, qbuf);
+    else {
+      /* `rescue M` where M is an included module: an exception matches when
+         its class (or an ancestor) includes M, so expand to the exception
+         classes carrying the module. A module nobody includes keeps the
+         plain name compare (which, like CRuby, never matches a class). */
+      buf_printf(b, "(strcmp(%s, \"%s\") == 0", clsv, ename);
+      if (uci >= 0) {
+        for (int k = 0; k < c->nclasses; k++) {
+          if (!class_is_exc_subclass(c, k)) continue;
+          int inc = 0;
+          for (int a = k; a >= 0 && !inc; a = c->classes[a].parent)
+            for (int m = 0; m < c->classes[a].nincluded_mods; m++)
+              if (c->classes[a].included_mods[m] == uci) { inc = 1; break; }
+          if (!inc) continue;
+          const char *kq = class_ruby_name(c, k);
+          buf_printf(b, " || sp_exc_cls_matches(%s, \"%s\")",
+                     clsv, kq ? kq : c->classes[k].name);
+        }
+      }
+      buf_puts(b, ")");
+    }
+  }
+  if (first) buf_puts(b, "1");  /* no usable type -> always */
+}
+
 void emit_rescue(Compiler *c, int id, Buf *b, int indent, int fr, int ens, const char *resultvar) {
   const NodeTable *nt = c->nt;
   int nexc = 0;
@@ -9348,156 +9506,7 @@ void emit_rescue(Compiler *c, int id, Buf *b, int indent, int fr, int ens, const
   if (!catchall) {
     emit_indent(b, indent);
     buf_puts(b, "if (");
-    if (bare) {
-    /* bare rescue: match StandardError and its subclasses only */
-    buf_printf(b, "sp_exc_is_standard_error(_rcls_%d)", rc);
-    }
-    else {
-    int first = 1;
-    for (int i = 0; i < nexc; i++) {
-      const char *en = nt_type(nt, exc[i]);
-      /* `rescue *list`: decide against the list's members at run time, so an
-         empty list matches nothing and a non-class member is a TypeError */
-      if (en && sp_streq(en, "SplatNode")) {
-        int sx = nt_ref(nt, exc[i], "expression");
-        if (sx >= 0) {
-          if (!first) buf_puts(b, " || ");
-          first = 0;
-          buf_printf(b, "sp_exc_matches_splat(_rcls_%d, ", rc);
-          emit_boxed(c, sx, b);
-          buf_puts(b, ")");
-          continue;
-        }
-      }
-      /* an operand that is plainly not a class or module is a TypeError in
-         CRuby, not a clause that matches everything (#3712) */
-      if (en && !sp_streq(en, "ConstantReadNode") && !sp_streq(en, "ConstantPathNode")) {
-        TyKind ot = comp_ntype(c, exc[i]);
-        if (ot == TY_INT || ot == TY_FLOAT || ot == TY_STRING || ot == TY_SYMBOL ||
-            ot == TY_BOOL || ot == TY_NIL || ty_is_array(ot) || ty_is_hash(ot)) {
-          if (!first) buf_puts(b, " || ");
-          first = 0;
-          buf_puts(b, "((void)("); emit_expr(c, exc[i], b);
-          buf_puts(b, "), sp_raise_cls(\"TypeError\", \"class or module required for rescue clause\"), 0)");
-          continue;
-        }
-      }
-      if (!en || (!sp_streq(en, "ConstantReadNode") && !sp_streq(en, "ConstantPathNode"))) continue;
-      if (!first) buf_puts(b, " || ");
-      first = 0;
-      const char *ename = nt_str(nt, exc[i], "name");
-      /* A builtin namespaced exception (e.g. StringScanner::Error) is raised
-         under its flattened runtime name "StringScanner_Error". Map the path
-         to that form only when it names a known builtin exception, so user
-         classes like M::Err keep matching on their leaf name. */
-      char enbuf[128];
-      if (sp_streq(en, "ConstantPathNode")) {
-        int par = nt_ref(nt, exc[i], "parent");
-        const char *pnm = (par >= 0 && nt_type(nt, par) &&
-                           sp_streq(nt_type(nt, par), "ConstantReadNode"))
-                          ? nt_str(nt, par, "name") : NULL;
-        if (pnm && ename) {
-          /* qualified form first (Math::DomainError), then the legacy
-             flattened form some package raisers still use */
-          snprintf(enbuf, sizeof enbuf, "%s::%s", pnm, ename);
-          if (is_exc_name(enbuf)) ename = enbuf;
-          else {
-            snprintf(enbuf, sizeof enbuf, "%s_%s", pnm, ename);
-            if (is_exc_name(enbuf)) ename = enbuf;
-          }
-        }
-      }
-      /* A user exception class is raised under its QUALIFIED Ruby name
-         (self->cls_name = "App::Error" -- the exception-subclass constructor
-         emission uses class_ruby_name). Canonicalize the rescue target
-         through the (leaf-keyed) class table so both a namespaced arm
-         (`rescue App::Error`, whose AST name is the leaf) and a
-         leaf-referenced arm inside the module match the raised name. Resolve
-         the index BEFORE swapping in the qualified name. */
-      int uci = (ename && !is_exc_name(ename)) ? comp_class_index(c, ename) : -1;
-      if (uci >= 0) {
-        const char *qn = class_ruby_name(c, uci);
-        if (qn) ename = qn;
-      }
-      /* use hierarchy-aware check for exception classes */
-      int is_exc_cls = (ename && is_exc_name(ename)) ||
-                       (uci >= 0 && class_is_exc_subclass(c, uci));
-      /* A namespaced rescue target with NO user class behind it (a package's
-         C-raised exception like JSON::ParserError) also matches the raised
-         name in its `Parent::Leaf` form: the raiser uses the qualified
-         string (so e.class displays like CRuby), while this arm's AST leaf
-         alone would only ever match the bare name. */
-      char qbuf[160]; qbuf[0] = 0;
-      if (sp_streq(en, "ConstantPathNode") && uci < 0 && ename && !is_exc_name(ename)) {
-        /* Rebuild the qualified name by walking the parent chain: a plain
-           `JSON::ParserError` has a ConstantReadNode parent; a root-anchored
-           `::JSON::ParserError` nests a parent-less ConstantPathNode (the
-           leading `::`), which must resolve to the same qualified string. */
-        char segs[8][64]; int nseg = 0;
-        int qpar = nt_ref(nt, exc[i], "parent");
-        int ok = 1;
-        while (qpar >= 0 && nseg < 8) {
-          const char *pty = nt_type(nt, qpar);
-          const char *pn = nt_str(nt, qpar, "name");
-          if (!pty || !pn) { ok = 0; break; }
-          if (sp_streq(pty, "ConstantReadNode")) {
-            snprintf(segs[nseg++], sizeof segs[0], "%s", pn);
-            break;
-          }
-          if (sp_streq(pty, "ConstantPathNode")) {
-            snprintf(segs[nseg++], sizeof segs[0], "%s", pn);
-            qpar = nt_ref(nt, qpar, "parent");   /* -1 = root anchor: done */
-            continue;
-          }
-          ok = 0; break;
-        }
-        if (ok && nseg > 0) {
-          size_t o = 0;
-          for (int si = nseg - 1; si >= 0; si--) {
-            int w = snprintf(qbuf + o, sizeof qbuf - o, "%s::", segs[si]);
-            if (w < 0 || (size_t)w >= sizeof qbuf - o) { qbuf[0] = 0; break; }
-            o += (size_t)w;
-          }
-          if (qbuf[0]) snprintf(qbuf + o, sizeof qbuf - o, "%s", ename);
-        }
-      }
-      /* strcmp rather than sp_str_eq for the name compares: sp_str_eq confirms
-         a strcmp hit by comparing byte lengths, and taking the length of a bare
-         C literal reads its s[-1] marker -- out of bounds, and whatever byte
-         precedes it in rodata. Land on a marker value there and it reads the
-         bytes BEFORE the literal as an sp_str_hdr and answers false for two
-         equal names, with the rodata layout (so the optimizer) deciding. A
-         class or module name carries no NUL, and _rcls_N is never NULL, so
-         strcmp is the right comparison here anyway. */
-      if (is_exc_cls)
-        buf_printf(b, "sp_exc_cls_matches(_rcls_%d, \"%s\")", rc, ename);
-      else if (qbuf[0])
-        buf_printf(b, "(strcmp(_rcls_%d, \"%s\") == 0 || strcmp(_rcls_%d, \"%s\") == 0)",
-                   rc, ename, rc, qbuf);
-      else {
-        /* `rescue M` where M is an included module: an exception matches when
-           its class (or an ancestor) includes M, so expand to the exception
-           classes carrying the module. A module nobody includes keeps the
-           plain name compare (which, like CRuby, never matches a class). */
-        buf_printf(b, "(strcmp(_rcls_%d, \"%s\") == 0", rc, ename);
-        if (uci >= 0) {
-          for (int k = 0; k < c->nclasses; k++) {
-            if (!class_is_exc_subclass(c, k)) continue;
-            int inc = 0;
-            for (int a = k; a >= 0 && !inc; a = c->classes[a].parent)
-              for (int m = 0; m < c->classes[a].nincluded_mods; m++)
-                if (c->classes[a].included_mods[m] == uci) { inc = 1; break; }
-            if (!inc) continue;
-            const char *kq = class_ruby_name(c, k);
-            buf_printf(b, " || sp_exc_cls_matches(_rcls_%d, \"%s\")",
-                       rc, kq ? kq : c->classes[k].name);
-          }
-        }
-        buf_puts(b, ")");
-      }
-    }
-    if (first) buf_puts(b, "1");  /* no usable type -> always */
-    }
+    emit_rescue_cls_cond(c, id, clsbuf, b);
     buf_puts(b, ") {\n");
     indent++;
   }
