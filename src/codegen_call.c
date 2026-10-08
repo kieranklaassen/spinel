@@ -11195,6 +11195,26 @@ static int emit_hash_new_block_arg(Compiler *c, int id, int argc, Buf *b) {
   return 1;
 }
 
+/* Follows the store of a key or a receiver, written at `at`, into the
+   exception _t<te> that KeyError.new, NameError.new or FrozenError.new has
+   just made. Making the value can collect, and a collection promotes the
+   rooted exception, so an old holder takes a young value: the store is
+   recorded, as the message's is in emit_super. Each store takes its own,
+   since making the receiver can collect again. A scalar's box is no object
+   (nil, true, an Integer, a Float, a Symbol) and a frozen String literal is
+   static storage (emit_frozen_literal): those take none. */
+static void emit_exc_field_wb(Compiler *c, int node, Buf *b, size_t at, int te) {
+  static const char fzl[] = "sp_box_str(((char *)_fzl_";
+  TyKind t = comp_ntype(c, node);
+  if (t == TY_NIL || t == TY_INT || t == TY_FLOAT || t == TY_SYMBOL || t == TY_BOOL) return;
+  const char *s = b->p + at, *end = b->p + b->len;
+  if ((size_t)(end - s) > sizeof fzl - 1 && !strncmp(s, fzl, sizeof fzl - 1)) {
+    for (s += sizeof fzl - 1; s < end && isdigit((unsigned char)*s); s++) ;
+    if (end - s == 4 && !strncmp(s, ".d))", 4)) return;
+  }
+  buf_printf(b, "; sp_gc_wb((void *)_t%d)", te);
+}
+
 static int emit_new_call_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, int *out) {
   if (!(recv >= 0 && (is_hash_constructor(name)))) return 0;
   const char *rty = nt_type(nt, recv);
@@ -11386,13 +11406,15 @@ static int emit_new_call_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, 
           buf_printf(b, "); SP_GC_ROOT(_t%d);", te3);
           if (key_v >= 0) {
             buf_printf(b, " _t%d->xkey = ", te3);
-            emit_boxed(c, key_v, b); buf_puts(b, ";");
+            size_t at = b->len;
+            emit_boxed(c, key_v, b); emit_exc_field_wb(c, key_v, b, at, te3); buf_puts(b, ";");
           }
           else if (sp_streq(cn, "KeyError")) buf_printf(b, " _t%d->has_key = 0;", te3);
           if (recv_v < 0) buf_printf(b, " _t%d->has_recv = 0;", te3);
           if (recv_v >= 0) {
             buf_printf(b, " _t%d->xrecv = ", te3);
-            emit_boxed(c, recv_v, b);
+            size_t at = b->len;
+            emit_boxed(c, recv_v, b); emit_exc_field_wb(c, recv_v, b, at, te3);
             buf_printf(b, "; _t%d->has_recv = 1;", te3);
           }
           buf_printf(b, " _t%d; })", te3);
