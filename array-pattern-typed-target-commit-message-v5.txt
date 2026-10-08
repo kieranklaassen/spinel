@@ -1,0 +1,31 @@
+An Array pattern binds an assigned local to an element of another class
+
+    t = "o"
+    case [3, "s"]
+    in [Integer => t, String]
+      p t                   # 3
+    end
+
+exited 139 with nothing printed, and `n = 0` bound by
+`[String => n, Integer]` over ["a", 4] printed 0. A captured element
+and an element after the splat kept the type the local's assignment
+gave it (infer_case_pattern_locals), so emit_pm_typed_assign unboxed
+an Integer as a String.
+
+The local is boxed now where the element is surely of another class
+and every other use of it prints it or compares it with a literal
+(pm_uses), by a name no method of the program's own can answer for.
+Each entry of pm_uses stands for the classes of value master answers
+right for on a local it boxes itself. Where one such local of a
+program is off the list none is boxed, and any other local writes the
+same C. The cost is the boxed comparison: ten million `t == "o"` take
+0.098 s where they took 0.007.
+
+The capture of an arm that then fails still leaves the local as it
+was, where Ruby keeps the capture.
+
+Test: test/array_pattern_target_typed_before.rb (expected from CRuby
+3.3.6), added to GC_STRESS_TESTS; master refuses it. No other program
+of the corpus changes its generated C.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
