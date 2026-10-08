@@ -1,0 +1,63 @@
+Delta of the one commit 190a80effe1a (tree 6a2f8f465118) on d0577d1d3082 (master 84f5b5020ef8) against the read heads f494c94622db and 2c2190766fd9 (verdict 5, two commits on 9922a2c74ee1).
+
+1. ONE COMMIT (the ruling on T1): the two read commits are squashed. No sentence says master cut the frames.
+
+2. THE CODE, src and lib, by diff of the added and removed lines of the two read commits together (<) and of this commit (>). Everything else is the read code; the five test files are the read blobs.
+26a27,41
+> +/* Can an exception pass every clause of this chain? Only a clause that
+> +   names Exception takes every one; the chain ends at it. */
+> +static int rescue_chain_can_miss(const NodeTable *nt, int rescue) {
+> +  for (int r = rescue; r >= 0; r = nt_ref(nt, r, "subsequent")) {
+> +    int nexc = 0;
+> +    const int *exc = nt_arr(nt, r, "exceptions", &nexc);
+> +    for (int i = 0; i < nexc; i++) {
+> +      const char *en = nt_type(nt, exc[i]);
+> +      if (en && sp_streq(en, "ConstantReadNode") && rescue_is_catchall_name(nt_str(nt, exc[i], "name")))
+> +        return 0;
+> +    }
+> +  }
+> +  return 1;
+> +}
+> +
+42a58,65
+> -    emit_indent(b, indent); buf_printf(b, "void *_excobj%d = NULL;\n", eid);
+> +    /* Where an exception can pass every clause, the arm for no match stores
+> +       the object, and an initializer would then be a store on every entry
+> +       (the local lives across the setjmp). It is written only where the flag
+> +       is set and read only under it, so it takes none there; volatile keeps
+> +       it in the frame, where it costs the entry nothing. */
+> +    int misses = rescue >= 0 && rescue_chain_can_miss(nt, rescue);
+> +    emit_indent(b, indent); buf_printf(b, misses ? "void *volatile _excobj%d;\n" : "void *_excobj%d = NULL;\n", eid);
+48a72,75
+> -      buf_printf(b, "if (strcmp((const char *)sp_last_exc_cls, \"FiberKillSignal\") == 0) { _excf%d = 1; _excmsg%d = sp_exc_msg[sp_exc_top]; _exccls%d = sp_exc_cls[sp_exc_top]; }\n",
+> +      buf_printf(b, "if (strcmp((const char *)sp_last_exc_cls, \"FiberKillSignal\") == 0) { _excf%d = 1; _excmsg%d = sp_exc_msg[sp_exc_top]; _exccls%d = sp_exc_cls[sp_exc_top]; ",
+> +      if (misses) buf_printf(b, "_excobj%d = NULL; ", eid);
+> +      buf_puts(b, "}\n");
+
+Why (a count, not asked by the verdict): on this base a begin with both clauses and a plain ensure body paid one instruction more on entry than beneath (callgrind, gcc -O2, 1,000,000 entries: 139,350,468 to 140,350,496), which the read base hid because every ensure body was rooted there. The cause: the arm for no match assigns `_excobj`, so gcc keeps the local in the frame across the setjmp and its `= NULL` becomes a store on the path with no exception. Where an exception can pass every clause the local is now declared with no initializer and volatile; every statement that sets the flag stores it (the arm a killed Fiber takes stores NULL there), and every read stands under the flag. Without volatile the store goes but gcc takes a sixth callee-saved register in a small method (two instructions an entry). With it, all 34 cost programs are at the level beneath on the path with no exception. One shape of six more is not: two nested begins in a method, the outer with both clauses, pays 1.0 an entry (237,349,761 to 238,349,761 for 1,000,000; gcc pushes one more register), stated in the body.
+
+3. THE MESSAGE: the first read commit's message (<) against this one (>):
+51a52,66
+> The exception that waits for the ensure keeps its backtrace. In a
+> --debug build the arm for no match set sp_bt_keep before it raised
+> again; the raise after the ensure body would take a new snapshot at
+> the begin and cut the frames beneath it. A debug build saves the
+> frames when no clause matches and puts them back for the raise after
+> the ensure body, so they survive a body that raises and rescues an
+> exception of its own, which takes the one buffer. Those lines are
+> emitted under --debug only.
+> 
+> The local that holds the object is assigned in that arm now. Where an
+> exception can pass every clause it takes no initializer, which would be
+> a store on each entry because the local lives across the setjmp, and
+> it is volatile, which keeps it in the frame. It is written wherever the
+> flag is set and read only under the flag.
+> 
+
+4. THE BODY, -v2 against the read one:
+- T1: one commit; the backtrace paragraph says what the arm did and what a debug build does now, and never that master cut the frames.
+- T2: every count retaken on 84f5b5020ef8 (6,611 corpus programs beneath, 21 changed besides the two tests; emit_rescue 338 to 347, emit_begin 346 to 363, rescue_chain_can_miss 12).
+- T3: the "Not here" line of the six programs, in the reader's words.
+- T4: "Depends on" names the one pull request "An ensure keeps the exception it holds while its body runs", in the text and in the last box.
+- New: the paragraph on the local's declaration; the cost paragraph (0 an entry on five programs, the one nested shape at 1.0, 768 a raise no clause takes, the debug row taken on master and here); `make share-strings-test` named as run; the attack set run again on this tip (master 151 of 400, this 233, none lost; the 147 still wrong split 124 and 23 as before).
+- Gone: the sentence on either half alone losing four (not run again), and the titles of changes master does not have.

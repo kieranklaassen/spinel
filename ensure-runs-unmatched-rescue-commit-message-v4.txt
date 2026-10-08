@@ -1,0 +1,70 @@
+An ensure runs when no rescue clause of its begin matches
+
+    def go
+      raise TypeError, "t"
+    rescue ArgumentError
+      puts "not reached"
+    ensure
+      puts "ensure"
+    end
+
+never printed "ensure": the exception went on and the ensure body was
+skipped, so a lock stayed held and a file stayed open. `exit` inside a
+begin with a bare rescue skipped it the same way. A begin with an ensure
+and no rescue was right, and so was a clause that matched.
+
+Such a begin has one frame. On landing the clauses run with that frame
+popped, and the arm for no match raised again at once: a jump to the
+enclosing frame, past the ensure. That arm now stores the exception as
+the begin with no rescue does and falls into the ensure, which raises it
+again after its body. What the clauses let through still leaves by that
+raise and not by the short way to an enclosing ensure, which would pass
+the rescue clauses around this begin.
+
+One shape was right only because that arm went past the ensure:
+
+    begin
+      begin
+        $m.synchronize { raise IOError, "in" }
+      rescue ArgumentError
+      end
+    rescue ArgumentError
+    ensure
+      log << "ensure "
+    end
+
+A synchronize block, and the block of select! and its siblings, emit an
+ensure region of their own, for the unlock and for the array's repair.
+Inside a begin's ensure region they handed the exception straight to
+that ensure and popped one frame. With a begin between the two, the
+frame popped was that begin's, and the outer frame, still armed, caught
+the re-raise after the ensure body. There the arm for no match left
+without the body; now it would run the body a second time. So the two
+regions take the rule emit_begin's own tail has: through
+emit_ensure_exc_block_out they raise the exception again when a frame
+stands between, and the begin between sees it. With a clause there that
+matches, it is rescued, where before the body ran twice and the
+exception left the method. EnsureCtx gains `live`, cleared when the
+region's body is done: in a rescue or else clause of the outer begin no
+frame of it is armed, a re-raise would leave without the ensure body,
+and the exception is handed over as it was.
+
+The exception that waits for the ensure keeps its backtrace. In a
+--debug build the arm for no match set sp_bt_keep before it raised
+again; the raise after the ensure body would take a new snapshot at
+the begin and cut the frames beneath it. A debug build saves the
+frames when no clause matches and puts them back for the raise after
+the ensure body, so they survive a body that raises and rescues an
+exception of its own, which takes the one buffer. Those lines are
+emitted under --debug only.
+
+The local that holds the object is assigned in that arm now. Where an
+exception can pass every clause it takes no initializer, which would be
+a store on each entry because the local lives across the setjmp, and
+it is volatile, which keeps it in the frame. It is written wherever the
+flag is set and read only under the flag.
+
+Nothing is added on the path with no exception, and a begin that lacks
+either clause emits the C it did.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
