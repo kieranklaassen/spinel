@@ -400,14 +400,22 @@ static inline char *sp_str_alloc_nogc(size_t len) {
    length, then the payload. A bare C string, whose length is strlen's, never matches.
    The sixth byte is 0x02 for a frozen String's message (a literal's), so the
    exception's copy is frozen too and `e.message << x` raises FrozenError, as
-   CRuby's message is the literal itself (sp_cmsg_frozen). */
+   CRuby's message is the literal itself (sp_cmsg_frozen).
+   A String of the program can begin with the same six bytes, so they alone do
+   not make a message counted: the length the string itself has must be the
+   header's plus the payload's. That length is read only once the six bytes
+   match, which only a String, with its own header, does. A String that is
+   such a message byte for byte travels counted itself (sp_exc_msg_given). */
 #define SP_CMSG_HDR 10
+static inline size_t sp_str_byte_len(const char *s);
+static inline size_t sp_cmsg_len(const char *m) { uint32_t n; memcpy(&n, m + 6, sizeof n); return n; }
 static inline int sp_cmsg_p(const char *m) {
-  return m && (unsigned char)m[0] == 0xff && (unsigned char)m[1] == 0xfe && m[2] == 'C' &&
-         m[3] == 'M' && (unsigned char)m[4] == 0xfd && ((unsigned char)m[5] == 0x01 || (unsigned char)m[5] == 0x02);
+  if (!(m && (unsigned char)m[0] == 0xff && (unsigned char)m[1] == 0xfe && m[2] == 'C' &&
+        m[3] == 'M' && (unsigned char)m[4] == 0xfd && ((unsigned char)m[5] == 0x01 || (unsigned char)m[5] == 0x02))) return 0;
+  size_t own = sp_str_byte_len(m);
+  return own >= SP_CMSG_HDR && own == SP_CMSG_HDR + sp_cmsg_len(m);
 }
 static inline int sp_cmsg_frozen(const char *m) { return (unsigned char)m[5] == 0x02; }
-static inline size_t sp_cmsg_len(const char *m) { uint32_t n; memcpy(&n, m + 6, sizeof n); return n; }
 static inline const char *sp_msg_heapify(const char *m) {
   if (!m) return NULL;
   if (sp_cmsg_p(m)) {   /* stays counted: a later stage decodes it */

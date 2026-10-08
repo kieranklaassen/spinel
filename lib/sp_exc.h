@@ -95,7 +95,9 @@ const char *sp_exc_cat(int n, ...);   /* parts joined by byte length, NULs kept 
 const char *sp_exc_full_text(volatile sp_Exception *e, const char *msg);       /* "Class: msg" */
 const char *sp_exc_detailed_text(volatile sp_Exception *e, const char *msg);   /* "msg (Class)" */
 /* m is a Spinel String here (the generated code gives only those), so its header's
-   length is safe to read; a NUL inside it travels as a counted message (#7556). */
+   length is safe to read; a NUL inside it travels as a counted message (#7556),
+   and so does a String that is itself one byte for byte, which would be read
+   as its own payload. */
 static inline const char *sp_exc_msg_given(const char *m) {
   if (!m) return m;
   size_t n = sp_str_byte_len(m);
@@ -103,7 +105,7 @@ static inline const char *sp_exc_msg_given(const char *m) {
      empty one as the frozen empty sentinel */
   if (sp_str_is_frozen_val(m)) return n == 0 ? sp_exc_no_msg_frozen : sp_exc_msg_counted_frozen(m, n);
   if (n == 0) return sp_exc_no_msg;
-  return memchr(m, 0, n) ? sp_exc_msg_counted(m, n) : m;
+  return (memchr(m, 0, n) || sp_cmsg_p(m)) ? sp_exc_msg_counted(m, n) : m;
 }
 void *sp_exc_new_sub_sized(size_t sz, const char *cls_name, const char *msg);
 
