@@ -3589,8 +3589,11 @@ static int emit_str_mutator_call(Compiler *c, int id, Buf *b, const NodeTable *n
              itself and every successful mutation answered nil (#4014). */
           int tchg = ++g_tmp;
           buf_printf(b, "const char *_t%d = %s; ", tnb, nbB.p ? nbB.p : "");
-          if (sb_nil_nc)
-            buf_printf(b, "int _t%d = !sp_str_eq(_t%d, _t%d)%s; ", tchg, tob, tnb, subm ? " || sp_re_sub_matched" : "");
+          if (sb_nil_nc) {
+            buf_printf(b, "int _t%d = !sp_str_eq(_t%d, _t%d)%s", tchg, tob, tnb, subm ? " || sp_re_sub_matched" : "");
+            emit_str_tr_bang_hit(c, id, tob, " || ", b);
+            buf_puts(b, "; ");
+          }
           buf_printf(b, "sp_String_set_bin(_t%d, _t%d); ", tsb, tnb);
           free(nbB.p);
           if (sb_nil_nc)
@@ -3640,8 +3643,11 @@ static int emit_str_mutator_call(Compiler *c, int id, Buf *b, const NodeTable *n
       buf_printf(b, "const char *_t%d = %s; ", tn2, nb.p ? nb.p : "");
       free(nb.p);
       emit_str_mut_writeback(c, recv, lvw, tn2, b);
-      if (sb_nil_nc)
-        buf_printf(b, "(sp_str_eq(_t%d, _t%d)%s) ? NULL : _t%d; })", to, tn2, subm2 ? " && !sp_re_sub_matched" : "", tn2);
+      if (sb_nil_nc) {
+        buf_printf(b, "(sp_str_eq(_t%d, _t%d)%s", to, tn2, subm2 ? " && !sp_re_sub_matched" : "");
+        emit_str_tr_bang_hit(c, id, to, " && !", b);
+        buf_printf(b, ") ? NULL : _t%d; })", tn2);
+      }
       else
         buf_printf(b, "_t%d; })", tn2);
       { *out = 1; return 1; }
@@ -12116,7 +12122,9 @@ static void emit_face_str_bang(Compiler *c, int id, unsigned own, Buf *b) {
   int tchg = 0;
   if (nil_nc) {
     tchg = ++g_tmp;
-    buf_printf(b, "int _t%d = !sp_str_eq(_t%d, _t%d); ", tchg, tob, tnb);
+    buf_printf(b, "int _t%d = !sp_str_eq(_t%d, _t%d)", tchg, tob, tnb);
+    emit_str_tr_bang_hit(c, id, tob, " || ", b);
+    buf_puts(b, "; ");
   }
   /* A shared handle absorbs the new contents; a plain string box cannot,
      so an lvalue receiver takes the value back the way the typed path
@@ -13801,9 +13809,9 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
       return 1;
     }
     if (sp_streq(name, "tr") && argc == 2) {
-      buf_puts(b, "sp_str_tr(sp_poly_recv_s("); emit_expr(c, recv, b);
-      buf_puts(b, ", \"tr\"), "); emit_str_expr(c, argv[0], b);
-      buf_puts(b, ", "); emit_str_expr(c, argv[1], b); buf_puts(b, ")");
+      buf_printf(b, "sp_str_tr%s(sp_poly_recv_s(", str_tr_entry(c, argv[0], argv[1])); emit_expr(c, recv, b);
+      buf_puts(b, ", \"tr\"), "); emit_str_tr_sets(c, argv[0], argv[1], b);
+      buf_puts(b, ")");
       return 1;
     }
     if ((is_substitution(name)) && argc == 2 &&

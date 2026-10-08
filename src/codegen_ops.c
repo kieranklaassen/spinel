@@ -130,6 +130,230 @@ static int emit_op_template(Compiler *c, const BopCtx *x, Buf *b) {
   return 1;
 }
 
+/* ---- String#tr / #tr_s: what the compiler can tell of the two sets -------
+   CRuby translates a character the source set names twice by its LAST
+   position (`"hello".tr("ll", "xy")` is "heyyo"); sp_str_tr answers by the
+   first. A literal set is read here as sp_utf8_decode_charset_n reads it at
+   run time: a backslash escapes the next character, `a-c` is a range. */
+typedef struct { uint32_t lo, hi; } TrRun;
+
+/* one character of UTF-8, strictly; 0 for bytes that are none */
+static int tr_char(const char *s, size_t n, uint32_t *cp) {
+  unsigned char b0 = (unsigned char)s[0];
+  int len = b0 < 0x80 ? 1 : (b0 & 0xe0) == 0xc0 ? 2 : (b0 & 0xf0) == 0xe0 ? 3 : (b0 & 0xf8) == 0xf0 ? 4 : 0;
+  static const uint32_t least[5] = { 0, 0, 0x80, 0x800, 0x10000 };
+  if (!len || (size_t)len > n) return 0;
+  uint32_t v = len == 1 ? b0 : b0 & (0xff >> (len + 1));
+  for (int i = 1; i < len; i++) {
+    if (((unsigned char)s[i] & 0xc0) != 0x80) return 0;
+    v = (v << 6) | ((unsigned char)s[i] & 0x3f);
+  }
+  if (v < least[len] || v > 0x10ffff || (v >= 0xd800 && v <= 0xdfff)) return 0;
+  *cp = v;
+  return len;
+}
+
+/* The runs of a literal set, in the set's order; NULL where the runtime has
+   to read it itself: no literal, bytes that are no character, a descending
+   range (an ArgumentError there). */
+static TrRun *tr_set_runs(Compiler *c, int set, size_t *count) {
+  if (nt_kind(c->nt, set) != NK_StringNode) return NULL;
+  const char *s = nt_str(c->nt, set, "content");
+  size_t n = s ? nt_str_len(c->nt, set, "content") : 0, i = 0, k = 0;
+  TrRun *run = malloc(sizeof(TrRun) * (n + 1));
+  int has_prev = 0, ok = run != NULL;
+  while (ok && i < n) {
+    uint32_t cp, hi;
+    int len = tr_char(s + i, n - i, &cp);
+    i += (size_t)len;
+    if (!len) ok = 0;
+    else if (cp == '\\' && i < n) {
+      len = tr_char(s + i, n - i, &cp);
+      i += (size_t)len;
+      if (!len) ok = 0;
+      else { run[k].lo = run[k].hi = cp; k++; has_prev = 1; }
+    }
+    else if (cp == '-' && has_prev && i < n) {
+      len = tr_char(s + i, n - i, &hi);
+      i += (size_t)len;
+      if (!len || hi < run[k - 1].lo) ok = 0;
+      else { run[k - 1].hi = hi; has_prev = 0; }
+    }
+    else { run[k].lo = run[k].hi = cp; k++; has_prev = 1; }
+  }
+  if (!ok) { free(run); return NULL; }
+  *count = k;
+  return run;
+}
+
+static size_t tr_runs_members(const TrRun *run, size_t k) {
+  size_t m = 0;
+  for (size_t i = 0; i < k; i++) m += run[i].hi - run[i].lo + 1;
+  return m;
+}
+
+static uint32_t tr_runs_at(const TrRun *run, size_t k, size_t at) {
+  for (size_t i = 0; i < k; i++) {
+    size_t m = run[i].hi - run[i].lo + 1;
+    if (at < m) return run[i].lo + (uint32_t)at;
+    at -= m;
+  }
+  return run[k - 1].hi;
+}
+
+/* the last position of a member */
+static size_t tr_runs_last(const TrRun *run, size_t k, size_t members, uint32_t cp) {
+  size_t after = 0;
+  for (size_t i = k; i-- > 0; ) {
+    after += run[i].hi - run[i].lo + 1;
+    if (cp >= run[i].lo && cp <= run[i].hi) return members - after + (cp - run[i].lo);
+  }
+  return 0;
+}
+
+static void tr_put_member(Buf *b, uint32_t cp, int escape) {
+  char u[5];
+  int n = 0;
+  if (escape && (cp == '\\' || cp == '-' || cp == '^')) u[n++] = '\\';
+  if (cp < 0x80) u[n++] = (char)cp;
+  else if (cp < 0x800) { u[n++] = (char)(0xc0 | (cp >> 6)); u[n++] = (char)(0x80 | (cp & 0x3f)); }
+  else if (cp < 0x10000) {
+    u[n++] = (char)(0xe0 | (cp >> 12)); u[n++] = (char)(0x80 | ((cp >> 6) & 0x3f)); u[n++] = (char)(0x80 | (cp & 0x3f));
+  }
+  else {
+    u[n++] = (char)(0xf0 | (cp >> 18)); u[n++] = (char)(0x80 | ((cp >> 12) & 0x3f));
+    u[n++] = (char)(0x80 | ((cp >> 6) & 0x3f)); u[n++] = (char)(0x80 | (cp & 0x3f));
+  }
+  buf_putn(b, u, (size_t)n);
+}
+
+/* How the call reaches the runtime:
+     TR_AS_WRITTEN  sp_str_tr with the two sets as the program has them. The
+                    first position answers as the last would: a negated set
+                    (a membership test), a literal set that names no
+                    character twice, or one whose repeated characters have
+                    the same replacement at each of their positions
+     TR_REWRITTEN   a literal set whose repeat matters, beside a literal
+                    replacement: sp_str_tr with the replacement written out
+                    here (to), each position of a repeated character given
+                    the replacement of its last; self takes the members
+                    that are their own replacement, unescaped
+     TR_AT_RUN_TIME every other set: sp_str_tr_any reads it in the program */
+enum { TR_AT_RUN_TIME, TR_AS_WRITTEN, TR_REWRITTEN };
+#define TR_REWRITE_MEMBERS 4096
+static int str_tr_sets(Compiler *c, int set, int repl, Buf *to, Buf *self) {
+  if (nt_kind(c->nt, set) == NK_StringNode) {
+    const char *s = nt_str(c->nt, set, "content");
+    if (s && nt_str_len(c->nt, set, "content") >= 2 && s[0] == '^' && s[1]) return TR_AS_WRITTEN;
+  }
+  size_t fk = 0, tk = 0;
+  TrRun *fr = tr_set_runs(c, set, &fk);
+  if (!fr) return TR_AT_RUN_TIME;
+  int repeats = 0, kind = TR_AS_WRITTEN;
+  for (size_t i = 0; i < fk && !repeats; i++)
+    for (size_t j = i + 1; j < fk && !repeats; j++)
+      repeats = fr[i].lo <= fr[j].hi && fr[j].lo <= fr[i].hi;
+  TrRun *tr = repeats ? tr_set_runs(c, repl, &tk) : NULL;
+  if (repeats && !tr) kind = TR_AT_RUN_TIME;
+  size_t fn = tr_runs_members(fr, fk), tn = tr ? tr_runs_members(tr, tk) : 0;
+  /* the replacement of position j, as sp_str_tr pads a short set */
+#define TR_REPL(j) tr_runs_at(tr, tk, (j) < tn ? (j) : tn - 1)
+  for (size_t j = 0; tn && kind == TR_AS_WRITTEN && j < fn; j++) {
+    size_t last = tr_runs_last(fr, fk, fn, tr_runs_at(fr, fk, j));
+    if (TR_REPL(j) != TR_REPL(last)) kind = fn <= TR_REWRITE_MEMBERS ? TR_REWRITTEN : TR_AT_RUN_TIME;
+  }
+  if (kind == TR_REWRITTEN && (to || self)) {
+    uint32_t *m = malloc(sizeof(uint32_t) * fn);
+    if (!m) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+    for (size_t j = 0; j < fn; j++) {
+      uint32_t cp = tr_runs_at(fr, fk, j);
+      size_t last = tr_runs_last(fr, fk, fn, cp);
+      m[j] = TR_REPL(last);
+      if (self && last == j && m[j] == cp) tr_put_member(self, cp, 0);
+    }
+    /* sp_str_tr pads with the last member, so a tail of it is written once */
+    size_t n = to ? fn : 0;
+    while (n > 1 && m[n - 2] == m[n - 1]) n--;
+    for (size_t j = 0; j < n; ) {
+      size_t e = j;
+      while (e + 1 < n && m[e + 1] == m[e] + 1) e++;
+      tr_put_member(to, m[j], 1);
+      /* three or more in a row are a range; its upper end is read as it stands */
+      if (e >= j + 2) { buf_puts(to, "-"); tr_put_member(to, m[e], 0); j = e + 1; }
+      else j++;
+    }
+    free(m);
+  }
+#undef TR_REPL
+  free(fr); free(tr);
+  return kind;
+}
+
+/* "" or "_any": the runtime entry `recv.tr(set, repl)` calls */
+const char *str_tr_entry(Compiler *c, int set, int repl) {
+  return str_tr_sets(c, set, repl, NULL, NULL) == TR_AT_RUN_TIME ? "_any" : "";
+}
+
+/* the two sets of the call, as C arguments */
+void emit_str_tr_sets(Compiler *c, int set, int repl, Buf *b) {
+  Buf to;
+  memset(&to, 0, sizeof to);
+  emit_str_expr(c, set, b);
+  buf_puts(b, ", ");
+  if (str_tr_sets(c, set, repl, &to, NULL) == TR_REWRITTEN) emit_str_literal_n(b, to.p ? to.p : "", to.len, 0);
+  else emit_str_expr(c, repl, b);
+  free(to.p);
+}
+
+/* tr! / tr_s! answer the receiver once one of its characters is in the set,
+   and their callers ask by comparing the texts. sp_str_tr's first match made
+   `s.tr!("hh", "Hh")` change the text; translated by the last position it
+   does not. So where the call is no longer sp_str_tr on the sets as written,
+   the question itself is added to the caller's test: lead, then whether a
+   character of _t<old>, the receiver's text before the call, is in the set.
+   For literal sets only the members that are their own replacement can be
+   in a text that came out the same: one is looked for, more are counted,
+   and where there are none nothing is added. */
+void emit_str_tr_bang_hit(Compiler *c, int id, int old, const char *lead, Buf *b) {
+  const char *name = nt_str(c->nt, id, "name");
+  int argc;
+  const int *argv = call_args(c->nt, id, &argc);
+  Buf self, set;
+  uint32_t cp;
+  memset(&self, 0, sizeof self);
+  memset(&set, 0, sizeof set);
+  if (!name || argc != 2 || (!sp_streq(name, "tr!") && !sp_streq(name, "tr_s!"))) return;
+  int kind = str_tr_sets(c, argv[0], argv[1], NULL, &self);
+  if (kind == TR_AT_RUN_TIME) buf_printf(b, "%ssp_str_tr_matched", lead);
+  else if (kind == TR_REWRITTEN && self.len) {
+    int one = (size_t)tr_char(self.p, self.len, &cp) == self.len && cp;
+    for (size_t i = 0; !one && i < self.len; i += (size_t)tr_char(self.p + i, self.len - i, &cp)) {
+      tr_char(self.p + i, self.len - i, &cp);
+      tr_put_member(&set, cp, 1);
+    }
+    buf_printf(b, "%ssp_str_%s(_t%d, ", lead, one ? "include" : "count", old);
+    emit_str_literal_n(b, one ? self.p : set.p, one ? self.len : set.len, 0);
+    buf_puts(b, ")");
+  }
+  free(self.p); free(set.p);
+}
+
+/* String#tr / #tr_s (the row's text is the call as written) */
+static int emit_op_str_tr(Compiler *c, const BopCtx *x, Buf *b) {
+  int argc;
+  const int *argv = call_args(c->nt, x->id, &argc);
+  BuiltinOp op = *x->op;
+  BopCtx y = *x;
+  char head[32];
+  snprintf(head, sizeof head, "sp_str_%s%s($r, ", op.name, str_tr_entry(c, argv[0], argv[1]));
+  op.arg = head;
+  y.op = &op;
+  emit_op_template(c, &y, b);
+  emit_str_tr_sets(c, argv[0], argv[1], b);
+  buf_puts(b, ")");
+  return 1;
+}
+
 /* Process::Status#success?: the runtime answers -1 for CRuby's nil, when
    the process did not exit normally */
 static int emit_op_pstatus_success(Compiler *c, const BopCtx *x, Buf *b) {
@@ -210,6 +434,7 @@ static int (*const bop_emitters[BOPE__COUNT])(Compiler *, const BopCtx *, Buf *)
   [BOPE_POLY_CASE_OPTIONS] = emit_op_poly_case_options,
   [BOPE_STR_SET_N] = emit_op_str_set_n,
   [BOPE_STR_AFFIX_ANY] = emit_op_str_affix_any,
+  [BOPE_STR_TR] = emit_op_str_tr,
   [BOPE_HASH_PATTERN] = emit_op_hash_pattern,
   [BOPE_HASH_PATTERN_ALL] = emit_op_hash_pattern_all,
   [BOPE_HASH_DEFAULT_PROC] = emit_op_hash_default_proc,

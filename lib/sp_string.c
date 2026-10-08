@@ -2,6 +2,7 @@
    prepend / insert / replace / dup are off the hot string-building path, so they
    are compiled once here instead of inline in every generated TU. */
 #include "sp_string.h"
+#include "sp_str.h"
 #include <string.h>
 
 void sp_String_prepend(sp_String*s,const char*t){SP_GC_ROOT(s);SP_GC_ROOT_STR(t);if(!s||!t)return;if(sp_String_is_frozen(s)){sp_raise_frozen_str(s->data);return;}int64_t tl=(int64_t)strlen(t);if(!sp_fd_grow(s,s->len+tl))return;memmove(s->data+tl,s->data,s->len+1);memcpy(s->data,t,tl);s->len+=tl;sp_fd_publish(s);}
@@ -90,3 +91,96 @@ const char*sp_sym_to_s_chilled(sp_sym id){
   SP_HEAP_UNLOCK();
   return r;
 }
+
+/* String#tr / #tr_s with a source set that may name a character twice. CRuby
+   fills its table left to right, so such a character takes its LAST position
+   (`"hello".tr("ll", "xy")` is "heyyo"); sp_str_tr stops at the first.
+   Codegen calls sp_str_tr itself for a literal set, which it reads at
+   compile time (str_tr_sets), and these for a set the program computes. They
+   are here and not in sp_str.c, which sits at gcc's inline limit. */
+typedef struct{uint32_t lo,hi;}sp_str_tr_run;
+/* mark a member in a bitmap; was it marked already? */
+static int sp_str_tr_mark(unsigned char*bits,uint32_t ch){int was=bits[ch>>3]>>(ch&7)&1;bits[ch>>3]|=(unsigned char)(1<<(ch&7));return was;}
+/* Do two of the runs share a member? Pair by pair up to 16 of them, in a
+   bitmap over their span past that. */
+static int sp_str_tr_runs_overlap(const sp_str_tr_run*run,size_t k){
+  size_t i,j;int rep=0;
+  if(k<=16){for(i=0;i<k;i++)for(j=i+1;j<k;j++)if(run[i].lo<=run[j].hi&&run[j].lo<=run[i].hi)return 1;return 0;}
+  uint32_t lo=run[0].lo,hi=run[0].hi;
+  for(i=1;i<k;i++){if(run[i].lo<lo)lo=run[i].lo;if(run[i].hi>hi)hi=run[i].hi;}
+  unsigned char*bits=(unsigned char*)calloc((hi-lo)/8+1,1);
+  for(i=0;i<k&&!rep;i++)for(uint32_t ch=run[i].lo;ch<=run[i].hi;ch++)if(sp_str_tr_mark(bits,ch-lo)){rep=1;break;}
+  free(bits);
+  return rep;
+}
+/* Does the set name a character twice? It is read once, in place, as
+   sp_utf8_decode_charset_n reads it (a backslash escapes, `a-c` is a range):
+   no when its runs ascend, and told by a table when its members are all
+   ASCII. When neither, the runs kept on the way are compared, so a set with
+   no repeat is never searched member against member. A negated set is a
+   membership test, where a repeat changes nothing. A descending range is a
+   yes: sp_str_tr raises on it. */
+static int sp_str_tr_set_repeats(const char*f){
+  if(!f||(f[0]=='^'&&f[1]))return 0;
+  const char*p=f,*end=f+sp_str_byte_len(f);
+  char seen[128]={0};int asc=1,ascii=1,has_prev=0,rep=0;uint32_t prev=0;int64_t last=-1;
+  sp_str_tr_run few[16],*run=few;size_t k=0;
+  while(p<end){
+    uint32_t lo,hi;int range=0;
+    p+=sp_utf8_decode(p,&lo);
+    if(lo=='\\'&&p<end)p+=sp_utf8_decode(p,&lo);
+    else if(lo=='-'&&has_prev&&p<end)range=1;
+    hi=lo;
+    if(range){p+=sp_utf8_decode(p,&hi);lo=prev+1;if(hi<prev){rep=1;break;}}
+    if(lo<=hi){
+      if((int64_t)lo<=last)asc=0;
+      last=hi;
+      if(hi>=0x80)ascii=0;
+      else for(uint32_t ch=lo;ch<=hi;ch++){if(seen[ch]){rep=1;goto told;}seen[ch]=1;}
+      if(k==16&&run==few){run=(sp_str_tr_run*)malloc(sizeof(sp_str_tr_run)*(size_t)(end-f));memcpy(run,few,sizeof few);}
+      run[k].lo=lo;run[k].hi=hi;k++;
+    }
+    prev=hi;has_prev=!range;
+  }
+  if(!asc&&!ascii)rep=sp_str_tr_runs_overlap(run,k);
+told:
+  if(run!=few)free(run);
+  return rep;
+}
+/* Rewrite the two sets with the earlier positions of a repeated character
+   dropped, each member escaped and beside its own replacement: what
+   sp_str_tr reads from those is CRuby's table. The earlier positions are
+   the members a walk from the end finds marked. */
+static void sp_str_tr_last_wins(const char**from,const char**to){
+  size_t fn,tn,a=0,b=0,j;
+  uint32_t*fc=sp_utf8_decode_charset_n(*from,sp_str_byte_len(*from),&fn);
+  uint32_t*tc=sp_utf8_decode_charset_n(*to,sp_str_byte_len(*to),&tn);
+  uint32_t lo=UINT32_MAX,hi=0;
+  for(j=0;j<fn;j++){if(fc[j]<lo)lo=fc[j];if(fc[j]>hi)hi=fc[j];}
+  unsigned char*bits=(unsigned char*)calloc(fn?(hi-lo)/8+1:1,1);
+  char*nf=(char*)malloc(fn*5+1),*nt=(char*)malloc(fn*5+1);
+  for(j=fn;j-->0;)if(sp_str_tr_mark(bits,fc[j]-lo))fc[j]=UINT32_MAX;
+  for(j=0;j<fn;j++){
+    if(fc[j]==UINT32_MAX)continue;
+    nf[a++]='\\';a+=sp_utf8_encode(fc[j],nf+a);
+    if(tn){nt[b++]='\\';b+=sp_utf8_encode(tc[j<tn?j:tn-1],nt+b);}
+  }
+  nf[a]=0;nt[b]=0;
+  char*r=sp_str_alloc(a);memcpy(r,nf,a+1);*from=r;
+  r=sp_str_alloc(b);memcpy(r,nt,b+1);*to=r;
+  free(nf);free(nt);free(bits);free(fc);free(tc);
+}
+/* tr! / tr_s! answer the receiver once one of its characters is in the set,
+   also when the text comes out the same (`"hello".tr!("hh", "Hh")`, where
+   sp_str_tr's first match changed it): the rewritten call says so here. */
+SP_TLS int sp_str_tr_matched=0;
+static const char*sp_str_tr_rewritten(const char*s,const char*from,const char*to,int squeeze){
+  const char*set=from,*r=NULL;
+  SP_GC_ROOT_STR(s);SP_GC_ROOT_STR(from);SP_GC_ROOT_STR(to);SP_GC_ROOT_STR(set);SP_GC_ROOT_STR(r);
+  sp_str_tr_last_wins(&from,&to);
+  r=squeeze?sp_str_tr_s(s,from,to):sp_str_tr(s,from,to);
+  sp_str_tr_matched=sp_str_eq(r,s)&&sp_str_count(s,set)>0;
+  return r;
+}
+const char*sp_str_tr_any(const char*s,const char*from,const char*to){sp_str_tr_matched=0;if(!s||!to||!sp_str_tr_set_repeats(from))return sp_str_tr(s,from,to);return sp_str_tr_rewritten(s,from,to,0);}
+const char*sp_str_tr_s_any(const char*s,const char*from,const char*to){sp_str_tr_matched=0;if(!s||!to||!sp_str_tr_set_repeats(from))return sp_str_tr_s(s,from,to);return sp_str_tr_rewritten(s,from,to,1);}
