@@ -1,0 +1,23 @@
+# gen_cost.rb: the guard's cost loops: a million calls through `&.` of a method the program adds to
+# a builtin, on a receiver that is not nil (each right on master), by where the receiver comes
+# from and what stands beside it; and master's own guard (bsafe against bplain).
+LOOP = "i = 0\nn = 0\nwhile i < 1_000_000\n  x = %s\n  n += 1 if x\n  i += 1\nend\n"
+TOP = {
+  "str"   => ["String", "def tag(a) = size + a",      "s = ARGV.size > 5 ? nil : \"abc\"",   "s&.tag(i)"],
+  "strs"  => ["String", "def tag(a) = self + a",      "s = ARGV.size > 5 ? nil : \"abc\"",   "s&.tag(\"d\")"],
+  "strh"  => ["String", "def tag(a) = size + a.size", "s = ARGV.size > 5 ? nil : \"abc\"",   "s&.tag([i])"],
+  "strk"  => ["String", "def tag(a) = size + a",      "def mk = ARGV.size > 5 ? nil : \"abc\"", "mk&.tag(i)"],
+  "strkh" => ["String", "def tag(a) = size + a.size", "def mk = ARGV.size > 5 ? nil : \"abc\"", "mk&.tag([i])"],
+  "int"   => ["Integer", "def tag(a) = self + a",     "s = ARGV.size > 5 ? nil : 7",         "s&.tag(i)"],
+  "flt"   => ["Float",  "def tag(a) = self + a",      "s = ARGV.size > 5 ? nil : 7.5",       "s&.tag(i)"],
+}
+TOP.each do |n, (cls, meth, setup, call)|
+  File.write("#{n}.rb", "class #{cls}\n  #{meth}\nend\n#{setup}\n#{LOOP % call}p n\n")
+end
+{ "striv" => ["def tag(a) = size + a", "@s&.tag(i)"], "strivh" => ["def tag(a) = size + a.size", "@s&.tag([i])"] }.each do |n, (meth, call)|
+  File.write("#{n}.rb", "class String\n  #{meth}\nend\nclass Box\n  def initialize = @s = ARGV.size > 5 ? nil : \"abc\"\n  def run\n" +
+    (LOOP % call).gsub(/^/, "    ") + "    n\n  end\nend\np Box.new.run\n")
+end
+{ "bplain" => "s.index(\"c\", i & 1)", "bsafe" => "s&.index(\"c\", i & 1)" }.each do |n, call|
+  File.write("#{n}.rb", "s = ARGV.size > 5 ? nil : \"abc\"\n#{LOOP % call}p n\n")
+end

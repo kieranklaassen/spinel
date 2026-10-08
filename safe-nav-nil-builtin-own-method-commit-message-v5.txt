@@ -1,0 +1,63 @@
+A method added to a builtin is not called on nil after &.
+
+`class String; def pair(a) = "#{self}-#{a}"; end` and then `s&.pair(1)`
+with a nil `s` printed "-1": the method ran on the nil, and its
+arguments ran too. The same for a method added to Integer or Float, and
+for a builtin's name the program redefines on one of the three
+(`s&.upcase`, `v&.numerator`).
+
+emit_call_body takes a call of a method the program added to a builtin
+class ahead of every builtin arm. That site never looked at the
+operator, so for a String, an Integer or a Float, which hold nil in
+their own C type, it took the call before the nil guard
+(emit_call_safe_nav_arms) saw it.
+
+The site now writes the guard where the call stands, as one expression
+(emit_reopen_call_first): the receiver into a temp, the nil test, and
+in the arm that is not nil what the call hoists (its arguments' temps)
+and then the call the site made before. Nothing leaves the call's
+place, so what the statement runs ahead of the call still runs ahead of
+it, and an argument runs only for a receiver that is not nil. It is the
+form a boxed receiver's `&.` has, with an `if` for the `?:` so that the
+hoisted statements stand inside the arm.
+
+A String held in a temp is the String as it was, and the call read it
+after its arguments: `s&.pair(add(s))`, where add appends to s and
+answers an Array, passed the longer one, as CRuby's one object shows it.
+So a String that is a read (a local, an instance variable, a global, a
+field) is tested where it stands and read again by the call, as it was.
+Any other String receiver runs once, into a temp, and is guarded only
+where no argument and no default the call leaves out can run the
+program's code (anything but reads, literals and what is made of them; a
+name the program gave the builtin, `[]` on an Array, an operator on an
+operand that is no Integer or Float, `5 == o`, and the hash of a key
+that is no String, Symbol or Integer are such code:
+sn_arg_runs_nothing), and where the method does not keep self as a
+handle (--share-strings: `r.name&.add!("d")`, where add! appends to
+self, takes the receiver's handle, which the temp is not). A read that
+makes such a call, `ys[0]` against the program's Array#[], is not read
+again: it runs once, into the temp. Any other call keeps the C it had.
+The temp is rooted unless nothing can run between it and the call: the
+call hoists nothing and each parameter is given a pure read of its own
+type.
+
+The value is boxed by the type read for the call, so the guard is
+written only where that type is the method's own. A redefined
+`Float#eql?` that answers a Symbol is read as a boolean with or without
+the `&.`, and with it the C does not build; such a call keeps the C it
+had, and so does a boxed receiver.
+
+Leaving the call to reach the guard on its own would not do: the numeric
+arms between this site and the guard (coerce, Rational and Complex, the
+operators, the predicates) answer a name the program redefined,
+`v&.numerator` or `v&.<=>(o)`, with the builtin.
+
+A call on a receiver that is not nil pays the test: 2 instructions on a
+String local, 0 to 5 on an Integer or a Float, and 13 to 21 where the
+receiver is itself a call and an argument is made in place, which roots
+it.
+
+Tests: test/safe_nav_reopened_builtin.rb, and under --share-strings
+test/share/safe_nav_reopened_builtin_handle.rb, which master passes.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

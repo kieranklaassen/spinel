@@ -1,0 +1,464 @@
+===== 1. range-diff 9c7ea3ce06f3..8bf7bcbc8208 against 2810a235d119..f5747aa9ff2e (trailing blanks stripped from its lines) =====
+1:  8bf7bcbc8 ! 1:  f5747aa9f A method added to a builtin is not called on nil after &.
+    @@ Commit message
+         form a boxed receiver's `&.` has, with an `if` for the `?:` so that the
+         hoisted statements stand inside the arm.
+
+    -    A String receiver is rooted in its temp only where something can run
+    -    between the temp and the call and may leave the temp the only holder:
+    -    not where the call hoists nothing and each argument is a plain read of
+    -    its parameter's type, and not for a local or an instance variable that
+    -    no argument or default can assign (read_rebound_by).
+    +    A String held in a temp is the String as it was, and the call read it
+    +    after its arguments: `s&.pair(add(s))`, where add appends to s and
+    +    answers an Array, passed the longer one, as CRuby's one object shows it.
+    +    So a String that is a read (a local, an instance variable, a global, a
+    +    field) is tested where it stands and read again by the call, as it was.
+    +    Any other String receiver runs once, into a temp, and is guarded only
+    +    where no argument and no default the call leaves out can run the
+    +    program's code (anything but reads, literals and what is made of them; a
+    +    name the program gave the builtin, `[]` on an Array, an operator on an
+    +    operand that is no Integer or Float, `5 == o`, and the hash of a key
+    +    that is no String, Symbol or Integer are such code:
+    +    sn_arg_runs_nothing), and where the method does not keep self as a
+    +    handle (--share-strings: `r.name&.add!("d")`, where add! appends to
+    +    self, takes the receiver's handle, which the temp is not). A read that
+    +    makes such a call, `ys[0]` against the program's Array#[], is not read
+    +    again: it runs once, into the temp. Any other call keeps the C it had.
+    +    The temp is rooted unless nothing can run between it and the call: the
+    +    call hoists nothing and each parameter is given a pure read of its own
+    +    type.
+
+         The value is boxed by the type read for the call, so the guard is
+         written only where that type is the method's own. A redefined
+    @@ Commit message
+         receiver is itself a call and an argument is made in place, which roots
+         it.
+
+    -    Test: test/safe_nav_reopened_builtin.rb.
+    +    Tests: test/safe_nav_reopened_builtin.rb, and under --share-strings
+    +    test/share/safe_nav_reopened_builtin_handle.rb, which master passes.
+
+         Co-Authored-By: Claude Code <noreply@anthropic.com>
+
+      ## Makefile ##
+     @@ Makefile: gc-phases-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
+    - # at level 2, alone and beside the full verifier, on both runtimes.
+      GC_STRESS_TESTS := test/gc_root_frame_slots.rb \
+    +                    test/symbol_intern_fresh_string_root.rb \
+                         test/gc_minor_byref_lent_slot.rb \
+     +                   test/safe_nav_reopened_builtin.rb \
+    +                    test/string_range_walk_answer.rb \
+                         test/struct_values_fresh_receiver_root.rb \
+                         test/hash_splat_to_a.rb \
+    -                    test/proc_cell_capture_marked.rb \
+
+      ## src/codegen_call.c ##
+     @@ src/codegen_call.c: static int emit_deep_return_pickup(Compiler *c, int id, Buf *b) {
+        return 1;
+      }
+
+    ++/* Does evaluating `n` run none of the program's code and store nothing? A
+    ++   pure read, a global, a String literal, and an Array, a Hash or a Range
+    ++   made of those. A call among them is a pure read whose name the program
+    ++   has not given the builtin (`[]` on an Array may be its own), and an
+    ++   operator is one of Integers and Floats, for `5 == o` runs o's ==; a Hash
+    ++   key is a String, a Symbol or an Integer, for any other key's hash may be
+    ++   the program's. A whitelist, as subtree_is_pure_read is. */
+    ++static int sn_arg_runs_nothing(Compiler *c, int n) {
+    ++  const NodeTable *nt = c->nt;
+    ++  if (n < 0) return 1;
+    ++  switch (nt_kind(nt, n)) {
+    ++    case NK_GlobalVariableReadNode: case NK_StringNode: return 1;
+    ++    case NK_CallNode: {
+    ++      int r = nt_ref(nt, n, "receiver");
+    ++      const char *nm = nt_str(nt, n, "name");
+    ++      if (!subtree_is_pure_read(c, n) ||
+    ++          (r >= 0 && nm && comp_builtin_kind_reopen_mi(c, comp_ntype(c, r), nm) >= 0)) return 0;
+    ++      if (call_is_scalar_op(c, n)) {
+    ++        int a = nt_ref(nt, n, "arguments"), ac = 0;
+    ++        const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+    ++        if (comp_ntype(c, r) == TY_BOOL) return 0;
+    ++        for (int i = 0; i < ac; i++)
+    ++          if (comp_ntype(c, av[i]) != TY_INT && comp_ntype(c, av[i]) != TY_FLOAT) return 0;
+    ++      }
+    ++      break;
+    ++    }
+    ++    case NK_AssocNode: {
+    ++      TyKind kt = comp_ntype(c, nt_ref(nt, n, "key"));
+    ++      if (kt != TY_STRING && kt != TY_SYMBOL && kt != TY_INT) return 0;
+    ++      break;
+    ++    }
+    ++    case NK_ParenthesesNode: case NK_StatementsNode: case NK_ArrayNode: case NK_HashNode:
+    ++    case NK_KeywordHashNode: case NK_RangeNode: break;
+    ++    default: {
+    ++      /* a call's argument list has no kind of its own */
+    ++      const char *ty = nt_type(nt, n);
+    ++      if (!ty || !sp_streq(ty, "ArgumentsNode")) return subtree_is_pure_read(c, n);
+    ++      break;
+    ++    }
+    ++  }
+    ++  int nr = nt_num_refs(nt, n), na = nt_num_arrs(nt, n);
+    ++  for (int i = 0; i < nr; i++) if (!sn_arg_runs_nothing(c, nt_ref_at(nt, n, i))) return 0;
+    ++  for (int i = 0; i < na; i++) {
+    ++    int k = 0;
+    ++    const int *ids = nt_arr_at(nt, n, i, &k);
+    ++    for (int j = 0; j < k; j++) if (!sn_arg_runs_nothing(c, ids[j])) return 0;
+    ++  }
+    ++  return 1;
+    ++}
+     +/* The program's own method `mi` on a builtin class takes call `id` ahead of
+     +   the builtin arms. What stands ahead of the plain call there: an IO
+     +   reopening has an emitter of its own, and a `&.` on a String, an Integer
+    @@ src/codegen_call.c: static int emit_deep_return_pickup(Compiler *c, int id, Buf
+     +   temps) runs inside the arm that is not nil, so nothing the statement runs
+     +   before the call falls behind it. The value is boxed by the type inference
+     +   read for the call, so the guard is written only where that is the
+    -+   method's own answer. A String receiver is rooted in its temp, unless
+    -+   nothing can run between the temp and the call (no hoist, and each
+    -+   parameter given a pure read of its own type), or the receiver is a local
+    -+   or an instance variable, read as its slot, that no argument or default
+    -+   can assign (read_rebound_by): the unguarded call held it no longer.
+    -+   Answers 1 when it emitted the call. */
+    ++   method's own answer.
+    ++   A String held in a temp is the String as it was, and the call read it
+    ++   after its arguments: `s&.pair(add(s))`, where add appends to s, passes
+    ++   the longer one, as CRuby's one object shows it. So a String that is a
+    ++   read (a local, an instance variable, a global, a field) is tested where
+    ++   it stands and read again by the call, as it was; a read that runs the
+    ++   program's code (`ys[0]` against its own Array#[]) is not read again.
+    ++   Any other String receiver runs once, into a temp, and is guarded only
+    ++   where no argument and no default the call leaves out can run the
+    ++   program's code (sn_arg_runs_nothing); it is rooted there unless nothing
+    ++   can run between the temp and the call (no hoist, and each parameter
+    ++   given a pure read of its own type). A method that keeps self as a
+    ++   handle (--share-strings) takes the receiver's handle, which the temp is
+    ++   not: its call is guarded only where the receiver is read again. Answers
+    ++   1 when it emitted the call. */
+     +static int emit_reopen_call_first(Compiler *c, int id, int recv, TyKind rt, const char *name, int mi, Buf *b) {
+     +  if (rt == TY_IO) { emit_io_reopen_call(c, id, recv, name, b); return 1; }
+     +  if ((rt != TY_STRING && rt != TY_INT && rt != TY_FLOAT) || !sn_guard_pending(c, id)) return 0;
+     +  TyKind ret = repr_of(c, id).as_ty, nat = ret == TY_POLY ? infer_uncached(c, id) : ret;
+     +  if (nat != c->scopes[mi].ret || repr_of(c, recv).kind == RK_BOXED || g_n_argov >= MAX_ARG_OVERRIDE) return 0;
+    ++  int an = nt_ref(c->nt, id, "arguments"), argc = 0;
+    ++  const int *argv = an >= 0 ? nt_arr(c->nt, an, "arguments", &argc) : NULL;
+    ++  Scope *m = &c->scopes[mi];
+    ++  int reread = rt == TY_STRING && ((subtree_is_pure_read(c, recv) && sn_arg_runs_nothing(c, recv)) ||
+    ++                                   nt_kind(c->nt, unwrap_parens(c, recv)) == NK_GlobalVariableReadNode);
+    ++  if (rt == TY_STRING && !reread) {
+    ++    if (repr_self_handle(c, mi)) return 0;
+    ++    int given = argc - (argc > 0 && nt_kind(c->nt, argv[argc - 1]) == NK_KeywordHashNode);
+    ++    for (int i = 0; i < argc; i++) if (!sn_arg_runs_nothing(c, argv[i])) return 0;
+    ++    for (int i = 0; m->pdefault && i < m->nparams; i++) {
+    ++      int d = m->pdefault[i];
+    ++      if (d < 0 || (!callee_param_is_declared_kwarg(c, m, m->pnames[i]) && arg_slot_for_param(c, m, i, given) >= 0)) continue;
+    ++      if (!sn_arg_runs_nothing(c, d)) return 0;
+    ++    }
+    ++  }
+     +  int t = ++g_tmp, box = ret == TY_POLY && nat != TY_POLY && nat != TY_UNKNOWN && nat != TY_VOID;
+     +  int novalue = !ty_is_object(ret) && (!c_type_name(ret) || sp_streq(c_type_name(ret), "void"));
+     +  Buf rpre, pre, vb, val;
+    @@ src/codegen_call.c: static int emit_deep_return_pickup(Compiler *c, int id, Buf
+     +  g_pre = &rpre;
+     +  Buf rx = expr_buf(c, recv);
+     +  g_pre = &pre;
+    -+  view_bind(recv, "_t%d", t);
+    ++  if (!reread) view_bind(recv, "_t%d", t);
+     +  int sv_skip = g_sn_skip; g_sn_skip = id;
+     +  int vw = box ? view_push(c, id, nat) : -1;
+     +  emit_expr(c, id, &vb);
+     +  if (vw >= 0) view_pop(c, vw);
+     +  g_sn_skip = sv_skip;
+    -+  view_unbind(g_n_argov - 1);
+    ++  if (!reread) view_unbind(g_n_argov - 1);
+     +  g_pre = sv_pre;
+     +  if (box) emit_boxed_text(c, nat, vb.p ? vb.p : "", &val);
+     +  else buf_puts(&val, vb.p ? vb.p : "");
+     +  buf_puts(b, "({ ");
+     +  if (rpre.p) buf_puts(b, rpre.p);
+    -+  int an = nt_ref(c->nt, id, "arguments"), argc = 0;
+    -+  const int *argv = an >= 0 ? nt_arr(c->nt, an, "arguments", &argc) : NULL;
+    -+  Scope *m = &c->scopes[mi];
+    -+  const char *slot = !rx.p ? NULL : !strncmp(rx.p, "lv_", 3) ? rx.p + 3 : !strncmp(rx.p, "self->iv_", 9) ? rx.p + 9
+    -+                   : !strncmp(rx.p, "self.iv_", 8) ? rx.p + 8 : NULL;
+    -+  int rk = nt_kind(c->nt, recv);
+    -+  int held = (rk == NK_LocalVariableReadNode || rk == NK_InstanceVariableReadNode) && slot &&
+    -+             !slot[strspn(slot, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")] &&
+    -+             !read_rebound_by(c, recv, an);
+    -+  for (int i = 0; held && m->pdefault && i < m->nparams; i++) held = !read_rebound_by(c, recv, m->pdefault[i]);
+     +  int still = !(rpre.p && rpre.p[0]) && !(pre.p && pre.p[0]) && argc == m->nparams;
+     +  for (int i = 0; still && i < argc; i++) {
+     +    LocalVar *p = scope_local(m, m->pnames[i]);
+     +    still = p && !p->byref_out && p->type == comp_ntype(c, argv[i]) && subtree_is_pure_read(c, argv[i]);
+     +  }
+    -+  held = held || still;
+    -+  if (rt == TY_STRING && held) buf_printf(b, "const char *_t%d = %s; ", t, rx.p);
+    ++  if (rt == TY_STRING && (reread || still)) buf_printf(b, "const char *_t%d = %s; ", t, rx.p ? rx.p : "NULL");
+     +  else if (rt == TY_STRING) buf_printf(b, "const char *_t%d = %s; SP_GC_ROOT_STR(_t%d); ", t, rx.p ? rx.p : "NULL", t);
+     +  else buf_printf(b, "%s _t%d = %s; ", rt == TY_INT ? "sp_int" : "sp_float", t, rx.p ? rx.p : "0");
+     +  if (!novalue) {
+    @@ src/codegen_call.c: void emit_call_body(Compiler *c, int id, Buf *b) {
+     -        if (miR >= 0 && rtR == TY_IO) { emit_io_reopen_call(c, id, recvR, nmR, b); return; }
+     +        if (miR >= 0 && emit_reopen_call_first(c, id, recvR, rtR, nmR, miR, b)) return;
+              if (miR >= 0) {
+    -           if (g_plan_check) ucall_observe(c, id, miR, ciR, 0);
+    -           buf_printf(b, "sp_%s_%s(", mc_reopen_cls(c, ciR, nmR), mc(nmR));
+    +           emit_reopen_primitive_call(c, id, ciR, miR, recvR, nmR, b);
+    +           return;
+
+      ## test/safe_nav_reopened_builtin.rb (new) ##
+     @@
+    @@ test/safe_nav_reopened_builtin.rb (new)
+     +  def held = @v&.pair([1, 2].inspect)
+     +end
+     +loc = fresh(ARGV.size)
+    -+p fresh(ARGV.size)&.pair([1, 2].inspect), loc&.pair([3].inspect)
+    -+p Tag.new(fresh(ARGV.size)).held, fresh(9)&.pair([4].inspect)
+    ++p fresh(ARGV.size)&.pair([1, 2]), loc&.pair([3].inspect)
+    ++p Tag.new(fresh(ARGV.size)).held, fresh(9)&.pair([4])
+    ++
+    ++# a String is read after an argument that changes it in place, as it was
+    ++# without the guard: held ahead of it, it would be the String as it was
+    ++def add(s) = (s << "c"; [1, 2])
+    ++q = +"ab"
+    ++p q&.pair(add(q).size)
+    ++$q = +"ab"
+    ++def addg = ($q << "c"; 2)
+    ++def cur = $q
+    ++p $q&.pair(addg), cur&.pair(addg)
+    ++
+    ++# an argument that runs the program's own code keeps its place beside a
+    ++# receiver that is a call, and a receiver whose read runs it runs once
+    ++$k = +"ab"
+    ++class Key
+    ++  def hash = ($k << "d"; 1)
+    ++  def eql?(o) = true
+    ++end
+    ++class String
+    ++  def many(*r) = "#{self}-#{r.size}"
+    ++end
+    ++def held = $k
+    ++$at = 0
+    ++class Array
+    ++  def [](i) = ($at += 1; "x")
+    ++end
+    ++key = Key.new
+    ++p held&.many({ key => 1 })
+    ++ys = ["y", "z"]
+    ++p ys[0]&.pair(1), $at
+
+      ## test/safe_nav_reopened_builtin.rb.expected (new) ##
+     @@
+    @@ test/safe_nav_reopened_builtin.rb.expected (new)
+     +"f0-[3]"
+     +"f0-[1, 2]"
+     +nil
+    ++"abc-2"
+    ++"abc-2"
+    ++"abcc-2"
+    ++"abd-1"
+    ++"x-1"
+    ++1
+    +
+    + ## test/share/safe_nav_reopened_builtin_handle.rb (new) ##
+    +@@
+    ++# `&.` on a method the program adds to String that changes self in place:
+    ++# such a method takes its receiver as the handle every name holds, so the
+    ++# change shows through them. The nil guard of a reopened builtin's method
+    ++# leaves that call as it was unless its receiver is a read, which the call
+    ++# reads again.
+    ++
+    ++class String
+    ++  def add!(x)
+    ++    self << x
+    ++    self
+    ++  end
+    ++  def idem = self
+    ++end
+    ++
+    ++class Rec
+    ++  attr_accessor :name
+    ++  def initialize(n) = @name = n
+    ++end
+    ++
+    ++# the receiver is a reader's answer
+    ++r = Rec.new(+"n")
+    ++p r.name&.add!("d")
+    ++p r.name
+    ++
+    ++# the receiver is a chain
+    ++s = +"c"
+    ++p s&.idem&.add!("1")
+    ++p s
+    ++
+    ++# a local that is nil, and one that is not
+    ++t = ARGV.size > 5 ? +"t" : nil
+    ++p t&.add!("x")
+    ++u = ARGV.size > 5 ? nil : +"u"
+    ++p u&.add!("x")
+    ++p u
+    +
+    + ## test/share/safe_nav_reopened_builtin_handle.rb.expected (new) ##
+    +@@
+    ++"nd"
+    ++"nd"
+    ++"c1"
+    ++"c1"
+    ++nil
+    ++"ux"
+    ++"ux"
+===== 2. the eleven programs (programs.rb) =====
+# == n1.rb
+class String
+  def pair(a) = "#{self}|#{a.size}"
+end
+
+def add(s)
+  s << "c"
+  [1, 2]
+end
+
+s = +"ab"
+puts s&.pair(add(s))
+# == n2.rb
+class String
+  def pair(a) = "#{self}|#{a.size}"
+end
+
+$s = ARGV.size > 5 ? nil : +"ab"
+
+def add
+  $s << "c"
+  [1, 2]
+end
+
+puts $s&.pair(add)
+# == n3.rb
+class String
+  def pair(a) = "#{self}|#{a.size}"
+end
+
+class Box
+  def initialize = @s = +"ab"
+  def add
+    @s << "c"
+    [1, 2]
+  end
+  def go = @s&.pair(add)
+end
+
+puts Box.new.go
+# == n4.rb
+class String
+  def pair(a) = "#{self}|#{a.size}"
+end
+
+$s = +"ab"
+
+def cur = $s
+
+def add
+  $s << "c"
+  [1, 2]
+end
+
+puts cur&.pair(add)
+# == f3a.rb
+class String
+  def add!(x)
+    self << x
+    self
+  end
+end
+class Rec
+  attr_accessor :name
+  def initialize(n) = @name = n
+end
+r = Rec.new(+"n")
+p r.name&.add!("d")
+p r.name
+# == f3b.rb
+class String
+  def add!(x)
+    self << x
+    self
+  end
+  def idem = self
+end
+s = +"c"
+p s&.idem&.add!("1")
+p s
+# == w1.rb
+$s = +"ab"
+class V
+  def hash = ($s << "c"; 1)
+  def eql?(o) = true
+end
+class String
+  def pair(*r) = "#{self}|#{r.size}"
+end
+def cur = $s
+v = V.new
+puts cur&.pair({ v => 1 })
+# == w2.rb
+$s = +"ab"
+class Array
+  def [](i) = ($s << "c"; 7)
+end
+class String
+  def pair(*r) = "#{self}|#{r.size}"
+end
+def cur = $s
+a = [1, 2]
+puts cur&.pair(a[0])
+# == w3.rb
+$n = 0
+class Array
+  def [](i) = ($n += 1; "x")
+end
+class String
+  def pair(*r) = "#{self}|#{r.size}"
+end
+a = ["p", "q"]
+puts a[0]&.pair(1)
+puts $n
+# == w4.rb
+$n = 0
+class Array
+  def [](i) = ($n += 1; $n > 5 ? nil : "x")
+end
+class String
+  def pair(*r) = "#{self}|#{r.size}"
+end
+a = ["p", "q"]
+puts a[0]&.pair(1)
+puts $n
+# == s3.rb
+class String
+  def pair(a) = "#{self}|#{a}"
+end
+
+def arg(b)
+  b << ("x" * 5000)
+  "a"
+end
+
+b = +"b"
+b << ARGV.size.to_s
+r = (b << "1").pair(arg(b))
+puts r.size
+puts r[0, 6]
+===== 3. the programs and their cells, from the same comment =====
+**The programs** (`programs.rb` below; gcc, clang and `--share-strings`, a plain run):
+
+| program | what it is | CRuby | bare tip | this head | C |
+|---|---|---|---|---|---|
+| n1 to n4 | mend 1: a String changed in place by the argument (a local, a global, an instance variable, a call) | `abc\|2` | `abc\|2` in the three cells | `abc\|2` in the three cells | n1 to n3 differ (the guard, the receiver read again); n4 is the bare tip's |
+| f3a | mend 2, reader 5's F-3a: `r.name&.add!("d")`, a handle self | "nd", "nd" | shared: "nd", "nd"; plain: "nd", "n" | the same three cells | differs |
+| f3b | mend 2, reader 5's F-3b: `s&.idem&.add!("1")` | "c1", "c1" | shared: "c1", "c1"; plain: "c1", "c" | the same three cells | differs |
+| w1 | mend 3: the `hash` of a key that is the program's object | `abc\|1` | `abc\|1` in the three cells | the same | the bare tip's |
+| w2 | mend 3: `[]` the program gave Array, for an argument | `abc\|1` | gcc and shared `abc\|1`, clang `ab\|1` | the same | the bare tip's |
+| w3, w4 | mend 3: a receiver whose read runs the program's `[]` (`a[0]&.pair(1)`, then the count of calls) | `x\|1`, 1 | `x\|1`, 1 in the three cells | the same | differs (the guard, the receiver once into a temp) |
+| s3 | the moved-buffer program of the receiver-first piece (the argument grows the String by 5,000 bytes) | `5005`, `b01xxx` | `5005`, `b0xxxx` in the three cells | the same | the bare tip's |
+
+On the first form of mend 1 (`133afd8f8ef2` on `957df0eba5ea`, built): f3a does not build under `--share-strings` (gcc and clang: an `sp_String *` initialized from a `const char *`) and f3b prints "c1", "c" there, as reader 5 found. On the form before mend 3 (`85e58a9a30a5` on `957df0eba5ea`, built): w1 prints `ab|1` (gcc and clang), w2 `ab|1` with gcc, and w3 and w4 count 2 calls.
