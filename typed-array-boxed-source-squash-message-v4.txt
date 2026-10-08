@@ -1,0 +1,36 @@
+An Array a call returns is held while its elements are boxed
+
+`take(*floats(i))` fills the rest parameter with a new Array of boxed
+values made from the Float Array, and `fmt % ints(i)` hands String#% one
+made from the Integer Array. Both come from sp_typed_to_poly, which
+allocates the new Array before it reads the old one and holds the old
+one nowhere. A result no variable holds was collected by that allocation
+and its elements were read out of a buffer already given back: of 1,000
+calls with 2,000 Floats, 59 answered wrong in a plain run.
+
+A source that something holds needs no root (typed_array_src_held): a
+variable, a constant or self; a field read off one, an attr_reader's
+or a Struct member's slot, or the class's own reader called with no
+receiver; an element of such an Array, while no class of the program
+defines `[]`; a conditional, a case, an `||` or an `&&` whose arms are
+such reads, or a begin around one; or an Array literal, which sits in
+a rooted temp. Those calls compile as before. A source the list does
+not prove held is boxed by sp_typed_to_poly_unheld, which holds it for
+the call, at 13 to 21 instructions a call (callgrind). That is a
+call's result, and also a held source the list does not look into,
+such as `pt.send(:fl)`, a hand-written reader, `fa.itself` or
+`@fa ||= x`.
+
+Where a class defines `[]`, `rows[i]` may be the program's own method
+and its answer a call's result, so it is no element read there: with
+`def [](i) = floats(i + $base)` in Array, `take(*rows[1])` answered
+wrong in 239 of 300 calls at SPINEL_GC_STRESS=1.
+
+sp_PolyArray_eq_typed held the source and compared against a boxed copy
+that nothing held. An element's own == allocates, and at
+SPINEL_GC_STRESS=2 the copy was collected under the comparison. The slot
+that holds the source now holds the copy once it is made, and the copy
+holds the Strings of a source nothing else holds, so a comparison keeps
+its two roots.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
