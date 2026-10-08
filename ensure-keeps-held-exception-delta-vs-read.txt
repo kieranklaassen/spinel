@@ -1,0 +1,153 @@
+Delta of the three commits d0577d1d3082 (head), 57ed59b749a5, cb7a3f5ba571 on 11ed60d50054 against the read heads 184698098782 (A, two commits) and 425f337d5e95 (B).
+
+A's two commits are plain replays: the stable patch-id of each equals the read one's (the refactor f2cf9f8c1a36, the fix 184698098782); their messages are the read ones.
+
+B's commit: src/codegen_stmt.c only, by diff of the two commits' added and removed lines, the read head's first (<), this head's after (>):
+1,2c1,28
+< +/* Does the ensure body `stmts` only name nil, true or false, each alone or
+< +   stored in a local or an instance variable? Nothing it runs allocates or
+---
+> +/* Is `v` a value an ensure body names with no call: nil, true, false, an
+> +   Integer, Float or Symbol literal, a read of a local, an instance variable
+> +   or a global, or a builtin operator over scalars (call_is_scalar_op) whose
+> +   operands are such values? */
+> +static int ensure_names_plain_value(Compiler *c, int v) {
+> +  const NodeTable *nt = c->nt;
+> +  if (v < 0) return 0;
+> +  switch (nt_kind(nt, v)) {
+> +  case NK_NilNode: case NK_TrueNode: case NK_FalseNode: case NK_FloatNode: case NK_SymbolNode:
+> +  case NK_LocalVariableReadNode: case NK_InstanceVariableReadNode: case NK_GlobalVariableReadNode:
+> +    return 1;
+> +  case NK_IntegerNode:
+> +    return comp_ntype(c, v) == TY_INT;
+> +  case NK_CallNode: {
+> +    if (!call_is_scalar_op(c, v) || !ensure_names_plain_value(c, nt_ref(nt, v, "receiver"))) return 0;
+> +    int args = nt_ref(nt, v, "arguments"), n = 0;
+> +    const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &n) : NULL;
+> +    for (int i = 0; i < n; i++) if (!ensure_names_plain_value(c, av[i])) return 0;
+> +    return 1;
+> +  }
+> +  default:
+> +    return 0;
+> +  }
+> +}
+> +
+> +/* Does the ensure body `stmts` only name plain values (above), each alone
+> +   or stored in a local, an instance variable or a global, by `=` or by an
+> +   `op=` on an Integer or Float slot? Nothing it runs enters a begin or
+5c31,32
+< +static int ensure_body_only_stores(const NodeTable *nt, int stmts) {
+---
+> +static int ensure_body_only_stores(Compiler *c, int stmts) {
+> +  const NodeTable *nt = c->nt;
+9,10c36,41
+< +    NodeKind k = nt_kind(nt, v);
+< +    if (k == NK_LocalVariableWriteNode || k == NK_InstanceVariableWriteNode) {
+---
+> +    switch (nt_kind(nt, v)) {
+> +    case NK_LocalVariableOperatorWriteNode: case NK_InstanceVariableOperatorWriteNode:
+> +    case NK_GlobalVariableOperatorWriteNode:
+> +      if (!ty_is_numeric(comp_ntype(c, v)) || !ty_is_numeric(comp_ntype(c, nt_ref(nt, v, "value")))) return 0;
+> +      /* fall through */
+> +    case NK_LocalVariableWriteNode: case NK_InstanceVariableWriteNode: case NK_GlobalVariableWriteNode:
+12,13c43,45
+< +      if (v < 0) return 0;
+< +      k = nt_kind(nt, v);
+---
+> +      break;
+> +    default:
+> +      break;
+15c47
+< +    if (k != NK_NilNode && k != NK_TrueNode && k != NK_FalseNode) return 0;
+---
+> +    if (!ensure_names_plain_value(c, v)) return 0;
+25c57
+< +    int holds = !ensure_body_only_stores(nt, ensure_stmts);
+---
+> +    int holds = !ensure_body_only_stores(c, ensure_stmts);
+
+B's test gained two parts (the .expected gained 7 lines): the inner of two ensures entering a begin while the outer allocates (reader 5's A-1 program, with the test's churn), and ensure bodies that only store plain values by = and by op=. By diff of the test file, read head against this head:
++# the inner of two ensures enters a begin, the outer one allocates
++def boom(i) = "boom " + i.to_s + " " + "z" * 30
++begin
++  begin
++    begin
++      raise KeyError, boom(1)
++    ensure
++      begin
++        churn
++      rescue ArgumentError
++        puts "not reached"
++      end
++    end
++  ensure
++    churn
++  end
++rescue => e
++  puts e.class
++  puts e.message
++end
++
++# an ensure body that only stores plain values, by `=` and by `op=`
++$count = 0
++class Tally
++  def initialize
++    @left = 3
++    @last = nil
++  end
++  def left; @left; end
++  def last; @last; end
++  def take(n)
++    raise ArgumentError, "tallied " + n.to_s
++  ensure
++    @left -= 1
++    @last = :taken
++    $count += 1
++  end
++end
++def stored(n)
++  saved = n * 2
++  x = 0
++  raise ArgumentError, "stored " + n.to_s
++ensure
++  x = saved + 1
++  $count = $count + x
++end
++tally = Tally.new
++begin
++  tally.take(1)
++rescue => e
++  puts e.message
++end
++begin
++  stored(2)
++rescue => e
++  puts e.message
++end
++p tally.left, tally.last, $count
++
+
+B's commit message, its last two paragraphs, read head:
+An ensure body that only names nil, true or false, alone or stored in a
+local or an instance variable, keeps its C: it allocates nothing and
+rescues no raise. Any call may rescue one, so the list ends there.
+
+The path with no exception pays for a saved root count: by callgrind,
+ten instructions on each entry of a begin with an ensure in a small
+method, five in a method that roots a local already, two for a begin in
+a loop. Rooting the two locals where they are declared costs 25, 9 and
+32.
+
+This head:
+An ensure body that only stores plain values keeps its C: nil, true,
+false, an Integer, Float or Symbol literal, a read of a local, an
+instance variable or a global, or a builtin operator over scalars of
+those, each alone or stored in a local, an instance variable or a
+global, by `=` or by an `op=` on an Integer or Float slot. Nothing
+there enters a begin or rescues a raise. Any other body is rooted.
+
+The path with no exception pays for a saved root count where the body
+is rooted: by callgrind, nine instructions on each entry of a begin
+with an ensure in a small method, four in a method that roots a local
+already, three for a begin in a loop. A raise pays 22 for each rooted
+ensure it passes.

@@ -1,0 +1,9 @@
+One helper hands a waiting exception to the enclosing ensure
+
+An ensure region whose body is done hands the exception it waits with to
+the ensure region around it, and the line that does it was written out
+three times: in emit_begin, in the region of Mutex#synchronize and in
+the loop of select! and its kin. emit_ensure_exc_hand_on emits it for
+all three. The C is unchanged.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

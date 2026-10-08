@@ -1,0 +1,1 @@
+An ensure keeps the exception it holds while its body runs
