@@ -10143,6 +10143,29 @@ static sp_RbVal sp_poly_shift(sp_RbVal v) {
   sp_raise_nomethod(sp_nomethod_msg("shift", v));
   return sp_box_nil();
 }
+/* Symbol#["sub"]: the substring when the name holds it, a new String. Out of
+   line, so sp_poly_get_str's other receivers do not carry its calls. A miss
+   is the read a value that is a Hash elsewhere makes, so it is answered
+   before the search: a name with no header holds no NUL, and where the
+   index's bytes up to its first NUL are nowhere in it, the index is not. */
+static SP_COLD SP_NOINLINE sp_RbVal sp_poly_sym_get_str(sp_RbVal v, const char *key) {
+  if (v.tag != SP_TAG_SYM || !key) return sp_box_nil();
+  const char *name = sp_sym_to_s((sp_sym)v.v.i);
+  if (key[0] && !sp_str_has_hdr(name))
+    for (const char *p = name; ; p++) {
+      while (*p && *p != key[0]) p++;
+      if (!*p) return sp_box_nil();
+      size_t j = 1;
+      while (key[j] && p[j] == key[j]) j++;
+      if (!key[j]) break;
+    }
+  if (!sp_str_include(name, key)) return sp_box_nil();
+  /* an index that is not whole characters is in no String, and a binary one
+     with a byte past ASCII is an error in CRuby: nil, as it was */
+  if (sp_str_is_binary(key) ? !sp_str_ascii_only(key) : !sp_str_valid_encoding(key))
+    return sp_box_nil();
+  return sp_box_str(sp_str_dup(key));
+}
 static sp_RbVal sp_poly_get_str(sp_RbVal v, const char *key) {
   /* MatchData#["name"]: the named group */
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_MATCHDATA && v.v.p) {
@@ -10159,7 +10182,8 @@ static sp_RbVal sp_poly_get_str(sp_RbVal v, const char *key) {
   }
   if (sp_poly_is_call_aref(v)) return sp_poly_call_aref(v, sp_box_str(key));
   sp_poly_coll_chk(v, "[]");
-  if (v.tag != SP_TAG_OBJ) return sp_box_nil();
+  /* a Symbol's name is searched; every other value that is no object is nil */
+  if (SP_UNLIKELY(v.tag != SP_TAG_OBJ)) return sp_poly_sym_get_str(v, key);
   switch (v.cls_id) {
     case SP_BUILTIN_CURRY: return sp_curry_call_poly((sp_Curry *)v.v.p, 1, (sp_RbVal[]){sp_box_str(key)});
     case SP_BUILTIN_STR_POLY_HASH: return sp_StrPolyHash_get((sp_StrPolyHash*)v.v.p, key);
@@ -10180,6 +10204,14 @@ static sp_RbVal sp_poly_get_str(sp_RbVal v, const char *key) {
   if (sp_poly_is_array_kind(v.cls_id))
     sp_raise_cls("TypeError", SPL("no implicit conversion of String into Integer"));
   return sp_box_nil();
+}
+/* The same read for a receiver whose slot the index may have assigned (a
+   bare global, instance variable or class variable is read after its
+   index ran): a Symbol keeps the nil it answered, which is CRuby's answer
+   wherever the value before held no such name. */
+static sp_RbVal sp_poly_get_str_asis(sp_RbVal v, const char *key) {
+  if (v.tag == SP_TAG_SYM) return sp_box_nil();
+  return sp_poly_get_str(v, key);
 }
 /* Extend sp_poly_arr_len for hash types defined after the initial declaration. */
 /* ---- widening one hash storage kind into another --------------------------
@@ -11100,7 +11132,8 @@ static sp_RbVal sp_poly_index_poly(sp_RbVal recv, sp_RbVal idx) {
    can share with CRuby's bit of the value before. An Array keeps its arm
    as it was, for the nil it gave can be CRuby's answer of the value
    before: every kind but a Float its TypeError, a Float cast with no range
-   test, and a Bignum left to the last line. */
+   test, and a Bignum left to the last line. A Symbol read by a String
+   keeps its nil. */
 static SP_NOINLINE SP_COLD sp_RbVal sp_poly_index_poly_asis(sp_RbVal recv, sp_RbVal idx) {
   if (recv.tag == SP_TAG_OBJ && sp_poly_is_array_kind(recv.cls_id) && idx.tag != SP_TAG_INT &&
       idx.tag != SP_TAG_NIL && !(idx.tag == SP_TAG_OBJ && idx.cls_id == SP_BUILTIN_RANGE)) {
@@ -11112,6 +11145,7 @@ static SP_NOINLINE SP_COLD sp_RbVal sp_poly_index_poly_asis(sp_RbVal recv, sp_Rb
       idx.tag != SP_TAG_STR && idx.tag != SP_TAG_SYM && !sp_poly_is_strbuf(idx) &&
       !(idx.tag == SP_TAG_OBJ && idx.cls_id == SP_BUILTIN_RANGE && idx.v.p))
     return sp_poly_arr_get_hash(recv, 0);
+  if (recv.tag == SP_TAG_SYM && (idx.tag == SP_TAG_STR || sp_poly_is_strbuf(idx))) return sp_box_nil();
   return sp_poly_index_poly(recv, idx);
 }
 
