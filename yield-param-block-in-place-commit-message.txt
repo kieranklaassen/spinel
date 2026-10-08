@@ -1,0 +1,47 @@
+A spliced method's read-only String parameter sees what the block does to its String in place
+
+A yielding method is spliced at its call. A String parameter its body
+only reads or hands on takes the argument's value where something can
+assign the variable while the body runs, so that the assignment does
+not show through the parameter. By value it also misses what the call's
+block does to that String in place:
+
+    def show(w)
+      yield
+      p w
+    end
+    u = +"u"
+    show(u) { u << "x"; u = +"k" if u.size > 9 }     # "ux", compiled "u"
+
+For an instance variable any call in the block counts as a possible
+assignment, so a block that assigns nothing lost its append as well:
+
+    show(@s) { @s << "x" }                           # "ax", compiled "a"
+
+Where the block's text changes the String in place (a mutator on the
+variable, or the variable handed to a method of the program), the
+parameter is an alias again when every assignment that can run during
+the call is one the splice sees (splice_alias_proven):
+
+- a local no proc assigns: only the block's own text can assign it, and
+  each such store moves the alias off the variable first
+  (splice_store_open), so the parameter keeps the String it was given.
+  Not where a store is one the move does not follow: a pattern's
+  binding, a `for` index, a store under a rescue, an ensure or the block
+  of a call that is no builtin iterator, or a method whose body opens
+  such a frame around its yield;
+- a local a proc assigns, where the block's text does not and neither
+  the block nor the method's body runs code out of view, so the proc
+  cannot be called during the call;
+- an instance variable, where the block and the method's body run no
+  code out of view and assign the variable only in the block's own
+  text. In view are builtins on values whose methods run no code of the
+  program's (ty_runs_no_code), `p`, `puts` and `print` of such values,
+  and a method of self with one body that passes the same test.
+
+Not a variable that is appended to in a loop, which is a buffer and has
+no slot to lend, and not a parameter the method hands on to a call with
+a block or yields: an inner splice copies the alias, and a store moves
+only the outer one. Everything else keeps the value, with master's C.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
