@@ -5214,6 +5214,14 @@ void emit_main_exit(Buf *b) {
   buf_puts(b, "_sp_main_rc = sp_at_exit_run(0); return; }\n");
 }
 
+/* The ensure region `eid`, its body done, hands the exception it waits with
+   to the ensure region around it: `outer`'s locals take it, its frame is
+   popped, and its ensure body runs next. */
+void emit_ensure_exc_hand_on(Buf *b, int eid, int outer) {
+  buf_printf(b, "if (_excf%d) { _excf%d = 1; _excmsg%d = _excmsg%d; _exccls%d = _exccls%d; _excobj%d = _excobj%d; sp_exc_top--; goto _ensure%d; }",
+             eid, outer, outer, eid, outer, eid, outer, eid, outer);
+}
+
 void emit_retf_return(int eid, int has_retval, Buf *b) {
   if (g_c_ret_void && g_ret_type == TY_UNKNOWN) { buf_printf(b, "if (_retf%d) { ", eid); emit_main_exit(b); }
   /* A fiber body is `static void`: returning the value there is a C
