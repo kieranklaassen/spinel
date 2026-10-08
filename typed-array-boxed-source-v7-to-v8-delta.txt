@@ -1,0 +1,88 @@
+1:  27f056819 ! 1:  a32278631 An Array a call returns is held while its elements are boxed
+    @@ Commit message
+         A source that something holds needs no root (typed_array_src_held): a
+         variable, a constant or self; a field read off one, an attr_reader's
+         or a Struct member's slot, or the class's own reader called with no
+    -    receiver; an element of such an Array, while no class of the program
+    -    defines `[]`; a conditional, a case, an `||` or an `&&` whose arms are
+    -    such reads, or a begin around one; or an Array literal, which sits in
+    -    a rooted temp. Those calls compile as before. A source the list does
+    -    not prove held is boxed by sp_typed_to_poly_unheld, which holds it for
+    -    the call, at 13 to 21 instructions a call (callgrind). That is a
+    -    call's result, and also a held source the list does not look into,
+    -    such as `pt.send(:fl)`, a hand-written reader, `fa.itself` or
+    -    `@fa ||= x`.
+    +    receiver; an element of such an Array, while the program gives Array
+    +    no `[]` of its own; a conditional, a case, an `||` or an `&&` whose
+    +    arms are such reads, or a begin around one; or an Array literal, which
+    +    sits in a rooted temp. Those calls compile as before. A source the
+    +    list does not prove held is boxed by sp_typed_to_poly_unheld, which
+    +    holds it for the call, at 13 to 21 instructions a call (callgrind).
+    +    That is a call's result, and also a held source the list does not
+    +    look into, such as `pt.send(:fl)`, a hand-written reader, `fa.itself`
+    +    or `@fa ||= x`.
+     
+    -    Where a class defines `[]`, `rows[i]` may be the program's own method
+    -    and its answer a call's result, so it is no element read there: with
+    -    `def [](i) = floats(i + $base)` in Array, `take(*rows[1])` answered
+    -    wrong in 239 of 300 calls at SPINEL_GC_STRESS=1.
+    +    Where the program gives Array a `[]` of its own, `rows[i]` is that
+    +    method and its answer a call's result, so it is no element read there:
+    +    with `def [](i) = floats(i + $base)` in Array, `take(*rows[1])`
+    +    answered wrong in 239 of 300 calls at SPINEL_GC_STRESS=1. A `[]` that
+    +    another class defines is not what an Array's `rows[i]` calls, and
+    +    changes nothing.
+     
+         sp_PolyArray_eq_typed held the source and compared against a boxed copy
+         that nothing held. An element's own == allocates, and at
+    @@ src/codegen_internal.h: int subtree_is_pure_read(Compiler *c, int id);
+      /* Typed-array headers cached across an innermost loop (codegen_stmt.c, see
+         emit_while). hc_array / hc_string answer 1 and the names of the cached
+         header locals when the receiver is cached in the loop being emitted;
+    -@@ src/codegen_internal.h: int scope_is_shadowed(Compiler *c, int s);
+    - int  scope_needs_proc_form(Compiler *c, int s);
+    - int  scope_proc_form_of(Compiler *c, int s);
+    - int  expr_is_held_ref(Compiler *c, int node);   /* a read of a held object: no root needed */
+    +@@ src/codegen_internal.h: int  expr_is_held_ref(Compiler *c, int node);   /* a read of a held object: no r
+    + /* Reads kept by their existing frame slot across later argument evaluation. */
+    + int read_of_fixed_param(Compiler *c, int node);
+    + int read_unbound_in_stmt(Compiler *c, int node);
+     +int  typed_array_src_held(Compiler *c, int node);   /* a typed Array held while it is boxed */
+      int  proc_form_live(Compiler *c, int s);
+      int  proc_form_source(Compiler *c, int s);
+    @@ src/codegen_util.c: int expr_is_held_ref(Compiler *c, int node) {
+     +   its own type, or an `||` or `&&` of two? Once its conditions and its
+     +   index have run, such a read allocates nothing and calls nothing of the
+     +   program's, so what it read is still held where it ends. `recv[i]` is an
+    -+   element read only while no class of the program defines `[]`: one that
+    -+   does may be what the call reaches, and its answer is a call's result. An
+    -+   index that only reads leaves any receiver's Array where it was; one that
+    -+   runs code does too if the receiver is a variable that code cannot give
+    -+   another Array (read_rebound_by, which does not look at a constant). */
+    ++   element read only while the program gives Array no `[]` of its own
+    ++   (array_index_is_own): that one is what the call reaches, and its answer
+    ++   is a call's result. An index that only reads leaves any receiver's Array
+    ++   where it was; one that runs code does too if the receiver is a variable
+    ++   that code cannot give another Array (read_rebound_by, which does not
+    ++   look at a constant). */
+     +static int read_is_held(Compiler *c, int node);
+    ++/* Does `[]` on an Array reach a method of the program's? Only one in the
+    ++   chain of the program's own reopening of Array can be: a `[]` another class
+    ++   defines (a Grid's) is never what an Array receiver calls. */
+    ++static int array_index_is_own(Compiler *c) {
+    ++  int ci = comp_class_index(c, "Array");
+    ++  return ci >= 0 && (comp_method_in_chain(c, ci, "[]", NULL) >= 0 ||
+    ++                     comp_reader_in_chain(c, ci, "[]", NULL));
+    ++}
+     +/* one statement, a held read of type t */
+     +static int arm_is_held(Compiler *c, int stmts, TyKind t) {
+     +  int n = 0;
+    @@ src/codegen_util.c: int expr_is_held_ref(Compiler *c, int node) {
+     +    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+     +    if (!nm || !sp_streq(nm, "[]") || ac != 1 || nt_ref(nt, node, "block") >= 0 ||
+     +        !(ty_is_array(comp_ntype(c, recv)) || ty_is_obj_array(comp_ntype(c, recv))) ||
+    -+        comp_ntype(c, av[0]) != TY_INT || any_class_defines(c, "[]"))
+    ++        comp_ntype(c, av[0]) != TY_INT || array_index_is_own(c))
+     +      return 0;
+     +    if (subtree_is_pure_read(c, av[0])) return 1;
+     +    recv = unwrap_parens(c, recv);
