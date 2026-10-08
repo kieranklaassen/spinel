@@ -624,6 +624,10 @@ extern int g_reads_match_regs;
    and a block form (emit_gsub_block_expr) answers with the C local that
    says whether its loop found a match. */
 extern int g_sub_bang_id, g_sub_bang_tm;
+/* The call whose plain form entered through the wrapper, told when its
+   emitter is done: a boxed receiver's arm (emit_face_str_bang) reads the
+   matched flag only for a call that did. */
+extern int g_sub_bang_own;
 extern int g_stmt_cur;         /* codegen_stmt.c: the statement being emitted */
 extern int g_gen_obj_hash;
 extern int g_gen_obj_to_json;  /* a package wants obj reflection + >=1 user #to_json */  /* a package wants obj reflection + >=1 struct: emit+install sp_obj_to_hash */

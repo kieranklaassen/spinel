@@ -161,6 +161,7 @@ static int emit_op_template(Compiler *c, const BopCtx *x, Buf *b) {
   free(r);
   if (held) buf_puts(b, "; })");
   free(hb.p);
+  if (g_sub_bang_id == x->id && strstr(tmpl, "_own(")) g_sub_bang_own = x->id;
   return 1;
 }
 

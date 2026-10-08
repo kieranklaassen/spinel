@@ -7101,6 +7101,7 @@ static int str_arms_pattern(Compiler *c, int id, Buf *b, const NodeTable *nt, co
     else if (hconv) { buf_printf(b, "%s(", hconv); emit_expr(c, argv[1], b); buf_puts(b, ")"); }
     else emit_str_expr(c, argv[1], b);
     buf_puts(b, ")");
+    if (sp_streq(suf, "_own")) g_sub_bang_own = id;
   }
   else if ((is_substitution(name)) && argc == 2 &&
            nt_type(nt, argv[0]) && sp_streq(nt_type(nt, argv[0]), "InterpolatedRegularExpressionNode")) {
@@ -7116,6 +7117,7 @@ static int str_arms_pattern(Compiler *c, int id, Buf *b, const NodeTable *nt, co
     else if (hconv) { buf_printf(b, "%s(", hconv); emit_expr(c, argv[1], b); buf_puts(b, ")"); }
     else emit_str_expr(c, argv[1], b);
     buf_puts(b, ")");
+    if (sp_streq(suf, "_own")) g_sub_bang_own = id;
     free(rp.p);
   }
   else if ((is_substitution(name)) && argc == 2 &&
@@ -7133,6 +7135,7 @@ static int str_arms_pattern(Compiler *c, int id, Buf *b, const NodeTable *nt, co
     else if (hconv) { buf_printf(b, "%s(", hconv); emit_expr(c, argv[1], b); buf_puts(b, ")"); }
     else emit_str_expr(c, argv[1], b);
     buf_puts(b, ")");
+    if (sp_streq(suf, "_own")) g_sub_bang_own = id;
   }
   else if ((is_substitution(name)) && argc == 2 &&
            comp_ntype(c, argv[0]) == TY_POLY && !repr_hash_is(repr_of(c, argv[1]), TY_STRING, TY_STRING)) {
@@ -7142,6 +7145,7 @@ static int str_arms_pattern(Compiler *c, int id, Buf *b, const NodeTable *nt, co
     buf_printf(b, "sp_poly_pat_gsub%s(", g_sub_bang_id == id ? "_own" : ""); emit_boxed(c, argv[0], b);
     buf_printf(b, ", %s, ", r); emit_str_expr(c, argv[1], b);
     buf_printf(b, ", %d)", sp_streq(name, "sub") ? 1 : 0);
+    if (g_sub_bang_id == id) g_sub_bang_own = id;
   }
   else if (sp_streq(name, "split") && argc == 1 && re_lit_index(c, argv[0]) >= 0) {
     buf_printf(b, "sp_re_split(sp_re_pat_%d, %s)", re_lit_index(c, argv[0]), r);
@@ -12245,6 +12249,18 @@ static void emit_face_str_bang(Compiler *c, int id, unsigned own, Buf *b) {
                     " const char *_t%d = sp_poly_recv_s(_t%d, \"%s\"); SP_GC_ROOT(_t%d);\n",
              tvb, rbb.p ? rbb.p : "sp_box_nil()", tvb, tob, tvb, bang, tob);
   free(rbb.p);
+  /* sub! / gsub! answer nil when no SUBSTITUTION was made, which the text
+     comparison below cannot tell from one that wrote the bytes it found
+     (`a[0].sub!("=") { "=" }`). The call is named as a String receiver's is
+     (sub_bang_reenters): its plain form enters the runtime through the
+     wrapper that clears the matched flag after the operands have run, or
+     answers from its block form's local, and "changed" reads that too. A
+     form no emitter took the wrapper for (a Hash replacement) keeps the
+     comparison alone, and a call that is a statement (g_stmt_call_id),
+     whose answer nobody reads, its C as it was. */
+  int subm = nil_nc && id != g_stmt_call_id && (sp_streq(bang, "sub!") || sp_streq(bang, "gsub!"));
+  int sv_sb = g_sub_bang_id;
+  if (subm) { g_sub_bang_id = id; g_sub_bang_tm = 0; g_sub_bang_own = -1; }
   view_bind(recv, "_t%d", tob);
   int v = view_push(c, recv, TY_STRING);
   nt_node_set_str((NodeTable *)nt, id, "name", plain);
@@ -12252,6 +12268,12 @@ static void emit_face_str_bang(Compiler *c, int id, unsigned own, Buf *b) {
   nt_node_set_str((NodeTable *)nt, id, "name", bang);
   view_pop(c, v);
   view_unbind(g_n_argov - 1);
+  char sm[40] = "";
+  if (subm) {
+    if (g_sub_bang_tm) snprintf(sm, sizeof sm, "_t%d || ", g_sub_bang_tm);
+    else if (g_sub_bang_own == id) snprintf(sm, sizeof sm, "sp_re_sub_matched || ");
+    g_sub_bang_id = sv_sb; g_sub_bang_tm = 0; g_sub_bang_own = -1;
+  }
   buf_printf(b, "({ const char *_t%d = %s; ", tnb, nbb.p ? nbb.p : "\"\"");
   free(nbb.p);
   /* Decide "did it change?" BEFORE the mutation. The receiver's old text
@@ -12261,7 +12283,7 @@ static void emit_face_str_bang(Compiler *c, int id, unsigned own, Buf *b) {
   int tchg = 0;
   if (nil_nc) {
     tchg = ++g_tmp;
-    buf_printf(b, "int _t%d = !sp_str_eq(_t%d, _t%d); ", tchg, tob, tnb);
+    buf_printf(b, "int _t%d = %s!sp_str_eq(_t%d, _t%d); ", tchg, sm, tob, tnb);
   }
   /* A shared handle absorbs the new contents; a plain string box cannot,
      so an lvalue receiver takes the value back the way the typed path
