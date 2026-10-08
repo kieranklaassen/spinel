@@ -10727,6 +10727,12 @@ static SP_NOINLINE sp_RbVal sp_poly_str_aref_other(const char *s, const sp_RbVal
     sp_raise_cls("TypeError", "no implicit conversion of String into Integer");
   return sp_box_nullable_str(sp_str_char_at_or_nil(s, sp_poly_arg_int_chk(idx)));
 }
+/* The same read for a Symbol, whose [] is its name's. A function of its
+   own: with this call written out in sp_poly_index_poly, gcc lays the reads
+   above it out one to five instructions longer. */
+static SP_NOINLINE sp_RbVal sp_poly_sym_aref_other(const sp_RbVal *rp, const sp_RbVal *ip) {
+  return sp_poly_str_aref_other(sp_sym_to_s((sp_sym)(*rp).v.i), ip);
+}
 static sp_RbVal sp_poly_index_poly(sp_RbVal recv, sp_RbVal idx) {
   /* a curried Proc applies its [] argument whatever the key kind -- claimed
      here, before the key-typed dispatch below coerces it to an index */
@@ -10865,6 +10871,10 @@ static sp_RbVal sp_poly_index_poly(sp_RbVal recv, sp_RbVal idx) {
      character */
   if (SP_UNLIKELY(idx.tag != SP_TAG_INT) && idx.tag != SP_TAG_BIGINT && recv.tag == SP_TAG_STR)
     return sp_poly_str_aref_other(recv.v.s, &idx);
+  /* a Symbol's [] is its name's: the same index on a Symbol read the name's
+     first character too */
+  if (SP_UNLIKELY(idx.tag != SP_TAG_INT) && idx.tag != SP_TAG_BIGINT && recv.tag == SP_TAG_SYM)
+    return sp_poly_sym_aref_other(&recv, &idx);
   return sp_poly_arr_get_hash(recv, i);
 }
 
