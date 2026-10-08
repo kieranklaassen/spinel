@@ -1,0 +1,31 @@
+A loop that tests after its body does not guard the body's first turn
+
+    def f(c)
+      t = +""
+      t << "4"
+      t << "2"
+      t = nil if c
+      i = 0
+      begin
+        t << "a"
+        i += 1
+      end while t && i < 2
+      t
+    end
+    p f(true)
+
+printed nil; CRuby raises NoMethodError at the append. nf_local_guarded
+takes a while loop's condition for a guard of the loop's body, which is
+right for `while t`: the test runs first. `begin ... end while t` runs
+its body once before any test, so on that turn t is whatever reached
+the loop. With the body taken for guarded no nil test was planned: the
+append did nothing on the nil handle, and `t.size` there read through
+NULL.
+
+The arm now leaves out a loop with the begin-modifier flag, so a call
+in such a body is planned as it is ahead of the loop. `while t` keeps
+its guard and its C.
+
+Test: test/nil_guard_post_test_loop.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
