@@ -978,6 +978,14 @@ spinel: test/reject/string_ivar_alias_lent_call.rb:6: a String instance variable
 spinel: test/reject/string_ivar_alias_lent_super.rb:8: a String instance variable written from a local is passed to an appending parameter (a String is not yet shared by reference through a lent instance variable written from a local). Return the String from the method and assign it, or append to it in the caller.
 == test/reject/string_ivar_alias_lent_super.rb [promote] rc=1
 spinel: test/reject/string_ivar_alias_lent_super.rb:8: a String instance variable written from a local is passed to an appending parameter (a String is not yet shared by reference through a lent instance variable written from a local). Return the String from the method and assign it, or append to it in the caller.
+== test/reject/string_ivar_alias_local_to_s.rb [default] rc=1
+spinel: test/reject/string_ivar_alias_local_to_s.rb:5: a String instance variable assigned from another instance variable, or from a local through `to_s` or another call answering its receiver, is mutated in place, or the String it was assigned from is (a String is not yet shared by reference through such an assignment). Mutate and read the String through one of the two names.
+== test/reject/string_ivar_alias_local_to_s.rb [promote] rc=1
+spinel: test/reject/string_ivar_alias_local_to_s.rb:5: a String instance variable assigned from another instance variable, or from a local through `to_s` or another call answering its receiver, is mutated in place, or the String it was assigned from is (a String is not yet shared by reference through such an assignment). Mutate and read the String through one of the two names.
+== test/reject/string_ivar_alias_mutation.rb [default] rc=1
+spinel: test/reject/string_ivar_alias_mutation.rb:7: a String instance variable assigned from another instance variable, or from a local through `to_s` or another call answering its receiver, is mutated in place, or the String it was assigned from is (a String is not yet shared by reference through such an assignment). Mutate and read the String through one of the two names.
+== test/reject/string_ivar_alias_mutation.rb [promote] rc=1
+spinel: test/reject/string_ivar_alias_mutation.rb:7: a String instance variable assigned from another instance variable, or from a local through `to_s` or another call answering its receiver, is mutated in place, or the String it was assigned from is (a String is not yet shared by reference through such an assignment). Mutate and read the String through one of the two names.
 == test/reject/string_ivar_array_append.rb [default] rc=1
 spinel: test/reject/string_ivar_array_append.rb:4: a String is not yet shared by reference through an ivar's or a call's Array into an appending iterator block
 == test/reject/string_ivar_array_append.rb [promote] rc=1
