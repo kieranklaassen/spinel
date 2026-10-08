@@ -131,15 +131,18 @@ static int split_line(const char *line, size_t len, Tok parts[3], const char **v
   return np;
 }
 
+/* The digits gather unsigned: the smallest Integer's are one past what a
+   long long holds until its sign is applied. */
 static long long parse_ll(const char *s, size_t len) {
-  long long sign = 1, v = 0;
+  int neg = 0;
+  unsigned long long v = 0;
   size_t i = 0;
-  if (i < len && (s[i] == '-' || s[i] == '+')) { if (s[i] == '-') sign = -1; i++; }
+  if (i < len && (s[i] == '-' || s[i] == '+')) { neg = s[i] == '-'; i++; }
   for (; i < len; i++) {
     if (s[i] < '0' || s[i] > '9') break;
-    v = (v * 10) + (s[i] - '0');
+    v = (v * 10) + (unsigned long long)(s[i] - '0');
   }
-  return v * sign;
+  return (long long)(neg ? 0ULL - v : v);
 }
 
 /* Parse a comma-separated id list into a malloc'd int array. */
@@ -363,15 +366,19 @@ int nt_clone_subtree(NodeTable *nt, int root) {
 
 /* ---- synthetic node construction ---- */
 
+static void nki_retyped(const NodeTable *nt, int id, NodeKind was);
+
 /* Retype an existing node in place. A desugar that rewrites one construct
    into another (a CallOperatorWriteNode into the writer CallNode Ruby means)
    has to keep the id: the parent's ref names it. */
 void nt_node_set_type(NodeTable *nt, int id, const char *type) {
   if (id < 0 || id >= nt->count || !type) return;
+  NodeKind was = nt_kind(nt, id);
   SpNode *nd = &nt->nodes[id];
   node_set_type(nd, type, strlen(type));
   nd->kind = 0;          /* the cached NodeKind is stale now */
   nt->version++;
+  nki_retyped(nt, id, was);
 }
 int nt_new_node(NodeTable *nt, const char *type) {
   if (nt->count >= nt->node_cap) {
@@ -389,6 +396,11 @@ int nt_new_node(NodeTable *nt, const char *type) {
   if (type) node_set_type(nd, type, strlen(type));
   return id;
 }
+int nt_new_int(NodeTable *nt, long long v) {
+  int n = nt_new_node(nt, "IntegerNode");
+  nt_node_set_int(nt, n, "value", v);
+  return n;
+}
 
 /* Turn an existing node INTO a node of another type, dropping every field it
    carried. A desugar that rewrites one construct as another needs the result
@@ -399,6 +411,7 @@ int nt_new_node(NodeTable *nt, const char *type) {
 void nt_node_reset(NodeTable *nt, int id, const char *type) {
   SpNode *nd = (SpNode *)node_at(nt, id);
   if (!nd) return;
+  NodeKind was = nt_kind(nt, id);
   nt->version++;
   free(nd->type); nd->type = NULL;
   free(nd->content); nd->content = NULL;
@@ -409,14 +422,7 @@ void nt_node_reset(NodeTable *nt, int id, const char *type) {
   nd->ns = nd->ni = nd->nr = nd->na = 0;
   nd->kind = 0;
   if (type) node_set_type(nd, type, strlen(type));
-}
-
-void nt_node_set_content(NodeTable *nt, int id, const char *val) {
-  SpNode *nd = (SpNode *)node_at(nt, id);
-  if (!nd) return;
-  nt->version++;
-  free(nd->content);
-  nd->content = dup_n(val, strlen(val));
+  nki_retyped(nt, id, was);
 }
 
 void nt_node_set_str(NodeTable *nt, int id, const char *key, const char *val) {
@@ -533,7 +539,8 @@ NodeKind nt_kind_resolve(const NodeTable *nt, int id) {
    each scan the whole table filtering by node kind, dozens of times per fixpoint
    iteration; this lets a pass walk only the nodes of the kind it cares about.
    Ids within a kind are in ascending order (matching a forward `for id` scan).
-   Rebuilt when the table pointer or count changes (desugar passes append nodes).
+   Rebuilt when the table pointer or count changes (desugar passes append nodes),
+   or when a node is retyped in place into another kind (nki_retyped).
    nt_kind is O(1) (cached per node), so a rebuild is a single linear pass. */
 static const NodeTable *nki_nt = NULL;
 static int nki_ntc = -1;
@@ -561,6 +568,16 @@ void nt_kind_iter_close(NtKindIter *it) {
   if (--nki_live > 0) return;
   for (int i = 0; i < nki_nretired; i++) free(nki_retired[i]);
   nki_nretired = 0;
+}
+/* Node id was retyped in place (nt_node_set_type, nt_node_reset) and is of
+   another kind now. The index still lists it under the kind it had and not
+   under its new one, and the node count, which is what tells a rebuild is
+   due, did not change: a desugar that folds `RUBY_ENGINE == "spinel"` into
+   a TrueNode appends nothing, so a later walk of the CallNodes was handed
+   the TrueNode and read its absent name. Drop the index; the next ask
+   rebuilds it, once however many nodes changed kind meanwhile. */
+static void nki_retyped(const NodeTable *nt, int id, NodeKind was) {
+  if (nki_nt == nt && nt_kind(nt, id) != was) nki_nt = NULL;
 }
 static void nki_build(const NodeTable *nt) {
   int n = nt->count;

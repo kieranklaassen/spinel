@@ -371,9 +371,37 @@ static inline char *sp_str_alloc_nogc(size_t len) {
 /* Copy a message onto the string heap so it can be held by a string root.
    The source is a bare literal (every raise the runtime and the generated
    code issue passes one) or an unrooted heap string; neither can be rooted
-   across an allocation, so the copy runs with no collection in between. */
+   across an allocation, so the copy runs with no collection in between.
+   The length is strlen's, not sp_str_byte_len's: a bare literal or a static
+   buffer (Process.spawn's sp_err_buf) has no header, and sp_str_byte_len reads
+   the byte before it for one, which for some neighbouring byte looks like a
+   header's marker and answers a made-up length (#7556 did, and a copied
+   message gained NUL bytes in some builds). */
+/* A "counted" message: a raise message that is a Spinel String with a NUL inside it
+   (sp_exc_msg_given builds it, #7556). The one place a message's length survives the
+   const char * the exception path carries it as, and only for a message the generated
+   code gave: it starts with six bytes no C string of ours starts with (a raw buffer's
+   neighbour bytes are never read; these are compared from the pointer on, stopping
+   at the first mismatch, and a NUL ends any shorter string), then the payload's
+   length, then the payload. A bare C string, whose length is strlen's, never matches.
+   The sixth byte is 0x02 for a frozen String's message (a literal's), so the
+   exception's copy is frozen too and `e.message << x` raises FrozenError, as
+   CRuby's message is the literal itself (sp_cmsg_frozen). */
+#define SP_CMSG_HDR 10
+static inline int sp_cmsg_p(const char *m) {
+  return m && (unsigned char)m[0] == 0xff && (unsigned char)m[1] == 0xfe && m[2] == 'C' &&
+         m[3] == 'M' && (unsigned char)m[4] == 0xfd && ((unsigned char)m[5] == 0x01 || (unsigned char)m[5] == 0x02);
+}
+static inline int sp_cmsg_frozen(const char *m) { return (unsigned char)m[5] == 0x02; }
+static inline size_t sp_cmsg_len(const char *m) { uint32_t n; memcpy(&n, m + 6, sizeof n); return n; }
 static inline const char *sp_msg_heapify(const char *m) {
   if (!m) return NULL;
+  if (sp_cmsg_p(m)) {   /* stays counted: a later stage decodes it */
+    size_t total = SP_CMSG_HDR + sp_cmsg_len(m);
+    char *c = sp_str_alloc_nogc(total);
+    memcpy(c, m, total);
+    return c;
+  }
   size_t n = strlen(m);
   char *r = sp_str_alloc_nogc(n);
   memcpy(r, m, n);
@@ -679,6 +707,10 @@ void *sp_pl_realloc(void *p, size_t newn);   /* lib/sp_slab.c: a slab block know
                                            that asserts every id is distinct will
                                            flag any future collision at compile
                                            time. */
+#define SP_BUILTIN_RANDOM        (-50)  /* Random (sp_Random *): boxed so a
+                                           generator in an Array or a poly slot
+                                           keeps its identity; it read as nil */
+/* SP_BUILTIN_ARGF (-51) is in sp_gc.h: the collector must not trace it */
 #define SP_BUILTIN_YIELDER       (-49)  /* Enumerator::Yielder: the generator's
                                           block parameter as a VALUE, for a
                                           proc inside the body that captures
@@ -737,6 +769,45 @@ extern size_t sp_gc_threshold;
 extern size_t sp_gc_threshold_init;
 extern int sp_gc_stress_checked;
 void *sp_gc_alloc(size_t sz, void (*fin)(void *), void (*scn)(void *));
+/* sp_gc_alloc(sz, NULL, scn) for a size that is a constant where it is
+   called: the switch folds to one call, of the front lib/sp_slab.c keeps for
+   that size class (16 bytes apart from 32 to 256, the header included). */
+void *sp_gc_alloc_32(size_t need, void (*scn)(void *));
+void *sp_gc_alloc_48(size_t need, void (*scn)(void *));
+void *sp_gc_alloc_64(size_t need, void (*scn)(void *));
+void *sp_gc_alloc_80(size_t need, void (*scn)(void *));
+void *sp_gc_alloc_96(size_t need, void (*scn)(void *));
+void *sp_gc_alloc_112(size_t need, void (*scn)(void *));
+void *sp_gc_alloc_128(size_t need, void (*scn)(void *));
+void *sp_gc_alloc_144(size_t need, void (*scn)(void *));
+void *sp_gc_alloc_160(size_t need, void (*scn)(void *));
+void *sp_gc_alloc_176(size_t need, void (*scn)(void *));
+void *sp_gc_alloc_192(size_t need, void (*scn)(void *));
+void *sp_gc_alloc_208(size_t need, void (*scn)(void *));
+void *sp_gc_alloc_224(size_t need, void (*scn)(void *));
+void *sp_gc_alloc_240(size_t need, void (*scn)(void *));
+void *sp_gc_alloc_256(size_t need, void (*scn)(void *));
+static inline void *sp_gc_alloc_sized(size_t sz, void (*scn)(void *)) {
+  size_t need = sizeof(sp_gc_hdr) + sz;
+  switch (need <= 32 ? 0 : need > 256 ? -1 : (int)((need + 15) >> 4) - 2) {
+  case 0: return sp_gc_alloc_32(need, scn);
+  case 1: return sp_gc_alloc_48(need, scn);
+  case 2: return sp_gc_alloc_64(need, scn);
+  case 3: return sp_gc_alloc_80(need, scn);
+  case 4: return sp_gc_alloc_96(need, scn);
+  case 5: return sp_gc_alloc_112(need, scn);
+  case 6: return sp_gc_alloc_128(need, scn);
+  case 7: return sp_gc_alloc_144(need, scn);
+  case 8: return sp_gc_alloc_160(need, scn);
+  case 9: return sp_gc_alloc_176(need, scn);
+  case 10: return sp_gc_alloc_192(need, scn);
+  case 11: return sp_gc_alloc_208(need, scn);
+  case 12: return sp_gc_alloc_224(need, scn);
+  case 13: return sp_gc_alloc_240(need, scn);
+  case 14: return sp_gc_alloc_256(need, scn);
+  default: return sp_gc_alloc(sz, NULL, scn);
+  }
+}
 void *sp_gc_alloc_nogc(size_t sz, void (*fin)(void *), void (*scn)(void *));
 
 SP_NORETURN void sp_raise_cls(const char *cls, const char *msg);  /* lib/sp_core.c */
@@ -789,6 +860,12 @@ static inline void sp_PolyArray_fin(void *p) { sp_PolyArray *a = (sp_PolyArray *
 extern SP_TLS sp_gc_hdr *sp_polyarr_pool_head;
 extern SP_TLS long sp_polyarr_pool_count;
 void sp_PolyArray_pool_recycle(sp_gc_hdr *h);
+/* An Array subclass instance's embedded Array (#7449, see
+   sp_IntArray_init_embedded): its elements start inline, and the first growth
+   installs the finalizer that frees the payload, as an unpooled one's does. */
+static inline void sp_PolyArray_init_embedded(sp_PolyArray *a) {
+  a->data = a->inl; a->cap = SP_POLYARR_INLINE; a->len = 0;
+}
 static inline sp_PolyArray *sp_PolyArray_new(void) {
   if (sp_slab_on > 0) {
     sp_PolyArray *a = (sp_PolyArray *)sp_gc_alloc(sizeof(sp_PolyArray), NULL, sp_PolyArray_scan);
@@ -974,7 +1051,9 @@ static inline sp_RbVal sp_box_range(sp_Range v) {
   return sp_box_obj(p, SP_BUILTIN_RANGE);
 }
 static inline const char*sp_encoding_name(sp_Encoding e){return e.name?e.name:sp_str_empty;}
-static inline const char*sp_encoding_inspect(sp_Encoding e){return sp_sprintf("#<Encoding:%s>",sp_encoding_name(e));}
+/* Encoding#inspect: the binary encoding reads "BINARY (ASCII-8BIT)" since Ruby 3.4 */
+static inline const char*sp_encoding_inspect_name(const char*n){return !strcmp(n,"ASCII-8BIT")?sp_sprintf("#<Encoding:BINARY (ASCII-8BIT)>"):sp_sprintf("#<Encoding:%s>",n);}
+static inline const char*sp_encoding_inspect(sp_Encoding e){return sp_encoding_inspect_name(sp_encoding_name(e));}
 static inline sp_bool sp_encoding_eq(sp_Encoding a,sp_Encoding b){const char*an=sp_encoding_name(a);const char*bn=sp_encoding_name(b);return strcmp(an,bn)==0;}
 
 /* ---- Box helper prototypes (0 optcarrot uses; bodies in lib/sp_cold.c). ---- */
