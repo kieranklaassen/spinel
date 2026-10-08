@@ -1788,6 +1788,21 @@ static int cplan_nil_user_method(Compiler *c, const char *name) {
   return 0;
 }
 
+/* Is nil's answer to `name` the program's own to give: a method of that
+   name or a method_missing it gives nil (cplan_nil_user_method), or either
+   name spelled as a Symbol anywhere (an alias, alias_method, define_method,
+   send)? Coarse, and safe: for such a program a call site adds no
+   NoMethodError of its own for a nil receiver. */
+int cplan_nil_program_answers(Compiler *c, const char *name) {
+  const NodeTable *nt = c->nt;
+  if (cplan_nil_user_method(c, name) || cplan_nil_user_method(c, "method_missing")) return 1;
+  NT_FOREACH_KIND(nt, NK_SymbolNode, s) {
+    const char *v = nt_str(nt, s, "value");
+    if (v && (sp_streq(v, name) || sp_streq(v, "method_missing"))) return 1;
+  }
+  return 0;
+}
+
 int cplan_nil_written(int why) {
   return why == NFW_NIL || why == NFW_NO_ELSE || why == NFW_SAFE_NAV || why == NFW_UNSET || why == NFW_ELEM_NIL;
 }
@@ -1814,6 +1829,7 @@ int cplan_nil(Compiler *c, int id) {
   /* a local or a global is tested in its slot, where a mutator writes
      back: a slot that holds the pointer, or a shared String's handle; one
      held another way (a box a read unboxes) is left as it is */
+  int handle_local = 0;
   if (rk == NK_LocalVariableReadNode || rk == NK_GlobalVariableReadNode) {
     const char *sn = nt_str(nt, r, "name");
     LocalVar *lv = NULL;
@@ -1824,6 +1840,7 @@ int cplan_nil(Compiler *c, int id) {
     else if (sn && sn[0] == '$') lv = comp_gvar(c, comp_resolve_gvar(c, sn + 1));
     Repr sr = repr_of_slot(c, lv);
     if (!lv || !(sr.kind == RK_STRBUF || (sr.kind == RK_PTR && sr.as_ty == rt))) return CN_NONE;
+    handle_local = rk == NK_LocalVariableReadNode && sr.kind == RK_STRBUF;
   }
   /* a shared String's handle a call renders is not bound like a value */
   else if (rr.kind == RK_STRBUF) return CN_NONE;
@@ -1832,7 +1849,18 @@ int cplan_nil(Compiler *c, int id) {
      read, a global, an ivar, a caller not seen, a builtin's answer), which
      a hot loop over a receiver that is never nil would pay for */
   int why = nil_fact_why(c, r);
-  if (!cplan_nil_written(why)) return CN_NONE;
+  /* an append to a local's shared String tests the handle itself
+     (sp_String_append_bin), so there a nil the fact cannot bound raises
+     inside the call, and a receiver that is never nil pays nothing */
+  int in_call = 0;
+  if (!cplan_nil_written(why)) {
+    int argc = 0;
+    (void)call_args(nt, id, &argc);
+    if (why == NFW_NONE || why == NFW_GUARDED || !handle_local || !is_append_concat(nm) || argc != 1) return CN_NONE;
+    /* an answer the program gives nil itself is not this site's to replace */
+    if (cplan_nil_program_answers(c, nm)) return CN_NONE;
+    in_call = 1;
+  }
   /* the definite-assignment walk over a temp the compiler wrote itself (a
      desugared splat's receiver) is not the program's nil */
   if (why == NFW_UNSET && nt_int(nt, r, "node_line", 0) <= 0) return CN_NONE;
@@ -1843,6 +1871,7 @@ int cplan_nil(Compiler *c, int id) {
     if (!rn || !sp_streq(rn, "__self")) return CN_NONE;
   }
   if (cplan_nil_user_method(c, nm)) return CN_NONE;
+  if (in_call) return CN_RAISE_IN_CALL;
   return is_nil_method(nm) ? CN_ANSWER : CN_RAISE;
 }
 

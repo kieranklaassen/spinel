@@ -15812,7 +15812,7 @@ static int str_mutate_append_bang_arms(Compiler *c, int id, Buf *b, int indent, 
      buffer. recv is emitted raw (the sp_String*), not via emit_expr (which
      would hand out a copy). */
   if ((is_append_concat(name)) && argc == 1) {
-    int chain[64]; int nchain = 0; int cur = id;
+    int chain[64]; int nchain = 0; int cur = id, first = -1;
     while (nchain < 64) {
       cur = unwrap_parens(c, cur);
       const char *cty = nt_type(nt, cur);
@@ -15824,6 +15824,7 @@ static int str_mutate_append_bang_arms(Compiler *c, int id, Buf *b, int indent, 
       int cac = 0; const int *cav = cargs >= 0 ? nt_arr(nt, cargs, "arguments", &cac) : NULL;
       if (cac != 1) break;
       chain[nchain++] = cav[0];
+      first = cur;
       cur = crecv;
     }
     char srefC[1024];
@@ -15839,19 +15840,28 @@ static int str_mutate_append_bang_arms(Compiler *c, int id, Buf *b, int indent, 
         many = at == TY_INT || at == TY_POLY || np > 1;
       }
       int held = strbuf_recv_hold(c, cur, name, nchain, chain, many, srefC, sizeof srefC, b, indent);
+      /* a handle that may be nil with no test ahead of the statement
+         (cplan_nil): the first link's append raises for a nil one, once
+         its operand has run */
+      const char *nilm = cplan_nil(c, first) == CN_RAISE_IN_CALL ? nt_str(nt, first, "name") : NULL;
       for (int j = nchain - 1; j >= 0; j--) {
         int arg = chain[j];
         TyKind at = comp_ntype(c, arg);
-        /* an interpolation appends its parts straight into the buffer, no
-           intermediate string (emit_interp_append) */
-        if (nt_kind(nt, arg) == NK_InterpolatedStringNode) {
-          char o1[1100], o2[1100];
+        char o1[1100], o2[1100];
+        if (nilm && j == nchain - 1) {
+          snprintf(o1, sizeof o1, "sp_String_append_recv(%s, \"%s\", ", srefC, nilm);
+          snprintf(o2, sizeof o2, "sp_String_append_recv_n(%s, \"%s\", ", srefC, nilm);
+        }
+        else {
           snprintf(o1, sizeof o1, "sp_String_append_bin(%s, ", srefC);
           snprintf(o2, sizeof o2, "sp_String_append_n(%s, ", srefC);
-          if (emit_interp_append(c, arg, o1, o2, b, indent + held)) continue;
         }
+        /* an interpolation appends its parts straight into the buffer, no
+           intermediate string (emit_interp_append) */
+        if (nt_kind(nt, arg) == NK_InterpolatedStringNode && emit_interp_append(c, arg, o1, o2, b, indent + held))
+          continue;
         emit_indent(b, indent + held);
-        buf_printf(b, "sp_String_append_bin(%s, ", srefC);
+        buf_puts(b, o1);
         (void)at;
         /* One rule for what a String append does with its argument, shared with
            the value-position emitter. This copy had the typed-Integer half and
