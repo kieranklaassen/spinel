@@ -2587,7 +2587,7 @@ static int str_call_makes_string(const char *n) {
    String (str_call_makes_string). The names are the builtin class's own, so
    no method the program gives Object or Kernel answers in their place; one
    it gives the builtin class by reopening it is asked the same question. */
-static int method_builds_string(Compiler *c, int mi, int depth) {
+int method_builds_string(Compiler *c, int mi, int depth) {
   const NodeTable *nt = c->nt;
   int last = scope_body_last(c, mi);
   if (last < 0 || depth > 4 || scope_has_return(c, mi)) return 0;

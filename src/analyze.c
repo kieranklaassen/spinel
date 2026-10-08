@@ -16829,6 +16829,15 @@ static int strbuf_demand_value_leaves(Compiler *c, int node, int depth) {
       if (infer_type(c, node) == TY_POLY) {
         int d = strbuf_demand_elem_arg(c, node);
         if (d >= 0) sbd_gen++;   /* it may have marked stores, changed or not */
+        /* a call on a boxed receiver that finds its method at run time
+           (`b[0].plus`): the arm of a class whose method builds its String
+           answers a fresh handle (poly_arm_fresh_handle) */
+        if (d < 0 && nt_kind(nt, node) == NK_CallNode && !c->poly_strbuf_lift[node] &&
+            nt_ref(nt, node, "receiver") >= 0 && infer_type(c, nt_ref(nt, node, "receiver")) == TY_POLY) {
+          c->poly_strbuf_lift[node] = 1;
+          sbd_gen++;
+          return 1;
+        }
         return d > 0 ? d : 0;
       }
       if (infer_type(c, node) != TY_STRING) return 0;

@@ -280,6 +280,22 @@ static int poly_user_arm0_decide(Compiler *c, int id, const char *name, int argc
   return 0;
 }
 
+/* The type a class's arm boxes its answer as. Where the dispatch `id` is
+   stored as an element that is changed in place (the store's handle demand
+   marked the call) and the arm's method builds its String
+   (method_builds_string), the arm answers the fresh handle a typed call's
+   store makes, so the change is the element's: `call` is wrapped, and the
+   type is TY_STRBUF. A plain String's box is a value, and an append to it
+   answered a new String the element never took. Every other arm: `t`. */
+static TyKind poly_arm_fresh_handle(Compiler *c, int id, int mi, TyKind t, TyKind ret, Buf *call) {
+  if (ret != TY_POLY || t != TY_STRING || mi < 0 || !(c->strbuf_box[id] || c->poly_strbuf_lift[id]) ||
+      !method_builds_string(c, mi, 0))
+    return t;
+  Buf hb; memset(&hb, 0, sizeof hb);
+  buf_printf(&hb, "sp_String_new_shared(%s)", call->p ? call->p : "");
+  free(call->p); *call = hb;
+  return TY_STRBUF;
+}
 /* One user-class arm of a zero-argument poly dispatch, as the plan (or the
    decision above) gives it: `case k:` writing the result temp _t<tr> from
    receiver _t<tv>, the arm's value fitted to the call's type ret. */
@@ -435,13 +451,14 @@ static void emit_poly_user_arm0(Compiler *c, int id, const char *name, TyKind re
     }
     else emit_cmethod_block_arg(c, id, &c->scopes[mi], blk_tmp0, &cb);
     buf_puts(&cb, ")");
-    const char *call = cb.p ? cb.p : "";
     buf_printf(b, " case %d: ", k);
     /* A proc form is a separately inferred clone, so its own return type
        is the one to read -- not the original's, which an inlined-only
        method never needed (#3399). */
     int pf9 = pfi9 >= 0;
     TyKind cret9 = pf9 ? c->scopes[pfi9].ret : c->scopes[mi].ret;
+    TyKind box9 = pf9 ? cret9 : poly_arm_fresh_handle(c, id, mi, cret9, ret, &cb);
+    const char *call = cb.p ? cb.p : "";
     int pconv = PC_SAME;
     if ((pf9 ? method_is_void(&c->scopes[pfi9]) : method_is_void(&c->scopes[mi]))) {
       buf_puts(b, call);  /* void: no usable value */
@@ -450,7 +467,7 @@ static void emit_poly_user_arm0(Compiler *c, int id, const char *name, TyKind re
     else {
       TyKind slotty = is_scalar_ret(ret) ? ret : TY_INT;
       buf_printf(b, "_t%d = ", tr);
-      if (ret == TY_POLY && cret9 != TY_POLY) { emit_boxed_text(c, cret9, call, b); pconv = PC_BOX; }
+      if (ret == TY_POLY && cret9 != TY_POLY) { emit_boxed_text(c, box9, call, b); pconv = PC_BOX; }
       /* The slot is scalar (e.g. a length dispatch fixed to sp_int) but
          this class's method widened its return to poly: coerce down. */
       else if (ret != TY_POLY && cret9 == TY_POLY) { emit_unbox_poly_ret(c, slotty, call, b); pconv = PC_UNBOX; }
@@ -897,7 +914,8 @@ static int poly_user_arm_n_replay(Compiler *c, int id, const char *name, const P
   /* a proc form carries its own inferred return type (#3399) */
   int pf8 = pfi8 >= 0;
   TyKind mret8 = pf8 ? c->scopes[pfi8].ret : mret;
-  int pconv = emit_poly_user_arm_n(c, k, cb.p, mret8, &c->scopes[pf8 ? pfi8 : mi], ret, tr,
+  TyKind box8 = pf8 || is_setter_val ? mret8 : poly_arm_fresh_handle(c, id, mi, mret8, ret, &cb);
+  int pconv = emit_poly_user_arm_n(c, k, cb.p, box8, &c->scopes[pf8 ? pfi8 : mi], ret, tr,
                                    is_setter_val, b);
   free(cb.p);
   if (g_plan_check) pa_observe(pf8 ? PA_PROC_FORM : PA_USER, k, mi, mret8, pconv);
@@ -1052,7 +1070,8 @@ static void emit_poly_user_arm_n_plan(Compiler *c, int id, const char *name, con
   /* a proc form carries its own inferred return type (#3399) */
   int pf8 = pfi8 >= 0;
   TyKind mret8 = pf8 ? c->scopes[pfi8].ret : mret;
-  int pconv = emit_poly_user_arm_n(c, k, cb.p, mret8, &c->scopes[pf8 ? pfi8 : mi], ret, tr,
+  TyKind box8 = pf8 || is_setter_val ? mret8 : poly_arm_fresh_handle(c, id, mi, mret8, ret, &cb);
+  int pconv = emit_poly_user_arm_n(c, k, cb.p, box8, &c->scopes[pf8 ? pfi8 : mi], ret, tr,
                                    is_setter_val, b);
   free(cb.p);
   if (g_plan_check) pa_observe(pf8 ? PA_PROC_FORM : PA_USER, k, mi, mret8, pconv);
