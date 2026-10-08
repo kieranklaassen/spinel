@@ -1304,6 +1304,20 @@ static int strbuf_uplus_operand(Compiler *c, int v) {
          is_unary_plus(nt_str(c->nt, v, "name")) && nt_ref(c->nt, v, "arguments") < 0 ?
          nt_ref(c->nt, v, "receiver") : -1;
 }
+/* `+x` on the handle h of operand x. nil has no +@, and sp_String_uplus
+   answers a NULL handle as it is: an operand the nil fact says may be nil
+   is tested first and raises NoMethodError, as the --share-strings route
+   does (emit_strbuf_route). One that is never nil keeps the bare call, and
+   so does a program that gives nil an answer to +@ itself. */
+static void emit_strbuf_uplus(Compiler *c, int x, const char *h, Buf *b) {
+  if (!repr_of(c, x).may_nil || cplan_nil_program_answers(c, "+@")) {
+    buf_printf(b, "sp_String_uplus(%s)", h);
+    return;
+  }
+  int t = ++g_tmp;
+  buf_printf(b, "({ sp_String *_t%d = %s; if (SP_UNLIKELY(!_t%d)) sp_raise_nomethod(sp_nomethod_msg(\"+@\", sp_box_nil())); "
+                "sp_String_uplus(_t%d); })", t, h, t, t);
+}
 /* The handle a slot the rule shares takes from value v (emit_strbuf_value
    into such a slot): a handle's own, a fresh String's a new one. */
 void emit_strbuf_handle_of(Compiler *c, int v, Buf *b) {
@@ -2190,7 +2204,7 @@ void emit_strbuf_value(Compiler *c, LocalVar *lv, int v, Buf *b) {
   /* (--share-strings: through the route, which raises for a nil s) */
   else if (shared && vplus >= 0 && repr_share_rule(c) && emit_strbuf_route(c, v, b)) { }
   else if (shared && vplus >= 0 && !repr_share_rule(c) && strbuf_slot_ref(c, vplus, srefV, sizeof srefV))
-    buf_printf(b, "sp_String_uplus(%s)", srefV);
+    emit_strbuf_uplus(c, vplus, srefV, b);
   else if (shared && emit_strbuf_ivar_write_handle(c, v, b)) { }
   /* A chained assignment (`u = t = s`) whose inner target is the handle too:
      run the inner write, then alias ITS handle. Wrapping the write's value
@@ -11565,7 +11579,12 @@ static int emit_multi_write_stmt(Compiler *c, int id, Buf *b, int indent, const 
     if (hread || hwrite) {
       /* `+s` is s itself unless s is frozen */
       if (hwrite) buf_printf(b, "sp_String * _t%d = %s;", tmps[i], hw.p ? hw.p : "NULL");
-      else buf_printf(b, hup >= 0 ? "sp_String * _t%d = sp_String_uplus(%s);" : "sp_String * _t%d = %s;", tmps[i], hsrc);
+      else if (hup >= 0) {
+        buf_printf(b, "sp_String * _t%d = ", tmps[i]);
+        emit_strbuf_uplus(c, hup, hsrc, b);
+        buf_puts(b, ";");
+      }
+      else buf_printf(b, "sp_String * _t%d = %s;", tmps[i], hsrc);
       free(hw.p);
       if (tmpts) tmpts[i] = TY_STRBUF;
       int later_alloc_h = store_alloc;

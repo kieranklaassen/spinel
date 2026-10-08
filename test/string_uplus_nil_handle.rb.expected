@@ -1,0 +1,10 @@
+"42!?"
+NoMethodError
+"42!?"
+"z!?"
+NoMethodError
+["42!?", 1]
+NoMethodError
+"xy42!?"
+NoMethodError
+["abcde", "abcde"]
