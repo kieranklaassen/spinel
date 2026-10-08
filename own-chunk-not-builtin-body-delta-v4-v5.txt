@@ -1,0 +1,11 @@
+--- own-chunk-not-builtin-body-v4.md
++++ own-chunk-not-builtin-body-v5.md
+@@ -36,7 +36,7 @@
+ gate: run on the Mac at opening
+ ```
+ 
+-Run on this head, in a container without CRuby 4.0: the build; `test/own_method_named_chunk.rb` with gcc and clang at `SPINEL_GC_STRESS` 0, 1 and 2 and with `--share-strings`; `ruby tools/gate.rb check`; `make cident` against master (6,512 programs identical, 2 differ: the new test and the test of the pull request beneath); `make share-strings-test` and `make int-min-test`; the test's `.expected` is CRuby 3.3.6's, run with `--enable-frozen-string-literal`.
++Run on this head, in a container without CRuby 4.0: the build; `test/own_method_named_chunk.rb` with gcc and clang at `SPINEL_GC_STRESS` 0, 1 and 2 and with `--share-strings`; `ruby tools/gate.rb check`; `make cident` against master (6,553 programs identical, 2 differ: the new test and the test of the pull request beneath); `make share-strings-test` and `make int-min-test`; the test's `.expected` is CRuby 3.3.6's, run with `--enable-frozen-string-literal`.
+ 
+ - [ ] New tests have `.expected` files that match CRuby 4.0 run with `--enable-frozen-string-literal`
+ - [x] Values past 2^31 are marked `# spinel: int64` (the test has none)
