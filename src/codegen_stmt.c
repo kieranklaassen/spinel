@@ -9417,7 +9417,9 @@ void emit_rescue(Compiler *c, int id, Buf *b, int indent, int fr, const char *re
      stores below put young values into it, so the barrier records it first.
      After the capture, not before: the capture allocates, and a collection
      inside it clears the record a barrier ahead of it would have made. */
-  buf_printf(b, "if (_ce_%d->backtrace == NULL) { sp_StrArray *_bt = sp_backtrace_captured(); sp_gc_wb((void *)_ce_%d); _ce_%d->backtrace = _bt; }\n", rc, rc, rc);
+  /* A frozen exception takes no backtrace, as in CRuby: its #backtrace
+     stays nil however often it is raised. */
+  buf_printf(b, "if (_ce_%d->backtrace == NULL && !sp_gc_is_frozen(_ce_%d)) { sp_StrArray *_bt = sp_backtrace_captured(); sp_gc_wb((void *)_ce_%d); _ce_%d->backtrace = _bt; }\n", rc, rc, rc, rc);
   emit_indent(b, indent);
   /* an exception never loses a cause it already carries (#3745) */
   buf_printf(b, "if (!_ce_%d->cause) { sp_gc_wb((void *)_ce_%d); _ce_%d->cause = (sp_Exception *)sp_pending_cause; } sp_pending_cause = NULL;\n", rc, rc, rc);
