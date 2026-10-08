@@ -1,0 +1,34 @@
+An ensure runs when a rescue clause of its begin raises
+
+    def go
+      raise ArgumentError, "y"
+    rescue ArgumentError
+      puts "logged"
+      raise
+    ensure
+      puts "ensure"
+    end
+
+printed "logged" and never "ensure". A new `raise`, a call that raises,
+an `exit` and a `throw` in the clause skipped the ensure body the same
+way.
+
+The begin's one frame is popped when it lands, so the clauses ran with
+no frame of this begin, and what they raised went to the enclosing one.
+A clause's body now runs under a frame of its own when the begin has an
+ensure. It is pushed on the landing path, so a begin that raises
+nothing enters one frame as before. Its landing stores the exception
+for the ensure, as the arm for no match does, and a throw or a proc's
+return goes on after the ensure body as it does out of the begin's
+body.
+
+A `retry` pops the frame before it jumps; `return`, `break` and `next`
+count it already. A `next` that an ensure inside the clause hands on to
+this one did not: it popped one frame whatever stood between, and left
+the clause's handler to the `next` itself, which counted it only while
+the clause had no frame. The hand-on now pops the frames down to the
+region's base and the handlers of the clauses it leaves
+(emit_ensure_next_chain); outside a rescue clause it is the line it
+was.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

@@ -1,0 +1,35 @@
+An ensure keeps the exception it holds while its body runs
+
+    def go(n)
+      raise ArgumentError, "the message of error number " + n.to_s
+    ensure
+      begin
+        churn
+      rescue TypeError
+      end
+      churn
+    end
+
+handed its caller an error whose message was another String of the
+program, in a plain run, where `churn` only allocates. An exception
+object lost what it held the same way once the ensure body had raised
+and rescued an error of its own.
+
+While the ensure body runs, the exception that waits to be raised again
+lives in two C locals, and they are not roots. A begin that body enters
+takes the slot the message was read from, and any raise clears
+sp_inflight_cause, which held the object: the next collection frees
+both. The two locals are now rooted for the ensure body, when an
+exception waits.
+
+An ensure body that only names nil, true or false, alone or stored in a
+local or an instance variable, keeps its C: it allocates nothing and
+rescues no raise. Any call may rescue one, so the list ends there.
+
+The path with no exception pays for a saved root count: by callgrind,
+ten instructions on each entry of a begin with an ensure in a small
+method, five in a method that roots a local already, two for a begin in
+a loop. Rooting the two locals where they are declared costs 25, 9 and
+32.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

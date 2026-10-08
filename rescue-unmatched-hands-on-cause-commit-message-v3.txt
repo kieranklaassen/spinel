@@ -1,0 +1,33 @@
+A rescue that does not match hands the exception on with its cause
+
+    def go
+      begin
+        raise ArgumentError, "first"
+      rescue ArgumentError
+        raise TypeError, "second"
+      end
+    end
+
+    begin
+      begin
+        go
+      rescue IOError
+        puts "io"
+      end
+    rescue => g
+      p g.cause
+    end
+
+printed nil, and inside another handler it printed that handler's
+exception. CRuby prints #<ArgumentError: first>.
+
+The cause is decided at every raise, from what is being handled there,
+and a rescue none of whose clauses match hands the exception on by
+raising it again: where it passes, nothing is being handled, or
+something else is. The arm for no match, and the rescue modifier's arm
+for an exception that is no StandardError, now call `sp_exc_pass_cause`,
+as the raise after an ensure body does: it gives that raise the cause
+the exception was raised with. An object that carries a cause of its
+own keeps it.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

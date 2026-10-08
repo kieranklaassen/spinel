@@ -1,0 +1,29 @@
+An exception handed from an inner ensure to the outer one stays alive
+
+    begin
+      begin
+        begin
+          raise KeyError, "boom"
+        ensure
+          x = 1
+        end
+      ensure
+        keep = []
+        50000.times { |i| keep << "y" + i.to_s }
+      end
+    rescue => e
+      puts e.message
+    end
+
+printed `y4466` for `boom` in a plain run: the message was another
+String of the program, where the outer ensure only allocates.
+
+The inner region hands the exception to the outer one by popping the
+outer region's frame and jumping to its ensure body. The collector keeps
+what the exception slots hold up to sp_exc_top, and the slot the message
+was read from lies above that once the frame is popped: the first
+collection in the outer ensure body freed it. The hand-on now puts the
+message and the object in the popped frame's slot, as a landing in that
+frame would have left them.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
