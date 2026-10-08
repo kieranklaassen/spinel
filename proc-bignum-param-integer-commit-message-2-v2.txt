@@ -1,0 +1,49 @@
+A Bignum parameter of a proc or a block takes another call's Integer
+
+    show = proc { |n| p n }
+    show.call(2**70)
+    show.call(7)
+
+ended in a segmentation fault, and printed nil for a 0 in place of the
+7. CRuby prints 7 and 0. The same pair through yield, or through
+blk.call on a block parameter, did not build: "assignment to
+'sp_Bigint *' from 'long long int'".
+
+ty_unify makes a parameter a Bignum when one call passes a Bignum and
+another an Integer, and each boundary has to make a Bignum of the
+Integer. A method call does, and a local write. A proc's body
+(emit_proc_literal_here) and a Method's proc (emit_method_tramp_fn)
+cast the sp_int slot to a pointer, and the slot carries the Integer as
+itself: 7 is the address 0x7, and 0 is NULL, which prints as nil. A
+yield spliced into its block (emit_block_arg_coerced) assigned the
+Integer to the pointer.
+
+The two bodies now read the parameter through sp_proc_arg_bigint,
+which looks at the box every call publishes beside the slot: a Bignum
+is taken as it is, an Integer becomes a Bignum, and nil or a value of
+any other kind reads the slot as before. The Bignum made is rooted,
+since nothing else holds it. The spliced yield converts the Integer
+with emit_bigint_operand_ext, as a local write does. `pr === 2**70`,
+where the runtime's own call fills the slot with the Bignum's low
+bits, handed the proc nil and is right by the same read. So is a
+proc called through a second name (`pr.call(7); qr = pr;
+qr.call(2**70)`), whose parameter is typed through the copy.
+
+A proc or lambda literal every call of which is in sight
+(proc_literal_calls_in_sight) and passes a Bignum as itself keeps the
+cast: cs_type_params marks the parameter big_boxed when a call passes
+anything else, splats, or the literal is called out of sight, and only
+a marked parameter reads the box. A Method's proc has no such record
+and always reads it: by callgrind a call given a Bignum goes from 250
+instructions to 263 built with gcc, from 234 to 241 built with clang.
+
+A parameter that is not a Bignum emits the C it did. So does a
+Method's proc of more than 16 parameters, and a post parameter behind
+a rest reads the slot alone when more than 16 arguments are passed: a
+call fills 16 boxes.
+
+Test: test/proc_bignum_param_integer.rb, run by gc-stress-test as
+well. With the root taken out its last loop loses 2 of 2,000
+parameters in a plain run and 1,999 at SPINEL_GC_STRESS=1.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
