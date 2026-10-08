@@ -1,0 +1,102 @@
+Delta of the format piece: git range-diff 4c3360a52fd6..0ab54d95aaab 4c3360a52fd6..282797eb91f2
+(the head read, 0ab54d95aaab, against this re-commit; both are one commit above the boxed-Array piece's head 4c3360a52fd6 on 74fa6d7c2457; context lines are the source as it stands; the message is the same file)
+
+1:  0ab54d95a ! 1:  282797eb9 A format made in place is held while its arguments are built
+    @@ src/codegen_call.c: static void emit_utime_arg_bad(Compiler *c, int node, TyKind
+     +  return sp_streq(nm, "attr") || sp_streq(nm, "attr_reader") || sp_streq(nm, "attr_writer") ||
+     +         sp_streq(nm, "attr_accessor");
+     +}
+    ++/* A number that changes when the node table does (its `version`: the
+    ++   emitter adds a node here and there). The answers below walk the whole
+    ++   program, so each is kept while the table stands. */
+    ++static int format_table_gen(Compiler *c) {
+    ++  static const Compiler *mc; static const NodeTable *mnt; static unsigned mver; static int gen;
+    ++  if (mc != c || mnt != c->nt || mver != c->nt->version) {
+    ++    mc = c; mnt = c->nt; mver = c->nt->version; gen++;
+    ++  }
+    ++  return gen;
+    ++}
+     +/* Can the program define a method that leaves neither a def nor an attr of
+     +   that name in the node table: an alias, a name handed to alias_method,
+     +   define_method or a delegator, a send, an eval of a class, an attr whose
+    @@ src/codegen_call.c: static void emit_utime_arg_bad(Compiler *c, int node, TyKind
+     +    "alias_method", "define_method", "define_singleton_method", "send", "__send__", "public_send",
+     +    "class_eval", "module_eval", "class_exec", "module_exec", "instance_eval", "instance_exec", "eval",
+     +    "def_delegator", "def_delegators", "delegate", NULL };
+    -+  static const Compiler *memo_c; static int memo;
+    -+  if (memo_c == c) return memo;
+    ++  static int memo_gen, memo;
+    ++  int g = format_table_gen(c);
+    ++  if (memo_gen == g) return memo;
+     +  const NodeTable *nt = c->nt;
+     +  int n = 0;
+    -+  memo_c = c; memo = 0;
+    ++  memo_gen = g; memo = 0;
+     +  nt_nodes_of_kind(nt, NK_AliasMethodNode, &n);
+     +  if (n > 0) return memo = 1;
+     +  const int *calls = nt_nodes_of_kind(nt, NK_CallNode, &n);
+    @@ src/codegen_call.c: static void emit_utime_arg_bad(Compiler *c, int node, TyKind
+     +   program has no def of that name anywhere, no attr of that name, and no
+     +   way to define one that the node table does not show? Asked by the name
+     +   alone, whatever the class: a def in a subclass, a module or a singleton
+    -+   counts. `!=` runs `==`. */
+    -+static int format_name_is_builtin(Compiler *c, const char *nm) {
+    ++   counts. `!=` runs `==`. A reader (`reader`) is asked for a def of its name
+    ++   only: its attr is what makes it a read. */
+    ++static int format_name_scan(Compiler *c, const char *nm, int reader) {
+     +  const NodeTable *nt = c->nt;
+    -+  if (!nm || format_prog_defines_unseen(c)) return 0;
+    ++  if (format_prog_defines_unseen(c)) return 0;
+     +  const char *also = sp_streq(nm, "!=") ? "==" : nm;
+     +  int n = 0;
+     +  const int *defs = nt_nodes_of_kind(nt, NK_DefNode, &n);
+    @@ src/codegen_call.c: static void emit_utime_arg_bad(Compiler *c, int node, TyKind
+     +    const char *dn = nt_str(nt, defs[i], "name");
+     +    if (!dn || sp_streq(dn, nm) || sp_streq(dn, also)) return 0;
+     +  }
+    ++  if (reader) return 1;
+     +  const int *calls = nt_nodes_of_kind(nt, NK_CallNode, &n);
+     +  for (int i = 0; i < n; i++) {
+     +    const char *cn = nt_str(nt, calls[i], "name");
+    @@ src/codegen_call.c: static void emit_utime_arg_bad(Compiler *c, int node, TyKind
+     +  }
+     +  return 1;
+     +}
+    ++/* The scan's answer, kept by name while the table stands (the name is
+    ++   copied: nothing is assumed of where it lives). */
+    ++static int format_name_answer(Compiler *c, const char *nm, int reader) {
+    ++  static char names[32][16]; static char kinds[32], answers[32]; static int used, memo_gen;
+    ++  if (!nm) return 0;
+    ++  int g = format_table_gen(c);
+    ++  if (memo_gen != g) { memo_gen = g; used = 0; }
+    ++  for (int i = 0; i < used; i++)
+    ++    if (kinds[i] == reader && sp_streq(names[i], nm)) return answers[i];
+    ++  int ans = format_name_scan(c, nm, reader);
+    ++  if (used < 32 && strlen(nm) < sizeof names[0]) {
+    ++    strcpy(names[used], nm); kinds[used] = (char)reader; answers[used++] = (char)ans;
+    ++  }
+    ++  return ans;
+    ++}
+    ++static int format_name_is_builtin(Compiler *c, const char *nm) {
+    ++  return format_name_answer(c, nm, 0);
+    ++}
+     +/* Does the argument, a pure read by master's list, hold a call that is not
+     +   provably the builtin's? That list takes an index into a typed Array, an
+     +   operator on numbers or booleans and a reader's field read by the type of
+    @@ src/codegen_call.c: static void emit_utime_arg_bad(Compiler *c, int node, TyKind
+     +    const char *nm = nt_str(nt, a, "name");
+     +    int alloc = 0;
+     +    if (!nm) return 1;
+    -+    if (call_is_field_read(c, a, &alloc)) {
+    -+      int n = 0;
+    -+      const int *defs = nt_nodes_of_kind(nt, NK_DefNode, &n);
+    -+      if (format_prog_defines_unseen(c)) return 1;
+    -+      for (int i = 0; i < n; i++) {
+    -+        const char *dn = nt_str(nt, defs[i], "name");
+    -+        if (!dn || sp_streq(dn, nm)) return 1;
+    -+      }
+    -+    } else if (!format_name_is_builtin(c, nm)) return 1;
+    ++    if (!format_name_answer(c, nm, call_is_field_read(c, a, &alloc))) return 1;
+     +  }
+     +  int nr = nt_num_refs(nt, a);
+     +  for (int i = 0; i < nr; i++)
