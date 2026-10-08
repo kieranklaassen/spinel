@@ -1,0 +1,77 @@
+"a\n" "bb\n" "c" each_line
+"a" "bb" "c" each_line chomp
+"a," "bb," "c" each_line sep
+"a" "bb" "c" each_line sep chomp
+"a" "b" "c" "b" each_char
+"a" "b" "c" "b" each_grapheme_cluster
+97 98 99 98 each_byte
+97 98 99 98 each_codepoint
+"a" "b" "c" "b" scan Regexp
+"b" "b" scan String
+"a" "b" "c" "b" scan boxed
+each_line: 2 late
+each_line chomp: 2 late
+each_line sep: 2 late
+each_line sep chomp: 2 late
+each_char: 2 late
+each_grapheme_cluster: 2 late
+each_byte: 2 late
+each_codepoint: 2 late
+scan Regexp: 2 late
+scan String: 3 late
+scan boxed: 2 late
+each_line ensure: 2
+2
+each_line chomp ensure: 2
+2
+each_line sep ensure: 2
+2
+each_line sep chomp ensure: 2
+2
+each_char ensure: 2
+2
+each_grapheme_cluster ensure: 2
+2
+each_byte ensure: 2
+2
+each_codepoint ensure: 2
+2
+scan Regexp ensure: 2
+2
+scan String ensure: 3
+3
+scan boxed ensure: 2
+2
+each_line proc: 102
+each_line chomp proc: 102
+each_line sep proc: 102
+each_line sep chomp proc: 102
+each_char proc: 102
+each_grapheme_cluster proc: 102
+each_byte proc: 102
+each_codepoint proc: 102
+scan Regexp proc: 102
+scan String proc: 103
+scan boxed proc: 102
+each_line inner ensure: 232
+each_line chomp inner ensure: 232
+each_line sep inner ensure: 232
+each_line sep chomp inner ensure: 232
+each_char inner ensure: 242
+each_grapheme_cluster inner ensure: 242
+each_byte inner ensure: 242
+each_codepoint inner ensure: 242
+scan Regexp inner ensure: 242
+scan String inner ensure: 123
+scan boxed inner ensure: 242
+each_line break: 1 late
+each_line chomp break: 1 late
+each_line sep break: 1 late
+each_line sep chomp break: 1 late
+each_char break: 1 late
+each_grapheme_cluster break: 1 late
+each_byte break: 1 late
+each_codepoint break: 1 late
+scan Regexp break: 1 late
+scan String break: 1 late
+scan boxed break: 1 late

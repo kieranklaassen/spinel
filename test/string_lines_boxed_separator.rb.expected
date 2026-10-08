@@ -1,0 +1,36 @@
+"a,"
+"b\nc,"
+"d"
+"a,"
+"b\nc,"
+"d"
+["a,", "b\nc,", "d"]
+["a,", "b\nc,", "d"]
+[2, 4, 1]
+"a,"
+"b\nc,"
+"d"
+["a,", "b\nc,", "d"]
+"a,b\nc,d"
+true
+["a,b\nc,d"]
+[""]
+["a\n\n", "b\nc"]
+true
+"a,b\nc,d"
+TypeError: no implicit conversion of Integer into String
+TypeError: no implicit conversion of Integer into String
+TypeError: no implicit conversion of Integer into String
+"a,"
+"b\nc,"
+"d"
+["a,", "b\nc,", "d"]
+["a,", "b\nc,", "d"]
+["a,", "b\nc,", "d"]
+["a,b\nc,d"]
+["a,b\nc,d"]
+true
+TypeError: no implicit conversion of Integer into String
+TypeError: no implicit conversion of Integer into String
+NoMethodError
+["x,", "y"]
