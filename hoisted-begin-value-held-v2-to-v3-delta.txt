@@ -1,0 +1,95 @@
+range-diff of cc7d27e9c7a5 (the head read) against f9c95adba28b (this cut)
+
+1:  cc7d27e9c ! 1:  f9c95adba A begin or catch read as a value is held until its expression reads it
+    @@ Commit message
+         Both temps are now rooted where they run ahead of the statement, for
+         every kind that holds a reference, the two Strings of a String Range
+         among them. A begin emitted as a statement expression is read where
+    -    it stands and keeps the root it had.
+    +    it stands and keeps the root it had. So does a begin or a catch that
+    +    is its statement, or all that a write to a local, an instance
+    +    variable or a global stores (hoisted_value_is_stmt): in
+    +    `x = begin ... end` the temp is read as soon as it is written, and
+    +    the generated C is as it was.
+     
+    -    The root costs 10 to 16 instructions a value built with gcc and 18 to
+    -    25 with clang (callgrind): a loop that evaluates one begin or catch
+    -    value 300,000 times and does nothing else runs 1.3% to 3.2% more. The
+    -    generated C of 144 of the suite's 6,254 programs changes.
+    +    Anywhere else the root is paid whether or not what reads the value
+    +    allocates first, and most programs that pay it were right: which
+    +    readers allocate before they read is not known where the temp is
+    +    made. It costs 9 to 18 instructions a value built with gcc and 18 to
+    +    22 with clang (callgrind): a loop that takes the size of one begin or
+    +    catch value 300,000 times and does nothing else runs 1.3% to 2.9%
+    +    more. The generated C of 69 of the 6,565 programs under test/,
+    +    benchmark/ and packages/*/test/ changes.
+     
+         test/hoisted_begin_value_held.rb counts the wrong values for a
+         Struct's super with and without keywords, Strings and Arrays added,
+    @@ src/codegen_call_kernel.c: int emit_call_kernel_flow_arms(Compiler *c, int id, B
+     +      /* the temp holds the value until the surrounding expression reads it,
+     +         past whatever an operand after this one hoists (the begin value's
+     +         temp, emit_expr); in front of the catch, so the landing's watermark
+    -+         restore keeps the root */
+    -+      if (ty_gc_holds_refs(c, bt)) { emit_indent(g_pre, g_indent); emit_gc_root_tmp_refs(c, bt, t, g_pre); buf_puts(g_pre, "\n"); }
+    ++         restore keeps the root. A catch that is its statement, or all that a
+    ++         write stores, is read at once and takes none. */
+    ++      if (ty_gc_holds_refs(c, bt) && !hoisted_value_is_stmt(c, id)) { emit_indent(g_pre, g_indent); emit_gc_root_tmp_refs(c, bt, t, g_pre); buf_puts(g_pre, "\n"); }
+            emit_indent(g_pre, g_indent); buf_puts(g_pre, "sp_catch_check_depth();\n");
+            int tag_kind = 0;
+            if (argc == 1) {
+    @@ src/codegen_expr.c: static int emit_and_or_begin_expr(Compiler *c, int id, Buf *
+     +         ensure; d; end)` the second begin runs with the first one's value in
+     +         a temp nothing else knows. So here the temp is rooted with or
+     +         without an ensure body, and so are the Strings a by-value kind
+    -+         carries. */
+    ++         carries. Not where the begin is its statement, or all that a write
+    ++         stores (hoisted_value_is_stmt): the temp is read at once, and it
+    ++         keeps the root it had. */
+            emit_indent(g_pre, g_indent); emit_ctype(c, rt, g_pre);
+            buf_printf(g_pre, " _t%d = %s;", t, slot_zero(c, rt));
+     -      if (hold) { buf_puts(g_pre, " "); emit_gc_root_tmp(c, rt, t, g_pre); }
+    -+      if (ty_gc_holds_refs(c, rt)) { buf_puts(g_pre, " "); emit_gc_root_tmp_refs(c, rt, t, g_pre); }
+    ++      if (hoisted_value_is_stmt(c, id)) { if (hold) { buf_puts(g_pre, " "); emit_gc_root_tmp(c, rt, t, g_pre); } }
+    ++      else if (ty_gc_holds_refs(c, rt)) { buf_puts(g_pre, " "); emit_gc_root_tmp_refs(c, rt, t, g_pre); }
+            buf_puts(g_pre, "\n");
+            emit_begin(c, id, g_pre, g_indent, rv);
+          }
+     
+    + ## src/codegen_internal.h ##
+    +@@ src/codegen_internal.h: int emit_catch_tag(Compiler *c, int id, Buf *b);
+    + void emit_hash_key(Compiler *c, int key, TyKind kt, Buf *b);
+    + /* Strip ParenthesesNode wrappers to reach the inner expression. */
+    + int unwrap_parens(Compiler *c, int id);
+    ++int hoisted_value_is_stmt(Compiler *c, int id);
+    + /* Collect a String `<<` chain's args outermost-first (max 64); *base gets
+    +    the node the chain bottoms out at. Returns the link count. */
+    + int str_append_chain(Compiler *c, int recv, int *chain, int *base);
+    +
+    + ## src/codegen_stmt.c ##
+    +@@ src/codegen_stmt.c: int hc_recv_cached(Compiler *c, int recv) {
+    +    for a loop that needs to see what ran just ahead of it (hc_bounded_index). */
+    + int g_stmt_cur = -1, g_stmt_prev = -1;
+    + 
+    ++/* Is `id`, a begin or a catch whose value goes ahead into a temp, the statement
+    ++   being emitted, or all that its local, ivar or global write stores? Then the
+    ++   temp is read as soon as it is written, with nothing run in between. A
+    ++   `return` is not counted: an ensure body around it runs before the read. */
+    ++int hoisted_value_is_stmt(Compiler *c, int id) {
+    ++  int s = g_stmt_cur;
+    ++  if (s < 0) return 0;
+    ++  if (unwrap_parens(c, s) == id) return 1;
+    ++  NodeKind k = nt_kind(c->nt, s);
+    ++  return (k == NK_LocalVariableWriteNode || k == NK_InstanceVariableWriteNode ||
+    ++          k == NK_GlobalVariableWriteNode) &&
+    ++         unwrap_parens(c, nt_ref(c->nt, s, "value")) == id;
+    ++}
+    ++
+    + /* A loop of the shape
+    +      i = <a literal >= 0>
+    +      while i < a.length      # or a.size
+    +
+      ## test/hoisted_begin_value_held.rb (new) ##
+     @@
+     +# A begin or a catch read as a value is held until its expression reads it.
