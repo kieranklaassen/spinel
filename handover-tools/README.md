@@ -177,3 +177,7 @@ raise to no build (all ten: two module methods chained by a bare `super`
 under a block into a superclass method that yields, which does not build on
 master either as `include T; include L`); none right to wrong, no failure
 to a wrong answer.
+The same two commits rebuilt on master 5d762fb16716, above that fix
+rebuilt there (upstream's move touched `emit_super`, its function, in
+another arm): `patches/lj-super-chain-on-5d762fb16716.patch`. The changed
+lines are the same; the 3,960 programs that change are the same set.
