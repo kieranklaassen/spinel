@@ -11078,6 +11078,26 @@ static int emit_struct_new_call(Compiler *c, int id, int ci, int argc, const int
        and too many arguments when they hold a key */
     int spread_over = spread_tail && argc - 1 == cls->nmembers ? ++g_tmp : -1;
     if (spread_over >= 0) buf_printf(b, "({ sp_%s *_t%d = ", cls->c_name, spread_over);
+    /* How many member values are made in the constructor's own argument
+       list by something that allocates: a converted literal or read, the
+       spread hash, a member read out of a keyword splat, or a value that
+       is neither hoisted into a rooted temp nor a plain read (a call that
+       answers a scalar)? The constructor roots its parameters before it
+       allocates the object, so one such value is held by then; with two,
+       the second can collect the first. */
+    int made = 0;
+    for (int a = 0; a < cls->nmembers && made < 2; a++) {
+      int vnode = -1;
+      TyKind mt = cls->ivar_types[a];
+      if (kwh >= 0) vnode = merged ? -1 : struct_kwarg_value(c, kwh, cls->ivars[a] + 1);
+      else if (a < argc) vnode = argv[a];
+      if (lit_tmp && lit_tmp[a] >= 0) continue;
+      if (spread_tail && a == argc - 1) made += !arg_wants_root(c, mt, -1);
+      else if (vnode < 0) made += splat_tmp >= 0;
+      else if (!arg_ran_first(vnode, argov_saved) && !arg_wants_root(c, mt, vnode))
+        made += arg_read_converts(c, mt, vnode) ||
+                (operand_may_allocate(c, vnode) && !subtree_is_pure_read(c, vnode));
+    }
     buf_printf(b, "sp_%s_new(", cls->c_name);
     for (int a = 0; a < cls->nmembers; a++) {
       if (a) buf_puts(b, ", ");
@@ -11112,8 +11132,15 @@ static int emit_struct_new_call(Compiler *c, int id, int ci, int argc, const int
            dangling and the next mark reads freed memory (#4049). */
         Buf mv; memset(&mv, 0, sizeof mv);
         emit_struct_member_value(c, cls, a, vnode, &mv);
-        if (arg_wants_root(c, cls->ivar_types[a], vnode) && !arg_ran_first(vnode, argov_saved))
+        int first = arg_ran_first(vnode, argov_saved);
+        if (!first && arg_wants_root(c, cls->ivar_types[a], vnode))
           emit_rooted_operand(c, cls->ivar_types[a], -1, mv.p ? mv.p : "", b);
+        /* a literal or a bare read wrapped in a handle of its own: as fresh
+           as a call's answer, and held where it stands (arg_read_converts)
+           when another value of the list can collect it */
+        else if (!first && made >= 2 && mv.p && cls->ivar_types[a] == TY_STRBUF &&
+                 arg_read_converts(c, TY_STRBUF, vnode))
+          emit_rooted_conversion(c, TY_STRBUF, mv.p, b);
         else buf_puts(b, mv.p ? mv.p : "");
         free(mv.p);
       }
