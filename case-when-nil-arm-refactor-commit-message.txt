@@ -1,0 +1,14 @@
+The case statement's typed `when <obj>` call moves into emit_when_obj_call
+
+emit_case wrote the call to an object arm's own === or == in place:
+the method looked up in the arm's class chain, the arm rooted where it
+allocates, the cast for an inherited method, the subject boxed where
+the parameter is. emit_when_obj_call now holds those lines and answers
+0 where there is no such method or the arm is kept by value, so the
+caller falls to emit_case_obj_eq as it did. The next commit puts its
+nil test there. The case value makes no such call: it goes to
+emit_case_obj_eq.
+
+The generated C is unchanged.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

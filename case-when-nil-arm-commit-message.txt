@@ -1,0 +1,32 @@
+A `when` arm that is nil when the case runs is not asked its ===
+
+An arm typed as an object can be nil when the case runs: a method's
+value, an instance variable, a local set on one path. The case called
+the class's === on it and the program ended in a segmentation fault:
+
+    class Above
+      attr_accessor :n
+      def initialize(n) = @n = n
+      def ===(o) = o > @n
+    end
+    def above(i) = i > 0 ? Above.new(i) : nil
+    p(Above.new(1) === 2)
+    case 5
+    when above(0) then puts "hit"
+    else puts "miss"             # CRuby: miss   Spinel: SIGSEGV
+    end
+
+nil === 5 is false. Three places made the call with no test: the
+statement's typed call (emit_when_obj_call) and, in both forms, the
+arm beside an Array or Hash subject (emit_case_container_eq) and the
+arm beside a subject of its own class (emit_case_obj_eq). Each now
+reads the nil fact of the arm (nil_fact_node, analyze_nil.c): where
+the arm may be nil it is held in a temporary and the method is called
+only when it is there; a nil arm matches a nil subject alone. An arm
+the analysis shows is never nil (`when Above.new(3)`, a local set on
+every path) compiles as before. No nil helper of the code generator is
+added to or changed.
+
+Test: test/case_when_nil_arm.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
