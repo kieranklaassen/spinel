@@ -1,0 +1,226 @@
+From 6f283ebaab34b603b91cfd3a45a104a004c9a044 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 8 Oct 2026 02:11:43 +0000
+Subject: [PATCH] A second `&.` on a boxed MatchData's or Enumerator's answer
+ builds
+
+    m = ["xab-cd".match(/a(b)-(c)/), 0][ARGV.size]
+    p m&.captures&.size             # 2
+
+did not build ("incompatible type for argument 1 of
+'sp_PolyArray_length'"), nor did `m&.string&.size` or
+`e&.with_index(1)&.to_a`, nor a first `&.` alone on a handle read out
+by an index (`p xs[0]&.pre_match`). The handle's emitter asks what the
+call answers with the receiver pinned to the handle, to box that answer
+into a poly slot ("A boxed handle's answer is boxed into a poly
+dispatch's slot"). infer_type recorded the answer on the call's node,
+so the second `&.` read an Array or a String there and took the typed
+arm on the boxed value. For a `&.` call the question is now a pure read
+(an_pure_read_begin), which records nothing. A `.` call's value is the
+handle's own answer, so it keeps the record and its C.
+
+Two places keep the recorded question for a `&.` call, and with it the
+C they had. While emit_iteration_stmt_sn tries a `&.` statement as a
+loop (g_sn_stmt_probe): the statement emitted after it declines is
+typed by that record. And where the call is an operand of an == or !=
+that the typed comparison folds to a constant, the other operand being
+of another kind and never nil (handle_answer_folds).
+
+Test: test/safe_nav_boxed_handle_chain.rb; it did not build. Expected
+output from CRuby 3.3.6.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/codegen_call.c                           | 42 +++++++++++++++++++-
+ src/codegen_internal.h                       |  1 +
+ src/codegen_iter.c                           |  8 +++-
+ test/safe_nav_boxed_handle_chain.rb          | 32 +++++++++++++++
+ test/safe_nav_boxed_handle_chain.rb.expected | 38 ++++++++++++++++++
+ 5 files changed, 118 insertions(+), 3 deletions(-)
+ create mode 100644 test/safe_nav_boxed_handle_chain.rb
+ create mode 100644 test/safe_nav_boxed_handle_chain.rb.expected
+
+diff --git a/src/codegen_call.c b/src/codegen_call.c
+index 063d79dee..0dbcbd389 100644
+--- a/src/codegen_call.c
++++ b/src/codegen_call.c
+@@ -17366,6 +17366,30 @@ static int unresolved_name_chain(Compiler *c, int node) {
+   }
+   return 0;
+ }
++/* Call `id`, a boxed handle's, answers kind `got` and is an operand of an
++   == or != whose other operand is of another kind and never nil (true or
++   false, an Integer or a Float with no nil sentinel). The typed comparison
++   folds that to a constant and reads no value from the call (emit_call's
++   "two different concrete types" arm), which is right for a nil receiver
++   too: the call keeps its typed record there. */
++static int handle_answer_folds(Compiler *c, int id, TyKind got) {
++  const NodeTable *nt = c->nt;
++  int par = node_parent(c, id);
++  if (par >= 0 && nt_type(nt, par) && sp_streq(nt_type(nt, par), "ArgumentsNode")) par = node_parent(c, par);
++  if (par < 0 || nt_kind(nt, par) != NK_CallNode) return 0;
++  const char *pn = nt_str(nt, par, "name");
++  if (!pn || (!sp_streq(pn, "==") && !sp_streq(pn, "!="))) return 0;
++  int args = nt_ref(nt, par, "arguments"), an = 0;
++  const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
++  int recv = nt_ref(nt, par, "receiver");
++  if (an != 1 || recv < 0 || (recv == id) == (av[0] == id)) return 0;
++  int other = recv == id ? av[0] : recv;
++  TyKind to = infer_type(c, other);
++  if (to != TY_BOOL && ((to != TY_INT && to != TY_FLOAT) || cmp_operand_may_be_nil(c, other))) return 0;
++  int fo = eq_family(to), fg = eq_family(got);
++  return fg && fo != fg;
++}
++
+ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
+   const NodeTable *nt = c->nt;
+   const char *name = nt_str(nt, id, "name");
+@@ -17598,8 +17622,22 @@ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
+       int svkn = g_handle_face_node; g_handle_face_node = id;
+       /* the handle's own emitter answers its own type (MatchData#string a
+          `const char *`); a poly slot gets it boxed, or the arm assigned the
+-         raw pointer into an sp_RbVal */
+-      TyKind got = infer_type(c, id);
++         raw pointer into an sp_RbVal. For a `&.` call a pure read: its C
++         value is the box, the answer under the face is not the node's
++         type, and a later `&.` on this call reads that to pick its arm.
++         A `.` call's value is the handle's own, and the statement probe
++         (g_sn_stmt_probe) is typed by the record: both keep the recorded
++         question */
++      const char *cop = nt_str(nt, id, "call_operator");
++      int rec = g_sn_stmt_probe || !cop || !sp_streq(cop, "&.");
++      TyKind got = TY_UNKNOWN;
++      if (!rec) {
++        an_pure_read_begin();
++        got = infer_type(c, id);
++        an_pure_read_end();
++        rec = handle_answer_folds(c, id, got);
++      }
++      if (rec) got = infer_type(c, id);
+       if (want == TY_POLY && got != TY_POLY && got != TY_UNKNOWN && got != TY_VOID) {
+         Buf fb; memset(&fb, 0, sizeof fb);
+         emit_call(c, id, &fb);
+diff --git a/src/codegen_internal.h b/src/codegen_internal.h
+index 41c2018db..f378e4fd2 100644
+--- a/src/codegen_internal.h
++++ b/src/codegen_internal.h
+@@ -249,6 +249,7 @@ void argov_reserve(void);
+    so emit_object_call leaves the value temp out (see setter_value_open). */
+ extern int  g_setter_stmt_id;
+ extern int  g_sn_skip;   /* safe-nav re-entry marker (see codegen_util.c) */
++extern int  g_sn_stmt_probe;   /* emit_iteration_stmt_sn is emitting its receiver */
+ extern int  g_cls_tag_skip;   /* poly-dispatch builtin-arm re-entry marker */
+ /* Ask subtree_may_allocate before leaving something unrooted across `id`:
+    its "no" is a keyed decision (src/decide.c). subtree_allocates is the
+diff --git a/src/codegen_iter.c b/src/codegen_iter.c
+index 4118cf90f..9cd3852da 100644
+--- a/src/codegen_iter.c
++++ b/src/codegen_iter.c
+@@ -5018,7 +5018,11 @@ static int emit_iteration_stmt_body(Compiler *c, int id, Buf *b, int indent);
+    skips a nil, re-entering with g_sn_skip set so the guard is not asked
+    again. Answers what the inner emission answers; when it declines, nothing
+    is written: the statements the receiver hoisted are taken back too, or the
+-   plain emission that follows would run them a second time. */
++   plain emission that follows would run them a second time. g_sn_stmt_probe
++   is set while the receiver is emitted here: a boxed handle's answer is
++   recorded on its call as it was, and the statement emitted after a decline
++   is typed by that record. */
++int g_sn_stmt_probe = 0;
+ static int emit_iteration_stmt_sn(Compiler *c, int id, Buf *b, int indent) {
+   const NodeTable *nt = c->nt;
+   int recv = nt_ref(nt, id, "receiver");
+@@ -5030,7 +5034,9 @@ static int emit_iteration_stmt_sn(Compiler *c, int id, Buf *b, int indent) {
+   Buf gb; memset(&gb, 0, sizeof gb);
+   Buf rb; memset(&rb, 0, sizeof rb);
+   size_t pre0 = g_pre ? g_pre->len : 0;
++  int svp = g_sn_stmt_probe; g_sn_stmt_probe = 1;
+   if (boxed) emit_boxed(c, recv, &rb); else emit_expr(c, recv, &rb);
++  g_sn_stmt_probe = svp;
+   emit_indent(&gb, indent);
+   buf_puts(&gb, "{ ");
+   if (boxed) buf_puts(&gb, "sp_RbVal"); else emit_ctype(c, rt, &gb);
+diff --git a/test/safe_nav_boxed_handle_chain.rb b/test/safe_nav_boxed_handle_chain.rb
+new file mode 100644
+index 000000000..9b37f90f3
+--- /dev/null
++++ b/test/safe_nav_boxed_handle_chain.rb
+@@ -0,0 +1,32 @@
++# A `&.` call on what a boxed MatchData or Enumerator answers under `&.`.
++# The first call's node kept the handle's own type from the question its
++# emitter asked, so the second call took the typed Array or String arm on
++# the boxed value and the C did not compile.
++m = ["xab-cd".match(/a(?<b>b)-(?<c>c)/), 0][ARGV.size]
++z = [nil, 0][ARGV.size]
++p m&.captures&.size, z&.captures&.size
++p m&.captures&.join("-"), m&.captures&.empty?, m&.captures&.include?("b")
++p m&.captures&.map(&:upcase), m&.captures&.to_a, m&.captures&.size&.succ
++p m&.string&.size, m&.string&.bytesize, m&.string&.start_with?("x")
++p m&.string&.chars, m&.string&.to_sym, z&.string&.size
++p m&.pre_match&.length, m&.pre_match&.empty?, m&.post_match&.to_sym
++p m&.offset(1)&.size, m&.begin(1)&.to_s, m&.end(1)&.zero?, z&.begin(1)&.to_s
++
++e = [[4, 5].each, 0][ARGV.size]
++n = [nil, 0][ARGV.size]
++p e&.with_index(1)&.to_a, n&.with_index(1)&.to_a
++p e&.with_index&.to_a, e&.with_index(1)&.size, e&.next_values&.size
++
++# the first call alone, as a receiver of a `.`, and through a local
++p m&.captures, m&.captures.size, m&.string.size
++c = m&.captures
++p c&.size, c&.first&.upcase
++def spans(v) = [1, 2].map { |g| v&.offset(g)&.size }
++p spans(m), spans(z)
++p "#{m&.string&.size}-#{z&.string&.size}"
++
++# read out by an index, the first `&.` alone did not build; a `.` call's
++# value is the handle's own answer and keeps its type
++xs = ["hello".match(/l+/), 0]
++p xs[0]&.pre_match, xs[0]&.string&.size, xs[0]&.pre_match + xs[0][0]
++p xs[0].string == xs[0].pre_match + "llo"
+diff --git a/test/safe_nav_boxed_handle_chain.rb.expected b/test/safe_nav_boxed_handle_chain.rb.expected
+new file mode 100644
+index 000000000..7e2990642
+--- /dev/null
++++ b/test/safe_nav_boxed_handle_chain.rb.expected
+@@ -0,0 +1,38 @@
++2
++nil
++"b-c"
++false
++true
++["B", "C"]
++["b", "c"]
++3
++6
++6
++true
++["x", "a", "b", "-", "c", "d"]
++:"xab-cd"
++nil
++1
++false
++:d
++2
++"2"
++false
++nil
++[[4, 1], [5, 2]]
++nil
++[[4, 0], [5, 1]]
++2
++1
++["b", "c"]
++2
++6
++2
++"B"
++[2, 2]
++[nil, nil]
++"6-"
++"he"
++5
++"hell"
++true
+-- 
+2.43.0
+

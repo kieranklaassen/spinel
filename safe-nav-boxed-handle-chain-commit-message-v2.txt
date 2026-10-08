@@ -1,0 +1,28 @@
+A second `&.` on a boxed MatchData's or Enumerator's answer builds
+
+    m = ["xab-cd".match(/a(b)-(c)/), 0][ARGV.size]
+    p m&.captures&.size             # 2
+
+did not build ("incompatible type for argument 1 of
+'sp_PolyArray_length'"), nor did `m&.string&.size` or
+`e&.with_index(1)&.to_a`, nor a first `&.` alone on a handle read out
+by an index (`p xs[0]&.pre_match`). The handle's emitter asks what the
+call answers with the receiver pinned to the handle, to box that answer
+into a poly slot ("A boxed handle's answer is boxed into a poly
+dispatch's slot"). infer_type recorded the answer on the call's node,
+so the second `&.` read an Array or a String there and took the typed
+arm on the boxed value. For a `&.` call the question is now a pure read
+(an_pure_read_begin), which records nothing. A `.` call's value is the
+handle's own answer, so it keeps the record and its C.
+
+Two places keep the recorded question for a `&.` call, and with it the
+C they had. While emit_iteration_stmt_sn tries a `&.` statement as a
+loop (g_sn_stmt_probe): the statement emitted after it declines is
+typed by that record. And where the call is an operand of an == or !=
+that the typed comparison folds to a constant, the other operand being
+of another kind and never nil (handle_answer_folds).
+
+Test: test/safe_nav_boxed_handle_chain.rb; it did not build. Expected
+output from CRuby 3.3.6.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
