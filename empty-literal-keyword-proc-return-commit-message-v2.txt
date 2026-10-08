@@ -1,0 +1,45 @@
+A proc returning an empty literal argument answers through a parameter
+
+    def keep(x) = x
+    def vals(n, k:) = -> { {"n" => n, "k" => k} }
+    p keep(vals(1, k: [])).call.values   # [1, []]; spinel [0, 0]
+
+    def hold(n, k:) = -> { [n, k] }
+    f = keep(hold(1, k: []))
+    p f.call   # [1, []]; spinel raised TypeError: an Array holding
+               # Array reached a slot typed as an Integer Array
+
+A parameter that only an empty literal reaches has no type of its own.
+The backstop bind pass, run once as the fixpoint converges, types it
+for a positional `[]`, and the fixpoint goes on so that what was read
+from the parameter is read again. An empty keyword literal and a
+positional `{}` had no such rule: k stayed untyped to the end and was
+boxed afterwards (never bound). By then the proc's return, read as an
+Integer Array while k had no type, was the type keep's x calls the
+proc by, and a slot that takes a proc only unifies; nothing after the
+fixpoint reads again what was typed from `x.call`.
+
+The pass notes the empty `{}` and the keyword's empty literal, and
+boxes the parameter once it has read every call site, where no other
+argument reaches it untyped: one that does (`e = []`, a local) is
+typed after the fixpoint and types the parameter the container, as it
+did. A keyword's `[]` is boxed, not the untyped array a positional one
+is: beside a `{}` from another call site the keywords have no rule to
+widen under, and the two would not build.
+
+Only where that return is all the method does with the parameter
+(param_held_by_proc_literal): each read of it is an element of the
+Array or Hash literal a proc made there answers with, or the receiver
+of a fill whose value is dropped (`k << e`, `k.push(e)`, `k[i] = e`).
+A bare `super` hands every parameter on, and is a read of another
+kind. Any other read was typed without the parameter, and the method
+compiles as it did: boxed before the fixpoint ends, k changes the
+route of every call on it, and a method that was right
+(`-> { k.empty? ? [n] : [n, k] }`) would pay for the box.
+
+Cost: the fixpoint runs on where the rule fills a parameter, as it
+does for a positional `[]`. optcarrot with one such call added
+compiles in 10.07 billion instructions for 8.43; with the positional
+twin master takes 9.99.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
