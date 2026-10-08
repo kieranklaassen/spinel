@@ -10,6 +10,21 @@
 #include "codegen_call_arms.h"
 #include "repr.h"
 
+/* A splat asks its operand to_a, and the splat arms of values_at below know
+   what a built-in Range, Integer, Float, String or Symbol answers. A program
+   can give any of them a to_a of its own, so where it names such a method at
+   all (a def, or the Symbol an alias, define_method or attribute takes)
+   those arms are not taken. */
+static int program_names_to_a(Compiler *c) {
+  static const NodeKind kinds[] = { NK_DefNode, NK_SymbolNode };
+  for (int j = 0; j < 2; j++)
+    for (int n = comp_kind_first(c, kinds[j]); n >= 0; n = comp_kind_next(c, n)) {
+      const char *nm = nt_kind(c->nt, n) == kinds[j] ? nt_str(c->nt, n, j ? "value" : "name") : NULL;
+      if (nm && sp_streq(nm, "to_a")) return 1;
+    }
+  return 0;
+}
+
 /* builtin methods on a poly receiver the runtime answers by the value it holds: inject / reduce(:op), the Array reductions and slices, values_at, Fiber's resume / transfer / raise, Queue's enq / deq */
 int emit_call_poly_builtin_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, TyKind rt) {
   /* Array-reduction methods on a boxed array element of a poly array (e.g.
@@ -89,6 +104,26 @@ int emit_call_poly_builtin_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
            one alone (#4164) */
         if (nt_type(nt, argv[k]) && sp_streq(nt_type(nt, argv[k]), "SplatNode")) {
           int sx9 = nt_ref(nt, argv[k], "expression");
+          TyKind st9 = sx9 >= 0 ? comp_ntype(c, sx9) : TY_POLY;
+          /* a splatted Range gives its members and a splatted scalar is the
+             index itself, unless it is nil when the call runs: read as an
+             Array below, either was empty and the call answered from its
+             other indexes alone */
+          if (st9 == TY_RANGE && !program_names_to_a(c)) {
+            Buf rb9; memset(&rb9, 0, sizeof rb9); emit_expr(c, sx9, &rb9);
+            emit_indent(g_pre, g_indent);
+            buf_printf(g_pre, "sp_poly_values_at_range(_t%d, %s);\n", ti9, rb9.p ? rb9.p : "");
+            free(rb9.p);
+            continue;
+          }
+          if (splat_operand_is_scalar(st9) && st9 != TY_NIL && !program_names_to_a(c)) {
+            Buf vb9; memset(&vb9, 0, sizeof vb9);
+            emit_boxed(c, sx9, &vb9);
+            emit_indent(g_pre, g_indent);
+            buf_printf(g_pre, "sp_poly_values_at_scalar(_t%d, %s);\n", ti9, vb9.p ? vb9.p : "sp_box_nil()");
+            free(vb9.p);
+            continue;
+          }
           int ts9 = ++g_tmp, tj9 = ++g_tmp;
           emit_indent(g_pre, g_indent);
           buf_printf(g_pre, "sp_PolyArray *_t%d = sp_poly_to_poly_array(", ts9);
