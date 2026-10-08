@@ -15813,8 +15813,14 @@ static int str_mutate_append_bang_arms(Compiler *c, int id, Buf *b, int indent, 
      would hand out a copy). */
   if ((is_append_concat(name)) && argc == 1) {
     int chain[64]; int nchain = 0; int cur = id, first = -1;
+    /* a link the statement's nil test ran already (a `&.` link, held by
+       emit_nil_target_stmt's head) appended there, with the links under
+       it: the walk goes on to the receiver and appends none of them again */
+    int ran = 0;
     while (nchain < 64) {
+      ran = ran || repr_of(c, cur).head_held;
       cur = unwrap_parens(c, cur);
+      ran = ran || repr_of(c, cur).head_held;
       const char *cty = nt_type(nt, cur);
       if (!cty || !sp_streq(cty, "CallNode")) break;
       const char *cnm = nt_str(nt, cur, "name");
@@ -15823,8 +15829,7 @@ static int str_mutate_append_bang_arms(Compiler *c, int id, Buf *b, int indent, 
       int cargs = nt_ref(nt, cur, "arguments");
       int cac = 0; const int *cav = cargs >= 0 ? nt_arr(nt, cargs, "arguments", &cac) : NULL;
       if (cac != 1) break;
-      chain[nchain++] = cav[0];
-      first = cur;
+      if (!ran) { chain[nchain++] = cav[0]; first = cur; }
       cur = crecv;
     }
     char srefC[1024];
