@@ -1,0 +1,16 @@
+The defaults-ahead rule and its temp are split out for a second site
+
+defaults_run_ahead answered which defaults of a call run ahead of it,
+from the call's layout, and emit_default_ahead made one of them into
+its temp. A bare super fills the parent's parameters by another route
+and needs both.
+
+The rule is now defaults_ahead_of, over the default each parameter
+takes at the site (none where it is given), and the temp is
+emit_value_ahead, over the slot's text and whether the temp takes a
+root. defaults_run_ahead and emit_default_ahead hand them what they
+computed before.
+
+C: no program of the corpus differs (tools/cident.sh).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

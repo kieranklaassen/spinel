@@ -1,0 +1,82 @@
+A super's defaults run in the order of the parameters
+
+    $n = 0
+    class Base
+      def m(x = ($n += 1), y = ($n += 1)) = [x, y]
+    end
+    class Kid < Base
+      def m = super
+    end
+    p Kid.new.m
+
+printed [2, 1] compiled with gcc; CRuby and a clang build print
+[1, 2]. `super()` into that method did the same, and `super(a)` into
+def m(a, x = ($n += 1), y = "b#{$n += 1}") ran the String first with
+both compilers.
+
+emit_super wrote the defaults a super leaves to the parent side by
+side in the call's parentheses, and C runs those in any order. A
+plain call no longer does: where two of the defaults it fills can
+tell their order (defaults_order_tells) it makes them ahead of the
+call, in order, in the call's own expression
+(emit_args_filled_ahead). The four calls emit_super writes now do
+the same. `super()` and `super(a)` take the call's route as it is. A
+bare super fills the parent's parameters by its own writers
+(emit_zsuper_param), so it asks the rule over the default each
+parameter takes (defaults_ahead_of) and makes the ones it names with
+emit_value_ahead:
+
+    ({ sp_int _t1 = <x's default>; sp_int _t2 = <y's default>;
+       sp_Base_m((sp_Base *)self, _t1, _t2); })
+
+A bare super differs from a call in one thing. A call makes a default
+the collector follows in the prelude, rooted; a bare super writes
+every default in the parentheses. So the rule is asked for those too,
+and one made ahead takes a rooted temp while anything made after it
+may allocate: a later default made ahead, a slot left in the
+parentheses whose value may, the block. The last one made takes a
+plain temp, as it had no root in the parentheses. A rooted temp is
+let go when the call has returned, so a default lives no longer than
+it did: after x = "a" * 3_000_000 through a bare super, GC.start
+frees it as on master. A default that makes a by-value object takes
+no root.
+
+Side by side, such defaults were also collected one under the other:
+with x = "a#{$n += 1}", y = "b#{$n += 1}", z = "c#{$n += 1}" the mark
+stopped at a freed heap string at SPINEL_GC_STRESS=2, with gcc and
+with clang. Made ahead, they are held.
+
+Cost (callgrind, instructions a call, gcc and clang): the root. A
+default the collector follows ahead of one that calls a method
+(x = "a" * 2, y = seven) 420 to 432 and 419 to 433; two of them
+(x = "a" * 2, y = "c" * 2) 820 to 832 and 819 to 833, where super()
+costs 836. Through `def two(*a) = super` 636 to 643 and 610 to 618
+with both given, 1215 to 1220 and 1191 to 1197 with none. Two
+keywords read out of `**o` 4 with gcc and 6 to 11 with clang, given
+or not (none given: 2220 to 2224 and 2123 to 2131). The temps alone
+cost nothing: two Integer defaults that write 25 to 24 and 27 to 27,
+`super(a)` with two 30 to 25 and 26 to 26, a String default beside
+an Integer one that writes within 2. A bare super with one default,
+with literal defaults, with two defaults that only call a method, or
+with its arguments given keeps its cost.
+
+Not here, on master and here alike: two defaults that allocate and
+neither write nor call ("a#{v}", "c#{v}") still stand side by side,
+and one is collected under the other (wrong at SPINEL_GC_STRESS=1,
+the mark stops at 2); a Range of Strings made ahead takes a plain
+temp, and its end is collected the same way; a default whose code is
+written in the prelude, an Array or Hash literal or `(@v += 1)`,
+still runs ahead of the defaults before it, and so does such an
+operand beside the call (`super + [bump]`); a default that reads an
+earlier defaulted parameter does not build through a bare super;
+`def initialize(*a); super; end` reached by Kid.new stops the mark at
+SPINEL_GC_STRESS=2.
+
+Test: test/super_defaults_in_order.rb (expected from CRuby 3.3.6),
+added to GC_STRESS_TESTS. On master, compiled with gcc, 14 of its 20
+lines differ in a plain run; compiled with clang 1 differs; at
+SPINEL_GC_STRESS=2 both stop the mark.
+C: no program of the corpus differs but the new test; optcarrot's is
+unchanged.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
