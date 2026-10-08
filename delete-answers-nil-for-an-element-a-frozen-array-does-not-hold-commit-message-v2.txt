@@ -1,0 +1,48 @@
+delete answers nil for an element a frozen Array does not hold
+
+    a = ["x", "y"].freeze
+    p a.delete("zz")
+    p a.delete("zz") { "none" }
+
+raised FrozenError (can't modify frozen Array: ["x", "y"]) at its
+first delete; CRuby prints nil and "none". CRuby's Array#delete
+raises only once it has found an element to remove, and an Array that
+does not hold the element is left alone. The delete functions of the
+four Array kinds (Integer and Symbol, Float, String, boxed) raised for
+a frozen Array before they searched.
+
+Each now hands a frozen Array to a cold function that searches it:
+the function raises where the Array holds the element and returns
+where it does not, and the caller then answers nil. A boxed Array
+proves the element absent only among Integers, Strings, Symbols, nil,
+true, false and Floats that are numbers, where the runtime equality
+is CRuby's; with a NaN, a Complex or an object that has its own == on
+either side it raises as it did.
+
+Cost: delete on an Integer Array that is not frozen runs 2
+instructions a call more, 1 in a program with threads, with gcc and
+with clang; on a Float, String or boxed Array it costs what it cost.
+The raise never returned and the search can, so sp_IntArray_delete
+now keeps the flag of its GC root in a register across that call,
+and saves and restores the register on every call. That cannot be
+cut: lib/sp_array.c is at gcc's inline unit limit, where a function
+that grows by one statement changes what gcc inlines into other
+functions of the file. So the call stands where the raise stood, the
+three typed search functions are in lib/sp_inspect.c, and the Float
+and the String element are handed as a one-member struct read through
+the parameter's address (a plain v there is a load, one statement
+more). The three delete functions keep the size gcc gave them, and
+every other function of lib/sp_array.c and of lib/sp_inspect.c
+compiles to the instructions it had, with and without threads.
+
+Not changed: delete_at with an index past the end of a frozen
+Integer, Float or String Array raises FrozenError where CRuby answers
+nil, and [1.5, 0.0 / 0.0].freeze.delete(0.0 / 0.0) raises where CRuby
+answers nil: the search cannot tell one NaN from another.
+
+Test: test/frozen_array_delete_absent.rb. It holds the element absent
+and held for the four Array kinds, the block form, a boxed receiver
+and the NaN, Complex and own == cases; master prints FrozenError in
+13 of its 34 lines and exits 0.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
