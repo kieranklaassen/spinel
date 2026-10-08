@@ -1,0 +1,1 @@
+max(n) of a String Range answers its n greatest members

@@ -1,0 +1,18 @@
+max(n) of a String Range answers its n greatest members
+
+`("9".."11").max(2)` answered ["11", "10"], where CRuby answers
+["9", "11"]: Range#max with a count is Enumerable's, the n greatest
+members by <=>. The row took the last n of the walk, reversed. A String
+Range walks by succ, which is the order of <=> only between ends of one
+length: ("9".."11") walks "9", "10", "11", and ("a".."bb") passes "z"
+on its way to "aa".
+
+Where the two ends differ in length the members are sorted before the
+last n are taken. Between ends of one length every member has that
+length, and succ makes of a String only a greater one of its length or
+a longer one, so that walk is left as it is.
+
+min(n) is not touched: Range#min with a count is first(n), the walk's
+own order, in CRuby too.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
