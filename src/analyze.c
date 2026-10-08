@@ -30377,6 +30377,89 @@ static void redef_rename_calls(NodeTable *nt, int id, const char *from, const ch
     for (int j = 0; j < nd->a[i].n; j++)
       redef_rename_calls(nt, nd->a[i].ids[j], from, to, depth + 1);
 }
+/* Does the subtree define `nm` again: a def of that name, on any receiver, or
+   an alias to it? Or ask `respond_to?` about it (or about a name not written
+   out), which answers from the defs and does not see an alias? */
+static int redef_name_defined(const NodeTable *nt, int id, const char *nm, int depth) {
+  if (id < 0 || id >= nt->count || depth > 400) return 0;
+  NodeKind k = nt_kind(nt, id);
+  int sym = k == NK_AliasMethodNode ? nt_ref(nt, id, "new_name") : -1;
+  const char *v = k == NK_DefNode ? nt_str(nt, id, "name")
+                : sym >= 0 && nt_kind(nt, sym) == NK_SymbolNode ? nt_str(nt, sym, "value") : NULL;
+  if (v && sp_streq(v, nm)) return 1;
+  if (k == NK_CallNode && nt_str(nt, id, "name") && sp_streq(nt_str(nt, id, "name"), "respond_to?")) {
+    int a = nt_ref(nt, id, "arguments"), an = 0;
+    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
+    const char *q = an > 0 && nt_kind(nt, av[0]) == NK_SymbolNode ? nt_str(nt, av[0], "value") : NULL;
+    if (!q || sp_streq(q, nm)) return 1;
+  }
+  const SpNode *nd = &nt->nodes[id];
+  for (int i = 0; i < nd->nr; i++)
+    if (redef_name_defined(nt, nd->r[i].ref, nm, depth + 1)) return 1;
+  for (int i = 0; i < nd->na; i++)
+    for (int j = 0; j < nd->a[i].n; j++)
+      if (redef_name_defined(nt, nd->a[i].ids[j], nm, depth + 1)) return 1;
+  return 0;
+}
+/* Does the subtree reach `nm` in a way redef_rename_calls does not follow? A
+   call of it in a method, class or module body, which keeps the name and
+   runs whenever it is called (`in_body`); a call of it on a receiver
+   (`self.nm`); the name as a Symbol or a String, and any call that looks a
+   method up by a name it is handed. */
+static int redef_name_kept(const NodeTable *nt, int id, const char *nm, int in_body, int depth) {
+  static const char *const by_name[] = {
+    "send", "__send__", "public_send", "method", "public_method", "instance_method", NULL };
+  if (id < 0 || id >= nt->count || depth > 400) return 0;
+  NodeKind k = nt_kind(nt, id);
+  if (k == NK_DefNode || k == NK_ClassNode || k == NK_ModuleNode || k == NK_SingletonClassNode) in_body = 1;
+  const char *v = k == NK_CallNode ? nt_str(nt, id, "name")
+                : k == NK_SymbolNode ? nt_str(nt, id, "value")
+                : k == NK_StringNode ? nt_str(nt, id, "content") : NULL;
+  if (k == NK_StringNode && !v) v = nt_str(nt, id, "unescaped");
+  if (k == NK_CallNode && v && str_in(v, by_name)) return 1;
+  if (v && sp_streq(v, nm) && (k != NK_CallNode || in_body || nt_ref(nt, id, "receiver") >= 0)) return 1;
+  const SpNode *nd = &nt->nodes[id];
+  for (int i = 0; i < nd->nr; i++)
+    if (redef_name_kept(nt, nd->r[i].ref, nm, in_body, depth + 1)) return 1;
+  for (int i = 0; i < nd->na; i++)
+    for (int j = 0; j < nd->a[i].n; j++)
+      if (redef_name_kept(nt, nd->a[i].ids[j], nm, in_body, depth + 1)) return 1;
+  return 0;
+}
+/* Is statement st[j] an `alias nm other` that takes the name from the def at
+   st[i], as a later def would? Only where the list says so: `other` is a
+   method or an alias of the program above it; nothing else in the program
+   defines `nm`; and nothing above the alias reaches `nm` past the rename
+   (redef_name_kept; above the def a bare call counts too, the rename starts
+   below it). Anything else is left bound as it was. */
+static int toplevel_alias_takes_name(const NodeTable *nt, const int *st, int n, int i, int j, const char *nm) {
+  if (nt_kind(nt, st[j]) != NK_AliasMethodNode) return 0;
+  int nn = nt_ref(nt, st[j], "new_name"), on = nt_ref(nt, st[j], "old_name");
+  if (nn < 0 || on < 0 || nt_kind(nt, nn) != NK_SymbolNode || nt_kind(nt, on) != NK_SymbolNode) return 0;
+  const char *nv = nt_str(nt, nn, "value"), *ov = nt_str(nt, on, "value");
+  if (!nv || !ov || !sp_streq(nv, nm) || sp_streq(ov, nm)) return 0;
+  int bd = nt_ref(nt, st[i], "body"), pr = nt_ref(nt, st[i], "parameters");
+  if (redef_name_kept(nt, bd, nm, 0, 0) || redef_name_kept(nt, pr, nm, 0, 0) ||
+      redef_name_defined(nt, bd, nm, 0) || redef_name_defined(nt, pr, nm, 0)) return 0;
+  int have = 0;
+  for (int k = 0; k < n; k++) {
+    if (k == i || k == j) continue;
+    if (redef_name_defined(nt, st[k], nm, 0)) return 0;
+    if (k > j) continue;
+    NodeKind sk = nt_kind(nt, st[k]);
+    if (sk == NK_AliasMethodNode) {
+      int kn = nt_ref(nt, st[k], "new_name");
+      const char *kv = kn >= 0 && nt_kind(nt, kn) == NK_SymbolNode ? nt_str(nt, kn, "value") : NULL;
+      if (!kv) return 0;
+      if (sp_streq(kv, ov)) have = 1;
+      continue;   /* its old name follows the def it names (below) */
+    }
+    if (sk == NK_DefNode && nt_ref(nt, st[k], "receiver") < 0 && nt_str(nt, st[k], "name") &&
+        sp_streq(nt_str(nt, st[k], "name"), ov)) have = 1;
+    if (redef_name_kept(nt, st[k], nm, k < i, 0)) return 0;
+  }
+  return have;
+}
 static void rename_redefined_toplevel_defs(Compiler *c) {
   NodeTable *nt = (NodeTable *)c->nt;
   int body = nt_ref(nt, nt->root_id, "statements");
@@ -30393,8 +30476,9 @@ static void rename_redefined_toplevel_defs(Compiler *c) {
     if (!nm0) continue;
     int next = -1;
     for (int j = i + 1; j < n && next < 0; j++)
-      if (nt_kind(nt, st[j]) == NK_DefNode && nt_ref(nt, st[j], "receiver") < 0 &&
-          nt_str(nt, st[j], "name") && sp_streq(nt_str(nt, st[j], "name"), nm0)) next = j;
+      if ((nt_kind(nt, st[j]) == NK_DefNode && nt_ref(nt, st[j], "receiver") < 0 &&
+           nt_str(nt, st[j], "name") && sp_streq(nt_str(nt, st[j], "name"), nm0)) ||
+          toplevel_alias_takes_name(nt, st, n, i, j, nm0)) next = j;
     if (next < 0) continue;
     char *nm = strdup(nm0);
     char to[256];
