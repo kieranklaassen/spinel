@@ -1,0 +1,11 @@
+--- boxed-array-index-converts-body-v5.md
++++ boxed-array-index-converts-body-v6.md
+@@ -19,7 +19,7 @@
+ 
+ Of 1,056 programs that read a boxed Array of every kind through an index of every kind, 327 are cured and none that was right is lost: 651 are right on master and here, and the other 78 print the same wrong bytes on both.
+ 
+-Not here: a Float Range index is still a TypeError, where CRuby slices; a String Range's TypeError names Range where CRuby names String; `Array#fill` reads its offset through the same cast, so `[1, 2, 3].fill(0, c)` with `c = Complex(1e30, 0)` in a boxed slot still fills from the first element, where CRuby raises RangeError.
++Not here: a Float Range index is still a TypeError, where CRuby slices; a String Range's TypeError names Range where CRuby names String; an object whose `to_int` raises, answers no Integer that fits a word (a String, nil, a Float, a Bignum) or comes from `method_missing` is still the TypeError that names its class, where CRuby raises `to_int`'s own error, names what it gave, raises RangeError for the Bignum or answers the element; `Array#fill` reads its offset through the same cast, so `[1, 2, 3].fill(0, c)` with `c = Complex(1e30, 0)` in a boxed slot still fills from the first element, where CRuby raises RangeError.
+ 
+ No generated C changes: the functions are in `lib/spinel_rt.h`.
+ 
