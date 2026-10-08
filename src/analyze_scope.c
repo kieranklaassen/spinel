@@ -5306,6 +5306,78 @@ static void intern_scope_ivars(Compiler *c, int ms, int ci) {
    included module method. We copy (not mutate) so multiple classes can include
    the same module independently. */
 int g_inc_did_clone = 0;
+/* Copy module method `ms` into class ci under `dst_name`. */
+static void include_copy_scope(Compiler *c, int ci, int ms, const char *dst_name) {
+  const NodeTable *nt = c->nt;
+  Scope *src = &c->scopes[ms];
+  /* Create a new scope sharing the same AST nodes but owned by ci. */
+  Scope *dst = comp_scope_new(c, dst_name, src->def_node);
+  int dst_idx = c->nscopes - 1;
+  /* comp_scope_new may realloc c->scopes; re-derive src pointer. */
+  src = &c->scopes[ms];
+  /* Clone the body and re-attribute it to the target when either:
+     (a) the target is a built-in class, where `self` has a different
+     (scalar) type than the module's object self -- otherwise the shared
+     SelfNode resolves to the module and e.g. `self.to_s` mis-dispatches; or
+     (b) the copied method itself calls `super` (a multi-module chain), so
+     its super node resolves to this shadow scope (and thus the class's prep
+     chain) rather than to the source module, where the chain isn't set; or
+     (c) the body has a receiverless instance_exec/eval, whose block rebinds
+     self to the includer -- a shared body would resolve that self to the
+     module and mis-splice; or
+     (d) the body touches an ivar, which must type against the includer's
+     slot rather than a divergent module-owned slot (scope_body_uses_ivar); or
+     (e) the method takes a &block param. A block-taking module method must be
+     inlinable per includer so a forwarded block literal threads through the
+     call chain and can be spliced (a collector builder `col(&b) = build(tag,
+     &b)` forwarding into a self-rebinding instance_exec); shared, it emits as
+     a real function that lifts the block to a proc and breaks the chain. */
+  /* Clone UNCONDITIONALLY: a shared body carries ONE node-type cache
+     and ONE scope attribution across every includer, so when two
+     includers' call sites settle the params differently (an --rbs
+     StrStr pin in one test class, symbol-keyed fixtures in another)
+     the signature is emitted from the emitting includer's scope while
+     the body reads the LAST-walked includer's types -- a hard C
+     mismatch (#2008). Per-includer cloning is how CRuby's iclass
+     semantics resolve self/ivars/blocks anyway (the previous
+     conditions); divergent inference makes it necessary for every
+     method. */
+  if (src->body >= 0) {
+    int nb = nt_clone_subtree((NodeTable *)nt, src->body);
+    if (nb >= 0) {
+      comp_grow_node_arrays(c);
+      src = &c->scopes[ms]; dst = &c->scopes[dst_idx];
+      dst->body = nb;
+      walk_scope(c, nb, dst_idx, ci);
+      g_inc_did_clone = 1;
+    }
+    else dst->body = src->body;
+  }
+else {
+    dst->body = src->body;
+  }
+  dst->origin_module_ci = src->class_id + 1;  /* #owner names it (#3662) */
+  dst->class_id = ci;
+  dst->is_cmethod = 0;
+  dst->is_include_copy = 1;
+  dst->reachable = src->reachable;
+  dst->yields = src->yields;
+  dst->nrequired = src->nrequired;
+  dst->rest_idx = src->rest_idx;
+  dst->kwrest_idx = src->kwrest_idx;
+  scope_copy_block_param(dst, src);
+  /* ...but a module_function original keeps its module-side spelling:
+     `Rt.peek` is a real call whoever also includes Rt, so the source is
+     not copied AWAY, only copied FROM. */
+  if (!src->is_module_function) src->is_transplanted_source = 1;
+  scope_copy_params(dst, src);
+  if (scope_own_defaults(c, dst_idx)) g_inc_did_clone = 1;
+  src = &c->scopes[ms]; dst = &c->scopes[dst_idx];
+  /* Scan source body for ivar accesses and register them in the
+     destination class so codegen's struct layout includes them. */
+  intern_scope_ivars(c, ms, ci);
+}
+
 void process_include_body(Compiler *c, int ci, int body_node) {
   const NodeTable *nt = c->nt;
   int n = 0;
@@ -5453,72 +5525,7 @@ void process_include_body(Compiler *c, int ci, int body_node) {
           }
           dst_name = inc_shadow;
         }
-        /* Create a new scope sharing the same AST nodes but owned by ci. */
-        Scope *dst = comp_scope_new(c, dst_name, src->def_node);
-        int dst_idx = c->nscopes - 1;
-        /* comp_scope_new may realloc c->scopes; re-derive src pointer. */
-        src = &c->scopes[ms];
-        /* Clone the body and re-attribute it to the target when either:
-           (a) the target is a built-in class, where `self` has a different
-           (scalar) type than the module's object self -- otherwise the shared
-           SelfNode resolves to the module and e.g. `self.to_s` mis-dispatches; or
-           (b) the copied method itself calls `super` (a multi-module chain), so
-           its super node resolves to this shadow scope (and thus the class's prep
-           chain) rather than to the source module, where the chain isn't set; or
-           (c) the body has a receiverless instance_exec/eval, whose block rebinds
-           self to the includer -- a shared body would resolve that self to the
-           module and mis-splice; or
-           (d) the body touches an ivar, which must type against the includer's
-           slot rather than a divergent module-owned slot (scope_body_uses_ivar); or
-           (e) the method takes a &block param. A block-taking module method must be
-           inlinable per includer so a forwarded block literal threads through the
-           call chain and can be spliced (a collector builder `col(&b) = build(tag,
-           &b)` forwarding into a self-rebinding instance_exec); shared, it emits as
-           a real function that lifts the block to a proc and breaks the chain. */
-        /* Clone UNCONDITIONALLY: a shared body carries ONE node-type cache
-           and ONE scope attribution across every includer, so when two
-           includers' call sites settle the params differently (an --rbs
-           StrStr pin in one test class, symbol-keyed fixtures in another)
-           the signature is emitted from the emitting includer's scope while
-           the body reads the LAST-walked includer's types -- a hard C
-           mismatch (#2008). Per-includer cloning is how CRuby's iclass
-           semantics resolve self/ivars/blocks anyway (the previous
-           conditions); divergent inference makes it necessary for every
-           method. */
-        if (src->body >= 0) {
-          int nb = nt_clone_subtree((NodeTable *)nt, src->body);
-          if (nb >= 0) {
-            comp_grow_node_arrays(c);
-            src = &c->scopes[ms]; dst = &c->scopes[dst_idx];
-            dst->body = nb;
-            walk_scope(c, nb, dst_idx, ci);
-            g_inc_did_clone = 1;
-          }
-          else dst->body = src->body;
-        }
-else {
-          dst->body = src->body;
-        }
-        dst->origin_module_ci = src->class_id + 1;  /* #owner names it (#3662) */
-        dst->class_id = ci;
-        dst->is_cmethod = 0;
-        dst->is_include_copy = 1;
-        dst->reachable = src->reachable;
-        dst->yields = src->yields;
-        dst->nrequired = src->nrequired;
-        dst->rest_idx = src->rest_idx;
-        dst->kwrest_idx = src->kwrest_idx;
-        scope_copy_block_param(dst, src);
-        /* ...but a module_function original keeps its module-side spelling:
-           `Rt.peek` is a real call whoever also includes Rt, so the source is
-           not copied AWAY, only copied FROM. */
-        if (!src->is_module_function) src->is_transplanted_source = 1;
-        scope_copy_params(dst, src);
-        if (scope_own_defaults(c, dst_idx)) g_inc_did_clone = 1;
-        src = &c->scopes[ms]; dst = &c->scopes[dst_idx];
-        /* Scan source body for ivar accesses and register them in the
-           destination class so codegen's struct layout includes them. */
-        intern_scope_ivars(c, ms, ci);
+        include_copy_scope(c, ci, ms, dst_name);
       }
     }
   }
