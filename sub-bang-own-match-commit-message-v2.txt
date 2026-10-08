@@ -1,0 +1,49 @@
+sub! and gsub! answer by their own match, not by an argument's
+
+    y = "zz".dup
+    z = "ab".dup
+    p y.sub!("q", z.sub("a", "b"))
+
+printed "zz" where CRuby prints nil: nothing in y matches. And
+
+    x = "ab".dup
+    p x.gsub!("a") { y.sub!("q", "-") ? "b" : "a" }
+
+printed nil where CRuby prints "ab": the block put "a" for "a".
+
+sub! and gsub! answer nil when no substitution was made. The text
+cannot say that, since a match may write the same bytes, so they read
+the runtime's flag sp_re_sub_matched. It is cleared ahead of the
+statement, before the call's operands run: a sub or gsub that the
+receiver, an argument, the pattern or a to_str conversion of one
+runs, or one beside the call in the same statement
+(`"#{z.sub("a", "a")} #{y.sub!("q", "-").inspect}"`), left its own
+answer there. And a block form's loop sets it before the block runs,
+where a sub! or gsub! whose answer is read clears it.
+
+Such a call enters the runtime through a wrapper that clears the
+flag after the operands have run (sp_str_sub_own and its kin, static
+inline in spinel_rt.h), and a block form answers from a C local of
+its loop, which the block cannot reach. The bang arm names the call
+in g_sub_bang_id and the emitters of sub and gsub take the wrapper
+for that call alone, so it is reached inside the temporaries that
+hold the receiver of an instance, a class or a global variable too.
+
+A call that is all its statement runs (`if x.sub!(a, b)`,
+`v = x.sub!(a, b)`, `p x.sub!(a, b)`), with a receiver, arguments
+and a block's body that are literals or reads of a String or a
+Regexp (a boxed pattern too, and a boxed replacement in a program
+that defines no to_str), compiles to the C it did, as does every sub
+and gsub; the runtime library is unchanged byte for byte. The
+wrapper costs one instruction a call at most, the block form's local
+two to five.
+
+Not here: a Hash for the replacement reads the flag as before, in
+both directions (`y.sub!(z.sub("ab", "q"), { "q" => "r" })` answers y
+and `s.sub!("a", { "a" => "a" })` nil). And a receiver that is an
+Array's element, a Hash's value or a boxed value reads no flag:
+`a[0].sub!("a", "a")` answers nil for "ab".
+
+Test: test/sub_bang_answers_by_its_own_match.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
