@@ -1,0 +1,1 @@
+A yield reached only by `super` takes each site's block type

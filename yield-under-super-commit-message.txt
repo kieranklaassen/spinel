@@ -1,0 +1,45 @@
+A yield reached only by `super` takes each site's block type
+
+A method that yields is spliced into every call site, and where the
+sites' blocks answer different types its yield is typed poly, so that
+each site boxes its own value. A method no call names, reached only
+through a child's `super`, has no site of its own: yield_value_diverges
+saw nothing to disagree and the yield kept the first site's type.
+
+    class Reader
+      def read(key)
+        value = fetch(key) { |k| yield k }
+        [value, key]
+      end
+      def fetch(key) = yield(key)
+    end
+    class Cached < Reader
+      def read(key) = super
+    end
+    p Cached.new.read(2) { |k| nil }
+    p Cached.new.read(3) { |k| k.to_s }
+
+printed [nil, 2] and [nil, 3]. In an `initialize` with a String site,
+a nil one and an Integer one, the Integer went into the String's slot
+and the program crashed.
+
+Where the method's own sites give no type and every `super` that lands
+on it hands on the block its own method was called with, the sites of
+the methods beneath it are read in one pass over the calls named like
+it. Each is placed on the method it calls (a receiver of one class, or
+`new` on a constant) and gives its block's type; the types are joined
+up the `super`s the two ways the method's own sites are, the first
+site's and all of them, and the yield is poly where the two differ.
+
+Nothing is said, and the method is typed as before, where a call named
+like it cannot be placed or has no block written at it, where a
+`super` writes a block or passes another proc (that one is handed up,
+not the caller's), or where a `super` comes out of a method of another
+name.
+
+Where each `super` lands is looked up once and kept while the tables
+it is read from stand. Reading a block's type can ask the same of
+another method, so the sites are kept on a stack of the pass's own and
+go into the shared table after the last one is read.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
