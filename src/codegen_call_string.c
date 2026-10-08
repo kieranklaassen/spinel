@@ -597,20 +597,24 @@ no_gsub_enum:
     int fck = (frty && (sp_streq(frty, "StringNode") || sp_streq(frty, "InterpolatedStringNode")))
               ? -1 : ++g_tmp;
     if (at == TY_POLY_ARRAY) {
-      if (fck >= 0) {
+      const char *fend = operand_may_allocate(c, argv[0]) ? emit_str_format_held(c, recv, fck, b) : NULL;
+      if (fend) buf_puts(b, ", ");
+      else if (fck >= 0) {
         buf_printf(b, "sp_str_format_polyarr(({ const char *_t%d = ", fck);
         emit_expr(c, recv, b);
         buf_printf(b, "; if (!_t%d) sp_nil_recv(\"%%\"); _t%d; }), ", fck, fck);
       }
       else { buf_puts(b, "sp_str_format_polyarr("); emit_expr(c, recv, b); buf_puts(b, ", "); }
-      emit_expr(c, argv[0], b); buf_puts(b, ")");
+      emit_expr(c, argv[0], b); buf_puts(b, fend ? fend : ")");
       return 1;
     }
     const char *ak = array_kind(at);
     if (ak) {
       const char *kind = at == TY_STR_ARRAY ? "SP_BUILTIN_STR_ARRAY"
                        : at == TY_FLOAT_ARRAY ? "SP_BUILTIN_FLT_ARRAY" : "SP_BUILTIN_INT_ARRAY";
-      if (fck >= 0) {
+      const char *fend = emit_str_format_held(c, recv, fck, b);
+      if (fend) {}
+      else if (fck >= 0) {
         buf_printf(b, "sp_str_format_polyarr(({ const char *_t%d = ", fck);
         emit_expr(c, recv, b);
         buf_printf(b, "; if (!_t%d) sp_nil_recv(\"%%\"); _t%d; })", fck, fck);
@@ -618,7 +622,7 @@ no_gsub_enum:
       else { buf_puts(b, "sp_str_format_polyarr("); emit_expr(c, recv, b); }
       buf_puts(b, typed_array_src_held(c, argv[0]) ? ", sp_typed_to_poly((void *)(" : ", sp_typed_to_poly_unheld((void *)(");
       emit_expr(c, argv[0], b);
-      buf_printf(b, "), %s))", kind);
+      buf_printf(b, "), %s)%s", kind, fend ? fend : ")");
       return 1;
     }
     /* named references ("%<name>spec" / "%{name}") reading from a symbol-keyed
@@ -657,8 +661,9 @@ no_gsub_enum:
     /* a poly RHS may hold an Array (spread across the directives) or a scalar
        (a one-element list) -- the distinction is only known at runtime. */
     if (at == TY_POLY) {
-      buf_puts(b, "sp_str_format_polyarr("); emit_expr(c, recv, b);
-      buf_puts(b, ", sp_format_args("); emit_boxed(c, argv[0], b); buf_puts(b, "))");
+      const char *fend = emit_str_format_held(c, recv, -1, b);
+      if (!fend) { buf_puts(b, "sp_str_format_polyarr("); emit_expr(c, recv, b); }
+      buf_puts(b, ", sp_format_args("); emit_boxed(c, argv[0], b); buf_printf(b, ")%s", fend ? fend : ")");
       return 1;
     }
     if (at == TY_UNKNOWN && emit_str_format_untyped_array(c, recv, argv[0], fck, b)) return 1;
@@ -667,9 +672,13 @@ no_gsub_enum:
        formatter's numeric directives) */
     if (at == TY_INT || at == TY_FLOAT || at == TY_STRING || at == TY_SYMBOL ||
         at == TY_NIL || at == TY_BOOL || at == TY_RATIONAL || at == TY_COMPLEX) {
-      buf_puts(b, "sp_str_format_polyarr("); emit_expr(c, recv, b);
-      buf_puts(b, ", ({ sp_PolyArray *_fa = sp_PolyArray_new(); sp_PolyArray_push(_fa, ");
-      emit_boxed(c, argv[0], b); buf_puts(b, "); _fa; }))");
+      const char *fend = emit_str_format_held(c, recv, -1, b);
+      if (!fend) { buf_puts(b, "sp_str_format_polyarr("); emit_expr(c, recv, b); }
+      /* the one-element list is held by `_fa` alone while an argument that
+         allocates is built (`"%5s|" % ("q" + i.to_s)`) */
+      buf_printf(b, ", ({ sp_PolyArray *_fa = sp_PolyArray_new(); %ssp_PolyArray_push(_fa, ",
+                 operand_may_allocate(c, argv[0]) ? "SP_GC_ROOT(_fa); " : "");
+      emit_boxed(c, argv[0], b); buf_printf(b, "); _fa; })%s", fend ? fend : ")");
       return 1;
     }
   }
