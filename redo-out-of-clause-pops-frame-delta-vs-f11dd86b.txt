@@ -1,0 +1,86 @@
+The redo pair on 9922a2c74ee1 against the pair that was read
+
+New pair, branch claude/redo-out-of-clause-pops-frame-and-exception-on-9922a2c7, two commits on upstream 9922a2c74ee1128162abf48b645575f0c8cc254d:
+  commit 1  5c7d2a8fd5ee632fe427e11cd273285b43b1a5a3  "One helper opens a redo label"
+            stable patch-id de8e5eba6a14366f5476a3a23588e12be0e79082
+  commit 2  a9f5f8735bb1658319365e18c06e7e84f88d6f09  "A redo out of a begin or rescue clause pops its frame and its exception"
+            stable patch-id c09992b06aa1a67e320acc3131e6dd5be71c4c77
+
+Read pair, fork branch claude/redo-out-of-begin-pops-frame-on-9274c732, two commits on 9274c732eaa204a5df31fbfd38e4efd097e99a2c:
+  commit 1  a7bda3af40234efcb8547b08fdd252d35dc48da9  "One helper opens a redo label"
+            stable patch-id de8e5eba6a14366f5476a3a23588e12be0e79082
+  commit 2  f11dd86b36c021ed72be65c55efcd02728d7ff71  "A redo out of a begin or a rescue clause pops its frame and its exception"
+            stable patch-id 2ea5aff25d23b5308eb9a249930ba6691b34416f
+
+How this was made: `git diff-tree -p` of each commit against its parent, the "index" lines dropped and the line numbers of the hunk headers blanked, then `diff` of the read commit's patch against the new one's; and `diff -u` of the commit messages. The read head was fetched from the fork by its id.
+
+1. The refactor (commit 1)
+
+The stable patch-ids are equal. The two patches are the same line for line once the index lines and the hunk line numbers are set aside. The message changed:
+
+--- message of a7bda3af4023 (read)
++++ message of 5c7d2a8fd5ee (new)
+@@ -7,5 +7,7 @@
+ 
+-No change in generated C. One case that cannot be seen: with 64 labels
+-open, emit_loop_body took a temp number before it found the stack
+-full; now none is taken.
++No change in the generated C of a program that builds. One case numbers
++differently: with 64 labels open, emit_loop_body took a temp number
++before it found the stack full; now none is taken. A redo there is
++refused, so it shows only under --defer-refusals, where the names
++numbered after that loop are one lower.
+ 
+
+2. The fix (commit 2)
+
+The stable patch-ids differ. One hunk differs, in src/codegen_util.c, the comment above emit_redo_unwind and its guard; in the read commit that file gains 15 lines, in the new one 17. Every other hunk (src/codegen_internal.h, src/codegen_stmt.c, the test and its .expected) is the same line for line.
+
+--- fix f11dd86b36c0 (read)
++++ fix a9f5f8735bb1 (new)
+@@ -42,13 +42,15 @@
+ +  g_redo_rescue_base[g_redo_depth] = g_rescue_save_depth;
+    return g_redo_stack[g_redo_depth++] = ++g_tmp;
+  }
+ +/* A redo goes back to the innermost label: it pops the frames of the begins it
+-+   is written in and the rescue clauses it stands in, as a `next` does for its
+-+   loop. With an ensure between, it is the bare goto it was. */
+++   is written in, as a `next` does for its loop, and the exceptions of the
+++   rescue clauses entered since the label. With an ensure between, it is the
+++   bare goto it was; so it is where the regions are no longer counted, since
+++   an ensure there could not be seen. */
+ +void emit_redo_unwind(Buf *b) {
+ +  int top = g_redo_depth - 1;
+-+  if (g_ensure_depth != g_redo_ensure_base[top]) return;
+++  if (g_ensure_depth != g_redo_ensure_base[top] || g_ensure_depth >= MAX_ENSURE_DEPTH) return;
+ +  int pops = g_exc_frame_depth - g_redo_exc_base[top], k = g_rescue_save_depth - g_redo_rescue_base[top];
+ +  if (pops > 0) buf_printf(b, "sp_exc_top -= %d; ", pops);
+ +  if (k > 0) buf_printf(b, "sp_rescue_sp -= %d; ", k);
+ +}
+
+The message changed, its subject too:
+
+--- message of f11dd86b36c0 (read)
++++ message of a9f5f8735bb1 (new)
+@@ -1,2 +1,2 @@
+-A redo out of a begin or a rescue clause pops its frame and its exception
++A redo out of a begin or rescue clause pops its frame and its exception
+ 
+@@ -26,7 +26,12 @@
+ 
+-The label now keeps what stands open where it is placed (frames,
+-ensure regions, rescue clauses), and a redo pops the frames and the
+-clauses above it, as a next does for its loop. A redo with nothing
+-between it and its body is the goto it was. So is one with an ensure
+-in between: that ensure has to run first, which this does not take on.
++The label now keeps what stands open where it is placed: frames,
++ensure regions, rescue clauses. A redo pops the frames above it, as a
++next does for its loop, and the exceptions of the clauses entered since
++the label, so a loop written inside a rescue clause leaves that
++clause's exception alone.
++
++A redo with nothing between it and its body is the goto it was. So is
++one with an ensure in between: that ensure has to run first, which this
++does not take on. So is one under 32 open ensure regions, past which an
++ensure is not counted and could not be seen.
+ 
