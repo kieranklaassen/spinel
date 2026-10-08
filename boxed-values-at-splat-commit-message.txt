@@ -1,0 +1,18 @@
+A splatted Range in a boxed values_at answers its elements
+
+    a = [[10, 20, 30], nil][ARGV.size]
+    p a.values_at(*(0..1))   # []; CRuby: [10, 20]
+
+values_at on a boxed receiver reads a splatted list with
+sp_poly_to_poly_array, which copies an Array and so answers none for
+what is no Array. A Range gave none of its members and an Integer was
+dropped, and the call answered from the other indexes alone. An
+operand typed as an Integer Range now has its members walked onto the
+list of indexes (sp_poly_values_at_range, with no array between), and
+one typed as a scalar that is not nil is pushed as the index it is. An
+operand that is an Array, nil or a box is read as before, in the same
+C.
+
+Test: test/boxed_values_at_splat.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

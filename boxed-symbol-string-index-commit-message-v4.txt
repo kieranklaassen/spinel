@@ -1,0 +1,25 @@
+A String index on a boxed Symbol answers its name's substring
+
+    def pick(n) = n > 0 ? {a: 1} : :stone
+    s = pick(0)
+    p s["ton"]   # nil; CRuby: "ton"
+
+Symbol#[] is String#[] on the Symbol's name. sp_poly_get_str answers
+the substring for a String and for a shared String, and answered nil for
+a Symbol with every other value that is no object. A Symbol now answers
+the substring its name holds, with a copy of the index: CRuby's answer
+is a new String, never the index itself. An index that is not whole
+characters is nil though the name holds its bytes, as CRuby's search
+refuses it; a binary index with a byte past ASCII, which CRuby raises
+for, is nil as it was. The search is out of line, behind the test for a
+value that is no object which the function already makes, so a Hash's
+read meets no new test. An index the name does not hold is the read a
+value that is a Hash elsewhere makes, so it is answered before the
+search and the copy: the index's bytes up to its first NUL are sought
+in a name that has no header, which holds no NUL.
+
+No generated C changes: the function is in lib/spinel_rt.h.
+
+Test: test/boxed_symbol_index_string.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

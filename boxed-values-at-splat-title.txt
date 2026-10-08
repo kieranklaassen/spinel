@@ -1,0 +1,1 @@
+A splatted Range in a boxed values_at answers its elements
