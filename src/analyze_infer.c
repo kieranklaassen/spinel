@@ -1054,6 +1054,7 @@ static int an_elems_int_rows(Compiler *c, int arr, int *saw) {
 }
 
 static int an_settled_int(Compiler *c, int n, int depth);
+static int infer_promote_op_in_word(const NodeTable *nt, const char *name, int recv, int arg);
 
 /* Whether every write of constant `name` is a plain `NAME = v` whose value
    is a settled Integer (an_settled_int). */
@@ -1084,7 +1085,9 @@ static int an_settled_int_const(Compiler *c, const char *name, int depth) {
 
 /* Whether `n` is an Integer no later inference can widen: an Integer
    literal, unary minus on one, an Integer constant whose value is one, or
-   arithmetic (+ - * / %) over those, parenthesized or not. */
+   arithmetic (+ - * / %) over those, parenthesized or not. Under
+   --int-overflow=promote a `+`, `-` or `*` that can leave the word is a
+   boxed value (infer_promote_op_in_word), and so is the row that holds it. */
 static int an_settled_int(Compiler *c, int n, int depth) {
   const NodeTable *nt = c->nt;
   if (n < 0 || depth > 8) return 0;
@@ -1106,8 +1109,9 @@ static int an_settled_int(Compiler *c, int n, int depth) {
       int a = nt_ref(nt, n, "arguments"); int an = 0;
       const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
       if (is_unary_minus(op)) return an == 0 && an_settled_int(c, rcv, depth + 1);
-      if (!is_int_arith_op(op)) return 0;
-      return an == 1 && an_settled_int(c, rcv, depth + 1) && an_settled_int(c, av[0], depth + 1);
+      if (!is_int_arith_op(op) || an != 1) return 0;
+      if (g_promote_mode && is_add_sub_mul(op) && !infer_promote_op_in_word(nt, op, rcv, av[0])) return 0;
+      return an_settled_int(c, rcv, depth + 1) && an_settled_int(c, av[0], depth + 1);
     }
     default: return 0;
   }
