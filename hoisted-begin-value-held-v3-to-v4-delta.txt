@@ -1,0 +1,12 @@
+71c71
+< Run here on this commit on master 0e8befeb3, built from nothing: the test in the seven collector lanes with gcc and clang, with and without `--share-strings` (master is wrong or aborts in all seven; this change is right in every one); `ruby tools/gate.rb check`; the generated C of the 6,565 programs, changed in 69, each of them run; optcarrot, checksum 59662; `make share-strings-test` and `make int-min-test`, both pass.
+---
+> Run here, built from nothing, on two masters. On 0e8befeb3, the base this change was read on: the test in the seven collector lanes with gcc and clang, with and without `--share-strings` (master is wrong or aborts in all seven; this change is right in every one); `ruby tools/gate.rb check`; the generated C of the 6,565 programs, changed in 69, each of them run; optcarrot, checksum 59662; `make share-strings-test` and `make int-min-test`, both pass. On 74fa6d7c2, where this commit is the same change replayed (the same patch but for the place of its line in the Makefile's list): the build, the test in the seven lanes with gcc and clang, with and without `--share-strings` (master and this change answer there as on the older base), and `ruby tools/gate.rb check`.
+74,76c74,76
+< - [ ] Values past 2^31 are marked `# spinel: int64`
+< - [ ] If optcarrot's generated C changed: callgrind numbers, checksum 59662
+< - [ ] Depends on: #
+---
+> - [x] Values past 2^31 are marked `# spinel: int64` (none)
+> - [ ] If optcarrot's generated C changed: callgrind numbers, checksum 59662 (its C is unchanged)
+> - [ ] Depends on: none
