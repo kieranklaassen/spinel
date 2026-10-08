@@ -1094,6 +1094,9 @@ void inl_dflt_leave(InlDflt sv) {
 /* Emitting the body of a non-lambda proc created at top level: a `return`
    there is a TOP-LEVEL return, which ends the script (#3663). */
 int g_proc_toplevel_return = 0;
+/* Emitting a lambda's body: the count of returning procs made in it that
+   took the lambda for their home (emit_proc_literal_here). NULL elsewhere. */
+int *g_lambda_home = NULL;
 /* Number of live setjmp exception frames (begin/rescue) enclosing the
    current emission point. A `return` from inside a try body must pop them
    (sp_exc_top -= N) before leaving -- a stale frame's jmp_buf points into

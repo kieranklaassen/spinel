@@ -427,6 +427,7 @@ InlDflt inl_dflt_enter(const Scope *m, int nren, const char *self, const char *d
 void inl_dflt_leave(InlDflt saved);
 extern int g_expr_depth;
 extern int g_proc_toplevel_return;
+extern int *g_lambda_home;
 extern int g_exc_frame_depth;      /* live begin/rescue setjmp frames (see codegen_util.c) */
 extern int g_method_pr_exc_depth;
 extern int g_method_pr_ensure_depth;  /* g_ensure_depth at the return-funnel target (see codegen_util.c) */
