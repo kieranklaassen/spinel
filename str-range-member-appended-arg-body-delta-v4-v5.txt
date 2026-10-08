@@ -1,0 +1,51 @@
+--- body-hp-v4.txt	2026-10-08 14:34:58.404147312 +0000
++++ body-hp-v5.txt	2026-10-08 15:55:22.540045066 +0000
+@@ -2,7 +2,7 @@
+ 
+ ## What this changes
+ 
+-Fix with a cost in a program that holds an appended String: 1 to 6 instructions on a membership call of a String Range with a boxed argument (the table below). A program that holds none compiles to the same C.
++Fix with a cost in a program that holds an appended String: 1 to 8 instructions on a membership call of a String Range with a boxed argument (the table below). A program that holds none compiles to the same C, with `--share-strings` and without.
+ 
+ ```ruby
+ h = {"k" => "a".dup, "n" => 1}
+@@ -19,18 +19,18 @@
+ 
+ The handle is now asked after the plain String: `include?` walks to its text, `cover?` compares it by its bytes, out of line. A nil stored among handles is a box with no handle and is no member.
+ 
+-The arm is written only where a box tagged as a handle is known to hold one. `program_strbuf_boxes` answers that once for the program, before any C is written. Master's C stays, byte for byte, in a program that holds no handle; in one that stores a method's own String, of a class of the program, where a handle is wanted (master tags the plain String's bytes as a handle there, and the box does not say which it holds; `StringIO#string` and `StringScanner#rest` stored so are wrapped as handles, and the arm is written there); and in one with its own `Range#cover?`, `#include?` or `#member?`, or its own `String#<=>`, `#==` or `#succ`, which this call does not ask, before or after.
++The arm is written only where a box tagged as a handle is known to hold one. `program_strbuf_boxes` answers that once for the program, before any C is written. Master's C stays, byte for byte, in a program that holds no handle, built with `--share-strings` or without; in one that stores a method's own String, of a class of the program, where a handle is wanted (master tags the plain String's bytes as a handle there, and the box does not say which it holds; `StringIO#string` and `StringScanner#rest` stored so are wrapped as handles, and the arm is written there); and in a call of `cover?`, `include?` or `member?` whose name the program defines anew on Range (the other two names take the arm), and in every such call of a program with its own `String#<=>`, `#==` or `#succ`: this call does not ask them, before or after.
+ 
+-Cost in instructions a call, gcc 13.3 / clang 18.1, callgrind over 300,000 turns of `n += 1 if r.cover?(x)` with `r = ("aa".."az")` and `x` read once from `["ab", 1]`. "With a handle" puts `hh = {"k" => "x".dup, "n" => 1}; hh["k"] << "y"` above the loop.
++Cost in instructions a call, gcc 13.3 / clang 18.1, callgrind over 300,000 turns of `n += 1 if r.cover?(x)`, in a `while` loop and in a `300000.times` block, with `r = ("aa".."az")` and `x` read once from `["ab", 1]`. "With a handle" puts `hh = {"k" => "x".dup, "n" => 1}; hh["k"] << "y"` above the loop.
+ 
+-| boxed argument | no handle in the program | with a handle |
+-|---|---|---|
+-| `cover?`, a String in a local | 0 / 0 | +4 / +2 |
+-| `cover?`, a String read from the Array each turn | 0 / 0 | +6 / +2 |
+-| `cover?`, an Integer | 0 / 0 | +6 / +4 |
+-| `include?`, a String (`"aa".."ad"`) | 0 / 0 | +3 / +1 |
++| boxed argument | no handle in the program | with a handle, `while` | with a handle, block |
++|---|---|---|---|
++| `cover?`, a String in a local | 0 / 0 | +4 / +2 | +5 / +2 |
++| `cover?`, a String read from the Array each turn | 0 / 0 | +6 / +2 | +8 / +2 |
++| `cover?`, an Integer | 0 / 0 | +6 / +4 | +6 / +4 |
++| `include?`, a String (`"aa".."ad"`) | 0 / 0 | +3 / +1 | +4 / +1 |
+ 
+-The walk looks at the call nodes stored as a handle: compiling optcarrot runs 8,338,283,807 instructions for 8,338,025,724, and its C is unchanged. In the corpus one program's C changes beside the new test, `test/codegen_settled_operand_types.rb`, which prints what it printed.
++The walk looks at the call nodes stored as a handle: compiling optcarrot runs 8,321,239,696 instructions for 8,320,980,372, and its C is unchanged. In the corpus one program's C changes beside the new test, `test/codegen_settled_operand_types.rb`, which prints what it printed.
+ 
+ Not here: the program whose box may hold a plain String under the handle's tag crashes when it reads that box (gcc) or does not build (clang), as on master; `cover?` of a plain String still compares up to its first NUL; a String Range the call does not see as typed (read out of an Array or a Hash, or a "Range or nil" local called with `&.`) and `r.method(:cover?).call(x)` still answer false for the handle; `===` and `case`/`when` of a String Range with a boxed value are their own change.
+ 
+@@ -40,9 +40,9 @@
+ gate: run on the Mac at opening
+ ```
+ 
+-Run here before that, on this commit over master `fb0de073421a` with the two pull requests it depends on beneath it (Linux x86-64, gcc 13.3 and clang 18.1, CRuby 3.3.6): the build from nothing, the tests at five collector settings with both compilers, with and without `--share-strings`, `tools/gate.rb check`, `make share-strings-test` and `make cident` against its parent. On master `9855f1f61ff8`, where this branch now stands, the build from nothing and the tests were run again at the same five settings with both compilers, with and without `--share-strings`.
++Run here before that (Linux x86-64, gcc 13.3 and clang 18.1, CRuby 3.3.6). On this commit over master `74fa6d7c2457` with the pull request it depends on beneath it: the build from nothing, the tests at five collector settings with both compilers, with and without `--share-strings`, and `tools/gate.rb check`. On the same commit over master `2810a235d119`: the same, `make share-strings-test`, `make cident` against its parent, and the cost and compile figures above.
+ 
+ - [ ] New tests have `.expected` files that match CRuby 4.0 run with `--enable-frozen-string-literal` (made with CRuby 3.3.6)
+ - [x] Values past 2^31 are marked `# spinel: int64` (none)
+ - [x] If optcarrot's generated C changed: callgrind numbers, checksum 59662 (its C is unchanged)
+-- [x] Depends on: "A String Range made on the spot keeps its ends, made in order, until it is read" (a Range whose two ends are made where it is written loses an end while a boxed argument is made; master's false for every handle hid that, and with this arm alone such a call answers true for a String outside the Range), and through it "A String Range answered by its walk keeps its ends across the walk"
++- [x] Depends on: "A String Range made on the spot keeps its ends, made in order, until it is read" (a Range whose two ends are made where it is written loses an end while a boxed argument is made; master's false for every handle hid that, and with this arm alone such a call answers true for a String outside the Range)

@@ -1,0 +1,47 @@
+--- msg-hp-v3.txt	2026-10-08 14:34:58.408147312 +0000
++++ msg-hp-v4.txt	2026-10-08 15:43:44.752059855 +0000
+@@ -27,24 +27,27 @@
+ one, which program_strbuf_boxes answers once for the program, before
+ any C is written. Master's C stays, byte for byte:
+ 
+-- in a program that holds no String as a handle;
++- in a program that holds no String as a handle, built with
++  --share-strings or without;
+ - in one that stores a method's own String, of a class of the program,
+   where a handle is wanted: emit_boxed_strbuf tags the plain String's
+   bytes as a handle there, and the box does not say which it holds
+   (StringIO#string and StringScanner#rest stored so are wrapped as
+   handles, and the arm is written there);
+-- in one with its own Range#cover?, #include? or #member?, or its own
+-  String#<=>, #== or #succ, which this call does not ask, before or
++- in a call of cover?, include? or member? whose name the program
++  defines anew on Range, and in every such call of a program with its
++  own String#<=>, #== or #succ: this call does not ask them, before or
+   after.
+ 
+ Cost: none where the C stays. In a program that holds a handle, a
+ membership call with a boxed argument runs more instructions (callgrind,
+-300,000 turns of `n += 1 if r.cover?(x)`, gcc 13.3 and clang 18.1):
+-4 and 2 a call for a plain String held in a local, 6 and 2 for one
+-read from an Array each turn, 6 and 4 for an Integer, 3 and 1 for
+-include? of a plain String. The walk looks at the call
+-nodes stored as a handle: compiling optcarrot runs 8,338,283,807
+-instructions for 8,338,025,724, and its C is byte for byte the same.
++300,000 turns of `n += 1 if r.cover?(x)`, gcc 13.3 and clang 18.1). In
++a while loop: 4 and 2 a call for a plain String held in a local, 6 and
++2 for one read from an Array each turn, 6 and 4 for an Integer, 3 and 1
++for include? of a plain String. In a block: 5 and 2, 8 and 2, 6 and 4,
++4 and 1. The walk looks at the call nodes stored as a handle: compiling
++optcarrot runs 8,321,239,696 instructions for 8,320,980,372, and its C
++is byte for byte the same.
+ 
+ Not here. The program whose box may hold a plain String under the
+ handle's tag crashes when it reads that box (gcc) or does not build
+@@ -57,6 +60,6 @@
+ 
+ Test: test/str_range_member_boxed_handle.rb (expected from CRuby
+ 3.3.6), added to GC_STRESS_TESTS: its last block makes both ends of its
+-Range where it is written, which the two commits beneath keep.
++Range where it is written, which the commits beneath keep.
+ 
+ Co-Authored-By: Claude Code <noreply@anthropic.com>

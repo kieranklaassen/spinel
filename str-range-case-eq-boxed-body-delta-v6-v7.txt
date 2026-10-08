@@ -1,0 +1,14 @@
+--- body-ml-v6.txt	2026-10-08 14:34:58.396147312 +0000
++++ body-ml-v7.txt	2026-10-08 15:55:22.440045068 +0000
+@@ -42,9 +42,9 @@
+ gate: run on the Mac at opening
+ ```
+ 
+-Run here before that, on these two commits over master `fb0de073421a` with the three pull requests they depend on beneath them (Linux x86-64, gcc 13.3 and clang 18.1, CRuby 3.3.6): the build from nothing, the tests at five collector settings with both compilers, with and without `--share-strings`, `tools/gate.rb check` for each commit, `make share-strings-test` and `make cident` against their parent. On master `9855f1f61ff8`, where this branch now stands, the build from nothing and the tests were run again at the same five settings with both compilers, with and without `--share-strings`.
++Run here before that (Linux x86-64, gcc 13.3 and clang 18.1, CRuby 3.3.6). On these two commits over master `74fa6d7c2457` with the two pull requests they depend on beneath them: the build from nothing, the tests at five collector settings with both compilers, with and without `--share-strings`, and `tools/gate.rb check` for each commit. On the same two over master `fb0de073421a`: the same, `make share-strings-test` and `make cident` against their parent.
+ 
+ - [ ] New tests have `.expected` files that match CRuby 4.0 run with `--enable-frozen-string-literal` (made with CRuby 3.3.6)
+ - [x] Values past 2^31 are marked `# spinel: int64` (none)
+ - [x] If optcarrot's generated C changed: callgrind numbers, checksum 59662 (its C is unchanged)
+-- [x] Depends on: "A String Range's cover? and include? read a boxed appended String" (its answer for the program, whether a box tagged as a handle holds one, and its out-of-line read of the handle are used here), and through it "A String Range made on the spot keeps its ends, made in order, until it is read" and "A String Range answered by its walk keeps its ends across the walk"
++- [x] Depends on: "A String Range's cover? and include? read a boxed appended String" (its answer for the program, whether a box tagged as a handle holds one, and its out-of-line read of the handle are used here), and through it "A String Range made on the spot keeps its ends, made in order, until it is read"
