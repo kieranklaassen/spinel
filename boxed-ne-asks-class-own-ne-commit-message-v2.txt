@@ -1,0 +1,51 @@
+A boxed != asks the class's own !=
+
+    class Tok
+      def !=(o) = true
+    end
+    xs = [Tok.new, 3]
+    p xs[0] != xs[0]    # false; CRuby: true
+
+`x != y` on a boxed x was `!sp_poly_eq(x, y)`: it asked the class's ==
+and never its !=. A typed receiver calls the method, so one object
+answered one way through a local and another through an Array. A
+rescued exception read by a bare rescue did the same: `e != e` was false
+for a class whose != says true.
+
+The operator table a boxed receiver's other operators go through
+(sp_user_binop_dispatch) has an arm for != now. In a program where a
+class of its own has a != of its own a boxed != asks it first
+(sp_poly_ne_own, emitted for such a program alone), and `!sp_poly_eq`
+answers as before for every other receiver and for an operand the
+method's parameter does not take. A raised exception is boxed as an
+Exception: one of a class whose != can be asked takes that class's id
+first.
+
+It is asked only where the boxed compare was that generic one. An
+operand with an arm of its own, nil or a Bignum, keeps the arm. And
+"of its own" is a != written under that name in a class or module of
+the program's, in the chain of a class the program instantiates
+(class_own_ne): one written on Object, Numeric, Kernel or Comparable,
+at top level or by an alias is not asked, and such a program emits the
+C it did.
+
+A program with no != of its own emits the C it did. In one that has
+one, a boxed != costs 24 instructions more on an Integer receiver, 27 on
+a String and 60 on an object of another class; on an object of the class
+it costs 53 fewer.
+
+Not here: an operand the parameter does not take (`x != 3` where !=
+reads `o.v`, and the calls the analysis saw passed a Tok) is still
+`!sp_poly_eq`; so is `x != nil` and `x != big`, by the arms above; a !=
+that answers a value other than true or false is read for its truth at
+a boxed call. A rescued exception as the receiver is asked only where
+its class has no instance variable and its != takes any value: for one
+with an attribute, or whose != was only ever passed one class, the
+compare is `!sp_poly_eq` as it was.
+
+Test: test/boxed_ne_asks_own_method.rb; two programs with a != on
+Object and on Numeric, right before and kept so:
+test/boxed_ne_on_object_left_alone.rb,
+test/boxed_ne_on_numeric_left_alone.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

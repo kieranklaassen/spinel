@@ -1,0 +1,55 @@
+An exception read out of an Array is == to itself as the rescued value
+
+    class MyErr < StandardError; end
+    begin
+      raise MyErr, "a"
+    rescue MyErr => e
+      p e == [e, 3][0]    # false; CRuby: true
+    end
+
+One exception reaches a comparison boxed two ways: a value typed as the
+program's class is boxed with the class's id, and the value a rescue
+reads is boxed as an Exception. sp_poly_eq answered false as soon as the
+two ids differed, so the same object was unequal to itself: `e != xs[0]`
+was true, and for `k = MyErr.new("n")` kept in an Array before `raise
+k`, include?, index, count and a `when` arm all missed the rescued
+value. Where the ids differ, one of them is the Exception's and the two
+pointers are the same, sp_poly_eq now answers true, or what the class's
+own == answers where it has one.
+
+The rescued value as the receiver (`rescue => e; e == ks[0]`, equal?,
+eql?, !=) has an arm of its own, which asked the boxed operand for the
+Exception's id before anything else. It takes the same pointer under any
+id too, in a program with an exception class of its own that leaves the
+method called alone.
+
+A program that defines a != anywhere keeps the answers it had. A boxed
+!= is `!sp_poly_eq` and asks no method, so the two boxes being unequal
+is what lets `e != ks[0]` answer true there, as a `def !=(o) = true`
+does, written on the class or on Object, Kernel, BasicObject or
+Exception. sp_poly_eq cannot see which operator asked, and nothing is
+asked about where the method lands: in a program with an exception
+class of its own where a def, a Symbol or a String spells !=, or spells
+define_method, define_singleton_method or alias_method, or one of those
+three is called with a name that is no literal, the generated main sets
+sp_ne_defined and both arms stand aside.
+
+Two objects stay unequal either way, as they were. A == of two boxed
+objects of different classes costs 3 instructions more (the pointer
+test); two boxed Integers, two boxed Strings and two objects of one
+class cost what they did.
+
+Not here: `-`, `|`, `&` and uniq ask eql? of each pair
+(sp_poly_eql_strict) and still take the two boxes for two values; so
+does a Hash key.
+
+Tests: test/exception_boxed_two_ways_equal.rb,
+test/exception_boxed_two_ways_own_eq.rb; a program that defines a !=,
+right before and kept so: test/exception_boxed_two_ways_own_ne.rb,
+test/exception_boxed_two_ways_ne_on_object.rb,
+test/exception_boxed_two_ways_ne_on_kernel.rb,
+test/exception_boxed_two_ways_ne_on_basic_object.rb,
+test/exception_boxed_two_ways_ne_on_exception.rb,
+test/exception_boxed_two_ways_ne_by_alias_method.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
