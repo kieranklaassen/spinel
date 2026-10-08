@@ -1,0 +1,1 @@
+A method inlined in a proc keeps its own variable where the proc captures one of that name

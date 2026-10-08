@@ -1,0 +1,44 @@
+A method inlined in a proc keeps its own variable where the proc captures one of that name
+
+    def twice(n)
+      yield n * 2
+    end
+    n = 10
+    g = -> { twice(3) { |v| v + n } }
+    p g.call   # 16; spinel 30
+
+A method that yields is inlined where it is called with a block, its
+parameters and locals under names of their own (the rename map). In a
+proc's body a local the proc captures is read through the capture
+struct, and emit_scope_local_ref asked "is this name captured" of the
+bare name before it looked at the map: twice's n was the proc's n. A
+write went the same way (`m = a * 2` in the method set the caller's
+m), and so did the builtins written in Ruby, whose parameters have
+plain names: with an n captured, `x.max_by(1) { }` answered n elements
+and `x.max_by { }` did not build.
+
+local_is_capture() says no for a name the live inline renamed. The
+capture is out of scope until the inline ends: the block the method
+yields to is emitted with the map parked, and reads the capture again.
+Seven sites asked the bare name and now ask it: the read and write of
+a local (emit_scope_local_ref), the two fills of the captures of a
+proc or a thread made inside the method, the two writes of a
+Proc-valued local's cell, the rebind of an aliased parameter, and the
+slot lent to an appender (emit_lent_local).
+
+The two Proc cell writes also spelled a cell of the method by its bare
+name, so a Proc of an inlined method that calls itself did not build,
+with or without a proc around the call ('_cell_r' undeclared):
+
+    def wrap(a)
+      r = ->(k) { k <= 0 ? 0 : k + r.call(k - 1) }
+      yield r.call(a)
+    end
+    p wrap(3) { |v| v + 1 }
+
+They take the renamed cell, which the first change needs: inside a
+proc the method now asks for its own cell there.
+
+A program with no such clash of names compiles to the C it did.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
