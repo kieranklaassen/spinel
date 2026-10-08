@@ -1,0 +1,39 @@
+A boxed operator's receiver is held while its Rational operand is boxed
+
+    def mk(i) = [Rational(i + 1, 3), :a][0]
+    keep = []
+    i = 0
+    while i < 400_000
+      v = mk(i) + 2r
+      keep << v if i % 2 == 0
+      i += 1
+    end
+
+left two wrong sums among the 200,000 kept: (5254/3) where (2633/3)
+belongs, which is mk(2626) + mk(2626). Built with clang one sum is
+(4/1), 2r + 2r.
+
+A Rational is a struct in C and becomes a heap cell where it is handed
+to a boxed operator. The node table shows no allocation for a literal
+`2r` or for a typed local, so the operator arms wrote
+
+    sp_poly_add(sp_mk(lv_i), sp_box_rational(...))
+
+with neither value held while the other is made: gcc boxes the operand
+first and the receiver's own allocation can free it, clang the other
+way round.
+
+boxed_operand_unholds_recv says when that is so: the operand's C form is
+a struct whose box is a cell (a Class value's is not) and the receiver
+is not a read (a variable, an Array element, a field, an element of a
+Hash read by an Integer or Symbol key, an element of an Array written
+in place, which the literal's rooted temporary holds). The arithmetic,
+comparison and fdiv arms and emit_poly_cmp_ordered then bind the
+receiver to a rooted temporary through poly_binop_recv_temp, as they do
+already when the operand allocates or runs Ruby code.
+
+Test: test/boxed_operator_struct_operand_rooted.rb, also in
+GC_STRESS_TESTS (expected from CRuby 3.3.6). On master it is wrong
+under SPINEL_GC_STRESS=1 and stops under 2.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
