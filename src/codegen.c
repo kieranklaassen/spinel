@@ -1208,6 +1208,42 @@ void emit_str_expr_sep(Compiler *c, int node, Buf *b) {
   if (hb) conv_hold_end(tmp);
 }
 
+static int re_subj_literal(Compiler *c, int node) {
+  int k = nt_kind(c->nt, node);
+  return k == NK_StringNode || k == NK_InterpolatedStringNode;
+}
+
+/* Does the nil subject of a Regexp's own match have to clear `$~` here? Only a
+   program that reads the registers can tell, and a String literal is never
+   nil: elsewhere the subject goes in as it did. */
+int re_subj_clears(Compiler *c, int node) {
+  return g_reads_match_regs && !re_subj_literal(c, node);
+}
+
+/* The subject of a Regexp's own `=~`, `!~`, `===` and `match` in its
+   `const char *` slot: nil goes in as NULL, boxed or not, and sp_re_subj
+   clears `$~` for it. RE_SUBJ_TYPED is an operand the caller knows to be a
+   String, emitted as the caller emitted it; RE_SUBJ_STRICT is the slot that
+   raised for nil, and still raises for true and false; RE_SUBJ_NAMED is the
+   named-capture `=~`, whose locals read the registers themselves. */
+void emit_re_subj(Compiler *c, int node, int how, Buf *b) {
+  int wrap = how == RE_SUBJ_NAMED ? !re_subj_literal(c, node) : re_subj_clears(c, node);
+  if (wrap) buf_puts(b, "sp_re_subj(");
+  if (how == RE_SUBJ_TYPED) emit_expr(c, node, b);
+  else if (yield_site_type(c, node) != TY_POLY) {
+    if (how == RE_SUBJ_STRICT && comp_ntype(c, node) != TY_NIL) emit_str_expr(c, node, b);
+    else emit_str_expr_nilable(c, node, b);
+  }
+  else {
+    int tmp; Buf *hb = conv_hold_begin(b, &tmp);
+    Buf *ob = hb ? hb : b;
+    buf_puts(ob, how == RE_SUBJ_STRICT ? "sp_poly_arg_str_nilable(" : "sp_poly_sep_str(");
+    emit_expr(c, node, ob); buf_puts(ob, ")");
+    if (hb) conv_hold_end(tmp);
+  }
+  if (wrap) buf_puts(b, ")");
+}
+
 /* Is `node` a call bound to a user method whose C function is `void`
    (method_is_void)? Bound the way the direct-call emitters bind it: a
    receiverless call through the enclosing self, `Const.m` through the class

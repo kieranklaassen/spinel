@@ -1984,6 +1984,9 @@ void emit_int_expr_nilable(Compiler *c, int node, Buf *b);
 void emit_int_expr_bound(Compiler *c, int node, const char *none, Buf *b);
 void emit_str_expr_nilable(Compiler *c, int node, Buf *b);
 void emit_str_expr_sep(Compiler *c, int node, Buf *b);
+enum { RE_SUBJ_SLOT, RE_SUBJ_TYPED, RE_SUBJ_STRICT, RE_SUBJ_NAMED };
+int re_subj_clears(Compiler *c, int node);
+void emit_re_subj(Compiler *c, int node, int how, Buf *b);
 /* strict with CRuby's rb_convert_type wording ("of nil into Integer") */
 void emit_int_expr_conv(Compiler *c, int node, Buf *b);
 void emit_int_expr_offt(Compiler *c, int node, Buf *b);

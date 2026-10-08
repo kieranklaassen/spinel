@@ -3063,6 +3063,22 @@ static SP_INLINE const char *sp_poly_arg_str_chk(sp_RbVal v) {
   if (v.tag == SP_TAG_STR) return v.v.s;
   return sp_poly_arg_str_chk_slow(v);
 }
+/* The subject of a Regexp's own `=~`, `!~`, `===`, `match` and `match?` may be
+   nil. A boxed nil stays NULL, which the matchers answer with no match, where
+   the String slot's conversion made it "" or raised; every other value
+   converts as that slot converted it. */
+static SP_INLINE const char *sp_poly_to_s_nilable(sp_RbVal v) {
+  return v.tag == SP_TAG_NIL ? NULL : sp_poly_to_s(v);
+}
+static SP_INLINE const char *sp_poly_arg_str_nilable(sp_RbVal v) {
+  return v.tag == SP_TAG_NIL ? NULL : sp_poly_arg_str_chk(v);
+}
+/* CRuby reads `$~` as nil after such a call on nil (`nil =~ re` leaves it);
+   the matchers return for NULL without touching the registers. */
+static SP_INLINE const char *sp_re_subj(const char *s) {
+  if (!s) sp_re_clear_last_match();
+  return s;
+}
 /* String#split's separator slot: the one String slot CRuby documents nil in
    (nil = whitespace mode). NULL preserves that answer, where the loose form
    above stringifies nil to "" and turns the call into a character split; a

@@ -18,26 +18,26 @@ int emit_call_regexp_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
     int rre = re_lit_index(c, recv);
     if (rre >= 0 && sp_streq(name, "match?") && argc == 1) {
       /* /re/.match?(str): a match boolean that leaves $~ alone (CRuby) */
-      if (a0 == TY_POLY) { buf_printf(b, "sp_re_match_p(sp_re_pat_%d, sp_poly_to_s(", rre); emit_expr(c, argv[0], b); buf_puts(b, "))"); }
+      if (a0 == TY_POLY) { buf_printf(b, "sp_re_match_p(sp_re_pat_%d, sp_poly_to_s_nilable(", rre); emit_expr(c, argv[0], b); buf_puts(b, "))"); }
       else { buf_printf(b, "sp_re_match_p(sp_re_pat_%d, ", rre); emit_str_expr_nilable(c, argv[0], b); buf_puts(b, ")"); }  /* nil subject: no match */
       return 1;
     }
     if (rre >= 0 && sp_streq(name, "===") && argc == 1) {
       /* /re/ === x updates the $~ registers, unlike match? */
-      if (a0 == TY_STRING) { buf_printf(b, "(sp_re_match(sp_re_pat_%d, ", rre); emit_expr(c, argv[0], b); buf_puts(b, ") >= 0)"); }
+      if (a0 == TY_STRING) { buf_printf(b, "(sp_re_match(sp_re_pat_%d, ", rre); emit_re_subj(c, argv[0], RE_SUBJ_TYPED, b); buf_puts(b, ") >= 0)"); }
       else { buf_printf(b, "sp_re_case_eq(sp_re_pat_%d, ", rre); emit_boxed(c, argv[0], b); buf_puts(b, ")"); }
       return 1;
     }
     if (rre >= 0 && sp_streq(name, "match?") && argc == 2) {
       /* the subject converts as match(str, pos)'s does: a boxed or nil one
          went into the const char * slot raw */
-      buf_printf(b, "sp_re_match_p_at(sp_re_pat_%d, ", rre); emit_str_expr_nilable(c, argv[0], b);
+      buf_printf(b, "sp_re_match_p_at(sp_re_pat_%d, ", rre); emit_str_expr_sep(c, argv[0], b);
       buf_puts(b, ", "); emit_int_expr(c, argv[1], b); buf_puts(b, ")");
       return 1;
     }
     /* /re/ =~ str -> match offset or nil (poly) */
     if (rre >= 0 && sp_streq(name, "=~") && argc == 1 && a0 == TY_STRING) {
-      buf_printf(b, "sp_re_match_poly(sp_re_pat_%d, ", rre); emit_expr(c, argv[0], b); buf_puts(b, ")");
+      buf_printf(b, "sp_re_match_poly(sp_re_pat_%d, ", rre); emit_re_subj(c, argv[0], RE_SUBJ_TYPED, b); buf_puts(b, ")");
       return 1;
     }
     /* ~ /re/ -> `/re/ =~ $_`: the match offset in the last-read line, or nil. */
@@ -330,7 +330,7 @@ no_gsub_enum:
       buf_printf(b, "({ sp_MatchData *_t%d = sp_re_matchdata%s(sp_re_pat_%d, ", tm, argc == 2 ? "_at" : "", rre);
       /* a nil subject answers nil without running the block, as the
          blockless form's does: the matchers return NULL for it */
-      emit_str_expr_nilable(c, argv[0], b);
+      emit_re_subj(c, argv[0], RE_SUBJ_SLOT, b);
       if (argc == 2) { buf_puts(b, ", "); emit_int_expr(c, argv[1], b); }
       buf_printf(b, "); sp_RbVal _t%d = sp_box_nil(); SP_GC_ROOT_RBVAL(_t%d); if (_t%d) { ",
                  tr2, tr2, tm);
@@ -349,10 +349,10 @@ no_gsub_enum:
          value (e.g. a `string?` attr read) to const char*, which emit_expr would
          leave as an sp_RbVal into sp_re_matchdata's const char* slot (#3219). */
       if (argc == 1) {
-        buf_printf(b, "sp_re_matchdata(sp_re_pat_%d, ", rre); emit_str_expr_nilable(c, argv[0], b); buf_puts(b, ")");
+        buf_printf(b, "sp_re_matchdata(sp_re_pat_%d, ", rre); emit_re_subj(c, argv[0], RE_SUBJ_SLOT, b); buf_puts(b, ")");
       }
       else {
-        buf_printf(b, "sp_re_matchdata_at(sp_re_pat_%d, ", rre); emit_str_expr_nilable(c, argv[0], b);
+        buf_printf(b, "sp_re_matchdata_at(sp_re_pat_%d, ", rre); emit_re_subj(c, argv[0], RE_SUBJ_SLOT, b);
         buf_puts(b, ", "); emit_int_expr(c, argv[1], b); buf_puts(b, ")");
       }
       return 1;
@@ -498,13 +498,17 @@ no_gsub_enum:
         }
         if (rp_ok && rp.p) {
           if ((sp_streq(name, "match?") || sp_streq(name, "===")) && argc == 1) {
-            if (a0 == TY_POLY) { buf_printf(b, "sp_re_match_p(%s, sp_poly_to_s(", rp.p); emit_expr(c, argv[0], b); buf_puts(b, "))"); }
-            else { buf_printf(b, "sp_re_match_p(%s, ", rp.p); emit_str_expr_nilable(c, argv[0], b); buf_puts(b, ")"); }  /* nil subject: no match */
+            /* nil subject: no match; `===` also clears $~ for it, match? leaves it */
+            int clr = name[0] == '=' && re_subj_clears(c, argv[0]);
+            buf_printf(b, "sp_re_match_p(%s, %s", rp.p, clr ? "sp_re_subj(" : "");
+            if (a0 == TY_POLY) { buf_puts(b, "sp_poly_to_s_nilable("); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
+            else emit_str_expr_nilable(c, argv[0], b);
+            buf_puts(b, clr ? "))" : ")");
             free(rp.p); return 1;
           }
           if (sp_streq(name, "=~") && argc == 1) {
             if (a0 == TY_STRING) {
-              buf_printf(b, "sp_re_match_poly(%s, ", rp.p); emit_expr(c, argv[0], b); buf_puts(b, ")");
+              buf_printf(b, "sp_re_match_poly(%s, ", rp.p); emit_re_subj(c, argv[0], RE_SUBJ_TYPED, b); buf_puts(b, ")");
             }
             else if (a0 == TY_POLY) {
               /* runtime type check: raise TypeError if not a string */
@@ -513,12 +517,13 @@ no_gsub_enum:
               buf_printf(g_pre, "sp_RbVal _t%d = ", tv); emit_expr(c, argv[0], g_pre); buf_puts(g_pre, ";\n");
               emit_indent(g_pre, g_indent);
               buf_printf(g_pre, "if (_t%d.tag != SP_TAG_STR && _t%d.tag != SP_TAG_NIL) sp_raise_no_str_conversion(_t%d);\n", tv, tv, tv);
-              buf_printf(b, "sp_re_match_poly(%s, _t%d.v.s)", rp.p, tv);
+              buf_printf(b, g_reads_match_regs ? "sp_re_match_poly(%s, sp_re_subj(_t%d.v.s))" : "sp_re_match_poly(%s, _t%d.v.s)", rp.p, tv);
             }
             else if (a0 == TY_NIL) {
               /* nil is the one non-String `re =~ x` accepts: it answers nil
                  rather than raising (#3633) */
-              buf_puts(b, "((void)("); emit_expr(c, argv[0], b); buf_puts(b, "), sp_box_nil())");
+              buf_puts(b, "((void)("); emit_expr(c, argv[0], b);
+              buf_puts(b, g_reads_match_regs ? "), sp_re_clear_last_match(), sp_box_nil())" : "), sp_box_nil())");
               free(rp.p); return 1;
             }
             else {
@@ -532,23 +537,25 @@ no_gsub_enum:
             free(rp.p); return 1;
           }
           if (sp_streq(name, "!~") && argc == 1 && a0 == TY_STRING) {
-            buf_printf(b, "(sp_re_match(%s, ", rp.p); emit_expr(c, argv[0], b); buf_puts(b, ") < 0)");
+            buf_printf(b, "(sp_re_match(%s, ", rp.p); emit_re_subj(c, argv[0], RE_SUBJ_TYPED, b); buf_puts(b, ") < 0)");
             free(rp.p); return 1;
           }
           /* `re !~ x` is !(re =~ x): nil does not match, and a poly operand
              is checked as =~ checks it -- a String is matched, nil answers
              true, anything else raises =~'s TypeError */
           if (sp_streq(name, "!~") && argc == 1 && a0 == TY_NIL) {
-            buf_puts(b, "((void)("); emit_expr(c, argv[0], b); buf_puts(b, "), (sp_bool)1)");
+            buf_puts(b, "((void)("); emit_expr(c, argv[0], b);
+            buf_puts(b, g_reads_match_regs ? "), sp_re_clear_last_match(), (sp_bool)1)" : "), (sp_bool)1)");
             free(rp.p); return 1;
           }
           if (sp_streq(name, "!~") && argc == 1 && a0 == TY_POLY) {
             int tv = ++g_tmp;
             /* a shared-string handle is a String (#4279) */
             buf_printf(b, "({ sp_RbVal _t%d = sp_poly_strbuf_deref(", tv); emit_expr(c, argv[0], b);
-            buf_printf(b, "); if (_t%d.tag != SP_TAG_STR && _t%d.tag != SP_TAG_NIL) sp_raise_no_str_conversion(_t%d);"
-                          " (sp_bool)(_t%d.tag == SP_TAG_NIL || sp_re_match(%s, _t%d.v.s) < 0); })",
-                       tv, tv, tv, tv, rp.p, tv);
+            buf_printf(b, "); if (_t%d.tag != SP_TAG_STR && _t%d.tag != SP_TAG_NIL) sp_raise_no_str_conversion(_t%d);", tv, tv, tv);
+            /* a boxed nil's string is NULL: sp_re_subj clears $~ for it and the match answers -1 */
+            if (g_reads_match_regs) buf_printf(b, " (sp_bool)(sp_re_match(%s, sp_re_subj(_t%d.v.s)) < 0); })", rp.p, tv);
+            else buf_printf(b, " (sp_bool)(_t%d.tag == SP_TAG_NIL || sp_re_match(%s, _t%d.v.s) < 0); })", tv, rp.p, tv);
             free(rp.p); return 1;
           }
           if (sp_streq(name, "match") && argc == 1 && nt_ref(nt, id, "block") >= 0) {
@@ -561,7 +568,8 @@ no_gsub_enum:
             int mbn = 0; const int *mbb = mbody >= 0 ? nt_arr(nt, mbody, "body", &mbn) : NULL;
             int tm = ++g_tmp, tr2 = ++g_tmp;
             buf_printf(b, "({ sp_MatchData *_t%d = sp_re_matchdata(%s, ", tm, rp.p);
-            emit_str_expr(c, argv[0], b);
+            /* a nil subject answers nil without running the block */
+            emit_re_subj(c, argv[0], RE_SUBJ_STRICT, b);
             buf_printf(b, "); sp_RbVal _t%d = sp_box_nil(); SP_GC_ROOT_RBVAL(_t%d); if (_t%d) { ",
                        tr2, tr2, tm);
             if (mp0r) buf_printf(b, "lv_%s = _t%d; ", mp0r, tm);
@@ -574,8 +582,8 @@ no_gsub_enum:
             /* the subject can arrive boxed -- one call site passing an
                untyped block param is enough -- so unbox it into the const
                char * slot the way match? and =~ already do */
-            if (argc == 1) { buf_printf(b, "sp_re_matchdata(%s, ", rp.p); emit_str_expr_nilable(c, argv[0], b); buf_puts(b, ")"); }
-            else { buf_printf(b, "sp_re_matchdata_at(%s, ", rp.p); emit_str_expr_nilable(c, argv[0], b); buf_puts(b, ", "); emit_int_expr(c, argv[1], b); buf_puts(b, ")"); }
+            if (argc == 1) { buf_printf(b, "sp_re_matchdata(%s, ", rp.p); emit_re_subj(c, argv[0], RE_SUBJ_SLOT, b); buf_puts(b, ")"); }
+            else { buf_printf(b, "sp_re_matchdata_at(%s, ", rp.p); emit_re_subj(c, argv[0], RE_SUBJ_SLOT, b); buf_puts(b, ", "); emit_int_expr(c, argv[1], b); buf_puts(b, ")"); }
             free(rp.p); return 1;
           }
           free(rp.p);

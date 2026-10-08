@@ -4157,7 +4157,7 @@ static void emit_expr_node(Compiler *c, int id, Buf *b) {
     int tcount = 0; const int *tv = nt_arr(nt, id, "targets", &tcount);
     int t = ++g_tmp;
     buf_printf(b, "({ sp_RbVal _t%d = sp_re_match_poly(sp_re_pat_%d, ", t, reidx);
-    emit_str_expr_nilable(c, av[0], b);   /* nil subject: no match, as =~ */
+    emit_re_subj(c, av[0], RE_SUBJ_NAMED, b);   /* nil subject: no match, as =~ */
     buf_puts(b, "); ");
     for (int ti = 0; ti < tcount; ti++) {
       const char *tnm = nt_str(nt, tv[ti], "name");
