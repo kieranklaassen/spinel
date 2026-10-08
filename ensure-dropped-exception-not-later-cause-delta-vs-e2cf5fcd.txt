@@ -1,0 +1,45 @@
+Delta of 11ed60d50054 (on 84f5b5020ef8) against the read e2cf5fcd3008 (on 9922a2c74ee1): src only; lib/spinel_rt.h's one added line (sp_inflight_restore), the test and its .expected are the same (the two test blobs are equal: 3fe157ec73d7, 0ee828775711).
+
+What changed, in words: a new whole-program fact g_uses_ensure (src/codegen_util.c, declared in src/codegen_internal.h), set in scan_prologue_features (src/codegen.c) where the node table holds an EnsureNode whose statements are not empty; the three landings (emit_method's _hic, emit_brk_wrapped_call's _brkic, the catch's _cic in emit_call_kernel_flow_arms) are emitted only where it is set. emit_begin's hunk is the read one.
+
+The hunks of the two commits, the read head's lines first (<), this head's after (>), by diff of their added and removed lines:
+4c4,5
+< +    buf_puts(b, "    void *_hic = sp_inflight_cause;\n");
+---
+> +    const char *hic = g_uses_ensure ? " sp_inflight_cause = _hic;" : "";
+> +    if (*hic) buf_puts(b, "    void *_hic = sp_inflight_cause;\n");
+6c7
+< +      buf_puts(b, "    if (setjmp(_h.jb)) { sp_proc_ret_head = _h.prev; sp_catch_top = _h.catch_top; sp_inflight_cause = _hic; return ");
+---
+> +      buf_printf(b, "    if (setjmp(_h.jb)) { sp_proc_ret_head = _h.prev; sp_catch_top = _h.catch_top;%s return ", hic);
+8c9,15
+< +      buf_puts(b, "    if (setjmp(_h.jb)) { sp_proc_ret_head = _h.prev; sp_catch_top = _h.catch_top; sp_inflight_cause = _hic; return; }\n");
+---
+> +      buf_printf(b, "    if (setjmp(_h.jb)) { sp_proc_ret_head = _h.prev; sp_catch_top = _h.catch_top;%s return; }\n", hic);
+> +  g_uses_ensure = 0;
+> +    /* An exception is in flight (sp_inflight_cause) only while the body of
+> +       an ensure clause runs. The landings that give it back (a catch, a
+> +       wrapped break, a proc's home) are emitted only in a program that
+> +       holds one with a body: elsewhere there is nothing to give back. */
+> +    if (sp_streq(ty, "EnsureNode") && nt_ref(nt, i, "statements") >= 0) g_uses_ensure = 1;
+10,12c17,19
+< +    emit_indent(g_pre, g_indent);
+< +    buf_printf(g_pre, "void *_brkic%d = sp_inflight_cause;\n", tS);
+< +    emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "sp_inflight_cause = _brkic%d;\n", tS);
+---
+> +    int brkic = g_uses_ensure;
+> +    if (brkic) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "void *_brkic%d = sp_inflight_cause;\n", tS); }
+> +    if (brkic) { emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "sp_inflight_cause = _brkic%d;\n", tS); }
+15,17c22,25
+< +      int cic = ++g_tmp;
+< +      emit_indent(g_pre, g_indent); buf_printf(g_pre, "void *_cic%d = sp_inflight_cause;\n", cic);
+< +      emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "sp_inflight_cause = _cic%d;\n", cic);
+---
+> +      int cic = g_uses_ensure ? ++g_tmp : 0;
+> +      if (cic) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "void *_cic%d = sp_inflight_cause;\n", cic); }
+> +      if (cic) { emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "sp_inflight_cause = _cic%d;\n", cic); }
+> +extern int g_uses_ensure;   /* the program holds an ensure clause: only then is an exception ever in flight (sp_inflight_cause) */
+25a34
+> +int g_uses_ensure = 0;       /* an ensure clause: the landings that give sp_inflight_cause back */
+
+The commit message gained one sentence at its end: "They do so only in a program that holds an ensure clause with a body (g_uses_ensure): in any other nothing is ever in flight, and its C is what it was."
