@@ -1,0 +1,26 @@
+Exception#exception keeps its message when its receiver allocates
+
+    def build
+      keep = []
+      50000.times { |i| keep << "y" + i.to_s }
+      RuntimeError.new("first")
+    end
+    x = build.exception("again")
+    p x.message
+
+printed "first" for "again" in a plain run built with gcc, and
+`e.exception("one").exception("again")` read a freed message under
+SPINEL_GC_STRESS=2.
+
+A frozen String given as a message, a literal's too, travels as a
+counted copy that sp_exc_msg_given allocates. emit_exc_exception wrote
+it and the receiver as the two operands of one C call, which leaves
+them unsequenced, and a literal counts as an operand that cannot
+allocate, so nothing ordered or held them: gcc ran the receiver after
+the copy was built and its collection swept the copy, clang ran it
+before and the copy's allocation swept the receiver. A receiver whose
+evaluation can allocate is now evaluated first, into a rooted temp. A
+receiver that is a variable, or one the caller already bound to a temp,
+is written as before.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
