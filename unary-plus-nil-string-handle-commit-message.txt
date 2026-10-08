@@ -1,0 +1,34 @@
+Unary plus on a nil String handle raises NoMethodError in a write
+
+    def f(c)
+      t = +""
+      t << "4"
+      t << "2"
+      t = nil if c
+      x = +t
+      x << "!"
+      p x
+    end
+    f(true)
+
+printed nil; CRuby raises NoMethodError, nil has no +@. Two appends
+make t an sp_String handle, and nil is a NULL handle. Where +t goes
+into another such local, emit_strbuf_value handed the slot to
+sp_String_uplus with no test in the default build, and
+emit_multi_write_stmt did the same for `x, n = +t, 1` in every build.
+sp_String_uplus answers a NULL handle as it is, so x was nil and the
+appends after it did nothing. An arm of a conditional (`x = c ? +t :
+u`) reaches the first of the two sites.
+
+Both now go through emit_strbuf_uplus, which tests the handle first
+where the nil fact says the operand may be nil, with the statement
+expression the --share-strings route (emit_strbuf_route) writes. An
+operand that is never nil keeps the bare call. So does a program that
+gives nil an answer to +@ itself: a method of that name or a
+method_missing, or either name as a Symbol anywhere (an alias,
+alias_method, define_method, send), which cplan_nil_program_answers
+asks.
+
+Test: test/string_uplus_nil_handle.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

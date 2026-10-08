@@ -1,0 +1,1 @@
+Unary plus on a nil String handle raises NoMethodError in a write
