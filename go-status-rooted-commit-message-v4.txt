@@ -1,0 +1,21 @@
+The first Process::Status stays rooted while a second `$?` is read
+
+    system("exit 3")
+    p $? == $?
+
+printed false at SPINEL_GC_STRESS=2; CRuby prints true. A read of `$?`
+builds its Process::Status (sp_last_process_status allocates), and the
+`==` and `!=` templates of two statuses (builtin_ops.c) bind the first
+to a C temporary and then evaluate the second: that allocation
+collected the first, and its status word was read from freed memory.
+
+The two rows now go through emit_op_pstatus_cmp. Where the second
+operand is a read of `$?` and the first operand's value is one too
+(the read, or a begin or `&&` whose value is one, or `||` whose left
+arm is one), the template is emitted with its receiver rooted. Every
+other pair gets the template as it stands: `a || $?` is one, its
+value is a's wherever a holds a status.
+
+Test: test/process_status_equality.rb joins GC_STRESS_TESTS.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
