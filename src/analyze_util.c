@@ -2296,12 +2296,21 @@ int is_proc_create(Compiler *c, int id) {
   if (ty && sp_streq(ty, "LambdaNode")) return 1;
   return is_proc_literal(c, id);
 }
+/* `lambda { }`, as against `proc { }` and `Proc.new { }`. */
+static int call_is_lambda(const NodeTable *nt, int id) {
+  const char *name = nt_kind(nt, id) == NK_CallNode ? nt_str(nt, id, "name") : NULL;
+  return name && nt_ref(nt, id, "receiver") < 0 && sp_streq(name, "lambda");
+}
 /* Unify the value types of `return <expr>` nodes lexically inside a proc body,
    without descending into a nested scope (a def/class/module, or a nested block
    or lambda -- whose returns are their own or non-local). Used to widen a proc
    whose paths return different types to TY_POLY, so the .call site reads the
-   boxed return slot instead of trusting one path's scalar type. */
-static TyKind proc_interior_return_ty(Compiler *c, int node) {
+   boxed return slot instead of trusting one path's scalar type.
+   `homes` is set for a lambda's body: a `return` in a `proc { }` or
+   `Proc.new { }` made there returns from the lambda, as it returns from a
+   method, so its type folds in as well. A proc made inside that proc is its
+   own, as before. */
+static TyKind proc_interior_return_ty(Compiler *c, int node, int homes) {
   const NodeTable *nt = c->nt;
   const char *ty = nt_type(nt, node);
   if (!ty) return TY_UNKNOWN;
@@ -2317,16 +2326,20 @@ static TyKind proc_interior_return_ty(Compiler *c, int node) {
   int nr = nt_num_refs(nt, node);
   for (int i = 0; i < nr; i++) {
     int ch = nt_ref_at(nt, node, i);
+    int in = homes;
     if (ch >= 0 && nt_type(nt, ch) && sp_streq(nt_type(nt, ch), "BlockNode") &&
-        is_proc_literal(c, node)) continue;   /* a nested proc's own block */
-    TyKind s = proc_interior_return_ty(c, ch);
+        is_proc_literal(c, node)) {
+      if (!homes || call_is_lambda(nt, node)) continue;   /* a nested proc's own block */
+      in = 0;
+    }
+    TyKind s = proc_interior_return_ty(c, ch, in);
     if (s != TY_UNKNOWN) r = (r == TY_UNKNOWN) ? s : ty_unify(r, s);
   }
   int na = nt_num_arrs(nt, node);
   for (int i = 0; i < na; i++) {
     int n = 0; const int *ids = nt_arr_at(nt, node, i, &n);
     for (int k = 0; k < n; k++) {
-      TyKind s = proc_interior_return_ty(c, ids[k]);
+      TyKind s = proc_interior_return_ty(c, ids[k], homes);
       if (s != TY_UNKNOWN) r = (r == TY_UNKNOWN) ? s : ty_unify(r, s);
     }
   }
@@ -2365,7 +2378,8 @@ TyKind proc_node_ret(Compiler *c, int create) {
      `break <expr>` carries a value out of the proc too (loop-bound ones bind to
      the loop, not the proc -- ie_block_break_next_ty stops at nested loops and
      scopes), so fold their types in as well. */
-  TyKind ir = proc_interior_return_ty(c, body);
+  TyKind ir = proc_interior_return_ty(c, body,
+                                      (ty && sp_streq(ty, "LambdaNode")) || call_is_lambda(nt, create));
   TyKind bnt = ie_block_break_next_ty(c, body);
   if (bnt != TY_UNKNOWN) ir = (ir == TY_UNKNOWN) ? bnt : ty_unify(ir, bnt);
   if (ir != TY_UNKNOWN && tail_ty != TY_UNKNOWN && ir != tail_ty)

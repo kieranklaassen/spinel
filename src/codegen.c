@@ -6311,6 +6311,7 @@ static void emit_fiber_new_here(Compiler *c, int id, Buf *b, int as_gen, int siz
      staged as #exit_value, exactly as a proc outliving its home does. */
   const char *sv_prh_fb = g_proc_return_home; int sv_ptr_fb = g_proc_toplevel_return;
   g_proc_return_home = "-1"; g_proc_toplevel_return = 0;
+  int *sv_lh_fb = g_lambda_home; g_lambda_home = NULL;
   RenPark ren_sv = ren_park(0);   /* as a proc body: park the caller's renames */
   g_pre = NULL; g_indent = 1; g_block_id = blk; g_block_nren = 0;
   /* g_block_param_name is the name of the &block a body calls through
@@ -6588,6 +6589,7 @@ static void emit_fiber_new_here(Compiler *c, int id, Buf *b, int as_gen, int siz
   g_pre = sv_pre; g_indent = sv_indent; g_block_id = sv_block; g_block_nren = sv_bnren;
   g_block_param_name = sv_bpn; g_self = sv_self; g_ret_type = sv_rt; g_c_ret_void = sv_cv;
   g_proc_return_home = sv_prh_fb; g_proc_toplevel_return = sv_ptr_fb;
+  g_lambda_home = sv_lh_fb;
   g_self_deref = sv_fbderef;
   g_result_poly = sv_rp; g_result_var = sv_rv; g_yielder_name = sv_yld;
   g_fn_pr_label = sv_fn_prl2; g_fn_pr_var = sv_fn_prv2; g_fn_ret_type = sv_fn_rt2;
@@ -7063,6 +7065,45 @@ static void emit_proc_param_slot(Compiler *c, Buf *pb, const char *name, const c
   free(dpre.p); free(dval.p);
 }
 
+/* The home a returning proc is built with: the method's `_h`, or the lambda's
+   whose body is being emitted, which that body has as `_home` (counted, for
+   emit_proc_fn). A method inlined into a lambda's body is not the lambda: its
+   procs name `_h` as they did. */
+static const char *proc_home_ref(void) {
+  if (!g_lambda_home || g_method_pr_label) return "_h.id";
+  ++*g_lambda_home;
+  return "_home";
+}
+
+/* Writes proc `pid`'s function to g_procs; `body` is its text after the
+   header line. `homed`: a returning proc made in this lambda's body took the
+   lambda for its home, as it takes a method. The body then goes under another
+   name, with the home's id as a parameter, and `_proc_<n>` is the home around
+   it, as a method pushes it (emit_method): the node is on this frame's C
+   stack, and sp_proc_return longjmps here with the value, which goes out
+   through the slot a lambda answers through. SP_GC_SAVE drops the roots of
+   the frames jumped over. */
+static void emit_proc_fn(int pid, const char *body, int homed) {
+  if (!homed) {
+    buf_printf(&g_procs, "static sp_int _proc_%d(void *_cap, sp_int argc, sp_int *args) {\n", pid);
+    buf_puts(&g_procs, body);
+    return;
+  }
+  buf_printf(&g_procs, "static sp_int _proc_%d_in(void *_cap, sp_int argc, sp_int *args, sp_int _home) {\n", pid);
+  buf_puts(&g_procs, body);
+  buf_printf(&g_procs, "static sp_int _proc_%d(void *_cap, sp_int argc, sp_int *args) {\n", pid);
+  buf_puts(&g_procs, "    SP_GC_SAVE();\n");
+  buf_puts(&g_procs, "    sp_proc_home _h;\n");
+  buf_puts(&g_procs, "    _h.val = sp_box_nil(); _h.id = sp_proc_home_next();\n");
+  buf_puts(&g_procs, "    _h.exc_top = sp_exc_top; _h.catch_top = sp_catch_top;\n");
+  buf_puts(&g_procs, "    _h.recur_mark = sp_poly_recur_save();\n");
+  buf_puts(&g_procs, "    _h.prev = sp_proc_ret_head; sp_proc_ret_head = &_h;\n");
+  buf_puts(&g_procs, "    if (setjmp(_h.jb)) { sp_proc_ret_head = _h.prev; sp_catch_top = _h.catch_top; _sp_proc_poly_ret = _h.val; return 0; }\n");
+  buf_printf(&g_procs, "    sp_int _r = _proc_%d_in(_cap, argc, args, _h.id);\n", pid);
+  buf_puts(&g_procs, "    sp_proc_ret_head = _h.prev;\n");
+  buf_puts(&g_procs, "    return _r;\n}\n");
+}
+
 static void emit_proc_literal_here(Compiler *c, int create, Buf *b) {
   const NodeTable *nt = c->nt;
   const char *cty = nt_type(nt, create);
@@ -7322,7 +7363,7 @@ static void emit_proc_literal_here(Compiler *c, int create, Buf *b) {
      emit_return throw. But when the tail is a plain expression, that expression
      IS the proc's value on the fall-through path (no `return` fired): keep the
      analyzed `ret` and emit it normally, so the value is not lost. */
-  int ret_proc = (g_method_pr_label != NULL) && proc_does_nonlocal_return(c, create);
+  int ret_proc = (g_method_pr_label != NULL || g_lambda_home) && proc_does_nonlocal_return(c, create);
   /* A non-lambda EXPLICIT proc (`proc {}` / `Proc.new {}`) whose body
      top-level-breaks raises LocalJumpError "break from proc-closure" when
      called -- CRuby 4 delivers a break only for a block-converted proc, never
@@ -7627,7 +7668,8 @@ else if (orecv >= 0 && onm) {
   else g_proc_return_home = NULL;
   /* a non-lambda proc written at TOP LEVEL: its `return` is a top-level
      return, which ends the script rather than just leaving the proc (#3663) */
-  int sv_ptr = g_proc_toplevel_return;
+  int sv_ptr = g_proc_toplevel_return, homed = 0, *sv_lh = g_lambda_home;
+  g_lambda_home = is_lambda ? &homed : NULL;   /* a lambda is its procs' home: proc_home_ref */
   g_proc_toplevel_return = (!is_lambda && !is_block_node && !ret_proc &&
                             comp_scope_of(c, create) == &c->scopes[0]);
   /* the body's inlines push their renames from slot 0, over the enclosing
@@ -7681,7 +7723,6 @@ else if (orecv >= 0 && onm) {
   g_c_ret_void = 0;   /* returns sp_int, whatever the enclosing body returns */
   Buf proc_body_buf; memset(&proc_body_buf, 0, sizeof proc_body_buf);
   Buf *pb = &proc_body_buf;
-  buf_printf(pb, "static sp_int _proc_%d(void *_cap, sp_int argc, sp_int *args) {\n", pid);
   buf_puts(pb, "    SP_GC_SAVE();\n");
   size_t proc_frame_ins = pb->len;
   if (ncap == 0 && !cap_self && !cap_cls && !ret_proc) buf_puts(pb, "    (void)_cap;\n");
@@ -8274,7 +8315,7 @@ else if (orecv >= 0 && onm) {
   }
   buf_puts(pb, "}\n");
   if (!g_no_root_frame) gc_frame_build(pb, proc_frame_ins, decide_node_site(c->nt, create));
-  buf_puts(&g_procs, proc_body_buf.p ? proc_body_buf.p : "");
+  emit_proc_fn(pid, proc_body_buf.p ? proc_body_buf.p : "", homed);
   free(proc_body_buf.p);
   g_c_loop_depth = sv_loopd; g_in_proc_body = sv_inproc; g_c_ret_void = sv_cv;
 
@@ -8291,7 +8332,7 @@ else if (orecv >= 0 && onm) {
   g_proc_body_kind = sv_pbk; g_proc_brk_home = sv_pbh;
   g_result_poly = sv_rp;
   g_method_pr_label = sv_pr_label; g_method_pr_var = sv_pr_var; g_proc_return_home = sv_prh;
-  g_proc_toplevel_return = sv_ptr;
+  g_proc_toplevel_return = sv_ptr; g_lambda_home = sv_lh;
   g_exc_frame_depth = sv_excd; g_method_pr_exc_depth = sv_prexcd;
   g_rescue_save_depth = sv_rsd;
   g_fn_pr_label = sv_fn_prl; g_fn_pr_var = sv_fn_prv; g_fn_ret_type = sv_fn_rt;
@@ -8346,7 +8387,7 @@ else if (orecv >= 0 && onm) {
         else
           buf_printf(g_pre, "_capv_%d->__self_cls = %s;\n", pid, bs->yields && sv_self ? sv_self : "_sp_cls");
       }
-      if (ret_proc) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "_capv_%d->_home = _h.id;\n", pid); }
+      if (ret_proc) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "_capv_%d->_home = %s;\n", pid, proc_home_ref()); }
       if (brk_blk) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "_capv_%d->_brkhome = %s;\n", pid, sv_bser); }
     }
     buf_printf(b, "sp_proc_new_meta((void *)_proc_%d, _capv_%d, _proc_cap_scan_%d, %d, %s, %d, %s)",
@@ -14123,6 +14164,7 @@ typedef struct EmitUnitState {
   const char *method_pr_label;
   const char *method_pr_var;
   const char *proc_return_home;
+  int *lambda_home;
   const char *ctor_self;
   const char *ctor_self_deref;
   const char *fn_pr_label;
@@ -14193,6 +14235,7 @@ void emit_unit_state_save(EmitUnitState *s) {
   s->method_pr_label = g_method_pr_label;
   s->method_pr_var = g_method_pr_var;
   s->proc_return_home = g_proc_return_home;
+  s->lambda_home = g_lambda_home;
   s->ctor_self = g_ctor_self;
   s->ctor_self_deref = g_ctor_self_deref;
   s->fn_pr_label = g_fn_pr_label;
@@ -14246,6 +14289,7 @@ void emit_unit_state_restore(const EmitUnitState *s) {
   g_method_pr_label = s->method_pr_label;
   g_method_pr_var = s->method_pr_var;
   g_proc_return_home = s->proc_return_home;
+  g_lambda_home = s->lambda_home;
   g_ctor_self = s->ctor_self;
   g_ctor_self_deref = s->ctor_self_deref;
   g_fn_pr_label = s->fn_pr_label;
