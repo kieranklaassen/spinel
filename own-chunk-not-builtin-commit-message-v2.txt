@@ -1,0 +1,28 @@
+A program's own chunk, slice_when and kin are not read as the builtin's
+
+    def chunk = [5, 6].each_with_index
+    p chunk.map { |x| x }
+
+printed [[5, 0], [6, 1]] for [5, 6]. The same for a method, a reader, a
+Struct member or a class method of the program's own named chunk,
+chunk_while, slice_when, slice_before or slice_after.
+
+The builtin's five yield one chunk a step, so the to_a that stands in
+front of a block over one of them hands each chunk on as the one value
+it is. one_value_enum_source knew them by the call's name alone, and a
+method of the program's own by one of the names, which answers what it
+likes, was read the same way.
+
+The name now stands for the builtin's unless the call is proven to
+reach the program's own: a bare call or one on self where the top
+level or the enclosing class defines the name; a receiver typed as an
+object of a class of the program that defines or reads it; a constant
+naming a class with a class method of the name; an Array, Hash or
+Range whose class the program reopened with the name, where the call
+carries no block. Every other call is read as before: a builtin's
+call keeps its C, and so does an own method reached another way (a
+top-level def called from inside a class, a receiver of two classes).
+
+Test: test/own_method_named_chunk.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
