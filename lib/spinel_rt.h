@@ -2701,6 +2701,13 @@ static inline sp_bool sp_srange_cover_bytes(const char *first, const char *last,
 static SP_NOINLINE SP_COLD sp_bool sp_srange_cover_handle(const char *first, const char *last, int excl, void *h) {
   return h && sp_srange_cover_bytes(first, last, excl, sp_String_cstr((sp_String *)h));
 }
+/* Array#delete on a String Array for a boxed object: a shared String handle
+   deletes by its text; NULL, a nil stored among handles, and any other
+   object delete nothing. Out of line: only an object's box comes here, and
+   the call beside it for a plain String stays as it was. */
+static SP_NOINLINE SP_COLD const char *sp_StrArray_delete_handle(sp_StrArray *a, sp_RbVal v) {
+  return sp_poly_is_strbuf(v) && v.v.p ? sp_StrArray_delete(a, sp_String_cstr((sp_String *)v.v.p)) : NULL;
+}
 /* The object pointer a boxed value carries, for a slot that holds pointers
    rather than sp_RbVal (a PtrArray of one user class). nil is a NULL element,
    which is how that slot spells nil already. */

@@ -2217,15 +2217,19 @@ else {
           buf_printf(b, "); !sp_float_is_nil(_t%d) ? sp_box_float(_t%d) : ", tdr, tdr);
         }
         else if (a0 == TY_POLY || held[0]) {
-          /* a boxed needle: a String compares, anything else is not
-             there, as include? and index read it (#4458) */
+          /* a boxed needle: a String compares, a shared String handle
+             by its text (out of line, sp_StrArray_delete_handle),
+             anything else is not there, as include? and index read it
+             (#4458) */
           int tv = ++g_tmp;
           char tvn[32]; snprintf(tvn, sizeof tvn, "_t%d", tv);
           const char *nd = held[0] ? held : tvn;
           buf_puts(b, "({ ");
           if (!held[0]) { buf_printf(b, "sp_RbVal %s = ", tvn); emit_boxed(c, argv[0], b); buf_puts(b, "; "); }
-          buf_printf(b, "const char *_t%d = %s.tag == SP_TAG_STR ? sp_StrArray_delete(%s, %s.v.s)"
-                        " : (const char *)0; _t%d ? sp_box_str(_t%d) : ", tdr, nd, rdb.p, nd, tdr, tdr);
+          buf_printf(b, "const char *_t%d = %s.tag == SP_TAG_STR ? sp_StrArray_delete(%s, %s.v.s)", tdr, nd, rdb.p, nd);
+          if (g_strbuf_boxes == SB_BOXES_HANDLES && !builtin_reopened(c, "String", "=="))
+            buf_printf(b, " : %s.tag == SP_TAG_OBJ ? sp_StrArray_delete_handle(%s, %s)", nd, rdb.p, nd);
+          buf_printf(b, " : (const char *)0; _t%d ? sp_box_str(_t%d) : ", tdr, tdr);
         }
         else {
           buf_printf(b, "({ const char *_t%d = sp_StrArray_delete(%s, ", tdr, rdb.p);
@@ -2260,8 +2264,10 @@ else {
       int tv = ++g_tmp;
       buf_printf(b, "({ sp_RbVal _t%d = ", tv); emit_boxed(c, argv[0], b);
       buf_printf(b, "; _t%d.tag == SP_TAG_STR ? sp_StrArray_delete(%s, _t%d.v.s)"
-                    " : _t%d.tag == SP_TAG_NIL ? sp_StrArray_delete(%s, NULL) : (const char *)0; })",
-                 tv, rdl.p, tv, tv, rdl.p);
+                    " : _t%d.tag == SP_TAG_NIL ? sp_StrArray_delete(%s, NULL)", tv, rdl.p, tv, tv, rdl.p);
+      if (g_strbuf_boxes == SB_BOXES_HANDLES && !builtin_reopened(c, "String", "=="))
+        buf_printf(b, " : _t%d.tag == SP_TAG_OBJ ? sp_StrArray_delete_handle(%s, _t%d)", tv, rdl.p, tv);
+      buf_puts(b, " : (const char *)0; })");
     }
     else {
       buf_printf(b, "sp_%sArray_delete%s(%s, ", k, df_boxed ? "_key" : "", rdl.p);
