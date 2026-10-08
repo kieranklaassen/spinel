@@ -76,6 +76,8 @@ int cmp_operand_may_be_nil(Compiler *c, int id);
 int emit_poly_isa_test(Compiler *c, const char *cn, const char *v, int exact, Buf *b);
 int class_takes_exc_name_arm(Compiler *c, int cid, int exact);
 void emit_poly_exc_name_arm(Compiler *c, int cid, const char *v, int exact, Buf *b);
+int prog_takes_exc_name_arm_by_value(Compiler *c);
+void emit_poly_exc_name_arm_by_value(const char *v, const char *k, Buf *b);
 void emit_pre_root(Compiler *c, TyKind t, int tmp);
 int emit_scalar_class_test(Compiler *c, int node, TyKind t, const char *cn, int exact, Buf *b);
 int hoist_boxed_rooted(Compiler *c, int node);

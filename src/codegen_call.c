@@ -18546,6 +18546,24 @@ void emit_poly_exc_name_arm(Compiler *c, int cid, const char *v, int exact, Buf 
   buf_printf(b, "%s((sp_Exception *)%s.v.p)->cls_name))", fn, v);
 }
 
+/* The exact test with the class a value (`x.instance_of?(k)`): is there an
+   exception class of the program's own for the name arm to ask? */
+int prog_takes_exc_name_arm_by_value(Compiler *c) {
+  for (int k = 0; k < c->nclasses; k++) if (class_takes_exc_name_arm(c, k, 1)) return 1;
+  return 0;
+}
+
+/* The name arm for that test, ` || (...)` after the class-id compare of the
+   boxed value `v` with the class value `k`: a class of the program's own is
+   an id with no name, and the id gives the name the exception carries. A
+   class read off a value carries a name and keeps the answer it had. */
+void emit_poly_exc_name_arm_by_value(const char *v, const char *k, Buf *b) {
+  buf_printf(b, " || (%s.tag == SP_TAG_OBJ && %s.cls_id == SP_BUILTIN_EXCEPTION && %s.v.p && "
+                "((sp_Exception *)%s.v.p)->parent_cls_name && %s.cls_id >= 0 && !%s.name && "
+                "strcmp(((sp_Exception *)%s.v.p)->cls_name, sp_class_to_s(%s)) == 0)",
+             v, v, v, v, k, k, v, k);
+}
+
 /* The runtime test for `<poly value v> is_a? <class named cn>` (exact: the
    instance_of? form, no ancestry). Shared by is_a?/kind_of?/instance_of? and by
    `Klass === poly`, which used to carry its own shorter copy of the table and

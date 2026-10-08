@@ -878,8 +878,18 @@ int emit_call_compare_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
     if (builtin_rt)
       buf_printf(b, "sp_poly_is_a_dyn(_t%d, sp_box_class(_t%d), %d); })",
                  t, k, sp_streq(name, "instance_of?"));
-    else if (sp_streq(name, "instance_of?"))
-      buf_printf(b, "sp_poly_get_class(_t%d).cls_id == _t%d.cls_id; })", t, k);
+    else if (sp_streq(name, "instance_of?")) {
+      /* a raised exception of a class of the program's own carries its
+         class by name, which no id compare reads */
+      int exc = prog_takes_exc_name_arm_by_value(c);
+      buf_printf(b, "%ssp_poly_get_class(_t%d).cls_id == _t%d.cls_id", exc ? "(" : "", t, k);
+      if (exc) {
+        char tv[32], kv[32];
+        snprintf(tv, sizeof tv, "_t%d", t); snprintf(kv, sizeof kv, "_t%d", k);
+        emit_poly_exc_name_arm_by_value(tv, kv, b); buf_puts(b, ")");
+      }
+      buf_puts(b, "; })");
+    }
     else
       buf_printf(b, "sp_poly_is_a(_t%d, _t%d); })", t, k);
     return 1;
