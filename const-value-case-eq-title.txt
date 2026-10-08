@@ -1,0 +1,1 @@
+=== on a constant that holds a value is the value's own ===
