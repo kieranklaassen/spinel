@@ -1,0 +1,91 @@
+A statement element store runs its receiver and its key before its value
+
+Ruby runs `recv[key] = value` receiver, key, value, each once. A store
+whose value is not used did not. With
+
+    def t(n) = (puts n; n)
+    a = [0, 0, 0]
+    a[t(1)] = t(2)
+
+the program printed 2 then 1. `c[i] = (i += 1; 50)` stored at the index
+the value left behind, `r[q[0]] = q.shift` at the one the shift
+uncovered, and `@cells[@at] = bump`, bump advancing @at, one slot on. A
+receiver the value reassigns, as in `v[0] = (v = [5, 5]; 6)` or
+`@cells[0] = fresh` where fresh stores a new Array in @cells, took the
+store on the new Array instead of the one it named. A Hash was the same
+through its variables: `h[k] = (k += 1; 5)` went in under 1, and
+`@h[5] = fresh` into the Hash fresh had just made.
+
+Such a store never reached emit_call: emit_stmt_inner hands it to
+emit_array_mutate_stmt, whose `[]=` arms write one C call with the
+receiver, the key and the value as sibling arguments, and gcc evaluates
+those right to left. The Hash arm reads its three operands into temps
+in order, but only when the receiver or the key may allocate.
+
+The new index_set_stmt_order_shows asks whether the order can show: the
+key or the value may give what the receiver reads another object, the
+value may give what the key reads another (read_moved_by), or two of
+the three operands run something. emit_index_set_stmt_in_order then
+runs the receiver and the key, each that runs something or reads what a
+later operand can move, ahead of the statement into a temp
+(emit_args_before), and the arm writes the call it always wrote, over
+those temps. What the arm declines is taken back and the statement is
+written as the value form, as before.
+
+The Hash arm takes its temps on the same question
+(index_set_order_shows), on the line that asked about allocation, and
+roots the key there where the value can move it: a key the value moves
+its variable off, `h[key] = (key = other; build)`, is held by nothing
+else while the value builds. Read first and unrooted, as clang's order
+had it, the set was handed a freed String (under SPINEL_GC_STRESS=2 the
+mark reached it). And what the value hoists ran ahead of the statement
+with either compiler, so `h[t(1)] = [t(2)]` printed 2 then 1: where the
+value runs something, and the receiver or the key does too or can be
+moved by it, it now runs after their temps.
+
+The value form with its value dropped, which the push takes, would not
+do here: it binds the value of an Array of objects before it reads the
+key, and a Hash's before a key the value assigns, and it roots the
+receiver whether or not anything allocates.
+
+Every other store keeps its single call and its C. Two things hold that
+where the push's rule would not. Operands that store nothing and run no
+code of the program's (subtree_stores_nothing: reads, literals,
+arithmetic, a typed Array's element, a field, a function of Math's, the
+least or greatest of an Array literal of numbers) cannot show their
+order however many of them run. A Levenshtein loop's store is
+
+    m[i][j] = [m[i - 1][j] + 1, m[i][j - 1] + 1,
+               m[i - 1][j - 1] + cost].min
+
+and with its row and its index read first, the row rooted, the loop ran
+340,104,552 to 408,996,280 instructions under callgrind; its C is as it
+was. And read_moved_by is read_rebound_by less what that takes for a
+rebinding and is none: a builtin over plain values assigns no variable
+(subtree_may_run_proc), nothing hands another Array to an ivar only a
+constructor assigns (ivar_set_only_by_ctor), and a global or a class
+variable is assigned where it shows or by code of the program's.
+
+By tools/cident.sh against master the C of five programs changes
+beside the test: four tests, and benchmark/bm_stark_field.rb, where two
+stores of a constructor, `@t[k][j] = Field.add(@t[k][j], 1)` and its
+sub, read their row ahead of the call, 1,110,032,583 to 1,110,129,683
+instructions. optcarrot's generated C is byte-identical.
+
+The test has each kind of Array the arm stores into and the Hash, the
+key and the receiver reassigned by the value in a local, an ivar, a
+global and a class variable, through a method of self's, another
+object's and a reader, and what can stand where a number would be and
+still run code: a method the program gives Array called on a literal,
+an == of the program's. 57 of its 106 lines are wrong before this with
+gcc and one with clang, and it aborts at stress 2 with both.
+
+Still on the old path: a store with a start and a length or a Range,
+whose value is built first; a store into a boxed value (rows of a
+nested Array literal, a Hash that widened), which takes the value
+first; an Array of objects, whose value form binds the value before it
+reads the key, so `cs[j] = (j += 1; Cell.new(9))` stores at 1; and a
+Hash store whose value is used, `x = (h[k] = (k += 1; 5))`, which reads
+the key after the value.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

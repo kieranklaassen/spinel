@@ -1,0 +1,1 @@
+A statement element store runs its receiver and its key before its value
