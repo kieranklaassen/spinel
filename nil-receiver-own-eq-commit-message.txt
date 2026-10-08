@@ -1,0 +1,42 @@
+A class's own == is not run on a nil receiver
+
+    class Tag
+      attr_reader :v
+      def initialize(v) = @v = v
+      def ==(o) = o.is_a?(Tag) && @v == o.v
+    end
+    a = [Tag.new(1)]
+    a[2] = Tag.new(4)
+    p a[1] == nil          # true
+    p nil == a[1]          # true
+    p a[1] == Tag.new(1)   # false
+
+This printed false and false, and the third line died of signal 11.
+
+A nil in a slot typed as an object is a NULL pointer. The equality
+emitter's object arm called the class's == with that pointer as self:
+a body that reads no instance variable of self answered by its own
+rule, and one that reaches @v faulted. The other way round,
+`nil == a[1]` was folded to false, as it is for an object that cannot
+be nil.
+
+Where the receiver may be nil (Repr.may_nil, the nil fact) the call
+now tests it: nil answers as NilClass#== does, true for nil alone, and
+the method runs for an object. The argument is evaluated once, after
+the receiver, either way. A != derived from ==, an == given a boxed
+argument, === and a `when` take the same test, and `nil == x` on such
+a slot is a NULL test. A receiver the fact rules nil out for keeps its
+C, and so does a program that gives nil an == of its own.
+
+The cost is that test. By callgrind, over 20 million comparisons: 2
+instructions more each where the receiver is an instance variable (89
+to 91), 6.5 where it is an Array element (124.5 to 131), none where
+nil is ruled out.
+
+Not here, each as it was: a class's own !=, eql? and equal? on such a
+slot, and the other names nil answers itself where the class defines
+them (to_s, inspect, hash).
+
+Test: test/user_eq_on_nil_slot.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
