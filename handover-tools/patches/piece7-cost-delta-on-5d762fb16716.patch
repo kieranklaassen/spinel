@@ -1,0 +1,208 @@
+diff --git a/src/analyze.c b/src/analyze.c
+index 64eb0ba6..c52dfa2d 100644
+--- a/src/analyze.c
++++ b/src/analyze.c
+@@ -3073,6 +3073,8 @@ typedef struct {
+   int *def_of;                     /* per node: its definition + 1 */
+   int stamp, nstmt, nwrite, again; /* include statements run, colliding writes passed, includes naming a held module */
+   int ran;                         /* 1 a statement that may read a constant has passed, 2 not this simple */
++  int tables;                      /* 1 the tables of the bodies are built, -1 they could not be */
++  int dry;                         /* the statements are only passed: no include is merged */
+   QCWrite *ws; int wn;
+ } QCOrder;
+ static int qc_name_in(const char *nm, const char *const *list) {
+@@ -3116,6 +3118,48 @@ static int qc_order_resolve(const NodeTable *nt, int ref, char (*scope)[64], int
+   }
+   return -1;
+ }
++/* The tables of the bodies and each class's superclass, built when the walk
++   first needs them: at the first include it merges, or at a `Struct.new`
++   whose name the program may define. A program the walk leaves before that
++   pays for none of them. 0 where memory runs out. */
++static int qc_order_tables(const NodeTable *nt, QCOrder *o) {
++  int nd = qc_ndefs;
++  if (o->tables) return o->tables > 0;
++  o->tables = -1;
++  for (qc_ord_cap = 16; qc_ord_cap < 2 * nd; qc_ord_cap *= 2) ;
++  qc_ord_tab = calloc((size_t)qc_ord_cap, sizeof(int));
++  qc_ord_leaf = calloc((size_t)qc_ord_cap, sizeof(int));
++  qc_ord_cls = malloc(sizeof(int) * (size_t)nd);
++  qc_ord_sup = malloc(sizeof(int) * (size_t)nd);
++  qc_own = calloc((size_t)nd, sizeof *qc_own);
++  qc_nown = calloc((size_t)nd, sizeof(int));
++  o->held = calloc((size_t)nd, 1);
++  o->in_own = calloc((size_t)nd, sizeof(int));
++  o->own_at = calloc((size_t)nd, sizeof(int));
++  o->in_sup = calloc((size_t)nd, sizeof(int));
++  if (!qc_ord_tab || !qc_ord_leaf || !qc_ord_cls || !qc_ord_sup || !qc_own || !qc_nown || !o->held || !o->in_own ||
++      !o->own_at || !o->in_sup)
++    return 0;
++  for (int d = 0; d < nd; d++) {
++    qc_ord_cls[d] = qc_order_first(0, qc_defs[d].path, qc_defs[d].depth, d);
++    if (qc_defs[d].depth > 1) qc_order_first(1, qc_defs[d].path + qc_defs[d].depth - 1, 1, d);
++    qc_ord_sup[d] = -1;
++  }
++  /* a class's superclass, as the walk resolves it: the last reopening that names one */
++  for (int d = 0; d < nd; d++) {
++    QCDef *q = &qc_defs[d];
++    int sr = nt_kind(nt, q->node) == NK_ClassNode ? nt_ref(nt, q->node, "superclass") : -1;
++    int k = qc_ord_cls[d];
++    if (sr < 0 || qc_ord_sup[k] == -2) continue;
++    int r = qc_order_resolve(nt, sr, q->path, q->depth - 1);
++    if (r >= 0) qc_ord_sup[k] = r;
++    else if (r == -2 || nt_kind(nt, sr) != NK_ConstantReadNode || !qc_builtin_name(nt_str(nt, sr, "name")) ||
++             sp_streq(nt_str(nt, sr, "name"), "BasicObject"))   /* its bodies do not see the program's level */
++      qc_ord_sup[k] = -2;
++  }
++  o->tables = 1;
++  return 1;
++}
+ /* `include <arg>` in the body of definition `d`: the module's list goes into
+    the body's, each module not held yet behind the last held one the list
+    has passed. 0 where CRuby's order is not this simple: a module given an
+@@ -3161,7 +3205,7 @@ static int qc_order_include(const NodeTable *nt, int d, int arg, QCOrder *o) {
+ }
+ /* A statement that only defines: no constant this pass renames is read in
+    it, and no method of the program runs. */
+-static int qc_order_defines_only(const NodeTable *nt, int s, const QCOrder *o, int depth) {
++static int qc_order_defines_only(const NodeTable *nt, int s, QCOrder *o, int depth) {
+   static const char *const decls[] = {
+     "attr_reader", "attr_writer", "attr_accessor", "attr", "private", "public", "protected",
+     "module_function", "private_constant", "public_constant", "private_class_method",
+@@ -3197,8 +3241,9 @@ static int qc_order_defines_only(const NodeTable *nt, int s, const QCOrder *o, i
+     const char *rn = nt_kind(nt, recv) == NK_ConstantReadNode ? nt_str(nt, recv, "name") : NULL;
+     char made[1][64];
+     snprintf(made[0], 64, "%s", rn ? rn : "");
+-    if (rn && nm && ((sp_streq(rn, "Struct") && sp_streq(nm, "new")) || (sp_streq(rn, "Data") && sp_streq(nm, "define"))) &&
+-        qc_order_first(0, made, 1, -1) < 0) {   /* a class made of names; its block is a body */
++    int maker = rn && nm && ((sp_streq(rn, "Struct") && sp_streq(nm, "new")) || (sp_streq(rn, "Data") && sp_streq(nm, "define")));
++    if (maker && !qc_order_tables(nt, o)) return 0;
++    if (maker && qc_order_first(0, made, 1, -1) < 0) {   /* a class made of names; its block is a body */
+       int blk = nt_ref(nt, s, "block"), body = nt_kind(nt, blk) == NK_BlockNode ? nt_ref(nt, blk, "body") : -1, bn = 0;
+       const int *bv = nt_kind(nt, body) == NK_StatementsNode ? nt_arr(nt, body, "body", &bn) : NULL;
+       if (blk >= 0 && body >= 0 && !bv) return 0;
+@@ -3255,9 +3300,9 @@ static void qc_order_walk(const NodeTable *nt, int list, int d, int req, QCOrder
+     else if (nm && sp_streq(nm, "include") && nt_ref(nt, s, "receiver") < 0) {
+       int anode = nt_ref(nt, s, "arguments"), an = 0;
+       const int *args = anode >= 0 ? nt_arr(nt, anode, "arguments", &an) : NULL;
+-      if (d < 0 || rq || o->ran) { o->ran = 2; break; }
++      if (d < 0 || rq || o->ran || (!o->dry && !qc_order_tables(nt, o))) { o->ran = 2; break; }
+       o->nstmt++;
+-      for (int j = an - 1; j >= 0 && o->ran < 2; j--)   /* `include A, B` puts B in first */
++      for (int j = an - 1; j >= 0 && o->ran < 2 && !o->dry; j--)   /* `include A, B` puts B in first */
+         if (!qc_order_include(nt, d, args[j], o)) o->ran = 2;
+     }
+     else {
+@@ -3266,13 +3311,15 @@ static void qc_order_walk(const NodeTable *nt, int list, int d, int req, QCOrder
+     }
+   }
+ }
+-/* Whether the `nstmt` include statements qc_order_walk ran are all that
+-   changes what a body holds, and nothing of the program runs while the
+-   bodies are defined: no other include (in a block, in a method, on a
+-   receiver), no prepend, nothing that mixes in or takes a constant away by
+-   a name given at run time, no hook, no method of the program's own under
+-   a name an include goes through or a declaration of a body uses. */
+-static int qc_order_plain(const NodeTable *nt, int nstmt) {
++/* The program's includes, counted, where they are all that can change what
++   a body holds and nothing of the program runs while the bodies are
++   defined: no include on a receiver, no prepend, nothing that mixes in or
++   takes a constant away by a name given at run time, no hook, no method of
++   the program's own under a name an include goes through or a declaration
++   of a body uses. -1 otherwise. An include in a block or in a method shows
++   as a count above the statements qc_order_walk runs. Two flat scans, asked
++   before anything is built. */
++static int qc_order_plain(const NodeTable *nt) {
+   static const char *const hides[] = {
+     "include", "prepend", "append_features", "prepend_features", "class_eval", "module_eval",
+     "class_exec", "module_exec", "instance_eval", "instance_exec", "eval", "refine",
+@@ -3287,7 +3334,7 @@ static int qc_order_plain(const NodeTable *nt, int nstmt) {
+   int seen = 0;
+   NT_FOREACH_KIND(nt, NK_DefNode, id) {
+     const char *nm = nt_str(nt, id, "name");
+-    if (qc_name_in(nm, hides) || qc_name_in(nm, decls)) return 0;
++    if (qc_name_in(nm, hides) || qc_name_in(nm, decls)) return -1;
+   }
+   NT_FOREACH_KIND(nt, NK_CallNode, id) {
+     const char *nm = nt_str(nt, id, "name");
+@@ -3295,18 +3342,18 @@ static int qc_order_plain(const NodeTable *nt, int nstmt) {
+     const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+     if (!nm) continue;
+     if (sp_streq(nm, "include")) {
+-      if (nt_ref(nt, id, "receiver") >= 0) return 0;
++      if (nt_ref(nt, id, "receiver") >= 0) return -1;
+       seen++;
+     }
+-    else if (qc_name_in(nm, hides)) return 0;
++    else if (qc_name_in(nm, hides)) return -1;
+     else if (qc_name_in(nm, by_name)) {
+       NodeKind ak = an > 0 ? nt_kind(nt, av[0]) : NK_NONE;
+       const char *lit = ak == NK_SymbolNode ? nt_str(nt, av[0], "value")
+                       : ak == NK_StringNode ? nt_str(nt, av[0], "unescaped") : NULL;
+-      if (!lit || qc_name_in(lit, hides)) return 0;
++      if (!lit || qc_name_in(lit, hides)) return -1;
+     }
+   }
+-  return seen == nstmt;
++  return seen;
+ }
+ static void qc_order_mark_singleton(const NodeTable *nt, int node) {
+   if (node < 0 || node >= qc_ord_sing_n || qc_ord_sing[node]) return;
+@@ -3363,43 +3410,23 @@ static void qc_order_build(Compiler *c, QCWrite *ws, int wn) {
+   int nd = qc_ndefs;
+   qc_ord_state = -1;
+   if (nd <= 0 || nt->root_id < 0 || !qc_order_twice(nt)) return;
+-  for (qc_ord_cap = 16; qc_ord_cap < 2 * nd; qc_ord_cap *= 2) ;
+-  qc_ord_tab = calloc((size_t)qc_ord_cap, sizeof(int));
+-  qc_ord_leaf = calloc((size_t)qc_ord_cap, sizeof(int));
+-  qc_ord_cls = malloc(sizeof(int) * (size_t)nd);
+-  qc_ord_sup = malloc(sizeof(int) * (size_t)nd);
+-  qc_own = calloc((size_t)nd, sizeof *qc_own);
+-  qc_nown = calloc((size_t)nd, sizeof(int));
+-  o.held = calloc((size_t)nd, 1);
+-  o.in_own = calloc((size_t)nd, sizeof(int));
+-  o.own_at = calloc((size_t)nd, sizeof(int));
+-  o.in_sup = calloc((size_t)nd, sizeof(int));
++  int nincl = qc_order_plain(nt);
++  if (nincl < 0) return;
+   o.def_of = calloc((size_t)nt->count + 1, sizeof(int));
+   o.ws = ws; o.wn = wn;
+-  if (qc_ord_tab && qc_ord_leaf && qc_ord_cls && qc_ord_sup && qc_own && qc_nown && o.held && o.in_own && o.own_at &&
+-      o.in_sup && o.def_of) {
+-    for (int d = 0; d < nd; d++) {
+-      qc_ord_cls[d] = qc_order_first(0, qc_defs[d].path, qc_defs[d].depth, d);
+-      if (qc_defs[d].depth > 1) qc_order_first(1, qc_defs[d].path + qc_defs[d].depth - 1, 1, d);
+-      qc_ord_sup[d] = -1;
+-      o.def_of[qc_defs[d].node] = d + 1;
+-    }
+-    /* a class's superclass, as the walk resolves it: the last reopening that names one */
+-    for (int d = 0; d < nd; d++) {
+-      QCDef *q = &qc_defs[d];
+-      int sr = nt_kind(nt, q->node) == NK_ClassNode ? nt_ref(nt, q->node, "superclass") : -1;
+-      int k = qc_ord_cls[d];
+-      if (sr < 0 || qc_ord_sup[k] == -2) continue;
+-      int r = qc_order_resolve(nt, sr, q->path, q->depth - 1);
+-      if (r >= 0) qc_ord_sup[k] = r;
+-      else if (r == -2 || nt_kind(nt, sr) != NK_ConstantReadNode || !qc_builtin_name(nt_str(nt, sr, "name")) ||
+-               sp_streq(nt_str(nt, sr, "name"), "BasicObject"))   /* its bodies do not see the program's level */
+-        qc_ord_sup[k] = -2;
+-    }
+-    qc_order_walk(nt, nt_ref(nt, nt->root_id, "statements"), -1, 0, &o);
+-    int nwrite = 0;
++  if (o.def_of) {
++    int stmts = nt_ref(nt, nt->root_id, "statements"), nwrite = 0;
++    for (int d = 0; d < nd; d++) o.def_of[qc_defs[d].node] = d + 1;
+     for (int i = 0; i < wn; i++) nwrite += ws[i].depth > 0;
+-    if (o.ran < 2 && o.again > 0 && o.nwrite == nwrite && qc_order_plain(nt, o.nstmt) &&
++    /* The statements are passed once before a list is merged: an include
++       behind a statement that runs, in a block or in a method leaves the
++       program here. */
++    o.dry = 1;
++    qc_order_walk(nt, stmts, -1, 0, &o);
++    int simple = o.ran < 2 && o.nwrite == nwrite && o.nstmt == nincl;
++    o.dry = o.ran = o.nstmt = o.nwrite = 0;
++    if (simple) qc_order_walk(nt, stmts, -1, 0, &o);
++    if (simple && o.ran < 2 && o.again > 0 && o.nwrite == nwrite && o.nstmt == nincl &&
+         (qc_ord_sing = calloc((size_t)nt->count + 1, 1))) {
+       /* a read in a `class << self` body does not look in what the class mixes in */
+       qc_ord_sing_n = nt->count;

@@ -181,3 +181,18 @@ The same two commits rebuilt on master 5d762fb16716, above that fix
 rebuilt there (upstream's move touched `emit_super`, its function, in
 another arm): `patches/lj-super-chain-on-5d762fb16716.patch`. The changed
 lines are the same; the 3,960 programs that change are the same set.
+
+The seventh piece is re-cut for its compile cost (reader 1's point): the two
+flat scans of `qc_order_plain` are asked before anything is built, the
+statements are passed once before any include is merged, and the tables are
+built at the first include the walk merges. No answer changes: the C of all
+9,301 programs and the 33 hand attacks is the old cut's, byte for byte. On
+master 5d762fb16716: `patches/piece5-constant-lookup-on-5d762fb16716.patch`
+on the bare tip, above it `piece7-constant-read-order-on-5d762fb16716.patch`
+(the message is unchanged), and `piece7-cost-delta-on-5d762fb16716.patch`,
+a plain diff from the old cut to the new one (it applies to the old cut on
+8dc5522541bb as well). Body: `texts/cr-pr-body-upstream-v2.md`. The
+stand-aside cost programs are `const-read/cost-d22-*.rb` (the 22-level
+diamond with a `puts` ahead of the last class, with a hook, with a `puts`
+between two levels): +0.18%, +0.07% and +0.15% over the fifth piece, where
+the old cut paid +1.60%, +1.62% and +0.86%.
