@@ -1956,6 +1956,7 @@ GC_STRESS_TESTS := test/gc_root_frame_slots.rb \
                    test/exception_class_raised_again.rb \
                    test/thread_new_args_rooted_across_fiber_alloc.rb \
                    test/nomethod_holds_receiver_and_args.rb \
+                   test/hoisted_begin_value_held.rb \
                    test/gc_root_volatile_string_slot.rb \
                    test/gc_root_gathered_handle_param.rb \
                    test/ffi_str_borrow.rb \
