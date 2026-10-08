@@ -1,0 +1,42 @@
+super in a module reaches the module it includes, from every includer
+
+    module Tag
+      def tag = "tag"
+    end
+    module Loud
+      include Tag
+      def tag = super.upcase
+    end
+    class Post
+      include Loud
+    end
+    p Post.new.tag
+
+raised "super: no superclass method 'tag' for an instance of Post".
+CRuby prints "TAG". With a method of its own in the class,
+def tag = "<" + super + ">", it printed "<tag>"; with that method in a
+subclass the C did not build.
+
+A module that includes another holds the other's methods as copies of
+its own, and a super between them as a chain of its own.
+process_include_body copied the module's methods into the includer one
+by one under their names, and the chain stayed behind: the includer's
+super found no method, or one the class had under that name.
+
+A method and those its super goes on to within the module are now
+copied as one run. It stands in the class where the single copy stood:
+behind the class's own method when that calls super, in front of an
+earlier include's copy.
+
+Only where the run is sure to be Ruby's order: every link is between
+two instance methods of the module, neither taking a &block, the
+program has no prepend, and no class reaches a module by two ways (its
+own includes or a superclass's). Ruby keeps such a module once, and
+where it stands then is not where a copy of it would. Everywhere else
+the methods are copied as before.
+
+Tests: test/include_module_super_chain.rb, and
+test/include_module_super_chain_held.rb for a module reached twice,
+which answers as before.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

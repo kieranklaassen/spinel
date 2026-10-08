@@ -1,0 +1,1 @@
+A class held by value builds a super into an included module's method
