@@ -1,0 +1,34 @@
+A parenthesized sequence keeps its place when its tail converts an argument
+
+A parenthesized sequence `(a; b)` moves its leading statements ahead of
+the statement as soon as its tail writes a prelude line, so that code
+the tail hoists does not run before them. Since "Shared String argument
+conversions stay rooted across calls" a literal or a bare read bound to
+a shared-handle parameter writes such a line: the declaration of the
+temp that holds its new handle (emit_rooted_conversion). So
+
+    def self.late(s)
+      return s, (s = "bb"; new("x", "t").x)
+    end
+
+ran the assignment before `s` was read: late("a") answered ["bb", "x"]
+in a plain run, where it had answered ["a", "x"], as CRuby does.
+
+That declaration, `T _tN = NULL; SP_GC_ROOT(_tN);`, runs no code of the
+tail: the handle is made and assigned where the argument stands. A
+prelude of nothing but such lines is passed on as it is, and the
+sequence stays in place. The emitter knows by reading the prelude
+(prelude_is_held_decls). The lines are read and not counted where they
+are written, because an operator with two call operands passes each
+operand's prelude on as bytes (emit_operands_in_order).
+
+An Array converted where it is handed over writes the same line, so a
+sequence beside one stays in place as well. Under the seeded signature
+of test/rbs-seed/seeded_param_converted_arg_rooted.rb,
+`"#{s}-#{(s = "b"; ConvArgHolder.new(acc, oth).col.length)}"` printed
+"b-40" and now prints "a-40".
+
+A sequence whose tail hoists code of its own, a call's answer as the
+argument, moves ahead as before.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

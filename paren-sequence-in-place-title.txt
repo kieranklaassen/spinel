@@ -1,0 +1,1 @@
+A parenthesized sequence keeps its place when its tail converts an argument
