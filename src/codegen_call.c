@@ -11901,6 +11901,15 @@ static int emit_new_call_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, 
       int an_next = bn > 0 && bb && subtree_has_own_next(nt, bbody);
       const char *sv_anx = g_ie_next_var; int sv_anp = g_ie_res_poly; TyKind sv_ant = g_ie_next_ty;
       char anbuf[32]; int anv = 0;
+      /* that `next` is this loop's continue: it pops the frames and runs
+         the ensures opened inside the block and no others, as
+         emit_loop_body records for its own loop */
+      int an_rec = an_next && iter_body_records_loop(c, bbody);
+      int sv_anlx = g_loop_exc_base, sv_anle = g_loop_ensure_base, sv_anlb = g_loop_body;
+      if (an_rec) {
+        g_loop_exc_base = g_exc_frame_depth; g_loop_ensure_base = g_ensure_depth;
+        g_c_loop_depth++; g_loop_body = bbody;
+      }
       if (an_next) {
         anv = ++g_tmp;
         snprintf(anbuf, sizeof anbuf, "_t%d", anv);
@@ -11966,6 +11975,7 @@ static int emit_new_call_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, 
         else { buf_printf(g_pre, "sp_%sArray_push%s(_t%d, %s);\n", k, nil_store_sfx(c, k, bb[bn - 1]), tr, vb.p ? vb.p : ""); }
         free(vb.p);
       }
+      if (an_rec) { g_c_loop_depth--; g_loop_exc_base = sv_anlx; g_loop_ensure_base = sv_anle; g_loop_body = sv_anlb; }
       g_indent--;
       emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
       buf_printf(b, "_t%d", tr);

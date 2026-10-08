@@ -1320,6 +1320,7 @@ void emit_block_value_into(Compiler *c, int block, const char *dest,
                            int want_poly, int indent);
 int emit_block_cond_next(Compiler *c, int block, int indent, Buf *out);
 int fold_body_has_next(Compiler *c, int node);  /* a `next` of the body's own, not a nested block's */
+int iter_body_records_loop(Compiler *c, int body);  /* such a `next`, and no jump under a rescue modifier */
 int iter_step_needs_frame(Compiler *c, int block);
 int emit_iter_step_stmts(Compiler *c, int body, Buf *b, int indent, const char *sep);
 void emit_iter_step_body(Compiler *c, int block, Buf *b, int indent);
