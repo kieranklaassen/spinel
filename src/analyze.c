@@ -213,6 +213,74 @@ void anh_add(ANameHash *st, const char *nm) {
 }
 void anh_free(ANameHash *st) { free(st->key); free(st->next); free(st->head); }
 
+/* The program as written, read ahead of every desugar (analyze_program's
+   first step): each name it gives a method by a def or may give one by a
+   Symbol (an attr, a Struct member, a name handed to another call), and
+   whether it holds an alias, an undef, an attr whose name is no Symbol, a
+   Symbol made of parts, or the name of a call that names a method by a
+   value, evaluates text or makes a Symbol the program does not write: as
+   a call, a def, a Symbol or a String, for `:alias_method.to_proc` and
+   `k.method(:alias_method)` call it too. The desugars rewrite such a call
+   away, so the table cannot be asked later. A key is a copy: a node's
+   strings do not outlive its rewrite. */
+static ANameHash g_written, g_written_twice, g_by_value_names;
+static int g_written_by_value;
+static void an_written_add(ANameHash *st, const char *nm) {
+  if (nm && !anh_has(st, nm)) anh_add(st, strdup(nm));
+}
+static int an_names_by_value(const char *nm) { return nm && anh_has(&g_by_value_names, nm); }
+static void an_note_written_names(const NodeTable *nt) {
+  static const char *const by_value[] = {
+    "alias_method", "define_method", "define_singleton_method", "send", "__send__", "public_send",
+    "class_eval", "module_eval", "class_exec", "module_exec", "instance_eval", "instance_exec", "eval",
+    "undef_method", "remove_method", "delegate", "instance_delegate", "single_delegate", "def_delegator",
+    "def_delegators", "def_instance_delegator", "def_instance_delegators", "def_single_delegator",
+    "def_single_delegators", "to_sym", "intern", NULL };
+  for (int k = 0; by_value[k]; k++) if (!anh_has(&g_by_value_names, by_value[k])) anh_add(&g_by_value_names, by_value[k]);
+  for (int id = 0; id < nt->count; id++) {
+    switch (nt_kind(nt, id)) {
+      case NK_AliasMethodNode: case NK_UndefNode: case NK_InterpolatedSymbolNode: g_written_by_value = 1; break;
+      case NK_StringNode:
+        if (an_names_by_value(nt_str(nt, id, "content"))) g_written_by_value = 1;
+        break;
+      case NK_SymbolNode: {
+        const char *nm = nt_str(nt, id, "value");
+        if (an_names_by_value(nm)) g_written_by_value = 1;
+        an_written_add(&g_written, nm);
+        an_written_add(&g_written_twice, nm);
+        break;
+      }
+      case NK_DefNode: {
+        const char *nm = nt_str(nt, id, "name");
+        if (an_names_by_value(nm)) g_written_by_value = 1;
+        if (nm && anh_has(&g_written, nm)) an_written_add(&g_written_twice, nm);
+        an_written_add(&g_written, nm);
+        break;
+      }
+      case NK_CallNode: {
+        const char *nm = nt_str(nt, id, "name");
+        if (!nm) break;
+        if (an_names_by_value(nm)) g_written_by_value = 1;
+        if (sp_streq(nm, "attr") || sp_streq(nm, "attr_reader") || sp_streq(nm, "attr_writer") ||
+            sp_streq(nm, "attr_accessor")) {
+          int an = 0;
+          const int *av = nt_arr(nt, nt_ref(nt, id, "arguments"), "arguments", &an);
+          for (int i = 0; i < an; i++) if (nt_kind(nt, av[i]) != NK_SymbolNode) g_written_by_value = 1;
+        }
+        break;
+      }
+      default: break;
+    }
+  }
+}
+/* Does the program, as written, give no class or module a method named
+   `nm`, beyond `defs` (0 or 1) defs of that name? Proved by what it does not
+   hold and by nothing cleverer: no other def of that name, no Symbol of that
+   name, and nowhere a route that names a method by a value. */
+int an_prog_never_gives(const char *nm, int defs) {
+  return !g_written_by_value && !anh_has(defs ? &g_written_twice : &g_written, nm);
+}
+
 static int cr_class_is_ancestor(Compiler *c, int sup, int cls) {
   for (int k = cls, hops = 0; k >= 0 && k < c->nclasses && hops < c->nclasses; k = c->classes[k].parent, hops++)
     if (k == sup) return 1;
@@ -39112,6 +39180,7 @@ static void an_phase_reconcile_check(Compiler *c) {
 
 void analyze_program(Compiler *c) {
   double tm_an = sp_timing_now();
+  an_note_written_names(c->nt);
   an_phase_desugar_register(c);
   an_phase_class_structure(c);
   an_phase_block_inline(c);
