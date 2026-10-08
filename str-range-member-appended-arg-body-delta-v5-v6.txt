@@ -1,0 +1,11 @@
+--- body-hp-v5.txt	2026-10-08 15:55:22.540045066 +0000
++++ body-hp-v6.txt	2026-10-08 17:10:34.579949435 +0000
+@@ -19,7 +19,7 @@
+ 
+ The handle is now asked after the plain String: `include?` walks to its text, `cover?` compares it by its bytes, out of line. A nil stored among handles is a box with no handle and is no member.
+ 
+-The arm is written only where a box tagged as a handle is known to hold one. `program_strbuf_boxes` answers that once for the program, before any C is written. Master's C stays, byte for byte, in a program that holds no handle, built with `--share-strings` or without; in one that stores a method's own String, of a class of the program, where a handle is wanted (master tags the plain String's bytes as a handle there, and the box does not say which it holds; `StringIO#string` and `StringScanner#rest` stored so are wrapped as handles, and the arm is written there); and in a call of `cover?`, `include?` or `member?` whose name the program defines anew on Range (the other two names take the arm), and in every such call of a program with its own `String#<=>`, `#==` or `#succ`: this call does not ask them, before or after.
++The arm is written only where a box tagged as a handle is known to hold one. `program_strbuf_boxes` answers that once for the program, before any C is written. Master's C stays, byte for byte, in a program that holds no handle, built with `--share-strings` or without; in one that stores a method's own String, of a class of the program, where a handle is wanted (master tags the plain String's bytes as a handle there, and the box does not say which it holds; `StringIO#string` and `StringScanner#rest` stored so are wrapped as handles without `--share-strings`, and the arm is written there; with the flag that program keeps master's C too); and in a call of `cover?`, `include?` or `member?` whose name the program defines anew on Range (the other two names take the arm), and in every such call of a program with its own `String#<=>`, `#==` or `#succ`: this call does not ask them, before or after.
+ 
+ Cost in instructions a call, gcc 13.3 / clang 18.1, callgrind over 300,000 turns of `n += 1 if r.cover?(x)`, in a `while` loop and in a `300000.times` block, with `r = ("aa".."az")` and `x` read once from `["ab", 1]`. "With a handle" puts `hh = {"k" => "x".dup, "n" => 1}; hh["k"] << "y"` above the loop.
+ 

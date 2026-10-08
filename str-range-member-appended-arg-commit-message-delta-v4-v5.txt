@@ -1,0 +1,12 @@
+--- msg-hp-v4.txt	2026-10-08 15:55:22.540045066 +0000
++++ msg-hp-v5.txt	2026-10-08 17:10:34.579949435 +0000
+@@ -33,7 +33,8 @@
+   where a handle is wanted: emit_boxed_strbuf tags the plain String's
+   bytes as a handle there, and the box does not say which it holds
+   (StringIO#string and StringScanner#rest stored so are wrapped as
+-  handles, and the arm is written there);
++  handles without --share-strings, and the arm is written there; with
++  the flag that program keeps master's C too);
+ - in a call of cover?, include? or member? whose name the program
+   defines anew on Range, and in every such call of a program with its
+   own String#<=>, #== or #succ: this call does not ask them, before or
