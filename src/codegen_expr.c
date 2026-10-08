@@ -1025,10 +1025,22 @@ void emit_orw_guard(Compiler *c, int v, TyKind slot, const char *cond, const cha
   free(vpre.p); free(vval.p);
 }
 
+/* The right side `val` of a store into `lhs`, a slot of an object whose
+   frozen guard is `fz` (emit_frozen_obj_guard's text; NULL where the class
+   has none, and `val` is printed as it is). Ruby runs the right side before
+   the writer raises, so the guard goes between the value and the store:
+   `lhs = ({ __typeof__(lhs) _fvN = VAL; <guard> _fvN; })`, N the value's
+   node. */
+void emit_frozen_guarded_value(const char *lhs, const char *val, const char *fz, int v, Buf *b) {
+  if (!fz) { buf_puts(b, val); return; }
+  buf_printf(b, "({ __typeof__(%s) _fv%d = %s; %s_fv%d; })", lhs, v, val, fz, v);
+}
+
 /* The guarded store of `REF ||= v` / `REF &&= v` on a shared-handle String
    slot: the RHS goes in as a handle (an alias by handle, anything else
-   freshly wrapped), its setup spliced inside the guard. */
-void emit_strbuf_orw_guard(Compiler *c, const char *ref, int v, int is_or, Buf *b) {
+   freshly wrapped), its setup spliced inside the guard. `fz` is the frozen
+   guard of the object that owns the slot, or NULL. */
+void emit_strbuf_orw_guard(Compiler *c, const char *ref, int v, int is_or, const char *fz, Buf *b) {
   Buf vpre; memset(&vpre, 0, sizeof vpre);
   Buf vval; memset(&vval, 0, sizeof vval);
   Buf *saved_pre = g_pre; g_pre = &vpre;
@@ -1039,7 +1051,9 @@ void emit_strbuf_orw_guard(Compiler *c, const char *ref, int v, int is_or, Buf *
   g_pre = saved_pre;
   buf_printf(b, "if (%s%s) { ", is_or ? "!" : "", ref);
   if (vpre.p) buf_puts(b, vpre.p);
-  buf_printf(b, "%s = %s; }", ref, vval.p ? vval.p : "");
+  buf_printf(b, "%s = ", ref);
+  emit_frozen_guarded_value(ref, vval.p ? vval.p : "", fz, v, b);
+  buf_puts(b, "; }");
   free(vpre.p); free(vval.p);
 }
 
@@ -1066,7 +1080,7 @@ int emit_strbuf_ivar_write_handle(Compiler *c, int v, Buf *b) {
   buf_puts(b, "({ ");
   if (nt_kind(nt, w) == NK_InstanceVariableWriteNode) emit_stmt_inner(c, w, b, 0);
   else emit_strbuf_orw_guard(c, ref, nt_ref(nt, w, "value"),
-                             nt_kind(nt, w) == NK_InstanceVariableOrWriteNode, b);
+                             nt_kind(nt, w) == NK_InstanceVariableOrWriteNode, NULL, b);
   buf_printf(b, " %s; })", ref);
   return 1;
 }
@@ -1099,11 +1113,11 @@ static void emit_strbuf_slot_read(Compiler *c, int id, Repr rp, const char *sref
    -1/NULL), and the value is the slot's read: the handle itself under the
    handle mark, else its read face. An `&&=` stores only into a slot that
    holds a String, whose flag is already set; flagging it after the guard
-   called an unset class variable defined. */
+   called an unset class variable defined. `fz` is emit_strbuf_orw_guard's. */
 static void emit_strbuf_orw_share_value(Compiler *c, int id, const char *ref, int v, int is_or,
-                                        int fcid, const char *fnm, Buf *b) {
+                                        int fcid, const char *fnm, const char *fz, Buf *b) {
   buf_puts(b, "({ ");
-  emit_strbuf_orw_guard(c, ref, v, is_or, b);
+  emit_strbuf_orw_guard(c, ref, v, is_or, fz, b);
   buf_puts(b, " ");
   if (is_or) emit_cvar_set_flag(c, fcid, fnm, 0, b);
   emit_strbuf_slot_read(c, id, repr_of(c, id), ref, b);
@@ -1114,8 +1128,11 @@ static void emit_strbuf_orw_share_value(Compiler *c, int id, const char *ref, in
    guard tests the slot kind's own nil (NULL for a pointer-backed slot, a
    sentinel for Integer and Symbol) and the RHS converts to the slot's kind.
    Shared by an ivar and by a generated attribute read through a typed
-   receiver, which had its own partial copy and lost the write (#5428). */
-void emit_slot_orw_value(Compiler *c, TyKind t, const char *ref, int v, int is_or, Buf *b) {
+   receiver, which had its own partial copy and lost the write (#5428).
+   `fz` is the frozen guard of the object that owns the slot, or NULL: it
+   runs where the store is taken, after the right side, as CRuby's writer
+   raises. */
+void emit_slot_orw_value(Compiler *c, TyKind t, const char *ref, int v, int is_or, const char *fz, Buf *b) {
   /* The RHS is rendered with its setup captured: the statements a composite
      RHS spills to g_pre (a hash literal's fills, a block-taking call's loop)
      would otherwise run unconditionally, ahead of the guard, so
@@ -1134,7 +1151,7 @@ void emit_slot_orw_value(Compiler *c, TyKind t, const char *ref, int v, int is_o
      the slot's read face with the handle published, as a plain write's is. */
   if (t == TY_STRBUF) {
     buf_puts(b, "({ ");
-    emit_strbuf_orw_guard(c, ref, v, is_or, b);
+    emit_strbuf_orw_guard(c, ref, v, is_or, fz, b);
     buf_printf(b, " (_sp_ret_strbuf = (void *)%s, %s ? sp_str_concat(sp_String_cstr(%s), (&(\"\\xff\")[1])) : NULL); })",
                ref, ref, ref);
     return;
@@ -1198,16 +1215,12 @@ void emit_slot_orw_value(Compiler *c, TyKind t, const char *ref, int v, int is_o
     else { free(vpre.p); free(vval.p); buf_puts(b, ref); return; }
     if (!unconditional) cond = condb;
   }
-  if (unconditional) {
-    buf_puts(b, "({ ");
-    if (vpre.p) buf_puts(b, vpre.p);
-    buf_printf(b, "%s = %s; %s; })", ref, vval.p ? vval.p : "", ref);
-  }
-  else {
-    buf_printf(b, "({ if (%s) { ", cond);
-    if (vpre.p) buf_puts(b, vpre.p);
-    buf_printf(b, "%s = %s; } %s; })", ref, vval.p ? vval.p : "", ref);
-  }
+  if (unconditional) buf_puts(b, "({ ");
+  else buf_printf(b, "({ if (%s) { ", cond);
+  if (vpre.p) buf_puts(b, vpre.p);
+  buf_printf(b, "%s = ", ref);
+  emit_frozen_guarded_value(ref, vval.p ? vval.p : "", fz, v, b);
+  buf_printf(b, "; %s%s; })", unconditional ? "" : "} ", ref);
   free(vpre.p); free(vval.p);
 }
 
@@ -1936,9 +1949,14 @@ static int emit_local_ivar_write_expr(Compiler *c, int id, Buf *b, const NodeTab
       snprintf(ref3, sizeof ref3, "%s%siv_%s", g_self, g_self_deref, iv_c(nm + 1));
     /* boxed where the slot holds the rule's handle (the handle mark): the
        handle itself */
+    /* an instance method's own ivar: a frozen self raises where it stores */
+    Buf fz; memset(&fz, 0, sizeof fz);
+    if (cws3 && !cws3->is_cmethod && cws3->class_id >= 0)
+      emit_frozen_obj_guard(c, cws3->class_id, g_self ? g_self : "self", &fz);
     if (repr_of(c, id).handle && repr_write_share(c, id))
-      emit_strbuf_orw_share_value(c, id, ref3, v, is_or, -1, NULL, b);
-    else emit_slot_orw_value(c, ivt3, ref3, v, is_or, b);
+      emit_strbuf_orw_share_value(c, id, ref3, v, is_or, -1, NULL, fz.p, b);
+    else emit_slot_orw_value(c, ivt3, ref3, v, is_or, fz.p, b);
+    free(fz.p);
     return 1;
   }
   if (sp_streq(ty, "LocalVariableOrWriteNode") || sp_streq(ty, "LocalVariableAndWriteNode")) {
@@ -2233,8 +2251,8 @@ static int emit_ivar_cvar_gvar_expr(Compiler *c, int id, Buf *b, const NodeTable
     int is_or = nt_kind(nt, id) == NK_GlobalVariableOrWriteNode;
     /* the handle under the mark, as an ivar's */
     if (repr_of(c, id).handle && repr_write_share(c, id))
-      emit_strbuf_orw_share_value(c, id, gref, nt_ref(nt, id, "value"), is_or, -1, NULL, b);
-    else emit_slot_orw_value(c, lv->type, gref, nt_ref(nt, id, "value"), is_or, b);
+      emit_strbuf_orw_share_value(c, id, gref, nt_ref(nt, id, "value"), is_or, -1, NULL, NULL, b);
+    else emit_slot_orw_value(c, lv->type, gref, nt_ref(nt, id, "value"), is_or, NULL, b);
     return 1;
   }
   if (sp_streq(ty, "ClassVariableOperatorWriteNode")) {
@@ -2270,7 +2288,7 @@ static int emit_ivar_cvar_gvar_expr(Compiler *c, int id, Buf *b, const NodeTable
     /* --share-strings: a class variable holding the shared handle, as the
        statement form (the raw String went into its sp_String * slot) */
     if (h.idx >= 0 && repr_of_cvar(c, cid, h.idx).share) {
-      emit_strbuf_orw_share_value(c, id, ref, v, 1, cid, nm, b);
+      emit_strbuf_orw_share_value(c, id, ref, v, 1, cid, nm, NULL, b);
       return 1;
     }
     buf_puts(b, "(");
@@ -2290,7 +2308,7 @@ static int emit_ivar_cvar_gvar_expr(Compiler *c, int id, Buf *b, const NodeTable
     char ref[300]; holder_slot_text(c, &h, ref, sizeof ref);
     TyKind at = h.idx >= 0 ? c->classes[h.cid].cvar_types[h.idx] : TY_UNKNOWN;
     if (h.idx >= 0 && repr_of_cvar(c, h.cid, h.idx).share) {   /* as `||=` */
-      emit_strbuf_orw_share_value(c, id, ref, v, 0, h.cid, nm, b);
+      emit_strbuf_orw_share_value(c, id, ref, v, 0, h.cid, nm, NULL, b);
       return 1;
     }
     buf_puts(b, "(");
@@ -4775,7 +4793,11 @@ static void emit_expr_node(Compiler *c, int id, Buf *b) {
       buf_puts(b, "({ ");
       emit_ctype(c, rt, b); buf_printf(b, " _t%d = ", tr); emit_expr(c, recv, b); buf_puts(b, "; ");
       char lhs[300]; snprintf(lhs, sizeof lhs, "_t%d->iv_%s", tr, iv_c(attr));
-      emit_slot_orw_value(c, ivt, lhs, v, is_or, b);
+      char rtmp[32]; snprintf(rtmp, sizeof rtmp, "_t%d", tr);
+      Buf fz; memset(&fz, 0, sizeof fz);
+      emit_frozen_obj_guard(c, class_id, rtmp, &fz);
+      emit_slot_orw_value(c, ivt, lhs, v, is_or, fz.p, b);
+      free(fz.p);
       buf_puts(b, "; })");
       return;
     }

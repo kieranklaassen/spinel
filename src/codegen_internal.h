@@ -135,7 +135,7 @@ int strbuf_slot_ref(Compiler *c, int recv, char *out, size_t cap);
 int strbuf_bang_self_local(const Compiler *c, int v);
 void emit_strbuf_param_bind(Compiler *c, const LocalVar *pv, TyKind want, const char *src, Buf *b);
 /* `REF ||= v` / `REF &&= v` on a shared-handle String slot (codegen_expr.c) */
-void emit_strbuf_orw_guard(Compiler *c, const char *ref, int v, int is_or, Buf *b);
+void emit_strbuf_orw_guard(Compiler *c, const char *ref, int v, int is_or, const char *fz, Buf *b);
 /* The value a write hands a shared-handle String slot `lv` (codegen_stmt.c) */
 void emit_strbuf_value(Compiler *c, LocalVar *lv, int v, Buf *b);
 /* The handle such a slot takes from value v: its own, or a new one */
@@ -852,7 +852,10 @@ void emit_unbox_nilable_text(Compiler *c, TyKind t, const char *expr, Buf *b);
    emits the reader/writer pair as an expression, or answers 0 to leave the
    caller's direct-ivar shapes alone. See codegen_expr.c. */
 void emit_orw_guard(Compiler *c, int v, TyKind slot, const char *cond, const char *lhs, int value_form, int indent, Buf *b);
-void emit_slot_orw_value(Compiler *c, TyKind t, const char *ref, int v, int is_or, Buf *b);
+void emit_slot_orw_value(Compiler *c, TyKind t, const char *ref, int v, int is_or, const char *fz, Buf *b);
+/* The right side of a store into a slot of an object that may be frozen: the
+   guard `fz` between the value and the store (codegen_expr.c) */
+void emit_frozen_guarded_value(const char *lhs, const char *val, const char *fz, int v, Buf *b);
 int emit_empty_literal_as(Compiler *c, int v, TyKind slot, Buf *b);
 int emit_call_or_write_via_methods(Compiler *c, int id, int is_or, Buf *b);
 /* Wrap a boxed expression in the --rbs seed assertion (a no-op macro without

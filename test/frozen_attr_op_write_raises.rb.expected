@@ -1,0 +1,57 @@
+FrozenError
+FrozenError
+FrozenError
+FrozenError
+FrozenError
+FrozenError
+FrozenError
+FrozenError
+FrozenError
+no raise
+no raise
+FrozenError
+FrozenError
+FrozenError
+FrozenError
+0
+nil
+"x"
+1.5
+[1]
+FrozenError
+FrozenError
+[0, nil]
+FrozenError
+FrozenError
+"abx"
+2
+5
+FrozenError
+0
+1
+ArgumentError
+ArgumentError
+ArgumentError
+ZeroDivisionError
+ZeroDivisionError
+loud 1
+FrozenError
+loud 2
+FrozenError
+loud 3
+FrozenError
+loud 4
+0
+nil
+0
+5
+FrozenError
+FrozenError
+0
+nil
+7
+8
+2 FrozenError
+0
+nil
+bye
