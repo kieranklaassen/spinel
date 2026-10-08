@@ -10,6 +10,62 @@
 #include "call_plan.h"
 #include "codegen_call_arms.h"
 
+/* `K === x` for a constant the program gave a value is the value's own ===,
+   as for a local that holds it, and not the class test `Class === x`, which
+   no value passes. Answers 1 for the kinds of K and x whose === then answers
+   as CRuby does; for any other pair the class arm keeps the call, and its
+   false: an Integer or a Symbol against an Array, a Hash or a Range raises
+   NoMethodError there, a String against an Array, a Bignum against a Float
+   and a Float against a Bignum do not build, and an object as x is asked
+   nothing where CRuby asks its ==. The nil of an Integer is a sentinel in
+   its slot, which a beginless Range covers and a Float Range can refuse
+   with a TypeError, and no slot says for sure that it cannot hold it (an
+   ivar never assigned, a fetch with a nil default): a Range takes an
+   Integer only where it is written as a literal. A name that a class or a
+   module bears too stays the class test: a constant's read is typed by its
+   name alone, so `Foo === x` outside the class that holds `Foo = 3` reads
+   as the 3. And only where the operand runs nothing: the value's === reads
+   the constant in one C expression with its operand, in the order the C
+   compiler picks, so an operand that binds the constant anew or changes its
+   String in place would be read before by one compiler and after by the
+   other. */
+static int eqq_operand_runs_nothing(Compiler *c, const NodeTable *nt, int arg) {
+  NodeKind k = nt_kind(nt, arg);
+  /* a String literal, or one node of master's pure reads with no call in it:
+     a local, an instance or class variable, a constant of the program, self,
+     a number, a Symbol, nil, true or false */
+  if (k == NK_StringNode) return 1;
+  return k != NK_CallNode && k != NK_ParenthesesNode && k != NK_StatementsNode && subtree_is_pure_read(c, arg);
+}
+static int const_value_eqq(Compiler *c, const NodeTable *nt, int recv, TyKind rt, int arg) {
+  const char *kn = nt_kind(nt, recv) == NK_ConstantReadNode ? nt_str(nt, recv, "name") : NULL;
+  if (!kn || !comp_const(c, kn) || comp_class_index(c, kn) >= 0) return 0;
+  if (!eqq_operand_runs_nothing(c, nt, arg)) return 0;
+  TyKind at = comp_ntype(c, arg);
+  int scalar = at == TY_INT || at == TY_FLOAT || at == TY_STRING || at == TY_SYMBOL || at == TY_BOOL || at == TY_POLY;
+  int listed = scalar || at == TY_BIGINT || at == TY_RANGE || at == TY_STR_RANGE || at == TY_INT_ARRAY ||
+               at == TY_STR_ARRAY || at == TY_SYM_POLY_HASH;
+  int int_lit = nt_kind(nt, arg) == NK_IntegerNode;
+  int kinds;
+  switch ((int)rt) {
+  case TY_INT: case TY_SYMBOL: kinds = scalar || at == TY_BIGINT; break;
+  case TY_BIGINT:              kinds = listed && at != TY_FLOAT; break;
+  case TY_FLOAT:               kinds = listed && at != TY_BIGINT; break;
+  case TY_STRING:              kinds = listed && at != TY_INT_ARRAY && at != TY_STR_ARRAY; break;
+  case TY_RANGE:               kinds = (at == TY_INT && int_lit) || at == TY_BIGINT || at == TY_FLOAT; break;
+  case TY_FLOAT_RANGE:         kinds = listed && (at != TY_INT || int_lit); break;
+  case TY_STR_RANGE:
+  case TY_INT_ARRAY: case TY_FLOAT_ARRAY: case TY_STR_ARRAY: case TY_POLY_ARRAY:
+  case TY_STR_INT_HASH: case TY_SYM_POLY_HASH:
+    kinds = listed; break;
+  default:
+    kinds = ty_is_object(rt) && listed;
+  }
+  /* the two walks of the builtin class table last: only a call about to
+     leave the class arm pays for them */
+  return kinds && !is_builtin_class_name(kn) && builtin_class_id(kn) == 0;
+}
+
 /* between?, object_id / __id__, hash, nil? and === on a receiver whose kind decides them */
 int emit_call_identity_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, TyKind rt) {
   /* between?(lo, hi): lo <= self <= hi */
@@ -390,6 +446,7 @@ int emit_call_identity_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
      constant, either a bare `Integer` or a top-level `::Integer` (a
      ConstantPathNode with no parent), both naming the class in "name". (#2889) */
   if (recv >= 0 && argc == 1 && sp_streq(name, "===") && nt_type(nt, recv) &&
+      !const_value_eqq(c, nt, recv, rt, argv[0]) &&
       (sp_streq(nt_type(nt, recv), "ConstantReadNode") ||
        (sp_streq(nt_type(nt, recv), "ConstantPathNode") && nt_ref(nt, recv, "parent") < 0) ||
        /* a parented path is this same static dispatch only when its FULL
