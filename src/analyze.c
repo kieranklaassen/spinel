@@ -20366,10 +20366,13 @@ static int poly_arm_may_be_string(Compiler *c, const HandleArgTab *hat, int n, i
   }
   return n >= 0;   /* an empty one answers nil */
 }
-/* 0 or 1 for a literal or a conditional, -1 for any other form */
+static int poly_call_no_string(Compiler *c, const HandleArgTab *hat, int v, int depth, const PolyLits *lits);
+/* 0 or 1 for a literal or a conditional, 0 for a call whose form proves it
+   (poly_call_no_string), -1 for any other form */
 static int poly_lit_may_be_string(Compiler *c, const HandleArgTab *hat, int v, int depth, const PolyLits *lits) {
   const NodeTable *nt = c->nt;
   switch (nt_kind(nt, v)) {
+  case NK_CallNode: return poly_call_no_string(c, hat, v, depth, lits) ? 0 : -1;
   case NK_ArrayNode: case NK_HashNode: case NK_IntegerNode: case NK_FloatNode: case NK_SymbolNode:
   case NK_NilNode: case NK_TrueNode: case NK_FalseNode: case NK_RangeNode: case NK_LambdaNode:
   case NK_RegularExpressionNode:
@@ -22257,6 +22260,47 @@ static int dyn_returns_may_callable(Compiler *c, int mi, int depth) {
   int r = dyn_returns_walk(c, mi, depth);
   g_dyn.rcall[mi] = r ? 2 : 1;
   return r;
+}
+/* Does the form of call `v` prove its value no String
+   (poly_lit_may_be_string)? An index into an Array literal is one of its
+   elements or nil, while Array is not reopened. A call on self from the top
+   level, or from a method defined there, is the value of the methods of that
+   name: each one's last statement and each `return` (a block's and a
+   lambda's among them). Not read: a call that carries a block (a `break` in
+   it is the call's value), a method with a rescue or an ensure clause, and a
+   name the program reaches some other way (dyn_callable_index: a Symbol or
+   a String argument spells it, an alias, a name it computes). */
+static int poly_call_no_string(Compiler *c, const HandleArgTab *hat, int v, int depth, const PolyLits *lits) {
+  const NodeTable *nt = c->nt;
+  const char *nm = nt_str(nt, v, "name");
+  int recv = nt_ref(nt, v, "receiver");
+  if (!nm || depth > 4 || nt_ref(nt, v, "block") >= 0) return 0;
+  if (recv >= 0) {
+    if (nt_kind(nt, recv) != NK_ArrayNode || !sp_streq(nm, "[]") || comp_class_index(c, "Array") >= 0) return 0;
+    int en = 0; const int *ev = nt_arr(nt, recv, "elements", &en);
+    for (int k = 0; k < en; k++)
+      if (nt_kind(nt, ev[k]) == NK_SplatNode || poly_value_may_be_string(c, hat, ev[k], depth + 1, lits)) return 0;
+    return 1;
+  }
+  Scope *from = comp_scope_of(c, v);
+  if (!from || from->class_id >= 0 || from->is_cmethod || comp_method_index(c, nm) < 0) return 0;
+  if (!g_dyn.fresh) dyn_memo_reset(c);
+  dyn_callable_index(c);
+  if (g_dyn.open_names || g_dyn.returns_open || anh_find(&g_dyn.lnames, nm) >= 0) return 0;
+  for (int mi = dyn_scopes_named(c, nm); mi >= 0; mi = g_dyn.snext[mi]) {
+    Scope *m = &c->scopes[mi];
+    if (mi >= g_dyn.nscope || m->cs_synth || m->is_lowered_yield || m->def_node < 0 ||
+        nt_kind(nt, m->def_node) != NK_DefNode || m->body < 0 || nt_kind(nt, m->body) != NK_StatementsNode) return 0;
+    if (poly_arm_may_be_string(c, hat, m->body, depth + 1, lits)) return 0;
+    for (int r = g_dyn.rhead[mi]; r >= 0; r = g_dyn.rnext[r]) {
+      int a = nt_ref(nt, r, "arguments"), an = 0;
+      const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
+      /* none is nil, several are an Array */
+      if (an == 1 && (nt_kind(nt, av[0]) == NK_SplatNode || poly_value_may_be_string(c, hat, av[0], depth + 1, lits)))
+        return 0;
+    }
+  }
+  return 1;
 }
 
 /* Can call `n` dispatch to method mi? Not when its receiver's type is one
