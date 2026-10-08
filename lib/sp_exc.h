@@ -106,6 +106,8 @@ static inline const char *sp_exc_msg_given(const char *m) {
   return memchr(m, 0, n) ? sp_exc_msg_counted(m, n) : m;
 }
 void *sp_exc_new_sub_sized(size_t sz, const char *cls_name, const char *msg);
+void *sp_exc_new_sub_ivars(size_t sz, const char *cls_name, const char *msg, void (*scan)(void *));
+void *sp_exc_new_sub_caught(size_t sz, const char *cls_name, const char *msg, void (*scan)(void *));
 
 void sp_exc_gc_scan(void *p);
 sp_Exception *sp_exc_new(const char *cls_name, const char *msg);
