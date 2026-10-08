@@ -1,0 +1,41 @@
+[7, 9]
+[8, 10, 9]
+the value's class is the proc's, not the tail's
+8
+"str"
+nil
+2.5
+[1]
+nil
+:tail
+[1, true]
+through a method, a block and the lambda's own ensure
+"21"
+:tail
+[1, :ensure, 1, 2, :ensure]
+each call is its own home
+inner answered 0
+inner answered 10
+20
+:outer
+2
+a nested lambda, a lambda that outlives its method
+[1, :n]
+101
+[101, 102]
+next, return and catch in the lambda keep their meaning
+:next
+:return
+:proc
+[:thrown, :tail]
+a proc that outlives its lambda
+1
+boom
+LocalJumpError: unexpected return
+LocalJumpError: unexpected return
+many calls, a captured String
+[0, 2]
+"v1ab!"
+[58, 31]
+"v59ab!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+32
