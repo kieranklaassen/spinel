@@ -337,10 +337,23 @@ sp_bool sp_exc_eq(sp_Exception *a, sp_Exception *b) {
   if (!a || !b) return 0;
   if (strcmp(a->cls_name ? a->cls_name : "", b->cls_name ? b->cls_name : "") != 0) return 0;
   /* Exception#== compares class, the STORED message and the backtrace.
-     UncaughtThrowError alone leaves its stored message nil and renders
+     The backtrace is nil until a rescue takes the exception or
+     #set_backtrace attaches one, so an exception that was raised and one
+     that never was differ; two that have one compare by its lines, which
+     are none in a release build (docs/limitations.md). */
+  { sp_StrArray *x = a->backtrace, *y = b->backtrace;
+    if (!x != !y) return 0;
+    if (x && x != y) {
+      if (x->len != y->len) return 0;
+      for (sp_int i = 0; i < x->len; i++) {
+        size_t n = sp_str_byte_len(x->data[i]);
+        if (n != sp_str_byte_len(y->data[i]) || (n && memcmp(x->data[i], y->data[i], n) != 0)) return 0;
+      }
+    } }
+  /* UncaughtThrowError alone leaves its stored message nil and renders
      "uncaught throw :tag" lazily, so Ruby sees two of them as equal whatever
      the tag. We keep the rendered text in ->msg, so skip it for that class
-     (#3098). Backtraces are empty here by design, see docs/limitations.md. */
+     (#3098). */
   if (a->cls_name && strcmp(a->cls_name, "UncaughtThrowError") == 0) return 1;
   { const char *am = sp_exc_msg_text(a), *bm = sp_exc_msg_text(b);
     size_t al = am ? sp_str_byte_len(am) : 0, bl = bm ? sp_str_byte_len(bm) : 0;

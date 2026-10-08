@@ -1,0 +1,21 @@
+raised against never raised: false
+never raised against raised: false
+not equal: true
+never raised, both: true
+itself: true
+its copy: true
+its copy with the same message: true
+raised at one place twice: true
+in an Array: false false true
+its index: 1
+Arrays of them: false true
+made, then raised: false
+a raised copy: false
+attached against none: false
+attached, the same lines: true
+attached, other lines: false
+raised, its backtrace taken away: true
+own, never raised: true
+own, raised: false true
+from a thread: false
+frozen, raised: true true
