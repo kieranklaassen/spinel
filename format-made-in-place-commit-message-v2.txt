@@ -1,0 +1,43 @@
+A format made in place is held while its arguments are built
+
+`fmt % args` builds two things, the format and the list of arguments,
+as the two arguments of one C call. A format made where it is written
+(an interpolation, a call's result) was held by nothing while the
+list was built, and C does not say which of the two is built first:
+
+    w = 5
+    ints = [3, 4]
+    p "%#{w}d %d|" % ints
+
+At SPINEL_GC_STRESS=2 clang builds the format first, the copy of
+`ints` into a boxed list collects it, and the line prints seven 0xDB
+bytes and exits 0. The one-element list a single argument goes into
+was held by nothing while that argument was built:
+`p("%.2f" % (1r/3))` in test/string_format_scalar_operands.rb raises
+"can't modify frozen Array" there with gcc and with clang, the freed
+list's poisoned header read as frozen.
+
+Such a format now goes into a rooted temporary ahead of the
+arguments (emit_str_format_held), and the one-element list is rooted
+where its argument is made by something that allocates. A single
+argument that is a read, or arithmetic on reads (`i + 1`), leaves
+its list as it was.
+
+A format something else holds is read where it stands, with the C it
+had (format_is_held): a literal, a variable or a constant, a
+reader's or a Struct member's field (`o.fmt`), an Array's element by
+an Integer index, its first or its last, a Hash's value, and a choice
+between two of those (`c ? f : g`, `f || g`). A slot read counts
+only while the method is the builtin: where the program gives Array
+or Hash its own `[]`, `first` or `last`, or writes the reader by
+hand, the answer is a call's and is held, and so is a Hash's value
+where a Hash of the program has a default block.
+
+A call's or a yield's answer is held whether or not the call made
+the String, which is not known where the format is emitted
+(`def fl = "%5d %d|"`): 16 to 21 instructions a statement built with
+gcc and 18 with clang, 13 and 9 for a yield, on formats that were
+right before. So is the list of a single argument a call answers
+(`"%5d|" % sq(i)`, 13 and 27).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

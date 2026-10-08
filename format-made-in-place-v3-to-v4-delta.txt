@@ -1,0 +1,164 @@
+Delta of the format piece: git range-diff 27f056819bbc..b7b989074707 4c3360a52fd6..62c6f38ddefe
+(the read head b7b989074707 against this cut; context lines are master's source, quoted as it stands)
+
+1:  b7b989074 ! 1:  62c6f38dd A format made in place is held while its arguments are built
+    @@ Commit message
+     
+         Such a format now goes into a rooted temporary ahead of the
+         arguments (emit_str_format_held), and the one-element list is rooted
+    -    where its argument may allocate. A literal format, a format read
+    -    from a variable and a list that is a variable are emitted as before.
+    +    where its argument is made by something that allocates. A single
+    +    argument that is a read, or arithmetic on reads (`i + 1`), leaves
+    +    its list as it was.
+    +
+    +    A format something else holds is read where it stands, with the C it
+    +    had (format_is_held): a literal, a variable or a constant, a
+    +    reader's or a Struct member's field (`o.fmt`), an Array's element by
+    +    an Integer index, its first or its last, a Hash's value, and a choice
+    +    between two of those (`c ? f : g`, `f || g`). A slot read counts
+    +    only while the method is the builtin: where the program gives Array
+    +    or Hash its own `[]`, `first` or `last`, or writes the reader by
+    +    hand, the answer is a call's and is held, and so is a Hash's value
+    +    where a Hash of the program has a default block.
+    +
+    +    A call's or a yield's answer is held whether or not the call made
+    +    the String, which is not known where the format is emitted
+    +    (`def fl = "%5d %d|"`): 16 to 21 instructions a statement built with
+    +    gcc and 18 with clang, 13 and 9 for a yield, on formats that were
+    +    right before. So is the list of a single argument a call answers
+    +    (`"%5d|" % sq(i)`, 13 and 27).
+     
+         Co-Authored-By: Claude Code <noreply@anthropic.com>
+     
+      ## Makefile ##
+     @@ Makefile: GC_STRESS_TESTS := test/gc_root_frame_slots.rb \
+    -                    test/struct_values_fresh_receiver_root.rb \
+    -                    test/hash_splat_to_a.rb \
+    -                    test/proc_cell_capture_marked.rb \
+    +                    test/ffi_str_arg_beside_alloc.rb \
+    +                    test/typed_array_boxed_source_held.rb \
+    +                    test/typed_array_boxed_source_own_index.rb \
+     +                   test/format_made_in_place_held.rb \
+    -                    test/poly_array_intersect.rb \
+    -                    test/thread_new_args_rooted_across_fiber_alloc.rb \
+    -                    test/gc_root_volatile_string_slot.rb \
+    +                    test/dispatch_arm_roots_operands.rb \
+    +                    test/exception_message_nul.rb \
+    +                    test/string_aset_value_runs_first.rb \
+     
+      ## src/codegen_call.c ##
+     @@ src/codegen_call.c: static void emit_utime_arg_bad(Compiler *c, int node, TyKind t, Buf *b) {
+        buf_printf(b, "); sp_raise_cls(\"TypeError\", \"can't convert %s into time\");", cn ? cn : "Object");
+      }
+      
+    ++static int format_method_is_own(Compiler *c, const char *cls, const char *nm) {
+    ++  int ci = comp_class_index(c, cls);
+    ++  return ci >= 0 && (comp_method_in_chain(c, ci, nm, NULL) >= 0 || comp_reader_in_chain(c, ci, nm, NULL));
+    ++}
+    ++/* Is the format read out of a slot that a variable, a constant or self
+    ++   holds: an attr_reader's or a Struct member's field, an Array's element by
+    ++   an Integer index, its first or its last, or a Hash's value, the index or
+    ++   the key a literal or a read? None of them is the program's own method, and
+    ++   a Hash with a default block may run it. */
+    ++static int format_is_slot_read(Compiler *c, int v) {
+    ++  const NodeTable *nt = c->nt;
+    ++  int recv = unwrap_parens(c, nt_ref(nt, v, "receiver")), alloc = 0;
+    ++  if (recv < 0 || nt_ref(nt, v, "block") >= 0 || comp_ntype(c, v) != TY_STRING ||
+    ++      !(expr_is_held_ref(c, recv) || nt_kind(nt, recv) == NK_GlobalVariableReadNode))
+    ++    return 0;
+    ++  if (call_is_field_read(c, v, &alloc)) return !alloc;
+    ++  const char *nm = nt_str(nt, v, "name");
+    ++  TyKind rt = comp_ntype(c, recv);
+    ++  int a = nt_ref(nt, v, "arguments"), ac = 0;
+    ++  const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+    ++  int ary = ty_is_array(rt), hash = ty_is_hash(rt);
+    ++  if (!nm || !(ary || hash) || format_method_is_own(c, ary ? "Array" : "Hash", nm)) return 0;
+    ++  if (ary && ac == 0) return sp_streq(nm, "first") || sp_streq(nm, "last");
+    ++  if (!sp_streq(nm, "[]") || ac != 1 ||
+    ++      !(nt_kind(nt, av[0]) == NK_StringNode || subtree_is_pure_read(c, av[0]))) return 0;
+    ++  return ary ? comp_ntype(c, av[0]) == TY_INT : !prog_has_hash_default_block(c);
+    ++}
+    ++/* Does something else hold the format while the arguments are built? A
+    ++   literal and a read that cannot allocate do, so does a read out of a slot
+    ++   (format_is_slot_read), and so does a choice between two of those
+    ++   (`c ? F : rows[0]`, `t || F`). Anything else is a String made where it is
+    ++   written: an interpolation, a copy of a shared String, a call's answer. */
+    ++static int format_is_held(Compiler *c, int v, int depth) {
+    ++  const NodeTable *nt = c->nt;
+    ++  v = unwrap_parens(c, v);
+    ++  if (v < 0 || depth > 8) return 0;
+    ++  NodeKind k = nt_kind(nt, v);
+    ++  if (k == NK_StringNode || !operand_may_allocate(c, v)) return 1;
+    ++  if (k == NK_IfNode) {
+    ++    int arm[2] = { nt_ref(nt, v, "statements"), nt_ref(nt, v, "subsequent") };
+    ++    if (arm[1] < 0 || nt_kind(nt, arm[1]) != NK_ElseNode) return 0;
+    ++    arm[1] = nt_ref(nt, arm[1], "statements");
+    ++    for (int i = 0; i < 2; i++) {
+    ++      int n = 0; const int *bb = arm[i] >= 0 ? nt_arr(nt, arm[i], "body", &n) : NULL;
+    ++      if (n != 1 || !format_is_held(c, bb[0], depth + 1)) return 0;
+    ++    }
+    ++    return 1;
+    ++  }
+    ++  if (k == NK_OrNode)
+    ++    return format_is_held(c, nt_ref(nt, v, "left"), depth + 1) &&
+    ++           format_is_held(c, nt_ref(nt, v, "right"), depth + 1);
+    ++  return k == NK_CallNode && format_is_slot_read(c, v);
+    ++}
+     +/* See codegen_call_arms.h. */
+     +const char *emit_str_format_held(Compiler *c, int recv, int fck, Buf *b) {
+     +  int r = unwrap_parens(c, recv);
+    -+  if (r < 0 || nt_kind(c->nt, r) == NK_StringNode || !operand_may_allocate(c, r)) return NULL;
+    ++  if (r < 0 || format_is_held(c, r, 0)) return NULL;
+     +  int t = fck >= 0 ? fck : ++g_tmp;
+     +  buf_printf(b, "({ const char *_t%d = ", t);
+     +  emit_expr(c, recv, b);
+    @@ src/codegen_call_arms.h: int emit_struct_new_early(Compiler *c, int ci, int argc
+     +   arguments, `({ const char *_tN = fmt; SP_GC_ROOT_STR(_tN);
+     +   sp_str_format_polyarr(_tN`, with the nil check where `fck` names the
+     +   temp, and answers the text that closes it after the arguments. NULL, with
+    -+   nothing written, for a literal format or one whose read cannot allocate:
+    ++   nothing written, for a format something else holds while the arguments
+    ++   are built (a literal, a read that cannot allocate, a read out of a slot):
+     +   the caller emits the call as before. */
+     +const char *emit_str_format_held(Compiler *c, int recv, int fck, Buf *b);
+      int emit_str_format_untyped_array(Compiler *c, int recv, int a0n, int fck, Buf *b);
+    @@ src/codegen_call_string.c: no_gsub_enum:
+                    ? -1 : ++g_tmp;
+          if (at == TY_POLY_ARRAY) {
+     -      if (fck >= 0) {
+    -+      const char *fend = operand_may_allocate(c, argv[0]) ? emit_str_format_held(c, recv, fck, b) : NULL;
+    ++      const char *fend = (operand_may_allocate(c, argv[0]) && !subtree_is_pure_read(c, argv[0])) ? emit_str_format_held(c, recv, fck, b) : NULL;
+     +      if (fend) buf_puts(b, ", ");
+     +      else if (fck >= 0) {
+              buf_printf(b, "sp_str_format_polyarr(({ const char *_t%d = ", fck);
+    @@ src/codegen_call_string.c: no_gsub_enum:
+     +      /* the one-element list is held by `_fa` alone while an argument that
+     +         allocates is built (`"%5s|" % ("q" + i.to_s)`) */
+     +      buf_printf(b, ", ({ sp_PolyArray *_fa = sp_PolyArray_new(); %ssp_PolyArray_push(_fa, ",
+    -+                 operand_may_allocate(c, argv[0]) ? "SP_GC_ROOT(_fa); " : "");
+    ++                 (operand_may_allocate(c, argv[0]) && !subtree_is_pure_read(c, argv[0])) ? "SP_GC_ROOT(_fa); " : "");
+     +      emit_boxed(c, argv[0], b); buf_printf(b, "); _fa; })%s", fend ? fend : ")");
+            return 1;
+          }
+    @@ test/format_made_in_place_held.rb (new)
+     +rescue NoMethodError => e
+     +  p e.class
+     +end
+    ++
+    ++# a format held ahead of its arguments is the String they change in place,
+    ++# and an interpolation reads its variable before an argument writes it
+    ++$fmt = +"%d"
+    ++def held = $fmt
+    ++def grow = ($fmt << "|%d"; 1)
+    ++p held % [grow, 2]
+    ++p "%#{w}d|%d" % [(w += 1), 2]
+     
+      ## test/format_made_in_place_held.rb.expected (new) ##
+     @@
+    @@ test/format_made_in_place_held.rb.expected (new)
+     +"   3|"
+     +"  7|zzz|"
+     +NoMethodError
+    ++"1|2"
+    ++"    6|2"
