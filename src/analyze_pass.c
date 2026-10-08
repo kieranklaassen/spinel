@@ -13130,8 +13130,14 @@ static int infer_zip_block_params(Compiler *c, int id, int block, const char *p0
   if (zp1) {
     int zargs = nt_ref(nt, id, "arguments");
     int zargc = 0; const int *zargv = zargs >= 0 ? nt_arr(nt, zargs, "arguments", &zargc) : NULL;
-    TyKind et2 = (zargc > 0 && zargv && ty_is_array(infer_type(c, zargv[0])))
-                 ? ty_array_elem(infer_type(c, zargv[0])) : ty_array_elem(rt);
+    /* An operand whose kind is known and is no Array yields what its each
+       yields: a Range its Integers, a String Range its Strings, a Hash or an
+       Enumerator boxed values. Only an operand known at run time alone is
+       taken to hold what the receiver holds. */
+    TyKind zt = (zargc > 0 && zargv) ? infer_type(c, zargv[0]) : TY_UNKNOWN;
+    TyKind et2 = ty_is_array(zt) ? ty_array_elem(zt)
+               : zt == TY_RANGE ? TY_INT : zt == TY_STR_RANGE ? TY_STRING
+               : (zt == TY_POLY || zt == TY_UNKNOWN) ? ty_array_elem(rt) : TY_POLY;
     if (bp_widen(zs, zp1, et2)) changed = 1;
   }
   return changed;

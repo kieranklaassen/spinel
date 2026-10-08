@@ -16907,6 +16907,24 @@ static sp_RbVal sp_zip_block_arg(sp_RbVal v, sp_int n) {
     return sp_box_poly_array(sp_Enumerator_take((sp_Enumerator *)v.v.p, n));
   return sp_box_poly_array(sp_PolyArray_slice(sp_zip_arg(v), 0, n));
 }
+/* The one operand of a block zip that is no Array, as what sp_poly_arr_get
+   reads: prepared as above, and a Range's first n members laid out. An
+   empty receiver asks nothing of its operand (CRuby's take_items). want is
+   the tag a block parameter of one kind can hold, or -1 for any: a value of
+   another kind is laid out as nil, which is what the parameter read before. */
+static sp_RbVal sp_zip_block_operand(sp_RbVal v, sp_int n, int want) {
+  if (n <= 0) return v;
+  v = sp_zip_block_arg(v, n);
+  if (v.cls_id != SP_BUILTIN_RANGE && want < 0) return v;
+  SP_GC_ROOT_RBVAL(v);
+  sp_PolyArray *row = sp_PolyArray_new(); SP_GC_ROOT(row);
+  sp_int len = sp_poly_arr_len_ex(v);
+  for (sp_int i = 0; i < n && i < len; i++) {
+    sp_RbVal e = sp_poly_each_elem(v, i);
+    sp_PolyArray_push(row, want < 0 || e.tag == want ? e : sp_box_nil());
+  }
+  return sp_box_poly_array(row);
+}
 static sp_RbVal sp_zip_block_row(sp_RbVal recv, sp_PolyArray *ops, sp_int i, sp_int n) {
   SP_GC_ROOT_RBVAL(recv); SP_GC_ROOT(ops);
   sp_PolyArray *row = sp_PolyArray_new(); SP_GC_ROOT(row);

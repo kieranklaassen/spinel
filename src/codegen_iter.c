@@ -6197,8 +6197,9 @@ static int iter_ewi_zip_poly_arms(Compiler *c, int id, Buf *b, int indent, const
       /* An operand read boxed is taken once, before the first element: its
          text inside the loop ran again for every element, and not at all for
          a block that binds no second value. */
+      int tza = 0;
       if (arg_poly) {
-        int tza = ++g_tmp;
+        tza = ++g_tmp;
         emit_indent(b, indent);
         buf_printf(b, "sp_RbVal _t%d = %s; SP_GC_ROOT_RBVAL(_t%d);\n", tza, ob.p ? ob.p : "sp_box_nil()", tza);
         free(ob.p); memset(&ob, 0, sizeof ob);
@@ -6208,6 +6209,18 @@ static int iter_ewi_zip_poly_arms(Compiler *c, int id, Buf *b, int indent, const
       LocalVar *zlv0 = (p0 && zs) ? scope_local(zs, p0) : NULL;
       LocalVar *zlv1 = (p1n && zs) ? scope_local(zs, p1n) : NULL;
       int zs0 = 0, zs1 = 0;
+      /* What is no Array at run time (a Range, a Hash, an Enumerator) is laid
+         out by its each: read as an Array it gave nil for every element. A
+         second parameter of one kind is handed the values of that kind. */
+      if (arg_poly) {
+        TyKind zt = zlv1 ? zlv1->type : TY_POLY;
+        const char *want = (zt == TY_POLY || zt == TY_UNKNOWN) ? "-1" : zt == TY_INT ? "SP_TAG_INT"
+                         : zt == TY_FLOAT ? "SP_TAG_FLT" : zt == TY_STRING ? "SP_TAG_STR" : "SP_TAG_NIL";
+        emit_indent(b, indent);
+        buf_printf(b, "if (!(_t%d.tag == SP_TAG_OBJ && sp_poly_is_array_kind(_t%d.cls_id))) _t%d = sp_zip_block_operand(_t%d, ", tza, tza, tza, tza);
+        if (recv_poly) buf_printf(b, "sp_poly_arr_len(%s), %s);\n", rb.p ? rb.p : "sp_box_nil()", want);
+        else buf_printf(b, "sp_%sArray_length(%s), %s);\n", k, rb.p ? rb.p : "NULL", want);
+      }
       if (p0 && zlv0) zs0 = emit_shadow_save(c, zlv0->type, p0, b, indent);
       if (p1n && zlv1) zs1 = emit_shadow_save(c, zlv1->type, p1n, b, indent);
       emit_indent(b, indent);
