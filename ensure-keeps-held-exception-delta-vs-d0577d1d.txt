@@ -1,0 +1,320 @@
+Delta of the re-cut third commit 25f7833f236b (tree 878b54b9caf2) on 57ed59b749a5 (master 84f5b5020ef8) against the read head d0577d1d3082 (verdict 22). The first two commits, cb7a3f5ba571 and 57ed59b749a5, are the read ones, untouched; only the third is cut again. Its body is -v2.
+
+1. C-B2, CUT, default-deny. The read commit took an operator for builtin by its name and its operand types alone (call_is_scalar_op). Here ensure_op_is_builtin must also say yes, and it says yes only where three things hold:
+   (i) every argument of the operator is typed Integer, Float or boolean (the receiver was already). `n == @w` with a Wrap in @w calls Wrap#== and was unrooted without this; an argument typed nil or String now roots the body too (`n == nil`).
+   (ii) the program has no def of that operator's name, nor of `==` where the operator is `!=` or `<=>`. One def does not count: a def whose every class is a class of the program's own, not a module, with no ancestor in the class table named Integer, Float, Numeric, Comparable, Object, Kernel, BasicObject, TrueClass, FalseClass or NilClass. So `class Vec; def +(o)` leaves `$n += 1` unrooted, and a def at the top level (in a block of a call there too), in a module, or in a reopened Integer, Float, Numeric, Object, Comparable or Kernel counts. A def is looked for in the node table (every def node of the name) as well as the scope table, so a def in a block or in a body the class table never saw still counts.
+   (iii) the program holds none of these anywhere: the alias keyword; a call named alias_method, define_method, undef_method, remove_method, prepend, refine, using, send, __send__, public_send, eval, instance_eval, class_eval, module_eval, instance_exec, class_exec, module_exec, const_get or const_set; a constant assigned a constant that names one of the ten classes above (`K = Float`). One of them anywhere roots every ensure body that holds an operator. A `send` with a literal name does not reach the scan: master turns it into the direct call before codegen, and the call is then judged as itself.
+   Booleans and nil, which reader 5 did not probe: `t & true`, `t == true`, `t ^ true` and `f | true` with the operator defined in TrueClass or FalseClass are rooted and right. nil is never the receiver of a listed operator: call_is_scalar_op takes Integer, Float and boolean receivers only.
+   The scan runs once for a program, the first time an ensure body holds an operator.
+
+2. THE CLASS-VARIABLE ARM, CUT as ruled: a read of a class variable is a plain value, and `@@n = v` and `@@n op= v` are plain stores under the same conditions as the instance-variable ones (an Integer or Float slot, the operator builtin by point 1). The C is a read and a store of one static, with no call: `@@d -= 1` in an ensure costs 143,672,813 instructions for 1,000,000 calls beneath and here, 152,672,813 at the read head (+9.0 a call, the rooting the list now keeps away). The others reader 5 names stay rooted, stated in the body's "Any other body is rooted".
+
+3. THE TEXT. T4: the body's "neither stands alone" sentence now reads as WANTED. T5: the message, the comment and the body carry the clause on a program's own operator (point 1). T6: "at most 22" in the message and the body.
+
+4. PROBES, 47 programs, each one ensure body with an operator and one route to a method of the program's own behind it, run at -O1 and -O2 against CRuby 3.3.6:
+   - at the read head 35 were unrooted and eleven of those WRONG by this fault (the message lost to a String of the program): Float `*` on a local and on an instance variable, Float `+`, `<` and `==`; define_method on Float and on Integer; `K = Float; class K; def *`; prepend on Float and on Integer; `n == @w`.
+   - here 38 are rooted and 9 are not. The 9, all right: no operator of the program's at all; a class-variable read; a class-variable `op=`; `*` defined in a class of the program's own; `==` defined in a class of the program's own; `*` defined in a subclass of Numeric; a def of coerce in a class of the program's own; `LIMIT = MAXV` (a constant assigned a constant that is no class); a `send` with a literal name of a method that is not an operator.
+   - of the 38 rooted, 31 are right and 7 print what master prints, wrong for a reason that is master's and not this change's: five define an Integer operator whose body calls a top-level method (master: "undefined method 'churn' for an instance of Integer", the side find reader 5 recorded), one calls class_eval on Float and one calls a prepended method (master: NoMethodError, uncaught). Recorded, not taken.
+
+5. COSTS (callgrind, gcc -O2; beneath, the read head, here; all three counted in one environment):
+   `$n += 1` body: 140,350,403 / 140,350,403 / 140,350,403
+   `@d -= 1` body: 148,672,802 / 148,672,802 / 148,672,802
+   `x = saved + 1` body: 125,349,697 / 125,349,697 / 125,349,697
+   `@@d -= 1` body: 143,672,813 / 152,672,813 / 143,672,813
+   `$n += 1` body, the program defining `+` on a class of its own: 141,673,796 / 141,673,796 / 141,673,796
+   `$n += 1` body, the program defining `%` on Float: 140,666,859 / 140,666,859 / 140,666,859 (the body holds no `%`: bit by bit, one operator's def roots only bodies with that operator)
+   `$f %= 2.0` body, the program defining `%` on Float: 140,666,174 / 140,666,174 / 132,666,174. Rooted here (the C differs by the root push and the saved count, by diff) and eight instructions a call FEWER: gcc lays the method out otherwise once the cleanup local is there. Not quoted in the body.
+   rooted body, small method: 140,350,429 / 149,350,429 / 149,350,429; a method that roots a local already: 181,663,547 / 185,663,547 / 185,663,547; a begin in a loop: 117,350,403 / 120,350,404 / 120,350,404
+   20,000 raises through one rooted ensure: 67,347,835 / 67,787,835 / 67,787,835; through a plain-store ensure: 67,347,767 on all three; one ensure handing to the next: 84,077,695 / 84,198,431 / 84,199,559 (the last two are one C; the row moves by 1,128 between runs)
+   the compiler, on a program of 4,000 methods with an operator in the ensure body: 16,468,799,055 at the read head, 16,473,836,504 here (+5,037,449, one scan); on optcarrot: 8,372,382,111 and 8,372,399,498 (+17,387). The C the compiler writes for both is the same at the two heads.
+   optcarrot's C is the read head's, byte for byte; in one environment 2,368,028,380 instructions beneath and 2,368,035,799 here.
+
+6. CORPUS. Against the second commit: 6,490 programs identical, 120 differ (89 tests, 31 package tests), the test new: the same 120 programs as the read head's third commit. Against the read head itself: 6,610 identical, and the changed test is the only difference. No corpus program is newly rooted or newly unrooted by the guard. The 90 tests among the changed print their `.expected`.
+
+7. THE TEST gains two sections (63 lines, 11 expected lines; 44 expected lines in all): a class variable `op=` in an ensure, and an operator the program defines on Float (its body enters a begin, raises and rescues, and allocates) applied in an ensure body to a local and to an instance variable, four rounds. Right in the seven builds here. Master has 6 of the 44 lines wrong at every level; the read head has 1 of the 44 wrong in a plain run at every level and with clang, and is wrong under both stress modes.
+
+8. CHECKS on this tree: the build; the two tests in the seven builds; `ruby tools/gate.rb check` staged, 0; the corpus C by hash against the second commit and against the read head; the 90 changed tests run; `make backtrace-test`, `make scale-test` (4.73, 6.14, 4.13), `make int-min-test`, `make share-strings-test` (636 s), each 0; function sizes ok (emit_begin 329 to 346; ensure_op_is_builtin 48, ensure_names_plain_value 25, ensure_body_only_stores 22, names_scalar_builtin 6, class_holds_no_scalar 6); optcarrot checksum 59662. The checks ran on tree 878b54b9caf2 under the commit id 6af17cc41be4, whose message listed fewer of the words of point 1 (iii); 25f7833f236b is the same tree and parent with the full list in the message, nothing else.
+
+9. THE CODE, src/codegen_stmt.c, the read head against this head:
+diff --git a/src/codegen_stmt.c b/src/codegen_stmt.c
+index d7303ccb3..d27418f66 100644
+--- a/src/codegen_stmt.c
++++ b/src/codegen_stmt.c
+@@ -9688,24 +9688,106 @@ static void emit_ensure_return(Compiler *c, int eid, int has_retval, Buf *b, int
+   else emit_retf_return(eid, has_retval, b);
+ }
+ 
++/* The builtin classes and modules a number or a boolean belongs to. */
++static int names_scalar_builtin(const char *cn) {
++  static const char *const B[] = { "Integer", "Float", "Numeric", "Comparable", "Object", "Kernel",
++                                   "BasicObject", "TrueClass", "FalseClass", "NilClass", NULL };
++  for (int i = 0; cn && B[i]; i++) if (sp_streq(cn, B[i])) return 1;
++  return 0;
++}
++
++/* Is `ci` a class of the program's own that no number and no boolean is an
++   instance of: written as a class, and neither it nor an ancestor named
++   for one of those builtins? */
++static int class_holds_no_scalar(Compiler *c, int ci) {
++  if (ci < 0 || comp_class_is_module(c, &c->classes[ci])) return 0;
++  for (int hops = 0; ci >= 0; ci = c->classes[ci].parent)
++    if (!c->classes[ci].name || ++hops > 64 || names_scalar_builtin(c->classes[ci].name)) return 0;
++  return 1;
++}
++
++/* Is the operator `name` the builtin one wherever this program applies it
++   to a number or a boolean? call_is_scalar_op answers by the types and the
++   name alone, and a program can put a method of its own behind the name.
++   Proved by absence, and no at the first doubt. The program has no def of
++   that name (nor of `==` for `!=` and `<=>`) but in a class of its own
++   that no scalar is an instance of; and it has none of
++   the words that define a method where no def shows: alias, alias_method,
++   define_method, prepend, a send, an eval, a constant that names a builtin
++   class. Asked once a program. */
++static int ensure_op_is_builtin(Compiler *c, const char *name) {
++  static const char *const OPS[] = {
++    "+","-","*","/","%","**","<",">","<=",">=","==","!=","<=>","&","|","^","<<",">>", NULL };
++  static const char *const WORDS[] = {
++    "alias_method","define_method","prepend","send","__send__","public_send","eval","instance_eval",
++    "class_eval","module_eval","instance_exec","class_exec","module_exec","refine","using",
++    "undef_method","remove_method","const_set","const_get", NULL };
++  enum { EQ = 10, NE = 11, CMP = 12, NOPS = 18, DOUBT = 31, NFAR = 64 };
++  static const NodeTable *seen; static int seen_n = -1; static unsigned own;
++  const NodeTable *nt = c->nt;
++  if (seen != nt || seen_n != nt->count) {
++    int far[NFAR], nfar = 0, n = 0;   /* defs of these names in a class no scalar belongs to */
++    own = 0;
++    for (int pass = 0; pass < 2; pass++)
++      for (int s = 0; s < c->nscopes; s++) {
++        const Scope *sc = &c->scopes[s];
++        int hit = 0, at = -1;
++        for (int i = 0; sc->name && OPS[i] && !hit; i++) hit = sp_streq(sc->name, OPS[i]);
++        if (!hit || sc->def_node < 0) continue;
++        for (int k = 0; k < nfar; k++) if (far[k] == sc->def_node) at = k;
++        if (class_holds_no_scalar(c, sc->class_id)) { if (!pass && at < 0 && nfar < NFAR) far[nfar++] = sc->def_node; }
++        else if (at >= 0) far[at] = -1;   /* the same def serves another class too */
++      }
++    NT_FOREACH_KIND(nt, NK_DefNode, d) {
++      const char *dn = nt_str(nt, d, "name");
++      int at = -1;
++      for (int k = 0; k < nfar; k++) if (far[k] == d) at = k;
++      for (int i = 0; dn && at < 0 && OPS[i]; i++) if (sp_streq(dn, OPS[i])) own |= 1u << i;
++    }
++    nt_nodes_of_kind(nt, NK_AliasMethodNode, &n);
++    if (n > 0) own |= 1u << DOUBT;
++    NT_FOREACH_KIND(nt, NK_ConstantWriteNode, w) {
++      int wv = nt_ref(nt, w, "value");
++      if (wv >= 0 && nt_kind(nt, wv) == NK_ConstantReadNode && names_scalar_builtin(nt_str(nt, wv, "name")))
++        own |= 1u << DOUBT;
++    }
++    if (!(own >> DOUBT)) NT_FOREACH_KIND(nt, NK_CallNode, u) {
++      const char *un = nt_str(nt, u, "name");
++      for (int i = 0; un && WORDS[i]; i++) if (sp_streq(un, WORDS[i])) own |= 1u << DOUBT;
++    }
++    seen = nt; seen_n = nt->count;
++  }
++  if (!name || (own >> DOUBT)) return 0;
++  for (int i = 0; i < NOPS; i++)
++    if (sp_streq(name, OPS[i]))
++      return !(own & 1u << i) && !((i == NE || i == CMP) && (own & 1u << EQ));
++  return 0;
++}
++
+ /* Is `v` a value an ensure body names with no call: nil, true, false, an
+-   Integer, Float or Symbol literal, a read of a local, an instance variable
+-   or a global, or a builtin operator over scalars (call_is_scalar_op) whose
+-   operands are such values? */
++   Integer, Float or Symbol literal, a read of a local, an instance
++   variable, a class variable or a global, or a builtin operator over
++   scalars (call_is_scalar_op, and ensure_op_is_builtin above) whose
++   operands are such values, every one of them a scalar itself? */
+ static int ensure_names_plain_value(Compiler *c, int v) {
+   const NodeTable *nt = c->nt;
+   if (v < 0) return 0;
+   switch (nt_kind(nt, v)) {
+   case NK_NilNode: case NK_TrueNode: case NK_FalseNode: case NK_FloatNode: case NK_SymbolNode:
+   case NK_LocalVariableReadNode: case NK_InstanceVariableReadNode: case NK_GlobalVariableReadNode:
++  case NK_ClassVariableReadNode:
+     return 1;
+   case NK_IntegerNode:
+     return comp_ntype(c, v) == TY_INT;
+   case NK_CallNode: {
+-    if (!call_is_scalar_op(c, v) || !ensure_names_plain_value(c, nt_ref(nt, v, "receiver"))) return 0;
++    if (!call_is_scalar_op(c, v) || !ensure_op_is_builtin(c, nt_str(nt, v, "name")) ||
++        !ensure_names_plain_value(c, nt_ref(nt, v, "receiver"))) return 0;
+     int args = nt_ref(nt, v, "arguments"), n = 0;
+     const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &n) : NULL;
+-    for (int i = 0; i < n; i++) if (!ensure_names_plain_value(c, av[i])) return 0;
++    for (int i = 0; i < n; i++) {
++      TyKind at = comp_ntype(c, av[i]);   /* `n == obj` calls the object's `==` */
++      if ((at != TY_INT && at != TY_FLOAT && at != TY_BOOL) || !ensure_names_plain_value(c, av[i])) return 0;
++    }
+     return 1;
+   }
+   default:
+@@ -9714,10 +9796,10 @@ static int ensure_names_plain_value(Compiler *c, int v) {
+ }
+ 
+ /* Does the ensure body `stmts` only name plain values (above), each alone
+-   or stored in a local, an instance variable or a global, by `=` or by an
+-   `op=` on an Integer or Float slot? Nothing it runs enters a begin or
+-   rescues a raise then, so the exception that waits stays as the begin
+-   left it. */
++   or stored in a local, an instance variable, a class variable or a
++   global, by `=` or by an `op=` on an Integer or Float slot whose operator
++   is the builtin one? Nothing it runs enters a begin or rescues a raise
++   then, so the exception that waits stays as the begin left it. */
+ static int ensure_body_only_stores(Compiler *c, int stmts) {
+   const NodeTable *nt = c->nt;
+   int n = 0; const int *bb = nt_arr(nt, stmts, "body", &n);
+@@ -9725,10 +9807,12 @@ static int ensure_body_only_stores(Compiler *c, int stmts) {
+     int v = bb[i];
+     switch (nt_kind(nt, v)) {
+     case NK_LocalVariableOperatorWriteNode: case NK_InstanceVariableOperatorWriteNode:
+-    case NK_GlobalVariableOperatorWriteNode:
+-      if (!ty_is_numeric(comp_ntype(c, v)) || !ty_is_numeric(comp_ntype(c, nt_ref(nt, v, "value")))) return 0;
++    case NK_GlobalVariableOperatorWriteNode: case NK_ClassVariableOperatorWriteNode:
++      if (!ty_is_numeric(comp_ntype(c, v)) || !ty_is_numeric(comp_ntype(c, nt_ref(nt, v, "value"))) ||
++          !ensure_op_is_builtin(c, nt_str(nt, v, "binary_operator"))) return 0;
+       /* fall through */
+     case NK_LocalVariableWriteNode: case NK_InstanceVariableWriteNode: case NK_GlobalVariableWriteNode:
++    case NK_ClassVariableWriteNode:
+       v = nt_ref(nt, v, "value");
+       break;
+     default:
+
+10. THE TEST FILES, the read head against this head:
+diff --git a/test/ensure_holds_deferred_exception.rb b/test/ensure_holds_deferred_exception.rb
+index fe7fa69e0..ed7e7176b 100644
+--- a/test/ensure_holds_deferred_exception.rb
++++ b/test/ensure_holds_deferred_exception.rb
+@@ -156,6 +156,69 @@ rescue => e
+ end
+ p tally.left, tally.last, $count
+ 
++# a class variable is a plain store too
++class Gate
++  @@open = 2
++  def self.open = @@open
++  def pass(n)
++    raise ArgumentError, "gated " + n.to_s
++  ensure
++    @@open -= 1
++  end
++end
++begin
++  Gate.new.pass(3)
++rescue => e
++  puts e.message
++end
++p Gate.open
++
++# an operator the program defines itself is a call like any other and may
++# enter a begin: a body that applies it is not one of plain stores
++class Float
++  def %(other)
++    begin
++      churn
++      raise ArgumentError, "inside the operator"
++    rescue ArgumentError
++      churn
++    end
++    0.5
++  end
++end
++class Meter
++  def initialize
++    @level = 7.5
++  end
++  def level = @level
++  def read(n)
++    f = 2.5
++    x = 0.0
++    raise ArgumentError, "own operator on a local " + n.to_s
++  ensure
++    x = f % 2.0
++  end
++  def drain(n)
++    raise ArgumentError, "own operator on an instance variable " + n.to_s
++  ensure
++    @level %= 2.0
++  end
++end
++meter = Meter.new
++4.times do |i|
++  begin
++    meter.read(i)
++  rescue => e
++    puts e.message
++  end
++  begin
++    meter.drain(i)
++  rescue => e
++    puts e.message
++  end
++end
++p meter.level
++
+ # a return in the ensure body drops the exception and leaves nothing behind
+ def swallowed(n)
+   raise ArgumentError, "dropped " + n.to_s
+diff --git a/test/ensure_holds_deferred_exception.rb.expected b/test/ensure_holds_deferred_exception.rb.expected
+index 21521a3f8..82f082e10 100644
+--- a/test/ensure_holds_deferred_exception.rb.expected
++++ b/test/ensure_holds_deferred_exception.rb.expected
+@@ -28,6 +28,17 @@ stored 2
+ 2
+ :taken
+ 6
++gated 3
++1
++own operator on a local 0
++own operator on an instance variable 0
++own operator on a local 1
++own operator on an instance variable 1
++own operator on a local 2
++own operator on an instance variable 2
++own operator on a local 3
++own operator on an instance variable 3
++0.5
+ 8
+ 10
+ 4000
+
+11. THE MESSAGE, the read commit's (<) against this one's (>):
+27,30c27,44
+< instance variable or a global, or a builtin operator over scalars of
+< those, each alone or stored in a local, an instance variable or a
+< global, by `=` or by an `op=` on an Integer or Float slot. Nothing
+< there enters a begin or rescues a raise. Any other body is rooted.
+---
+> instance variable, a class variable or a global, or a builtin operator
+> over scalars of those, each alone or stored in a local, an instance
+> variable, a class variable or a global, by `=` or by an `op=` on an
+> Integer or Float slot. Nothing there enters a begin or rescues a
+> raise. Any other body is rooted.
+> 
+> An operator counts as builtin only where the program cannot have put a
+> method of its own behind the name: its operands are all numbers or
+> booleans; the program has no def of that name (nor of `==` for `!=`
+> and `<=>`) but in a class of its own that no number or boolean is an
+> instance of; and it holds none of the words by which a method is
+> defined, removed or reached where no def shows: alias, alias_method,
+> define_method, undef_method, remove_method, prepend, refine, using,
+> send, __send__, public_send, eval, the `_eval` and `_exec` of an
+> instance, a class or a module, const_get, const_set, or a constant
+> assigned a builtin class a number or a boolean belongs to. A body that
+> applies an operator of the program's own makes a call like any other,
+> and is rooted.
+35,36c49,50
+< already, three for a begin in a loop. A raise pays 22 for each rooted
+< ensure it passes.
+---
+> already, three for a begin in a loop. A raise pays at most 22 for each
+> rooted ensure it passes.
+
+Addendum to the delta of the re-cut third commit 25f7833f236b: its body is -v3 (the block just above this one); the body block before the delta is superseded. Two things changed in the body, both figures, after two notes that reached me once the first blocks were in.
+
+1. The entry cost where the begin has a rescue clause beside a rooted ensure body (reader 5's side find in verdict 23: ten, where the body stated nine for an ensure alone). Counted, 1,000,000 calls, beneath and here: an ensure alone with a call in its body 140,350,429 to 149,350,429 (+9.0); the same with `rescue ArgumentError` 139,350,489 to 149,350,489 (+10.0); the same with the rescue clause and a `$n += 1` body 139,350,468 on both (0). The body now says nine, and ten with a rescue clause.
+
+2. Compile time, the pull request beneath against this head, the compiler under callgrind on programs of 1,000 and of 2,000 methods whose ensure body is `$n += 1`: 2,377,431,280 to 2,378,840,561 (+1,409,281, 0.06%) and 5,263,498,573 to 5,266,315,854 (+2,817,281, 0.05%); the C written is the same on both sides. The scan of the program runs once: its answer is kept in three statics keyed on the node table and its count, and each later question is a compare of the name against the eighteen operators and a bit test. The body states these two rows in place of the two the delta's point 5 gives (the read head against this head: +5,037,449 of 16,468,799,055 at 4,000 methods, +17,387 of 8,372,382,111 on optcarrot), which stand as measured.

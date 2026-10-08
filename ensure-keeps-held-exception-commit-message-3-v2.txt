@@ -1,0 +1,52 @@
+An ensure keeps the exception it holds while its body runs
+
+    def go(n)
+      raise ArgumentError, "the message of error number " + n.to_s
+    ensure
+      begin
+        churn
+      rescue TypeError
+      end
+      churn
+    end
+
+handed its caller an error whose message was another String of the
+program, in a plain run, where `churn` only allocates. An exception
+object lost what it held the same way once the ensure body had raised
+and rescued an error of its own.
+
+While the ensure body runs, the exception that waits to be raised again
+lives in two C locals, and they are not roots. A begin that body enters
+takes the slot the message was read from, and any raise clears
+sp_inflight_cause, which held the object: the next collection frees
+both. The two locals are now rooted for the ensure body, when an
+exception waits.
+
+An ensure body that only stores plain values keeps its C: nil, true,
+false, an Integer, Float or Symbol literal, a read of a local, an
+instance variable, a class variable or a global, or a builtin operator
+over scalars of those, each alone or stored in a local, an instance
+variable, a class variable or a global, by `=` or by an `op=` on an
+Integer or Float slot. Nothing there enters a begin or rescues a
+raise. Any other body is rooted.
+
+An operator counts as builtin only where the program cannot have put a
+method of its own behind the name: its operands are all numbers or
+booleans; the program has no def of that name (nor of `==` for `!=`
+and `<=>`) but in a class of its own that no number or boolean is an
+instance of; and it holds none of the words by which a method is
+defined, removed or reached where no def shows: alias, alias_method,
+define_method, undef_method, remove_method, prepend, refine, using,
+send, __send__, public_send, eval, the `_eval` and `_exec` of an
+instance, a class or a module, const_get, const_set, or a constant
+assigned a builtin class a number or a boolean belongs to. A body that
+applies an operator of the program's own makes a call like any other,
+and is rooted.
+
+The path with no exception pays for a saved root count where the body
+is rooted: by callgrind, nine instructions on each entry of a begin
+with an ensure in a small method, four in a method that roots a local
+already, three for a begin in a loop. A raise pays at most 22 for each
+rooted ensure it passes.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
