@@ -1,0 +1,1 @@
+A C function's String argument stays rooted beside one that allocates
