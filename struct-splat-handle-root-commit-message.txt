@@ -1,0 +1,31 @@
+A shared String argument stays rooted in a Struct's new and out of a splat
+
+A member some code changes in place (`e.a << "z"`) holds its String
+through a handle, and a String that is not one already is wrapped in a
+handle of its own where it is handed over. "Shared String argument
+conversions stay rooted across calls" holds that handle for the
+argument of an ordinary call (arg_read_converts in emit_arg_rooted).
+Two binders write their values themselves and still left the handle
+held by nothing while the value beside it, or the object, was
+allocated:
+
+- a Struct's constructor (emit_struct_new_call): 3,000 of
+  `Entry.new("alpha", "beta")` left two holding another String in a
+  plain run, and 2,995 with SPINEL_GC_STRESS=1;
+- a String element of a splatted Array bound to such a parameter
+  (emit_elem_param), with the default a short splat leaves to fill:
+  20,000 of `Pair.new("q", *ra)` left four in a plain run, and 19,996
+  with SPINEL_GC_STRESS=1.
+
+Both now take the form the ordinary call has. emit_rooted_conversion
+declares the temp ahead of the statement, rooted, and the handle is
+made and assigned where the value stands, so a variable the statement
+writes before it is read at its own position. The Struct's member asks
+arg_read_converts, as an argument does; a value that is a handle
+already, or nil, gets no temp.
+
+A temp exists only where the binder allocates a handle: 15 to 17
+instructions for each such member, 15 to 27 for a splat's element. A
+Struct handed handles or Integers costs what it did.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
