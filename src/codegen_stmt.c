@@ -9465,6 +9465,46 @@ static void emit_rescue_cls_cond(Compiler *c, int id, const char *clsv, Buf *b) 
   if (first) buf_puts(b, "1");  /* no usable type -> always */
 }
 
+/* Do the rescue clauses from `rescue` on name only constants, or nothing?
+   Their tests of the class then run no code of the program's and can be
+   asked ahead of the landing. A clause that names a catch-all class answers
+   0: it takes every exception, so there is nothing to ask. */
+static int rescue_clauses_only_name(const NodeTable *nt, int rescue) {
+  for (int r = rescue; r >= 0; r = nt_ref(nt, r, "subsequent")) {
+    int n = 0;
+    const int *exc = nt_arr(nt, r, "exceptions", &n);
+    for (int i = 0; i < n; i++) {
+      NodeKind k = nt_kind(nt, exc[i]);
+      if (k != NK_ConstantReadNode && k != NK_ConstantPathNode) return 0;
+      if (k == NK_ConstantReadNode && rescue_is_catchall_name(nt_str(nt, exc[i], "name"))) return 0;
+    }
+  }
+  return 1;
+}
+
+/* An exception that waits in region `eid` leaves the body of a begin whose
+   first rescue clause is `rescue`, where only that begin's own frame would
+   catch a raise. Opens the guard of the raise: `_excfN` alone where the
+   clauses cannot be asked ahead (0), else `_excfN` and the clauses' own tests
+   of the class that waits (1), so that an exception none of them takes is
+   left for the hand-on the caller emits after. */
+int emit_ensure_exc_rescue_guard(Compiler *c, int rescue, int eid, Buf *b) {
+  int asked = rescue_clauses_only_name(c->nt, rescue);
+  buf_printf(b, "if (_excf%d", eid);
+  if (asked) {
+    char clsv[32];
+    snprintf(clsv, sizeof clsv, "_exccls%d", eid);
+    buf_puts(b, " && (");
+    for (int r = rescue; r >= 0; r = nt_ref(c->nt, r, "subsequent")) {
+      if (r != rescue) buf_puts(b, " || ");
+      emit_rescue_cls_cond(c, r, clsv, b);
+    }
+    buf_puts(b, ")");
+  }
+  buf_puts(b, ") { ");
+  return asked;
+}
+
 void emit_rescue(Compiler *c, int id, Buf *b, int indent, int fr, int ens, const char *resultvar) {
   const NodeTable *nt = c->nt;
   int nexc = 0;
@@ -9862,7 +9902,7 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
       }
       buf_puts(b, "\n");
     }
-    g_ensure_stack[g_ensure_depth++] = (EnsureCtx){ eid, has_retval, g_exc_frame_depth, g_ret_type, 1 };
+    g_ensure_stack[g_ensure_depth++] = (EnsureCtx){ eid, has_retval, g_exc_frame_depth, g_ret_type, 1, rescue };
 
     /* retry in the rescue restarts the body; the ensure runs only when the
        begin finally exits (matching CRuby, where an aborted attempt does not
@@ -9889,7 +9929,7 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
       emit_stmts(c, body, b, indent + 1);
     }
     g_exc_frame_depth--;
-    g_ensure_stack[g_ensure_depth - 1].live = 0;
+    g_ensure_stack[g_ensure_depth - 1].live = 0; g_ensure_stack[g_ensure_depth - 1].body_rescue = -1;
     emit_indent(b, indent + 1); buf_puts(b, "sp_exc_top--;\n");
     if (else_stmts >= 0) {
       if (resultvar) {
@@ -10040,7 +10080,11 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
          and the outer ensure's own, so re-raise there and let that handler
          match; with no such frame, propagate to the outer ensure as before.
          What this begin's own clauses let through leaves by the re-raise too,
-         as it did before it waited for the ensure. */
+         as it did before it waited for the ensure. And the rescue clauses of
+         the enclosing begin itself are handlers: they share the ensure's
+         frame, so while its body is what is being left a re-raise is what
+         brings the exception to them. It is raised there only where one of
+         them takes it; one that none takes is handed on as it was. */
       emit_indent(b, indent);
       if (g_exc_frame_depth > outer->exc_base + 1 || rescue >= 0) {
         buf_printf(b, "if (_excf%d) { ", eid);
@@ -10048,8 +10092,16 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
         buf_printf(b, "sp_pending_exc_obj = _excobj%d; sp_raise_cls(_exccls%d, _excmsg%d); }\n", eid, eid, eid);
       }
       else {
-        emit_ensure_exc_hand_on(b, eid, outer->lid);
-        buf_puts(b, "\n");
+        int asked = 1;
+        if (outer->body_rescue >= 0) {
+          asked = emit_ensure_exc_rescue_guard(c, outer->body_rescue, eid, b);
+          buf_printf(b, "sp_pending_exc_obj = _excobj%d; sp_raise_cls(_exccls%d, _excmsg%d); }\n", eid, eid, eid);
+          if (asked) emit_indent(b, indent);
+        }
+        if (asked) {
+          emit_ensure_exc_hand_on(b, eid, outer->lid);
+          buf_puts(b, "\n");
+        }
       }
     }
     else {

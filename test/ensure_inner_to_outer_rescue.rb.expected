@@ -1,0 +1,76 @@
+inner ensure
+rescued t
+outer ensure
+inner ensure
+rescued m
+outer ensure
+:rescued
+inner ensure
+outer ensure
+-1
+inner ensure
+outer ensure
+outside io
+ensure 1
+rescued deep
+ensure 2
+after
+ensure 3
+rescued held
+outer ensure
+false
+rescued at 3
+outer ensure
+[2, 3, 4]
+3000
+late
+inner
+outer
+miss: out TypeError
+inner
+took TypeError
+outer
+second: returned
+inner
+took DeepError
+outer
+parent: returned
+inner
+took IOError
+outer
+bare: returned
+inner
+outer
+bare miss: out NotImplementedError
+inner
+took NetError
+outer
+module: returned
+inner
+took IndexError
+outer
+splat: returned
+inner
+outer
+splat miss: out TypeError
+inner
+took NotImplementedError
+outer
+all: returned
+outer false
+sync miss: out TypeError
+took DeepError
+outer false
+sync: returned
+outer 3
+select miss: out TypeError
+took KeyError
+outer 3
+select: returned
+inner
+took Coded 7 coded
+outer
+object: returned
+inner
+outer
+object miss: out Coded

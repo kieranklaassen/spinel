@@ -534,8 +534,11 @@ void emit_line_directive(Compiler *c, int id, Buf *b);
    g_ret_type at the store site therefore asked the wrong function whether to
    box, and a String went into an sp_RbVal slot unboxed. */
 /* live: the region's own frame is armed, which it is while its body is emitted
-   and no longer in its rescue and else clauses. */
-typedef struct { int lid; int has_retval; int exc_base; TyKind retv_ty; int live; } EnsureCtx;
+   and no longer in its rescue and else clauses.
+   body_rescue: the region's first rescue clause while the region's body is
+   being emitted, else -1: an exception leaving that body is the clauses'
+   before the ensure's. */
+typedef struct { int lid; int has_retval; int exc_base; TyKind retv_ty; int live; int body_rescue; } EnsureCtx;
 extern EnsureCtx g_ensure_stack[MAX_ENSURE_DEPTH];
 extern int       g_ensure_depth;
 
@@ -962,7 +965,8 @@ void emit_pd_cell_alias_into(Compiler *c, LocalVar *plv, const char *uniq, Buf *
 void emit_inlined_locals(Compiler *c, Scope *m, int tag, Buf *b, int din);
 void emit_retf_return(int eid, int has_retval, Buf *b);
 void emit_ensure_exc_hand_on(Buf *b, int eid, int outer);
-void emit_ensure_exc_block_out(Buf *b, int eid, const EnsureCtx *outer);
+void emit_ensure_exc_block_out(Compiler *c, Buf *b, int eid, const EnsureCtx *outer);
+int emit_ensure_exc_rescue_guard(Compiler *c, int rescue, int eid, Buf *b);   /* 1: the clauses were asked */
 void emit_main_exit(Buf *b);
 /* The assignment target for an inlined method's parameter, spelled by the same
    rule that declared it (a cell-promoted one is `(*_cell_x)`). See codegen.c. */
