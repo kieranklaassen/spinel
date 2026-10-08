@@ -1,0 +1,1 @@
+The extension try helper hands the host a message with a NUL as text
