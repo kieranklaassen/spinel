@@ -5940,14 +5940,24 @@ static sp_RbVal sp_poly_pow(sp_RbVal a, sp_RbVal b) {
       if (rb.den == 1) return sp_box_rational(sp_rational_pow(ra, rb.num));
     }
   }
-  if (a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_COMPLEX) {
-    sp_Complex ca = sp_poly_as_complex(a);
-    if (b.tag == SP_TAG_INT) return sp_box_complex(sp_complex_pow(ca, b.v.i));
-    if (sp_poly_is_rational(b)) return sp_box_complex(sp_complex_pow_rational(ca, sp_poly_as_rational(b)));
-    if (b.tag == SP_TAG_OBJ && b.cls_id == SP_BUILTIN_COMPLEX)
-      return sp_box_complex(sp_complex_pow_c(ca, sp_poly_as_complex(b)));
-    if (b.tag == SP_TAG_FLT)
-      return sp_box_complex(sp_complex_pow_c(ca, (sp_Complex){b.v.f, 0.0, SP_CPLX_RE_F | SP_CPLX_IM_F}));
+  if (a.tag == SP_TAG_OBJ) {
+    if (a.cls_id == SP_BUILTIN_COMPLEX) {
+      sp_Complex ca = sp_poly_as_complex(a);
+      if (b.tag == SP_TAG_INT) return sp_box_complex(sp_complex_pow(ca, b.v.i));
+      if (sp_poly_is_rational(b)) return sp_box_complex(sp_complex_pow_rational(ca, sp_poly_as_rational(b)));
+      if (b.tag == SP_TAG_OBJ && b.cls_id == SP_BUILTIN_COMPLEX)
+        return sp_box_complex(sp_complex_pow_c(ca, sp_poly_as_complex(b)));
+      if (b.tag == SP_TAG_FLT)
+        return sp_box_complex(sp_complex_pow_c(ca, (sp_Complex){b.v.f, 0.0, SP_CPLX_RE_F | SP_CPLX_IM_F}));
+    }
+    /* a Rational of Bignums raised to an integer is a Rational too */
+    else if (a.cls_id == SP_BUILTIN_BIG_RATIONAL && a.v.p) {
+      if (b.tag == SP_TAG_INT) return sp_brat_pow((sp_BigRational *)a.v.p, b.v.i);
+      if (sp_poly_is_rational(b)) {
+        sp_Rational rb = sp_poly_as_rational(b);
+        if (rb.den == 1) return sp_brat_pow((sp_BigRational *)a.v.p, rb.num);
+      }
+    }
   }
   double r = pow((double)sp_poly_to_f(a), (double)sp_poly_to_f(b));
   return sp_box_float((sp_float)r);

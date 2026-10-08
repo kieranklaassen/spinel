@@ -1138,6 +1138,8 @@ sp_RbVal sp_brat_from_bigint(sp_Bigint *n);
 const char *sp_brat_to_s(sp_BigRational *r);
 const char *sp_brat_inspect(sp_BigRational *r);
 sp_float sp_brat_to_f(sp_BigRational *r);
+sp_Bigint *sp_bigint_pow(sp_Bigint *base, int64_t exp);
+sp_RbVal sp_brat_pow(sp_BigRational *r, sp_int e);   /* Rational#** by an Integer; lib/sp_format.c */
 /* the exact integer quotients, each rounding the way its method does */
 sp_Bigint *sp_brat_trunc_b(sp_BigRational *r);
 sp_Bigint *sp_brat_floor_b(sp_BigRational *r);

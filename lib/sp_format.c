@@ -693,3 +693,16 @@ sp_Rational sp_rational_pow(sp_Rational a, sp_int e) {
   if (a.num == 0) sp_raise_cls("ZeroDivisionError", "divided by 0");
   return sp_rational_new_wide(sp_rat_ipow(a.den, -e), sp_rat_ipow(a.num, -e));
 }
+/* The same for a Rational of Bignums: each part is raised in Bignums, and a
+   negative exponent swaps them. sp_box_brat keeps the denominator positive. */
+sp_RbVal sp_brat_pow(sp_BigRational *r, sp_int e) {
+  sp_Bigint *n = r->num, *d = r->den;
+  SP_GC_ROOT(n); SP_GC_ROOT(d);
+  if (e < 0) {
+    if (sp_bigint_sign(n) == 0) sp_raise_cls("ZeroDivisionError", "divided by 0");
+    sp_Bigint *t = n; n = d; d = t; e = -e;
+  }
+  n = sp_bigint_pow(n, e);
+  d = sp_bigint_pow(d, e);
+  return sp_box_brat(n, d);
+}
