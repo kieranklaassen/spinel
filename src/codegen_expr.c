@@ -619,6 +619,8 @@ static int fold_int_const_name(Compiler *c, const char *name, long long *out, in
   if (wnode < 0) return 0;
   return fold_int_node(c, nt_ref(c->nt, wnode, "value"), out, depth);
 }
+/* See codegen_internal.h. */
+int fold_int_const(Compiler *c, int id, long long *out) { return fold_int_node(c, id, out, 0); }
 
 /* Emit an integer divisor operand, substituting a compile-time-constant
    value with its literal so the C compiler can strength-reduce `/`/`%` by

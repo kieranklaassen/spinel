@@ -277,6 +277,8 @@ int hc_recv_cached(Compiler *c, int recv);
    a receiver seen as Repr.nil_cold (emit_nil_target_cold, codegen_call.c) */
 void emit_nil_cold_test(Compiler *c, int id, int r, Buf *b);
 int call_is_scalar_op(Compiler *c, int id);   /* a builtin operator over scalars */
+int ty_runs_no_code(TyKind t);                 /* a kind whose builtin methods run no code of the program's */
+int fold_int_const(Compiler *c, int id, long long *out);   /* a compile-time Integer: a literal, a constant, arithmetic on them */
 /* Whether the subtree at `id` assigns the local `nm`: a write, an op-write
    or a multiple-assignment target by that name. */
 int subtree_writes_local(Compiler *c, int id, const char *nm);
