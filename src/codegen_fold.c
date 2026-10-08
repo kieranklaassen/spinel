@@ -3498,6 +3498,34 @@ int fold_body_has_next(Compiler *c, int node) {
   return 0;
 }
 
+/* Does `node` hold a `next`, a `break` or a `redo` under a rescue modifier?
+   The modifier's frame is not counted in g_exc_frame_depth, so a loop that
+   wrote such a jump as its own C continue or break would leave that frame
+   on the stack. A nested block is walked too: it may stand under this
+   loop's record. */
+static int jump_under_rescue_mod(const NodeTable *nt, int node, int under) {
+  if (node < 0) return 0;
+  NodeKind k = nt_kind(nt, node);
+  if (k == NK_NextNode || k == NK_BreakNode || k == NK_RedoNode) return under;
+  if (k == NK_LambdaNode || k == NK_DefNode) return 0;
+  if (k == NK_RescueModifierNode) under = 1;
+  int nr = nt_num_refs(nt, node);
+  for (int i = 0; i < nr; i++) if (jump_under_rescue_mod(nt, nt_ref_at(nt, node, i), under)) return 1;
+  int na = nt_num_arrs(nt, node);
+  for (int i = 0; i < na; i++) {
+    int m = 0; const int *ids = nt_arr_at(nt, node, i, &m);
+    for (int j = 0; j < m; j++) if (jump_under_rescue_mod(nt, ids[j], under)) return 1;
+  }
+  return 0;
+}
+
+/* Does the iterator's own C loop record itself for this body? Only for a
+   `next` of the body's own, and not where a jump stands under a rescue
+   modifier: that body keeps the C it had. */
+int iter_body_records_loop(Compiler *c, int body) {
+  return body >= 0 && fold_body_has_next(c, body) && !jump_under_rescue_mod(c->nt, body, 0);
+}
+
 /* A fold that reads a block body as "leading statements, then the tail as the
    answer" drops a `next <value>`: the next leaves the block WITH that value and
    never reaches the tail. Read that way it became a bare `continue` and the
@@ -3575,8 +3603,20 @@ void emit_iter_step_body(Compiler *c, int block, Buf *b, int indent) {
 
 /* A step's body inside the iterator's own C loop, through emit_stmts (the
    locals' reset, the statements), with the body's own redo label after
-   that setup (g_redo_pending), where it had none. */
+   that setup (g_redo_pending), where it had none. A body with a `next`
+   records the loop as emit_loop_body records its own: that `next` is this
+   loop's continue, so it pops the frames and runs the ensures opened
+   inside the body and no others, an ensure's deferred `next` ends in that
+   continue, and a `next v` is not the value of an enclosing block. */
 void emit_iter_loop_stmts(Compiler *c, int body, Buf *b, int indent) {
+  int own_next = iter_body_records_loop(c, body);
+  int sv_lexc = g_loop_exc_base, sv_lens = g_loop_ensure_base, sv_lbody = g_loop_body;
+  const char *sv_nxv = g_ie_next_var; TyKind sv_nxt = g_ie_next_ty;
+  if (own_next) {
+    g_loop_exc_base = g_exc_frame_depth; g_loop_ensure_base = g_ensure_depth;
+    g_c_loop_depth++; g_loop_body = body;
+    g_ie_next_var = NULL; g_ie_next_ty = TY_UNKNOWN;
+  }
   int lbl = 0;
   if (body >= 0 && subtree_has_own_redo(c->nt, body) &&
       g_redo_depth < (int)(sizeof g_redo_stack / sizeof g_redo_stack[0])) {
@@ -3587,6 +3627,11 @@ void emit_iter_loop_stmts(Compiler *c, int body, Buf *b, int indent) {
   }
   emit_stmts(c, body, b, indent);
   if (lbl) g_redo_depth--;
+  if (own_next) {
+    g_ie_next_var = sv_nxv; g_ie_next_ty = sv_nxt;
+    g_c_loop_depth--;
+    g_loop_exc_base = sv_lexc; g_loop_ensure_base = sv_lens; g_loop_body = sv_lbody;
+  }
 }
 
 /* Does block `block` need the step's frame: a `next` or a `redo` of its

@@ -1,0 +1,240 @@
+each_line: 2 late
+lines: 2 late
+each_line chomp: 2 late
+each_line sep: 2 late
+each_char: 2 late
+each_byte: 2 late
+each_grapheme_cluster: 2 late
+each_codepoint: 2 late
+each_index: 2 late
+Array.new: 2 late
+chars: 2 late
+bytes: 2 late
+codepoints: 2 late
+boxed each_index: 2 late
+String each_index: 2 late
+mixed each_index: 2 late
+each_line ensure: 2
+2
+lines ensure: 2
+2
+each_line chomp ensure: 2
+2
+each_line sep ensure: 2
+2
+each_char ensure: 2
+2
+each_byte ensure: 2
+2
+each_grapheme_cluster ensure: 2
+2
+each_codepoint ensure: 2
+2
+each_index ensure: 2
+2
+Array.new ensure: 2
+2
+chars ensure: 2
+2
+bytes ensure: 2
+2
+codepoints ensure: 2
+2
+boxed each_index ensure: 2
+2
+String each_index ensure: 2
+2
+mixed each_index ensure: 2
+2
+each_line inner ensure: 232
+lines inner ensure: 232
+each_line chomp inner ensure: 232
+each_line sep inner ensure: 232
+each_char inner ensure: 232
+each_byte inner ensure: 232
+each_grapheme_cluster inner ensure: 232
+each_codepoint inner ensure: 232
+each_index inner ensure: 232
+Array.new inner ensure: 232
+chars inner ensure: 232
+bytes inner ensure: 232
+codepoints inner ensure: 232
+boxed each_index inner ensure: 232
+String each_index inner ensure: 232
+mixed each_index inner ensure: 232
+each_line inner rescue: 2 late
+lines inner rescue: 2 late
+each_line chomp inner rescue: 2 late
+each_line sep inner rescue: 2 late
+each_char inner rescue: 2 late
+each_byte inner rescue: 2 late
+each_grapheme_cluster inner rescue: 2 late
+each_codepoint inner rescue: 2 late
+each_index inner rescue: 2 late
+Array.new inner rescue: 2 late
+chars inner rescue: 2 late
+bytes inner rescue: 2 late
+codepoints inner rescue: 2 late
+boxed each_index inner rescue: 2 late
+String each_index inner rescue: 2 late
+mixed each_index inner rescue: 2 late
+each_line ensure in a rescue: 32 late
+lines ensure in a rescue: 32 late
+each_line chomp ensure in a rescue: 32 late
+each_line sep ensure in a rescue: 32 late
+each_char ensure in a rescue: 32 late
+each_byte ensure in a rescue: 32 late
+each_grapheme_cluster ensure in a rescue: 32 late
+each_codepoint ensure in a rescue: 32 late
+each_index ensure in a rescue: 32 late
+Array.new ensure in a rescue: 32 late
+chars ensure in a rescue: 32 late
+bytes ensure in a rescue: 32 late
+codepoints ensure in a rescue: 32 late
+boxed each_index ensure in a rescue: 32 late
+String each_index ensure in a rescue: 32 late
+mixed each_index ensure in a rescue: 32 late
+seventy turns: 1470
+seventy turns of Array.new: 1470
+each_line in a proc: 5 2
+lines in a proc: 5 2
+each_line chomp in a proc: 5 2
+each_line sep in a proc: 5 2
+each_char in a proc: 5 2
+each_byte in a proc: 5 2
+each_grapheme_cluster in a proc: 5 2
+each_codepoint in a proc: 5 2
+each_index in a proc: 5 2
+Array.new in a proc: 5 2
+chars in a proc: 5 2
+bytes in a proc: 5 2
+codepoints in a proc: 5 2
+boxed each_index in a proc: 5 2
+String each_index in a proc: 5 2
+mixed each_index in a proc: 5 2
+2
+3
+each_line modifier: 2
+lines modifier: 2
+each_line chomp modifier: 2
+each_line sep modifier: 2
+each_char modifier: 2
+each_byte modifier: 2
+each_grapheme_cluster modifier: 2
+each_codepoint modifier: 2
+each_index modifier: 2
+Array.new modifier: 2
+chars modifier: 2
+bytes modifier: 2
+codepoints modifier: 2
+boxed each_index modifier: 2
+String each_index modifier: 2
+mixed each_index modifier: 2
+each_line modifier value: 2
+lines modifier value: 2
+each_line chomp modifier value: 2
+each_line sep modifier value: 2
+each_char modifier value: 2
+each_byte modifier value: 2
+each_grapheme_cluster modifier value: 2
+each_codepoint modifier value: 2
+each_index modifier value: 2
+Array.new modifier value: 2
+chars modifier value: 2
+bytes modifier value: 2
+codepoints modifier value: 2
+boxed each_index modifier value: 2
+String each_index modifier value: 2
+mixed each_index modifier value: 2
+[1, 2]
+[1, 2]
+["a", "b"]
+each_char.each: 2 late
+each_char.each in a proc: 2
+[2, 9]
+scan in Array.new: late
+24
+rescued x
+6: 2 late
+7: 2 late
+10: 1 late
+11: 1 late
+12: 1 late
+13: 2 late
+14: 2 late
+15: 2 late
+16: 2 late
+17: 2 late
+18: 2 late
+19: 2 late
+20: 2 late
+21: 2 late
+22: 2 late
+23: 2 late
+24: 2 late
+26: 2 late
+27: 2 late
+28: 1 late
+29: 1 late
+30: 2 late
+31: 1 late
+32: 1 late
+33: 4 late
+34: 2 late
+35: 2 late
+36: 1 late
+37: 1 late
+38: 1 late
+39: 1 late
+40: 1 late
+41: 3 late
+42: 2 late
+43: 2 late
+44: 2 late
+45: 2 late
+46: 2 late
+47: 2 late
+49: 2 late
+50: 2 late
+51: 2 late
+52: 1 late
+53: 2 late
+54: 2 late
+55: 2 late
+56: 2 late
+57: 2 late
+58: 2 late
+59: 2 late
+60: 2 late
+61: 2 late
+62: 2 late
+63: 2 late
+64: 2 late
+65: 2 late
+66: 2 late
+67: 1 late
+68: 1 late
+69: 1 late
+70: 2 late
+71: 2 late
+72: 2 late
+73: 2 late
+74: 2 late
+tz late: each_line, next under a modifier
+tz late: lines, next under a modifier
+tz late: each_char, next under a modifier
+tz late: chars, next under a modifier
+tz late: each_byte, next under a modifier
+tz late: bytes, next under a modifier
+tz late: each_codepoint, next under a modifier
+tz late: each_grapheme_cluster, next under a modifier
+tz late: each_index, next under a modifier
+t[nil, 7] late: Array.new, next under a modifier
+t[5, 7] late: Array.new, next with a value under a modifier
+tz late: each_char, next as a value
+tz late: each_char, next in a begin under a modifier
+tz late: each_char, next in two begins under a modifier
+tz late: each_char, next in a rescue clause under a modifier
+enentz late: each_char, next after an ensure under a modifier
+eetz late: each_char, next in an ensure clause under a modifier
+Rtz late: each_char, next and a raise under a second modifier
