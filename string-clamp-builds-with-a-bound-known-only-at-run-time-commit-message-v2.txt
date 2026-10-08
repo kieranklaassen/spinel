@@ -1,0 +1,44 @@
+String#clamp builds with a bound known only at run time
+
+    g = { "lo" => "b", "hi" => "d", "n" => 1 }
+    p "a".clamp(g["lo"], g["hi"])
+
+did not build: the C compiler refused the generated C (incompatible
+types when initializing type 'const char *' using type 'sp_RbVal').
+CRuby prints "b". The String arm of clamp emits each bound as a C
+string, and a boxed bound is a boxed value.
+
+A String#clamp with a boxed bound is now typed boxed and answered by
+sp_poly_clamp, the clamp a boxed receiver takes: nil is an open side,
+an Integer bound raises CRuby's comparison error, and the answer is
+the receiver or the bound itself. A String the program appends to is
+held in its box as a shared handle, and when it wins the answer is
+that handle:
+
+    h = { "k" => +"b", "n" => 1 }
+    h["k"] << "b"
+    x = "a".clamp(h["k"], g["hi"])
+    p x.equal?(h["k"])      # true
+    x << "!"
+    p h["k"]                # "bb!"
+
+An operand that is a local or an instance variable whose String the
+program mutates in place becomes the shared handle too, as one stored
+into an Array literal does (promote_shared_stored_strings), and is
+boxed as that handle, so an append through the answer reaches the
+variable. The three operands fill rooted temporaries in Ruby's order,
+receiver, low bound, high bound: C leaves the order of a call's
+arguments open, and gcc runs them last to first.
+
+Not changed: a clamp with two typed bounds emits what it did, and so
+does a program that defines a clamp of its own. A Range of boxed ends,
+s.clamp(g["lo"]..g["hi"]), still does not build.
+
+Test: test/string_clamp_boxed_bound.rb. It holds the answer for each
+winner, nil as an open side, the two raises, the identity of an
+appended bound that wins as the low and as the high bound, with an
+append showing through either name, the same for an appended receiver,
+and the order of the operands where the low or the high bound runs
+code. On master it does not build (the C error above).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
