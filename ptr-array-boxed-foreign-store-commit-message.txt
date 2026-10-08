@@ -1,0 +1,44 @@
+An Array of one class holds a boxed value of another kind
+
+An Array whose elements are all one user class is narrowed to a
+pointer array, and `<<` and `[]=` unbox a boxed value into it with
+sp_poly_obj_ptr: the pointer of any object, NULL for everything else.
+A boxed value was no evidence against the class, so a String stored
+there read back nil, and an object of another class was read through
+this class's layout:
+
+    class K
+      attr_reader :n
+      def initialize(n) = @n = n
+    end
+    class J
+      def n = 9
+    end
+    t = [K.new(1)]
+    h = { a: "s", b: J.new }
+    t << h[:a]
+    p t[1]          # nil; CRuby: "s"
+    t << h[:b]
+    p t[2].n        # 0; CRuby: 9
+
+narrow_object_arrays now notes the boxed values those two stores put
+into a slot, and a component narrows to a class only where each of
+them is proved an object of it or of a class beneath it. Elsewhere
+the value is the foreign element a String stored by its type is: the
+Array stays boxed and holds it.
+
+A value is proved where the program says so without a run: a call of
+a method whose whole body is a read of one of its parameters, on a
+proved argument (the widened return the unboxing was written for); a
+call of a method that answers one class, on a proved receiver; a
+local every write of which is proved; and an element of a slot,
+which is of its component's class: an index read, first, last, min,
+max, and the parameter a walk of it hands its block. Such a program
+compiles to the C it had.
+
+Every other way a value enters such an Array (a literal, unshift,
+insert, concat, a block's value) boxed it already.
+
+Test: test/ptr_array_boxed_foreign_store.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

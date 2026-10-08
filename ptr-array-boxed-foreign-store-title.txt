@@ -1,0 +1,1 @@
+An Array of one class holds a boxed value of another kind
