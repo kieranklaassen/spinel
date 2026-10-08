@@ -428,6 +428,119 @@ int an_prog_never_gives(const char *nm, int defs) {
   return !g_written_by_value && !anh_has(defs ? &g_written_twice : &g_written, nm);
 }
 
+/* ---- where a method of the program can be found from ----
+   CRuby runs methods of the program on its own: a hook where a class is
+   inherited or an object is copied, raised or matched, a conversion where
+   one is printed or destructured. The compiler runs few of them, and the
+   names CRuby calls are an open list, so what a class and its objects
+   answer with is proved here by where a method can come from. Above, the
+   text names nothing by value and mixes no module in. Here: every def, and
+   every call by one of the words above that gives, takes away, hides or
+   renames a method or evaluates a block, stands in the body of a class or
+   a module, outside every def and block there, with no receiver but self;
+   so what it makes is that class's or module's own. And no body or
+   assignment carries the name of a class or module that every class, or an
+   exception, answers through. Then a class whose every body holds
+   attribute declarations with literal names and nothing else, under
+   parents that are such classes up to a builtin, answers with its
+   attributes and with CRuby's own methods only. */
+enum { AN_IN_TOP, AN_IN_BODY, AN_IN_CODE };
+static ANameHash g_attr_only, g_attr_only_not;
+static int g_method_astray;
+static int an_above_classes(const char *outer, const char *leaf) {
+  char q[256];
+  if (!leaf) return 1;
+  if (sp_streq(leaf, "Object") || sp_streq(leaf, "BasicObject") || sp_streq(leaf, "Kernel") ||
+      sp_streq(leaf, "Module") || sp_streq(leaf, "Class") || is_builtin_exception_name(leaf)) return 1;
+  return outer && snprintf(q, sizeof q, "%s::%s", outer, leaf) < (int)sizeof q && is_builtin_exception_name(q);
+}
+static int an_body_only_attrs(const NodeTable *nt, int body) {
+  int n = 0;
+  if (body < 0) return 1;
+  if (nt_kind(nt, body) != NK_StatementsNode) return 0;
+  const int *v = nt_arr(nt, body, "body", &n);
+  for (int i = 0; i < n; i++) {
+    const char *nm = nt_kind(nt, v[i]) == NK_CallNode ? nt_str(nt, v[i], "name") : NULL;
+    int an = 0;
+    const int *av = nt_arr(nt, nt_ref(nt, v[i], "arguments"), "arguments", &an);
+    if (!nm || !(is_attr_reader_family(nm) || is_attr_writer_family(nm)) || an < 1 ||
+        nt_ref(nt, v[i], "receiver") >= 0 || nt_ref(nt, v[i], "block") >= 0) return 0;
+    for (int j = 0; j < an; j++) if (nt_kind(nt, av[j]) != NK_SymbolNode) return 0;
+  }
+  return 1;
+}
+/* Is `n`, a def or a call, in a body with no receiver but self? */
+static int an_in_own_body(const NodeTable *nt, int n, int in) {
+  int r = nt_ref(nt, n, "receiver");
+  return in == AN_IN_BODY && (r < 0 || nt_kind(nt, r) == NK_SelfNode);
+}
+static void an_note_method_homes(const NodeTable *nt, int n, int in, const char *outer) {
+  if (n < 0) return;
+  NodeKind k = nt_kind(nt, n);
+  switch (k) {
+    case NK_DefNode:
+      if (!an_in_own_body(nt, n, in)) g_method_astray = 1;
+      in = AN_IN_CODE;
+      break;
+    case NK_BlockNode: case NK_LambdaNode: in = AN_IN_CODE; break;
+    case NK_AliasMethodNode: case NK_UndefNode:
+      if (in != AN_IN_BODY) g_method_astray = 1;
+      break;
+    case NK_CallNode: {
+      int how = an_by_name_how(nt_str(nt, n, "name"));
+      if ((how == AN_GIVES || how == AN_GIVES_ALL || how == AN_RENAMES || how == AN_VIS || how == AN_EVAL ||
+           how == AN_EXEC) && !an_in_own_body(nt, n, in)) g_method_astray = 1;
+      break;
+    }
+    case NK_SingletonClassNode:
+      if (in != AN_IN_BODY || nt_kind(nt, nt_ref(nt, n, "expression")) != NK_SelfNode) in = AN_IN_CODE;
+      break;
+    case NK_ClassNode: case NK_ModuleNode: {
+      int cp = nt_ref(nt, n, "constant_path"), sc = k == NK_ClassNode ? nt_ref(nt, n, "superclass") : -1;
+      const char *nm = nt_str(nt, cp, "name"), *par = nt_str(nt, nt_ref(nt, cp, "parent"), "name");
+      if (an_above_classes(par ? par : outer, nm)) g_method_astray = 1;
+      int plain = k == NK_ClassNode && in != AN_IN_CODE && nt_kind(nt, cp) == NK_ConstantReadNode &&
+                  (sc < 0 || nt_kind(nt, sc) == NK_ConstantReadNode) && an_body_only_attrs(nt, nt_ref(nt, n, "body"));
+      an_written_add(plain ? &g_attr_only : &g_attr_only_not, nm);
+      an_note_method_homes(nt, sc, in, outer);
+      an_note_method_homes(nt, nt_ref(nt, n, "body"), AN_IN_BODY, nm);
+      return;
+    }
+    case NK_ConstantWriteNode: case NK_ConstantAndWriteNode: case NK_ConstantOrWriteNode:
+    case NK_ConstantOperatorWriteNode: case NK_ConstantTargetNode: case NK_ConstantPathTargetNode:
+    case NK_ConstantPathWriteNode: case NK_ConstantPathAndWriteNode: case NK_ConstantPathOrWriteNode:
+    case NK_ConstantPathOperatorWriteNode: {
+      int t = nt_ref(nt, n, "target");
+      if (t < 0) t = n;
+      const char *nm = nt_str(nt, t, "name"), *par = nt_str(nt, nt_ref(nt, t, "parent"), "name");
+      if (an_above_classes(par ? par : outer, nm)) g_method_astray = 1;
+      an_written_add(&g_attr_only_not, nm);
+      break;
+    }
+    default: break;
+  }
+  int nr = nt_num_refs(nt, n), na = nt_num_arrs(nt, n);
+  for (int i = 0; i < nr; i++) an_note_method_homes(nt, nt_ref_at(nt, n, i), in, outer);
+  for (int i = 0; i < na; i++) {
+    int m = 0;
+    const int *ids = nt_arr_at(nt, n, i, &m);
+    for (int j = 0; j < m; j++) an_note_method_homes(nt, ids[j], in, outer);
+  }
+}
+/* The statements the compiler's own builtins bring are no text of the
+   program's. */
+static void an_note_attr_only_classes(const NodeTable *nt) {
+  int n = 0;
+  const int *v = nt_arr(nt, nt_ref(nt, nt->root_id, "statements"), "body", &n);
+  for (int i = 0; i < n; i++)
+    if (!nt_int(nt, v[i], "node_bi", 0)) an_note_method_homes(nt, v[i], AN_IN_TOP, NULL);
+}
+/* Can no method of the program be found from the class named `nm` beyond
+   its own attributes and its parent's methods? */
+int an_class_only_attrs(const char *nm) {
+  return !g_written_by_value && !g_method_astray && nm && anh_has(&g_attr_only, nm) && !anh_has(&g_attr_only_not, nm);
+}
+
 static int cr_class_is_ancestor(Compiler *c, int sup, int cls) {
   for (int k = cls, hops = 0; k >= 0 && k < c->nclasses && hops < c->nclasses; k = c->classes[k].parent, hops++)
     if (k == sup) return 1;
@@ -40052,6 +40165,7 @@ static void an_phase_reconcile_check(Compiler *c) {
 void analyze_program(Compiler *c) {
   double tm_an = sp_timing_now();
   an_note_written_names(c->nt);
+  an_note_attr_only_classes(c->nt);
   AN_PHASE("desugar_register", an_phase_desugar_register(c));
   AN_PHASE("class_structure", an_phase_class_structure(c));
   AN_PHASE("block_inline", an_phase_block_inline(c));

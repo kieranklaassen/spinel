@@ -110,6 +110,9 @@ void analyze_program(Compiler *c);
 /* The program as written gives no class a method named `nm`, beyond `defs`
    (0 or 1) defs of that name: read ahead of the desugars, by absence. */
 int an_prog_never_gives(const char *nm, int defs);
+/* No method of the program can be found from the class named `nm`, or from
+   an object of it, beyond its own attributes and what its parent answers. */
+int an_class_only_attrs(const char *nm);
 /* True if a regex source contains a capturing group: an unescaped '(' that
    isn't the start of a non-capturing/extension group '(?...'. scan returns
    nested arrays for capturing patterns, which the str_array path can't model. */
