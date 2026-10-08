@@ -11270,11 +11270,47 @@ int desugar_enum_pair_lone_param(Compiler *c) {
    Its to_a is the chunks themselves, so a block over it binds each chunk
    as the one value it is (`runs.map { |*r| r }` is [[chunk]], `&:sum`
    sums the chunk). */
-static int one_value_enum_source(const NodeTable *nt, int hop) {
+static int one_value_enum_source(Compiler *c, int hop) {
+  const NodeTable *nt = c->nt;
   int src = hop >= 0 && nt_kind(nt, hop) == NK_CallNode ? nt_ref(nt, hop, "receiver") : -1;
   const char *sn = src >= 0 && nt_kind(nt, src) == NK_CallNode ? nt_str(nt, src, "name") : NULL;
-  return sn && (sp_streq(sn, "chunk_while") || sp_streq(sn, "slice_when") || sp_streq(sn, "chunk") ||
-                sp_streq(sn, "slice_before") || sp_streq(sn, "slice_after"));
+  if (!sn || !(sp_streq(sn, "chunk_while") || sp_streq(sn, "slice_when") || sp_streq(sn, "chunk") ||
+               sp_streq(sn, "slice_before") || sp_streq(sn, "slice_after")))
+    return 0;
+  /* ...when the method is the builtin's. A method, reader or Struct member
+     of the program's own by one of these names answers what it likes
+     (`def chunk = [5, 6].each_with_index` yields two values), and its hop
+     reads the Enumerator's flag as any other does. That is read only where
+     the call is proven to reach the program's own: any other call is the
+     builtin's. */
+  int sr = nt_ref(nt, src, "receiver");
+  /* a Range, a Hash or an Enumerable object reaches the builtin's through
+     a to_a put in front of it, which reads as an Array */
+  const char *rn = sr >= 0 && nt_kind(nt, sr) == NK_CallNode ? nt_str(nt, sr, "name") : NULL;
+  if (rn && (sp_streq(rn, "to_a") || sp_streq(rn, "__enum_to_a"))) return 1;
+  if (sr < 0 || nt_kind(nt, sr) == NK_SelfNode) {
+    const Scope *s = comp_scope_of(c, src);
+    if (!s || s->class_id < 0) return comp_method_index(c, sn) < 0;
+    if (s->is_cmethod) return comp_cmethod_in_chain(c, s->class_id, sn, NULL) < 0;
+    return comp_method_in_chain(c, s->class_id, sn, NULL) < 0 && !comp_reader_in_chain(c, s->class_id, sn, NULL);
+  }
+  TyKind st = infer_type(c, sr);
+  if (ty_is_object(st)) {
+    /* its class's own; Object's is behind an Enumerable the class includes */
+    int dc = -1, mi = comp_method_in_chain(c, ty_object_class(st), sn, &dc);
+    if (mi >= 0 && dc >= 0 && !sp_streq(c->classes[dc].name, "Object") && !sp_streq(c->classes[dc].name, "Kernel")) return 0;
+    return !comp_reader_in_chain(c, ty_object_class(st), sn, NULL);
+  }
+  if (nt_kind(nt, sr) == NK_ConstantReadNode) {
+    int ci = comp_class_index(c, nt_str(nt, sr, "name"));
+    return ci < 0 || comp_cmethod_in_chain(c, ci, sn, NULL) < 0;
+  }
+  /* a builtin's value whose own class the program reopened with the name:
+     a call that carries a block is still the builtin's */
+  if (nt_ref(nt, src, "block") >= 0) return 1;
+  const char *cn = ty_is_array(st) ? "Array" : ty_is_hash(st) ? "Hash" : st == TY_RANGE ? "Range" : NULL;
+  int ci = cn ? comp_class_index(c, cn) : -1;
+  return ci < 0 || comp_method_in_class(c, ci, sn) < 0;
 }
 
 void enum_hop_yield_view(Compiler *c, int id, int hop) {
@@ -11282,7 +11318,7 @@ void enum_hop_yield_view(Compiler *c, int id, int hop) {
   int blk = nt_ref(nt, id, "block");
   const char *nm = nt_str(nt, id, "name");
   if (blk < 0 || !nm || !enum_pair_spread_iter(nm) || enum_pair_source_call(nt, hop)) return;
-  if (one_value_enum_source(nt, hop)) return;
+  if (one_value_enum_source(c, hop)) return;
   /* the builtins' own walks (builtins/, `each { |x| yield x }`) hand the
      packed item on as the one value their block takes */
   const char *sn = comp_scope_of(c, id)->name;
