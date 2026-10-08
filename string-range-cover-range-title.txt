@@ -1,0 +1,1 @@
+cover? of a String Range takes a String Range

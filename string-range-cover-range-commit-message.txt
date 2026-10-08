@@ -1,0 +1,23 @@
+cover? of a String Range takes a String Range
+
+    ("a".."e").cover?("b".."c")
+
+answered false. Range#cover? given a Range asks whether the argument's
+members all lie within the receiver, and an Integer Range answers that
+(sp_range_cover_rng). A String Range had an arm for a String and one for
+a boxed value; a String Range as the argument fell to the arm that runs
+the argument and answers false.
+
+sp_srange_cover_rng follows CRuby's r_cover_range_p: an open side of the
+argument needs that side of the receiver open; an empty argument holds
+nothing; the argument's begin lies within the receiver; then the two
+ends are compared. Where the receiver includes its end and the argument
+excludes one past it, the argument's greatest member decides, which
+only the walk gives: `("a".."e").cover?("b"..."f")` is true, the walk
+ends at "e". The ends are compared as whole Strings, past a NUL.
+
+While the argument is made, a receiver that no name holds is rooted as
+it is for a String argument. ===, include? and member? ask about one
+member and are not touched.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
