@@ -18707,6 +18707,64 @@ static int operand_hoists_effect(Compiler *c, int node) {
   for (int i = 0; i < ac; i++) if (!subtree_is_pure_read(c, av[i])) return 1;
   return 0;
 }
+/* Does this body run nothing a statement can see: a pure read, down to
+   scalar arithmetic over calls with no receiver to methods of the program
+   whose own bodies are pure reads (`inc(x) + i` for `def inc(x) = x + 1`)? */
+static int body_runs_nothing(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  if (id < 0 || subtree_is_pure_read(c, id)) return 1;
+  if (nt_kind(nt, id) == NK_CallNode) {
+    if (nt_ref(nt, id, "block") >= 0) return 0;
+    if (!call_is_scalar_op(c, id)) {
+      const char *nm = nt_str(nt, id, "name");
+      int mi = nm && nt_ref(nt, id, "receiver") < 0 ? comp_self_call_mi(c, id, nm) : -1;
+      int def = mi >= 0 ? c->scopes[mi].def_node : -1;
+      if (def < 0) return 0;
+      /* a default value is code the call may run */
+      int pn = nt_ref(nt, def, "parameters"), n_opt = 0, n_kw = 0;
+      if (pn >= 0) { nt_arr(nt, pn, "optionals", &n_opt); nt_arr(nt, pn, "keywords", &n_kw); }
+      if (n_opt || n_kw || !subtree_is_pure_read(c, nt_ref(nt, def, "body"))) return 0;
+    }
+  }
+  else if (nt_kind(nt, id) != NK_ParenthesesNode && nt_kind(nt, id) != NK_StatementsNode) {
+    const char *ty = nt_type(nt, id);
+    if (!ty || !sp_streq(ty, "ArgumentsNode")) return 0;
+  }
+  int nr = nt_num_refs(nt, id);
+  for (int i = 0; i < nr; i++)
+    if (!body_runs_nothing(c, nt_ref_at(nt, id, i))) return 0;
+  int na = nt_num_arrs(nt, id);
+  for (int i = 0; i < na; i++) {
+    int n = 0;
+    const int *ids = nt_arr_at(nt, id, i, &n);
+    for (int j = 0; j < n; j++)
+      if (!body_runs_nothing(c, ids[j])) return 0;
+  }
+  return 1;
+}
+/* Does operand `node` run a block that runs code? Its call is written as a
+   loop ahead of the statement, so it ran before the operands to its left:
+   `arr(8) + xs.map { |i| tick(i) }`. A block passed with `&` is whatever it
+   is given. */
+static int operand_block_runs(Compiler *c, int node) {
+  const NodeTable *nt = c->nt;
+  if (nt_kind(nt, node) != NK_CallNode) return 0;
+  int blk = nt_ref(nt, node, "block");
+  return blk >= 0 && (nt_kind(nt, blk) != NK_BlockNode ||
+                      !body_runs_nothing(c, nt_ref(nt, blk, "body")));
+}
+int operand_runs_ahead(Compiler *c, int node) {
+  return operand_hoists_effect(c, node) || operand_block_runs(c, node);
+}
+/* Does a temporary of type `t` still read its value after later code ran: a
+   scalar, or an Array, a Hash or an object reached through its pointer? A
+   String, a box and a by-value object are copied into the temporary, and
+   what a later block appends to the same String is not in the copy. */
+int temp_reads_through(Compiler *c, TyKind t) {
+  return t == TY_INT || t == TY_FLOAT || t == TY_BOOL || t == TY_NIL || t == TY_SYMBOL ||
+         t == TY_BIGINT || ty_is_array(t) || ty_is_hash(t) ||
+         (ty_is_object(t) && !comp_ty_value_obj(c, t));
+}
 
 static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
   if (emit_or_take_back(c, id, b, emit_str_append_chain_handle)) return 1;
@@ -18886,6 +18944,12 @@ static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
   for (int i = 0; i < nb; i++) {
     if (!opp[i].p) continue;
     int inl = i > 0 && operand_hoists_effect(c, node[i]);
+    /* a block's loop too, where no temporary before it is a copy: one that
+       is keeps the loop ahead of it, where its String is read afterwards */
+    if (!inl && i > 0 && operand_block_runs(c, node[i])) {
+      inl = 1;
+      for (int j = 0; j < i; j++) if (!temp_reads_through(c, ty[j])) inl = 0;
+    }
     if (!inl) { buf_puts(g_pre, opp[i].p); free(opp[i].p); opp[i].p = NULL; }
   }
   buf_puts(b, "({ ");
