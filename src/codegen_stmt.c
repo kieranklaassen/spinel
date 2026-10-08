@@ -15313,6 +15313,37 @@ static char *emit_str_splice_value(Compiler *c, int recv, int v, int late, int t
   buf_puts(b, " sp_str_check_mutable("); emit_expr(c, recv, b); buf_puts(b, ");");
   return vb.p;
 }
+/* Does something else hold the String the statement form of replace copies,
+   once it is read? A literal, a constant, self, and a local, an instance
+   variable or a global read where it stands do (strbuf_slot_ref says which
+   of those are read as a copy), and so does a choice between two of them
+   (`c ? t : K`, `t || K`). Anything else is a value a call made: an object
+   or a box counts, read through its to_str, and so does an element or a
+   reader's answer, which the program's own `[]` or reader may have made. */
+static int replace_source_is_held(Compiler *c, int v, int depth) {
+  const NodeTable *nt = c->nt;
+  char hs[1024];
+  v = unwrap_parens(c, v);
+  if (v < 0 || depth > 8) return 0;
+  NodeKind k = nt_kind(nt, v);
+  if (k == NK_StringNode) return 1;
+  if (k == NK_IfNode) {
+    int arm[2] = { nt_ref(nt, v, "statements"), nt_ref(nt, v, "subsequent") };
+    if (arm[1] < 0 || nt_kind(nt, arm[1]) != NK_ElseNode) return 0;
+    arm[1] = nt_ref(nt, arm[1], "statements");
+    for (int i = 0; i < 2; i++) {
+      int n = 0; const int *bb = arm[i] >= 0 ? nt_arr(nt, arm[i], "body", &n) : NULL;
+      if (n != 1 || !replace_source_is_held(c, bb[0], depth + 1)) return 0;
+    }
+    return 1;
+  }
+  if (k == NK_OrNode)
+    return replace_source_is_held(c, nt_ref(nt, v, "left"), depth + 1) &&
+           replace_source_is_held(c, nt_ref(nt, v, "right"), depth + 1);
+  TyKind t = comp_ntype(c, v);
+  if (t != TY_STRING && t != TY_STRBUF) return 0;
+  return (expr_is_held_ref(c, v) || k == NK_GlobalVariableReadNode) && !strbuf_slot_ref(c, v, hs, sizeof hs);
+}
 /* emit_array_mutate_stmt_body's String mutators done by reassigning the
    receiver: replace, prepend, insert, concat, clear, delete_prefix! /
    delete_suffix! (answers 1 emitted, 0 declined, -1 to go on) */
@@ -15363,6 +15394,9 @@ static int str_mutate_reassign_arms(Compiler *c, Buf *b, int indent, const NodeT
          reads as its string, TypeError for anything else */
       buf_printf(b, "{ const char *_t%d = ", trep); emit_str_expr(c, argv[0], b);
       buf_printf(b, "; ");
+      /* a source made in place is held by this temp alone while the copy
+         is allocated, and so is the copy a shared String is read as */
+      if (!replace_source_is_held(c, argv[0], 0)) buf_printf(b, "SP_GC_ROOT(_t%d); ", trep);
       emit_expr(c, recv, b);
       buf_printf(b, " = sp_str_from_bytes(_t%d, sp_str_byte_len(_t%d)); }\n", trep, trep);
       return 1;
