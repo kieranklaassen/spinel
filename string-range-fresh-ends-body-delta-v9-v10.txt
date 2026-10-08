@@ -1,0 +1,14 @@
+--- body-fresh-v9.txt	2026-10-08 14:35:12.404147015 +0000
++++ body-fresh-v10.txt	2026-10-08 15:13:34.752098218 +0000
+@@ -101,9 +101,9 @@
+ gate: run on the Mac at opening
+ ```
+ 
+-Run here before that, on these three commits over master `fb0de073421a` with the pull request they depend on beneath them (Linux x86-64, gcc 13.3 and clang 18.1, CRuby 3.3.6): the build from nothing, the test and the walk's test at five collector settings with both compilers, with and without `--share-strings`, `tools/gate.rb check` for each commit, `make share-strings-test` and `make cident` against their parent. On master `9855f1f61ff8`, where this branch now stands: the build from nothing, the two tests at the same settings, `tools/gate.rb check` for each commit, and every program and cost figure this text gives.
++Run here before that (Linux x86-64, gcc 13.3 and clang 18.1, CRuby 3.3.6). On these three commits over master `2810a235d119`: the build from nothing, the test and the walk's test at five collector settings with both compilers, with and without `--share-strings`, and `tools/gate.rb check` for each commit. On the same three over master `9855f1f61ff8`, with the walks' pull request beneath them before it merged: the same, `make share-strings-test`, `make cident` against their parent, and every program and cost figure this text gives.
+ 
+ - [ ] New tests have `.expected` files that match CRuby 4.0 run with `--enable-frozen-string-literal` (written with 3.3.6)
+ - [x] Values past 2^31 are marked `# spinel: int64` (none)
+ - [x] If optcarrot's generated C changed: callgrind numbers, checksum 59662 (its C is unchanged)
+-- [x] Depends on: "A String Range answered by its walk keeps its ends across the walk" (the walks answer their receiver from a temp of their own, and without that pull request beneath a walk's answer reaches its read with ends the walk let go)
++- [x] Depends on: nothing
