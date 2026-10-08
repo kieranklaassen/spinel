@@ -14286,6 +14286,16 @@ static int yield_block_value_boxed(Compiler *c) {
 }
 
 
+/* The tail arm's append to a String handle local, behind the nil arm the
+   call plan gives it as a statement (emit_nil_target_stmt): the arm's own
+   append has none, and did nothing on a NULL handle. 1 when it emitted. */
+static int tail_append_nil_armed(Compiler *c, int id, Buf *b, int indent) {
+  char ref[1024];
+  int r = unwrap_parens(c, nt_ref(c->nt, id, "receiver"));
+  return r >= 0 && nt_kind(c->nt, r) == NK_LocalVariableReadNode && strbuf_slot_ref(c, r, ref, sizeof ref) &&
+         emit_nil_target_stmt(c, id, b, indent);
+}
+
 void emit_stmt_tail_inner(Compiler *c, int id, Buf *b, int indent) {
   const NodeTable *nt = c->nt;
   const char *ty = nt_type(nt, id);
@@ -14676,10 +14686,12 @@ void emit_stmt_tail_inner(Compiler *c, int id, Buf *b, int indent) {
     const char *_snm = nt_str(nt, id, "name");
     /* (--share-strings: a receiver that may be nil, a shared parameter an
        argument binds nil, runs behind its nil test, as the statement form
-       does) */
+       does; so does a handle local's append in the default build:
+       tail_append_nil_armed) */
     if (_srecv >= 0 && _snm && sp_streq(_snm, "<<") &&
         comp_ntype(c, _srecv) == TY_STRING &&
         ((repr_share_rule(c) && emit_nil_target_stmt(c, id, b, indent)) ||
+         tail_append_nil_armed(c, id, b, indent) ||
          emit_array_mutate_stmt(c, id, b, indent))) {
       /* return the chain's BASE receiver: for `buf << a << b` the immediate
          receiver is the inner `<<` call, and re-emitting it would run the
