@@ -1,0 +1,147 @@
+Delta of the statement-replace piece: git range-diff 0e8befeb3691..c3b504705823 ed9861279d67..52f68dc4fc1d
+(the head read, c3b504705823 on 0e8befeb3691, against this cut on ed9861279d67; context lines are master's source, quoted as it stands)
+
+1:  c3b504705 ! 1:  52f68dc4f A String made in place is kept alive while replace copies it
+    @@ Commit message
+         else holds the source: a literal, a constant, self, a local, an
+         instance variable or a global read where it stands (strbuf_slot_ref
+         says which of those are read as a copy), a read out of a slot that a
+    -    variable, a constant or self holds (replace_source_is_slot_read), or
+    -    a choice between two such sources (`c ? t : K`, `t || K`). Those run
+    -    master's C. The copy itself is as it was: the source is not sent
+    -    through sp_str_dup, which would turn the "" that a nil String-or-nil
+    -    source reads as into nil.
+    +    variable, a constant or self holds (replace_source_is_slot_read),
+    +    such a source answered by its own to_s, to_str, itself or freeze
+    +    (replace_source_answers_receiver), or a choice between two such
+    +    sources (`c ? t : K`, `t || K`). Those run master's C. The copy
+    +    itself is as it was: the source is not sent through sp_str_dup, which
+    +    would turn the "" that a nil String-or-nil source reads as into nil.
+     
+         A slot read is an attr_reader's or a Struct member's field (`o.name`),
+         an Array's element by an Integer index (`ar[0]`, `ar[i % 2]`), its
+    -    first or its last, and a Hash's value (`h[:k]`), the index or the key
+    -    a literal or a read. It is one only while the method is the builtin:
+    -    where the program gives Array or Hash its own `[]`, `first` or `last`,
+    -    writes the reader by hand, or gives a Hash a default block, the answer
+    -    is a call's and is rooted. A boxed value counts only where no class
+    -    defines to_str.
+    +    first or its last, and a Hash's value (`h[:k]`, `h.fetch(:k)`), the
+    +    index or the key a literal or a read. It is one only while the method
+    +    is the builtin: where the program gives Array or Hash its own `[]`,
+    +    `first`, `last` or `fetch`, writes the reader by hand, or gives a
+    +    Hash a default block (which `fetch` with one key never runs), the
+    +    answer is a call's and is rooted. A boxed value counts only where no
+    +    class defines to_str.
+    +
+    +    to_s, to_str, itself and freeze with no argument answer a String
+    +    receiver itself and make nothing (freeze seals it in place, or
+    +    answers an immortal copy of a literal). They are looked through
+    +    while String has no method of that name of the program's own.
+     
+         Any other source keeps the root, at 7 to 17 instructions a statement
+    -    with gcc and 5 to 14 with clang, and master ran some of them right:
+    -    `y.itself`, `h.fetch(:k)`, `ar[idx(i)]`, `Item.new(y).name`.
+    +    with gcc and 5 to 13 with clang, and master ran some of them right:
+    +    `ar[idx(i)]`, `Item.new(y).name`.
+     
+         The generated C of two tests gains the root; every other test's and
+         optcarrot's is unchanged.
+    @@ Commit message
+     
+      ## Makefile ##
+     @@ Makefile: GC_STRESS_TESTS := test/gc_root_frame_slots.rb \
+    -                    test/gc_minor_byref_lent_slot.rb \
+    +                    test/string_range_walk_answer.rb \
+                         test/struct_values_fresh_receiver_root.rb \
+                         test/hash_splat_to_a.rb \
+     +                   test/string_replace_fresh_source_root.rb \
+                         test/proc_cell_capture_marked.rb \
+                         test/poly_array_intersect.rb \
+    -                    test/thread_new_args_rooted_across_fiber_alloc.rb \
+    +                    test/exception_class_raised_again.rb \
+     
+      ## src/codegen_call.c ##
+     @@ src/codegen_call.c: int subtree_is_pure_read(Compiler *c, int id) {
+    @@ src/codegen_call.c: int subtree_is_pure_read(Compiler *c, int id) {
+        memo_c = c; memo = 0;
+     
+      ## src/codegen_internal.h ##
+    -@@ src/codegen_internal.h: int subtree_is_pure_read(Compiler *c, int id);
+    +@@ src/codegen_internal.h: int operand_is_held_read(Compiler *c, int id);
+      /* Is the call a reader the emitter lowers to a plain field read? *allocates is
+         set when the read builds a copy (a shared String slot). codegen_call.c */
+      int call_is_field_read(Compiler *c, int id, int *allocates);
+    @@ src/codegen_stmt.c: static char *emit_str_splice_value(Compiler *c, int recv, in
+     +}
+     +/* Is call `v` a read out of a slot that goes on holding the String: a
+     +   reader's or a Struct member's field (call_is_field_read), an element of
+    -+   an Array (`ar[0]`, `ar.first`, `ar.last`) or a value of a Hash, off a
+    -+   variable, a constant or self? It runs no code of the program's while
+    -+   Array or Hash has no method of that name of the program's own, the index
+    -+   is a plain read, and no Hash of the program has a default block. A boxed
+    -+   element is read through its to_str, so no class may define one. */
+    ++   an Array (`ar[0]`, `ar.first`, `ar.last`) or a value of a Hash (`h[:k]`,
+    ++   `h.fetch(:k)`), off a variable, a constant or self? It runs no code of
+    ++   the program's while Array or Hash has no method of that name of the
+    ++   program's own, the index is a plain read, and no Hash of the program has
+    ++   a default block (fetch with one key runs none: a missing key raises). A
+    ++   boxed element is read through its to_str, so no class may define one. */
+     +static int replace_source_is_slot_read(Compiler *c, int v) {
+     +  const NodeTable *nt = c->nt;
+     +  TyKind t = comp_ntype(c, v);
+    @@ src/codegen_stmt.c: static char *emit_str_splice_value(Compiler *c, int recv, in
+     +  int ary = ty_is_array(rt), hash = ty_is_hash(rt);
+     +  if (!nm || !(ary || hash) || builtin_method_is_own(c, ary ? "Array" : "Hash", nm)) return 0;
+     +  if (ary && ac == 0) return sp_streq(nm, "first") || sp_streq(nm, "last");
+    -+  if (!sp_streq(nm, "[]") || ac != 1 ||
+    -+      !(nt_kind(nt, av[0]) == NK_StringNode || subtree_is_pure_read(c, av[0]))) return 0;
+    ++  if (ac != 1 || !(nt_kind(nt, av[0]) == NK_StringNode || subtree_is_pure_read(c, av[0]))) return 0;
+    ++  if (hash && sp_streq(nm, "fetch")) return 1;
+    ++  if (!sp_streq(nm, "[]")) return 0;
+     +  return ary ? comp_ntype(c, av[0]) == TY_INT : !prog_has_hash_default_block(c);
+     +}
+    ++static int replace_source_is_held(Compiler *c, int v, int depth);
+    ++/* Is call `v` one that answers its String receiver itself, making nothing:
+    ++   to_s, to_str, itself or freeze with no argument, on a receiver something
+    ++   else holds, while String has no method of that name of the program's own? */
+    ++static int replace_source_answers_receiver(Compiler *c, int v, int depth) {
+    ++  const NodeTable *nt = c->nt;
+    ++  const char *nm = nt_str(nt, v, "name");
+    ++  int recv = unwrap_parens(c, nt_ref(nt, v, "receiver"));
+    ++  int a = nt_ref(nt, v, "arguments"), ac = 0;
+    ++  if (a >= 0) nt_arr(nt, a, "arguments", &ac);
+    ++  if (!nm || recv < 0 || ac != 0 || nt_ref(nt, v, "block") >= 0) return 0;
+    ++  if (!(sp_streq(nm, "to_s") || sp_streq(nm, "to_str") || sp_streq(nm, "itself") || sp_streq(nm, "freeze")))
+    ++    return 0;
+    ++  if (comp_ntype(c, v) != TY_STRING || comp_ntype(c, recv) != TY_STRING ||
+    ++      builtin_method_is_own(c, "String", nm)) return 0;
+    ++  return replace_source_is_held(c, recv, depth + 1);
+    ++}
+     +/* Does something else hold the String the statement form of replace copies,
+     +   once it is read? A literal, a constant, self, and a local, an instance
+     +   variable or a global read where it stands do (strbuf_slot_ref says which
+     +   of those are read as a copy), so does a read out of a slot one of them
+    -+   holds (replace_source_is_slot_read), and so does a choice between two
+    -+   such sources (`c ? t : K`, `t || K`). Anything else is a value a call
+    -+   made: an object counts, read through its to_str, and so does the answer
+    -+   of the program's own `[]`, `first` or reader. */
+    ++   holds (replace_source_is_slot_read), so does such a source answered by
+    ++   its own to_s, to_str, itself or freeze (replace_source_answers_receiver),
+    ++   and so does a choice between two such sources (`c ? t : K`, `t || K`).
+    ++   Anything else is a value a call made: an object counts, read through its
+    ++   to_str, and so does the answer of the program's own `[]`, `first`, `to_s`
+    ++   or reader. */
+     +static int replace_source_is_held(Compiler *c, int v, int depth) {
+     +  const NodeTable *nt = c->nt;
+     +  char hs[1024];
+    @@ src/codegen_stmt.c: static char *emit_str_splice_value(Compiler *c, int recv, in
+     +  if (k == NK_OrNode)
+     +    return replace_source_is_held(c, nt_ref(nt, v, "left"), depth + 1) &&
+     +           replace_source_is_held(c, nt_ref(nt, v, "right"), depth + 1);
+    -+  if (k == NK_CallNode) return replace_source_is_slot_read(c, v);
+    ++  if (k == NK_CallNode)
+    ++    return replace_source_answers_receiver(c, v, depth) || replace_source_is_slot_read(c, v);
+     +  TyKind t = comp_ntype(c, v);
+     +  if (t != TY_STRING && t != TY_STRBUF) return 0;
+     +  return (expr_is_held_ref(c, v) || k == NK_GlobalVariableReadNode) && !strbuf_slot_ref(c, v, hs, sizeof hs);
