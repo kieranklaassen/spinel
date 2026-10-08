@@ -1,0 +1,25 @@
+0
+1
+1
+0
+1
+0
+1
+0
+0
+1
+0
+FloatDomainError: NaN
+FloatDomainError: Infinity
+TypeError: no implicit conversion of true into Integer
+TypeError: no implicit conversion of nil into Integer
+TypeError: no implicit conversion of Array into Integer
+1
+0
+RangeError: float 1e+30 out of range of integer
+RangeError: float NaN out of range of integer
+TypeError: no implicit conversion from nil to integer
+TypeError: no implicit conversion of true into Integer
+1
+1
+0
