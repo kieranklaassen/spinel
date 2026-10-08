@@ -2103,6 +2103,13 @@ const char *exc_builtin_parent(Compiler *c, int ci);
 void emit_class_struct(Compiler *c, ClassInfo *ci, Buf *b);
 int class_needs_scan(ClassInfo *ci);
 void emit_class_scan(Compiler *c, ClassInfo *ci, Buf *b);
+int class_exc_built_by_name(Compiler *c, int cid);
+const char *exc_catch_builder(Compiler *c);
+int class_exc_by_name_row(Compiler *c, int cid);
+void emit_exc_cls_name(Compiler *c, int cid, const char *name, Buf *b);
+int class_exc_has_by_name_sub(Compiler *c, int cid);
+int class_exc_ivnil(Compiler *c, int cid);
+void emit_exc_ivars_tail(Compiler *c, int cid, Buf *b);
 int comp_class_is_module(Compiler *c, ClassInfo *ci);
 int hv_value_class(Compiler *c, int recv);   /* analyze_infer.c (#4846) */
 void emit_class_new(Compiler *c, ClassInfo *ci, Buf *b);

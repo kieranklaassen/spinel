@@ -1962,6 +1962,7 @@ GC_STRESS_TESTS := test/gc_root_frame_slots.rb \
                    test/ffi_str_arg_beside_alloc.rb \
                    test/dispatch_arm_roots_operands.rb \
                    test/exception_message_nul.rb \
+                   test/exception_attribute_marked.rb \
                    test/string_aset_value_runs_first.rb \
                    test/yielding_initialize_new_own_class.rb
 gc-stress-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
