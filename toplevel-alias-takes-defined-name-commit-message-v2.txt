@@ -1,0 +1,29 @@
+A top-level alias takes the name from an earlier top-level def
+
+`def greet = "hello"; def shout = "HELLO"; alias greet shout; p greet`
+printed "hello". A top-level alias is kept on the Toplevel pseudo-class,
+and comp_method_index consults it only when no method owns the name, so
+an alias over a name a `def` holds was never read.
+
+rename_redefined_toplevel_defs already gives an earlier top-level def a
+private name where a later def of the name follows, and renames the
+calls that run between the two. The alias is now such a later
+definition: the def and the calls above the alias take the private name,
+and with no owner left the calls below resolve through the alias.
+
+The alias counts only where the rename is known to be right: its target
+is a method or an alias of the program above it; the def's body does not
+ask `__method__`, which would answer the private name; the program
+defines the name nowhere else; no `respond_to?` asks about the name,
+since it answers from the defs; nothing above the alias reaches the name
+past the rename (a method, class or module body that calls it, a call on
+a receiver, the name as a Symbol or a String, a method looked up by a
+name); and nothing below it takes the name as a method object or as the
+old name of another alias, neither of which is built over an alias.
+Every other program is compiled as it was.
+
+The alias is looked for only where no later def of the name is found,
+and only between the program's first and last top-level alias: a
+program with none asks nothing more than it did.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
