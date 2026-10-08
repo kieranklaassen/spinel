@@ -1,0 +1,28 @@
+FrozenError
+FrozenError
+FrozenError
+[[:a, "lit"]]
+[[:a, "lit"]]
+[[:b, "fresh"]]
+FrozenError
+[[:a, "lit"]]
+FrozenError
+[[:a, "lit"]]
+FrozenError
+FrozenError
+[[:a, "lit"]]
+[["a", "lit"], ["b", "lit"]]
+[[:a, [1, 2]]]
+"q!"
+"local!"
+[[:a, "q"]]
+[[:a, [1, 0]], [:b, [2, 3, 0]]]
+[[:a, "q"]]
+[[:a, "1"], [:b, "2"], [:total, "n"]]
+[[:a, "q"]]
+[[:a, [1, 0]]]
+[[:a, "q"]]
+[[:a, [1, 0]]]
+[[:a, [1, 0, 0]]]
+[[:a, "q"]]
+[[:a, "q"]]
