@@ -1,0 +1,116 @@
+diff --git a/docs/limitations.md b/docs/limitations.md
+index ad3dc7312..7f783265f 100644
+--- a/docs/limitations.md
++++ b/docs/limitations.md
+@@ -741,7 +741,7 @@ Not yet shared:
+ - through a global variable: a String variable assigned from a global (`t = $g`, `t = $g.to_s`) or to one (`$g = s`, `$h = $g`), when one name is mutated in place and the other is read;
+ - through a method that returns its String parameter (`def id(x) = x`, also `x.itself` or a bang method on it), when the result or the variable passed in is mutated in place and the other is read (a variable passed in through the caller's own parameter counts: the caller reads it again);
+ - through a bang method's result, which is its receiver (`r = s.strip!`, `r = s.strip! || s`), when the result is mutated in place through a variable and the receiver is read, by its own name or, for a local that shares its String, through the other one (`t = s; r = t.strip!`); a mutator straight on the result (`s.sub!(a, b) << x`) reaches the receiver;
+-- through the result of `bytesplice`, `append_as_bytes`, or `concat` or `prepend` with other than one argument, which is its receiver too (`r = s.concat(a, b)`), when the result is mutated in place through a variable and the receiver is read, or when a method returns its parameter through one of them. A class's instance variable that keeps `concat` with arguments on another one is not refused where both already hold a shared String (`def initialize(s) = @s = s`, then `@r = @s.concat(a, b)`): it takes that String itself. A mutator straight on the result of `bytesplice` or `append_as_bytes` (`s.bytesplice(0, 1, "Z") << x`) does not reach the receiver and is not refused yet;
++- through the result of `bytesplice`, `append_as_bytes`, or `concat` or `prepend` with other than one argument, which is its receiver too (`r = s.concat(a, b)`), when the result is mutated in place through a variable and the receiver is read, or when a method returns its parameter through one of them. A class's instance variable that keeps `concat` with arguments on another one or on a local is not refused where the write hands it the receiver's String itself (`def initialize(s) = @s = s`, then `@r = @s.concat(a, b); @r << "!"`). A mutator straight on the result of `bytesplice` or `append_as_bytes` (`s.bytesplice(0, 1, "Z") << x`) does not reach the receiver and is not refused yet;
+ - through `to_s` (or another call answering its String receiver) under a mutator whose argument reassigns the variable, when the variable is a String handle (`e.to_s << (e = +"b")`);
+ - into an Array, a String variable added by `insert`, `prepend`, a `concat` of a literal, the later push of a chain (`a << t << s`) or a push into a global Array, or as the value of `s << x`, of `+s` (s itself unless s is frozen; a parameter is refused even when every caller passes a frozen literal) or of a reader method (`a << sb` with `def sb = @s`), when the variable or the element is then mutated in place;
+ - through a reader on a boxed receiver (a Struct or Data member, an `attr_reader`, `def m = @iv`), a String read into a local that is mutated in place while the receiver is read again (a local only queried with String's own methods and then rebound to a copy with String's own `dup`, `s = s.dup`, before the change compiles: the change is the copy's);
+diff --git a/src/analyze.c b/src/analyze.c
+index fe840b633..8635ddcaa 100644
+--- a/src/analyze.c
++++ b/src/analyze.c
+@@ -33549,16 +33549,19 @@ static int sa_bang_receiver(Compiler *c, int call, int *plain) {
+   return r;
+ }
+ /* Does `to`, a class's instance variable, take the handle itself from
+-   `call`, a `concat` with arguments on the instance variable `from`? Where
+-   both slots hold a String handle, that call answers its receiver's handle
+-   and the write stores it: the two names are one String, and a change
+-   through either reaches the other. */
++   `call`, a `concat` with arguments on `from`, an instance variable or a
++   local? Where both slots hold a String handle and the call is marked to
++   hand its handle on (strbuf_box, the mark the emitter reads), the call
++   answers its receiver's handle and the write stores it: the two names
++   are one String, and a change through either reaches the other. Without
++   the mark the write wraps the call's bytes in a handle of its own, a
++   copy, whatever the two slots hold. */
+ static int sa_ivar_keeps_handle(Compiler *c, int call, const SaName *to, const SaName *from) {
+   const NodeTable *nt = c->nt;
+   return to->kind == NK_InstanceVariableReadNode && to->cid != comp_class_index(c, "Toplevel") &&
+-         from->kind == NK_InstanceVariableReadNode && nt_kind(nt, call) == NK_CallNode &&
++         (from->kind == NK_InstanceVariableReadNode || from->kind == NK_LocalVariableReadNode) && nt_kind(nt, call) == NK_CallNode &&
+          sp_streq(nt_str(nt, call, "name"), "concat") && call_plain_argc(c, call) > 0 &&
+-         sa_handle(c, to, 1) && sa_handle(c, from, 1);
++         sa_handle(c, to, 1) && sa_handle(c, from, 1) && c->strbuf_box[call];
+ }
+ /* The String arguments a call's method answers as they are (`def id(x) =
+    x`, also through `x.itself` or `x.strip!`, and each arm of `f ? x : y`):
+diff --git a/test/collect/refusals.expected b/test/collect/refusals.expected
+index 9eb5373ec..6408d0c12 100644
+--- a/test/collect/refusals.expected
++++ b/test/collect/refusals.expected
+@@ -1080,6 +1080,10 @@ spinel: test/reject/string_nested_masgn_target.rb:3: a nested multiple-assignmen
+ spinel: test/reject/string_plain_mutator_result_class_ivar.rb:9: the result of `bytesplice`, `append_as_bytes`, or `concat` or `prepend` with other than one argument, which is its receiver, is mutated in place (a String is not yet shared by reference through such a result). Mutate the receiver instead.
+ == test/reject/string_plain_mutator_result_class_ivar.rb [promote] rc=1
+ spinel: test/reject/string_plain_mutator_result_class_ivar.rb:9: the result of `bytesplice`, `append_as_bytes`, or `concat` or `prepend` with other than one argument, which is its receiver, is mutated in place (a String is not yet shared by reference through such a result). Mutate the receiver instead.
++== test/reject/string_plain_mutator_result_class_ivar_copy.rb [default] rc=1
++spinel: test/reject/string_plain_mutator_result_class_ivar_copy.rb:9: the result of `bytesplice`, `append_as_bytes`, or `concat` or `prepend` with other than one argument, which is its receiver, is mutated in place (a String is not yet shared by reference through such a result). Mutate the receiver instead.
++== test/reject/string_plain_mutator_result_class_ivar_copy.rb [promote] rc=1
++spinel: test/reject/string_plain_mutator_result_class_ivar_copy.rb:9: the result of `bytesplice`, `append_as_bytes`, or `concat` or `prepend` with other than one argument, which is its receiver, is mutated in place (a String is not yet shared by reference through such a result). Mutate the receiver instead.
+ == test/reject/string_plain_mutator_result_mutation.rb [default] rc=1
+ spinel: test/reject/string_plain_mutator_result_mutation.rb:6: the result of `bytesplice`, `append_as_bytes`, or `concat` or `prepend` with other than one argument, which is its receiver, is mutated in place (a String is not yet shared by reference through such a result). Mutate the receiver instead.
+ == test/reject/string_plain_mutator_result_mutation.rb [promote] rc=1
+diff --git a/test/reject/string_plain_mutator_result_class_ivar_copy.rb b/test/reject/string_plain_mutator_result_class_ivar_copy.rb
+new file mode 100644
+index 000000000..6e234779f
+--- /dev/null
++++ b/test/reject/string_plain_mutator_result_class_ivar_copy.rb
+@@ -0,0 +1,14 @@
++# Both instance variables hold a String handle here, but the write wraps
++# the call's bytes in a handle of its own: @r is a copy, and an upcase!
++# through it would not reach @s (CRuby [" AB XY", " AB XY"], Spinel
++# [" ab xy", " AB XY"]): refused, as `@r = @s.strip!` is.
++class Box
++  def initialize(s) = @s = s
++
++  def add(a, b)
++    @r = @s.concat(a, b)
++    @r.upcase!
++    [@s, @r]
++  end
++end
++p Box.new(+" ab ").add("x", "y")
+diff --git a/test/string_plain_mutator_result_kept.rb b/test/string_plain_mutator_result_kept.rb
+index 498e621f3..38037f54d 100644
+--- a/test/string_plain_mutator_result_kept.rb
++++ b/test/string_plain_mutator_result_kept.rb
+@@ -2,8 +2,8 @@
+ # argument answer their receiver. Keeping that result compiles where the
+ # copy cannot be told from the String, a result that is only read; and in
+ # a class where the instance variable that keeps a concat takes the
+-# receiver's String itself: a parameter set @s, so an append through @r
+-# reaches it.
++# receiver's String itself: a parameter set @s, or the receiver is a
++# second name of a parameter, so an append through @r reaches it.
+ s = +"ab"
+ r = s.concat("x", "y")
+ puts r
+@@ -31,3 +31,13 @@ class Box
+   end
+ end
+ p Box.new(+"ab").add
++
++class Tag
++  def go(s)
++    t = s
++    @r = t.concat("x", "y")
++    @r << "!"
++    s
++  end
++end
++p Tag.new.go(+"cd")
+diff --git a/test/string_plain_mutator_result_kept.rb.expected b/test/string_plain_mutator_result_kept.rb.expected
+index df362c7ff..062274a6c 100644
+--- a/test/string_plain_mutator_result_kept.rb.expected
++++ b/test/string_plain_mutator_result_kept.rb.expected
+@@ -7,3 +7,4 @@ abxy
+ "ghi"
+ "ghi"
+ "abxy and a tail long enough to move the buffer"
++"cdxy!"

@@ -1,0 +1,22 @@
+Refuse a plain mutator's kept result in a class's instance variable
+
+`@r = @s.concat("x", "y"); @r.upcase!; p @s` in a class printed "abxy"
+where CRuby prints "ABXY". bytesplice, append_as_bytes, and concat or
+prepend with other than one argument answer their receiver, and a
+class's instance variable that keeps the answer holds a copy, as a local
+or a global does. The route of refuse_string_alias_copies that refuses
+that copy left a class's instance variable out.
+
+It is asked there too: the kept result mutated in place while the
+receiver is read is refused, as `@r = @s.strip!` is in the same class.
+One write is left alone, the one that hands over the receiver's handle:
+`concat` with arguments on an instance variable or a local, where both
+slots hold a String handle and the call is marked to hand its handle on
+(`def initialize(s) = @s = s`, then `@r = @s.concat(a, b); @r << "!"`).
+The two names are one String there, and a change through either reaches
+the other. Without the mark the write stores a copy, whatever the two
+slots hold, and is refused.
+
+Under --share-strings nothing changes: the calls are left to the rule.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

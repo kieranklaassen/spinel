@@ -1,0 +1,12 @@
+--- the message of 6a23c01e8e2d
++++ the message of 49440b5a1911
+@@ -13,3 +13,6 @@
+-`concat` with arguments on an instance variable, where both slots hold a
+-String handle (`def initialize(s) = @s = s`). The two names are one
+-String there, and a change through either reaches the other.
++`concat` with arguments on an instance variable or a local, where both
++slots hold a String handle and the call is marked to hand its handle on
++(`def initialize(s) = @s = s`, then `@r = @s.concat(a, b); @r << "!"`).
++The two names are one String there, and a change through either reaches
++the other. Without the mark the write stores a copy, whatever the two
++slots hold, and is refused.
