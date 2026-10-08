@@ -1,0 +1,54 @@
+A trap block that returns leaves alone a proc call in flight
+
+A proc is called through a side channel: the caller leaves the boxed
+arguments in `_sp_proc_poly_args`, the block in `_sp_proc_blk` and what
+the last argument is in `_sp_proc_kwpos`, and reads the answer back
+from `_sp_proc_poly_ret`. Signal.trap runs its block inside the signal
+handler, and sp_trap_call calls that block the same way. Arriving after
+one side of a call has written the channel and before the other has
+read it, the block's run wrote over the call it interrupted:
+
+    note = proc { |a, b| a }
+    Signal.trap("USR1") { note.call(:got, :it) }
+    def sig
+      Process.kill("USR1", Process.pid)
+      10
+    end
+    pr = proc { |a, b = sig, c| [a, b, c] }
+    p pr.call(1, 3)
+
+printed [1, 10, nil] where CRuby prints [1, 10, 3], and exited 0: the
+proc had read `a`, the default of `b` sent the signal, and `c` was read
+after the block's own call. A signal from outside finds the same
+window in any proc call, between two instructions.
+
+sp_trap_call now sets the channel aside and puts it back when the block
+returns. What is set aside sits in sp_trap_call's frame, on a list the
+globals marker walks: the values are marked as the channel's own are,
+since an answer on its way back has nothing else pointing at it. The
+list changes through one call into the library, so a record is whole
+before it is on the list and the channel has its values back before
+the record is off it, in whatever order the compiler stores.
+
+The channel is the worker's, not a fiber's. Once a block's run has
+switched fibers, by leaving its own or by resuming another, what the
+channel holds when the block returns may be another fiber's call in
+flight, and the old values would be written over it. So a fiber switch
+empties the list, and a block puts back only while the list still ends
+in its own record: then nothing but its own run, whose calls are done,
+has written the channel since. After a switch it puts nothing back, as
+before. A block that leaves by a raise or a throw abandons the
+interrupted call, so nothing is put back there either.
+
+In a program with threads a worker that parks for another worker's
+collection tells its running fiber's context the list as it stands,
+because the collector marks that context for a parked worker.
+
+The test is procs caught at that point by a default argument that
+sends the signal, while the block calls procs of its own with
+arguments, a block and keywords, and collects. Then a block that
+raises, and blocks that switch fibers: one resumes a fiber that yields
+out of its own call, one leaves its fiber and is resumed out of another
+call, two cross, one leaves for good.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
