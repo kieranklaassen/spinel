@@ -1,0 +1,31 @@
+An empty Hash or a bare Array.new is no row of a narrowed table
+
+narrow_object_arrays makes a boxed Array a table of Integer rows, of
+Float rows or of one class where every value stored into it agrees.
+A value with no type yet is neutral there. An empty `{}` and a bare
+`Array.new` have no type yet either, but each is built as what it is,
+a Hash and a boxed Array, so the table narrowed around a value that
+is no row of it and read it back as one:
+
+    t = [[1, 2], [3, 4]]
+    t << Array.new
+    p t[2].size      # 8; CRuby 0
+
+`t << {}; p t[2]` and `t.push({})` ended in a segmentation fault,
+`t.each { |r| p r.size }` printed an address for the Hash, `t[1] = {}`
+and `t[1] = Array.new` did not compile, `p t[1]` never returned from
+a table of Float rows, and a table of objects printed the Hash as an
+object of their class.
+
+oa_obj_class_of now answers "conflict" for the two, as it does for
+every typed value that is no row, and the table stays boxed. The
+empty `[]` literal stays neutral: it is the one empty container built
+at the row's kind (oa_note_empty).
+
+A table that takes one of the two then costs what the same table
+written with the value in its literal (`t = [[1, 2], [3, 4], {}]`)
+costs on master.
+
+Test: test/table_empty_container_row.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

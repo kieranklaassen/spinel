@@ -1,0 +1,1 @@
+An empty Hash or a bare Array.new is no row of a narrowed table
