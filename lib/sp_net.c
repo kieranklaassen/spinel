@@ -171,6 +171,29 @@ int sp_net_sock_ip(int fd, int peer, char *ipbuf, int cap) {
     return -1;
 }
 
+/* The host name the local/peer address of a socket fd reverse-resolves to,
+   into hostbuf: 0, or -1 when it has none (the caller then reports the
+   numeric address, as CRuby does). A lookup may take seconds, so it runs
+   outside the world, as getaddrinfo does. */
+int sp_net_sock_host(int fd, int peer, char *hostbuf, int cap) {
+    struct sockaddr_storage ss;
+    socklen_t len = sizeof(ss);
+    int r = peer ? getpeername(fd, (struct sockaddr *)&ss, &len)
+                 : getsockname(fd, (struct sockaddr *)&ss, &len);
+    if (r != 0) return -1;
+    if (ss.ss_family != AF_INET && ss.ss_family != AF_INET6) return -1;
+#ifdef NI_NAMEREQD
+    sp_native_enter();
+    int rc = getnameinfo((struct sockaddr *)&ss, len, hostbuf, (socklen_t)cap, NULL, 0, NI_NAMEREQD);
+    sp_native_leave();
+    return rc == 0 ? 0 : -1;
+#else
+    /* no reverse lookup on this platform (wasm32-wasi): the numeric address */
+    (void)len; (void)hostbuf; (void)cap;
+    return -1;
+#endif
+}
+
 int sp_net_listen(int port, int reuseport) {
     if (port < 0 || port > 65535) return -1;
     int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -414,12 +437,12 @@ int sp_net_socket(int domain, int type, int protocol) {
 /* getaddrinfo, one resolution at a time: `idx` selects the entry so the caller
    can walk them without owning the addrinfo list. Fills family/socktype/
    protocol/ip/port; returns 0 on success, -1 past the end or on failure. */
-int sp_net_getaddrinfo_at(const char *host, int port, int socktype, int idx,
+int sp_net_getaddrinfo_at(const char *host, int port, int want_family, int socktype, int idx,
                           int *family, int *stype, int *proto,
                           char *ipbuf, int ipcap, int *port_out) {
     struct addrinfo hints, *res = NULL, *ai;
     memset(&hints, 0, sizeof(hints));
-    hints.ai_family   = AF_UNSPEC;
+    hints.ai_family   = want_family > 0 ? want_family : AF_UNSPEC;
     hints.ai_socktype = socktype > 0 ? socktype : 0;
     char portbuf[16];
     snprintf(portbuf, sizeof(portbuf), "%d", port);
