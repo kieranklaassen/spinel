@@ -1,0 +1,30 @@
+An append raises on a String local that a builtin's miss left nil
+
+    def tail(s)
+      t = s[10, 2]
+      t << "a"
+      t << "b"
+      t
+    end
+    p tail("abc")
+
+printed nil; CRuby raises NoMethodError at the first append. Two
+appends make t an sp_String handle, and the slice past the end left it
+NULL. cplan_nil plans a nil test ahead of a call only for a nil the
+program writes, so that a receiver that is never nil does not pay for
+one: the append ran on the NULL handle, sp_String_append_bin did
+nothing there, and the read after it answered nil. An element read
+(`a[5]`), a match that fails (`s[/x+/]`), concat, an interpolation and
+an append that is its method's value went the same way.
+
+The append tests its handle anyway. For an append to a local's handle
+that may be nil from a nil the fact cannot bound, cplan_nil now answers
+CN_RAISE_IN_CALL, and str_mutate_append_bang_arms emits the statement's
+first link through sp_String_append_recv (sp_String_append_recv_n for
+an interpolation's parts), whose NULL arm raises once the operand has
+run. No test is added ahead of the call. `&.`, a guarded append, and a
+program that gives nil a `<<` or a method_missing keep their C.
+
+Test: test/string_handle_append_miss_nil.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
