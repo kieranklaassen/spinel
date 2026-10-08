@@ -1,0 +1,32 @@
+--- redo-out-of-clause-pops-frame-body-v2.md
++++ redo-out-of-clause-pops-frame-body-v3.md
+@@ -33,9 +33,9 @@
+ 
+ Not here:
+ 
+-- A rescue modifier's frame is not counted on master, so a redo out of a modifier's expression leaves that frame as it did; with a modifier inside the begin the one pop takes the modifier's frame and the begin's stays, where master leaves both. "A return, next or break out of a rescue modifier's expression pops its frame" counts that frame, and above it such a redo leaves nothing.
++- A rescue modifier's frame is not counted on master, so a redo out of a modifier's expression leaves that frame as it did; with a modifier inside the begin the one pop takes the modifier's frame and the begin's stays, where master leaves both. Master stopped at the 32nd such redo (`stack level too deep`); this runs on to the 63rd, and an exception raised after the loop that the begin's clause names is rescued by the frame left standing, so the program prints wrong lines where it stopped. With `while true ... next ... break` in place of the redo master prints the same lines. Counting that frame is a change of its own.
+ - A redo with a begin/ensure between it and its body (`begin; redo if n == 1; ensure; done; end`) skips that ensure and leaves its frame, as on master. The ensure has to run before the jump, which is a change of its own; such a redo is the `goto` it was.
+-- A redo as a rescue modifier's fallback (`work rescue redo`) leaves the fallback's exception as the one being handled, as on master: its push is not counted. Inside a rescue clause the redo now pops one of the two, so `$!` after the loop is the clause's exception where master had the fallback's, and the program stops at the 64th such redo where it stopped at the 32nd.
++- A redo as a rescue modifier's fallback (`work rescue redo`) leaves the fallback's exception as the one being handled, as on master: its push is not counted. Inside a rescue clause the redo now pops one of the two, so `$!` after the loop is the clause's exception where master had the fallback's, and the program stops in the 64th call where it stopped in the 33rd.
+ - A redo written in an ensure clause while an exception is on its way drops that exception, as CRuby does, but the next raise takes it as its cause. Master stopped before it got there (`stack level too deep`); with `while true ... next ... break` in place of the redo it prints the same line:
+ 
+   ```ruby
+@@ -62,7 +62,7 @@
+ 
+ The test calls eight methods 200 times each: a redo in a begin's body, in two begins, in a rescue clause, in a while, in a block given to a method that yields, in `map`, in `each_char`, and in a loop that stands inside another rescue clause. It then reads `$!` and rescues one more exception.
+ 
+-Measured on master 9922a2c74. The test is right at -O0 to -O3, with clang and under both stress modes; master prints 6 of its 12 lines wrong at every level and exits 1 (`stack level too deep`). Of 1,615 attack programs (a redo under 17 things that can stand between it and its body; in 19 kinds of loop: while, until, for, loop, a method that yields, each, times, each_with_index, each_with_object, upto, downto, step, map, each_char, each_line, each_byte, each_index, a Hash's each and a Range's each; in a method, in a begin's body, in a rescue clause, under an ensure and in a while; each called 203 times, then `$!` read, one more exception rescued and one left uncaught) master is right on 380 and this on 1,235; none is lost. The 380 left print master's bytes: 190 have a rescue modifier between and 190 an ensure, the first two items above. `make backtrace-test` passes. The scale-test ratios are master's (4.73, 6.14, 4.13). No function grows past its limit: `emit_stmt_inner` goes from 721 lines to 723, the four that open a label lose 6 to 8 lines each, and the two helpers are 8 and 7 lines; `ruby tools/gate.rb check` answers 0 with either commit staged.
++Measured on master 9922a2c74. The test is right at -O0 to -O3, with clang and under both stress modes; master prints 6 of its 12 lines wrong at every level and exits 1. Of 1,615 attack programs (a redo under 17 things that can stand between it and its body, in 19 kinds of loop, each called 203 times) master is right on 380 and this on 1,235; none is lost, and the 380 left print master's bytes (190 with a rescue modifier between, 190 with an ensure: the first two items above).
+ 
+ ## `make gate` (on this branch merged with current master)
+ 
+@@ -70,7 +70,7 @@
+ gate: run on the Mac at opening
+ ```
+ 
+-Run here on this head, two commits on master 9922a2c74: the build of each commit, the test in the seven builds, `ruby tools/gate.rb check` with each commit staged, the C of all 6,530 corpus programs after each commit against the C beneath it, the changed test and the new one built and run, `make backtrace-test`, `make scale-test` and `make int-min-test` at each commit, optcarrot's C by hash, and the 1,615 attack programs on this head and on master.
++Run here on this head: the build and the test at each commit, `ruby tools/gate.rb check` with each commit staged, the corpus C against master's, `make backtrace-test`, `make scale-test`, `make int-min-test` and the attack programs.
+ 
+ - [ ] New tests have `.expected` files that match CRuby 4.0 run with `--enable-frozen-string-literal`
+ - [x] Values past 2^31 are marked `# spinel: int64` (none)
