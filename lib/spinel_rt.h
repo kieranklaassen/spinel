@@ -10689,6 +10689,30 @@ static SP_INLINE sp_RbVal sp_poly_arr_get_hash(sp_RbVal a, sp_int i) {
   }
   return sp_poly_arr_get_hash_cold(a, i);
 }
+/* A Bignum as an Array's index: the smallest Integer still fits a word and
+   is past every Array; any other is CRuby's RangeError. */
+static SP_COLD SP_NOINLINE sp_int sp_poly_ary_big_offset(sp_RbVal v) {
+  sp_Bigint *b = (sp_Bigint *)v.v.p;
+  if (sp_bigint_bit_length(b) < (sp_int)(sizeof(sp_int) * 8)) return (sp_int)sp_bigint_to_int(b);
+  sp_raise_cls("RangeError", "bignum too big to convert into 'long'");
+}
+/* An Array's index that is no Integer, off the hot read: it converts as
+   Array#fill's offset does. An object answers to_int, a Float or a Bignum
+   past a word is CRuby's RangeError, and what has no conversion is its
+   TypeError. A Bignum comes here with the rest: left out of the arm, it
+   went on to the function's last line, which read element 0. */
+static SP_NOINLINE sp_RbVal sp_poly_ary_index_other(sp_RbVal a, sp_RbVal idx) {
+  if (idx.tag == SP_TAG_BIGINT) return sp_poly_arr_get_hash(a, sp_poly_ary_big_offset(idx));
+  /* a Complex whose real part is past a word converts to a Bignum, CRuby's
+     RangeError; sp_complex_to_int casts it, and the cast is no offset */
+  if (idx.tag == SP_TAG_OBJ && idx.cls_id == SP_BUILTIN_COMPLEX && idx.v.p) {
+    sp_Complex *c = (sp_Complex *)idx.v.p;
+    if (c->im == 0.0 && !(c->fl & SP_CPLX_IM_F) && isfinite(c->re) &&
+        (c->re >= -(sp_float)INTPTR_MIN || c->re < (sp_float)INTPTR_MIN))
+      sp_raise_cls("RangeError", "bignum too big to convert into 'long'");
+  }
+  return sp_poly_arr_get_hash(a, sp_array_fill_offset_arg(idx, 0));
+}
 
 static SP_NOINLINE sp_RbVal sp_poly_arr_get_hash_cold(sp_RbVal a, sp_int i) {
   /* MatchData#[i]: the group, nil where it did not match */
@@ -10948,10 +10972,13 @@ static sp_RbVal sp_poly_index_poly(sp_RbVal recv, sp_RbVal idx) {
   /* ...nor a String's or a Symbol's: the index arms below read it as 0 */
   if (idx.tag == SP_TAG_NIL && (recv.tag == SP_TAG_STR || recv.tag == SP_TAG_SYM))
     sp_raise_cls("TypeError", "no implicit conversion from nil to integer");
-  if (recv.tag == SP_TAG_OBJ && sp_poly_is_array_kind(recv.cls_id) && idx.tag != SP_TAG_BIGINT &&
+  if (recv.tag == SP_TAG_OBJ && sp_poly_is_array_kind(recv.cls_id) &&
       !(idx.tag == SP_TAG_OBJ && idx.cls_id == SP_BUILTIN_RANGE)) {
-    if (idx.tag == SP_TAG_FLT) return sp_poly_arr_get_hash(recv, (sp_int)idx.v.f);
-    sp_raise_cls("TypeError", sp_sprintf("no implicit conversion of %s into Integer", sp_poly_class_name(idx)));
+    /* a Float is cut where it fits a word: the cast alone is undefined for
+       a NaN or 1e30, and answered nil */
+    if (idx.tag == SP_TAG_FLT && idx.v.f < -(sp_float)INTPTR_MIN && idx.v.f >= (sp_float)INTPTR_MIN)
+      return sp_poly_arr_get_hash(recv, (sp_int)idx.v.f);
+    return sp_poly_ary_index_other(recv, idx);
   }
   /* heterogeneous-key hash: any key kind (incl. Method) looks up directly. */
   if (recv.tag == SP_TAG_OBJ && recv.cls_id == SP_BUILTIN_POLY_POLY_HASH)
@@ -11070,8 +11097,17 @@ static sp_RbVal sp_poly_index_poly(sp_RbVal recv, sp_RbVal idx) {
 /* The same read for a receiver whose slot the index assigned (`$x[($x = v;
    k)]`, read after the index ran): an Integer keeps the bit 0 it answered
    for an index no arm above the last line takes, which the value assigned
-   can share with CRuby's bit of the value before. */
+   can share with CRuby's bit of the value before. An Array keeps its arm
+   as it was, for the nil it gave can be CRuby's answer of the value
+   before: every kind but a Float its TypeError, a Float cast with no range
+   test, and a Bignum left to the last line. */
 static SP_NOINLINE SP_COLD sp_RbVal sp_poly_index_poly_asis(sp_RbVal recv, sp_RbVal idx) {
+  if (recv.tag == SP_TAG_OBJ && sp_poly_is_array_kind(recv.cls_id) && idx.tag != SP_TAG_INT &&
+      idx.tag != SP_TAG_NIL && !(idx.tag == SP_TAG_OBJ && idx.cls_id == SP_BUILTIN_RANGE)) {
+    if (idx.tag == SP_TAG_BIGINT) return sp_poly_arr_get_hash(recv, 0);
+    if (idx.tag == SP_TAG_FLT) return sp_poly_arr_get_hash(recv, (sp_int)idx.v.f);
+    sp_raise_cls("TypeError", sp_sprintf("no implicit conversion of %s into Integer", sp_poly_class_name(idx)));
+  }
   if ((recv.tag == SP_TAG_INT || recv.tag == SP_TAG_BIGINT) && idx.tag != SP_TAG_INT &&
       idx.tag != SP_TAG_STR && idx.tag != SP_TAG_SYM && !sp_poly_is_strbuf(idx) &&
       !(idx.tag == SP_TAG_OBJ && idx.cls_id == SP_BUILTIN_RANGE && idx.v.p))
