@@ -1,9 +1,9 @@
 # bytesplice, append_as_bytes, and concat or prepend with other than one
 # argument answer their receiver. Keeping that result compiles where the
 # copy cannot be told from the String, a result that is only read; and in
-# a class, where nothing is refused yet: there an append through the
-# instance variable that keeps the result reaches an instance-variable
-# receiver a parameter set.
+# a class where the instance variable that keeps a concat takes the
+# receiver's String itself: a parameter set @s, so an append through @r
+# reaches it.
 s = +"ab"
 r = s.concat("x", "y")
 puts r

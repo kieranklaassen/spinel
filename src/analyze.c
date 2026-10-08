@@ -33548,6 +33548,18 @@ static int sa_bang_receiver(Compiler *c, int call, int *plain) {
   if (plain) *plain = unfollowed;
   return r;
 }
+/* Does `to`, a class's instance variable, take the handle itself from
+   `call`, a `concat` with arguments on the instance variable `from`? Where
+   both slots hold a String handle, that call answers its receiver's handle
+   and the write stores it: the two names are one String, and a change
+   through either reaches the other. */
+static int sa_ivar_keeps_handle(Compiler *c, int call, const SaName *to, const SaName *from) {
+  const NodeTable *nt = c->nt;
+  return to->kind == NK_InstanceVariableReadNode && to->cid != comp_class_index(c, "Toplevel") &&
+         from->kind == NK_InstanceVariableReadNode && nt_kind(nt, call) == NK_CallNode &&
+         sp_streq(nt_str(nt, call, "name"), "concat") && call_plain_argc(c, call) > 0 &&
+         sa_handle(c, to, 1) && sa_handle(c, from, 1);
+}
 /* The String arguments a call's method answers as they are (`def id(x) =
    x`, also through `x.itself` or `x.strip!`, and each arm of `f ? x : y`):
    parameters the method never reassigns, read as one of its values. Up to
@@ -33842,13 +33854,10 @@ static void refuse_string_alias_copies(Compiler *c) {
       if (b < 0 || !sa_name(c, b, &from) || (str_self_call(nt, bv) && sa_handle(c, &to, 0) && sa_handle(c, &from, 0)))
         continue;
       /* a class's instance variable that keeps the result of a call
-         without a bang is left as on master, and nothing there is refused
-         yet: an append through it reaches an instance-variable receiver in
-         some programs (`@r = @s.concat(a, b)` where a parameter set @s)
-         and does not build in others, and most other changes through
-         either name are lost. One of the top level takes a copy, as a
-         global does */
-      if (plain && to.kind == NK_InstanceVariableReadNode && to.cid != comp_class_index(c, "Toplevel"))
+         without a bang holds a copy too, but for the one write that hands
+         over the handle (sa_ivar_keeps_handle). One of the top level takes
+         a copy, as a global does */
+      if (plain && sa_ivar_keeps_handle(c, v, &to, &from))
         continue;
       /* a local that shares its handle is read through the other name
          (`t = s; r = t.strip!; r << x; p s`) */
