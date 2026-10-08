@@ -15311,6 +15311,50 @@ static char *emit_str_splice_value(Compiler *c, int recv, int v, int late, int t
   if (recv >= 0) { buf_puts(b, " sp_str_check_mutable("); emit_expr(c, recv, b); buf_puts(b, ");"); }
   return vb.p;
 }
+/* The Range of `s[range] = v` into _t<ti>. An endless Range carries
+   INTPTR_MAX as its end, and so does a Range whose end is 2^63 - 1: from a
+   start of 0 the arm's count of characters ran over it, and `s[0..] = "x"`
+   kept all of s behind the x. A Range written in the index is asked here.
+   Answers 1 where it is written with no end, or with nil; 2 where the end
+   written can be nil when the program runs, and `_ne<ti>` says whether it
+   was; 0 for any other index, read as it was: a Range out of a variable has
+   no word for "no end" that 2^63 - 1 cannot counterfeit. */
+static int emit_str_aset_range(Compiler *c, int idx, int ti, Buf *b) {
+  const NodeTable *nt = c->nt;
+  int rg = unwrap_parens(c, idx), left = -1, right = -1, lnone = 0, pend = 0, ask = 0;
+  if (nt_kind(nt, rg) == NK_RangeNode) {
+    left = nt_ref(nt, rg, "left"); right = nt_ref(nt, rg, "right");
+    lnone = left < 0 || nt_kind(nt, left) == NK_NilNode;
+    if (right < 0 || nt_kind(nt, right) == NK_NilNode) ask = 1;
+    else {
+      /* the two ends go to temps, the left one first: only the shapes the
+         Range literal builds with sp_range_new or sp_range_new_pend, and
+         not a Range that ran ahead of the statement into a temp */
+      Repr lr = repr_of(c, lnone ? right : left), rr = repr_of(c, right), gr = repr_of(c, rg);
+      int lplain = lnone || (lr.kind != RK_BOXED && lr.as_ty == TY_INT && !lr.big);
+      int rnil = rr.kind != RK_BOXED && rr.as_ty == TY_INT && !rr.big && nullable_int_value(c, right);
+      pend = comp_ntype(c, right) == TY_POLY && !rr.big;
+      if (lplain && (pend || rnil) && gr.range != TY_FLOAT && gr.range != TY_STRING &&
+          !arg_ran_first(idx, 0) && !arg_ran_first(rg, 0)) ask = 2;
+    }
+  }
+  if (ask != 2) {
+    buf_printf(b, "{ sp_Range _t%d = sp_range_ix(", ti); emit_expr(c, idx, b); buf_puts(b, ");");
+    return ask;
+  }
+  buf_printf(b, "{ sp_int _rl%d = ", ti);
+  if (lnone) buf_puts(b, "INTPTR_MIN"); else emit_range_endpoint(c, left, "INTPTR_MIN", b);
+  if (pend) {
+    buf_printf(b, "; sp_RbVal _re%d = ", ti); emit_expr(c, right, b);
+    buf_printf(b, "; int _ne%d = _re%d.tag == SP_TAG_NIL; sp_Range _t%d = sp_range_ix(sp_range_new_pend(_rl%d, _re%d", ti, ti, ti, ti, ti);
+  }
+  else {
+    buf_printf(b, "; sp_int _re%d = ", ti); emit_int_expr_nilable(c, right, b);
+    buf_printf(b, "; int _ne%d = _re%d == SP_INT_NIL; sp_Range _t%d = sp_range_ix(sp_range_new(_rl%d, _ne%d ? INTPTR_MAX : _re%d", ti, ti, ti, ti, ti, ti);
+  }
+  buf_printf(b, ", %d));", (nt_int(nt, rg, "flags", 0) & 4) ? 1 : 0);
+  return 2;
+}
 /* emit_array_mutate_stmt_body's String mutators done by reassigning the
    receiver: replace, prepend, insert, concat, clear, delete_prefix! /
    delete_suffix! (answers 1 emitted, 0 declined, -1 to go on) */
@@ -15494,7 +15538,7 @@ static int str_mutate_reassign_arms(Compiler *c, Buf *b, int indent, const NodeT
     if (assignable && sp_streq(name, "[]=") && argc == 2 && comp_ntype(c, argv[0]) == TY_RANGE) {
       int ti = ++g_tmp;
       emit_indent(b, indent);
-      buf_printf(b, "{ sp_Range _t%d = sp_range_ix(", ti); emit_expr(c, argv[0], b); buf_puts(b, ");");
+      int ne = emit_str_aset_range(c, argv[0], ti, b);
       char *v = emit_str_splice_value(c, -1, argv[1], 0, ti, b);
       buf_printf(b, " sp_int _len%d = (sp_int)sp_str_length(", ti); emit_expr(c, recv, b); buf_puts(b, ");");
       /* a beginless bound is 0 and an endless one is the last index, rather
@@ -15512,7 +15556,16 @@ static int str_mutate_reassign_arms(Compiler *c, Buf *b, int indent, const NodeT
       buf_printf(b, " int _oe%d = _t%d.last == SP_INT_NIL;", ti, ti);
       buf_printf(b, " sp_int _e%d = _oe%d ? _len%d - 1 :"
                     " (_t%d.last < 0 ? _t%d.last + _len%d : _t%d.last);", ti, ti, ti, ti, ti, ti, ti);
-      buf_printf(b, " sp_int _n%d = _e%d - _a%d + ((_t%d.excl && !_oe%d) ? 0 : 1);", ti, ti, ti, ti, ti);
+      /* No end, from a start of 0: all of the String, where the count ran
+         over. From any other start the count is what it was. An end that is
+         2^63 - 1 runs it over too, and there nothing is replaced: CRuby's
+         count wraps the same way. The wrap is spelled out, where signed
+         arithmetic left it to the C compiler and gcc raised IndexError,
+         "negative length", for some of them. */
+      buf_printf(b, " sp_int _n%d = ", ti);
+      if (ne == 1) buf_printf(b, "!_a%d ? INTPTR_MAX : ", ti);
+      else if (ne) buf_printf(b, "_ne%d && !_a%d ? INTPTR_MAX : ", ti, ti);
+      buf_printf(b, "(sp_int)((uintptr_t)_e%d - (uintptr_t)_a%d + ((_t%d.excl && !_oe%d) ? 0 : 1));", ti, ti, ti, ti);
       buf_puts(b, " "); emit_expr(c, recv, b); buf_puts(b, " = sp_str_splice_at(");
       emit_expr(c, recv, b);
       buf_printf(b, ", _a%d, _n%d < 0 ? 0 : _n%d, %s, 1); }\n", ti, ti, ti, v ? v : "NULL");
