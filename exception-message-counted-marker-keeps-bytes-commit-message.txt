@@ -1,0 +1,30 @@
+An exception message that begins with the counted marker keeps its bytes
+
+    m = "\xFF\xFECM\xFD\x01AAAA rest".b
+    begin
+      raise m
+    rescue => e
+      p e.message.bytesize
+    end
+
+printed 1094795585 where CRuby prints 15: the message that came back was
+a gigabyte of whatever followed the String in memory. With "ab" after
+the six bytes it was 25,185 bytes, and with nothing after them it came
+back empty. With 0x02 for the sixth byte it came back frozen as well.
+
+A message that holds a NUL, and a frozen String's, travels as a counted
+message: six marker bytes, the payload's length, the payload. Every
+reader took a message for a counted one by the six bytes alone, so a
+String of the program that begins with them had its next four bytes
+read as a length.
+
+sp_cmsg_p now also asks the string for its own length, which for a
+counted message is the header's plus the payload's. It reads the length
+only once the six bytes match, and only a String, with its own header,
+has them. A String that is such a message byte for byte is then still
+read as its own payload, so sp_exc_msg_given sends it counted itself,
+as it sends one with a NUL. Without a NUL in it such a String is
+sixteen megabytes long, each byte of its length nonzero, and came back
+ten bytes short; the test raises one of each form.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

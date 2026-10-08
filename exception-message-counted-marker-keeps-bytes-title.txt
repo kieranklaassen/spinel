@@ -1,0 +1,1 @@
+An exception message that begins with the counted marker keeps its bytes
