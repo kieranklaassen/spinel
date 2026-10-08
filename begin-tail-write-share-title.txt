@@ -1,0 +1,1 @@
+--share-strings: a begin block that ends in a local's write answers the local's String

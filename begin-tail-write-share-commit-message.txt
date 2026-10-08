@@ -1,0 +1,44 @@
+--share-strings: a begin block that ends in a local's write answers the local's String
+
+  s = +"a"
+  v = begin
+    t = s << "g"
+  end
+  v << "!"
+  p v, s
+
+prints "ag!" twice in CRuby. Built with --share-strings, master prints
+nil and "ag": the block's value is lost. It is lost wherever the value
+goes: printed it is nil, `.size` on it raises NoMethodError, a `<<` on
+it raises FrozenError, an Array literal that holds it holds nil.
+
+A begin's last statement that writes a local is emitted as a statement,
+and the local's slot is then handed back as the value. That is done
+only where the slot's type is the result's. The slot of a String local
+the rule shares is the handle and the block's result is a String, so
+nothing was handed back.
+
+Where the value is kept or changed in place the rule asks the begin for
+the handle (strbuf_route_begin), which it gives when each arm ends in a
+variable's read. An arm that ends in the write of a local holding the
+handle now counts too: the result slot is the handle and the arm puts
+the local's slot into it. The begin's node is typed as that slot, so it
+is read as the handle under the box mark.
+
+Where the value is only read the result is a String, and the slot is
+read out into it as a read of the local is. That is done for a begin
+the rule routes, since any other hands the copy on even to what changes
+it in place; and not past an ensure body, which runs after the read and
+can change the String.
+
+Without --share-strings the generated C is unchanged.
+
+test/share/share_strings_begin_tail_write.rb has the write under a
+plain begin, under a rescue, in a rescue's body, before an ensure, as
+`&&=` and `||=`, and in a method, with the value kept in a local and
+appended to, printed, measured, interpolated, held by an Array literal,
+changed in place as a receiver, pushed into an Array, written to an
+instance variable and a global, and passed to a method that appends. On
+master its first 21 lines are wrong and the next statement raises.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
