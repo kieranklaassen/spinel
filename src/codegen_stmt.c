@@ -9617,6 +9617,11 @@ void emit_rescue(Compiler *c, int id, Buf *b, int indent, int fr, const char *re
   emit_indent(b, indent);
   if (spec_cid >= 0) {
     const char *xn = c->classes[spec_cid].name;
+    /* a class with ivars and no initialize is raised by its name and built
+       here: with its own scan and nil seeds, as Klass.new builds it */
+    int by_name = class_exc_built_by_name(c, spec_cid);
+    const char *fn = by_name ? "sp_exc_new_sub_ivars" : "sp_exc_new_sub_sized";
+    int own_sub = 0;
     if (bare) {
       /* A bare arm matches any StandardError, so the carried-object cast to
          the specialized class must be guarded by a class match: a foreign
@@ -9624,17 +9629,24 @@ void emit_rescue(Compiler *c, int id, Buf *b, int indent, int fr, const char *re
       const char *qn = class_ruby_name(c, spec_cid);
       buf_printf(b, "sp_Exception *_ce_%d = (sp_exc_obj[sp_exc_top] && sp_exc_cls_matches(_rcls_%d, \"%s\"))"
                     " ? (sp_Exception *)sp_exc_obj[sp_exc_top]"
-                    " : (sp_Exception *)sp_exc_new_sub_sized(sizeof(sp_%s), _rcls_%d, _rmsg_%d);\n",
-                 rc, rc, qn ? qn : xn, xn, rc, rc);
+                    " : (sp_Exception *)%s(sizeof(sp_%s), _rcls_%d, _rmsg_%d",
+                 rc, rc, qn ? qn : xn, fn, xn, rc, rc);
     }
-    else
+    else {
+      /* the arm matched, so what was raised is this class or one below it: a
+         subclass built by name is built as itself, at its own size */
+      own_sub = by_name && class_exc_has_by_name_sub(c, spec_cid);
       buf_printf(b, "sp_Exception *_ce_%d = sp_exc_obj[sp_exc_top] ? (sp_Exception *)sp_exc_obj[sp_exc_top]"
-                    " : (sp_Exception *)sp_exc_new_sub_sized(sizeof(sp_%s), _rcls_%d, _rmsg_%d);\n",
-                 rc, xn, rc, rc);
+                    " : (sp_Exception *)", rc);
+      if (own_sub) buf_printf(b, "({ void *_u = sp_exc_own_by_name(_rcls_%d, _rmsg_%d, 0); _u ? _u : ", rc, rc);
+      buf_printf(b, "%s(sizeof(sp_%s), _rcls_%d, _rmsg_%d", fn, xn, rc, rc);
+    }
+    if (by_name) emit_exc_ivars_tail(c, spec_cid, b);
+    buf_puts(b, own_sub ? "); });\n" : ");\n");
   }
   else
     buf_printf(b, "sp_Exception *_ce_%d = sp_exc_obj[sp_exc_top] ? (sp_Exception *)sp_exc_obj[sp_exc_top]"
-                  " : sp_exc_new_for_catch(_rcls_%d, _rmsg_%d);\n", rc, rc, rc);
+                  " : %s(_rcls_%d, _rmsg_%d);\n", rc, exc_catch_builder(c), rc, rc);
   emit_indent(b, indent);
   /* Push the exception onto sp_exc_handling FIRST: the push is what roots it.
    * A raise that carried no object -- every `raise Cls, "msg"` and every
@@ -9965,8 +9977,8 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
     emit_indent(b, indent);
     buf_printf(b, "void *_ic%d = sp_inflight_cause;"
                   " if (_excf%d) sp_inflight_cause = _excobj%d ? _excobj%d"
-                  " : (void *)sp_exc_new_for_catch(_exccls%d, _excmsg%d);\n",
-               eid, eid, eid, eid, eid, eid);
+                  " : (void *)%s(_exccls%d, _excmsg%d);\n",
+               eid, eid, eid, eid, exc_catch_builder(c), eid, eid);
     /* The ensure's reads are not the method's return. Keep both a
        published handle and a fresh tail's cleared channel across them. */
     Scope *sc = comp_scope_of(c, id);
@@ -14578,7 +14590,7 @@ void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
       int tce = ++g_tmp;
       emit_indent(b, indent + 1);
       buf_printf(b, "sp_Exception *_t%d = sp_exc_obj[sp_exc_top] ? (sp_Exception *)sp_exc_obj[sp_exc_top]"
-                    " : sp_exc_new_for_catch(sp_exc_cls[sp_exc_top], sp_exc_msg[sp_exc_top]);\n", tce);
+                    " : %s(sp_exc_cls[sp_exc_top], sp_exc_msg[sp_exc_top]);\n", tce, exc_catch_builder(c));
       emit_indent(b, indent + 1);
       buf_printf(b, "sp_gc_wb((void *)_t%d); _t%d->cause = (sp_Exception *)sp_pending_cause; sp_pending_cause = NULL;\n", tce, tce);
       emit_indent(b, indent + 1);
