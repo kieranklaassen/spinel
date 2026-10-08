@@ -12757,6 +12757,19 @@ static sp_RbVal sp_poly_struct_values(sp_RbVal v) {
   if (v.tag != SP_TAG_OBJ || v.cls_id < 0 || !sp_obj_struct_values_fn) return sp_box_nil();
   return sp_obj_struct_values_fn(v);
 }
+/* A splatted Integer Range among values_at's indexes: its members onto the
+   list. One that steps by one between two ends is walked as it stands; any
+   other goes through the array sp_range_to_ia makes of it, which raises for
+   an endless or a beginless one. */
+static void sp_poly_values_at_range(sp_PolyArray *idx, sp_Range r) {
+  if (sp_range_step(r) == 1 && r.last != INTPTR_MAX && r.first != INTPTR_MIN) {
+    for (sp_int i = r.first; i <= r.last - r.excl; i++) sp_PolyArray_push(idx, sp_box_int(i));
+    return;
+  }
+  sp_IntArray *ia = sp_range_to_ia(r); SP_GC_ROOT(ia);
+  for (sp_int i = 0; i < sp_IntArray_length(ia); i++)
+    sp_PolyArray_push(idx, sp_box_int(sp_IntArray_get(ia, i)));
+}
 /* Array#values_at indexes; Hash#values_at looks the keys up. */
 static sp_RbVal sp_poly_arr_values_at(sp_RbVal v, sp_PolyArray *idx) {
   /* MatchData#values_at: each group by index or name (it took the Array
