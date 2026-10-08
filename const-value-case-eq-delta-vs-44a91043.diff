@@ -1,0 +1,96 @@
+diff --git a/src/codegen_call_object.c b/src/codegen_call_object.c
+index 390818ee4..82e12ccd5 100644
+--- a/src/codegen_call_object.c
++++ b/src/codegen_call_object.c
+@@ -17,9 +17,14 @@
+    false: an Integer or a Symbol against an Array, a Hash or a Range raises
+    NoMethodError there, a String against an Array, a Bignum against a Float
+    and a Float against a Bignum do not build, and an object as x is asked
+-   nothing where CRuby asks its ==. A name that a class or a module bears
+-   too stays the class test: a constant's read is typed by its name alone,
+-   so `Foo === x` outside the class that holds `Foo = 3` reads as the 3. */
++   nothing where CRuby asks its ==. The nil of an Integer is a sentinel in
++   its slot, which a beginless Range covers and a Float Range can refuse
++   with a TypeError, and no slot says for sure that it cannot hold it (an
++   ivar never assigned, a fetch with a nil default): a Range takes an
++   Integer only where it is written as a literal. A name that a class or a
++   module bears too stays the class test: a constant's read is typed by its
++   name alone, so `Foo === x` outside the class that holds `Foo = 3` reads
++   as the 3. */
+ static int const_value_eqq(Compiler *c, const NodeTable *nt, int recv, TyKind rt, int arg) {
+   const char *kn = nt_kind(nt, recv) == NK_ConstantReadNode ? nt_str(nt, recv, "name") : NULL;
+   if (!kn || !comp_const(c, kn) || comp_class_index(c, kn) >= 0 ||
+@@ -28,13 +33,15 @@ static int const_value_eqq(Compiler *c, const NodeTable *nt, int recv, TyKind rt
+   int scalar = at == TY_INT || at == TY_FLOAT || at == TY_STRING || at == TY_SYMBOL || at == TY_BOOL || at == TY_POLY;
+   int listed = scalar || at == TY_BIGINT || at == TY_RANGE || at == TY_STR_RANGE || at == TY_INT_ARRAY ||
+                at == TY_STR_ARRAY || at == TY_SYM_POLY_HASH;
++  int int_lit = nt_kind(nt, arg) == NK_IntegerNode;
+   switch ((int)rt) {
+   case TY_INT: case TY_SYMBOL: return scalar || at == TY_BIGINT;
+   case TY_BIGINT:              return listed && at != TY_FLOAT;
+   case TY_FLOAT:               return listed && at != TY_BIGINT;
+   case TY_STRING:              return listed && at != TY_INT_ARRAY && at != TY_STR_ARRAY;
+-  case TY_RANGE:               return at == TY_INT || at == TY_BIGINT || at == TY_FLOAT;
+-  case TY_FLOAT_RANGE: case TY_STR_RANGE:
++  case TY_RANGE:               return (at == TY_INT && int_lit) || at == TY_BIGINT || at == TY_FLOAT;
++  case TY_FLOAT_RANGE:         return listed && (at != TY_INT || int_lit);
++  case TY_STR_RANGE:
+   case TY_INT_ARRAY: case TY_FLOAT_ARRAY: case TY_STR_ARRAY: case TY_POLY_ARRAY:
+   case TY_STR_INT_HASH: case TY_SYM_POLY_HASH:
+     return listed;
+diff --git a/test/const_value_case_eq.rb b/test/const_value_case_eq.rb
+index db993a647..4ecf9495c 100644
+--- a/test/const_value_case_eq.rb
++++ b/test/const_value_case_eq.rb
+@@ -45,15 +45,22 @@ p(mix.map { |v| HALF === v })
+ p(mix.map { |v| PAIR === v })
+ p(mix.map { |v| LUCKY === v })
+ # in a block, and from a method of the class that holds the constant
+-p([9, 3, 1].find { |v| LIMIT === v }, [9, 3, 1].select { |v| LIMIT === v }, [9, 3, 1].count { |v| LIMIT === v })
++p([9, 3, 1].find { |v| THREE === v }, ["x", "abc"].select { |v| NAME === v }, [1.5, 2.5, 1.5].count { |v| RATE === v })
+ class Gate
+-  ALLOWED = 10..20
++  CODE = 15
+   WORD = "open"
+-  def ok?(n) = ALLOWED === n
++  def ok?(n) = CODE === n
+   def word?(s) = WORD === s
+ end
+ g = Gate.new
+ p(g.ok?(15), g.ok?(5), g.word?("open"), g.word?("shut"))
++# an Integer that can be nil is not asked of a Range: no Range covers nil
++MAXIMUM = (..5)
++BAND = -1.0..1.0
++STOCK = {"bolt" => 9}
++def level(i) = i == 0 ? 9 : nil
++p(MAXIMUM === STOCK["cog"], BAND === STOCK["cog"], MAXIMUM === level(1), BAND === level(1))
++p(MAXIMUM === 3, MAXIMUM === 9, BAND === 0, BAND === 2)
+ # a class is still asked whether x is one of its instances
+ p(Integer === 3, String === NAME, Seven === LUCKY, Seven === 7, Comparable === 3, Gate === g, Range === LIMIT)
+ # a name that a class bears too is still read as the class
+diff --git a/test/const_value_case_eq.rb.expected b/test/const_value_case_eq.rb.expected
+index 42248e1e3..4e8b449b5 100644
+--- a/test/const_value_case_eq.rb.expected
++++ b/test/const_value_case_eq.rb.expected
+@@ -60,12 +60,20 @@ false
+ [false, false, false, false, false, true, false, false, false]
+ [false, false, false, false, false, false, false, false, true]
+ 3
+-[3, 1]
++["abc"]
+ 2
+ true
+ false
+ true
+ false
++false
++false
++false
++false
++true
++false
++true
++false
+ true
+ true
+ true
