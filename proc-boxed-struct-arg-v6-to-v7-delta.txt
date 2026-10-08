@@ -1,0 +1,8 @@
+67,69c67,69
+< - [ ] Values past 2^31 are marked `# spinel: int64`
+< - [ ] If optcarrot's generated C changed: callgrind numbers, checksum 59662
+< - [ ] Depends on: #
+---
+> - [x] Values past 2^31 are marked `# spinel: int64` (none)
+> - [ ] If optcarrot's generated C changed: callgrind numbers, checksum 59662 (its C is unchanged)
+> - [ ] Depends on: none in the code; to be merged after the pull request that keeps both ends of a String Range made on the spot (see above)
