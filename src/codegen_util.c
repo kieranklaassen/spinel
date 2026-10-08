@@ -2614,6 +2614,13 @@ int srange_member_builtin(Compiler *c, const char *name) {
   return !builtin_reopened(c, "Range", name) && !builtin_reopened(c, "String", "<=>") &&
          !builtin_reopened(c, "String", "==") && !builtin_reopened(c, "String", "succ");
 }
+/* May === of a String Range answer a boxed value by covering the String
+   it holds? Not where a box tagged as a handle is unsure, and not where
+   the program has a Range#=== of its own: there the equality it was
+   written as stays. */
+int srange_eqq_covers_boxed(Compiler *c) {
+  return g_strbuf_boxes != SB_BOXES_UNSURE && srange_member_builtin(c, "===");
+}
 /* A String method answering its receiver or nil (bop_share_self_answer:
    a bang method, an iterator given a block) called on a local that holds
    the shared handle: its value is that local's String, or nil. */
