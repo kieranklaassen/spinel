@@ -1,0 +1,13 @@
+Refactor: the constant rewrite takes the read, not the call
+
+rewrite_const_alias_kind_arg took an is_a? call and checked its name and
+argument count before the guards. The guards speak of a constant read
+alone, so the function becomes rewrite_const_alias_read and takes the
+read; the caller keeps the test of the call. The scan for a program's
+own is_a?, kind_of? or instance_of? becomes program_names_method with
+the list of names as an argument.
+
+No change in the C of any program.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+

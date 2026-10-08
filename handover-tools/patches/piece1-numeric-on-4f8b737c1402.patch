@@ -1,0 +1,60 @@
+diff --git a/src/codegen_call.c b/src/codegen_call.c
+index 91656ad2..3ab08c0a 100644
+--- a/src/codegen_call.c
++++ b/src/codegen_call.c
+@@ -18022,6 +18022,7 @@ int emit_poly_isa_test(Compiler *c, const char *cn, const char *v, int exact, Bu
+   else if (sp_streq(cn, "NilClass")) buf_printf(b, "%s.tag == SP_TAG_NIL", v);
+   else if (sp_streq(cn, "TrueClass"))  buf_printf(b, "(%s.tag == SP_TAG_BOOL && %s.v.b)", v, v);
+   else if (sp_streq(cn, "FalseClass")) buf_printf(b, "(%s.tag == SP_TAG_BOOL && !%s.v.b)", v, v);
++  else if (sp_streq(cn, "Numeric") && exact) buf_puts(b, "0");   /* no number's own class */
+   else if (sp_streq(cn, "Numeric"))
+     buf_printf(b, "(%s.tag == SP_TAG_INT || %s.tag == SP_TAG_FLT || %s.tag == SP_TAG_BIGINT || "
+                   "(%s.tag == SP_TAG_OBJ && (%s.cls_id == SP_BUILTIN_RATIONAL || "
+diff --git a/test/instance_of_numeric_boxed.rb b/test/instance_of_numeric_boxed.rb
+new file mode 100644
+index 00000000..0202b159
+--- /dev/null
++++ b/test/instance_of_numeric_boxed.rb
+@@ -0,0 +1,17 @@
++# spinel: int64 -- a Bignum among the values
++# instance_of? asks for the object's own class: no number is an instance of
++# Numeric itself, on a boxed receiver as on a typed one.
++vals = [1.5, "s", 1, :a, nil, 2**70, 1r, 2i]
++vals.each do |v|
++  p [v.instance_of?(Numeric), v.is_a?(Numeric), v.kind_of?(Numeric), Numeric === v]
++end
++p vals.count { |v| v.instance_of?(Numeric) }, vals.count { |v| v.is_a?(Numeric) }
++p vals.select { |v| v.instance_of?(Numeric) }.size
++
++def exact(v) = v.instance_of?(Numeric) ? "numeric" : "other"
++p exact(1), exact(1.5), exact("s")
++
++def own(v) = v.instance_of?(Integer) || v.instance_of?(Float)
++p own(1), own(1.5), own(1r)
++
++p 1.5.instance_of?(Numeric), 1.instance_of?(Numeric)
+diff --git a/test/instance_of_numeric_boxed.rb.expected b/test/instance_of_numeric_boxed.rb.expected
+new file mode 100644
+index 00000000..f4dc8f3c
+--- /dev/null
++++ b/test/instance_of_numeric_boxed.rb.expected
+@@ -0,0 +1,19 @@
++[false, true, true, true]
++[false, false, false, false]
++[false, true, true, true]
++[false, false, false, false]
++[false, false, false, false]
++[false, true, true, true]
++[false, true, true, true]
++[false, true, true, true]
++0
++5
++0
++"other"
++"other"
++"other"
++true
++true
++false
++false
++false

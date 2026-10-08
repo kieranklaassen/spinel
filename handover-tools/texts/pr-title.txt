@@ -1,0 +1,1 @@
+A constant holding a class names it in is_a?, kind_of? and instance_of?

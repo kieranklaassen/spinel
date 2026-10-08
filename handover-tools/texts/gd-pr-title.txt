@@ -1,0 +1,1 @@
+is_a? on an exception finds a class two modules both name

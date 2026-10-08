@@ -1,0 +1,1 @@
+A boxed number is not an instance_of? Numeric

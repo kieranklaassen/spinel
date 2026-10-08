@@ -1,0 +1,245 @@
+diff --git a/src/analyze.c b/src/analyze.c
+index 23baffc6..04697381 100644
+--- a/src/analyze.c
++++ b/src/analyze.c
+@@ -1969,6 +1969,26 @@ static int program_names_method(const NodeTable *nt, const char *const *list) {
+   return 0;
+ }
+ 
++/* Whether the program defines one of the listed methods: by a def, an alias,
++   or a define_method, define_singleton_method or alias_method of that name,
++   or of a name no literal spells. `:fail` and "raise" as plain values, which
++   programs do write, define nothing. */
++static const char *const exc_protocol[] = { "===", "exception", "raise", "fail", NULL };
++static int program_defines_method(const NodeTable *nt, const char *const *list) {
++  NT_FOREACH_KIND(nt, NK_DefNode, d) if (name_listed(list, nt_str(nt, d, "name"))) return 1;
++  NT_FOREACH_KIND(nt, NK_AliasMethodNode, a) if (name_listed(list, literal_name(nt, nt_ref(nt, a, "new_name")))) return 1;
++  NT_FOREACH_KIND(nt, NK_CallNode, id) {
++    const char *cn = nt_str(nt, id, "name");
++    int args = nt_ref(nt, id, "arguments"), argc = 0, a0 = 0;
++    const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &argc) : NULL;
++    if (cn && is_send_family(cn) && argc && nt_kind(nt, argv[0]) == NK_SymbolNode) { cn = nt_str(nt, argv[0], "value"); a0 = 1; }
++    if (!name_listed(method_definers, cn) || argc <= a0) continue;
++    const char *dn = literal_name(nt, argv[a0]);
++    if (!dn || name_listed(list, dn)) return 1;
++  }
++  return 0;
++}
++
+ /* The numbering of the whole program. A program that defines a hook, or a
+    declaration's own name, runs it at a definition: nothing is quiet then. A
+    program that names is_a?, kind_of? or instance_of? as a method of its own
+@@ -2126,14 +2146,24 @@ static void rewrite_const_alias_read(Compiler *c, int rd, int **seq) {
+ void rewrite_const_alias_receivers(Compiler *c) {
+   const NodeTable *nt = c->nt;
+   int *seq = NULL;   /* statement numbers, built for the first read that asks */
++  /* `rescue A` and `raise A` ask the class by `===` and `exception`: a
++     program with its own is left alone, as one with its own is_a? is */
++  int exc = !program_defines_method(nt, exc_protocol);
+   for (int id = 0; id < nt->count; id++) {
+     const char *ty = nt_type(nt, id);
++    if (exc && ty && sp_streq(ty, "RescueNode")) {   /* rescue A, B */
++      int n = 0;
++      const int *ex = nt_arr(nt, id, "exceptions", &n);
++      for (int i = 0; i < n; i++) rewrite_const_alias_read(c, ex[i], &seq);
++    }
+     if (!ty || !sp_streq(ty, "CallNode")) continue;
+-    {   /* x.is_a?(A), kind_of?, instance_of? */
++    {   /* x.is_a?(A), kind_of?, instance_of?; raise A, raise A, "msg" */
+       const char *name = nt_str(nt, id, "name");
+       int args = nt_ref(nt, id, "arguments"), argc = 0;
+       const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &argc) : NULL;
+-      if (name && argc == 1 && is_kind_query(name)) rewrite_const_alias_read(c, argv[0], &seq);
++      if (name && ((argc == 1 && is_kind_query(name)) ||
++                   (exc && argc >= 1 && nt_ref(nt, id, "receiver") < 0 && is_raise_alias(name))))
++        rewrite_const_alias_read(c, argv[0], &seq);
+     }
+     int recv = nt_ref(nt, id, "receiver");
+     if (recv < 0 || !nt_type(nt, recv)) continue;
+diff --git a/test/const_alias_rescue_own.rb b/test/const_alias_rescue_own.rb
+new file mode 100644
+index 00000000..0d71f7c7
+--- /dev/null
++++ b/test/const_alias_rescue_own.rb
+@@ -0,0 +1,15 @@
++# A class that answers === itself is asked at the rescue: a constant holding
++# it is not read as the class's name there.
++class Quiet < StandardError
++  def self.===(e) = false
++end
++Q = Quiet
++begin
++  begin
++    raise Quiet, "q"
++  rescue Q
++    puts "wrong arm"
++  end
++rescue StandardError => e
++  puts "outer #{e.class}"
++end
+diff --git a/test/const_alias_rescue_own.rb.expected b/test/const_alias_rescue_own.rb.expected
+new file mode 100644
+index 00000000..6d39f493
+--- /dev/null
++++ b/test/const_alias_rescue_own.rb.expected
+@@ -0,0 +1 @@
++outer Quiet
+diff --git a/test/const_alias_rescue_raise.rb b/test/const_alias_rescue_raise.rb
+new file mode 100644
+index 00000000..566047e6
+--- /dev/null
++++ b/test/const_alias_rescue_raise.rb
+@@ -0,0 +1,131 @@
++# A constant holding an exception class names it in rescue and raise.
++class MyErr < StandardError; end
++class CodeErr < StandardError
++  def initialize(msg, code)
++    super(msg)
++    @code = code
++  end
++  def code = @code
++end
++module Lib
++  class Err < StandardError; end
++end
++
++E = ArgumentError
++ME = MyErr
++CE = CodeErr
++LE = Lib::Err
++SE = StandardError
++
++def try
++  yield
++rescue E => e
++  "E #{e.class}: #{e.message}"
++rescue ME, LE => e
++  "ME #{e.class}: #{e.message}"
++end
++
++# a class's own constant, in its methods
++class Svc
++  Oops = MyErr
++  def run
++    raise Oops, "i"
++  rescue Oops => e
++    "svc #{e.class}: #{e.message}"
++  end
++end
++
++# rescue
++puts try { raise ArgumentError, "a" }
++puts try { raise MyErr, "b" }
++puts try { raise Lib::Err, "c" }
++puts try { "none" }
++puts Svc.new.run
++begin
++  raise MyErr, "d"
++rescue SE => e
++  puts "#{e.class}: #{e.message}"
++end
++begin
++  raise CodeErr.new("e", 41)
++rescue CE => e
++  puts e.code + 1
++end
++begin
++  begin
++    raise TypeError, "f"
++  rescue E, ME
++    puts "wrong arm"
++  end
++rescue TypeError => e
++  puts "outer #{e.message}"
++end
++
++# raise
++begin
++  raise E, "g"
++rescue ArgumentError => e
++  puts "#{e.class}: #{e.message}"
++end
++begin
++  raise ME
++rescue MyErr => e
++  puts "#{e.class}: #{e.message}"
++end
++begin
++  raise LE, "h"
++rescue => e
++  puts "#{e.class}: #{e.message}"
++end
++n = 0
++begin
++  n += 1
++  raise E, "again" if n < 3
++  puts "n=#{n}"
++rescue E
++  retry
++ensure
++  puts "done"
++end
++
++# a constant written twice holds what was written last
++T = TypeError
++T = KeyError
++begin
++  begin
++    raise TypeError, "j"
++  rescue T
++    puts "wrong arm"
++  end
++rescue TypeError => e
++  puts "outer #{e.message}"
++end
++
++# a rescue that runs before the constant is written: CRuby raises NameError
++def early
++  raise ArgumentError, "k"
++rescue LATE
++  "caught"
++end
++begin
++  puts early
++rescue StandardError
++  puts "stopped"
++end
++LATE = ArgumentError
++
++# a call made before the write, to a method a later body replaces
++class Gate
++  def fire = "none"
++end
++puts Gate.new.fire
++AFTER = MyErr
++class Gate
++  def fire
++    raise MyErr, "l"
++  rescue AFTER
++    "caught"
++  rescue MyErr
++    "none"
++  end
++end
+diff --git a/test/const_alias_rescue_raise.rb.expected b/test/const_alias_rescue_raise.rb.expected
+new file mode 100644
+index 00000000..8aca149f
+--- /dev/null
++++ b/test/const_alias_rescue_raise.rb.expected
+@@ -0,0 +1,16 @@
++E ArgumentError: a
++ME MyErr: b
++ME Lib::Err: c
++none
++svc MyErr: i
++MyErr: d
++42
++outer f
++ArgumentError: g
++MyErr: MyErr
++Lib::Err: h
++n=3
++done
++outer j
++stopped
++none

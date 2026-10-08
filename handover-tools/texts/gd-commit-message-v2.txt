@@ -1,0 +1,36 @@
+is_a? on an exception finds a class two modules both name
+
+    module Net;  class Error < StandardError; end; end
+    module Disk; class Error < StandardError; end; end
+    begin
+      raise Net::Error, "down"
+    rescue => e
+      p e.is_a?(Net::Error)
+    end
+
+printed false; CRuby prints true. kind_of? and instance_of? did the
+same, and so did the bare `Error` inside `module Net`, with a second
+class of the name or without one.
+
+An exception answers by its class's Ruby name ("Net::Error"), and the
+arm compared the text of the argument's path. For a leaf two modules
+share, qualify_colliding_classes has renamed it (`Net__Error`), so the
+path read "Net::Net__Error"; a bare name read "Error". No exception
+carries either.
+
+The exception arm now asks the class table for the name, as the `when`
+arm does (exc_when_cls_name), where the path as written is that class:
+read from the program's level, or from a class or module body the call
+stands in. Every other argument compares as its text, as before: in a
+program that writes a constant named as one of its classes or modules,
+or holding one (`Error = Plain` beside Net::Error, `Net = Disk`, a
+const_set); a path read from a body when two modules have its first
+name (Net and an included Mixin::Net), since Ruby may find the other
+through an include or a superclass; in a method an include copied,
+whose body of origin is not kept; a builtin exception's name and a
+path under one of CRuby's namespaces (`Errno::ENOENT`).
+
+Tests: test/exc_is_a_same_leaf.rb; test/exc_is_a_bare_name_constant.rb
+holds the programs left alone and passes without the change.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

@@ -1,0 +1,48 @@
+A constant read through included modules follows the order of ancestors
+
+    module Slow;  LIMIT = 1; end
+    module Fast;  LIMIT = 2; end
+    module Tuned
+      include Slow
+      include Fast
+    end
+    module Logged
+      include Slow
+    end
+    class Job
+      include Tuned
+      include Logged
+      def limit = LIMIT
+    end
+    p Job.new.limit
+
+printed 1; CRuby prints 2, and Job.ancestors reads [Job, Logged,
+Tuned, Fast, Slow].
+
+A name several bodies define is looked up through the ancestors of the
+body that reads it (qc_ancestor_lookup), and that walk takes each
+included module with all it includes before the next one: Logged and
+its Slow before Tuned. CRuby keeps one list a class, and a module the
+class or a superclass holds already is not put in again, so Slow stays
+behind Fast. The same happened for a module the superclass includes,
+and for a class two modules both name.
+
+qualify_colliding_consts and qualify_colliding_classes now build
+CRuby's list of the modules behind each body (qc_order_build): the
+include statements are run in the order they stand, as
+rb_include_module merges a module's list into a class's, and a read
+through the ancestors takes the first write on that list. The first
+read with a write behind its body builds them; the names the read
+pass has replaced by then are put back while it does.
+
+The list is built only where the statements give it: two include
+arguments share a name; every include is a plain statement of a class
+or module body in the program's own file, and the statements ahead of
+the last one only define; no prepend, hook, class_eval, const_set or
+remove_const; no include to a module mixed in already, to a reopened
+builtin or to a BasicObject subclass. Every other program, and a read
+in a `class << self` body, is answered by the walk as before.
+
+Test: test/const_read_include_order.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

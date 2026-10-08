@@ -1,0 +1,103 @@
+diff --git a/src/codegen_call_exception.c b/src/codegen_call_exception.c
+index 521dd675..e7d959cc 100644
+--- a/src/codegen_call_exception.c
++++ b/src/codegen_call_exception.c
+@@ -68,6 +68,30 @@ static int emit_exception_object_accessor(Compiler *c, int id, int recv, const c
+   return 0;
+ }
+ 
++/* The name an exception's is_a?, kind_of? or instance_of? compares with. An
++   exception carries its class's Ruby name ("A::E"), and the argument's path
++   arrives with a leaf qualify_colliding_classes may have renamed (`A::E` is
++   `A__E` beside a `B::E`): the path's text, "A::A__E", is a name no
++   exception answers to. Where the leaf is a class of the program's and the
++   path is bare or starts at a class or module of the program's, the class
++   table has the name the raise site uses, as the `when` arm asks it
++   (exc_when_cls_name). A path under one of CRuby's namespaces
++   (`Errno::ENOENT`, `Math::DomainError`) names that namespace's class,
++   whatever the program calls its own. */
++static const char *exc_query_cls_name(Compiler *c, int arg, char *buf, size_t n) {
++  const NodeTable *nt = c->nt;
++  const char *qn = isa_const_qualname(nt, arg, buf, n);
++  const char *leaf = qn ? nt_str(nt, arg, "name") : NULL;
++  int ci = leaf ? comp_class_index(c, leaf) : -1, head = arg;
++  if (ci < 0 || is_builtin_exception_name(qn)) return qn;
++  while (nt_kind(nt, head) == NK_ConstantPathNode && nt_ref(nt, head, "parent") >= 0) head = nt_ref(nt, head, "parent");
++  if (head != arg && comp_class_index(c, nt_str(nt, head, "name")) < 0) return qn;
++  const char *rn = class_ruby_name(c, ci);
++  if (!rn) return qn;
++  snprintf(buf, n, "%s", rn);   /* copied: class_ruby_name answers from a shared buffer */
++  return buf;
++}
++
+ /* the methods of an exception object: message, full_message, backtrace, set_backtrace, cause, ==, and the rest of TY_EXCEPTION */
+ int emit_call_exception_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv) {
+   /* A specialized rescue var (`rescue MyError => e`, MyError carrying ivars)
+@@ -544,7 +568,7 @@ int emit_call_exception_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, c
+          so a nested-path argument must compare with the whole path -- the
+          flat leaf name never matched (#3260) */
+       char qbuf[192];
+-      const char *cn = isa_const_qualname(nt, argv[0], qbuf, sizeof qbuf);
++      const char *cn = exc_query_cls_name(c, argv[0], qbuf, sizeof qbuf);
+       if (cn) {
+         /* instance_of? is an exact-class test, not an ancestor walk: an
+            ArgumentError is not instance_of?(StandardError) (#3013) */
+diff --git a/test/exc_is_a_same_leaf.rb b/test/exc_is_a_same_leaf.rb
+new file mode 100644
+index 00000000..69d55be4
+--- /dev/null
++++ b/test/exc_is_a_same_leaf.rb
+@@ -0,0 +1,43 @@
++# Two modules each name an exception class Error. is_a?, kind_of? and
++# instance_of? on a rescued exception ask for the class the path names, by
++# the name the exception carries ("Net::Error"), in a path and as the bare
++# name inside its module.
++module Net
++  class Error < StandardError; end
++  class Timeout < Error; end
++  def self.mine?(e) = e.is_a?(Error)
++end
++
++module Disk
++  class Error < StandardError; end
++  def self.mine?(e) = e.is_a?(Error)
++end
++
++def kinds(e)
++  [e.is_a?(Net::Error), e.kind_of?(Disk::Error), e.instance_of?(Net::Error),
++   Net.mine?(e), Disk.mine?(e), e.is_a?(StandardError)]
++end
++
++begin
++  raise Net::Error, "down"
++rescue => e
++  p kinds(e)
++end
++
++begin
++  raise Net::Timeout, "slow"
++rescue => e
++  p kinds(e)
++end
++
++begin
++  raise Disk::Error, "full"
++rescue => e
++  p kinds(e)
++end
++
++begin
++  raise ArgumentError, "bad"
++rescue => e
++  p kinds(e)
++end
+diff --git a/test/exc_is_a_same_leaf.rb.expected b/test/exc_is_a_same_leaf.rb.expected
+new file mode 100644
+index 00000000..71b2ffdd
+--- /dev/null
++++ b/test/exc_is_a_same_leaf.rb.expected
+@@ -0,0 +1,4 @@
++[true, false, true, true, false, true]
++[true, false, false, true, false, true]
++[false, true, false, false, true, true]
++[false, false, false, false, false, true]

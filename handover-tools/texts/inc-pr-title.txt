@@ -1,0 +1,1 @@
+Including a module a class already has does not move it to the front

@@ -1,0 +1,32 @@
+A class held by value builds a super into an included module's method
+
+    module Scaled
+      def area(k) = k * 2
+    end
+    class Tile
+      include Scaled
+      def initialize(w); @w = w; end
+      def area(k) = super(k + @w) + 1
+    end
+    p Tile.new(3).area(1)
+
+did not build: "cannot convert to a pointer type". CRuby prints 9.
+
+A class whose instance variables are scalars written only in
+initialize, and that has no subclass, is held by value: its methods
+take the object itself, not its address. emit_super wrote the call
+into the module's copy with self cast to a pointer, as for every other
+class. Where the calling method has the object by value, it now hands
+it over as it is.
+
+The same for a super between two modules' methods in such a class, and
+for one inside a block or a proc. Only that argument changes, in C
+that did not compile.
+
+A super from initialize into a module's initialize in such a class
+still does not build: initialize has the address and the copy takes
+the object.
+
+Test: test/super_into_module_by_value.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

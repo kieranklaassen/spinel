@@ -1,0 +1,1 @@
+A constant holding an exception class names it in rescue and raise
