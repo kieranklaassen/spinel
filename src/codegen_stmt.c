@@ -15264,7 +15264,7 @@ void emit_str_frozen_check(Compiler *c, int recv, Buf *b) {
    CRuby raises where it converts the value, which the splice took for "".
    `text` is the value as the splice reads it. CRuby tests a length first:
    with `tlen` the temp of one, a negative length is left to its IndexError. */
-static void emit_str_splice_nil(Compiler *c, int v, const char *text, int tlen, Buf *b) {
+void emit_str_splice_nil(Compiler *c, int v, const char *text, int tlen, Buf *b) {
   if (!text || comp_ntype(c, v) != TY_STRING || !repr_of(c, v).may_nil) return;
   buf_puts(b, " if (");
   if (tlen >= 0) buf_printf(b, "_t%d >= 0 && ", tlen);
