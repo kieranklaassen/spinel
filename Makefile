@@ -1944,7 +1944,8 @@ GC_STRESS_TESTS := test/gc_root_frame_slots.rb \
                    test/string_aset_value_runs_first.rb \
                    test/yielding_initialize_new_own_class.rb \
                    test/str_range_member_boxed_handle.rb \
-                   test/str_range_case_eq_boxed.rb
+                   test/str_range_case_eq_boxed.rb \
+                   test/case_when_str_range_boxed.rb
 gc-stress-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
 	@tmp=$$(mktemp -d /tmp/spinel-gcstress.XXXXXX); ok=1; \
 	if $(CC) -O1 -w -Ilib test/gc-stress/lost.c $(SP_RT_LIB) $(LDFLAGS) -lm -o "$$tmp/lost" 2>"$$tmp/cc.err"; then \
