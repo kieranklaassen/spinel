@@ -41,6 +41,7 @@ test/reject/string_hash_values_variable.rb
 test/reject/string_identity_return_nil_arm.rb
 test/reject/string_ivar_alias_lent_call.rb
 test/reject/string_ivar_alias_lent_super.rb
+test/reject/string_ivar_alias_mutation.rb
 test/reject/string_ivar_array_append.rb
 test/reject/string_kwsplat_last_dynamic.rb
 test/reject/string_kwsplat_last_yieldblock.rb
