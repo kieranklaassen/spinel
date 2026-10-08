@@ -1,0 +1,21 @@
+One pair of helpers records a C loop the emitter writes around a block
+
+A `next` or a `break` reads five things about the loop it leaves: the
+rescue frames and the ensures open at the loop's entry, the C loop
+depth, the body the loop runs, and that no enclosing block's value
+slot is its target. emit_loop_body sets them for the loops it emits,
+and so does each emitter that writes a loop or a do { } while (0) of
+its own around a block's body: every one saved, set and restored the
+same globals by hand, and a copy that leaves one out compiles a `next`
+that pops a rescue frame its loop never opened.
+
+c_loop_enter and c_loop_leave do it in one place. emit_loop_body,
+emit_iter_loop_stmts, emit_block_value_into, the filter body, tap and
+Array.new with a block call them. A loop that collects its block's
+value names its own slot after the enter, and names no body: that is
+what leaving the outer loop's body in place came to, since a body
+never owns a begin inside another call's block. No generated C
+changes: tools/cident.sh reports every program of the corpus
+identical.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

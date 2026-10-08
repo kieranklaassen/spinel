@@ -1,0 +1,59 @@
+A next in a File, ARGF or Dir loop, product or scan ends its own turn
+
+    n = 0
+    begin
+      File.open("log.txt").each_line { |l| next if l.size > 3; n += 1 }
+      raise "late"
+    rescue => e
+      puts e.message
+    end
+
+ends with an uncaught "late"; CRuby prints late. The next popped the
+begin's rescue frame. Under an ensure the same next ended the whole
+loop and went to the ensure, and in a proc it returned from the proc.
+
+Each of these runs its block inside a C loop its emitter writes, and
+the emitter did not record that loop, so a next there was emitted for
+whatever stood around the call: a File's each_line, each, each_char,
+each_byte and each_codepoint, ARGF.each_line, a Dir's each, each_child
+and each_entry; product with a block; scan with a block, read as a
+value or with groups in its Regexp; and, read as a value,
+each.with_index with a block and each.with_index followed by each.
+
+The File, ARGF and Dir loops and the scan now run the block through
+emit_iter_loop_stmts, as a String's each_line does. That call also
+makes the block's own locals new in every turn, which these loops did
+not (File#each_line { |l| y ||= l; print y } printed the first line
+in every turn), and places the label a redo needs, which they refused.
+emit_iter_step_body records the loop for product and each.with_index
+(c_loop_enter), and each.with_index followed by each records it around
+its walk of the body. The record is made for the blocks the String
+iterators record: one with a next of its own and no next, break or
+redo under a rescue modifier.
+
+A redo in a block with such a jump under a rescue modifier stays
+refused in the File, ARGF and Dir loops and the scan: its goto would
+leave the modifier's frame on the stack, as it does in a String's
+loop, so these loops place no label for that block.
+
+Not changed: the loops that take the block's value as their answer
+(find with a fallback proc, an Enumerator's find, detect and
+take_while, a boxed Array's index and rindex, each.with_index followed
+by reduce, take_while.with_index, and slice_when, chunk and
+chunk_while followed by to_a) have the same next, and it cannot be
+cured there alone: they also drop the value a next carries.
+
+Test: test/loop_block_next_own_turn.rb. Fifteen such loops, each with
+a next under a begin, under an ensure, in a proc, beside an ensure
+inside the block, and under an ensure in a begin/rescue inside the
+block (six of them for seventy turns); ARGF.each_line under a begin;
+a break under a begin where it was right before, and thirteen blocks
+with a next under a rescue modifier, which stay right; the File, Dir
+and scan loops also with a local first set inside the block. Without
+the change the File loops print their first line in every turn and
+the first raise ends the program.
+test/loop_block_redo_runs_turn_again.rb: a redo in the File and Dir
+loops and the scan, with a local of the block and under a begin.
+Without the change it does not build.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
