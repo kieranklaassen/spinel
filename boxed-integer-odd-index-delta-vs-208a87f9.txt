@@ -1,0 +1,37 @@
+Integer piece, re-cut on upstream 16bca08960d1 (fork draft 439 holds the older head 208a87f934a5). A NEW CUT, the whole commit.
+
+- head 4b29b2a1ed1c3a79bdf90f8de1d31df1c1ddec57, tree fd1a50aa2669b554e7148c8f5d807b43724a5bbe: ONE commit on matz master
+  16bca08960d154b861cb96c38bf9f4cf1209059a. LOCAL only; block boxedintodd-v6.patch (`git format-patch -1`; applied to
+  16bca08960d1's index it gives the tree above, checked with read-tree, apply --cached, write-tree). Suggested branch
+  claude/boxed-integer-odd-index-v4-on-16bca089.
+- Texts: title boxed-integer-odd-index-title.txt (unchanged), body boxed-integer-odd-index-body-v6.md (NEW),
+  message boxed-integer-odd-index-commit-message-v4.txt (NEW; -v3 with its last sentence now "A Float Range and an
+  object of a user class still read bit 0.").
+- 3 files: lib/spinel_rt.h +31, test/boxed_integer_index_not_integer.rb and its .expected (25 lines; marked int64).
+
+Why a new cut. The reader stopped on 208a87f934a5 with two findings. (1) Rule (a): an index that is an object of a
+user class held by value raised TypeError where master printed CRuby's answer: the bridge that asks an object its
+to_int has no case for such a class. (2) An unstated cost with gcc on a boxed Integer's bit read by a boxed Integer.
+Then upstream's line of 09:42 in sp_poly_index_poly (a shared String index is read as its value) made the index a
+variable that is assigned, and the first mend (ddb39a798a4e, never handed over), which took it by address, cost clang
+6 to 18 instructions on reads of a Hash and an Integer.
+
+What changed against 208a87f934a5:
+- An index that is an object of a user class is left as on master (bit 0), with a Float Range. The test loses its
+  class Ix and the one line that read by it; the body and the message say so.
+- The whole test of the index's kind moved into the helper sp_poly_int_bit_other, which now stands directly above
+  sp_poly_index_poly; for a Float Range or a user object it calls the generic read with offset 0, as master's last
+  line does. The function's own new line asks only the receiver's tag:
+      if (SP_UNLIKELY(recv.tag == SP_TAG_INT || recv.tag == SP_TAG_BIGINT)) return sp_poly_int_bit_other(&recv, idx);
+  The receiver goes by address (by value gcc lays the Integer read out three instructions longer), the index by value.
+- The answer is boxed in the helper.
+
+The body states the cost that is left: with clang, one to three instructions on five reads that are right on master;
+with gcc no loop of forty costs more and fifteen cost less. Fourteen forms of the arm were measured on this tip
+(tables cost-y, -z, -w, -v and cost-r-in5 in the builder's container); none is free with both compilers.
+
+Run on 16bca08960d1 (the commit's parent): build; `tools/gate.rb check`; the test in eighteen cells; `tools/cident.sh`
+(6,541 identical, 0 differ); share-strings-test and int-min-test pass; forty loops with both compilers; the 1,028
+programs of the Integer receiver's family (counts in the body); probes by a user object held by value and on the
+heap (master's answers). Clean into 47225b489a3c by exit status (tree d299a59705e2); that move names no function of
+the piece nor a helper it calls.
