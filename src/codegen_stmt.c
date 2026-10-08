@@ -12550,7 +12550,7 @@ static int emit_ivar_cvar_write_stmt(Compiler *c, int id, Buf *b, int indent, co
     /* --share-strings: a class variable holding the shared handle, as a
        global's slot (#6765) */
     if (h.r.share) {
-      emit_strbuf_orw_guard(c, ref, v, is_or, b);
+      emit_strbuf_orw_guard(c, ref, v, is_or, NULL, b);
       buf_puts(b, " ");
       /* `||=` leaves the class variable defined whether or not it stored;
          `&&=` stores only into one that holds a String, so already set --
@@ -12818,6 +12818,25 @@ static int emit_ivar_cvar_write_stmt(Compiler *c, int id, Buf *b, int indent, co
 }
 
 /* Call-operator, global-variable and constant writes: o.x += v, $g = v and its operator and or/and forms, C = v, A::B = v and their operator and or/and forms (emit_stmt_inner's arms, in their order) */
+/* What the arms of `recv.attr op= v` read and write as the slot. Ruby calls
+   the reader, runs the right side and the operator, and only then the
+   writer, which raises on a frozen receiver. So where the receiver's class
+   has the writer's guard (`fz`, its text; NULL where it has none) the
+   slot's value is taken into a temporary declared in `b`, the arms work on
+   the temporary, and the caller emits the guard and the store after them: a
+   right side or an operator that raises has raised, and one that prints has
+   printed. The temporary is rooted where the right side can run code that
+   replaces the slot's value. Answers the temporary's name, or `slot`. */
+static const char *op_write_slot_temp(Compiler *c, const char *slot, TyKind t, int val,
+                                      const char *fz, char *tn, size_t tnsz, Buf *b) {
+  if (!fz) return slot;
+  int tv = ++g_tmp;
+  snprintf(tn, tnsz, "_t%d", tv);
+  buf_printf(b, "__typeof__(%s) %s = %s;", slot, tn, slot);
+  if (ty_gc_rootable(c, t) && subtree_has_side_effect(c, val)) { buf_puts(b, " "); emit_gc_root_tmp(c, t, tv, b); }
+  return tn;
+}
+
 static int emit_attr_global_const_write_stmt(Compiler *c, int id, Buf *b, int indent, const NodeTable *nt, const char *ty) {
   if (sp_streq(ty, "CallOperatorWriteNode")) {
     /* `recv.attr op= value` (e.g. doom's `sector.ceiling_height -=
@@ -12888,6 +12907,16 @@ static int emit_attr_global_const_write_stmt(Compiler *c, int id, Buf *b, int in
       /* the slot, and what the arms below read and write as it */
       char slot[400]; snprintf(slot, sizeof slot, "_t%d%siv_%s", trecv, acc, iv_c(rn));
       const char *lv = slot;
+      /* the store is the writer's: a frozen receiver raises as `s.n = v`
+         does, after the right side and the operator have run */
+      char rtmp[32], vtmp[32]; snprintf(rtmp, sizeof rtmp, "_t%d", trecv);
+      Buf fz; memset(&fz, 0, sizeof fz);
+      emit_frozen_obj_guard(c, ty_object_class(rt), rtmp, &fz);
+      if (fz.p) {
+        emit_indent(rb, g_pre ? g_indent : indent);
+        lv = op_write_slot_temp(c, slot, ivt, val, fz.p, vtmp, sizeof vtmp, rb);
+        buf_puts(rb, "\n");
+      }
       emit_indent(b, indent);
       if (ivt == TY_STRING) {
         buf_printf(b, "%s = sp_str_concat(%s, ", lv, lv);
@@ -12922,6 +12951,8 @@ static int emit_attr_global_const_write_stmt(Compiler *c, int id, Buf *b, int in
         else emit_expr(c, val, b);
         buf_puts(b, ";\n");
       }
+      if (fz.p) { emit_indent(b, indent); buf_printf(b, "%s%s = %s;\n", fz.p, slot, lv); }
+      free(fz.p);
       return 1;
     }
     /* A native (C-backed) class has no ivar behind its attribute: the read and
@@ -13045,6 +13076,11 @@ static int emit_attr_global_const_write_stmt(Compiler *c, int id, Buf *b, int in
         char slot[320]; snprintf(slot, sizeof slot, "_o->iv_%s", iv_c(rn));
         const char *lv = slot;
         int own_line = 0;   /* the arm ended its line */
+        /* the writer's guard for this class, after the arm, as above */
+        char ko[320], vtmp[32]; snprintf(ko, sizeof ko, "((sp_%s *)_t%d.v.p)", c->classes[k].c_name, trecv);
+        Buf fz; memset(&fz, 0, sizeof fz);
+        emit_frozen_obj_guard(c, k, ko, &fz);
+        if (fz.p) { lv = op_write_slot_temp(c, slot, ivt, val, fz.p, vtmp, sizeof vtmp, b); buf_puts(b, " "); }
         if (ivt == TY_STRING) {
           buf_printf(b, "%s = sp_str_concat(%s, ", lv, lv);
           emit_poly_unboxed(c, val, rhst, "sp_poly_to_s(", b);
@@ -13079,6 +13115,8 @@ static int emit_attr_global_const_write_stmt(Compiler *c, int id, Buf *b, int in
         }
         if (own_line) emit_indent(b, indent + 1);
         else buf_puts(b, " ");
+        if (fz.p) buf_printf(b, "%s%s = %s; ", fz.p, slot, lv);
+        free(fz.p);
         buf_puts(b, "break; }\n");
       }
       /* a receiver whose runtime class has no such accessor pair (or a boxed
@@ -13391,7 +13429,7 @@ static int emit_attr_global_const_write_stmt(Compiler *c, int id, Buf *b, int in
       char gref[256];
       snprintf(gref, sizeof gref, "gv_%s", rn);
       emit_indent(b, indent);
-      emit_strbuf_orw_guard(c, gref, v, is_or, b);
+      emit_strbuf_orw_guard(c, gref, v, is_or, NULL, b);
       buf_puts(b, "\n");
       return 1;
     }
@@ -13724,17 +13762,29 @@ void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
         ivt2 == TY_FIBER || ivt2 == TY_THREAD || ivt2 == TY_QUEUE || ivt2 == TY_MUTEX || ivt2 == TY_CONDVAR || ivt2 == TY_PROC || ivt2 == TY_IO ||
         ivt2 == TY_MATCHDATA || ivt2 == TY_EXCEPTION || ivt2 == TY_REGEX)
       snprintf(cond2, sizeof cond2, "%s%s", is_or ? "!" : "", ref2);
+    /* an instance method's own ivar: a frozen self raises where it stores,
+       after the right side has run */
+    Buf fz2; memset(&fz2, 0, sizeof fz2);
+    if (cws2 && !cws2->is_cmethod && cws2->class_id >= 0)
+      emit_frozen_obj_guard(c, cws2->class_id, g_self ? g_self : "self", &fz2);
     if (cond2[0]) {
+      Buf gv; memset(&gv, 0, sizeof gv);
+      emit_frozen_guarded_value(ref2, vval.p ? vval.p : "", fz2.p, v, &gv);
       emit_indent(b, indent);
       buf_printf(b, "if (%s) { ", cond2);
       if (vpre.p) buf_puts(b, vpre.p);
-      emit_splice_store_text(c, id, ref2, vval.p ? vval.p : "", ivt2 == TY_STRING, b); buf_puts(b, "; }\n");
+      emit_splice_store_text(c, id, ref2, gv.p ? gv.p : "", ivt2 == TY_STRING, b); buf_puts(b, "; }\n");
+      free(gv.p);
     }
     else if (!is_or) {
+      Buf cv; memset(&cv, 0, sizeof cv);
+      emit_coerce(c, v, ivt2, CO_HOLD, "an instance variable's `||=` or `&&=`", &cv);
       emit_indent(b, indent);
       buf_printf(b, "%s = ", ref2);
-      emit_coerce(c, v, ivt2, CO_HOLD, "an instance variable's `||=` or `&&=`", b); buf_puts(b, ";\n");
+      emit_frozen_guarded_value(ref2, cv.p ? cv.p : "", fz2.p, v, b); buf_puts(b, ";\n");
+      free(cv.p);
     }
+    free(fz2.p);
     return;
   }
   if (sp_streq(ty, "CallOrWriteNode") || sp_streq(ty, "CallAndWriteNode")) {
@@ -13770,9 +13820,13 @@ void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
        it, and the guard is the ivar's own: a pointer-backed attribute that
        was never assigned is NULL, not truthy (#5428). */
     char lhs[300]; snprintf(lhs, sizeof lhs, "_t%d->iv_%s", tr, iv_c(attr));
+    char rtmp[32]; snprintf(rtmp, sizeof rtmp, "_t%d", tr);
+    Buf fz; memset(&fz, 0, sizeof fz);
+    emit_frozen_obj_guard(c, class_id, rtmp, &fz);
     buf_puts(b, "(void)");
-    emit_slot_orw_value(c, ivt, iidx >= 0 && repr_of_ivar(c, class_id, iidx).elems_handle, lhs, v, is_or, b);
+    emit_slot_orw_value(c, ivt, iidx >= 0 && repr_of_ivar(c, class_id, iidx).elems_handle, lhs, v, is_or, fz.p, b);
     buf_puts(b, "; }\n");
+    free(fz.p);
     return;
   }
   if (emit_ivar_cvar_write_stmt(c, id, b, indent, nt, ty)) return;
