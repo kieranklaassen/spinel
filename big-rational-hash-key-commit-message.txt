@@ -1,0 +1,29 @@
+A Rational of Bignums is found as a Hash key
+
+    x = [Rational(2**70, 3), :a][0]
+    h = { x => 1 }
+    p h[[Rational(2**70, 3), :a][0]]
+
+printed nil; CRuby prints 1. key?, fetch, include?, delete and tally
+missed the same way: [x, x2].tally had two entries, and a counter kept
+in Hash.new(0) counted every equal value as a new one. The hash of such
+a key goes by value already (sp_rbval_hash_key), but the comparison a
+lookup runs, sp_rbval_eql_key, had an arm for the word-sized Rational
+alone, so a Rational of Bignums was equal to itself only.
+
+sp_brat_eql_key compares two of them part by part. It also answers for
+one of each kind: an operation's answer stays a Rational of Bignums
+when its parts fit a word again (x / 2**70 is (1/3)), and it is the
+key the word-sized (1/3) is, as the hash takes it. It allocates
+nothing: a lookup compares keys while it holds values nothing else
+does.
+
+Cost (callgrind, 200,000 lookups): with gcc a key that is a Rational,
+a Range or a Complex pays 1 instruction a lookup (0.4%) and an Integer
+key takes 1 less; a String, a Struct and a user object are on the same
+count. With clang every one of them is on the same count.
+
+Test: test/big_rational_hash_key.rb (expected from CRuby 3.3.6). On
+master sixteen of its lines are wrong, in every build.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
