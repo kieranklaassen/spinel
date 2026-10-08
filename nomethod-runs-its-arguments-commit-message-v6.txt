@@ -1,0 +1,97 @@
+A call no method answers runs its arguments on a typed receiver too
+
+    def tick = (puts "tick"; 1)
+    begin
+      5.zork(k: tick)
+    rescue NoMethodError => e
+      puts e.message
+    end
+
+printed the message alone where CRuby prints "tick" first. A boxed
+receiver binds such a call's arguments ahead of the raise, so they
+run. A receiver of one known class (an Integer, a String, a Symbol,
+an Array, an object, nil) raised without running them when one was a
+splat, a keyword argument, a double splat or a String key; and so did
+a boxed receiver for an argument that binding leaves to the call,
+such as a splat of a method that always raises, which lost its own
+error to the NoMethodError.
+
+emit_unresolved_call stages a call's arguments into the error
+(NoMethodError#args) only when all of them are plain: "a
+splat/block/kwarg shape keeps the plain message". The arguments of
+any other call were not emitted at all. They are now emitted for
+their effect after the receiver, in CRuby's order, where every one
+of them is of a listed shape. A call with an argument of any other
+shape keeps the C it had.
+
+The list is short because an argument that was never emitted may be
+one the compiler refuses, or one it compiles to something that does
+not answer as CRuby does, and a program that never reached it was
+right: `5.zork(k: (U = 7))` builds and raises NoMethodError, and
+goes on doing so. The same holds for a method that only such an
+argument calls: it may never have run. Listed are:
+
+- what has nothing to run: a literal, a read of a variable, an Array
+  or Hash literal of those;
+- a plain write of a local, an instance variable or a global of the
+  program's own, from a variable, a literal or a listed call;
+- a call, written in top-level code, that is sure to reach a
+  top-level method which is sure to do what CRuby does. It has no
+  receiver and no block; inference binds it to the one method of
+  that name; that method is defined by a top-level statement above
+  the call in the same file, takes exactly that many plain
+  parameters, does not yield, and is named by no builtin and by no
+  Symbol or String of the program (an undef, an alias, a send); it
+  is given variables, literals or such calls. And the method's body
+  does nothing but read variables and literals, write a local or a
+  global of the program's own, print a text or an Integer that
+  cannot be nil (puts, print, p), raise a builtin error with such a
+  text, and call methods that are listed themselves;
+
+inside parentheses, an Array or Hash literal, a splat, a keyword
+argument or the block argument. In a method or a class body self may
+be an object with a method of that name of its own, so a call there
+is not listed; nor is one in a program that evaluates a block as
+another object's (instance_eval and its kin, define_method, a
+Class.new body), extends an object, has a BEGIN block or names
+BasicObject. A body that prints or raises is not listed in a program
+that defines a method named puts, print, p, raise, exception, write,
+to_s or inspect, has a Symbol of one of those names, aliases a
+global, or names $stdout, $>, STDOUT or an output separator.
+
+Only the calls and writes inside a listed argument are emitted: the
+Array, the Hash or the splat around them is not built. What one
+hoists ahead of its statement is written where the argument goes, so
+it too runs after the receiver and after the arguments before it.
+What a dispatch has run into a temporary already, an argument or a
+literal or a call inside one, is not run a second time.
+
+A receiver read from a variable is the object the variable held
+before the arguments ran: `t = 5; t.zork(k: (t = 7))` raises for 5.
+The error is staged after the arguments, so where one of them can
+rebind what the receiver reads, the receiver is boxed into a rooted
+temp ahead of them, with its nil test, as a boxed receiver is.
+read_rebound_by answers that for a variable and for the variables an
+Array or Hash literal reads. It does not answer for a constant, so
+one is held wherever an argument calls a method. Where nothing can
+rebind it, the receiver is read as it was.
+
+A call whose arguments have nothing to run compiles to the C it did,
+as does a call with plain arguments and every call that is answered.
+
+Not here: NoMethodError#args of a call with a splat or a keyword
+argument is nil as before, and a block argument that is a call's only
+argument (`5.zork(&mk)`) is still not run. An argument of a shape
+outside the list is not run either, as before: one that calls a
+method on a receiver (`@s.zork(k: (@s << "x"))`), any call written
+in a method, an operator, a multiple assignment, a call of a method
+that does more than the list allows (one that calls a proc, builds
+an Array, adds two numbers).
+
+Nor here, as on master: a call with plain arguments reads its
+receiver in the C call that boxes them, so `t.zork(t = 7)` raises for
+7 with gcc and for 5 with clang.
+
+Test: test/nomethod_runs_its_arguments.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
