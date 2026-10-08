@@ -1,0 +1,73 @@
+An append keeps what is known of a String's length
+
+    s = +""
+    n = ARGV[0].to_i
+    t = 0
+    n.times { s << "ab"; t += s.size }
+    p t
+
+Instructions, callgrind, for n = 25,000, 50,000 and 100,000:
+
+    before     713,062,335  2,831,713,314  11,287,781,425
+    after       10,610,520     20,559,889      40,474,807
+
+A String remembers its character count once it is asked for: a hint in
+its header, or an entry in the length cache. Every append in place
+dropped both (sp_str_append_grow, sp_str_append_grow_n and
+sp_fd_publish under sp_fd_append_len), so the next size, length,
+negative index or slice counted every byte again, and a buffer that is
+appended to and measured in one loop was quadratic.
+
+An append leaves the bytes ahead of it alone, so the cache entry now
+stays (sp_str_lcache_grown): it records the new length and that its
+count is short of it. The append counts nothing. The next
+sp_str_length counts only the bytes added since (sp_str_length_grown)
+and adds the two counts where both halves are valid UTF-8; where it
+cannot tell, it counts the whole String as before.
+
+No answer changes. Three things see to that:
+
+- setbyte writes a byte in place and leaves the entry where it is. For
+  a String CRuby counts by bytes (65.chr * 3, 1.5.to_s, a binary
+  append) that stale count is the right answer, and an append after
+  the setbyte dropped it. So setbyte now bumps a counter
+  (sp_str_byte_writes), an entry records the counter when it is
+  counted, and a carried entry whose record is old is counted whole.
+- What the cache holds decides such answers too. A carried entry is a
+  free way when a count is stored, as the dropped one was, and a
+  carried count is stored as a fresh one is: among its counted entries
+  the cache holds what it held when every append forgot.
+- The header's hint goes at every append, as it did.
+
+The threaded runtime (SP_THREADS) forgets as before: another worker
+may have written the bytes this one counted, and only its own cache
+would have heard of it.
+
+With "bé" appended in the same loop: 14,118,350, 27,581,805 and
+54,525,417 after.
+
+Cost, instructions a call, callgrind (gcc; clang in brackets):
+
+- setbyte: +1 (the counter);
+- size answered from the cache: +2 (the count is tested for the
+  mark);
+- an append to a String nobody has measured: 89 to 79 (85 to 79);
+  through an instance variable 251.6 to 239.6 (255.7 to 243.7); of
+  an interpolated String 197 to 181 (242 to 228; the hint was
+  cleared twice);
+- an append to a String with a cache entry: 223.5 to 224.5 (215.5 to
+  222.5).
+
+No generated C changes: the change is in lib/.
+
+Left alone: a String that moves when it grows forgets as before (it is
+counted once after each move, and the capacity doubles, so the loop
+stays linear); s.concat(x) on a local, ascii_only? and rindex after an
+append, which are slow for reasons of their own.
+
+Test: test/string_append_keeps_length.rb. It holds the answers after
+each kind of append, and after an append and a setbyte in either
+order; it passes without this commit, the counts above are what shows
+the change. Without the counter six of its lines are wrong.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
