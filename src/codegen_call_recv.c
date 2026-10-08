@@ -8258,17 +8258,47 @@ static int emit_scalar_call_arms(Compiler *c, int id, Buf *b) {
         return 1;
       }
       if (haveB) {
+        /* the arguments run before the buffer is read, as in the shims
+           (sb_shim_args_first): one that appends to this handle frees the
+           buffer it had, and the byte went into the freed block */
+        Buf pre; memset(&pre, 0, sizeof pre);
+        /* two pure reads run no code and allocate nothing: they stay where
+           they are, and the arm keeps the C it had */
+        int pureB = subtree_is_pure_read(c, avS[0]) && subtree_is_pure_read(c, avS[1]);
+        int mark = pureB ? g_n_argov : sb_shim_args_first(c, id, &pre, g_indent);
         int tH = ++g_tmp;
-        buf_printf(b, "({ sp_String *_t%d = %s;"
-                      " if (sp_String_is_frozen(_t%d)) sp_raise_frozen_str(_t%d->data);"
-                      " const char *_p%d = sp_String_cstr(_t%d); sp_int _v%d = ",
-                   tH, srefB, tH, tH, tH, tH, tH);
+        buf_printf(b, "({ sp_String *_t%d = %s;", tH, srefB);
+        /* a local holds its handle while they run, unless one of them
+           rebinds it. A handle a reader answered is held by the object it
+           came from, which nothing may hold once an argument runs code or
+           allocates: `mk.b.setbyte(0, (keep << churn.last; 0x41))` */
+        if (sbnB ? read_rebound_by(c, recvS, avS[0]) || read_rebound_by(c, recvS, avS[1]) : !pureB)
+          buf_printf(b, " SP_GC_ROOT(_t%d);", tH);
+        if (pureB)
+          buf_printf(b, " if (sp_String_is_frozen(_t%d)) sp_raise_frozen_str(_t%d->data);", tH, tH);
+        buf_printf(b, "%s const char *_p%d = sp_String_cstr(_t%d); sp_int _v%d = ",
+                   pre.p ? pre.p : "", tH, tH, tH);
+        free(pre.p);
         emit_int_expr(c, avS[1], b);
-        buf_printf(b, "; const char *_q%d = sp_str_setbyte_cow(_p%d, ", tH, tH);
-        emit_int_expr(c, avS[0], b);
+        if (pureB) {
+          buf_printf(b, "; const char *_q%d = sp_str_setbyte_cow(_p%d, ", tH, tH);
+          emit_int_expr(c, avS[0], b);
+        } else {
+          /* the frozen test waits for the arguments too, since one of them
+             may freeze the String, and so stands where CRuby has it, behind
+             the index test: `s.setbyte((s.freeze; 50), 0)` raised IndexError
+             when the test ran ahead of them, and still does */
+          buf_printf(b, "; sp_int _i%d = ", tH);
+          emit_int_expr(c, avS[0], b);
+          buf_printf(b, "; if (sp_String_is_frozen(_t%d) && _i%d >= -_t%d->len && _i%d < _t%d->len)"
+                        " sp_raise_frozen_str(_t%d->data);"
+                        " const char *_q%d = sp_str_setbyte_cow(_p%d, _i%d",
+                     tH, tH, tH, tH, tH, tH, tH, tH, tH);
+        }
         buf_printf(b, ", _v%d);"
                       " if (_q%d != _p%d) sp_String_set_bin(_t%d, _q%d); _v%d; })",
                    tH, tH, tH, tH, tH, tH);
+        view_unbind(mark);
         return 1;
       }
     }

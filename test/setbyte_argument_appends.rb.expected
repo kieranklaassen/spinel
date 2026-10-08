@@ -1,0 +1,35 @@
+65
+"Abcx"
+"Abcx"
+4003
+66
+"aBcx"
+"aBcx"
+90
+"xxZ"
+4003
+67
+"Cbcx"
+"Cbcx"
+4003
+index 43 out of string
+43
+90
+"abcxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxZ"
+90
+81
+"aQc"
+65
+["index", "value"]
+"Abc"
+FrozenError
+"abc"
+FrozenError
+"abc"
+IndexError
+IndexError
+FrozenError
+"abc"
+65
+66
+2
