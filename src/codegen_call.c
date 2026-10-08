@@ -18637,7 +18637,7 @@ int subtree_is_pure_read(Compiler *c, int id) {
 
 /* Does the program give a Hash a default block anywhere (`Hash.new { }`,
    `default_proc=`)? Only such a Hash runs code on a missing key. */
-static int prog_has_hash_default_block(Compiler *c) {
+int prog_has_hash_default_block(Compiler *c) {
   static const Compiler *memo_c; static int memo;
   if (memo_c == c) return memo;
   memo_c = c; memo = 0;
