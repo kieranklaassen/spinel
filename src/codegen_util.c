@@ -1197,14 +1197,18 @@ int       g_ensure_depth = 0;
 RescueSave g_rescue_save_stack[MAX_ENSURE_DEPTH];
 int        g_rescue_save_depth = 0;
 /* The exception an ensure region `eid` waits with while its ensure body
-   runs: read from the frame just landed, sp_exc_top being its index. */
+   runs: read from the frame just landed, sp_exc_top being its index. Its
+   cause waits with it: the raise that hands it on would decide another. */
 void emit_ensure_exc_store(Buf *b, int eid) {
-  buf_printf(b, "_excf%d = 1; _excmsg%d = sp_exc_msg[sp_exc_top]; _exccls%d = sp_exc_cls[sp_exc_top]; _excobj%d = sp_exc_obj[sp_exc_top];",
-             eid, eid, eid, eid);
+  buf_printf(b, "_excf%d = 1; _excmsg%d = sp_exc_msg[sp_exc_top]; _exccls%d = sp_exc_cls[sp_exc_top]; _excobj%d = sp_exc_obj[sp_exc_top];"
+                " _exccause%d = sp_pending_cause;",
+             eid, eid, eid, eid, eid);
 }
-/* The same exception raised again, the ensure body done. */
+/* The same exception raised again, the ensure body done, with the cause it
+   waited with. */
 void emit_ensure_exc_raise(Buf *b, int eid) {
-  buf_printf(b, "sp_pending_exc_obj = _excobj%d; sp_raise_cls(_exccls%d, _excmsg%d);", eid, eid, eid);
+  buf_printf(b, "sp_exc_pass_cause(_excobj%d, _exccause%d); sp_pending_exc_obj = _excobj%d; sp_raise_cls(_exccls%d, _excmsg%d);",
+             eid, eid, eid, eid, eid);
 }
 
 /* rescue bodies crossed by an exit to frame-depth pop_base: those entered at or
@@ -5167,11 +5171,14 @@ void emit_main_exit(Buf *b) {
    popped, and its ensure body runs next. That frame never lands, so the
    exception is put in its slot as a landing would have left it: the
    collector keeps what the slots hold up to sp_exc_top, and the slot the
-   exception was read from lies above that once the frame is popped. */
+   exception was read from lies above that once the frame is popped. Its
+   cause goes over with it, and back to sp_pending_cause, which the
+   collector marks, until `outer` roots it. */
 void emit_ensure_exc_hand_on(Buf *b, int eid, int outer) {
-  buf_printf(b, "if (_excf%d) { _excf%d = 1; _excmsg%d = _excmsg%d; _exccls%d = _exccls%d; _excobj%d = _excobj%d; sp_exc_top--;"
-                " sp_exc_msg[sp_exc_top] = _excmsg%d; sp_exc_obj[sp_exc_top] = _excobj%d; goto _ensure%d; }",
-             eid, outer, outer, eid, outer, eid, outer, eid, outer, outer, outer);
+  buf_printf(b, "if (_excf%d) { _excf%d = 1; _excmsg%d = _excmsg%d; _exccls%d = _exccls%d; _excobj%d = _excobj%d;"
+                " _exccause%d = _exccause%d; sp_exc_top--;"
+                " sp_exc_msg[sp_exc_top] = _excmsg%d; sp_exc_obj[sp_exc_top] = _excobj%d; sp_pending_cause = _exccause%d; goto _ensure%d; }",
+             eid, outer, outer, eid, outer, eid, outer, eid, outer, eid, outer, outer, outer, outer);
 }
 
 /* A synchronize block or a filter loop, its unlock or its cleanup done, sends

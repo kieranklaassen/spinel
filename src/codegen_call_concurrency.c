@@ -323,7 +323,7 @@ int emit_call_synchronize_arms(Compiler *c, int id, Buf *b, const NodeTable *nt,
          `next`, `break` and exception object to, as an ordinary ensure frame
          declares them (codegen_stmt.c): without them the nested ensure's
          epilogue named fields this frame did not have (#7342) */
-      buf_printf(b, "int _nxtf%d = 0; (void)_nxtf%d; void *_excobj%d = NULL; ", eid, eid, eid);
+      buf_printf(b, "int _nxtf%d = 0; (void)_nxtf%d; void *_excobj%d = NULL; void *_exccause%d = NULL; ", eid, eid, eid, eid);
       if (g_c_loop_depth > 0) buf_printf(b, "int _brkf%d = 0; (void)_brkf%d; ", eid, eid);
       if (has_retval) { emit_ctype(c, g_ret_type, b); buf_printf(b, " _retv%d = %s; ", eid, default_value_from_compiler(c, g_ret_type)); }
       g_ensure_stack[g_ensure_depth++] = (EnsureCtx){ eid, has_retval, g_exc_frame_depth, g_ret_type, 1, 0 };
