@@ -6194,6 +6194,16 @@ static int iter_ewi_zip_poly_arms(Compiler *c, int id, Buf *b, int indent, const
         hoist_loop_recv(c, rt, &rb, b, indent);
         if (ty_is_array(a0t)) hoist_loop_recv(c, a0t, &ob, b, indent);
       }
+      /* An operand read boxed is taken once, before the first element: its
+         text inside the loop ran again for every element, and not at all for
+         a block that binds no second value. */
+      if (arg_poly) {
+        int tza = ++g_tmp;
+        emit_indent(b, indent);
+        buf_printf(b, "sp_RbVal _t%d = %s; SP_GC_ROOT_RBVAL(_t%d);\n", tza, ob.p ? ob.p : "sp_box_nil()", tza);
+        free(ob.p); memset(&ob, 0, sizeof ob);
+        buf_printf(&ob, "_t%d", tza);
+      }
       Scope *zs = comp_scope_of(c, id);
       LocalVar *zlv0 = (p0 && zs) ? scope_local(zs, p0) : NULL;
       LocalVar *zlv1 = (p1n && zs) ? scope_local(zs, p1n) : NULL;
