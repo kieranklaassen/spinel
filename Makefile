@@ -1960,6 +1960,8 @@ GC_STRESS_TESTS := test/gc_root_frame_slots.rb \
                    test/gc_root_gathered_handle_param.rb \
                    test/ffi_str_borrow.rb \
                    test/ffi_str_arg_beside_alloc.rb \
+                   test/typed_array_boxed_source_held.rb \
+                   test/typed_array_boxed_source_own_index.rb \
                    test/dispatch_arm_roots_operands.rb \
                    test/exception_message_nul.rb \
                    test/string_aset_value_runs_first.rb \
