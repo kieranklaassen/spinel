@@ -7625,6 +7625,52 @@ void emit_rooted_conversion(Compiler *c, TyKind pt, const char *expr, Buf *out) 
   buf_printf(out, "(_t%d = %s)", t, expr);
 }
 
+/* Does argument `v` make a String where it stands in the call's argument
+   list? A read of a shared String slot does: it is a fresh copy, unless the
+   parameter takes the live buffer (strbuf-raw). So does a call whose value
+   is a scalar, which runs in the list (`mk(w).size`), though not a builtin
+   operator over scalars (`n + 1`). An argument whose value needs a root
+   runs ahead of the call, into its temp. */
+static int arg_allocates_in_place(Compiler *c, int v) {
+  const NodeTable *nt = c->nt;
+  if (v < 0 || !operand_may_allocate(c, v)) return 0;
+  if (!subtree_may_allocate(nt, v)) {
+    int r = unwrap_parens(c, v);
+    return !(repr_of(c, r).read_raw && decide_node(nt, r, "strbuf-raw", NULL));
+  }
+  TyKind at = repr_of(c, v).as_ty;
+  return at != TY_POLY && !needs_root(at) && subtree_has_side_effect(c, v);
+}
+
+/* Is argument `node` a shared String slot's copy -- held by nothing but the
+   C call's argument list, or an unrooted temp -- beside something else the
+   call allocates in place: another argument (a second such read is enough:
+   `two(s, u)` made both copies in the list, and the second's allocation
+   collected the first) or the Array a rest parameter of `m` receives. An
+   argument the call ran ahead of itself (bound since `from`) does not
+   count; with `after`, only one written after the read does, the arguments
+   running in order there. A keyword argument's value counts as the
+   argument it is. */
+static int arg_copy_beside_alloc(Compiler *c, Scope *m, int node, const int *argv, int argc,
+                                 int from, int after) {
+  const NodeTable *nt = c->nt;
+  if (node < 0 || subtree_may_allocate(nt, node) || !arg_allocates_in_place(c, node)) return 0;
+  if (m && m->rest_idx >= 0) return 1;
+  int seen = !after;
+  for (int i = 0; i < argc; i++) {
+    int en = 1; const int *el = &argv[i];
+    int kwh = nt_kind(nt, argv[i]) == NK_KeywordHashNode;
+    if (kwh) el = nt_arr(nt, argv[i], "elements", &en);
+    for (int e = 0; e < en; e++) {
+      int v = kwh ? nt_ref(nt, el[e], "value") : el[e];
+      if (v == node) seen = 1;
+      else if (seen && !arg_ran_first(v, from) &&
+               (after ? operand_may_allocate(c, v) : arg_allocates_in_place(c, v))) return 1;
+    }
+  }
+  return 0;
+}
+
 /* Like emit_arg_or_default, but hoists a pointer-backed / poly argument into a
    g_pre temp and roots it before the call. A fresh allocation passed straight
    into a callee that allocates before it roots the parameter -- the canonical
@@ -7641,7 +7687,9 @@ void emit_rooted_conversion(Compiler *c, TyKind pt, const char *expr, Buf *out) 
    evaluated the argument into and rooted, or 0. An argument that renders as
    that temp unconverted is passed as it is: copying it into a second rooted
    temp only rooted the same pointer twice, a frame slot and a store on every
-   call (`Node.new(make_tree(d), make_tree(d))` held each subtree in two). */
+   call (`Node.new(make_tree(d), make_tree(d))` held each subtree in two).
+   A negative `held` asks for a bare read's copy to be rooted where it stands
+   (arg_copy_beside_alloc). */
 static void emit_arg_rooted(Compiler *c, Scope *m, int idx, int provided, int held, Buf *out) {
   LocalVar *p = scope_local(m, m->pnames[idx]);
   TyKind pt = p ? p->type : TY_UNKNOWN;
@@ -7649,7 +7697,8 @@ static void emit_arg_rooted(Compiler *c, Scope *m, int idx, int provided, int he
      own rooted temp when one is needed (see emit_arg_or_default) */
   if (p && p->byref_out) { emit_arg_or_default(c, m, idx, provided, out); return; }
   if (!arg_wants_root(c, pt, provided)) {
-    if (!arg_read_converts(c, pt, provided)) { emit_arg_or_default(c, m, idx, provided, out); return; }
+    int copy = held < 0 && pt == TY_STRING && repr_of_slot(c, p).kind != RK_STRBUF;
+    if (!copy && !arg_read_converts(c, pt, provided)) { emit_arg_or_default(c, m, idx, provided, out); return; }
     Buf cb; memset(&cb, 0, sizeof cb);
     emit_arg_or_default(c, m, idx, provided, &cb);
     emit_rooted_conversion(c, pt, cb.p ? cb.p : "NULL", out);
@@ -10610,7 +10659,7 @@ else {
       int is_kwparam = m->pnames[i] && callee_has_kwarg(c, m, m->pnames[i]);
       int kv = (kwh >= 0 && is_kwparam && !kw_merged) ? kwh_lookup(nt, kwh, m->pnames[i]) : -1;
       if (kv >= 0) {
-        emit_arg_rooted(c, m, i, kv, 0, out);
+        emit_arg_rooted(c, m, i, kv, arg_copy_beside_alloc(c, m, kv, argv, argc, argov_saved, 0) ? -1 : 0, out);
       }
       else if (ds_hash_tmp >= 0 && is_kwparam && i != m->kwrest_idx) {
         /* Double-splat: extract param by name from the pre-eval'd hash. */
@@ -10637,7 +10686,9 @@ else {
            keywords, so they still bind here.) A post takes its argument from
            the end of the call's, and a positional after a mid-list splat the
            layout could not gather (`g(1, *m, 4)`) a tail parameter. */
-        emit_arg_rooted(c, m, i, argv[L.arg[i]], held ? held[L.arg[i]] : 0, out);
+        int an = argv[L.arg[i]];
+        emit_arg_rooted(c, m, i, an, arg_copy_beside_alloc(c, m, an, argv, argc, argov_saved, 0) ? -1 :
+                                     held ? held[L.arg[i]] : 0, out);
       }
       else {
         /* No positional arg and no keyword match. If the param is hash-typed
@@ -11532,10 +11583,13 @@ else {
            statement can rebind, is held by the local's own root: Interp#visit
            passed its env on through a pushed and popped root at every
            recursive call, and ao_render's sampling loop its ray and isect at
-           each of four intersect calls. */
+           each of four intersect calls. Not so a shared String slot's read:
+           the temp is a fresh copy the slot does not hold, and a later
+           argument's allocation collected it (arg_copy_beside_alloc). */
         int held = (att == TY_POLY || needs_root(att)) &&
                    provided >= 0 && repr_of(c, provided).as_ty == att &&
-                   (read_of_fixed_param(c, provided) || read_unbound_in_stmt(c, provided));
+                   (read_of_fixed_param(c, provided) || read_unbound_in_stmt(c, provided)) &&
+                   !arg_copy_beside_alloc(c, pm, provided, argv, argc, argov_saved_d, 1);
         if (held) {}
         else if (att == TY_POLY) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT_RBVAL(_t%d);\n", atmp[k]); }
         else if (needs_root(att)) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", atmp[k]); }
