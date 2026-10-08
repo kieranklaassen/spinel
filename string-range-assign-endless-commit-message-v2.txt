@@ -1,0 +1,43 @@
+String#[]= with an endless Range from the first character replaces the String
+
+`s = +"abc"; s[0..] = "x"; p s` printed "xabc" where CRuby prints "x".
+An endless Range carries INTPTR_MAX as its end, and the Range arm took
+only SP_INT_NIL for "no end": from a start of 0 the count of
+characters, INTPTR_MAX - 0 + 1, ran over and nothing was replaced.
+From any other start the count stays an Integer and the splice clamps
+it, which is why `s[1..] = "x"` was right. `s[-3..] = "x"` on "abc",
+`s[0..nil]` and an end that is nil when the program runs answered the
+same, or built with gcc raised IndexError, "negative length
+-9223372036854775808".
+
+A Range whose end is 2^63 - 1 carries the same INTPTR_MAX, and there
+CRuby's own count runs over and replaces nothing, so the number cannot
+say which Range it is. The arm asks the Range written in its index
+(emit_str_aset_range): one written with no end, or with nil, has none;
+one whose end can be nil when the program runs has its two ends taken
+into temps, the start first, and the end is asked whether it was nil.
+With no end and a start of 0 the count is INTPTR_MAX, which the splice
+clamps to the String. Every other count is what it was.
+
+The count now wraps as unsigned arithmetic. As signed arithmetic the
+overflow was the C compiler's to decide: `s[-6..9223372036854775807] =
+"x"` on "abcdef" printed "xabcdef" built with clang, as CRuby does, and
+raised that IndexError built with gcc.
+
+A start counted from the end pays one compare: 1,123 instructions a
+`s[-3..] = "xyz"` before, 1,124 after (callgrind, gcc; two with
+clang). `s[5..] = "xyz"`, an end written as an Integer, an end that
+may be nil and a Range out of a variable count what they counted.
+
+Left as they are: an endless Range that arrives as a value
+(`r = (0..); s[r] = "x"`) still answers "xabc". sp_Range has no word
+for "no end" that an end of 2^63 - 1 cannot counterfeit
+(`p (0..9223372036854775807)` prints "0.."), so a Range out of a
+variable, a method or a constant is read as it was. So is a Range
+written with a boxed start and an end that is nil at run time, and
+one whose end is a call that answers nil where the String has a second
+name (`t = s`): its Range runs into a temp ahead of the statement.
+
+Test: test/string_range_assign_endless.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
