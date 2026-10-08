@@ -1,0 +1,168 @@
+1:  8575bda73 ! 1:  c3b504705 A String made in place is kept alive while replace copies it
+    @@ Commit message
+         The temp is now rooted unless replace_source_is_held says something
+         else holds the source: a literal, a constant, self, a local, an
+         instance variable or a global read where it stands (strbuf_slot_ref
+    -    says which of those are read as a copy), or a choice between two of
+    -    them (`c ? t : K`, `t || K`). Those run master's C. The copy itself
+    -    is as it was: the source is not sent through sp_str_dup, which would
+    -    turn the "" that a nil String-or-nil source reads as into nil.
+    +    says which of those are read as a copy), a read out of a slot that a
+    +    variable, a constant or self holds (replace_source_is_slot_read), or
+    +    a choice between two such sources (`c ? t : K`, `t || K`). Those run
+    +    master's C. The copy itself is as it was: the source is not sent
+    +    through sp_str_dup, which would turn the "" that a nil String-or-nil
+    +    source reads as into nil.
+     
+    -    An element, a Hash value and a reader's answer (`s.replace(ar[0])`,
+    -    `h[:k]`, `ar.first`, `o.name`) are rooted as well, at 15 instructions
+    -    a statement with gcc and 13 to 14 with clang: the program's own `[]`,
+    -    `first` or reader may have made the String.
+    +    A slot read is an attr_reader's or a Struct member's field (`o.name`),
+    +    an Array's element by an Integer index (`ar[0]`, `ar[i % 2]`), its
+    +    first or its last, and a Hash's value (`h[:k]`), the index or the key
+    +    a literal or a read. It is one only while the method is the builtin:
+    +    where the program gives Array or Hash its own `[]`, `first` or `last`,
+    +    writes the reader by hand, or gives a Hash a default block, the answer
+    +    is a call's and is rooted. A boxed value counts only where no class
+    +    defines to_str.
+    +
+    +    Any other source keeps the root, at 7 to 17 instructions a statement
+    +    with gcc and 5 to 14 with clang, and master ran some of them right:
+    +    `y.itself`, `h.fetch(:k)`, `ar[idx(i)]`, `Item.new(y).name`.
+     
+         The generated C of two tests gains the root; every other test's and
+         optcarrot's is unchanged.
+    @@ Makefile: GC_STRESS_TESTS := test/gc_root_frame_slots.rb \
+                         test/poly_array_intersect.rb \
+                         test/thread_new_args_rooted_across_fiber_alloc.rb \
+     
+    + ## src/codegen_call.c ##
+    +@@ src/codegen_call.c: int subtree_is_pure_read(Compiler *c, int id) {
+    + 
+    + /* Does the program give a Hash a default block anywhere (`Hash.new { }`,
+    +    `default_proc=`)? Only such a Hash runs code on a missing key. */
+    +-static int prog_has_hash_default_block(Compiler *c) {
+    ++int prog_has_hash_default_block(Compiler *c) {
+    +   static const Compiler *memo_c; static int memo;
+    +   if (memo_c == c) return memo;
+    +   memo_c = c; memo = 0;
+    +
+    + ## src/codegen_internal.h ##
+    +@@ src/codegen_internal.h: int subtree_is_pure_read(Compiler *c, int id);
+    + /* Is the call a reader the emitter lowers to a plain field read? *allocates is
+    +    set when the read builds a copy (a shared String slot). codegen_call.c */
+    + int call_is_field_read(Compiler *c, int id, int *allocates);
+    ++/* Does the program give a Hash a default block anywhere? codegen_call.c */
+    ++int prog_has_hash_default_block(Compiler *c);
+    + /* Typed-array headers cached across an innermost loop (codegen_stmt.c, see
+    +    emit_while). hc_array / hc_string answer 1 and the names of the cached
+    +    header locals when the receiver is cached in the loop being emitted;
+    +
+      ## src/codegen_stmt.c ##
+     @@ src/codegen_stmt.c: static char *emit_str_splice_value(Compiler *c, int recv, int v, int late, int t
+        buf_puts(b, " sp_str_check_mutable("); emit_expr(c, recv, b); buf_puts(b, ");");
+        return vb.p;
+      }
+    ++/* Does the program give the builtin class `cls` a method `nm` of its own,
+    ++   in the chain of its reopening? Then `nm` on such a receiver is a call. */
+    ++static int builtin_method_is_own(Compiler *c, const char *cls, const char *nm) {
+    ++  int ci = comp_class_index(c, cls);
+    ++  return ci >= 0 && (comp_method_in_chain(c, ci, nm, NULL) >= 0 || comp_reader_in_chain(c, ci, nm, NULL));
+    ++}
+    ++/* Is call `v` a read out of a slot that goes on holding the String: a
+    ++   reader's or a Struct member's field (call_is_field_read), an element of
+    ++   an Array (`ar[0]`, `ar.first`, `ar.last`) or a value of a Hash, off a
+    ++   variable, a constant or self? It runs no code of the program's while
+    ++   Array or Hash has no method of that name of the program's own, the index
+    ++   is a plain read, and no Hash of the program has a default block. A boxed
+    ++   element is read through its to_str, so no class may define one. */
+    ++static int replace_source_is_slot_read(Compiler *c, int v) {
+    ++  const NodeTable *nt = c->nt;
+    ++  TyKind t = comp_ntype(c, v);
+    ++  int recv = unwrap_parens(c, nt_ref(nt, v, "receiver")), alloc = 0;
+    ++  if (recv < 0 || nt_ref(nt, v, "block") >= 0 ||
+    ++      !(expr_is_held_ref(c, recv) || nt_kind(nt, recv) == NK_GlobalVariableReadNode))
+    ++    return 0;
+    ++  if (call_is_field_read(c, v, &alloc)) return t == TY_STRING && !alloc;
+    ++  if (t != TY_STRING && !(t == TY_POLY && !any_class_defines(c, "to_str"))) return 0;
+    ++  const char *nm = nt_str(nt, v, "name");
+    ++  TyKind rt = comp_ntype(c, recv);
+    ++  int a = nt_ref(nt, v, "arguments"), ac = 0;
+    ++  const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+    ++  int ary = ty_is_array(rt), hash = ty_is_hash(rt);
+    ++  if (!nm || !(ary || hash) || builtin_method_is_own(c, ary ? "Array" : "Hash", nm)) return 0;
+    ++  if (ary && ac == 0) return sp_streq(nm, "first") || sp_streq(nm, "last");
+    ++  if (!sp_streq(nm, "[]") || ac != 1 ||
+    ++      !(nt_kind(nt, av[0]) == NK_StringNode || subtree_is_pure_read(c, av[0]))) return 0;
+    ++  return ary ? comp_ntype(c, av[0]) == TY_INT : !prog_has_hash_default_block(c);
+    ++}
+     +/* Does something else hold the String the statement form of replace copies,
+     +   once it is read? A literal, a constant, self, and a local, an instance
+     +   variable or a global read where it stands do (strbuf_slot_ref says which
+    -+   of those are read as a copy), and so does a choice between two of them
+    -+   (`c ? t : K`, `t || K`). Anything else is a value a call made: an object
+    -+   or a box counts, read through its to_str, and so does an element or a
+    -+   reader's answer, which the program's own `[]` or reader may have made. */
+    ++   of those are read as a copy), so does a read out of a slot one of them
+    ++   holds (replace_source_is_slot_read), and so does a choice between two
+    ++   such sources (`c ? t : K`, `t || K`). Anything else is a value a call
+    ++   made: an object counts, read through its to_str, and so does the answer
+    ++   of the program's own `[]`, `first` or reader. */
+     +static int replace_source_is_held(Compiler *c, int v, int depth) {
+     +  const NodeTable *nt = c->nt;
+     +  char hs[1024];
+    @@ src/codegen_stmt.c: static char *emit_str_splice_value(Compiler *c, int recv, in
+     +  if (k == NK_OrNode)
+     +    return replace_source_is_held(c, nt_ref(nt, v, "left"), depth + 1) &&
+     +           replace_source_is_held(c, nt_ref(nt, v, "right"), depth + 1);
+    ++  if (k == NK_CallNode) return replace_source_is_slot_read(c, v);
+     +  TyKind t = comp_ntype(c, v);
+     +  if (t != TY_STRING && t != TY_STRBUF) return 0;
+     +  return (expr_is_held_ref(c, v) || k == NK_GlobalVariableReadNode) && !strbuf_slot_ref(c, v, hs, sizeof hs);
+    @@ test/string_replace_fresh_source_root.rb (new)
+     +# source only the call holds (a concatenation, a join, a method's result)
+     +# was held by nothing while that copy was allocated. So was a String two
+     +# names hold: reading it as the source makes a copy, alone or as one side of
+    -+# a choice. So was the String an object's to_str makes. Each round replaces
+    -+# through a local, a global and an instance variable and counts the ones
+    -+# that came out as another String.
+    ++# a choice. So was the String an object's to_str makes, and the one the
+    ++# program's own Array#first or its own reader makes. An element the Array
+    ++# holds is read where it stands. Each round replaces through a local, a
+    ++# global and an instance variable and counts the ones that came out as
+    ++# another String.
+     +class Box
+     +  attr_reader :s
+     +  def initialize
+    @@ test/string_replace_fresh_source_root.rb (new)
+     +  def to_str = @s + "!"
+     +end
+     +
+    ++class Array
+    ++  def first = "f" + size.to_s
+    ++end
+    ++
+    ++class Label
+    ++  def initialize(n) = @name = n
+    ++  def name = @name + "!"
+    ++end
+    ++
+     +def made(n) = "m" + n.to_s
+     +
+     +$g = +"qrst"
+    @@ test/string_replace_fresh_source_root.rb (new)
+     +  o = Named.new("v" + i.to_s)
+     +  s.replace(o)
+     +  bad += 1 unless s == "v#{i}!"
+    ++  ar = ["e" + i.to_s, "l" + i.to_s]
+    ++  s.replace(ar.first)
+    ++  bad += 1 unless s == "f2"
+    ++  s.replace(ar[1])
+    ++  bad += 1 unless s == "l#{i}"
+    ++  lab = Label.new("n" + i.to_s)
+    ++  s.replace(lab.name)
+    ++  bad += 1 unless s == "n#{i}!"
+     +  bad += 1 unless b.refill(i) == "sh#{i}"
+     +  bad += 1 unless b.fill(i) == "i#{i}"
+     +end

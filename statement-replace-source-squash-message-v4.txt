@@ -1,0 +1,45 @@
+A String made in place is kept alive while replace copies it
+
+The statement form of replace copies its source into a new String
+(str_mutate_reassign_arms): the source goes into a C temp and
+sp_str_from_bytes allocates the copy. A source only that temp holds,
+such as `s.replace("a" + i.to_s)`, a join or a method's result, was
+held by nothing while the copy was allocated. So was a String two
+names hold, read as the source alone or as one side of a choice
+(`s.replace(c ? t : "x")`): reading it makes a copy. So was the String
+an object's to_str makes (`s.replace(o)`).
+
+Under SPINEL_GC_STRESS=2 the copy was made from a freed String and the
+receiver came out as poison bytes, for a local, a global and an
+instance variable alike. With short Strings a plain run and level 1
+were right. With 8,000-byte Strings a plain run was wrong too:
+`$g.replace($g.dup)` was wrong in 285 of 300 rounds, and a source
+with `def to_str = @s + "!"` in 4 of 300.
+
+The temp is now rooted unless replace_source_is_held says something
+else holds the source: a literal, a constant, self, a local, an
+instance variable or a global read where it stands (strbuf_slot_ref
+says which of those are read as a copy), a read out of a slot that a
+variable, a constant or self holds (replace_source_is_slot_read), or
+a choice between two such sources (`c ? t : K`, `t || K`). Those run
+master's C. The copy itself is as it was: the source is not sent
+through sp_str_dup, which would turn the "" that a nil String-or-nil
+source reads as into nil.
+
+A slot read is an attr_reader's or a Struct member's field (`o.name`),
+an Array's element by an Integer index (`ar[0]`, `ar[i % 2]`), its
+first or its last, and a Hash's value (`h[:k]`), the index or the key
+a literal or a read. It is one only while the method is the builtin:
+where the program gives Array or Hash its own `[]`, `first` or `last`,
+writes the reader by hand, or gives a Hash a default block, the answer
+is a call's and is rooted. A boxed value counts only where no class
+defines to_str.
+
+Any other source keeps the root, at 7 to 17 instructions a statement
+with gcc and 5 to 14 with clang, and master ran some of them right:
+`y.itself`, `h.fetch(:k)`, `ar[idx(i)]`, `Item.new(y).name`.
+
+The generated C of two tests gains the root; every other test's and
+optcarrot's is unchanged.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
