@@ -1,0 +1,246 @@
+1:  c8ef1c46a ! 1:  9bfec11cc An attribute of an exception class with no initialize is nil until set, and is marked once set
+    @@ Commit message
+             kept.each { |v| p v.ctx if v.respond_to?(:ctx) }   # 0; CRuby: nil
+     
+         A method of the class that stores three ivars segfaulted. An arm typed
+    -    to its parent built it at the parent's size, and the ivars the subclass
+    -    adds were read past that.
+    +    to its parent, where the parent is such a class too, built it at the
+    +    parent's size, and the ivars the subclass adds were read past that.
+     
+         Built by `.new`, or by the rescue that catches a raise by its name, it
+         had its own size, but sp_exc_new_sub_sized zeroed the struct and gave it
+    @@ Commit message
+         asked a second time. A raise that builds the exception itself asks the
+         same entry (sp_exc_catch_own). A name that is no row is built as it was.
+     
+    +    Where sp_exc_new_for_catch built such a class before, a message given
+    +    as a frozen literal stays that frozen literal (`e.message.frozen?`,
+    +    `e.message << "x"` raising FrozenError): sp_exc_new_sub_caught is the
+    +    same builder with that function's own test of the message.
+    +
+    +    Cost, in instructions under callgrind for one exception built (gcc,
+    +    glibc): 20 where master built the class at its own size (`.new`, the
+    +    arm that names it), for two more arguments and the nil stores of two
+    +    attributes; 45 where an arm typed to a parent of the same kind catches
+    +    a subclass raised by name, which is built as itself now; 5 for a
+    +    builtin exception caught in a program that has such a class; and an arm
+    +    that names no class of the program builds such a class in 134 fewer.
+    +    Around these, glibc's strcmp counts 22 to 66 more for the same compares
+    +    (17,400,000 calls in 150,000 turns either way): the class's name is a
+    +    row of the table and no longer the literal, and strcmp enters by its
+    +    page-crossing path by the two addresses' offsets in their pages, for 19
+    +    of a turn's 116 compares where master's build has 13.
+    +
+         A program without such a class emits the C it did.
+         sp_exc_new_for_catch does not change, and sp_exc_new_sub_sized stays,
+         with the base scan, for a class with an initialize of its own, whose C
+    @@ Commit message
+         Not here: a class read off a value (`raise x.class, "re"`). Its name
+         reaches the raise as a copy (sp_exc_class_name), which is no row: no
+         initialize runs for it, and a class without one is still built at the
+    -    base size.
+    +    base size. And a subclass caught by an arm typed to a parent that has a
+    +    method of its own and no attribute, or by a bare arm typed to the
+    +    parent, is still built at the parent's size, as before: its attribute
+    +    does not read nil there, and ivars a method of the subclass stores go
+    +    past the object.
+     
+         Tests: test/exception_attribute_without_initialize.rb,
+         test/exception_attribute_marked.rb (added to GC_STRESS_TESTS),
+         test/exception_attribute_parent_arm.rb,
+    -    test/exception_attribute_builtin_reopened.rb,
+         test/share_strings_exception_attribute.rb (run by share-strings-test
+    -    too)
+    +    too), and test/exception_attribute_builtin_reopened.rb, which passes
+    +    before this change too: it guards a reopened builtin exception against
+    +    it
+     
+         Co-Authored-By: Claude Code <noreply@anthropic.com>
+     
+      ## Makefile ##
+     @@ Makefile: GC_STRESS_TESTS := test/gc_root_frame_slots.rb \
+    -                    test/thread_new_args_rooted_across_fiber_alloc.rb \
+    -                    test/gc_root_volatile_string_slot.rb \
+    -                    test/gc_root_gathered_handle_param.rb \
+    -+                   test/exception_attribute_marked.rb \
+    +                    test/ffi_str_arg_beside_alloc.rb \
+                         test/dispatch_arm_roots_operands.rb \
+                         test/exception_message_nul.rb \
+    ++                   test/exception_attribute_marked.rb \
+                         test/string_aset_value_runs_first.rb \
+    +                    test/yielding_initialize_new_own_class.rb
+    + gc-stress-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
+     
+      ## lib/sp_exc.c ##
+     @@ lib/sp_exc.c: sp_Exception *sp_exc_new_for_catch(const char *cls, const char *msg) {
+    @@ lib/sp_exc.c: void *sp_exc_new_sub_sized(size_t sz, const char *cls_name, const
+      }
+     +/* With the base scan and no seeds, for the degenerate catch path where a
+     +   user subclass with ivars and an initialize of its own was raised without a
+    -+   carried object (#1415): the body is inlined, so this entry is what it was. */
+    ++   carried object: the body is inlined, so this entry is what it was. */
+     +void *sp_exc_new_sub_sized(size_t sz, const char *cls_name, const char *msg) {
+     +  return sp_exc_sub_build(sz, cls_name, msg, sp_exc_gc_scan, NULL);
+     +}
+     +void *sp_exc_new_sub_ivars(size_t sz, const char *cls_name, const char *msg,
+     +                           void (*scan)(void *), void (*nils)(void *)) {
+     +  return sp_exc_sub_build(sz, cls_name, msg, scan, nils);
+    ++}
+    ++/* The same, where sp_exc_new_for_catch built the exception before its class
+    ++   was built at its own size: a frozen message stays frozen there, by that
+    ++   function's own test of the message it is handed. */
+    ++void *sp_exc_new_sub_caught(size_t sz, const char *cls_name, const char *msg,
+    ++                            void (*scan)(void *), void (*nils)(void *)) {
+    ++  int fz = msg && msg != sp_exc_no_msg && !sp_cmsg_p(msg) &&
+    ++           (((const unsigned char *)msg)[-1] == 0xfa || ((const unsigned char *)msg)[-1] == 0xf8);
+    ++  sp_Exception *e = (sp_Exception *)sp_exc_sub_build(sz, cls_name, msg, scan, nils);
+    ++  if (fz && e->msg) ((unsigned char *)e->msg)[-1] = 0xfa;
+    ++  return e;
+     +}
+      void sp_exc_gc_scan(void *p) {
+        sp_Exception *e = (sp_Exception *)p;
+    @@ lib/sp_exc.h: static inline const char *sp_exc_msg_given(const char *m) {
+      void *sp_exc_new_sub_sized(size_t sz, const char *cls_name, const char *msg);
+     +void *sp_exc_new_sub_ivars(size_t sz, const char *cls_name, const char *msg,
+     +                           void (*scan)(void *), void (*nils)(void *));
+    ++void *sp_exc_new_sub_caught(size_t sz, const char *cls_name, const char *msg,
+    ++                            void (*scan)(void *), void (*nils)(void *));
+      
+      void sp_exc_gc_scan(void *p);
+      sp_Exception *sp_exc_new(const char *cls_name, const char *msg);
+    @@ src/codegen.c: int class_needs_scan(ClassInfo *ci) {
+     +  buf_printf(b, "static const char sp_xbn_name[%d][%d] = {", g_xbn_n, (int)w);
+     +  for (int i = 0; i < g_xbn_nc; i++)
+     +    if (g_xbn_row[i] >= 0) buf_printf(b, "%s\"\\xff\" \"%s\"", g_xbn_row[i] ? ", " : "", exc_by_name_row_name(c, i));
+    -+  buf_puts(b, "};\nstatic void *sp_exc_own_by_name(const char *cls, const char *msg);\n"
+    ++  buf_puts(b, "};\nstatic void *sp_exc_own_by_name(const char *cls, const char *msg, int caught);\n"
+     +              "static sp_Exception *sp_exc_catch_own(const char *cls, const char *msg);\n");
+     +}
+     +
+    @@ src/codegen.c: static void emit_user_exc_dispatch(Compiler *c, Buf *b) {
+     +     names. Where the raise carried no object the rescue builds what it
+     +     caught from the name: a row of sp_xbn_name is a class built by its name
+     +     (class_exc_by_name_row), built at its own size, with its own scan and nil
+    -+     seeds; any other name is the runtime's to build, as it was. */
+    ++     seeds; any other name is the runtime's to build, as it was. `caught` is
+    ++     set where sp_exc_new_for_catch built the exception before, and a frozen
+    ++     message stays frozen there as it did (sp_exc_new_sub_caught); a rescue
+    ++     arm typed to a parent class passes 0, as its own builder never kept it. */
+     +  exc_by_name_rows(c);
+     +  if (g_xbn_n) {
+    -+    buf_puts(b, "SP_UNUSED static void *sp_exc_own_by_name(const char *cls, const char *msg){\n"
+    ++    buf_puts(b, "SP_UNUSED static void *sp_exc_own_by_name(const char *cls, const char *msg, int caught){\n"
+     +                "  size_t d = (size_t)((uintptr_t)cls - (uintptr_t)sp_xbn_name);\n"
+     +                "  if (d >= sizeof sp_xbn_name) return NULL;\n"
+     +                "  switch (d / sizeof sp_xbn_name[0]) {\n");
+     +    for (int i = 0; i < c->nclasses; i++) {
+     +      int q = class_exc_by_name_row(c, i);
+     +      if (q < 0) continue;
+    -+      buf_printf(b, "  case %d: return sp_exc_new_sub_ivars(sizeof(sp_%s), &sp_xbn_name[%d][1], msg", q, c->classes[i].c_name, q);
+    ++      buf_printf(b, "  case %d: return (caught ? sp_exc_new_sub_caught : sp_exc_new_sub_ivars)(sizeof(sp_%s), &sp_xbn_name[%d][1], msg", q, c->classes[i].c_name, q);
+     +      emit_exc_ivars_tail(c, i, b);
+     +      buf_puts(b, ");\n");
+     +    }
+     +    buf_puts(b, "  }\n  return NULL;\n}\n"
+     +                "SP_UNUSED static sp_Exception *sp_exc_catch_own(const char *cls, const char *msg){\n"
+    -+                "  void *u = sp_exc_own_by_name(cls, msg);\n"
+    ++                "  void *u = sp_exc_own_by_name(cls, msg, 1);\n"
+     +                "  return u ? (sp_Exception *)u : sp_exc_new_for_catch(cls, msg);\n}\n");
+     +  }
+      
+    @@ src/codegen_stmt.c: void emit_rescue(Compiler *c, int id, Buf *b, int indent, in
+     -                    " : (sp_Exception *)sp_exc_new_sub_sized(sizeof(sp_%s), _rcls_%d, _rmsg_%d);\n",
+     -                 rc, xn, rc, rc);
+     +                    " : (sp_Exception *)", rc);
+    -+      if (own_sub) buf_printf(b, "({ void *_u = sp_exc_own_by_name(_rcls_%d, _rmsg_%d); _u ? _u : ", rc, rc);
+    ++      if (own_sub) buf_printf(b, "({ void *_u = sp_exc_own_by_name(_rcls_%d, _rmsg_%d, 0); _u ? _u : ", rc, rc);
+     +      buf_printf(b, "%s(sizeof(sp_%s), _rcls_%d, _rmsg_%d", fn, xn, rc, rc);
+     +    }
+     +    if (by_name) emit_exc_ivars_tail(c, spec_cid, b);
+    @@ test/exception_attribute_marked.rb.expected (new)
+      ## test/exception_attribute_parent_arm.rb (new) ##
+     @@
+     +# An arm typed to a parent class builds the subclass that was raised by its
+    -+# name, at the subclass's own size: the attributes the subclass adds are nil
+    ++# name, at the subclass's own size, where the parent is such a class too
+    ++# (attributes and no initialize): the attributes the subclass adds are nil
+     +# until set, and what the arm sets through the parent's writer stays.
+     +class Error < StandardError; attr_accessor :code; end
+     +class ParseError < Error; attr_accessor :line, :ctx; end
+    @@ test/exception_attribute_without_initialize.rb (new)
+     +20_000.times { |i| n += "x#{i}".size }
+     +p n
+     +kept.each { |v| p v.marks if v.respond_to?(:marks) }
+    ++
+    ++# a message given as a literal is that frozen literal still, where an arm
+    ++# that names no class of the program catches the exception
+    ++begin
+    ++  raise ParseError, "lit"
+    ++rescue StandardError => g
+    ++  p g.message.frozen?
+    ++  begin
+    ++    g.message << "x"
+    ++  rescue FrozenError => fe
+    ++    p fe.class
+    ++  end
+    ++  p g.message
+    ++end
+    ++made = ParseError.new("lit2")
+    ++p made.message.frozen?
+    ++begin
+    ++  raise made
+    ++rescue StandardError => g
+    ++  p g.message.frozen?
+    ++end
+    ++[-> { raise ParseError, "lit" }, -> { raise DeepError, "lit" }, -> { raise ParseError, "" },
+    ++ -> { raise ParseError, "x#{1}" }, -> { raise ParseError }].each do |f|
+    ++  begin
+    ++    f.call
+    ++  rescue StandardError => g
+    ++    p [g.class, g.message, g.message.frozen?]
+    ++    begin
+    ++      g.message << "!"
+    ++    rescue FrozenError => fe
+    ++      p fe.class
+    ++    end
+    ++  end
+    ++end
+    ++begin
+    ++  raise ParseError, "lit"
+    ++rescue => g
+    ++  p g.message.frozen?
+    ++end
+    ++begin
+    ++  raise DeepError, "lit"
+    ++rescue Exception => g
+    ++  p g.message.frozen?
+    ++end
+    ++p kept.first.message, kept.first.message.frozen?
+     
+      ## test/exception_attribute_without_initialize.rb.expected (new) ##
+     @@
+    @@ test/exception_attribute_without_initialize.rb.expected (new)
+     +["s1a2", "s2a2", "s3a2"]
+     +["s1a3", "s2a3", "s3a3"]
+     +["s1a4", "s2a4", "s3a4"]
+    ++true
+    ++FrozenError
+    ++"lit"
+    ++true
+    ++true
+    ++[ParseError, "lit", true]
+    ++FrozenError
+    ++[DeepError, "lit", true]
+    ++FrozenError
+    ++[ParseError, "", true]
+    ++FrozenError
+    ++[ParseError, "x1", false]
+    ++[ParseError, "ParseError", false]
+    ++true
+    ++true
+    ++"kept"
+    ++true
+     
+      ## test/share_strings_exception_attribute.rb (new) ##
+     @@

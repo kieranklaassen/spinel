@@ -1,0 +1,113 @@
+An attribute of an exception class with no initialize is nil until set, and is marked once set
+
+    class Tagged < StandardError; attr_accessor :tag, :at; end
+    kept = []
+    60.times do |i|
+      s = +"m"
+      s << i.to_s
+      begin
+        raise Tagged, s
+      rescue Tagged => e
+        e.tag = "tag-#{i}"
+        e.at = [i, "a#{i}"]
+        kept << e
+      end
+    end
+    # --share-strings: 59 of the 60 read back wrong; CRuby: none
+
+A class of the program's under a builtin exception, with ivars and no
+initialize in its chain, has no constructor on its path, so the runtime
+builds it. With --share-strings a raise whose message is a String the
+program appends to builds the exception at the raise, to hold that
+String ("An exception holds a shared String message as its handle"),
+and builds it as a plain exception of the base size: the arm typed to
+the class wrote its ivars past the end, in a plain run. Before that
+change the arm built it itself, at the class's size.
+
+Without the flag the same class was read past its end once an arm that
+names no class of the program had caught it. sp_exc_new_for_catch built
+it at the base size there too, and a dispatch on the kept value went
+past the end of it:
+
+    class ParseError < StandardError; attr_accessor :line, :ctx; end
+    kept = []
+    begin
+      raise ParseError, "m"
+    rescue StandardError => e
+      kept << e
+    end
+    kept.each { |v| p v.ctx if v.respond_to?(:ctx) }   # 0; CRuby: nil
+
+A method of the class that stores three ivars segfaulted. An arm typed
+to its parent, where the parent is such a class too, built it at the
+parent's size, and the ivars the subclass adds were read past that.
+
+Built by `.new`, or by the rescue that catches a raise by its name, it
+had its own size, but sp_exc_new_sub_sized zeroed the struct and gave it
+the base exception's scan:
+
+    e = ParseError.new("m")
+    p e.line          # 0; CRuby: nil
+    e.ctx = rows(3)
+    20000.times { rows(3) }
+    p e.ctx           # [1, "r1"]; CRuby: the three rows
+
+An ivar nothing had set read as the zero pattern, 0 for a boxed or an
+Integer slot, where a constructor seeds nil; and an ivar the program
+stored was never marked, and its value was freed under the exception in
+a plain run.
+
+One builder cures both. sp_exc_new_sub_ivars takes the class's own scan
+and a function that seeds the slots whose nil is not zero
+(sp_<Class>__ivnil, emitted beside the scan of such a class and only
+for one). The rescue has to know which class was raised, and all it
+holds is the name. The names of these classes stand in one table of the
+generated code (sp_xbn_name), and that code passes a class's row where
+it raises the class or builds it; the rescue then knows the class by
+one range test on the pointer (sp_exc_own_by_name), whatever the number
+of classes and the length of their names, and sp_user_exc_parent is not
+asked a second time. A raise that builds the exception itself asks the
+same entry (sp_exc_catch_own). A name that is no row is built as it was.
+
+Where sp_exc_new_for_catch built such a class before, a message given
+as a frozen literal stays that frozen literal (`e.message.frozen?`,
+`e.message << "x"` raising FrozenError): sp_exc_new_sub_caught is the
+same builder with that function's own test of the message.
+
+Cost, in instructions under callgrind for one exception built (gcc,
+glibc): 20 where master built the class at its own size (`.new`, the
+arm that names it), for two more arguments and the nil stores of two
+attributes; 45 where an arm typed to a parent of the same kind catches
+a subclass raised by name, which is built as itself now; 5 for a
+builtin exception caught in a program that has such a class; and an arm
+that names no class of the program builds such a class in 134 fewer.
+Around these, glibc's strcmp counts 22 to 66 more for the same compares
+(17,400,000 calls in 150,000 turns either way): the class's name is a
+row of the table and no longer the literal, and strcmp enters by its
+page-crossing path by the two addresses' offsets in their pages, for 19
+of a turn's 116 compares where master's build has 13.
+
+A program without such a class emits the C it did.
+sp_exc_new_for_catch does not change, and sp_exc_new_sub_sized stays,
+with the base scan, for a class with an initialize of its own, whose C
+does not change either. A builtin exception the program reopens is not
+such a class.
+
+Not here: a class read off a value (`raise x.class, "re"`). Its name
+reaches the raise as a copy (sp_exc_class_name), which is no row: no
+initialize runs for it, and a class without one is still built at the
+base size. And a subclass caught by an arm typed to a parent that has a
+method of its own and no attribute, or by a bare arm typed to the
+parent, is still built at the parent's size, as before: its attribute
+does not read nil there, and ivars a method of the subclass stores go
+past the object.
+
+Tests: test/exception_attribute_without_initialize.rb,
+test/exception_attribute_marked.rb (added to GC_STRESS_TESTS),
+test/exception_attribute_parent_arm.rb,
+test/share_strings_exception_attribute.rb (run by share-strings-test
+too), and test/exception_attribute_builtin_reopened.rb, which passes
+before this change too: it guards a reopened builtin exception against
+it
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
