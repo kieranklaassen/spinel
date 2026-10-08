@@ -1,0 +1,9 @@
+One helper emits the test a rescue clause makes of the class
+
+emit_rescue wrote the test of the exception's class against the clause's
+list in line: the bare clause, a splat, a constant, a namespaced name, a
+module. emit_rescue_cls_cond emits that expression for a class held in
+any C string, so the same test can be asked before the clause is
+reached. The C is unchanged.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

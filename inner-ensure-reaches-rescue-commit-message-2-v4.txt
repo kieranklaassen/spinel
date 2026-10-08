@@ -1,0 +1,40 @@
+An exception leaving an inner ensure reaches the rescue around it
+
+    begin
+      begin
+        raise TypeError, "t"
+      ensure
+        puts "inner ensure"
+      end
+    rescue TypeError
+      puts "rescued"
+    ensure
+      puts "outer ensure"
+    end
+
+printed both ensures and died with the TypeError uncaught, where CRuby
+prints "inner ensure", "rescued", "outer ensure".
+
+After its ensure body a region hands the exception it deferred straight
+to the enclosing ensure, unless a begin's frame lies between the two.
+The rescue clauses of the enclosing begin itself share that ensure's
+frame: no frame lies between, and they were passed. A synchronize block
+and the loop of select! directly under such a begin passed them the same
+way.
+
+EnsureCtx gains body_rescue: the region's first rescue clause, while
+its body is what is being emitted. Where it is set the exception is
+raised again, and the enclosing begin's frame brings it to those
+clauses, but only where one of them takes it: the hand-on first asks
+the clauses' own tests of the class that waits
+(emit_ensure_exc_rescue_guard), and an exception none of them takes is
+handed to the ensure as it was. Clauses that name something other than
+constants (a splat, a call) cannot be asked ahead; there the exception
+is raised again and the arm for no match runs the ensure. Everywhere
+else the C is what it was.
+
+An exception that no clause takes pays those tests once: some 4,150
+instructions for one class name that misses (callgrind, gcc -O2), the
+walk sp_exc_cls_matches makes up the hierarchy by name.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
