@@ -1,0 +1,21 @@
+1:  348fe6e11 ! 1:  5c68a02fb The two ends of a String Range made on the spot are both kept, and made in order
+    @@ test/string_range_fresh_ends.rb (new)
+     +
+     +# a collection between the two ends takes neither
+     +bad = 0
+    -+300000.times do |i|
+    ++3000.times do |i|
+     +  b = i.to_s
+     +  e = (i + 3).to_s
+     +  m = (i.to_s..(i + 3).to_s).max
+    @@ test/string_range_fresh_ends.rb (new)
+     +p bad
+     +
+     +none = 0
+    -+300000.times do |j|
+    ++3000.times do |j|
+     +  i = j + 100000
+     +  none += 1 if (i.to_s...(i + 3).to_s).min.nil?
+     +end
+2:  2b364a5eb = 2:  e3698ea1c A String Range that no name holds is kept until it is read
+3:  598c8cb3d = 3:  099efda4a A local as one end of a String Range takes no slot when the other end cannot reach it

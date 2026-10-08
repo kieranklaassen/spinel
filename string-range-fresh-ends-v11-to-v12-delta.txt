@@ -1,0 +1,20 @@
+--- body -v11
++++ body -v12
+@@ -93,7 +93,7 @@
+ 
+ **Not here.** A String Range passed to a Proc, taken apart by a multiple assignment, read by `inspect` or handed to a Struct's constructor as above still loses an end at level 2. There master aborts for the Proc, `inspect` and the Struct and prints a wrong count for the multiple assignment; here the Proc and `inspect` still abort, the multiple assignment still prints a wrong count, and the Struct's abort is the wrong count above. A String Range read end by end through a reader, out of a Struct member or an instance variable (`h.r.first == x && h.r.last == y`), aborts at level 2 before and after; an instance variable's Range read whole by `cover?`, or into a local first, is right here. All of these are right in a plain run and at level 1, before and after. A String Range in a global, a constant or a class variable is still not marked while nothing reads it, a fix of its own. Until that is in, a program that allocates between the write of `$r` and its read can print a wrong line in a plain run too, on master and here (the program of the second stated cost is one); one that printed a wrong line on master at level 2 aborts there here: the temp is rooted with ends that were already freed. That is wrong to loud. The constant's Range of the second stated cost and the Range handed to a Struct go the other way, loud to wrong. An Integer or Float Range's ends still run in the C compiler's order.
+ 
+-**Test.** `test/string_range_fresh_ends.rb`, also in `GC_STRESS_TESTS`. Fails on master in a plain run with gcc, at level 1 with clang (the global's line), and aborts at level 2 with both.
++**Test.** `test/string_range_fresh_ends.rb`, also in `GC_STRESS_TESTS`. Fails on master in a plain run with gcc and with clang (with clang by the global's line alone), and aborts at level 2 with both.
+ 
+ ## `make gate` (on this branch merged with current master)
+ 
+@@ -101,7 +101,7 @@
+ gate: run on the Mac at opening
+ ```
+ 
+-Run here before that (Linux x86-64, gcc 13.3 and clang 18.1, CRuby 3.3.6). On these three commits over master `74fa6d7c2457`: the build from nothing, the test and the walk's test at five collector settings with both compilers, with and without `--share-strings`, and `tools/gate.rb check` for each commit. On the same three over master `9855f1f61ff8`, with the walks' pull request beneath them before it merged: the same, `make share-strings-test`, `make cident` against their parent, and every program and cost figure this text gives.
++Run here before that (Linux x86-64, gcc 13.3 and clang 18.1, CRuby 3.3.6). On these three commits over master `84f5b5020ef8`: the build from nothing, the test and the walk's test at five collector settings with both compilers, with and without `--share-strings`, `tools/gate.rb check` for each commit, and `make gc-stress-test`. On the same three with the test's two long loops at 300,000 turns where they now have 3,000, over master `9855f1f61ff8`, with the walks' pull request beneath them before it merged: all of that but `make gc-stress-test`, then `make share-strings-test`, `make cident` against their parent, and every program and cost figure this text gives.
+ 
+ - [ ] New tests have `.expected` files that match CRuby 4.0 run with `--enable-frozen-string-literal` (written with 3.3.6)
+ - [x] Values past 2^31 are marked `# spinel: int64` (none)
