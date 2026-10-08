@@ -1365,6 +1365,7 @@ reject-test: $(SPINEL)
 	         test/reject/string_hash_fresh_each.rb \
 	         test/reject/string_hash_fresh_pair.rb \
 	         test/reject/string_hash_fresh_values.rb \
+	         test/reject/string_hash_value_alias.rb \
 	         test/reject/string_hash_interpolated.rb \
 	         test/reject/string_hash_call.rb \
 	         test/reject/string_hash_fresh_store.rb \

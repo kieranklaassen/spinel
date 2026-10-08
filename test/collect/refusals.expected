@@ -940,6 +940,14 @@ spinel: test/reject/string_hash_store_value.rb:4: a String stored in a Hash is p
 spinel: test/reject/string_hash_store_value_block.rb:4: a String stored in a Hash is passed to an appending value block: a String is not yet shared by reference through a Hash's values. Append to the String before storing it in the Hash.
 == test/reject/string_hash_store_value_block.rb [promote] rc=1
 spinel: test/reject/string_hash_store_value_block.rb:4: a String stored in a Hash is passed to an appending value block: a String is not yet shared by reference through a Hash's values. Append to the String before storing it in the Hash.
+== test/reject/string_hash_value_alias.rb [default] rc=1
+spinel: test/reject/string_hash_value_alias.rb:4: a String stored in a Hash is passed to an appending value block: a String is not yet shared by reference through a Hash's values. Append to the String before storing it in the Hash.
+== test/reject/string_hash_value_alias.rb [promote] rc=1
+spinel: test/reject/string_hash_value_alias.rb:4: a String stored in a Hash is passed to an appending value block: a String is not yet shared by reference through a Hash's values. Append to the String before storing it in the Hash.
+== test/reject/string_hash_value_alias_far.rb [default] rc=1
+spinel: test/reject/string_hash_value_alias_far.rb:2: a String stored in a Hash is passed to an appending value block: a String is not yet shared by reference through a Hash's values. Append to the String before storing it in the Hash.
+== test/reject/string_hash_value_alias_far.rb [promote] rc=1
+spinel: test/reject/string_hash_value_alias_far.rb:2: a String stored in a Hash is passed to an appending value block: a String is not yet shared by reference through a Hash's values. Append to the String before storing it in the Hash.
 == test/reject/string_hash_value_default_block.rb [default] rc=1
 spinel: test/reject/string_hash_value_default_block.rb:2: a String stored in a Hash is passed to an appending value block: a String is not yet shared by reference through a Hash's values. Append to the String before storing it in the Hash.
 == test/reject/string_hash_value_default_block.rb [promote] rc=1

@@ -17691,11 +17691,16 @@ static int an_hash_value_block(Compiler *c, const char *itn, int recv, int *hrec
   return (nt_kind(nt, recv) == NK_LocalVariableReadNode || nt_kind(nt, recv) == NK_HashNode) &&
          ty_is_hash(infer_type(c, recv));
 }
-/* Does the block append to its parameter `vp`, in place or through a method
-   it hands it to? */
-static int an_value_block_appends(Compiler *c, int blk, const char *vp) {
-  return strbuf_mut_kind(c, vp, comp_scope_of(c, blk)) == 1 || cap_wrap_mutates_param(c, blk, vp) ||
-         an_subtree_hands_to_appender(c, nt_ref(c->nt, blk, "body"), vp, 0);
+/* Does the block append to its parameter `vp`, in place, through a method
+   it hands it to, or through a local that names it
+   (`{ |v| t = v; t << "!" }`, an_block_param_alias_mutated)? The alias
+   table is built by the first block that asks for it. */
+static int an_value_block_appends(Compiler *c, int blk, const char *vp, ALocalAliases *t, int *built) {
+  Scope *vs = comp_scope_of(c, blk);
+  if (strbuf_mut_kind(c, vp, vs) == 1 || cap_wrap_mutates_param(c, blk, vp) ||
+      an_subtree_hands_to_appender(c, nt_ref(c->nt, blk, "body"), vp, 0)) return 1;
+  if (!*built) { an_local_aliases_build(c, t); *built = 1; }
+  return an_block_param_alias_mutated(c, t, vs, vp);
 }
 static const char an_hash_value_block_refusal[] =
     "a String stored in a Hash is passed to an appending value block: "
@@ -18892,7 +18897,7 @@ static int promote_shared_stored_strings(Compiler *c) {
       int hr, vi;
       if (an_hash_value_block(c, itn, recv4, &hr, &vi)) {
         const char *vp = block_param_name(c, blk4, vi);
-        if (!vp || !an_value_block_appends(c, blk4, vp)) continue;
+        if (!vp || !an_value_block_appends(c, blk4, vp, &bpa, &bpa_built)) continue;
         an_hash_store_routes(c, hr, -1, blk4, vp, an_hash_value_block_refusal);
         continue;
       }
@@ -33441,6 +33446,7 @@ static int hv_far_store(Compiler *c, int hr) {
 static void refuse_far_hash_value_stores(Compiler *c) {
   const NodeTable *nt = c->nt;
   int listed = 0;
+  ALocalAliases bpa; int bpa_built = 0;
   NT_FOREACH_KIND(nt, NK_CallNode, it) {
     char nb[64]; int recv, an;
     const char *itn = hp_call(nt, it, &recv, &an, nb, sizeof nb);
@@ -33448,7 +33454,7 @@ static void refuse_far_hash_value_stores(Compiler *c) {
     /* the shape and the parameter first: they ask the node table alone */
     if (!itn || blk < 0 || !an_value_block_shape(nt, itn, recv, &hr, &vi)) continue;
     const char *vp = block_param_name(c, blk, vi);
-    if (!vp || !an_value_block_appends(c, blk, vp)) continue;
+    if (!vp || !an_value_block_appends(c, blk, vp, &bpa, &bpa_built)) continue;
     /* the store index is the fixpoint's: list again on the settled tree */
     if (!listed) { sb_store_valid = 0; hv_list_sites(c); listed = 1; }
     /* the receiver's type last: only a block with such a store asks it */
@@ -33475,6 +33481,7 @@ static void refuse_far_hash_value_stores(Compiler *c) {
     free(hv_memo); hv_memo = NULL; free(hv_slot); hv_slot = NULL; free(hv_open); hv_open = NULL;
     hv_nmemo = hv_slot_cap = hv_nopen = hv_open_cap = 0;
   }
+  if (bpa_built) an_local_aliases_free(&bpa);
 }
 
 /* A bare `@ivar` argument whose ivar is written from a local, handed to a
