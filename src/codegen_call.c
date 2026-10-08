@@ -17542,6 +17542,396 @@ static int unresolved_name_chain(Compiler *c, int node) {
   }
   return 0;
 }
+/* The arguments of a call that no method answers, emitted for their effect
+   alone, each followed by `sep`, in the order CRuby evaluates them before it
+   raises NoMethodError. A call with a splat or a keyword argument is not
+   staged into NoMethodError#args, and its arguments were not evaluated at
+   all: `r.zork(tick, *xs)` raised without calling tick.
+
+   They are run only where every one of them is of a listed shape
+   (gate_args_listed); any other call keeps the C it had. The list is short
+   on purpose. An argument that was never emitted may be one the compiler
+   refuses, or compiles to something that does not answer as CRuby does, and
+   a program that never reached it was right: `5.zork(k: (U = 7))` built and
+   raised NoMethodError, and must go on doing so. Listed are what has
+   nothing to run (a literal, a pure read, an Array or Hash literal of
+   those), a call in top-level code that is sure to reach a top-level
+   method (gate_call_is_listed), itself given variables, literals or such
+   calls, and a plain write of a local, instance or global variable from
+   one of those; inside parentheses, an Array or Hash literal, a splat or a
+   keyword argument. The method such a call reaches may never have run
+   either, so its body is listed too (gate_body_is_listed). */
+static int gate_arg_is_inert(Compiler *c, int n) {
+  const NodeTable *nt = c->nt;
+  if (n < 0) return 1;
+  switch (nt_kind(nt, n)) {
+    case NK_StringNode: case NK_GlobalVariableReadNode: return 1;
+    case NK_ArrayNode: case NK_HashNode: {
+      int en = 0; const int *el = nt_arr(nt, n, "elements", &en);
+      for (int e = 0; e < en; e++) if (!gate_arg_is_inert(c, el[e])) return 0;
+      return 1;
+    }
+    case NK_AssocNode:
+      return gate_arg_is_inert(c, nt_ref(nt, n, "key")) && gate_arg_is_inert(c, nt_ref(nt, n, "value"));
+    default: return subtree_is_pure_read(c, n);
+  }
+}
+static int gate_call_is_listed(Compiler *c, int n);
+/* a value a listed call or write is given: a variable, a literal, an Array
+   or Hash literal with nothing to run, or such a call */
+static int gate_value_is_listed(Compiler *c, int n) {
+  switch (nt_kind(c->nt, n)) {
+    case NK_LocalVariableReadNode: case NK_InstanceVariableReadNode:
+    case NK_GlobalVariableReadNode: case NK_StringNode: case NK_IntegerNode:
+    case NK_FloatNode: case NK_SymbolNode: case NK_NilNode: case NK_TrueNode:
+    case NK_FalseNode:
+      return 1;
+    case NK_ArrayNode: case NK_HashNode: return gate_arg_is_inert(c, n);
+    case NK_CallNode: return gate_call_is_listed(c, n);
+    default: return 0;
+  }
+}
+/* What the program holds, anywhere, that takes a listed call or a listed
+   body off what it reads as. GATE_MOVES_SELF: top-level code runs with
+   another self, or before the definitions above it (a BEGIN block, a block
+   evaluated as some object's: instance_eval and its kin, define_method, a
+   Class.new body; an extended main, a BasicObject). GATE_REBINDS_PRINT:
+   puts, an interpolation or raise may reach something of the program's own
+   (a method, a Symbol or an alias of one of their names, standard output or
+   its separators by name). */
+enum { GATE_MOVES_SELF = 1, GATE_REBINDS_PRINT = 2 };
+static int gate_name_in(const char *nm, const char *const *list) {
+  for (int k = 0; nm && list[k]; k++) if (sp_streq(nm, list[k])) return 1;
+  return 0;
+}
+static int gate_prog_scan(Compiler *c) {
+  static const char *const MOVES[] = {
+    "instance_eval", "instance_exec", "class_eval", "class_exec", "module_eval", "module_exec",
+    "define_method", "define_singleton_method", "refine", "extend", NULL };
+  static const char *const PRINTS[] = {
+    "puts", "print", "p", "raise", "exception", "write", "to_s", "inspect", NULL };
+  static const char *const OUT[] = { "$stdout", "$>", "$,", "$\\", "STDOUT", NULL };
+  static const char *const BLOCKED[] = { "Class", "Module", "Struct", "Data", NULL };
+  static const char *const SELFLESS[] = { "BasicObject", "Ractor", NULL };
+  static const NodeKind NAMED[] = {
+    NK_CallNode, NK_SymbolNode, NK_ConstantReadNode, NK_DefNode, NK_GlobalVariableReadNode,
+    NK_GlobalVariableWriteNode, NK_GlobalVariableTargetNode, NK_GlobalVariableOperatorWriteNode,
+    NK_GlobalVariableOrWriteNode, NK_GlobalVariableAndWriteNode };
+  static const NodeTable *memo_nt; static int memo_ver = -1, memo_count = -1, memo;
+  const NodeTable *nt = c->nt;
+  if (memo_nt == nt && memo_ver == nt->version && memo_count == nt->count) return memo;
+  memo_nt = nt; memo_ver = nt->version; memo_count = nt->count; memo = 0;
+  int n = 0;
+  nt_nodes_of_kind(nt, NK_PreExecutionNode, &n);
+  if (n) memo |= GATE_MOVES_SELF;
+  nt_nodes_of_kind(nt, NK_AliasGlobalVariableNode, &n);
+  if (n) memo |= GATE_REBINDS_PRINT;
+  for (int q = 0; q < (int)(sizeof NAMED / sizeof NAMED[0]); q++) {
+    const int *ids = nt_nodes_of_kind(nt, NAMED[q], &n);
+    for (int i = 0; i < n; i++) {
+      const char *nm = nt_str(nt, ids[i], q == 1 ? "value" : "name");
+      if (q == 0) {
+        int r = nt_ref(nt, ids[i], "block") >= 0 ? nt_ref(nt, ids[i], "receiver") : -1;
+        if (gate_name_in(nm, MOVES) ||
+            (r >= 0 && nt_kind(nt, r) == NK_ConstantReadNode && gate_name_in(nt_str(nt, r, "name"), BLOCKED)))
+          memo |= GATE_MOVES_SELF;
+      }
+      else if (q == 1) {
+        if (gate_name_in(nm, MOVES)) memo |= GATE_MOVES_SELF;
+        if (gate_name_in(nm, PRINTS)) memo |= GATE_REBINDS_PRINT;
+      }
+      else if (q == 2) {
+        if (gate_name_in(nm, SELFLESS)) memo |= GATE_MOVES_SELF;
+        if (gate_name_in(nm, OUT)) memo |= GATE_REBINDS_PRINT;
+      }
+      else if (gate_name_in(nm, q == 3 ? PRINTS : OUT)) memo |= GATE_REBINDS_PRINT;
+    }
+  }
+  return memo;
+}
+/* Is the top-level method `mi` the one method of its name, defined by a
+   statement of the program's top level, and named nowhere else: by no
+   builtin, by none of main's own methods, and by no Symbol or String (an
+   undef, an alias, a send)? */
+static int gate_def_is_sole(Compiler *c, int mi) {
+  static const char *const MAIN[] = { "using", "include", "define_method", "ruby2_keywords", NULL };
+  enum { SLOTS = 16 };
+  static const NodeTable *memo_nt; static int memo_ver = -1, memo_count = -1;
+  static int memo_mi[SLOTS], memo_ans[SLOTS];
+  const NodeTable *nt = c->nt;
+  if (memo_nt != nt || memo_ver != nt->version || memo_count != nt->count) {
+    memo_nt = nt; memo_ver = nt->version; memo_count = nt->count;
+    for (int i = 0; i < SLOTS; i++) memo_mi[i] = -1;
+  }
+  int slot = mi % SLOTS;
+  if (memo_mi[slot] == mi) return memo_ans[slot];
+  memo_mi[slot] = mi; memo_ans[slot] = 0;
+  const char *name = c->scopes[mi].name;
+  int dn = c->scopes[mi].def_node;
+  if (!name || dn < 0 || builtin_instance_name_known(name) || builtin_object_method_known(name) ||
+      is_visibility_name(name)) return 0;
+  for (int k = 0; MAIN[k]; k++) if (sp_streq(name, MAIN[k])) return 0;
+  int n = 0, top = 0;
+  const int *ids = nt_nodes_of_kind(nt, NK_DefNode, &n);
+  for (int i = 0; i < n; i++) {
+    const char *dnm = nt_str(nt, ids[i], "name");
+    if (ids[i] != dn && dnm && sp_streq(dnm, name)) return 0;
+  }
+  int sn = 0; const int *st = c->scopes[0].body >= 0 ? nt_arr(nt, c->scopes[0].body, "body", &sn) : NULL;
+  for (int j = 0; j < sn && !top; j++) top = st[j] == dn;
+  if (!top) return 0;
+  for (int q = 0; q < 2; q++) {
+    ids = nt_nodes_of_kind(nt, q ? NK_StringNode : NK_SymbolNode, &n);
+    for (int i = 0; i < n; i++) {
+      const char *v = nt_str(nt, ids[i], q ? "content" : "value");
+      if (v && sp_streq(v, name)) return 0;
+    }
+  }
+  return memo_ans[slot] = 1;
+}
+/* a global of the program's own: `$stdout`, `$;` and their kin are the
+   interpreter's */
+static int gate_gvar_is_own(const char *g) {
+  if (!g || g[0] != '$' || g[1] < 'a' || g[1] > 'z' || sp_streq(g, "$stdout") ||
+      sp_streq(g, "$stderr") || sp_streq(g, "$stdin")) return 0;
+  for (g += 2; *g; g++)
+    if (!((*g >= 'a' && *g <= 'z') || (*g >= '0' && *g <= '9') || *g == '_')) return 0;
+  return 1;
+}
+/* an Integer that cannot be nil, a literal or a variable: what a listed
+   body prints */
+static int gate_int_is_listed(Compiler *c, int n) {
+  switch (nt_kind(c->nt, n)) {
+    case NK_IntegerNode: case NK_LocalVariableReadNode: case NK_InstanceVariableReadNode:
+    case NK_GlobalVariableReadNode:
+      return comp_ntype(c, n) == TY_INT && !nullable_int_value(c, n);
+    default: return 0;
+  }
+}
+/* a String literal, or one that interpolates such Integers */
+static int gate_text_is_listed(Compiler *c, int n) {
+  const NodeTable *nt = c->nt;
+  if (nt_kind(nt, n) == NK_StringNode) return 1;
+  if (nt_kind(nt, n) != NK_InterpolatedStringNode) return 0;
+  int pn = 0; const int *parts = nt_arr(nt, n, "parts", &pn);
+  for (int i = 0; i < pn; i++) {
+    if (nt_kind(nt, parts[i]) == NK_StringNode) continue;
+    if (nt_kind(nt, parts[i]) != NK_EmbeddedStatementsNode) return 0;
+    int st = nt_ref(nt, parts[i], "statements");
+    int sn = 0; const int *sv = st >= 0 ? nt_arr(nt, st, "body", &sn) : NULL;
+    if (sn != 1 || !gate_int_is_listed(c, sv[0])) return 0;
+  }
+  return 1;
+}
+static int gate_callee_is_listed(Compiler *c, int n, long long line, long long file, int depth);
+/* The body of a listed method, and the values a call in it is given. The
+   call that reaches it was never emitted, so the body may never have run:
+   it is listed only where it does nothing but read variables and literals,
+   write a local or a global of the program's own, print text or an Integer
+   (puts, print, p), raise a builtin error with such a text, and call
+   methods that are listed themselves. */
+static int gate_body_is_listed(Compiler *c, int n, long long line, long long file, int depth) {
+  static const char *const ERRORS[] = {
+    "StandardError", "RuntimeError", "ArgumentError", "IOError", "TypeError", "RangeError",
+    "IndexError", NULL };
+  const NodeTable *nt = c->nt;
+  if (n < 0) return 1;
+  switch (nt_kind(nt, n)) {
+    case NK_StatementsNode: {
+      int sn = 0; const int *st = nt_arr(nt, n, "body", &sn);
+      for (int i = 0; i < sn; i++) if (!gate_body_is_listed(c, st[i], line, file, depth)) return 0;
+      return 1;
+    }
+    case NK_ParenthesesNode: return gate_body_is_listed(c, nt_ref(nt, n, "body"), line, file, depth);
+    case NK_LocalVariableReadNode: case NK_InstanceVariableReadNode:
+    case NK_GlobalVariableReadNode: case NK_StringNode: case NK_IntegerNode:
+    case NK_FloatNode: case NK_SymbolNode: case NK_NilNode: case NK_TrueNode:
+    case NK_FalseNode:
+      return 1;
+    case NK_GlobalVariableWriteNode:
+      if (!gate_gvar_is_own(nt_str(nt, n, "name"))) return 0;
+      /* fall through */
+    case NK_LocalVariableWriteNode:
+      return gate_body_is_listed(c, nt_ref(nt, n, "value"), line, file, depth);
+    case NK_CallNode: {
+      if (nt_ref(nt, n, "receiver") >= 0 || nt_ref(nt, n, "block") >= 0) return 0;
+      if (cplan_user(c, n)->mi >= 0) return gate_callee_is_listed(c, n, line, file, depth + 1);
+      const char *nm = nt_str(nt, n, "name");
+      int ac = 0; const int *av = call_args(nt, n, &ac);
+      if (!nm || (gate_prog_scan(c) & GATE_REBINDS_PRINT)) return 0;
+      if (sp_streq(nm, "puts") || sp_streq(nm, "print") || sp_streq(nm, "p")) {
+        for (int a = 0; a < ac; a++)
+          if (!gate_text_is_listed(c, av[a]) && !gate_int_is_listed(c, av[a])) return 0;
+        return 1;
+      }
+      if (!sp_streq(nm, "raise") || ac < 1 || ac > 2) return 0;
+      if (ac == 2 || nt_kind(nt, av[0]) == NK_ConstantReadNode) {
+        const char *en = nt_kind(nt, av[0]) == NK_ConstantReadNode ? nt_str(nt, av[0], "name") : NULL;
+        if (!gate_name_in(en, ERRORS) || comp_class_index(c, en) >= 0 || comp_const(c, en)) return 0;
+        if (ac == 1) return 1;
+      }
+      return gate_text_is_listed(c, av[ac - 1]);
+    }
+    default: return 0;
+  }
+}
+/* A call that is sure to reach the method CRuby calls there, and a method
+   that is sure to do what CRuby does: it has no receiver and no block;
+   inference binds it straight to a top-level method that takes exactly that
+   many plain parameters and does not yield; that method is the only one of
+   its name (gate_def_is_sole) and its definition stands above `line` of
+   `file`, where the argument is written; its body is listed, and it is not
+   reached through itself. */
+static int gate_callee_is_listed(Compiler *c, int n, long long line, long long file, int depth) {
+  const NodeTable *nt = c->nt;
+  if (depth > 4 || nt_ref(nt, n, "receiver") >= 0 || nt_ref(nt, n, "block") >= 0) return 0;
+  const CallPlan *p = cplan_user(c, n);
+  int mi = p->mi;
+  if (mi < 0 || p->via != UC_TOP || p->dispatch != CP_DIRECT) return 0;
+  const Scope *m = &c->scopes[mi];
+  if (m->def_node < 0 || m->yields || m->blk_param) return 0;
+  long long dl = nt_int(nt, m->def_node, "node_line", 0);
+  if (dl <= 0 || dl >= line || nt_int(nt, m->def_node, "node_file", 0) != file) return 0;
+  int ac = 0; const int *av = call_args(nt, n, &ac);
+  int pn = nt_ref(nt, m->def_node, "parameters");
+  int rn = 0, on = 0, sn = 0, kn = 0;
+  const int *rq = pn >= 0 ? nt_arr(nt, pn, "requireds", &rn) : NULL;
+  if (pn >= 0) {
+    nt_arr(nt, pn, "optionals", &on); nt_arr(nt, pn, "posts", &sn); nt_arr(nt, pn, "keywords", &kn);
+    if (on || sn || kn || nt_ref(nt, pn, "rest") >= 0 || nt_ref(nt, pn, "keyword_rest") >= 0 ||
+        nt_ref(nt, pn, "block") >= 0) return 0;
+  }
+  if (rn != ac) return 0;
+  for (int a = 0; a < ac; a++)
+    if (nt_kind(nt, rq[a]) != NK_RequiredParameterNode ||
+        !(depth ? gate_body_is_listed(c, av[a], line, file, depth) : gate_value_is_listed(c, av[a])))
+      return 0;
+  return gate_def_is_sole(c, mi) &&
+         gate_body_is_listed(c, nt_ref(nt, m->def_node, "body"), line, file, depth);
+}
+/* A listed call is written in top-level code, where self is main, not in a
+   method or a class body, whose self may be an object with a method of that
+   name of its own. */
+static int gate_call_is_listed(Compiler *c, int n) {
+  const NodeTable *nt = c->nt;
+  if (comp_scope_of(c, n) != &c->scopes[0] || c->node_cbody[n] >= 0 ||
+      (gate_prog_scan(c) & GATE_MOVES_SELF)) return 0;
+  return gate_callee_is_listed(c, n, nt_int(nt, n, "node_line", 0), nt_int(nt, n, "node_file", 0), 0);
+}
+/* a dispatch has run this node into a temporary: an argument, or a literal
+   or a call inside one */
+static int gate_node_is_held(int n) {
+  for (int i = 0; i < g_n_argov; i++) if (g_argov_node[i] == n) return 1;
+  return 0;
+}
+static int gate_arg_is_listed(Compiler *c, int n) {
+  const NodeTable *nt = c->nt;
+  if (gate_node_is_held(n) || gate_arg_is_inert(c, n)) return 1;
+  switch (nt_kind(nt, n)) {
+    case NK_ParenthesesNode: return gate_arg_is_listed(c, nt_ref(nt, n, "body"));
+    case NK_SplatNode: return gate_arg_is_listed(c, nt_ref(nt, n, "expression"));
+    case NK_AssocSplatNode: return gate_arg_is_listed(c, nt_ref(nt, n, "value"));
+    case NK_AssocNode:
+      return gate_arg_is_listed(c, nt_ref(nt, n, "key")) && gate_arg_is_listed(c, nt_ref(nt, n, "value"));
+    case NK_StatementsNode: case NK_ArrayNode: case NK_HashNode: case NK_KeywordHashNode: {
+      int en = 0;
+      const int *el = nt_arr(nt, n, nt_kind(nt, n) == NK_StatementsNode ? "body" : "elements", &en);
+      for (int e = 0; e < en; e++) if (!gate_arg_is_listed(c, el[e])) return 0;
+      return 1;
+    }
+    case NK_CallNode: return gate_call_is_listed(c, n);
+    case NK_GlobalVariableWriteNode:
+      if (!gate_gvar_is_own(nt_str(nt, n, "name"))) return 0;
+      /* fall through */
+    case NK_LocalVariableWriteNode: case NK_InstanceVariableWriteNode:
+      return gate_value_is_listed(c, nt_ref(nt, n, "value"));
+    default: return 0;
+  }
+}
+/* Whether every argument of the call `id` is of a listed shape, but for
+   what a dispatch has run already (gate_node_is_held). */
+static int gate_args_listed(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  int ac = 0; const int *av = call_args(nt, id, &ac);
+  for (int k = 0; k < ac; k++) if (!gate_arg_is_listed(c, av[k])) return 0;
+  int blk = nt_ref(nt, id, "block");
+  return blk < 0 || nt_kind(nt, blk) != NK_BlockArgumentNode ||
+         gate_arg_is_listed(c, nt_ref(nt, blk, "expression"));
+}
+static int gate_text_is_value(const char *t) {
+  for (; *t; t++)
+    if (!((*t >= 'a' && *t <= 'z') || (*t >= 'A' && *t <= 'Z') || (*t >= '0' && *t <= '9') ||
+          *t == '_' || *t == '.' || *t == '[' || *t == ']')) return 0;
+  return 1;
+}
+/* A listed argument is walked down to the calls and writes in it, and only
+   those are emitted: the Array, the Hash or the splat around them is not
+   built. What one hoists is taken into a buffer of its own and written
+   here, where its text goes: in the statement's prelude it would run ahead
+   of the receiver and of the arguments before it. */
+static void emit_gate_arg_effect(Compiler *c, int n, const char *sep, Buf *b) {
+  const NodeTable *nt = c->nt;
+  if (gate_node_is_held(n) || gate_arg_is_inert(c, n)) return;
+  switch (nt_kind(nt, n)) {
+    case NK_ParenthesesNode: emit_gate_arg_effect(c, nt_ref(nt, n, "body"), sep, b); return;
+    case NK_SplatNode: emit_gate_arg_effect(c, nt_ref(nt, n, "expression"), sep, b); return;
+    case NK_AssocSplatNode: emit_gate_arg_effect(c, nt_ref(nt, n, "value"), sep, b); return;
+    case NK_AssocNode:
+      emit_gate_arg_effect(c, nt_ref(nt, n, "key"), sep, b);
+      emit_gate_arg_effect(c, nt_ref(nt, n, "value"), sep, b);
+      return;
+    case NK_StatementsNode: case NK_ArrayNode: case NK_HashNode: case NK_KeywordHashNode: {
+      int en = 0;
+      const int *el = nt_arr(nt, n, nt_kind(nt, n) == NK_StatementsNode ? "body" : "elements", &en);
+      for (int e = 0; e < en; e++) emit_gate_arg_effect(c, el[e], sep, b);
+      return;
+    }
+    default: break;
+  }
+  Buf x; memset(&x, 0, sizeof x);
+  Buf apre; memset(&apre, 0, sizeof apre);
+  Buf *sv_pre = g_pre; g_pre = &apre;
+  emit_expr(c, n, &x);
+  g_pre = sv_pre;
+  int run = x.p && *x.p && !gate_text_is_value(x.p);
+  if (apre.p && apre.p[0]) {
+    buf_printf(b, "({ %s", apre.p);
+    if (run) buf_printf(b, "(void)(%s); ", x.p);
+    buf_printf(b, "})%s", sep);
+  }
+  else if (run) buf_printf(b, "(void)(%s)%s", x.p, sep);
+  free(x.p); free(apre.p);
+}
+static void emit_gate_args_effect(Compiler *c, int id, const char *sep, Buf *b) {
+  const NodeTable *nt = c->nt;
+  int ac = 0; const int *av = call_args(nt, id, &ac);
+  for (int k = 0; k < ac; k++) emit_gate_arg_effect(c, av[k], sep, b);
+  int blk = nt_ref(nt, id, "block");
+  if (blk >= 0 && nt_kind(nt, blk) == NK_BlockArgumentNode)
+    emit_gate_arg_effect(c, nt_ref(nt, blk, "expression"), sep, b);
+}
+/* Whether an argument of the call `id` can leave another object in what its
+   receiver `rv` reads, so that the receiver has to be taken ahead of the
+   arguments: `t = 5; t.zork(k: (t = 7))` raises for 5. read_rebound_by
+   answers for a variable, and for the variables an Array or Hash literal
+   reads. It does not answer for a constant, so one is held wherever an
+   argument may run a method. A receiver held ahead is the object the bare
+   call raised for: nothing a listed argument runs changes an object in
+   place. */
+static int gate_recv_rebindable(Compiler *c, int id, int rv) {
+  const NodeTable *nt = c->nt;
+  if (rv < 0) return 0;
+  NodeKind rk = nt_kind(nt, rv);
+  if (rk != NK_ConstantReadNode && !gate_arg_is_inert(c, rv)) return 1;
+  int ac = 0; const int *av = call_args(nt, id, &ac);
+  int blk = nt_ref(nt, id, "block");
+  if (blk >= 0 && nt_kind(nt, blk) != NK_BlockArgumentNode) blk = -1;
+  for (int a = 0; a <= ac; a++) {
+    int n = a < ac ? av[a] : blk;
+    if (rk == NK_ConstantReadNode ? subtree_may_run_proc(c, n) : read_rebound_by(c, rv, n)) return 1;
+  }
+  return 0;
+}
 int emit_unresolved_call(Compiler *c, int id, Buf *b) {
   const NodeTable *nt = c->nt;
   const char *name = nt_str(nt, id, "name");
@@ -18167,17 +18557,34 @@ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
             if (gac == 0) buf_puts(b, "sp_box_nil()"); \
             buf_puts(b, "}"); \
           } while (0)
+          /* arguments that are not staged still run, after the receiver,
+             where every one of them is of a listed shape */
+          int grun = !gstage && gate_args_listed(c, id);
+          #define EMIT_GATE_POLY_RECV() do { \
+            if (!grun) emit_boxed(c, recv, b); \
+            else { \
+              Buf grb; memset(&grb, 0, sizeof grb); emit_boxed(c, recv, &grb); \
+              Buf gfx; memset(&gfx, 0, sizeof gfx); emit_gate_args_effect(c, id, "; ", &gfx); \
+              if (gfx.p && *gfx.p) { \
+                int grv = ++g_tmp; \
+                buf_printf(b, "({ sp_RbVal _t%d = %s; SP_GC_ROOT_RBVAL(_t%d); %s_t%d; })", \
+                           grv, grb.p ? grb.p : "sp_box_nil()", grv, gfx.p, grv); \
+              } \
+              else buf_puts(b, grb.p ? grb.p : ""); \
+              free(grb.p); free(gfx.p); \
+            } \
+          } while (0)
           if (sp_streq(dflt, "sp_box_nil()") && !ret_scalar) {
             buf_printf(b, "sp_raise_nomethod(sp_nomethod_msg%s(\"%s\", ",
                        gstage ? "_args" : "", nm ? nm : "?");
-            emit_boxed(c, recv, b);
+            EMIT_GATE_POLY_RECV();
             if (gstage) EMIT_GATE_ARGS();
             buf_puts(b, "))");
           }
           else {
             buf_printf(b, "(sp_raise_cls(\"NoMethodError\", sp_nomethod_msg%s(\"%s\", ",
                        gstage ? "_args" : "", nm ? nm : "?");
-            emit_boxed(c, recv, b);
+            EMIT_GATE_POLY_RECV();
             if (gstage) EMIT_GATE_ARGS();
             buf_printf(b, ")), %s)", ret_scalar ? default_value_from_compiler(c, ret) : dflt);
           }
@@ -18213,6 +18620,9 @@ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
              Integer or a Float that also sees nil) names nil or its class at
              run time: the slot's kind alone cannot say which the value is */
           char gmsg[400];
+          /* the nil test and the head of a nullable receiver's message, for
+             a receiver held ahead of the arguments: it is tested there */
+          char gnil[400] = "", ghd[96] = "";
           int recv_evaluated = 0;
           {
             int nullable_recv = recv >= 0 && (grt == TY_STRING ||
@@ -18240,6 +18650,10 @@ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
                        grt == TY_FLOAT ? "sp_float_is_nil(" : "(", rv,
                        grt == TY_FLOAT ? ")" : grt == TY_INT ? ") == SP_INT_NIL" : ") == NULL",
                        hd, hd2, rdesc);
+              snprintf(ghd, sizeof ghd, "%s", hd);
+              snprintf(gnil, sizeof gnil, "%s%s%s",
+                       grt == TY_FLOAT ? "sp_float_is_nil(" : "(", rv,
+                       grt == TY_FLOAT ? ")" : grt == TY_INT ? ") == SP_INT_NIL" : ") == NULL");
               free(rvb.p);
             }
             else {
@@ -18257,16 +18671,43 @@ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
              receiver already evaluated for its message must not run again. */
           int recv_run = recv >= 0 && !recv_stageable && !recv_evaluated;
           int rrt = recv_run ? ++g_tmp : -1;
+          /* Arguments that are not staged still run, after the receiver,
+             where every one of them is of a listed shape. A receiver they
+             can rebind is read ahead of them, as CRuby reads it: into a
+             boxed temp, with its nil test, when they have anything to run. */
+          int grun = !gstage && gate_args_listed(c, id);
+          int ghold = grun && recv_stageable && gate_recv_rebindable(c, id, _rvnode);
+          int ght = -1;
           if (recv_run) recv_stageable = 1;
           #define EMIT_GATE_MSG() do { \
+            int gparen = 0; \
             if (recv_run) { \
               buf_printf(b, "({ sp_RbVal _t%d = ", rrt); emit_boxed(c, recv, b); \
               buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); ", rrt); \
+              if (grun) emit_gate_args_effect(c, id, "; ", b); \
+            } \
+            else if (grun) { \
+              Buf gfx; memset(&gfx, 0, sizeof gfx); \
+              emit_gate_args_effect(c, id, ghold ? "; " : ", ", &gfx); \
+              if (gfx.p && *gfx.p && ghold) { \
+                ght = ++g_tmp; \
+                buf_printf(b, "({ sp_RbVal _t%d = ", ght); emit_boxed(c, recv, b); \
+                buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); ", ght); \
+                if (gnil[0]) { \
+                  int gzt = ++g_tmp; \
+                  buf_printf(b, "int _t%d = %s; ", gzt, gnil); \
+                  snprintf(gmsg, sizeof gmsg, "(_t%d ? \"%s nil\" : \"%s %s\")", gzt, ghd, ghd, rdesc); \
+                } \
+                buf_puts(b, gfx.p); \
+              } \
+              else if (gfx.p && *gfx.p) { buf_puts(b, "("); buf_puts(b, gfx.p); gparen = 1; } \
+              free(gfx.p); \
             } \
             const char *_stagefn = gstage ? "sp_stage_recv_args_msg" : "sp_stage_recv_msg"; \
             if (recv_stageable) { \
               buf_printf(b, "%s(%s, ", _stagefn, gmsg); \
-              if (recv_run) buf_printf(b, "_t%d", rrt); else emit_boxed(c, recv, b); \
+              if (recv_run || ght >= 0) buf_printf(b, "_t%d", recv_run ? rrt : ght); \
+              else emit_boxed(c, recv, b); \
               if (gstage) { \
                 buf_printf(b, ", %d, (sp_RbVal[]){", gac); \
                 for (int gk = 0; gk < gac; gk++) { if (gk) buf_puts(b, ", "); emit_boxed(c, gav[gk], b); } \
@@ -18282,7 +18723,8 @@ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
               buf_puts(b, "})"); \
             } \
             else buf_puts(b, gmsg); \
-            if (recv_run) buf_puts(b, "; })"); \
+            if (recv_run || ght >= 0) buf_puts(b, "; })"); \
+            else if (gparen) buf_puts(b, ")"); \
           } while (0)
           /* A receiver the message could not stage is still evaluated, once,
              ahead of the raise, as CRuby evaluates it before the method is
@@ -18312,6 +18754,7 @@ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
           #undef EMIT_GATE_RECV_MSG
           #undef EMIT_GATE_MSG
           #undef EMIT_GATE_ARGS
+          #undef EMIT_GATE_POLY_RECV
         }
         return 1;
       }
