@@ -1,0 +1,122 @@
+From 5aff63857d0db84c282b5cb5d0b82cd2c867a414 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 8 Oct 2026 01:20:00 +0000
+Subject: [PATCH] A class held by value builds a super into an included
+ module's method
+
+    module Scaled
+      def area(k) = k * 2
+    end
+    class Tile
+      include Scaled
+      def initialize(w); @w = w; end
+      def area(k) = super(k + @w) + 1
+    end
+    p Tile.new(3).area(1)
+
+did not build: "cannot convert to a pointer type". CRuby prints 9.
+
+A class whose instance variables are scalars written only in
+initialize, and that has no subclass, is held by value: its methods
+take the object itself, not its address. emit_super wrote the call
+into the module's copy with self cast to a pointer, as for every other
+class. Where the calling method has the object by value, it now hands
+it over as it is.
+
+The same for a super between two modules' methods in such a class, and
+for one inside a block or a proc. Only that argument changes, in C
+that did not compile.
+
+A super from initialize into a module's initialize in such a class
+still does not build: initialize has the address and the copy takes
+the object.
+
+Test: test/super_into_module_by_value.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/codegen.c                               | 10 ++++--
+ test/super_into_module_by_value.rb          | 37 +++++++++++++++++++++
+ test/super_into_module_by_value.rb.expected |  5 +++
+ 3 files changed, 49 insertions(+), 3 deletions(-)
+ create mode 100644 test/super_into_module_by_value.rb
+ create mode 100644 test/super_into_module_by_value.rb.expected
+
+diff --git a/src/codegen.c b/src/codegen.c
+index f2233cd7..9607b842 100644
+--- a/src/codegen.c
++++ b/src/codegen.c
+@@ -11416,9 +11416,13 @@ void emit_super(Compiler *c, int id, Buf *b) {
+      method's chain is taken below, in the class-method form). */
+   const char *shadow = s->is_cmethod ? NULL : comp_super_shadow(c, s);
+   if (shadow) {
+-    buf_printf(b, "sp_%s_%s((sp_%s *)%s",
+-               c->classes[s->class_id].c_name, mc(shadow),
+-               c->classes[s->class_id].c_name, g_self);
++    /* a class held by value hands its methods the object itself */
++    if (c->classes[s->class_id].is_value_type && g_self_deref[0] == '.')
++      buf_printf(b, "sp_%s_%s(%s", c->classes[s->class_id].c_name, mc(shadow), g_self);
++    else
++      buf_printf(b, "sp_%s_%s((sp_%s *)%s",
++                 c->classes[s->class_id].c_name, mc(shadow),
++                 c->classes[s->class_id].c_name, g_self);
+     /* the shadow's method in this class: the plan's, or the latest scope of
+        the shadow's name here */
+     int smi = super_plan_mi(c, id, s->class_id);
+diff --git a/test/super_into_module_by_value.rb b/test/super_into_module_by_value.rb
+new file mode 100644
+index 00000000..087784f3
+--- /dev/null
++++ b/test/super_into_module_by_value.rb
+@@ -0,0 +1,37 @@
++# A class held by value (scalar ivars written only in initialize, no
++# subclass) calls super into an included module's method.
++module Scaled
++  def area(k) = k * 2
++  def to_s = "scaled"
++end
++class Tile
++  include Scaled
++  def initialize(w); @w = w; end
++  def area(k) = super(k + @w) + 1
++  def to_s = "tile " + super
++end
++
++# between two modules' methods, the class defining neither
++module Doubled
++  def area(k) = super * 2
++end
++class Slab
++  include Scaled
++  include Doubled
++  def initialize(w); @w = w; end
++  def width = @w
++end
++
++# the super inside a block
++class Grid
++  include Scaled
++  def initialize(n); @n = n; end
++  def area(k) = [1, 2].map { |e| super(e + k) + @n }.sum
++end
++
++t = Tile.new(3)
++p t.area(1)
++puts t.to_s
++s = Slab.new(2)
++p s.area(5), s.width
++p Grid.new(1).area(10)
+diff --git a/test/super_into_module_by_value.rb.expected b/test/super_into_module_by_value.rb.expected
+new file mode 100644
+index 00000000..a7c1067a
+--- /dev/null
++++ b/test/super_into_module_by_value.rb.expected
+@@ -0,0 +1,5 @@
++9
++tile scaled
++20
++2
++48
+-- 
+2.43.0
+

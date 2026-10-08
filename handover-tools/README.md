@@ -157,8 +157,11 @@ wrong; the lists equal `ancestors` in 153 of 153 programs.
 `lj-*` in `texts/` is "super in a module reaches the module it includes,
 from every includer": two commits, the move of one method's copy out of
 `process_include_body` and the fix. It stands above "A class held by value
-builds a super into an included module's method", which is held and not on
-this branch yet, so this branch's own `src/` does not carry either. The two
+builds a super into an included module's method" (`sv-*` in `texts/`, the
+mail `patches/oo-super-by-value-on-5d762fb16716.patch` on the bare tip
+5d762fb16716, its family `vt-gen.rb OUT`: 2,826 one-answer programs, 420
+change, 400 from no build to right, 20 do not build before or after). This
+branch's own `src/` carries both since the hand-over of that fix. The two
 mails are `patches/lj-super-chain-on-42557a3c0e7c.patch`: `git am` above
 that fix's commit on 42557a3c0e7c. Its tools:
 - `lj-gen.rb OUT`: 18,474 one-answer programs (four module graphs, each
@@ -196,3 +199,7 @@ stand-aside cost programs are `const-read/cost-d22-*.rb` (the 22-level
 diamond with a `puts` ahead of the last class, with a hook, with a `puts`
 between two levels): +0.18%, +0.07% and +0.15% over the fifth piece, where
 the old cut paid +1.60%, +1.62% and +0.86%.
+
+Next body versions: `texts/lj-pr-body-upstream-v2.md` puts the compile cost
+in its first lines; `texts/qc-pr-body-upstream-v2.md` (the fifth piece)
+states the cost reader 1 measured and its corpus line on 5d762fb16716.

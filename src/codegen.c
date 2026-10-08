@@ -11124,9 +11124,13 @@ void emit_super(Compiler *c, int id, Buf *b) {
      method's chain is taken below, in the class-method form). */
   const char *shadow = s->is_cmethod ? NULL : comp_super_shadow(c, s);
   if (shadow) {
-    buf_printf(b, "sp_%s_%s((sp_%s *)%s",
-               c->classes[s->class_id].c_name, mc(shadow),
-               c->classes[s->class_id].c_name, g_self);
+    /* a class held by value hands its methods the object itself */
+    if (c->classes[s->class_id].is_value_type && g_self_deref[0] == '.')
+      buf_printf(b, "sp_%s_%s(%s", c->classes[s->class_id].c_name, mc(shadow), g_self);
+    else
+      buf_printf(b, "sp_%s_%s((sp_%s *)%s",
+                 c->classes[s->class_id].c_name, mc(shadow),
+                 c->classes[s->class_id].c_name, g_self);
     /* the shadow's method in this class: the plan's, or the latest scope of
        the shadow's name here */
     int smi = super_plan_mi(c, id, s->class_id);
