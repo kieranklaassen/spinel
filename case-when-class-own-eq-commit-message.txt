@@ -1,0 +1,31 @@
+`when Klass` asks a class that defines === itself
+
+A `when` arm naming a class was answered as x.is_a?(Klass) for every
+class of the program. A class that defines === itself was not asked:
+
+    class Even
+      def self.===(o) = o.is_a?(Integer) && o.even?
+    end
+    case 4
+    when Even then puts "even"     # CRuby
+    else puts "other"              # Spinel
+    end
+
+and `case Even.new when Even` took the arm CRuby does not.
+
+Both case emitters now call the method class_recv_own_eqq finds, the
+one `Klass === x` written out calls: its parameter is boxed, and the
+subject is handed over boxed. The class the arm names is the method's
+`self`. The subject is rooted for the call as it is for an arm that
+allocates.
+
+Where a written call has given the parameter one type the class test
+stays, as it does for `Klass === x`. So does a === whose answer is
+neither a boolean nor boxed. A === that only calls `super` is
+Module#=== and keeps it too.
+
+`in Klass` still folds.
+
+Test: test/case_when_class_own_eq.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

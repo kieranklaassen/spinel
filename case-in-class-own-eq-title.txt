@@ -1,0 +1,1 @@
+`in Klass` asks a class that defines === itself

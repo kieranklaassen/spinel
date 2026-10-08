@@ -1,0 +1,32 @@
+`in Klass` asks a class that defines === itself
+
+A pattern naming a class was answered as x.is_a?(Klass) for every class
+of the program. A class that defines === itself was not asked:
+
+    class Even
+      def self.===(o) = o.is_a?(Integer) && o.even?
+    end
+    case 4
+    in Even then puts "even"       # CRuby
+    else puts "other"              # Spinel
+    end
+
+emit_pm_cond's class arm now calls the method `when Klass` calls
+(emit_when_class_own_eqq), for the pattern itself, a captured value, an
+alternative, an element of an Array or Hash pattern and the class such
+a pattern names. Its parameter is boxed, as there.
+
+No call written out reaches the method in a program whose only use of
+it is a pattern, so compute_reachable marks it for the `in` arms, as it
+marks === for a `when` (a_pattern_own_eqq, analyze.c).
+class_recv_own_eqq_def is class_recv_own_eqq before inference: it does
+not ask the parameter's type.
+
+A builtin class's name keeps the class test (Integer, Float, String,
+Symbol, NilClass, Array, Hash and the others the compiler holds as its
+own values): a capture `Integer => t` is read as binding a value of
+that class. So does a subject held with its nil sentinel.
+
+Test: test/case_in_class_own_eq.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
