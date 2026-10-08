@@ -7056,6 +7056,86 @@ static void emit_proc_param_slot(Compiler *c, Buf *pb, const char *name, const c
   free(dpre.p); free(dval.p);
 }
 
+/* Whether a proc body's plain write `p = v` leaves in `p` a value nothing
+   else holds. A value that is not a pointer, or one built by nothing that
+   allocates, needs no root; an Array or a Hash literal with elements stays
+   in the rooted temp it is built in. */
+static int proc_write_unheld(Compiler *c, int v) {
+  const NodeTable *nt = c->nt;
+  v = unwrap_parens(c, v);
+  if (v < 0) return 0;
+  if (nt_kind(nt, v) == NK_ArrayNode || nt_kind(nt, v) == NK_HashNode) {
+    int n = 0;
+    nt_arr(nt, v, "elements", &n);
+    return n == 0;
+  }
+  return ty_gc_rootable(c, comp_ntype(c, v)) && operand_may_allocate(c, v) && !subtree_is_pure_read(c, v);
+}
+
+/* Whether the proc body at `id` assigns `p` a value nothing else holds: a
+   plain write of one (proc_write_unheld), or any other form of assignment
+   (`+=`, `||=`, a multiple-assignment target). */
+static int proc_assigns_unheld(Compiler *c, int id, const char *p) {
+  const NodeTable *nt = c->nt;
+  if (id < 0) return 0;
+  NodeKind k = nt_kind(nt, id);
+  const char *wn = lv_is_write_or_target(k) ? nt_str(nt, id, "name") : NULL;
+  if (wn && sp_streq(wn, p) &&
+      (k != NK_LocalVariableWriteNode || proc_write_unheld(c, nt_ref(nt, id, "value")))) return 1;
+  int nr = nt_num_refs(nt, id);
+  for (int i = 0; i < nr; i++)
+    if (proc_assigns_unheld(c, nt_ref_at(nt, id, i), p)) return 1;
+  int na = nt_num_arrs(nt, id);
+  for (int i = 0; i < na; i++) {
+    int n = 0;
+    const int *ids = nt_arr_at(nt, id, i, &n);
+    for (int j = 0; j < n; j++)
+      if (proc_assigns_unheld(c, ids[j], p)) return 1;
+  }
+  return 0;
+}
+
+/* Whether a root is owed for `p` in the proc body: the body assigns it a
+   value nothing else holds (proc_assigns_unheld) and something can
+   allocate while it holds that value. A write that is one of the body's
+   own statements, with nothing but reads after it, is followed by no
+   allocation. */
+static int proc_param_wants_root(Compiler *c, int body, const char *p) {
+  const NodeTable *nt = c->nt;
+  int n = 0;
+  const int *st = body >= 0 && nt_kind(nt, body) == NK_StatementsNode ? nt_arr(nt, body, "body", &n) : NULL;
+  if (!st) return proc_assigns_unheld(c, body, p);
+  for (int i = 0; i < n; i++) {
+    if (!proc_assigns_unheld(c, st[i], p)) continue;
+    if (nt_kind(nt, st[i]) != NK_LocalVariableWriteNode) return 1;
+    for (int j = i + 1; j < n; j++)
+      if (!subtree_is_pure_read(c, st[j])) return 1;
+    return proc_assigns_unheld(c, nt_ref(nt, st[i], "value"), p);
+  }
+  return 0;
+}
+
+/* A proc's parameter the body assigns is rooted where it binds, as an
+   optional and a keyword are (emit_proc_param_slot): the slots the
+   parameters are read out of are cleared once they are read, so nothing
+   else holds what the body assigns. A block's required parameter is
+   copied into a rooted local and does not come here; one kept in a cell
+   is held by the cell; one the body only reads keeps the prologue it
+   had. Ends the binding's line. */
+static void proc_root_assigned(Compiler *c, Buf *pb, const LocalVar *lv, TyKind t, const char *p, int body) {
+  if ((!lv || !lv->is_cell) && ty_gc_rootable(c, t) && proc_param_wants_root(c, body, p)) {
+    char nm[160]; snprintf(nm, sizeof nm, "lv_%s", p);
+    buf_puts(pb, " "); emit_gc_root_var(c, t, nm, pb);
+  }
+  buf_puts(pb, "\n");
+}
+
+/* The boxed required parameter `p` out of slot `k`. */
+static void emit_proc_boxed_param(Compiler *c, Buf *pb, const LocalVar *lv, const char *p, int k, int body) {
+  buf_printf(pb, "(argc > %d) ? _sp_proc_poly_args[%d] : sp_box_nil();", k, k);
+  proc_root_assigned(c, pb, lv, TY_POLY, p, body);
+}
+
 static void emit_proc_literal_here(Compiler *c, int create, Buf *b) {
   const NodeTable *nt = c->nt;
   const char *cty = nt_type(nt, create);
@@ -7829,7 +7909,7 @@ else if (orecv >= 0 && onm) {
         if (pt == TY_FLOAT)
           buf_printf(pb, "(argc > %d) ? sp_poly_to_f_or_nil(_sp_proc_poly_args[%d]) : sp_float_nil();\n", k, k);
         else
-          buf_printf(pb, "(argc > %d) ? _sp_proc_poly_args[%d] : sp_box_nil();\n", k, k);
+          emit_proc_boxed_param(c, pb, lv, p, k, body);
       }
       else buf_puts(pb, pt == TY_FLOAT ? "sp_float_nil();\n" : "0;\n");
       /* either nil makes it nullable, as an Integer's below */
@@ -7848,7 +7928,7 @@ else if (orecv >= 0 && onm) {
     }
     else if (proc_slot_is_ptr(pt)) {
       buf_printf(pb, "(argc > %d) ? (", k); emit_ctype(c, pt, pb);
-      buf_printf(pb, ")(uintptr_t)args[%d] : NULL;\n", k);
+      buf_printf(pb, ")(uintptr_t)args[%d] : NULL;", k); proc_root_assigned(c, pb, lv, pt, p, body);
     }
     else {
       const char *nilv = (pt == TY_INT || pt == TY_BOOL) ? "SP_INT_NIL"
@@ -8031,7 +8111,7 @@ else if (orecv >= 0 && onm) {
       if (lt == TY_POLY || lt == TY_UNKNOWN) {
         buf_printf(pb, "    sp_RbVal lv_%s = ({ sp_int __i = _sp_ps + %d;\n", pp, j);
         buf_puts(pb, "      (__i < argc && __i < 16) ? _sp_proc_poly_args[__i] : sp_box_nil(); });\n");
-        buf_printf(pb, "    (void)lv_%s;\n", pp);
+        buf_printf(pb, "    (void)lv_%s;", pp); proc_root_assigned(c, pb, plv, TY_POLY, pp, body);
         continue;
       }
       buf_printf(pb, "    sp_RbVal _pv_%s = (_sp_ps + %d < argc && _sp_ps + %d < 16) ? _sp_proc_poly_args[_sp_ps + %d]"
