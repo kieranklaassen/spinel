@@ -7161,6 +7161,62 @@ static int str_arms_pattern(Compiler *c, int id, Buf *b, const NodeTable *nt, co
   return 1;
 }
 
+/* True when `n` reads an element of a variable's Array of boxed values by an
+   Integer that runs no code: the Array holds the element. A typed Array's
+   element is boxed afresh at the read and is not one. */
+static int boxed_elem_of_held_array(Compiler *c, int n) {
+  const NodeTable *nt = c->nt;
+  if (n < 0 || nt_kind(nt, n) != NK_CallNode || comp_ntype(c, n) != TY_POLY) return 0;
+  const char *nm = nt_str(nt, n, "name");
+  int r = nt_ref(nt, n, "receiver"), a = nt_ref(nt, n, "arguments"), ac = 0;
+  const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+  if (!nm || !sp_streq(nm, "[]") || r < 0 || ac != 1 || nt_ref(nt, n, "block") >= 0) return 0;
+  return comp_ntype(c, r) == TY_POLY_ARRAY && !arg_wants_root(c, TY_POLY_ARRAY, r) &&
+         comp_ntype(c, av[0]) == TY_INT && !subtree_has_side_effect(c, av[0]);
+}
+
+/* True when coerce's operand `arg` is a value made where it is handed over
+   that is a heap cell once boxed: the answer keeps the operand itself, and
+   nothing else holds this one while the pair is made. A read is held where
+   it lives, an element by its Array (the operand is read last, so nothing
+   runs after it) and a boxed value that ran first by its temp; an Integer
+   or a Float boxes to no cell. A value that is a struct in C (a typed
+   Rational or Complex) is copied into a new cell where it is boxed, so its
+   box is made here even when the value is read from a variable. */
+static int coerce_operand_made_here(Compiler *c, int arg) {
+  TyKind at = comp_ntype(c, arg);
+  if ((at == TY_INT && !repr_of(c, arg).big) || at == TY_FLOAT) return 0;
+  if (ty_is_struct_valued(repr_of(c, arg).as_ty)) return 1;
+  if (arg_ran_first(arg, 0) && repr_of(c, arg).as_ty == TY_POLY) return 0;
+  return arg_wants_root(c, TY_POLY, arg) && !boxed_elem_of_held_array(c, arg);
+}
+
+/* True when coerce's boxed receiver is held by nothing while `arg` and the
+   pair are made. One that ran first is held by its temp; an element stays
+   in its Array while the operand runs no code. */
+static int coerce_recv_made_here(Compiler *c, int recv, int arg) {
+  if (!arg_wants_root(c, TY_POLY, recv) || arg_ran_first(recv, 0)) return 0;
+  return !boxed_elem_of_held_array(c, recv) || subtree_has_side_effect(c, arg);
+}
+
+/* A one-argument numeric method of a boxed receiver, `fn(recv, arg)`.
+   coerce's pair keeps the operands themselves: one made here is held across
+   the Array, as the Bignum receiver's arm holds its own. */
+static void emit_poly_numeric1(Compiler *c, const char *fn, int recv, int arg, Buf *b) {
+  int hr = coerce_recv_made_here(c, recv, arg), ha = coerce_operand_made_here(c, arg);
+  if (sp_streq(fn, "sp_poly_coerce") && (hr || ha)) {
+    int tr = ++g_tmp, ta = ++g_tmp;
+    buf_printf(b, "({ sp_RbVal _t%d = ", tr); emit_expr(c, recv, b);
+    if (hr) buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d)", tr);
+    buf_printf(b, "; sp_RbVal _t%d = ", ta); emit_boxed(c, arg, b);
+    if (ha) buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d)", ta);
+    buf_printf(b, "; sp_poly_coerce(_t%d, _t%d); })", tr, ta);
+    return;
+  }
+  buf_printf(b, "%s(", fn); emit_expr(c, recv, b);
+  buf_puts(b, ", "); emit_boxed(c, arg, b); buf_puts(b, ")");
+}
+
 /* An Integer receiver's clamp, digits, allbits? / anybits? / nobits?,
    ceildiv, pow, coerce, eql? and equal? (emit_scalar_recv_arms's Integer
    chain; answers 1 when a branch was taken) */
@@ -7353,9 +7409,17 @@ static int int_arms_clamp_pow(Compiler *c, Buf *b, const NodeTable *nt, const ch
       /* the tag decides at run time, through the same helper the boxed
          receiver path uses */
       int o = ++g_tmp;
-      buf_printf(b, "({ sp_RbVal _t%d = sp_poly_coerce(sp_box_int(%s), ", o, r);
-      emit_boxed(c, argv[0], b);
-      buf_printf(b, "); sp_poly_to_poly_array(_t%d); })", o);
+      if (coerce_operand_made_here(c, argv[0])) {
+        int ta = ++g_tmp;
+        buf_printf(b, "({ sp_RbVal _t%d = ", ta); emit_boxed(c, argv[0], b);
+        buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); sp_RbVal _t%d = sp_poly_coerce(sp_box_int(%s), _t%d);"
+                      " sp_poly_to_poly_array(_t%d); })", ta, o, r, ta, o);
+      }
+      else {
+        buf_printf(b, "({ sp_RbVal _t%d = sp_poly_coerce(sp_box_int(%s), ", o, r);
+        emit_boxed(c, argv[0], b);
+        buf_printf(b, "); sp_poly_to_poly_array(_t%d); })", o);
+      }
     }
     else {
       int ta = ++g_tmp, o = ++g_tmp;
@@ -14093,8 +14157,7 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
       sp_streq(name, "quo")     ? "sp_poly_quo" : NULL;
     if (pfn1) {
       if (!poly_name_user_claimed(c, name, argc)) {
-        buf_printf(b, "%s(", pfn1); emit_expr(c, recv, b);
-        buf_puts(b, ", "); emit_boxed(c, argv[0], b); buf_puts(b, ")");
+        emit_poly_numeric1(c, pfn1, recv, argv[0], b);
         return 1;
       }
     }
