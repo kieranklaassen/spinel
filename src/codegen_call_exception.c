@@ -797,10 +797,15 @@ int emit_call_raise_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const
         if ((xc >= 0 && class_is_syserr(c, xc)) || (xc < 0 && is_syserr_family_name(effn))) {
           if (sp_streq(effn, "SystemCallError"))
             buf_puts(b, "sp_raise_exc(sp_syserr_new_v(0, NULL))");
-          else
-            buf_printf(b, "sp_raise_cls(\"%s\", sp_syserr_msg_a(\"%s\", 0, NULL))", effn, effn);
+          else {
+            buf_puts(b, "sp_raise_cls("); emit_exc_cls_name(c, xc, effn, b);
+            buf_printf(b, ", sp_syserr_msg_a(\"%s\", 0, NULL))", effn);
+          }
         }
-        else buf_printf(b, "sp_raise_cls(\"%s\", (&(\"\\xff\")[1]))", effn);
+        else {
+          buf_puts(b, "sp_raise_cls("); emit_exc_cls_name(c, xc, effn, b);
+          buf_puts(b, ", (&(\"\\xff\")[1]))");
+        }
       }
     }
     else if (ac >= 2 && nt_type(nt, av[0]) &&
@@ -879,7 +884,7 @@ int emit_call_raise_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const
           }
           else {
             char lead[192]; snprintf(lead, sizeof lead, "\"%s\", ", effn);
-            buf_printf(b, "sp_raise_cls(\"%s\", ", effn);
+            buf_puts(b, "sp_raise_cls("); emit_exc_cls_name(c, xc, effn, b); buf_puts(b, ", ");
             emit_syserr_call(c, id, "sp_syserr_msg_a", lead, 1, &av[1], b);
             buf_puts(b, ")");
           }
@@ -890,14 +895,16 @@ int emit_call_raise_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const
           char mh[256];
           if (comp_ntype(c, av[1]) == TY_STRING && exc_msg_handle(c, av[1], mh, sizeof mh)) {
             /* the exception is built here, holding the handle, as the
-               rescue would build it (sp_exc_new_for_catch) */
-            buf_printf(b, "sp_raise_exc((sp_Exception *)sp_exc_attach_msg(sp_exc_new_for_catch(\"%s\", "
-                          "sp_exc_msg_given(", effn);
+               rescue would build it (exc_catch_builder) */
+            buf_printf(b, "sp_raise_exc((sp_Exception *)sp_exc_attach_msg(%s(",
+                       class_exc_by_name_row(c, xc) >= 0 ? exc_catch_builder(c) : "sp_exc_new_for_catch");
+            emit_exc_cls_name(c, xc, effn, b);
+            buf_puts(b, ", sp_exc_msg_given(");
             emit_expr(c, av[1], b);
             buf_printf(b, ")), %s))", mh);
           }
           else if (comp_ntype(c, av[1]) == TY_STRING) {
-            buf_printf(b, "sp_raise_cls(\"%s\", sp_exc_msg_given(", effn);
+            buf_puts(b, "sp_raise_cls("); emit_exc_cls_name(c, xc, effn, b); buf_puts(b, ", sp_exc_msg_given(");
             emit_expr(c, av[1], b);
             buf_puts(b, "))");
           }
@@ -905,8 +912,9 @@ int emit_call_raise_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const
             /* nil is not a message, so the class name answers (#3812) */
             int rt2 = ++g_tmp;
             buf_printf(b, "({ sp_RbVal _t%d = ", rt2); emit_boxed(c, av[1], b);
-            buf_printf(b, "; sp_raise_cls(\"%s\", _t%d.tag == SP_TAG_NIL ? (&(\"\\xff\")[1])"
-                          " : sp_exc_msg_given(sp_poly_to_s(_t%d))); })", effn, rt2, rt2);
+            buf_puts(b, "; sp_raise_cls("); emit_exc_cls_name(c, xc, effn, b);
+            buf_printf(b, ", _t%d.tag == SP_TAG_NIL ? (&(\"\\xff\")[1])"
+                          " : sp_exc_msg_given(sp_poly_to_s(_t%d))); })", rt2, rt2);
           }
         }
       }
