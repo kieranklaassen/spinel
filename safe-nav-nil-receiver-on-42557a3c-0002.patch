@@ -1,0 +1,199 @@
+From 08144fc8bbde471bf531d0de553ee727841c0be1 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 7 Oct 2026 19:32:09 +0000
+Subject: [PATCH] A `&.` call on a nil receiver runs none of its arguments
+
+    s = nil_or_string
+    r = s&.rjust(lg(5), lg("b"))
+
+ran both `lg` calls for a nil `s`; CRuby runs neither. A call to a
+builtin has its operands ordered ahead of it (emit_operands_in_order),
+and for a `&.` call that was ahead of the nil guard too: an argument
+with an effect ran, or raised, on the very nil the guard stops.
+
+The guard re-enters the call's emission under its nil test, so the
+ordering now waits for that re-entry (sn_guard_ahead) where the guard
+will run, a boxed receiver and the typed ones it tests, and where the
+call's value can stay in its place (sn_stays_in_place). There the
+order against the statement's other operands is kept. Where a later
+operand of the statement is more than a literal or a plain read, the
+call is as it was.
+
+Test: test/safe_nav_nil_receiver_runs_no_operand.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/codegen_call.c                            |  4 ++
+ src/codegen_call_object.c                     | 11 ++++
+ src/codegen_internal.h                        |  6 +++
+ test/safe_nav_nil_receiver_runs_no_operand.rb | 50 +++++++++++++++++++
+ ...v_nil_receiver_runs_no_operand.rb.expected | 46 +++++++++++++++++
+ 5 files changed, 117 insertions(+)
+ create mode 100644 test/safe_nav_nil_receiver_runs_no_operand.rb
+ create mode 100644 test/safe_nav_nil_receiver_runs_no_operand.rb.expected
+
+diff --git a/src/codegen_call.c b/src/codegen_call.c
+index 439625fbe..33f0e68e6 100644
+--- a/src/codegen_call.c
++++ b/src/codegen_call.c
+@@ -18687,6 +18687,10 @@ static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
+   if (emit_or_take_back(c, id, b, emit_str_append_chain_handle)) return 1;
+   const NodeTable *nt = c->nt;
+   if (id == g_operand_order_node) return 0;
++  /* a `&.` call's operands are ordered on its guard's re-entry, under the
++     nil test: ordered here they ran although the receiver was nil
++     (`s&.rjust(lg(5), lg("b"))` logged both) */
++  if (sn_guard_ahead(c, id)) return 0;
+   int recv = nt_ref(nt, id, "receiver");
+   int args = nt_ref(nt, id, "arguments");
+   int argc = 0;
+diff --git a/src/codegen_call_object.c b/src/codegen_call_object.c
+index dabd3586c..8a92ceae4 100644
+--- a/src/codegen_call_object.c
++++ b/src/codegen_call_object.c
+@@ -1482,6 +1482,17 @@ static int sn_stays_in_place(Compiler *c, int id) {
+   return 0;
+ }
+ 
++/* See codegen_internal.h. */
++int sn_guard_ahead(Compiler *c, int id) {
++  const NodeTable *nt = c->nt;
++  if (g_sn_skip == id) return 0;
++  const char *op = nt_str(nt, id, "call_operator");
++  int recv = nt_ref(nt, id, "receiver");
++  if (recv < 0 || !op || !sp_streq(op, "&.")) return 0;
++  Repr rrr = repr_of(c, recv);
++  return (rrr.kind == RK_BOXED || sn_typed_nil_recv(rrr)) && sn_stays_in_place(c, id);
++}
++
+ /* The guard of a `&.` call steps over what its value hoisted (`pre`) when
+    `nilt` holds, and the value stays in the call's place. Computed with them
+    ahead of the statement, the call ran before what is written before it:
+diff --git a/src/codegen_internal.h b/src/codegen_internal.h
+index 432f95897..6a31c8f08 100644
+--- a/src/codegen_internal.h
++++ b/src/codegen_internal.h
+@@ -230,6 +230,12 @@ void argov_reserve(void);
+    so emit_object_call leaves the value temp out (see setter_value_open). */
+ extern int  g_setter_stmt_id;
+ extern int  g_sn_skip;   /* safe-nav re-entry marker (see codegen_util.c) */
++/* Whether the operands of the `&.` call `id` wait for its nil guard:
++   emit_call_safe_nav_arms has yet to write the guard and re-enter the call,
++   and the call's value can stay in its place there (sn_stays_in_place), so
++   ordering them under the guard moves nothing. What is emitted ahead of the
++   guard runs although the receiver is nil. */
++int sn_guard_ahead(Compiler *c, int id);
+ extern int  g_cls_tag_skip;   /* poly-dispatch builtin-arm re-entry marker */
+ /* Ask subtree_may_allocate before leaving something unrooted across `id`:
+    its "no" is a keyed decision (src/decide.c). subtree_allocates is the
+diff --git a/test/safe_nav_nil_receiver_runs_no_operand.rb b/test/safe_nav_nil_receiver_runs_no_operand.rb
+new file mode 100644
+index 000000000..f1b0be011
+--- /dev/null
++++ b/test/safe_nav_nil_receiver_runs_no_operand.rb
+@@ -0,0 +1,50 @@
++# A `&.` call to a builtin on a nil receiver runs none of its operands; on
++# any other receiver, each once and in order.
++$log = []
++def lg(x) = ($log << x; x)
++def show(v) = (p v, $log; $log.clear)
++def str(v) = v ? "ab" : nil
++def ary(v) = v ? [1, 2] : nil
++def hsh(v) = v ? {a: 1} : nil
++
++# receiver nil
++s = str(false)
++show s&.rjust(lg(5), lg("b"))
++show s&.center(lg(5), lg("b"))
++show s&.sub(lg("a"), lg("b"))
++show s&.tr(lg("a"), lg("b"))
++show s&.[](lg(0), lg(1))
++a = ary(false)
++show a&.fetch(lg(0), lg(9))
++show a&.push(lg(0), lg(1))
++h = hsh(false)
++show h&.fetch(lg(:a), lg(0))
++show h&.store(lg(:b), lg(2))
++
++# receiver not nil
++s = str(true)
++show s&.rjust(lg(5), lg("b"))
++show s&.sub(lg("a"), lg("b"))
++a = ary(true)
++show a&.fetch(lg(0), lg(9))
++show a&.push(lg(0), lg(1))
++h = hsh(true)
++show h&.fetch(lg(:a), lg(0))
++
++# beside other operands of the statement
++s = str(false)
++t = str(true)
++show [lg(0), s&.rjust(lg(5), lg("b"))]
++show [lg(0), t&.rjust(lg(5), lg("b"))]
++show "#{lg(0)} #{s&.tr(lg("a"), [lg("b")].first)}!"
++show "#{lg(0)} #{t&.tr(lg("a"), [lg("b")].first)}!"
++
++# a value read out of a container
++x = [nil, "ab"][ARGV.size]
++y = ["ab", nil][ARGV.size]
++show x&.rjust(lg(5), lg("b"))
++show y&.rjust(lg(5), lg("b"))
++show [lg(0), x&.center(lg(7), [lg("*"), "-"].first)]
++show [lg(0), y&.center(lg(7), [lg("*"), "-"].first)]
++q = [nil, [3, 4]][ARGV.size]
++show [lg(0), q&.push(lg(1), [lg(2)].size)]
+diff --git a/test/safe_nav_nil_receiver_runs_no_operand.rb.expected b/test/safe_nav_nil_receiver_runs_no_operand.rb.expected
+new file mode 100644
+index 000000000..be672c818
+--- /dev/null
++++ b/test/safe_nav_nil_receiver_runs_no_operand.rb.expected
+@@ -0,0 +1,46 @@
++nil
++[]
++nil
++[]
++nil
++[]
++nil
++[]
++nil
++[]
++nil
++[]
++nil
++[]
++nil
++[]
++nil
++[]
++"bbbab"
++[5, "b"]
++"bb"
++["a", "b"]
++1
++[0, 9]
++[1, 2, 0, 1]
++[0, 1]
++1
++[:a, 0]
++[0, nil]
++[0]
++[0, "bbbab"]
++[0, 5, "b"]
++"0 !"
++[0]
++"0 bb!"
++[0, "a", "b"]
++nil
++[]
++"bbbab"
++[5, "b"]
++[0, nil]
++[0]
++[0, "**ab***"]
++[0, 7, "*"]
++[0, nil]
++[0]
+-- 
+2.43.0
+
