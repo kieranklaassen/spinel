@@ -1,0 +1,25 @@
+1:  9595d4e22 ! 1:  1981950b9 === on a constant that holds a value is the value's own ===
+    @@ Commit message
+         Range (2.4% to 2.7%), 31,000 to 33,200 for a Float Range (4.0% to
+         4.3%) and 65,700 to 70,500 for the object (7.4% to 8.0%). That is the
+         comparison being written where master wrote `false`: asked by name on
+    -    the same constant (`K.cover?(x)` of a Range, a method of the object's
+    -    own), master pays the like today. One line that asks such an object,
+    -    in a program where no local holds one of its class, adds 0.6% to the
+    -    whole compile: the call roots its receiver, and master lays out the
+    -    function's frame of roots once, as it does for any call on that
+    -    constant. A line left in the class arm costs about 400:
+    -    const_value_eqq looks at the operand and the two kinds before it walks
+    -    the table of builtin class names.
+    +    the same constant, master pays the like today for an Integer Range
+    +    (`K.cover?(9)`) and for the object (a method of its own), and less for a
+    +    String Range and for a Float Range against a literal. One line that asks
+    +    such an object, in a program where no local holds one of its class, adds
+    +    0.6% to the whole compile: the call roots its receiver, and master lays
+    +    out the function's frame of roots once, as it does for any call on that
+    +    constant. A line left in the class arm costs 400 to 500: const_value_eqq
+    +    looks at the operand and the two kinds before it walks the table of
+    +    builtin class names.
+     
+         Tests: test/const_value_case_eq.rb, and
+         test/const_value_case_eq_bignum.rb for the Bignum pairs.
