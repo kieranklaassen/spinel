@@ -1,0 +1,290 @@
+1:  92b81936f ! 1:  829267979 A call no method answers runs its arguments on a typed receiver too
+    @@ Commit message
+         as a value) is written where the argument itself goes, so it too runs
+         after the receiver and after the arguments before it.
+     
+    +    A receiver read from a variable is the object the variable held
+    +    before the arguments ran: `t = 5; t.zork(k: (t = 7))` raises for 5.
+    +    The error is staged after the arguments, so where one of them can
+    +    assign the variable the receiver is boxed into a rooted temp ahead of
+    +    them, with its nil test, as a boxed receiver is. A local is assigned
+    +    only by a write inside the call, unless a proc that holds it assigns
+    +    it; any other variable by whatever the arguments call. Where none can
+    +    assign it, the variable is read as it was.
+    +
+    +    A String is a value here, and one held ahead would not show a change
+    +    made in place. So a String whose arguments do nothing but change it
+    +    in place (`@s.zork(k: (@s << "x"))` raises for the String as
+    +    changed) is read after them.
+    +
+         An argument with nothing to run, a literal or a read of a variable,
+         is not emitted: a call whose arguments are all such compiles to the
+         C it did, as does a call with plain arguments and every call that is
+    @@ Commit message
+         argument is nil as before, and a block argument that is a call's only
+         argument (`5.zork(&mk)`) is still not run.
+     
+    +    Nor here, as on master: a String held ahead of arguments that also
+    +    change it in place is raised for with its text from before; and a
+    +    call with plain arguments reads its receiver in the C call that boxes
+    +    them, so `t.zork(t = 7)` raises for 7 with gcc and for 5 with clang.
+    +
+         Test: test/nomethod_runs_its_arguments.rb.
+     
+         Co-Authored-By: Claude Code <noreply@anthropic.com>
+    @@ src/codegen_call.c: static int unresolved_name_chain(Compiler *c, int node) {
+     +  int blk = nt_ref(nt, id, "block");
+     +  if (blk >= 0 && nt_kind(nt, blk) == NK_BlockArgumentNode)
+     +    emit_gate_arg_effect(c, nt_ref(nt, blk, "expression"), sep, b);
+    ++}
+    ++/* Whether all that `n` runs changes the String in the variable `rv` in
+    ++   place: a builtin mutator called on a read of that variable with literal
+    ++   arguments (`@s << "x"`). */
+    ++static int gate_arg_mutates_own(Compiler *c, int n, int rv) {
+    ++  static const char *const own[] = {
+    ++    "<<", "concat", "prepend", "insert", "replace", "clear", "upcase!", "downcase!",
+    ++    "capitalize!", "swapcase!", "reverse!", "strip!", "lstrip!", "rstrip!", "chomp!",
+    ++    "chop!", "squeeze!", "succ!", "next!", "sub!", "gsub!", "tr!", "delete!", NULL };
+    ++  const NodeTable *nt = c->nt;
+    ++  if (n < 0 || gate_arg_is_inert(c, n)) return 1;
+    ++  switch (nt_kind(nt, n)) {
+    ++    case NK_IntegerNode: case NK_FloatNode: case NK_SymbolNode:
+    ++    case NK_NilNode: case NK_TrueNode: case NK_FalseNode:
+    ++      return 1;
+    ++    case NK_ParenthesesNode: return gate_arg_mutates_own(c, nt_ref(nt, n, "body"), rv);
+    ++    case NK_SplatNode: case NK_BlockArgumentNode:
+    ++      return gate_arg_mutates_own(c, nt_ref(nt, n, "expression"), rv);
+    ++    case NK_AssocSplatNode: return gate_arg_mutates_own(c, nt_ref(nt, n, "value"), rv);
+    ++    case NK_AssocNode:
+    ++      return gate_arg_mutates_own(c, nt_ref(nt, n, "key"), rv) &&
+    ++             gate_arg_mutates_own(c, nt_ref(nt, n, "value"), rv);
+    ++    case NK_StatementsNode: case NK_KeywordHashNode: {
+    ++      int en = 0;
+    ++      const int *el = nt_arr(nt, n, nt_kind(nt, n) == NK_StatementsNode ? "body" : "elements", &en);
+    ++      for (int e = 0; e < en; e++) if (!gate_arg_mutates_own(c, el[e], rv)) return 0;
+    ++      return 1;
+    ++    }
+    ++    case NK_CallNode: {
+    ++      int r = nt_ref(nt, n, "receiver");
+    ++      const char *mn = nt_str(nt, n, "name"), *rn = r >= 0 ? nt_str(nt, r, "name") : NULL;
+    ++      const char *vn = nt_str(nt, rv, "name");
+    ++      if (!mn || !rn || !vn || nt_kind(nt, r) != nt_kind(nt, rv) || !sp_streq(rn, vn)) return 0;
+    ++      if (nt_ref(nt, n, "block") >= 0 || an_user_defines_method(c, mn)) return 0;
+    ++      int k = 0;
+    ++      while (own[k] && !sp_streq(own[k], mn)) k++;
+    ++      if (!own[k]) return 0;
+    ++      int ac = 0; const int *av = call_args(nt, n, &ac);
+    ++      for (int a = 0; a < ac; a++) {
+    ++        NodeKind ak = nt_kind(nt, av[a]);
+    ++        if (ak != NK_StringNode && ak != NK_IntegerNode && ak != NK_SymbolNode) return 0;
+    ++      }
+    ++      return 1;
+    ++    }
+    ++    default: return 0;
+    ++  }
+    ++}
+    ++/* Whether an argument of the call `id` can leave another object in the
+    ++   variable its receiver reads (`rv`), so that the receiver has to be taken
+    ++   ahead of the arguments: `t = 5; t.zork(k: (t = 7))` raises for 5. A local
+    ++   is assigned only by a write inside the call, unless a proc that holds it
+    ++   assigns it (LocalVar.proc_rebinds): a callee cannot reach it otherwise.
+    ++   Any other variable, and such a local, is assigned by whatever the
+    ++   arguments call. A String is left to be read after them where all they do
+    ++   is change it in place (`@s.zork(k: (@s << "x"))` raises for the changed
+    ++   String): a String the gate holds is a value, which would not show the
+    ++   change. */
+    ++static int gate_recv_rebindable(Compiler *c, int id, int rv, TyKind grt) {
+    ++  const NodeTable *nt = c->nt;
+    ++  if (rv < 0) return 0;
+    ++  NodeKind k = nt_kind(nt, rv);
+    ++  const char *nm = nt_str(nt, rv, "name");
+    ++  if (k == NK_LocalVariableReadNode) {
+    ++    Scope *s = nm ? comp_scope_of(c, rv) : NULL;
+    ++    LocalVar *lv = s ? scope_local(s, nm) : NULL;
+    ++    if (subtree_writes_local(c, id, nm)) return 1;
+    ++    if (lv && !lv->proc_rebinds) return 0;
+    ++  }
+    ++  else if (k != NK_InstanceVariableReadNode && k != NK_GlobalVariableReadNode &&
+    ++           k != NK_ClassVariableReadNode && k != NK_ConstantReadNode) return 0;
+    ++  if (grt != TY_STRING) return 1;
+    ++  int ac = 0; const int *av = call_args(nt, id, &ac);
+    ++  for (int a = 0; a < ac; a++) if (!gate_arg_mutates_own(c, av[a], rv)) return 1;
+    ++  int blk = nt_ref(nt, id, "block");
+    ++  return blk >= 0 && !gate_arg_mutates_own(c, blk, rv);
+     +}
+      int emit_unresolved_call(Compiler *c, int id, Buf *b) {
+        const NodeTable *nt = c->nt;
+    @@ src/codegen_call.c: int emit_unresolved_call(Compiler *c, int id, Buf *b) {
+                  buf_printf(b, ")), %s)", ret_scalar ? default_value_from_compiler(c, ret) : dflt);
+                }
+     @@ src/codegen_call.c: int emit_unresolved_call(Compiler *c, int id, Buf *b) {
+    +              Integer or a Float that also sees nil) names nil or its class at
+    +              run time: the slot's kind alone cannot say which the value is */
+    +           char gmsg[400];
+    ++          /* the nil test and the head of a nullable receiver's message: a
+    ++             receiver held ahead of the arguments is tested there too */
+    ++          char gnil[200] = "", ghd[96] = "";
+    +           int recv_evaluated = 0;
+    +           {
+    +             int nullable_recv = recv >= 0 && (grt == TY_STRING ||
+    +@@ src/codegen_call.c: int emit_unresolved_call(Compiler *c, int id, Buf *b) {
+    +               }
+    +               recv_evaluated = 1;
+    +               const char *rv = rvb.p ? rvb.p : "0";
+    +-              char hd[96], hd2[96];
+    +-              snprintf(hd, sizeof hd, nomethod_head(nm), nm ? nm : "?");
+    +-              snprintf(hd2, sizeof hd2, nomethod_head(nm), nm ? nm : "?");
+    +-              snprintf(gmsg, sizeof gmsg, "(%s%s%s ? \"%s nil\" : \"%s %s\")",
+    ++              snprintf(ghd, sizeof ghd, nomethod_head(nm), nm ? nm : "?");
+    ++              snprintf(gnil, sizeof gnil, "%s%s%s",
+    +                        grt == TY_FLOAT ? "sp_float_is_nil(" : "(", rv,
+    +-                       grt == TY_FLOAT ? ")" : grt == TY_INT ? ") == SP_INT_NIL" : ") == NULL",
+    +-                       hd, hd2, rdesc);
+    ++                       grt == TY_FLOAT ? ")" : grt == TY_INT ? ") == SP_INT_NIL" : ") == NULL");
+    ++              snprintf(gmsg, sizeof gmsg, "(%s ? \"%s nil\" : \"%s %s\")", gnil, ghd, ghd, rdesc);
+    +               free(rvb.p);
+    +             }
+    +             else {
+    +@@ src/codegen_call.c: int emit_unresolved_call(Compiler *c, int id, Buf *b) {
+    +              receiver already evaluated for its message must not run again. */
+    +           int recv_run = recv >= 0 && !recv_stageable && !recv_evaluated;
+                int rrt = recv_run ? ++g_tmp : -1;
+    ++          /* A variable the arguments can assign is read ahead of them, as
+    ++             CRuby reads it: into a boxed temp, with its nil test, when the
+    ++             arguments have anything to run. */
+    ++          int ghold = !gstage && recv_stageable && gate_recv_rebindable(c, id, _rvnode, grt);
+    ++          int ght = -1;
+                if (recv_run) recv_stageable = 1;
+                #define EMIT_GATE_MSG() do { \
+     +            int gparen = 0; \
+    @@ src/codegen_call.c: int emit_unresolved_call(Compiler *c, int id, Buf *b) {
+     +              if (!gstage) emit_gate_args_effect(c, id, "; ", b); \
+     +            } \
+     +            else if (!gstage) { \
+    -+              Buf gfx; memset(&gfx, 0, sizeof gfx); emit_gate_args_effect(c, id, ", ", &gfx); \
+    -+              if (gfx.p && *gfx.p) { buf_puts(b, "("); buf_puts(b, gfx.p); gparen = 1; } \
+    ++              Buf gfx; memset(&gfx, 0, sizeof gfx); \
+    ++              emit_gate_args_effect(c, id, ghold ? "; " : ", ", &gfx); \
+    ++              if (gfx.p && *gfx.p && ghold) { \
+    ++                ght = ++g_tmp; \
+    ++                buf_printf(b, "({ sp_RbVal _t%d = ", ght); emit_boxed(c, recv, b); \
+    ++                buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); ", ght); \
+    ++                if (gnil[0]) { \
+    ++                  int gzt = ++g_tmp; \
+    ++                  buf_printf(b, "int _t%d = %s; ", gzt, gnil); \
+    ++                  snprintf(gmsg, sizeof gmsg, "(_t%d ? \"%s nil\" : \"%s %s\")", gzt, ghd, ghd, rdesc); \
+    ++                } \
+    ++                buf_puts(b, gfx.p); \
+    ++              } \
+    ++              else if (gfx.p && *gfx.p) { buf_puts(b, "("); buf_puts(b, gfx.p); gparen = 1; } \
+     +              free(gfx.p); \
+                  } \
+                  const char *_stagefn = gstage ? "sp_stage_recv_args_msg" : "sp_stage_recv_msg"; \
+                  if (recv_stageable) { \
+    +               buf_printf(b, "%s(%s, ", _stagefn, gmsg); \
+    +-              if (recv_run) buf_printf(b, "_t%d", rrt); else emit_boxed(c, recv, b); \
+    ++              if (recv_run || ght >= 0) buf_printf(b, "_t%d", recv_run ? rrt : ght); \
+    ++              else emit_boxed(c, recv, b); \
+    +               if (gstage) { \
+    +                 buf_printf(b, ", %d, (sp_RbVal[]){", gac); \
+    +                 for (int gk = 0; gk < gac; gk++) { if (gk) buf_puts(b, ", "); emit_boxed(c, gav[gk], b); } \
+     @@ src/codegen_call.c: int emit_unresolved_call(Compiler *c, int id, Buf *b) {
+    +               buf_puts(b, "})"); \
+                  } \
+                  else buf_puts(b, gmsg); \
+    -             if (recv_run) buf_puts(b, "; })"); \
+    +-            if (recv_run) buf_puts(b, "; })"); \
+    ++            if (recv_run || ght >= 0) buf_puts(b, "; })"); \
+     +            else if (gparen) buf_puts(b, ")"); \
+                } while (0)
+                /* A receiver the message could not stage is still evaluated, once,
+    @@ test/nomethod_runs_its_arguments.rb (new)
+     +try { r.zork(*[tick(28)]) }
+     +try { t.zork(tick(29)) }
+     +try { r.zork(tick(30)) { 1 } }
+    ++
+    ++# the receiver is the object its variable held before the arguments ran:
+    ++# an argument that assigns the variable does not change what is raised for
+    ++def held
+    ++  yield
+    ++rescue NoMethodError => e
+    ++  puts "#{e.receiver.inspect}: #{e.message.tr("`", "'")}"
+    ++end
+    ++
+    ++def npick(c) = c > 5 ? 3 : nil
+    ++
+    ++class Box
+    ++  def initialize
+    ++    @n = 5
+    ++    @s = +"ab"
+    ++  end
+    ++
+    ++  def bump = (@n += 2)
+    ++
+    ++  def run
+    ++    held { @n.zork(k: (@n = 7)) }
+    ++    held { @n.zork(*(bump; [1])) }
+    ++    held { @s.zork(k: (@s << "x")) }
+    ++    held { @s.zork(k: (@s = "cd")) }
+    ++    p @n, @s
+    ++  end
+    ++end
+    ++
+    ++u = 5
+    ++held { u.zork(k: (u = 7)) }
+    ++s = "ab"
+    ++held { s.zork(*(s = "cd"; xs)) }
+    ++n = npick(ARGV.size)
+    ++held { n.zork(k: (n = 7)) }
+    ++v = 5
+    ++set = -> { v = 9 }
+    ++held { v.zork(k: set.call) }
+    ++$g = 5
+    ++def gset = ($g = 8)
+    ++held { $g.zork(k: gset) }
+    ++w = 5
+    ++begin
+    ++  w.zork(k: (w = 7))
+    ++rescue NoMethodError => e
+    ++  puts "#{e.receiver.inspect}: #{e.message.tr("`", "'")}"
+    ++end
+    ++p u, s, n, v, $g, w
+    ++Box.new.run
+    ++
+    ++# one that changes the receiver in place leaves the same object, changed
+    ++m = +"ab"
+    ++held { m.zork(k: (m << "x")) }
+    ++a = [1, 2]
+    ++held { a.zork(k: (a << 3)) }
+    ++held { a.zork(k: (a = [9])) }
+    ++p m, a
+     
+      ## test/nomethod_runs_its_arguments.rb.expected (new) ##
+     @@
+    @@ test/nomethod_runs_its_arguments.rb.expected (new)
+     +NoMethodError: undefined method 'zork' for an instance of Integer
+     +tick 30
+     +NoMethodError: undefined method 'zork' for an instance of Integer
+    ++5: undefined method 'zork' for an instance of Integer
+    ++"ab": undefined method 'zork' for an instance of String
+    ++nil: undefined method 'zork' for nil
+    ++5: undefined method 'zork' for an instance of Integer
+    ++5: undefined method 'zork' for an instance of Integer
+    ++5: undefined method 'zork' for an instance of Integer
+    ++7
+    ++"cd"
+    ++7
+    ++9
+    ++8
+    ++7
+    ++5: undefined method 'zork' for an instance of Integer
+    ++7: undefined method 'zork' for an instance of Integer
+    ++"abx": undefined method 'zork' for an instance of String
+    ++"abx": undefined method 'zork' for an instance of String
+    ++9
+    ++"cd"
+    ++"abx": undefined method 'zork' for an instance of String
+    ++[1, 2, 3]: undefined method 'zork' for an instance of Array
+    ++[1, 2, 3]: undefined method 'zork' for an instance of Array
+    ++"abx"
+    ++[9]

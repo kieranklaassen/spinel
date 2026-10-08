@@ -1,0 +1,37 @@
+--- nomethod-runs-its-arguments-body-v7.md
++++ nomethod-runs-its-arguments-body-v8.md
+@@ -20,6 +20,8 @@
+ 
+ `emit_unresolved_call` stages a call's arguments into the error only when all are plain ("a splat/block/kwarg shape keeps the plain message"), and the arguments of any other call were not emitted at all. They are now emitted for their effect, after the receiver and in CRuby's order: each argument, a splat's and a double splat's operand, a keyword's value, then the block argument's expression. What an argument hoists ahead of its statement (the loop of a call with a block, the calls inside an Array or Hash literal, an `if` used as a value) is written where the argument itself goes, so it too runs after the receiver and after the arguments before it.
+ 
++The error is staged after the arguments, and a receiver read from a variable is the object the variable held before they ran: `t = 5; t.zork(k: (t = 7))` raises for 5. So where an argument can assign the variable, the receiver is boxed into a rooted temp ahead of them, with its nil test, as a boxed receiver already is; where none can, the variable is read as it was. A local is assigned only by a write inside the call, unless a proc that holds it assigns it; any other variable by whatever the arguments call. A String is a value here, and one held ahead would not show a change made in place: a String whose arguments do nothing but change it in place (`@s.zork(k: (@s << "x"))`) is read after them and raises for the String as changed.
++
+ ```
+ spinel diff: output-diff
+ --- stdout (ruby)
+@@ -33,17 +35,23 @@
+ +NoMethodError
+ ```
+ 
+-An argument with nothing to run, a literal or a read of a variable, is not emitted, and one a dispatch already holds in a temporary is not run a second time: a call whose arguments are all such compiles to the C it did, as does a call with plain arguments and every call that is answered. So it costs nothing where a call is answered: of the corpus's programs the generated C of one changes, the new test (`tools/cident.sh`). Test: `test/nomethod_runs_its_arguments.rb`.
++An argument with nothing to run, a literal or a read of a variable, is not emitted, and one a dispatch already holds in a temporary is not run a second time: a call whose arguments are all such compiles to the C it did, as does a call with plain arguments and every call that is answered. So it costs nothing where a call is answered: of the corpus's programs the generated C of two changes (`tools/cident.sh`), the new test and `test/builtin_kwarg_honored.rb`, where an arm of a run-time `send` that raises now reads the keyword it was handed before it does; that test runs as it did, in as many instructions. A receiver held ahead adds 3 to 6 instructions with gcc and 1 to 2 with clang to a call that raises, which takes about 2,100 (callgrind, 200,000 calls). Test: `test/nomethod_runs_its_arguments.rb`.
+ 
+ Not here: `NoMethodError#args` of such a call is nil where CRuby lists the arguments, as before (`e.args` after `5.zork(a: tick(1), b: tick(2))`), and a block argument that is a call's only argument (`5.zork(&mk)`) is still not run. And where a String receiver that may be nil is called with a double splat and a block argument (`r.zork(**kw(1), &blk(2))`), the nil path does not run the block argument's expression, the same as on master; the String path now does.
+ 
++Nor here, as on master:
++
++- a String held ahead of arguments that also change it in place is raised for with its text from before the change: one in an instance, global or class variable or a constant, or a local a proc assigns, whose arguments change it beside another call (`@s.zork(tick(1), k: (@s << "x"))`), and a local the arguments also assign;
++- a call with plain arguments reads its receiver in the C call that boxes them, so `t.zork(t = 7)` raises for 7 with gcc and for 5 with clang;
++- a String that may be nil binds a keyword argument ahead of its nil test, so `t.zork(k: (t = "cd"))` on a nil `t` raises for "cd".
++
+ ## `make gate` (on this branch merged with current master)
+ 
+ ```
+ gate: run on the Mac at opening
+ ```
+ 
+-Run here on the commit replayed on an earlier tip of master, `9922a2c74ee1` (its tree is that of this branch merged with it), gcc and clang: the new test at `SPINEL_GC_STRESS` unset, 1 and 2 (also with `--share-strings`); `tools/gate.rb check` with the commit staged; `tools/cident.sh` against master (one program differs, the new test).
++Run here on master `0e8befeb3691`, gcc and clang: the new test at `SPINEL_GC_STRESS` unset, 1 and 2 (also with `--share-strings`); `tools/gate.rb check` with the commit staged; `tools/cident.sh` against master (two programs differ, the new test and `test/builtin_kwarg_honored.rb`, which runs 6 of 6 as on master); `make share-strings-test` and `make int-min-test`.
+ 
+ - [ ] New tests have `.expected` files that match CRuby 4.0 run with `--enable-frozen-string-literal`
+ - [ ] Values past 2^31 are marked `# spinel: int64`
