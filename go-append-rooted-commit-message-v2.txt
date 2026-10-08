@@ -1,0 +1,31 @@
+append_as_bytes keeps its String so far rooted while the next argument is made
+
+    def tail(i)
+      junk = "y" * (16 + i % 300)
+      junk.size > 0 ? "cd" + "ef" : "q"
+    end
+    bad = 0
+    i = 0
+    while i < 300_000
+      s = +"x"
+      s.append_as_bytes("ab", tail(i))
+      bad += 1 unless s == "xabcdef"
+      i += 1
+    end
+    p bad
+
+printed 7; it is 0. With two or more arguments emit_str_mutator_call
+appends one argument at a time into a C temporary, and nothing held
+the String so far while the next argument was evaluated: a collection
+that fell there freed it, and the next append read freed bytes. At
+SPINEL_GC_STRESS=2 `s.append_as_bytes("ab", "\xff".b)` stopped in the
+collector's check. The temporary is rooted after the first append when
+a later argument can allocate as it is made: a call, an interpolation,
+a shared handle's read. Arguments that allocate nothing (literals,
+plain locals, an Integer, whose byte is static data, arithmetic on
+Integers) keep their C, and so does one argument.
+
+Test: test/string_append_as_bytes_args_held.rb;
+test/string_append_as_bytes_encoding.rb joins GC_STRESS_TESTS.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
