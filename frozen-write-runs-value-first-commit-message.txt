@@ -1,0 +1,52 @@
+A write to a frozen object runs its value before it raises
+
+    class S
+      attr_accessor :n
+      def initialize = @n = 0
+    end
+    def value = (puts "value"; 1)
+    s = S.new
+    s.freeze
+    begin
+      s.n = value
+    rescue FrozenError => e
+      puts e.class
+    end
+
+printed FrozenError alone. CRuby prints "value" first: the right-hand
+side runs, then the writer finds its object frozen. `@n = value` in
+the object's own method, `self.n = value`, each of them used as a
+value, and `instance_variable_set(:@n, value)` raised ahead of their
+values the same way.
+
+Each of these stores emits the frozen check in front of itself. Where
+the value can be seen to run (it calls a method, yields or writes; a
+scalar operator and a plain field read are no such call) the value now
+goes into a temporary of the slot's type, the check follows it and the
+store takes the temporary:
+
+    slot = ({ __typeof__(slot) _t = <value>; <check> _t; })
+
+A store site calls emit_frozen_obj_guard_for in place of the guard
+and, where it answers 1, brackets its value with frozen_value_open and
+frozen_value_close, inside the brackets an open splice alias has: the
+alias moves only once the check has passed. Two arms of the writer's
+value form already hold the value in a temporary of their own, and
+there the check moves behind it.
+
+So a right side that raises, throws, exits or leaves its block does
+so, and one that freezes the receiver is followed by FrozenError.
+
+A value that is a literal, a plain read, a field read or a scalar
+operator keeps the check in front, and a class whose objects the
+program neither freezes nor asks `frozen?` has no check: both keep
+their generated C. Where the class has the check and the value is a
+call, a write on an object that is not frozen runs the same check one
+step later; gcc keeps it inside a loop it had lifted it out of when it
+inlines the called method to nothing, two instructions a write.
+
+Not changed here, each as before: `@n += value` raises without
+calling `value`, and `s.n = 1 / 0` on a frozen object raises
+FrozenError where CRuby raises ZeroDivisionError.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
