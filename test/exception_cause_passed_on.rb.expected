@@ -1,0 +1,26 @@
+TypeError cause=ArgumentError:first
+TypeError cause=ArgumentError:first
+RuntimeError cause=ArgumentError:first
+MyErr cause=ArgumentError:first
+TypeError cause=KeyError:given
+TypeError cause=nil
+TypeError cause=ArgumentError:first
+TypeError cause=ArgumentError:first
+RuntimeError cause=ArgumentError:first
+MyErr cause=ArgumentError:first
+TypeError cause=ArgumentError:first
+TypeError cause=nil
+Stop cause=ArgumentError:first
+Stop cause=ArgumentError:first
+TypeError cause=KeyError:k
+TypeError cause=nil
+MyErr cause=nil
+MyErr cause=nil
+MyErr cause=nil
+KeyError cause=nil
+KeyError cause=nil
+KeyError cause=nil
+KeyError cause=ArgumentError:outside
+KeyError cause=ArgumentError:outside
+KeyError cause=ArgumentError:outside
+8
