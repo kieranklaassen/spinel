@@ -1,0 +1,35 @@
+Two all-digit ends of a String Range walk as numbers at any width
+
+`("99999999999999999998".."100000000000000000001").to_a` answers [],
+where CRuby answers the four members. The walk takes two all-digit ends
+as numbers only up to the 18 digits a long long holds. Longer ones fall
+to the succ walk, which compares the ends as bytes, and "9..." is the
+greater there: the range is empty. With the begin the longer,
+`("0000000000000000000008".."11")`, it holds the begin alone.
+
+CRuby's rb_str_upto_each walks them on Bignums. Two all-digit ends of
+unequal width, one of them past 18 digits, now walk by String#succ,
+which carries through the digits and keeps the begin's zeros, each
+member compared with the end as a number: leading zeros aside, the
+longer is the greater. At one width the succ walk is right at any width
+and is not touched. to_a, include?, member?, first(n), each, for and
+String#upto all take the walk: it is written once, in the
+member-at-a-time pair of lib/sp_str_walk.c.
+
+lib/sp_array.c sits at gcc's inline limit for a unit: a line added to
+the walk there changes what gcc inlines into sp_StrArray_insert and
+sp_StrArray_slice_bang, which have nothing to do with a Range. So that
+walk keeps its body under the name
+sp_str_upto_narrow, and sp_str_upto_each, now in lib/sp_str_walk.c,
+reads one byte of the begin before it hands a range on. build/sp_array.o
+is the same code but for the name.
+
+A range that was wrongly empty may now hold more members than fit in
+memory: `("5".."10000000000000000000")` has 10^19. each, for, upto,
+find and its kin and first(n) take them one at a time, so a caller that
+leaves early answers at once, as it did from the empty range. One that
+needs every member (to_a, count, include? of a String that is no
+member) ran to an answer from the empty range and now does not, where
+CRuby does not finish.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
