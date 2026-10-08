@@ -15840,10 +15840,15 @@ static int str_mutate_append_bang_arms(Compiler *c, int id, Buf *b, int indent, 
         many = at == TY_INT || at == TY_POLY || np > 1;
       }
       int held = strbuf_recv_hold(c, cur, name, nchain, chain, many, srefC, sizeof srefC, b, indent);
-      /* a handle that may be nil with no test ahead of the statement
-         (cplan_nil): the first link's append raises for a nil one, once
-         its operand has run */
-      const char *nilm = cplan_nil(c, first) == CN_RAISE_IN_CALL ? nt_str(nt, first, "name") : NULL;
+      /* a handle that may be nil with no test ahead of the statement: one
+         cplan_nil leaves to the call, or the first link of a chain, whose
+         plan the statement's head does not ask (unless the program gives
+         nil the name itself). The first link's append raises for a nil
+         one, once its operand has run */
+      int fplan = cplan_nil(c, first);
+      const char *fnm = nt_str(nt, first, "name");
+      const char *nilm = fplan == CN_RAISE_IN_CALL ||
+                         (fplan == CN_RAISE && nchain > 1 && !cplan_nil_program_answers(c, fnm)) ? fnm : NULL;
       for (int j = nchain - 1; j >= 0; j--) {
         int arg = chain[j];
         TyKind at = comp_ntype(c, arg);
