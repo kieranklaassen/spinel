@@ -1,0 +1,25 @@
+A boxed Integer's [] reads a Float, nil or Bignum index
+
+    g = { "n" => 5, "f" => 1.5 }
+    p g["n"][g["f"]]
+
+printed 1, bit 0 of 5, where CRuby prints 0, bit 1. sp_poly_index_poly
+reads one bit of a boxed Integer by an Integer index; an index of any
+other kind that no earlier arm takes fell to the last line, which reads
+offset 0. A Float is now cut, a Rational or a Complex with no imaginary
+part is the Integer it converts to, and nil, true or an Array is
+CRuby's TypeError. An index past a word (a Bignum, or a Float, a
+Rational or a Complex that large) reads the receiver's sign above its
+bits and 0 below; a Bignum receiver takes a Bignum so and no other
+index that large: CRuby's RangeError. A Float Range, a Class, a Module
+and an object of a user class still read bit 0.
+
+A boxed global, instance variable or class variable indexed by what
+assigns that same variable, `$x[($x = v; k)]`, is read after the index
+ran where the index is no call. Bit 0 of the value assigned can be
+CRuby's bit of the value before, so such a read keeps the answer it
+gave (sp_poly_index_poly_asis); every other read is emitted as it was.
+
+Test: test/boxed_integer_index_not_integer.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
