@@ -1,0 +1,129 @@
+1:  5b1d23fbc ! 1:  80db022be === on a constant that holds a value is the value's own ===
+    @@ Commit message
+         Array and a Hash compare by ==, an object with a === of its own is
+         asked.
+     
+    +    It takes the call only where x is one node that runs nothing: a number,
+    +    a String or a Symbol written out, nil, true, false, self, a local, an
+    +    instance or a class variable, a constant of the program. The value's
+    +    === reads the constant in one C expression with x, in the order the C
+    +    compiler picks. An x that changes the constant's String in place or
+    +    binds the constant anew would be read before the constant by one
+    +    compiler and after it by the other, where master's false is CRuby's
+    +    answer with both. So `K === f(n)`, `K === h["k"]`, `K === n + 1`,
+    +    `K === [1, 2]` and a literal in parentheses stay in the class arm.
+    +
+         It answers for the kinds of K and x it lists, the ones where that ===
+         answers as CRuby does on master. Every other pair stays in the class
+         arm with its false, right or wrong as before: an Integer or a Symbol
+    @@ Commit message
+         outside the class that holds `Foo = 3` would be read as the 3.
+     
+         Checked on 1,296 programs, every pair of 24 values of K and 27 of x in
+    -    the constant form and in the local form: 28 of the 648 constant forms
+    -    go from false to CRuby's answer, no answer that was right changes, and
+    -    the local forms compile to the same C. And on 3,556 programs whose
+    -    operand is nil or not at run time (72 operands): 1,612 change C, 76
+    -    go from false to CRuby's answer, none that was right changes.
+    +    the constant form and in the local form, x held in a local: 28 of the
+    +    648 constant forms go from false to CRuby's answer, no answer that was
+    +    right changes with gcc or with clang, and the local forms compile to
+    +    the same C.
+     
+         A call that answered false and was right now runs the comparison it
+    -    names, where master wrote the constant false: 4 to 50 instructions a
+    -    call by the kind (callgrind, gcc 13.3 and clang 18.1); a Symbol costs
+    -    less than the class test did. It is the C a local writes, but for an
+    -    object with a === of its own, which costs 14 (gcc) and 22 (clang) more
+    -    than through a local.
+    +    names, where master wrote the constant false: 11 to 81 instructions a
+    +    call by the kind (callgrind, gcc 13.3 and clang 18.1), the dearest an
+    +    Integer Range against a literal Integer. Nothing where the two kinds
+    +    cannot be equal, and less than the class test did where x is a Symbol.
+    +    Against the same value in a local it is within 2 instructions, but for
+    +    an object with a === of its own, which costs 16 (gcc) and 20 (clang)
+    +    more than through a local. Compiling 2,000 such lines runs 0.5% more
+    +    instructions.
+     
+         Tests: test/const_value_case_eq.rb, and
+         test/const_value_case_eq_bignum.rb for the Bignum pairs.
+    @@ src/codegen_call_object.c
+     +   Integer only where it is written as a literal. A name that a class or a
+     +   module bears too stays the class test: a constant's read is typed by its
+     +   name alone, so `Foo === x` outside the class that holds `Foo = 3` reads
+    -+   as the 3. */
+    ++   as the 3. And only where the operand runs nothing: the value's === reads
+    ++   the constant in one C expression with its operand, in the order the C
+    ++   compiler picks, so an operand that binds the constant anew or changes its
+    ++   String in place would be read before by one compiler and after by the
+    ++   other. */
+    ++static int eqq_operand_runs_nothing(Compiler *c, const NodeTable *nt, int arg) {
+    ++  NodeKind k = nt_kind(nt, arg);
+    ++  /* a String literal, or one node of master's pure reads with no call in it:
+    ++     a local, an instance or class variable, a constant of the program, self,
+    ++     a number, a Symbol, nil, true or false */
+    ++  if (k == NK_StringNode) return 1;
+    ++  return k != NK_CallNode && k != NK_ParenthesesNode && k != NK_StatementsNode && subtree_is_pure_read(c, arg);
+    ++}
+     +static int const_value_eqq(Compiler *c, const NodeTable *nt, int recv, TyKind rt, int arg) {
+     +  const char *kn = nt_kind(nt, recv) == NK_ConstantReadNode ? nt_str(nt, recv, "name") : NULL;
+     +  if (!kn || !comp_const(c, kn) || comp_class_index(c, kn) >= 0 ||
+     +      is_builtin_class_name(kn) || builtin_class_id(kn) != 0) return 0;
+    ++  if (!eqq_operand_runs_nothing(c, nt, arg)) return 0;
+     +  TyKind at = comp_ntype(c, arg);
+     +  int scalar = at == TY_INT || at == TY_FLOAT || at == TY_STRING || at == TY_SYMBOL || at == TY_BOOL || at == TY_POLY;
+     +  int listed = scalar || at == TY_BIGINT || at == TY_RANGE || at == TY_STR_RANGE || at == TY_INT_ARRAY ||
+    @@ test/const_value_case_eq.rb (new)
+     +p(NAME === "abc", NAME === "abd", NAME === :abc, NAME === 3, EMPTY === "", EMPTY === "a", NUL === "a\0b", NUL === "a\0c", NUL === "a")
+     +p(KIND === :a, KIND === :b, KIND === "a", KIND === 3)
+     +# an Array and a Hash: ==
+    -+p(PAIR === [1, 2], PAIR === [1, 3], PAIR === 3, TAGS === ["a", "b"], TAGS === ["a"], TAGS === [1, 2])
+    -+p(OPTS === {a: 1}, OPTS === {a: 2}, OPTS === 3)
+    ++one_two = [1, 2]
+    ++one_three = [1, 3]
+    ++a_b = ["a", "b"]
+    ++only_a = ["a"]
+    ++opt_one = {a: 1}
+    ++opt_two = {a: 2}
+    ++p(PAIR === one_two, PAIR === one_three, PAIR === 3, TAGS === a_b, TAGS === only_a, TAGS === one_two)
+    ++p(OPTS === opt_one, OPTS === opt_two, OPTS === 3)
+     +# an object with a === of its own
+     +p(LUCKY === 7, LUCKY === 8, LUCKY === "7")
+     +# a boxed argument
+    @@ test/const_value_case_eq.rb (new)
+     +def level(i) = i == 0 ? 9 : nil
+     +p(MAXIMUM === STOCK["cog"], BAND === STOCK["cog"], MAXIMUM === level(1), BAND === level(1))
+     +p(MAXIMUM === 3, MAXIMUM === 9, BAND === 0, BAND === 2)
+    ++# an operand that runs something is not taken: one that changes the
+    ++# constant's String in place, or binds the constant anew, is read against
+    ++# the value the constant had when the call began
+    ++BUF = String.new("abcd")
+    ++GROW = String.new("ab")
+    ++def more = (GROW << "c"; "ab")
+    ++p(BUF === (BUF.replace("zz"); "abcd"), GROW === more, GROW)
+     +# a class is still asked whether x is one of its instances
+     +p(Integer === 3, String === NAME, Seven === LUCKY, Seven === 7, Comparable === 3, Gate === g, Range === LIMIT)
+     +# a name that a class bears too is still read as the class
+    @@ test/const_value_case_eq.rb.expected (new)
+     +false
+     +true
+     +false
+    ++false
+    ++false
+    ++"abc"
+     +true
+     +true
+     +true
+    @@ test/const_value_case_eq_bignum.rb (new)
+     +LIMIT = 1..5
+     +THREE = 3
+     +BIG = 2**70
+    -+p(BIG === 2**70, BIG === 2**71, BIG === 3, BIG === "x", BIG === :a)
+    -+p(THREE === 2**70, LIMIT === 2**70)
+    ++big = 2**70
+    ++bigger = 2**71
+    ++p(BIG === big, BIG === bigger, BIG === 3, BIG === "x", BIG === :a)
+    ++p(THREE === big, LIMIT === big)
+     +mix = [2**70, 3, "x", nil]
+     +p(mix.map { |v| BIG === v })
+     

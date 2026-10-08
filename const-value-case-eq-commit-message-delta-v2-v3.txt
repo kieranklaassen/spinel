@@ -1,0 +1,50 @@
+--- msg-mz-v2.txt	2026-10-08 08:43:38.048594102 +0000
++++ msg-mz-v3.txt	2026-10-08 17:12:50.296564037 +0000
+@@ -19,6 +19,16 @@
+ Array and a Hash compare by ==, an object with a === of its own is
+ asked.
+ 
++It takes the call only where x is one node that runs nothing: a number,
++a String or a Symbol written out, nil, true, false, self, a local, an
++instance or a class variable, a constant of the program. The value's
++=== reads the constant in one C expression with x, in the order the C
++compiler picks. An x that changes the constant's String in place or
++binds the constant anew would be read before the constant by one
++compiler and after it by the other, where master's false is CRuby's
++answer with both. So `K === f(n)`, `K === h["k"]`, `K === n + 1`,
++`K === [1, 2]` and a literal in parentheses stay in the class arm.
++
+ It answers for the kinds of K and x it lists, the ones where that ===
+ answers as CRuby does on master. Every other pair stays in the class
+ arm with its false, right or wrong as before: an Integer or a Symbol
+@@ -41,18 +51,20 @@
+ outside the class that holds `Foo = 3` would be read as the 3.
+ 
+ Checked on 1,296 programs, every pair of 24 values of K and 27 of x in
+-the constant form and in the local form: 28 of the 648 constant forms
+-go from false to CRuby's answer, no answer that was right changes, and
+-the local forms compile to the same C. And on 3,556 programs whose
+-operand is nil or not at run time (72 operands): 1,612 change C, 76
+-go from false to CRuby's answer, none that was right changes.
++the constant form and in the local form, x held in a local: 28 of the
++648 constant forms go from false to CRuby's answer, no answer that was
++right changes with gcc or with clang, and the local forms compile to
++the same C.
+ 
+ A call that answered false and was right now runs the comparison it
+-names, where master wrote the constant false: 4 to 50 instructions a
+-call by the kind (callgrind, gcc 13.3 and clang 18.1); a Symbol costs
+-less than the class test did. It is the C a local writes, but for an
+-object with a === of its own, which costs 14 (gcc) and 22 (clang) more
+-than through a local.
++names, where master wrote the constant false: 11 to 81 instructions a
++call by the kind (callgrind, gcc 13.3 and clang 18.1), the dearest an
++Integer Range against a literal Integer. Nothing where the two kinds
++cannot be equal, and less than the class test did where x is a Symbol.
++Against the same value in a local it is within 2 instructions, but for
++an object with a === of its own, which costs 16 (gcc) and 20 (clang)
++more than through a local. Compiling 2,000 such lines runs 0.5% more
++instructions.
+ 
+ Tests: test/const_value_case_eq.rb, and
+ test/const_value_case_eq_bignum.rb for the Bignum pairs.
