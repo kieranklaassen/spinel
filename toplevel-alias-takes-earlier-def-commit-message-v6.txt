@@ -1,0 +1,70 @@
+A top-level alias takes the name from an earlier top-level def
+
+`def greet = "hello"; def shout = "HELLO"; alias greet shout; p greet`
+printed "hello". A top-level alias is kept on the Toplevel pseudo-class,
+and comp_method_index consults it only when no method owns the name, so
+an alias over a name a `def` holds was never read.
+
+rename_redefined_toplevel_defs gives an earlier top-level def a private
+name where a later def of the name follows, and renames the calls that
+run between the two. rename_aliased_toplevel_defs, a pass of its own
+that runs after it, does the same where an alias follows: the def and
+the calls above the alias take the private name, and with no owner left
+the calls below resolve through the alias.
+
+The alias counts only where the rename is known to be right. What the
+program says of the two names is read from the program as written, ahead
+of every desugar (redef_note_inside_names, analyze_program's first
+step), because the desugars drop and rewrite the code it asks about:
+
+- Each name is written only as a call with no receiver, in its def at
+  the top level and in a top-level alias: no def of either anywhere
+  else (in a class, under a condition, in another def, on a receiver),
+  no Symbol, String, variable or parameter of the name, and no target
+  that calls it through no call (`for self.count in list`,
+  `self.count += 1`). A def under an `if` may or may not have run when
+  the alias does, and a Symbol hands a name to define_method,
+  attr_reader, undef or send.
+- Neither is a method name of Object or of a core class, by the
+  generated tables (object_method_names.inc, core_method_names.inc):
+  with no receiver `raise`, `exit` or `spawn` reaches the builtin once
+  no method owns the name, and in a method added to Array `count` is
+  Array's.
+- The program writes "__redef" in no name and no String: the private
+  name is then one nothing in it can spell.
+- Nothing is named include, prepend or extend, or one of their hooks, as
+  a call, a Symbol, a String or a def: a module mixed in can put a body
+  of either name ahead of the top level's, and it need not be the
+  program's text (`prepend Kernel`).
+- No respond_to? asks about a name that is not written out: it answers
+  from the defs and does not see an alias.
+- The program names, makes and loads no method by something its text
+  does not spell (g_written_by_value, which a file the compiler did not
+  read sets too).
+- The build is not a debug build (SPINEL_DEBUG): its backtrace names a
+  frame after the C function, and would show the private name.
+
+Then by position, among the statements of the top level: the target is
+a def above the alias, and no alias above gives the target's name; no
+other def or alias gives the alias's name, and no alias below takes it
+as its old name; the def's body asks neither `__method__` nor
+`__callee__`, by a call or by a Symbol handed on (`send(:__method__)`),
+which would answer the private name; nothing above the alias reaches
+the name past the rename, in a method, class or module body that calls
+it, by a call on a receiver, or by a call in a lambda, a BEGIN or END
+block or a block that is not known to have run when its call returns
+(known: `times` on an Integer literal, and `each`, `each_with_index`
+and `map` on an Array literal, where the program defines no method of
+that name); and a statement below the alias calls the name. Every other
+program is compiled as it was.
+
+A program with no top-level alias pays one look over the statements of
+its top level, and one whose aliases give no name a def holds a lookup
+for each alias and each def there. Where an alias does give a def's
+name the program is read once for the names it writes and the top level
+is walked once for all its aliases (redef_reach_walk); each def then
+asks the one alias that gives its name, and a rename visits the
+statements that call the name, so the cost grows with the program and
+not with its square.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

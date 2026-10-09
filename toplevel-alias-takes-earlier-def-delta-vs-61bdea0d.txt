@@ -1,0 +1,78 @@
+## OB re-cut, a top-level alias takes the name: head 69fcb62101b5 on master 090969e7759b (written 20:01 UTC 10-09); a DELTA for reader 7 against 61bdea0d83e2
+
+THE TIP. 2d5b3d1211d7 was the tip the restart note named; my ls-remote at 17:58 UTC answered 090969e7759b, 13 commits on (pull requests 8228 to 8232 and 8234). Both trees were rebuilt on it and EVERYTHING below was run there. What the 13 touch in src: analyze.c only in `promote_shared_stored_strings_pass`; compiler.c `comp_poly_candidates` and `comp_method_overridden` (pull request 8229: an alias in a descendant class counts as an override; it is about an alias inside a subclass and holds none of this piece's ground: on the bare tip the "Before" program still prints "hello", "hello"); codegen files; analyze_scope.c one line. CONTRIBUTING.md, the template and docs/limitations.md did not change in it. CONTRIBUTING.md and the template were read fresh on 090969e7759b. NEWER TIP by my ls-remote at 19:51 UTC: 671eed2c21b070aed9930e2d90cfdf8a487df01e, 57 commits on (26 pull requests, 8236 to 8261). The head merges into it with exit 0 (merge tree 92058604a9e1bd066524fe25af6a6568421a0f38). By the hunk headers the 57 touch, in src/analyze.c and src/analyze_desugar.c: an_local_read_once, desugar_masgn_store_evidence, an_subtree_hands_walk, convert_byref_handle_params, share_default_apply, share_lift_value, share_ret_typed_str_literal, splat_constructor_arity, splat_dispatch_on_length, splat_lit_len, splat_local_len, strbuf_map_block_tail, share_types_digest; by `git log -L` none of redef_rename_calls, rename_redefined_toplevel_defs, an_phase_desugar_register, analyze_program, an_note_written_names, an_prog_never_gives, anh_find, anh_add, core_method_name, object_public_method_name, name_in_list; the two generated tables and tools/gen_method_names.rb are unchanged. docs/limitations.md gains one row (a synthesized attr_writer inherited by sibling classes); CONTRIBUTING.md and the template do not change. A clean merge is not a build: the merged tree was built here, and on it the three tests print their `.expected` and the "Before" program prints "hello", "HELLO". Every other check below is on the parent 090969e7759b.
+
+REFUSALS, which of the three: the piece ADDS NO REFUSAL AND LIFTS NONE, so docs/limitations.md is left alone. Checked by `spinel -c` on both trees over 776 set programs (exit status and message): 0 differ; cident: 0 refusal changes. The coordinator's point on `alias say puts` above `def puts`: the SMALLER pick is taken, the program keeps master's C (it names `puts`, one of Object's methods; five forms of it in r7, b1_say_puts_*, each the bare tip's C byte for byte), so no refusal is made there and no entry is owed.
+
+B3 (the private name an alias gives). A program that writes `__redef` in ANY name or String (a call's, a def's, an alias's, a Symbol, a String, a variable) is left as it was: `redef_note_inside_names` clears `g_redef_alias`. The private name is then asked nothing the program can answer; the serial still steps over the names master's own rename gave (x_later_def_then_alias: `f__redef1` is master's, the head takes `f__redef2`, right). b3_private_alias (the reader's), b3_private_alias_differ, b3_private_def, b3_private_symbol, b3_private_call, x_redef_string: master's C. (At 61bdea0d83e2 `def greet__redef1` beside it took `greet__redef2` and was right; that program is master's C now: the plainer rule.)
+
+```
+      K          master            here    change
+no alias
+    500     325,911,669     325,905,944   -0.002%  same C
+  1,000     890,564,201     890,557,535   -0.001%  same C
+  2,000   2,635,453,706   2,635,450,955   -0.000%  same C
+K aliases `alias hI gI` of fresh names
+    500     466,765,197     467,138,330   +0.080%  same C
+  1,000   1,295,776,719   1,297,134,781   +0.105%  same C
+  2,000   3,724,120,525   3,720,465,502   -0.098%  same C
+the same, one of them over a def (`alias f0 g0`)
+    500     467,737,430     470,628,806   +0.618%  same C
+  1,000   1,298,035,840   1,304,536,850   +0.501%  same C
+  2,000   3,724,058,637   3,732,856,720   +0.236%  same C
+K aliases `alias fI gI`, nothing calls an fI below
+    500     451,867,326     454,778,962   +0.644%  same C
+  1,000   1,230,018,382   1,234,836,475   +0.392%  same C
+  2,000   3,551,625,277   3,563,410,814   +0.332%  same C
+the same with `p fI` and `p :fI` below for each
+    500   1,029,986,605   1,034,150,688   +0.404%  same C
+  1,000   2,615,704,276   2,622,512,041   +0.260%  same C
+  2,000   7,218,315,746   7,236,439,377   +0.251%  same C
+the same with `p fI` below for each (cured)
+    500     818,208,555     919,596,058  +12.391%  other C
+  1,000   2,078,747,522   2,478,688,957  +19.240%  other C
+  2,000   5,753,527,058   7,526,408,873  +30.814%  other C
+the cured program written by hand: defs `fxI`, then `alias fI gI`, `p fI`
+    500     914,474,652     914,638,998   +0.018%  same C
+  1,000   2,474,204,861   2,474,091,081   -0.005%  same C
+  2,000   7,605,025,951   7,605,849,857   +0.011%  same C
+```
+
+With no alias the look is 22 instructions a line by function (`redef_note_inside_names`, 22,195 on 1,001 lines); the whole counts come out a few thousand instructions below master's, which is the layout of the binary and not the look. Aliases of fresh names cost a lookup each, within 0.11% either way. In the next three shapes master compiles the same C and the program pays the read of its names and the one walk, 0.24% to 0.64%: with every alias over a `def`, about 4,800 to 5,900 instructions an alias, a share that falls as the program grows (0.64%, 0.39% and 0.33% at 500, 1,000 and 2,000). Where the change cures, the calls below go through the alias, and that is what costs: master pays the same for the program that says so in names of its own (the last shape), and against that one the cured program takes +5,121,406, +4,484,096 and -78,617,078 instructions (+0.56%, +0.18%, -1.03%).
+
+The count programs of the earlier hand-over, on this tip, bare tip / head: no alias, 300 to 3,000 top-level defs with as many calls (601 to 6,001 lines), the same C: 465,887,166 / 465,702,316 (-0.040%); 794,086,787 / 793,785,257 (-0.038%); 1,684,604,054 / 1,684,010,057 (-0.035%); 2,669,298,929 / 2,668,566,734 (-0.027%); 3,746,617,377 / 3,745,746,527 (-0.023%); 6,172,197,055 / 6,171,049,179 (-0.019%): the head counts BELOW the bare tip on all six, which is layout and no saving. 1,500 defs and 40 aliases of fresh names (the same C): 2,720,241,162 / 2,719,975,491 (-0.010%). 1,500 defs and one alias over a def nothing calls afterwards (the same C): 2,673,857,006 / 2,678,977,559 (+0.192%); 40 such (the same C): 2,687,142,999 / 2,694,009,124 (+0.256%). 1,500 defs and 40 aliases the change cures (other C): 2,717,682,940 / 2,729,082,175 (+0.419%; it was +2.456% at 61bdea0d83e2, where each rename walked every statement between the def and the alias).
+
+R1 (the lambda beside another arity: CUT). A call of the name in a `LambdaNode`, a `PostExecutionNode`, or the `BlockNode` of any call counts as kept where it stands above the alias (`redef_note_reach` sets `in_body`; a `PreExecutionNode` counts as statement -1, so a BEGIN block that calls the name declines wherever it stands). The one exception is `redef_block_in_place`: `times` on an Integer literal, `each`, `each_with_index` and `map` on an Array literal, and only in a program that gives no method of that name anywhere (no def of it in a class, no top-level def, no Symbol or String of it; `g_written_by_value` covers the rest). Shown right: r1_times_in_place, r1_each_in_place (the three Array ones), nested_in_place, times_break, each_next, block_param_default cure and are right by the whole output; their twins are master's C: r1_times_own, r1_each_own, r1_map_own_define, r1_each_class_eval, times_redefined_below (the iterator is the program's), r1_times_on_variable, r1_each_variable (no literal), r1_times_nested_proc (a proc made inside the in-place block), r1_loop_block, select_block, thread_block, lambda_call_block. r1_lambda_arity (the reader's) and r1_at_exit_arity: master's C, the ArgumentError stands. r1_lambda, r1_proc, r1_end_block, r1_begin_block_calls, r1_lambda_in_def_body: master's C. The by-line check now finds NO lost line anywhere (it found two at 61bdea0d83e2, both this case).
+
+T1: taken, re-counted on the bare tip 090969e7759b: the cured test prints 17 lines there, 10 of them wrong, and raises ArgumentError at the 18th (`p none("given")`); exit 1.
+T2: the cost sentences of the body and of the message are written again against this head (the body carries the table above).
+T3: taken and checked: `--emit-rbs` prints `def greet__redef1: () -> String` on the head and `--profile`'s symbol map `sp_greet__redef1`; master prints `f__redef1` in both for a later def. The debug bullet says so.
+THE OPTCARROT BOX: run and ticked. `make optcarrot OPTCARROT_RUNS=1` on the bare tip: checksum 59662, "Optcarrot: OK"; the packed program compiled by the head gives the same C byte for byte (sha256 d1d95e6f2030830b...), and it has no top-level alias. On the head `make optcarrot OPTCARROT_RUNS=1` prints checksum 59662 and "Optcarrot: OK" too; the C its own clone gives differs from the bare tip's only in the checkout's path, which the packed program spells in one string.
+
+THE TEST. Four method names of the cured test were core names (step, count, pack, drop) and would stand aside now: they are pace, total, bundle, shed. The `.expected` is unchanged and still CRuby's (3.3.6).
+
+OWN CHECKS on 090969e7759b (chain15, 17:58 to 19:49 UTC):
+- build (gcc 13.3.0); the "Before" program prints "hello", "hello" on the bare tip and "hello", "HELLO" on the head; `spinel diff` gives the report in the body on the bare tip and "same" on the head.
+- the three tests, 14 lanes each with gcc and with clang 18.1.3 (plain, stress 1, stress 2 with the verifier off and on, minor 0 and 1, the generational check; built plain and with --share-strings): 42 of 42 right on the head. On the bare tip the cured test exits 1 in all 14 lanes (T1's count: 17 lines, 10 wrong, ArgumentError at the 18th); the two guard tests (12 and 4 lines) pass there.
+- `ruby tools/gate.rb check` staged: exit 0 ("no Ruby 4.0 or later": the .expected comparison is skipped here; made with CRuby 3.3.6).
+- `make infer-test`, `make share-strings-test`, `make int-min-test`: pass. `make share-verify-test`: exit 0, "1121 programs, 0 known/conflicting diagnostics, 0 new, 8 stale, 0 failures, 96 channel gaps"; the bare tip's own run, made here, prints the same summary line and the same 8 stale reminders byte for byte (they are on master's tests).
+- `make cident` against 090969e7759b: 6,766 identical, 1 differ (test/toplevel_alias_takes_defined_name.rb, the cured test), 0 refusal changes, 0 refused by both, 0 not in the reference.
+- under `--debug`, 169 programs of nine sets (r7 among them): the same C as the bare tip for all 169.
+- refusals (`spinel -c` exit status and message, both trees): 776 programs, 0 differ.
+- saved C of 745 set programs: 569 the bare tip's, 176 other; against 61bdea0d83e2's source built on this tip (208 other) the head's C is the same for 711 and other for 34 (the 32 of the GIVEN BACK list and the two that give back one alias of two).
+- 23 probe sets, 446 programs, bare tip against head against CRuby: none right on the bare tip and not on the head. By line, 54 programs differ between the trees and 0 lines are lost.
+- r7 (the reader's programs and twins, 44) by C and whole output: 6 other C, each wrong on the bare tip and right on the head; 38 master's C (6 right on both, 31 wrong on both, 1 that builds on neither: a refinement). r7b (20 more twins, run by C and whole output outside the chain): 13 other C, each wrong on the bare tip and right on the head (a setter, `?` and `!` names, a capitalised name, the in-place blocks with break, next, a nested one, a block parameter's default, a pinned expression, two aliases at once); 7 master's C.
+- attacks, 120 programs in three modes: 21 wrong made right, 1 raise made right (atk2__retval), 21 right stay right, 65 wrong on both, 6 raise on both, 6 refused on both. NO raise to wrong any more (atk6__l_lambda_arity and r1__f4 raise on both, master's C). The same C for 95; other C for 25: the 22 made right, atk4__r5 (right on both), atk4__r11 (raises on both), atk2__typediff (prints CRuby 4.0's `{a: 1}`; right by a 4.0 reading). By line: 24 programs differ, 0 lines lost.
+- family, 207 programs in three modes: 21 right stay right and keep their C, 82 wrong made right, 104 wrong on both; the same C for 119, other for 88 (the 82, and 6 still wrong: the swap through a spare name in five kinds, and x_two, whose second alias names `b`). By line: 88 programs differ, 0 lines lost.
+- the body's own examples (bodychk, 11 programs, and four more for the chain of aliases, `respond_to?` and `alias_method`): each prints on the bare tip, on the head and in CRuby what the body says.
+- the name sweep: under B1 above.
+
+HOLES I CAN READ, named:
+- The in-place list is short on purpose: `select`, `loop`, `each` on a variable, a block handed to the program's own method are given back though they run in place.
+- depth: both walks stop at 400 levels; `redef_name_kept` then answers "kept" and `redef_note_reach` sets `deep`, which leaves the whole program as it was.
+- What is left of the cost on programs master runs right is linear and stated (the three middle shapes of the table): the read of the program's names (a strdup and a hash per distinct string) and the one walk. I did not cut it further; the ruling asked the square cut and the rest stated.
+- The reference CRuby here is 3.3.6: `.expected` files were made with it and not run under 4.0; one attack program prints 4.0's `{a: 1}` and is counted wrong on both trees by it.
+- Not run: `make gate` (the Mac's), CRuby 4.0.
+
+SIDE FINDS, recorded, not taken: master's own rename names a debug frame, an RBS def and a profile symbol `f__redef1`; `respond_to?(:greet, true)` for a name only an alias defines prints false on master; a top-level def named `private`, `public` or `using` is called on master where CRuby calls main's own; `def __enum_chain` and four more internal names fail in the C compiler on master.
+
