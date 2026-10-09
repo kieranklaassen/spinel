@@ -1,0 +1,89 @@
+uniq with a block keeps an Enumerator's items, not what the block binds
+
+    e = [5, 6, 5].each_with_index
+    p e.uniq { |x| x }
+
+printed [5, 6] for [[5, 0], [6, 1]]. The other way round, over
+o = [5, 6, 5, 7].each, o.uniq { |*r| r } printed [[5], [6], [7]] for
+[5, 6, 7] and o.uniq(&:odd?) printed [[5], [6]] for [5, 6].
+
+The to_a that stands in front of a block iterator over an Enumerator
+hands each item as the block binds it (enum_hop_yield_view): the first
+value a step yields for a lone |x|, all of them for a lone |*r| or
+&:m. That is right for map or count, whose answer is the block's. uniq
+answers the items, and got what the block binds in their place.
+
+emit_poly_uniq_block now reads the Enumerator itself under such a
+view. For a lone |x| the block binds the first values, as before, and
+a step that packed two values or more has a new Array of its values
+for its survivor, made when the survivor is pushed. For a lone
+|*r| or &:m the view's to_a stands as it did, a new Array of each
+step's values, and that Array is the survivor, as on master, but for a
+step of one value nothing can change in place (an Integer, a Float, a
+Symbol, nil, true or false): that value is the step's survivor. Any
+other one value keeps its Array for the survivor: it may be a String
+or an Array the Enumerator made and keeps (each_char, each_slice), and
+what uniq answers must not be an object the Enumerator's next to_a
+hands out again. So the Array a step packed is never the survivor
+either: the survivor is a new one of the same values.
+
+What that Array is made of depends on what can run between the first
+step and the last push. An Enumerator hands out its own items, so a
+block that calls anything, or an == of the program's own, may reach
+them through another to_a while the steps run, and master reads the
+first values ahead. Where nothing of the program's runs there (the
+block's body is reads of its parameter and literals, and the program
+as written gives no class an ==, an eql?, a hash or a <=>), the Array
+is made of the item itself: an Enumerator that keeps its items is
+read by the view's own to_a, so the step loop is master's, and the
+item is the one it keeps; a generator, which makes its items anew at
+every to_a, is read once, plain, with the first values taken beside.
+For any other block the first values go in place ahead of the first
+step and the values after the first are kept beside them, one step's
+after another's. No call is on the list: the parameter is the step's
+first value, of any class, and a Hash's [] runs its default block.
+
+Under a lone |*r| the one value is asked of a survivor only, when it
+is pushed, where the block leaves its Array as it is: its body uses
+the parameter only as the receiver of an index that is not assigned,
+of size, length, first or last, each of them the builtin's (the
+program gives no class a method of that name), which is all the body
+written for &:m does. Any other block may change its Array
+({ |*q| k = q[0]; q.pop; k }), so there the value is taken ahead of
+the block.
+
+It does so only where the program as written gives no class a uniq of
+its own (an_prog_never_gives): no def and no Symbol of that name, and
+no site where a method is named, made or loaded by something the text
+does not spell. A uniq the program gives Enumerable or Enumerator, in
+a file the compiler reads or in one it does not, answers what it
+likes, so such a program keeps master's C.
+
+A step that yields one value has the parameter for its item, and a
+block may change that String in place: `x.chomp!` rebinds the
+parameter, and uniq kept the changed one. So for a lone |x| the
+survivor of such a step is the parameter as it is after the block
+ran, as it was.
+
+By callgrind, instructions a step with gcc and with clang, on programs
+that size the answer, which master runs right. A lone |x| over steps
+of one value (a.each, each_char, each_slice(2)) stays within 2 of
+master or under it. Over steps of several values, { |x| x } is 4
+fewer and 15 more over each_with_index (of 929 and 885) and 1 and 25
+more over a generator of two or of three values a step; clang's 15
+are sp_yielded_packed, inlined at its one call on master and called
+here, where it has two. A block that calls anything ({ |x| x + 0 })
+pays for the values kept ahead: 88 and 104 over each_with_index, 44
+and 49 over the generator of two values, 84 and 89 of three. A lone
+|*r| that only reads its Array, and &:abs, stay within 1 of master
+over each_with_index, over that generator and over a.each; one that
+may change it pays 15 and 9 over the generator and 23 and 26 over
+a.each. spinel -c of a program of 1,000 and of 2,000 such calls,
+against master: 3.83% and 8.07% fewer for the lone |x|, 3.28% and
+4.89% fewer for the lone |*r|, and the same to 0.03% over an Array,
+whose C is master's. A block with two parameters, a block with none
+and no block keep their C.
+
+Test: test/enum_uniq_block_keeps_item.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
