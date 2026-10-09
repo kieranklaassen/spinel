@@ -1,0 +1,21 @@
+Changed lines of ivar-alias-copy-body-v16.md against ivar-alias-copy-body-v15.md (two places, nothing else; no line added or removed).
+
+PLACE 1. Line 25, under "Left as on master": one sentence REMOVED from the parenthesis at its end; the line is the same up to it.
+OLD END:
+A `clear` through such an instance variable is lost on master whatever the assignment; that is not this route's.)
+NEW END:
+)
+OLD LINE, whole:
+- a plain `@t = @s` between two names that already hold the one shared handle, which hands the handle over. (Through a call the write copies even then, and is refused, but for the three calls above. A `clear` through such an instance variable is lost on master whatever the assignment; that is not this route's.)
+NEW LINE, whole:
+- a plain `@t = @s` between two names that already hold the one shared handle, which hands the handle over. (Through a call the write copies even then, and is refused, but for the three calls above.)
+
+PLACE 2. Line 28, "what the route cannot see": one clause ADDED at its end (the "and" before the item that was last moves to the new last item); the line is the same up to it.
+OLD END:
+, and an assignment that runs again with no other read of the old name (`@t = @s; @t << "1"; p @t` in a method called twice).
+NEW END:
+, an assignment that runs again with no other read of the old name (`@t = @s; @t << "1"; p @t` in a method called twice), and a write the route does not ask: an operator write (`@t ||= @s`, `@t &&= @s`), a multiple assignment (`@t, x = @s, 1` in a method; in a script's body master's C for it does not compile), and a conditional (`@t = c ? @s : @s.to_s`) or a rescue modifier (`@t = (@s rescue nil)`) as the value.
+OLD LINE, whole:
+- what the route cannot see, still a silent copy: a parameter mutated after `@t = s` in a method, a third name through an instance variable write (`@t = (@u = @s)`), a read or a change through a reader (`k.t << x`), and an assignment that runs again with no other read of the old name (`@t = @s; @t << "1"; p @t` in a method called twice).
+NEW LINE, whole:
+- what the route cannot see, still a silent copy: a parameter mutated after `@t = s` in a method, a third name through an instance variable write (`@t = (@u = @s)`), a read or a change through a reader (`k.t << x`), an assignment that runs again with no other read of the old name (`@t = @s; @t << "1"; p @t` in a method called twice), and a write the route does not ask: an operator write (`@t ||= @s`, `@t &&= @s`), a multiple assignment (`@t, x = @s, 1` in a method; in a script's body master's C for it does not compile), and a conditional (`@t = c ? @s : @s.to_s`) or a rescue modifier (`@t = (@s rescue nil)`) as the value.
