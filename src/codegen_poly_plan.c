@@ -4056,6 +4056,8 @@ void emit_poly_defaults_n(Compiler *c, int id, int recv, const char *name, const
       if (g_plan_check) pa_observe(PA_BUILTIN, PA_KEY_BUILTIN + PB_ND_ROUND, -1, TY_UNKNOWN, PC_SAME);
       char nd9[64];
       if (atmp_ty[0] == TY_POLY) snprintf(nd9, sizeof nd9, "sp_poly_arg_int_chk(_t%d)", atmp[0]);
+      /* a Float count is range-checked where the receiver is a number */
+      else if (atmp_ty[0] == TY_FLOAT) snprintf(nd9, sizeof nd9, "sp_poly_ndigits_f(_t%d, _t%d)", tv, atmp[0]);
       else snprintf(nd9, sizeof nd9, "(sp_int)_t%d", atmp[0]);
       Buf nv9; memset(&nv9, 0, sizeof nv9);
       if (sp_streq(name, "round")) buf_printf(&nv9, "sp_poly_round_n(_t%d, %s)", tv, nd9);
