@@ -1,0 +1,70 @@
+inner ensure
+rescued t
+outer ensure
+inner ensure
+rescued m
+outer ensure
+:rescued
+ensure 1
+rescued deep
+ensure 2
+inner ensure
+outer ensure
+-1
+inner ensure
+outer ensure
+outside io
+ensure 1
+rescued deep
+ensure 2
+after
+ensure 3
+3000
+late
+inner
+outer
+miss: out TypeError
+inner
+took TypeError
+outer
+second: returned
+inner
+took DeepError
+outer
+parent: returned
+inner
+took IOError
+outer
+bare: returned
+inner
+outer
+bare miss: out NotImplementedError
+inner
+took IndexError
+outer
+splat: returned
+inner
+outer
+splat miss: out TypeError
+inner
+took NotImplementedError
+outer
+all: returned
+inner
+named clause
+outer
+named first: returned
+inner
+outer
+raise in the clause: out TypeError
+inner 1
+inner 2
+inner 3
+outer
+retry: returned
+inner
+outer
+bare, made from Exception: out Made
+inner
+outer
+bare second, made from ScriptError: out MadeScript
