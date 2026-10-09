@@ -15800,6 +15800,97 @@ static char *emit_str_splice_value(Compiler *c, int recv, int v, int late, int t
   buf_puts(b, " sp_str_check_mutable("); emit_expr(c, recv, b); buf_puts(b, ");");
   return vb.p;
 }
+/* Does the program give the builtin class `cls` a method `nm` of its own,
+   in the chain of its reopening? Then `nm` on such a receiver is a call. */
+static int builtin_method_is_own(Compiler *c, const char *cls, const char *nm) {
+  int ci = comp_class_index(c, cls);
+  return ci >= 0 && (comp_method_in_chain(c, ci, nm, NULL) >= 0 || comp_reader_in_chain(c, ci, nm, NULL));
+}
+/* Is call `v` a read out of a slot that goes on holding the String: a
+   reader's or a Struct member's field (call_is_field_read), an element of
+   an Array (`ar[0]`, `ar.fetch(0)`, `ar.first`, `ar.last`) or a value of a
+   Hash (`h[:k]`, `h.fetch(:k)`), off a variable, a constant or self, or
+   the class's own reader with no receiver (implicit_self_is_field_read)? It
+   runs no code of the program's while Array or Hash has no method of that
+   name of the program's own, the index is a plain read, and no Hash of the
+   program has a default block (fetch with one key or one Integer index
+   runs none: a missing one raises). A boxed element is read through its
+   to_str, so no class may define one. */
+static int replace_source_is_slot_read(Compiler *c, int v) {
+  const NodeTable *nt = c->nt;
+  TyKind t = comp_ntype(c, v);
+  int recv = unwrap_parens(c, nt_ref(nt, v, "receiver")), alloc = 0;
+  if (nt_ref(nt, v, "receiver") < 0) return t == TY_STRING && implicit_self_is_field_read(c, v);
+  if (recv < 0 || nt_ref(nt, v, "block") >= 0 ||
+      !(expr_is_held_ref(c, recv) || nt_kind(nt, recv) == NK_GlobalVariableReadNode))
+    return 0;
+  if (call_is_field_read(c, v, &alloc)) return t == TY_STRING && !alloc;
+  if (t != TY_STRING && !(t == TY_POLY && !any_class_defines(c, "to_str"))) return 0;
+  const char *nm = nt_str(nt, v, "name");
+  TyKind rt = comp_ntype(c, recv);
+  int a = nt_ref(nt, v, "arguments"), ac = 0;
+  const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+  int ary = ty_is_array(rt), hash = ty_is_hash(rt);
+  if (!nm || !(ary || hash) || builtin_method_is_own(c, ary ? "Array" : "Hash", nm)) return 0;
+  if (ary && ac == 0) return sp_streq(nm, "first") || sp_streq(nm, "last");
+  if (ac != 1 || !(nt_kind(nt, av[0]) == NK_StringNode || subtree_is_pure_read(c, av[0]))) return 0;
+  if (sp_streq(nm, "fetch")) return hash || comp_ntype(c, av[0]) == TY_INT;
+  if (!sp_streq(nm, "[]")) return 0;
+  return ary ? comp_ntype(c, av[0]) == TY_INT : !prog_has_hash_default_block(c);
+}
+static int replace_source_is_held(Compiler *c, int v, int depth);
+/* Is call `v` one that answers its String receiver itself, making nothing:
+   to_s, to_str, itself or freeze with no argument, on a receiver something
+   else holds, while String has no method of that name of the program's own? */
+static int replace_source_answers_receiver(Compiler *c, int v, int depth) {
+  const NodeTable *nt = c->nt;
+  const char *nm = nt_str(nt, v, "name");
+  int recv = unwrap_parens(c, nt_ref(nt, v, "receiver"));
+  int a = nt_ref(nt, v, "arguments"), ac = 0;
+  if (a >= 0) nt_arr(nt, a, "arguments", &ac);
+  if (!nm || recv < 0 || ac != 0 || nt_ref(nt, v, "block") >= 0) return 0;
+  if (!(sp_streq(nm, "to_s") || sp_streq(nm, "to_str") || sp_streq(nm, "itself") || sp_streq(nm, "freeze")))
+    return 0;
+  if (comp_ntype(c, v) != TY_STRING || comp_ntype(c, recv) != TY_STRING ||
+      builtin_method_is_own(c, "String", nm)) return 0;
+  return replace_source_is_held(c, recv, depth + 1);
+}
+/* Does something else hold the String the statement form of replace copies,
+   once it is read? A literal, a constant, self, and a local, an instance
+   variable or a global read where it stands do (strbuf_slot_ref says which
+   of those are read as a copy), so does a read out of a slot one of them
+   holds (replace_source_is_slot_read), so does such a source answered by
+   its own to_s, to_str, itself or freeze (replace_source_answers_receiver),
+   and so does a choice between two such sources (`c ? t : K`, `t || K`).
+   Anything else is a value a call made: an object counts, read through its
+   to_str, and so does the answer of the program's own `[]`, `first`, `to_s`
+   or reader. */
+static int replace_source_is_held(Compiler *c, int v, int depth) {
+  const NodeTable *nt = c->nt;
+  char hs[1024];
+  v = unwrap_parens(c, v);
+  if (v < 0 || depth > 8) return 0;
+  NodeKind k = nt_kind(nt, v);
+  if (k == NK_StringNode) return 1;
+  if (k == NK_IfNode) {
+    int arm[2] = { nt_ref(nt, v, "statements"), nt_ref(nt, v, "subsequent") };
+    if (arm[1] < 0 || nt_kind(nt, arm[1]) != NK_ElseNode) return 0;
+    arm[1] = nt_ref(nt, arm[1], "statements");
+    for (int i = 0; i < 2; i++) {
+      int n = 0; const int *bb = arm[i] >= 0 ? nt_arr(nt, arm[i], "body", &n) : NULL;
+      if (n != 1 || !replace_source_is_held(c, bb[0], depth + 1)) return 0;
+    }
+    return 1;
+  }
+  if (k == NK_OrNode)
+    return replace_source_is_held(c, nt_ref(nt, v, "left"), depth + 1) &&
+           replace_source_is_held(c, nt_ref(nt, v, "right"), depth + 1);
+  if (k == NK_CallNode)
+    return replace_source_answers_receiver(c, v, depth) || replace_source_is_slot_read(c, v);
+  TyKind t = comp_ntype(c, v);
+  if (t != TY_STRING && t != TY_STRBUF) return 0;
+  return (expr_is_held_ref(c, v) || k == NK_GlobalVariableReadNode) && !strbuf_slot_ref(c, v, hs, sizeof hs);
+}
 /* emit_array_mutate_stmt_body's String mutators done by reassigning the
    receiver: replace, prepend, insert, concat, clear, delete_prefix! /
    delete_suffix! (answers 1 emitted, 0 declined, -1 to go on) */
@@ -15850,6 +15941,9 @@ static int str_mutate_reassign_arms(Compiler *c, Buf *b, int indent, const NodeT
          reads as its string, TypeError for anything else */
       buf_printf(b, "{ const char *_t%d = ", trep); emit_str_expr(c, argv[0], b);
       buf_printf(b, "; ");
+      /* a source made in place is held by this temp alone while the copy
+         is allocated, and so is the copy a shared String is read as */
+      if (!replace_source_is_held(c, argv[0], 0)) buf_printf(b, "SP_GC_ROOT(_t%d); ", trep);
       emit_expr(c, recv, b);
       buf_printf(b, " = sp_str_from_bytes(_t%d, sp_str_byte_len(_t%d)); }\n", trep, trep);
       return 1;
