@@ -1,0 +1,629 @@
+1:  dd058151d ! 1:  5065de212 A String Range's cover? and include? read a boxed appended String
+    @@ Commit message
+     
+         - in a program that holds no String as a handle, built with
+           --share-strings or without;
+    -    - in one that stores a method's own String, of a class of the program,
+    -      where a handle is wanted: emit_boxed_strbuf tags the plain String's
+    -      bytes as a handle there, and the box does not say which it holds
+    -      (StringIO#string and StringScanner#rest stored so are wrapped as
+    -      handles without --share-strings, and the arm is written there; with
+    -      the flag that program keeps master's C too);
+    -    - in a call of cover?, include? or member? whose name the program
+    -      defines anew on Range, and in every such call of a program with its
+    -      own String#<=>, #== or #succ: this call does not ask them, before or
+    -      after.
+    -
+    -    "Its own" is by any road. A def in the class is in the class table
+    -    (builtin_reopened), and so is a prepend or an include written in the
+    -    class's body, with what that module defines and includes. What that
+    -    table does not hold is read off the program's nodes
+    -    (program_writes_name): the name written as a Symbol or a String
+    -    anywhere but as the old name of an alias (`alias <=> index`,
+    -    `String.define_method(:<=>) { }` under a rescue: this compiler does not
+    -    perform that call, CRuby does); a def of the name on one object
+    -    (`def lo.<=>`), or anywhere but as a statement of a class's or a
+    -    module's body; a prepend on a receiver, inside a method or in a
+    -    module's body (the table does not follow a module that prepends in
+    -    turn); an include on a receiver or inside a method. A method made by
+    -    none of these is made by one of four uses, and with any of them the
+    -    program stands aside whole:
+    -
+    -    - a call that takes a method's name as a value, where the name is no
+    -      literal: define_method, alias_method, the attr words, undef_method,
+    -      remove_method, private, public, protected and module_function (a def
+    -      or an attr call written as the argument is read where it stands);
+    -      send, method, instance_method and their kin; an inject or a reduce
+    -      with a name for its operand; a to_proc of anything but a Symbol
+    -      written out. And any of these words written as a Symbol or a String
+    -      (`send(:define_method, n)`);
+    -    - a `&` argument that is neither a Symbol written out nor a Proc, a
+    -      Method or the method's own block;
+    -    - a text or a block run as a class's body: eval, class_eval,
+    -      instance_exec and their kin, ERB, and a block of defs this compiler
+    -      leaves out and writes as a raise the program can rescue (a class_eval
+    -      on a class held in a local, NotImplementedError);
+    -    - a file the compiler did not read: a require or a require_relative
+    -      that still stands as a call (one it read is spliced in as text ahead
+    -      of parsing), a require whose path a String computes (written as a
+    -      raise of LoadError), a load, an autoload, and a require of a literal
+    -      path it did not find, dropped with a warning (g_require_unread, set
+    -      by the parser). A require it knows (`require "set"`) is none of
+    -      these.
+    -
+    -    Where a name or a text is not written out the answer is "it can", and
+    -    master's C stays; a road that is not among these is not seen. The names
+    -    asked are the ones CRuby asks on these calls: cover?, include? and
+    -    member? on Range (=== for the changes above this one), <=>, == and succ
+    -    on String.
+    -    program_defines_method asks the same and a def of the name anywhere,
+    -    for a method a builtin stands on in CRuby and not here (Enumerable's
+    -    walk by `each`); nothing in this commit asks it.
+    +    - in one that stores the String a method call on an object of the
+    +      program's returns where a handle is wanted, the call no read of a
+    +      handle's slot through a receiver: this scan does not follow what
+    +      such a call renders, so it does not say what that box holds;
+    +    - in a program that has, or may have, a method of the call's name or a
+    +      <=>, an == or a succ of its own, in any class: this call does not ask
+    +      them, before or after.
+    +
+    +    "May have" is asked of two tables. A def in the builtin's class is in
+    +    the class table (builtin_reopened). The rest is an_prog_never_gives,
+    +    the analysis's walk of the program as written (analyze.c). It reads
+    +    the program ahead of every rewrite and of the arm a test of the engine
+    +    drops: no def and no Symbol of the name anywhere, and no site where a
+    +    method is named, made, mixed in or loaded by something the text does
+    +    not spell. So `alias <=> index`, `def lo.<=>`, a
+    +    `String.define_method(:<=>) { }` under a rescue, a `send(name)`, an
+    +    eval and a file the compiler did not read leave master's C. So does
+    +    `class String; prepend Kernel; end`: Kernel's <=> answers nil for two
+    +    Strings that differ, and no text of the program's holds it. And so
+    +    does a `def ==` in a class of the program's own: the walk does not ask
+    +    where a def lands. A package's Ruby is the program's text to the walk,
+    +    so a program that requires set, csv or uri keeps master's C too.
+    +
+    +    The names asked are the ones CRuby asks on these calls: cover?,
+    +    include? and member? on Range (=== for the changes above this one),
+    +    <=>, == and succ on String.
+     
+         Cost: none where the C stays. In a program that holds a handle, a
+         membership call with a boxed argument runs more instructions (callgrind,
+    @@ Commit message
+         a while loop: 4 and 2 a call for a plain String held in a local, 6 and
+         2 for one read from an Array each turn, 6 and 4 for an Integer, 3 and 1
+         for include? of a plain String. In a block: 5 and 2, 8 and 2, 6 and 4,
+    -    4 and 1. Compiling such a call runs 32,300 to 32,800 more instructions
+    -    (callgrind over `spinel -c`: 2.3% over 1,000 of them and over 2,000),
+    -    5,200 of them the question of the program's own methods; the program's
+    -    nodes are walked once for a name and the answer is kept for the whole
+    -    compile (what the emitter adds to the node table meanwhile defines
+    -    nothing), and that walk is 0.12% of the compile where two such calls
+    -    stand behind 20,000 other lines. A program with no such call does not
+    -    ask. The walk for handles looks at the call nodes stored as a handle:
+    -    compiling optcarrot runs 8,313,709,919 instructions for 8,313,608,189,
+    +    4 and 1. Compiling such a call runs 32,000 to 32,100 more instructions
+    +    (callgrind over `spinel -c`: 2.3% over 1,000 of them and over 2,000):
+    +    the arm, and in it 920 a call for the eight questions, each a lookup in
+    +    a table the analysis built. A program with no such call does not ask.
+    +    The walk for handles looks at the call nodes stored as a handle:
+    +    compiling optcarrot runs 8,267,124,714 instructions for 8,266,868,983,
+         and its C is byte for byte the same.
+     
+    -    Not here. The program whose box may hold a plain String under the
+    -    handle's tag crashes when it reads that box (gcc) or does not build
+    -    (clang), as on master. cover? of a plain String still compares up to
+    -    its first NUL. A String Range the call does not see as typed (read out
+    -    of an Array or a Hash, or a "Range or nil" local called with `&.`) and
+    -    `r.method(:cover?).call(x)` still answer false for the handle. `===`
+    -    and case/when of a String Range with a boxed value are their own
+    -    change.
+    +    Not here. A String stored from a method call the scan does not follow
+    +    (`{"k" => box.text}` beside an appended String, without --share-strings)
+    +    still answers false: that program keeps master's C. So does one stored
+    +    from a reader called without a receiver (`{"k" => name}` in a method of
+    +    its class, with --share-strings). cover? of a plain String still
+    +    compares up to its first NUL. A String Range the call does not see as
+    +    typed (read out of an Array or a Hash, or a "Range or nil" local called
+    +    with `&.`) and `r.method(:cover?).call(x)` still answer false for the
+    +    handle. `===` and case/when of a String Range with a boxed value are
+    +    their own change.
+     
+         Test: test/str_range_member_boxed_handle.rb (expected from CRuby
+         3.3.6), run under GC stress by its header line: its last block makes
+    -    both ends of its Range where it is written. Nine programs with a
+    -    String#<=> of their own that the class table does not hold, each right
+    -    on master and kept: test/str_range_cover_own_compare_alias.rb,
+    +    both ends of its Range where it is written. Thirteen programs with a
+    +    <=> ahead of String's own that the class table does not hold, each
+    +    right on master and kept: test/str_range_cover_own_compare_alias.rb,
+         _computed.rb, _rescued.rb, _singleton.rb, _prepend_in_method.rb,
+    -    _module_prepends.rb, _dropped_block.rb, _inject.rb and _erb.rb.
+    +    _module_prepends.rb, _dropped_block.rb, _inject.rb, _erb.rb,
+    +    _inject_block.rb, _own_lambda.rb, _engine_arm.rb and
+    +    _prepend_kernel.rb.
+     
+         Co-Authored-By: Claude Code <noreply@anthropic.com>
+     
+    @@ src/codegen_internal.h: void nameset_add(NameSet *s, const char *nm);
+     +extern int g_strbuf_boxes;
+     +int program_strbuf_boxes(Compiler *c);
+     +int builtin_reopened(Compiler *c, const char *cls, const char *name);
+    -+int program_writes_name(Compiler *c, const char *name);
+    -+int program_defines_method(Compiler *c, const char *name);
+     +int srange_member_builtin(Compiler *c, const char *name);
+      void emit_scope_local_ref(Compiler *c, Scope *s, const char *name, Buf *b);
+      void emit_typed_elem_value(Compiler *c, int node, TyKind et, Buf *b);
+    @@ src/codegen_util.c: int strbuf_marked_yields_handle(Compiler *c, int v) {
+     +   (g_strbuf_boxes). SB_BOXES_NONE: the program holds no String as a
+     +   handle, so no box is tagged so and the reader leaves the test out.
+     +   SB_BOXES_UNSURE: a call on an object, stored where a handle is wanted, is
+    -+   boxed as it renders (emit_boxed_strbuf), and only a reader of a handle's
+    -+   slot renders the handle; any other leaves its String's bytes under the
+    -+   handle's tag, the box does not say which it holds, and the reader keeps
+    ++   boxed as it renders (emit_boxed_strbuf). A reader of a handle's slot
+    ++   renders the handle; what another call renders this scan does not
+    ++   follow, so it does not say what that box holds, and the reader keeps
+     +   to the plain String. SB_BOXES_HANDLES: each is a handle, or NULL for a
+     +   nil stored among handles. */
+     +int g_strbuf_boxes = SB_BOXES_UNSURE;
+    @@ src/codegen_util.c: int strbuf_marked_yields_handle(Compiler *c, int v) {
+     +  int ci = comp_class_index(c, cls);
+     +  return ci >= 0 && comp_method_in_chain(c, ci, name, NULL) >= 0;
+     +}
+    -+/* A method of the program's own under a builtin, by a way the class table
+    -+   does not hold. A builtin answers without asking the method a program
+    -+   put under it (in CRuby a String Range compares by String#<=> and
+    -+   Enumerable walks by `each`). builtin_reopened says so for a def in the
+    -+   builtin's class. An alias to a builtin, a name that is computed, and a
+    -+   call the compiler does not perform and the program rescues
+    -+   (`String.define_method(:<=>) { }`) are not in that table, so they are
+    -+   read off the program's nodes here. So are a def on one object
+    -+   (`def lo.<=>`) and a def or a prepend that is no statement of a class's
+    -+   own body (a prepend inside a method the class is then asked to run).
+    -+   A method made by none of these is made by a call that takes its name
+    -+   as a value, by a block handed on that is such a name, by a text the
+    -+   program evaluates, or in a file the compiler did not read: the lists
+    -+   below are those four uses. Where a name or a text is not written out
+    -+   the answer is "it can", and master's C stays. A road that is not on
+    -+   the lists below is not seen.
+    -+
+    -+   program_reflects: the program defines or mixes in methods by a road
+    -+   whose name, or whose text, the compiler does not read.
+    -+
+    -+   The scans are cold: each runs once for a name, and marked so their
+    -+   inlined accessors stay out of the C compiler's inlining budget for
+    -+   this file, which ivar_set_kind's loop over the ivar writes needs. */
+    -+static const char *name_literal(const NodeTable *nt, int id) {
+    -+  NodeKind k = nt_kind(nt, id);
+    -+  return k == NK_SymbolNode ? nt_str(nt, id, "value") : k == NK_StringNode ? nt_str(nt, id, "content") : NULL;
+    -+}
+    -+static int name_in(const char *s, const char *const *list) {
+    -+  for (int i = 0; list[i]; i++) if (sp_streq(s, list[i])) return 1;
+    -+  return 0;
+    -+}
+    -+/* a call that defines by its first argument, or finds a method by it */
+    -+static const char *const reflect_first[] = { "define_method", "define_singleton_method", "alias_method", "send",
+    -+  "__send__", "public_send", "method", "public_method", "instance_method", "public_instance_method",
+    -+  "singleton_method", NULL };
+    -+/* a call that defines, removes or hides by each argument */
+    -+static const char *const reflect_each[] = { "attr", "attr_reader", "attr_writer", "attr_accessor", "undef_method",
+    -+  "remove_method", "def_delegator", "def_delegators", "def_instance_delegator", "def_instance_delegators",
+    -+  "def_single_delegator", "def_single_delegators", "private", "public", "protected", "module_function",
+    -+  "private_class_method", "public_class_method", NULL };
+    -+/* a call that runs a text or a block as a class's body, mixes a module in
+    -+   by hand, or reads a file: a require the compiler read is spliced in as
+    -+   text ahead of parsing, so one that still stands as a call was not */
+    -+static const char *const reflect_any[] = { "eval", "instance_eval", "class_eval", "module_eval", "instance_exec",
+    -+  "class_exec", "module_exec", "delegate", "instance_delegate", "single_delegate", "prepend_features",
+    -+  "append_features", "load", "autoload", "require", "require_relative", NULL };
+    -+/* a call that runs a method by a name it is handed: read where it stands
+    -+   below, and as a name written out here */
+    -+static const char *const reflect_by_value[] = { "inject", "reduce", "to_proc", NULL };
+    -+/* Is the node a statement of a class's own body (mods 0), or of a class's,
+    -+   a module's or a `class << self`'s (mods 1)? A def or a bare include or
+    -+   prepend there is that body's own, and the class table reads it. */
+    -+static __attribute__((cold)) int stmt_of_body(const NodeTable *nt, int id, int mods) {
+    -+  static const NodeKind BK[] = { NK_ClassNode, NK_ModuleNode, NK_SingletonClassNode };
+    -+  for (int k = 0; k < (mods ? 3 : 1); k++)
+    -+    NT_FOREACH_KIND(nt, BK[k], b) {
+    -+      int of = BK[k] == NK_SingletonClassNode ? nt_ref(nt, b, "expression") : -1;
+    -+      if (BK[k] == NK_SingletonClassNode && (of < 0 || nt_kind(nt, of) != NK_SelfNode)) continue;
+    -+      int body = nt_ref(nt, b, "body"), n = 0;
+    -+      const int *st = body >= 0 && nt_kind(nt, body) == NK_StatementsNode ? nt_arr(nt, body, "body", &n) : NULL;
+    -+      for (int i = 0; i < n; i++)
+    -+        if (st[i] == id) return 1;
+    -+    }
+    -+  return 0;
+    -+}
+    -+/* Is the node a statement of the program's top level? */
+    -+static __attribute__((cold)) int stmt_of_top(const NodeTable *nt, int id) {
+    -+  int st = nt->root_id >= 0 ? nt_ref(nt, nt->root_id, "statements") : -1, n = 0;
+    -+  const int *sv = st >= 0 && nt_kind(nt, st) == NK_StatementsNode ? nt_arr(nt, st, "body", &n) : NULL;
+    -+  for (int i = 0; i < n; i++)
+    -+    if (sv[i] == id) return 1;
+    -+  return 0;
+    -+}
+    -+static int reflect_name(const char *s) {
+    -+  return name_in(s, reflect_first) || name_in(s, reflect_each) || name_in(s, reflect_any) ||
+    -+         name_in(s, reflect_by_value) || sp_streq(s, "prepend") || sp_streq(s, "include");
+    -+}
+    -+static __attribute__((cold)) int program_reflects_scan(Compiler *c) {
+    -+  const NodeTable *nt = c->nt;
+    -+  /* a require of a path the compiler did not find was dropped with a
+    -+     warning and left no node (g_require_unread, set by the parser) */
+    -+  if (g_require_unread) return 1;
+    -+  NT_FOREACH_KIND(nt, NK_CallNode, v) {
+    -+    const char *cn = nt_str(nt, v, "name");
+    -+    if (!cn) continue;
+    -+    if (name_in(cn, reflect_any)) return 1;
+    -+    /* inject and reduce with no block call a method by their last
+    -+       argument; a Symbol made into a Proc calls the method it names */
+    -+    if (sp_streq(cn, "inject") || sp_streq(cn, "reduce")) {
+    -+      int a = nt_ref(nt, v, "arguments"), ac = 0;
+    -+      const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+    -+      if (nt_ref(nt, v, "block") < 0 && ac >= 1 && !name_literal(nt, av[ac - 1])) return 1;
+    -+      continue;
+    -+    }
+    -+    if (sp_streq(cn, "to_proc")) {
+    -+      int rv = nt_ref(nt, v, "receiver");
+    -+      if (rv < 0 || nt_kind(nt, rv) != NK_SymbolNode) return 1;
+    -+      continue;
+    -+    }
+    -+    /* a prepend puts a module's methods ahead of the class's own. The class
+    -+       table reads one written in a class's body, and what that module
+    -+       defines and includes; not what a module prepends in turn, nor an
+    -+       include or a prepend called on a receiver or inside a method. An
+    -+       include at the top level is Object's, behind every builtin's own */
+    -+    if (sp_streq(cn, "prepend") || sp_streq(cn, "include")) {
+    -+      int inc = cn[0] == 'i';
+    -+      if (nt_ref(nt, v, "receiver") >= 0 || !(stmt_of_body(nt, v, inc) || (inc && stmt_of_top(nt, v)))) return 1;
+    -+      continue;
+    -+    }
+    -+    int first = name_in(cn, reflect_first);
+    -+    if (!first && !name_in(cn, reflect_each)) continue;
+    -+    int a = nt_ref(nt, v, "arguments"), ac = 0;
+    -+    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+    -+    if (first && ac < 1) return 1;
+    -+    for (int i = 0; i < (first ? 1 : ac); i++) {
+    -+      if (name_literal(nt, av[i])) continue;
+    -+      /* `private def x` and `private attr_reader :x`: the def and the
+    -+         inner call are read where they stand */
+    -+      if (first) return 1;
+    -+      NodeKind ak = nt_kind(nt, av[i]);
+    -+      const char *an = ak == NK_CallNode ? nt_str(nt, av[i], "name") : NULL;
+    -+      if (ak != NK_DefNode && !(an && name_in(an, reflect_each))) return 1;
+    -+    }
+    -+  }
+    -+  /* ERB runs its template's text */
+    -+  NT_FOREACH_KIND(nt, NK_ConstantReadNode, k) {
+    -+    const char *kn = nt_str(nt, k, "name");
+    -+    if (kn && sp_streq(kn, "ERB")) return 1;
+    -+  }
+    -+  /* a block handed on that is no Symbol written out, no Proc or Method,
+    -+     and not the method's own block (the desugar made that forward a yield
+    -+     and named its read __orphaned__): a Symbol the program computed calls
+    -+     a method by a name that is not read here */
+    -+  NT_FOREACH_KIND(nt, NK_BlockArgumentNode, ba) {
+    -+    int e = nt_ref(nt, ba, "expression");
+    -+    if (e < 0 || nt_kind(nt, e) == NK_SymbolNode) continue;
+    -+    const char *en = nt_kind(nt, e) == NK_LocalVariableReadNode ? nt_str(nt, e, "name") : NULL;
+    -+    if (en && sp_streq(en, "__orphaned__")) continue;
+    -+    TyKind et = comp_ntype(c, e);
+    -+    if (et != TY_PROC && et != TY_METHOD) return 1;
+    -+  }
+    -+  /* the road named as a value: send(:define_method, n), method(:prepend).
+    -+     And the compiler's own words for what it left out, in the raise it
+    -+     wrote in its place, which a program can rescue and then runs on
+    -+     without the methods CRuby has: a block of defs it dropped (a
+    -+     class_eval on a class held in a variable, a Class.new built from a
+    -+     method's locals), and a require whose path a String computes */
+    -+  for (int pass = 0; pass < 2; pass++)
+    -+    NT_FOREACH_KIND(nt, pass ? NK_StringNode : NK_SymbolNode, l) {
+    -+      const char *ln = name_literal(nt, l);
+    -+      if (ln && (reflect_name(ln) || (pass && (!strncmp(ln, "spinel: ", 8) ||
+    -+                                               !strncmp(ln, "cannot load such file -- ", 25))))) return 1;
+    -+    }
+    -+  NT_FOREACH_KIND(nt, NK_AliasMethodNode, al) {
+    -+    int nn = nt_ref(nt, al, "new_name");
+    -+    if (nn < 0 || nt_kind(nt, nn) != NK_SymbolNode) return 1;
+    -+  }
+    -+  return 0;
+    -+}
+    -+/* How often `name` is written as a Symbol or a String, the times it is the
+    -+   old name of an alias (which defines nothing under it) left out; and how
+    -+   often a def of it is on one object, or is no statement of a class's own
+    -+   body. */
+    -+static __attribute__((cold)) int name_written_scan(Compiler *c, const char *name) {
+    -+  const NodeTable *nt = c->nt;
+    -+  int n = 0;
+    -+  for (int pass = 0; pass < 2; pass++)
+    -+    NT_FOREACH_KIND(nt, pass ? NK_StringNode : NK_SymbolNode, l) {
+    -+      const char *ln = name_literal(nt, l);
+    -+      if (ln && sp_streq(ln, name)) n++;
+    -+    }
+    -+  NT_FOREACH_KIND(nt, NK_AliasMethodNode, al) {
+    -+    int on = nt_ref(nt, al, "old_name");
+    -+    const char *ln = on >= 0 ? name_literal(nt, on) : NULL;
+    -+    if (ln && sp_streq(ln, name)) n--;
+    -+  }
+    -+  NT_FOREACH_KIND(nt, NK_CallNode, v) {
+    -+    const char *cn = nt_str(nt, v, "name");
+    -+    if (!cn || !sp_streq(cn, "alias_method")) continue;
+    -+    int a = nt_ref(nt, v, "arguments"), ac = 0;
+    -+    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+    -+    const char *ln = ac == 2 ? name_literal(nt, av[1]) : NULL;
+    -+    if (ln && sp_streq(ln, name)) n--;
+    -+  }
+    -+  NT_FOREACH_KIND(nt, NK_DefNode, d) {
+    -+    const char *dn = nt_str(nt, d, "name");
+    -+    if (!dn || !sp_streq(dn, name)) continue;
+    -+    int on = nt_ref(nt, d, "receiver");
+    -+    if (on >= 0 ? nt_kind(nt, on) != NK_SelfNode : !stmt_of_body(nt, d, 1)) n++;
+    -+  }
+    -+  return n;
+    -+}
+    -+static __attribute__((cold)) int name_defined_scan(Compiler *c, const char *name) {
+    -+  const NodeTable *nt = c->nt;
+    -+  NT_FOREACH_KIND(nt, NK_DefNode, d) {
+    -+    const char *dn = nt_str(nt, d, "name");
+    -+    if (dn && sp_streq(dn, name)) return 1;
+    -+  }
+    -+  return 0;
+    -+}
+    -+/* The three questions, each answered once for a compile and kept. An
+    -+   answer is a fact of the program's own text, taken when all of it is in
+    -+   the node table: nothing is kept before analysis is done
+    -+   (g_scopes_settled), and after it only the emitter edits the table. No
+    -+   edit of the emitter's changes an answer, so the kept one is what a
+    -+   fresh walk would give:
+    -+   - it adds nodes, at six nt_new_node sites in three functions. For a
+    -+     refused method emitted as a raise (deferred_raise_body): a
+    -+     StatementsNode, a CallNode named raise, an ArgumentsNode, a
+    -+     ConstantReadNode named NotImplementedError, and a StringNode with
+    -+     the refusal's sentence. For a lone splat into an object's method
+    -+     (emit_poly_builtin_default_spread): two LocalVariableReadNodes and
+    -+     three ArgumentsNodes. For a setter read for its value: one
+    -+     LocalVariableReadNode. The scans read a def, an alias, a block
+    -+     argument, a Symbol, a String, a constant named ERB, and a call by
+    -+     its name: raise is on no list, and the sentence is no method's name
+    -+     and none of the compiler's two messages looked for above;
+    -+   - it renames a call for one re-entry and puts the name back: === and
+    -+     <=> to ==, slice to [], find_all to select, [] to new,
+    -+     each_grapheme_cluster to each_char, and a String's bang method to
+    -+     its plain one. That twin is made only for a row of the String bang
+    -+     table (ty_str_typed_bang_flags) and for gsub!, sub!, tr! and delete!
+    -+     as a statement: a method of the program's own that ends in `!`
+    -+     (`send!`) is never written as `send`. No name of any pair is on a
+    -+     list, so a walk made in between reads what it reads before and
+    -+     after;
+    -+   - it points a call at other arguments, at no block or at another
+    -+     receiver for one re-entry: the splat's call and the setter at the
+    -+     nodes above, a String's slice! at the variable its chain starts
+    -+     from. None is a call whose arguments, block or receiver are read.
+    -+   Asked again whenever the table changed, the program would be walked
+    -+   once more for every such edit ahead of a call that asks here. The name
+    -+   is copied: the table frees a name it rewrites. what: 0 the program
+    -+   reflects, 1 the name is written, 2 a def has the name. */
+    -+static int own_method_fact(Compiler *c, int what, const char *name) {
+    -+  static struct { int what; char name[16]; int answer; } memo[16];
+    -+  static const Compiler *of;
+    -+  static const NodeTable *of_nt;
+    -+  static int used;
+    -+  if (of != c || of_nt != c->nt) { of = c; of_nt = c->nt; used = 0; }
+    -+  for (int i = 0; i < used; i++)
+    -+    if (memo[i].what == what && sp_streq(memo[i].name, name)) return memo[i].answer;
+    -+  int r = what == 0 ? program_reflects_scan(c)
+    -+        : what == 1 ? name_written_scan(c, name) > 0 : name_defined_scan(c, name);
+    -+  if (g_scopes_settled && used < 16 && strlen(name) < sizeof memo[0].name) {
+    -+    memo[used].what = what; strcpy(memo[used].name, name); memo[used].answer = r;
+    -+    used++;
+    -+  }
+    -+  return r;
+    -+}
+    -+/* Can the program have put a method of this name under a builtin by a way
+    -+   builtin_reopened does not see: the name written as a Symbol or a String
+    -+   (an alias, an alias_method, a define_method called on the class), a def
+    -+   of it on one object or outside a class's own body, or a road the
+    -+   compiler does not read? */
+    -+int program_writes_name(Compiler *c, const char *name) {
+    -+  return own_method_fact(c, 0, "") || own_method_fact(c, 1, name);
+    -+}
+    -+/* The same, or a def of that name anywhere: for a method a builtin's
+    -+   answer stands on in CRuby and not here, in whatever class or module the
+    -+   program defines it (Enumerable's walk by `each`). */
+    -+int program_defines_method(Compiler *c, const char *name) {
+    -+  return program_writes_name(c, name) || own_method_fact(c, 2, name);
+    -+}
+     +/* Is a String Range's membership `name` (cover?, include?, member?, ===)
+    -+   the runtime's own, with the String methods it stands on? A program's own
+    -+   is not asked on any road. Where the road of a boxed value answered false
+    -+   it agreed with a method of the program that says "no member", so there
+    -+   it stays as it was: where the program defines one of them in its class,
+    -+   and where it can have by a way the class table does not hold. */
+    ++   the runtime's own, with the String methods it stands on? The runtime
+    ++   answers the call without asking (CRuby compares the ends by String#<=>,
+    ++   the runtime by their bytes). Where the road of a boxed value answered
+    ++   false it agreed with a method of the program's that says "no member",
+    ++   so there it stays as it was: where the class table holds one of them
+    ++   under the builtin, and where the program as written may give a method
+    ++   of that name to any class or put a module ahead of one
+    ++   (an_prog_never_gives, analyze.c, which reads the program ahead of every
+    ++   desugar and of the arm an engine test drops). */
+     +int srange_member_builtin(Compiler *c, const char *name) {
+     +  return !builtin_reopened(c, "Range", name) && !builtin_reopened(c, "String", "<=>") &&
+     +         !builtin_reopened(c, "String", "==") && !builtin_reopened(c, "String", "succ") &&
+    -+         !program_writes_name(c, name) && !program_writes_name(c, "<=>") &&
+    -+         !program_writes_name(c, "==") && !program_writes_name(c, "succ");
+    ++         an_prog_never_gives(name, 0) && an_prog_never_gives("<=>", 0) &&
+    ++         an_prog_never_gives("==", 0) && an_prog_never_gives("succ", 0);
+     +}
+      /* A String method answering its receiver or nil (bop_share_self_answer:
+         a bang method, an iterator given a block) called on a local that holds
+         the shared handle (--share-strings: or an ivar, a global, a class
+     
+    - ## src/compiler.h ##
+    -@@
+    -    require-gated stdlib (stringio, io/console, ...) so they match CRuby's
+    -    uninitialized-constant / NoMethodError when the require is absent. */
+    - extern int g_require_gate;
+    -+/* a plain require was dropped unread (spinel_parse.c) */
+    -+extern int g_require_unread;
+    - /* SPINEL_SHARE_STRINGS is on: set, not empty and not "0" (spinel_parse.c) */
+    - int sp_share_strings_env(void);
+    - void sp_feature_mark(const char *name);
+    -
+    - ## src/spinel_parse.c ##
+    -@@ src/spinel_parse.c: static int source_references_io_buffer(const char *src) {
+    -    sp_feature_enabled(). Definitions here (spinel_parse.c includes no project
+    -    headers); declared extern in compiler.h. */
+    - int g_require_gate = 0;
+    -+/* A plain require named a file that was not found and is no capability of
+    -+   the runtime: it was dropped with a warning and left no node, so
+    -+   whatever that file defines is unknown to the compiler. */
+    -+int g_require_unread = 0;
+    - /* --share-strings, as main.c exports it: on only when SPINEL_SHARE_STRINGS
+    -    is set to something, empty and "0" being off. The compiler's flag and the
+    -    parser's read of a package's share declarations ask this one test. */
+    -@@ src/spinel_parse.c: else {
+    -           fprintf(stderr,
+    -                   "warning: '%s' is not available in Spinel; the require is ignored and code using it will fail\n",
+    -                   lib_name);
+    -+          g_require_unread = 1;
+    -           content = strdup("# require not resolved");
+    -         }
+    -       }
+    -
+      ## test/str_range_cover_own_compare_alias.rb (new) ##
+     @@
+     +# cover? of a String Range stands on String#<=>. This program gives String
+    @@ test/str_range_cover_own_compare_dropped_block.rb (new)
+      ## test/str_range_cover_own_compare_dropped_block.rb.expected (new) ##
+     @@
+     +false
+    ++false
+    +
+    + ## test/str_range_cover_own_compare_engine_arm.rb (new) ##
+    +@@
+    ++# cover? of a String Range stands on String#<=>. This program gives String
+    ++# a <=> of its own under a test of the engine. CRuby runs that arm; this
+    ++# compiler decides the test and leaves the arm out of the program, so the
+    ++# def is in no table. The cover? of a boxed appended String keeps the
+    ++# answer it had: the one the program's <=> gives in CRuby.
+    ++if RUBY_ENGINE == "ruby"
+    ++  class String
+    ++    def <=>(o)
+    ++      1
+    ++    end
+    ++  end
+    ++end
+    ++
+    ++h = {"k" => "a".dup, "n" => 1}
+    ++h["k"] << "b"
+    ++r = ("aa".."az")
+    ++p r.cover?(h["k"])
+    ++p r.cover?(h["n"])
+    +
+    + ## test/str_range_cover_own_compare_engine_arm.rb.expected (new) ##
+    +@@
+    ++false
+     +false
+     
+      ## test/str_range_cover_own_compare_erb.rb (new) ##
+    @@ test/str_range_cover_own_compare_inject.rb (new)
+      ## test/str_range_cover_own_compare_inject.rb.expected (new) ##
+     @@
+     +false
+    ++false
+    +
+    + ## test/str_range_cover_own_compare_inject_block.rb (new) ##
+    +@@
+    ++# cover? of a String Range stands on String#<=>. This program gives String
+    ++# a <=> of its own by an inject handed a name it computes, beside a block
+    ++# it hands on: the method's own block parameter, which holds no block
+    ++# here, so the name is called. This compiler does not call a method by a
+    ++# name that is a value: it raises NoMethodError here, and the program
+    ++# goes on. The cover? of a boxed appended String keeps the answer it had:
+    ++# the one the program's <=> gives in CRuby.
+    ++def fold(list, name, &b)
+    ++  list.inject(name, &b)
+    ++end
+    ++
+    ++begin
+    ++  fold([String, "def <=>(o) = 1"], "class_e" + "val")
+    ++rescue NoMethodError
+    ++end
+    ++
+    ++h = {"k" => "a".dup, "n" => 1}
+    ++h["k"] << "b"
+    ++r = ("aa".."az")
+    ++p r.cover?(h["k"])
+    ++p r.cover?(h["n"])
+    +
+    + ## test/str_range_cover_own_compare_inject_block.rb.expected (new) ##
+    +@@
+    ++false
+     +false
+     
+      ## test/str_range_cover_own_compare_module_prepends.rb (new) ##
+    @@ test/str_range_cover_own_compare_module_prepends.rb (new)
+      ## test/str_range_cover_own_compare_module_prepends.rb.expected (new) ##
+     @@
+     +false
+    ++false
+    +
+    + ## test/str_range_cover_own_compare_own_lambda.rb (new) ##
+    +@@
+    ++# cover? of a String Range stands on String#<=>. This program gives String
+    ++# a <=> of its own through a lambda of its own, which answers a Symbol it
+    ++# computes: handed on as a block, the Symbol calls the method it names,
+    ++# class_eval, on the class with a text. This compiler reads `lambda { }`
+    ++# as a Proc, runs the empty block and defines nothing. The cover? of a
+    ++# boxed appended String keeps the answer it had: the one the program's
+    ++# <=> gives in CRuby.
+    ++def lambda(&b)
+    ++  ("class_e" + "val").to_sym
+    ++end
+    ++
+    ++[String, "def <=>(o) = 1"].inject(&lambda { })
+    ++
+    ++h = {"k" => "a".dup, "n" => 1}
+    ++h["k"] << "b"
+    ++r = ("aa".."az")
+    ++p r.cover?(h["k"])
+    ++p r.cover?(h["n"])
+    +
+    + ## test/str_range_cover_own_compare_own_lambda.rb.expected (new) ##
+    +@@
+    ++false
+     +false
+     
+      ## test/str_range_cover_own_compare_prepend_in_method.rb (new) ##
+    @@ test/str_range_cover_own_compare_prepend_in_method.rb (new)
+      ## test/str_range_cover_own_compare_prepend_in_method.rb.expected (new) ##
+     @@
+     +false
+    ++false
+    +
+    + ## test/str_range_cover_own_compare_prepend_kernel.rb (new) ##
+    +@@
+    ++# cover? of a String Range stands on String#<=>. This program puts
+    ++# Kernel's <=> ahead of String's by a prepend. No text of the program's
+    ++# has a <=>: Kernel's answers nil for two Strings that differ, so the
+    ++# Range covers nothing. The cover? of a boxed appended String keeps the
+    ++# answer it had, which is CRuby's.
+    ++class String
+    ++  prepend Kernel
+    ++end
+    ++
+    ++h = {"k" => "a".dup, "n" => 1}
+    ++h["k"] << "b"
+    ++r = ("aa".."az")
+    ++p r.cover?(h["k"])
+    ++p r.cover?(h["n"])
+    +
+    + ## test/str_range_cover_own_compare_prepend_kernel.rb.expected (new) ##
+    +@@
+    ++false
+     +false
+     
+      ## test/str_range_cover_own_compare_rescued.rb (new) ##
