@@ -1,0 +1,57 @@
+The format piece, body v11 to v12: the four text fixes of the second reading as ruled, in five passages. The head fffcc8f5fb2712f263334ab991866d7e7ec963d0 and its message (v8) are as they were; the message carries none of these sentences. The reader-alone pair was counted here, both sides in one run on master f85f04b3a (the bare tree and the head, built from nothing).
+
+OLD:
+p("%.2f" % (1r/3))           # can't modify frozen Array (FrozenError)
+
+NEW:
+p("%.2f" % (1r/3))
+
+----
+
+OLD:
+That line is in `test/string_format_scalar_operands.rb`, and it raises there with gcc and with clang, the freed list's poisoned header read as frozen. Two more of the tests in the tree answer otherwise than their `.expected` at that level with clang, both exit 0: `packages/benchmark/test/benchmark_tms.rb` prints `0xDB` bytes for its times (`"#{$1}f" % @utime`), and `test/poly_string_dup_unfrozen.rb` prints `"a\xDB\xDBb"`. At `SPINEL_GC_STRESS=0` and `1` I found no freed byte read, the freed format not being taken again before it is read. What is wrong there is the order, with gcc: `"%#{w}d|" % (w += 1)` makes the list first and prints the width the argument wrote.
+
+NEW:
+That line is in `test/string_format_scalar_operands.rb`, and it raises there, "can't modify frozen Array (FrozenError)", with gcc and with clang, the freed list's poisoned header read as frozen. Two more of the tests in the tree answer otherwise than their `.expected` at that level with clang, both exit 0: `packages/benchmark/test/benchmark_tms.rb` prints `0xDB` bytes for its times (`"#{$1}f" % @utime`), and `test/poly_string_dup_unfrozen.rb` prints `"a\xDB\xDBb"`. At `SPINEL_GC_STRESS=0` and `1` I found no freed byte read, the freed format not being taken again before it is read. What is wrong there is the order, with gcc: `"%#{w}d|" % (w += 1)` makes the list first and prints the width the argument wrote.
+
+----
+
+OLD:
+- A call's answer as the format beside an argument that runs code, where master does not run both into temporaries itself: `fmt(4) % ("q" + i.to_s)` is stopped by the collector's own check (exit 134) at `SPINEL_GC_STRESS=2`, with gcc and with clang, on master and here (the same C). The argument is not one this change can show to leave the format's String alone.
+
+NEW:
+- A call's answer as the format beside an argument that runs code, where master does not run both into temporaries itself: `fmt(4) % ("q" + i.to_s)` prints `0xDB` bytes or is stopped by the collector's own check (exit 134) at `SPINEL_GC_STRESS=2`, with gcc and with clang, on master and here (the same C). The argument is not one this change can show to leave the format's String alone.
+
+----
+
+OLD:
+- A `def` or a Symbol of the name in the arm of a `RUBY_ENGINE` test the compiler drops: the program is read as it is written, the name counts, and the statement keeps master's C and its answer.
+
+NEW:
+- A `def` or a Symbol of the name in the arm of a `RUBY_ENGINE` test the compiler drops: the program is read as it is written, the name counts, and the statement keeps master's C and its answer. An interpolation as the format is held ahead whatever its argument, in the order of the program as compiled: with `Array#[]` defined in such an arm and `def bump = ($ar[0] = 9; 5)`, `"%#{bump}d|" % (ar[k] + i * m)` prints `"   15|"` here and with clang on master; master with gcc made the list first and printed `"    7|"`, the line of CRuby, which runs the arm.
+
+----
+
+OLD:
+Run here on this commit on master f85f04b3a, built from nothing: the test in the seven collector lanes with gcc and clang, with and without `--share-strings` (right in every one); `ruby tools/gate.rb check`; the generated C of the 6,738 other programs, changed in 7 (three more print the path of the build's own directory and differ in that alone), the five of them under `test/` run in the seven lanes and the two under `packages/` too; optcarrot, checksum 59662, its C byte-identical; `make share-strings-test` and `make int-min-test`, both pass; the 112 statements and the probes above with gcc and clang at levels 0, 1 and 2; the compiler's own instructions on the test, 90,696,636 on master and 91,037,386 here, and over 1,000 and 2,000 lines of one statement that keeps master's C: `p held % (ar[k] + i * m)`, 4,419,878,101 and 4,420,715,204 at 1,000 (+0.02%), 8,840,199,166 and 8,842,336,536 at 2,000 (+0.02%); `p held % (o.a_rather_long_reader + i)`, an `attr_accessor`'s reader in the argument, 3,447,088,442 and 3,447,783,825 at 1,000 (+0.02%), 6,890,450,351 and 6,893,186,688 at 2,000 (+0.04%); and the dearest of the pairs counted, a literal format beside the same argument: `p "%5d|" % (o.a_rather_long_reader + i)`, 3,087,130,670 and 3,110,724,942 at 1,000 (+0.76%), 6,173,105,732 and 6,220,302,448 at 2,000 (+0.76%). What is paid there is the walk that shows the argument makes nothing (master's `subtree_is_pure_read`), about 23,600 instructions a statement. The cost table was measured on 74fa6d7c2 and is not run again.
+
+NEW:
+Run here on this commit on master f85f04b3a, built from nothing: the test in the seven collector lanes with gcc and clang, with and without `--share-strings` (right in every one); `ruby tools/gate.rb check`; the generated C of the 6,738 other programs, changed in 7 (three more print the path of the build's own directory and differ in that alone), the five of them under `test/` run in the seven lanes and the two under `packages/` too; optcarrot, checksum 59662, its C byte-identical; `make share-strings-test` and `make int-min-test`, both pass; the 112 statements and the probes above with gcc and clang at levels 0, 1 and 2; the compiler's own instructions on the test, 90,696,636 on master and 91,037,386 here, and over 1,000 and 2,000 lines of one statement that keeps master's C: `p held % (ar[k] + i * m)`, 4,419,878,101 and 4,420,715,204 at 1,000 (+0.02%), 8,840,199,166 and 8,842,336,536 at 2,000 (+0.02%); `p held % (o.a_rather_long_reader + i)`, an `attr_accessor`'s reader in the argument, 3,447,088,442 and 3,447,783,825 at 1,000 (+0.02%), 6,890,450,351 and 6,893,186,688 at 2,000 (+0.04%); a literal format beside the same argument, `p "%5d|" % (o.a_rather_long_reader + i)`, 3,087,130,670 and 3,110,724,942 at 1,000 (+0.76%), 6,173,105,732 and 6,220,302,448 at 2,000 (+0.76%); and the dearest measured, the reader alone as that argument, `p "%5d|" % o.a_rather_long_reader`, 1,261,175,175 and 1,282,901,367 at 1,000 (+1.72%), 2,518,582,756 and 2,562,032,516 at 2,000 (+1.73%), with master's C. What is paid in those two is one more call of the walk that shows the argument makes nothing (master's `subtree_is_pure_read`), about 21,700 to 23,600 instructions a statement. The cost table was measured on 74fa6d7c2 and is not run again.
+
+----
+
+THE NOTE (format-made-in-place-delta-on-f85f04b3.txt) is read with these two passages replaced; the file itself stays as pushed.
+
+OLD:
+The pair that is left, +0.76%: a literal format beside an argument that names a call (a reader). The list of a single argument is rooted only where that argument makes something, and master's walk (subtree_is_pure_read) is what shows it makes nothing: about 23,600 instructions a statement, of the 3.09 million master spends on it. The body states it as the dearest of the pairs counted; "the largest pair found" is gone.
+
+NEW:
+The pairs that are left: a literal format beside an argument that names a call (a reader), +0.76% where the argument adds to the reader, and +1.72% at 1,000 and +1.73% at 2,000 where the reader is the whole argument (`p "%5d|" % o.a_rather_long_reader`, 1,261,175,175 | 1,282,901,367 and 2,518,582,756 | 2,562,032,516, the same C). That second pair is the dearest measured; the second reading found it. The list of a single argument is rooted only where that argument makes something, and master's walk (subtree_is_pure_read) is what shows it makes nothing: one more call of it, about 21,700 to 23,600 instructions a statement. The body names both pairs.
+
+----
+
+OLD:
+- u04_own_made_format (twice in the sets): a `def` in a RUBY_ENGINE arm the compiler drops; the tip's gcc line equals CRuby's only because CRuby runs the dropped arm. The body's "Not in this change" has it.
+
+NEW:
+- u04_own_made_format (twice in the sets): a `def` in a RUBY_ENGINE arm the compiler drops; the tip's gcc line equals CRuby's only because CRuby runs the dropped arm. The format there is an interpolation, held ahead whatever its argument, so the line moves from CRuby's to the order of the program as compiled. The body's "Not in this change" has it now, as a sentence of its own in the bullet on dropped arms.
