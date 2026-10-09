@@ -1312,6 +1312,15 @@ int block_tail_is_unresolved(Compiler *c, int node) {
   return !diag_user_defines(c, nm);
 }
 
+/* The C test that the boxed value `_t<t>` is one nothing can change in
+   place: an Integer, a Float, a Symbol, true, false, or nil (not the nil
+   that marks a step of no values). */
+static void uniq_own_item(char *out, size_t n, int t) {
+  snprintf(out, n, "(_t%d.tag == SP_TAG_INT || _t%d.tag == SP_TAG_FLT || _t%d.tag == SP_TAG_BOOL || "
+                   "_t%d.tag == SP_TAG_SYM || (_t%d.tag == SP_TAG_NIL && !sp_poly_is_empty_step(_t%d)))",
+           t, t, t, t, t, t);
+}
+
 /* poly `uniq`/`uniq!` with a block, as an expression: the receiver boxes an
    array; keep the first element for each distinct block-key value (compared with
    sp_poly_eq), and for the bang form write the survivors back in place. Yields
@@ -1360,11 +1369,55 @@ int emit_poly_uniq_block(Compiler *c, int id, Buf *b) {
     int np = 0; while (block_param_name(c, block, np)) np++;
     int splat = gather || bare || (rr.elem == TY_POLY && np >= 2 && !block_param_is_multi(c, block, 0));
     int use_shadow = !splat && clv0 && clv0->type != et && et != TY_UNKNOWN;
-    Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
+    /* Over the to_a an Enumerator's block reads through (enum_hop_yield_view)
+       the block binds what a step yields and the survivor is what the step
+       yielded: `e.uniq { |x| x }` over each_with_index keeps [5, 0], not 5,
+       and `o.uniq { |*r| r }` over [5, 6].each keeps 5, not [5]. The items
+       are read as that to_a reads them (sp_Enumerator_to_a_yielded), ahead
+       of the first step, and what a step packed is an Array made here: the
+       Enumerator keeps its own, and the next to_a hands that out again.
+       Only where the program as written gives no class a uniq of its own
+       (an_prog_never_gives): one it gives, in a file read or not, answers
+       what it likes. */
+    const char *view = nt_kind(nt, recv) == NK_CallNode ? nt_str(nt, recv, "enum_yield_view") : NULL;
+    int esrc = view ? nt_ref(nt, recv, "receiver") : -1;
+    int tview = esrc >= 0 && comp_ntype(c, esrc) == TY_ENUMERATOR && !splat && !use_shadow &&
+                clv0 && clv0->type == TY_POLY && an_prog_never_gives("uniq", 0);
+    int tpair = tview ? ++g_tmp : 0;
+    int first = tpair && sp_streq(view, "first");
+    Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, tpair ? esrc : recv, &rb);
+    if (tpair) {
+      int te = ++g_tmp;
+      emit_indent(g_pre, g_indent);
+      buf_printf(g_pre, "sp_Enumerator *_t%d = %s; int _t%d = _t%d ? _t%d->yields_pair : 0;\n",
+                 te, rb.p ? rb.p : "NULL", tpair, te, te);
+      free(rb.p); memset(&rb, 0, sizeof rb);
+      buf_printf(&rb, first ? "sp_Enumerator_to_a(_t%d)" : "sp_Enumerator_to_a_yielded(_t%d, 1)", te);
+    }
     emit_indent(g_pre, g_indent);
     emit_ctype(c, rt, g_pre);
     buf_printf(g_pre, " _t%d = %s;\n", trecv, rb.p ? rb.p : "NULL"); free(rb.p);
     emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", trecv);
+    int titem = first ? ++g_tmp : 0, town = tpair && !first ? ++g_tmp : 0, tval = town ? ++g_tmp : 0;
+    if (titem) {
+      /* a lone `|x|`: the first values in place, as that to_a leaves them,
+         and beside them a new Array of what a step packed, where it packed
+         two values or more (a step of one value or of none keeps the
+         parameter for its survivor, as it did) */
+      int tk = ++g_tmp, tv = ++g_tmp, ta = ++g_tmp;
+      emit_indent(g_pre, g_indent); buf_printf(g_pre, "sp_PolyArray *_t%d = NULL; SP_GC_ROOT(_t%d);\n", titem, titem);
+      emit_indent(g_pre, g_indent);
+      buf_printf(g_pre, "if (_t%d) { _t%d = sp_PolyArray_new(); for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++) { "
+                        "sp_RbVal _t%d = _t%d->data[_t%d]; "
+                        "sp_PolyArray *_t%d = sp_yielded_packed(_t%d, _t%d) ? sp_yielded_args(_t%d, _t%d) : NULL; "
+                        "sp_PolyArray_push(_t%d, _t%d && _t%d->len > 1 ? sp_box_poly_array(_t%d) : sp_box_nil()); "
+                        "sp_gc_wb((void *)_t%d); _t%d->data[_t%d] = sp_yielded_first(_t%d, _t%d); } }\n",
+                 tpair, titem, tk, tk, trecv, tk,
+                 tv, trecv, tk,
+                 ta, tpair, tv, tpair, tv,
+                 titem, ta, ta, ta,
+                 trecv, trecv, tk, tpair, tv);
+    }
     emit_indent(g_pre, g_indent); buf_printf(g_pre, "sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);\n", tseen, tseen);
     emit_indent(g_pre, g_indent); buf_printf(g_pre, "sp_%sArray *_t%d = sp_%sArray_new(); SP_GC_ROOT(_t%d);\n", rk, tres, rk, tres);
     emit_indent(g_pre, g_indent); buf_printf(g_pre, "for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++) {\n", ti, ti, trecv, ti);
@@ -1393,6 +1446,21 @@ int emit_poly_uniq_block(Compiler *c, int id, Buf *b) {
       else if (!splat || !emit_iter_autosplat(c, block, rt, sel, din)) {
         splat = 0;
         emit_indent(g_pre, din); buf_printf(g_pre, "lv_%s = %s;\n", p0, es);
+        if (town) {
+          /* a lone `|*r|` or `&:m` has a new Array of each step's values,
+             as it had, and that Array is the survivor, as it was, but for a
+             step of one value that nothing can change (an Integer, a Float,
+             a Symbol, nil, true or false): that value is its own survivor,
+             taken here, ahead of the block. Any other one value may be a
+             String or an Array the Enumerator made and keeps, so its Array
+             stays. An Enumerator whose every step is a pair
+             (each_with_index) has no step of one value and is not asked. */
+          char own[256]; uniq_own_item(own, sizeof own, tval);
+          emit_indent(g_pre, din);
+          buf_printf(g_pre, "int _t%d = 0; sp_RbVal _t%d; if (_t%d != SP_PAIR_EACH && ((sp_PolyArray *)lv_%s.v.p)->len == 1) { "
+                            "_t%d = ((sp_PolyArray *)lv_%s.v.p)->data[0]; _t%d = %s; }\n",
+                     town, tval, tpair, p0, tval, p0, town, own);
+        }
       }
       else snprintf(es, sizeof es, "%s", sel);
     }
@@ -1405,7 +1473,18 @@ int emit_poly_uniq_block(Compiler *c, int id, Buf *b) {
     buf_printf(g_pre, "int _t%d = 0; for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++) if (sp_poly_eq(_t%d->data[_t%d], _t%d)) { _t%d = 1; break; }\n",
                tdup, tj, tj, tseen, tj, tseen, tj, tkey, tdup);
     emit_indent(g_pre, din);
-    if (splat) buf_printf(g_pre, "if (!_t%d) { sp_PolyArray_push(_t%d, _t%d); sp_%sArray_push(_t%d, %s); }\n", tdup, tseen, tkey, rk, tres, es);
+    /* A lone `|x|` has the parameter for the survivor of a step that yields
+       one value, pushed as it is after the block ran (`x.chomp!` rebinds
+       it), and the Array made above for one that packed. A lone `|*r|` has
+       the value taken above where the step is its own survivor, and else
+       the parameter, as it was. */
+    if (titem)
+      buf_printf(g_pre, "if (!_t%d) { sp_PolyArray_push(_t%d, _t%d); sp_%sArray_push(_t%d, _t%d && _t%d->data[_t%d].tag == SP_TAG_OBJ ? _t%d->data[_t%d] : lv_%s); }\n",
+                 tdup, tseen, tkey, rk, tres, titem, titem, ti, titem, ti, p0);
+    else if (town)
+      buf_printf(g_pre, "if (!_t%d) { sp_PolyArray_push(_t%d, _t%d); sp_%sArray_push(_t%d, _t%d ? _t%d : lv_%s); }\n",
+                 tdup, tseen, tkey, rk, tres, town, tval, p0);
+    else if (splat) buf_printf(g_pre, "if (!_t%d) { sp_PolyArray_push(_t%d, _t%d); sp_%sArray_push(_t%d, %s); }\n", tdup, tseen, tkey, rk, tres, es);
     else buf_printf(g_pre, "if (!_t%d) { sp_PolyArray_push(_t%d, _t%d); sp_%sArray_push(_t%d, lv_%s); }\n", tdup, tseen, tkey, rk, tres, p0);
     if (use_shadow) { din--; emit_indent(g_pre, din); buf_puts(g_pre, "}\n"); }
     if (clv0) clv0->type = csaved0;
