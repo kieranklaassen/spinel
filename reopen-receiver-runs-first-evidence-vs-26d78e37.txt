@@ -1,0 +1,291 @@
+The rest of the evidence for the receiver-first head `5a8c168d9564` (hand-over, mail and delta are the three comments above). Written 01:41 UTC 2026-10-09. The bare `68d40ff05fd4` against this head, as in the delta comment, and the same legend for a cells line. Each sha256 is of the block's text with one final newline.
+
+**1. My family of 148 again** (the generator is unchanged: the `gen.rb` block of comment 6071017026, sha256 `363a3c5175a6d486d3279708463d6835693bc155c98896d82ac41c99f487bc19`). No cell that is right on the bare tip is wrong on this head.
+
+| group | programs | what `R` is | result |
+|---|---|---|---|
+| f | 32 | a call that answers `$s` itself, or may | 31 the tip's C; 1 refused at compile time on both |
+| d | 44 | `$s.upcase`, the one `def`, or an Integer's `to_s`, in a program that gives that name a method by a route | 26 the tip's C; 18 refused on both |
+| h | 21 | the same with the definer reached without its name as a call, or with its name made at run time | 13 the tip's C; 6 refused on both; 2 cured (h20, h21) |
+| p, q | 51 | a call that makes its own String in CRuby | 37 right here in the five cells where the bare tip is wrong in all five; 1 (`chr`) right on both; 12 the tip's C, wrong on both alike; 1 refused on both |
+
+Against `26d78e37aea1`: the same 37 of p and q. h20 (`class Foo; def define_method(*) = nil; end`) and h21 (`$w = "send"`) are cured now: each only spells a word, as a `def` name and as a String, and holds no site. h24 (a definer's name made at run time as a String, handed to `inject`), which differed in C before and which I had left open, has the tip's C: `inject` with an operand that is no Symbol literal is a site. sha256 `f2a8b0d6bfba68b7d1c473afda1aebc6d7eb276f37e22ba853deb62c449542f3`:
+
+`````text
+d1    sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+d2    sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+d3    sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+d4    sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+d5    sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+d6    sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+d7    sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+d8    sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+d9    sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+d10   sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+d11   sameC            ruby[abc|2~rc 0~     ] tip xxxxx  head xxxxx
+d12   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+d13   sameC            ruby[abc|2~rc 0~     ] tip xxxxx  head xxxxx
+d14   sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+d15   sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+d16   sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+d17   sameC            ruby[abc|2~rc 0~     ] tip xxxxx  head xxxxx
+d18   sameC            ruby[none~rc 0~      ] tip xxxxx  head xxxxx
+d19   sameC(refused)   ruby[none~rc 0~      ] tip nnn    head nnn
+d20   sameC(refused)   ruby[none~rc 0~      ] tip nnn    head nnn
+d21   sameC            ruby[abc|2~rc 0~     ] tip xxxxx  head xxxxx
+d22   sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+d23   sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+d24   sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+d25   sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+d26   sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+d27   sameC            ruby[abc|2~rc 0~     ] tip xxxxx  head xxxxx
+d28   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+d29   sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+d30   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+d31   sameC            ruby[abc|2~rc 0~     ] tip xxxxx  head xxxxx
+d32   sameC            ruby[abc|abc~rc 0~   ] tip ooooo  head ooooo
+d33   sameC            ruby[abc|abc~rc 0~   ] tip xxxxx  head xxxxx
+d34   sameC            ruby[abc|abc~rc 0~   ] tip ooooo  head ooooo
+d35   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+d36   sameC            ruby[abc|2~rc 0~     ] tip xxxxx  head xxxxx
+d37   sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+d38   sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+d39   sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+d40   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+d41   sameC            ruby[abc|2~rc 0~     ] tip xxxxx  head xxxxx
+d42   sameC            ruby[a0|2~rc 0~      ] tip xxxxx  head xxxxx
+d43   sameC            ruby[abc|abc~rc 0~   ] tip ooooo  head ooooo
+d44   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+f1    sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+f2    sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+f3    sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+f4    sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+f5    sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+f6    sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+f7    sameC            ruby[abc|2~rc 0~     ] tip xxxxx  head xxxxx
+f8    sameC            ruby[abc|2~rc 0~     ] tip xxxxx  head xxxxx
+f9    sameC            ruby[abc|2~rc 0~     ] tip xxxxo  head xxxxo
+f10   sameC            ruby[abc|2~rc 0~     ] tip xxxxo  head xxxxo
+f11   sameC            ruby[abc|2~rc 0~     ] tip xxxxn  head xxxxn
+f12   sameC            ruby[abc|2~rc 0~     ] tip xxxxo  head xxxxo
+f13   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+f14   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+f15   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+f16   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+f17   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+f18   sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+f19   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+f20   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+f21   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+f22   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+f23   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+f24   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+f25   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+f26   sameC            ruby[abc|2~rc 0~     ] tip xxxxn  head xxxxn
+f27   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+f28   sameC            ruby[abc|2~rc 0~     ] tip xxxxo  head xxxxo
+f29   sameC            ruby[rc 1~           ] tip xxxxx  head xxxxx
+f30   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+f31   sameC            ruby[abc|2~rc 0~     ] tip xxxxx  head xxxxx
+f32   sameC            ruby[abc|2~rc 0~     ] tip xxxxo  head xxxxo
+h1    sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+h2    sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+h3    sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+h4    sameC            ruby[abc|2~rc 0~     ] tip xxxxx  head xxxxx
+h5    sameC            ruby[abc|2~rc 0~     ] tip xxxxx  head xxxxx
+h6    sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+h8    sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+h13   sameC            ruby[abc|2~rc 0~     ] tip xxxxx  head xxxxx
+h14   sameC            ruby[abc|2~rc 0~     ] tip nnn    head nnn
+h15   sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+h17   sameC            ruby[abc|2~rc 0~     ] tip xxxxx  head xxxxx
+h18   sameC            ruby[abc|2~rc 0~     ] tip xxxxx  head xxxxx
+h19   sameC            ruby[abc|2~rc 0~     ] tip xxxxx  head xxxxx
+h20   otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+h21   otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+h22   sameC            ruby[none~rc 0~      ] tip xxxxx  head xxxxx
+h23   sameC            ruby[none~rc 0~      ] tip xxxxx  head xxxxx
+h24   sameC            ruby[none~rc 0~      ] tip xxxxx  head xxxxx
+h25   sameC            ruby[none~rc 0~      ] tip xxxxx  head xxxxx
+h26   sameC            ruby[none~rc 0~      ] tip xxxxx  head xxxxx
+h27   sameC            ruby[abc|2~rc 0~     ] tip xxxxx  head xxxxx
+p1    otherC           ruby[ab|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+p2    otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+p3    otherC           ruby[ab|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+p4    otherC           ruby[Ab|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+p5    otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+p6    otherC           ruby[ba|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+p7    otherC           ruby[ab|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+p8    otherC           ruby[ab|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+p9    otherC           ruby[ab|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+p10   otherC           ruby[ab|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+p11   otherC           ruby[a|2~rc 0~       ] tip xxxxx  head ooooo   won 5
+p12   otherC           ruby[a|2~rc 0~       ] tip ooooo  head ooooo
+p13   otherC           ruby[ac|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+p14   otherC           ruby[ac|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+p15   otherC           ruby[ab|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+p16   otherC           ruby["ab"|2~rc 0~    ] tip xxxxx  head ooooo   won 5
+p17   otherC           ruby["ab"|2~rc 0~    ] tip xxxxx  head ooooo   won 5
+p18   sameC            ruby[ab|2~rc 0~      ] tip xxxxx  head xxxxx
+p19   sameC            ruby[ab|2~rc 0~      ] tip xxxxx  head xxxxx
+p20   sameC            ruby[ab|2~rc 0~      ] tip xxxxx  head xxxxx
+p21   sameC(refused)   ruby[ab|2~rc 0~      ] tip nnn    head nnn
+p22   sameC            ruby[ab|2~rc 0~      ] tip xxxxx  head xxxxx
+p23   otherC           ruby[2|2~rc 0~       ] tip xxxxx  head ooooo   won 5
+p24   otherC           ruby[2|2~rc 0~       ] tip xxxxx  head ooooo   won 5
+q1    otherC           ruby[ab|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+q2    otherC           ruby[ab|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+q3    otherC           ruby[ab|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+q4    sameC            ruby[ab|2~rc 0~      ] tip xxxxx  head xxxxx
+q5    otherC           ruby[ab|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+q6    otherC           ruby[ab|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+q7    otherC           ruby[ab|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+q8    otherC           ruby[ab|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+q9    otherC           ruby[ab|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+q10   otherC           ruby[ab|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+q11   sameC            ruby[ab|2~rc 0~      ] tip xxxxx  head xxxxx
+q12   sameC            ruby[ab|2~rc 0~      ] tip xxxxx  head xxxxx
+q13   otherC           ruby[ab|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+q14   otherC           ruby[ab|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+q15   sameC            ruby[ab|2~rc 0~      ] tip xxxxx  head xxxxx
+q16   sameC            ruby[ab|2~rc 0~      ] tip xxxxx  head xxxxx
+q17   sameC            ruby[ab|2~rc 0~      ] tip xxxxx  head xxxxx
+q18   otherC           ruby[ab|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+q19   otherC           ruby[ab|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+q20   otherC           ruby[xab|2~rc 0~     ] tip xxxxx  head ooooo   won 5
+q21   sameC            ruby[ab|2~rc 0~      ] tip xxxxx  head xxxxx
+q22   sameC            ruby[AB|2~rc 0~      ] tip xxxxx  head xxxxx
+q30   otherC           ruby[aab|2~rc 0~     ] tip xxxxx  head ooooo   won 5
+q31   otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+q32   otherC           ruby[aab|2~rc 0~     ] tip xxxxx  head ooooo   won 5
+q33   otherC           ruby[2|2~rc 0~       ] tip xxxxx  head ooooo   won 5
+q34   otherC           ruby[aab|2~rc 0~     ] tip xxxxx  head ooooo   won 5
+`````
+
+**2. The twins** (each of the 37 cured programs with one line more at its top; the C compared with the tip's, not run): `class Foo; def a = 1; alias b a; end` and `$z = 5.send(:abs)` leave all 37 with this change's C (under `26d78e37aea1` each gave all 37 back to the tip); `x = "abs"; $z = 5.send(x)` and `pr = proc { |v| $v = v }; [1].each(&pr)` make all 37 the tip's C; `$y = :NAME` makes the 16 whose `R` is `$s.NAME` the tip's C. sha256 `b3fcb9cb48891958d7d5ad626147a9e0f17f5cce0f5517766638f6e55f0cc480`:
+
+`````text
+twin alias: 37 programs, tip's C 0, other C 37, refused 0
+twin send: 37 programs, tip's C 0, other C 37, refused 0
+twin dyn: 37 programs, tip's C 37, other C 0, refused 0
+twin pass: 37 programs, tip's C 37, other C 0, refused 0
+twin sym: 16 programs, tip's C 16, other C 0, refused 0
+`````
+
+**3. The libraries** (40 programs: `require "X"` ahead of the family's five lines and `puts $s.upcase.pair(add)`; five cells each). The head is right in the five cells, where the bare tip is wrong in all five, after 36: the 22 the ruling names (`json`, `forwardable`, `strscan`, `securerandom`, `fileutils`, `erb`, `base64`, `digest`, `csv`, `bigdecimal`, `pathname`, `tempfile`, `tmpdir`, `uri`, `zlib`, `open3`, `find`, `time`, `io/console`, `thread`, `fiber`, `enumerator`) and `set`, `stringio`, `optparse`, `logger`, `shellwords`, `cgi`, `net/http`, `openssl`, `pty`, `monitor`, `socket`, `ostruct`, `rational`, `complex`. `ffi`: CRuby here has no such library to compare with (its line shows exit 1), the bare tip prints `ABC|2` and the head `AB|2` in the five. The tip's C, wrong on both alike: `rbconfig` and `English` (the parser warns that it ignores them: kind 4) and `benchmark` (its own text, spliced in, calls `__send__` with a computed name at 10 sites and passes 6 blocks from locals of which 4 are own). The file names `io_console` and `net_http` stand for `io/console` and `net/http`. sha256 `ab0c57210c6cd6d164a08a30c082d1a47778fc0eaa3a8c8ddcbb3befb4744f63`:
+
+`````text
+English sameC            ruby[AB|2~rc 0~      ] tip xxxxx  head xxxxx
+base64 otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+benchmark sameC            ruby[AB|2~rc 0~      ] tip xxxxx  head xxxxx
+bigdecimal otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+cgi   otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+complex otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+csv   otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+digest otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+enumerator otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+erb   otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+ffi   otherC           ruby[rc 1~           ] tip xxxxx  head xxxxx   CHANGED ['gcc/0', 'gcc/2', 'clang/0', 'clang/2', 'share/0']
+fiber otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+fileutils otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+find  otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+forwardable otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+io_console otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+json  otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+logger otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+monitor otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+net_http otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+open3 otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+openssl otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+optparse otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+ostruct otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+pathname otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+pty   otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+rational otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+rbconfig sameC            ruby[AB|2~rc 0~      ] tip xxxxx  head xxxxx
+securerandom otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+set   otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+shellwords otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+socket otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+stringio otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+strscan otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+tempfile otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+thread otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+time  otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+tmpdir otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+uri   otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+zlib  otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+`````
+
+**4. The corpus count** (ruling 1: what the cut gives back and what it newly denies). A copy of the head's compiler that also computes the flag of `26d78e37aea1` (the words anywhere) printed both for each of the 6,368 programs under `test/`. The earlier flag is set in 534 programs and this head's in 352: 185 in both, 349 given back, 167 newly denied. The 167 by their first site: a block-pass of a local that is not its `def`'s own block parameter 53; `to_proc` on a receiver that is no Symbol literal 38; a block-pass of a call 31; `&nil` 9; `const_get` 8; `trap` 5; a block-pass of a parenthesized expression 4; `binding` 3; a block-pass of an instance variable 2 and of a constant 2; a `require` left standing 2; `inject` 2 and `reduce` 2 with a last operand that is no Symbol literal; `method` with a computed name 2; a block-pass of a Hash 1 and of a global 1; `to_enum` 1; `private` 1. In the 352 there are 960 sites of kinds 1, 3 and 4 and of kind 2 other than a local's, and in 111 of them the block-passes of a local outnumber the own ones. The count is of programs that hold a site, not of cures lost: the flag is asked only at a String receiver from a call beside an argument that can run code, and `make cident` differs in the same four programs under both heads.
+
+**5. The body's "Not in this change" programs, one each, on this tip** (20 programs, `notin.rb`): every one has the tip's C, so each sentence of that paragraph is the bare tip's answer and this head's. n14, the Integer receiver beside an argument with an effect, is right on both; n17, `(b << "1").pair(b)`, is wrong with gcc and right with clang on both; n19 aborts at stress 2 on both. sha256 `4ef6f0737071422c7207be86af0f888246cf837a56180d4a5e83ab5585e3c41a`:
+
+`````text
+n1    sameC            ruby[recv~arg~       ] tip xxxxx  head xxxxx
+n2    sameC            ruby[recv~arg~       ] tip xxxxx  head xxxxx
+n3    sameC            ruby[ab|2~rc 0~      ] tip xxxxx  head xxxxx
+n4    sameC            ruby[ab|2~rc 0~      ] tip xxxxx  head xxxxx
+n5    sameC            ruby[AB|2~rc 0~      ] tip xxxxx  head xxxxx
+n6    sameC            ruby[AB|2~rc 0~      ] tip xxxxx  head xxxxx
+n7    sameC            ruby[ab|2~rc 0~      ] tip xxxxx  head xxxxx
+n8    sameC            ruby[ab|2~rc 0~      ] tip xxxxx  head xxxxx
+n9    sameC            ruby[abc|2~rc 0~     ] tip xxxxx  head xxxxx
+n10   sameC            ruby[e|g1~rc 0~      ] tip xxxxx  head xxxxx
+n11   sameC            ruby[true|g1~rc 0~   ] tip xxxxx  head xxxxx
+n12   sameC            ruby[nil|g1~rc 0~    ] tip xxxxx  head xxxxx
+n13   sameC            ruby[4|g1~rc 0~      ] tip xxxxx  head xxxxx
+n14   sameC            ruby[int~arg~        ] tip ooooo  head ooooo
+n15   sameC            ruby[seven~r0|g1!|7~ ] tip xxxxx  head xxxxx
+n16   sameC            ruby[r0|x1~rc 0~     ] tip xxxxx  head xxxxx
+n17   sameC            ruby[b1|b1~rc 0~     ] tip xxoox  head xxoox
+n18   sameC            ruby[bc|c~rc 0~      ] tip xxxxx  head xxxxx
+n19   sameC            ruby[4~rc 0~         ] tip oxoxo  head oxoxo
+n20   sameC            ruby[seven~r0|g1!|7~ ] tip xxxxx  head xxxxx
+`````
+
+The generator, sha256 `7950cb283166314c13ceea09b517fb24ab5bf0ca0c5c9881d2cae0a650e302e9`:
+
+`````ruby
+# gen.rb: the body's "Not in this change" programs, one each
+SP = "class String\n  def pair(a) = \"\#{self}|\#{a.size}\"\nend\n$s = +\"ab\"\ndef add = ($s << \"c\"; [1, 2])\n"
+SV = "class String\n  def pair(a) = \"\#{self}|\#{a}\"\nend\n$g = \"g0\"\n"
+def w(n, s) = File.write("#{n}.rb", s)
+w("n1", SP + "def cur = (puts \"recv\"; $s)\ndef arg = (puts \"arg\"; [1, 2])\nputs cur.pair(arg)\n")
+w("n2", SP + "def bld(x) = (s = +\"s\"; s << x; puts \"recv\"; s)\ndef arg = (puts \"arg\"; [1, 2])\nputs bld(\"a\").pair(arg)\n")
+w("n3", SP + "puts $s.clone.pair(add)\n")
+w("n4", SP + "puts $s[0, 5].pair(add)\n")
+w("n5", SP + "puts $s.upcase.to_s.pair(add)\n")
+w("n6", SP + "x = \"abs\"\n$z = 5.send(x)\nputs $s.upcase.pair(add)\n")
+w("n7", SP + "def fresh = \"\#{\"\"}\#{$s}\"\nputs fresh.pair(add)\n")
+w("n8", SP + "puts \"\#{$s}\".pair(add)\n")
+w("n9", SP + "def fresh = \"a\#{ARGV.size}\"\ndef other = $s\nalias fresh other\nputs fresh.pair(add)\n")
+w("n10", "class StandardError\n  def pair(a) = \"\#{message}|\#{a}\"\nend\n$g = \"g0\"\ndef sete = ($g = \"g1\"; StandardError.new(\"e\"))\nputs sete.pair($g)\n")
+w("n11", "class TrueClass\n  def pair(a) = \"\#{self}|\#{a}\"\nend\n$g = \"g0\"\ndef sett = ($g = \"g1\"; ARGV.size == 0)\nputs sett.pair($g)\n")
+w("n12", "class NilClass\n  def pair(a) = \"nil|\#{a}\"\nend\n$g = \"g0\"\ndef setn = ($g = \"g1\"; nil)\nputs setn.pair($g)\n")
+w("n13", "class Integer\n  def pair(a) = \"\#{self}|\#{a}\"\nend\n$g = \"g0\"\ndef seti = ($g = \"g1\"; ARGV.size + 4)\nputs seti.pair($g)\n")
+w("n14", "class Integer\n  def pair(a) = \"\#{self}|\#{a.size}\"\nend\ndef int = (puts \"int\"; ARGV.size + 4)\ndef arg = (puts \"arg\"; [1, 2])\nputs int.pair(arg)\n")
+w("n15", "class Object\n  def pk(a, k: 1) = \"\#{self}|\#{a}|\#{k}\"\nend\n$g = \"g0\"\ndef setg = ($g = \"g1\"; \"r\" + ARGV.size.to_s)\ndef seven = (puts \"seven\"; 7)\nputs setg.pk(\"\#{$g}!\", k: seven)\n")
+w("n16", SV + "def psh(x) = (x << \"1\"; \"r\" + ARGV.size.to_s)\nx = +\"x\"\nputs psh(x).pair(\"\#{x}\")\n")
+w("n17", SV + "b = +\"b\"\nputs (b << \"1\").pair(b)\n")
+w("n18", SV + "s = \"abc\" + ARGV.size.to_s\nputs s[/b(c)/].pair($1)\n")
+w("n19", "class String\n  def me = self\n  def c = (h = {}; h[\"k\"] = 1; x = me; y = [1]; x.size + y.size)\nend\nputs (\"ab\" + ARGV.size.to_s).c\n")
+w("n20", "class Kernel_\nend\nmodule Kernel\n  def pk(a, k: 1) = \"\#{self}|\#{a}|\#{k}\"\nend\n$g = \"g0\"\ndef setg = ($g = \"g1\"; \"r\" + ARGV.size.to_s)\ndef seven = (puts \"seven\"; 7)\nputs setg.pk(\"\#{$g}!\", k: seven)\n")
+`````
+
+**6. The counts** (the compiler's own instructions, `spinel -c` under callgrind, the bare tip then the head).
+
+| form | lines | bare tip | head | |
+|---|---|---|---|---|
+| the body's, every call taken: `t += mk(i).pair(cnt(i))` | 1,000 | 1,726,537,047 | 1,753,380,139 | +1.55% |
+| | 2,000 | 3,444,384,355 | 3,498,057,137 | +1.56% |
+| the node-adding form (the coordinator's worst case: a guarded site beside a setter read for its value and a lone splat into an object's method) | 1,000 | 14,291,256,657 | 14,314,630,113 | +0.16% |
+| | 2,000 | 33,661,442,407 | 33,707,664,998 | +0.14% |
+| no call taken: `t += s.pair(cnt(i))` with a local `s` | 1,000 | 1,316,937,266 | 1,319,029,516 | +0.16% |
+| | 2,000 | 2,620,321,814 | 2,624,445,215 | +0.16% |
+
+The walk `an_note_written_names`, inclusive of what it calls: 2,838,148 at 1,000 lines of the body's form and 5,629,058 at 2,000 (0.16% of the compile at both); over optcarrot 5,916,481 of 8,315,887,857 (the bare tip runs 8,315,431,542 there; optcarrot's C is the tip's byte for byte, 608,454 bytes). It is the first statement of `analyze_program` and runs once a compile; the guard is a lookup in two sets and one flag, with no key that a node the emitter adds could change.
+
+Run time, instructions a call (callgrind, 200,000 calls, the 21 loops of the body's cost paragraph, measured again on this tip and head): every figure is `26d78e37aea1`'s. A String receiver beside `cnt(i)` 17.95 with gcc and 15.00 with clang; beside `$n` 19.95 and 13.98; an Array 11 and 9, then 9 and 15; a Hash 2 and 9, then 3 and 11; Numeric's method on an Integer 3 and 4, then 4 and 4; a Symbol 2 and 0; a Range 1 and 0; an Integer, a Float and an object 0. The body says "String 22 and 14" by text item T-1: the 22 is the reader's figure, and my largest is 19.95, so 22 stands as the bound and I do not claim to have reproduced it.
+
+**7. The test and the legs.** `test/reopen_receiver_runs_first.rb`: 7 of 7 cells on the head and 0 of 7 on the bare tip (gcc and clang at `SPINEL_GC_STRESS` 0, 1 and 2; `--share-strings` plain); its `.expected` equals CRuby 3.3.6's output. `ruby tools/gate.rb check` with the commit staged: exit 0. `make cident REF=68d40ff05fd4`: 6,627 identical, 4 differ, 0 refusal changes, 0 refused by both. `make share-strings-test`: pass. `make int-min-test`: pass. The C under `--share-strings` over the 6,368 programs of `test/`: the same four differ. optcarrot's C: the tip's, byte for byte. The tip moved twice while I worked: `8e4f8e5d603d` (my ls-remote at 01:29:35 UTC) and `18af056cacb6` (01:40:42; one pull request more: lib/sp_io.c and a test). `git merge-tree --write-tree` of each with this head: exit 0, and neither move touches a function of the piece. I built the merge with `8e4f8e5d603d` (rc 0): the test, the three corpus programs whose C this piece changes and upstream's new `test/typed_conv_objects.rb` pass the seven cells on it. NOT run: `make gate`.

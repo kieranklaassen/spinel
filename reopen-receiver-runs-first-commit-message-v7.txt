@@ -1,0 +1,68 @@
+A method added to a builtin runs its receiver before its arguments
+
+    class String
+      def pair(a) = "#{size} #{a.size}"
+    end
+    puts recv.pair(arg)
+
+ran arg before recv, with gcc and with clang, for a method the program
+adds to Object, Kernel, String, Symbol, Float, Range, Array, Hash or
+Numeric, and to Integer where the method has a rest or a keyword; a
+class's own method runs recv first, as CRuby does. Those arms wrote the
+receiver in place, one C argument beside the others, while
+emit_args_filled runs an argument that allocates ahead of the
+statement. An argument that only reads was read too early the same
+way: `setg.pair($g)` passed the $g that setg had not yet assigned. And
+a rest or a default made in place stood beside that receiver with no
+root, so for `Door.new.note(m)` against `def note(m, *r)` gcc made the
+Array first and Door.new collected it (r.size answered 3 in a plain
+run), and clang made the Door first and the Array's allocation could
+collect that.
+
+emit_reopen_recv_in_order opens such a call as a statement expression,
+in place: the receiver bound to a rooted temp, then what the arguments
+hoist, then the call. It does so when the receiver has an effect and an
+argument (or a default the call leaves out) has one too, when the
+receiver can change what such an argument reads (read_rebound_by), or
+when the receiver allocates and the method has a rest or leaves out a
+default that allocates. The box of an Array, a Hash or an object is
+held as its pointer and boxed where the call takes it: a pointer's
+root is a push and a pop. A String, or an object passed by value, that
+Object's method takes is held boxed, in a slot of the frame.
+
+A String held ahead of the arguments is the String as it was, and the
+call read it after them: `cur.pair(add)`, where cur answers $s and add
+appends to $s, passed the longer one, as CRuby's one object shows it.
+So beside an argument, or such a default, that can run the program's
+code (anything but reads, literals and what is made of them; a name
+the program gave the builtin, `[]` on an Array, an operator on an
+operand that is no Integer or Float, `5 == o`, and the hash of a key
+that is no String, Symbol or Integer are such code: arg_runs_nothing)
+the receiver is held only where the held value is what the call would
+read after it (recv_held_as_read): a scalar, a Range, the pointer of
+an Array, a Hash or an object, an interpolation CRuby makes a new
+String for (one with a plain part that is not empty, or of one
+embedded part: `"#{s}#{""}"` answers s itself), or a String from a
+call proved to make its own (recv_new_string). The proof is by what
+the program does not hold: the call is one of 30 String builtins that
+always answer a new String and that str_fresh_value takes for one too
+(not clamp, which answers its receiver), an Integer's or a Float's
+to_s or inspect, or it reaches the one def of that name, whose body
+ends in such a String and has no return; and the program as written
+holds no other def of that name, no Symbol of that name, and no site
+where a method is named, made or loaded by something the text does
+not spell (an_prog_never_gives): a call that takes a method's name
+(send, method, to_proc, inject, define_method, alias_method, an attr
+or a visibility word) with a name that is no Symbol literal, or one
+that calls, reads or renames another such word by its Symbol; a
+block-pass of anything but a Symbol literal, a literal lambda or
+proc, or the block parameter of its own def; text evaluated (eval,
+instance_exec, binding, ERB); a require the parser did not read (one
+left in the node table, or one it warned it ignores:
+g_require_unread). analyze_program reads this ahead of every rewrite,
+since a desugar erases such a call. Any other call is emitted as it
+was.
+
+Test: test/reopen_receiver_runs_first.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

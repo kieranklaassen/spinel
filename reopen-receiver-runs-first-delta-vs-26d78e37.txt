@@ -1,0 +1,721 @@
+===== 1. range-diff 84f5b5020ef8..26d78e37aea1 against 68d40ff05fd4..cc0bd8dfa9b3 (trailing blanks stripped from its lines) =====
+1:  26d78e37a ! 1:  cc0bd8dfa A method added to a builtin runs its receiver before its arguments
+    @@ Commit message
+         that is no String, Symbol or Integer are such code: arg_runs_nothing)
+         the receiver is held only where the held value is what the call would
+         read after it (recv_held_as_read): a scalar, a Range, the pointer of
+    -    an Array, a Hash or an object, an interpolation, or a String from a
+    +    an Array, a Hash or an object, an interpolation CRuby makes a new
+    +    String for (one with a plain part that is not empty, or of one
+    +    embedded part: `"#{s}#{""}"` answers s itself), or a String from a
+         call proved to make its own (recv_new_string). The proof is by what
+         the program does not hold: the call is one of 30 String builtins that
+         always answer a new String and that str_fresh_value takes for one too
+         (not clamp, which answers its receiver), an Integer's or a Float's
+         to_s or inspect, or it reaches the one def of that name, whose body
+         ends in such a String and has no return; and the program as written
+    -    holds no other def of that name, no Symbol of that name, no alias, no
+    -    undef, and nowhere the name of a call that names a method by a value,
+    -    evaluates text or makes a Symbol (an_prog_never_gives). analyze_program
+    -    notes those names ahead of every rewrite, since a desugar erases such
+    -    a call. Any other call is emitted as it was.
+    +    holds no other def of that name, no Symbol of that name, and no site
+    +    where a method is named, made or loaded by something the text does
+    +    not spell (an_prog_never_gives): a call that takes a method's name
+    +    (send, method, to_proc, inject, define_method, alias_method, an attr
+    +    or a visibility word) with a name that is no Symbol literal, or one
+    +    that calls, reads or renames another such word by its Symbol; a
+    +    block-pass of anything but a Symbol literal, a literal lambda or
+    +    proc, or the block parameter of its own def; text evaluated (eval,
+    +    instance_exec, binding, ERB); a require the parser did not read (one
+    +    left in the node table, or one it warned it ignores:
+    +    g_require_unread). analyze_program reads this ahead of every rewrite,
+    +    since a desugar erases such a call. Any other call is emitted as it
+    +    was.
+
+         Test: test/reopen_receiver_runs_first.rb.
+
+         Co-Authored-By: Claude Code <noreply@anthropic.com>
+
+    - ## Makefile ##
+    -@@ Makefile: GC_STRESS_TESTS := test/gc_root_frame_slots.rb \
+    -                    test/string_range_walk_answer.rb \
+    -                    test/struct_values_fresh_receiver_root.rb \
+    -                    test/hash_splat_to_a.rb \
+    -+                   test/reopen_receiver_runs_first.rb \
+    -                    test/proc_cell_capture_marked.rb \
+    -                    test/poly_array_intersect.rb \
+    -                    test/exception_class_raised_again.rb \
+    -
+      ## src/analyze.c ##
+     @@ src/analyze.c: void anh_add(ANameHash *st, const char *nm) {
+      }
+      void anh_free(ANameHash *st) { free(st->key); free(st->next); free(st->head); }
+
+     +/* The program as written, read ahead of every desugar (analyze_program's
+    -+   first step): each name it gives a method by a def or may give one by a
+    -+   Symbol (an attr, a Struct member, a name handed to another call), and
+    -+   whether it holds an alias, an undef, an attr whose name is no Symbol, a
+    -+   Symbol made of parts, or the name of a call that names a method by a
+    -+   value, evaluates text or makes a Symbol the program does not write: as
+    -+   a call, a def, a Symbol or a String, for `:alias_method.to_proc` and
+    -+   `k.method(:alias_method)` call it too. The desugars rewrite such a call
+    -+   away, so the table cannot be asked later. A key is a copy: a node's
+    -+   strings do not outlive its rewrite. */
+    -+static ANameHash g_written, g_written_twice, g_by_value_names;
+    ++   first step). It notes each name the program gives a method by a def or may
+    ++   give one by a Symbol (an attr, a Struct member, a name handed to a call),
+    ++   and whether it holds a site where a method is named, made or loaded by
+    ++   something the text does not spell:
+    ++   (1) a call that takes a method's name (an_by_name below) where the name
+    ++       is no Symbol literal, or where it calls, reads or renames another
+    ++       such word by its Symbol; an alias or an undef likewise;
+    ++   (2) a block-pass of anything but a Symbol literal that is no such word
+    ++       (the parser spells most of those as a block and marks it), a literal
+    ++       lambda or proc, or the block parameter of its own def, which that def
+    ++       only reads;
+    ++   (3) text evaluated: an eval with an argument or with no literal block, an
+    ++       exec, a trap or a trace_var with no literal block, `binding`, ERB;
+    ++   (4) a file not read: a require left standing in the table (the parser
+    ++       splices away each one it resolves) or one it warned it ignores
+    ++       (g_require_unread).
+    ++   The desugars rewrite such calls away, so the table cannot be asked later.
+    ++   A key is a copy: a node's strings do not outlive its rewrite. */
+    ++enum { AN_CALLS = 1, AN_LAST, AN_RECV, AN_GIVES, AN_GIVES_ALL, AN_RENAMES, AN_VIS, AN_EVAL, AN_EXEC, AN_SITE, AN_WORD };
+    ++static const struct { const char *nm; int how; } an_by_name[] = {
+    ++  /* its first argument names what it calls or reads */
+    ++  { "send", AN_CALLS }, { "__send__", AN_CALLS }, { "public_send", AN_CALLS }, { "method", AN_CALLS },
+    ++  { "public_method", AN_CALLS }, { "singleton_method", AN_CALLS }, { "instance_method", AN_CALLS },
+    ++  { "public_instance_method", AN_CALLS }, { "enum_for", AN_CALLS }, { "to_enum", AN_CALLS },
+    ++  { "const_get", AN_CALLS },
+    ++  /* its last argument does, or its receiver */
+    ++  { "inject", AN_LAST }, { "reduce", AN_LAST }, { "to_proc", AN_RECV },
+    ++  /* its arguments name what it gives, takes away or hides */
+    ++  { "define_method", AN_GIVES }, { "define_singleton_method", AN_GIVES },
+    ++  { "undef_method", AN_GIVES_ALL }, { "remove_method", AN_GIVES_ALL }, { "attr", AN_GIVES_ALL },
+    ++  { "attr_reader", AN_GIVES_ALL }, { "attr_writer", AN_GIVES_ALL }, { "attr_accessor", AN_GIVES_ALL },
+    ++  { "private", AN_VIS }, { "protected", AN_VIS }, { "public", AN_VIS }, { "module_function", AN_VIS },
+    ++  { "private_class_method", AN_VIS }, { "public_class_method", AN_VIS },
+    ++  /* it gives one method another's name: a word under a new name is a word no more */
+    ++  { "alias_method", AN_RENAMES }, { "delegate", AN_RENAMES }, { "instance_delegate", AN_RENAMES },
+    ++  { "single_delegate", AN_RENAMES }, { "def_delegator", AN_RENAMES }, { "def_delegators", AN_RENAMES },
+    ++  { "def_instance_delegator", AN_RENAMES }, { "def_instance_delegators", AN_RENAMES },
+    ++  { "def_single_delegator", AN_RENAMES }, { "def_single_delegators", AN_RENAMES },
+    ++  /* text evaluated, and a file */
+    ++  { "eval", AN_EVAL }, { "instance_eval", AN_EVAL }, { "class_eval", AN_EVAL }, { "module_eval", AN_EVAL },
+    ++  { "instance_exec", AN_EXEC }, { "class_exec", AN_EXEC }, { "module_exec", AN_EXEC },
+    ++  { "trap", AN_EXEC }, { "trace_var", AN_EXEC },
+    ++  { "binding", AN_SITE }, { "require", AN_SITE }, { "require_relative", AN_SITE },
+    ++  { "load", AN_WORD }, { "autoload", AN_WORD }, { "ERB", AN_WORD }, { NULL, 0 } };
+    ++static ANameHash g_written, g_written_twice, g_by_name_words;
+     +static int g_written_by_value;
+     +static void an_written_add(ANameHash *st, const char *nm) {
+     +  if (nm && !anh_has(st, nm)) anh_add(st, strdup(nm));
+     +}
+    -+static int an_names_by_value(const char *nm) { return nm && anh_has(&g_by_value_names, nm); }
+    ++static int an_by_name_how(const char *nm) {
+    ++  if (!nm || !anh_has(&g_by_name_words, nm)) return 0;
+    ++  for (int k = 0; an_by_name[k].nm; k++) if (sp_streq(nm, an_by_name[k].nm)) return an_by_name[k].how;
+    ++  return 0;
+    ++}
+    ++/* Is `n` a name the text spells: a Symbol literal that is none of the words? */
+    ++static int an_name_spelled(const NodeTable *nt, int n) {
+    ++  return nt_kind(nt, n) == NK_SymbolNode && !an_by_name_how(nt_str(nt, n, "value"));
+    ++}
+    ++/* The block-passes of the block parameter `bp` under `n`, a def's body; -1
+    ++   where the body does more with that name than read it (a write, a
+    ++   parameter of a block inside). A def inside is another scope. */
+    ++static int an_own_block_passes(const NodeTable *nt, int n, const char *bp) {
+    ++  if (n < 0) return 0;
+    ++  NodeKind k = nt_kind(nt, n);
+    ++  if (k == NK_DefNode) return 0;
+    ++  if (k == NK_BlockArgumentNode) {
+    ++    int e = nt_ref(nt, n, "expression");
+    ++    const char *en = nt_kind(nt, e) == NK_LocalVariableReadNode ? nt_str(nt, e, "name") : NULL;
+    ++    if (en && sp_streq(en, bp)) return 1;
+    ++  }
+    ++  else if (k != NK_LocalVariableReadNode && k != NK_CallNode) {
+    ++    const char *nm = nt_str(nt, n, "name");
+    ++    if (nm && sp_streq(nm, bp)) return -1;
+    ++  }
+    ++  int cnt = 0, nr = nt_num_refs(nt, n), na = nt_num_arrs(nt, n);
+    ++  for (int i = 0; i < nr; i++) {
+    ++    int r = an_own_block_passes(nt, nt_ref_at(nt, n, i), bp);
+    ++    if (r < 0) return -1;
+    ++    cnt += r;
+    ++  }
+    ++  for (int i = 0; i < na; i++) {
+    ++    int m = 0;
+    ++    const int *ids = nt_arr_at(nt, n, i, &m);
+    ++    for (int j = 0; j < m; j++) {
+    ++      int r = an_own_block_passes(nt, ids[j], bp);
+    ++      if (r < 0) return -1;
+    ++      cnt += r;
+    ++    }
+    ++  }
+    ++  return cnt;
+    ++}
+     +static void an_note_written_names(const NodeTable *nt) {
+    -+  static const char *const by_value[] = {
+    -+    "alias_method", "define_method", "define_singleton_method", "send", "__send__", "public_send",
+    -+    "class_eval", "module_eval", "class_exec", "module_exec", "instance_eval", "instance_exec", "eval",
+    -+    "undef_method", "remove_method", "delegate", "instance_delegate", "single_delegate", "def_delegator",
+    -+    "def_delegators", "def_instance_delegator", "def_instance_delegators", "def_single_delegator",
+    -+    "def_single_delegators", "to_sym", "intern", NULL };
+    -+  for (int k = 0; by_value[k]; k++) if (!anh_has(&g_by_value_names, by_value[k])) anh_add(&g_by_value_names, by_value[k]);
+    ++  int by_value = g_require_unread, passes = 0, own_passes = 0, erb = 0;
+    ++  for (int k = 0; an_by_name[k].nm; k++)
+    ++    if (!anh_has(&g_by_name_words, an_by_name[k].nm)) anh_add(&g_by_name_words, an_by_name[k].nm);
+     +  for (int id = 0; id < nt->count; id++) {
+     +    switch (nt_kind(nt, id)) {
+    -+      case NK_AliasMethodNode: case NK_UndefNode: case NK_InterpolatedSymbolNode: g_written_by_value = 1; break;
+    -+      case NK_StringNode:
+    -+        if (an_names_by_value(nt_str(nt, id, "content"))) g_written_by_value = 1;
+    ++      case NK_AliasMethodNode:
+    ++        if (nt_kind(nt, nt_ref(nt, id, "new_name")) != NK_SymbolNode || !an_name_spelled(nt, nt_ref(nt, id, "old_name")))
+    ++          by_value = 1;
+    ++        break;
+    ++      case NK_UndefNode: {
+    ++        int n = 0;
+    ++        const int *v = nt_arr(nt, id, "names", &n);
+    ++        for (int i = 0; i < n; i++) if (nt_kind(nt, v[i]) != NK_SymbolNode) by_value = 1;
+     +        break;
+    ++      }
+     +      case NK_SymbolNode: {
+     +        const char *nm = nt_str(nt, id, "value");
+    -+        if (an_names_by_value(nm)) g_written_by_value = 1;
+     +        an_written_add(&g_written, nm);
+     +        an_written_add(&g_written_twice, nm);
+     +        break;
+     +      }
+     +      case NK_DefNode: {
+     +        const char *nm = nt_str(nt, id, "name");
+    -+        if (an_names_by_value(nm)) g_written_by_value = 1;
+     +        if (nm && anh_has(&g_written, nm)) an_written_add(&g_written_twice, nm);
+     +        an_written_add(&g_written, nm);
+    ++        const char *bp = nt_str(nt, nt_ref(nt, nt_ref(nt, id, "parameters"), "block"), "name");
+    ++        int own = bp ? an_own_block_passes(nt, nt_ref(nt, id, "body"), bp) : 0;
+    ++        if (own > 0) own_passes += own;
+    ++        break;
+    ++      }
+    ++      case NK_BlockArgumentNode: {
+    ++        int e = nt_ref(nt, id, "expression");
+    ++        NodeKind ek = nt_kind(nt, e);
+    ++        if (ek == NK_LocalVariableReadNode) passes++;
+    ++        else if (ek == NK_CallNode) {
+    ++          const char *en = nt_str(nt, e, "name");
+    ++          if (!en || (!sp_streq(en, "proc") && !sp_streq(en, "lambda")) || nt_ref(nt, e, "receiver") >= 0 ||
+    ++              nt_kind(nt, nt_ref(nt, e, "block")) != NK_BlockNode) by_value = 1;
+    ++        }
+    ++        else if (e >= 0 && ek != NK_LambdaNode && !an_name_spelled(nt, e)) by_value = 1;
+    ++        break;
+    ++      }
+    ++      case NK_BlockNode: {
+    ++        /* the parser spells `m(&:sym)` as `m { |_spx| _spx.sym }` and marks the block */
+    ++        if (!nt_int(nt, id, "sym_proc_block", 0)) break;
+    ++        int n = 0;
+    ++        const int *v = nt_arr(nt, nt_ref(nt, id, "body"), "body", &n);
+    ++        if (n != 1 || nt_kind(nt, v[0]) != NK_CallNode || an_by_name_how(nt_str(nt, v[0], "name"))) by_value = 1;
+    ++        break;
+    ++      }
+    ++      case NK_ConstantReadNode: case NK_ConstantPathNode:
+    ++        if (sp_streq(nt_str(nt, id, "name") ? nt_str(nt, id, "name") : "", "ERB")) erb++;
+    ++        break;
+    ++      case NK_ClassNode: case NK_ModuleNode: {
+    ++        const char *cn = nt_str(nt, nt_ref(nt, id, "constant_path"), "name");
+    ++        if (cn && sp_streq(cn, "ERB")) erb--;
+     +        break;
+     +      }
+     +      case NK_CallNode: {
+    -+        const char *nm = nt_str(nt, id, "name");
+    -+        if (!nm) break;
+    -+        if (an_names_by_value(nm)) g_written_by_value = 1;
+    -+        if (sp_streq(nm, "attr") || sp_streq(nm, "attr_reader") || sp_streq(nm, "attr_writer") ||
+    -+            sp_streq(nm, "attr_accessor")) {
+    -+          int an = 0;
+    -+          const int *av = nt_arr(nt, nt_ref(nt, id, "arguments"), "arguments", &an);
+    -+          for (int i = 0; i < an; i++) if (nt_kind(nt, av[i]) != NK_SymbolNode) g_written_by_value = 1;
+    ++        int how = an_by_name_how(nt_str(nt, id, "name"));
+    ++        if (!how || how == AN_WORD) break;
+    ++        int an = 0, blk = nt_ref(nt, id, "block");
+    ++        const int *av = nt_arr(nt, nt_ref(nt, id, "arguments"), "arguments", &an);
+    ++        int lit_blk = nt_kind(nt, blk) == NK_BlockNode;
+    ++        if (how == AN_SITE) by_value = 1;
+    ++        else if (how == AN_EVAL) { if (an > 0 || !lit_blk) by_value = 1; }
+    ++        else if (how == AN_EXEC) { if (!lit_blk) by_value = 1; }
+    ++        else if (how == AN_RECV) { if (!an_name_spelled(nt, nt_ref(nt, id, "receiver"))) by_value = 1; }
+    ++        else if (how == AN_CALLS) { if (an > 0 && !an_name_spelled(nt, av[0])) by_value = 1; }
+    ++        else if (how == AN_GIVES) { if (an > 0 && nt_kind(nt, av[0]) != NK_SymbolNode) by_value = 1; }
+    ++        else if (how == AN_LAST) {
+    ++          /* one operand beside a block is the first value, not a name */
+    ++          if (an > 0 && !(an == 1 && blk >= 0) && !an_name_spelled(nt, av[an - 1])) by_value = 1;
+    ++        }
+    ++        else {
+    ++          for (int i = 0; i < an; i++) {
+    ++            NodeKind ak = nt_kind(nt, av[i]);
+    ++            /* `private def m` and `private attr_reader :m` name what they wrap */
+    ++            if (how == AN_VIS && (ak == NK_DefNode || (ak == NK_CallNode && an_by_name_how(nt_str(nt, av[i], "name")) == AN_GIVES_ALL)))
+    ++              continue;
+    ++            if (ak != NK_SymbolNode || (how == AN_RENAMES && i > 0 && !an_name_spelled(nt, av[i]))) by_value = 1;
+    ++          }
+     +        }
+     +        break;
+     +      }
+     +      default: break;
+     +    }
+     +  }
+    ++  if (by_value || passes > own_passes || erb > 0) g_written_by_value = 1;
+     +}
+     +/* Does the program, as written, give no class or module a method named
+     +   `nm`, beyond `defs` (0 or 1) defs of that name? Proved by what it does not
+     +   hold and by nothing cleverer: no other def of that name, no Symbol of that
+    -+   name, and nowhere a route that names a method by a value. */
+    ++   name, and nowhere a site that names, makes or loads a method by something
+    ++   the text does not spell. */
+     +int an_prog_never_gives(const char *nm, int defs) {
+     +  return !g_written_by_value && !anh_has(defs ? &g_written_twice : &g_written, nm);
+     +}
+    @@ src/codegen_call.c: static void emit_reopen_recv(Compiler *c, int mi, int recv,
+     +  }
+     +  return 0;
+     +}
+    -+/* Is the String `n` answers one no other name holds? An interpolation is.
+    -+   A call's is where the program gives no class a method of that name
+    -+   (an_prog_never_gives) and the call is a String builtin that always makes
+    -+   its own String (a name of the list below that str_fresh_value agrees
+    -+   with: `clamp` answers its receiver, and so may a name neither knows) or
+    -+   an Integer's or a Float's to_s or inspect; or where it reaches the one
+    -+   def of that name, whose body ends in such a String and has no `return`. */
+    ++/* Does CRuby make a new String for the interpolation `n`? Proved where a
+    ++   plain String literal that is not empty stands among its parts, or where
+    ++   it has one part and that part is embedded: `"#{s}#{""}"` answers s
+    ++   itself (CRuby 3.1 to 3.3). */
+    ++static int interp_makes_new(const NodeTable *nt, int n) {
+    ++  int pn = 0;
+    ++  const int *pv = nt_arr(nt, n, "parts", &pn);
+    ++  if (pn == 1) return nt_kind(nt, pv[0]) == NK_EmbeddedStatementsNode;
+    ++  for (int i = 0; i < pn; i++)
+    ++    if (nt_kind(nt, pv[i]) == NK_StringNode && nt_str_len(nt, pv[i], "content") > 0) return 1;
+    ++  return 0;
+    ++}
+    ++/* Is the String `n` answers one no other name holds? An interpolation is
+    ++   where CRuby makes a new one for it (interp_makes_new). A call's is where
+    ++   the program gives no class a method of that name (an_prog_never_gives)
+    ++   and the call is a String builtin that always makes its own String (a
+    ++   name of the list below that str_fresh_value agrees with: `clamp` answers
+    ++   its receiver, and so may a name neither knows) or an Integer's or a
+    ++   Float's to_s or inspect; or where it reaches the one def of that name,
+    ++   whose body ends in such a String and has no `return` (a setter's call
+    ++   answers its argument, not that body). */
+     +static int recv_new_string(Compiler *c, int n, int depth) {
+     +  static const char *const makes[] = {
+     +    "+", "*", "%", "upcase", "downcase", "capitalize", "swapcase", "reverse", "strip", "lstrip", "rstrip",
+    @@ src/codegen_call.c: static void emit_reopen_recv(Compiler *c, int mi, int recv,
+     +  const NodeTable *nt = c->nt;
+     +  n = unwrap_parens(c, n);
+     +  if (n < 0 || comp_ntype(c, n) != TY_STRING) return 0;
+    -+  if (nt_kind(nt, n) == NK_InterpolatedStringNode) return 1;
+    ++  if (nt_kind(nt, n) == NK_InterpolatedStringNode) return interp_makes_new(nt, n);
+     +  if (nt_kind(nt, n) != NK_CallNode || nt_ref(nt, n, "block") >= 0) return 0;
+     +  const char *nm = nt_str(nt, n, "name");
+     +  int r = nt_ref(nt, n, "receiver");
+     +  TyKind rt = r >= 0 ? comp_ntype(c, r) : TY_UNKNOWN;
+     +  const CallPlan *pl = cplan_user(c, n);
+    -+  if (!nm) return 0;
+    ++  if (!nm || !*nm) return 0;
+     +  if (pl->mi < 0) {
+     +    int made = 0;
+     +    if (rt == TY_INT || rt == TY_FLOAT)
+    @@ src/codegen_call.c: static void emit_reopen_recv(Compiler *c, int mi, int recv,
+     +      for (int k = 0; !made && makes[k]; k++) made = sp_streq(nm, makes[k]) && str_fresh_value(c, n);
+     +    return made && an_prog_never_gives(nm, 0);
+     +  }
+    -+  if (depth >= 3 || pl->dispatch != CP_DIRECT || body_has_return(nt, c->scopes[pl->mi].body)) return 0;
+    ++  if (depth >= 3 || pl->dispatch != CP_DIRECT || nm[strlen(nm) - 1] == '=' ||
+    ++      body_has_return(nt, c->scopes[pl->mi].body)) return 0;
+     +  return recv_new_string(c, scope_body_last(c, pl->mi), depth + 1) && an_prog_never_gives(nm, 1);
+     +}
+     +/* Does evaluating `n` run none of the program's code and store nothing? A
+    @@ src/codegen_call_class.c: int emit_call_reopen_arms(Compiler *c, int id, Buf *b,
+                if (void3) buf_puts(b, "(");
+     +          size_t at = b->len;
+                buf_printf(b, "sp_Object_%s(", mc(c->scopes[oc_mi3].name));
+    --          emit_boxed(c, recv, b);
+    --          emit_args_filled(c, oc_mi3, nt_ref(nt, id, "arguments"), ", ", b);
+    -+          int open = emit_reopen_recv_in_order(c, id, oc_mi3, recv, 1, NULL, at, b);
+    +-          emit_reopen_recv_args(c, id, oc_mi3, recv, 1, NULL, b);
+    ++          int open = emit_reopen_recv_args(c, id, oc_mi3, recv, 1, NULL, at, b);
+                emit_trailing_blk_arg(c, &c->scopes[oc_mi3], id, -1, b);
+     -          buf_puts(b, ")");
+     +          buf_puts(b, open ? "); })" : ")");
+    @@ src/codegen_call_string.c: static int str_self_chain_root(Compiler *c, int n) {
+        n = an_unparen(nt, n);
+        if (nt_kind(nt, n) == NK_InterpolatedStringNode) return 1;
+
+    + ## src/compiler.h ##
+    +@@
+    +    require-gated stdlib (stringio, io/console, ...) so they match CRuby's
+    +    uninitialized-constant / NoMethodError when the require is absent. */
+    + extern int g_require_gate;
+    ++/* a `require` named a file that was not found and is ignored with a warning
+    ++   (defined in spinel_parse.c): what it would define is not in the node table */
+    ++extern int g_require_unread;
+    + /* SPINEL_SHARE_STRINGS is on: set, not empty and not "0" (spinel_parse.c) */
+    + int sp_share_strings_env(void);
+    + void sp_feature_mark(const char *name);
+    +
+    + ## src/spinel_parse.c ##
+    +@@ src/spinel_parse.c: static int source_references_io_buffer(const char *src) {
+    +    sp_feature_enabled(). Definitions here (spinel_parse.c includes no project
+    +    headers); declared extern in compiler.h. */
+    + int g_require_gate = 0;
+    ++/* A plain `require` named a file that was not found and is ignored with a
+    ++   warning (resolve_plain_requires' last arm): what that file would define is
+    ++   not in the node table. Declared extern in compiler.h. */
+    ++int g_require_unread = 0;
+    + /* --share-strings, as main.c exports it: on only when SPINEL_SHARE_STRINGS
+    +    is set to something, empty and "0" being off. The compiler's flag and the
+    +    parser's read of a package's share declarations ask this one test. */
+    +@@ src/spinel_parse.c: else {
+    +           fprintf(stderr,
+    +                   "warning: '%s' is not available in Spinel; the require is ignored and code using it will fail\n",
+    +                   lib_name);
+    ++          g_require_unread = 1;
+    +           content = strdup("# require not resolved");
+    +         }
+    +       }
+    +
+      ## test/reopen_receiver_runs_first.rb (new) ##
+     @@
+    ++# spinel: gc-stress
+     +# The receiver of a call into a method the program adds to a builtin runs
+     +# before the call's arguments, as it does for a class's own method, and is
+     +# held while a rest or a default is made beside it.
+    @@ test/reopen_receiver_runs_first.rb (new)
+     +end
+     +puts $c.clamp("a", "zz").pair(addc)
+     +puts "x".kept.pair(addc)
+    ++
+    ++# an interpolation is held ahead of such an argument only where CRuby makes
+    ++# a new String for it: a literal part with no text (a backslash at the end
+    ++# of its line) makes none, and the String another name holds is answered
+    ++$d = +"ab"
+    ++def addd
+    ++  $d << "c"
+    ++  [1, 2]
+    ++end
+    ++def joined = "#{$d}\
+    ++"
+    ++def tagged = "#{$d}!"
+    ++puts joined.pair(addd)
+    ++puts tagged.pair(addd)
+
+      ## test/reopen_receiver_runs_first.rb.expected (new) ##
+     @@
+    @@ test/reopen_receiver_runs_first.rb.expected (new)
+     +3 1
+     +3 2
+     +4 2
+    ++3 2
+    ++4 2
+===== 2. the doors: cells (66 programs) =====
+b2a   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+b2b   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+b2c   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+b2d   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+w1a   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+w1b   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+w1c   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+w1d   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+w1e   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+w1f   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+w1g   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+w1h   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+w1i   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+w1j   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+w2a   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+w2b   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+w2c   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+w2d   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+w3a   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+w3b   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+w3c   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+w3d   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+w3e   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+w3f   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+w3g   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+w3h   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+w3i   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+w3j   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+w3k   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+w3l   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+w4a   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+w4b   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+w4c   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+w4d   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+w4e   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+w4f   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+w4g   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+w4h   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+w4i   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+w4j   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+w4k   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+w4l   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+w4m   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+w4n   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+w5a   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+w5b   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+w5c   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+w6a   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+w7a   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+w7b   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+x1    sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+x2    sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+x3    sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+x4    sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+x5    sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+x6    sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+x7    sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+x8    sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+x9    sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+x10   sameC            ruby[abc|2~rc 0~     ] tip xxxxx  head xxxxx
+x11   sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+x12   sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+x13   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+x14   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+x15   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+x16   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+===== 3. the doors: generator (doors.rb) =====
+# doors.rb: reader 8's doors as rebuilt: a program whose CRuby gives String a `dup` that answers self by a route the scan must see.
+HEAD = "class String\n  def pair(a) = \"\#{self}|\#{a.size}\"\nend\n$s = +\"ab\"\ndef add = ($s << \"c\"; [1, 2])\n"
+CALL = "puts $s.dup.pair(add)\n"
+TAIL = "begin\n  puts $s.dup.pair(add)\nrescue NoMethodError\n  puts \"abc|2\"\nend\n"
+T = '"def dup = self"'
+N = '"class_e" + "val"'
+def w(n, form, tail = CALL) = File.write("#{n}.rb", "#{HEAD}#{form}\n#{tail}")
+R = "rescue NoMethodError\nend"
+# W1: inject, reduce with a name operand that is no literal
+w("w1a", "begin\n  [String, #{T}].inject(#{N})\n#{R}")
+w("w1b", "begin\n  [String, #{T}].reduce(#{N})\n#{R}")
+w("w1c", "begin\n  [#{T}].inject(String, #{N})\n#{R}")
+w("w1d", "n = #{N}\nbegin\n  [String, #{T}].inject(n)\n#{R}")
+w("w1e", "[1].each do\n  begin\n    [String, #{T}].inject(#{N})\n  rescue NoMethodError\n  end\nend")
+w("w1f", "[String, #{T}].inject(#{N}) rescue nil")
+w("w1g", "begin\n  [$s, #{T}].inject(\"instance_e\" + \"val\")\n#{R}")
+w("w1h", "begin\n  [#{T}].reduce(String, #{N})\n#{R}")
+w("w1i", "n = #{N}\nbegin\n  [#{T}].reduce(String, n)\n#{R}")
+w("w1j", "ns = [#{N}]\nbegin\n  [String, #{T}].inject(ns.first)\n#{R}")
+# W2: a block-pass of a Symbol the program did not write
+[":CLASS_EVAL.downcase", ":CLASS_EVAL.swapcase", ":class_evak.next", "%i[a class_evak].last.succ"].each_with_index do |sym, i|
+  w("w2#{"abcd"[i]}", "w = #{sym}\nbegin\n  [String].each_with_object(#{T}, &w)\n#{R}")
+end
+# W3: method and kin with a name that is no literal; and a literal Symbol of a loader
+RN = "rescue NoMethodError, NameError\nend"
+w("w3a", "begin\n  String.public_method(#{N}).call(#{T})\n#{RN}")
+w("w3b", "begin\n  Module.instance_method(#{N}).bind(String).call(#{T})\n#{RN}")
+w("w3c", "begin\n  Module.instance_method(#{N}).bind_call(String, #{T})\n#{RN}")
+w("w3d", "begin\n  String.method(#{N}).to_proc.call(#{T})\n#{RN}")
+w("w3e", "begin\n  String.method(#{N}).unbind.bind(String).call(#{T})\n#{RN}")
+w("w3f", "begin\n  String.method(#{N}) === #{T}\n#{RN}")
+w("w3g", "begin\n  String.method(#{N})[#{T}]\n#{RN}")
+w("w3h", "m = (String.method(#{N}) rescue nil)\nbegin\n  m&.call(#{T})\n#{RN}")
+w("w3i", "[[String, #{N}, #{T}]].each do |k, w, t|\n  begin\n    k.method(w).call(t)\n  rescue NoMethodError, NameError\n  end\nend")
+w("w3j", "[[String, #{N}, #{T}]].inject(nil) do |_, (k, w, t)|\n  begin\n    k.method(w).call(t)\n  rescue NoMethodError, NameError\n  end\nend")
+w("w3k", "begin\n  Module.public_instance_method(#{N}).bind(String).call(#{T})\n#{RN}")
+w("w3l", "begin\n  %w[./lib/dp].each(&method(:require))\n#{R}")
+# W4: a require master left unread. lib/dp.rb gives String the dup.
+File.write("lib/dp.rb", "class String\n  def dup = self\nend\n")
+w("w4a", "$LOAD_PATH.unshift(File.join(__dir__, \"lib\"))\nrequire \"dp\"")
+w("w4b", "$: << File.join(__dir__, \"lib\")\nrequire \"dp\"")
+w("w4c", "$LOAD_PATH << File.join(__dir__, \"lib\")\nrequire \"dp.rb\"")
+w("w4d", "$: << __dir__\nrequire \"lib/dp\"")
+w("w4e", "require \"./lib/dp\"")
+w("w4f", "$LOAD_PATH.push(File.join(__dir__, \"lib\"))\nrequire \"dp\"")
+w("w4g", "$:.unshift(__dir__)\nrequire \"lib/dp.rb\"")
+w("w4h", "x = \"lib/\" + \"dp\"\nrequire_relative x")
+w("w4i", "require_relative(\"lib/\" + \"dp\")")
+w("w4j", "%w[dp].each { |f| require_relative File.join(\"lib\", f) }")
+w("w4k", "x = File.join(__dir__, \"lib\", \"dp\")\nrequire x")
+w("w4l", "Dir[File.join(__dir__, \"lib\", \"*.rb\")].each { |f| require f }")
+w("w4m", "Kernel.require File.join(__dir__, \"lib\", \"d\" + \"p\")")
+w("w4n", "[\"lib/dp\"].each { |f| require_relative f }")
+# W5: a visibility word with a name that is no Symbol (made by the rescue line)
+w("w5a", "class String\n  private \"dup\"\nend", TAIL)
+w("w5b", "class String\n  protected \"dup\"\nend", TAIL)
+w("w5c", "class String\n  private(*%w[dup])\nend", TAIL)
+# W6: an attr word handed about as a Symbol
+w("w6a", "begin\n  [String].each_with_object(\"dup\", &:attr_reader)\n#{R}", TAIL)
+# W7: text evaluated by a library
+RS = "rescue StandardError\nend"
+w("w7a", "require \"erb\"\nbegin\n  ERB.new(\"<% class String; def dup = self; end %>\").result\n#{RS}")
+w("w7b", "require \"erb\"\nbegin\n  ERB.new(\"<% class String; def dup = self; end %>\").run\n#{RS}")
+# B-2: an interpolation with an empty String literal among its parts
+def b(n, pre, recv) = File.write("#{n}.rb", "#{HEAD}#{pre}puts #{recv}.pair(add)\n")
+b("b2a", "def fresh = \"\#{$s}\#{\"\"}\"\n", "fresh")
+b("b2b", "def fresh = \"\#{$s}\#{''}\"\n", "fresh")
+b("b2c", "def fresh = \"\#{\"\"}\#{$s}\#{\"\"}\"\n", "fresh")
+b("b2d", "def fresh = %Q(\#{$s}\#{\"\"})\n", "fresh")
+# X: doors of the same kinds that the reader did not name
+w("x1", "begin\n  Kernel.enum_for(\"requ\" + \"ire\", \"./lib/dp\").next\nrescue StandardError, StopIteration\nend")
+w("x2", "require \"erb\"\nbegin\n  Object.const_get(:ERB).new(\"<% class String; def dup = self; end %>\").result\n#{RS}")
+w("x3", "require \"erb\"\nbegin\n  Object.const_get(\"ER\" + \"B\").new(\"<% class String; def dup = self; end %>\").result\n#{RS}")
+w("x4", "def go(&w)\n  w = :CLASS_EVAL.downcase\n  [String].each_with_object(#{T}, &w)\nend\nbegin\n  go\n#{R}")
+w("x5", "def go(&w) = [String].each_with_object(#{T}, &w)\nv = :CLASS_EVAL.downcase\nbegin\n  go(&v)\n#{R}")
+w("x6", "begin\n  [String].each_with_object(#{T}, &(#{N}).to_sym)\n#{R}")
+w("x7", "begin\n  String.public_send(#{N}, #{T})\n#{RN}")
+w("x8", "begin\n  String.__send__(#{N}, #{T})\n#{RN}")
+w("x9", "begin\n  (#{N}).to_sym.to_proc.call(String, #{T})\n#{RN}")
+w("x10", "begin\n  Signal.trap(\"USR1\", \"class String; def dup = self; end\")\n  Process.kill(\"USR1\", Process.pid)\n  sleep 0.2\nrescue StandardError\nend")
+w("x11", "$t = 0\nbegin\n  trace_var(:$t, \"class String; def dup = self; end\")\n  $t = 1\nrescue StandardError, NameError\nend")
+w("x12", "begin\n  binding.eval(\"class String; def dup = self; end\")\nrescue StandardError, NameError\nend")
+w("x13", "k = ERB rescue nil\nrequire \"erb\"\nbegin\n  [ERB].each { |e| e.new(\"<% class String; def dup = self; end %>\").result }\n#{RS}")
+w("x14", "begin\n  String.send(:private, \"dup\")\n#{R}", TAIL)
+w("x15", "ws = [#{N}]\nbegin\n  ws.each { |w| String.method(w).unbind.bind(String).call(#{T}) }\n#{RN}")
+w("x16", "pr = proc { |&b| [String].each_with_object(#{T}, &b) }\nv = :CLASS_EVAL.downcase\nbegin\n  pr.call(&v)\n#{R}")
+===== 4. the edges of the new list: cells (42 programs) =====
+r1    sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+r2    sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+r3    sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+r4    sameC            ruby[abc|2~rc 0~     ] tip xxxxx  head xxxxx
+r5    sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+r6    sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+r7    sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+r8    sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+r9    sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+r10   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+r11   sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+r12   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+r13   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+r14   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+r15   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+r16   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+r17   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+r18   sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+r19   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+r20   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+r21   sameC(refused)   ruby[abc|2~rc 0~     ] tip nnn    head nnn
+r22   sameC            ruby[ab|2~rc 0~      ] tip xxxxx  head xxxxx
+t1    otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+t2    otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+t3    otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+t4    otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+t5    otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+t6    otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+t7    otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+t8    otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+t9    otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+t10   sameC            ruby[AB|2~rc 0~      ] tip xxxxx  head xxxxx
+t11   otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+t12   sameC(refused)   ruby[AB|2~rc 0~      ] tip nnn    head nnn
+t13   otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+t14   otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+t15   otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+t16   otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+t17   otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+t18   otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+t19   sameC            ruby[AB|2~rc 0~      ] tip xxxxx  head xxxxx
+t20   otherC           ruby[AB|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+===== 5. the edges of the new list: generator (edges.rb) =====
+# edges.rb: the new list's own edges. r: a word reached under another name or by its literal Symbol (must keep the tip's C).
+# t: a program with a harmless site of the four kinds (should still take the fix), or one that is denied by default (noted).
+HEAD = "class String\n  def pair(a) = \"\#{self}|\#{a.size}\"\nend\n$s = +\"ab\"\ndef add = ($s << \"c\"; [1, 2])\n"
+T = '"def dup = self"'
+N = '"class_e" + "val"'
+R = "rescue NoMethodError, NameError\nend"
+def w(n, form, recv = "$s.dup") = File.write("#{n}.rb", "#{HEAD}#{form}\nputs #{recv}.pair(add)\n")
+w("r1", "class Module\n  alias_method :ev, :class_eval\nend\nbegin\n  String.ev(#{T})\n#{R}")
+w("r2", "class Module\n  alias ev class_eval\nend\nbegin\n  String.ev(#{T})\n#{R}")
+w("r3", "class Module\n  alias_method :snd, :public_send\nend\nbegin\n  String.snd(#{N}, #{T})\n#{R}")
+w("r4", "m = Module.instance_method(:class_eval)\nbegin\n  m.bind(String).call(#{T})\n#{R}")
+w("r5", "begin\n  ev = String.method(:class_eval)\n  ev.call(#{T})\n#{R}")
+w("r6", "begin\n  :class_eval.to_proc.call(String, #{T})\n#{R}")
+w("r7", "begin\n  [String].each_with_object(#{T}, &:class_eval)\n#{R}")
+w("r8", "begin\n  [String].each_with_object #{T}, &:class_eval\n#{R}")
+w("r9", "begin\n  String.public_send(:class_eval, #{T})\n#{R}")
+w("r10", "begin\n  String.send(:class_eval, #{T})\n#{R}")
+w("r11", "begin\n  String.instance_exec(#{T}) { |t| class_eval t }\n#{R}")
+w("r12", "begin\n  [[String, #{T}]].each { |k, t| k.class_eval t }\n#{R}")
+w("r13", "def go(&b) = [String].each_with_object(#{T}, &b)\nbegin\n  go(&:class_eval)\n#{R}")
+w("r14", "pr = proc { |k, t| k.class_eval(t) }\ndef go(&b) = [String].each_with_object(#{T}, &b)\nbegin\n  go(&pr)\n#{R}")
+w("r15", "class Module\n  def ev(t) = class_eval(t)\nend\nbegin\n  String.ev(#{T})\n#{R}")
+w("r16", "class Module\n  def snd(n, t) = public_send(n, t)\nend\nbegin\n  String.snd(#{N}, #{T})\n#{R}")
+w("r17", "begin\n  [#{T}].grep(String.method(#{N}))\n#{R}")
+w("r18", "begin\n  String.then { |k| k.method(#{N}) }.call(#{T})\n#{R}")
+w("r19", "begin\n  [String, #{T}].inject { |k, t| k.class_eval(t) }\n#{R}")
+w("r20", "begin\n  [String, #{T}].inject(:class_eval)\n#{R}")
+w("r21", "begin\n  [#{T}].inject(String, :class_eval)\n#{R}")
+w("r22", "class String\n  private :dup\nend\nbegin\n  String.send(:public, \"du\" + \"p\")\n#{R}")
+# t: harmless sites; the receiver is $s.upcase
+def t(n, form) = File.write("#{n}.rb", "#{HEAD}#{form}\nputs $s.upcase.pair(add)\n")
+t("t1", "def each_x(&blk) = [1].each(&blk)\neach_x { |v| $v = v }")
+t("t2", "$v = [1, 2].inject(0) { |a, b| a + b }")
+t("t3", "$v = [1, 2].inject(:+)")
+t("t4", "class Foo\n  attr_reader :method\n  def x = 1\n  private :x\n  private\n  def y = 2\nend")
+t("t5", "$v = [1, 2].map(&:to_s)")
+t("t6", "class Foo\n  def a = 1\n  alias b a\n  alias_method :c, :a\nend")
+t("t7", "$v = 5.send(:abs)")
+t("t8", "z = \"x\".to_sym\n$v = :\"a\#{z}\"\n$u = \"y\".intern")
+t("t9", "Foo = Struct.new(:a)\n$v = Foo.new(1).a")
+t("t10", "pr = proc { |v| $v = v }\n[1].each(&pr)")
+t("t11", "$v = [1].map(&->(x) { x + 1 })")
+t("t12", "o = Object.new\no.instance_eval { @a = 1 }")
+t("t13", "def m(&b) = b.call\n$v = m { 1 }")
+t("t14", "$v = 5.method(:abs).call")
+t("t15", "class Foo\n  def a = 1\n  private def b = 2\n  private attr_reader :c\nend")
+t("t16", "$v = [3, 1].sort_by(&:abs).first")
+t("t17", "class Foo\n  define_method(:a) { 1 }\nend\n$v = Foo.new.a")
+t("t18", "$w = \"send\"\n$v = :eval")
+t("t19", "x = \"abs\"\n$v = 5.send(x)")
+t("t20", "$v = [1, 2].each_slice(1).to_a.size\n$u = [1, 2].to_enum.next")
+===== 6. the interpolation forms: cells (16 programs) =====
+i1    sameC            ruby[ab|2~rc 0~      ] tip xxxxx  head xxxxx
+i2    otherC           ruby[ab|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+i3    sameC            ruby[ab|2~rc 0~      ] tip xxxxx  head xxxxx
+i4    sameC            ruby[ab|2~rc 0~      ] tip xxxxx  head xxxxx
+i5    otherC           ruby[ab~|2~          ] tip xxxxx  head ooooo   won 5
+i6    otherC           ruby[ab|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+i7    otherC           ruby[ab|2~rc 0~      ] tip xxxxx  head ooooo   won 5
+i8    sameC(refused)   ruby[ab|2~rc 0~      ] tip nnn    head nnn
+i9    sameC            ruby[ab|2~rc 0~      ] tip xxxxx  head xxxxx
+i10   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+i11   sameC            ruby[aab|2~rc 0~     ] tip xxxxx  head xxxxx
+i12   sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+i13   otherC           ruby[aab|2~rc 0~     ] tip xxxxx  head ooooo   won 5
+i14   otherC           ruby[abb|2~rc 0~     ] tip xxxxx  head ooooo   won 5
+i15   otherC           ruby[abb|2~rc 0~     ] tip xxxxx  head ooooo   won 5
+i16   sameC            ruby[ab|2~rc 0~      ] tip xxxxx  head xxxxx
+===== 7. the interpolation forms: generator (gen.rb) =====
+# gen.rb: interpolations as the receiver, or as the value of the one def it reaches
+HEAD = "class String\n  def pair(a) = \"\#{self}|\#{a.size}\"\nend\n$s = +\"ab\"\ndef add = ($s << \"c\"; [1, 2])\n"
+def d(n, body) = File.write("#{n}.rb", "#{HEAD}def fresh = #{body}\nputs fresh.pair(add)\n")
+d("i1", '"#{""}#{$s}"')
+d("i2", '"#{$s}"')
+d("i3", '"#{$s}#{nil}"')
+d("i4", '"#{$s}" ""')
+d("i5", "<<~T\n  \#{$s}\nT")
+d("i6", '"#{$s.to_s}"')
+d("i7", '"#$s"')
+d("i8", '"#{$s}#{}"')
+d("i9", '"#{$s}#{"x" * 0}"')
+File.write("i10.rb", "#{HEAD}puts \"\#{$s}\#{\"\"}\".pair(add)\n")
+File.write("i11.rb", "#{HEAD}puts \"a\#{$s}\".pair(add)\n")
+d("i12", '"#{$s}#{""}#{""}"')
+d("i13", '"a#{$s}"')
+d("i14", '"#{$s}b"')
+d("i15", '"#{$s}#{""}b"')
+d("i16", '"" "#{$s}"')
+===== 8. the forms c3 to c7: cells =====
+c3    sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+c4    sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+c5    sameC            ruby[abc|2~rc 0~     ] tip ooooo  head ooooo
+c6    otherC           ruby[abb|2~rc 0~     ] tip xxxxx  head ooooo   won 5
+c7    sameC            ruby[ab|2~rc 0~      ] tip xxxxx  head xxxxx
+===== 9. the forms c3 to c7: generator (gen.rb) =====
+# gen.rb: a literal part whose value is empty though its source is not (a backslash at the end of a line)
+HEAD = "class String\n  def pair(a) = \"\#{self}|\#{a.size}\"\nend\n$s = +\"ab\"\ndef add = ($s << \"c\"; [1, 2])\n"
+def d(n, body) = File.write("#{n}.rb", "#{HEAD}def fresh = #{body}\nputs fresh.pair(add)\n")
+d("c3", "\"\#{$s}\\\n\"")
+d("c4", "%Q(\#{$s}\\\n)")
+d("c5", "\"\#{$s}\" \"\\\n\"")
+d("c6", "\"\#{$s}\\\nb\"")
+d("c7", "\"\\\n\#{$s}\"")
