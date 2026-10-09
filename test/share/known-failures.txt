@@ -9,3 +9,5 @@ pkg.net.net_http_request_host
 pkg.net.net_http_response_value
 pkg.net.net_http_rest_verbs
 pkg.net.net_http_start_block
+string_ivar_alias_last_mutation
+string_ivar_alias_only_mutation
