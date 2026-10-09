@@ -1,0 +1,79 @@
+The pool lock piece's body, -v6 to -v7: every changed passage, OLD then NEW. Every other line is -v6's.
+
+OLD:
+On master (de66d5c81) the test below, which is this program with its counts printed, prints a wrong line and exits 0 or segfaults in each of the seven collector lanes with gcc; with clang it prints a wrong line in all seven and exits 0: one name is two Symbols. With the pull request below beneath, four Threads that make the same 3,000 names answer wrong in 22 runs of 25 with gcc and 21 with clang, exit 0.
+
+NEW:
+On master (f5f59352e) these four Threads answer wrong in 21 runs of 25 with gcc and 21 with clang, exit 0: one name is two Symbols. The test below, which is this program with its counts printed, fails 25 runs of 25 with each, 6 of them by a segfault with gcc and 3 with clang.
+
+----
+
+OLD:
+the generated C of 226 of the 6,659 programs under `test/`, `benchmark/` and `packages/*/test/` differs (on de66d5c81 with the pull request below beneath), each one a program the compiler emits for Threads (its C carries `SPINEL_USES_THREADS`): 222 name Thread, Mutex, Queue or ConditionVariable and four use the pty package. optcarrot's is byte-identical. Each of the 226, built with this change, prints its `.expected`.
+
+NEW:
+the generated C of 231 of the 6,751 programs under `test/`, `benchmark/` and `packages/*/test/` differs (on f5f59352e), each one a program the compiler emits for Threads (its C carries `SPINEL_USES_THREADS`): 227 name Thread, Mutex, Queue or ConditionVariable and four use the pty package. optcarrot's is byte-identical. Each of the 231, built with this change, prints its `.expected`.
+
+----
+
+OLD:
+one Thread working; gcc and clang; on de66d5c81 with the pull request below beneath):
+
+NEW:
+one Thread working; gcc and clang; on f5f59352e):
+
+----
+
+OLD:
+| 120,664 | 120,759 | 122,226 to 122,244 | 122,329 to 122,332 |
+
+NEW:
+| 120,661 | 120,756 | 122,224 to 122,246 | 122,326 to 122,334 |
+
+----
+
+OLD:
+A new Symbol pays 95 with gcc and 85 to 106 with clang of some 121,000
+
+NEW:
+A new Symbol pays 95 with gcc and 80 to 110 with clang of some 121,000
+
+----
+
+OLD:
+With the pull request below beneath and without this one, the test fails 25 runs of 25 with gcc (17 by a segfault) and with clang (19).
+
+NEW:
+On master it fails 25 runs of 25 with each, as said above.
+
+----
+
+OLD:
+Run here on this commit, above the pull request it depends on, on master de66d5c81, built from nothing:
+
+NEW:
+Run here on this commit on master f5f59352e, built from nothing:
+
+----
+
+OLD:
+the generated C of the 6,659 programs against the commit below, and each of the 226 changed ones run; optcarrot, checksum 59662;
+
+NEW:
+the generated C of the 6,751 programs against master's (three more than the 231 differ, in the path of the build's own directory, which they print), and each of the 231 changed ones run; optcarrot, checksum 59662, its C byte-identical;
+
+----
+
+OLD:
+- [ ] Depends on: the pull request "A program that makes more than 8,192 Symbols at run time keeps them apart"
+
+NEW:
+- [ ] Depends on: none
+
+----
+
+OLD:
+optcarrot's C did not change: byte-identical to the commit below, checksum 59662. It depends on the pull request "A program that makes more than 8,192 Symbols at run time keeps them apart": this is one commit above it; the pool that grows is the pool the lock is on, and a block it grows out of is kept for the lookups that take no lock.
+
+NEW:
+optcarrot's C did not change: byte-identical to master's, checksum 59662. It depends on no other pull request: the pool that grows is in master, and a block it grows out of is kept there, which is what lets a lookup take no lock. It neither adds a refusal nor lifts one.
