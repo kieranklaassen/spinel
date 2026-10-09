@@ -1,0 +1,42 @@
+Code delta of the Proc piece: d83a8e15eeb7 on ed9861279d67 (no row yet) replayed as 2fb5610224bf on master 5518e5934b3a
+
+git range-diff ed9861279d67..d83a8e15eeb7 5518e5934b3a..2fb5610224bf, whole:
+
+1:  d83a8e15e ! 1:  2fb561022 The box of a Range handed to a Proc is held while the Proc runs
+    @@ Commit message
+     
+         Co-Authored-By: Claude Code <noreply@anthropic.com>
+     
+    - ## Makefile ##
+    -@@ Makefile: GC_STRESS_TESTS := test/gc_root_frame_slots.rb \
+    -                    test/thread_new_args_rooted_across_fiber_alloc.rb \
+    -                    test/nomethod_holds_receiver_and_args.rb \
+    -                    test/gc_root_volatile_string_slot.rb \
+    -+                   test/proc_boxed_struct_arg_root.rb \
+    -                    test/gc_root_gathered_handle_param.rb \
+    -                    test/ffi_str_borrow.rb \
+    -                    test/ffi_str_arg_beside_alloc.rb \
+    -
+      ## lib/spinel_rt.h ##
+     @@ lib/spinel_rt.h: static sp_RbVal sp_poly_call_aref(sp_RbVal v, sp_RbVal arg) {
+        sp_int slot = sp_poly_slot_i(arg);
+    @@ test/proc_boxed_struct_arg_root.rb (new)
+     +# allocates before it uses the parameter lost the box. Each round hands a
+     +# value made in place to a Proc through every form of a call and counts the
+     +# answers that are not Ruby's.
+    ++# spinel: gc-stress
+     +class Wide
+     +  def call(x) = [x, x].size
+     +end
+
+The Makefile's GC_STRESS_TESTS list is gone on master ("Tests register their extra runs in their own headers"); the test now carries the line `# spinel: gc-stress` at the end of its header comment, as CONTRIBUTING.md asks ("no Makefile edit"). No line of src/ or lib/ differs between the two patches; the commit message is the same file (-v6).
+
+git diff --stat 5518e5934b3a 2fb5610224bf:
+ lib/spinel_rt.h                             | 14 +++++++--
+ src/codegen_call.c                          | 33 ++++++++++++++++---
+ src/codegen_call_method.c                   |  3 +-
+ src/codegen_call_object.c                   | 21 ++++++++++---
+ src/codegen_internal.h                      |  4 +++
+ test/proc_boxed_struct_arg_root.rb          | 49 +++++++++++++++++++++++++++++
+ test/proc_boxed_struct_arg_root.rb.expected |  3 ++
+ 7 files changed, 115 insertions(+), 12 deletions(-)
