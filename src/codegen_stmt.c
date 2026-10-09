@@ -15990,6 +15990,62 @@ static char *emit_str_splice_value(Compiler *c, int recv, int v, int late, int t
   buf_puts(b, " sp_str_check_mutable("); emit_expr(c, recv, b); buf_puts(b, ");");
   return vb.p;
 }
+/* Does the source the statement form of replace copies read a shared
+   String's copy below its top, where the read can be the source's value
+   (strbuf_slot_ref says which reads are a copy)? Left out are the
+   children whose value is never the node's: a condition, the left of
+   `&&` (it answers only where it is nil or false), a when's conditions,
+   an in's pattern, an ensure clause, every statement of a sequence but
+   its last, and what defined? is asked about. Every other child counts
+   and the walk ends with the tree, so what it gets wrong costs a root. */
+static int replace_source_reads_copy(Compiler *c, int v) {
+  const NodeTable *nt = c->nt;
+  char hs[1024];
+  if (v < 0) return 0;
+  NodeKind k = nt_kind(nt, v);
+  if (k == NK_DefinedNode) return 0;
+  int nr = nt_num_refs(nt, v), na = nt_num_arrs(nt, v);
+  if ((nr == 0 && na == 0) || k == NK_ConstantPathNode) return strbuf_slot_ref(c, v, hs, sizeof hs);
+  int cond = nt_ref(nt, v, "predicate"), ens = nt_ref(nt, v, "ensure_clause");
+  int left = k == NK_AndNode ? nt_ref(nt, v, "left") : -1, pat = k == NK_InNode ? nt_ref(nt, v, "pattern") : -1;
+  for (int i = 0; i < nr; i++) {
+    int ch = nt_ref_at(nt, v, i);
+    if (ch < 0 || ch == cond || ch == ens || ch == left || ch == pat) continue;
+    if (replace_source_reads_copy(c, ch)) return 1;
+  }
+  int nw = 0;
+  const char *ty = nt_type(nt, v);
+  const int *whens = ty && sp_streq(ty, "WhenNode") ? nt_arr(nt, v, "conditions", &nw) : NULL;
+  for (int i = 0; i < na; i++) {
+    int n = 0;
+    const int *ids = nt_arr_at(nt, v, i, &n);
+    if (whens && ids == whens) continue;
+    for (int j = k == NK_StatementsNode && n > 0 ? n - 1 : 0; j < n; j++)
+      if (replace_source_reads_copy(c, ids[j])) return 1;
+  }
+  return 0;
+}
+/* May that source be a String nothing else holds, where it runs no call
+   (operand_may_allocate answers for those)? An object is, read through
+   its to_str, and so is a boxed value while a class of the program
+   defines to_str. A String is where a shared String's copy is read below
+   the top: one side of a choice (`t || K`, `c ? t : K`), the value of an
+   assignment. */
+static int replace_source_may_be_fresh(Compiler *c, int v) {
+  const NodeTable *nt = c->nt;
+  v = unwrap_parens(c, v);
+  if (v < 0) return 0;
+  TyKind t = comp_ntype(c, v);
+  if (t != TY_STRING && t != TY_STRBUF && !(t == TY_POLY && !any_class_defines(c, "to_str"))) return 1;
+  if ((nt_num_refs(nt, v) == 0 && nt_num_arrs(nt, v) == 0) || nt_kind(nt, v) == NK_ConstantPathNode) {
+    /* a read that is the whole source: operand_may_allocate's answer
+       stands, but for a read marked to hand out its handle (strbuf_box,
+       which repr_of reads the mark from), which it passes unasked */
+    char hs[1024];
+    return c->strbuf_box[v] && strbuf_slot_ref(c, v, hs, sizeof hs);
+  }
+  return replace_source_reads_copy(c, v);
+}
 /* emit_array_mutate_stmt_body's String mutators done by reassigning the
    receiver: replace, prepend, insert, concat, clear, delete_prefix! /
    delete_suffix! (answers 1 emitted, 0 declined, -1 to go on) */
@@ -16043,6 +16099,9 @@ static int str_mutate_reassign_arms(Compiler *c, Buf *b, int indent, const NodeT
       /* a fresh source (`x.replace(y + z)`, a shared String's copy) is held
          by nothing while sp_str_from_bytes allocates the copy it reads */
       if (operand_may_allocate(c, argv[0])) buf_printf(b, "SP_GC_ROOT_STR(_t%d); ", trep);
+      /* nor is one no call shows: a copy read as one side of a choice
+         (`t || K`), the String an object's to_str makes */
+      else if (replace_source_may_be_fresh(c, argv[0])) buf_printf(b, "SP_GC_ROOT_STR(_t%d); ", trep);
       emit_expr(c, recv, b);
       buf_printf(b, " = sp_str_from_bytes(_t%d, sp_str_byte_len(_t%d)); }\n", trep, trep);
       return 1;
