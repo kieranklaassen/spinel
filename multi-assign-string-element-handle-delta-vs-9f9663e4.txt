@@ -1,0 +1,28 @@
+diff --git a/src/codegen_stmt.c b/src/codegen_stmt.c
+index 2a0b92b6f..47de2ea90 100644
+--- a/src/codegen_stmt.c
++++ b/src/codegen_stmt.c
+@@ -12013,14 +12013,15 @@ static int masgn_plain_element_target(Compiler *c, int t) {
+ /* Whether the statement is one whose new Strings are held as handles
+    (masgn_el_fresh_str): as many values as targets, every target a plain
+    element or a local, every value a new String, a literal or a local (so
+-   no value runs the program's code or writes a local), and one new String
+-   at least bound for an element. A new String bound for a local is none
+-   of these (masgn_el_fresh_str asks what the target keeps), and a String
+-   literal bound for an element has no handle to be held as: either takes
+-   the statement off the list. So does an assignment read for its value,
+-   whose values are held before the statement is emitted (emit_expr binds
+-   them), and a program that could have a `[]=`, a `+@` or a `dup` of its
+-   own (masgn_program_may_own). Any other statement is emitted as it was. */
++   no value writes a local, or runs more of the program's than a `to_s`),
++   and one new String at least bound for an element. A new String bound
++   for a local is none of these (masgn_el_fresh_str asks what the target
++   keeps), and a String literal bound for an element has no handle to be
++   held as: either takes the statement off the list. So does an
++   assignment read for its value, whose values are held before the
++   statement is emitted (emit_expr binds them), and a program that could
++   have a `[]=`, a `+@` or a `dup` of its own (masgn_program_may_own).
++   Any other statement is emitted as it was. */
+ static int masgn_fresh_stmt(Compiler *c, int id, const int *lefts, int ln, const int *els, int en) {
+   const NodeTable *nt = c->nt;
+   int rn = 0, fresh = 0, any = 0;
