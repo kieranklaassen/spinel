@@ -1,0 +1,24 @@
+The pool-grows piece's body, -v6 to -v7: every changed line, OLD and NEW (the replay on master de66d5c81; the commit message is unchanged)
+
+OLD: Cost, callgrind on 9c7ea3ce0, the commit below against this one. A program under the limit is given the same ids in the same order. 200,000 lookups of a name in the program's table take 10,664,117 instructions before and 10,664,121 here with gcc (10,623,246 and 10,623,241 with clang); of a name already in the pool 231,550,216 and 231,350,232 (243,913,663 and 239,112,533); 200,000 of `:"q#{i & 7}"` 64,220,077 and 64,220,165 (63,759,500 and 63,434,294). 4,000 new names take 300,894,587 and 300,893,494 (311,944,027 and 303,942,019).
+NEW: Cost, callgrind on de66d5c81, master against this change. A program under the limit is given the same ids in the same order. 200,000 lookups of a name in the program's table take 10,664,205 instructions before and 10,664,209 here with gcc (10,623,334 and 10,623,329 with clang); of a name already in the pool 231,550,304 and 231,350,320 (243,913,751 and 239,112,621); 200,000 of `:"q#{i & 7}"` 64,220,165 and 64,220,253 (63,759,804 and 63,434,598). 4,000 new names take 300,894,675 and 300,893,582 (311,944,121 and 303,942,113).
+
+OLD: 6,391 of the 6,513 programs under `test/`, `benchmark/` and `packages/*/test/` on 9c7ea3ce0.
+NEW: 6,535 of the 6,657 programs under `test/`, `benchmark/` and `packages/*/test/` on de66d5c81.
+
+OLD: on master (9c7ea3ce0, gcc and clang) it prints 8193 for 9000
+NEW: on master (de66d5c81, gcc and clang) it prints 8193 for 9000
+
+OLD: Not in this change, as on master: four Threads that each make new Symbols crash.
+NEW: Not in this change, as on master: four Threads that each make new Symbols get a wrong answer or crash.
+
+OLD: Run here on this commit, one above the pull request it depends on, on master 9c7ea3ce0, built from nothing: both tests in the seven collector lanes with gcc and clang, with and without `--share-strings`; the 33 programs above; `ruby tools/gate.rb check`; the generated C of the 6,513 programs against the commit below; optcarrot, checksum 59662;
+NEW: Run here on this commit on master de66d5c81, built from nothing: both tests in the seven collector lanes with gcc and clang, with and without `--share-strings`; the 33 programs above; `ruby tools/gate.rb check`; the generated C of the 6,657 programs against master's; optcarrot, checksum 59662;
+
+OLD: - [ ] Depends on: #
+NEW: - [ ] Depends on: none
+
+OLD: optcarrot's C changed by the pool's lines: 2,367,025,147 instructions on the commit below and 2,366,926,792 here, checksum 59662 both times. It depends on the pull request "A String made in place is kept alive while it becomes a new Symbol": a new Symbol's String is allocated without a collection and its name is copied into it, and this change is one commit above it and rewrites the same line.
+NEW: optcarrot's C changed by the pool's lines: 2,368,367,688 instructions on master and 2,368,227,762 here, checksum 59662 both times. It depends on no other pull request: "A String made in place is kept alive while it becomes a new Symbol", whose line this change rewrites, is in master.
+
+The commit message (symbol-pool-grows-squash-message-v2.txt) is unchanged, byte for byte.
