@@ -1082,6 +1082,14 @@ spinel: test/reject/string_nested_masgn_deep.rb:4: a nested multiple-assignment 
 spinel: test/reject/string_nested_masgn_target.rb:4: a nested multiple-assignment target appends to a String variable from an Array literal (a String is not yet shared by reference through a nested multiple-assignment target). Append to the source String instead.
 == test/reject/string_nested_masgn_target.rb [promote] rc=1
 spinel: test/reject/string_nested_masgn_target.rb:4: a nested multiple-assignment target appends to a String variable from an Array literal (a String is not yet shared by reference through a nested multiple-assignment target). Append to the source String instead.
+== test/reject/string_plain_mutator_result_class_ivar.rb [default] rc=1
+spinel: test/reject/string_plain_mutator_result_class_ivar.rb:9: the result of `bytesplice`, `append_as_bytes`, or `concat` or `prepend` with other than one argument, which is its receiver, is mutated in place (a String is not yet shared by reference through such a result). Mutate the receiver instead.
+== test/reject/string_plain_mutator_result_class_ivar.rb [promote] rc=1
+spinel: test/reject/string_plain_mutator_result_class_ivar.rb:9: the result of `bytesplice`, `append_as_bytes`, or `concat` or `prepend` with other than one argument, which is its receiver, is mutated in place (a String is not yet shared by reference through such a result). Mutate the receiver instead.
+== test/reject/string_plain_mutator_result_class_ivar_copy.rb [default] rc=1
+spinel: test/reject/string_plain_mutator_result_class_ivar_copy.rb:9: the result of `bytesplice`, `append_as_bytes`, or `concat` or `prepend` with other than one argument, which is its receiver, is mutated in place (a String is not yet shared by reference through such a result). Mutate the receiver instead.
+== test/reject/string_plain_mutator_result_class_ivar_copy.rb [promote] rc=1
+spinel: test/reject/string_plain_mutator_result_class_ivar_copy.rb:9: the result of `bytesplice`, `append_as_bytes`, or `concat` or `prepend` with other than one argument, which is its receiver, is mutated in place (a String is not yet shared by reference through such a result). Mutate the receiver instead.
 == test/reject/string_plain_mutator_result_mutation.rb [default] rc=1
 spinel: test/reject/string_plain_mutator_result_mutation.rb:6: the result of `bytesplice`, `append_as_bytes`, or `concat` or `prepend` with other than one argument, which is its receiver, is mutated in place (a String is not yet shared by reference through such a result). Mutate the receiver instead.
 == test/reject/string_plain_mutator_result_mutation.rb [promote] rc=1
