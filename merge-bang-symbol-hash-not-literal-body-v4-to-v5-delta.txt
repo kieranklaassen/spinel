@@ -1,0 +1,12 @@
+--- merge-bang-symbol-hash-not-literal-body-v4.md
++++ merge-bang-symbol-hash-not-literal-body-v5.md
+@@ -51,7 +51,8 @@
+ - 1,752 generated programs (nine receivers, eight arguments, the reached and the unreached call, seventeen reads and seven later uses, fourteen places the receiver is held): 1,186 get the C they had. The 566 that get other C, in the three modes: 364 that raise on master are right here (344 the NoMethodError, 20 the TypeError); 190 that are right stay right, all with the `merge!` behind a condition that is false in the run (the cost in the first lines); 12 print a wrong line on master and are right here (with the `merge!` not reached, `g = h; g["a"] = 5` stored into a copy). None that was right is wrong, and none that raised prints a wrong line.
+ - 200 programs for the call in a method (5 receivers, 4 arguments, 10 ways the method is or is not called), in the three modes: 40 whose method nothing names get the C they had; 96 that raise on master are right here (a call, a block, a lambda, `send`, and `public_send` or `method(:m).call` on an object or a class); 52 that were right stay right with other C (the call behind a condition, a method only named by a Symbol, and one called by `public_send` at the top level, where it is private and the `public_send` raises as in CRuby); 12 raise on both (`method(:m).call` at the top level is a missing method on master).
+ - 21 programs that reach the method by a name, or do not: `send` and `public_send` of a name built at run time, `method`, `instance_method`, `to_proc`, a block-pass, `inject` beside a block-pass, `eval`, a `require` the compiler did not follow, a load-path statement, `load` and `autoload`. 18 get the C they had (3 of them build on neither tree); 3 that raise on master are right here.
+-- On master 7565ad80, which this branch merges into cleanly: the new test passes in the same lanes with gcc and with clang, the programs under "Not in this change" print what they print on 9f320d1d, and the same programs of the three families get other C.
++
++On master 7565ad80, which this branch merges into cleanly, the new test passes in the same lanes with gcc and with clang, the programs under "Not in this change" print what they print on 9f320d1d, and of the table, the 1,752 and the 200 the programs that get other C than master's are the ones that get it on 9f320d1d.
+ 
+ Test: `test/hash_merge_bang_symbol_keyed_argument.rb`.
+ 
