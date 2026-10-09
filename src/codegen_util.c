@@ -2662,6 +2662,318 @@ int strbuf_marked_yields_handle(Compiler *c, int v) {
   const char *nm = nt_str(nt, v, "name");
   return nm && (is_append_concat(nm) || str_self_call(nt, v));
 }
+/* What a box of this program tagged as a shared String handle holds, for a
+   reader that takes the handle out of a box it did not make
+   (g_strbuf_boxes). SB_BOXES_NONE: the program holds no String as a
+   handle, so no box is tagged so and the reader leaves the test out.
+   SB_BOXES_UNSURE: a call on an object, stored where a handle is wanted, is
+   boxed as it renders (emit_boxed_strbuf), and only a reader of a handle's
+   slot renders the handle; any other leaves its String's bytes under the
+   handle's tag, the box does not say which it holds, and the reader keeps
+   to the plain String. SB_BOXES_HANDLES: each is a handle, or NULL for a
+   nil stored among handles. */
+int g_strbuf_boxes = SB_BOXES_UNSURE;
+int program_strbuf_boxes(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  NT_FOREACH_KIND(nt, NK_CallNode, v) {
+    int al = 0;
+    if (comp_ntype(c, v) != TY_STRBUF) continue;   /* no other is boxed as a handle */
+    if (repr_of(c, v).strbuf_src == RS_DEMANDED && !call_is_field_read(c, v, &al)) return SB_BOXES_UNSURE;
+  }
+  int held = 0;
+  for (int n = 0; n < nt->count && !held; n++)
+    held = c->ntype[n] == TY_STRBUF || c->strbuf_box[n] || c->strbuf_handle_demand[n] || c->poly_strbuf_lift[n];
+  for (int si = 0; si < c->nscopes && !held; si++) {
+    const Scope *s = &c->scopes[si];
+    held = s->ret == TY_STRBUF;
+    for (int k = 0; k < s->nlocals && !held; k++) held = s->locals[k].type == TY_STRBUF;
+  }
+  for (int k = 0; k < c->nclasses && !held; k++)
+    for (int i = 0; i < c->classes[k].nivars && !held; i++) held = c->classes[k].ivar_types[i] == TY_STRBUF;
+  return held ? SB_BOXES_HANDLES : SB_BOXES_NONE;
+}
+/* Does the program reopen the builtin class `cls` with a method `name` of
+   its own, in it or above it? */
+int builtin_reopened(Compiler *c, const char *cls, const char *name) {
+  int ci = comp_class_index(c, cls);
+  return ci >= 0 && comp_method_in_chain(c, ci, name, NULL) >= 0;
+}
+/* A method of the program's own under a builtin, by a way the class table
+   does not hold. A builtin answers without asking the method a program
+   put under it (in CRuby a String Range compares by String#<=> and
+   Enumerable walks by `each`). builtin_reopened says so for a def in the
+   builtin's class. An alias to a builtin, a name that is computed, and a
+   call the compiler does not perform and the program rescues
+   (`String.define_method(:<=>) { }`) are not in that table, so they are
+   read off the program's nodes here. So are a def on one object
+   (`def lo.<=>`) and a def or a prepend that is no statement of a class's
+   own body (a prepend inside a method the class is then asked to run).
+   A method made by none of these is made by a call that takes its name
+   as a value, by a block handed on that is such a name, by a text the
+   program evaluates, or in a file the compiler did not read: the lists
+   below are those four uses. Where a name or a text is not written out
+   the answer is "it can", and master's C stays. A road that is not on
+   the lists below is not seen.
+
+   program_reflects: the program defines or mixes in methods by a road
+   whose name, or whose text, the compiler does not read.
+
+   The scans are cold: each runs once for a name, and marked so their
+   inlined accessors stay out of the C compiler's inlining budget for
+   this file, which ivar_set_kind's loop over the ivar writes needs. */
+static const char *name_literal(const NodeTable *nt, int id) {
+  NodeKind k = nt_kind(nt, id);
+  return k == NK_SymbolNode ? nt_str(nt, id, "value") : k == NK_StringNode ? nt_str(nt, id, "content") : NULL;
+}
+static int name_in(const char *s, const char *const *list) {
+  for (int i = 0; list[i]; i++) if (sp_streq(s, list[i])) return 1;
+  return 0;
+}
+/* a call that defines by its first argument, or finds a method by it */
+static const char *const reflect_first[] = { "define_method", "define_singleton_method", "alias_method", "send",
+  "__send__", "public_send", "method", "public_method", "instance_method", "public_instance_method",
+  "singleton_method", NULL };
+/* a call that defines, removes or hides by each argument */
+static const char *const reflect_each[] = { "attr", "attr_reader", "attr_writer", "attr_accessor", "undef_method",
+  "remove_method", "def_delegator", "def_delegators", "def_instance_delegator", "def_instance_delegators",
+  "def_single_delegator", "def_single_delegators", "private", "public", "protected", "module_function",
+  "private_class_method", "public_class_method", NULL };
+/* a call that runs a text or a block as a class's body, mixes a module in
+   by hand, or reads a file: a require the compiler read is spliced in as
+   text ahead of parsing, so one that still stands as a call was not */
+static const char *const reflect_any[] = { "eval", "instance_eval", "class_eval", "module_eval", "instance_exec",
+  "class_exec", "module_exec", "delegate", "instance_delegate", "single_delegate", "prepend_features",
+  "append_features", "load", "autoload", "require", "require_relative", NULL };
+/* a call that runs a method by a name it is handed: read where it stands
+   below, and as a name written out here */
+static const char *const reflect_by_value[] = { "inject", "reduce", "to_proc", NULL };
+/* Is the node a statement of a class's own body (mods 0), or of a class's,
+   a module's or a `class << self`'s (mods 1)? A def or a bare include or
+   prepend there is that body's own, and the class table reads it. */
+static __attribute__((cold)) int stmt_of_body(const NodeTable *nt, int id, int mods) {
+  static const NodeKind BK[] = { NK_ClassNode, NK_ModuleNode, NK_SingletonClassNode };
+  for (int k = 0; k < (mods ? 3 : 1); k++)
+    NT_FOREACH_KIND(nt, BK[k], b) {
+      int of = BK[k] == NK_SingletonClassNode ? nt_ref(nt, b, "expression") : -1;
+      if (BK[k] == NK_SingletonClassNode && (of < 0 || nt_kind(nt, of) != NK_SelfNode)) continue;
+      int body = nt_ref(nt, b, "body"), n = 0;
+      const int *st = body >= 0 && nt_kind(nt, body) == NK_StatementsNode ? nt_arr(nt, body, "body", &n) : NULL;
+      for (int i = 0; i < n; i++)
+        if (st[i] == id) return 1;
+    }
+  return 0;
+}
+/* Is the node a statement of the program's top level? */
+static __attribute__((cold)) int stmt_of_top(const NodeTable *nt, int id) {
+  int st = nt->root_id >= 0 ? nt_ref(nt, nt->root_id, "statements") : -1, n = 0;
+  const int *sv = st >= 0 && nt_kind(nt, st) == NK_StatementsNode ? nt_arr(nt, st, "body", &n) : NULL;
+  for (int i = 0; i < n; i++)
+    if (sv[i] == id) return 1;
+  return 0;
+}
+static int reflect_name(const char *s) {
+  return name_in(s, reflect_first) || name_in(s, reflect_each) || name_in(s, reflect_any) ||
+         name_in(s, reflect_by_value) || sp_streq(s, "prepend") || sp_streq(s, "include");
+}
+static __attribute__((cold)) int program_reflects_scan(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  /* a require of a path the compiler did not find was dropped with a
+     warning and left no node (g_require_unread, set by the parser) */
+  if (g_require_unread) return 1;
+  NT_FOREACH_KIND(nt, NK_CallNode, v) {
+    const char *cn = nt_str(nt, v, "name");
+    if (!cn) continue;
+    if (name_in(cn, reflect_any)) return 1;
+    /* inject and reduce with no block call a method by their last
+       argument; a Symbol made into a Proc calls the method it names */
+    if (sp_streq(cn, "inject") || sp_streq(cn, "reduce")) {
+      int a = nt_ref(nt, v, "arguments"), ac = 0;
+      const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+      if (nt_ref(nt, v, "block") < 0 && ac >= 1 && !name_literal(nt, av[ac - 1])) return 1;
+      continue;
+    }
+    if (sp_streq(cn, "to_proc")) {
+      int rv = nt_ref(nt, v, "receiver");
+      if (rv < 0 || nt_kind(nt, rv) != NK_SymbolNode) return 1;
+      continue;
+    }
+    /* a prepend puts a module's methods ahead of the class's own. The class
+       table reads one written in a class's body, and what that module
+       defines and includes; not what a module prepends in turn, nor an
+       include or a prepend called on a receiver or inside a method. An
+       include at the top level is Object's, behind every builtin's own */
+    if (sp_streq(cn, "prepend") || sp_streq(cn, "include")) {
+      int inc = cn[0] == 'i';
+      if (nt_ref(nt, v, "receiver") >= 0 || !(stmt_of_body(nt, v, inc) || (inc && stmt_of_top(nt, v)))) return 1;
+      continue;
+    }
+    int first = name_in(cn, reflect_first);
+    if (!first && !name_in(cn, reflect_each)) continue;
+    int a = nt_ref(nt, v, "arguments"), ac = 0;
+    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+    if (first && ac < 1) return 1;
+    for (int i = 0; i < (first ? 1 : ac); i++) {
+      if (name_literal(nt, av[i])) continue;
+      /* `private def x` and `private attr_reader :x`: the def and the
+         inner call are read where they stand */
+      if (first) return 1;
+      NodeKind ak = nt_kind(nt, av[i]);
+      const char *an = ak == NK_CallNode ? nt_str(nt, av[i], "name") : NULL;
+      if (ak != NK_DefNode && !(an && name_in(an, reflect_each))) return 1;
+    }
+  }
+  /* ERB runs its template's text */
+  NT_FOREACH_KIND(nt, NK_ConstantReadNode, k) {
+    const char *kn = nt_str(nt, k, "name");
+    if (kn && sp_streq(kn, "ERB")) return 1;
+  }
+  /* a block handed on that is no Symbol written out, no Proc or Method,
+     and not the method's own block (the desugar made that forward a yield
+     and named its read __orphaned__): a Symbol the program computed calls
+     a method by a name that is not read here */
+  NT_FOREACH_KIND(nt, NK_BlockArgumentNode, ba) {
+    int e = nt_ref(nt, ba, "expression");
+    if (e < 0 || nt_kind(nt, e) == NK_SymbolNode) continue;
+    const char *en = nt_kind(nt, e) == NK_LocalVariableReadNode ? nt_str(nt, e, "name") : NULL;
+    if (en && sp_streq(en, "__orphaned__")) continue;
+    TyKind et = comp_ntype(c, e);
+    if (et != TY_PROC && et != TY_METHOD) return 1;
+  }
+  /* the road named as a value: send(:define_method, n), method(:prepend).
+     And the compiler's own words for what it left out, in the raise it
+     wrote in its place, which a program can rescue and then runs on
+     without the methods CRuby has: a block of defs it dropped (a
+     class_eval on a class held in a variable, a Class.new built from a
+     method's locals), and a require whose path a String computes */
+  for (int pass = 0; pass < 2; pass++)
+    NT_FOREACH_KIND(nt, pass ? NK_StringNode : NK_SymbolNode, l) {
+      const char *ln = name_literal(nt, l);
+      if (ln && (reflect_name(ln) || (pass && (!strncmp(ln, "spinel: ", 8) ||
+                                               !strncmp(ln, "cannot load such file -- ", 25))))) return 1;
+    }
+  NT_FOREACH_KIND(nt, NK_AliasMethodNode, al) {
+    int nn = nt_ref(nt, al, "new_name");
+    if (nn < 0 || nt_kind(nt, nn) != NK_SymbolNode) return 1;
+  }
+  return 0;
+}
+/* How often `name` is written as a Symbol or a String, the times it is the
+   old name of an alias (which defines nothing under it) left out; and how
+   often a def of it is on one object, or is no statement of a class's own
+   body. */
+static __attribute__((cold)) int name_written_scan(Compiler *c, const char *name) {
+  const NodeTable *nt = c->nt;
+  int n = 0;
+  for (int pass = 0; pass < 2; pass++)
+    NT_FOREACH_KIND(nt, pass ? NK_StringNode : NK_SymbolNode, l) {
+      const char *ln = name_literal(nt, l);
+      if (ln && sp_streq(ln, name)) n++;
+    }
+  NT_FOREACH_KIND(nt, NK_AliasMethodNode, al) {
+    int on = nt_ref(nt, al, "old_name");
+    const char *ln = on >= 0 ? name_literal(nt, on) : NULL;
+    if (ln && sp_streq(ln, name)) n--;
+  }
+  NT_FOREACH_KIND(nt, NK_CallNode, v) {
+    const char *cn = nt_str(nt, v, "name");
+    if (!cn || !sp_streq(cn, "alias_method")) continue;
+    int a = nt_ref(nt, v, "arguments"), ac = 0;
+    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+    const char *ln = ac == 2 ? name_literal(nt, av[1]) : NULL;
+    if (ln && sp_streq(ln, name)) n--;
+  }
+  NT_FOREACH_KIND(nt, NK_DefNode, d) {
+    const char *dn = nt_str(nt, d, "name");
+    if (!dn || !sp_streq(dn, name)) continue;
+    int on = nt_ref(nt, d, "receiver");
+    if (on >= 0 ? nt_kind(nt, on) != NK_SelfNode : !stmt_of_body(nt, d, 1)) n++;
+  }
+  return n;
+}
+static __attribute__((cold)) int name_defined_scan(Compiler *c, const char *name) {
+  const NodeTable *nt = c->nt;
+  NT_FOREACH_KIND(nt, NK_DefNode, d) {
+    const char *dn = nt_str(nt, d, "name");
+    if (dn && sp_streq(dn, name)) return 1;
+  }
+  return 0;
+}
+/* The three questions, each answered once for a compile and kept. An
+   answer is a fact of the program's own text, taken when all of it is in
+   the node table: nothing is kept before analysis is done
+   (g_scopes_settled), and after it only the emitter edits the table. No
+   edit of the emitter's changes an answer, so the kept one is what a
+   fresh walk would give:
+   - it adds nodes, at six nt_new_node sites in three functions. For a
+     refused method emitted as a raise (deferred_raise_body): a
+     StatementsNode, a CallNode named raise, an ArgumentsNode, a
+     ConstantReadNode named NotImplementedError, and a StringNode with
+     the refusal's sentence. For a lone splat into an object's method
+     (emit_poly_builtin_default_spread): two LocalVariableReadNodes and
+     three ArgumentsNodes. For a setter read for its value: one
+     LocalVariableReadNode. The scans read a def, an alias, a block
+     argument, a Symbol, a String, a constant named ERB, and a call by
+     its name: raise is on no list, and the sentence is no method's name
+     and none of the compiler's two messages looked for above;
+   - it renames a call for one re-entry and puts the name back: === and
+     <=> to ==, slice to [], find_all to select, [] to new,
+     each_grapheme_cluster to each_char, and a String's bang method to
+     its plain one. That twin is made only for a row of the String bang
+     table (ty_str_typed_bang_flags) and for gsub!, sub!, tr! and delete!
+     as a statement: a method of the program's own that ends in `!`
+     (`send!`) is never written as `send`. No name of any pair is on a
+     list, so a walk made in between reads what it reads before and
+     after;
+   - it points a call at other arguments, at no block or at another
+     receiver for one re-entry: the splat's call and the setter at the
+     nodes above, a String's slice! at the variable its chain starts
+     from. None is a call whose arguments, block or receiver are read.
+   Asked again whenever the table changed, the program would be walked
+   once more for every such edit ahead of a call that asks here. The name
+   is copied: the table frees a name it rewrites. what: 0 the program
+   reflects, 1 the name is written, 2 a def has the name. */
+static int own_method_fact(Compiler *c, int what, const char *name) {
+  static struct { int what; char name[16]; int answer; } memo[16];
+  static const Compiler *of;
+  static const NodeTable *of_nt;
+  static int used;
+  if (of != c || of_nt != c->nt) { of = c; of_nt = c->nt; used = 0; }
+  for (int i = 0; i < used; i++)
+    if (memo[i].what == what && sp_streq(memo[i].name, name)) return memo[i].answer;
+  int r = what == 0 ? program_reflects_scan(c)
+        : what == 1 ? name_written_scan(c, name) > 0 : name_defined_scan(c, name);
+  if (g_scopes_settled && used < 16 && strlen(name) < sizeof memo[0].name) {
+    memo[used].what = what; strcpy(memo[used].name, name); memo[used].answer = r;
+    used++;
+  }
+  return r;
+}
+/* Can the program have put a method of this name under a builtin by a way
+   builtin_reopened does not see: the name written as a Symbol or a String
+   (an alias, an alias_method, a define_method called on the class), a def
+   of it on one object or outside a class's own body, or a road the
+   compiler does not read? */
+int program_writes_name(Compiler *c, const char *name) {
+  return own_method_fact(c, 0, "") || own_method_fact(c, 1, name);
+}
+/* The same, or a def of that name anywhere: for a method a builtin's
+   answer stands on in CRuby and not here, in whatever class or module the
+   program defines it (Enumerable's walk by `each`). */
+int program_defines_method(Compiler *c, const char *name) {
+  return program_writes_name(c, name) || own_method_fact(c, 2, name);
+}
+/* Is a String Range's membership `name` (cover?, include?, member?, ===)
+   the runtime's own, with the String methods it stands on? A program's own
+   is not asked on any road. Where the road of a boxed value answered false
+   it agreed with a method of the program that says "no member", so there
+   it stays as it was: where the program defines one of them in its class,
+   and where it can have by a way the class table does not hold. */
+int srange_member_builtin(Compiler *c, const char *name) {
+  return !builtin_reopened(c, "Range", name) && !builtin_reopened(c, "String", "<=>") &&
+         !builtin_reopened(c, "String", "==") && !builtin_reopened(c, "String", "succ") &&
+         !program_writes_name(c, name) && !program_writes_name(c, "<=>") &&
+         !program_writes_name(c, "==") && !program_writes_name(c, "succ");
+}
 /* A String method answering its receiver or nil (bop_share_self_answer:
    a bang method, an iterator given a block) called on a local that holds
    the shared handle (--share-strings: or an ivar, a global, a class

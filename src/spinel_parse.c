@@ -2156,6 +2156,10 @@ static int source_references_io_buffer(const char *src) {
    sp_feature_enabled(). Definitions here (spinel_parse.c includes no project
    headers); declared extern in compiler.h. */
 int g_require_gate = 0;
+/* A plain require named a file that was not found and is no capability of
+   the runtime: it was dropped with a warning and left no node, so
+   whatever that file defines is unknown to the compiler. */
+int g_require_unread = 0;
 /* --share-strings, as main.c exports it: on only when SPINEL_SHARE_STRINGS
    is set to something, empty and "0" being off. The compiler's flag and the
    parser's read of a package's share declarations ask this one test. */
@@ -4183,6 +4187,7 @@ else {
           fprintf(stderr,
                   "warning: '%s' is not available in Spinel; the require is ignored and code using it will fail\n",
                   lib_name);
+          g_require_unread = 1;
           content = strdup("# require not resolved");
         }
       }

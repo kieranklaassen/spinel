@@ -20,6 +20,8 @@
    require-gated stdlib (stringio, io/console, ...) so they match CRuby's
    uninitialized-constant / NoMethodError when the require is absent. */
 extern int g_require_gate;
+/* a plain require was dropped unread (spinel_parse.c) */
+extern int g_require_unread;
 /* SPINEL_SHARE_STRINGS is on: set, not empty and not "0" (spinel_parse.c) */
 int sp_share_strings_env(void);
 void sp_feature_mark(const char *name);
