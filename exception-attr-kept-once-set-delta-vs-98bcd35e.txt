@@ -1,0 +1,792 @@
+===== 1. the reader's delta =====
+# Row 264, piece one: the reader's delta against 98bcd35e94f9
+
+Title, new: "An attribute of an exception class with no initialize is kept
+once set". It was "An attribute of an exception class with no initialize is
+nil until set, and is marked once set": the nil half left the title, the
+message, the body and the tests.
+
+## Where it stands
+
+- Head dc95405220e8cd7720b9e15f2a413e8b485c4890, ONE commit on upstream
+  master 2afc69c54d7a7f0e4027f5e275ddd5956959c980. Tree
+  592398e49cc445f9abbefdf0dd3fd4b466fd77d2. "Depends on: none".
+- The tip by my ls-remote at 21:19 UTC 10-09 is
+  8a674181d16629509f02f64dae5c7a67355bc89f, 16 commits past the parent: the
+  head merges into it clean by exit status (tree b9096406902e), and the 16
+  touch no function of the piece nor one its proof reads: the two diffs
+  have no hunk header in common, by script. They add one call of
+  sp_exc_new_for_catch in the new lib/sp_cext_exc.c, the C extension
+  bridge, built only with SP_CEXT: an exception a C extension raises by
+  name is built there as master builds it, and is not this piece's. No
+  build was made on that tip.
+- It supersedes 98bcd35e94f9b5a38c803c5a6466d62d5348c531 (comments
+  6085408802, 6085480105, 6085517679, 6085553977), which its reader
+  returned as BLOCK by rule (a): the narrowing proved where a method can be
+  found from, not where a store into the object can run.
+- THE SPLIT, as ruled at 17:40 and 18:00: this piece keeps the size and the
+  scan for every such class and holds NO nil seed. With the seed went every
+  guard whose only why was the seed: the walk of the program's text, the
+  finalizer term, and the decline for a program whose chain is unknown. An
+  attribute nothing has stored answers as it does on master where master
+  sizes the object (part 3).
+- TWO TIPS, ONE PATCH. Master moved under the cut again and again
+  (090969e7759b, then 5749e9566750, then 2afc69c54d7a). Between the first
+  two it changed the line after the builder's at two catch sites ("A
+  modifier rescue keeps the caught exception's existing cause"), so the cut
+  was moved by hand there: the added and removed lines are the same list
+  (patch-id at -U0 3f15fe4bd4c8 on both), and the two sites keep master's
+  new line. Being new code, it ran the WHOLE chain on 5749e9566750 (record
+  b5cd82d9b1cd, tree 2caf632b174c). The head is its clean replay onto
+  2afc69c54d7a: merged by exit status, stable patch-id EQUAL
+  (06a29e2f3d8d33a6ae1c5468220c66dd0d7f7e50), and on it the short set
+  allowed for such a replay. Each figure below says which tip it is of.
+- What the 11 commits from 5749e9566750 to the parent touch, by hunk
+  header: emit_sym_class_name_rt (the pool of run-time Symbols takes a lock
+  in a program with Threads), under whose header two hunks of the piece
+  sit, some hundred lines further down, and not met; infer_ivar_types and
+  pivs_settle_hash_stores ("Keep inherited attr-writer families aligned":
+  a writer inherited by sibling classes and called through a boxed
+  receiver), which the piece does not change, and no test of the piece
+  calls a writer through a boxed receiver;
+  lib/sp_gc.c and the new lib/sp_cext.c. No site that names the old
+  builders was added (the counts by file are the same on both tips).
+- Neither a refusal added nor one lifted: docs/limitations.md is not
+  touched by the piece (master added one row to it, on inherited writers).
+
+## 1. What left, and that nothing else did
+
+- The delta is read on 090969e7759b, the last tip 98bcd35e94f9 merges into
+  clean (on 5749e9566750 it conflicts at the two sites named above, as
+  the piece did). 98bcd35e94f9 replayed onto 090969e7759b is tree
+  dd7c151be0a58df0461a9f5a2a5417c082dd1101; this piece cut there is tree
+  46ced4af21fcf14720944988fed6bfeced326837, and the head is that patch
+  moved, line for line. `git diff dd7c151be0a5 46ced4af21fc`: 35 files, 123
+  insertions, 590 deletions.
+- SOURCE: the block below this note is `git diff dd7c151be0a5 46ced4af21fc
+  -- src lib`, the old head's tree against this piece's: 216 lines removed,
+  25 added. src/analyze.c (-114), src/analyze.h (-3), src/analyze_desugar.c
+  (-4) and src/compiler.h (-4) are master's files again, byte for byte.
+- What the 216 are: the walk (an_note_method_homes, an_class_only_attrs);
+  class_exc_only_attrs; class_exc_ivnil and the emitted sp_<Class>__ivnil;
+  the `nils` parameter of the three builders, of sp_exc_sub_build and of
+  emit_exc_ivars_tail; the g_uses_finalizers term; and the decline
+  (exc_chain_unknown, exc_sub_builder and its question to
+  an_prog_never_gives, g_engine_decided and the line of the desugar pass
+  that set it).
+- What the 25 are, each a removed line said again without the seed: the
+  signatures of sp_exc_sub_build, sp_exc_new_sub_ivars and
+  sp_exc_new_sub_caught and the two declarations (5 lines); the three calls
+  of sp_exc_sub_build that pass the scan and no `nils` (3); `,
+  sp_%s__gc_scan` in emit_exc_ivars_tail (1); the three sites that print
+  sp_exc_new_sub_ivars by name where exc_sub_builder chose it (3); comments
+  that no longer speak of the seed or the decline (11); and ONE REORDER, two
+  lines, in class_exc_built_by_name: the test for an `initialize` in the
+  chain now stands before the test for a reopened builtin. Both are lookups
+  with no effect, so the answer is the same; the first is the cheaper, which
+  part 5 needs.
+- No line was added that the old head did not hold in another wording: no
+  new site, no new entry, no new test of the program's text.
+- TESTS. Eight left, each a guard of the seed or of the decline:
+  exception_attribute_computed_initialize, _engine_test, _finalizer,
+  _inherited_hook, _own_exception, _own_method, _singleton_def,
+  _toplevel_def. Four changed, each losing its reads of an attribute nothing
+  has stored and storing what it reads back:
+  exception_attribute_ensure_clause (its second road, an exception passing
+  the clauses unmatched, now stores and reads 30 of them),
+  exception_attribute_parent_arm, exception_attribute_without_initialize,
+  share_strings_exception_attribute (a second class, caught by an arm that
+  names no class of the program). Two are unchanged:
+  exception_attribute_builtin_reopened, exception_attribute_marked. On the
+  BARE tip the six run 72 cells (gcc and clang, with and without
+  --share-strings, SPINEL_GC_STRESS 0, 1, 2): 18 pass (builtin_reopened 12,
+  marked 4, share_strings 2) and 54 fail; on the head 72 pass.
+- THE DECLINE WENT WITH THE SEED. It kept master's C for a program in which
+  a zero could be what CRuby stored; with no seed there is nothing for it
+  to protect, and such a program now gets the size and the scan too. Its 51
+  twins of the old delta, 306 cells, on 5749e9566750: lost 0, cured 0,
+  moved 0, no exit status differs. 40 of them now emit other C than
+  master's (the builder with the class's scan), 7 the same C, 4 are refused
+  by both.
+
+## 2. The block: stores the compiler does not run
+
+- The verdict's ten programs (a store of 0 from `inherited`, `method_added`,
+  `singleton_method_added`, `to_ary`, `respond_to_missing?`, a class's own
+  `===` (two of them), `to_s` and `allocate`, `initialize_dup`, each in
+  ANOTHER class's body) and five of mine (the same store into an exception
+  that was raised and kept, and into one held by a constant): 15 programs,
+  90 cells, on the bare tip and the head: lost 0, moved 0, no exit status
+  differs. Where the compiler does not run the hook, the head prints the
+  zeroed slot's 0 as master does, and that is CRuby's line.
+- There is no test of the program's text left in the piece that such a
+  program could pass or fail: class_exc_built_by_name asks whether the
+  class has ivars, is an exception, has no `initialize` in its chain and is
+  no reopened builtin, and those four decide the size and the scan only.
+
+## 3. An attribute nothing has stored (ruled 18:00: reached, not made)
+
+CRuby reads nil. Spinel zeroes the struct, and a slot whose nil is not zero
+reads 0. That is master's fault, in master's text on both trees (the read
+`((sp_C *)p)->iv_x` and the print of it do not change); the piece neither
+cures it nor makes it. What the piece changes is which bytes the read
+finds.
+
+- WHERE MASTER SIZES THE OBJECT ITSELF (`.new`, the arm that names the
+  class): the read is inside the object on both. Four programs (one per
+  slot kind: the text stores an Integer in it elsewhere, an Integer and a
+  String, a String, nothing), 240 reads each (four slots of 30 objects, by
+  `p` and by `puts`), six cells: master prints 0 on every line, the head
+  prints 0 on every line. THE TWIN is this read.
+- WHERE MASTER BUILDS THE OBJECT SHORT, the read is past its end. The
+  proof is the sizes in bare master's C, once per route:
+  - an arm that names no class of the program: master's C builds the
+    caught exception with `sp_exc_new_for_catch(_rcls_10, _rmsg_10)`,
+    which is sp_exc_new, which allocates sizeof(sp_Exception) = 120 bytes
+    (lib/sp_exc.c: `sp_gc_alloc(sizeof(sp_Exception), NULL,
+    sp_exc_gc_scan)`). The class's struct is 184 bytes and its four slots
+    stand at 120, 136, 152 and 168, 16 bytes each (boxed slots; Integer
+    slots are 8 bytes each, from 120 too): every read
+    `((sp_Shape *)p)->iv_x` of that C is past the 120.
+  - a raise with an appended String under --share-strings: `sp_raise_exc(
+    (sp_Exception *)sp_exc_attach_msg(sp_exc_new_for_catch("Shape", ...),
+    lv_s))`: the same 120 bytes, the same four slots from 120.
+  - the exception an ensure holds: `sp_exc_new_for_catch(_exccls8,
+    _excmsg8)`: 120 bytes, slots from 120.
+  - an arm typed to the parent: `sp_exc_new_sub_sized(sizeof(sp_Base),
+    _rcls_11, _rmsg_11)`: 128 bytes (the parent's struct, one slot), and
+    the subclass's four slots stand at 128, 144, 160 and 176 of its 192.
+  The numbers are printed by master's own C (sizeof and offsetof, in a
+  constructor appended to the file master emits, built with the
+  ingredients `spinel --print-build` lists). What lies past the 120 is the
+  allocator's: the cell's padding, the next cell's header, the next object.
+- What that read prints on bare master: 16 programs (the four routes by
+  the four slot kinds), six cells, 10 runs of each: 960 runs, 230,400 lines.
+  NOT ONE equals CRuby's line. Master prints 0 on 116,430 of them, a
+  pointer's value on 87,000 (94416497002608, another each run), and on
+  26,970 an empty line from `p`, where CRuby prints `nil`; from `puts`,
+  where CRuby's line is empty, it never printed an empty one. So there is
+  no cell to list where a read past the end was right by chance: 0 lines
+  of 230,400, in 0 of 960 runs.
+- The head, the same 16 programs, six cells, two runs each: every one of
+  its 46,080 lines is, byte for byte, the line bare master prints for the
+  twin of the same slot kind (0). No run of the head ends loud.
+- THE PAIRS (a program that is loud or wrong on master before such a read
+  and reaches it on the head). Each is paired with its twin: the same
+  class, the same stores, the same read, the object built by `.new`. By
+  script, six cells each; "wrong" is against CRuby:
+  - the body's second example with a fourth attribute read unset (master:
+    segmentation fault in 6 of 6 cells): the head's wrong lines 30, the
+    twin's line on bare master 30.
+  - the body's first example with a third attribute read unset (master: 59
+    of 60 wrong with the flag, the unset line a read past the end): 6, 6.
+  - the body's third example reading `e.line` unset (master: the freed
+    value; the read inside the object on both): 6, 6.
+  - the ensure's held exception with an attribute read unset (master: 29
+    of 30 wrong): 6, 6.
+  - the parent's arm with an attribute read unset (master: 29 of 30
+    wrong): 6, 6.
+  54 wrong lines on the head, 54 the twin's line on bare master, 0 not.
+  I found no program of this class that has no such twin: every route that
+  builds the object short has `.new` as its twin, since the class has no
+  `initialize` to make `.new` differ.
+- "Right by chance is right" binds every line that is not a read past the
+  end, and there lost is 0 in every set of part 4.
+
+## 4. The probes, each program on CRuby, the bare tip and the head, six cells
+
+"lost" is a line right on master and wrong on the head; "moved" a line wrong
+on both and not the same.
+
+On 5749e9566750 (the whole chain):
+
+- The verdict's ten hooks, my five beside them, a reopened builtin with
+  `.new` (it builds on neither), unset reads, and the crash before an
+  unset read: 18 programs, 108 cells: lost 0, cured 6, moved 30 (the 30
+  lines of the first pair of part 3), exit status differs in 6 cells
+  (master's segmentation fault).
+- The body's four programs, 24 cells: lost 0, cured 17, moved 0, exit
+  status differs in 8 cells (master's crashes).
+- The 92 roads of the old delta, 552 cells: lost 0, cured 0, moved 24, no
+  exit status differs. They were written for the seed: where the old head
+  printed nil, this head prints master's line. The 24 are four programs
+  that `puts` the exception and print `#<Counted:0x...>` with another
+  address each run, on both. 85 emit other C than master's; 7 are refused
+  by both.
+- 13 more programs of the old delta, 78 cells: lost 0, cured 22, moved 0,
+  exit status differs in 4 cells.
+- The decline's 51 twins, 306 cells: lost 0, cured 0, moved 0.
+- The frozen literal's 6, 36 cells: lost 0, moved 0.
+- The 3 programs of reader 8's first round, 18 cells: lost 0, cured 4,
+  moved 0, exit status differs in 2 cells.
+
+187 programs, 1,122 cells: no line right on master is wrong on the head.
+
+## 5. Compile cost: which programs pay, and what is left (reader 8's point)
+
+Callgrind of `spinel -c`, both compilers in one run, on 5749e9566750 (the
+totals on the head's base are in part 6). "Own" is the instructions in the
+compiler's own functions; the rest is libc's.
+
+| the program | master | this | total | own, a class |
+|---|---|---|---|---|
+| `p 1` | 1,994,324 | 1,989,589 | -0.24% | +44 in all |
+| seven lines with a rescue, no class | 7,766,875 | 7,771,879 | +0.06% | +184 in all |
+| 300 plain classes with attributes | 375,391,132 | 375,798,001 | +0.11% | +191 |
+| 300 exception classes, no attribute | 116,372,489 | 116,490,396 | +0.10% | +22 |
+| 300 exception classes, attributes and an `initialize` | 728,443,257 | 729,365,728 | +0.13% | +1,149 |
+| one such class | 4,265,540 | 4,334,386 | +1.61% | +33,426 in all |
+| 300 such classes | 411,189,878 | 417,238,239 | +1.47% | +8,703 |
+| 300 such classes, each raised and read | 4,428,132,838 | 4,434,428,171 | +0.14% | |
+| 1,000 such classes | 2,563,050,879 | 2,580,911,692 | +0.70% | +8,689 |
+| 2,000 such classes | 8,579,064,797 | 8,614,891,538 | +0.42% | |
+| optcarrot | 8,267,383,775 | 8,267,415,013 | +0.0003% | |
+
+- The walk is gone, and with it the 48,000 a class.
+- WHO PAYS. Every class is one turn of the loop that builds the rows (22
+  instructions for an exception class with no attribute), and only a class
+  that has an ivar is asked more (class_exc_built_by_name tests the ivar
+  count first). A program with no class of its own: 44 to 184 instructions,
+  whole. A class with an ivar that is no exception: 191, one call of
+  class_is_exc_subclass, which master's own layout check asks of the same
+  class. An exception class with an
+  `initialize` of its own: 1,149 (it was 2,613 before the reorder of part
+  1: the reopened-builtin test is a search of the builtin names and now
+  runs only for a class that passed the other three). Such a class: 8,700
+  of the compiler's own and about 18,000 in all, for the row of the table,
+  the scan's name at each site and the two entries.
+- WHAT IS LEFT for a program master ran right and that has no such class:
+  the 191 a class with an ivar (0.02% at 300 classes) or the 1,149 (0.07%),
+  and no change of its C. The totals move more than that by glibc alone:
+  its `strncmp` is called the same number of times on both (643,210 at 300
+  plain classes, 953,136 at 300 with an initialize, 21,628 for the seven
+  lines) and costs more or less by where the strings lie.
+- I did not cut the 191: it is one ask of a question master asks of every
+  class, and removing it needs a cache master does not keep.
+
+## 6. Checks of record
+
+On 2afc69c54d7a (the head's own base), both sides built there, the head
+from nothing (`make clean`, then `make`); the short set for a clean replay:
+- The six tests in 12 cells each (gcc and clang, with and without
+  --share-strings, SPINEL_GC_STRESS 0, 1, 2): 72 pass; on the bare tip 18
+  pass and 54 fail. Two neighbours (exception_user_method_generic_receiver,
+  share_strings_exception_literal): 24 pass.
+- tools/cident.sh against the bare tip: 6,775 identical, 12 differ, 0
+  refusal changes; with CIDENT_FLAGS=--share-strings 6,774 identical, the
+  same 12 differ, 0 refusal changes, 1 refused by both alike. The 12 are
+  five of the tests (all but exception_attribute_builtin_reopened) and
+  seven of the corpus that hold such a class
+  (builtin_ivar_boxed_reflection, class_value_new_exception_subclass,
+  exception_bare_new_in_class_method, exception_message_super_private_def,
+  exception_object_surface, ivar_set_poly_builtin_reopen,
+  systemcallerror_message_from_errno).
+- Those 12 and the sixth test in the corpus lane at -O1
+  (build/test-results) and with SPINEL_SHARE_STRINGS=1
+  (build/test-results-shared): 13 PASS in each.
+- tools/refusals.sh: pass, 594 records. `make reject-test`: pass.
+- `LC_ALL=C.UTF-8 ruby tools/gate.rb check` with the commit staged on a
+  clean tree at the tip: rc 0 (it warns that no Ruby 4.0 is here).
+- `make int-min-test`, `make gc-stress-test`, `make shadow-check` (882
+  programs): pass.
+- `make share-strings-test SHARE_TESTS=test/share_strings_exception_attribute.rb`
+  and `ruby tools/share_verify.rb test/share_strings_exception_attribute.rb`
+  (0 diagnostics, 0 failures, 0 channel gaps): pass.
+- optcarrot: the C is byte-equal on the bare tip and the head (12,150
+  lines).
+- The mail: `git am` on 2afc69c54d7a with the mail's date as the committer
+  date and committer Claude gives dc95405220e8.
+- The body's "Before" on the BARE tip: 59 with --share-strings and 0
+  without; the segmentation fault; [1, "r1"]; 29 of 30 for the ensure's
+  clause and for the parent's arm; 0 on master and the head where CRuby
+  prints nil.
+- Probes by C: 241 programs, each on the bare tip and the head, with the
+  flag and without (964 C files), against the same on 5749e9566750: 952
+  byte-equal; the 12 that differ are three programs with Threads (master's
+  lock on the Symbol pool), on both sides, and were run again in full: the
+  same lines, lost 0.
+- Compile time, callgrind of `spinel -c`, both sides in one run: `p 1`
+  1,999,806 to 1,990,412 (-0.47%); the seven lines 7,777,030 to 7,775,722
+  (-0.02%); 300 plain classes 375,406,918 to 375,807,024 (+0.11%); 300
+  exception classes with no attribute 116,373,301 to 116,487,746 (+0.10%);
+  300 with an initialize 728,458,253 to 729,310,149 (+0.12%); one such
+  class 4,271,603 to 4,335,964 (+1.51%); 300 such classes 411,138,889 to
+  417,247,516 (+1.49%); 300 with reads 4,428,138,350 to 4,434,576,216
+  (+0.15%); 1,000 classes 2,563,105,715 to 2,580,961,210 (+0.70%); 2,000
+  classes 8,579,211,412 to 8,615,035,921 (+0.42%); optcarrot 8,267,837,899
+  to 8,267,833,135 (-0.0001%).
+
+On 5749e9566750 (the same patch, 11 commits of master earlier), both sides
+built there, the head from nothing; the WHOLE chain:
+- The same set as above with the same results (6,771 identical, 12 differ;
+  with the flag 6,770 and the same 12; 72 and 24 cells; 13 PASS in each
+  lane; 594 records; gate.rb check rc 0).
+- `make share-strings-test`: pass, whole. `make share-verify-test`: rc 0,
+  whole (1,132 programs, 0 new, 0 failures; its 8 stale entries are three
+  programs of master's that the bare tip reports alike). `make
+  gc-stress-test`, `make shadow-check` (881 programs), `make
+  int-min-test`: pass.
+- The probes of parts 2 and 4, the unset reads, the pairs and the size
+  proof of part 3.
+- The cost rows, gcc and clang (the body's table), and the split of part
+  5; the C of each cost program is byte-equal on 2afc69c54d7a, on both
+  sides.
+
+On 090969e7759b, where the piece was first cut (tree 46ced4af21fc), the
+chain but the four long legs ran before master moved, with the same
+results (6,758 identical, 12 differ; 72 cells; the 187 programs, lost 0).
+
+## Side finds, not worked
+
+- `puts e` on an exception does not call a program's `to_ary` and prints
+  `#<Counted:0x…>` where CRuby prints the message (master and the head
+  alike; the 24 moved lines of part 4).
+- A writer called on an element of an Array that holds exceptions of more
+  than one class (`v.line = 3`) raises NoMethodError at run time, on master
+  and on the head (seen on 090969e7759b); a reader, and a method behind `respond_to?`, work. The
+  tests store through an arm typed to the class or through a method.
+===== 2. source: the old head against this piece =====
+diff --git a/lib/sp_exc.c b/lib/sp_exc.c
+index 9e5231330..60d30c951 100644
+--- a/lib/sp_exc.c
++++ b/lib/sp_exc.c
+@@ -222,10 +222,9 @@ sp_Exception *sp_exc_new_for_catch(const char *cls, const char *msg) {
+    {cls_name, parent_cls_name, msg} prefix set, for a user subclass with
+    ivars that no constructor of its own builds. `scan` marks the struct; a
+    class whose instances are built here and then written to passes its own,
+-   so an ivar the program stores is marked with the object. `nils`, when
+-   given, seeds the ivars whose nil is not the zero pattern. */
++   so an ivar the program stores is marked with the object. */
+ static SP_INLINE void *sp_exc_sub_build(size_t sz, const char *cls_name, const char *msg,
+-                                         void (*scan)(void *), void (*nils)(void *)) {if (!sp_exc_msg_empty_given(msg)) msg = sp_msg_heapify(msg); SP_GC_ROOT_STR(msg);
++                                         void (*scan)(void *)) {if (!sp_exc_msg_empty_given(msg)) msg = sp_msg_heapify(msg); SP_GC_ROOT_STR(msg);
+   sp_Exception *e = (sp_Exception *)sp_gc_alloc(sz, NULL, scan);
+   memset(e, 0, sz);
+   e->cls_name = cls_name ? cls_name : "RuntimeError";
+@@ -233,7 +232,6 @@ static SP_INLINE void *sp_exc_sub_build(size_t sz, const char *cls_name, const c
+   e->xname = sp_box_nil();
+   e->xkey = sp_box_nil();
+   e->xrecv = sp_box_nil();
+-  if (nils) nils(e);
+   if (sp_user_exc_parent_fn) e->parent_cls_name = sp_user_exc_parent_fn(e->cls_name);
+   if (e->parent_cls_name) sp_exc_syserr_init(e);
+   /* heap-launder the message (see sp_exc_new); memset left msg NULL, so a GC
+@@ -249,24 +247,22 @@ static SP_INLINE void *sp_exc_sub_build(size_t sz, const char *cls_name, const c
+   sp_gc_wb((void *)e);
+   return e;
+ }
+-/* With the base scan and no seeds, for the degenerate catch path where a
+-   user subclass with ivars and an initialize of its own was raised without a
+-   carried object: the body is inlined, so this entry is what it was. */
++/* With the base scan, for the degenerate catch path where a user subclass
++   with ivars and an initialize of its own was raised without a carried
++   object: the body is inlined, so this entry is what it was. */
+ void *sp_exc_new_sub_sized(size_t sz, const char *cls_name, const char *msg) {
+-  return sp_exc_sub_build(sz, cls_name, msg, sp_exc_gc_scan, NULL);
++  return sp_exc_sub_build(sz, cls_name, msg, sp_exc_gc_scan);
+ }
+-void *sp_exc_new_sub_ivars(size_t sz, const char *cls_name, const char *msg,
+-                           void (*scan)(void *), void (*nils)(void *)) {
+-  return sp_exc_sub_build(sz, cls_name, msg, scan, nils);
++void *sp_exc_new_sub_ivars(size_t sz, const char *cls_name, const char *msg, void (*scan)(void *)) {
++  return sp_exc_sub_build(sz, cls_name, msg, scan);
+ }
+ /* The same, where sp_exc_new_for_catch built the exception before its class
+    was built at its own size: a frozen message stays frozen there, by that
+    function's own test of the message it is handed. */
+-void *sp_exc_new_sub_caught(size_t sz, const char *cls_name, const char *msg,
+-                            void (*scan)(void *), void (*nils)(void *)) {
++void *sp_exc_new_sub_caught(size_t sz, const char *cls_name, const char *msg, void (*scan)(void *)) {
+   int fz = msg && msg != sp_exc_no_msg && !sp_cmsg_p(msg) &&
+            (((const unsigned char *)msg)[-1] == 0xfa || ((const unsigned char *)msg)[-1] == 0xf8);
+-  sp_Exception *e = (sp_Exception *)sp_exc_sub_build(sz, cls_name, msg, scan, nils);
++  sp_Exception *e = (sp_Exception *)sp_exc_sub_build(sz, cls_name, msg, scan);
+   if (fz && e->msg) ((unsigned char *)e->msg)[-1] = 0xfa;
+   return e;
+ }
+diff --git a/lib/sp_exc.h b/lib/sp_exc.h
+index a5dc915bb..ba068c7ad 100644
+--- a/lib/sp_exc.h
++++ b/lib/sp_exc.h
+@@ -106,10 +106,8 @@ static inline const char *sp_exc_msg_given(const char *m) {
+   return memchr(m, 0, n) ? sp_exc_msg_counted(m, n) : m;
+ }
+ void *sp_exc_new_sub_sized(size_t sz, const char *cls_name, const char *msg);
+-void *sp_exc_new_sub_ivars(size_t sz, const char *cls_name, const char *msg,
+-                           void (*scan)(void *), void (*nils)(void *));
+-void *sp_exc_new_sub_caught(size_t sz, const char *cls_name, const char *msg,
+-                            void (*scan)(void *), void (*nils)(void *));
++void *sp_exc_new_sub_ivars(size_t sz, const char *cls_name, const char *msg, void (*scan)(void *));
++void *sp_exc_new_sub_caught(size_t sz, const char *cls_name, const char *msg, void (*scan)(void *));
+ 
+ void sp_exc_gc_scan(void *p);
+ sp_Exception *sp_exc_new(const char *cls_name, const char *msg);
+diff --git a/src/analyze.c b/src/analyze.c
+index 9e3399a7c..611ac5192 100644
+--- a/src/analyze.c
++++ b/src/analyze.c
+@@ -428,119 +428,6 @@ int an_prog_never_gives(const char *nm, int defs) {
+   return !g_written_by_value && !anh_has(defs ? &g_written_twice : &g_written, nm);
+ }
+ 
+-/* ---- where a method of the program can be found from ----
+-   CRuby runs methods of the program on its own: a hook where a class is
+-   inherited or an object is copied, raised or matched, a conversion where
+-   one is printed or destructured. The compiler runs few of them, and the
+-   names CRuby calls are an open list, so what a class and its objects
+-   answer with is proved here by where a method can come from. Above, the
+-   text names nothing by value and mixes no module in. Here: every def, and
+-   every call by one of the words above that gives, takes away, hides or
+-   renames a method or evaluates a block, stands in the body of a class or
+-   a module, outside every def and block there, with no receiver but self;
+-   so what it makes is that class's or module's own. And no body or
+-   assignment carries the name of a class or module that every class, or an
+-   exception, answers through. Then a class whose every body holds
+-   attribute declarations with literal names and nothing else, under
+-   parents that are such classes up to a builtin, answers with its
+-   attributes and with CRuby's own methods only. */
+-enum { AN_IN_TOP, AN_IN_BODY, AN_IN_CODE };
+-static ANameHash g_attr_only, g_attr_only_not;
+-static int g_method_astray;
+-static int an_above_classes(const char *outer, const char *leaf) {
+-  char q[256];
+-  if (!leaf) return 1;
+-  if (sp_streq(leaf, "Object") || sp_streq(leaf, "BasicObject") || sp_streq(leaf, "Kernel") ||
+-      sp_streq(leaf, "Module") || sp_streq(leaf, "Class") || is_builtin_exception_name(leaf)) return 1;
+-  return outer && snprintf(q, sizeof q, "%s::%s", outer, leaf) < (int)sizeof q && is_builtin_exception_name(q);
+-}
+-static int an_body_only_attrs(const NodeTable *nt, int body) {
+-  int n = 0;
+-  if (body < 0) return 1;
+-  if (nt_kind(nt, body) != NK_StatementsNode) return 0;
+-  const int *v = nt_arr(nt, body, "body", &n);
+-  for (int i = 0; i < n; i++) {
+-    const char *nm = nt_kind(nt, v[i]) == NK_CallNode ? nt_str(nt, v[i], "name") : NULL;
+-    int an = 0;
+-    const int *av = nt_arr(nt, nt_ref(nt, v[i], "arguments"), "arguments", &an);
+-    if (!nm || !(is_attr_reader_family(nm) || is_attr_writer_family(nm)) || an < 1 ||
+-        nt_ref(nt, v[i], "receiver") >= 0 || nt_ref(nt, v[i], "block") >= 0) return 0;
+-    for (int j = 0; j < an; j++) if (nt_kind(nt, av[j]) != NK_SymbolNode) return 0;
+-  }
+-  return 1;
+-}
+-/* Is `n`, a def or a call, in a body with no receiver but self? */
+-static int an_in_own_body(const NodeTable *nt, int n, int in) {
+-  int r = nt_ref(nt, n, "receiver");
+-  return in == AN_IN_BODY && (r < 0 || nt_kind(nt, r) == NK_SelfNode);
+-}
+-static void an_note_method_homes(const NodeTable *nt, int n, int in, const char *outer) {
+-  if (n < 0) return;
+-  NodeKind k = nt_kind(nt, n);
+-  switch (k) {
+-    case NK_DefNode:
+-      if (!an_in_own_body(nt, n, in)) g_method_astray = 1;
+-      in = AN_IN_CODE;
+-      break;
+-    case NK_BlockNode: case NK_LambdaNode: in = AN_IN_CODE; break;
+-    case NK_AliasMethodNode: case NK_UndefNode:
+-      if (in != AN_IN_BODY) g_method_astray = 1;
+-      break;
+-    case NK_CallNode: {
+-      int how = an_by_name_how(nt_str(nt, n, "name"));
+-      if ((how == AN_GIVES || how == AN_GIVES_ALL || how == AN_RENAMES || how == AN_VIS || how == AN_EVAL ||
+-           how == AN_EXEC) && !an_in_own_body(nt, n, in)) g_method_astray = 1;
+-      break;
+-    }
+-    case NK_SingletonClassNode:
+-      if (in != AN_IN_BODY || nt_kind(nt, nt_ref(nt, n, "expression")) != NK_SelfNode) in = AN_IN_CODE;
+-      break;
+-    case NK_ClassNode: case NK_ModuleNode: {
+-      int cp = nt_ref(nt, n, "constant_path"), sc = k == NK_ClassNode ? nt_ref(nt, n, "superclass") : -1;
+-      const char *nm = nt_str(nt, cp, "name"), *par = nt_str(nt, nt_ref(nt, cp, "parent"), "name");
+-      if (an_above_classes(par ? par : outer, nm)) g_method_astray = 1;
+-      int plain = k == NK_ClassNode && in != AN_IN_CODE && nt_kind(nt, cp) == NK_ConstantReadNode &&
+-                  (sc < 0 || nt_kind(nt, sc) == NK_ConstantReadNode) && an_body_only_attrs(nt, nt_ref(nt, n, "body"));
+-      an_written_add(plain ? &g_attr_only : &g_attr_only_not, nm);
+-      an_note_method_homes(nt, sc, in, outer);
+-      an_note_method_homes(nt, nt_ref(nt, n, "body"), AN_IN_BODY, nm);
+-      return;
+-    }
+-    case NK_ConstantWriteNode: case NK_ConstantAndWriteNode: case NK_ConstantOrWriteNode:
+-    case NK_ConstantOperatorWriteNode: case NK_ConstantTargetNode: case NK_ConstantPathTargetNode:
+-    case NK_ConstantPathWriteNode: case NK_ConstantPathAndWriteNode: case NK_ConstantPathOrWriteNode:
+-    case NK_ConstantPathOperatorWriteNode: {
+-      int t = nt_ref(nt, n, "target");
+-      if (t < 0) t = n;
+-      const char *nm = nt_str(nt, t, "name"), *par = nt_str(nt, nt_ref(nt, t, "parent"), "name");
+-      if (an_above_classes(par ? par : outer, nm)) g_method_astray = 1;
+-      an_written_add(&g_attr_only_not, nm);
+-      break;
+-    }
+-    default: break;
+-  }
+-  int nr = nt_num_refs(nt, n), na = nt_num_arrs(nt, n);
+-  for (int i = 0; i < nr; i++) an_note_method_homes(nt, nt_ref_at(nt, n, i), in, outer);
+-  for (int i = 0; i < na; i++) {
+-    int m = 0;
+-    const int *ids = nt_arr_at(nt, n, i, &m);
+-    for (int j = 0; j < m; j++) an_note_method_homes(nt, ids[j], in, outer);
+-  }
+-}
+-/* The statements the compiler's own builtins bring are no text of the
+-   program's. */
+-static void an_note_attr_only_classes(const NodeTable *nt) {
+-  int n = 0;
+-  const int *v = nt_arr(nt, nt_ref(nt, nt->root_id, "statements"), "body", &n);
+-  for (int i = 0; i < n; i++)
+-    if (!nt_int(nt, v[i], "node_bi", 0)) an_note_method_homes(nt, v[i], AN_IN_TOP, NULL);
+-}
+-/* Can no method of the program be found from the class named `nm` beyond
+-   its own attributes and its parent's methods? */
+-int an_class_only_attrs(const char *nm) {
+-  return !g_written_by_value && !g_method_astray && nm && anh_has(&g_attr_only, nm) && !anh_has(&g_attr_only_not, nm);
+-}
+-
+ static int cr_class_is_ancestor(Compiler *c, int sup, int cls) {
+   for (int k = cls, hops = 0; k >= 0 && k < c->nclasses && hops < c->nclasses; k = c->classes[k].parent, hops++)
+     if (k == sup) return 1;
+@@ -40223,7 +40110,6 @@ static void an_phase_reconcile_check(Compiler *c) {
+ void analyze_program(Compiler *c) {
+   double tm_an = sp_timing_now();
+   an_note_written_names(c->nt);
+-  an_note_attr_only_classes(c->nt);
+   AN_PHASE("desugar_register", an_phase_desugar_register(c));
+   AN_PHASE("class_structure", an_phase_class_structure(c));
+   AN_PHASE("block_inline", an_phase_block_inline(c));
+diff --git a/src/analyze.h b/src/analyze.h
+index 3561f4549..9bb0f713f 100644
+--- a/src/analyze.h
++++ b/src/analyze.h
+@@ -110,9 +110,6 @@ void analyze_program(Compiler *c);
+ /* The program as written gives no class a method named `nm`, beyond `defs`
+    (0 or 1) defs of that name: read ahead of the desugars, by absence. */
+ int an_prog_never_gives(const char *nm, int defs);
+-/* No method of the program can be found from the class named `nm`, or from
+-   an object of it, beyond its own attributes and what its parent answers. */
+-int an_class_only_attrs(const char *nm);
+ /* True if a regex source contains a capturing group: an unescaped '(' that
+    isn't the start of a non-capturing/extension group '(?...'. scan returns
+    nested arrays for capturing patterns, which the str_array path can't model. */
+diff --git a/src/analyze_desugar.c b/src/analyze_desugar.c
+index 7b1f591ff..3a45b3e6e 100644
+--- a/src/analyze_desugar.c
++++ b/src/analyze_desugar.c
+@@ -3569,9 +3569,6 @@ int desugar_paren_def_body(Compiler *c) {
+   return changed;
+ }
+ 
+-/* Set once this pass has changed the node table: it settled a test of the
+-   engine and dropped what the test rules out, which CRuby may run. */
+-int g_engine_decided = 0;
+ int desugar_engine_branches(Compiler *c) {
+   NodeTable *nt = (NodeTable *)c->nt;
+   int n0 = nt->count;
+@@ -3684,7 +3681,6 @@ int desugar_engine_branches(Compiler *c) {
+     if (ck == NK_ModuleNode || ck == NK_ClassNode || ck == NK_SingletonClassNode)
+       changed |= engine_splice_list(nt, nt_ref(nt, id, "body"));
+   }
+-  if (changed) g_engine_decided = 1;
+   return changed;
+ }
+ 
+diff --git a/src/codegen.c b/src/codegen.c
+index 60dbe8ba9..1b8661898 100644
+--- a/src/codegen.c
++++ b/src/codegen.c
+@@ -9179,32 +9179,13 @@ int class_needs_scan(ClassInfo *ci) {
+   return 0;
+ }
+ 
+-/* "No initialize in the chain" is read from the class table, and the table
+-   holds what the compiler kept of what it read. The arm of a test the
+-   analysis settled (g_engine_decided) may hold the `def initialize` or the
+-   accessor CRuby runs; so may a file the compiler did not read, and a method
+-   the program names or makes by something its text does not spell; and a
+-   `raise` of the class by its name asks the class's own `exception` for the
+-   object, where the program gives a class one. an_prog_never_gives answers
+-   for the last three. In such a program what CRuby builds is not known from
+-   the chain, so its exception classes are built as they were. */
+-int exc_chain_unknown(void) {
+-  return g_engine_decided || !an_prog_never_gives("exception", 0);
+-}
+-
+-/* What the generated code calls to build a class with ivars and no
+-   initialize where it builds one itself. */
+-const char *exc_sub_builder(void) {
+-  return exc_chain_unknown() ? "sp_exc_new_sub_sized" : "sp_exc_new_sub_ivars";
+-}
+-
+ /* An exception class of the program's with ivars and no initialize is built
+    by the runtime (sp_exc_new_sub_ivars), not by a constructor: by `.new`,
+    or, raised by its name, when it is caught. */
+ int class_exc_built_by_name(Compiler *c, int cid) {
+   return c->classes[cid].nivars > 0 && class_is_exc_subclass(c, cid) &&
+-         !is_builtin_reopen(c->classes[cid].name) &&
+-         comp_method_in_chain(c, cid, "initialize", NULL) < 0 && !exc_chain_unknown();
++         comp_method_in_chain(c, cid, "initialize", NULL) < 0 &&
++         !is_builtin_reopen(c->classes[cid].name);
+ }
+ 
+ /* The names of the classes built by name stand in one table of the generated
+@@ -9280,48 +9261,10 @@ static void emit_exc_by_name_table(Compiler *c, Buf *b) {
+               "static sp_Exception *sp_exc_catch_own(const char *cls, const char *msg);\n");
+ }
+ 
+-/* Can no method of the program be found from the class or from an object of
+-   it, beyond its attributes? Asked of the class and of each parent the
+-   program wrote, up to the builtin exception. */
+-static int class_exc_only_attrs(Compiler *c, int cid) {
+-  for (int k = cid, guard = 0; k >= 0 && guard < 256; guard++) {
+-    if (!an_class_only_attrs(c->classes[k].name)) return 0;
+-    if (superclass_builtin_exc_name(c->nt, nt_ref(c->nt, c->classes[k].def_node, "superclass"))) return 1;
+-    k = c->classes[k].parent;
+-  }
+-  return 0;
+-}
+-
+-/* The runtime zeroes the struct. Does the class have an ivar whose nil is not
+-   the zero pattern? Then sp_<Class>__ivnil seeds those slots, as a
+-   constructor does: but only where the slot can hold nothing CRuby stored
+-   and the compiler did not. CRuby runs methods of the program on its own (a
+-   hook, a conversion, the class's own `new`); where one stores the zero
+-   value, the zeroed slot is CRuby's answer and nil is not. So the seed
+-   goes to a class no method of the program can be found from, in a
+-   program with no finalizer (a block the collector runs when it chooses,
+-   and CRuby's chooses another moment), and every other class keeps the
+-   zeroed slot. The size and the scan do not wait on that: a zeroed slot
+-   holds nothing to mark, as in any object between its allocation and its
+-   constructor. */
+-int class_exc_ivnil(Compiler *c, int cid) {
+-  ClassInfo *ci = &c->classes[cid];
+-  if (!class_exc_built_by_name(c, cid) || g_uses_finalizers || !class_exc_only_attrs(c, cid)) return 0;
+-  Buf t = {0};
+-  emit_ivar_nil_inits(&t, ci, "", "", "");
+-  int seeded = t.len > 0;
+-  free(t.p);
+-  return seeded;
+-}
+-
+ /* The rest of a sp_exc_new_sub_ivars call for such a class: its own scan,
+-   so an ivar the program stores is marked, and its nil seeds if it has any. */
++   so an ivar the program stores is marked. */
+ void emit_exc_ivars_tail(Compiler *c, int cid, Buf *b) {
+-  const char *cn = c->classes[cid].c_name;
+-  if (exc_chain_unknown()) return;
+-  buf_printf(b, ", sp_%s__gc_scan, ", cn);
+-  if (class_exc_ivnil(c, cid)) buf_printf(b, "sp_%s__ivnil", cn);
+-  else buf_puts(b, "NULL");
++  buf_printf(b, ", sp_%s__gc_scan", c->classes[cid].c_name);
+ }
+ 
+ /* Emit the GC scan function (marks heap ivars) for a class that needs one.
+@@ -9373,12 +9316,6 @@ void emit_class_scan(Compiler *c, ClassInfo *ci, Buf *b) {
+     }
+   }
+   buf_puts(b, "}\n");
+-  if (cid >= 0 && class_exc_ivnil(c, cid)) {
+-    buf_printf(b, "SP_UNUSED static void sp_%s__ivnil(void *p) {\n", ci->c_name);
+-    buf_printf(b, "  sp_%s *self = (sp_%s *)p;\n", ci->c_name, ci->c_name);
+-    emit_ivar_nil_inits(b, ci, "self->", "  ", ";\n");
+-    buf_puts(b, "}\n");
+-  }
+ }
+ 
+ /* An int ivar's nil default differs from its zero bit-pattern: its nil is
+@@ -16583,11 +16520,11 @@ static void emit_user_exc_dispatch(Compiler *c, Buf *b) {
+   /* That dispatch casts a boxed exception to the struct of the class it
+      names. Where the raise carried no object the rescue builds what it
+      caught from the name: a row of sp_xbn_name is a class built by its name
+-     (class_exc_by_name_row), built at its own size, with its own scan and nil
+-     seeds; any other name is the runtime's to build, as it was. `caught` is
+-     set where sp_exc_new_for_catch built the exception before, and a frozen
+-     message stays frozen there as it did (sp_exc_new_sub_caught); a rescue
+-     arm typed to a parent class passes 0, as its own builder never kept it. */
++     (class_exc_by_name_row), built at its own size, with its own scan; any
++     other name is the runtime's to build, as it was. `caught` is set where
++     sp_exc_new_for_catch built the exception before, and a frozen message
++     stays frozen there as it did (sp_exc_new_sub_caught); a rescue arm typed
++     to a parent class passes 0, as its own builder never kept it. */
+   exc_by_name_rows(c);
+   if (g_xbn_n) {
+     buf_puts(b, "SP_UNUSED static void *sp_exc_own_by_name(const char *cls, const char *msg, int caught){\n"
+diff --git a/src/codegen_call.c b/src/codegen_call.c
+index 11f59232a..2f9c8b79c 100644
+--- a/src/codegen_call.c
++++ b/src/codegen_call.c
+@@ -10248,7 +10248,7 @@ int emit_exc_sub_new_arm(Compiler *c, int ci, int argc, const int *atmp, int rt2
+     else buf_puts(b, "(&(\"\\xff\")[1]); ");
+   }
+   if (c->classes[ci].nivars > 0) {
+-    buf_printf(b, "_t%d = sp_box_obj(%s(sizeof(sp_%s), ", rt2, exc_sub_builder(), c->classes[ci].c_name);
++    buf_printf(b, "_t%d = sp_box_obj(sp_exc_new_sub_ivars(sizeof(sp_%s), ", rt2, c->classes[ci].c_name);
+     emit_exc_cls_name(c, ci, cn, b);
+     buf_puts(b, ", _m");
+     emit_exc_ivars_tail(c, ci, b);
+@@ -11599,7 +11599,7 @@ void emit_exc_new_no_init(Compiler *c, int id, int ci, int argc, const int *argv
+            exc_msg_handle(c, argv[0], mh, sizeof mh);
+   if (hm) buf_printf(b, "((sp_%s *)sp_exc_attach_msg(", c->classes[ci].nivars > 0 ? c->classes[ci].c_name : "Exception");
+   if (c->classes[ci].nivars > 0) {
+-    buf_printf(b, "((sp_%s *)%s(sizeof(sp_%s), ", c->classes[ci].c_name, exc_sub_builder(), c->classes[ci].c_name);
++    buf_printf(b, "((sp_%s *)sp_exc_new_sub_ivars(sizeof(sp_%s), ", c->classes[ci].c_name, c->classes[ci].c_name);
+     emit_exc_cls_name(c, ci, cn2, b);
+     buf_puts(b, ", ");
+   }
+diff --git a/src/codegen_call_class.c b/src/codegen_call_class.c
+index 5eb37884c..79dc5fa89 100644
+--- a/src/codegen_call_class.c
++++ b/src/codegen_call_class.c
+@@ -2119,7 +2119,7 @@ int emit_call_new_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const c
+                    exc_msg_handle(c, argv[0], mh, sizeof mh);
+           if (hm) buf_printf(b, "((sp_%s *)sp_exc_attach_msg(", c->classes[ci].nivars > 0 ? c->classes[ci].c_name : "Exception");
+           if (c->classes[ci].nivars > 0) {
+-            buf_printf(b, "((sp_%s *)%s(sizeof(sp_%s), ", c->classes[ci].c_name, exc_sub_builder(), c->classes[ci].c_name);
++            buf_printf(b, "((sp_%s *)sp_exc_new_sub_ivars(sizeof(sp_%s), ", c->classes[ci].c_name, c->classes[ci].c_name);
+             emit_exc_cls_name(c, ci, cn2, b);
+             buf_puts(b, ", ");
+           }
+diff --git a/src/codegen_internal.h b/src/codegen_internal.h
+index 34b5cccf5..0af71c9f1 100644
+--- a/src/codegen_internal.h
++++ b/src/codegen_internal.h
+@@ -2170,13 +2170,10 @@ void emit_class_struct(Compiler *c, ClassInfo *ci, Buf *b);
+ int class_needs_scan(ClassInfo *ci);
+ void emit_class_scan(Compiler *c, ClassInfo *ci, Buf *b);
+ int class_exc_built_by_name(Compiler *c, int cid);
+-int exc_chain_unknown(void);
+-const char *exc_sub_builder(void);
+ const char *exc_catch_builder(Compiler *c);
+ int class_exc_by_name_row(Compiler *c, int cid);
+ void emit_exc_cls_name(Compiler *c, int cid, const char *name, Buf *b);
+ int class_exc_has_by_name_sub(Compiler *c, int cid);
+-int class_exc_ivnil(Compiler *c, int cid);
+ void emit_exc_ivars_tail(Compiler *c, int cid, Buf *b);
+ int comp_class_is_module(Compiler *c, ClassInfo *ci);
+ int hv_value_class(Compiler *c, int recv);   /* analyze_infer.c (#4846) */
+diff --git a/src/codegen_stmt.c b/src/codegen_stmt.c
+index 593a5d31a..17067a721 100644
+--- a/src/codegen_stmt.c
++++ b/src/codegen_stmt.c
+@@ -9765,7 +9765,7 @@ void emit_rescue(Compiler *c, int id, Buf *b, int indent, int fr, const char *re
+   if (spec_cid >= 0) {
+     const char *xn = c->classes[spec_cid].name;
+     /* a class with ivars and no initialize is raised by its name and built
+-       here: with its own scan and nil seeds, as Klass.new builds it */
++       here: with its own scan, as Klass.new builds it */
+     int by_name = class_exc_built_by_name(c, spec_cid);
+     const char *fn = by_name ? "sp_exc_new_sub_ivars" : "sp_exc_new_sub_sized";
+     int own_sub = 0;
+diff --git a/src/compiler.h b/src/compiler.h
+index 46892d8e2..e1a312678 100644
+--- a/src/compiler.h
++++ b/src/compiler.h
+@@ -1313,10 +1313,6 @@ int comp_defined_guard_false(Compiler *c, int pred);
+ /* the dual: statically-true defined?(Const / Const::Path) guard */
+ int comp_defined_guard_true(Compiler *c, int pred);
+ 
+-/* desugar_engine_branches settled a test and changed the node table: code
+-   CRuby may run is not in it (analyze_desugar.c) */
+-extern int g_engine_decided;
+-
+ /* Classes. */
+ ClassInfo *comp_class_new(Compiler *c, const char *name, int def_node);
+ int        comp_class_index(Compiler *c, const char *name);   /* -1 if none */
