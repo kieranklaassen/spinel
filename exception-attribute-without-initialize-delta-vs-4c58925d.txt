@@ -1,0 +1,252 @@
+# Row 264 (HE): the reader's delta against 4c58925d276e
+
+Title, unchanged: "An attribute of an exception class with no initialize is nil
+until set, and is marked once set".
+
+## Where it stands
+
+- Head 1521c16a01ce657a59ea8daec6ebb2f8e57fd7e6, ONE commit above
+  ec35ec49070357d9f22f1cdffe54b8807aa901ae (fork branch
+  claude/receiver-first-on-4337d93c: "A method added to a builtin runs
+  its receiver before its arguments" on upstream 4337d93cfc9b). Tree
+  33c86fbcf983c22ffe6f6e958794f840ff4b75ee.
+- It is a plain replay of ef23b3b892e6 (the same commit on b3c03927a022,
+  handed over in comments 6076722525, 6076741002 and 6076783473): no line of
+  the code changes, and the stable patch-id is EQUAL, plain
+  (0dc9d3d6fd154ed65813aab63c8c17c0eb652eb9) and at -U0
+  (a57df9c582569206129026c1aae339df7cbe80d2). The texts changed by the lines
+  listed in the first comment: the module mixed in, the counts, master's
+  column of the cost table and the compile-time figures.
+- Those two are NOT the patch-ids of 4c58925d276e (5eda5356478f plain,
+  4d72af9989ea at -U0): the code moved against it by the lines listed next.
+- Upstream's tip is 4337d93cfc9bbff8729d4eaffaa5674db838339b by the builder's
+  ls-remote at 10:16 UTC 10-09: the base's own parent. The head stands on
+  the tip, so there is nothing to merge.
+
+## What moved against 4c58925d276e, by line
+
+Everything not listed is the same added and removed lines (the two patches
+compared line by line, context left out).
+
+1. Makefile: the `test/exception_attribute_marked.rb \` line in
+   GC_STRESS_TESTS is gone (upstream has no such list now);
+   test/exception_attribute_marked.rb opens with `# spinel: gc-stress`.
+2. The engine fact's three lines, which this piece carries:
+   - src/analyze_desugar.c, above desugar_engine_branches: a two-line comment
+     and `int g_engine_decided = 0;`
+   - the same function, ahead of its `return changed;`:
+     `if (changed) g_engine_decided = 1;`
+   - src/compiler.h, a paragraph of its own just above `/* Classes. */`: a
+     two-line comment and `extern int g_engine_decided;`
+3. The decline, src/codegen.c, above class_exc_built_by_name:
+   `int exc_chain_unknown(void) { return g_engine_decided ||
+   !an_prog_never_gives("exception", 0); }` and
+   `const char *exc_sub_builder(void)`, which names sp_exc_new_sub_sized where
+   exc_chain_unknown() and sp_exc_new_sub_ivars where not.
+4. Its four uses:
+   - class_exc_built_by_name ends `... < 0 && !exc_chain_unknown();`
+   - emit_exc_ivars_tail begins `if (exc_chain_unknown()) return;`
+   - the three sites that printed the literal `sp_exc_new_sub_ivars(` print
+     `%s(` with exc_sub_builder() (src/codegen_call.c twice,
+     src/codegen_call_class.c once)
+   - src/codegen_internal.h declares the two.
+5. Three guard tests with their .expected (CRuby 3.3.6), each passing on the
+   base too: test/exception_attribute_engine_test.rb,
+   test/exception_attribute_computed_initialize.rb,
+   test/exception_attribute_own_exception.rb.
+
+No line of the receiver-first piece's files changes. HE asks its public
+question an_prog_never_gives and reads no static of it.
+
+## The decline, term by term
+
+In a declined program the generated C is the base's byte for byte (and the
+bare tip's): class_exc_built_by_name is false for every class, so no table,
+no row, no `__ivnil`, and the three build sites name the old builder with the
+old arguments.
+
+- THE ENGINE FACT (g_engine_decided). desugar_engine_branches settles a test
+  of RUBY_ENGINE, RUBY_VERSION, a `defined?` or a `method_defined?` and drops
+  the arm the test rules out before the class table is built. A
+  `def initialize` spelled plainly in the dropped arm is in no table and is
+  no by-value site, so no other term sees it.
+- THE WORD `exception` (!an_prog_never_gives("exception", 0)). `raise One,
+  "m"` asks `One.exception("m")` for the object. Where the program writes
+  that name as a def or a Symbol, what is raised may be another object, or
+  one the method stored into.
+- BY VALUE, held by the same call. an_prog_never_gives answers "may" for
+  every name once g_written_by_value is set: a method made or named by
+  something the text does not spell (`define_method(name.to_sym)`).
+- THE UNREAD-FILE FLAG is NOT a term of its own: my call, dropped. The third
+  holds it provably: the walk starts `int by_value = g_require_unread` and
+  ends `if (by_value || ...) g_written_by_value = 1`, so the flag set means
+  an_prog_never_gives answers "may" for every name. Counted too: over the
+  6,418 test programs the flag is set in 218 and in none of them is the
+  walk clear.
+
+Two twins decide it: a file required by a computed name that holds
+`def self.exception` (u13) or the reader `def tag = (@tag || 0)` (u14) prints
+the bare tip's line in 12 cells with the tip's C on this two-term head.
+
+So the flag alone is not enough for HE: it says nothing of a name sent by
+value in a file that was read, nor of `exception`.
+
+## The reading of `changed`
+
+Every write desugar_engine_branches makes to the node table raises `changed`
+before the function returns: engine_absent_fold returns 1 only after its
+writes; the comparison fold; the `&&` and `||` fold; the dead arm; both
+branches of the statements loop, the blanked return among them; the splice.
+The one `break` (a failed malloc) stands ahead of any write. So
+g_engine_decided clear means the table is as parsed, as far as this pass goes.
+
+## The twins
+
+Each was run on CRuby 3.3.6, the bare tip 4337d93cfc9b, the base and the head,
+in 12 cells a compiler (gcc and clang, with and without --share-strings,
+SPINEL_GC_STRESS 0, 1, 2), and the head's C compared with the tip's and the
+base's, with the flag and without. The programs are the builder's t, u, k
+and s sets, named in brackets below.
+
+S7, a dropped arm (t1 to t12) and an unread file (u1 to u12): 20 of the 24
+build, and in all 20 the head prints the bare tip's line in 12 cells and its C
+is the tip's and the base's byte for byte. The other four (`load`, `autoload`,
+`eval(File.read(..))`) are refused at compile on all three.
+
+(1) The constructor or the reader made by define_method of a name by value
+(k4: `define_method(name.to_sym)` for initialize; k22: for the reader): CRuby
+and the bare tip `0 0 "r"`, the head the same, the tip's C.
+
+(2) An `exception` of the program's own, each `0 0 "r"` on the tip and the
+head with the tip's C (CRuby `nil 0 "r"`, the made object not being raised):
+`def self.exception` (k26); the tap form (k35); `class << self` with a
+`def exception` (k37); `define_singleton_method(:exception)` (k38); one where
+only a PARENT class of the program's own defines it (k39). An instance
+`def exception` (k28): CRuby `nil nil "r"`, the tip and the head `0 0 "r"`
+with the tip's C; the fix is given up there.
+
+Right on both or refused on both, so no twin (one cell each, the tip against
+the head, on b3c03927a022): `define_method(:initialize)` with the literal;
+`[:initialize].each { |n| define_method(n) }`; `%w[initialize].each`;
+`class_eval { def initialize }`; an anonymous parent; a parent's initialize;
+refused at compile on both: `send(:define_method, ..)`, `One.include(M)`,
+`class_eval("..")`, `eval("..")`, `class_exec`, `define_method` with a
+block-pass, `self.new` with super, `One.prepend(Module.new { .. })`.
+
+## S8, a module that is no text of the program's ahead of the class
+
+Closed by the base: its walk takes a call named include, prepend or extend
+with an argument that is no literal for a by-value site, so
+an_prog_never_gives answers "may" and HE declines. No word of HE's is added.
+
+The three that lost on b3c03927a022 print the bare tip's line in 12 cells
+with the tip's C here: `prepend Enumerable` in an exception class with
+`attr_accessor :count` (s7) or `:sum` (s12) and an empty `each`, in the class
+body or in a reopening `class One; prepend Enumerable; end` (s13); CRuby and
+the tip `0 0 "r"`.
+
+Every other program that mixes a module in is the tip's C byte for byte now,
+right or wrong as the tip is: an own module with the reader prepended (s3)
+or included (s4); `class << self; prepend M` (s6) and `extend M` (s10) with
+an `exception` in M; a parent that prepends (s8) or includes (s11) an own
+module's initialize, and the class itself including (k9) or prepending (k18)
+one; the attribute in the parent and Enumerable included in the subclass
+(s15) or an own module between (s16); `include Enumerable` in the class
+(s17). The fix is given up in one of them: a parent that prepends Enumerable
+(s14: CRuby nil, the tip and the head 0).
+
+A call of that name whose arguments are literals is no site:
+`s.prepend("a")` on a String beside such a class (s20) keeps the fix (CRuby
+and the head nil, the tip 0).
+
+Refused at compile on the tip and the head alike (one cell each, on
+b3c03927a022): `One.prepend(M)`, `One.send(:prepend, M)`,
+`singleton_class.prepend(M)`. `Enumerable.send(:prepend_features, One)`
+raises NoMethodError at run time on both.
+
+## Cost of declining
+
+- Over the head's 6,418 test programs: the engine fact 26, by value 960, the
+  word `exception` beyond that 22 (an `exception:` keyword, as in
+  `Integer(s, exception: false)`, is the Symbol), declined 996. On
+  b3c03927a022 it was 608 of 6,409: the difference is the base's rule that a
+  module mixed in by a name that is no literal is a by-value site (570 by
+  value there).
+- Of the 14 that hold such a class, 5 are declined: the three guard tests,
+  builtin_ivar_boxed_reflection and ivar_set_poly_builtin_reopen (a
+  `Marshal.load`, by value). The other 9 are the nine the C differs for.
+- Of my 24 programs 20 build, and the decline gives all 20 the tip's C: in 16
+  the tip's 0 for the Integer attribute is CRuby's; in 2 (t6, t7) CRuby
+  prints nil and the fix is given up; t8 keeps an initialize under
+  `RUBY_ENGINE == "spinel"` and is no such class; u5 raises LoadError at run
+  time on all three.
+
+## Checks run on this head
+
+Linux, gcc 13.3, clang 18.1.3, CRuby 3.3.6; CONTRIBUTING.md and the template
+unchanged since they were read on 9c57b440b908.
+
+- The bare tip, the base and the head built. The eight new tests and two
+  neighbours in 12 cells each on the head: 120 pass, 0 fail. The eight on the
+  base: 52 pass and 44 fail (the four guards pass in all their cells there).
+- The corpus against the base (tools/cident.sh): 6,672 programs emit the same
+  C and 9 differ, no refusal changes; the same nine with --share-strings.
+  tools/refusals.sh (554 records) and make reject-test pass.
+- The gate's two corpus lanes for those nine and the four other new tests: 13
+  PASS at -O1, 13 PASS at -O1 with SPINEL_SHARE_STRINGS=1.
+- tools/gate.rb check with the commit staged, rc 0 (the staged tree is the
+  record's); make int-min-test, share-strings-test and gc-stress-test pass.
+- make shadow-check (new on this tip, no gate lane): pass, 869 programs on
+  the head and 868 on the base. desugar_engine_branches is called once,
+  ahead of the fixpoint, and is not among the passes the fixpoint skips.
+- optcarrot's C is the base's byte for byte (12,147 lines).
+- The body's four programs: the base prints 59 (with the flag), 0, nothing
+  (the segmentation fault) and 0 with [1, "r1"]; the head prints CRuby's
+  lines. The two probes: fz1 to fz4 answer as CRuby in 12 cells each, fz5 and
+  fz6 are wrong on both trees alike; the receiver probes rp1, rp1b, rp2 as
+  before (rp2 as CRuby on the head).
+- The 51 twins above, run again on this base: line for line what they gave on
+  4b017e8987a0 (46 with the tip's and the base's C, 4 refused on all three,
+  s20 keeping the fix).
+- The cost rows measured again on this base, every function listed
+  (--threshold=100): gcc 2367.7 +5.0; 5607.1 +86.1 (+20.1, +66.0); 4460.8
+  +42.0 (+20.0, +22.0); 6242.5 +105.05 (+44.80, +60.25); 6074.7 -173.5
+  (-132.6, -40.9); a program with an initialize +0.00; a program with a plain
+  class, whose C is the same, 1,128 instructions more in the 150,000-turn
+  run and none in the 50,000-turn one, 1,120 of them in glibc's malloc_trim,
+  malloc_consolidate and systrim. clang: glibc's column -66.0, -33.0, +11.3,
+  totals -47.9, -15.0, +55.5, the builtin row +6.0. The changes are the
+  table's to the digit; master's column is this tip's, about one instruction
+  above b3c03927a022's in four rows.
+- Compile time, instructions of `spinel -c` under callgrind, the base's
+  compiler against the head's, a program that only defines n such classes
+  with two attributes: n = 1, 4,497,236 to 4,605,566 (+2.41%); n = 300,
+  418,429,540 to 433,886,949 (+3.69%); n = 1,000, 2,587,423,323 to
+  2,636,251,304 (+1.89%); n = 2,000, 8,627,662,969 to 8,726,185,305 (+1.14%).
+  That is 51,525, 48,828 and 49,261 instructions a class: flat. 300 raises of
+  such classes: +0.34%.
+- Those are above the same code's on b3c03927a022 and 4b017e8987a0 (45,679,
+  42,831 and 43,591 a class), and the texts carry this base's. Profiled side
+  by side at n = 300 on 4b017e8987a0 and here, the head less the base is the
+  same in every function but glibc's strncmp: 106,201 more calls on both
+  (354 a class, under the lookups of a builtin's row), 2,696,558
+  instructions there and 4,439,262 here. The base's own 687,386 calls cost
+  17.9 million instructions on the tip before and 27.7 million on this one:
+  26 a call and 40, by where this tip's build puts the strings. The work is
+  the same; glibc's rate moved under it.
+- With no such class the C is the same and the difference is glibc's strcmp
+  alone: +2,254 and +9,277 instructions on two small programs (0.12%; in a
+  profiled run of each strcmp is +2,460 of +2,141 and +10,884 of +10,772),
+  -0.009% on optcarrot. The body says "under 0.15% more".
+
+Not run: the Mac's gate, the whole corpus under gate-test-shared, CRuby 4.0.
+
+## Side finds, recorded and not worked
+
+- The tip drops a `define_method` of a name by value silently (with `@tag = 7`
+  CRuby prints 7, the tip 0).
+- A reopened StandardError or RuntimeError with an initialize fails in the C
+  compiler.
+- A `require` of a computed path is dropped with no warning.
+- An included module's method runs ahead of the class's own attribute reader
+  (s4, s17).
