@@ -1,0 +1,94 @@
+===== 1. what met in analyze_program, as written in the hand-over =====
+**What met.** `git merge-tree --write-tree` of `3e15f8becfdd` and the tip exits 1 with one conflict, in src/analyze.c, in `analyze_program`: upstream's "--timing reports each fixpoint pass, the re-narrow loop and the analysis phases" writes the four phase calls ahead of the fixpoint as `AN_PHASE("desugar_register", an_phase_desugar_register(c));` and so on, and the piece adds its one line `an_note_written_names(c->nt);` ahead of the first of them. Settled as both: the piece's line, then upstream's four. Every other file merges by itself.
+
+**The walk still runs first.** `AN_PHASE(nm, call)` is `do { double _ph0 = sp_timing_now(); call; sp_timing_end(_ph0, "an_" nm, ""); } while (0)`: it times a call and moves none. The walk is a plain call ahead of `an_phase_desugar_register`, so its time is in `analysis` and in no phase of its own; `make timing-test`, which asks for the phases by name, passes (below). The five commits past `978e0dea5524` change `an_phase_infer_fixpoint` (20 hunks: the fixpoint now skips a tree-only desugar pass the tree has not moved under, and times each pass), `analyze_program` (the four lines above and the eight after the fixpoint), `an_phase_reconcile_check` and `an_retract_stale_reverse_widening` in src/analyze.c, and `toplevel_def`, `arity_call_block`, `arity_violation`, `emit_wrong_count` and `poly_arity_plan` in src/codegen_call.c. None is a function of the piece but `analyze_program`, at that one place. The whole move from `68d40ff05fd4` to the tip, 59 commits, by the line ranges of both diffs: `analyze_program` is the one function in common (src/analyze.c 2 functions of the piece and 25 of the move; src/codegen_call.c 3 and 9, none in common; src/codegen_call_string.c 1 and 1, none; the move does not touch the piece's other files). The walk reads the node table and writes its own three tables and one flag; nothing in the fixpoint's new skip reads those, and the walk moves no node.
+===== 2. the delta against 3e15f8becfdd, by hunk, as written in the hand-over =====
+**The delta against `3e15f8becfdd`, by hunk** (`git diff -U0` of each commit against its parent: 49 hunks on both). The added and removed lines of every hunk are the same; the stable patch-id of the `-U0` diff is the same on both, `daf31968d753ca20ec52e47a5214ed93f2dc2e09`. With context (`-U3`) it is `6583dd07b748f01e5eb0a973159b42640d509b66` on `68d40ff05fd4` and `43f8142246a27c9df4e73d559085fb721f25afde` here: the one context line that differs is the line after hunk 2, `an_phase_desugar_register(c);` then and `AN_PHASE("desugar_register", an_phase_desugar_register(c));` now. Hunks 2, 4 to 13 and 33 stand further down, by upstream's lines above them. sha256 `4283057f185e47067668866d0203e0ba1842a05cd53bc7ef8ce327449821f1f8`:
+===== 3. the hunks (the block under that paragraph) =====
+hunks: 49 on 68d40ff05fd4, 49 on 4337d93cfc9b
+ 1 src/analyze.c: 215 lines, lines equal, the same place
+ 2 src/analyze.c: 1 lines, lines equal, -39141,0 +39357 -> -39552,0 +39768
+ 3 src/analyze.h: 3 lines, lines equal, the same place
+ 4 src/codegen_call.c: 241 lines, lines equal, -8708 +8708,240 -> -8744 +8744,240
+ 5 src/codegen_call.c: 6 lines, lines equal, -8722,5 +8961 -> -8758,5 +8997
+ 6 src/codegen_call.c: 1 lines, lines equal, -8741,0 +8977 -> -8777,0 +9013
+ 7 src/codegen_call.c: 2 lines, lines equal, -8747,0 +8984,2 -> -8783,0 +9020,2
+ 8 src/codegen_call.c: 6 lines, lines equal, -8749,3 +8987,3 -> -8785,3 +9023,3
+ 9 src/codegen_call.c: 1 lines, lines equal, -8753,0 +8992 -> -8789,0 +9028
+10 src/codegen_call.c: 2 lines, lines equal, -8755 +8994 -> -8791 +9030
+11 src/codegen_call.c: 1 lines, lines equal, -25082,0 +25322 -> -25180,0 +25420
+12 src/codegen_call.c: 2 lines, lines equal, -25084 +25324 -> -25182 +25422
+13 src/codegen_call.c: 2 lines, lines equal, -25086 +25326 -> -25184 +25424
+14 src/codegen_call_arms.h: 3 lines, lines equal, the same place
+15 src/codegen_call_arms.h: 1 lines, lines equal, the same place
+16 src/codegen_call_class.c: 1 lines, lines equal, the same place
+17 src/codegen_call_class.c: 2 lines, lines equal, the same place
+18 src/codegen_call_class.c: 2 lines, lines equal, the same place
+19 src/codegen_call_class.c: 1 lines, lines equal, the same place
+20 src/codegen_call_class.c: 2 lines, lines equal, the same place
+21 src/codegen_call_class.c: 2 lines, lines equal, the same place
+22 src/codegen_call_class.c: 1 lines, lines equal, the same place
+23 src/codegen_call_class.c: 2 lines, lines equal, the same place
+24 src/codegen_call_class.c: 2 lines, lines equal, the same place
+25 src/codegen_call_class.c: 1 lines, lines equal, the same place
+26 src/codegen_call_class.c: 5 lines, lines equal, the same place
+27 src/codegen_call_class.c: 1 lines, lines equal, the same place
+28 src/codegen_call_class.c: 2 lines, lines equal, the same place
+29 src/codegen_call_class.c: 2 lines, lines equal, the same place
+30 src/codegen_call_class.c: 1 lines, lines equal, the same place
+31 src/codegen_call_class.c: 2 lines, lines equal, the same place
+32 src/codegen_call_class.c: 2 lines, lines equal, the same place
+33 src/codegen_call_string.c: 2 lines, lines equal, -1427 +1427 -> -1428 +1428
+34 src/compiler.h: 3 lines, lines equal, the same place
+35 src/spinel_parse.c: 40 lines, lines equal, the same place
+36 src/spinel_parse.c: 1 lines, lines equal, the same place
+37 src/spinel_parse.c: 1 lines, lines equal, the same place
+38 src/spinel_parse.c: 2 lines, lines equal, the same place
+39 src/spinel_parse.c: 1 lines, lines equal, the same place
+40 src/spinel_parse.c: 1 lines, lines equal, the same place
+41 src/spinel_parse.c: 1 lines, lines equal, the same place
+42 src/spinel_parse.c: 1 lines, lines equal, the same place
+43 src/spinel_parse.c: 1 lines, lines equal, the same place
+44 src/spinel_parse.c: 1 lines, lines equal, the same place
+45 src/spinel_parse.c: 1 lines, lines equal, the same place
+46 src/spinel_parse.c: 1 lines, lines equal, the same place
+47 src/spinel_parse.c: 10 lines, lines equal, the same place
+48 test/reopen_receiver_runs_first.rb: 177 lines, lines equal, the same place
+49 test/reopen_receiver_runs_first.rb.expected: 24 lines, lines equal, the same place
+hunks whose added and removed lines are equal: 49 of 49
+===== 4. commit message -v10 to -v11 (diff -U0) =====
+--- message -v10
++++ message -v11
+@@ -64,9 +64,13 @@
+-extend with an argument that is no literal, a hook beneath them called
+-by hand, or one of those six words as a def or as a Symbol). A module
+-mixed in runs its methods ahead of a class's own, of its parent's or
+-of an object's class's, and a core module's are no text of the
+-program's: after `class String; prepend Kernel; end` Kernel's itself
+-runs for the program's one def of it. That a constant names a module
+-of the program's own is not proved here, so a program that mixes in
+-its own keeps master's C as well. analyze_program reads this ahead of
+-every rewrite, since a desugar erases such a call.
++extend with an argument that is not a String, an interpolation, a
++Symbol, an Integer or a Float literal, nil, true or false; a hook
++beneath them called by hand; or one of those six words as a def or as
++a Symbol). Any other argument makes the call a site: an Array, a
++Regexp or a Range literal, an interpolated Symbol, a literal in
++parentheses and a unary minus on a String among them. A module mixed
++in runs its methods ahead of a class's own, of its parent's or of an
++object's class's, and a core module's are no text of the program's:
++after `class String; prepend Kernel; end` Kernel's itself runs for the
++program's one def of it. That a constant names a module of the
++program's own is not proved here, so a program that mixes in its own
++keeps master's C as well. analyze_program reads this ahead of every
++rewrite, since a desugar erases such a call.
+===== 5. counted again on this base: compile time and the corpus, as written in the hand-over's own checks =====
+- Compile time (callgrind, `spinel -c`, the body's two programs and optcarrot; no function of the piece changed, counted again because the base did): 1,000 calls: tip 1,686,275,430, head 1,713,916,036 (27.6 million more; on `68d40ff05fd4` 26.8 million). 2,000 calls: tip 3,362,820,251, head 3,419,443,783 (56.6 million more; there 55.0 million); the walk 5,546,024, the text read 663,511. optcarrot: tip 8,272,379,316, head 8,276,163,773 (3.8 million more; there 4.8 million); the walk 6,012,926, the text read 1,908,487.
+- The corpus (the 6,410 programs `test/*.rb` at the tip, by a debug build of this head's analyzer that prints each site): the flag is set for 959 (953 of 6,368 on `68d40ff05fd4`); for 218 a file is not read (216); 446 hold a site of the mix-in kind (445), and for 390 it is the only kind (389).
+===== 6. the texts: what changed in the body and what was counted again, as written in the hand-over =====
+**Texts.** The title is unchanged. Body -v12 to -v13, five sentences in three lines: the mend the coordinator ruled on reader 8's point 6, and each count that is of the base:
+- Line 36 (Cost), the compile-time sentence: 1.6% over 1,000 calls (1,686 million to 1,714 million), 1.7% over 2,000 (3,363 million to 3,419 million), 5.5 million the walk and 0.7 million the text read; over optcarrot 6.0 million and 1.9 million of 8,276 million.
+- Line 69, the mix-in kind: "with an argument that is no literal" is now "with an argument that is not a String, an interpolation, a Symbol, an Integer or a Float literal, nil, true or false", and inside the parentheses, after "`s.prepend("x")` is String's": "any other argument makes the call a site, an Array, a Regexp or a Range literal, an interpolated Symbol, a literal in parentheses and a unary minus on a String among them". Checked here by the C of twenty forms of `x.prepend(...)` ahead of the losing shape: the eight kinds, a character literal, a single-quoted String and two adjacent Strings keep the cure; `[1]`, `/z/`, `(1..2)`, `1..2`, `("z")`, `-"z"` and `:"z#{1}"` have the tip's C. A Rational is not named: `x.prepend(3r)` (and `2i`) is refused by the tip's compiler and by this head's alike here. The code comment stays as it is (the ruling).
+- Line 69: the corpus, "Of the 6,410 programs `test/*.rb`, 959 hold a site of one of the five kinds: for 218 of them it is a file not read, and 446 mix a module in, 390 of them with no other site."
+- Line 81, the run line: "`make cident` against master (6,627 programs identical, 4 differ: ...)" is now "the generated C of every program `tools/cident.sh` lists, by this head's compiler and by master's, with that tool's flags (6,669 programs identical, 4 differ: the new test and the three tests counted above; none refused)", which is what was run; and `make timing-test` is named beside the other two.
+No other line. Counted again on this base and found as the body has them: the libraries (18 and 21); the cost a call, the 21 programs of line 36 by callgrind with gcc and clang, the tip's compiler against this head's, each figure to the instruction but one: for the String receiver beside a global read (`mk(i).pair($n)`) my count is 20 and 14, here as on every earlier base, where the body has reader 8's 22 and 14 (its T-1 of the earlier round); the reader's figure, the larger, stays. Not counted again: the 48 probes of line 69 (37 and eleven), which are among the 845 above and stand each in its class by the C. Line 69's "`make cident` finds three corpus programs changed" stands unchanged: found by the tool's own method here, and by the tool itself in the Mac's gate.
