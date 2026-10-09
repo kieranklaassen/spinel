@@ -1,0 +1,22 @@
+Row 270, the round piece: the commit message of record (head 22f9a174f380) against message v2 (head 0a5f017a9c5f). Every changed run of lines, OLD then NEW.
+
+OLD:
+values (emit_poly_defaults_n, src/codegen_poly_plan.c). It writes
+sp_poly_ndigits_f(_gcf.v[0], _t9) now, a helper beside the two
+rounding helpers in lib/spinel_rt.h: where the receiver is an
+Integer, a Float or a Bignum it is sp_float_arg_i, the check
+emit_int_expr writes for a typed Float in an Integer slot.
+
+NEW:
+values (emit_poly_defaults_n, src/codegen_poly_plan.c). It calls
+sp_poly_prec_n_fdigits(_gcf.v[0], _t9, SP_PREC_FLOOR) now, or
+sp_poly_round_n_fdigits for round: two helpers beside the rounding
+helpers in lib/spinel_rt.h that hand the count on through a third,
+sp_poly_ndigits_f. Where the receiver is an Integer, a Float or a
+Bignum that is sp_float_arg_i, the check emit_int_expr writes for a
+typed Float in an Integer slot.
+
+The helpers' names are as long as the cast they stand for, so the
+site's C keeps its length: a dispatch of 320 characters or more is
+moved into a function of its own (pd_hoist), and a longer call
+would carry sites over that size.

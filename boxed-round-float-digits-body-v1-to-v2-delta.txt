@@ -1,0 +1,95 @@
+Row 270, the round piece: the body of record (head 22f9a174f380 on f5f59352e68d) against body v2 (head 0a5f017a9c5f on 6271a4f42cf8). Every changed passage, OLD then NEW; a passage is a paragraph of the body.
+
+OLD:
+Master (f5f59352e) prints `0` four times on x86-64, with gcc and with clang, and exits 0.
+
+NEW:
+Master (6271a4f42) prints `0` four times on x86-64, with gcc and with clang, and exits 0.
+
+----
+
+OLD:
+default: _t9 = sp_poly_prec_n(_gcf.v[0], (sp_int)_t10, SP_PREC_FLOOR); break;
+
+NEW:
+default: _t8 = sp_poly_prec_n(_gcf.v[0], (sp_int)_t9, SP_PREC_FLOOR); break;
+
+----
+
+OLD:
+C leaves the cast undefined for those values. The site now writes `sp_poly_ndigits_f(_gcf.v[0], _t10)` in its place, a helper added beside the two rounding helpers in `lib/spinel_rt.h`:
+
+NEW:
+C leaves the cast undefined for those values. The site now writes
+
+```c
+default: _t8 = sp_poly_prec_n_fdigits(_gcf.v[0], _t9, SP_PREC_FLOOR); break;
+```
+
+`sp_poly_prec_n_fdigits`, and `sp_poly_round_n_fdigits` for `round`, are added beside the two rounding helpers in `lib/spinel_rt.h`. Each hands the count to its helper through a third, `sp_poly_ndigits_f`:
+
+----
+
+OLD:
+(nothing: the passage is new)
+
+NEW:
+static SP_INLINE sp_RbVal sp_poly_round_n_fdigits(sp_RbVal v, sp_float f) { return sp_poly_round_n(v, sp_poly_ndigits_f(v, f)); }
+static SP_INLINE sp_RbVal sp_poly_prec_n_fdigits(sp_RbVal v, sp_float f, int op) { return sp_poly_prec_n(v, sp_poly_ndigits_f(v, f), op); }
+
+----
+
+OLD:
+Cost: the range test on a Float count at this site, at most 6 instructions a call. callgrind, 200,000 calls each, before and after, with the instructions a call in parentheses (`v` a boxed Integer or Float beside the class, `a` a Float local, `ds` a Float Array, `n` an Integer):
+
+NEW:
+Cost: the range test on a Float count at this site, at most 8 instructions a call. callgrind, 200,000 calls each, before and after, with the instructions a call in parentheses (`v` a boxed Integer or Float beside the class, `a` a Float local, `ds` a Float Array, `n` an Integer):
+
+----
+
+OLD:
+| `v.floor(a)`, `v` a boxed Integer | 10,471,397 to 10,671,400 (+1) | 10,829,348, the same |
+| `v.round(ds[i % 3])`, a count read on every call | 28,939,148 to 29,539,147 (+3) | 35,098,641 to 36,298,762 (+6) |
+| `v.floor(ds[i % 3])`, `v` a boxed Float | 47,408,477 to 48,141,811 (+4) | 51,566,135 to 52,566,336 (+5) |
+| `v.floor(n)` | 11,671,397, the same | 12,029,336, the same |
+
+NEW:
+| `v.floor(a)`, `a` a constant | 10,470,634 to 10,670,655 (+1) | 10,828,594 and 10,828,567 (0) |
+| `v.floor(a)`, `a` known only at run time | 11,274,042 to 12,874,059 (+8) | 11,829,793 to 12,629,817 (+4) |
+| `v.round(ds[i % 3])`, a count read on every call | 28,938,399 to 30,338,414 (+7) | 35,097,873 to 36,297,874 (+6) |
+| `v.floor(ds[i % 3])`, `v` a boxed Float | 47,407,700 to 48,541,052 (+6) | 51,565,431 to 52,565,449 (+5) |
+| `v.floor(n)` | 11,670,634 and 11,670,652 (0) | 12,028,582 and 12,028,555 (0) |
+
+----
+
+OLD:
+Where the count does not change in the loop the C compiler lifts the test out of it. The longer line also carries some sites over the size at which master moves a dispatch into a function of its own (320 characters, `pd_hoist`): in a method of 100 such calls, 67 cross that size here and none on master, which costs 10 instructions a call with gcc (15,075,456 to 17,016,223 over 200,000 calls) and nothing with clang (12,033,574 before and after).
+
+NEW:
+Where the count is a constant the C compiler folds the test away (one instruction is left with gcc). The call the site writes is as long as the cast it replaces, because master moves a dispatch of 320 characters or more into a function of its own (`pd_hoist`) and a longer line would carry sites over that size. In a method of 100 such calls none is moved, on master or here, and the generated C is master's but for the helper's name where the cast was: 15,074,616 to 16,077,419, 5 a call, with gcc and 12,032,798 and 12,032,762, nothing a call, with clang, over 200,000 calls.
+
+----
+
+OLD:
+No program under `test/`, `benchmark/` and `packages/*/test/` gets other C: the generated C of all 6,751 is master's (three print the path of the build's own directory and differ in that alone), and optcarrot's is byte-identical.
+
+NEW:
+The helpers are functions because CONTRIBUTING.md asks it ("Helpers are functions, not Ruby-style macros"). With gcc that is 2 to 4 of the instructions above: written as macros the same test costs 6, 3 and 4 a call in the second, third and fourth rows, where the functions cost 8, 7 and 6 (gcc copies the boxed receiver once more on the way in). With clang the two forms cost the same.
+
+No program under `test/`, `benchmark/` and `packages/*/test/` gets other C: the generated C of all 6,785 is master's (three print the path of the build's own directory and differ in that alone), and optcarrot's is byte-identical.
+
+----
+
+OLD:
+- a Time with an infinite or NaN count raises an ArgumentError where Ruby raises a RangeError, and a Rational takes a Float count that Ruby refuses with a TypeError. Where such a count is written as a literal, master's answer for those two depended on how the C compiler folded the undefined cast (gcc and clang differ); both now answer as the cast answered at run time. Of the 4,732 lines probed here 22 move by that, each from a wrong value to a raise; none was a right line, and no raise became a value.
+
+NEW:
+- a Time with an infinite or NaN count raises an ArgumentError where Ruby raises a RangeError, and a Rational takes a Float count that Ruby refuses with a TypeError. Where such a count is written as a literal, master's answer for those two depended on how the C compiler folded the undefined cast (gcc and clang differ); both now answer as the cast answered at run time. Of the 5,044 lines probed here 22 move by that, each from a wrong value to a raise; none was a right line, and no raise became a value.
+
+----
+
+OLD:
+Run here on this commit on master f5f59352e, built from nothing, on x86-64 with gcc 13.3 and clang 18.1: the test in the seven collector lanes with both compilers, with and without `--share-strings`; `ruby tools/gate.rb check`; the generated C of the 6,751 other programs, unchanged; optcarrot, checksum 59662, its C byte-identical; `make share-strings-test` and `make int-min-test`, both pass; the compiler's own instructions over 1,000 and 2,000 lines of one statement inside a method, before and after: `s += 1 if v.floor(a)` with a Float `a`, 1,112,361,506 and 1,109,065,925 (-0.30%) and 2,213,693,433 and 2,213,505,467 (-0.01%); the same with an Integer count, which keeps master's C, 1,112,186,812 and 1,112,165,602 (-0.00%) and 2,213,314,318 and 2,213,269,256 (-0.00%); a program with no such call, 392,165,844 and 392,168,458 (+0.00%) and 778,359,635 and 778,351,912 (-0.00%). The Float pair's count falls: the longer line carries more sites over the size at which master moves a dispatch into a function (333 of the 1,000 stay inline on master, 33 here), so less text is written.
+
+NEW:
+Run here on this commit on master 6271a4f42, built from nothing, on x86-64 with gcc 13.3 and clang 18.1: the test in the seven collector lanes with both compilers, with and without `--share-strings`; `ruby tools/gate.rb check`; the generated C of the 6,785 other programs, unchanged; optcarrot, checksum 59662, its C byte-identical; `make share-strings-test` and `make int-min-test`, both pass; the compiler's own instructions over 1,000 and 2,000 lines of one statement inside a method, before and after: `s += 1 if v.floor(a)` with a Float `a`, whose C is master's but for the helper's name where the cast was, 1,127,711,758 and 1,127,431,861 (-0.02%) and 2,244,683,559 and 2,244,173,484 (-0.02%); the same with an Integer count, which keeps master's C, 1,127,554,188 and 1,127,561,177 (+6,989 instructions) and 2,244,173,847 and 2,244,187,836 (+13,989 instructions); a program with no such call, 392,222,122 and 392,222,101 (-21 instructions) and 778,456,339 and 778,456,318 (-21 instructions).

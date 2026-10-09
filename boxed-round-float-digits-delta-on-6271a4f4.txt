@@ -1,0 +1,136 @@
+Delta for the reader: the round piece (row 270), re-cut for the one point of your verdict (the cost of the longer line).
+
+22f9a174f380 (one commit on f5f59352e68d) is superseded and stays pushed. The new head is 0a5f017a9c5fa2c51f443007ba47e053b2bc2e4c, tree f8ee42f2e2ccc362803156af5820df4e846ca522, one commit on master 6271a4f42cf8bcc340a3ea31d9ad09f0bed9af33, the tip by my own ls-remote when it was cut. It is cut on that tip and not on an earlier one because the last pull request merged there changes one token of emit_poly_method_dispatch (its gate's or-list gains the new String-set arm, which is 0 for round, floor, ceil and truncate): that function holds the dispatch region, calls emit_poly_defaults_n into it and pd_hoist on it, so the proof of the cut reads it. Texts: body -v2, message -v2, an OLD/NEW file for each. The title, the test and its .expected are as they were (the same blobs).
+
+THE CODE, whole, against master:
+
+    diff --git a/lib/spinel_rt.h b/lib/spinel_rt.h
+    index 46234082b..c2840660b 100644
+    --- a/lib/spinel_rt.h
+    +++ b/lib/spinel_rt.h
+    @@ -4991,6 +4991,15 @@ static sp_RbVal sp_poly_nonzero(sp_RbVal v) { if (!sp_poly_tower_p(v)) sp_raise_
+     static sp_RbVal sp_poly_getbyte(sp_RbVal v, sp_int i) { v = sp_poly_strbuf_deref(v); if (v.tag != SP_TAG_STR) sp_raise_poly_nomethod("getbyte", v); const char *s = v.v.s; if (!s) return sp_box_nil(); sp_int bl = (sp_int)sp_str_byte_len(s); if (i < 0) i += bl; if (i < 0 || i >= bl) return sp_box_nil(); return sp_box_int((sp_int)(unsigned char)s[i]); }
+     static sp_RbVal sp_poly_ceil(sp_RbVal v) { if (SP_UNLIKELY(v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_TIME && v.v.p)) return sp_box_time(sp_time_round_to(*(sp_Time *)v.v.p, 0, 1)); if (v.tag == SP_TAG_FLT) { sp_poly_flo_domain_ck(v.v.f); return sp_box_f_to_int(ceil(v.v.f)); } if (v.tag == SP_TAG_INT || v.tag == SP_TAG_BIGINT) return v; if (sp_poly_is_rational(v)) return sp_box_int(sp_rational_ceil_i(sp_poly_as_rational(v))); if (sp_poly_is_brat(v) && v.v.p) return sp_box_bigint(sp_brat_ceil_b((sp_BigRational *)v.v.p)); sp_raise_poly_nomethod("ceil", v); }
+     static sp_RbVal sp_poly_round(sp_RbVal v) { if (SP_UNLIKELY(v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_TIME && v.v.p)) return sp_box_time(sp_time_round_to(*(sp_Time *)v.v.p, 0, 2)); if (v.tag == SP_TAG_FLT) { sp_poly_flo_domain_ck(v.v.f); return sp_box_f_to_int(round(v.v.f)); } if (v.tag == SP_TAG_INT || v.tag == SP_TAG_BIGINT) return v; if (sp_poly_is_rational(v)) return sp_box_int(sp_rational_round_i(sp_poly_as_rational(v))); if (sp_poly_is_brat(v) && v.v.p) return sp_box_bigint(sp_brat_round_b((sp_BigRational *)v.v.p)); sp_raise_poly_nomethod("round", v); }
+    +/* A Float digit count for sp_poly_round_n and sp_poly_prec_n: range-checked
+    +   as sp_float_arg_i checks one where the receiver is a number. Any other
+    +   receiver answers for itself (a NoMethodError, mostly), so a count no
+    +   Integer holds reads there as the x86-64 cast read it. */
+    +static SP_INLINE sp_int sp_poly_ndigits_f(sp_RbVal v, sp_float f) {
+    +  if (SP_LIKELY(f >= (sp_float)INTPTR_MIN && f < -(sp_float)INTPTR_MIN)) return (sp_int)f;
+    +  if (sp_poly_numeric_p(v)) sp_float_arg_range_error(f);
+    +  return INTPTR_MIN;
+    +}
+     /* Numeric#round(ndigits): a Float stays Float when n > 0 (rounded to n decimal
+        places) and becomes Integer when n <= 0; an Integer is unchanged for n >= 0
+        and rounded to a power of ten for n < 0. Mirrors the scalar Float#round(n)
+    @@ -5059,6 +5068,11 @@ static sp_RbVal sp_poly_prec_n(sp_RbVal v, sp_int n, int op) {
+       }
+       sp_raise_poly_nomethod(nm, v);
+     }
+    +/* The two above with a Float digit count (sp_poly_ndigits_f). The names
+    +   are as long as the cast they stand for, `(sp_int)`, so a call site's C
+    +   keeps its length. */
+    +static SP_INLINE sp_RbVal sp_poly_round_n_fdigits(sp_RbVal v, sp_float f) { return sp_poly_round_n(v, sp_poly_ndigits_f(v, f)); }
+    +static SP_INLINE sp_RbVal sp_poly_prec_n_fdigits(sp_RbVal v, sp_float f, int op) { return sp_poly_prec_n(v, sp_poly_ndigits_f(v, f), op); }
+     static sp_RbVal sp_poly_truncate(sp_RbVal v) { if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_IO) return sp_poly_io_truncate(v, SP_INT_NIL); if (v.tag == SP_TAG_FLT) { sp_poly_flo_domain_ck(v.v.f); return sp_box_f_to_int(trunc(v.v.f)); } if (v.tag == SP_TAG_INT || v.tag == SP_TAG_BIGINT) return v; if (sp_poly_is_rational(v)) { sp_Rational _r = sp_poly_as_rational(v); return sp_box_int(_r.num / _r.den); } if (sp_poly_is_brat(v) && v.v.p) return sp_box_bigint(sp_brat_trunc_b((sp_BigRational *)v.v.p)); sp_raise_poly_nomethod("truncate", v); }
+     /* forward: generic array length/element (defined later in this header) and
+        the array-kind predicate for cross-kind value equality. */
+    diff --git a/src/codegen_poly_plan.c b/src/codegen_poly_plan.c
+    index 1e3b497fc..6957e9c87 100644
+    --- a/src/codegen_poly_plan.c
+    +++ b/src/codegen_poly_plan.c
+    @@ -4065,11 +4065,15 @@ void emit_poly_defaults_n(Compiler *c, int id, int recv, const char *name, const
+         else if (is_round_family(name) && argc == 1 && splat_a < 0) {
+           if (g_plan_check) pa_observe(PA_BUILTIN, PA_KEY_BUILTIN + PB_ND_ROUND, -1, TY_UNKNOWN, PC_SAME);
+           char nd9[64];
+    +      /* a Float count is range-checked where the receiver is a number: the
+    +         _fdigits helpers, whose call is as long as the cast it replaces */
+    +      int fd9 = atmp_ty[0] == TY_FLOAT;
+           if (atmp_ty[0] == TY_POLY) snprintf(nd9, sizeof nd9, "sp_poly_arg_int_chk(_t%d)", atmp[0]);
+    +      else if (fd9) snprintf(nd9, sizeof nd9, "_t%d", atmp[0]);
+           else snprintf(nd9, sizeof nd9, "(sp_int)_t%d", atmp[0]);
+           Buf nv9; memset(&nv9, 0, sizeof nv9);
+    -      if (sp_streq(name, "round")) buf_printf(&nv9, "sp_poly_round_n(_t%d, %s)", tv, nd9);
+    -      else buf_printf(&nv9, "sp_poly_prec_n(_t%d, %s, %s)", tv, nd9,
+    +      if (sp_streq(name, "round")) buf_printf(&nv9, fd9 ? "sp_poly_round_n_fdigits(_t%d, %s)" : "sp_poly_round_n(_t%d, %s)", tv, nd9);
+    +      else buf_printf(&nv9, fd9 ? "sp_poly_prec_n_fdigits(_t%d, %s, %s)" : "sp_poly_prec_n(_t%d, %s, %s)", tv, nd9,
+                           name[0] == 'c' ? "SP_PREC_CEIL" : name[0] == 'f' ? "SP_PREC_FLOOR" : "SP_PREC_TRUNC");
+           buf_printf(b, " _t%d = ", tr);
+           if (ret == TY_POLY) buf_puts(b, nv9.p ? nv9.p : "");
+
+Against the head you read: sp_poly_ndigits_f is the same nine lines in the same place. New are the two helpers after sp_poly_prec_n and the emitter's lines: the site writes `sp_poly_prec_n_fdigits(_tV, _tA, OP)` or `sp_poly_round_n_fdigits(_tV, _tA)` where master writes `sp_poly_prec_n(_tV, (sp_int)_tA, OP)` or `sp_poly_round_n(_tV, (sp_int)_tA)`: your names and your site text, as long as master's. The emitter picks one of two whole format strings by the count's type, so the two calls an Integer or a boxed count makes are the ones master makes.
+
+THE FORM: two functions, not your two macros. CONTRIBUTING.md on the tip, under "C style": "Helpers are functions, not Ruby-style macros." A macro that names its receiver twice is one; lib/spinel_rt.h has four lower-case function-like macros and none named sp_poly_. The same file says "`lib/spinel_rt.h` changes are additive only", so the header is the home: three functions added beside the two they call. The macro form was built from nothing beside it and measured (below); its generated C is this head's byte for byte, the difference being in the header alone.
+
+THE CUT, PROVED. The bare tip, this head, the macro form; the C generated with -c:
+  the method of 100 statements: sites calling a moved dispatch 0, 0, 0; dispatches written out (the moved function's body among them) 100, 100, 100; bytes of C 66709, 66709, 66709; this head with the name put back: the bare tip's byte for byte; this head against the macro form: equal
+  1,000 statements in one method: sites calling a moved dispatch 667, 667, 667; dispatches written out (the moved function's body among them) 334, 334, 334; bytes of C 284615, 284615, 284615; this head with the name put back: the bare tip's byte for byte; this head against the macro form: equal
+  2,000 statements in one method: sites calling a moved dispatch 1667, 1667, 1667; dispatches written out (the moved function's body among them) 334, 334, 334; bytes of C 452615, 452615, 452615; this head with the name put back: the bare tip's byte for byte; this head against the macro form: equal
+"calling a moved dispatch" counts the sites that call an sp_pd_N function (pd_hoist); "the name put back" rewrites `sp_poly_prec_n_fdigits(X, _tA` to `sp_poly_prec_n(X, (sp_int)_tA` in this head's C and compares with the bare tip's.
+
+RUN TIME (callgrind, 200,000 calls; the bare tip | this head, a call in parentheses). gcc 13.3:
+  g1_plan_floor_float          10,470,634 | 10,670,655 (+1.0)
+  g2_plan_round_changing       28,938,399 | 30,338,414 (+7.0)
+  g3_plan_floor_float_recv     47,407,700 | 48,541,052 (+5.7)
+  g4_plan_floor_int            11,670,634 | 11,670,652 (+0.0)
+  g5_hundred_sites             15,074,616 | 16,077,419 (+5.0)
+  g6_plan_floor_runtime_count  11,274,042 | 12,874,059 (+8.0)
+clang 18.1:
+  g1_plan_floor_float          10,828,594 | 10,828,567 (-0.0)
+  g2_plan_round_changing       35,097,873 | 36,297,874 (+6.0)
+  g3_plan_floor_float_recv     51,565,431 | 52,565,449 (+5.0)
+  g4_plan_floor_int            12,028,582 | 12,028,555 (-0.0)
+  g5_hundred_sites             12,032,798 | 12,032,762 (-0.0)
+  g6_plan_floor_runtime_count  11,829,793 | 12,629,817 (+4.0)
+The macro form, for the difference. gcc:
+  g1_plan_floor_float          10,470,620 | 10,670,623 (+1.0)
+  g2_plan_round_changing       28,938,399 | 29,538,398 (+3.0)
+  g3_plan_floor_float_recv     47,407,714 | 48,141,048 (+3.7)
+  g4_plan_floor_int            11,670,634 | 11,670,634 (+0.0)
+  g5_hundred_sites             15,074,630 | 16,077,415 (+5.0)
+  g6_plan_floor_runtime_count  11,274,028 | 12,474,027 (+6.0)
+clang:
+  g1_plan_floor_float          10,828,594 | 10,828,594 (+0.0)
+  g2_plan_round_changing       35,097,887 | 36,297,972 (+6.0)
+  g3_plan_floor_float_recv     51,565,431 | 52,565,533 (+5.0)
+  g4_plan_floor_int            12,028,568 | 12,028,568 (+0.0)
+  g5_hundred_sites             12,032,798 | 12,032,798 (+0.0)
+  g6_plan_floor_runtime_count  11,829,793 | 12,629,901 (+4.0)
+g1 `v.floor(a)` with a constant count; g6 the same with a count known only at run time (`-1.9 - ARGV.size`); g2 `v.round(ds[i % 3])`; g3 `v.floor(ds[i % 3])` on a boxed Float; g4 an Integer count (master's C); g5 the method of 100 statements `s += 1 if v.floor(a)`, 2,000 rounds.
+With gcc the function costs 2 to 4 instructions a call more than the macro at a site that reads a run-time Float count (gcc copies the boxed receiver once more through the inlined helper; plain `static` and `static inline` cost the same as SP_INLINE or one more); with clang the two are equal. On the 100-statement method both cost 5 a call with gcc where the head you read cost 10, and nothing with clang. The body states the function's numbers: "at most 8 instructions a call".
+
+T1: the body says "Where the count is a constant the C compiler folds the test away (one instruction is left with gcc)" now, as g1 measures here, and the table has the run-time count as a row of its own (g6).
+
+BY THE LINE. The 37 probe programs of the first read, the bare tip against this head, gcc and clang, SPINEL_GC_STRESS 0 and 2; each output line against CRuby 3.3.6's:
+- lines judged: 5,044; right on the tip and not here: 0; a raise on the tip and a value here: 0; wrong on the tip and right here: 752;
+- 22 lines move without becoming CRuby's, each from a wrong value to a raise (the Time and the Rational with a literal count, as before);
+- 4 cells are judged whole (one program, which prints fewer lines than CRuby on the tip and here alike): the tip and the head print the same in each. More lines are judged than on f5f59352e68d (5,044 for 4,732), master having moved.
+By the cell, 29 of them: no cell lost, no raise made a wrong line, 30 wrong programs right.
+
+THE TEST OF RECORD, seven lanes, gcc and clang; rc0 is a wrong line with exit 0:
+  the bare tip: gcc:rc0/rc0/rc0/rc0/rc0/rc0/rc0 clang:rc0/rc0/rc0/rc0/rc0/rc0/rc0
+  this head: gcc:ok/ok/ok/ok/ok/ok/ok clang:ok/ok/ok/ok/ok/ok/ok
+  this head, --share-strings: gcc:ok/ok/ok/ok/ok/ok/ok clang:ok/ok/ok/ok/ok/ok/ok
+  the bare tip, --share-strings: gcc:rc0/rc0/rc0/rc0/rc0/rc0/rc0 clang:rc0/rc0/rc0/rc0/rc0/rc0/rc0
+On the bare tip 32 of its 46 lines differ from CRuby's (24 a value, 8 a RangeError with other words), gcc and clang alike. gcc's -fsanitize=float-cast-overflow reports the cast at 10 places in it on the tip and at none here.
+
+COMPILE TIME (callgrind, the compiler's own instructions with -c; the bare tip | this head, both in one run). `s += 1 if v.floor(a)` 1,000 or 2,000 times in one method:
+  rp_float_1000.rb: 1,127,711,758 | 1,127,431,861 (-0.025%)  C differs
+  rp_float_2000.rb: 2,244,683,559 | 2,244,173,484 (-0.023%)  C differs
+  rp_int_1000.rb: 1,127,554,188 | 1,127,561,177 (+0.001%)  C equal
+  rp_int_2000.rb: 2,244,173,847 | 2,244,187,836 (+0.001%)  C equal
+  rp_bare_1000.rb: 392,222,122 | 392,222,101 (-0.000%)  C equal
+  rp_bare_2000.rb: 778,456,339 | 778,456,318 (-0.000%)  C equal
+  boxed_round_float_digits_beside_class.rb: 65,028,755 | 65,021,213 (-0.012%)  C differs
+rp_float is the Float count (C master's but for the name where the cast was), rp_int an Integer count and rp_bare no such call (the same C). A statement with an Integer count costs the compiler 7 instructions more (+6,989 and +13,989 over 1,000 and 2,000 statements), the emitter's new test of the count's type. A first form of this re-cut passed the helper's name through a `%s` and cost some 365 a statement there (361,179 and 738,829, measured on 6d06fd3b04c3); that was cut before this head. The Float count costs -279,897 and -510,075 instructions, fewer than the bare tip. rp_bare (-21 and -21) is what the two builds of the compiler differ by where nothing of the piece runs. The head you read fell by 0.30% at 1,000 for the text it did not write.
+
+OWN CHECKS on this head, built from nothing, against the bare tip 6271a4f42cf8 built from nothing
+- `ruby tools/gate.rb check`, the commit staged: exit 0;
+- corpus: 6,785 programs, the C of none changed (three print the path of the build's own directory and differ in that alone); the runtime header is not part of the generated C;
+- optcarrot: checksum 59662, C byte-identical;
+- `make share-strings-test`: pass; `make int-min-test`: pass;
+- master's tip by my own ls-remote at 22:46:40 UTC: 82cfb601d688e70b24f7f6b98aacc104245a90ef. This head is cut on 6271a4f42cf8 and that tip is 37 commits on. Its merge into the tip is clean by exit status (tree 8d3b128a81a7) and the range changes no function of the piece and none its proof reads: emit_poly_defaults_n, emit_poly_method_dispatch, pd_hoist, is_round_family, sp_poly_round_n, sp_poly_prec_n, sp_poly_numeric_p, sp_float_arg_range_error and sp_float_arg_i are untouched; in the piece's files the range changes emit_poly_defaults0, emit_poly_prearms0, emit_poly_vis_precheck, emit_unresolved_call, two visibility refusals, two lines after proc_arg_ty and the exception helpers of lib/spinel_rt.h. A short round on the merge into 0dc2c574f190 (28 of the 37 commits; the tip at 22:35), built from nothing against that bare tip built from nothing: the test prints its .expected in the 14 lanes and the 14 with --share-strings (the bare tip is wrong in all 14); the method of 100 statements has 0 sites calling a moved dispatch on both, and the head's C with the name put back is the bare tip's byte for byte there and at 1,000 and 2,000 statements. The corpus, the legs and the counts were not run again on a merge;
+- It neither adds a refusal nor lifts one.
+
+RECORDED, NOT TAKEN (side finds on master): yours of this read (a Float receiver with a count inside the word but past an int; a boxed Bignum not rounded by a negative Float count, and `case x when Integer` not taking it; a Time with a count no Integer holds raising ArgumentError), and the earlier ones (the boxed-count arm of this site checks ahead of the receiver; a Rational takes a Float count; the next arm of emit_poly_defaults_n writes the same cast of a Float).
