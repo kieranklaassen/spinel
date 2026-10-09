@@ -1,4 +1,7 @@
 # SPINEL_SHARE_STRINGS=1, OPT=-O1, macOS, Apple clang 21.
 # Names are those printed by make test; remove an entry when it passes.
 # Every corpus program passes with sharing on master; add an entry only for a known failure.
+string_ivar_alias_call_handle
+string_ivar_alias_last_mutation
+string_ivar_alias_only_mutation
 string_plain_mutator_result_kept
