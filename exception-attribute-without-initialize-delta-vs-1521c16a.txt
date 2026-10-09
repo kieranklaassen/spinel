@@ -1,0 +1,368 @@
+# Row 264 (HE): the reader's delta against 1521c16a01ce
+
+Title, unchanged: "An attribute of an exception class with no initialize is nil
+until set, and is marked once set".
+
+## Where it stands
+
+- Head 98bcd35e94f9b5a38c803c5a6466d62d5348c531, ONE commit on upstream
+  master 97bb480031b783eb65370e64cd92a3854b9aa847. The tip by my ls-remote
+  at 16:53 UTC 10-09 is 2d5b3d1211d74a13c45adfc176da22046c43cff8, 36
+  commits on: the head merges into it clean by exit status (tree
+  8768717d80ae) and the 36 touch no function of the piece nor one its
+  proof reads, by hunk header, and add no site that names the old
+  builders; no build was made on it. Tree
+  50879057e080879a7816793bd5934e0e4b3f2bfc. "Depends on: none": the
+  receiver-first change is in master (its merge 87fed5a8c482), so
+  an_prog_never_gives, g_require_unread and the walk are master's.
+- It is three things, kept apart below: THE REPLAY of 1521c16a01ce onto that
+  tip, which changes no line; THE ONE SITE master added under it, which is
+  one line pair; and THE NARROWING of the nil seed ruled at 11:05, which is
+  every other line that differs.
+- TWO TIPS, ONE PATCH. The tip moved four times under the re-cut
+  (a3892bb00366, 7232a8021458, b791081037be, 97bb480031b7), each move
+  touching functions of the piece by hunk header, so the cut was moved
+  before any hand-over. The whole chain ran on b791081037be (the same
+  patch as tree 19adc8ac30c3). The head is its clean replay onto
+  97bb480031b7: the stable patch-id is EQUAL, plain
+  (46cd2bddfe79b5777f5f9260721903a02be2e7cb) and at -U0
+  (ed7fda3e54e9834e3306550c135c3865f07d6a3d). On 97bb480031b7 I used the
+  short set the coordinator allowed at 15:45 for such a replay: the build
+  from nothing, the tests in every lane, gate.rb check, the corpus by C
+  both ways against the bare tip, the probes BY C, the compile counts. Each
+  figure below says which tip it is of.
+- Neither a refusal added nor one lifted: docs/limitations.md is not
+  touched (CONTRIBUTING.md read fresh on 97bb480031b7; the template is
+  unchanged).
+
+## 1. The replay (no line of it differs)
+
+- 1521c16a01ce replayed onto 97bb480031b7 merges clean by exit status; its
+  tree is aa18cb4e024676f40986d1814fbab99531d5335d. The stable patch-id of
+  97bb480031b7..aa18cb4e0246 is EQUAL to that of ec35ec490703..1521c16a01ce,
+  plain (0dc9d3d6fd154ed65813aab63c8c17c0eb652eb9) and at -U0
+  (a57df9c582569206129026c1aae339df7cbe80d2), and the added and removed
+  lines of the two patches are the same list.
+- What the 142 commits since 4337d93cfc9b did to the functions HE changes,
+  by hunk header: emit_begin, emit_stmt_inner, emit_sym_class_name_rt,
+  codegen_program. emit_stmt_inner: a `class << self` body marked
+  singleton_body, and the pops a retry, a break and a next make where they
+  leave rescue clauses. emit_sym_class_name_rt: the pool of run-time
+  Symbols grows. codegen_program: one report line. None meets HE's lines.
+  emit_begin: the ensure's statements stand in a cleanup block, the sharing
+  check brackets them, `$!` is pushed for them, a deferred next pops down
+  to the enclosing ensure, and the rescue clauses run in a frame of their
+  own: that last one is part 2.
+- No line of lib/sp_exc.c, lib/sp_exc.h or src/codegen_call_exception.c
+  changed in the 142.
+
+## 2. The one site master added (one line pair, one test)
+
+- "An ensure runs when the exception leaves through the rescue clauses"
+  holds such an exception as its object until the ensure has run, and
+  builds it with sp_exc_new_for_catch: a NEW site of the builder HE
+  replaces (six sites name it in src/codegen_stmt.c on this tip, five on
+  7232a8021458; none more since). On the BARE tip that is the body's fault
+  without the flag:
+  a class with attributes raised in a rescue clause of a begin that has an
+  ensure, caught afterwards by an arm typed to it, reads back wrong 29 of
+  30 (30 under SPINEL_GC_STRESS 2; CRuby 0); passing the clauses unmatched,
+  it reads 0 for nil and the mark reaches a freed slot under stress 2.
+- HE's rule is that every catch site prints exc_catch_builder(c); the site
+  now does (src/codegen_stmt.c, emit_begin: `%s` for the literal and one
+  argument more). Where the program has no such class the name printed is
+  sp_exc_new_for_catch, so the C is master's.
+- NEW test/exception_attribute_ensure_clause.rb (fails on master in all 12
+  cells): both roads, raised in a clause and passing unmatched.
+- This is not a second fix beside master's: master does no part of what HE
+  does; it added a place where the old builder is called.
+
+## 3. The narrowing
+
+The source lines are the block below this note (with the line pair of part
+2), the head against the replay's tree: src/analyze.c (+114),
+src/analyze.h (+3), src/codegen.c (+23 -2). Beside them one test changed
+and six are new (listed under "Tests").
+
+THE FACT, one sentence: the nil seed is emitted only for a class from which
+no method of the program can be found, in a program with no finalizer: every
+body of the class, and of each parent the program wrote up to the builtin
+exception, holds attribute declarations with literal names and nothing
+else, and in the whole program every def, and every call by one of
+master's by-name words that gives, takes away, hides or renames a method or
+evaluates a block, stands in the body of a class or module, outside every
+def and block there, with no receiver but self, and no body or assignment
+carries the name of Object, BasicObject, Kernel, Module, Class or a builtin
+exception.
+
+WHY IT PROVES IT. A method of the program is made by a def or from a block.
+(a) A def with no receiver but self, in a class or module body and outside
+every def and block, is that class's or module's own (its instance method,
+or its singleton's). (b) master's walk has proved, where HE applies at all,
+that nothing is named by value and that no module is mixed in
+(an include, prepend or extend with an argument that is no literal is a
+by-value site), so a module's methods reach no class and no object. (c) The
+calls that make a method from a block, or run a block as another object
+(define_method, define_singleton_method, the eval and exec families), and
+those that take away, hide or rename one, are master's own table
+(an_by_name_how: AN_GIVES, AN_GIVES_ALL, AN_RENAMES, AN_VIS, AN_EVAL,
+AN_EXEC); HE keeps no word list of its own for them, and `alias` and
+`undef` are their node kinds. Each is held to the same place as a def. So
+every method of the program belongs to the class or module whose body its
+text stands in. (d) From an exception class and its objects CRuby looks
+methods up in: the class and its parents (attribute declarations only, so
+readers and writers that store what they are given); the builtin
+exceptions above, Object, Kernel and BasicObject; and, for the class
+itself, Class and Module. A body or an assignment under any of those names
+declines the whole program, by the leaf and by `outer::leaf` (`module
+Errno; class EAGAIN`). So nothing CRuby calls on its own, by whatever name,
+finds a method of the program there.
+
+THE FINALIZER TERM, mine, found after the six roads. A method is not the
+only code CRuby runs at a moment of its own: `ObjectSpace.define_finalizer(
+"x".dup, proc { e.count = 0 })`, then `GC.start`, then `p e.count` prints 0
+on CRuby and on master (whose finalizer has not run yet and whose slot is
+zero) and printed nil on the narrowed head. It is closed by a fact master
+holds and by no list: g_uses_finalizers, set where the program's text has
+`define_finalizer` at all; such a program seeds no class
+(class_exc_ivnil). Guard: test/exception_attribute_finalizer.rb (0 on
+master and on the head in 12 cells; nil without the term, checked on a
+binary without it). The other blocks CRuby runs later I tried lose no line
+(at_exit in both orders, Thread.new with and without join, explicit
+stores; in the roads below); `trap` at the top level is astray by master's
+AN_EXEC; set_trace_func, TracePoint and refinements are refused by both.
+
+WHAT I DID NOT TAKE from the shape you offered, and why.
+- "Every mention of the class's constant at a proven position": dropped. The
+  class is reached without its constant (`e.class`, the argument of an
+  `inherited` hook, `StandardError.subclasses`), so where the constant
+  stands proves nothing that (a) to (d) do not already hold; and they hold
+  for a receiver of any spelling. An assignment to a constant of the
+  class's name does decline it (`Counted = Struct.new(:count)`).
+- "A top-level def declines only where its name is one Kernel or Object
+  defines": not enough, by test. CRuby calls a private top-level `to_ary`
+  on an exception where an Array is flattened (and `puts e`), `to_str`
+  for `"a" + e`, `coerce` for `1 + e`; none is a Kernel or Object method,
+  and with `def to_ary; @count = 0; nil; end` CRuby prints 0, master 0,
+  and 1521c16a01ce nil (g1; the eighth road, g4, is `def e.count; 0; end`
+  on the object). So any def at the top level declines the program's seeds.
+- "A def's body that can store nothing": not taken. A def that stores
+  nothing still loses by what it returns (`def to_ary; [[]]; end` and
+  `first, = e`: CRuby reads `first.count` off an Array, 0; g8).
+
+THE SIZE AND THE SCAN stay for every class the two terms pass, and are
+independent of the seed: the class's scan marks a String slot through
+sp_mark_string, a boxed slot through sp_mark_rbval and any other pointer
+under `if (o->iv_x)`; a zeroed slot is a null pointer or the boxed Integer
+0 (tag 0), which each of them marks as nothing. An unseeded class is built
+by the same sp_exc_new_sub_ivars with NULL for the seed, which is what a
+class whose slots need no seed already got in 1521c16a01ce. Five such
+classes are raised and kept under SPINEL_GC_STRESS 2 in
+test/exception_attribute_own_method.rb.
+
+WHICH CLASSES ARE LEFT AS MASTER'S for the seed (the body's sentence):
+every class not so proved; its unset attribute reads 0 as on master, and
+it has its own size and scan.
+
+## Reader 8's six roads and their neighbours
+
+Each program on CRuby 3.3.6, master's tip and the head, six cells a tree
+(with and without --share-strings, SPINEL_GC_STRESS 0, 1, 2), compared line
+by line: lost = a line right on master and wrong on the head. Run on
+b791081037be; on 97bb480031b7 the C of every one, on the bare tip and on
+the head, with the flag and without, is byte-equal to what it was there,
+but for n1 and n3 below and your rp1 and rp1b (changed on both sides by
+master's own lines), which were run again in full with the same results.
+
+- 92 programs, 552 cells, 0 lines lost, 120 cured; the six roads and G (65
+  programs) print master's lines in every cell.
+- 13 more, 78 cells, 0 lost: the finalizer at the top level, in a class
+  body and as the guard test; at_exit, threads and explicit stores (7,
+  master's lines); and the new site (n1 to n3: 28 lines cured).
+- A (a1 to a13): the hook by class_eval, class_exec, module_eval,
+  k.define_method(:initialize), in `class << self`, by
+  define_singleton_method(:inherited), with super first, two levels down, a
+  class's own hook for its subclass; and the hook in `class Object`, in
+  `class Class`, in `class StandardError`, in `class Exception`.
+- B (b1 to b12): `def self.new`, `class << self` with `def new`,
+  `def Counted.new`, define_singleton_method(:new), an alias of new, the new
+  in a parent, `class Class` with `def new`, `raise Counted.new("o")`,
+  `class << Counted`, singleton_class.define_method, instance_eval with a
+  def, `class Object` with `def self.new` (two refused by both).
+- C (c1 to c9): initialize_copy, initialize_dup, initialize_clone, each in
+  the class, at the top level and in `class Exception` (two refused by
+  both).
+- D (d1 to d4): `def backtrace` in the class, in a parent, in
+  `class StandardError`, in a reopening of the class.
+- E (e1 to e4): `def set_backtrace` in the class, in `class Exception`, by
+  Counted.class_eval, by Counted.define_method (refused by both).
+- F (f1 to f3): `def self.===` in the class, `class Module` with `def ===`,
+  `def Counted.===`.
+- G, mine (g1 to g20): a top-level to_ary, to_str, coerce,
+  respond_to_missing?, method_missing, detailed_message, message, to_s,
+  exception, ==, hash, inspect; to_ary in `module Kernel`, `class Object`,
+  `class BasicObject`; `def e.count`; the identity road (g8); a constant
+  reassigned; a private def in the class; a module extended on the object.
+- kept, the head prints CRuby's nil where master prints 0 (h1 to h6, 120
+  lines cured): defs in another class and in a module, another exception
+  class with `def backtrace` and an `inherited` hook, a class with
+  define_method, private, alias_method and `class << self`, a chain of
+  three attribute-only classes, the class reopened with a second attribute
+  and read through a lambda.
+- given back, each master's lines (h7, i1 to i20): a top-level def; `def
+  Tool.make`; a def on an object; a def in a block; class_eval and
+  define_method on a constant (refused by both); define_method inside a
+  def; `class Object; end`; `module Kernel; end`; `class RuntimeError; end`;
+  a Struct.new block with a def; `private`, a constant or a String name in
+  the class's body; a parent with a def; `class << Tool`; a top-level alias;
+  a def inside a def; the class's constant assigned; `module Errno; class
+  EAGAIN`.
+- Your rp2 is given back for the seed (it has top-level defs): its lines
+  are master's, and its abort under stress 2 on master is cured by the
+  scan.
+
+## The twins, the cells, the counts by script
+
+- The 51 twins of the decline (t, u, k, s), 12 cells a tree, on
+  b791081037be: line for line what they gave on 1521c16a01ce: 46 emit
+  master's C, 4 are refused by both, s20 keeps the fix.
+- The fourteen tests in 12 cells, on 97bb480031b7: 168 pass on the head; on
+  master 100 pass and 68 fail (the six fix tests: marked in 8 of its 12).
+- What the narrowing keeps and gives back, by a counting copy of the head
+  (a patched codegen.c and analyze.c in a spare tree, not in the commit)
+  over the 6,495 programs of test/*.rb on 97bb480031b7: the engine fact
+  26, by value 971 (the unread-file flag 223, all of them by value), the word
+  beyond that 22, chain unknown 1,007; a def or a word astray in 2,342 of the
+  5,488 others; a finalizer in 7 of them, none of which holds such a class
+  but the guard test. 20 programs hold such a class: 5 are declined whole
+  as before (the three guards, builtin_ivar_boxed_reflection,
+  ivar_set_poly_builtin_reopen). Of the other 15, seven hold a class that
+  takes the seed: exception_attribute_marked (1 of 1), _parent_arm (3 of
+  3), _without_initialize (2 of the 2 that need one), _ensure_clause (2 of
+  2), _own_method (1 of 6, by design), share_strings_exception_attribute
+  (1 of 1) and the corpus's exception_object_surface (1 of 1). Eight hold
+  none: the four guards (_inherited_hook, _toplevel_def, _singleton_def,
+  _finalizer) and four of the corpus: class_value_new_exception_subclass
+  (a Class.new block), exception_bare_new_in_class_method (the class has a
+  `def self.build`), exception_message_super_private_def and
+  systemcallerror_message_from_errno (top-level defs). All four pass as
+  they did, in both lanes.
+- Of 1521c16a01ce's fourteen with such a class, nine kept the fix; all nine
+  keep the size and the scan, and of the five that read an unset attribute
+  as nil there, the four tests still do (one after its helpers moved into a
+  class) and exception_object_surface does.
+- My own cured programs: the body's four are cured as before (the fourth
+  with its helper a lambda: with `def rows` at the top level it reads 0 and
+  keeps the three rows); the kept set above, 120 lines; the new site's
+  programs.
+
+## Tests
+
+- test/exception_attribute_without_initialize.rb: `rows` and `check` were
+  top-level defs and are `Work.rows` and `Work.check` now; .expected is
+  unchanged (CRuby 3.3.6 prints the same).
+- NEW test/exception_attribute_own_method.rb: five classes with a method
+  CRuby runs on its own (new, initialize_copy, backtrace, set_backtrace,
+  ===), each reading CRuby's 0, and a class of attributes alone beside
+  them reading nil. Fails on master (the nil lines).
+- NEW test/exception_attribute_ensure_clause.rb (part 2). Fails on master.
+- NEW guards, passing on master too: test/exception_attribute_inherited_hook.rb
+  (road A), test/exception_attribute_toplevel_def.rb (a top-level to_ary and
+  `[e].flatten`), test/exception_attribute_singleton_def.rb (`def e.count`),
+  test/exception_attribute_finalizer.rb.
+- No line is added to test/share/known-failures.txt.
+
+## Checks run on this head
+
+Linux, gcc 13.3, clang 18.1.3, CRuby 3.3.6; CONTRIBUTING.md and the template
+read on b791081037be (the template is unchanged; CONTRIBUTING.md gained
+`make share-verify-test`, which is separate from the gate and was run).
+
+On 97bb480031b7 (the head's own base), both sides built there, the head
+from nothing (`make clean`, then `make`):
+- The fourteen tests of the piece in 12 cells each (gcc and clang, with and
+  without --share-strings, SPINEL_GC_STRESS 0, 1, 2): 168 pass. Two
+  neighbours (exception_user_method_generic_receiver,
+  share_strings_exception_literal): 24 pass.
+- tools/cident.sh against the bare tip: 6,744 identical, 15 differ, 0
+  refusal changes; with CIDENT_FLAGS=--share-strings 6,743 identical, the
+  same 15 differ, 0 refusal changes, 1 refused by both alike. The 15 are
+  ten of the tests (all but the four whose chain is unknown) and five of
+  the corpus that hold such a class (class_value_new_exception_subclass,
+  exception_bare_new_in_class_method, exception_message_super_private_def,
+  exception_object_surface, systemcallerror_message_from_errno).
+- Those 15 and the other four tests in the corpus lane at -O1
+  (build/test-results) and with SPINEL_SHARE_STRINGS=1
+  (build/test-results-shared): 19 PASS in each.
+- tools/refusals.sh: pass, 590 records. `make reject-test`: pass.
+- `LC_ALL=C.UTF-8 ruby tools/gate.rb check` with the commit staged on a
+  clean tree at the tip: rc 0 (it warns that no Ruby 4.0 is here).
+- `make int-min-test`, `make gc-stress-test`, `make shadow-check` (878
+  programs): pass.
+- `make share-strings-test SHARE_TESTS=test/share_strings_exception_attribute.rb`
+  and `ruby tools/share_verify.rb test/share_strings_exception_attribute.rb`
+  (0 diagnostics, 0 failures, 0 channel gaps): pass.
+- optcarrot: the C is byte-equal on the bare tip and the head (12,150
+  lines).
+- The mail: `git am` on 97bb480031b7 with the mail's date as the committer
+  date and committer Claude gives 98bcd35e94f9.
+- The body's "Before" on the BARE tip: 59 with --share-strings and 0
+  without; 0 where CRuby prints nil; the segmentation fault; 0 and
+  [1, "r1"]; the two programs that print 0 on CRuby, master and the head.
+- Probes by C: 192 programs, each on the bare tip and the head, with the
+  flag and without (768 C files), against the same on b791081037be: 752
+  byte-equal; the 16 that differ are n1, n3, rp1 and rp1b, on both sides,
+  and were run again in full: same lines as on b791081037be.
+- Compile time, callgrind of `spinel -c`, both sides in one run:
+  `p 1` 1,985,535 to 1,997,019 (+0.58%); a seven-line program 7,761,008 to
+  7,785,729 (+0.32%); one such class 4,263,731 to 4,389,025 (+2.94%); 300
+  classes 411,223,787 to 426,911,318 (+3.81%); 300 with reads
+  4,427,594,305 to 4,444,023,758 (+0.37%); 1,000 classes 2,563,300,864 to
+  2,613,053,180 (+1.94%); 2,000 classes 8,579,462,326 to 8,678,936,126
+  (+1.16%); optcarrot 8,222,595,291 to 8,227,961,240 (+0.07%).
+
+On b791081037be (the same patch, 19 commits of master earlier), both sides
+built there:
+- The same set as above, with the same counts for its corpus (6,728
+  identical, 15 differ; with the flag 6,727 and the same 15), 168 and 24
+  cells, 19 PASS in each lane, 590 records.
+- `make share-strings-test`: pass, whole. `make share-verify-test`: rc 0,
+  whole (1,106 programs, 0 new, 0 failures). `make gc-stress-test`,
+  `make shadow-check`, `make int-min-test`: pass.
+- The roads, the twins and the probes of the sections above.
+- The cost rows, gcc and clang (the body's table); the C of each cost
+  program is byte-equal on 97bb480031b7, on both sides.
+
+Not run: the Mac's gate, the whole corpus under gate-test-shared, CRuby 4.0.
+
+## Reader 8's text finds
+
+- "a program with none runs under 0.15% more, and that in glibc's strcmp
+  alone": mended, and not with the reader's wording as it stood, because the
+  narrowing's walk is new work for every program: on this
+  build `p 1` compiles in 0.58% more and a seven-line program in 0.32%
+  more, and that is glibc's strcmp, called the same number of times on
+  both sides (7,154 and 25,008 calls, counted from the callgrind files): of
+  `p 1`'s 11,233 instructions more, strcmp is 11,407, the walk and its
+  node-table reads about 500, the rest is the allocator's. On the build of
+  b791081037be the same two programs read +0.07% and +0.08%, with strcmp
+  at -328 and +636: the compares move with the addresses. So the body
+  says: "A program with none emits the same C and compiles in up to 0.6%
+  more (0.58% for `p 1`, 0.32% for a seven-line program, 0.07% for
+  optcarrot): nearly all of it in glibc's `strcmp`, called the same number
+  of times, whose cost moves with the addresses; the rest is one more walk
+  of the program's text, which proves the seed below (about 500
+  instructions for `p 1`, 4,000 for the seven lines)." The "1.9% at
+  1,000" stands; 3.7% and 1.1% read 3.8% and 1.2% with the walk.
+- The optcarrot line reads "it did not: the C is the same with and without
+  this change".
+- Every changed line of the message and the body, OLD and NEW, is in the
+  first comment.
+
+## Side finds, recorded and not worked
+
+- `puts e` does not call a program's top-level to_ary on master (it prints
+  the object's inspect line where CRuby prints the message).
+- A top-level def that calls `is_a?` with no receiver is refused as an
+  unsupported call.
+- The compiled program runs a finalizer later than CRuby's `GC.start` does.
