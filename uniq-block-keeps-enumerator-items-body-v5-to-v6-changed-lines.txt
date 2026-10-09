@@ -1,0 +1,22 @@
+25c25
+< `emit_poly_uniq_block` now takes the Enumerator's plain `to_a` under such a view and binds the parameter itself, an item at a time, so the survivor is the item. For a lone `|x|` over steps that yield two values the first values are kept in an Array of their own, made only then. An Enumerator whose steps yield one value or several (`Enumerator.new { |y| y.yield 1; y.yield 2, 3 }`) comes out right by the same road, and so does a block that changes its `|*r|`.
+---
+> `emit_poly_uniq_block` now takes the Enumerator's plain `to_a` under such a view and binds the parameter itself, an item at a time, so the survivor is the item. For a lone `|x|` over steps that yield two values the first values are kept in an Array of their own, made only then. An Enumerator whose steps yield one value or several (`Enumerator.new { |y| y.yield 1; y.yield 2, 3 }`) comes out right by the same road, and so does a block that changes its `|*r|`. It does so only where the program as written gives no class a `uniq` of its own (`an_prog_never_gives`, which the pull request this depends on adds): no `def` and no Symbol of that name, and no site where a method is named, made or loaded by something the text does not spell. A `uniq` the program gives Enumerable or Enumerator, in a file the compiler reads or in one it does not, answers what it likes, so such a program keeps master's C.
+29c29
+< Not in this change: the chain written in one expression, `[5, 6, 5].each_with_index.uniq { |x| x }`, is refused on master and here (unsupported call). A block that changes in place the first value of a step that yields several is wrong on master and wrong here: over `w = [+"a\n", +"b\n", +"a\n"].each_with_index`, `w.uniq { |x| x.chomp!; x }` is `[["a", 0], ["b", 1]]`; master prints `["a", "b"]`, this prints `[["a\n", 0], ["b\n", 1]]`. So is `e.uniq(&:chomp!)` over `each_line`: `["a", "b"]`; master `[["a\n"], ["b\n"]]`, this `["a\n", "b\n"]`.
+---
+> Not in this change: a program that holds a `def` or a Symbol named `uniq`, or a site of the four kinds the pull request this depends on lists (`5.send(m)`, `[1].map(&pr)` with a proc in a local, a file the compiler does not read), keeps master's answer, `[5, 6]` for the two lines above: so after `require "json"`, whose text holds the word `require` in a string or in a comment, and not after `require "set"`. The chain written in one expression, `[5, 6, 5].each_with_index.uniq { |x| x }`, is refused on master and here (unsupported call). A block that changes in place the first value of a step that yields several is wrong on master and wrong here: over `w = [+"a\n", +"b\n", +"a\n"].each_with_index`, `w.uniq { |x| x.chomp!; x }` is `[["a", 0], ["b", 1]]`; master prints `["a", "b"]`, this prints `[["a\n", 0], ["b\n", 1]]`. So is `e.uniq(&:chomp!)` over `each_line`: `["a", "b"]`; master `[["a\n"], ["b\n"]]`, this `["a\n", "b\n"]`.
+31c31
+< `test/enum_uniq_block_keeps_item.rb` prints 21 lines and joins `GC_STRESS_TESTS`; master prints 12 of them wrong.
+---
+> `test/enum_uniq_block_keeps_item.rb` prints 21 lines and carries `# spinel: gc-stress`; master prints 12 of them wrong.
+39c39
+< Run on this head, in a container without CRuby 4.0: the build; `test/enum_uniq_block_keeps_item.rb` with gcc and clang at `SPINEL_GC_STRESS` 0, 1 and 2 and with `--share-strings`; `ruby tools/gate.rb check`; `make cident` against master (6,553 programs identical, 1 differs: the new test); `make share-strings-test` and `make int-min-test`; the test's `.expected` is CRuby 3.3.6's, run with `--enable-frozen-string-literal`.
+---
+> Run on this head, in a container without CRuby 4.0: the build; `test/enum_uniq_block_keeps_item.rb` with gcc and clang at `SPINEL_GC_STRESS` 0, 1 and 2 and with `--share-strings`; `ruby tools/gate.rb check`; the generated C of every program `tools/cident.sh` lists, by this head's compiler and by its base's, with that tool's flags (6,631 programs identical, 1 differs: the new test; none refused); `make share-strings-test` and `make int-min-test`; the test's `.expected` is CRuby 3.3.6's, run with `--enable-frozen-string-literal`.
+43,44c43,44
+< - [x] If optcarrot's generated C changed: callgrind numbers, checksum 59662 (it did not: the C is master's byte for byte)
+< - [ ] Depends on: none
+---
+> - [x] If optcarrot's generated C changed: callgrind numbers, checksum 59662 (it did not: the C is its base's byte for byte)
+> - [x] Depends on: the pull request "A method added to a builtin runs its receiver before its arguments" (this reads its `an_prog_never_gives`)

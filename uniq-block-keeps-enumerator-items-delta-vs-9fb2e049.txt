@@ -1,0 +1,203 @@
+===== 1. the code delta against 9fb2e049a89c: plain diff of the changed lines of the old head's own diff ("<") against the changed lines of this commit's diff on 0ed1a93ee4f0 (">") =====
+1d0
+< +                   test/enum_uniq_block_keeps_item.rb \
+6c5,7
+< +       each_with_index keeps [5, 0], not 5. */
+---
+> +       each_with_index keeps [5, 0], not 5. Only where the program as written
+> +       gives no class a uniq of its own (an_prog_never_gives): one it gives,
+> +       in a file read or not, answers what it likes. */
+10c11
+< +                clv0 && clv0->type == TY_POLY ? ++g_tmp : 0;
+---
+> +                clv0 && clv0->type == TY_POLY && an_prog_never_gives("uniq", 0) ? ++g_tmp : 0;
+54a56
+> +# spinel: gc-stress
+===== 2. the probes: the list, as written in the hand-over =====
+**The probes.** CRuby 3.3.6's answer first; then the bare tip `68d40ff05fd4`, the base `0ed1a93ee4f0` and this head, gcc at SPINEL_GC_STRESS unset and 2: `o` the same as CRuby, `x` another answer (the first shown), `r` no output, `nn` no build.
+- *The file not read* (the old head lost these): a2 and a3, an own `uniq` given to Enumerator and to Enumerable by a file reached through `$LOAD_PATH`: `oo` on all three. a4 (`load`) builds nowhere.
+- *Class (2), the program's own method of the name never asked*: a5 (a READ `module Enumerable; def uniq`), r1 (`define_method(:uniq)`), r2 (`alias_method :uniq, :mine`), r3 (`alias uniq mine`): `oo` on all three. a1 (`class Enumerator; def uniq`) builds nowhere; a6, a7 and a8 (a `uniq` that ignores its block, given to Enumerable, Kernel and Array) are wrong on all three alike; r4 (`module_eval` of a string) and r9 (`send(:define_method, n)`) print nothing on all three.
+- *S7*: s7a and s7b, the own `uniq` under `if RUBY_ENGINE == "ruby"`, in Enumerable and in Enumerator: `oo` on all three (the def is written, so the table of written names holds it).
+- *The cure stands* where the program holds no site: r6 (the two lines), r7 (after `require "set"`), k6 (beside `5.send(:abs)` and `map(&:succ)`), k7 (beside `alias b a`): `xx xx oo`.
+- *The cure is given back* where it holds one, master's answer `[5, 6]`: r5 (a whole-line comment with the word `require`), r8 (`require "json"`), k1 (`5.send(m)`), k2 (`map(&pr)` with a proc in a local), k4 (a Symbol `:uniq`), k5 (a class of the program with its own `def uniq`): `xx xx xx`. k3 (`eval`) builds nowhere.
+- No program right on the base is wrong here.
+===== 3. the probes: cells (26 programs) =====
+a1 ruby[[5, 6] ] tip nn base nn head nn
+a2 ruby[[5, 6] ] tip oo base oo head oo
+a3 ruby[[5, 6] ] tip oo base oo head oo
+a4 ruby[[5, 6] ] tip nn base nn head nn
+a5 ruby[[5, 6] ] tip oo base oo head oo
+a6 ruby[[9] ] tip xx[[5, 6] ] base xx[[5, 6] ] head xx[[5, 6] ]
+a7 ruby[[[5, 0], [6, 1]] ] tip xx[[5, 6] ] base xx[[5, 6] ] head xx[[5, 6] ]
+a8 ruby[[[5, 0], [6, 1]] [9] ] tip xx[[5, 6] [[5, 0], [6, 1], [5, 2]] ] base xx[[5, 6] [[5, 0], [6, 1], [5, 2]] ] head xx[[5, 6] [[5, 0], [6, 1], [5, 2]] ]
+r1 ruby[[5, 6] ] tip oo base oo head oo
+r2 ruby[[5, 6] ] tip oo base oo head oo
+r3 ruby[[5, 6] ] tip oo base oo head oo
+r4 ruby[[5, 6] ] tip rr base rr head rr
+r5 ruby[[[5, 0], [6, 1]] ] tip xx[[5, 6] ] base xx[[5, 6] ] head xx[[5, 6] ]
+r6 ruby[[[5, 0], [6, 1]] ] tip xx[[5, 6] ] base xx[[5, 6] ] head oo
+r7 ruby[[[5, 0], [6, 1]] ] tip xx[[5, 6] ] base xx[[5, 6] ] head oo
+r8 ruby[[[5, 0], [6, 1]] ] tip xx[[5, 6] ] base xx[[5, 6] ] head xx[[5, 6] ]
+r9 ruby[[5, 6] ] tip rr base rr head rr
+s7a ruby[[5, 6] ] tip oo base oo head oo
+s7b ruby[[5, 6] ] tip oo base oo head oo
+k1 ruby[5 [[5, 0], [6, 1]] ] tip xx[5 [5, 6] ] base xx[5 [5, 6] ] head xx[5 [5, 6] ]
+k2 ruby[[2] [[5, 0], [6, 1]] ] tip xx[[2] [5, 6] ] base xx[[2] [5, 6] ] head xx[[2] [5, 6] ]
+k3 ruby[2 [[5, 0], [6, 1]] ] tip nn base nn head nn
+k4 ruby[:uniq [[5, 0], [6, 1]] ] tip xx[:uniq [5, 6] ] base xx[:uniq [5, 6] ] head xx[:uniq [5, 6] ]
+k5 ruby[1 [[5, 0], [6, 1]] ] tip xx[1 [5, 6] ] base xx[1 [5, 6] ] head xx[1 [5, 6] ]
+k6 ruby[5 [2, 3] [[5, 0], [6, 1]] ] tip xx[5 [2, 3] [5, 6] ] base xx[5 [2, 3] [5, 6] ] head oo
+k7 ruby[1 [[5, 0], [6, 1]] ] tip xx[1 [5, 6] ] base xx[1 [5, 6] ] head oo
+===== 4. the probes: programs (26 programs and the two files of lib2, which stand in a directory of that name beside them) =====
+== a1.rb
+class Enumerator
+  def uniq(&b) = to_a.map { |x, i| x }.uniq(&b)
+end
+e = [5, 6, 5].each_with_index
+p e.uniq { |x| x }
+== a2.rb
+$LOAD_PATH.unshift(File.join(__dir__, "lib2"))
+require "m_uniq"
+e = [5, 6, 5].each_with_index
+p e.uniq { |x| x }
+== a3.rb
+$LOAD_PATH.unshift(File.join(__dir__, "lib2"))
+require "m_uniq2"
+e = [5, 6, 5].each_with_index
+p e.uniq { |x| x }
+== a4.rb
+load File.join(__dir__, "lib2", "m_uniq.rb")
+e = [5, 6, 5].each_with_index
+p e.uniq { |x| x }
+== a5.rb
+module Enumerable
+  def uniq(&b) = to_a.map { |x, i| x }.uniq(&b)
+end
+e = [5, 6, 5].each_with_index
+p e.uniq { |x| x }
+== a6.rb
+module Enumerable
+  def uniq = [9]
+end
+e = [5, 6, 5].each_with_index
+p e.uniq { |x| x }
+== a7.rb
+module Kernel
+  def uniq = [9]
+end
+e = [5, 6, 5].each_with_index
+p e.uniq { |x| x }
+== a8.rb
+class Array
+  def uniq = [9]
+end
+e = [5, 6, 5].each_with_index
+p e.uniq { |x| x }
+p e.to_a.uniq { |x| x }
+== r1.rb
+module Enumerable
+  define_method(:uniq) { |&b| to_a.map { |x, i| x }.uniq(&b) }
+end
+e = [5, 6, 5].each_with_index
+p e.uniq { |x| x }
+== r2.rb
+module Enumerable
+  def mine(&b) = to_a.map { |x, i| x }.uniq(&b)
+  alias_method :uniq, :mine
+end
+e = [5, 6, 5].each_with_index
+p e.uniq { |x| x }
+== r3.rb
+module Enumerable
+  def mine(&b) = to_a.map { |x, i| x }.uniq(&b)
+  alias uniq mine
+end
+e = [5, 6, 5].each_with_index
+p e.uniq { |x| x }
+== r4.rb
+Enumerable.module_eval "def uniq(&b) = to_a.map { |x, i| x }.uniq(&b)"
+e = [5, 6, 5].each_with_index
+p e.uniq { |x| x }
+== r5.rb
+# require "nothing_here"
+e = [5, 6, 5].each_with_index
+p e.uniq { |x| x }
+== r6.rb
+e = [5, 6, 5].each_with_index
+p e.uniq { |x| x }
+== r7.rb
+require "set"
+e = [5, 6, 5].each_with_index
+p e.uniq { |x| x }
+== r8.rb
+require "json"
+e = [5, 6, 5].each_with_index
+p e.uniq { |x| x }
+== r9.rb
+n = "un" + "iq"
+Enumerable.send(:define_method, n) { |&b| to_a.map { |x, i| x }.uniq(&b) }
+e = [5, 6, 5].each_with_index
+p e.uniq { |x| x }
+== s7a.rb
+if RUBY_ENGINE == "ruby"
+  module Enumerable
+    def uniq(&b) = to_a.map { |x, i| x }.uniq(&b)
+  end
+end
+e = [5, 6, 5].each_with_index
+p e.uniq { |x| x }
+== s7b.rb
+if RUBY_ENGINE == "ruby"
+  class Enumerator
+    def uniq(&b) = to_a.map { |x, i| x }.uniq(&b)
+  end
+end
+e = [5, 6, 5].each_with_index
+p e.uniq { |x| x }
+== k1.rb
+m = [:abs, :succ][ARGV.size]
+p 5.send(m)
+e = [5, 6, 5].each_with_index
+p e.uniq { |x| x }
+== k2.rb
+pr = proc { |x| x + 1 }
+p [1].map(&pr)
+e = [5, 6, 5].each_with_index
+p e.uniq { |x| x }
+== k3.rb
+p eval("1 + 1")
+e = [5, 6, 5].each_with_index
+p e.uniq { |x| x }
+== k4.rb
+x = :uniq
+p x
+e = [5, 6, 5].each_with_index
+p e.uniq { |x| x }
+== k5.rb
+class Foo
+  def uniq = 1
+end
+p Foo.new.uniq
+e = [5, 6, 5].each_with_index
+p e.uniq { |x| x }
+== k6.rb
+p 5.send(:abs)
+p [1, 2].map(&:succ)
+e = [5, 6, 5].each_with_index
+p e.uniq { |x| x }
+== k7.rb
+class Foo
+  def a = 1
+  alias b a
+end
+p Foo.new.b
+e = [5, 6, 5].each_with_index
+p e.uniq { |x| x }
+== lib2/m_uniq.rb
+class Enumerator
+  def uniq(&b) = to_a.map { |x, i| x }.uniq(&b)
+end
+== lib2/m_uniq2.rb
+module Enumerable
+  def uniq(&b) = to_a.map { |x, i| x }.uniq(&b)
+end

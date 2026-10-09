@@ -1,0 +1,8 @@
+22a23,29
+> It does so only where the program as written gives no class a uniq of
+> its own (an_prog_never_gives): no def and no Symbol of that name, and
+> no site where a method is named, made or loaded by something the text
+> does not spell. A uniq the program gives Enumerable or Enumerator, in
+> a file the compiler reads or in one it does not, answers what it
+> likes, so such a program keeps master's C.
+> 

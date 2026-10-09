@@ -1,0 +1,51 @@
+uniq with a block keeps an Enumerator's items, not what the block binds
+
+    e = [5, 6, 5].each_with_index
+    p e.uniq { |x| x }
+
+printed [5, 6] for [[5, 0], [6, 1]]. The other way round, over
+o = [5, 6, 5, 7].each, o.uniq { |*r| r } printed [[5], [6], [7]] for
+[5, 6, 7] and o.uniq(&:odd?) printed [[5], [6]] for [5, 6].
+
+The to_a that stands in front of a block iterator over an Enumerator
+hands each item as the block binds it (enum_hop_yield_view): the first
+value a step yields for a lone |x|, all of them for a lone |*r| or
+&:m. That is right for map or count, whose answer is the block's. uniq
+answers the items, and got what the block binds in their place.
+
+emit_poly_uniq_block now takes the Enumerator's plain to_a under such
+a view and binds the parameter itself, an item at a time, so the
+survivor is the item. For a lone |x| over steps that yield two values
+the first values are kept in an Array of their own, made only then.
+An Enumerator whose steps yield one value or several comes out right
+by the same road, and so does a block that changes its |*r|.
+
+It does so only where the program as written gives no class a uniq of
+its own (an_prog_never_gives): no def and no Symbol of that name, and
+no site where a method is named, made or loaded by something the text
+does not spell. A uniq the program gives Enumerable or Enumerator, in
+a file the compiler reads or in one it does not, answers what it
+likes, so such a program keeps master's C.
+
+A step that yields one value has the parameter for its item, and a
+block may change that String in place: `x.chomp!` rebinds the
+parameter, and uniq kept the changed one. So for a lone |x| the
+survivor of such a step is the parameter as it is after the block
+ran, as it was; only a step that packs several values
+(sp_yielded_packed) is read from the to_a's own Array, which no name
+of the program reaches.
+
+Whether a step yields one value or several is known when the program
+runs, so the loop is told ahead of its first item and asks it of each
+survivor. A lone |x| over a one-value Enumerator, which master ran
+right, pays by callgrind, a step with gcc and with clang: over a.each
+up to 1 and 1, over each_char up to 1 and 1, over each_slice(2) up to
+5.5 and 4, and 7 and 5 with the slice's first value for the key. It
+is stated and not cut: whether a step packs is known only when the
+program runs, so a loop free of the question would be the loop and
+the block's body written twice. A block with two parameters, a bare
+block and no block keep their C.
+
+Test: test/enum_uniq_block_keeps_item.rb.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
