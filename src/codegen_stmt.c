@@ -9944,6 +9944,33 @@ static void emit_ensure_return(Compiler *c, int eid, int has_retval, Buf *b, int
 /* begin/body/rescue (ensure/else deferred) via the setjmp exception model.
    When resultvar != NULL, the body's and rescue handlers' values are
    assigned to it (begin/rescue as an expression). */
+/* Can an exception that leaves an ensure region inside a begin's body be
+   raised to that begin's rescue clauses, from `rescue` on? Only where no
+   clause would say yes to an exception CRuby's would decline, since the
+   hand-on past the clauses is right for those:
+   0: no. A clause's test never calls a `===` of the program's, so not where
+      the program as written may give a class one (an_prog_never_gives); and
+      a clause whose operand is neither a constant nor a splat takes
+      everything.
+   2: one clause is bare, and its test takes a class the runtime does not
+      know for a StandardError: the caller asks the ancestry first.
+   1: otherwise. */
+static int rescue_offers(const NodeTable *nt, int rescue) {
+  int bare = 0;
+  if (rescue < 0 || !an_prog_never_gives("===", 0)) return 0;
+  for (int r = rescue; r >= 0; r = nt_ref(nt, r, "subsequent")) {
+    int n = 0;
+    const int *exc = nt_arr(nt, r, "exceptions", &n);
+    if (n == 0) bare = 1;
+    for (int i = 0; i < n; i++) {
+      NodeKind k = nt_kind(nt, exc[i]);
+      if (k == NK_SplatNode ? nt_ref(nt, exc[i], "expression") < 0
+                            : k != NK_ConstantReadNode && k != NK_ConstantPathNode) return 0;
+    }
+  }
+  return bare ? 2 : 1;
+}
+
 void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) {
   const NodeTable *nt = c->nt;
   int body = nt_ref(nt, id, "statements");
@@ -10021,7 +10048,8 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
       }
       buf_puts(b, "\n");
     }
-    g_ensure_stack[g_ensure_depth++] = (EnsureCtx){ eid, has_retval, g_exc_frame_depth, g_ret_type, g_rescue_save_depth };
+    g_ensure_stack[g_ensure_depth++] = (EnsureCtx){ eid, has_retval, g_exc_frame_depth, g_ret_type, g_rescue_save_depth,
+                                                    rescue_offers(nt, rescue) };
 
     /* retry in the rescue restarts the body; the ensure runs only when the
        begin finally exits (matching CRuby, where an aborted attempt does not
@@ -10050,6 +10078,7 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
       emit_stmts(c, body, b, indent + 1);
     }
     g_exc_frame_depth--;
+    g_ensure_stack[g_ensure_depth - 1].rescued = 0;
     emit_indent(b, indent + 1); buf_puts(b, "sp_exc_top--;\n");
     if (else_stmts >= 0) {
       if (resultvar) {
@@ -10244,12 +10273,23 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
          and any value-position begin/ensure nested the same way. An
          intervening rescue shows up as an exception frame between this level
          and the outer ensure's own, so re-raise there and let that handler
-         match; with no such frame, propagate to the outer ensure as before. */
+         match; with no such frame, propagate to the outer ensure as before.
+         The begin whose body this is a statement of is such a handler too
+         when it has rescue clauses, with no frame between: re-raise into
+         its body's frame, where the clauses are offered the exception and
+         its ensure runs after them, taken or not. A bare clause would take
+         a class the runtime does not know for a StandardError, so with one
+         in the list such a class is handed on (rescue_offers). */
       emit_indent(b, indent);
-      if (g_exc_frame_depth > outer->exc_base + 1) {
+      if (g_exc_frame_depth > outer->exc_base + 1 || outer->rescued == 1) {
         buf_printf(b, "if (SP_UNLIKELY(_excf%d)) sp_raise_exc((sp_Exception *)_excobj%d);\n", eid, eid);
       }
       else {
+        if (outer->rescued) {
+          buf_printf(b, "if (_excf%d && (!sp_exc_is_standard_error(_exccls%d) || sp_exc_cls_matches(_exccls%d, \"StandardError\")))"
+                        " sp_raise_exc((sp_Exception *)_excobj%d);\n", eid, eid, eid, eid);
+          emit_indent(b, indent);
+        }
         buf_printf(b, "if (_excf%d) { _excf%d = 1; _excmsg%d = _excmsg%d; _exccls%d = _exccls%d; _excobj%d = _excobj%d; sp_exc_top--; goto _ensure%d; }\n",
                    eid, outer->lid, outer->lid, eid, outer->lid, eid, outer->lid, eid, outer->lid);
       }
