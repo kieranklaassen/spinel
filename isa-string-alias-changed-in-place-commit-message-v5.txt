@@ -1,0 +1,67 @@
+A local assigned a boxed String under is_a? is that String, not a copy
+
+    r = [+"ab", 5]
+    e = r[0]
+    if e.is_a?(String)
+      t = e
+      t << "z"
+    end
+    p r
+
+prints ["abz", 5] in CRuby and ["ab", 5] here. With --share-strings it
+is right, and so it is under `case e when String` without the flag.
+
+The Array keeps this String as its handle, since an element is changed
+in place. The guard narrows the reads of e in its arm to String, and a
+narrowed read unboxes: `t = e` took the bytes out of the handle, t was
+a String of its own, and the append grew that one. The when arm narrows
+nothing, so there t is boxed too and lift_poly_alias_reads makes the
+two names one String. Under --share-strings the store lifts the box
+itself (strbuf_boxed_local), so nothing here applies to that build and
+its C is the C it was.
+
+isa_mark_reads already leaves an Array read boxed where it is handed
+on, because the narrowed read is a copy. It now leaves a String read
+boxed where it is the value of a local's only assignment, that local is
+changed in place as a String (itself, under a name it is assigned to,
+or by a method it is handed to whose parameter is), and the box is
+known to hold the handle: the guarded local is the element an Array's
+iterator binds (each, map, select and their kin) or is assigned only an
+element read (`r[k]`, `r.first`, `h.fetch(k)`), and the Array or Hash
+is a literal, or a local that is written only as a literal or
+`Array.new(n)` and otherwise only read, printed, or stored into with a
+value it was asked to keep as its handle (isa_holder_keeps_handles).
+
+Everywhere else the read is narrowed as before and the C is the C it
+was. A holder that keeps a plain String hands out that String itself (a
+Hash filled by `h[k] = v` and read by each_value, an Array born `[]`,
+filled by index and read by `r[0]`): there the narrowed read is no copy,
+an append that fits the String's spare room shows through the holder,
+and a handle made at `t = e` would be the copy. A local assigned in a
+second place keeps the narrowed read too: boxed, it is boxed for its
+whole scope, and the other assignment's String would be appended to as a
+box's is.
+
+The proof reads its calls by their names: `r.each`, `r[k] = v`,
+`Array.new(n)`, `p r`. A method of the program's own under one of those
+names may put a plain String into the holder behind them (a top-level
+`def p(a)` that does `a.concat(["s"])`), so the read is narrowed as
+before in any program that could have one. That is asked of the program
+as written (an_prog_never_gives): no def and no Symbol of such a name,
+and no site that names, makes or loads a method by something the text
+does not spell (a computed name, text evaluated, a file left unread, a
+module mixed in).
+
+Two more kinds of local keep the narrowed read though they are changed
+in place. One that is the receiver of a call with a block: a boxed
+String's `split(x) { }` raises NoMethodError. And one whose guarded
+value is only what a method of the program returned, read nowhere
+else: the box does not reach that String either.
+
+The walks read the writes, the reads and the calls of one scope off
+their chains (comp_lvw_first_sc, comp_vsite_first, comp_scall_first,
+comp_bcall_first), and what they find is kept while that scope is
+marked (isa_answer, isa_note_locals): a scope of many guarded
+assignments is walked once, not once for each of them.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

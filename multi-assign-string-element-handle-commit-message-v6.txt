@@ -1,0 +1,41 @@
+A multiple assignment's new String element is held as its handle
+
+    r = [+"q"]
+    r[0], r[1] = +"ab", +"cd"
+    r[0] << "z"
+    p r
+
+prints ["abz", "cd"] in CRuby and does not build here, with and without
+--share-strings: "initialization of 'sp_String *' from incompatible
+pointer type 'const char *'". `r[0] = +"ab"; r[1] = +"cd"` in place of
+the multiple assignment builds and is right.
+
+A String stored where an element is changed in place is wrapped in a
+handle of its own, and a single store does that at the store
+(emit_boxed). A multiple assignment holds each value in a temp first.
+The temp was declared by the value's stored type, the handle, and filled
+with what the value renders as, the String.
+
+The temp is now the handle the store would have made, for the statements
+a list proves (masgn_fresh_stmt). The value is a new String written as
+one: an interpolation, `+"lit"` or `"lit".dup`. Its target is an element
+of a local that is an Array or a Hash by its text (each write of it a
+literal, nil, or a conditional of those) and is not nil there, under a
+literal or a local key of the kind the store takes as it is. The
+statement has as many values as targets, every other target such an
+element or a local, every other value a number, a Symbol, nil, true,
+false or a local, or a String literal bound for a local.
+
+Such a statement roots every temp it holds: nothing else holds a new
+handle until its own store, and a store before it can allocate.
+
+Every other statement is emitted as it was. That is so for an assignment
+read for its value, and for every statement of a program that could have
+a `[]=`, a `+@` or a `dup` of its own, where the store or the value may
+be the program's to make. That is asked of the program as written
+(an_prog_never_gives): no def and no Symbol of such a name, and no site
+that names, makes or loads a method by something the text does not
+spell (a computed name, text evaluated, a file left unread, a module
+mixed in).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
