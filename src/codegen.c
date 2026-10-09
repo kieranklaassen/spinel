@@ -16381,6 +16381,7 @@ char *codegen_program(const NodeTable *nt) {
   size_t isa_ext_at = 0;
   Compiler *c = comp_new(nt);
   g_tmc_c = c;
+  program_note_parsed_operators(c);   /* the table as parsed: see codegen_stmt.c */
   analyze_program(c);
   if (g_dump_traits) { ty_traits_dump(c); exit(0); }
   /* --dump-repr: the analysis's answer, printed once the compile passes */
@@ -16432,6 +16433,7 @@ char *codegen_program(const NodeTable *nt) {
      emissions are gated on them (a `puts "hello"` program gets none). */
   g_needs_class_machinery = program_needs_class_machinery(c);
   scan_prologue_features(c);
+  program_scan_own_operators(c);   /* before any emit: see codegen_stmt.c */
   refuse_syserr_errno_const(c);
 
   /* Analyze-only emit modes (legacy --emit-*): write the requested artifact

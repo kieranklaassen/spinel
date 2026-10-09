@@ -9794,6 +9794,343 @@ static void emit_ensure_return(Compiler *c, int eid, int has_retval, Buf *b, int
   else emit_retf_return(eid, has_retval, b);
 }
 
+/* The builtin classes and modules a number or a boolean belongs to, and
+   Toplevel, the compiler's record of what is written outside every class
+   (Object's own). */
+static int names_scalar_builtin(const char *cn) {
+  static const char *const B[] = { "Integer", "Float", "Numeric", "Comparable", "Object", "Kernel",
+                                   "BasicObject", "TrueClass", "FalseClass", "NilClass", "Toplevel", NULL };
+  for (int i = 0; cn && B[i]; i++) if (sp_streq(cn, B[i])) return 1;
+  return 0;
+}
+
+/* The nodes that say what a class is: the writes of a constant (`K = v`,
+   `K ||= v`, `A::K = v`, `K, J = v, w`) and the openings of a class. */
+static const NodeKind CLASS_SHAPERS[] = {
+  NK_ConstantWriteNode, NK_ConstantOrWriteNode, NK_ConstantAndWriteNode, NK_ConstantOperatorWriteNode,
+  NK_ConstantTargetNode, NK_ConstantPathWriteNode, NK_ConstantPathOrWriteNode, NK_ConstantPathAndWriteNode,
+  NK_ConstantPathOperatorWriteNode, NK_ConstantPathTargetNode, NK_ClassNode };
+enum { N_CONST_WRITES = 10, N_CLASS_SHAPERS = 11 };
+
+/* Does the program assign the constant `name` anywhere, by any of the
+   writes? */
+static int const_is_assigned(Compiler *c, const char *name) {
+  const NodeTable *nt = c->nt;
+  const char *last = strrchr(name, ':');
+  if (last) name = last + 1;
+  for (int i = 0; i < N_CONST_WRITES; i++)
+    NT_FOREACH_KIND(nt, CLASS_SHAPERS[i], w) {
+      int tg = nt_ref(nt, w, "target");
+      const char *wn = nt_str(nt, tg >= 0 ? tg : w, "name");
+      if (!wn || sp_streq(wn, name)) return 1;
+    }
+  return 0;
+}
+
+/* Is `ci` a class of the program's own that no number and no boolean is an
+   instance of: written as a class, neither it nor an ancestor named for one
+   of those builtins, and its name never assigned as a constant (`K = Float`,
+   then `class K`, opens Float)? Of no class where the analysis took a write
+   or an opening out of the table: CRuby may run the one it dropped. */
+static int g_own_shaper_lost;
+static int class_holds_no_scalar(Compiler *c, int ci) {
+  if (g_own_shaper_lost || ci < 0 || comp_class_is_module(c, &c->classes[ci])) return 0;
+  if (!c->classes[ci].name || const_is_assigned(c, c->classes[ci].name)) return 0;
+  for (int hops = 0; ci >= 0; ci = c->classes[ci].parent)
+    if (!c->classes[ci].name || ++hops > 64 || names_scalar_builtin(c->classes[ci].name)) return 0;
+  return 1;
+}
+
+/* What the program may have put behind the operators' names. Bit i:
+   OPS[i] has a def that a number or a boolean may answer to, which is every
+   def of the name but one written with no receiver, or on self, in a class of
+   the program's own that no scalar is an instance of; an alias that gives a
+   method that name counts as a def of it, in the class it is recorded for.
+   Bit DOUBT: the program may define, remove or reach a method where no def
+   shows (own_uses_doubt), or holds code in a file the compiler did not read
+   (g_require_unread, the parser's). Proved by absence; no at the first
+   doubt. */
+static const char *const ENSURE_OPS[] = {
+  "+","-","*","/","%","**","<",">","<=",">=","==","!=","<=>","&","|","^","<<",">>", NULL };
+enum { ENSURE_OP_EQ = 10, ENSURE_OP_NE = 11, ENSURE_OP_CMP = 12, ENSURE_OP_DOUBT = 31 };
+
+/* The scan's bit for a method's name, or -1. */
+static int own_op_bit(const char *name) {
+  for (int i = 0; name && ENSURE_OPS[i]; i++) if (sp_streq(name, ENSURE_OPS[i])) return i;
+  return -1;
+}
+
+static const char *const OWN_WORDS[] = {   /* a doubt as a call's name or as a Symbol */
+  "alias_method","define_method","define_singleton_method","undef_method","remove_method","prepend",
+  "extend","refine","using","send","__send__","public_send","method","public_method","instance_method",
+  "public_instance_method","singleton_method","to_proc","eval","instance_eval","class_eval",
+  "module_eval","instance_exec","class_exec","module_exec","const_get","const_set","def_delegator",
+  "def_delegators","def_instance_delegator","def_instance_delegators","delegate","instance_delegate",
+  NULL };
+static const char *const OWN_NAMERS[] = {   /* they take the names of methods; the last two call them */
+  "attr","attr_reader","attr_writer","attr_accessor","public","private","protected","module_function",
+  "private_class_method","public_class_method","inject","reduce", NULL };
+
+static int own_word(const char *const *words, const char *name) {
+  for (int i = 0; name && words[i]; i++) if (sp_streq(name, words[i])) return 1;
+  return 0;
+}
+
+/* May the program define, remove or reach a method where no def shows? It
+   holds, as a call's name or as a Symbol, one of the WORDS; the undef
+   keyword; an alias whose new name is no plain Symbol; `class << x` for an
+   x that is not self; an argument of the attr words or the visibility words
+   that is no literal name; an argument of an inject or a reduce with no
+   block written out that is no literal (it is taken as a method's name
+   where no block comes, and `&b` may carry none); a block-pass of anything
+   but a literal Symbol, a `->` literal, or the block parameter of its own
+   def; or ERB.
+   Asked twice: of the table as parsed, and of the table as the analysis
+   left it. The analysis rewrites what it can resolve (a block-pass on
+   inject becomes a block, a call it has applied becomes nil), so the first
+   walk is the one that reads what the program wrote, and the second reads
+   what the analysis added. `parsed`: the scopes are not made yet. */
+static int own_uses_doubt(Compiler *c, int parsed) {
+  const NodeTable *nt = c->nt;
+  int n = 0;
+  nt_nodes_of_kind(nt, NK_UndefNode, &n);
+  if (n > 0) return 1;
+  NT_FOREACH_KIND(nt, NK_AliasMethodNode, al) {
+    int nn = nt_ref(nt, al, "new_name");
+    if (nn < 0 || nt_kind(nt, nn) != NK_SymbolNode) return 1;
+  }
+  NT_FOREACH_KIND(nt, NK_SingletonClassNode, sc) {
+    int x = nt_ref(nt, sc, "expression");
+    if (x < 0 || nt_kind(nt, x) != NK_SelfNode) return 1;
+  }
+  NT_FOREACH_KIND(nt, NK_SymbolNode, y)
+    if (own_word(OWN_WORDS, nt_str(nt, y, "value"))) return 1;
+  NT_FOREACH_KIND(nt, NK_CallNode, u) {
+    const char *un = nt_str(nt, u, "name");
+    if (own_word(OWN_WORDS, un)) return 1;
+    if (!own_word(OWN_NAMERS, un)) continue;
+    int calls = sp_streq(un, "inject") || sp_streq(un, "reduce");
+    int ub = nt_ref(nt, u, "block"), args = nt_ref(nt, u, "arguments"), an = 0;
+    /* a block written out: the argument is the first value. After the
+       analysis the block may stand for a block-pass: that call was judged
+       as parsed. */
+    if (calls && ub >= 0 && nt_kind(nt, ub) == NK_BlockNode) continue;
+    const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
+    for (int j = 0; j < an; j++) {
+      NodeKind k = nt_kind(nt, av[j]);
+      const char *vn = nt_str(nt, av[j], k == NK_SymbolNode ? "value" : k == NK_StringNode ? "content" : "name");
+      /* a literal name that is none of the words; for inject, a literal that
+         names nothing; `private def m`, `private attr_reader :m` */
+      int ok = k == NK_SymbolNode || k == NK_StringNode ? vn && !own_word(OWN_NAMERS, vn) && !own_word(OWN_WORDS, vn)
+             : calls ? k == NK_IntegerNode || k == NK_FloatNode || k == NK_NilNode || k == NK_TrueNode ||
+                       k == NK_FalseNode || k == NK_ArrayNode || k == NK_HashNode
+             : k == NK_DefNode || (k == NK_CallNode && vn && !strncmp(vn, "attr", 4) && own_word(OWN_NAMERS, vn));
+      if (!ok) return 1;
+    }
+  }
+  NT_FOREACH_KIND(nt, NK_BlockArgumentNode, ba) {
+    int x = nt_ref(nt, ba, "expression");
+    if (x < 0) continue;   /* a bare `&` hands on the def's own block */
+    NodeKind k = nt_kind(nt, x);
+    const char *xn = k == NK_SymbolNode ? nt_str(nt, x, "value") : nt_str(nt, x, "name");
+    if (k == NK_SymbolNode && !own_word(OWN_NAMERS, xn)) continue;   /* the WORDS were asked of every Symbol */
+    if (k == NK_LambdaNode) continue;   /* `->`; proc and lambda are methods a program can define */
+    if (k == NK_LocalVariableReadNode && xn) {   /* `def each(&blk) ... list.each(&blk)` */
+      int own = 0;
+      if (parsed) {   /* the name of a def's block parameter; whose def, the second walk asks */
+        NT_FOREACH_KIND(nt, NK_BlockParameterNode, bp) {
+          const char *bn = nt_str(nt, bp, "name");
+          if (bn && sp_streq(bn, xn)) own = 1;
+        }
+      }
+      else {
+        Scope *bs = comp_scope_of(c, ba);
+        int ps = bs && bs->def_node >= 0 ? nt_ref(nt, bs->def_node, "parameters") : -1;
+        int bp = ps >= 0 ? nt_ref(nt, ps, "block") : -1;
+        const char *bn = bp >= 0 ? nt_str(nt, bp, "name") : NULL;
+        /* the analysis turns a parameter that is only handed on into a yield
+           and leaves the read behind under this name */
+        own = (bn && sp_streq(bn, xn)) || sp_streq(xn, "__orphaned__");
+      }
+      if (own) continue;
+    }
+    return 1;
+  }
+  NT_FOREACH_KIND(nt, NK_ConstantReadNode, cr) {
+    const char *cn = nt_str(nt, cr, "name");
+    if (cn && sp_streq(cn, "ERB")) return 1;   /* text it evaluates */
+  }
+  return 0;
+}
+
+/* Of the first `n0` nodes, the ones the program wrote: how many defs, and
+   aliases that give a method the name, each operator has, and in
+   count[ENSURE_OP_DOUBT] how many nodes say what a class is. */
+static void own_count_written(const NodeTable *nt, int n0, int *count) {
+  NT_FOREACH_KIND(nt, NK_DefNode, d) {
+    int bit = d < n0 ? own_op_bit(nt_str(nt, d, "name")) : -1;
+    if (bit >= 0) count[bit]++;
+  }
+  NT_FOREACH_KIND(nt, NK_AliasMethodNode, al) {
+    int nn = al < n0 ? nt_ref(nt, al, "new_name") : -1;
+    int bit = nn >= 0 && nt_kind(nt, nn) == NK_SymbolNode ? own_op_bit(nt_str(nt, nn, "value")) : -1;
+    if (bit >= 0) count[bit]++;
+  }
+  for (int i = 0; i < N_CLASS_SHAPERS; i++)
+    NT_FOREACH_KIND(nt, CLASS_SHAPERS[i], w)
+      if (w < n0) count[ENSURE_OP_DOUBT]++;
+}
+
+static int program_holds_ensure(const NodeTable *nt) {
+  NT_FOREACH_KIND(nt, NK_BeginNode, g)
+    if (nt_ref(nt, g, "ensure_clause") >= 0) return 1;
+  return 0;
+}
+
+/* The table as parsed, read by codegen_program ahead of the analysis, for a
+   program that holds an ensure: the doubt of its text, how many nodes it
+   has, and what own_count_written counts of them. A table that was not read
+   here is all doubt. */
+static const Compiler *g_own_parsed_c;
+static int g_own_parsed_doubt, g_own_parsed_nodes, g_own_parsed_count[32];
+
+void program_note_parsed_operators(Compiler *c) {
+  g_own_parsed_c = c;
+  g_own_parsed_nodes = c->nt->count;
+  memset(g_own_parsed_count, 0, sizeof g_own_parsed_count);
+  g_own_parsed_doubt = !program_holds_ensure(c->nt) || own_uses_doubt(c, 1);
+  if (!g_own_parsed_doubt) own_count_written(c->nt, g_own_parsed_nodes, g_own_parsed_count);
+}
+
+static unsigned scan_own_operators(Compiler *c) {
+  enum { DOUBT = ENSURE_OP_DOUBT, NFAR = 64 };
+  const NodeTable *nt = c->nt;
+  int far[NFAR], nfar = 0, now[32] = { 0 };   /* defs of these names in a class no scalar belongs to */
+  unsigned own = 0;
+  if (g_own_parsed_c != c || g_own_parsed_doubt || own_uses_doubt(c, 0) || g_require_unread)
+    return 1u << DOUBT;
+  /* what the analysis took out of the table (an arm under a test it
+     decides) CRuby may run: a def is a def still */
+  own_count_written(nt, g_own_parsed_nodes, now);
+  for (int i = 0; i < DOUBT; i++) if (now[i] < g_own_parsed_count[i]) own |= 1u << i;
+  g_own_shaper_lost = now[DOUBT] < g_own_parsed_count[DOUBT];
+  for (int pass = 0; pass < 2; pass++)
+    for (int s = 0; s < c->nscopes; s++) {
+      const Scope *sc = &c->scopes[s];
+      int at = -1;
+      if (own_op_bit(sc->name) < 0 || sc->def_node < 0) continue;
+      for (int k = 0; k < nfar; k++) if (far[k] == sc->def_node) at = k;
+      if (class_holds_no_scalar(c, sc->class_id)) { if (!pass && at < 0 && nfar < NFAR) far[nfar++] = sc->def_node; }
+      else if (at >= 0) far[at] = -1;   /* the same def serves another class too */
+    }
+  NT_FOREACH_KIND(nt, NK_DefNode, d) {
+    int bit = own_op_bit(nt_str(nt, d, "name")), at = -1, recv = nt_ref(nt, d, "receiver");
+    for (int k = 0; k < nfar; k++) if (far[k] == d) at = k;
+    if (recv >= 0 && nt_kind(nt, recv) != NK_SelfNode) at = -1;   /* `def x.+`: whose it is is not known */
+    if (bit >= 0 && at < 0) own |= 1u << bit;
+  }
+  NT_FOREACH_KIND(nt, NK_AliasMethodNode, al) {
+    int nn = nt_ref(nt, al, "new_name"), in_far = 0, in_near = 0;
+    int bit = own_op_bit(nt_str(nt, nn, "value"));
+    if (bit < 0) continue;   /* a second name that is none of ours */
+    for (int ci = 0; ci < c->nclasses; ci++)
+      for (int k = 0; k < c->classes[ci].naliases; k++)
+        if (c->classes[ci].alias_node[k] == al) { if (class_holds_no_scalar(c, ci)) in_far = 1; else in_near = 1; }
+    if (!in_far || in_near) own |= 1u << bit;
+  }
+  return own;
+}
+
+/* The scan is made once, by codegen_program before anything is emitted: the
+   table then holds the program as analysis left it, and nothing the emitter
+   adds to it or rewrites in it for a while afterwards is the program's. It
+   is made only for a program that holds an ensure; a question about any
+   other Compiler is answered with every doubt. */
+static const Compiler *g_own_ops_c;
+static unsigned g_own_ops;
+
+void program_scan_own_operators(Compiler *c) {
+  g_own_ops = program_holds_ensure(c->nt) ? scan_own_operators(c) : ~0u;
+  g_own_ops_c = c;
+}
+
+static unsigned program_own_operators(Compiler *c) {
+  return g_own_ops_c == c ? g_own_ops : ~0u;
+}
+
+/* Is the operator `name` the builtin one wherever this program applies it
+   to a number or a boolean? call_is_scalar_op answers by the types and the
+   name alone, and a program can put a method of its own behind the name:
+   program_own_operators must find none (nor one behind `==` for `!=` and
+   `<=>`) and have no doubt. */
+static int ensure_op_is_builtin(Compiler *c, const char *name) {
+  unsigned own = program_own_operators(c);
+  if (!name || (own >> ENSURE_OP_DOUBT)) return 0;
+  for (int i = 0; ENSURE_OPS[i]; i++)
+    if (sp_streq(name, ENSURE_OPS[i]))
+      return !(own & 1u << i) && !((i == ENSURE_OP_NE || i == ENSURE_OP_CMP) && (own & 1u << ENSURE_OP_EQ));
+  return 0;
+}
+
+/* Is `v` a value an ensure body names with no call: nil, true, false, an
+   Integer, Float or Symbol literal, a read of a local, an instance
+   variable, a class variable or a global, or a builtin operator over
+   scalars (call_is_scalar_op, and ensure_op_is_builtin above) whose
+   operands are such values, every one of them a scalar itself? */
+static int ensure_names_plain_value(Compiler *c, int v) {
+  const NodeTable *nt = c->nt;
+  if (v < 0) return 0;
+  switch (nt_kind(nt, v)) {
+  case NK_NilNode: case NK_TrueNode: case NK_FalseNode: case NK_FloatNode: case NK_SymbolNode:
+  case NK_LocalVariableReadNode: case NK_InstanceVariableReadNode: case NK_GlobalVariableReadNode:
+  case NK_ClassVariableReadNode:
+    return 1;
+  case NK_IntegerNode:
+    return comp_ntype(c, v) == TY_INT;
+  case NK_CallNode: {
+    if (!call_is_scalar_op(c, v) || !ensure_op_is_builtin(c, nt_str(nt, v, "name")) ||
+        !ensure_names_plain_value(c, nt_ref(nt, v, "receiver"))) return 0;
+    int args = nt_ref(nt, v, "arguments"), n = 0;
+    const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &n) : NULL;
+    for (int i = 0; i < n; i++) {
+      TyKind at = comp_ntype(c, av[i]);   /* `n == obj` calls the object's `==` */
+      if ((at != TY_INT && at != TY_FLOAT && at != TY_BOOL) || !ensure_names_plain_value(c, av[i])) return 0;
+    }
+    return 1;
+  }
+  default:
+    return 0;
+  }
+}
+
+/* Does the ensure body `stmts` only name plain values (above), each alone
+   or stored in a local, an instance variable, a class variable or a
+   global, by `=` or by an `op=` on an Integer or Float slot whose operator
+   is the builtin one? Nothing it runs enters a begin or rescues a raise
+   then, so the exception that waits stays as the begin left it. */
+static int ensure_body_only_stores(Compiler *c, int stmts) {
+  const NodeTable *nt = c->nt;
+  int n = 0; const int *bb = nt_arr(nt, stmts, "body", &n);
+  for (int i = 0; i < n; i++) {
+    int v = bb[i];
+    switch (nt_kind(nt, v)) {
+    case NK_LocalVariableOperatorWriteNode: case NK_InstanceVariableOperatorWriteNode:
+    case NK_GlobalVariableOperatorWriteNode: case NK_ClassVariableOperatorWriteNode:
+      if (!ty_is_numeric(comp_ntype(c, v)) || !ty_is_numeric(comp_ntype(c, nt_ref(nt, v, "value"))) ||
+          !ensure_op_is_builtin(c, nt_str(nt, v, "binary_operator"))) return 0;
+      /* fall through */
+    case NK_LocalVariableWriteNode: case NK_InstanceVariableWriteNode: case NK_GlobalVariableWriteNode:
+    case NK_ClassVariableWriteNode:
+      v = nt_ref(nt, v, "value");
+      break;
+    default:
+      break;
+    }
+    if (!ensure_names_plain_value(c, v)) return 0;
+  }
+  return 1;
+}
+
 /* begin/body/rescue (ensure/else deferred) via the setjmp exception model.
    When resultvar != NULL, the body's and rescue handlers' values are
    assigned to it (begin/rescue as an expression). */
@@ -9981,11 +10318,28 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
        as its cause. */
     emit_indent(b, indent);
     buf_printf(b, "{ void *_icr%d SP_CLEANUP(sp_inflight_restore) = _ic%d; (void)_icr%d;\n", eid, eid, eid);
+    /* The deferred exception waits in _excmsg and _excobj while the ensure
+       body runs, and nothing else holds it there: a begin entered by that
+       body takes the slot the message was read from, and a raise it rescues
+       takes sp_inflight_cause. Both are rooted for the body, and only when
+       an exception waits, so the path with none pays a saved count. */
+    int holds = !ensure_body_only_stores(c, ensure_stmts);
+    if (holds) {
+      emit_indent(b, indent);
+      buf_printf(b, "{ int _exr%d SP_CLEANUP(sp_gc_cleanup) = sp_gc_nroots;"
+                    " if (_excf%d) { _sp_gc_root_push((void **)((uintptr_t)&_excmsg%d | (uintptr_t)2));"
+                    " _sp_gc_root_push((void **)&_excobj%d); }\n",
+                 eid, eid, eid, eid);
+    }
     emit_stmts(c, ensure_stmts, b, indent);
     if (keep_handle) {
       emit_indent(b, indent); buf_printf(b, "_sp_ret_strbuf = _rh%d;\n", eid);
     }
     emit_indent(b, indent);
+    if (holds) {
+      buf_puts(b, "}\n");
+      emit_indent(b, indent);
+    }
     buf_puts(b, "}\n");
     emit_indent(b, indent);
     buf_printf(b, "sp_unwind_kind = _uk%d; sp_unwind_target = _ut%d; sp_unwind_exc_top = _ue%d; sp_unwind_home = _uh%d;\n",

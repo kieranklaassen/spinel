@@ -2016,6 +2016,8 @@ void emit_stmt_tail_inner(Compiler *c, int id, Buf *b, int indent);
 void emit_stmts(Compiler *c, int id, Buf *b, int indent);
 void emit_stmts_tail(Compiler *c, int id, Buf *b, int indent);
 int emit_top_stmts(Compiler *c, int id, Buf *b, int indent, size_t *cuts);
+void program_note_parsed_operators(Compiler *c);   /* once, before the analysis */
+void program_scan_own_operators(Compiler *c);   /* once, before any emit */
 int needs_root(TyKind t);
 /* Whether a variable of an inferred type takes a root, and the root itself,
    picking the rbval macro for boxed poly and the string one for a String. */
