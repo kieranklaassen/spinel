@@ -1,0 +1,400 @@
+**The delta**, `git diff 771a07e0633f9961dd95052ed985d1f1cf191872 0ed1a93ee4f0aae49398f67f22eb6d4d8d111885`: src/analyze.c (3 in, 13 out) and src/spinel_parse.c (19 in, 29 out). Lines 73, 76, 107 and 123 are one space each. sha256 `2152cb675179fd38f98ce0616d175be7c7bc1d96a1e6de485531edc6f0050e74`:
+
+`````diff
+diff --git a/src/analyze.c b/src/analyze.c
+index 3bee26de8..3440dc56d 100644
+--- a/src/analyze.c
++++ b/src/analyze.c
+@@ -223,9 +223,8 @@ void anh_free(ANameHash *st) { free(st->key); free(st->next); free(st->head); }
+        such word by its Symbol; an alias or an undef likewise;
+    (2) a block-pass of anything but a Symbol literal that is no such word
+        (the parser spells most of those as a block and marks it), a literal
+-       lambda, a `proc { }` or `lambda { }` where the program gives neither
+-       name a method, or the block parameter of its own def, which that def
+-       only reads;
++       lambda, or the block parameter of its own def, which that def only
++       reads;
+    (3) text evaluated: an eval with an argument or with no literal block, an
+        exec, a trap or a trace_var with no literal block, `binding`, ERB;
+    (4) a file not read: a require left standing in the table (the parser
+@@ -308,7 +307,7 @@ static int an_own_block_passes(const NodeTable *nt, int n, const char *bp) {
+   return cnt;
+ }
+ static void an_note_written_names(const NodeTable *nt) {
+-  int by_value = g_require_unread, passes = 0, own_passes = 0, erb = 0, makers = 0;
++  int by_value = g_require_unread, passes = 0, own_passes = 0, erb = 0;
+   for (int k = 0; an_by_name[k].nm; k++)
+     if (!anh_has(&g_by_name_words, an_by_name[k].nm)) anh_add(&g_by_name_words, an_by_name[k].nm);
+   for (int id = 0; id < nt->count; id++) {
+@@ -342,12 +341,6 @@ static void an_note_written_names(const NodeTable *nt) {
+         int e = nt_ref(nt, id, "expression");
+         NodeKind ek = nt_kind(nt, e);
+         if (ek == NK_LocalVariableReadNode) passes++;
+-        else if (ek == NK_CallNode) {
+-          const char *en = nt_str(nt, e, "name");
+-          int maker = !en ? 0 : sp_streq(en, "proc") ? 1 : sp_streq(en, "lambda") ? 2 : 0;
+-          if (!maker || nt_ref(nt, e, "receiver") >= 0 || nt_kind(nt, nt_ref(nt, e, "block")) != NK_BlockNode) by_value = 1;
+-          else makers |= maker;
+-        }
+         else if (e >= 0 && ek != NK_LambdaNode && !an_name_spelled(nt, e)) by_value = 1;
+         break;
+       }
+@@ -398,9 +391,6 @@ static void an_note_written_names(const NodeTable *nt) {
+       default: break;
+     }
+   }
+-  /* `&proc { }` and `&lambda { }` pass what Kernel's own makes, not what a
+-     method of that name the program gives would answer */
+-  if (((makers & 1) && anh_has(&g_written, "proc")) || ((makers & 2) && anh_has(&g_written, "lambda"))) by_value = 1;
+   if (by_value || passes > own_passes || erb > 0) g_written_by_value = 1;
+ }
+ /* Does the program, as written, give no class or module a method named
+diff --git a/src/spinel_parse.c b/src/spinel_parse.c
+index f18a63e8d..7dabf42cd 100644
+--- a/src/spinel_parse.c
++++ b/src/spinel_parse.c
+@@ -3313,14 +3313,12 @@ static char *sp_rewrite_dead_requires(const char *source) {
+        raise or a warning, blanked as unreachable, or past where the scan
+        gave up counts as written and not resolved; one a rewrite made sets
+        the flag itself.
+-   Text the class macros write (sp_expand_class_macros) is read the same way
+-   once they have, and any of these words in it sets the flag: the parts a
+-   macro joins need not spell one. The flag is final when the parser returns.
+-   The words are counted, not parsed: one in a string, or in a comment after
+-   code, sets the flag, and all that gives up is an optimisation. A line that
+-   is only a comment and holds no interpolation is skipped: it is a comment
+-   where code is read and plain text inside a literal, a call in neither.
+-   Declared extern in compiler.h. */
++   Text the class macros write (sp_expand_class_macros) is read once they
++   have, for the words that set the flag: the parts a macro joins need not
++   spell one. The flag is final when the parser returns.
++   The words are counted, not parsed, and no character of the text is passed
++   over: one in a string or in a comment sets the flag, and all that gives up
++   is an optimisation. Declared extern in compiler.h. */
+ int g_require_unread = 0;
+ static int sp_req_written = 0, sp_req_resolved = 0;
+ 
+@@ -3329,25 +3327,15 @@ static int sp_req_word_at(const char *p, const char *w, size_t n) {
+ }
+ 
+ static void sp_require_note_text(const char *text) {
+-  for (const char *ln = text; *ln; ) {
+-    const char *e = strchr(ln, '\n');
+-    if (!e) e = ln + strlen(ln);
+-    const char *p = ln;
+-    while (p < e && (*p == ' ' || *p == '\t')) p++;
+-    int comment = p < e && *p == '#';
+-    for (const char *q = p; comment && q + 1 < e; q++)
+-      if (*q == '#' && (q[1] == '{' || q[1] == '$' || q[1] == '@')) comment = 0;
+-    for (; !comment && p < e; p++) {
+-      if (*p == '$') {
+-        if (p[1] == ':' || p[1] == '"' || strncmp(p + 1, "-I", 2) == 0 || strncmp(p + 1, "LOAD_PATH", 9) == 0 ||
+-            strncmp(p + 1, "LOADED_FEATURES", 15) == 0) g_require_unread = 1;
+-        continue;
+-      }
+-      if ((*p != 'r' && *p != 'l' && *p != 'a') || (p > text && sp_req_ident_char(p[-1]))) continue;
+-      if (sp_req_word_at(p, "require", 7) || sp_req_word_at(p, "require_relative", 16)) sp_req_written++;
+-      else if (sp_req_word_at(p, "load", 4) || sp_req_word_at(p, "autoload", 8)) g_require_unread = 1;
++  for (const char *p = text; *p; p++) {
++    if (*p == '$') {
++      if (p[1] == ':' || p[1] == '"' || strncmp(p + 1, "-I", 2) == 0 || strncmp(p + 1, "LOAD_PATH", 9) == 0 ||
++          strncmp(p + 1, "LOADED_FEATURES", 15) == 0) g_require_unread = 1;
++      continue;
+     }
+-    ln = *e ? e + 1 : e;
++    if ((*p != 'r' && *p != 'l' && *p != 'a') || (p > text && sp_req_ident_char(p[-1]))) continue;
++    if (sp_req_word_at(p, "require", 7) || sp_req_word_at(p, "require_relative", 16)) sp_req_written++;
++    else if (sp_req_word_at(p, "load", 4) || sp_req_word_at(p, "autoload", 8)) g_require_unread = 1;
+   }
+ }
+ 
+@@ -5193,10 +5181,12 @@ static int sp_parse_emit(const char *source_file, const char *argv0, SpStrBuf *o
+      attach_function / const_set names) expanded in place; line count kept */
+   { char *mx = sp_expand_class_macros(source);
+     if (mx) {
+-      /* what a macro wrote was in no file's text: g_require_unread reads it here */
+-      int written = sp_req_written;
++      /* what a macro wrote was in no file's text. A require it wrote is a
++         call in the node table, where the analyzer finds it; a load-path
++         statement is dropped ahead of the table, so g_require_unread reads
++         the text here, past the count (the resolver's own stubs hold the
++         word require) */
+       sp_require_note_text(mx);
+-      if (sp_req_written != written) g_require_unread = 1;
+       free(source); source = mx;
+     } }
+ 
+`````
+
+**The reader's twelve doors**, written from the relay (line and byte counts equal). The first field after the name is CRuby 3.3.6's first line; then the bare tip `68d40ff05fd4`, `cc0bd8dfa9b3`, the mend `771a07e0633f` and this head (`cut`), gcc at SPINEL_GC_STRESS unset and 2: `o` the same as CRuby, `x` another answer. sha256 `eab589360782efd2fc3b968f34356f58f5dcfda1b34fae29509dfd4b40c1b419`:
+
+`````text
+n01_dq_loadpath ruby[abc|2] tip oo cc0b xx mend xx cut oo
+n02_pq_loadpath ruby[abc|2] tip oo cc0b xx mend xx cut oo
+n03_sq_colon ruby[abc|2] tip oo cc0b xx mend xx cut oo
+n04_dq_self_load ruby[abc|2] tip oo cc0b xx mend xx cut oo
+n05_dq_dead_req ruby[abc|2] tip oo cc0b xx mend xx cut oo
+n07_regex_loadpath ruby[abc|2] tip oo cc0b xx mend xx cut oo
+n08_pw_loadpath ruby[abc|2] tip oo cc0b xx mend xx cut oo
+n09_dq_autoload ruby[abc|2] tip oo cc0b xx mend xx cut oo
+n10_indented ruby[abc|2] tip oo cc0b xx mend xx cut oo
+y11_macro_hidden ruby[abc|2] tip oo cc0b xx mend xx cut oo
+i12_struct_str_member ruby[abc|2] tip oo cc0b xx mend xx cut oo
+i21_struct_pw_member ruby[abc|2] tip oo cc0b xx mend xx cut oo
+`````
+
+**My family of 121**: the generator (it writes the programs and the three library files beside them; `python3 family.py` in an empty directory), sha256 `14c96b894c78c64059eea962a47a85f84a5b141d217564bd07e771d0ba793792`:
+
+`````python
+# gen.py: the reader's families, rebuilt from the forms in the verdict. Each program is
+# the five lines, a form, and the last line; the files it reads are written beside it.
+import os
+HEAD = '''class String
+  def pair(a) = "#{self}|#{a.size}"
+end
+$s = +"ab"
+def add = ($s << "c"; [1, 2])
+'''
+LAST = 'puts $s.dup.pair(add)\n'
+DUP = 'class String; def dup = self; end\n'
+P = {}
+names = '''json set ffi ostruct time securerandom fileutils base64 digest csv pathname tempfile uri zlib open3 find
+io/console fiber enumerator rational complex socket erb forwardable bigdecimal tmpdir stringio optparse logger
+shellwords net/http openssl cgi pty fiddle'''.split()
+assert len(names) == 35
+os.makedirs('lib2', exist_ok=True); os.makedirs('lib', exist_ok=True)
+for n in names + ['thread', 'monitor', 'strscan', 'benchmark']:
+    d = os.path.dirname('lib2/' + n + '.rb'); os.makedirs(d, exist_ok=True)
+    open('lib2/' + n + '.rb', 'w').write(DUP)
+open('lib/dp.rb', 'w').write(DUP)
+open('lib/dpc.rb', 'w').write('Dp = 1\n' + DUP)
+open('m_dp.rb', 'w').write(DUP)
+U = '$LOAD_PATH.unshift(File.join(__dir__, "lib2"))\n'
+for i, n in enumerate(names, 1):
+    P['a%02d' % i] = U + 'require "%s"\n' % n
+P['a50'] = '$:.unshift(File.join(__dir__, "lib2"))\nrequire "json"\n'
+P['a53'] = '$LOAD_PATH.unshift(File.expand_path("lib2", __dir__))\nrequire "json"\n'
+P['a56'] = '$LOAD_PATH.unshift(File.join(__dir__, "lib2")) if true\nrequire "json"\n'
+P['a61'] = '$LOAD_PATH[0, 0] = File.join(__dir__, "lib2")\nrequire "json"\n'
+P['a64'] = 'begin $LOAD_PATH.unshift(File.join(__dir__, "lib2")) rescue nil end\nrequire "json"\n'
+P['a70'] = 'def setup\n  $LOAD_PATH.unshift(File.join(__dir__, "lib2"))\n  require "json"\nend\nsetup\n'
+P['a71'] = 'def setup(d)\n  $LOAD_PATH.unshift(d)\nend\nsetup(File.join(__dir__, "lib2"))\nrequire "json"\n'
+P['a72'] = 'def setup\n  $LOAD_PATH.unshift(File.join(__dir__, "lib2"))\nrescue NoMethodError\nend\nsetup\nrequire "json"\n'
+for k, n in (('a80', 'thread'), ('a81', 'monitor'), ('a82', 'strscan'), ('a83', 'benchmark')):
+    P[k] = U + 'require "%s"\n' % n
+P['a84'] = '$-I.unshift(File.join(__dir__, "lib2"))\nrequire "json"\n'
+P['a85'] = '$LOAD_PATH.insert(0, File.join(__dir__, "lib2"))\nrequire "json"\n'
+P['b05'] = 'begin\n  Object.autoload(:Dp, File.join(__dir__, "lib/dpc.rb")); Dp\nrescue NameError, NoMethodError\nend\n'
+P['b06'] = 'class Holder\n  autoload :Dp, File.join(__dir__, "lib/dpc.rb")\nend\nbegin\n  Holder::Dp\nrescue NameError, NoMethodError\nend\n'
+P['b07'] = 'begin\n  Kernel.autoload(:Dp, File.join(__dir__, "lib/dpc.rb")); Dp\nrescue NameError, NoMethodError\nend\n'
+P['b09'] = 'begin\n  self.load(File.join(__dir__, "lib/dp.rb"))\nrescue NoMethodError\nend\n'
+def beg(body, exc='NoMethodError'): return 'begin\n  %s\nrescue %s\nend\n' % (body, exc)
+GO = beg('go(String, "def dup = self", "class_e" + "val")')
+P['c01'] = 'def go(k, t, n, &b) = [k, t].inject(n, &b)\n' + GO
+P['c02'] = 'def go(k, t, n, &b) = [k, t].reduce(n, &b)\n' + GO
+P['c03'] = 'def go(n, &b) = [String, "def dup = self"].inject(n, &b)\n' + beg('go("class_e" + "val")')
+P['c04'] = 'def go(k, t, n, &b)\n  [k, t].inject(n, &b)\nend\n' + GO
+P['c05'] = 'def go(k, t, n) = [k, t].inject(n, &nil)\n' + GO
+P['c06'] = 'def go(k, t, n, &) = [k, t].inject(n, &)\n' + GO
+P['c07'] = 'def go(k, t, &b) = [k, t].inject(:class_eval, &b)\n' + beg('go(String, "def dup = self")')
+P['c08'] = 'T = "def dup = self"\ndef go(...) = [String, T].inject(...)\n' + beg('go("class_e" + "val")')
+P['c09'] = 'def go(k, t, &) = [k, t].inject(:class_eval, &)\n' + beg('go(String, "def dup = self")')
+P['g01'] = beg('require "#{__dir__}/lib/dp"', 'LoadError')
+P['g02'] = 'd = "lib"\n' + beg('require_relative "#{d}/dp"', 'LoadError')
+P['g03'] = beg('%w[dp].each { |f| require_relative "lib/#{f}" }', 'LoadError')
+P['i01'] = '$pr = :CLASS_EVAL.downcase\ndef proc(&b) = $pr\n' + beg('[String].each_with_object("def dup = self", &proc { })')
+P['i02'] = '$pr = :CLASS_EVAL.downcase\ndef lambda(&b) = $pr\n' + beg('[String].each_with_object("def dup = self", &lambda { })')
+P['j01'] = 'if RUBY_ENGINE == "ruby"\n  require_relative "lib/dp"\nend\n'
+P['j02'] = 'unless RUBY_ENGINE == "spinel"\n  require_relative "lib/dp"\nend\n'
+P['j03'] = 'if RUBY_ENGINE != "spinel"\n  require_relative "lib/dp"\nend\n'
+P['j04'] = 'require_relative "lib/dp" if RUBY_ENGINE == "ruby"\n'
+P['j05'] = 'if RUBY_ENGINE == "spinel"\n  $x = 1\nelse\n  require_relative "lib/dp"\nend\n'
+P['j06'] = 'if RUBY_ENGINE == "ruby"\n  require "./lib/dp"\nend\n'
+P['j07'] = 'if RUBY_ENGINE == "ruby"\n  $LOAD_PATH.unshift(File.join(__dir__, "lib2"))\nend\nrequire "json"\n'
+P['j08'] = 'if RUBY_ENGINE == "ruby"\n  Kernel.require "./lib/dp"\nend\n'
+P['j09'] = 'if RUBY_ENGINE == "ruby"\n  class String; def dup = self; end\nend\n'
+P['j10'] = 'case RUBY_ENGINE\nwhen "ruby" then require_relative "lib/dp"\nend\n'
+P['m01'] = 'Dir.chdir(__dir__)\nrequire "./m_dp"\n'
+P['m02'] = 'Dir.chdir(__dir__) do\n  require "./m_dp"\nend\n'
+# a word the class-macro pass makes from parts: in no file's text
+def mac(text, arg): return 'module M\n  def mk(n)\n    module_eval "%s"\n  end\nend\nclass Foo\n  extend M\n  mk "%s"\nend\n' % (text, arg)
+P['y01'] = mac('def self.go(f) = self.l#{n}(f)', 'oad') + beg('Foo.go(File.join(__dir__, "lib/dp.rb"))')
+P['y02'] = mac('def self.go(f) = l#{n}(f)', 'oad') + beg('Foo.go(File.join(__dir__, "lib/dp.rb"))')
+P['y03'] = mac('def self.go(d) = (begin $LOAD#{n}.unshift(d) rescue nil end)', '_PATH') + 'Foo.go(File.join(__dir__, "lib2"))\nrequire "json"\n'
+P['y04'] = mac('def self.go(f) = Kernel.req#{n}(f)', 'uire') + beg('Foo.go(File.join(__dir__, "lib/dp.rb"))', 'NoMethodError, LoadError')
+P['y05'] = mac('def self.#{n} = 1', 'one') + '$t = Foo.one\n'
+P['y06'] = mac('def self.go = $LOAD#{n}', '_PATH')
+# a line that looks like a comment and is code: a literal ends on it (the reader's n01, n02, n05, and kin)
+P['n01'] = 'x = "\n#"; $LOAD_PATH.unshift(File.join(__dir__, "lib2"))\nrequire "json"\n'
+P['n02'] = 'x = %q#\n#; $LOAD_PATH.unshift(File.join(__dir__, "lib2"))\nrequire "json"\n'
+P['n03'] = "x = '\n#'; $LOAD_PATH.unshift(File.join(__dir__, \"lib2\"))\nrequire \"json\"\n"
+P['n04'] = 'x = <<~T\n  a\nT\n# $LOAD_PATH.unshift(File.join(__dir__, "lib2"))\nrequire "json"\n'
+P['n05'] = 'if RUBY_ENGINE == "ruby"\n  x = "\n#"; require_relative "lib/dp"\nend\n'
+P['n06'] = 'x = %q#\n#; begin; load File.join(__dir__, "lib/dp.rb"); rescue NoMethodError; end\n'
+P['n07'] = 'x = /a\n#/x; $LOAD_PATH.unshift(File.join(__dir__, "lib2"))\nrequire "json"\n'
+P['n08'] = 'x = %w[a\n#]; $LOAD_PATH.unshift(File.join(__dir__, "lib2"))\nrequire "json"\n'
+P['n09'] = 'x = "\n \t#"; $LOAD_PATH.unshift(File.join(__dir__, "lib2"))\nrequire "json"\n'
+P['n10'] = 'x = "\n#"; begin; self.load(File.join(__dir__, "lib/dp.rb")); rescue NoMethodError; end\n'
+P['n11'] = 'x = "\n#"; begin; Object.autoload(:Dp, File.join(__dir__, "lib/dpc.rb")); Dp; rescue NameError, NoMethodError; end\n'
+P['n12'] = 'module M\n  def mk(n)\n    module_eval "def self.go(d) = (begin $LOAD#{n}.unshift(d) rescue nil end)"\n  end\nend\nclass Foo\n  extend M\n  x = "\n#"; mk "_PATH"\nend\nFoo.go(File.join(__dir__, "lib2"))\nrequire "json"\n'
+P['n13'] = 'x = "\n#"; $:.unshift(File.join(__dir__, "lib2"))\nrequire "json"\n'
+# the program's own proc or lambda, by a road that is no def and no Symbol (the reader's two), and the plain pass
+EW = '[String].each_with_object("def dup = self", &%s { })'
+GOS = 'begin\n  S.new(1, :CLASS_EVAL.downcase).go\nrescue NoMethodError, ArgumentError, TypeError\nend\n'
+P['s01'] = 'S = Struct.new(:a, "proc") do\n  def go = ' + EW % 'proc' + '\nend\n' + GOS
+P['s02'] = 'S = Struct.new(:a, *%w[proc]) do\n  def go = ' + EW % 'proc' + '\nend\n' + GOS
+P['s03'] = 'S = Struct.new(:a, "lambda") do\n  def go = ' + EW % 'lambda' + '\nend\n' + GOS
+P['s04'] = '$t = [1, 2].map(&proc { |v| v + 1 })\n'
+P['s05'] = '$t = [1, 2].map(&lambda { |v| v + 1 })\n'
+P['s06'] = '$t = [1, 2].map(&->(v) { v + 1 })\n'
+# what a macro writes, past the count: a require it makes is a call in the table
+P['y07'] = mac('def self.go = (begin; req#{n} \\"lib/dp\\"; rescue NoMethodError, LoadError; end)', 'uire_relative') + 'Foo.go\n'
+P['y08'] = mac('def self.go = (begin; send(:req#{n}, \\"lib/dp\\"); rescue NoMethodError, LoadError; end)', 'uire_relative') + 'Foo.go\n'
+P['y09'] = mac('def self.go = (if RUBY_ENGINE == \\"ruby\\" then req#{n} \\"lib/dp\\" end)', 'uire_relative') + 'Foo.go\n'
+P['y10'] = 'require "set"\n' + mac('def self.#{n} = 1', 'one') + '$t = Foo.one\n'
+P['y11'] = 'require "set"\n' + mac('def self.go(d) = (begin $LOAD#{n}.unshift(d) rescue nil end)', '_PATH') + 'Foo.go(File.join(__dir__, "lib2"))\nrequire "json"\n'
+P['y12'] = mac('def self.go(f) = req#{n}(f)', 'uire') + beg('Foo.go(File.join(__dir__, "lib/dp"))', 'NoMethodError, LoadError')
+P['y13'] = mac('def self.go(f) = send(:req#{n}, f)', 'uire') + beg('Foo.go(File.join(__dir__, "lib/dp"))', 'NoMethodError, LoadError')
+P['y14'] = 'require "set"\n' + mac('def self.go(f) = req#{n}(f)', 'uire') + beg('Foo.go(File.join(__dir__, "lib/dp"))', 'NoMethodError, LoadError')
+# the plain forms: nothing here may lose the fix
+P['z01'] = ''
+P['z02'] = 'require "json"\n'
+P['z03'] = 'require_relative "lib/plain"\n'
+P['z04'] = 'require "set"\nrequire "strscan"\n$t = Set.new([1])\n'
+P['z05'] = '# $LOAD_PATH.unshift(File.join(__dir__, "lib2"))\n# load "x"\n# require "nothing_here"\n'
+P['z06'] = 'x = "require"\n'
+P['z07'] = 'x = "the load"\n'
+P['z08'] = 'if false\n  require "json"\nend\n'
+P['z09'] = '$t = [3, 1].sort.map { |v| v + 1 }.select(&:odd?)\n'
+open('lib/plain.rb', 'w').write('def plain = 1\n')
+for k, v in P.items():
+    open(k + '.rb', 'w').write(HEAD + v + LAST)
+open('names.txt', 'w').write(' '.join(sorted(P)) + '\n')
+print(len(P))
+`````
+
+Its cells, the same columns (`r` no output, `nn` no build), sha256 `2ee3aad20f30f6370bf55144b65a20a9f7eafb7cf83da4a5c2da5621b7988ba5`:
+
+`````text
+a01 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+a02 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+a03 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+a04 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+a05 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+a06 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+a07 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+a08 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+a09 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+a10 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+a11 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+a12 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+a13 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+a14 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+a15 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+a16 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+a17 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+a18 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+a19 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+a20 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+a21 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+a22 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+a23 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+a24 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+a25 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+a26 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+a27 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+a28 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+a29 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+a30 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+a31 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+a32 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+a33 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+a34 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+a35 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+a50 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+a53 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+a56 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+a61 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+a64 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+a70 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+a71 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+a72 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+a80 ruby[ab|2] tip xx cc0b oo mend xx cut xx
+a81 ruby[ab|2] tip xx cc0b oo mend xx cut xx
+a82 ruby[abc|2] tip oo cc0b oo mend oo cut oo
+a83 ruby[abc|2] tip oo cc0b oo mend oo cut oo
+a84 ruby[abc|2] tip nn cc0b nn mend nn cut nn
+a85 ruby[abc|2] tip rr cc0b rr mend rr cut rr
+b05 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+b06 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+b07 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+b09 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+c01 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+c02 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+c03 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+c04 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+c05 ruby[abc|2] tip oo cc0b oo mend oo cut oo
+c06 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+c07 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+c08 ruby[abc|2] tip oo cc0b oo mend oo cut oo
+c09 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+g01 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+g02 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+g03 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+i01 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+i02 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+j01 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+j02 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+j03 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+j04 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+j05 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+j06 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+j07 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+j08 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+j09 ruby[abc|2] tip oo cc0b oo mend oo cut oo
+j10 ruby[abc|2] tip oo cc0b oo mend oo cut oo
+m01 ruby[abc|2] tip oo cc0b oo mend oo cut oo
+m02 ruby[abc|2] tip oo cc0b oo mend oo cut oo
+n01 ruby[abc|2] tip oo cc0b xx mend xx cut oo
+n02 ruby[abc|2] tip oo cc0b xx mend xx cut oo
+n03 ruby[abc|2] tip oo cc0b xx mend xx cut oo
+n04 ruby[ab|2] tip xx cc0b oo mend oo cut xx
+n05 ruby[abc|2] tip oo cc0b xx mend xx cut oo
+n06 ruby[abc|2] tip nn cc0b nn mend nn cut nn
+n07 ruby[abc|2] tip oo cc0b xx mend xx cut oo
+n08 ruby[abc|2] tip oo cc0b xx mend xx cut oo
+n09 ruby[abc|2] tip oo cc0b xx mend xx cut oo
+n10 ruby[abc|2] tip oo cc0b xx mend xx cut oo
+n11 ruby[abc|2] tip oo cc0b xx mend xx cut oo
+n12 ruby[abc|2] tip oo cc0b xx mend xx cut oo
+n13 ruby[abc|2] tip oo cc0b xx mend xx cut oo
+s01 ruby[abc|2] tip oo cc0b xx mend xx cut oo
+s02 ruby[abc|2] tip oo cc0b xx mend xx cut oo
+s03 ruby[abc|2] tip oo cc0b xx mend xx cut oo
+s04 ruby[ab|2] tip xx cc0b oo mend oo cut xx
+s05 ruby[ab|2] tip xx cc0b oo mend oo cut xx
+s06 ruby[ab|2] tip xx cc0b oo mend oo cut oo
+y01 ruby[abc|2] tip nn cc0b nn mend nn cut nn
+y02 ruby[abc|2] tip nn cc0b nn mend nn cut nn
+y03 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+y04 ruby[abc|2] tip oo cc0b oo mend oo cut oo
+y05 ruby[ab|2] tip xx cc0b oo mend oo cut oo
+y06 ruby[ab|2] tip xx cc0b oo mend xx cut xx
+y07 ruby[ab|2] tip xx cc0b xx mend xx cut xx
+y08 ruby[ab|2] tip xx cc0b xx mend xx cut xx
+y09 ruby[(eval at y09.rb:8):1:in `require_relative': cannot infer basepath (LoadError)] tip xx cc0b xx mend xx cut xx
+y10 ruby[ab|2] tip xx cc0b oo mend oo cut oo
+y11 ruby[abc|2] tip oo cc0b xx mend oo cut oo
+y12 ruby[abc|2] tip oo cc0b oo mend oo cut oo
+y13 ruby[abc|2] tip oo cc0b oo mend oo cut oo
+y14 ruby[abc|2] tip oo cc0b oo mend oo cut oo
+z01 ruby[ab|2] tip xx cc0b oo mend oo cut oo
+z02 ruby[ab|2] tip xx cc0b oo mend oo cut xx
+z03 ruby[ab|2] tip xx cc0b oo mend oo cut oo
+z04 ruby[ab|2] tip xx cc0b xx mend xx cut xx
+z05 ruby[ab|2] tip xx cc0b oo mend oo cut xx
+z06 ruby[ab|2] tip xx cc0b oo mend xx cut xx
+z07 ruby[ab|2] tip xx cc0b oo mend xx cut xx
+z08 ruby[ab|2] tip xx cc0b oo mend xx cut xx
+z09 ruby[ab|2] tip xx cc0b oo mend oo cut oo
+`````

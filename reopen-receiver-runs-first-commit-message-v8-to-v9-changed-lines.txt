@@ -1,0 +1,26 @@
+59,61c59,61
+< a Symbol literal that is no such word, a literal lambda, a `proc { }`
+< or `lambda { }` where the program holds no def and no Symbol of that
+< name, or the block parameter of its own def; text evaluated (eval,
+---
+> a Symbol literal that is no such word, a literal `->` lambda, or the
+> block parameter of its own def (`&proc { }` and `&lambda { }` are
+> sites: a program can give either name a method); text evaluated (eval,
+68,74c68,76
+< written, and of what its class macros write: no load-path global is
+< written ($LOAD_PATH, $:, $-I, $LOADED_FEATURES, $"), nothing named
+< load or autoload is, and every require and require_relative written
+< was resolved, which one with a computed name, one it warns it ignores
+< and one in a branch it rules dead are not. The words are counted, not
+< parsed: one in a string keeps master's C. Any other call is emitted as
+< it was.
+---
+> written, every character of it: no load-path global is written
+> ($LOAD_PATH, $:, $-I, $LOADED_FEATURES, $"), nothing named load or
+> autoload is, and every require and require_relative written was
+> resolved, which one with a computed name, one it warns it ignores and
+> one in a branch it rules dead are not. What its class macros write is
+> read again for those globals, load and autoload; a require a macro
+> writes stays a call, which the walk finds. The words are counted, not
+> parsed: one in a string or in a comment keeps master's C. Any other
+> call is emitted as it was.
