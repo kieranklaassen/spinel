@@ -1,0 +1,17 @@
+Changed lines of kept-mutator-result-class-ivar-body-v12.md against kept-mutator-result-class-ivar-body-v11.md (two places, nothing else).
+
+PLACE 1. Line 63 of -v11, a bullet under "Left as on master": REMOVED whole. -v12 has no line in its place; every later line moves up by one.
+OLD:
+- `clear` through an instance variable that holds a shared String, which master loses with one name as with two (`def initialize(s) = @s = s`, then `@s << "1"; @s.clear; p @s` prints "aabcd1"): a separate fault, left as master has it;
+NEW:
+(no line)
+
+PLACE 2. Line 76 of -v11, which is line 75 of -v12: the last clause only; the line is the same up to it.
+OLD CLAUSE:
+and 49 change the kept name with `clear`, which master loses on a shared String instance variable that has one name too (`def initialize(s) = @s = s`, then `@s << "1"; @s.clear; p @s` prints "aabcd1").
+NEW CLAUSE:
+and 49 change the kept name with `clear`, which master lost then on a shared String instance variable that has one name too and has mended since: run again on master 2d5b3d12, all 49 answer as CRuby does, plain and at `SPINEL_GC_STRESS=2`.
+OLD LINE, whole:
+- 1,792 more programs written against the write that stands aside (eight ways the receiver comes to hold its String, seven forms of the keep, sixteen changes through the kept name, each with and without an `equal?` question): the first pull request's head refuses 224 and builds 1,568; this refuses 336 more, and for all 336 master's C does not compile. Of the 1,232 it still builds, with that head's C, 763 answer as CRuby does and 469 do not, none of them by the kept write: in 210 another instance variable took the receiver's String first and was changed (`@u = @s; @u << "0"`), in 210 an `attr_writer` set the receiver, which is typed poly, and 49 change the kept name with `clear`, which master loses on a shared String instance variable that has one name too (`def initialize(s) = @s = s`, then `@s << "1"; @s.clear; p @s` prints "aabcd1").
+NEW LINE, whole:
+- 1,792 more programs written against the write that stands aside (eight ways the receiver comes to hold its String, seven forms of the keep, sixteen changes through the kept name, each with and without an `equal?` question): the first pull request's head refuses 224 and builds 1,568; this refuses 336 more, and for all 336 master's C does not compile. Of the 1,232 it still builds, with that head's C, 763 answer as CRuby does and 469 do not, none of them by the kept write: in 210 another instance variable took the receiver's String first and was changed (`@u = @s; @u << "0"`), in 210 an `attr_writer` set the receiver, which is typed poly, and 49 change the kept name with `clear`, which master lost then on a shared String instance variable that has one name too and has mended since: run again on master 2d5b3d12, all 49 answer as CRuby does, plain and at `SPINEL_GC_STRESS=2`.
