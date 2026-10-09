@@ -1,0 +1,33 @@
+A Float digit count beside a class that defines the method is range-checked too
+
+A Float digit count that no Integer holds (an infinity, a NaN, a
+Float past the word) is a RangeError in round, floor, ceil and
+truncate. One site still answered a value: a boxed receiver, in a
+program where a class defines the method.
+
+    class Tile
+      def floor(d) = "tile"
+    end
+    v = [1234, 12.5, Tile.new][0]
+    [Float::INFINITY, Float::NAN].each { |d| p v.floor(d) }
+
+printed 0 and 0 on x86-64, with gcc and with clang, where Ruby
+raises "float Inf out of range of integer" and "float NaN out of
+range of integer".
+
+The dispatch there holds the count in a temporary and wrote the C
+cast of it itself, `(sp_int)_t9`, which C leaves undefined for those
+values (emit_poly_defaults_n, src/codegen_poly_plan.c). It writes
+sp_poly_ndigits_f(_gcf.v[0], _t9) now, a helper beside the two
+rounding helpers in lib/spinel_rt.h: where the receiver is an
+Integer, a Float or a Bignum it is sp_float_arg_i, the check
+emit_int_expr writes for a typed Float in an Integer slot.
+
+The receiver is asked because the check must not come ahead of
+another receiver's own answer: "str".floor(Float::INFINITY) in such
+a slot is a NoMethodError in Ruby and stays one. For a receiver that
+is no number, a count no Integer holds reads as the cast read it on
+x86-64, now without the cast. A count that is no Float keeps the C
+it had.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
