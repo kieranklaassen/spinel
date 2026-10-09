@@ -1,0 +1,71 @@
+A local assigned a boxed String under is_a? is that String, not a copy
+
+    r = [+"ab", 5]
+    e = r[0]
+    if e.is_a?(String)
+      t = e
+      t << "z"
+    end
+    p r
+
+prints ["abz", 5] in CRuby and ["ab", 5] here. With --share-strings it
+is right, and so it is under `case e when String` without the flag.
+
+The Array keeps this String as its handle, since an element is changed
+in place. The guard narrows the reads of e in its arm to String, and a
+narrowed read unboxes: `t = e` took the bytes out of the handle, t was
+a String of its own, and the append grew that one. The when arm narrows
+nothing, so there t is boxed too and lift_poly_alias_reads makes the
+two names one String. Under --share-strings the store lifts the box
+itself (strbuf_boxed_local), so nothing here applies to that build and
+its C is the C it was.
+
+isa_mark_reads already leaves an Array read boxed where it is handed
+on, because the narrowed read is a copy. It now leaves a String read
+boxed where it is the value of a local's only assignment, a statement,
+and four things are shown by the program's text. Anywhere else the read
+is narrowed as before and the C is the C it was.
+
+The box holds the handle (isa_guarded_is_handle): the guarded local is
+the element an Array's iterator binds (each, map, collect, select,
+filter, reject) or is assigned once, an element read (`r[i]`,
+`r.fetch(i)`, `r.first`, `r.last`), and the Array is a local that keeps
+handles. It does where every use of the local is on a list
+(isa_holder_keeps_handles): a statement that assigns an Array literal
+or `Array.new(n)`; the receiver of an element read, of a count or of
+`inspect`; of an iterator with a block, `each` as a statement; of a
+statement that stores a value kept as its handle (`r[i] = v`, `r << v`,
+`r.push(v)`); an argument of a `p`, `puts` or `print` statement. Any
+other use takes the Array off the list: one a call hands back
+(`q = p(r)`, `q = r.each { }`), a write read for its value
+(`q = r = [...]`), `fetch` with a default, a parameter, a captured
+local, a Hash. Under a second name a plain String may be put in it.
+
+The box serves every use of the assigned local (isa_alias_served): it
+is the receiver of a String mutator that is a statement (`t << x`,
+`t << x << y`, `t.upcase!`), the receiver of a call that is an argument
+of a `p`, `puts` or `print` statement (`puts t.size`), or such an
+argument. A boxed String as another call's operand, as a Range's end
+or under `case` does not answer as a String does, a call with a block
+does not take one, and a second name or a method it is handed to would
+have uses of its own to answer for: each keeps the narrowed String.
+
+The String is read under another name (isa_read_again): the guarded
+local is read beside its guards and the assignment, or its Array is
+read in a second place. Where nothing else in the scope reads the
+String, the narrowed copy answers as CRuby does and the box would only
+cost.
+
+No call these read by its name could be the program's own
+(isa_program_may_own, and the mutator's or the printed call's own
+name). That is asked of the program as written (an_prog_never_gives):
+no def and no Symbol of such a name, and no site that names, makes or
+loads a method by something the text does not spell (a computed name,
+text evaluated, a file left unread, a module mixed in).
+
+Each question is answered once for a local while its scope is marked
+(isa_answer) and is read off that local's own chains
+(comp_lvw_first_sc, comp_vsite_first, comp_bcall_first); the first one
+asked is whether the value is a read of the guarded local at all.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
