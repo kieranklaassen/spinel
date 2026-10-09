@@ -1,0 +1,914 @@
+Code delta of the format piece: 282797eb91f2 above 4c3360a52fd6 (the head reader 5 read: verdict 24 and its points since) re-cut as aec1ea725375, one commit above e685fce791fa, which is the boxed-Array piece replayed on master 5518e5934b3a. The range-diff of the two is at the end; the notes come first.
+
+WHAT MOVED
+
+1. The base: master 5518e5934b3a. Its Makefile has no GC_STRESS_TESTS list; the test registers by the last line of its header comment, `# spinel: gc-stress`.
+2. The key the kept answers stand on (format_answers_kept, was format_table_gen). Was: the Compiler, its table and the table's `version`. Is: the Compiler and its table, kept once g_scopes_settled is set; a question asked sooner is walked and nothing is kept.
+3. The words (format_prog_defines_unseen), in four kinds, below.
+4. The Struct piece's F1 (reader 9) holds for this twin too, and takes the same cure, the argument-type test: an operator counts as the builtin's only where its ARGUMENT is typed Integer, Float or boolean (format_operand_is_scalar, in format_arg_calls_own).
+4b. THE RULED CUT of format_is_own_made, below.
+5. The uses walk (format_uses_walk, the body format_prog_defines_unseen had) now runs twice: on the table as the parser wrote it, in format_note_parsed, which codegen_program calls ahead of analyze_program (one line in src/codegen.c, between `g_tmc_c = c;` and `analyze_program(c);`; its declaration in src/codegen_internal.h), and again on the table the emitter has. This is how the coordinator's S1 is mended, below. NO PARSER LINE: the unread-file flag is not in this piece and no line of src/spinel_parse.c or src/compiler.h moves (kind 4, below). The other piece of the pair carries the same walk under its own prefix, its call one line away; the two heads merge with each other with exit 0.
+6. The test: one line more, `p "#{sb}|" % (grow_s(sb) + 1)`, an interpolation with a literal part that reads its String before the argument appends to it. `.expected` has thirty lines.
+7. Texts: body -v8, message -v5.
+8. The coordinator's S7 (code the analysis drops under a test it decides) moves no code: the words already rest on the walk as parsed (item 5), and the names are a fact of the compiled program. The twins and the reasons are below. The body says it in two places (the guard's paragraph and "Not in this change").
+
+THE KEY THAT LASTS
+
+(a) When the first kept walk runs. codegen_program, src/codegen.c lines 16301 and 16306 of this tree: `analyze_program(c);` and then `g_scopes_settled = 1;`. The parser has spliced every require it reads into the one text before the table is built, and analyze_program has run every desugar, so by that line all the program's nodes are in the table. format_answers_kept answers 0 until the flag is set: a question asked sooner is walked afresh and nothing is kept. The comment over format_answers_kept says so and names the place. In the checking build (below) no question came sooner: 0 early asks over the corpus and over the probes.
+
+(b) What the emitter writes into the table after that line. The grep, over the ten writers node_table.h declares:
+
+    grep -n -E "nt_(new_node|clone_subtree|swap_nodes|import_subtree|node_set_type|node_reset|node_set_str|node_set_int|node_set_ref|node_set_arr|set_str)\(" src/codegen*.c
+
+55 lines, the same 55 (line numbers aside) on master 5518e5934b3a, in this tree and on master de66d5c81274:
+
+    src/codegen.c:14586:  int st = nt_new_node(nt, "StatementsNode"), call = nt_new_node(nt, "CallNode");
+    src/codegen.c:14587:  int args = nt_new_node(nt, "ArgumentsNode"), cls = nt_new_node(nt, "ConstantReadNode");
+    src/codegen.c:14588:  int str = nt_new_node(nt, "StringNode");
+    src/codegen.c:14594:    nt_node_set_int(nt, ids[i], "node_line", nt_int(nt, like, "node_line", 0));
+    src/codegen.c:14595:    nt_node_set_int(nt, ids[i], "node_file", nt_int(nt, like, "node_file", 0));
+    src/codegen.c:14597:  nt_node_set_str(nt, call, "name", "raise");
+    src/codegen.c:14598:  nt_node_set_ref(nt, call, "receiver", -1);
+    src/codegen.c:14599:  nt_node_set_ref(nt, call, "block", -1);
+    src/codegen.c:14600:  nt_node_set_str(nt, cls, "name", "NotImplementedError");
+    src/codegen.c:14601:  nt_node_set_str(nt, str, "content", msg);
+    src/codegen.c:14602:  nt_node_set_str(nt, str, "unescaped", msg);
+    src/codegen.c:14604:  nt_node_set_arr(nt, args, "arguments", av, 2);
+    src/codegen.c:14605:  nt_node_set_ref(nt, call, "arguments", args);
+    src/codegen.c:14606:  nt_node_set_arr(nt, st, "body", &call, 1);
+    src/codegen_call.c:6414:    el[k] = nt_new_node(nt, "LocalVariableReadNode");
+    src/codegen_call.c:6415:    nt_node_set_str(nt, el[k], "name", "__spinel_splat_elem");
+    src/codegen_call.c:6418:  for (int n = 0; n < 3; n++) an[n] = nt_new_node(nt, "ArgumentsNode");
+    src/codegen_call.c:6421:  nt_node_set_arr(nt, an[0], "arguments", NULL, 0);
+    src/codegen_call.c:6422:  for (int n = 1; n < 3; n++) nt_node_set_arr(nt, an[n], "arguments", el, n);
+    src/codegen_call.c:6437:    nt_node_set_ref(nt, id, "arguments", an[n]);
+    src/codegen_call.c:6438:    nt_node_set_ref(nt, id, "block", -1);
+    src/codegen_call.c:6444:    nt_node_set_ref(nt, id, "arguments", sargs);
+    src/codegen_call.c:6445:    nt_node_set_ref(nt, id, "block", blk);
+    src/codegen_call_class.c:1422:              int rd = nt_new_node((NodeTable *)nt, "LocalVariableReadNode");
+    src/codegen_call_class.c:1423:              nt_node_set_str((NodeTable *)nt, rd, "name", svn);
+    src/codegen_call_class.c:1450:              nt_node_set_arr((NodeTable *)nt, argsn, "arguments", one, 1);
+    src/codegen_call_class.c:1455:              nt_node_set_arr((NodeTable *)nt, argsn, "arguments", back, 1);
+    src/codegen_call_object.c:1674:  nt_node_set_str((NodeTable *)nt, id, "name", "==");
+    src/codegen_call_object.c:1676:  nt_node_set_str((NodeTable *)nt, id, "name", "===");
+    src/codegen_call_object.c:1827:        nt_node_set_str((NodeTable *)nt, id, "name", "==");
+    src/codegen_call_object.c:1829:        nt_node_set_str((NodeTable *)nt, id, "name", "===");
+    src/codegen_call_operator.c:529:      nt_node_set_str((NodeTable *)nt, id, "name", "==");
+    src/codegen_call_operator.c:531:      nt_node_set_str((NodeTable *)nt, id, "name", "<=>");
+    src/codegen_call_recv.c:3748:          nt_node_set_str((NodeTable *)nt, id, "name", sb_plain);
+    src/codegen_call_recv.c:3776:          nt_node_set_str((NodeTable *)nt, id, "name", sb_bang);
+    src/codegen_call_recv.c:3824:      nt_node_set_str((NodeTable *)nt, id, "name", sb_plain);
+    src/codegen_call_recv.c:3836:      nt_node_set_str((NodeTable *)nt, id, "name", sb_bang);
+    src/codegen_call_recv.c:4332:        nt_node_set_str((NodeTable *)nt0, id, "name", "[]");
+    src/codegen_call_recv.c:4334:        nt_node_set_str((NodeTable *)nt0, id, "name", "slice");
+    src/codegen_call_recv.c:11779:    if (fa) nt_node_set_str((NodeTable *)c->nt, id, "name", "select");
+    src/codegen_call_recv.c:11793:    if (fa) nt_node_set_str((NodeTable *)c->nt, id, "name", "find_all");
+    src/codegen_call_recv.c:12550:  nt_node_set_str((NodeTable *)nt, id, "name", plain);
+    src/codegen_call_recv.c:12552:  nt_node_set_str((NodeTable *)nt, id, "name", bang);
+    src/codegen_call_recv.c:12684:    nt_node_set_str((NodeTable *)nt, id, "name", "new");
+    src/codegen_call_recv.c:12686:    nt_node_set_str((NodeTable *)nt, id, "name", "[]");
+    src/codegen_call_recv.c:14286:      nt_node_set_str((NodeTable *)nt, id, "name", "[]");
+    src/codegen_call_recv.c:14288:      nt_node_set_str((NodeTable *)nt, id, "name", "slice");
+    src/codegen_call_string.c:1510:      nt_node_set_ref(ntw, id, "receiver", root);
+    src/codegen_call_string.c:1512:      nt_node_set_ref(ntw, id, "receiver", orig);
+    src/codegen_iter.c:3639:      if (graph) nt_node_set_str((NodeTable *)nt, id, "name", "each_char");
+    src/codegen_iter.c:3642:        nt_node_set_str((NodeTable *)nt, id, "name", "each_grapheme_cluster");
+    src/codegen_stmt.c:16322:        nt_node_set_str((NodeTable *)nt, id, "name", abase);
+    src/codegen_stmt.c:16328:        nt_node_set_str((NodeTable *)nt, id, "name", abang);
+    src/codegen_stmt.c:16334:      nt_node_set_str((NodeTable *)nt, id, "name", abase);
+    src/codegen_stmt.c:16339:      nt_node_set_str((NodeTable *)nt, id, "name", abang);
+
+What the walks read: every DefNode's name; whether an AliasMethodNode or an UndefNode stands; every ClassNode's constant_path name; every BlockArgumentNode's expression (its kind; a Symbol's value; a local's name, and then the KIND of every node that carries that name); and every CallNode's name, with the receiver, arguments and block only of a call named a word, an attr word, a by-name call, a visibility word, to_proc, inject or reduce. The walk on the parsed table (line 16300) is over before analyze_program starts; its answer is one int kept beside the table's pointer, which no later write reaches.
+
+Per site:
+
+- deferred_raise_body (src/codegen.c, 14 lines; five nt_new_node): a StatementsNode, a CallNode named `raise` with its receiver, block and arguments, an ArgumentsNode, a ConstantReadNode named `NotImplementedError`, a StringNode, and two line numbers. No def, alias, undef, class or `&`. `raise` is none of the names the walks ask. The ConstantReadNode is an argument, not a class's constant_path. A call is a kind a `&` parameter's name may stand on, and no local is named `NotImplementedError`.
+- emit_poly_builtin_default_spread (src/codegen_call.c, 9 lines; two nt_new_node lines, five nodes): two LocalVariableReadNodes named `__spinel_splat_elem` and three ArgumentsNodes; the call's arguments and block are swapped for the re-entry and put back. The call is a universal_object_method (respond_to?, is_a?, kind_of?, instance_of?, inspect, to_s, ==, !=, eql?, equal?, hash, nil?, frozen?, class, object_id, ===): none is a name whose arguments or block the walks read. The `&` unhooked from the call for the re-entry still stands in the table, and the walk over the `&` nodes goes by kind, not from the call. A read is a kind a `&` parameter's name may stand on.
+- emit_call_cmethod_arms (src/codegen_call_class.c, 4 lines; one nt_new_node): a LocalVariableReadNode named `__svN`, and a setter's one argument swapped for it and back. A setter's name ends in `=`: none of the names. A read, as above.
+- The name writes, each on a CallNode that stands, and back after the re-entry: emit_case_eq_identity and emit_call_object_override_arms (`===` and `==`), emit_call_compare_arms (`<=>` and `==`), emit_array_call and emit_poly_call (`slice` and `[]`), emit_boxed_class_aref (`[]` and `new`), emit_range_call (`find_all` and `select`), emit_poly_recv_block_dispatch (`each_grapheme_cluster` and `each_char`), and the three bang sites emit_str_mutator_call, emit_face_str_bang and str_mutate_append_bang_arms. THE COMPUTED TWINS: the bang sites compute the plain name by dropping the `!`, and only for a name the face table answers for (ty_str_typed_bang_flags; emit_face_str_bang is reached only with a PF_STR_BANG row; str_mutate_append_bang_arms names its four): capitalize! chomp! chop! delete! delete_prefix! delete_suffix! downcase! gsub! lstrip! next! reverse! rstrip! squeeze! strip! sub! succ! swapcase! tr! tr_s! upcase!. A program's own `send!` or `eval!` is in no row and is never renamed. None of the twenty plain names and no other written name is a word, an attr word, a by-name call, a visibility word, to_proc, inject or reduce, so no call enters or leaves the set whose receiver and arguments are read; a call of any name is a kind a `&` parameter's name may stand on; and a def's name is never written.
+- emit_op_string_slice (src/codegen_call_string.c, 2 lines): a `slice!`'s receiver swapped and back. The walks read the receiver only of the listed calls.
+
+So six nt_new_node lines in three functions (ten nodes), and the name writes of eleven functions. The comment over format_answers_kept lists what the walks read and ends: "A new place in the emitter that adds a node or writes a name is to be checked against what the walks read."
+
+THE CHECKING BUILD (this tree with check3.py: every kept answer is walked again where it is used and the two compared, abort on a difference; every table write after analyze_program is logged from node_table.c, whoever makes it):
+
+- corpus: `guard checks 0 in 0 programs; mismatches 0`; its C is this head's C in all 6,631 but the three that print the build directory's path. No statement of the corpus asks this guard a name, so the probes carry the check. The log of 3,226 lines: 1,206 a call's name; 709 an ArgumentsNode's list; 372 new LocalVariableReadNode; 372 a new read's name; 208 a call's arguments; 208 a call's block; 113 new ArgumentsNode; 22 a call's receiver; 16 of the deferred raise's two bodies (two each of a new StatementsNode, CallNode, ConstantReadNode and StringNode and their strings). No clone, retype, reset, swap or import after analysis, and no write the 55 lines do not make.
+- probes (350 files: the 290 of the round before, which hold the families, the four kinds, the operand probes, the interpolations and the sixteen that put a guarded site INSIDE each call the emitter renames or re-enters, and this round's 43 S-programs with their two library files, the five operand cells and the ten files of the missed-file cells): `programs 350; asks 579; checks 452 in 120 programs; mismatches 0; C equal 340, differs 0, neither builds 10; early asks 0`. 36 questions were asked inside a rename's window (sub!, gsub!, tr!, delete!, chomp!, squeeze!, delete_prefix!, `===`, `<=>`, slice) and three inside the setter's, each walked again there: no difference.
+- the lone splat's window re-enters with fresh element nodes for arguments and the receiver already in a temp, so no guarded site can stand inside it; its counts are in the Struct piece's notes.
+
+(c) The corpus under both keys: this head (the key that lasts) and the same tree keyed on the table's `version` as well give the same C for all 6,631 programs (x2ver2 compiler 92d07b404e87: lines 6631 FAIL 0; differing lines against the head's: 0  04:25:59).
+
+(d) The compiler's own instructions (callgrind, `-c`), the base e685fce791fa, this head, and this tree keyed on `version` as well. Each program repeats one line 1,000 or 2,000 times: plain is `p held % (ar[k] + i * m)`; setter puts `z = (o.v = i + 1)` before each, which adds a node and bumps the version; bang puts `w.sub!("a", "b")` before each, which renames the call and back; long name asks a name of more than fifteen bytes; lone splat puts `z = po[k].to_s(*ea)` before each.
+
+                                the base       this head            on version too          
+    plain, 1,000           4,104,025,677   4,138,652,348    +0.84%   4,138,667,366    +0.84%
+    plain, 2,000           8,210,866,597   8,279,674,504    +0.84%   8,279,704,522    +0.84%
+    setter, 1,000          7,292,342,030   7,338,255,669    +0.63%  12,722,097,617   +74.46%
+    setter, 2,000         16,448,421,259  16,528,497,238    +0.49%  38,120,243,233  +131.76%
+    bang call, 1,000       6,180,940,186   6,216,243,829    +0.57%  10,133,997,195   +63.96%
+    bang call, 2,000      15,262,902,043  15,333,923,519    +0.47%  31,007,432,898  +103.16%
+    long name, 1,000       3,220,621,929   3,307,254,968    +2.69%   3,307,264,980    +2.69%
+    long name, 2,000       6,441,122,942   6,614,371,633    +2.69%   6,614,391,645    +2.69%
+    the test                  85,941,381      86,285,963    +0.40%      86,285,979    +0.40%
+    (the lone splat is counted in the Struct piece's notes: the walk and its key are the same code in both)
+
+NAMES OVER 15 BYTES (reader 5: "say what you did"): the kept list is a growable array of malloc'd copies of the names, with no cap on a name's length or on the count; the long-name rows above are a 20-byte reader's name asked 1,000 and 2,000 times and kept.
+
+THE WORDS, IN FOUR KINDS ("close the uses, not the makers")
+
+The read head's sixteen words (alias_method, define_method, define_singleton_method, send, __send__, public_send, class_eval, module_eval, class_exec, module_exec, instance_eval, instance_exec, eval, def_delegator, def_delegators, delegate), its `alias` and its attr with a name that is no Symbol literal covered: of kind 1, the sends, define_method and kin, alias_method and the attr words (the first three denied whatever the name, a literal too); of kind 3, the evals and execs; nothing of kinds 2 and 4. All sixteen stay. Added:
+
+- Kind 1, by-name calls: undef_method, remove_method and `undef`; method, public_method, singleton_method, instance_method, public_instance_method with a first argument that is no plain Symbol literal; to_proc on a receiver that is no plain Symbol literal; inject and reduce with a last operand that is no plain Symbol literal, unless it is the only operand and a LITERAL block follows (the coordinator's S1; with two operands the last is the name whatever follows); public, private, protected, module_function, private_class_method, public_class_method with an argument that is no Symbol literal, def or attr call; local_variable_set. A plain Symbol literal is one that names none of these words (`method(:define_method)` is denied).
+- Kind 2, a `&`: denied unless its operand is none (the def's anonymous `&`), a plain Symbol literal, a `->`, or a local that is only ever a block parameter (every node of its name is a read, a `&` parameter or a call; `it` and `_1` are refused by name). A `&proc { }` or a `&lambda { }` is a call's answer and is denied like any other call's: the coordinator's S6 does not bite, neither piece ever exempted one. The parser rewrites `m(&:name)` into a block on `_spx`; a call named one of the words on `_spx` is read as the Symbol it was.
+- Kind 3, text: a class named ERB in the program (the `erb` package, once required) beside the evals and execs.
+- Kind 4, a file master did not read. HELD: a call named require or require_relative that still stands in the table (a name the parser could not take as text). NOT HELD, and this piece does not need it: the unread-file flag of the coordinator's S5. What a file master did not read would define is not in the compiled program, the base's or this head's, so the head runs the methods the base runs. With such a file missed the head takes the fix and prints, in every cell, the line the base prints in the cells where its format is not collected: the cells k41 to k46 under the S-programs below (CRuby's line needs the file neither program holds; the base's sixth cell is the freed format, with exit 0). That line is the base's, made by the file it did not read before this piece's step. One sentence in the body's "Not in this change" says so.
+
+S1 BIT, AND BY MORE THAN THE LINE. `def fold(a, nm, &b) = a.inject(nm, &b)` reaches the emitter with the inject call holding a BlockNode: the analysis rewrites the pass of a block parameter into a block that calls it (master's own answer for that program is "undefined method 'call' for nil"). The walk at emit time therefore saw one operand beside a literal block and exempted it, whatever the inject line said. So the same walk now runs on the table as parsed as well, where the call still holds the `&`, and the program is denied where either walk finds a use; a table that was never walked as parsed is denied (format_parsed_nt != c->nt). The anonymous `&` beside an operand is a `&` and not a literal block there, so `a.inject(nm, &)` is denied the same way.
+
+What it gives back against the read head: nothing; no word was taken out. What it newly denies, in the corpus: of the 6,631 other programs the read head's words denied 477 (asked of the table the emitter has). This head denies 722. Its walk at emit time denies 646: the 477, the 168 that the kinds added before the coordinator's S1 deny, and one by the inject line (test/inject_symbol_root.rb, for `reduce("z", &:+)`: one operand beside a pass; a Symbol's to_proc is always a block, so this one is a cost of drawing the line at the literal block as ruled). Its walk on the parsed table denies 76 more, programs whose use the analysis had rewritten before the emitter looked: an `alias` it turns into a def (test/alias_inherited_method.rb), a `send`, `__send__` or `public_send` it turns into the call (test/public_send.rb, test/allocate_through_self.rb), a `define_method`, an `eval` in a branch it drops (test/ruby_engine_dead_branch.rb). The read head's own words did not see those either, though its texts said a send is denied whatever the name. Twelve are denied at emit time and not as parsed: a use the analysis itself writes into the table (the respond_to? and Method tests).
+
+One program each (CRuby | the base e685fce791fa | this head, a plain run built with gcc; "C differs" is the fix taken, the format read into its temporary; "C=base" is the base's C byte for byte, the fix denied; "no C on either" is a program neither compiler builds). In each the program's own `Array#[]` comes by the route named, beside `p held % (ar[k] + i * m)`. w460 is the require master warns about and ignores: the fix is taken, since the unread file is in neither program (kind 4); w463 is a require of a computed name, still standing as a call: denied:
+
+    w400_plain | ruby: "8|" | base: "8|" | head: "8|" | C differs
+    w410_method_lit | ruby: 2 "8|" | base: 2 "8|" | head: 2 "8|" | C differs
+    w411_method_var | ruby: 2 "8|" | base: 2 "8|" | head: 2 "8|" | C=base
+    w412_method_word | ruby: "13|" | base: NOBUILD| head: NOBUILD| no C on either
+    w413_inst_method_var | ruby: 2 "8|" | base: undefined method 'instance_method' for class Array| head: undefined method 'instance_method' for class Array| C=base
+    w414_to_proc_lit | ruby: 2 "8|" | base: 2 "8|" | head: 2 "8|" | C differs
+    w415_to_proc_var | ruby: 2 "8|" | base: 2 "8|" | head: 2 "8|" | C=base
+    w416_undef_method | ruby: 1 "8|" | base: 1 "8|" | head: 1 "8|" | C=base
+    w417_undef | ruby: 1 "8|" | base: 1 "8|" | head: 1 "8|" | C=base
+    w418_remove_method | ruby: 1 "8|" | base: NOBUILD| head: NOBUILD| no C on either
+    w419_private_sym | ruby: 1 "8|" | base: 1 "8|" | head: 1 "8|" | C differs
+    w420_private_def | ruby: 2 "8|" | base: 2 "8|" | head: 2 "8|" | C differs
+    w421_private_splat | ruby: 1 "8|" | base: 1 "8|" | head: 1 "8|" | C=base
+    w422_private_attr | ruby: 1 "8|" | base: 1 "8|" | head: 1 "8|" | C differs
+    w423_module_function | ruby: 2 "8|" | base: 2 "8|" | head: 2 "8|" | C differs
+    w424_own_method_noarg | ruby: "GET" "8|" | base: "GET" "8|" | head: "GET" "8|" | C differs
+    w430_amp_sym | ruby: ["1", "2"] "8|" | base: ["1", "2"] "8|" | head: ["1", "2"] "8|" | C differs
+    w431_amp_sym_word | ruby: "6|" | base: rescued "8|" | head: rescued "8|" | C=base
+    w432_amp_symvar | ruby: "6|" | base: rescued "8|" | head: rescued "8|" | C=base
+    w433_amp_proc_var | ruby: [2, 3] "8|" | base: [2, 3] "8|" | head: [2, 3] "8|" | C=base
+    w434_amp_lambda | ruby: [2, 3] "8|" | base: [2, 3] "8|" | head: [2, 3] "8|" | C differs
+    w435_amp_own_param | ruby: 1 "8|" | base: 1 "8|" | head: 1 "8|" | C differs
+    w436_amp_rebound | ruby: ["1"] "8|" | base: ["1"] "8|" | head: ["1"] "8|" | C=base
+    w437_amp_shadowed | ruby: ["1"] "8|" | base: undefined method 'call' for an instance of Symbol | head: undefined method 'call' for an instance of Symbol | C=base
+    w438_amp_anonymous | ruby: 1 "8|" | base: 1 "8|" | head: 1 "8|" | C differs
+    w439_amp_method | ruby: 1 2 "8|" | base: 1 2 "8|" | head: 1 2 "8|" | C=base
+    w440_amp_it | ruby: w440_amp_it.rb:7: warning: `it` calls without argu| base: undefined method 'call' for an instance of Symbol | head: undefined method 'call' for an instance of Symbol | C=base
+    w441_amp_fold_param | ruby: 3 "8|" | base: 3 "8|" | head: 3 "8|" | C differs
+    w450_erb | ruby: w450_erb.rb:5: warning: Passing safe_level with th| base: "8|" | head: "8|" | C=base
+    w460_require_unfound | ruby: "13|" | base: "8|" | head: "8|" | C differs
+    w461_require_known | ruby: "YWI=" "8|" | base: "YWI=" "8|" | head: "YWI=" "8|" | C differs
+    w462_require_native | ruby: 1 "8|" | base: 1 "8|" | head: 1 "8|" | C differs
+    w463_require_computed | ruby: "13|" | base: "8|" | head: "8|" | C=base
+
+THE S-PROGRAMS (the same columns; the site is the same line). For this piece "C differs" is the fix taken and "C=base" is the fix denied, the base's C byte for byte. s500, s501 and s503 take the fix. s502 and s504 are denied at the site: the benchmark package has a `__send__` and the set package an `alias`, as at the read head (s502's C differs in the package's own format statements, which are held by another arm). s510 to s550: a file master does not read (kind 4, above): the fix is taken; s522 and s541 are read by master, which sees the file's `Array#[]`: denied; s552 to s555 are denied by `public_send`, by `method(:require)` and by the require still standing; s521, s533, s542, s543 and s551 build on neither. s560 to s562: a word in a comment or a string moves nothing. s570 to s573 and s577 are the coordinator's S1: denied (s570 and s571 by the Symbol of an eval word, s572, s573 and s577 by the walk on the parsed table). s574 is a literal `:+` beside the pass, which is the name or the first value and names no word: taken. s575 is the one operand beside a literal block: taken. s576 is two operands and a block, where CRuby takes the last as the name: denied. s580 to s582 are the coordinator's S6: a `&proc { }` or a `&lambda { }` is denied with or without the program's own `proc`. s583 is a `->`: taken.
+
+    s500_plain | ruby: "8|" | base: "8|" | head: "8|" | C differs
+    s501_require_package | ruby: "YWI=" "8|" | base: "YWI=" "8|" | head: "YWI=" "8|" | C differs
+    s502_require_benchmark | ruby: "8|" | base: "8|" | head: "8|" | C differs
+    s503_require_relative | ruby: "8|" | base: "8|" | head: "8|" | C differs
+    s504_require_set_twice | ruby: "8|" | base: "8|" | head: "8|" | C=base
+    s510_engine_if | ruby: "13|" | base: "8|" | head: "8|" | C differs
+    s511_engine_unless | ruby: "13|" | base: "8|" | head: "8|" | C differs
+    s512_engine_modifier | ruby: "13|" | base: "8|" | head: "8|" | C differs
+    s513_engine_plain | ruby: "13|" | base: "8|" | head: "8|" | C differs
+    s520_computed_rescue | ruby: "13|" | base: rescued "8|" | head: rescued "8|" | C differs
+    s521_computed_relative | ruby: "13|" | base: NOBUILD| head: NOBUILD| no C on either
+    s522_computed_join | ruby: "13|" | base: "13|" | head: "13|" | C=base
+    s530_path_unshift | ruby: "13|" | base: "8|" | head: "8|" | C differs
+    s531_path_splice | ruby: "13|" | base: "8|" | head: "8|" | C differs
+    s532_path_colon | ruby: "13|" | base: "8|" | head: "8|" | C differs
+    s533_path_dash_i | ruby: "13|" | base: NOBUILD| head: NOBUILD| no C on either
+    s534_path_alias | ruby: "13|" | base: undefined method 'unshift' for nil (NoMethodError)| head: undefined method 'unshift' for nil (NoMethodError)| C differs
+    s535_features | ruby: "8|" | base: undefined method 'clear' for nil (NoMethodError) | head: undefined method 'clear' for nil (NoMethodError) | C differs
+    s540_object_autoload | ruby: "13|" | base: private method 'autoload' called for class Object | head: private method 'autoload' called for class Object | C differs
+    s541_autoload | ruby: "13|" | base: "13|" | head: "13|" | C=base
+    s542_kernel_load | ruby: "13|" | base: NOBUILD| head: NOBUILD| no C on either
+    s543_load | ruby: "13|" | base: NOBUILD| head: NOBUILD| no C on either
+    s550_require_tail | ruby: "8|" | base: "8|" | head: "8|" | C differs
+    s551_require_plus | ruby: "8|" | base: NOBUILD| head: NOBUILD| no C on either
+    s552_require_send | ruby: "13|" | base: "8|" | head: "8|" | C=base
+    s553_require_method | ruby: "13|" | base: undefined method 'require' for an instance of Obje| head: undefined method 'require' for an instance of Obje| C=base
+    s554_require_var | ruby: "13|" | base: "8|" | head: "8|" | C=base
+    s555_require_in_string | ruby: "13|" | base: "8|" | head: "8|" | C=base
+    s560_word_in_comment | ruby: "8|" | base: "8|" | head: "8|" | C differs
+    s561_word_in_string | ruby: "8|" | base: "8|" | head: "8|" | C differs
+    s562_require_in_comment | ruby: "8|" | base: "8|" | head: "8|" | C differs
+    s570_inject_word_pass | ruby: "13|" | base: rescued "8|" | head: rescued "8|" | C=base
+    s571_inject_word_anon | ruby: "13|" | base: rescued "8|" | head: rescued "8|" | C=base
+    s572_inject_var_pass | ruby: 3 "8|" | base: undefined method 'call' for nil (NoMethodError) | head: undefined method 'call' for nil (NoMethodError) | C=base
+    s573_inject_var_anon | ruby: 3 "8|" | base: undefined method 'call' for nil (NoMethodError) | head: undefined method 'call' for nil (NoMethodError) | C=base
+    s574_inject_sym_pass | ruby: 3 "8|" | base: :+ "8|" | head: :+ "8|" | C differs
+    s575_inject_init_block | ruby: 6 "8|" | base: 6 "8|" | head: 6 "8|" | C differs
+    s576_inject_two_block | ruby: 6 "8|" | base: 6 "8|" | head: 6 "8|" | C=base
+    s577_reduce_var_pass | ruby: 3 "8|" | base: undefined method 'call' for nil (NoMethodError) | head: undefined method 'call' for nil (NoMethodError) | C=base
+    s580_own_proc | ruby: ["1", "2"] "8|" | base: [2, 3] "8|" | head: [2, 3] "8|" | C=base
+    s581_proc_literal | ruby: [2, 3] "8|" | base: [2, 3] "8|" | head: [2, 3] "8|" | C=base
+    s582_own_lambda | ruby: ["1", "2"] "8|" | base: [2, 3] "8|" | head: [2, 3] "8|" | C=base
+    s583_arrow | ruby: [2, 3] "8|" | base: [2, 3] "8|" | head: [2, 3] "8|" | C differs
+
+THE MISSED-FILE CELLS (k4x; CRuby, then the base f8 and this head x4, gcc and clang at SPINEL_GC_STRESS 0, 1 and 2 with the exit status, then whether this head's C is the base's). The site is `p fl(5) % [ar[k], i * m]` with `def fl(w) = "%#{w}d %d|"`, a call's fresh String beside a list that allocates; the missed file gives Array its own `[]`. k40 has no file. k41 to k46: the file is missed by a RUBY_ENGINE test (two forms), a computed name behind rescue LoadError, the load path (two forms) and the require master warns about. k47 is the require still standing as a call: denied. k48 has the `def` in the program itself: denied.
+
+    k40_plain | ruby: "    2 6|"
+       f8: gcc "    2 6|" rc0/ "    2 6|" rc0/ "    2 6|" rc0/ clang "    2 6|" rc0/ "    2 6|" rc0/ "\xDB\xDB\xDB\xDB\xDB\xDB\xDB" rc0/
+       x4: gcc "    2 6|" rc0/ "    2 6|" rc0/ "    2 6|" rc0/ clang "    2 6|" rc0/ "    2 6|" rc0/ "    2 6|" rc0/
+       C differs
+    k41_engine_if | ruby: "    7 6|"
+       f8: gcc "    2 6|" rc0/ "    2 6|" rc0/ "    2 6|" rc0/ clang "    2 6|" rc0/ "    2 6|" rc0/ "\xDB\xDB\xDB\xDB\xDB\xDB\xDB" rc0/
+       x4: gcc "    2 6|" rc0/ "    2 6|" rc0/ "    2 6|" rc0/ clang "    2 6|" rc0/ "    2 6|" rc0/ "    2 6|" rc0/
+       C differs
+    k42_engine_modifier | ruby: "    7 6|"
+       f8: gcc "    2 6|" rc0/ "    2 6|" rc0/ "    2 6|" rc0/ clang "    2 6|" rc0/ "    2 6|" rc0/ "\xDB\xDB\xDB\xDB\xDB\xDB\xDB" rc0/
+       x4: gcc "    2 6|" rc0/ "    2 6|" rc0/ "    2 6|" rc0/ clang "    2 6|" rc0/ "    2 6|" rc0/ "    2 6|" rc0/
+       C differs
+    k43_computed_rescue | ruby: "    7 6|"
+       f8: gcc rescued "    2 6|" rc0/ rescued "    2 6|" rc0/ rescued "    2 6|" rc0/ clang rescued "    2 6|" rc0/ rescued "    2 6|" rc0/ rescued "\xDB\xDB\xDB\xDB\xDB\xDB\xDB" rc0/
+       x4: gcc rescued "    2 6|" rc0/ rescued "    2 6|" rc0/ rescued "    2 6|" rc0/ clang rescued "    2 6|" rc0/ rescued "    2 6|" rc0/ rescued "    2 6|" rc0/
+       C differs
+    k44_path_unshift | ruby: "    7 6|"
+       f8: gcc "    2 6|" rc0/ "    2 6|" rc0/ "    2 6|" rc0/ clang "    2 6|" rc0/ "    2 6|" rc0/ "\xDB\xDB\xDB\xDB\xDB\xDB\xDB" rc0/
+       x4: gcc "    2 6|" rc0/ "    2 6|" rc0/ "    2 6|" rc0/ clang "    2 6|" rc0/ "    2 6|" rc0/ "    2 6|" rc0/
+       C differs
+    k45_path_splice | ruby: "    7 6|"
+       f8: gcc "    2 6|" rc0/ "    2 6|" rc0/ "    2 6|" rc0/ clang "    2 6|" rc0/ "    2 6|" rc0/ "\xDB\xDB\xDB\xDB\xDB\xDB\xDB" rc0/
+       x4: gcc "    2 6|" rc0/ "    2 6|" rc0/ "    2 6|" rc0/ clang "    2 6|" rc0/ "    2 6|" rc0/ "    2 6|" rc0/
+       C differs
+    k46_warned | ruby: "    7 6|"
+       f8: gcc "    2 6|" rc0/ "    2 6|" rc0/ "    2 6|" rc0/ clang "    2 6|" rc0/ "    2 6|" rc0/ "\xDB\xDB\xDB\xDB\xDB\xDB\xDB" rc0/
+       x4: gcc "    2 6|" rc0/ "    2 6|" rc0/ "    2 6|" rc0/ clang "    2 6|" rc0/ "    2 6|" rc0/ "    2 6|" rc0/
+       C differs
+    k47_require_var | ruby: "    7 6|"
+       f8: gcc "    2 6|" rc0/ "    2 6|" rc0/ "    2 6|" rc0/ clang "    2 6|" rc0/ "    2 6|" rc0/ "\xDB\xDB\xDB\xDB\xDB\xDB\xDB" rc0/
+       x4: gcc "    2 6|" rc0/ "    2 6|" rc0/ "    2 6|" rc0/ clang "    2 6|" rc0/ "    2 6|" rc0/ "\xDB\xDB\xDB\xDB\xDB\xDB\xDB" rc0/
+       C=base
+    k48_own_in_program | ruby: "    7 6|"
+       f8: gcc "    7 6|" rc0/ "    7 6|" rc0/ "    7 6|" rc0/ clang "    7 6|" rc0/ "    7 6|" rc0/ "\xDB\xDB\xDB\xDB\xDB\xDB\xDB" rc0/
+       x4: gcc "    7 6|" rc0/ "    7 6|" rc0/ "    7 6|" rc0/ clang "    7 6|" rc0/ "    7 6|" rc0/ "\xDB\xDB\xDB\xDB\xDB\xDB\xDB" rc0/
+       C=base
+    lib_k4 | ruby:
+       f8: gcc rc0/ rc0/ rc0/ clang rc0/ rc0/ rc0/
+       x4: gcc rc0/ rc0/ rc0/ clang rc0/ rc0/ rc0/
+       C=base
+
+S7, CODE THE ANALYSIS DROPS UNDER A TEST IT DECIDES (desugar_engine_branches resets the arm not taken to NilNode, ahead of the class table: `if RUBY_ENGINE == "ruby"` and kin). Two reads, and each rests on the table that is right for it.
+
+- The WORDS (kinds 1 to 3) rest on the walk AS PARSED, which runs ahead of analyze_program and so reads the arm CRuby runs: an alias, a define_method, a class_eval or a send in the dropped arm denies the program. The walk at emit time alone would miss all of them, the arm being NilNode by then; it is kept for the uses the analysis itself writes into the table.
+- The NAMES (format_name_scan: a def or an attr of the name) are read at emit time, after that pass, and that is the table they are a fact of: the proof is of what the COMPILED program runs at the operand, and the dropped def is in neither the base's program nor this head's. With the proof this head TAKES the fix: the format is read into a rooted temp ahead of an argument that, in the compiled program, runs the builtin and nothing of the program's, so the temp is the String the base formats and the line is the base's wherever the base's format is not collected.
+
+The twins (s7gen.rb; the program's own `Array#[]` is written to answer what the builtin answers, so CRuby and the base agree; the same columns, then the lanes):
+
+    t700_none | ruby: 300 "8|" 1 | base: 300 "8|" 1 | head: 300 "8|" 1 | C differs
+    t701_if_engine | ruby: 300 "8|" 1 | base: 300 "8|" 1 | head: 300 "8|" 1 | C differs
+    t702_unless_engine | ruby: 300 "8|" 1 | base: 300 "8|" 1 | head: 300 "8|" 1 | C differs
+    t703_modifier | ruby: 300 "8|" 1 | base: 300 "8|" 1 | head: 300 "8|" 1 | C differs
+    t704_ternary | ruby: 300 "8|" 1 | base: 300 "8|" 1 | head: 300 "8|" 1 | C differs
+    t705_defined | ruby: 300 "8|" 1 | base: 300 "8|" 1 | head: 300 "8|" 1 | C differs
+    t706_not_spinel | ruby: 300 "8|" 1 | base: 300 "8|" 1 | head: 300 "8|" 1 | C differs
+    t707_else_arm | ruby: 300 "8|" 1 | base: 300 "8|" 1 | head: 300 "8|" 1 | C differs
+    t710_class_eval | ruby: 300 "8|" 1 | base: 300 "8|" 1 | head: 300 "8|" 1 | C=base
+    t711_define_method | ruby: 300 "8|" 1 | base: 300 "8|" 1 | head: 300 "8|" 1 | C=base
+    t712_alias | ruby: 300 "8|" 1 | base: 300 "8|" 1 | head: 300 "8|" 1 | C=base
+    t713_send_computed | ruby: 300 "8|" 1 | base: 300 "8|" 1 | head: 300 "8|" 1 | C=base
+    t714_eval_text | ruby: 300 "8|" 1 | base: 300 "8|" 1 | head: 300 "8|" 1 | C=base
+    t720_seen_by_ruby | ruby: 300 "13|" 1 | base: 300 "8|" 1 | head: 300 "8|" 1 | C differs
+    t721_undropped_def | ruby: 300 "8|" 1 | base: stack level too deep (SystemStackError) | head: stack level too deep (SystemStackError) | C=base
+
+t701 to t707 are the def in the arm CRuby runs, in seven shapes: the fix is taken (C differs) and the line is CRuby's and the base's. t710 to t714 are the five routes of the words in that arm (class_eval with a block, define_method, alias, a send of a computed name, class_eval of a text): denied, by the walk as parsed, the base's C. t720 is a def CRuby shows (`[]` answers 7): the base and this head agree with each other and not with CRuby, which is that pass's own doing and no step of this piece. t721 is the def under no test: denied, the base's C; the base and this head end in "stack level too deep" with one C (master lowers the def's `at(i)` to `[]`, the program's own again): a side find, not taken. In the lanes (f8 is the base's build and x4 this head's; gcc and clang at SPINEL_GC_STRESS 0, 1 and 2) the base and this head print the same line in every cell of all fifteen:
+
+    t700_none | ruby: 300 "8|" 1
+       f8: gcc 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ clang 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/
+       x4: gcc 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ clang 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/
+       C differs
+    t701_if_engine | ruby: 300 "8|" 1
+       f8: gcc 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ clang 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/
+       x4: gcc 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ clang 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/
+       C differs
+    t702_unless_engine | ruby: 300 "8|" 1
+       f8: gcc 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ clang 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/
+       x4: gcc 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ clang 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/
+       C differs
+    t703_modifier | ruby: 300 "8|" 1
+       f8: gcc 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ clang 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/
+       x4: gcc 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ clang 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/
+       C differs
+    t704_ternary | ruby: 300 "8|" 1
+       f8: gcc 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ clang 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/
+       x4: gcc 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ clang 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/
+       C differs
+    t705_defined | ruby: 300 "8|" 1
+       f8: gcc 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ clang 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/
+       x4: gcc 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ clang 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/
+       C differs
+    t706_not_spinel | ruby: 300 "8|" 1
+       f8: gcc 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ clang 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/
+       x4: gcc 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ clang 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/
+       C differs
+    t707_else_arm | ruby: 300 "8|" 1
+       f8: gcc 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ clang 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/
+       x4: gcc 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ clang 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/
+       C differs
+    t710_class_eval | ruby: 300 "8|" 1
+       f8: gcc 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ clang 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/
+       x4: gcc 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ clang 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/
+       C=base
+    t711_define_method | ruby: 300 "8|" 1
+       f8: gcc 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ clang 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/
+       x4: gcc 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ clang 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/
+       C=base
+    t712_alias | ruby: 300 "8|" 1
+       f8: gcc 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ clang 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/
+       x4: gcc 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ clang 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/
+       C=base
+    t713_send_computed | ruby: 300 "8|" 1
+       f8: gcc 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ clang 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/
+       x4: gcc 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ clang 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/
+       C=base
+    t714_eval_text | ruby: 300 "8|" 1
+       f8: gcc 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ clang 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/
+       x4: gcc 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ clang 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/
+       C=base
+    t720_seen_by_ruby | ruby: 300 "13|" 1
+       f8: gcc 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ clang 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/
+       x4: gcc 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ clang 300 "8|" 1 rc0/ 300 "8|" 1 rc0/ 300 "8|" 1 rc0/
+       C differs
+    t721_undropped_def | ruby: 300 "8|" 1
+       f8: gcc rc1/ rc1/ rc139/ clang rc1/ rc1/ rc139/
+       x4: gcc rc1/ rc1/ rc139/ clang rc1/ rc1/ rc139/
+       C=base
+
+THE OPERAND TEST, the cells (f8 is the base's build and x4 this head's; gcc and clang at SPINEL_GC_STRESS 0, 1 and 2; `rc1` with no line is a raise). `mo` is an object whose `coerce` appends to the format's String; `n` is an Integer. The read head took `(j <=> mo)` for arithmetic on numbers and read the format ahead of it, printing "2" where the base built with gcc prints Ruby's "2|x":
+
+    f1x_cmp | ruby: "2|x"
+       f8: gcc "2|x" rc0/ "2|x" rc0/ rc1/ clang "2" rc0/ "2" rc0/ rc1/
+       x4: gcc "2|x" rc0/ "2|x" rc0/ rc1/ clang "2" rc0/ "2" rc0/ rc1/
+       C=base
+    f1x_gt | ruby: "2|x"
+       f8: gcc "2|x" rc0/ "2|x" rc0/ rc1/ clang "2" rc0/ "2" rc0/ rc1/
+       x4: gcc "2|x" rc0/ "2|x" rc0/ rc1/ clang "2" rc0/ "2" rc0/ rc1/
+       C=base
+    f1x_le | ruby: "3|x"
+       f8: gcc "3|x" rc0/ "3|x" rc0/ rc1/ clang "3" rc0/ "3" rc0/ rc1/
+       x4: gcc "3|x" rc0/ "3|x" rc0/ rc1/ clang "3" rc0/ "3" rc0/ rc1/
+       C=base
+    f1x_typed | ruby: "2"
+       f8: gcc "2" rc0/ "2" rc0/ "2" rc0/ clang "2" rc0/ "2" rc0/ "2" rc0/
+       x4: gcc "2" rc0/ "2" rc0/ "2" rc0/ clang "2" rc0/ "2" rc0/ "2" rc0/
+       C=base
+    f1x_typed_cmp | ruby: "2"
+       f8: gcc "2" rc0/ "2" rc0/ "2" rc0/ clang "2" rc0/ "2" rc0/ "2" rc0/
+       x4: gcc "2" rc0/ "2" rc0/ "2" rc0/ clang "2" rc0/ "2" rc0/ "2" rc0/
+       C differs
+
+THE RULED CUT (format_is_own_made). An interpolation is proved the statement's own only where (i) a StringNode part whose text is not empty stands among its parts, asked of the part's value as the table holds it (`content`), or (ii) it has exactly one part and that part is an EmbeddedStatementsNode. Everything else answers 0 and keeps the base's C. The read head answered 1 for every interpolation; `"#{s}#{""}"` is `s` itself in Ruby (CRuby 3.3.6: `"#{s}#{""}".equal?(s)` is true, `"#{s}".equal?(s)` is false), so a temporary read ahead of an argument that appends to `s` printed "a1" where the base built with gcc prints Ruby's "a1!". The backslash-newline forms and the adjacent literals come to the table as an empty StringNode part or a nested interpolation and fall under "everything else". One sentence in the body's "Not in this change" says what is left: the interpolations that are new Strings in Ruby and are not told apart (`"#{""}#{s}"`, `"#{s}#{nil}"`, `"#{s}#{t}"`) keep the base's C and its answer.
+
+The cells (CRuby; the base f8 and this head x4, plain and --share-strings, gcc and clang at SPINEL_GC_STRESS 0, 1 and 2 with the exit status; then whether this head's C is the base's). i01 is reader 5's program; i04 to i06 are the backslash-newline forms; i07 to i10 still take the fix and are right in every cell; i03, i14 and i16 are the ones the "Not in this change" sentence names:
+
+    i01_empty_after | ruby: "a1!" "a%d!"
+       plain f8: gcc "a1!" "a%d!" rc0/ "a1!" "a%d!" rc0/  rc1/ clang "a1" "a%d!" rc0/ "a1" "a%d!" rc0/  rc1/
+       plain x4: gcc "a1!" "a%d!" rc0/ "a1!" "a%d!" rc0/  rc1/ clang "a1" "a%d!" rc0/ "a1" "a%d!" rc0/  rc1/
+       plain C=base
+       --share-strings f8: gcc "a1!" "a%d!" rc0/ "a1!" "a%d!" rc0/  rc1/ clang "a1" "a%d!" rc0/ "a1" "a%d!" rc0/  rc1/
+       --share-strings x4: gcc "a1!" "a%d!" rc0/ "a1!" "a%d!" rc0/  rc1/ clang "a1" "a%d!" rc0/ "a1" "a%d!" rc0/  rc1/
+       --share-strings C=base
+    i02_empty_both | ruby: "a1!" "a%d!"
+       plain f8: gcc "a1!" "a%d!" rc0/ "a1!" "a%d!" rc0/  rc1/ clang "a1" "a%d!" rc0/ "a1" "a%d!" rc0/  rc1/
+       plain x4: gcc "a1!" "a%d!" rc0/ "a1!" "a%d!" rc0/  rc1/ clang "a1" "a%d!" rc0/ "a1" "a%d!" rc0/  rc1/
+       plain C=base
+       --share-strings f8: gcc "a1!" "a%d!" rc0/ "a1!" "a%d!" rc0/  rc1/ clang "a1" "a%d!" rc0/ "a1" "a%d!" rc0/  rc1/
+       --share-strings x4: gcc "a1!" "a%d!" rc0/ "a1!" "a%d!" rc0/  rc1/ clang "a1" "a%d!" rc0/ "a1" "a%d!" rc0/  rc1/
+       --share-strings C=base
+    i03_empty_first | ruby: "a1" "a%d!"
+       plain f8: gcc "a1!" "a%d!" rc0/ "a1!" "a%d!" rc0/  rc1/ clang "a1" "a%d!" rc0/ "a1" "a%d!" rc0/  rc1/
+       plain x4: gcc "a1!" "a%d!" rc0/ "a1!" "a%d!" rc0/  rc1/ clang "a1" "a%d!" rc0/ "a1" "a%d!" rc0/  rc1/
+       plain C=base
+       --share-strings f8: gcc "a1!" "a%d!" rc0/ "a1!" "a%d!" rc0/  rc1/ clang "a1" "a%d!" rc0/ "a1" "a%d!" rc0/  rc1/
+       --share-strings x4: gcc "a1!" "a%d!" rc0/ "a1!" "a%d!" rc0/  rc1/ clang "a1" "a%d!" rc0/ "a1" "a%d!" rc0/  rc1/
+       --share-strings C=base
+    i04_backslash_nl | ruby: "a1!" "a%d!"
+       plain f8: gcc "a1!" "a%d!" rc0/ "a1!" "a%d!" rc0/  rc1/ clang "a1" "a%d!" rc0/ "a1" "a%d!" rc0/  rc1/
+       plain x4: gcc "a1!" "a%d!" rc0/ "a1!" "a%d!" rc0/  rc1/ clang "a1" "a%d!" rc0/ "a1" "a%d!" rc0/  rc1/
+       plain C=base
+       --share-strings f8: gcc "a1!" "a%d!" rc0/ "a1!" "a%d!" rc0/  rc1/ clang "a1" "a%d!" rc0/ "a1" "a%d!" rc0/  rc1/
+       --share-strings x4: gcc "a1!" "a%d!" rc0/ "a1!" "a%d!" rc0/  rc1/ clang "a1" "a%d!" rc0/ "a1" "a%d!" rc0/  rc1/
+       --share-strings C=base
+    i05_backslash_nl_q | ruby: "a1!" "a%d!"
+       plain f8: gcc "a1!" "a%d!" rc0/ "a1!" "a%d!" rc0/  rc1/ clang "a1" "a%d!" rc0/ "a1" "a%d!" rc0/  rc1/
+       plain x4: gcc "a1!" "a%d!" rc0/ "a1!" "a%d!" rc0/  rc1/ clang "a1" "a%d!" rc0/ "a1" "a%d!" rc0/  rc1/
+       plain C=base
+       --share-strings f8: gcc "a1!" "a%d!" rc0/ "a1!" "a%d!" rc0/  rc1/ clang "a1" "a%d!" rc0/ "a1" "a%d!" rc0/  rc1/
+       --share-strings x4: gcc "a1!" "a%d!" rc0/ "a1!" "a%d!" rc0/  rc1/ clang "a1" "a%d!" rc0/ "a1" "a%d!" rc0/  rc1/
+       --share-strings C=base
+    i06_adjacent_backslash_nl | ruby: "a1!" "a%d!"
+       plain f8: gcc "a1!" "a%d!" rc0/ "a1!" "a%d!" rc0/  rc1/ clang "a1" "a%d!" rc0/ "a1" "a%d!" rc0/  rc1/
+       plain x4: gcc "a1!" "a%d!" rc0/ "a1!" "a%d!" rc0/  rc1/ clang "a1" "a%d!" rc0/ "a1" "a%d!" rc0/  rc1/
+       plain C=base
+       --share-strings f8: gcc "a1!" "a%d!" rc0/ "a1!" "a%d!" rc0/  rc1/ clang "a1" "a%d!" rc0/ "a1" "a%d!" rc0/  rc1/
+       --share-strings x4: gcc "a1!" "a%d!" rc0/ "a1!" "a%d!" rc0/  rc1/ clang "a1" "a%d!" rc0/ "a1" "a%d!" rc0/  rc1/
+       --share-strings C=base
+    i07_one_part | ruby: "a1" "a%d!"
+       plain f8: gcc "a1!" "a%d!" rc0/ "a1!" "a%d!" rc0/  rc1/ clang "a1" "a%d!" rc0/ "a1" "a%d!" rc0/  rc1/
+       plain x4: gcc "a1" "a%d!" rc0/ "a1" "a%d!" rc0/ "a1" "a%d!" rc0/ clang "a1" "a%d!" rc0/ "a1" "a%d!" rc0/ "a1" "a%d!" rc0/
+       plain C differs
+       --share-strings f8: gcc "a1!" "a%d!" rc0/ "a1!" "a%d!" rc0/  rc1/ clang "a1" "a%d!" rc0/ "a1" "a%d!" rc0/  rc1/
+       --share-strings x4: gcc "a1" "a%d!" rc0/ "a1" "a%d!" rc0/ "a1" "a%d!" rc0/ clang "a1" "a%d!" rc0/ "a1" "a%d!" rc0/ "a1" "a%d!" rc0/
+       --share-strings C differs
+    i08_literal_after | ruby: "a1|" "a%d!"
+       plain f8: gcc "a1!|" "a%d!" rc0/ "a1!|" "a%d!" rc0/  rc1/ clang "a1|" "a%d!" rc0/ "a1|" "a%d!" rc0/  rc1/
+       plain x4: gcc "a1|" "a%d!" rc0/ "a1|" "a%d!" rc0/ "a1|" "a%d!" rc0/ clang "a1|" "a%d!" rc0/ "a1|" "a%d!" rc0/ "a1|" "a%d!" rc0/
+       plain C differs
+       --share-strings f8: gcc "a1!|" "a%d!" rc0/ "a1!|" "a%d!" rc0/  rc1/ clang "a1|" "a%d!" rc0/ "a1|" "a%d!" rc0/  rc1/
+       --share-strings x4: gcc "a1|" "a%d!" rc0/ "a1|" "a%d!" rc0/ "a1|" "a%d!" rc0/ clang "a1|" "a%d!" rc0/ "a1|" "a%d!" rc0/ "a1|" "a%d!" rc0/
+       --share-strings C differs
+    i09_literal_before | ruby: "ka1" "a%d!"
+       plain f8: gcc "ka1!" "a%d!" rc0/ "ka1!" "a%d!" rc0/  rc1/ clang "ka1" "a%d!" rc0/ "ka1" "a%d!" rc0/  rc1/
+       plain x4: gcc "ka1" "a%d!" rc0/ "ka1" "a%d!" rc0/ "ka1" "a%d!" rc0/ clang "ka1" "a%d!" rc0/ "ka1" "a%d!" rc0/ "ka1" "a%d!" rc0/
+       plain C differs
+       --share-strings f8: gcc "ka1!" "a%d!" rc0/ "ka1!" "a%d!" rc0/  rc1/ clang "ka1" "a%d!" rc0/ "ka1" "a%d!" rc0/  rc1/
+       --share-strings x4: gcc "ka1" "a%d!" rc0/ "ka1" "a%d!" rc0/ "ka1" "a%d!" rc0/ clang "ka1" "a%d!" rc0/ "ka1" "a%d!" rc0/ "ka1" "a%d!" rc0/
+       --share-strings C differs
+    i10_adjacent_literal | ruby: "a1|" "a%d!"
+       plain f8: gcc "a1!|" "a%d!" rc0/ "a1!|" "a%d!" rc0/  rc1/ clang "a1|" "a%d!" rc0/ "a1|" "a%d!" rc0/  rc1/
+       plain x4: gcc "a1|" "a%d!" rc0/ "a1|" "a%d!" rc0/ "a1|" "a%d!" rc0/ clang "a1|" "a%d!" rc0/ "a1|" "a%d!" rc0/ "a1|" "a%d!" rc0/
+       plain C differs
+       --share-strings f8: gcc "a1!|" "a%d!" rc0/ "a1!|" "a%d!" rc0/  rc1/ clang "a1|" "a%d!" rc0/ "a1|" "a%d!" rc0/  rc1/
+       --share-strings x4: gcc "a1|" "a%d!" rc0/ "a1|" "a%d!" rc0/ "a1|" "a%d!" rc0/ clang "a1|" "a%d!" rc0/ "a1|" "a%d!" rc0/ "a1|" "a%d!" rc0/
+       --share-strings C differs
+    i11_empty_sq | ruby: "a1!" "a%d!"
+       plain f8: gcc "a1!" "a%d!" rc0/ "a1!" "a%d!" rc0/  rc1/ clang "a1" "a%d!" rc0/ "a1" "a%d!" rc0/  rc1/
+       plain x4: gcc "a1!" "a%d!" rc0/ "a1!" "a%d!" rc0/  rc1/ clang "a1" "a%d!" rc0/ "a1" "a%d!" rc0/  rc1/
+       plain C=base
+       --share-strings f8: gcc "a1!" "a%d!" rc0/ "a1!" "a%d!" rc0/  rc1/ clang "a1" "a%d!" rc0/ "a1" "a%d!" rc0/  rc1/
+       --share-strings x4: gcc "a1!" "a%d!" rc0/ "a1!" "a%d!" rc0/  rc1/ clang "a1" "a%d!" rc0/ "a1" "a%d!" rc0/  rc1/
+       --share-strings C=base
+    i12_seq_operand | ruby: "a1!" "a%d!"
+       plain f8: gcc "a1!" "a%d!" rc0/ "a1!" "a%d!" rc0/  rc1/ clang "a1" "a%d!" rc0/ "a1" "a%d!" rc0/  rc1/
+       plain x4: gcc "a1!" "a%d!" rc0/ "a1!" "a%d!" rc0/  rc1/ clang "a1" "a%d!" rc0/ "a1" "a%d!" rc0/  rc1/
+       plain C=base
+       --share-strings f8: gcc "a1!" "a%d!" rc0/ "a1!" "a%d!" rc0/  rc1/ clang "a1" "a%d!" rc0/ "a1" "a%d!" rc0/  rc1/
+       --share-strings x4: gcc "a1!" "a%d!" rc0/ "a1!" "a%d!" rc0/  rc1/ clang "a1" "a%d!" rc0/ "a1" "a%d!" rc0/  rc1/
+       --share-strings C=base
+    i13_array_arg | ruby: "a1!" "a%d!"
+       plain f8: gcc "a1!" "a%d!" rc0/ "a1!" "a%d!" rc0/ "a1!" "a%d!" rc0/ clang "a1!" "a%d!" rc0/ "a1!" "a%d!" rc0/ "\xDB\xDB\xDB\xDB" "a%d!" rc0/
+       plain x4: gcc "a1!" "a%d!" rc0/ "a1!" "a%d!" rc0/ "a1!" "a%d!" rc0/ clang "a1!" "a%d!" rc0/ "a1!" "a%d!" rc0/ "\xDB\xDB\xDB\xDB" "a%d!" rc0/
+       plain C=base
+       --share-strings f8: gcc "a1!" "a%d!" rc0/ "a1!" "a%d!" rc0/ "a1!" "a%d!" rc0/ clang "a1!" "a%d!" rc0/ "a1!" "a%d!" rc0/ "\xDB\xDB\xDB\xDB" "a%d!" rc0/
+       --share-strings x4: gcc "a1!" "a%d!" rc0/ "a1!" "a%d!" rc0/ "a1!" "a%d!" rc0/ clang "a1!" "a%d!" rc0/ "a1!" "a%d!" rc0/ "\xDB\xDB\xDB\xDB" "a%d!" rc0/
+       --share-strings C=base
+    i14_nil_part | ruby: "a1" "a%d!"
+       plain f8: gcc "a1!" "a%d!" rc0/ "a1!" "a%d!" rc0/  rc1/ clang "a1" "a%d!" rc0/ "a1" "a%d!" rc0/  rc1/
+       plain x4: gcc "a1!" "a%d!" rc0/ "a1!" "a%d!" rc0/  rc1/ clang "a1" "a%d!" rc0/ "a1" "a%d!" rc0/  rc1/
+       plain C=base
+       --share-strings f8: gcc "a1!" "a%d!" rc0/ "a1!" "a%d!" rc0/  rc1/ clang "a1" "a%d!" rc0/ "a1" "a%d!" rc0/  rc1/
+       --share-strings x4: gcc "a1!" "a%d!" rc0/ "a1!" "a%d!" rc0/  rc1/ clang "a1" "a%d!" rc0/ "a1" "a%d!" rc0/  rc1/
+       --share-strings C=base
+    i15_two_values | ruby: "a1a2" "a%d!"
+       plain f8: gcc "a1!a2!" "a%d!" rc0/ "a1!a2!" "a%d!" rc0/ "a1!a2!" "a%d!" rc0/ clang "a1!a2!" "a%d!" rc0/ "a1!a2!" "a%d!" rc0/ "\xDB\xDB\xDB\xDB\xDB\xDB\xDB\xDB" "a%d!" rc0/
+       plain x4: gcc "a1!a2!" "a%d!" rc0/ "a1!a2!" "a%d!" rc0/ "a1!a2!" "a%d!" rc0/ clang "a1!a2!" "a%d!" rc0/ "a1!a2!" "a%d!" rc0/ "\xDB\xDB\xDB\xDB\xDB\xDB\xDB\xDB" "a%d!" rc0/
+       plain C=base
+       --share-strings f8: gcc "a1!a2!" "a%d!" rc0/ "a1!a2!" "a%d!" rc0/ "a1!a2!" "a%d!" rc0/ clang "a1!a2!" "a%d!" rc0/ "a1!a2!" "a%d!" rc0/ "\xDB\xDB\xDB\xDB\xDB\xDB\xDB\xDB" "a%d!" rc0/
+       --share-strings x4: gcc "a1!a2!" "a%d!" rc0/ "a1!a2!" "a%d!" rc0/ "a1!a2!" "a%d!" rc0/ clang "a1!a2!" "a%d!" rc0/ "a1!a2!" "a%d!" rc0/ "\xDB\xDB\xDB\xDB\xDB\xDB\xDB\xDB" "a%d!" rc0/
+       --share-strings C=base
+    i16_two_embedded | ruby: "a1|" "a%d!"
+       plain f8: gcc "a1!|" "a%d!" rc0/ "a1!|" "a%d!" rc0/  rc1/ clang "a1|" "a%d!" rc0/ "a1|" "a%d!" rc0/  rc1/
+       plain x4: gcc "a1!|" "a%d!" rc0/ "a1!|" "a%d!" rc0/  rc1/ clang "a1|" "a%d!" rc0/ "a1|" "a%d!" rc0/  rc1/
+       plain C=base
+       --share-strings f8: gcc "a1!|" "a%d!" rc0/ "a1!|" "a%d!" rc0/  rc1/ clang "a1|" "a%d!" rc0/ "a1|" "a%d!" rc0/  rc1/
+       --share-strings x4: gcc "a1!|" "a%d!" rc0/ "a1!|" "a%d!" rc0/  rc1/ clang "a1|" "a%d!" rc0/ "a1|" "a%d!" rc0/  rc1/
+       --share-strings C=base
+
+OWN CHECKS on this head, built from nothing (compiler 5114afe3de0d): the test right in the seven lanes with gcc and clang, with and without --share-strings (the base: five wrong lines with gcc at levels 0 and 1, a raise at level 2 with both); `ruby tools/gate.rb check` exit 0; corpus C as above, the five changed tests under test/ and the two under packages/ run in the seven lanes on the base and here (poly_string_dup_unfrozen, string_format_scalar_operands and benchmark_tms cured at level 2; the other four the same in every lane); optcarrot checksum 59662, its C byte-identical; `make share-strings-test` pass; `make int-min-test` pass. The 112 generated statements, run again on this base with gcc and clang at levels 0, 1 and 2: the base raises in 40 with gcc at level 2, and with clang prints a wrong line in 33 and raises in 7 (53 statements with one or the other); this head is right in all 112 at levels 0 and 1, and at level 2 in 105 with gcc and 108 with clang. The seven left raise as on the base, with the base's C: call__str_alloc, holder__str_alloc, local__str_alloc and tern__str_alloc with both compilers, local__made_ints, local__made_strs and local__map with gcc alone.
+
+Merge into master de66d5c81274 (ls-remote 05:19:01 UTC 10-09): exit 0; the move 5518e5934b3a..de66d5c81274 touches none of this piece's functions. The merge holds the boxed-Array piece too (its row 250 opens first).
+
+THE RANGE-DIFF: git range-diff 4c3360a52fd6..282797eb91f2 e685fce791fa..aec1ea725375
+
+1:  282797eb9 ! 1:  aec1ea725 A format made in place is held while its arguments are built
+    @@ Commit message
+         arguments (emit_str_format_held). It is a String nothing else can
+         name, so it is held beside any argument, and it reads its parts
+         before an argument writes them: `"%#{w}d|" % (w += 1)` printed the
+    -    width the argument wrote where gcc built the list first.
+    +    width the argument wrote where gcc built the list first. An
+    +    interpolation counts as one only where it is provably a new String:
+    +    a literal part that is not empty stands among its parts, or its one
+    +    part is embedded (`"#{s}"`). CRuby answers the embedded String
+    +    itself for one whose other parts are all empty (`"#{s}#{""}"`), and
+    +    such a format keeps the C it had.
+     
+         A call's or a yield's answer is held the same way only beside
+         arguments that run none of the program's code (format_arg_is_inert:
+    @@ Commit message
+         statement has already run into a temporary of its own is left there.
+     
+         An index, an operator or a reader in the argument is the builtin's
+    -    only where that can be shown (format_name_is_builtin): the program
+    -    has no def and no attr of that name anywhere, in any class, and none
+    -    of the ways to define a method that leave no def behind, an alias,
+    -    alias_method, define_method, a delegator, a send or an eval of a
+    -    class. Otherwise the argument may run the program's code, as
+    -    `ar[0] + 1` does under `class Array; def [](i) = ($fmt << "|x"; 7);
+    -    end`, and the statement keeps the C it had. A concatenation is the
+    -    statement's own only while `+` passes the same test.
+    +    only where that can be shown (format_name_is_builtin): the program has
+    +    no def and no attr of that name anywhere, in any class, and nothing
+    +    that could give it one the node table does not show: an alias or an
+    +    undef; alias_method, define_method, a delegator, a send or an eval; a
+    +    method named or run by a name that is not a Symbol literal
+    +    (`method(nm)`, `inject(op)`, `private(*names)`); a `&` handed
+    +    anything but a Symbol literal, a `->` or a block parameter; a require
+    +    left standing as a call. The program is asked as the parser wrote it
+    +    (format_note_parsed, ahead of analyze_program) and again where the
+    +    code is written: the analysis rewrites a block parameter passed on
+    +    with `&` into a block. An operator counts only where its operand is
+    +    a number or a boolean by its type: an Integer's `>` hands any other
+    +    operand to that operand's own coerce. Otherwise the argument may run
+    +    the program's code, as `ar[0] + 1` does under `class Array; def [](i)
+    +    = ($fmt << "|x"; 7); end`, and the statement keeps the C it had. A
+    +    concatenation is the statement's own only while `+` passes the same
+    +    test.
+     
+         A format something else holds is read where it stands, with the C it
+         had (format_is_held): a literal, a variable or a constant, a
+    @@ Commit message
+     
+         Co-Authored-By: Claude Code <noreply@anthropic.com>
+     
+    - ## Makefile ##
+    -@@ Makefile: GC_STRESS_TESTS := test/gc_root_frame_slots.rb \
+    -                    test/ffi_str_arg_beside_alloc.rb \
+    -                    test/typed_array_boxed_source_held.rb \
+    -                    test/typed_array_boxed_source_own_index.rb \
+    -+                   test/format_made_in_place_held.rb \
+    -                    test/dispatch_arm_roots_operands.rb \
+    -                    test/exception_message_nul.rb \
+    -                    test/string_aset_value_runs_first.rb \
+    + ## src/codegen.c ##
+    +@@ src/codegen.c: char *codegen_program(const NodeTable *nt) {
+    +   size_t isa_ext_at = 0;
+    +   Compiler *c = comp_new(nt);
+    +   g_tmc_c = c;
+    ++  format_note_parsed(c);   /* ahead of the analysis's desugars */
+    +   analyze_program(c);
+    +   if (g_dump_traits) { ty_traits_dump(c); exit(0); }
+    +   /* --dump-repr: the analysis's answer, printed once the compile passes */
+     
+      ## src/codegen_call.c ##
+     @@ src/codegen_call.c: static void emit_utime_arg_bad(Compiler *c, int node, TyKind t, Buf *b) {
+    @@ src/codegen_call.c: static void emit_utime_arg_bad(Compiler *c, int node, TyKind
+     +  return sp_streq(nm, "attr") || sp_streq(nm, "attr_reader") || sp_streq(nm, "attr_writer") ||
+     +         sp_streq(nm, "attr_accessor");
+     +}
+    -+/* A number that changes when the node table does (its `version`: the
+    -+   emitter adds a node here and there). The answers below walk the whole
+    -+   program, so each is kept while the table stands. */
+    -+static int format_table_gen(Compiler *c) {
+    -+  static const Compiler *mc; static const NodeTable *mnt; static unsigned mver; static int gen;
+    -+  if (mc != c || mnt != c->nt || mver != c->nt->version) {
+    -+    mc = c; mnt = c->nt; mver = c->nt->version; gen++;
+    -+  }
+    -+  return gen;
+    ++static int format_name_in(const char *nm, const char *const *names) {
+    ++  for (int w = 0; names[w]; w++) if (sp_streq(nm, names[w])) return 1;
+    ++  return 0;
+     +}
+    -+/* Can the program define a method that leaves neither a def nor an attr of
+    -+   that name in the node table: an alias, a name handed to alias_method,
+    -+   define_method or a delegator, a send, an eval of a class, an attr whose
+    -+   name is not a Symbol literal? */
+    -+static int format_prog_defines_unseen(Compiler *c) {
+    ++/* A call of one of these names can define or remove a method and leave no
+    ++   def and no attr of its name in the node table, run a method by a name the
+    ++   table does not show, or run text. A `require` or a `require_relative`
+    ++   still standing is one the parser did not splice in (it replaces each one
+    ++   it reads with the file's text) and the emitter makes a no-op: the file's
+    ++   defs are not in the table. A `load` is refused where it is emitted. */
+    ++static int format_is_word(const char *nm) {
+     +  static const char *const WORDS[] = {
+    -+    "alias_method", "define_method", "define_singleton_method", "send", "__send__", "public_send",
+    ++    "alias_method", "define_method", "define_singleton_method", "undef_method", "remove_method",
+    ++    "send", "__send__", "public_send", "local_variable_set",
+     +    "class_eval", "module_eval", "class_exec", "module_exec", "instance_eval", "instance_exec", "eval",
+    -+    "def_delegator", "def_delegators", "delegate", NULL };
+    -+  static int memo_gen, memo;
+    -+  int g = format_table_gen(c);
+    -+  if (memo_gen == g) return memo;
+    -+  const NodeTable *nt = c->nt;
+    -+  int n = 0;
+    -+  memo_gen = g; memo = 0;
+    ++    "def_delegator", "def_delegators", "delegate", "require", "require_relative", NULL };
+    ++  return format_name_in(nm, WORDS);
+    ++}
+    ++/* The calls that answer a method by its name, and the visibility words:
+    ++   counted only where the name they are handed is not a Symbol literal. */
+    ++static int format_is_by_name(const char *nm) {
+    ++  static const char *const NAMES[] = {
+    ++    "method", "public_method", "singleton_method", "instance_method", "public_instance_method", NULL };
+    ++  return format_name_in(nm, NAMES);
+    ++}
+    ++static int format_is_visibility(const char *nm) {
+    ++  static const char *const NAMES[] = {
+    ++    "public", "private", "protected", "module_function", "private_class_method", "public_class_method",
+    ++    NULL };
+    ++  return format_name_in(nm, NAMES);
+    ++}
+    ++/* Is the name one that a call running a method by its name must not be
+    ++   handed (`inject(:send)`, `&:attr_accessor`)? */
+    ++static int format_names_a_word(const char *sv) {
+    ++  return format_is_word(sv) || format_is_attr_call(sv) || format_is_by_name(sv) || format_is_visibility(sv) ||
+    ++         sp_streq(sv, "to_proc") || sp_streq(sv, "inject") || sp_streq(sv, "reduce");
+    ++}
+    ++/* A Symbol literal that names none of them. */
+    ++static int format_is_plain_symbol(const NodeTable *nt, int id) {
+    ++  const char *sv = id >= 0 && nt_kind(nt, id) == NK_SymbolNode ? nt_str(nt, id, "value") : NULL;
+    ++  return sv && !format_names_a_word(sv);
+    ++}
+    ++/* Is the receiver the parameter of the block the parser writes for a
+    ++   `&:name` (`m(&:name)` reaches the table as `m { |_spx| _spx.name }`)? */
+    ++static int format_recv_is_sym_proc(const NodeTable *nt, int call) {
+    ++  int r = nt_ref(nt, call, "receiver");
+    ++  const char *rn = r >= 0 && nt_kind(nt, r) == NK_LocalVariableReadNode ? nt_str(nt, r, "name") : NULL;
+    ++  return rn && sp_streq(rn, "_spx");
+    ++}
+    ++/* Is the local only ever a `&` parameter: every node of the table that
+    ++   carries its name is a read of it, a `&` parameter, or a call (which
+    ++   binds nothing)? Then it holds a block some caller passed, and each such
+    ++   pass is asked where it stands. `it` and `_1` are bound with no node. */
+    ++static int format_is_block_param(const NodeTable *nt, const char *nm) {
+    ++  if (sp_streq(nm, "it") || (nm[0] == '_' && nm[1] >= '0' && nm[1] <= '9')) return 0;
+    ++  for (int id = 0; id < nt->count; id++) {
+    ++    const char *s = nt_str(nt, id, "name");
+    ++    if (!s || !sp_streq(s, nm)) continue;
+    ++    NodeKind k = nt_kind(nt, id);
+    ++    if (k != NK_LocalVariableReadNode && k != NK_BlockParameterNode && k != NK_CallNode) return 0;
+    ++  }
+    ++  return 1;
+    ++}
+    ++/* Can the operand of a `&` only be a block the table holds: none (the
+    ++   anonymous `&` of the def), a Symbol literal that names no word, a `->`
+    ++   literal, or a local that is only ever a `&` parameter? */
+    ++static int format_block_pass_is_plain(const NodeTable *nt, int e) {
+    ++  if (e < 0) return 1;
+    ++  NodeKind k = nt_kind(nt, e);
+    ++  if (k == NK_SymbolNode) return format_is_plain_symbol(nt, e);
+    ++  if (k == NK_LambdaNode) return 1;
+    ++  const char *nm = k == NK_LocalVariableReadNode ? nt_str(nt, e, "name") : NULL;
+    ++  return nm && format_is_block_param(nt, nm);
+    ++}
+    ++/* The answers below walk the whole program, so each is kept once the
+    ++   analysis is done (g_scopes_settled, set in codegen_program when
+    ++   analyze_program has returned; scope_is_shadowed keeps its table from
+    ++   there too): every file the program requires was spliced into the one
+    ++   text that is parsed, and every desugar has run, so the nodes the walks
+    ++   read are all in the table. A question asked sooner is walked and nothing
+    ++   is kept. The number answered changes with the Compiler or its table.
+    ++   The emitter still edits the table while it writes, and no edit of its
+    ++   changes an answer. The walks read the defs' names, the aliases, the
+    ++   undefs, the classes' names, the operand of each `&`, the calls named a
+    ++   word, an attr, a by-name call, a visibility word, to_proc, inject or
+    ++   reduce with their receiver and arguments, and, for a local handed to a
+    ++   `&`, the kind of every node of its name. The nodes the emitter adds are
+    ++   a StatementsNode, a `raise` call, a ConstantReadNode, a StringNode,
+    ++   ArgumentsNodes and LocalVariableReadNodes: no def, alias, undef, class
+    ++   or `&`, and a read or a call of a name is what a `&` parameter's name
+    ++   may be on. The one string it writes on a node that stands is a call's
+    ++   name, between two spellings of a builtin and back after the re-entry:
+    ++   `===` and `==`, `<=>` and `==`, `slice` and `[]`, `[]` and `new`,
+    ++   `find_all` and `select`, `each_grapheme_cluster` and `each_char`, and a
+    ++   String's bang method (ty_str_typed_bang_flags) and its plain name. The
+    ++   arguments and the block it swaps are a setter's and those of a splatted
+    ++   universal_object_method; the receiver, a `slice!`'s. None of these is a
+    ++   node or a name the walks read, so the table's `version`, which each such
+    ++   edit bumps, is not asked. A new place in the emitter that adds a node or
+    ++   writes a name is to be checked against what the walks read. */
+    ++static int format_answers_kept(Compiler *c) {
+    ++  static const Compiler *mc; static const NodeTable *mnt; static int gen;
+    ++  if (!g_scopes_settled) return 0;
+    ++  if (mc != c || mnt != c->nt) { mc = c; mnt = c->nt; gen++; }
+    ++  return gen;
+    ++}
+    ++/* Can the program have a method that leaves neither a def nor an attr of
+    ++   that name in the node table? It can by text it evaluates (the evals, the
+    ++   execs, ERB), by an alias or an undef, by a call named one of the words,
+    ++   and by a method run or named by a name the table does not show: an attr,
+    ++   a by-name call, a visibility word, a to_proc, or an inject or a reduce,
+    ++   handed a name that is not a Symbol literal or is one of those words, and
+    ++   a `&` whose operand is not provably a block the table holds. An inject's
+    ++   last operand is a name unless it is the only one and a literal block
+    ++   follows: beside a `&` that holds no block when it runs, CRuby reads the
+    ++   one operand as the name. A file the parser did not read is not asked
+    ++   for: what it would define is not in the compiled program either. */
+    ++static int format_uses_walk(const NodeTable *nt) {
+    ++  int n = 0, found = 0;
+     +  nt_nodes_of_kind(nt, NK_AliasMethodNode, &n);
+    -+  if (n > 0) return memo = 1;
+    -+  const int *calls = nt_nodes_of_kind(nt, NK_CallNode, &n);
+    -+  for (int i = 0; i < n && !memo; i++) {
+    -+    const char *nm = nt_str(nt, calls[i], "name");
+    ++  if (n > 0) found = 1;
+    ++  nt_nodes_of_kind(nt, NK_UndefNode, &n);
+    ++  if (n > 0) found = 1;
+    ++  const int *ids = nt_nodes_of_kind(nt, NK_ClassNode, &n);
+    ++  for (int i = 0; i < n && !found; i++) {
+    ++    int cp = nt_ref(nt, ids[i], "constant_path");
+    ++    const char *cn = cp >= 0 ? nt_str(nt, cp, "name") : NULL;
+    ++    if (cn && sp_streq(cn, "ERB")) found = 1;
+    ++  }
+    ++  const char *asked = NULL;
+    ++  ids = nt_nodes_of_kind(nt, NK_BlockArgumentNode, &n);
+    ++  for (int i = 0; i < n && !found; i++) {
+    ++    int e = nt_ref(nt, ids[i], "expression");
+    ++    const char *ln = e >= 0 && nt_kind(nt, e) == NK_LocalVariableReadNode ? nt_str(nt, e, "name") : NULL;
+    ++    if (ln && asked && sp_streq(ln, asked)) continue;
+    ++    if (!format_block_pass_is_plain(nt, e)) found = 1;
+    ++    asked = ln;
+    ++  }
+    ++  ids = nt_nodes_of_kind(nt, NK_CallNode, &n);
+    ++  for (int i = 0; i < n && !found; i++) {
+    ++    const char *nm = nt_str(nt, ids[i], "name");
+     +    if (!nm) continue;
+    -+    for (int w = 0; WORDS[w] && !memo; w++) if (sp_streq(nm, WORDS[w])) memo = 1;
+    -+    if (memo || !format_is_attr_call(nm)) continue;
+    -+    int a = nt_ref(nt, calls[i], "arguments"), ac = 0;
+    ++    if (format_is_word(nm)) { found = 1; continue; }
+    ++    int attr = format_is_attr_call(nm), by_name = !attr && format_is_by_name(nm);
+    ++    int vis = !attr && !by_name && format_is_visibility(nm);
+    ++    int to_proc = sp_streq(nm, "to_proc"), fold = sp_streq(nm, "inject") || sp_streq(nm, "reduce");
+    ++    if (!attr && !by_name && !vis && !to_proc && !fold) continue;
+    ++    int a = nt_ref(nt, ids[i], "arguments"), ac = 0;
+     +    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+    -+    for (int j = 0; j < ac; j++) if (nt_kind(nt, av[j]) != NK_SymbolNode) memo = 1;
+    ++    if (format_recv_is_sym_proc(nt, ids[i])) found = 1;
+    ++    else if (to_proc) found = !format_is_plain_symbol(nt, nt_ref(nt, ids[i], "receiver"));
+    ++    else if (by_name) found = ac > 0 && !format_is_plain_symbol(nt, av[0]);
+    ++    else if (fold) {
+    ++      int blk = nt_ref(nt, ids[i], "block");
+    ++      int own_block = ac == 1 && blk >= 0 && nt_kind(nt, blk) == NK_BlockNode;
+    ++      found = ac > 0 && !own_block && !format_is_plain_symbol(nt, av[ac - 1]);
+    ++    }
+    ++    else {
+    ++      for (int j = 0; j < ac && !found; j++) {
+    ++        NodeKind k = nt_kind(nt, av[j]);
+    ++        const char *an = vis && k == NK_CallNode ? nt_str(nt, av[j], "name") : NULL;
+    ++        found = k != NK_SymbolNode && !(vis && (k == NK_DefNode || (an && format_is_attr_call(an))));
+    ++      }
+    ++    }
+     +  }
+    -+  return memo;
+    ++  return found;
+    ++}
+    ++/* The walk is run on the table as the parser wrote it, ahead of
+    ++   analyze_program (codegen_program), and again on the table the emitter
+    ++   has: a desugar of the analysis may rewrite a use into nodes the walk
+    ++   does not count (a block-pass into a block the call then holds), and one
+    ++   may add a use. A table that was not walked as parsed is answered as
+    ++   holding one. */
+    ++static const NodeTable *format_parsed_nt;
+    ++static int format_parsed_unseen;
+    ++void format_note_parsed(Compiler *c) {
+    ++  format_parsed_nt = c->nt;
+    ++  format_parsed_unseen = format_uses_walk(c->nt);
+    ++}
+    ++static int format_prog_defines_unseen(Compiler *c) {
+    ++  static int memo_gen, memo;
+    ++  int g = format_answers_kept(c);
+    ++  if (g && memo_gen == g) return memo;
+    ++  int found = format_parsed_nt != c->nt || format_parsed_unseen || format_uses_walk(c->nt);
+    ++  if (g) { memo_gen = g; memo = found; }
+    ++  return found;
+     +}
+     +/* Is a call of `nm` on a builtin's value provably the builtin's own: the
+     +   program has no def of that name anywhere, no attr of that name, and no
+    @@ src/codegen_call.c: static void emit_utime_arg_bad(Compiler *c, int node, TyKind
+     +  return 1;
+     +}
+     +/* The scan's answer, kept by name while the table stands (the name is
+    -+   copied: nothing is assumed of where it lives). */
+    ++   copied: the emitter frees a call's name where it writes another). */
+     +static int format_name_answer(Compiler *c, const char *nm, int reader) {
+    -+  static char names[32][16]; static char kinds[32], answers[32]; static int used, memo_gen;
+    ++  static struct { char *name; char reader, answer; } *kept;
+    ++  static int used, cap, memo_gen;
+     +  if (!nm) return 0;
+    -+  int g = format_table_gen(c);
+    -+  if (memo_gen != g) { memo_gen = g; used = 0; }
+    ++  int g = format_answers_kept(c);
+    ++  if (!g) return format_name_scan(c, nm, reader);
+    ++  if (memo_gen != g) { while (used > 0) free(kept[--used].name); memo_gen = g; }
+     +  for (int i = 0; i < used; i++)
+    -+    if (kinds[i] == reader && sp_streq(names[i], nm)) return answers[i];
+    ++    if (kept[i].reader == reader && sp_streq(kept[i].name, nm)) return kept[i].answer;
+     +  int ans = format_name_scan(c, nm, reader);
+    -+  if (used < 32 && strlen(nm) < sizeof names[0]) {
+    -+    strcpy(names[used], nm); kinds[used] = (char)reader; answers[used++] = (char)ans;
+    ++  if (used == cap) {
+    ++    void *grown = realloc(kept, sizeof *kept * (size_t)(cap ? cap * 2 : 32));
+    ++    if (!grown) return ans;
+    ++    kept = grown; cap = cap ? cap * 2 : 32;
+     +  }
+    ++  if ((kept[used].name = strdup(nm)) != NULL) { kept[used].reader = (char)reader; kept[used++].answer = (char)ans; }
+     +  return ans;
+     +}
+    ++/* Is the operator's operand typed a number or a boolean? An Integer's or a
+    ++   Float's operator hands an operand of any other class to that operand's
+    ++   own `coerce`, or to its `==`: the program's code. */
+    ++static int format_operand_is_scalar(Compiler *c, int call) {
+    ++  const NodeTable *nt = c->nt;
+    ++  int a = nt_ref(nt, call, "arguments"), ac = 0;
+    ++  const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+    ++  TyKind t = ac == 1 ? comp_ntype(c, av[0]) : TY_UNKNOWN;
+    ++  return t == TY_INT || t == TY_FLOAT || t == TY_BOOL;
+    ++}
+     +static int format_name_is_builtin(Compiler *c, const char *nm) {
+     +  return format_name_answer(c, nm, 0);
+     +}
+     +/* Does the argument, a pure read by master's list, hold a call that is not
+     +   provably the builtin's? That list takes an index into a typed Array, an
+     +   operator on numbers or booleans and a reader's field read by the type of
+    -+   the receiver; the program's own `[]` or `+` runs its code. A reader is
+    ++   the receiver; the program's own `[]` or `+` runs its code, and so does
+    ++   the `coerce` of an operator's operand that is no number. A reader is
+     +   asked for a def of its name only: its attr is what makes it a read. */
+     +static int format_arg_calls_own(Compiler *c, int a) {
+     +  const NodeTable *nt = c->nt;
+    @@ src/codegen_call.c: static void emit_utime_arg_bad(Compiler *c, int node, TyKind
+     +    int alloc = 0;
+     +    if (!nm) return 1;
+     +    if (!format_name_answer(c, nm, call_is_field_read(c, a, &alloc))) return 1;
+    ++    if (call_is_scalar_op(c, a) && !format_operand_is_scalar(c, a)) return 1;
+     +  }
+     +  int nr = nt_num_refs(nt, a);
+     +  for (int i = 0; i < nr; i++)
+    @@ src/codegen_call.c: static void emit_utime_arg_bad(Compiler *c, int node, TyKind
+     +  return 0;
+     +}
+     +/* Is the format a String the statement makes itself, which nothing else can
+    -+   name: an interpolation, or a concatenation by String's own `+`? */
+    ++   name: a concatenation by String's own `+`, or an interpolation that is
+    ++   provably a new String? CRuby answers the embedded String itself for an
+    ++   interpolation whose other parts are all empty (`"#{s}#{""}"`), so one
+    ++   counts only where a literal part that is not empty stands among its
+    ++   parts, by the part's text as the table holds it, or where its one part
+    ++   is embedded (`"#{s}"`). */
+     +static int format_is_own_made(Compiler *c, int v) {
+     +  const NodeTable *nt = c->nt;
+     +  const char *ty = nt_type(nt, v);
+    -+  if (ty && sp_streq(ty, "InterpolatedStringNode")) return 1;
+    ++  if (ty && sp_streq(ty, "InterpolatedStringNode")) {
+    ++    int n = 0;
+    ++    const int *parts = nt_arr(nt, v, "parts", &n);
+    ++    for (int i = 0; i < n; i++) {
+    ++      const char *text = nt_kind(nt, parts[i]) == NK_StringNode ? nt_str(nt, parts[i], "content") : NULL;
+    ++      if (text && text[0]) return 1;
+    ++    }
+    ++    const char *pty = n == 1 ? nt_type(nt, parts[0]) : NULL;
+    ++    return pty && sp_streq(pty, "EmbeddedStatementsNode");
+    ++  }
+     +  if (nt_kind(nt, v) != NK_CallNode) return 0;
+     +  const char *nm = nt_str(nt, v, "name");
+     +  int recv = nt_ref(nt, v, "receiver");
+    @@ src/codegen_call_string.c: no_gsub_enum:
+          }
+        }
+     
+    + ## src/codegen_internal.h ##
+    +@@ src/codegen_internal.h: extern int g_class_body_id;
+    +    implicit self calls in included-module methods to the including class. */
+    + extern int g_emitting_class_id;
+    + extern int g_scopes_settled;   /* analysis done: scope_is_shadowed caches (codegen_util.c) */
+    ++/* The uses by which a program can hold a method the node table does not
+    ++   show (format_uses_walk, codegen_call.c), asked of the table as the parser
+    ++   wrote it: called ahead of analyze_program, whose desugars may rewrite one. */
+    ++void format_note_parsed(Compiler *c);
+    + /* While emitting a compile-time-unrolled define_method body: the loop-var
+    +    name to substitute and the literal node to emit in its place (-1 = none). */
+    + extern const char *g_dm_subst_name;
+    +
+      ## test/format_made_in_place_held.rb (new) ##
+     @@
+     +# `fmt % args` builds two things, the format and the list of arguments.
+    @@ test/format_made_in_place_held.rb (new)
+     +# a single argument goes into was held by nothing while that argument was
+     +# built: whichever was made first could be collected by the making of the
+     +# other.
+    ++# spinel: gc-stress
+     +w = 5
+     +i = 7
+     +ints = [3, 4]
+    @@ test/format_made_in_place_held.rb (new)
+     +sb = +"%d"
+     +p "#{sb}" % (grow_s(sb) + 1)
+     +p (sb + "") % (grow_s(sb) + 1)
+    ++p "#{sb}|" % (grow_s(sb) + 1)
+     +p sb
+     +
+     +# a call that answers the format ahead of a global's read runs once
+    @@ test/format_made_in_place_held.rb.expected (new)
+     +"      3|4"
+     +"2"
+     +"2|x"
+    -+"%d|x|x"
+    ++"2|x|x|"
+    ++"%d|x|x|x"
+     +"1|"
