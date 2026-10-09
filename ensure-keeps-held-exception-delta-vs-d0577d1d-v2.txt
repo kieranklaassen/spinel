@@ -1,0 +1,627 @@
+Delta of the third commit of this pull request, cut once more on upstream master 4337d93cfc9b: bcea99f83b6d (tree 7771972f303c) on c69a8c6544ed. It SUPERSEDES the cut 25f7833f236b (the one held as "-c3b") and is WHOLE against the read head d0577d1d3082 (verdict 22): nothing of the superseded delta is needed to read it. Its message is the "-v3" block and the body the "-v4" block beside this one. The first two commits are the read ones replayed on the tip: b95f43868c18 (stable patch-id 9f6408a7f5d5, as cb7a3f5ba571) and c69a8c6544ed (38acc2af0fa1, as 57ed59b749a5). The read third commit replays on the same parent with its added and removed lines unchanged (stable patch-id without context 0b256c232b8b, as d0577d1d3082 has; tree b7724fff5316); "the read head" below is that tree, built, and the diffs at the end are against it.
+THIS COMMIT READS ONE FACT IT DOES NOT MAKE: g_require_unread, the flag of the receiver-first pull request ("A method added to a builtin runs its receiver before its arguments"), declared in src/compiler.h. It holds no line of src/spinel_parse.c and reads nothing else of that pull request: not its walk's answer (g_written_by_value) and not the engine fact. WHICH FACT THE GUARD READS, AND WHY THAT IS ENOUGH: the flag, clear, says that in every file read there is no load-path global, no word load or autoload, every written require resolved and none made by a rewrite; that is this commit's kind 4 (a file the compiler did not read) and no more. Kinds 1 to 3 (a name sent by value, text evaluated, a block-pass) are this commit's own walk, own_uses_doubt, asked as parsed and after the analysis (points 3 and 4); it does not lean on the flag for them. -I, RUBYLIB and installed gems are outside by your ruling. For building and for every figure below, THIS CUT STANDS ON ec35ec490703, the fork's receiver-first base branch (that pull request as one commit on upstream 4337d93cfc9b), and above it the row 260 piece (7594548652a5); the three mails apply on that. This row goes to the Mac after the receiver-first pull request is merged, as a plain replay.
+
+1. C-B2, CUT, default-deny. The read commit took an operator for builtin by its name and its operand types alone (call_is_scalar_op). Here ensure_op_is_builtin must also say yes, and it says yes only where three things hold:
+   (i) every argument of the operator is typed Integer, Float or boolean (the receiver was already). `n == @w` with a Wrap in @w calls Wrap#== and was unrooted without this; an argument typed nil or String roots the body too (`n == nil`).
+   (ii) the program has no def of that operator's name, nor of `==` where the operator is `!=` or `<=>`. One def does not count: a def written with no receiver or on self whose every class is a class of the program's own, not a module, with no ancestor in the class table named Integer, Float, Numeric, Comparable, Object, Kernel, BasicObject, TrueClass, FalseClass or NilClass, and WHOSE NAME THE PROGRAM NEVER ASSIGNS AS A CONSTANT. The last clause is new with this cut and is my own find: `K = Float` then `class K; def *(o)` opens Float, and master compiles it so (the tip loses the message there); the cut before this one caught `K = Float` by the shape of the value alone, and `K = ::Float`, `K = [Float][0]` and `K ||= Float` passed. Now any of the ten constant writes of the name (plain, `||=`, `&&=`, `op=`, a target of a multiple assignment, and the same five through a path) makes the class not the program's own; a write whose name cannot be read denies every class. A constant assigned and never opened as a class costs nothing (`K = Float` alone is not rooted any more). So `class Vec; def +(o)` leaves `$n += 1` unrooted, and a def at the top level (in a block of a call there too), in a module, with a receiver that is not self, or in a reopened Integer, Float, Numeric, Object, Comparable or Kernel counts. A def is looked for in the node table (every def node of the name) as well as the scope table, so a def in a block or in a body the class table never saw still counts. AN ALIAS IS A DEF: `alias + plus` counts as a def of `+` in the class the compiler recorded the alias for (the top level's record, "Toplevel", is Object's), and as a def anywhere where it finds no record. The superseded cut took the alias keyword anywhere as a doubt; that rooted, and for D refused, every program that requires or names Set, whose library file holds `alias + |` and `alias === include?` in class Set.
+   (iii) nothing in the program may define, remove or reach a method where no def shows: point 4.
+   Booleans and nil: `t & true`, `t == true`, `t ^ true` and `f | true` with the operator defined in TrueClass or FalseClass are rooted and right. nil is never the receiver of a listed operator: call_is_scalar_op takes Integer, Float and boolean receivers only.
+   Bit by bit: a def of one operator roots only the bodies that hold that operator (or `!=` and `<=>` for a def of `==`); a doubt of (iii) roots every body that holds an operator.
+
+2. THE CLASS-VARIABLE ARM, CUT as ruled: a read of a class variable is a plain value, and `@@n = v` and `@@n op= v` are plain stores under the same conditions as the instance-variable ones (an Integer or Float slot, the operator builtin by point 1). The C is a read and a store of one static, with no call. The other shapes reader 5 named stay rooted, stated in the body's "Any other body is rooted".
+
+3. THE KEY LASTS (your four conditions of 23:48), AND THE TEXT IS READ TWICE (your 03:34 and 03:35 notes).
+   THE TWO READS. What the scan asks of the program's text (point 4: the words, undef, the alias with no plain name, `class << x`, the name-taking words' arguments, the block-pass, ERB) is one function, own_uses_doubt, and it is asked twice. FIRST of the table as parsed: program_note_parsed_operators, called from codegen_program in src/codegen.c on the line ahead of analyze_program(c), which is the first thing codegen_program runs on the new Compiler. It keeps, for that Compiler, the doubt of the text, the size of the table, and what the program wrote of two kinds: for each operator, how many defs and aliases give a method its name, and how many nodes say what a class is (a write of a constant, an opening of a class). SECOND of the table as the analysis left it, inside the scan. The reason is a fact about master: the analysis rewrites what it resolves, in place. desugar_reduce_proc_arg turns `x.inject(v, &b)` into `x.inject(v) { |a, b| b.call(a, b) }`, so after it a block written out cannot be told from a `&b` that may carry no block (where CRuby takes the one argument as a method's NAME); a literal `send(:name)` becomes the call it names; and 70 lines of the analysis reset a node to another kind (a call it has applied becomes nil). The first read is of what the program wrote; the second of what the analysis added. A table that was not read as parsed is all doubt (the keyed Compiler differs), and a program with no ensure as parsed is not read and is all doubt, so an ensure the analysis itself would make changes nothing. WHAT THE ANALYSIS TAKES OUT IS WRITTEN STILL: where an operator has fewer defs and aliases after the analysis than as parsed, its bit is set, and where a write of a constant or an opening of a class is gone, no class is the program's own (point 4, S7).
+   The scan itself is made ONCE, by program_scan_own_operators, called from codegen_program on the line after scan_prologue_features(c) and before refuse_syserr_errno_const(c): after analyze_program(c) and before the first line of C is written. Its answer is kept in two statics (the Compiler it was made for, and the bits). It is made only for a program that holds a begin with an ensure clause; a question about any other Compiler, or before the scan, is answered with every doubt (rooted).
+   (a) ALL THE NODES ARE IN THE TABLE at the scan. The parser reads every file it can find into the source before it parses (point 4, kind 4), and the analysis, which adds and rewrites nodes, has ended when analyze_program returns. Nothing between that return and the scan touches the table.
+   (b) NO EDIT OF THE EMITTER CHANGES WHAT THE SCAN READS, because the scan has read it all before the first edit: every table edit of the emitter is made inside an emit function, and the first of those runs after the scan. So the kept answer is the answer for the program as the analysis left it, which is the one to judge by. What a fresh walk at a later question would see, site by site (counted at this head in src/codegen*.c):
+      - nodes added, six nt_new_node lines at three sites: the deferred refusal (codegen.c: a StatementsNode, a CallNode named `raise`, an ArgumentsNode, a ConstantReadNode named `NotImplementedError`, a StringNode), the lone splat (codegen_call.c: two LocalVariableReadNodes named `__spinel_splat_elem`, three ArgumentsNodes) and a setter read for its value (codegen_call_class.c: one LocalVariableReadNode named `__svN`); and 40 nt_new_int lines, each an IntegerNode. The scan reads DefNodes, AliasMethodNodes, UndefNodes, SingletonClassNodes, the ten kinds of constant write, SymbolNodes, CallNodes, BlockArgumentNodes, ConstantReadNodes and BeginNodes (and BlockParameterNodes in the read as parsed only). Of the added kinds it reads two: a CallNode named `raise`, which is none of its words, and a ConstantReadNode named `NotImplementedError`, which is not ERB. It reads a local read only as the operand of a block-pass or as an argument of a name-taking word, and the added reads hang in the argument lists of the lone splat's and the setter's own calls; an IntegerNode is a literal wherever it meets one; the added StringNode is the argument of `raise`. No added node is a BeginNode, so the answer to "does the program hold an ensure" cannot move either.
+      - names written, 32 nt_node_set_str lines: two write the new String's text and four name the new nodes above; the other 26 are thirteen pairs that rename a CallNode for a re-entry of emit_call and put the name back: `===` to `==` (two sites), `<=>` to `==`, `slice` to `[]` (two sites), `find_all` to `select`, `[]` to `new`, `each_grapheme_cluster` to `each_char`, and the String bangs to their plain twins (five sites, point 5). No DefNode, alias or Symbol is ever rewritten, and those are where the scan reads the operators' names: on a CallNode it reads the name only against its two word lists, and none of the twins is a word of either. (The cut before this one also read `proc`, `lambda` and `new` under a block-pass; this one does not, point 4 kind 2.)
+      - refs and arrays written, 9 nt_node_set_ref and 6 nt_node_set_arr lines: they hang the new nodes in, and swap a call's arguments, block or receiver for the time of one re-entry (the lone splat, the setter, one String route) and put them back. For that time a fresh walk reads the temporary arguments, plain reads of a local; a call that is one of the name-taking words with a splat or a setter in its arguments was a doubt already by the arguments as written.
+      - two nt_node_set_int lines, on the new nodes of the deferred refusal.
+      The read as parsed is ahead of every edit of anyone's, the analysis's too.
+   (c) THE CORPUS C UNDER BOTH KEYS: all 6,676 corpus programs (test/*.rb, benchmark/*.rb and the packages' tests, the two new tests and the receiver-first one among them) give the same C under the lasting key and under the version key, by hash, and none is refused under one and compiled under the other.
+   (d) THE COUNTS, the compiler under callgrind, beneath (the commit under this one) / the lasting key (this head) / a version key (not committed: the scan made again at a question whenever the table's version or node count has moved); the C written is the same on all three by hash:
+      plain, `$n += 1` in the ensure of each method, 1,000 methods: 2,372,709,923 / 2,376,122,272 (+0.14%) / 2,376,142,032 (+0.14%)
+      the same, 2,000 methods: 5,255,181,810 / 5,261,999,260 (+0.13%) / 5,262,039,020 (+0.13%)
+      a setter read for its value in each method, 1,000: 7,740,985,908 / 7,761,852,478 (+0.27%) / 9,798,107,527 (+26.57%)
+      the same, 2,000: 23,054,448,481 / 23,064,678,511 (+0.04%) / 31,300,764,854 (+35.77%)
+      `w.sub!("a", "b")` in each method, 1,000: 8,654,568,089 / 8,661,342,540 (+0.08%) / 11,960,141,219 (+38.19%)
+      the same, 2,000: 22,138,650,944 / 22,152,131,243 (+0.06%) / 35,347,731,922 (+59.67%)
+      The lasting key's cost is the read as parsed and one scan, and grows with the program (3.4 million instructions at 1,000 plain methods, 6.8 million at 2,000).
+      The plain form adds no node and renames nothing. The setter form reads a setter for its value in each method, which adds a node each time; the bang form calls `w.sub!("a", "b")` in each method, which adds no node and moves the version twice. Under the version key both bring the walk back at every question.
+   THE CHECKING BUILD (not committed): at every question the kept answer is compared with a fresh walk of the table, and once more when everything is emitted, just before the Compiler is freed; it aborts on a difference, on a question before the scan, on a question in a program whose scan was skipped for having no ensure, and on an ensure that appears after the scan. Over the corpus: 6,676 compiles, 190 of them of a program that holds an ensure (their scans: 79 with no bit, 1 with a def's bit, 110 with a doubt), 21 questions in all, no abort, and the C of all 6,676 this head's by hash. Over the 163 programs of point 7, each compiled to C and built at -O1 and -O2: 470 compiles reach the scan, 434 questions, no abort, and every line of the result (rooted or not, right or not at each level) the head's own. Over the fifteen programs of point 5: 46 questions, no abort.
+
+4. THE OWN-METHOD WORDS, by the four kinds of your 00:21 note ("close the uses, not the makers"), with the site findings of your 02:35 and 02:49 notes (S1, S3, S5, S6), each tested before this commit was made:
+   (1) by-name calls. A call named, or a Symbol whose value is, one of alias_method, define_method, define_singleton_method, undef_method, remove_method, prepend, extend, refine, using, send, __send__, public_send, method, public_method, instance_method, public_instance_method, singleton_method, to_proc, eval, instance_eval, class_eval, module_eval, instance_exec, class_exec, module_exec, const_get, const_set, def_delegator, def_delegators, def_instance_delegator, def_instance_delegators, delegate, instance_delegate: a doubt whatever its arguments, a literal name too. With the read as parsed this now holds for the calls the analysis resolves away as well: a literal `send(:name)` (which the analysis makes the direct call) and a `define_method` it turns into a def are doubts, where the cut before saw neither.
+       The name-taking words. The attr words (attr, attr_reader, attr_writer, attr_accessor) and the visibility words (public, private, protected, module_function, private_class_method, public_class_method): a doubt unless every argument is a literal Symbol or String that is none of the words of either list, a def, or an attr word's own call (`private def m`, `private attr_reader :m`). inject and reduce, S1: with a block WRITTEN OUT the argument is the first value and is not looked at; with none, or with a block-pass, every argument must be a literal that names nothing: an Integer, a Float, nil, true, false, an Array or Hash literal, or a String or Symbol that is none of the words of either list. So `[String, T].inject(:class_eval, &b)`, `l.inject(:attr_writer, &b)`, the same with the anonymous `&`, `l.inject(start, &b)` and `l.reduce(:public)` are doubts; `a.inject(start) { ... }`, `inject(0, &b)`, `inject(:+)` and `inject("") { ... }` are not. "Written out" is read from the table as parsed (point 3): after the analysis the call holds a block either way.
+   (2) a block-pass, S6. A doubt unless its operand is absent (a bare `&`), a literal Symbol that names no word of (1), a `->` literal, or the block parameter of its own def. `proc { }`, `lambda { }` and `Proc.new { }` are NOT exempt any more: proc and lambda are methods a program can define (`def proc(&b) = $pr`), so a literal block on them proves nothing; `->` is syntax. The block parameter is read two ways. As parsed, where no scope is made yet: a local read whose name is the block parameter of some def of the program. After the analysis: a local read whose name is the block parameter of the def it stands in, or a read named `__orphaned__`, the name the analysis itself gives the read it leaves behind when it turns a block parameter that is only handed on into a yield. The second read is the exact one; a block-pass of a local that merely shares a name with some def's block parameter is a doubt by it (probe: `def each_one(l, &blk)` beside a top-level `blk = proc { }` and `sort(&blk)`).
+   (3) text evaluated. The evals and the execs of (1), and a constant named ERB.
+   (4) a file the compiler did not read, S3 and S5. One read of g_require_unread, the receiver-first pull request's flag: clear only where the text of every file read proves there is none (no load-path global written, nothing named load or autoload written, every require and require_relative written resolved), and counted ahead of master's own rewrites. This commit's own loop over the require, load and autoload calls still standing in the table is GONE: the flag's count of words covers every one of them, with any receiver. Run on the base branch as carried: the programs of this kind below.
+   Also a doubt, as before: the undef keyword; an alias whose new name is no plain Symbol; `class << x` for an x that is not self. The constant assigned a builtin class is no doubt any more: point 1 (ii) decides it by the class's name, bit by bit.
+   With (1) and (2) whole the Symbol makers (to_sym, intern, an interpolated Symbol) are not words. No guard of this pull request takes an interpolation for a new String.
+   WHAT THE READ AS PARSED COSTS AND GIVES. Gives back, against a scan made after the analysis alone: `a.inject(start) { ... }` with a variable (after the analysis a written block and a block-pass look the same, so that scan had to take every such argument for a name). Newly denies: `public(*[:a])` (the analysis makes a splat of an Array literal the plain arguments; as written it is a splat) and a literal `send(:name)`. Corpus count: point 9.
+   S7, CODE THE ANALYSIS DROPS UNDER A TEST IT DECIDES (your 04:18 note). desugar_engine_branches blanks, node by node, the arm not taken of a test on RUBY_ENGINE or RUBY_VERSION, of a defined? or a const_defined? of a constant the program does not define, and of a method_defined?; CRuby runs that arm. What this commit reads of the table after that pass, and what the read as parsed does about it:
+      - the words of the four kinds: asked as parsed too, so a word in the dropped arm is a doubt (`Float.class_eval do ... end`, `Float.send(:define_method, :*)`, each under `if RUBY_ENGINE == "ruby"`).
+      - the defs and aliases of an operator: counted as parsed and counted again at the scan, both times among the nodes the program wrote. Those are the first N ids of the table, N its size as parsed: the analysis resets a node in place and adds its own nodes behind, so a def it makes (it makes DefNodes at seven sites) cannot stand in for one it dropped. Fewer at the scan sets that operator's bit.
+      - "a class of the program's own" (point 1 (ii)): the constant writes and the class table are read after the analysis. So the ten kinds of constant write and the openings of a class are counted the same way, and where one of them is gone NO class is the program's own: every def of an operator counts, wherever it is written. `K = Float if RUBY_ENGINE == "ruby"`, then `class K; def *(o)`, is CRuby's Float and the compiled program's own class K. A module's opening is not counted: the analysis folds the prelude's `module Enumerable` away in every program that uses a Set, which is no drop, and a module is never "a class of the program's own".
+      - the ensure clauses, the operand types and the flag are facts about the compiled program and are read where it is compiled.
+      FOR THIS PULL REQUEST NONE OF IT CAN LOSE A PROGRAM: an unrooted body is master's C byte for byte, and the method the arm would have made does not exist in the compiled program. It is closed here because the fix two pull requests up reads the same bits, and there a missed `===` changes what is printed; its own twin is in that row's delta.
+      TWINS, fourteen programs, each the frame below with `*` on Float made under a decided test (CRuby runs the def; the compiled program has the builtin `*`): the def under `if RUBY_ENGINE == "ruby"`, `unless RUBY_ENGINE == "spinel"`, `if defined?(RubyVM)`, `if Object.const_defined?(:RubyVM)`, as `def ... end if RUBY_ENGINE == "ruby"`, the same beside a Struct (whose made defs do not hide the dropped one), an `alias * mine if RUBY_ENGINE == "ruby"`, `Float.class_eval`, `Float.send(:define_method, :*)` and a ternary under the same test; `K = Float` under the modifier and under the `if`, the same beside a Struct, and `class K < Float` under the `if`, each before `class K; def *(o)`. All print CRuby's bytes on the tip, at the read head and here; none is rooted on the tip or at the read head, every one is rooted here. Controls, not rooted here: a constant written in both arms of the test with no operator anywhere; a Struct, and a `Class.new` assigned to a constant, beside `class K; def *(o)` with no test (the analysis turns both writes into openings in place: nothing is lost). One more, `if RUBY_VERSION >= "3.0"` around the def, is live in the compiled program as in CRuby: the tip and the read head lose the message there (this fault), here it is rooted and right.
+      Corpus: of the 80 corpus programs whose scan gets as far as the count, none has fewer defs or aliases of an operator after the analysis than as parsed, and one has a counted node gone: test/strict_arg_conversion.rb, where the analysis folds the prelude's `class Integer` opening away; it defines no operator, so its C does not move.
+   S8, A MODULE PUT AHEAD OF A BUILTIN'S OWN METHOD WITH NO DEF AND NO SYMBOL OF ITS NAME (your 06:35 and 06:48 notes). WHAT THIS GUARD READS: the flag and its own walk; it does not read an_prog_never_gives. WHY THAT IS ENOUGH HERE, AND THE THREE TWINS:
+      An unrooted body is master's C byte for byte, and rooting changes no byte a program prints; so no twin can make this head print another line than the base's, whatever the walk misses. What a miss would cost is the fix (a body left unrooted that needed the root). The three, each the frame below, each printing the base's lines (CRuby's) on the tip, at the read head and here:
+      - prepend into the builtin: `class Float; prepend Kernel; end`, `class Integer; prepend Comparable; end`, and `class Float; prepend Comparable; end` under `if RUBY_ENGINE == "ruby"`: not rooted on the tip and at the read head, R here. prepend is one of the words of kind 1, as a call's name or a Symbol, asked as parsed too.
+      - include in a subclass: `class Float; include Comparable; end` changes nothing in CRuby (Numeric has the module, so it is not put in again: Float, Numeric, Comparable); `class TrueClass; include Comparable; end` does (TrueClass, Comparable, Object), and puts Comparable's `==` ahead of BasicObject's for `t == true`. Both, and the second with a def of `<=>` on TrueClass that enters a begin and a body `x = t == false`: not rooted on any, base's lines on all. No doubt is owed: the compiled program compares two booleans there and calls nothing, with or without the include, so there is nothing to root; and a def in a module of the program's own counts wherever it is included (a module is never "a class of the program's own").
+      - include beside a top-level def of the name: a top-level `def *(o)` and `class Float; include Kernel; end`: not rooted on the tip and at the read head, R here, by the def (a def at the top level always counts).
+      Where a route that only CRuby has is material is the fix two pull requests up, which changes what is printed; its twins are in that row's delta, and it asks the walk's answer.
+   ONE PROGRAM EACH (CRuby 3.3.6 / the tip / the read head / this head; R = the ensure body is rooted; each is the same frame, a method whose ensure body is `x = f * 2.0`, beside the lines named):
+      (1) `private NAME` with NAME a constant holding a Symbol, `public(*LIST)` and `public(*[:a])`: right on all three; not rooted on the tip and at the read head, R here. `attr_accessor :a, :b`, `private attr_reader :c`, `private :peek`, `private def hid`: right on all three, not rooted on any (literal names). `attr_reader "send"` (a String literal that is a word): right on all three, R here. `attr_accessor(*names)` with a local: refused by master, no C on any of the three.
+      (1) a literal `T.new.send(:helper)` and `define_method(:helper) { 1 }` in a class of the program's own, with no operator anywhere: right on all three; not rooted on the tip and at the read head, R here (the words, read as parsed).
+      (1) `OP = [:+, :*][1]` and `[1.5, 2.0].inject(OP)` with `*` defined on Float: CRuby prints 3.5; the tip prints 3.0 (its inject by a name value takes the builtin: master's) and loses the first message to this fault; the read head prints the tip's bytes; here R, 3.0 and both messages kept. `inject(:+)`, `[1, 2, 3].inject(start) { |s, v| s + v }`, `inject([]) { ... }`, `inject("") { ... }`, `inject(:private) { |s, v| v }` and `def fold(l, &b) = l.inject(0, &b)`: right on all three, not rooted on any. `def fold(l, &b) = l.inject(:attr_writer, &b)`, the same with the anonymous `&`, `l.inject(:class_eval, &b)`, `l.inject("class_eval", &b)`, `l.inject(start, &b)` and `l.reduce(:public)`: right on all three; not rooted on the tip and at the read head, R here. `p [1, 2, 3].inject("+")`: CRuby prints 6, the tip ends in master's NoMethodError ("undefined method 'inject' for an instance of Array"); the read head and this head print the tip's bytes; not rooted on any. It is the one program of point 7 that is not rooted here and not right, and it is master's bytes on all three.
+      (2) `pr = proc { |v| v }` and `list.each(&pr)`; `map(&proc { |v| v + 1 })`; `map(&lambda { |v| v + 1 })`; `cmp = proc { ... }` and `sort(&cmp)`; `def each_one(l, &blk)` beside a top-level `blk = proc { }` and `sort(&blk)`: right on all three; not rooted on the tip and at the read head, R here. `map(&->(v) { v + 1 })`, `map(&:to_s)` and `def each(&blk); @list.each(&blk); end`: right on all three, not rooted on any. `$pr = nil; def proc(&b) = $pr` and `map(&proc { |v| v + 1 })` (S6): CRuby prints an Enumerator (the program's proc hands back nil); the tip takes the builtin proc and prints `[2, 3]`; here R and the tip's bytes.
+      (3) `require "erb"` and `ERB.new("two", trim_mode: "-").result_with_hash({})`: right on all three (master's ERB is a placeholder that evaluates nothing); not rooted on the tip and at the read head, R here.
+      (4) by the flag. `require "no_such_library_here"`: CRuby raises LoadError; the tip warns that the require is ignored and prints the two messages; the read head and this head print the tip's bytes; R here. `require name` with name a local; a `require_relative` of a file that defines `*` on Float under `if RUBY_ENGINE == "ruby"`, under that modifier and under `unless RUBY_ENGINE == "spinel"` (S5 and S7 at once: the parser does not splice a require in the arm the engine test drops, CRuby runs it, and the flag counts a require written and none resolved); a require inside an interpolation with a rescue; `$:.unshift(dir)`, `$LOAD_PATH.unshift(dir)` and a splice into the load path; `send(:require_relative, "lib/x")`; `autoload :Dp, file` in a class body and `Yam.load("a: 1")` on a module of the program's own with a `load` of its own (S3); a String that only holds the word ("we load nothing"): right on all three; not rooted on the tip and at the read head, R here. `self.load(file)`, `Kernel.autoload(:Dp, file)`, `Object.autoload(:Dp, file)` and `method(:require_relative).call("lib/x")`: CRuby loads the file; master compiles each and ends in a NoMethodError at run time ("private method 'load' called for an instance of Object" and its kin) on the tip, at the read head and here; R here. `$-I.unshift(dir)`: refused by master, no C on any.
+      (4) files that ARE read: a plain `require_relative` of a file that defines `*` on Float, the same indented in an `if`, a required file whose module with `*` is included in or prepended to Float or Integer, and a file with the prepend itself: on the tip and at the read head each loses the message (this fault, not rooted); here each is R and right. `require "set"` and a program that uses a Set: right on all three and not rooted on any (the flag stays clear: every require written is resolved). `require "json"`, `require "stringio"`, `require "set"` beside `require "json"`, and a comment that holds the words ("does not require or load anything"): right on all three; not rooted on the tip and at the read head, R here. The flag counts words and passes over no character of any file read, so a word in a comment or in a library's own text sets it; that is the flag's price, counted in point 9.
+
+5. THE COMPUTED TWINS (your 00:07 note), unchanged from the superseded delta and run again on this head. Of the five bang sites (ten writes at this head), three compute the plain twin from the call's own name, all in codegen_call_recv.c: str_bang_plain, twice in the String mutator arm, and the copy without the last byte in emit_face_str_bang. Each is reached only for a name the String bang table knows (ty_str_typed_bang_flags, or a face row marked as a String bang): the nineteen names of its rows in src/types.c (capitalize! chomp! chop! delete! delete_prefix! delete_suffix! downcase! gsub! lstrip! next! rstrip! squeeze! strip! sub! succ! swapcase! tr! tr_s! upcase!) and reverse!. The two sites in codegen_stmt.c write fixed names (gsub, sub, tr, delete). A program's own `send!` or `eval!` has no row: it is never written as `send` or `eval`, and neither the kept answer nor a fresh walk ever sees those words for it. None of the twenty plain twins is a string the scan reads. So inside a twin's window the kept answer and a fresh walk are the same answer.
+   The checking build meets the window: with a line added that logs, at the scan and at each question, how many calls of a given name the table holds, fifteen programs that put a begin with an ensure (body `x = f * 2.0; $n = $n + 1`) inside the block or an argument of a renamed call were compiled. In eight the question was asked with the twin in the table (the count of calls of the twin's name one more than at the scan): `gsub!` with a block as a statement, `sub!` with a block for its value, `tr!` and `delete!` with the begin as an argument, `gsub!` and `squeeze!` on a boxed receiver, `===` and `find_all`. In the other seven the begin is emitted outside the window (`<=>`, `slice`, each_grapheme_cluster, `[]` on a class value, the setter, the lone splat) or there is no window (`o.send!(...)` of the program's own: no call named send at the scan or at any of the four questions). No difference in any, 46 questions; all fifteen unrooted; fourteen print CRuby's bytes on the tip and here, and one prints the tip's bytes on both (side find, recorded and not taken: `a <=> b` for an object whose own `==` says equal answers nil on master, 0 in CRuby).
+
+6. READER 5'S THREE ROUTES (your 00:07 note), each as an ensure body of this pull request's shape and once more with the operator's answer stored in a global and printed: a top-level `def ==` asked by `n == 2`; `class BasicObject; def ==`; `module Comparable; def <` asked by `n < 2`. Five programs: all rooted here; the tip and this head print the same bytes in each. Four are CRuby's bytes; the Comparable one with its answer printed is wrong on both (master applies the def to an Integer receiver, and its body's call of a top-level method then raises NoMethodError; CRuby answers by Integer's own `<`): master's, recorded and not taken. This cut changes what is rooted there and nothing that is printed.
+
+7. PROBES, 163 programs (the 87 of the superseded delta, 51 for the site findings S1, S3, S5, S6 and the class-name rule, 18 for S7 and 7 for S8), each one ensure body with an operator and one route to a method of the program's own behind it (or one of the shapes that must stay plain), run at -O1 and -O2 against CRuby 3.3.6, on the tip, on the read head and here:
+   - on the tip 111 are right, 42 print wrong bytes, 9 are refused (no C) and 1 does not build; none is rooted. 25 of the 42 lose the message to this fault and nothing else, and 17 are wrong for a reason that is master's (below).
+   - at the read head 139 are not rooted and 30 of those print wrong bytes, 19 by this fault: Float `*` on a local and on an instance variable, Float `+`, `<` and `==`; `n == @w` with an object in @w; define_method on Float and on Integer; `K = Float; class K; def *` and `K = ::Float; class K; def *`; prepend on Float and on Integer; the six programs whose operator sits in a required file; and the def of `*` on Float under `if RUBY_VERSION >= "3.0"`. The other 11 are master's. The two class-variable programs are rooted at the read head and not here (point 2).
+   - here 118 are rooted and 36 are not; the 9 the tip refuses are refused. Of the 36, 35 are right and one prints master's bytes (`inject("+")`, point 4). The 36: no operator of the program's at all; a class-variable read and a class-variable `op=`; `*` and `==` defined in a class of the program's own, with a Struct and with a `Class.new` constant beside; `*` defined in a subclass of Numeric; a def of coerce in a class of the program's own; an alias that gives `+` to a method of a class of the program's own; `class << self` and `def self.x` in a class of the program's own; `LIMIT = MAXV` and `K = Float` with no `class K` (a constant assigned and never opened); `K = Mine; class K; def *` with Mine a class of the program's own; attr and visibility words with literal names; a def handing on its own block parameter; `map(&:to_s)` and `map(&->(v) { })`; `inject(:+)`, `inject("+")`, and inject with a block written out (a variable, an Array, a String, or `:private` as its first value); `inject(0, &b)` with the def's own block parameter; `require "set"` and a program that uses a Set; a constant written in both arms of a test on RUBY_ENGINE; `class Float; include Comparable; end`, and `class TrueClass; include Comparable; end` with and without a def of `<=>` there.
+   - of the 118 rooted, 101 are right, 1 does not build on the tip, at the read head or here (the delegator words), and 16 print wrong bytes for a reason that is master's and not this change's: six print the tip's bytes exactly (master applies a def of an Integer operator, or one in a reopened Comparable, to the Integer receiver, and its body's call of a top-level method raises "undefined method 'churn' for an instance of Integer"); three end in master's uncaught NoMethodError on the tip and here ("undefined method 'class_eval' for class Float" once, "undefined method 'prepend' for class Float" twice); four end in master's NoMethodError for a load, an autoload or a `method(:require_relative)` it compiles as a call (point 4, kind 4); the unread require and the program's own `proc` print the tip's bytes; the inject by a name value prints master's 3.0 with the message now kept. Recorded, not taken.
+   - nothing that is right on the tip is wrong here, and nothing that is not rooted here prints other bytes than the tip's.
+
+8. COSTS (callgrind, gcc -O2; beneath and here, the two sides built and counted in one environment under names of one length; "beneath" is the parent of the first commit):
+   `$n += 1` body: 140,351,054 / 140,351,054
+   `@d -= 1` body: 148,673,489 / 148,673,489
+   `x = saved + 1` body: 125,350,334 / 125,350,334
+   `@@d -= 1` body: 143,673,500 / 143,673,500 (the read head rooted it, nine a call more)
+   `$n += 1` body, the program defining `+` on a class of its own: 141,674,497 / 141,674,497
+   `$n += 1` body, the program defining `%` on Float: 140,667,542 / 140,667,542 (the body holds no `%`)
+   `$f %= 2.0` body, the program defining `%` on Float: 140,666,843 / 132,666,843. Rooted here and eight instructions a call FEWER: gcc lays the method out otherwise once the cleanup local is there. Not quoted in the body.
+   rooted body, small method: 140,351,080 / 149,351,080 (+9); the same with a rescue clause beside the ensure: 139,351,109 / 149,351,109 (+10), and a plain-store body there: 139,351,074 / 139,351,074; a method that roots a local already: 181,664,216 / 185,664,216 (+4); an ensure body that stores through an index: 180,663,546 / 184,663,546 (+4); a begin in a loop: 117,351,054 / 120,351,055 (+3)
+   20,000 raises through one rooted ensure: 67,388,498 / 67,828,498 (22.0 each); through a plain-store ensure: 67,388,486 / 67,388,486; through two plain-store ensures, one handing to the next: 84,117,244 / 84,239,108 (6.1); through two rooted ensures, one handing to the next: 84,117,256 / 85,119,120 (50.1, two times 22 and the six)
+   every row prints the same output on both sides.
+   optcarrot, built and counted in one tree: 2,368,217,466 beneath, 2,368,248,814 here, checksum 59662 on both; its C is the same after the first and the second commit and changes at its one ensure with the third.
+
+9. CORPUS on the tip (test/*.rb, benchmark/*.rb and the packages' tests). After the first commit 6,674 programs identical, none differs. After the second 6,645 identical, 29 differ (21 tests, 8 package tests), its test new. After the third 6,550 identical, 125 differ (92 tests, 33 package tests), its test new; the 93 tests among them, the new one counted, print their `.expected`. Against the read head on the same parent, both hashed in one tree: the changed test is the only program whose C differs (6,675 identical by hash). No corpus program is newly rooted or newly unrooted by the guard, the flag or the read as parsed.
+
+10. THE TEST is the superseded cut's, unchanged: against the read head it gains two sections (63 lines, 11 expected lines; 231 lines and 44 expected lines in all): a class variable `op=` in an ensure, and an operator the program defines on Float (its body enters a begin, raises and rescues, and allocates) applied in an ensure body to a local and to an instance variable, four rounds. Right in the seven builds here (-O0 to -O3, clang, both stress modes) and as the gate's shared leg builds it (SPINEL_SHARE_STRINGS=1, -O1). The tip has 6 of the 44 lines wrong at every level. No section is added for the site findings, for S7 or for S8: a program of those kinds prints the same bytes rooted and unrooted (point 4), so a test of them would pass on the tip.
+
+11. CHECKS on this tree: the build of each of the three commits; the two tests in the seven builds (the tip: 1 of 9 and 6 of 44 lines wrong at every level) and in the shared leg; `ruby tools/gate.rb check` staged at each commit, 0; the corpus C by hash after each commit (point 9), under the version key and under the checking build (point 3) and at the read head (point 9); the changed tests run, 22 of 22 and 93 of 93; `make backtrace-test`, `make scale-test` (1.95, 1.86, 1.71, 4.76, 6.19, 4.13, under their limits) and `make int-min-test` at each commit, each 0; `make share-strings-test` on the head, 0 (902 s); function sizes ok (codegen_program 961 to 963, emit_begin 340 to 357; new: own_uses_doubt 72, scan_own_operators 38, ensure_names_plain_value 25, ensure_body_only_stores 22, own_count_written 14, const_is_assigned 12, ensure_op_is_builtin 8, class_holds_no_scalar 7, program_note_parsed_operators 7, names_scalar_builtin 6, emit_ensure_exc_hand_on 5, program_holds_ensure 5, own_op_bit 4, own_word 4, program_scan_own_operators 4, program_own_operators 3); optcarrot built, run and counted (point 8); the body's two programs print the body's lines on the tip at -O0 to -O3 and CRuby's here. Tested against S1, S3, S5, S6, S7 and S8 before the commit was made (point 4). The stable patch-id of this third commit is its own, new (3be759e4f40c without context); no reading covers it.
+
+12. THE CODE, the read head against this head:
+diff --git a/src/codegen.c b/src/codegen.c
+index 50f87d555..694ad7a89 100644
+--- a/src/codegen.c
++++ b/src/codegen.c
+@@ -16381,6 +16381,7 @@ char *codegen_program(const NodeTable *nt) {
+   size_t isa_ext_at = 0;
+   Compiler *c = comp_new(nt);
+   g_tmc_c = c;
++  program_note_parsed_operators(c);   /* the table as parsed: see codegen_stmt.c */
+   analyze_program(c);
+   if (g_dump_traits) { ty_traits_dump(c); exit(0); }
+   /* --dump-repr: the analysis's answer, printed once the compile passes */
+@@ -16432,6 +16433,7 @@ char *codegen_program(const NodeTable *nt) {
+      emissions are gated on them (a `puts "hello"` program gets none). */
+   g_needs_class_machinery = program_needs_class_machinery(c);
+   scan_prologue_features(c);
++  program_scan_own_operators(c);   /* before any emit: see codegen_stmt.c */
+   refuse_syserr_errno_const(c);
+ 
+   /* Analyze-only emit modes (legacy --emit-*): write the requested artifact
+diff --git a/src/codegen_internal.h b/src/codegen_internal.h
+index 745bab14e..2d360964b 100644
+--- a/src/codegen_internal.h
++++ b/src/codegen_internal.h
+@@ -2016,6 +2016,8 @@ void emit_stmt_tail_inner(Compiler *c, int id, Buf *b, int indent);
+ void emit_stmts(Compiler *c, int id, Buf *b, int indent);
+ void emit_stmts_tail(Compiler *c, int id, Buf *b, int indent);
+ int emit_top_stmts(Compiler *c, int id, Buf *b, int indent, size_t *cuts);
++void program_note_parsed_operators(Compiler *c);   /* once, before the analysis */
++void program_scan_own_operators(Compiler *c);   /* once, before any emit */
+ int needs_root(TyKind t);
+ /* Whether a variable of an inferred type takes a root, and the root itself,
+    picking the rbval macro for boxed poly and the string one for a String. */
+diff --git a/src/codegen_stmt.c b/src/codegen_stmt.c
+index f5f7d8d70..fcbee8550 100644
+--- a/src/codegen_stmt.c
++++ b/src/codegen_stmt.c
+@@ -9794,24 +9794,308 @@ static void emit_ensure_return(Compiler *c, int eid, int has_retval, Buf *b, int
+   else emit_retf_return(eid, has_retval, b);
+ }
+ 
++/* The builtin classes and modules a number or a boolean belongs to, and
++   Toplevel, the compiler's record of what is written outside every class
++   (Object's own). */
++static int names_scalar_builtin(const char *cn) {
++  static const char *const B[] = { "Integer", "Float", "Numeric", "Comparable", "Object", "Kernel",
++                                   "BasicObject", "TrueClass", "FalseClass", "NilClass", "Toplevel", NULL };
++  for (int i = 0; cn && B[i]; i++) if (sp_streq(cn, B[i])) return 1;
++  return 0;
++}
++
++/* The nodes that say what a class is: the writes of a constant (`K = v`,
++   `K ||= v`, `A::K = v`, `K, J = v, w`) and the openings of a class. */
++static const NodeKind CLASS_SHAPERS[] = {
++  NK_ConstantWriteNode, NK_ConstantOrWriteNode, NK_ConstantAndWriteNode, NK_ConstantOperatorWriteNode,
++  NK_ConstantTargetNode, NK_ConstantPathWriteNode, NK_ConstantPathOrWriteNode, NK_ConstantPathAndWriteNode,
++  NK_ConstantPathOperatorWriteNode, NK_ConstantPathTargetNode, NK_ClassNode };
++enum { N_CONST_WRITES = 10, N_CLASS_SHAPERS = 11 };
++
++/* Does the program assign the constant `name` anywhere, by any of the
++   writes? */
++static int const_is_assigned(Compiler *c, const char *name) {
++  const NodeTable *nt = c->nt;
++  const char *last = strrchr(name, ':');
++  if (last) name = last + 1;
++  for (int i = 0; i < N_CONST_WRITES; i++)
++    NT_FOREACH_KIND(nt, CLASS_SHAPERS[i], w) {
++      int tg = nt_ref(nt, w, "target");
++      const char *wn = nt_str(nt, tg >= 0 ? tg : w, "name");
++      if (!wn || sp_streq(wn, name)) return 1;
++    }
++  return 0;
++}
++
++/* Is `ci` a class of the program's own that no number and no boolean is an
++   instance of: written as a class, neither it nor an ancestor named for one
++   of those builtins, and its name never assigned as a constant (`K = Float`,
++   then `class K`, opens Float)? Of no class where the analysis took a write
++   or an opening out of the table: CRuby may run the one it dropped. */
++static int g_own_shaper_lost;
++static int class_holds_no_scalar(Compiler *c, int ci) {
++  if (g_own_shaper_lost || ci < 0 || comp_class_is_module(c, &c->classes[ci])) return 0;
++  if (!c->classes[ci].name || const_is_assigned(c, c->classes[ci].name)) return 0;
++  for (int hops = 0; ci >= 0; ci = c->classes[ci].parent)
++    if (!c->classes[ci].name || ++hops > 64 || names_scalar_builtin(c->classes[ci].name)) return 0;
++  return 1;
++}
++
++/* What the program may have put behind the operators' names. Bit i:
++   OPS[i] has a def that a number or a boolean may answer to, which is every
++   def of the name but one written with no receiver, or on self, in a class of
++   the program's own that no scalar is an instance of; an alias that gives a
++   method that name counts as a def of it, in the class it is recorded for.
++   Bit DOUBT: the program may define, remove or reach a method where no def
++   shows (own_uses_doubt), or holds code in a file the compiler did not read
++   (g_require_unread, the parser's). Proved by absence; no at the first
++   doubt. */
++static const char *const ENSURE_OPS[] = {
++  "+","-","*","/","%","**","<",">","<=",">=","==","!=","<=>","&","|","^","<<",">>", NULL };
++enum { ENSURE_OP_EQ = 10, ENSURE_OP_NE = 11, ENSURE_OP_CMP = 12, ENSURE_OP_DOUBT = 31 };
++
++/* The scan's bit for a method's name, or -1. */
++static int own_op_bit(const char *name) {
++  for (int i = 0; name && ENSURE_OPS[i]; i++) if (sp_streq(name, ENSURE_OPS[i])) return i;
++  return -1;
++}
++
++static const char *const OWN_WORDS[] = {   /* a doubt as a call's name or as a Symbol */
++  "alias_method","define_method","define_singleton_method","undef_method","remove_method","prepend",
++  "extend","refine","using","send","__send__","public_send","method","public_method","instance_method",
++  "public_instance_method","singleton_method","to_proc","eval","instance_eval","class_eval",
++  "module_eval","instance_exec","class_exec","module_exec","const_get","const_set","def_delegator",
++  "def_delegators","def_instance_delegator","def_instance_delegators","delegate","instance_delegate",
++  NULL };
++static const char *const OWN_NAMERS[] = {   /* they take the names of methods; the last two call them */
++  "attr","attr_reader","attr_writer","attr_accessor","public","private","protected","module_function",
++  "private_class_method","public_class_method","inject","reduce", NULL };
++
++static int own_word(const char *const *words, const char *name) {
++  for (int i = 0; name && words[i]; i++) if (sp_streq(name, words[i])) return 1;
++  return 0;
++}
++
++/* May the program define, remove or reach a method where no def shows? It
++   holds, as a call's name or as a Symbol, one of the WORDS; the undef
++   keyword; an alias whose new name is no plain Symbol; `class << x` for an
++   x that is not self; an argument of the attr words or the visibility words
++   that is no literal name; an argument of an inject or a reduce with no
++   block written out that is no literal (it is taken as a method's name
++   where no block comes, and `&b` may carry none); a block-pass of anything
++   but a literal Symbol, a `->` literal, or the block parameter of its own
++   def; or ERB.
++   Asked twice: of the table as parsed, and of the table as the analysis
++   left it. The analysis rewrites what it can resolve (a block-pass on
++   inject becomes a block, a call it has applied becomes nil), so the first
++   walk is the one that reads what the program wrote, and the second reads
++   what the analysis added. `parsed`: the scopes are not made yet. */
++static int own_uses_doubt(Compiler *c, int parsed) {
++  const NodeTable *nt = c->nt;
++  int n = 0;
++  nt_nodes_of_kind(nt, NK_UndefNode, &n);
++  if (n > 0) return 1;
++  NT_FOREACH_KIND(nt, NK_AliasMethodNode, al) {
++    int nn = nt_ref(nt, al, "new_name");
++    if (nn < 0 || nt_kind(nt, nn) != NK_SymbolNode) return 1;
++  }
++  NT_FOREACH_KIND(nt, NK_SingletonClassNode, sc) {
++    int x = nt_ref(nt, sc, "expression");
++    if (x < 0 || nt_kind(nt, x) != NK_SelfNode) return 1;
++  }
++  NT_FOREACH_KIND(nt, NK_SymbolNode, y)
++    if (own_word(OWN_WORDS, nt_str(nt, y, "value"))) return 1;
++  NT_FOREACH_KIND(nt, NK_CallNode, u) {
++    const char *un = nt_str(nt, u, "name");
++    if (own_word(OWN_WORDS, un)) return 1;
++    if (!own_word(OWN_NAMERS, un)) continue;
++    int calls = sp_streq(un, "inject") || sp_streq(un, "reduce");
++    int ub = nt_ref(nt, u, "block"), args = nt_ref(nt, u, "arguments"), an = 0;
++    /* a block written out: the argument is the first value. After the
++       analysis the block may stand for a block-pass: that call was judged
++       as parsed. */
++    if (calls && ub >= 0 && nt_kind(nt, ub) == NK_BlockNode) continue;
++    const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &an) : NULL;
++    for (int j = 0; j < an; j++) {
++      NodeKind k = nt_kind(nt, av[j]);
++      const char *vn = nt_str(nt, av[j], k == NK_SymbolNode ? "value" : k == NK_StringNode ? "content" : "name");
++      /* a literal name that is none of the words; for inject, a literal that
++         names nothing; `private def m`, `private attr_reader :m` */
++      int ok = k == NK_SymbolNode || k == NK_StringNode ? vn && !own_word(OWN_NAMERS, vn) && !own_word(OWN_WORDS, vn)
++             : calls ? k == NK_IntegerNode || k == NK_FloatNode || k == NK_NilNode || k == NK_TrueNode ||
++                       k == NK_FalseNode || k == NK_ArrayNode || k == NK_HashNode
++             : k == NK_DefNode || (k == NK_CallNode && vn && !strncmp(vn, "attr", 4) && own_word(OWN_NAMERS, vn));
++      if (!ok) return 1;
++    }
++  }
++  NT_FOREACH_KIND(nt, NK_BlockArgumentNode, ba) {
++    int x = nt_ref(nt, ba, "expression");
++    if (x < 0) continue;   /* a bare `&` hands on the def's own block */
++    NodeKind k = nt_kind(nt, x);
++    const char *xn = k == NK_SymbolNode ? nt_str(nt, x, "value") : nt_str(nt, x, "name");
++    if (k == NK_SymbolNode && !own_word(OWN_NAMERS, xn)) continue;   /* the WORDS were asked of every Symbol */
++    if (k == NK_LambdaNode) continue;   /* `->`; proc and lambda are methods a program can define */
++    if (k == NK_LocalVariableReadNode && xn) {   /* `def each(&blk) ... list.each(&blk)` */
++      int own = 0;
++      if (parsed) {   /* the name of a def's block parameter; whose def, the second walk asks */
++        NT_FOREACH_KIND(nt, NK_BlockParameterNode, bp) {
++          const char *bn = nt_str(nt, bp, "name");
++          if (bn && sp_streq(bn, xn)) own = 1;
++        }
++      }
++      else {
++        Scope *bs = comp_scope_of(c, ba);
++        int ps = bs && bs->def_node >= 0 ? nt_ref(nt, bs->def_node, "parameters") : -1;
++        int bp = ps >= 0 ? nt_ref(nt, ps, "block") : -1;
++        const char *bn = bp >= 0 ? nt_str(nt, bp, "name") : NULL;
++        /* the analysis turns a parameter that is only handed on into a yield
++           and leaves the read behind under this name */
++        own = (bn && sp_streq(bn, xn)) || sp_streq(xn, "__orphaned__");
++      }
++      if (own) continue;
++    }
++    return 1;
++  }
++  NT_FOREACH_KIND(nt, NK_ConstantReadNode, cr) {
++    const char *cn = nt_str(nt, cr, "name");
++    if (cn && sp_streq(cn, "ERB")) return 1;   /* text it evaluates */
++  }
++  return 0;
++}
++
++/* Of the first `n0` nodes, the ones the program wrote: how many defs, and
++   aliases that give a method the name, each operator has, and in
++   count[ENSURE_OP_DOUBT] how many nodes say what a class is. */
++static void own_count_written(const NodeTable *nt, int n0, int *count) {
++  NT_FOREACH_KIND(nt, NK_DefNode, d) {
++    int bit = d < n0 ? own_op_bit(nt_str(nt, d, "name")) : -1;
++    if (bit >= 0) count[bit]++;
++  }
++  NT_FOREACH_KIND(nt, NK_AliasMethodNode, al) {
++    int nn = al < n0 ? nt_ref(nt, al, "new_name") : -1;
++    int bit = nn >= 0 && nt_kind(nt, nn) == NK_SymbolNode ? own_op_bit(nt_str(nt, nn, "value")) : -1;
++    if (bit >= 0) count[bit]++;
++  }
++  for (int i = 0; i < N_CLASS_SHAPERS; i++)
++    NT_FOREACH_KIND(nt, CLASS_SHAPERS[i], w)
++      if (w < n0) count[ENSURE_OP_DOUBT]++;
++}
++
++static int program_holds_ensure(const NodeTable *nt) {
++  NT_FOREACH_KIND(nt, NK_BeginNode, g)
++    if (nt_ref(nt, g, "ensure_clause") >= 0) return 1;
++  return 0;
++}
++
++/* The table as parsed, read by codegen_program ahead of the analysis, for a
++   program that holds an ensure: the doubt of its text, how many nodes it
++   has, and what own_count_written counts of them. A table that was not read
++   here is all doubt. */
++static const Compiler *g_own_parsed_c;
++static int g_own_parsed_doubt, g_own_parsed_nodes, g_own_parsed_count[32];
++
++void program_note_parsed_operators(Compiler *c) {
++  g_own_parsed_c = c;
++  g_own_parsed_nodes = c->nt->count;
++  memset(g_own_parsed_count, 0, sizeof g_own_parsed_count);
++  g_own_parsed_doubt = !program_holds_ensure(c->nt) || own_uses_doubt(c, 1);
++  if (!g_own_parsed_doubt) own_count_written(c->nt, g_own_parsed_nodes, g_own_parsed_count);
++}
++
++static unsigned scan_own_operators(Compiler *c) {
++  enum { DOUBT = ENSURE_OP_DOUBT, NFAR = 64 };
++  const NodeTable *nt = c->nt;
++  int far[NFAR], nfar = 0, now[32] = { 0 };   /* defs of these names in a class no scalar belongs to */
++  unsigned own = 0;
++  if (g_own_parsed_c != c || g_own_parsed_doubt || own_uses_doubt(c, 0) || g_require_unread)
++    return 1u << DOUBT;
++  /* what the analysis took out of the table (an arm under a test it
++     decides) CRuby may run: a def is a def still */
++  own_count_written(nt, g_own_parsed_nodes, now);
++  for (int i = 0; i < DOUBT; i++) if (now[i] < g_own_parsed_count[i]) own |= 1u << i;
++  g_own_shaper_lost = now[DOUBT] < g_own_parsed_count[DOUBT];
++  for (int pass = 0; pass < 2; pass++)
++    for (int s = 0; s < c->nscopes; s++) {
++      const Scope *sc = &c->scopes[s];
++      int at = -1;
++      if (own_op_bit(sc->name) < 0 || sc->def_node < 0) continue;
++      for (int k = 0; k < nfar; k++) if (far[k] == sc->def_node) at = k;
++      if (class_holds_no_scalar(c, sc->class_id)) { if (!pass && at < 0 && nfar < NFAR) far[nfar++] = sc->def_node; }
++      else if (at >= 0) far[at] = -1;   /* the same def serves another class too */
++    }
++  NT_FOREACH_KIND(nt, NK_DefNode, d) {
++    int bit = own_op_bit(nt_str(nt, d, "name")), at = -1, recv = nt_ref(nt, d, "receiver");
++    for (int k = 0; k < nfar; k++) if (far[k] == d) at = k;
++    if (recv >= 0 && nt_kind(nt, recv) != NK_SelfNode) at = -1;   /* `def x.+`: whose it is is not known */
++    if (bit >= 0 && at < 0) own |= 1u << bit;
++  }
++  NT_FOREACH_KIND(nt, NK_AliasMethodNode, al) {
++    int nn = nt_ref(nt, al, "new_name"), in_far = 0, in_near = 0;
++    int bit = own_op_bit(nt_str(nt, nn, "value"));
++    if (bit < 0) continue;   /* a second name that is none of ours */
++    for (int ci = 0; ci < c->nclasses; ci++)
++      for (int k = 0; k < c->classes[ci].naliases; k++)
++        if (c->classes[ci].alias_node[k] == al) { if (class_holds_no_scalar(c, ci)) in_far = 1; else in_near = 1; }
++    if (!in_far || in_near) own |= 1u << bit;
++  }
++  return own;
++}
++
++/* The scan is made once, by codegen_program before anything is emitted: the
++   table then holds the program as analysis left it, and nothing the emitter
++   adds to it or rewrites in it for a while afterwards is the program's. It
++   is made only for a program that holds an ensure; a question about any
++   other Compiler is answered with every doubt. */
++static const Compiler *g_own_ops_c;
++static unsigned g_own_ops;
++
++void program_scan_own_operators(Compiler *c) {
++  g_own_ops = program_holds_ensure(c->nt) ? scan_own_operators(c) : ~0u;
++  g_own_ops_c = c;
++}
++
++static unsigned program_own_operators(Compiler *c) {
++  return g_own_ops_c == c ? g_own_ops : ~0u;
++}
++
++/* Is the operator `name` the builtin one wherever this program applies it
++   to a number or a boolean? call_is_scalar_op answers by the types and the
++   name alone, and a program can put a method of its own behind the name:
++   program_own_operators must find none (nor one behind `==` for `!=` and
++   `<=>`) and have no doubt. */
++static int ensure_op_is_builtin(Compiler *c, const char *name) {
++  unsigned own = program_own_operators(c);
++  if (!name || (own >> ENSURE_OP_DOUBT)) return 0;
++  for (int i = 0; ENSURE_OPS[i]; i++)
++    if (sp_streq(name, ENSURE_OPS[i]))
++      return !(own & 1u << i) && !((i == ENSURE_OP_NE || i == ENSURE_OP_CMP) && (own & 1u << ENSURE_OP_EQ));
++  return 0;
++}
++
+ /* Is `v` a value an ensure body names with no call: nil, true, false, an
+-   Integer, Float or Symbol literal, a read of a local, an instance variable
+-   or a global, or a builtin operator over scalars (call_is_scalar_op) whose
+-   operands are such values? */
++   Integer, Float or Symbol literal, a read of a local, an instance
++   variable, a class variable or a global, or a builtin operator over
++   scalars (call_is_scalar_op, and ensure_op_is_builtin above) whose
++   operands are such values, every one of them a scalar itself? */
+ static int ensure_names_plain_value(Compiler *c, int v) {
+   const NodeTable *nt = c->nt;
+   if (v < 0) return 0;
+   switch (nt_kind(nt, v)) {
+   case NK_NilNode: case NK_TrueNode: case NK_FalseNode: case NK_FloatNode: case NK_SymbolNode:
+   case NK_LocalVariableReadNode: case NK_InstanceVariableReadNode: case NK_GlobalVariableReadNode:
++  case NK_ClassVariableReadNode:
+     return 1;
+   case NK_IntegerNode:
+     return comp_ntype(c, v) == TY_INT;
+   case NK_CallNode: {
+-    if (!call_is_scalar_op(c, v) || !ensure_names_plain_value(c, nt_ref(nt, v, "receiver"))) return 0;
++    if (!call_is_scalar_op(c, v) || !ensure_op_is_builtin(c, nt_str(nt, v, "name")) ||
++        !ensure_names_plain_value(c, nt_ref(nt, v, "receiver"))) return 0;
+     int args = nt_ref(nt, v, "arguments"), n = 0;
+     const int *av = args >= 0 ? nt_arr(nt, args, "arguments", &n) : NULL;
+-    for (int i = 0; i < n; i++) if (!ensure_names_plain_value(c, av[i])) return 0;
++    for (int i = 0; i < n; i++) {
++      TyKind at = comp_ntype(c, av[i]);   /* `n == obj` calls the object's `==` */
++      if ((at != TY_INT && at != TY_FLOAT && at != TY_BOOL) || !ensure_names_plain_value(c, av[i])) return 0;
++    }
+     return 1;
+   }
+   default:
+@@ -9820,10 +10104,10 @@ static int ensure_names_plain_value(Compiler *c, int v) {
+ }
+ 
+ /* Does the ensure body `stmts` only name plain values (above), each alone
+-   or stored in a local, an instance variable or a global, by `=` or by an
+-   `op=` on an Integer or Float slot? Nothing it runs enters a begin or
+-   rescues a raise then, so the exception that waits stays as the begin
+-   left it. */
++   or stored in a local, an instance variable, a class variable or a
++   global, by `=` or by an `op=` on an Integer or Float slot whose operator
++   is the builtin one? Nothing it runs enters a begin or rescues a raise
++   then, so the exception that waits stays as the begin left it. */
+ static int ensure_body_only_stores(Compiler *c, int stmts) {
+   const NodeTable *nt = c->nt;
+   int n = 0; const int *bb = nt_arr(nt, stmts, "body", &n);
+@@ -9831,10 +10115,12 @@ static int ensure_body_only_stores(Compiler *c, int stmts) {
+     int v = bb[i];
+     switch (nt_kind(nt, v)) {
+     case NK_LocalVariableOperatorWriteNode: case NK_InstanceVariableOperatorWriteNode:
+-    case NK_GlobalVariableOperatorWriteNode:
+-      if (!ty_is_numeric(comp_ntype(c, v)) || !ty_is_numeric(comp_ntype(c, nt_ref(nt, v, "value")))) return 0;
++    case NK_GlobalVariableOperatorWriteNode: case NK_ClassVariableOperatorWriteNode:
++      if (!ty_is_numeric(comp_ntype(c, v)) || !ty_is_numeric(comp_ntype(c, nt_ref(nt, v, "value"))) ||
++          !ensure_op_is_builtin(c, nt_str(nt, v, "binary_operator"))) return 0;
+       /* fall through */
+     case NK_LocalVariableWriteNode: case NK_InstanceVariableWriteNode: case NK_GlobalVariableWriteNode:
++    case NK_ClassVariableWriteNode:
+       v = nt_ref(nt, v, "value");
+       break;
+     default:
+
+13. THE TEST, the read head against this head:
+diff --git a/test/ensure_holds_deferred_exception.rb b/test/ensure_holds_deferred_exception.rb
+index fe7fa69e0..ed7e7176b 100644
+--- a/test/ensure_holds_deferred_exception.rb
++++ b/test/ensure_holds_deferred_exception.rb
+@@ -156,6 +156,69 @@ rescue => e
+ end
+ p tally.left, tally.last, $count
+ 
++# a class variable is a plain store too
++class Gate
++  @@open = 2
++  def self.open = @@open
++  def pass(n)
++    raise ArgumentError, "gated " + n.to_s
++  ensure
++    @@open -= 1
++  end
++end
++begin
++  Gate.new.pass(3)
++rescue => e
++  puts e.message
++end
++p Gate.open
++
++# an operator the program defines itself is a call like any other and may
++# enter a begin: a body that applies it is not one of plain stores
++class Float
++  def %(other)
++    begin
++      churn
++      raise ArgumentError, "inside the operator"
++    rescue ArgumentError
++      churn
++    end
++    0.5
++  end
++end
++class Meter
++  def initialize
++    @level = 7.5
++  end
++  def level = @level
++  def read(n)
++    f = 2.5
++    x = 0.0
++    raise ArgumentError, "own operator on a local " + n.to_s
++  ensure
++    x = f % 2.0
++  end
++  def drain(n)
++    raise ArgumentError, "own operator on an instance variable " + n.to_s
++  ensure
++    @level %= 2.0
++  end
++end
++meter = Meter.new
++4.times do |i|
++  begin
++    meter.read(i)
++  rescue => e
++    puts e.message
++  end
++  begin
++    meter.drain(i)
++  rescue => e
++    puts e.message
++  end
++end
++p meter.level
++
+ # a return in the ensure body drops the exception and leaves nothing behind
+ def swallowed(n)
+   raise ArgumentError, "dropped " + n.to_s
+diff --git a/test/ensure_holds_deferred_exception.rb.expected b/test/ensure_holds_deferred_exception.rb.expected
+index 21521a3f8..82f082e10 100644
+--- a/test/ensure_holds_deferred_exception.rb.expected
++++ b/test/ensure_holds_deferred_exception.rb.expected
+@@ -28,6 +28,17 @@ stored 2
+ 2
+ :taken
+ 6
++gated 3
++1
++own operator on a local 0
++own operator on an instance variable 0
++own operator on a local 1
++own operator on an instance variable 1
++own operator on a local 2
++own operator on an instance variable 2
++own operator on a local 3
++own operator on an instance variable 3
++0.5
+ 8
+ 10
+ 4000
+
+14. THE MESSAGE, the read commit's against this one's:
+27,30c27,62
+< instance variable or a global, or a builtin operator over scalars of
+< those, each alone or stored in a local, an instance variable or a
+< global, by `=` or by an `op=` on an Integer or Float slot. Nothing
+< there enters a begin or rescues a raise. Any other body is rooted.
+---
+> instance variable, a class variable or a global, or a builtin operator
+> over scalars of those, each alone or stored in a local, an instance
+> variable, a class variable or a global, by `=` or by an `op=` on an
+> Integer or Float slot. Nothing there enters a begin or rescues a
+> raise. Any other body is rooted.
+> 
+> An operator counts as builtin only where the program cannot have put a
+> method of its own behind the name: its operands are all numbers or
+> booleans; the program has no def of that name (nor of `==` for `!=` and
+> `<=>`) but one written with no receiver, or on self, in a class of its
+> own that no number or boolean is an instance of and whose name it never
+> assigns as a constant (`K = Float`, then `class K`, opens Float), an
+> alias that gives a method that name counting as a def of it; and nothing
+> in the program may define, remove or reach a method where no def shows.
+> That is, it holds none of: these words as a call's name or as a Symbol:
+> alias_method, define_method, define_singleton_method, undef_method,
+> remove_method, prepend, extend, refine, using, send, __send__,
+> public_send, method, public_method, instance_method,
+> public_instance_method, singleton_method, to_proc, eval, the `_eval` and
+> `_exec` of an instance, a class or a module, const_get, const_set, the
+> delegator words of Forwardable; undef; an alias whose new name is no
+> plain Symbol; `class << x` for an x that is not self; an argument of the
+> attr words or the visibility words that is no literal name; an argument
+> of an inject or a reduce with no block written out that is no literal
+> (it is taken as a method's name where no block comes, and `&b` may carry
+> none); a block-pass of anything but a literal Symbol, a `->` literal, or
+> the block parameter of its own def; ERB; code in a file the compiler did
+> not read. The text is asked twice, as parsed and as the analysis left
+> it: the analysis rewrites what it can resolve (a block-pass on inject
+> becomes a block, a literal send the call it names) and takes out the
+> arm of a test it decides (`if RUBY_ENGINE == "ruby"`), which CRuby may
+> run. A def it took out is a def still, and where it took out a write
+> of a constant or an opening of a class, no class counts as the
+> program's own. The scan is made once, before any C is written, for a
+> program that holds an ensure. A body that applies an operator of the
+> program's own makes a call like any other, and is rooted.
+35,36c67,68
+< already, three for a begin in a loop. A raise pays 22 for each rooted
+< ensure it passes.
+---
+> already, three for a begin in a loop. A raise pays at most 22 for each
+> rooted ensure it passes.

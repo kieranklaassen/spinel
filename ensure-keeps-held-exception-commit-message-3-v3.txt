@@ -1,0 +1,70 @@
+An ensure keeps the exception it holds while its body runs
+
+    def go(n)
+      raise ArgumentError, "the message of error number " + n.to_s
+    ensure
+      begin
+        churn
+      rescue TypeError
+      end
+      churn
+    end
+
+handed its caller an error whose message was another String of the
+program, in a plain run, where `churn` only allocates. An exception
+object lost what it held the same way once the ensure body had raised
+and rescued an error of its own.
+
+While the ensure body runs, the exception that waits to be raised again
+lives in two C locals, and they are not roots. A begin that body enters
+takes the slot the message was read from, and any raise clears
+sp_inflight_cause, which held the object: the next collection frees
+both. The two locals are now rooted for the ensure body, when an
+exception waits.
+
+An ensure body that only stores plain values keeps its C: nil, true,
+false, an Integer, Float or Symbol literal, a read of a local, an
+instance variable, a class variable or a global, or a builtin operator
+over scalars of those, each alone or stored in a local, an instance
+variable, a class variable or a global, by `=` or by an `op=` on an
+Integer or Float slot. Nothing there enters a begin or rescues a
+raise. Any other body is rooted.
+
+An operator counts as builtin only where the program cannot have put a
+method of its own behind the name: its operands are all numbers or
+booleans; the program has no def of that name (nor of `==` for `!=` and
+`<=>`) but one written with no receiver, or on self, in a class of its
+own that no number or boolean is an instance of and whose name it never
+assigns as a constant (`K = Float`, then `class K`, opens Float), an
+alias that gives a method that name counting as a def of it; and nothing
+in the program may define, remove or reach a method where no def shows.
+That is, it holds none of: these words as a call's name or as a Symbol:
+alias_method, define_method, define_singleton_method, undef_method,
+remove_method, prepend, extend, refine, using, send, __send__,
+public_send, method, public_method, instance_method,
+public_instance_method, singleton_method, to_proc, eval, the `_eval` and
+`_exec` of an instance, a class or a module, const_get, const_set, the
+delegator words of Forwardable; undef; an alias whose new name is no
+plain Symbol; `class << x` for an x that is not self; an argument of the
+attr words or the visibility words that is no literal name; an argument
+of an inject or a reduce with no block written out that is no literal
+(it is taken as a method's name where no block comes, and `&b` may carry
+none); a block-pass of anything but a literal Symbol, a `->` literal, or
+the block parameter of its own def; ERB; code in a file the compiler did
+not read. The text is asked twice, as parsed and as the analysis left
+it: the analysis rewrites what it can resolve (a block-pass on inject
+becomes a block, a literal send the call it names) and takes out the
+arm of a test it decides (`if RUBY_ENGINE == "ruby"`), which CRuby may
+run. A def it took out is a def still, and where it took out a write
+of a constant or an opening of a class, no class counts as the
+program's own. The scan is made once, before any C is written, for a
+program that holds an ensure. A body that applies an operator of the
+program's own makes a call like any other, and is rooted.
+
+The path with no exception pays for a saved root count where the body
+is rooted: by callgrind, nine instructions on each entry of a begin
+with an ensure in a small method, four in a method that roots a local
+already, three for a begin in a loop. A raise pays at most 22 for each
+rooted ensure it passes.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
