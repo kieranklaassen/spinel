@@ -1,0 +1,54 @@
+Code delta of the boxed-Array piece: 4c3360a52fd6 on 74fa6d7c2457 (row 250) replayed as e685fce791fa on master 5518e5934b3a
+
+git range-diff 74fa6d7c2457..4c3360a52fd6 5518e5934b3a..e685fce791fa, whole:
+
+1:  4c3360a52 ! 1:  e685fce79 An Array a call returns is held while its elements are boxed
+    @@ Commit message
+     
+         Co-Authored-By: Claude Code <noreply@anthropic.com>
+     
+    - ## Makefile ##
+    -@@ Makefile: GC_STRESS_TESTS := test/gc_root_frame_slots.rb \
+    -                    test/gc_root_gathered_handle_param.rb \
+    -                    test/ffi_str_borrow.rb \
+    -                    test/ffi_str_arg_beside_alloc.rb \
+    -+                   test/typed_array_boxed_source_held.rb \
+    -+                   test/typed_array_boxed_source_own_index.rb \
+    -                    test/dispatch_arm_roots_operands.rb \
+    -                    test/exception_message_nul.rb \
+    -                    test/string_aset_value_runs_first.rb \
+    -
+      ## lib/spinel_rt.h ##
+     @@ lib/spinel_rt.h: static sp_PolyArray *sp_typed_to_poly(void *tp, int kind) {
+        }
+    @@ test/typed_array_boxed_source_held.rb (new)
+     +#
+     +# Each line is the number of calls, of 1,000, that answered something else;
+     +# the last three are of 4,000, of 1,400 and of 750.
+    ++# spinel: gc-stress
+     +
+     +SIZE = 2000
+     +CALLS = 1000
+    @@ test/typed_array_boxed_source_own_index.rb (new)
+     +# variable while it is boxed for the rest parameter or for String#%.
+     +#
+     +# Each line is the number of calls, of 300, that answered something else.
+    ++# spinel: gc-stress
+     +
+     +SIZE = 2000
+     +CALLS = 300
+
+The Makefile's GC_STRESS_TESTS list is gone on master ("Tests register their extra runs in their own headers"); each test now carries the line `# spinel: gc-stress` at the end of its header comment, as CONTRIBUTING.md asks ("no Makefile edit"). No line of src/ or lib/ differs between the two patches; the commit message is the same file (-v5).
+
+git diff --stat 5518e5934b3a e685fce791fa:
+ lib/spinel_rt.h                                    |  12 +-
+ src/codegen_call.c                                 |  16 ++
+ src/codegen_call_string.c                          |   3 +-
+ src/codegen_fold.c                                 |   5 +-
+ src/codegen_internal.h                             |   5 +
+ src/codegen_util.c                                 |  98 ++++++++++
+ test/typed_array_boxed_source_held.rb              | 215 +++++++++++++++++++++
+ test/typed_array_boxed_source_held.rb.expected     |   7 +
+ test/typed_array_boxed_source_own_index.rb         |  56 ++++++
+ .../typed_array_boxed_source_own_index.rb.expected |   2 +
+ 10 files changed, 415 insertions(+), 4 deletions(-)
