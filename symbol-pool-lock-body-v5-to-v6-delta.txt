@@ -1,0 +1,36 @@
+The pool-lock piece's body, -v5 to -v6: every changed line, OLD and NEW (the replay on master de66d5c81, above the pool-grows replay; the commit message is unchanged)
+
+OLD: On master (9c7ea3ce0) the test below, which is this program with its counts printed, segfaults with gcc in all seven collector lanes; with clang it prints a wrong line in all seven and exits 0: one name is two Symbols. With the two pull requests below beneath, four Threads that make the same 3,000 names answer wrong in 20 runs of 25 with gcc and 21 with clang, exit 0.
+NEW: On master (de66d5c81) the test below, which is this program with its counts printed, prints a wrong line and exits 0 or segfaults in each of the seven collector lanes with gcc; with clang it prints a wrong line in all seven and exits 0: one name is two Symbols. With the pull request below beneath, four Threads that make the same 3,000 names answer wrong in 22 runs of 25 with gcc and 21 with clang, exit 0.
+
+OLD: There a lookup costs what it did, `Symbol#to_s` 1 instruction more, and a new Symbol 80 to 97 more of some 121,000 (the numbers are below).
+NEW: There a lookup costs what it did, `Symbol#to_s` 1 instruction more, and a new Symbol about 100 more of some 121,000 (the numbers are below).
+
+OLD: A program without Threads is emitted as before: the generated C of 213 of the 6,513 programs under `test/`, `benchmark/` and `packages/*/test/` differs (on 9c7ea3ce0), each one a program that names Thread, Mutex, Queue or ConditionVariable; optcarrot's is byte-identical. Each of the 213, built with this change, prints its `.expected`.
+NEW: A program without Threads is emitted as before: the generated C of 226 of the 6,659 programs under `test/`, `benchmark/` and `packages/*/test/` differs (on de66d5c81 with the pull request below beneath), each one a program the compiler emits for Threads (its C carries `SPINEL_USES_THREADS`): 222 name Thread, Mutex, Queue or ConditionVariable and four use the pty package. optcarrot's is byte-identical. Each of the 226, built with this change, prints its `.expected`.
+
+OLD: one Thread working; gcc and clang; on 9c7ea3ce0 with the pull requests below beneath):
+NEW: one Thread working; gcc and clang; on de66d5c81 with the pull request below beneath):
+
+OLD: | a new Symbol in a pool that grows to 6,000 (a Thread makes 6,000 names) | 120,661 | 120,759 | 122,244 | 122,324 |
+NEW: | a new Symbol in a pool that grows to 6,000 (a Thread makes 6,000 names) | 120,664 | 120,759 | 122,226 to 122,244 | 122,329 to 122,332 |
+
+OLD: A new Symbol pays 97 with gcc and 80 with clang of some 121,000 (the search of a pool of 3,000 on average comes first): the lock taken and released and the entries added since the lookup compared. The last row's clang columns are the count of the Thread's block, because clang's build of this change has `sp_sym_intern_n` inlined into the block.
+NEW: A new Symbol pays 95 with gcc and 85 to 106 with clang of some 121,000 (the search of a pool of 3,000 on average comes first): the lock taken and released and the entries added since the lookup compared. The last row's clang columns are the count of the Thread's block, because clang's build of this change has `sp_sym_intern_n` inlined into the block; that count moves by about 20 between runs, so each is the range of three.
+
+OLD: With the pull requests below beneath and without this one, the test fails 25 runs of 25 with gcc (19 by a segfault) and with clang (20).
+NEW: With the pull request below beneath and without this one, the test fails 25 runs of 25 with gcc (17 by a segfault) and with clang (19).
+
+OLD: Run here on this commit, above the two pull requests it depends on, on master 9c7ea3ce0, built from nothing: the test in the seven collector lanes with gcc and clang, with and without `--share-strings`, and 25 runs of it and of the three programs named above; `ruby tools/gate.rb check`; the generated C of the 6,513 programs against the commit below, and each of the 213 changed ones run;
+NEW: Run here on this commit, above the pull request it depends on, on master de66d5c81, built from nothing: the test in the seven collector lanes with gcc and clang, with and without `--share-strings`, and 25 runs of it and of the three programs named above; `ruby tools/gate.rb check`; the generated C of the 6,659 programs against the commit below, and each of the 226 changed ones run;
+
+OLD: - [ ] Depends on: #
+NEW: - [ ] Depends on: the pull request "A program that makes more than 8,192 Symbols at run time keeps them apart"
+
+OLD: It depends on the pull request "A program that makes more than 8,192 Symbols at run time keeps them apart", and through it on "A String made in place is kept alive while it becomes a new Symbol": this is one commit above the first; the pool that grows is the pool the lock is on, and a block it grows out of is kept for the lookups that take no lock.
+NEW: It depends on the pull request "A program that makes more than 8,192 Symbols at run time keeps them apart": this is one commit above it; the pool that grows is the pool the lock is on, and a block it grows out of is kept for the lookups that take no lock.
+
+The commit message, symbol-pool-lock-commit-message.txt to -v2: one line (the same tree; the program fails every run beneath this change, by a segfault in 17 runs of 25 with gcc and 19 with clang, by a wrong line in the others)
+
+OLD: segfaults with gcc; with clang it prints false or segfaults.
+NEW: prints false or segfaults, with gcc and with clang.
