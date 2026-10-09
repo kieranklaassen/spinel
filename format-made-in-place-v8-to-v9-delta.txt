@@ -1,0 +1,77 @@
+The format piece's body, -v8 to -v9: every changed line, OLD and NEW (the one commit re-cut on master 4337d93cf above the pull request "A method added to a builtin runs its receiver before its arguments"; its message is -v6, one paragraph rewritten, at the end of this file)
+
+OLD: An index, an operator or a reader in the argument counts as the builtin's only where that can be shown (`format_name_is_builtin`): the program has no `def` and no `attr` of that name anywhere, in any class, and nothing that could give it one the node table does not show. That is: an `alias` or an `undef`; `alias_method`, `define_method`, `undef_method`, `remove_method`, a delegator, a `send`, an eval or ERB; a method named or run by a name that is not a Symbol literal (`method(nm)`, `nm.to_proc`, `inject(op)`, `attr_reader(*names)`, `private(*names)`); a `&` handed anything but a Symbol literal that names none of those, a `->`, or a local that is only ever a block parameter; and a `require` left standing as a call (a name the parser could not take as text). The program is asked as the parser wrote it and again where the code is written, since the analysis rewrites some of these (a block parameter passed on with `&` becomes a block) and drops the arm of a `RUBY_ENGINE` test it decides. An operator counts
+NEW: An index or an operator in the argument counts as the builtin's only where that can be shown (`format_name_is_builtin`), and the showing is the one the pull request below brings (`an_prog_never_gives`), asked by the name alone, whatever the class. It reads the program as the parser wrote it: no `def` and no Symbol of that name anywhere; nothing that names, makes or loads a method by something the text does not spell (a `send` or a `define_method` of a computed name, an eval, a `&` handed a value); no module mixed in; and no file the compiler did not read. A reader in the argument is never shown: its name is the Symbol its `attr_reader` is given, or a `def`. An operator counts
+
+OLD: Cost (callgrind, instructions a statement over 100,000 statements, gcc and clang, on 74fa6d7c2 with the pull request below beneath).
+NEW: Cost (callgrind, instructions a statement over 100,000 statements, gcc and clang; measured on master 74fa6d7c2 with the boxed-Array change master has since merged).
+
+OLD: The generated C of 7 of the 6,631 other programs under `test/`, `benchmark/` and `packages/*/test/` differs (on master 5518e5934 with the pull request below beneath)
+NEW: The generated C of 7 of the 6,673 other programs under `test/`, `benchmark/` and `packages/*/test/` differs (on master 4337d93cf with the pull request below beneath)
+
+OLD: at `SPINEL_GC_STRESS=2` the base (5518e5934 with the pull request below) answers
+NEW: at `SPINEL_GC_STRESS=2` the base (4337d93cf with the pull request below) answers
+
+OLD: Four more look from the other side: the builtin's index, a reader, and `t + i` in a program that says `inject(:+)` are held and right; a `def` of `+` in a class of the program's own, far from the argument, leaves `v.x + i` with master's C, the name being asked and not the class.
+NEW: Four more look from the other side: the builtin's index is held and right; a reader, `t + i` in a program that says `inject(:+)`, and `v.x + i` beside a `def` of `+` in a class of the program's own, far from the argument, keep master's C and are right: the name is asked as the program writes it, a Symbol or a `def`, whatever the class.
+
+OLD: They print the same line in every cell, before and after.
+NEW: They print the same line in every cell, before and after, but one: `f % [$n, 2]`, with `def f = ($n += 1; "%d|" + "%d")`, prints `0xDB` bytes on master at level 2 with clang and its plain run's line here.
+
+OLD: - An argument with an index, an operator or a reader, in a program that has one of the words above anywhere, or a `def` or an `attr` of that name in any class, and an operator whose operand is no number or boolean by its type: the statement keeps master's C, and where master was wrong it still is.
+NEW: - An argument with an index or an operator the proof does not show to be the builtin's, any reader, and an operator whose operand is no number or boolean by its type: the statement keeps master's C, and where master was wrong it still is. That is a program with a `def` or a Symbol of the name anywhere (`inject(:+)` beside a `+`), one that names a method by a value, and one that mixes a module in.
+
+OLD: The two are arguments of one C call, and master leaves their order to the C compiler.
+NEW: The two are arguments of one C call, and master leaves their order to the C compiler. Where a call's answer is held, the call runs ahead of the argument's reads, as in Ruby: with `def held = ($ar[0] = 9; "%5d|" + "")` and `ar = $ar`, `held % (ar[0] + i * 2)` prints Ruby's line, where master with gcc reads `ar[0]` first.
+
+OLD: - Code the compiler does not compile: a file it did not read (a `require` it warns about and ignores, one under a `RUBY_ENGINE` test it drops, one a changed `$LOAD_PATH` would find elsewhere) and a `def` in the arm of a `RUBY_ENGINE` test it drops. What is defined there is in neither program, the base's or this one, so an index or an operator in the argument is the builtin's there, and the statement prints what the base prints where its format is not collected.
+NEW: - A `def` or a Symbol of the name in the arm of a `RUBY_ENGINE` test the compiler drops: the program is read as it is written, the name counts, and the statement keeps master's C and its answer.
+- A program that may load a file the compiler did not read (a `require` it warns about and ignores, one under a `RUBY_ENGINE` test it drops, a changed `$LOAD_PATH`, a `load`): nothing in it is shown to be the builtin's, and the statement keeps master's C and its answer. Under `test/`, `benchmark/` and `packages/*/test/` no statement is given back for either: two ask the proof, in the two `yield_operator_diverging_block_types` tests, and both are shown.
+
+OLD: On master (5518e5934 with the pull request below) it is right at levels 0 and 1 with clang
+NEW: On master (4337d93cf with the pull request below) it is right at levels 0 and 1 with clang
+
+OLD: Run here on this commit on master 5518e5934 with the pull request below beneath, built from nothing: the test in the seven collector lanes with gcc and clang, with and without `--share-strings` (right in every one); `ruby tools/gate.rb check`; the generated C of the 6,631 other programs, changed in 7, the five of them under `test/` run in the seven lanes and the two under `packages/` too; optcarrot, checksum 59662, its C byte-identical; `make share-strings-test` and `make int-min-test`, both pass; the 112 statements with gcc and clang at levels 0, 1 and 2; the compiler's own instructions on the test, 85,941,381 on the base and 86,285,963 here, and over 2,000 lines of `p held % (ar[k] + i * m)`, 8,210,866,597 and 8,279,674,504 (the guard walks the program once for a name and keeps the answer while the node table stands). On 74fa6d7c2 with the pull request below: the cost table and the probes above, gcc and clang, at levels 0, 1 and 2.
+NEW: Run here on this commit on master 4337d93cf with the pull request below beneath, built from nothing: the test in the seven collector lanes with gcc and clang, with and without `--share-strings` (right in every one); `ruby tools/gate.rb check`; the generated C of the 6,673 other programs, changed in 7, the five of them under `test/` run in the seven lanes and the two under `packages/` too; optcarrot, checksum 59662, its C byte-identical; `make share-strings-test` and `make int-min-test`, both pass; the 112 statements and the probes above with gcc and clang at levels 0, 1 and 2; the compiler's own instructions on the test, 85,074,552 on the base and 85,355,770 here, and over 1,000 and 2,000 lines of one statement: `p held % (ar[k] + i * m)`, 4,045,480,586 and 4,074,819,225 at 1,000 (+0.73%), 8,092,778,908 and 8,151,355,327 at 2,000 (+0.72%); the largest pair found is `p held % (o.a_rather_long_reader + i)`, an `attr_accessor`'s reader in the argument, 3,176,852,077 and 3,205,246,573 at 1,000 (+0.89%) and 6,353,913,630 and 6,410,701,747 at 2,000 (+0.89%), on statements that keep master's C. The cost table was measured on 74fa6d7c2 and is not run again.
+
+OLD: - [ ] Depends on: the pull request "An Array a call returns is held while its elements are boxed"
+NEW: - [ ] Depends on: the pull request "A method added to a builtin runs its receiver before its arguments"
+
+OLD: It depends on the pull request "An Array a call returns is held while its elements are boxed": this is one commit above it, and the typed Array arm it changes is one of those this one opens.
+NEW: It depends on the pull request "A method added to a builtin runs its receiver before its arguments": this is one commit above it, and the proof that a name is the builtin's is the one it brings (`an_prog_never_gives`).
+
+THE MESSAGE, -v5 to -v6: its guard paragraph (lines 49 to 66 of -v5 become 49 to 61); nothing else moves.
+OLD:
+An index, an operator or a reader in the argument is the builtin's
+only where that can be shown (format_name_is_builtin): the program has
+no def and no attr of that name anywhere, in any class, and nothing
+that could give it one the node table does not show: an alias or an
+undef; alias_method, define_method, a delegator, a send or an eval; a
+method named or run by a name that is not a Symbol literal
+(`method(nm)`, `inject(op)`, `private(*names)`); a `&` handed
+anything but a Symbol literal, a `->` or a block parameter; a require
+left standing as a call. The program is asked as the parser wrote it
+(format_note_parsed, ahead of analyze_program) and again where the
+code is written: the analysis rewrites a block parameter passed on
+with `&` into a block. An operator counts only where its operand is
+a number or a boolean by its type: an Integer's `>` hands any other
+operand to that operand's own coerce. Otherwise the argument may run
+the program's code, as `ar[0] + 1` does under `class Array; def [](i)
+= ($fmt << "|x"; 7); end`, and the statement keeps the C it had. A
+concatenation is the statement's own only while `+` passes the same
+test.
+
+NEW:
+An index or an operator in the argument is the builtin's only where
+that can be shown (format_name_is_builtin), by an_prog_never_gives,
+which reads the program as the parser wrote it: no def and no Symbol
+of that name anywhere, nothing that names, makes or loads a method by
+something the text does not spell, no module mixed in, no file the
+compiler did not read. A reader is never shown, its name being the
+Symbol its attr is given. An operator counts only where its operand
+is a number or a boolean by its type: an Integer's `>` hands any
+other operand to that operand's own coerce. Otherwise the argument
+may run the program's code, as `ar[0] + 1` does under `class Array;
+def [](i) = ($fmt << "|x"; 7); end`, and the statement keeps the C it
+had. A concatenation is the statement's own only while `+` passes
+the same test.

@@ -1,0 +1,360 @@
+Code delta of the format piece: aec1ea725375 (the head last read, one commit above e685fce791fa) re-cut as cfcae9ef962455ad3822d40c78ff3789644392f2, tree ff68f64e0ca5e5859e8535ccfd7421befff8a5dc, one commit above ec35ec49070357d9f22f1cdffe54b8807aa901ae, which is the pull request "A method added to a builtin runs its receiver before its arguments" on master 4337d93cfc9b. Master holds the boxed-Array change now; this commit stands on that pull request alone and names it alone under "Depends on:".
+
+WHAT MOVED
+
+1. The guard asks the base's proof and has no walk of its own. Was: format_name_is_builtin over format_prog_defines_unseen, format_uses_walk and format_note_parsed (with its line in src/codegen.c and its declaration in src/codegen_internal.h), the name scan and the kept answers: sixteen functions. Is, whole:
+
+    static int format_name_is_builtin(const char *nm) {
+      return an_prog_never_gives(nm, 0) && (!sp_streq(nm, "!=") || an_prog_never_gives("==", 0));
+    }
+
+   an_prog_never_gives(nm, 0) is the base's (src/analyze.c): no by-value site anywhere and `nm` not among the names the program writes. The names written are every def name and every Symbol literal, read from the table as the parser wrote it, ahead of the analysis. A by-value site is a send or a define_method of a computed name, an eval, a `&` handed a value, ERB, a require left standing, a module mixed in (include, prepend or extend with an argument that is no literal, the three hooks, or any of those six words as a def or a Symbol), and the parser's own flag for a file it did not read (a require it could not resolve or dropped, `load`, `autoload`, `$LOAD_PATH`, `$LOADED_FEATURES`). `defs` is 0: one def of the name is enough to decline, since the question here is whether the name is the builtin's at all.
+
+2. A reader in the argument is never proved. format_arg_calls_own declines every call whose name is not proved, and a reader's name is the Symbol its attr is given, or a def. On the head last read a plain reader counted as a read. `held % (o.x + 1)` now keeps master's C. No program under test/, benchmark/ or packages/*/test/ has such a statement (point 6).
+
+3. format_is_own_made ends with format_name_is_builtin("+"), as before, by the new proof.
+
+4. format_arg_is_inert asks format_arg_calls_own first and subtree_is_pure_read second. Both must hold, so the answer is the same; the order is the cost (COMPILE TIME, below).
+
+5. Everything else is the code as read. Stable patch-ids by file, the head last read and this one:
+   src/codegen_call.c: 3c3d9e0557c8a4ab | 712b90b3aabf664b
+   src/codegen_call_arms.h: 0f18a716915930e0 | 0f18a716915930e0
+   src/codegen_call_string.c: cf470f5c66587368 | cf470f5c66587368
+   src/codegen.c: 70658aa2557a61a1 | (untouched)
+   src/codegen_internal.h: a85556d6cebafab8 | (untouched)
+   test/format_made_in_place_held.rb: 39a83bbbe1d49599 | 39a83bbbe1d49599
+   test/format_made_in_place_held.rb.expected: b495b2dc6876dbac | b495b2dc6876dbac
+   No line of src/codegen.c or src/codegen_internal.h is in this commit.
+
+6. What reaches the guard under test/, benchmark/ and packages/*/test/ (a counting build over the 6,673 programs, the piece's own test left out): two statements ask whether the argument is inert, in test/yield_operator_diverging_block_types.rb and test/promote_yield_operator_diverging_block_types.rb, and in both it is (it calls nothing unproved, it is a plain read, and neither program has a by-value site). No statement there has a concatenation as its format.
+
+WHY THE BASE'S PROOF IS ENOUGH HERE
+
+A "proved" here TAKES the fix (the call's answer goes into a rooted temporary ahead of the argument), so a wrong "proved" could lose a program master ran right. The findings on the head last read were of that kind, and each is declined by the base's proof. In the rows below a cell is gcc at SPINEL_GC_STRESS 0, 1, 2, then clang at 0, 1, 2, for the base and then for this commit; "ok" is the line CRuby prints, anything else is what was printed.
+
+- A core module mixed into a builtin (the five S8 twins: Comparable prepended into Integer, a module included in a subclass, beside a top-level def, alone, and the program's own module): a module mixed in is a by-value site. All five are the base's C byte for byte, so each prints the base's line in every cell:
+    f1_prepend_into_builtin | CRuby " true|" | compile 0 0 C equal | base: ok ok ok / ["false|"] ["false|"] ["\xDB\xDB\xDB\xDB"] / head: ok ok ok / ["false|"] ["false|"] ["\xDB\xDB\xDB\xDB"] /
+    f2_include_in_subclass | CRuby "   15|" | compile 0 0 C equal | base: ["    7|"] ["    7|"] ["    7\xDB"] / ok ok ["\xDB\xDB\xDB\xDB"] / head: ["    7|"] ["    7|"] ["    7\xDB"] / ok ok ["\xDB\xDB\xDB\xDB"] /
+    f3_toplevel_def_and_include | CRuby "false|" | compile 0 0 C equal | base: [" true|"] [" true|"] [" true|"] / ok ok ["\xDB\xDB\xDB\xDB"] / head: [" true|"] [" true|"] [" true|"] / ok ok ["\xDB\xDB\xDB\xDB"] /
+    f3b_include_alone | CRuby "false|" | compile 0 0 C equal | base: [" true|"] [" true|"] [" true|"] / ok ok ["\xDB\xDB\xDB\xDB"] / head: [" true|"] [" true|"] [" true|"] / ok ok ["\xDB\xDB\xDB\xDB"] /
+    f4_own_module_included | CRuby "false|" | compile 0 0 C equal | base: [" true|"] [" true|"] [" true|"] / ok ok ["\xDB\xDB\xDB\xDB"] / head: [" true|"] [" true|"] [" true|"] / ok ok ["\xDB\xDB\xDB\xDB"] /
+- A def, or a reader's def, of the name in the arm of a RUBY_ENGINE test the compiler drops (h01, h01b, h01c, h06): the names are read as the parser wrote them, so the name is written. A file the compiler did not read (h04 a changed $LOAD_PATH, h05 a require in a dropped arm, h07 a require with a modifier): the parser's flag. Each of the seven is the base's C byte for byte. CRuby runs the arm, or reads the file, that the compiler leaves out, so "ok" in these rows is the line of the program with it:
+    h01_def_in_dropped_arm | CRuby "    7|" | compile 0 0 C equal | base: ok ok ok / ["   15|"] ["   15|"] ["\xDB\xDB\xDB\xDB"] / head: ok ok ok / ["   15|"] ["   15|"] ["\xDB\xDB\xDB\xDB"] /
+    h01b_def_under_unless | CRuby "    7|" | compile 0 0 C equal | base: ok ok ok / ["   15|"] ["   15|"] ["\xDB\xDB\xDB\xDB"] / head: ok ok ok / ["   15|"] ["   15|"] ["\xDB\xDB\xDB\xDB"] /
+    h01c_def_under_defined | CRuby "    7|" | compile 0 0 C equal | base: ok ok ok / ["   15|"] ["   15|"] ["\xDB\xDB\xDB\xDB"] / head: ok ok ok / ["   15|"] ["   15|"] ["\xDB\xDB\xDB\xDB"] /
+    h04_load_path_file | CRuby "    7|" | compile 0 0 C equal | base: ok ok ok / ["   15|"] ["   15|"] ["\xDB\xDB\xDB\xDB"] / head: ok ok ok / ["   15|"] ["   15|"] ["\xDB\xDB\xDB\xDB"] /
+    h05_require_in_dropped_arm | CRuby "    7|" | compile 0 0 C equal | base: ok ok ok / ["   15|"] ["   15|"] ["\xDB\xDB\xDB\xDB"] / head: ok ok ok / ["   15|"] ["   15|"] ["\xDB\xDB\xDB\xDB"] /
+    h06_reader_def_in_dropped_arm | CRuby "    7|" | compile 0 0 C equal | base: ok ok ok / ["   15|"] ["   15|"] ["\xDB\xDB\xDB\xDB"] / head: ok ok ok / ["   15|"] ["   15|"] ["\xDB\xDB\xDB\xDB"] /
+    h07_require_modifier | CRuby "    7|" | compile 0 0 C equal | base: ok ok ok / ["   15|"] ["   15|"] ["\xDB\xDB\xDB\xDB"] / head: ok ok ok / ["   15|"] ["   15|"] ["\xDB\xDB\xDB\xDB"] /
+- With nothing in the way (c01) the statement is held and right in every cell; with a def of the index in the program (c02) it is the base's C. u02 and u04 have nothing in a dropped arm that names a method (a flag set there, and a def of `[]` there beside an interpolated format, which is the statement's own and asks no proof): both are held, and print the line Ruby prints for the program the compiler compiles (15), where CRuby, running the arm, prints 7:
+    c01_nothing_dropped | CRuby "   15|" | compile 0 0 C differs(2) | base: ["    7|"] ["    7|"] ["    7|"] / ok ok ["\xDB\xDB\xDB\xDB"] / head: ok ok ok / ok ok ok /
+    c02_def_stands | CRuby "    7|" | compile 0 0 C equal | base: ok ok ok / ok ok ["\xDB\xDB\xDB\xDB"] / head: ok ok ok / ok ok ["\xDB\xDB\xDB\xDB"] /
+    u02_flag_in_dropped_arm | CRuby "    7|" | compile 0 0 C differs(2) | base: ok ok ok / ["   15|"] ["   15|"] ["\xDB\xDB\xDB\xDB"] / head: ["   15|"] ["   15|"] ["   15|"] / ["   15|"] ["   15|"] ["   15|"] /
+    u04_own_made_format | CRuby "    7|" | compile 0 0 C differs(2) | base: ok ok ok / ["   15|"] ["   15|"] ["\xDB\xDB\xDB\xDB"] / head: ["   15|"] ["   15|"] ["   15|"] / ["   15|"] ["   15|"] ["   15|"] /
+
+AGAINST THE GUARD LAST READ, both built on the tree the head last read stood on, with the base's proof as it then was (without its mixed-in rule): of the probe programs, 52 get another C. 49 are given back to master's C (a Symbol of the name somewhere, a reader in the argument); 3 are newly held (an `undef` or an `undef_method` of another name, which the old list of words declined whole, and one mixed probe), and each of the three is right in every cell. No cell is lost in the 52, and no program under test/, benchmark/ and packages/*/test/ gets another C. The mixed-in rule gives back more, the S8 twins among them.
+
+CHECKS, on cfcae9ef962455ad3822d40c78ff3789644392f2 and its base, both built from nothing
+- the test, seven lanes, gcc and clang: right in all fourteen, and the same with --share-strings; the base with gcc prints a wrong line in six lanes and raises at SPINEL_GC_STRESS=2, with clang it raises at level 2 and is right in the other six;
+- `ruby tools/gate.rb check`, the commit staged: exit 0;
+- corpus: the generated C of 7 of the 6,673 other programs differs from the base's, none is without C on either: under test/ poly_string_dup_unfrozen (the base wrong at level 2 with clang, right here in fourteen lanes), string_format_scalar_operands (the base raises at level 2 with gcc and clang, right here in fourteen lanes), format_binary and yield_operator_diverging_block_types (right in fourteen lanes on both), promote_yield_operator_diverging_block_types (exit 1 in every lane on the base and here alike); under packages/ benchmark_report (right in fourteen lanes on both) and benchmark_tms (the base wrong at level 2 with clang, right here). Three more differ by nothing but the length of the build directory's path in a frozen literal, the two trees having been built in directories whose names differ in length: conditional_require_line, require_expression_lines, source_file_required;
+- optcarrot: checksum 59662, its C equal to the base's;
+- `make share-strings-test`: pass; `make int-min-test`: pass;
+- the 112 generated statements, gcc and clang at levels 0, 1 and 2: the base raises on 40 with gcc at level 2, and with clang prints a wrong line on 33 and raises on 7, 53 with one or the other; here 105 are right with gcc and 108 with clang at level 2, all 112 at levels 0 and 1, and no statement loses a cell (the seven left raise as on the base);
+- 636 probe programs by their generated C: 395 the base's, 222 other, 19 that build on neither. The cells (gcc and clang, levels 0, 1 and 2) of the 222 and of the body's probe sets, 295 programs: 216 cells that were not CRuby's line are in 115 programs; the only cells that go the other way are u02's and u04's above, where CRuby's line is the dropped arm's;
+- the body's counted sets on this pair: the thirty (29 the base's C and the base's cells, the extended one builds on neither), the four (the builtin's index held; the reader, `t + i` beside `inject(:+)` and `v.x + i` beside a def of `+` the base's C; right in every cell), the fifteen (the base's C; gcc right at levels 0 and 1, seven raise at level 2; clang without the append), the eleven (five right on both, six wrong alike; `f % [$n, 2]` at level 2 with clang: poison on the base, its plain line here).
+
+COMPILE TIME (callgrind, the compiler's instructions, the base and this commit)
+  `p held % (ar[k] + i * m)`, the format a call's answer, the argument proved, 1,000 statements: 4,045,480,586 and 4,074,819,225 (+0.73%), the C differs
+    as above, 2,000 statements: 8,092,778,908 and 8,151,355,327 (+0.72%), the C differs
+  the same beside a line `z = (o.v = i + 1)` each (a setter the class defines), 1,000 statements: 7,218,096,312 and 7,248,589,625 (+0.42%), the C differs
+    as above, 2,000 statements: 16,339,597,227 and 16,341,826,591 (+0.01%), the C differs
+  the same beside a line `w.sub!("a", "b")` each, 1,000 statements: 6,109,597,142 and 6,139,187,049 (+0.48%), the C differs
+    as above, 2,000 statements: 15,120,475,172 and 15,179,753,037 (+0.39%), the C differs
+  `p held % (o.a_rather_long_reader + i)`, the reader an attr_accessor's (declined), 1,000 statements: 3,176,852,077 and 3,205,246,573 (+0.89%), the C equal
+    as above, 2,000 statements: 6,353,913,630 and 6,410,701,747 (+0.89%), the C equal
+  the test: 85,074,552 and 85,355,770 (+0.33%)
+The largest pair is the last shape. Its statements are the base's C byte for byte (a reader is not proved), and the cost is the question itself: the arms ask whether the argument is a plain read (subtree_is_pure_read, master's, which asks call_is_field_read and repr_of of the reader). With subtree_is_pure_read asked first the same 1,000 lines cost +2.19% (on the tree of the early look); point 4 is that cut. The setter row is level at 2,000 in a second pair too (the tree of the early look: +0.39% at 1,000, -0.01% at 2,000); every other row is linear in the count.
+
+THE LINES of src/codegen_call.c ("<" the head last read adds, ">" this commit adds; every other added line of the file is the same in both)
+
+59,299d58
+< +static int format_is_attr_call(const char *nm) {
+< +  return sp_streq(nm, "attr") || sp_streq(nm, "attr_reader") || sp_streq(nm, "attr_writer") ||
+< +         sp_streq(nm, "attr_accessor");
+< +}
+< +static int format_name_in(const char *nm, const char *const *names) {
+< +  for (int w = 0; names[w]; w++) if (sp_streq(nm, names[w])) return 1;
+< +  return 0;
+< +}
+< +/* A call of one of these names can define or remove a method and leave no
+< +   def and no attr of its name in the node table, run a method by a name the
+< +   table does not show, or run text. A `require` or a `require_relative`
+< +   still standing is one the parser did not splice in (it replaces each one
+< +   it reads with the file's text) and the emitter makes a no-op: the file's
+< +   defs are not in the table. A `load` is refused where it is emitted. */
+< +static int format_is_word(const char *nm) {
+< +  static const char *const WORDS[] = {
+< +    "alias_method", "define_method", "define_singleton_method", "undef_method", "remove_method",
+< +    "send", "__send__", "public_send", "local_variable_set",
+< +    "class_eval", "module_eval", "class_exec", "module_exec", "instance_eval", "instance_exec", "eval",
+< +    "def_delegator", "def_delegators", "delegate", "require", "require_relative", NULL };
+< +  return format_name_in(nm, WORDS);
+< +}
+< +/* The calls that answer a method by its name, and the visibility words:
+< +   counted only where the name they are handed is not a Symbol literal. */
+< +static int format_is_by_name(const char *nm) {
+< +  static const char *const NAMES[] = {
+< +    "method", "public_method", "singleton_method", "instance_method", "public_instance_method", NULL };
+< +  return format_name_in(nm, NAMES);
+< +}
+< +static int format_is_visibility(const char *nm) {
+< +  static const char *const NAMES[] = {
+< +    "public", "private", "protected", "module_function", "private_class_method", "public_class_method",
+< +    NULL };
+< +  return format_name_in(nm, NAMES);
+< +}
+< +/* Is the name one that a call running a method by its name must not be
+< +   handed (`inject(:send)`, `&:attr_accessor`)? */
+< +static int format_names_a_word(const char *sv) {
+< +  return format_is_word(sv) || format_is_attr_call(sv) || format_is_by_name(sv) || format_is_visibility(sv) ||
+< +         sp_streq(sv, "to_proc") || sp_streq(sv, "inject") || sp_streq(sv, "reduce");
+< +}
+< +/* A Symbol literal that names none of them. */
+< +static int format_is_plain_symbol(const NodeTable *nt, int id) {
+< +  const char *sv = id >= 0 && nt_kind(nt, id) == NK_SymbolNode ? nt_str(nt, id, "value") : NULL;
+< +  return sv && !format_names_a_word(sv);
+< +}
+< +/* Is the receiver the parameter of the block the parser writes for a
+< +   `&:name` (`m(&:name)` reaches the table as `m { |_spx| _spx.name }`)? */
+< +static int format_recv_is_sym_proc(const NodeTable *nt, int call) {
+< +  int r = nt_ref(nt, call, "receiver");
+< +  const char *rn = r >= 0 && nt_kind(nt, r) == NK_LocalVariableReadNode ? nt_str(nt, r, "name") : NULL;
+< +  return rn && sp_streq(rn, "_spx");
+< +}
+< +/* Is the local only ever a `&` parameter: every node of the table that
+< +   carries its name is a read of it, a `&` parameter, or a call (which
+< +   binds nothing)? Then it holds a block some caller passed, and each such
+< +   pass is asked where it stands. `it` and `_1` are bound with no node. */
+< +static int format_is_block_param(const NodeTable *nt, const char *nm) {
+< +  if (sp_streq(nm, "it") || (nm[0] == '_' && nm[1] >= '0' && nm[1] <= '9')) return 0;
+< +  for (int id = 0; id < nt->count; id++) {
+< +    const char *s = nt_str(nt, id, "name");
+< +    if (!s || !sp_streq(s, nm)) continue;
+< +    NodeKind k = nt_kind(nt, id);
+< +    if (k != NK_LocalVariableReadNode && k != NK_BlockParameterNode && k != NK_CallNode) return 0;
+< +  }
+< +  return 1;
+< +}
+< +/* Can the operand of a `&` only be a block the table holds: none (the
+< +   anonymous `&` of the def), a Symbol literal that names no word, a `->`
+< +   literal, or a local that is only ever a `&` parameter? */
+< +static int format_block_pass_is_plain(const NodeTable *nt, int e) {
+< +  if (e < 0) return 1;
+< +  NodeKind k = nt_kind(nt, e);
+< +  if (k == NK_SymbolNode) return format_is_plain_symbol(nt, e);
+< +  if (k == NK_LambdaNode) return 1;
+< +  const char *nm = k == NK_LocalVariableReadNode ? nt_str(nt, e, "name") : NULL;
+< +  return nm && format_is_block_param(nt, nm);
+< +}
+< +/* The answers below walk the whole program, so each is kept once the
+< +   analysis is done (g_scopes_settled, set in codegen_program when
+< +   analyze_program has returned; scope_is_shadowed keeps its table from
+< +   there too): every file the program requires was spliced into the one
+< +   text that is parsed, and every desugar has run, so the nodes the walks
+< +   read are all in the table. A question asked sooner is walked and nothing
+< +   is kept. The number answered changes with the Compiler or its table.
+< +   The emitter still edits the table while it writes, and no edit of its
+< +   changes an answer. The walks read the defs' names, the aliases, the
+< +   undefs, the classes' names, the operand of each `&`, the calls named a
+< +   word, an attr, a by-name call, a visibility word, to_proc, inject or
+< +   reduce with their receiver and arguments, and, for a local handed to a
+< +   `&`, the kind of every node of its name. The nodes the emitter adds are
+< +   a StatementsNode, a `raise` call, a ConstantReadNode, a StringNode,
+< +   ArgumentsNodes and LocalVariableReadNodes: no def, alias, undef, class
+< +   or `&`, and a read or a call of a name is what a `&` parameter's name
+< +   may be on. The one string it writes on a node that stands is a call's
+< +   name, between two spellings of a builtin and back after the re-entry:
+< +   `===` and `==`, `<=>` and `==`, `slice` and `[]`, `[]` and `new`,
+< +   `find_all` and `select`, `each_grapheme_cluster` and `each_char`, and a
+< +   String's bang method (ty_str_typed_bang_flags) and its plain name. The
+< +   arguments and the block it swaps are a setter's and those of a splatted
+< +   universal_object_method; the receiver, a `slice!`'s. None of these is a
+< +   node or a name the walks read, so the table's `version`, which each such
+< +   edit bumps, is not asked. A new place in the emitter that adds a node or
+< +   writes a name is to be checked against what the walks read. */
+< +static int format_answers_kept(Compiler *c) {
+< +  static const Compiler *mc; static const NodeTable *mnt; static int gen;
+< +  if (!g_scopes_settled) return 0;
+< +  if (mc != c || mnt != c->nt) { mc = c; mnt = c->nt; gen++; }
+< +  return gen;
+< +}
+< +/* Can the program have a method that leaves neither a def nor an attr of
+< +   that name in the node table? It can by text it evaluates (the evals, the
+< +   execs, ERB), by an alias or an undef, by a call named one of the words,
+< +   and by a method run or named by a name the table does not show: an attr,
+< +   a by-name call, a visibility word, a to_proc, or an inject or a reduce,
+< +   handed a name that is not a Symbol literal or is one of those words, and
+< +   a `&` whose operand is not provably a block the table holds. An inject's
+< +   last operand is a name unless it is the only one and a literal block
+< +   follows: beside a `&` that holds no block when it runs, CRuby reads the
+< +   one operand as the name. A file the parser did not read is not asked
+< +   for: what it would define is not in the compiled program either. */
+< +static int format_uses_walk(const NodeTable *nt) {
+< +  int n = 0, found = 0;
+< +  nt_nodes_of_kind(nt, NK_AliasMethodNode, &n);
+< +  if (n > 0) found = 1;
+< +  nt_nodes_of_kind(nt, NK_UndefNode, &n);
+< +  if (n > 0) found = 1;
+< +  const int *ids = nt_nodes_of_kind(nt, NK_ClassNode, &n);
+< +  for (int i = 0; i < n && !found; i++) {
+< +    int cp = nt_ref(nt, ids[i], "constant_path");
+< +    const char *cn = cp >= 0 ? nt_str(nt, cp, "name") : NULL;
+< +    if (cn && sp_streq(cn, "ERB")) found = 1;
+< +  }
+< +  const char *asked = NULL;
+< +  ids = nt_nodes_of_kind(nt, NK_BlockArgumentNode, &n);
+< +  for (int i = 0; i < n && !found; i++) {
+< +    int e = nt_ref(nt, ids[i], "expression");
+< +    const char *ln = e >= 0 && nt_kind(nt, e) == NK_LocalVariableReadNode ? nt_str(nt, e, "name") : NULL;
+< +    if (ln && asked && sp_streq(ln, asked)) continue;
+< +    if (!format_block_pass_is_plain(nt, e)) found = 1;
+< +    asked = ln;
+< +  }
+< +  ids = nt_nodes_of_kind(nt, NK_CallNode, &n);
+< +  for (int i = 0; i < n && !found; i++) {
+< +    const char *nm = nt_str(nt, ids[i], "name");
+< +    if (!nm) continue;
+< +    if (format_is_word(nm)) { found = 1; continue; }
+< +    int attr = format_is_attr_call(nm), by_name = !attr && format_is_by_name(nm);
+< +    int vis = !attr && !by_name && format_is_visibility(nm);
+< +    int to_proc = sp_streq(nm, "to_proc"), fold = sp_streq(nm, "inject") || sp_streq(nm, "reduce");
+< +    if (!attr && !by_name && !vis && !to_proc && !fold) continue;
+< +    int a = nt_ref(nt, ids[i], "arguments"), ac = 0;
+< +    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+< +    if (format_recv_is_sym_proc(nt, ids[i])) found = 1;
+< +    else if (to_proc) found = !format_is_plain_symbol(nt, nt_ref(nt, ids[i], "receiver"));
+< +    else if (by_name) found = ac > 0 && !format_is_plain_symbol(nt, av[0]);
+< +    else if (fold) {
+< +      int blk = nt_ref(nt, ids[i], "block");
+< +      int own_block = ac == 1 && blk >= 0 && nt_kind(nt, blk) == NK_BlockNode;
+< +      found = ac > 0 && !own_block && !format_is_plain_symbol(nt, av[ac - 1]);
+< +    }
+< +    else {
+< +      for (int j = 0; j < ac && !found; j++) {
+< +        NodeKind k = nt_kind(nt, av[j]);
+< +        const char *an = vis && k == NK_CallNode ? nt_str(nt, av[j], "name") : NULL;
+< +        found = k != NK_SymbolNode && !(vis && (k == NK_DefNode || (an && format_is_attr_call(an))));
+< +      }
+< +    }
+< +  }
+< +  return found;
+< +}
+< +/* The walk is run on the table as the parser wrote it, ahead of
+< +   analyze_program (codegen_program), and again on the table the emitter
+< +   has: a desugar of the analysis may rewrite a use into nodes the walk
+< +   does not count (a block-pass into a block the call then holds), and one
+< +   may add a use. A table that was not walked as parsed is answered as
+< +   holding one. */
+< +static const NodeTable *format_parsed_nt;
+< +static int format_parsed_unseen;
+< +void format_note_parsed(Compiler *c) {
+< +  format_parsed_nt = c->nt;
+< +  format_parsed_unseen = format_uses_walk(c->nt);
+< +}
+< +static int format_prog_defines_unseen(Compiler *c) {
+< +  static int memo_gen, memo;
+< +  int g = format_answers_kept(c);
+< +  if (g && memo_gen == g) return memo;
+< +  int found = format_parsed_nt != c->nt || format_parsed_unseen || format_uses_walk(c->nt);
+< +  if (g) { memo_gen = g; memo = found; }
+< +  return found;
+< +}
+< +/* Is a call of `nm` on a builtin's value provably the builtin's own: the
+< +   program has no def of that name anywhere, no attr of that name, and no
+< +   way to define one that the node table does not show? Asked by the name
+< +   alone, whatever the class: a def in a subclass, a module or a singleton
+< +   counts. `!=` runs `==`. A reader (`reader`) is asked for a def of its name
+< +   only: its attr is what makes it a read. */
+< +static int format_name_scan(Compiler *c, const char *nm, int reader) {
+< +  const NodeTable *nt = c->nt;
+< +  if (format_prog_defines_unseen(c)) return 0;
+< +  const char *also = sp_streq(nm, "!=") ? "==" : nm;
+< +  int n = 0;
+< +  const int *defs = nt_nodes_of_kind(nt, NK_DefNode, &n);
+< +  for (int i = 0; i < n; i++) {
+< +    const char *dn = nt_str(nt, defs[i], "name");
+< +    if (!dn || sp_streq(dn, nm) || sp_streq(dn, also)) return 0;
+< +  }
+< +  if (reader) return 1;
+< +  const int *calls = nt_nodes_of_kind(nt, NK_CallNode, &n);
+< +  for (int i = 0; i < n; i++) {
+< +    const char *cn = nt_str(nt, calls[i], "name");
+< +    if (!cn || !format_is_attr_call(cn)) continue;
+< +    int a = nt_ref(nt, calls[i], "arguments"), ac = 0;
+< +    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+< +    for (int j = 0; j < ac; j++) {
+< +      const char *sv = nt_kind(nt, av[j]) == NK_SymbolNode ? nt_str(nt, av[j], "value") : NULL;
+< +      if (!sv || sp_streq(sv, nm) || sp_streq(sv, also)) return 0;
+< +    }
+< +  }
+< +  return 1;
+< +}
+< +/* The scan's answer, kept by name while the table stands (the name is
+< +   copied: the emitter frees a call's name where it writes another). */
+< +static int format_name_answer(Compiler *c, const char *nm, int reader) {
+< +  static struct { char *name; char reader, answer; } *kept;
+< +  static int used, cap, memo_gen;
+< +  if (!nm) return 0;
+< +  int g = format_answers_kept(c);
+< +  if (!g) return format_name_scan(c, nm, reader);
+< +  if (memo_gen != g) { while (used > 0) free(kept[--used].name); memo_gen = g; }
+< +  for (int i = 0; i < used; i++)
+< +    if (kept[i].reader == reader && sp_streq(kept[i].name, nm)) return kept[i].answer;
+< +  int ans = format_name_scan(c, nm, reader);
+< +  if (used == cap) {
+< +    void *grown = realloc(kept, sizeof *kept * (size_t)(cap ? cap * 2 : 32));
+< +    if (!grown) return ans;
+< +    kept = grown; cap = cap ? cap * 2 : 32;
+< +  }
+< +  if ((kept[used].name = strdup(nm)) != NULL) { kept[used].reader = (char)reader; kept[used++].answer = (char)ans; }
+< +  return ans;
+< +}
+310,311c69,76
+< +static int format_name_is_builtin(Compiler *c, const char *nm) {
+< +  return format_name_answer(c, nm, 0);
+---
+> +/* Is a call of `nm` on a builtin's value provably the builtin's own? Only
+> +   where the program as written gives no class a method of that name
+> +   (an_prog_never_gives, analyze.c): no def and no Symbol of the name, no
+> +   site that names, makes or loads a method by something the text does not
+> +   spell, no file the compiler did not read. Asked by the name alone,
+> +   whatever the class. `!=` runs `==`. */
+> +static int format_name_is_builtin(const char *nm) {
+> +  return an_prog_never_gives(nm, 0) && (!sp_streq(nm, "!=") || an_prog_never_gives("==", 0));
+317,318c82,83
+< +   the `coerce` of an operator's operand that is no number. A reader is
+< +   asked for a def of its name only: its attr is what makes it a read. */
+---
+> +   the `coerce` of an operator's operand that is no number. A reader's name
+> +   is one its attr gives, so a reader is not proved. */
+324,326c89
+< +    int alloc = 0;
+< +    if (!nm) return 1;
+< +    if (!format_name_answer(c, nm, call_is_field_read(c, a, &alloc))) return 1;
+---
+> +    if (!nm || !format_name_is_builtin(nm)) return 1;
+366c129
+< +         format_name_is_builtin(c, "+");
+---
+> +         format_name_is_builtin("+");
+371,372c134,135
+< +   those? An index, an operator or a reader in it counts only while it is
+< +   provably the builtin's (format_arg_calls_own). */
+---
+> +   those? An index or an operator in it counts only while it is provably
+> +   the builtin's (format_arg_calls_own, the cheaper question, asked first). */
+385c148
+< +  return subtree_is_pure_read(c, a) && !format_arg_calls_own(c, a);
+---
+> +  return !format_arg_calls_own(c, a) && subtree_is_pure_read(c, a);
