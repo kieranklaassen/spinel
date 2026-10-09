@@ -1,0 +1,456 @@
+**The delta of the mend, and the reader's programs rebuilt** (head `771a07e0633f`; its notes and texts are the comment two above, its mail the comment just above). Every sha256 is of the block's text with one final newline.
+
+**1. The delta.** `git diff cc0bd8dfa9b3 771a07e0633f`: three files under `src/`, nothing else. sha256 `c5f683e497b36cdfa4514313c56229fe6bc1b748366471e00993d41c942b563f`:
+
+`````diff
+diff --git a/src/analyze.c b/src/analyze.c
+index e1f3e3a14..3bee26de8 100644
+--- a/src/analyze.c
++++ b/src/analyze.c
+@@ -223,13 +223,15 @@ void anh_free(ANameHash *st) { free(st->key); free(st->next); free(st->head); }
+        such word by its Symbol; an alias or an undef likewise;
+    (2) a block-pass of anything but a Symbol literal that is no such word
+        (the parser spells most of those as a block and marks it), a literal
+-       lambda or proc, or the block parameter of its own def, which that def
++       lambda, a `proc { }` or `lambda { }` where the program gives neither
++       name a method, or the block parameter of its own def, which that def
+        only reads;
+    (3) text evaluated: an eval with an argument or with no literal block, an
+        exec, a trap or a trace_var with no literal block, `binding`, ERB;
+    (4) a file not read: a require left standing in the table (the parser
+-       splices away each one it resolves) or one it warned it ignores
+-       (g_require_unread).
++       splices away each one it resolves), or g_require_unread, which stays
++       clear only where the program's text proves every file it loads was
++       read (spinel_parse.c).
+    The desugars rewrite such calls away, so the table cannot be asked later.
+    A key is a copy: a node's strings do not outlive its rewrite. */
+ enum { AN_CALLS = 1, AN_LAST, AN_RECV, AN_GIVES, AN_GIVES_ALL, AN_RENAMES, AN_VIS, AN_EVAL, AN_EXEC, AN_SITE, AN_WORD };
+@@ -306,7 +308,7 @@ static int an_own_block_passes(const NodeTable *nt, int n, const char *bp) {
+   return cnt;
+ }
+ static void an_note_written_names(const NodeTable *nt) {
+-  int by_value = g_require_unread, passes = 0, own_passes = 0, erb = 0;
++  int by_value = g_require_unread, passes = 0, own_passes = 0, erb = 0, makers = 0;
+   for (int k = 0; an_by_name[k].nm; k++)
+     if (!anh_has(&g_by_name_words, an_by_name[k].nm)) anh_add(&g_by_name_words, an_by_name[k].nm);
+   for (int id = 0; id < nt->count; id++) {
+@@ -342,8 +344,9 @@ static void an_note_written_names(const NodeTable *nt) {
+         if (ek == NK_LocalVariableReadNode) passes++;
+         else if (ek == NK_CallNode) {
+           const char *en = nt_str(nt, e, "name");
+-          if (!en || (!sp_streq(en, "proc") && !sp_streq(en, "lambda")) || nt_ref(nt, e, "receiver") >= 0 ||
+-              nt_kind(nt, nt_ref(nt, e, "block")) != NK_BlockNode) by_value = 1;
++          int maker = !en ? 0 : sp_streq(en, "proc") ? 1 : sp_streq(en, "lambda") ? 2 : 0;
++          if (!maker || nt_ref(nt, e, "receiver") >= 0 || nt_kind(nt, nt_ref(nt, e, "block")) != NK_BlockNode) by_value = 1;
++          else makers |= maker;
+         }
+         else if (e >= 0 && ek != NK_LambdaNode && !an_name_spelled(nt, e)) by_value = 1;
+         break;
+@@ -377,8 +380,9 @@ static void an_note_written_names(const NodeTable *nt) {
+         else if (how == AN_CALLS) { if (an > 0 && !an_name_spelled(nt, av[0])) by_value = 1; }
+         else if (how == AN_GIVES) { if (an > 0 && nt_kind(nt, av[0]) != NK_SymbolNode) by_value = 1; }
+         else if (how == AN_LAST) {
+-          /* one operand beside a block is the first value, not a name */
+-          if (an > 0 && !(an == 1 && blk >= 0) && !an_name_spelled(nt, av[an - 1])) by_value = 1;
++          /* one operand beside a literal block is the first value, not a name;
++             beside a block-pass it is the name whenever no block was given */
++          if (an > 0 && !(an == 1 && lit_blk) && !an_name_spelled(nt, av[an - 1])) by_value = 1;
+         }
+         else {
+           for (int i = 0; i < an; i++) {
+@@ -394,6 +398,9 @@ static void an_note_written_names(const NodeTable *nt) {
+       default: break;
+     }
+   }
++  /* `&proc { }` and `&lambda { }` pass what Kernel's own makes, not what a
++     method of that name the program gives would answer */
++  if (((makers & 1) && anh_has(&g_written, "proc")) || ((makers & 2) && anh_has(&g_written, "lambda"))) by_value = 1;
+   if (by_value || passes > own_passes || erb > 0) g_written_by_value = 1;
+ }
+ /* Does the program, as written, give no class or module a method named
+diff --git a/src/compiler.h b/src/compiler.h
+index 2c258c186..2b3e7d925 100644
+--- a/src/compiler.h
++++ b/src/compiler.h
+@@ -20,8 +20,8 @@
+    require-gated stdlib (stringio, io/console, ...) so they match CRuby's
+    uninitialized-constant / NoMethodError when the require is absent. */
+ extern int g_require_gate;
+-/* a `require` named a file that was not found and is ignored with a warning
+-   (defined in spinel_parse.c): what it would define is not in the node table */
++/* the program may load a file the compiler did not read (spinel_parse.c,
++   above resolve_requires): what that file would define is not in the node table */
+ extern int g_require_unread;
+ /* SPINEL_SHARE_STRINGS is on: set, not empty and not "0" (spinel_parse.c) */
+ int sp_share_strings_env(void);
+diff --git a/src/spinel_parse.c b/src/spinel_parse.c
+index ced809722..f18a63e8d 100644
+--- a/src/spinel_parse.c
++++ b/src/spinel_parse.c
+@@ -2156,10 +2156,6 @@ static int source_references_io_buffer(const char *src) {
+    sp_feature_enabled(). Definitions here (spinel_parse.c includes no project
+    headers); declared extern in compiler.h. */
+ int g_require_gate = 0;
+-/* A plain `require` named a file that was not found and is ignored with a
+-   warning (resolve_plain_requires' last arm): what that file would define is
+-   not in the node table. Declared extern in compiler.h. */
+-int g_require_unread = 0;
+ /* --share-strings, as main.c exports it: on only when SPINEL_SHARE_STRINGS
+    is set to something, empty and "0" being off. The compiler's flag and the
+    parser's read of a package's share declarations ask this one test. */
+@@ -3303,8 +3299,61 @@ static char *sp_rewrite_dead_requires(const char *source) {
+   return result;
+ }
+ 
++/* g_require_unread: may the program load a file this compiler did not read?
++   Such a file can define or reopen anything, so a pass that asks what the
++   program gives a class has to take the answer as unknown where this is set.
++   It stays clear only where the text proves there is no such file, read as
++   written (ahead of every rewrite below) in each file handed to
++   resolve_requires:
++     - none of $LOAD_PATH, $:, $-I, $LOADED_FEATURES, $" is written, so a
++       name is looked up where this compiler looks;
++     - nothing named load or autoload is written;
++     - every require and require_relative written was resolved: a file read,
++       one read before, or a feature the runtime provides. One left as a
++       raise or a warning, blanked as unreachable, or past where the scan
++       gave up counts as written and not resolved; one a rewrite made sets
++       the flag itself.
++   Text the class macros write (sp_expand_class_macros) is read the same way
++   once they have, and any of these words in it sets the flag: the parts a
++   macro joins need not spell one. The flag is final when the parser returns.
++   The words are counted, not parsed: one in a string, or in a comment after
++   code, sets the flag, and all that gives up is an optimisation. A line that
++   is only a comment and holds no interpolation is skipped: it is a comment
++   where code is read and plain text inside a literal, a call in neither.
++   Declared extern in compiler.h. */
++int g_require_unread = 0;
++static int sp_req_written = 0, sp_req_resolved = 0;
++
++static int sp_req_word_at(const char *p, const char *w, size_t n) {
++  return strncmp(p, w, n) == 0 && !sp_req_ident_char(p[n]);
++}
++
++static void sp_require_note_text(const char *text) {
++  for (const char *ln = text; *ln; ) {
++    const char *e = strchr(ln, '\n');
++    if (!e) e = ln + strlen(ln);
++    const char *p = ln;
++    while (p < e && (*p == ' ' || *p == '\t')) p++;
++    int comment = p < e && *p == '#';
++    for (const char *q = p; comment && q + 1 < e; q++)
++      if (*q == '#' && (q[1] == '{' || q[1] == '$' || q[1] == '@')) comment = 0;
++    for (; !comment && p < e; p++) {
++      if (*p == '$') {
++        if (p[1] == ':' || p[1] == '"' || strncmp(p + 1, "-I", 2) == 0 || strncmp(p + 1, "LOAD_PATH", 9) == 0 ||
++            strncmp(p + 1, "LOADED_FEATURES", 15) == 0) g_require_unread = 1;
++        continue;
++      }
++      if ((*p != 'r' && *p != 'l' && *p != 'a') || (p > text && sp_req_ident_char(p[-1]))) continue;
++      if (sp_req_word_at(p, "require", 7) || sp_req_word_at(p, "require_relative", 16)) sp_req_written++;
++      else if (sp_req_word_at(p, "load", 4) || sp_req_word_at(p, "autoload", 8)) g_require_unread = 1;
++    }
++    ln = *e ? e + 1 : e;
++  }
++}
++
+ static char *resolve_requires(const char *source, const char *source_path,
+                               unsigned char **fsl_out, size_t *fsl_n_out) {
++  sp_require_note_text(source);
+   /* Get base directory */
+   char *path_copy = strdup(source_path);
+   char *dir = strdup(path_copy);
+@@ -3318,8 +3367,9 @@ static char *resolve_requires(const char *source, const char *source_path,
+      a literal path (#5696): each answers a fresh copy of what it reads */
+   char *reachable = sp_rewrite_dead_requires(source);
+   char *pre_auto = sp_rewrite_computed_requires(reachable, dir);
+-  free(reachable);
+   char *result = sp_rewrite_autoloads(pre_auto, dir);
++  if (strcmp(reachable, result) != 0) g_require_unread = 1;   /* a require the two made */
++  free(reachable);
+   free(pre_auto);
+   sp_autoload_is_main = 0;
+   /* One pragma flag per line of `result`, kept in lockstep with every text
+@@ -3379,6 +3429,7 @@ static char *resolve_requires(const char *source, const char *source_path,
+       cfsl = sp_fsl_make(content, 0, &cfsl_n);
+       free(canonical);
+       req_val = "false";
++      sp_req_resolved++;
+     }
+ else {
+       sp_mark_path_included(canonical);
+@@ -3400,6 +3451,7 @@ else {
+         char *resolved = resolve_requires(content, full_path, &cfsl, &cfsl_n);
+         free(content);
+         content = resolved;
++        sp_req_resolved++;
+       }
+       free(canonical);
+     }
+@@ -3707,6 +3759,7 @@ static char *sp_prepend_require(char *source, const char *exe_path, const char *
+   char *ns = (char *)malloc(sl + hl + 1);
+   if (!ns) return source;
+   memcpy(ns, head, hl); memcpy(ns + hl, source, sl + 1);
++  sp_require_note_text(head);
+   sp_src_lex_drop();
+   free(source);
+   ns = resolve_plain_requires(ns, exe_path, fsl, fsl_n);
+@@ -4035,6 +4088,7 @@ static char *resolve_plain_requires(char *source, const char *exe_path,
+       content = strdup("# require skipped (already included)");
+       free(canonical);
+       req_val = "false";
++      sp_req_resolved++;
+     }
+ else {
+       sp_mark_path_included(canonical);
+@@ -4166,6 +4220,7 @@ else {
+           sp_feature_mark(lib_name);
+           content = strdup("# require provided by Spinel runtime");
+           req_val = "false";   /* already there: nothing was loaded */
++          sp_req_resolved++;
+         }
+ else if (sp_require_tolerated(lib_name)) {
+           /* A core capability Spinel provides without a file (Thread,
+@@ -4173,6 +4228,7 @@ else if (sp_require_tolerated(lib_name)) {
+              no-op, like modern CRuby -- gate or no gate. */
+           content = strdup("# require no-op (core feature)");
+           req_val = "false";   /* already there: nothing was loaded */
++          sp_req_resolved++;
+         }
+ else if (g_require_gate) {
+           /* Whole-program AOT: an unsatisfiable require can never be provided, so
+@@ -4187,7 +4243,6 @@ else {
+           fprintf(stderr,
+                   "warning: '%s' is not available in Spinel; the require is ignored and code using it will fail\n",
+                   lib_name);
+-          g_require_unread = 1;
+           content = strdup("# require not resolved");
+         }
+       }
+@@ -4199,6 +4254,7 @@ else {
+         char *resolved = resolve_requires(content, lib_path, &cfsl, &cfsl_n);
+         free(content);
+         content = resolved;
++        sp_req_resolved++;
+       }
+     }
+     /* Stub arms above leave cfsl NULL: their content is a one-line comment. */
+@@ -5131,11 +5187,18 @@ static int sp_parse_emit(const char *source_file, const char *argv0, SpStrBuf *o
+   source = sp_splice_builtin_extras(source, argv0, &fsl, &fsl_n);
+   source = sp_splice_builtin_enumerator(source, argv0, &fsl, &fsl_n);
+   sp_src_lex_drop();
++  if (sp_req_written != sp_req_resolved) g_require_unread = 1;
+ 
+   /* class-body macro calls (module_eval'd templates, computed
+      attach_function / const_set names) expanded in place; line count kept */
+   { char *mx = sp_expand_class_macros(source);
+-    if (mx) { free(source); source = mx; } }
++    if (mx) {
++      /* what a macro wrote was in no file's text: g_require_unread reads it here */
++      int written = sp_req_written;
++      sp_require_note_text(mx);
++      if (sp_req_written != written) g_require_unread = 1;
++      free(source); source = mx;
++    } }
+ 
+   /* Debug: build the buffer-line -> (file, original line) map from the
+      marker-annotated buffer *before* syntax-sugar rewriting (which could
+`````
+
+**2. The programs.** Each is the reader's five lines, a form, and `puts $s.dup.pair(add)`; the files a form reads are written beside it (`lib2/NAME.rb`, `lib/dp.rb` and `m_dp.rb` hold `class String; def dup = self; end`; `lib/dpc.rb` holds `Dp = 1` ahead of it). The numbers are mine where the verdict gave a form and no program: a01 to a35 are the 35 names in the verdict's order; a50, a53, a56, a61, a64 as there; a70 to a72 are three shapes of "inside a def that is called" (my first shape, an endless def that only unshifts, is loud on all three, so it is not here); a80 to a85 the six the verdict has as not lost; b, c, g, i, j as there; m01 and m02 the `Dir.chdir` forms; y01 to y06 are mine, a word the class-macro pass makes from parts; z01 to z09 are mine, plain programs that must keep the fix or give it back by design. Not rebuilt, for want of a form in the verdict: a55, a57, a58, a60, a69, a71 of the reader's numbering, b01 to b04, b08, b10, d01, e01, g04, g05, h04, i03 to i10, k01 to k06, m03; the reader has them. The generator, run in an empty directory, sha256 `78b007c89dadff4d47258c6daa3630ac8956256e6990ab6fcb9f6d557b8e3376`:
+
+`````python
+# gen.py: the reader's families, rebuilt from the forms in the verdict. Each program is
+# the five lines, a form, and the last line; the files it reads are written beside it.
+import os
+HEAD = '''class String
+  def pair(a) = "#{self}|#{a.size}"
+end
+$s = +"ab"
+def add = ($s << "c"; [1, 2])
+'''
+LAST = 'puts $s.dup.pair(add)\n'
+DUP = 'class String; def dup = self; end\n'
+P = {}
+names = '''json set ffi ostruct time securerandom fileutils base64 digest csv pathname tempfile uri zlib open3 find
+io/console fiber enumerator rational complex socket erb forwardable bigdecimal tmpdir stringio optparse logger
+shellwords net/http openssl cgi pty fiddle'''.split()
+assert len(names) == 35
+os.makedirs('lib2', exist_ok=True); os.makedirs('lib', exist_ok=True)
+for n in names + ['thread', 'monitor', 'strscan', 'benchmark']:
+    d = os.path.dirname('lib2/' + n + '.rb'); os.makedirs(d, exist_ok=True)
+    open('lib2/' + n + '.rb', 'w').write(DUP)
+open('lib/dp.rb', 'w').write(DUP)
+open('lib/dpc.rb', 'w').write('Dp = 1\n' + DUP)
+open('m_dp.rb', 'w').write(DUP)
+U = '$LOAD_PATH.unshift(File.join(__dir__, "lib2"))\n'
+for i, n in enumerate(names, 1):
+    P['a%02d' % i] = U + 'require "%s"\n' % n
+P['a50'] = '$:.unshift(File.join(__dir__, "lib2"))\nrequire "json"\n'
+P['a53'] = '$LOAD_PATH.unshift(File.expand_path("lib2", __dir__))\nrequire "json"\n'
+P['a56'] = '$LOAD_PATH.unshift(File.join(__dir__, "lib2")) if true\nrequire "json"\n'
+P['a61'] = '$LOAD_PATH[0, 0] = File.join(__dir__, "lib2")\nrequire "json"\n'
+P['a64'] = 'begin $LOAD_PATH.unshift(File.join(__dir__, "lib2")) rescue nil end\nrequire "json"\n'
+P['a70'] = 'def setup\n  $LOAD_PATH.unshift(File.join(__dir__, "lib2"))\n  require "json"\nend\nsetup\n'
+P['a71'] = 'def setup(d)\n  $LOAD_PATH.unshift(d)\nend\nsetup(File.join(__dir__, "lib2"))\nrequire "json"\n'
+P['a72'] = 'def setup\n  $LOAD_PATH.unshift(File.join(__dir__, "lib2"))\nrescue NoMethodError\nend\nsetup\nrequire "json"\n'
+for k, n in (('a80', 'thread'), ('a81', 'monitor'), ('a82', 'strscan'), ('a83', 'benchmark')):
+    P[k] = U + 'require "%s"\n' % n
+P['a84'] = '$-I.unshift(File.join(__dir__, "lib2"))\nrequire "json"\n'
+P['a85'] = '$LOAD_PATH.insert(0, File.join(__dir__, "lib2"))\nrequire "json"\n'
+P['b05'] = 'begin\n  Object.autoload(:Dp, File.join(__dir__, "lib/dpc.rb")); Dp\nrescue NameError, NoMethodError\nend\n'
+P['b06'] = 'class Holder\n  autoload :Dp, File.join(__dir__, "lib/dpc.rb")\nend\nbegin\n  Holder::Dp\nrescue NameError, NoMethodError\nend\n'
+P['b07'] = 'begin\n  Kernel.autoload(:Dp, File.join(__dir__, "lib/dpc.rb")); Dp\nrescue NameError, NoMethodError\nend\n'
+P['b09'] = 'begin\n  self.load(File.join(__dir__, "lib/dp.rb"))\nrescue NoMethodError\nend\n'
+def beg(body, exc='NoMethodError'): return 'begin\n  %s\nrescue %s\nend\n' % (body, exc)
+GO = beg('go(String, "def dup = self", "class_e" + "val")')
+P['c01'] = 'def go(k, t, n, &b) = [k, t].inject(n, &b)\n' + GO
+P['c02'] = 'def go(k, t, n, &b) = [k, t].reduce(n, &b)\n' + GO
+P['c03'] = 'def go(n, &b) = [String, "def dup = self"].inject(n, &b)\n' + beg('go("class_e" + "val")')
+P['c04'] = 'def go(k, t, n, &b)\n  [k, t].inject(n, &b)\nend\n' + GO
+P['c05'] = 'def go(k, t, n) = [k, t].inject(n, &nil)\n' + GO
+P['c06'] = 'def go(k, t, n, &) = [k, t].inject(n, &)\n' + GO
+P['c07'] = 'def go(k, t, &b) = [k, t].inject(:class_eval, &b)\n' + beg('go(String, "def dup = self")')
+P['c08'] = 'T = "def dup = self"\ndef go(...) = [String, T].inject(...)\n' + beg('go("class_e" + "val")')
+P['c09'] = 'def go(k, t, &) = [k, t].inject(:class_eval, &)\n' + beg('go(String, "def dup = self")')
+P['g01'] = beg('require "#{__dir__}/lib/dp"', 'LoadError')
+P['g02'] = 'd = "lib"\n' + beg('require_relative "#{d}/dp"', 'LoadError')
+P['g03'] = beg('%w[dp].each { |f| require_relative "lib/#{f}" }', 'LoadError')
+P['i01'] = '$pr = :CLASS_EVAL.downcase\ndef proc(&b) = $pr\n' + beg('[String].each_with_object("def dup = self", &proc { })')
+P['i02'] = '$pr = :CLASS_EVAL.downcase\ndef lambda(&b) = $pr\n' + beg('[String].each_with_object("def dup = self", &lambda { })')
+P['j01'] = 'if RUBY_ENGINE == "ruby"\n  require_relative "lib/dp"\nend\n'
+P['j02'] = 'unless RUBY_ENGINE == "spinel"\n  require_relative "lib/dp"\nend\n'
+P['j03'] = 'if RUBY_ENGINE != "spinel"\n  require_relative "lib/dp"\nend\n'
+P['j04'] = 'require_relative "lib/dp" if RUBY_ENGINE == "ruby"\n'
+P['j05'] = 'if RUBY_ENGINE == "spinel"\n  $x = 1\nelse\n  require_relative "lib/dp"\nend\n'
+P['j06'] = 'if RUBY_ENGINE == "ruby"\n  require "./lib/dp"\nend\n'
+P['j07'] = 'if RUBY_ENGINE == "ruby"\n  $LOAD_PATH.unshift(File.join(__dir__, "lib2"))\nend\nrequire "json"\n'
+P['j08'] = 'if RUBY_ENGINE == "ruby"\n  Kernel.require "./lib/dp"\nend\n'
+P['j09'] = 'if RUBY_ENGINE == "ruby"\n  class String; def dup = self; end\nend\n'
+P['j10'] = 'case RUBY_ENGINE\nwhen "ruby" then require_relative "lib/dp"\nend\n'
+P['m01'] = 'Dir.chdir(__dir__)\nrequire "./m_dp"\n'
+P['m02'] = 'Dir.chdir(__dir__) do\n  require "./m_dp"\nend\n'
+# a word the class-macro pass makes from parts: in no file's text
+def mac(text, arg): return 'module M\n  def mk(n)\n    module_eval "%s"\n  end\nend\nclass Foo\n  extend M\n  mk "%s"\nend\n' % (text, arg)
+P['y01'] = mac('def self.go(f) = self.l#{n}(f)', 'oad') + beg('Foo.go(File.join(__dir__, "lib/dp.rb"))')
+P['y02'] = mac('def self.go(f) = l#{n}(f)', 'oad') + beg('Foo.go(File.join(__dir__, "lib/dp.rb"))')
+P['y03'] = mac('def self.go(d) = (begin $LOAD#{n}.unshift(d) rescue nil end)', '_PATH') + 'Foo.go(File.join(__dir__, "lib2"))\nrequire "json"\n'
+P['y04'] = mac('def self.go(f) = Kernel.req#{n}(f)', 'uire') + beg('Foo.go(File.join(__dir__, "lib/dp.rb"))', 'NoMethodError, LoadError')
+P['y05'] = mac('def self.#{n} = 1', 'one') + '$t = Foo.one\n'
+P['y06'] = mac('def self.go = $LOAD#{n}', '_PATH')
+# the plain forms: nothing here may lose the fix
+P['z01'] = ''
+P['z02'] = 'require "json"\n'
+P['z03'] = 'require_relative "lib/plain"\n'
+P['z04'] = 'require "set"\nrequire "strscan"\n$t = Set.new([1])\n'
+P['z05'] = '# $LOAD_PATH.unshift(File.join(__dir__, "lib2"))\n# load "x"\n# require "nothing_here"\n'
+P['z06'] = 'x = "require"\n'
+P['z07'] = 'x = "the load"\n'
+P['z08'] = 'if false\n  require "json"\nend\n'
+P['z09'] = '$t = [3, 1].sort.map { |v| v + 1 }.select(&:odd?)\n'
+open('lib/plain.rb', 'w').write('def plain = 1\n')
+for k, v in P.items():
+    open(k + '.rb', 'w').write(HEAD + v + LAST)
+open('names.txt', 'w').write(' '.join(sorted(P)) + '\n')
+print(len(P))
+`````
+
+**3. The cells.** One line a program: CRuby 3.3.6's first line (`--enable-frozen-string-literal`), then two cells (gcc 13.3 at SPINEL_GC_STRESS unset and 2; `o` equal to CRuby's output and exit, `x` not, `n` no build, `r` a raise, exit 1) for the bare `68d40ff05fd4`, for `cc0bd8dfa9b3`, and for this head. 94 programs: 68 lost on `cc0bd8dfa9b3` and right here (a 43, b 4, c 7, g 3, i 2, j 8, y03); 13 the same on all three and right or loud; z04 the same on all three and wrong (strscan's own text); 6 cured and kept (z01 to z03, z05, z09, y05); 6 cures given back, each with master's answer (a80 `thread` and a81 `monitor` behind a load-path word, y06 a macro-made read of the load path, z06 `x = "require"`, z07 `x = "the load"`, z08 a require under `if false`). No program right on the bare tip is wrong here. sha256 `aa01882d345624afec4b966bc368815e2af4a012eb622ef40cd04e56bb70254a`:
+
+`````text
+a01  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+a02  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+a03  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+a04  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+a05  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+a06  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+a07  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+a08  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+a09  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+a10  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+a11  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+a12  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+a13  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+a14  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+a15  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+a16  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+a17  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+a18  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+a19  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+a20  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+a21  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+a22  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+a23  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+a24  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+a25  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+a26  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+a27  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+a28  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+a29  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+a30  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+a31  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+a32  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+a33  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+a34  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+a35  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+a50  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+a53  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+a56  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+a61  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+a64  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+a70  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+a71  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+a72  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+a80  ruby[ab|2 ] tip xx  handed-over oo  mended xx   cure given back
+a81  ruby[ab|2 ] tip xx  handed-over oo  mended xx   cure given back
+a82  ruby[abc|2] tip oo  handed-over oo  mended oo   same on all three
+a83  ruby[abc|2] tip oo  handed-over oo  mended oo   same on all three
+a84  ruby[abc|2] tip nn  handed-over nn  mended nn   same on all three
+a85  ruby[abc|2] tip rr  handed-over rr  mended rr   same on all three
+b05  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+b06  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+b07  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+b09  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+c01  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+c02  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+c03  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+c04  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+c05  ruby[abc|2] tip oo  handed-over oo  mended oo   same on all three
+c06  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+c07  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+c08  ruby[abc|2] tip oo  handed-over oo  mended oo   same on all three
+c09  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+g01  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+g02  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+g03  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+i01  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+i02  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+j01  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+j02  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+j03  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+j04  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+j05  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+j06  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+j07  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+j08  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+j09  ruby[abc|2] tip oo  handed-over oo  mended oo   same on all three
+j10  ruby[abc|2] tip oo  handed-over oo  mended oo   same on all three
+m01  ruby[abc|2] tip oo  handed-over oo  mended oo   same on all three
+m02  ruby[abc|2] tip oo  handed-over oo  mended oo   same on all three
+y01  ruby[abc|2] tip nn  handed-over nn  mended nn   same on all three
+y02  ruby[abc|2] tip nn  handed-over nn  mended nn   same on all three
+y03  ruby[abc|2] tip oo  handed-over xx  mended oo   lost, now right
+y04  ruby[abc|2] tip oo  handed-over oo  mended oo   same on all three
+y05  ruby[ab|2 ] tip xx  handed-over oo  mended oo   cured, kept
+y06  ruby[ab|2 ] tip xx  handed-over oo  mended xx   cure given back
+z01  ruby[ab|2 ] tip xx  handed-over oo  mended oo   cured, kept
+z02  ruby[ab|2 ] tip xx  handed-over oo  mended oo   cured, kept
+z03  ruby[ab|2 ] tip xx  handed-over oo  mended oo   cured, kept
+z04  ruby[ab|2 ] tip xx  handed-over xx  mended xx   same on all three
+z05  ruby[ab|2 ] tip xx  handed-over oo  mended oo   cured, kept
+z06  ruby[ab|2 ] tip xx  handed-over oo  mended xx   cure given back
+z07  ruby[ab|2 ] tip xx  handed-over oo  mended xx   cure given back
+z08  ruby[ab|2 ] tip xx  handed-over oo  mended xx   cure given back
+z09  ruby[ab|2 ] tip xx  handed-over oo  mended oo   cured, kept
+`````

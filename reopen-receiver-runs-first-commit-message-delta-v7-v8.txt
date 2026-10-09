@@ -1,0 +1,39 @@
+--- reopen-receiver-runs-first-commit-message-v7.txt
++++ reopen-receiver-runs-first-commit-message-v8.txt
+@@ -52,16 +52,26 @@
+ holds no other def of that name, no Symbol of that name, and no site
+ where a method is named, made or loaded by something the text does
+ not spell (an_prog_never_gives): a call that takes a method's name
+-(send, method, to_proc, inject, define_method, alias_method, an attr
+-or a visibility word) with a name that is no Symbol literal, or one
+-that calls, reads or renames another such word by its Symbol; a
+-block-pass of anything but a Symbol literal, a literal lambda or
+-proc, or the block parameter of its own def; text evaluated (eval,
+-instance_exec, binding, ERB); a require the parser did not read (one
+-left in the node table, or one it warned it ignores:
+-g_require_unread). analyze_program reads this ahead of every rewrite,
+-since a desugar erases such a call. Any other call is emitted as it
+-was.
++(send, method, to_proc, inject with an operand no literal block
++follows, define_method, alias_method, an attr or a visibility word)
++with a name that is no Symbol literal, or one that calls, reads or
++renames another such word by its Symbol; a block-pass of anything but
++a Symbol literal that is no such word, a literal lambda, a `proc { }`
++or `lambda { }` where the program holds no def and no Symbol of that
++name, or the block parameter of its own def; text evaluated (eval,
++instance_exec, binding, ERB); a file the compiler did not read
++(g_require_unread). analyze_program reads this ahead of every rewrite,
++since a desugar erases such a call.
++
++The parser's rewrites erase a require the same way, so it leaves
++g_require_unread clear only by the text of each file it reads, as
++written, and of what its class macros write: no load-path global is
++written ($LOAD_PATH, $:, $-I, $LOADED_FEATURES, $"), nothing named
++load or autoload is, and every require and require_relative written
++was resolved, which one with a computed name, one it warns it ignores
++and one in a branch it rules dead are not. The words are counted, not
++parsed: one in a string keeps master's C. Any other call is emitted as
++it was.
+ 
+ Test: test/reopen_receiver_runs_first.rb.
+ 
