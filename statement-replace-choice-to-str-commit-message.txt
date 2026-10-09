@@ -1,0 +1,42 @@
+A shared String's copy in a choice and a to_str's String are rooted while replace copies them
+
+The statement form of replace copies its source into a new String
+(str_mutate_reassign_arms): the source goes into a C temp and
+sp_str_from_bytes allocates the copy. The temp is rooted where
+operand_may_allocate says the source may make a String: a call, an
+interpolation, a String two names hold, which is read as a copy.
+
+Two kinds of source make a String with no call written in them, and
+that test does not see them. A String two names hold is read as a
+copy where it is one side of a choice too (`s.replace(t || "none")`,
+`c ? t : "none"`, a case): the test asks about the read itself, not
+about a choice it stands in. And an object as the source is read
+through its to_str (`s.replace(o)`): alone, out of an instance
+variable, boxed beside a String, or as one side of a choice. Nothing
+held either String while the copy was allocated.
+
+Under SPINEL_GC_STRESS=2 the receiver came out as poison bytes, with
+exit 0. With 8,000-byte Strings a plain run was wrong too: a source
+with `def to_str = @s + "!"` in 4 of 300 rounds, `t || "none"` in 1.
+
+Where the first test says no, a second now asks whether something
+else holds the source (replace_source_is_held), and the temp is
+rooted unless it does: a literal; a local, an instance variable, a
+constant, a global or self read where it stands (strbuf_slot_ref
+says which of those are read as a copy); a choice between two of
+those (`c ? a : K`, `a || K`, `k && a`). An object is not on that
+list, and a boxed value is on it only while no class of the program
+defines to_str. For a source on the list, and for every source the
+first test roots, the generated C is as it was.
+
+Four sources with no call in them take the root and were right: an
+`&&` of a boolean and a String two names hold, which is boxed and
+not copied; an assignment written as the source (`s.replace(x = a)`);
+a `begin` block; and a boxed String in a program where a class
+defines to_str. The root is 14 to 17 instructions a statement with
+gcc and 14 to 20 with clang.
+
+No program under test/, benchmark/ or packages/*/test/ has such a
+statement: their generated C is unchanged, and optcarrot's.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

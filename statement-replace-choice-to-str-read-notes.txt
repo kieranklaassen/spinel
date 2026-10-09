@@ -1,0 +1,211 @@
+Read notes for the replace piece as re-cut to its remainder: d3f93df36bfa6c962065e4338d510d92bc32dcb7, tree d7414a09fcce655bd041d7effbdcd7b217ad288b, one commit on master a3892bb0036656805b51316ea5c205d0cdf6b2d0. A NEW short read, not a delta: the earlier heads 05cef87ee861 and f8952568c04a and their texts (-v14, -v13) are superseded and stay pushed. Title, message and body are new files beside this one.
+
+WHY IT IS SMALL NOW
+
+Master a3892bb00 carries another contributor's change at this statement ("A shared String's copy beside an allocating operand is rooted until its call"): `if (operand_may_allocate(c, argv[0])) buf_printf(b, "SP_GC_ROOT_STR(_t%d); ", trep);`. operand_may_allocate answers yes for any call in the source, an interpolation, a container literal, and the read itself of a String two names hold (a local, an instance variable, self, a share-marked static). So everything the earlier heads judged about calls (the slot reads, the receiver-answering calls, the reader with no receiver, the class-method condition) is master's now: master roots every call. None of that code comes along.
+
+What master's test leaves out, measured on the bare tip, is a source with NO call in it that still makes a String:
+1. a String two names hold as one side of a choice (`t || "x"`, `c ? t : "x"`, a case, an unless, `k && t` with a String `k`): read as a copy there, and the test looks at the top node only (inside its parentheses);
+2. an object read through its to_str: typed (a local, an instance variable), boxed (a local that holds a String or the object), or one side of a choice with a literal.
+
+THE WHOLE SOURCE CHANGE (src/codegen_stmt.c, 35 lines; master's line and its comment are byte for byte, the new test is an `else if` after it):
+
+    diff --git a/src/codegen_stmt.c b/src/codegen_stmt.c
+    index e24f0a6f4..5091d19d5 100644
+    --- a/src/codegen_stmt.c
+    +++ b/src/codegen_stmt.c
+    @@ -15858,6 +15858,38 @@ static char *emit_str_splice_value(Compiler *c, int recv, int v, int late, int t
+       buf_puts(b, " sp_str_check_mutable("); emit_expr(c, recv, b); buf_puts(b, ");");
+       return vb.p;
+     }
+    +/* Does something else hold the String the statement form of replace
+    +   copies, where its source runs no call (operand_may_allocate answers for
+    +   those)? A literal does, and so does a local, an instance variable, a
+    +   constant, a global or self read where it stands (strbuf_slot_ref says
+    +   which of those are read as a copy), and a choice between two such
+    +   sources (`c ? t : K`, `t || K`, `k && t`). Anything else is not known
+    +   to be held: an object counts, read through its to_str, and so does a
+    +   boxed value while a class of the program defines to_str. */
+    +static int replace_source_is_held(Compiler *c, int v, int depth) {
+    +  const NodeTable *nt = c->nt;
+    +  char hs[1024];
+    +  v = unwrap_parens(c, v);
+    +  if (v < 0 || depth > 8) return 0;
+    +  NodeKind k = nt_kind(nt, v);
+    +  if (k == NK_StringNode) return 1;
+    +  if (k == NK_IfNode) {
+    +    int arm[2] = { nt_ref(nt, v, "statements"), nt_ref(nt, v, "subsequent") };
+    +    if (arm[1] < 0 || nt_kind(nt, arm[1]) != NK_ElseNode) return 0;
+    +    arm[1] = nt_ref(nt, arm[1], "statements");
+    +    for (int i = 0; i < 2; i++) {
+    +      int n = 0; const int *bb = arm[i] >= 0 ? nt_arr(nt, arm[i], "body", &n) : NULL;
+    +      if (n != 1 || !replace_source_is_held(c, bb[0], depth + 1)) return 0;
+    +    }
+    +    return 1;
+    +  }
+    +  if (k == NK_OrNode || k == NK_AndNode)
+    +    return replace_source_is_held(c, nt_ref(nt, v, "left"), depth + 1) &&
+    +           replace_source_is_held(c, nt_ref(nt, v, "right"), depth + 1);
+    +  TyKind t = comp_ntype(c, v);
+    +  if (t != TY_STRING && t != TY_STRBUF && !(t == TY_POLY && !any_class_defines(c, "to_str"))) return 0;
+    +  return (expr_is_held_ref(c, v) || k == NK_GlobalVariableReadNode) && !strbuf_slot_ref(c, v, hs, sizeof hs);
+    +}
+     /* emit_array_mutate_stmt_body's String mutators done by reassigning the
+        receiver: replace, prepend, insert, concat, clear, delete_prefix! /
+        delete_suffix! (answers 1 emitted, 0 declined, -1 to go on) */
+    @@ -15911,6 +15943,9 @@ static int str_mutate_reassign_arms(Compiler *c, Buf *b, int indent, const NodeT
+           /* a fresh source (`x.replace(y + z)`, a shared String's copy) is held
+              by nothing while sp_str_from_bytes allocates the copy it reads */
+           if (operand_may_allocate(c, argv[0])) buf_printf(b, "SP_GC_ROOT_STR(_t%d); ", trep);
+    +      /* nor is one no call shows: a copy read as one side of a choice
+    +         (`t || K`), the String an object's to_str makes */
+    +      else if (!replace_source_is_held(c, argv[0], 0)) buf_printf(b, "SP_GC_ROOT_STR(_t%d); ", trep);
+           emit_expr(c, recv, b);
+           buf_printf(b, " = sp_str_from_bytes(_t%d, sp_str_byte_len(_t%d)); }\n", trep, trep);
+           return 1;
+
+How to read it. The function is asked only where master's test said no, so its leaves are call-free. It answers "held" for: a StringNode; an if with an else whose arms are one statement each, both held; `||` and `&&` with both sides held; and a leaf that is a local, an instance variable, a constant, self (expr_is_held_ref, master's) or a global read, typed String or StrBuf and not a strbuf_slot_ref (master's own test for "this read emits a copy"), or typed poly while no class defines to_str (any_class_defines, master's). Everything else is rooted: default-deny, and the root is the one master writes. The inverted test: a miss in the list costs a root, never a wrong answer.
+
+Two things to look at with the two probes every reader runs: nothing here holds a receiver ahead of arguments or reads one after them; the statement's order is master's, the root is added after the temp is assigned and before sp_str_from_bytes, inside the statement's own block.
+
+THE TABLES. Each row: CRuby's line | compile exit of the bare tip and of this head, and whether the generated C is equal | the bare tip's cells | this head's. A cell is gcc at SPINEL_GC_STRESS 0, 1, 2, then clang the same (real clang, by --cc=clang, in every table of this file). "ok" is CRuby's line with exit 0; a bracket holds the wrong line printed with exit 0 (a count of wrong rounds of 300); rcN an exit code.
+
+What master leaves wrong and this head makes right, and their neighbours (q4: a call in the condition, master's; q5: `k && t` with a boolean k, boxed, right on master, pays the root; q7: parentheses, master's; q9: a boxed value object, raises on both; q10: a boxed local, no class with to_str, master's C):
+  q10_poly_local_no_to_str | CRuby 0 | compile 0 0 C equal | base: ok ok ok / ok ok ok / head: ok ok ok / ok ok ok /
+  q1_or_shared | CRuby 0 | compile 0 0 C differs(2) | base: ok ok [300] / ok ok [300] / head: ok ok ok / ok ok ok /
+  q2_to_str_object | CRuby 0 | compile 0 0 C differs(2) | base: ok ok [300] / ok ok [300] / head: ok ok ok / ok ok ok /
+  q3_choice_local_cond | CRuby 0 | compile 0 0 C differs(2) | base: ok ok [294] / ok ok [294] / head: ok ok ok / ok ok ok /
+  q4_choice_call_cond | CRuby 0 | compile 0 0 C equal | base: ok ok ok / ok ok ok / head: ok ok ok / ok ok ok /
+  q5_and_shared | CRuby 0 | compile 0 0 C differs(2) | base: ok ok ok / ok ok ok / head: ok ok ok / ok ok ok /
+  q6_ivar_or | CRuby 0 | compile 0 0 C differs(2) | base: ok ok [300] / ok ok [300] / head: ok ok ok / ok ok ok /
+  q7_paren_shared | CRuby 0 | compile 0 0 C equal | base: ok ok ok / ok ok ok / head: ok ok ok / ok ok ok /
+  q8_to_str_ivar | CRuby 0 | compile 0 0 C differs(4) | base: ok ok [300] / ok ok [300] / head: ok ok ok / ok ok ok /
+  q9_poly_local | CRuby 0 | compile 0 0 C differs(2) | base: rc1 rc1 rc1 / rc1 rc1 rc1 / head: rc1 rc1 rc1 / rc1 rc1 rc1 /
+
+Held forms, cost forms and more choices (h01 to h07, h10, h20 are master's C; h08, h09 raise ahead of the root; h11 an assignment, h15 a to_str answering a shared String, h17 a begin block, h18 `a || t || "x"` pay the root and were right; h12 a case, h13 an unless, h14 both sides shared were wrong; h16 a value object in a choice raises on both; h19 an object with no to_str is refused at compile time on both):
+  h01_local | CRuby 0 | compile 0 0 C equal | base: ok ok ok / ok ok ok / head: ok ok ok / ok ok ok /
+  h02_choice_plain | CRuby 0 | compile 0 0 C equal | base: ok ok ok / ok ok ok / head: ok ok ok / ok ok ok /
+  h03_or_plain | CRuby 0 | compile 0 0 C equal | base: ok ok ok / ok ok ok / head: ok ok ok / ok ok ok /
+  h04_lit | CRuby 0 | compile 0 0 C equal | base: ok ok ok / ok ok ok / head: ok ok ok / ok ok ok /
+  h05_ivar | CRuby 0 | compile 0 0 C equal | base: ok ok ok / ok ok ok / head: ok ok ok / ok ok ok /
+  h06_const_global | CRuby 0 | compile 0 0 C equal | base: ok ok ok / ok ok ok / head: ok ok ok / ok ok ok /
+  h07_and_plain | CRuby 0 | compile 0 0 C equal | base: ok ok ok / ok ok ok / head: ok ok ok / ok ok ok /
+  h08_int | CRuby no implicit conversion of Integer into String "qrst" | compile 0 0 C differs(2) | base: ok ok ok / ok ok ok / head: ok ok ok / ok ok ok /
+  h09_nil | CRuby no implicit conversion of nil into String "qrst" | compile 0 0 C differs(2) | base: ok ok ok / ok ok ok / head: ok ok ok / ok ok ok /
+  h10_shared_local | CRuby 0 | compile 0 0 C equal | base: ok ok ok / ok ok ok / head: ok ok ok / ok ok ok /
+  h11_assign | CRuby 0 | compile 0 0 C differs(2) | base: ok ok ok / ok ok ok / head: ok ok ok / ok ok ok /
+  h12_case_shared | CRuby 0 | compile 0 0 C differs(2) | base: ok ok [100] / ok ok [100] / head: ok ok ok / ok ok ok /
+  h13_unless_shared | CRuby 0 | compile 0 0 C differs(2) | base: ok ok [150] / ok ok [150] / head: ok ok ok / ok ok ok /
+  h14_both_shared | CRuby 0 | compile 0 0 C differs(2) | base: ok ok [300] / ok ok [300] / head: ok ok ok / ok ok ok /
+  h15_to_str_shared | CRuby 0 | compile 0 0 C differs(2) | base: ok ok ok / ok ok ok / head: ok ok ok / ok ok ok /
+  h16_obj_choice | CRuby 0 | compile 0 0 C differs(2) | base: rc1 rc1 rc1 / rc1 rc1 rc1 / head: rc1 rc1 rc1 / rc1 rc1 rc1 /
+  h17_begin_shared | CRuby 0 | compile 0 0 C differs(2) | base: ok ok ok / ok ok ok / head: ok ok ok / ok ok ok /
+  h18_nested_or | CRuby 0 | compile 0 0 C differs(2) | base: ok ok ok / ok ok ok / head: ok ok ok / ok ok ok /
+  h19_obj_no_to_str | CRuby no implicit conversion of Plain into String "qrst" | compile 1 1 C differs(0) | base: NOBUILD / NOBUILD / head: NOBUILD / NOBUILD /
+  h20_param | CRuby 0 | compile 0 0 C equal | base: ok ok ok / ok ok ok / head: ok ok ok / ok ok ok /
+
+A boxed value object, whose to_str master does not send a boxed value to (conv_bridge_callee skips a value type): raises on both, also with the method reached elsewhere:
+  p1_poly_obj_reached | CRuby 0 "a!" | compile 0 0 C differs(2) | base: rc1 rc1 rc1 / rc1 rc1 rc1 / head: rc1 rc1 rc1 / rc1 rc1 rc1 /
+  p2_poly_str_to_str_class | CRuby 0 "a!" | compile 0 0 C differs(2) | base: ok ok ok / ok ok ok / head: ok ok ok / ok ok ok /
+  p3_obj_choice_reached | CRuby 0 "a!" | compile 0 0 C differs(2) | base: rc1 rc1 rc1 / rc1 rc1 rc1 / head: rc1 rc1 rc1 / rc1 rc1 rc1 /
+
+A boxed REFERENCE object (a class with a setter): its to_str runs, and nothing held its String (p1, p3); p2 is a boxed String in such a program, right on master, pays the root:
+  p1_poly_ref_obj | CRuby 0 | compile 0 0 C differs(2) | base: ok ok [150] / ok ok [150] / head: ok ok ok / ok ok ok /
+  p2_poly_str_ref_class | CRuby 0 "w!" | compile 0 0 C differs(2) | base: ok ok ok / ok ok ok / head: ok ok ok / ok ok ok /
+  p3_obj_choice_ref | CRuby 0 | compile 0 0 C differs(2) | base: ok ok [150] / ok ok [150] / head: ok ok ok / ok ok ok /
+
+The receiver a String two names hold (another arm, sp_String_set_bin): a choice is right there on master; an object does not build, on both:
+  r1_shared_recv_or | CRuby 0 | compile 0 0 C equal | base: ok ok ok / ok ok ok / head: ok ok ok / ok ok ok /
+  r2_shared_recv_object | CRuby 0 | compile 0 0 C equal | base: NOBUILD / NOBUILD / head: NOBUILD / NOBUILD /
+  r3_shared_recv_choice | CRuby 0 | compile 0 0 C equal | base: ok ok ok / ok ok ok / head: ok ok ok / ok ok ok /
+
+`k && t` with a String k (copied, wrong on master) and an elsif chain whose condition is a call (master's root):
+  a1_and_string_shared | CRuby 0 | compile 0 0 C differs(2) | base: ok ok [300] / ok ok [300] / head: ok ok ok / ok ok ok /
+  a2_elsif | CRuby 0 | compile 0 0 C equal | base: ok ok ok / ok ok ok / head: ok ok ok / ok ok ok /
+
+The body's three lead examples and the choice at 8,000 bytes (plain run, level 1, level 2):
+  l1_to_str | CRuby 0 | compile 0 0 C differs(2) | base: [4] [267] [179] / [4] [267] [179] / head: ok ok ok / ok ok ok /
+  l2_or | CRuby 0 | compile 0 0 C differs(2) | base: [1] [179] [179] / [1] [179] [179] / head: ok ok ok / ok ok ok /
+  l3_choice | CRuby 0 | compile 0 0 C differs(2) | base: [1] ok [36] / [1] ok [36] / head: ok ok ok / ok ok ok /
+  l4_small | CRuby "a0" "a1" "a2" | compile 0 0 C differs(2) | base: ok ok ["\xDB\xDB" "\xDB\xDB" "\xDB\xDB"] / ok ok ["\xDB\xDB" "\xDB\xDB" "\xDB\xDB"] / head: ok ok ok / ok ok ok /
+
+The ten class-method twins of the last read and the instance_eval ones: master's C on every one now (master roots the call); n05 and n06 fault at level 2 on both, as before (the new instance is held by nothing, ahead of this statement):
+  m01_class_method | CRuby 0 | compile 0 0 C equal | base: ok ok ok / ok ok ok / head: ok ok ok / ok ok ok /
+  m02_class_shift_self | CRuby 0 | compile 0 0 C equal | base: ok ok ok / ok ok ok / head: ok ok ok / ok ok ok /
+  m03_module_def_self | CRuby 0 | compile 0 0 C equal | base: ok ok ok / ok ok ok / head: ok ok ok / ok ok ok /
+  m04_struct_def_self | CRuby 0 | compile 0 0 C equal | base: ok ok ok / ok ok ok / head: ok ok ok / ok ok ok /
+  m05_in_a_block | CRuby 0 | compile 0 0 C equal | base: ok ok ok / ok ok ok / head: ok ok ok / ok ok ok /
+  m06_under_a_choice | CRuby 0 | compile 0 0 C equal | base: ok ok ok / ok ok ok / head: ok ok ok / ok ok ok /
+  m07_to_s | CRuby 0 | compile 0 0 C equal | base: ok ok ok / ok ok ok / head: ok ok ok / ok ok ok /
+  m08_or | CRuby 0 | compile 0 0 C equal | base: ok ok ok / ok ok ok / head: ok ok ok / ok ok ok /
+  m09_subclass | CRuby 0 | compile 0 0 C equal | base: ok ok ok / ok ok ok / head: ok ok ok / ok ok ok /
+  m10_accessor | CRuby 0 | compile 0 0 C equal | base: ok ok ok / ok ok ok / head: ok ok ok / ok ok ok /
+  n01_instance_eval_in_class_method | CRuby 0 | compile 0 0 C equal | base: ok ok ok / ok ok ok / head: ok ok ok / ok ok ok /
+  n02_instance_exec_in_class_method | CRuby 0 | compile 0 0 C equal | base: ok ok ok / ok ok ok / head: ok ok ok / ok ok ok /
+  n05_instance_eval_local_dest | CRuby 0 | compile 0 0 C equal | base: ok ok rc139 / ok ok rc139 / head: ok ok rc139 / ok ok rc139 /
+  n06_instance_exec_local_dest | CRuby 0 | compile 0 0 C equal | base: ok ok rc139 / ok ok rc139 / head: ok ok rc139 / ok ok rc139 /
+  n07_instance_eval_held_instance | CRuby 0 | compile 0 0 C equal | base: ok ok ok / ok ok ok / head: ok ok ok / ok ok ok /
+  n08_instance_exec_held_instance | CRuby 0 | compile 0 0 C equal | base: ok ok ok / ok ok ok / head: ok ok ok / ok ok ok /
+
+The superseded test of record (fourteen forms) compiled by both: the bare tip counts 600 of 4,200 wrong at level 2, this head none; the C differs in two statements, the `t || K` form and the object, and the other twelve forms are master's C:
+  string_replace_fresh_source_root | CRuby 0 "g299" "i299" | compile 0 0 C differs(4) | base: ok ok [600 "g299" "i299"] / ok ok [600 "g299" "i299"] / head: ok ok ok / ok ok ok /
+
+THE FAMILY: the 79 probe programs of the earlier reads, bare tip against this head, gcc and clang at levels 0, 1, 2: cells lost 0, cells cured 0: master's own change now makes right what the earlier heads made right there. 74 are CRuby's line in all twelve cells on both; the others answer otherwise than CRuby on both, with the same output cell for cell (1 = CRuby's line, s = the same output as the bare tip's):
+  k07_to_str_hash base:000000 head:0s0s0s0s0s0s loss:0 cure:0
+  v01_object_itself base:000000 head:0s0s0s0s0s0s loss:0 cure:0
+  v03_kernel_itself base:000000 head:0s0s0s0s0s0s loss:0 cure:0
+  v04_included_to_s base:000000 head:0s0s0s0s0s0s loss:0 cure:0
+  v05_prepended_to_s base:000000 head:0s0s0s0s0s0s loss:0 cure:0
+
+THE TEST OF RECORD, test/string_replace_choice_to_str_root.rb, seven lanes (plain, level 1, level 1 with the verifier, level 2, MINOR=0, MINOR=1, MINOR=1 with VERIFY_GEN at level 1), gcc and clang; rc0 is a wrong line with exit 0:
+  bare  string_replace_choice_to_str_root gcc:ok/ok/ok/rc0/ok/ok/ok clang:ok/ok/ok/rc0/ok/ok/ok
+  piece string_replace_choice_to_str_root gcc:ok/ok/ok/ok/ok/ok/ok clang:ok/ok/ok/ok/ok/ok/ok
+  piece share-strings string_replace_choice_to_str_root gcc:ok/ok/ok/ok/ok/ok/ok clang:ok/ok/ok/ok/ok/ok/ok
+  bare  share-strings string_replace_choice_to_str_root gcc:ok/ok/ok/rc0/ok/ok/ok clang:ok/ok/ok/rc0/ok/ok/ok
+On the bare tip at level 2 it prints 300 150 100 300 300 300 150 150 0: 1,750 of 2,400 wrong, the ninth count (held sources) 0 of 1,200.
+
+COMPILE TIME (callgrind, the compiler's own instructions with -c; bare tip | this head, both in one run). One line repeated 1,000 or 2,000 times:
+`s.replace(a)`, a local, 1,000: 488,132,727 | 489,169,834 (+0.21%)  C = the tip's
+`s.replace(a)`, a local, 2,000: 970,305,771 | 972,379,878 (+0.21%)  C = the tip's
+`s.replace(c ? a : "x")`, held sides, 1,000: 887,600,559 | 889,232,673 (+0.18%)  C = the tip's
+`s.replace(c ? a : "x")`, held sides, 2,000: 1,774,340,155 | 1,777,604,269 (+0.18%)  C = the tip's
+`s.replace(c ? t : "x")`, `t` two names hold, 1,000: 890,789,324 | 898,931,932 (+0.91%)  C gains the root
+`s.replace(c ? t : "x")`, `t` two names hold, 2,000: 1,780,895,100 | 1,797,218,288 (+0.92%)  C gains the root
+`s.replace(t || "x")`, 1,000: 636,715,250 | 644,604,962 (+1.24%)  C gains the root
+`s.replace(t || "x")`, 2,000: 1,268,767,093 | 1,284,659,165 (+1.25%)  C gains the root
+`s.replace(a + k)`, master's test roots it, 1,000: 1,079,750,196 | 1,079,750,317 (+0.00%)  C = the tip's
+`s.replace(a + k)`, master's test roots it, 2,000: 2,155,778,506 | 2,155,778,627 (+0.00%)  C = the tip's
+`s.replace(name)`, a reader with no receiver (master's test roots it), 1,000: 807,513,183 | 807,513,312 (+0.00%)  C = the tip's
+`s.replace(name)`, a reader with no receiver (master's test roots it), 2,000: 1,606,867,326 | 1,606,867,455 (+0.00%)  C = the tip's
+the test itself: 75,979,326 | 76,019,618
+The second test is asked once a statement whose source master's test passes; on a statement that keeps master's C it is +0.2%. Where the root is added the count also carries the emitting of it.
+
+RUN TIME (callgrind, 200,000 statements, the bare tip and this head; gcc then clang). c1 `k && t` with a boolean k, c2 `x = a`, c3 a boxed String beside a to_str class, c4 a begin block, c5 an object, c6 `t || "none"`, c7 `c ? t : "none"`, c8 `k && a`, c9 `a`:
+  gcc   c1_and_shared  tip 71073417  head 73875362
+  gcc   c2_assign  tip 62456126  head 65256772
+  gcc   c3_boxed_string  tip 62485675  head 65286295
+  gcc   c4_begin  tip 110477087  head 113277092
+  gcc   c5_object  tip 60060386  head 62861002
+  gcc   c6_or_copy  tip 106876162  head 110276163
+  gcc   c7_choice_copy  tip 107476161  head 110276163
+  gcc   c8_and_plain  tip 62656127  head 62656127
+  gcc   c9_plain  tip 62055618  head 62055618
+  clang c1_and_shared  tip 69851818  head 72653760
+  clang c2_assign  tip 62839097  head 65839740
+  clang c3_boxed_string  tip 61665452  head 64466059
+  clang c4_begin  tip 111075562  head 113875563
+  clang c5_object  tip 60441044  head 63241657
+  clang c6_or_copy  tip 107074640  head 111074639
+  clang c7_choice_copy  tip 107474640  head 110474639
+  clang c8_and_plain  tip 63039113  head 63039113
+  clang c9_plain  tip 62438603  head 62438603
+
+OWN CHECKS on this head, built from nothing, against the bare tip built from nothing
+- gate check rc=0 (`ruby tools/gate.rb check`, the commit staged);
+- corpus: programs 6707; not in the before file 0; changed 3; the three are the path-printing tests (conditional_require_line, require_expression_lines, source_file_required), whose frozen literal holds the build directory's path, the two trees standing in directories whose names differ in length;
+- make optcarrot rc=0 checksum: 59662 Optcarrot: OK ; optcarrot C equal to the reference's;
+- share-strings-test rc=0 seconds=2150: share-strings-test: pass
+- int-min-test rc=0 seconds=5: int-min-test: pass
+- merge into master's tip by my own ls-remote at 12:34:30 UTC 10-09 (tip 7232a8021458, 24 commits past a3892bb00; the move touches no function of the piece and none of the helpers it asks; the merged tree is fa069658003d): exit status 0.
+
+RECORDED, NOT TAKEN (side finds, for after the run): master's other callers of operand_may_allocate ask the same top-node question, so a choice with a shared String's copy on one side may be unrooted at those sites too (not measured); a boxed value object's to_str is not dispatched (raises where CRuby converts); an object as the source of a receiver two names hold does not build; master's line roots held sources it need not (`ar[1]`, `o.name`, `h[:k]`), upstream's choice.

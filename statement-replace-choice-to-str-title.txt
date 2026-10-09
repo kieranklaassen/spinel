@@ -1,0 +1,1 @@
+A shared String's copy in a choice and a to_str's String are rooted while replace copies them
