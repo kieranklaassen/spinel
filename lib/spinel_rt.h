@@ -9779,6 +9779,33 @@ static void sp_PolyPolyHash_update(sp_PolyPolyHash *a, sp_PolyPolyHash *b) {
     sp_PolyPolyHash_set(a, b->keys[idx], b->vals[idx]);
   }
 }
+/* A new Hash holding b's table as it stands: every entry in its slot, under
+   the hash it went in with. A key changed since then (an Array given one
+   more element) is found in the copy exactly where it is found in b; setting
+   the entries one by one would hash it again. The default is not taken. */
+static SP_UNUSED sp_PolyPolyHash *sp_PolyPolyHash_copy_table(sp_PolyPolyHash *b) {
+  SP_GC_ROOT(b);
+  sp_PolyPolyHash *a = sp_PolyPolyHash_new();
+  if (!b || !b->len) return a;
+  size_t n = (size_t)b->cap;
+  if (a->cap != b->cap) {
+    sp_pl_free(a->keys); sp_pl_free(a->vals); sp_pl_free(a->hs); sp_pl_free(a->order); sp_pl_free(a->occ);
+    a->cap = b->cap; a->mask = b->mask;
+    a->keys = (sp_RbVal *)sp_pl_alloc(n * sizeof(sp_RbVal));
+    a->vals = (sp_RbVal *)sp_pl_alloc(n * sizeof(sp_RbVal));
+    a->hs = (sp_int *)sp_pl_alloc(n * sizeof(sp_int));
+    a->order = (sp_int *)sp_pl_alloc(n * sizeof(sp_int));
+    a->occ = (sp_bool *)sp_pl_alloc(n * sizeof(sp_bool));
+  }
+  memcpy(a->keys, b->keys, n * sizeof(sp_RbVal));
+  memcpy(a->vals, b->vals, n * sizeof(sp_RbVal));
+  memcpy(a->hs, b->hs, n * sizeof(sp_int));
+  memcpy(a->order, b->order, (size_t)b->len * sizeof(sp_int));
+  memcpy(a->occ, b->occ, n * sizeof(sp_bool));
+  a->len = b->len;
+  sp_gc_wb((void *)a);
+  return a;
+}
 static void sp_marv_hash_set(sp_RbVal h, sp_RbVal k, sp_RbVal v) { sp_PolyPolyHash_set((sp_PolyPolyHash *)h.v.p, k, v); }
 /* Marshal's read of a boxed Hash's default value, nil for none, with
    *has_proc set where a default proc stands in for it (CRuby refuses to
@@ -12479,6 +12506,25 @@ static sp_Time sp_time_at_args(sp_RbVal args) {
   return sp_time_add_nsec(t, (int64_t)(sp_poly_to_f_with_rational(sub) * (double)mult));
 }
 sp_RbVal sp_poly_to_h_m(sp_RbVal v);
+/* Hash[v] with one boxed argument: a Hash gives a new Hash of its entries,
+   without its default and not frozen; anything else is the list of pairs
+   sp_poly_to_h_m reads. A boxed Hash's table is copied as it stands; a Hash
+   of another kind is read entry by entry, once. */
+static SP_UNUSED sp_RbVal sp_hash_brackets_one(sp_RbVal v) {
+  if (!(v.tag == SP_TAG_OBJ && sp_poly_is_hash_kind(v.cls_id))) return sp_poly_to_h_m(v);
+  if (v.cls_id == SP_BUILTIN_POLY_POLY_HASH)
+    return sp_box_obj(sp_PolyPolyHash_copy_table((sp_PolyPolyHash *)v.v.p), SP_BUILTIN_POLY_POLY_HASH);
+  SP_GC_ROOT_RBVAL(v);
+  sp_PolyPolyHash *r = sp_PolyPolyHash_new();
+  SP_GC_ROOT(r);
+  sp_int n = sp_poly_length(v);
+  for (sp_int i = 0; i < n; i++) {
+    sp_RbVal k, x;
+    sp_poly_hash_pair(v, i, &k, &x);
+    sp_PolyPolyHash_set(r, k, x);
+  }
+  return sp_box_obj(r, SP_BUILTIN_POLY_POLY_HASH);
+}
 /* Hash[*args]: the splatted list is Hash[]'s argument list. One argument is
    a Hash (copied) or a list of pairs; an even count alternates keys and
    values, which pair up into the list sp_poly_to_h_m reads. */

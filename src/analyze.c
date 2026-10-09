@@ -5902,6 +5902,7 @@ static void desugar_enum_chain_shapes(Compiler *c) {
           nt_node_set_ref(nt, id, "receiver", av0[0]);
           nt_node_set_ref(nt, id, "arguments", -1);
           nt_node_set_int(nt, id, "hash_brackets", 1);
+          g_hash_brackets_seen = 1;
           continue;
         }
         if (an >= 2 && an % 2 == 0 && an <= 64) {
@@ -39230,6 +39231,7 @@ void analyze_program(Compiler *c) {
   an_phase_storage(c);
   an_phase_value_types(c);
   an_phase_reconcile_check(c);
+  if (g_hash_brackets_seen) mark_hash_brackets_reads(c);
 
   if (getenv("SP_FIXPOINT_LOG"))
     fprintf(stderr, "[fp] rounds=%d%s\n", g_fixpoint_rounds,

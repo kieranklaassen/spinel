@@ -427,6 +427,30 @@ int str_in(const char *s, const char *const *set) {
   for (int i = 0; set[i]; i++) if (sp_streq(s, set[i])) return 1;
   return 0;
 }
+/* A Hash[v] of one argument that is no literal was rewritten to v.to_h: the
+   program has a Hash[] that may have to copy. */
+int g_hash_brackets_seen;
+/* Hash[h] is a new Hash of h's entries, and the emitter copies h unless the
+   call the copy is the receiver of only reads it: one of these with no block
+   neither keeps nor changes its receiver, so h itself serves there. The
+   desugar left `hash_brackets` at 1. analyze_program runs this last, when
+   every call node of the program is in the table, and one walk of them
+   makes it 2 where every call on the node is such a read and 3 where one is
+   not: the copy is made where it is odd. */
+void mark_hash_brackets_reads(Compiler *c) {
+  static const char *const readers[] = {
+    "size", "length", "empty?", "count", "keys", "values", "to_a", "first", "key?", "has_key?",
+    "include?", "member?", "[]", "fetch", "dig", "merge", "==", "inspect", "to_s", NULL };
+  NodeTable *nt = (NodeTable *)c->nt;
+  NT_FOREACH_KIND(nt, NK_CallNode, call) {
+    int recv = nt_ref(nt, call, "receiver");
+    int was = recv >= 0 ? (int)nt_int(nt, recv, "hash_brackets", 0) : 0;
+    if (!was) continue;
+    const char *nm = nt_str(nt, call, "name");
+    if (!nm || !str_in(nm, readers) || nt_ref(nt, call, "block") >= 0) nt_node_set_int(nt, recv, "hash_brackets", 3);
+    else if (was == 1) nt_node_set_int(nt, recv, "hash_brackets", 2);
+  }
+}
 int an_unparen(const NodeTable *nt, int n) {
   while (n >= 0 && nt_kind(nt, n) == NK_ParenthesesNode) {
     int pb = nt_ref(nt, n, "body"); int pn = 0;

@@ -313,6 +313,9 @@ int call_is_field_read(Compiler *c, int id, int *allocates);
 int hc_array(Compiler *c, int recv, int is_float, char *d, char *l, char *w, size_t cap);
 int hc_index_in_range(Compiler *c, int recv, int idx);
 extern int g_loop_polls_in_cond;   /* the next emit_loop_body leaves its polls to the loop's condition */
+extern int g_hash_conv_value;      /* the value emit_assign is converting to its slot's Hash kind, or -1 */
+extern int g_hash_brackets_seen;   /* the program holds a Hash[v] made v.to_h (analyze_util.c) */
+void emit_boxed_to_h_open(Compiler *c, int id, int t, Buf *b);
 int hc_string(Compiler *c, int recv, char *d, char *l, size_t cap);
 /* hc_array for a Float array whose in-range elements the reader needs to
    be no nil: *n names a length that is 0 while the array may hold one, or

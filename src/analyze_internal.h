@@ -349,6 +349,8 @@ int an_builtin_only_p(void);
 TyKind an_builtin_answer(Compiler *c, int id);
 int an_yield_site_builtin_answer(Compiler *c, int id, TyKind kind, TyKind *out);
 extern int g_scopes_settled;   /* analysis done (codegen_util.c) */
+extern int g_hash_brackets_seen;   /* the program holds a Hash[v] made v.to_h (analyze_util.c) */
+void mark_hash_brackets_reads(Compiler *c);   /* analyze_util.c */
 int poly_expr_flows_container(Compiler *c, int node);
 int rejoin_local_writes(Compiler *c);
 int widen_arrays_from_map_bang(Compiler *c);
