@@ -10162,12 +10162,17 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
     buf_printf(b, "int _uk%d = sp_unwind_kind, _ut%d = sp_unwind_target, _ue%d = sp_unwind_exc_top; sp_proc_home *_uh%d = sp_unwind_home;\n",
                eid, eid, eid, eid);
     /* an exception raised from inside this ensure takes the one unwinding
-       through it as its cause (#3745) */
+       through it as its cause (#3745). The ensure holds it as that object
+       from here on and raises the object again below, since the raw
+       message does not outlive the body: a begin the body enters takes
+       the slot it was read from, and an inner ensure that hands its
+       exception here has popped that slot's frame, so the next collection
+       frees it. The object owns its message */
     emit_indent(b, indent);
     buf_printf(b, "void *_ic%d = sp_inflight_cause;"
-                  " if (_excf%d) sp_inflight_cause = _excobj%d ? _excobj%d"
-                  " : (void *)sp_exc_new_for_catch(_exccls%d, _excmsg%d);\n",
-               eid, eid, eid, eid, eid, eid);
+                  " if (_excf%d) { if (!_excobj%d) _excobj%d = sp_exc_new_for_catch(_exccls%d, _excmsg%d);"
+                  " sp_inflight_cause = _excobj%d; }\n",
+               eid, eid, eid, eid, eid, eid, eid);
     /* The ensure's reads are not the method's return. Keep both a
        published handle and a fresh tail's cleared channel across them. */
     Scope *sc = comp_scope_of(c, id);
@@ -10260,8 +10265,7 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
          match; with no such frame, propagate to the outer ensure as before. */
       emit_indent(b, indent);
       if (g_exc_frame_depth > outer->exc_base + 1) {
-        buf_printf(b, "if (_excf%d) { sp_pending_exc_obj = _excobj%d; sp_raise_cls(_exccls%d, _excmsg%d); }\n",
-                   eid, eid, eid, eid);
+        buf_printf(b, "if (SP_UNLIKELY(_excf%d)) sp_raise_exc((sp_Exception *)_excobj%d);\n", eid, eid);
       }
       else {
         buf_printf(b, "if (_excf%d) { _excf%d = 1; _excmsg%d = _excmsg%d; _exccls%d = _exccls%d; _excobj%d = _excobj%d; sp_exc_top--; goto _ensure%d; }\n",
@@ -10269,9 +10273,9 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
       }
     }
     else {
-      /* Unhandled exception: re-raise using the saved class/message. */
+      /* Unhandled exception: re-raise the object the ensure held. */
       emit_indent(b, indent);
-      buf_printf(b, "if (_excf%d) { sp_pending_exc_obj = _excobj%d; sp_raise_cls(_exccls%d, _excmsg%d); }\n", eid, eid, eid, eid);
+      buf_printf(b, "if (SP_UNLIKELY(_excf%d)) sp_raise_exc((sp_Exception *)_excobj%d);\n", eid, eid);
     }
     g_retry_label = ens_saved_retry;
     g_retry_pops = ens_saved_retry_pops;
