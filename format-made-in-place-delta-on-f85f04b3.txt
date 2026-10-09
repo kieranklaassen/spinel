@@ -1,0 +1,48 @@
+Delta for the reader: the format piece on master f85f04b3a.
+
+1ea33dc5f307 (one commit on a3892bb00; body -v10, message -v7) is superseded and stays pushed. The new head is fffcc8f5fb2712f263334ab991866d7e7ec963d0, tree a237fc94575870d13587b56b42869bc1240c9019, one commit on master f85f04b3abef4b0540406948c56db7a51a420122. Texts: body -v11, message -v8, the OLD/NEW file -v10-to-v11. The title, the test and its .expected are as they were (the same blobs).
+
+WHAT CHANGED IN THE CODE (one statement, the single-argument arm of `%`, src/codegen_call_string.c). The whole delta against 1ea33dc5f307's change:
+
+-      int runs = operand_may_allocate(c, argv[0]) && !subtree_is_pure_read(c, argv[0]) && !arg_ran_first(an, 0);
+-      if (!fend && str_format_left_alone(c, recv, argv[0])) runs = 0;
++      /* not asked of a statement left alone, and the walk of the argument
++         (subtree_is_pure_read) last */
++      int runs = !(!fend && str_format_left_alone(c, recv, argv[0])) &&
++                 operand_may_allocate(c, argv[0]) && !arg_ran_first(an, 0) && !subtree_is_pure_read(c, argv[0]);
+-      else if (runs && (at == TY_INT || at == TY_FLOAT)) {
++      if (runs && (at == TY_INT || at == TY_FLOAT)) {
+
+The value of `runs` is the same in every case: the four questions have no effect and are asked in another order. It is a compile-time cut: a statement left alone no longer pays the walk of its argument. Proof by the C: 1ea33dc5f307's change replayed on f85f04b3a (tree eb3132ba53a7) and this head give the same C on all 6,738 programs under test/, benchmark/ and packages/*/test/ and on 625 probes (19 more build on neither).
+
+Compile time, callgrind, the compiler's own instructions with -c, one statement repeated; the bare tip | the plain replay | this head:
+  p held % (ar[k] + i * m), 1,000 lines:              4,419,878,101 | 4,424,370,289 (+0.10%) | 4,420,715,204 (+0.02%)
+  p held % (o.a_rather_long_reader + i), 1,000:       3,447,088,442 | 3,469,515,062 (+0.65%) | 3,447,783,825 (+0.02%)
+  p held % (o.a_rather_long_reader + i), 2,000:       6,890,450,351 | 6,936,649,141 (+0.67%) | 6,893,186,688 (+0.04%)
+  p "%5d|" % (o.a_rather_long_reader + i), 1,000:     3,087,130,670 | 3,110,718,032 (+0.76%) | 3,110,724,942 (+0.76%)
+  p "%5d|" % (o.a_rather_long_reader + i), 2,000:     6,173,105,732 | 6,220,288,538 (+0.76%) | 6,220,302,448 (+0.76%)
+Head only, the bare tip | this head: the first statement at 2,000, 8,840,199,166 | 8,842,336,536 (+0.02%); beside 1,000 setter calls (x_defs), 7,631,112,394 | 7,630,883,760 (-0.00%), and at 2,000, 17,107,302,474 | 17,108,006,586 (+0.00%); beside 1,000 `sub!` calls, 6,489,036,221 | 6,490,285,597 (+0.02%), and at 2,000, 15,879,229,454 | 15,881,720,257 (+0.02%); a literal format beside three readers, `p "%5d|" % (o.a_rather_long_reader + o.b_reader + o.c_reader + i)`, 14,468,788,300 | 14,530,966,996 (+0.43%) at 1,000 and 28,936,948,924 | 29,061,299,828 (+0.43%) at 2,000; the test, 90,696,636 | 91,037,386. Two runs of one binary on one file differ by up to 0.03% here (the output path's length), so +0.02% and -0.00% are the same.
+The pair that is left, +0.76%: a literal format beside an argument that names a call (a reader). The list of a single argument is rooted only where that argument makes something, and master's walk (subtree_is_pure_read) is what shows it makes nothing: about 23,600 instructions a statement, of the 3.09 million master spends on it. The body states it as the dearest of the pairs counted; "the largest pair found" is gone.
+
+THE BASE MOVED UNDER THE TEXTS. Upstream's "Bind a parenthesized operand in order like a call" (in f85f04b3a) binds the left operand into a rooted temporary itself where the right one is a non-String in parentheses. `held % (grow + 1)` prints "2" on master now, with gcc and with clang, for Ruby's "2|x". The piece's code needed no change for it: where master has bound the format, the piece finds it already in a temporary and leaves it, and the C is master's. What changed is what the texts may say about master, so every example and every number in body and message was run again on the bare tip:
+- the example of C's order is now a String argument, `held % (grow + "b")`, which master does not bind: gcc Ruby's line, clang "ab" (the same C before and after);
+- the example of the proof is now `held % (f + 1.0)` under the program's own Float#+ (master's C; gcc Ruby's line, clang "7.5"); `held % (ar[0] + 1)` under the program's own Array#[] prints "8" with both compilers on master and here;
+- the fifteen: all master's C; thirteen print the format without the append in every cell, the two with a String argument as they did;
+- at level 2 a freed slot is now stopped by the collector's own check (exit 134) where it raised or printed poison bytes: the 112 statements (33 raise and 7 stopped with gcc; 33 wrong and 7 stopped with clang; 53 with one or the other; here 105 and 108 right, the seven left with master's C), the test on master (stopped after its sixth line with both), `fmt(4) % ("q" + i.to_s)`;
+- with gcc in a plain run the test differs on master in four lines, not five: `(sb + "") % (grow_s(sb) + 1)` is right on master now.
+The OLD/NEW file has each passage.
+
+NO CELL LOST, NO RAISE MADE A WRONG LINE. 349 probe programs, the bare tip against this head, gcc and clang at levels 0, 1 and 2 (seven of them also with --share-strings): no cell that is right on the tip is lost and no raise or stop becomes a wrong line, by the statement. Two cases to name, both on record from the earlier rounds.
+- u04_own_made_format (twice in the sets): a `def` in a RUBY_ENGINE arm the compiler drops; the tip's gcc line equals CRuby's only because CRuby runs the dropped arm. The body's "Not in this change" has it.
+- three programs of several statements (formats made from one String an argument appends to) are stopped at their first statement on the bare tip at level 2 and run on here to later statements master answers wrong in a plain run too (an Array literal as the list runs ahead of the format's read). Split by the statement, ten programs: no raise becomes a wrong line, no cell is lost.
+
+OWN CHECKS on this head, built from nothing, against the bare tip f85f04b3a built from nothing
+- `ruby tools/gate.rb check`, the commit staged: exit 0;
+- the test, seven lanes, gcc and clang, plain and --share-strings: right in every one here; the bare tip: gcc rc0/rc0/rc0/rc134/rc0/rc0/rc0, clang ok/ok/ok/rc134/ok/ok/ok;
+- corpus: 6,738 programs, the C of 10 differs: the seven of the body and three that print the path of the build's own directory (in that alone). Lanes of the seven: poly_string_dup_unfrozen and benchmark_tms, clang level 2 wrong on the tip and right here; string_format_scalar_operands raises on the tip at level 2 with both and is right here; the other four as they were (promote_yield_operator_diverging_block_types exits 1 in every lane on both);
+- optcarrot: checksum 59662, C byte-identical;
+- `make share-strings-test`: pass; `make int-min-test`: pass;
+- the proof is asked twice under test/, benchmark/ and packages/*/test/ (the two yield_operator_diverging_block_types tests), and shown both times;
+- the hold of a constant changed in place as the format, with --share-strings: 13 instructions a statement with gcc, 26 with clang, as before.
+
+MASTER'S MOVE SINCE: f85f04b3a to 2d5b3d121 touches no function of the piece (the `%` arms, emit_str_format_held, format_arg_is_inert, format_name_is_builtin, str_format_left_alone and the rest) and none its proof reads (operand_may_allocate, subtree_is_pure_read, arg_ran_first, an_prog_never_gives, emit_boxed, emit_expr, emit_operands_in_order); the merge into 2d5b3d121 is clean by exit status.

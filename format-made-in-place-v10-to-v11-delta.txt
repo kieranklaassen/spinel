@@ -1,0 +1,153 @@
+The format piece's body, -v10 to -v11: every changed passage, OLD then NEW. Every other line is -v10's.
+
+OLD:
+$fmt = +"%d"
+def held = $fmt
+def grow = ($fmt << "|x"; 1)
+p held % (grow + 1)          # "2|x"
+```
+
+NEW:
+$fmt = +"%s"
+def held = $fmt
+def grow = ($fmt << "|x"; "a")
+p held % (grow + "b")        # "ab|x"
+```
+
+----
+
+OLD:
+gcc makes the list first, so `grow` has appended by the time `held` is read, and master prints Ruby's line; clang reads `held` first and prints `"2"`. A temporary read ahead of the argument would print `"2"` with both. So beside an argument that runs a call, a `yield` or a write, a call's answer keeps master's C byte for byte (`str_format_left_alone`), and with it the order the C compiler gives the two. A format the statement has already run into a temporary of its own (`fmt(4) % sq(i)`, both of them calls) is left there.
+
+NEW:
+gcc makes the list first, so `grow` has appended by the time `held` is read, and master prints Ruby's line; clang reads `held` first and prints `"ab"`. A temporary read ahead of the argument would print `"ab"` with both. So beside an argument that runs a call, a `yield` or a write, a call's answer keeps master's C byte for byte (`str_format_left_alone`), and with it the order master gives the two. A format the statement has already run into a temporary of its own is left there: `fmt(4) % sq(i)`, both of them calls, and beside a number in parentheses, `held % (grow + 1)`, where master reads the format first itself and prints `"2"` for Ruby's `"2|x"`, with gcc and with clang, on master and here.
+
+----
+
+OLD:
+$fmt = +"%d"
+class Array
+  def [](i) = ($fmt << "|x"; 7)
+end
+def held = $fmt
+ar = [1, 2]
+p held % (ar[0] + 1)         # "8|x"
+```
+
+Master's list of plain reads takes `ar[0] + 1` for one by the types alone. Here the statement keeps master's C, and its answer: Ruby's line with gcc, `"8"` with clang.
+
+NEW:
+$fmt = +"%.1f"
+class Float
+  def +(o) = ($fmt << "|x"; 7.5)
+end
+def held = $fmt
+f = 1.5
+p held % (f + 1.0)           # "7.5|x"
+```
+
+Master's list of plain reads takes `f + 1.0` for one by the types alone. Here the statement keeps master's C, and its answer: Ruby's line with gcc, `"7.5"` with clang.
+
+----
+
+OLD:
+The generated C of 7 of the 6,707 other programs under `test/`, `benchmark/` and `packages/*/test/` differs (on master a3892bb00)
+
+NEW:
+The generated C of 7 of the 6,738 other programs under `test/`, `benchmark/` and `packages/*/test/` differs (on master f85f04b3a)
+
+----
+
+OLD:
+at `SPINEL_GC_STRESS=2` master (a3892bb00) answers 40 otherwise than Ruby with gcc (each raises) and 40 with clang (33 print a wrong line and exit 0, 7 raise), 53 with one or the other. With this change all 112 are right at levels 0 and 1. At level 2, 105 are right with gcc and 108 with clang, and none prints a wrong line: the seven left raise as on master, with the same C (four with both compilers, three with gcc alone).
+
+NEW:
+at `SPINEL_GC_STRESS=2` master (f85f04b3a) answers 40 otherwise than Ruby with gcc (33 raise, 7 are stopped by the collector's own check, exit 134) and 40 with clang (33 print a wrong line and exit 0, 7 are stopped by that check), 53 with one or the other. With this change all 112 are right at levels 0 and 1. At level 2, 105 are right with gcc and 108 with clang, and none prints a wrong line: the seven left end as on master, with the same C (four stopped by that check with both compilers, three that raise with gcc alone).
+
+----
+
+OLD:
+Master prints another line for the last five with gcc, in a plain run.
+
+NEW:
+Master prints another line with gcc, in a plain run, for the last five but `(sb + "") % (grow_s(sb) + 1)`.
+
+----
+
+OLD:
+Fifteen programs put the question of the example above (`held % (grow + 1)`) to the other arms:
+
+NEW:
+Fifteen programs put the question of the example above to the other arms:
+
+----
+
+OLD:
+Each is master's C byte for byte. With gcc all fifteen are right at levels 0 and 1, and seven raise at level 2; with clang all fifteen print the format without the append at levels 0 and 1, and the same seven raise at level 2; on master and here alike. They are not in the test, having one answer with gcc and another with clang.
+
+NEW:
+Each is master's C byte for byte, and answers as on master in every cell. Thirteen print the format without the append at every level, with gcc and with clang: master reads the format into a temporary of its own ahead of such an argument. The two whose argument is a String are right with gcc and print the format without the append with clang at levels 0 and 1, and with either compiler are stopped by the collector's own check at level 2. They are not in the test, having other answers than Ruby's.
+
+----
+
+OLD:
+Four more look from the other side: the builtin's index is held and right; a reader, `t + i` in a program that says `inject(:+)`, and `v.x + i` beside a `def` of `+` in a class of the program's own, far from the argument, keep master's C and are right: the name is asked as the program writes it, a Symbol or a `def`, whatever the class.
+
+NEW:
+Four more look from the other side, and are right with master's C: the builtin's index, a reader, `t + i` in a program that says `inject(:+)`, and `v.x + i` beside a `def` of `+` in a class of the program's own, far from the argument: the name is asked as the program writes it, a Symbol or a `def`, whatever the class.
+
+----
+
+OLD:
+`fmt(4) % ("q" + i.to_s)` prints a wrong line at `SPINEL_GC_STRESS=2` with gcc and raises with clang, on master and here (the same C).
+
+NEW:
+`fmt(4) % ("q" + i.to_s)` is stopped by the collector's own check (exit 134) at `SPINEL_GC_STRESS=2`, with gcc and with clang, on master and here (the same C).
+
+----
+
+OLD:
+ The two are arguments of one C call, and master leaves their order to the C compiler. Where a call's answer is held, the call runs ahead of the argument's reads, as in Ruby: with `def held = ($ar[0] = 9; "%5d|" + "")` and `ar = $ar`, `held % (ar[0] + i * 2)` prints Ruby's line, where master with gcc reads `ar[0]` first.
+
+NEW:
+ The two are arguments of one C call, and master leaves their order to the C compiler.
+
+----
+
+OLD:
+On master (a3892bb00) it is right at levels 0 and 1 with clang, and with gcc prints another line for the five named above; at `SPINEL_GC_STRESS=2` it raises at its seventh line with gcc, and with clang prints `0xDB` bytes for its first three lines and its sixth, then raises.
+
+NEW:
+On master (f85f04b3a) it is right at levels 0 and 1 with clang, and with gcc prints another line for the four named above; at `SPINEL_GC_STRESS=2` it is stopped after its sixth line by the collector's own check (exit 134) with gcc and with clang, and with clang its first three lines and its sixth are `0xDB` bytes.
+
+----
+
+OLD:
+Run here on this commit on master a3892bb00, built from nothing
+
+NEW:
+Run here on this commit on master f85f04b3a, built from nothing
+
+----
+
+OLD:
+the generated C of the 6,707 other programs, changed in 7, the five
+
+NEW:
+the generated C of the 6,738 other programs, changed in 7 (three more print the path of the build's own directory and differ in that alone), the five
+
+----
+
+OLD:
+the compiler's own instructions on the test, 85,241,321 on master and 85,468,195 here, and over 1,000 and 2,000 lines of one statement: `p held % (ar[k] + i * m)`, 4,347,363,241 and 4,374,783,287 at 1,000 (+0.63%), 8,696,639,323 and 8,751,479,366 at 2,000 (+0.63%); the largest pair found is `p held % (o.a_rather_long_reader + i)`, an `attr_accessor`'s reader in the argument, 3,382,673,402 and 3,409,801,837 at 1,000 (+0.80%) and 6,765,878,767 and 6,820,137,341 at 2,000 (+0.80%), on statements that keep master's C.
+
+NEW:
+the compiler's own instructions on the test, 90,696,636 on master and 91,037,386 here, and over 1,000 and 2,000 lines of one statement that keeps master's C: `p held % (ar[k] + i * m)`, 4,419,878,101 and 4,420,715,204 at 1,000 (+0.02%), 8,840,199,166 and 8,842,336,536 at 2,000 (+0.02%); `p held % (o.a_rather_long_reader + i)`, an `attr_accessor`'s reader in the argument, 3,447,088,442 and 3,447,783,825 at 1,000 (+0.02%), 6,890,450,351 and 6,893,186,688 at 2,000 (+0.04%); and the dearest of the pairs counted, a literal format beside the same argument: `p "%5d|" % (o.a_rather_long_reader + i)`, 3,087,130,670 and 3,110,724,942 at 1,000 (+0.76%), 6,173,105,732 and 6,220,302,448 at 2,000 (+0.76%). What is paid there is the walk that shows the argument makes nothing (master's `subtree_is_pure_read`), about 23,600 instructions a statement.
+
+----
+
+OLD:
+- The index alone as the argument, under the program's own `Array#[]` above: `held % ar[0]` prints `"7"` for `"7|x"` with gcc and with clang, on master and here (the same C).
+
+NEW:
+- The index alone as the argument, under the program's own `Array#[]` (`class Array; def [](i) = ($fmt << "|x"; 7); end`): `held % ar[0]` prints `"7"` for `"7|x"` with gcc and with clang, on master and here (the same C).

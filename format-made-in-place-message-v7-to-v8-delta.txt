@@ -1,0 +1,18 @@
+The format piece's commit message, -v7 to -v8: every changed line, OLD then NEW. Every other line is -v7's.
+
+OLD:
+    $fmt = +"%d"
+NEW:
+    $fmt = +"%s"
+
+OLD:
+    def grow = ($fmt << "|x"; 1)
+    p held % (grow + 1)          # "2|x"
+NEW:
+    def grow = ($fmt << "|x"; "a")
+    p held % (grow + "b")        # "ab|x"
+
+OLD:
+the two: gcc prints the line above, clang prints "2". A format the
+NEW:
+the two: gcc prints the line above, clang prints "ab". A format the
