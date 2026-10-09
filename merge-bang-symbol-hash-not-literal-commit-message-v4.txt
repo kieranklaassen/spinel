@@ -1,0 +1,63 @@
+merge! and update take a Symbol-keyed Hash that is not a literal
+
+    h = {"a" => 1}
+    m = {b: 2}
+    h.merge!(m)
+    p h.to_a
+
+raised NoMethodError, "undefined method 'merge!' for an instance of
+Hash", where CRuby prints [["a", 1], [:b, 2]]. Written out at the
+call, `h.merge!({b: 2})`, it was right.
+
+A Hash literal is built as the general Hash when its slot is stored
+into with keys of more than one class. widen_mixed_key_hash_slots
+gathers those classes for each local, global, class variable and
+instance variable, and for merge! and update it read only the
+arguments that are Hash literals. A Hash held in a local was left to
+the usage fold (infer_write_container_usage), and
+fold_container_evidence widens a local for an Integer key but leaves a
+Hash of another kind as it is for a Symbol key. The receiver stayed a
+String-keyed Hash, emit_hash_call has no arm that merges a Symbol-keyed
+Hash into one, and the call was emitted as a missing method.
+
+The pass now counts a Symbol key for an argument that is no literal
+and whose variant is Symbol-keyed, unless the receiver is the general
+Hash already. The receiver's literal is then built as it is for
+`h.merge!({b: 2})`, and the merge is emitted by the arm that call
+uses. The argument can be a local, a parameter, a keyword rest, an
+instance variable, a constant, a method's value or one of two locals.
+The receiver can be a local, a global or a class variable, and an
+instance variable of the main object or one a subclass's method merges
+into: those two raised TypeError, "can't store Symbol as a key in a
+Hash of String keys through a boxed receiver".
+
+The kind of a Hash is settled when the program is compiled, from the
+stores it holds. A call behind a condition that is never true at run
+time widens its receiver all the same, as `h.merge!({b: 2}) if c` and
+`h[:b] = 2 if c` do: a program that master ran right because the call
+that would raise never ran now reads a String key in 197 instructions
+for 96 and stores one in 229 for 107 (callgrind), which is what the
+literal form costs on master.
+
+A call in a method that cannot run widens nothing: one that is not
+reachable and whose name the program writes nowhere, as a call, a Symbol
+or a String. Reachability is not asked alone, because it is settled
+before `send(:m)` is rewritten to the call it is. The names written are
+gathered once a pass, by the first such call, so many methods that
+cannot run cost one walk of the program and not one each. A program
+without such a call gets the C it had, and so does one whose receiver is
+empty, Symbol-keyed or Float-keyed: it has one key class, or is the
+general Hash already.
+
+Not changed: only a Symbol-keyed argument is read. A global or a class
+variable given a Hash of Integer or String keys that is no literal still
+raises (`$h = {"a" => 1}; m = {1 => 2}; $h.merge!(m)`), and the other
+direction is still refused at compile time (`h = {a: 1}; m = {"b" => 2};
+h.merge!(m)`). `h.merge!(**m)` still raises, and a boxed argument is
+not merged (`[{b: 2}, {c: 3}].each { |x| h.merge!(x) }` leaves h as it
+was). A receiver that is a second name for the Hash (`g = h;
+g.merge!(m)`), a copy (`h = {"a" => 1}.dup`), a constant or a method's
+value still raises; the first two are right when the argument is a
+literal.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

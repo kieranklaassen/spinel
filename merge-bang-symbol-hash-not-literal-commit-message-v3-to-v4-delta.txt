@@ -1,0 +1,30 @@
+--- merge-bang-symbol-hash-not-literal-commit-message-v3.txt
++++ merge-bang-symbol-hash-not-literal-commit-message-v4.txt
+@@ -35,8 +35,8 @@
+ stores it holds. A call behind a condition that is never true at run
+ time widens its receiver all the same, as `h.merge!({b: 2}) if c` and
+ `h[:b] = 2 if c` do: a program that master ran right because the call
+-that would raise never ran now reads a String key in 196 instructions
+-for 96 and stores one in 228 for 107 (callgrind), which is what the
++that would raise never ran now reads a String key in 197 instructions
++for 96 and stores one in 229 for 107 (callgrind), which is what the
+ literal form costs on master.
+ 
+ A call in a method that cannot run widens nothing: one that is not
+@@ -53,10 +53,11 @@
+ variable given a Hash of Integer or String keys that is no literal still
+ raises (`$h = {"a" => 1}; m = {1 => 2}; $h.merge!(m)`), and the other
+ direction is still refused at compile time (`h = {a: 1}; m = {"b" => 2};
+-h.merge!(m)`). `h.merge!(**m)` and a boxed argument (`[{b: 2}, {c:
+-3}].each { |x| h.merge!(x) }`) still raise. So does a receiver that is a
+-second name for the Hash (`g = h; g.merge!(m)`), a copy (`h = {"a" =>
+-1}.dup`), a constant or a method's value; the first two are right when
+-the argument is a literal.
++h.merge!(m)`). `h.merge!(**m)` still raises, and a boxed argument is
++not merged (`[{b: 2}, {c: 3}].each { |x| h.merge!(x) }` leaves h as it
++was). A receiver that is a second name for the Hash (`g = h;
++g.merge!(m)`), a copy (`h = {"a" => 1}.dup`), a constant or a method's
++value still raises; the first two are right when the argument is a
++literal.
+ 
+ Co-Authored-By: Claude Code <noreply@anthropic.com>
