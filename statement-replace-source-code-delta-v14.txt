@@ -1,0 +1,140 @@
+Code delta of the statement-replace piece: f8952568c04a (the head last read, verdict PASS with one find) re-cut as 05cef87ee8612c396fb16d753484bdcc6356a8c9, tree edd90c8e9ad789d386ba22b4c2450e4cd0e73d6c, one commit on master 4337d93cfc9b. The find is cut in the code: the line that takes a reader with no receiver now asks first whether the caller has an instance at all. The diff of the two heads is at the end.
+
+WHAT MOVED
+
+1. src/codegen_stmt.c, replace_source_is_slot_read: the receiverless line is taken only where the enclosing scope is not a class method outside an instance_eval or instance_exec block. In lines:
+
+    if (nt_ref(nt, v, "receiver") < 0) {
+      Scope *sc = comp_scope_of(c, v);
+      return t == TY_STRING && !(g_ie_class_id < 0 && sc && sc->is_cmethod) && implicit_self_is_field_read(c, v);
+    }
+
+   The scope is looked up once; the test is the one master writes at its own bare-call sites (`g_ie_class_id < 0 && esc && esc->is_cmethod`). The function's comment gains the clause "not in a class method, which has no instance and calls its own". Master's implicit_self_is_field_read does not ask this: it answers by the class's reader, and in `def self.put` the bare name is the class's own `def self.label`.
+
+2. The test of record gains the case, as a fourteenth form: `attr_reader :tag` beside `def self.tag = "c" + $g`, and a class method `made` that does `t.replace(tag)` on its own local. Its .expected is unchanged (the count stays 0). On master the test now counts 3,750 of 4,200 wrong at level 2 (was 3,450 of 3,900): the new form is wrong all 300 times there. The destination is the method's own local and not a parameter, because under --share-strings master does not build `s.replace(o)` (an object with to_str) once `s` has been handed to a method (sp_String_set_bin is given the object): a side find on master, recorded, not taken.
+
+3. Nothing else moves. Stable patch-ids by file, f8952568c04a | this head:
+  src/codegen_call.c: 55c9eace8db260a2 | 55c9eace8db260a2
+  src/codegen_stmt.c: fbff6fe40819e205 | 2e8a313b4737c0c3
+  src/codegen_internal.h: c5f112cfdf005ab6 | c5f112cfdf005ab6
+  test/string_replace_fresh_source_root.rb: 28b2112936e60fc5 | 184af1cf7eb0259b
+  test/string_replace_fresh_source_root.rb.expected: 0a8a131c28cff457 | 0a8a131c28cff457
+
+THE TEN TWINS (the find's shapes: a class method, `class << self`, a module's `def self.`, a Struct's, in a block, under a choice, with `.to_s`, with `||`, in a subclass, and with an attr_accessor). Each runs 300 rounds and counts; a cell is gcc at SPINEL_GC_STRESS 0, 1, 2, then clang at 0, 1, 2, for master 4337d93cfc9b ("base") and this head; "ok" is CRuby 3.3.6's line. All ten are wrong on master at level 2 with both compilers, right here in every cell, and their generated C here is the plain replay's (b15b78878f53) byte for byte:
+  m01_class_method | CRuby 0 | compile 0 0 C differs(4) | base: ok ok [300] / ok ok [300] / head: ok ok ok / ok ok ok /
+  m02_class_shift_self | CRuby 0 | compile 0 0 C differs(4) | base: ok ok [300] / ok ok [300] / head: ok ok ok / ok ok ok /
+  m03_module_def_self | CRuby 0 | compile 0 0 C differs(4) | base: ok ok [300] / ok ok [300] / head: ok ok ok / ok ok ok /
+  m04_struct_def_self | CRuby 0 | compile 0 0 C differs(4) | base: ok ok [300] / ok ok [300] / head: ok ok ok / ok ok ok /
+  m05_in_a_block | CRuby 0 | compile 0 0 C differs(4) | base: ok ok [300] / ok ok [300] / head: ok ok ok / ok ok ok /
+  m06_under_a_choice | CRuby 0 | compile 0 0 C differs(4) | base: ok ok [300] / ok ok [300] / head: ok ok ok / ok ok ok /
+  m07_to_s | CRuby 0 | compile 0 0 C differs(4) | base: ok ok [300] / ok ok [300] / head: ok ok ok / ok ok ok /
+  m08_or | CRuby 0 | compile 0 0 C differs(4) | base: ok ok [300] / ok ok [300] / head: ok ok ok / ok ok ok /
+  m09_subclass | CRuby 0 | compile 0 0 C differs(4) | base: ok ok [300] / ok ok [300] / head: ok ok ok / ok ok ok /
+  m10_accessor | CRuby 0 | compile 0 0 C differs(4) | base: ok ok [300] / ok ok [300] / head: ok ok ok / ok ok ok /
+
+Under instance_eval and instance_exec inside a class method the bare name is the instance's reader, and the line still takes it (master's C; the plain replay's differs by the root):
+  n01_instance_eval_in_class_method | CRuby 0 | compile 0 0 C equal | base: ok ok ok / ok ok ok / head: ok ok ok / ok ok ok /
+  n02_instance_exec_in_class_method | CRuby 0 | compile 0 0 C equal | base: ok ok ok / ok ok ok / head: ok ok ok / ok ok ok /
+  n05_instance_eval_local_dest | CRuby 0 | compile 0 0 C equal | base: ok ok rc139 / ok ok rc139 / head: ok ok rc139 / ok ok rc139 /
+  n06_instance_exec_local_dest | CRuby 0 | compile 0 0 C equal | base: ok ok rc139 / ok ok rc139 / head: ok ok rc139 / ok ok rc139 /
+  n07_instance_eval_held_instance | CRuby 0 | compile 0 0 C equal | base: ok ok ok / ok ok ok / head: ok ok ok / ok ok ok /
+  n08_instance_exec_held_instance | CRuby 0 | compile 0 0 C equal | base: ok ok ok / ok ok ok / head: ok ok ok / ok ok ok /
+   n05 and n06 make the instance in place (`new(...).instance_eval do ... end`): master, the plain replay and this head fault alike at level 2, the new instance being held by nothing while the block's String is made; that is master's, ahead of this statement, and the root on the read does not change it. n07 and n08 hand the instance in: right in every cell. n01 and n02 replace a String the block captures, which is the same C on master, the plain replay and here.
+
+THE PROBES OF THE LAST DELTA, run again on this head against master: the fifteen probes and the fifteen twins for a reader with no receiver, and the six S8 twins. Each has the generated C and the cells it had on f8952568c04a (the fifteen probes against the last delta's own sentences, the twins and the S8 programs row by row against their run on that head). Their clang cells in the last delta were made with gcc: the probe script named the compiler in a way spinel does not read (`CC=`, where it reads `--cc=`). They are made with clang now, on f8952568c04a and on this head, and are the same cells; no sentence of that file changes.
+
+COMPILE TIME (callgrind, the compiler's own instructions with `-c`; master 4337d93cfc9b | the plain replay | f8952568c04a where it was counted | this head). One line repeated 1,000 or 2,000 times:
+`s.replace(name)` in an instance method, 1,000: 795,237,048 | 807,702,459 (+1.57%) | 797,342,075 | 797,368,079 (+0.27%)  C = the tip's
+`s.replace(name)` in an instance method, 2,000: 1,582,331,011 | 1,607,128,024 (+1.57%) | 1,586,541,048 | 1,586,593,052 (+0.27%)  C = the tip's
+`s.replace(label)` in a class method, 1,000: 694,953,533 | 707,474,124 (+1.80%) | not counted | 707,579,005 (+1.82%)  C = the plain replay's
+`s.replace(label)` in a class method, 2,000: 1,381,777,464 | 1,407,068,769 (+1.83%) | not counted | 1,407,278,650 (+1.85%)  C = the plain replay's
+`s.replace(o.name)`, 1,000: 884,407,914 | 887,171,077 (+0.31%) | 887,237,944 | 887,237,948 (+0.32%)  C = the tip's
+`s.replace(o.name)`, 2,000: 1,762,277,543 | 1,767,803,714 (+0.31%) | 1,767,937,581 | 1,767,937,585 (+0.32%)  C = the tip's
+`s.replace("a" + i.to_s)`, 1,000: 1,606,820,635 | 1,612,530,578 (+0.36%) | 1,612,596,432 | 1,612,596,449 (+0.36%)  C = the plain replay's
+`s.replace("a" + i.to_s)`, 2,000: 3,214,446,815 | 3,226,301,307 (+0.37%) | 3,226,433,161 | 3,226,433,178 (+0.37%)  C = the plain replay's
+The condition costs nothing that can be told from the noise on the instance-method row. The class-method row pays what the plain replay pays: the root it writes.
+
+OWN CHECKS on this head, built from nothing
+- the test with its fourteenth form, seven lanes, gcc and clang: this head right in all fourteen, and with --share-strings; master wrong at SPINEL_GC_STRESS=2 with exit 0 (3,750 of 4,200 counted wrong, gcc and clang), right in the other six;
+- `ruby tools/gate.rb check`, the commit staged: exit 0;
+- corpus: 6,672 programs, the generated C of five differs from the bare tip's, the same five as on f8952568c04a: `string_replace_boxed_argument` and `string_replace_prepend_insert_clear` gain the root (both print their .expected in the fourteen lanes; on master the second is wrong at level 2), and three print the build directory's path (conditional_require_line, require_expression_lines, source_file_required). The generated C of all 6,672 is the same on f8952568c04a and on this head: no program there has the find's shape;
+- optcarrot: checksum 59662, its C equal to the bare tip's;
+- `make share-strings-test`: pass; `make int-min-test`: pass;
+- the family probes (79 programs), this head against the bare tip, gcc and clang at levels 0, 1 and 2: no cell lost, 25 programs cured at level 2, row for row what they were;
+- the test's compile count: 79,914,412 on master, 79,991,170 on the plain replay, 79,991,575 here (+0.10%), the C the plain replay's.
+
+TEXTS: body -v14 (statement-replace-source-v14.md), two lines changed against -v13, both in statement-replace-source-v13-to-v14-delta.txt as OLD and NEW: line 61, the clause for what stays rooted with no receiver gains the class method; line 96, the test's forms (fourteen, four named) and master's count (3,750 of 4,200). Lines 57 and 92 and the message's lines 30 to 31 stand as written. The message is -v7 byte for byte (statement-replace-source-squash-message-v7.txt). "Depends on: none".
+
+Master moved while the checks ran: f1a045ee40c0 by ls-remote at 11:03 UTC 10-09. The merge of this head into it exits 0, and the move touches none of the piece's functions (builtin_method_is_own, prog_has_hash_default_block, replace_source_answers_receiver, replace_source_is_held, replace_source_is_slot_read, str_mutate_reassign_arms) and none of the helpers they ask (implicit_self_is_field_read, comp_scope_of, call_is_field_read, expr_is_held_ref, strbuf_slot_ref, subtree_is_pure_read, any_class_defines). Every check above was run on 4337d93cfc9b.
+
+THE DIFF: git diff f8952568c04a 05cef87ee8612c396fb16d753484bdcc6356a8c9
+
+diff --git a/src/codegen_stmt.c b/src/codegen_stmt.c
+index 917f1cc46..d237a9bb6 100644
+--- a/src/codegen_stmt.c
++++ b/src/codegen_stmt.c
+@@ -15810,7 +15810,8 @@ static int builtin_method_is_own(Compiler *c, const char *cls, const char *nm) {
+    reader's or a Struct member's field (call_is_field_read), an element of
+    an Array (`ar[0]`, `ar.fetch(0)`, `ar.first`, `ar.last`) or a value of a
+    Hash (`h[:k]`, `h.fetch(:k)`), off a variable, a constant or self, or
+-   the class's own reader with no receiver (implicit_self_is_field_read)? It
++   the class's own reader with no receiver (implicit_self_is_field_read;
++   not in a class method, which has no instance and calls its own)? It
+    runs no code of the program's while Array or Hash has no method of that
+    name of the program's own, the index is a plain read, and no Hash of the
+    program has a default block (fetch with one key or one Integer index
+@@ -15820,7 +15821,10 @@ static int replace_source_is_slot_read(Compiler *c, int v) {
+   const NodeTable *nt = c->nt;
+   TyKind t = comp_ntype(c, v);
+   int recv = unwrap_parens(c, nt_ref(nt, v, "receiver")), alloc = 0;
+-  if (nt_ref(nt, v, "receiver") < 0) return t == TY_STRING && implicit_self_is_field_read(c, v);
++  if (nt_ref(nt, v, "receiver") < 0) {
++    Scope *sc = comp_scope_of(c, v);
++    return t == TY_STRING && !(g_ie_class_id < 0 && sc && sc->is_cmethod) && implicit_self_is_field_read(c, v);
++  }
+   if (recv < 0 || nt_ref(nt, v, "block") >= 0 ||
+       !(expr_is_held_ref(c, recv) || nt_kind(nt, recv) == NK_GlobalVariableReadNode))
+     return 0;
+diff --git a/test/string_replace_fresh_source_root.rb b/test/string_replace_fresh_source_root.rb
+index b6baf38a2..2aa51265c 100644
+--- a/test/string_replace_fresh_source_root.rb
++++ b/test/string_replace_fresh_source_root.rb
+@@ -4,10 +4,10 @@
+ # was held by nothing while that copy was allocated. So was a String two
+ # names hold: reading it as the source makes a copy, alone or as one side of
+ # a choice. So was the String an object's to_str makes, and the one the
+-# program's own Array#first or its own reader makes. An element the Array
+-# holds is read where it stands. Each round replaces through a local, a
+-# global and an instance variable and counts the ones that came out as
+-# another String.
++# program's own Array#first, its own reader or a class method of a reader's
++# name makes. An element the Array holds is read where it stands. Each
++# round replaces through a local, a global and an instance variable and
++# counts the ones that came out as another String.
+ # spinel: gc-stress
+ class Box
+   attr_reader :s
+@@ -38,8 +38,15 @@ class Array
+ end
+ 
+ class Label
++  attr_reader :tag
+   def initialize(n) = @name = n
+   def name = @name + "!"
++  def self.tag = "c" + $g
++  def self.made
++    t = +"qrst"
++    t.replace(tag)
++    t
++  end
+ end
+ 
+ def made(n) = "m" + n.to_s
+@@ -77,6 +84,7 @@ bad = 0
+   lab = Label.new("n" + i.to_s)
+   s.replace(lab.name)
+   bad += 1 unless s == "n#{i}!"
++  bad += 1 unless Label.made == "cg#{i}"
+   bad += 1 unless b.refill(i) == "sh#{i}"
+   bad += 1 unless b.fill(i) == "i#{i}"
+ end

@@ -1,0 +1,10 @@
+The statement-replace piece's body, -v13 to -v14: every changed line, OLD and NEW (lines 61 and 96; the message stays -v7, byte for byte)
+
+OLD: (with no receiver too: `name` under `def name = @name + "!"`, and a reader over a slot the class appends to in place, which reads a copy; master was wrong on both at `SPINEL_GC_STRESS=2`)
+NEW: (with no receiver too: `name` under `def name = @name + "!"`, a reader over a slot the class appends to in place, which reads a copy, and `name` in a class method, which has no instance and runs the class's own `def self.name`; master was wrong on all three at `SPINEL_GC_STRESS=2`)
+
+OLD: replaces through thirteen forms and counts the Strings that came out wrong; three of the forms are the program's own `Array#first`, an element the Array holds (`ar[1]`, which must stay master's C and be right) and a reader written by hand.
+NEW: replaces through fourteen forms and counts the Strings that came out wrong; four of the forms are the program's own `Array#first`, an element the Array holds (`ar[1]`, which must stay master's C and be right), a reader written by hand and a class method under a reader's name.
+
+OLD: and counts 3,450 of its 3,900 wrong at level 2 with exit 0
+NEW: and counts 3,750 of its 4,200 wrong at level 2 with exit 0
