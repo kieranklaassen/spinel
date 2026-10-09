@@ -1,0 +1,56 @@
+The format piece's body, -v9 to -v10: every changed line, OLD and NEW. The one commit is re-cut on master a3892bb00, which has merged the pull request "A method added to a builtin runs its receiver before its arguments": it depends on no other pull request now. Its message is -v7, one paragraph longer by a sentence, at the end of this file.
+
+OLD: and the showing is the one the pull request below brings (`an_prog_never_gives`), asked by the name alone
+NEW: and the showing is master's (`an_prog_never_gives`), asked by the name alone
+
+OLD: a Hash's value; and a choice between two of those (`c ? f : g`, `f || g`). A slot read counts only while the method is the builtin:
+NEW: a Hash's value; and a choice between two of those (`c ? f : g`, `f || g`). A variable or a constant that is read as a copy is not held (master's `operand_may_allocate` says which reads those are: a String two names hold, and with `--share-strings` a global or a constant changed in place): the copy is a String made where it is written, and is held as a call's answer is. With `KF = +"%5d"` and `KF << "|"`, `KF % i` was wrong in 300 rounds of 300 at `SPINEL_GC_STRESS=2` under `--share-strings` built with clang; built with gcc it was right, and pays 13 instructions a statement for the hold (26 with clang). A slot read counts only while the method is the builtin:
+
+OLD: differs (on master 4337d93cf with the pull request below beneath), each one with such a statement
+NEW: differs (on master a3892bb00), each one with such a statement
+
+OLD: The generated C of 7 of the 6,673 other programs
+NEW: The generated C of 7 of the 6,707 other programs
+
+OLD: at `SPINEL_GC_STRESS=2` the base (4337d93cf with the pull request below) answers 40 otherwise than Ruby
+NEW: at `SPINEL_GC_STRESS=2` master (a3892bb00) answers 40 otherwise than Ruby
+
+OLD: the seven left raise as on the base, with the same C
+NEW: the seven left raise as on master, with the same C
+
+OLD: On master (4337d93cf with the pull request below) it is right at levels 0 and 1 with clang
+NEW: Its last two lines are a constant and a global changed in place as the format, which are right on master without `--share-strings`. On master (a3892bb00) it is right at levels 0 and 1 with clang
+
+OLD: Run here on this commit on master 4337d93cf with the pull request below beneath, built from nothing:
+NEW: Run here on this commit on master a3892bb00, built from nothing:
+
+OLD: the generated C of the 6,673 other programs, changed in 7,
+NEW: the generated C of the 6,707 other programs, changed in 7,
+
+OLD: - [ ] Depends on: the pull request "A method added to a builtin runs its receiver before its arguments"
+NEW: - [ ] Depends on: none
+
+OLD: It depends on the pull request "A method added to a builtin runs its receiver before its arguments": this is one commit above it, and the proof that a name is the builtin's is the one it brings (`an_prog_never_gives`).
+NEW: It depends on no other pull request: the proof that a name is the builtin's (`an_prog_never_gives`) is in master.
+
+OLD: the compiler's own instructions on the test, 85,074,552 on the base and 85,355,770 here, and over 1,000 and 2,000 lines of one statement: `p held % (ar[k] + i * m)`, 4,045,480,586 and 4,074,819,225 at 1,000 (+0.73%), 8,092,778,908 and 8,151,355,327 at 2,000 (+0.72%); the largest pair found is `p held % (o.a_rather_long_reader + i)`, an `attr_accessor`'s reader in the argument, 3,176,852,077 and 3,205,246,573 at 1,000 (+0.89%) and 6,353,913,630 and 6,410,701,747 at 2,000 (+0.89%), on statements that keep master's C.
+NEW: the compiler's own instructions on the test, 85,241,321 on master and 85,468,195 here, and over 1,000 and 2,000 lines of one statement: `p held % (ar[k] + i * m)`, 4,347,363,241 and 4,374,783,287 at 1,000 (+0.63%), 8,696,639,323 and 8,751,479,366 at 2,000 (+0.63%); the largest pair found is `p held % (o.a_rather_long_reader + i)`, an `attr_accessor`'s reader in the argument, 3,382,673,402 and 3,409,801,837 at 1,000 (+0.80%) and 6,765,878,767 and 6,820,137,341 at 2,000 (+0.80%), on statements that keep master's C.
+
+THE MESSAGE, -v6 to -v7: one sentence added to the paragraph that begins "A format something else holds is read where it stands":
+OLD:
+between two of those (`c ? f : g`, `f || g`). A slot read counts
+only while the method is the builtin: where the program gives Array
+or Hash its own `[]`, `first` or `last`, or writes the reader by
+hand, the answer is a call's, and so is a Hash's value where a Hash
+of the program has a default block.
+
+NEW:
+between two of those (`c ? f : g`, `f || g`). A slot read counts
+only while the method is the builtin: where the program gives Array
+or Hash its own `[]`, `first` or `last`, or writes the reader by
+hand, the answer is a call's, and so is a Hash's value where a Hash
+of the program has a default block. A variable or a constant read
+as a copy (operand_may_allocate: a String two names hold, and with
+--share-strings a global or a constant changed in place) is not
+held either: the copy is held as a call's answer is.
+

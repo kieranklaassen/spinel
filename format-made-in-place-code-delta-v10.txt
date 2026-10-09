@@ -1,0 +1,5226 @@
+Code delta of the format piece: cfcae9ef9624 (one commit above the carried base ec35ec490703) re-cut as 1ea33dc5f3077e3e7064043cfe5d74457b7ee3ea, tree a67d2e1310e6a6528b72c5419c2b328d3b12cd6d, one commit on master a3892bb0036656805b51316ea5c205d0cdf6b2d0. Master has merged the pull request "A method added to a builtin runs its receiver before its arguments" (its commit and the carried base have the same tree and stable patch-id), so the piece stands on master alone: "Depends on: none". Texts: body -v10, message -v7, the OLD/NEW file -v9-to-v10.
+
+IT IS A RE-CUT, NOT A PLAIN REPLAY. The read patch applies to this master without a conflict and its test is right in the fourteen lanes, but two of master's own moves reach the piece's generated C beyond what body -v9 said. One is mended in the code (1), the other is the piece's rule working on a read master newly calls a copy (2).
+
+WHAT MOVED
+
+1. src/codegen_call_string.c, boxed_number_value: a third spelling. Master now boxes a yield's Integer that is never nil by a new call, `sp_box_int_nn(X)` (the YieldNode arm of emit_boxed, src/codegen.c). The function knew the type's two box calls, so on this master it answered NULL for that text and the arm fell back to its safe form: the one-element list rooted, where on the old base the Integer was taken into a C temporary ahead of the list and nothing was rooted. Right in every cell either way; the body's sentences ("a `yield` ... is taken into a C temporary ... nothing is rooted", "An Integer a call or a `yield` answers costs nothing") were false of the plain replay. The whole change:
+
+    diff --git a/src/codegen_call_string.c b/src/codegen_call_string.c
+    index 5c68dbe8e..5dd95c4b1 100644
+    --- a/src/codegen_call_string.c
+    +++ b/src/codegen_call_string.c
+    @@ -13,11 +13,12 @@
+     /* a Regexp literal's match / match? / ===, the match family on a String, gsub, and String#% */
+     /* The text emit_boxed gives an Integer or a Float is most often one box
+        call around the value, `FN(X)`. Where `text` has that shape its X is cut
+    -   out in place and FN is answered; NULL for any other shape. */
+    +   out in place and FN is answered; NULL for any other shape. A yield's
+    +   Integer that is never nil is boxed by sp_box_int_nn. */
+     static const char *boxed_number_value(char *text, TyKind at, char **val) {
+    -  const char *fns[2] = { ty_box_fn(at), ty_box_nil_fn(at) };
+    +  const char *fns[3] = { ty_box_fn(at), ty_box_nil_fn(at), at == TY_INT ? "sp_box_int_nn" : NULL };
+       size_t len = text ? strlen(text) : 0;
+    -  for (int i = 0; i < 2; i++) {
+    +  for (int i = 0; i < 3; i++) {
+         size_t n = fns[i] ? strlen(fns[i]) : 0, k = n;
+         int depth = 0;
+         if (!n || len < n + 2 || strncmp(text, fns[i], n) || text[n] != '(' || text[len - 1] != ')') continue;
+
+   "sp_box_int" cannot match the text "sp_box_int_nn(": the function wants `(` right after the name. FN is answered and reused to box the temporary, so the box call written is master's own.
+
+2. A global or a constant changed in place, under --share-strings: no code change. format_is_held has asked master's operand_may_allocate from the start ("a read master says makes a copy is not held"; its comment names "a copy of a shared String"). Master's helper now also answers yes for a share-marked static read, so with --share-strings such a read as the format is held in a rooted temporary, as a String two names hold in a local already was. It is a fault on the bare tip: y6 below. Without --share-strings the read is not share-marked and the C is master's. The body gains one sentence and the message one; the test gains two lines so the form has a test of record:
+
+    diff --git a/test/array_constructor_splat.rb b/test/array_constructor_splat.rb
+    new file mode 100644
+    index 000000000..d4e6eb3f2
+    --- /dev/null
+    +++ b/test/array_constructor_splat.rb
+    @@ -0,0 +1,27 @@
+    +# spinel: share
+    +# spinel: gc-minor
+    +# spinel: gc-stress
+    +# Constructor splats separate the size from the fill at either length.
+    +p Array.new(*[2, 7])
+    +p Array.new(*[])
+    +p Array.new(*[3]) { |i| i + 1 }
+    +def array_forward(*args) = Array.new(*args)
+    +p array_forward(2, 7)
+    +p array_forward
+    +p array_forward(2)
+    +y = [4]
+    +y << 9
+    +p Array.new(*y)
+    +p Array.new(*y.take(2))
+    +z = [8, 9]
+    +z.pop
+    +p Array.new(2, *z)
+    +begin
+    +  array_forward(1, 2, 3)
+    +rescue ArgumentError
+    +  p 99
+    +end
+    +
+    +# A block overrides the fill, including its inferred element representation.
+    +p Array.new(*[2, 3]) { |i| i * 5 }
+    +p Array.new(2, 3) { |i| i * 5 }
+    diff --git a/test/array_constructor_splat.rb.expected b/test/array_constructor_splat.rb.expected
+    new file mode 100644
+    index 000000000..f06a57c51
+    --- /dev/null
+    +++ b/test/array_constructor_splat.rb.expected
+    @@ -0,0 +1,12 @@
+    +[7, 7]
+    +[]
+    +[1, 2, 3]
+    +[7, 7]
+    +[]
+    +[nil, nil]
+    +[9, 9, 9, 9]
+    +[9, 9, 9, 9]
+    +[8, 8]
+    +99
+    +[0, 5]
+    +[0, 5]
+    diff --git a/test/array_sum_native_paths.rb b/test/array_sum_native_paths.rb
+    new file mode 100644
+    index 000000000..3e4629647
+    --- /dev/null
+    +++ b/test/array_sum_native_paths.rb
+    @@ -0,0 +1,42 @@
+    +# spinel: int64
+    +# spinel: share
+    +# spinel: gc-minor
+    +# Native sums preserve the empty seed, full-width integers, and Float consumers.
+    +def show_native_sum
+    +  r = yield
+    +  p r
+    +end
+    +m = -(2**62) - 2**62
+    +show_native_sum { [m].sum }
+    +show_native_sum { [m, 5].sum }
+    +show_native_sum { [m, 5].sum(1) }
+    +show_native_sum { [m, 5].sum(0.5) }
+    +show_native_sum { [m].sum { |x| x } }
+    +show_native_sum { [m, 5].inject(:+) }
+    +p [m].sum
+    +p [m].sum { |x| x }
+    +a = [0.5, 1.25]
+    +e = a.take(0)
+    +p [a.sum.class, e.sum.class]
+    +p [a.sum { |x| x * 2.0 }, e.sum { |x| x * 2.0 }]
+    +p [a.sum(3) { |x| x }, e.sum(3) { |x| x }]
+    +t = 0.0
+    +3.times { t += a.sum; t += e.sum }
+    +p [t, t.class]
+    +a.clear
+    +t += a.sum
+    +p [t, t.class]
+    +seed_calls = 0
+    +p e.sum(begin; seed_calls += 1; 7; end) { |x| x }
+    +p seed_calls
+    +# A boxed receiver keeps the typed array's element-nil fact.
+    +missing = [1][ARGV.size + 9]
+    +maybe = [nil, true][ARGV.size]
+    +boxed = maybe || [missing, 3]
+    +begin
+    +  p boxed.sum
+    +rescue TypeError => ex
+    +  p ex.class
+    +end
+    +boxed_min = maybe || [m, 5]
+    +p boxed_min.sum
+    diff --git a/test/array_sum_native_paths.rb.expected b/test/array_sum_native_paths.rb.expected
+    new file mode 100644
+    index 000000000..bb7034953
+    --- /dev/null
+    +++ b/test/array_sum_native_paths.rb.expected
+    @@ -0,0 +1,17 @@
+    +-9223372036854775808
+    +-9223372036854775803
+    +-9223372036854775802
+    +-9.223372036854776e+18
+    +-9223372036854775808
+    +-9223372036854775803
+    +-9223372036854775808
+    +-9223372036854775808
+    +[Float, Integer]
+    +[3.5, 0]
+    +[4.75, 3]
+    +[5.25, Float]
+    +[5.25, Float]
+    +7
+    +1
+    +TypeError
+    +-9223372036854775803
+    diff --git a/test/array_sum_seed_classes.rb b/test/array_sum_seed_classes.rb
+    new file mode 100644
+    index 000000000..daaffde22
+    --- /dev/null
+    +++ b/test/array_sum_seed_classes.rb
+    @@ -0,0 +1,74 @@
+    +# spinel: int64
+    +# spinel: share
+    +# spinel: gc-minor
+    +# Sum keeps the seed class when empty and boxes a seed of another class.
+    +ia = [1, 2, 3]
+    +fa = [0.5, 0.25]
+    +sa = ["a", "b"]
+    +p ia.sum(Rational(1, 2)) { |x| x }
+    +p ia.sum(Rational(1, 3)) { |x| Rational(x, 2) }
+    +p ia.sum(Complex(1, 1)) { |x| x }
+    +p fa.sum(Rational(1, 2)) { |x| x }
+    +p fa.sum(Complex(1, 1)) { |x| x }
+    +p ia.sum(2**70) { |x| x }
+    +p ia.take(0).sum(Rational(1, 2)) { |x| x }
+    +p ia.take(0).sum(Complex(1, 2)) { |x| x }
+    +p ia.take(0).sum([]) { |x| x }
+    +r = ia.sum(Rational(1, 2)) { |x| x }
+    +p r.class
+    +p sa.sum([]) { |x| [x] }
+    +p sa.take(0).sum([]) { |x| [x] }
+    +q = +"q"
+    +p [q, 1].take(1).sum([]) { |el| [el] }
+    +p [1.5].take(0).sum
+    +p [1.5].take(0).sum.class
+    +p [1.5].take(0).sum(3)
+    +p [1.5].take(0).sum(3) { |x| x }
+    +p [1.0].take(0).sum(-0.0) { |x| x }
+    +p [1.0].take(0).sum(-0.0)
+    +p [Float::INFINITY, 1.0].sum { |x| x }
+    +p [1.0, Float::INFINITY].sum { |x| x }
+    +p [1, 2].sum { |x| x == 1 ? Float::INFINITY : 1.0 }
+    +p [Float::INFINITY, -Float::INFINITY].sum { |x| x }.nan?
+    +p [1e100, 1.0, -1e100].sum { |x| x }
+    +p ["a\0b", "c"].sum("x\0").bytes
+    +s = +"seed"
+    +r = ["x"].sum(s)
+    +p [s, r, r.equal?(s), r.frozen?]
+    +p ["x"].take(0).sum("seed").frozen?
+    +p [[1], [2, 3], []].sum([0])
+    +begin
+    +  [[1], 2, [3]].sum([])
+    +rescue TypeError => e
+    +  p e.message
+    +end
+    +begin
+    +  r = [[1]].take(0).sum([].freeze)
+    +  r << 1
+    +rescue FrozenError => e
+    +  p e.message
+    +end
+    +
+    +total = 0
+    +3.times { |i| total += [i, 1.5].sum }
+    +p total
+    +total_seeded = 0
+    +3.times { |i| total_seeded += [i, 1.5].sum(i) }
+    +p total_seeded
+    +# The numeric accumulator also widens for a boxed value without a sum.
+    +plain = 0
+    +3.times { plain += [1.5, "unused"][0] }
+    +p plain
+    +
+    +p [1].take(0).sum(-0.0)
+    +$sum_order = []
+    +def sum_int_items
+    +  $sum_order << :array
+    +  [1, 2]
+    +end
+    +def sum_float_seed
+    +  $sum_order << :seed
+    +  0.5
+    +end
+    +p sum_int_items.sum(sum_float_seed)
+    +p $sum_order
+    diff --git a/test/array_sum_seed_classes.rb.expected b/test/array_sum_seed_classes.rb.expected
+    new file mode 100644
+    index 000000000..810dc2955
+    --- /dev/null
+    +++ b/test/array_sum_seed_classes.rb.expected
+    @@ -0,0 +1,36 @@
+    +(13/2)
+    +(10/3)
+    +(7+1i)
+    +1.25
+    +(1.75+1i)
+    +1180591620717411303430
+    +(1/2)
+    +(1+2i)
+    +[]
+    +Rational
+    +["a", "b"]
+    +[]
+    +["q"]
+    +0
+    +Integer
+    +3
+    +3
+    +-0.0
+    +-0.0
+    +Infinity
+    +Infinity
+    +Infinity
+    +true
+    +1.0
+    +[120, 0, 97, 0, 98, 99]
+    +["seed", "seedx", false, false]
+    +true
+    +[0, 1, 2, 3]
+    +"no implicit conversion of Integer into Array"
+    +"can't modify frozen Array: []"
+    +7.5
+    +10.5
+    +4.5
+    +-0.0
+    +3.5
+    +[:array, :seed]
+    diff --git a/test/array_sum_user_block.rb b/test/array_sum_user_block.rb
+    new file mode 100644
+    index 000000000..29332534f
+    --- /dev/null
+    +++ b/test/array_sum_user_block.rb
+    @@ -0,0 +1,16 @@
+    +# spinel: share
+    +# spinel: gc-minor
+    +# A block sum reaches the seed's operator even without a direct call to it.
+    +class SumVector
+    +  attr_reader :x
+    +  def initialize(x)
+    +    @x = x
+    +  end
+    +  def +(other)
+    +    SumVector.new(@x + other.x)
+    +  end
+    +end
+    +vs = [SumVector.new(1), SumVector.new(2)]
+    +r = vs.sum(SumVector.new(10)) { |v| v }
+    +p r.x
+    +p vs.take(0).sum(SumVector.new(10)) { |v| v }.x
+    diff --git a/test/array_sum_user_block.rb.expected b/test/array_sum_user_block.rb.expected
+    new file mode 100644
+    index 000000000..f844fb463
+    --- /dev/null
+    +++ b/test/array_sum_user_block.rb.expected
+    @@ -0,0 +1,2 @@
+    +13
+    +10
+    diff --git a/test/array_sum_user_coerce.rb b/test/array_sum_user_coerce.rb
+    new file mode 100644
+    index 000000000..e08b69bc2
+    --- /dev/null
+    +++ b/test/array_sum_user_coerce.rb
+    @@ -0,0 +1,19 @@
+    +# spinel: share
+    +# spinel: gc-minor
+    +# An Integer seed reaches the element's operator through coerce.
+    +class SumMoney
+    +  attr_reader :c
+    +  def initialize(c)
+    +    @c = c
+    +  end
+    +  def +(other)
+    +    SumMoney.new(@c + other.c)
+    +  end
+    +  def coerce(n)
+    +    [SumMoney.new(n), self]
+    +  end
+    +end
+    +ms = [SumMoney.new(1), SumMoney.new(2)]
+    +p ms.sum(0).c
+    +p ms.sum.c
+    +p ms.sum(5) { |m| m }.c
+    diff --git a/test/array_sum_user_coerce.rb.expected b/test/array_sum_user_coerce.rb.expected
+    new file mode 100644
+    index 000000000..2aaf4b6c6
+    --- /dev/null
+    +++ b/test/array_sum_user_coerce.rb.expected
+    @@ -0,0 +1,3 @@
+    +3
+    +3
+    +8
+    diff --git a/test/autoload_dir_interpolation.rb b/test/autoload_dir_interpolation.rb
+    new file mode 100644
+    index 000000000..3ef546c02
+    --- /dev/null
+    +++ b/test/autoload_dir_interpolation.rb
+    @@ -0,0 +1,11 @@
+    +# autoload with a "#{__dir__}/path" argument, the layout a gem's lib/x.rb
+    +# uses to name its own files (rdoc's lib/rdoc.rb has 85 of them): the path is
+    +# the file's own directory plus a literal, so it is loaded eagerly as a
+    +# require_relative, the same as a plain literal path. Any other interpolation
+    +# stays a computed path and is left alone.
+    +require_relative "autoload_dir_interpolation/adi"
+    +p Adi::Thing.hi
+    +p Adi.name_of
+    +p Adi::Other::DEEP
+    +p Adi.late_class.name
+    +raise "line numbers moved" unless __LINE__ == 11
+    diff --git a/test/autoload_dir_interpolation.rb.expected b/test/autoload_dir_interpolation.rb.expected
+    new file mode 100644
+    index 000000000..959b3d79d
+    --- /dev/null
+    +++ b/test/autoload_dir_interpolation.rb.expected
+    @@ -0,0 +1,4 @@
+    +:hi
+    +"Adi::Thing"
+    +[1, 2]
+    +"Adi::Late"
+    diff --git a/test/autoload_dir_interpolation/adi.rb b/test/autoload_dir_interpolation/adi.rb
+    new file mode 100644
+    index 000000000..b482f4d29
+    --- /dev/null
+    +++ b/test/autoload_dir_interpolation/adi.rb
+    @@ -0,0 +1,8 @@
+    +# spliced by main: the autoloads name files beside this one through __dir__
+    +module Adi
+    +  autoload :Thing, "#{__dir__}/adi/thing"
+    +  autoload(:Other, "#{__dir__}/adi/other")
+    +  def self.name_of = Thing.name
+    +  def self.late_class = Late
+    +  autoload :Late,  "#{__dir__}/adi/late.rb"
+    +end
+    diff --git a/test/autoload_dir_interpolation/adi/late.rb b/test/autoload_dir_interpolation/adi/late.rb
+    new file mode 100644
+    index 000000000..109c71400
+    --- /dev/null
+    +++ b/test/autoload_dir_interpolation/adi/late.rb
+    @@ -0,0 +1,3 @@
+    +module Adi
+    +  class Late; end
+    +end
+    diff --git a/test/autoload_dir_interpolation/adi/other.rb b/test/autoload_dir_interpolation/adi/other.rb
+    new file mode 100644
+    index 000000000..68f378be2
+    --- /dev/null
+    +++ b/test/autoload_dir_interpolation/adi/other.rb
+    @@ -0,0 +1,5 @@
+    +module Adi
+    +  module Other
+    +    DEEP = [1, 2]
+    +  end
+    +end
+    diff --git a/test/autoload_dir_interpolation/adi/thing.rb b/test/autoload_dir_interpolation/adi/thing.rb
+    new file mode 100644
+    index 000000000..e0d26ed57
+    --- /dev/null
+    +++ b/test/autoload_dir_interpolation/adi/thing.rb
+    @@ -0,0 +1,5 @@
+    +module Adi
+    +  class Thing
+    +    def self.hi = :hi
+    +  end
+    +end
+    diff --git a/test/bare_const_compact_class_path_raises.rb b/test/bare_const_compact_class_path_raises.rb
+    new file mode 100644
+    index 000000000..54a348b29
+    --- /dev/null
+    +++ b/test/bare_const_compact_class_path_raises.rb
+    @@ -0,0 +1,15 @@
+    +# `class A::B` puts only A::B in the body's lexical scope, not A: reading
+    +# LIMIT there raises NameError (uninitialized constant A::B::LIMIT) when it
+    +# runs, as in CRuby. spinel read A::LIMIT, and later refused the program.
+    +module A
+    +  LIMIT = 3
+    +end
+    +class A::B
+    +  def self.limit = LIMIT
+    +end
+    +begin
+    +  p A::B.limit
+    +rescue NameError => e
+    +  p e.message
+    +end
+    +p A::LIMIT
+    diff --git a/test/bare_const_compact_class_path_raises.rb.expected b/test/bare_const_compact_class_path_raises.rb.expected
+    new file mode 100644
+    index 000000000..74e01db87
+    --- /dev/null
+    +++ b/test/bare_const_compact_class_path_raises.rb.expected
+    @@ -0,0 +1,2 @@
+    +"uninitialized constant A::B::LIMIT"
+    +3
+    diff --git a/test/bare_const_unreachable_raises_at_run.rb b/test/bare_const_unreachable_raises_at_run.rb
+    new file mode 100644
+    index 000000000..ce9ae2e20
+    --- /dev/null
+    +++ b/test/bare_const_unreachable_raises_at_run.rb
+    @@ -0,0 +1,24 @@
+    +# X is defined only as A::X. CRuby's lookup from the top level, or from B,
+    +# never looks inside A, so reading `X` raises NameError when it runs -- and
+    +# only then: a method that reads it and is never called is fine. spinel
+    +# refused the whole program; the read now raises as CRuby's does.
+    +module A
+    +  class X; def w = "A::X"; end
+    +end
+    +def g = X.new.w
+    +class B
+    +  def self.never = X
+    +  def self.ok = :ok
+    +end
+    +p B.ok
+    +begin
+    +  g
+    +rescue NameError => e
+    +  p e.class, e.message
+    +end
+    +begin
+    +  B.never
+    +rescue NameError => e
+    +  p e.message
+    +end
+    +p defined?(X), A::X.new.w
+    diff --git a/test/bare_const_unreachable_raises_at_run.rb.expected b/test/bare_const_unreachable_raises_at_run.rb.expected
+    new file mode 100644
+    index 000000000..1e93bae55
+    --- /dev/null
+    +++ b/test/bare_const_unreachable_raises_at_run.rb.expected
+    @@ -0,0 +1,6 @@
+    +:ok
+    +NameError
+    +"uninitialized constant X"
+    +"uninitialized constant B::X"
+    +nil
+    +"A::X"
+    diff --git a/test/boxed_pattern_bad_arg_wording.rb b/test/boxed_pattern_bad_arg_wording.rb
+    index 01c9da44c..6e727253b 100644
+    --- a/test/boxed_pattern_bad_arg_wording.rb
+    +++ b/test/boxed_pattern_bad_arg_wording.rb
+    @@ -1,12 +1,14 @@
+     # A pattern read out of a mixed Array that is neither a Regexp nor a String:
+     # split, partition and rpartition raise CRuby's "wrong argument type X
+     # (expected Regexp)". They said "no implicit conversion of X into String".
+    -# nil is still split's whitespace mode, and an object with #to_str converts.
+    +# nil is still split's whitespace mode, and an object with #to_str converts;
+    +# one without it raises the same TypeError.
+     
+     class Sep
+       def to_str = "b"
+     end
+    -BAD = [1, 2.5, :sym, nil, true, 1..2, Sep.new, "b", /b/]
+    +class Pt; end
+    +BAD = [1, 2.5, :sym, nil, true, 1..2, Sep.new, Pt.new, "b", /b/]
+     s = "abc d"
+     BAD.each do |pat|
+       [-> { s.split(pat) }, -> { s.split(pat, 2) }, -> { s.partition(pat) },
+    diff --git a/test/boxed_pattern_bad_arg_wording.rb.expected b/test/boxed_pattern_bad_arg_wording.rb.expected
+    index 3b0eda094..3e3470d4f 100644
+    --- a/test/boxed_pattern_bad_arg_wording.rb.expected
+    +++ b/test/boxed_pattern_bad_arg_wording.rb.expected
+    @@ -26,6 +26,10 @@ true 3: wrong argument type true (expected Regexp)
+     #<Se 1: ["a", "c d"]
+     #<Se 2: ["a", "b", "c d"]
+     #<Se 3: ["a", "b", "c d"]
+    +#<Pt 0: wrong argument type Pt (expected Regexp)
+    +#<Pt 1: wrong argument type Pt (expected Regexp)
+    +#<Pt 2: wrong argument type Pt (expected Regexp)
+    +#<Pt 3: wrong argument type Pt (expected Regexp)
+     "b" 0: ["a", "c d"]
+     "b" 1: ["a", "c d"]
+     "b" 2: ["a", "b", "c d"]
+    diff --git a/test/builtin_class_singleton_override.rb b/test/builtin_class_singleton_override.rb
+    new file mode 100644
+    index 000000000..850d32a09
+    --- /dev/null
+    +++ b/test/builtin_class_singleton_override.rb
+    @@ -0,0 +1,105 @@
+    +# spinel: share
+    +# spinel: gc-minor
+    +# Builtin class and module emitters defer to the resolved user singleton.
+    +# A user method may also accept arguments different from the builtin's.
+    +class Dir
+    +  def self.exist?(value) = "dir:#{value}"
+    +  def self.glob(value) = "glob:#{value}"
+    +  def self.empty?(value) = "empty:#{value}"
+    +end
+    +class IO
+    +  def self.sysopen(value) = "io:#{value}"
+    +  def self.read(value) = "read:#{value}"
+    +end
+    +module FileTest
+    +  def self.file?(value) = "filetest:#{value}"
+    +end
+    +module Process
+    +  def self.pid = "process"
+    +end
+    +module Math
+    +  def self.sqrt(value) = "math:#{value}"
+    +end
+    +class Time
+    +  def self.at(value) = "time:#{value}"
+    +end
+    +class Regexp
+    +  def self.escape(value) = value + 10
+    +end
+    +module GC
+    +  def self.count = "gc"
+    +end
+    +class Thread
+    +  def self.current = "thread"
+    +end
+    +class Random
+    +  def self.rand(value) = "random:#{value}"
+    +end
+    +module Marshal
+    +  def self.dump(value) = "marshal:#{value}"
+    +end
+    +p Dir.exist?("x")
+    +p Dir.glob("x")
+    +p Dir.empty?("x")
+    +p IO.sysopen("x")
+    +p FileTest.file?("x")
+    +p Process.pid
+    +p Math.sqrt("x")
+    +p Time.at("x")
+    +p Regexp.escape(3)
+    +p GC.count
+    +p Thread.current
+    +p Random.rand("x")
+    +p Marshal.dump("x")
+    +
+    +# Builtin rewrites and block parameter rules also respect user targets.
+    +class File
+    +  def self.open(value)
+    +    yield value + 1
+    +  end
+    +  def self.foreach(value)
+    +    yield value + 2
+    +  end
+    +  def self.new(value) = value + 3
+    +end
+    +class Time
+    +  def self.new(value) = value + 4
+    +end
+    +p IO.read("x")
+    +p File.open(4) { |value| value * 2 }
+    +p File.foreach(4) { |value| value * 3 }
+    +p File.new(4)
+    +p Time.new(4)
+    +
+    +# Conversion and constructor arms use the same resolved target.
+    +class Array
+    +  def self.try_convert(value) = "array:#{value}"
+    +end
+    +class Integer
+    +  def self.try_convert(value) = "integer:#{value}"
+    +end
+    +class String
+    +  def self.try_convert(value) = "string:#{value}"
+    +end
+    +class Hash
+    +  def self.try_convert(value) = "hash:#{value}"
+    +  def self.new(*args, **kw) = "hash-new:#{args.size}:#{kw.size}"
+    +end
+    +class Rational
+    +  def self.sqrt(value) = "rational:#{value}"
+    +end
+    +class Proc
+    +  def self.new = "proc-new"
+    +end
+    +module Kernel
+    +  def self.sleep(value) = "sleep:#{value}"
+    +end
+    +p Array.try_convert(3)
+    +p Integer.try_convert(3)
+    +p String.try_convert(3)
+    +p Hash.try_convert(3)
+    +p Hash.new
+    +p Hash.new(4, capacity: 5)
+    +p Rational.sqrt(4)
+    +p Proc.new { 7 }
+    +p Kernel.sleep(0)
+    diff --git a/test/builtin_class_singleton_override.rb.expected b/test/builtin_class_singleton_override.rb.expected
+    new file mode 100644
+    index 000000000..85a60271f
+    --- /dev/null
+    +++ b/test/builtin_class_singleton_override.rb.expected
+    @@ -0,0 +1,27 @@
+    +"dir:x"
+    +"glob:x"
+    +"empty:x"
+    +"io:x"
+    +"filetest:x"
+    +"process"
+    +"math:x"
+    +"time:x"
+    +13
+    +"gc"
+    +"thread"
+    +"random:x"
+    +"marshal:x"
+    +"read:x"
+    +10
+    +18
+    +7
+    +8
+    +"array:3"
+    +"integer:3"
+    +"string:3"
+    +"hash:3"
+    +"hash-new:0:0"
+    +"hash-new:1:1"
+    +"rational:4"
+    +"proc-new"
+    +"sleep:0"
+    diff --git a/test/builtin_singleton_alias_user.rb b/test/builtin_singleton_alias_user.rb
+    new file mode 100644
+    index 000000000..b3988eda3
+    --- /dev/null
+    +++ b/test/builtin_singleton_alias_user.rb
+    @@ -0,0 +1,18 @@
+    +# spinel: share
+    +# User singleton aliases and super keep resolving to compiled user methods.
+    +class File
+    +  class << self
+    +    def basename(path) = "user:#{path}"
+    +    alias saved_basename basename
+    +    alias_method :other_basename, :saved_basename
+    +  end
+    +end
+    +p File.saved_basename("a")
+    +p File.other_basename("b")
+    +class SingletonParent
+    +  def self.read(value) = value + 1
+    +end
+    +class SingletonChild < SingletonParent
+    +  def self.read(value) = super(value) + 2
+    +end
+    +p SingletonChild.read(3)
+    diff --git a/test/builtin_singleton_alias_user.rb.expected b/test/builtin_singleton_alias_user.rb.expected
+    new file mode 100644
+    index 000000000..9b20102c1
+    --- /dev/null
+    +++ b/test/builtin_singleton_alias_user.rb.expected
+    @@ -0,0 +1,3 @@
+    +"user:a"
+    +"user:b"
+    +6
+    diff --git a/test/builtin_singleton_class_unused.rb b/test/builtin_singleton_class_unused.rb
+    new file mode 100644
+    index 000000000..7ab4b09ba
+    --- /dev/null
+    +++ b/test/builtin_singleton_class_unused.rb
+    @@ -0,0 +1,65 @@
+    +# spinel: share
+    +# spinel: gc-minor
+    +# A singleton-class body preserves the builtin instance type and constructor.
+    +class << Struct
+    +  def unused_helper = :unused
+    +end
+    +class << Regexp
+    +  def unused_helper = :unused
+    +end
+    +class << Enumerator
+    +  def unused_helper = :unused
+    +end
+    +class << MatchData
+    +  def unused_helper = :unused
+    +end
+    +class << Complex
+    +  def unused_helper = :unused
+    +end
+    +class << Kernel
+    +  def unused_helper = :unused
+    +end
+    +Point = Struct.new(:x)
+    +p Point.new(3).x
+    +p Regexp.new("b+").match?("bb")
+    +p [3, 4].each.to_a
+    +p /(b)/.match("b")[1]
+    +p Complex(2, 3) + 1
+    +p Kernel.format("%02d", 4)
+    +
+    +# Native singleton reopenings whose methods are unreachable keep working.
+    +require "ostruct"
+    +require "monitor"
+    +class << Mutex
+    +  def unused_native_helper = :unused
+    +end
+    +class << Encoding
+    +  def unused_native_helper = :unused
+    +end
+    +class << Queue
+    +  def unused_native_helper = :unused
+    +end
+    +class << SizedQueue
+    +  def unused_native_helper = :unused
+    +end
+    +class << ConditionVariable
+    +  def unused_native_helper = :unused
+    +end
+    +class << OpenStruct
+    +  def unused_native_helper = :unused
+    +end
+    +class << Monitor
+    +  def unused_native_helper = :unused
+    +end
+    +m = Mutex.new
+    +m.synchronize { p :locked }
+    +p Encoding::UTF_8.name
+    +q = Queue.new
+    +q << 1
+    +p q.pop
+    +sq = SizedQueue.new(1)
+    +sq << 2
+    +p sq.pop
+    +p ConditionVariable.new.class
+    +p OpenStruct.new(a: 3).a
+    +Monitor.new.synchronize { p :monitored }
+    diff --git a/test/builtin_singleton_class_unused.rb.expected b/test/builtin_singleton_class_unused.rb.expected
+    new file mode 100644
+    index 000000000..73e0200a8
+    --- /dev/null
+    +++ b/test/builtin_singleton_class_unused.rb.expected
+    @@ -0,0 +1,13 @@
+    +3
+    +true
+    +[3, 4]
+    +"b"
+    +(3+3i)
+    +"04"
+    +:locked
+    +"UTF-8"
+    +1
+    +2
+    +Thread::ConditionVariable
+    +3
+    +:monitored
+    diff --git a/test/builtin_singleton_rewrite_targets.rb b/test/builtin_singleton_rewrite_targets.rb
+    new file mode 100644
+    index 000000000..ec50fdd08
+    --- /dev/null
+    +++ b/test/builtin_singleton_rewrite_targets.rb
+    @@ -0,0 +1,50 @@
+    +# spinel: share
+    +# spinel: gc-minor
+    +# The written method chooses the target before a builtin rewrites the call.
+    +# Direct singleton definitions need no enclosing class or module body.
+    +require "tmpdir"
+    +scratch_dir = Dir.tmpdir
+    +def File.read(path) = "user-read"
+    +def File.open(path) = "user-open"
+    +def File.readlines(path) = ["user-lines"]
+    +def File.stat(path) = "user-stat"
+    +def Dir.glob(path) = ["user-glob"]
+    +def Dir.pwd = "user-pwd"
+    +def Dir.rmdir(path) = "user-rmdir"
+    +def Math.sqrt(value) = value + 1
+    +class << File
+    +  def writable?(path) = "user-writable"
+    +end
+    +path = File.join(scratch_dir, "spinel_singleton_rewrite_#{Process.pid}.txt")
+    +File.write(path, "one\ntwo\n")
+    +p File.read(path)
+    +p IO.read(path)
+    +p File.open(path)
+    +p open(path) { |io| io.read }
+    +File.foreach(path, chomp: true) { |line| p line }
+    +p File.foreach(path).to_a
+    +p File::Stat.new(path).size
+    +p File.stat(path)
+    +p File.writable?(path)
+    +p Dir.glob(path)
+    +p Dir[path].size
+    +p Dir.getwd == "user-pwd"
+    +p Math.sqrt(4)
+    +File.delete(path)
+    +dir = path + ".dir"
+    +Dir.mkdir(dir)
+    +p Dir.delete(dir)
+    +p Dir.exist?(dir)
+    +
+    +def File.size(value)
+    +  yield value + 4
+    +end
+    +def Math.cos(value)
+    +  yield value + 2
+    +end
+    +def Dir.empty?(value)
+    +  yield value + 3
+    +end
+    +p File.size(3) { |n| n * 2 }
+    +p Math.cos(3) { |n| n * 2 }
+    +p Dir.empty?(3) { |n| n * 2 }
+    diff --git a/test/builtin_singleton_rewrite_targets.rb.expected b/test/builtin_singleton_rewrite_targets.rb.expected
+    new file mode 100644
+    index 000000000..09e46dcfd
+    --- /dev/null
+    +++ b/test/builtin_singleton_rewrite_targets.rb.expected
+    @@ -0,0 +1,19 @@
+    +"user-read"
+    +"one\ntwo\n"
+    +"user-open"
+    +"one\ntwo\n"
+    +"one"
+    +"two"
+    +["one\n", "two\n"]
+    +8
+    +"user-stat"
+    +"user-writable"
+    +["user-glob"]
+    +1
+    +false
+    +5
+    +0
+    +false
+    +14
+    +10
+    +12
+    diff --git a/test/builtin_singleton_unused.rb b/test/builtin_singleton_unused.rb
+    new file mode 100644
+    index 000000000..1eb45d71a
+    --- /dev/null
+    +++ b/test/builtin_singleton_unused.rb
+    @@ -0,0 +1,47 @@
+    +# spinel: share
+    +# spinel: gc-minor
+    +# An unused singleton definition preserves the builtin's construction and layout.
+    +def Struct.unused_helper = :unused
+    +def Regexp.unused_helper = :unused
+    +def Kernel.unused_helper = :unused
+    +def Warning.unused_helper = :unused
+    +def Enumerator.unused_helper = :unused
+    +def MatchData.unused_helper = :unused
+    +def Complex.unused_helper = :unused
+    +Point = Struct.new(:x)
+    +p Point.new(1).x
+    +KeywordPoint = Struct.new(:x, keyword_init: true)
+    +p KeywordPoint.new(x: 2).x
+    +p Regexp.new("a+").match?("aa")
+    +p Kernel.format("%03d", 5)
+    +p [1, 2].each.to_a
+    +p /a(b)/.match("ab")[1]
+    +p Complex(1, 2) + 1
+    +p Warning.respond_to?(:warn)
+    +p Kernel.respond_to?(:new)
+    +
+    +# Native singleton reopenings whose methods are unreachable keep working.
+    +require "ostruct"
+    +require "monitor"
+    +def Mutex.unused_native_helper = :unused
+    +def Encoding.unused_native_helper = :unused
+    +def Queue.unused_native_helper = :unused
+    +def SizedQueue.unused_native_helper = :unused
+    +def ConditionVariable.unused_native_helper = :unused
+    +def OpenStruct.unused_native_helper = :unused
+    +def Monitor.unused_native_helper = :unused
+    +def unused_native_caller
+    +  Queue.unused_native_helper
+    +end
+    +m = Mutex.new
+    +m.synchronize { p :locked }
+    +p Encoding::UTF_8.name
+    +q = Queue.new
+    +q << 1
+    +p q.pop
+    +sq = SizedQueue.new(1)
+    +sq << 2
+    +p sq.pop
+    +p ConditionVariable.new.class
+    +p OpenStruct.new(a: 3).a
+    +Monitor.new.synchronize { p :monitored }
+    diff --git a/test/builtin_singleton_unused.rb.expected b/test/builtin_singleton_unused.rb.expected
+    new file mode 100644
+    index 000000000..acf3f62f0
+    --- /dev/null
+    +++ b/test/builtin_singleton_unused.rb.expected
+    @@ -0,0 +1,16 @@
+    +1
+    +2
+    +true
+    +"005"
+    +[1, 2]
+    +"b"
+    +(2+2i)
+    +true
+    +false
+    +:locked
+    +"UTF-8"
+    +1
+    +2
+    +Thread::ConditionVariable
+    +3
+    +:monitored
+    diff --git a/test/c_compile_gaps.rb b/test/c_compile_gaps.rb
+    new file mode 100644
+    index 000000000..2d1116832
+    --- /dev/null
+    +++ b/test/c_compile_gaps.rb
+    @@ -0,0 +1,54 @@
+    +$log = []
+    +def eff(v) = ($log << v; v)
+    +def t
+    +  yield
+    +rescue => e
+    +  [e.class, e.message]
+    +end
+    +
+    +h = {a: 1}
+    +p t { h.merge(raise("lone")) }
+    +p t { h.merge({b: 2}, raise(ArgumentError, "second")) }
+    +p t { h.merge!(raise(ArgumentError, "bang")) }
+    +p t { x = h.merge(raise("as value")); x }
+    +p t { true ? h.merge(raise("arm")) : h }
+    +p t { eff([1]).push(eff(2), raise("order")) }
+    +p $log
+    +p(catch(:t) { [1].push(throw(:t, 9)) })
+    +p(catch(:u) { h.merge(throw(:u, 7)) })
+    +p t { [1].push(raise("push")) }
+    +p t { "s" + raise("plus") }
+    +p t { (puts 1; raise("seq")) }
+    +p h
+    +
+    +class Raiser
+    +  def raise(m) = "own #{m}"
+    +  def go(h) = h.merge({b: raise("x")})
+    +end
+    +p Raiser.new.go({a: 1})
+    +a = nil
+    +p a&.push(raise("never"))
+    +
+    +p t { "12".between?("1", 99) }
+    +p t { "12".between?(99, "z") }
+    +p t { "12".between?(nil, "z") }
+    +p t { "12".between?("1", :z) }
+    +p t { "12".between?("1", 2.5) }
+    +p t { "12".between?("1", [1]) }
+    +p t { "12".between?("1", {}) }
+    +p t { "12".between?("1", "9") }
+    +p t { "12".clamp("1", 99) }
+    +p t { "12".clamp(1, 99) }
+    +p t { "12".clamp(99, 1) }
+    +p t { "12".clamp(nil, "z") }
+    +p t { "12".clamp(nil, 99) }
+    +p t { "12".clamp(1, nil) }
+    +p t { "12".clamp("1", "9") }
+    +x = 99
+    +p t { "12".between?("1", x) }
+    +p t { "12".clamp("1", x) }
+    +
+    +[[:to_i, :size], [:chomp, :size], [:include?, :size]].each do |names|
+    +  n = names[0]
+    +  p t { "12\n".send(n, "1", 99) }
+    +end
+    diff --git a/test/c_compile_gaps.rb.expected b/test/c_compile_gaps.rb.expected
+    new file mode 100644
+    index 000000000..7682657c6
+    --- /dev/null
+    +++ b/test/c_compile_gaps.rb.expected
+    @@ -0,0 +1,36 @@
+    +[RuntimeError, "lone"]
+    +[ArgumentError, "second"]
+    +[ArgumentError, "bang"]
+    +[RuntimeError, "as value"]
+    +[RuntimeError, "arm"]
+    +[RuntimeError, "order"]
+    +[[1], 2]
+    +9
+    +7
+    +[RuntimeError, "push"]
+    +[RuntimeError, "plus"]
+    +1
+    +[RuntimeError, "seq"]
+    +{a: 1}
+    +{a: 1, b: "own x"}
+    +nil
+    +[ArgumentError, "comparison of String with 99 failed"]
+    +[ArgumentError, "comparison of String with 99 failed"]
+    +[ArgumentError, "comparison of String with nil failed"]
+    +[ArgumentError, "comparison of String with :z failed"]
+    +[ArgumentError, "comparison of String with 2.5 failed"]
+    +[ArgumentError, "comparison of String with Array failed"]
+    +[ArgumentError, "comparison of String with Hash failed"]
+    +true
+    +[ArgumentError, "comparison of String with 99 failed"]
+    +[ArgumentError, "comparison of String with 1 failed"]
+    +[ArgumentError, "min argument must be less than or equal to max argument"]
+    +"12"
+    +[ArgumentError, "comparison of String with 99 failed"]
+    +[ArgumentError, "comparison of String with 1 failed"]
+    +"12"
+    +[ArgumentError, "comparison of String with 99 failed"]
+    +[ArgumentError, "comparison of String with 99 failed"]
+    +[ArgumentError, "wrong number of arguments (given 2, expected 0..1)"]
+    +[ArgumentError, "wrong number of arguments (given 2, expected 0..1)"]
+    +[ArgumentError, "wrong number of arguments (given 2, expected 1)"]
+    diff --git a/test/class_body_local_scope.rb b/test/class_body_local_scope.rb
+    new file mode 100644
+    index 000000000..c5c6bc458
+    --- /dev/null
+    +++ b/test/class_body_local_scope.rb
+    @@ -0,0 +1,27 @@
+    +# A class, module or singleton class body is a local scope of its own: its
+    +# locals are not the top level's, nor another body's. spinel emitted the
+    +# bodies into the top level's C function with one variable per name, so
+    +# `module M; a = 5; end; a ||= 10` left a at 5.
+    +module M
+    +  a = 5
+    +  b = [1, 2].map { |x| x + a }
+    +  p b
+    +end
+    +class C
+    +  a = "str"
+    +  p a
+    +  class << self
+    +    a = :sym
+    +    p a
+    +  end
+    +  p a
+    +end
+    +a ||= 10
+    +p a
+    +p defined?(b)
+    +items = []
+    +class D
+    +  items = [:d]
+    +  p items
+    +end
+    +p items
+    diff --git a/test/class_body_local_scope.rb.expected b/test/class_body_local_scope.rb.expected
+    new file mode 100644
+    index 000000000..e98cc72c1
+    --- /dev/null
+    +++ b/test/class_body_local_scope.rb.expected
+    @@ -0,0 +1,8 @@
+    +[6, 7]
+    +"str"
+    +:sym
+    +"str"
+    +10
+    +nil
+    +[:d]
+    +[]
+    diff --git a/test/collect/refusals.expected b/test/collect/refusals.expected
+    index 047b37f3a..087bb7928 100644
+    --- a/test/collect/refusals.expected
+    +++ b/test/collect/refusals.expected
+    @@ -28,14 +28,10 @@ spinel: 1 refusal, nothing written
+     == test/reject/attr_assign_value_shared_string.rb [promote] rc=1
+     spinel: test/reject/attr_assign_value_shared_string.rb:6: an attribute assignment in value position (kept, passed on, or a method's last expression, which the method answers) stores into an instance variable that is mutated in place through another name, and its value would be a copy (a String is not yet shared by reference through an assignment's value). Make the assignment a statement of its own, or read the String back through the reader.
+     spinel: 1 refusal, nothing written
+    -== test/reject/bare_const_compact_class_path.rb [default] rc=1
+    -spinel: test/reject/bare_const_compact_class_path.rb:7: uninitialized constant A::B::LIMIT (NameError): the program defines it only as A::LIMIT, which CRuby's lookup from A::B (its lexical scope, then its ancestors) does not reach
+    -== test/reject/bare_const_compact_class_path.rb [promote] rc=1
+    -spinel: test/reject/bare_const_compact_class_path.rb:7: uninitialized constant A::B::LIMIT (NameError): the program defines it only as A::LIMIT, which CRuby's lookup from A::B (its lexical scope, then its ancestors) does not reach
+    -== test/reject/bare_const_nested_unreachable.rb [default] rc=1
+    -spinel: test/reject/bare_const_nested_unreachable.rb:7: uninitialized constant X (NameError): the program defines it only as A::X, which CRuby's lookup from the top level does not reach
+    -== test/reject/bare_const_nested_unreachable.rb [promote] rc=1
+    -spinel: test/reject/bare_const_nested_unreachable.rb:7: uninitialized constant X (NameError): the program defines it only as A::X, which CRuby's lookup from the top level does not reach
+    +== test/reject/bare_const_unreachable_const_missing.rb [default] rc=1
+    +spinel: test/reject/bare_const_unreachable_const_missing.rb:9: uninitialized constant B::X (NameError): the program defines it only as A::X, which CRuby's lookup from B (its lexical scope, then its ancestors) does not reach; CRuby then calls const_missing (or raises NameError), which spinel does not follow here
+    +== test/reject/bare_const_unreachable_const_missing.rb [promote] rc=1
+    +spinel: test/reject/bare_const_unreachable_const_missing.rb:9: uninitialized constant B::X (NameError): the program defines it only as A::X, which CRuby's lookup from B (its lexical scope, then its ancestors) does not reach; CRuby then calls const_missing (or raises NameError), which spinel does not follow here
+     == test/reject/basicobject_toplevel_include_call.rb [default] rc=1
+     spinel: test/reject/basicobject_toplevel_include_call.rb:18: unsupported call: node N (CallNode `hello`) recv=-/ty-1 argc=0
+     spinel: 1 refusal, nothing written
+    @@ -54,6 +50,60 @@ spinel: 1 refusal, nothing written
+     == test/reject/builtin_ivar_string_write.rb [promote] rc=1
+     spinel: test/reject/builtin_ivar_string_write.rb:7: an instance variable set on a String (`@x = v` in a String method, or instance_variable_set): a String is copied, not shared, so it keeps no identity for the variable yet (waits on #6765); see docs/limitations.md
+     spinel: 1 refusal, nothing written
+    +== test/reject/builtin_singleton_alias_call.rb [default] rc=1
+    +spinel: test/reject/builtin_singleton_alias_call.rb:8: File.basename: calling an alias of a builtin singleton method is not supported; see docs/limitations.md
+    +spinel: 1 refusal, nothing written
+    +== test/reject/builtin_singleton_alias_call.rb [promote] rc=1
+    +spinel: test/reject/builtin_singleton_alias_call.rb:8: File.basename: calling an alias of a builtin singleton method is not supported; see docs/limitations.md
+    +spinel: 1 refusal, nothing written
+    +== test/reject/builtin_singleton_alias_chain.rb [default] rc=1
+    +spinel: test/reject/builtin_singleton_alias_chain.rb:7: Time.at: rebinding a builtin singleton method captured by an alias is not supported; see docs/limitations.md
+    +== test/reject/builtin_singleton_alias_chain.rb [promote] rc=1
+    +spinel: test/reject/builtin_singleton_alias_chain.rb:7: Time.at: rebinding a builtin singleton method captured by an alias is not supported; see docs/limitations.md
+    +== test/reject/builtin_singleton_alias_method_redefine.rb [default] rc=1
+    +spinel: test/reject/builtin_singleton_alias_method_redefine.rb:4: File.basename: alias of a builtin singleton method that is later overridden is not supported; see docs/limitations.md
+    +== test/reject/builtin_singleton_alias_method_redefine.rb [promote] rc=1
+    +spinel: test/reject/builtin_singleton_alias_method_redefine.rb:4: File.basename: alias of a builtin singleton method that is later overridden is not supported; see docs/limitations.md
+    +== test/reject/builtin_singleton_alias_redefine.rb [default] rc=1
+    +spinel: test/reject/builtin_singleton_alias_redefine.rb:5: File.basename: alias of a builtin singleton method that is later overridden is not supported; see docs/limitations.md
+    +== test/reject/builtin_singleton_alias_redefine.rb [promote] rc=1
+    +spinel: test/reject/builtin_singleton_alias_redefine.rb:5: File.basename: alias of a builtin singleton method that is later overridden is not supported; see docs/limitations.md
+    +== test/reject/builtin_singleton_kernel_alias.rb [default] rc=1
+    +spinel: test/reject/builtin_singleton_kernel_alias.rb:5: Kernel.sleep: alias of a builtin singleton method that is later overridden is not supported; see docs/limitations.md
+    +== test/reject/builtin_singleton_kernel_alias.rb [promote] rc=1
+    +spinel: test/reject/builtin_singleton_kernel_alias.rb:5: Kernel.sleep: alias of a builtin singleton method that is later overridden is not supported; see docs/limitations.md
+    +== test/reject/builtin_singleton_kernel_super.rb [default] rc=1
+    +spinel: test/reject/builtin_singleton_kernel_super.rb:4: Kernel.puts: super to an inherited builtin singleton method is not supported; see docs/limitations.md
+    +spinel: 1 refusal, nothing written
+    +== test/reject/builtin_singleton_kernel_super.rb [promote] rc=1
+    +spinel: test/reject/builtin_singleton_kernel_super.rb:4: Kernel.puts: super to an inherited builtin singleton method is not supported; see docs/limitations.md
+    +spinel: 1 refusal, nothing written
+    +== test/reject/builtin_singleton_native_class_reopen.rb [default] rc=1
+    +spinel: test/reject/builtin_singleton_native_class_reopen.rb:4: reopening the builtin class ConditionVariable is not supported
+    +== test/reject/builtin_singleton_native_class_reopen.rb [promote] rc=1
+    +spinel: test/reject/builtin_singleton_native_class_reopen.rb:4: reopening the builtin class ConditionVariable is not supported
+    +== test/reject/builtin_singleton_native_reopen.rb [default] rc=1
+    +spinel: test/reject/builtin_singleton_native_reopen.rb:3: reopening the builtin class Queue is not supported
+    +== test/reject/builtin_singleton_native_reopen.rb [promote] rc=1
+    +spinel: test/reject/builtin_singleton_native_reopen.rb:3: reopening the builtin class Queue is not supported
+    +== test/reject/builtin_singleton_super.rb [default] rc=1
+    +spinel: test/reject/builtin_singleton_super.rb:5: File.read: super to an inherited builtin singleton method is not supported; see docs/limitations.md
+    +spinel: 1 refusal, nothing written
+    +== test/reject/builtin_singleton_super.rb [promote] rc=1
+    +spinel: test/reject/builtin_singleton_super.rb:5: File.read: super to an inherited builtin singleton method is not supported; see docs/limitations.md
+    +spinel: 1 refusal, nothing written
+    +== test/reject/builtin_singleton_super_forward.rb [default] rc=1
+    +spinel: test/reject/builtin_singleton_super_forward.rb:5: File.open: super to an inherited builtin singleton method is not supported; see docs/limitations.md
+    +spinel: 1 refusal, nothing written
+    +== test/reject/builtin_singleton_super_forward.rb [promote] rc=1
+    +spinel: test/reject/builtin_singleton_super_forward.rb:5: File.open: super to an inherited builtin singleton method is not supported; see docs/limitations.md
+    +spinel: 1 refusal, nothing written
+    +== test/reject/builtin_singleton_super_new.rb [default] rc=1
+    +spinel: test/reject/builtin_singleton_super_new.rb:4: File.new: super to an inherited builtin singleton method is not supported; see docs/limitations.md
+    +spinel: 1 refusal, nothing written
+    +== test/reject/builtin_singleton_super_new.rb [promote] rc=1
+    +spinel: test/reject/builtin_singleton_super_new.rb:4: File.new: super to an inherited builtin singleton method is not supported; see docs/limitations.md
+    +spinel: 1 refusal, nothing written
+     == test/reject/builtin_value_ivar_set.rb [default] rc=1
+     spinel: test/reject/builtin_value_ivar_set.rb:6: an instance variable set on a String (`@x = v` in a String method, or instance_variable_set): a String is copied, not shared, so it keeps no identity for the variable yet (waits on #6765); see docs/limitations.md
+     spinel: 1 refusal, nothing written
+    @@ -1108,6 +1158,18 @@ spinel: test/reject/string_returned_arg_second.rb:7: a String a method returns a
+     spinel: test/reject/string_returned_arg_second_append.rb:6: a String a method returns as its parameter is mutated in place, or the variable passed in is (a String is not yet shared by reference through a method returning its parameter). Mutate and read the String through the variable passed in.
+     == test/reject/string_returned_arg_second_append.rb [promote] rc=1
+     spinel: test/reject/string_returned_arg_second_append.rb:6: a String a method returns as its parameter is mutated in place, or the variable passed in is (a String is not yet shared by reference through a method returning its parameter). Mutate and read the String through the variable passed in.
+    +== test/reject/string_returned_arg_stored.rb [default] rc=1
+    +spinel: test/reject/string_returned_arg_stored.rb:7: a String a method returns as its parameter is mutated in place, or the variable passed in is (a String is not yet shared by reference through a method returning its parameter). Mutate and read the String through the variable passed in.
+    +== test/reject/string_returned_arg_stored.rb [promote] rc=1
+    +spinel: test/reject/string_returned_arg_stored.rb:7: a String a method returns as its parameter is mutated in place, or the variable passed in is (a String is not yet shared by reference through a method returning its parameter). Mutate and read the String through the variable passed in.
+    +== test/reject/string_returned_arg_stored_element.rb [default] rc=1
+    +spinel: test/reject/string_returned_arg_stored_element.rb:6: a String a method returns as its parameter is mutated in place, or the variable passed in is (a String is not yet shared by reference through a method returning its parameter). Mutate and read the String through the variable passed in.
+    +== test/reject/string_returned_arg_stored_element.rb [promote] rc=1
+    +spinel: test/reject/string_returned_arg_stored_element.rb:6: a String a method returns as its parameter is mutated in place, or the variable passed in is (a String is not yet shared by reference through a method returning its parameter). Mutate and read the String through the variable passed in.
+    +== test/reject/string_returned_arg_stored_literal.rb [default] rc=1
+    +spinel: test/reject/string_returned_arg_stored_literal.rb:5: a String a method returns as its parameter is mutated in place, or the variable passed in is (a String is not yet shared by reference through a method returning its parameter). Mutate and read the String through the variable passed in.
+    +== test/reject/string_returned_arg_stored_literal.rb [promote] rc=1
+    +spinel: test/reject/string_returned_arg_stored_literal.rb:5: a String a method returns as its parameter is mutated in place, or the variable passed in is (a String is not yet shared by reference through a method returning its parameter). Mutate and read the String through the variable passed in.
+     == test/reject/string_scan_block_kept_mutation.rb [default] rc=1
+     spinel: test/reject/string_scan_block_kept_mutation.rb:5: a match `scan` hands its block is kept and mutated in place (a String is not yet shared by reference through `scan`'s block parameter). Mutate a copy (`m = +m.dup`) and keep that.
+     == test/reject/string_scan_block_kept_mutation.rb [promote] rc=1
+    diff --git a/test/defined_scoped_constant.rb b/test/defined_scoped_constant.rb
+    new file mode 100644
+    index 000000000..34f473da2
+    --- /dev/null
+    +++ b/test/defined_scoped_constant.rb
+    @@ -0,0 +1,18 @@
+    +# defined?(P::n) looks n up in P and P's ancestors but not in Object, so a
+    +# top-level constant is not P::n. spinel checked each segment's name alone
+    +# and answered "constant" for defined?(Mod::String).
+    +class K; X = 1; end
+    +class S < K; end
+    +module M; Y = 2; end
+    +class C; include M; end
+    +module Spec
+    +  class Basic; end
+    +end
+    +p defined?(K::String), defined?(S::X), defined?(C::Y), defined?(K::Nope)
+    +p defined?(M::Comparable), defined?(Object::String)
+    +p defined?(Spec::String), defined?(Spec::Basic::String), defined?(Spec::Basic)
+    +p defined?(String), defined?(::String), defined?(M::Y)
+    +module Spec
+    +  self::Scoped = 42
+    +end
+    +p defined?(Spec::Scoped)
+    diff --git a/test/defined_scoped_constant.rb.expected b/test/defined_scoped_constant.rb.expected
+    new file mode 100644
+    index 000000000..1c3fdc5d6
+    --- /dev/null
+    +++ b/test/defined_scoped_constant.rb.expected
+    @@ -0,0 +1,13 @@
+    +nil
+    +"constant"
+    +"constant"
+    +nil
+    +nil
+    +"constant"
+    +nil
+    +nil
+    +"constant"
+    +"constant"
+    +"constant"
+    +"constant"
+    +"constant"
+    diff --git a/test/ensure_dropped_exception_no_cause.rb b/test/ensure_dropped_exception_no_cause.rb
+    new file mode 100644
+    index 000000000..3fe157ec7
+    --- /dev/null
+    +++ b/test/ensure_dropped_exception_no_cause.rb
+    @@ -0,0 +1,170 @@
+    +# An ensure body that is left by a return, a break, a next, a throw or a
+    +# proc's return drops the exception it was running for. A raise after that
+    +# does not take the dropped exception as its cause.
+    +
+    +def later
+    +  raise "later"
+    +rescue => e
+    +  e.cause.inspect
+    +end
+    +
+    +def by_return
+    +  begin
+    +    raise "dropped"
+    +  ensure
+    +    return 1
+    +  end
+    +end
+    +by_return
+    +puts "return: #{later}"
+    +
+    +[1].each do |x|
+    +  begin
+    +    raise "dropped"
+    +  ensure
+    +    break
+    +  end
+    +end
+    +puts "break: #{later}"
+    +
+    +[1, 2].each do |x|
+    +  begin
+    +    raise "dropped"
+    +  ensure
+    +    next
+    +  end
+    +end
+    +puts "next: #{later}"
+    +
+    +i = 0
+    +while i < 2
+    +  i += 1
+    +  begin
+    +    raise "dropped"
+    +  ensure
+    +    next
+    +  end
+    +end
+    +puts "next in a while: #{later}"
+    +
+    +catch(:out) do
+    +  begin
+    +    raise "dropped"
+    +  ensure
+    +    throw :out
+    +  end
+    +end
+    +puts "throw: #{later}"
+    +
+    +def from_block
+    +  [1].each do |x|
+    +    begin
+    +      raise "dropped"
+    +    ensure
+    +      return 1
+    +    end
+    +  end
+    +end
+    +from_block
+    +puts "return from a block: #{later}"
+    +
+    +def from_proc
+    +  pr = proc do
+    +    begin
+    +      raise "dropped"
+    +    ensure
+    +      return 1
+    +    end
+    +  end
+    +  pr.call
+    +end
+    +from_proc
+    +puts "a proc's return: #{later}"
+    +
+    +def pass
+    +  yield 1
+    +  yield 2
+    +end
+    +def from_yield
+    +  pass do |x|
+    +    begin
+    +      raise "dropped"
+    +    ensure
+    +      break
+    +    end
+    +  end
+    +end
+    +from_yield
+    +puts "break out of a yield: #{later}"
+    +
+    +# two deep: the inner ensure drops its exception, the outer one's is still
+    +# in flight and is the cause of what the outer body raises
+    +def two_deep
+    +  begin
+    +    raise "outer"
+    +  ensure
+    +    [1].each do |x|
+    +      begin
+    +        raise "inner"
+    +      ensure
+    +        break
+    +      end
+    +    end
+    +    raise "from the outer ensure"
+    +  end
+    +end
+    +begin
+    +  two_deep
+    +rescue => e
+    +  puts "two deep: #{e.message}, cause #{e.cause.inspect}"
+    +end
+    +
+    +def two_deep_throw
+    +  begin
+    +    raise "outer"
+    +  ensure
+    +    catch(:out) do
+    +      begin
+    +        raise "inner"
+    +      ensure
+    +        throw :out
+    +      end
+    +    end
+    +    raise "from the outer ensure"
+    +  end
+    +end
+    +begin
+    +  two_deep_throw
+    +rescue => e
+    +  puts "two deep, a throw: #{e.message}, cause #{e.cause.inspect}"
+    +end
+    +
+    +# an ensure body that is not left: its raise takes the one in flight
+    +begin
+    +  begin
+    +    raise "first"
+    +  ensure
+    +    raise "second"
+    +  end
+    +rescue => e
+    +  puts "not left: #{e.message}, cause #{e.cause.inspect}"
+    +end
+    +
+    +# an ensure body that ends: nothing is in flight after it
+    +begin
+    +  begin
+    +    raise "first"
+    +  ensure
+    +    x = 1
+    +  end
+    +rescue => e
+    +  puts "ended: #{e.message}, cause #{e.cause.inspect}"
+    +end
+    +puts "after it: #{later}"
+    +
+    +n = 0
+    +200.times do
+    +  by_return
+    +  n += 1 if later == "nil"
+    +end
+    +p n
+    diff --git a/test/ensure_dropped_exception_no_cause.rb.expected b/test/ensure_dropped_exception_no_cause.rb.expected
+    new file mode 100644
+    index 000000000..0ee828775
+    --- /dev/null
+    +++ b/test/ensure_dropped_exception_no_cause.rb.expected
+    @@ -0,0 +1,14 @@
+    +return: nil
+    +break: nil
+    +next: nil
+    +next in a while: nil
+    +throw: nil
+    +return from a block: nil
+    +a proc's return: nil
+    +break out of a yield: nil
+    +two deep: from the outer ensure, cause #<RuntimeError: outer>
+    +two deep, a throw: from the outer ensure, cause #<RuntimeError: outer>
+    +not left: second, cause #<RuntimeError: first>
+    +ended: first, cause nil
+    +after it: nil
+    +200
+    diff --git a/test/format_made_in_place_held.rb b/test/format_made_in_place_held.rb
+    index 0611fd26e..3d6a85365 100644
+    --- a/test/format_made_in_place_held.rb
+    +++ b/test/format_made_in_place_held.rb
+    @@ -76,3 +76,12 @@ p sb
+     $n = 0
+     def counted = ($n += 1; "%d|")
+     p counted % $n
+    +
+    +# a constant and a global changed in place are read as a copy where Strings
+    +# are shared (--share-strings), and such a copy is a format made in place
+    +KF = +"%5d"
+    +KF << "|"
+    +$gf = +"%3d"
+    +$gf << "|"
+    +p KF % 7
+    +p $gf % (w + 1)
+    diff --git a/test/format_made_in_place_held.rb.expected b/test/format_made_in_place_held.rb.expected
+    index 76182c128..febe6363a 100644
+    --- a/test/format_made_in_place_held.rb.expected
+    +++ b/test/format_made_in_place_held.rb.expected
+    @@ -28,3 +28,5 @@ NoMethodError
+     "2|x|x|"
+     "%d|x|x|x"
+     "1|"
+    +"    7|"
+    +"  9|"
+    diff --git a/test/hash_constructor_splat.rb b/test/hash_constructor_splat.rb
+    new file mode 100644
+    index 000000000..77302d4e9
+    --- /dev/null
+    +++ b/test/hash_constructor_splat.rb
+    @@ -0,0 +1,31 @@
+    +# spinel: share
+    +# spinel: gc-minor
+    +# spinel: gc-stress
+    +# A splat supplies defaults positionally, including run-time-length arrays.
+    +p Hash.new(*[5])[1]
+    +p Hash.new(*[])[1]
+    +def hash_forward(*args) = Hash.new(*args)
+    +p hash_forward(6)[1]
+    +p hash_forward[1]
+    +a = [7, 8]
+    +a.pop
+    +p Hash.new(*a)[1]
+    +p Hash.new(*a.take(1))[1]
+    +begin
+    +  hash_forward(1, 2)
+    +rescue ArgumentError
+    +  p 99
+    +end
+    +
+    +def capacity_amount
+    +  p 42
+    +  4
+    +end
+    +def hash_capacity_forward(*args) = Hash.new(*args, capacity: capacity_amount)
+    +p hash_capacity_forward(8)[1]
+    +p hash_capacity_forward[1]
+    +begin
+    +  hash_capacity_forward(1, 2)
+    +rescue ArgumentError
+    +  p 99
+    +end
+    diff --git a/test/hash_constructor_splat.rb.expected b/test/hash_constructor_splat.rb.expected
+    new file mode 100644
+    index 000000000..7247c92c9
+    --- /dev/null
+    +++ b/test/hash_constructor_splat.rb.expected
+    @@ -0,0 +1,13 @@
+    +5
+    +nil
+    +6
+    +nil
+    +7
+    +7
+    +99
+    +42
+    +8
+    +42
+    +nil
+    +42
+    +99
+    diff --git a/test/hash_merge_bang_symbol_keyed_argument.rb b/test/hash_merge_bang_symbol_keyed_argument.rb
+    new file mode 100644
+    index 000000000..23e5d8be8
+    --- /dev/null
+    +++ b/test/hash_merge_bang_symbol_keyed_argument.rb
+    @@ -0,0 +1,136 @@
+    +# merge! and update given a Symbol-keyed Hash that is not written out at
+    +# the call: a local, a parameter, a keyword rest, an instance variable, a
+    +# method's value, one of two locals, a constant. A receiver whose keys are
+    +# of another class takes the variant that holds both, as it does for
+    +# `h.merge!({b: 2})`.
+    +
+    +# written out at the call
+    +s = {"a" => 1}
+    +s.merge!({b: 2})
+    +p s.to_a
+    +
+    +# an empty receiver takes the argument's keys, and Symbol keys take more
+    +m = {b: 2}
+    +e = {}
+    +e.merge!(m)
+    +p e.to_a
+    +y = {a: 1}
+    +y.update(m)
+    +p y.to_a
+    +
+    +# a local
+    +h = {"a" => 1}
+    +h.merge!(m)
+    +p h.to_a
+    +p h["a"]
+    +p h[:b]
+    +p h.size
+    +h.each { |k, v| p [k, v] }
+    +p h.keys
+    +
+    +# update, and an Integer-keyed receiver
+    +i = {1 => "x"}
+    +i.update(m)
+    +p i.to_a
+    +p i[1]
+    +p i.keys
+    +
+    +# String values, mixed values, Float keys
+    +ss = {"a" => "x"}
+    +ss.merge!(m)
+    +p ss.to_a
+    +sm = {"a" => 1, "c" => "x"}
+    +sm.merge!(m)
+    +p sm.values
+    +f = {1.5 => 1}
+    +f.merge!(m)
+    +p f.to_a
+    +
+    +# a parameter and a keyword rest
+    +def from_param(o)
+    +  h = {"a" => 1}
+    +  h.merge!(o)
+    +  h
+    +end
+    +p from_param({b: 2}).to_a
+    +
+    +def from_kwrest(**o)
+    +  h = {1 => 1}
+    +  h.update(o)
+    +  h
+    +end
+    +p from_kwrest(b: 2, c: 3).to_a
+    +
+    +# an instance variable, a method's value, a constant, one of two locals
+    +@iv = {c: 3}
+    +a = {"a" => 1}
+    +a.merge!(@iv)
+    +p a.to_a
+    +
+    +def made
+    +  {d: 4}
+    +end
+    +b = {"a" => 1}
+    +b.merge!(made)
+    +p b.to_a
+    +
+    +OPTS = {e: 5}
+    +c = {"a" => 1}
+    +c.merge!(OPTS)
+    +p c.to_a
+    +
+    +m2 = {z: 26}
+    +d = {"a" => 1}
+    +d.merge!(ARGV.empty? ? m : m2)
+    +p d.to_a
+    +
+    +# two arguments, and a block that no key calls
+    +n = {c: 3}
+    +t = {"a" => 1}
+    +t.merge!(m, n)
+    +p t.to_a
+    +k = {"a" => 1}
+    +k.merge!(m) { |key, old, new| old }
+    +p k.to_a
+    +
+    +# a second name sees the merge
+    +g1 = {"a" => 1}
+    +g2 = g1
+    +g1.merge!(m)
+    +p g2.to_a
+    +p g2.equal?(g1)
+    +
+    +# later uses: another merge, a delete, a store, a lookup's value
+    +u = {"a" => 1}
+    +u.merge!(m)
+    +u.merge!(n)
+    +u.delete(:b)
+    +u["z"] = 9
+    +p u.to_a
+    +p u["a"] + u[:c]
+    +p u.values.sum
+    +
+    +# a global, a class variable and a top-level instance variable
+    +$g = {"a" => 1}
+    +$g.merge!(m)
+    +p $g.to_a
+    +
+    +class Keep
+    +  @@h = {"a" => 1}
+    +  def self.add(o)
+    +    @@h.merge!(o)
+    +  end
+    +  def self.h = @@h
+    +end
+    +Keep.add(m)
+    +p Keep.h.to_a
+    +
+    +@top = {"a" => 1}
+    +@top.merge!(m)
+    +p @top.to_a
+    +
+    +# a merge that is not reached
+    +q = {"a" => 1}
+    +q.merge!(m) if ARGV.size > 3
+    +p q.to_a
+    +p q["a"] + 1
+    diff --git a/test/hash_merge_bang_symbol_keyed_argument.rb.expected b/test/hash_merge_bang_symbol_keyed_argument.rb.expected
+    new file mode 100644
+    index 000000000..cdab121f3
+    --- /dev/null
+    +++ b/test/hash_merge_bang_symbol_keyed_argument.rb.expected
+    @@ -0,0 +1,34 @@
+    +[["a", 1], [:b, 2]]
+    +[[:b, 2]]
+    +[[:a, 1], [:b, 2]]
+    +[["a", 1], [:b, 2]]
+    +1
+    +2
+    +2
+    +["a", 1]
+    +[:b, 2]
+    +["a", :b]
+    +[[1, "x"], [:b, 2]]
+    +"x"
+    +[1, :b]
+    +[["a", "x"], [:b, 2]]
+    +[1, "x", 2]
+    +[[1.5, 1], [:b, 2]]
+    +[["a", 1], [:b, 2]]
+    +[[1, 1], [:b, 2], [:c, 3]]
+    +[["a", 1], [:c, 3]]
+    +[["a", 1], [:d, 4]]
+    +[["a", 1], [:e, 5]]
+    +[["a", 1], [:b, 2]]
+    +[["a", 1], [:b, 2], [:c, 3]]
+    +[["a", 1], [:b, 2]]
+    +[["a", 1], [:b, 2]]
+    +true
+    +[["a", 1], [:c, 3], ["z", 9]]
+    +4
+    +13
+    +[["a", 1], [:b, 2]]
+    +[["a", 1], [:b, 2]]
+    +[["a", 1], [:b, 2]]
+    +[["a", 1]]
+    +2
+    diff --git a/test/int_overflow_raises.rb b/test/int_overflow_raises.rb
+    index ab897d7ae..8a6f3d7d3 100644
+    --- a/test/int_overflow_raises.rb
+    +++ b/test/int_overflow_raises.rb
+    @@ -1,4 +1,5 @@
+     # spinel: int64 -- assumes a 64-bit Integer (values or arithmetic past 2^31); not run on a 32-bit target
+    +# spinel: not-cruby -- the default Integer overflow policy raises RangeError.
+     # Integer arithmetic that overflows sp_int (int64) raises
+     # RangeError rather than silently wrapping. spinel uses
+     # `__builtin_add_overflow` / `_sub_overflow` / `_mul_overflow`
+    @@ -33,3 +34,15 @@ puts 6 * 7
+         puts "#{op}: caught #{e.message}"
+       end
+     end
+    +
+    +def sum_overflow
+    +  yield
+    +rescue RangeError => e
+    +  p [e.class, e.message]
+    +end
+    +sum_overflow { [2**62].sum(2**62) }
+    +sum_overflow { [2**62, 2**62].sum(2**62) }
+    +sum_overflow { [2**62, 2**62].sum }
+    +sum_overflow { [2**62].sum(2**62) { |x| x } }
+    +sum_overflow { [2**62, 2**62].sum { |x| x } }
+    +sum_overflow { [2**62, 2**62, -(2**62)].sum }
+    diff --git a/test/int_overflow_raises.rb.expected b/test/int_overflow_raises.rb.expected
+    index ed31fa627..bc4516575 100644
+    --- a/test/int_overflow_raises.rb.expected
+    +++ b/test/int_overflow_raises.rb.expected
+    @@ -4,3 +4,9 @@
+     plus: caught integer overflow in +
+     minus: caught integer overflow in -
+     mul: caught integer overflow in *
+    +[RangeError, "integer overflow in +"]
+    +[RangeError, "integer overflow in +"]
+    +[RangeError, "integer overflow in +"]
+    +[RangeError, "integer overflow in +"]
+    +[RangeError, "integer overflow in +"]
+    +[RangeError, "integer overflow in +"]
+    diff --git a/test/multi_break_values.rb b/test/multi_break_values.rb
+    new file mode 100644
+    index 000000000..ddda91e93
+    --- /dev/null
+    +++ b/test/multi_break_values.rb
+    @@ -0,0 +1,10 @@
+    +# spinel: share
+    +# spinel: gc-minor
+    +# spinel: gc-stress
+    +# Multiple break arguments form one Array in loops and iterators.
+    +p(loop { break 1, 2 })
+    +p(while true; break 3, 4; end)
+    +p(until false; break 5, 6; end)
+    +p([1, 2].each { |i| break i, i + 1 })
+    +p([1, 2].map { |i| break 7, 8 if i == 2; i })
+    +p(loop { break 1, *[2, 3], 4 })
+    diff --git a/test/multi_break_values.rb.expected b/test/multi_break_values.rb.expected
+    new file mode 100644
+    index 000000000..bff6eca2d
+    --- /dev/null
+    +++ b/test/multi_break_values.rb.expected
+    @@ -0,0 +1,6 @@
+    +[1, 2]
+    +[3, 4]
+    +[5, 6]
+    +[1, 2]
+    +[7, 8]
+    +[1, 2, 3, 4]
+    diff --git a/test/native_singleton_override.rb b/test/native_singleton_override.rb
+    new file mode 100644
+    index 000000000..45bbda8e1
+    --- /dev/null
+    +++ b/test/native_singleton_override.rb
+    @@ -0,0 +1,29 @@
+    +# spinel: share
+    +# spinel: gc-minor
+    +# Ruby singleton methods replace native and FFI functions, including their types.
+    +require "json"
+    +require "base64"
+    +require "stringio"
+    +module JSON
+    +  def self.parse(text) = { "user" => text }
+    +  def self.generate(value) = "generate:#{value}"
+    +  def self.dump(value) = value + 10
+    +end
+    +module Base64
+    +  def self.encode64(text) = text.size + 20
+    +end
+    +class StringIO
+    +  def self.new(*args) = "stringio:#{args.size}"
+    +end
+    +module NativeOverride
+    +  # CRuby can read the FFI declaration; the call below uses the Ruby method.
+    +  def self.ffi_func(*) = nil
+    +  ffi_func :abs, [:int], :int
+    +  def self.abs(value) = "abs:#{value}"
+    +end
+    +p JSON.parse("input")
+    +p JSON.generate(2)
+    +p JSON.dump(3)
+    +p Base64.encode64("hello")
+    +p NativeOverride.abs(-4)
+    +p StringIO.new("input")
+    diff --git a/test/native_singleton_override.rb.expected b/test/native_singleton_override.rb.expected
+    new file mode 100644
+    index 000000000..bd6104b42
+    --- /dev/null
+    +++ b/test/native_singleton_override.rb.expected
+    @@ -0,0 +1,6 @@
+    +{"user" => "input"}
+    +"generate:2"
+    +13
+    +25
+    +"abs:-4"
+    +"stringio:1"
+    diff --git a/test/nested_array_pattern_binding.rb b/test/nested_array_pattern_binding.rb
+    new file mode 100644
+    index 000000000..92aac79a8
+    --- /dev/null
+    +++ b/test/nested_array_pattern_binding.rb
+    @@ -0,0 +1,15 @@
+    +# spinel: share
+    +# spinel: gc-minor
+    +# spinel: gc-stress
+    +# Nested pattern leaves must be boxed before Integer shift is inferred.
+    +case [[1]]; in [[a]]; end
+    +p a << 2
+    +case [0, [3, 4]]; in [*, [b, c]]; end
+    +p b << 1
+    +p c << 2
+    +case [[[5]]]; in [[[d]]]; end
+    +p d << 1
+    +case [0, [6, 7]]; in [*, [e, f] => pair]; end
+    +p e << 1
+    +p f << 1
+    +p pair
+    diff --git a/test/nested_array_pattern_binding.rb.expected b/test/nested_array_pattern_binding.rb.expected
+    new file mode 100644
+    index 000000000..eed2deab4
+    --- /dev/null
+    +++ b/test/nested_array_pattern_binding.rb.expected
+    @@ -0,0 +1,7 @@
+    +4
+    +6
+    +16
+    +10
+    +12
+    +14
+    +[6, 7]
+    diff --git a/test/pack_ber_bignum.rb b/test/pack_ber_bignum.rb
+    new file mode 100644
+    index 000000000..e0fbf21ac
+    --- /dev/null
+    +++ b/test/pack_ber_bignum.rb
+    @@ -0,0 +1,42 @@
+    +# spinel: int64
+    +# spinel: share
+    +# spinel: gc-minor
+    +# BER stores the whole nonnegative Integer, including every promoted bit.
+    +[0, 127, 128, 16383, 16384, 2**63 - 1, 2**63, 2**64 - 1,
+    + 2**64, 2**70, 2**100 + 129, 2**1000 + 127].each do |value|
+    +  p [value].pack("w").bytes
+    +  buffer = +"ab"
+    +  p [value].pack("w", buffer: buffer).bytes
+    +  p buffer.bytes
+    +end
+    +p [2**64].pack("w").bytes
+    +(63..84).each do |bits|
+    +  value = (2**64) << (bits - 64)
+    +  p [value - 1, value, value + 1].pack("w*").unpack1("H*")
+    +end
+    +p [0, 127, 128, 2**64, 1].pack("w*").bytes
+    +p [2**70 - 2**70, 2**70 - (2**70 - 128)].pack("w2").bytes
+    +p [2**64, "z", 2**100].pack("waw").bytes
+    +p [1.0, 127.9, 128.9, -0.5].pack("w*").bytes
+    +p [2.0**64].pack("w").bytes
+    +begin
+    +  [1.0].pack("w2")
+    +rescue ArgumentError => e
+    +  p e.message
+    +end
+    +[-1, -(2**64), -(2**100)].each do |value|
+    +  begin
+    +    [value].pack("w")
+    +  rescue ArgumentError => e
+    +    p e.message
+    +  end
+    +  buffer = +"ab"
+    +  begin
+    +    [value].pack("w", buffer: buffer)
+    +  rescue ArgumentError => e
+    +    p e.message
+    +  end
+    +  p buffer.bytes
+    +end
+    +p [2**64].pack("w0").bytes
+    +p [2**64 + 1].pack("Q<").bytes
+    diff --git a/test/pack_ber_bignum.rb.expected b/test/pack_ber_bignum.rb.expected
+    new file mode 100644
+    index 000000000..e80edff7f
+    --- /dev/null
+    +++ b/test/pack_ber_bignum.rb.expected
+    @@ -0,0 +1,76 @@
+    +[0]
+    +[97, 98, 0]
+    +[97, 98, 0]
+    +[127]
+    +[97, 98, 127]
+    +[97, 98, 127]
+    +[129, 0]
+    +[97, 98, 129, 0]
+    +[97, 98, 129, 0]
+    +[255, 127]
+    +[97, 98, 255, 127]
+    +[97, 98, 255, 127]
+    +[129, 128, 0]
+    +[97, 98, 129, 128, 0]
+    +[97, 98, 129, 128, 0]
+    +[255, 255, 255, 255, 255, 255, 255, 255, 127]
+    +[97, 98, 255, 255, 255, 255, 255, 255, 255, 255, 127]
+    +[97, 98, 255, 255, 255, 255, 255, 255, 255, 255, 127]
+    +[129, 128, 128, 128, 128, 128, 128, 128, 128, 0]
+    +[97, 98, 129, 128, 128, 128, 128, 128, 128, 128, 128, 0]
+    +[97, 98, 129, 128, 128, 128, 128, 128, 128, 128, 128, 0]
+    +[129, 255, 255, 255, 255, 255, 255, 255, 255, 127]
+    +[97, 98, 129, 255, 255, 255, 255, 255, 255, 255, 255, 127]
+    +[97, 98, 129, 255, 255, 255, 255, 255, 255, 255, 255, 127]
+    +[130, 128, 128, 128, 128, 128, 128, 128, 128, 0]
+    +[97, 98, 130, 128, 128, 128, 128, 128, 128, 128, 128, 0]
+    +[97, 98, 130, 128, 128, 128, 128, 128, 128, 128, 128, 0]
+    +[129, 128, 128, 128, 128, 128, 128, 128, 128, 128, 0]
+    +[97, 98, 129, 128, 128, 128, 128, 128, 128, 128, 128, 128, 0]
+    +[97, 98, 129, 128, 128, 128, 128, 128, 128, 128, 128, 128, 0]
+    +[132, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 129, 1]
+    +[97, 98, 132, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 129, 1]
+    +[97, 98, 132, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 129, 1]
+    +[192, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 127]
+    +[97, 98, 192, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 127]
+    +[97, 98, 192, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 127]
+    +[130, 128, 128, 128, 128, 128, 128, 128, 128, 0]
+    +"ffffffffffffffff7f8180808080808080800081808080808080808001"
+    +"81ffffffffffffffff7f8280808080808080800082808080808080808001"
+    +"83ffffffffffffffff7f8480808080808080800084808080808080808001"
+    +"87ffffffffffffffff7f8880808080808080800088808080808080808001"
+    +"8fffffffffffffffff7f9080808080808080800090808080808080808001"
+    +"9fffffffffffffffff7fa0808080808080808000a0808080808080808001"
+    +"bfffffffffffffffff7fc0808080808080808000c0808080808080808001"
+    +"ffffffffffffffffff7f81808080808080808080008180808080808080808001"
+    +"81ffffffffffffffffff7f82808080808080808080008280808080808080808001"
+    +"83ffffffffffffffffff7f84808080808080808080008480808080808080808001"
+    +"87ffffffffffffffffff7f88808080808080808080008880808080808080808001"
+    +"8fffffffffffffffffff7f90808080808080808080009080808080808080808001"
+    +"9fffffffffffffffffff7fa080808080808080808000a080808080808080808001"
+    +"bfffffffffffffffffff7fc080808080808080808000c080808080808080808001"
+    +"ffffffffffffffffffff7f818080808080808080808000818080808080808080808001"
+    +"81ffffffffffffffffffff7f828080808080808080808000828080808080808080808001"
+    +"83ffffffffffffffffffff7f848080808080808080808000848080808080808080808001"
+    +"87ffffffffffffffffffff7f888080808080808080808000888080808080808080808001"
+    +"8fffffffffffffffffffff7f908080808080808080808000908080808080808080808001"
+    +"9fffffffffffffffffffff7fa08080808080808080808000a08080808080808080808001"
+    +"bfffffffffffffffffffff7fc08080808080808080808000c08080808080808080808001"
+    +"ffffffffffffffffffffff7f8180808080808080808080800081808080808080808080808001"
+    +[0, 127, 129, 0, 130, 128, 128, 128, 128, 128, 128, 128, 128, 0, 1]
+    +[0, 129, 0]
+    +[130, 128, 128, 128, 128, 128, 128, 128, 128, 0, 122, 132, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 0]
+    +[1, 127, 129, 0, 0]
+    +[130, 128, 128, 128, 128, 128, 128, 128, 128, 0]
+    +"too few arguments"
+    +"can't compress negative numbers"
+    +"can't compress negative numbers"
+    +[97, 98]
+    +"can't compress negative numbers"
+    +"can't compress negative numbers"
+    +[97, 98]
+    +"can't compress negative numbers"
+    +"can't compress negative numbers"
+    +[97, 98]
+    +[]
+    +[1, 0, 0, 0, 0, 0, 0, 0]
+    diff --git a/test/pack_cursor_star.rb b/test/pack_cursor_star.rb
+    new file mode 100644
+    index 000000000..8fb8ac6c2
+    --- /dev/null
+    +++ b/test/pack_cursor_star.rb
+    @@ -0,0 +1,25 @@
+    +# spinel: share
+    +# spinel: gc-minor
+    +# Cursor stars have count zero and consume no array elements.
+    +["C@*C", "CX*C", "Cx*C", "CCX*", "Cx*"].each do |format|
+    +  p [1, 2].pack(format).bytes
+    +  buffer = +"ab"
+    +  p [1, 2].pack(format, buffer: buffer).bytes
+    +  p buffer.bytes
+    +end
+    +["@*", "X*", "x*", "@0", "X0", "x0"].each do |format|
+    +  p [].pack(format).bytes
+    +  buffer = +"ab"
+    +  p [].pack(format, buffer: buffer).bytes
+    +  p buffer.bytes
+    +end
+    +["C@*C", "CX*C", "Cx*C"].each do |format|
+    +  p [1.0, 2.0].pack(format).bytes
+    +end
+    +["a@*a", "aX*a", "ax*a"].each do |format|
+    +  p ["a", "b"].pack(format).bytes
+    +end
+    +["C@*a", "CX*a", "Cx*a"].each do |format|
+    +  p [1, "b"].pack(format).bytes
+    +end
+    +p [1, 2].pack("Cx2CX1@4").bytes
+    diff --git a/test/pack_cursor_star.rb.expected b/test/pack_cursor_star.rb.expected
+    new file mode 100644
+    index 000000000..ad8fb8e1a
+    --- /dev/null
+    +++ b/test/pack_cursor_star.rb.expected
+    @@ -0,0 +1,43 @@
+    +[2]
+    +[2]
+    +[2]
+    +[1, 2]
+    +[97, 98, 1, 2]
+    +[97, 98, 1, 2]
+    +[1, 2]
+    +[97, 98, 1, 2]
+    +[97, 98, 1, 2]
+    +[1, 2]
+    +[97, 98, 1, 2]
+    +[97, 98, 1, 2]
+    +[1]
+    +[97, 98, 1]
+    +[97, 98, 1]
+    +[]
+    +[]
+    +[]
+    +[]
+    +[97, 98]
+    +[97, 98]
+    +[]
+    +[97, 98]
+    +[97, 98]
+    +[]
+    +[]
+    +[]
+    +[]
+    +[97, 98]
+    +[97, 98]
+    +[]
+    +[97, 98]
+    +[97, 98]
+    +[2]
+    +[1, 2]
+    +[1, 2]
+    +[98]
+    +[97, 98]
+    +[97, 98]
+    +[98]
+    +[1, 98]
+    +[1, 98]
+    +[1, 0, 0, 0]
+    diff --git a/test/pack_too_few_arguments.rb b/test/pack_too_few_arguments.rb
+    new file mode 100644
+    index 000000000..de7f0b016
+    --- /dev/null
+    +++ b/test/pack_too_few_arguments.rb
+    @@ -0,0 +1,69 @@
+    +# spinel: share
+    +# spinel: gc-minor
+    +# Every consuming directive raises when its next element is absent.
+    +["C", "c", "n", "N", "v", "V", "s", "S", "l", "L", "q", "Q",
+    + "i", "I", "j", "J", "U", "w", "f", "F", "d", "D", "e", "E", "g", "G",
+    + "a", "A", "Z", "H", "h", "B", "b", "m", "M", "u",
+    + "a0", "a*", "m0", "M0", "u*"].each do |format|
+    +  begin
+    +    [].pack(format)
+    +  rescue ArgumentError => e
+    +    p e.message
+    +  end
+    +  buffer = +"ab"
+    +  begin
+    +    [].pack(format, buffer: buffer)
+    +  rescue ArgumentError => e
+    +    p e.message
+    +  end
+    +  p buffer.bytes
+    +end
+    +["CC", "C2", "n2", "w2", "f2", "Ca", "Ca0", "Cm0"].each do |format|
+    +  begin
+    +    [1].pack(format)
+    +  rescue ArgumentError => e
+    +    p e.message
+    +  end
+    +  begin
+    +    [1].pack(format, buffer: +"ab")
+    +  rescue ArgumentError => e
+    +    p e.message
+    +  end
+    +end
+    +begin
+    +  [1.0].pack("d2")
+    +rescue ArgumentError => e
+    +  p e.message
+    +end
+    +begin
+    +  [1.0].pack("C2")
+    +rescue ArgumentError => e
+    +  p e.message
+    +end
+    +begin
+    +  ["a"].pack("aa")
+    +rescue ArgumentError => e
+    +  p e.message
+    +end
+    +begin
+    +  ["a"].pack("aC")
+    +rescue ArgumentError => e
+    +  p e.message
+    +end
+    +begin
+    +  [1, "a"].pack("CaC")
+    +rescue ArgumentError => e
+    +  p e.message
+    +end
+    +begin
+    +  [nil].pack("C2")
+    +rescue TypeError => e
+    +  p e.message
+    +end
+    +p [].pack("C0w0f0C*w*f*x0").bytes
+    +p [1].pack("C*").bytes
+    +p [1.0].pack("C*").bytes
+    +p ["a"].pack("C0a").bytes
+    +p ["a"].pack("aC*").bytes
+    +p [1, "a"].pack("CaC*").bytes
+    +p [nil].pack("a0").bytes
+    diff --git a/test/pack_too_few_arguments.rb.expected b/test/pack_too_few_arguments.rb.expected
+    new file mode 100644
+    index 000000000..a4f0c7feb
+    --- /dev/null
+    +++ b/test/pack_too_few_arguments.rb.expected
+    @@ -0,0 +1,152 @@
+    +"too few arguments"
+    +"too few arguments"
+    +[97, 98]
+    +"too few arguments"
+    +"too few arguments"
+    +[97, 98]
+    +"too few arguments"
+    +"too few arguments"
+    +[97, 98]
+    +"too few arguments"
+    +"too few arguments"
+    +[97, 98]
+    +"too few arguments"
+    +"too few arguments"
+    +[97, 98]
+    +"too few arguments"
+    +"too few arguments"
+    +[97, 98]
+    +"too few arguments"
+    +"too few arguments"
+    +[97, 98]
+    +"too few arguments"
+    +"too few arguments"
+    +[97, 98]
+    +"too few arguments"
+    +"too few arguments"
+    +[97, 98]
+    +"too few arguments"
+    +"too few arguments"
+    +[97, 98]
+    +"too few arguments"
+    +"too few arguments"
+    +[97, 98]
+    +"too few arguments"
+    +"too few arguments"
+    +[97, 98]
+    +"too few arguments"
+    +"too few arguments"
+    +[97, 98]
+    +"too few arguments"
+    +"too few arguments"
+    +[97, 98]
+    +"too few arguments"
+    +"too few arguments"
+    +[97, 98]
+    +"too few arguments"
+    +"too few arguments"
+    +[97, 98]
+    +"too few arguments"
+    +"too few arguments"
+    +[97, 98]
+    +"too few arguments"
+    +"too few arguments"
+    +[97, 98]
+    +"too few arguments"
+    +"too few arguments"
+    +[97, 98]
+    +"too few arguments"
+    +"too few arguments"
+    +[97, 98]
+    +"too few arguments"
+    +"too few arguments"
+    +[97, 98]
+    +"too few arguments"
+    +"too few arguments"
+    +[97, 98]
+    +"too few arguments"
+    +"too few arguments"
+    +[97, 98]
+    +"too few arguments"
+    +"too few arguments"
+    +[97, 98]
+    +"too few arguments"
+    +"too few arguments"
+    +[97, 98]
+    +"too few arguments"
+    +"too few arguments"
+    +[97, 98]
+    +"too few arguments"
+    +"too few arguments"
+    +[97, 98]
+    +"too few arguments"
+    +"too few arguments"
+    +[97, 98]
+    +"too few arguments"
+    +"too few arguments"
+    +[97, 98]
+    +"too few arguments"
+    +"too few arguments"
+    +[97, 98]
+    +"too few arguments"
+    +"too few arguments"
+    +[97, 98]
+    +"too few arguments"
+    +"too few arguments"
+    +[97, 98]
+    +"too few arguments"
+    +"too few arguments"
+    +[97, 98]
+    +"too few arguments"
+    +"too few arguments"
+    +[97, 98]
+    +"too few arguments"
+    +"too few arguments"
+    +[97, 98]
+    +"too few arguments"
+    +"too few arguments"
+    +[97, 98]
+    +"too few arguments"
+    +"too few arguments"
+    +[97, 98]
+    +"too few arguments"
+    +"too few arguments"
+    +[97, 98]
+    +"too few arguments"
+    +"too few arguments"
+    +[97, 98]
+    +"too few arguments"
+    +"too few arguments"
+    +[97, 98]
+    +"too few arguments"
+    +"too few arguments"
+    +[97, 98]
+    +"too few arguments"
+    +"too few arguments"
+    +"too few arguments"
+    +"too few arguments"
+    +"too few arguments"
+    +"too few arguments"
+    +"too few arguments"
+    +"too few arguments"
+    +"too few arguments"
+    +"too few arguments"
+    +"too few arguments"
+    +"too few arguments"
+    +"too few arguments"
+    +"too few arguments"
+    +"too few arguments"
+    +"too few arguments"
+    +"too few arguments"
+    +"too few arguments"
+    +"too few arguments"
+    +"too few arguments"
+    +"too few arguments"
+    +"no implicit conversion of nil into Integer"
+    +[]
+    +[1]
+    +[1]
+    +[97]
+    +[97]
+    +[1, 97]
+    +[]
+    diff --git a/test/poly_array_sum_seed.rb b/test/poly_array_sum_seed.rb
+    new file mode 100644
+    index 000000000..157f0219e
+    --- /dev/null
+    +++ b/test/poly_array_sum_seed.rb
+    @@ -0,0 +1,83 @@
+    +# spinel: int64
+    +# spinel: share
+    +# spinel: gc-minor
+    +# A seeded sum starts with the seed, including when it is boxed. Empty
+    +# arrays keep its class; non-empty arrays add in order, with compensation
+    +# when Float elements appear. Mutating a result here reads that same name.
+    +def sum_seed(n)
+    +  case n
+    +  when 0 then +"ab"
+    +  when 1 then [9]
+    +  when 2 then 10
+    +  when 3 then 0.0
+    +  else Rational(1, 2)
+    +  end
+    +end
+    +
+    +def empty_items
+    +  [1, "unused"].take(0)
+    +end
+    +
+    +def attempt
+    +  p yield
+    +rescue TypeError => e
+    +  p [e.class, e.message]
+    +end
+    +
+    +p empty_items.sum(sum_seed(0))
+    +p empty_items.sum(sum_seed(1))
+    +p empty_items.sum(sum_seed(2))
+    +p empty_items.sum(sum_seed(3))
+    +p empty_items.sum(sum_seed(4))
+    +text = empty_items.sum(sum_seed(0))
+    +text << "!"
+    +p text
+    +
+    +p ["c", :unused].take(1).sum(sum_seed(0))
+    +p [[1, 2], :unused].take(1).sum(sum_seed(1))
+    +p [1, 2.5].sum(sum_seed(2))
+    +p [0.1, 0.2, 0.3, 0r].sum(sum_seed(3))
+    +p [1, Rational(1, 4)].sum(sum_seed(4))
+    +p [1, 0.25].sum(sum_seed(4))
+    +p [-1.0e16, 1.0, 0r].sum(10000000000000000)
+    +p [-1.0e16, 1.0, 0r].sum(10000000000000000r)
+    +p ["c", :unused].take(1).sum("ab")
+    +p [[1], [2]].sum([9])
+    +p [[1], [2]].sum([])
+    +p empty_items.sum("ab")
+    +p empty_items.sum([9])
+    +p empty_items.sum([])
+    +attempt { ["c", 1].sum("ab") }
+    +attempt { [[1], 2].sum([9]) }
+    +attempt { ["c", 1].sum(sum_seed(0)) }
+    +attempt { [[1], 2].sum(sum_seed(1)) }
+    +
+    +p [1, 2].sum(sum_seed(4)) { |x| x }
+    +p [1, 2].take(0).sum(sum_seed(0)) { |x| x }
+    +p ["c", "d"].sum(sum_seed(0)) { |x| x }
+    +p [1, 2].sum(sum_seed(1)) { |x| [x] }
+    +p [1, 2.5].sum(sum_seed(2)) { |x| x }
+    +p [0.1, 0.2, 0.3].sum(sum_seed(3)) { |x| x }
+    +p [1, 2].sum(sum_seed(4))
+    +p [1.0, 2.0].sum(sum_seed(4))
+    +attempt { [1, 2].sum(sum_seed(0)) }
+    +p [1, 2].sum(0.5)
+    +p [0.1, 0.2, 0.3].sum(0.0)
+    +p [Float::INFINITY, 1.0].sum(0.0) { |x| x }
+    +p [Float::NAN, 1.0].sum(0.0) { |x| x }.nan?
+    +p (1..3).sum(sum_seed(4))
+    +p (1...1).sum(sum_seed(0))
+    +p({ a: 1, b: 2 }.sum(sum_seed(4)) { |k, v| v })
+    +p ["c", "d"].each.sum(sum_seed(0)) { |x| x }
+    +
+    +$order = []
+    +def sum_items
+    +  $order << "receiver"
+    +  [1, 2.5]
+    +end
+    +def ordered_seed
+    +  $order << "seed"
+    +  10
+    +end
+    +p sum_items.sum(ordered_seed)
+    +p $order
+    diff --git a/test/poly_array_sum_seed.rb.expected b/test/poly_array_sum_seed.rb.expected
+    new file mode 100644
+    index 000000000..388b1dda6
+    --- /dev/null
+    +++ b/test/poly_array_sum_seed.rb.expected
+    @@ -0,0 +1,43 @@
+    +"ab"
+    +[9]
+    +10
+    +0.0
+    +(1/2)
+    +"ab!"
+    +"abc"
+    +[9, 1, 2]
+    +13.5
+    +0.6
+    +(7/4)
+    +1.75
+    +1.0
+    +1.0
+    +"abc"
+    +[9, 1, 2]
+    +[1, 2]
+    +"ab"
+    +[9]
+    +[]
+    +[TypeError, "no implicit conversion of Integer into String"]
+    +[TypeError, "no implicit conversion of Integer into Array"]
+    +[TypeError, "no implicit conversion of Integer into String"]
+    +[TypeError, "no implicit conversion of Integer into Array"]
+    +(7/2)
+    +"ab"
+    +"abcd"
+    +[9, 1, 2]
+    +13.5
+    +0.6
+    +(7/2)
+    +3.5
+    +[TypeError, "no implicit conversion of Integer into String"]
+    +3.5
+    +0.6
+    +Infinity
+    +true
+    +6.5
+    +"ab"
+    +(7/2)
+    +"abcd"
+    +13.5
+    +["receiver", "seed"]
+    diff --git a/test/poly_numeric_op_assign_div_mod.rb b/test/poly_numeric_op_assign_div_mod.rb
+    new file mode 100644
+    index 000000000..1b683a08c
+    --- /dev/null
+    +++ b/test/poly_numeric_op_assign_div_mod.rb
+    @@ -0,0 +1,31 @@
+    +# A boxed numeric accumulator validates division and modulo operands before
+    +# conversion, including after an addition widens an initially native local.
+    +# spinel: share
+    +# spinel: gc-minor
+    +def checked_div_mod(value, divisor)
+    +  value += [0, "unused"][0]
+    +  begin
+    +    value /= divisor
+    +    p value
+    +  rescue TypeError => e
+    +    p [e.class, value]
+    +  end
+    +  begin
+    +    value %= divisor
+    +    p value
+    +  rescue TypeError => e
+    +    p [e.class, value]
+    +  end
+    +end
+    +
+    +[nil, "2", true, :two, [], {}].each do |divisor|
+    +  checked_div_mod(7, divisor)
+    +  checked_div_mod(7.5, divisor)
+    +end
+    +checked_div_mod(7, 2)
+    +checked_div_mod(7.5, 2.0)
+    +
+    +class DivisorCoercion
+    +  def coerce(value) = [value, 2]
+    +end
+    +checked_div_mod(7, DivisorCoercion.new)
+    diff --git a/test/poly_numeric_op_assign_div_mod.rb.expected b/test/poly_numeric_op_assign_div_mod.rb.expected
+    new file mode 100644
+    index 000000000..b46e10232
+    --- /dev/null
+    +++ b/test/poly_numeric_op_assign_div_mod.rb.expected
+    @@ -0,0 +1,30 @@
+    +[TypeError, 7]
+    +[TypeError, 7]
+    +[TypeError, 7.5]
+    +[TypeError, 7.5]
+    +[TypeError, 7]
+    +[TypeError, 7]
+    +[TypeError, 7.5]
+    +[TypeError, 7.5]
+    +[TypeError, 7]
+    +[TypeError, 7]
+    +[TypeError, 7.5]
+    +[TypeError, 7.5]
+    +[TypeError, 7]
+    +[TypeError, 7]
+    +[TypeError, 7.5]
+    +[TypeError, 7.5]
+    +[TypeError, 7]
+    +[TypeError, 7]
+    +[TypeError, 7.5]
+    +[TypeError, 7.5]
+    +[TypeError, 7]
+    +[TypeError, 7]
+    +[TypeError, 7.5]
+    +[TypeError, 7.5]
+    +3
+    +1
+    +3.75
+    +1.75
+    +3
+    +1
+    diff --git a/test/promote_array_sum_overflow.rb b/test/promote_array_sum_overflow.rb
+    new file mode 100644
+    index 000000000..726f27984
+    --- /dev/null
+    +++ b/test/promote_array_sum_overflow.rb
+    @@ -0,0 +1,11 @@
+    +# spinel: int64
+    +# Integer sums promote the whole accumulator when its additions overflow.
+    +p [2**62].sum(2**62)
+    +p [2**62, 2**62].sum(2**62)
+    +p [2**62, 2**62].sum
+    +p [2**62].sum(2**62) { |x| x }
+    +p [2**62, 2**62].sum { |x| x }
+    +p [2**62, 2**62].sum(0.5)
+    +p [2**62, 2**62, -(2**62)].sum
+    +# Boxing a minimum-Integer prefix can allocate before the overflowing step.
+    +p [-(2**62) - 2**62, -1].sum
+    diff --git a/test/promote_array_sum_overflow.rb.expected b/test/promote_array_sum_overflow.rb.expected
+    new file mode 100644
+    index 000000000..02e60d3fb
+    --- /dev/null
+    +++ b/test/promote_array_sum_overflow.rb.expected
+    @@ -0,0 +1,8 @@
+    +9223372036854775808
+    +13835058055282163712
+    +9223372036854775808
+    +9223372036854775808
+    +9223372036854775808
+    +9.223372036854776e+18
+    +4611686018427387904
+    +-9223372036854775809
+    diff --git a/test/reject/bare_const_compact_class_path.rb b/test/reject/bare_const_compact_class_path.rb
+    deleted file mode 100644
+    index 646622ea0..000000000
+    --- a/test/reject/bare_const_compact_class_path.rb
+    +++ /dev/null
+    @@ -1,9 +0,0 @@
+    -# `class A::B` puts only A::B in the body's lexical scope, not A: CRuby raises
+    -# NameError (uninitialized constant A::B::LIMIT) where spinel read A::LIMIT.
+    -module A
+    -  LIMIT = 3
+    -end
+    -class A::B
+    -  def self.limit = LIMIT
+    -end
+    -p A::B.limit
+    diff --git a/test/reject/bare_const_nested_unreachable.rb b/test/reject/bare_const_nested_unreachable.rb
+    deleted file mode 100644
+    index 3e8d0610d..000000000
+    --- a/test/reject/bare_const_nested_unreachable.rb
+    +++ /dev/null
+    @@ -1,8 +0,0 @@
+    -# X is defined only as A::X. CRuby's lookup from the top level never looks
+    -# inside A, so `X` raises NameError (uninitialized constant X); spinel bound
+    -# the leaf name to A::X and printed "A::X".
+    -module A
+    -  class X; def w = "A::X"; end
+    -end
+    -def g = X.new.w
+    -p g
+    diff --git a/test/reject/bare_const_unreachable_const_missing.rb b/test/reject/bare_const_unreachable_const_missing.rb
+    new file mode 100644
+    index 000000000..808c55e21
+    --- /dev/null
+    +++ b/test/reject/bare_const_unreachable_const_missing.rb
+    @@ -0,0 +1,11 @@
+    +# X is defined only as A::X and B's lookup does not reach it, but B defines
+    +# const_missing, which CRuby calls for the miss: spinel does not follow it,
+    +# so the read is refused where it is written.
+    +module A
+    +  class X; end
+    +end
+    +class B
+    +  def self.const_missing(name) = name
+    +  def self.get = X
+    +end
+    +p B.get
+    diff --git a/test/reject/builtin_singleton_alias_call.rb b/test/reject/builtin_singleton_alias_call.rb
+    new file mode 100644
+    index 000000000..26c6c2a01
+    --- /dev/null
+    +++ b/test/reject/builtin_singleton_alias_call.rb
+    @@ -0,0 +1,8 @@
+    +# A captured builtin singleton alias has no compiled user body to call.
+    +# spinel: reject-builtin-class: File.basename: calling an alias of a builtin singleton method is not supported
+    +class File
+    +  class << self
+    +    alias basename_copy basename
+    +  end
+    +end
+    +p File.basename_copy("dir/name")
+    diff --git a/test/reject/builtin_singleton_alias_call.rb.expected b/test/reject/builtin_singleton_alias_call.rb.expected
+    new file mode 100644
+    index 000000000..7cc35dd7c
+    --- /dev/null
+    +++ b/test/reject/builtin_singleton_alias_call.rb.expected
+    @@ -0,0 +1 @@
+    +"name"
+    diff --git a/test/reject/builtin_singleton_alias_chain.rb b/test/reject/builtin_singleton_alias_chain.rb
+    new file mode 100644
+    index 000000000..091ca3745
+    --- /dev/null
+    +++ b/test/reject/builtin_singleton_alias_chain.rb
+    @@ -0,0 +1,10 @@
+    +# Captured builtin singleton dispatch is refused until it can keep its target.
+    +# spinel: reject-builtin-class: Time.at: rebinding a builtin singleton method captured by an alias is not supported
+    +class Time
+    +  class << self
+    +    def at_with_coercion(value) = at_without_coercion(value.to_i)
+    +    alias_method :at_without_coercion, :at
+    +    alias_method :at, :at_with_coercion
+    +  end
+    +end
+    +p Time.at("7").to_i
+    diff --git a/test/reject/builtin_singleton_alias_chain.rb.expected b/test/reject/builtin_singleton_alias_chain.rb.expected
+    new file mode 100644
+    index 000000000..7f8f011eb
+    --- /dev/null
+    +++ b/test/reject/builtin_singleton_alias_chain.rb.expected
+    @@ -0,0 +1 @@
+    +7
+    diff --git a/test/reject/builtin_singleton_alias_method_redefine.rb b/test/reject/builtin_singleton_alias_method_redefine.rb
+    new file mode 100644
+    index 000000000..90fc55694
+    --- /dev/null
+    +++ b/test/reject/builtin_singleton_alias_method_redefine.rb
+    @@ -0,0 +1,7 @@
+    +# Captured builtin singleton dispatch is refused until it can keep its target.
+    +# spinel: reject-builtin-class: File.basename: alias of a builtin singleton method that is later overridden is not supported
+    +class << File
+    +  alias_method :original_basename, :basename
+    +  def basename(path) = "wrapped:#{original_basename(path)}"
+    +end
+    +p File.basename("dir/name")
+    diff --git a/test/reject/builtin_singleton_alias_method_redefine.rb.expected b/test/reject/builtin_singleton_alias_method_redefine.rb.expected
+    new file mode 100644
+    index 000000000..052dead27
+    --- /dev/null
+    +++ b/test/reject/builtin_singleton_alias_method_redefine.rb.expected
+    @@ -0,0 +1 @@
+    +"wrapped:name"
+    diff --git a/test/reject/builtin_singleton_alias_redefine.rb b/test/reject/builtin_singleton_alias_redefine.rb
+    new file mode 100644
+    index 000000000..9551cbc41
+    --- /dev/null
+    +++ b/test/reject/builtin_singleton_alias_redefine.rb
+    @@ -0,0 +1,9 @@
+    +# Captured builtin singleton dispatch is refused until it can keep its target.
+    +# spinel: reject-builtin-class: File.basename: alias of a builtin singleton method that is later overridden is not supported
+    +class File
+    +  class << self
+    +    alias original_basename basename
+    +    def basename(path) = "wrapped:#{original_basename(path)}"
+    +  end
+    +end
+    +p File.basename("dir/name")
+    diff --git a/test/reject/builtin_singleton_alias_redefine.rb.expected b/test/reject/builtin_singleton_alias_redefine.rb.expected
+    new file mode 100644
+    index 000000000..052dead27
+    --- /dev/null
+    +++ b/test/reject/builtin_singleton_alias_redefine.rb.expected
+    @@ -0,0 +1 @@
+    +"wrapped:name"
+    diff --git a/test/reject/builtin_singleton_kernel_alias.rb b/test/reject/builtin_singleton_kernel_alias.rb
+    new file mode 100644
+    index 000000000..61ff06fa8
+    --- /dev/null
+    +++ b/test/reject/builtin_singleton_kernel_alias.rb
+    @@ -0,0 +1,9 @@
+    +# A builtin omitted from blocking arity probes still retains its alias target.
+    +# spinel: reject-builtin-class: Kernel.sleep: alias of a builtin singleton method that is later overridden is not supported
+    +module Kernel
+    +  class << self
+    +    alias original_sleep sleep
+    +    def sleep(value) = "sleep:#{original_sleep(0)}"
+    +  end
+    +end
+    +p Kernel.sleep(0)
+    diff --git a/test/reject/builtin_singleton_kernel_alias.rb.expected b/test/reject/builtin_singleton_kernel_alias.rb.expected
+    new file mode 100644
+    index 000000000..a549bac92
+    --- /dev/null
+    +++ b/test/reject/builtin_singleton_kernel_alias.rb.expected
+    @@ -0,0 +1 @@
+    +"sleep:0"
+    diff --git a/test/reject/builtin_singleton_kernel_super.rb b/test/reject/builtin_singleton_kernel_super.rb
+    new file mode 100644
+    index 000000000..4682f11b9
+    --- /dev/null
+    +++ b/test/reject/builtin_singleton_kernel_super.rb
+    @@ -0,0 +1,6 @@
+    +# Kernel singleton super reaches its module function through Object.
+    +# spinel: reject-builtin-class: Kernel.puts: super to an inherited builtin singleton method is not supported
+    +module Kernel
+    +  def self.puts(*args) = super
+    +end
+    +Kernel.puts "k"
+    diff --git a/test/reject/builtin_singleton_kernel_super.rb.expected b/test/reject/builtin_singleton_kernel_super.rb.expected
+    new file mode 100644
+    index 000000000..b68fde2a0
+    --- /dev/null
+    +++ b/test/reject/builtin_singleton_kernel_super.rb.expected
+    @@ -0,0 +1 @@
+    +k
+    diff --git a/test/reject/builtin_singleton_native_class_reopen.rb b/test/reject/builtin_singleton_native_class_reopen.rb
+    new file mode 100644
+    index 000000000..89607114f
+    --- /dev/null
+    +++ b/test/reject/builtin_singleton_native_class_reopen.rb
+    @@ -0,0 +1,7 @@
+    +# A constant singleton-class body cannot reopen a native class implicitly.
+    +# spinel: reject-builtin-class: reopening the builtin class ConditionVariable is not supported
+    +class << ConditionVariable
+    +  def reachable_helper = :called
+    +end
+    +p ConditionVariable.new.class
+    +p ConditionVariable.reachable_helper
+    diff --git a/test/reject/builtin_singleton_native_class_reopen.rb.expected b/test/reject/builtin_singleton_native_class_reopen.rb.expected
+    new file mode 100644
+    index 000000000..0f0a04635
+    --- /dev/null
+    +++ b/test/reject/builtin_singleton_native_class_reopen.rb.expected
+    @@ -0,0 +1 @@
+    +Thread::ConditionVariable
+    diff --git a/test/reject/builtin_singleton_native_reopen.rb b/test/reject/builtin_singleton_native_reopen.rb
+    new file mode 100644
+    index 000000000..56e76c66c
+    --- /dev/null
+    +++ b/test/reject/builtin_singleton_native_reopen.rb
+    @@ -0,0 +1,7 @@
+    +# Direct singleton definitions obey the same limits as a native class body.
+    +# spinel: reject-builtin-class: reopening the builtin class Queue is not supported
+    +def Queue.reachable_helper = :called
+    +q = Queue.new
+    +q << 1
+    +p q.pop
+    +p Queue.reachable_helper
+    diff --git a/test/reject/builtin_singleton_native_reopen.rb.expected b/test/reject/builtin_singleton_native_reopen.rb.expected
+    new file mode 100644
+    index 000000000..d00491fd7
+    --- /dev/null
+    +++ b/test/reject/builtin_singleton_native_reopen.rb.expected
+    @@ -0,0 +1 @@
+    +1
+    diff --git a/test/reject/builtin_singleton_super.rb b/test/reject/builtin_singleton_super.rb
+    new file mode 100644
+    index 000000000..31371708d
+    --- /dev/null
+    +++ b/test/reject/builtin_singleton_super.rb
+    @@ -0,0 +1,8 @@
+    +# Explicit singleton super needs the inherited builtin implementation.
+    +# spinel: reject-builtin-class: File.read: super to an inherited builtin singleton method is not supported
+    +class File
+    +  def self.read(path)
+    +    super(path).lines.first.chomp
+    +  end
+    +end
+    +p File.read(__FILE__)
+    diff --git a/test/reject/builtin_singleton_super.rb.expected b/test/reject/builtin_singleton_super.rb.expected
+    new file mode 100644
+    index 000000000..27532cb4a
+    --- /dev/null
+    +++ b/test/reject/builtin_singleton_super.rb.expected
+    @@ -0,0 +1 @@
+    +"# Explicit singleton super needs the inherited builtin implementation."
+    diff --git a/test/reject/builtin_singleton_super_forward.rb b/test/reject/builtin_singleton_super_forward.rb
+    new file mode 100644
+    index 000000000..811d370a2
+    --- /dev/null
+    +++ b/test/reject/builtin_singleton_super_forward.rb
+    @@ -0,0 +1,8 @@
+    +# Forwarding singleton super needs the inherited builtin and its block.
+    +# spinel: reject-builtin-class: File.open: super to an inherited builtin singleton method is not supported
+    +class File
+    +  def self.open(path, &block)
+    +    super
+    +  end
+    +end
+    +File.open(__FILE__) { |io| p io.gets.chomp }
+    diff --git a/test/reject/builtin_singleton_super_forward.rb.expected b/test/reject/builtin_singleton_super_forward.rb.expected
+    new file mode 100644
+    index 000000000..e9b3d028b
+    --- /dev/null
+    +++ b/test/reject/builtin_singleton_super_forward.rb.expected
+    @@ -0,0 +1 @@
+    +"# Forwarding singleton super needs the inherited builtin and its block."
+    diff --git a/test/reject/builtin_singleton_super_new.rb b/test/reject/builtin_singleton_super_new.rb
+    new file mode 100644
+    index 000000000..3fcffb9c4
+    --- /dev/null
+    +++ b/test/reject/builtin_singleton_super_new.rb
+    @@ -0,0 +1,8 @@
+    +# File.new super requires IO's builtin constructor rather than a user layout.
+    +# spinel: reject-builtin-class: File.new: super to an inherited builtin singleton method is not supported
+    +class File
+    +  def self.new(*args) = super
+    +end
+    +f = File.new(__FILE__)
+    +p f.gets.chomp
+    +f.close
+    diff --git a/test/reject/builtin_singleton_super_new.rb.expected b/test/reject/builtin_singleton_super_new.rb.expected
+    new file mode 100644
+    index 000000000..79480b85c
+    --- /dev/null
+    +++ b/test/reject/builtin_singleton_super_new.rb.expected
+    @@ -0,0 +1 @@
+    +"# File.new super requires IO's builtin constructor rather than a user layout."
+    diff --git a/test/reject/string_returned_arg_stored.rb b/test/reject/string_returned_arg_stored.rb
+    new file mode 100644
+    index 000000000..4dfe3a5ad
+    --- /dev/null
+    +++ b/test/reject/string_returned_arg_stored.rb
+    @@ -0,0 +1,9 @@
+    +# id answers its argument, so the Array's element is u itself and the append
+    +# shows through it. The element held a copy: refused, as `v = id(u); q << v`
+    +# is.
+    +def id(x) = x
+    +u = +"u"
+    +q = []
+    +q << id(u)
+    +u << "z"
+    +p q
+    diff --git a/test/reject/string_returned_arg_stored_element.rb b/test/reject/string_returned_arg_stored_element.rb
+    new file mode 100644
+    index 000000000..32914cedc
+    --- /dev/null
+    +++ b/test/reject/string_returned_arg_stored_element.rb
+    @@ -0,0 +1,8 @@
+    +# The append goes through the element and u is read: the element would be a
+    +# fresh handle over a copy of u's String. Refused, as `id(u) << "y"` is.
+    +def id(x) = x
+    +u = +"u"
+    +q = []
+    +q << id(u)
+    +q[0] << "y"
+    +p u
+    diff --git a/test/reject/string_returned_arg_stored_literal.rb b/test/reject/string_returned_arg_stored_literal.rb
+    new file mode 100644
+    index 000000000..873e4a6e0
+    --- /dev/null
+    +++ b/test/reject/string_returned_arg_stored_literal.rb
+    @@ -0,0 +1,7 @@
+    +# The same as a literal's element: the Hash holds u itself. Refused, as
+    +# `v = id(u); h = { k: v }` is.
+    +def id(x) = x
+    +u = +"u"
+    +h = { k: id(u) }
+    +u << "z"
+    +p h[:k]
+    diff --git a/test/respond_to_builtin_mutator_surface.rb b/test/respond_to_builtin_mutator_surface.rb
+    new file mode 100644
+    index 000000000..bfd63996c
+    --- /dev/null
+    +++ b/test/respond_to_builtin_mutator_surface.rb
+    @@ -0,0 +1,104 @@
+    +# sp_poly_responds_builtin's per-class method tables (lib/spinel_rt.h) named
+    +# only a fraction of each builtin's real surface, against bop_rows's own
+    +# templates -- Array alone was missing 67 names, including every bang
+    +# mutator (uniq!, sort!, compact!, ...). A boxed receiver's respond_to?(:m)
+    +# for a real, implemented method answered false, which this repro's shape
+    +# (gem "jaccard") hit for real: Jaccard.coefficient's `union.uniq! if
+    +# union.respond_to?(:uniq!)` silently stopped deduping once `union`'s
+    +# parameter was boxed by an unrelated call site, so the coefficient came out
+    +# wrong (3/7 instead of 3/4).
+    +#
+    +# Exception's per-subclass accessors (key, args, errno, ...) are answered
+    +# by walking the boxed exception's real ancestor chain (sp_exc_is_a), not
+    +# by a flat name list -- see the dedicated section below.
+    +
+    +def force_poly(mixed, idx)
+    +  mixed[idx]
+    +end
+    +
+    +# Array: the exact jaccard shape (uniq! via respond_to?, plus a sample of
+    +# the other newly-covered bang mutators).
+    +a = force_poly([[1, 2, 3, 4], "x"], 0)
+    +union = a + [1, 3, 4]
+    +p union.respond_to?(:uniq!)
+    +union.uniq! if union.respond_to?(:uniq!)
+    +p union
+    +p force_poly([[1, 2], "x"], 0).respond_to?(:sort!)
+    +p force_poly([[1, 2], "x"], 0).respond_to?(:compact!)
+    +p force_poly([[1, 2], "x"], 0).respond_to?(:flatten!)
+    +p force_poly([[1, 2], "x"], 0).respond_to?(:select!)
+    +p force_poly([[1, 2], "x"], 0).respond_to?(:member?)
+    +
+    +# Hash
+    +p force_poly([{ "a" => 1 }, "x"], 0).respond_to?(:compact!)
+    +p force_poly([{ "a" => 1 }, "x"], 0).respond_to?(:transform_keys!)
+    +p force_poly([{ "a" => 1 }, "x"], 0).respond_to?(:except)
+    +
+    +# String
+    +p force_poly(["abc", 1], 0).respond_to?(:upcase!)
+    +p force_poly(["abc", 1], 0).respond_to?(:strip!)
+    +p force_poly(["abc", 1], 0).respond_to?(:each_byte)
+    +
+    +# Integer / Float
+    +p force_poly([1, "x"], 0).respond_to?(:gcdlcm)
+    +p force_poly([1, "x"], 0).respond_to?(:infinite?)
+    +p force_poly([1.5, "x"], 0).respond_to?(:next_float)
+    +
+    +# Range
+    +p force_poly([(1..5), "x"], 0).respond_to?(:filter_map)
+    +p force_poly([(1..5), "x"], 0).respond_to?(:max_by)
+    +
+    +# Symbol
+    +p force_poly([:sym, 1], 0).respond_to?(:casecmp)
+    +p force_poly([:sym, 1], 0).respond_to?(:slice)
+    +
+    +# Proc
+    +p force_poly([proc {}, 1], 0).respond_to?(:source_location)
+    +
+    +# Exception: bop_rows registers key/receiver/name/args/errno/status/...
+    +# for ANY exception (no owning-subclass field), but CRuby gates each to
+    +# the subclass that actually defines it. sp_poly_responds_builtin answers
+    +# these by walking the boxed exception's real ancestor chain
+    +# (sp_exc_is_a), the same way `case e; when KeyError` does -- so a
+    +# KeyError responds to :key and a plain RuntimeError does not, rather
+    +# than either both answering true (bop_rows read flatly) or both
+    +# answering false (the subclass-specific names dropped altogether).
+    +key_error = begin
+    +  {}.fetch(:x)
+    +rescue KeyError => e
+    +  e
+    +end
+    +no_method_error = begin
+    +  1.nosuch_method_xyz
+    +rescue NoMethodError => e
+    +  e
+    +end
+    +p force_poly([key_error, 1], 0).respond_to?(:key)              # true
+    +p force_poly([RuntimeError.new, 1], 0).respond_to?(:key)        # false
+    +p force_poly([no_method_error, 1], 0).respond_to?(:args)        # true
+    +p force_poly([key_error, 1], 0).respond_to?(:args)              # false
+    +p force_poly([RuntimeError.new, 1], 0).respond_to?(:message)    # true (universal)
+    +
+    +# A user subclass that defines its own method boxes under its own cls_id,
+    +# not SP_BUILTIN_EXCEPTION (a trivial `class X < KeyError; end` with no
+    +# body happens to share the builtin's cls_id and never exercised this).
+    +# is_a?(KeyError) already followed the ancestor chain for this case;
+    +# respond_to?(:key) must too, not fall through to false.
+    +class MyKeyError < KeyError
+    +  def extra = "hi"
+    +end
+    +my_key_error = begin
+    +  raise MyKeyError.new("x")
+    +rescue MyKeyError => mke
+    +  mke
+    +end
+    +p force_poly([my_key_error, 1], 0).respond_to?(:key)            # true
+    +p force_poly([my_key_error, 1], 0).respond_to?(:extra)          # true
+    +p force_poly([my_key_error, 1], 0).is_a?(KeyError)              # true
+    +
+    +# Negative controls: a real method name no class defines, and format, a
+    +# Kernel method (BOP_KERNEL in bop_rows), not a String instance method --
+    +# "x".respond_to?(:format) is false in CRuby, so it must not be read off
+    +# bop_rows's TY_STRING rows either.
+    +p force_poly([[1, 2], "x"], 0).respond_to?(:not_a_real_method)
+    +p force_poly(["abc", 1], 0).respond_to?(:format)
+    diff --git a/test/respond_to_builtin_mutator_surface.rb.expected b/test/respond_to_builtin_mutator_surface.rb.expected
+    new file mode 100644
+    index 000000000..50652e988
+    --- /dev/null
+    +++ b/test/respond_to_builtin_mutator_surface.rb.expected
+    @@ -0,0 +1,31 @@
+    +true
+    +[1, 2, 3, 4]
+    +true
+    +true
+    +true
+    +true
+    +true
+    +true
+    +true
+    +true
+    +true
+    +true
+    +true
+    +true
+    +true
+    +true
+    +true
+    +true
+    +true
+    +true
+    +true
+    +true
+    +false
+    +true
+    +false
+    +true
+    +true
+    +true
+    +true
+    +false
+    +false
+    diff --git a/test/safe_nav_block_param_shapes.rb b/test/safe_nav_block_param_shapes.rb
+    index d6fa6f990..af22d3fc4 100644
+    --- a/test/safe_nav_block_param_shapes.rb
+    +++ b/test/safe_nav_block_param_shapes.rb
+    @@ -1,3 +1,4 @@
+    +# spinel: share
+     # A block given to a builtin iterator through `&.` binds its parameters as
+     # it does through `.`: a block of two parameters spreads the one Array that
+     # then, yield_self or tap yields, and an optional, a post-required or a rest
+    diff --git a/test/safe_nav_tap_then_nil.rb b/test/safe_nav_tap_then_nil.rb
+    index ef37be138..fed9348fd 100644
+    --- a/test/safe_nav_tap_then_nil.rb
+    +++ b/test/safe_nav_tap_then_nil.rb
+    @@ -1,3 +1,4 @@
+    +# spinel: share
+     # `v&.then { }` (and tap, yield_self) on a receiver that may be nil skips the
+     # block when it is nil, as CRuby's &. does. On an Integer, Float, String,
+     # Array or object that can hold its own nil, the block was inlined ahead of
+    diff --git a/test/share/known-failures.txt b/test/share/known-failures.txt
+    index 1875920f5..c1d2515aa 100644
+    --- a/test/share/known-failures.txt
+    +++ b/test/share/known-failures.txt
+    @@ -1,11 +1,3 @@
+     # SPINEL_SHARE_STRINGS=1, OPT=-O1, macOS, Apple clang 21.
+     # Names are those printed by make test; remove an entry when it passes.
+    -# Observed at master 84f5b5020 on Linux x86_64 (the fork's CI).
+    -pkg.net.net_http_client
+    -pkg.net.net_http_default_headers
+    -pkg.net.net_http_finish_not_started
+    -pkg.net.net_http_header_crlf
+    -pkg.net.net_http_request_host
+    -pkg.net.net_http_response_value
+    -pkg.net.net_http_rest_verbs
+    -pkg.net.net_http_start_block
+    +# Every corpus program passes with sharing on master; add an entry only for a known failure.
+    diff --git a/test/share/poly_array_sum_seed_identity.rb b/test/share/poly_array_sum_seed_identity.rb
+    new file mode 100644
+    index 000000000..2e464931b
+    --- /dev/null
+    +++ b/test/share/poly_array_sum_seed_identity.rb
+    @@ -0,0 +1,43 @@
+    +# An empty sum returns its seed, including the shared String handle. A
+    +# non-empty sum concatenates into a new String and leaves the seed alone.
+    +class TextSeed
+    +  def value = +"a" + "b"
+    +end
+    +class NumberSeed
+    +  def value = 7
+    +end
+    +objects = [TextSeed.new, NumberSeed.new]
+    +empty = []
+    +r = empty.sum(objects[0].value)
+    +q = r
+    +q << "!"
+    +p r
+    +
+    +items = [1, "unused"].take(0)
+    +seed = +"a" + "b"
+    +result = items.sum(seed)
+    +seed << "!"
+    +p result
+    +
+    +strings = ["x"].take(0)
+    +seed2 = +"c"
+    +result2 = strings.sum(seed2)
+    +seed2 << "!"
+    +p result2
+    +
+    +seed3 = +"d"
+    +result3 = [1].take(0).sum(seed3) { |x| x.to_s }
+    +seed3 << "!"
+    +p result3
+    +
+    +hash = { a: 1 }
+    +hash.clear
+    +seed4 = +"e"
+    +result4 = hash.sum(seed4) { |k, v| v.to_s }
+    +seed4 << "!"
+    +p result4
+    +
+    +seed5 = +"f"
+    +result5 = ["g"].sum(seed5)
+    +seed5 << "!"
+    +p [result5, seed5]
+    diff --git a/test/share/poly_array_sum_seed_identity.rb.expected b/test/share/poly_array_sum_seed_identity.rb.expected
+    new file mode 100644
+    index 000000000..0cb2160c0
+    --- /dev/null
+    +++ b/test/share/poly_array_sum_seed_identity.rb.expected
+    @@ -0,0 +1,6 @@
+    +"ab!"
+    +"ab!"
+    +"c!"
+    +"d!"
+    +"e!"
+    +["fg", "f!"]
+    diff --git a/test/share/refuse/route_borrowed_conversion.rb.expected b/test/share/refuse/route_borrowed_conversion.rb.expected
+    deleted file mode 100644
+    index 290b7e253..000000000
+    --- a/test/share/refuse/route_borrowed_conversion.rb.expected
+    +++ /dev/null
+    @@ -1 +0,0 @@
+    -spinel: test/share/refuse/route_borrowed_conversion.rb:7: under --share-strings, the String the value of `to_s` hands on as a variable's write is shared with another name and changed in place, and that route cannot carry the shared handle yet: it would hand on a copy (#6765)
+    diff --git a/test/share/refuse/route_safe_nav_conversion.rb b/test/share/refuse/route_safe_nav_conversion.rb
+    new file mode 100644
+    index 000000000..708845df1
+    --- /dev/null
+    +++ b/test/share/refuse/route_safe_nav_conversion.rb
+    @@ -0,0 +1,8 @@
+    +# spinel: not-cruby
+    +# The observed nullable conversion still needs a boxed return route.
+    +def nullable_text(s) = s&.to_s
+    +nullable_text(nil)
+    +s = +"source"
+    +t = nullable_text(s)
+    +t << "!"
+    +p s, t
+    diff --git a/test/share/refuse/route_safe_nav_conversion.rb.expected b/test/share/refuse/route_safe_nav_conversion.rb.expected
+    new file mode 100644
+    index 000000000..6d9df8a94
+    --- /dev/null
+    +++ b/test/share/refuse/route_safe_nav_conversion.rb.expected
+    @@ -0,0 +1 @@
+    +spinel: test/share/refuse/route_safe_nav_conversion.rb:6: under --share-strings, the share analysis does not follow this route, so it cannot prove that no other name sees the copy: a String a method returns as its parameter is mutated in place, or the variable passed in is (a String is not yet shared by reference through a method returning its parameter). Mutate and read the String through the variable passed in.
+    diff --git a/test/share/share_strings_array_copy_facts.rb b/test/share/share_strings_array_copy_facts.rb
+    new file mode 100644
+    index 000000000..d0fbadbd3
+    --- /dev/null
+    +++ b/test/share/share_strings_array_copy_facts.rb
+    @@ -0,0 +1,82 @@
+    +# spinel: share
+    +# spinel: gc-minor
+    +# A shallow Array copy keeps each element's identity. Keep the two mutation
+    +# directions in separate scopes so one cannot make the other share by chance.
+    +source = +"top"
+    +original = [source]
+    +copied = Array.new(original)
+    +copied[0] << "!"
+    +p source, original, copied
+    +copied << +"other"
+    +p original, copied
+    +
+    +reverse_source = +"reverse"
+    +reverse_copy = Array.new([reverse_source])
+    +reverse_source << "?"
+    +p reverse_copy
+    +
+    +def copy_forward
+    +  s = +"method"
+    +  a = Array.new([s])
+    +  a[0] << "!"
+    +  p s
+    +end
+    +
+    +def copy_reverse
+    +  s = +"method-reverse"
+    +  a = [s]
+    +  b = Array.new(a)
+    +  s << "?"
+    +  p b
+    +end
+    +copy_forward
+    +copy_reverse
+    +
+    +1.times do
+    +  block_source = +"block"
+    +  block_copy = Array.new([block_source])
+    +  block_copy[0] << "!"
+    +  p block_source
+    +end
+    +1.times do
+    +  block_reverse = +"block-reverse"
+    +  block_array = [block_reverse]
+    +  block_copy_reverse = Array.new(block_array)
+    +  block_reverse << "?"
+    +  p block_copy_reverse
+    +end
+    +
+    +# The same copy can be read directly, or retain a nested container.
+    +def direct_copy
+    +  s = +"direct"
+    +  t = Array.new([s])[0]
+    +  t << "!"
+    +  p s
+    +end
+    +def nested_copy
+    +  s = +"nested"
+    +  a = Array.new([[s]])
+    +  a[0][0] << "!"
+    +  p s
+    +end
+    +direct_copy
+    +nested_copy
+    +
+    +# A duplicated String stays separate and a literal stays frozen.
+    +def distinct_elements
+    +  s = +"distinct"
+    +  a = Array.new([s, s.dup])
+    +  a[1] << "!"
+    +  p s, a
+    +end
+    +distinct_elements
+    +frozen_copy = Array.new(["fixed"])
+    +begin
+    +  frozen_copy[0] << "!"
+    +rescue FrozenError
+    +  puts "frozen"
+    +end
+    +
+    +# Integer sizes and block results keep their existing meanings.
+    +p Array.new(2)
+    +p Array.new(2) { |i| i }
+    diff --git a/test/share/share_strings_array_copy_facts.rb.expected b/test/share/share_strings_array_copy_facts.rb.expected
+    new file mode 100644
+    index 000000000..d29d32825
+    --- /dev/null
+    +++ b/test/share/share_strings_array_copy_facts.rb.expected
+    @@ -0,0 +1,17 @@
+    +"top!"
+    +["top!"]
+    +["top!"]
+    +["top!"]
+    +["top!", "other"]
+    +["reverse?"]
+    +"method!"
+    +["method-reverse?"]
+    +"block!"
+    +["block-reverse?"]
+    +"direct!"
+    +"nested!"
+    +"distinct"
+    +["distinct", "distinct!"]
+    +frozen
+    +[nil, nil]
+    +[0, 1]
+    diff --git a/test/share/share_strings_array_fill_splat.rb b/test/share/share_strings_array_fill_splat.rb
+    new file mode 100644
+    index 000000000..5b1e2f6ae
+    --- /dev/null
+    +++ b/test/share/share_strings_array_fill_splat.rb
+    @@ -0,0 +1,167 @@
+    +# spinel: share
+    +# spinel: gc-minor
+    +# Splatted Array fill arguments keep the fill object in every element.
+    +
+    +s = +"ab"
+    +a = Array.new(*[2, s]); t = a[0]
+    +t << "c"
+    +p s
+    +
+    +s = +"ab"
+    +a = Array.new(*[2, s]); t = a[0]
+    +s << "c"
+    +p t
+    +
+    +def array_fill_splat_forward
+    +  s = +"ab"
+    +  a = Array.new(*[2, s]); t = a[0]
+    +  t << "c"
+    +  p s
+    +end
+    +array_fill_splat_forward
+    +
+    +def array_fill_splat_reverse
+    +  s = +"ab"
+    +  a = Array.new(*[2, s]); t = a[0]
+    +  s << "c"
+    +  p t
+    +end
+    +array_fill_splat_reverse
+    +
+    +1.times do
+    +  s = +"ab"
+    +  a = Array.new(*[2, s]); t = a[0]
+    +  t << "c"
+    +  p s
+    +end
+    +
+    +1.times do
+    +  s = +"ab"
+    +  a = Array.new(*[2, s]); t = a[0]
+    +  s << "c"
+    +  p t
+    +end
+    +
+    +s = +"ab"
+    +a = Array.new(2, *[s]); t = a[0]
+    +t << "c"
+    +p s
+    +
+    +s = +"ab"
+    +a = Array.new(2, *[s]); t = a[0]
+    +s << "c"
+    +p t
+    +
+    +def array_fill_tail_splat_forward
+    +  s = +"ab"
+    +  a = Array.new(2, *[s]); t = a[0]
+    +  t << "c"
+    +  p s
+    +end
+    +array_fill_tail_splat_forward
+    +
+    +def array_fill_tail_splat_reverse
+    +  s = +"ab"
+    +  a = Array.new(2, *[s]); t = a[0]
+    +  s << "c"
+    +  p t
+    +end
+    +array_fill_tail_splat_reverse
+    +
+    +1.times do
+    +  s = +"ab"
+    +  a = Array.new(2, *[s]); t = a[0]
+    +  t << "c"
+    +  p s
+    +end
+    +
+    +1.times do
+    +  s = +"ab"
+    +  a = Array.new(2, *[s]); t = a[0]
+    +  s << "c"
+    +  p t
+    +end
+    +
+    +s = +"ab"
+    +a = Array.new(*[2], s); t = a[0]
+    +t << "c"
+    +p s
+    +
+    +s = +"ab"
+    +a = Array.new(*[2], s); t = a[0]
+    +s << "c"
+    +p t
+    +
+    +def array_fill_size_splat_forward
+    +  s = +"ab"
+    +  a = Array.new(*[2], s); t = a[0]
+    +  t << "c"
+    +  p s
+    +end
+    +array_fill_size_splat_forward
+    +
+    +def array_fill_size_splat_reverse
+    +  s = +"ab"
+    +  a = Array.new(*[2], s); t = a[0]
+    +  s << "c"
+    +  p t
+    +end
+    +array_fill_size_splat_reverse
+    +
+    +1.times do
+    +  s = +"ab"
+    +  a = Array.new(*[2], s); t = a[0]
+    +  t << "c"
+    +  p s
+    +end
+    +
+    +1.times do
+    +  s = +"ab"
+    +  a = Array.new(*[2], s); t = a[0]
+    +  s << "c"
+    +  p t
+    +end
+    +
+    +def fill_once
+    +  n = 0
+    +  a = Array.new(*[2, (n += 1; +"ab")])
+    +  a[0] << "c"
+    +  p a[1]
+    +  p n
+    +end
+    +fill_once
+    +
+    +def fill_from_local
+    +  s = +"ab"
+    +  args = [2, s]
+    +  a = Array.new(*args)
+    +  a[0] << "c"
+    +  p s
+    +end
+    +fill_from_local
+    +
+    +def copy_from_splat
+    +  s = +"ab"
+    +  a = Array.new(*[[s]])
+    +  a[0] << "c"
+    +  p s
+    +end
+    +copy_from_splat
+    +p Array.new(*[])
+    +p Array.new(*[2])
+    +p Array.new(*[2, 7])
+    +p Array.new(2, *[7])
+    +p Array.new(*[2]) { |i| i + 1 }
+    +
+    +# Forwarded and mutated argument arrays separate size and shared fill.
+    +def array_runtime_forward(*args) = Array.new(*args)
+    +s = +"ab"
+    +a = array_runtime_forward(2, s)
+    +a[0] << "c"
+    +p s
+    +s = +"ab"
+    +args = [2]
+    +args << s
+    +a = Array.new(*args)
+    +s << "c"
+    +p a[1]
+    diff --git a/test/share/share_strings_array_fill_splat.rb.expected b/test/share/share_strings_array_fill_splat.rb.expected
+    new file mode 100644
+    index 000000000..3c35d5c9b
+    --- /dev/null
+    +++ b/test/share/share_strings_array_fill_splat.rb.expected
+    @@ -0,0 +1,29 @@
+    +"abc"
+    +"abc"
+    +"abc"
+    +"abc"
+    +"abc"
+    +"abc"
+    +"abc"
+    +"abc"
+    +"abc"
+    +"abc"
+    +"abc"
+    +"abc"
+    +"abc"
+    +"abc"
+    +"abc"
+    +"abc"
+    +"abc"
+    +"abc"
+    +"abc"
+    +1
+    +"abc"
+    +"abc"
+    +[]
+    +[nil, nil]
+    +[7, 7]
+    +[7, 7]
+    +[1, 2]
+    +"abc"
+    +"abc"
+    diff --git a/test/share/refuse/route_borrowed_conversion.rb b/test/share/share_strings_borrowed_conversion_return.rb
+    similarity index 79%
+    rename from test/share/refuse/route_borrowed_conversion.rb
+    rename to test/share/share_strings_borrowed_conversion_return.rb
+    index b524851fa..c6bb4d562 100644
+    --- a/test/share/refuse/route_borrowed_conversion.rb
+    +++ b/test/share/share_strings_borrowed_conversion_return.rb
+    @@ -1,3 +1,5 @@
+    +# spinel: share
+    +# spinel: gc-minor
+     # A borrowing user conversion cannot be replaced by a fresh String.
+     class BorrowedText
+       def to_s = $source.to_s
+    @@ -7,3 +9,5 @@ x = [BorrowedText.new, 1][ARGV.size]
+     y = x.to_s
+     y << "!"
+     p [$source, y]
+    +$source << "?"
+    +p y
+    diff --git a/test/share/share_strings_borrowed_conversion_return.rb.expected b/test/share/share_strings_borrowed_conversion_return.rb.expected
+    new file mode 100644
+    index 000000000..b4be0216a
+    --- /dev/null
+    +++ b/test/share/share_strings_borrowed_conversion_return.rb.expected
+    @@ -0,0 +1,2 @@
+    +["source!", "source!"]
+    +"source!?"
+    diff --git a/test/share/share_strings_builtin_return_routes.rb b/test/share/share_strings_builtin_return_routes.rb
+    new file mode 100644
+    index 000000000..4f79efe58
+    --- /dev/null
+    +++ b/test/share/share_strings_builtin_return_routes.rb
+    @@ -0,0 +1,158 @@
+    +# spinel: share
+    +# spinel: gc-minor
+    +# A builtin's handle route also publishes its value at a method return.
+    +# Mutations in either direction observe the same String after the pickup.
+    +def tapped(s)
+    +  s.tap { |x| String(+"other"); x.size }
+    +end
+    +def converted(s)
+    +  String(s)
+    +end
+    +def constructed_message(s)
+    +  RuntimeError.new(s).message
+    +end
+    +def rescued_message(s)
+    +  raise ArgumentError, s
+    +rescue ArgumentError => e
+    +  e.message
+    +end
+    +def explicit_conversion(s)
+    +  return String(s)
+    +end
+    +def ensured_conversion(s)
+    +  return s.tap { |x| String(+"other"); x.size }
+    +ensure
+    +  10.times { "garbage" * 100 }
+    +end
+    +def conditional_conversion(s, choose)
+    +  choose ? String(s) : nil
+    +end
+    +def mixed_conversion(s, choose)
+    +  choose ? String(s) : +"fresh"
+    +end
+    +
+    +# tap
+    +s = +"a\0b"
+    +t = tapped(s)
+    +p t.equal?(s)
+    +t << "c"
+    +p s
+    +s << "d"
+    +p t
+    +
+    +# String
+    +s = +"a\0b"
+    +t = converted(s)
+    +p t.equal?(s)
+    +t << "c"
+    +p s
+    +s << "d"
+    +p t
+    +
+    +# new message
+    +s = +"a\0b"
+    +t = constructed_message(s)
+    +p t.equal?(s)
+    +t << "c"
+    +p s
+    +s << "d"
+    +p t
+    +
+    +# raised message
+    +s = +"a\0b"
+    +t = rescued_message(s)
+    +p t.equal?(s)
+    +t << "c"
+    +p s
+    +s << "d"
+    +p t
+    +
+    +# explicit
+    +s = +"a\0b"
+    +t = explicit_conversion(s)
+    +p t.equal?(s)
+    +t << "c"
+    +p s
+    +s << "d"
+    +p t
+    +
+    +# ensure
+    +s = +"a\0b"
+    +t = ensured_conversion(s)
+    +p t.equal?(s)
+    +t << "c"
+    +p s
+    +s << "d"
+    +p t
+    +
+    +# conditional
+    +s = +"a\0b"
+    +t = conditional_conversion(s, true)
+    +p t.equal?(s)
+    +t << "c"
+    +p s
+    +s << "d"
+    +p t
+    +
+    +# mixed
+    +s = +"a\0b"
+    +t = mixed_conversion(s, true)
+    +p t.equal?(s)
+    +t << "c"
+    +p s
+    +s << "d"
+    +p t
+    +
+    +p conditional_conversion(+"unused", false)
+    +s = +"unchanged"
+    +fresh = mixed_conversion(s, false)
+    +fresh << "!"
+    +p s, fresh
+    +
+    +# Frozen inputs keep their frozen mark, including through a block caller.
+    +1.times do
+    +  source = "fixed"
+    +  value = converted(source)
+    +  p value.equal?(source)
+    +  begin
+    +    value << "!"
+    +  rescue FrozenError
+    +    p source
+    +  end
+    +end
+    +
+    +# A conversion may return fresh text rather than a borrowed String.
+    +class ReturnLabel
+    +  def to_s = +"label"
+    +end
+    +def converted_label(value) = String(value)
+    +p converted_label(ReturnLabel.new)
+    +
+    +# Identity conversion through a static holder, and a multi-statement block.
+    +def same_source = $source.itself
+    +def then_source(s)
+    +  s.then { |x| x.size; x }
+    +end
+    +$source = +"identity"
+    +t = same_source
+    +t << "!"
+    +p $source
+    +$source << "?"
+    +p t
+    +s = +"then"
+    +t = then_source(s)
+    +t << "!"
+    +p s
+    +s << "?"
+    +p t
+    +
+    +# A native answer's route is queried without rendering its block receiver.
+    +require "stringio"
+    +def native_tail(io)
+    +  io.tap { |out| out << "!" }.string
+    +end
+    +io = StringIO.new(+"native")
+    +t = native_tail(io)
+    +p t.equal?(io.string)
+    +t << "?"
+    +p io.string
+    diff --git a/test/share/share_strings_builtin_return_routes.rb.expected b/test/share/share_strings_builtin_return_routes.rb.expected
+    new file mode 100644
+    index 000000000..ca22b84f1
+    --- /dev/null
+    +++ b/test/share/share_strings_builtin_return_routes.rb.expected
+    @@ -0,0 +1,36 @@
+    +true
+    +"a\u0000bc"
+    +"a\u0000bcd"
+    +true
+    +"a\u0000bc"
+    +"a\u0000bcd"
+    +true
+    +"a\u0000bc"
+    +"a\u0000bcd"
+    +true
+    +"a\u0000bc"
+    +"a\u0000bcd"
+    +true
+    +"a\u0000bc"
+    +"a\u0000bcd"
+    +true
+    +"a\u0000bc"
+    +"a\u0000bcd"
+    +true
+    +"a\u0000bc"
+    +"a\u0000bcd"
+    +true
+    +"a\u0000bc"
+    +"a\u0000bcd"
+    +nil
+    +"unchanged"
+    +"fresh!"
+    +true
+    +"fixed"
+    +"label"
+    +"identity!"
+    +"identity!?"
+    +"then!"
+    +"then!?"
+    +true
+    +"!ative?"
+    diff --git a/test/share/share_strings_class_include_return.rb b/test/share/share_strings_class_include_return.rb
+    new file mode 100644
+    index 000000000..a80144223
+    --- /dev/null
+    +++ b/test/share/share_strings_class_include_return.rb
+    @@ -0,0 +1,28 @@
+    +# spinel: share
+    +# spinel: gc-minor
+    +# Builtin fallback arms read shared String bytes without losing user method handles.
+    +class A
+    +  def self.include?(value)
+    +    value << "A"
+    +  end
+    +end
+    +class B
+    +  def self.include?(value)
+    +    value << "B"
+    +  end
+    +end
+    +class Other
+    +  def include?(value)
+    +    "instance:#{value}"
+    +  end
+    +end
+    +[A, B, Other.new].each do |klass|
+    +  value = +"hello"
+    +  aliased = value
+    +  value << "!"
+    +  result = klass.include?(value)
+    +  p result.equal?(value)
+    +  result << "?"
+    +  p result
+    +  p aliased
+    +end
+    diff --git a/test/share/share_strings_class_include_return.rb.expected b/test/share/share_strings_class_include_return.rb.expected
+    new file mode 100644
+    index 000000000..7d8cdef78
+    --- /dev/null
+    +++ b/test/share/share_strings_class_include_return.rb.expected
+    @@ -0,0 +1,9 @@
+    +true
+    +"hello!A?"
+    +"hello!A?"
+    +true
+    +"hello!B?"
+    +"hello!B?"
+    +false
+    +"instance:hello!?"
+    +"hello!"
+    diff --git a/test/share/share_strings_class_return_handle.rb b/test/share/share_strings_class_return_handle.rb
+    new file mode 100644
+    index 000000000..f30392eac
+    --- /dev/null
+    +++ b/test/share/share_strings_class_return_handle.rb
+    @@ -0,0 +1,26 @@
+    +# spinel: share
+    +# spinel: gc-minor
+    +# Class-value returns preserve the argument handle across boxed dispatch.
+    +class FirstReturn
+    +  def self.consume(value)
+    +    value << "A"
+    +  end
+    +end
+    +class SecondReturn
+    +  def self.consume(value)
+    +    value << "B"
+    +  end
+    +end
+    +class InstanceReturn
+    +  def consume(value)
+    +    value << "C"
+    +  end
+    +end
+    +[FirstReturn, SecondReturn, InstanceReturn.new].each do |receiver|
+    +  value = +"start"
+    +  held = value
+    +  result = receiver.consume(value)
+    +  p result.equal?(value)
+    +  result << "?"
+    +  p [result, held]
+    +end
+    diff --git a/test/share/share_strings_class_return_handle.rb.expected b/test/share/share_strings_class_return_handle.rb.expected
+    new file mode 100644
+    index 000000000..b2ff40d5f
+    --- /dev/null
+    +++ b/test/share/share_strings_class_return_handle.rb.expected
+    @@ -0,0 +1,6 @@
+    +true
+    +["startA?", "startA?"]
+    +true
+    +["startB?", "startB?"]
+    +true
+    +["startC?", "startC?"]
+    diff --git a/test/share/share_strings_class_return_tails.rb b/test/share/share_strings_class_return_tails.rb
+    new file mode 100644
+    index 000000000..b393a78c7
+    --- /dev/null
+    +++ b/test/share/share_strings_class_return_tails.rb
+    @@ -0,0 +1,36 @@
+    +# spinel: share
+    +# spinel: gc-minor
+    +# A class arm boxes borrowed, fresh and nil returns by the same return facts.
+    +class ClassTail
+    +  def self.take(value, which)
+    +    return nil if which == 2
+    +    return value + "\0new" if which == 1
+    +    value << "!"
+    +  end
+    +end
+    +class OtherClassTail
+    +  def self.take(value, which)
+    +    return nil if which == 2
+    +    return value + "\0other" if which == 1
+    +    value << "?"
+    +  end
+    +end
+    +class IntegerTail
+    +  def take(value, which)
+    +    17
+    +  end
+    +end
+    +[ClassTail, OtherClassTail, IntegerTail.new].each do |receiver|
+    +  [0, 1, 2].each do |which|
+    +    value = +"s"
+    +    held = value
+    +    result = receiver.take(value, which)
+    +    if result.is_a?(String)
+    +      p result.equal?(value)
+    +      result << "."
+    +      p [result.bytes, held]
+    +    else
+    +      p result
+    +    end
+    +  end
+    +end
+    diff --git a/test/share/share_strings_class_return_tails.rb.expected b/test/share/share_strings_class_return_tails.rb.expected
+    new file mode 100644
+    index 000000000..110fb3744
+    --- /dev/null
+    +++ b/test/share/share_strings_class_return_tails.rb.expected
+    @@ -0,0 +1,13 @@
+    +true
+    +[[115, 33, 46], "s!."]
+    +false
+    +[[115, 0, 110, 101, 119, 46], "s"]
+    +nil
+    +true
+    +[[115, 63, 46], "s?."]
+    +false
+    +[[115, 0, 111, 116, 104, 101, 114, 46], "s"]
+    +nil
+    +17
+    +17
+    +17
+    diff --git a/test/share/share_strings_default_setter_fresh.rb b/test/share/share_strings_default_setter_fresh.rb
+    new file mode 100644
+    index 000000000..f7b7c5652
+    --- /dev/null
+    +++ b/test/share/share_strings_default_setter_fresh.rb
+    @@ -0,0 +1,112 @@
+    +# spinel: share
+    +# spinel: gc-minor
+    +# spinel: gc-stress
+    +# Each fresh setter result is the object retained as the Hash default.
+    +def fresh_default_0
+    +  s = +"src"
+    +  h = {}
+    +  t = (h.default = +"lit")
+    +  t << "!"
+    +  p t.equal?(h.default), h[:missing], t
+    +  h.default << "?"
+    +  p t, s
+    +end
+    +fresh_default_0
+    +
+    +def fresh_default_1
+    +  s = +"src"
+    +  h = {}
+    +  t = (h.default = s.upcase)
+    +  t << "!"
+    +  p t.equal?(h.default), h[:missing], t
+    +  h.default << "?"
+    +  p t, s
+    +end
+    +fresh_default_1
+    +
+    +def fresh_default_2
+    +  s = +"src"
+    +  h = {}
+    +  t = (h.default = s + "x")
+    +  t << "!"
+    +  p t.equal?(h.default), h[:missing], t
+    +  h.default << "?"
+    +  p t, s
+    +end
+    +fresh_default_2
+    +
+    +def fresh_default_3
+    +  s = +"src"
+    +  h = {}
+    +  t = (h.default = s.dup)
+    +  t << "!"
+    +  p t.equal?(h.default), h[:missing], t
+    +  h.default << "?"
+    +  p t, s
+    +end
+    +fresh_default_3
+    +
+    +def fresh_default_4
+    +  s = +"src"
+    +  h = {}
+    +  t = (h.default = String.new(s))
+    +  t << "!"
+    +  p t.equal?(h.default), h[:missing], t
+    +  h.default << "?"
+    +  p t, s
+    +end
+    +fresh_default_4
+    +
+    +def fresh_default_5
+    +  s = +"src"
+    +  h = {}
+    +  t = (h.default = "#{s}y")
+    +  t << "!"
+    +  p t.equal?(h.default), h[:missing], t
+    +  h.default << "?"
+    +  p t, s
+    +end
+    +fresh_default_5
+    +
+    +def fresh_default_6
+    +  s = +"src"
+    +  h = {}
+    +  t = (h.default = s * 2)
+    +  t << "!"
+    +  p t.equal?(h.default), h[:missing], t
+    +  h.default << "?"
+    +  p t, s
+    +end
+    +fresh_default_6
+    +
+    +def fresh_default_7
+    +  s = +"src"
+    +  h = {}
+    +  t = (h.default = s[0, 2])
+    +  t << "!"
+    +  p t.equal?(h.default), h[:missing], t
+    +  h.default << "?"
+    +  p t, s
+    +end
+    +fresh_default_7
+    +
+    +# The store row also covers Array#[]=, Hash#[]= and Hash#store results.
+    +a = []
+    +t = (a[0] = +"array")
+    +t << "!"
+    +p a, t.equal?(a[0])
+    +h = {}
+    +u = (h[:x] = +"hash")
+    +u << "!"
+    +p h, u.equal?(h[:x])
+    +v = h.store(:y, +"store")
+    +v << "!"
+    +p h, v.equal?(h[:y])
+    +
+    +# A dropped fresh setter value still leaves the default mutable through its Hash.
+    +h = {}
+    +h.default = +"dropped"
+    +h.default << "!"
+    +p h[:missing]
+    +h[:missing] << "?"
+    +p h.default
+    diff --git a/test/share/share_strings_default_setter_fresh.rb.expected b/test/share/share_strings_default_setter_fresh.rb.expected
+    new file mode 100644
+    index 000000000..4d958387e
+    --- /dev/null
+    +++ b/test/share/share_strings_default_setter_fresh.rb.expected
+    @@ -0,0 +1,48 @@
+    +true
+    +"lit!"
+    +"lit!"
+    +"lit!?"
+    +"src"
+    +true
+    +"SRC!"
+    +"SRC!"
+    +"SRC!?"
+    +"src"
+    +true
+    +"srcx!"
+    +"srcx!"
+    +"srcx!?"
+    +"src"
+    +true
+    +"src!"
+    +"src!"
+    +"src!?"
+    +"src"
+    +true
+    +"src!"
+    +"src!"
+    +"src!?"
+    +"src"
+    +true
+    +"srcy!"
+    +"srcy!"
+    +"srcy!?"
+    +"src"
+    +true
+    +"srcsrc!"
+    +"srcsrc!"
+    +"srcsrc!?"
+    +"src"
+    +true
+    +"sr!"
+    +"sr!"
+    +"sr!?"
+    +"src"
+    +["array!"]
+    +true
+    +{x: "hash!"}
+    +true
+    +{x: "hash!", y: "store!"}
+    +true
+    +"dropped!"
+    +"dropped!?"
+    diff --git a/test/share/share_strings_default_setter_value.rb b/test/share/share_strings_default_setter_value.rb
+    new file mode 100644
+    index 000000000..60809df8e
+    --- /dev/null
+    +++ b/test/share/share_strings_default_setter_value.rb
+    @@ -0,0 +1,74 @@
+    +# spinel: share
+    +# spinel: gc-minor
+    +# The setter's expression value and the Hash default keep the argument itself.
+    +s = +"a\0b"
+    +h = {}
+    +t = (h.default = s)
+    +p t.equal?(s), h.default.equal?(s)
+    +t << "c"
+    +p s, h.default
+    +s << "d"
+    +p t, h[:missing]
+    +
+    +def default_value(s)
+    +  h = {}
+    +  h.default = s
+    +end
+    +s = +"method"
+    +t = default_value(s)
+    +t << "!"
+    +p s
+    +s << "?"
+    +p t
+    +
+    +1.times do
+    +  s = +"block"
+    +  h = {}
+    +  t = begin
+    +    h.default = String(s)
+    +  ensure
+    +    10.times { "garbage" * 100 }
+    +  end
+    +  p t.equal?(s)
+    +  t << "!"
+    +  p s, h.default
+    +  s << "?"
+    +  p t
+    +end
+    +
+    +h = {}
+    +t = (h.default = +"fresh")
+    +t << "!"
+    +p h.default
+    +h.default << "?"
+    +p t
+    +
+    +t = (h.default = "frozen")
+    +p t.equal?(h.default)
+    +begin
+    +  t << "!"
+    +rescue FrozenError
+    +  p h.default
+    +end
+    +
+    +# The receiver and the argument run once, in order, before the frozen check.
+    +$events = []
+    +def default_receiver(h)
+    +  $events << :receiver
+    +  h
+    +end
+    +def default_argument(s)
+    +  $events << :argument
+    +  s
+    +end
+    +s = +"ordered"
+    +h = {}
+    +t = (default_receiver(h).default = default_argument(s))
+    +t << "!"
+    +p s, h.default, $events
+    +h.freeze
+    +begin
+    +  default_receiver(h).default = default_argument(s)
+    +rescue FrozenError
+    +  p $events
+    +end
+    diff --git a/test/share/share_strings_default_setter_value.rb.expected b/test/share/share_strings_default_setter_value.rb.expected
+    new file mode 100644
+    index 000000000..d544a1cc6
+    --- /dev/null
+    +++ b/test/share/share_strings_default_setter_value.rb.expected
+    @@ -0,0 +1,20 @@
+    +true
+    +true
+    +"a\u0000bc"
+    +"a\u0000bc"
+    +"a\u0000bcd"
+    +"a\u0000bcd"
+    +"method!"
+    +"method!?"
+    +true
+    +"block!"
+    +"block!"
+    +"block!?"
+    +"fresh!"
+    +"fresh!?"
+    +true
+    +"frozen"
+    +"ordered!"
+    +"ordered!"
+    +[:receiver, :argument]
+    +[:receiver, :argument, :receiver, :argument]
+    diff --git a/test/share/share_strings_hash_default_splat.rb b/test/share/share_strings_hash_default_splat.rb
+    new file mode 100644
+    index 000000000..2be466cce
+    --- /dev/null
+    +++ b/test/share/share_strings_hash_default_splat.rb
+    @@ -0,0 +1,85 @@
+    +# spinel: share
+    +# spinel: gc-minor
+    +# A splatted Hash default is the argument itself and retains its identity.
+    +
+    +s = +"ab"
+    +h = Hash.new(*[s]); t = h[:k]
+    +t << "c"
+    +p s
+    +
+    +s = +"ab"
+    +h = Hash.new(*[s]); t = h[:k]
+    +s << "c"
+    +p t
+    +
+    +def hash_forward
+    +  s = +"ab"
+    +  h = Hash.new(*[s]); t = h[:k]
+    +  t << "c"
+    +  p s
+    +end
+    +hash_forward
+    +
+    +def hash_reverse
+    +  s = +"ab"
+    +  h = Hash.new(*[s]); t = h[:k]
+    +  s << "c"
+    +  p t
+    +end
+    +hash_reverse
+    +
+    +1.times do
+    +  s = +"ab"
+    +  h = Hash.new(*[s]); t = h[:k]
+    +  t << "c"
+    +  p s
+    +end
+    +
+    +1.times do
+    +  s = +"ab"
+    +  h = Hash.new(*[s]); t = h[:k]
+    +  s << "c"
+    +  p t
+    +end
+    +
+    +def default_from_local
+    +  s = +"ab"
+    +  args = [s]
+    +  h = Hash.new(*args)
+    +  h[:missing] << "c"
+    +  p s
+    +end
+    +def default_once
+    +  n = 0
+    +  h = Hash.new(*[(n += 1; +"ab")])
+    +  h[:a] << "c"
+    +  p h[:b]
+    +  p n
+    +end
+    +def default_frozen
+    +  h = Hash.new(*["ab"])
+    +  begin
+    +    h[:a] << "c"
+    +  rescue FrozenError
+    +    puts "frozen"
+    +  end
+    +end
+    +default_from_local
+    +default_once
+    +default_frozen
+    +p Hash.new(*[])[:k]
+    +p Hash.new(*[nil])[:k]
+    +p Hash.new(*[7])[:k]
+    +
+    +# Forwarded and mutated argument arrays use their run-time length.
+    +def hash_runtime_forward(*args) = Hash.new(*args)
+    +s = +"ab"
+    +h = hash_runtime_forward(s)
+    +h[0] << "c"
+    +p s
+    +s = +"ab"
+    +args = [s, s]
+    +args.pop
+    +h = Hash.new(*args)
+    +s << "c"
+    +p h[0]
+    diff --git a/test/share/share_strings_hash_default_splat.rb.expected b/test/share/share_strings_hash_default_splat.rb.expected
+    new file mode 100644
+    index 000000000..a35ecef17
+    --- /dev/null
+    +++ b/test/share/share_strings_hash_default_splat.rb.expected
+    @@ -0,0 +1,15 @@
+    +"abc"
+    +"abc"
+    +"abc"
+    +"abc"
+    +"abc"
+    +"abc"
+    +"abc"
+    +"abc"
+    +1
+    +frozen
+    +nil
+    +nil
+    +7
+    +"abc"
+    +"abc"
+    diff --git a/test/share/share_strings_kernel_array_element.rb b/test/share/share_strings_kernel_array_element.rb
+    new file mode 100644
+    index 000000000..fdad97f9d
+    --- /dev/null
+    +++ b/test/share/share_strings_kernel_array_element.rb
+    @@ -0,0 +1,52 @@
+    +# spinel: share
+    +# spinel: gc-minor
+    +# spinel: gc-stress
+    +# Array(s) makes a new Array whose element is s itself.
+    +s = +"a\0b"
+    +a = Array(s)
+    +p a[0].equal?(s)
+    +a[0] << "!"
+    +p s
+    +s << "?"
+    +p a
+    +
+    +def array_element(s)
+    +  Array(s)[0]
+    +end
+    +s = +"method"
+    +t = array_element(s)
+    +t << "!"
+    +p s
+    +s << "?"
+    +p t
+    +
+    +1.times do
+    +  s = +"block"
+    +  a = Array(s)
+    +  a[0] << "!"
+    +  p s
+    +  s << "?"
+    +  p a[0]
+    +end
+    +
+    +# Already-array inputs retain the Array and its elements.
+    +s = +"existing"
+    +a = [s]
+    +b = Array(a)
+    +p a.equal?(b), b[0].equal?(s)
+    +b[0] << "!"
+    +p s
+    +
+    +# Fresh, frozen and non-String inputs keep their existing conversion rules.
+    +a = Array(+"fresh")
+    +a[0] << "!"
+    +p a
+    +s = "frozen"
+    +a = Array(s)
+    +p a[0].equal?(s)
+    +begin
+    +  a[0] << "!"
+    +rescue FrozenError
+    +  p s
+    +end
+    +p Array(nil), Array(2), Array(1.5)
+    diff --git a/test/share/share_strings_kernel_array_element.rb.expected b/test/share/share_strings_kernel_array_element.rb.expected
+    new file mode 100644
+    index 000000000..de473e738
+    --- /dev/null
+    +++ b/test/share/share_strings_kernel_array_element.rb.expected
+    @@ -0,0 +1,16 @@
+    +true
+    +"a\u0000b!"
+    +["a\u0000b!?"]
+    +"method!"
+    +"method!?"
+    +"block!"
+    +"block!?"
+    +true
+    +true
+    +"existing!"
+    +["fresh!"]
+    +true
+    +"frozen"
+    +[]
+    +[2]
+    +[1.5]
+    diff --git a/test/share/share_strings_multi_break_array.rb b/test/share/share_strings_multi_break_array.rb
+    new file mode 100644
+    index 000000000..d11e75487
+    --- /dev/null
+    +++ b/test/share/share_strings_multi_break_array.rb
+    @@ -0,0 +1,49 @@
+    +# spinel: share
+    +# spinel: gc-minor
+    +# Multiple break values form one Array and retain their element identities.
+    +
+    +s = +"ab"
+    +a = loop { break 1, s }; t = a[1]
+    +t << "c"
+    +p s
+    +
+    +s = +"ab"
+    +a = loop { break 1, s }; t = a[1]
+    +s << "c"
+    +p t
+    +
+    +def break_forward
+    +  s = +"ab"
+    +  a = loop { break 1, s }; t = a[1]
+    +  t << "c"
+    +  p s
+    +end
+    +break_forward
+    +
+    +def break_reverse
+    +  s = +"ab"
+    +  a = loop { break 1, s }; t = a[1]
+    +  s << "c"
+    +  p t
+    +end
+    +break_reverse
+    +
+    +1.times do
+    +  s = +"ab"
+    +  a = loop { break 1, s }; t = a[1]
+    +  t << "c"
+    +  p s
+    +end
+    +
+    +1.times do
+    +  s = +"ab"
+    +  a = loop { break 1, s }; t = a[1]
+    +  s << "c"
+    +  p t
+    +end
+    +
+    +p(loop { break 1, 2 })
+    +p(loop { break 1, *[2, 3] })
+    +p([1].each { break 1, 2 })
+    +p(while true; break 1, 2; end)
+    +p(1.times { break nil, 2 })
+    diff --git a/test/share/share_strings_multi_break_array.rb.expected b/test/share/share_strings_multi_break_array.rb.expected
+    new file mode 100644
+    index 000000000..d6f765bb2
+    --- /dev/null
+    +++ b/test/share/share_strings_multi_break_array.rb.expected
+    @@ -0,0 +1,11 @@
+    +"abc"
+    +"abc"
+    +"abc"
+    +"abc"
+    +"abc"
+    +"abc"
+    +[1, 2]
+    +[1, 2, 3]
+    +[1, 2]
+    +[1, 2]
+    +[nil, 2]
+    diff --git a/test/share/share_strings_nested_pattern_bind.rb b/test/share/share_strings_nested_pattern_bind.rb
+    new file mode 100644
+    index 000000000..5432fb739
+    --- /dev/null
+    +++ b/test/share/share_strings_nested_pattern_bind.rb
+    @@ -0,0 +1,92 @@
+    +# spinel: share
+    +# spinel: gc-minor
+    +# Nested Array patterns bind their elements, not an Array guessed from <<.
+    +
+    +s = +"ab"
+    +case [[s]]; in [[t]]; end
+    +t << "c"
+    +p s
+    +
+    +s = +"ab"
+    +case [[s]]; in [[t]]; end
+    +s << "c"
+    +p t
+    +
+    +def pattern_forward
+    +  s = +"ab"
+    +  case [[s]]; in [[t]]; end
+    +  t << "c"
+    +  p s
+    +end
+    +pattern_forward
+    +
+    +def pattern_reverse
+    +  s = +"ab"
+    +  case [[s]]; in [[t]]; end
+    +  s << "c"
+    +  p t
+    +end
+    +pattern_reverse
+    +
+    +1.times do
+    +  s = +"ab"
+    +  case [[s]]; in [[t]]; end
+    +  t << "c"
+    +  p s
+    +end
+    +
+    +1.times do
+    +  s = +"ab"
+    +  case [[s]]; in [[t]]; end
+    +  s << "c"
+    +  p t
+    +end
+    +
+    +def nested_neighbor_0
+    +  s = +"ab"
+    +  case [[[s]]]; in [[[t]]]; end
+    +  t << "c"
+    +  p s
+    +end
+    +nested_neighbor_0
+    +
+    +def nested_neighbor_1
+    +  s = +"ab"
+    +  case [{k: [s]}]; in [{k: [t]}]; end
+    +  t << "c"
+    +  p s
+    +end
+    +nested_neighbor_1
+    +
+    +def nested_neighbor_2
+    +  s = +"ab"
+    +  case [[s]]; in [[t]] if t.length > 0; end
+    +  t << "c"
+    +  p s
+    +end
+    +nested_neighbor_2
+    +
+    +def nested_neighbor_3
+    +  s = +"ab"
+    +  case [[s]]; in [[String => t]]; end
+    +  t << "c"
+    +  p s
+    +end
+    +nested_neighbor_3
+    +
+    +def nested_neighbor_4
+    +  s = +"ab"
+    +  case [[s]]; in [[t] => a]; end
+    +  t << "c"
+    +  p s
+    +end
+    +nested_neighbor_4
+    +
+    +def nested_neighbor_5
+    +  s = +"ab"
+    +  case [1, [s]]; in [*, [t]]; end
+    +  t << "c"
+    +  p s
+    +
+    +end
+    +nested_neighbor_5
+    diff --git a/test/share/share_strings_nested_pattern_bind.rb.expected b/test/share/share_strings_nested_pattern_bind.rb.expected
+    new file mode 100644
+    index 000000000..b34c1cd0d
+    --- /dev/null
+    +++ b/test/share/share_strings_nested_pattern_bind.rb.expected
+    @@ -0,0 +1,12 @@
+    +"abc"
+    +"abc"
+    +"abc"
+    +"abc"
+    +"abc"
+    +"abc"
+    +"abc"
+    +"abc"
+    +"abc"
+    +"abc"
+    +"abc"
+    +"abc"
+    diff --git a/test/share/share_strings_rescue_local_return.rb b/test/share/share_strings_rescue_local_return.rb
+    new file mode 100644
+    index 000000000..144f4677c
+    --- /dev/null
+    +++ b/test/share/share_strings_rescue_local_return.rb
+    @@ -0,0 +1,35 @@
+    +# spinel: share
+    +# spinel: gc-minor
+    +# case value assigned to a local, local is the tail
+    +module M
+    +  def get(k)
+    +    v = case k
+    +        when 1 then @x
+    +        else @x + "c"
+    +        end
+    +    v
+    +  end
+    +  def get2(k)
+    +    v = begin
+    +      raise "x" if k == 0
+    +      @x
+    +    rescue
+    +      @x + "r"
+    +    end
+    +    v
+    +  end
+    +end
+    +class A; include M; def initialize(x) = @x = x; end
+    +class B; def get(k) = "b".dup; def get2(k) = "d".dup; end
+    +src = "s".dup
+    +a = A.new(src)
+    +r = a.get(2); r << "!"
+    +q = a.get2(0); q << "?"
+    +p r, q, src
+    +os = [A.new(src), B.new]
+    +r = os[0].get(2); r << "!"
+    +q = os[0].get2(0); q << "?"
+    +p r, q, src
+    +u = os[0].get(1); u << "#"
+    +w = os[0].get2(1); w << "%"
+    +p u, w, src
+    diff --git a/test/share/share_strings_rescue_local_return.rb.expected b/test/share/share_strings_rescue_local_return.rb.expected
+    new file mode 100644
+    index 000000000..ae7867f82
+    --- /dev/null
+    +++ b/test/share/share_strings_rescue_local_return.rb.expected
+    @@ -0,0 +1,9 @@
+    +"sc!"
+    +"sr?"
+    +"s"
+    +"sc!"
+    +"sr?"
+    +"s"
+    +"s#%"
+    +"s#%"
+    +"s#%"
+    diff --git a/test/share/share_strings_safe_nav_return.rb b/test/share/share_strings_safe_nav_return.rb
+    new file mode 100644
+    index 000000000..5a0a9db95
+    --- /dev/null
+    +++ b/test/share/share_strings_safe_nav_return.rb
+    @@ -0,0 +1,43 @@
+    +# spinel: share
+    +# spinel: gc-minor
+    +# spinel: gc-stress
+    +# A fresh block result needs no return handle; a demanded result keeps &.'s guard.
+    +def fresh_tail(s) = s&.then { |x| x + "!" }
+    +def renamed(s) = s.yield_self { |v| v + "!" }
+    +def shared_local(s)
+    +  t = s&.then { |x| x + "!" }
+    +  u = t
+    +  u << "?" if u
+    +  t
+    +end
+    +p fresh_tail(nil), fresh_tail("ab"), renamed("ab")
+    +p shared_local(nil), shared_local(+"ab")
+    +
+    +def identity_tail(s) = s&.then { |x| x }
+    +def tapped_tail(s) = s&.tap { |x| x << "!" }
+    +def yielded_tail(s) = s&.yield_self { |x| x }
+    +p identity_tail(nil), tapped_tail(nil), yielded_tail(nil)
+    +s = +"identity"
+    +t = identity_tail(s)
+    +p t.equal?(s)
+    +t << "!"
+    +p s
+    +u = tapped_tail(s)
+    +p u.equal?(s), s
+    +v = yielded_tail(s)
+    +p v.equal?(s)
+    +s << "?"
+    +p t, u, v
+    +
+    +# A fresh block result must not pick up its receiver's earlier publication.
+    +s = +"source"
+    +t = identity_tail(s)
+    +t << "!"
+    +t = renamed(s)
+    +p t.equal?(s)
+    +t << "?"
+    +p s, t
+    +
+    +# A conversion whose identity is not observed keeps ordinary safe navigation.
+    +def nullable_text(s) = s&.to_s
+    +p nullable_text(nil), nullable_text(+"plain")
+    diff --git a/test/share/share_strings_safe_nav_return.rb.expected b/test/share/share_strings_safe_nav_return.rb.expected
+    new file mode 100644
+    index 000000000..a7348ae63
+    --- /dev/null
+    +++ b/test/share/share_strings_safe_nav_return.rb.expected
+    @@ -0,0 +1,21 @@
+    +nil
+    +"ab!"
+    +"ab!"
+    +nil
+    +"ab!?"
+    +nil
+    +nil
+    +nil
+    +true
+    +"identity!"
+    +true
+    +"identity!!"
+    +true
+    +"identity!!?"
+    +"identity!!?"
+    +"identity!!?"
+    +false
+    +"source!"
+    +"source!!?"
+    +nil
+    +"plain"
+    diff --git a/test/share/share_strings_temporary_map_elements.rb b/test/share/share_strings_temporary_map_elements.rb
+    new file mode 100644
+    index 000000000..6e2109e75
+    --- /dev/null
+    +++ b/test/share/share_strings_temporary_map_elements.rb
+    @@ -0,0 +1,151 @@
+    +# spinel: share
+    +# spinel: gc-minor
+    +# Collected block results retain their handles before the Array is named.
+    +
+    +s = +"ab"
+    +t = [1].map { next s }[0]
+    +t << "c"
+    +p s
+    +
+    +s = +"ab"
+    +t = [1].map { next s }[0]
+    +s << "c"
+    +p t
+    +
+    +def next_map_forward
+    +  s = +"ab"
+    +  t = [1].map { next s }[0]
+    +  t << "c"
+    +  p s
+    +end
+    +next_map_forward
+    +
+    +def next_map_reverse
+    +  s = +"ab"
+    +  t = [1].map { next s }[0]
+    +  s << "c"
+    +  p t
+    +end
+    +next_map_reverse
+    +
+    +1.times do
+    +  s = +"ab"
+    +  t = [1].map { next s }[0]
+    +  t << "c"
+    +  p s
+    +end
+    +
+    +1.times do
+    +  s = +"ab"
+    +  t = [1].map { next s }[0]
+    +  s << "c"
+    +  p t
+    +end
+    +
+    +s = +"ab"
+    +t = [1].collect { next s }[0]
+    +t << "c"
+    +p s
+    +
+    +s = +"ab"
+    +t = [1].collect { next s }[0]
+    +s << "c"
+    +p t
+    +
+    +def next_collect_forward
+    +  s = +"ab"
+    +  t = [1].collect { next s }[0]
+    +  t << "c"
+    +  p s
+    +end
+    +next_collect_forward
+    +
+    +def next_collect_reverse
+    +  s = +"ab"
+    +  t = [1].collect { next s }[0]
+    +  s << "c"
+    +  p t
+    +end
+    +next_collect_reverse
+    +
+    +1.times do
+    +  s = +"ab"
+    +  t = [1].collect { next s }[0]
+    +  t << "c"
+    +  p s
+    +end
+    +
+    +1.times do
+    +  s = +"ab"
+    +  t = [1].collect { next s }[0]
+    +  s << "c"
+    +  p t
+    +end
+    +
+    +s = +"ab"
+    +t = [1].map { s }[0]
+    +t << "c"
+    +p s
+    +
+    +s = +"ab"
+    +t = [1].map { s }[0]
+    +s << "c"
+    +p t
+    +
+    +def block_map_forward
+    +  s = +"ab"
+    +  t = [1].map { s }[0]
+    +  t << "c"
+    +  p s
+    +end
+    +block_map_forward
+    +
+    +def block_map_reverse
+    +  s = +"ab"
+    +  t = [1].map { s }[0]
+    +  s << "c"
+    +  p t
+    +end
+    +block_map_reverse
+    +
+    +1.times do
+    +  s = +"ab"
+    +  t = [1].map { s }[0]
+    +  t << "c"
+    +  p s
+    +end
+    +
+    +1.times do
+    +  s = +"ab"
+    +  t = [1].map { s }[0]
+    +  s << "c"
+    +  p t
+    +end
+    +
+    +def conditional_map
+    +  s = +"ab"
+    +  t = [1, 2].map { |i| next s if i == 1; s.dup }[0]
+    +  t << "c"
+    +  p s
+    +end
+    +conditional_map
+    +
+    +def fresh_map
+    +  s = +"ab"
+    +  t = [1].map { s.dup }[0]
+    +  t << "c"
+    +  p s
+    +  p t
+    +end
+    +fresh_map
+    +
+    +def frozen_map
+    +  s = "ab"
+    +  t = [1].map { s }[0]
+    +  begin
+    +    t << "c"
+    +  rescue FrozenError
+    +    puts "frozen"
+    +  end
+    +end
+    +frozen_map
+    diff --git a/test/share/share_strings_temporary_map_elements.rb.expected b/test/share/share_strings_temporary_map_elements.rb.expected
+    new file mode 100644
+    index 000000000..1f50fd482
+    --- /dev/null
+    +++ b/test/share/share_strings_temporary_map_elements.rb.expected
+    @@ -0,0 +1,22 @@
+    +"abc"
+    +"abc"
+    +"abc"
+    +"abc"
+    +"abc"
+    +"abc"
+    +"abc"
+    +"abc"
+    +"abc"
+    +"abc"
+    +"abc"
+    +"abc"
+    +"abc"
+    +"abc"
+    +"abc"
+    +"abc"
+    +"abc"
+    +"abc"
+    +"abc"
+    +"ab"
+    +"abc"
+    +frozen
+    diff --git a/test/share_strings_copy_beside_alloc.rb b/test/share_strings_copy_beside_alloc.rb
+    new file mode 100644
+    index 000000000..97211e788
+    --- /dev/null
+    +++ b/test/share_strings_copy_beside_alloc.rb
+    @@ -0,0 +1,83 @@
+    +# A read of a shared String slot is a fresh copy of its bytes, and nothing
+    +# holds that copy until the call takes it. Beside another operand of the same
+    +# call that allocates -- another such copy, a `+`, a `*` -- a collection there
+    +# freed the copy and the call read freed bytes: CSV.generate_line quoted the
+    +# empty field of ["", nil, 1.0] as six quotes, which parse back as a field of
+    +# two. The copy is now held in a rooted temp across the other operands, and
+    +# taken after them. gc-stress-test (the default build) and share-strings-test
+    +# (the flag) run this file under SPINEL_GC_STRESS=2, which stops at the first
+    +# freed read.
+    +# spinel: gc-stress
+    +require "csv"
+    +
+    +p CSV.parse_line(CSV.generate_line(["", nil, 1.0]))
+    +
+    +a = +"a-b"
+    +b = +"-"
+    +c = +"+"
+    +all = [a, b, c]
+    +a << "-c"
+    +p all
+    +
+    +# copies beside copies
+    +p a.gsub(b, c)
+    +p a.tr(b, c)
+    +p a + b
+    +
+    +# a copy beside an allocating argument
+    +p a.gsub("-", "=" + "=")
+    +p a.sub(b, c * 2)
+    +p a.delete(b + "")
+    +
+    +# a receiver read for its live bytes copies nothing
+    +p a.center(9, b + c)
+    +p a.count(b + c)
+    +p a.index(b + c)
+    +p [a.start_with?(b + ""), a.end_with?(c + "c"), a.include?(b * 1)]
+    +
+    +# a user method's arguments
+    +def join3(x, y, z)
+    +  x + y + z
+    +end
+    +p join3(a, b, c)
+    +p join3(a, b * 2, c)
+    +
+    +# The callee sees the String as it is at the call: a copy is taken after the
+    +# operands that run code, even one that appends to the same String.
+    +def mut(s, t)
+    +  s << t
+    +  "abc"
+    +end
+    +x = +"x-y"
+    +y = +"-"
+    +z = +"+"
+    +more = [x, y, z]
+    +p join3(x, mut(x, "!"), z)
+    +p join3(y, z, mut(y, "w"))
+    +p "abc".delete(y, z, mut(y, "a"), mut(z, "a"))
+    +p x.sub(y, mut(y, "z"))
+    +p x + mut(x, "?") + y
+    +p x.sub(y, (x << "!"; z))
+    +p x.tr(y, (y << "a"; z))
+    +p "#{x}#{(x << "Y"; y * 2)}#{x}"
+    +p x.delete(z * 1, (x << "x"; "xyz"), (x << "y"; "xy"))
+    +p more
+    +
+    +# operands no binding took before: a write, a parenthesized statement, a begin
+    +p a.tr(b, t = c * 2)
+    +p a.sub(b, (c << "x"; "y"))
+    +p a.sub(b, begin; c + c; end)
+    +p a.sub(b, $g = c + c)
+    +
+    +# a Hash key that is a copy is read after its value is built
+    +h = {}
+    +h[a] = b * 2
+    +h.store(b, a * 2)
+    +p h
+    +p({ a => b * 2 })
+    +p(h[c] = a * 2)
+    +
+    +# replace copies from a fresh source after allocating its own copy
+    +w = +"q"
+    +w.replace(a + b)
+    +p w
+    diff --git a/test/share_strings_copy_beside_alloc.rb.expected b/test/share_strings_copy_beside_alloc.rb.expected
+    new file mode 100644
+    index 000000000..13faf6b34
+    --- /dev/null
+    +++ b/test/share_strings_copy_beside_alloc.rb.expected
+    @@ -0,0 +1,32 @@
+    +["", nil, "1.0"]
+    +["a-b-c", "-", "+"]
+    +"a+b+c"
+    +"a+b+c"
+    +"a-b-c-"
+    +"a==b==c"
+    +"a++b-c"
+    +"abc"
+    +"-+a-b-c-+"
+    +2
+    +nil
+    +[false, false, true]
+    +"a-b-c-+"
+    +"a-b-c--+"
+    +"x-y!abc+"
+    +"-w+abc"
+    +"bc"
+    +"x-y!"
+    +"x-y!?abc-waz"
+    +"x-y!?!"
+    +"x+y!?!"
+    +"x-y!?!Y-waza-wazax-y!?!Y"
+    +"x-y!?!Yxy"
+    +["x-y!?!Yxy", "-waza", "+a"]
+    +"a+b+c"
+    +"ayb-c"
+    +"a+x+xb-c"
+    +"a+x+xb-c"
+    +{"a-b-c" => "--", "-" => "a-b-ca-b-c"}
+    +{"a-b-c" => "--"}
+    +"a-b-ca-b-c"
+    +"a-b-c-"
+    diff --git a/test/share_strings_file_class_override.rb b/test/share_strings_file_class_override.rb
+    new file mode 100644
+    index 000000000..4db9ef1cc
+    --- /dev/null
+    +++ b/test/share_strings_file_class_override.rb
+    @@ -0,0 +1,66 @@
+    +# spinel: share
+    +# spinel: gc-minor
+    +# User singleton methods on File keep their own mutation and return aliases,
+    +# whether defined in a reopening, directly, or through the singleton class.
+    +class File
+    +  def self.readable?(value)
+    +    value << "!"
+    +    value
+    +  end
+    +end
+    +
+    +def File.writable?(value)
+    +  value << "!"
+    +  value
+    +end
+    +
+    +class << File
+    +  def executable?(value)
+    +    value << "!"
+    +    value
+    +  end
+    +end
+    +
+    +module FilePredicateOverride
+    +  def exist?(value)
+    +    value << "!"
+    +    value
+    +  end
+    +end
+    +class File
+    +  singleton_class.prepend(FilePredicateOverride)
+    +end
+    +
+    +readable = +"readable"
+    +readable_answer = File.readable?(readable)
+    +readable_answer << "?"
+    +p readable
+    +p readable_answer
+    +writable = +"writable"
+    +writable_answer = File.writable?(writable)
+    +writable_answer << "?"
+    +p writable
+    +p writable_answer
+    +executable = +"executable"
+    +executable_answer = File.executable?(executable)
+    +executable_answer << "?"
+    +p executable
+    +p executable_answer
+    +existing = +"existing"
+    +existing_answer = File.exist?(existing)
+    +existing_answer << "?"
+    +p existing
+    +p existing_answer
+    +
+    +# A FileTest override keeps the same mutation and return aliases.
+    +module FileTest
+    +  def self.readable?(value)
+    +    value << "!"
+    +    value
+    +  end
+    +end
+    +filetest = +"filetest"
+    +filetest_answer = FileTest.readable?(filetest)
+    +filetest_answer << "?"
+    +p filetest
+    +p filetest_answer
+    diff --git a/test/share_strings_file_class_override.rb.expected b/test/share_strings_file_class_override.rb.expected
+    new file mode 100644
+    index 000000000..edfb7a232
+    --- /dev/null
+    +++ b/test/share_strings_file_class_override.rb.expected
+    @@ -0,0 +1,10 @@
+    +"readable!?"
+    +"readable!?"
+    +"writable!?"
+    +"writable!?"
+    +"executable!?"
+    +"executable!?"
+    +"existing!?"
+    +"existing!?"
+    +"filetest!?"
+    +"filetest!?"
+    diff --git a/test/string_returned_arg_stored_unaffected.rb b/test/string_returned_arg_stored_unaffected.rb
+    new file mode 100644
+    index 000000000..f45fa69b0
+    --- /dev/null
+    +++ b/test/string_returned_arg_stored_unaffected.rb
+    @@ -0,0 +1,38 @@
+    +# Stored calls the returned-argument route leaves alone.
+    +
+    +def id(x) = x
+    +def cp(x) = x.dup
+    +def norm(x) = x.empty? ? "-" : x
+    +
+    +# nothing is mutated in place
+    +u = +"u"
+    +q = []
+    +q << id(u)
+    +p q, u
+    +
+    +# the method answers a fresh String
+    +w = +"w"
+    +r = [cp(w)]
+    +w << "z"
+    +p r, w
+    +h = { k: cp(w) }
+    +h[:k] << "y"
+    +p h[:k], w
+    +
+    +# the variable is given another String, which is no mutation
+    +t = +"t"
+    +a = [id(t)]
+    +t = t + "z"
+    +p a, t
+    +
+    +# a literal that is not kept is read where it stands
+    +line = +""
+    +line << "abc"
+    +puts [norm(line), "x"].join(",")
+    +
+    +# the Array is never read
+    +m = +"m"
+    +o = []
+    +o << id(m)
+    +m << "z"
+    +p m
+    diff --git a/test/string_returned_arg_stored_unaffected.rb.expected b/test/string_returned_arg_stored_unaffected.rb.expected
+    new file mode 100644
+    index 000000000..e24b73fcc
+    --- /dev/null
+    +++ b/test/string_returned_arg_stored_unaffected.rb.expected
+    @@ -0,0 +1,10 @@
+    +["u"]
+    +"u"
+    +["w"]
+    +"wz"
+    +"wzy"
+    +"wz"
+    +["t"]
+    +"tz"
+    +abc,x
+    +"mz"
+    diff --git a/test/tap_block_param_cell.rb b/test/tap_block_param_cell.rb
+    index 781419772..dc8a7d6d8 100644
+    --- a/test/tap_block_param_cell.rb
+    +++ b/test/tap_block_param_cell.rb
+    @@ -1,3 +1,4 @@
+    +# spinel: share
+     # A `tap` block parameter that is CELLED, and the cell nobody filled.
+     #
+     # `StringIO.new.tap { |body| ... }` crashed with SIGSEGV, and only when three
+    diff --git a/test/zip_range_stops_at_receiver.rb b/test/zip_range_stops_at_receiver.rb
+    new file mode 100644
+    index 000000000..4cbc1375c
+    --- /dev/null
+    +++ b/test/zip_range_stops_at_receiver.rb
+    @@ -0,0 +1,9 @@
+    +# zip reads a Range argument only as far as its receiver reaches, so an
+    +# infinite one stops there as in CRuby. spinel materialized the whole range
+    +# first: `10.upto(Float::INFINITY)` took a 2**30-element array (seconds of
+    +# run time), and its bound was a cast of Infinity to an Integer.
+    +p [1, 2].zip(10.upto(Float::INFINITY))
+    +p [1, 2].zip(1..)
+    +p [1, 2, 3].zip(5..6)
+    +p %w[a b].zip(3.upto(2.5), 0...9)
+    +p 1.upto(2.5).to_a, 3.downto(1.5).to_a
+    diff --git a/test/zip_range_stops_at_receiver.rb.expected b/test/zip_range_stops_at_receiver.rb.expected
+    new file mode 100644
+    index 000000000..91d7f5f1f
+    --- /dev/null
+    +++ b/test/zip_range_stops_at_receiver.rb.expected
+    @@ -0,0 +1,6 @@
+    +[[1, 10], [2, 11]]
+    +[[1, 1], [2, 2]]
+    +[[1, 5], [2, 6], [3, nil]]
+    +[["a", nil, 0], ["b", nil, 1]]
+    +[1, 2]
+    +[3, 2]
+
+   On the bare tip the test stops at its seventh line at SPINEL_GC_STRESS=2 (as before), so these two lines show their fault only in a probe of their own (y6); in the test they pin the right answer, with and without --share-strings.
+
+3. Nothing else moves. Stable patch-ids by file, cfcae9ef9624 | this head:
+   src/codegen_call.c: 712b90b3aabf664b | 712b90b3aabf664b
+   src/codegen_call_arms.h: 0f18a716915930e0 | 0f18a716915930e0
+   src/codegen_call_string.c: cf470f5c66587368 | c720d284e74e8213
+   test/format_made_in_place_held.rb: 39a83bbbe1d49599 | 215e07cdcd56c644
+   test/format_made_in_place_held.rb.expected: b495b2dc6876dbac | 5bb7b7a49d5e76a8
+
+THE PROBES for 1 and 2. Each row: CRuby's line | compile exits of the bare tip and of this head, and whether the generated C is equal | the bare tip's cells | this head's. A cell is gcc at SPINEL_GC_STRESS 0, 1, 2, then clang the same (real clang, by --cc=clang, in every table of this file). y1 to y4 are a yield's Integer as the single argument (a literal, a product, beside an interpolated format, and two blocks at one site): the changed lines of each are the old pair's, line for line, but for the box's name. y6 and y7 are a constant and a global changed in place as the format; without --share-strings (these rows) the C is master's:
+  y1_yield_int_plain | CRuby     7| | compile 0 0 C differs(4) | base: ok ok ok / ok ok ok / head: ok ok ok / ok ok ok /
+  y2_yield_int_calc | CRuby 89401| | compile 0 0 C differs(4) | base: ok ok ok / ok ok ok / head: ok ok ok / ok ok ok /
+  y3_yield_poly | CRuby     7| | compile 0 0 C differs(2) | base: ok ok ok / ok ok ok / head: ok ok ok / ok ok ok /
+  y4_yield_plain_poly_site | CRuby     7|  s299| | compile 0 0 C differs(18) | base: ok ok rc134 / ok ok rc134 / head: ok ok ok / ok ok ok /
+  y6_shared_const | CRuby 0 | compile 0 0 C equal | base: ok ok ok / ok ok ok / head: ok ok ok / ok ok ok /
+  y7_shared_global_list | CRuby 0 | compile 0 0 C equal | base: ok ok ok / ok ok ok / head: ok ok ok / ok ok ok /
+   With --share-strings, y6 (`KF % i`, 300 rounds): the bare tip gcc right at levels 0, 1, 2; clang right at 0 and 1 and 300 of 300 wrong at level 2, exit 0; this head right in all six cells. y7 (`$f % ints`, a typed Array as the list): right in all six cells on both. The hold costs 13 instructions a statement with gcc and 26 with clang on y6's statement (callgrind, 100,000 statements: 169,266,705 to 170,575,241 and 166,294,531 to 168,900,706).
+
+WHAT THE SAME PATCH DID ON THIS MASTER BEFORE THE MEND (the plain replay, tree 4e2d5a79fc9a, every check run on it too): the same seven corpus programs changed, their changed lines the old pair's but for two spellings of master's own on both sides (`sp_box_int_nn`, and a cleanup attribute on the inflight cause); the 112 statements, the sweep and the cells came out as on the old pair. The mend changes the C of a yield's Integer argument only.
+
+CHECKS, on this head and the bare tip, both built from nothing
+
+- the test, seven lanes (plain, level 1, level 1 with the verifier, level 2, MINOR=0, MINOR=1, MINOR=1 with VERIFY_GEN at level 1), gcc and clang; rc0 is a wrong line with exit 0, rc134 the abort at level 2:
+  bare  format_made_in_place_held gcc:rc0/rc0/rc0/rc134/rc0/rc0/rc0 clang:ok/ok/ok/rc134/ok/ok/ok
+  piece format_made_in_place_held gcc:ok/ok/ok/ok/ok/ok/ok clang:ok/ok/ok/ok/ok/ok/ok
+  piece share-strings format_made_in_place_held gcc:ok/ok/ok/ok/ok/ok/ok clang:ok/ok/ok/ok/ok/ok/ok
+  bare  share-strings format_made_in_place_held gcc:rc0/rc0/rc0/rc134/rc0/rc0/rc0 clang:ok/ok/ok/rc134/ok/ok/ok
+- gate check rc=0 (`ruby tools/gate.rb check`, the commit staged);
+- corpus: programs 6707; not in the before file 0; changed 10:
+  packages/benchmark/test/benchmark_report.rb
+  packages/benchmark/test/benchmark_tms.rb
+  test/conditional_require_line.rb
+  test/poly_string_dup_unfrozen.rb
+  test/promote_yield_operator_diverging_block_types.rb
+  test/require_expression_lines.rb
+  test/source_file_required.rb
+  test/string_format_scalar_operands.rb
+  test/yield_operator_diverging_block_types.rb
+  test/format_binary.rb
+  Seven are the piece's (the two under packages/, poly_string_dup_unfrozen, string_format_scalar_operands, format_binary and the two yield_operator_diverging_block_types tests), the same seven as on the old base; the three path-printing tests differ by the length of the build directory's name alone. The lanes of the changed tests, the bare tip's rows against this head's:
+  rows 8; differ: 2
+  2c2
+  < poly_string_dup_unfrozen gcc:ok/ok/ok/ok/ok/ok/ok clang:ok/ok/ok/rc0/ok/ok/ok
+  ---
+  > poly_string_dup_unfrozen gcc:ok/ok/ok/ok/ok/ok/ok clang:ok/ok/ok/ok/ok/ok/ok
+  6c6
+  < string_format_scalar_operands gcc:ok/ok/ok/rc1/ok/ok/ok clang:ok/ok/ok/rc1/ok/ok/ok
+  ---
+  > string_format_scalar_operands gcc:ok/ok/ok/ok/ok/ok/ok clang:ok/ok/ok/ok/ok/ok/ok
+  not all ok on the piece:
+  promote_yield_operator_diverging_block_types gcc:rc1/rc1/rc1/rc1/rc1/rc1/rc1 clang:rc1/rc1/rc1/rc1/rc1/rc1/rc1
+  The two under packages/ (bare, then piece):
+  bare  benchmark_report gcc:ok/ok/ok/ok/ok/ok/ok clang:ok/ok/ok/ok/ok/ok/ok
+  bare  benchmark_tms gcc:ok/ok/ok/ok/ok/ok/ok clang:ok/ok/ok/rc0/ok/ok/ok
+  piece benchmark_report gcc:ok/ok/ok/ok/ok/ok/ok clang:ok/ok/ok/ok/ok/ok/ok
+  piece benchmark_tms gcc:ok/ok/ok/ok/ok/ok/ok clang:ok/ok/ok/ok/ok/ok/ok
+- make optcarrot rc=0 checksum: 59662 Optcarrot: OK ; optcarrot C equal to the reference's;
+- share-strings-test rc=0 seconds=2278: share-strings-test: pass
+- int-min-test rc=0 seconds=4: int-min-test: pass
+- the 112 generated statements (ok / RAISE / WRONG / other = an abort):
+  bare gcc level 0 ok 112 RAISE 0 WRONG 0 other 0
+  bare gcc level 1 ok 112 RAISE 0 WRONG 0 other 0
+  bare gcc level 2 ok 72 RAISE 33 WRONG 0 other 7
+  bare clang level 0 ok 112 RAISE 0 WRONG 0 other 0
+  bare clang level 1 ok 112 RAISE 0 WRONG 0 other 0
+  bare clang level 2 ok 72 RAISE 0 WRONG 33 other 7
+  piece gcc level 0 ok 112 RAISE 0 WRONG 0 other 0
+  piece gcc level 1 ok 112 RAISE 0 WRONG 0 other 0
+  piece gcc level 2 ok 105 RAISE 3 WRONG 0 other 4
+  piece clang level 0 ok 112 RAISE 0 WRONG 0 other 0
+  piece clang level 1 ok 112 RAISE 0 WRONG 0 other 0
+  piece clang level 2 ok 108 RAISE 0 WRONG 0 other 4
+  statements 112 base not ok at level 2 with one or the other 53 losses []
+  left on the head at level 2: [('call__str_alloc', 'RC134', 'RC134'), ('holder__str_alloc', 'RC134', 'RC134'), ('local__made_ints', 'RAISE', 'ok'), ('local__made_strs', 'RAISE', 'ok'), ('local__map', 'RAISE', 'ok'), ('local__str_alloc', 'RC134', 'RC134'), ('tern__str_alloc', 'RC134', 'RC134')]
+  left same as base: True
+- what reaches the guard (a counting build over the corpus; programs 6707 lines 2 13:42:28):
+  test/promote_yield_operator_diverging_block_types.rb X2STAT arg node=91 depth=0 own=0 pure=1 byvalue=0 line=0
+  test/yield_operator_diverging_block_types.rb X2STAT arg node=91 depth=0 own=0 pure=1 byvalue=0 line=0
+- 636 probe programs by their generated C: 395 the bare tip's, 222 other, 19 that build on neither. The cells of 295 programs (the 222 and the body's probe sets): 216 cells that were not CRuby's line are, in 115 programs; cells that go the other way: 6, in these rows (u02 and u04 as ruled: CRuby runs the arm the compiler drops):
+  u02_flag_in_dropped_arm base:111000 head:0d0d0d0s0s0d loss:3 cure:0
+  u04_own_made_format base:111000 head:0d0d0d0s0s0d loss:3 cure:0
+- the five S8 twins (a module mixed into a builtin): the bare tip's C on each:
+  f1_prepend_into_builtin | CRuby " true|" | compile 0 0 C equal | base: ok ok ok / ["false|"] ["false|"] ["\xDB\xDB\xDB\xDB"] / head: ok ok ok / ["false|"] ["false|"] ["\xDB\xDB\xDB\xDB"] /
+  f2_include_in_subclass | CRuby "   15|" | compile 0 0 C equal | base: ["    7|"] ["    7|"] ["    7\xDB"] / ok ok ["\xDB\xDB\xDB\xDB"] / head: ["    7|"] ["    7|"] ["    7\xDB"] / ok ok ["\xDB\xDB\xDB\xDB"] /
+  f3_toplevel_def_and_include | CRuby "false|" | compile 0 0 C equal | base: [" true|"] [" true|"] [" true|"] / ok ok ["\xDB\xDB\xDB\xDB"] / head: [" true|"] [" true|"] [" true|"] / ok ok ["\xDB\xDB\xDB\xDB"] /
+  f3b_include_alone | CRuby "false|" | compile 0 0 C equal | base: [" true|"] [" true|"] [" true|"] / ok ok ["\xDB\xDB\xDB\xDB"] / head: [" true|"] [" true|"] [" true|"] / ok ok ["\xDB\xDB\xDB\xDB"] /
+  f4_own_module_included | CRuby "false|" | compile 0 0 C equal | base: [" true|"] [" true|"] [" true|"] / ok ok ["\xDB\xDB\xDB\xDB"] / head: [" true|"] [" true|"] [" true|"] / ok ok ["\xDB\xDB\xDB\xDB"] /
+- the dropped-arm and unread-file probes:
+  c01_nothing_dropped | CRuby "   15|" | compile 0 0 C differs(2) | base: ["    7|"] ["    7|"] ["    7|"] / ok ok ["\xDB\xDB\xDB\xDB"] / head: ok ok ok / ok ok ok /
+  c02_def_stands | CRuby "    7|" | compile 0 0 C equal | base: ok ok ok / ok ok ["\xDB\xDB\xDB\xDB"] / head: ok ok ok / ok ok ["\xDB\xDB\xDB\xDB"] /
+  h01_def_in_dropped_arm | CRuby "    7|" | compile 0 0 C equal | base: ok ok ok / ["   15|"] ["   15|"] ["\xDB\xDB\xDB\xDB"] / head: ok ok ok / ["   15|"] ["   15|"] ["\xDB\xDB\xDB\xDB"] /
+  h01b_def_under_unless | CRuby "    7|" | compile 0 0 C equal | base: ok ok ok / ["   15|"] ["   15|"] ["\xDB\xDB\xDB\xDB"] / head: ok ok ok / ["   15|"] ["   15|"] ["\xDB\xDB\xDB\xDB"] /
+  h01c_def_under_defined | CRuby "    7|" | compile 0 0 C equal | base: ok ok ok / ["   15|"] ["   15|"] ["\xDB\xDB\xDB\xDB"] / head: ok ok ok / ["   15|"] ["   15|"] ["\xDB\xDB\xDB\xDB"] /
+  h04_load_path_file | CRuby "    7|" | compile 0 0 C equal | base: ok ok ok / ["   15|"] ["   15|"] ["\xDB\xDB\xDB\xDB"] / head: ok ok ok / ["   15|"] ["   15|"] ["\xDB\xDB\xDB\xDB"] /
+  h05_require_in_dropped_arm | CRuby "    7|" | compile 0 0 C equal | base: ok ok ok / ["   15|"] ["   15|"] ["\xDB\xDB\xDB\xDB"] / head: ok ok ok / ["   15|"] ["   15|"] ["\xDB\xDB\xDB\xDB"] /
+  h06_reader_def_in_dropped_arm | CRuby "    7|" | compile 0 0 C equal | base: ok ok ok / ["   15|"] ["   15|"] ["\xDB\xDB\xDB\xDB"] / head: ok ok ok / ["   15|"] ["   15|"] ["\xDB\xDB\xDB\xDB"] /
+  h07_require_modifier | CRuby "    7|" | compile 0 0 C equal | base: ok ok ok / ["   15|"] ["   15|"] ["\xDB\xDB\xDB\xDB"] / head: ok ok ok / ["   15|"] ["   15|"] ["\xDB\xDB\xDB\xDB"] /
+  u02_flag_in_dropped_arm | CRuby "    7|" | compile 0 0 C differs(2) | base: ok ok ok / ["   15|"] ["   15|"] ["\xDB\xDB\xDB\xDB"] / head: ["   15|"] ["   15|"] ["   15|"] / ["   15|"] ["   15|"] ["   15|"] /
+  u04_own_made_format | CRuby "    7|" | compile 0 0 C differs(2) | base: ok ok ok / ["   15|"] ["   15|"] ["\xDB\xDB\xDB\xDB"] / head: ["   15|"] ["   15|"] ["   15|"] / ["   15|"] ["   15|"] ["   15|"] /
+- merge into master's tip by my own ls-remote at 13:43 UTC 10-09 (b791081037be): exit status 0.
+
+COMPILE TIME (callgrind, the compiler's own instructions with -c; the bare tip | this head, both in one run)
+  `p held % (ar[k] + i * m)`, the format a call's answer, the argument proved, 1,000: 4,347,363,241 | 4,374,783,287 (+0.63%), the C differs
+  `p held % (ar[k] + i * m)`, the format a call's answer, the argument proved, 2,000: 8,696,639,323 | 8,751,479,366 (+0.63%), the C differs
+  the same beside a line `z = (o.v = i + 1)` each, 1,000: 7,545,714,349 | 7,572,106,503 (+0.35%), the C differs
+  the same beside a line `z = (o.v = i + 1)` each, 2,000: 16,994,694,044 | 16,993,251,351 (-0.01%), the C differs
+  the same beside a line `w.sub!("a", "b")` each, 1,000: 6,417,216,843 | 6,444,819,356 (+0.43%), the C differs
+  the same beside a line `w.sub!("a", "b")` each, 2,000: 15,735,832,109 | 15,791,055,719 (+0.35%), the C differs
+  `p held % (o.a_rather_long_reader + i)`, the reader an attr_accessor's (declined), 1,000: 3,382,673,402 | 3,409,801,837 (+0.80%), the C equal
+  `p held % (o.a_rather_long_reader + i)`, the reader an attr_accessor's (declined), 2,000: 6,765,878,767 | 6,820,137,341 (+0.80%), the C equal
+  the test: 85,241,321 | 85,468,195
