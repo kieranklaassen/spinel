@@ -1,0 +1,120 @@
+Delta for reader 5: the pull request "An ensure keeps the exception it holds while its body runs" is a NEW READ. It is ONE commit now, 070cae01d73b on upstream master 5749e9566750, "Depends on: none". The three commits you read (the hand-on helper, the hand-on stores, the root wrapper with its operator walk, and the cap cut after your find) and their texts are SUPERSEDED: no line of them is carried, so your cap find, the T2 clause and the compile-time figures have nothing left to stand on. The mail and the body are the blocks beside this one.
+   This block REPLACES the delta handed over for ad356ba23f94 on 2d5b3d1211d7 (block n==745), with its mail and body (n==741, n==743). Against that head the commit's lines under src/ are the same, line for line; the test gains ONE section (the last paragraph of section C says why); and every count below was taken again on the new tip. If you read block n==745, what is new to read is the last two paragraphs of section C and that test section. The notes block n==739 (the minimal programs, the side finds) stands.
+
+A. WHY IT IS A NEW PIECE.
+   Master's own ensure commits changed the ground under the old one. The rescue clauses of a begin with an ensure now run in a frame of their own, and an exception no clause takes is held there as its object. At the ensure's entry master makes the exception's object when the raise carried none, for `$!` in the body and for the cause of a raise in the body, and keeps it alive while the body runs (it is pushed on the `$!` stack, which the collector marks, and popped by a cleanup when the body is left). So the object the old root wrapper rooted is already alive, and what is left of the old fault is the RAW MESSAGE: the class and message in the C locals are what master still raises again after the body, and the message is freed as before.
+   By the builder rule the piece is cut down to that remainder, standing on master's rule: the ensure holds the object master makes and raises that.
+
+B. THE WHOLE CHANGE (four statements in three functions; the test beside it):
+
+diff --git a/src/codegen_call_concurrency.c b/src/codegen_call_concurrency.c
+index 67bf6468d..406a6a27b 100644
+--- a/src/codegen_call_concurrency.c
++++ b/src/codegen_call_concurrency.c
+@@ -447,7 +447,9 @@ int emit_call_synchronize_arms(Compiler *c, int id, Buf *b, const NodeTable *nt,
+         /* a proc body returns sp_int: see the sibling in codegen_iter.c */
+         else if (g_in_proc_body) buf_printf(b, "if (_retf%d) return 0; ", eid);
+         else buf_printf(b, "if (_retf%d) return; ", eid);
+-        buf_printf(b, "if (_excf%d) { sp_pending_exc_obj = _excobj%d; sp_raise_cls(_exccls%d, _excmsg%d); } ", eid, eid, eid, eid);
++        /* an object an ensure inside the block handed up is raised as
++           itself: its raw message may be gone (see emit_begin) */
++        buf_printf(b, "if (_excf%d) { if (_excobj%d) sp_raise_exc((sp_Exception *)_excobj%d); sp_raise_cls(_exccls%d, _excmsg%d); } ", eid, eid, eid, eid, eid);
+       }
+     }
+     if (scalar) buf_printf(b, "_t%d; })", rv);
+diff --git a/src/codegen_iter.c b/src/codegen_iter.c
+index f63068297..562210e0f 100644
+--- a/src/codegen_iter.c
++++ b/src/codegen_iter.c
+@@ -5003,7 +5003,9 @@ int emit_array_filter_loop(Compiler *c, int recv, int block, TyKind rt, const ch
+       buf_printf(b, "if (_retf%d) { %s = _retv%d; return 0; }\n", eid, proc_ret_slot(), eid);
+     else emit_retf_return(eid, has_retval, b);
+     emit_indent(b, indent);
+-    buf_printf(b, "if (_excf%d) { sp_pending_exc_obj = _excobj%d; sp_raise_cls(_exccls%d, _excmsg%d); }\n", eid, eid, eid, eid);
++    /* an object an ensure inside the block handed up is raised as itself:
++       its raw message may be gone (see emit_begin) */
++    buf_printf(b, "if (_excf%d) { if (_excobj%d) sp_raise_exc((sp_Exception *)_excobj%d); sp_raise_cls(_exccls%d, _excmsg%d); }\n", eid, eid, eid, eid, eid);
+   }
+   if (flv) flv->type = fsaved;
+   *tr = t; *torig = to; *twp = tw;
+diff --git a/src/codegen_stmt.c b/src/codegen_stmt.c
+index 0c6f5eff2..4eb01a904 100644
+--- a/src/codegen_stmt.c
++++ b/src/codegen_stmt.c
+@@ -10162,12 +10162,17 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar)
+     buf_printf(b, "int _uk%d = sp_unwind_kind, _ut%d = sp_unwind_target, _ue%d = sp_unwind_exc_top; sp_proc_home *_uh%d = sp_unwind_home;\n",
+                eid, eid, eid, eid);
+     /* an exception raised from inside this ensure takes the one unwinding
+-       through it as its cause (#3745) */
++       through it as its cause (#3745). The ensure holds it as that object
++       from here on and raises the object again below, since the raw
++       message does not outlive the body: a begin the body enters takes
++       the slot it was read from, and an inner ensure that hands its
++       exception here has popped that slot's frame, so the next collection
++       frees it. The object owns its message */
+     emit_indent(b, indent);
+     buf_printf(b, "void *_ic%d = sp_inflight_cause;"
+-                  " if (_excf%d) sp_inflight_cause = _excobj%d ? _excobj%d"
+-                  " : (void *)sp_exc_new_for_catch(_exccls%d, _excmsg%d);\n",
+-               eid, eid, eid, eid, eid, eid);
++                  " if (_excf%d) { if (!_excobj%d) _excobj%d = sp_exc_new_for_catch(_exccls%d, _excmsg%d);"
++                  " sp_inflight_cause = _excobj%d; }\n",
++               eid, eid, eid, eid, eid, eid, eid);
+     /* The ensure's reads are not the method's return. Keep both a
+        published handle and a fresh tail's cleared channel across them. */
+     Scope *sc = comp_scope_of(c, id);
+@@ -10260,8 +10265,7 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar)
+          match; with no such frame, propagate to the outer ensure as before. */
+       emit_indent(b, indent);
+       if (g_exc_frame_depth > outer->exc_base + 1) {
+-        buf_printf(b, "if (_excf%d) { sp_pending_exc_obj = _excobj%d; sp_raise_cls(_exccls%d, _excmsg%d); }\n",
+-                   eid, eid, eid, eid);
++        buf_printf(b, "if (SP_UNLIKELY(_excf%d)) sp_raise_exc((sp_Exception *)_excobj%d);\n", eid, eid);
+       }
+       else {
+         buf_printf(b, "if (_excf%d) { _excf%d = 1; _excmsg%d = _excmsg%d; _exccls%d = _exccls%d; _excobj%d = _excobj%d; sp_exc_top--; goto _ensure%d; }\n",
+@@ -10269,9 +10273,9 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar)
+       }
+     }
+     else {
+-      /* Unhandled exception: re-raise using the saved class/message. */
++      /* Unhandled exception: re-raise the object the ensure held. */
+       emit_indent(b, indent);
+-      buf_printf(b, "if (_excf%d) { sp_pending_exc_obj = _excobj%d; sp_raise_cls(_exccls%d, _excmsg%d); }\n", eid, eid, eid, eid);
++      buf_printf(b, "if (SP_UNLIKELY(_excf%d)) sp_raise_exc((sp_Exception *)_excobj%d);\n", eid, eid);
+     }
+     g_retry_label = ens_saved_retry;
+     g_retry_pops = ens_saved_retry_pops;
+
+   emit_begin: the entry statement stores the object it makes into the region's own local, where master stored it in sp_inflight_cause alone; the two raise lines after the body (the one for a begin between this region and the enclosing ensure, and the one with no ensure around) raise the object. They are written as the file writes a raise branch elsewhere, `if (SP_UNLIKELY(...)) sp_raise_...`: with a plain `if` the path with NO exception came out two instructions a call dearer in one shape (an ensure around a synchronize block), by the C compiler's layout alone, the statements run on that path being the same; with the idiom no program measured is dearer.
+   emit_call_synchronize_arms and emit_array_filter_loop: the raise line of the region with no ensure around it raises an object when it holds one, else class and message as master does. These two regions make no object of their own; they hold one only when an ensure inside their block handed it up.
+   No runtime function is changed. The four runtime names the lines use are master's: sp_exc_new_for_catch, sp_raise_exc, sp_raise_cls, sp_inflight_cause.
+
+C. MASTER'S MOVES UNDER IT. The commit was first cut on b791081037be and replayed clean on f85f04b3abef and 97bb480031b7 (stable patch-id 038ee8ff67b2 each time); on 2d5b3d1211d7 it was that replay with the two raise lines in the idiom (stable patch-id 7c859f6ca5a2); on 5749e9566750 that commit replays clean with the same patch-id, and the test section added on top makes it 4678249b6534.
+   b791081037be to f85f04b3abef (11 commits): no hunk in emit_begin, emit_call_synchronize_arms or emit_array_filter_loop.
+   f85f04b3abef to 97bb480031b7 (8 commits): emit_begin, three hunks (the EnsureCtx push gains rescue_base; the deferred `next` pops down to the enclosing ensure and pops its rescue handlers; the `continue` of a deferred next goes through emit_loop_unwind); emit_call_synchronize_arms, four hunks (the push; a block with a `next` runs in a do-while and its value goes to the result temporary; the deferred next as in emit_begin); emit_array_filter_loop, one line (the push). None is a line this commit changes or reads: they are the `next`, `break` and `return` paths, and this commit is the exception path.
+   97bb480031b7 to 2d5b3d1211d7 (36 commits): none of the three functions is touched (emit_return and emit_return_deferred are, by a cast before the returned value), nor a runtime name the lines use.
+   2d5b3d1211d7 to 5749e9566750 (62 commits): emit_begin and emit_call_synchronize_arms are the same bytes, and no runtime name the lines use is in a changed line under lib/. emit_array_filter_loop IS changed, in the branch this commit does not touch: where an ensure lies around select!'s loop and a begin with a rescue between the two, the loop's region now raises the exception again for that rescue, `if (_excf) { sp_pending_exc_obj = _excobj; sp_raise_cls(_exccls, _excmsg); }`, where it handed it to the enclosing ensure. This commit's line in that function is the raise of the region with NO ensure around it.
+   MASTER'S NEW RAISE LINE IS LEFT AS MASTER'S, by measurement. It raises by class and raw message with the object the region may hold left pending, so the handler is given that object. The raw message there can be a freed one only when an ensure inside the block handed the exception up; on this head that ensure holds the object and hands it up with the message, and the handler reads the message from the object. (sp_raise_cls still copies the raw message it is passed before anything else, so on that path it copies bytes that may be freed ones; the copy is the frame's message, which nothing reads when an object is pending. That read is master's line's own and is not taken away here.) Four programs go through the line that way (an ensure inside the block that allocates; a rescue before an ensure around the loop that takes the exception, one that binds it, one that misses it with a rescue further out, one that misses it and lets it end the program): built at -O2, the bare tip prints freed bytes in all four under SPINEL_GC_STRESS=2 (on stdout in three, in the uncaught report in the fourth) and CRuby's lines plain and under stress 1; this head prints CRuby's stdout in all four, plain and under both stress modes, and the message in the report. So no line is added there, and the test gains the section "and from that loop to a rescue that stands before an ensure around it", whose message line the bare tip gets wrong in the test under both stress modes.
+   5749e9566750 to 2afc69c54d7a, master's tip when this was handed over (11 commits): the three functions are the same bytes still, no line under lib/ that is changed holds a runtime name the lines use (the collector gains opt-in hooks for C extensions), and the commit's merge into it is clean by exit status. On bare 2afc69c54d7a, built, the body's two programs print the same wrong lines at -O0 to -O3 as on 5749e9566750, byte for byte. The checks below are on 5749e9566750; no other was run on 2afc69c54d7a.
+   MASTER DOES NO PART OF THIS WORK on bare 5749e9566750, built from nothing: the body's two programs print the body's wrong lines at -O0, -O1, -O2 and -O3 (the bytes they printed on 2d5b3d1211d7), and the test has 4 of its 29 lines wrong at each of those levels and with clang, 11 under stress 1 and 12 under stress 2.
+
+D. WHERE TO PUSH (the twins by the line; each is a section of the test, which is run at -O0 to -O3, with clang and under both stress modes, or a behaviour program, run plain and under stress 2).
+   1. The entry statement reads the raw message once more, to make the object: `sp_exc_new_for_catch(_exccls, _excmsg)`. It is the read master's own statement made at the same place. Between the catch that filled the two locals and this statement nothing allocates in emit_begin's own lines. The hand-on from an inner region jumps to the label that stands BEFORE this statement, so a region that was handed a class and a message with the frame popped (only a synchronize or select! region hands those up without an object) makes the object before its body runs. Test section "handed on to the region of a synchronize block, and of select!'s loop".
+   2. MATZ'S ARM, the one you were pointed at: where a clause frame's exception is taken by no clause, master makes the object with the frame already popped (`sp_exc_obj[sp_exc_top] ? ... : sp_exc_new_for_catch(sp_exc_cls[sp_exc_top], sp_exc_msg[sp_exc_top])` after `sp_exc_top--`). This commit does not change that arm; it changes what happens to its result: the object goes into the region's local and is the one raised after the body. Rule (b) there: a program that crashed or raised on master must not answer silently now. Test section "raised again to a rescue that does not take it, then held once more", whose ensure allocates.
+   3. After the body: the cleanup has popped the `$!` stack, so the object is held by the C local alone until `sp_raise_exc` runs, and the lines between (the unwind restore, the deferred next, break and return hand-ons) allocate nothing. sp_raise_exc puts it in sp_pending_exc_obj before it reads the message.
+   4. A `return`, `break` or `next` in the ensure body drops the exception (`_excf` is not asked again): last section of the test.
+   5. A kill passing through an ensure: the behaviour programs hold kills of a thread from outside, of the current thread, and aimed at a thread's main fiber, each through ensures. Plain, both sides print the same lines. Under stress 2 the tip printed a wrong line in two of them and the head CRuby's; those are thread programs, see the note on load.
+   6. The uncaught report: master prints the freed bytes there too (`filler string number 3334 (TypeError)`), this head the message. 27 kinds of uncaught exception through a plain ensure print the same stdout, stderr and exit status on both; the report differs in 6 other programs, each time freed bytes on the tip and the message on the head.
+   7. THE ONE COST: an exception that a rescue clause of the same begin has declined is an object already (the arm of point 2). Master raised it again by the class and the raw message in the locals; this head raises the object, whose message is read from it: 37 instructions more for each such exception (144,232,810 to 144,974,335 for 20,000), stated in the body. It is the fix itself on that path: the raw message is the one that may be freed.
+
+E. THE CHECKS OF RECORD, all on 5749e9566750 built from nothing.
+   The test: right at -O0, -O1, -O2, -O3, with clang, under SPINEL_GC_STRESS=1 and =2 and as the gate's shared leg builds it. `ruby tools/gate.rb check` with the commit staged: rc 0.
+   CORPUS by C against the bare tip, hashed in one tree: 6,512 programs the same, 265 differ (229 tests, 36 package tests), no refusal changes, 1 new (the test). The 229 tests and the new one built and run: 230 of 230 print their `.expected`. The 36 package tests, built and run on the bare tip and on the head: the same verdict each, 35 right and one wrong on both (the tmpdir test that asks the machine's temporary directory).
+   backtrace-test, scale-test, int-min-test, share-strings-test: rc 0 each.
+   optcarrot: its C differs in its one ensure by the two statements; 2,367,098,996 instructions on the bare tip, 2,367,106,062 on the head, checksum 59662 on both.
+   PROBES, 166, at -O1 and -O2: 114 right on both; 25 wrong on the tip and right on the head; 17 wrong on both, 16 of them with the same bytes on both and one (a message through inject with a name and a value) where the head now keeps the message and a line of master's own stays wrong; 9 the compiler refuses on both; 1 that fails in the C compiler on both. Nothing right on the tip is wrong, refused or unbuilt on the head.
+   BEHAVIOUR PROGRAMS, 69, plain and under stress 2, one at a time: every line right on the tip is right on the head. Wrong on the tip and right on the head: a frozen literal's message, the object `$!` read, an exception caught around a synchronize block (each plain and under stress), and, under stress 2 alone, three thread programs (a thread that raises and is joined; two kills). The head's run had the machine to itself; beside the bare tip's a compiler build ran at low priority, and the bare tip's verdicts are, on all 69, the ones bare 2d5b3d1211d7 had in a run that was alone. The uncaught reports differ only where the tip prints freed bytes.
+   ATTACK SET, 400 programs at -O0: 282 right on both sides, 98 wrong on both with the same bytes, 20 that do not build on either.
+   COSTS under callgrind, gcc -O2, both sides built and counted in one tree, the same output on every program. No exception, eighteen programs: 11 cheaper by two instructions a call, the dearest 18 instructions over its whole run. Exceptions: 20,000 raises through one ensure 67,568,999 to 51,611,546, through two 84,477,732 to 54,091,736, out of a synchronize block under an ensure 95,267,620 to 72,367,876; and the one dearer path of D.7.
+   A NOTE ON LOAD, your own warning: a thread that dies of an exception and is joined aborts on master's own C under SPINEL_GC_STRESS=2 when the machine is loaded (phase globals:exceptions), on the bare tip and on the head alike; five shapes, 1,500 loaded rounds each, abort on both sides in like numbers (measured before this re-cut, on an earlier tip and the commit on it). So a thread program under stress is read only from a run that had the machine to itself; the head's behaviour programs ran alone, the bare tip's as said above.
