@@ -1,0 +1,549 @@
+===== 1. range-diff 84f5b5020ef8..e708f3cf0fd7 against 84f5b5020ef8..f10938e5c681 (as git range-diff writes it) =====
+1:  e708f3cf0 ! 1:  f10938e5c A boxed Integer's [] reads a Float, nil or Bignum index
+    @@ Commit message
+         and an object of a user class still read bit 0.
+     
+         A bare global, instance variable or class variable is read after its
+    -    index ran, so where the index assigns it, `$x[($x = v; k)]`, the bit
+    -    is read of the value assigned, and bit 0 of that can be CRuby's bit of
+    -    the value before. Such a read keeps the answer it gave
+    -    (sp_poly_index_poly_asis). It is one whose index names a write of the
+    -    variable, and one whose index is not proved to run none of the
+    -    program's code where a method, a block or a lambda writes the
+    -    variable. Proved are literals, reads and plain writes of variables, a
+    -    typed Array read by a typed Integer, and an operator with a numeric or
+    -    boolean operand, in a program with no `[]` or operator of its own. A
+    -    `[]` on a boxed value is not: it calls a Proc. Every other read is
+    -    emitted as it was.
+    +    index ran, so where the index assigns it, `$x[($x = v; k)]`, the bit is
+    +    read of the value assigned, and bit 0 of that can be CRuby's bit of the
+    +    value before. Such a read keeps the answer it gave
+    +    (sp_poly_index_poly_asis) unless its index is proved to leave the
+    +    variable as it is. Proved are number, Symbol and String literals, reads
+    +    of variables and of the program's constants, a plain write of a local
+    +    or of an instance or class variable of another name, a typed Array read
+    +    by a typed Integer in a program with no `[]` of its own, and an
+    +    operator of an Integer or a Float with a number or a boolean in a
+    +    program with no operator of its own. Not proved: a write of a global,
+    +    which another name can reach (`alias $y $x`; `$-d` is `$DEBUG`); `nil`,
+    +    `true` and `false`, which a `require` in a statement is replaced by
+    +    while its file runs ahead of the statement; and any other call. Every
+    +    other read is emitted as it was.
+     
+         Test: test/boxed_integer_index_not_integer.rb
+    +    Test: test/boxed_integer_index_global_alias.rb
+     
+         Co-Authored-By: Claude Code <noreply@anthropic.com>
+     
+    @@ src/codegen_call_recv.c: static int emit_poly_call0_arms(Compiler *c, int id, Bu
+      }
+      
+      /* Element access on a boxed receiver: an index read, []= and [] with one or two arguments (emit_poly_call's arms, in their order) */
+    -+/* Is the variable `nm` written under `id`, by any write kind? `kind` is the
+    -+   node name's head: GlobalVariable, InstanceVariable or ClassVariable. With
+    -+   `body`, only inside a method, block or lambda body: the writes a call can
+    -+   run. A global alias or a class_variable_set may name it. */
+    -+static int slot_written_under(Compiler *c, int id, const char *kind, const char *nm, int body) {
+    -+  const NodeTable *nt = c->nt;
+    -+  const char *ty = id < 0 ? NULL : nt_type(nt, id);
+    -+  if (!ty) return 0;
+    -+  if (sp_streq(ty, "DefNode") || sp_streq(ty, "BlockNode") || sp_streq(ty, "LambdaNode")) body = 0;
+    -+  if (!body && !strncmp(ty, kind, strlen(kind)) && (strstr(ty, "WriteNode") || strstr(ty, "TargetNode"))) {
+    -+    const char *wn = nt_str(nt, id, "name");
+    -+    if (!wn || sp_streq(wn, nm)) return 1;
+    -+  }
+    -+  if (sp_streq(ty, "AliasGlobalVariableNode") && kind[0] == 'G') return 1;
+    -+  if (sp_streq(ty, "CallNode") && kind[0] == 'C') {
+    -+    const char *cn = nt_str(nt, id, "name");
+    -+    if (cn && sp_streq(cn, "class_variable_set")) return 1;
+    -+  }
+    -+  for (int i = 0; i < nt_num_refs(nt, id); i++)
+    -+    if (slot_written_under(c, nt_ref_at(nt, id, i), kind, nm, body)) return 1;
+    -+  for (int i = 0; i < nt_num_arrs(nt, id); i++) {
+    -+    int n = 0;
+    -+    const int *ids = nt_arr_at(nt, id, i, &n);
+    -+    for (int j = 0; j < n; j++)
+    -+      if (slot_written_under(c, ids[j], kind, nm, body)) return 1;
+    -+  }
+    -+  return 0;
+    -+}
+     +/* Can the program have given a class a method of one of these names? A def
+     +   of the name, the compiler's own tables, or any alias, alias_method,
+     +   define_method or define_singleton_method, which may name it. Asked for
+    @@ src/codegen_call_recv.c: static int emit_poly_call0_arms(Compiler *c, int id, Bu
+     +  }
+     +  return memo[which] = may;
+     +}
+    -+/* Is this index proved to run none of the program's code? Only what is
+    -+   listed is: a literal, a read or a plain write of a variable, and two
+    -+   calls. One is a typed Array read by a typed Integer, in a program with no
+    -+   `[]` of its own. The other is an arithmetic, comparison or bit operator
+    -+   whose operand is an Integer, a Float or a boolean, in a program that
+    -+   gives no class an operator of its own: an operator reaches the program
+    -+   only through one (`3 == k` asks k's `==`, `3 < k` its coerce, and a
+    -+   reopened Float answers `f * 2`). A `[]` on a boxed value is not listed:
+    -+   it calls a Proc. Anything else is taken to run the program. */
+    -+static int index_runs_builtins_only(Compiler *c, int id) {
+    ++/* Is this index proved to leave the variable `vn` as it is: to run none of
+    ++   the program's code, and to write no variable that can be `vn`, which a
+    ++   write of kind `wk` names? Only what is listed is: a number, a Symbol or a
+    ++   String literal; a read of a variable, or of a constant the program
+    ++   defines that reads its static; a plain write of a local, or of an
+    ++   instance or class variable of another name; and two calls. One is a typed
+    ++   Array read by a typed Integer, in a program with no `[]` of its own. The
+    ++   other is an arithmetic, comparison or bit operator of an Integer or a
+    ++   Float with an Integer, a Float or a boolean, in a program that gives no
+    ++   class an operator of its own: an operator reaches the program only
+    ++   through one (`3 == k` asks k's `==`, `3 < k` its coerce, and a reopened
+    ++   Float answers `f * 2`). Not listed, so taken to write the variable: a
+    ++   write of a global, which can be the same one by another name (`alias $y
+    ++   $x`; `$-d` is `$DEBUG`); `nil`, `true` and `false`, which is what a
+    ++   `require` inside a statement is replaced by while its file runs ahead of
+    ++   the statement; a `[]` on a boxed value, which calls a Proc; and every
+    ++   other call, for a method, a block or a required file can write it. */
+    ++static int index_leaves_slot(Compiler *c, int id, NodeKind wk, const char *vn) {
+     +  static const char *const OPS[] = {
+     +    "+", "-", "*", "/", "%", "**", "<", ">", "<=", ">=", "==", "!=", "<=>", "&", "|", "^", "<<", ">>",
+     +    /* eighteen operators, then what one of them may call that is none */
+    @@ src/codegen_call_recv.c: static int emit_poly_call0_arms(Compiler *c, int id, Bu
+     +  static const char *const AREF[] = { "[]", NULL };
+     +  const NodeTable *nt = c->nt;
+     +  if (id < 0) return 1;
+    -+  switch (nt_kind(nt, id)) {
+    ++  NodeKind k = nt_kind(nt, id);
+    ++  switch (k) {
+     +    case NK_ParenthesesNode: case NK_StatementsNode: case NK_SelfNode:
+    -+    case NK_IntegerNode: case NK_FloatNode: case NK_NilNode: case NK_TrueNode: case NK_FalseNode:
+    -+    case NK_SymbolNode: case NK_StringNode:
+    ++    case NK_IntegerNode: case NK_FloatNode: case NK_SymbolNode: case NK_StringNode:
+     +    case NK_LocalVariableReadNode: case NK_InstanceVariableReadNode:
+     +    case NK_GlobalVariableReadNode: case NK_ClassVariableReadNode:
+    -+    case NK_LocalVariableWriteNode: case NK_InstanceVariableWriteNode:
+    -+    case NK_GlobalVariableWriteNode: case NK_ClassVariableWriteNode:
+    ++    case NK_LocalVariableWriteNode:
+    ++      break;
+    ++    case NK_ConstantReadNode: {
+    ++      const char *cn = nt_str(nt, id, "name");
+    ++      LocalVar *cv = cn ? comp_const(c, cn) : NULL;
+    ++      if (!cv || cv->type == TY_UNKNOWN || cv->init_guarded) return 0;
+     +      break;
+    ++    }
+    ++    case NK_InstanceVariableWriteNode: case NK_ClassVariableWriteNode: {
+    ++      const char *wn = nt_str(nt, id, "name");
+    ++      if (k == wk && (!wn || sp_streq(wn, vn))) return 0;
+    ++      break;
+    ++    }
+     +    case NK_CallNode: {
+     +      const char *nm = nt_str(nt, id, "name");
+     +      int recv = nt_ref(nt, id, "receiver"), a = nt_ref(nt, id, "arguments"), ac = 0;
+     +      const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+     +      if (!nm || recv < 0 || ac != 1 || nt_ref(nt, id, "block") >= 0) return 0;
+    -+      TyKind at = comp_ntype(c, av[0]);
+    ++      TyKind at = comp_ntype(c, av[0]), rt = comp_ntype(c, recv);
+     +      if (sp_streq(nm, "[]")) {
+    -+        if (!ty_is_array(comp_ntype(c, recv)) || at != TY_INT || program_may_define(c, AREF, 1)) return 0;
+    ++        if (!ty_is_array(rt) || at != TY_INT || program_may_define(c, AREF, 1)) return 0;
+     +        break;
+     +      }
+     +      int op = 0;
+     +      for (int i = 0; i < 18 && !op; i++) op = sp_streq(nm, OPS[i]);
+    -+      NodeKind ak = nt_kind(nt, av[0]);
+    -+      if (!op || !(ak == NK_IntegerNode || ak == NK_FloatNode || at == TY_INT || at == TY_FLOAT || at == TY_BOOL) ||
+    ++      NodeKind ak = nt_kind(nt, av[0]), rk = nt_kind(nt, recv);
+    ++      if (!op || !(rk == NK_IntegerNode || rk == NK_FloatNode || rt == TY_INT || rt == TY_FLOAT) ||
+    ++          !(ak == NK_IntegerNode || ak == NK_FloatNode || at == TY_INT || at == TY_FLOAT || at == TY_BOOL) ||
+     +          program_may_define(c, OPS, 0)) return 0;
+     +      break;
+     +    }
+    @@ src/codegen_call_recv.c: static int emit_poly_call0_arms(Compiler *c, int id, Bu
+     +    }
+     +  }
+     +  for (int i = 0; i < nt_num_refs(nt, id); i++)
+    -+    if (!index_runs_builtins_only(c, nt_ref_at(nt, id, i))) return 0;
+    ++    if (!index_leaves_slot(c, nt_ref_at(nt, id, i), wk, vn)) return 0;
+     +  for (int i = 0; i < nt_num_arrs(nt, id); i++) {
+     +    int n = 0;
+     +    const int *ids = nt_arr_at(nt, id, i, &n);
+     +    for (int j = 0; j < n; j++)
+    -+      if (!index_runs_builtins_only(c, ids[j])) return 0;
+    ++      if (!index_leaves_slot(c, ids[j], wk, vn)) return 0;
+     +  }
+     +  return 1;
+     +}
+    @@ src/codegen_call_recv.c: static int emit_poly_call0_arms(Compiler *c, int id, Bu
+     +   the index assigns that variable the read answers from the value just
+     +   assigned. An Integer there answered bit 0 for an index that is no Integer,
+     +   and that can be CRuby's bit of the value before; such a read keeps that
+    -+   answer (sp_poly_index_poly_asis). It is every read whose index names a
+    -+   write of the variable, and every one whose index is not proved to run
+    -+   none of the program's code (index_runs_builtins_only) where a body of the
+    -+   program's can write it: any, for an instance variable. A receiver already
+    -+   held in a temp was read first, and is read as any other. */
+    ++   answer (sp_poly_index_poly_asis). It is every read whose index is not
+    ++   proved to leave the variable as it is (index_leaves_slot). A receiver
+    ++   already held in a temp was read first, and is read as any other. */
+     +static int index_reads_assigned_slot(Compiler *c, int recv, int index) {
+     +  const NodeTable *nt = c->nt;
+     +  NodeKind rk = nt_kind(nt, recv);
+    @@ src/codegen_call_recv.c: static int emit_poly_call0_arms(Compiler *c, int id, Bu
+     +      rk != NK_ClassVariableReadNode) return 0;
+     +  for (int i = 0; i < g_n_argov; i++) if (g_argov_node[i] == recv) return 0;
+     +  const char *vn = nt_str(nt, recv, "name");
+    -+  if (!vn) return 0;
+    -+  const char *kind = rk == NK_GlobalVariableReadNode ? "GlobalVariable" :
+    -+                     rk == NK_InstanceVariableReadNode ? "InstanceVariable" : "ClassVariable";
+    -+  if (slot_written_under(c, index, kind, vn, 0)) return 1;
+    -+  if (index_runs_builtins_only(c, index)) return 0;
+    -+  return rk == NK_InstanceVariableReadNode || slot_written_under(c, nt->root_id, kind, vn, 1);
+    ++  if (!vn) return 1;
+    ++  return !index_leaves_slot(c, index, rk == NK_GlobalVariableReadNode ? NK_GlobalVariableWriteNode :
+    ++                                      rk == NK_InstanceVariableReadNode ? NK_InstanceVariableWriteNode :
+    ++                                                                          NK_ClassVariableWriteNode, vn);
+     +}
+      static int emit_poly_index_call(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, TyKind rt, int *out) {
+        /* poly receiver: arr[start, len] = src -- 3-arg splice assign
+    @@ src/codegen_call_recv.c: static int emit_poly_index_call(Compiler *c, int id, Bu
+              { *out = 1; return 1; }
+            }
+     
+    + ## test/boxed_integer_index_global_alias.rb (new) ##
+    +@@
+    ++# A write of a global in an index can be a write of the receiver's own
+    ++# variable under another name: after `alias $y $x`, and `$-d` is `$DEBUG`.
+    ++# A boxed Integer in that variable is read after its index ran, so it is
+    ++# read as it was: these answered CRuby's bit.
+    ++
+    ++$x = 0
+    ++alias $y $x
+    ++$new = -6
+    ++a = [5, 1.5, "s"]
+    ++$x = a[0]
+    ++p $x[($y = $new; a[1])]
+    ++p $x
+    ++def m(a)
+    ++  $x = a[0]
+    ++  p $x[($y = -6; a[1])]
+    ++  p $x
+    ++end
+    ++m(a)
+    ++$DEBUG = a[0]
+    ++p $DEBUG[($-d = $new; a[1])]
+    ++p $DEBUG
+    +
+    + ## test/boxed_integer_index_global_alias.rb.expected (new) ##
+    +@@
+    ++0
+    ++-6
+    ++0
+    ++-6
+    ++0
+    ++-6
+    +
+      ## test/boxed_integer_index_not_integer.rb (new) ##
+     @@
+     +# spinel: int64 -- assumes a 64-bit Integer (Bignum operands need it)
+    @@ test/boxed_integer_index_not_integer.rb (new)
+     +  def initialize(g) = (@g = g; @x = g["n"])
+     +  def iv = @x[(@x = @g["m"]; @g["f"])]
+     +  def cv = (@@c = @g["n"]; @@c[(@@c = @g["m"]; @g["bi"])])
+    -+  def other = (@k = @g["nf"]; @x[@k = @k + 3])
+    ++  def other = (@k = -1.5; @x[@k = @k + 3.0])
+     +end
+     +t { Holder.new(g).iv }
+     +t { Holder.new(g).cv }
+    @@ test/boxed_integer_index_not_integer.rb (new)
+     +k = Keeper.new(g)
+     +t { k.iv([->(i) { k.swap; i }, g["f"]]) }
+     +t { Keeper.cv(g, [->(i) { Keeper.swap(g); i }, g["f"]]) }
+    ++# an index that is a constant leaves the variable as it is: bit 1 of 5
+    ++KF = 1.5
+    ++$x = g["n"]
+    ++t { $x[KF] }
+     
+      ## test/boxed_integer_index_not_integer.rb.expected (new) ##
+     @@
+    @@ test/boxed_integer_index_not_integer.rb.expected (new)
+     +-6
+     +0
+     +0
+    ++0
+===== 2. the probes (the block probes-in10.txt, as written) =====
+#### a1.rb
+$x = 0
+alias $y $x
+$new = -6
+a = [5, 1.5, "s"]
+$x = a[0]
+p $x[($y = $new; a[1])]
+p $x
+
+#### a2.rb
+$x = 0
+alias $y $x
+def m(a)
+  $x = a[0]
+  p $x[($y = -6; a[1])]
+  p $x
+end
+m([5, 1.5, "s"])
+
+#### a3.rb
+$x = 0
+$new = -6
+def rd(a) = ($x = a[0]; $x[($y = $new; a[1])])
+alias $y $x
+p rd([5, 1.5, "s"])
+p $x
+
+#### a4.rb
+$x = 0
+def mk
+  alias $y $x
+end
+mk
+$new = -6
+a = [5, 1.5, "s"]
+$x = a[0]
+p $x[($y = $new; a[1])]
+p $x
+
+#### a5.rb
+$y = 0
+alias $x $y
+$new = -6
+a = [5, 1.5, "s"]
+$x = a[0]
+p $x[($y = $new; a[1])]
+p $x
+
+#### a6.rb
+$x = 0
+alias $y $x
+$new = 5
+a = [6, 1.5, "s"]
+$x = a[0]
+p $x[($y = $new; a[1])]
+p $x
+
+#### b1.rb
+$new = -6
+a = [5, 1.5, "s"]
+$DEBUG = a[0]
+p $DEBUG[($-d = $new; a[1])]
+p $DEBUG
+
+#### b2.rb
+$new = -6
+a = [5, 1.5, "s"]
+$-d = a[0]
+p $-d[($DEBUG = $new; a[1])]
+p $-d
+
+#### c1.rb
+a = [5, 1.5, ->(i) { $-d = -6; i }, "s"]
+$DEBUG = a[0]
+p $DEBUG[(a[2][0]; a[1])]
+p $DEBUG
+
+#### q1.rb
+a = [5, 1.5, "s"]
+$x = a[0]
+p $x[(require_relative "lib/w"; a[1])]
+p $x
+
+#### q2.rb
+a = [6, 1.5, "s"]
+$x = a[0]
+p $x[(require_relative "lib/w5"; a[1])]
+p $x
+
+#### q3.rb
+a = [5, 1.5, "s"]
+$x = a[0]
+p $x[(require_relative("lib/w") ? a[1] : a[1])]
+p $x
+
+#### q4.rb
+a = [5, 1.5, "s"]
+$x = a[0]
+[1].each { |i| p $x[(require_relative "lib/w"; a[i])] }
+p $x
+
+#### rq.rb
+$new = -6
+a = [5, 1.5, "s"]
+$x = a[0]
+def m = (require_relative "rq_w"; 0)
+p $x[(m; a[1])]
+p $x
+
+#### rq2.rb
+$new = -6
+a = [5, 1.5, "s"]
+$x = a[0]
+p $x[(require_relative("rq_w"); a[1])]
+p $x
+
+#### rq3.rb
+$new = -6
+h = { "n" => 5, "f" => 1.5 }
+f = h["f"]
+$x = h["n"]
+p [$x[f], require_relative("rq_w")]
+p $x
+
+#### f1_in.rb
+g = { "h" => { nil => 1 }, "n" => 5 }
+alias $y $x
+n = g["n"]
+key = g["z"]
+$x = g["h"]
+p $x[($y = n; key)]
+
+#### f2_in.rb
+g = { "h" => { nil => 1 }, "n" => 5 }
+$w = { "k" => g["h"] }
+nw = { "k" => g["n"] }
+key = g["z"]
+t = $w[($w = nw; "k")]
+p t[key]
+
+#### iv.rb
+class C
+  attr_writer :x
+  def initialize(a) = (@a = a; @x = a[0])
+  def set(v) = (@x = v; 0)
+  def r1 = @x[(instance_variable_set(:@x, -6); @a[1])]
+  def r2 = @x[(self.x = -6; @a[1])]
+  def r3 = @x[(set(-6); @a[1])]
+  def r4(o) = @x[(o.x = -6; @a[1])]
+  def r5 = @x[(@y = -6; @a[1])]
+  def r6 = @x[(@a[1])]
+end
+a = [5, 1.5, "s"]
+p C.new(a).r1
+p C.new(a).r2
+p C.new(a).r3
+c = C.new(a)
+p c.r4(c)
+p C.new(a).r5
+p C.new(a).r6
+
+#### cv.rb
+class D
+  @@x = 0
+  @@a = nil
+  def self.init(a) = (@@a = a; @@x = a[0])
+  def self.set(v) = (@@x = v; 0)
+  def self.r1 = @@x[(class_variable_set(:@@x, -6); @@a[1])]
+  def self.r2 = @@x[(set(-6); @@a[1])]
+  def self.r3 = @@x[(D.class_variable_set(:@@x, -6); @@a[1])]
+  def self.r4 = @@x[(@@y = -6; @@a[1])]
+  def self.r5 = @@x[(@@a[1])]
+  @@y = 0
+end
+a = [5, 1.5, "s"]
+D.init(a); p D.r1
+D.init(a); p D.r2
+D.init(a); p D.r3
+D.init(a); p D.r4
+D.init(a); p D.r5
+
+#### cv2.rb
+class D
+  @@x = 0
+  @@a = nil
+  def self.init(a) = (@@a = a; @@x = a[0])
+  def self.r4 = @@x[(E.poke; @@a[1])]
+end
+class E < D
+  def self.poke = (@@x = -6; 0)
+end
+a = [5, 1.5, "s"]
+D.init(a); p D.r4
+
+#### gu.rb
+h = { "n" => 5, "f" => 1.5 }
+f = h["f"]; s = +"ab"
+module M; KM = 1.5; end
+def t
+  p yield
+rescue => e
+  puts e.class
+end
+$x = h["n"]
+t { $x[(s << 65; f)] }
+t { $x[($z = 1; f)] }
+t { $x[M::KM] }
+t { $x[nil] }
+t { $x[true] }
+t { $x[(f * 2; f)] }
+t { $x[s.size - 1.5] }
+
+#### op.rb
+$new = -6
+h = { "n" => 5, "f" => 1.5 }
+f = h["f"]; n = 3
+s = +"ab"; ar = [1]
+def w = ($x = $new; 0)
+$x = h["n"]; p $x[(s << 65; f)]
+$x = h["n"]; p $x[(ar << 1; f)]
+$x = h["n"]; p $x[(s * 2; f)]
+$x = h["n"]; p $x[("%s" % n; f)]
+$x = h["n"]; p $x[(n + 1; f)]
+$x = h["n"]; p $x[(n < 2.5; f)]
+$x = h["n"]; p $x[(f * 2; f)]
+
+#### op2.rb
+class Integer
+  def to_s = ($x = $new; "7")
+end
+$new = -6
+h = { "n" => 5, "f" => 1.5 }
+f = h["f"]; n = 3
+$x = h["n"]
+p $x[("%s" % n; f)]
+p $x
+
+#### op3.rb
+class K
+  def to_s = ($x = $new; "k")
+  def inspect = ($x = $new; "k")
+end
+$new = -6
+h = { "n" => 5, "f" => 1.5 }
+f = h["f"]; ar = [K.new, 1]
+$x = h["n"]
+p $x[(ar == 1; f)]
+p $x
+$x = h["n"]
+p $x[(ar * 2; f)]
+p $x
+
+#### k_cls.rb
+class Foo; end
+g = { "n" => 5, "m" => -6, "f" => 1.5 }
+$x = g["n"]
+begin; p $x[Foo]; rescue => e; puts "#{e.class}: #{e.message}"; end
+K2 = g["f"]
+p $x[K2]
+module M; KM = 1.5; def self.r = $x[KM]; end
+p M.r
+p $x[M::KM]
+p $x[Float::EPSILON]
+
+#### lv2.rb
+a = [5, 1.5, "s"]
+x = a[0]
+l = -> { x = -6 }
+p x[(l.call; a[1])]
+p x
+
+#### lib/w.rb (required by q1, q3, q4)
+$x = -6
+
+#### lib/w5.rb (required by q2)
+$x = 5
+
+#### rq_w.rb (required by rq, rq2, rq3)
+$x = $new

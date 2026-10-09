@@ -1,0 +1,36 @@
+A boxed Integer's [] reads a Float, nil or Bignum index
+
+    g = { "n" => 5, "f" => 1.5 }
+    p g["n"][g["f"]]
+
+printed 1, bit 0 of 5, where CRuby prints 0, bit 1. sp_poly_index_poly
+reads one bit of a boxed Integer by an Integer index; an index of any
+other kind that no earlier arm takes fell to the last line, which reads
+offset 0. A Float is now cut, a Rational or a Complex with no imaginary
+part is the Integer it converts to, and nil, true or an Array is
+CRuby's TypeError. An index past a word (a Bignum, or a Float, a
+Rational or a Complex that large) reads the receiver's sign above its
+bits and 0 below; a Bignum receiver takes a Bignum so and no other
+index that large: CRuby's RangeError. A Float Range, a Class, a Module
+and an object of a user class still read bit 0.
+
+A bare global, instance variable or class variable is read after its
+index ran, so where the index assigns it, `$x[($x = v; k)]`, the bit is
+read of the value assigned, and bit 0 of that can be CRuby's bit of the
+value before. Such a read keeps the answer it gave
+(sp_poly_index_poly_asis) unless its index is proved to leave the
+variable as it is. Proved are number, Symbol and String literals, reads
+of variables and of the program's constants, a plain write of a local
+or of an instance or class variable of another name, a typed Array read
+by a typed Integer in a program with no `[]` of its own, and an
+operator of an Integer or a Float with a number or a boolean in a
+program with no operator of its own. Not proved: a write of a global,
+which another name can reach (`alias $y $x`; `$-d` is `$DEBUG`); `nil`,
+`true` and `false`, which a `require` in a statement is replaced by
+while its file runs ahead of the statement; and any other call. Every
+other read is emitted as it was.
+
+Test: test/boxed_integer_index_not_integer.rb
+Test: test/boxed_integer_index_global_alias.rb
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
