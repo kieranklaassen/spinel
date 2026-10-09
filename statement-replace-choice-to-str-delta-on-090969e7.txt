@@ -1,0 +1,259 @@
+Delta for the reader: the replace piece, fourth cut (the write that reads its own slot back).
+
+9c44a157a79f (one commit on f85f04b3abef, read NOT READY on that one point) is superseded and stays pushed. The new head is 17793d006d900719979674590adb6909054f2070, tree 01f5b363fd9d0283a5accd761d48ae1860e22643, one commit on master 090969e7759bb41aacfa0e8ca4c6240111acb6e9, the tip by my own ls-remote when it was cut. Texts: body -v3, message -v3, an OLD/NEW file for each against -v2. The title is as it was.
+
+THE CODE, against the third cut replayed on the same tip (tree ad4c88449a60, the tree of your merge):
+
+diff --git a/src/codegen_stmt.c b/src/codegen_stmt.c
+index c68ada264..5ea7be434 100644
+--- a/src/codegen_stmt.c
++++ b/src/codegen_stmt.c
+@@ -16022,12 +16022,15 @@ static char *emit_str_splice_value(Compiler *c, int recv, int v, int late, int t
+ }
+ /* Does the source the statement form of replace copies read a shared
+    String's copy below its top, where the read can be the source's value
+-   (strbuf_slot_ref says which reads are a copy)? Left out are the
++   (strbuf_slot_ref says which reads are a copy)? A write counts as one:
++   its value is its own slot read back, a copy where that slot is a
++   shared String, and no read node stands for it. Left out are the
+    children whose value is never the node's: a condition, the left of
+    `&&` (it answers only where it is nil or false), a when's conditions,
+    an in's pattern, an ensure clause, every statement of a sequence but
+-   its last, and what defined? is asked about. Every other child counts
+-   and the walk ends with the tree, so what it gets wrong costs a root. */
++   its last (a `break` before it gives a loop its value, which the loop
++   holds in a frame slot), and what defined? is asked about. Every other
++   child counts, and the walk ends with the tree. */
+ static int replace_source_reads_copy(Compiler *c, int v) {
+   const NodeTable *nt = c->nt;
+   char hs[1024];
+@@ -16036,6 +16039,8 @@ static int replace_source_reads_copy(Compiler *c, int v) {
+   if (k == NK_DefinedNode) return 0;
+   int nr = nt_num_refs(nt, v), na = nt_num_arrs(nt, v);
+   if ((nr == 0 && na == 0) || k == NK_ConstantPathNode) return strbuf_slot_ref(c, v, hs, sizeof hs);
++  HolderRef wh;
++  if (holder_kind_of(k) != HK_NONE && holder_of_node(c, v, &wh) && (wh.r.kind == RK_STRBUF || wh.r.share)) return 1;
+   int cond = nt_ref(nt, v, "predicate"), ens = nt_ref(nt, v, "ensure_clause");
+   int left = k == NK_AndNode ? nt_ref(nt, v, "left") : -1, pat = k == NK_InNode ? nt_ref(nt, v, "pattern") : -1;
+   for (int i = 0; i < nr; i++) {
+@@ -16060,7 +16065,7 @@ static int replace_source_reads_copy(Compiler *c, int v) {
+    its to_str, and so is a boxed value while a class of the program
+    defines to_str. A String is where a shared String's copy is read below
+    the top: one side of a choice (`t || K`, `c ? t : K`), the value of an
+-   assignment. */
++   assignment (`x = t`), a write of the shared String itself (`t ||= K`). */
+ static int replace_source_may_be_fresh(Compiler *c, int v) {
+   const NodeTable *nt = c->nt;
+   v = unwrap_parens(c, v);
+
+How to read it. Your cure, retyped and judged. A node that writes a variable (holder_kind_of is not HK_NONE) is asked through holder_of_node what its variable holds; where that is a shared String (RK_STRBUF, or `share` with --share-strings) the write counts as a copy read, since the statement's C reads the slot back (sp_strbuf_read_pub) and no read node stands for that. A leaf never reaches the line (the read forms are answered by strbuf_slot_ref above it). The rest of the piece is the third cut line for line.
+
+The test gains three counts, ahead of the held one: `s.replace(w ||= "x")`, `s.replace(c ? (w ||= "x") : "y")`, `s.replace(w = "abc")`, over a String two names hold. Its .expected is twelve lines of `0`. On the bare tip at SPINEL_GC_STRESS=2 it prints 300 150 100 300 300 300 150 150 300 150 300 0 with gcc and with clang, exit 0: 2,500 of 3,300.
+
+WHAT THE CURE MOVES. The bare tip | this head; a cell is gcc at SPINEL_GC_STRESS 0, 1, 2, then clang the same; "ok" is CRuby's line with exit 0; a bracket holds what was printed with exit 0 (a count of wrong rounds of 300). t two names hold, a one local holds, k true, n nil.
+  w01 `s.replace(t ||= "none")` | C differs(2) | base ok ok [300] ok ok [300] | head ok ok ok ok ok ok
+  w02 `s.replace(t += "")` | C differs(0) | base NOBUILD NOBUILD | head NOBUILD NOBUILD
+  w03 `s.replace(@t ||= "none")` | C equal | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+  w04 `s.replace(t &&= t)` | C differs(2) | base ok ok [300] ok ok [300] | head ok ok ok ok ok ok
+  w05 `s.replace(k ? (t ||= "none") : "x")` | C differs(2) | base ok ok [300] ok ok [300] | head ok ok ok ok ok ok
+  w06 `s.replace(t = "abc")` | C differs(2) | base ok ok [300] ok ok [300] | head ok ok ok ok ok ok
+  w07 `s.replace(t = a)` | C differs(2) | base ok ok [300] ok ok [300] | head ok ok ok ok ok ok
+  w08 `s.replace($g ||= "none")` | C equal | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+  w09 `s.replace(@x = t)` | C differs(2) | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+  w10 `s.replace((t ||= "none") || "x")` | C differs(2) | base ok ok [300] ok ok [300] | head ok ok ok ok ok ok
+  w11 `s.replace(a ||= "none")` | C equal | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+  w12 `s.replace(x = a)` | C equal | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+  w13 `s.replace(t += "!")` | C differs(0) | base NOBUILD NOBUILD | head NOBUILD NOBUILD
+  w14 `s.replace(false || t)` | C differs(2) | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+  w15 `s.replace(n || t)` | C differs(2) | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+  w16 `s.replace(while true; break t; end)` | C differs(2) | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+  w17 `s.replace(begin; t; rescue; "x"; end)` | C differs(2) | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+  w18 `s.replace(case i; in Integer then t; end)` | C differs(2) | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+  w19 `s.replace((t ||= "none"; a))` | C equal | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+  w20 `s.replace(t = t)` | C differs(2) | base ok ok [300] ok ok [300] | head ok ok ok ok ok ok
+With --share-strings:
+  w01 `s.replace(t ||= "none")` | C differs(2) | base ok ok [300] ok ok [300] | head ok ok ok ok ok ok
+  w02 `s.replace(t += "")` | C differs(2) | base ok ok [300] ok ok [300] | head ok ok ok ok ok ok
+  w03 `s.replace(@t ||= "none")` | C differs(2) | base ok ok [300] ok ok [300] | head ok ok ok ok ok ok
+  w04 `s.replace(t &&= t)` | C differs(2) | base ok ok [300] ok ok [300] | head ok ok ok ok ok ok
+  w05 `s.replace(k ? (t ||= "none") : "x")` | C differs(2) | base ok ok [300] ok ok [300] | head ok ok ok ok ok ok
+  w06 `s.replace(t = "abc")` | C differs(2) | base ok ok [300] ok ok [300] | head ok ok ok ok ok ok
+  w07 `s.replace(t = a)` | C differs(2) | base ok ok [300] ok ok [300] | head ok ok ok ok ok ok
+  w08 `s.replace($g ||= "none")` | C differs(2) | base ok ok [300] ok ok [300] | head ok ok ok ok ok ok
+  w09 `s.replace(@x = t)` | C differs(2) | base ok ok [300] ok ok [300] | head ok ok ok ok ok ok
+  w10 `s.replace((t ||= "none") || "x")` | C differs(2) | base ok ok [300] ok ok [300] | head ok ok ok ok ok ok
+  w11 `s.replace(a ||= "none")` | C equal | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+  w12 `s.replace(x = a)` | C equal | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+  w13 `s.replace(t += "!")` | C differs(2) | base ok ok [300] ok ok [300] | head ok ok ok ok ok ok
+  w14 `s.replace(false || t)` | C differs(2) | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+  w15 `s.replace(n || t)` | C differs(2) | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+  w16 `s.replace(while true; break t; end)` | C differs(2) | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+  w17 `s.replace(begin; t; rescue; "x"; end)` | C differs(2) | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+  w18 `s.replace(case i; in Integer then t; end)` | C differs(2) | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+  w19 `s.replace((t ||= "none"; a))` | C equal | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+  w20 `s.replace(t = t)` | C differs(2) | base ok ok [300] ok ok [300] | head ok ok ok ok ok ok
+w02 and w13 (`t += ""`, `t += "!"`) do not build without --share-strings, on the tip and here alike (a side find). w04, w07 and w20 were rooted by the third cut already (each has a read of a copy: `t = a` makes `a` a String two names hold). With --share-strings w09 (`@x = t`) is the fault too, and the third cut's walk cured it.
+
+A write below the top, in the positions of the three families:
+  w21 `s.replace(begin; t = "abc"; end)` | C differs(2) | base [300] [300] [300] [300] [300] [300] | head [300] [300] [300] [300] [300] [300]
+  w22 `s.replace(false || (t = "abc"))` | C differs(2) | base ok ok [300] ok ok [300] | head ok ok ok ok ok ok
+  w23 `s.replace(while true; break(t = "abc"); end)` | C differs(2) | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+  w24 `s.replace((t = "abc" if k))` | C differs(2) | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+  w25 `s.replace(n || (t ||= "none"))` | C differs(2) | base ok ok [300] ok ok [300] | head ok ok ok ok ok ok
+  w26 `s.replace(@x = "abc")` | C equal | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+  w27 `s.replace(k ? (t = "abc") : 5)` | C differs(2) | base ok ok [300] ok ok [300] | head ok ok ok ok ok ok
+With --share-strings:
+  w21 `s.replace(begin; t = "abc"; end)` | C differs(2) | base [300] [300] [300] [300] [300] [300] | head [300] [300] [300] [300] [300] [300]
+  w22 `s.replace(false || (t = "abc"))` | C differs(2) | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+  w23 `s.replace(while true; break(t = "abc"); end)` | C differs(2) | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+  w24 `s.replace((t = "abc" if k))` | C differs(2) | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+  w25 `s.replace(n || (t ||= "none"))` | C differs(2) | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+  w26 `s.replace(@x = "abc")` | C equal | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+  w27 `s.replace(k ? (t = "abc") : 5)` | C differs(2) | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+w22, w25 and w27 are more of the fault, cured. w23 (a loop's break) and w24 (`(t = "abc" if k)`, run ahead) were right and take the root now: the same two families with a write in place of the read, said in the body under the families and in the message. w21 (`begin; t = "abc"; end`) counts 300 wrong in every run on the tip and here: another fault of master's, not this piece's (a side find).
+
+THIS HEAD AGAINST THE THIRD CUT ON THE TIP, the generated C:
+- the corpus, 6,764 programs: differs in 0 but the three that print the path of the build's own directory;
+- the probes plain, 166 programs: equal but for f5, f6, w01, w05, w06, w10;
+- the probes with --share-strings, 106 programs: equal but for w01, w02, w03, w05, w06, w08, w10, w13;
+- of the seven above: w26 (`@x = "abc"`) equal; the other six differ, by the one root.
+So against the third cut only sources with such a write move.
+
+EVERY PROBE, the bare tip against this head: 139 programs plain and 113 with --share-strings; no cell that is right on the tip is lost, no raise becomes a wrong line; 72 and 72 programs that were wrong are right.
+
+THE FIVE TEXT POINTS
+1. The body's bullet on the second test, the message's paragraph on it and the code comment say that a write counts as a read of its own variable where that holds such a String.
+2. "Eleven sources found" is gone. The sources that pay are named as three families, by what the emitter did with the read: boxed by its handle (`k && t`, `n ||= t`, `false || t`, `n || t`, `k ? t : 5`, a loop's break value in a frame slot); run into a rooted temp ahead (the begin forms, `(t if k)`, an elsif chain, an in arm); held by the variable written (`$g = t`, `@x = t`). The two from the type line follow. The table has a row for `false || t`, `k ? t : 5`, the loop, the in arm and `@x = t`.
+3. The range is as I measure it here: 10 to 17 instructions a statement with gcc, 10 to 20 with clang, over every paying program below. A loop with a break costs 14 with both compilers in the three forms I tried (`while true; break t; end`, `until false; break t; end`, `while true; break t if k; end`); I did not reach 22 with mine, and the texts state mine.
+4. Beside the choice pair the body now has the two-locals and five-locals pairs, the dearest of the pairs measured that keep master's C, and the `s.replace(x = a)` pair, where the cure asks the write for its variable. The counts are below.
+5. The clause on a break is in the comment, the body's bullet and the message: every statement of a sequence but its last is left out; a break before the last gives a loop its value, and the loop holds that in a frame slot.
+
+THE TEST OF RECORD, seven lanes, gcc and clang; rc0 is a wrong line with exit 0:
+the bare tip: gcc:ok/ok/ok/rc0/ok/ok/ok clang:ok/ok/ok/rc0/ok/ok/ok
+this head: gcc:ok/ok/ok/ok/ok/ok/ok clang:ok/ok/ok/ok/ok/ok/ok
+this head, --share-strings: gcc:ok/ok/ok/ok/ok/ok/ok clang:ok/ok/ok/ok/ok/ok/ok
+the bare tip, --share-strings: gcc:ok/ok/ok/rc0/ok/ok/ok clang:ok/ok/ok/rc0/ok/ok/ok
+
+COMPILE TIME (callgrind, the compiler's own instructions with -c). One statement repeated 1,000 or 2,000 times: the bare tip | the third cut on the tip | this head, with this head against the tip and against the third cut:
+  dr_plain_1000.rb                            482,966,588 |    483,122,515 |    483,122,515  +0.032% on the tip, C equal; +0 on the third cut, C equal
+  dr_plain_2000.rb                            959,819,762 |    960,131,689 |    960,131,689  +0.032% on the tip, C equal; +0 on the third cut, C equal
+  dr_choice_held_1000.rb                      882,232,524 |    884,576,464 |    884,602,465  +0.269% on the tip, C equal; +26001 on the third cut, C equal
+  dr_choice_held_2000.rb                    1,763,469,043 |  1,768,156,983 |  1,768,208,984  +0.269% on the tip, C equal; +52001 on the third cut, C equal
+  dr_choice_copy_1000.rb                      885,425,101 |    893,662,586 |    893,677,587  +0.932% on the tip, C differs; +15001 on the third cut, C equal
+  dr_choice_copy_2000.rb                    1,770,028,162 |  1,786,552,550 |  1,786,582,551  +0.935% on the tip, C differs; +30001 on the third cut, C equal
+  dr_or_copy_1000.rb                          631,470,502 |    639,468,329 |    639,475,330  +1.268% on the tip, C differs; +7001 on the third cut, C equal
+  dr_or_copy_2000.rb                        1,258,117,258 |  1,274,228,010 |  1,274,242,011  +1.282% on the tip, C differs; +14001 on the third cut, C equal
+  dr_call_1000.rb                           1,076,727,076 |  1,076,727,133 |  1,076,726,988  -0.000% on the tip, C equal; -145 on the third cut, C equal
+  dr_call_2000.rb                           2,149,669,082 |  2,149,669,139 |  2,149,668,994  -0.000% on the tip, C equal; -145 on the third cut, C equal
+  d_bare_1000.rb                              809,141,614 |    809,141,529 |    809,141,541  -0.000% on the tip, C equal; +12 on the third cut, C equal
+  d_bare_2000.rb                            1,610,076,675 |  1,610,076,590 |  1,610,076,602  -0.000% on the tip, C equal; +12 on the third cut, C equal
+  string_replace_choice_to_str_root.rb         91,037,786 |     91,113,581 |     91,127,509  +0.099% on the tip, C differs; +13928 on the third cut, C differs
+  dr_two_locals_1000.rb                       898,592,407 |    901,605,342 |    901,631,343  +0.338% on the tip, C equal; +26001 on the third cut, C equal
+  dr_two_locals_2000.rb                     1,796,548,766 |  1,802,574,701 |  1,802,626,702  +0.338% on the tip, C equal; +52001 on the third cut, C equal
+  dr_five_locals_1000.rb                    1,819,676,821 |  1,827,840,747 |  1,827,893,734  +0.452% on the tip, C equal; +52987 on the third cut, C equal
+  dr_five_locals_2000.rb                    3,639,817,957 |  3,656,145,883 |  3,656,251,870  +0.452% on the tip, C equal; +105987 on the third cut, C equal
+  dr_or_held_1000.rb                          633,835,729 |    635,469,655 |    635,473,642  +0.258% on the tip, C equal; +3987 on the third cut, C equal
+  dr_or_held_2000.rb                        1,261,779,123 |  1,265,047,049 |  1,265,055,036  +0.260% on the tip, C equal; +7987 on the third cut, C equal
+  dr_or_write_copy_1000.rb                    591,006,315 |    591,655,231 |    596,723,240  +0.967% on the tip, C differs; +5068009 on the third cut, C differs
+  dr_or_write_copy_2000.rb                  1,174,840,346 |  1,176,138,262 |  1,186,348,234  +0.980% on the tip, C differs; +10209972 on the third cut, C differs
+  dr_write_held_1000.rb                    10,677,690,721 | 10,678,991,656 | 10,679,731,657  +0.019% on the tip, C equal; +740001 on the third cut, C equal
+  dr_write_held_2000.rb                    41,355,346,180 | 41,357,948,115 | 41,359,428,116  +0.010% on the tip, C equal; +1480001 on the third cut, C equal
+dr_plain is `s.replace(a)`; dr_choice_held `s.replace(c ? a : "x")`; dr_two_locals `s.replace(c ? a : b)`; dr_five_locals a case over five locals; dr_or_held `s.replace(a || "x")`; dr_write_held `s.replace(x = a)`; dr_choice_copy `s.replace(c ? t : "x")`, dr_or_copy `s.replace(t || "x")` and dr_or_write_copy `s.replace(t ||= "x")` gain the root; dr_call `s.replace(a + k)`, master's root; d_bare has no replace.
+Two runs of one compiler over one file differ by up to some 150 instructions here, so a difference of that size is none.
+The cure a statement, this head against the third cut: +26 and +26 instructions (1,000 and 2,000 statements) on the choice pair, +740 and +740 on `s.replace(x = a)`. That last program is dear on master itself (10,677,690,721 instructions for 1,000 statements: a side find).
+
+RUN TIME (callgrind, 200,000 statements; the bare tip | this head). f: the fixes. p: sources that pay. s: sources that have master's C. gcc:
+  f1_or_copy                   106,876,162 | 110,276,163 (+17 a statement)
+  f2_choice_copy               107,476,161 | 110,276,163 (+14 a statement)
+  f3_object                    100,293,716 | 103,296,386 (+15 a statement)
+  f4_assign_shared             107,879,423 | 110,679,424 (+14 a statement)
+  p1_and_shared                71,073,360 | 73,875,305 (+14 a statement)
+  p2_or_assign_shared          72,075,338 | 74,877,282 (+14 a statement)
+  p3_begin_shared              110,477,087 | 113,277,092 (+14 a statement)
+  p4_begin_ensure_shared       126,677,665 | 129,277,668 (+13 a statement)
+  p5_global_assign_shared      108,081,138 | 110,481,139 (+12 a statement)
+  p6_elsif_shared              110,477,087 | 113,277,092 (+14 a statement)
+  p7_if_no_else_shared         110,477,073 | 113,277,078 (+14 a statement)
+  p8_boxed_string              62,485,614 | 65,286,234 (+14 a statement)
+  p9_to_str_held               60,060,981 | 62,863,811 (+14 a statement)
+  pa_rescue_arm_shared         76,877,224 | 79,479,449 (+13 a statement)
+  pb_begin_else_shared         126,302,932 | 128,902,935 (+13 a statement)
+  s1_assign                    62,456,646 | 62,456,646 (+0 a statement)
+  s2_case                      62,056,127 | 62,056,127 (+0 a statement)
+  s3_and_bool                  62,061,307 | 62,061,307 (+0 a statement)
+  s4_class_variable            56,062,761 | 56,062,761 (+0 a statement)
+  s5_plain                     62,056,113 | 62,056,113 (+0 a statement)
+  s6_choice_held               62,056,127 | 62,056,127 (+0 a statement)
+  s7_begin                     65,056,758 | 65,056,758 (+0 a statement)
+  f5_or_write_shared           107,483,776 | 110,283,776 (+14 a statement)
+  f6_choice_or_write_shared    107,482,648 | 110,283,776 (+14 a statement)
+  f7_and_write_shared          107,483,758 | 110,283,764 (+14 a statement)
+  pc_ivar_assign_shared        108,087,040 | 110,488,175 (+12 a statement)
+  pd_false_or_shared           71,074,368 | 73,876,318 (+14 a statement)
+  pe_nil_or_shared             71,474,354 | 74,476,302 (+15 a statement)
+  pf_choice_boxed              71,074,368 | 73,876,318 (+14 a statement)
+  pg_in_arm_shared             110,484,756 | 113,284,756 (+14 a statement)
+  ph_begin_rescue_shared       126,285,422 | 128,885,425 (+13 a statement)
+  pi_while_break_shared        71,476,274 | 74,278,217 (+14 a statement)
+  s8_write_held                62,470,787 | 62,470,787 (+0 a statement)
+  s9_or_write_held             61,270,260 | 61,270,260 (+0 a statement)
+  f8_false_or_write_shared     174,497,429 | 176,497,433 (+10 a statement)
+  f9_choice_int_write_shared   174,497,536 | 176,497,540 (+10 a statement)
+  pn_break_write_shared        176,499,846 | 179,300,373 (+14 a statement)
+  po_if_write_shared           176,500,374 | 179,300,180 (+14 a statement)
+  pj_until_break_shared        71,476,274 | 74,278,217 (+14 a statement)
+  pk_while_cond_break_shared   74,278,217 | 74,278,217 (+0 a statement)
+  pl_while_break_if_shared     71,476,260 | 74,278,203 (+14 a statement)
+  pm_until_cond_break_shared   74,678,219 | 74,678,219 (+0 a statement)
+clang:
+  f1_or_copy                   107,074,626 | 111,074,625 (+20 a statement)
+  f2_choice_copy               107,474,626 | 110,474,625 (+15 a statement)
+  f3_object                    100,291,827 | 103,094,494 (+14 a statement)
+  f4_assign_shared             107,877,916 | 110,877,915 (+15 a statement)
+  p1_and_shared                69,851,793 | 72,653,735 (+14 a statement)
+  p2_or_assign_shared          70,653,828 | 73,455,771 (+14 a statement)
+  p3_begin_shared              111,075,562 | 113,875,563 (+14 a statement)
+  p4_begin_ensure_shared       131,078,224 | 134,278,224 (+16 a statement)
+  p5_global_assign_shared      107,878,495 | 110,679,622 (+14 a statement)
+  p6_elsif_shared              111,075,562 | 113,875,563 (+14 a statement)
+  p7_if_no_else_shared         111,075,562 | 113,875,563 (+14 a statement)
+  p8_boxed_string              61,665,314 | 64,465,921 (+14 a statement)
+  p9_to_str_held               60,441,707 | 63,244,534 (+14 a statement)
+  pa_rescue_arm_shared         78,061,560 | 81,463,780 (+17 a statement)
+  pb_begin_else_shared         126,903,529 | 129,903,529 (+15 a statement)
+  s1_assign                    62,839,628 | 62,839,628 (+0 a statement)
+  s2_case                      62,439,113 | 62,439,113 (+0 a statement)
+  s3_and_bool                  62,640,413 | 62,640,413 (+0 a statement)
+  s4_class_variable            54,842,821 | 54,842,821 (+0 a statement)
+  s5_plain                     62,439,113 | 62,439,113 (+0 a statement)
+  s6_choice_held               62,439,099 | 62,439,099 (+0 a statement)
+  s7_begin                     65,639,757 | 65,639,757 (+0 a statement)
+  f5_or_write_shared           107,878,170 | 109,878,169 (+10 a statement)
+  f6_choice_or_write_shared    107,878,184 | 109,878,183 (+10 a statement)
+  f7_and_write_shared          107,478,176 | 110,478,175 (+15 a statement)
+  pc_ivar_assign_shared        107,882,656 | 110,682,656 (+14 a statement)
+  pd_false_or_shared           69,852,845 | 72,654,789 (+14 a statement)
+  pe_nil_or_shared             71,052,858 | 73,854,802 (+14 a statement)
+  pf_choice_boxed              69,852,859 | 72,654,803 (+14 a statement)
+  pg_in_arm_shared             111,079,248 | 113,879,249 (+14 a statement)
+  ph_begin_rescue_shared       126,880,877 | 129,880,876 (+15 a statement)
+  pi_while_break_shared        70,254,762 | 73,056,703 (+14 a statement)
+  s8_write_held                62,849,777 | 62,849,777 (+0 a statement)
+  s9_or_write_held             61,849,253 | 61,849,253 (+0 a statement)
+  f8_false_or_write_shared     179,753,709 | 182,552,605 (+14 a statement)
+  f9_choice_int_write_shared   179,754,223 | 182,554,222 (+14 a statement)
+  pn_break_write_shared        181,756,849 | 184,757,235 (+15 a statement)
+  po_if_write_shared           181,757,279 | 184,756,961 (+15 a statement)
+  pj_until_break_shared        70,254,762 | 73,056,703 (+14 a statement)
+  pk_while_cond_break_shared   73,056,703 | 73,056,703 (+0 a statement)
+  pl_while_break_if_shared     70,254,762 | 73,056,703 (+14 a statement)
+  pm_until_cond_break_shared   73,056,703 | 73,056,703 (+0 a statement)
+
+OWN CHECKS on this head, built from nothing, against the bare tip 090969e7759b built from nothing
+- `ruby tools/gate.rb check`, the commit staged: exit 0;
+- corpus: 6,764 programs, the C of none changed (three print the path of the build's own directory and differ in that alone);
+- optcarrot: checksum 59662, C byte-identical;
+- `make share-strings-test`: pass; `make int-min-test`: pass;
+- master's tip by my own ls-remote at 20:21:14: 2afc69c54d7a7f0e4027f5e275ddd5956959c980 (60 commits past 090969e7759b). The move touches no function of the piece (str_mutate_reassign_arms, replace_source_reads_copy, replace_source_may_be_fresh) and none its proof reads (operand_may_allocate, strbuf_slot_ref, repr_of, unwrap_parens, any_class_defines, comp_ntype, holder_kind_of, holder_of_node); the merge into it: exit status 0, tree 1043e0beda42. So the head stands on 090969e7759b by the rule. A short round all the same, on the piece merged into 671eed2c21b0 (tree eb4aa2fac9c7; the three commits since change lib/sp_cext.c alone), beside that bare tip, both built from nothing: the test of record ok in its 28 lanes (the bare tip rc0 at level 2 in each of its four rows); 113 probe programs plain and 113 with --share-strings, no cell that is right on the tip lost, no raise made a wrong line, 66 and 70 wrong programs right.
+
+RECORDED, NOT TAKEN (side finds): `s.replace(t += "!")` over a String two names hold does not build without --share-strings; `s.replace(begin; t = "abc"; end)` over one gives a wrong String in every run; the compiler spends 10,677,690,721 instructions on 1,000 lines of `s.replace(x = a)` in one method and about four times that on 2,000; and the earlier ones (self in a String method with a fresh receiver; `s.replace(self)` there leaves the caller's s unchanged when s is not returned; a class variable or constant two names hold as the source without --share-strings; a global two names hold refused without --share-strings; master's other callers of operand_may_allocate ask the same top-node question; a boxed value object's to_str is not dispatched; an object as the source of a receiver two names hold does not build).

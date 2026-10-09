@@ -1,0 +1,57 @@
+A shared String's copy in a choice and a to_str's String are rooted while replace copies them
+
+The statement form of replace copies its source into a new String
+(str_mutate_reassign_arms): the source goes into a C temp and
+sp_str_from_bytes allocates the copy. The temp is rooted where
+operand_may_allocate says the source may make a String: a call, an
+interpolation, a String two names hold, which is read as a copy.
+
+Two kinds of source make a String with no call written in them, and
+that test does not see them. A String two names hold is read as a
+copy below the top of the source too, as one side of a choice
+(`s.replace(t || "none")`, `c ? t : "none"`, a case), the value of
+an assignment (`x = t`), or a write to that String itself
+(`t ||= "none"`, `t = "abc"`), whose value is the String read back:
+the test asks about a read that is the whole source, not about one
+inside it. And an object as the source is read through its to_str
+(`s.replace(o)`): alone, out of an instance variable, boxed beside
+a String, or as one side of a choice. Nothing held either String
+while the copy was allocated.
+
+Under SPINEL_GC_STRESS=2 the receiver came out as poison bytes, with
+exit 0. With 8,000-byte Strings a plain run was wrong too: a source
+with `def to_str = @s + "!"` in 4 of 300 rounds, `t || "none"`
+in 1.
+
+Where the first test says no, a second now asks whether the source
+may be such a String (replace_source_may_be_fresh), and the temp is
+rooted where it may: a source that is no String (an object; a boxed
+value while a class of the program defines to_str), and a String
+source with a read below its top that strbuf_slot_ref calls a copy.
+A write counts as a read of its own variable where that holds such
+a String (holder_of_node says so), no read node standing for it.
+Reads whose value is never the source's are left out: a condition,
+the left of `&&`, a when's conditions, an in's pattern, an ensure
+clause, every statement of a sequence but its last (a `break`
+before the last gives a loop its value, and the loop holds that in
+a frame slot), what defined? is asked about. For every other
+source, and for every source the first test roots, the generated C
+is as it was.
+
+Sources of three families take the root and were right, because the
+tree does not show what the emitter did with the read. The String
+is boxed by its handle and not copied: `k && t` with a boolean k,
+`n ||= t`, `false || t`, `k ? t : 5`, a loop that hands it out by
+`break`. The source is run into a rooted temp ahead of the
+statement: a begin block, alone or with a rescue or an else arm, an
+if with no else, an elsif chain, an in arm. The variable written
+holds the copy: `$g = t`, `@x = t`. A write to t in place of the
+read pays the same in a loop's `break` and in the forms run ahead.
+So do a boxed String where a class defines to_str, and an object
+whose to_str answers a String it holds. The root is 10 to 17
+instructions a statement with gcc and 10 to 20 with clang.
+
+No program under test/, benchmark/ or packages/*/test/ has such a
+statement: their generated C is unchanged, and optcarrot's.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

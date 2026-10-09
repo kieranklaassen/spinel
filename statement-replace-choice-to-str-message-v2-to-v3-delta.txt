@@ -1,0 +1,69 @@
+The replace piece's commit message, -v2 to -v3: every changed passage, OLD then NEW
+
+OLD:
+(`s.replace(t || "none")`, `c ? t : "none"`, a case) or the value of
+an assignment (`x = t`): the test asks about a read that is the whole
+source, not about one inside it. And an object as the source is read
+through its to_str (`s.replace(o)`): alone, out of an instance
+variable, boxed beside a String, or as one side of a choice. Nothing
+held either String while the copy was allocated.
+
+NEW:
+(`s.replace(t || "none")`, `c ? t : "none"`, a case), the value of
+an assignment (`x = t`), or a write to that String itself
+(`t ||= "none"`, `t = "abc"`), whose value is the String read back:
+the test asks about a read that is the whole source, not about one
+inside it. And an object as the source is read through its to_str
+(`s.replace(o)`): alone, out of an instance variable, boxed beside
+a String, or as one side of a choice. Nothing held either String
+while the copy was allocated.
+
+----
+
+OLD:
+(nothing: the passage is new)
+
+NEW:
+A write counts as a read of its own variable where that holds such
+a String (holder_of_node says so), no read node standing for it.
+
+----
+
+OLD:
+clause, every statement of a sequence but its last, what defined?
+is asked about. For every other source, and for every source the
+first test roots, the generated C is as it was.
+
+NEW:
+clause, every statement of a sequence but its last (a `break`
+before the last gives a loop its value, and the loop holds that in
+a frame slot), what defined? is asked about. For every other
+source, and for every source the first test roots, the generated C
+is as it was.
+
+----
+
+OLD:
+Eleven sources found take the root and were right, because the tree
+does not show what the emitter did with the read: `k && t` with a
+boolean k and `n ||= t`, where the String is boxed by its handle and
+not copied; a begin block, alone or with a rescue or an else arm,
+an if with no else and an elsif chain, each run into a rooted temp
+ahead of the statement; `$g = t`, where the global holds the copy;
+a boxed String where a class defines to_str; and an object whose
+to_str answers a String it holds. The root is 12 to 17
+instructions a statement with gcc and 14 to 20 with clang.
+
+NEW:
+Sources of three families take the root and were right, because the
+tree does not show what the emitter did with the read. The String
+is boxed by its handle and not copied: `k && t` with a boolean k,
+`n ||= t`, `false || t`, `k ? t : 5`, a loop that hands it out by
+`break`. The source is run into a rooted temp ahead of the
+statement: a begin block, alone or with a rescue or an else arm, an
+if with no else, an elsif chain, an in arm. The variable written
+holds the copy: `$g = t`, `@x = t`. A write to t in place of the
+read pays the same in a loop's `break` and in the forms run ahead.
+So do a boxed String where a class defines to_str, and an object
+whose to_str answers a String it holds. The root is 10 to 17
+instructions a statement with gcc and 10 to 20 with clang.
