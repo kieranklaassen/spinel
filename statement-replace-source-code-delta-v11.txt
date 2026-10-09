@@ -1,0 +1,40 @@
+Code delta of the statement-replace piece: 704565c9343f on 84f5b5020ef8 (row 263) replayed as 277ac1eda5bb on master 5518e5934b3a
+
+git range-diff 84f5b5020ef8..704565c9343f 5518e5934b3a..277ac1eda5bb, whole:
+
+1:  704565c93 ! 1:  277ac1eda A String made in place is kept alive while replace copies it
+    @@ Commit message
+     
+         Co-Authored-By: Claude Code <noreply@anthropic.com>
+     
+    - ## Makefile ##
+    -@@ Makefile: GC_STRESS_TESTS := test/gc_root_frame_slots.rb \
+    -                    test/string_range_walk_answer.rb \
+    -                    test/struct_values_fresh_receiver_root.rb \
+    -                    test/hash_splat_to_a.rb \
+    -+                   test/string_replace_fresh_source_root.rb \
+    -                    test/proc_cell_capture_marked.rb \
+    -                    test/poly_array_intersect.rb \
+    -                    test/exception_class_raised_again.rb \
+    -
+      ## src/codegen_call.c ##
+     @@ src/codegen_call.c: int subtree_is_pure_read(Compiler *c, int id) {
+      
+    @@ test/string_replace_fresh_source_root.rb (new)
+     +# holds is read where it stands. Each round replaces through a local, a
+     +# global and an instance variable and counts the ones that came out as
+     +# another String.
+    ++# spinel: gc-stress
+     +class Box
+     +  attr_reader :s
+     +  def initialize
+
+The Makefile's GC_STRESS_TESTS list is gone on master ("Tests register their extra runs in their own headers"); the test now carries the line `# spinel: gc-stress` at the end of its header comment, as CONTRIBUTING.md asks ("no Makefile edit"). No line of src/ or lib/ differs between the two patches; the commit message is the same file (-v6).
+
+git diff --stat 5518e5934b3a 277ac1eda5bb:
+ src/codegen_call.c                                |  2 +-
+ src/codegen_internal.h                            |  2 +
+ src/codegen_stmt.c                                | 92 +++++++++++++++++++++++
+ test/string_replace_fresh_source_root.rb          | 84 +++++++++++++++++++++
+ test/string_replace_fresh_source_root.rb.expected |  3 +
+ 5 files changed, 182 insertions(+), 1 deletion(-)
