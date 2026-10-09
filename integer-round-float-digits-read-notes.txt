@@ -1,0 +1,415 @@
+Read notes for the round piece (row 270): 0acee590784d6cda4f18d907a3067ec536020b12, tree 574142e19f30aa614ee7f4649551da091e138483, one commit on master b791081037be4543d6eb124724fcc7615d0d65e3. A new piece: title, commit message and body are new files beside this one. "Depends on: none".
+
+WHY IT EXISTS
+
+`make gate` on darwin-arm64 fails on master 7232a8021 (the Mac's run, not mine; I have no arm64 machine) in ruby/spec's core/integer, round_spec__004: `42.round(Float::INFINITY)`, `42.round(-Float::INFINITY)` and `42.round(Float::NAN)` print 42 there, where CRuby raises RangeError "float Inf out of range of integer", "float -Inf ...", "float NaN ...". The cause is one cast. emit_int_expr writes a typed Float in an Integer slot as `(sp_int)(X)` (src/codegen.c, the Float arm of emit_int_expr_ex), and C leaves that cast undefined for an infinity, a NaN and a Float past the word. x86-64's instruction gives the smallest Integer; arm64's saturates and gives 0 for a NaN; a compiler that folds the cast of a constant gives anything (clang 18 on x86-64 prints 42 for the three lines, here, on the bare tip this head is cut on).
+
+WHAT IS TAKEN: the digit count of round, floor, ceil and truncate, at every site where it is read through that cast and CRuby reads it by NUM2INT. Nine sites:
+
+  A1  Integer receiver, one argument (int_arms_round_divide): `sp_int_NAME(r, COUNT)`, all four names.
+  A2  Integer receiver, a count and `half:` (the same function): round only.
+  B1  Bignum receiver, truncate (emit_call_bigint_arms).
+  B2  Bignum receiver, round, ceil, floor (the same function).
+  C1  Float receiver, round with a `half:` read at run time (emit_scalar_recv_arms).
+  C2  Float receiver, a count that is not an Integer literal, all four names (the same function; a literal `half:` mode ends here too).
+  E1  a receiver in a boxed slot, round with `half:` (emit_poly_numeric_call).
+  E2  a receiver in a boxed slot, one argument, all four names (the same function).
+  F   a receiver in a boxed slot where a class of the program defines the method (emit_poly_defaults_n, src/codegen_poly_plan.c): its own `(sp_int)_tN` of a count hoisted as a Float.
+
+WHAT IS NOT, each for its reason (all recorded as side finds, none taken):
+  - emit_int_expr itself. The cast serves every Integer slot a typed Float reaches (an index, a repeat count, a width). CRuby raises the same RangeError in most of them, but that is every program with a Float in an Integer slot, and its cost. This piece changes no C outside a digit count.
+  - floor, ceil, truncate with `half:` and a count (Integer, Float and boxed receivers): CRuby raises the arity's ArgumentError before it reads the count; the count is bound, cast and never used. Master's C stays (the binder is called with fdig 0).
+  - Rational#round and kin (the Rational arms of src/codegen_call_numeric.c): a Float count is CRuby's TypeError "not an integer" whatever its value. Another cause: the count's class is not checked.
+  - a count held in a boxed slot: sp_poly_arg_int_chk in the runtime; an infinity raises there with other words ("float out of Integer range (Bignum promotion pending)"), a NaN is cast (sp_float_fit_i's comparison is false for a NaN).
+  - a count past a C int with floor, ceil, truncate and with a Float receiver: no check of the int range (`1234.floor(1e10)` answers 1234, `1234.floor(2 ** 40)` 1234, `1234.5.round(1e10)` 1234.5; CRuby raises "integer 10000000000 too big to convert to 'int'"). Whatever the count's class.
+
+THE WHOLE SOURCE CHANGE
+
+    diff --git a/lib/spinel_rt.h b/lib/spinel_rt.h
+    index 85261ec26..79dfcbd74 100644
+    --- a/lib/spinel_rt.h
+    +++ b/lib/spinel_rt.h
+    @@ -4642,6 +4642,19 @@ static inline sp_int sp_float_fit_i(sp_float v) {
+         sp_raise_cls("RangeError", "float out of Integer range (Bignum promotion pending)");
+       return (sp_int)v;
+     }
+    +/* A Float digit count of round, floor, ceil and truncate, read as CRuby's
+    +   NUM2LONG reads one: its integer part, and CRuby's RangeError for an
+    +   infinity, a NaN and a Float past the word. A C cast has no defined answer
+    +   for those: x86-64 gives the smallest Integer, arm64 the nearest end of the
+    +   word and 0 for a NaN, and a compiler that folds the cast gives anything. */
+    +static SP_UNUSED SP_NORETURN SP_COLD void sp_float_ndigits_range(sp_float d) {
+    +  if (isfinite(d)) sp_raise_cls("RangeError", sp_sprintf("float %.10g out of range of integer", d));
+    +  sp_raise_cls("RangeError", sp_sprintf("float %s out of range of integer", isnan(d) ? "NaN" : d > 0 ? "Inf" : "-Inf"));
+    +}
+    +static inline sp_int sp_float_to_ndigits(sp_float d) {
+    +  if (SP_UNLIKELY(!(d >= (sp_float)INTPTR_MIN && d < -(sp_float)INTPTR_MIN))) sp_float_ndigits_range(d);
+    +  return (sp_int)d;
+    +}
+     /* sp_float_div_v's quotient in an sp_int slot (a typed call in the raise and
+        wrap modes): one past the word is sp_float_fit_i's RangeError. The NaN a
+        NaN divisor makes was cast to sp_int, which is undefined: 2.5.div(NaN)
+    diff --git a/src/codegen.c b/src/codegen.c
+    index 1184785a2..1132a0aba 100644
+    --- a/src/codegen.c
+    +++ b/src/codegen.c
+    @@ -897,6 +897,47 @@ void emit_int_expr_offt(Compiler *c, int node, Buf *b) {
+       emit_int_expr_ex(c, node, 3, b);
+     }
+     
+    +/* Is `node`, as the digit count of round, floor, ceil or truncate, a Float
+    +   that emit_int_expr casts to the word, `(sp_int)(X)`? That cast is undefined
+    +   in C for an infinity, a NaN and a Float past the word: x86-64 answers the
+    +   smallest Integer, arm64 the nearest end of the word and 0 for a NaN. Such
+    +   a count is handed to sp_float_to_ndigits instead, which reads it as CRuby's
+    +   NUM2LONG does. A literal a 32-bit word holds is cast rightly, and anything
+    +   emit_int_expr writes another way (a splat, a boxed value, a Bignum) is not
+    +   a cast: those stay its text. */
+    +int float_ndigits(Compiler *c, int node) {
+    +  if (comp_ntype(c, node) != TY_FLOAT) return 0;
+    +  const char *nty = nt_type(c->nt, node);
+    +  if (nty && sp_streq(nty, "FloatNode")) {
+    +    const char *v = nt_content(c->nt, node);
+    +    char *end = NULL;
+    +    double d = v ? strtod(v, &end) : 0.0;
+    +    if (v && end != v && !*end && d > -2.0e9 && d < 2.0e9) return 0;
+    +  }
+    +  return !(nty && sp_streq(nty, "SplatNode")) && yield_site_type(c, node) != TY_POLY && !repr_of(c, node).big;
+    +}
+    +
+    +/* The digit count where it is converted as it is read: emit_int_expr's text,
+    +   or the checked conversion of a Float count (`fdig`, float_ndigits' answer). */
+    +void emit_ndigits(Compiler *c, int node, int fdig, Buf *b) {
+    +  if (!fdig) { emit_int_expr(c, node, b); return; }
+    +  buf_puts(b, "sp_float_to_ndigits("); emit_scalar_operand(c, node, "0", b); buf_puts(b, ")");
+    +}
+    +
+    +/* The digit count bound to _t<t> ahead of operands that run after it. A Float
+    +   count is bound as the Float it is and converted where it is used
+    +   (emit_ndigits_use), so its RangeError comes after those operands have run,
+    +   as CRuby's does. */
+    +void emit_ndigits_bind(Compiler *c, int node, int fdig, int t, Buf *b) {
+    +  buf_printf(b, "%s _t%d = ", fdig ? "sp_float" : "sp_int", t);
+    +  if (fdig) emit_scalar_operand(c, node, "0", b); else emit_int_expr(c, node, b);
+    +  buf_puts(b, "; ");
+    +}
+    +
+    +void emit_ndigits_use(int fdig, int t, Buf *b) {
+    +  buf_printf(b, fdig ? "sp_float_to_ndigits(_t%d)" : "_t%d", t);
+    +}
+    +
+     /* Emit a node as an sp_float. A poly value is unboxed via sp_poly_to_f; a
+        numeric value is plain-cast, matching the legacy `(sp_float)(...)`. The
+        slot follows CRuby's rb_to_float, which converts only a Numeric: a String,
+    diff --git a/src/codegen_call_numeric.c b/src/codegen_call_numeric.c
+    index eebd36fc4..a898db572 100644
+    --- a/src/codegen_call_numeric.c
+    +++ b/src/codegen_call_numeric.c
+    @@ -227,14 +227,14 @@ int emit_call_bigint_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
+           int tt = ++g_tmp;
+           buf_printf(b, "({ sp_Bigint *_t%d = %s; SP_GC_ROOT(_t%d); sp_bigint_round_prec(_t%d, ({ sp_int _rnd = ",
+                      tt, r, tt, tt);
+    -      emit_int_expr(c, argv[0], b);
+    +      emit_ndigits(c, argv[0], float_ndigits(c, argv[0]), b);
+           buf_printf(b, "; sp_int_round_check_ndigits(_rnd); _rnd; }), sp_bigint_sign(_t%d) < 0 ? 2 : 1); })", tt);
+           free(rs.p); return 1;
+         }
+         if ((sp_streq(name, "round") || sp_streq(name, "ceil") || sp_streq(name, "floor")) && argc == 1) {
+           int mode = sp_streq(name, "floor") ? 1 : sp_streq(name, "ceil") ? 2 : 0;
+           /* a precision past a C int is a RangeError, as on a Fixnum (#6702) */
+    -      buf_printf(b, "sp_bigint_round_prec(%s, ({ sp_int _rnd = ", r); emit_int_expr(c, argv[0], b);
+    +      buf_printf(b, "sp_bigint_round_prec(%s, ({ sp_int _rnd = ", r); emit_ndigits(c, argv[0], float_ndigits(c, argv[0]), b);
+           buf_printf(b, "; sp_int_round_check_ndigits(_rnd); _rnd; }), %d)", mode); free(rs.p); return 1;
+         }
+         if (sp_streq(name, "to_s") && argc == 1) {
+    diff --git a/src/codegen_call_recv.c b/src/codegen_call_recv.c
+    index 7f19a18b9..95c23d082 100644
+    --- a/src/codegen_call_recv.c
+    +++ b/src/codegen_call_recv.c
+    @@ -7944,7 +7944,10 @@ static int int_arms_round_divide(Compiler *c, int id, Buf *b, const NodeTable *n
+         buf_printf(b, "({ sp_int _t%d = (%s); ", tr, r);
+         if (argc == 2) {
+           int tn = ++g_tmp;
+    -      buf_printf(b, "sp_int _t%d = ", tn); emit_int_expr(c, argv[0], b); buf_puts(b, "; ");
+    +      /* a Float count that round converts raises at the call, after the
+    +         keywords' values have run */
+    +      int fdig = sp_streq(name, "round") && float_ndigits(c, argv[0]);
+    +      emit_ndigits_bind(c, argv[0], fdig, tn, b);
+           if (!sp_streq(name, "round")) {
+             /* the hash is built before the call rejects it */
+             emit_round_kw_effects(c, &kw, b);
+    @@ -7954,7 +7957,7 @@ static int int_arms_round_divide(Compiler *c, int id, Buf *b, const NodeTable *n
+           }
+           else {
+             int tm = emit_round_kw_binds(c, &kw, b);
+    -        buf_printf(b, "sp_int_round_half_v(_t%d, _t%d, ", tr, tn);
+    +        buf_printf(b, "sp_int_round_half_v(_t%d, ", tr); emit_ndigits_use(fdig, tn, b); buf_puts(b, ", ");
+             if (tm >= 0) buf_printf(b, "_t%d", tm); else buf_puts(b, "sp_box_nil()");
+             buf_puts(b, "); })");
+           }
+    @@ -7974,6 +7977,12 @@ static int int_arms_round_divide(Compiler *c, int id, Buf *b, const NodeTable *n
+           buf_printf(b, "_t%d; })", tr);
+         }
+       }
+    +  else if (is_round_family(name) && argc == 1 && float_ndigits(c, argv[0])) {
+    +    /* a Float count may raise as it is converted: the receiver is read first */
+    +    int tr = ++g_tmp;
+    +    buf_printf(b, "({ sp_int _t%d = (%s); sp_int_%s(_t%d, ", tr, r, name, tr);
+    +    emit_ndigits(c, argv[0], 1, b); buf_puts(b, "); })");
+    +  }
+       else if (is_round_family(name) && argc == 1) {
+         buf_printf(b, "sp_int_%s(%s, ", name, r); emit_int_expr(c, argv[0], b); buf_puts(b, ")");
+       }
+    @@ -8466,10 +8475,12 @@ static int emit_scalar_recv_arms(Compiler *c, int id, Buf *b, const NodeTable *n
+              value before the call decides anything, so they are bound in that
+              order and only then read. */
+           int tv = ++g_tmp, tn = -1;
+    +      /* a Float count raises at the call, after the keywords' values have run */
+    +      int fdig = eff_argc == 1 && float_ndigits(c, argv[0]);
+           buf_printf(b, "({ double _t%d = (%s); ", tv, r);
+           if (eff_argc == 1) {
+             tn = ++g_tmp;
+    -        buf_printf(b, "sp_int _t%d = ", tn); emit_int_expr(c, argv[0], b); buf_puts(b, "; ");
+    +        emit_ndigits_bind(c, argv[0], fdig, tn, b);
+           }
+           int tm = emit_round_kw_binds(c, &kw, b);
+           int pv_wide = g_promote_mode && (eff_argc == 0 ||
+    @@ -8494,7 +8505,7 @@ static int emit_scalar_recv_arms(Compiler *c, int id, Buf *b, const NodeTable *n
+           buf_printf(b, "%s(_t%d", fn, tv);
+           if (!pv_wide) {
+             buf_puts(b, ", ");
+    -        if (tn >= 0) buf_printf(b, "_t%d", tn); else buf_puts(b, "0");
+    +        if (tn >= 0) emit_ndigits_use(fdig, tn, b); else buf_puts(b, "0");
+           }
+           if (tm >= 0) buf_printf(b, ", _t%d); })", tm);
+           else buf_puts(b, ", sp_box_nil()); })");
+    @@ -8532,8 +8543,15 @@ static int emit_scalar_recv_arms(Compiler *c, int id, Buf *b, const NodeTable *n
+             /* The class depends on the runtime ndigits: Float when n > 0, Integer
+                when n <= 0 (CRuby). Choose at runtime and return a boxed poly. */
+             int tn = ++g_tmp, tv = ++g_tmp;
+    -        buf_printf(b, "({ sp_int _t%d = ", tn); emit_int_expr(c, argv[0], b);
+    -        buf_printf(b, "; double _t%d = (%s); (_t%d > 0)", tv, r, tn);
+    +        /* a Float count is converted once the receiver has been read */
+    +        int fdig = float_ndigits(c, argv[0]);
+    +        buf_puts(b, "({ "); emit_ndigits_bind(c, argv[0], fdig, tn, b);
+    +        buf_printf(b, "double _t%d = (%s); ", tv, r);
+    +        if (fdig) {
+    +          int tf = tn; tn = ++g_tmp;
+    +          buf_printf(b, "sp_int _t%d = sp_float_to_ndigits(_t%d); ", tn, tf);
+    +        }
+    +        buf_printf(b, "(_t%d > 0)", tn);
+             buf_printf(b, " ? sp_box_float(sp_float_prec_op(_t%d, _t%d, %s))", tv, tn, precop);
+             buf_printf(b, " : ({ if (isinf(_t%d)) sp_raise_cls(\"FloatDomainError\", _t%d > 0 ? \"Infinity\" : \"-Infinity\");"
+                           " if (isnan(_t%d)) sp_raise_cls(\"FloatDomainError\", \"NaN\");"
+    @@ -14205,11 +14223,12 @@ static int emit_poly_numeric_call(Compiler *c, int id, Buf *b, const NodeTable *
+           int tv = ++g_tmp;
+           buf_puts(b, "({ "); tv = hold_operand(c, recv, TY_POLY, 0, tv, 1, " ", b);
+           int tn = -1;
+    +      /* a Float count that round converts raises at the call, after the
+    +         keywords' values have run */
+    +      int fdig = argc == 2 && sp_streq(name, "round") && float_ndigits(c, argv[0]);
+           if (argc == 2) {
+             tn = ++g_tmp;
+    -        buf_printf(b, "sp_int _t%d = ", tn);
+    -        emit_int_expr(c, argv[0], b);
+    -        buf_puts(b, "; ");
+    +        emit_ndigits_bind(c, argv[0], fdig, tn, b);
+           }
+           /* only #round takes a tie-break mode; the other three reject a keyword
+              outright, with CRuby's words (the typed arm does the same, #3646).
+    @@ -14239,7 +14258,7 @@ static int emit_poly_numeric_call(Compiler *c, int id, Buf *b, const NodeTable *
+              Symbol, a String, nil for the default -- deciding which is the
+              helper's job, since only it knows whether the receiver cares */
+           buf_printf(b, "sp_poly_round_half(_t%d, ", tv);
+    -      if (tn >= 0) buf_printf(b, "_t%d", tn); else buf_puts(b, "0");
+    +      if (tn >= 0) emit_ndigits_use(fdig, tn, b); else buf_puts(b, "0");
+           if (thalf >= 0) buf_printf(b, ", _t%d); })", thalf);
+           else buf_puts(b, ", sp_box_nil()); })");
+           { *out = 1; return 1; }
+    @@ -14251,13 +14270,17 @@ static int emit_poly_numeric_call(Compiler *c, int id, Buf *b, const NodeTable *
+         if (!poly_name_user_claimed(c, name, argc)) {
+           /* ceil / floor / truncate with a precision had no arm at all and
+              raised NoMethodError on a Float (#4532) */
+    +      /* a Float count may raise as it is converted: the receiver is held first */
+    +      int fdig = float_ndigits(c, argv[0]), tv = -1;
+    +      if (fdig) { tv = ++g_tmp; buf_puts(b, "({ "); tv = hold_operand(c, recv, TY_POLY, 0, tv, 1, " ", b); }
+           if (sp_streq(name, "round")) buf_puts(b, "sp_poly_round_n(");
+           else buf_puts(b, "sp_poly_prec_n(");
+    -      emit_expr(c, recv, b); buf_puts(b, ", ");
+    -      emit_int_expr(c, argv[0], b);
+    +      if (fdig) buf_printf(b, "_t%d", tv); else emit_expr(c, recv, b);
+    +      buf_puts(b, ", ");
+    +      emit_ndigits(c, argv[0], fdig, b);
+           if (!sp_streq(name, "round"))
+             buf_printf(b, ", %s", name[0] == 'c' ? "SP_PREC_CEIL" : name[0] == 'f' ? "SP_PREC_FLOOR" : "SP_PREC_TRUNC");
+    -      buf_puts(b, ")");
+    +      buf_puts(b, fdig ? "); })" : ")");
+           { *out = 1; return 1; }
+         }
+       }
+    diff --git a/src/codegen_internal.h b/src/codegen_internal.h
+    index 76085d3ad..bbb375106 100644
+    --- a/src/codegen_internal.h
+    +++ b/src/codegen_internal.h
+    @@ -2077,6 +2077,12 @@ void emit_str_expr_sep(Compiler *c, int node, Buf *b);
+     /* strict with CRuby's rb_convert_type wording ("of nil into Integer") */
+     void emit_int_expr_conv(Compiler *c, int node, Buf *b);
+     void emit_int_expr_offt(Compiler *c, int node, Buf *b);
+    +/* The digit count of round, floor, ceil and truncate: a Float count is
+    +   converted by sp_float_to_ndigits (see float_ndigits in codegen.c). */
+    +int float_ndigits(Compiler *c, int node);
+    +void emit_ndigits(Compiler *c, int node, int fdig, Buf *b);
+    +void emit_ndigits_bind(Compiler *c, int node, int fdig, int t, Buf *b);
+    +void emit_ndigits_use(int fdig, int t, Buf *b);
+     int emit_unresolved_coerced(Compiler *c, int node, TyKind target, Buf *b);
+     int emit_unresolved_coerced_text(Compiler *c, int node, TyKind target, const char *txt, Buf *b);
+     int call_answers_no_value(Compiler *c, int node);
+    diff --git a/src/codegen_poly_plan.c b/src/codegen_poly_plan.c
+    index 9c04aad57..65768de67 100644
+    --- a/src/codegen_poly_plan.c
+    +++ b/src/codegen_poly_plan.c
+    @@ -4052,6 +4052,9 @@ void emit_poly_defaults_n(Compiler *c, int id, int recv, const char *name, const
+           if (g_plan_check) pa_observe(PA_BUILTIN, PA_KEY_BUILTIN + PB_ND_ROUND, -1, TY_UNKNOWN, PC_SAME);
+           char nd9[64];
+           if (atmp_ty[0] == TY_POLY) snprintf(nd9, sizeof nd9, "sp_poly_arg_int_chk(_t%d)", atmp[0]);
+    +      /* a Float count, held as the Float it is */
+    +      else if (atmp_ty[0] == TY_FLOAT && float_ndigits(c, argv[0]))
+    +        snprintf(nd9, sizeof nd9, "sp_float_to_ndigits(_t%d)", atmp[0]);
+           else snprintf(nd9, sizeof nd9, "(sp_int)_t%d", atmp[0]);
+           Buf nv9; memset(&nv9, 0, sizeof nv9);
+           if (sp_streq(name, "round")) buf_printf(&nv9, "sp_poly_round_n(_t%d, %s)", tv, nd9);
+
+HOW TO READ IT
+
+1. float_ndigits (src/codegen.c) is the one question: would emit_int_expr write this count as the cast? It is emit_int_expr_ex's own path to its Float arm: the count is typed Float, is no splat, is not a boxed yield value, is not widened to a Bignum. Anything else is "no" and the site emits master's text. A FloatNode whose value a 32-bit word holds is "no" too: master's cast of that constant is defined and right, so its C stays. The type is asked first, so a count that is no Float costs one comp_ntype.
+2. sp_float_to_ndigits (lib/spinel_rt.h, beside sp_float_fit_i) is `static inline`: the range test and the cast. In range it is the cast master made, so every answer master got from a Float inside the word is the same answer. Out of range it calls the cold sp_float_ndigits_range, which raises with CRuby's words: "float %.10g out of range of integer" for a finite Float (CRuby's own format), "Inf", "-Inf", "NaN" for the others. The test is written so a NaN fails it. (double)INTPTR_MIN is exact at either width.
+3. Where the count is converted. CRuby converts it inside the method, after the receiver and every argument have run. So:
+   - A1, E2: master's raise (round's check of the count) was inside the callee, after both C arguments. The conversion is now an argument, and C does not order arguments: the receiver is read into a temp first (E2: hold_operand, rooted as E1's is). Only for a Float count; any other count has master's text.
+   - A2, C1, E1: the count is bound ahead of the keywords' values. A Float count is bound as the Float it is (emit_ndigits_bind) and converted in the call's argument (emit_ndigits_use), after the keyword binds.
+   - C2: master binds the count, then reads the receiver. A Float count is bound as a Float, the receiver read, then the count converted into the temp the rest of the arm uses.
+   - B1, B2: master's own check of the count already stands in the argument (`({ sp_int _rnd = COUNT; sp_int_round_check_ndigits(_rnd); _rnd; })`); the conversion stands in the same place. So with gcc a Bignum receiver that prints is still run after the count has raised, as on master for a count past a C int (probe a8, b1).
+   - F: the arguments are hoisted ahead of the dispatch; the conversion stands where the cast stood.
+4. The two probes every reader runs. A receiver held ahead of arguments that change it: A1 and E2 now hold it (b1: `n.round((n = 5; b))` and `v.round((v = 6; b))` are CRuby's 1230; the bare tip answers 10 with gcc). A receiver read after arguments newly run: C2 reads the Float receiver after the count, as master does (b1: `f.round((f = 2.5; a))` is 2.5 on both, CRuby 1234.6), and B2 as above. Neither is made by this piece; no cell is lost.
+
+THE TABLES. Each row: the program and its lines | compile exits of the bare tip and of this head, and whether the generated C is equal | the bare tip's cells | this head's. A cell is gcc at SPINEL_GC_STRESS 0, 1, 2, then clang the same (real clang 18.1.3, by --cc=clang). "ok" is CRuby's output line for line with exit 0; "Nw" is N lines that differ from CRuby's, exit 0; rcN an exit code; NOBUILD a C compile error.
+  a1  the four methods on 1234 with Float::INFINITY, -Float::INFINITY, Float::NAN, 1e30, -1e30 written in place
+  a2  the same through locals
+  a3  finite counts inside the word, literals and locals, on 1234 and -1255 (80 lines)
+  a4  Integer#round with half:, and floor, ceil, truncate with half: (the ArgumentError)
+  a5  a Bignum receiver
+  a6  a Float receiver, with and without half:
+  a7  an Integer and a Float in a boxed slot
+  a8  receivers and counts that print (the order)
+  a9  a Rational receiver (not taken)
+  a10 a boxed receiver beside a class that defines round, floor and ceil (site F)
+  a11 a count held in a boxed slot (not taken)
+  a12 receivers that are no literal (x += 1, a product, a Float sum)
+  a13 Float literals inside a 32-bit word, and 3e9 and 1e3 (its one line that differs is the quote in CRuby 3.3.6's "`int'" against 4.0's "'int'")
+  a14 a count read out of a Float Array
+  b1  a count that rebinds the receiver
+  b2  receivers and counts with side effects (+=, -=)
+  b3  a count that is a method's parameter
+  a1 (20 lines) | compile 0 0 C differs(828) | bare: 20w 20w 20w 20w 20w 20w | piece: ok ok ok ok ok ok
+  a2 (20 lines) | compile 0 0 C differs(828) | bare: 20w 20w 20w 20w 20w 20w | piece: ok ok ok ok ok ok
+  a3 (80 lines) | compile 0 0 C differs(2964) | bare: ok ok ok ok ok ok | piece: ok ok ok ok ok ok
+  a4 (14 lines) | compile 0 0 C differs(22) | bare: 5w 5w 5w 5w 5w 5w | piece: ok ok ok ok ok ok
+  a5 (24 lines) | compile 0 0 C differs(48) | bare: 16w 16w 16w 16w 16w 16w | piece: ok ok ok ok ok ok
+  a6 (30 lines) | compile 0 0 C differs(868) | bare: 19w 19w 19w 19w 19w 19w | piece: ok ok ok ok ok ok
+  a7 (46 lines) | compile 0 0 C differs(1706) | bare: 27w 27w 27w 27w 27w 27w | piece: ok ok ok ok ok ok
+  a8 (28 lines) | compile 0 0 C differs(438) | bare: 20w 20w 20w rc139 rc139 rc139 | piece: 14w 14w 14w ok ok ok
+  a9 (5 lines) | compile 0 0 C equal | bare: 5w 5w 5w 5w 5w 5w | piece: 5w 5w 5w 5w 5w 5w
+  a10 (5 lines) | compile 0 0 C differs(10) | bare: 1w 1w 1w 1w 1w 1w | piece: ok ok ok ok ok ok
+  a11 (8 lines) | compile 0 0 C equal | bare: 6w 6w 6w 6w 6w 6w | piece: 6w 6w 6w 6w 6w 6w
+  a12 (6 lines) | compile 0 0 C differs(236) | bare: 6w 6w 6w 6w 6w 6w | piece: ok ok ok ok ok ok
+  a13 (11 lines) | compile 0 0 C differs(150) | bare: 1w 1w 1w 1w 1w 1w | piece: 1w 1w 1w 1w 1w 1w
+  a14 (4 lines) | compile 0 0 C differs(148) | bare: ok ok ok ok ok ok | piece: ok ok ok ok ok ok
+  b1 (13 lines) | compile 0 0 C differs(522) | bare: 4w 4w 4w 2w 2w 2w | piece: 2w 2w 2w 1w 1w 1w
+  b2 (8 lines) | compile 0 0 C differs(324) | bare: 1w 1w 1w ok ok ok | piece: ok ok ok ok ok ok
+  b3 (6 lines) | compile 0 0 C differs(270) | bare: 4w 4w 4w 4w 4w 4w | piece: ok ok ok ok ok ok
+  a6 as first written had one more line, `x.floor(inf, half: :even)` on a Float `x`: that line does not build on the bare tip nor here (the arm that raises the ArgumentError answers a C double where the call is typed boxed). A side find; the row above is a6 without it.
+
+What is left after the piece and why (all equal to the bare tip's cells or better):
+  a8, gcc: one line. `brecv.round(inf)` on a Bignum receiver that prints raises before "brecv" is printed (B2, point 3). clang is right.
+  b1: `f.round((f = 2.5; a))` (C2's order) on both compilers, and `x.round((x = 2 ** 71; b))` on a Bignum with gcc (B2's order).
+  a9, a11: not taken, the bare tip's C.
+
+SANITIZER (gcc 13.3 -fsanitize=float-cast-overflow; clang's runtime library is not installed here). Reports of "is outside the range of representable values of type 'long int'":
+  u0 bare tip: reports 3
+  u0 this head: reports 0
+  u1 bare tip: reports 4
+  u1 this head: reports 0
+  u2 bare tip: reports 16
+  u2 this head: reports 0
+  t bare tip: reports 32
+  t this head: reports 0
+  u0 is the three lines of the rubyspec case, u1 the same through locals plus one floor, u2 fifteen lines over the receivers, t the test of record.
+
+THE TEST OF RECORD, test/round_float_digits_range.rb (65 lines, `# spinel: int64`: it has a Bignum), seven lanes (plain, level 1, level 1 with the verifier, level 2, MINOR=0, MINOR=1, MINOR=1 with VERIFY_GEN at level 1), gcc and clang; rc0 is wrong lines with exit 0:
+  bare  round_float_digits_range gcc:rc0/rc0/rc0/rc0/rc0/rc0/rc0 clang:rc0/rc0/rc0/rc0/rc0/rc0/rc0
+  piece round_float_digits_range gcc:ok/ok/ok/ok/ok/ok/ok clang:ok/ok/ok/ok/ok/ok/ok
+  piece share-strings round_float_digits_range gcc:ok/ok/ok/ok/ok/ok/ok clang:ok/ok/ok/ok/ok/ok/ok
+  bare  share-strings round_float_digits_range gcc:rc0/rc0/rc0/rc0/rc0/rc0/rc0 clang:rc0/rc0/rc0/rc0/rc0/rc0/rc0
+On the bare tip 30 of its 65 lines differ from CRuby's with gcc and 30 with clang (the first six, the literal counts, raise by chance or print 0 with gcc and print 42 with clang).
+
+COMPILE TIME (callgrind, the compiler's own instructions with -c; the bare tip | this head, both in one run). One line repeated 1,000 or 2,000 times:
+  r_int_1000.rb: 1,123,588,686 | 1,123,918,042 (+0.03%)  C equal
+  r_int_2000.rb: 2,246,589,661 | 2,247,219,836 (+0.03%)  C equal
+  r_float_1000.rb: 1,122,659,053 | 1,131,389,854 (+0.78%)  C differs
+  r_float_2000.rb: 2,245,497,369 | 2,260,354,670 (+0.66%)  C differs
+  r_floatrecv_1000.rb: 874,407,366 | 881,796,936 (+0.85%)  C differs
+  r_floatrecv_2000.rb: 1,749,280,252 | 1,763,756,644 (+0.83%)  C differs
+  d_bare_1000.rb: 808,171,692 | 808,150,062 (-0.00%)  C equal
+  d_bare_2000.rb: 1,608,228,153 | 1,608,182,359 (-0.00%)  C equal
+  round_float_digits_range.rb: 139,143,662 | 139,718,466 (+0.41%)  C differs
+  r_int is `s += n.round(d)` with an Integer d (master's C); r_float `s += n.round(a)` with a Float local (site A1); r_floatrecv `s += 1 if f.round(a)` (site C2); d_bare has no round at all.
+  r_int by function (one more run of r_int_1000 on the same two compilers, with the output to /dev/null): the totals were 1,123,565,990 | 1,123,433,039, this head the LOWER by 132,951, because libc's strcmp counted 288,947 fewer (its count follows where the strings lie). What the piece adds itself: float_ndigits 45,000 and the type question under it 25,000, the one more is_round_family ahead of master's arm 43,000 with its compares 22,023, int_arms_round_divide 9,000, emit_poly_numeric_call 2,000: about 150 instructions a site, +0.013%. So the +0.03% above is the piece's 0.013% and strcmp's swing. An Integer call that is no round and reaches int_arms_round_divide pays the one more is_round_family (four name compares); d_bare shows nothing of it.
+
+RUN TIME (callgrind, 200,000 calls; the bare tip | this head, and the difference a call; gcc then clang). c1 to c8: the count is a constant the C compiler can see (`run(1234, -1.9)` inlined). d1 to d7: a count read from an Array once, ahead of the loop. e1 to e4: a count read from an Array on every call.
+  gcc   c1_int_round_float         10,450,774 | 10,450,774 (+0.0 a call)
+  gcc   c2_int_floor_float         8,510,774 | 8,510,774 (+0.0 a call)
+  gcc   c3_int_round_half_float    11,470,851 | 11,470,851 (+0.0 a call)
+  gcc   c4_big_round_float         1,209,190,047 | 1,209,190,047 (+0.0 a call)
+  gcc   c5_float_round_float       9,352,352 | 9,352,352 (+0.0 a call)
+  gcc   c6_boxed_round_float       5,268,105 | 5,668,110 (+2.0 a call)
+  gcc   c7_int_round_literal       11,650,774 | 11,650,774 (+0.0 a call)
+  gcc   c8_int_round_int           10,250,774 | 10,250,774 (+0.0 a call)
+  gcc   d1_int_round_float         10,764,642 | 10,764,689 (+0.0 a call)
+  gcc   d2_int_floor_float         8,824,642 | 8,824,653 (+0.0 a call)
+  gcc   d3_int_round_half_float    11,784,727 | 11,784,735 (+0.0 a call)
+  gcc   d4_big_round_float         1,209,193,038 | 1,209,993,035 (+4.0 a call)
+  gcc   d5_float_round_float       39,068,928 | 38,668,940 (-2.0 a call)
+  gcc   d6_boxed_round_float       33,269,908 | 33,669,915 (+2.0 a call)
+  gcc   d7_float_round_half_float  48,069,510 | 47,669,518 (-2.0 a call)
+  gcc   e1_int_round_changing      12,330,603 | 13,330,638 (+5.0 a call)
+  gcc   e2_int_floor_changing      10,715,937 | 11,715,936 (+5.0 a call)
+  gcc   e3_float_round_changing    48,468,121 | 49,534,795 (+5.3 a call)
+  gcc   e4_boxed_round_changing    27,402,584 | 29,002,580 (+8.0 a call)
+  clang c1_int_round_float         10,607,490 | 10,607,490 (+0.0 a call)
+  clang c2_int_floor_float         8,667,490 | 8,667,490 (+0.0 a call)
+  clang c3_int_round_half_float    11,627,554 | 11,627,554 (+0.0 a call)
+  clang c4_big_round_float         1,204,912,674 | 1,204,912,674 (+0.0 a call)
+  clang c5_float_round_float       8,508,886 | 8,508,886 (+0.0 a call)
+  clang c6_boxed_round_float       4,624,028 | 5,024,095 (+2.0 a call)
+  clang c7_int_round_literal       11,807,490 | 11,807,490 (+0.0 a call)
+  clang c8_int_round_int           10,607,490 | 10,607,490 (+0.0 a call)
+  clang d1_int_round_float         10,923,592 | 10,923,852 (+0.0 a call)
+  clang d2_int_floor_float         8,983,592 | 8,983,879 (+0.0 a call)
+  clang d3_int_round_half_float    11,943,652 | 12,343,907 (+2.0 a call)
+  clang d4_big_round_float         1,204,915,645 | 1,204,916,018 (+0.0 a call)
+  clang d5_float_round_float       37,825,922 | 37,825,956 (+0.0 a call)
+  clang d6_boxed_round_float       5,426,044 | 6,026,211 (+3.0 a call)
+  clang d7_float_round_half_float  47,026,712 | 47,026,596 (-0.0 a call)
+  clang e1_int_round_changing      13,889,752 | 14,489,807 (+3.0 a call)
+  clang e2_int_floor_changing      12,275,086 | 12,875,159 (+3.0 a call)
+  clang e3_float_round_changing    48,559,088 | 48,959,165 (+2.0 a call)
+  clang e4_boxed_round_changing    9,692,034 | 10,692,210 (+5.0 a call)
+
+OWN CHECKS on this head, built from nothing, against the bare tip built from nothing
+- gate check rc=0 (`ruby tools/gate.rb check`, the commit staged);
+- corpus: programs 6729; not in the before file 0; changed 0;
+- make optcarrot rc=0 checksum: 59662 Optcarrot: OK ; optcarrot C equal to the reference's;
+- share-strings-test rc=0 seconds=1562: share-strings-test: pass
+- int-min-test rc=0 seconds=5: int-min-test: pass
+- merge into master's tip by my own ls-remote at 14:31 UTC 10-09 (the tip then f85f04b3abef, 11 commits past the one this head is cut on; that move touches no function of the piece): exit status 0.
+
+RECORDED, NOT TAKEN (side finds, for after the run): the five under "what is not" above; `x.floor(d, half: :even)` on a Float receiver with a count that is not an Integer literal does not build; a Bignum receiver's count is checked ahead of the receiver with gcc; a Float receiver's count is run ahead of the receiver; on the bare tip with clang, probe a8 (receivers that print) ends with a segmentation fault at all three levels and is right with this piece.

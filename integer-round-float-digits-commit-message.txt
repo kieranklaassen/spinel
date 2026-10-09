@@ -1,0 +1,24 @@
+A Float digit count out of range is a RangeError in round, floor, ceil and truncate
+
+42.round(Float::INFINITY) is a RangeError in Ruby: "float Inf out of range
+of integer". A Float digit count was cast to the word, `(sp_int)(X)`, and C
+leaves that cast undefined for an infinity, a NaN and a Float past the word,
+so the answer followed the C compiler and the machine: with gcc on x86-64
+the line raised by chance (the cast gave the smallest Integer, which round's
+own check of the count refused), with clang on x86-64 and on arm64 it
+printed 42, and floor, ceil and truncate, a Float receiver and a boxed one
+answered 0, nil, the receiver or the smallest Integer.
+
+sp_float_to_ndigits reads a Float count as CRuby's NUM2LONG does: its
+integer part, and CRuby's RangeError for an infinity, a NaN and a Float past
+the word. It stands where the cast stood at every digit count of the four
+methods that CRuby reads that way: an Integer, a Bignum, a Float and a
+boxed receiver, with and without half:. On an Integer, a Float and a boxed
+receiver the count is converted after the receiver and the keywords' values
+have run, as in Ruby; a Bignum receiver keeps the order it had.
+
+A Float count inside the word keeps its answer and costs the two compares
+of the range test. A literal a 32-bit word holds and a count that is no
+Float keep the C they had.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>

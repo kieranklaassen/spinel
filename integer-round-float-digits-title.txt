@@ -1,0 +1,1 @@
+A Float digit count out of range is a RangeError in round, floor, ceil and truncate
