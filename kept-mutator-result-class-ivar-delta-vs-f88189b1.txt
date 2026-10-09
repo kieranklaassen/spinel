@@ -1,0 +1,25 @@
+DELTA FOR THE READER, against the head last read, f88189b1aa8a. (1) The parent: f88189b1aa8a sat on row 258's
+old head fb2167f6687c, which sat on row 257's old head on 9c57b440b908; this head sits on row 258's cut above,
+which sits on master's 2d5b3d1211d7 (its tip of 16:53 UTC), which holds row 257 as Matz merged it. So the
+branch is two commits where it was three. (2) The diff: every changed line is f88189b1aa8a's,
+test/collect/refusals.expected's eight included. The run test it adds lines to,
+string_plain_mutator_result_kept, is master's now, the same blob the old stack had beneath; it adds no name to
+test/share/known-failures.txt, where master lists that test. (3) The functions: sa_bang_receiver is as row
+257's merged commit left it; the hunk of refuse_string_alias_copies is not in the lines master's stored-call
+piece added, nor in the lines 53b7591d0 added at the top of the call loop. The new function
+sa_ivar_keeps_handle reads the mark strbuf_box, which the emitter's String-handle routes read; the thirty-five
+commits from b791081037be to f5f59352e68d change those routes in src/codegen_stmt.c and src/repr.c (the last
+twenty do not), so the write that stands aside was MEASURED AGAIN (the last paragraph of this section): every
+program it builds, on the bare f85f04b3abef by a run and on the bare f5f59352e68d and 2d5b3d1211d7 by C. (4)
+The message: unchanged. (5) The body: fourteen lines change. Eleven because the first pull request is master's
+now: it "sits on" the second alone ("the second pull request below; its commit is the first of this branch"),
+"beneath" goes where it meant the first, the base-bound bullet keeps what was decided on 9c57b440 in the past
+tense, gives the run on 7232a802, what f85f04b3, f5f59352 and 2d5b3d12 leave as it was and the counts on
+2d5b3d12, the run paragraph names the test and says master lists it, and "Depends on" names the second alone.
+And from the cost run (below): the opening paragraph and the first bullet under Measured say that 6 of the 269
+right programs are right in a plain run alone; the bullet of the 1,554 says the same of 4 of its 170 and now
+counts the 444 with a parameter-set receiver; the bullet of the write that stands aside says 58 where it said
+44, and gives the 1,272. The body already names its docs/limitations.md line ("this rewrites the line the
+first pull request added"). (6) "Before" on the bare 2d5b3d1211d7: the body's three examples print "abxy", ["
+ab xy", " AB XY"] and "abcdxy" where CRuby prints "ABXY", [" AB XY", " AB XY"] and "abcdxy!"; the two reject
+tests build and print "abxy" and [" ab xy", " AB XY"].

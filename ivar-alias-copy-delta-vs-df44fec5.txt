@@ -1,0 +1,204 @@
+DELTA FOR THE READER, against the head last read, df44fec5b40d. THIS ROW HAS NEW CODE. (1) The parent:
+9c57b440b908 then, master's 2d5b3d1211d7 (its tip of 16:53 UTC) now. (2) What is df44fec5b40d's, line for
+line: the refusal itself (the instance-variable arm of refuse_string_alias_copies, sa_after_all_mutations,
+sa_mutation_site and the other helpers), the two reject tests, the four run tests, their eight lines of
+test/collect/refusals.expected, and the docs entry but for one clause. (3) WHAT IS NEW, 89 lines added and 4
+removed against the same commit without it (the block "the stand-aside as a diff" below shows exactly this):
+in src/analyze.c one function of 12 lines, sa_call_hands_handle, placed after sa_handle; one line in the arm's
+condition, `!sa_call_hands_handle(c, v, g, &to, &from) &&`; the arm's comment, which said "through a call the
+write copies even then" and now adds "but for the three calls the emitter carries the handle through". In
+docs/limitations.md the row's entry gains one clause ("or the call is a `clear`, a `replace` or a `prepend` of
+one argument that hands its receiver's handle on to an instance variable that holds one").
+test/string_ivar_alias_call_handle.rb and its .expected are new (59 and 10 lines).
+test/share/known-failures.txt gets a third name of this row, string_ivar_alias_call_handle, in sorted place:
+the list reads string_ivar_alias_call_handle, string_ivar_alias_last_mutation,
+string_ivar_alias_only_mutation, string_plain_mutator_result_kept under master's three comment lines, which
+are not touched. (4) WHY (the coordinator's 12:34 note, point 3, and 15:45 note). The cost run showed that the
+uncut row refused 302 programs master builds in two families of the class-variable row, in no line of its
+body, and that its sentence "through a call the write copies even then" is false for three calls: with `def
+initialize(s) = @s = s`, `@r = @s.clear; @r << "!"; p @s` prints "!" on master as in CRuby, because the
+emitter hands the receiver's handle on through the call. Four rules for standing aside were measured on a
+switchable scratch build over the six families the row refuses in (both slots hold a handle and the call has
+the emitter's mark strbuf_box; handles alone; shared handles alone; the mark alone). Handles alone and shared
+handles alone would build 605 programs of the 744, 531 of them wrong; the mark alone would build 132 whose C
+does not compile; the first builds 6, all right. That rule was then put to two new families written around it
+(2,880 programs with an instance-variable receiver, 2,160 with a local or a parameter; twelve calls, fifteen
+changes, four places): on the 2,880 it would build 312, of which 192 answer as CRuby does and 120 do not
+compile on master, and the 120 are exactly the calls `insert`, `force_encoding` and `itself`. So the function
+names its three calls, `clear` with no argument and `replace` and `prepend` with one, asks that the call's
+receiver is the name read, that both slots hold a handle and that the call has the mark; as built it stands
+aside for 246 programs (6 of the 2,970, 192 of the 2,880 and 48 of the 2,160), ALL right plain and at
+SPINEL_GC_STRESS=2 on the bare f85f04b3abef, and decides every other program of the eight families as the
+uncut commit does. The other 296 of the 302 cannot be cut and are stated in the body with their counts (the
+cost paragraph below). (5) The functions: sa_after_all_mutations and sa_mutation_site are this row's own, and
+its hunks of refuse_string_alias_copies are not in the lines our two merged pieces or 53b7591d0 changed; the
+new function calls sa_handle, call_plain_argc and an_unparen and reads strbuf_box, none of which the last
+fifty-five commits change in src/analyze.c. It is a function of this row alone: row 265's
+sa_ivar_keeps_handle, which asks the same of `concat`, is added some hundred lines further down, and this head
+and row 265's merge clean. (6) The message: one paragraph changes, the one that said "through a call the write
+copies even then"; OLD and NEW below. (7) The body: the changed lines are below as OLD and NEW. The opening
+paragraph counts the other families; the paragraph on the route gives the write that stands aside and says
+docs/limitations.md gains the entry; the "Left as on master" parenthesis says "but for the three calls above";
+two bullets under Measured are new (the 296, and the two families around the stand-aside); the base-bound
+bullet gives the run on 7232a802, what f5f59352 and 2d5b3d12 leave as it was and the counts on 2d5b3d12; the
+run paragraph says five tests and has one clause per listed name. "Depends on: nothing" stands. (8) "Before"
+on the bare 2d5b3d1211d7: `@s = +"a"; @t = @s; @t << "!"; p @s` prints "a" where CRuby prints "a!"; the two
+reject tests build and print "a". THE INVERTED TEST: on the bare 2d5b3d1211d7 string_ivar_alias_call_handle
+builds with gcc and clang and prints CRuby's ten lines, plain and at SPINEL_GC_STRESS=2; the uncut commit
+141c3809aa66 refused it at line 9 in this row's sentence; under --share-strings the bare tip refuses it at
+line 9 ("the String the value of `clear` hands on as a variable's write is shared with another name and
+changed in place, and that route cannot carry the shared handle yet"), which is why the list names it.
+
+the stand-aside as a diff (git diff 141c3809aa66 7c5cbd77882c, the uncut and the cut-down commit on f85f04b3abef: what cutting down adds), sha256 41d5c88356e0a6d1f61be024187eef3bb31f2f6c60c38284ad728650d49ea2d7:
+
+diff --git a/docs/limitations.md b/docs/limitations.md
+index 86f778069..02986f577 100644
+--- a/docs/limitations.md
++++ b/docs/limitations.md
+@@ -862,7 +862,7 @@ Not yet shared:
+ - into an Array, a String variable added by `insert`, `prepend`, a `concat` of a literal, the later push of a chain (`a << t << s`) or a push into a global Array, or as the value of `s << x`, of `+s` (s itself unless s is frozen; a parameter is refused even when every caller passes a frozen literal) or of a reader method (`a << sb` with `def sb = @s`), when the variable or the element is then mutated in place;
+ - into an Array or a Hash, the result of a method that returns its String parameter, stored straight (`a << id(s)`, `a[0] = id(s)`, `a = [id(s)]`, `h = { k: id(s) }`), when the variable is mutated in place and the container is read, or an element is mutated in place and the variable is read. A constructor argument (`Box.new(id(s))`) and a literal that is not assigned to a variable are still copies and are not refused;
+ - through a reader on a boxed receiver (a Struct or Data member, an `attr_reader`, `def m = @iv`), a String read into a local that is mutated in place while the receiver is read again (a local only queried with String's own methods and then rebound to a copy with String's own `dup`, `s = s.dup`, before the change compiles: the change is the copy's);
+-- through an instance variable assigned from another instance variable (`@t = @s`, unless both already hold the one shared handle), or from an instance variable or a local through a call answering its receiver (`@t = @s.to_s`, `@t = s.itself`), when one name is mutated in place and the other is read, unless that call is the program's only mutation or the script body's last, or the script body only prints the other name, ahead of the assignment;
++- through an instance variable assigned from another instance variable (`@t = @s`, unless both already hold the one shared handle), or from an instance variable or a local through a call answering its receiver (`@t = @s.to_s`, `@t = s.itself`), when one name is mutated in place and the other is read, unless that call is the program's only mutation or the script body's last, or the script body only prints the other name, ahead of the assignment, or the call is a `clear`, a `replace` or a `prepend` of one argument that hands its receiver's handle on to an instance variable that holds one;
+ - into a container, a String held by a block parameter no element iterator binds (a proc's, a lambda's, a yielding method's block, `each_char`'s, `scan`'s), when an element is then mutated in place;
+ - through `scan`'s block parameter, a match the block keeps and mutates in place (it did not build);
+ - through a global variable's Array, a String element mutated in place through the Array (`$b.each { |y| y << x }`, `$b[0] << x`);
+diff --git a/src/analyze.c b/src/analyze.c
+index bfbff35d1..eb357eba2 100644
+--- a/src/analyze.c
++++ b/src/analyze.c
+@@ -34175,6 +34175,18 @@ static int sa_handle(Compiler *c, const SaName *a, int any) {
+   int iv = comp_ivar_index(ci, a->name);
+   return iv >= 0 && (ci->ivar_str_shared[iv] || (any && ci->ivar_types[iv] == TY_STRBUF));
+ }
++/* `@r = @s.clear`, `@r = @s.replace(x)`, `@r = @s.prepend(x)` between two
++   slots that hold a handle, where the call has the emitter's mark
++   (strbuf_box): the write hands the receiver's handle on, and the two
++   names are one String. */
++static int sa_call_hands_handle(Compiler *c, int call, int recv, const SaName *to, const SaName *from) {
++  const NodeTable *nt = c->nt;
++  if (nt_kind(nt, call) != NK_CallNode || !c->strbuf_box[call] || an_unparen(nt, nt_ref(nt, call, "receiver")) != recv) return 0;
++  const char *m = nt_str(nt, call, "name");
++  int argc = call_plain_argc(c, call);
++  return ((sp_streq(m, "clear") && argc == 0) || ((sp_streq(m, "replace") || sp_streq(m, "prepend")) && argc == 1)) &&
++         sa_handle(c, to, 1) && sa_handle(c, from, 1);
++}
+ /* The name's entries of site kind k, in node order (the variable-site
+    chains, comp_vsite_first; the site is comp_vsite_node): the first, and
+    the next after e. The chains carry hash collisions, so each entry's
+@@ -34659,15 +34671,18 @@ static void refuse_string_alias_copies(Compiler *c) {
+          an instance variable written from another, or from a local through
+          a call, so it holds a copy as a global does. A plain `@t = @s`
+          between two shared handles hands the handle over; through a call
+-         the write copies even then. `@t = s` and `t = @s.to_s` have walks
+-         of their own and are left alone. Under --share-strings the write
+-         is the rule's in every form, and nothing is asked here */
++         the write copies even then, but for the three calls the emitter
++         carries the handle through (sa_call_hands_handle). `@t = s` and
++         `t = @s.to_s` have walks of their own and are left alone. Under
++         --share-strings the write is the rule's in every form, and nothing
++         is asked here */
+       else if (to.kind == NK_InstanceVariableReadNode && sa_name(c, g, &from) &&
+                (from.kind == NK_InstanceVariableReadNode || (from.kind == NK_LocalVariableReadNode && g != v)) &&
+                (comp_ntype(c, g) == TY_STRING || comp_ntype(c, g) == TY_STRBUF) &&
+                !(from.kind == to.kind && from.cid == to.cid && sp_streq(to.name, from.name)) &&
+                !c->share_strings &&
+                (g != v || !(sa_handle(c, &to, 0) && sa_handle(c, &from, 0))) &&
++               !sa_call_hands_handle(c, v, g, &to, &from) &&
+                !sa_after_all_mutations(c, &order, w) &&
+                sa_copy_observable(c, &to, &from, g) && !sa_value_mutates_last(c, &order, w, v, g) &&
+                !(!sa_mutated(c, &from) && sa_read_only_before(c, &order, &from, g, w)))
+diff --git a/test/share/known-failures.txt b/test/share/known-failures.txt
+index 7a881ff2a..2881a7b9a 100644
+--- a/test/share/known-failures.txt
++++ b/test/share/known-failures.txt
+@@ -1,6 +1,7 @@
+ # SPINEL_SHARE_STRINGS=1, OPT=-O1, macOS, Apple clang 21.
+ # Names are those printed by make test; remove an entry when it passes.
+ # Every corpus program passes with sharing on master; add an entry only for a known failure.
++string_ivar_alias_call_handle
+ string_ivar_alias_last_mutation
+ string_ivar_alias_only_mutation
+ string_plain_mutator_result_kept
+diff --git a/test/string_ivar_alias_call_handle.rb b/test/string_ivar_alias_call_handle.rb
+new file mode 100644
+index 000000000..f39d95dcb
+--- /dev/null
++++ b/test/string_ivar_alias_call_handle.rb
+@@ -0,0 +1,59 @@
++# `@r = @s.clear`, `@r = @s.replace(x)` and `@r = @s.prepend(x)` between
++# two instance variables that hold String handles: the call hands the
++# handle on, a change through either name shows through the other, and
++# the assignment is left as it is.
++
++class Cleared
++  def initialize(s) = @s = s
++  def go
++    @r = @s.clear
++    @r << "!"
++    p @s, @r
++  end
++end
++Cleared.new(+"abcd").go
++
++class Replaced
++  def initialize
++    a = +"abcd"
++    @s = a
++    a << "0"
++  end
++  def go
++    [1].each do
++      @r = @s.replace("wxyz")
++      @r << "!"
++      @s << " and forty more bytes, so that the buffer has to move, and then some more of them"
++      p @s, @r
++    end
++  end
++end
++Replaced.new.go
++
++class Prepended
++  def initialize(s)
++    @s = s
++    s << "0"
++  end
++  def keep
++    @r = @s.prepend("x")
++  end
++  def go
++    keep
++    @r << " and forty more bytes, so that the buffer has to move, and then some more of them"
++    p @s, @r
++  end
++end
++Prepended.new(+"abcd").go
++
++class Twice
++  def initialize(s) = @s = s
++  def go
++    @r = (@s).replace("wxyz")
++    [1].each { @r << "!" }
++    p @s, @r
++  end
++end
++k = Twice.new(+"abcd")
++k.go
++k.go
+diff --git a/test/string_ivar_alias_call_handle.rb.expected b/test/string_ivar_alias_call_handle.rb.expected
+new file mode 100644
+index 000000000..7343716ba
+--- /dev/null
++++ b/test/string_ivar_alias_call_handle.rb.expected
+@@ -0,0 +1,10 @@
++"!"
++"!"
++"wxyz! and forty more bytes, so that the buffer has to move, and then some more of them"
++"wxyz! and forty more bytes, so that the buffer has to move, and then some more of them"
++"xabcd0 and forty more bytes, so that the buffer has to move, and then some more of them"
++"xabcd0 and forty more bytes, so that the buffer has to move, and then some more of them"
++"wxyz!"
++"wxyz!"
++"wxyz!"
++"wxyz!"

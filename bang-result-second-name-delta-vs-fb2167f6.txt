@@ -1,0 +1,21 @@
+DELTA FOR THE READER, against the head last read, fb2167f6687c. (1) The parent: fb2167f6687c sat on row 257's
+old head 35acd86d3521, which sat on 9c57b440b908; this head sits on master's 2d5b3d1211d7 (its tip of 16:53
+UTC), which holds row 257 as Matz merged it. (2) The diff: this head against master is fb2167f6687c against
+35acd86d3521 to the stable patch-id, and the four lines it adds to test/collect/refusals.expected are the same
+four. (3) The functions: the one hunk of src/analyze.c is in refuse_string_alias_copies. Master changed that
+function three times since 9c57b440b908: our two merged pieces, and 53b7591d0, which adds a refusal for line
+iteration at the top of the call loop. None of the three is in the lines this hunk changes, and the hunk
+merges clean on each; the last fifty-five commits do not touch the function. (4) The message: unchanged. (5)
+The body: eight lines change. Seven because the pull request this sat on is master's now. The cost paragraph
+says "master already refuses, for all 212" where it said the pull request beneath refuses 27 of them, and
+"refused beyond master" where it said "beyond that pull request"; "This sits on ..." becomes "Master's ...
+added ...", and that paragraph now says that docs/limitations.md is updated with it, as CONTRIBUTING.md asks
+since f5f59352e68d (the docs line is the old head's); the first sentence under Measured and its first bullet
+name that pull request by what it was then (master 8dc55225 did not hold it); the base-bound bullet says the
+same held on 47225b48 and 9c57b440, gives the run on 7232a802, what f85f04b3, f5f59352 and 2d5b3d12 leave as
+it was, and the counts on 2d5b3d12; the run paragraph names master's test `string_plain_mutator_result_kept`
+where it said "the test of the pull request beneath"; "Depends on: nothing". And from the cost run (below):
+the cost paragraph ends with the 78 programs refused where the kept name is a class's instance variable, 42 of
+them right; one new bullet under Measured counts them. No other count changes. (6) "Before" on the bare
+2d5b3d1211d7: `t = s; r = t.strip!; r << "!"; p s` prints "ab" where CRuby prints "ab!"; the body's opening
+example, with `p r`, prints "ab!" there as the body says; the reject test builds and prints "ab".

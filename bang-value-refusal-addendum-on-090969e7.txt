@@ -1,0 +1,32 @@
+THE BARE 090969e7759b (master's tip by my ls-remote at 18:03, 18:04, 18:05 and 18:18 UTC), built from nothing
+in a fresh worktree: make rc 0; `tools/refusals.sh` pass (594 records); `make reject-test` pass; master's test
+string_plain_mutator_result_kept passes with gcc and clang, plain and at SPINEL_GC_STRESS=2, and by the gate's
+rule reads "default PASS, shared ERR", scored "0 pass, 1 known failures, 0 new failures". `git merge-tree` of
+each of the three heads with that tip is clean by exit status.
+
+"BEFORE". The eleven programs (each body's "Before" examples and each row's reject tests) print on the bare
+090969e7759b what they print on the bare 2d5b3d1211d7, byte for byte: for 258 "ab" where CRuby prints "ab!"
+(and its body's opening example, with `p r`, "ab!" as the body says); for 256 "a" where CRuby prints "a!"; for
+265 "abxy", [" ab xy", " AB XY"] and "abcdxy" where CRuby prints "ABXY", [" AB XY", " AB XY"] and "abcdxy!".
+Every piece's "Before" holds on that tip, so no piece is closed.
+
+THE REFUSED SETS. Every program a head refuses beyond its parent and every program a write that stands aside
+builds, 15,413 different programs in all (503 for 258; 10,435 and 246 for 256; 3,181 and 1,272 for 265; the
+sets overlap): for EVERY ONE the bare 090969e7759b makes the C the bare 2d5b3d1211d7 makes, byte for byte, and
+lib/, builtins/ and packages/ do not change between the two tips, so each is the program it was and keeps its
+recorded run. 771 of them (a third one in twenty) were built with the bare 090969e7759b and run plain and at
+SPINEL_GC_STRESS=2 against CRuby 3.3.6: 771 answer as recorded, 0 otherwise. SO THAT TIP RUNS RIGHT NO PROGRAM
+A HEAD REFUSES OR STANDS ASIDE FROM THAT WAS NOT RIGHT BEFORE: no program is named, no refusal is cut. The
+right programs each row refuses are those its body counts, as before.
+
+THE FAMILIES. The bare 090969e7759b decides all 21 lists (49,391 programs) as the bare 2d5b3d1211d7 did, to
+the line and the sentence, plain and with the flag: master refuses and builds there what it refused and built.
+
+promote_shared_stored_strings_pass AGAINST WHAT THE PROOFS READ. The pass gives a String held in a container
+the shared handle where a method appends to the parameter it arrives as; the change lets a call with a poly
+receiver ask each method of the name the receiver may answer with. No function of the rows calls the pass;
+they read its result alone, as the type of a slot (sa_handle asks whether a slot holds a handle). For the
+programs above that result is the same on the two tips: the same decisions over the 49,391 and the same C over
+the 15,413. The emitter's part of the two commits (emit_poly_arg_temp, emit_struct_new_call, the splat and
+element-parameter functions, the new plain_ helpers) is in no String-handle route the write that stands aside
+of 256 or of 265 leans on, and no changed line holds "sa_" or strbuf_box.
