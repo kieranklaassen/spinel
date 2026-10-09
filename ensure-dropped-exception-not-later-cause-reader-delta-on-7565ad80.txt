@@ -1,0 +1,23 @@
+Delta of 11bdcf206c55 (tree 1b4c3f694c0e, one commit on upstream master 7565ad80d6ec) against the read head 11ed60d50054 (on 84f5b5020ef8).
+
+WHY A RE-CUT. Upstream's move to 7565ad80d6ec put lines of its own, for a String return handle kept across an ensure, into the two functions this commit edits. The read head no longer merges there: conflicts in emit_method (src/codegen.c) and in emit_begin (src/codegen_stmt.c).
+
+WHAT IS THE SAME. Every added and every removed line of the commit: its stable patch-id taken with no context (`git show -U0 <commit> | git patch-id --stable`) is 23d803aa2d5f for the read head and for this one. With three lines of context it is f565b4cbc44d for the read head and fe6fc17e67d8 here, by the context alone. The commit message is the read one byte for byte. lib/spinel_rt.h's one added line, the test and its .expected are the same.
+
+WHAT MOVED, both sides kept whole:
+1. emit_method, the landing at the home of a proc's return. Upstream now wraps the value that landing returns in the publication of its handle: `int pub = ...`, an opening `(_sp_ret_strbuf = ..., ` and a closing `)`, all after the line this commit changes. That line is upstream's still, with this commit's `%s` for the restore of the cause ahead of `return`; upstream's wrapper sits inside the return's expression, after it.
+2. emit_begin, around the ensure's statements. Upstream declares and roots `_rhN` ahead of them and stores it back to `_sp_ret_strbuf` after them. This commit opens its cleanup block after upstream's declaration and closes it after upstream's store. So the root is pushed in the function's scope and not inside the block, and the handle is stored back right after the body's statements, as upstream has it. A body left by a return, a break or a next skips upstream's store as it does on master, and the cleanup gives the cause back as before.
+
+ONE COMMAND: `git range-diff 11ed60d50054^! 11bdcf206c55^!` shows these two changes of context and nothing else.
+
+CHECKS on this head: the build; the test in the seven builds (-O0 to -O3, clang, both stress modes) and as the gate's shared leg builds it (SPINEL_SHARE_STRINGS=1, -O1), right in all; the tip has 11 of its 14 lines wrong at -O0 to -O3 and with clang; `ruby tools/gate.rb check` staged, 0; the corpus C by hash against the tip's: 6,640 programs, 6,504 identical, 136 differ (103 tests, 33 package tests), the test new, no refusal changed; the 103 changed tests and the new one built and run, 104 of 104 print their `.expected`; `make backtrace-test` 0; `make scale-test` 0 (1.95, 1.86, 1.71, 4.73, 6.14, 4.13); `make int-min-test` 0; `make share-strings-test` 0 (739 s); function sizes ok (emit_begin 334 to 340, emit_call_kernel_flow_arms 628 to 633, emit_brk_wrapped_call 176 to 180, emit_method 249 to 253, scan_prologue_features 217 to 223); optcarrot built, run and counted in one tree (2,368,315,232 on the tip, 2,368,315,197 here, checksum 59662 on both); the body's three programs print what the body says on CRuby 3.3.6, on the tip and here.
+
+COSTS, counted again on this tip, the two sides under paths of one length (the tip / here; every row prints the same output on both sides):
+   an ensure body that ends, 2,000,000 calls: 280,350,068 / 280,350,068
+   200,000 catches with a throw: 51,549,998 / 52,350,001 (4.0 each); the same loop in a program with no ensure body: 51,349,833 / 51,349,833
+   200,000 catches whose block ends: 20,750,001 / 21,149,998 (2.0 each); in a program with no ensure body: 20,749,845 / 20,749,845
+   200,000 proc returns: 107,184,031 / 107,984,031 (4.0 each); in a program with no ensure body: 107,183,929 / 107,183,929
+   200,000 breaks with a value out of each_with_index: 51,750,021 / 52,550,021 (4.0 each); in a program with no ensure body: 51,749,893 / 51,749,893
+The two tests that pay landings for an ensure in a method they never call are still two on this tip, test/file_foreach_arg_exprs.rb (four landings) and test/file_foreach_streams.rb (one): of the 103 changed tests they are the only ones whose C holds a landing and no ensure body.
+
+THE BODY is "-v4". Against "-v3" only figures moved: the tip's id (84f5b5020 to 7565ad80d); the corpus sentence (6,608, 133, 102 and 31 to 6,640, 136, 103 and 33); three cost figures (280,350,059 to 280,350,068; 51,550,007 to 52,350,010 becomes 51,549,998 to 52,350,001; 107,184,229 to 107,984,229 becomes 107,184,031 to 107,984,031); the scale-test ratios, now six; two function sizes (emit_begin 323 to 329 becomes 334 to 340, emit_method 244 to 248 becomes 249 to 253); the optcarrot figures; and the list of what was run names the shared leg and the cost programs.
