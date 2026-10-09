@@ -13073,6 +13073,12 @@ static int name_in_list(const char *const *list, const char *n) {
 int object_public_method_name(const char *n) {
   return name_in_list(RB_OBJECT_PUBLIC, n);
 }
+/* Is `n` one of Object's own instance methods, public or private (the
+   generated OBJECT_METHOD_NAMES)? A call of such a name with no receiver has
+   a builtin to reach. */
+int object_method_name(const char *n) {
+  return name_in_list(OBJECT_METHOD_NAMES, n);
+}
 
 static int rbself_builtin(const char *cn) {
   static const char *const B[] = { "String", "Integer", "Float", "Symbol", "TrueClass",
