@@ -447,7 +447,9 @@ int emit_call_synchronize_arms(Compiler *c, int id, Buf *b, const NodeTable *nt,
         /* a proc body returns sp_int: see the sibling in codegen_iter.c */
         else if (g_in_proc_body) buf_printf(b, "if (_retf%d) return 0; ", eid);
         else buf_printf(b, "if (_retf%d) return; ", eid);
-        buf_printf(b, "if (_excf%d) { sp_pending_exc_obj = _excobj%d; sp_raise_cls(_exccls%d, _excmsg%d); } ", eid, eid, eid, eid);
+        /* an object an ensure inside the block handed up is raised as
+           itself: its raw message may be gone (see emit_begin) */
+        buf_printf(b, "if (_excf%d) { if (_excobj%d) sp_raise_exc((sp_Exception *)_excobj%d); sp_raise_cls(_exccls%d, _excmsg%d); } ", eid, eid, eid, eid, eid);
       }
     }
     if (scalar) buf_printf(b, "_t%d; })", rv);
