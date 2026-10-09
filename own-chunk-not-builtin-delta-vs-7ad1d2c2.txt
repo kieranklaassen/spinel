@@ -1,0 +1,92 @@
+9,14c9,18
+< +  /* ...when the method is the builtin's. A method, reader or Struct member
+< +     of the program's own by one of these names answers what it likes
+< +     (`def chunk = [5, 6].each_with_index` yields two values), and its hop
+< +     reads the Enumerator's flag as any other does. That is read only where
+< +     the call is proven to reach the program's own: any other call is the
+< +     builtin's. */
+---
+> +  /* ...when the method is the builtin's. A method of the program's own by
+> +     one of these names answers what it likes (`def chunk = [5, 6].each_with_index`
+> +     yields two values), and its hop reads the Enumerator's flag as any other
+> +     does. That is read only where the call is proven to reach the program's
+> +     own: any other call is the builtin's. The proof is of the program's one
+> +     def of the name: where the program as written holds another, a Symbol of
+> +     the name (a reader, a Struct member), or a site where a method is named,
+> +     made or loaded by something the text does not spell, the def CRuby runs
+> +     may be one the compiler does not hold (an_prog_never_gives). */
+> +  if (!an_prog_never_gives(sn, 1)) return 1;
+24c28
+< +    return comp_method_in_chain(c, s->class_id, sn, NULL) < 0 && !comp_reader_in_chain(c, s->class_id, sn, NULL);
+---
+> +    return comp_method_in_chain(c, s->class_id, sn, NULL) < 0;
+31c35
+< +    return !comp_reader_in_chain(c, ty_object_class(st), sn, NULL);
+---
+> +    return 1;
+45,57c49,61
+< +# A method, reader or Struct member of the program's own named chunk,
+< +# chunk_while, slice_when, slice_before or slice_after answers what it likes:
+< +# here an each_with_index Enumerator, which yields two values a step, so a
+< +# lone |x| takes the first and a lone |*r| both. Only the builtin's
+< +# Enumerator yields one chunk a step; the hop in front of the block took
+< +# every call of these names for the builtin's.
+< +
+< +def chunk = [5, 6].each_with_index
+< +p chunk.map { |x| x }
+< +p chunk.map { |*r| r }
+< +p chunk.any? { |x| x == 5 }
+< +p chunk.flat_map { |x| [x] }
+< +p chunk.uniq { |x| x }
+---
+> +# A method of the program's own named chunk, chunk_while, slice_when,
+> +# slice_before or slice_after answers what it likes: here an each_with_index
+> +# Enumerator, which yields two values a step, so a lone |x| takes the first
+> +# and a lone |*r| both. Only the builtin's Enumerator yields one chunk a
+> +# step; the hop in front of the block took every call of these names for
+> +# the builtin's. Each name is given once: that is what the proof asks.
+> +
+> +def slice_after = [5, 6].each_with_index
+> +p slice_after.map { |x| x }
+> +p slice_after.map { |*r| r }
+> +p slice_after.any? { |x| x == 5 }
+> +p slice_after.flat_map { |x| [x] }
+> +p slice_after.uniq { |x| x }
+60,61d63
+< +  attr_reader :slice_before
+< +  def initialize = @slice_before = [5, 6].each_with_index
+65c67
+< +  def self.chunk = [7, 8].each_with_index
+---
+> +  def self.slice_before = [7, 8].each_with_index
+71d72
+< +p f.slice_before.map { |x| x }
+73,77c74
+< +p Foo.chunk.map { |x| x }
+< +
+< +P = Struct.new(:slice_after)
+< +q = P.new([7, 8].each_with_index)
+< +p q.slice_after.map { |x| x }
+---
+> +p Foo.slice_before.map { |x| x }
+85,93c82
+< +# another receiver keeps the builtin's: a Range, an Enumerable object
+< +class Bag
+< +  include Enumerable
+< +  def each
+< +    yield 1
+< +    yield 2
+< +    yield 4
+< +  end
+< +end
+---
+> +# another receiver keeps the builtin's: a Range
+95,96d83
+< +p Bag.new.chunk { |x| x.even? }.map { |*r| r }
+< +p Bag.new.chunk { |x| x.even? }.map(&:size)
+118,119d104
+< +[5, 6]
+< +[7, 8]
+123,124d107
+< +[[[false, [1]]], [[true, [2, 4]]]]
+< +[2, 2]
