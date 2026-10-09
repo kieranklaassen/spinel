@@ -1,0 +1,14 @@
+Delta of the Proc piece's body, -v11 to -v12 (diff of the two files; a line is a paragraph). Text only: the pull request it was to be merged after is in master.
+
+54c54
+< To be merged after the pull request that keeps both ends of a String Range made on the spot. Without it a String Range with two ends made in place loses its first end before the call, and the holder then keeps a box whose first end is gone: a Method's Proc handed `("a" + i.to_s)..("c" + i.to_s)` is right on master (0e8befeb3) at level 1, gcc and clang, and prints a wrong line there with this change alone. The counts over the whole set of such programs were taken on earlier masters and were not run again on this one: of 39 on 9c7ea3ce0, master was right in 15 at level 1 and this change alone in 27 (it gained 13 and lost that one), and none was right at level 2 on either; with that pull request beneath, on ab9b925aa, all 39 were right at every level, with or without this one.
+---
+> This relies on "The two ends of a String Range made on the spot are both kept, and made in order", which is in master. Without it a String Range with two ends made in place loses its first end before the call, and the holder then keeps a box whose first end is gone: on a master without it (0e8befeb3) a Method's Proc handed `("a" + i.to_s)..("c" + i.to_s)` was right at level 1, gcc and clang, and printed a wrong line there with this change alone. The counts over the whole set of such programs were taken on earlier masters and were not run again on this one: of 39 on 9c7ea3ce0, master was right in 15 at level 1 and this change alone in 27 (it gained 13 and lost that one), and none was right at level 2 on either; with that change beneath, on ab9b925aa, all 39 were right at every level, with or without this one.
+76c76
+< - [ ] Depends on: none in the code; to be merged after the pull request that keeps both ends of a String Range made on the spot (see above)
+---
+> - [ ] Depends on: none
+78c78
+< The `.expected` file was written from ruby 3.3.6 with `--enable-frozen-string-literal`; it is `0`, four Ranges with their text, and `50`. CRuby 4.0 is not on the machine that ran the checks above, so the first box is left for the gate's run. No value is past 2^31. optcarrot's generated C did not change. The dependency is the pull request that keeps both ends of a String Range made on the spot: nothing in the code depends on it, the order does, as said above.
+---
+> The `.expected` file was written from ruby 3.3.6 with `--enable-frozen-string-literal`; it is `0`, four Ranges with their text, and `50`. CRuby 4.0 is not on the machine that ran the checks above, so the first box is left for the gate's run. No value is past 2^31. optcarrot's generated C did not change. It depends on no other pull request: "The two ends of a String Range made on the spot are both kept, and made in order", which it relies on as said above, is in master.
