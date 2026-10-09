@@ -1,0 +1,65 @@
+The replace piece's commit message, the first text to -v2: every changed run of lines, OLD then NEW. Every other line is as it was.
+
+OLD:
+copy where it is one side of a choice too (`s.replace(t || "none")`,
+`c ? t : "none"`, a case): the test asks about the read itself, not
+about a choice it stands in. And an object as the source is read
+
+NEW:
+copy below the top of the source too, as one side of a choice
+(`s.replace(t || "none")`, `c ? t : "none"`, a case) or the value of
+an assignment (`x = t`): the test asks about a read that is the whole
+source, not about one inside it. And an object as the source is read
+
+----
+
+OLD:
+with `def to_str = @s + "!"` in 4 of 300 rounds, `t || "none"` in 1.
+
+NEW:
+with `def to_str = @s + "!"` in 4 of 300 rounds, `t || "none"`
+in 1.
+
+----
+
+OLD:
+Where the first test says no, a second now asks whether something
+else holds the source (replace_source_is_held), and the temp is
+rooted unless it does: a literal; a local, an instance variable, a
+constant, a global or self read where it stands (strbuf_slot_ref
+says which of those are read as a copy); a choice between two of
+those (`c ? a : K`, `a || K`, `k && a`). An object is not on that
+list, and a boxed value is on it only while no class of the program
+defines to_str. For a source on the list, and for every source the
+
+NEW:
+Where the first test says no, a second now asks whether the source
+may be such a String (replace_source_may_be_fresh), and the temp is
+rooted where it may: a source that is no String (an object; a boxed
+value while a class of the program defines to_str), and a String
+source with a read below its top that strbuf_slot_ref calls a copy.
+Reads whose value is never the source's are left out: a condition,
+the left of `&&`, a when's conditions, an in's pattern, an ensure
+clause, every statement of a sequence but its last, what defined?
+is asked about. For every other source, and for every source the
+
+----
+
+OLD:
+Four sources with no call in them take the root and were right: an
+`&&` of a boolean and a String two names hold, which is boxed and
+not copied; an assignment written as the source (`s.replace(x = a)`);
+a `begin` block; and a boxed String in a program where a class
+defines to_str. The root is 14 to 17 instructions a statement with
+gcc and 14 to 20 with clang.
+
+NEW:
+Eleven sources found take the root and were right, because the tree
+does not show what the emitter did with the read: `k && t` with a
+boolean k and `n ||= t`, where the String is boxed by its handle and
+not copied; a begin block, alone or with a rescue or an else arm,
+an if with no else and an elsif chain, each run into a rooted temp
+ahead of the statement; `$g = t`, where the global holds the copy;
+a boxed String where a class defines to_str; and an object whose
+to_str answers a String it holds. The root is 12 to 17
+instructions a statement with gcc and 14 to 20 with clang.

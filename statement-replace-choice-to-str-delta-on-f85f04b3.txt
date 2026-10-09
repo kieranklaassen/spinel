@@ -1,0 +1,256 @@
+Delta for the reader: the replace piece re-cut by the inverted test.
+
+d3f93df36bfa (one commit on a3892bb00366, read NOT READY by the cost rule) is superseded and stays pushed. The new head is 9c44a157a79f98c25a5d4ebfe9122d77ffbdb630, tree 02584acbac3087cc69e808f0467556de2a25dd54, one commit on master f85f04b3abef4b0540406948c56db7a51a420122. Texts: body -v2, message -v2, an OLD/NEW file for each. The title, the test and its .expected are as they were (the same blobs as on d3f93df36bfa).
+
+WHAT CHANGED IN THE CODE
+
+The allow-list is gone: replace_source_is_held is dropped. In its place, as ruled: the head's own type line asked once of the whole source; strbuf_slot_ref asked of each read below the top; a read that is the whole source left to master's answer. The statement's line is the same `else if` after master's, with the question turned round (root where the source MAY be fresh, not where it is not known to be held). The lines are mine; the shape is your trial's, with the two differences named below.
+
+The piece's whole source change against master:
+
+diff --git a/src/codegen_stmt.c b/src/codegen_stmt.c
+index 7fc5db1fc..e06e025b3 100644
+--- a/src/codegen_stmt.c
++++ b/src/codegen_stmt.c
+@@ -15990,6 +15990,62 @@ static char *emit_str_splice_value(Compiler *c, int recv, int v, int late, int t
+   buf_puts(b, " sp_str_check_mutable("); emit_expr(c, recv, b); buf_puts(b, ");");
+   return vb.p;
+ }
++/* Does the source the statement form of replace copies read a shared
++   String's copy below its top, where the read can be the source's value
++   (strbuf_slot_ref says which reads are a copy)? Left out are the
++   children whose value is never the node's: a condition, the left of
++   `&&` (it answers only where it is nil or false), a when's conditions,
++   an in's pattern, an ensure clause, every statement of a sequence but
++   its last, and what defined? is asked about. Every other child counts
++   and the walk ends with the tree, so what it gets wrong costs a root. */
++static int replace_source_reads_copy(Compiler *c, int v) {
++  const NodeTable *nt = c->nt;
++  char hs[1024];
++  if (v < 0) return 0;
++  NodeKind k = nt_kind(nt, v);
++  if (k == NK_DefinedNode) return 0;
++  int nr = nt_num_refs(nt, v), na = nt_num_arrs(nt, v);
++  if ((nr == 0 && na == 0) || k == NK_ConstantPathNode) return strbuf_slot_ref(c, v, hs, sizeof hs);
++  int cond = nt_ref(nt, v, "predicate"), ens = nt_ref(nt, v, "ensure_clause");
++  int left = k == NK_AndNode ? nt_ref(nt, v, "left") : -1, pat = k == NK_InNode ? nt_ref(nt, v, "pattern") : -1;
++  for (int i = 0; i < nr; i++) {
++    int ch = nt_ref_at(nt, v, i);
++    if (ch < 0 || ch == cond || ch == ens || ch == left || ch == pat) continue;
++    if (replace_source_reads_copy(c, ch)) return 1;
++  }
++  int nw = 0;
++  const char *ty = nt_type(nt, v);
++  const int *whens = ty && sp_streq(ty, "WhenNode") ? nt_arr(nt, v, "conditions", &nw) : NULL;
++  for (int i = 0; i < na; i++) {
++    int n = 0;
++    const int *ids = nt_arr_at(nt, v, i, &n);
++    if (whens && ids == whens) continue;
++    for (int j = k == NK_StatementsNode && n > 0 ? n - 1 : 0; j < n; j++)
++      if (replace_source_reads_copy(c, ids[j])) return 1;
++  }
++  return 0;
++}
++/* May that source be a String nothing else holds, where it runs no call
++   (operand_may_allocate answers for those)? An object is, read through
++   its to_str, and so is a boxed value while a class of the program
++   defines to_str. A String is where a shared String's copy is read below
++   the top: one side of a choice (`t || K`, `c ? t : K`), the value of an
++   assignment. */
++static int replace_source_may_be_fresh(Compiler *c, int v) {
++  const NodeTable *nt = c->nt;
++  v = unwrap_parens(c, v);
++  if (v < 0) return 0;
++  TyKind t = comp_ntype(c, v);
++  if (t != TY_STRING && t != TY_STRBUF && !(t == TY_POLY && !any_class_defines(c, "to_str"))) return 1;
++  if ((nt_num_refs(nt, v) == 0 && nt_num_arrs(nt, v) == 0) || nt_kind(nt, v) == NK_ConstantPathNode) {
++    /* a read that is the whole source: operand_may_allocate's answer
++       stands, but for a read marked to hand out its handle (strbuf_box,
++       which repr_of reads the mark from), which it passes unasked */
++    char hs[1024];
++    return c->strbuf_box[v] && strbuf_slot_ref(c, v, hs, sizeof hs);
++  }
++  return replace_source_reads_copy(c, v);
++}
+ /* emit_array_mutate_stmt_body's String mutators done by reassigning the
+    receiver: replace, prepend, insert, concat, clear, delete_prefix! /
+    delete_suffix! (answers 1 emitted, 0 declined, -1 to go on) */
+@@ -16043,6 +16099,9 @@ static int str_mutate_reassign_arms(Compiler *c, Buf *b, int indent, const NodeT
+       /* a fresh source (`x.replace(y + z)`, a shared String's copy) is held
+          by nothing while sp_str_from_bytes allocates the copy it reads */
+       if (operand_may_allocate(c, argv[0])) buf_printf(b, "SP_GC_ROOT_STR(_t%d); ", trep);
++      /* nor is one no call shows: a copy read as one side of a choice
++         (`t || K`), the String an object's to_str makes */
++      else if (replace_source_may_be_fresh(c, argv[0])) buf_printf(b, "SP_GC_ROOT_STR(_t%d); ", trep);
+       emit_expr(c, recv, b);
+       buf_printf(b, " = sp_str_from_bytes(_t%d, sp_str_byte_len(_t%d)); }\n", trep, trep);
+       return 1;
+
+How to read it.
+- replace_source_may_be_fresh is asked only where operand_may_allocate said no, so the source runs no call. The type line is d3f93df36bfa's, once: a source that is no String (not TY_STRING, not TY_STRBUF, and not a boxed value in a program where no class defines to_str) is rooted.
+- A String source that is one read (no child node, or a constant path) is master's: its test has answered for that read.
+- THE CORNER, kept, at the cost of one array read. operand_may_allocate answers no for a read marked to hand out its handle WITHOUT asking (`if (id < 0 || repr_of(c, id).handle) return 0;`). d3f93df36bfa rooted such a read where strbuf_slot_ref called it a copy. I found no program that reaches the statement with one as its whole source (the C of every corpus program and every probe whose source is one read is master's), and could not prove there is none, so the guard stays for that case. It reads the mark where repr_of reads it: repr_of's only line for it is `r.handle = c->strbuf_box[node] != 0;` (src/repr.c), so `c->strbuf_box[v]` IS `repr_of(c, v).handle`, without the rest of repr_of. Your trial answered that read by its type alone and paid nothing; asking repr_of paid about 1,060 instructions on a plain `s.replace(a)` (about 825 of them repr_of and what it calls); this pays about 156: the plain pair below, +0.03%.
+- Below the top, replace_source_reads_copy asks strbuf_slot_ref of each leaf. No depth bound: the walk ends with the tree.
+- DIFFERENCE 1 from your trial: value positions. The trial left out a `predicate`. This leaves out every child whose value is never the node's: a condition, the left of `&&`, a when's conditions, an in's pattern, an ensure clause, every statement of a sequence but its last, and what defined? is asked about. Each is a source master ran right that the trial would root (g2 to g9 below: master's C now). Every child not named there counts, so what the walk gets wrong still costs a root, never an answer: the four k rows that were wrong on the tip (a sequence's last statement, the right of `&&` beside a String left, a case arm, the right of `||`) are rooted.
+- DIFFERENCE 2: the when node is told by its type name (nt_type), there being no NodeKind for it; its conditions are the Array the walk skips.
+
+YOUR FIVE POINTS
+
+1. Eleven pay, each in the body under the cost table with its reason; the sentence with "four" is gone. Your nine, and two the wider probes found, which the trial roots too: `begin; a; rescue; t; end` and `begin; a; rescue; b; else; t; end` (k4, k6 below: right on the tip, each run into a rooted temp ahead of the statement). By what the bare tip's C shows for the nine: `k && t` (boolean k) and `n ||= t` box `t` by its handle (sp_box_nullable_obj(lv_t, SP_BUILTIN_STRBUF)), no copy; `begin; t; end`, `begin; t; ensure; z; end`, `(t if k)` and the elsif chain are run into `const char * _tN = NULL; SP_GC_ROOT_STR(_tN);` ahead of the statement; `$g = t` stores the copy in the global first; the boxed String and the held to_str are the type line.
+2. Compile time, both sides in one run (below): the plain pair +0.03%, the choice pair over held Strings +0.27% with equal C (a leaf question a side), the two that gain the root +0.93% and +1.27%. "The largest pair found" is gone from the texts.
+3. `self` is in no list now; the body's "Not in this change" has the String-method case as measured here (g1 below: wrong at level 2 on the bare tip and on this head, equal C).
+4. Every sentence you named is replaced; the OLD/NEW files have each passage.
+5. Cut on master f85f04b3a, the tip by my own ls-remote when it was cut; both trees built from nothing; every check again. Master's move since is at the end.
+
+THE 33 (my own programs for your list; a, b one local holds; t two names hold; k, z booleans; n nil). Each row: whether the generated C is equal | CRuby's output | the bare tip's cells | this head's. A cell is gcc at SPINEL_GC_STRESS 0, 1, 2, then clang the same; "ok" is CRuby's line with exit 0; a bracket holds what was printed with exit 0 (a count of wrong rounds of 300).
+c01_class_variable | C equal | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+c02_const_path | C equal | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+c04_case | C equal | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+c05_unless | C equal | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+c06_if_no_else | C equal | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+c09_begin | C equal | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+c10_assign | C equal | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+c11_and | C equal | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+c12_and_shared | C differs(2) | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+c13_elsif | C equal | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+c14_or_assign | C equal | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+c15_file | C equal | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+c16_defined | C equal | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+c17_rescue | C equal | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+c18_sequence | C equal | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+c19_choice_sequence | C equal | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+c20_true_and | C equal | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+c21_false_or | C equal | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+c22_nil_or | C equal | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+c23_boxed_string_to_str_class | C differs(2) | 0 "n!" | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+c24_begin_shared | C differs(2) | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+c25_ivar_assign | C equal | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+c31_choice_ten_deep | C equal | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+c37_nil_const_or | C equal | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+c38_op_assign | C equal | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+c39_choice_nil_or | C equal | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+e01_match_group | C equal | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+e07_global_assign_shared | C differs(2) | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+e11_begin_ensure_shared | C differs(2) | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+e15_or_assign_shared | C differs(2) | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+f10_elsif_shared | C differs(2) | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+f11_if_no_else_shared | C differs(2) | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+f15_to_str_held | C differs(2) | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+24 of the 33 have the bare tip's C; the nine that differ are the nine of point 1, each by the one added root.
+
+Two more: f12 `x = t` (wrong on the bare tip, rooted now) and g1, `s.replace(self)` in a method added to String, called on a String made in place (not this piece's: equal C):
+f12_assign_shared | C differs(2) | 0 | base ok ok [300] ok ok [300] | head ok ok ok ok ok ok
+g1_self_in_string_method | C equal | 0 | base ok ok [300] ok ok [300] | head ok ok [300] ok ok [300]
+
+VALUE POSITIONS (difference 1): g2 `defined?(t)`, g3 a case's subject, g4 a when's condition, g5 a condition, g6 `(t; a)`, g7 `t && a`, g8 an ensure clause, g9 an in's pattern, each with `t` only there: master's C. k1 `(b; t)`, k2 `a && t`, k3 a case arm, k5 `(z ? b : nil) || t`: wrong on the tip at level 2, right here. k4 and k6: point 1.
+g2_defined_shared | C equal | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+g3_case_subject_shared | C equal | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+g4_when_condition_shared | C equal | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+g5_condition_shared | C equal | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+g6_sequence_shared_first | C equal | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+g7_and_shared_left | C equal | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+g8_ensure_shared | C equal | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+g9_in_pattern_shared | C equal | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+k1_sequence_shared_last | C differs(2) | 0 | base ok ok [300] ok ok [300] | head ok ok ok ok ok ok
+k2_and_string_left | C differs(2) | 0 | base ok ok [300] ok ok [300] | head ok ok ok ok ok ok
+k3_case_arm_shared | C differs(2) | 0 | base ok ok [300] ok ok [300] | head ok ok ok ok ok ok
+k4_rescue_arm_shared | C differs(2) | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+k5_or_right_shared | C differs(2) | 0 | base ok ok [300] ok ok [300] | head ok ok ok ok ok ok
+k6_begin_else_shared | C differs(2) | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+With --share-strings:
+g2_defined_shared | C equal | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+g3_case_subject_shared | C equal | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+g4_when_condition_shared | C equal | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+g5_condition_shared | C equal | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+g6_sequence_shared_first | C equal | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+g7_and_shared_left | C equal | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+g8_ensure_shared | C equal | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+g9_in_pattern_shared | C equal | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+k1_sequence_shared_last | C differs(2) | 0 | base ok ok [300] ok ok [300] | head ok ok ok ok ok ok
+k2_and_string_left | C differs(2) | 0 | base ok ok [300] ok ok [300] | head ok ok ok ok ok ok
+k3_case_arm_shared | C differs(2) | 0 | base ok ok [300] ok ok [300] | head ok ok ok ok ok ok
+k4_rescue_arm_shared | C differs(2) | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+k5_or_right_shared | C differs(2) | 0 | base ok ok [300] ok ok [300] | head ok ok ok ok ok ok
+k6_begin_else_shared | C differs(2) | 0 | base ok ok ok ok ok ok | head ok ok ok ok ok ok
+
+EVERY PROBE: 112 programs plain and 86 with --share-strings, the bare tip against the cut before this one (the same C as this head, next paragraph): no cell that is right on the tip is lost, no raise becomes a wrong line; 52 and 48 cells that were wrong are right.
+
+THIS HEAD AGAINST THE CUT BEFORE IT. The twins and the run costs here were run on the cut before this one, which asked repr_of at the corner; this head reads strbuf_box there and is otherwise that cut line for line. The same value, so the same C: equal on all 6,738 corpus programs, on 133 probe programs plain and 85 with --share-strings, and on the count programs below (their C hashes are equal). Build, test lanes, gate check, corpus, optcarrot, the two legs and the compile counts were run on this head.
+
+THE TEST OF RECORD, seven lanes, gcc and clang; rc0 is a wrong line with exit 0:
+the bare tip: gcc:ok/ok/ok/rc0/ok/ok/ok clang:ok/ok/ok/rc0/ok/ok/ok
+this head: gcc:ok/ok/ok/ok/ok/ok/ok clang:ok/ok/ok/ok/ok/ok/ok
+this head, --share-strings: gcc:ok/ok/ok/ok/ok/ok/ok clang:ok/ok/ok/ok/ok/ok/ok
+the bare tip, --share-strings: gcc:ok/ok/ok/rc0/ok/ok/ok clang:ok/ok/ok/rc0/ok/ok/ok
+
+COMPILE TIME (callgrind, the compiler's own instructions with -c; the bare tip | this head, both in one run; then the cut before this one against the same tip count). One statement repeated 1,000 or 2,000 times:
+  dr_plain_1000.rb                               482,477,968 |     482,633,968 (+0.032%)  C equal | the cut before this one: 483,549,534 (+0.222%)
+  dr_plain_2000.rb                               958,861,018 |     959,173,018 (+0.033%)  C equal | the cut before this one: 960,988,757 (+0.222%)
+  dr_choice_held_1000.rb                         881,833,787 |     884,177,777 (+0.266%)  C equal | the cut before this one: 884,179,122 (+0.266%)
+  dr_choice_held_2000.rb                       1,762,659,715 |   1,767,347,705 (+0.266%)  C equal | the cut before this one: 1,767,351,371 (+0.266%)
+  dr_choice_copy_1000.rb                         885,034,364 |     893,271,899 (+0.931%)  C differs | the cut before this one: 893,272,219 (+0.931%)
+  dr_choice_copy_2000.rb                       1,769,234,834 |   1,785,759,272 (+0.934%)  C differs | the cut before this one: 1,785,766,689 (+0.934%)
+  dr_or_copy_1000.rb                             631,027,743 |     639,025,620 (+1.267%)  C differs | the cut before this one: 639,030,118 (+1.268%)
+  dr_or_copy_2000.rb                           1,257,262,338 |   1,273,373,140 (+1.281%)  C differs | the cut before this one: 1,273,357,057 (+1.280%)
+  dr_call_1000.rb                              1,075,788,657 |   1,075,788,657 (+0.000%)  C equal | the cut before this one: 1,075,800,907 (+0.001%)
+  dr_call_2000.rb                              2,147,809,274 |   2,147,809,274 (+0.000%)  C equal | the cut before this one: 2,147,868,016 (+0.003%)
+  d_bare_1000.rb                                 808,239,405 |     808,239,389 (-0.000%)  C equal | the cut before this one: 808,247,327 (+0.001%)
+  d_bare_2000.rb                               1,608,356,226 |   1,608,356,210 (-0.000%)  C equal | the cut before this one: 1,608,358,372 (+0.000%)
+  string_replace_choice_to_str_root.rb            76,166,715 |      76,208,192 (+0.054%)  C differs | the cut before this one: 76,211,827 (+0.059%)
+dr_plain is `s.replace(a)`; dr_choice_held `s.replace(c ? a : "x")`; dr_choice_copy `s.replace(c ? t : "x")` and dr_or_copy `s.replace(t || "x")`, which gain the root; dr_call `s.replace(a + k)`, master's root; d_bare has no replace.
+
+RUN TIME (callgrind, 200,000 statements; the bare tip | the head; gcc, then clang). f: the fixes. p: the eleven that pay. s: sources that have master's C.
+  f1_or_copy                 106,876,974 | 110,276,975 (+17 a statement)
+  f2_choice_copy             107,476,973 | 110,276,975 (+14 a statement)
+  f3_object                  100,295,668 | 103,298,338 (+15 a statement)
+  f4_assign_shared           107,880,235 | 110,680,236 (+14 a statement)
+  p1_and_shared              71,074,172 | 73,876,117 (+14 a statement)
+  p2_or_assign_shared        72,077,278 | 74,878,094 (+14 a statement)
+  p3_begin_shared            110,477,899 | 113,277,904 (+14 a statement)
+  p4_begin_ensure_shared     126,678,477 | 129,279,608 (+13 a statement)
+  p5_global_assign_shared    108,081,950 | 110,481,951 (+12 a statement)
+  p6_elsif_shared            110,477,899 | 113,277,904 (+14 a statement)
+  p7_if_no_else_shared       110,477,885 | 113,277,890 (+14 a statement)
+  p8_boxed_string            62,486,438 | 65,287,058 (+14 a statement)
+  p9_to_str_held             60,061,805 | 62,864,635 (+14 a statement)
+  pa_rescue_arm_shared       76,878,036 | 79,480,261 (+13 a statement)
+  pb_begin_else_shared       126,304,872 | 128,904,875 (+13 a statement)
+  s1_assign                  62,457,452 | 62,457,452 (+0 a statement)
+  s2_case                    62,056,933 | 62,056,933 (+0 a statement)
+  s3_and_bool                62,062,113 | 62,062,113 (+0 a statement)
+  s4_class_variable          56,063,579 | 56,063,579 (+0 a statement)
+  s5_plain                   62,056,919 | 62,056,919 (+0 a statement)
+  s6_choice_held             62,056,933 | 62,056,933 (+0 a statement)
+  s7_begin                   65,058,692 | 65,057,564 (+0 a statement)
+clang:
+  f1_or_copy                 107,076,565 | 111,075,437 (+20 a statement)
+  f2_choice_copy             107,476,565 | 110,476,564 (+15 a statement)
+  f3_object                  100,293,724 | 103,096,391 (+14 a statement)
+  f4_assign_shared           107,878,728 | 110,878,727 (+15 a statement)
+  p1_and_shared              69,853,687 | 72,655,629 (+14 a statement)
+  p2_or_assign_shared        70,655,767 | 73,457,710 (+14 a statement)
+  p3_begin_shared            111,076,374 | 113,877,502 (+14 a statement)
+  p4_begin_ensure_shared     131,079,036 | 134,279,036 (+16 a statement)
+  p5_global_assign_shared    107,881,561 | 110,681,561 (+14 a statement)
+  p6_elsif_shared            111,076,374 | 113,877,502 (+14 a statement)
+  p7_if_no_else_shared       111,076,374 | 113,877,502 (+14 a statement)
+  p8_boxed_string            61,667,121 | 64,467,728 (+14 a statement)
+  p9_to_str_held             60,442,468 | 63,246,422 (+14 a statement)
+  pa_rescue_arm_shared       78,063,499 | 81,465,719 (+17 a statement)
+  pb_begin_else_shared       126,905,468 | 129,905,468 (+15 a statement)
+  s1_assign                  62,840,434 | 62,840,434 (+0 a statement)
+  s2_case                    62,439,919 | 62,439,919 (+0 a statement)
+  s3_and_bool                62,642,292 | 62,641,165 (+0 a statement)
+  s4_class_variable          54,843,594 | 54,844,721 (+0 a statement)
+  s5_plain                   62,441,046 | 62,441,046 (+0 a statement)
+  s6_choice_held             62,439,905 | 62,439,905 (+0 a statement)
+  s7_begin                   65,640,563 | 65,640,563 (+0 a statement)
+
+OWN CHECKS on this head, built from nothing, against the bare tip f85f04b3a built from nothing
+- `ruby tools/gate.rb check`, the commit staged: exit 0;
+- corpus: 6,738 programs, the C of none changed (three print the path of the build's own directory and differ in that alone);
+- optcarrot: checksum 59662, C byte-identical;
+- `make share-strings-test`: pass; `make int-min-test`: pass;
+- master's move since: f85f04b3a to ab73d2ee0 (my own ls-remote at 17:41:45) touches no function of the piece (str_mutate_reassign_arms and the two new functions) and none its proof reads (operand_may_allocate, strbuf_slot_ref, repr_of and its handle line, unwrap_parens, any_class_defines); the merge into it: exit status 0.
+
+RECORDED, NOT TAKEN (side finds): your five (self in a String method with a fresh receiver; `s.replace(self)` there leaves the caller's s unchanged when s is not returned; a class variable or constant two names hold as the source without --share-strings; a global two names hold refused without --share-strings; master's other callers of operand_may_allocate ask the same top-node question); a boxed value object's to_str is not dispatched (raises where CRuby converts); an object as the source of a receiver two names hold does not build.
