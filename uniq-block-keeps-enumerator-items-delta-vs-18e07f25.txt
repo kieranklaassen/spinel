@@ -1,0 +1,159 @@
+0a1,9
+> +/* The C test that the boxed value `_t<t>` is one nothing can change in
+> +   place: an Integer, a Float, a Symbol, true, false, or nil (not the nil
+> +   that marks a step of no values). */
+> +static void uniq_own_item(char *out, size_t n, int t) {
+> +  snprintf(out, n, "(_t%d.tag == SP_TAG_INT || _t%d.tag == SP_TAG_FLT || _t%d.tag == SP_TAG_BOOL || "
+> +                   "_t%d.tag == SP_TAG_SYM || (_t%d.tag == SP_TAG_NIL && !sp_poly_is_empty_step(_t%d)))",
+> +           t, t, t, t, t, t);
+> +}
+> +
+3,7c12,20
+< +       the block binds what a step yields, a lone `|x|` its first value, and
+< +       the survivor is the step's item: `e.uniq { |x| x }` over
+< +       each_with_index keeps [5, 0], not 5. Only where the program as written
+< +       gives no class a uniq of its own (an_prog_never_gives): one it gives,
+< +       in a file read or not, answers what it likes. */
+---
+> +       the block binds what a step yields and the survivor is what the step
+> +       yielded: `e.uniq { |x| x }` over each_with_index keeps [5, 0], not 5,
+> +       and `o.uniq { |*r| r }` over [5, 6].each keeps 5, not [5]. The items
+> +       are read as that to_a reads them (sp_Enumerator_to_a_yielded), ahead
+> +       of the first step, and what a step packed is an Array made here: the
+> +       Enumerator keeps its own, and the next to_a hands that out again.
+> +       Only where the program as written gives no class a uniq of its own
+> +       (an_prog_never_gives): one it gives, in a file read or not, answers
+> +       what it likes. */
+10,11c23,26
+< +    int tpair = esrc >= 0 && comp_ntype(c, esrc) == TY_ENUMERATOR && !splat && !use_shadow &&
+< +                clv0 && clv0->type == TY_POLY && an_prog_never_gives("uniq", 0) ? ++g_tmp : 0;
+---
+> +    int tview = esrc >= 0 && comp_ntype(c, esrc) == TY_ENUMERATOR && !splat && !use_shadow &&
+> +                clv0 && clv0->type == TY_POLY && an_prog_never_gives("uniq", 0);
+> +    int tpair = tview ? ++g_tmp : 0;
+> +    int first = tpair && sp_streq(view, "first");
+19c34
+< +      buf_printf(&rb, "sp_Enumerator_to_a(_t%d)", te);
+---
+> +      buf_printf(&rb, first ? "sp_Enumerator_to_a(_t%d)" : "sp_Enumerator_to_a_yielded(_t%d, 1)", te);
+21,23c36
+< +    /* the items are kept apart from the first values, in an Array of their
+< +       own only where a step yields two */
+< +    int titem = tpair && sp_streq(view, "first") ? ++g_tmp : 0;
+---
+> +    int titem = first ? ++g_tmp : 0, town = tpair && !first ? ++g_tmp : 0, tval = town ? ++g_tmp : 0;
+25,26c38,43
+< +      int tk = ++g_tmp;
+< +      emit_indent(g_pre, g_indent); buf_printf(g_pre, "sp_PolyArray *_t%d = _t%d; SP_GC_ROOT(_t%d);\n", titem, trecv, titem);
+---
+> +      /* a lone `|x|`: the first values in place, as that to_a leaves them,
+> +         and beside them a new Array of what a step packed, where it packed
+> +         two values or more (a step of one value or of none keeps the
+> +         parameter for its survivor, as it did) */
+> +      int tk = ++g_tmp, tv = ++g_tmp, ta = ++g_tmp;
+> +      emit_indent(g_pre, g_indent); buf_printf(g_pre, "sp_PolyArray *_t%d = NULL; SP_GC_ROOT(_t%d);\n", titem, titem);
+28,30c45,54
+< +      buf_printf(g_pre, "if (_t%d) { _t%d = sp_PolyArray_new(); for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++) "
+< +                        "sp_PolyArray_push(_t%d, sp_yielded_first(_t%d, _t%d->data[_t%d])); }\n",
+< +                 tpair, trecv, tk, tk, titem, tk, trecv, tpair, titem, tk);
+---
+> +      buf_printf(g_pre, "if (_t%d) { _t%d = sp_PolyArray_new(); for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++) { "
+> +                        "sp_RbVal _t%d = _t%d->data[_t%d]; "
+> +                        "sp_PolyArray *_t%d = sp_yielded_packed(_t%d, _t%d) ? sp_yielded_args(_t%d, _t%d) : NULL; "
+> +                        "sp_PolyArray_push(_t%d, _t%d && _t%d->len > 1 ? sp_box_poly_array(_t%d) : sp_box_nil()); "
+> +                        "sp_gc_wb((void *)_t%d); _t%d->data[_t%d] = sp_yielded_first(_t%d, _t%d); } }\n",
+> +                 tpair, titem, tk, tk, trecv, tk,
+> +                 tv, trecv, tk,
+> +                 ta, tpair, tv, tpair, tv,
+> +                 titem, ta, ta, ta,
+> +                 trecv, trecv, tk, tpair, tv);
+32,44c56,65
+< +      else if (tpair) {
+< +        /* the item stays in the to_a's own Array, which nothing else holds:
+< +           beside a first value it is read there, where it is kept. A step
+< +           that yields one value has the parameter for its item, pushed as
+< +           it is after the block ran: `x.chomp!` rebinds it. */
+< +        emit_indent(g_pre, din);
+< +        if (titem) {
+< +          buf_printf(g_pre, "lv_%s = %s;\n", p0, es);
+< +          snprintf(es, sizeof es, "_t%d->data[_t%d]", titem, ti);
+< +        }
+< +        else {
+< +          int tel = ++g_tmp;
+< +          buf_printf(g_pre, "sp_RbVal _t%d = _t%d->data[_t%d];\n", tel, trecv, ti);
+---
+> +        if (town) {
+> +          /* a lone `|*r|` or `&:m` has a new Array of each step's values,
+> +             as it had, and that Array is the survivor, as it was, but for a
+> +             step of one value that nothing can change (an Integer, a Float,
+> +             a Symbol, nil, true or false): that value is its own survivor,
+> +             taken here, ahead of the block. Any other one value may be a
+> +             String or an Array the Enumerator made and keeps, so its Array
+> +             stays. An Enumerator whose every step is a pair
+> +             (each_with_index) has no step of one value and is not asked. */
+> +          char own[256]; uniq_own_item(own, sizeof own, tval);
+46,47c67,69
+< +          buf_printf(g_pre, "lv_%s = sp_box_poly_array(sp_yielded_args(_t%d, _t%d));\n", p0, tpair, tel);
+< +          snprintf(es, sizeof es, "_t%d", tel);
+---
+> +          buf_printf(g_pre, "int _t%d = 0; sp_RbVal _t%d; if (_t%d != SP_PAIR_EACH && ((sp_PolyArray *)lv_%s.v.p)->len == 1) { "
+> +                            "_t%d = ((sp_PolyArray *)lv_%s.v.p)->data[0]; _t%d = %s; }\n",
+> +                     town, tval, tpair, p0, tval, p0, town, own);
+49,50d70
+< +        splat = 1;
+< +      }
+51a72,76
+> +    /* A lone `|x|` has the parameter for the survivor of a step that yields
+> +       one value, pushed as it is after the block ran (`x.chomp!` rebinds
+> +       it), and the Array made above for one that packed. A lone `|*r|` has
+> +       the value taken above where the step is its own survivor, and else
+> +       the parameter, as it was. */
+53,54c78,82
+< +      buf_printf(g_pre, "if (!_t%d) { sp_PolyArray_push(_t%d, _t%d); sp_%sArray_push(_t%d, sp_yielded_packed(_t%d, %s) ? %s : lv_%s); }\n",
+< +                 tdup, tseen, tkey, rk, tres, tpair, es, es, p0);
+---
+> +      buf_printf(g_pre, "if (!_t%d) { sp_PolyArray_push(_t%d, _t%d); sp_%sArray_push(_t%d, _t%d && _t%d->data[_t%d].tag == SP_TAG_OBJ ? _t%d->data[_t%d] : lv_%s); }\n",
+> +                 tdup, tseen, tkey, rk, tres, titem, titem, ti, titem, ti, p0);
+> +    else if (town)
+> +      buf_printf(g_pre, "if (!_t%d) { sp_PolyArray_push(_t%d, _t%d); sp_%sArray_push(_t%d, _t%d ? _t%d : lv_%s); }\n",
+> +                 tdup, tseen, tkey, rk, tres, town, tval, p0);
+57c85
+< +# uniq with a block over an Enumerator keeps the items its steps yield. The
+---
+> +# uniq with a block over an Enumerator keeps what its steps yield. The
+59c87,88
+< +# the first value, a lone |*r| every value); the survivor is the item.
+---
+> +# the first value, a lone |*r| every value); the survivor is the step's one
+> +# value, or a new Array of the values it packed.
+93d121
+< +p e.uniq { |*r| r << 1; r[0] }
+102a131,148
+> +
+> +# what a step packed is the survivor's own Array: changing it leaves the
+> +# Enumerator's items as they were
+> +r = e.uniq { |*q| q[0] }
+> +r[0] << 7
+> +p e.to_a
+> +p e.uniq { |*q| q[0] }
+> +p r[0].equal?(e.to_a[0])
+> +u = e.uniq { |x| x }
+> +u[0] << 7
+> +p e.to_a
+> +p e.uniq { |x| x }
+> +h = { a: 1, b: 2 }
+> +hi = h.each_with_index
+> +t = hi.uniq { |x| x }
+> +t[0] << 7
+> +p t
+> +p hi.to_a
+120d165
+< +[[5, 0], [6, 1]]
+123a169,175
+> +[[5, 0], [6, 1], [5, 2]]
+> +[[5, 0], [6, 1]]
+> +false
+> +[[5, 0], [6, 1], [5, 2]]
+> +[[5, 0], [6, 1]]
+> +[[[:a, 1], 0, 7], [[:b, 2], 1]]
+> +[[[:a, 1], 0], [[:b, 2], 1]]
