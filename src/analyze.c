@@ -11871,6 +11871,351 @@ static int isa_array_read_only(const char *nm) {
   return str_in(nm, R);
 }
 
+static int strbuf_any_str_mut(Compiler *c, const char *vn, Scope *vs);
+
+/* What isa_mark_reads asks before it leaves a guarded read boxed, each
+   question answered once for a local while its scope is the one being
+   marked (a bit a local), and each read off the chains of that local: a
+   scope of n guarded assignments does not read them n times over. */
+enum { ISA_HANDLE = 1, ISA_HOLDER = 2, ISA_ITER = 4, ISA_BOUND = 8, ISA_SERVED = 16, ISA_AGAIN = 32, ISA_ONCE = 64 };
+static Scope *g_isa_scope;
+static unsigned char *g_isa_asked, *g_isa_yes;
+static int *g_isa_src, *g_isa_par;
+static int g_isa_noted;
+
+static void isa_answers_drop(void) {
+  free(g_isa_asked); free(g_isa_yes); free(g_isa_src);
+  g_isa_asked = g_isa_yes = NULL;
+  g_isa_src = NULL;
+  g_isa_scope = NULL;
+  g_isa_noted = 0;
+}
+
+static void isa_answers_of(Scope *s) {
+  if (g_isa_scope == s) return;
+  isa_answers_drop();
+  g_isa_asked = calloc((size_t)s->nlocals + 1, 1);
+  g_isa_yes = calloc((size_t)s->nlocals + 1, 1);
+  g_isa_src = malloc(sizeof(int) * ((size_t)s->nlocals + 1));
+  for (int li = 0; li <= s->nlocals; li++) g_isa_src[li] = -1;
+  g_isa_scope = s;
+}
+
+static int isa_answer(Compiler *c, const char *vn, Scope *s, int q, int (*ask)(Compiler *, const char *, Scope *)) {
+  LocalVar *lv = vn ? scope_local(s, vn) : NULL;
+  if (!lv) return 0;
+  isa_answers_of(s);
+  int li = (int)(lv - s->locals);
+  if (!(g_isa_asked[li] & q)) {
+    int yes = ask(c, vn, s);
+    g_isa_asked[li] |= q;
+    if (yes) g_isa_yes[li] |= q;
+  }
+  return (g_isa_yes[li] & q) != 0;
+}
+
+/* Is `n` a read of local `vn` of scope `vs`? */
+static int isa_local_read(Compiler *c, int n, const char *vn, Scope *vs) {
+  const char *rn = n >= 0 && nt_kind(c->nt, n) == NK_LocalVariableReadNode ? nt_str(c->nt, n, "name") : NULL;
+  return rn && sp_streq(rn, vn) && comp_scope_of(c, n) == vs;
+}
+
+/* Is the value of statement `n` used nowhere? Another statement follows
+   it, or it is the last of a loop's body or of an iterating block
+   (an_value_dropped), of the program, or of a conditional's arm whose own
+   value is used nowhere. The last statement of a method or of any other
+   block is that method's or block's value. */
+static int isa_unused(Compiler *c, int n) {
+  const NodeTable *nt = c->nt;
+  if (!g_isa_par) g_isa_par = an_parent_map(nt);
+  const int *par = g_isa_par;
+  for (int depth = 0; par && n >= 0 && depth < 64; depth++) {
+    if (an_value_dropped(nt, par, n)) return 1;
+    int st = par[n];
+    if (st < 0 || nt_kind(nt, st) != NK_StatementsNode) return 0;
+    if (st == c->scopes[0].body) return 1;
+    int o = par[st];
+    if (o >= 0 && nt_kind(nt, o) == NK_ElseNode) o = par[o];
+    /* an `elsif` is its `if`'s value */
+    while (o >= 0 && nt_kind(nt, o) == NK_IfNode && par[o] >= 0 && nt_kind(nt, par[o]) == NK_IfNode &&
+           nt_ref(nt, par[o], "subsequent") == o)
+      o = par[o];
+    if (o < 0 || (nt_kind(nt, o) != NK_IfNode && nt_kind(nt, o) != NK_UnlessNode)) return 0;
+    n = o;
+  }
+  return 0;
+}
+
+/* Is `x` an argument of a `p`, `puts` or `print` statement? */
+static int isa_print_arg(Compiler *c, int x) {
+  static const char *const prints[] = { "p", "puts", "print", NULL };
+  const NodeTable *nt = c->nt;
+  if (!g_isa_par) g_isa_par = an_parent_map(nt);
+  int a = g_isa_par ? g_isa_par[x] : -1;
+  int u = a >= 0 ? g_isa_par[a] : -1;
+  return u >= 0 && nt_kind(nt, u) == NK_CallNode && nt_ref(nt, u, "receiver") < 0 && nt_ref(nt, u, "block") < 0 &&
+         nt_ref(nt, u, "arguments") == a && str_in(nt_str(nt, u, "name"), prints) && isa_unused(c, u);
+}
+
+/* Is local `vn` of scope `vs` assigned in one place only? A boxed read
+   boxes the local for its whole scope, and a second assignment's String
+   would be appended to as a box's is, not in place as a String's. */
+static int isa_written_once(Compiler *c, const char *vn, Scope *vs) {
+  int n = 0;
+  for (int w = comp_lvw_first_sc(c, (int)(vs - c->scopes), vn); w >= 0 && n < 2; w = comp_lvw_next_sc(c, w)) {
+    const char *wn = nt_str(c->nt, w, "name");
+    if (wn && sp_streq(wn, vn) && comp_scope_of(c, w) == vs) n++;
+  }
+  return n == 1;
+}
+
+/* Is `v`, stored into an Array, kept there as its handle: a String the
+   Array was asked to keep so (strbuf_demand_store_leaf), or no String at
+   all? */
+static int isa_stored_as_handle(Compiler *c, int v) {
+  v = an_unparen(c->nt, v);
+  if (v < 0) return 0;
+  if (c->strbuf_box[v] || c->strbuf_handle_demand[v]) return 1;
+  TyKind t = comp_ntype(c, v);
+  return t == TY_INT || t == TY_FLOAT || t == TY_SYMBOL || t == TY_BOOL || t == TY_NIL;
+}
+
+/* Could a call the questions below read by its name alone be the
+   program's own? They take `r.each`, `r[k] = v`, `Array.new(n)` and `p r`
+   for the builtins, and a method of the program under one of those names
+   may put a plain String into the holder behind them. Asked of the
+   program as written and not of a class's chain, which a `class_eval`, a
+   `prepend` or a singleton `def` goes round: no def and no Symbol of such
+   a name, and no site that names, makes or loads a method by something
+   the text does not spell (an_prog_never_gives). */
+static int isa_program_may_own(void) {
+  static const char *const read_by_name[] = { "each", "map", "collect", "select", "filter", "reject", "[]", "first",
+                                              "last", "fetch", "size", "length", "empty?", "inspect", "p", "puts", "print",
+                                              "[]=", "<<", "push", "append", "new", "method_missing", "respond_to_missing?",
+                                              NULL };
+  for (int k = 0; read_by_name[k]; k++)
+    if (!an_prog_never_gives(read_by_name[k], 0)) return 1;
+  return 0;
+}
+
+/* Is call `u` on an Array one that answers an element, and never the
+   Array: `r[i]` and `r.fetch(i)` under one Integer, `r.first`, `r.last`?
+   Or, with `counts`, one that answers a count or a String of its own:
+   `r.size`, `r.length`, `r.empty?`, `r.inspect`? `fetch` with a default
+   answers the default, and a Range or a length answers another Array. */
+static int isa_element_read(Compiler *c, int u, int counts) {
+  const NodeTable *nt = c->nt;
+  const char *un = nt_str(nt, u, "name");
+  int aa = nt_ref(nt, u, "arguments"), an = 0;
+  const int *av = aa >= 0 ? nt_arr(nt, aa, "arguments", &an) : NULL;
+  if (!un || nt_ref(nt, u, "block") >= 0) return 0;
+  if (sp_streq(un, "[]") || sp_streq(un, "fetch")) return an == 1 && comp_ntype(c, av[0]) == TY_INT;
+  if (sp_streq(un, "first") || sp_streq(un, "last")) return an == 0;
+  return counts && an == 0 &&
+         (sp_streq(un, "size") || sp_streq(un, "length") || sp_streq(un, "empty?") || sp_streq(un, "inspect"));
+}
+
+static const char *const isa_iters[] = { "each", "map", "collect", "select", "filter", "reject", NULL };
+
+/* Does local Array `rn` of scope `rs` keep every String it is given as its
+   handle, by the program's text? Only where each use of the local is one of
+   these. A write: a statement that assigns an Array literal of values kept
+   so, or `Array.new`, `Array.new(n)`. A read: the receiver of an element
+   read (isa_element_read); of an iterator with a block, `each` as a
+   statement (it answers the Array); of a statement that stores values kept
+   so (`r[i] = v`, `r << v`, `r.push(v)`); or an argument of a `p`, `puts` or
+   `print` statement. By any other use (the Array handed on or answered by a
+   call, a write read for its value, a parameter, a captured local) a plain
+   String may come to be in it, and the Array is not known to. */
+static int isa_holder_keeps_handles(Compiler *c, const char *rn, Scope *rs) {
+  const NodeTable *nt = c->nt;
+  LocalVar *lv = scope_local(rs, rn);
+  if (!lv || lv->is_param || lv->is_block_param || lv->is_cell || !ty_is_array(lv->type)) return 0;
+  int si = (int)(rs - c->scopes), writes = 0;
+  for (int w = comp_lvw_first_sc(c, si, rn); w >= 0; w = comp_lvw_next_sc(c, w)) {
+    const char *wn = nt_str(nt, w, "name");
+    if (!wn || !sp_streq(wn, rn) || comp_scope_of(c, w) != rs) continue;
+    if (nt_kind(nt, w) != NK_LocalVariableWriteNode || !isa_unused(c, w)) return 0;
+    int v = nt_ref(nt, w, "value"), n = 0;
+    if (v >= 0 && nt_kind(nt, v) == NK_ArrayNode) {
+      const int *el = nt_arr(nt, v, "elements", &n);
+      for (int i = 0; i < n; i++)
+        if (!isa_stored_as_handle(c, el[i])) return 0;
+    }
+    else {
+      /* `Array.new`, `Array.new(n)`: every element nil */
+      int r = v >= 0 && nt_kind(nt, v) == NK_CallNode ? nt_ref(nt, v, "receiver") : -1;
+      int aa = r >= 0 ? nt_ref(nt, v, "arguments") : -1;
+      const int *av = aa >= 0 ? nt_arr(nt, aa, "arguments", &n) : NULL;
+      const char *cn = r >= 0 && nt_kind(nt, r) == NK_ConstantReadNode ? nt_str(nt, r, "name") : NULL;
+      if (!cn || !sp_streq(cn, "Array") || !sp_streq(nt_str(nt, v, "name"), "new") || nt_ref(nt, v, "block") >= 0 ||
+          n > 1 || (n == 1 && comp_ntype(c, av[0]) != TY_INT))
+        return 0;
+    }
+    writes++;
+  }
+  for (int e = comp_vsite_first(c, VS_READ, NK_LocalVariableReadNode, rn, si); e >= 0; e = comp_vsite_next(c, e)) {
+    int x = comp_vsite_var(c, e);
+    if (!isa_local_read(c, x, rn, rs)) continue;
+    int u = comp_recv_parent(c, x);
+    if (u < 0 || nt_ref(nt, u, "receiver") != x) {
+      if (!isa_print_arg(c, x)) return 0;
+      continue;
+    }
+    if (isa_element_read(c, u, 1)) continue;
+    const char *un = nt_str(nt, u, "name");
+    int blk = nt_ref(nt, u, "block"), aa = nt_ref(nt, u, "arguments"), an = 0;
+    const int *av = aa >= 0 ? nt_arr(nt, aa, "arguments", &an) : NULL;
+    if (!un) return 0;
+    if (blk >= 0) {
+      if (nt_kind(nt, blk) != NK_BlockNode || an > 0 || !str_in(un, isa_iters)) return 0;
+      if (sp_streq(un, "each") && !isa_unused(c, u)) return 0;
+      continue;
+    }
+    int first = -1;
+    if (sp_streq(un, "[]=")) first = an == 2 && comp_ntype(c, av[0]) == TY_INT ? 1 : -1;
+    else if (sp_streq(un, "<<")) first = an == 1 ? 0 : -1;
+    else if (sp_streq(un, "push") || sp_streq(un, "append")) first = an > 0 ? 0 : -1;
+    if (first < 0 || !isa_unused(c, u)) return 0;
+    for (int k = first; k < an; k++)
+      if (nt_kind(nt, av[k]) == NK_SplatNode || !isa_stored_as_handle(c, av[k])) return 0;
+  }
+  return writes > 0;
+}
+
+/* Is `r` a read of a local Array of scope `s` that keeps its Strings as
+   their handles? */
+static int isa_source_keeps_handles(Compiler *c, int r, Scope *s) {
+  return r >= 0 && nt_kind(c->nt, r) == NK_LocalVariableReadNode && comp_scope_of(c, r) == s &&
+         isa_answer(c, nt_str(c->nt, r, "name"), s, ISA_HOLDER, isa_holder_keeps_handles);
+}
+
+/* One walk of scope `s` over its calls with a block, for what each block
+   parameter would else be asked singly: ISA_ITER where an Array's iterator
+   over a holder of handles binds it first (the holder's read is kept for
+   isa_read_again), ISA_BOUND where any other block binds it. */
+static void isa_note_locals(Compiler *c, Scope *s) {
+  isa_answers_of(s);
+  if (g_isa_noted) return;
+  g_isa_noted = 1;
+  const NodeTable *nt = c->nt;
+  for (int u = comp_bcall_first(c, (int)(s - c->scopes)); u >= 0; u = comp_bcall_next(c, u)) {
+    int blk = nt_ref(nt, u, "block"), keeps = -1;
+    const char *bn;
+    for (int k = 0; (bn = block_param_name(c, blk, k)); k++) {
+      LocalVar *bl = scope_local(s, bn);
+      if (!bl) continue;
+      if (k == 0 && keeps < 0) {
+        keeps = nt_kind(nt, blk) == NK_BlockNode && nt_ref(nt, u, "arguments") < 0 &&
+                str_in(nt_str(nt, u, "name"), isa_iters) && isa_source_keeps_handles(c, nt_ref(nt, u, "receiver"), s);
+        if (keeps) g_isa_src[bl - s->locals] = nt_ref(nt, u, "receiver");
+      }
+      g_isa_yes[bl - s->locals] |= k == 0 && keeps > 0 ? ISA_ITER : ISA_BOUND;
+    }
+  }
+}
+
+/* Does guarded local `pn` of scope `s` hold the handle of each String it
+   holds? It is the element an Array's iterator binds, or each write of it
+   is a statement that assigns an element read, and the Array keeps handles
+   (isa_holder_keeps_handles). Only then is the box the String itself; an
+   Array that keeps a plain String hands out that String, and a handle made
+   of it there is a copy beside it. */
+static int isa_guarded_is_handle(Compiler *c, const char *pn, Scope *s) {
+  const NodeTable *nt = c->nt;
+  LocalVar *lv = scope_local(s, pn);
+  if (!lv || lv->is_cell || (lv->is_param && !lv->is_block_param)) return 0;
+  int bound = 0;
+  for (int w = comp_lvw_first_sc(c, (int)(s - c->scopes), pn); w >= 0; w = comp_lvw_next_sc(c, w)) {
+    const char *wn = nt_str(nt, w, "name");
+    if (!wn || !sp_streq(wn, pn) || comp_scope_of(c, w) != s) continue;
+    if (lv->is_block_param || nt_kind(nt, w) != NK_LocalVariableWriteNode) return 0;
+    int v = nt_ref(nt, w, "value");
+    if (v < 0 || nt_kind(nt, v) != NK_CallNode || !isa_element_read(c, v, 0) ||
+        !isa_source_keeps_handles(c, nt_ref(nt, v, "receiver"), s) || !isa_unused(c, w))
+      return 0;
+    g_isa_src[lv - s->locals] = nt_ref(nt, v, "receiver");
+    bound++;
+  }
+  if (!lv->is_block_param) return bound == 1;
+  isa_note_locals(c, s);
+  return (g_isa_yes[lv - s->locals] & (ISA_ITER | ISA_BOUND)) == ISA_ITER;
+}
+
+/* Is local `tn` of scope `s`, left boxed, served by the box at each use?
+   It is assigned in one place; a String mutator changes it; and each read
+   of it is the receiver of a call that is a statement and a String mutator
+   (`t << x`, `t << x << y`, `t.upcase!`), the receiver of a call that is an
+   argument of a `p`, `puts` or `print` statement (`puts t.size`), or such an
+   argument itself. Under any other use the local keeps the narrowed
+   String: a boxed String as another call's operand, as a Range's end or
+   under `case` answers as no String does there, a call with a block does
+   not take one, and a second name or a method it is handed to would have
+   each of its own uses to answer for. */
+static int isa_alias_served(Compiler *c, const char *tn, Scope *s) {
+  const NodeTable *nt = c->nt;
+  LocalVar *lv = scope_local(s, tn);
+  if (!lv || lv->is_param || lv->is_block_param || lv->is_cell || !isa_written_once(c, tn, s)) return 0;
+  int changed = 0;
+  for (int e = comp_vsite_first(c, VS_READ, NK_LocalVariableReadNode, tn, (int)(s - c->scopes)); e >= 0;
+       e = comp_vsite_next(c, e)) {
+    int x = comp_vsite_var(c, e);
+    if (!isa_local_read(c, x, tn, s)) continue;
+    if (isa_print_arg(c, x)) continue;
+    int u = comp_recv_parent(c, x);
+    const char *un = u >= 0 && nt_ref(nt, u, "receiver") == x ? nt_str(nt, u, "name") : NULL;
+    if (!un || nt_ref(nt, u, "block") >= 0 || !an_prog_never_gives(un, 0)) return 0;
+    if (isa_print_arg(c, u)) continue;
+    if (!sp_str_mutator(un, SP_MUT_LOCAL)) return 0;
+    /* `t << x << y`: `<<` answers its receiver */
+    for (int up; sp_streq(nt_str(nt, u, "name"), "<<") && (up = comp_recv_parent(c, u)) >= 0; u = up)
+      if (nt_ref(nt, up, "receiver") != u || nt_ref(nt, up, "block") >= 0 || !sp_streq(nt_str(nt, up, "name"), "<<"))
+        break;
+    if (!isa_unused(c, u)) return 0;
+    changed = 1;
+  }
+  return changed;
+}
+
+/* Is Array `rn` of scope `rs` read in one place only, whatever stores into
+   it and counts it? */
+static int isa_holder_read_once(Compiler *c, const char *rn, Scope *rs) {
+  static const char *const blind[] = { "size", "length", "empty?", "[]=", "<<", "push", "append", NULL };
+  int seen = 0;
+  for (int e = comp_vsite_first(c, VS_READ, NK_LocalVariableReadNode, rn, (int)(rs - c->scopes)); e >= 0;
+       e = comp_vsite_next(c, e)) {
+    int x = comp_vsite_var(c, e);
+    if (!isa_local_read(c, x, rn, rs)) continue;
+    int u = comp_recv_parent(c, x);
+    if (u >= 0 && str_in(nt_str(c->nt, u, "name"), blind)) continue;
+    if (++seen > 1) return 0;
+  }
+  return 1;
+}
+
+/* Is the String that guarded local `pn` of scope `s` holds read under a
+   name other than the one local it is assigned to? `pn` is read beside its
+   guards and that assignment, or its Array is read in a second place.
+   Where neither is so, nothing in the scope reads the String but the local
+   that changes it, the narrowed copy answers as CRuby does, and the box
+   would only cost. (isa_guarded_is_handle is asked first: it notes the
+   Array's read.) */
+static int isa_read_again(Compiler *c, const char *pn, Scope *s) {
+  const NodeTable *nt = c->nt;
+  LocalVar *lv = scope_local(s, pn);
+  int handed = 0, src = lv ? g_isa_src[lv - s->locals] : -1;
+  for (int e = comp_vsite_first(c, VS_READ, NK_LocalVariableReadNode, pn, (int)(s - c->scopes)); e >= 0;
+       e = comp_vsite_next(c, e)) {
+    int x = comp_vsite_var(c, e);
+    if (!isa_local_read(c, x, pn, s)) continue;
+    int u = comp_recv_parent(c, x);
+    const char *un = u >= 0 ? nt_str(nt, u, "name") : NULL;
+    if (un && (sp_streq(un, "is_a?") || sp_streq(un, "kind_of?"))) continue;
+    if (u >= 0 || comp_lwrite_of_value(c, x) < 0 || ++handed > 1) return 1;
+  }
+  return src < 0 || !isa_answer(c, nt_str(nt, src, "name"), s, ISA_ONCE, isa_holder_read_once);
+}
+
 /* Like nng_mark_reads, but a bare read that is a direct ELEMENT of an array
    or hash literal stays unnarrowed: narrowing it retypes the container literal
    (`[v]` becomes a typed array), which cascades into the container's consumers
@@ -11888,6 +12233,26 @@ static void isa_mark_reads(Compiler *c, int root, Scope *s, const char *pn, TyKi
   if (root < 0) return;
   const NodeTable *nt = c->nt;
   const char *ty = nt_type(nt, root);
+  /* `t = v` under a String guard, t changed in place (`t << x`): the
+     narrowed read is a copy of the String the box holds, as an Array's is
+     below, and the change never reached it. Left boxed, t is a second name
+     for the one String (lift_poly_alias_reads).
+     The read is left boxed only where each fact is shown by the program's
+     text, and stays narrowed, as it was, anywhere else: v holds the handle
+     of its String (isa_guarded_is_handle), every use of t is one a box
+     serves (isa_alias_served), the String is read under another name
+     (isa_read_again), the assignment is a statement, and no call these
+     read by its name could be the program's own (isa_program_may_own).
+     Under --share-strings the store lifts the box itself
+     (strbuf_boxed_local), so this is the default build's alone. */
+  if (!c->share_strings && t == TY_STRING && nt_kind(nt, root) == NK_LocalVariableWriteNode &&
+      isa_local_read(c, nt_ref(nt, root, "value"), pn, s) && comp_scope_of(c, root) == s) {
+    const char *wn = nt_str(nt, root, "name");
+    if (strbuf_any_str_mut(c, wn, s) && isa_answer(c, pn, s, ISA_HANDLE, isa_guarded_is_handle) &&
+        isa_answer(c, wn, s, ISA_SERVED, isa_alias_served) && isa_answer(c, pn, s, ISA_AGAIN, isa_read_again) &&
+        isa_unused(c, root) && !isa_program_may_own())
+      return;
+  }
   if (ty && sp_streq(ty, "LocalVariableReadNode")) {
     const char *nm = nt_str(nt, root, "name");
     if (nm && sp_streq(nm, pn) && comp_scope_of(c, root) == s && t != TY_POLY_ARRAY)
@@ -11995,6 +12360,9 @@ static void narrow_isa_guards(Compiler *c) {
     if (s->body < 0 || s->cs_synth) continue;
     isa_mark_guards(c, s->body, s);
   }
+  isa_answers_drop();
+  free(g_isa_par);
+  g_isa_par = NULL;
 }
 
 /* ---- caller-side narrowing of a nil-guarded poly LOCAL (#1675) ------------
