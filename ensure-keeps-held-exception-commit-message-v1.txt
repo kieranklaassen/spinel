@@ -1,0 +1,46 @@
+An ensure keeps the exception it holds while its body runs
+
+While an ensure body runs, the exception that is raised again after
+it waits as a class and a raw message in C locals. The message does
+not outlive the body. A begin the body enters takes the slot the
+message was read from, and an inner ensure that hands its exception
+to the ensure around it has popped that slot's frame, so the first
+collection in the body frees the message, and the rescue that takes
+the exception afterwards reads freed bytes:
+
+    def go(n)
+      raise ArgumentError, "the message of error number " + n.to_s
+    ensure
+      begin
+        churn
+      rescue TypeError
+      end
+      churn
+    end
+
+    begin
+      go(0)
+    rescue => e
+      puts e.message
+    end
+
+prints a string churn built, in a plain run at every level. The
+report of an uncaught exception and a thread's join read the same
+bytes.
+
+The ensure already has the exception as an object at its entry, the
+one $! reads in the body and a raise in the body takes as its cause,
+and that object is kept alive while the body runs and owns a copy of
+the message. The ensure now holds that object, making it there when
+the raise carried none, and raises it again after the body as
+`raise e` does, so the message read afterwards is the object's. The
+regions of Mutex#synchronize and of select!'s loop raise an object
+that an ensure inside their block handed up the same way, and raise
+by class and message as before when they hold none.
+
+Nothing is added on the path with no exception. The rescue after an
+ensure now binds the object $! read in the body, where it built a
+second one, and a literal's message stays frozen through an ensure,
+both as in CRuby.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
