@@ -1,0 +1,280 @@
+===== 1. the patch: git diff 0ed1a93ee4f0aae49398f67f22eb6d4d8d111885 3e15f8becfddcd3706e251492be8a24d8a2aaa2b (src/analyze.c alone, 29 lines in and 3 out) =====
+diff --git a/src/analyze.c b/src/analyze.c
+index 3440dc56d..ed5e2ac4d 100644
+--- a/src/analyze.c
++++ b/src/analyze.c
+@@ -230,10 +230,17 @@ void anh_free(ANameHash *st) { free(st->key); free(st->next); free(st->head); }
+    (4) a file not read: a require left standing in the table (the parser
+        splices away each one it resolves), or g_require_unread, which stays
+        clear only where the program's text proves every file it loads was
+-       read (spinel_parse.c).
++       read (spinel_parse.c);
++   (5) a module mixed in: an include, a prepend or an extend with an
++       argument that is no literal (`s.prepend("x")` is String's), a hook
++       beneath them called by hand, or one of those six words as a def or
++       as a Symbol. A module's methods run ahead of a class's own
++       (prepend), of its parent's (include) or of an object's class's
++       (extend), and a core module's are no text of the program's; that a
++       constant names a module of the program's own is not proved here.
+    The desugars rewrite such calls away, so the table cannot be asked later.
+    A key is a copy: a node's strings do not outlive its rewrite. */
+-enum { AN_CALLS = 1, AN_LAST, AN_RECV, AN_GIVES, AN_GIVES_ALL, AN_RENAMES, AN_VIS, AN_EVAL, AN_EXEC, AN_SITE, AN_WORD };
++enum { AN_CALLS = 1, AN_LAST, AN_RECV, AN_GIVES, AN_GIVES_ALL, AN_RENAMES, AN_VIS, AN_EVAL, AN_EXEC, AN_SITE, AN_WORD, AN_MIX, AN_MIX_HOOK };
+ static const struct { const char *nm; int how; } an_by_name[] = {
+   /* its first argument names what it calls or reads */
+   { "send", AN_CALLS }, { "__send__", AN_CALLS }, { "public_send", AN_CALLS }, { "method", AN_CALLS },
+@@ -258,6 +265,9 @@ static const struct { const char *nm; int how; } an_by_name[] = {
+   { "instance_exec", AN_EXEC }, { "class_exec", AN_EXEC }, { "module_exec", AN_EXEC },
+   { "trap", AN_EXEC }, { "trace_var", AN_EXEC },
+   { "binding", AN_SITE }, { "require", AN_SITE }, { "require_relative", AN_SITE },
++  /* it mixes a module in */
++  { "include", AN_MIX }, { "prepend", AN_MIX }, { "extend", AN_MIX },
++  { "append_features", AN_MIX_HOOK }, { "prepend_features", AN_MIX_HOOK }, { "extend_object", AN_MIX_HOOK },
+   { "load", AN_WORD }, { "autoload", AN_WORD }, { "ERB", AN_WORD }, { NULL, 0 } };
+ static ANameHash g_written, g_written_twice, g_by_name_words;
+ static int g_written_by_value;
+@@ -273,6 +283,19 @@ static int an_by_name_how(const char *nm) {
+ static int an_name_spelled(const NodeTable *nt, int n) {
+   return nt_kind(nt, n) == NK_SymbolNode && !an_by_name_how(nt_str(nt, n, "value"));
+ }
++static int an_mixes(const char *nm) {
++  int how = an_by_name_how(nm);
++  return how == AN_MIX || how == AN_MIX_HOOK;
++}
++/* A literal, which is no module. */
++static int an_mix_literal(const NodeTable *nt, int n) {
++  switch (nt_kind(nt, n)) {
++    case NK_StringNode: case NK_InterpolatedStringNode: case NK_SymbolNode:
++    case NK_IntegerNode: case NK_FloatNode: case NK_NilNode: case NK_TrueNode: case NK_FalseNode:
++      return 1;
++    default: return 0;
++  }
++}
+ /* The block-passes of the block parameter `bp` under `n`, a def's body; -1
+    where the body does more with that name than read it (a write, a
+    parameter of a block inside). A def inside is another scope. */
+@@ -326,12 +349,14 @@ static void an_note_written_names(const NodeTable *nt) {
+         const char *nm = nt_str(nt, id, "value");
+         an_written_add(&g_written, nm);
+         an_written_add(&g_written_twice, nm);
++        if (an_mixes(nm)) by_value = 1;
+         break;
+       }
+       case NK_DefNode: {
+         const char *nm = nt_str(nt, id, "name");
+         if (nm && anh_has(&g_written, nm)) an_written_add(&g_written_twice, nm);
+         an_written_add(&g_written, nm);
++        if (an_mixes(nm)) by_value = 1;
+         const char *bp = nt_str(nt, nt_ref(nt, nt_ref(nt, id, "parameters"), "block"), "name");
+         int own = bp ? an_own_block_passes(nt, nt_ref(nt, id, "body"), bp) : 0;
+         if (own > 0) own_passes += own;
+@@ -366,7 +391,8 @@ static void an_note_written_names(const NodeTable *nt) {
+         int an = 0, blk = nt_ref(nt, id, "block");
+         const int *av = nt_arr(nt, nt_ref(nt, id, "arguments"), "arguments", &an);
+         int lit_blk = nt_kind(nt, blk) == NK_BlockNode;
+-        if (how == AN_SITE) by_value = 1;
++        if (how == AN_SITE || how == AN_MIX_HOOK) by_value = 1;
++        else if (how == AN_MIX) { for (int i = 0; i < an; i++) if (!an_mix_literal(nt, av[i])) by_value = 1; }
+         else if (how == AN_EVAL) { if (an > 0 || !lit_blk) by_value = 1; }
+         else if (how == AN_EXEC) { if (!lit_blk) by_value = 1; }
+         else if (how == AN_RECV) { if (!an_name_spelled(nt, nt_ref(nt, id, "receiver"))) by_value = 1; }
+===== 2. the twins: the list, as written in the hand-over =====
+**The twins: 41 programs**, each the losing program's shape with one form ahead of the call. Columns: CRuby 3.3.6's output; the bare tip `68d40ff05fd4`, the base `0ed1a93ee4f0` and this head, gcc at SPINEL_GC_STRESS unset and 2 (`o` the same as CRuby, `x` another answer, the first shown; `nn` no build); then whether this head's C is the bare tip's byte for byte.
+- *The losses of the base, closed* (tip right, base wrong, head right with the tip's C): m01 (`class String; prepend Kernel; end` over the program's one `def itself`), m12 (the same through `E = Kernel`), m15 (the same under `if RUBY_ENGINE == "ruby"`, which the walk reads as written), and m35, a second shape I found on the way: `include Enumerable` in a SUBCLASS, over the parent's one `def min` (`class Foo; def each = yield($s); def min = "#{$s}"; end; class Bar < Foo; include Enumerable; end; puts Bar.new.min.pair(add)`): tip `abc|2`, base `ab|2`, head `abc|2`.
+- *The cure stands* (wrong on the tip, right on base and head): m00 (no form) and m18 (`x.prepend("z")`, a literal).
+- *The cure is given back*, master's answer with the tip's C: prepend of Comparable (m02), of Enumerable in Array (m03), of a module of the program's own without the name (m04); a prepend in a class the route does not ask (m14); `include Kernel` (m16); `x.prepend(y)` with a local (m19); a Symbol as data, `{ include: 1 }` (m20); `def include` (m21); an own module included (m22), one that includes Comparable (m23), an own module extended (m29), `extend self` (m30).
+- *Right on all three, the tip's C here*: m05 (an own module with the name prepended: two defs), m34 (a top-level `def min` beside a class that includes Enumerable), m36, m40.
+- *Master builds none of them*: `send(:prepend, Kernel)`, `public_send`, `__send__`, `method(:prepend).call`, `String.prepend(Kernel)`, a local for the module, `Module.new`, a block-pass of `String.method(:prepend)`, a singleton class, `class_eval { prepend Kernel }`, `extend` on an object, `Foo.send(:include, Enumerable)` (m07 to m11, m13, m17, m24 to m27, m31).
+- *Wrong on all three alike*: the hooks called by hand and an alias of the word raise NoMethodError at run time (m06, m28, m32, m33); a core class's own method ahead of Object's def with no mix-in written (an Array subclass, a Struct, a plain Array: m37, m38, m39) prints `ab|2` on all three. The two forms with no `include` in the text that the coordinator asked of me were run by reader 8 on `0ed1a93ee4f0` (no loss, its hunt of 07:17); m37 to m39 are my three of that kind.
+- No program right on the bare tip is wrong here.
+===== 3. the twins: cells (41 programs) =====
+m00_plain ruby[ab|2 ] tip xx[abc|2 ] base oo head oo C differs
+m01_prepend_kernel ruby[abc|2 ] tip oo base xx[ab|2 ] head oo C=tip
+m02_prepend_comparable ruby[ab|2 ] tip xx[abc|2 ] base oo head xx[abc|2 ] C=tip
+m03_prepend_enumerable ruby[ab|2 ] tip xx[abc|2 ] base oo head xx[abc|2 ] C=tip
+m04_prepend_own_without ruby[ab|2 ] tip xx[abc|2 ] base oo head xx[abc|2 ] C=tip
+m05_prepend_own_with ruby[abc|2 ] tip oo base oo head oo C=tip
+m06_prepend_features ruby[abc|2 ] tip xx[undefined method 'prepend_features' for module Kernel (NoMethodError) ] base xx[undefined method 'prepend_features' for module Kernel (NoMethodError) ] head xx[undefined method 'prepend_features' for module Kernel (NoMethodError) ] C=tip
+m07_send_symbol ruby[abc|2 ] tip nn base nn head nn C refused:11
+m08_public_send ruby[abc|2 ] tip nn base nn head nn C refused:11
+m09_dunder_send ruby[abc|2 ] tip nn base nn head nn C refused:11
+m10_method_call ruby[abc|2 ] tip nn base nn head nn C refused:11
+m11_receiver ruby[abc|2 ] tip nn base nn head nn C refused:11
+m12_constant_copy ruby[abc|2 ] tip oo base xx[ab|2 ] head oo C=tip
+m13_local ruby[abc|2 ] tip nn base nn head nn C refused:11
+m14_other_class ruby[ab|2 ] tip xx[abc|2 ] base oo head xx[abc|2 ] C=tip
+m15_engine_arm ruby[abc|2 ] tip oo base xx[ab|2 ] head oo C=tip
+m16_include_kernel ruby[ab|2 ] tip xx[abc|2 ] base oo head xx[abc|2 ] C=tip
+m17_extend_kernel ruby[ab|2 ] tip nn base nn head nn C refused:11
+m18_string_prepend_literal ruby[ab|2 ] tip xx[abc|2 ] base oo head oo C differs
+m19_string_prepend_local ruby[ab|2 ] tip xx[abc|2 ] base oo head xx[abc|2 ] C=tip
+m20_symbol_as_data ruby[ab|2 ] tip xx[abc|2 ] base oo head xx[abc|2 ] C=tip
+m21_def_include ruby[ab|2 ] tip xx[abc|2 ] base oo head xx[abc|2 ] C=tip
+m22_own_included ruby[ab|2 ] tip xx[abc|2 ] base oo head xx[abc|2 ] C=tip
+m23_own_includes_comparable ruby[ab|2 ] tip xx[abc|2 ] base oo head xx[abc|2 ] C=tip
+m24_module_new ruby[ab|2 ] tip nn base nn head nn C refused:11
+m25_block_pass_symbol ruby[abc|2 ] tip nn base nn head nn C refused:11
+m26_singleton ruby[ab|2 ] tip nn base nn head nn C refused:11
+m27_class_eval_block ruby[abc|2 ] tip nn base nn head nn C refused:11
+m28_alias_of_word ruby[abc|2 ] tip xx[undefined method 'ahead' for class String (NoMethodError) ] base xx[undefined method 'ahead' for class String (NoMethodError) ] head xx[undefined method 'ahead' for class String (NoMethodError) ] C=tip
+m29_extend_own ruby[ab|2 ] tip xx[abc|2 ] base oo head xx[abc|2 ] C=tip
+m30_extend_self ruby[ab|2 ] tip xx[abc|2 ] base oo head xx[abc|2 ] C=tip
+m31_include_send ruby[ab|2 ] tip nn base nn head nn C refused:11
+m32_append_features ruby[ab|2 ] tip xx[undefined method 'append_features' for module Comparable (NoMethodError) ] base xx[undefined method 'append_features' for module Comparable (NoMethodError) ] head xx[undefined method 'append_features' for module Comparable (NoMethodError) ] C=tip
+m33_extend_object ruby[ab|2 ] tip xx[undefined method 'extend_object' for module Comparable (NoMethodError) ] base xx[undefined method 'extend_object' for module Comparable (NoMethodError) ] head xx[undefined method 'extend_object' for module Comparable (NoMethodError) ] C=tip
+m34_top_level_def ruby[abc|2 ] tip oo base oo head oo C=tip
+m35_include_in_subclass ruby[abc|2 ] tip oo base xx[ab|2 ] head oo C=tip
+m36_include_own_with ruby[abc|2 ] tip oo base oo head oo C=tip
+m37_array_subclass ruby[abc|2 ] tip xx[ab|2 ] base xx[ab|2 ] head xx[ab|2 ] C differs
+m38_struct ruby[abc|2 ] tip xx[ab|2 ] base xx[ab|2 ] head xx[ab|2 ] C=tip
+m39_array ruby[abc|2 ] tip xx[ab|2 ] base xx[ab|2 ] head xx[ab|2 ] C=tip
+m40_comparable_class ruby[abc|2 ] tip oo base oo head oo C=tip
+===== 4. the twins: programs (the generator of m00 to m33, then m34 to m40) =====
+# gen.rb: writes m00 to m33 (ruby gen.rb in an empty directory)
+head = <<~R
+  class String
+    def pair(a) = "\#{self}|\#{a.size}"
+    def itself = "\#{self}"
+  end
+R
+tail = <<~R
+  $s = +"ab"
+  def add = ($s << "c"; [1, 2])
+  puts $s.itself.pair(add)
+R
+tw = {
+  "m00_plain" => "",
+  "m01_prepend_kernel" => "class String\n  prepend Kernel\nend\n",
+  "m02_prepend_comparable" => "class String\n  prepend Comparable\nend\n",
+  "m03_prepend_enumerable" => "class Array\n  prepend Enumerable\nend\n",
+  "m04_prepend_own_without" => "module Mine\n  def zz = 1\nend\nclass String\n  prepend Mine\nend\n",
+  "m05_prepend_own_with" => "module Mine\n  def itself = self\nend\nclass String\n  prepend Mine\nend\n",
+  "m06_prepend_features" => "Kernel.send(:prepend_features, String)\n",
+  "m07_send_symbol" => "String.send(:prepend, Kernel)\n",
+  "m08_public_send" => "String.public_send(:prepend, Kernel)\n",
+  "m09_dunder_send" => "String.__send__(:prepend, Kernel)\n",
+  "m10_method_call" => "String.method(:prepend).call(Kernel)\n",
+  "m11_receiver" => "String.prepend(Kernel)\n",
+  "m12_constant_copy" => "E = Kernel\nclass String\n  prepend E\nend\n",
+  "m13_local" => "m = Kernel\nString.prepend(m)\n",
+  "m14_other_class" => "class Foo\n  prepend Comparable\nend\n",
+  "m15_engine_arm" => "if RUBY_ENGINE == \"ruby\"\n  class String\n    prepend Kernel\n  end\nend\n",
+  "m16_include_kernel" => "class String\n  include Kernel\nend\n",
+  "m17_extend_kernel" => "$s = +\"ab\"\n$s.extend(Kernel)\n",
+  "m18_string_prepend_literal" => "x = +\"q\"\nx.prepend(\"z\")\n",
+  "m19_string_prepend_local" => "x = +\"q\"\ny = \"z\"\nx.prepend(y)\n",
+  "m20_symbol_as_data" => "h = { include: 1 }\n",
+  "m21_def_include" => "def include(x) = x\n",
+  "m22_own_included" => "module Mine\n  def zz = 1\nend\nclass Foo\n  include Mine\nend\n",
+  "m23_own_includes_comparable" => "module Mine\n  include Comparable\nend\nclass Foo\n  include Mine\nend\n",
+  "m24_module_new" => "String.prepend(Module.new)\n",
+  "m25_block_pass_symbol" => "[Kernel].each(&String.method(:prepend))\n",
+  "m26_singleton" => "class << $stdout\n  prepend Comparable\nend\n",
+  "m27_class_eval_block" => "String.class_eval { prepend Kernel }\n",
+  "m28_alias_of_word" => "class Module\n  alias_method :ahead, :prepend\n  public :ahead\nend\nString.ahead(Kernel)\n",
+  "m29_extend_own" => "module Mine\n  def zz = 1\nend\nclass Foo\n  extend Mine\nend\n",
+  "m30_extend_self" => "module Mine\n  extend self\n  def zz = 1\nend\n",
+  "m31_include_send" => "class Foo; end\nFoo.send(:include, Enumerable)\n",
+  "m32_append_features" => "Comparable.send(:append_features, String)\n",
+  "m33_extend_object" => "o = Object.new\nComparable.send(:extend_object, o)\n",
+}
+tw.each { |n, mid| File.write("#{n}.rb", head + mid + (n == "m17_extend_kernel" ? tail.sub(/\A.*\n/, "") : tail)) }
+File.write("names.txt", tw.keys.join("\n") + "\n")
+
+# ---- m34_top_level_def.rb
+class String
+  def pair(a) = "#{self}|#{a.size}"
+end
+def min = "#{$s}"
+class Foo
+  include Enumerable
+  def each = yield($s)
+end
+$s = +"ab"
+def add = ($s << "c"; [1, 2])
+puts Foo.new.min.pair(add)
+
+# ---- m35_include_in_subclass.rb
+class String
+  def pair(a) = "#{self}|#{a.size}"
+end
+class Foo
+  def each = yield($s)
+  def min = "#{$s}"
+end
+class Bar < Foo
+  include Enumerable
+end
+$s = +"ab"
+def add = ($s << "c"; [1, 2])
+puts Bar.new.min.pair(add)
+
+# ---- m36_include_own_with.rb
+class String
+  def pair(a) = "#{self}|#{a.size}"
+end
+module Mine
+  def cur = $s
+end
+class Foo
+  def cur = "#{$s}"
+end
+class Bar < Foo
+  include Mine
+end
+$s = +"ab"
+def add = ($s << "c"; [1, 2])
+puts Bar.new.cur.pair(add)
+
+# ---- m37_array_subclass.rb
+class String
+  def pair(a) = "#{self}|#{a.size}"
+end
+class Object
+  def min = "#{$s}"
+end
+class Bar < Array
+end
+$s = +"ab"
+def add = ($s << "c"; [1, 2])
+b = Bar.new
+b << $s
+puts b.min.pair(add)
+
+# ---- m38_struct.rb
+class String
+  def pair(a) = "#{self}|#{a.size}"
+end
+class Object
+  def min = "#{$s}"
+end
+Box = Struct.new(:a)
+$s = +"ab"
+def add = ($s << "c"; [1, 2])
+b = Box.new($s)
+puts b.min.pair(add)
+
+# ---- m39_array.rb
+class String
+  def pair(a) = "#{self}|#{a.size}"
+end
+class Object
+  def min = "#{$s}"
+end
+$s = +"ab"
+def add = ($s << "c"; [1, 2])
+b = [$s]
+puts b.min.pair(add)
+
+# ---- m40_comparable_class.rb
+class String
+  def pair(a) = "#{self}|#{a.size}"
+end
+class Object
+  def clamp(a, b) = "#{$s}"
+end
+$s = +"ab"
+def add = ($s << "c"; [1, 2])
+puts $s.clamp("aa", "zz").pair(add)
+===== 5. counts, as written in the hand-over =====
+**Counts, and the price.** The corpus (the 6,368 programs `test/*.rb` at `68d40ff05fd4`, by a debug build of this head's analyzer that prints each site): the flag `g_written_by_value` is set for 953, against 564 on `0ed1a93ee4f0`. 445 hold a site of the new kind; for 389 of them it is the only kind, and those are the 389 newly set. None was unset; `g_require_unread` alone is set for 216, as before. The libraries: of the 39, `$s.upcase.pair(add)` is right after 18 and prints master's answer after 21: the 15 as before and six whose text holds an `include` (`set`, `csv`, `logger`, `pathname`, `bigdecimal`, `openssl`; the walk's report for each is `CallNode:include`). `ffi`, the fortieth, which CRuby cannot run here, goes the same way. The price is cures given back and none lost: the generated C of all 6,631 corpus programs is the base's byte for byte (6,627 are the bare tip's too; the four that are not are the base's four), so no corpus program's answer moves.
