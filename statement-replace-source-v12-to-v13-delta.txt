@@ -1,0 +1,45 @@
+The statement-replace piece's body, -v12 to -v13: every changed line, OLD and NEW (the one commit re-cut on master 4337d93cf; its message is -v7, one paragraph reflowed around the same phrase: statement-replace-source-squash-message-v7.txt)
+
+OLD: an `attr_reader`'s or a Struct member's field (`o.name`, `st.name`), an Array's element by an Integer index
+NEW: an `attr_reader`'s or a Struct member's field (`o.name`, `st.name`, or `name` with no receiver inside its class), an Array's element by an Integer index
+
+OLD: or writes the reader by hand, the answer is a call's result, and so is `h[:k]` in a program
+NEW: or writes the reader by hand, the answer is a call's result (with no receiver too: `name` under `def name = @name + "!"`, and a reader over a slot the class appends to in place, which reads a copy; master was wrong on both at `SPINEL_GC_STRESS=2`), and so is `h[:k]` in a program
+
+OLD: `ar.fetch(i & 1)`, `ar[0].to_s` and `hs["k"].to_s` are the same too.
+NEW: `ar.fetch(i & 1)`, `ar[0].to_s`, `hs["k"].to_s` and a reader with no receiver inside its class (`name`) are the same too.
+
+OLD: On master 5518e5934 the generated C of two of the 6,629 programs under
+NEW: On master 4337d93cf the generated C of two of the 6,672 programs under
+
+OLD: On master 5518e5934 (gcc and clang) it is right in a plain run and at level 1,
+NEW: On master 4337d93cf (gcc and clang) it is right in a plain run and at level 1,
+
+OLD: Run here on this commit on master 5518e5934, built from nothing:
+NEW: Run here on this commit on master 4337d93cf, built from nothing:
+
+OLD: the generated C of the 6,629 programs, changed in the two named above,
+NEW: the generated C of the 6,672 programs, changed in the two named above,
+
+THE MESSAGE, -v6 to -v7, its one paragraph (lines 30 to 38 become 30 to 39; nothing else moves):
+OLD:
+A slot read is an attr_reader's or a Struct member's field (`o.name`),
+an Array's element by an Integer index (`ar[0]`, `ar[i % 2]`,
+`ar.fetch(0)`), its first or its last, and a Hash's value (`h[:k]`,
+`h.fetch(:k)`), the index or the key a literal or a read. It is one
+only while the method is the builtin: where the program gives Array
+or Hash its own `[]`, `first`, `last` or `fetch`, writes the reader
+by hand, or gives a Hash a default block (which `fetch` with one key
+never runs), the answer is a call's and is rooted. A boxed value
+counts only where no class defines to_str.
+NEW:
+A slot read is an attr_reader's or a Struct member's field (`o.name`,
+or `name` with no receiver inside its class), an Array's element by
+an Integer index (`ar[0]`, `ar[i % 2]`, `ar.fetch(0)`), its first or
+its last, and a Hash's value (`h[:k]`, `h.fetch(:k)`), the index or
+the key a literal or a read. It is one only while the method is the
+builtin: where the program gives Array or Hash its own `[]`, `first`,
+`last` or `fetch`, writes the reader by hand, or gives a Hash a
+default block (which `fetch` with one key never runs), the answer is
+a call's and is rooted. A boxed value counts only where no class
+defines to_str.

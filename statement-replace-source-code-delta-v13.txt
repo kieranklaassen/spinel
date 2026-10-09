@@ -1,0 +1,167 @@
+The statement-replace piece, ONE re-cut: 277ac1eda5bb on master 5518e5934b3a (the head that was read, and gated green on e223bfa11477) becomes f8952568c04a on master 4337d93cfc9b. One commit, tree 677833d14e31. What changed against the read head, by hunk; then the checks; the range-diff is at the end.
+
+WHY IT WAS RE-CUT
+
+277ac1eda5bb stopped merging into the tip by exit status when the pull request "An Array a call returns is held while its elements are boxed" merged (978e0dea5): that change and this one each add a declaration at the same line of src/codegen_internal.h, right under master's `int call_is_field_read(Compiler *c, int id, int *allocates);`. Two different functions and no shared name: its `implicit_self_is_field_read`, this piece's `prog_has_hash_default_block` (`operand_is_held_read` is master's own line above both, the hunk header's context). The move 5518e5934b3a..4337d93cfc9b touches none of this piece's functions (builtin_method_is_own, prog_has_hash_default_block, replace_source_answers_receiver, replace_source_is_held, replace_source_is_slot_read, str_mutate_reassign_arms), judged by function body ranges on the tip's text.
+
+WHAT CHANGED, BY HUNK
+
+1. src/codegen_internal.h, its one hunk: the same two added lines (the comment and `int prog_has_hash_default_block(Compiler *c);`), now under master's three lines for implicit_self_is_field_read. Context alone differs.
+2. src/codegen_stmt.c, replace_source_is_slot_read: ONE line added and one sentence of its comment extended. This is where the two pieces meet, in a fact and not in a name; the diff and the reason are below.
+3. Unchanged: src/codegen_call.c (`static` dropped from prog_has_hash_default_block), every other line of src/codegen_stmt.c, the test and its .expected.
+
+Stable patch-ids, file by file (git diff BASE HEAD -- FILE | git patch-id --stable): 704565c9343f on 84f5b5020ef8, the head whose code was read (verdict 20) | 277ac1eda5bb on 5518e5934b3a, the head that was gated | the plain replay b15b78878f53 | this head
+src/codegen_call.c                                   55c9eace8db260a2 | 55c9eace8db260a2 | 55c9eace8db260a2 | 55c9eace8db260a2
+src/codegen_internal.h                               c8616f5714e40b2a | c8616f5714e40b2a | c5f112cfdf005ab6 | c5f112cfdf005ab6
+src/codegen_stmt.c                                   84cdc0c87cf3f09a | 84cdc0c87cf3f09a | 84cdc0c87cf3f09a | fbff6fe40819e205
+test/string_replace_fresh_source_root.rb             146c93775baf9963 | 28b2112936e60fc5 | 28b2112936e60fc5 | 28b2112936e60fc5
+test/string_replace_fresh_source_root.rb.expected    0a8a131c28cff457 | 0a8a131c28cff457 | 0a8a131c28cff457 | 0a8a131c28cff457
+the whole commit                                     e1a79283dee9cb12 | d33440347d3f6284 | d0c4e3ab485cb010 | 47f792c7d481a17b
+Read across: the three source files of the plain replay carry the read code. src/codegen_call.c and src/codegen_stmt.c are equal in the first three columns; src/codegen_internal.h is equal in the first two and differs in the third by its context alone (master's three new lines stand above the piece's two); the test differs between the first two columns by its registration alone (a line in the Makefile's list then, the header line `# spinel: gc-stress` since 5518e5934b3a) and is equal from the second on; the .expected is equal in all four. This head differs from the plain replay in src/codegen_stmt.c alone, by the diff below.
+
+The plain replay is the read head's commit cherry-picked onto the tip with the header hunk set under master's new lines and nothing else: commit b15b78878f5358d71b3241bbb42eab30a12da806, tree 573399ededc7, built from nothing and checked like this head (below). It is on the fork as the branch claude/statement-replace-plain-replay-on-4337d93c-dwxd41 for this compare alone; it is not a head of record and no row. This head is that commit plus:
+
+diff --git a/src/codegen_stmt.c b/src/codegen_stmt.c
+index 1343a0cbd..917f1cc46 100644
+--- a/src/codegen_stmt.c
++++ b/src/codegen_stmt.c
+@@ -15809,7 +15809,8 @@ static int builtin_method_is_own(Compiler *c, const char *cls, const char *nm) {
+ /* Is call `v` a read out of a slot that goes on holding the String: a
+    reader's or a Struct member's field (call_is_field_read), an element of
+    an Array (`ar[0]`, `ar.fetch(0)`, `ar.first`, `ar.last`) or a value of a
+-   Hash (`h[:k]`, `h.fetch(:k)`), off a variable, a constant or self? It
++   Hash (`h[:k]`, `h.fetch(:k)`), off a variable, a constant or self, or
++   the class's own reader with no receiver (implicit_self_is_field_read)? It
+    runs no code of the program's while Array or Hash has no method of that
+    name of the program's own, the index is a plain read, and no Hash of the
+    program has a default block (fetch with one key or one Integer index
+@@ -15819,6 +15820,7 @@ static int replace_source_is_slot_read(Compiler *c, int v) {
+   const NodeTable *nt = c->nt;
+   TyKind t = comp_ntype(c, v);
+   int recv = unwrap_parens(c, nt_ref(nt, v, "receiver")), alloc = 0;
++  if (nt_ref(nt, v, "receiver") < 0) return t == TY_STRING && implicit_self_is_field_read(c, v);
+   if (recv < 0 || nt_ref(nt, v, "block") >= 0 ||
+       !(expr_is_held_ref(c, recv) || nt_kind(nt, recv) == NK_GlobalVariableReadNode))
+     return 0;
+
+THE ONE LINE, AND WHY
+
+The merged pull request gave master `implicit_self_is_field_read` (src/codegen_call.c): is a call with no receiver the class's own attr reader, lowered to a plain read of self's slot? It answers no for a slot that reads out as a copy (a shared String) and for a reader a subclass overrides. The list of this piece did not ask it (it was not in master when the piece was read), so on the tip the plain replay ROOTS a source that master runs right:
+
+    class Item
+      attr_reader :name
+      def initialize(n) = @name = n
+      def put(s)
+        s.replace(name)        # `name`, no receiver
+        s
+      end
+    end
+
+Master 4337d93cfc9b is right in every cell here (gcc and clang, SPINEL_GC_STRESS 0, 1 and 2), also with the Item made in place as the receiver (`Item.new("ab" + i.to_s).put(s)`). `s.replace(@name)` and `s.replace(self.name)` in the same method were on the list already and keep master's C. A cost on a program master ran right, with a fact master holds that proves the read: cut. With the line, a reader with no receiver that master lowers to the slot read is a slot read for this list too, typed String; anything else with no receiver stays a call's answer and is rooted, as before.
+
+Fifteen programs, each the one above with the change named, run 300 rounds and counted (CRuby 3.3.6 against master 4337d93cfc9b and this head, gcc and clang at levels 0, 1 and 2; the plain replay by its generated C):
+- master's C byte for byte with the line, the root without it, right in every cell on master and here: the bare reader; the same with the Item made in place as the receiver (two programs, one with five fields); `name.to_s`; `c ? name : "lit"`; inside a block (`2.times { s.replace(name) }`); a String-or-nil slot under `name || "none"`; `@other.replace(name)`; an attr_accessor written between the calls; a Struct member read with no receiver in a method of the Struct's block, by its result. Ten programs.
+- still rooted with the line (the plain replay's C is this head's), wrong on master at level 2 (gcc and clang), right here: a bare reader whose slot is a shared String (`def grow = (@name << "x"; self)`), read as a copy; a bare call of a def that makes its String (`def name = @name + "!"`). Two programs.
+- master's C on both heads, right in every cell: a reader a subclass overrides, and a module's reader with a subclass's def (master runs those through a dispatch into a temp of its own). Two programs.
+- one program wrong on master and on both heads alike, at every level: the Struct member one read through the parameter after the call (`pt.put(s); s`). The fault is master's and is not this piece's: `s.replace(...)` on a parameter inside a method of a Struct.new block does not reach the caller's String (CRuby prints the member, master "start"); the same line in a class's method works. Recorded as a side find, not taken. With the line its C is master's.
+No cell is lost in any of the fifteen.
+
+THE TWINS for a reader with no receiver (fifteen more programs; the same loop, the Item made in place as the receiver; master 4337d93cfc9b and this head in the same cells, the plain replay by its generated C):
+- the reader redefined by the program, in the class's body after the attr_reader (`def name = @name + "!"`), by reopening the class after `put` is written, and by `define_method(:name) { @name + "!" }`: rooted on both heads (the same C), master wrong at level 2 with gcc and clang, this head right in every cell. Three programs.
+- the attr_reader shadowed: a local of the name (`name = "l" + s.size.to_s; s.replace(name)`) and a parameter of the name (`def put(s, name)`) are reads of the local, master's C on both heads. With the local in scope and the reader called with parentheses (`s.replace(name())`) the line takes it: master's C here, the root on the plain replay. Right in every cell on master and here. Three programs.
+- an alias of the reader called with no receiver (`alias label name`; `s.replace(label)`) and a reader made private (`private :name`): master's C with the line, the root without; right in every cell on master and here. Two programs.
+- a method_missing road (`def method_missing(m, *a) = m == :name ? @n + "!" : super`, no reader): master warns that it does not dispatch undefined calls to method_missing, and the program raises NameError at every level, on master and on both heads alike; the heads' C carries the root. One program.
+- the name called on another self: `o.instance_eval { s.replace(name) }` and `o.instance_exec(s) { |q| q.replace(name) }` inside Item's `put`, with `o` an object of another class that has an attr_reader of the name, of another class whose `name` is a def that makes its String, and of Item itself: CRuby reads `o`'s. Master's C on both heads in all five, and right in every cell (master does not lower such a block's call to a read of the method's self). Five programs.
+- a module prepended into the class whose `name` calls `super`: the C does not compile, on master and on both heads alike (`void value not ignored`). One program.
+No cell is lost in any of them either.
+
+The corpus has no such statement: the generated C of the plain replay and of this head is the same for all 6,672 programs (three print the build directory's path and differ in that alone).
+
+COMPILE TIME (callgrind, the compiler's own instructions with `-c`; master 4337d93cfc9b | the plain replay | this head). Each program is one line repeated 1,000 or 2,000 times:
+`s.replace(name)` in a method, 1,000           795,237,048 | 807,702,459 (+1.57%) | 797,342,075 (+0.26%)  C = the tip's
+`s.replace(name)` in a method, 2,000           1,582,331,011 | 1,607,128,024 (+1.57%) | 1,586,541,048 (+0.27%)  C = the tip's
+`s.replace(o.name)`, 1,000                     884,407,914 | 887,171,077 (+0.31%) | 887,237,944 (+0.32%)  C = the tip's
+`s.replace(o.name)`, 2,000                     1,762,277,543 | 1,767,803,714 (+0.31%) | 1,767,937,581 (+0.32%)  C = the tip's
+`s.replace("a" + i.to_s)`, 1,000               1,606,820,635 | 1,612,530,578 (+0.36%) | 1,612,596,432 (+0.36%)
+`s.replace("a" + i.to_s)`, 2,000               3,214,446,815 | 3,226,301,307 (+0.37%) | 3,226,433,161 (+0.37%)
+the test                                       73,011,312 | 73,081,892 (+0.10%) | 73,082,350 (+0.10%)
+The bare reader is where the line is asked: it costs 2,105 instructions a statement to prove the read, at 1,000 and at 2,000; the plain replay's 12,400 or so a statement there is the root it writes and the longer C. Linear in the count in every row.
+
+OWN CHECKS on this head, built from nothing (compiler 8d0996f036a1; bare tip 52ead35edfe6):
+- the test, seven lanes, gcc and clang: this head right in all fourteen, and with --share-strings; master wrong at SPINEL_GC_STRESS=2 with exit 0 (3,450 of 3,900 counted wrong, gcc and clang), right in the other six;
+- `ruby tools/gate.rb check` exit 0;
+- corpus: 6,672 programs, the generated C of five differs from the bare tip's: `string_replace_boxed_argument` and `string_replace_prepend_insert_clear` gain the root (both print their .expected in the fourteen lanes; on master the second is wrong at level 2), and three print the build directory's path (conditional_require_line, require_expression_lines, source_file_required);
+- optcarrot: checksum 59662, its C equal to the bare tip's;
+- `make share-strings-test`: pass; `make int-min-test`: pass;
+- the three lead examples of the body on the bare tip: 285, 4, and "\xDB\xDB" three times at level 2, gcc and clang, as the body says; right on the plain replay, whose C for them is this head's;
+- the family probes (79 programs: the slot reads, the program's own `[]`, first, last, fetch, to_s and kin, the choices), run on the plain replay against the bare tip: no cell lost, 25 cured at level 2; the generated C of all 90 family, lead and S8 programs is the same on the plain replay and on this head;
+- the S8 twins (six programs: a core module prepended into Array, included in a subclass of Array, beside a top-level def): right in every cell on the bare tip and on the plain replay (the same C here). The list's "held" writes master's C, so a method the list does not see can only give master's answer.
+
+The plain replay, checked the same way: the test right in fourteen lanes and with --share-strings; gate check 0; the same five corpus programs; optcarrot 59662, C equal; `make share-strings-test`: pass; `make int-min-test`: pass.
+
+TEXTS: body -v13 (statement-replace-source-v13.md) and message -v7 (statement-replace-source-squash-message-v7.txt). Every changed line is in statement-replace-source-v12-to-v13-delta.txt as OLD and NEW. By line of the body: 57, the phrase "or `name` with no receiver inside its class" in the list; 61, one clause for what stays rooted with no receiver (a `name` the class writes by hand, a reader over a slot the class appends to in place) and the level master was wrong at; 92, "a reader with no receiver inside its class (`name`)" among the sources whose C is the same; 94, 96 and 106, the base id and the program count. The message: its slot-read paragraph, lines 30 to 38 of -v6, reflowed around the same phrase as lines 30 to 39. "Depends on: none", as before: the line asks a function that is in master.
+
+Merge into master 4337d93cfc9b (ls-remote 08:42 UTC 10-09): exit 0.
+
+THE RANGE-DIFF: git range-diff 277ac1eda5bb~1..277ac1eda5bb 4337d93cfc9b..f8952568c04a
+
+1:  277ac1eda ! 1:  f8952568c A String made in place is kept alive while replace copies it
+    @@ Commit message
+         itself is as it was: the source is not sent through sp_str_dup, which
+         would turn the "" that a nil String-or-nil source reads as into nil.
+     
+    -    A slot read is an attr_reader's or a Struct member's field (`o.name`),
+    -    an Array's element by an Integer index (`ar[0]`, `ar[i % 2]`,
+    -    `ar.fetch(0)`), its first or its last, and a Hash's value (`h[:k]`,
+    -    `h.fetch(:k)`), the index or the key a literal or a read. It is one
+    -    only while the method is the builtin: where the program gives Array
+    -    or Hash its own `[]`, `first`, `last` or `fetch`, writes the reader
+    -    by hand, or gives a Hash a default block (which `fetch` with one key
+    -    never runs), the answer is a call's and is rooted. A boxed value
+    -    counts only where no class defines to_str.
+    +    A slot read is an attr_reader's or a Struct member's field (`o.name`,
+    +    or `name` with no receiver inside its class), an Array's element by
+    +    an Integer index (`ar[0]`, `ar[i % 2]`, `ar.fetch(0)`), its first or
+    +    its last, and a Hash's value (`h[:k]`, `h.fetch(:k)`), the index or
+    +    the key a literal or a read. It is one only while the method is the
+    +    builtin: where the program gives Array or Hash its own `[]`, `first`,
+    +    `last` or `fetch`, writes the reader by hand, or gives a Hash a
+    +    default block (which `fetch` with one key never runs), the answer is
+    +    a call's and is rooted. A boxed value counts only where no class
+    +    defines to_str.
+     
+         to_s, to_str, itself and freeze with no argument answer a String
+         receiver itself and make nothing (freeze seals it in place, or
+    @@ src/codegen_call.c: int subtree_is_pure_read(Compiler *c, int id) {
+        memo_c = c; memo = 0;
+     
+      ## src/codegen_internal.h ##
+    -@@ src/codegen_internal.h: int operand_is_held_read(Compiler *c, int id);
+    - /* Is the call a reader the emitter lowers to a plain field read? *allocates is
+    -    set when the read builds a copy (a shared String slot). codegen_call.c */
+    - int call_is_field_read(Compiler *c, int id, int *allocates);
+    +@@ src/codegen_internal.h: int call_is_field_read(Compiler *c, int id, int *allocates);
+    + /* Is the receiverless call a class's own attr reader, lowered to a plain
+    +    read of self's slot? codegen_call.c */
+    + int implicit_self_is_field_read(Compiler *c, int id);
+     +/* Does the program give a Hash a default block anywhere? codegen_call.c */
+     +int prog_has_hash_default_block(Compiler *c);
+      /* Typed-array headers cached across an innermost loop (codegen_stmt.c, see
+    @@ src/codegen_stmt.c: static char *emit_str_splice_value(Compiler *c, int recv, in
+     +/* Is call `v` a read out of a slot that goes on holding the String: a
+     +   reader's or a Struct member's field (call_is_field_read), an element of
+     +   an Array (`ar[0]`, `ar.fetch(0)`, `ar.first`, `ar.last`) or a value of a
+    -+   Hash (`h[:k]`, `h.fetch(:k)`), off a variable, a constant or self? It
+    ++   Hash (`h[:k]`, `h.fetch(:k)`), off a variable, a constant or self, or
+    ++   the class's own reader with no receiver (implicit_self_is_field_read)? It
+     +   runs no code of the program's while Array or Hash has no method of that
+     +   name of the program's own, the index is a plain read, and no Hash of the
+     +   program has a default block (fetch with one key or one Integer index
+    @@ src/codegen_stmt.c: static char *emit_str_splice_value(Compiler *c, int recv, in
+     +  const NodeTable *nt = c->nt;
+     +  TyKind t = comp_ntype(c, v);
+     +  int recv = unwrap_parens(c, nt_ref(nt, v, "receiver")), alloc = 0;
+    ++  if (nt_ref(nt, v, "receiver") < 0) return t == TY_STRING && implicit_self_is_field_read(c, v);
+     +  if (recv < 0 || nt_ref(nt, v, "block") >= 0 ||
+     +      !(expr_is_held_ref(c, recv) || nt_kind(nt, recv) == NK_GlobalVariableReadNode))
+     +    return 0;
