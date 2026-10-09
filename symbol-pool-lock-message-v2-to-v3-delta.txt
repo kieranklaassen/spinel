@@ -1,0 +1,4 @@
+The commit message, symbol-pool-lock-commit-message-v2.txt to -v3: one line (the four lines the message prints fail by a wrong line, exit 0: 22 runs of 25 with gcc and 21 with clang beneath this change, none by a signal; the segfaults are the test's, which does more)
+
+OLD: prints false or segfaults, with gcc and with clang.
+NEW: prints false in most runs, with gcc and with clang.
